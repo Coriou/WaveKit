@@ -18,6 +18,7 @@ import { resolveActivityLimits } from "../activity/storage/limits.js"
 import type { ActivityRetentionOverrides } from "../activity/runtime.js"
 import { BAND_OVERRIDE_FILE_NAME } from "../../decoders/band-override-store.js"
 import { STATION_STORE_FILE } from "../station/contract.js"
+import { BACKUPS_DIR } from "../state-backup.js"
 import type { StorageAreaSource } from "./contract.js"
 
 const MiB = 1024 * 1024
@@ -99,6 +100,9 @@ export function storageAreasFromConfig(
 		{
 			id: "scanner-evidence",
 			paths: [scannerDir],
+			// Pre-migration backups (state-backup.ts): mostly hard links of the recordings counted
+			// here already, and no scanner retention ever removes them.
+			exclude: [join(scannerDir, BACKUPS_DIR)],
 			capBytes:
 				inputs.scannerEnabled === false
 					? null

@@ -73,10 +73,12 @@ import type {
 	ScannerRecorderDiscovery,
 } from "@wavekit/api-types"
 import {
+	RECORDING_KEEPS_FILE_NAME,
 	SCANNER_DISCOVERY_HOLDS_KEPT_CODE,
 	SOURCE_PAUSED_MESSAGE,
 	TUNE_WAITERS_MAX,
 } from "@wavekit/api-types"
+import { backupStatusOf } from "../state-backup.js"
 import type {
 	RecordingProtection,
 	ScannerRecordingDeleter,
@@ -168,7 +170,6 @@ import {
 	type LiveAudioEvidence,
 } from "./live-audio-evidence.js"
 import type { JobActivityView } from "./scanner-redesign-contract.js"
-import { tuningTrustOf } from "../tuning-trust.js"
 import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
@@ -249,6 +250,7 @@ import {
 	type SpectrumEngine,
 } from "../spectrum/spectrum-engine.js"
 import { SpectrumService } from "../spectrum/spectrum-service.js"
+import type { SpectrumPersistence } from "../spectrum/spectrum-service.js"
 import { MAX_REAL_RANGES } from "../spectrum/spur-map.js"
 import { confirmedRealRange } from "./real-ranges.js"
 import {
@@ -454,6 +456,27 @@ export type ChannelLiveCoverage = (
 export const REPLAY_ATTRIBUTION_HALF_RASTER_HZ = 6_250
 
 /**
+ * A channel tap begun at engine epoch `start` is still current at `now`: the same stream, epoch,
+ * rate, centre, gain and label, and the same trusted run. The tap takes live samples from its
+ * start on, never back: it stays inside the trusted run it began in (a run that broke and
+ * resumed starts later: not this one), so a doubt or a re-proof ends it.
+ */
+export function channelTapEpochCurrent(
+	start: EngineEpoch,
+	now: EngineEpoch,
+): boolean {
+	return (
+		now.stream === start.stream &&
+		now.epoch === start.epoch &&
+		now.sampleRateHz === start.sampleRateHz &&
+		now.centreHz === start.centreHz &&
+		now.gainKey === start.gainKey &&
+		now.tuningTrust === start.tuningTrust &&
+		now.trustedFromSample === start.trustedFromSample
+	)
+}
+
+/**
  * The coverage predicate's containment rule: the track's [hz ± widthHz/2] lies inside the decoder
  * channel's usable passband [channelHz ± passbandHz/2]. A non-finite or non-positive input: false.
  */
@@ -493,6 +516,15 @@ export interface ScannerServiceDeps {
 	 * writes no state, while its close still ends sockets, children and listeners.
 	 */
 	readonly lostOwnership?: () => boolean
+	/**
+	 * Namespaces learned engine state per receiver (ReceiverLearnedState.attach). Gets
+	 * the store, the gated persistence used without it, and the same write gate.
+	 */
+	readonly learnedState?: (
+		store: ScannerPersistence,
+		gated: SpectrumPersistence,
+		writable: () => boolean,
+	) => SpectrumPersistence
 	/** WG11 req 6: IQ capture on detection and replay; absent keeps today's behaviour. */
 	readonly analogTrial?: AnalogTrialRunner
 	readonly iqCapture?: ScannerIqCapture
@@ -1242,8 +1274,7 @@ export class ScannerService extends EventEmitter {
 	}
 	private disk: "ok" | "disk-low" = "ok"
 	/** The load-time folder migration's counts (status `folders`); null until it ran. */
-	private folderMigration: { reattached: number; unresolved: number } | null =
-		null
+	private folderMigration: NonNullable<ScannerStatus["folders"]> | null = null
 	private dirty = false
 	/** False when the persisted state could not be read: the journal and snapshot are not written this run. */
 	private stateLoaded = false
@@ -1423,6 +1454,8 @@ export class ScannerService extends EventEmitter {
 				dir: this.storageDir,
 				logger: deps.logger,
 				now: this.now,
+				// The recording keep store (RecordingKeepStore, `<stateDir>`) goes into the backup's outside/.
+				backup: { keepsFile: join(deps.stateDir, RECORDING_KEEPS_FILE_NAME) },
 			})
 			this.spectrum = new SpectrumService({
 				sources: deps.sources,
@@ -1432,7 +1465,7 @@ export class ScannerService extends EventEmitter {
 				settings: () => this.settings(),
 				tuning: sourceId => this.engineTuning(sourceId),
 				// Engine state keeps the config-load gate (Task 35): never written when jobs and settings could not be read.
-				persistence: {
+				persistence: this.learnedPersistence(deps, {
 					writeEngine: (sourceId, state) =>
 						this.writeEngineState(sourceId, state),
 					loadEngine: sourceId => this.persistence.loadEngine(sourceId),
@@ -1442,7 +1475,7 @@ export class ScannerService extends EventEmitter {
 							? this.persistence.writeOccupancy(sourceId, state)
 							: Promise.resolve(),
 					loadOccupancy: sourceId => this.persistence.loadOccupancy(sourceId),
-				},
+				}),
 				logger: deps.logger,
 				now: this.now,
 				engineHost: deps.engineHost ?? "thread",
@@ -1569,6 +1602,7 @@ export class ScannerService extends EventEmitter {
 					),
 				// Recordings share the probes' and live audio's CPU budget (cpuBudgetCores).
 				reserveCores: cores => this.probes.reserveExternal(cores),
+				tuningRefused: sourceId => this.tuningRefused(sourceId, "recording"),
 				logger: deps.logger,
 				now: this.now,
 			})
@@ -2280,7 +2314,9 @@ export class ScannerService extends EventEmitter {
 			},
 			disk: this.disk,
 			...(this.folderMigration ? { folders: { ...this.folderMigration } } : {}),
+			...withBackup(backupStatusOf(this.persistence.preMigrationBackup())),
 			...this.recordingsQuotaStatus(),
+			...this.analogOperationsStatus(),
 			jobs: {
 				active: [...this.jobs.values()].filter(j => !isTerminal(j.state))
 					.length,
@@ -4200,7 +4236,23 @@ export class ScannerService extends EventEmitter {
 			this.classifierContext(sourceId, track.centreHz),
 		)
 		// § 4.7: unverified RF: spectral evidence alone never lifts a discovery past `candidate`.
-		return track.tuningTrust === "unverified" ? { ...c, tier: "spectral" } : c
+		if (track.tuningTrust !== "unverified") return c
+		this.tuningRefused(sourceId, "identification")
+		return { ...c, tier: "spectral" }
+	}
+
+	/** A refusal the source's unproven tuning caused (GET /api/sources `tuningUnproven`). */
+	private tuningRefused(
+		sourceId: string,
+		kind: "recording" | "identification",
+	): void {
+		try {
+			;(
+				this.deps.sources as Partial<Pick<SourceManager, "tuningUnproven">>
+			).tuningUnproven?.noteRefusal(sourceId, kind)
+		} catch {
+			// Diagnostics only: a count is never worth a failed classification.
+		}
 	}
 
 	/**
@@ -4334,12 +4386,7 @@ export class ScannerService extends EventEmitter {
 				currentCaps.centerFreq === epoch.centreHz &&
 				!this.consumerLifecycle.admissionSealed &&
 				this.spectrum.engine(live.sourceId) === engine &&
-				now.stream === epoch.stream &&
-				now.epoch === epoch.epoch &&
-				now.sampleRateHz === epoch.sampleRateHz &&
-				now.centreHz === epoch.centreHz &&
-				now.gainKey === epoch.gainKey &&
-				now.tuningTrust === epoch.tuningTrust &&
+				channelTapEpochCurrent(epoch, now) &&
 				!live.encrypted
 			)
 		}
@@ -7589,14 +7636,13 @@ export class ScannerService extends EventEmitter {
 		this.liveAudio = null
 	}
 
-	/** Fail closed: unknown tuner state, an unwritten connection, or a throw. */
+	/** The tuning ledger's label of the live edge; fail closed: no ledger, or a throw. */
 	private liveAudioTrust(sourceId: string): TuningTrust {
 		try {
-			const trust = tuningTrustOf(this.deps.tuner.getState(sourceId))
-			if (trust === "unverified") return trust
-			if (this.deps.tuner.tuningWrittenOnConnection(sourceId) !== true)
-				return "unverified"
-			return trust
+			const ledger = (
+				this.deps.sources as Partial<Pick<SourceManager, "tuningLedger">>
+			).tuningLedger
+			return ledger?.trustNow(sourceId).trust ?? "unverified"
 		} catch {
 			return "unverified"
 		}
@@ -9117,6 +9163,12 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	/** `status().analogOperations`: crash-residue folders set aside; absent while none is held. */
+	private analogOperationsStatus(): Pick<ScannerStatus, "analogOperations"> {
+		const held = this.evidence.analogOperationsStatus()
+		return held ? { analogOperations: held } : {}
+	}
+
 	/**
 	 * `status().recordingsQuota`: present while the last retention pass left the recordings quota
 	 * exceeded with nothing more it may remove (counts from the evidence store only).
@@ -9163,9 +9215,18 @@ export class ScannerService extends EventEmitter {
 		try {
 			const history = await this.persistence.aliasHistory(new Set(orphans))
 			const result = this.store.reattachOrphanFolders(orphans, history)
-			this.folderMigration = result
+			const left = orphans.filter(
+				id => this.store.folderOwner(id) === undefined,
+			)
+			const noAlias = left.filter(id => !history.has(id)).length
+			const unresolvedBy = { noAlias, aliasWithoutOwner: left.length - noAlias }
+			this.folderMigration = { ...result, unresolvedBy }
 			this.log.info(
-				{ reattached: result.reattached, unresolved: result.unresolved },
+				{
+					reattached: result.reattached,
+					unresolved: result.unresolved,
+					unresolvedBy,
+				},
 				"Scanner folders without an owner re-attached; the rest are kept in place",
 			)
 		} catch (err: unknown) {
@@ -9295,6 +9356,20 @@ export class ScannerService extends EventEmitter {
 			}
 			await this.refreshPassive()
 		}
+	}
+
+	/** The per-receiver wrapper when wired, else the gated persistence as before. */
+	private learnedPersistence(
+		deps: ScannerServiceDeps,
+		gated: SpectrumPersistence,
+	): SpectrumPersistence {
+		return deps.learnedState
+			? deps.learnedState(
+					this.persistence,
+					gated,
+					() => this.configLoaded && !this.ownershipLost(),
+				)
+			: gated
 	}
 
 	/** Engine state is never written when the persisted state could not be read at all. */
@@ -9611,3 +9686,8 @@ export function dcCentredOf(
 	const half = Number.isFinite(obwHz) && obwHz > 0 ? obwHz / 2 : 0
 	return Math.abs(centreHz - tunedHz) - half <= DQ_DC_ADMIT_HZ
 }
+
+const withBackup = (
+	b: ReturnType<typeof backupStatusOf>,
+): { stateBackup?: NonNullable<ScannerStatus["stateBackup"]> } =>
+	b === null ? {} : { stateBackup: b }

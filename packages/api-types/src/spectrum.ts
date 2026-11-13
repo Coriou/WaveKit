@@ -152,7 +152,104 @@ export interface SpectrumSourceStatus {
 	summaryHz: number | null
 	/** The latest block summary at the default profile. */
 	latestFrame: SpectrumFrameEventData | null
+	/**
+	 * Tuning-ledger diagnostics. The ledger's label is the engine's only label: `agree` counts the
+	 * block summaries labelled; `ledgerStricter`, `ledgerLooser` and `mismatch` stay 0 and
+	 * `disagreements` empty (cores before 2026-11-12 compared a second label). Absent without a
+	 * ledger.
+	 */
+	trustShadow?: SpectrumTrustShadow
 	lastError?: string
+}
+
+export interface SpectrumTrustShadow {
+	agree: number
+	/** @deprecated Always 0 since the ledger's label became the only one (kept for the shape). */
+	ledgerStricter: number
+	/** @deprecated Always 0 since the ledger's label became the only one (kept for the shape). */
+	ledgerLooser: number
+	/** @deprecated Always 0 since the ledger's label became the only one (kept for the shape). */
+	mismatch: number
+	/**
+	 * @deprecated Always empty since the ledger's label became the only one (kept for the shape).
+	 * Was: the last 32 disagreements, oldest first.
+	 */
+	disagreements: SpectrumTrustDisagreement[]
+	/**
+	 * Measured delay from a centre or rate frame's flush to the first block summary whose content
+	 * shows the change (payload bytes, and ms at the engine's rate; lower bounds, with upper-bound
+	 * maxima beside them). p50 and max over the last 64; null before the first. `undetected`: changes not seen (a quiet band, another
+	 * bin grid, a newer frame first, or nothing within 5 s of payload). Diagnostics only.
+	 */
+	retuneDelay?: SpectrumRetuneDelay
+	/**
+	 * Block summaries labelled `unverified`, by the first failing check: the engine's (`no-anchor`,
+	 * `upstream-loss`, `before-session`, `no-stream-map`, `session-ended`, `bad-range`,
+	 * `no-ledger`, `no-epoch-record`, `value-mismatch`, `hop-receipt`) or the ledger's (`settling`,
+	 * `doubt`, `no-receipt`, ...); at most 32 keys. Optional: absent on cores before 2026-11-13.
+	 */
+	unverifiedBlocks?: Record<string, number>
+	/**
+	 * Bytes the burst absorber lost while the engine read the ledger: the engine's placement of
+	 * its samples widened by them (fail closed) instead of being lost until a reconnect. Optional:
+	 * absent on cores before 2026-11-13.
+	 */
+	anchorWidenedBytes?: number
+	/**
+	 * Scanner hops whose proof a detected test-mode marker moved earlier (from the frame plus the
+	 * settle to the marker). Optional: absent on cores before 2026-11-13.
+	 */
+	markerBoundaries?: number
+}
+
+export interface SpectrumRetuneDelay {
+	count: number
+	p50Ms: number | null
+	maxMs: number | null
+	p50Bytes: number | null
+	maxBytes: number | null
+	/**
+	 * Upper bounds over the same measurements (flush to the end of the detecting block): the change
+	 * showed no later than this. Optional: absent on cores before 2026-11-11.
+	 */
+	maxMsUpper?: number | null
+	maxBytesUpper?: number | null
+	undetected: number
+	/**
+	 * `undetected` by reason (they add up to it): `superseded` (a newer frame first),
+	 * `unmeasurable` (no payload rate), `session` (a reconnect first), `noReference` (no block
+	 * before the flush), `grid` (another bin grid: nearly every rate change), `bracket` (a scanner
+	 * marker's test pattern), `timeout` (nothing within 5 s of payload: a quiet band). Optional:
+	 * absent on cores before 2026-11-13.
+	 */
+	undetectedReasons?: {
+		superseded: number
+		unmeasurable: number
+		session: number
+		noReference: number
+		grid: number
+		bracket: number
+		timeout: number
+	}
+}
+
+export interface SpectrumTrustDisagreement {
+	kind: "ledger-stricter" | "ledger-looser" | "mismatch"
+	at: string
+	/** Ledger session and payload-position bounds the block was read at (null: not mapped). */
+	session: number | null
+	posA: number | null
+	posB: number | null
+	engineTrust: "commanded" | "relay" | "unverified"
+	ledgerTrust: "commanded" | "relay" | "unverified"
+	engineCentreHz: number
+	ledgerCentreHz: number | null
+	engineSampleRateHz: number
+	ledgerSampleRateHz: number | null
+	/** Fixed code of the ledger's first failing check (e.g. "settling", "doubt", "before-session"). */
+	reason?: string
+	/** The doubt's fixed reason when `reason` is "doubt" (e.g. "untracked-retune"). */
+	doubtReason?: string
 }
 
 /** `options.spectrum` of a WS `subscribe` that includes "spectrum". Omitted options = the default selection. */

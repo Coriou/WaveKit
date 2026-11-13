@@ -75,6 +75,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			{
 				id: "scanner-evidence",
 				paths: [join(stateDir, "scanner")],
+				exclude: [join(stateDir, "scanner", ".backups")],
 				capBytes: 512 * MiB,
 			},
 			{
@@ -137,6 +138,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 		expect(areas[1]).toEqual({
 			id: "scanner-evidence",
 			paths: ["/srv/scanner"],
+			exclude: ["/srv/scanner/.backups"],
 			capBytes: 3 * MiB,
 		})
 	})
@@ -164,14 +166,16 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			"/data/wav",
 		])
 		const walked = await disjoint(areas)
-		expect(walked[1]?.exclude).toEqual([inside])
+		expect(walked[1]?.exclude).toEqual([join(scannerDir, ".backups"), inside])
 		const none = storageAreasFromConfig(inputs())
 		expect(none[3]).toEqual({
 			id: "digital-voice-wav",
 			paths: [],
 			capBytes: null,
 		})
-		expect((await disjoint(none))[1]).not.toHaveProperty("exclude")
+		expect((await disjoint(none))[1]?.exclude).toEqual([
+			join(scannerDir, ".backups"),
+		])
 	})
 
 	it("treats names starting with .. as inside, the parent and siblings as outside", async () => {
@@ -191,7 +195,10 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 				}),
 			),
 		)
-		expect(areas[1]?.exclude).toEqual([dotted])
+		expect(areas[1]?.exclude).toEqual([
+			join(stateDir, "scanner", ".backups"),
+			dotted,
+		])
 	})
 
 	it("collapses nested roots of one area and excludes roots nested in another area", async () => {
@@ -244,7 +251,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 				}),
 			),
 		)
-		expect(shared[1]?.exclude).toEqual(["/d/wav"])
+		expect(shared[1]?.exclude).toEqual(["/d/wav/.backups", "/d/wav"])
 		expect(shared[3]).not.toHaveProperty("exclude")
 	})
 
@@ -261,6 +268,11 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			await write(join(state, "activity", "activity.db"), 5)
 			await write(join(state, "operator-data", "access", "key"), 3)
 			await write(join(state, "scanner", "..calls", "a.wav"), 2)
+			// A pre-migration backup: excluded from scanner-evidence, counted nowhere.
+			await write(
+				join(state, "scanner", ".backups", "pre-unmarked.1", "jobs.json"),
+				9,
+			)
 			// An IQ capture and its metadata, as the capture route writes them.
 			await write(join(state, "iq-captures", "capture.cf32"), 11)
 			await write(join(state, "iq-captures", "capture.json"), 4)

@@ -15,7 +15,7 @@ import type {
 } from "../../../src/core/source-manager.js"
 
 const SET_FREQUENCY = 0x01
-const SET_GAIN = 0x04
+const SET_SAMPLE_RATE = 0x02
 const SET_TEST_MODE = 0x07
 
 function fakeTransport() {
@@ -95,7 +95,11 @@ describe("TunerController origin tags and test mode", () => {
 			"testMode",
 		) // known (inferred)
 		reconnect()
-		expect(transport.frames).toEqual([[SET_FREQUENCY, 446_000_000]])
+		// Assert: the declared rate and the accepted centre; no test mode.
+		expect(transport.frames).toEqual([
+			[SET_SAMPLE_RATE, 2_048_000],
+			[SET_FREQUENCY, 446_000_000],
+		])
 	})
 
 	it("never replays test mode observed from the relay", () => {
@@ -118,7 +122,10 @@ describe("TunerController origin tags and test mode", () => {
 			[SET_TEST_MODE, 0],
 		])
 		reconnect()
-		expect(transport.frames).toEqual([[SET_FREQUENCY, 412_600_000]])
+		expect(transport.frames).toEqual([
+			[SET_SAMPLE_RATE, 2_048_000],
+			[SET_FREQUENCY, 412_600_000],
+		])
 	})
 
 	it("accept: false writes and updates state and caps, marks the field known, but is not replayed", async () => {
@@ -133,21 +140,24 @@ describe("TunerController origin tags and test mode", () => {
 			"gain",
 		)
 		reconnect()
-		expect(
-			transport.frames.some(
-				([cmd]) => cmd === SET_FREQUENCY || cmd === SET_GAIN,
-			),
-		).toBe(false)
+		// The unaccepted centre is no held value: assert writes the declared one; no gain.
+		expect(transport.frames).toEqual([
+			[SET_SAMPLE_RATE, 2_048_000],
+			[SET_FREQUENCY, 100_000_000],
+		])
 	})
 
-	it("accept: false after an earlier accepted write replays the current value (replay encodes state)", async () => {
+	it("accept: false after an earlier accepted write asserts the accepted value, never the hop's", async () => {
 		await controller.setFrequency("rtl-1", 145_000_000)
 		await controller.setFrequency("rtl-1", 433_920_000, {
 			origin: "scanner",
 			accept: false,
 		})
 		reconnect()
-		expect(transport.frames).toEqual([[SET_FREQUENCY, 433_920_000]])
+		expect(transport.frames).toEqual([
+			[SET_SAMPLE_RATE, 2_048_000],
+			[SET_FREQUENCY, 145_000_000],
+		])
 	})
 
 	it("reports the origin of every write; untagged writes report none", async () => {
@@ -178,6 +188,7 @@ describe("TunerController origin tags and test mode", () => {
 		sent.length = 0
 		reconnect()
 		expect(sent).toEqual([
+			{ command: "set-sample-rate", value: 2_048_000, origin: "replay" },
 			{ command: "set-frequency", value: 145_500_000, origin: "replay" },
 		])
 	})

@@ -16,11 +16,15 @@ import { z } from "zod"
 import {
 	SOURCE_RESUME_FAILED_MESSAGE,
 	sourceActivitySchema,
+	sourceConnectFailureSchema,
+	sourceCandidateStatusSchema,
+	sourceReceiverStatusSchema,
 	sourceFeedSchema,
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
 	sourceEndpointSchema,
 	sourceVerdictSchema,
+	sourceTuningUnprovenSchema,
 } from "@wavekit/api-types"
 import { WaveKitError } from "../../utils/errors.js"
 import { SourceConfigSchema } from "../../config.js"
@@ -41,6 +45,7 @@ import type {
 	ExtendedSourceStatus as ApiExtendedSourceStatus,
 	SdrHostStatus,
 	SourceFeedResponse,
+	SourceTuningUnproven,
 } from "@wavekit/api-types"
 import {
 	countConsumersBySource,
@@ -154,7 +159,11 @@ const extendedSourceStatusSchema = {
 		signalLevelDbfs: { type: "number" },
 		endpoint: sourceEndpointSchema,
 		feed: sourceFeedSchema,
+		connectFailure: sourceConnectFailureSchema,
+		candidate: sourceCandidateStatusSchema,
+		receiver: sourceReceiverStatusSchema,
 		verdict: sourceVerdictSchema,
+		tuningUnproven: sourceTuningUnprovenSchema,
 		assignments: {
 			type: "array",
 			items: decoderAssignmentSchema,
@@ -406,6 +415,15 @@ export interface UnassignmentResponse {
 	decoderId: string
 }
 
+/** `tuningUnproven` of a source, or nothing (proven, settling, or no ledger session ever). */
+function tuningUnprovenOf(
+	tracker: SourceManager["tuningUnproven"] | undefined,
+	sourceId: string,
+): { tuningUnproven?: SourceTuningUnproven } {
+	const view = tracker?.view(sourceId) ?? null
+	return view !== null ? { tuningUnproven: view } : {}
+}
+
 /**
  * Source routes plugin for Fastify.
  * Registers /api/sources endpoints for source management.
@@ -442,17 +460,36 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 			const consumersBySourceId = countConsumersBySource(fanoutManager)
 			const hosts = sdrHostsBySource(sdrHostStatuses)
 			const now = Date.now()
-			return sourceManager
-				.getAllStatus()
-				.map(status =>
-					toApiExtendedSourceStatus(
-						status,
-						sourceManager,
-						consumersBySourceId,
-						hosts,
-						now,
-					),
-				)
+			const unproven = (
+				sourceManager as Partial<Pick<SourceManager, "tuningUnproven">>
+			).tuningUnproven
+			return sourceManager.getAllStatus().map(status => ({
+				...toApiExtendedSourceStatus(
+					status,
+					sourceManager,
+					consumersBySourceId,
+					hosts,
+					now,
+				),
+				// Why the last attempt failed, while not connected (fixed class and hint).
+				...(status.connectFailure !== undefined
+					? { connectFailure: { ...status.connectFailure } }
+					: {}),
+				// The selected endpoint and the receiver whose learned state applies.
+				...(status.candidate !== undefined
+					? { candidate: { ...status.candidate } }
+					: {}),
+				...(status.receiver !== undefined
+					? {
+							receiver: {
+								...status.receiver,
+								restoredTuning: { ...status.receiver.restoredTuning },
+							},
+						}
+					: {}),
+				// Why the centre or rate is not proven and what to do (one reason per source).
+				...tuningUnprovenOf(unproven, status.id),
+			}))
 		},
 	)
 

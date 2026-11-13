@@ -143,6 +143,86 @@ export interface TunerState {
 	restore?: TuneRestore
 	/** How the last POST /api/tuner/:sourceId/tune ended, for a client that lost its answer. */
 	lastTune?: TunerLastTune
+	/**
+	 * What proves `frequency` and `sampleRate` on the receiver's current connection (the core's
+	 * tuning ledger: every tuning frame flushed to the receiver, at its payload position). Absent
+	 * on cores without a ledger.
+	 */
+	proof?: TunerTuningProof
+	/**
+	 * After a plain resume (POST /api/sources/:id/resume without restoreTuning): whether the core
+	 * took the receiver's tuning back and why. Present from that resume until a restore resume.
+	 */
+	resumeOutcome?: TunerResumeOutcome
+}
+
+/**
+ * Why a plain resume left the tuning as found or took it back (TunerState.resumeOutcome):
+ * `port-matched` (a fresh sdr-host answer lists exactly one rtlmux client, with this core's
+ * connection port, and no relay client is attached: the core writes its held centre and rate
+ * again), `sole-client` (the same, but the one client's port is another or none, as behind a NAT
+ * that rewrites ports), `another-client` (rtlmux lists this connection and another client),
+ * `clients-unknown` (no sdr-host answer, an answer too old, zero clients, or two or more that do
+ * not list this connection), `relay-attached` (a relay client is attached), `operator`
+ * (POST /api/tuner/:sourceId/take-back).
+ */
+export const TUNER_RESUME_REASONS = [
+	"port-matched",
+	"sole-client",
+	"another-client",
+	"clients-unknown",
+	"relay-attached",
+	"operator",
+] as const
+export type TunerResumeReason = (typeof TUNER_RESUME_REASONS)[number]
+
+export interface TunerResumeOutcome {
+	outcome: "restored" | "left-as-found"
+	reason: TunerResumeReason
+	/** One fixed sentence, e.g. "another client on the receiver: tuning left as found". */
+	message: string
+}
+
+/** TunerState.proof. */
+export interface TunerTuningProof {
+	frequency: TunerFieldProof
+	sampleRate: TunerFieldProof
+	/**
+	 * Centre or rate frames the core wrote back because an untracked retune (a client tuning the
+	 * receiver past the core's relay) left them unproven, since the core started; absent before the
+	 * first. Climbing steadily: something keeps retuning the receiver and the core keeps fighting it.
+	 */
+	assertFights?: number
+}
+
+/**
+ * One field's proof on the current connection: `commanded` (a frame of the core or the scanner
+ * went out and settled), `relay` (a relay client's frame settled), `settling` (a frame went out, or
+ * waits to leave, and its settle has not passed) or `unverified` (nothing on this connection
+ * proves it; `reason` says why, a fixed code such as `no-receipt`, `untracked-retune`,
+ * `rate-truth-mismatch`, `relay-attached`, `scanner-lease`, `plain-resume`, `reset-policy` or
+ * `declared-write-off`).
+ */
+export interface TunerFieldProof {
+	state: "unverified" | "settling" | "commanded" | "relay"
+	/** Who wrote the frame that proves (or is settling) it, else null. */
+	writer: "operator" | "scanner" | "assert" | "relay" | null
+	/** The connection's ledger session (numbered per source from 1); null without one. */
+	session: number | null
+	reason?: string
+	/**
+	 * When unverified: why the core writes nothing for the field now (`relay-attached`,
+	 * `external-control`, `scanner-lease`, `lost-ownership`, or, with nothing accepted to write,
+	 * `plain-resume`, `reset-policy`, `declared-write-off`). Shown beside a doubt's `reason`, which
+	 * it would otherwise hide.
+	 */
+	blocked?: string
+	/**
+	 * The field's last frame flushed to the receiver on this connection: its ledger `seq` (per
+	 * source, increasing), the payload byte position it left at (`pos`) and when (`at`, ISO 8601).
+	 * Absent before the connection's first frame of the field.
+	 */
+	lastReceipt?: { seq: number; pos: number; at: string }
 }
 
 /**

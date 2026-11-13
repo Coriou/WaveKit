@@ -162,10 +162,25 @@ export function reduceMaxHold(
  * (Tasks 16, 17a) implements it structurally; the spectrum layer never imports the scanner.
  */
 export interface SpectrumPersistence {
-	writeEngine(sourceId: string, s: EngineState): Promise<void>
+	/**
+	 * `generation`: what `generation(sourceId)` returned when the writer started exporting the
+	 * state; a write whose generation is no longer current is dropped (the state is another
+	 * receiver's). Omitted: written as is.
+	 */
+	writeEngine(
+		sourceId: string,
+		s: EngineState,
+		generation?: number,
+	): Promise<void>
 	loadEngine(sourceId: string): Promise<EngineState | null>
-	writeOccupancy(sourceId: string, s: OccupancyState): Promise<void>
+	writeOccupancy(
+		sourceId: string,
+		s: OccupancyState,
+		generation?: number,
+	): Promise<void>
 	loadOccupancy(sourceId: string): Promise<OccupancyState | null>
+	/** The binding generation of a source's learned state (per-receiver persistence only). */
+	generation?(sourceId: string): number
 }
 
 // on/off come from EventEmitter: picking them from SourceManager/TunerController would return the
@@ -493,13 +508,62 @@ export class SpectrumService extends EventEmitter {
 	/** Engine state of running engines and every occupancy history (maintenance, every 5 min). */
 	async persist(): Promise<void> {
 		for (const [sourceId, entry] of this.entries) {
+			// Captured before the export: a receiver switch meanwhile drops the write.
+			const generation = this.deps.persistence.generation?.(sourceId)
 			const state = await entry.engine.exportState().catch(() => null)
 			if (state)
 				await this.deps.persistence
-					.writeEngine(sourceId, state)
+					.writeEngine(sourceId, state, generation)
 					.catch(() => undefined)
 		}
 		await this.persistOccupancy()
+	}
+
+	/**
+	 * A source's learned state now (the running engine's, and its occupancy history),
+	 * for persisting under the receiver it was learned on. Nulls when there is none.
+	 */
+	async exportLearnedState(sourceId: string): Promise<{
+		engine: EngineState | null
+		occupancy: OccupancyState | null
+	}> {
+		const entry = this.entries.get(sourceId)
+		const engine = entry
+			? await entry.engine.exportState().catch(() => null)
+			: null
+		const occupancy = this.histories.get(sourceId)?.exportState() ?? null
+		return { engine, occupancy }
+	}
+
+	/**
+	 * Replaces a source's learned state with another receiver's (null: fresh). A running
+	 * engine recreates its pipeline with it, and so does one still opening (its load may have read
+	 * the binding before this switch): the open is awaited first. An engine opened later loads from
+	 * persistence. The occupancy history is replaced (validated; another bucket size starts fresh).
+	 */
+	async replaceLearnedState(
+		sourceId: string,
+		next: { engine: EngineState | null; occupancy: OccupancyState | null },
+	): Promise<void> {
+		const opening = this.opening.get(sourceId)
+		if (opening) await opening.catch(() => undefined)
+		const history = new OccupancyHistory()
+		if (next.occupancy !== null) {
+			const parsed = OccupancyStateSchema.safeParse(next.occupancy)
+			if (!parsed.success || !history.importState(parsed.data))
+				this.log.info(
+					{ sourceId },
+					"Receiver occupancy history unusable; starting fresh",
+				)
+		}
+		this.histories.set(sourceId, history)
+		const entry = this.entries.get(sourceId)
+		if (entry)
+			await entry.engine
+				.swapLearnedState(next.engine)
+				.catch((err: unknown) =>
+					this.log.warn({ err, sourceId }, "Swapping the learned state failed"),
+				)
 	}
 
 	/** IQ sources the scanner can read, except permanently removed ones. */
@@ -863,6 +927,7 @@ export class SpectrumService extends EventEmitter {
 		opts: { reemitStop: boolean },
 	): Promise<void> {
 		let state: EngineState | null = null
+		const generation = this.deps.persistence.generation?.(sourceId)
 		try {
 			state = await entry.engine.stop()
 		} catch (err) {
@@ -873,14 +938,14 @@ export class SpectrumService extends EventEmitter {
 		}
 		if (state)
 			await this.deps.persistence
-				.writeEngine(sourceId, state)
+				.writeEngine(sourceId, state, generation)
 				.catch((err: unknown) =>
 					this.log.warn({ err, sourceId }, "Engine state write failed"),
 				)
 		const history = this.histories.get(sourceId)
 		if (history)
 			await this.deps.persistence
-				.writeOccupancy(sourceId, history.exportState())
+				.writeOccupancy(sourceId, history.exportState(), generation)
 				.catch((err: unknown) =>
 					this.log.warn({ err, sourceId }, "Occupancy write failed"),
 				)
@@ -1729,7 +1794,24 @@ export class SpectrumService extends EventEmitter {
 							reduceMaxHold(summary.bins, def.bins),
 						)
 					: null,
+			...this.trustShadowOf(engine),
 			...(error ? { lastError: error } : {}),
+		}
+	}
+
+	private trustShadowOf(
+		engine: SpectrumEngine | undefined,
+	): Pick<SpectrumSourceStatus, "trustShadow"> {
+		const shadow = engine?.trustShadow() ?? null
+		if (!shadow) return {}
+		return {
+			trustShadow: {
+				...shadow,
+				disagreements: shadow.disagreements.map(d => ({
+					...d,
+					at: new Date(d.at).toISOString(),
+				})),
+			},
 		}
 	}
 }

@@ -31,20 +31,39 @@ import { PassThrough } from "node:stream"
 import { SOURCE_RESUME_FAILED_MESSAGE } from "@wavekit/api-types"
 import type {
 	SourceActivity,
+	SourceCandidateStatus,
+	SourceConnectFailure,
+	SourceReceiverStatus,
 	SourceEndpoint,
 	SourceFeed,
 	SourceFeedRestoreTuning,
 	SourceFeedState,
 } from "@wavekit/api-types"
+import {
+	connectFailureStatus,
+	connectTarget,
+	noteConnectFailure,
+	PEER_CLOSED,
+} from "./source-manager-connect-failure.js"
+import type { ConnectFailureRecord } from "./source-manager-connect-failure.js"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError, WaveKitError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
 import { detectAudioFormat } from "../utils/audio-analyzer.js"
+import {
+	DEFAULT_LEDGER_SETTLE_MS,
+	TuningLedger,
+	type LedgerConnection,
+	type ReceiptCallback,
+	type TuningWriterTag,
+} from "./tuning-ledger.js"
+import { TuningUnprovenTracker } from "./tuning-ledger-unproven.js"
 import { convertFloat32ToS16LE } from "../utils/converters.js"
 import {
 	RateTruthTracker,
 	bytesPerSampleFor,
 	type RateMismatch,
+	type RateWindowMark,
 } from "./rate-truth.js"
 import {
 	SignalLevelTracker,
@@ -77,6 +96,14 @@ export const TUNER_COMMAND_TIMEOUT_MS =
 export const TUNER_COMMAND_QUEUE_LIMIT = 16
 // Default stall watchdog for continuous-stream rtl_tcp IQ sessions (0 = off).
 export const SOURCE_STALL_TIMEOUT_MS = 15_000
+/**
+ * A source with candidates leaves an endpoint that accepts but sends no data payload (a header
+ * alone does not count) within this deadline from the TCP connect: 2 x the 5 s connect timeout =
+ * 10 s per attempt, so a silent endpoint costs one deadline plus the backoff before the next one
+ * is tried. A failure of class `silent`. Sources without candidates keep a silent connection (it
+ * is reported stale; there is nothing else to try).
+ */
+export const SOURCE_SILENT_DEADLINE_MS = 2 * SOURCE_CONNECT_TIMEOUT_MS
 // TCP keepalive is defence in depth for a dead peer (Node 21+ on Linux probes
 // every 1 s, 10 probes). It cannot detect a live rtlmux whose upstream dongle /
 // rtl_tcp is gone: that socket stays healthy but silent, hence the watchdog.
@@ -100,6 +127,15 @@ export const SOURCE_PAUSE_CLOSE_TIMEOUT_MS = 2000
  * 300 s apart never trigger it.
  */
 export const SOURCE_ENDPOINT_FALLBACK_FAILURES = 3
+/**
+ * A source with candidates retries the endpoint that last delivered a data payload this
+ * many times after a loss before it moves to the next one. With the 2 s base backoff the three
+ * retries wait about 2-4 s, 4-8 s and 8-16 s (equal jitter), plus up to 5 s connect timeout
+ * each: 14-43 s, so an rtlmux restart or a short network drop keeps the receiver, while an
+ * unplugged one is left within a minute. An endpoint that never delivered a data payload (a
+ * header alone does not count) is left after its first failed attempt.
+ */
+export const SOURCE_CANDIDATE_RETRIES = 3
 export const SOURCE_ENDPOINT_FAILURE_WINDOW_MS = 10 * 60_000
 
 /** Failure times on a selected endpoint, in a sliding window. */
@@ -170,6 +206,12 @@ export interface SourceStatus {
 	endpoint?: SourceEndpoint | undefined
 	/** Pause / resume state; network sources only (recordings omit it). */
 	feed?: SourceFeed | undefined
+	/** The last failed connection attempt; only while a network source is not connected. */
+	connectFailure?: SourceConnectFailure | undefined
+	/** The selected endpoint; only for rtl_tcp sources with `candidates`. */
+	candidate?: SourceCandidateStatus | undefined
+	/** The receiver reached and whose learned state applies (setReceiverStatusSource). */
+	receiver?: SourceReceiverStatus | undefined
 }
 
 /**
@@ -203,6 +245,14 @@ export interface SourceManagerOptions {
 	stateDir?: string | undefined
 	/** Overrides the store built from `stateDir` (tests). */
 	feedPersistence?: SourceFeedPersistence | undefined
+	/**
+	 * The configured settle of a source's link the tuning ledger uses (the live
+	 * `scanner.sweep.settleMs[link]` the arbiter reads), read at each ledger read so a settings
+	 * change is seen at once. Default DEFAULT_LEDGER_SETTLE_MS (the network default, 1000 ms).
+	 */
+	tuningSettleMs?: ((sourceId: string) => number) | undefined
+	/** Overrides the ledger's in-flight estimate (IN_FLIGHT_BOUND_BYTES, 512 KiB): tests, measured links. */
+	tuningInFlightBytes?: number | undefined
 }
 
 /**
@@ -255,6 +305,17 @@ export interface SourceManagerEvents {
 	 * per connection. Through rtlmux this means the upstream dongle is back.
 	 */
 	"payload-started": (sourceId: string) => void
+	/**
+	 * The session's rtl_tcp header was read (once per connection, before its first
+	 * payload is forwarded). `info` is the parsed header, or null when it is not one.
+	 */
+	"rtl-tcp-header": (sourceId: string, info: RtlTcpHeaderInfo | null) => void
+	/**
+	 * A tuning-ledger session (`session`, numbered per source from 1) starts: emitted once per
+	 * connection, before its first payload byte is written to the source stream (so before the
+	 * first "data" and "payload-started"). Recordings have no session.
+	 */
+	"session-started": (sourceId: string, session: number) => void
 	/**
 	 * A selected endpoint failed repeatedly and the source went back to its
 	 * configured host (receiver-endpoints 3.4); `host` is the endpoint left.
@@ -317,6 +378,10 @@ interface SourceAttempt {
 	headerBuffer: Buffer | null
 	headerAt: number | null
 	watchdog: ReturnType<typeof setInterval> | null
+	/** SOURCE_SILENT_DEADLINE_MS timer of a source with candidates; null once cleared. */
+	silentTimer: ReturnType<typeof setTimeout> | null
+	/** This connection in the tuning ledger (frames written, its session once payload flows). */
+	ledger: LedgerConnection
 }
 
 interface SourceState {
@@ -335,6 +400,8 @@ interface SourceState {
 	sessionBytesReceived: number
 	bytesReceivedSinceLastMetric: number
 	lastMetricTime: number
+	/** Ledger session and position at `lastMetricTime` (null: no live session then). */
+	metricStartMark: RateWindowMark | null
 	dataRate: number
 	/** Measured versus declared rate; network sources only. */
 	rateTruth: RateTruthTracker
@@ -346,6 +413,8 @@ interface SourceState {
 	metricTicksSinceConnect: number
 	lastError?: string | undefined
 	reconnectAttempts: number
+	/** Failed attempts since the last connect (source-manager-connect-failure.ts); null after one. */
+	connectFailure: ConnectFailureRecord | null
 	reconnectTimer: ReturnType<typeof setTimeout> | null
 	/** Host override from endpoint selection; null uses config.host. */
 	activeHost: string | null
@@ -357,6 +426,16 @@ interface SourceState {
 	connectPending: boolean
 	/** Failures on the selected endpoint since the last switch (sliding window). */
 	endpointFailures: EndpointFailureWindow
+	/** Index into [primary, ...candidates]; always 0 without candidates. */
+	candidateIndex: number
+	/** The selected endpoint delivered a data payload since it was selected (a header alone: no). */
+	candidateWon: boolean
+	/** Losses of the selected endpoint since it last delivered a data payload. */
+	candidateFailures: number
+	/** Why the selected endpoint is the one (status `selectedBecause`). */
+	candidateReason: string
+	/** What made the source leave the previous endpoint; null before any rotation. */
+	candidateCause: string | null
 
 	metricsTimer: ReturnType<typeof setInterval> | null
 	stallTimer: ReturnType<typeof setInterval> | null
@@ -505,10 +584,17 @@ export class SourceManager extends EventEmitter {
 	private feedsUnsaved = false
 	/** Generation of the latest write; only its outcome sets `feedsUnsaved`. */
 	private feedSaveGeneration = 0
+	/** The receiver status per source (setReceiverStatusSource). */
+	private receiverStatusSource:
+		| ((id: string) => SourceReceiverStatus | undefined)
+		| null = null
+
 	/** What a restore resume writes back, per source (setPausedTuningSource). */
 	private pausedTuningSource:
 		| ((id: string) => SourceFeedRestoreTuning | undefined)
 		| null = null
+	private readonly ledger: TuningLedger
+	private readonly unproven: TuningUnprovenTracker
 
 	constructor(logger: Logger, options: SourceManagerOptions = {}) {
 		super()
@@ -521,6 +607,44 @@ export class SourceManager extends EventEmitter {
 				? new SourceFeedStore({ stateDir: options.stateDir, logger })
 				: null)
 		this.feedsLoaded = this.feedPersistence === null
+		this.ledger = new TuningLedger({
+			settleLink: id => ({
+				configuredSettleMs:
+					options.tuningSettleMs?.(id) ?? DEFAULT_LEDGER_SETTLE_MS,
+				...(options.tuningInFlightBytes !== undefined
+					? { inFlightBytes: options.tuningInFlightBytes }
+					: {}),
+			}),
+			frameBytes: id => {
+				const caps = this.sources.get(id)?.config.caps
+				return caps ? iqFrameBytes(caps) : null
+			},
+			capsRate: id => this.sources.get(id)?.config.caps.sampleRate ?? null,
+		})
+		this.unproven = new TuningUnprovenTracker(this.ledger)
+	}
+
+	/** The tuning ledger of every network source (sessions, positions, receipts, doubts). */
+	get tuningLedger(): TuningLedger {
+		return this.ledger
+	}
+
+	/** Why each source's tuning is unproven now, if it is (GET /api/sources `tuningUnproven`). */
+	get tuningUnproven(): TuningUnprovenTracker {
+		return this.unproven
+	}
+
+	/**
+	 * The local TCP port of the source's live connection (an sdr-host lists rtlmux's clients by
+	 * address and port: a plain resume's free-receiver check), or null while not connected.
+	 */
+	connectionLocalPort(id: string): number | null {
+		const state = this.sources.get(id)
+		const socket = state?.connected === true ? state.socket : null
+		const port = socket?.localPort
+		return typeof port === "number" && Number.isInteger(port) && port > 0
+			? port
+			: null
 	}
 
 	private plainSourceData<T>(value: T): T {
@@ -536,6 +660,29 @@ export class SourceManager extends EventEmitter {
 				typeof item === "boolean"
 			)
 				return item
+			// Plain arrays (sources[i].candidates): own index elements only, within the node budget.
+			if (
+				Array.isArray(item) &&
+				!utilTypes.isProxy(item) &&
+				Object.getPrototypeOf(item) === Array.prototype
+			) {
+				if (
+					item.length > 32 ||
+					Reflect.ownKeys(item).length !== item.length + 1
+				)
+					throw new WaveKitError("Invalid source data", "SOURCE_CONFIG_INVALID")
+				const out: unknown[] = []
+				for (let i = 0; i < item.length; i++) {
+					const descriptor = Object.getOwnPropertyDescriptor(item, i)
+					if (!descriptor || !("value" in descriptor))
+						throw new WaveKitError(
+							"Invalid source data",
+							"SOURCE_CONFIG_INVALID",
+						)
+					out.push(copy(descriptor.value, depth + 1))
+				}
+				return out
+			}
 			if (
 				typeof item !== "object" ||
 				utilTypes.isProxy(item) ||
@@ -886,14 +1033,21 @@ export class SourceManager extends EventEmitter {
 			pausedSinceLastMetric: false,
 			metricTicksSinceConnect: 0,
 			lastMetricTime: Date.now(),
+			metricStartMark: null,
 			dataRate: 0,
 			reconnectAttempts: 0,
+			connectFailure: null,
 			reconnectTimer: null,
 			activeHost: null,
 			endpoint: null,
 			retargetPending: false,
 			connectPending: false,
 			endpointFailures: new EndpointFailureWindow(),
+			candidateIndex: 0,
+			candidateWon: false,
+			candidateFailures: 0,
+			candidateReason: "configured",
+			candidateCause: null,
 			metricsTimer: null,
 			stallTimer: null,
 			stopping: false,
@@ -1013,6 +1167,19 @@ export class SourceManager extends EventEmitter {
 					recovery.deadline > Date.now() && !recovery.owner.aborted,
 				)
 		}
+		// The ledger session opens before its first payload byte reaches the stream; after that
+		// only a counter add per chunk (hot path). Bytes a destroyed stream never takes are no
+		// position: nothing downstream can hold them.
+		if (attempt !== null && chunk.length > 0) {
+			if (attempt.ledger.session === null) {
+				const session = attempt.ledger.start()
+				if (session) this.emit("session-started", id, session.session)
+				if (!current()) return false
+			}
+			const session = attempt.ledger.session
+			if (session !== null && !state.stream.destroyed)
+				session.pos += chunk.length
+		}
 		let canWrite = true
 		if (!state.stream.destroyed) {
 			canWrite = state.stream.write(chunk)
@@ -1028,6 +1195,8 @@ export class SourceManager extends EventEmitter {
 		this.emit("data", id, chunk)
 		if (!current()) return false
 		if (firstPayload) {
+			// A header alone wins nothing: an endpoint that answers and then stalls is left.
+			if (state.config.type === "rtl_tcp") this.noteCandidateWon(id, state)
 			this.emit("payload-started", id)
 			// Its listeners (tuner sync, scanner recovery) have read the resume kind.
 			if (current()) state.pendingResume = null
@@ -1481,7 +1650,9 @@ export class SourceManager extends EventEmitter {
 		if (state.attempt && this.isActiveAttempt(state, state.attempt))
 			return Promise.resolve()
 		const { config } = state
-		const host = state.activeHost ?? config.host!
+		const endpoint = this.currentEndpoint(state)
+		const host = endpoint.host
+		const port = endpoint.port
 		return new Promise<void>((resolve, reject) => {
 			const socket = new net.Socket()
 			if (!this.isCurrent(state)) {
@@ -1503,8 +1674,12 @@ export class SourceManager extends EventEmitter {
 						: null,
 				headerAt: null,
 				watchdog: null,
+				silentTimer: null,
+				ledger: this.ledger.connection(id),
 			}
+			const previous = state.attempt
 			state.attempt = attempt
+			previous?.ledger.close()
 			state.socket = socket
 			state.connected = false
 			state.lastSampleAt = null
@@ -1538,6 +1713,8 @@ export class SourceManager extends EventEmitter {
 				if (timer !== null) clearInterval(timer)
 				if (timer !== null && state.stallTimer === timer)
 					state.stallTimer = null
+				if (attempt.silentTimer !== null) clearTimeout(attempt.silentTimer)
+				attempt.silentTimer = null
 			}
 			const cleanup = () => {
 				stopOwnWatchdog()
@@ -1566,10 +1743,14 @@ export class SourceManager extends EventEmitter {
 					state.dataRate = 0
 					state.bytesReceivedSinceLastMetric = 0
 					state.lastMetricTime = Date.now()
+					state.metricStartMark = this.ledger.position(id)
 					state.metricTicksSinceConnect = 0
 					state.pausedSinceLastMetric = false
 					state.reconnectAttempts = 0
 					state.lastError = undefined
+					// connectFailure stays until the first payload (onData): a receiver that accepts and
+					// then resets before sending anything keeps counting attempts; any first data clears
+					// the record, so a stall or reset after data starts again at 1.
 					// A resume's connection: the feed is live before "connected" fires.
 					if (state.feed.state === "resuming")
 						state.feed = { state: "live", since: Date.now() }
@@ -1579,12 +1760,11 @@ export class SourceManager extends EventEmitter {
 					if (!this.isActiveAttempt(state, attempt)) return
 					this.resetSignalLevel(id, state)
 					if (!this.isActiveAttempt(state, attempt)) return
-					this.logger.info(
-						{ sourceId: id, host, port: config.port },
-						"Connected to source",
-					)
+					this.logger.info({ sourceId: id, host, port }, "Connected to source")
 					if (!this.isActiveAttempt(state, attempt)) return
 					this.startStallWatchdog(state, socket, onError)
+					if (!this.isActiveAttempt(state, attempt)) return
+					this.startSilentDeadline(state, attempt, onError)
 					if (!this.isActiveAttempt(state, attempt)) return
 					this.emit("connected", id)
 				} finally {
@@ -1598,6 +1778,8 @@ export class SourceManager extends EventEmitter {
 				)
 					return
 				if (state.sessionBytesReceived === 0) {
+					// The peer sent something (the rtl_tcp header first): the connect succeeded.
+					state.connectFailure = null
 					this.logger.info(
 						{ sourceId: id, firstChunkSize: chunk.length },
 						"First data chunk received from source",
@@ -1710,6 +1892,8 @@ export class SourceManager extends EventEmitter {
 									"Captured RTL-TCP header from source",
 								)
 								if (!this.isActiveAttempt(state, attempt)) return
+								this.emit("rtl-tcp-header", id, state.rtlTcpHeaderInfo)
+								if (!this.isActiveAttempt(state, attempt)) return
 							}
 						}
 
@@ -1745,6 +1929,7 @@ export class SourceManager extends EventEmitter {
 				const current = this.isActiveAttempt(state, attempt)
 				const hadConnected = attempt.phase === "connected"
 				if (current) {
+					attempt.ledger.close()
 					attempt.phase = "failed"
 					attempt.sessionId = null
 					attempt.lastSampleAt = null
@@ -1757,10 +1942,19 @@ export class SourceManager extends EventEmitter {
 					stopOwnWatchdog()
 				}
 				try {
-					if (current) this.handleConnectionError(id, err, state, attempt)
+					if (current) {
+						state.connectFailure = noteConnectFailure(
+							state.connectFailure,
+							err,
+							host,
+							port,
+							Date.now(),
+						)
+						this.handleConnectionError(id, err, state, attempt)
+					}
 				} finally {
 					if (isInitialAttempt && !hadConnected)
-						safeReject(new SourceConnectionError(host, config.port!, err))
+						safeReject(new SourceConnectionError(host, port, err))
 					else safeResolve()
 					try {
 						socket.destroy()
@@ -1775,8 +1969,26 @@ export class SourceManager extends EventEmitter {
 					state.attempt === attempt &&
 					state.socket === socket
 				const wasConnected = state.connected
+				// The peer ended it: no socket error (that is `failed`) and no pause, teardown or
+				// retarget of ours (those set `closed` first or are not current). Only before any
+				// payload: a close after a healthy session (payload seen) is a disconnect, not a
+				// failed connect, so it starts no connect-failure record.
+				const peerClosed =
+					owns &&
+					!state.retargetPending &&
+					attempt.lastSampleAt === null &&
+					(attempt.phase === "connecting" || attempt.phase === "connected")
+				if (peerClosed)
+					state.connectFailure = noteConnectFailure(
+						state.connectFailure,
+						PEER_CLOSED,
+						host,
+						port,
+						Date.now(),
+					)
 				if (owns) this.noteEndpointClose(id, state)
 				if (owns) {
+					attempt.ledger.close()
 					attempt.phase = "closed"
 					attempt.sessionId = null
 					attempt.lastSampleAt = null
@@ -1818,7 +2030,7 @@ export class SourceManager extends EventEmitter {
 						safeReject(
 							new SourceConnectionError(
 								host,
-								config.port!,
+								port,
 								new WaveKitError(
 									state.lastError ??
 										"Socket closed before establishing a connection",
@@ -1850,8 +2062,7 @@ export class SourceManager extends EventEmitter {
 				)
 			})
 			socket.setTimeout(SOURCE_CONNECT_TIMEOUT_MS)
-			if (this.isActiveAttempt(state, attempt))
-				socket.connect(config.port!, host)
+			if (this.isActiveAttempt(state, attempt)) socket.connect(port, host)
 			else safeResolve()
 		})
 	}
@@ -1934,6 +2145,36 @@ export class SourceManager extends EventEmitter {
 		state.stallTimer = timer
 	}
 
+	/**
+	 * For a source with candidates: fails a connection that delivered no data payload within
+	 * SOURCE_SILENT_DEADLINE_MS of its connect (`SOURCE_SILENT`), so the endpoint rotates.
+	 */
+	private startSilentDeadline(
+		state: SourceState,
+		attempt: SourceAttempt,
+		fail: (err: Error) => void,
+	): void {
+		if (this.candidatesOf(state).length === 0) return
+		const timer = setTimeout(() => {
+			if (attempt.silentTimer !== timer) return
+			attempt.silentTimer = null
+			if (
+				!this.isActiveAttempt(state, attempt) ||
+				attempt.phase !== "connected" ||
+				attempt.lastSampleAt !== null
+			)
+				return
+			fail(
+				new WaveKitError(
+					`No data from source within ${SOURCE_SILENT_DEADLINE_MS}ms of connecting; trying the next endpoint`,
+					"SOURCE_SILENT",
+				),
+			)
+		}, SOURCE_SILENT_DEADLINE_MS)
+		timer.unref?.()
+		attempt.silentTimer = timer
+	}
+
 	private stopStallWatchdog(state: SourceState): void {
 		if (!state.stallTimer) return
 		const timer = state.stallTimer
@@ -1966,7 +2207,8 @@ export class SourceManager extends EventEmitter {
 			errorCode === "ECONNREFUSED" ||
 			errorCode === "ETIMEDOUT" ||
 			errorCode === "ECONNRESET" ||
-			errorCode === "SOURCE_STALLED"
+			errorCode === "SOURCE_STALLED" ||
+			errorCode === "SOURCE_SILENT"
 
 		state.lastError = err.message
 
@@ -2009,6 +2251,7 @@ export class SourceManager extends EventEmitter {
 			state.retargetPending = false
 			delay = SOURCE_RETARGET_RECONNECT_MS
 		} else {
+			this.noteCandidateFailure(id, state)
 			state.reconnectAttempts++
 			const baseDelay = calculateBackoffDelay(state.reconnectAttempts)
 			// Add small jitter to avoid thundering herd when multiple sources restart.
@@ -2069,6 +2312,7 @@ export class SourceManager extends EventEmitter {
 		if (!current()) return
 		state.bytesReceivedSinceLastMetric = 0
 		state.lastMetricTime = now
+		state.metricStartMark = this.ledger.position(id)
 
 		this.emit("metrics", id, {
 			bytesReceived: state.bytesReceived,
@@ -2114,13 +2358,28 @@ export class SourceManager extends EventEmitter {
 			declaredSampleRateHz: caps.sampleRate,
 			bytesPerSample,
 			stable,
+			...(state.metricStartMark ? { startMark: state.metricStartMark } : {}),
 		})
 		if (transition === "flagged") {
+			// The receiver may run another rate than any receipt says from the start of the
+			// newest agreeing interval on (none, or outside the live session: its start, 0).
+			const mark = state.rateTruth.doubtFromMark
+			const live = this.ledger.position(id)
+			this.ledger.raiseDoubt(
+				id,
+				"sampleRate",
+				"rate-truth-mismatch",
+				mark && live && mark.session === live.session ? mark.pos : 0,
+			)
+			// While the mismatch stands no rate receipt proves the rate (one re-write may fix the
+			// receiver; until the measurement agrees again, sustained, nothing is trusted).
+			this.ledger.setHold(id, "sampleRate", "rate-truth-mismatch")
 			this.logger.warn(
 				{ sourceId: id, ...state.rateTruth.mismatch },
 				"Source delivers a different sample rate than its caps declare; caps left unchanged (check external tuner clients)",
 			)
 		} else if (transition === "cleared") {
+			this.ledger.setHold(id, "sampleRate", null)
 			this.logger.info(
 				{ sourceId: id, declaredSampleRateHz: caps.sampleRate },
 				"Source rate matches its caps again",
@@ -2130,8 +2389,11 @@ export class SourceManager extends EventEmitter {
 	}
 
 	private resetRateTruth(id: string, state: SourceState): void {
-		if (this.isCurrent(state) && state.rateTruth.reset())
+		if (this.isCurrent(state) && state.rateTruth.reset()) {
+			// The measurement starts over: no mismatch stands (a new session has no hold anyway).
+			this.ledger.setHold(id, "sampleRate", null)
 			this.emit("rate-truth-changed", id)
+		}
 	}
 
 	private createSignalLevelTracker(config: SourceConfig): SignalLevelTracker {
@@ -2170,6 +2432,7 @@ export class SourceManager extends EventEmitter {
 				"Source IQ level is flat (near-zero gain?); decoders will hear nothing (check external tuner clients)",
 			)
 		} else if (transition === "cleared") {
+			// The level says nothing about the rate: a rate-truth hold stays while its mismatch does.
 			this.logger.info(
 				{ sourceId: id, levelDbfs: state.signalLevel.levelDbfs },
 				"Source IQ level recovered",
@@ -2240,6 +2503,7 @@ export class SourceManager extends EventEmitter {
 
 		state.stopping = true
 		if (state.attempt) {
+			state.attempt.ledger.close()
 			state.attempt.phase = "closed"
 			state.attempt.sessionId = null
 			state.attempt.headerAt = null
@@ -2370,6 +2634,8 @@ export class SourceManager extends EventEmitter {
 		const state = this.sources.get(id)
 		if (!state || state.config.type === "recording" || !state.config.host)
 			return false
+		// Endpoint selection moves the primary receiver only; a candidate is another receiver.
+		if (state.candidateIndex !== 0) return false
 		const current = state.activeHost ?? state.config.host
 		if (host === current) return true
 		state.activeHost = host === state.config.host ? null : host
@@ -2480,6 +2746,21 @@ export class SourceManager extends EventEmitter {
 		}
 	}
 
+	/** Supplies `receiver` on getStatus (null removes it). */
+	setReceiverStatusSource(
+		source: ((id: string) => SourceReceiverStatus | undefined) | null,
+	): void {
+		this.receiverStatusSource = source
+	}
+
+	private receiverStatusOf(id: string): SourceReceiverStatus | undefined {
+		try {
+			return this.receiverStatusSource?.(id)
+		} catch {
+			return undefined
+		}
+	}
+
 	/**
 	 * Supplies a held feed's `restoreTuning`: what a restore resume would write back (the tuner
 	 * controller's accepted centre, rate and gain; wired in core/tuner-wiring.ts). Read on every
@@ -2573,6 +2854,8 @@ export class SourceManager extends EventEmitter {
 			const persist = !this.pausedIds.has(id) || this.feedsUnsaved
 			this.pausedIds.add(id)
 			state.pendingResume = null
+			// A deliberate close is no failure; a resume's own attempts count afresh.
+			state.connectFailure = null
 			if (changed) {
 				this.logger.info({ sourceId: id }, "Pausing source feed")
 				this.setFeed(id, state, "paused")
@@ -2597,6 +2880,7 @@ export class SourceManager extends EventEmitter {
 		const socket = attempt.socket
 		const connected = attempt.phase === "connected"
 		// No more payload from this session; the close handler still reports "disconnected".
+		attempt.ledger.close()
 		attempt.phase = "closed"
 		attempt.sessionId = null
 		attempt.lastSampleAt = null
@@ -2715,7 +2999,126 @@ export class SourceManager extends EventEmitter {
 			...(state.config.type !== "recording"
 				? { feed: this.feedOf(state) }
 				: {}),
+			...(state.connectFailure !== null &&
+			!state.connected &&
+			state.config.type !== "recording"
+				? { connectFailure: connectFailureStatus(state.connectFailure) }
+				: {}),
+			...(this.candidatesOf(state).length > 0
+				? { candidate: this.candidateStatus(state) }
+				: {}),
+			...(r => (r ? { receiver: r } : {}))(this.receiverStatusOf(id)),
 		}
+	}
+
+	// === Candidate endpoints ===
+
+	/**
+	 * The configured candidates, only for rtl_tcp U8_IQ sources. The first data payload decides a
+	 * winner, not the header: an endpoint that sends bytes without an `RTL0` header wins too, with
+	 * an unknown receiver identity.
+	 */
+	private candidatesOf(
+		state: SourceState,
+	): NonNullable<SourceConfig["candidates"]> {
+		const { config } = state
+		if (config.type !== "rtl_tcp" || config.caps.format !== "U8_IQ") return []
+		return config.candidates ?? []
+	}
+
+	/** Where the current or next attempt dials: the primary (with endpoint selection) or a candidate. */
+	private currentEndpoint(state: SourceState): {
+		host: string
+		port: number
+		label?: string
+	} {
+		const candidate =
+			state.candidateIndex > 0
+				? this.candidatesOf(state)[state.candidateIndex - 1]
+				: undefined
+		if (candidate)
+			return candidate.label !== undefined
+				? { host: candidate.host, port: candidate.port, label: candidate.label }
+				: { host: candidate.host, port: candidate.port }
+		return {
+			host: state.activeHost ?? state.config.host!,
+			port: state.config.port!,
+		}
+	}
+
+	private candidateStatus(state: SourceState): SourceCandidateStatus {
+		const endpoint = this.currentEndpoint(state)
+		return {
+			index: state.candidateIndex,
+			count: this.candidatesOf(state).length + 1,
+			...(endpoint.label !== undefined ? { label: endpoint.label } : {}),
+			target: connectTarget(endpoint.host, endpoint.port),
+			selectedBecause: state.candidateReason,
+			delivering: state.candidateWon,
+			failures: state.candidateFailures,
+			retries: SOURCE_CANDIDATE_RETRIES,
+		}
+	}
+
+	/** The selected endpoint of a source with candidates; undefined without candidates. */
+	getSelectedCandidate(id: string): SourceCandidateStatus | undefined {
+		const state = this.sources.get(id)
+		if (!state || this.candidatesOf(state).length === 0) return undefined
+		return this.candidateStatus(state)
+	}
+
+	/** The first payload of a connection: this endpoint wins (again); its failure count starts over. */
+	private noteCandidateWon(id: string, state: SourceState): void {
+		if (this.candidatesOf(state).length === 0) return
+		state.candidateFailures = 0
+		if (state.candidateWon) return
+		state.candidateWon = true
+		state.candidateReason =
+			state.candidateCause === null
+				? "first reachable"
+				: `previous failed: ${state.candidateCause}`
+		const endpoint = this.currentEndpoint(state)
+		this.logger.info(
+			{
+				sourceId: id,
+				index: state.candidateIndex,
+				target: connectTarget(endpoint.host, endpoint.port),
+				reason: state.candidateReason,
+			},
+			"Source endpoint selected",
+		)
+	}
+
+	/**
+	 * A lost or failed connection (not a deliberate switch or a pause): an endpoint that never
+	 * delivered a payload is left at once; one that did is retried SOURCE_CANDIDATE_RETRIES times,
+	 * the count starting over only when a connection delivers a payload again.
+	 */
+	private noteCandidateFailure(id: string, state: SourceState): void {
+		const candidates = this.candidatesOf(state)
+		if (candidates.length === 0) return
+		const cause = state.connectFailure?.errorClass ?? "lost"
+		if (state.candidateWon) {
+			state.candidateFailures += 1
+			if (state.candidateFailures <= SOURCE_CANDIDATE_RETRIES) return
+		}
+		const from = state.candidateIndex
+		state.candidateIndex = (from + 1) % (candidates.length + 1)
+		state.candidateCause = state.candidateWon
+			? `${cause} (${state.candidateFailures} losses)`
+			: cause
+		state.candidateWon = false
+		state.candidateFailures = 0
+		state.candidateReason = `trying: previous failed: ${state.candidateCause}`
+		this.logger.info(
+			{
+				sourceId: id,
+				from,
+				to: state.candidateIndex,
+				cause: state.candidateCause,
+			},
+			"Source endpoint rotated",
+		)
 	}
 
 	private getActivity(state: SourceState): SourceActivity {
@@ -3029,6 +3432,12 @@ export class SourceManager extends EventEmitter {
 		}
 	>()
 
+	/**
+	 * Sockets that already raised an unledgered-write doubt: one per socket, so a doubt never
+	 * feeds itself (doubt → assert writes → the same stray socket → doubt).
+	 */
+	private readonly unledgeredDoubted = new WeakSet<net.Socket>()
+
 	private readonly tunerCommandContext = new AsyncLocalStorage<{
 		id: string
 		signal: AbortSignal
@@ -3267,9 +3676,18 @@ export class SourceManager extends EventEmitter {
 	 *
 	 * @param id - Source ID
 	 * @param payload - Raw control bytes to send
+	 * @param writer - Who writes (tuning ledger receipts); absent = no writer (reads unverified)
+	 * @param onReceipt - Runs once when the payload left the socket: the tuning-ledger receipt of its
+	 *   last complete frame, or null when none was recorded (session ended first, write error, no
+	 *   ledger connection). Not called when this method throws.
 	 * @returns true if write buffer accepted the data
 	 */
-	writeToSource(id: string, payload: Buffer): boolean {
+	writeToSource(
+		id: string,
+		payload: Buffer,
+		writer?: TuningWriterTag,
+		onReceipt?: ReceiptCallback,
+	): boolean {
 		// Async context follows controller awaits, so cancelled callbacks cannot
 		// write later, even after a replacement source registers the same id.
 		this.assertTunerCommandActive()
@@ -3306,7 +3724,27 @@ export class SourceManager extends EventEmitter {
 			payload.length === 5 &&
 			payload[0] === 0x02 &&
 			payload.readUInt32BE(1) !== state.config.caps.sampleRate
-		const accepted = socket.write(payload)
+		// Frames are parsed in socket order now and receipted when they leave (write callback).
+		const ledger =
+			state.attempt?.socket === socket ? state.attempt.ledger : null
+		const accepted = ledger
+			? socket.write(payload, ledger.write(payload, writer, onReceipt))
+			: onReceipt
+				? socket.write(payload, () => {
+						try {
+							onReceipt(null)
+						} catch {
+							// A caller's callback never breaks the socket callback.
+						}
+					})
+				: socket.write(payload)
+		// A socket that is not the live attempt's has no ledger connection: the frame went out
+		// unrecorded, so nothing about the live session can be proven past it.
+		// Once per socket (unledgeredDoubted).
+		if (!ledger && !this.unledgeredDoubted.has(socket)) {
+			this.unledgeredDoubted.add(socket)
+			this.ledger.raiseDoubt(id, "both", "unledgered-write")
+		}
 		if (rateChange) {
 			// First retry: <= 4 s equal-jitter backoff (2^1 × 2 s) + 5 s
 			// connect timeout = 9 s. A later retry needs a new caller request.

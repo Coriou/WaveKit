@@ -771,18 +771,18 @@ JSON, decoder protocols to 16, job names to 32 and reasons to 24, and
 `truncated` is `true` when a list or an id was cut or that count stopped; read the
 fuller route then.
 
-| Field            | Summary of                   | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `at`             |                              | ISO time of the answer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `truncated`      |                              | `true` when a list was cut at its cap, an id was shortened or `scanner.discoveries` stopped at its cap (a shortened job name alone does not set it)                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `tuners`         | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds the tuner lease), `declaredOnly` (frequency or rate only from config). Unknown values are null                                                                                                                                                                                                                                                          |
-| `sources`        | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`), `feed` (the receiver feed state: `live`, `paused`, `resuming`, `error`), `tuningUnverified` (`true` while the tuner's frequency, sample rate, gain or gain mode is unknown, for example after a plain resume), `verdict` (the [`verdict.code`](#get-apisources) of `GET /api/sources`, absent when it reads `ok`), `passive` (why the cost guard holds passive scanning off: a [`reasonCode`](#get-apiscanner) of `GET /api/scanner`, absent otherwise) |
-| `liveAudio`      | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `scanner`        | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `heldJobs` (sweeps paused with reason `resumed-without-retune`), `discoveries` (records in the discovery store; null if this core cannot say), `job` (the most recently updated held sweep, else the most recently updated active job: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                                                                                                                      |
-| `decoders`       | `GET /api/decoders/summary`  | one row per decoder instance, problem verdicts first, then configuration order: `id`, `protocol` (the decoder type) and the same `verdict` `code` and `actions` (at most three, most helpful first), with `cause` (`host` or `decoder`, whose loss stopped it) only on a loss verdict (`efficiency-drops`, `efficiency-late-drops`, `efficiency-cpu`, at most two actions) and never `retryAt` (read the summary route for it); the verdict sentence is on the summary route. A `listening` row may add the summary's `reception` (`heard-undecoded` or `nothing-heard`)    |
-| `hiddenProblems` | `GET /api/decoders/summary`  | number of decoders with a problem verdict cut from `decoders` by its cap (0 when every problem shows)                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `activity`       | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `lastDecode`     | `GET /api/decoders/summary`  | `{ protocol, at }` per protocol with output (over every decoder), newest first                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Field            | Summary of                   | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `at`             |                              | ISO time of the answer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `truncated`      |                              | `true` when a list was cut at its cap, an id was shortened or `scanner.discoveries` stopped at its cap (a shortened job name alone does not set it)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `tuners`         | `GET /api/tuner`             | `sourceId`, `frequencyHz`, `sampleRateHz`, `gainMode`, `gain` (tenths of a dB; null in AGC), `owner` (`wavekit`, `external` while an external client such as SDR++ controls it, `scanner` while a scanner job holds the tuner lease), `declaredOnly` (frequency or rate only from config). Unknown values are null                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `sources`        | `GET /api/sources`           | `id`, `connected`, `state` (the source activity state), `sampleAgeMs`, `warnings` (`rate-mismatch`, `signal-flat`), `feed` (the receiver feed state: `live`, `paused`, `resuming`, `error`), `tuningUnverified` (`true` while the tuner's frequency, sample rate, gain or gain mode is unknown, for example after a plain resume), `verdict` (the [`verdict.code`](#get-apisources) of `GET /api/sources`, absent when it reads `ok`), `passive` (why the cost guard holds passive scanning off: a [`reasonCode`](#get-apiscanner) of `GET /api/scanner`, absent otherwise), `tuning` (why the centre or rate is not proven: the [`tuningUnproven.cause`](#get-apisources) code of `GET /api/sources`, `doubt` for any doubt, `engine` for any engine cause; only on a row without `verdict`, absent while proven), `receiver` (`strength`, `learnedState`, `tuningRestored`: the [receiver fields](#receiver-and-candidate-fields) of `GET /api/sources`, absent before the receiver is identified) |
+| `liveAudio`      | `GET /api/live-audio/status` | `running`, `health`, `sourceId`, `modulation`, `offsetHz`, `clients`, `squelchOpen` (null while stopped); null without live audio                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `scanner`        | `GET /api/scanner`           | `enabled`, `activeJobs` (not yet ended), `heldJobs` (sweeps paused with reason `resumed-without-retune`), `discoveries` (records in the discovery store; null if this core cannot say), `job` (the most recently updated held sweep, else the most recently updated active job: `id`, `name`, `kind`, `state`, `reason`, `sourceId`) or null; null without the scanner                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `decoders`       | `GET /api/decoders/summary`  | one row per decoder instance, problem verdicts first, then configuration order: `id`, `protocol` (the decoder type) and the same `verdict` `code` and `actions` (at most three, most helpful first), with `cause` (`host` or `decoder`, whose loss stopped it) only on a loss verdict (`efficiency-drops`, `efficiency-late-drops`, `efficiency-cpu`, at most two actions) and never `retryAt` (read the summary route for it); the verdict sentence is on the summary route. A `listening` row may add the summary's `reception` (`heard-undecoded` or `nothing-heard`)                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `hiddenProblems` | `GET /api/decoders/summary`  | number of decoders with a problem verdict cut from `decoders` by its cap (0 when every problem shows)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `activity`       | `GET /api/activity/status`   | `state` (`disabled`, `opening`, `retrying`, `available`, `unavailable`) and `rows` (null unless available)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `lastDecode`     | `GET /api/decoders/summary`  | `{ protocol, at }` per protocol with output (over every decoder), newest first                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 A scanner job owns a tuner only while it holds the tuner lease: passive jobs never
 take one, and a sweep the operator paused keeps it until it is released.
@@ -991,6 +991,24 @@ curl http://localhost:9000/api/sources
 
 `deviceFacts` says what the receiver's status API can tell, and only `present` and `absent` assert a device state: `present` or `absent` (a fresh answer stating a boolean), `malformed` (it answered without one), `probe-failed` (it answered, but its USB check failed or timed out), `stale` (its last answer is over 15 s old), `unreachable` (it does not answer now), `none` (this core polls no status API for the source). Samples flowing outrank any report, so a receiver that says "no device" while IQ arrives still reads `ok`. The verdict is on this route and on `source:status` events (where a change that comes only from the receiver's facts waits for the 10 s heartbeat) and, as a bare code, on `GET /api/agent/status`.
 
+`tuningUnproven` says why the source's centre or sample rate is not proven by the core's tuning ledger and what to do, one reason per source: `{ code: "tuning-unproven", cause, fields, message, fix, since, refusals }`. It is absent while both are proven or settling, and on sources the ledger never saw (recordings, audio sources). While it stands, the scanner's recordings and identification of the source's signals wait: `refusals.recording` counts the track snapshots the analog recorder refused (`refused:tuning`) and `refusals.identification` the snapshots classified on the unproven tuning (spectral evidence only, so their discoveries stay candidates), both since `since`, when this cause began (a new cause starts again from 0). `fields` lists the unproven fields (`frequency`, `sampleRate`). `message` and `fix` are fixed text per cause, never a value from the receiver or a client.
+
+| `cause`              | Meaning                                                                                                                                                                                                                                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plain-resume`       | A resume without restore holds the tuning: the core writes nothing until the tuning is taken back ([`POST /api/tuner/:sourceId/take-back`](#post-apitunersourceidtake-back)), set (`POST /api/tuner/:sourceId/tune`) or restored; `resumeOutcome` on `GET /api/tuner/:sourceId` says why it was left as found |
+| `relay-attached`     | A relay client is attached and sent no tuning on this connection; the core does not write over it                                                                                                                                                                                                             |
+| `external-control`   | The tuner is under external control                                                                                                                                                                                                                                                                           |
+| `scanner-lease`      | A scanner job holds the tuner and its hop has not settled                                                                                                                                                                                                                                                     |
+| `lost-ownership`     | Another core owns the receiver                                                                                                                                                                                                                                                                                |
+| `declared-write-off` | `tuner.writeDeclaredTuningOnConnect` is false and nothing was set since the connection began                                                                                                                                                                                                                  |
+| `reset-policy`       | `tuner.reconnectPolicy` is `reset` and nothing was set on this connection                                                                                                                                                                                                                                     |
+| `doubt:<reason>`     | Evidence that the receiver moved without a frame (`untracked-retune`, `host-centre-mismatch`, `rate-truth-mismatch`, `pipeline-error`, ...); the core writes the held tuning again                                                                                                                            |
+| `no-session`         | The receiver is not connected                                                                                                                                                                                                                                                                                 |
+| `no-receipt`         | No tuning frame reached the receiver on this connection yet                                                                                                                                                                                                                                                   |
+| `engine:<reason>`    | Both are proven, but the spectrum engine cannot place its newest samples after the proof (`upstream-loss`, `no-anchor`, `before-session`, ...: the reasons of `trustShadow.unverifiedBlocks` on [`GET /api/spectrum`](#get-apispectrum)); usually gone within a second                                        |
+
+No connection comes first (`no-session`, whatever the core would write on one), then a cause the core writes nothing for (a plain resume over a doubt). A cause that changes with no ledger event (a relay client attaching, a scanner lease, the engine's label) is read again at the next refusal, at most every 250 ms, so refusals count under the cause standing when they happen. `GET /api/agent/status` carries the cause's code as `tuning` (a doubt without its reason) on a source row whose `verdict` reads `ok`.
+
 **Response**:
 
 ```json
@@ -1069,6 +1087,108 @@ only on the configured API port. Upgrades are at least
 activeHost, reason, at }` (also on `source:status` and in `/api/status`); `url`
 stays the configured address. Other sources never carry `endpoint`. See
 [receiver-endpoints](specs/receiver-endpoints/design.md).
+
+**Connect failures.** While a network source is not connected after a failed attempt,
+its entry carries `connectFailure`: `target` (the attempt's `host:port`, omitted when the host
+is not a plain name or address), `errorClass` (`refused`, `timeout`, `unreachable`,
+`not-found`, `reset`, `closed`, `stalled`, `silent` or `other`), `attempts` (failed attempts since a connection
+last delivered data), `lastAttemptAt` (ISO time) and a short fixed `hint`, for example:
+
+```json
+"connectFailure": {
+	"target": "receiver.local:1234",
+	"errorClass": "refused",
+	"attempts": 3,
+	"lastAttemptAt": "2026-01-01T00:00:00.000Z",
+	"hint": "Nothing listening at receiver.local:1234: is the bridge or rtl_tcp running?"
+}
+```
+
+The class comes from the socket error code (`ECONNREFUSED` is `refused`, `ETIMEDOUT` or the
+core's connect timeout `timeout`, `EHOSTUNREACH`/`ENETUNREACH`/`EHOSTDOWN` `unreachable`,
+`ENOTFOUND`/`EAI_AGAIN` `not-found`, `ECONNRESET`/`EPIPE` `reset`, a close by the peer
+without an error `closed`, the stall watchdog `stalled`, a source with candidates whose endpoint
+sent no data payload within 10 s of the connect `silent`, anything else `other`); the hint is fixed text per class and never repeats the
+error message. The field goes once a connection delivers its first data (the rtl_tcp header),
+not when the TCP connection is accepted: a receiver that accepts and then resets before
+sending anything keeps counting attempts; any first data clears the record, so a stall or
+reset after data starts again at 1. Pausing the feed clears it too (a deliberate close is no
+failure). A peer close after a healthy session (payload seen) is a disconnect and starts no
+record. While connected the field is not shown.
+
+#### Receiver and candidate fields
+
+**`candidate`** (only `rtl_tcp` `U8_IQ` sources with `candidates` in the config): the endpoint in
+use. `index` (0 is the configured `host`/`port`, 1 onwards the candidates in config order),
+`count` (all endpoints), `label` (the candidate's label, if any), `target` (`host:port`, null when
+the host is not a plain name or address), `selectedBecause`, `delivering` (it sent a data
+payload since it was selected; a header alone does not count, and an endpoint that sends bytes
+without a valid `RTL0` header delivers with an unknown receiver), `failures` (losses since then)
+and `retries` (losses after which a delivering endpoint is left, 3). `selectedBecause` reads
+`configured` before any attempt, `first reachable`, `previous failed: <class>` once it delivered
+after a switch (the class is a `connectFailure.errorClass` or `lost`, with `(N losses)` when the
+endpoint left had delivered), or `trying: previous failed: <class>` while it is being tried.
+An endpoint that accepts the connection but sends no data payload (a header alone does not
+count) within 10 s of the connect (twice the 5 s connect timeout) fails as `silent` and the next
+endpoint is tried.
+
+**`receiver`** (tracked `rtl_tcp` `U8_IQ` sources, once their first connection identified the
+receiver): which receiver the source reaches and whose learned state applies.
+
+```json
+"receiver": {
+	"key": "unit:0123456789abcdef0123456789abcdef",
+	"strength": "unit",
+	"tunerType": 5,
+	"serial": "SDR04711",
+	"candidateLabel": "usb",
+	"selectedBecause": "previous failed: refused",
+	"learnedStateNamespace": "engine/receivers/rtl/unit%3A0123456789abcdef0123456789abcdef",
+	"namespaceState": "resumed",
+	"restoredTuning": { "restored": true, "reason": "same receiver" }
+}
+```
+
+- `key` and `strength`: `unit:<unitId>` (the sdr-host's stable unit id, kept across sdr-host
+  restarts and image updates) or `serial:<vendor>:<product>:<serial>` (the dongle's USB ids and
+  serial, only for a serial that is not a shared factory default such as `00000001`) are a
+  `unit`; `source:<source>|model:<tunerType>:<gainCount>` (`rtl_tcp` header only) is a `model`,
+  shared by every dongle of that model on that source; `unknown` means nothing usable was
+  reported. The sdr-host's `receiverId` changes at every sdr-host restart and never forms a key;
+  an sdr-host without `unitId` (an older one) gives the `model` key. Every part is validated
+  (letters, digits, `.`, `_`, `-`, bounded length); anything else is dropped, which only weakens
+  the identity.
+- `serial` (as validated) and `candidateLabel` are present only when known.
+- `learnedStateNamespace`: where the spectrum engine state and occupancy of this receiver live,
+  relative to the scanner state directory; null while the receiver is unknown.
+- `namespaceState`: `fresh` (new receiver), `resumed` (its own earlier state), `adopted` (a copy
+  of learned state taken over once: the state saved before receiver namespacing, or, for a unit
+  identified for the first time, what the source learned under its `model` key) or `none`
+  (unknown receiver: nothing learned applies, nothing is written). The state saved before
+  namespacing goes to a `unit` key, or to the `model` key only on a source without an sdr-host;
+  the original files stay for an older version.
+- After a connect the identity waits for the sdr-host's first answer (or failure) since that
+  connection, at most 7 s by default (three sdr-host request timeouts plus 1 s). Until then
+  `receiver` still shows the last identified receiver and its learned state stays applied, but
+  nothing is saved. The same receiver again resumes without any change to the spectrum engine;
+  another receiver switches to its own state. Learned state that cannot be saved yet (the scanner
+  store not writable) is kept in memory for its receiver and saved once the store is writable.
+- While a tracked source's receiver is not identified (unknown, or in that window), a retune
+  with `applyToMyTuning` applies no band gain and keeps your gain: the gain it would replace
+  could not be saved for the right receiver. This is the intended safe answer; the log line
+  `Band gain not applied: the receiver is not identified yet` carries the reason
+  `receiver not identified`.
+- `restoredTuning`: whether the tuning accepted through the API or the relay was replayed on
+  this connection, and why (`same receiver`, `this receiver's tuning from earlier`, `another
+receiver: configured tuning`, `receiver unknown: nothing restored`, ...). It is replayed only to
+  the receiver it was accepted on, except that a same-model unit may get it until the sdr-host
+  identity settles (never corrected on a candidate endpoint without sdr-host). Tuning accepted
+  while the source's receiver is unknown (the first connection's receiver not identified yet,
+  or an unidentifiable one) belongs to no receiver: it is dropped, not replayed on a later
+  connection.
+
+`GET /api/agent/status` carries a compact `receiver` per source: `strength`, `learnedState`
+(the `namespaceState`) and `tuningRestored`.
 
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
@@ -1203,13 +1323,50 @@ What a resume writes to the receiver depends on the body:
   you paused (`paused(operator)`) stays as it is; in-window and passive jobs, which never
   tune, resume as usual. TEST_MODE 0
   (the scanner's own marker) is still sent when a marker may be open.
+- **A plain resume on a free receiver** takes the tuning back as a restore resume would:
+  while the sdr-host's rtlmux client list ([`GET /api/resources/sdr-hosts`](#get-apiresourcessdr-hosts))
+  holds exactly one client while this core's connection is up, and no
+  [tuner relay](#tuner-relay) client is attached, the core writes its held centre and sample
+  rate again (accepted before the pause, else declared; `tuner.writeDeclaredTuningOnConnect`
+  `false` still keeps the declared ones off), and a later dropout reconnect writes the
+  configured gain again. That one client is this connection whether or not its port matches
+  this connection's local port (rtlmux sees the core's address after any NAT, which may rewrite
+  the port); `resumeOutcome` says which. Each sdr-host answer must be at most two poll intervals and
+  a request timeout old (8 s with the defaults); the client list it carries may be older (below). Anything else
+  leaves the tuning as found: two or more clients on rtlmux, zero clients, an sdr-host whose
+  API host is not the host the IQ connection uses, no sdr-host (or
+  `resources.sdrHostPoller` off), an answer that fails or is too old, or a relay client. The
+  sdr-host serves the client list of its own last rtlmux stats poll, which can be older than the
+  answer, so a free answer counts only when the list itself is newer than the connection and the
+  last doubt on the centre or rate: the core takes the list as no newer than the poll's start
+  minus the list's age the answer reports (`sampling.stats.ageMs`) minus 3 s for the sdr-host's
+  own stats request (the age is measured on the sdr-host's clock and the 3 s is a fixed bound, so
+  a clock offset between the hosts does not matter), or minus 33 s when the answer reports no age (the sdr-host serves a list until
+  it is 30 s old). With a working sdr-host the take-back comes a few seconds after the
+  connection. A list taken before this connection (which may name only another client, SDR++
+  say) never counts, and a client that joins and retunes is not fought on an older list: after an
+  untracked retune the receiver reads as another client's until a newer answer says free. It is
+  re-read at every poll: a client that joins later puts the hold back, one that leaves gives the
+  tuning back. `resumeOutcome` on
+  the tuner state says which: `{ outcome, reason, message }` with `outcome` `restored` or
+  `left-as-found` and `reason` `port-matched` ("receiver free (only this connection): tuning
+  restored"; the one client has this connection's port), `sole-client` ("receiver free (one
+  client, port not matched): tuning restored"; its port is another or not listed),
+  `another-client` ("another client on the receiver: tuning left as found"; two or more clients
+  are listed, each with its own entry),
+  `clients-unknown` ("receiver clients unknown: tuning left as found"), `relay-attached`, or
+  `operator` after [`POST /api/tuner/:sourceId/take-back`](#post-apitunersourceidtake-back);
+  present from the plain resume until a restore resume.
 - **Restore resume** (`restoreTuning: true`) writes the accepted pre-pause tuning back on
   the first payload, whatever `tuner.reconnectPolicy` says (even `reset`; a later dropout
   follows the policy again): the configured gain, then every accepted field (frequency,
   sample rate, gain mode, gain and the others), the scanner's queued lease recovery and
   owed gain restore, and a band gain the receiver had before the pause; a sweep waiting in
   `paused(source-down)` continues with its next hop. The held feed's
-  `restoreTuning` shows what it writes.
+  `restoreTuning` shows what it writes. A centre or rate with nothing accepted to write
+  (after a plain resume dropped the pre-pause values, or nothing was ever set) gets the
+  declared one from the source's config or caps, unless
+  `tuner.writeDeclaredTuningOnConnect` is `false`.
 
 **SDR++ through the tuner relay or through rtlmux.** With the
 [tuner relay](#tuner-relay) enabled, SDR++ connected to the relay is seen: its commands
@@ -1790,18 +1947,72 @@ has an active control client.
 
 Tuner values are the last _commanded_ desired values, not hardware readback:
 rtl_tcp has no positive acknowledgement. When an rtl_tcp source reconnects, the
-`tuner.reconnectPolicy` config decides what happens. With `restore` (the default),
-core re-sends the fields that were accepted through this API or the relay (never
-config defaults) and counts them in `commandCount`/`lastCommandAt`; a failed
+`tuner.reconnectPolicy` config decides what happens to the other fields. With
+`restore` (the default), core re-sends the fields that were accepted through this
+API or the relay and counts them in `commandCount`/`lastCommandAt`; a failed
 restore sets `lastError` and is retried on the next connection. Relay commands
 received while the source is down become desired state and are sent on
-reconnect. With `reset`, core sends nothing and returns tuner state and source
-caps to the configured baseline. With either policy, source caps
-(`sampleRate`/`centerFreq`) are reconciled to values backed by an accepted
-command or the configured baseline (the `reset` baseline must mirror the
-receiver's startup arguments). A relay rate the controller rejects never
-changes source caps. Combine with the source `connected` flag to tell sent from
-pending.
+reconnect. With `reset`, core discards them and returns tuner state and source
+caps to the configured baseline.
+
+Centre and sample rate follow one rule (**assert**): every new connection starts
+unproven, and as its first payload arrives the core writes the values it holds,
+the last accepted ones (API or relay; never a scanner hop's), else the declared
+baseline (config or caps). Accepted values belong to the receiver they were
+accepted on: when the connection reaches another receiver (another dongle behind
+the same endpoint, or a source candidate) the core holds only the declared values
+for it, and an unknown receiver gets no accepted value either; the first
+receiver's values come back when it does, while it is among the last 9 receivers
+seen on the source (`RECEIVER_TUNING_STASH_MAX`; an older one gets the declared
+values like a new one). Until the sdr-host names the unit, two dongles of the same
+model are told apart by their header only, which they share: a value accepted on
+one may be written to the other in that window, and is set aside as soon as the
+sdr-host names another unit. A plain resume onto another receiver writes nothing
+but still sets the first receiver's values aside. The declared fallback is off when
+`tuner.writeDeclaredTuningOnConnect` is `false`, after a plain resume of a paused
+feed (until a restore resume; values accepted after the resume are still written)
+and under `reconnectPolicy: reset` (another operator may own the receiver: values
+accepted on an earlier connection are discarded, so only a value accepted on the
+current connection, which starts at its first payload, is written back, after a
+doubt). A restore resume writes the
+held values, the declared centre and rate included when nothing is accepted, also
+after a plain resume and under `reset`. It writes nothing for them while a tuner
+relay client is attached or holds control, while a scanner lease holds the tuner
+(the lease holder re-sends its own hop, the rate too), or once this core lost
+ownership. It writes again when a doubt leaves either field unproven on the live connection (an
+untracked retune, a host-centre mismatch, a pipeline error, a sustained rate
+mismatch), when a relay client leaves, or when a scanner lease ends. These frames
+report origin `replay`. A write to either field through this API is skipped only
+when the live connection already proves that value or a frame of it is still
+settling; otherwise it is sent. Source caps follow the values written. A relay
+rate the controller rejects never changes source caps.
+
+`proof` says, per field (`frequency`, `sampleRate`), what proves it on the
+current connection, from the core's tuning ledger (every tuning frame flushed to
+the receiver, at the payload position it left at): `state` is `commanded` (a
+frame of the core or a scanner job went out and its network settle passed),
+`relay` (a relay client's frame did), `settling` (a frame went out, or still waits
+to leave, `reason: "queued"`, and its settle has not passed) or `unverified`;
+`writer` (`operator`, `scanner`, `assert`, `relay` or null), `session` (the
+connection's number, per source from 1, null between connections) and, when
+unverified, a fixed `reason`: the doubt's own (`untracked-retune`,
+`host-centre-mismatch`, `pipeline-error`, `rate-truth-mismatch`,
+`unledgered-write`, `write-failed`), why nothing is written (`relay-attached`,
+`external-control`, `scanner-lease`, `lost-ownership`, or, with nothing accepted to
+write, why the declared fallback is off: `plain-resume`, `reset-policy`,
+`declared-write-off`) or the ledger's (`no-receipt`, `session-ended`,
+`no-writer`, …). A doubt's reason comes first; `blocked` (unverified only) names
+why nothing is written back whatever the `reason` (same codes as above, from
+`relay-attached` to `declared-write-off`). `lastReceipt` `{ seq, pos, at }` names
+the field's last frame flushed on this connection: its ledger number (per source,
+increasing), the payload byte position it left at and when (ISO 8601); absent
+before the first. `unknownFields`/`declaredOnlyFields` keep saying where a shown
+value comes from; `proof` says whether this connection carries it.
+`proof.assertFights` (absent before the first) counts the centre and rate frames
+the core wrote back because an untracked retune left them unproven, since it
+started, with no rate limit: a figure that keeps climbing means a client retunes
+the receiver past the core's relay (SDR++ straight on a shared rtlmux) and the
+core keeps putting its values back.
 
 `lastChange` says who made the last change and why: `{ actor, reason, at, fields, jobId? }`,
 one per source, in memory, absent until the first change since the core started. Clients cannot
@@ -2078,6 +2289,25 @@ The restore's writes read `actor: restore`, `reason: tune-restore` in `lastChang
 
 `DELETE /api/tuner/:sourceId/tune/restore` keeps the temporary tuning (`cancel-request`) and answers the
 tuner state; with no restore pending it is 404 `TUNER_RESTORE_NOT_PENDING`.
+
+#### POST /api/tuner/:sourceId/take-back
+
+Takes the receiver's tuning back in one call: writes the held sample rate, then the held centre
+(accepted, also before a [plain resume](#post-apisourcesidpause-and-post-apisourcesidresume),
+else declared; none declared while `tuner.writeDeclaredTuningOnConnect` is `false`), as operator
+writes whatever the ledger proves now, and ends a plain resume's hold (the connection then follows
+the restore rules, as after a restore resume; `resumeOutcome` reads `restored`, `operator`). No
+body, or `{}`; anything else is 400. Answers the tuner state, its `proof` settling until the
+frames' settle passes. 409 `TUNER_TAKE_BACK_BLOCKED` while a scanner job holds the tuner or
+another core owns the receiver, 409 `TUNER_CONTROL_EXTERNAL` under external control (an exclusive
+relay client), 409 `TUNER_NOTHING_HELD` with no held centre or rate (set the tuning with
+[`POST /api/tuner/:sourceId/tune`](#post-apitunersourceidtune) instead); nothing is written then.
+A write that fails answers its error and leaves the hold as it was (a rate already written stays
+accepted); call it again.
+
+```bash
+curl -X POST http://localhost:9000/api/tuner/rtl-local/take-back
+```
 
 While a tune is temporary, the core never writes the gain saved before a band
 ([per-band gain](CORE-REFERENCE.md#per-band-gain), `applyToMyTuning`) to disk. What entering a band
@@ -3722,7 +3952,16 @@ curl http://localhost:9000/api/scanner
 	},
 	"cpuGuard": { "percent": 41.5, "limitPercent": 90, "source": "os" },
 	"disk": "ok",
-	"folders": { "reattached": 0, "unresolved": 0 },
+	"folders": {
+		"reattached": 0,
+		"unresolved": 1,
+		"unresolvedBy": { "noAlias": 1, "aliasWithoutOwner": 0 }
+	},
+	"stateBackup": {
+		"outcome": "none",
+		"reason": "same-format",
+		"toFormat": "f1-h3-r1"
+	},
 	"jobs": { "active": 2, "total": 5 }
 }
 ```
@@ -3731,8 +3970,17 @@ curl http://localhost:9000/api/scanner
 start did with recording and evidence folders that no discovery owned: `reattached` folders
 were given back to the discovery they were merged into (found from the journal's merge alias
 listings, then from the observations listing their recordings), and `unresolved` folders
-could not be traced and stay on disk, kept by every retention pass. Nothing is moved or
-deleted. One info line at startup carries the same two counts.
+could not be traced and stay on disk, kept by every retention pass. `unresolvedBy` splits
+them: `noAlias`, no merge alias names the folder; `aliasWithoutOwner`, its alias chain ends at
+no live discovery (either way no observation listing its recordings named a single owner).
+Nothing is moved or deleted. One info line at startup carries the same counts.
+
+`stateBackup` (absent from older cores and before the scanner state loaded) is this start's
+pre-migration backup of the scanner state ([SCANNER.md](SCANNER.md), upgrade and rollback):
+`outcome` `taken` with `fromFormat`, `toFormat` and `path` (relative to `scanner.storage.dir`,
+`.backups/pre-<format>.<ms>`); `skipped` with `fromFormat`, `toFormat` and a fixed `reason`
+(`unreadable`, `low-disk`, `disk-unknown`, `too-many-files`, `copy-failed`: one file could not
+be read or copied, and no backup was kept); or `none` with `reason` `same-format` or `fresh`.
 
 `recordingsQuota` is present only while the last retention pass left the recordings quota
 (`storage.maxRecordingsMb`) exceeded after removing every file its rules allow, so everything
@@ -3743,6 +3991,18 @@ Meanwhile new analog recordings are refused with the receipt error `storage-cap`
 stop only at the free-disk threshold (`disk-low`). It is absent within the quota and from older
 cores. One warning line names `storage-cap` with the same numbers when it starts, and one info
 line when it clears.
+
+`analogOperations` is present while incomplete analog recording operation folders that hold no
+recording (crash leftovers) are held in `.analog-operations/.set-aside/`:
+`{ "setAside": 1, "lastReason": "missing-intent" }`. Every inventory scan (for example at
+start and before each new recording is admitted) moves such folders there. `setAside` counts
+the folders held now (at most 32 provably empty ones are kept, the oldest deleted past that; a folder that
+cannot be proven empty is kept and counted too), and `lastReason` is `staging-residue`,
+`missing-intent` or `invalid-intent` for the last one moved since the start (absent when none
+was). The field stays as long as entries are held, across restarts; to clear it, stop the core,
+check the entries under `.analog-operations/.set-aside/` (each should hold only `intent.json` or
+`intent.tmp`), delete them and start again. Recordings and the scanner stay available meanwhile.
+Absent from older cores.
 
 `blankedFrames` counts frames blanked as broadband impulses;
 `broadbandRfi` is `{ periodMs }` while periodic broadband RFI is active.
@@ -5532,12 +5792,47 @@ curl http://localhost:9000/api/spectrum
 `profiles[].key` carries the `:a<n>` suffix for an averaged profile.
 `SpectrumSourceStatus` (`sources[]`): `eligible` and `reason?`
 (`source-not-iq` | `source-removed`), the engine state and consumers, RBW,
-floor, `k` per range, `settleMode`, `tuningTrust` (since 2026-10-17: `unverified` while an
-operator retune's frames are still `unverified`, until the first block at or past
-the network settle), `warnings`
+floor, `k` per range, `settleMode`, `tuningTrust` (the tuning ledger's label of the
+current epoch's newest block summary; `unverified` before its first block), `warnings`
 (`untracked-retune` | `host-centre-mismatch`, with `deltaHz` and `at`), the summary
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
-`latestFrame` (at the default profile) and `lastError?`.
+`latestFrame` (at the default profile), `trustShadow?` and `lastError?`.
+
+`trustShadow` (diagnostics, since 2026-11-11). Since 2026-11-12 the tuning ledger's
+label is the engine's only label (the core's record of every tuning frame flushed to
+the receiver, at the payload position it was flushed at, per connection: a block is
+trusted only when the last frequency and sample-rate frames before it were flushed
+on the same connection, the block starts at least the settle after them, no doubt
+(untracked retune, host-centre mismatch, pipeline error, rate mismatch) was raised
+since, and they name the block's own centre and rate). `agree` counts the block
+summaries labelled; `ledgerStricter`, `ledgerLooser` and `mismatch` stay 0 and
+`disagreements` empty (kept for the shape; before 2026-11-12 they compared the
+engine's former label with the ledger's, each disagreement with `kind`, `at`,
+`session`, `posA`/`posB`, both labels, centres and rates, `reason?` and
+`doubtReason?`), and `retuneDelay`: per centre or
+rate frame that changed the value, the payload from its flush to the first block
+summary whose content shows the change (a carrier pattern moved by the expected
+shift, or the spectrum changed by 6 dB on average): `count`, `p50Ms`, `maxMs`,
+`p50Bytes`, `maxBytes` over the last 64 (null before the first; lower bounds, from
+the detecting block's first byte), `maxMsUpper`, `maxBytesUpper` (upper bounds over
+the same, to the detecting block's end: the change showed no later) and
+`undetected` (a quiet band, another bin grid, a newer frame first, or nothing
+within 5 s of payload), with `undetectedReasons` (since 2026-11-13; they add up to
+`undetected`): `superseded` (a newer frame first), `unmeasurable` (no payload rate),
+`session` (a reconnect first), `noReference` (no block before the flush to compare
+with), `grid` (another bin grid: nearly every sample-rate change), `bracket` (a
+scanner marker's test pattern) and `timeout` (nothing within 5 s of payload: a quiet
+band). `unverifiedBlocks` (since 2026-11-13) counts the block summaries labelled
+`unverified` by the first check that failed: the engine's own (`no-anchor`,
+`upstream-loss`, `before-session`, `no-stream-map`, `session-ended`, `bad-range`,
+`no-ledger`, `no-epoch-record`, `value-mismatch`: the block's centre or rate is not the
+proven one, `hop-receipt`: a scanner hop's block not proven by the hop's own frame) or the
+ledger's (`settling`, `doubt`, `no-receipt`, ...); at most 32 keys. `anchorWidenedBytes`
+(since 2026-11-13): bytes the burst absorber lost while the engine read the ledger; each lost
+byte widens where the engine places its samples instead of losing the map until a reconnect,
+so blocks after the next proof are trusted again. `markerBoundaries` (since 2026-11-13): scanner
+hops whose proof a detected test-mode marker moved earlier (from the frame plus the settle to
+the marker). Diagnostics for the network settle; nothing reads it. Absent without a ledger.
 
 Untracked-retune warnings carry two optional fields, absent on
 `host-centre-mismatch`. `suspected`: `iq-byte-slip` (the vanished features reappear
@@ -6542,44 +6837,30 @@ its own device (external input, for example readsb with `rtlTcpHost`) has
 means no frequency.
 
 `tuningTrust` (superseding the 2026-10-16 core's "unverified for every decoder") is
-`commanded` (the source is under WaveKit's internal control) or `relay` (it is
-under external control through the RTL-TCP relay) when the observed tuner state
-proves the decoder hears its targets, and `unverified` otherwise. All of these
-must hold:
+the tuning ledger's label of the source's live edge (since 2026-11-12): `commanded`
+(WaveKit wrote the frames) or `relay` (a relay client's frames through the core's
+RTL-TCP relay) when the ledger proves the decoder hears its targets, and
+`unverified` otherwise. All of these must hold:
 
 - the decoder reads a WaveKit tuner source (not its own device) and has at least
   one target frequency;
-- the source's tuner state has a known, finite frequency and a positive sample
-  rate, and both were proven: written by WaveKit (an API or scanner command or a
-  reconnect replay) or seen in a relay client's accepted command. A value only
-  declared by the configuration baseline (`tuner.defaultFrequency`, the source
-  caps `centerFreq`/`sampleRate`) does not count (it is listed in the tuner
-  state's `declaredOnlyFields`): after a fresh start, a core-only restart while
-  rtlmux replays relay-set values, or a `reconnectPolicy: reset` reconnect, the
-  receiver may be elsewhere, so trust is `unverified` until WaveKit or a relay
-  client sets both again. A relay frequency or rate the controller ignored (out of
-  range, or an RTL rate gap) is forwarded upstream anyway, so it makes the field
-  unknown until the next accepted value;
+- the ledger proves the centre and the sample rate on the live connection: the last
+  frequency and rate frames flushed on it are past the settle with no doubt since
+  (a fresh start, a reconnect, a value only declared by the configuration
+  baseline: `unverified` until WaveKit or a relay client sends both again), and the
+  proven centre is the tuner state's;
 - direct sampling is `off` (in direct sampling the receiver does not use the
-  tuner centre; a relay value above 2 is the Q branch, as in librtlsdr). After a
-  fresh start or a reset reconnect `off` is an unproven placeholder (listed in
-  `unknownFields`) that the rule still accepts: a local rtl_tcp left in direct
-  sampling by an earlier client can read `commanded`. rtlmux drops direct sampling
-  commands, so the Raspberry Pi path is unaffected;
-- the source centre still equals the centre captured when the decoder was last
+  tuner centre; a relay value above 2 is the Q branch, as in librtlsdr);
+- the proven centre still equals the centre captured when the decoder was last
   created or started (a retune makes it `unverified` until the decoder starts
   again, even when the decoder already follows the new centre);
-- every target lies within 0.45 × sample rate of that centre (the usable 90 % of
-  the IQ bandwidth; ±1.08 MHz at 2.4 Msps).
+- every target lies within 0.45 × the proven sample rate of that centre (the usable
+  90 % of the IQ bandwidth; ±1.08 MHz at 2.4 Msps).
 
-Tuner state comes from WaveKit's own tuning commands, relay commands and
-reconnect replay. A reconnect under either policy forgets a centre or rate that
-WaveKit wrote without accepting it (it is not replayed), returning it to the
-baseline. A client that tunes the dongle host directly, bypassing
-WaveKit and the relay, is not observed, so trust can claim a centre the dongle
-no longer has. A removed tuner source drops its state: receptions on it are
-`unverified` until it is added again and reports state. Rows stored before the 2026-10-16 core
-keep `unverified`.
+The input rate is reported only while the ledger proves it. A client that tunes the
+dongle host directly, bypassing WaveKit and the relay, is invisible to the ledger
+until a detector raises a doubt, so trust can claim a centre the dongle no longer
+has. Rows stored before the 2026-10-16 core keep `unverified`.
 
 | Output                                                   | `frequency.hz`                                                                        |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -7955,12 +8236,12 @@ shape is unchanged.
 ```
 
 - `frequency`: the tuned centre of the demodulator's source plus `offsetHz`
-  when the transmission opened. `tuningTrust` is `commanded` under WaveKit
-  control and `relay` under external (SDR++) control, with the same strict rule
-  as spectrum frames: both the centre and the sample rate must have been
-  written or relayed on the current connection, else `unverified` (declared-only
-  values, a failed reconnect replay). Null when the source has no tuner state or
-  its centre is an unconfirmed placeholder.
+  when the transmission opened. `tuningTrust` is the tuning ledger's label of the
+  live edge: `commanded` (WaveKit's frames) or `relay` (a relay client's) when the
+  centre and the sample rate flushed on the current connection are past the settle
+  with no doubt since and the proven centre is the tuner's, else `unverified`
+  (declared-only values, a reconnect not yet re-proven). Null when the source has
+  no tuner state or its centre is an unconfirmed placeholder.
 - `endedAt`: for a `squelch` close, the last above-threshold block (in noise mode
   the last quieted block; the close time minus the squelch hang, 250 ms, never
   before `startedAt`); for every other reason, the close time. Since the 2026-10-16 noise
@@ -8795,6 +9076,9 @@ and absent without a sweep scheduler.
 `ScanJobProgress` and `scanner:progress` add optional `phase`, `parked`,
 `holding { discoveryId, frequencyHz, trackId }`,
 `trial { protocol, decoder, transport, discoveryId }` and `replayQueueDepth`.
+Job DTOs of a sweep add `hopSkips { unproven }` once the sweep left a hop without hearing it:
+`unproven` counts visits whose hop's tuning never proved (a standing doubt) within 4 × the larger
+of the hop's dwell and its settle, and at least 15 s.
 Phase precedence is `settling`, `holding`, `trialing` (parked live probe),
 `replaying`, `capturing`, then `watching`. Capturing means an open capture;
 replaying includes the analog replay trial. Queue depth counts waiting replays.

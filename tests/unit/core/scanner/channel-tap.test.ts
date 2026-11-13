@@ -5,6 +5,8 @@ import type { ScannerChannelAttempt } from "../../../../src/core/scanner/channel
 import type { ChannelProvider } from "../../../../src/core/channelizer/types.js"
 import type { PreparedScannerChannel } from "../../../../src/core/scanner/channel/provider-observer.js"
 import { prepareDirectChannel } from "../../../../src/core/scanner/channel/provider-observer.js"
+import { channelTapEpochCurrent } from "../../../../src/core/scanner/scanner-service.js"
+import type { EngineEpoch } from "../../../../src/core/spectrum/spectrum-engine.js"
 
 vi.mock("../../../../src/core/scanner/channel/provider-observer.js", () => ({
 	prepareDirectChannel: vi.fn(),
@@ -291,5 +293,58 @@ describe("bounded current tap intake and component drains", () => {
 		expect(f.taps.stop()).toBe(stop)
 		expect(await stop).toEqual({ ok: true })
 		expect(collected).not.toHaveBeenCalled()
+	})
+})
+
+describe("the scanner's channel tap and the trusted run", () => {
+	const start: EngineEpoch = {
+		stream: 1,
+		epoch: 1,
+		startSample: 0,
+		centreHz: 100_000_000,
+		sampleRateHz: 2_048_000,
+		gainKey: "g",
+		tuningTrust: "commanded",
+		settleMode: null,
+		trustedFromSample: 4096,
+	}
+
+	it("a tap ends when its trusted run ends (a doubt) or restarts (re-proven at the same tuning)", async () => {
+		for (const next of [null, 8192]) {
+			const f = ownedTap()
+			let now: EngineEpoch = { ...start }
+			const tap = f.taps.begin({
+				attempt,
+				current: () => channelTapEpochCurrent(start, now),
+				minMs: 500,
+				collected: vi.fn(),
+			})!
+			await f.ready()
+			f.taps.tick()
+			expect(f.lifecycle.invalidate).not.toHaveBeenCalled()
+			expect(tap.current).toBe(true)
+			// Same stream, epoch, tuning and label; only the run changed.
+			now = { ...start, trustedFromSample: next }
+			f.taps.tick()
+			expect(f.lifecycle.invalidate).toHaveBeenCalledOnce()
+			expect(tap.current).toBe(false)
+		}
+	})
+
+	it("the tap's epoch check: every field of the start epoch, the trusted run included", () => {
+		expect(channelTapEpochCurrent(start, { ...start })).toBe(true)
+		// Another run start, however close, is another run.
+		expect(
+			channelTapEpochCurrent(start, { ...start, trustedFromSample: 4097 }),
+		).toBe(false)
+		for (const patch of [
+			{ stream: 2 },
+			{ epoch: 2 },
+			{ centreHz: 100_000_001 },
+			{ sampleRateHz: 1_024_000 },
+			{ gainKey: "h" },
+			{ tuningTrust: "relay" as const },
+		])
+			expect(channelTapEpochCurrent(start, { ...start, ...patch })).toBe(false)
 	})
 })

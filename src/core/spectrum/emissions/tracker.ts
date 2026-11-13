@@ -397,6 +397,19 @@ interface OpenTrack {
 	floorDbSum: number
 	centroidNum: number
 	centroidDen: number
+	/**
+	 * The frequency, width and shape claims (centroid, on-bin span, widest block, mean spectrum)
+	 * count only blocks from this sample on (measureFrom); null: from the start.
+	 */
+	measuredFrom: number | null
+	/** measureFrom: the next accumulated block sets the on-bin span afresh (not widens it). */
+	spanRestart: boolean
+	/**
+	 * measureFrom: the restarted measurement just took its first whole block, so the track is
+	 * published (track-update) with it: the engine labels the claim from proven blocks then, not
+	 * at the next periodic update (up to updateEvery blocks later, or the close).
+	 */
+	remeasured: boolean
 	thresholdDb: number
 	spectrum: SpectrumAccumulator
 	env: Float32Array
@@ -639,6 +652,35 @@ export class Tracker {
 			verifiedFromSample: e.verifiedFromSample ?? null,
 		}
 		return events
+	}
+
+	/**
+	 * Restarts an open track's frequency, width and shape claims from `sample` (SpectrumEngine.
+	 * trackLabel: its label turned trusted after it began): its centroid, mean spectrum, widest
+	 * block and on-bin span (the OBW window), so they come from blocks the tuning ledger proves.
+	 * The span keeps matching segments until the next block replaces it. Blocks
+	 * accumulated from now on start past `sample` (the engine asks after it saw a block ending
+	 * there). Ignored for another stream or epoch, a closed track, or a sample not past the
+	 * current measurement's start.
+	 */
+	measureFrom(at: {
+		stream: number
+		epoch: number
+		trackId: string
+		sample: number
+	}): void {
+		if (at.stream !== this.epoch.stream || at.epoch !== this.epoch.epoch) return
+		const t = this.open.find(o => o.id === at.trackId)
+		if (!t || at.sample <= (t.measuredFrom ?? t.startSample)) return
+		t.centroidNum = 0
+		t.centroidDen = 0
+		t.maxWidthBins = 0
+		t.spectrum.reset()
+		t.spanRestart = true
+		// Where accumulation restarts: the request's block, or the next one when a later block was
+		// already accumulated (a thread host delivers the request late), so `measuredFromSample`
+		// never names a block whose samples the restarted measurement does not hold.
+		t.measuredFrom = Math.max(at.sample, this.blockEndSample)
 	}
 
 	/**
@@ -1006,9 +1048,11 @@ export class Tracker {
 				t.blocks === CLASS_SETTLE_BLOCKS ||
 				t.blocks === EARLY_LAST_UPDATE_BLOCKS ||
 				t.blocks % this.updateEvery === 0 ||
-				t.flagsChanged
+				t.flagsChanged ||
+				t.remeasured
 			) {
 				t.flagsChanged = false
+				t.remeasured = false
 				events.push({ kind: "track-update", track: this.snapshot(t, n) })
 			}
 		}
@@ -1590,6 +1634,9 @@ export class Tracker {
 			floorDbSum: 0,
 			centroidNum: 0,
 			centroidDen: 0,
+			measuredFrom: null,
+			spanRestart: false,
+			remeasured: false,
 			thresholdDb: b.thresholdDb,
 			spectrum: new SpectrumAccumulator(),
 			env: new Float32Array(ENV_MAX_MS),
@@ -1676,6 +1723,13 @@ export class Tracker {
 		}
 		t.bandLinSum += band
 		t.bandBlocks++
+		if (t.spanRestart) {
+			// measureFrom: the span is this block's (the blocks before the request no longer count).
+			t.spanRestart = false
+			t.remeasured = true
+			t.onMin = s.startBin
+			t.onMax = s.endBin
+		}
 		const widened = s.startBin < t.onMin || s.endBin > t.onMax
 		t.onMin = Math.min(t.onMin, s.startBin)
 		t.onMax = Math.max(t.onMax, s.endBin)
@@ -2831,6 +2885,7 @@ export class Tracker {
 				t.epoch.verifiedFromSample,
 			),
 		}
+		if (t.measuredFrom !== null) snap.measuredFromSample = t.measuredFrom
 		if (this.planActive && t.gate !== undefined) {
 			// A gate field like the others; absent without a channel plan.
 			if (t.localSnrBlocks > 0)

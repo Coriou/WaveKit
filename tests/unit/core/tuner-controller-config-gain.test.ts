@@ -6,6 +6,7 @@
  *
  * In-memory fake transport only (no socket).
  */
+import { tuningHeldOnConnection } from "../../mocks/tuner-ledger-held.js"
 import { EventEmitter } from "node:events"
 import fc from "fast-check"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -99,10 +100,12 @@ function harness(
 			controlPolicy: "shared" as const,
 		})),
 	})
+	// These tests are about the configured gain frames: assert's declared centre and rate are off
+	// (tuner.writeDeclaredTuningOnConnect false; tests/unit/core/tuner-assert.test.ts covers them).
 	const controller = new TunerController(
 		createLogger({ level: "fatal" }),
 		sources as unknown as SourceManager,
-		{ reconnectPolicy: policy },
+		{ reconnectPolicy: policy, writeDeclaredTuningOnConnect: false },
 	)
 	wireTunerControl({
 		log: createLogger({ level: "fatal" }),
@@ -139,7 +142,7 @@ function harness(
 				declaredOnlyFields: s.declaredOnlyFields,
 				lastError: s.lastError,
 			},
-			tuningWritten: controller.tuningWrittenOnConnection(SRC),
+			tuningWritten: tuningHeldOnConnection(controller, SRC),
 		}
 		frames.length = 0
 		sent.length = 0

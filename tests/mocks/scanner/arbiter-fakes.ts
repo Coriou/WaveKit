@@ -13,6 +13,10 @@ import type {
 	EngineEpoch,
 } from "../../../src/core/spectrum/spectrum-engine.js"
 import type { PendingEpoch } from "../../../src/core/spectrum/types.js"
+import type {
+	TuningReceipt,
+	TuningWriter,
+} from "../../../src/core/tuning-ledger.js"
 
 export interface SentCommand {
 	sourceId: string
@@ -22,6 +26,15 @@ export interface SentCommand {
 	accept: boolean
 }
 
+/** Records one flushed frame in a tuning ledger and answers its receipt (FakeReceiverLedger.write). */
+export type FakeReceiptHook = (
+	sourceId: string,
+	command: string,
+	value: number,
+	writer: TuningWriter | undefined,
+	jobId?: string,
+) => TuningReceipt | null
+
 /** TunerController double implementing exactly what TunerArbiter uses. */
 export class ArbiterFakeTuner extends EventEmitter {
 	readonly sent: SentCommand[] = []
@@ -29,13 +42,16 @@ export class ArbiterFakeTuner extends EventEmitter {
 	readonly known = new Map<string, Set<TunerStateField>>()
 	/** WG9: frequency/sampleRate known only from the declared baseline until a write proves them. */
 	readonly declared = new Map<string, Set<TunerStateField>>()
-	/** WG9 req 3.2: tuning fields written on this connection; null = every field counts as written. */
-	connectionWrites: Set<TunerStateField> | null = null
 	failNext: Error | null = null
 	/** Rejects every write while set (a dropped socket). */
 	failAll: Error | null = null
 	/** Runs once, right after the next TEST_MODE 1 write resolves (between two arbiter awaits). */
 	afterTestModeOn: (() => void) | null = null
+	/**
+	 * Flushes each frame into a tuning ledger (FakeReceiverLedger.write) and reports its receipt
+	 * to the write's `onReceipt`, as TunerController does at flush. Null: no ledger, no receipt.
+	 */
+	receipts: FakeReceiptHook | null = null
 
 	addSource(sourceId: string, unknown: TunerStateField[] = []): void {
 		this.states.set(sourceId, {
@@ -82,11 +98,6 @@ export class ArbiterFakeTuner extends EventEmitter {
 		}
 	}
 
-	tuningWrittenOnConnection(_sourceId: string): boolean {
-		const w = this.connectionWrites
-		return w === null || (w.has("frequency") && w.has("sampleRate"))
-	}
-
 	setControl(sourceId: string, mode: "internal" | "external"): void {
 		const s = this.states.get(sourceId)!
 		if (s.controlMode === mode) return
@@ -123,10 +134,15 @@ export class ArbiterFakeTuner extends EventEmitter {
 		}
 		const accept = name === "set-test-mode" ? false : (opts.accept ?? true)
 		this.sent.push({ sourceId, name, value, origin: opts.origin, accept })
+		if (this.receipts) {
+			const writer: TuningWriter =
+				opts.origin === "scanner" ? "scanner" : "operator"
+			const receipt = this.receipts(sourceId, name, value, writer, opts.jobId)
+			opts.onReceipt?.(receipt)
+		} else opts.onReceipt?.(null)
 		if (field && accept) {
 			this.known.get(sourceId)?.add(field)
 			this.declared.get(sourceId)?.delete(field)
-			this.connectionWrites?.add(field)
 		}
 		this.emit("command-sent", sourceId, name, value, opts.origin)
 		return Promise.resolve()

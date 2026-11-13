@@ -46,6 +46,14 @@ export interface RateTruthSample {
 	bytesPerSample: number
 	/** False when the interval cannot be trusted (paused, reconnecting). */
 	stable: boolean
+	/** Where the interval started in the source's tuning ledger (absent: unknown). */
+	startMark?: RateWindowMark
+}
+
+/** A tuning-ledger session and position. */
+export interface RateWindowMark {
+	session: number
+	pos: number
 }
 
 export interface RateMismatch {
@@ -70,11 +78,29 @@ export class RateTruthTracker {
 	private run: Run | undefined
 	private declaredSampleRateHz: number | undefined
 	private bytesPerSample: number | undefined
+	/**
+	 * Start of the newest valid in-tolerance interval with no invalid interval
+	 * (or reset) after it; undefined when there is none.
+	 */
+	private lastAgreeingMark: RateWindowMark | undefined
 
 	constructor(
 		private readonly tolerance = RATE_TRUTH_TOLERANCE,
 		private readonly sustainMs = RATE_TRUTH_SUSTAIN_MS,
 	) {}
+
+	/**
+	 * From where a flagged mismatch may already hold: the start of the newest
+	 * valid in-tolerance interval before it, with no invalid interval after it.
+	 * Not the mismatching run's first interval: an interval where the rate
+	 * changed part-way can still average within tolerance, and an invalid or
+	 * reset interval measured nothing. Undefined: no such interval, so the
+	 * wrong rate may hold since the session started (a caller reads 0).
+	 */
+	get doubtFromMark(): RateWindowMark | undefined {
+		const mark = this.lastAgreeingMark
+		return mark ? { ...mark } : undefined
+	}
 
 	get mismatch(): RateMismatch | undefined {
 		return this.flagged ? { ...this.flagged } : undefined
@@ -87,6 +113,7 @@ export class RateTruthTracker {
 		this.run = undefined
 		this.declaredSampleRateHz = undefined
 		this.bytesPerSample = undefined
+		this.lastAgreeingMark = undefined
 		return wasFlagged
 	}
 
@@ -117,6 +144,7 @@ export class RateTruthTracker {
 			sample.bytesPerSample > 0
 		if (!valid) {
 			this.run = undefined
+			this.lastAgreeingMark = undefined
 			return null
 		}
 
@@ -140,6 +168,10 @@ export class RateTruthTracker {
 		const sustained = this.run.elapsedMs >= this.sustainMs
 
 		if (sign === 0) {
+			// An interval without a known start cannot anchor a doubt.
+			this.lastAgreeingMark = sample.startMark
+				? { ...sample.startMark }
+				: undefined
 			if (this.flagged && sustained) {
 				this.flagged = undefined
 				return "cleared"

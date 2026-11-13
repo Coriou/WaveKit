@@ -3,6 +3,7 @@
  * per connection in internal control; external and relay control answer as
  * the frozen code did (goldens recorded at 1e5b4c1f).
  */
+import { tuningHeldOnConnection } from "../../mocks/tuner-ledger-held.js"
 import { afterEach, describe, expect, it } from "vitest"
 import Fastify, { type FastifyInstance } from "fastify"
 import { tunerRoutes } from "../../../src/api/routes/tuner.js"
@@ -86,7 +87,7 @@ describe("tuner routes prove the rate (WG10 req 2.8)", () => {
 			[SET_FREQUENCY, 446_000_000],
 		])
 		expect(origins).toEqual(["rest", "rest"])
-		expect(h.controller.tuningWrittenOnConnection("rtl-1")).toBe(true)
+		expect(tuningHeldOnConnection(h.controller, "rtl-1")).toBe(true)
 		expect(res.json()).toMatchObject({ sampleRate: 2_048_000 })
 		res = await h.app.inject({
 			method: "POST",

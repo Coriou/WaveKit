@@ -100,6 +100,28 @@ export const CHANNELS_RESERVED_MESSAGE =
 	'delivery "channels" is reserved for a later receiver-side channelizer (link-burst-resilience 7.1)'
 
 /**
+ * At most 8 extra endpoints per source. With the primary that is 9 endpoints; a full
+ * round of first attempts then takes at most 9 x (5 s connect timeout + the 30 s backoff cap)
+ * = 315 s, and a typical setup (a Pi and a USB host) lists one or two.
+ */
+export const SOURCE_CANDIDATES_MAX = 8
+/** A candidate's label: printable ASCII without control characters, 1 to 48 characters. */
+export const SOURCE_CANDIDATE_LABEL_MAX_LENGTH = 48
+
+export const SourceCandidateSchema = z
+	.object({
+		host: z.string().min(1).max(253),
+		port: z.number().int().min(1).max(65535),
+		label: z
+			.string()
+			.min(1)
+			.max(SOURCE_CANDIDATE_LABEL_MAX_LENGTH)
+			.regex(/^[\x20-\x7e]+$/, "label must be printable ASCII")
+			.optional(),
+	})
+	.strict()
+
+/**
  * Schema for SDR source configuration.
  * Supports rtl_tcp, SDR++ network sink, and recording sources.
  */
@@ -150,6 +172,17 @@ export const SourceConfigSchema = z.object({
 	scanner: SourceScannerConfigSchema.optional(),
 	/** WG11: configured gain written on connect (rtl_tcp only; absent: nothing is written). */
 	tuner: SourceTunerConfigSchema.optional(),
+	/**
+	 * Other rtl_tcp endpoints this source may use (rtl_tcp U8_IQ only; ignored
+	 * otherwise). The source tries host/port first, then these in order, with the usual backoff;
+	 * the first that delivers a data payload wins (a header alone does not; an endpoint sending
+	 * bytes without a valid `RTL0` header wins with an unknown receiver identity). Only these
+	 * configured endpoints are ever contacted (no discovery).
+	 */
+	candidates: z
+		.array(SourceCandidateSchema)
+		.max(SOURCE_CANDIDATES_MAX)
+		.optional(),
 })
 
 /**
@@ -282,8 +315,20 @@ export const TunerConfigSchema = z.object({
 	 * On rtl_tcp reconnect: "restore" re-sends the last accepted tuner state;
 	 * "reset" sends nothing and resets tuner state/source caps to the configured
 	 * baseline (use when another operator may own the receiver after an outage).
+	 * Under "reset" the centre and rate are never written from the declared
+	 * config/caps values (as if writeDeclaredTuningOnConnect were false), and only
+	 * values accepted on the current connection are written back after a doubt.
 	 */
 	reconnectPolicy: z.enum(["restore", "reset"]).default("restore"),
+	/**
+	 * Every new connection starts unproven: the core writes the centre and rate it holds (the last
+	 * accepted ones, else the declared config/caps values) unless a relay client is attached or a
+	 * scanner lease holds the tuner (its hop is re-sent). False: the declared fallback is never
+	 * written (a field nothing accepted stays unverified until set); accepted values are still
+	 * written. A plain resume of a paused feed and reconnectPolicy "reset" also turn the declared
+	 * fallback off (values accepted since are still written).
+	 */
+	writeDeclaredTuningOnConnect: z.boolean().default(true),
 	/**
 	 * Per-band gain table (src/core/band-gain-schema.ts states the defaults and their
 	 * reasons). Scanner hops, dwells and jobs apply it; an operator retune applies it only
@@ -1298,8 +1343,13 @@ export function parseEnvironmentVariables(): Record<string, unknown> {
 			} else if (/^WAVEKIT_(SOURCES|DECODERS)_\d+_.+/.test(key)) {
 				// Compatibility with the indexed form shown in older Docker examples.
 				const indexed = /^WAVEKIT_(SOURCES|DECODERS)_(\d+)_(.+)$/.exec(key)!
+				// A source's candidates nest a second index: WAVEKIT_SOURCES_0_CANDIDATES_1_HOST.
+				const rest =
+					indexed[1] === "SOURCES"
+						? indexed[3]!.replace(/^CANDIDATES_(\d+)_/, "CANDIDATES__$1__")
+						: indexed[3]!
 				const path = envVarToConfigPath(
-					`WAVEKIT_${indexed[1]}__${indexed[2]}__${indexed[3]}`,
+					`WAVEKIT_${indexed[1]}__${indexed[2]}__${rest}`,
 				)
 				setNestedValue(result, path, parseEnvValue(value))
 			} else if (key.includes(NESTED_KEY_SEPARATOR)) {
@@ -1676,6 +1726,8 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_LOGGING__DIR",
 		"WAVEKIT_SOURCES__<INDEX>__HOST",
 		"WAVEKIT_SOURCES__<INDEX>__PORT",
+		"WAVEKIT_SOURCES__<INDEX>__CANDIDATES__<INDEX>__HOST",
+		"WAVEKIT_SOURCES__<INDEX>__CANDIDATES__<INDEX>__PORT",
 		"WAVEKIT_DECODERS__<INDEX>__ENABLED",
 		"WAVEKIT_SCANNER__ENABLED",
 		"WAVEKIT_SCANNER__PASSIVE__ENABLED",

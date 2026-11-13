@@ -101,12 +101,22 @@ function liveAudioClient(broadcaster: WebSocketEventBroadcaster) {
 	return messages
 }
 
-const tuner = (state: Partial<TunerState> | undefined) =>
-	tunerFrequencyAt(() =>
-		state
-			? { frequency: 446_000_000, controlMode: "internal", ...state }
-			: undefined,
+/**
+ * The tuner state, and a tuning ledger proving its centre at the live edge with the writer its
+ * control mode implies (WaveKit's frames internal, a relay client's external).
+ */
+const tuner = (state: Partial<TunerState> | undefined) => {
+	const s = state
+		? { frequency: 446_000_000, controlMode: "internal" as const, ...state }
+		: undefined
+	return tunerFrequencyAt(
+		() => s,
+		() => ({
+			trust: s?.controlMode === "external" ? "relay" : "commanded",
+			frequency: s?.frequency ?? null,
+		}),
 	)
+}
 
 const runtimes: ActivityRuntime[] = []
 
@@ -273,7 +283,7 @@ describe("analog transmission wiring", () => {
 		await expect(readdir(stateDir)).resolves.toEqual([])
 	})
 
-	it("derives frequency and trust from the tuner like the spectrum engine", () => {
+	it("derives frequency from the tuner and trust from the tuning ledger", () => {
 		expect(tuner({})("rtl0", 100)).toEqual({
 			hz: 446_000_100,
 			tuningTrust: "commanded",

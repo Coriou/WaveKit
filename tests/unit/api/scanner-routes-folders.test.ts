@@ -35,6 +35,24 @@ describe("GET /api/scanner folders", () => {
 		expect(res.json().folders).toEqual({ reattached: 2, unresolved: 3 })
 	})
 
+	it("passes the unresolved breakdown and the state backup outcome through", async () => {
+		const folders = {
+			reattached: 0,
+			unresolved: 3,
+			unresolvedBy: { noAlias: 2, aliasWithoutOwner: 1 },
+		}
+		const stateBackup: ScannerStatus["stateBackup"] = {
+			outcome: "skipped",
+			reason: "copy-failed",
+			fromFormat: "unmarked",
+			toFormat: "f1-h3-r1",
+		}
+		const server = await build({ enabled: true, folders, stateBackup })
+		const res = await server.inject({ url: "/api/scanner" })
+		expect(res.json().folders).toEqual(folders)
+		expect(res.json().stateBackup).toEqual(stateBackup)
+	})
+
 	it("omits the field before the migration ran", async () => {
 		const server = await build({ enabled: true })
 		const res = await server.inject({ url: "/api/scanner" })

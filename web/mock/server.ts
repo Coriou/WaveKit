@@ -181,7 +181,28 @@ export interface MockServerOptions {
 	 * (WAVEKIT_MOCK_ACTIVITY_OPEN_MS); without it, never.
 	 */
 	activityStore?: { state: "opening" | "retrying"; openAfterMs?: number }
+	/**
+	 * POST /api/tuner/:sourceId/take-back answers the core's 409 with this code instead of taking the
+	 * tuning back (WAVEKIT_MOCK_TAKE_BACK=blocked|nothing-held): `TUNER_TAKE_BACK_BLOCKED` (a relay client,
+	 * a scanner lease or another core) or `TUNER_NOTHING_HELD`.
+	 */
+	takeBackRefusal?: "TUNER_TAKE_BACK_BLOCKED" | "TUNER_NOTHING_HELD"
 }
+
+/** The core's `tuningUnproven` text for a plain resume's hold (src/core/tuning-ledger-unproven.ts). */
+const PLAIN_RESUME_UNPROVEN = {
+	message:
+		"Tuning not proven since a resume without restore: recordings and identification are paused until the tuning is set or restored (GET /api/tuner/:sourceId `resumeOutcome` says why the core left it as found)",
+	fix: "Take the tuning back in one call (POST /api/tuner/:sourceId/take-back writes the held centre and rate), or set it (POST /api/tuner/:sourceId/tune)",
+} as const
+
+/** The core's 409 messages of POST /api/tuner/:sourceId/take-back (TunerController.takeTuningBack). */
+const TAKE_BACK_REFUSALS = {
+	TUNER_TAKE_BACK_BLOCKED:
+		"The tuning cannot be taken back now (relay-attached)",
+	TUNER_NOTHING_HELD:
+		"No held centre and sample rate to take back; set the tuning (POST /api/tuner/:sourceId/tune)",
+} as const
 
 export interface MockServer {
 	app: FastifyInstance
@@ -855,6 +876,9 @@ export async function buildMockServer(
 		return status
 	}
 
+	/** Since when a plain resume holds the main source's tuning (its `tuningUnproven`); null: none. */
+	let plainHoldSince: string | null = null
+
 	/** What `source:status` pushes: the REST row, without `feed` under `socketOmitsFeed`. */
 	const sourceStatusEvent = (): ExtendedSourceStatus => {
 		const status = sourceStatus()
@@ -952,6 +976,19 @@ export async function buildMockServer(
 			available: true,
 			...(held ? {} : { signalLevelDbfs: -31.5 }),
 			...(feedMock ? { feed: feedMock.feed() } : {}),
+			// a plain resume holds the tuning until it is taken back, set or restored (like the core)
+			...(!held && plainHoldSince !== null
+				? {
+						tuningUnproven: {
+							code: "tuning-unproven" as const,
+							cause: "plain-resume",
+							fields: ["frequency" as const, "sampleRate" as const],
+							...PLAIN_RESUME_UNPROVEN,
+							since: plainHoldSince,
+							refusals: { recording: 0, identification: 0 },
+						},
+					}
+				: {}),
 		}
 	}
 
@@ -1852,6 +1889,14 @@ export async function buildMockServer(
 			if (sourceId !== MOCK_SOURCE_ID) return
 			// a plain resume writes no tuning: like the core, centre, rate and gain read unverified
 			// with their last known values until set (a measured rate is adopted, still unverified)
+			plainHoldSince = restoreTuning ? null : new Date().toISOString()
+			if (restoreTuning) delete tuner.resumeOutcome
+			else
+				tuner.resumeOutcome = {
+					outcome: "left-as-found",
+					reason: "another-client",
+					message: "another client on the receiver: tuning left as found",
+				}
 			if (!restoreTuning) {
 				tuner.unknownFields = [
 					...new Set([
@@ -1917,6 +1962,43 @@ export async function buildMockServer(
 		},
 	})
 	feedMock = feed
+
+	// POST /api/tuner/:sourceId/take-back: writes the held centre and rate, ends a plain resume's hold.
+	app.post<{ Params: { sourceId: string } }>(
+		"/api/tuner/:sourceId/take-back",
+		async (request, reply) => {
+			const { sourceId } = request.params
+			if (sourceId !== MOCK_SOURCE_ID)
+				return reply.code(404).send({
+					error: "TunerControllerError",
+					code: "SOURCE_NOT_FOUND",
+					message: `Source ${sourceId} not found`,
+				})
+			const refusal = options.takeBackRefusal
+			if (refusal !== undefined)
+				return reply.code(409).send({
+					error: "TunerControllerError",
+					code: refusal,
+					message: TAKE_BACK_REFUSALS[refusal],
+				})
+			plainHoldSince = null
+			const unknown =
+				tuner.unknownFields?.filter(
+					f => f !== "frequency" && f !== "sampleRate",
+				) ?? []
+			if (unknown.length > 0) tuner.unknownFields = unknown
+			else delete tuner.unknownFields
+			delete tuner.measuredFields
+			tuner.resumeOutcome = {
+				outcome: "restored",
+				reason: "operator",
+				message: "tuning taken back by the operator",
+			}
+			broadcast("tuner", "tuner:state-changed", { sourceId, state: tuner })
+			broadcast("sources", "source:status", sourceStatusEvent())
+			return { ...tuner }
+		},
+	)
 
 	// --- Receiver controls (./receiver.ts): tuner settings, capabilities, relay. Begin. ---
 	const receiver = registerReceiverMock(app, {
@@ -2825,6 +2907,11 @@ async function main(): Promise<void> {
 		...(env["WAVEKIT_MOCK_SECOND_SOURCE"] === "1"
 			? { secondSource: true }
 			: {}),
+		...(env["WAVEKIT_MOCK_TAKE_BACK"] === "blocked"
+			? { takeBackRefusal: "TUNER_TAKE_BACK_BLOCKED" as const }
+			: env["WAVEKIT_MOCK_TAKE_BACK"] === "nothing-held"
+				? { takeBackRefusal: "TUNER_NOTHING_HELD" as const }
+				: {}),
 		...(activityStoreEnv === "opening" || activityStoreEnv === "retrying"
 			? {
 					activityStore: {

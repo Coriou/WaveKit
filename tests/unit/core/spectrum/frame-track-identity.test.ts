@@ -138,10 +138,20 @@ describe("frame track scanner identity (req 5.1-5.3)", () => {
 		expect(JSON.stringify(thrown.all)).toBe(JSON.stringify(base.all))
 		const debug = lines.filter(l => l.includes("track identity"))
 		expect(debug).toHaveLength(1) // 3.1 s of frames: inside one minute
-		expect(debug[0]).toContain("Spectrum track identity lookup failed")
-		expect(debug[0]).not.toContain("SECRET")
-		expect(debug[0]).not.toContain("passwd")
-		for (const id of trackedIds(RICH)) expect(debug[0]).not.toContain(id)
+		// Only what the service wrote: pino's base fields (time, pid, hostname,
+		// level) vary by host and can contain any short id by chance.
+		const {
+			time: _time,
+			pid: _pid,
+			hostname: _hostname,
+			level: _level,
+			...written
+		} = JSON.parse(debug[0]!) as Record<string, unknown>
+		expect(written["msg"]).toBe("Spectrum track identity lookup failed")
+		const text = JSON.stringify(written)
+		expect(text).not.toContain("SECRET")
+		expect(text).not.toContain("passwd")
+		for (const id of trackedIds(RICH)) expect(text).not.toContain(id)
 		await base.h.service.stop()
 		await thrown.h.service.stop()
 	})

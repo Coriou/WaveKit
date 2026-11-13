@@ -43,7 +43,13 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 	// TCP accept precedes the dongle (writing commands into an rtlmux upstream
 	// gap can crash it), and rtlmux replays its own command cache first, so the
 	// core's restore lands last. Direct rtl_tcp streams within milliseconds.
-	sourceManager.on("payload-started", sourceId => {
+	// With a tuning ledger the sync runs as its session starts (just before that first payload
+	// byte is forwarded): assert reads the new session, unproven from its first byte. A source
+	// manager without one (test doubles) syncs on "payload-started".
+	const hasLedger =
+		(sourceManager as Partial<Pick<SourceManager, "tuningLedger">>)
+			.tuningLedger !== undefined
+	const synchronize = (sourceId: string) => {
 		if (!sourceManager.isRtlTcpSource(sourceId)) return
 		tunerController.initializeSource(sourceId, sourceManager.getCaps(sourceId))
 		// The receiver may have come back at its own defaults: restore or reset
@@ -68,7 +74,9 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 				"Tuner state restore after reconnect failed; will retry on next connection",
 			)
 		}
-	})
+	}
+	if (hasLedger) sourceManager.on("session-started", synchronize)
+	else sourceManager.on("payload-started", synchronize)
 
 	sourceManager.on("removed", sourceId => {
 		tunerController.removeSource(sourceId)
@@ -102,6 +110,16 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 
 	if (!relayEnabled) return
 
+	// Assert rule 1: an attached relay client tunes the receiver; the core writes no centre or rate
+	// (the client's frames prove them as `relay`). Its detach is a trigger.
+	tunerController.setRelayAttachedView(sourceId => {
+		// Optional call: relay doubles in tests may not report a status.
+		const status = (
+			tunerRelay as Partial<Pick<TunerRelay, "getStatus">>
+		).getStatus?.()
+		return status?.sourceId === sourceId && status.clientsConnected > 0
+	})
+
 	const syncRelayControl = () => {
 		const status = tunerRelay.getStatus()
 		if (!status.sourceId) {
@@ -133,6 +151,12 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 
 	tunerRelay.on("client-connected", syncRelayControl)
 	tunerRelay.on("client-disconnected", syncRelayControl)
+	tunerRelay.on("client-disconnected", () => {
+		const sourceId = (
+			tunerRelay as Partial<Pick<TunerRelay, "getStatus">>
+		).getStatus?.().sourceId
+		if (sourceId) tunerController.requestAssert(sourceId)
+	})
 	tunerRelay.on("control-changed", syncRelayControl)
 	tunerRelay.on("command-received", event => {
 		if (!event.sourceId) {

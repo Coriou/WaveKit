@@ -5,7 +5,11 @@ import {
 	DECODER_VERDICT_CODES,
 	decoderVerdictSchema,
 } from "./decoders.js"
-import { SOURCE_FEED_STATES, type SourceVerdictCode } from "./sources.js"
+import {
+	SOURCE_FEED_STATES,
+	TUNING_UNPROVEN_CAUSES,
+	type SourceVerdictCode,
+} from "./sources.js"
 
 /**
  * GET /api/agent/status: one compact answer to "what is the receiver doing", for
@@ -27,6 +31,8 @@ export const AGENT_STATUS_LIMITS = Object.freeze({
 	 *               warning twice, tuningUnverified; `verdict` 33 with the 20-byte
 	 *               `receiver-not-running`, `passive` 31 with the 18-byte
 	 *               `measuring-baseline`) + 3                                =   549
+	 *               (`tuning`, 30 with the 18-byte `declared-write-off`, rides only on a
+	 *               row without `verdict`, 33: such a row is 3 bytes under the worst one.)
 	 *   liveAudio:  sourceId 32, modulation 12, two numbers                 =   202
 	 *   scanner:    job id 32, name 32, reason 24, sourceId 32, two integers,
 	 *               discoveries 7 digits                                    =   321
@@ -215,10 +221,31 @@ export const agentSourceSchema = z
 		tuningUnverified: z.boolean(),
 		/** GET /api/sources `verdict.code`; absent when it reads `ok`. Message on that route. */
 		verdict: z.enum(AGENT_SOURCE_VERDICTS).optional(),
+		/**
+		 * GET /api/sources `tuningUnproven.cause` code (a doubt without its reason): why the centre
+		 * or rate is not proven. Only on a row without `verdict` (one top-level reason per source:
+		 * a feed problem comes first); message, fix and refusal counts on that route.
+		 */
+		tuning: z.enum(TUNING_UNPROVEN_CAUSES).optional(),
 		/** Why the cost guard holds passive scanning off (GET /api/scanner); absent otherwise. */
 		passive: z.enum(SCANNER_PASSIVE_REASONS).optional(),
+		/**
+		 * GET /api/sources `receiver`, compact: identity strength, what became of the
+		 * learned state, and whether the accepted tuning was restored. Absent before it is known.
+		 */
+		receiver: z
+			.object({
+				strength: z.enum(["unit", "model", "unknown"]),
+				learnedState: z.enum(["fresh", "resumed", "adopted", "none"]),
+				tuningRestored: z.boolean(),
+			})
+			.strict()
+			.optional(),
 	})
 	.strict()
+	.refine(row => row.tuning === undefined || row.verdict === undefined, {
+		message: "tuning rides only on a row without verdict",
+	})
 
 /** GET /api/live-audio/status; null when live audio is not configured. */
 export const agentLiveAudioSchema = z
@@ -405,6 +432,15 @@ export const agentStatusResponseSchema = strictObject({
 					...row.properties,
 					verdict: { type: "string", enum: [...AGENT_SOURCE_VERDICTS] },
 					passive: { type: "string", enum: [...SCANNER_PASSIVE_REASONS] },
+					tuning: { type: "string", enum: [...TUNING_UNPROVEN_CAUSES] },
+					receiver: strictObject({
+						strength: { type: "string", enum: ["unit", "model", "unknown"] },
+						learnedState: {
+							type: "string",
+							enum: ["fresh", "resumed", "adopted", "none"],
+						},
+						tuningRestored: bool,
+					}),
 				},
 			}
 		})(),

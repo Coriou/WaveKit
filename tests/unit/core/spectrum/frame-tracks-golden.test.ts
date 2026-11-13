@@ -10,6 +10,7 @@ import {
 	untrackedScenario,
 } from "./frame-tracks-harness.js"
 import { makeService } from "./frame-tracks-service-harness.js"
+import { FS } from "../../../mocks/scanner/service-fakes.js"
 
 /**
  * WG11 lane TR goldens (req 5.1, 5.6; common brief §5): recorded from the frozen code at
@@ -36,25 +37,59 @@ const GOLDEN = {
 		blocks: 24,
 		sha256: "31b881c9dac2b310dfb23d83cabf7ce0064d04e156feb767c9adf38ba3c738a3",
 	},
+	/**
+	 * The rich scenario's service output (three epochs, see frame-tracks-harness), with trust from
+	 * the tuning ledger: byte-identical to the same scenario under the earlier tuner-state trust
+	 * rule (26b9e88539a51c0ed4f36785adf4716a5ea6f011565b8b9b60465b700dc0702c) except the
+	 * `tuningTrust` of eight live frames, the first four after each of the two retunes, now
+	 * `unverified` where that rule said `commanded`. The engine reads a summary's block at its own
+	 * block length, 50 ms at the caps rate (51 200 samples at 1.024 Msps), but the fixture's
+	 * summaries were recorded at 256 ksps, 12 800 samples apart: each block the engine reads back
+	 * spans the three summaries before it too, so the first four of an epoch reach before the
+	 * retune's receipt (written at the epoch's first sample) and the ledger proves the old centre
+	 * there. Every other frame stays `commanded`.
+	 */
 	serviceOutput: {
 		frames: 47,
-		sha256: "26b9e88539a51c0ed4f36785adf4716a5ea6f011565b8b9b60465b700dc0702c",
+		sha256: "96f172c33483ddcfd1a578246c8d0d886b4e691adef5432292ef04ca5dd78113",
 	},
 }
 
 /** Feeds summaries through a SpectrumService over a fake host: a default client and a source client with backfill. */
 async function serviceOutput(summaries: readonly BlockSummary[]) {
-	const h = makeService()
+	// The receiver was told the centre and the rate the summaries were measured at (ledger receipts settled before the engine's first byte); each summary's
+	// payload is forwarded before it (the fake host gets no bytes), and a centre change is written
+	// at its epoch's first sample. The fake link has no in-flight delay (settle 0).
+	const h = makeService({
+		proven: { rateHz: summaries[0]!.sampleRateHz, settleMs: 0 },
+	})
+	const ledger = h.receiverLedger!
+	// Payload other consumers took after the proof and before the engine opened: one engine block
+	// (50 ms at the caps rate), so a first block's lower bound still lies after the receipts.
+	ledger.advance(ledger.bps * Math.round((FS * 50) / 1000))
+	const opened = ledger.ledger.position("rtl")!.pos
+	const forward = (endSample: number) => {
+		const need =
+			opened + ledger.bps * endSample - ledger.ledger.position("rtl")!.pos
+		if (need > 0) ledger.advance(need)
+	}
 	await h.service.start()
 	await h.service.acquire("rtl", "job:a")
 	await h.service.subscribe("c-default", undefined)
 	let epoch = 0
+	let prevEnd = 0
 	let subscribed = false
 	for (const [i, s] of summaries.entries()) {
 		if (s.epoch !== epoch) {
+			if (epoch !== 0) {
+				forward(prevEnd)
+				ledger.write("set-frequency", s.centreHz, "operator")
+			}
 			h.host().epoch(s.epoch, epoch === 0)
 			epoch = s.epoch
 		}
+		prevEnd = s.endSample
+		forward(s.endSample)
 		h.host().summary({ ...s, stream: 0 }) // the fake engine reports stream 0
 		h.advance(50)
 		if (i === 30 && !subscribed) {

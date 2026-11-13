@@ -17,6 +17,10 @@ import { isDialableEndpoint } from "./endpoint-probe.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import type { SdrHostLinkFacts } from "./link-burst/contract.js"
 import type { SdrHostStatus } from "@wavekit/api-types"
+import {
+	parseSdrHostIdentity,
+	type SdrHostIdentityFacts,
+} from "./receiver-identity.js"
 
 // ============================================================================
 // Constants
@@ -26,6 +30,12 @@ const DEFAULT_POLL_INTERVAL_MS = 3000
 const DEFAULT_TIMEOUT_MS = 2000
 const BASE_BACKOFF_MS = 2000
 const MAX_BACKOFF_MS = 30000
+/**
+ * An auto-detected sdr-host that never answered is still awaited (a weak receiver key does not
+ * adopt the learned state from before namespacing) until this many polls failed: with the backoff
+ * above, about 2 + 4 s after the first failure (pollNow at a connection can shorten it).
+ */
+export const SDR_HOST_FIRST_ANSWER_ATTEMPTS = 3
 
 /** Pass a version string through only when it is short printable ASCII. */
 export function sanitizeHostVersion(value: unknown): string | null {
@@ -147,6 +157,63 @@ export interface SdrHostPollerEvents {
 	) => void
 	error: (sourceId: string, error: Error) => void
 	recovered: (sourceId: string) => void
+	/**
+	 * Every poll's result, right after its `/api/status` request (before `/api/host`): the
+	 * validated identity fields of an unredirected answer, or null (a failed or redirected one).
+	 */
+	"identity-result": (sourceId: string, result: SdrHostIdentityResult) => void
+}
+
+/** One poll's identity outcome (SdrHostPoller "identity-result"). */
+export interface SdrHostIdentityResult {
+	/**
+	 * performance.now() (monotonic) when the poll's request started: the tracker's connection
+	 * epoch rule compares it with its own performance.now() at the connection, so a wall-clock
+	 * step never puts a result in the wrong connection.
+	 */
+	startedAt: number
+	/** The sdr-host answered `/api/status` (redirected or not). */
+	ok: boolean
+	/** The answer's identity fields; null for a failed or redirected answer. */
+	facts: SdrHostIdentityFacts | null
+}
+
+/**
+ * rtlmux's clients as one poll saw them (SdrHostPoller.clientsReading): their number and the
+ * remote port of each (the client's own local port), null where an entry names none.
+ */
+export interface ReceiverClientsReading {
+	/** performance.now() (monotonic) when the poll's request started. */
+	startedAt: number
+	clients: number
+	ports: Array<number | null>
+	/**
+	 * How old the sdr-host's client list was when it answered (`sampling.stats.ageMs`: the age of
+	 * its last rtlmux stats observation, which it serves until 30 s old), or null when the answer
+	 * does not say (raw rtlmux stats, an older sdr-host): the list may then be that old.
+	 * receiverClientsListedAfter turns it into the earliest instant the list can be from.
+	 */
+	listAgeMs: number | null
+}
+
+/** `sampling.stats.ageMs` of an sdr-host answer: a finite age >= 0, else null. */
+function listAgeOf(body: Record<string, unknown>): number | null {
+	const sampling = body["sampling"]
+	if (typeof sampling !== "object" || sampling === null) return null
+	const stats = (sampling as Record<string, unknown>)["stats"]
+	if (typeof stats !== "object" || stats === null) return null
+	const age = (stats as Record<string, unknown>)["ageMs"]
+	return typeof age === "number" && Number.isFinite(age) && age >= 0
+		? age
+		: null
+}
+
+/** The port of an sdr-host client address (`host:port`, `[v6]:port`), or null. */
+function addressPort(address: string): number | null {
+	const m = /:(\d{1,5})$/.exec(address)
+	if (!m) return null
+	const port = Number(m[1])
+	return port > 0 && port <= 65535 ? port : null
 }
 
 export interface SdrHostPollerOptions {
@@ -167,6 +234,16 @@ interface PollerState {
 	consecutiveFailures: number
 	nextPollAt: number
 	timer: ReturnType<typeof setTimeout> | null
+	/** A poll is running now. */
+	inFlight: boolean
+	/** pollNow came while one ran: another starts right after it. */
+	rerun: boolean
+	/** Any poll of this process got an answer. */
+	answered: boolean
+	/** The next poll is a retry (pollNow with `retry`): its failure does not grow the backoff. */
+	retryNext: boolean
+	/** rtlmux's clients at the last answered poll; null after a failed one or without stats. */
+	clients: ReceiverClientsReading | null
 }
 
 // ============================================================================
@@ -202,6 +279,11 @@ export class SdrHostPoller extends EventEmitter {
 				consecutiveFailures: 0,
 				nextPollAt: 0,
 				timer: null,
+				inFlight: false,
+				rerun: false,
+				answered: false,
+				retryNext: false,
+				clients: null,
 			})
 		}
 	}
@@ -250,6 +332,15 @@ export class SdrHostPoller extends EventEmitter {
 	}
 
 	/**
+	 * rtlmux's clients at the source's last answered poll (count and ports), or null: no poller
+	 * for it, the last poll failed, or the answer had no rtlmux stats.
+	 */
+	clientsReading(sourceId: string): ReceiverClientsReading | null {
+		const clients = this.pollers.get(sourceId)?.clients ?? null
+		return clients ? { ...clients, ports: [...clients.ports] } : null
+	}
+
+	/**
 	 * Gets the latest status for a specific source.
 	 */
 	getStatus(sourceId: string): SdrHostStatus | undefined {
@@ -266,6 +357,43 @@ export class SdrHostPoller extends EventEmitter {
 	getLinkFacts(sourceId: string): SdrHostLinkFacts | null {
 		const facts = this.pollers.get(sourceId)?.linkFacts
 		return facts ? { ...facts } : null
+	}
+
+	/** True once any poll of this process got an answer from the source's sdr-host. */
+	hasAnswered(sourceId: string): boolean {
+		return this.pollers.get(sourceId)?.answered === true
+	}
+
+	/**
+	 * True while the source's sdr-host may still give its first answer: it never answered and
+	 * fewer than SDR_HOST_FIRST_ANSWER_ATTEMPTS polls failed (false for an unknown source).
+	 */
+	awaitingFirstAnswer(sourceId: string): boolean {
+		const state = this.pollers.get(sourceId)
+		return (
+			state !== undefined &&
+			!state.answered &&
+			state.consecutiveFailures < SDR_HOST_FIRST_ANSWER_ATTEMPTS
+		)
+	}
+
+	/**
+	 * Polls the source's sdr-host now (a new connection wants an answer from after it opened):
+	 * a poll running now is followed by another right after it; a scheduled one (also a failure
+	 * backoff) is brought forward. The failure count is kept, so backoff after it still grows.
+	 * With `retry` (a connection still waiting for a unit answer asks again): a failure of that
+	 * poll does not grow the failure count, so quick retries neither lengthen the backoff nor use
+	 * up the first-answer attempts (SDR_HOST_FIRST_ANSWER_ATTEMPTS).
+	 */
+	pollNow(sourceId: string, retry = false): void {
+		const state = this.pollers.get(sourceId)
+		if (!state || !this.isRunning) return
+		if (retry) state.retryNext = true
+		if (state.inFlight) {
+			state.rerun = true
+			return
+		}
+		this.scheduleNextPoll(sourceId, 0)
 	}
 
 	/**
@@ -294,6 +422,11 @@ export class SdrHostPoller extends EventEmitter {
 			consecutiveFailures: 0,
 			nextPollAt: 0,
 			timer: null,
+			inFlight: false,
+			rerun: false,
+			answered: false,
+			retryNext: false,
+			clients: null,
 		}
 
 		this.pollers.set(config.sourceId, state)
@@ -341,12 +474,50 @@ export class SdrHostPoller extends EventEmitter {
 
 	private async pollHost(sourceId: string): Promise<void> {
 		const state = this.pollers.get(sourceId)
-		if (!state || !this.isRunning) {
+		if (!state || !this.isRunning || state.inFlight) {
 			return
 		}
-
+		state.inFlight = true
+		state.rerun = false
+		const retry = state.retryNext
+		state.retryNext = false
+		const startedAt = performance.now()
+		let next: number
 		try {
-			const { status, endpoints } = await this.fetchStatus(state.config)
+			next = await this.pollOnce(sourceId, state, startedAt, retry)
+		} finally {
+			state.inFlight = false
+		}
+		if (this.pollers.get(sourceId) !== state) return
+		if (state.rerun) {
+			state.rerun = false
+			next = 0
+		}
+		this.scheduleNextPoll(sourceId, next)
+	}
+
+	/** One poll; resolves the delay before the next. */
+	private async pollOnce(
+		sourceId: string,
+		state: PollerState,
+		startedAt: number,
+		retry: boolean,
+	): Promise<number> {
+		try {
+			const { status, endpoints, identity, ports, listAgeMs } =
+				await this.fetchStatus(state.config)
+			state.answered = true
+			state.clients =
+				status.rtlmux && ports !== null
+					? { startedAt, clients: status.rtlmux.clients, ports, listAgeMs }
+					: null
+			// The identity first: the receiver tracker waits on it, not on /api/host.
+			if (this.pollers.get(sourceId) === state)
+				this.emitIdentityResult(sourceId, {
+					startedAt,
+					ok: true,
+					facts: identity,
+				})
 			state.linkFacts = await this.fetchLinkFacts(state.config)
 
 			// Track recovery
@@ -362,11 +533,13 @@ export class SdrHostPoller extends EventEmitter {
 			if (this.pollers.get(sourceId) === state)
 				this.emit("receiver-endpoints", sourceId, endpoints)
 
-			// Schedule next poll at normal interval
-			this.scheduleNextPoll(sourceId, this.pollIntervalMs)
+			// Next poll at the normal interval
+			return this.pollIntervalMs
 		} catch (error) {
 			state.linkFacts = null
-			state.consecutiveFailures++
+			state.clients = null
+			// A retry's failure marks the host down (recovery is still reported) but adds no count.
+			if (!retry || state.consecutiveFailures === 0) state.consecutiveFailures++
 
 			const backoffDelay = Math.min(
 				BASE_BACKOFF_MS * Math.pow(2, state.consecutiveFailures - 1),
@@ -388,10 +561,28 @@ export class SdrHostPoller extends EventEmitter {
 				error instanceof Error ? error.message : String(error),
 			)
 
+			if (this.pollers.get(sourceId) === state)
+				this.emitIdentityResult(sourceId, {
+					startedAt,
+					ok: false,
+					facts: null,
+				})
 			this.emit("error", sourceId, error as Error)
 
-			// Schedule retry with backoff
-			this.scheduleNextPoll(sourceId, backoffDelay)
+			// Retry with backoff
+			return backoffDelay
+		}
+	}
+
+	/** A throwing listener never breaks the poll loop. */
+	private emitIdentityResult(
+		sourceId: string,
+		result: SdrHostIdentityResult,
+	): void {
+		try {
+			this.emit("identity-result", sourceId, result)
+		} catch (err) {
+			this.log.warn({ err, sourceId }, "Identity result listener failed")
 		}
 	}
 
@@ -441,8 +632,13 @@ export class SdrHostPoller extends EventEmitter {
 	}
 
 	private async fetchStatus(config: SdrHostConfig): Promise<{
+		/** rtlmux's client ports (ReceiverClientsReading.ports); null without stats. */
+		ports: Array<number | null> | null
+		/** The client list's age the answer reports (ReceiverClientsReading.listAgeMs). */
+		listAgeMs: number | null
 		status: SdrHostStatus
 		endpoints: ReceiverEndpointsReport | null
+		identity: SdrHostIdentityFacts | null
 	}> {
 		const controller = new AbortController()
 		const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs)
@@ -522,6 +718,7 @@ export class SdrHostPoller extends EventEmitter {
 				address: string
 				bytesDropped: number
 			}> = []
+			let ports: Array<number | null> | null = null
 
 			if (rtlmuxStats) {
 				// Check for SDR Host API format first (has bytesPerSec as number)
@@ -536,6 +733,15 @@ export class SdrHostPoller extends EventEmitter {
 					bytesPerSec = rtlmuxStats.bytesPerSec
 					totalBytesSent = rtlmuxStats.totalBytesSent ?? 0
 					clientDetails = rtlmuxStats.clientDetails ?? []
+					// Only a full list names every client: a bare count names none.
+					ports =
+						clientDetails.length === clientCount
+							? clientDetails.map(c =>
+									typeof c?.address === "string"
+										? addressPort(c.address)
+										: null,
+								)
+							: null
 				} else if (Array.isArray(rtlmuxStats.clients)) {
 					// Raw rtlmux stats.json format
 					const rawClients = rtlmuxStats.clients as Array<{
@@ -552,6 +758,15 @@ export class SdrHostPoller extends EventEmitter {
 						0,
 					)
 					// bytesPerSec not available in raw format
+					ports = rawClients.map(c => {
+						const port = c.client?.port
+						return typeof port === "number" &&
+							Number.isInteger(port) &&
+							port > 0 &&
+							port <= 65535
+							? port
+							: null
+					})
 					clientDetails = rawClients.map((c, i) => ({
 						id: i,
 						address: c.client?.host ?? "unknown",
@@ -618,7 +833,14 @@ export class SdrHostPoller extends EventEmitter {
 			// A redirected answer is not the configured API's own list (3.6).
 			return {
 				status,
+				// A redirected answer is another server's clients.
+				ports: response.redirected ? null : ports,
+				listAgeMs: response.redirected
+					? null
+					: listAgeOf(body as Record<string, unknown>),
 				endpoints: response.redirected ? null : parseReceiverEndpoints(body),
+				// Another server's answer never names this receiver.
+				identity: response.redirected ? null : parseSdrHostIdentity(body),
 			}
 		} finally {
 			clearTimeout(timeoutId)

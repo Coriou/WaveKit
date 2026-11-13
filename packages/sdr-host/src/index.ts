@@ -14,6 +14,7 @@ import {
 } from "./supervisor/preflight.js"
 import { createApiServer, startApiServer } from "./api/server.js"
 import { HostCollector } from "./telemetry/host.js"
+import { loadUnitIdAtStartup } from "./telemetry/unit-id.js"
 
 async function main(): Promise<void> {
 	// Load configuration
@@ -45,6 +46,40 @@ async function main(): Promise<void> {
 	})
 	hostCollector.start()
 
+	// The stable unit id (kept in the state directory); none when it would not be stable.
+	const unit = await loadUnitIdAtStartup(config.state.dir)
+	const { result } = unit
+	if (result.reason === "state-not-persistent")
+		logger.warn(
+			{ stateDir: config.state.dir, persistence: unit.persistence },
+			unit.persistence === "tmpfs"
+				? "State directory is a tmpfs (lost at every restart): no stable unit id is reported. Mount a disk-backed volume there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)"
+				: "State directory is not a mounted volume: no stable unit id is reported. Mount a volume there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)",
+		)
+	else if (result.reason === "state-anonymous-volume")
+		logger.warn(
+			{ stateDir: config.state.dir },
+			"State directory is an anonymous Docker volume (a new empty one at every docker compose down + up or docker rm + run): no stable unit id is reported. Mount a named volume or a host directory there (docker-compose.yml mounts /var/lib/wavekit/sdr-host at /state)",
+		)
+	else if (result.reason !== null)
+		logger.warn(
+			{ stateDir: config.state.dir, reason: result.reason },
+			"State directory not readable or writable: no stable unit id is reported",
+		)
+	else {
+		if (unit.persistence === "unknown")
+			logger.warn(
+				{ stateDir: config.state.dir },
+				"Could not tell whether the state directory is a mounted volume; the unit id may change when the container is recreated",
+			)
+		if (result.dirSyncError !== undefined)
+			logger.warn(
+				{ stateDir: config.state.dir, code: result.dirSyncError },
+				"State directory cannot be fsynced; the unit id was written but its rename may not survive a power loss",
+			)
+		logger.info({ source: result.source }, "Unit id ready")
+	}
+
 	// Create API server
 	const fastify = await createApiServer({
 		config,
@@ -52,6 +87,8 @@ async function main(): Promise<void> {
 		processManager,
 		preflightResult,
 		hostTelemetry: hostCollector,
+		unitId: result.unitId,
+		unitIdReason: result.reason,
 	})
 
 	// Handle shutdown

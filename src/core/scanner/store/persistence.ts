@@ -19,6 +19,7 @@ import {
 	readFile,
 	rename,
 	rm,
+	stat,
 	truncate,
 } from "node:fs/promises"
 import { readJournalFiles } from "./journal-reader.js"
@@ -27,6 +28,15 @@ import { DQ_CONSOLIDATE_GROUP_MAX } from "../detection-quality-contract.js"
 import { join, resolve } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
+import {
+	ensurePreMigrationBackup,
+	noteCleanLoad,
+	SCANNER_STATE_FILE_VERSION,
+} from "../../state-backup.js"
+import type {
+	PreMigrationBackupOptions,
+	StateBackupOutcome,
+} from "../../state-backup.js"
 import { createComponentLogger } from "../../../utils/logger.js"
 import type { Logger } from "../../../utils/logger.js"
 import type {
@@ -79,6 +89,7 @@ import type {
 	SnapshotWorkerStatus,
 } from "./snapshot-writer.js"
 import { OccupancyStateSchema } from "../../spectrum/occupancy.js"
+import { pathSegment } from "../../receiver-identity.js"
 import type { OccupancyState } from "../../spectrum/occupancy.js"
 import {
 	DiscoverySchema,
@@ -89,7 +100,8 @@ import {
 	DiscoveryAliasEntrySchema,
 } from "./schemas.js"
 
-const FILE_VERSION = 1
+/** state-backup.ts owns the number so its format marker follows every version bump. */
+const FILE_VERSION = SCANNER_STATE_FILE_VERSION
 const SNAPSHOT_FILE = "discoveries.json"
 const JOBS_FILE = "jobs.json"
 const SETTINGS_FILE = "settings.json"
@@ -100,6 +112,15 @@ const JOURNAL_DIR = "journal"
 const ENGINE_DIR = "engine"
 /** A subdirectory, so readEngines (direct `engine/*.json` only) never sees these files. */
 const OCCUPANCY_DIR = join(ENGINE_DIR, "occupancy")
+/**
+ * Learned state per receiver, `engine/receivers/<source>/<receiver key>/` holding
+ * `engine.json` and `occupancy.json`. A directory without a `.json` name, so readEngines
+ * (direct `engine/*.json` only) never sees it. Both segments come from pathSegment (never `.`,
+ * `..` or a separator).
+ */
+const RECEIVERS_DIR = join(ENGINE_DIR, "receivers")
+const NS_ENGINE_FILE = "engine.json"
+const NS_OCCUPANCY_FILE = "occupancy.json"
 const JOURNAL_NAME = /^observations-(\d{8})\.jsonl$/
 const DAY_MS = 86_400_000
 /**
@@ -652,6 +673,19 @@ export class ScannerPersistence {
 	private readonly buildClock: () => number
 	private loaded = false
 	private authorityHealth: "healthy" | "degraded" = "degraded"
+	/** The pre-migration backup check runs once per process, before the first load reads anything. */
+	private backupOutcome: StateBackupOutcome | null = null
+	private readonly backupOptions: Pick<
+		PreMigrationBackupOptions,
+		"statfs" | "link" | "keepsFile"
+	>
+	/** A clean load is counted toward the backup's expiry once per process (noteCleanLoad). */
+	private cleanLoadNoted = false
+
+	/** Outcome of the pre-migration backup check (null before the first load). */
+	preMigrationBackup(): StateBackupOutcome | null {
+		return this.backupOutcome
+	}
 
 	/** S1 can load fallback state; Task42 must require complete restored authority. */
 	recoveryHealth(): "healthy" | "degraded" {
@@ -678,7 +712,13 @@ export class ScannerPersistence {
 		 * `performance.now` by default.
 		 */
 		buildClock?: () => number
+		/**
+		 * The pre-migration backup (state-backup.ts): `keepsFile`, the recording keep store outside
+		 * this directory, is copied into the backup; `statfs` and `link` are test seams.
+		 */
+		backup?: Pick<PreMigrationBackupOptions, "statfs" | "link" | "keepsFile">
 	}) {
+		this.backupOptions = opts.backup ?? {}
 		this.yieldTurn = opts.yieldTurn ?? yieldToEventLoop
 		this.loadSliceClock = opts.loadSliceClock ?? (() => deadlineSliceClock())
 		this.buildClock = opts.buildClock ?? (() => performance.now())
@@ -694,13 +734,27 @@ export class ScannerPersistence {
 	}
 
 	async load(): Promise<LoadedState> {
+		// Before any read can set a file aside or a later write migrate it (never throws).
+		this.backupOutcome ??= await ensurePreMigrationBackup({
+			dir: this.root,
+			logger: this.log,
+			now: this.now,
+			...this.backupOptions,
+		})
+		let loaded: LoadedState
 		try {
-			return await this.loadState()
+			loaded = await this.loadState()
 		} catch (err) {
 			this.authorityHealth = "degraded"
 			this.loaded = false
 			throw err
 		}
+		if (this.authorityHealth === "healthy" && !this.cleanLoadNoted) {
+			this.cleanLoadNoted = true
+			// Counts toward the backup's expiry; never throws.
+			await noteCleanLoad({ dir: this.root, logger: this.log, now: this.now })
+		}
+		return loaded
 	}
 
 	private async loadState(): Promise<LoadedState> {
@@ -1399,6 +1453,135 @@ export class ScannerPersistence {
 	/** One source's engine state; null when missing or invalid (logged). Does not need load(). */
 	loadEngine(sourceId: string): Promise<EngineState | null> {
 		return this.readEngineFile(this.engineFile(sourceId))
+	}
+
+	// === Learned state per receiver ===
+
+	/** `engine/receivers/<source>/<receiver key>` relative to the scanner state directory. */
+	receiverNamespacePath(sourceId: string, receiverKey: string): string {
+		return join(RECEIVERS_DIR, pathSegment(sourceId), pathSegment(receiverKey))
+	}
+
+	writeEngineIn(
+		sourceId: string,
+		receiverKey: string,
+		s: EngineState,
+	): Promise<void> {
+		const text = JSON.stringify(s)
+		const file = this.namespaceFile(sourceId, receiverKey, NS_ENGINE_FILE)
+		return this.enqueue(() => atomicWrite(file, text))
+	}
+
+	loadEngineIn(
+		sourceId: string,
+		receiverKey: string,
+	): Promise<EngineState | null> {
+		return this.readEngineFile(
+			this.namespaceFile(sourceId, receiverKey, NS_ENGINE_FILE),
+		)
+	}
+
+	writeOccupancyIn(
+		sourceId: string,
+		receiverKey: string,
+		s: OccupancyState,
+	): Promise<void> {
+		const text = JSON.stringify(s)
+		const file = this.namespaceFile(sourceId, receiverKey, NS_OCCUPANCY_FILE)
+		return this.enqueue(() => atomicWrite(file, text))
+	}
+
+	async loadOccupancyIn(
+		sourceId: string,
+		receiverKey: string,
+	): Promise<OccupancyState | null> {
+		const file = this.namespaceFile(sourceId, receiverKey, NS_OCCUPANCY_FILE)
+		const read = await readJson(file)
+		if (read.kind === "missing") return null
+		const parsed =
+			read.kind === "ok" ? OccupancyStateSchema.safeParse(read.value) : null
+		if (parsed === null || !parsed.success) {
+			this.log.warn({ file }, "Ignoring an invalid occupancy history file")
+			return null
+		}
+		return parsed.data
+	}
+
+	/**
+	 * Copies a source's files from before receiver namespacing (`engine/<source>.json`,
+	 * `engine/occupancy/<source>.json`) into a receiver's namespace, unless it already has its
+	 * own. The originals stay (an older image rolled back to still reads them); the caller records
+	 * the adoption so it happens once. Serialised with the writes; resolves true when a file was
+	 * copied.
+	 */
+	adoptLegacyInto(sourceId: string, receiverKey: string): Promise<boolean> {
+		return this.enqueue(async () => {
+			let copied = false
+			const pairs: Array<[string, string]> = [
+				[
+					this.engineFile(sourceId),
+					this.namespaceFile(sourceId, receiverKey, NS_ENGINE_FILE),
+				],
+				[
+					this.occupancyFile(sourceId),
+					this.namespaceFile(sourceId, receiverKey, NS_OCCUPANCY_FILE),
+				],
+			]
+			for (const [from, to] of pairs) {
+				const legacy = await readJson(from)
+				if (legacy.kind !== "ok") continue
+				if ((await readJson(to)).kind !== "missing") continue
+				await atomicWrite(to, JSON.stringify(legacy.value))
+				copied = true
+			}
+			return copied
+		})
+	}
+
+	/**
+	 * Modification times (ms) of a receiver namespace's engine and occupancy files, or of the files
+	 * from before namespacing (`receiverKey` null); null for a file that cannot be stat'ed.
+	 */
+	async learnedFileTimes(
+		sourceId: string,
+		receiverKey: string | null,
+	): Promise<{ engine: number | null; occupancy: number | null }> {
+		// Only a missing file reads as absent; any other error rejects, so a caller can take the
+		// safe answer (an unreadable legacy file still counts as present).
+		const mtime = (file: string) =>
+			stat(file).then(
+				st => st.mtimeMs,
+				(err: unknown) => {
+					if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT")
+						return null
+					throw err
+				},
+			)
+		return receiverKey === null
+			? {
+					engine: await mtime(this.engineFile(sourceId)),
+					occupancy: await mtime(this.occupancyFile(sourceId)),
+				}
+			: {
+					engine: await mtime(
+						this.namespaceFile(sourceId, receiverKey, NS_ENGINE_FILE),
+					),
+					occupancy: await mtime(
+						this.namespaceFile(sourceId, receiverKey, NS_OCCUPANCY_FILE),
+					),
+				}
+	}
+
+	private namespaceFile(
+		sourceId: string,
+		receiverKey: string,
+		name: string,
+	): string {
+		return join(
+			this.root,
+			this.receiverNamespacePath(sourceId, receiverKey),
+			name,
+		)
 	}
 
 	pruneJournal(caps: {

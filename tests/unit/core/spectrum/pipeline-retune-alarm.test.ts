@@ -270,6 +270,53 @@ describe("untracked-retune alarm in the pipeline", () => {
 		).toBe(true)
 	}, 60_000)
 
+	it("reports the reference block's start: one block before an alarm that fires at once", () => {
+		const h = play([
+			scene(1, OFFSETS, 10.6),
+			scene(
+				2,
+				OFFSETS.map(o => o - 25_000),
+				1,
+			),
+		])
+		const block = (h.pipeline as unknown as { blockSamples: number })
+			.blockSamples
+		const [a] = h.of("untracked-retune")
+		// startSample is the alarm block's end; the reference is the block before it.
+		expect(a!.referenceStartSample).toBe(a!.startSample - 2 * block)
+	}, 60_000)
+
+	it("reports the reference block's start for an alarm held pending until it fires as external-control", () => {
+		const h = new Harness({ format: "FLOAT32LE" })
+		h.start({ feed: false })
+		const p = h.pipeline as unknown as {
+			blockSamples: number
+			alarmWaitBlocks: number
+			classify: () => string
+		}
+		h.push(scene(1, OFFSETS, 10.6), 16_384)
+		// A strong track that would explain the alarm never closes: the alarm waits its full wait.
+		vi.spyOn(p, "classify").mockReturnValue("pending")
+		h.push(
+			scene(
+				2,
+				OFFSETS.map(o => o - 25_000),
+				2,
+			),
+			16_384,
+		)
+		const alarms = h.of("untracked-retune")
+		expect(alarms).toHaveLength(1)
+		const a = alarms[0]!
+		expect(a.suspected).toBe("external-control")
+		expect(p.alarmWaitBlocks).toBeGreaterThan(2)
+		// alarmWaitBlocks + 1 held blocks after the reference, the last one fires (its end is
+		// startSample): the reference started alarmWaitBlocks + 2 blocks before it.
+		expect(a.referenceStartSample).toBe(
+			a.startSample - (p.alarmWaitBlocks + 2) * p.blockSamples,
+		)
+	}, 60_000)
+
 	it("does not alarm when one carrier switches off", () => {
 		const h = play([scene(3, OFFSETS, 10.6), scene(4, OFFSETS.slice(1), 1)])
 		expect(h.of("untracked-retune")).toEqual([])

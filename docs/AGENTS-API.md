@@ -250,11 +250,21 @@ Each answer below is one read, no logs needed; every closed list is in `GET /api
   delay, CPU by thread and open channels, one shared sample every 2 s, so poll it freely. Read
   it twice: the first answer has no CPU window yet.
 - **Why a signal was not recorded:** `recorder` on `GET /api/scanner/discoveries/:id`.
+- **Why recordings and identification wait:** `sources[].tuning` here (the cause code, only on
+  a row whose `verdict` reads `ok`), `tuningUnproven` on `GET /api/sources` with its message,
+  fix, since when, and the refusals it caused (`plain-resume`: take the tuning back in one
+  call with `POST /api/tuner/:sourceId/take-back`; `resumeOutcome` on `GET /api/tuner/:sourceId`
+  says why a plain resume left it as found).
 - **What a sweep was allowed to disturb:** `impact` and `consentedImpact` on the job.
 
 `sources[].feed` reads `paused` or `resuming` while an operator holds the receiver feed off
 and `error` after a failed resume. After a plain resume, `tuningUnverified: true` means the
 receiver may have been retuned during the pause: read or set the tuning before trusting it.
+`sources[].receiver` says which receiver the source reaches: `strength` (`unit`, `model` or
+`unknown`), `learnedState` (`fresh`, `resumed`, `adopted` or `none`) and `tuningRestored`.
+After a switch to another receiver `tuningRestored` is `false` and the configured tuning
+applies; the full fields, with the receiver key and why that endpoint was chosen, are on
+[`GET /api/sources`](API.md#receiver-and-candidate-fields).
 `scanner.heldJobs` counts sweeps that a plain resume parked (`reason`
 `resumed-without-retune`); `scanner.job` shows one of them before any newer job, and it
 waits for an explicit job resume. `scanner.discoveries` is how many records the discovery store

@@ -119,12 +119,14 @@ class FakeDemod extends EventEmitter implements AnalogTransmissionSource {
 	}
 }
 
+// The tuning ledger proves the tuner's centre at the live edge (WaveKit's frames).
 const tuner = tunerFrequencyAt(
 	(): TunerState =>
 		({
 			frequency: 446_000_000,
 			controlMode: "internal",
 		}) as TunerState,
+	() => ({ trust: "commanded", frequency: 446_000_000 }),
 )
 
 /** Manual gate timers: the store and the tracker keep real time. */

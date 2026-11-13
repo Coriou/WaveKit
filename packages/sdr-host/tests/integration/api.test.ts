@@ -334,6 +334,79 @@ describe("sdr-host API", () => {
 		expect(payload.endpoints).toBeNull()
 	})
 
+	it("reports the persisted unit id apart from the per-process receiver id", async () => {
+		const config = SdrHostConfigSchema.parse({})
+		const unitId = "fedcba9876543210fedcba9876543210"
+		const statusOf = async (receiverId: string) => {
+			const server = await createApiServer({
+				hostTelemetry: emptyHost,
+				config,
+				logger,
+				processManager: createProcessManager(),
+				preflightResult: createPreflightResult(),
+				receiverId,
+				unitId,
+			})
+			await server.ready()
+			try {
+				return (
+					await server.inject({ method: "GET", url: "/api/status" })
+				).json() as {
+					receiverId: string
+					unitId: string | null
+					unitIdReason: unknown
+				}
+			} finally {
+				await server.close()
+			}
+		}
+		// Two processes (a restart): a new receiverId, the same unitId.
+		const before = await statusOf("0".repeat(31) + "1")
+		const after = await statusOf("0".repeat(31) + "2")
+		expect(before.receiverId).not.toBe(after.receiverId)
+		expect(before.unitId).toBe(unitId)
+		expect(after.unitId).toBe(unitId)
+		expect(after.unitIdReason).toBeNull()
+	})
+
+	it("reports a null unit id when none was persisted", async () => {
+		const config = SdrHostConfigSchema.parse({})
+		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
+			config,
+			logger,
+			processManager: createProcessManager(),
+			preflightResult: createPreflightResult(),
+		})
+		await fastify.ready()
+		const payload = (
+			await fastify.inject({ method: "GET", url: "/api/status" })
+		).json() as { unitId: unknown; unitIdReason: unknown }
+		expect(payload.unitId).toBeNull()
+		expect(payload.unitIdReason).toBeNull()
+	})
+
+	it("says why no unit id is reported (the state dir is not persistent)", async () => {
+		const config = SdrHostConfigSchema.parse({})
+		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
+			config,
+			logger,
+			processManager: createProcessManager(),
+			preflightResult: createPreflightResult(),
+			unitId: null,
+			unitIdReason: "state-not-persistent",
+		})
+		await fastify.ready()
+		const payload = (
+			await fastify.inject({ method: "GET", url: "/api/status" })
+		).json() as { unitId: unknown; unitIdReason: unknown }
+		expect(payload).toMatchObject({
+			unitId: null,
+			unitIdReason: "state-not-persistent",
+		})
+	})
+
 	it("returns fix instructions for driver conflict", async () => {
 		const config = SdrHostConfigSchema.parse({})
 		fastify = await createApiServer({

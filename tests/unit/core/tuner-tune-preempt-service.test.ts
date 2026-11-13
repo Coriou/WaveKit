@@ -467,6 +467,8 @@ describe("the close after a lost private lock", () => {
 		let lost = false
 		const h = await setup({ lostOwnership: () => lost })
 		await h.controller.setFrequency("rtl", 120_000_000, { origin: "rest" })
+		// A doubt leaves the live session unproven: the connect sync's assert writes again.
+		h.manager.tuningLedger.raiseDoubt("rtl", "both", "test")
 		const replayed = h.controller.synchronizeOnConnect("rtl")
 		expect(replayed.commands.length).toBeGreaterThan(0)
 		let open: (() => void) | undefined
@@ -490,6 +492,8 @@ describe("the close after a lost private lock", () => {
 		await expect(
 			h.controller.setFrequency("rtl", 122_000_000, { origin: "scanner" }),
 		).rejects.toMatchObject(refused)
+		// Unproven again, and still nothing: this core no longer owns the tuner.
+		h.manager.tuningLedger.raiseDoubt("rtl", "both", "test")
 		expect(h.controller.synchronizeOnConnect("rtl").commands).toEqual([])
 		expect((await h.flushed()) - before).toBe(1)
 	})
@@ -499,8 +503,8 @@ describe("the close after a lost private lock", () => {
 		const h = await setup({ lostOwnership: () => lost })
 		const saveOperatorGains = vi.fn(() => Promise.resolve(true))
 		h.controller.setBandGain({
-			saveOperatorGains,
-			savedOperatorGains: () => [],
+			saveOperatorGainRecords: saveOperatorGains,
+			savedOperatorGainRecords: () => [],
 			applyToMyTuning: () => false,
 			gainAt: () => "keep",
 			labelAt: () => undefined,

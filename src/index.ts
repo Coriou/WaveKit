@@ -102,6 +102,7 @@ import {
 	TunerController,
 	TUNER_REST_COMMAND_POLICY,
 } from "./core/tuner-controller.js"
+import type { TuningLedger } from "./core/tuning-ledger.js"
 import { applyConfiguredTuning } from "./core/tuner-config-gain.js"
 import { createRegionalRegistry } from "./core/regional/registry.js"
 import { createRegionalRegistration } from "./core/regional/data.js"
@@ -125,6 +126,7 @@ import type {
 } from "./core/channelizer/settlement-observer.js"
 import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle.js"
 import { ScannerService } from "./core/scanner/scanner-service.js"
+import { settleLinkOf } from "./core/spectrum/network-settle.js"
 import {
 	createChannelActivityRanker,
 	type ChannelActivityRanker,
@@ -204,6 +206,21 @@ import {
 } from "./decoders/builtin/lora-meshtastic.js"
 import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
+import {
+	receiverClientsMaxAgeMs,
+	receiverClientsVerdict,
+	sdrHostPairedWithSource,
+} from "./core/tuning-ledger-receiver-free.js"
+import {
+	ReceiverIdentityTracker,
+	receiverSdrHostWaitMs,
+} from "./core/receiver-identity-tracker.js"
+import { ReceiverLearnedState } from "./core/receiver-identity-state.js"
+import {
+	receiverBoundToTuner,
+	wireReceiverStatus,
+	wireReceiverTracker,
+} from "./core/receiver-identity-wiring.js"
 import {
 	EndpointSelector,
 	type EndpointSelectionTarget,
@@ -688,16 +705,16 @@ export function decoderSettingsPort(
 }
 
 /**
- * WG9 req 3.2: the analog transmission frequency label. The strict state rule, demoted to
- * `unverified` unless the controller wrote both frequency and sample rate on the current
- * connection (a failed reconnect replay proves nothing).
+ * The analog transmission frequency label: the tuning ledger's at the live edge (`trustNow`), for
+ * the tuner's centre only (fail closed without a ledger).
  */
 export function analogFrequencyAt(
-	tuner: Pick<TunerController, "getState" | "tuningWrittenOnConnection">,
+	tuner: Pick<TunerController, "getState">,
+	ledger: Pick<TuningLedger, "trustNow"> | null,
 ): ReturnType<typeof tunerFrequencyAt> {
 	return tunerFrequencyAt(
 		id => tuner.getState(id),
-		id => tuner.tuningWrittenOnConnection(id),
+		ledger ? id => ledger.trustNow(id) : undefined,
 	)
 }
 
@@ -1301,11 +1318,73 @@ async function main(): Promise<void> {
 			signalFlatHoldMs: config.health?.signalFlatHoldMs,
 			// Paused feeds persist in <stateDir>/source-feed.json across restarts.
 			stateDir: config.stateDir,
+			// Tuning-ledger settle: the live settle of the source's link, the value the arbiter
+			// reads (the scanner's current settings once it exists, else the configured ones).
+			tuningSettleMs: sourceId => {
+				const cfg = config.sources.find(c => c.id === sourceId)
+				const sweep = (scanner?.settings() ?? config.scanner).sweep
+				return sweep.settleMs[settleLinkOf(cfg)]
+			},
 		})
 		own(100, async () => {
 			await disposeReceiverAfterApi()
 			await sourceManager.disconnectAll()
 		})
+		// Receiver identity and per-receiver learned state (rtl_tcp U8_IQ sources).
+		const receiverTracked = (id: string): boolean => {
+			const s = config.sources.find(source => source.id === id)
+			return s?.type === "rtl_tcp" && s.caps.format === "U8_IQ"
+		}
+		let identityPoller: SdrHostPoller | undefined
+		const receiverState = new ReceiverLearnedState({
+			stateDir: config.stateDir,
+			logger,
+			tracked: receiverTracked,
+			// An sdr-host is there: configured explicitly, or auto-detected and it has answered or
+			// may still answer first (fewer than SDR_HOST_FIRST_ANSWER_ATTEMPTS failed polls). Only
+			// then does a weak (source-scoped) key wait for a stable one to adopt; the poller's
+			// failed results recheck it (below).
+			sdrHostConfigured: id =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(config.sources.find(source => source.id === id)?.sdrHost?.apiUrl !==
+					undefined ||
+					identityPoller.hasAnswered(id) ||
+					identityPoller.awaitingFirstAnswer(id)),
+			// While that first answer is still awaited, the weak key writes nothing learned.
+			sdrHostAwaited: id => identityPoller?.awaitingFirstAnswer(id) === true,
+			// The tracker and the controller are built below; nothing binds before the first
+			// connection, so both are read late (an earlier call throws, never reads stale state).
+			onBound: receiverBoundToTuner(
+				{ current: id => receiverIdentity.current(id) },
+				() => tunerController,
+			),
+		})
+		const receiverIdentity = new ReceiverIdentityTracker({
+			sources: sourceManager,
+			logger,
+			// The configured sdr-host describes the primary endpoint only, never a candidate.
+			sdrHostApplies: id =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(sourceManager.getSelectedCandidate(id)?.index ?? 0) === 0,
+			// Waits for this connection's first poll result; the bound is only a safety net.
+			sdrHostWaitMs: receiverSdrHostWaitMs(
+				config.resources.sdrHostPoller.timeoutMs,
+			),
+			kickSdrHostPoll: (id, retry) => identityPoller?.pollNow(id, retry),
+			// A unit answer is expected (a failed poll at a reconnect is retried until the bound, not
+			// settled on the model): the sdr-host is configured, answered before, or the source's last
+			// receiver (persisted) was a unit. receiverState is declared above, so this never reads
+			// it uninitialised.
+			sdrHostExpected: (id): boolean =>
+				identityPoller?.getStatus(id) !== undefined &&
+				(config.sources.find(source => source.id === id)?.sdrHost?.apiUrl !==
+					undefined ||
+					identityPoller.hasAnswered(id) ||
+					receiverState.lastKey(id)?.startsWith("unit:") === true),
+		})
+		own(100, () => receiverIdentity.stop())
+		await receiverState.load()
+		wireReceiverTracker(receiverIdentity, receiverState)
 		const composed = composeLinkBurst({ log: logger })
 		own(20, composed.dispose)
 		const fanoutManager = new FanoutManager(logger)
@@ -1344,8 +1423,13 @@ async function main(): Promise<void> {
 		own(80, () => tunerRelay.stop())
 		const tunerController = new TunerController(logger, sourceManager, {
 			reconnectPolicy: config.tuner.reconnectPolicy,
+			writeDeclaredTuningOnConnect: config.tuner.writeDeclaredTuningOnConnect,
 			lostOwnership,
+			receiverIdentity: id =>
+				receiverTracked(id) ? receiverIdentity.provisional(id) : undefined,
+			receiverTracked,
 		})
+		wireReceiverStatus(sourceManager, receiverState, tunerController)
 		// Per-band gain: tuner.bandGain, replaced by <stateDir>/tuner-band-gain.json once PUT.
 		const bandGain = new BandGainSettingsService({
 			stateDir: config.stateDir,
@@ -2012,6 +2096,8 @@ async function main(): Promise<void> {
 			scannerConstructionStarted = true
 			scanner = new ScannerService({
 				settings: scannerSettings,
+				learnedState: (store, gated, writable) =>
+					receiverState.attach(store, gated, writable),
 				...(iqCapture ? { iqCapture } : {}),
 				// Stage 1: no coverage predicate (no sample-arrival timestamps yet), so every
 				// gate-passed track is captured within the existing budget.
@@ -2095,6 +2181,12 @@ async function main(): Promise<void> {
 				cpuMeter: efficiencyCpu,
 			})
 			scannerConstructionSettled = true
+			receiverState.setSpectrum(scanner.spectrum)
+			// tuningUnproven: why the engine labels its newest samples unverified on a proven tuning.
+			const labelSpectrum = scanner.spectrum
+			sourceManager.tuningUnproven.setEngineResolver(
+				id => labelSpectrum.engine(id)?.labelReason() ?? null,
+			)
 			scannerConstruction.completeConstruction({ ok: true })
 			await iqCapture?.start()
 			await scanner.start()
@@ -2213,6 +2305,45 @@ async function main(): Promise<void> {
 					pollIntervalMs: config.resources.sdrHostPoller.pollIntervalMs,
 					timeoutMs: config.resources.sdrHostPoller.timeoutMs,
 				})
+				identityPoller = sdrHostPoller
+				const poller = sdrHostPoller
+				poller.on("identity-result", (sourceId, result) => {
+					receiverIdentity.noteSdrHostResult(sourceId, result)
+					// An auto-detected sdr-host that stopped being awaited: the weak key may adopt now.
+					if (
+						!result.ok &&
+						!poller.hasAnswered(sourceId) &&
+						!poller.awaitingFirstAnswer(sourceId)
+					)
+						void receiverState.recheckAdoption(sourceId)
+				})
+				// A plain resume takes the tuning back only while rtlmux serves this core alone.
+				const clientsMaxAgeMs = receiverClientsMaxAgeMs(
+					config.resources.sdrHostPoller.pollIntervalMs,
+					config.resources.sdrHostPoller.timeoutMs,
+				)
+				const apiUrlOf = new Map(
+					sdrHostConfigs.map(c => [c.sourceId, c.apiUrl]),
+				)
+				tunerController.setReceiverClientsView(
+					id =>
+						// A sole client proves nothing about an sdr-host that is not this source's receiver.
+						sdrHostPairedWithSource(
+							apiUrlOf.get(id),
+							sourceManager.getActiveHost(id),
+						)
+							? receiverClientsVerdict(
+									poller.clientsReading(id),
+									sourceManager.connectionLocalPort(id),
+									performance.now(),
+									clientsMaxAgeMs,
+								)
+							: { free: false, reason: "clients-unknown" },
+					id => poller.pollNow(id),
+				)
+				poller.on("status", status =>
+					tunerController.noteReceiverClients(status.sourceId),
+				)
 				log.info(
 					{
 						count: sdrHostConfigs.length,
@@ -2491,13 +2622,13 @@ async function main(): Promise<void> {
 		own(15, disposeReceiverAfterApi)
 
 		// WG3 req 5: RF provenance on receptions from each decoder's binding (config and
-		// scanner probes alike), kept current on decoder create/remove. WG5 req 6:
-		// tuningTrust is "commanded" (internal control) or "relay" (external) when the
-		// observed tuner state proves the decoder hears its targets, else "unverified".
+		// scanner probes alike), kept current on decoder create/remove. tuningTrust is the
+		// tuning ledger's at the live edge, for the centre the decoder was started on.
 		const decoderProvenance = createDecoderProvenanceIndex(
 			decoderManager,
 			() => sourceRouting.getDefaultSourceId(),
 			tunerController,
+			sourceManager.tuningLedger,
 		)
 		own(8, () => decoderProvenance.dispose())
 		ambientProvenance = decoderProvenance.lookup
@@ -2910,7 +3041,10 @@ async function main(): Promise<void> {
 		// close. own(7) does the same on a failed startup (Activity is own(8)).
 		const transmissions = wireAnalogTransmissions({
 			source: liveDemod,
-			frequencyAt: analogFrequencyAt(tunerController),
+			frequencyAt: analogFrequencyAt(
+				tunerController,
+				sourceManager.tuningLedger,
+			),
 			broadcast: event => {
 				wsBroadcaster.broadcastLiveAudioTransmission(event)
 			},

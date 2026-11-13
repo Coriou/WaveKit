@@ -33,6 +33,7 @@ import {
 	testSettings,
 } from "../../../mocks/scanner/engine-fakes.js"
 import { CENTRE, FS } from "../../../mocks/scanner/service-fakes.js"
+import { FakeReceiverLedger } from "../../../mocks/fake-receiver-ledger.js"
 
 export const NOW = 1_700_000_000_000
 
@@ -81,9 +82,25 @@ export interface ProfileLog {
 }
 
 export function makeService(
-	opts: { logLines?: string[]; extraSourceIds?: readonly string[] } = {},
+	opts: {
+		logLines?: string[]
+		extraSourceIds?: readonly string[]
+		/**
+		 * The receiver of "rtl" was told the centre and this rate on this session, settled
+		 * (`settleMs`) before the engine's first byte: a tuning ledger, so blocks claiming that
+		 * tuning are labelled `commanded`. Default: no ledger, every label reads `unverified`
+		 * (fail closed).
+		 */
+		proven?: { rateHz: number; settleMs: number }
+	} = {},
 ) {
+	const proven = opts.proven
 	const sources = new FakeSources("rtl", { sampleRate: FS, centerFreq: CENTRE })
+	const receiverLedger = proven ? new FakeReceiverLedger("rtl", proven) : null
+	if (receiverLedger && proven) {
+		receiverLedger.prove(CENTRE, proven.rateHz)
+		sources.tuningLedger = receiverLedger.ledger
+	}
 	const tuner = new FakeTuner()
 	const extra = opts.extraSourceIds ?? []
 	for (const id of extra) {
@@ -164,6 +181,7 @@ export function makeService(
 			hosts.filter(h => h.cfg.sourceId === sourceId).at(-1)!,
 		profiles,
 		frames,
+		receiverLedger,
 		advance: (ms: number) => {
 			clock += ms
 		},

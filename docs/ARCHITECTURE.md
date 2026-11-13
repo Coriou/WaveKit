@@ -65,6 +65,13 @@ Manages TCP connections to SDR sources with automatic reconnection.
 - Auto-reconnect with exponential backoff (2s → 4s → 8s → max 30s)
 - Emit connection events and data rate metrics
 - Track source capabilities (sample rate, format, exclusivity)
+- Report why the last connection attempt failed (`connectFailure`: a closed error class and a
+  fixed hint, `src/core/source-manager-connect-failure.ts`)
+- Rotate an rtl_tcp U8_IQ source through its configured `candidates` (primary first; an endpoint
+  that never delivered a data payload is left after one failure (a header alone does not count;
+  one that sends bytes without an `RTL0` header delivers, with an unknown receiver), a
+  delivering one after `SOURCE_CANDIDATE_RETRIES` losses) and report the endpoint in use
+  (`candidate`)
 
 **Key interfaces**:
 
@@ -93,6 +100,69 @@ interface SourceCaps {
 - `data` — Raw data received
 - `metrics` — Data rate metrics (every 5s)
 - `caps-changed` — Source capabilities updated (e.g., sample rate change via TunerRelay)
+- `rtl-tcp-header` — A session's rtl_tcp header was read (before its first payload)
+
+### Receiver identity
+
+Learned state is kept per physical receiver, inside the one state directory, so a USB dongle's
+spurs, floors or pre-band gain never apply to the Pi receiver.
+
+- `src/core/receiver-identity.ts` (pure): the key `unit:<unitId>` (the sdr-host's persisted
+  unit id) or `serial:<vendor>:<product>:<serial>` (non-default serials only; strength `unit`),
+  `source:<source>|model:<tunerType>:<gainCount>` from the rtl_tcp header (`model`), or
+  `unknown`. The sdr-host's per-process `receiverId` never forms a key. Every component is
+  Zod/charset- and length-checked first; `pathSegment` turns any string into one collision-free
+  path segment.
+- `src/core/receiver-identity-tracker.ts`: per connection, the identity from the header,
+  upgraded by a validated sdr-host answer while the source is on its primary endpoint. Each
+  connection kicks a poll (`SdrHostPoller.pollNow`) and waits for the first poll result
+  (`identity-result`, emitted right after `/api/status`, success or failure) whose request
+  started at or after the connection opened; a hard bound (3 request timeouts + 1 s, 7 s by
+  default) is only a safety net. When a unit answer is expected (the sdr-host is configured,
+  answered before, or the source's last receiver was a `unit` key), a failed result does not end
+  the wait: a Pi reboot or sdr-host restart has rtlmux listening before the sdr-host API, so the
+  connection asks again every second (`pollNow(id, true)`, past the failure backoff and without
+  growing it) and settles on the `model` key only at the bound. It never downgrades within a
+  connection and is recomputed on each new connection. It emits `connection` on every disconnect and connect, `settled` on every
+  settle and `identity` on a change; `src/core/receiver-identity-wiring.ts` connects it to the
+  learned state, the tuner (`noteReceiverBound`) and the source status (`setReceiverStatusSource`).
+- `src/core/receiver-identity-state.ts`: binds each tracked source (rtl_tcp U8_IQ) to its
+  receiver's namespace `engine/receivers/<source>/<key>/` in the scanner state directory for the
+  spectrum engine state and occupancy. On a change it saves the running state under the old
+  receiver and loads the new one's (`SpectrumService.replaceLearnedState`, which recreates the
+  pipeline, and first waits for an engine still opening). A connection boundary makes the source
+  pending until the next settle: the state so far is exported under the bound receiver and stays
+  applied read-only (loads read it, writes are dropped); the same key settling again costs no
+  swap and no pipeline restart. Exports the store cannot take yet are held in memory per receiver
+  (at most 4 per source) and written once it is writable. A per-source generation makes a load
+  that a switch overtook read again, and drops a write whose export straddled a switch. An
+  unknown receiver gets nothing applied and nothing written. The un-namespaced state from before
+  is adopted once (`<stateDir>/receiver-namespaces.json` records `adoptedBy`, what it still
+  `owed`, and `takenOver`): by a `unit` key, or by the `model` key only on a source without an
+  sdr-host; the pre-band gain at that binding (no scanner needed), the spectrum files copied (not
+  moved) once the scanner store is writable while that receiver is bound. A `unit` key new on a
+  source that does not adopt starts from the source's `model` namespace of its model, once per
+  `model` key. The first `unit` key on a source whose `model` key learned while nobody adopted (an
+  sdr-host without `unitId`, updated later) adopts, and takes that `model` namespace over only
+  when no legacy file exists; else the legacy files win whatever their age, and the legacy
+  pre-band gain record comes before the `model` key's. A
+  pending window that spans more than one new connection (an unsettled connection to another
+  receiver, then back) reloads the settled key's saved state instead of keeping what the engine
+  learned in memory meanwhile (one swap). `unit:` names the sdr-host install (its state
+  directory), not the dongle: a dongle swapped on the same sdr-host keeps the namespace, so give
+  the install a new unit id after a swap (docs/SDR-HOST-SETUP.md). One INFO line
+  per change: `Receiver changed: <old> -> <new>; learned state <fresh|resumed|adopted|none>`.
+- `TunerController` keeps the pre-band gain records per receiver key
+  (`tuner-band-gain-saved-receivers.json`; `tuner-band-gain-saved.json` keeps the un-keyed
+  format older images read) and gates the reconnect restore: accepted tuning (gain included)
+  is replayed only to the receiver it was accepted on (a unit owner also matches a header-only
+  identity of the same model until the sdr-host answers, so another unit of that model may get
+  the replay; on a candidate endpoint without sdr-host that is never corrected). Another
+  receiver gets the configured baseline (under a plain-resume hold: the values stay, unverified),
+  and its own earlier tuning comes back if it had one. Tuning accepted while the receiver was
+  unknown is dropped at the next identified receiver.
+- Scanner discoveries and recordings stay shared. GET /api/sources shows `receiver` and
+  `candidate`.
 
 ### FanoutManager
 
@@ -311,6 +381,12 @@ client such as SDR++).
   lease; operator retunes apply it only with `tuner.bandGain.applyToMyTuning` (serialised per
   source, the pre-band gain persisted by `BandGainSettingsService`)
 
+### State backup
+
+`src/core/state-backup.ts` takes one bounded backup of the scanner state directory before a
+build that writes another format reads it (`ScannerPersistence.load`): see the rollback note in
+[SCANNER.md](SCANNER.md).
+
 ### TunerRelay
 
 Optional RTL-TCP compatible server that exposes the internal IQ stream to local
@@ -475,6 +551,59 @@ Players (ffplay, VLC, browser)
 FanoutManager → branch scanner-<sourceId> → SpectrumEngine → spectrum-worker (FFT, floor, detector, tracker)
    → SpectrumService (spectrum:frame per profile, occupancy) → ScannerService (classify, probes, discoveries) → REST/WS
 ```
+
+### Tuning trust
+
+One owner, `TuningLedger` (`src/core/tuning-ledger.ts`), created and fed by `SourceManager`:
+per source, sessions (one connection from its first payload byte to its close), the payload
+position of each session, a receipt for every tuning frame flushed to the receiver (at the
+position of the flush, with its writer: operator, scanner, assert or relay) and doubts (an
+untracked retune, a host-centre mismatch, a pipeline error, a rate mismatch). A sample range is
+trusted only when the last frequency and sample-rate receipts before it were flushed on the same
+session, the range starts at least the settle after them (`network-settle.ts`: the larger of the
+link's configured settle and an in-flight floor, an estimate of 512 KiB for the two TCP buffers
+between the receiver and the core), no doubt was raised since, and their values are the centre
+and rate the result was computed at. A scanner hop's detected test-mode marker moves its frame's
+boundary earlier, to the marker's upper-bound position (`TuningLedger.lowerBoundary`, never below
+the frame's own position). Everything else is `unverified`: a fresh core, a reconnect, a missing
+ledger.
+
+Readers only: the spectrum engine stamps every block summary, track (by the blocks its
+frequency was measured on: a track on air when a proof settles has its centre measured again
+from the first proven block, and is trusted once it comes from proven blocks only, never
+back-dated) and transient by the ledger on its sample range; a scanner hop's samples need the hop's own frequency receipt
+(`TunerArbiter` hands it to the engine), and the arbiter's same-centre skip and rate re-send
+read the ledger too. Engine starts, pipeline restarts and stream openings carry no label;
+pipeline epochs only reset the DSP. The engine places a branch's samples in the session by an
+anchor (bounds on where position 0 lies in the bytes offered to the branch); bytes the burst
+absorber loses widen it (fail closed, never a lost map), and each unverified block is counted by
+the check that failed (`trustShadow.unverifiedBlocks`). A sweep's dwell counts only its hop's
+trusted blocks, and assert rule 2's re-send of a hop goes through the job holding the lease, so
+the re-sent hop's epoch is the job's own (re-send asks while one is still queued are that one). A
+visit whose hop never proves is left after 4 × the larger of its dwell and its settle, at least
+15 s (`hopSkips.unproven` in the job's progress), so a standing doubt cannot stall a sweep. Decoder provenance, live-audio evidence and the analog
+transmission frequency read `trustNow` (the live edge). Recorder, discoveries and IQ capture read
+the label on the epoch or track; the current epoch also names where its trusted run of blocks
+starts (`trustedFromSample`), and a recording's pre-roll never reaches before it; a recording or
+channel tap ends when that run ends or restarts. `TuningUnprovenTracker` (beside the ledger, fed
+by the tuner controller's block reasons) names one cause per source while its centre or rate is
+unproven (`tuningUnproven` on `GET /api/sources`), and the engine's reason while the ledger proves
+both but the engine's newest block reads unverified. A plain resume's hold gives the tuning back
+only while a fresh sdr-host reading lists exactly one rtlmux client while this core's connection is
+up (`port-matched` when its port is the connection's, `sole-client` otherwise: a NAT may rewrite
+it) and no relay client is attached (`TunerController.plainResumeTakesTuningBack`, the one decision;
+`tuning-ledger-receiver-free.ts`), on a reading whose client list is newer than the connection's
+session and the last doubt on its centre or rate (an untracked-retune doubt reads as another client
+until such a reading says free). The sdr-host serves the list of its own last rtlmux stats poll, so
+the list's time is bounded from the reply, not the poll: the poll's start minus the reported list
+age (`sampling.stats.ageMs`) minus 3 s for the sdr-host's stats request, or minus 33 s without an
+age (`receiverClientsListedAfter`); `POST /api/tuner/:sourceId/take-back` re-proves both fields in one
+call and ends the hold only once both writes succeeded. A command
+whose frame tuned a stream that starts at a queued reconnect boundary gets its DSP epoch once
+that boundary is applied, at its receipt's position in the new stream. A client that retunes the receiver behind the core's back is
+invisible until a detector raises a doubt. A host-centre mismatch also moves the engine's epoch
+to the centre the host reports; the next poll that matches the source's centre again moves it
+back, so the blocks after the core's re-sent tuning can be trusted again.
 
 ### Event Flow
 

@@ -27,6 +27,7 @@ import { createComponentLogger, type Logger } from "../utils/logger.js"
 import { WaveKitError } from "../utils/errors.js"
 import { atomicWrite } from "./scanner/store/atomic-write.js"
 import { BandGainSettingsSchema, bandGainAt } from "./band-gain-schema.js"
+import { isReceiverKey, RECEIVER_KEY_MAX_LENGTH } from "./receiver-identity.js"
 
 export const BAND_GAIN_FILE_NAME = "tuner-band-gain.json"
 const FILE_VERSION = 1
@@ -44,15 +45,37 @@ const FileSchema = z
 	.strict()
 
 export const BAND_GAIN_SAVED_FILE_NAME = "tuner-band-gain-saved.json"
-/** One saved gain per tuner source; 16 is far above the sources one core runs. */
+/**
+ * The saved gain records kept per receiver (each with `receiverKey`). A file of its own,
+ * so BAND_GAIN_SAVED_FILE_NAME keeps the format older images read (their strict schema refuses
+ * a `receiverKey`) and an image rolled back keeps its records. Same bounds as the legacy file.
+ */
+export const BAND_GAIN_SAVED_RECEIVERS_FILE_NAME =
+	"tuner-band-gain-saved-receivers.json"
+/**
+ * Saved gain records per file: one per tuner source (legacy file) or per tuner source and
+ * receiver (receivers file); 16 is far above the sources one core runs times the receivers each
+ * reaches.
+ */
 export const BAND_GAIN_SAVED_MAX_SOURCES = 16
 const SAVED_SOURCE_ID_MAX_LENGTH = 128
 /**
- * 16 records x about 190 bytes each (a 128-char source id, the mode, a 3-digit gain, keys
- * and tab indentation) is about 3 KiB; 8 KiB leaves room and bounds the read before parse.
- * Ids that JSON escapes take more, so a write is bounded by its serialised bytes too.
+ * 16 records x about 340 bytes each (a 128-char source id, a receiver key of at most 128
+ * characters, the mode, a 3-digit gain, keys and tab indentation) is about 5.4 KiB; 8 KiB leaves
+ * room and bounds the read before parse. Ids that JSON escapes take more, so a write is bounded
+ * by its serialised bytes too.
  */
 export const BAND_GAIN_SAVED_FILE_MAX_BYTES = 8 * 1024
+
+/**
+ * One saved pre-band gain: per source and per receiver key. A record without
+ * `receiverKey` is from before receiver namespacing; the first receiver identified adopts it.
+ */
+export interface SavedOperatorGainRecord {
+	sourceId: string
+	receiverKey?: string
+	saved: SavedOperatorGain | null
+}
 
 /** The operator's gain from before a band gain (null gain: an AGC gain that was unknown). */
 export interface SavedOperatorGain {
@@ -60,33 +83,46 @@ export interface SavedOperatorGain {
 	gain: number | null
 }
 
-const SavedFileSchema = z
-	.object({
-		version: z.literal(FILE_VERSION),
-		sources: z
-			.array(
-				z
-					.object({
-						sourceId: z.string().min(1).max(SAVED_SOURCE_ID_MAX_LENGTH),
-						// null: the gain was unknown when the band gain went on (nothing to restore).
-						saved: z
-							.object({
-								gainMode: z.enum(["manual", "agc"]),
-								gain: z
-									.number()
-									.int()
-									.min(BAND_GAIN_MIN_TENTHS_DB)
-									.max(BAND_GAIN_MAX_TENTHS_DB)
-									.nullable(),
-							})
-							.strict()
-							.nullable(),
-					})
-					.strict(),
-			)
-			.max(BAND_GAIN_SAVED_MAX_SOURCES),
-	})
-	.strict()
+const ReceiverKeySchema = z
+	.string()
+	.max(RECEIVER_KEY_MAX_LENGTH)
+	.refine(v => isReceiverKey(v))
+const savedFileSchema = <K extends z.ZodTypeAny>(receiverKey: K) =>
+	z
+		.object({
+			version: z.literal(FILE_VERSION),
+			sources: z
+				.array(
+					z
+						.object({
+							sourceId: z.string().min(1).max(SAVED_SOURCE_ID_MAX_LENGTH),
+							receiverKey,
+							// null: the gain was unknown when the band gain went on (nothing to restore).
+							saved: z
+								.object({
+									gainMode: z.enum(["manual", "agc"]),
+									gain: z
+										.number()
+										.int()
+										.min(BAND_GAIN_MIN_TENTHS_DB)
+										.max(BAND_GAIN_MAX_TENTHS_DB)
+										.nullable(),
+								})
+								.strict()
+								.nullable(),
+						})
+						.strict(),
+				)
+				.max(BAND_GAIN_SAVED_MAX_SOURCES),
+		})
+		.strict()
+/**
+ * The legacy file. Written without `receiverKey` (the older images' format); a keyed record in it
+ * (written by a build before the receivers file) is still read, and moves to the receivers file
+ * at the next write.
+ */
+const SavedFileSchema = savedFileSchema(ReceiverKeySchema.optional())
+const SavedReceiversFileSchema = savedFileSchema(ReceiverKeySchema)
 
 /** The read bound was exceeded: the file is never buffered past `maxBytes + 1` bytes. */
 const TOO_LARGE = "EFBIG"
@@ -225,13 +261,20 @@ export class BandGainSettingsService {
 	private provenance: "config" | "runtime" = "config"
 	private chain: Promise<unknown> = Promise.resolve()
 	private readonly savedFile: string
-	private saved: ReadonlyMap<string, SavedOperatorGain | null> = new Map()
+	private readonly savedReceiversFile: string
+	/** The receivers file may hold records (read or written non-empty): an empty set rewrites it. */
+	private receiversOnDisk = false
+	private saved: readonly SavedOperatorGainRecord[] = []
 	private savedChain: Promise<void> = Promise.resolve()
 
 	constructor(options: BandGainSettingsServiceOptions) {
 		this.log = createComponentLogger(options.logger, "BandGainSettings")
 		this.file = join(options.stateDir, BAND_GAIN_FILE_NAME)
 		this.savedFile = join(options.stateDir, BAND_GAIN_SAVED_FILE_NAME)
+		this.savedReceiversFile = join(
+			options.stateDir,
+			BAND_GAIN_SAVED_RECEIVERS_FILE_NAME,
+		)
 		this.fs = options.fs ?? {
 			readFile: (path, maxBytes) => readFileBounded(path, maxBytes),
 			atomicWrite: (path, data) => atomicWrite(path, data),
@@ -315,59 +358,150 @@ export class BandGainSettingsService {
 	}
 
 	private async loadSavedGains(): Promise<void> {
-		const text = await this.readBounded(
+		const legacy = await this.readSavedFile(
 			this.savedFile,
-			BAND_GAIN_SAVED_FILE_MAX_BYTES,
+			SavedFileSchema,
 			"Saved pre-band gain",
 		)
-		if (text === null) return
+		const receivers = await this.readSavedFile(
+			this.savedReceiversFile,
+			SavedReceiversFileSchema,
+			"Saved per-receiver pre-band gain",
+		)
+		this.receiversOnDisk =
+			receivers.length > 0 || legacy.some(r => r.receiverKey !== undefined)
+		// A receiver's record in both (a build before the receivers file): the receivers file's wins.
+		const keyed = new Set(receivers.map(r => `${r.sourceId}\n${r.receiverKey}`))
+		this.saved = [
+			...legacy.filter(
+				r =>
+					r.receiverKey === undefined ||
+					!keyed.has(`${r.sourceId}\n${r.receiverKey}`),
+			),
+			...receivers,
+		]
+	}
+
+	/** One saved gain file's records; missing, unreadable or invalid reads as none (logged). */
+	private async readSavedFile(
+		path: string,
+		schema: typeof SavedFileSchema | typeof SavedReceiversFileSchema,
+		what: string,
+	): Promise<SavedOperatorGainRecord[]> {
+		const text = await this.readBounded(
+			path,
+			BAND_GAIN_SAVED_FILE_MAX_BYTES,
+			what,
+		)
+		if (text === null) return []
 		let json: unknown
 		try {
 			json = JSON.parse(text)
 		} catch {
-			this.log.warn("Saved pre-band gain file is not JSON; ignored")
-			return
+			this.log.warn(`${what} file is not JSON; ignored`)
+			return []
 		}
-		const parsed = SavedFileSchema.safeParse(json)
+		const parsed = schema.safeParse(json)
 		if (!parsed.success) {
-			this.log.warn("Saved pre-band gain file is invalid; ignored")
-			return
+			this.log.warn(`${what} file is invalid; ignored`)
+			return []
 		}
-		const saved = new Map<string, SavedOperatorGain | null>()
-		for (const record of parsed.data.sources)
-			saved.set(
-				record.sourceId,
+		return parsed.data.sources.map(record => ({
+			sourceId: record.sourceId,
+			...(record.receiverKey !== undefined
+				? { receiverKey: record.receiverKey }
+				: {}),
+			saved:
 				record.saved === null
 					? null
 					: { gainMode: record.saved.gainMode, gain: record.saved.gain },
-			)
-		this.saved = saved
+		}))
 	}
 
-	/** The pre-band gains saved before the last shutdown (read by the controller at wiring). */
+	/** The pre-band gains saved before the last shutdown, one per source (records without a receiver). */
 	savedOperatorGains(): ReadonlyMap<string, SavedOperatorGain | null> {
-		return this.saved
+		return new Map(this.saved.map(r => [r.sourceId, r.saved] as const))
 	}
 
-	/**
-	 * Persists the controller's saved pre-band gains (a copy, taken now). Serialised; never
-	 * rejects: resolves false when the write failed (logged; the next change writes again)
-	 * or when `required` (a source id) was not among the records written. Past
-	 * BAND_GAIN_SAVED_MAX_SOURCES, or past BAND_GAIN_SAVED_FILE_MAX_BYTES serialised (an
-	 * id of escaped characters takes up to 6 bytes per character), the oldest records are
-	 * dropped, so the file always reads back within its bound.
-	 */
+	/** Every saved pre-band gain record, per source and receiver (read by the controller at wiring). */
+	savedOperatorGainRecords(): readonly SavedOperatorGainRecord[] {
+		return this.saved.map(r => ({ ...r }))
+	}
+
+	/** saveOperatorGainRecords with one record per source and no receiver key. */
 	saveOperatorGains(
 		gains: ReadonlyMap<string, SavedOperatorGain | null>,
 		required?: string,
 	): Promise<boolean> {
-		const records = [...gains]
-			.filter(([sourceId]) => sourceId.length <= SAVED_SOURCE_ID_MAX_LENGTH)
-			.slice(-BAND_GAIN_SAVED_MAX_SOURCES)
-			.map(([sourceId, saved]) => ({
-				sourceId,
-				saved: saved === null ? null : { ...saved },
-			}))
+		return this.saveOperatorGainRecords(
+			[...gains].map(([sourceId, saved]) => ({ sourceId, saved })),
+			required,
+		)
+	}
+
+	/**
+	 * Persists the controller's saved pre-band gains (a copy, taken now): the records without a
+	 * receiver in BAND_GAIN_SAVED_FILE_NAME (the legacy format), those with one in
+	 * BAND_GAIN_SAVED_RECEIVERS_FILE_NAME. Serialised; never rejects: resolves false when a write
+	 * failed (logged; the next change writes again) or when `required` (a source id, or a record
+	 * test) was not among the records written. Past BAND_GAIN_SAVED_MAX_SOURCES, or past
+	 * BAND_GAIN_SAVED_FILE_MAX_BYTES serialised (an id of escaped characters takes up to 6 bytes
+	 * per character), the oldest records of a file are dropped, so each file always reads back
+	 * within its bound.
+	 */
+	saveOperatorGainRecords(
+		gains: readonly SavedOperatorGainRecord[],
+		required?: string | ((record: SavedOperatorGainRecord) => boolean),
+	): Promise<boolean> {
+		const isRequired =
+			typeof required === "function"
+				? required
+				: (r: SavedOperatorGainRecord) => r.sourceId === required
+		const valid = gains.filter(
+			r =>
+				r.sourceId.length > 0 &&
+				r.sourceId.length <= SAVED_SOURCE_ID_MAX_LENGTH &&
+				(r.receiverKey === undefined || isReceiverKey(r.receiverKey)),
+		)
+		const legacy = this.boundSaved(
+			valid.filter(r => r.receiverKey === undefined),
+		)
+		const receivers = this.boundSaved(
+			valid.filter(r => r.receiverKey !== undefined),
+		)
+		const records = [...legacy.records, ...receivers.records]
+		const write = (path: string, text: string) =>
+			this.fs.atomicWrite(path, text).then(
+				() => true,
+				() => {
+					this.log.warn("Writing the saved pre-band gain failed")
+					return false
+				},
+			)
+		const run = this.savedChain.then(async () => {
+			const keyedDue = receivers.records.length > 0 || this.receiversOnDisk
+			const keyed =
+				!keyedDue || (await write(this.savedReceiversFile, receivers.text))
+			if (keyedDue && keyed) this.receiversOnDisk = receivers.records.length > 0
+			const plain = await write(this.savedFile, legacy.text)
+			if (!keyed || !plain) return false
+			this.saved = records
+			return required === undefined || records.some(isRequired)
+		})
+		this.savedChain = run.then(() => undefined)
+		return run
+	}
+
+	/** The newest records of one file within its count and byte bounds, and their text. */
+	private boundSaved(gains: readonly SavedOperatorGainRecord[]): {
+		records: SavedOperatorGainRecord[]
+		text: string
+	} {
+		const records = gains.slice(-BAND_GAIN_SAVED_MAX_SOURCES).map(r => ({
+			sourceId: r.sourceId,
+			...(r.receiverKey !== undefined ? { receiverKey: r.receiverKey } : {}),
+			saved: r.saved === null ? null : { ...r.saved },
+		}))
 		const serialise = () =>
 			JSON.stringify({ version: FILE_VERSION, sources: records }, null, "\t")
 		let text = serialise()
@@ -386,21 +520,7 @@ export class BandGainSettingsService {
 				{ dropped, maxBytes: BAND_GAIN_SAVED_FILE_MAX_BYTES },
 				"Saved pre-band gains past the file size bound; the oldest were not persisted",
 			)
-		const kept = new Map(records.map(r => [r.sourceId, r.saved] as const))
-		const run = this.savedChain.then(() =>
-			this.fs.atomicWrite(this.savedFile, text).then(
-				() => {
-					this.saved = kept
-					return required === undefined || kept.has(required)
-				},
-				() => {
-					this.log.warn("Writing the saved pre-band gain failed")
-					return false
-				},
-			),
-		)
-		this.savedChain = run.then(() => undefined)
-		return run
+		return { records, text }
 	}
 
 	settings(): BandGainSettings {

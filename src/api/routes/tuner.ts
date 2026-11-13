@@ -2,6 +2,7 @@
  * Tuner Routes - RTL-TCP tuner control endpoints
  */
 
+import { z } from "zod"
 import type { SourceManager } from "../../core/source-manager.js"
 import {
 	TUNER_REST_COMMAND_POLICY,
@@ -23,6 +24,7 @@ import type {
 	FastifyRequest,
 } from "fastify"
 import {
+	TUNER_RESUME_REASONS,
 	TUNER_CHANGE_ACTORS,
 	TUNER_CHANGE_FIELDS,
 	TUNER_CHANGE_REASONS,
@@ -197,6 +199,34 @@ const lastTuneSchema = {
 	required: ["at", "usable", "applied", "notApplied"],
 } as const
 
+/** TunerState.proof's per-field entry (the tuning ledger's verdict on the live connection). */
+const fieldProofSchema = {
+	type: "object",
+	properties: {
+		state: {
+			type: "string",
+			enum: ["unverified", "settling", "commanded", "relay"],
+		},
+		writer: {
+			type: ["string", "null"],
+			enum: ["operator", "scanner", "assert", "relay", null],
+		},
+		session: { type: ["integer", "null"] },
+		reason: { type: "string" },
+		blocked: { type: "string" },
+		lastReceipt: {
+			type: "object",
+			properties: {
+				seq: { type: "integer" },
+				pos: { type: "integer" },
+				at: { type: "string", format: "date-time" },
+			},
+			required: ["seq", "pos", "at"],
+		},
+	},
+	required: ["state", "writer", "session"],
+} as const
+
 const tunerStateSchema = {
 	type: "object",
 	properties: {
@@ -248,6 +278,24 @@ const tunerStateSchema = {
 		},
 		restore: tuneRestoreSchema,
 		lastTune: lastTuneSchema,
+		resumeOutcome: {
+			type: "object",
+			properties: {
+				outcome: { type: "string", enum: ["restored", "left-as-found"] },
+				reason: { type: "string", enum: [...TUNER_RESUME_REASONS] },
+				message: { type: "string" },
+			},
+			required: ["outcome", "reason", "message"],
+		},
+		proof: {
+			type: "object",
+			properties: {
+				frequency: fieldProofSchema,
+				sampleRate: fieldProofSchema,
+				assertFights: { type: "integer" },
+			},
+			required: ["frequency", "sampleRate"],
+		},
 	},
 	required: [
 		"sourceId",
@@ -397,7 +445,12 @@ const BAND_GAIN_RULES: Readonly<Record<string, string>> = Object.freeze({
 	"entries.*": "ranges are inclusive and must not overlap another entry",
 })
 
+/** POST /api/tuner/:sourceId/take-back: no body, or an empty object. */
+const TakeBackBodySchema = z.object({}).strict()
+const TAKE_BACK_EXPECTED = "no body, or {}"
+
 const EXPECTED_BODY: Readonly<Record<string, string>> = Object.freeze({
+	"/api/tuner/:sourceId/take-back": TAKE_BACK_EXPECTED,
 	"/api/tuner/:sourceId/frequency":
 		'{"hz": integer, frequency in Hz (24000000-1900000000)}',
 	"/api/tuner/:sourceId/gain": GAIN_EXPECTED,
@@ -810,6 +863,54 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					err,
 					expectedFor(request.routeOptions.url),
 				)
+			}
+		},
+	)
+
+	// POST /api/tuner/:sourceId/take-back - The held centre and rate, written again in one call
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: unknown
+		Reply: TunerState | unknown
+	}>(
+		"/api/tuner/:sourceId/take-back",
+		{
+			schema: {
+				tags: ["tuner"],
+				summary: "Take the receiver's tuning back",
+				description:
+					"Writes the held sample rate and centre (accepted, also before a plain resume, else configured) as operator writes, whatever is proven now, and ends a plain resume's hold: one call re-proves both. Answers the tuner state (proof settling). 409 TUNER_TAKE_BACK_BLOCKED under a relay client, a scanner lease or another core owning the receiver; 409 TUNER_NOTHING_HELD with no held value (set the tuning instead).",
+				params: {
+					type: "object",
+					properties: { sourceId: { type: "string" } },
+					required: ["sourceId"],
+				},
+				response: {
+					200: tunerStateSchema,
+					400: errorResponseSchema,
+					404: errorResponseSchema,
+					409: errorResponseSchema,
+				},
+			},
+		},
+		async (request, reply) => {
+			if (!TakeBackBodySchema.safeParse(request.body ?? {}).success)
+				return reply.status(400).send({
+					error: "ValidationError",
+					code: "VALIDATION_ERROR",
+					message: `Invalid tuner value at body; expected ${TAKE_BACK_EXPECTED}`,
+					fields: [{ field: "body", expected: TAKE_BACK_EXPECTED }],
+				})
+			try {
+				return await run(request.params.sourceId, async () => {
+					await tunerController.takeTuningBack(
+						request.params.sourceId,
+						rest(request),
+					)
+					return tunerController.getState(request.params.sourceId)
+				})
+			} catch (err) {
+				return handleTunerError(reply, err, TAKE_BACK_EXPECTED)
 			}
 		},
 	)

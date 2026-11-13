@@ -7,6 +7,7 @@
  *
  * In-memory fake transport only (no socket).
  */
+import { tuningHeldOnConnection } from "../../mocks/tuner-ledger-held.js"
 import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { TunerCommandOrigin } from "@wavekit/api-types"
@@ -89,10 +90,12 @@ function harness(policy: TunerReconnectPolicy = "restore") {
 			controlPolicy: "shared" as const,
 		})),
 	})
+	// The goldens record the gain connect writes: assert's declared centre and rate are off
+	// (tuner.writeDeclaredTuningOnConnect false; tests/unit/core/tuner-assert.test.ts covers them).
 	const controller = new TunerController(
 		createLogger({ level: "fatal" }),
 		sources as unknown as SourceManager,
-		{ reconnectPolicy: policy },
+		{ reconnectPolicy: policy, writeDeclaredTuningOnConnect: false },
 	)
 	wireTunerControl({
 		log: createLogger({ level: "fatal" }),
@@ -129,7 +132,7 @@ function harness(policy: TunerReconnectPolicy = "restore") {
 				declaredOnlyFields: s.declaredOnlyFields,
 				lastError: s.lastError,
 			},
-			tuningWritten: controller.tuningWrittenOnConnection(SRC),
+			tuningWritten: tuningHeldOnConnection(controller, SRC),
 		}
 		frames.length = 0
 		sent.length = 0
@@ -337,7 +340,7 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 		})
 	})
 
-	it("external (relay) control: today's replay still writes accepted state", async () => {
+	it("external (relay) control: no centre or rate from the core; the relay client's frames prove them", async () => {
 		const h = harness()
 		h.connect()
 		h.snapshot()
@@ -346,22 +349,20 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 		h.relayClient(true)
 		h.snapshot()
 		h.connect()
+		// Assert rule 1 (was: the replay wrote the accepted rate and centre under the relay).
 		expect(h.snapshot()).toEqual({
-			frames: ["0200249f00", "0108a48640"],
-			sent: [
-				["set-sample-rate", 2_400_000, "replay"],
-				["set-frequency", 145_000_000, "replay"],
-			],
+			frames: [],
+			sent: [],
 			state: {
 				...baseState,
 				frequency: 145_000_000,
 				sampleRate: 2_400_000,
 				controlMode: "external",
-				commandCount: 4,
+				commandCount: 2,
 				unknownFields: UNKNOWN_ALL_GAIN,
 				declaredOnlyFields: undefined,
 			},
-			tuningWritten: true,
+			tuningWritten: false,
 		})
 	})
 
@@ -373,7 +374,7 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 		const live = h.snapshot()
 		expect(live.tuningWritten).toBe(true)
 		h.sources.emit("connected", SRC)
-		expect(h.controller.tuningWrittenOnConnection(SRC)).toBe(true)
+		expect(tuningHeldOnConnection(h.controller, SRC)).toBe(true)
 		h.sources.emit("payload-started", SRC)
 		expect(h.snapshot()).toEqual({
 			frames: ["0200249f00", "0108a48640"],

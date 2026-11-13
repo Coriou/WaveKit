@@ -59,6 +59,7 @@ import { PROVISIONAL_WINDOW_MS, ProvisionalSpurs } from "./provisional-spurs.js"
 import type { BinRange } from "./provisional-spurs.js"
 import {
 	ALARM_FEATURE_MARGIN_DB,
+	alarmWaitBlocksOf,
 	classifyAlarm,
 	untrackedRetuneAlarm,
 	vanishedFeatures,
@@ -333,6 +334,11 @@ export class SpectrumPipeline {
 	private readonly mergedDb: Float32Array
 	private floorReady = false
 	private prevPersistent: PersistentFeature[] = []
+	/**
+	 * Start sample of the block whose features are `prevPersistent` (the alarm's reference): an
+	 * untracked move lies after it, however many blocks a pending alarm was held.
+	 */
+	private prevPersistentStart = 0
 	private readonly alarmStrength = new Map<string, number>()
 	/** WG10 req 2.9: open and just-closed tracks for the transmission-end classifier. */
 	private readonly trackInfo = new Map<
@@ -379,6 +385,8 @@ export class SpectrumPipeline {
 
 	private ep: EpochState | null = null
 	private resolving: PendingEpoch | null = null
+	/** The resolving epoch's `proof-floor` (PendingEpoch.awaitProofFloor), or null before it. */
+	private proofFloor: number | null = null
 	private epochCounter = 0
 	private stream = 0
 	private gaps: { start: number; end: number }[] = []
@@ -541,7 +549,11 @@ export class SpectrumPipeline {
 		const hangBlocks = Math.max(1, Math.round(cfg.trackHangMs / this.blockMs))
 		this.hangSamples = hangBlocks * this.blockSamples
 		// The strong track closes one hang after it vanished; its close is visible a block later.
-		this.alarmWaitBlocks = hangBlocks + 2
+		this.alarmWaitBlocks = alarmWaitBlocksOf(
+			cfg.trackHangMs,
+			this.blockSamples,
+			this.fs,
+		)
 		this.fft = new Fft(this.n)
 		this.floor = new NoiseFloor({
 			fftSize: this.n,
@@ -750,6 +762,16 @@ export class SpectrumPipeline {
 			}
 			case "spectrum-feed":
 				this.feed = input.enabled
+				break
+			case "measure-from":
+				this.tracker.measureFrom(input)
+				this.wideband.measureFrom(input)
+				break
+			case "proof-floor":
+				this.onProofFloor(input.epoch, input.sample)
+				break
+			case "proof-slack":
+				this.onProofSlack(input.epoch, input.samples)
 				break
 			case "channel-plan":
 				this.channelPlan = input.plan
@@ -1019,11 +1041,41 @@ export class SpectrumPipeline {
 		}
 		this.startEpochState()
 		this.resolving = p
-		if (!p.expectMarker)
+		this.proofFloor = null
+		if (!p.expectMarker && p.awaitProofFloor !== true)
 			this.resolve(
 				p.commandSample + p.bufferedSamples + p.settleSamples,
 				"timer",
 			)
+	}
+
+	/**
+	 * The resolving hop's proof floor: a timer hop starts at the later of it and its timer start;
+	 * a marker hop keeps it for its marker timeout (a timer start then, whose boundary is the full
+	 * settle). Another epoch's floor, or one after the start, changes nothing.
+	 */
+	private onProofFloor(epoch: number, sample: number): void {
+		const p = this.resolving
+		if (!p || p.epoch !== epoch || !Number.isSafeInteger(sample)) return
+		this.proofFloor = sample
+		if (!p.expectMarker)
+			this.resolve(
+				Math.max(p.commandSample + p.bufferedSamples + p.settleSamples, sample),
+				"timer",
+			)
+	}
+
+	/**
+	 * The resolving marker hop's slack grew (SpectrumEngine: a gap or an upstream loss since it was
+	 * posted): its marker start takes the larger slack. Another epoch's, a smaller one, or one for
+	 * a hop already started changes nothing.
+	 */
+	private onProofSlack(epoch: number, samples: number): void {
+		const p = this.resolving
+		if (!p || p.epoch !== epoch || !p.expectMarker) return
+		if (!Number.isSafeInteger(samples) || samples <= (p.proofSlackSamples ?? 0))
+			return
+		this.resolving = { ...p, proofSlackSamples: samples }
 	}
 
 	/**
@@ -1150,18 +1202,24 @@ export class SpectrumPipeline {
 
 	private checkMarkerTimeout(atSample: number): void {
 		const p = this.resolving
-		if (!p?.expectMarker || atSample < p.commandSample + p.markerTimeoutSamples)
+		if (!p) return
+		const timerStart = p.commandSample + p.bufferedSamples + p.settleSamples
+		if (!p.expectMarker) {
+			// A hop waiting for its proof floor that data reached the timer start without one: it
+			// starts there (no receipt to place; the ledger labels its blocks).
+			if (p.awaitProofFloor === true && atSample >= timerStart)
+				this.resolve(timerStart, "timer")
 			return
-		this.resolve(
-			Math.max(p.commandSample + p.bufferedSamples + p.settleSamples, atSample),
-			"timer",
-		)
+		}
+		if (atSample < p.commandSample + p.markerTimeoutSamples) return
+		this.resolve(Math.max(timerStart, atSample, this.proofFloor ?? 0), "timer")
 	}
 
 	private resolve(
 		startSample: number,
 		mode: SettleMode,
 		markerRunSamples?: number,
+		proofSlackSamples = 0,
 	): void {
 		this.resolving = null
 		const ep = this.ep
@@ -1183,6 +1241,7 @@ export class SpectrumPipeline {
 						startSample,
 						settleMode: mode,
 						markerRunSamples,
+						proofSlackSamples,
 					},
 		)
 	}
@@ -1228,7 +1287,13 @@ export class SpectrumPipeline {
 		if (samples > STUCK_TEST_MODE_S * this.fs) this.stuck = true
 		const p = this.resolving
 		if (p?.expectMarker && run.startSample >= p.commandSample) {
-			this.resolve(run.endSample + p.pllSettleSamples, "marker", samples)
+			const slack = p.proofSlackSamples ?? 0
+			this.resolve(
+				run.endSample + p.pllSettleSamples + slack,
+				"marker",
+				samples,
+				slack,
+			)
 			return
 		}
 		this.gaps.push({ start: run.startSample, end: run.endSample }) // another engine's marker
@@ -1740,6 +1805,8 @@ export class SpectrumPipeline {
 						kind: "untracked-retune",
 						epoch: ep.epoch,
 						startSample: blockEnd,
+						referenceStartSample: this.prevPersistentStart,
+						stream: ep.stream,
 						deltaHz: null,
 						suspected,
 						newEpoch: false,
@@ -1748,7 +1815,13 @@ export class SpectrumPipeline {
 					// WG10 R1 M1: a suspected byte slip is only a label. A dense-band retune can look
 					// mirrored, and an automatic one-byte re-align on an aligned stream would swap
 					// I/Q for good: every alarm but signal-change is the frozen untracked epoch.
-					this.startUntrackedEpoch(ep, blockEnd, alarm.deltaHz, suspected)
+					this.startUntrackedEpoch(
+						ep,
+						blockEnd,
+						alarm.deltaHz,
+						suspected,
+						this.prevPersistentStart,
+					)
 					if (sample) this.closeSample()
 					return
 				}
@@ -1833,7 +1906,10 @@ export class SpectrumPipeline {
 			// Qualification follows every valid block, even while classification holds
 			// the old reference scene. A returning feature must earn a fresh window.
 			const currentPersistent = this.persistentFeatures(trackSegs, ep)
-			if (!holdPersistent) this.prevPersistent = currentPersistent
+			if (!holdPersistent) {
+				this.prevPersistent = currentPersistent
+				this.prevPersistentStart = blockStart
+			}
 		}
 		if (learn) {
 			this.tracker.trackBinsMask(this.joined, 2)
@@ -2134,6 +2210,7 @@ export class SpectrumPipeline {
 		startSample: number,
 		deltaHz: number | null,
 		suspected: AlarmSuspect,
+		referenceStartSample: number,
 	): void {
 		const epoch = ++this.epochCounter
 		const info = {
@@ -2161,7 +2238,9 @@ export class SpectrumPipeline {
 		this.out.push({
 			kind: "untracked-retune",
 			epoch,
+			stream: ep.stream,
 			startSample,
+			referenceStartSample,
 			deltaHz,
 			suspected,
 		})

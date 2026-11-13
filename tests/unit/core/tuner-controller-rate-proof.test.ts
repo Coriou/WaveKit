@@ -2,6 +2,7 @@
  * WG10 req 2.8: `proveSampleRateForFrequency` writes the held sample rate once per
  * connection epoch, only in internal control, only when the rate is known and unproven.
  */
+import { tuningHeldOnConnection } from "../../mocks/tuner-ledger-held.js"
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import { createLogger } from "../../../src/utils/logger.js"
@@ -141,7 +142,8 @@ describe("proveSampleRateForFrequency (WG10 req 2.8)", () => {
 			false,
 		)
 		expect(t.rateWrites()).toHaveLength(replayed)
-		// A connection without a replay (reset policy) needs one more write.
+		// A reset reconnect discards the accepted rate and writes no declared one (another
+		// operator may own the receiver): the proof writes once more, then finds it proven.
 		const r = make()
 		;(
 			r.controller as unknown as { config: { reconnectPolicy: string } }
@@ -213,7 +215,7 @@ describe("proveSampleRateForFrequency (WG10 req 2.8)", () => {
 		const t = make()
 		await t.controller.setFrequency("rtl-1", 162_000_000, { origin: "scanner" })
 		expect(t.frames.map(f => f[0])).toEqual([SET_FREQUENCY])
-		expect(t.controller.tuningWrittenOnConnection("rtl-1")).toBe(false)
+		expect(tuningHeldOnConnection(t.controller, "rtl-1")).toBe(false)
 	})
 })
 
@@ -254,6 +256,7 @@ describe("Property 7", () => {
 					for (const op of ops) {
 						if (op === "reconnect") {
 							t.controller.synchronizeOnConnect("rtl-1")
+							// Assert may have proved the declared rate on the new connection.
 							epochWrites = 0
 						} else if (op === "external")
 							t.controller.setControlMode("rtl-1", "external")
@@ -287,7 +290,14 @@ describe("Property 7", () => {
 						for (const f of t.rateWrites()) expect(f.readUInt32BE(1)).toBe(held)
 						expect(t.controller.getState("rtl-1")!.sampleRate).toBe(held)
 					}
-					expect(t.frames.every(f => f[0] === SET_SAMPLE_RATE)).toBe(true)
+					// Besides the proof's rate, only assert's declared centre on a reconnect.
+					expect(
+						t.frames.every(
+							f =>
+								f[0] === SET_SAMPLE_RATE ||
+								(f[0] === SET_FREQUENCY && f.readUInt32BE(1) === 100_000_000),
+						),
+					).toBe(true)
 				},
 			),
 			{ numRuns: 100 },
