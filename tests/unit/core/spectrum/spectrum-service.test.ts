@@ -1531,6 +1531,53 @@ describe("SpectrumService learned state per receiver", () => {
 		await service.stop()
 	})
 
+	it("hands the trust of a replaced state to the next pipeline, and only with a state", async () => {
+		const { service, hostsOf } = make({ fake: true })
+		await service.start()
+		await service.acquire("rtl", "job:a")
+		expect(hostsOf("rtl").at(-1)?.cfg.persistedEngineTrusted).toBeUndefined()
+		await service.replaceLearnedState("rtl", {
+			engine: learned(-70),
+			occupancy: null,
+			trusted: true,
+		})
+		expect(hostsOf("rtl").at(-1)?.cfg.persistedEngineTrusted).toBe(true)
+		await service.replaceLearnedState("rtl", {
+			engine: learned(-71),
+			occupancy: null,
+		})
+		expect(hostsOf("rtl").at(-1)?.cfg.persistedEngineTrusted).toBeUndefined()
+		await service.replaceLearnedState("rtl", {
+			engine: null,
+			occupancy: null,
+			trusted: true,
+		})
+		expect(hostsOf("rtl").at(-1)?.cfg.persistedEngineTrusted).toBeUndefined()
+		await service.release("rtl", "job:a")
+		await service.stop()
+	})
+
+	it("an engine opened on a loaded state is trusted only when the persistence says so for that state", async () => {
+		for (const trusted of [true, false]) {
+			const { service, hostsOf, mem } = make({ fake: true })
+			mem.engines.set("rtl", learned(-75))
+			const asked: EngineState[] = []
+			mem.persistence.engineTrusted = (_id, state) => {
+				asked.push(state)
+				return trusted
+			}
+			await service.start()
+			await service.acquire("rtl", "job:a")
+			expect(asked).toEqual([learned(-75)])
+			expect(hostsOf("rtl").at(-1)?.cfg.persistedEngine).toEqual(learned(-75))
+			expect(hostsOf("rtl").at(-1)?.cfg.persistedEngineTrusted).toBe(
+				trusted ? true : undefined,
+			)
+			await service.release("rtl", "job:a")
+			await service.stop()
+		}
+	})
+
 	it("an invalid occupancy history starts fresh instead of being imported", async () => {
 		const { service } = make({ fake: true })
 		await service.start()

@@ -676,7 +676,14 @@ export class SpectrumPipeline {
 		const persisted = cfg.persistedEngine
 		if (persisted) {
 			this.floor.importState({ absoluteFloors: persisted.absoluteFloors })
-			this.spurs.importState({ spurs: persisted.spurs })
+			// Trusted: this same receiver's own lines from a resumed strong-key namespace (SpurMap).
+			const trusted = cfg.persistedEngineTrusted === true
+			this.spurs.importState({ spurs: persisted.spurs }, { trusted })
+			// Only lines saved verified: an unflagged one (older file, take-over, adoption) is not.
+			if (trusted)
+				this.spurs.trustLines(
+					(persisted.provisionalSpurs ?? []).filter(l => l.verified === true),
+				)
 			this.detector.importK(
 				persisted.kByRange.map(e => ({
 					key: `${e.startHz}:${e.endHz}`,

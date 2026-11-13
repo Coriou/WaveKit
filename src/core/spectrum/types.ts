@@ -359,6 +359,12 @@ export interface PipelineConfig {
 	/** FFT frame overlap; 0.5 doubles FFT cost (spec § 4.2). Default 0, the measured setting. */
 	overlap?: 0 | 0.5
 	persistedEngine?: EngineState
+	/**
+	 * True only when `persistedEngine` is this same receiver's own state, from a resumed namespace
+	 * of a strong receiver key: its spur and provisional lines load verified (SpurMap trusted
+	 * restore). Absent or false: unverified.
+	 */
+	persistedEngineTrusted?: boolean
 }
 
 /** Persisted per source (§ 8). */
@@ -372,6 +378,13 @@ export interface EngineState {
 		widthBins: number
 		kind: "baseband" | "rf"
 		rfHz?: number
+		/**
+		 * A baseband line verified (LO-confirmed and seen within the TTL) when saved: by credits in
+		 * the saving process, or a trusted restore still standing then. Absent (older files, a
+		 * restored line never re-verified, a legacy adoption or a take-over): unverified. Only a
+		 * verified line of a trusted namespace loads trusted.
+		 */
+		verified?: boolean
 	}[]
 	kByRange: { startHz: number; endHz: number; k: number }[]
 	/** Fast-path spur lines per key, core bins (§ 4.9, Task 7a). Optional: files written before Task 7a still load. */
@@ -380,6 +393,8 @@ export interface EngineState {
 		basebandBin: number
 		widthBins: number
 		comb: boolean
+		/** As `spurs[].verified`: the line was verified when saved; absent = unverified. */
+		verified?: boolean
 	}[]
 }
 

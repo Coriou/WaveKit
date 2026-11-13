@@ -76,6 +76,7 @@ export const PipelineConfigSchema = z.object({
 	shortIntegrationMs: z.number().positive().nullable().optional(),
 	overlap: z.union([z.literal(0), z.literal(0.5)]).optional(),
 	persistedEngine: EngineStateSchema.optional(),
+	persistedEngineTrusted: z.boolean().optional(),
 })
 
 const PendingEpochSchema = z.object({

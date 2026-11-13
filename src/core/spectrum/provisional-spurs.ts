@@ -169,7 +169,8 @@ export class ProvisionalSpurs {
 
 	/**
 	 * Lines `gate` verifies, and restored comb lines whose candidate bins have not expired. A new
-	 * line persists once verified; a lone provisional line only while verified.
+	 * line persists once verified; a lone provisional line only while verified. A line the gate
+	 * verifies now saves `verified: true`; a restored comb line kept unverified saves no flag.
 	 */
 	exportState(gate: LineGate): { provisionalSpurs: Entry[] } {
 		const out: Entry[] = [...this.foreign]
@@ -177,12 +178,15 @@ export class ProvisionalSpurs {
 			for (const l of [...s.comb, ...s.provisional]) {
 				const restored =
 					l.comb && l.imported && gate.alive(key, l.startBin, l.endBin)
-				if (!restored && !gate.verified(key, l.startBin, l.endBin)) continue
+				const verified = gate.verified(key, l.startBin, l.endBin)
+				if (!restored && !verified) continue
 				out.push({
 					key,
 					basebandBin: l.startBin,
 					widthBins: l.endBin - l.startBin,
 					comb: l.comb,
+					// Verified when saved: only such a line can load trusted (absent = unverified).
+					...(verified ? { verified: true } : {}),
 				})
 			}
 		}
@@ -196,7 +200,9 @@ export class ProvisionalSpurs {
 	importState(st: Pick<EngineState, "provisionalSpurs">): void {
 		for (const e of st.provisionalSpurs ?? []) {
 			if (Number(e.key.split(":").at(-1)) !== this.n) {
-				this.foreign.push(e)
+				// Kept for its own FFT size, never verified here: saved again with no flag.
+				const { verified: _verified, ...line } = e
+				this.foreign.push(line)
 				continue
 			}
 			const start = e.basebandBin

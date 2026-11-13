@@ -486,6 +486,11 @@ export interface SpectrumEngineDeps {
 	host?: PipelineHostMode
 	workerUrl?: URL
 	persistedEngine?: EngineState
+	/**
+	 * `persistedEngine` is this same receiver's own state from a resumed strong-key namespace (set
+	 * only by the caller that knows it): its lines load verified. Absent or false: unverified.
+	 */
+	persistedEngineTrusted?: boolean
 	createHost?: (
 		cfg: PipelineConfig,
 		handlers: PipelineHostHandlers,
@@ -554,6 +559,8 @@ export function buildPipelineConfig(
 	persisted?: EngineState,
 	/** WG8: the host bins cap; the summary budget is min(ws.spectrumSummaryBins, cap). Default: the floor. */
 	binsCap: number = PROFILE_BINS_FLOOR,
+	/** `persisted` loads verified (trusted restore); only with `persisted`. */
+	persistedTrusted = false,
 ): PipelineConfig {
 	const sensitivity = tuning.sensitivity ?? s.detection.sensitivity
 	const fftSize =
@@ -590,6 +597,7 @@ export function buildPipelineConfig(
 		shortIntegrationMs: s.detection.shortIntegrationMs,
 		overlap: s.detection.overlap,
 		...(persisted ? { persistedEngine: persisted } : {}),
+		...(persisted && persistedTrusted ? { persistedEngineTrusted: true } : {}),
 	}
 }
 
@@ -669,10 +677,19 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private restarting = false
 	private persisted: EngineState | undefined
 	/**
+	 * `persisted` loads verified: set with the state by the deps or swapLearnedState, and kept
+	 * across a pipeline restart (its export is that same receiver's state: its trusted lines, the
+	 * lines verified in this run, restored ones not expired yet).
+	 */
+	private persistedTrusted = false
+	/**
 	 * Learned state queued by swapLearnedState for the next host (undefined: fresh).
 	 * Applied in createHost, so a restart already in flight picks it up too.
 	 */
-	private learnedSwap: { state: EngineState | undefined } | null = null
+	private learnedSwap: {
+		state: EngineState | undefined
+		trusted: boolean
+	} | null = null
 	// Stream and sample accounting
 	private stream = -1
 	private nextSample = 0
@@ -837,6 +854,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.branchId = `scanner-${deps.sourceId}`
 		this.batchBytes = deps.batchBytes ?? DEFAULT_BATCH_BYTES
 		this.persisted = deps.persistedEngine
+		this.persistedTrusted =
+			deps.persistedEngine !== undefined && deps.persistedEngineTrusted === true
 		this.log = createComponentLogger(
 			deps.logger,
 			`SpectrumEngine:${deps.sourceId}`,
@@ -1451,14 +1470,17 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * Replaces the learned state (spur map, floors, k, provisional spurs) with another
 	 * receiver's, or with nothing (fresh). Resolves the state it replaced (for persisting under
 	 * the previous receiver), or null when there was none. A running pipeline is recreated.
+	 * `trusted`: `next` is this same receiver's own state from a resumed strong-key namespace, so
+	 * its lines load verified (default false: unverified).
 	 */
 	async swapLearnedState(
 		next: EngineState | null,
+		trusted = false,
 	): Promise<EngineState | null> {
 		const previous = await this.exportState().catch(
 			() => this.persisted ?? null,
 		)
-		const swap = { state: next ?? undefined }
+		const swap = { state: next ?? undefined, trusted: next !== null && trusted }
 		this.learnedSwap = swap
 		// A restart already in flight may be past its createHost: wait for it (bounded, 100 x 20 ms
 		// = 2 s, far above a pipeline restart) and restart again until this swap was applied.
@@ -1470,6 +1492,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (this.learnedSwap === swap) {
 			// No pipeline (stopped, failed or not started): the next one starts from it.
 			this.persisted = swap.state
+			this.persistedTrusted = swap.trusted
 			this.learnedSwap = null
 		}
 		return previous
@@ -1486,6 +1509,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const tuning = this.deps.tuning?.() ?? DEFAULT_TUNING
 		if (this.learnedSwap) {
 			this.persisted = this.learnedSwap.state
+			this.persistedTrusted = this.learnedSwap.trusted
 			this.learnedSwap = null
 		}
 		const cfg = buildPipelineConfig(
@@ -1496,6 +1520,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			tuning,
 			this.persisted,
 			this.deps.binsCap?.(),
+			this.persistedTrusted,
 		)
 		this.cfg = cfg
 		// A new host's pipeline numbers its epochs from zero.

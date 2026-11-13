@@ -209,12 +209,19 @@ describe("SpurMap", () => {
 		feed(map, 5, 447_350_000, 6, { rfHz: [447_000_000], baseband: [SPUR_BIN] })
 		const state = map.exportState()
 		expect(state.spurs.filter(s => s.kind === "baseband")).toEqual([
-			{ key: KEY, basebandBin: SPUR_BIN, widthBins: 1, kind: "baseband" },
+			{
+				key: KEY,
+				basebandBin: SPUR_BIN,
+				widthBins: 1,
+				kind: "baseband",
+				verified: true, // confirmed by credits in this map
+			},
 		])
 		const restored = newMap()
 		restored.importState(state)
 		expect(masked(restored)).toEqual([]) // restored lines are unverified
-		expect(restored.exportState()).toEqual(state) // and persisted again until they expire
+		// and persisted again until they expire, unverified (only a line verified when saved is flagged)
+		expect(restored.exportState()).toEqual(unflagged(state))
 		expect(restored.rfCarriers()).toEqual(map.rfCarriers())
 	})
 
@@ -660,6 +667,13 @@ describe("SpurMap RF move veto", () => {
 	}
 })
 
+/** `st` as a map that restored it unverified saves it again: no `verified` flag. */
+function unflagged(
+	st: ReturnType<SpurMap["exportState"]>,
+): ReturnType<SpurMap["exportState"]> {
+	return { spurs: st.spurs.map(({ verified: _v, ...sp }) => sp) }
+}
+
 describe("SpurMap restored candidates age by wall time", () => {
 	/** A state with one confirmed line of `key`, learned by a fresh map. */
 	function persisted(): ReturnType<SpurMap["exportState"]> {
@@ -669,7 +683,13 @@ describe("SpurMap restored candidates age by wall time", () => {
 			lineEpoch(map, e, C + e * 1e6, 2000, { bins: [SPUR_BIN] })
 		const st = map.exportState()
 		expect(st.spurs).toEqual([
-			{ key: KEY, basebandBin: SPUR_BIN, widthBins: 1, kind: "baseband" },
+			{
+				key: KEY,
+				basebandBin: SPUR_BIN,
+				widthBins: 1,
+				kind: "baseband",
+				verified: true, // confirmed by credits in this map
+			},
 		])
 		return st
 	}
@@ -691,7 +711,7 @@ describe("SpurMap restored candidates age by wall time", () => {
 		map.importState(st)
 		clock.t += SPUR_TTL_MS - 1
 		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
-		expect(map.exportState()).toEqual(st)
+		expect(map.exportState()).toEqual(unflagged(st))
 		clock.t += 1
 		expect(map.alive(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
 		const out = new Uint8Array(N)

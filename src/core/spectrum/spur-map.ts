@@ -49,7 +49,18 @@
  *   baseband from RF, and between two such centres a real emission of up to one 12.5 kHz
  *   channel plus the line's width and its ±1-bin skirt has left the line's bins entirely. The
  *   miss rule keeps two real emitters at one offset under far-apart hops from confirming it.
- *   Credits are never persisted: after a restart every line is unverified until re-confirmed.
+ *   Credits are never persisted: after a restart every line is unverified until re-confirmed,
+ *   except a trusted restore (below).
+ * - Trusted restore. Lines restored from a resumed namespace of a strong receiver key (a `unit:`
+ *   key or a strong serial; the caller that knows the namespace and the key decides, never this
+ *   map from the data) are trusted (`importState(…, { trusted: true })`, `trustLines`): each bin
+ *   counts as LO-confirmed at once, so a parked receiver masks the lines it verified before
+ *   without a second centre. It never verifies a new line. A trusted bin counts as seen at the
+ *   import (the key's settled clock then), so it stops masking once unseen for SPUR_TTL_MS of
+ *   that clock, like a confirmed line; never seen since the import, it also loses the trust
+ *   SPUR_TTL_MS of wall time (nowMs) after the import; a miss clears it. Level, lift and protect
+ *   apply as to any verified line. A weak key's state, another receiver's, a take-over or a
+ *   legacy adoption load unverified.
  * - RF move veto. Two steady real carriers exactly one hop apart land in one baseband bin under
  *   both centres (a 775.1 kHz hop at 1 kHz bins moves RF by 775.1 bins, so the carrier at
  *   f + hop sits at the bin the carrier at f held), and no miss comes between them. A credit of
@@ -77,7 +88,8 @@
  *   so one of a gain key never observed again (whose settled clock never advances) leaves within
  *   10 min instead of persisting forever; once re-confirmed it ages like a learned line.
  *
- * Only confirmed candidates and restored ones not yet expired persist (exportState). Bins a
+ * Only confirmed candidates and restored ones not yet expired persist (exportState), a line
+ * verified when saved with `verified: true` (only such a line can load trusted). Bins a
  * mask may not cover (a confirmed real signal there, `protect`) are left unmasked and counted.
  * RF positions are quantised to the key's bin width; an RF entry counts as on when a window bin
  * within ±1 bin of it is on, so carriers that straddle a bin edge under different centres still
@@ -164,6 +176,16 @@ interface KeyState {
 	imported: Uint8Array
 	/** Wall time (nowMs) of the last importState that flagged a restored candidate here. */
 	importedWallMs: number
+	/**
+	 * 1 = a line restored by a trusted import (`importState(…, { trusted: true })`, `trustLines`):
+	 * it counts as LO-confirmed until a miss clears it, it goes unseen for SPUR_TTL_MS of the key's
+	 * settled clock, or (never seen since the import) SPUR_TTL_MS of wall time passes.
+	 */
+	trusted: Uint8Array
+	/** Wall time (nowMs) of the last trusted import here (−∞ none). */
+	trustedWallMs: number
+	/** The key's settled clock at that import: a trusted bin seen after it ages by the clock only. */
+	trustedClockMs: number
 	rf: Map<number, RfEntry>
 	rfConfirmed: Map<
 		number,
@@ -489,7 +511,9 @@ export class SpurMap implements LineGate {
 	/** LineGate: a bin of [startBin − 1, endBin] is confirmed and was seen within the TTL. */
 	verified(key: string, startBin: number, endBin: number): boolean {
 		const s = this.keys.get(key)
-		return s !== undefined && this.verifiedIn(s, startBin, endBin)
+		if (s === undefined) return false
+		this.expireTrusted(s)
+		return this.verifiedIn(s, startBin, endBin)
 	}
 
 	/** LineGate: a candidate bin of [startBin − 1, endBin] has not expired. */
@@ -527,21 +551,35 @@ export class SpurMap implements LineGate {
 		return [...out.values()].sort((a, b) => a.rfHz - b.rfHz)
 	}
 
-	/** Confirmed candidates, and restored ones not yet expired (a new line persists once confirmed). */
+	/**
+	 * Confirmed candidates, and restored ones not yet expired (a new line persists once confirmed).
+	 * A run is split where the bins' verified state changes; a verified run (each bin `active`:
+	 * LO-confirmed within ±1, by credits or a standing trusted restore, and seen within the TTL)
+	 * saves `verified: true`, any other run saves no flag (unverified on load).
+	 */
 	exportState(): Pick<EngineState, "spurs"> {
 		const spurs: EngineState["spurs"] = []
 		const keep = (s: KeyState, i: number): boolean =>
 			s.baseband[i] === 1 && (s.imported[i] === 1 || this.confirmedNear(s, i))
 		for (const [key, s] of this.keys) {
 			this.expireRestored(s)
+			this.expireTrusted(s)
 			for (let i = 0; i < this.fftSize; ) {
 				if (!keep(s, i)) {
 					i++
 					continue
 				}
+				const verified = this.active(s, i)
 				let j = i
-				while (j < this.fftSize && keep(s, j)) j++
-				spurs.push({ key, basebandBin: i, widthBins: j - i, kind: "baseband" })
+				while (j < this.fftSize && keep(s, j) && this.active(s, j) === verified)
+					j++
+				spurs.push({
+					key,
+					basebandBin: i,
+					widthBins: j - i,
+					kind: "baseband",
+					...(verified ? { verified: true } : {}),
+				})
 				i = j
 			}
 			for (const c of s.rfConfirmed.values())
@@ -556,13 +594,23 @@ export class SpurMap implements LineGate {
 		return { spurs }
 	}
 
-	/** Restored baseband lines are candidates with no credits: unverified until re-confirmed. */
-	importState(st: Pick<EngineState, "spurs">): void {
+	/**
+	 * Restored baseband lines are candidates with no credits: unverified until re-confirmed. With
+	 * `trusted` (set only by a caller that knows the state is this same receiver's own, saved under
+	 * a strong receiver key it resumed), a line saved `verified: true` is also a trusted line
+	 * (`trustLines`): verified at once. A line saved without the flag (an older file, a line not
+	 * verified when saved, a legacy adoption or a take-over saved since) stays unverified.
+	 */
+	importState(
+		st: Pick<EngineState, "spurs">,
+		opts?: { trusted?: boolean },
+	): void {
 		const wallMs = this.nowMs()
+		const trusted = opts?.trusted === true
 		for (const sp of st.spurs) {
 			// key = `${fs}:${gainKey}:${fftSize}`; one SpurMap serves one fftSize
-			const binHz = Number(sp.key.split(":")[0]) / this.fftSize
-			if (!Number.isFinite(binHz) || binHz <= 0) continue
+			const binHz = this.binHzOf(sp.key)
+			if (binHz === null) continue
 			const s = this.state(sp.key, binHz)
 			if (sp.kind === "baseband") {
 				for (
@@ -574,6 +622,7 @@ export class SpurMap implements LineGate {
 						this.flag(s, i)
 						s.imported[i] = 1
 						s.importedWallMs = wallMs
+						if (trusted && sp.verified === true) this.trustBin(s, i, wallMs)
 					}
 			} else if (sp.rfHz !== undefined) {
 				s.rfConfirmed.set(Math.round(sp.rfHz / binHz), {
@@ -583,6 +632,61 @@ export class SpurMap implements LineGate {
 				})
 			}
 		}
+	}
+
+	/**
+	 * Lines this same receiver verified before (core bins [startBin, endBin) of `key`, e.g. its
+	 * restored provisional lines), loaded from a trusted import: each bin counts as LO-confirmed
+	 * (it verifies and may mask at once, from one centre), as if seen at the key's settled clock
+	 * now. The level, lift and protect (confirmed real signal) rules apply unchanged. A trusted bin
+	 * stops counting at a miss (an epoch where the line was quiet), once unseen for SPUR_TTL_MS of
+	 * the key's settled clock (like a confirmed line), or, never seen since the import, once
+	 * SPUR_TTL_MS of wall time (nowMs) passed since it. Never call it for state of another
+	 * receiver, of a weak key, or of unknown origin: those load unverified.
+	 */
+	trustLines(
+		lines: readonly { key: string; basebandBin: number; widthBins: number }[],
+	): void {
+		const wallMs = this.nowMs()
+		for (const l of lines) {
+			if (Number(l.key.split(":").at(-1)) !== this.fftSize) continue
+			const binHz = this.binHzOf(l.key)
+			if (binHz === null) continue
+			const s = this.state(l.key, binHz)
+			const end = Math.min(this.fftSize, l.basebandBin + l.widthBins)
+			for (let i = Math.max(0, l.basebandBin); i < end; i++)
+				this.trustBin(s, i, wallMs)
+		}
+	}
+
+	private binHzOf(key: string): number | null {
+		const binHz = Number(key.split(":")[0]) / this.fftSize
+		return Number.isFinite(binHz) && binHz > 0 ? binHz : null
+	}
+
+	private trustBin(s: KeyState, i: number, wallMs: number): void {
+		s.trusted[i] = 1
+		if (s.lastSeenMs[i]! < s.clockMs) s.lastSeenMs[i] = s.clockMs
+		s.trustedWallMs = wallMs
+		s.trustedClockMs = s.clockMs
+	}
+
+	/** Credit-confirmed, or a trusted restored line (trustLines). */
+	private conf(s: KeyState, i: number): boolean {
+		return s.confirmed[i] === 1 || s.trusted[i] === 1
+	}
+
+	/**
+	 * Clears trusted bins not seen since the trusted import once SPUR_TTL_MS of wall time passed
+	 * since it, at the bound itself (a key never observed again keeps no trust past 10 min).
+	 */
+	private expireTrusted(s: KeyState): void {
+		if (s.trustedWallMs === Number.NEGATIVE_INFINITY) return
+		if (this.nowMs() - s.trustedWallMs < SPUR_TTL_MS) return
+		for (let i = 0; i < this.fftSize; i++)
+			if (s.trusted[i] === 1 && !(s.lastSeenMs[i]! > s.trustedClockMs))
+				s.trusted[i] = 0
+		s.trustedWallMs = Number.NEGATIVE_INFINITY
 	}
 
 	private state(key: string, binHz: number): KeyState {
@@ -610,6 +714,9 @@ export class SpurMap implements LineGate {
 				keepMs: new Float64Array(n).fill(Number.NEGATIVE_INFINITY),
 				imported: new Uint8Array(n),
 				importedWallMs: Number.NEGATIVE_INFINITY,
+				trusted: new Uint8Array(n),
+				trustedWallMs: Number.NEGATIVE_INFINITY,
+				trustedClockMs: 0,
 				rf: new Map(),
 				rfConfirmed: new Map(),
 			}
@@ -641,7 +748,7 @@ export class SpurMap implements LineGate {
 			i <= Math.min(this.fftSize - 1, endBin);
 			i++
 		)
-			if (s.confirmed[i] === 1 && s.clockMs - s.lastSeenMs[i]! < SPUR_TTL_MS)
+			if (this.conf(s, i) && s.clockMs - s.lastSeenMs[i]! < SPUR_TTL_MS)
 				return true
 		return false
 	}
@@ -649,9 +756,9 @@ export class SpurMap implements LineGate {
 	/** A bin within ±1 is confirmed (a promoted range carries a ±1-bin skirt). */
 	private confirmedNear(s: KeyState, i: number): boolean {
 		return (
-			s.confirmed[i] === 1 ||
-			(i > 0 && s.confirmed[i - 1] === 1) ||
-			(i + 1 < this.fftSize && s.confirmed[i + 1] === 1)
+			this.conf(s, i) ||
+			(i > 0 && this.conf(s, i - 1)) ||
+			(i + 1 < this.fftSize && this.conf(s, i + 1))
 		)
 	}
 
@@ -685,6 +792,7 @@ export class SpurMap implements LineGate {
 			}
 		}
 		this.expireRestored(s)
+		this.expireTrusted(s)
 	}
 
 	/**
@@ -760,6 +868,7 @@ export class SpurMap implements LineGate {
 				s.epochLoudMs[i]! < SPUR_MISS_ON_FRACTION * obs
 			) {
 				s.centres[i]!.length = 0
+				s.trusted[i] = 0 // quiet under this centre: no receiver line now
 			}
 		}
 		s.epochOnMs.fill(0)

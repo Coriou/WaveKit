@@ -173,6 +173,12 @@ export interface SpectrumPersistence {
 		generation?: number,
 	): Promise<void>
 	loadEngine(sourceId: string): Promise<EngineState | null>
+	/**
+	 * True when `state`, as this persistence's loadEngine returned it, is this same receiver's own
+	 * state from a resumed namespace of a strong receiver key: its lines load verified. Absent or
+	 * false: unverified (the default; untracked and legacy state never qualifies).
+	 */
+	engineTrusted?(sourceId: string, state: EngineState): boolean
 	writeOccupancy(
 		sourceId: string,
 		s: OccupancyState,
@@ -540,10 +546,16 @@ export class SpectrumService extends EventEmitter {
 	 * engine recreates its pipeline with it, and so does one still opening (its load may have read
 	 * the binding before this switch): the open is awaited first. An engine opened later loads from
 	 * persistence. The occupancy history is replaced (validated; another bucket size starts fresh).
+	 * `next.trusted`: the engine state is this same receiver's own, from a resumed namespace of a
+	 * strong receiver key (set by ReceiverLearnedState only): its lines load verified.
 	 */
 	async replaceLearnedState(
 		sourceId: string,
-		next: { engine: EngineState | null; occupancy: OccupancyState | null },
+		next: {
+			engine: EngineState | null
+			occupancy: OccupancyState | null
+			trusted?: boolean
+		},
 	): Promise<void> {
 		const opening = this.opening.get(sourceId)
 		if (opening) await opening.catch(() => undefined)
@@ -560,7 +572,7 @@ export class SpectrumService extends EventEmitter {
 		const entry = this.entries.get(sourceId)
 		if (entry)
 			await entry.engine
-				.swapLearnedState(next.engine)
+				.swapLearnedState(next.engine, next.trusted === true)
 				.catch((err: unknown) =>
 					this.log.warn({ err, sourceId }, "Swapping the learned state failed"),
 				)
@@ -827,6 +839,10 @@ export class SpectrumService extends EventEmitter {
 			logger: this.deps.logger,
 			host: this.deps.engineHost ?? "thread",
 			...(persisted ? { persistedEngine: persisted } : {}),
+			...(persisted &&
+			this.deps.persistence.engineTrusted?.(sourceId, persisted) === true
+				? { persistedEngineTrusted: true }
+				: {}),
 			...(this.deps.hostCentre ? { hostCentre: this.deps.hostCentre } : {}),
 			...(this.deps.createHost ? { createHost: this.deps.createHost } : {}),
 			...(this.deps.profile ? { profile: this.deps.profile } : {}),
