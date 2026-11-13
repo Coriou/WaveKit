@@ -247,6 +247,15 @@ export function qualificationWorld(opts: {
 	 * then runs the same on every run. Off: the event loop's own timing, as before.
 	 */
 	settled?: boolean
+	/**
+	 * Settled only: the recorder's per-turn budget clock (WidebandAnalogRecorder `clock`) advances
+	 * this many ms at each read, instead of standing still (Settled). A drain turn reads it once
+	 * when it starts and once after each slice it demodulated, so with the production
+	 * WIDEBAND_TURN_BUDGET_MS (2 ms) a turn demodulates ceil(2 / step) slices of 25 ms
+	 * (WIDEBAND_SLICE_MS), then defers to its next turn: the recorder lags the live edge as on a
+	 * loaded host, the same on every run.
+	 */
+	recorderClockStepMs?: number
 }) {
 	const dir = makeTmpDir("wk-qualify-")
 	const sources = new FakeSources("rtl", {
@@ -311,7 +320,10 @@ export function qualificationWorld(opts: {
 		now: clock,
 	})
 	const internals = service as unknown as Internals
-	const settle = opts.settled === true ? settledChunks(service) : null
+	const settle =
+		opts.settled === true
+			? settledChunks(service, opts.recorderClockStepMs)
+			: null
 	const visits: VisitLog[] = []
 	const tracks: TrackLog[] = []
 	let chunksFed = 0
@@ -373,9 +385,13 @@ export function qualificationWorld(opts: {
 	const runners: Runners = {
 		idle: (): Promise<unknown> =>
 			Promise.all(
-				[...internals.drivers.values()].map(
-					d => (d as { idle?(): Promise<void> }).idle?.() ?? Promise.resolve(),
-				),
+				[...internals.drivers.values()].map(d => {
+					const idle = (d as { idle?: () => Promise<void> }).idle
+					// A renamed hook would leave the scene unsettled without a word: fail instead.
+					if (typeof idle !== "function")
+						throw new Error("settled: a job runner has no idle()")
+					return idle.call(d)
+				}),
 			),
 		chains: (): unknown[] =>
 			[...internals.drivers.values()].flatMap(d => {
@@ -480,7 +496,7 @@ interface AnalogHandleLike {
 	settled: Promise<unknown>
 }
 
-function settledChunks(service: ScannerService): Settled {
+function settledChunks(service: ScannerService, clockStepMs?: number): Settled {
 	const inFlight = new Set<Promise<unknown>>()
 	const track = <T>(p: Promise<T>): Promise<T> => {
 		const settled = p.then(
@@ -491,9 +507,22 @@ function settledChunks(service: ScannerService): Settled {
 		void settled.finally(() => inFlight.delete(settled))
 		return p
 	}
-	const rec = (service as unknown as { widebandAnalog: RecorderSettling })
+	const rec = (service as unknown as { widebandAnalog?: RecorderSettling })
 		.widebandAnalog
-	rec.clock = () => 0
+	// The private hooks this relies on: a rename fails here, never unsettles the scene silently.
+	if (rec === undefined)
+		throw new Error("settled: the scanner has no wideband recorder")
+	if (typeof rec.clock !== "function")
+		throw new Error("settled: the wideband recorder has no clock")
+	if (typeof rec.deps?.beginAnalog !== "function")
+		throw new Error("settled: the wideband recorder has no deps.beginAnalog")
+	if (clockStepMs === undefined) rec.clock = () => 0
+	else {
+		if (!(clockStepMs > 0))
+			throw new Error("settled: recorderClockStepMs must be positive")
+		let at = 0
+		rec.clock = () => (at += clockStepMs)
+	}
 	const begin = rec.deps.beginAnalog.bind(rec.deps)
 	rec.deps.beginAnalog = input => {
 		const h = begin(input)
@@ -514,7 +543,13 @@ function settledChunks(service: ScannerService): Settled {
 			| { flushBatch?(): void }
 			| undefined
 	return {
-		flush: () => engine()?.flushBatch?.(),
+		flush: () => {
+			const e = engine()
+			if (e === undefined) return
+			if (typeof e.flushBatch !== "function")
+				throw new Error("settled: the spectrum engine has no flushBatch()")
+			e.flushBatch()
+		},
 		async drain(runners, turn) {
 			for (let round = 0; round < SETTLE_ROUNDS; round++) {
 				const before = inFlight.size
@@ -684,6 +719,8 @@ export interface SceneConfig {
 	onChunk?: (atMs: number, centreHz: number) => void
 	/** Each chunk's work settled before the next (qualificationWorld `settled`). */
 	settled?: boolean
+	/** Settled only: the recorder's lagged budget clock (qualificationWorld `recorderClockStepMs`). */
+	recorderClockStepMs?: number
 	/** Called once the world is built, before the service starts (a test's own probes). */
 	onWorld?: (w: ReturnType<typeof qualificationWorld>) => void
 }
@@ -770,6 +807,9 @@ export async function runScene(config: SceneConfig): Promise<SceneReport> {
 		...(config.logger ? { logger: config.logger } : {}),
 		...(config.onChunk ? { onChunk: config.onChunk } : {}),
 		...(config.settled === true ? { settled: true } : {}),
+		...(config.recorderClockStepMs === undefined
+			? {}
+			: { recorderClockStepMs: config.recorderClockStepMs }),
 	})
 	config.onWorld?.(w)
 	try {

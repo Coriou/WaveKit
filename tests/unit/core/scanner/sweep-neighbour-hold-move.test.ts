@@ -33,6 +33,7 @@
  * over's end, 10 s into the ID: the ID split in two files. Synthetic signals only, no wall clock.
  */
 import { describe, expect, it } from "vitest"
+import { WIDEBAND_TURN_BUDGET_MS } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import type { RecordingActivity } from "../../../../src/core/scanner/scheduler.js"
 import { runScene, type Emitter } from "./sweep-qualification-harness.js"
 
@@ -71,6 +72,13 @@ const WHOLE_ID_S = 25
  * apart, RECORD_RECHECK_MS), so the visit has asked the recorder during its hold of the ID's track.
  */
 const MOVE_AFTER_FOLLOW_MS = 500
+/**
+ * The lagged variant's recorder clock step: 2 ms per demodulated 25 ms slice (each read of the
+ * recorder's budget clock), the whole of the production per-turn budget (WIDEBAND_TURN_BUDGET_MS,
+ * 2 ms) as on a loaded host, so each drain turn demodulates one slice and defers the rest to its
+ * next turn: the recorder trails the live edge and its voice answers come late against the move.
+ */
+const LAGGED_CLOCK_STEP_MS = 2
 
 interface SchedulerInternals {
 	visit: {
@@ -105,7 +113,7 @@ interface RecorderInternals {
 const near = (hz: number | undefined, to: number): boolean =>
 	hz !== undefined && Math.abs(hz - to) < SAME_CHANNEL_HZ
 
-async function holdMoveScene(): Promise<{
+async function holdMoveScene(recorderClockStepMs?: number): Promise<{
 	idFiles: number[]
 	movedToNeighbour: boolean
 	report: string
@@ -140,6 +148,7 @@ async function holdMoveScene(): Promise<{
 		// Each chunk's work settled before the next (the harness's `settled`): the landing falls on
 		// the same block of the sample clock on every run, whatever the host's load.
 		settled: true,
+		...(recorderClockStepMs === undefined ? {} : { recorderClockStepMs }),
 		emitters,
 		targets: [
 			{
@@ -286,6 +295,17 @@ describe("a hold that moves to a neighbour's track mid-visit", () => {
 		// The scene exercised the move: the hold sat on the neighbour's track during the ID's visit.
 		expect(movedToNeighbour, report).toBe(true)
 		// One file of the ID from the landing to its end, not two split at the neighbour's end.
+		expect(
+			idFiles.filter(s => s >= WHOLE_ID_S),
+			report,
+		).toHaveLength(1)
+	}, 600_000)
+
+	it("with the recorder lagged (a fixed 2 ms turn budget against a clock that moves 2 ms per slice) the ID is still one file", async () => {
+		expect(WIDEBAND_TURN_BUDGET_MS).toBe(2)
+		const { idFiles, movedToNeighbour, report } =
+			await holdMoveScene(LAGGED_CLOCK_STEP_MS)
+		expect(movedToNeighbour, report).toBe(true)
 		expect(
 			idFiles.filter(s => s >= WHOLE_ID_S),
 			report,

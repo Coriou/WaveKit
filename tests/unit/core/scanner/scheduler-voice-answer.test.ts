@@ -826,15 +826,14 @@ describe('a voice answer still to come ("judging")', () => {
 	 * hop for the voice to its end.
 	 */
 	const VOICE_LAG_MS = 1_000
-	const handedOver = (voiceMs: number) => {
+	const handedOver = (voiceMs: number, lagMs = VOICE_LAG_MS) => {
 		const holdsFrom = 3 * BLOCK_MS
 		const qualifiesAt = holdsFrom + 500
 		let heardFrom: number | null = null
 		const d = drive(
 			(hop, ms) => {
 				if (hop !== 0) return false
-				if (heardFrom === null || ms < heardFrom + VOICE_LAG_MS)
-					return "judging"
+				if (heardFrom === null || ms < heardFrom + lagMs) return "judging"
 				return ms < heardFrom + voiceMs ? voiceAnswer() : false
 			},
 			(hop, s, visit) => {
@@ -859,6 +858,56 @@ describe('a voice answer still to come ("judging")', () => {
 		expect(stay).toBeLessThanOrEqual(
 			qualifiesAt - 3 * BLOCK_MS + 25_000 + RECHECK_MS + BLOCK_MS,
 		)
+	})
+
+	it("voice answered in the very re-check the track qualifies in (no lag): the commitment to the wait's band is tentative, passes to the track by its own voice, and a 25 s voice is kept to its end", () => {
+		// The wait's band is the window's (the neighbour "n", 25 kHz below: recordedTrack with no
+		// hold), so the voice, the qualifying track's own, commits there as a neighbour's; firm, the
+		// track's own voice was never named and it was cut within L.
+		const { stay, qualifiesAt } = handedOver(25_000, 0)
+		// It qualifies at the wait's second re-check.
+		expect(qualifiesAt - 3 * BLOCK_MS).toBe(2 * RECHECK_MS)
+		expect(stay).toBeGreaterThan(L3 + RECHECK_MS)
+		expect(stay).toBeGreaterThanOrEqual(qualifiesAt - 3 * BLOCK_MS + 25_000)
+		expect(stay).toBeLessThanOrEqual(
+			qualifiesAt - 3 * BLOCK_MS + 25_000 + RECHECK_MS + BLOCK_MS,
+		)
+	})
+
+	it("a voice hold started and spent during it: a decoded track that qualifies after is held within what L has left, not under the wait's earlier window", () => {
+		// The wait opens the holds at 150 ms; its first re-check (400 ms) answers voice in the
+		// window's band (the neighbour "n"): the voice hold. The next (650 ms) answers another
+		// transmission: spent, the window cut to what L has left (spendVoice). A track that needs a
+		// decoder qualifies at 900 ms and is decoded, its follow running to the window's end
+		// (maxHoldDeadline): L, not `hold.maxHoldMs` (28 000 ms).
+		const holdsFrom = 3 * BLOCK_MS
+		let phase: "judging" | "voice" | "other" = "judging"
+		const d = drive(
+			hop => {
+				if (hop !== 0) return false
+				if (phase === "judging") return "judging"
+				return phase === "voice"
+					? voiceAnswer(0, hopHz(0) - 25_000)
+					: { voice: "b", quietMs: 0, targetHz: hopHz(0) + 100_000 }
+			},
+			(hop, s, visit) => {
+				if (hop === 0 && visit === 1)
+					s.onTrack(sighting("n", hopHz(0) - 25_000), false, 0)
+			},
+			0,
+			(hop, s, visit, intoMs) => {
+				if (hop !== 0 || visit !== 1) return
+				if (intoMs === holdsFrom + RECHECK_MS) phase = "voice"
+				if (intoMs === holdsFrom + 2 * RECHECK_MS) phase = "other"
+				if (intoMs === holdsFrom + 3 * RECHECK_MS)
+					s.onTrack(sighting("d", hopHz(0) + 50_000), true, 60_000)
+				if (intoMs === holdsFrom + 3 * RECHECK_MS + BLOCK_MS)
+					s.onConfirmed("d", true)
+			},
+		)
+		const stay = d.stayed(0, 1) - COARSE_MS
+		expect(stay).toBeGreaterThan(3 * RECHECK_MS)
+		expect(stay).toBeLessThanOrEqual(L3 + BLOCK_MS)
 	})
 
 	it("a track that qualifies during it and voices 2 s is left when its voice ends, within L", () => {
