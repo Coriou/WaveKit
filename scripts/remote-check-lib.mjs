@@ -56,17 +56,39 @@ const CONTENT_RULES = [
 					return o.every(n => n <= 255) && isLanIpv4(o[0] ?? 0, o[1] ?? 0)
 				})
 				.map(m => m[0]),
-			...[...text.matchAll(/(?<![\w:])f[cde][0-9a-f]{2}:[0-9a-f]{0,4}:/gi)].map(
-				m => m[0],
-			),
+			// The whole address is the token (no zone, no brackets), so a link-local or unique-local
+			// address in the base does not allow a longer one it is a prefix of.
+			...[
+				...text.matchAll(
+					/(?<![\w:])f[cde][0-9a-f]{2}:[0-9a-f]{0,4}:(?:[0-9a-f:]*[0-9a-f])?/gi,
+				),
+			].map(m => m[0]),
 		],
 	},
 	{
+		// A bare name (not a path segment like config/x.local) or the host of a URL
+		// (scheme://[user@]a.b.local[:port]/...); /usr/local/bin has no dot before "local".
 		label: "LAN host name",
+		find: text => [
+			...[
+				...text.matchAll(
+					/(?<![\w.*/-])[a-z0-9][\w-]*\.(?:local|lan)\b(?![.\w-])/gi,
+				),
+			].map(m => m[0]),
+			...[
+				...text.matchAll(
+					/:\/\/(?:[^\s/@]*@)?((?:[a-z0-9][\w-]*\.)+(?:local|lan))(?![.\w-])/gi,
+				),
+			].map(m => m[1] ?? ""),
+		],
+	},
+	{
+		// Six hex pairs joined by one separator, not part of a longer run of pairs.
+		label: "MAC address",
 		find: text =>
 			[
 				...text.matchAll(
-					/(?<![\w.*/-])[a-z0-9][\w-]*\.(?:local|lan)\b(?![.\w-])/gi,
+					/(?<![0-9a-f]|[0-9a-f][:-])[0-9a-f]{2}([:-])(?:[0-9a-f]{2}\1){4}[0-9a-f]{2}(?![0-9a-f]|[:-][0-9a-f])/gi,
 				),
 			].map(m => m[0]),
 	},
@@ -84,9 +106,9 @@ const CONTENT_RULES = [
 	},
 	{
 		// The private agent directory may be named on its own, as may the shared memory link and its
-		// index file that AGENTS.md names (AGENT_LINKS); never anything else inside it.
+		// index file that AGENTS.md names (AGENT_LINKS); anything else inside it only when the base
+		// already holds that whole path (it is public already).
 		label: "private agent path",
-		absolute: true,
 		find: text =>
 			[...text.matchAll(/(?<![\w-])\.agents\/[\w.\/-]*\w/g)]
 				.map(m => m[0])
@@ -380,6 +402,23 @@ export function trimMessage(message, max = MESSAGE_CHARS, lines = 3) {
 	return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
+/** Lines of a failed step's output a verdict keeps and a summary prints, in all. */
+export const TAIL_LINES = 15
+
+/**
+ * The last `lines` lines of a step's output, trimmed like a message: no colour codes, blank lines
+ * or stack frames, each capped at `max` characters.
+ * @param {string} output
+ */
+export function tailLines(output, lines = TAIL_LINES, max = 200) {
+	return plain(output)
+		.split("\n")
+		.map(l => (l.replace(/\r+$/, "").split("\r").pop() ?? "").trim())
+		.filter(l => l.length > 0 && !/^at\s/.test(l))
+		.slice(-lines)
+		.map(l => (l.length > max ? `${l.slice(0, max - 1)}…` : l))
+}
+
 /**
  * A vitest `--reporter=json` report, per file relative to `root`.
  * @param {unknown} report
@@ -499,12 +538,14 @@ export const mmss = s =>
 const WORD = { 0: "PASS", 1: "FAIL", 2: "INFRA" }
 
 /**
- * The summary, at most 30 lines; a FAIL ends with how to force a recheck of the same tree.
+ * The summary, at most 30 lines; a FAIL ends with how to force a recheck of the same tree. The last
+ * lines of a failed step's output (a verdict's `tail`, TAIL_LINES at most in all) are indented
+ * under the line naming that step; an identical tail of the same step is printed once.
  * @param {{
  *   code: 0 | 1 | 2, tree: string, base: string, seconds: number,
- *   static?: { ok: boolean, seconds: number, steps: Record<string, number> } | undefined,
- *   root: ({ ok: boolean, seconds: number, steps: Record<string, number>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[] } | undefined)[],
- *   others?: { name: string, ok: boolean, seconds: number, steps: Record<string, number> }[],
+ *   static?: { ok: boolean, seconds: number, steps: Record<string, number>, tail?: Record<string, string[]> } | undefined,
+ *   root: ({ ok: boolean, seconds: number, steps: Record<string, number>, tail?: Record<string, string[]>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[] } | undefined)[],
+ *   others?: { name: string, ok: boolean, seconds: number, steps: Record<string, number>, tail?: Record<string, string[]> }[],
  *   missing: string[], url: string, runNote: string, notes?: string[],
  * }} s
  */
@@ -516,12 +557,40 @@ export function formatSummary(s) {
 		Object.entries(steps)
 			.filter(([, c]) => c !== 0)
 			.map(([n]) => n)
+	let tailRoom = TAIL_LINES
+	const printed = new Set()
+	/** The tail of step `n` that still fits, `extra` lines (a header) reserved; once per text. */
+	const tailOf = (
+		/** @type {Record<string, string[]> | undefined} */ tail,
+		/** @type {string} */ n,
+		extra = 0,
+	) => {
+		const lines = tail?.[n] ?? []
+		const key = `${n}\0${lines.join("\n")}`
+		if (!lines.length || printed.has(key) || tailRoom - extra < 1) return []
+		printed.add(key)
+		const out = lines.slice(-(tailRoom - extra))
+		tailRoom -= extra + out.length
+		return out
+	}
+	/** A job line, then each failed step's tail under a "  <step>:" line. */
+	const job = (
+		/** @type {string} */ line,
+		/** @type {{ steps: Record<string, number>, tail?: Record<string, string[]> }} */ v,
+	) => {
+		head.push(line)
+		for (const n of bad(v.steps)) {
+			const t = tailOf(v.tail, n, 1)
+			if (t.length) head.push(`  ${n}:`, ...t.map(l => `    ${l}`))
+		}
+	}
 	const st = s.static
-	head.push(
-		st
-			? `static ${st.ok ? "ok" : "FAIL"} ${st.seconds}s${bad(st.steps).length ? `  (${bad(st.steps).join(" ")})` : ""}`
-			: "static MISSING",
-	)
+	if (st)
+		job(
+			`static ${st.ok ? "ok" : "FAIL"} ${st.seconds}s${bad(st.steps).length ? `  (${bad(st.steps).join(" ")})` : ""}`,
+			st,
+		)
+	else head.push("static MISSING")
 	const word = (
 		/** @type {{ ok: boolean, flaky?: unknown[] } | undefined} */ v,
 	) =>
@@ -536,16 +605,19 @@ export function formatSummary(s) {
 		`root ${s.root.map(word).join(" ")}  (${s.root.map(v => (v ? v.seconds : "-")).join(" ")} s)`,
 	)
 	for (const o of s.others ?? [])
-		head.push(
+		job(
 			`${o.name} ${o.ok ? "ok" : "FAIL"} ${o.seconds}s${bad(o.steps).length ? `  (${bad(o.steps).join(" ")})` : ""}`,
+			o,
 		)
 	if (s.missing.length) head.push(`no verdict: ${s.missing.join(", ")}`)
 
+	/** @type {{ file: string, test: string, message: string, detail?: string[] }[]} */
 	const failed = s.root.flatMap((v, i) => [
 		...(v ? bad(v.steps).filter(n => n !== "root-tests") : []).map(n => ({
 			file: `root ${i + 1}`,
 			test: `step ${n}`,
 			message: "",
+			detail: tailOf(v?.tail, n),
 		})),
 		...(v?.failed ?? []),
 	])
@@ -558,7 +630,7 @@ export function formatSummary(s) {
 	let room = SUMMARY_LINES - head.length - tail.length
 	const list = (
 		/** @type {string} */ title,
-		/** @type {{ file: string, test: string, message: string }[]} */ items,
+		/** @type {{ file: string, test: string, message: string, detail?: string[] }[]} */ items,
 		/** @type {boolean} */ withMessage,
 	) => {
 		if (!items.length || room <= 0) return
@@ -566,12 +638,17 @@ export function formatSummary(s) {
 		room--
 		let shown = 0
 		for (const it of items) {
-			const need = withMessage && it.message ? 2 : 1
-			const left = items.length - shown
-			if (shown >= 10 || room - need < (left > 1 ? 1 : 0)) break
+			const msg = withMessage && it.message ? 1 : 0
+			const reserve = items.length - shown > 1 ? 1 : 0
+			if (shown >= 10 || room - 1 - msg < reserve) break
+			const detail = (it.detail ?? []).slice(
+				0,
+				Math.max(0, room - 1 - msg - reserve),
+			)
 			body.push(`  ${it.file}${it.test ? ` > ${it.test}` : ""}`)
-			if (need === 2) body.push(`    ${it.message}`)
-			room -= need
+			if (msg) body.push(`    ${it.message}`)
+			for (const d of detail) body.push(`    ${d}`)
+			room -= 1 + msg + detail.length
 			shown++
 		}
 		if (shown < items.length && room > 0) {
@@ -670,12 +747,21 @@ export function refusal(why, hits) {
 }
 
 /**
- * Paths whose change runs the native job: the Rust crates, and the TypeScript references and
- * tests its "Kernels against the JS reference" step pins the Wasm kernels to (ci.yml's channelizer
- * job): the spectrum pipeline, the wideband NFM demodulator, the analog recorder and its decisions.
+ * Paths whose change runs the native job: the Rust crates, the files that build or install them
+ * (Makefile, the lockfile, this workflow, the esbuild script and its kernel-digest plugin that
+ * stamp dist/*.wasm), and the TypeScript references and tests its "Kernels against the JS
+ * reference" step pins the Wasm kernels to (ci.yml's channelizer job): the spectrum pipeline, the
+ * wideband NFM demodulator, the analog recorder and its decisions. A path missed here only skips
+ * the native job of a remote check; ci.yml still runs it on every pull request and push to main and
+ * stays the backstop.
  */
 export const NATIVE_PREFIXES = [
 	"native/",
+	"Makefile",
+	"pnpm-lock.yaml",
+	".github/workflows/ci-remote.yml",
+	"scripts/build-file.mjs",
+	"scripts/kernel-digest.mjs",
 	"src/core/spectrum/",
 	"src/core/scanner/channel/wideband-nfm",
 	"src/core/scanner/channel/wideband-analog-recorder",
@@ -885,5 +971,5 @@ export function verdictOf(r) {
 }
 
 /**
- * @typedef {{ ok: boolean, seconds: number, steps: Record<string, number>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[], testSeconds?: number, durations?: Record<string, number> }} ShardVerdictT
+ * @typedef {{ ok: boolean, seconds: number, steps: Record<string, number>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[], testSeconds?: number, durations?: Record<string, number>, tail?: Record<string, string[]> }} ShardVerdictT
  */

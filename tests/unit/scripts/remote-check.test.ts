@@ -30,6 +30,7 @@ import {
 	repoSlug,
 	scanHygiene,
 	sweep,
+	tailLines,
 	trimMessage,
 	FILE_OVERHEAD_S,
 	SUMMARY_LINES,
@@ -86,6 +87,69 @@ describe("hygiene scan", () => {
 		).toEqual([])
 	})
 
+	it("takes a whole IPv6 address as the token, so a shorter one in the base allows nothing longer", () => {
+		const c = ":"
+		const scan = (text: string, base: string) =>
+			scanHygiene({
+				changes: [],
+				added: new Map([["src/a.ts", [{ line: 1, text }]]]),
+				denylist: none,
+				inBase: (t, find) => base.includes(t) && find(base).includes(t),
+			}).map(h => h.label)
+		for (const prefix of ["fe80", "fd00"]) {
+			const short = `${prefix}${c}${c}1`
+			const base = `listen [${short}%eth0]${c}80`
+			expect(scan(`host ${short}`, base)).toEqual([])
+			expect(scan(`[${short}]${c}80`, base)).toEqual([])
+			for (const longer of [`${short}${c}2`, `${short}2`, `${short}${c}abcd`])
+				expect(scan(`host ${longer}`, base)).toEqual(["private address"])
+		}
+	})
+
+	it("flags LAN host names inside URLs, not paths", () => {
+		const local = (...p: string[]) => dot(...p, "local")
+		for (const text of [
+			`http${":"}//${local("receiver")}${":"}8080/api`,
+			`ssh${":"}//${dot("box", "lan")}/x`,
+			`ws${":"}//user${"@"}${local("a", "b")}/stream`,
+			`see https${":"}//${local("my", "box")}`,
+		])
+			expect(scanText(text).map(h => h.label)).toContain("LAN host name")
+		for (const text of [
+			"run /usr/local/bin/node",
+			`file${":"}///usr/local/share`,
+			`see https${":"}//${dot("example", "com")}/local`,
+		])
+			expect(scanText(text)).toEqual([])
+	})
+
+	it("flags MAC addresses, allowed when the base holds the same one", () => {
+		const mac = (sep: string, pairs: string[]) => pairs.join(sep)
+		const one = mac(":", ["b8", "27", "eb", "12", "34", "56"])
+		for (const text of [
+			`hw ${one}`,
+			`hw ${mac("-", ["B8", "27", "EB", "12", "34", "56"])}`,
+		])
+			expect(scanText(text).map(h => h.label)).toEqual(["MAC address"])
+		for (const text of [
+			`time 12${":"}34${":"}56`,
+			`bytes ${mac(":", ["01", "02", "03", "04", "05", "06", "07"])}`,
+			`mixed ${["b8", "27", "eb"].join(":")}-${["12", "34", "56"].join("-")}`,
+		])
+			expect(scanText(text)).toEqual([])
+		const scan = (text: string) =>
+			scanHygiene({
+				changes: [],
+				added: new Map([["src/a.ts", [{ line: 1, text }]]]),
+				denylist: none,
+				inBase: (t, find) => find(`mac: ${one}`).includes(t),
+			}).map(h => h.label)
+		expect(scan(`hw ${one}`)).toEqual([])
+		expect(
+			scan(`hw ${mac(":", ["b8", "27", "eb", "12", "34", "57"])}`),
+		).toEqual(["MAC address"])
+	})
+
 	it("flags home directory paths", () => {
 		expect(scanText(`see /${"Users"}/someone/x`)[0]?.label).toBe(
 			"home directory path",
@@ -96,16 +160,31 @@ describe("hygiene scan", () => {
 		expect(scanText("see /usr/local/bin")).toEqual([])
 	})
 
-	it("flags references inside the private agent directory, absolutely", () => {
+	it("flags references inside the private agent directory unless the base holds the whole path", () => {
 		const a = ".agents"
-		const all = () => true
-		const labels = (text: string) =>
+		const baseLine = `see \`${a}/lane-status.md\` and ${a}/memory/notes.md`
+		const labels = (text: string, base = "") =>
 			scanHygiene({
 				changes: [],
 				added: new Map([["docs/x.md", [{ line: 3, text }]]]),
 				denylist: none,
-				inBase: all,
+				inBase: (t, find) => find(base).includes(t),
 			}).map(h => h.label)
+		expect(labels(`see \`${a}/lane-status.md\``, baseLine)).toEqual([])
+		expect(labels(`cat ${a}/memory/notes.md`, baseLine)).toEqual([])
+		expect(labels(`cat ${a}/memory/notes.md.bak`, baseLine)).toEqual([
+			"private agent path",
+		])
+		expect(labels(`cat ${a}/memory`, baseLine)).toEqual([])
+		// A path in the tree is never allowed, whatever the base holds.
+		expect(
+			scanHygiene({
+				changes: [{ path: `${a}/x.md`, status: "A", binary: false, size: 1 }],
+				added: new Map(),
+				denylist: none,
+				inBase: () => true,
+			}).map(h => h.label),
+		).toEqual(["private agent path"])
 		for (const text of [
 			`see \`${a}/lane-status.md\``,
 			`cat ${a}/memory/notes.md`,
@@ -620,6 +699,68 @@ describe("summary", () => {
 		])
 	})
 
+	it("keeps the last 15 trimmed lines of a failed step's output", () => {
+		const out = [
+			...Array.from({ length: 20 }, (_, i) => `\x1b[31mline ${i}\x1b[0m`),
+			"",
+			"    at foo (x.js:1:1)",
+			"progress 10%\rprogress 100%",
+			`${"x".repeat(250)}\r`,
+		].join("\n")
+		const lines = tailLines(out)
+		expect(lines).toHaveLength(15)
+		expect(lines[0]).toBe("line 7")
+		expect(lines.at(-2)).toBe("progress 100%")
+		expect(lines.at(-1)).toBe(`${"x".repeat(199)}…`)
+		expect(tailLines("")).toEqual([])
+	})
+
+	it("prints failed steps' output tails under their lines, 15 lines at most in all", () => {
+		const tail = (n: number, w: string) =>
+			Array.from({ length: n }, (_, i) => `${w} ${i}`)
+		const setup = (tl: string[]) =>
+			shard({
+				ok: false,
+				steps: { install: 1, "root-tests": -1 },
+				tail: { install: tl },
+			})
+		const text = formatSummary({
+			...base,
+			code: 1,
+			static: {
+				ok: false,
+				seconds: 228,
+				steps: { lint: 1, typecheck: 0 },
+				tail: { lint: tail(3, "lint") },
+			},
+			root: [
+				setup(tail(15, "pnpm")),
+				setup(tail(15, "pnpm")),
+				...Array.from({ length: 4 }, () => shard()),
+			],
+		})
+		const lines = text.split("\n")
+		expect(lines.length).toBeLessThanOrEqual(SUMMARY_LINES)
+		expect(lines.slice(1, 6)).toEqual([
+			"static FAIL 228s  (lint)",
+			"  lint:",
+			"    lint 0",
+			"    lint 1",
+			"    lint 2",
+		])
+		const at = lines.indexOf("  root 1 > step install")
+		expect(at).toBeGreaterThan(0)
+		// 4 lines went to lint, so the shard's tail keeps its last 11; the same tail of shard 2 is
+		// not repeated.
+		expect(lines.slice(at + 1, at + 12)).toEqual(
+			tail(15, "pnpm")
+				.slice(-11)
+				.map(l => `    ${l}`),
+		)
+		expect(lines[at + 12]).toBe("  root 2 > step install")
+		expect(lines.filter(l => /^ {4}(lint|pnpm) /.test(l))).toHaveLength(14)
+	})
+
 	it("passes with flaky tests and lists them", () => {
 		const text = formatSummary({
 			...base,
@@ -802,6 +943,11 @@ describe("untracked files and client text", () => {
 			"src/core/scanner/channel/wideband-analog-recorder.ts",
 			"src/core/scanner/channel/recorder-decisions.ts",
 			"tests/unit/core/scanner/wideband-analog-recorder.test.ts",
+			"Makefile",
+			"pnpm-lock.yaml",
+			".github/workflows/ci-remote.yml",
+			"scripts/build-file.mjs",
+			"scripts/kernel-digest.mjs",
 		])
 			expect(commitMessage(["src/a.ts", p])).toBe("ci: remote check [native]")
 		expect(commitMessage(["src/core/scanner/channel/channel-tap.ts"])).toBe(
@@ -1137,6 +1283,22 @@ describe("client with fake git and gh", () => {
 		calls = []
 		const again = await remoteCheck(deps(), [])
 		expect(again.code).toBe(0)
+		expect(w.pushes).toBe(1)
+		expect(calls).toContain(
+			"gh run view 7 --json status,attempt,url,createdAt,updatedAt,jobs -R o/r",
+		)
+	})
+
+	it("drops the rerun mark with a stored run that vanished, so the new run is read", async () => {
+		const cache = join(root, ".remote-check/abcdef012345")
+		fs.mkdirSync(cache, { recursive: true })
+		fs.writeFileSync(
+			join(cache, "state.json"),
+			JSON.stringify({ runId: "99", rerunAttempt: 1 }),
+		)
+		const r = await remoteCheck(deps(), [])
+		// With the stale mark, attempt 1 of the new run would never count as done (code 4).
+		expect(r.code).toBe(0)
 		expect(w.pushes).toBe(1)
 		expect(calls).toContain(
 			"gh run view 7 --json status,attempt,url,createdAt,updatedAt,jobs -R o/r",

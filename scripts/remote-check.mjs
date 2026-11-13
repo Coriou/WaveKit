@@ -160,8 +160,12 @@ export async function remoteCheck(d, argv) {
 	const deadline = t0 + BUDGET_MS
 	const still = (/** @type {string} */ why) =>
 		finish(`remote-check RUNNING  tree ${tree12}: ${why}, call again`, 4)
-	if (state.runId && !ok(() => gh(["run", "view", `${state.runId}`])))
+	// A vanished run takes its rerun mark along: a new run starts at attempt 1 again.
+	if (state.runId && !ok(() => gh(["run", "view", `${state.runId}`]))) {
 		delete state.runId
+		delete state.rerunAttempt
+		save()
+	}
 	if (!state.runId) {
 		const runs = ciRuns(["--branch", branch])
 		const live = runs.find(r => r.status !== "completed")

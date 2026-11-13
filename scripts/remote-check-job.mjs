@@ -7,6 +7,7 @@
 //                                                              files packed by weight, failed files rerun once together
 //
 // <step...> are the step names expected in $RUNNER_TEMP/verdict-steps; a missing one counts as -1.
+// A failed step's last lines ($RUNNER_TEMP/step-<name>.log, trimmed by tailLines) go in `tail`.
 //
 // Time budget of a root job (timeout-minutes 25 = 1500 s), counted from its "Start verdict" step:
 // the setup steps end by 600 s (step.sh, VERDICT_STEPS_S) and this script by VERDICT_END_S =
@@ -25,6 +26,7 @@ import {
 	packShards,
 	parseVitestReport,
 	SHARDS,
+	tailLines,
 } from "./remote-check-lib.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
@@ -193,12 +195,21 @@ function main() {
 			}
 		} else steps["root-tests"] = -1
 	}
+	// The end of each failed step's output (step.sh tees it to $RUNNER_TEMP/step-<name>.log).
+	/** @type {Record<string, string[]>} */
+	const tail = {}
+	for (const [name, code] of Object.entries(steps)) {
+		if (code === 0 || name === "root-tests") continue
+		const lines = tailLines(readOr(`step-${name}.log`))
+		if (lines.length) tail[name] = lines
+	}
 	Object.assign(verdict, {
 		ok: Object.values(steps).every(c => c === 0) && failed.length === 0,
 		seconds: Math.round((Date.now() - startedAt) / 1000),
 		steps,
 		failed,
 		flaky,
+		tail,
 	})
 	verdict["durations"] ??= {}
 	writeFileSync(join(root, "verdict.json"), JSON.stringify(verdict))

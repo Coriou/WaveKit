@@ -61,8 +61,10 @@ does not check the docs: run `node scripts/check-docs.mjs` locally beside it.
 Exit codes: 0 green (a test that failed and then passed on its rerun is listed as flaky, still a
 pass), 1 real failures, 2 infrastructure (the run is kept for inspection), 3 refused (hygiene or
 base), 4 still running (run it again to attach). The runs always conclude as successful on
-GitHub; the verdict is in the summary. Changes to `native/` or to the TypeScript code the Wasm
-kernels are compared with also run the channelizer and kernel tests. Put extra private patterns,
+GitHub; the verdict is in the summary, with the last lines of a failed step's output (lint,
+typecheck, build) under it. Changes to `native/`, its build inputs (`Makefile`, the lockfile, the
+esbuild script) or the TypeScript code the Wasm kernels are compared with also run the channelizer
+and kernel tests. Put extra private patterns,
 one regular expression per line, in `~/.config/wavekit-remote/denylist`. Shards are packed by the
 per-file seconds in `scripts/remote-check-durations.json`; every green check leaves a refreshed
 table in `.remote-check/durations.json`, and a maintainer copies it over the tracked one when the

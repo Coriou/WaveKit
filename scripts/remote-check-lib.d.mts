@@ -39,9 +39,16 @@ export interface ShardVerdict {
 	flaky: Entry[]
 	testSeconds?: number
 	durations?: Record<string, number>
+	tail?: Record<string, string[]>
 }
 
 export const SUMMARY_LINES: number
+export const TAIL_LINES: number
+export function tailLines(
+	output: string,
+	lines?: number,
+	max?: number,
+): string[]
 export const FILE_OVERHEAD_S: number
 export function parseDenylist(read: () => string | undefined): Denylist
 export function addedLines(patch: string): Map<string, AddedLine[]>
@@ -91,7 +98,12 @@ export function formatSummary(s: {
 	base: string
 	seconds: number
 	static?:
-		| { ok: boolean; seconds: number; steps: Record<string, number> }
+		| {
+				ok: boolean
+				seconds: number
+				steps: Record<string, number>
+				tail?: Record<string, string[]>
+		  }
 		| undefined
 	root: (ShardVerdict | undefined)[]
 	others?: {
@@ -99,6 +111,7 @@ export function formatSummary(s: {
 		ok: boolean
 		seconds: number
 		steps: Record<string, number>
+		tail?: Record<string, string[]>
 	}[]
 	missing: string[]
 	url: string
