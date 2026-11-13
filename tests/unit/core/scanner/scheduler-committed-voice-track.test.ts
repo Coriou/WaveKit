@@ -189,7 +189,10 @@ function movedHold(scene: Scene = {}) {
 			25,
 			scene.idObwHz === undefined ? extra : { ...extra, obwHz: scene.idObwHz },
 		)
-	const followA = scene.followedFirst === true ? { followOnAir: true } : {}
+	// The ID's track has the spectrum of analog voice: labelled and followed (`followedFirst`), else
+	// too young to be labelled (voiceLater), so a neighbour's voice may commit the visit to it.
+	const followA =
+		scene.followedFirst === true ? { followOnAir: true } : { voiceLater: true }
 	const tunes = (a: SchedulerAction[]): boolean =>
 		a.some(x => x.type === "tune")
 	s.start()
