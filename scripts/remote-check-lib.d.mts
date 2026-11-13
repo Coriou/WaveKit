@@ -132,7 +132,12 @@ export function sweep(input: {
 	git: (args: string[]) => string
 	gh: (args: string[]) => string
 	remote: string
-	runs: { databaseId: number; headBranch: string; createdAt: string }[]
+	runs: {
+		databaseId: number
+		headBranch: string
+		status: string
+		updatedAt: string
+	}[]
 	now: number
 	maxAgeMs: number
 }): { branches: string[]; runs: number[] }

@@ -540,18 +540,15 @@ export const artifactName = job =>
 
 /**
  * The step names of .github/workflows/ci-remote.yml, in one place. A failed setup step (the
- * runner's tools, the dependency install, the shared build, the Rust toolchain: network and
- * runner trouble) makes the job's verdict `infra`, which the client treats like a missing verdict;
- * only the check steps decide pass or fail.
+ * runner's tools and toolchains: network and runner trouble, never the checked code) makes the
+ * job's verdict `infra`, which the client treats like a missing verdict and reruns once; the same
+ * setup step failing again is a failure. The dependency install and the shared build depend on
+ * the checked code (lockfile, packages), so they are check steps and decide pass or fail.
  */
-export const SETUP_STEPS = [
-	"pip",
-	"corepack",
+export const SETUP_STEPS = ["pip", "corepack", "rust"]
+export const CHECK_STEPS = [
 	"install",
 	"build-shared",
-	"rust",
-]
-export const CHECK_STEPS = [
 	"lint",
 	"typecheck",
 	"build",
@@ -777,15 +774,24 @@ export function repoSlug(url) {
 	)
 }
 
+/** Git's own binary test: a NUL byte in the first 8000 bytes. */
+export const BINARY_PROBE_BYTES = 8000
+
 /**
  * Changed files and added lines between two trees, for scanHygiene. Renames count as an add and a
- * delete, so every line of a moved file is scanned.
+ * delete, so every line of a moved file is scanned. Neither test depends on the tree's
+ * .gitattributes: a file is binary when its blob holds a NUL byte in its first 8000 bytes (files
+ * over 1 MB are refused for their size and not read), and the added lines of every other file are
+ * read with `--text`, so a `-diff` or `binary` attribute cannot hide them from the scan.
  * @param {(args: string[]) => string} git returns stdout
  * @param {string} from
  * @param {string} to
  */
 export function collectChanges(git, from, to) {
-	const diff = (/** @type {string[]} */ a) =>
+	const diff = (
+		/** @type {string[]} */ a,
+		/** @type {string[]} */ paths = [],
+	) =>
 		git([
 			"-c",
 			"core.quotePath=false",
@@ -796,41 +802,59 @@ export function collectChanges(git, from, to) {
 			...a,
 			from,
 			to,
+			...(paths.length ? ["--", ...paths.map(p => `:(literal)${p}`)] : []),
 		])
-	const binary = new Set(
-		diff(["--numstat", "-z"])
-			.split("\0")
-			.filter(l => l.startsWith("-\t-\t"))
-			.map(l => l.slice(4)),
-	)
-	const sizes = new Map(
+	/** @type {Map<string, { type: string, sha: string, size: number }>} */
+	const blobs = new Map(
 		git(["ls-tree", "-r", "-l", "-z", to])
 			.split("\0")
 			.filter(Boolean)
 			.map(l => {
 				const [meta = "", path = ""] = l.split("\t")
-				return [path, Number(meta.trim().split(/\s+/)[3]) || 0]
+				const [, type = "", sha = "", size = ""] = meta.trim().split(/\s+/)
+				return [path, { type, sha, size: Number(size) || 0 }]
 			}),
 	)
+	const isBinary = (/** @type {string} */ path) => {
+		const b = blobs.get(path)
+		if (!b || b.type !== "blob" || b.size > BIG_FILE_BYTES) return false
+		return git(["cat-file", "-p", b.sha])
+			.slice(0, BINARY_PROBE_BYTES)
+			.includes("\0")
+	}
 	const ns = diff(["--name-status", "-z"]).split("\0")
 	const changes = []
 	for (let i = 0; i + 1 < ns.length; i += 2) {
 		const path = ns[i + 1] ?? ""
+		const status = ns[i] ?? ""
 		changes.push({
 			path,
-			status: ns[i] ?? "",
-			binary: binary.has(path),
-			size: sizes.get(path) ?? 0,
+			status,
+			binary: status !== "D" && isBinary(path),
+			size: blobs.get(path)?.size ?? 0,
 		})
 	}
-	return { changes, added: addedLines(diff(["-U0", "--no-color"])) }
+	// Deleted files add no lines; binary and big ones are refused whole.
+	const text = changes
+		.filter(c => c.status !== "D" && !c.binary && c.size <= BIG_FILE_BYTES)
+		.map(c => c.path)
+	// In chunks of 500 paths, well under any argument-length limit; none means no diff at all
+	// (an empty pathspec would diff every file).
+	/** @type {Map<string, { line: number, text: string }[]>} */
+	const added = new Map()
+	for (let i = 0; i < text.length; i += 500)
+		for (const [f, lines] of addedLines(
+			diff(["-U0", "--no-color", "--text"], text.slice(i, i + 500)),
+		))
+			added.set(f, lines)
+	return { changes, added }
 }
 
 // ---------------------------------------------------------------- client text
 
 /** gh run list / view fields the client reads. */
 export const RUN_FIELDS =
-	"databaseId,headBranch,headSha,createdAt,status,workflowName"
+	"databaseId,headBranch,headSha,createdAt,updatedAt,status,workflowName"
 export const VIEW_FIELDS = "status,attempt,url,createdAt,updatedAt,jobs"
 
 /** @type {{ file: string, line: number, label: string }[]} */
@@ -979,31 +1003,36 @@ export function refusals({ git, mb, tree, untracked, denylist }) {
 }
 
 /**
- * Deletes ci/<12 hex> branches and runs older than `maxAgeMs`. A branch's age is its newest run's,
- * else its commit's when that object is local; a branch of unknown age stays. Never throws.
- * @param {{ git: Git, gh: (args: string[]) => string, remote: string, runs: { databaseId: number, headBranch: string, createdAt: string }[], now: number, maxAgeMs: number }} input
+ * Deletes ci/<12 hex> branches and completed runs whose last update is older than `maxAgeMs`. A
+ * run that is not completed (queued, running, or rerun by a call) is never deleted, nor is its
+ * branch. A branch's age is its newest run's last update, else its commit's when that object is
+ * local; a branch of unknown age stays. Never throws.
+ * @param {{ git: Git, gh: (args: string[]) => string, remote: string, runs: { databaseId: number, headBranch: string, status: string, updatedAt: string }[], now: number, maxAgeMs: number }} input
  */
 export function sweep({ git, gh, remote, runs, now, maxAgeMs }) {
 	const old = (/** @type {number} */ t) =>
 		Number.isFinite(t) && t > 0 && now - t > maxAgeMs
+	const done = (/** @type {{ status: string }} */ r) => r.status === "completed"
 	const ls = quiet(() => git(["ls-remote", remote, "refs/heads/ci/*"])) ?? ""
 	const branches = []
 	for (const l of ls.split("\n").filter(Boolean)) {
 		const [sha = "", ref = ""] = l.split("\t")
 		const name = ref.replace("refs/heads/", "")
 		if (!BRANCH_RE.test(name)) continue
-		const times = runs
-			.filter(r => r.headBranch === name)
-			.map(r => Date.parse(r.createdAt))
-		const time = times.length
-			? Math.max(...times)
+		const own = runs.filter(r => r.headBranch === name)
+		if (!own.every(done)) continue
+		const time = own.length
+			? Math.max(...own.map(r => Date.parse(r.updatedAt)))
 			: Number(
 					quiet(() => git(["log", "-1", "--format=%ct", sha]).trim()) || 0,
 				) * 1000
 		if (old(time)) branches.push(name)
 	}
 	const ids = runs
-		.filter(r => BRANCH_RE.test(r.headBranch) && old(Date.parse(r.createdAt)))
+		.filter(
+			r =>
+				BRANCH_RE.test(r.headBranch) && done(r) && old(Date.parse(r.updatedAt)),
+		)
 		.map(r => r.databaseId)
 	for (const b of branches)
 		quiet(() => git(["push", "-q", remote, "--delete", b]))
@@ -1015,19 +1044,28 @@ export function sweep({ git, gh, remote, runs, now, maxAgeMs }) {
  * The verdict of a completed run: exit code and summary from the downloaded verdicts in `dl`.
  * Side files: `<out>/durations.json` (a green run's per-file seconds, in the tracked table's
  * shape) and the flaky ledger under `<home>/<LEDGER_DIR>`. `keep`: leave an INFRA run for its logs.
- * An `infra` verdict (a failed setup step) counts as no verdict and is named with its step.
+ * An `infra` verdict (a failed setup step) counts as no verdict and is named with its step, unless
+ * `setupBefore` (artifact name to the setup step that failed on the attempt before the rerun) holds
+ * the same step for that job: a setup step failing on both attempts is a failure.
  * @param {{
  *   dl: string, expected: string[], notes: string[],
  *   view: { url: string, createdAt: string, updatedAt: string },
  *   tree12: string, key?: string, mb: string, out: string, home: string, now: number,
+ *   setupBefore?: Record<string, string>,
  * }} r
  */
 export function verdictOf(r) {
 	/** @type {Map<string, ShardVerdictT>} */
 	const read = new Map()
+	const notes = [...r.notes]
 	for (const name of r.expected) {
 		const v = readVerdict(join(r.dl, name, "verdict.json"))
-		if (v) read.set(name, v)
+		if (!v) continue
+		const step = v.infra ? setupFailure(v.steps) : undefined
+		if (step !== undefined && r.setupBefore?.[name] === step) {
+			read.set(name, { ...v, ok: false, infra: false })
+			notes.push(`setup failed on both attempts: ${name.slice(8)} ${step}`)
+		} else read.set(name, v)
 	}
 	const infra = [...read]
 		.filter(([, v]) => v.infra)
@@ -1081,7 +1119,7 @@ export function verdictOf(r) {
 		...(r.key ? { key: r.key } : {}),
 		url: r.view.url,
 		runNote: keep ? "kept" : "deleted",
-		notes: r.notes,
+		notes,
 	})
 	return { code, text, keep }
 }

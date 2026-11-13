@@ -90,7 +90,7 @@ export async function remoteCheck(d, argv) {
 	}
 	const refuse = (/** @type {string} */ why, hits = lib.NO_HITS) =>
 		finish(lib.refusal(why, hits), 3)
-	/** @returns {{ databaseId: number, headBranch: string, headSha: string, createdAt: string, status: string }[]} */
+	/** @returns {{ databaseId: number, headBranch: string, headSha: string, createdAt: string, updatedAt: string, status: string }[]} */
 	const ciRuns = (extra = /** @type {string[]} */ ([])) =>
 		JSON.parse(
 			gh(["run", "list", "--limit", "100", ...extra, "--json", lib.RUN_FIELDS]),
@@ -182,7 +182,7 @@ export async function remoteCheck(d, argv) {
 	// this call's own run at the end, and the sweep's runs older than an hour.
 	const branch = `ci/${key}`
 	const stateFile = join(cache, "state.json")
-	/** @type {{ runId?: string, rerunAttempt?: number }} */
+	/** @type {{ runId?: string, rerunAttempt?: number, setupBefore?: Record<string, string> }} */
 	const state =
 		quiet(() => JSON.parse(fs.readFileSync(stateFile, "utf8"))) ?? {}
 	const save = () => fs.writeFileSync(stateFile, JSON.stringify(state))
@@ -193,6 +193,7 @@ export async function remoteCheck(d, argv) {
 	if (state.runId && !ok(() => gh(["run", "view", `${state.runId}`]))) {
 		delete state.runId
 		delete state.rerunAttempt
+		delete state.setupBefore
 		save()
 	}
 	const ours = (/** @type {{ headSha: string }} */ r) =>
@@ -239,8 +240,11 @@ export async function remoteCheck(d, argv) {
 
 	// Wait; jobs without a verdict or with an infra one (a failed setup step) are rerun once, each by
 	// its job id (`--failed` would not pick a job that concluded success without a usable verdict),
-	// and a rerun gh refuses for every job is INFRA at once. A run that vanished was finished by
-	// another call for this key: its stored result, else call again.
+	// unless a real failure is already known: then nothing is rerun and the check fails. A setup
+	// step failing again on the rerun is a failure. A rerun gh refuses is INFRA at once, unless the
+	// run is live again (another call for this key reran it): then this call waits for that rerun.
+	// A run that vanished was finished by another call for this key: its stored result, else call
+	// again.
 	const dl = join(cache, "verdicts")
 	/** @type {{ status: string, attempt: number, url: string, createdAt: string, updatedAt: string, jobs: { name: string, databaseId: number, conclusion: string }[] }} */
 	let view
@@ -259,14 +263,24 @@ export async function remoteCheck(d, argv) {
 			ok(() => gh(["run", "download", runId, "-D", dl, "-p", "verdict-*"]))
 			const jobs = view.jobs.filter(j => j.conclusion !== "skipped")
 			expected = jobs.map(j => lib.artifactName(j.name))
+			const read = new Map(
+				expected.map(n => [n, lib.readVerdict(join(dl, n, "verdict.json"))]),
+			)
 			const missing = jobs.filter(j => {
-				const v = lib.readVerdict(
-					join(dl, lib.artifactName(j.name), "verdict.json"),
-				)
+				const v = read.get(lib.artifactName(j.name))
 				return !v || v.infra
 			})
-			if (missing.length === 0 || state.rerunAttempt !== undefined) break
+			const failed = [...read.values()].some(v => v && !v.infra && !v.ok)
+			if (missing.length === 0 || failed || state.rerunAttempt !== undefined)
+				break
 			state.rerunAttempt = view.attempt
+			/** @type {Record<string, string>} */
+			const setupBefore = {}
+			for (const [n, v] of read) {
+				const step = v?.infra ? lib.setupFailure(v.steps) : undefined
+				if (step) setupBefore[n] = step
+			}
+			state.setupBefore = setupBefore
 			save()
 			// GitHub accepts one rerun request per run at a time: one missing job reruns alone,
 			// several rerun the whole run in one request.
@@ -278,7 +292,12 @@ export async function remoteCheck(d, argv) {
 					: ok(() => gh(["run", "rerun", runId]))
 						? missing
 						: []
-			if (!accepted.length) {
+			const live = () =>
+				quiet(
+					() =>
+						JSON.parse(gh(["run", "view", runId, "--json", "status"])).status,
+				) !== "completed"
+			if (!accepted.length && !live()) {
 				fs.rmSync(stateFile, { force: true })
 				return finish(
 					`remote-check INFRA  tree ${tree12}: rerun refused, run ${view.url} kept`,
@@ -301,6 +320,7 @@ export async function remoteCheck(d, argv) {
 		out: cache,
 		home: d.home,
 		now: d.now(),
+		...(state.setupBefore ? { setupBefore: state.setupBefore } : {}),
 	})
 
 	// Cache (a FAIL too: `rm -r .remote-check/<key>` forces a recheck), then delete the branch and

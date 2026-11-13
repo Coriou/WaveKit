@@ -8,8 +8,9 @@
 //
 // <step...> are the step names expected in $RUNNER_TEMP/verdict-steps; a missing one counts as -1.
 // A failed step's last lines ($RUNNER_TEMP/step-<name>.log, trimmed by tailLines) go in `tail`.
-// A failed setup step (SETUP_STEPS in remote-check-lib.mjs) sets `infra`: the client reruns the job
-// instead of reporting a failure; `ok` speaks for the check steps only.
+// A failed setup step (SETUP_STEPS in remote-check-lib.mjs: runner tools, never the checked code)
+// sets `infra`: the client reruns the job once instead of reporting a failure; `ok` speaks for
+// the check steps only.
 //
 // Time budget of a root job (timeout-minutes 25 = 1500 s), counted from its "Start verdict" step:
 // the setup steps end by 600 s (step.sh, VERDICT_STEPS_S) and this script by VERDICT_END_S =

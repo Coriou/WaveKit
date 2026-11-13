@@ -5,6 +5,7 @@
  *
  * Sensitive-looking inputs are assembled at run time, so this file itself passes the scan.
  */
+import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import { tmpdir } from "node:os"
@@ -581,11 +582,19 @@ describe("exit codes", () => {
 			undefined,
 		)
 		expect(setupFailure({ pip: 0, install: 1, "build-shared": 1 })).toBe(
-			"install",
+			undefined,
 		)
+		expect(setupFailure({ pip: 1, install: -1 })).toBe("pip")
 		expect(setupFailure({ corepack: -1, install: -1 })).toBe("corepack")
 		expect(setupFailure({ rust: 124, channelizer: -1 })).toBe("rust")
 		expect(setupFailure({ "root-tests": 1 })).toBe(undefined)
+	})
+
+	it("keeps only runner tool steps in the setup list: the install and the shared build are checks", () => {
+		expect(SETUP_STEPS).toEqual(["pip", "corepack", "rust"])
+		expect(CHECK_STEPS).toEqual(
+			expect.arrayContaining(["install", "build-shared"]),
+		)
 	})
 
 	it("puts every step of the workflow in exactly one of the setup and check lists", () => {
@@ -911,22 +920,20 @@ describe("durations and sweep", () => {
 			calls.push(`gh ${args.join(" ")}`)
 			return ""
 		}
+		const run = (
+			databaseId: number,
+			headBranch: string,
+			updated: number,
+			status = "completed",
+		) => ({ databaseId, headBranch, status, updatedAt: iso(updated) })
 		const r = sweep({
 			git,
 			gh,
 			remote: "github",
 			runs: [
-				{
-					databaseId: 1,
-					headBranch: "ci/0123456789ab",
-					createdAt: iso(now - 2 * hour),
-				},
-				{
-					databaseId: 2,
-					headBranch: "ci/aaaaaaaaaaaa",
-					createdAt: iso(now - 59 * 60_000),
-				},
-				{ databaseId: 3, headBranch: "main", createdAt: iso(0) },
+				run(1, "ci/0123456789ab", now - 2 * hour),
+				run(2, "ci/aaaaaaaaaaaa", now - 59 * 60_000),
+				run(3, "main", 0),
 			],
 			now,
 			maxAgeMs: hour,
@@ -939,6 +946,65 @@ describe("durations and sweep", () => {
 			"git push -q github --delete ci/0123456789ab",
 			"git push -q github --delete ci/cccccccccccc",
 			"gh run delete 1",
+		])
+	})
+
+	it("ages runs by their last update and never sweeps a run that is not completed, nor its branch", () => {
+		const hour = 3600_000
+		const now = 10 * hour
+		const iso = (t: number) => new Date(t).toISOString()
+		const calls: string[] = []
+		const git = (args: string[]) => {
+			calls.push(`git ${args.join(" ")}`)
+			if (args[0] === "ls-remote")
+				return [
+					"a1\trefs/heads/ci/0123456789ab",
+					"a2\trefs/heads/ci/aaaaaaaaaaaa",
+					"a3\trefs/heads/ci/bbbbbbbbbbbb",
+				].join("\n")
+			return ""
+		}
+		const gh = (args: string[]) => {
+			calls.push(`gh ${args.join(" ")}`)
+			return ""
+		}
+		const r = sweep({
+			git,
+			gh,
+			remote: "github",
+			runs: [
+				// Created hours ago, rerun since: in progress, then completed minutes ago.
+				{
+					databaseId: 1,
+					headBranch: "ci/0123456789ab",
+					status: "in_progress",
+					updatedAt: iso(now - 3 * hour),
+				},
+				{
+					databaseId: 4,
+					headBranch: "ci/0123456789ab",
+					status: "completed",
+					updatedAt: iso(now - 5 * hour),
+				},
+				{
+					databaseId: 2,
+					headBranch: "ci/aaaaaaaaaaaa",
+					status: "completed",
+					updatedAt: iso(now - 10 * 60_000),
+				},
+				{
+					databaseId: 3,
+					headBranch: "ci/bbbbbbbbbbbb",
+					status: "queued",
+					updatedAt: iso(now - 4 * hour),
+				},
+			],
+			now,
+			maxAgeMs: hour,
+		})
+		expect(r).toEqual({ branches: [], runs: [4] })
+		expect(calls.filter(c => / --delete |run delete/.test(c))).toEqual([
+			"gh run delete 4",
 		])
 	})
 })
@@ -956,24 +1022,102 @@ describe("git inputs", () => {
 		const calls: string[][] = []
 		const git = (args: string[]) => {
 			calls.push(args)
-			if (args.includes("--numstat"))
-				return "1\t0\tsrc/a.ts\0-\t-\tdocs/x.bin\0"
-			if (args.includes("--name-status")) return "M\0src/a.ts\0A\0docs/x.bin\0"
+			if (args.includes("--name-status"))
+				return "M\0src/a.ts\0A\0docs/x.bin\0A\0docs/big.txt\0D\0old.ts\0"
 			if (args[0] === "ls-tree")
-				return "100644 blob aa      12\tsrc/a.ts\u0000100644 blob bb 2000000\tdocs/x.bin\0"
+				return [
+					"100644 blob aa      12\tsrc/a.ts",
+					"100644 blob bb     20\tdocs/x.bin",
+					"100644 blob cc 2000000\tdocs/big.txt",
+				].join("\0")
+			if (args[0] === "cat-file") return args[2] === "bb" ? "PNG\0\x01" : "x\n"
 			return "diff --git a/src/a.ts b/src/a.ts\n+++ b/src/a.ts\n@@ -1,0 +2 @@\n+x\n"
 		}
 		const r = collectChanges(git, "base", "tree")
 		expect(r.changes).toEqual([
 			{ path: "src/a.ts", status: "M", binary: false, size: 12 },
-			{ path: "docs/x.bin", status: "A", binary: true, size: 2000000 },
+			{ path: "docs/x.bin", status: "A", binary: true, size: 20 },
+			{ path: "docs/big.txt", status: "A", binary: false, size: 2000000 },
+			{ path: "old.ts", status: "D", binary: false, size: 0 },
 		])
 		expect([...r.added]).toEqual([["src/a.ts", [{ line: 2, text: "x" }]]])
+		// Only the small text file is read whole by the line diff, as text.
+		expect(calls.filter(c => c[0] === "cat-file").map(c => c[2])).toEqual([
+			"aa",
+			"bb",
+		])
+		const lines = calls.find(c => c.includes("-U0")) ?? []
+		expect(lines.includes("--text")).toBe(true)
+		expect(lines.slice(lines.indexOf("--") + 1)).toEqual([":(literal)src/a.ts"])
 		expect(
 			calls
 				.filter(c => c.includes("diff"))
 				.every(c => c.includes("--no-renames")),
 		).toBe(true)
+	})
+})
+
+describe("binaries whatever .gitattributes says", () => {
+	let dir = ""
+	beforeEach(() => {
+		dir = fs.mkdtempSync(join(tmpdir(), "rc-attr-"))
+	})
+	afterEach(() => {
+		fs.rmSync(dir, { recursive: true, force: true })
+	})
+
+	it("finds a binary by its NUL bytes and reads text lines despite diff and -diff attributes", () => {
+		const g = (...args: string[]) =>
+			execFileSync(
+				"git",
+				[
+					"-c",
+					"user.name=t",
+					"-c",
+					`user.email=${at("t", "example.invalid")}`,
+					"-c",
+					"commit.gpgsign=false",
+					...args,
+				],
+				{
+					cwd: dir,
+					encoding: "utf8",
+					env: {
+						...process.env,
+						GIT_CONFIG_GLOBAL: "/dev/null",
+						GIT_CONFIG_NOSYSTEM: "1",
+					},
+				},
+			)
+		g("init", "-q")
+		fs.writeFileSync(join(dir, "keep.txt"), "base\n")
+		g("add", "-A")
+		g("commit", "-q", "-m", "base")
+		const base = g("rev-parse", "HEAD").trim()
+		// The tree's own attributes call the image text and the source binary.
+		fs.writeFileSync(join(dir, ".gitattributes"), "*.png diff\n*.ts -diff\n")
+		fs.writeFileSync(
+			join(dir, "shot.png"),
+			Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0, 0, 0, 0x0d, 0x2b]),
+		)
+		fs.writeFileSync(join(dir, "a.ts"), "export const x = 1\n")
+		g("add", "-A")
+		const tree = g("write-tree").trim()
+		const r = collectChanges(args => g(...args), base, tree)
+		expect(r.changes.map(c => [c.path, c.binary])).toEqual([
+			[".gitattributes", false],
+			["a.ts", false],
+			["shot.png", true],
+		])
+		expect(r.added.get("a.ts")).toEqual([
+			{ line: 1, text: "export const x = 1" },
+		])
+		expect(r.added.has("shot.png")).toBe(false)
+		expect(
+			scanHygiene({ ...r, denylist: none }).filter(h => h.file === "shot.png"),
+		).toEqual([
+			{ file: "shot.png", line: 0, label: "binary file added or changed" },
+		])
 	})
 })
 
@@ -1123,7 +1267,7 @@ describe("client with fake git and gh", () => {
 		...verdict(name),
 		ok: false,
 		infra: true,
-		steps: { pip: 0, install: 1, "root-tests": -1 },
+		steps: { pip: 1, install: -1, "root-tests": -1 },
 	})
 
 	// Commits this client wrote: their tree and parent, as `git log --format=%T %P` prints them.
@@ -1157,9 +1301,11 @@ describe("client with fake git and gh", () => {
 			if (!lines.length) throw new Error("no match")
 			return `${lines.join("\n")}\n`
 		}
-		if (args.includes("diff") && w.binary) {
-			if (args.includes("--numstat")) return `-\t-\t${w.binary}\0`
-			if (args.includes("--name-status")) return `A\0${w.binary}\0`
+		if (w.binary) {
+			if (args.includes("diff") && args.includes("--name-status"))
+				return `A\0${w.binary}\0`
+			if (cmd === "ls-tree") return `100644 blob b1 10\t${w.binary}\0`
+			if (cmd === "cat-file" && a1 === "-p") return "PNG\0\x01"
 		}
 		if (args.includes("diff") && w.patch) {
 			if (args.includes("--name-status")) return "M\0src/a.ts\0"
@@ -1199,6 +1345,7 @@ describe("client with fake git and gh", () => {
 						headBranch: r.branch,
 						headSha: r.sha,
 						createdAt: new Date(r.createdAt).toISOString(),
+						updatedAt: new Date(r.createdAt).toISOString(),
 						status: r.status,
 						workflowName: "CI remote",
 					})),
@@ -1569,21 +1716,77 @@ describe("client with fake git and gh", () => {
 		])
 	})
 
-	it("is INFRA, naming the job and its setup step, when the setup fails again", async () => {
+	it("fails, naming the job and its setup step, when the same setup step fails again", async () => {
 		verdictFor = name =>
 			name === "root (2)" || name === "static"
 				? infraVerdict(name)
 				: verdict(name)
 		const r = await remoteCheck(deps(), [])
-		expect(r.code).toBe(2)
-		expect(r.text).toContain("infra: static install, root-2 install")
-		expect(r.text).toContain("root ok INFRA ok ok ok ok")
-		expect(r.text).not.toContain("FAIL")
-		expect(r.text).toMatch(/run https:.*\/7 {2}\(kept\)/)
+		expect(r.code).toBe(1)
+		expect(r.text).toContain("root ok FAIL ok ok ok ok")
+		expect(r.text).toContain("static FAIL")
+		expect(r.text).toContain("root 2 > step pip")
+		expect(r.text).toContain("setup failed on both attempts: static pip")
+		expect(r.text).toContain("setup failed on both attempts: root-2 pip")
+		expect(r.text).not.toContain("infra:")
 		expect(calls.filter(c => c.startsWith("gh run rerun"))).toEqual([
 			"gh run rerun 7 -R o/r",
 		])
+		expect(deleted()).toEqual(["7"])
+	})
+
+	it("is INFRA, naming the job and its setup step, when another setup step fails on the rerun", async () => {
+		verdictFor = (name, attempt) =>
+			name === "root (2)"
+				? {
+						...infraVerdict(name),
+						steps:
+							attempt === 1
+								? { pip: 1, "root-tests": -1 }
+								: { pip: 0, corepack: 1, "root-tests": -1 },
+					}
+				: verdict(name)
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(2)
+		expect(r.text).toContain("infra: root-2 corepack")
+		expect(r.text).toContain("root ok INFRA ok ok ok ok")
+		expect(r.text).not.toContain("FAIL")
+		expect(r.text).toMatch(/run https:.*\/7 {2}\(kept\)/)
 		expect(deleted()).toEqual([])
+	})
+
+	it("fails a code-caused install failure at once, without a rerun", async () => {
+		verdictFor = name =>
+			name === "root (4)"
+				? {
+						...verdict(name),
+						ok: false,
+						steps: { pip: 0, install: 1, "root-tests": -1 },
+					}
+				: verdict(name)
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(1)
+		expect(r.text).toContain("root 4 > step install")
+		expect(calls.some(c => c.startsWith("gh run rerun"))).toBe(false)
+	})
+
+	it("never reruns once a real failure is known, and still lists the jobs without a verdict", async () => {
+		w.missingFirst = ["static", "root (5)"]
+		verdictFor = name =>
+			name === "root (3)"
+				? {
+						...verdict(name),
+						ok: false,
+						steps: { install: 0, "root-tests": 1 },
+						failed: [{ file: "tests/a.test.ts", test: "t", message: "boom" }],
+					}
+				: verdict(name)
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(1)
+		expect(r.text).toContain("no verdict: static, root-5")
+		expect(r.text).toContain("tests/a.test.ts > t")
+		expect(calls.some(c => c.startsWith("gh run rerun"))).toBe(false)
+		expect(deleted()).toEqual(["7"])
 	})
 
 	it("reruns the whole run in one request when several jobs lack a verdict", async () => {
@@ -1625,7 +1828,46 @@ describe("client with fake git and gh", () => {
 		expect(r.text).toBe(
 			"remote-check INFRA  tree abcdef012345: rerun refused, run https://github.com/o/r/actions/runs/7 kept",
 		)
-		expect(calls.filter(c => c.startsWith("gh run view"))).toHaveLength(1)
+		expect(calls.filter(c => c.startsWith("gh run view"))).toHaveLength(2)
+	})
+
+	it("keeps waiting, not INFRA, when the rerun is refused because another call's rerun is live", async () => {
+		w.missingFirst = ["static"]
+		const base = deps()
+		const d: Deps = {
+			...base,
+			gh: args => {
+				if (args[1] === "rerun") {
+					calls.push(`gh ${args.join(" ")}`)
+					// Another call for this key reran the run first: GitHub refuses a second request.
+					const run = w.runs[0]
+					if (run) {
+						run.attempt++
+						run.status = "in_progress"
+					}
+					w.doneAt = Number.POSITIVE_INFINITY
+					throw new Error("run is already being rerun")
+				}
+				return base.gh(args)
+			},
+		}
+		const r = await remoteCheck(d, [])
+		expect(r.code).toBe(4)
+		expect(r.text).toMatch(
+			/^remote-check RUNNING {2}tree abcdef012345: run .*\/7 still running, call again$/,
+		)
+		expect(w.clock - 1_000_000).toBeLessThanOrEqual(9 * 60_000)
+		const state = JSON.parse(
+			fs.readFileSync(join(root, `.remote-check/${KEY}/state.json`), "utf8"),
+		)
+		expect(state).toMatchObject({ runId: "7", rerunAttempt: 1 })
+		// The other call's rerun ends with every verdict: this call reads it, no second rerun.
+		w.doneAt = 0
+		for (const run of w.runs) run.missing = []
+		calls = []
+		const again = await remoteCheck(deps(), [])
+		expect(again.code).toBe(0)
+		expect(calls.some(c => c.startsWith("gh run rerun"))).toBe(false)
 	})
 
 	it("returns 4 while the run is live and attaches through state.json on the next call", async () => {
