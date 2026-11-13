@@ -9,6 +9,8 @@ export interface Deps {
 	sleep: (ms: number) => Promise<unknown>
 	now: () => number
 	home: string
+	/** The deny-list text; undefined when the file is absent, throws when it is unreadable. */
+	readDenylist: () => string | undefined
 }
 export const defaultDeps: Deps
 export function remoteCheck(

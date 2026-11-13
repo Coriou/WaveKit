@@ -8,6 +8,8 @@
 //
 // <step...> are the step names expected in $RUNNER_TEMP/verdict-steps; a missing one counts as -1.
 // A failed step's last lines ($RUNNER_TEMP/step-<name>.log, trimmed by tailLines) go in `tail`.
+// A failed setup step (SETUP_STEPS in remote-check-lib.mjs) sets `infra`: the client reruns the job
+// instead of reporting a failure; `ok` speaks for the check steps only.
 //
 // Time budget of a root job (timeout-minutes 25 = 1500 s), counted from its "Start verdict" step:
 // the setup steps end by 600 s (step.sh, VERDICT_STEPS_S) and this script by VERDICT_END_S =
@@ -25,6 +27,7 @@ import {
 	classifyShard,
 	packShards,
 	parseVitestReport,
+	setupFailure,
 	SHARDS,
 	tailLines,
 } from "./remote-check-lib.mjs"
@@ -201,6 +204,7 @@ function main() {
 	}
 	Object.assign(verdict, {
 		ok: Object.values(steps).every(c => c === 0) && failed.length === 0,
+		infra: setupFailure(steps) !== undefined,
 		seconds: Math.round((Date.now() - startedAt) / 1000),
 		steps,
 		failed,

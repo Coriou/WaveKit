@@ -5,6 +5,7 @@
  *
  * Sensitive-looking inputs are assembled at run time, so this file itself passes the scan.
  */
+import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -15,6 +16,8 @@ import { remoteCheck, type Deps } from "../../../scripts/remote-check.mjs"
 import {
 	addedLines,
 	artifactName,
+	checkKey,
+	CHECK_STEPS,
 	classifyShard,
 	collectChanges,
 	commitMessage,
@@ -29,6 +32,8 @@ import {
 	parseVitestReport,
 	repoSlug,
 	scanHygiene,
+	setupFailure,
+	SETUP_STEPS,
 	sweep,
 	tailLines,
 	trimMessage,
@@ -194,7 +199,7 @@ describe("hygiene scan", () => {
 		expect(hits.every(h => h.line === 0)).toBe(true)
 	})
 
-	it("flags binaries outside fixtures/ and big files anywhere, for every status but D", () => {
+	it("flags every added or changed binary, fixtures/ included, and big files, for every status but D", () => {
 		const mb2 = 2 * 1024 * 1024
 		const changes: Change[] = [
 			{ path: "docs/capture.bin", status: "A", binary: true, size: 10 },
@@ -207,14 +212,23 @@ describe("hygiene scan", () => {
 			{ path: "docs/gone.bin", status: "D", binary: true, size: mb2 },
 		]
 		const hits = scanHygiene({ changes, added: new Map(), denylist: none })
+		const bin = "binary file added or changed"
 		expect(hits.map(h => `${h.file}: ${h.label}`)).toEqual([
-			"docs/capture.bin: binary file outside fixtures/",
+			`docs/capture.bin: ${bin}`,
 			"tests/big.json: file over 1 MB",
+			`fixtures/iq/small.bin: ${bin}`,
+			`fixtures/iq/huge.bin: ${bin}`,
 			"fixtures/iq/huge.bin: file over 1 MB",
-			"docs/old.png: binary file outside fixtures/",
-			"src/now-binary: binary file outside fixtures/",
+			`docs/old.png: ${bin}`,
+			`src/now-binary: ${bin}`,
 			"src/grown.ts: file over 1 MB",
 		])
+		// A text file under fixtures/ is content-scanned like any other.
+		expect(
+			scanText(`host ${dot(10, 1, 2, 3)}`, none, "fixtures/iq/notes.txt").map(
+				h => h.label,
+			),
+		).toEqual(["private address"])
 	})
 
 	it("allows a built-in rule's token already in the public base as a whole token only", () => {
@@ -270,23 +284,25 @@ describe("hygiene scan", () => {
 		expect(JSON.stringify(hits)).not.toMatch(/secret/i)
 	})
 
-	it("fails closed when the deny-list is unreadable or invalid", () => {
+	it("fails closed when the deny-list is missing, unreadable, invalid or empty", () => {
+		const file = "~/.config/wavekit-remote/denylist"
 		const unreadable = parseDenylist(() => {
 			throw new Error("EACCES")
 		})
-		expect(unreadable).toEqual({ error: "deny-list unreadable" })
+		expect(unreadable).toEqual({ error: `deny-list unreadable: ${file}` })
 		expect(scanText("clean text", unreadable)).toEqual([
-			{ file: "(deny-list)", line: 0, label: "deny-list unreadable" },
+			{ file: "(deny-list)", line: 0, label: `deny-list unreadable: ${file}` },
 		])
 		const invalid = parseDenylist(() => "ok\n(unclosed\n")
-		expect(invalid).toEqual({
-			error: "deny-list line 2 is not a valid expression",
-		})
+		expect(invalid).toEqual({ error: `deny-list invalid line 2: ${file}` })
 		expect(scanText("clean text", invalid)).toHaveLength(1)
 		expect(parseDenylist(() => undefined)).toEqual({
-			patterns: [],
-			missing: true,
+			error: `deny-list missing: create ${file} (one regex per line; see CONTRIBUTING)`,
 		})
+		for (const text of ["", "# only a comment\n\n  \n"])
+			expect(parseDenylist(() => text)).toEqual({
+				error: `deny-list empty: add at least one regex to ${file} (see CONTRIBUTING)`,
+			})
 	})
 
 	it("reads added lines that look like diff headers by the hunk counts", () => {
@@ -552,6 +568,61 @@ describe("exit codes", () => {
 		expect(artifactName("root (3)")).toBe("verdict-root-3")
 		expect(artifactName("static")).toBe("verdict-static")
 	})
+
+	it("counts an infra verdict as no verdict, never as a failure", () => {
+		const infra = { ok: false, infra: true }
+		expect(exitCode({ verdicts: v(ok, infra), expected })).toBe(2)
+		expect(exitCode({ verdicts: v(infra, ok), expected })).toBe(2)
+		expect(exitCode({ verdicts: v(infra, { ok: false }), expected })).toBe(1)
+	})
+
+	it("names the first failed setup step, a missing one too, and ignores check steps", () => {
+		expect(setupFailure({ pip: 0, corepack: 0, install: 0, lint: 1 })).toBe(
+			undefined,
+		)
+		expect(setupFailure({ pip: 0, install: 1, "build-shared": 1 })).toBe(
+			"install",
+		)
+		expect(setupFailure({ corepack: -1, install: -1 })).toBe("corepack")
+		expect(setupFailure({ rust: 124, channelizer: -1 })).toBe("rust")
+		expect(setupFailure({ "root-tests": 1 })).toBe(undefined)
+	})
+
+	it("puts every step of the workflow in exactly one of the setup and check lists", () => {
+		const yml = fs.readFileSync(
+			new URL("../../../.github/workflows/ci-remote.yml", import.meta.url),
+			"utf8",
+		)
+		const named = new Set(
+			[...yml.matchAll(/step\.sh" ([\w-]+) /g)].map(m => m[1] ?? ""),
+		)
+		for (const m of yml.matchAll(
+			/remote-check-job\.mjs (?:verdict|root \$\{\{ matrix\.shard \}\}) (.+)/g,
+		))
+			for (const n of (m[1] ?? "").split(" ")) named.add(n)
+		named.add("root-tests")
+		expect(named.size).toBeGreaterThan(10)
+		for (const n of named)
+			expect([n, SETUP_STEPS.includes(n) !== CHECK_STEPS.includes(n)]).toEqual([
+				n,
+				true,
+			])
+		// The check runs only on pushed ci/** branches: no manual trigger.
+		expect(yml).not.toMatch(/workflow_dispatch/)
+	})
+
+	it("keys a check by its tree and merge base", () => {
+		const tree = "a".repeat(40)
+		const k = checkKey(tree, "b".repeat(40))
+		expect(k).toBe(
+			createHash("sha1")
+				.update(`${tree}${"b".repeat(40)}`)
+				.digest("hex")
+				.slice(0, 12),
+		)
+		expect(k).toMatch(/^[0-9a-f]{12}$/)
+		expect(checkKey(tree, "c".repeat(40))).not.toBe(k)
+	})
 })
 
 describe("summary", () => {
@@ -777,6 +848,34 @@ describe("summary", () => {
 		expect(text.split("\n")[0]).toMatch(/^remote-check INFRA /)
 		expect(text).not.toContain("recheck")
 	})
+
+	it("names infra jobs with their setup step and recheck by key", () => {
+		const text = formatSummary({
+			...base,
+			code: 2,
+			static: undefined,
+			root: [shard(), undefined, ...Array.from({ length: 4 }, () => shard())],
+			infra: [
+				{ name: "static", step: "pip" },
+				{ name: "root-2", step: "install" },
+			],
+		})
+		expect(text.split("\n").slice(1, 4)).toEqual([
+			"static INFRA",
+			"root ok INFRA ok ok ok ok  (200 - 200 200 200 200 s)",
+			"infra: static pip, root-2 install",
+		])
+		expect(
+			formatSummary({
+				...base,
+				code: 1,
+				key: "0123456789ab",
+				root: [shard({ ok: false })],
+			})
+				.split("\n")
+				.at(-1),
+		).toBe("recheck: rm -r .remote-check/0123456789ab")
+	})
 })
 
 describe("durations and sweep", () => {
@@ -935,19 +1034,34 @@ describe("untracked files and client text", () => {
 
 describe("client with fake git and gh", () => {
 	const TREE = "abcdef0123456789abcdef0123456789abcdef01"
-	const BRANCH = "ci/abcdef012345"
 	const MB = "1111111111111111111111111111111111111111"
+	const KEY = checkKey(TREE, MB)
+	const BRANCH = `ci/${KEY}`
 	const JOBS = ["static", ...[1, 2, 3, 4, 5, 6].map(i => `root (${i})`)]
+	const VIEW =
+		"gh run view 7 --json status,attempt,url,createdAt,updatedAt,jobs -R o/r"
 	let root = ""
 	let calls: string[] = []
 
-	type Run = { id: number; status: string; attempt: number; missing: string[] }
+	type Run = {
+		id: number
+		status: string
+		attempt: number
+		missing: string[]
+		branch: string
+		sha: string
+		createdAt: number
+	}
 	interface World {
 		onBase: boolean
+		mb: string
 		runs: Run[]
 		nextId: number
 		pushes: number
+		commits: number
 		rerunFails: boolean
+		// A rerun job writes its verdict this time.
+		rerunHeals: boolean
 		// The status a newly pushed run reports to `run view` until the clock passes `doneAt`.
 		doneAt: number
 		clock: number
@@ -956,8 +1070,12 @@ describe("client with fake git and gh", () => {
 		// A diff of one added line in src/a.ts, and the lines `git grep` finds in the base.
 		patch: string
 		baseLines: string[]
-		// Runs `run view` no longer finds (another call for the tree deleted them).
+		// An untracked binary file the diff adds.
+		binary: string
+		// Runs `run view` no longer finds (another call for the key deleted them).
 		gone: Set<number>
+		// The deny-list text; undefined: absent; an Error: unreadable.
+		denylist: string | undefined | Error
 	}
 	let w: World
 
@@ -966,17 +1084,22 @@ describe("client with fake git and gh", () => {
 		calls = []
 		w = {
 			onBase: true,
+			mb: MB,
 			runs: [],
 			nextId: 7,
 			pushes: 0,
+			commits: 0,
 			rerunFails: false,
+			rerunHeals: false,
 			doneAt: 0,
 			clock: 1_000_000,
 			missingFirst: [],
 			listLag: false,
 			patch: "",
 			baseLines: [],
+			binary: "",
 			gone: new Set(),
+			denylist: "never-matching-word\n",
 		}
 		verdictFor = verdict
 	})
@@ -984,7 +1107,6 @@ describe("client with fake git and gh", () => {
 		fs.rmSync(root, { recursive: true, force: true })
 	})
 
-	let verdictFor = (name: string): object => verdict(name)
 	const verdict = (name: string) =>
 		name === "static"
 			? { ok: true, seconds: 100, steps: { lint: 0 }, failed: [], flaky: [] }
@@ -996,7 +1118,16 @@ describe("client with fake git and gh", () => {
 					flaky: [],
 					durations: {},
 				}
+	let verdictFor: (name: string, attempt: number) => object = verdict
+	const infraVerdict = (name: string) => ({
+		...verdict(name),
+		ok: false,
+		infra: true,
+		steps: { pip: 0, install: 1, "root-tests": -1 },
+	})
 
+	// Commits this client wrote: their tree and parent, as `git log --format=%T %P` prints them.
+	const commitTrees = new Map<string, string>()
 	const git = (args: string[]) => {
 		calls.push(`git ${args.join(" ")}`)
 		const [cmd = "", a1 = ""] = args
@@ -1004,17 +1135,31 @@ describe("client with fake git and gh", () => {
 		if (cmd === "rev-parse") return join(root, "no-index")
 		if (cmd === "remote") return `git${"@"}github.com-alias:o/r.git\n`
 		if (cmd === "write-tree") return `${TREE}\n`
+		if (cmd === "ls-files") return w.binary ? `${w.binary}\0` : ""
 		if (cmd === "merge-base" && a1 === "--is-ancestor") {
 			if (!w.onBase) throw new Error("not an ancestor")
 			return ""
 		}
-		if (cmd === "merge-base") return `${MB}\n`
-		if (cmd === "commit-tree") return "c0ffee\n"
+		if (cmd === "merge-base") return `${w.mb}\n`
+		if (cmd === "commit-tree") {
+			const sha = `c0ffee${w.commits++}`
+			commitTrees.set(sha, `${args[2]} ${args[4]}`)
+			return `${sha}\n`
+		}
+		if (cmd === "log" && a1 === "-1" && args[2] === "--format=%T %P") {
+			const t = commitTrees.get(args[3] ?? "")
+			if (!t) throw new Error("bad object")
+			return `${t}\n`
+		}
 		if (cmd === "grep") {
 			const t = args[args.indexOf("-e") + 1] ?? ""
 			const lines = w.baseLines.filter(l => l.includes(t))
 			if (!lines.length) throw new Error("no match")
 			return `${lines.join("\n")}\n`
+		}
+		if (args.includes("diff") && w.binary) {
+			if (args.includes("--numstat")) return `-\t-\t${w.binary}\0`
+			if (args.includes("--name-status")) return `A\0${w.binary}\0`
 		}
 		if (args.includes("diff") && w.patch) {
 			if (args.includes("--name-status")) return "M\0src/a.ts\0"
@@ -1022,12 +1167,16 @@ describe("client with fake git and gh", () => {
 				return `diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,0 +2 @@\n+${w.patch}\n`
 		}
 		if (cmd === "push" && !args.includes("--delete")) {
+			const [sha = "", ref = ""] = (args.at(-1) ?? "").split(":")
 			w.pushes++
 			w.runs.push({
 				id: w.nextId++,
 				status: "in_progress",
 				attempt: 1,
 				missing: [...w.missingFirst],
+				branch: ref.replace("refs/heads/", ""),
+				sha,
+				createdAt: w.clock,
 			})
 		}
 		return ""
@@ -1036,22 +1185,30 @@ describe("client with fake git and gh", () => {
 	const gh = (args: string[]) => {
 		calls.push(`gh ${args.join(" ")}`)
 		const [, verb = "", id = ""] = args
-		const run = w.runs.find(r => String(r.id) === id)
 		if (verb === "list") {
-			const branch = args.includes("--branch")
+			const b = args.includes("--branch")
+				? args[args.indexOf("--branch") + 1]
+				: undefined
 			return JSON.stringify(
-				(branch && w.listLag ? [] : w.runs)
+				(b && w.listLag ? [] : w.runs)
+					.filter(r => !b || r.branch === b)
 					.slice()
 					.reverse()
 					.map(r => ({
 						databaseId: r.id,
-						headBranch: BRANCH,
-						createdAt: new Date(w.clock).toISOString(),
+						headBranch: r.branch,
+						headSha: r.sha,
+						createdAt: new Date(r.createdAt).toISOString(),
 						status: r.status,
 						workflowName: "CI remote",
 					})),
 			)
 		}
+		// A job id is its run's id times 100 plus its index.
+		const job = verb === "rerun" ? Number(args[args.indexOf("--job") + 1]) : NaN
+		const run = w.runs.find(r =>
+			Number.isNaN(job) ? String(r.id) === id : r.id === Math.floor(job / 100),
+		)
 		if (!run || w.gone.has(run.id)) throw new Error(`run ${id} not found`)
 		if (verb === "view") {
 			if (w.clock >= w.doneAt) run.status = "completed"
@@ -1063,7 +1220,7 @@ describe("client with fake git and gh", () => {
 				updatedAt: "2026-01-01T00:04:00Z",
 				jobs: JOBS.map((name, i) => ({
 					name,
-					databaseId: 100 + i,
+					databaseId: run.id * 100 + i,
 					conclusion: "success",
 				})),
 			})
@@ -1076,13 +1233,17 @@ describe("client with fake git and gh", () => {
 				fs.mkdirSync(art, { recursive: true })
 				fs.writeFileSync(
 					join(art, "verdict.json"),
-					JSON.stringify(verdictFor(name)),
+					JSON.stringify(verdictFor(name, run.attempt)),
 				)
 			}
 			return ""
 		}
 		if (verb === "rerun") {
 			if (w.rerunFails) throw new Error("cannot rerun")
+			if (w.rerunHeals)
+				run.missing = Number.isNaN(job)
+					? []
+					: run.missing.filter(n => n !== JOBS[job % 100])
 			run.attempt++
 			run.status = "in_progress"
 			return ""
@@ -1102,9 +1263,15 @@ describe("client with fake git and gh", () => {
 		},
 		now: () => w.clock,
 		home: root,
+		readDenylist: () => {
+			if (w.denylist instanceof Error) throw w.denylist
+			return w.denylist
+		},
 	})
 	const network = () =>
 		calls.filter(c => /^gh |^git (fetch|push|ls-remote)/.test(c))
+	const deleted = () =>
+		calls.filter(c => c.startsWith("gh run delete")).map(c => c.split(" ")[3])
 
 	it("reads the slug from an SSH host alias and passes a green tree", async () => {
 		const r = await remoteCheck(deps(), [])
@@ -1112,13 +1279,13 @@ describe("client with fake git and gh", () => {
 		expect(r.text.split("\n")[0]).toMatch(
 			/^remote-check PASS {2}tree abcdef012345 {2}base 11111111/,
 		)
-		expect(r.text).toContain(
-			"denylist missing: ~/.config/wavekit-remote/denylist",
-		)
 		const ghCalls = calls.filter(c => c.startsWith("gh "))
 		expect(ghCalls.every(c => c.endsWith("-R o/r"))).toBe(true)
 		expect(calls).toContain(
 			`git commit-tree --no-gpg-sign ${TREE} -p ${MB} -m ci: remote check`,
+		)
+		expect(calls).toContain(
+			`git push -q --force github c0ffee0:refs/heads/${BRANCH}`,
 		)
 		expect(calls).toContain(`git push -q github --delete ${BRANCH}`)
 		expect(w.runs).toEqual([])
@@ -1132,7 +1299,54 @@ describe("client with fake git and gh", () => {
 		expect(sweeps).toHaveLength(2)
 		expect(sweeps[0]).toBeLessThan(push)
 		expect(sweeps[1]).toBeGreaterThan(push)
-		expect(r.text.split("\n")).toHaveLength(4)
+		expect(r.text.split("\n")).toHaveLength(3)
+	})
+
+	it.each<[string, string | undefined | Error, string]>([
+		[
+			"missing",
+			undefined,
+			"deny-list missing: create ~/.config/wavekit-remote/denylist (one regex per line; see CONTRIBUTING)",
+		],
+		[
+			"unreadable",
+			new Error("EACCES"),
+			"deny-list unreadable: ~/.config/wavekit-remote/denylist",
+		],
+		[
+			"invalid",
+			"fine\n(open\n",
+			"deny-list invalid line 2: ~/.config/wavekit-remote/denylist",
+		],
+		[
+			"empty",
+			"# nothing yet\n\n",
+			"deny-list empty: add at least one regex to ~/.config/wavekit-remote/denylist (see CONTRIBUTING)",
+		],
+	])(
+		"refuses with exit 3 and one line when the deny-list is %s",
+		async (_, text, why) => {
+			w.denylist = text
+			const r = await remoteCheck(deps(), [])
+			expect(r).toEqual({
+				code: 3,
+				text: `remote-check REFUSED  ${why}, nothing pushed`,
+			})
+			expect(network()).toEqual([])
+			expect(w.pushes).toBe(0)
+		},
+	)
+
+	it("refuses an untracked binary under fixtures/ without pushing", async () => {
+		w.binary = "fixtures/iq/new.bin"
+		fs.mkdirSync(join(root, "fixtures/iq"), { recursive: true })
+		fs.writeFileSync(join(root, w.binary), Buffer.from([0, 1, 2, 0]))
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(3)
+		expect(r.text).toBe(
+			"remote-check REFUSED  tree abcdef012345: hygiene, nothing pushed\n  fixtures/iq/new.bin binary file added or changed",
+		)
+		expect(w.pushes).toBe(0)
 	})
 
 	it("writes a green run's per-file seconds into its cache directory, silently", async () => {
@@ -1149,7 +1363,7 @@ describe("client with fake git and gh", () => {
 		expect(
 			JSON.parse(
 				fs.readFileSync(
-					join(root, ".remote-check/abcdef012345/durations.json"),
+					join(root, `.remote-check/${KEY}/durations.json`),
 					"utf8",
 				),
 			),
@@ -1198,21 +1412,44 @@ describe("client with fake git and gh", () => {
 		expect(calls.filter(c => c.startsWith("gh "))).toEqual([])
 	})
 
-	it("answers a second call for the same tree from the cache without the network", async () => {
+	it("answers a second call for the same key from the cache without the network", async () => {
 		const first = await remoteCheck(deps(), [])
 		calls = []
 		const second = await remoteCheck(deps(), [])
 		expect(second).toEqual(first)
 		expect(network()).toEqual([])
 		expect(calls.some(c => c.startsWith("git fetch"))).toBe(false)
-		// The stored result is for github/main only: another base is checked again.
+		// Another merge base is another key: checked again.
+		w.mb = "2".repeat(40)
 		w.onBase = false
 		const other = await remoteCheck(deps(), ["HEAD~1"])
 		expect(other.code).toBe(3)
 	})
 
+	it("keys the branch and the cache by tree and merge base, so two bases never share a run", async () => {
+		const mb2 = "2".repeat(40)
+		const key2 = checkKey(TREE, mb2)
+		expect(key2).not.toBe(KEY)
+		// A live run of the first base must not be attached to by a check against the second.
+		w.doneAt = Number.POSITIVE_INFINITY
+		expect((await remoteCheck(deps(), [])).code).toBe(4)
+		w.mb = mb2
+		calls = []
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(4)
+		expect(w.pushes).toBe(2)
+		expect(w.runs.map(x => x.branch)).toEqual([BRANCH, `ci/${key2}`])
+		expect(calls).toContain(
+			`git commit-tree --no-gpg-sign ${TREE} -p ${mb2} -m ci: remote check`,
+		)
+		expect(fs.existsSync(join(root, `.remote-check/${key2}/state.json`))).toBe(
+			true,
+		)
+		expect(deleted()).toEqual([])
+	})
+
 	it("stores a FAIL too and says how to force a recheck", async () => {
-		const failing = (name: string) =>
+		verdictFor = name =>
 			name === "root (2)"
 				? {
 						...verdict(name),
@@ -1221,38 +1458,91 @@ describe("client with fake git and gh", () => {
 						failed: [{ file: "tests/x.test.ts", test: "t", message: "no" }],
 					}
 				: verdict(name)
-		verdictFor = failing
 		const first = await remoteCheck(deps(), [])
 		expect(first.code).toBe(1)
 		expect(first.text.split("\n").at(-1)).toBe(
-			"recheck: rm -r .remote-check/abcdef012345",
+			`recheck: rm -r .remote-check/${KEY}`,
 		)
 		calls = []
 		expect(await remoteCheck(deps(), [])).toEqual(first)
 		expect(network()).toEqual([])
 	})
 
-	it("keeps an INFRA run, then deletes it and pushes a new run on the next call", async () => {
+	it("keeps an INFRA run, then reattaches by its commit and reruns its missing job", async () => {
 		w.missingFirst = ["root (3)"]
 		const r = await remoteCheck(deps(), [])
 		expect(r.code).toBe(2)
 		expect(r.text).toContain("no verdict: root-3")
 		expect(r.text).toMatch(/run https:.*\/7 {2}\(kept\)/)
+		expect(calls).toContain("gh run rerun --job 703 -R o/r")
 		expect(w.runs.map(x => [x.id, x.status, x.attempt])).toEqual([
 			[7, "completed", 2],
 		])
-		expect(
-			fs.existsSync(join(root, ".remote-check/abcdef012345/state.json")),
-		).toBe(false)
-		w.missingFirst = []
+		expect(fs.existsSync(join(root, `.remote-check/${KEY}/state.json`))).toBe(
+			false,
+		)
+		w.rerunHeals = true
 		calls = []
 		const again = await remoteCheck(deps(), [])
 		expect(again.code).toBe(0)
-		expect(w.pushes).toBe(2)
-		const del = calls.indexOf("gh run delete 7 -R o/r")
-		const push = calls.findIndex(c => c.startsWith("git push -q --force"))
-		expect(del).toBeGreaterThanOrEqual(0)
-		expect(del).toBeLessThan(push)
+		expect(w.pushes).toBe(1)
+		expect(calls).toContain("gh run rerun --job 703 -R o/r")
+		expect(deleted()).toEqual(["7"])
+	})
+
+	it("never deletes another call's young completed run; reuses one of its key, else pushes", async () => {
+		// A completed run on this branch whose commit is another tree (or unknown here), one on
+		// another check's branch, both younger than the hour.
+		const foreign = (id: number, branch: string, sha: string): Run => ({
+			id,
+			status: "completed",
+			attempt: 1,
+			missing: [],
+			branch,
+			sha,
+			createdAt: w.clock - 10 * 60_000,
+		})
+		commitTrees.set("d00d", `${"9".repeat(40)} ${MB}`)
+		w.runs = [
+			foreign(3, BRANCH, "d00d"),
+			foreign(4, BRANCH, "unknown"),
+			foreign(5, "ci/0123456789ab", "beef"),
+		]
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(0)
+		expect(w.pushes).toBe(1)
+		expect(deleted()).toEqual(["7"])
+		expect(w.runs.map(x => x.id)).toEqual([3, 4, 5])
+		// A completed run of this key (its commit is this tree on this merge base) is reused.
+		commitTrees.set("cafe", `${TREE} ${MB}`)
+		w.runs.push(foreign(6, BRANCH, "cafe"))
+		fs.rmSync(join(root, ".remote-check"), { recursive: true })
+		calls = []
+		const reused = await remoteCheck(deps(), [])
+		expect(reused.code).toBe(0)
+		expect(w.pushes).toBe(1)
+		expect(calls).toContain(VIEW.replace(" 7 ", " 6 "))
+		expect(deleted()).toEqual(["6"])
+		expect(w.runs.map(x => x.id)).toEqual([3, 4, 5])
+	})
+
+	it("attaches to the pushed run by its commit, not an older run of the branch", async () => {
+		commitTrees.set("d00d", `${"9".repeat(40)} ${MB}`)
+		w.runs = [
+			{
+				id: 3,
+				status: "completed",
+				attempt: 1,
+				missing: [],
+				branch: BRANCH,
+				sha: "d00d",
+				createdAt: w.clock,
+			},
+		]
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(0)
+		expect(calls).toContain(VIEW)
+		expect(calls.some(c => c.startsWith("gh run view 3 "))).toBe(false)
 	})
 
 	it("deletes the run of a failure, a failed non-test step's too, and writes no durations", async () => {
@@ -1265,8 +1555,46 @@ describe("client with fake git and gh", () => {
 		expect(r.text).toContain("actions/runs/7  (deleted)")
 		expect(w.runs).toEqual([])
 		expect(
-			fs.existsSync(join(root, ".remote-check/abcdef012345/durations.json")),
+			fs.existsSync(join(root, `.remote-check/${KEY}/durations.json`)),
 		).toBe(false)
+	})
+
+	it("reruns a job whose setup step failed instead of failing, and passes when it heals", async () => {
+		verdictFor = (name, attempt) =>
+			name === "root (2)" && attempt === 1 ? infraVerdict(name) : verdict(name)
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(0)
+		expect(calls.filter(c => c.startsWith("gh run rerun"))).toEqual([
+			"gh run rerun --job 702 -R o/r",
+		])
+	})
+
+	it("is INFRA, naming the job and its setup step, when the setup fails again", async () => {
+		verdictFor = name =>
+			name === "root (2)" || name === "static"
+				? infraVerdict(name)
+				: verdict(name)
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(2)
+		expect(r.text).toContain("infra: static install, root-2 install")
+		expect(r.text).toContain("root ok INFRA ok ok ok ok")
+		expect(r.text).not.toContain("FAIL")
+		expect(r.text).toMatch(/run https:.*\/7 {2}\(kept\)/)
+		expect(calls.filter(c => c.startsWith("gh run rerun"))).toEqual([
+			"gh run rerun 7 -R o/r",
+		])
+		expect(deleted()).toEqual([])
+	})
+
+	it("reruns the whole run in one request when several jobs lack a verdict", async () => {
+		w.missingFirst = ["static", "root (4)", "root (6)"]
+		w.rerunHeals = true
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(0)
+		expect(calls.filter(c => c.startsWith("gh run rerun"))).toEqual([
+			"gh run rerun 7 -R o/r",
+		])
+		expect(calls.some(c => c.includes("--failed"))).toBe(false)
 	})
 
 	it("returns 4 at the deadline while the pushed run has not appeared, then attaches", async () => {
@@ -1280,7 +1608,7 @@ describe("client with fake git and gh", () => {
 		const r = await remoteCheck(d, [])
 		expect(r).toEqual({
 			code: 4,
-			text: "remote-check RUNNING  tree abcdef012345: run of ci/abcdef012345 not started yet, call again",
+			text: `remote-check RUNNING  tree abcdef012345: run of ${BRANCH} not started yet, call again`,
 		})
 		expect(w.clock - 1_000_000).toBeLessThanOrEqual(9 * 60_000)
 		w.listLag = false
@@ -1308,10 +1636,7 @@ describe("client with fake git and gh", () => {
 			/^remote-check RUNNING {2}tree abcdef012345: run .*\/7 still running, call again$/,
 		)
 		const state = JSON.parse(
-			fs.readFileSync(
-				join(root, ".remote-check/abcdef012345/state.json"),
-				"utf8",
-			),
+			fs.readFileSync(join(root, `.remote-check/${KEY}/state.json`), "utf8"),
 		)
 		expect(state).toEqual({ runId: "7" })
 		w.doneAt = 0
@@ -1320,13 +1645,11 @@ describe("client with fake git and gh", () => {
 		const again = await remoteCheck(deps(), [])
 		expect(again.code).toBe(0)
 		expect(w.pushes).toBe(1)
-		expect(calls).toContain(
-			"gh run view 7 --json status,attempt,url,createdAt,updatedAt,jobs -R o/r",
-		)
+		expect(calls).toContain(VIEW)
 	})
 
 	it("drops the rerun mark with a stored run that vanished, so the new run is read", async () => {
-		const cache = join(root, ".remote-check/abcdef012345")
+		const cache = join(root, `.remote-check/${KEY}`)
 		fs.mkdirSync(cache, { recursive: true })
 		fs.writeFileSync(
 			join(cache, "state.json"),
@@ -1336,9 +1659,7 @@ describe("client with fake git and gh", () => {
 		// With the stale mark, attempt 1 of the new run would never count as done (code 4).
 		expect(r.code).toBe(0)
 		expect(w.pushes).toBe(1)
-		expect(calls).toContain(
-			"gh run view 7 --json status,attempt,url,createdAt,updatedAt,jobs -R o/r",
-		)
+		expect(calls).toContain(VIEW)
 	})
 
 	it("asks to call again, not INFRA, when the attached run vanishes without a stored result", async () => {
@@ -1359,7 +1680,7 @@ describe("client with fake git and gh", () => {
 
 	it("prints the stored result when the run vanishes while it waits", async () => {
 		w.doneAt = Number.POSITIVE_INFINITY
-		const cache = join(root, ".remote-check/abcdef012345")
+		const cache = join(root, `.remote-check/${KEY}`)
 		const d: Deps = {
 			...deps(),
 			sleep: async ms => {

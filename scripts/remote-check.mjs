@@ -2,12 +2,13 @@
 // One-command full check on GitHub runners: `node scripts/remote-check.mjs [<base>]` (default github/main).
 //
 // Commits the working tree (tracked changes and untracked, non-ignored files) on its merge base with
-// the base, with a temporary index, refuses to push anything that fails the hygiene scan, pushes
-// ci/<tree12>, waits for .github/workflows/ci-remote.yml, then deletes the branch and the run. The
-// merge base must already be on GitHub, so only the scanned diff is ever published. Idempotent by
-// tree: a second call prints the stored result offline or attaches to the live run. stdout is only
-// the summary, also written to .remote-check/summary.txt. Docs are not checked here: run
-// scripts/check-docs.mjs locally.
+// the base, with a temporary index, refuses to push anything that fails the hygiene scan (the
+// private deny-list is required), pushes ci/<key> (key: 12 hex of sha1(tree + merge base)), waits
+// for .github/workflows/ci-remote.yml, then deletes the branch and its own run. The merge base must
+// already be on GitHub, so only the scanned diff is ever published. Idempotent by key: a second
+// call prints the stored result offline or attaches to the run of the same tree and merge base.
+// stdout is only the summary, also written to .remote-check/summary.txt. Docs are not checked here:
+// run scripts/check-docs.mjs locally.
 //
 // Exit: 0 green (flaky tests included), 1 failures, 2 infrastructure (run kept), 3 refused,
 // 4 still running after 9 minutes: call again.
@@ -51,6 +52,16 @@ export const defaultDeps = {
 	sleep: ms => new Promise(r => setTimeout(r, ms)),
 	now: () => Date.now(),
 	home: homedir(),
+	/** The deny-list text; undefined when the file is absent, throws when it is unreadable. */
+	readDenylist: () => {
+		try {
+			return fs.readFileSync(join(homedir(), lib.DENYLIST_PATH), "utf8")
+		} catch (e) {
+			if (/** @type {{ code?: string }} */ (e).code === "ENOENT")
+				return undefined
+			throw e
+		}
+	},
 }
 
 /** @param {typeof defaultDeps} d @param {string[]} argv */
@@ -79,7 +90,7 @@ export async function remoteCheck(d, argv) {
 	}
 	const refuse = (/** @type {string} */ why, hits = lib.NO_HITS) =>
 		finish(lib.refusal(why, hits), 3)
-	/** @returns {{ databaseId: number, headBranch: string, createdAt: string, status: string }[]} */
+	/** @returns {{ databaseId: number, headBranch: string, headSha: string, createdAt: string, status: string }[]} */
 	const ciRuns = (extra = /** @type {string[]} */ ([])) =>
 		JSON.parse(
 			gh(["run", "list", "--limit", "100", ...extra, "--json", lib.RUN_FIELDS]),
@@ -87,6 +98,10 @@ export async function remoteCheck(d, argv) {
 			(/** @type {{ workflowName: string, headBranch: string }} */ r) =>
 				r.workflowName === WORKFLOW && lib.BRANCH_RE.test(r.headBranch),
 		)
+
+	// The deny-list is required: missing, unreadable, empty or invalid refuses before anything else.
+	const denylist = lib.parseDenylist(d.readDenylist)
+	if ("error" in denylist) return refuse(denylist.error)
 
 	// The tree and the cache lookup, offline. An untracked file over 1 MB is refused before hashing.
 	const untracked = lib.listUntracked(git, root)
@@ -98,35 +113,44 @@ export async function remoteCheck(d, argv) {
 		)
 	const tree = lib.writeTree(git)
 	tree12 = tree.slice(0, 12)
-	const cache = join(out, tree12)
-	// A stored result answers only the base it was checked against ("<code>\t<base>").
+	// A stored result answers its key (tree and merge base): first from the local base ref, offline,
+	// then again after the fetch when that moved the merge base.
 	const base = argv[0] ?? `${REMOTE}/main`
-	const codeFile = join(cache, "code")
-	const cached = () => {
-		const [hit, hitBase] = (
-			quiet(() => fs.readFileSync(codeFile, "utf8")) ?? ""
-		)
-			.trim()
-			.split("\t")
-		const text = quiet(() =>
-			fs.readFileSync(join(cache, "summary.txt"), "utf8"),
-		)
-		return hit && hitBase === base && text
-			? finish(text.trimEnd(), Number(hit), 1)
-			: undefined
+	const mergeBase = () => quiet(() => git(["merge-base", "HEAD", base]).trim())
+	const at = (/** @type {string} */ m) => {
+		const key = lib.checkKey(tree, m)
+		const cache = join(out, key)
+		return { key, cache, codeFile: join(cache, "code") }
 	}
-	const hit = cached()
-	if (hit) return hit
+	const cachedAt = (/** @type {ReturnType<typeof at>} */ k) => {
+		const hit = (quiet(() => fs.readFileSync(k.codeFile, "utf8")) ?? "")
+			.trim()
+			.split("\t")[0]
+		const text = quiet(() =>
+			fs.readFileSync(join(k.cache, "summary.txt"), "utf8"),
+		)
+		return hit && text ? finish(text.trimEnd(), Number(hit), 1) : undefined
+	}
+	const localMb = mergeBase()
+	const early = localMb ? cachedAt(at(localMb)) : undefined
+	if (early) return early
 
 	// The merge base with the base must be on GitHub, or the push would publish private history.
 	const ref = /^github\/(.+)$/.exec(base)?.[1] ?? "main"
 	const pub = `${REMOTE}/${ref}`
 	if (!ok(() => git(["fetch", "-q", REMOTE, ref])))
 		return refuse(`cannot fetch ${pub}`)
-	const mb = quiet(() => git(["merge-base", "HEAD", base]).trim())
+	const mb = mergeBase()
 	if (!mb) return refuse(`base ${base} not found or unrelated to HEAD`)
 	if (!ok(() => git(["merge-base", "--is-ancestor", mb, pub])))
 		return refuse(`merge base ${mb.slice(0, 8)} of ${base} is not on ${pub}`)
+	const k = at(mb)
+	const { key, cache, codeFile } = k
+	const cached = () => cachedAt(k)
+	if (mb !== localMb) {
+		const hit = cached()
+		if (hit) return hit
+	}
 	fs.mkdirSync(cache, { recursive: true })
 
 	// Refusals: the workflow must be in the tree, and the diff must pass the hygiene scan.
@@ -135,12 +159,6 @@ export async function remoteCheck(d, argv) {
 	const notes = []
 	if (untracked.length)
 		notes.push(lib.untrackedLine(untracked.map(u => u.path)))
-	const denyFile = join(d.home, lib.DENYLIST_PATH)
-	const denylist = lib.parseDenylist(() =>
-		fs.existsSync(denyFile) ? fs.readFileSync(denyFile, "utf8") : undefined,
-	)
-	if ("missing" in denylist)
-		notes.push(`denylist missing: ~/${lib.DENYLIST_PATH}`)
 	const scan = lib.refusals({ git, mb, tree, untracked, denylist })
 	if (scan.hits.length) return refuse(`tree ${tree12}: hygiene`, scan.hits)
 
@@ -158,9 +176,11 @@ export async function remoteCheck(d, argv) {
 		)
 	sweepOld()
 
-	// Attach to this tree's run (state.json) or a live run of its branch; otherwise delete the
-	// branch's completed runs (an earlier INFRA) and push a new one once a slot is free.
-	const branch = `ci/${tree12}`
+	// Attach to this key's run (state.json), else to a run of its branch whose commit is this tree on
+	// this merge base (live, or completed: another call's or a kept INFRA run, its verdict reused);
+	// otherwise push a new one once a slot is free. Runs of other calls are never deleted here: only
+	// this call's own run at the end, and the sweep's runs older than an hour.
+	const branch = `ci/${key}`
 	const stateFile = join(cache, "state.json")
 	/** @type {{ runId?: string, rerunAttempt?: number }} */
 	const state =
@@ -175,12 +195,14 @@ export async function remoteCheck(d, argv) {
 		delete state.rerunAttempt
 		save()
 	}
+	const ours = (/** @type {{ headSha: string }} */ r) =>
+		quiet(() => git(["log", "-1", "--format=%T %P", r.headSha]).trim()) ===
+		`${tree} ${mb}`
 	if (!state.runId) {
-		const runs = ciRuns(["--branch", branch])
-		const live = runs.find(r => r.status !== "completed")
-		if (live) state.runId = String(live.databaseId)
+		const runs = ciRuns(["--branch", branch]).filter(r => r.headSha && ours(r))
+		const found = runs.find(r => r.status !== "completed") ?? runs[0]
+		if (found) state.runId = String(found.databaseId)
 		else {
-			for (const r of runs) ok(() => gh(["run", "delete", `${r.databaseId}`]))
 			while (ciRuns().filter(r => r.status !== "completed").length >= 2) {
 				if (d.now() + POLL_MS > deadline)
 					return still("two other checks are live, waiting for a slot")
@@ -203,7 +225,7 @@ export async function remoteCheck(d, argv) {
 				if (d.now() + 5000 > deadline)
 					return still(`run of ${branch} not started yet`)
 				await d.sleep(5000)
-				const r = ciRuns(["--branch", branch])[0]
+				const r = ciRuns(["--branch", branch]).find(x => x.headSha === commit)
 				if (r) state.runId = String(r.databaseId)
 			}
 			if (!state.runId) {
@@ -215,8 +237,10 @@ export async function remoteCheck(d, argv) {
 	}
 	const runId = String(state.runId)
 
-	// Wait; jobs without a verdict are rerun once, and a rerun gh refuses is INFRA at once. A run
-	// that vanished was finished by another call for this tree: its stored result, else call again.
+	// Wait; jobs without a verdict or with an infra one (a failed setup step) are rerun once, each by
+	// its job id (`--failed` would not pick a job that concluded success without a usable verdict),
+	// and a rerun gh refuses for every job is INFRA at once. A run that vanished was finished by
+	// another call for this key: its stored result, else call again.
 	const dl = join(cache, "verdicts")
 	/** @type {{ status: string, attempt: number, url: string, createdAt: string, updatedAt: string, jobs: { name: string, databaseId: number, conclusion: string }[] }} */
 	let view
@@ -235,17 +259,26 @@ export async function remoteCheck(d, argv) {
 			ok(() => gh(["run", "download", runId, "-D", dl, "-p", "verdict-*"]))
 			const jobs = view.jobs.filter(j => j.conclusion !== "skipped")
 			expected = jobs.map(j => lib.artifactName(j.name))
-			const missing = jobs.filter(
-				j => !fs.existsSync(join(dl, lib.artifactName(j.name), "verdict.json")),
-			)
+			const missing = jobs.filter(j => {
+				const v = lib.readVerdict(
+					join(dl, lib.artifactName(j.name), "verdict.json"),
+				)
+				return !v || v.infra
+			})
 			if (missing.length === 0 || state.rerunAttempt !== undefined) break
 			state.rerunAttempt = view.attempt
 			save()
-			const how =
+			// GitHub accepts one rerun request per run at a time: one missing job reruns alone,
+			// several rerun the whole run in one request.
+			const accepted =
 				missing.length === 1
-					? ["--job", `${missing[0]?.databaseId}`]
-					: ["--failed"]
-			if (!ok(() => gh(["run", "rerun", runId, ...how]))) {
+					? missing.filter(j =>
+							ok(() => gh(["run", "rerun", "--job", `${j.databaseId}`])),
+						)
+					: ok(() => gh(["run", "rerun", runId]))
+						? missing
+						: []
+			if (!accepted.length) {
 				fs.rmSync(stateFile, { force: true })
 				return finish(
 					`remote-check INFRA  tree ${tree12}: rerun refused, run ${view.url} kept`,
@@ -263,15 +296,16 @@ export async function remoteCheck(d, argv) {
 		notes,
 		view,
 		tree12,
+		key,
 		mb,
 		out: cache,
 		home: d.home,
 		now: d.now(),
 	})
 
-	// Cache (a FAIL too: `rm -r .remote-check/<tree12>` forces a recheck), then delete the branch
-	// and the run unless it is kept (INFRA: the sweep takes it). An INFRA run is never reattached:
-	// state.json goes, and the next call deletes it and pushes a new one.
+	// Cache (a FAIL too: `rm -r .remote-check/<key>` forces a recheck), then delete the branch and
+	// this call's run unless it is kept (INFRA: the sweep takes it after an hour). state.json goes;
+	// the next call finds the kept run by its commit and reruns its jobs without a verdict once.
 	fs.writeFileSync(join(cache, "summary.txt"), `${text}\n`)
 	if (code !== 2) fs.writeFileSync(codeFile, `${code}\t${base}`)
 	fs.rmSync(dl, { recursive: true, force: true })

@@ -4,7 +4,9 @@ name: CI remote
 # records its exit code instead of failing and every job is continue-on-error, so the run always
 # concludes success; the result is in each job's verdict artifact, written by
 # scripts/remote-check-job.mjs. Each job's steps share one budget from its "Start verdict" step
-# (VERDICT_STEPS_S, enforced by step.sh) that ends minutes before timeout-minutes.
+# (VERDICT_STEPS_S, enforced by step.sh) that ends minutes before timeout-minutes. Every step.sh
+# name is in SETUP_STEPS (a failure makes the verdict infra: rerun, never a FAIL) or CHECK_STEPS
+# in scripts/remote-check-lib.mjs.
 on:
   push:
     branches: ["ci/**"]

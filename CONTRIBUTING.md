@@ -52,21 +52,29 @@ image build breaks.
 the root suite in six shards on GitHub runners, so your machine stays free. The base defaults to
 `github/main` and must be on the public remote. The command squashes your working tree (tracked
 changes plus untracked files) into one commit with a fixed message, scans the diff for private
-data and refuses on a hit, pushes it to a temporary `ci/<hash>` branch, waits up to 9 minutes and
+data and refuses on a hit, pushes it to a temporary `ci/<hash>` branch (the hash keys the tree and
+its merge base, so checks against different bases never share a run), waits up to 9 minutes and
 prints a short summary (also in `.remote-check/summary.txt`). Run it in the foreground with a
-600 s tool timeout. It deletes the branch and the run afterwards, and repeating it for the same
-tree prints the stored result offline, a failure included: `rm -r .remote-check/<hash>` (the last
-line of a failed summary) forces a recheck. It does not check the docs: run
-`node scripts/check-docs.mjs` locally beside it.
+600 s tool timeout. It deletes the branch and its own run afterwards (never another check's run;
+runs older than an hour are swept), and repeating it for the same tree and merge base prints the
+stored result offline, a failure included: `rm -r .remote-check/<hash>` (the last line of a failed
+summary) forces a recheck. It does not check the docs: run `node scripts/check-docs.mjs` locally
+beside it.
 
 Exit codes: 0 green (a test that failed and then passed on its rerun is listed as flaky, still a
 pass), 1 real failures, 2 infrastructure (the run is kept for an hour for inspection), 3 refused
-(hygiene or base), 4 still running (call it again to attach). The runs always conclude as
-successful on GitHub; the verdict is in the summary, with the last lines of a failed step's output
-(lint, typecheck, build) under it. Changes to `native/`, its build inputs (`Makefile`, the
-lockfile, the esbuild script) or the TypeScript code the Wasm kernels are compared with also run
-the channelizer and kernel tests. Put extra private patterns, one regular expression per line, in
-`~/.config/wavekit-remote/denylist`. Shards are packed by the per-file seconds in
+(hygiene, base or deny-list), 4 still running (call it again to attach). A job whose setup failed
+(Python packages, Corepack, the install, the shared build, the Rust toolchain) is infrastructure,
+not a failure: it is rerun once, and the summary names it (`infra: <job> <step>`) if it fails
+again. Binary files are refused when the check adds or changes them, under `fixtures/` too; commit
+them first through a normal pull request. The runs always conclude as successful on GitHub; the
+verdict is in the summary, with the last lines of a failed step's output (lint, typecheck, build)
+under it. Changes to `native/`, its build inputs (`Makefile`, the lockfile, the esbuild script) or
+the TypeScript code the Wasm kernels are compared with also run the channelizer and kernel tests.
+The private deny-list `~/.config/wavekit-remote/denylist` is required: one regular expression per
+line (case-insensitive; blank and `#` lines skipped), at least one pattern, for names and addresses
+of your own the built-in rules do not know. The command refuses while it is missing, unreadable,
+empty or holds an invalid line. Shards are packed by the per-file seconds in
 `scripts/remote-check-durations.json` (files of 5 s or more), which the command never writes. A
 green check leaves its own per-file seconds in `.remote-check/<hash>/durations.json`; refreshing
 the tracked table means copying that file over it by hand, only on explicit request. A flaky

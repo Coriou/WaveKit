@@ -3,6 +3,7 @@
 // the client's git-side steps. Nothing here spawns git, gh or vitest itself: the steps take the
 // client's injected `git`/`gh`, so every rule is unit tested without a network.
 
+import { createHash } from "node:crypto"
 import * as fs from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -159,20 +160,24 @@ const CONTENT_RULES = [
 export const DENYLIST_PATH = ".config/wavekit-remote/denylist"
 
 /**
- * The private deny-list: one regular expression per line, blank and `#` lines skipped.
- * A missing file is an empty deny-list marked `missing`; an unreadable file or an invalid line
- * refuses the push.
+ * The private deny-list: one regular expression per line, blank and `#` lines skipped. Required:
+ * a missing, unreadable or empty file (no pattern) or an invalid line is an error, and the client
+ * refuses with it before anything else.
  * @param {() => string | undefined} read returns the text, undefined when the file is absent, throws when unreadable
- * @returns {{ patterns: RegExp[], missing?: boolean } | { error: string }}
+ * @returns {{ patterns: RegExp[] } | { error: string }}
  */
 export function parseDenylist(read) {
+	const file = `~/${DENYLIST_PATH}`
 	let text
 	try {
 		text = read()
 	} catch {
-		return { error: "deny-list unreadable" }
+		return { error: `deny-list unreadable: ${file}` }
 	}
-	if (text === undefined) return { patterns: [], missing: true }
+	if (text === undefined)
+		return {
+			error: `deny-list missing: create ${file} (one regex per line; see CONTRIBUTING)`,
+		}
 	const patterns = []
 	const lines = text.split("\n")
 	for (let i = 0; i < lines.length; i++) {
@@ -181,9 +186,13 @@ export function parseDenylist(read) {
 		try {
 			patterns.push(new RegExp(line, "i"))
 		} catch {
-			return { error: `deny-list line ${i + 1} is not a valid expression` }
+			return { error: `deny-list invalid line ${i + 1}: ${file}` }
 		}
 	}
+	if (!patterns.length)
+		return {
+			error: `deny-list empty: add at least one regex to ${file} (see CONTRIBUTING)`,
+		}
 	return { patterns }
 }
 
@@ -236,7 +245,8 @@ export function addedLines(patch) {
  * Every hygiene hit of a diff. Fails closed: a deny-list error is itself a hit. A built-in rule's
  * token is allowed when `inBase` finds it in the public base as a whole token of that rule (it
  * gets the rule's `find` to check the base lines with); deny-list and absolute rules never are.
- * Binaries are allowed under fixtures/ only; the size limit applies everywhere.
+ * A binary file the diff adds or changes is refused anywhere, fixtures/ included (an untracked one
+ * is in the diff too; an unchanged one is not); the size limit applies everywhere.
  * @param {{
  *   changes: { path: string, status: string, binary: boolean, size: number }[],
  *   added: Map<string, { line: number, text: string }[]>,
@@ -298,8 +308,7 @@ export function scanHygiene({
 	}
 	for (const c of changes) {
 		if (c.status === "D") continue
-		if (c.binary && !c.path.startsWith("fixtures/"))
-			hit(c.path, 0, "binary file outside fixtures/")
+		if (c.binary) hit(c.path, 0, "binary file added or changed")
 		if (c.size > BIG_FILE_BYTES) hit(c.path, 0, "file over 1 MB")
 	}
 	for (const [file, lines] of added)
@@ -530,15 +539,57 @@ export const artifactName = job =>
 	`verdict-${job.replace(/ \((\d+)\)$/, "-$1")}`
 
 /**
- * Exit code of a check: 1 any real failure, 2 a job without a verdict, 0 green (flaky tests
- * included: a file that passed on its rerun is a pass).
- * @param {{ verdicts: Map<string, { ok: boolean }>, expected: string[] }} input
+ * The step names of .github/workflows/ci-remote.yml, in one place. A failed setup step (the
+ * runner's tools, the dependency install, the shared build, the Rust toolchain: network and
+ * runner trouble) makes the job's verdict `infra`, which the client treats like a missing verdict;
+ * only the check steps decide pass or fail.
+ */
+export const SETUP_STEPS = [
+	"pip",
+	"corepack",
+	"install",
+	"build-shared",
+	"rust",
+]
+export const CHECK_STEPS = [
+	"lint",
+	"typecheck",
+	"build",
+	"workspace-tests",
+	"root-tests",
+	"channelizer",
+	"kernels",
+	"kernels-js",
+]
+
+/**
+ * The first setup step that did not exit 0 (a missing one counts), or undefined.
+ * @param {Record<string, number>} steps
+ */
+export const setupFailure = steps =>
+	SETUP_STEPS.find(n => n in steps && steps[n] !== 0)
+
+/**
+ * Exit code of a check: 1 any real failure, 2 a job without a verdict or with an `infra` one, 0
+ * green (flaky tests included: a file that passed on its rerun is a pass).
+ * @param {{ verdicts: Map<string, { ok: boolean, infra?: boolean }>, expected: string[] }} input
  */
 export function exitCode({ verdicts, expected }) {
-	if ([...verdicts.values()].some(v => !v.ok)) return 1
-	if (expected.some(name => !verdicts.has(name))) return 2
+	const real = [...verdicts.values()].filter(v => !v.infra)
+	if (real.some(v => !v.ok)) return 1
+	if (expected.some(name => !verdicts.has(name) || verdicts.get(name)?.infra))
+		return 2
 	return 0
 }
+
+/**
+ * The key of a check: 12 hex of sha1(tree + merge base), the ci/<key> branch and the
+ * .remote-check/<key> cache directory, so checks of one tree against different bases never share
+ * a run or a result.
+ * @param {string} tree @param {string} mb
+ */
+export const checkKey = (tree, mb) =>
+	createHash("sha1").update(`${tree}${mb}`).digest("hex").slice(0, 12)
 
 /**
  * The weight table of a whole run: its shards' per-file seconds merged, files of 5 s or more.
@@ -581,9 +632,13 @@ const WORD = { 0: "PASS", 1: "FAIL", 2: "INFRA" }
  *   root: ({ ok: boolean, seconds: number, steps: Record<string, number>, tail?: Record<string, string[]>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[] } | undefined)[],
  *   others?: { name: string, ok: boolean, seconds: number, steps: Record<string, number>, tail?: Record<string, string[]> }[],
  *   missing: string[], url: string, runNote: string, notes?: string[],
+ *   infra?: { name: string, step: string }[], key?: string,
  * }} s
  */
 export function formatSummary(s) {
+	const infra = s.infra ?? []
+	const isInfra = (/** @type {string} */ name) =>
+		infra.some(i => i.name === name)
 	const head = [
 		`remote-check ${WORD[s.code]}  tree ${s.tree}  base ${s.base.slice(0, 8)}  ${mmss(s.seconds)}`,
 	]
@@ -620,12 +675,15 @@ export function formatSummary(s) {
 			`static ${st.ok ? "ok" : "FAIL"} ${st.seconds}s${bad(st.steps).length ? `  (${bad(st.steps).join(" ")})` : ""}`,
 			st,
 		)
-	else head.push("static MISSING")
+	else head.push(`static ${isInfra("static") ? "INFRA" : "MISSING"}`)
 	const word = (
 		/** @type {{ ok: boolean, flaky?: unknown[] } | undefined} */ v,
+		/** @type {number} */ i,
 	) =>
 		!v
-			? "MISSING"
+			? isInfra(`root-${i + 1}`)
+				? "INFRA"
+				: "MISSING"
 			: !v.ok
 				? "FAIL"
 				: (v.flaky?.length ?? 0) > 0
@@ -640,6 +698,8 @@ export function formatSummary(s) {
 			o,
 		)
 	if (s.missing.length) head.push(`no verdict: ${s.missing.join(", ")}`)
+	if (infra.length)
+		head.push(`infra: ${infra.map(i => `${i.name} ${i.step}`).join(", ")}`)
 
 	/** @type {{ file: string, test: string, message: string, detail?: string[] }[]} */
 	const failed = s.root.flatMap((v, i) => [
@@ -670,7 +730,7 @@ export function formatSummary(s) {
 		tail.push("property counterexample hidden by rerun: replay with the seed")
 	if (s.code !== 0 && s.url)
 		tail.push(`run ${s.url}${s.runNote ? `  (${s.runNote})` : ""}`)
-	if (s.code === 1) tail.push(`recheck: rm -r .remote-check/${s.tree}`)
+	if (s.code === 1) tail.push(`recheck: rm -r .remote-check/${s.key ?? s.tree}`)
 	const body = []
 	let room = SUMMARY_LINES - head.length - tail.length
 	const list = (
@@ -769,7 +829,8 @@ export function collectChanges(git, from, to) {
 // ---------------------------------------------------------------- client text
 
 /** gh run list / view fields the client reads. */
-export const RUN_FIELDS = "databaseId,headBranch,createdAt,status,workflowName"
+export const RUN_FIELDS =
+	"databaseId,headBranch,headSha,createdAt,status,workflowName"
 export const VIEW_FIELDS = "status,attempt,url,createdAt,updatedAt,jobs"
 
 /** @type {{ file: string, line: number, label: string }[]} */
@@ -954,21 +1015,27 @@ export function sweep({ git, gh, remote, runs, now, maxAgeMs }) {
  * The verdict of a completed run: exit code and summary from the downloaded verdicts in `dl`.
  * Side files: `<out>/durations.json` (a green run's per-file seconds, in the tracked table's
  * shape) and the flaky ledger under `<home>/<LEDGER_DIR>`. `keep`: leave an INFRA run for its logs.
+ * An `infra` verdict (a failed setup step) counts as no verdict and is named with its step.
  * @param {{
  *   dl: string, expected: string[], notes: string[],
  *   view: { url: string, createdAt: string, updatedAt: string },
- *   tree12: string, mb: string, out: string, home: string, now: number,
+ *   tree12: string, key?: string, mb: string, out: string, home: string, now: number,
  * }} r
  */
 export function verdictOf(r) {
 	/** @type {Map<string, ShardVerdictT>} */
-	const verdicts = new Map()
+	const read = new Map()
 	for (const name of r.expected) {
-		const v = quiet(() =>
-			JSON.parse(fs.readFileSync(join(r.dl, name, "verdict.json"), "utf8")),
-		)
-		if (v) verdicts.set(name, v)
+		const v = readVerdict(join(r.dl, name, "verdict.json"))
+		if (v) read.set(name, v)
 	}
+	const infra = [...read]
+		.filter(([, v]) => v.infra)
+		.map(([n, v]) => ({
+			name: n.slice(8),
+			step: setupFailure(v.steps) ?? "setup",
+		}))
+	const verdicts = new Map([...read].filter(([, v]) => !v.infra))
 	const shards = Array.from({ length: SHARDS }, (_, i) =>
 		verdicts.get(`verdict-root-${i + 1}`),
 	)
@@ -1009,7 +1076,9 @@ export function verdictOf(r) {
 		others: [...verdicts]
 			.filter(([n]) => n !== "verdict-static" && !n.startsWith("verdict-root-"))
 			.map(([n, v]) => ({ ...v, name: n.slice(8) })),
-		missing: r.expected.filter(n => !verdicts.has(n)).map(n => n.slice(8)),
+		missing: r.expected.filter(n => !read.has(n)).map(n => n.slice(8)),
+		infra,
+		...(r.key ? { key: r.key } : {}),
 		url: r.view.url,
 		runNote: keep ? "kept" : "deleted",
 		notes: r.notes,
@@ -1018,5 +1087,13 @@ export function verdictOf(r) {
 }
 
 /**
- * @typedef {{ ok: boolean, seconds: number, steps: Record<string, number>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[], durations?: Record<string, number>, tail?: Record<string, string[]> }} ShardVerdictT
+ * A downloaded verdict.json, or undefined when absent or unreadable.
+ * @param {string} file
+ * @returns {ShardVerdictT | undefined}
+ */
+export const readVerdict = file =>
+	quiet(() => JSON.parse(fs.readFileSync(file, "utf8"))) ?? undefined
+
+/**
+ * @typedef {{ ok: boolean, infra?: boolean, seconds: number, steps: Record<string, number>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[], durations?: Record<string, number>, tail?: Record<string, string[]> }} ShardVerdictT
  */

@@ -14,9 +14,7 @@ export interface Hit {
 	line: number
 	label: string
 }
-export type Denylist =
-	| { patterns: RegExp[]; missing?: boolean }
-	| { error: string }
+export type Denylist = { patterns: RegExp[] } | { error: string }
 export interface Failure {
 	test: string
 	message: string
@@ -33,6 +31,7 @@ export interface Entry {
 }
 export interface ShardVerdict {
 	ok: boolean
+	infra?: boolean
 	seconds: number
 	steps: Record<string, number>
 	failed: Entry[]
@@ -49,6 +48,11 @@ export function tailLines(
 	max?: number,
 ): string[]
 export const FILE_OVERHEAD_S: number
+export const DENYLIST_PATH: string
+export const SETUP_STEPS: string[]
+export const CHECK_STEPS: string[]
+export function setupFailure(steps: Record<string, number>): string | undefined
+export function checkKey(tree: string, mb: string): string
 export function parseDenylist(read: () => string | undefined): Denylist
 export function addedLines(patch: string): Map<string, AddedLine[]>
 export function scanHygiene(input: {
@@ -84,7 +88,7 @@ export function classifyShard(
 ): { failed: Entry[]; flaky: Entry[] }
 export function artifactName(job: string): string
 export function exitCode(input: {
-	verdicts: Map<string, { ok: boolean }>
+	verdicts: Map<string, { ok: boolean; infra?: boolean }>
 	expected: string[]
 }): number
 export function durationTable(
@@ -115,6 +119,8 @@ export function formatSummary(s: {
 	url: string
 	runNote: string
 	notes?: string[]
+	infra?: { name: string; step: string }[]
+	key?: string
 }): string
 export function repoSlug(url: string): string
 export function collectChanges(
