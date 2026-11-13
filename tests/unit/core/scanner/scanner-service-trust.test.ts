@@ -38,6 +38,12 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 				s.passive.enabled = false
 			},
 		})
+		// The source's tuningUnproven count (SourceManager.tuningUnproven) hears each classification
+		// made on unverified tuning.
+		const noteRefusal = vi.fn()
+		;(h.sources as unknown as { tuningUnproven: unknown }).tuningUnproven = {
+			noteRefusal,
+		}
 		await h.service.start()
 		const job = await h.service.createJob({
 			sourceId: "rtl",
@@ -100,6 +106,7 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 			epoch: retuned,
 			tuningTrust: "unverified",
 		})
+		const before = noteRefusal.mock.calls.length
 		deliver([
 			{
 				kind: "track-open",
@@ -116,6 +123,11 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 		).live
 		expect(live.get("t-before")?.classification.tier).toBe("channel")
 		expect(live.get("t-after")?.classification.tier).toBe("spectral")
+		// The unverified track: classified on unproven tuning, and its recording refused.
+		expect(noteRefusal.mock.calls.slice(before)).toEqual([
+			["rtl", "identification"],
+			["rtl", "recording"],
+		])
 		await h.service.cancelJob(job.id)
 		await h.service.stop()
 	})

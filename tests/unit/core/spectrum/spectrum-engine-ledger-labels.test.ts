@@ -118,7 +118,8 @@ function track(
 	} as TrackSnapshot
 }
 
-async function make() {
+/** viaSources: the engine reads the ledger from its source manager (removable mid-test). */
+async function make(opts: { viaSources?: boolean } = {}) {
 	const sources = new FakeSources()
 	const fanout = new FakeFanout()
 	const ledger = new TuningLedger({
@@ -126,6 +127,7 @@ async function make() {
 		frameBytes: () => 2,
 		capsRate: () => RATE,
 	})
+	if (opts.viaSources) sources.tuningLedger = ledger
 	const conn = ledger.connection("rtl")
 	const session = conn.start()!
 	let host: Host | null = null
@@ -138,7 +140,7 @@ async function make() {
 			releaseUnused: () => undefined,
 		},
 		tuner,
-		ledger,
+		...(opts.viaSources ? {} : { ledger }),
 		settings: () => testSettings(),
 		logger: pino({ level: "silent" }),
 		createHost: (_cfg, handlers) => (host = new Host(handlers)),
@@ -372,6 +374,48 @@ describe("SpectrumEngine labels from the tuning ledger", () => {
 			writer: "assert",
 		})
 		await feed(SETTLE_BYTES / 2 + block * 2)
+		const again = samples()
+		blockAt(again)
+		expect(engine.currentEpoch()).toMatchObject({
+			tuningTrust: "commanded",
+			trustedFromSample: again - block,
+		})
+		await engine.stop()
+	})
+
+	it("a block read without a ledger ends the trusted run: a later trusted block starts a new one", async () => {
+		const {
+			engine,
+			sources,
+			ledger,
+			feed,
+			write,
+			events,
+			block,
+			opening,
+			samples,
+		} = await make({ viaSources: true })
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		const blockAt = (end: number) =>
+			events([{ kind: "block-summary", summary: summary(0, opening, end) }])
+		await feed(SETTLE_BYTES / 2 + block * 2)
+		const first = samples()
+		blockAt(first)
+		expect(engine.currentEpoch()).toMatchObject({
+			tuningTrust: "commanded",
+			trustedFromSample: first - block,
+		})
+		// The ledger is gone for one block (fail closed: unverified, the run ends).
+		delete sources.tuningLedger
+		await feed(block)
+		blockAt(samples())
+		expect(engine.currentEpoch()).toMatchObject({
+			tuningTrust: "unverified",
+			trustedFromSample: null,
+		})
+		// Back: the next trusted block starts a run of its own, never the old run's start.
+		sources.tuningLedger = ledger
+		await feed(block)
 		const again = samples()
 		blockAt(again)
 		expect(engine.currentEpoch()).toMatchObject({

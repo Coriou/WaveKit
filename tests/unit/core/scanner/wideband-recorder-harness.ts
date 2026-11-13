@@ -201,6 +201,8 @@ export function harness(
 		readyHold?: Promise<void>
 		source?: Partial<ConstructorParameters<typeof NfmSource>[0]>
 		reserveCores?: (cores: number) => (() => void) | null
+		/** The recorder's refused:tuning report (WidebandAnalogDeps.tuningRefused). */
+		tuningRefused?: (sourceId: string) => void
 		/** The recorder's per-turn budget clock (milliseconds); default performance.now. */
 		clock?: () => number
 		/**
@@ -235,6 +237,7 @@ export function harness(
 		beginAnalog: opts.beginWrap ? opts.beginWrap(begin) : begin,
 		recordTone: (observationId, hz) => tones.push({ observationId, hz }),
 		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
+		...(opts.tuningRefused ? { tuningRefused: opts.tuningRefused } : {}),
 		logger,
 		now: () => 1_700_000_000_000,
 		schedule: run => queue.push(run),

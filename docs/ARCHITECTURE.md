@@ -573,7 +573,10 @@ read the ledger too. Engine starts, pipeline restarts and stream openings carry 
 pipeline epochs only reset the DSP. Decoder provenance, live-audio evidence and the analog
 transmission frequency read `trustNow` (the live edge). Recorder, discoveries and IQ capture read
 the label on the epoch or track; the current epoch also names where its trusted run of blocks
-starts (`trustedFromSample`), and a recording's pre-roll never reaches before it. A command
+starts (`trustedFromSample`), and a recording's pre-roll never reaches before it; a recording or
+channel tap ends when that run ends or restarts. `TuningUnprovenTracker` (beside the ledger, fed
+by the tuner controller's block reasons) names one cause per source while its centre or rate is
+unproven (`tuningUnproven` on `GET /api/sources`). A command
 whose frame tuned a stream that starts at a queued reconnect boundary gets its DSP epoch once
 that boundary is applied, at its receipt's position in the new stream. A client that retunes the receiver behind the core's back is
 invisible until a detector raises a doubt. A host-centre mismatch also moves the engine's epoch

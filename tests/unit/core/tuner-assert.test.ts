@@ -610,6 +610,44 @@ describe("a plain resume of a paused feed", () => {
 	}, 30_000)
 })
 
+describe("the plain-resume hold's one decision point", () => {
+	it("plainResumeTakesTuningBack alone decides whether the hold blocks the declared fallback (false today)", async () => {
+		const h = await harness()
+		await h.sessionFlowing(1)
+		await h.controller.setFrequency("rtl", F1, { origin: "rest" })
+		await until(() => h.proofOf().frequency.state === "commanded")
+		const decision = vi.spyOn(h.controller, "plainResumeTakesTuningBack")
+		await h.manager.pause("rtl")
+		const from = h.fake.frames.length
+		await h.manager.resume("rtl")
+		await h.sessionFlowing(2)
+		await wait(200)
+		// Today: consulted, false, nothing written, the hold's reason shown.
+		expect(decision).toHaveBeenCalledWith("rtl")
+		expect(decision.mock.results.every(r => r.value === false)).toBe(true)
+		expect(h.framesFrom(from)).toEqual([])
+		expect(h.proofOf().frequency).toMatchObject({
+			state: "unverified",
+			reason: "plain-resume",
+		})
+		// Flipping that one predicate (nothing else) gives the tuning back: with the pre-pause
+		// centre dropped by the resume, assert writes the declared rate and centre, and they prove.
+		decision.mockReturnValue(true)
+		h.ledger.raiseDoubt("rtl", "both", "test")
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.framesFrom(from)).toEqual([
+			[SET_SAMPLE_RATE, RATE],
+			[SET_FREQUENCY, F0],
+		])
+		expect(h.sessionReceipts(2).map(r => [r.field, r.value, r.writer])).toEqual(
+			[
+				["sampleRate", RATE, "assert"],
+				["frequency", F0, "assert"],
+			],
+		)
+	}, 30_000)
+})
+
 describe("a fight with a client retuning past the relay (Main gate minor 3)", () => {
 	it("counts each assert frame an untracked-retune doubt caused, never other doubts", async () => {
 		const h = await harness()

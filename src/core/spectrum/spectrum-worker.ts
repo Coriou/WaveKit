@@ -23,6 +23,7 @@ import type { FrameWasmLoad } from "./frame-wasm.js"
 import { SpectrumPipeline } from "./pipeline.js"
 import { encodeEventsForWire } from "./summary-wire.js"
 import {
+	isMeasureFromMessage,
 	MainToWorkerSchema,
 	type WorkerPipelineInput,
 	type WorkerToMain,
@@ -95,6 +96,8 @@ function returnBuffer(raw: unknown): void {
 port.on("message", (raw: unknown) => {
 	const parsed = MainToWorkerSchema.safeParse(raw)
 	if (!parsed.success) {
+		// A measurement restart the worker cannot use changes nothing: ignored, never an error.
+		if (isMeasureFromMessage(raw)) return
 		post({
 			type: "error",
 			message: `invalid worker message: ${parsed.error.message}`,

@@ -1658,6 +1658,24 @@ export class TunerController extends EventEmitter {
 		this.sourceManager = sourceManager
 		this.config = config
 		this.ledger().subscribe(this.onLedgerChange)
+		// The tuning-unproven reason names why the core writes nothing, as proof.blocked does.
+		;(
+			sourceManager as Partial<Pick<SourceManager, "tuningUnproven">> | null
+		)?.tuningUnproven?.setBlockResolver((sourceId, field) =>
+			this.unprovenBlock(sourceId, field),
+		)
+	}
+
+	/** Why the core writes nothing for an unproven field now (`proof.blocked`), or null. */
+	private unprovenBlock(sourceId: string, field: GatedField): string | null {
+		const state = this.tunerStates.get(sourceId)
+		if (!state) return null
+		return (
+			this.assertBlock(sourceId, state) ??
+			(this.heldValue(sourceId, field) === null
+				? this.declaredBlock(sourceId)
+				: null)
+		)
 	}
 
 	// === Tuning ledger: proof, assert and the skip rule ===
@@ -1819,7 +1837,11 @@ export class TunerController extends EventEmitter {
 	 * accepted on the current connection is written, see synchronizeOnConnect), or the kill switch.
 	 */
 	private declaredBlock(sourceId: string): AssertBlock | null {
-		if (this.plainResumeHold.has(sourceId)) return "plain-resume"
+		if (
+			this.plainResumeHold.has(sourceId) &&
+			!this.plainResumeTakesTuningBack(sourceId)
+		)
+			return "plain-resume"
 		if (
 			this.config.reconnectPolicy === "reset" &&
 			this.restoreResumeSession.get(sourceId) !==
@@ -1829,6 +1851,16 @@ export class TunerController extends EventEmitter {
 		if (this.config.writeDeclaredTuningOnConnect === false)
 			return "declared-write-off"
 		return null
+	}
+
+	/**
+	 * The one decision of whether a plain resume's hold gives the receiver's tuning back to the
+	 * core: true would let the declared fallback write again while the hold stands. Consulted only
+	 * where the hold blocks the declared fallback (declaredBlock: assert's held value and the
+	 * proof's reason both read it). False today: a plain resume never fights another client.
+	 */
+	plainResumeTakesTuningBack(_sourceId: string): boolean {
+		return false
 	}
 
 	/** What assert writes for a field (rule 3): last accepted, else declared (declaredBlock). */
@@ -3753,7 +3785,9 @@ export class TunerController extends EventEmitter {
 	 * known values until they are written, accepted or observed (adoptObservedSampleRate).
 	 * Fields accepted during the pause (tuner relay commands while the source was down; without
 	 * a pause marker, every accepted field: the feed was paused at boot) are the operator's newest
-	 * state and are written, as on a restore. Caps keep their values; replayed fields follow.
+	 * state and are written, as on a restore, on the same receiver only: the receiver gate runs
+	 * first (gateReceiver), and another or an unknown receiver gets none of them (its accepted
+	 * tuning is stashed and cleared). Caps keep their values; replayed fields follow.
 	 */
 	private synchronizeOnPlainResume(
 		sourceId: string,
@@ -4743,7 +4777,13 @@ export class TunerController extends EventEmitter {
 
 	private emitStateChanged(sourceId: string): void {
 		const state = this.tunerStates.get(sourceId)
-		if (!state) return
+		if (!state)
+			return // A block reason (hold, relay, control mode) may have changed with the state.
+		;(
+			this.sourceManager as Partial<
+				Pick<SourceManager, "tuningUnproven">
+			> | null
+		)?.tuningUnproven?.refresh(sourceId)
 		this.emit("state-changed", sourceId, this.cloneState(state))
 	}
 

@@ -25,6 +25,7 @@ import { sourceVerdict } from "../../core/source-verdict.js"
 import type { ScannerService } from "../../core/scanner/scanner-service.js"
 import type { SourceManager } from "../../core/source-manager.js"
 import type { TunerController } from "../../core/tuner-controller.js"
+import { causeCode } from "../../core/tuning-ledger-unproven.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import { sdrHostsBySource } from "../serializers/source-status.js"
 import { decoderSummary, sourceActivityReader } from "./decoder-summary.js"
@@ -32,7 +33,7 @@ import { decoderSummary, sourceActivityReader } from "./decoder-summary.js"
 export interface AgentStatusRoutesOptions {
 	decoderManager: Pick<DecoderManager, "getAllStatus">
 	sourceManager: Pick<SourceManager, "getAllStatus"> &
-		Partial<Pick<SourceManager, "getStatus">>
+		Partial<Pick<SourceManager, "getStatus" | "tuningUnproven">>
 	/** The receiver facts behind a source verdict; absent or empty says nothing of a device. */
 	sdrHostStatuses?: (() => readonly SdrHostStatus[]) | undefined
 	tunerController?: Pick<TunerController, "getAllStates"> | undefined
@@ -163,6 +164,11 @@ function sourceRows(
 		if (status.signalFlat) warnings.push("signal-flat")
 		const verdict = sourceVerdict(status, hosts.get(status.id), now).code
 		const passive = options.scanner?.passiveHoldReason?.(status.id) ?? null
+		// One top-level reason per source: the tuning's only when the feed reads ok.
+		const unproven =
+			verdict === "ok"
+				? (sourceManager.tuningUnproven?.view(status.id) ?? null)
+				: null
 		return {
 			id: bounds.id(status.id),
 			connected: status.connected,
@@ -172,6 +178,7 @@ function sourceRows(
 			feed: status.feed?.state ?? "live",
 			tuningUnverified: unverified.has(status.id),
 			...(verdict !== "ok" ? { verdict } : {}),
+			...(unproven !== null ? { tuning: causeCode(unproven.cause) } : {}),
 			...(passive !== null ? { passive } : {}),
 			...(status.receiver
 				? {

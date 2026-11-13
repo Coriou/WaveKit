@@ -133,7 +133,9 @@ export const PipelineInputSchema = z
 			kind: z.literal("measure-from"),
 			stream: z.number().int().nonnegative(),
 			epoch: z.number().int().nonnegative(),
-			trackId: z.string().min(1).max(64),
+			// A pipeline track id: `${sourceId}-…` (trackIdPrefixes), as long as its source id, which
+			// has no bound of its own; a stale or unknown id is ignored by the tracker.
+			trackId: z.string().min(1),
 			sample: z.number().int().nonnegative(),
 		}),
 		z.object({
@@ -153,6 +155,17 @@ export const PipelineInputSchema = z
 			})
 		}
 	})
+
+/**
+ * An input message whose `input.kind` is `measure-from`: a request the engine may send for a track
+ * the pipeline no longer holds. One the worker cannot validate is dropped without an error (an
+ * error raises a pipeline-error doubt, and the re-proof would ask again: a doubt loop).
+ */
+export function isMeasureFromMessage(raw: unknown): boolean {
+	if (typeof raw !== "object" || raw === null) return false
+	const message = raw as { type?: unknown; input?: { kind?: unknown } }
+	return message.type === "input" && message.input?.kind === "measure-from"
+}
 
 /** Opt-in worker stage profile (R 9.2). Absent on init: the pipeline records nothing. */
 export const PipelineProfileOptionSchema = z.object({

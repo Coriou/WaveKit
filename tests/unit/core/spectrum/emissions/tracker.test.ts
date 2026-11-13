@@ -158,6 +158,33 @@ describe("Tracker", () => {
 		)
 	})
 
+	it("measureFrom restarts the width and shape claims too: OBW (-20 dB and on-bins) from the blocks past the request only", () => {
+		// The same emission, wide on the blocks before the request, narrow after it (strong: -20 dB
+		// OBW from the mean spectrum over the on-bin span; weak: the widest block's on-bins).
+		for (const [db, method] of [
+			[-20, "-20dB"],
+			[-50, "on-bins"],
+		] as const) {
+			const t = tracker()
+			const id = tracksOf(run(t, 0, [[120, 160, db]]), "track-open")[0]!.trackId
+			run(t, 1, [[120, 160, db]])
+			t.measureFrom({ stream: 1, epoch: 1, trackId: id, sample: 2 * BLOCK })
+			run(t, 2, [[140, 147, db]])
+			run(t, 3, [[140, 147, db]])
+			const after = t.snapshotOf(id)!
+			expect(after.measuredFromSample).toBe(2 * BLOCK)
+			expect(after.obwMethod).toBe(method)
+			expect(after.obwHz).toBe(7000)
+			// The same narrow blocks alone (never wide) read the same.
+			const plain = tracker()
+			const pid = tracksOf(run(plain, 0, [[140, 147, db]]), "track-open")[0]!
+				.trackId
+			run(plain, 1, [[140, 147, db]])
+			expect(plain.snapshotOf(pid)!.obwHz).toBe(after.obwHz)
+			expect(plain.snapshotOf(pid)!.spectralShape).toBe(after.spectralShape)
+		}
+	})
+
 	it("reports on-bin width below 20 dB SNR", () => {
 		const t = tracker()
 		run(t, 0, [[140, 147, -50]])

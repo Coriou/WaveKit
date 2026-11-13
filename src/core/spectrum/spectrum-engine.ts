@@ -2265,6 +2265,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (map) map.summarised = Math.max(map.summarised, summary.endSample)
 		const ledger = this.ledger()
 		if (!ledger || !map || map.blockSamples === null) {
+			// Unverified like any other: the epoch's trusted run ends here.
+			const record = this.epochRecord(summary.stream, summary.epoch)
+			if (record !== null) {
+				record.trustedFrom = null
+				record.trustedLabel = "unverified"
+			}
 			this.noteBlockLabel(summary, "unverified")
 			return "unverified"
 		}

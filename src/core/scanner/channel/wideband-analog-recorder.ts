@@ -569,6 +569,8 @@ export interface WidebandAnalogDeps {
 	beginAnalog(input: AnalogInput): AnalogHandle
 	/** A standard CTCSS tone heard over a finalized file of this observation. */
 	recordTone?(observationId: string, ctcssHz: number, at: number): void
+	/** A snapshot refused `refused:tuning` (counted in the source's `tuningUnproven`). */
+	tuningRefused?(sourceId: string): void
 	/**
 	 * Reserves `cores` in the scanner's shared CPU budget (probes, live audio): a release, or
 	 * null when the budget is full (the session does not start; the next snapshot retries).
@@ -748,6 +750,11 @@ interface Session {
 	readonly captureCentreHz: number
 	readonly targetHz: number
 	readonly tuningTrust: "commanded" | "relay"
+	/**
+	 * The trusted run it started in (`currentEpoch().trustedFromSample`); undefined: a view without
+	 * runs. The file ends where the run ends or changes (drain), like at a retune.
+	 */
+	readonly trustedFrom: number | null | undefined
 	readonly owner: string
 	/** The owner's discovery; a shadow may start before it exists. */
 	discoveryId: string | null
@@ -1707,6 +1714,7 @@ export class WidebandAnalogRecorder {
 			epoch.trustedFromSample === null
 		) {
 			this.decisions.note("refused:tuning", ref)
+			this.deps.tuningRefused?.(input.sourceId)
 			return
 		}
 		// A continuation of a channel already recording joins whatever its classification.
@@ -1717,6 +1725,8 @@ export class WidebandAnalogRecorder {
 				s.engine !== engine ||
 				s.stream !== track.stream ||
 				s.epoch !== track.epoch ||
+				// Another trusted run: that session is ending (drain); nothing joins across runs.
+				s.trustedFrom !== epoch.trustedFromSample ||
 				Math.abs(s.targetHz - track.centreHz) > WIDEBAND_JOIN_TOLERANCE_HZ
 			)
 				continue
@@ -1728,7 +1738,12 @@ export class WidebandAnalogRecorder {
 				this.refuse(s, bar, true)
 				return
 			}
-			const events = s.seg.open(observationId, track.startSample)
+			// Never back-dated: a file it opens starts no earlier than the trusted run.
+			const events = s.seg.open(
+				observationId,
+				track.startSample,
+				epoch.trustedFromSample ?? Number.NEGATIVE_INFINITY,
+			)
 			s.observations.add(observationId)
 			s.lastActive = Math.max(s.lastActive, track.lastSample)
 			this.noteActivity(s, observationId, track)
@@ -2032,6 +2047,7 @@ export class WidebandAnalogRecorder {
 			captureCentreHz: epoch.centreHz,
 			targetHz: track.centreHz,
 			tuningTrust: trust,
+			trustedFrom: epoch.trustedFromSample,
 			owner: input.observationId,
 			discoveryId: input.discoveryId,
 			classed: input.analogFm,
@@ -2751,11 +2767,20 @@ export class WidebandAnalogRecorder {
 			this.endSession(s, "stream-changed")
 			return
 		}
-		if (epoch.epoch !== s.epoch && s.limit === Number.POSITIVE_INFINITY) {
+		const retuned = epoch.epoch !== s.epoch
+		// The trusted run it started in ended (a doubt: null) or another began (re-proven): its
+		// samples from here on are not proven by the run the file is labelled with. Ended like at a
+		// retune (cut epoch-changed), at what it demodulated so far; a later snapshot starts a new
+		// session in the new run, or is refused while unverified.
+		const untrusted =
+			!retuned &&
+			s.trustedFrom !== undefined &&
+			epoch.trustedFromSample !== s.trustedFrom
+		if ((retuned || untrusted) && s.limit === Number.POSITIVE_INFINITY) {
 			// A retune: nothing at or past the new epoch's start is this channel. The file ends
 			// at the earlier of its own end target and that start; no later file follows. A
 			// sweep that hops after the hang has a complete file.
-			s.limit = epoch.startSample ?? s.next
+			s.limit = retuned ? (epoch.startSample ?? s.next) : s.next
 			const target = s.seg.endTarget
 			const end = Math.min(target ?? s.limit, s.limit)
 			const cut: AnalogCut =

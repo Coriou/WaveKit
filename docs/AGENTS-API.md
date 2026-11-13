@@ -250,6 +250,10 @@ Each answer below is one read, no logs needed; every closed list is in `GET /api
   delay, CPU by thread and open channels, one shared sample every 2 s, so poll it freely. Read
   it twice: the first answer has no CPU window yet.
 - **Why a signal was not recorded:** `recorder` on `GET /api/scanner/discoveries/:id`.
+- **Why recordings and identification wait:** `sources[].tuning` here (the cause code, only on
+  a row whose `verdict` reads `ok`), `tuningUnproven` on `GET /api/sources` with its message,
+  fix, since when, and the refusals it caused (`plain-resume`: set the tuning or resume with
+  restore).
 - **What a sweep was allowed to disturb:** `impact` and `consentedImpact` on the job.
 
 `sources[].feed` reads `paused` or `resuming` while an operator holds the receiver feed off

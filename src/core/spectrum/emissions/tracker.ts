@@ -397,8 +397,13 @@ interface OpenTrack {
 	floorDbSum: number
 	centroidNum: number
 	centroidDen: number
-	/** The centroid counts only blocks from this sample on (measureFrom); null: from the start. */
+	/**
+	 * The frequency, width and shape claims (centroid, on-bin span, widest block, mean spectrum)
+	 * count only blocks from this sample on (measureFrom); null: from the start.
+	 */
 	measuredFrom: number | null
+	/** measureFrom: the next accumulated block sets the on-bin span afresh (not widens it). */
+	spanRestart: boolean
 	thresholdDb: number
 	spectrum: SpectrumAccumulator
 	env: Float32Array
@@ -644,8 +649,10 @@ export class Tracker {
 	}
 
 	/**
-	 * Restarts an open track's centroid from `sample` (SpectrumEngine.trackLabel: its label turned
-	 * trusted after it began), so its centre comes from blocks the tuning ledger proves. Blocks
+	 * Restarts an open track's frequency, width and shape claims from `sample` (SpectrumEngine.
+	 * trackLabel: its label turned trusted after it began): its centroid, mean spectrum, widest
+	 * block and on-bin span (the OBW window), so they come from blocks the tuning ledger proves.
+	 * The span keeps matching segments until the next block replaces it. Blocks
 	 * accumulated from now on start past `sample` (the engine asks after it saw a block ending
 	 * there). Ignored for another stream or epoch, a closed track, or a sample not past the
 	 * current measurement's start.
@@ -661,6 +668,9 @@ export class Tracker {
 		if (!t || at.sample <= (t.measuredFrom ?? t.startSample)) return
 		t.centroidNum = 0
 		t.centroidDen = 0
+		t.maxWidthBins = 0
+		t.spectrum.reset()
+		t.spanRestart = true
 		t.measuredFrom = at.sample
 	}
 
@@ -1614,6 +1624,7 @@ export class Tracker {
 			centroidNum: 0,
 			centroidDen: 0,
 			measuredFrom: null,
+			spanRestart: false,
 			thresholdDb: b.thresholdDb,
 			spectrum: new SpectrumAccumulator(),
 			env: new Float32Array(ENV_MAX_MS),
@@ -1700,6 +1711,12 @@ export class Tracker {
 		}
 		t.bandLinSum += band
 		t.bandBlocks++
+		if (t.spanRestart) {
+			// measureFrom: the span is this block's (the blocks before the request no longer count).
+			t.spanRestart = false
+			t.onMin = s.startBin
+			t.onMax = s.endBin
+		}
 		const widened = s.startBin < t.onMin || s.endBin > t.onMax
 		t.onMin = Math.min(t.onMin, s.startBin)
 		t.onMax = Math.max(t.onMax, s.endBin)
