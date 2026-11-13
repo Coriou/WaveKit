@@ -1,11 +1,11 @@
-/** The spectrum worker's own `/ws` connection: spectrum channel only, reconnect with backoff, resubscribe. */
+/** The spectrum worker's own `/ws` connection: spectrum channel only, reconnect with backoff, resubscribe on a drop or a stall. */
 
 import type {
 	SpectrumFrameEventData,
 	SpectrumProfileEventData,
 	SpectrumSubscribeOptions,
 } from "@wavekit/api-types"
-import type { SpectrumSubscription } from "./protocol.ts"
+import type { SpectrumLinkState, SpectrumSubscription } from "./protocol.ts"
 import { backoffDelay } from "./schedule.ts"
 
 /** ws(s)://host/ws for a page (or worker script) URL. */
@@ -88,11 +88,39 @@ export const UNSUBSCRIBE_MESSAGE = JSON.stringify({
 	channels: ["spectrum"],
 })
 
-export interface SocketHandlers {
-	message: (msg: SpectrumServerMessage) => void
-	state: (state: "connecting" | "open" | "closed") => void
+/** No frame for this long (ms) while subscribed counts as a stalled stream, at any rate. */
+export const STALL_MIN_MS = 5000
+
+/** How long the stream may stay silent before it is resubscribed: 4 frame periods, at least STALL_MIN_MS. */
+export function stallTimeoutMs(hz: number | undefined): number {
+	const period = hz !== undefined && hz > 0 ? Math.ceil(4000 / hz) : 0
+	return Math.max(STALL_MIN_MS, period)
 }
 
+/**
+ * Close codes that mean "do not retry": 1008 (policy: the core's "Access expired") and the
+ * application range 4400–4499 (an HTTP 4xx refusal). Anything else is retried with backoff.
+ */
+export function closeIsFinal(code: number): boolean {
+	return code === 1008 || (code >= 4400 && code <= 4499)
+}
+
+export interface SocketHandlers {
+	message: (msg: SpectrumServerMessage) => void
+	/** The link changed; `message` explains a "failed". */
+	state: (state: SpectrumLinkState, message?: string) => void
+}
+
+/**
+ * Connects, subscribes, and keeps the stream flowing by itself:
+ * - a dropped socket reconnects with backoff and resubscribes to the same selection;
+ * - a silent stream (the source paused, its spectrum engine gone) is resubscribed on the same
+ *   socket, spaced by the backoff, until frames flow again; a socket that answers nothing at all
+ *   (not even the ack) is dropped and reconnected;
+ * - a do-not-retry close (closeIsFinal) stops and reports "failed".
+ * State: "connecting" until the first frame, "live" while frames flow, "reconnecting" after a
+ * drop or a stall until frames flow again.
+ */
 export class SpectrumSocket {
 	private readonly url: string
 	private readonly handlers: SocketHandlers
@@ -100,7 +128,17 @@ export class SpectrumSocket {
 	private subscription: SpectrumSubscription | null = null
 	private attempt = 0
 	private retryTimer: ReturnType<typeof setTimeout> | null = null
+	private stallTimer: ReturnType<typeof setTimeout> | null = null
 	private disposed = false
+	private failed = false
+	private everLive = false
+	private link: SpectrumLinkState | null = null
+	/** Date.now() of the newest frame (or of the subscribe that started the wait). */
+	private lastFrameAt = 0
+	/** Resubscribes sent since the last frame. */
+	private resubscribes = 0
+	/** Any message since the last resubscribe (the socket still answers). */
+	private heard = false
 
 	constructor(url: string, handlers: SocketHandlers) {
 		this.url = url
@@ -113,26 +151,34 @@ export class SpectrumSocket {
 		const ws = this.ws
 		if (ws && ws.readyState === WebSocket.OPEN) {
 			ws.send(sub ? subscribeMessage(sub) : UNSUBSCRIBE_MESSAGE)
+			this.restartWatch()
 			return
 		}
-		if (sub && !ws && this.retryTimer === null) this.connect()
+		if (sub && !ws && this.retryTimer === null) {
+			// A new selection after a refusal tries once more.
+			this.failed = false
+			this.connect()
+		}
 	}
 
 	dispose(): void {
 		this.disposed = true
 		if (this.retryTimer !== null) clearTimeout(this.retryTimer)
 		this.retryTimer = null
-		const ws = this.ws
-		this.ws = null
-		if (ws) {
-			ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
-			ws.close()
-		}
+		this.clearStall()
+		this.detach()
+	}
+
+	private setLink(state: SpectrumLinkState, message?: string): void {
+		if (state === this.link && message === undefined) return
+		this.link = state
+		if (message === undefined) this.handlers.state(state)
+		else this.handlers.state(state, message)
 	}
 
 	private connect(): void {
-		if (this.disposed) return
-		this.handlers.state("connecting")
+		if (this.disposed || this.failed) return
+		this.setLink(this.everLive ? "reconnecting" : "connecting")
 		let ws: WebSocket
 		try {
 			ws = new WebSocket(this.url)
@@ -143,31 +189,108 @@ export class SpectrumSocket {
 		this.ws = ws
 		ws.onopen = () => {
 			this.attempt = 0
-			this.handlers.state("open")
 			if (this.subscription) ws.send(subscribeMessage(this.subscription))
+			this.restartWatch()
 		}
 		ws.onmessage = event => {
 			if (typeof event.data !== "string") return
 			const msg = parseServerMessage(event.data)
-			if (msg) this.handlers.message(msg)
+			if (!msg) return
+			this.heard = true
+			if (msg.type === "spectrum:frame") {
+				this.lastFrameAt = Date.now()
+				this.resubscribes = 0
+				this.everLive = true
+				this.setLink("live")
+			}
+			this.handlers.message(msg)
 		}
 		ws.onerror = () => {
 			// onclose follows and schedules the retry.
 		}
-		ws.onclose = () => {
+		ws.onclose = event => {
 			if (this.ws !== ws) return
 			this.ws = null
-			this.handlers.state("closed")
+			this.clearStall()
+			if (closeIsFinal(event.code)) {
+				this.failed = true
+				const why = event.reason ? `: ${event.reason}` : ""
+				this.setLink(
+					"failed",
+					`The core refused the spectrum stream${why} (code ${event.code}). Reload the page to try again.`,
+				)
+				return
+			}
+			this.setLink(this.everLive ? "reconnecting" : "connecting")
 			this.scheduleRetry()
 		}
 	}
 
+	/** Closes the current socket without waiting for its close event. */
+	private detach(): void {
+		const ws = this.ws
+		this.ws = null
+		if (ws) {
+			ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+			try {
+				ws.close()
+			} catch {
+				// Already closing.
+			}
+		}
+	}
+
 	private scheduleRetry(): void {
-		if (this.disposed || this.retryTimer !== null) return
+		if (this.disposed || this.failed || this.retryTimer !== null) return
 		const delay = backoffDelay(this.attempt++)
 		this.retryTimer = setTimeout(() => {
 			this.retryTimer = null
 			if (this.subscription) this.connect()
 		}, delay)
+	}
+
+	/** A (re)subscribe was sent: frames are due within the stall timeout from now. */
+	private restartWatch(): void {
+		this.lastFrameAt = Date.now()
+		this.resubscribes = 0
+		this.heard = false
+		this.armStall(stallTimeoutMs(this.subscription?.hz))
+	}
+
+	private armStall(ms: number): void {
+		this.clearStall()
+		if (!this.subscription || this.disposed) return
+		this.stallTimer = setTimeout(() => {
+			this.stallTimer = null
+			this.checkStall()
+		}, ms)
+	}
+
+	private clearStall(): void {
+		if (this.stallTimer !== null) clearTimeout(this.stallTimer)
+		this.stallTimer = null
+	}
+
+	private checkStall(): void {
+		const ws = this.ws
+		const sub = this.subscription
+		if (!ws || !sub || ws.readyState !== WebSocket.OPEN) return
+		const timeout = stallTimeoutMs(sub.hz)
+		const silent = Date.now() - this.lastFrameAt
+		if (this.resubscribes === 0 && silent < timeout) {
+			this.armStall(timeout - silent)
+			return
+		}
+		this.setLink(this.everLive ? "reconnecting" : "connecting")
+		if (this.resubscribes > 0 && !this.heard) {
+			// Not even the ack came back: the socket is dead without having closed.
+			this.detach()
+			this.scheduleRetry()
+			return
+		}
+		ws.send(subscribeMessage(sub))
+		this.resubscribes++
+		this.heard = false
+		this.armStall(Math.max(timeout, backoffDelay(this.resubscribes)))
 	}
 }

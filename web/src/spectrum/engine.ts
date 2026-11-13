@@ -14,6 +14,7 @@ import {
 	type SpectrumFrameMeta,
 	type SpectrumLayout,
 	type SpectrumLevels,
+	type SpectrumLinkState,
 	type SpectrumSize,
 	type SpectrumSubscription,
 	type SpectrumViewSpan,
@@ -41,7 +42,7 @@ export interface SpectrumEngineOptions {
 }
 
 export type SpectrumEngineStatus =
-	| { type: "connection"; state: "connecting" | "open" | "closed" }
+	| { type: "connection"; state: SpectrumLinkState; message?: string }
 	| { type: "reset"; reason: ResetReason }
 	| { type: "profile"; outcome: string; code?: string; message?: string }
 	| { type: "error"; message: string }

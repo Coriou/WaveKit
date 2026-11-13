@@ -116,11 +116,22 @@ export type WorkerToMain =
 	| { type: "reset"; reason: ResetReason }
 	/** Fallback path only: one decoded row (byte v ↔ v / 2 − 127.5 dBFS), `binCount` bytes used. */
 	| { type: "row"; axis: RowAxis; buffer: ArrayBuffer; binCount: number }
-	| { type: "connection"; state: "connecting" | "open" | "closed" }
+	| { type: "connection"; state: SpectrumLinkState; message?: string }
 	| { type: "profile"; outcome: string; code?: string; message?: string }
 	| { type: "error"; message: string }
 	/** Answer to a probe: the peak dBFS there, null when no row covers it. */
 	| { type: "probe"; id: number; db: number | null }
+
+/**
+ * The spectrum stream's link: "connecting" until the first frame, "live" while frames flow,
+ * "reconnecting" after a dropped socket or a silent stream until frames flow again, "failed" when
+ * the core closed with a do-not-retry code (no more attempts; `message` says why).
+ */
+export type SpectrumLinkState =
+	| "connecting"
+	| "live"
+	| "reconnecting"
+	| "failed"
 
 export type ResetReason = "profile" | "subscription" | "source" | "axis"
 

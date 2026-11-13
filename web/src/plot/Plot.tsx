@@ -25,6 +25,7 @@ import {
 	type SpectrumEngineStatus,
 	type SpectrumFrameMeta,
 	type SpectrumLevels,
+	type SpectrumLinkState,
 	type SpectrumViewSpan,
 } from "../spectrum/index.ts"
 import {
@@ -202,6 +203,11 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const bins = fftBins(device.fftSize, binsMax)
 	useEffect(() => autoLevelsNow.set(autoScale), [autoScale])
 	const [engineError, setEngineError] = useState<string | null>(null)
+	// the spectrum stream's link: a note while it reconnects, the core's refusal when it failed
+	const [link, setLink] = useState<{
+		state: SpectrumLinkState
+		message?: string | undefined
+	}>({ state: "connecting" })
 	const heldRef = useRef<{ track: Track; seenAt: number }[]>([])
 	const [tracks, setTracks] = useState<readonly Track[]>([])
 	// Settings › Signal labels: which signals get a chip, followed across frames (label-gate.ts)
@@ -392,6 +398,8 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	}
 	const onStatus = (status: SpectrumEngineStatus) => {
 		if (status.type === "error") setEngineError(status.message)
+		if (status.type === "connection")
+			setLink({ state: status.state, message: status.message })
 		if (status.type === "reset" && status.reason !== "profile") {
 			heldRef.current = []
 			setTracks([])
@@ -604,6 +612,17 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 				{sourceId === null && (
 					<div className="wk-plot-note">No source connected</div>
 				)}
+				{link.state !== "live" &&
+					link.state !== "connecting" &&
+					engineError === null &&
+					sourceId !== null &&
+					!receiverPaused && (
+						<div className="wk-plot-note" role="status">
+							{link.state === "failed"
+								? (link.message ?? "The core refused the spectrum stream")
+								: "Spectrum stream lost · reconnecting…"}
+						</div>
+					)}
 				{engineError !== null && sourceId !== null && !receiverPaused && (
 					<div className="wk-plot-note" role="status">
 						{engineError}

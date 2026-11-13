@@ -15,6 +15,7 @@ export {
 	type SpectrumFrameMeta,
 	type SpectrumLayout,
 	type SpectrumLevels,
+	type SpectrumLinkState,
 	type SpectrumSubscription,
 	type SpectrumViewSpan,
 	type TuningTrust,

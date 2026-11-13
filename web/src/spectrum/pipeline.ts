@@ -19,6 +19,7 @@ import {
 	type SpectrumFrameMeta,
 	type SpectrumLayout,
 	type SpectrumLevels,
+	type SpectrumLinkState,
 	type SpectrumSize,
 	type SpectrumSubscription,
 	type SpectrumViewSpan,
@@ -269,9 +270,24 @@ export class SpectrumPipeline {
 		if (msg.canvas) this.attachRenderer(msg.canvas, msg.historyRows)
 		this.socket = this.deps.openSocket(msg.wsUrl, {
 			message: m => this.onServer(m),
-			state: state => this.deps.post({ type: "connection", state }),
+			state: (state, message) => this.onLink(state, message),
 		})
 		if (this.subscription) this.socket.setSubscription(this.subscription)
+	}
+
+	/**
+	 * Link changes from the socket. A reconnect or resubscribe starts a new stream: an ack hold left
+	 * from the lost one must not swallow its frames, and its first frame posts meta at once.
+	 */
+	private onLink(state: SpectrumLinkState, message?: string): void {
+		if (state === "reconnecting") {
+			this.heldUntil = null
+			this.metaFresh = true
+			this.decodeErrorReported = false
+		}
+		const out: WorkerToMain = { type: "connection", state }
+		if (message !== undefined) out.message = message
+		this.deps.post(out)
 	}
 
 	private attachRenderer(canvas: OffscreenCanvas, depth: number): void {
