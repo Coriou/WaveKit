@@ -572,6 +572,59 @@ describe("a decode counts only during the session's air time", () => {
 		expect(codes(h)).not.toContain("discarded:not-analog")
 	}, 120_000)
 
+	for (const delay of [0.8, 1.5])
+		for (const by of ["dmr1", "channel:d_1"])
+			it(`M1: a channel DMR decode stamped ${delay} s into a new analog over, frozen to ${by} (the earlier digital over, or a turnaround naming neither), keeps the voice`, async () => {
+				let label: DecodedLabel | null = null
+				const h = low(
+					{ liveClock: true, decodedLabel: () => label },
+					{ ctcssHz: null },
+				)
+				await h.feed(1, false)
+				await over(h, 5, {
+					during: at => {
+						if (at >= delay && label === null)
+							label = { protocol: "dmr", at: h.now(), observationId: by }
+					},
+				})
+				expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+				expect(codes(h)).not.toContain("discarded:not-analog")
+				expect(refusals(h)).not.toContain("refused:not-analog")
+			}, 120_000)
+
+	it("M1: a decode naming no observation stamped just before the over's onset (the over before it, a decoder's lag) refuses nothing", async () => {
+		let label: DecodedLabel | null = null
+		const h = low(
+			{ liveClock: true, decodedLabel: () => label },
+			{ ctcssHz: null },
+		)
+		await h.feed(1, false)
+		// Inside the old window (pre-roll 300 ms + skew 500 ms before the onset), before the onset.
+		label = { protocol: "dmr", at: h.now() - 200, observationId: "decode:d_1" }
+		await over(h, 5)
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		expect(refusals(h)).not.toContain("refused:not-analog")
+	}, 120_000)
+
+	for (const by of [null, "decode:d_1"])
+		it(`M1: a pager decode after the onset naming no observation (${by ?? "null"}) discards the recording`, async () => {
+			let label: DecodedLabel | null = null
+			const h = low(
+				{ liveClock: true, decodedLabel: () => label },
+				{ ctcssHz: null },
+			)
+			await h.feed(1, false)
+			await over(h, 6, {
+				during: at => {
+					if (at >= 3 && label === null)
+						label = { protocol: "pocsag", at: h.now(), observationId: by }
+				},
+			})
+			expect(h.ops.length).toBeGreaterThan(0)
+			expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+			expect(codes(h)).toContain("discarded:not-analog")
+		}, 120_000)
+
 	it("a DMR decode during the analog over's hang, of a digital over joined on the same discovery, ends the session at the join: the voice file is kept", async () => {
 		let label: DecodedLabel | null = null
 		const h = low(
@@ -613,4 +666,57 @@ describe("a decode counts only during the session's air time", () => {
 		expect(refusals(h)).toContain("refused:not-analog")
 		expect(h.rec.owns("j")).toBe(false)
 	}, 120_000)
+})
+
+describe("m2: a join before the current file's start (a roll-over)", () => {
+	/**
+	 * A 118 s voice `o`, then `j` (same channel) reported beside it for `joinedSeconds` from
+	 * 118 s on while `o` goes on past the 120 s roll-over; 1 s past the roll-over a DMR decode
+	 * naming `j` arrives.
+	 */
+	const scene = async (joinedSeconds: number) => {
+		let label: DecodedLabel | null = null
+		const h = low(
+			{ liveClock: true, decodedLabel: () => label },
+			{ ctcssHz: null },
+		)
+		await h.feed(0.5, false)
+		const onset = h.engine.liveEdge()
+		const report = () =>
+			h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge(), LOW)))
+		await h.feed(118, true, report)
+		const joinAt = h.engine.liveEdge()
+		const joinEnd = joinAt + joinedSeconds * h.fs
+		await h.feed(4, true, () => {
+			report()
+			const edge = h.engine.liveEdge()
+			if (edge >= joinAt + 0.1 * h.fs && edge <= joinEnd)
+				h.rec.track(input("j", snapshot("j", joinAt, edge, LOW)))
+			if (edge > joinEnd && h.rec.owns("j"))
+				h.rec.closed("j", snapshot("j", joinAt, joinEnd, LOW), null)
+			if (edge - onset >= 121 * h.fs && label === null)
+				label = { protocol: "dmr", at: h.now(), observationId: "j" }
+		})
+		h.rec.closed("o", snapshot("o", onset, h.engine.liveEdge(), LOW), null)
+		await h.feed(3.5, false)
+		await h.rec.idle()
+		return h
+	}
+
+	it("the joined signal still on the air when the roll-over's file opened: that file is dropped, the voice before it kept", async () => {
+		const h = await scene(4)
+		expect(h.ops.length).toBeGreaterThan(0)
+		expect(h.ops[0]!.input.observationId).toBe("o")
+		expect(h.ops[0]!.outcome).toBe("finalized")
+		expect(h.ops.filter(o => o.outcome === "finalized")).toHaveLength(1)
+		expect(codes(h)).not.toContain("discarded:not-analog")
+		expect(h.rec.owns("o")).toBe(false)
+	}, 240_000)
+
+	it("the joined signal ended before the roll-over's file opened: that file (voice after it) is kept too", async () => {
+		const h = await scene(1)
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
+		expect(codes(h)).not.toContain("discarded:not-analog")
+		expect(h.rec.owns("o")).toBe(false)
+	}, 240_000)
 })

@@ -32,8 +32,8 @@
  * Never analog voice (voice-veto.ts), judged on evidence about the session's owner only: a
  * session whose owner's discovery, or the discovery it was merged into, is decoded as a protocol
  * that is not analog voice (a pager, packet data, digital voice) during its air time (decodeVeto:
- * from its pre-roll start to now, the hang included; a decode of an earlier over on a mixed-mode
- * channel proves nothing), or whose owner's snapshot has a digital class backed by more than the
+ * from its pre-roll start to now, the hang included, or from its onset for a decode that names no
+ * observation; a decode of an earlier over on a mixed-mode channel proves nothing), or whose owner's snapshot has a digital class backed by more than the
  * spectrum (a verified decode, the channel tier), is discarded (`discarded:not-analog`: every
  * file not finalized yet, one being written is cancelled), and none starts for an observation
  * so decoded (`refused:not-analog`, once per observation). A spectral reading alone never
@@ -1792,8 +1792,12 @@ export class WidebandAnalogRecorder {
 	 * onset less the pre-roll, mapped to wall time through the live edge, less
 	 * WIDEBAND_DECODE_SKEW_MS) up to now (the hang included) counts. An older one is another
 	 * transmission's (a mixed-mode repeater's earlier digital over): nothing. The observation it
-	 * cites names whose: the owner, or none (a channel anchor), the session's own (`own`); a
-	 * joined other one (Session.joins), that join; any other observation, another transmission's.
+	 * cites names whose: the owner, the session's own (`own`); a joined other one
+	 * (Session.joins), that join; any other observation (a channel proof frozen to an earlier
+	 * over, or `channel:` for a decode of either over at a turnaround), another transmission's.
+	 * One that cites none (null, a channel anchor's or unpaired channel proof's `decode:`) can
+	 * be of the over before the owner's (a decoder's lag reaches past an onset): it is the
+	 * session's own only when stamped at or after the owner's onset, with no pre-roll or skew.
 	 */
 	private decodeVeto(s: Session, discoveryId: string | null): Veto {
 		const d = this.notVoiceDecode(discoveryId)
@@ -1803,7 +1807,11 @@ export class WidebandAnalogRecorder {
 		)
 			return null
 		const by = d.observationId
-		if (citesNoObservation(by) || by === s.owner) return "own"
+		if (by === s.owner) return "own"
+		if (citesNoObservation(by))
+			return decodedSince(d, this.wallAt(s.engine, s.fs, s.onset))
+				? "own"
+				: null
 		return by !== null && s.joins.has(by) ? { joined: by } : null
 	}
 
@@ -1816,10 +1824,17 @@ export class WidebandAnalogRecorder {
 		fs: number,
 		fromSample: number,
 	): number {
+		return this.wallAt(engine, fs, fromSample) - WIDEBAND_DECODE_SKEW_MS
+	}
+
+	/** Wall time (ms) of input sample `sample`: now less the span from it to the live edge. */
+	private wallAt(
+		engine: WidebandEngineView,
+		fs: number,
+		sample: number,
+	): number {
 		return (
-			this.deps.now() -
-			(Math.max(0, engine.liveEdge() - fromSample) * 1000) / fs -
-			WIDEBAND_DECODE_SKEW_MS
+			this.deps.now() - (Math.max(0, engine.liveEdge() - sample) * 1000) / fs
 		)
 	}
 
@@ -1856,10 +1871,16 @@ export class WidebandAnalogRecorder {
 			observationId,
 			discoveryId,
 		})
+		const span = s.activity.get(observationId)
 		this.endSession(
 			s,
 			"cancelled",
-			s.joins.get(observationId) ?? s.activity.get(observationId)?.start,
+			s.joins.get(observationId) ?? span?.start,
+			span === undefined
+				? Number.NEGATIVE_INFINITY
+				: span.open
+					? Number.POSITIVE_INFINITY
+					: span.last,
 		)
 	}
 
@@ -2027,19 +2048,23 @@ export class WidebandAnalogRecorder {
 		const decode = this.notVoiceDecode(input.discoveryId)
 		if (
 			decode !== null &&
-			(citesNoObservation(decode.observationId) ||
-				decode.observationId === observationId) &&
-			decodedSince(
-				decode,
-				this.airStart(
-					engine,
-					epoch.sampleRateHz,
-					track.startSample -
-						Math.round(
-							(Math.max(0, settings.preRollMs) * epoch.sampleRateHz) / 1000,
+			(decode.observationId === observationId
+				? decodedSince(
+						decode,
+						this.airStart(
+							engine,
+							epoch.sampleRateHz,
+							track.startSample -
+								Math.round(
+									(Math.max(0, settings.preRollMs) * epoch.sampleRateHz) / 1000,
+								),
 						),
-				),
-			)
+					)
+				: citesNoObservation(decode.observationId) &&
+					decodedSince(
+						decode,
+						this.wallAt(engine, epoch.sampleRateHz, track.startSample),
+					))
 		) {
 			// Decoded during this transmission (its pre-roll on): final, this observation is refused
 			// once, not looked up again per snapshot. An older decode (another transmission on a
@@ -3752,26 +3777,36 @@ export class WidebandAnalogRecorder {
 
 	/**
 	 * Ends every open file now (kept, cut), e.g. stream loss or shutdown; no later than `endAt`
-	 * (an input sample past the file's start: a joined other signal's start, endAtJoin).
+	 * (a joined other signal's start, endAtJoin, its track last reported at `joinedLast`: +∞ while
+	 * open, −∞ unknown). A join at or before the current file's start (it opened after a roll-over
+	 * or a new transmission): while the joined signal was still on the air at that start, the file
+	 * opened inside it and nothing of it precedes the join, so it ends at its start and is dropped
+	 * as empty; when the joined signal had ended by then (or that is unknown), the file holds no
+	 * audio of it and ends now, judged as usual (a voice after a short digital burst is never lost).
+	 * Files before the current one are never touched.
 	 */
 	private endSession(
 		s: Session,
 		cut: AnalogCut,
 		endAt = Number.POSITIVE_INFINITY,
+		joinedLast = Number.NEGATIVE_INFINITY,
 	): void {
 		const file = s.file
 		s.pendingStart = null
 		if (file && !file.finishing) {
+			const inside = endAt <= file.startSample && joinedLast >= file.startSample
 			file.endSample = Math.min(
 				file.endSample ?? s.next,
 				s.next,
 				endAt > file.startSample ? endAt : Number.POSITIVE_INFINITY,
 			)
 			file.cut = cut
-			if (file.frames === 0) {
+			if (file.frames === 0 || inside) {
 				file.failed = true
 				s.file = null
 				s.files.delete(file)
+				const waiting = s.waiting.indexOf(file)
+				if (waiting >= 0) s.waiting.splice(waiting, 1)
 				file.handle?.cancel(cut)
 				this.endFile(s, file, "discarded:empty")
 			} else this.finishFile(s, file)

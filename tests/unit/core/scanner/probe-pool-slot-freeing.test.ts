@@ -3,6 +3,7 @@
  * keeps such a run queued past IDENTIFY_QUEUE_WAIT_MS instead of skipping it.
  */
 import { describe, expect, it } from "vitest"
+import { IDENTIFY_PROBE_PRIORITY } from "../../../../src/core/scanner/identify.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
 import {
 	flushAsync,
@@ -30,7 +31,7 @@ describe("ProbePool.slotFreeing", () => {
 		const open = gate(h)
 		const req = probeRequest({
 			jobId: "identify",
-			priority: 101,
+			priority: IDENTIFY_PROBE_PRIORITY,
 			trackId: "t2",
 		})
 		expect(h.pool.request(req)).toEqual({ deferred: "max-probes" })
@@ -46,10 +47,16 @@ describe("ProbePool.slotFreeing", () => {
 	it("false while the slot is held by a probe nobody stops (another identify)", async () => {
 		const h = poolHarness()
 		expect(
-			h.pool.request(probeRequest({ jobId: "first", priority: 101 })),
+			h.pool.request(
+				probeRequest({ jobId: "first", priority: IDENTIFY_PROBE_PRIORITY }),
+			),
 		).toHaveProperty("started")
 		await flushAsync()
-		const req = probeRequest({ jobId: "second", priority: 101, trackId: "t2" })
+		const req = probeRequest({
+			jobId: "second",
+			priority: IDENTIFY_PROBE_PRIORITY,
+			trackId: "t2",
+		})
 		expect(h.pool.request(req)).toEqual({ deferred: "max-probes" })
 		await flushAsync()
 		expect(h.pool.slotFreeing(req)).toBe(false)
@@ -63,7 +70,7 @@ describe("ProbePool.slotFreeing", () => {
 		const open = gate(h)
 		const req = probeRequest({
 			jobId: "identify",
-			priority: 101,
+			priority: IDENTIFY_PROBE_PRIORITY,
 			trackId: "t2",
 		})
 		expect(h.pool.slotFreeing(req)).toBe(false)
@@ -80,9 +87,15 @@ describe("ProbePool.slotFreeing", () => {
 describe("ProbePool.queuedDeferral: the real reason a queued request waits", () => {
 	it("max-probes while another identify holds the slot", async () => {
 		const h = poolHarness()
-		h.pool.request(probeRequest({ jobId: "first", priority: 101 }))
+		h.pool.request(
+			probeRequest({ jobId: "first", priority: IDENTIFY_PROBE_PRIORITY }),
+		)
 		await flushAsync()
-		const req = probeRequest({ jobId: "second", priority: 101, trackId: "t2" })
+		const req = probeRequest({
+			jobId: "second",
+			priority: IDENTIFY_PROBE_PRIORITY,
+			trackId: "t2",
+		})
 		h.pool.request(req)
 		expect(h.pool.queuedDeferral(req)).toMatchObject({
 			deferral: "max-probes",
@@ -125,7 +138,10 @@ describe("ProbePool: identify is not starved by external reservations", () => {
 		const held = budget - 0.08 - 0.45
 		const release = h.pool.reserveExternal(held)
 		expect(release).not.toBeNull()
-		const req = probeRequest({ jobId: "identify", priority: 101 })
+		const req = probeRequest({
+			jobId: "identify",
+			priority: IDENTIFY_PROBE_PRIORITY,
+		})
 		expect(h.pool.request(req)).toHaveProperty("started")
 		await flushAsync()
 		// Identify's 0.5 does not count for a reservation: engine 0.08 + held + 0.01 = budget - 0.44.
@@ -144,7 +160,9 @@ describe("ProbePool: identify is not starved by external reservations", () => {
 		const h = poolHarness({ settings })
 		expect(h.pool.reserveExternal(0.3)).not.toBeNull()
 		expect(
-			h.pool.request(probeRequest({ jobId: "identify", priority: 101 })),
+			h.pool.request(
+				probeRequest({ jobId: "identify", priority: IDENTIFY_PROBE_PRIORITY }),
+			),
 		).toHaveProperty("started")
 	})
 
@@ -153,7 +171,10 @@ describe("ProbePool: identify is not starved by external reservations", () => {
 			s.cpuBudgetCores = 0.57
 		})
 		const h = poolHarness({ settings })
-		const req = probeRequest({ jobId: "identify", priority: 101 })
+		const req = probeRequest({
+			jobId: "identify",
+			priority: IDENTIFY_PROBE_PRIORITY,
+		})
 		expect(h.pool.request(req)).toEqual({ deferred: "budget" })
 		expect(h.pool.queuedDeferral(req)).toMatchObject({ deferral: "budget" })
 	})
@@ -180,7 +201,9 @@ describe("ProbePool.reserveExternal: recordings do not wait on identify", () => 
 	it("at the bound: with an identify probe running, E + X + new = 0.08 + 0.92 = 1 is admitted", async () => {
 		const h = poolHarness({ settings: settings() })
 		expect(
-			h.pool.request(probeRequest({ jobId: "identify", priority: 101 })),
+			h.pool.request(
+				probeRequest({ jobId: "identify", priority: IDENTIFY_PROBE_PRIORITY }),
+			),
 		).toHaveProperty("started")
 		await flushAsync()
 		expect(h.pool.reserveExternal(0.92)).not.toBeNull()
@@ -191,7 +214,9 @@ describe("ProbePool.reserveExternal: recordings do not wait on identify", () => 
 	it("past the bound: E + X + new = 0.08 + 0.93 > 1 is refused, identify running or not", async () => {
 		const h = poolHarness({ settings: settings() })
 		expect(h.pool.reserveExternal(0.93)).toBeNull()
-		h.pool.request(probeRequest({ jobId: "identify", priority: 101 }))
+		h.pool.request(
+			probeRequest({ jobId: "identify", priority: IDENTIFY_PROBE_PRIORITY }),
+		)
 		await flushAsync()
 		expect(h.pool.reserveExternal(0.93)).toBeNull()
 		expect(h.pool.reserveExternal(0.92)).not.toBeNull()
@@ -211,7 +236,9 @@ describe("ProbePool.reserveExternal: recordings do not wait on identify", () => 
 
 	it("a job probe still counts identify's cores and reservations: no room at E + I + X = 1.5", async () => {
 		const h = poolHarness({ settings: settings(2) })
-		h.pool.request(probeRequest({ jobId: "identify", priority: 101 }))
+		h.pool.request(
+			probeRequest({ jobId: "identify", priority: IDENTIFY_PROBE_PRIORITY }),
+		)
 		await flushAsync()
 		expect(h.pool.reserveExternal(0.42)).not.toBeNull()
 		expect(
@@ -230,8 +257,16 @@ describe("ProbePool.reserveExternal: recordings do not wait on identify", () => 
 				s.maxProbes.offset = 2
 			}),
 		})
-		h.pool.request(probeRequest({ jobId: "id1", priority: 101 }))
-		h.pool.request(probeRequest({ jobId: "id2", priority: 101, trackId: "t2" }))
+		h.pool.request(
+			probeRequest({ jobId: "id1", priority: IDENTIFY_PROBE_PRIORITY }),
+		)
+		h.pool.request(
+			probeRequest({
+				jobId: "id2",
+				priority: IDENTIFY_PROBE_PRIORITY,
+				trackId: "t2",
+			}),
+		)
 		await flushAsync()
 		expect(h.pool.status()).toHaveLength(2)
 		expect(h.pool.reserveExternal(1)).not.toBeNull()

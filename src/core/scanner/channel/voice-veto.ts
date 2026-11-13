@@ -88,9 +88,15 @@ export function notAnalogVoiceProtocol(protocol: unknown): boolean {
 /** A discovery's decoded protocol and the decode behind it (ownerDecoded). */
 export interface DecodedLabel {
 	readonly protocol: ScannerProtocol
-	/** When it was decoded (ms since the epoch, the newest decode of its proof); null: unknown. */
+	/**
+	 * When it was decoded (ms since the epoch): the time the label's shown proof states
+	 * (OwnerLabel.proofAt; for a decoded label its newest decoded proof); null: unknown.
+	 */
 	readonly at: number | null
-	/** The observation that was decoded; null or a synthetic id when no observation is cited. */
+	/**
+	 * The observation that was decoded; null or a synthetic id when none is cited (`decode:`, none
+	 * on the air; `channel:`, a channel decode at a turnaround that names neither over).
+	 */
 	readonly observationId: string | null
 }
 
@@ -98,7 +104,7 @@ export interface DecodedLabel {
 export interface LookupLabel {
 	readonly protocol: ScannerProtocol
 	readonly confidence: ScannerConfidence
-	/** The proof's time (ms since the epoch); absent or null: unknown. */
+	/** The shown proof's time (ms since the epoch, OwnerLabel.proofAt); absent or null: unknown. */
 	readonly proofAt?: number | null
 	/** The observation the proof cites; absent or null: none. */
 	readonly proofObservationId?: string | null

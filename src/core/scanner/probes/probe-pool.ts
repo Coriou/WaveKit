@@ -1297,7 +1297,9 @@ export class ProbePool extends EventEmitter {
 			// only (E + J + I + new <= B), a reservation against engines, job probes and reservations only
 			// (E + J + X + new <= B), and a job probe against everything (E + J + I + X + new <= B).
 			// Bound: the last two keep E + J + X <= B, the first keeps I <= B, so the full estimate
-			// E + J + I + X <= B + I, and I <= maxProbes.offset x CPU_COST.offsetProbe (0.5 per slot).
+			// E + J + I + X <= B + I, and I <= maxProbes.offset x CPU_COST.offsetProbe (0.5 per slot):
+			// that last bound assumes identify runs on offset probes only (the channel transport is not
+			// wired for identify); identify on another transport would need its own bound here.
 			// (E engines, J job probes, I identify probes, X reservations, B cpuBudgetCores.)
 			const held = isIdentifyPriority(ctx.req.priority)
 				? this.ownCores()

@@ -98,6 +98,45 @@ describe("DiscoveryStore.ownerLabel", () => {
 		})
 	})
 
+	it("a channel anchor's answer is cached per anchor (no garbage per snapshot) and follows a new decode", () => {
+		const store = newStore()
+		try {
+			const acars = (value: string, at: number) => ({
+				protocol: "acars" as const,
+				origin: "ambient" as const,
+				crcClean: true,
+				epoch: 1,
+				at,
+				identity: { kind: "acars-reg" as const, value },
+				metadata: {},
+			})
+			// A synthetic channel inside the VHF aeronautical band.
+			const hz = 130_000_000
+			const id =
+				store.anchorDecode("rtl", hz, acars("TEST01", T0), "commanded")
+					.discoveryId ?? ""
+			const first = store.ownerLabel(id)
+			expect(first).toMatchObject({
+				protocol: "acars",
+				confidence: "decoded",
+				proofAt: T0,
+				proofObservationId: `decode:${id}`,
+			})
+			expect(labelOf(first)).toEqual(labelOf(store.get(id)))
+			// Same answer object while nothing it reads changed.
+			expect(store.ownerLabel(id)).toBe(first)
+			store.anchorDecode("rtl", hz, acars("TEST02", T0 + 5_000), "commanded")
+			// Publishes the staged confirmation now (rate-limited otherwise).
+			store.stopAnchorExpiry()
+			const next = store.ownerLabel(id)
+			expect(next).not.toBe(first)
+			expect(next?.proofAt).toBe(T0 + 5_000)
+			expect(store.ownerLabel(id)).toBe(next)
+		} finally {
+			store.stopAnchorExpiry()
+		}
+	})
+
 	it("a folder nobody owns: undefined", () => {
 		const store = newStore()
 		expect(store.ownerLabel("d_nobody")).toBeUndefined()

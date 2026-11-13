@@ -3971,7 +3971,8 @@ running probe's cost, and the cores held by analog recordings and analog trials.
 recordings do not wait on each other: an identify probe is admitted against engines and probes
 only, a recording or analog trial against engines, job probes and other recordings only. So the
 estimate can exceed `cpuBudgetCores` while an identify probe runs, by at most identify's own probe
-cores (0.5 per offset slot, `maxProbes.offset` slots).
+cores (0.5 per offset slot, `maxProbes.offset` slots). The bound assumes identify runs on offset
+probes only, as it does today (the channel transport is not wired for identify).
 
 `folders` (absent from older cores and before the scanner state loaded) counts what the
 start did with recording and evidence folders that no discovery owned: `reattached` folders
@@ -6485,7 +6486,8 @@ keys, `limit=10abc` or a malformed cursor answer 400
   discovery centre is known. A recording keeps the folder (and `discoveryId`)
   of the discovery it was made under; once that discovery is merged into
   another, even through a chain of merges, `frequencyHz` is the live owner's
-  centre, and null when no live discovery owns the folder. dsd-fme names carry
+  centre (unless the alias was released at the alias ceiling: then null), and
+  null when no live discovery owns the folder. dsd-fme names carry
   no frequency, so it is null: the frequency is never guessed.
 - Never listed: files modified in the last 10 s (still being written),
   `TEMP_` files, live probe folders (`probe-*`), names that match neither the
