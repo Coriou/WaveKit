@@ -430,9 +430,11 @@ export interface ReceiverClientsVerdict {
 	free: boolean
 	reason: "port-matched" | "sole-client" | "another-client" | "clients-unknown"
 	/**
-	 * performance.now() (monotonic) when the poll behind the verdict started. A free verdict
-	 * counts only from a reading started after the connection's session and the gated fields'
-	 * last doubt (plainResumeVerdict); without it, a free verdict never counts.
+	 * performance.now() (monotonic) at or after which the listed clients were read by rtlmux: not
+	 * the poll's start, since the sdr-host serves the list of its last stats poll
+	 * (receiverClientsListedAfter). A free verdict counts only from a list newer than the
+	 * connection's session and the gated fields' last doubt (plainResumeVerdict); without it, a
+	 * free verdict never counts.
 	 */
 	readingAt?: number
 }
@@ -1626,7 +1628,7 @@ export class TunerController extends EventEmitter {
 	private receiverClientsPoll: ((sourceId: string) => void) | null = null
 	/**
 	 * performance.now() of the source's last session start or doubt on a gated field: a free
-	 * reading counts only when its poll started after it (plainResumeVerdict). `untracked`: an
+	 * reading counts only when its list is newer than it (plainResumeVerdict). `untracked`: an
 	 * untracked-retune doubt came since the last fresh free reading (a client bypassing the relay
 	 * retuned the receiver): until a fresh reading, the receiver is another client's. Gone with
 	 * the source.
@@ -1991,8 +1993,10 @@ export class TunerController extends EventEmitter {
 		} catch {
 			verdict = null
 		}
-		// A free reading counts only when its poll started after the session and the last doubt:
-		// an older one (up to the reading's max age) may predate a client that joined and retuned.
+		// A free reading counts only when its list is newer than the session and the last doubt
+		// (readingAt bounds when rtlmux listed it, not when the poll started): an older list may
+		// name another client alone (one from before this connection) or predate a client that
+		// joined and retuned.
 		const stale = this.clientsStaleBefore.get(sourceId)
 		const fresh =
 			typeof verdict?.readingAt === "number" &&

@@ -187,6 +187,25 @@ export interface ReceiverClientsReading {
 	startedAt: number
 	clients: number
 	ports: Array<number | null>
+	/**
+	 * How old the sdr-host's client list was when it answered (`sampling.stats.ageMs`: the age of
+	 * its last rtlmux stats observation, which it serves until 30 s old), or null when the answer
+	 * does not say (raw rtlmux stats, an older sdr-host): the list may then be that old.
+	 * receiverClientsListedAfter turns it into the earliest instant the list can be from.
+	 */
+	listAgeMs: number | null
+}
+
+/** `sampling.stats.ageMs` of an sdr-host answer: a finite age >= 0, else null. */
+function listAgeOf(body: Record<string, unknown>): number | null {
+	const sampling = body["sampling"]
+	if (typeof sampling !== "object" || sampling === null) return null
+	const stats = (sampling as Record<string, unknown>)["stats"]
+	if (typeof stats !== "object" || stats === null) return null
+	const age = (stats as Record<string, unknown>)["ageMs"]
+	return typeof age === "number" && Number.isFinite(age) && age >= 0
+		? age
+		: null
 }
 
 /** The port of an sdr-host client address (`host:port`, `[v6]:port`), or null. */
@@ -485,13 +504,12 @@ export class SdrHostPoller extends EventEmitter {
 		retry: boolean,
 	): Promise<number> {
 		try {
-			const { status, endpoints, identity, ports } = await this.fetchStatus(
-				state.config,
-			)
+			const { status, endpoints, identity, ports, listAgeMs } =
+				await this.fetchStatus(state.config)
 			state.answered = true
 			state.clients =
 				status.rtlmux && ports !== null
-					? { startedAt, clients: status.rtlmux.clients, ports }
+					? { startedAt, clients: status.rtlmux.clients, ports, listAgeMs }
 					: null
 			// The identity first: the receiver tracker waits on it, not on /api/host.
 			if (this.pollers.get(sourceId) === state)
@@ -616,6 +634,8 @@ export class SdrHostPoller extends EventEmitter {
 	private async fetchStatus(config: SdrHostConfig): Promise<{
 		/** rtlmux's client ports (ReceiverClientsReading.ports); null without stats. */
 		ports: Array<number | null> | null
+		/** The client list's age the answer reports (ReceiverClientsReading.listAgeMs). */
+		listAgeMs: number | null
 		status: SdrHostStatus
 		endpoints: ReceiverEndpointsReport | null
 		identity: SdrHostIdentityFacts | null
@@ -815,6 +835,9 @@ export class SdrHostPoller extends EventEmitter {
 				status,
 				// A redirected answer is another server's clients.
 				ports: response.redirected ? null : ports,
+				listAgeMs: response.redirected
+					? null
+					: listAgeOf(body as Record<string, unknown>),
 				endpoints: response.redirected ? null : parseReceiverEndpoints(body),
 				// Another server's answer never names this receiver.
 				identity: response.redirected ? null : parseSdrHostIdentity(body),

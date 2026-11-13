@@ -23,7 +23,9 @@ import type { TuningReceipt } from "../../../src/core/tuning-ledger.js"
 import {
 	receiverClientsMaxAgeMs,
 	receiverClientsVerdict,
+	SDR_HOST_LIST_MAX_AGE_MS,
 } from "../../../src/core/tuning-ledger-receiver-free.js"
+import type { ReceiverClientsReading } from "../../../src/core/sdr-host-poller.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import { startStampedRtlTcp } from "../../mocks/stamped-rtl-tcp.js"
 
@@ -47,6 +49,11 @@ const SET_GAIN_MODE = 0x03
 const SET_GAIN = 0x04
 const POLL_MS = 40
 const TIMEOUT_MS = 1000
+/**
+ * The sdr-host's stats request bound for these tests (SDR_HOST_LIST_FETCH_MS is 3 s): short, so a
+ * list fresh at the answer counts a little after the session instead of 3 s later.
+ */
+const BOUNDS = { maxListAgeMs: SDR_HOST_LIST_MAX_AGE_MS, fetchMs: 100 }
 
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -84,15 +91,25 @@ function config(port: number): SourceConfig {
 	} as SourceConfig
 }
 
-type HostMode = "free" | "second" | "down" | "nat" | "nat-second"
+type HostMode =
+	| "free"
+	| "second"
+	| "down"
+	| "nat"
+	| "nat-second"
+	| "cached-other"
 
 /**
  * The fake sdr-host: GET /api/status lists rtlmux's clients (the core's connection by its local
  * port, and in `second` another one); `down` answers 500. `nat` lists the core's connection under
  * a rewritten port (as a NAT in front of rtlmux would), `nat-second` that and another client.
+ * `cached-other` serves the list of a stats poll from before the core's connection: one other
+ * client (SDR++ alone), the list `listAge` ms old. Every answer reports its list's age
+ * (`sampling.stats.ageMs`, `listAge`: 0 by default, a list just read) as the sdr-host does.
  */
 async function startFakeSdrHost(localPort: () => number | null) {
 	let mode: HostMode = "free"
+	let listAge = 0
 	/** While held, answers wait (a slow poll): `release` sends them in the mode of that time. */
 	let held: (() => void)[] | null = null
 	const server = http.createServer((req, res) => {
@@ -108,7 +125,7 @@ async function startFakeSdrHost(localPort: () => number | null) {
 			res.end()
 			return
 		}
-		const own = localPort()
+		const own = mode === "cached-other" ? null : localPort()
 		const nat = mode === "nat" || mode === "nat-second"
 		const details = [
 			...(own !== null
@@ -121,7 +138,7 @@ async function startFakeSdrHost(localPort: () => number | null) {
 						},
 					]
 				: []),
-			...(mode === "second" || mode === "nat-second"
+			...(mode === "second" || mode === "nat-second" || mode === "cached-other"
 				? [{ id: 1, address: "127.0.0.1:1", bytesDropped: 0 }]
 				: []),
 		]
@@ -137,6 +154,7 @@ async function startFakeSdrHost(localPort: () => number | null) {
 						clientDetails: details,
 					},
 				},
+				sampling: { stats: { state: "ok", ageMs: listAge } },
 			}),
 		)
 	}
@@ -144,8 +162,9 @@ async function startFakeSdrHost(localPort: () => number | null) {
 	const { port } = server.address() as net.AddressInfo
 	return {
 		url: `http://127.0.0.1:${port}`,
-		setMode: (m: HostMode) => {
+		setMode: (m: HostMode, age = 0) => {
 			mode = m
+			listAge = age
 		},
 		hold: () => {
 			held ??= []
@@ -220,6 +239,7 @@ async function harness(
 				manager.connectionLocalPort(id),
 				performance.now(),
 				maxAge,
+				BOUNDS,
 			),
 		)
 		poller.on("status", status =>
@@ -316,7 +336,7 @@ describe("a plain resume on a free receiver (U1, U3)", () => {
 		})
 	}, 30_000)
 
-	it("behind a NAT with a second client leaves the tuning as found", async () => {
+	it("behind a NAT with a second client leaves the tuning as found: another client (two listed, neither on this port)", async () => {
 		const h = await harness()
 		h.host.setMode("nat-second")
 		const from = await h.plainResume()
@@ -325,7 +345,33 @@ describe("a plain resume on a free receiver (U1, U3)", () => {
 		expect(h.proofOf().frequency.state).toBe("unverified")
 		expect(h.state().resumeOutcome).toMatchObject({
 			outcome: "left-as-found",
+			reason: "another-client",
+		})
+	}, 30_000)
+
+	it("a cached list that names only another client (SDR++ from before this connection) holds, though every poll started after the session; its refreshed list takes the tuning back", async () => {
+		const h = await harness()
+		// The sdr-host's last stats poll predates the connection: it still lists SDR++ alone.
+		h.host.setMode("cached-other", 1_500)
+		const from = await h.plainResume()
+		await wait(400)
+		expect(h.framesFrom(from)).toEqual([])
+		expect(h.proofOf().frequency.state).toBe("unverified")
+		expect(h.state().resumeOutcome).toMatchObject({
+			outcome: "left-as-found",
 			reason: "clients-unknown",
+		})
+		// SDR++ left; the sdr-host's next stats poll lists this connection alone (NAT: no port
+		// match), read after the session: a genuine sole client.
+		h.host.setMode("nat", 0)
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.framesFrom(from)).toEqual([
+			[SET_SAMPLE_RATE, RATE],
+			[SET_FREQUENCY, F1],
+		])
+		expect(h.state().resumeOutcome).toMatchObject({
+			outcome: "restored",
+			reason: "sole-client",
 		})
 	}, 30_000)
 
@@ -465,6 +511,67 @@ describe("a free verdict counts only from a reading after the connection and the
 			[SET_SAMPLE_RATE, RATE],
 			[SET_FREQUENCY, F1],
 		])
+	}, 30_000)
+
+	it("a sole-client list taken before the session or the last doubt holds even when its poll started after them; one newer than both takes the tuning back", async () => {
+		const h = await harness({ sdrHost: false })
+		const reading: ReceiverClientsReading = {
+			startedAt: performance.now(),
+			clients: 1,
+			ports: [null],
+			listAgeMs: 0,
+		}
+		// The production verdict over a reading the test sets (fetch bound 100 ms, as the harness).
+		h.controller.setReceiverClientsView(
+			id =>
+				receiverClientsVerdict(
+					reading,
+					h.manager.connectionLocalPort(id),
+					performance.now(),
+					60_000,
+					BOUNDS,
+				),
+			() => undefined,
+		)
+		/** A poll that starts now and is answered with a list `listAgeMs` old. */
+		const answer = (listAgeMs: number) => {
+			reading.startedAt = performance.now()
+			reading.listAgeMs = listAgeMs
+			h.controller.noteReceiverClients("rtl")
+		}
+		const from = await h.plainResume()
+		// The poll starts after the session, but the list is 1.5 s old: from before the connection.
+		answer(1_500)
+		await wait(200)
+		expect(h.framesFrom(from)).toEqual([])
+		expect(h.state().resumeOutcome?.reason).toBe("clients-unknown")
+		// No age in the answer: the list may be 30 s old, so it holds as well.
+		reading.startedAt = performance.now()
+		reading.listAgeMs = null
+		h.controller.noteReceiverClients("rtl")
+		await wait(200)
+		expect(h.framesFrom(from)).toEqual([])
+		// A list newer than the session: taken back as sole-client.
+		answer(0)
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.state().resumeOutcome).toMatchObject({
+			outcome: "restored",
+			reason: "sole-client",
+		})
+		const restored = h.framesFrom(from).length
+		// A doubt, then a poll after it answered with a list from before it: held, no assert frame.
+		await wait(BOUNDS.fetchMs + 50)
+		h.ledger.raiseDoubt("rtl", "frequency", "pipeline-error")
+		answer(1_500)
+		await wait(200)
+		expect(h.framesFrom(from)).toHaveLength(restored)
+		expect(h.proofOf().frequency.state).toBe("unverified")
+		expect(h.state().resumeOutcome?.reason).toBe("clients-unknown")
+		// A list newer than the doubt (poll past the fetch bound after it): taken back again.
+		await wait(BOUNDS.fetchMs + 50)
+		answer(0)
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.framesFrom(from).slice(restored)).toEqual([[SET_FREQUENCY, F1]])
 	}, 30_000)
 
 	it("a sole-client reading follows the same freshness rules: one before the session or the last doubt holds", async () => {

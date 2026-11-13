@@ -1334,10 +1334,16 @@ What a resume writes to the receiver depends on the body:
   the port); `resumeOutcome` says which. The client list is read at every sdr-host poll and must
   be at most two poll intervals and a request timeout old (8 s with the defaults). Anything else
   leaves the tuning as found: two or more clients on rtlmux, zero clients, no sdr-host (or
-  `resources.sdrHostPoller` off), an answer that fails or is too old, or a relay client. A free
-  answer counts only when its poll started after the connection and after the last doubt on the
-  centre or rate, so a reading taken before this connection (which may list one other client)
-  never counts, and a client that joins and retunes is not fought on an older answer: after an
+  `resources.sdrHostPoller` off), an answer that fails or is too old, or a relay client. The
+  sdr-host serves the client list of its own last rtlmux stats poll, which can be older than the
+  answer, so a free answer counts only when the list itself is newer than the connection and the
+  last doubt on the centre or rate: the core takes the list as no newer than the poll's start
+  minus the list's age the answer reports (`sampling.stats.ageMs`) minus 3 s for the sdr-host's
+  own stats request (both measured on the sdr-host's clock, so a clock offset between the hosts
+  does not matter), or minus 33 s when the answer reports no age (the sdr-host serves a list until
+  it is 30 s old). With a working sdr-host the take-back comes a few seconds after the
+  connection. A list taken before this connection (which may name only another client, SDR++
+  say) never counts, and a client that joins and retunes is not fought on an older list: after an
   untracked retune the receiver reads as another client's until a newer answer says free. It is
   re-read at every poll: a client that joins later puts the hold back, one that leaves gives the
   tuning back. `resumeOutcome` on
@@ -1345,8 +1351,8 @@ What a resume writes to the receiver depends on the body:
   `left-as-found` and `reason` `port-matched` ("receiver free (only this connection): tuning
   restored"; the one client has this connection's port), `sole-client` ("receiver free (one
   client, port not matched): tuning restored"; its port is another or not listed),
-  `another-client` ("another client on the receiver: tuning left as found"; this connection and
-  another are listed),
+  `another-client` ("another client on the receiver: tuning left as found"; two or more clients
+  are listed, each with its own entry),
   `clients-unknown` ("receiver clients unknown: tuning left as found"), `relay-attached`, or
   `operator` after [`POST /api/tuner/:sourceId/take-back`](#post-apitunersourceidtake-back);
   present from the plain resume until a restore resume.

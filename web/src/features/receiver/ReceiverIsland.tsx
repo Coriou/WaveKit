@@ -310,8 +310,8 @@ function FeedControl() {
 
 /**
  * The source's `tuningUnproven` (GET /api/sources): the core's sentence, and "Take the tuning back"
- * (POST /api/tuner/:sourceId/take-back) unless its cause is one the core always refuses. A refusal
- * shows the core's message in its place.
+ * (POST /api/tuner/:sourceId/take-back) unless its cause is one the core always refuses or there is
+ * no connection. A refusal shows the core's message beside it, announced (role="alert").
  */
 function TuningUnprovenNote() {
 	const { data, source } = useReceiver()
@@ -333,9 +333,9 @@ function TuningUnprovenNote() {
 		if (text !== null) setRefusal({ id, text })
 	}
 	return (
+		// A plain wrapper: only the refusal is a live region (no live region nested in another).
 		<span
 			className="wkf-warn wkf-rx-error wkf-rx-unproven"
-			role="status"
 			data-cause={unproven.cause}
 		>
 			<span className="wkf-grow wkf-rx-toggle-text">

@@ -92,6 +92,46 @@ describe("Take the tuning back", () => {
 		await close()
 	})
 
+	it("is a plain wrapper, not a live region: only the refusal text is one (no nested live regions)", async () => {
+		const { services, close } = await resumedPlain()
+		const html = panel(services)
+		const open =
+			/<span class="wkf-warn wkf-rx-error wkf-rx-unproven"[^>]*>/.exec(
+				html,
+			)?.[0]
+		expect(open).toBeDefined()
+		expect(open).not.toMatch(/role=|aria-live/)
+		// Before any refusal there is no live region inside it at all.
+		const note = html.slice(html.indexOf(open ?? ""))
+		const body = note.slice(0, note.indexOf("Take the tuning back"))
+		expect(body).not.toMatch(/role="(status|alert)"|aria-live/)
+		await close()
+	})
+
+	it("hides the action without a connection (cause no-session) and keeps the core's sentence", async () => {
+		const { services, close } = await resumedPlain()
+		services.data.sources.update(s => ({
+			...s,
+			sources: s.sources.map(row =>
+				row.id === "rtl-0" && row.tuningUnproven
+					? {
+							...row,
+							tuningUnproven: {
+								...row.tuningUnproven,
+								cause: "no-session",
+								message: "Tuning not proven: no connection",
+							},
+						}
+					: row,
+			),
+		}))
+		const html = panel(services)
+		expect(html).toContain('data-cause="no-session"')
+		expect(html).toContain("Tuning not proven: no connection")
+		expect(html).not.toContain("Take the tuning back")
+		await close()
+	})
+
 	it("takes the tuning back: the outcome reads operator and the notice goes", async () => {
 		const { services, close } = await resumedPlain()
 		expect(await takeTuningBack(services.data, "rtl-0")).toBeNull()
@@ -139,6 +179,7 @@ describe("Take the tuning back", () => {
 			"external-control",
 			"scanner-lease",
 			"lost-ownership",
+			"no-session",
 		])
 			expect(offersTakeBack(cause)).toBe(false)
 		for (const cause of [

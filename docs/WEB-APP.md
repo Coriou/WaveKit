@@ -299,7 +299,8 @@ waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads
   back** writes the held centre and rate again in one call
   ([`POST /api/tuner/:sourceId/take-back`](API.md#post-apitunersourceidtake-back)). It is not
   offered while a relay client, a scanner job, external control or another core holds the
-  receiver; if the core still refuses, its reason shows in place. When the core measures a common rate from the
+  receiver, or while the source is not connected; if the core still refuses, its reason shows
+  beside it. When the core measures a common rate from the
   stream it adopts it and the island labels it `measured`. **Resume at 161.500 MHz** (shown when
   the core knows the centre from before the pause) reconnects and writes the centre, rate and gain
   from before the pause back. SDR++ connected through WaveKit's tuner relay is seen: its retunes

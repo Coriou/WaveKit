@@ -1,21 +1,24 @@
 /**
  * "Take the tuning back" in the Receiver island: POST /api/tuner/:sourceId/take-back writes the held
  * centre and sample rate and ends a plain resume's hold (docs/API.md). Offered while the source's
- * `tuningUnproven` (GET /api/sources) is set, except under the causes the core always refuses.
+ * `tuningUnproven` (GET /api/sources) is set, except under the causes the core always refuses and
+ * without a connection.
  */
 import type { TunerState } from "@wavekit/api-types"
 import type { DataLayer } from "../../data/index.ts"
 import { errorMessage, isApiError } from "../../data/index.ts"
 
 /**
- * The causes under which the core refuses a take-back (409 TUNER_TAKE_BACK_BLOCKED: a relay client,
- * a scanner lease, another core; TUNER_CONTROL_EXTERNAL under external control): no action there.
+ * The causes with no action: the core refuses a take-back (409 TUNER_TAKE_BACK_BLOCKED: a relay
+ * client, a scanner lease, another core; TUNER_CONTROL_EXTERNAL under external control), or there
+ * is no connection to write on (`no-session`: the tuning is proven again once it connects).
  */
 const REFUSED_CAUSES: ReadonlySet<string> = new Set([
 	"relay-attached",
 	"external-control",
 	"scanner-lease",
 	"lost-ownership",
+	"no-session",
 ])
 
 /** Whether the island offers the action for this `tuningUnproven.cause`. */

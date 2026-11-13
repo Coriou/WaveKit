@@ -592,9 +592,12 @@ both but the engine's newest block reads unverified. A plain resume's hold gives
 only while a fresh sdr-host reading lists exactly one rtlmux client while this core's connection is
 up (`port-matched` when its port is the connection's, `sole-client` otherwise: a NAT may rewrite
 it) and no relay client is attached (`TunerController.plainResumeTakesTuningBack`, the one decision;
-`tuning-ledger-receiver-free.ts`), on a reading whose poll started after the connection's session
-and the last doubt on its centre or rate (an untracked-retune doubt reads as another client until
-such a reading says free); `POST /api/tuner/:sourceId/take-back` re-proves both fields in one
+`tuning-ledger-receiver-free.ts`), on a reading whose client list is newer than the connection's
+session and the last doubt on its centre or rate (an untracked-retune doubt reads as another client
+until such a reading says free). The sdr-host serves the list of its own last rtlmux stats poll, so
+the list's time is bounded from the reply, not the poll: the poll's start minus the reported list
+age (`sampling.stats.ageMs`) minus 3 s for the sdr-host's stats request, or minus 33 s without an
+age (`receiverClientsListedAfter`); `POST /api/tuner/:sourceId/take-back` re-proves both fields in one
 call and ends the hold only once both writes succeeded. A command
 whose frame tuned a stream that starts at a queued reconnect boundary gets its DSP epoch once
 that boundary is applied, at its receipt's position in the new stream. A client that retunes the receiver behind the core's back is
