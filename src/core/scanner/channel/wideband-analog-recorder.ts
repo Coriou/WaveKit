@@ -28,6 +28,16 @@
  * WIDEBAND_DIGITAL_CLASS_MS); a session classed by its own audio only keeps a low priority and
  * a bounded hold (WIDEBAND_TONE_ONLY_HOLD_FRAMES), and each of its files is checked again over
  * the whole file when it finishes.
+ *
+ * Never analog voice (voice-veto.ts): a session whose discovery, or the discovery it was merged
+ * into, is decoded as a protocol that is not analog voice (a pager, packet data, digital voice),
+ * whose snapshots give a digital class backed by more than the spectrum, or which was classed
+ * analog-fm by snapshots only while more of its snapshots read a digital class (judged once it
+ * heard WIDEBAND_DIGITAL_CLASS_MS of in-track audio, and again when each file finishes) with no
+ * CTCSS class from its own audio, is discarded (`discarded:not-analog`: every file not finalized
+ * yet, one being written is cancelled) and none starts for such a discovery
+ * (`refused:not-analog`). A voice over a standard CTCSS tone (its own audio's class) keeps
+ * today's rules whatever the spectrum reads.
  */
 import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
@@ -82,6 +92,7 @@ import {
 	VOICE_WINDOW_BLOCKS,
 } from "./voice-activity.js"
 import { RecorderDecisions, type ReceiptDetail } from "./recorder-decisions.js"
+import { digitalOutvotes, notAnalogVoiceProtocol } from "./voice-veto.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 /** Same bound as the channel-tier trigger: a 25 kHz NFM channel's occupied bandwidth. */
@@ -576,6 +587,12 @@ export interface WidebandAnalogDeps {
 	 * null when the budget is full (the session does not start; the next snapshot retries).
 	 */
 	reserveCores?(cores: number): (() => void) | null
+	/**
+	 * The decoded protocol of `discoveryId`, or of the live discovery it was merged into (its
+	 * folder's owner); null while not decoded or unknown. A protocol that is not analog voice
+	 * (notAnalogVoiceProtocol) refuses and discards the discovery's recordings. Absent: no check.
+	 */
+	decodedProtocol?(discoveryId: string): string | null
 	logger: Logger
 	now(): number
 	/** Next-turn scheduler for drain slices; default setImmediate. */
@@ -603,6 +620,8 @@ export interface WidebandTrackInput {
 	 * `nonAnalog`): its shadow has the lowest slot priority (WIDEBAND_DIGITAL_CLASS_MS).
 	 */
 	readonly spectralDigital?: boolean
+	/** The snapshot's class is a digital one (voice-veto.ts DIGITAL_CLASSES), whatever its tier. */
+	readonly digitalClass?: boolean
 	readonly encrypted: boolean
 	/** No covering job, or a covering job with record.analog. */
 	readonly recordAllowed: boolean
@@ -617,6 +636,7 @@ export interface WidebandTrackInput {
 export interface WidebandArtefactInfo {
 	readonly analogFm: boolean
 	readonly nonAnalog?: boolean
+	readonly digitalClass?: boolean
 	readonly encrypted: boolean
 	readonly recordAllowed: boolean
 }
@@ -625,6 +645,7 @@ export interface WidebandArtefactInfo {
 export interface WidebandCloseInfo {
 	readonly analogFm: boolean
 	readonly nonAnalog?: boolean
+	readonly digitalClass?: boolean
 	readonly discoveryId: string | null
 	/** Encrypted evidence arrived (possibly after the last update): the session is discarded. */
 	readonly encrypted?: boolean
@@ -770,6 +791,14 @@ interface Session {
 	 * the lowest slot priority, and a bounded time to be classed (WIDEBAND_DIGITAL_*_MS).
 	 */
 	digital: boolean
+	/** Snapshots of joined observations read analog-fm, and read a digital class (voice-veto.ts). */
+	analogReads: number
+	digitalReads: number
+	/**
+	 * Its own audio gave a CTCSS class (ToneClassEvidence over a voiced file: classByTone, or a
+	 * file's verdict while classed otherwise). Sticky: the digital-class majority never vetoes it.
+	 */
+	toneHeard: boolean
 	/**
 	 * Its owner's shadows expired unclassed in WIDEBAND_EXPIRED_STALE earlier visits: while
 	 * unclassed it gives its slot to any waiting candidate (evict).
@@ -907,6 +936,7 @@ interface ClassInfo {
 	readonly analogFm: boolean
 	readonly nonAnalog?: boolean | undefined
 	readonly spectralDigital?: boolean | undefined
+	readonly digitalClass?: boolean | undefined
 	readonly discoveryId: string | null
 }
 
@@ -992,6 +1022,12 @@ function countSnapshot(
  * Whether a snapshot's class discards the session (classify): a definite other class (a verified
  * decode, the channel tier) while the session is a shadow or classed by its own audio only.
  */
+/** Counts one snapshot's class reading of a joined observation (notVoice's majority). */
+function countClass(s: Session, info: ClassInfo): void {
+	if (info.analogFm) s.analogReads++
+	else if (info.digitalClass === true) s.digitalReads++
+}
+
 function classVetoes(s: Session, info: ClassInfo): boolean {
 	return !info.analogFm && (!s.classed || s.toneOnly) && info.nonAnalog === true
 }
@@ -1256,7 +1292,8 @@ export class WidebandAnalogRecorder {
 			!s.classed ||
 			!s.qualified ||
 			countSnapshot(s, track, barred).bar !== null ||
-			classVetoes(s, { ...info, discoveryId: null })
+			classVetoes(s, { ...info, discoveryId: null }) ||
+			this.notVoice(s, { ...info, discoveryId: null }, false)
 		)
 			return this.revoke(observationId)
 		rememberWaiver(this.waived, observationId, s.toneOnly)
@@ -1628,6 +1665,7 @@ export class WidebandAnalogRecorder {
 			}
 			s.digital = info.spectralDigital === true && !info.analogFm
 		}
+		countClass(s, info)
 		if (info.analogFm) {
 			if (s.toneOnly) this.classedBySnapshot(s, observationId)
 			s.toneOnly = false
@@ -1639,8 +1677,59 @@ export class WidebandAnalogRecorder {
 			this.refuse(s, "discarded:not-analog", true)
 			return false
 		}
+		if (this.notVoice(s, info, false)) {
+			this.refuse(s, "discarded:not-analog", true)
+			return false
+		}
 		if (s.classed) for (const f of [...s.files]) this.admit(s, f)
 		return !s.done
+	}
+
+	/**
+	 * Whether `s` is no analog voice (voice-veto.ts), with `info` (a snapshot's class, already
+	 * counted) when given: a digital class backed by more than the spectrum; a class by snapshots
+	 * only that the digital readings outvote, once the session heard WIDEBAND_DIGITAL_CLASS_FRAMES
+	 * of in-track audio (its own audio's CTCSS class had that long to arrive) or when a file
+	 * finishes (`finishing`), unless its own audio gave a CTCSS class (`toneHeard`); or a
+	 * discovery of it decoded as a protocol that is not analog voice.
+	 */
+	private notVoice(
+		s: Session,
+		info: ClassInfo | undefined,
+		finishing: boolean,
+	): boolean {
+		if (
+			info !== undefined &&
+			!info.analogFm &&
+			info.nonAnalog === true &&
+			info.digitalClass === true
+		)
+			return true
+		if (
+			s.classed &&
+			!s.toneHeard &&
+			(finishing || s.inTrack >= WIDEBAND_DIGITAL_CLASS_FRAMES) &&
+			digitalOutvotes(s.digitalReads, s.analogReads)
+		)
+			return true
+		if (this.decodedNotVoice(s.discoveryId)) return true
+		return (
+			info !== undefined &&
+			info.discoveryId !== s.discoveryId &&
+			this.decodedNotVoice(info.discoveryId)
+		)
+	}
+
+	/** `discoveryId`'s (or its merge owner's) decoded protocol is not analog voice. */
+	private decodedNotVoice(discoveryId: string | null): boolean {
+		const lookup = this.deps.decodedProtocol
+		if (discoveryId === null || lookup === undefined) return false
+		try {
+			return notAnalogVoiceProtocol(lookup(discoveryId))
+		} catch {
+			// An unreadable answer proves nothing: today's behaviour.
+			return false
+		}
 	}
 
 	private onTrack(input: WidebandTrackInput): void {
@@ -1778,7 +1867,10 @@ export class WidebandAnalogRecorder {
 			input.shadowAllowed === true &&
 			input.nonAnalog !== true &&
 			!track.flags.burst
-		if (!input.analogFm && !shadow) {
+		if (
+			(!input.analogFm && !shadow) ||
+			this.decodedNotVoice(input.discoveryId)
+		) {
 			this.decisions.note("refused:not-analog", ref)
 			return
 		}
@@ -2053,6 +2145,9 @@ export class WidebandAnalogRecorder {
 			classed: input.analogFm,
 			toneOnly: false,
 			digital: input.spectralDigital === true && !input.analogFm,
+			analogReads: input.analogFm ? 1 : 0,
+			digitalReads: !input.analogFm && input.digitalClass === true ? 1 : 0,
+			toneHeard: false,
 			stale:
 				(this.digitalExpired.get(input.observationId)?.unclassed ?? 0) >=
 				WIDEBAND_EXPIRED_STALE,
@@ -2969,6 +3064,14 @@ export class WidebandAnalogRecorder {
 			}
 			s.qualified = true
 			if (!s.classed) this.classByTone(s, file.toneClass?.result() ?? null)
+			else if (
+				!s.toneHeard &&
+				s.digitalReads > 0 &&
+				(file.toneClass?.result() ?? null) !== null
+			)
+				// Classed by snapshots, and its own audio holds a CTCSS class too: the spectrum's
+				// digital readings no longer veto it (notVoice).
+				s.toneHeard = true
 			this.admit(s, file)
 		} else if (
 			!s.qualified &&
@@ -3023,6 +3126,7 @@ export class WidebandAnalogRecorder {
 		if (toneHz === null || s.classed || s.done) return
 		s.classed = true
 		s.toneOnly = true
+		s.toneHeard = true
 		this.decide(s, "classed")
 		for (const f of [...s.files]) this.admit(s, f)
 	}
@@ -3094,9 +3198,13 @@ export class WidebandAnalogRecorder {
 			while (j < pcm.length && mask[j] === 1) j++
 			s.inTrack += j - i
 			const evidence = file.toneClass
-			if (evidence !== null && (!s.classed || s.toneOnly)) {
+			if (
+				evidence !== null &&
+				(!s.classed || s.toneOnly || (!s.toneHeard && s.digitalReads > 0))
+			) {
 				// classByTone's speech test: the same in-track runs, a break resets its meter (also
-				// once classed by it: the whole file is checked again when it finishes).
+				// once classed by it: the whole file is checked again when it finishes; and for a
+				// session classed by snapshots that digital readings may outvote, toneHeard).
 				const runFrom = from + i * perFrame
 				evidence.speechRun(
 					pcm,
@@ -3198,6 +3306,7 @@ export class WidebandAnalogRecorder {
 		file.toneHz = file.ctcss?.result() ?? null
 		file.classTone = file.toneClass?.result() ?? null
 		file.toneClass = null
+		if (file.classTone !== null && file.gate.voiced) s.toneHeard = true
 		if (s.toneOnly && file.classTone === null && !file.failed) {
 			// Classed by its audio only, and the whole file no longer holds the evidence (its
 			// prefix did): discarded, a file being written is cancelled (completeFinish).
@@ -3317,6 +3426,11 @@ export class WidebandAnalogRecorder {
 				this.dropParked(s, true, "discarded:not-analog")
 				return
 			}
+			countClass(s, info)
+			if (this.notVoice(s, info, false)) {
+				this.dropParked(s, true, "discarded:not-analog")
+				return
+			}
 		}
 		// A voiced shadow parked before its audio was judged: a finished file's own evidence.
 		if (!s.classed && s.qualified)
@@ -3324,6 +3438,7 @@ export class WidebandAnalogRecorder {
 				if (f.classTone !== null) {
 					s.classed = true
 					s.toneOnly = true
+					s.toneHeard = true
 					this.decide(s, "classed")
 					break
 				}
@@ -3385,6 +3500,21 @@ export class WidebandAnalogRecorder {
 
 	/** Writes the rest of a finishing file's queue, then finishes its operation. */
 	private completeFinish(s: Session, file: FileState): void {
+		// The last chance before the file is finalized: a decode (of its discovery or the one it
+		// was merged into) or the class majority may have arrived after the last snapshot.
+		if (
+			!file.failed &&
+			!file.finishAsked &&
+			this.notVoice(s, undefined, true)
+		) {
+			if (!s.done) {
+				// Every file of the live session goes (refuse cancels this one too).
+				this.refuse(s, "discarded:not-analog", true)
+				return
+			}
+			this.endFile(s, file, "discarded:not-analog")
+			file.failed = true
+		}
 		if (file.failed) {
 			this.fileLost(s)
 			file.handle?.cancel("cancelled")

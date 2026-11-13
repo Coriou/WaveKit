@@ -156,6 +156,7 @@ import type {
 } from "./scanner-redesign-contract.js"
 import { replayMissEligible } from "../iq-capture/replay-miss.js"
 import { createKnownProtocolMemory } from "./known-protocol.js"
+import { digitalClass, ownerDecodedProtocol } from "./channel/voice-veto.js"
 import { narrowRasterAt } from "./narrow-digital.js"
 import { planReplayTrials } from "./replay-plan.js"
 import { TrialMemory, type TrialMemoryEntry } from "./trial-memory.js"
@@ -1601,6 +1602,9 @@ export class ScannerService extends EventEmitter {
 				// Recordings share the probes' and live audio's CPU budget (cpuBudgetCores).
 				reserveCores: cores => this.probes.reserveExternal(cores),
 				tuningRefused: sourceId => this.tuningRefused(sourceId, "recording"),
+				// The decoded protocol of a discovery, or of the live one it was merged into.
+				decodedProtocol: discoveryId =>
+					ownerDecodedProtocol(this.store, discoveryId),
 				logger: deps.logger,
 				now: this.now,
 			})
@@ -3784,6 +3788,7 @@ export class ScannerService extends EventEmitter {
 			{
 				analogFm: live.classification.class === "analog-fm",
 				nonAnalog: definitelyNotAnalogFm(live),
+				digitalClass: digitalClass(live.classification.class),
 				discoveryId: this.store.discoveryIdOf(live.observationId) ?? null,
 				// Encrypted evidence may arrive after the last update: vetoed here too.
 				encrypted: live.encrypted,
@@ -4050,6 +4055,7 @@ export class ScannerService extends EventEmitter {
 			this.widebandAnalog.keepsOverArtefact(live.observationId, track, {
 				analogFm: live.classification.class === "analog-fm",
 				nonAnalog: definitelyNotAnalogFm(live),
+				digitalClass: digitalClass(live.classification.class),
 				encrypted: live.encrypted,
 				recordAllowed: this.widebandRecordAllowed(live),
 			})
@@ -4186,6 +4192,7 @@ export class ScannerService extends EventEmitter {
 			track,
 			analogFm,
 			nonAnalog: definitelyNotAnalogFm(live),
+			digitalClass: digitalClass(live.classification.class),
 			// A spectral class other than analog FM alone: its shadow has the lowest slot priority.
 			spectralDigital:
 				nonAnalogFmClass(live.classification.class) &&

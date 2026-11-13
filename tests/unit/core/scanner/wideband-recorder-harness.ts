@@ -205,6 +205,8 @@ export function harness(
 		tuningRefused?: (sourceId: string) => void
 		/** The recorder's per-turn budget clock (milliseconds); default performance.now. */
 		clock?: () => number
+		/** The discovery's (or its merge owner's) decoded protocol (WidebandAnalogDeps). */
+		decodedProtocol?: (discoveryId: string) => string | null
 		/**
 		 * settings().ringSeconds and the FakeEngine's real ring capacity; default absent (the
 		 * recorder assumes 3 s, the FakeEngine's default ring).
@@ -238,6 +240,7 @@ export function harness(
 		recordTone: (observationId, hz) => tones.push({ observationId, hz }),
 		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
 		...(opts.tuningRefused ? { tuningRefused: opts.tuningRefused } : {}),
+		...(opts.decodedProtocol ? { decodedProtocol: opts.decodedProtocol } : {}),
 		logger,
 		now: () => 1_700_000_000_000,
 		schedule: run => queue.push(run),
