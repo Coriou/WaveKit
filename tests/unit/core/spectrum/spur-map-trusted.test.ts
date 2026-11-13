@@ -94,12 +94,45 @@ describe("SpurMap trusted restore", () => {
 		expect(plain.verified(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(false)
 	})
 
-	it("verifies a trusted line before any block, and it persists as a verified line", () => {
+	it("verifies a trusted line before any block, but saves it without the flag until a block sees it", () => {
 		const clock = { t: 0 }
 		const map = clockedMap(clock)
 		map.importState(SAVED, { trusted: true })
 		expect(map.verified(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		// Never observed since the import: no evidence of this run, so no flag.
+		expect(map.exportState()).toEqual(UNFLAGGED)
+	})
+
+	it("saves a trusted line verified once one observed block saw it since the import", () => {
+		const clock = { t: 0 }
+		const map = clockedMap(clock)
+		map.importState(SAVED, { trusted: true })
+		lineEpoch(map, clock, 1, C, BLOCK_MS, [SPUR_BIN])
 		expect(map.exportState()).toEqual(SAVED)
+	})
+
+	it("saves no flag for a trusted line observed but never seen since the import", () => {
+		const clock = { t: 0 }
+		const map = clockedMap(clock)
+		map.importState(SAVED, { trusted: true })
+		lineEpoch(map, clock, 1, C, 3 * BLOCK_MS, []) // open epoch: no miss yet, the line unseen
+		expect(map.verified(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		expect(map.exportState()).toEqual(UNFLAGGED)
+	})
+
+	it("ends the trust after one restart when restarts see no block", () => {
+		const clock = { t: 0 }
+		let saved = SAVED
+		const loads: boolean[] = []
+		for (let restart = 0; restart < 3; restart++) {
+			const map = clockedMap(clock)
+			map.importState(saved, { trusted: true })
+			loads.push(map.verified(KEY, SPUR_BIN, SPUR_BIN + 1))
+			saved = map.exportState()
+			clock.t += 60_000 // restarted a minute later, well within 10 min
+		}
+		expect(loads).toEqual([true, false, false])
+		expect(saved).toEqual(UNFLAGGED)
 	})
 
 	it("never verifies a new line: a line first seen after the trusted import needs two centres", () => {
@@ -182,6 +215,20 @@ describe("SpurMap trusted restore", () => {
 		const out = new Uint8Array(N)
 		expect(map.mask(KEY, out, protect)).toBe(1)
 		expect(out.includes(1)).toBe(false)
+	})
+
+	it("lets a provisional line from trustLines save verified only once seen since the import", () => {
+		const clock = { t: 0 }
+		const map = clockedMap(clock)
+		const line = SPUR_BIN + 300
+		map.trustLines([{ key: KEY, basebandBin: line, widthBins: 1 }])
+		expect(map.verified(KEY, line, line + 1)).toBe(true)
+		expect(map.saveVerified(KEY, line, line + 1)).toBe(false)
+		lineEpoch(map, clock, 1, C, BLOCK_MS, [line])
+		expect(map.saveVerified(KEY, line, line + 1)).toBe(true)
+		// A new wider line over it is not the trusted line: neither verified nor saved verified.
+		expect(map.verified(KEY, line, line + 2)).toBe(false)
+		expect(map.saveVerified(KEY, line - 1, line + 1)).toBe(false)
 	})
 
 	it("trusts provisional lines given by trustLines at their core bins, of its own FFT size only", () => {
@@ -277,20 +324,78 @@ describe("SpurMap trusted restore", () => {
 	it("splits a saved run where the verified state changes", () => {
 		const clock = { t: 0 }
 		const map = clockedMap(clock)
-		// Bins SPUR_BIN .. +5: the first three restored trusted and flagged, the last three not.
-		map.importState({
-			spurs: [
-				{ ...UNFLAGGED.spurs[0]!, basebandBin: SPUR_BIN + 3, widthBins: 3 },
-			],
-		})
+		// Bins SPUR_BIN .. +5 of one trusted file: the first three flagged, the last three not.
 		map.importState(
-			{ spurs: [{ ...SAVED.spurs[0]!, widthBins: 3 }] },
+			{
+				spurs: [
+					{ ...SAVED.spurs[0]!, widthBins: 3 },
+					{ ...UNFLAGGED.spurs[0]!, basebandBin: SPUR_BIN + 3, widthBins: 3 },
+				],
+			},
 			{ trusted: true },
 		)
-		// A verified bin carries a ±1-bin skirt: SPUR_BIN + 3 counts as verified beside it.
-		expect(map.exportState().spurs).toEqual([
-			{ ...SAVED.spurs[0]!, widthBins: 4 },
-			{ ...UNFLAGGED.spurs[0]!, basebandBin: SPUR_BIN + 4, widthBins: 2 },
+		// SPUR_BIN + 3 masks as the trusted run's skirt, but saves no flag: only bins seen with their
+		// own trust save verified, never a ±1 neighbour.
+		lineEpoch(map, clock, 1, C, BLOCK_MS, [
+			SPUR_BIN,
+			SPUR_BIN + 1,
+			SPUR_BIN + 2,
 		])
+		expect(masked(map)).toEqual([
+			SPUR_BIN,
+			SPUR_BIN + 1,
+			SPUR_BIN + 2,
+			SPUR_BIN + 3,
+		])
+		expect(map.exportState().spurs).toEqual([
+			{ ...SAVED.spurs[0]!, widthBins: 3 },
+			{ ...UNFLAGGED.spurs[0]!, basebandBin: SPUR_BIN + 3, widthBins: 3 },
+		])
+	})
+
+	for (const restarts of [2, 3])
+		it(`keeps the trusted bins of a saved run from growing over ${restarts} trusted round trips`, () => {
+			const clock = { t: 0 }
+			let saved: Pick<EngineState, "spurs"> = {
+				spurs: [
+					{ ...SAVED.spurs[0]!, widthBins: 3 },
+					{ ...UNFLAGGED.spurs[0]!, basebandBin: SPUR_BIN + 3, widthBins: 3 },
+				],
+			}
+			for (let r = 0; r < restarts; r++) {
+				const map = clockedMap(clock)
+				map.importState(saved, { trusted: true })
+				// The detector sees the line and its skirt bin each run, from one centre.
+				lineEpoch(map, clock, 1, C, 4 * BLOCK_MS, [
+					SPUR_BIN - 1,
+					SPUR_BIN,
+					SPUR_BIN + 1,
+					SPUR_BIN + 2,
+					SPUR_BIN + 3,
+				])
+				saved = map.exportState()
+				const trustedBins = saved.spurs
+					.filter(sp => sp.verified === true)
+					.flatMap(sp =>
+						Array.from({ length: sp.widthBins }, (_, k) => sp.basebandBin + k),
+					)
+				expect(trustedBins).toEqual([SPUR_BIN, SPUR_BIN + 1, SPUR_BIN + 2])
+			}
+		})
+
+	it("never verifies a new line beside or over a trusted line while parked", () => {
+		const clock = { t: 0 }
+		const map = clockedMap(clock)
+		map.importState(SAVED, { trusted: true })
+		// A new provisional line one bin beside it, or overlapping it, from one centre.
+		lineEpoch(map, clock, 1, C, 2000, [SPUR_BIN, SPUR_BIN + 1])
+		expect(map.verified(KEY, SPUR_BIN, SPUR_BIN + 1)).toBe(true)
+		expect(map.verified(KEY, SPUR_BIN + 1, SPUR_BIN + 2)).toBe(false)
+		expect(map.verified(KEY, SPUR_BIN, SPUR_BIN + 2)).toBe(false)
+		expect(map.masks(KEY, SPUR_BIN + 1, SPUR_BIN + 2)).toBe(false)
+		// A new SpurMap candidate flagged beside it does not borrow the trusted bin's skirt.
+		map.promote(KEY, BIN_HZ, [{ startBin: SPUR_BIN + 1, endBin: SPUR_BIN + 2 }])
+		lineEpoch(map, clock, 1, C, 2000, [SPUR_BIN, SPUR_BIN + 1])
+		expect(masked(map)).toEqual([SPUR_BIN])
 	})
 })

@@ -239,11 +239,19 @@ describe("SpurMap", () => {
 		expect(masked(map)).toEqual([]) // the second centre's epoch has not closed
 		lineEpoch(map, 3, 447e6, 1000, { bins: [701, 1501] })
 		expect(masked(map)).toEqual(bins)
+		// Each bin saves its own verified state: the confirmed core with the flag, the ±1 skirt that
+		// masks beside it without (no skirt saves verified through its neighbour).
 		expect(
-			map.exportState().spurs.map(s => [s.basebandBin, s.widthBins]),
+			map
+				.exportState()
+				.spurs.map(s => [s.basebandBin, s.widthBins, s.verified === true]),
 		).toEqual([
-			[700, 3],
-			[1500, 3],
+			[700, 1, false],
+			[701, 1, true],
+			[702, 1, false],
+			[1500, 1, false],
+			[1501, 1, true],
+			[1502, 1, false],
 		])
 	})
 })

@@ -20,9 +20,9 @@
  * Saved spur lines load verified only from a resumed namespace of a strong receiver key (a unit
  * key or a strong serial), and only lines saved verified (`verified: true`): a weak model key's
  * lines load unverified, since every dongle of that model on the source shares the key. Without an sdr-host the key is that weak model key, so a
- * parked receiver (one centre) cannot verify its lines and a line of these is one discovery: the
- * documented weak-key limit. That variant asserts the reconnect adds nothing to it (the same one
- * discovery before the drop and after the reconnect window).
+ * parked receiver (one centre) cannot verify its lines: even quiet lines stay unmasked and are
+ * tracked (the documented weak-key limit). That variant runs the quiet lines and asserts the
+ * reconnect adds nothing (the same discovery ids before the drop and after the reconnect window).
  *
  * Line levels. The fake's noise is σ = 0.04 (total complex power σ²) at a 1024-point FFT, so the
  * per-bin noise power is σ² · 1.5 / 1024 ≈ 2.34e-6 (Hann, tone-calibrated as in the pipeline
@@ -417,8 +417,9 @@ async function runScenario(
 		expect(settled).toEqual([RECEIVER_KEY, UNIT_KEY])
 		await learned.idle("rtl")
 		const seen = new Set(discoveries().map(d => d.id))
-		// Past the upgrade: exactly one swap (model -> unit; a swap restarts the pipeline once), the
-		// unit's spur map in use, so no discovery after it.
+		// Past the upgrade: exactly one swap (model -> unit; a swap restarts the pipeline once) and
+		// the unit key resumed, with no new discovery id after it. The swap is a take-over, so the
+		// unit's lines load unverified (never trusted); masks are not asserted here.
 		await new Promise(resolve => setTimeout(resolve, 4_000))
 		expect(swaps).toBe(swapsAtModel + 1)
 		expect(discoveries().filter(d => !seen.has(d.id))).toEqual([])
@@ -431,10 +432,10 @@ async function runScenario(
 	expect(settled).toEqual([key])
 	await learned.idle("rtl")
 	// The seeded map is in use: under a unit key the lines are no discovery. Under the weak model
-	// key they load unverified (weak-key limit, module doc): the parked line is one discovery.
+	// key they load unverified (weak-key limit, module doc): even quiet, they are tracked.
 	await new Promise(resolve => setTimeout(resolve, 3_000))
 	const weak = sdrHost === null
-	if (weak) expect(discoveries()).toHaveLength(1)
+	if (weak) await expectLines({ masked: false, tracked: true })
 	else if (amp === LOUD_AMP) {
 		// Trusted lines, but loud past the 6 dB gate: each mask lifts and the tone is tracked.
 		await expectLines({ masked: false, tracked: true })
@@ -473,7 +474,10 @@ async function runScenario(
 	expect(swaps).toBe(swapsBefore)
 	expect(builds.mock.calls.length).toBe(buildsBefore)
 	// Still masked, still no track: the reconnect kept the trusted lines in the same pipeline.
-	if (!weak) await expectLines({ masked: true, tracked: false })
+	// Under the weak key still unmasked and tracked: the reconnect trusted nothing.
+	await expectLines(
+		weak ? { masked: false, tracked: true } : { masked: true, tracked: false },
+	)
 	expect(learned.view("rtl")?.namespaceState).toBe("resumed")
 	expect(learned.view("rtl")?.key).toBe(key)
 	if (sdrHost) {
@@ -486,8 +490,8 @@ async function runScenario(
 }
 
 describe("scenario: reconnect to the same receiver with spur lines in the IQ", () => {
-	it("under a weak model key the parked spur line is one discovery, and the reconnect keeps it at one", async () => {
-		await runScenario(false)
+	it("under a weak model key the quiet lines are tracked, not masked, and the reconnect adds no discovery: no swap, no pipeline rebuild", async () => {
+		await runScenario(false, false, 0, QUIET_AMP)
 	}, 60_000)
 
 	it("with a fake sdr-host the quiet lines stay masked and untracked across the reconnect: the unit key settles twice, no swap, no pipeline rebuild, no discovery", async () => {

@@ -55,12 +55,17 @@
  *   key or a strong serial; the caller that knows the namespace and the key decides, never this
  *   map from the data) are trusted (`importState(…, { trusted: true })`, `trustLines`): each bin
  *   counts as LO-confirmed at once, so a parked receiver masks the lines it verified before
- *   without a second centre. It never verifies a new line. A trusted bin counts as seen at the
- *   import (the key's settled clock then), so it stops masking once unseen for SPUR_TTL_MS of
- *   that clock, like a confirmed line; never seen since the import, it also loses the trust
- *   SPUR_TTL_MS of wall time (nowMs) after the import; a miss clears it. Level, lift and protect
- *   apply as to any verified line. A weak key's state, another receiver's, a take-over or a
- *   legacy adoption load unverified.
+ *   without a second centre. It never verifies a new line: trust covers only the trusted bins
+ *   themselves (a line verifies by trust only when every core bin is trusted), and a trusted bin
+ *   lends its ±1 skirt only to candidate bins restored by the same trusted import, never to a bin
+ *   flagged since. A trusted bin counts as seen at the import (the key's settled clock then), so
+ *   it stops masking once unseen for SPUR_TTL_MS of that clock, like a confirmed line; never seen
+ *   since the import, it also loses the trust SPUR_TTL_MS of wall time (nowMs) after the import;
+ *   a miss clears it. It saves `verified: true` again only once an observed block saw it since
+ *   the import (no miss, within the TTL): restarts without observation end the trust at the next
+ *   load, and a skirt bin never saves verified through its neighbour, so a line never widens.
+ *   Level, lift and protect apply as to any verified line. A weak key's state, another
+ *   receiver's, a take-over or a legacy adoption load unverified.
  * - RF move veto. Two steady real carriers exactly one hop apart land in one baseband bin under
  *   both centres (a 775.1 kHz hop at 1 kHz bins moves RF by 775.1 bins, so the carrier at
  *   f + hop sits at the bin the carrier at f held), and no miss comes between them. A credit of
@@ -88,8 +93,8 @@
  *   so one of a gain key never observed again (whose settled clock never advances) leaves within
  *   10 min instead of persisting forever; once re-confirmed it ages like a learned line.
  *
- * Only confirmed candidates and restored ones not yet expired persist (exportState), a line
- * verified when saved with `verified: true` (only such a line can load trusted). Bins a
+ * Only confirmed candidates and restored ones not yet expired persist (exportState), a bin with
+ * its own evidence when saved with `verified: true` (only such a bin can load trusted). Bins a
  * mask may not cover (a confirmed real signal there, `protect`) are left unmasked and counted.
  * RF positions are quantised to the key's bin width; an RF entry counts as on when a window bin
  * within ±1 bin of it is on, so carriers that straddle a bin edge under different centres still
@@ -184,8 +189,17 @@ interface KeyState {
 	trusted: Uint8Array
 	/** Wall time (nowMs) of the last trusted import here (−∞ none). */
 	trustedWallMs: number
-	/** The key's settled clock at that import: a trusted bin seen after it ages by the clock only. */
-	trustedClockMs: number
+	/**
+	 * The key's settled clock when the bin was trusted: a trusted bin seen after it (lastSeenMs past
+	 * it) ages by the clock only, and only such a bin saves verified again (exportState).
+	 */
+	trustedAtMs: Float64Array
+	/**
+	 * 1 = a candidate bin restored by a trusted import (the skirt saved beside a trusted line): a
+	 * trusted neighbour counts as its confirmation (confirmedNear). A bin flagged after the import
+	 * (a new line) never borrows a trusted neighbour's trust.
+	 */
+	trustedSkirt: Uint8Array
 	rf: Map<number, RfEntry>
 	rfConfirmed: Map<
 		number,
@@ -508,12 +522,26 @@ export class SpurMap implements LineGate {
 		return true
 	}
 
-	/** LineGate: a bin of [startBin − 1, endBin] is confirmed and was seen within the TTL. */
+	/**
+	 * LineGate: a bin of [startBin − 1, endBin] is credit-confirmed and was seen within the TTL,
+	 * or every core bin is trusted (or confirmed) and one was seen within the TTL (verifiedIn).
+	 */
 	verified(key: string, startBin: number, endBin: number): boolean {
 		const s = this.keys.get(key)
 		if (s === undefined) return false
 		this.expireTrusted(s)
 		return this.verifiedIn(s, startBin, endBin)
+	}
+
+	/**
+	 * LineGate: verified on evidence of this run, what may save `verified: true`: as `verified`,
+	 * but a trusted core bin counts only once seen since it was trusted (`evidenced`).
+	 */
+	saveVerified(key: string, startBin: number, endBin: number): boolean {
+		const s = this.keys.get(key)
+		if (s === undefined) return false
+		this.expireTrusted(s)
+		return this.verifiedIn(s, startBin, endBin, true)
 	}
 
 	/** LineGate: a candidate bin of [startBin − 1, endBin] has not expired. */
@@ -553,9 +581,11 @@ export class SpurMap implements LineGate {
 
 	/**
 	 * Confirmed candidates, and restored ones not yet expired (a new line persists once confirmed).
-	 * A run is split where the bins' verified state changes; a verified run (each bin `active`:
-	 * LO-confirmed within ±1, by credits or a standing trusted restore, and seen within the TTL)
-	 * saves `verified: true`, any other run saves no flag (unverified on load).
+	 * A run is split where the bins' saved verified state changes. A bin saves `verified: true`
+	 * only on its own evidence (`evidenced`: credit-confirmed, or trusted and seen since the
+	 * trusted import, seen within the TTL), never through a ±1 neighbour: a skirt bin that only
+	 * masks beside a verified bin saves no flag, so a trusted line never widens across restarts,
+	 * and a trusted line never seen in this run saves no flag, so its trust ends at the next load.
 	 */
 	exportState(): Pick<EngineState, "spurs"> {
 		const spurs: EngineState["spurs"] = []
@@ -569,9 +599,13 @@ export class SpurMap implements LineGate {
 					i++
 					continue
 				}
-				const verified = this.active(s, i)
+				const verified = this.evidenced(s, i)
 				let j = i
-				while (j < this.fftSize && keep(s, j) && this.active(s, j) === verified)
+				while (
+					j < this.fftSize &&
+					keep(s, j) &&
+					this.evidenced(s, j) === verified
+				)
 					j++
 				spurs.push({
 					key,
@@ -622,6 +656,7 @@ export class SpurMap implements LineGate {
 						this.flag(s, i)
 						s.imported[i] = 1
 						s.importedWallMs = wallMs
+						if (trusted) s.trustedSkirt[i] = 1
 						if (trusted && sp.verified === true) this.trustBin(s, i, wallMs)
 					}
 			} else if (sp.rfHz !== undefined) {
@@ -664,11 +699,29 @@ export class SpurMap implements LineGate {
 		return Number.isFinite(binHz) && binHz > 0 ? binHz : null
 	}
 
+	/**
+	 * Counts bin i as seen at the key's settled clock now, so it verifies at once and its TTL runs
+	 * from here; it saves verified again only once seen after this clock (`evidenced`).
+	 */
 	private trustBin(s: KeyState, i: number, wallMs: number): void {
 		s.trusted[i] = 1
 		if (s.lastSeenMs[i]! < s.clockMs) s.lastSeenMs[i] = s.clockMs
+		s.trustedAtMs[i] = s.clockMs
 		s.trustedWallMs = wallMs
-		s.trustedClockMs = s.clockMs
+	}
+
+	/**
+	 * Bin i has its own evidence now, read only from itself (never ±1): credit-confirmed, or
+	 * trusted (no miss since: a miss clears it) and seen by an observed block since it was
+	 * trusted; either way seen within SPUR_TTL_MS of the key's settled clock. Only such a bin
+	 * saves `verified: true`, so a trusted line neither widens nor renews without being seen.
+	 */
+	private evidenced(s: KeyState, i: number): boolean {
+		const seen = s.lastSeenMs[i]!
+		if (!(s.clockMs - seen < SPUR_TTL_MS)) return false
+		return (
+			s.confirmed[i] === 1 || (s.trusted[i] === 1 && seen > s.trustedAtMs[i]!)
+		)
 	}
 
 	/** Credit-confirmed, or a trusted restored line (trustLines). */
@@ -684,7 +737,7 @@ export class SpurMap implements LineGate {
 		if (s.trustedWallMs === Number.NEGATIVE_INFINITY) return
 		if (this.nowMs() - s.trustedWallMs < SPUR_TTL_MS) return
 		for (let i = 0; i < this.fftSize; i++)
-			if (s.trusted[i] === 1 && !(s.lastSeenMs[i]! > s.trustedClockMs))
+			if (s.trusted[i] === 1 && !(s.lastSeenMs[i]! > s.trustedAtMs[i]!))
 				s.trusted[i] = 0
 		s.trustedWallMs = Number.NEGATIVE_INFINITY
 	}
@@ -716,7 +769,8 @@ export class SpurMap implements LineGate {
 				importedWallMs: Number.NEGATIVE_INFINITY,
 				trusted: new Uint8Array(n),
 				trustedWallMs: Number.NEGATIVE_INFINITY,
-				trustedClockMs: 0,
+				trustedAtMs: new Float64Array(n),
+				trustedSkirt: new Uint8Array(n),
 				rf: new Map(),
 				rfConfirmed: new Map(),
 			}
@@ -731,6 +785,7 @@ export class SpurMap implements LineGate {
 		s.bornMs[i] = s.clockMs
 		s.keepMs[i] = Number.NEGATIVE_INFINITY
 		s.imported[i] = 0
+		s.trustedSkirt[i] = 0
 	}
 
 	/** A candidate bin verified now (its level aside: mask lifts loud runs whole). */
@@ -742,23 +797,48 @@ export class SpurMap implements LineGate {
 		)
 	}
 
-	private verifiedIn(s: KeyState, startBin: number, endBin: number): boolean {
-		for (
-			let i = Math.max(0, startBin - 1);
-			i <= Math.min(this.fftSize - 1, endBin);
-			i++
-		)
-			if (this.conf(s, i) && s.clockMs - s.lastSeenMs[i]! < SPUR_TTL_MS)
-				return true
-		return false
+	/**
+	 * The line [startBin, endBin) (core bins) is verified: a bin of [startBin − 1, endBin] is
+	 * credit-confirmed and seen within the TTL, or every core bin is trusted or credit-confirmed
+	 * and one of them was seen within the TTL. Trust never reaches past the core: a new line beside
+	 * or over a trusted one is not verified by it (a parked receiver never verifies a new line).
+	 * With `evidence`, the seen core bin must also have its own evidence (`evidenced`): what saves
+	 * `verified: true`.
+	 */
+	private verifiedIn(
+		s: KeyState,
+		startBin: number,
+		endBin: number,
+		evidence = false,
+	): boolean {
+		const n = this.fftSize
+		const fresh = (i: number): boolean =>
+			s.clockMs - s.lastSeenMs[i]! < SPUR_TTL_MS
+		for (let i = Math.max(0, startBin - 1); i <= Math.min(n - 1, endBin); i++)
+			if (s.confirmed[i] === 1 && fresh(i)) return true
+		const a = Math.max(0, startBin)
+		const b = Math.min(n, endBin)
+		if (b <= a) return false
+		let seen = false
+		for (let i = a; i < b; i++) {
+			if (!this.conf(s, i)) return false
+			if (evidence ? this.evidenced(s, i) : fresh(i)) seen = true
+		}
+		return seen
 	}
 
-	/** A bin within ±1 is confirmed (a promoted range carries a ±1-bin skirt). */
+	/**
+	 * A bin within ±1 is confirmed (a promoted range carries a ±1-bin skirt). A trusted neighbour
+	 * counts only for a bin restored by the same trusted import (`trustedSkirt`), never for a bin
+	 * flagged since (a new line).
+	 */
 	private confirmedNear(s: KeyState, i: number): boolean {
+		const near = (j: number): boolean =>
+			s.confirmed[j] === 1 || (s.trusted[j] === 1 && s.trustedSkirt[i] === 1)
 		return (
 			this.conf(s, i) ||
-			(i > 0 && this.conf(s, i - 1)) ||
-			(i + 1 < this.fftSize && this.conf(s, i + 1))
+			(i > 0 && near(i - 1)) ||
+			(i + 1 < this.fftSize && near(i + 1))
 		)
 	}
 

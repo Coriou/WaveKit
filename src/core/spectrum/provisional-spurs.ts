@@ -51,6 +51,11 @@ export interface LineGate {
 	masks(key: string, startBin: number, endBin: number): boolean
 	/** Verified (LO-confirmed and seen within the TTL), whatever its level now: it may persist. */
 	verified(key: string, startBin: number, endBin: number): boolean
+	/**
+	 * Verified on evidence of this run (a trusted line seen since it was restored, never one only
+	 * restored): the line may save `verified: true`.
+	 */
+	saveVerified(key: string, startBin: number, endBin: number): boolean
 	/** A candidate bin of the line has not expired. */
 	alive(key: string, startBin: number, endBin: number): boolean
 }
@@ -180,13 +185,16 @@ export class ProvisionalSpurs {
 					l.comb && l.imported && gate.alive(key, l.startBin, l.endBin)
 				const verified = gate.verified(key, l.startBin, l.endBin)
 				if (!restored && !verified) continue
+				// Verified on this run's evidence when saved: only such a line can load trusted
+				// (absent = unverified); a trusted line never seen since its restore saves no flag.
+				const evidenced =
+					verified && gate.saveVerified(key, l.startBin, l.endBin)
 				out.push({
 					key,
 					basebandBin: l.startBin,
 					widthBins: l.endBin - l.startBin,
 					comb: l.comb,
-					// Verified when saved: only such a line can load trusted (absent = unverified).
-					...(verified ? { verified: true } : {}),
+					...(evidenced ? { verified: true } : {}),
 				})
 			}
 		}

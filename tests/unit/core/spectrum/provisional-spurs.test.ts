@@ -22,6 +22,7 @@ const K = 4 // detector threshold over the floor
 const ALL: LineGate = {
 	masks: () => true,
 	verified: () => true,
+	saveVerified: () => true,
 	alive: () => true,
 }
 
@@ -231,6 +232,7 @@ describe("ProvisionalSpurs", () => {
 		const gate: LineGate = {
 			masks: (_k, s) => verified.has(s),
 			verified: (_k, s) => verified.has(s),
+			saveVerified: (_k, s) => verified.has(s),
 			alive: () => aliveAll,
 		}
 		for (let b = 0; b < WINDOW_BLOCKS; b++) {
