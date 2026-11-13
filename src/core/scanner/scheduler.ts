@@ -830,6 +830,14 @@ interface Hold {
 	from: number
 	/** Start of the unbroken on-air run this hold heard (its start, or the last reopening). */
 	runFrom: number
+	/**
+	 * `record` kept for a voice answer still to come ("judging", keepForRecording): the visit's
+	 * Visit.recordEndMs before that wait, which set it to the wait's own end (3000 ms and a
+	 * re-check). A track that qualifies meanwhile is held under the bounds it had without the wait
+	 * (recheckRecording), not under the wait's: the wait keeps the hop longer, it never shortens
+	 * another hold.
+	 */
+	beforeJudging?: number | null
 }
 
 type Phase = "idle" | "tuning" | "dwell" | "hold"
@@ -1889,6 +1897,11 @@ export class SweepScheduler {
 		if (now >= hold.cap || active === false) return this.leaveHop([])
 		const next = this.nextCandidate()
 		if (next !== null) {
+			// The wait for a voice answer ends here: the track is held within the visit's own window
+			// (Hold.beforeJudging), L and `hold.maxHoldMs` from the start of its holds, not within the
+			// wait's 3 s, unless a voice hold started meanwhile (its own window, above).
+			if (v !== null && hold.beforeJudging !== undefined && v.voice !== "on")
+				v.recordEndMs = hold.beforeJudging
 			this.endHold(false)
 			return this.startHold(next)
 		}
@@ -2000,6 +2013,7 @@ export class SweepScheduler {
 		if (named !== null) this.startVoiceHold(v, named, now)
 		if (isVoiceOnAir(active)) this.commitVoiceTrack(v, bandId, active, voice)
 		if (judging) v.judged = true
+		const beforeJudging = v.recordEndMs
 		// A judging hold's cap is a re-check, not a forced leave: voice answered since the last one
 		// still gets its hold at the cap.
 		v.recordEndMs = cap - start + (judging ? RECORD_RECHECK_MS : 0)
@@ -2018,6 +2032,7 @@ export class SweepScheduler {
 			decoded: false,
 			from: now,
 			runFrom: now,
+			...(judging ? { beforeJudging } : {}),
 		}
 		this.phase = "hold"
 		return true

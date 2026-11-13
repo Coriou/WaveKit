@@ -818,6 +818,55 @@ describe('a voice answer still to come ("judging")', () => {
 		expect(heldMs).toBeLessThanOrEqual(3 * BLOCK_MS + 1_500 + 3_000 + BLOCK_MS)
 	})
 
+	/**
+	 * The wait opens the visit's holds (a neighbour's session judging, its track not held), and a
+	 * voice qualifies 500 ms into it on the hop's own channel, its session answering voice
+	 * VOICE_LAG_MS later (still judging until then): the wait's 3000 ms (and its re-check) bound the
+	 * wait only, never the follow its re-check starts, which runs within L and whose end keeps the
+	 * hop for the voice to its end.
+	 */
+	const VOICE_LAG_MS = 1_000
+	const handedOver = (voiceMs: number) => {
+		const holdsFrom = 3 * BLOCK_MS
+		const qualifiesAt = holdsFrom + 500
+		let heardFrom: number | null = null
+		const d = drive(
+			(hop, ms) => {
+				if (hop !== 0) return false
+				if (heardFrom === null || ms < heardFrom + VOICE_LAG_MS)
+					return "judging"
+				return ms < heardFrom + voiceMs ? voiceAnswer() : false
+			},
+			(hop, s, visit) => {
+				if (hop === 0 && visit === 1)
+					s.onTrack(sighting("n", hopHz(0) - 25_000), false, 0)
+			},
+			0,
+			(hop, s, visit, intoMs) => {
+				if (hop !== 0 || visit !== 1 || intoMs !== qualifiesAt) return
+				s.onTrack(sighting("id", hopHz(0)), false, 0, { followOnAir: true })
+				heardFrom = d.now()
+			},
+		)
+		return { stay: d.stayed(0, 1) - COARSE_MS, qualifiesAt }
+	}
+
+	it("a track that qualifies during it is held past the wait's bound: a 25 s voice is kept to its end", () => {
+		const { stay, qualifiesAt } = handedOver(25_000)
+		// Past the wait's bound (3000 ms and a re-check from the start of the holds) and past L.
+		expect(stay).toBeGreaterThan(3_000 + RECHECK_MS)
+		expect(stay).toBeGreaterThanOrEqual(qualifiesAt - 3 * BLOCK_MS + 25_000)
+		expect(stay).toBeLessThanOrEqual(
+			qualifiesAt - 3 * BLOCK_MS + 25_000 + RECHECK_MS + BLOCK_MS,
+		)
+	})
+
+	it("a track that qualifies during it and voices 2 s is left when its voice ends, within L", () => {
+		const { stay, qualifiesAt } = handedOver(2_000)
+		expect(stay).toBeLessThanOrEqual(L3 + RECHECK_MS)
+		expect(stay).toBeGreaterThanOrEqual(qualifiesAt - 3 * BLOCK_MS + 2_000)
+	})
+
 	it("after the visit's voice hold ended, it keeps only what L has left", () => {
 		const stay = keptFor(into => (into < 5_000 ? voiceAnswer() : "judging"))
 		expect(stay).toBeGreaterThanOrEqual(L3)

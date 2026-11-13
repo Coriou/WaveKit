@@ -5,11 +5,19 @@
  * value for a network source, config/default.yaml `sweep.settleMs.network`). A decoy voice on hop 0
  * holds the sweep there until it ends, so the ID's hop is landed on just before a 28 s ID keys; a
  * neighbour 25 kHz below the ID and 6 dB weaker talks from 8 s before the ID to 10 s into it. The
- * ID's track is held first (a probe, then a follow): the neighbour's track reaches the scheduler
- * only once the ID's has been held (its reports before that are not passed on, the next report
- * brings it in), so the landing's first hold is the ID's whichever track qualified first, the
+ * ID's track is the first track held (a probe, then a follow): the neighbour's track reaches the
+ * scheduler only once the ID's has been held (its reports before that are not passed on, the next
+ * report brings it in), so the landing's first track held is the ID's whichever qualified first, the
  * order the gate scene had (the neighbour, on air at the landing, may otherwise qualify first and be
  * held as the visit's own target, a different case).
+ *
+ * The scene runs settled (the harness's `settled`: the engine's IQ batch flushed each chunk, the
+ * recorder unbudgeted, the store's operations and the job runner's chains awaited before the next
+ * chunk), so the landing falls on the same block on every run. There the dwell decides before the
+ * ID's track qualified, with the neighbour's session judging: the visit opens with the wait for its
+ * voice answer (a `record` hold), whose re-check then probes the ID's track. That wait's 3 s bounds
+ * only the wait, not the probe and follow it hands over to (a scheduler that held them within it
+ * left the hop 3.25 s after the landing, the ID's voice never named).
  *
  * Deterministic ordering (no event-loop timing). The move is forced: MOVE_AFTER_FOLLOW_MS into
  * the follow of the ID's track, the hold ends and the neighbour's track is held, by the two calls a
@@ -129,6 +137,9 @@ async function holdMoveScene(): Promise<{
 		ranges: [RANGE],
 		durationMs: DURATION_MS,
 		settleMs: SETTLE_MS,
+		// Each chunk's work settled before the next (the harness's `settled`): the landing falls on
+		// the same block of the sample clock on every run, whatever the host's load.
+		settled: true,
 		emitters,
 		targets: [
 			{
