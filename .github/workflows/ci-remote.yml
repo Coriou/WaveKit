@@ -1,0 +1,179 @@
+name: CI remote
+
+# A check run for pushed ci/** branches. Every step records its exit code instead of failing,
+# so the run always concludes success; the result is in each job's verdict artifact.
+on:
+  push:
+    branches: ["ci/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    env:
+      VERDICT_JOB: static
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start verdict
+        run: |
+          date +%s > "$RUNNER_TEMP/verdict-start"
+          : > "$RUNNER_TEMP/verdict-steps"
+          cat > "$RUNNER_TEMP/step.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # step.sh <name> <command...>: runs the command under a 15 minute timeout and records its exit code.
+          name="$1"
+          shift
+          timeout 15m "$@"
+          code=$?
+          printf '%s\t%s\n' "$name" "$code" >> "$RUNNER_TEMP/verdict-steps"
+          echo "step $name exited $code"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/step.sh"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Python packages
+        run: '"$RUNNER_TEMP/step.sh" pip python -m pip install numpy==2.5.3 cryptography protobuf'
+      - name: Enable Corepack
+        run: '"$RUNNER_TEMP/step.sh" corepack corepack enable'
+      - name: Install dependencies
+        run: '"$RUNNER_TEMP/step.sh" install pnpm install --frozen-lockfile'
+      - name: Lint
+        run: '"$RUNNER_TEMP/step.sh" lint pnpm run lint'
+      - name: Typecheck
+        run: '"$RUNNER_TEMP/step.sh" typecheck pnpm run typecheck'
+      - name: Build
+        run: '"$RUNNER_TEMP/step.sh" build pnpm run build'
+      - name: Workspace tests
+        run: '"$RUNNER_TEMP/step.sh" workspace-tests pnpm exec turbo run test --filter=!wavekit'
+      - name: Write verdict
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json, os, time
+          tmp = os.environ["RUNNER_TEMP"]
+          try:
+              start = int(open(os.path.join(tmp, "verdict-start")).read().strip())
+          except Exception:
+              start = int(time.time())
+          steps = {}
+          try:
+              for line in open(os.path.join(tmp, "verdict-steps")):
+                  name, _, code = line.rstrip("\n").partition("\t")
+                  if name:
+                      steps[name] = int(code)
+          except Exception:
+              pass
+          expected = ["pip", "corepack", "install", "lint", "typecheck", "build", "workspace-tests"]
+          for name in expected:
+              steps.setdefault(name, -1)
+          verdict = {
+              "job": os.environ["VERDICT_JOB"],
+              "ok": all(code == 0 for code in steps.values()),
+              "steps": steps,
+              "seconds": int(time.time()) - start,
+          }
+          with open("verdict.json", "w") as f:
+              json.dump(verdict, f)
+          print(json.dumps(verdict))
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verdict-static
+          path: verdict.json
+          retention-days: 1
+
+  root:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    env:
+      VERDICT_JOB: root
+      VERDICT_SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start verdict
+        run: |
+          date +%s > "$RUNNER_TEMP/verdict-start"
+          : > "$RUNNER_TEMP/verdict-steps"
+          cat > "$RUNNER_TEMP/step.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # step.sh <name> <command...>: runs the command under a 15 minute timeout and records its exit code.
+          name="$1"
+          shift
+          timeout 15m "$@"
+          code=$?
+          printf '%s\t%s\n' "$name" "$code" >> "$RUNNER_TEMP/verdict-steps"
+          echo "step $name exited $code"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/step.sh"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # Fixture composer tests (tests/unit/fixtures) run compose.py.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Python packages
+        run: '"$RUNNER_TEMP/step.sh" pip python -m pip install numpy==2.5.3 cryptography protobuf'
+      - name: Enable Corepack
+        run: '"$RUNNER_TEMP/step.sh" corepack corepack enable'
+      - name: Install dependencies
+        run: '"$RUNNER_TEMP/step.sh" install pnpm install --frozen-lockfile'
+      - name: Build shared packages
+        run: '"$RUNNER_TEMP/step.sh" build-shared bash -c "pnpm --filter @wavekit/shared build && pnpm --filter @wavekit/api-types build"'
+      - name: Root tests
+        run: '"$RUNNER_TEMP/step.sh" root-tests pnpm exec vitest run --shard=${{ matrix.shard }}/6'
+      - name: Write verdict
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json, os, time
+          tmp = os.environ["RUNNER_TEMP"]
+          try:
+              start = int(open(os.path.join(tmp, "verdict-start")).read().strip())
+          except Exception:
+              start = int(time.time())
+          steps = {}
+          try:
+              for line in open(os.path.join(tmp, "verdict-steps")):
+                  name, _, code = line.rstrip("\n").partition("\t")
+                  if name:
+                      steps[name] = int(code)
+          except Exception:
+              pass
+          expected = ["pip", "corepack", "install", "build-shared", "root-tests"]
+          for name in expected:
+              steps.setdefault(name, -1)
+          verdict = {
+              "job": os.environ["VERDICT_JOB"],
+              "shard": int(os.environ["VERDICT_SHARD"]),
+              "ok": all(code == 0 for code in steps.values()),
+              "steps": steps,
+              "seconds": int(time.time()) - start,
+          }
+          with open("verdict.json", "w") as f:
+              json.dump(verdict, f)
+          print(json.dumps(verdict))
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verdict-root-${{ matrix.shard }}
+          path: verdict.json
+          retention-days: 1
