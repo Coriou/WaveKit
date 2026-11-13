@@ -214,6 +214,14 @@ import type { YieldTurn } from "./slices.js"
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
 export type { EvidenceLabel } from "../classify/label-from-evidence.js"
 
+/** DiscoveryStore.ownerLabel: a published label and the proof behind it (null: none, no time). */
+export interface OwnerLabel extends EvidenceLabel {
+	/** The proof's time (ms since the epoch): a decoded label's newest decode. */
+	readonly proofAt: number | null
+	/** The observation the proof cites (the decoded one, or a synthetic `decode:` id). */
+	readonly proofObservationId: string | null
+}
+
 export type StoreChange =
 	| "created"
 	| "updated"
@@ -3904,15 +3912,35 @@ export class DiscoveryStore
 		this.aliasTable.setFolderLookup(lookup)
 	}
 
+	/** ownerLabel's answer per cached proof view (a new view, a new answer; no parse per call). */
+	private readonly ownerLabels = new WeakMap<DiscoveryProofView, OwnerLabel>()
+
 	/**
 	 * The published label (the protocol and confidence `get` presents) of `folderId`'s live owner
-	 * (folderOwner): no copy of the discovery, no hint or spur lookup; the proof view is cached.
-	 * Undefined for a folder nobody owns. The analog recorder's per-snapshot check (voice-veto.ts).
+	 * (folderOwner), with the time and observation of the proof behind it (a decoded label's newest
+	 * decode of its strongest proof): no copy of the discovery, no hint or spur lookup; the proof
+	 * view is cached. Undefined for a folder nobody owns. The analog recorder's per-snapshot check
+	 * (voice-veto.ts).
 	 */
-	ownerLabel(folderId: string): EvidenceLabel | undefined {
+	ownerLabel(folderId: string): OwnerLabel | undefined {
 		const owner = this.folderOwner(folderId)
 		const d = owner === undefined ? undefined : this.discoveries.get(owner)
-		return d === undefined ? undefined : publishedOf(this.discoveryView(d))
+		if (d === undefined) return undefined
+		const view = this.discoveryView(d)
+		const hit = this.ownerLabels.get(view)
+		if (hit !== undefined) return hit
+		const label = publishedOf(view)
+		const proof = label === UNKNOWN_LABEL ? null : view.proof
+		const at = proof === null ? Number.NaN : Date.parse(proof.at)
+		const answer: OwnerLabel = {
+			protocol: label.protocol,
+			family: label.family,
+			confidence: label.confidence,
+			proofAt: Number.isFinite(at) ? at : null,
+			proofObservationId: proof?.observationId ?? null,
+		}
+		this.ownerLabels.set(view, answer)
+		return answer
 	}
 
 	/**

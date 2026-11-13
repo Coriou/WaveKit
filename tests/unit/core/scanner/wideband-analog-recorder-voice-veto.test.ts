@@ -1,18 +1,20 @@
 /**
  * The analog recorder never keeps a digital or paging transmission as voice (voice-veto.ts,
- * WidebandAnalogRecorder.ownerNotVoice): a discovery of the session's owner (or its merge owner)
- * decoded as a protocol that is not analog voice refuses and discards, and so does a definite
- * digital class (a verified decode, the channel tier) of the owner's own track. A spectral
- * digital reading alone never discards or refuses, and a joined other signal ends the session at
- * the join without discarding the voice before it. Analog FM voice, with or without a tone,
- * records as before.
+ * WidebandAnalogRecorder.ownerVeto): a discovery of the session's owner (or its merge owner)
+ * decoded as a protocol that is not analog voice during the session's air time refuses and
+ * discards, and so does a definite digital class (a verified decode, the channel tier) of the
+ * owner's own track. An older decode (a mixed-mode repeater's earlier digital over) proves
+ * nothing. A spectral digital reading alone never discards or refuses, and a joined other signal
+ * ends the session at the join (never later than its start) without discarding the voice before
+ * it. Analog FM voice, with or without a tone, records as before.
  */
 import { describe, expect, it } from "vitest"
 import {
 	DIGITAL_CLASSES,
 	digitalClass,
 	notAnalogVoiceProtocol,
-	ownerDecodedProtocol,
+	ownerDecoded,
+	type DecodedLabel,
 } from "../../../../src/core/scanner/channel/voice-veto.js"
 import type { WidebandTrackInput } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import { CLASS_HYPOTHESES } from "../../../../src/core/scanner/classify/classifier.js"
@@ -21,6 +23,7 @@ import type {
 	ScannerProtocol,
 } from "../../../../src/core/scanner/types.js"
 import {
+	HARNESS_T0,
 	LOW_FS,
 	LOW_OFFSET,
 	harness,
@@ -136,7 +139,7 @@ describe("voice-veto tables", () => {
 			expect(notAnalogVoiceProtocol(p)).toBe(false)
 	})
 
-	it("ownerDecodedProtocol reads the merge owner's decoded protocol, null otherwise", () => {
+	it("ownerDecoded reads the merge owner's decoded protocol, null otherwise", () => {
 		const discoveries = new Map<
 			string,
 			{ protocol: ScannerProtocol; confidence: "decoded" | "activity" }
@@ -153,22 +156,40 @@ describe("voice-veto tables", () => {
 		const store = {
 			ownerLabel: (id: string) => {
 				const owner = owners.get(id)
-				return owner === undefined ? undefined : discoveries.get(owner)
+				const label = owner === undefined ? undefined : discoveries.get(owner)
+				return label === undefined
+					? undefined
+					: { ...label, proofAt: 1_000, proofObservationId: "o_1" }
 			},
 		}
-		expect(ownerDecodedProtocol(store, "d_pager")).toBe("pocsag")
+		const pager = { protocol: "pocsag", at: 1_000, observationId: "o_1" }
+		expect(ownerDecoded(store, "d_pager")).toEqual(pager)
 		// A discovery merged into the decoded pager: its owner's protocol.
-		expect(ownerDecodedProtocol(store, "d_merged")).toBe("pocsag")
-		expect(ownerDecodedProtocol(store, "d_carrier")).toBeNull()
-		expect(ownerDecodedProtocol(store, "d_orphan")).toBeNull()
-		expect(ownerDecodedProtocol(store, "d_unknown")).toBeNull()
-		expect(ownerDecodedProtocol(store, "")).toBeNull()
+		expect(ownerDecoded(store, "d_merged")).toEqual(pager)
+		expect(ownerDecoded(store, "d_carrier")).toBeNull()
+		expect(ownerDecoded(store, "d_orphan")).toBeNull()
+		expect(ownerDecoded(store, "d_unknown")).toBeNull()
+		expect(ownerDecoded(store, "")).toBeNull()
+		// A malformed time or observation reads unknown.
+		const malformed = {
+			ownerLabel: () => ({
+				protocol: "pocsag" as const,
+				confidence: "decoded" as const,
+				proofAt: Number.NaN,
+				proofObservationId: "",
+			}),
+		}
+		expect(ownerDecoded(malformed, "d_pager")).toEqual({
+			protocol: "pocsag",
+			at: null,
+			observationId: null,
+		})
 		const throwing = {
 			ownerLabel: () => {
 				throw new Error("boom")
 			},
 		}
-		expect(ownerDecodedProtocol(throwing, "d_pager")).toBeNull()
+		expect(ownerDecoded(throwing, "d_pager")).toBeNull()
 	})
 })
 
@@ -266,15 +287,21 @@ describe("digital and paging transmissions are never kept as voice", () => {
 	}, 120_000)
 
 	it("a discovery merged into a decoded pager discovery (alias owner) refuses the recording", async () => {
-		// The service's lookup resolves the alias to its owner (ownerDecodedProtocol).
+		// The service's lookup resolves the alias to its owner (ownerDecoded): decoded now, on
+		// this observation.
 		const store = {
 			ownerLabel: (id: string) =>
 				id === "d_1" || id === "d_owner"
-					? { protocol: "pocsag" as const, confidence: "decoded" as const }
+					? {
+							protocol: "pocsag" as const,
+							confidence: "decoded" as const,
+							proofAt: HARNESS_T0,
+							proofObservationId: "o",
+						}
 					: undefined,
 		}
 		const h = low(
-			{ decodedProtocol: id => ownerDecodedProtocol(store, id) },
+			{ decodedLabel: id => ownerDecoded(store, id) },
 			{ ctcssHz: null },
 		)
 		await h.feed(1, false)
@@ -397,12 +424,15 @@ describe("a joined other signal never discards the voice before it", () => {
 			{ ctcssHz: null },
 		)
 		await h.feed(1, false)
+		const voiceOnset = h.engine.liveEdge()
 		await transmission(h, "o", 5, {}, LOW)
 		// Inside the 2 s hang, another over on the same channel joins the session.
+		const joinAt = h.engine.liveEdge()
 		await transmission(h, "j", 3, { discoveryId: "d_2", ...extra }, LOW)
 		await h.feed(3.5, false)
 		await h.rec.idle()
-		return h
+		// Frames from the pre-roll (300 ms) to the joined over's start.
+		return { h, toJoin: ((joinAt - voiceOnset) / h.fs + 0.3) * 8000 }
 	}
 
 	for (const [name, extra, decoded] of [
@@ -415,12 +445,13 @@ describe("a joined other signal never discards the voice before it", () => {
 		["a joined over whose discovery is decoded as a pager", {}, "pocsag"],
 	] as const)
 		it(`${name} ends the session at the join; the voice file is kept`, async () => {
-			const h = await joined(extra, decoded)
+			const { h, toJoin } = await joined(extra, decoded)
 			expect(h.ops).toHaveLength(1)
 			expect(h.ops[0]!.input.observationId).toBe("o")
 			expect(h.ops[0]!.outcome).toBe("finalized")
-			// The 5 s over is in it.
+			// The 5 s over is in it, and nothing of the joined signal (one 25 ms chunk of rounding).
 			expect(h.ops[0]!.frames).toBeGreaterThanOrEqual(5 * 8000)
+			expect(h.ops[0]!.frames).toBeLessThanOrEqual(Math.round(toJoin + 200))
 			expect(codes(h)).not.toContain("discarded:not-analog")
 			expect(
 				(h.rec.diagnostics().recentRefusals ?? []).map(d => d.code),
@@ -429,9 +460,157 @@ describe("a joined other signal never discards the voice before it", () => {
 		}, 120_000)
 
 	it("a joined analog-fm over with no decode still joins the voice file as before", async () => {
-		const h = await joined({})
+		const { h } = await joined({})
 		expect(h.ops).toHaveLength(1)
 		expect(h.ops[0]!.outcome).toBe("finalized")
 		expect(h.ops[0]!.frames).toBeGreaterThanOrEqual(8 * 8000)
+	}, 120_000)
+})
+
+describe("a decode counts only during the session's air time", () => {
+	const refusals = (h: Harness): string[] =>
+		(h.rec.diagnostics().recentRefusals ?? []).map(d => d.code)
+
+	for (const by of ["c4fm", null])
+		it(`a mixed-mode repeater: a discovery decoded as DMR 60 s before a new analog FM over (citing ${by ?? "no observation"}) refuses and discards nothing`, async () => {
+			let label: DecodedLabel | null = null
+			const h = low(
+				{ liveClock: true, decodedLabel: () => label },
+				{ ctcssHz: null },
+			)
+			await h.feed(1, false)
+			label = { protocol: "dmr", at: h.now() - 60_000, observationId: by }
+			await over(h, 5)
+			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+			expect(codes(h)).not.toContain("discarded:not-analog")
+			expect(refusals(h)).not.toContain("refused:not-analog")
+		}, 120_000)
+
+	it("a stale decode is not remembered as a refusal: a pager decode of this over later still discards it", async () => {
+		let label: DecodedLabel | null = null
+		const h = low(
+			{ liveClock: true, decodedLabel: () => label },
+			{ ctcssHz: null },
+		)
+		await h.feed(1, false)
+		label = { protocol: "dmr", at: h.now() - 60_000, observationId: "c4fm" }
+		await over(h, 6, {
+			during: at => {
+				if (at >= 4 && label?.protocol === "dmr")
+					label = { protocol: "pocsag", at: h.now(), observationId: "o" }
+			},
+		})
+		expect(h.ops.length).toBeGreaterThan(0)
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(codes(h)).toContain("discarded:not-analog")
+	}, 120_000)
+
+	it("a discovery decoded at the over's onset refuses it once, before it starts", async () => {
+		let lookups = 0
+		let label: DecodedLabel | null = null
+		const h = low(
+			{
+				liveClock: true,
+				decodedLabel: () => {
+					lookups++
+					return label
+				},
+			},
+			{ ctcssHz: null },
+		)
+		await h.feed(1, false)
+		label = { protocol: "pocsag", at: h.now(), observationId: null }
+		await over(h, 5)
+		expect(h.ops).toEqual([])
+		expect(refusals(h)).toContain("refused:not-analog")
+		expect(lookups).toBe(1)
+	}, 120_000)
+
+	it("a pager burst decoded during its recording is discarded, through a merge alias too", async () => {
+		let proofAt: number | null = null
+		// d_1 was merged into d_owner, the decoded pager: the alias resolves to its label.
+		const store = {
+			ownerLabel: (id: string) =>
+				proofAt !== null && (id === "d_1" || id === "d_owner")
+					? {
+							protocol: "pocsag" as const,
+							confidence: "decoded" as const,
+							proofAt,
+							proofObservationId: "o",
+						}
+					: undefined,
+		}
+		const h = low(
+			{ liveClock: true, decodedLabel: id => ownerDecoded(store, id) },
+			{ ctcssHz: null },
+		)
+		await h.feed(1, false)
+		await over(h, 6, {
+			during: at => {
+				if (at >= 3 && proofAt === null) proofAt = h.now()
+			},
+		})
+		expect(h.ops.length).toBeGreaterThan(0)
+		expect(h.ops.every(o => o.outcome === "aborted")).toBe(true)
+		expect(codes(h)).toContain("discarded:not-analog")
+	}, 120_000)
+
+	it("a decode during the over that cites another observation (another transmission) discards nothing", async () => {
+		let label: DecodedLabel | null = null
+		const h = low(
+			{ liveClock: true, decodedLabel: () => label },
+			{ ctcssHz: null },
+		)
+		await h.feed(1, false)
+		await over(h, 5, {
+			during: at => {
+				if (at >= 2 && label === null)
+					label = { protocol: "dmr", at: h.now(), observationId: "c4fm" }
+			},
+		})
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		expect(codes(h)).not.toContain("discarded:not-analog")
+	}, 120_000)
+
+	it("a DMR decode during the analog over's hang, of a digital over joined on the same discovery, ends the session at the join: the voice file is kept", async () => {
+		let label: DecodedLabel | null = null
+		const h = low(
+			{ liveClock: true, decodedLabel: () => label },
+			{ ctcssHz: null },
+		)
+		await h.feed(1, false)
+		const voiceOnset = h.engine.liveEdge()
+		await transmission(h, "o", 5, {}, LOW)
+		// Inside the 2 s hang, a digital over on the same frequency (the same discovery) joins
+		// (its spectrum reads 4FSK only); its decode arrives 1 s in.
+		const onset = h.engine.liveEdge()
+		const digital = {
+			analogFm: false,
+			shadowAllowed: true,
+			spectralDigital: true,
+			digitalClass: true,
+		}
+		await h.feed(3, true, () => {
+			const edge = h.engine.liveEdge()
+			if (edge - onset >= h.fs && label === null)
+				label = { protocol: "dmr", at: h.now(), observationId: "j" }
+			if (edge - onset >= 0.1 * h.fs)
+				h.rec.track(input("j", snapshot("j", onset, edge, LOW), digital))
+		})
+		await h.feed(0.6, false)
+		h.rec.closed("j", snapshot("j", onset, h.engine.liveEdge(), LOW), null)
+		await h.feed(3.5, false)
+		await h.rec.idle()
+		expect(h.ops).toHaveLength(1)
+		expect(h.ops[0]!.input.observationId).toBe("o")
+		expect(h.ops[0]!.outcome).toBe("finalized")
+		expect(h.ops[0]!.frames).toBeGreaterThanOrEqual(5 * 8000)
+		// Pre-roll + the voice + its quiet up to the join, nothing of the joined over although its
+		// decode came 1 s in (writes stay a holdback behind the edge; one 25 ms chunk of rounding).
+		const toJoin = ((onset - voiceOnset) / h.fs + 0.3) * 8000
+		expect(h.ops[0]!.frames).toBeLessThanOrEqual(Math.round(toJoin + 200))
+		expect(codes(h)).not.toContain("discarded:not-analog")
+		expect(refusals(h)).toContain("refused:not-analog")
+		expect(h.rec.owns("j")).toBe(false)
 	}, 120_000)
 })

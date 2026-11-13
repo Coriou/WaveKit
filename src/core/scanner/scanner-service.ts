@@ -159,7 +159,7 @@ import type {
 } from "./scanner-redesign-contract.js"
 import { replayMissEligible } from "../iq-capture/replay-miss.js"
 import { createKnownProtocolMemory } from "./known-protocol.js"
-import { digitalClass, ownerDecodedProtocol } from "./channel/voice-veto.js"
+import { digitalClass, ownerDecoded } from "./channel/voice-veto.js"
 import { narrowRasterAt } from "./narrow-digital.js"
 import { planReplayTrials } from "./replay-plan.js"
 import { TrialMemory, type TrialMemoryEntry } from "./trial-memory.js"
@@ -1605,9 +1605,9 @@ export class ScannerService extends EventEmitter {
 				// Recordings share the probes' and live audio's CPU budget (cpuBudgetCores).
 				reserveCores: cores => this.probes.reserveExternal(cores),
 				tuningRefused: sourceId => this.tuningRefused(sourceId, "recording"),
-				// The decoded protocol of a discovery, or of the live one it was merged into.
-				decodedProtocol: discoveryId =>
-					ownerDecodedProtocol(this.store, discoveryId),
+				// The decoded label (and its decode's time) of a discovery, or of the live one it
+				// was merged into.
+				decodedLabel: discoveryId => ownerDecoded(this.store, discoveryId),
 				logger: deps.logger,
 				now: this.now,
 			})

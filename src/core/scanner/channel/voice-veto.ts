@@ -3,8 +3,9 @@
  * transmission whose own track a verified decode or the channel tier classes as a digital class
  * (a spectral reading alone never counts: weak or low-deviation NFM voice can read as one for
  * its whole length), or whose discovery (or the discovery it was merged into) is decoded as a
- * protocol that is not analog voice. Pure tables
- * and predicates; the recorder decides when they apply (admission and retention only).
+ * protocol that is not analog voice while that transmission was on the air (a decode of an
+ * earlier transmission on a mixed-mode channel proves nothing about this one). Pure tables and
+ * predicates; the recorder decides when they apply (admission and retention only).
  *
  * Both tables are total over their key type, so a class or protocol family added later fails to
  * compile until it is decided here. Unknown or malformed input is never digital and never "not
@@ -84,33 +85,58 @@ export function notAnalogVoiceProtocol(protocol: unknown): boolean {
 		: false
 }
 
-/** The discovery read ownerDecodedProtocol needs (DiscoveryStore.ownerLabel). */
+/** A discovery's decoded protocol and the decode behind it (ownerDecoded). */
+export interface DecodedLabel {
+	readonly protocol: ScannerProtocol
+	/** When it was decoded (ms since the epoch, the newest decode of its proof); null: unknown. */
+	readonly at: number | null
+	/** The observation that was decoded; null or a synthetic id when no observation is cited. */
+	readonly observationId: string | null
+}
+
+/** The label DecodedProtocolLookup gives (DiscoveryStore.ownerLabel's OwnerLabel). */
+export interface LookupLabel {
+	readonly protocol: ScannerProtocol
+	readonly confidence: ScannerConfidence
+	/** The proof's time (ms since the epoch); absent or null: unknown. */
+	readonly proofAt?: number | null
+	/** The observation the proof cites; absent or null: none. */
+	readonly proofObservationId?: string | null
+}
+
+/** The discovery read ownerDecoded needs (DiscoveryStore.ownerLabel). */
 export interface DecodedProtocolLookup {
 	/**
 	 * The published label of the live discovery whose folder `folderId` is (itself, or the owner
-	 * of a merge alias); undefined when there is none. O(1), no copy of the discovery.
+	 * of a merge alias), with its proof's time and observation; undefined when there is none.
+	 * O(1), no copy of the discovery.
 	 */
-	ownerLabel(
-		folderId: string,
-	): { protocol: ScannerProtocol; confidence: ScannerConfidence } | undefined
+	ownerLabel(folderId: string): LookupLabel | undefined
 }
 
 /**
- * The decoded protocol of `discoveryId`, or of the live discovery it was merged into (its
- * folder's owner, recording-aliases.ts): the presented protocol while its confidence is
- * `decoded`, else null. Unknown ids, malformed answers and throwing lookups: null.
+ * The decoded label of `discoveryId`, or of the live discovery it was merged into (its folder's
+ * owner, recording-aliases.ts): the presented protocol while its confidence is `decoded`, with
+ * the decode's time and observation, else null. Unknown ids, malformed answers and throwing
+ * lookups: null; a malformed time or observation reads null (unknown).
  */
-export function ownerDecodedProtocol(
+export function ownerDecoded(
 	store: DecodedProtocolLookup,
 	discoveryId: string,
-): ScannerProtocol | null {
+): DecodedLabel | null {
 	if (typeof discoveryId !== "string" || discoveryId.length === 0) return null
 	try {
 		const label = store.ownerLabel(discoveryId)
 		if (label === undefined || label.confidence !== "decoded") return null
-		return typeof label.protocol === "string" && label.protocol.length > 0
-			? label.protocol
-			: null
+		if (typeof label.protocol !== "string" || label.protocol.length === 0)
+			return null
+		const at = label.proofAt
+		const by = label.proofObservationId
+		return {
+			protocol: label.protocol,
+			at: typeof at === "number" && Number.isFinite(at) ? at : null,
+			observationId: typeof by === "string" && by.length > 0 ? by : null,
+		}
 	} catch {
 		return null
 	}

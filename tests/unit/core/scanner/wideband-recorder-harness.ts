@@ -26,11 +26,15 @@ import {
 	type AnalogReceipt,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import type { RecordingBinding } from "../../../../src/core/scanner/store/recording-operation.js"
+import type { DecodedLabel } from "../../../../src/core/scanner/channel/voice-veto.js"
+import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
 import { IqRing } from "../../../../src/core/spectrum/iq-ring.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import { NfmSource } from "./wideband-nfm-fixtures.js"
 
 export const FS = 1_024_000
+/** The recorder's wall clock (ms): fixed, or at sample 0 with `liveClock`. */
+export const HARNESS_T0 = 1_700_000_000_000
 export const CENTRE = 100_000_000
 export const OFFSET = 50_000
 
@@ -205,8 +209,18 @@ export function harness(
 		tuningRefused?: (sourceId: string) => void
 		/** The recorder's per-turn budget clock (milliseconds); default performance.now. */
 		clock?: () => number
-		/** The discovery's (or its merge owner's) decoded protocol (WidebandAnalogDeps). */
+		/**
+		 * The discovery's (or its merge owner's) decoded protocol, decoded now and citing no
+		 * observation (WidebandAnalogDeps.decodedLabel); `decodedLabel` wins when both are given.
+		 */
 		decodedProtocol?: (discoveryId: string) => string | null
+		/** The discovery's (or its merge owner's) decoded label (WidebandAnalogDeps). */
+		decodedLabel?: (discoveryId: string) => DecodedLabel | null
+		/**
+		 * The recorder's wall clock follows the fake engine's live edge (HARNESS_T0 at sample 0)
+		 * instead of standing still at HARNESS_T0.
+		 */
+		liveClock?: boolean
 		/**
 		 * settings().ringSeconds and the FakeEngine's real ring capacity; default absent (the
 		 * recorder assumes 3 s, the FakeEngine's default ring).
@@ -226,6 +240,24 @@ export function harness(
 	const tones: { observationId: string; hz: number }[] = []
 	const warnings: unknown[] = []
 	const logger = pino({ level: "silent" })
+	const now = opts.liveClock
+		? () => HARNESS_T0 + (engine.liveEdge() * 1000) / fs
+		: () => HARNESS_T0
+	const legacy = opts.decodedProtocol
+	const decodedLabel =
+		opts.decodedLabel ??
+		(legacy === undefined
+			? undefined
+			: (id: string): DecodedLabel | null => {
+					const protocol = legacy(id)
+					return protocol === null
+						? null
+						: {
+								protocol: protocol as ScannerProtocol,
+								at: now(),
+								observationId: null,
+							}
+				})
 	rec = new WidebandAnalogRecorder({
 		engine: () => engine,
 		settings: () => ({
@@ -240,9 +272,9 @@ export function harness(
 		recordTone: (observationId, hz) => tones.push({ observationId, hz }),
 		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
 		...(opts.tuningRefused ? { tuningRefused: opts.tuningRefused } : {}),
-		...(opts.decodedProtocol ? { decodedProtocol: opts.decodedProtocol } : {}),
+		...(decodedLabel ? { decodedLabel } : {}),
 		logger,
-		now: () => 1_700_000_000_000,
+		now,
 		schedule: run => queue.push(run),
 		...(opts.clock ? { clock: opts.clock } : {}),
 	})
@@ -288,7 +320,20 @@ export function harness(
 			await pump()
 		}
 	}
-	return { engine, ops, begin, rec, tones, warnings, feed, pump, turn, src, fs }
+	return {
+		engine,
+		ops,
+		begin,
+		rec,
+		tones,
+		warnings,
+		feed,
+		pump,
+		turn,
+		src,
+		fs,
+		now,
+	}
 }
 
 export function snapshot(

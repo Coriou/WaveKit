@@ -2,10 +2,11 @@
  * DiscoveryStore.ownerLabel: the published label (protocol, family, confidence) of a folder's
  * live owner, through merge aliases, without presenting (cloning) the discovery. It must match
  * what `get` presents for that owner, so the analog recorder's per-snapshot check
- * (voice-veto.ts ownerDecodedProtocol) sees exactly the label the API shows.
+ * (voice-veto.ts ownerDecoded) sees exactly the label the API shows, with the time and
+ * observation of the decode behind it.
  */
 import { describe, expect, it } from "vitest"
-import { ownerDecodedProtocol } from "../../../../src/core/scanner/channel/voice-veto.js"
+import { ownerDecoded } from "../../../../src/core/scanner/channel/voice-veto.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 import {
@@ -52,7 +53,7 @@ describe("DiscoveryStore.ownerLabel", () => {
 		const id = store.ingest(dmrObs("o1", CH, T0)).discoveryId ?? ""
 		expect(labelOf(store.ownerLabel(id))).toEqual(labelOf(store.get(id)))
 		expect(store.ownerLabel(id)?.confidence).not.toBe("decoded")
-		expect(ownerDecodedProtocol(store, id)).toBeNull()
+		expect(ownerDecoded(store, id)).toBeNull()
 	})
 
 	it("a decoded discovery: its decoded protocol, as get presents it", () => {
@@ -63,7 +64,16 @@ describe("DiscoveryStore.ownerLabel", () => {
 		store.applyEvidence(id, decoded)
 		expect(store.get(id)?.confidence).toBe("decoded")
 		expect(labelOf(store.ownerLabel(id))).toEqual(labelOf(store.get(id)))
-		expect(ownerDecodedProtocol(store, id)).toBe("dmr")
+		expect(ownerDecoded(store, id)).toEqual({
+			protocol: "dmr",
+			at: T0 + 500,
+			observationId: "o1",
+		})
+		// A newer decode moves the time (the recorder's time-overlap rule reads it).
+		const later = evidence("dmr", T0 + 3_000, { identity: dmrCc(1) })
+		expect(store.appendObservationEvidence("o1", later)).toBe(true)
+		store.applyEvidence(id, later)
+		expect(ownerDecoded(store, id)?.at).toBe(T0 + 3_000)
 	})
 
 	it("a merged discovery's folder resolves to the survivor's label", () => {
@@ -81,12 +91,16 @@ describe("DiscoveryStore.ownerLabel", () => {
 		expect(labelOf(store.ownerLabel(dropped))).toEqual(
 			labelOf(store.get(survivor)),
 		)
-		expect(ownerDecodedProtocol(store, dropped)).toBe("dmr")
+		expect(ownerDecoded(store, dropped)).toEqual({
+			protocol: "dmr",
+			at: T0 + 2_000,
+			observationId: "o1",
+		})
 	})
 
 	it("a folder nobody owns: undefined", () => {
 		const store = newStore()
 		expect(store.ownerLabel("d_nobody")).toBeUndefined()
-		expect(ownerDecodedProtocol(store, "d_nobody")).toBeNull()
+		expect(ownerDecoded(store, "d_nobody")).toBeNull()
 	})
 })
