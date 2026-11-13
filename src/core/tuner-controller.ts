@@ -423,11 +423,12 @@ type AssertBlock =
 
 /**
  * Whether rtlmux serves this core's connection alone (TunerController.setReceiverClientsView):
- * `receiver-free`, `another-client` or `clients-unknown` (TunerResumeReason).
+ * free as `port-matched` or `sole-client`, else `another-client` or `clients-unknown`
+ * (TunerResumeReason; tuning-ledger-receiver-free.ts).
  */
 export interface ReceiverClientsVerdict {
 	free: boolean
-	reason: "receiver-free" | "another-client" | "clients-unknown"
+	reason: "port-matched" | "sole-client" | "another-client" | "clients-unknown"
 	/**
 	 * performance.now() (monotonic) when the poll behind the verdict started. A free verdict
 	 * counts only from a reading started after the connection's session and the gated fields'
@@ -439,7 +440,9 @@ export interface ReceiverClientsVerdict {
 /** TunerState.resumeOutcome messages: fixed text per reason. */
 const RESUME_MESSAGES: Readonly<Record<TunerResumeReason, string>> =
 	Object.freeze({
-		"receiver-free": "receiver free: tuning restored",
+		"port-matched": "receiver free (only this connection): tuning restored",
+		"sole-client":
+			"receiver free (one client, port not matched): tuning restored",
 		"another-client": "another client on the receiver: tuning left as found",
 		"clients-unknown": "receiver clients unknown: tuning left as found",
 		"relay-attached": "relay client attached: tuning left as found",
@@ -1995,10 +1998,13 @@ export class TunerController extends EventEmitter {
 			typeof verdict?.readingAt === "number" &&
 			Number.isFinite(verdict.readingAt) &&
 			(stale === undefined || verdict.readingAt > stale.at)
-		if (verdict?.free === true && verdict.reason === "receiver-free") {
+		if (
+			verdict?.free === true &&
+			(verdict.reason === "port-matched" || verdict.reason === "sole-client")
+		) {
 			if (fresh) {
 				if (stale?.untracked === true) stale.untracked = false
-				return { free: true, reason: "receiver-free" }
+				return { free: true, reason: verdict.reason }
 			}
 			// An untracked retune since the last fresh reading: another client's until one says free.
 			if (stale?.untracked === true)

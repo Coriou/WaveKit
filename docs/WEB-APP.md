@@ -283,10 +283,23 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
 waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads `Paused`. The
   pause survives a core restart; if the core could not save it, the island warns `Paused, but not
   saved — it will not survive a restart` with **Retry**, which saves it again. **Resume** reconnects once
-  without changing the receiver's tuning: while WaveKit was paused, SDR++ may have retuned the
-  shared dongle through rtlmux, which WaveKit cannot see, so it adopts what it finds: until you set them, the island shows the centre and rate as
+  and writes the tuning back only when WaveKit is the receiver's only client: the core reads
+  rtlmux's client list from the sdr-host, and when a fresh answer lists exactly one client while
+  WaveKit is connected (WaveKit itself, whatever port a NAT gives it) and no relay client is
+  attached, it writes the centre and rate from before the pause again. Otherwise (two or more
+  clients, no answer) it leaves the tuning as found: while WaveKit was paused, SDR++ may have
+  retuned the shared dongle through rtlmux, which WaveKit cannot see, so it adopts what it finds:
+  until you set them, the island shows the centre and rate as
   `last known … · unverified` (header and Centre row), no sample rate is selected (picking any rate,
-  the shown one too, sets it), and gain reads unknown. When the core measures a common rate from the
+  the shown one too, sets it), and gain reads unknown. The tuner state's `resumeOutcome` says which
+  happened and why (`port-matched`, `sole-client`, `another-client`, `clients-unknown`,
+  `relay-attached`, see [API.md](API.md#post-apisourcesidpause-and-post-apisourcesidresume)).
+  While the core cannot prove the tuning (the source's `tuningUnproven`), the island shows the
+  core's sentence about it, and recordings and identification of signals wait; **Take the tuning
+  back** writes the held centre and rate again in one call
+  ([`POST /api/tuner/:sourceId/take-back`](API.md#post-apitunersourceidtake-back)). It is not
+  offered while a relay client, a scanner job, external control or another core holds the
+  receiver; if the core still refuses, its reason shows in place. When the core measures a common rate from the
   stream it adopts it and the island labels it `measured`. **Resume at 161.500 MHz** (shown when
   the core knows the centre from before the pause) reconnects and writes the centre, rate and gain
   from before the pause back. SDR++ connected through WaveKit's tuner relay is seen: its retunes

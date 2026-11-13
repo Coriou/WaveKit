@@ -158,14 +158,17 @@ export interface TunerState {
 
 /**
  * Why a plain resume left the tuning as found or took it back (TunerState.resumeOutcome):
- * `receiver-free` (the sdr-host lists this core's connection as rtlmux's only client and no relay
- * client is attached: the core writes its held centre and rate again), `another-client` (rtlmux
- * lists another client too), `clients-unknown` (no sdr-host answer, an answer too old, or one that
- * does not list this connection), `relay-attached` (a relay client is attached), `operator`
+ * `port-matched` (a fresh sdr-host answer lists exactly one rtlmux client, with this core's
+ * connection port, and no relay client is attached: the core writes its held centre and rate
+ * again), `sole-client` (the same, but the one client's port is another or none, as behind a NAT
+ * that rewrites ports), `another-client` (rtlmux lists this connection and another client),
+ * `clients-unknown` (no sdr-host answer, an answer too old, zero clients, or two or more that do
+ * not list this connection), `relay-attached` (a relay client is attached), `operator`
  * (POST /api/tuner/:sourceId/take-back).
  */
 export const TUNER_RESUME_REASONS = [
-	"receiver-free",
+	"port-matched",
+	"sole-client",
 	"another-client",
 	"clients-unknown",
 	"relay-attached",

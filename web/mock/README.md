@@ -47,6 +47,11 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `WAVEKIT_MOCK_PERSIST_FAILURES=<n>` (`persistFailures`) makes the next `n` pauses or resumes
   answer 200 with `persisted: false` (the change holds but was not saved), to try the unsaved
   warning's Retry.
+  After a plain resume `GET /api/sources` carries `tuningUnproven` (cause `plain-resume`) and the
+  tuner state `resumeOutcome` (`another-client`) until a restore resume or
+  `POST /api/tuner/:sourceId/take-back`, which takes the tuning back (`resumeOutcome` `operator`).
+  `WAVEKIT_MOCK_TAKE_BACK=blocked` or `=nothing-held` (`takeBackRefusal`) makes take-back answer
+  the core's 409 `TUNER_TAKE_BACK_BLOCKED` or `TUNER_NOTHING_HELD` instead.
   `WAVEKIT_MOCK_SOCKET_OMITS_FEED=1` (`socketOmitsFeed`) leaves `feed` out of `source:status`, as
   an older core's socket did, while `GET /api/sources` keeps it.
   `WAVEKIT_MOCK_SECOND_SOURCE=1` (`secondSource`) lists a second receiver, `rtl-1`, after `rtl-0`:

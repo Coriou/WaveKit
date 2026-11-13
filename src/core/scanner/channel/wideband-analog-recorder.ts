@@ -548,6 +548,11 @@ export interface WidebandEngineView {
 		 * unverified. Absent: a view without runs (test doubles), its epoch start bounds it.
 		 */
 		trustedFromSample?: number | null
+		/**
+		 * The newest ended trusted run of this epoch: its first sample and the first sample after
+		 * it. Absent or null: none ended (or a view without runs), trustedFromSample alone bounds.
+		 */
+		runEnd?: { from: number; end: number } | null
 	}
 	liveEdge(): number
 	readRing(
@@ -911,6 +916,35 @@ interface ClassInfo {
 }
 
 type Usable = "commanded" | "relay"
+
+/**
+ * The first sample past the trusted run a session started in (`from`, its trustedFromSample),
+ * within the current epoch: the end of the newest ended run when that run is the session's, the
+ * start of a later ended run when the session's own end is no longer named (it ended before
+ * that one, so no later than its start), and in any case no later than the current run's start
+ * when that is past `from`. +Infinity: no bound known (a view without runs, or the run goes on).
+ * A doubt shorter than one drain, re-proven before the recorder saw it, still ends the file at
+ * the doubt instead of at the drain's read position.
+ */
+export function trustedRunEnd(
+	epoch: ReturnType<WidebandEngineView["currentEpoch"]>,
+	from: number | null | undefined,
+): number {
+	if (typeof from !== "number") return Number.POSITIVE_INFINITY
+	let end = Number.POSITIVE_INFINITY
+	const r = epoch.runEnd
+	if (r)
+		end =
+			r.from === from
+				? r.end
+				: r.from > from
+					? r.from
+					: Number.POSITIVE_INFINITY
+	const current = epoch.trustedFromSample
+	if (typeof current === "number" && current > from)
+		end = Math.min(end, current)
+	return end
+}
 
 function usableTrust(trust: TuningTrust): trust is Usable {
 	return trust === "commanded" || trust === "relay"
@@ -2780,7 +2814,9 @@ export class WidebandAnalogRecorder {
 			// A retune: nothing at or past the new epoch's start is this channel. The file ends
 			// at the earlier of its own end target and that start; no later file follows. A
 			// sweep that hops after the hang has a complete file.
-			s.limit = retuned ? (epoch.startSample ?? s.next) : s.next
+			s.limit = retuned
+				? (epoch.startSample ?? s.next)
+				: Math.min(s.next, trustedRunEnd(epoch, s.trustedFrom))
 			const target = s.seg.endTarget
 			const end = Math.min(target ?? s.limit, s.limit)
 			const cut: AnalogCut =

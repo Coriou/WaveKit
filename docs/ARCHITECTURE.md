@@ -589,8 +589,9 @@ channel tap ends when that run ends or restarts. `TuningUnprovenTracker` (beside
 by the tuner controller's block reasons) names one cause per source while its centre or rate is
 unproven (`tuningUnproven` on `GET /api/sources`), and the engine's reason while the ledger proves
 both but the engine's newest block reads unverified. A plain resume's hold gives the tuning back
-only while the sdr-host lists this core's connection as rtlmux's only client and no relay client
-is attached (`TunerController.plainResumeTakesTuningBack`, the one decision;
+only while a fresh sdr-host reading lists exactly one rtlmux client while this core's connection is
+up (`port-matched` when its port is the connection's, `sole-client` otherwise: a NAT may rewrite
+it) and no relay client is attached (`TunerController.plainResumeTakesTuningBack`, the one decision;
 `tuning-ledger-receiver-free.ts`), on a reading whose poll started after the connection's session
 and the last doubt on its centre or rate (an untracked-retune doubt reads as another client until
 such a reading says free); `POST /api/tuner/:sourceId/take-back` re-proves both fields in one

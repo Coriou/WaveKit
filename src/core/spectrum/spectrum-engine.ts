@@ -2360,10 +2360,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	/** § 4.7: a host-reported centre that disagrees with caps makes new data unverified. */
 	private async checkHostCentre(reader: HostCentreReader): Promise<void> {
 		if (!this.running) return
-		const reported = await reader.read(this.sourceId).catch(() => null)
-		if (reported === null || !this.running) return
+		// The centre the reading is compared with is the one when it was asked for: a retune while
+		// the HTTP read is in flight makes the answer older than the centre (it may still report
+		// the previous one), so that reading is skipped and the next poll compares afresh.
 		const caps = this.deps.sources.getCaps(this.sourceId)?.centerFreq
 		if (caps === undefined) return
+		const reported = await reader.read(this.sourceId).catch(() => null)
+		if (reported === null || !this.running) return
+		if (this.deps.sources.getCaps(this.sourceId)?.centerFreq !== caps) return
 		const mismatch = Math.abs(reported - caps) > HOST_CENTRE_TOLERANCE_HZ
 		const ledger = this.ledger()
 		if (!mismatch) {

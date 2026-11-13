@@ -84,11 +84,12 @@ function config(port: number): SourceConfig {
 	} as SourceConfig
 }
 
-type HostMode = "free" | "second" | "down"
+type HostMode = "free" | "second" | "down" | "nat" | "nat-second"
 
 /**
  * The fake sdr-host: GET /api/status lists rtlmux's clients (the core's connection by its local
- * port, and in `second` another one); `down` answers 500.
+ * port, and in `second` another one); `down` answers 500. `nat` lists the core's connection under
+ * a rewritten port (as a NAT in front of rtlmux would), `nat-second` that and another client.
  */
 async function startFakeSdrHost(localPort: () => number | null) {
 	let mode: HostMode = "free"
@@ -108,11 +109,19 @@ async function startFakeSdrHost(localPort: () => number | null) {
 			return
 		}
 		const own = localPort()
+		const nat = mode === "nat" || mode === "nat-second"
 		const details = [
 			...(own !== null
-				? [{ id: 0, address: `127.0.0.1:${own}`, bytesDropped: 0 }]
+				? [
+						{
+							id: 0,
+							// A NAT rewrites the port: never this connection's.
+							address: `127.0.0.1:${nat ? 2 : own}`,
+							bytesDropped: 0,
+						},
+					]
 				: []),
-			...(mode === "second"
+			...(mode === "second" || mode === "nat-second"
 				? [{ id: 1, address: "127.0.0.1:1", bytesDropped: 0 }]
 				: []),
 		]
@@ -285,10 +294,39 @@ describe("a plain resume on a free receiver (U1, U3)", () => {
 		await until(() => h.fake.tuning().centre === F1)
 		expect(h.state().resumeOutcome).toEqual({
 			outcome: "restored",
-			reason: "receiver-free",
-			message: "receiver free: tuning restored",
+			reason: "port-matched",
+			message: "receiver free (only this connection): tuning restored",
 		})
 		expect(h.manager.tuningUnproven.view("rtl")).toBeNull()
+	}, 30_000)
+
+	it("behind a NAT that rewrites the port, one listed client is this connection: takes the tuning back as sole-client", async () => {
+		const h = await harness()
+		h.host.setMode("nat")
+		const from = await h.plainResume()
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.framesFrom(from)).toEqual([
+			[SET_SAMPLE_RATE, RATE],
+			[SET_FREQUENCY, F1],
+		])
+		expect(h.state().resumeOutcome).toEqual({
+			outcome: "restored",
+			reason: "sole-client",
+			message: "receiver free (one client, port not matched): tuning restored",
+		})
+	}, 30_000)
+
+	it("behind a NAT with a second client leaves the tuning as found", async () => {
+		const h = await harness()
+		h.host.setMode("nat-second")
+		const from = await h.plainResume()
+		await wait(400)
+		expect(h.framesFrom(from)).toEqual([])
+		expect(h.proofOf().frequency.state).toBe("unverified")
+		expect(h.state().resumeOutcome).toMatchObject({
+			outcome: "left-as-found",
+			reason: "clients-unknown",
+		})
 	}, 30_000)
 
 	it("with a second client on rtlmux leaves the tuning as found, and takes it back once that client is gone", async () => {
@@ -374,7 +412,7 @@ describe("a free verdict counts only from a reading after the connection and the
 		const h = await harness()
 		const from = await h.plainResume()
 		await until(() => h.proofOf().frequency.state === "commanded")
-		expect(h.state().resumeOutcome?.reason).toBe("receiver-free")
+		expect(h.state().resumeOutcome?.reason).toBe("port-matched")
 		const restored = h.framesFrom(from).length
 		// An SDR++-like client joins straight on rtlmux and retunes: the polls in flight stall (the
 		// last answer, under 8 s old, still says free), the engine's alarm raises the doubt.
@@ -407,7 +445,7 @@ describe("a free verdict counts only from a reading after the connection and the
 		let readingAt = performance.now()
 		const polls: string[] = []
 		h.controller.setReceiverClientsView(
-			() => ({ free: true, reason: "receiver-free", readingAt }),
+			() => ({ free: true, reason: "port-matched", readingAt }),
 			id => polls.push(id),
 		)
 		const from = await h.plainResume()
@@ -427,6 +465,33 @@ describe("a free verdict counts only from a reading after the connection and the
 			[SET_SAMPLE_RATE, RATE],
 			[SET_FREQUENCY, F1],
 		])
+	}, 30_000)
+
+	it("a sole-client reading follows the same freshness rules: one before the session or the last doubt holds", async () => {
+		const h = await harness({ sdrHost: false })
+		let readingAt = performance.now()
+		h.controller.setReceiverClientsView(
+			() => ({ free: true, reason: "sole-client", readingAt }),
+			() => undefined,
+		)
+		const from = await h.plainResume()
+		h.controller.noteReceiverClients("rtl")
+		await wait(200)
+		expect(h.framesFrom(from)).toEqual([])
+		expect(h.state().resumeOutcome?.reason).toBe("clients-unknown")
+		readingAt = performance.now()
+		h.ledger.raiseDoubt("rtl", "frequency", "pipeline-error")
+		h.controller.noteReceiverClients("rtl")
+		await wait(200)
+		expect(h.framesFrom(from)).toEqual([])
+		// A reading after the doubt: taken back, and the outcome names the sole client.
+		readingAt = performance.now()
+		h.controller.noteReceiverClients("rtl")
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.state().resumeOutcome).toMatchObject({
+			outcome: "restored",
+			reason: "sole-client",
+		})
 	}, 30_000)
 })
 
@@ -448,7 +513,7 @@ describe("the plain resume's one decision covers the configured frames (Q4)", ()
 		).toEqual([])
 		// The receiver is free (the next answer lists the new connection alone): a blip writes them.
 		h.host.setMode("free")
-		await until(() => h.state().resumeOutcome?.reason === "receiver-free")
+		await until(() => h.state().resumeOutcome?.reason === "port-matched")
 		const decision = vi.spyOn(h.controller, "plainResumeTakesTuningBack")
 		decision.mockReturnValue(true)
 		from = h.fake.frames.length

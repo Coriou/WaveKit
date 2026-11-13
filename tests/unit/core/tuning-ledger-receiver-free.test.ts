@@ -28,7 +28,7 @@ describe("receiverClientsVerdict", () => {
 	it("is free only for this connection alone, within the age bound", () => {
 		expect(receiverClientsVerdict(reading([5000]), 5000, 1000, MAX)).toEqual({
 			free: true,
-			reason: "receiver-free",
+			reason: "port-matched",
 			readingAt: 1000,
 		})
 		// At the bound it still counts; past it the reading is unknown.
@@ -46,25 +46,59 @@ describe("receiverClientsVerdict", () => {
 		).toEqual({ free: false, reason: "another-client", readingAt: 1000 })
 	})
 
-	it("fails closed on every unknown: no reading, no port, unlisted connection, a bare count, a time in the future", () => {
+	it("is free with exactly one listed client whose port does not match (a NAT that rewrites ports): sole-client", () => {
+		const sole = { free: true, reason: "sole-client", readingAt: 1000 }
+		expect(receiverClientsVerdict(reading([6000]), 5000, 1000, MAX)).toEqual(
+			sole,
+		)
+		// One client without a port, or a bare count of one, is the same one client.
+		expect(receiverClientsVerdict(reading([null]), 5000, 1000, MAX)).toEqual(
+			sole,
+		)
+		expect(receiverClientsVerdict(reading([], 1), 5000, 1000, MAX)).toEqual(
+			sole,
+		)
+		// The age bound holds for it as for a matched port: at the bound free, past it unknown.
+		expect(
+			receiverClientsVerdict(reading([6000]), 5000, 1000 + MAX, MAX).free,
+		).toBe(true)
+		expect(
+			receiverClientsVerdict(reading([6000]), 5000, 1001 + MAX, MAX),
+		).toEqual({ free: false, reason: "clients-unknown" })
+	})
+
+	it("holds with two or more clients whatever their ports", () => {
+		expect(
+			receiverClientsVerdict(reading([6000, 7000]), 5000, 1000, MAX),
+		).toEqual({ free: false, reason: "clients-unknown" })
+		expect(
+			receiverClientsVerdict(reading([null, null, null]), 5000, 1000, MAX),
+		).toEqual({ free: false, reason: "clients-unknown" })
+		expect(receiverClientsVerdict(reading([], 2), 5000, 1000, MAX).free).toBe(
+			false,
+		)
+	})
+
+	it("fails closed on every unknown: no reading, no connection, zero clients, a malformed count, a time in the future", () => {
 		const unknown = { free: false, reason: "clients-unknown" }
 		expect(receiverClientsVerdict(null, 5000, 1000, MAX)).toEqual(unknown)
+		// No local port: our connection is not up, so one listed client is someone else.
 		expect(receiverClientsVerdict(reading([5000]), null, 1000, MAX)).toEqual(
-			unknown,
-		)
-		// A reading from before this connection (or behind a NAT) never names it.
-		expect(receiverClientsVerdict(reading([6000]), 5000, 1000, MAX)).toEqual(
 			unknown,
 		)
 		expect(receiverClientsVerdict(reading([]), 5000, 1000, MAX)).toEqual(
 			unknown,
 		)
+		// One client but two ports: malformed, not one client.
+		expect(
+			receiverClientsVerdict(reading([5000, 6000], 1), 5000, 1000, MAX),
+		).toEqual(unknown)
 		expect(receiverClientsVerdict(reading([5000], 2), 5000, 1000, MAX)).toEqual(
 			unknown,
 		)
-		expect(receiverClientsVerdict(reading([null]), 5000, 1000, MAX)).toEqual(
-			unknown,
-		)
+		expect(
+			receiverClientsVerdict(reading([5000], Number.NaN), 5000, 1000, MAX),
+		).toEqual(unknown)
 		expect(receiverClientsVerdict(reading([5000]), 5000, 999, MAX)).toEqual(
 			unknown,
 		)
