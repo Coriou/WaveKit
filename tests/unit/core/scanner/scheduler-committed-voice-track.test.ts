@@ -69,6 +69,30 @@ interface Scene {
 	 * so the move is forced: what is under test is the commit by the follow's first recording check.
 	 */
 	followedFirst?: boolean
+	/**
+	 * The frequencies swapped: the first track "a" (followed, analog-labelled) lies 25 kHz below
+	 * and never voices (the recorder answers a recording that is no voice until the ID voices); the
+	 * ID is the neighbour "b" at TARGET_HZ, which the hold moves to, voiced from `voicedMs` to
+	 * ID_END_MS and open to the end.
+	 */
+	swap?: boolean
+	/**
+	 * The ID's track "a" fades closed 300 ms after the neighbour qualifies and reopens (the same
+	 * track id): `"flap"` 400 ms later, read as a flap (a gap under TRAFFIC_GAP_MS, 1000 ms: carrier
+	 * evidence of its frequency); `"turnaround"` 1200 ms later, its sample positions 1200 samples
+	 * (1200 ms at 1000 Hz) past the close, read 1250 ms apart (one block added): a turnaround.
+	 */
+	blipA?: "flap" | "turnaround"
+	/** The ID's track "a" is flagged (a spur) this long after the neighbour qualifies. */
+	flagAfterMs?: number
+	/**
+	 * The ID's track "a" closes for good 300 ms after the neighbour qualifies, and a track "a2" this
+	 * far above it opens 1200 ms later, after a turnaround (as `blipA: "turnaround"`, so no flap of
+	 * a frequency the two share), and carries the ID (voiced at a2's centre) from `voicedMs`.
+	 */
+	successorOffsetHz?: number
+	/** The ID's track's occupied bandwidth (OBW_HZ when absent). */
+	idObwHz?: number
 }
 
 /**
@@ -80,8 +104,11 @@ function movedHold(scene: Scene = {}) {
 	const seenMs = scene.seenMs ?? NEIGHBOUR_SEEN_MS
 	const voicedMs = scene.voicedMs ?? ID_VOICED_MS
 	const n = voice("n", neighbourHz)
-	const id = voice("id", TARGET_HZ)
+	const idHz = TARGET_HZ + (scene.successorOffsetHz ?? 0)
+	const id = voice("id", idHz)
 	const recording = (ms: number): RecordingActivity => {
+		if (scene.swap === true)
+			return ms < voicedMs ? true : ms < ID_END_MS ? listing(id) : false
 		if (ms < NEIGHBOUR_END_MS)
 			return ms < voicedMs ? listing(n) : listing(n, id)
 		if (ms < NEIGHBOUR_END_MS + 500 && scene.endedAnswer === true)
@@ -125,22 +152,49 @@ function movedHold(scene: Scene = {}) {
 	}
 	const tracksOf = (): Map<string, unknown> =>
 		(s as unknown as { visit: { tracks: Map<string, unknown> } }).visit.tracks
-	const sighting = (trackId: string, centreHz: number, snrDb: number) =>
-		({
-			...makeTrack({ id: trackId, centreHz, startedAt: 0, blocks: 8, snrDb }),
+	const sighting = (
+		trackId: string,
+		centreHz: number,
+		snrDb: number,
+		extra: { obwHz?: number; spur?: boolean; afterSamples?: number } = {},
+	): TrackSnapshot => {
+		const t = makeTrack({
+			id: trackId,
+			centreHz,
+			startedAt: 0,
+			blocks: 8,
+			snrDb,
+			spur: extra.spur === true,
+		})
+		// A reopening `afterSamples` past the last sample of the run that closed, 8 blocks on air.
+		const from =
+			extra.afterSamples === undefined
+				? null
+				: t.lastSample + extra.afterSamples
+		return {
+			...t,
 			trackId,
-			obwHz: OBW_HZ,
-		}) satisfies TrackSnapshot
+			obwHz: extra.obwHz ?? OBW_HZ,
+			...(from === null
+				? {}
+				: { startSample: from, lastSample: from + 8 * 50 }),
+		}
+	}
+	const idSighting = (
+		extra: { spur?: boolean; afterSamples?: number } = {},
+	): TrackSnapshot =>
+		sighting(
+			"a",
+			scene.swap === true ? neighbourHz : TARGET_HZ,
+			25,
+			scene.idObwHz === undefined ? extra : { ...extra, obwHz: scene.idObwHz },
+		)
+	const followA = scene.followedFirst === true ? { followOnAir: true } : {}
 	const tunes = (a: SchedulerAction[]): boolean =>
 		a.some(x => x.type === "tune")
 	s.start()
 	s.onEpochStarted(0)
-	s.onTrack(
-		sighting("a", TARGET_HZ, 25),
-		false,
-		0,
-		scene.followedFirst === true ? { followOnAir: true } : {},
-	)
+	s.onTrack(idSighting(), false, 0, followA)
 	const named = new Set<string>()
 	const heldOn = new Set<string>()
 	let leftAt: number | null = null
@@ -148,9 +202,14 @@ function movedHold(scene: Scene = {}) {
 		const actions: SchedulerAction[] = []
 		if (clock === seenMs)
 			actions.push(
-				...s.onTrack(sighting("b", neighbourHz, 15), false, 0, {
-					followOnAir: true,
-				}),
+				...s.onTrack(
+					sighting("b", scene.swap === true ? TARGET_HZ : neighbourHz, 15),
+					false,
+					0,
+					{
+						followOnAir: true,
+					},
+				),
 			)
 		if (
 			scene.followedFirst === true &&
@@ -167,7 +226,30 @@ function movedHold(scene: Scene = {}) {
 				}),
 			)
 		}
-		if (clock === NEIGHBOUR_END_MS) actions.push(...s.onTrackClosed("b"))
+		if (scene.blipA !== undefined && clock === seenMs + 300)
+			actions.push(...s.onTrackClosed("a"))
+		if (scene.blipA === "flap" && clock === seenMs + 700)
+			actions.push(...s.onTrack(idSighting(), false, 0, followA))
+		if (scene.blipA === "turnaround" && clock === seenMs + 1_500)
+			actions.push(
+				...s.onTrack(idSighting({ afterSamples: 1_200 }), false, 0, followA),
+			)
+		if (scene.flagAfterMs !== undefined && clock === seenMs + scene.flagAfterMs)
+			actions.push(...s.onTrack(idSighting({ spur: true }), false, 0, followA))
+		if (scene.successorOffsetHz !== undefined) {
+			if (clock === seenMs + 300) actions.push(...s.onTrackClosed("a"))
+			if (clock === seenMs + 1_500)
+				actions.push(
+					...s.onTrack(
+						sighting("a2", idHz, 25, { afterSamples: 1_200 }),
+						false,
+						0,
+						{ followOnAir: true },
+					),
+				)
+		}
+		if (clock === NEIGHBOUR_END_MS && scene.swap !== true)
+			actions.push(...s.onTrackClosed("b"))
 		actions.push(...s.onBlock(clock), ...s.tick(clock))
 		if (tunes(actions)) leftAt = clock
 		const v = internals.visit
@@ -215,8 +297,65 @@ describe("a hold moved to a neighbour's track names the visit's transmission aft
 		expect(h.leftAt!).toBeLessThanOrEqual(KEPT_AT + L2)
 	})
 
+	it("a first track that never voices is no commitment: the ID the hold moves to, voiced after the move, is named and held to its end", () => {
+		const h = movedHold({ followedFirst: true, swap: true })
+		expect([...h.heldOn].sort()).toEqual(["a", "b"])
+		expect([...h.named]).toEqual(["id"])
+		expect(h.leftAt!).toBeGreaterThanOrEqual(ID_END_MS)
+		expect(h.leftAt!).toBeLessThanOrEqual(ID_END_MS + RECHECK_MS)
+	})
+
+	it("the committed track fades closed and reopens after a turnaround while the hold sits on the neighbour: the neighbour is never named, the ID held to its end", () => {
+		const h = movedHold({ followedFirst: true, blipA: "turnaround" })
+		expect(h.heldOn.has("b")).toBe(true)
+		expect([...h.named]).toEqual(["id"])
+		expect(h.leftAt!).toBeGreaterThanOrEqual(ID_END_MS)
+		expect(h.leftAt!).toBeLessThanOrEqual(ID_END_MS + RECHECK_MS)
+	})
+
+	it("the committed track flaps closed for 400 ms while the hold sits on the neighbour: the commitment survives, the neighbour is never named or ends the hold", () => {
+		const h = movedHold({ followedFirst: true, blipA: "flap" })
+		expect(h.heldOn.has("b")).toBe(true)
+		expect([...h.named]).toEqual(["id"])
+		// The flap is carrier evidence of the ID's frequency (no verified voice yet), so the hop is
+		// not kept for it past the neighbour's follow and hang (recordedTrack): left at that hang's
+		// end, 1050 ms after the neighbour's close, never at the neighbour's voice end itself.
+		expect(h.leftAt!).toBeGreaterThan(NEIGHBOUR_END_MS)
+		expect(h.leftAt!).toBeLessThan(ID_END_MS)
+	})
+
+	it("a committed track flagged as a spur is released: the held neighbour's own voice is named", () => {
+		const h = movedHold({ followedFirst: true, flagAfterMs: 100 })
+		expect(h.heldOn.has("b")).toBe(true)
+		expect([...h.named]).toEqual(["n"])
+		expect(h.leftAt!).toBeLessThan(ID_END_MS)
+	})
+
+	it("a closed committed track's successor lies within SAME_FREQUENCY_FLOOR_HZ (6250 Hz, half a 12.5 kHz channel) of it: at the bound the ID carries on there", () => {
+		const h = movedHold({ followedFirst: true, successorOffsetHz: 6_250 })
+		expect([...h.named]).toEqual(["id"])
+		expect(h.leftAt!).toBeGreaterThanOrEqual(ID_END_MS)
+		expect(h.leftAt!).toBeLessThanOrEqual(ID_END_MS + RECHECK_MS)
+	})
+
+	it("past the successor bound (6251 Hz) the closed committed track has no successor: nothing is named, the hop left before the voice ends", () => {
+		const h = movedHold({ followedFirst: true, successorOffsetHz: 6_251 })
+		expect([...h.named]).toEqual([])
+		expect(h.leftAt!).toBeLessThan(ID_END_MS)
+	})
+
+	it("a wide merged committed track (20 kHz, its band reaching 13 kHz) has no successor on the next 12.5 kHz channel", () => {
+		const h = movedHold({
+			followedFirst: true,
+			successorOffsetHz: 12_500,
+			idObwHz: 20_000,
+		})
+		expect([...h.named]).toEqual([])
+		expect(h.leftAt!).toBeLessThan(ID_END_MS)
+	})
+
 	it("whatever the neighbour's offset past the ID's reach and when it qualifies before the ID voices, only the ID is named and it is held to its end", () => {
-		// Feature: scanner sweep, Property: a moved hold names the committed track's transmission
+		// Feature: scanner sweep, Property 1: a moved hold names the committed track's transmission
 		// Validates: a neighbour's end never ends the committed track's hold
 		fc.assert(
 			fc.property(
