@@ -46,6 +46,22 @@ node scripts/check-docs.mjs
 A new workspace package needs its manifest copied in the root `Dockerfile` node-build stage, or the
 image build breaks.
 
+### Run the full suite remotely
+
+`node scripts/remote-check.mjs [github/<ref>]` runs lint, typecheck, build, the workspace tests and
+the root suite in six shards on GitHub runners, so your machine stays free. The base defaults to
+`github/main` and must be on the public remote. The command squashes your working tree (tracked
+changes plus untracked files) into one commit with a fixed message, scans the diff for private
+data and refuses on a hit, pushes it to a temporary `ci/<hash>` branch, waits up to 9 minutes and
+prints a short summary (also in `.remote-check/summary.txt`). It deletes the branch and the run
+afterwards, and repeating it for the same tree prints the stored result offline.
+
+Exit codes: 0 green, 1 real failures, 2 flaky only (a failed file passed when rerun), 3
+infrastructure, 4 refused (hygiene or base), 5 still running (run it again to attach). The runs
+always conclude as successful on GitHub; the verdict is in the summary. Files touching `native/`
+also run the channelizer and kernel tests. Put extra private patterns, one regular expression per
+line, in `~/.config/wavekit-remote/denylist`.
+
 ## Documentation
 
 The docs are plain GitHub Markdown in the repository, so they change in the same commit as the

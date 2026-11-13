@@ -63,6 +63,7 @@ pnpm run lint          # eslint .
 pnpm test              # turbo test of workspaces, then root vitest run
 pnpm exec vitest run tests/unit/path/to/file.test.ts   # one file
 pnpm exec vitest run -t "test name"                    # by name
+node scripts/remote-check.mjs [github/<ref>]           # full suite on GitHub runners; exit 0 green, 1 red, 2 flaky, 3 infra, 4 refused, 5 call again
 pnpm run dev           # esbuild watch + node --watch dist/index.js (no Docker)
 make dev-local         # run natively without a Pi, dongle, Docker or decoders
 make dev-dashboard     # interactive CLI dashboard
@@ -155,5 +156,6 @@ Rules and style: [`CONTRIBUTING.md`](CONTRIBUTING.md#documentation).
 ## Before reporting done
 
 Run the touched test files, `pnpm run typecheck`, `pnpm run lint` and
-`node scripts/check-docs.mjs` (the full suite when runtime code changes broadly). Report exact
+`node scripts/check-docs.mjs` (the full suite, via `node scripts/remote-check.mjs`, when runtime
+code changes broadly). Report exact
 base/head and commits, check results with any failure output, and open gaps. Never claim a check you skipped.
