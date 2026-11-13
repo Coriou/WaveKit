@@ -3954,6 +3954,11 @@ curl http://localhost:9000/api/scanner
 }
 ```
 
+`budgets.cpuCoresInUse` is the core estimate admission uses: 0.08 per spectrum engine, each
+running probe's cost, and the cores held by analog recordings and analog trials. It can exceed
+`cpuBudgetCores` while an identify probe runs: identify is admitted against engines and probes
+only, recordings already running go on, and new recordings wait until it ends.
+
 `folders` (absent from older cores and before the scanner state loaded) counts what the
 start did with recording and evidence folders that no discovery owned: `reattached` folders
 were given back to the discovery they were merged into (found from the journal's merge alias
@@ -5233,8 +5238,11 @@ which can take up to 10 min and end `no-signal`; and the job's remaining wait co
 At the default 15 s, a repeat joins for the first 1.5 s, so a client retry starts nothing
 and still gets at least 13.5 s of listening; a job that has its signal and is running
 trials joins at any time, unless a gated timeout will cut them first. A later request is a new job with
-its own full wait. If another job holds the probe slot, its runs queue for up to 3 s, then
-end `skipped-budget` (`could-not-test`, `why: "budget"`). A running job with no
+its own full wait. If another job holds the probe slot, or the CPU budget (engines and probes;
+recordings and analog trials do not hold identify back) has no room, its runs queue for up to 3 s, then end `skipped-budget`
+(`could-not-test`, `why: "budget"`); the core log names which (`slot-busy`, `cpu-budget`,
+`cpu-guard`). A run whose slot is being freed for it (a probe it preempted is still stopping)
+waits up to 8 s from its request instead, since a decoder can take 5 s to stop. A running job with no
 `protocols` contains a named one only once its plan holds a runnable trial for it. A
 finished job or a finished target never joins, and `target.all` never does. An epoch change preserves an
 established single-target deadline; collected `all` targets may receive a

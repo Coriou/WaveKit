@@ -203,8 +203,19 @@ export const IDENTIFY_MAX_ALIVE_JOBS = 8
  * voice assistant asking twice) and gets at least 13 500 ms; later it is a new job.
  */
 export const IDENTIFY_JOIN_COVERED_FRACTION = 0.9
-/** A run that gets no probe slot within this time is reported `skipped-budget`. */
+/**
+ * A run that gets no probe slot within this time is reported `skipped-budget`, unless the pool is
+ * already freeing a slot for it (a probe preempted for it still stopping): that run waits for the
+ * slot, since a real decoder may take up to its 5 s graceful stop to exit, up to
+ * IDENTIFY_SLOT_FREEING_MAX_MS.
+ */
 export const IDENTIFY_QUEUE_WAIT_MS = 3000
+/**
+ * The longest a queued run waits, from its request, for a slot the pool is freeing: the 5 s graceful
+ * decoder stop (base-decoder GRACEFUL_STOP_TIMEOUT, then SIGKILL) plus 3 s for the kill, the exit and the
+ * channel release. A stop that never ends cannot hold the run longer; it is then `skipped-budget`.
+ */
+export const IDENTIFY_SLOT_FREEING_MAX_MS = 8000
 /** Trials are planned once the track has 300 ms of envelope at 50 ms blocks (the § 6.2 ACF test), or closed. */
 export const IDENTIFY_SETTLE_BLOCKS = 6
 export const IDENTIFY_MIN_TOLERANCE_HZ = 1000
@@ -448,6 +459,37 @@ export function identifyRequestJoins(
  * What is left of a running job's wait for a new request to compare, or null when there is no wait
  * left to compare: the job has its signal and its trials are bounded by their holds.
  */
+type QueuedDeferral = NonNullable<ReturnType<ProbePool["queuedDeferral"]>>
+/**
+ * Why a queued identify run ended `skipped-budget`: `slot-busy`, another job holds the probe slot it
+ * needs; `cpu-budget`, the core estimate (probes, engines, recordings and analog trials) leaves no room
+ * for it; `cpu-guard`, measured CPU is over the guard; `slot-still-freeing`, a stop freeing its slot ran
+ * past IDENTIFY_SLOT_FREEING_MAX_MS; `unknown`, the pool could not say.
+ */
+export type IdentifyQueueSkipWhy =
+	| "slot-busy"
+	| "cpu-budget"
+	| "cpu-guard"
+	| "slot-still-freeing"
+	| "unknown"
+
+export function identifyQueueSkipWhy(
+	deferral: QueuedDeferral["deferral"] | null,
+	freeing: boolean,
+): IdentifyQueueSkipWhy {
+	if (freeing) return "slot-still-freeing"
+	switch (deferral) {
+		case "max-probes":
+			return "slot-busy"
+		case "budget":
+			return "cpu-budget"
+		case "cpu":
+			return "cpu-guard"
+		case null:
+			return "unknown"
+	}
+}
+
 export type IdentifyWaitLeft = {
 	ms: number
 	/** Still waiting for a gated transmission (`waitUntilSignal`), so `ms` compares with `waitMs`. */
@@ -1506,6 +1548,7 @@ export interface IdentifyDeps {
 		| "on"
 		| "off"
 	> &
+		Partial<Pick<ProbePool, "slotFreeing" | "queuedDeferral">> &
 		ProbeUnavailableMemo
 	engine: (sourceId: string) => { currentEpoch(): EngineEpoch } | undefined
 	/**
@@ -2549,6 +2592,12 @@ export class IdentifyRunner implements JobDriver {
 				continue
 			}
 			if (r.queuedUntil !== null && now >= r.queuedUntil) {
+				const freeingCapped =
+					now >=
+					r.queuedUntil - IDENTIFY_QUEUE_WAIT_MS + IDENTIFY_SLOT_FREEING_MAX_MS
+				const freeing = this.slotFreeing(r)
+				if (freeing && !freeingCapped) continue
+				this.logSkipped(r, freeing, now)
 				this.deps.probes.dequeue(r.req)
 				t.active.splice(t.active.indexOf(r), 1)
 				this.setTrials(t, r.runIndex, () => "skipped-budget")
@@ -4171,6 +4220,53 @@ export class IdentifyRunner implements JobDriver {
 		} finally {
 			this.requesting = false
 		}
+	}
+
+	/**
+	 * A queued run whose slot the pool is already freeing (a probe preempted for it is still tearing
+	 * down) waits for that slot past IDENTIFY_QUEUE_WAIT_MS: the teardown ends by itself, and a real
+	 * decoder may take longer than the queue wait to stop. A pool without the query, or one that
+	 * throws, frees nothing (the run is skipped as before).
+	 */
+	private slotFreeing(r: RunState): boolean {
+		const freeing = this.deps.probes.slotFreeing
+		if (!freeing) return false
+		try {
+			return freeing.call(this.deps.probes, r.req) === true
+		} catch {
+			return false
+		}
+	}
+
+	/**
+	 * A queued run is given up: logs the real reason (identifyQueueSkipWhy) with the pool's core
+	 * estimate, so a `budget` verdict can be told apart from a held slot or the CPU guard.
+	 */
+	private logSkipped(r: RunState, freeing: boolean, now: number): void {
+		let deferral: QueuedDeferral | null = null
+		try {
+			deferral = this.deps.probes.queuedDeferral?.(r.req) ?? null
+		} catch {
+			deferral = null
+		}
+		const queuedMs =
+			r.queuedUntil === null ? 0 : now - r.queuedUntil + IDENTIFY_QUEUE_WAIT_MS
+		this.log.info(
+			{
+				decoder: r.run.mode.decoderType,
+				protocols: r.run.protocols,
+				why: identifyQueueSkipWhy(deferral?.deferral ?? null, freeing),
+				queuedMs,
+				...(deferral
+					? {
+							estimatedCores: deferral.estimatedCores,
+							externalCores: deferral.externalCores,
+							budgetCores: deferral.budgetCores,
+						}
+					: {}),
+			},
+			"Identify run skipped: no probe slot",
+		)
 	}
 
 	private releaseRuns(runs: readonly RunState[]): void {

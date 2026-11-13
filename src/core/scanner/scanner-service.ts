@@ -2298,7 +2298,9 @@ export class ScannerService extends EventEmitter {
 				cpuBudgetCores: s.cpuBudgetCores,
 				cpuCoresInUse:
 					this.spectrum.sourceIds().length * CPU_COST.engine +
-					probes.reduce((sum, p) => sum + p.cores, 0),
+					probes.reduce((sum, p) => sum + p.cores, 0) +
+					// Recordings and analog trials hold cores in the same budget (reserveExternal).
+					this.probes.externalCoresInUse(),
 				maxProbes: { offset: s.maxProbes.offset, channel: s.maxProbes.channel },
 				probesInUse: {
 					offset: probes.filter(p => p.transport === "offset").length,

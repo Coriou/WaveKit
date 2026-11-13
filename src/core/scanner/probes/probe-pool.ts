@@ -868,6 +868,64 @@ export class ProbePool extends EventEmitter {
 		return this.queue.length < before
 	}
 
+	/**
+	 * Whether a slot is already being freed for this queued request: it is still queued and a probe
+	 * whose slot it could use is tearing down (a probe preempted for it, or the previous run of the
+	 * same job). That teardown ends by itself: a decoder stop has its own kill fallback, and a failed
+	 * cleanup seals the pool, which empties the queue. pump() runs the queue when it ends. A mode
+	 * step keeps its slot, so it frees nothing. False for anything not queued.
+	 */
+	slotFreeing(req: ProbeRequest): boolean {
+		if (this.destroyed || !this.queue.includes(req)) return false
+		const ctx = this.liveOrReplayContext(req)
+		const first = (req.modes ?? probeModesFor(req.cls, req.protocols))[0]
+		if (!ctx || !first) return false
+		const replaying = req.replay !== undefined
+		const kinds = new Set(
+			this.deps.transports
+				.filter(
+					t => (t.kind === "replay") === replaying && t.supports(first, ctx),
+				)
+				.map(t => t.kind),
+		)
+		return [...this.records.values()].some(
+			r => r.state === "stopping" && !r.stepping && kinds.has(r.transport.kind),
+		)
+	}
+
+	/**
+	 * Why a queued request still waits, from the check pump() makes: `max-probes` (the slots of the
+	 * transports it can use are held), `budget` (the core estimate leaves no room: for a job probe
+	 * external reservations such as recordings and analog trials included; for identify engines and
+	 * probes only), `cpu` (the CPU guard). With the core estimate behind it. Null for anything not
+	 * queued, or once it would start.
+	 */
+	queuedDeferral(req: ProbeRequest): {
+		deferral: "max-probes" | "budget" | "cpu"
+		estimatedCores: number
+		externalCores: number
+		budgetCores: number
+	} | null {
+		if (this.destroyed || !this.queue.includes(req)) return null
+		const ctx = this.liveOrReplayContext(req)
+		const first = (req.modes ?? probeModesFor(req.cls, req.protocols))[0]
+		if (!ctx || !first) return null
+		const pick = this.pickTransport(first, ctx)
+		if (
+			!("deferred" in pick) ||
+			(pick.deferred !== "max-probes" &&
+				pick.deferred !== "budget" &&
+				pick.deferred !== "cpu")
+		)
+			return null
+		return {
+			deferral: pick.deferred,
+			estimatedCores: this.estimatedCores(),
+			externalCores: this.externalCores,
+			budgetCores: this.deps.settings().cpuBudgetCores,
+		}
+	}
+
 	async onEpoch(
 		sourceId: string,
 		epoch: number,
@@ -1152,8 +1210,10 @@ export class ProbePool extends EventEmitter {
 	// Hold `cores` against the same budget probe admission uses. Null when
 	// the pool is destroyed, `cores` is not a finite non-negative number,
 	// `settings()` throws or has a non-finite budget, or the reservation
-	// would exceed `cpuBudgetCores`. Zero returns a no-op release. Release is
-	// idempotent and never drives the counter negative.
+	// would exceed `cpuBudgetCores` (also while an identify probe holds the
+	// estimate over it: pickTransport admits identify against engines and
+	// probes only, so new reservations wait for it). Zero returns a no-op
+	// release. Release is idempotent and never drives the counter negative.
 	reserveExternal(cores: number): (() => void) | null {
 		if (this.destroyed) return null
 		if (!Number.isFinite(cores) || cores < 0) return null
@@ -1176,9 +1236,22 @@ export class ProbePool extends EventEmitter {
 	}
 
 	private estimatedCores(): number {
-		let cores = this.deps.engineCount() * CPU_COST.engine + this.externalCores
+		return this.ownCores() + this.externalCores
+	}
+
+	/** Engines and probes: the estimate without external reservations. */
+	private ownCores(): number {
+		let cores = this.deps.engineCount() * CPU_COST.engine
 		for (const r of this.records.values()) cores += r.cores
 		return cores
+	}
+
+	/**
+	 * Cores held by reserveExternal (wideband recordings, analog trials), for the status estimate
+	 * (`budgets.cpuCoresInUse`).
+	 */
+	externalCoresInUse(): number {
+		return this.externalCores
 	}
 
 	private pickTransport(
@@ -1199,10 +1272,15 @@ export class ProbePool extends EventEmitter {
 				reason ??= "max-probes"
 				continue
 			}
-			if (
-				this.estimatedCores() + transport.cores(mode.decoderType) >
-				s.cpuBudgetCores + 1e-9
-			) {
+			// Identify (priority above 100, a user request) is not starved by background recordings
+			// and analog trials: its probe counts against engines and probes only. Reservations already
+			// held go on (a recording in progress is never cut); while the estimate is over the budget
+			// reserveExternal refuses new ones, so recordings yield until identify's probes end. The
+			// overshoot is bounded: external reservations each fit the budget when made, so the estimate
+			// stays <= cpuBudgetCores + identify's own probe cores (maxProbes.offset x 0.5 offset).
+			const held =
+				ctx.req.priority > 100 ? this.ownCores() : this.estimatedCores()
+			if (held + transport.cores(mode.decoderType) > s.cpuBudgetCores + 1e-9) {
 				reason ??= "budget"
 				continue
 			}
