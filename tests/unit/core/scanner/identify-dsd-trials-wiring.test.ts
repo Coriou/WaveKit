@@ -45,10 +45,15 @@ interface Internals {
 	spectrum: { engine(id: string): { currentEpoch(): { epoch: number } } }
 }
 
-async function run(opts: {
-	holderPriority: number
-	stopMs: number
-}): Promise<{ trials: ScannerIdentifyTrial[]; elapsedMs: number }> {
+async function run(opts: { holderPriority: number; stopMs: number }): Promise<{
+	trials: ScannerIdentifyTrial[]
+	elapsedMs: number
+	/**
+	 * The dmr trial's outcome when the first slow decoder stop ended (null: no trial yet), or
+	 * undefined while no stop has ended: what came first, without a wall-clock bound.
+	 */
+	dmrAtStopEnd: string | null | undefined
+}> {
 	const h = serviceHarness({ decoderConfigs: [ambientDsd] })
 	await h.service.start()
 	const rng = mulberry32(7)
@@ -60,6 +65,12 @@ async function run(opts: {
 		)
 		h.fanout.write(Buffer.from(packCu8(iq.re, iq.im)))
 	}
+	let jobId: string | null = null
+	let dmrAtStopEnd: string | null | undefined
+	const trials = (): ScannerIdentifyTrial[] =>
+		jobId === null
+			? []
+			: (h.service.getJob(jobId)?.identify?.targets[0]?.trials ?? [])
 	try {
 		for (let i = 0; i < 20; i++) {
 			feed()
@@ -72,6 +83,8 @@ async function run(opts: {
 		const remove = decoders.removeEphemeralDecoder.bind(h.decoders)
 		decoders.removeEphemeralDecoder = async (id: string) => {
 			await tick(opts.stopMs)
+			if (dmrAtStopEnd === undefined)
+				dmrAtStopEnd = trials().find(t => t.protocol === "dmr")?.outcome ?? null
 			await remove(id)
 		}
 		const svc = h.service as unknown as Internals
@@ -95,15 +108,14 @@ async function run(opts: {
 			}),
 		).toHaveProperty("started")
 		expect(h.service.status().budgets.probesInUse.offset).toBe(1)
-		const startedAt = Date.now()
+		const startedAt = performance.now()
 		const job = await h.service.identify({
 			sourceId: "rtl",
 			target: { frequencyHz: CENTRE + OFFSET_HZ },
 			timeoutMs: 30_000,
 			record: false,
 		})
-		const trials = (): ScannerIdentifyTrial[] =>
-			h.service.getJob(job.id)?.identify?.targets[0]?.trials ?? []
+		jobId = job.id
 		// Until the auto run has left the queue (started or skipped).
 		for (let i = 0; i < 400; i++) {
 			feed()
@@ -111,7 +123,11 @@ async function run(opts: {
 			const dmr = trials().find(t => t.protocol === "dmr")
 			if (dmr && dmr.outcome !== "pending") break
 		}
-		return { trials: trials(), elapsedMs: Date.now() - startedAt }
+		return {
+			trials: trials(),
+			elapsedMs: performance.now() - startedAt,
+			dmrAtStopEnd,
+		}
 	} finally {
 		await h.service.stop()
 	}
@@ -143,16 +159,19 @@ describe("identify dsd-fme trials on a continuous 4FSK signal (real wiring)", ()
 	}, 120_000)
 
 	it("a stop that outlasts the bound: the run waits IDENTIFY_SLOT_FREEING_MAX_MS, no longer, then is skipped", async () => {
-		const { trials, elapsedMs } = await run({
+		const { trials, elapsedMs, dmrAtStopEnd } = await run({
 			holderPriority: 50,
 			stopMs: IDENTIFY_SLOT_FREEING_MAX_MS + 3000,
 		})
 		const auto = trials.filter(t => AUTO.includes(t.protocol))
 		expect(auto).toHaveLength(AUTO.length)
 		for (const t of auto) expect(t.outcome).toBe("skipped-budget")
-		// Queued after the job started; skipped once the bound passed, well before the stop ends.
+		// Queued after the job started, skipped once the bound passed (real time only moves on,
+		// so a slow runner cannot fail this) and before the stop ended: an ordering, not a
+		// wall-clock upper bound (the bound itself is pinned with a fake clock in
+		// probe-pool-slot-freeing.test.ts).
 		expect(elapsedMs).toBeGreaterThanOrEqual(IDENTIFY_SLOT_FREEING_MAX_MS)
-		expect(elapsedMs).toBeLessThan(IDENTIFY_SLOT_FREEING_MAX_MS + 3000)
+		expect([undefined, "skipped-budget"]).toContain(dmrAtStopEnd)
 	}, 120_000)
 })
 

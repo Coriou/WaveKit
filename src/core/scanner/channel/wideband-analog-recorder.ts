@@ -40,7 +40,12 @@
  * discards or refuses (weak or low-deviation NFM voice can read as a digital class for its whole
  * length). A joined observation with such evidence (another signal on the channel) ends the
  * session at the join, its file no later than the joined track's start: the files before it are
- * kept. A decode that arrives after a file's finish was asked does not discard that file.
+ * kept, only the joined observation is refused, and an owner still on the air goes on in a new
+ * session from there (endAtJoin). An own veto never discards a joined analog-fm voice with the
+ * owner's part (ownVeto): one that started after the owner's track closed restarts in its own
+ * session from its onset while it is on the air and the ring holds it (splitAtVoice), and one
+ * that cannot be separated is kept whole. A decode that arrives after a file's finish was asked
+ * does not discard that file.
  */
 import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
@@ -921,6 +926,23 @@ interface Session {
 	 * decode of one still names it (decodeVeto); at most WIDEBAND_JOINS_KEPT, oldest dropped.
 	 */
 	readonly joins: Map<string, number>
+	/**
+	 * Joined observations (never the owner) a snapshot classed analog-fm: another transmission's
+	 * voice in this session, which an own veto (ownVeto) never discards with the owner's part. At
+	 * most WIDEBAND_JOINS_KEPT, oldest dropped.
+	 */
+	readonly joinedVoice: Set<string>
+	/**
+	 * The owner's track closed: its last sample (closed spans leave `activity` once judged);
+	 * null while it is open.
+	 */
+	ownerClosedAt: number | null
+	/**
+	 * The end its channel remembers when it is disposed (recentEnds, the next session's pre-roll
+	 * floor), clamped to [from, to]; null: the segmenter's previous end as is. Set by a split at a
+	 * joined voice (splitAtVoice): the restarted voice's file starts past the owner's part only.
+	 */
+	endWithin: { readonly from: number; readonly to: number } | null
 	/** Newest sample a joined track was reported on. */
 	lastActive: number
 	readonly groupDelay: number
@@ -1081,6 +1103,39 @@ function countSnapshot(
  * session ends at that join, the voice before it is kept).
  */
 type Veto = null | "own" | { readonly joined: string }
+
+/**
+ * What an own veto of a session does (ownVeto): `refuse`, no joined voice, the whole session is
+ * discarded; `split`, every joined voice started after the owner's track closed: the owner's part
+ * (up to `at`, the first such voice's start) is discarded and the voice restarts in its own
+ * session (`restart`, splitAtVoice) when it is still on the air and the ring still holds its
+ * start, else it is kept whole with the owner's part (a file ending by `at` holds only the
+ * owner's part and still goes); `keep`, a joined voice overlaps the owner (or its owner's span is
+ * unknown): not separable, the voice is kept whole.
+ */
+type OwnVeto =
+	| { readonly kind: "refuse" }
+	| { readonly kind: "keep" }
+	| OwnVetoSplit
+
+/** OwnVeto's `split`. */
+interface OwnVetoSplit {
+	readonly kind: "split"
+	readonly at: number
+	readonly ownerLast: number
+	readonly restart: boolean
+}
+
+/** A snapshot of joined `observationId` classed `s` analog-fm (Session.joinedVoice). */
+function noteJoinedVoice(s: Session, observationId: string): void {
+	if (observationId === s.owner) return
+	s.joinedVoice.delete(observationId)
+	s.joinedVoice.add(observationId)
+	if (s.joinedVoice.size > WIDEBAND_JOINS_KEPT) {
+		const oldest = s.joinedVoice.values().next()
+		if (oldest.done !== true) s.joinedVoice.delete(oldest.value)
+	}
+}
 
 /** `d` was decoded at or after `from` (wall ms); an unknown time never was. */
 function decodedSince(d: DecodedLabel, from: number): boolean {
@@ -1357,10 +1412,11 @@ export class WidebandAnalogRecorder {
 			!s.qualified ||
 			countSnapshot(s, track, barred).bar !== null ||
 			classVetoes(s, { ...info, discoveryId: null }) ||
-			this.ownerVeto(
+			(this.ownerVeto(
 				s,
 				observationId === s.owner ? { ...info, discoveryId: null } : undefined,
-			) === "own"
+			) === "own" &&
+				this.ownVetoEnds(s))
 		)
 			return this.revoke(observationId)
 		rememberWaiver(this.waived, observationId, s.toneOnly)
@@ -1622,6 +1678,12 @@ export class WidebandAnalogRecorder {
 		}
 		this.byObservation.delete(observationId)
 		const parked = this.parked.get(id)
+		const session = parked ?? this.sessions.get(id)
+		if (session !== undefined && observationId === session.owner)
+			session.ownerClosedAt = Math.max(
+				track.lastSample,
+				session.activity.get(observationId)?.last ?? Number.NEGATIVE_INFINITY,
+			)
 		if (parked) {
 			this.updateParked(
 				parked,
@@ -1735,6 +1797,7 @@ export class WidebandAnalogRecorder {
 		if (info.analogFm) {
 			if (s.toneOnly) this.classedBySnapshot(s, observationId)
 			s.toneOnly = false
+			noteJoinedVoice(s, observationId)
 			if (!s.classed) {
 				s.classed = true
 				this.decide(s, "classed")
@@ -1745,10 +1808,17 @@ export class WidebandAnalogRecorder {
 		}
 		const veto = this.ownerVeto(s, observationId === s.owner ? info : undefined)
 		if (veto === "own") {
-			this.refuse(s, "discarded:not-analog", true)
-			return false
-		}
-		if (veto !== null) {
+			const own = this.ownVeto(s)
+			if (own.kind === "refuse") {
+				this.refuse(s, "discarded:not-analog", true)
+				return false
+			}
+			if (own.kind === "split" && own.restart) {
+				this.splitAtVoice(s, own)
+				return false
+			}
+			// A joined voice the owner's part cannot be cut from: kept whole (fails toward voice).
+		} else if (veto !== null) {
 			this.endAtJoin(s, veto.joined, info.discoveryId)
 			return false
 		}
@@ -1784,6 +1854,69 @@ export class WidebandAnalogRecorder {
 		)
 			return veto
 		return this.decodeVeto(s, info.discoveryId)
+	}
+
+	/**
+	 * What an own veto of `s` does (OwnVeto). Reads only. The voice of a joined other transmission
+	 * (a turnaround in the hang after a short digital burst) is never discarded with the owner's
+	 * part: separable when every joined voice's track starts after the owner's closed track's last
+	 * sample; a restart needs the session live and not parked, the first such voice's track open,
+	 * and its start within the ring's reach (Session.maxBacklog) so its new file loses no head.
+	 */
+	private ownVeto(s: Session): OwnVeto {
+		if (s.joinedVoice.size === 0) return { kind: "refuse" }
+		const ownerLast = s.ownerClosedAt
+		if (ownerLast === null) return { kind: "keep" }
+		let at = Number.POSITIVE_INFINITY
+		let first: string | null = null
+		for (const id of s.joinedVoice) {
+			const start = Math.min(
+				s.joins.get(id) ?? Number.POSITIVE_INFINITY,
+				s.activity.get(id)?.start ?? Number.POSITIVE_INFINITY,
+			)
+			if (!Number.isFinite(start) || start <= ownerLast) return { kind: "keep" }
+			if (start < at) {
+				at = start
+				first = id
+			}
+		}
+		const voice = first === null ? undefined : s.activity.get(first)
+		const restart =
+			!s.done &&
+			!this.parked.has(s.id) &&
+			voice?.open === true &&
+			s.engine.liveEdge() - at <= s.maxBacklog
+		return { kind: "split", at, ownerLast, restart }
+	}
+
+	/** An own veto of `s` ends it (refuse, or a split that restarts the joined voice). Reads only. */
+	private ownVetoEnds(s: Session): boolean {
+		const own = this.ownVeto(s)
+		return own.kind === "refuse" || (own.kind === "split" && own.restart)
+	}
+
+	/**
+	 * An own veto of `s` with a separable joined voice still on the air (ownVeto `split` with
+	 * `restart`): every file of the session is discarded (`discarded:not-analog`, the owner's
+	 * decision) and the owner's observations up to the voice are refused, but the observations
+	 * that joined at or after the voice's start are not: the voice's next snapshot starts its own
+	 * session, whose file reads the ring back from the voice's onset (its pre-roll floored past
+	 * the owner's last sample, Session.endWithin), so nothing of the owner's part is in it.
+	 */
+	private splitAtVoice(
+		s: Session,
+		own: { readonly at: number; readonly ownerLast: number },
+	): void {
+		const voice: string[] = []
+		for (const id of s.observations)
+			if (
+				id !== s.owner &&
+				(s.joins.get(id) ?? Number.NEGATIVE_INFINITY) >= own.at
+			)
+				voice.push(id)
+		s.endWithin = { from: own.ownerLast, to: own.at }
+		this.refuse(s, "discarded:not-analog", true)
+		for (const id of voice) this.refused.delete(id)
 	}
 
 	/**
@@ -1856,15 +1989,17 @@ export class WidebandAnalogRecorder {
 	/**
 	 * A joined observation that is no analog voice (joinedNotVoice, decodeVeto) ends the session
 	 * at the join: what it recorded before stays (its current file ends no later than the joined
-	 * track's start, then is finished and checked as usual), none of its observations is tried
-	 * again, and the joined one is refused (`refused:not-analog`).
+	 * track's start, then is finished and checked as usual), and only the joined one is refused
+	 * (`refused:not-analog`). The session's other observations still on the air are not: the
+	 * owner's next snapshot (a voice going on past the join) starts a new session, whose file
+	 * starts where the kept file ended (past the joined signal's end once it closed, its pre-roll
+	 * floored by recentEnds) and holds whatever of the joined signal overlaps the voice after that.
 	 */
 	private endAtJoin(
 		s: Session,
 		observationId: string,
 		discoveryId: string | null,
 	): void {
-		for (const id of s.observations) remember(this.refused, id)
 		remember(this.refused, observationId)
 		this.decisions.note("refused:not-analog", {
 			sourceId: s.sourceId,
@@ -1872,16 +2007,38 @@ export class WidebandAnalogRecorder {
 			discoveryId,
 		})
 		const span = s.activity.get(observationId)
-		this.endSession(
-			s,
-			"cancelled",
-			s.joins.get(observationId) ?? span?.start,
+		const joinedAt = s.joins.get(observationId) ?? span?.start
+		const joinedLast =
 			span === undefined
 				? Number.NEGATIVE_INFINITY
 				: span.open
 					? Number.POSITIVE_INFINITY
-					: span.last,
+					: span.last
+		const file = s.file
+		this.endSession(s, "cancelled", joinedAt, joinedLast)
+		// A continuation never repeats the kept file's audio, nor a joined signal that has ended.
+		// A dropped file (empty, or opened inside the joined signal) ends where it started.
+		const kept =
+			file === null
+				? Number.NEGATIVE_INFINITY
+				: file.failed
+					? file.startSample
+					: (file.endSample ?? file.startSample)
+		const floor = Math.max(
+			kept,
+			joinedAt ?? Number.NEGATIVE_INFINITY,
+			Number.isFinite(joinedLast) ? joinedLast : Number.NEGATIVE_INFINITY,
 		)
+		if (Number.isFinite(floor)) {
+			this.recentEnds.push({
+				sourceId: s.sourceId,
+				stream: s.stream,
+				epoch: s.epoch,
+				hz: s.targetHz,
+				end: floor,
+			})
+			if (this.recentEnds.length > RECENT_ENDS) this.recentEnds.shift()
+		}
 	}
 
 	/** `discoveryId`'s (or its merge owner's) decoded label when it is not analog voice. */
@@ -2388,6 +2545,9 @@ export class WidebandAnalogRecorder {
 			vetoFrom:
 				track.startSample - Math.round(Math.max(0, settings.preRollMs) * perMs),
 			joins: new Map(),
+			joinedVoice: new Set(),
+			ownerClosedAt: null,
+			endWithin: null,
 			lastActive: track.lastSample,
 			groupDelay: chain.groupDelaySeconds(fs) * 48_000,
 			next: 0,
@@ -3611,6 +3771,7 @@ export class WidebandAnalogRecorder {
 			if (info.analogFm) {
 				if (s.toneOnly) this.classedBySnapshot(s, observationId)
 				s.toneOnly = false
+				noteJoinedVoice(s, observationId)
 				if (!s.classed) {
 					s.classed = true
 					this.decide(s, "classed")
@@ -3619,9 +3780,11 @@ export class WidebandAnalogRecorder {
 				this.dropParked(s, true, "discarded:not-analog")
 				return
 			}
+			// A parked session cannot restart a joined voice (its epoch is over): one is kept whole.
 			if (
 				this.ownerVeto(s, observationId === s.owner ? info : undefined) ===
-				"own"
+					"own" &&
+				this.ownVeto(s).kind === "refuse"
 			) {
 				this.dropParked(s, true, "discarded:not-analog")
 				return
@@ -3703,13 +3866,27 @@ export class WidebandAnalogRecorder {
 			!file.finishAsked &&
 			this.ownerVeto(s, undefined) === "own"
 		) {
-			if (!s.done) {
+			// A joined voice is never discarded with the owner's part (ownVeto).
+			const own = this.ownVeto(s)
+			if (own.kind === "split" && own.restart) {
+				this.splitAtVoice(s, own)
+				return
+			}
+			if (own.kind === "refuse" && !s.done) {
 				// Every file of the live session goes (refuse cancels this one too).
 				this.refuse(s, "discarded:not-analog", true)
 				return
 			}
-			this.endFile(s, file, "discarded:not-analog")
-			file.failed = true
+			// Only the owner's part (ended by the first separable voice's start): this file goes.
+			if (
+				own.kind === "refuse" ||
+				(own.kind === "split" &&
+					file.endSample !== null &&
+					file.endSample <= own.at)
+			) {
+				this.endFile(s, file, "discarded:not-analog")
+				file.failed = true
+			}
 		}
 		if (file.failed) {
 			this.fileLost(s)
@@ -3858,7 +4035,11 @@ export class WidebandAnalogRecorder {
 		if (!keepMappings)
 			for (const id of s.observations)
 				if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
-		const end = s.seg.previousEnd
+		const w = s.endWithin
+		const end =
+			w === null
+				? s.seg.previousEnd
+				: Math.max(w.from, Math.min(s.seg.previousEnd, w.to))
 		if (Number.isFinite(end)) {
 			this.recentEnds.push({
 				sourceId: s.sourceId,
