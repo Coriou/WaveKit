@@ -110,6 +110,8 @@ type HostMode =
 async function startFakeSdrHost(localPort: () => number | null) {
 	let mode: HostMode = "free"
 	let listAge = 0
+	/** When the served list was taken (performance.now()): it ages with every answer, as a real cache does. */
+	let listTakenAt = performance.now()
 	/** While held, answers wait (a slow poll): `release` sends them in the mode of that time. */
 	let held: (() => void)[] | null = null
 	const server = http.createServer((req, res) => {
@@ -154,7 +156,12 @@ async function startFakeSdrHost(localPort: () => number | null) {
 						clientDetails: details,
 					},
 				},
-				sampling: { stats: { state: "ok", ageMs: listAge } },
+				sampling: {
+					stats: {
+						state: "ok",
+						ageMs: Math.round(listAge + performance.now() - listTakenAt),
+					},
+				},
 			}),
 		)
 	}
@@ -165,6 +172,7 @@ async function startFakeSdrHost(localPort: () => number | null) {
 		setMode: (m: HostMode, age = 0) => {
 			mode = m
 			listAge = age
+			listTakenAt = performance.now()
 		},
 		hold: () => {
 			held ??= []
