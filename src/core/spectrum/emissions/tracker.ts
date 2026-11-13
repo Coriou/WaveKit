@@ -671,7 +671,10 @@ export class Tracker {
 		t.maxWidthBins = 0
 		t.spectrum.reset()
 		t.spanRestart = true
-		t.measuredFrom = at.sample
+		// Where accumulation restarts: the request's block, or the next one when a later block was
+		// already accumulated (a thread host delivers the request late), so `measuredFromSample`
+		// never names a block whose samples the restarted measurement does not hold.
+		t.measuredFrom = Math.max(at.sample, this.blockEndSample)
 	}
 
 	/**

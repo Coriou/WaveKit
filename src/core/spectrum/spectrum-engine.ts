@@ -142,6 +142,14 @@ export interface EngineEpoch {
 	 */
 	trustedFromSample?: number | null
 	/**
+	 * In `currentEpoch()` only: the newest trusted run of this epoch that ended (its first sample
+	 * `from`, the `trustedFromSample` it was read with, and `end`, the first sample after it: the
+	 * start of the block that read `unverified` or changed the label), null before any ended. A
+	 * consumer holding samples of run `from` keeps none at or past `end`, however late it sees the
+	 * run change.
+	 */
+	runEnd?: { from: number; end: number } | null
+	/**
 	 * On an `epoch-started` event only, never in `currentEpoch()`: the id its poster was given
 	 * (`allocateEpoch`) when the pipeline started it as another (it numbers a post
 	 * `max(id, last + 1)`, so an untracked epoch it started first moves it).
@@ -230,8 +238,9 @@ export type EngineLedger = Pick<
 	TuningLedger,
 	"trustAt" | "position" | "raiseDoubt" | "fieldState"
 > &
-	// Receipts feed the retune-delay measurement; a ledger without it measures nothing.
-	Partial<Pick<TuningLedger, "subscribe">>
+	// Receipts feed the retune-delay measurement; a ledger without it measures nothing. A
+	// detected scanner marker moves its hop's boundary earlier (lowerBoundary); without it, none.
+	Partial<Pick<TuningLedger, "subscribe" | "lowerBoundary">>
 
 /**
  * Tuning-ledger diagnostics. Since trust step 3 the ledger's label is the engine's only label, so
@@ -250,6 +259,17 @@ export interface EngineTrustShadow {
 	 * (retune-delay.ts): diagnostics for the settle, which it never changes.
 	 */
 	retuneDelay: RetuneDelayStatus
+	/**
+	 * Block summaries labelled `unverified`, by the first failing check: the engine's own
+	 * (`no-anchor`, `upstream-loss`, `before-session`, `no-stream-map`, `session-ended`,
+	 * `bad-range`, `no-ledger`, `no-epoch-record`, `value-mismatch`, `hop-receipt`) or the
+	 * ledger's (`settling`, `doubt`, `no-receipt`, ...). At most UNVERIFIED_REASONS keys.
+	 */
+	unverifiedBlocks: Record<string, number>
+	/** Bytes the absorber lost while anchored, by which the anchor was widened (upstreamLost). */
+	anchorWidenedBytes: number
+	/** Scanner hop boundaries a detected marker moved earlier (TuningLedger.lowerBoundary). */
+	markerBoundaries: number
 }
 
 export interface EngineTrustDisagreement {
@@ -276,9 +296,19 @@ interface LedgerAnchor {
 	session: number
 	oLow: number
 	oHigh: number
-	/** The absorber's lost bytes when anchored (bytes lost after it break the map). */
+	/**
+	 * The absorber's lost bytes when anchored or last widened: bytes lost after it make later
+	 * offered bytes sit further on in the session, so the anchor widens by them (upstreamLost).
+	 */
 	lost: number | null
 }
+
+/**
+ * Distinct `trustShadow.unverifiedBlocks` keys kept: the engine's ten codes and the ledger's
+ * thirteen UnverifiedReason codes are 23; 32 leaves room and bounds a stray code (counted as
+ * `other` once full).
+ */
+const UNVERIFIED_REASONS = 32
 
 /** A ledger read of a sample range: the verdict and where it was read (null: not mapped). */
 interface LedgerRead {
@@ -337,6 +367,8 @@ interface EpochRecord {
 	 */
 	trustedFrom: number | null
 	trustedLabel: TuningTrust
+	/** The newest trusted run of this epoch that ended (`currentEpoch().runEnd`), or null. */
+	runEnd: { from: number; end: number } | null
 }
 
 /**
@@ -598,6 +630,17 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private readonly epochRecords: EpochRecord[] = []
 	/** Scanner hop id → its frequency receipt seq, or null when it got none (HOP_RECEIPTS). */
 	private readonly hopReceipts = new Map<number, number | null>()
+	/**
+	 * A marker-settled hop epoch whose frequency receipt was not noted yet: its marker lowers the
+	 * receipt's boundary once noteHopReceipt names it (one at a time: the newest hop's).
+	 */
+	private markerPending: {
+		hop: number
+		stream: number
+		sample: number
+	} | null = null
+	/** Hop boundaries lowered by a detected marker (`trustShadow.markerBoundaries`). */
+	private markerBoundaries = 0
 	/** The label of the current epoch's newest block summary (currentEpoch()). */
 	private liveLabel: TuningTrust = "unverified"
 	/**
@@ -622,6 +665,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private lastTuningReceipt: { session: number; pos: number } | null = null
 	/** Block summaries labelled (status `trustShadow.agree`). */
 	private labelledBlocks = 0
+	/** Block summaries labelled `unverified`, by reason (`trustShadow.unverifiedBlocks`). */
+	private readonly unverifiedBlocks = new Map<string, number>()
+	/** Bytes the anchor was widened by for absorber loss (`trustShadow.anchorWidenedBytes`). */
+	private anchorWidenedBytes = 0
+	/** Why the current epoch's newest block reads `unverified` (labelReason), or null. */
+	private liveReason: string | null = null
 	/**
 	 * Streams posted to the host whose own `epoch-started` (settleMode "none")
 	 * has not arrived yet, in post order. A thread host can still deliver the
@@ -773,6 +822,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.openingStreams.length = 0
 		this.epochRecords.length = 0
 		this.hopReceipts.clear()
+		this.markerPending = null
 		this.liveLabel = "unverified"
 		this.newestLabel = null
 		this.measureRequests.clear()
@@ -887,6 +937,44 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		)
 		if (this.hopReceipts.size > HOP_RECEIPTS)
 			this.hopReceipts.delete(this.hopReceipts.keys().next().value as number)
+		const marker = this.markerPending
+		if (marker?.hop === epoch) {
+			this.markerPending = null
+			if (typeof seq === "number") this.lowerHopBoundary(marker, seq)
+		}
+	}
+
+	/**
+	 * A marker-settled hop epoch started at `sample` of `stream`: the hop's frequency frame took
+	 * effect by then (the marker bracket ends after it), so the ledger may trust the hop's blocks
+	 * from that sample on instead of the receipt plus the settle. The sample's position is taken
+	 * by its upper bound (a block is trusted only when its lowest possible position is past the
+	 * highest possible marker position); the ledger never lowers below the receipt itself.
+	 */
+	private lowerHopBoundary(
+		at: { stream: number; sample: number },
+		seq: number,
+	): void {
+		const ledger = this.ledger()
+		const anchor = this.ledgerAnchor
+		if (!ledger?.lowerBoundary || !anchor) return
+		if (this.upstreamLost(anchor)) return
+		const map = this.streamMaps.find(m => m.stream === at.stream)
+		if (!map || !Number.isFinite(map.oHigh0)) return
+		const live = ledger.position(this.sourceId)
+		if (!live || live.session !== anchor.session) return
+		const pos = Math.min(
+			live.pos,
+			map.oHigh0 + at.sample * map.bps - anchor.oLow,
+		)
+		try {
+			if (ledger.lowerBoundary(this.sourceId, anchor.session, seq, pos)) {
+				this.markerBoundaries += 1
+				this.newestLabel = null
+			}
+		} catch {
+			// A failing ledger lowers nothing: the settle boundary stands (fail closed).
+		}
 	}
 
 	/** `hop`: a scanner hop (submitEpoch); else an engine-posted DSP epoch (flushExternal). */
@@ -978,7 +1066,16 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			...this.current,
 			tuningTrust: this.liveLabel,
 			trustedFromSample: from,
+			runEnd: record?.runEnd ? { ...record.runEnd } : null,
 		}
+	}
+
+	/**
+	 * Why the current epoch's newest block summary reads `unverified` (a fixed code, see
+	 * `trustShadow.unverifiedBlocks`), or null while it is trusted or none was labelled yet.
+	 */
+	labelReason(): string | null {
+		return this.liveLabel === "unverified" ? this.liveReason : null
 	}
 
 	// === Consumers ===
@@ -1617,6 +1714,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					tuningTrust: "unverified",
 				}
 				if (ev.settleMode === "marker") this.marker = true
+				const markerHop =
+					ev.settleMode === "marker" && start?.hop === true ? start.key : null
 				const record: EpochRecord = {
 					stream: this.current.stream,
 					epoch: ev.epoch,
@@ -1625,8 +1724,19 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					hop: start?.hop === true ? start.key : null,
 					trustedFrom: null,
 					trustedLabel: "unverified",
+					runEnd: null,
 				}
 				this.rememberEpoch(record)
+				if (markerHop !== null) {
+					const at = {
+						hop: markerHop,
+						stream: record.stream,
+						sample: ev.startSample,
+					}
+					const seq = this.hopReceipts.get(markerHop)
+					if (typeof seq === "number") this.lowerHopBoundary(at, seq)
+					else if (seq === undefined) this.markerPending = at
+				}
 				this.liveLabel = "unverified"
 				// Openings and untracked epochs are not tuning events: no claim.
 				const claim =
@@ -1769,6 +1879,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			}
 		}
 		if (newest === "unverified") return "unverified"
+		// A restarted measurement with no whole block accumulated since (a track closing on the
+		// block its restart was asked at) measured nothing proven: its frequency is no claim.
+		if (
+			t.measuredFromSample !== undefined &&
+			t.lastSample - t.measuredFromSample < block
+		)
+			return "unverified"
 		const from = Math.max(t.startSample, t.measuredFromSample ?? t.startSample)
 		if (from >= newestFrom) return newest
 		const whole = this.stamp(record, from, t.lastSample)
@@ -2124,6 +2241,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			mismatch: 0,
 			disagreements: [],
 			retuneDelay: this.retuneDelay.status(),
+			unverifiedBlocks: Object.fromEntries(this.unverifiedBlocks),
+			anchorWidenedBytes: this.anchorWidenedBytes,
+			markerBoundaries: this.markerBoundaries,
 		}
 	}
 
@@ -2264,17 +2384,18 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const map = this.streamMaps.find(m => m.stream === summary.stream)
 		if (map) map.summarised = Math.max(map.summarised, summary.endSample)
 		const ledger = this.ledger()
+		const record = this.epochRecord(summary.stream, summary.epoch)
 		if (!ledger || !map || map.blockSamples === null) {
 			// Unverified like any other: the epoch's trusted run ends here.
-			const record = this.epochRecord(summary.stream, summary.epoch)
-			if (record !== null) {
-				record.trustedFrom = null
-				record.trustedLabel = "unverified"
-			}
-			this.noteBlockLabel(summary, "unverified")
+			const start = summary.endSample - (map?.blockSamples ?? 0)
+			if (record !== null) this.noteRun(record, "unverified", start)
+			this.noteBlockLabel(
+				summary,
+				"unverified",
+				!ledger ? "no-ledger" : "no-stream-map",
+			)
 			return "unverified"
 		}
-		const record = this.epochRecord(summary.stream, summary.epoch)
 		const read = this.ledgerRange(
 			ledger,
 			summary.stream,
@@ -2289,34 +2410,62 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				bins: summary.bins,
 				binHz: summary.binHz,
 			})
-		const trust =
+		const label =
 			record === null
-				? "unverified"
-				: this.labelOf(read, {
+				? { trust: "unverified" as const, reason: "no-epoch-record" }
+				: this.labelWithReason(read, {
 						centreHz: summary.centreHz,
 						sampleRateHz: summary.sampleRateHz,
 						hop: record.hop,
 					})
 		this.labelledBlocks += 1
-		if (record !== null) {
-			if (trust === "unverified") record.trustedFrom = null
-			else if (record.trustedFrom === null || record.trustedLabel !== trust)
-				record.trustedFrom = summary.endSample - map.blockSamples
-			record.trustedLabel = trust
-		}
-		this.noteBlockLabel(summary, trust)
-		return trust
+		if (record !== null)
+			this.noteRun(record, label.trust, summary.endSample - map.blockSamples)
+		this.noteBlockLabel(summary, label.trust, label.reason)
+		return label.trust
+	}
+
+	/**
+	 * A block starting at `start` labelled `trust`: the epoch's trusted run goes on, begins, or
+	 * ends there (`runEnd`: a block that reads `unverified` or changes the label ends the run).
+	 */
+	private noteRun(
+		record: EpochRecord,
+		trust: TuningTrust,
+		start: number,
+	): void {
+		const ends =
+			record.trustedFrom !== null &&
+			(trust === "unverified" || record.trustedLabel !== trust)
+		if (ends) record.runEnd = { from: record.trustedFrom!, end: start }
+		if (trust === "unverified") record.trustedFrom = null
+		else if (record.trustedFrom === null || record.trustedLabel !== trust)
+			record.trustedFrom = start
+		record.trustedLabel = trust
 	}
 
 	private noteBlockLabel(
 		summary: { stream: number; epoch: number },
 		trust: TuningTrust,
+		reason?: string,
 	): void {
+		if (trust === "unverified") {
+			let key = reason ?? "unknown"
+			// Bounded: once full, a code not seen yet is counted as `other`.
+			if (
+				!this.unverifiedBlocks.has(key) &&
+				this.unverifiedBlocks.size >= UNVERIFIED_REASONS - 1
+			)
+				key = "other"
+			this.unverifiedBlocks.set(key, (this.unverifiedBlocks.get(key) ?? 0) + 1)
+		}
 		if (
 			summary.stream === this.current.stream &&
 			summary.epoch === this.current.epoch
-		)
+		) {
 			this.liveLabel = trust
+			this.liveReason = trust === "unverified" ? (reason ?? "unknown") : null
+		}
 	}
 
 	/**
@@ -2338,16 +2487,25 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		read: LedgerRead,
 		claim: Pick<EpochRecord, "centreHz" | "sampleRateHz" | "hop">,
 	): TuningTrust {
+		return this.labelWithReason(read, claim).trust
+	}
+
+	/** labelOf with the first failing check when `unverified` (`trustShadow.unverifiedBlocks`). */
+	private labelWithReason(
+		read: LedgerRead,
+		claim: Pick<EpochRecord, "centreHz" | "sampleRateHz" | "hop">,
+	): { trust: TuningTrust; reason?: string } {
 		const v = read.verdict
-		if (v.trust === "unverified") return "unverified"
+		if (v.trust === "unverified")
+			return { trust: "unverified", reason: v.reason ?? "unknown" }
 		if (v.frequency !== claim.centreHz || v.sampleRate !== claim.sampleRateHz)
-			return "unverified"
+			return { trust: "unverified", reason: "value-mismatch" }
 		if (claim.hop !== null) {
 			const seq = this.hopReceipts.get(claim.hop)
 			if (typeof seq !== "number" || v.receipts?.frequency !== seq)
-				return "unverified"
+				return { trust: "unverified", reason: "hop-receipt" }
 		}
-		return v.trust
+		return { trust: v.trust }
 	}
 
 	/**
@@ -2482,12 +2640,25 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		)
 	}
 
-	/** Bytes the absorber lost since the anchor break the offered-byte map. */
+	/**
+	 * Bytes the absorber lost since the anchor: each lost byte puts every later offered byte one
+	 * position further on in the session, so the anchor widens by the loss (position 0 may sit
+	 * that much earlier in the offered bytes: `oLow` moves down, `oHigh` stays). Lower bounds stay
+	 * lower bounds and upper bounds grow by the loss, so the map stays fail closed and blocks after
+	 * the next proof are trusted again, without a reconnect. True (unmappable) only when the counter
+	 * went backwards or disappeared (a router reset: nothing known of the loss).
+	 */
 	private upstreamLost(anchor: LedgerAnchor): boolean {
 		if (anchor.lost === null) return false
 		const lost =
 			this.deps.routing.ingestCounters?.(this.sourceId)?.lostBytesTotal ?? null
-		return lost !== anchor.lost
+		if (lost === anchor.lost) return false
+		if (lost === null || lost < anchor.lost) return true
+		const delta = lost - anchor.lost
+		anchor.oLow -= delta
+		anchor.lost = lost
+		this.anchorWidenedBytes += delta
+		return false
 	}
 
 	/**

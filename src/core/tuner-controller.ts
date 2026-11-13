@@ -56,6 +56,8 @@ import type {
 	TunerLastTune,
 	TunerFieldProof,
 	TunerTuningProof,
+	TunerResumeOutcome,
+	TunerResumeReason,
 } from "@wavekit/api-types"
 
 /**
@@ -418,6 +420,25 @@ type AssertBlock =
 	| "external-control"
 	| "scanner-lease"
 	| "declared-write-off"
+
+/**
+ * Whether rtlmux serves this core's connection alone (TunerController.setReceiverClientsView):
+ * `receiver-free`, `another-client` or `clients-unknown` (TunerResumeReason).
+ */
+export interface ReceiverClientsVerdict {
+	free: boolean
+	reason: "receiver-free" | "another-client" | "clients-unknown"
+}
+
+/** TunerState.resumeOutcome messages: fixed text per reason. */
+const RESUME_MESSAGES: Readonly<Record<TunerResumeReason, string>> =
+	Object.freeze({
+		"receiver-free": "receiver free: tuning restored",
+		"another-client": "another client on the receiver: tuning left as found",
+		"clients-unknown": "receiver clients unknown: tuning left as found",
+		"relay-attached": "relay client attached: tuning left as found",
+		operator: "tuning taken back by the operator",
+	})
 
 /** The doubt reason of the spectrum engine's untracked-retune alarm (TunerTuningProof.assertFights). */
 const UNTRACKED_RETUNE_DOUBT = "untracked-retune"
@@ -1577,6 +1598,21 @@ export class TunerController extends EventEmitter {
 	 * Fields the user sets afterwards (API or relay) are accepted and replayed as usual.
 	 */
 	private plainResumeHold: Set<string> = new Set()
+	/**
+	 * The centre and rate accepted before a plain resume dropped them (synchronizeOnPlainResume),
+	 * on the receiver it resumed on: what a take-back writes (plainResumeTakesTuningBack, or
+	 * takeTuningBack) before the declared fallback. Gone with the hold.
+	 */
+	private plainResumeAccepted: Map<
+		string,
+		Partial<Record<GatedField, number>>
+	> = new Map()
+	/** Sources whose plain-resume hold the operator ended (takeTuningBack: resumeOutcome). */
+	private takenBack: Set<string> = new Set()
+	/** Whether rtlmux serves this core's connection alone (null: unknown, the hold stands). */
+	private receiverClients:
+		| ((sourceId: string) => ReceiverClientsVerdict)
+		| null = null
 	private acceptanceSeq = 0
 	/**
 	 * Intent: the last accepted (operator or relay) centre and rate per source, the value assert
@@ -1730,6 +1766,25 @@ export class TunerController extends EventEmitter {
 	}
 
 	/**
+	 * Whether rtlmux serves this core's connection alone (the sdr-host's client list): a plain
+	 * resume takes the tuning back only then (plainResumeTakesTuningBack). Null: always unknown.
+	 */
+	setReceiverClientsView(
+		view: ((sourceId: string) => ReceiverClientsVerdict) | null,
+	): void {
+		this.receiverClients = view
+	}
+
+	/**
+	 * A new reading of the receiver's clients (an sdr-host poll answered): under a plain resume's
+	 * hold, assert re-checks the source (the take-back may be due, or no longer) and the state is
+	 * published (resumeOutcome).
+	 */
+	noteReceiverClients(sourceId: string): void {
+		if (this.plainResumeHold.has(sourceId)) this.scheduleAssert(sourceId, true)
+	}
+
+	/**
 	 * A trigger of assert (relay client detached, scanner lease released): re-checks the source on
 	 * a later microtask. Writes only what the ledger says is unproven.
 	 */
@@ -1837,12 +1892,12 @@ export class TunerController extends EventEmitter {
 	 * accepted on the current connection is written, see synchronizeOnConnect), or the kill switch.
 	 */
 	private declaredBlock(sourceId: string): AssertBlock | null {
+		const hold = this.plainResumeHold.has(sourceId)
+		const takesBack = hold && this.plainResumeTakesTuningBack(sourceId)
+		if (hold && !takesBack) return "plain-resume"
 		if (
-			this.plainResumeHold.has(sourceId) &&
-			!this.plainResumeTakesTuningBack(sourceId)
-		)
-			return "plain-resume"
-		if (
+			// A plain resume that takes the tuning back behaves as a restore resume's session.
+			!takesBack &&
 			this.config.reconnectPolicy === "reset" &&
 			this.restoreResumeSession.get(sourceId) !==
 				this.ledger().position(sourceId)?.session
@@ -1855,17 +1910,123 @@ export class TunerController extends EventEmitter {
 
 	/**
 	 * The one decision of whether a plain resume's hold gives the receiver's tuning back to the
-	 * core: true would let the declared fallback write again while the hold stands. Consulted only
-	 * where the hold blocks the declared fallback (declaredBlock: assert's held value and the
-	 * proof's reason both read it). False today: a plain resume never fights another client.
+	 * core: then the plain resume behaves as a restore (assert writes the held centre and rate:
+	 * accepted before the resume, else declared; the kill switch still applies) and the configured
+	 * frames are written again. Consulted wherever the hold blocks a write (declaredBlock, so
+	 * assert's held value and the proof's reason; heldValue; writeConfiguredTuning). True only
+	 * while the receiver is free: rtlmux serves this core's connection alone (the sdr-host's
+	 * client list, fresh) and no relay client is attached. Anything unknown keeps the hold: a
+	 * plain resume never fights another client. Level-triggered: a client that shows up later
+	 * puts the hold back.
 	 */
-	plainResumeTakesTuningBack(_sourceId: string): boolean {
-		return false
+	plainResumeTakesTuningBack(sourceId: string): boolean {
+		return this.plainResumeVerdict(sourceId).free
+	}
+
+	/** plainResumeTakesTuningBack with its reason (TunerState.resumeOutcome). */
+	private plainResumeVerdict(sourceId: string): {
+		free: boolean
+		reason: TunerResumeReason
+	} {
+		if (this.relayAttached?.(sourceId) === true)
+			return { free: false, reason: "relay-attached" }
+		let verdict: ReceiverClientsVerdict | null = null
+		try {
+			verdict = this.receiverClients?.(sourceId) ?? null
+		} catch {
+			verdict = null
+		}
+		if (verdict?.free === true && verdict.reason === "receiver-free")
+			return { free: true, reason: "receiver-free" }
+		return {
+			free: false,
+			reason:
+				verdict?.reason === "another-client"
+					? "another-client"
+					: "clients-unknown",
+		}
+	}
+
+	/**
+	 * POST /api/tuner/:sourceId/take-back: ends a plain resume's hold (if any) and writes the held
+	 * sample rate and centre (accepted, before that resume too, else declared; the kill switch
+	 * applies) as operator writes, whatever the ledger proves now: one call re-proves both, and
+	 * from then on assert holds them as after a restore resume. Refused (409) under a relay
+	 * client, a scanner lease or lost ownership (TUNER_TAKE_BACK_BLOCKED), and with no held value
+	 * for either field (TUNER_NOTHING_HELD), before anything changes; external control answers as
+	 * every setter does.
+	 */
+	async takeTuningBack(
+		sourceId: string,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
+		const state = this.validateSourceForControl(sourceId)
+		const block = this.assertBlock(sourceId, state)
+		if (block !== null)
+			throw new TunerControllerError(
+				`The tuning cannot be taken back now (${block})`,
+				"TUNER_TAKE_BACK_BLOCKED",
+				409,
+			)
+		const kept = this.plainResumeAccepted.get(sourceId)
+		const held = (field: GatedField): number | null => {
+			const value =
+				this.acceptedTuning.get(sourceId)?.[field] ??
+				kept?.[field] ??
+				(this.config.writeDeclaredTuningOnConnect === false
+					? undefined
+					: this.declaredValue(sourceId, field))
+			if (value === undefined) return null
+			const valid =
+				field === "frequency"
+					? this.isWithinRange(value, VALIDATION.frequency)
+					: isValidRtlSampleRate(value)
+			return valid ? value : null
+		}
+		const rate = held("sampleRate")
+		const centre = held("frequency")
+		if (rate === null || centre === null)
+			throw new TunerControllerError(
+				"No held centre and sample rate to take back; set the tuning (POST /api/tuner/:sourceId/tune)",
+				"TUNER_NOTHING_HELD",
+				409,
+			)
+		if (this.plainResumeHold.delete(sourceId)) this.takenBack.add(sourceId)
+		this.plainResumeAccepted.delete(sourceId)
+		// This session follows the restore policy from here on (declaredBlock), as a restore resume.
+		const session = this.ledger().position(sourceId)?.session
+		if (session !== undefined) this.restoreResumeSession.set(sourceId, session)
+		const write: TunerWriteOptions = { ...opts, origin: opts.origin ?? "rest" }
+		await this.setSampleRate(sourceId, rate, write)
+		await this.setFrequency(sourceId, centre, write)
+	}
+
+	/** TunerState.resumeOutcome: from a plain resume until a restore resume. */
+	private resumeOutcomeOf(sourceId: string): TunerResumeOutcome | undefined {
+		if (this.takenBack.has(sourceId))
+			return {
+				outcome: "restored",
+				reason: "operator",
+				message: RESUME_MESSAGES.operator,
+			}
+		if (!this.plainResumeHold.has(sourceId)) return undefined
+		const v = this.plainResumeVerdict(sourceId)
+		return {
+			outcome: v.free ? "restored" : "left-as-found",
+			reason: v.reason,
+			message: RESUME_MESSAGES[v.reason],
+		}
 	}
 
 	/** What assert writes for a field (rule 3): last accepted, else declared (declaredBlock). */
 	private heldValue(sourceId: string, field: GatedField): number | null {
-		const accepted = this.acceptedTuning.get(sourceId)?.[field]
+		const accepted =
+			this.acceptedTuning.get(sourceId)?.[field] ??
+			// A plain resume that takes the tuning back writes what was accepted before it.
+			(this.plainResumeHold.has(sourceId) &&
+			this.plainResumeTakesTuningBack(sourceId)
+				? this.plainResumeAccepted.get(sourceId)?.[field]
+				: undefined)
 		const value =
 			accepted ??
 			(this.declaredBlock(sourceId) !== null
@@ -2173,6 +2334,8 @@ export class TunerController extends EventEmitter {
 		this.measuredRates.delete(sourceId)
 		this.pausedAtSeq.delete(sourceId)
 		this.plainResumeHold.delete(sourceId)
+		this.plainResumeAccepted.delete(sourceId)
+		this.takenBack.delete(sourceId)
 		this.acceptedTuning.delete(sourceId)
 		this.restoreResumeSession.delete(sourceId)
 		this.assertFights.delete(sourceId)
@@ -3560,6 +3723,8 @@ export class TunerController extends EventEmitter {
 		// It measured nothing yet: a rate it does not write stays unverified, not measured.
 		if (options.resume === "restore") {
 			this.plainResumeHold.delete(sourceId)
+			this.plainResumeAccepted.delete(sourceId)
+			this.takenBack.delete(sourceId)
 			this.forgetMeasuredRate(sourceId)
 			// This session follows the restore policy whatever tuner.reconnectPolicy says.
 			const session = this.ledger().position(sourceId)?.session
@@ -3806,6 +3971,15 @@ export class TunerController extends EventEmitter {
 		if (kept.size > 0) this.desiredFields.set(sourceId, kept)
 		else this.desiredFields.delete(sourceId)
 		const accepted = this.acceptedTuning.get(sourceId)
+		// What a take-back writes (plainResumeTakesTuningBack): this receiver's accepted values
+		// (the gate already stashed another receiver's away).
+		const before: Partial<Record<GatedField, number>> = {}
+		for (const field of GATED_FIELDS) {
+			const value = accepted?.[field]
+			if (value !== undefined && !kept.has(field)) before[field] = value
+		}
+		this.plainResumeAccepted.set(sourceId, before)
+		this.takenBack.delete(sourceId)
 		for (const field of GATED_FIELDS)
 			if (accepted && !kept.has(field)) delete accepted[field]
 		// A pre-pause inferred value is no more proven than an accepted one.
@@ -3882,6 +4056,9 @@ export class TunerController extends EventEmitter {
 		}
 		if (failure) this.emit("error", sourceId, failure)
 		this.emitStateChanged(sourceId)
+		// A free receiver: the take-back's assert (plainResumeTakesTuningBack), level-triggered
+		// from here on (noteReceiverClients, relay detach, doubts).
+		this.scheduleAssert(sourceId, true)
 		return failure
 			? {
 					policy,
@@ -4069,7 +4246,8 @@ export class TunerController extends EventEmitter {
 		if (
 			!configured ||
 			state.controlMode !== "internal" ||
-			this.plainResumeHold.has(sourceId)
+			(this.plainResumeHold.has(sourceId) &&
+				!this.plainResumeTakesTuningBack(sourceId))
 		)
 			return { attempted: false, commands: [] }
 		const held = (field: TunerStateField) =>
@@ -4793,6 +4971,7 @@ export class TunerController extends EventEmitter {
 			declaredOnlyFields: _staleDeclared,
 			measuredFields: _staleMeasured,
 			proof: _staleProof,
+			resumeOutcome: _staleResume,
 			...fields
 		} = state
 		const { unknownFields, declaredOnlyFields } = this.fieldProof(
@@ -4805,6 +4984,7 @@ export class TunerController extends EventEmitter {
 			this.measuredRates.get(state.sourceId) === state.sampleRate
 		const lastChange = this.lastChanges.get(state.sourceId)
 		const proof = this.proofOf(state)
+		const resumeOutcome = this.resumeOutcomeOf(state.sourceId)
 		return {
 			...fields,
 			...this.tuneStatus?.(state.sourceId),
@@ -4820,6 +5000,7 @@ export class TunerController extends EventEmitter {
 			...(measured ? { measuredFields: ["sampleRate" as const] } : {}),
 			...(bandGain ? { bandGain } : {}),
 			...(proof ? { proof } : {}),
+			...(resumeOutcome ? { resumeOutcome } : {}),
 		}
 	}
 

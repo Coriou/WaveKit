@@ -634,6 +634,19 @@ export class SourceManager extends EventEmitter {
 		return this.unproven
 	}
 
+	/**
+	 * The local TCP port of the source's live connection (an sdr-host lists rtlmux's clients by
+	 * address and port: a plain resume's free-receiver check), or null while not connected.
+	 */
+	connectionLocalPort(id: string): number | null {
+		const state = this.sources.get(id)
+		const socket = state?.connected === true ? state.socket : null
+		const port = socket?.localPort
+		return typeof port === "number" && Number.isInteger(port) && port > 0
+			? port
+			: null
+	}
+
 	private plainSourceData<T>(value: T): T {
 		let nodes = 0
 		const copy = (item: unknown, depth: number): unknown => {

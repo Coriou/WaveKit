@@ -207,6 +207,10 @@ import {
 import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
 import {
+	receiverClientsMaxAgeMs,
+	receiverClientsVerdict,
+} from "./core/tuning-ledger-receiver-free.js"
+import {
 	ReceiverIdentityTracker,
 	receiverSdrHostWaitMs,
 } from "./core/receiver-identity-tracker.js"
@@ -2177,6 +2181,11 @@ async function main(): Promise<void> {
 			})
 			scannerConstructionSettled = true
 			receiverState.setSpectrum(scanner.spectrum)
+			// tuningUnproven: why the engine labels its newest samples unverified on a proven tuning.
+			const labelSpectrum = scanner.spectrum
+			sourceManager.tuningUnproven.setEngineResolver(
+				id => labelSpectrum.engine(id)?.labelReason() ?? null,
+			)
 			scannerConstruction.completeConstruction({ ok: true })
 			await iqCapture?.start()
 			await scanner.start()
@@ -2307,6 +2316,22 @@ async function main(): Promise<void> {
 					)
 						void receiverState.recheckAdoption(sourceId)
 				})
+				// A plain resume takes the tuning back only while rtlmux serves this core alone.
+				const clientsMaxAgeMs = receiverClientsMaxAgeMs(
+					config.resources.sdrHostPoller.pollIntervalMs,
+					config.resources.sdrHostPoller.timeoutMs,
+				)
+				tunerController.setReceiverClientsView(id =>
+					receiverClientsVerdict(
+						poller.clientsReading(id),
+						sourceManager.connectionLocalPort(id),
+						performance.now(),
+						clientsMaxAgeMs,
+					),
+				)
+				poller.on("status", status =>
+					tunerController.noteReceiverClients(status.sourceId),
+				)
 				log.info(
 					{
 						count: sdrHostConfigs.length,

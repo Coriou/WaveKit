@@ -149,6 +149,35 @@ export interface TunerState {
 	 * on cores without a ledger.
 	 */
 	proof?: TunerTuningProof
+	/**
+	 * After a plain resume (POST /api/sources/:id/resume without restoreTuning): whether the core
+	 * took the receiver's tuning back and why. Present from that resume until a restore resume.
+	 */
+	resumeOutcome?: TunerResumeOutcome
+}
+
+/**
+ * Why a plain resume left the tuning as found or took it back (TunerState.resumeOutcome):
+ * `receiver-free` (the sdr-host lists this core's connection as rtlmux's only client and no relay
+ * client is attached: the core writes its held centre and rate again), `another-client` (rtlmux
+ * lists another client too), `clients-unknown` (no sdr-host answer, an answer too old, or one that
+ * does not list this connection), `relay-attached` (a relay client is attached), `operator`
+ * (POST /api/tuner/:sourceId/take-back).
+ */
+export const TUNER_RESUME_REASONS = [
+	"receiver-free",
+	"another-client",
+	"clients-unknown",
+	"relay-attached",
+	"operator",
+] as const
+export type TunerResumeReason = (typeof TUNER_RESUME_REASONS)[number]
+
+export interface TunerResumeOutcome {
+	outcome: "restored" | "left-as-found"
+	reason: TunerResumeReason
+	/** One fixed sentence, e.g. "another client on the receiver: tuning left as found". */
+	message: string
 }
 
 /** TunerState.proof. */

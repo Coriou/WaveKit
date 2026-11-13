@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest"
 import { TuningLedger } from "../../../src/core/tuning-ledger.js"
 import {
 	causeCode,
+	REFUSAL_REFRESH_MS,
 	TuningUnprovenTracker,
 } from "../../../src/core/tuning-ledger-unproven.js"
 
@@ -101,8 +102,10 @@ describe("TuningUnprovenTracker", () => {
 		const view = tracker.view("rtl")!
 		expect(view.cause).toBe("plain-resume")
 		expect(view.message).toBe(
-			"Tuning not proven since a resume without restore: recordings and identification are paused until the tuning is set or restored",
+			"Tuning not proven since a resume without restore: recordings and identification are paused until the tuning is set or restored (GET /api/tuner/:sourceId `resumeOutcome` says why the core left it as found)",
 		)
+		// The fix names the one-call take-back (U2).
+		expect(view.fix).toContain("POST /api/tuner/:sourceId/take-back")
 		// Not a cause code: the ledger's own reason (never an echoed string).
 		block = "something-else"
 		expect(tracker.view("rtl")!.cause).toBe("no-receipt")
@@ -130,8 +133,10 @@ describe("TuningUnprovenTracker", () => {
 		expect(pattern.test(view.cause)).toBe(true)
 		expect(pattern.test("doubt:untracked-retune")).toBe(true)
 		for (const cause of TUNING_UNPROVEN_CAUSES)
-			expect(pattern.test(cause)).toBe(cause !== "doubt")
+			expect(pattern.test(cause)).toBe(cause !== "doubt" && cause !== "engine")
 		expect(pattern.test("doubt:")).toBe(false)
+		expect(pattern.test("engine:upstream-loss")).toBe(true)
+		expect(pattern.test("engine:")).toBe(false)
 	})
 
 	it("a standing hold (rate-truth mismatch) reads as a doubt of the rate", () => {
@@ -148,5 +153,80 @@ describe("TuningUnprovenTracker", () => {
 			cause: "doubt:rate-truth-mismatch",
 			fields: ["sampleRate"],
 		})
+	})
+
+	it("no connection wins over a block the controller names (Q3)", () => {
+		const { ledger, tracker } = make()
+		const conn = ledger.connection("rtl")
+		conn.start()
+		tracker.setBlockResolver(() => "relay-attached")
+		expect(tracker.view("rtl")!.cause).toBe("relay-attached")
+		conn.close()
+		expect(tracker.view("rtl")).toMatchObject({
+			cause: "no-session",
+			fields: ["frequency", "sampleRate"],
+		})
+	})
+
+	it("a refusal re-reads a polled cause first: counted under the cause standing now, at most every REFUSAL_REFRESH_MS (Q2)", () => {
+		const { ledger, tracker, tick, at } = make()
+		ledger.connection("rtl").start()
+		let block: string | null = null
+		tracker.setBlockResolver(() => block)
+		tracker.noteRefusal("rtl", "recording")
+		expect(tracker.view("rtl")).toMatchObject({
+			cause: "no-receipt",
+			refusals: { recording: 1, identification: 0 },
+		})
+		// A relay client attaches: no ledger event says so.
+		block = "relay-attached"
+		tick(REFUSAL_REFRESH_MS - 1)
+		// Inside the rate limit: still the old period.
+		tracker.noteRefusal("rtl", "recording")
+		tick(1)
+		const began = at()
+		tracker.noteRefusal("rtl", "identification")
+		tracker.noteRefusal("rtl", "recording")
+		const view = tracker.view("rtl")!
+		expect(view).toMatchObject({
+			cause: "relay-attached",
+			since: began,
+			refusals: { recording: 1, identification: 1 },
+		})
+	})
+
+	it("names the engine's reason when the ledger proves both fields but the engine cannot place its samples (F5), and counts its refusals", () => {
+		const { ledger, tracker, tick } = make()
+		const conn = ledger.connection("rtl")
+		const session = conn.start()!
+		let engine: string | null = "upstream-loss"
+		tracker.setEngineResolver(() => engine)
+		// Unproven by the ledger: the ledger's own reason, never the engine's.
+		expect(tracker.view("rtl")!.cause).toBe("no-receipt")
+		conn.write(Buffer.concat([frame(0x02, RATE), frame(0x01, 100_000_000)]), {
+			writer: "operator",
+		})(null)
+		session.pos += 2
+		const view = tracker.view("rtl")!
+		expect(view).toMatchObject({
+			cause: "engine:upstream-loss",
+			fields: ["frequency", "sampleRate"],
+		})
+		expect(causeCode(view.cause)).toBe("engine")
+		expect(view.fix).toContain("unverifiedBlocks")
+		tracker.noteRefusal("rtl", "recording")
+		expect(tracker.view("rtl")!.refusals.recording).toBe(1)
+		// A code outside the pattern reads engine:other; the engine trusted again: nothing.
+		engine = "Not A Code"
+		expect(tracker.view("rtl")!.cause).toBe("engine:other")
+		engine = null
+		tick(REFUSAL_REFRESH_MS)
+		tracker.noteRefusal("rtl", "recording")
+		expect(tracker.view("rtl")).toBeNull()
+		// A throwing resolver: nothing (the ledger proves the tuning).
+		tracker.setEngineResolver(() => {
+			throw new Error("boom")
+		})
+		expect(tracker.view("rtl")).toBeNull()
 	})
 })

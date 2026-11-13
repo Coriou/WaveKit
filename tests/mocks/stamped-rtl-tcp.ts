@@ -56,6 +56,12 @@ export async function startStampedRtlTcp(opts: {
 	 * its centre. Default: one stamp per centre.
 	 */
 	restampFrequencyFrames?: boolean
+	/**
+	 * RTL2832 test mode (SET_TEST_MODE 0x07): while on, payload bytes are a counter ramp (the
+	 * scanner's marker). At least one chunk of ramp follows every switch on, even when the core
+	 * switches it off again before the next chunk (a USB transfer is under way). Default: ignored.
+	 */
+	testModeRamp?: boolean
 }): Promise<StampedRtlTcp> {
 	const frames: [number, number][] = []
 	const centres: number[] = []
@@ -79,7 +85,14 @@ export async function startStampedRtlTcp(opts: {
 	const timers = new Set<NodeJS.Timeout>()
 	/** The pending stamp change of an untracked retune (retuneSilently), or null. */
 	let silent: NodeJS.Timeout | null = null
+	let testMode = false
+	let rampDue = false
+	let ramp = 0
 	const apply = (cmd: number, value: number) => {
+		if (cmd === 0x07 && opts.testModeRamp === true) {
+			testMode = value !== 0
+			if (testMode) rampDue = true
+		}
 		if (cmd === 0x01) {
 			// The receiver had already moved (only its older bytes still carried the old stamp): a
 			// later frame is executed after that move, so it wins.
@@ -130,10 +143,14 @@ export async function startStampedRtlTcp(opts: {
 	const chunkBytes = opts.chunkBytes ?? 1024
 	const timer = setInterval(() => {
 		const bytes = Buffer.alloc(chunkBytes)
-		for (let i = 0; i < chunkBytes; i += 2) {
-			bytes[i] = centre
-			bytes[i + 1] = rate
-		}
+		if (testMode || rampDue) {
+			rampDue = false
+			for (let i = 0; i < chunkBytes; i++) bytes[i] = ramp++ & 255
+		} else
+			for (let i = 0; i < chunkBytes; i += 2) {
+				bytes[i] = centre
+				bytes[i + 1] = rate
+			}
 		for (const s of sockets) if (!s.destroyed) s.write(bytes)
 	}, opts.intervalMs ?? 5)
 	timer.unref()

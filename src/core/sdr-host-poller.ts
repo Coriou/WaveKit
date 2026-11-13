@@ -178,6 +178,25 @@ export interface SdrHostIdentityResult {
 	facts: SdrHostIdentityFacts | null
 }
 
+/**
+ * rtlmux's clients as one poll saw them (SdrHostPoller.clientsReading): their number and the
+ * remote port of each (the client's own local port), null where an entry names none.
+ */
+export interface ReceiverClientsReading {
+	/** performance.now() (monotonic) when the poll's request started. */
+	startedAt: number
+	clients: number
+	ports: Array<number | null>
+}
+
+/** The port of an sdr-host client address (`host:port`, `[v6]:port`), or null. */
+function addressPort(address: string): number | null {
+	const m = /:(\d{1,5})$/.exec(address)
+	if (!m) return null
+	const port = Number(m[1])
+	return port > 0 && port <= 65535 ? port : null
+}
+
 export interface SdrHostPollerOptions {
 	/** Poll interval in milliseconds (default: 3000) */
 	pollIntervalMs?: number
@@ -204,6 +223,8 @@ interface PollerState {
 	answered: boolean
 	/** The next poll is a retry (pollNow with `retry`): its failure does not grow the backoff. */
 	retryNext: boolean
+	/** rtlmux's clients at the last answered poll; null after a failed one or without stats. */
+	clients: ReceiverClientsReading | null
 }
 
 // ============================================================================
@@ -243,6 +264,7 @@ export class SdrHostPoller extends EventEmitter {
 				rerun: false,
 				answered: false,
 				retryNext: false,
+				clients: null,
 			})
 		}
 	}
@@ -288,6 +310,15 @@ export class SdrHostPoller extends EventEmitter {
 		}
 
 		this.log.info("Stopped SDR host polling")
+	}
+
+	/**
+	 * rtlmux's clients at the source's last answered poll (count and ports), or null: no poller
+	 * for it, the last poll failed, or the answer had no rtlmux stats.
+	 */
+	clientsReading(sourceId: string): ReceiverClientsReading | null {
+		const clients = this.pollers.get(sourceId)?.clients ?? null
+		return clients ? { ...clients, ports: [...clients.ports] } : null
 	}
 
 	/**
@@ -376,6 +407,7 @@ export class SdrHostPoller extends EventEmitter {
 			rerun: false,
 			answered: false,
 			retryNext: false,
+			clients: null,
 		}
 
 		this.pollers.set(config.sourceId, state)
@@ -453,10 +485,14 @@ export class SdrHostPoller extends EventEmitter {
 		retry: boolean,
 	): Promise<number> {
 		try {
-			const { status, endpoints, identity } = await this.fetchStatus(
+			const { status, endpoints, identity, ports } = await this.fetchStatus(
 				state.config,
 			)
 			state.answered = true
+			state.clients =
+				status.rtlmux && ports !== null
+					? { startedAt, clients: status.rtlmux.clients, ports }
+					: null
 			// The identity first: the receiver tracker waits on it, not on /api/host.
 			if (this.pollers.get(sourceId) === state)
 				this.emitIdentityResult(sourceId, {
@@ -483,6 +519,7 @@ export class SdrHostPoller extends EventEmitter {
 			return this.pollIntervalMs
 		} catch (error) {
 			state.linkFacts = null
+			state.clients = null
 			// A retry's failure marks the host down (recovery is still reported) but adds no count.
 			if (!retry || state.consecutiveFailures === 0) state.consecutiveFailures++
 
@@ -577,6 +614,8 @@ export class SdrHostPoller extends EventEmitter {
 	}
 
 	private async fetchStatus(config: SdrHostConfig): Promise<{
+		/** rtlmux's client ports (ReceiverClientsReading.ports); null without stats. */
+		ports: Array<number | null> | null
 		status: SdrHostStatus
 		endpoints: ReceiverEndpointsReport | null
 		identity: SdrHostIdentityFacts | null
@@ -659,6 +698,7 @@ export class SdrHostPoller extends EventEmitter {
 				address: string
 				bytesDropped: number
 			}> = []
+			let ports: Array<number | null> | null = null
 
 			if (rtlmuxStats) {
 				// Check for SDR Host API format first (has bytesPerSec as number)
@@ -673,6 +713,15 @@ export class SdrHostPoller extends EventEmitter {
 					bytesPerSec = rtlmuxStats.bytesPerSec
 					totalBytesSent = rtlmuxStats.totalBytesSent ?? 0
 					clientDetails = rtlmuxStats.clientDetails ?? []
+					// Only a full list names every client: a bare count names none.
+					ports =
+						clientDetails.length === clientCount
+							? clientDetails.map(c =>
+									typeof c?.address === "string"
+										? addressPort(c.address)
+										: null,
+								)
+							: null
 				} else if (Array.isArray(rtlmuxStats.clients)) {
 					// Raw rtlmux stats.json format
 					const rawClients = rtlmuxStats.clients as Array<{
@@ -689,6 +738,15 @@ export class SdrHostPoller extends EventEmitter {
 						0,
 					)
 					// bytesPerSec not available in raw format
+					ports = rawClients.map(c => {
+						const port = c.client?.port
+						return typeof port === "number" &&
+							Number.isInteger(port) &&
+							port > 0 &&
+							port <= 65535
+							? port
+							: null
+					})
 					clientDetails = rawClients.map((c, i) => ({
 						id: i,
 						address: c.client?.host ?? "unknown",
@@ -755,6 +813,8 @@ export class SdrHostPoller extends EventEmitter {
 			// A redirected answer is not the configured API's own list (3.6).
 			return {
 				status,
+				// A redirected answer is another server's clients.
+				ports: response.redirected ? null : ports,
 				endpoints: response.redirected ? null : parseReceiverEndpoints(body),
 				// Another server's answer never names this receiver.
 				identity: response.redirected ? null : parseSdrHostIdentity(body),

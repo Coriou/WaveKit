@@ -387,7 +387,8 @@ export const sourceVerdictSchema = {
  * the receiver (`lost-ownership`), or nothing accepted is left to write with the declared tuning
  * switched off (`declared-write-off`, `reset-policy`); else evidence that the receiver moved
  * (`doubt`, with its reason), no connection (`no-session`), or no frame of it on this connection
- * yet (`no-receipt`).
+ * yet (`no-receipt`); with both proven or settling, the spectrum engine cannot place its newest
+ * samples after the proof (`engine`, with its reason: `engine:upstream-loss`).
  */
 export const TUNING_UNPROVEN_CAUSES = [
 	"plain-resume",
@@ -400,6 +401,7 @@ export const TUNING_UNPROVEN_CAUSES = [
 	"doubt",
 	"no-session",
 	"no-receipt",
+	"engine",
 ] as const
 export type TuningUnprovenCause = (typeof TUNING_UNPROVEN_CAUSES)[number]
 
@@ -412,7 +414,10 @@ export const TUNING_DOUBT_REASON_PATTERN = "^[a-z0-9][a-z0-9-]{0,31}$"
  */
 export interface SourceTuningUnproven {
 	code: "tuning-unproven"
-	/** A TUNING_UNPROVEN_CAUSES code; a doubt names its reason: `doubt:untracked-retune`. */
+	/**
+	 * A TUNING_UNPROVEN_CAUSES code; a doubt and an engine cause name their reason:
+	 * `doubt:untracked-retune`, `engine:upstream-loss`.
+	 */
 	cause: string
 	/** The unproven fields. */
 	fields: ("frequency" | "sampleRate")[]
@@ -437,7 +442,7 @@ export const sourceTuningUnprovenSchema = {
 		code: { type: "string", enum: ["tuning-unproven"] },
 		cause: {
 			type: "string",
-			pattern: `^(${TUNING_UNPROVEN_CAUSES.filter(c => c !== "doubt").join("|")}|doubt:${TUNING_DOUBT_REASON_PATTERN.slice(1, -1)})$`,
+			pattern: `^(${TUNING_UNPROVEN_CAUSES.filter(c => c !== "doubt" && c !== "engine").join("|")}|(doubt|engine):${TUNING_DOUBT_REASON_PATTERN.slice(1, -1)})$`,
 		},
 		fields: {
 			type: "array",

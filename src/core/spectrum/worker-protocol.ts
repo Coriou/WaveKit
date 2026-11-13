@@ -167,6 +167,32 @@ export function isMeasureFromMessage(raw: unknown): boolean {
 	return message.type === "input" && message.input?.kind === "measure-from"
 }
 
+/**
+ * The worker logs the measure-from requests it ignored (isMeasureFromMessage) at most once per
+ * this interval, with their count since the last line: 60 s keeps a burst (one per open track per
+ * label change, at most MEASURE_REQUESTS 512) to one line a minute.
+ */
+export const MEASURE_FROM_LOG_MS = 60_000
+
+/** Counts ignored measure-from requests; `note` answers the count to log now, or null. */
+export class IgnoredMeasureFrom {
+	private pending = 0
+	private total = 0
+	private loggedAt: number | null = null
+
+	/** One ignored request at `now` (ms, monotonic). */
+	note(now: number): { count: number; total: number } | null {
+		this.pending += 1
+		this.total += 1
+		if (this.loggedAt !== null && now - this.loggedAt < MEASURE_FROM_LOG_MS)
+			return null
+		this.loggedAt = now
+		const count = this.pending
+		this.pending = 0
+		return { count, total: this.total }
+	}
+}
+
 /** Opt-in worker stage profile (R 9.2). Absent on init: the pipeline records nothing. */
 export const PipelineProfileOptionSchema = z.object({
 	sampleEvery: z.number().int().positive(),

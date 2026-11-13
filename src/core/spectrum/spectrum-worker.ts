@@ -23,6 +23,7 @@ import type { FrameWasmLoad } from "./frame-wasm.js"
 import { SpectrumPipeline } from "./pipeline.js"
 import { encodeEventsForWire } from "./summary-wire.js"
 import {
+	IgnoredMeasureFrom,
 	isMeasureFromMessage,
 	MainToWorkerSchema,
 	type WorkerPipelineInput,
@@ -93,11 +94,25 @@ function returnBuffer(raw: unknown): void {
 	}
 }
 
+const ignoredMeasureFrom = new IgnoredMeasureFrom()
+
 port.on("message", (raw: unknown) => {
 	const parsed = MainToWorkerSchema.safeParse(raw)
 	if (!parsed.success) {
-		// A measurement restart the worker cannot use changes nothing: ignored, never an error.
-		if (isMeasureFromMessage(raw)) return
+		// A measurement restart the worker cannot use changes nothing: ignored, never an error;
+		// counted, one line a minute at most (MEASURE_FROM_LOG_MS).
+		if (isMeasureFromMessage(raw)) {
+			const due = ignoredMeasureFrom.note(performance.now())
+			if (due !== null)
+				createComponentLogger(
+					createLogger({ level: "info" }),
+					"SpectrumWorker",
+				).info(
+					due,
+					"Ignored measure-from requests the worker could not validate",
+				)
+			return
+		}
 		post({
 			type: "error",
 			message: `invalid worker message: ${parsed.error.message}`,

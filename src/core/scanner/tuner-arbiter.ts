@@ -57,6 +57,11 @@ export interface Lease {
 	 * no band gain puts the snapshot's gain mode and gain back first.
 	 */
 	bandGain?: boolean
+	/**
+	 * Set by the holder: re-sends its latest hop itself (true) so the re-sent hop's epoch is its
+	 * own (TunerArbiter.resendHop, assert rule 2); false or absent: the arbiter re-sends it.
+	 */
+	resend?: () => boolean
 }
 
 /**
@@ -539,6 +544,18 @@ export class TunerArbiter extends EventEmitter {
 		}
 		// The acceptance is stale: the same centre must write.
 		this.clearVerified(lease)
+		// Through the holder when it can: a hop it did not send would start an epoch it does not
+		// own, and its dwell would drop every block of it.
+		let routed = false
+		try {
+			routed = lease.resend?.() === true
+		} catch (err) {
+			this.log.warn(
+				{ err, sourceId, jobId: lease.jobId },
+				"The lease holder's hop re-send failed; the arbiter re-sends it",
+			)
+		}
+		if (routed) return
 		void this.retune(lease, target).catch((err: unknown) => {
 			this.log.warn(
 				{ err, sourceId, jobId: lease.jobId },

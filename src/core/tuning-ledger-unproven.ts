@@ -20,10 +20,11 @@ import type {
 	TuningLedger,
 } from "./tuning-ledger.js"
 
-/** A cause code, or `doubt:<reason>` (SourceTuningUnproven.cause). */
+/** A cause code, `doubt:<reason>` or `engine:<reason>` (SourceTuningUnproven.cause). */
 export type UnprovenCause =
-	| Exclude<TuningUnprovenCause, "doubt">
+	| Exclude<TuningUnprovenCause, "doubt" | "engine">
 	| `doubt:${string}`
+	| `engine:${string}`
 
 export interface UnprovenReading {
 	cause: UnprovenCause
@@ -39,14 +40,32 @@ export type UnprovenBlockResolver = (
 	field: GatedField,
 ) => string | null
 
+/**
+ * Why the spectrum engine labels the source's newest block `unverified` while the ledger proves
+ * or settles both fields (a fixed code: `upstream-loss`, `no-anchor`, ...), or null.
+ */
+export type UnprovenEngineResolver = (sourceId: string) => string | null
+
 export type RefusalKind = "recording" | "identification"
+
+/**
+ * A refusal re-reads the cause at most this often per source (noteRefusal): a block the
+ * controller polls (relay attached, lease, ownership) or the engine's label changes with no
+ * ledger event. 250 ms: at most four re-reads a second per source on the snapshot path, and a
+ * changed cause collects the refusals it causes from at most a quarter second after it began.
+ */
+export const REFUSAL_REFRESH_MS = 250
 
 /** Gated fields in the order a reason is read from: the centre first. */
 const FIELDS: readonly GatedField[] = ["frequency", "sampleRate"]
 const DOUBT_REASON = new RegExp(TUNING_DOUBT_REASON_PATTERN)
 const BLOCK_CAUSES: ReadonlySet<string> = new Set(
 	TUNING_UNPROVEN_CAUSES.filter(
-		c => c !== "doubt" && c !== "no-session" && c !== "no-receipt",
+		c =>
+			c !== "doubt" &&
+			c !== "engine" &&
+			c !== "no-session" &&
+			c !== "no-receipt",
 	),
 )
 
@@ -56,8 +75,8 @@ const TEXT: Readonly<
 > = Object.freeze({
 	"plain-resume": {
 		message:
-			"Tuning not proven since a resume without restore: recordings and identification are paused until the tuning is set or restored",
-		fix: "Set the tuning (POST /api/tuner/:sourceId/tune), or pause the source and resume it with restoreTuning: true",
+			"Tuning not proven since a resume without restore: recordings and identification are paused until the tuning is set or restored (GET /api/tuner/:sourceId `resumeOutcome` says why the core left it as found)",
+		fix: "Take the tuning back in one call (POST /api/tuner/:sourceId/take-back writes the held centre and rate), or set it (POST /api/tuner/:sourceId/tune)",
 	},
 	"relay-attached": {
 		message:
@@ -94,6 +113,11 @@ const TEXT: Readonly<
 			"Tuning not proven: the receiver may have moved without a frame from the core; recordings and identification are paused until the tuning is written again",
 		fix: "Usually clears by itself within a second; if it keeps coming back, something else retunes the receiver (a client past the core's relay)",
 	},
+	engine: {
+		message:
+			"Tuning not proven on the samples: the receiver's tuning is proven, but the spectrum engine cannot place its newest samples after that proof; recordings and identification are paused",
+		fix: "Usually clears by itself within a second; if it stays, check the source's link for upstream loss (GET /api/spectrum: trustShadow.unverifiedBlocks)",
+	},
 	"no-session": {
 		message:
 			"Tuning not proven: the receiver is not connected; recordings and identification are paused",
@@ -110,6 +134,8 @@ interface Entry {
 	cause: UnprovenCause
 	fields: GatedField[]
 	sinceMs: number
+	/** When the cause was last re-read (noteRefusal's rate limit). */
+	readMs: number
 	recording: number
 	identification: number
 }
@@ -117,6 +143,11 @@ interface Entry {
 /** `doubt:<reason>` with a fixed-code reason; anything else is `doubt:other`. */
 function doubtCause(reason: string): UnprovenCause {
 	return `doubt:${DOUBT_REASON.test(reason) ? reason : "other"}`
+}
+
+/** `engine:<reason>` with a fixed-code reason; anything else is `engine:other`. */
+function engineCause(reason: string): UnprovenCause {
+	return `engine:${DOUBT_REASON.test(reason) ? reason : "other"}`
 }
 
 /** The ledger's own reason a field is unverified, or null when it is proven, settling or queued. */
@@ -135,11 +166,13 @@ const CAUSE_CODES: ReadonlySet<string> = new Set(TUNING_UNPROVEN_CAUSES)
 /** The cause's code (TUNING_UNPROVEN_CAUSES): a doubt's reason dropped; unknown: `no-receipt`. */
 export function causeCode(cause: string): TuningUnprovenCause {
 	if (cause.startsWith("doubt:")) return "doubt"
+	if (cause.startsWith("engine:")) return "engine"
 	return CAUSE_CODES.has(cause) ? (cause as TuningUnprovenCause) : "no-receipt"
 }
 
 export class TuningUnprovenTracker {
 	private blocked: UnprovenBlockResolver | null = null
+	private engine: UnprovenEngineResolver | null = null
 	private readonly entries = new Map<string, Entry>()
 
 	constructor(
@@ -156,6 +189,11 @@ export class TuningUnprovenTracker {
 	/** The tuner controller's block reasons (null: the ledger's reasons only). */
 	setBlockResolver(resolver: UnprovenBlockResolver | null): void {
 		this.blocked = resolver
+	}
+
+	/** The spectrum engines' label reasons (null: the ledger's and the controller's only). */
+	setEngineResolver(resolver: UnprovenEngineResolver | null): void {
+		this.engine = resolver
 	}
 
 	/** The source's reason now, or null while its centre and rate are proven or settling. */
@@ -175,6 +213,11 @@ export class TuningUnprovenTracker {
 			if (own === null) continue
 			fields.push(field)
 			if (cause !== null) continue
+			// No connection is the reason whatever the core would or would not write on one.
+			if (own === "no-session") {
+				cause = own
+				continue
+			}
 			let block: string | null = null
 			try {
 				block = this.blocked?.(sourceId, field) ?? null
@@ -186,7 +229,24 @@ export class TuningUnprovenTracker {
 					? (block as UnprovenCause)
 					: own
 		}
-		return cause === null ? null : { cause, fields }
+		if (cause !== null) return { cause, fields }
+		// Both proven (a frame still settling is no reason), yet the engine cannot place its newest
+		// samples after the proof.
+		if (
+			!FIELDS.every(
+				f => states[f].state === "proven" && states[f].queued === null,
+			)
+		)
+			return null
+		let engine: string | null = null
+		try {
+			engine = this.engine?.(sourceId) ?? null
+		} catch {
+			engine = null
+		}
+		return engine === null
+			? null
+			: { cause: engineCause(engine), fields: [...FIELDS] }
 	}
 
 	/**
@@ -200,14 +260,17 @@ export class TuningUnprovenTracker {
 			return
 		}
 		const entry = this.entries.get(sourceId)
+		const at = this.now()
 		if (entry?.cause === now.cause) {
 			entry.fields = now.fields
+			entry.readMs = at
 			return
 		}
 		this.entries.set(sourceId, {
 			cause: now.cause,
 			fields: now.fields,
-			sinceMs: this.now(),
+			sinceMs: at,
+			readMs: at,
 			recording: 0,
 			identification: 0,
 		})
@@ -215,11 +278,17 @@ export class TuningUnprovenTracker {
 
 	/**
 	 * A refusal the unproven tuning caused (a snapshot the recorder refused `refused:tuning`, a
-	 * snapshot classified on it, spectral evidence only); counted only while a cause stands. Cheap on the track path: one
-	 * map read and an add once the period is known (its changes come with ledger and state events).
+	 * snapshot classified on it, spectral evidence only); counted only while a cause stands, under
+	 * the cause standing now: the cause is re-read first, at most every REFUSAL_REFRESH_MS (a block
+	 * the controller polls, or the engine's label, changes with no ledger event). Cheap on the
+	 * track path: one map read, a clock read and an add between re-reads.
 	 */
 	noteRefusal(sourceId: string, kind: RefusalKind): void {
 		let entry = this.entries.get(sourceId)
+		if (entry && this.now() - entry.readMs >= REFUSAL_REFRESH_MS) {
+			this.refresh(sourceId)
+			entry = this.entries.get(sourceId)
+		}
 		if (!entry) {
 			this.refresh(sourceId)
 			entry = this.entries.get(sourceId)

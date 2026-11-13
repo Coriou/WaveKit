@@ -182,6 +182,24 @@ export interface SpectrumTrustShadow {
 	 * bin grid, a newer frame first, or nothing within 5 s of payload). Diagnostics only.
 	 */
 	retuneDelay?: SpectrumRetuneDelay
+	/**
+	 * Block summaries labelled `unverified`, by the first failing check: the engine's (`no-anchor`,
+	 * `upstream-loss`, `before-session`, `no-stream-map`, `session-ended`, `bad-range`,
+	 * `no-ledger`, `no-epoch-record`, `value-mismatch`, `hop-receipt`) or the ledger's (`settling`,
+	 * `doubt`, `no-receipt`, ...); at most 32 keys. Optional: absent on cores before 2026-11-13.
+	 */
+	unverifiedBlocks?: Record<string, number>
+	/**
+	 * Bytes the burst absorber lost while the engine read the ledger: the engine's placement of
+	 * its samples widened by them (fail closed) instead of being lost until a reconnect. Optional:
+	 * absent on cores before 2026-11-13.
+	 */
+	anchorWidenedBytes?: number
+	/**
+	 * Scanner hops whose proof a detected test-mode marker moved earlier (from the frame plus the
+	 * settle to the marker). Optional: absent on cores before 2026-11-13.
+	 */
+	markerBoundaries?: number
 }
 
 export interface SpectrumRetuneDelay {

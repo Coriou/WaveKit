@@ -252,8 +252,9 @@ Each answer below is one read, no logs needed; every closed list is in `GET /api
 - **Why a signal was not recorded:** `recorder` on `GET /api/scanner/discoveries/:id`.
 - **Why recordings and identification wait:** `sources[].tuning` here (the cause code, only on
   a row whose `verdict` reads `ok`), `tuningUnproven` on `GET /api/sources` with its message,
-  fix, since when, and the refusals it caused (`plain-resume`: set the tuning or resume with
-  restore).
+  fix, since when, and the refusals it caused (`plain-resume`: take the tuning back in one
+  call with `POST /api/tuner/:sourceId/take-back`; `resumeOutcome` on `GET /api/tuner/:sourceId`
+  says why a plain resume left it as found).
 - **What a sweep was allowed to disturb:** `impact` and `consentedImpact` on the job.
 
 `sources[].feed` reads `paused` or `resuming` while an operator holds the receiver feed off

@@ -611,7 +611,7 @@ describe("a plain resume of a paused feed", () => {
 })
 
 describe("the plain-resume hold's one decision point", () => {
-	it("plainResumeTakesTuningBack alone decides whether the hold blocks the declared fallback (false today)", async () => {
+	it("plainResumeTakesTuningBack alone decides whether the hold blocks the held tuning (false while the receiver's clients are unknown)", async () => {
 		const h = await harness()
 		await h.sessionFlowing(1)
 		await h.controller.setFrequency("rtl", F1, { origin: "rest" })
@@ -622,7 +622,7 @@ describe("the plain-resume hold's one decision point", () => {
 		await h.manager.resume("rtl")
 		await h.sessionFlowing(2)
 		await wait(200)
-		// Today: consulted, false, nothing written, the hold's reason shown.
+		// No sdr-host here (clients unknown): consulted, false, nothing written, the hold's reason shown.
 		expect(decision).toHaveBeenCalledWith("rtl")
 		expect(decision.mock.results.every(r => r.value === false)).toBe(true)
 		expect(h.framesFrom(from)).toEqual([])
@@ -630,19 +630,20 @@ describe("the plain-resume hold's one decision point", () => {
 			state: "unverified",
 			reason: "plain-resume",
 		})
-		// Flipping that one predicate (nothing else) gives the tuning back: with the pre-pause
-		// centre dropped by the resume, assert writes the declared rate and centre, and they prove.
+		// Flipping that one predicate (nothing else) gives the tuning back as a restore would: assert
+		// writes the rate and the centre accepted before the resume (U1: accepted, else declared),
+		// and they prove.
 		decision.mockReturnValue(true)
 		h.ledger.raiseDoubt("rtl", "both", "test")
 		await until(() => h.proofOf().frequency.state === "commanded")
 		expect(h.framesFrom(from)).toEqual([
 			[SET_SAMPLE_RATE, RATE],
-			[SET_FREQUENCY, F0],
+			[SET_FREQUENCY, F1],
 		])
 		expect(h.sessionReceipts(2).map(r => [r.field, r.value, r.writer])).toEqual(
 			[
 				["sampleRate", RATE, "assert"],
-				["frequency", F0, "assert"],
+				["frequency", F1, "assert"],
 			],
 		)
 	}, 30_000)
