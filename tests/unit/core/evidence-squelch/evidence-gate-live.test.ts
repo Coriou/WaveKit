@@ -770,7 +770,16 @@ describe("A14: the latch survives only the same transmission", () => {
 							if (expired || since >= limit) {
 								expect(g.state).toBe("waiting")
 								expired = true
-							} else if (since + stale < limit) expect(g.state).toBe("open")
+							} else if (
+								step.open &&
+								g.state === "waiting" &&
+								g.endCause !== null
+							)
+								// A17 / A20.4: an STE or reverse-burst detection on the re-opened noise ends
+								// the over before the hang (permitted by A20.1/A20.4, not covered by A20.6's
+								// corpus; ending on noise fails closed). Only the hang is modelled.
+								expired = true
+							else if (since + stale < limit) expect(g.state).toBe("open")
 							else if (g.state === "waiting") expired = true
 						}
 				},
@@ -801,10 +810,68 @@ describe("A14: the latch survives only the same transmission", () => {
 						2_000,
 						2_248,
 					],
+					// Found in CI: the A20 tracker ends the over on loud noise 640 ms after the re-open.
+					[
+						[
+							{ open: false, blocks: 14 },
+							{ open: false, blocks: 7 },
+							{ open: false, blocks: 6 },
+							{ open: false, blocks: 1 },
+							{ open: false, blocks: 8 },
+							{ open: true, blocks: 41 },
+							{ open: true, blocks: 23 },
+						],
+						167,
+						false,
+						20_000,
+						6_000,
+						1_500,
+					],
 				],
 			},
 		)
 	}, 120_000)
+
+	// Validates: Requirements 1.5, A20.1, A20.4
+	it("the Property 16 counterexample: a 1.5 s bare tone, 360 ms closed, then loud noise: the latch outlives the close and ends by a reverse burst, inside the hang", () => {
+		const g = gate()
+		const tone = Buffer.alloc(Math.round((RATE * 1_500) / 1_000) * 2)
+		for (let i = 0; i < tone.length / 2; i++)
+			tone.writeInt16LE(
+				Math.round(6_000 * Math.sin((2 * Math.PI * 79.7 * i) / RATE)),
+				i * 2,
+			)
+		drive(g, [
+			{ pcm: tone, open: true, quieted: false },
+			{ pcm: Buffer.alloc(BLOCK_BYTES), open: false, quieted: false },
+		])
+		expect(g.state).toBe("open")
+		const rand = mulberry32(167)
+		const noise = (): Buffer => {
+			const block = Buffer.alloc(BLOCK_BYTES)
+			for (let i = 0; i < BLOCK_BYTES; i += 2)
+				block.writeInt16LE(Math.round((rand() * 2 - 1) * 20_000), i)
+			return block
+		}
+		// 36 closed blocks: the latch is kept (360 ms + the 10 ms close, far inside the hang).
+		for (let b = 0; b < 36; b++) {
+			drive(g, [{ pcm: noise(), open: false, quieted: false }])
+			expect(g.state).toBe("open")
+		}
+		// The re-open: the A20 tracker restarts (first evaluation after 8 x 40 ms blocks) and,
+		// on this noise, sees a step at the 64th 10 ms block.
+		const states: string[] = []
+		for (let b = 0; b < 64; b++)
+			states.push(
+				...drive(g, [{ pcm: noise(), open: true, quieted: false }]).states,
+			)
+		expect(states.indexOf("waiting")).toBe(63)
+		expect(g.endCause).toBe("reverse")
+		// The model's bound: samples since the last sighting, plus one CTCSS hop of staleness,
+		// are still under the hang: the hang did not end it.
+		const since = (1 + 36 + 64) * (BLOCK_BYTES / 2)
+		expect(since + RATE / 4).toBeLessThan(HANG + TONE_GRACE)
+	})
 })
 
 /**
