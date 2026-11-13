@@ -159,7 +159,11 @@ async function startFakeSdrHost(localPort: () => number | null) {
 				sampling: {
 					stats: {
 						state: "ok",
-						ageMs: Math.round(listAge + performance.now() - listTakenAt),
+						// A cached list ages with every answer; the other modes serve a list just read.
+						ageMs:
+							mode === "cached-other"
+								? Math.round(listAge + performance.now() - listTakenAt)
+								: listAge,
 					},
 				},
 			}),
