@@ -146,8 +146,8 @@ describe("tuningUnproven on GET /api/sources and agent status", () => {
 			cause: "plain-resume",
 			fields: ["frequency", "sampleRate"],
 			message:
-				"Tuning not proven since a resume without restore: recordings and identification are paused until the tuning is set or restored",
-			fix: "Set the tuning (POST /api/tuner/:sourceId/tune), or pause the source and resume it with restoreTuning: true",
+				"Tuning not proven since a resume without restore: recordings and identification are paused until the tuning is set or restored (GET /api/tuner/:sourceId `resumeOutcome` says why the core left it as found)",
+			fix: "Take the tuning back in one call (POST /api/tuner/:sourceId/take-back writes the held centre and rate), or set it (POST /api/tuner/:sourceId/tune)",
 			since: held.since,
 			refusals: { recording: 2, identification: 1 },
 		})
