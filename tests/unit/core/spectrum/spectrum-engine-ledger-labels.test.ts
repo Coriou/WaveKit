@@ -700,6 +700,108 @@ describe("SpectrumEngine labels from the tuning ledger", () => {
 		await engine.stop()
 	})
 
+	it("a timer hop starts at its proof floor: its first block is proven, one a sample earlier is not", async () => {
+		const { engine, ledger, feed, write, seen, events, block, host, samples } =
+			await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block)
+		const pending = hopPending(engine, HOP)
+		engine.suppressExternal(true)
+		engine.submitEpoch(pending)
+		write(frame(0x01, HOP), { writer: "scanner", jobId: "j1" })
+		engine.suppressExternal(false)
+		const posted = host().inputs.find(i => i.kind === "pending-epoch")
+		expect(posted).toMatchObject({ pending: { awaitProofFloor: true } })
+		const seq = ledger.fieldState("rtl").frequency.receipt!
+		engine.noteHopReceipt(pending.epoch, seq)
+		// Posted after the socket callback that noted it.
+		expect(host().inputs.some(i => i.kind === "proof-floor")).toBe(false)
+		await Promise.resolve()
+		const floor = host().inputs.find(i => i.kind === "proof-floor")
+		expect(floor).toMatchObject({ kind: "proof-floor", epoch: pending.epoch })
+		const at = (floor as { sample: number }).sample
+		// The receipt's B(R) (its position + 100 ms) lies past the samples fed so far.
+		expect(at).toBeGreaterThan(samples())
+		events([
+			{
+				kind: "epoch-started",
+				epoch: pending.epoch,
+				startSample: at,
+				settleMode: "timer",
+			},
+		])
+		await feed(at + 4 * block - samples())
+		events([
+			{
+				kind: "block-summary",
+				summary: summary(0, pending.epoch, at - 1 + block, HOP),
+			},
+		])
+		expect(seen.at(-1)!.trust).toBe("unverified")
+		events([
+			{
+				kind: "block-summary",
+				summary: summary(0, pending.epoch, at + block, HOP),
+			},
+		])
+		expect(seen.at(-1)!.trust).toBe("commanded")
+		// A hop whose frame got no receipt gets no floor (the pipeline's timer start stands).
+		const lost = hopPending(engine, HOP + 100_000)
+		engine.submitEpoch(lost)
+		engine.noteHopReceipt(lost.epoch, null)
+		await Promise.resolve()
+		expect(
+			host().inputs.filter(
+				i => i.kind === "proof-floor" && i.epoch === lost.epoch,
+			),
+		).toEqual([])
+		await engine.stop()
+	})
+
+	it("a marker hop is posted with the mapping width: its first block past the marker start is proven", async () => {
+		const { engine, ledger, feed, write, seen, events, block, host, samples } =
+			await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block)
+		const pending = { ...hopPending(engine, HOP), expectMarker: true }
+		engine.suppressExternal(true)
+		engine.submitEpoch(pending)
+		write(frame(0x01, HOP), { writer: "scanner", jobId: "j1" })
+		engine.suppressExternal(false)
+		const posted = host().inputs.find(i => i.kind === "pending-epoch") as {
+			pending: PendingEpoch
+		}
+		// At least the gaps + 1 sample of the lower bound.
+		const slack = posted.pending.proofSlackSamples!
+		expect(slack).toBeGreaterThanOrEqual(1)
+		engine.noteHopReceipt(
+			pending.epoch,
+			ledger.fieldState("rtl").frequency.receipt,
+		)
+		// The marker bracket ended inside the settle: the boundary is lowered to it.
+		await feed(block * 2)
+		const markerStart = samples()
+		events([
+			{
+				kind: "epoch-started",
+				epoch: pending.epoch,
+				startSample: markerStart + slack,
+				settleMode: "marker",
+				markerRunSamples: 512,
+			},
+		])
+		await feed(block * 4)
+		events([
+			{
+				kind: "block-summary",
+				summary: summary(0, pending.epoch, markerStart + slack + block, HOP),
+			},
+		])
+		expect(seen.at(-1)!.trust).toBe("commanded")
+		expect(engine.trustShadow()!.markerBoundaries).toBe(1)
+		await engine.stop()
+	})
+
 	it("without a ledger every event reads unverified (fail closed)", async () => {
 		const sources = new FakeSources()
 		const fanout = new FakeFanout()

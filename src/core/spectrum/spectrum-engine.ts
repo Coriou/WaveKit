@@ -240,7 +240,8 @@ export type EngineLedger = Pick<
 > &
 	// Receipts feed the retune-delay measurement; a ledger without it measures nothing. A
 	// detected scanner marker moves its hop's boundary earlier (lowerBoundary); without it, none.
-	Partial<Pick<TuningLedger, "subscribe" | "lowerBoundary">>
+	// A hop's epoch starts at its proof boundary (proofBoundary); without it, at its timer start.
+	Partial<Pick<TuningLedger, "subscribe" | "lowerBoundary" | "proofBoundary">>
 
 /**
  * Tuning-ledger diagnostics. Since trust step 3 the ledger's label is the engine's only label, so
@@ -558,6 +559,8 @@ interface PendingStart {
 	/** A scanner hop (submitEpoch): its samples need its own frequency receipt. */
 	hop: boolean
 	meta: EngineEpoch
+	/** PendingEpoch.proofSlackSamples posted with a marker hop (0: none). */
+	proofSlack: number
 }
 
 export class SpectrumEngine extends EventEmitter implements EpochClock {
@@ -945,6 +948,70 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.markerPending = null
 			if (typeof seq === "number") this.lowerHopBoundary(marker, seq)
 		}
+		// After the socket callback that noted it: an inline pipeline starts the epoch at once.
+		if (typeof seq === "number")
+			queueMicrotask(() => this.postProofFloor(epoch, seq))
+	}
+
+	/**
+	 * A posted hop not started yet gets its proof floor: the first sample of its stream whose
+	 * lowest possible ledger position is at or past the boundary its frequency receipt `seq` proves
+	 * from (TuningLedger.proofBoundary). A timer hop starts there, so its first block is proven
+	 * (PendingEpoch.awaitProofFloor). Nothing when it cannot be placed: the pipeline then starts
+	 * the hop at its timer start, and the ledger labels its blocks as ever.
+	 */
+	private postProofFloor(epoch: number, seq: number): void {
+		if (!this.running || !this.host || this.restarting) return
+		const start = this.starts.find(e => e.key === epoch && e.hop)
+		if (!start || start.meta.stream !== this.stream) return
+		const ledger = this.ledger()
+		const anchor = this.ledgerAnchor
+		if (!ledger?.proofBoundary || !anchor) return
+		let boundary: number | null
+		try {
+			boundary = ledger.proofBoundary(this.sourceId, anchor.session, seq)
+		} catch {
+			return
+		}
+		if (boundary === null) return
+		const sample = this.firstSampleFrom(start.meta.stream, boundary)
+		if (sample === null) return
+		this.send({ kind: "proof-floor", epoch, sample })
+	}
+
+	/**
+	 * The first sample `s` of engine stream `stream` whose lowest possible ledger position (the
+	 * lower bound ledgerRange takes, `oLow0 + (s − gaps − 1) × bps − oHigh`) is at or past `pos`:
+	 * `ceil((pos + oHigh − oLow0) / bps) + gaps + 1`. Null when unmapped.
+	 */
+	private firstSampleFrom(stream: number, pos: number): number | null {
+		const anchor = this.ledgerAnchor
+		if (!anchor || this.upstreamLost(anchor) || !Number.isFinite(pos))
+			return null
+		const map = this.streamMaps.find(m => m.stream === stream)
+		if (!map || !Number.isFinite(map.oLow0) || !(map.bps > 0)) return null
+		const sample =
+			Math.ceil((pos + anchor.oHigh - map.oLow0) / map.bps) + map.gaps + 1
+		return Number.isSafeInteger(sample) ? Math.max(0, sample) : null
+	}
+
+	/**
+	 * Samples between one sample's highest and lowest possible ledger positions on engine stream
+	 * `stream`, rounded up: upper(s) − lower(s) = (oHigh0 − oLow0) + (anchor.oHigh − anchor.oLow)
+	 * + (gaps + 1) × bps bytes (ledgerRange and lowerHopBoundary). A marker hop that starts this
+	 * many samples past the sample its boundary is lowered to has its first block proven. Null
+	 * when unmapped.
+	 */
+	private mappingWidth(stream: number): number | null {
+		const anchor = this.ledgerAnchor
+		if (!anchor || this.upstreamLost(anchor)) return null
+		const map = this.streamMaps.find(m => m.stream === stream)
+		if (!map || !Number.isFinite(map.oLow0) || !Number.isFinite(map.oHigh0))
+			return null
+		if (!(map.bps > 0)) return null
+		const bytes = map.oHigh0 - map.oLow0 + (anchor.oHigh - anchor.oLow)
+		const width = Math.ceil(bytes / map.bps) + map.gaps + 1
+		return Number.isSafeInteger(width) && width >= 0 ? width : null
 	}
 
 	/**
@@ -998,9 +1065,20 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			return
 		}
 		this.flushBatch()
+		// A hop starts at its proof boundary: a timer hop at its receipt's (postProofFloor), a
+		// marker hop the mapping width past the marker start its boundary is lowered to.
+		const ledger = this.ledger()
+		let posted = pending
+		if (hop && !pending.expectMarker && ledger?.proofBoundary)
+			posted = { ...pending, awaitProofFloor: true }
+		else if (hop && pending.expectMarker && ledger?.lowerBoundary) {
+			const width = this.mappingWidth(this.stream)
+			if (width !== null) posted = { ...pending, proofSlackSamples: width }
+		}
 		this.starts.push({
 			key: pending.epoch,
 			hop,
+			proofSlack: posted.proofSlackSamples ?? 0,
 			meta: {
 				stream: this.stream,
 				epoch: pending.epoch,
@@ -1012,7 +1090,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				settleMode: null,
 			},
 		})
-		this.send({ kind: "pending-epoch", pending })
+		this.send({ kind: "pending-epoch", pending: posted })
 	}
 
 	suppressExternal(on: boolean): void {
@@ -1733,10 +1811,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				}
 				this.rememberEpoch(record)
 				if (markerHop !== null) {
+					// The marker start (run end + PLL settle), before the slack the hop was posted with.
 					const at = {
 						hop: markerHop,
 						stream: record.stream,
-						sample: ev.startSample,
+						sample: Math.max(0, ev.startSample - (start?.proofSlack ?? 0)),
 					}
 					const seq = this.hopReceipts.get(markerHop)
 					if (typeof seq === "number") this.lowerHopBoundary(at, seq)

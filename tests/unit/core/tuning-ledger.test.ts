@@ -1208,3 +1208,87 @@ describe("TuningLedger receipt status (step 4)", () => {
 		expect(ledger.fieldState("rtl").frequency.lastReceipt).toBeUndefined()
 	})
 })
+
+describe("TuningLedger proof boundary (hop start)", () => {
+	it("is the frequency receipt's B(R), marker-lowered, pushed by the rate's own boundary", () => {
+		const ledger = ledgerWith(1000)
+		const { conn, session } = started(ledger)
+		flush(conn, frame(2, RATE), OP)
+		session.pos = 300
+		flush(conn, frame(1, 5), { writer: "scanner" })
+		const freq = ledger.receipts("rtl").at(-1)!
+		// The rate's boundary (0 + 1000) is below the frequency's (300 + 1000).
+		expect(ledger.proofBoundary("rtl", 1, freq.seq)).toBe(1300)
+		session.pos = 5000
+		expect(ledger.trustAt("rtl", 1, 1299, 1400).reason).toBe("settling")
+		expect(ledger.trustAt("rtl", 1, 1300, 1400).trust).toBe("commanded")
+		// A marker lowers it (1100), never below the rate's own boundary (1000).
+		expect(ledger.lowerBoundary("rtl", 1, freq.seq, 1100)).toBe(true)
+		expect(ledger.proofBoundary("rtl", 1, freq.seq)).toBe(1100)
+		expect(ledger.trustAt("rtl", 1, 1100, 1200).trust).toBe("commanded")
+		expect(ledger.lowerBoundary("rtl", 1, freq.seq, 400)).toBe(true)
+		expect(ledger.proofBoundary("rtl", 1, freq.seq)).toBe(1000)
+		expect(ledger.trustAt("rtl", 1, 999, 1100).reason).toBe("settling")
+		// A later rate frame: the frequency proof waits for the rate's boundary too.
+		session.pos = 6000
+		flush(conn, frame(2, RATE), OP)
+		expect(ledger.proofBoundary("rtl", 1, freq.seq)).toBe(7000)
+		// Not a ring frequency receipt of the live session: null.
+		const rate = ledger.receipts("rtl").at(-1)!
+		expect(ledger.proofBoundary("rtl", 1, rate.seq)).toBeNull()
+		expect(ledger.proofBoundary("rtl", 1, 99)).toBeNull()
+		expect(ledger.proofBoundary("rtl", 2, freq.seq)).toBeNull()
+		expect(ledger.proofBoundary("nope", 1, freq.seq)).toBeNull()
+		conn.close()
+		expect(ledger.proofBoundary("rtl", 1, freq.seq)).toBeNull()
+	})
+
+	it("is null when no rate can be read (nothing ever settles)", () => {
+		const ledger = new TuningLedger({
+			settleLink: () => ({ configuredSettleMs: 50, inFlightBytes: 0 }),
+			frameBytes: () => null,
+			capsRate: () => RATE,
+		})
+		const { conn } = started(ledger)
+		flush(conn, Buffer.concat([frame(2, RATE), frame(1, 5)]), OP)
+		const freq = ledger.receipts("rtl").at(-1)!
+		expect(ledger.proofBoundary("rtl", 1, freq.seq)).toBeNull()
+	})
+
+	// Feature: tuning-trust-ledger, Property 4: a hop's proof boundary is where its proof starts
+	// Validates: Requirements 1.1
+	it("trustAt proves a block from the proof boundary on, and never one before it", () => {
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 0, max: 5000 }),
+				fc.integer({ min: 0, max: 5000 }),
+				fc.integer({ min: 0, max: 4000 }),
+				fc.option(fc.integer({ min: 0, max: 20_000 }), { nil: null }),
+				fc.boolean(),
+				(settle, ratePos, gap, marker, laterMover) => {
+					const ledger = ledgerWith(settle)
+					const { conn, session } = started(ledger)
+					session.pos = ratePos
+					flush(conn, frame(2, RATE), OP)
+					session.pos = ratePos + gap
+					flush(conn, frame(1, 7), { writer: "scanner" })
+					const seq = ledger.receipts("rtl").at(-1)!.seq
+					if (marker !== null) ledger.lowerBoundary("rtl", 1, seq, marker)
+					if (laterMover) {
+						session.pos += 10
+						flush(conn, frame(5, 1), OP)
+					}
+					const b = ledger.proofBoundary("rtl", 1, seq)
+					expect(b).not.toBeNull()
+					session.pos = b! + 100
+					expect(ledger.trustAt("rtl", 1, b!, b! + 50).trust).toBe("commanded")
+					if (b! > 0)
+						expect(ledger.trustAt("rtl", 1, b! - 1, b! + 50).trust).toBe(
+							"unverified",
+						)
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+})

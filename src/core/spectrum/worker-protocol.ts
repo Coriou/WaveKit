@@ -92,6 +92,8 @@ const PendingEpochSchema = z.object({
 	centreChanged: z.boolean(),
 	staleMaxMs: z.number().finite().nonnegative().max(1000).optional(),
 	verifiedFromSample: z.number().int().nonnegative().optional(),
+	awaitProofFloor: z.boolean().optional(),
+	proofSlackSamples: z.number().int().nonnegative().optional(),
 })
 
 export const PipelineInputSchema = z
@@ -136,6 +138,11 @@ export const PipelineInputSchema = z
 			// A pipeline track id: `${sourceId}-…` (trackIdPrefixes), as long as its source id, which
 			// has no bound of its own; a stale or unknown id is ignored by the tracker.
 			trackId: z.string().min(1),
+			sample: z.number().int().nonnegative(),
+		}),
+		z.object({
+			kind: z.literal("proof-floor"),
+			epoch: z.number().int().nonnegative(),
 			sample: z.number().int().nonnegative(),
 		}),
 		z.object({

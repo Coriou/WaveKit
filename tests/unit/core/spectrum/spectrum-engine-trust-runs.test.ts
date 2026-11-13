@@ -421,9 +421,32 @@ describe("a detected scanner marker lowers its hop's boundary (F2)", () => {
 		return pending
 	}
 
+	/**
+	 * The slack the engine posted the marker hop with (PendingEpoch.proofSlackSamples): the
+	 * pipeline starts the hop that far past the marker run's end plus the PLL settle.
+	 */
+	function postedSlack(
+		inputs: readonly PipelineInput[],
+		epoch: number,
+	): number {
+		for (const i of inputs)
+			if (i.kind === "pending-epoch" && i.pending.epoch === epoch)
+				return i.pending.proofSlackSamples ?? 0
+		throw new Error(`hop ${epoch} not posted`)
+	}
+
 	it("trusts the hop's blocks from the marker on, long before its receipt's settle; never before the marker", async () => {
-		const { engine, ledger, feed, write, events, block, blockAt, samples } =
-			await make()
+		const {
+			engine,
+			ledger,
+			feed,
+			write,
+			events,
+			block,
+			blockAt,
+			samples,
+			host,
+		} = await make()
 		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
 		await feed(SETTLE_BYTES / 2 + block * 2)
 		expect(blockAt(samples())).toBe("commanded")
@@ -434,20 +457,24 @@ describe("a detected scanner marker lowers its hop's boundary (F2)", () => {
 		const receiptAt = samples()
 		await feed(block / 4)
 		const marker = samples()
+		// As the pipeline starts it: the posted slack (the mapping width) past the marker.
+		const slack = postedSlack(host().inputs, pending.epoch)
+		expect(slack).toBeGreaterThanOrEqual(1)
 		events([
 			{
 				kind: "epoch-started",
 				epoch: pending.epoch,
-				startSample: marker,
+				startSample: marker + slack,
 				settleMode: "marker",
 			},
 		])
-		// A block starting at the marker itself: its lowest position (one sample of rounding) may
-		// lie before the marker's highest one: not trusted. One starting just past it is.
-		await feed(block)
-		expect(blockAt(samples(), pending.epoch, HOP)).toBe("unverified")
-		await feed(8)
-		expect(blockAt(samples(), pending.epoch, HOP)).toBe("commanded")
+		// A block starting at the marker itself: its lowest position (one sample of rounding) lies
+		// before the marker's highest one: not trusted. The hop's first block, the slack past it, is.
+		await feed(block + slack)
+		expect(blockAt(marker + block, pending.epoch, HOP)).toBe("unverified")
+		expect(blockAt(marker + slack + block, pending.epoch, HOP)).toBe(
+			"commanded",
+		)
 		// Well inside the receipt's settle (two blocks).
 		expect(samples() - receiptAt).toBeLessThan(SETTLE_BYTES / 2)
 		expect(engine.trustShadow()!.markerBoundaries).toBe(1)

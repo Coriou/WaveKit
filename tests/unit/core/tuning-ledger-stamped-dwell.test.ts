@@ -266,8 +266,9 @@ const hopReceipts = (receipts: TuningReceipt[]) =>
 	receipts.filter(r => r.field === "frequency" && r.writer === "scanner")
 
 /**
- * `hopSettleMs`: the hop's pipeline settle (its timer epoch starts that long after the command);
- * the ledger's stays SETTLE_MS, so a shorter one offers the dwell blocks the ledger does not prove.
+ * `hopSettleMs`: the hop's pipeline settle (its timer epoch starts that long after the command at
+ * the earliest); the ledger's stays SETTLE_MS (with the in-flight estimate), and a timer hop starts
+ * at the later of the two (its proof floor), so a shorter one never offers an unproven block.
  */
 async function startSweep(markers: boolean, hopSettleMs = SETTLE_MS) {
 	const c = await compose({ markers, hopSettleMs })
@@ -315,12 +316,13 @@ describe("a sweep dwell counts only its own hop's proven blocks (production wiri
 		await s.scanner.cancelJob(s.job.id)
 		// Hops ran, each dwell finished, and not one counted block was unproven or another hop's.
 		expect(expectCountedProven(s.w)).toBeGreaterThan(0)
-		// The settle was honoured: unverified hop blocks exist (they were offered and not counted).
-		expect(
-			[...s.w.blocks.values()].some(
-				b => b.trust === "unverified" && b.centreHz > 449_000_000,
-			),
-		).toBe(true)
+		// The ledger's settle was honoured: each hop starts at its proof floor, so no hop block
+		// inside the ledger's settle is offered at all (none labelled unverified), and none foreign.
+		const hopBlocks = [...s.w.blocks.values()].filter(
+			b => b.centreHz > 449_000_000,
+		)
+		expect(hopBlocks.length).toBeGreaterThan(0)
+		expect(hopBlocks.filter(b => b.trust === "unverified")).toEqual([])
 		expect(s.w.foreign()).toBe(0)
 	}, 60_000)
 

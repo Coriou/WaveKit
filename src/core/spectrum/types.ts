@@ -71,6 +71,21 @@ export interface PendingEpoch {
 	 * before it are `unverified`. Absent = no unverified window (the scanner's epochs never set it).
 	 */
 	verifiedFromSample?: number
+	/**
+	 * A scanner hop on a timer settle whose proof the tuning ledger can place (SpectrumEngine): the
+	 * epoch starts at the hop's `proof-floor` (its frequency receipt's B(R) mapped to the first
+	 * sample whose lowest possible position is past it), never before the timer start; until the
+	 * floor comes it stays unresolved, and data reaching the timer start without one starts it
+	 * there (the labels stay the ledger's). Absent: the timer start alone.
+	 */
+	awaitProofFloor?: boolean
+	/**
+	 * A marker-settled scanner hop: samples added to the marker start (run end + PLL settle), the
+	 * engine's sample-to-position mapping width (gaps + 1 + the anchor and stream-map byte widths,
+	 * in samples), so the first block's lowest position is past the boundary the marker lowers to
+	 * (the marker start's highest position). Absent: 0.
+	 */
+	proofSlackSamples?: number
 }
 
 export interface TrackFlags {
@@ -252,6 +267,8 @@ export type PipelineInput =
 	| { kind: "spectrum-feed"; enabled: boolean }
 	/** Restart open track `trackId`'s frequency measurement (centroid) from `sample` (SpectrumEngine.trackLabel). */
 	| { kind: "measure-from"; stream: number; epoch: number; trackId: string; sample: number }
+	/** The first sample posted epoch `epoch` (PendingEpoch.epoch) can be proven from (PendingEpoch.awaitProofFloor). */
+	| { kind: "proof-floor"; epoch: number; sample: number }
 
 export type ObservationEndReason =
 	| "quiet"

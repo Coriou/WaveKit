@@ -911,6 +911,36 @@ export class TuningLedger {
 		}
 	}
 
+	/**
+	 * The first position a block can start at and be proven by frequency receipt `seq` of the live
+	 * session `session` (a scanner hop's own): the larger of that receipt's boundary B(R) and the
+	 * boundary of the session's last sample-rate receipt, both as a read up to the live edge would
+	 * see them now (a marker-lowered B(R) is lowered; later moving frames push it). Null for
+	 * anything but a ring frequency receipt of the live session, or a boundary that never comes
+	 * (no usable rate): the caller then starts where it would have, and the labels stay the
+	 * ledger's (a block before the boundary reads `settling`). Never a trust decision: trustAt
+	 * still proves every block.
+	 */
+	proofBoundary(sourceId: string, session: number, seq: number): number | null {
+		try {
+			const live = this.sources.get(sourceId)?.live
+			if (!live || live.session !== session) return null
+			const receipt = live.receipts.find(r => r.seq === seq)
+			if (!receipt || receipt.field !== "frequency") return null
+			const end = live.pos + 1
+			let boundary = this.boundaryOf(live, "frequency", receipt, end)
+			const rate = this.lastReceipt(live, "sampleRate", end)
+			if (rate)
+				boundary = Math.max(
+					boundary,
+					this.boundaryOf(live, "sampleRate", rate, end),
+				)
+			return Number.isFinite(boundary) ? boundary : null
+		} catch {
+			return null
+		}
+	}
+
 	/** The live session and its position, or null. */
 	position(sourceId: string): { session: number; pos: number } | null {
 		const live = this.sources.get(sourceId)?.live
@@ -1198,6 +1228,22 @@ export class TuningLedger {
 			if (d.field === field || d.field === "both")
 				return { ok: false, reason: "doubt", doubtReason: d.reason }
 		}
+		const boundary = this.boundaryOf(live, field, receipt, posB)
+		if (!(posA >= boundary)) return { ok: false, reason: "settling" }
+		return { ok: true, receipt, boundary }
+	}
+
+	/**
+	 * B(R) of `field`'s receipt `receipt` for a read ending at `posB`: its position plus the settle,
+	 * lowered by a detected marker, pushed by every centre- (rate-) moving frame flushed after it
+	 * before `posB`.
+	 */
+	private boundaryOf(
+		live: SessionRecord,
+		field: GatedField,
+		receipt: TuningReceipt,
+		posB: number,
+	): number {
 		const settle = this.settleFor(live, receipt, posB)
 		let boundary = receipt.pos + settle
 		const lowered = live.lowered.get(receipt.seq)
@@ -1221,8 +1267,7 @@ export class TuningLedger {
 			evictedMover.pos < posB
 		)
 			boundary = Math.max(boundary, evictedMover.pos + settle)
-		if (!(posA >= boundary)) return { ok: false, reason: "settling" }
-		return { ok: true, receipt, boundary }
+		return boundary
 	}
 
 	/**

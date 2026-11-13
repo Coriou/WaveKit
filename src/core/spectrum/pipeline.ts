@@ -379,6 +379,8 @@ export class SpectrumPipeline {
 
 	private ep: EpochState | null = null
 	private resolving: PendingEpoch | null = null
+	/** The resolving epoch's `proof-floor` (PendingEpoch.awaitProofFloor), or null before it. */
+	private proofFloor: number | null = null
 	private epochCounter = 0
 	private stream = 0
 	private gaps: { start: number; end: number }[] = []
@@ -741,6 +743,9 @@ export class SpectrumPipeline {
 				this.tracker.measureFrom(input)
 				this.wideband.measureFrom(input)
 				break
+			case "proof-floor":
+				this.onProofFloor(input.epoch, input.sample)
+				break
 			case "channel-plan":
 				this.channelPlan = input.plan
 				this.planActive = input.plan !== null
@@ -997,9 +1002,26 @@ export class SpectrumPipeline {
 		}
 		this.startEpochState()
 		this.resolving = p
-		if (!p.expectMarker)
+		this.proofFloor = null
+		if (!p.expectMarker && p.awaitProofFloor !== true)
 			this.resolve(
 				p.commandSample + p.bufferedSamples + p.settleSamples,
+				"timer",
+			)
+	}
+
+	/**
+	 * The resolving hop's proof floor: a timer hop starts at the later of it and its timer start;
+	 * a marker hop keeps it for its marker timeout (a timer start then, whose boundary is the full
+	 * settle). Another epoch's floor, or one after the start, changes nothing.
+	 */
+	private onProofFloor(epoch: number, sample: number): void {
+		const p = this.resolving
+		if (!p || p.epoch !== epoch || !Number.isSafeInteger(sample)) return
+		this.proofFloor = sample
+		if (!p.expectMarker)
+			this.resolve(
+				Math.max(p.commandSample + p.bufferedSamples + p.settleSamples, sample),
 				"timer",
 			)
 	}
@@ -1091,12 +1113,17 @@ export class SpectrumPipeline {
 
 	private checkMarkerTimeout(atSample: number): void {
 		const p = this.resolving
-		if (!p?.expectMarker || atSample < p.commandSample + p.markerTimeoutSamples)
+		if (!p) return
+		const timerStart = p.commandSample + p.bufferedSamples + p.settleSamples
+		if (!p.expectMarker) {
+			// A hop waiting for its proof floor that data reached the timer start without one: it
+			// starts there (no receipt to place; the ledger labels its blocks).
+			if (p.awaitProofFloor === true && atSample >= timerStart)
+				this.resolve(timerStart, "timer")
 			return
-		this.resolve(
-			Math.max(p.commandSample + p.bufferedSamples + p.settleSamples, atSample),
-			"timer",
-		)
+		}
+		if (atSample < p.commandSample + p.markerTimeoutSamples) return
+		this.resolve(Math.max(timerStart, atSample, this.proofFloor ?? 0), "timer")
 	}
 
 	private resolve(
@@ -1169,7 +1196,11 @@ export class SpectrumPipeline {
 		if (samples > STUCK_TEST_MODE_S * this.fs) this.stuck = true
 		const p = this.resolving
 		if (p?.expectMarker && run.startSample >= p.commandSample) {
-			this.resolve(run.endSample + p.pllSettleSamples, "marker", samples)
+			this.resolve(
+				run.endSample + p.pllSettleSamples + (p.proofSlackSamples ?? 0),
+				"marker",
+				samples,
+			)
 			return
 		}
 		this.gaps.push({ start: run.startSample, end: run.endSample }) // another engine's marker
