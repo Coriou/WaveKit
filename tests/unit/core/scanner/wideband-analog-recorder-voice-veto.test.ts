@@ -16,7 +16,10 @@ import {
 	ownerDecoded,
 	type DecodedLabel,
 } from "../../../../src/core/scanner/channel/voice-veto.js"
-import type { WidebandTrackInput } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
+import {
+	WIDEBAND_MAX_JOIN_RESTARTS,
+	type WidebandTrackInput,
+} from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import { CLASS_HYPOTHESES } from "../../../../src/core/scanner/classify/classifier.js"
 import type {
 	ScannerClass,
@@ -925,5 +928,355 @@ describe("minor 1: a decoded other signal joining a voice still on the air", () 
 			d => d.code === "refused:not-analog",
 		)
 		expect(refused.map(d => d.observationId)).toEqual(["j"])
+	}, 120_000)
+})
+
+describe("M1 residual: an own veto spares joined observations by timing, not by class", () => {
+	const DIGITAL_SHADOW = {
+		analogFm: false,
+		shadowAllowed: true,
+		spectralDigital: true,
+		digitalClass: true,
+	}
+	/** A snapshot that is still a shadow: no class yet, a recording may start in memory. */
+	const SHADOW = { analogFm: false, shadowAllowed: true }
+
+	/**
+	 * A 2.5 s digital burst `b` (a shadow, its spectrum reads 4FSK only), 200 ms of quiet, then a
+	 * 6 s analog FM over `v` on the same channel that joins `b`'s session inside its hang. `v`'s
+	 * snapshots are shadows until `classAt` seconds in (default 2 s), analog-fm after; `b`'s close
+	 * is reported `closeAt` seconds into `v` (default 0.4 s, `closeInfo`); `atVoice(at)` runs before
+	 * each chunk of `v`.
+	 */
+	const scene = async (opts: {
+		closeInfo: Parameters<Harness["rec"]["closed"]>[3]
+		closeAt?: number
+		classAt?: number
+		atVoice?: (h: Harness, at: number) => void
+		label?: () => DecodedLabel | null
+		reserveCores?: (cores: number) => (() => void) | null
+	}) => {
+		const h = low(
+			{
+				liveClock: true,
+				decodedLabel: () => opts.label?.() ?? null,
+				...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
+			},
+			{ ctcssHz: null },
+		)
+		await h.feed(1, false)
+		const burstOnset = h.engine.liveEdge()
+		await h.feed(2.5, true, () => {
+			const edge = h.engine.liveEdge()
+			if (edge - burstOnset >= 0.1 * h.fs)
+				h.rec.track(
+					input("b", snapshot("b", burstOnset, edge, LOW), DIGITAL_SHADOW),
+				)
+		})
+		const burstEnd = h.engine.liveEdge()
+		await h.feed(0.2, false)
+		const voiceOnset = h.engine.liveEdge()
+		let closedBurst = false
+		await h.feed(6, true, () => {
+			const edge = h.engine.liveEdge()
+			const at = (edge - voiceOnset) / h.fs
+			opts.atVoice?.(h, at)
+			if (at >= 0.1)
+				h.rec.track(
+					input(
+						"v",
+						snapshot("v", voiceOnset, edge, LOW),
+						at < (opts.classAt ?? 2) ? SHADOW : {},
+					),
+				)
+			if (at >= (opts.closeAt ?? 0.4) && !closedBurst) {
+				closedBurst = true
+				h.rec.closed(
+					"b",
+					snapshot("b", burstOnset, burstEnd, LOW),
+					null,
+					opts.closeInfo,
+				)
+			}
+		})
+		const voiceEnd = h.engine.liveEdge()
+		await h.feed(0.6, false)
+		h.rec.closed("v", snapshot("v", voiceOnset, voiceEnd, LOW), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		await h.feed(3.5, false)
+		await h.rec.idle()
+		return h
+	}
+
+	const refusalsOf = (h: Harness, id: string) =>
+		(h.rec.diagnostics().recentRefusals ?? []).filter(
+			d => d.observationId === id && d.code === "refused:not-analog",
+		)
+
+	const expectVoiceKept = (h: Harness) => {
+		const kept = h.ops.filter(o => o.outcome === "finalized")
+		expect(kept).toHaveLength(1)
+		expect(kept[0]!.input.observationId).toBe("v")
+		// The whole over (from the burst's end, the pre-roll floored there) and its hang, nothing
+		// of the 2.5 s burst before it (one 25 ms chunk of rounding).
+		expect(kept[0]!.frames).toBeGreaterThanOrEqual(6 * 8000)
+		expect(kept[0]!.frames).toBeLessThanOrEqual((0.2 + 6 + 2) * 8000 + 200)
+		expect(codes(h)).toContain("discarded:not-analog")
+		expect(refusalsOf(h, "v")).toEqual([])
+		expect(
+			h.rec
+				.diagnostics()
+				.recent.filter(
+					d => d.observationId === "v" && d.code === "discarded:not-analog",
+				),
+		).toEqual([])
+	}
+
+	it("a pager decode citing the burst after its close, while the joined voice is still a shadow (its class comes later): the voice is recorded and kept", async () => {
+		let label: DecodedLabel | null = null
+		const h = await scene({
+			closeInfo: { analogFm: false, digitalClass: true, discoveryId: "d_1" },
+			label: () => label,
+			atVoice: (h, at) => {
+				if (at >= 1 && label === null)
+					label = { protocol: "pocsag", at: h.now(), observationId: "b" }
+			},
+		})
+		expectVoiceKept(h)
+	}, 120_000)
+
+	it("the burst's close carrying the channel tier's digital class while the session is unclassed (the joined voice a shadow): the voice is recorded and kept", async () => {
+		const h = await scene({
+			closeInfo: {
+				analogFm: false,
+				nonAnalog: true,
+				digitalClass: true,
+				discoveryId: "d_1",
+			},
+		})
+		expectVoiceKept(h)
+	}, 120_000)
+
+	it("a pager decode citing the burst before its close is reported (the voice a shadow): the burst's newest report ends it, the voice is recorded and kept", async () => {
+		let label: DecodedLabel | null = null
+		const h = await scene({
+			closeInfo: { analogFm: false, digitalClass: true, discoveryId: "d_1" },
+			closeAt: 1.2,
+			label: () => label,
+			atVoice: (h, at) => {
+				if (at >= 0.5 && label === null)
+					label = { protocol: "pocsag", at: h.now(), observationId: "b" }
+			},
+		})
+		expectVoiceKept(h)
+	}, 120_000)
+
+	it("the restarted voice refused for CPU on its next snapshots starts later: its file is marked cut and kept, nothing is refused as not analog", async () => {
+		let label: DecodedLabel | null = null
+		let blockedUntil = Number.NEGATIVE_INFINITY
+		let edgeNow = 0
+		const h = await scene({
+			closeInfo: { analogFm: false, digitalClass: true, discoveryId: "d_1" },
+			label: () => label,
+			reserveCores: () => (edgeNow < blockedUntil ? null : () => undefined),
+			atVoice: (h, at) => {
+				edgeNow = at
+				if (at >= 1 && label === null) {
+					label = { protocol: "pocsag", at: h.now(), observationId: "b" }
+					// The CPU budget is full for the next 3.5 s of the voice: past the ring's reach.
+					blockedUntil = at + 3.5
+				}
+			},
+		})
+		const cpu = [
+			...h.rec.diagnostics().recent,
+			...(h.rec.diagnostics().recentRefusals ?? []),
+		].filter(d => d.observationId === "v" && d.code === "refused:cpu")
+		expect(cpu.length).toBeGreaterThan(0)
+		const kept = h.ops.filter(o => o.outcome === "finalized")
+		expect(kept.map(o => o.input.observationId)).toEqual(["v"])
+		// Started about 4.5 s into the 6 s over (the ring no longer held its onset): the rest of it
+		// and its hang, marked cut.
+		expect(kept[0]!.frames).toBeGreaterThanOrEqual((6 - 4.5 + 2) * 8000 - 400)
+		expect(kept[0]!.cut).toBe("source-lost")
+		expect(refusalsOf(h, "v")).toEqual([])
+	}, 120_000)
+
+	it("a pager decode naming no observation, stamped after the joined voice's onset, cannot be told from a decode of the voice: the voice is refused too", async () => {
+		let label: DecodedLabel | null = null
+		const h = await scene({
+			closeInfo: { analogFm: false, digitalClass: true, discoveryId: "d_1" },
+			label: () => label,
+			atVoice: (h, at) => {
+				if (at >= 1 && label === null)
+					label = { protocol: "pocsag", at: h.now(), observationId: null }
+			},
+		})
+		expect(h.ops.filter(o => o.outcome === "finalized")).toEqual([])
+		expect(codes(h)).toContain("discarded:not-analog")
+		expect(refusalsOf(h, "v")).toHaveLength(1)
+	}, 120_000)
+})
+
+describe("minor 1: an own veto keeps only the files overlapping a joined voice", () => {
+	it("an open digital owner with one neighbouring analog-fm reading, then a decode citing the owner: the owner's audio after the reading is not kept", async () => {
+		let label: DecodedLabel | null = null
+		const h = low(
+			{ liveClock: true, decodedLabel: () => label },
+			{ ctcssHz: null },
+		)
+		await h.feed(1, false)
+		const onset = h.engine.liveEdge()
+		let nOnset = 0
+		let nClosed = false
+		await h.feed(12, true, () => {
+			const edge = h.engine.liveEdge()
+			const at = (edge - onset) / h.fs
+			if (at >= 0.1)
+				h.rec.track(
+					input("o", snapshot("o", onset, edge, LOW), {
+						analogFm: false,
+						shadowAllowed: true,
+						spectralDigital: true,
+						digitalClass: true,
+					}),
+				)
+			if (at >= 1 && nOnset === 0) nOnset = edge
+			if (nOnset !== 0 && !nClosed) {
+				if (at < 2) h.rec.track(input("n", snapshot("n", nOnset, edge, LOW)))
+				else {
+					nClosed = true
+					h.rec.closed("n", snapshot("n", nOnset, edge, LOW), null, {
+						analogFm: true,
+						discoveryId: "d_1",
+					})
+				}
+			}
+			if (at >= 4 && label === null)
+				label = { protocol: "pocsag", at: h.now(), observationId: "o" }
+		})
+		const end = h.engine.liveEdge()
+		await h.feed(0.6, false)
+		h.rec.closed("o", snapshot("o", onset, end, LOW), null)
+		await h.feed(3.5, false)
+		await h.rec.idle()
+		const kept = h.ops.filter(o => o.outcome === "finalized")
+		expect(kept).toHaveLength(1)
+		// From the pre-roll to the reading's end, and at most what was already written when the
+		// decode came (writes trail the edge by 1 s): never the 12 s owner and its hang.
+		expect(kept[0]!.frames).toBeGreaterThanOrEqual((0.3 + 2) * 8000 - 400)
+		expect(kept[0]!.frames).toBeLessThanOrEqual((0.3 + 4) * 8000 + 400)
+		expect(
+			(h.rec.diagnostics().recentRefusals ?? [])
+				.filter(d => d.code === "refused:not-analog")
+				.map(d => d.observationId),
+		).toContain("o")
+	}, 120_000)
+})
+
+describe("minor 2 and 4: continuations at decoded joins", () => {
+	/**
+	 * An analog over `o` of `seconds`; `joins` other signals, each `j<i>` 0.5 s long from `at`
+	 * seconds in, with `info` (default the channel tier's digital class); `atVoice(at)` per chunk.
+	 */
+	const scene = async (
+		seconds: number,
+		joins: readonly number[],
+		opts: {
+			info?: Partial<WidebandTrackInput>
+			label?: () => DecodedLabel | null
+			atVoice?: (h: Harness, at: number) => void
+		} = {},
+	) => {
+		const h = low(
+			{
+				liveClock: true,
+				...(opts.label ? { decodedLabel: () => opts.label?.() ?? null } : {}),
+			},
+			{ ctcssHz: null },
+		)
+		await h.feed(1, false)
+		const onset = h.engine.liveEdge()
+		const starts = joins.map(() => 0)
+		const closed = joins.map(() => false)
+		await h.feed(seconds, true, () => {
+			const edge = h.engine.liveEdge()
+			const at = (edge - onset) / h.fs
+			opts.atVoice?.(h, at)
+			if (at >= 0.1) h.rec.track(input("o", snapshot("o", onset, edge, LOW)))
+			joins.forEach((from, i) => {
+				if (at < from || closed[i]) return
+				if (starts[i] === 0) starts[i] = edge
+				const id = `j${i + 1}`
+				if (at < from + 0.5)
+					h.rec.track(
+						input(id, snapshot(id, starts[i]!, edge, LOW), {
+							discoveryId: "d_2",
+							...(opts.info ?? {
+								analogFm: false,
+								nonAnalog: true,
+								digitalClass: true,
+							}),
+						}),
+					)
+				else {
+					closed[i] = true
+					h.rec.closed(id, snapshot(id, starts[i]!, edge, LOW), null)
+				}
+			})
+		})
+		const end = h.engine.liveEdge()
+		await h.feed(0.6, false)
+		h.rec.closed("o", snapshot("o", onset, end, LOW), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		await h.feed(3.5, false)
+		await h.rec.idle()
+		return h
+	}
+
+	const refused = (h: Harness) =>
+		(h.rec.diagnostics().recentRefusals ?? [])
+			.filter(d => d.code === "refused:not-analog")
+			.map(d => d.observationId)
+
+	it("a decode of a joined signal arriving after frames past the join were written: the continuation starts past them, no sample is recorded twice", async () => {
+		let label: DecodedLabel | null = null
+		// The joined signal (a shadow) 5 to 5.5 s in; its DMR decode on the same discovery 3 s later.
+		const h = await scene(14, [5], {
+			info: { analogFm: false, discoveryId: "d_1" },
+			label: () => label,
+			atVoice: (h, at) => {
+				if (at >= 8.5 && label === null)
+					label = { protocol: "dmr", at: h.now(), observationId: "j1" }
+			},
+		})
+		const kept = h.ops.filter(o => o.outcome === "finalized")
+		expect(kept.map(o => o.input.observationId)).toEqual(["o", "o"])
+		const total = kept.reduce((n, o) => n + o.frames, 0)
+		// The pre-roll, the 14 s over and its hang, each sample at most once (two chunks of rounding),
+		// and nothing of it lost past the first file's written end.
+		expect(total).toBeLessThanOrEqual((0.3 + 14 + 2) * 8000 + 400)
+		expect(total).toBeGreaterThanOrEqual((0.3 + 14 + 2) * 8000 - 800)
+		expect(refused(h)).toEqual(["j1"])
+	}, 120_000)
+
+	it(`a decoded signal joining again and again restarts the owner at most ${WIDEBAND_MAX_JOIN_RESTARTS} times per 240 s: at the cap it restarts, past it the owner keeps one session`, async () => {
+		expect(WIDEBAND_MAX_JOIN_RESTARTS).toBe(3)
+		const joins = [3, 6, 9, 12, 15]
+		const h = await scene(18, joins)
+		const kept = h.ops.filter(o => o.outcome === "finalized")
+		// The first file and 3 continuations (at j1, j2, j3: the third reaches the cap); j4 and j5
+		// stay in the last one.
+		expect(kept.map(o => o.input.observationId)).toEqual(["o", "o", "o", "o"])
+		expect(refused(h).sort()).toEqual(["j1", "j2", "j3", "j4", "j5"])
+		const total = kept.reduce((n, o) => n + o.frames, 0)
+		expect(total).toBeLessThanOrEqual((0.3 + 18 + 2) * 8000 + 400)
+		// The last file holds the over from j3's end on, j4 and j5 included, and its hang.
+		expect(kept[3]!.frames).toBeGreaterThanOrEqual((18 - 9.5 + 2) * 8000 - 800)
+		expect(codes(h)).not.toContain("discarded:not-analog")
 	}, 120_000)
 })
