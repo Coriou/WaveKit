@@ -33,9 +33,13 @@ export function isLanIpv4(a, b) {
 	)
 }
 
+/** The agent paths AGENTS.md names: the memory link and its index. */
+const AGENT_LINKS = ["memory", "memory/MEMORY.md"].map(p => `.agents/${p}`)
+
 /**
  * Built-in content rules; `find` returns the matched tokens. A token of a plain rule that already
- * appears in the public base is allowed (it is published already); an `absolute` rule never is.
+ * appears as a whole token of the same rule in the public base is allowed (it is published
+ * already); an `absolute` rule never is.
  * @type {{ label: string, absolute?: boolean, find: (text: string) => string[] }[]}
  */
 const CONTENT_RULES = [
@@ -69,7 +73,7 @@ const CONTENT_RULES = [
 	{
 		label: "home directory path",
 		find: text =>
-			[...text.matchAll(/\/(?:Users|home)\/[\w.-]+/g)].map(m => m[0]),
+			[...text.matchAll(/\/(?:Users|home)\/[^\s"'`)]+/g)].map(m => m[0]),
 	},
 	{
 		label: "email address",
@@ -77,6 +81,16 @@ const CONTENT_RULES = [
 			[...text.matchAll(/[\w.%+-]+@([\w-]+(?:\.[\w-]+)*\.[a-z]{2,})\b/gi)]
 				.filter(m => !SAFE_DOMAIN.test(m[1] ?? "") && !FILE_SUFFIX.test(m[0]))
 				.map(m => m[0]),
+	},
+	{
+		// The private agent directory may be named on its own, as may the shared memory link and its
+		// index file that AGENTS.md names (AGENT_LINKS); never anything else inside it.
+		label: "private agent path",
+		absolute: true,
+		find: text =>
+			[...text.matchAll(/(?<![\w-])\.agents\/[\w.\/-]*\w/g)]
+				.map(m => m[0])
+				.filter(t => !AGENT_LINKS.includes(t)),
 	},
 	{
 		label: "private key",
@@ -173,13 +187,14 @@ export function addedLines(patch) {
 
 /**
  * Every hygiene hit of a diff. Fails closed: a deny-list error is itself a hit. A built-in rule's
- * token that `inBase` finds in the public base is allowed; deny-list and absolute rules never are.
+ * token is allowed when `inBase` finds it in the public base as a whole token of that rule (it
+ * gets the rule's `find` to check the base lines with); deny-list and absolute rules never are.
  * Binaries are allowed under fixtures/ only; the size limit applies everywhere.
  * @param {{
  *   changes: { path: string, status: string, binary: boolean, size: number }[],
  *   added: Map<string, { line: number, text: string }[]>,
  *   denylist: { patterns: RegExp[] } | { error: string },
- *   inBase?: (token: string) => boolean,
+ *   inBase?: (token: string, find: (text: string) => string[]) => boolean,
  * }} input
  * @returns {{ file: string, line: number, label: string }[]}
  */
@@ -191,13 +206,27 @@ export function scanHygiene({
 }) {
 	/** @type {{ file: string, line: number, label: string }[]} */
 	const hits = []
-	if ("error" in denylist)
-		hits.push({ file: "(deny-list)", line: 0, label: denylist.error })
+	const seen = new Set()
+	const hit = (
+		/** @type {string} */ file,
+		/** @type {number} */ line,
+		/** @type {string} */ label,
+	) => {
+		const key = `${file}\0${line}\0${label}`
+		if (seen.has(key)) return
+		seen.add(key)
+		hits.push({ file, line, label })
+	}
+	if ("error" in denylist) hit("(deny-list)", 0, denylist.error)
 	const patterns = "patterns" in denylist ? denylist.patterns : []
 	const known = new Map()
-	const published = (/** @type {string} */ t) => {
-		if (!known.has(t)) known.set(t, inBase(t))
-		return known.get(t)
+	const published = (
+		/** @type {(typeof CONTENT_RULES)[number]} */ rule,
+		/** @type {string} */ t,
+	) => {
+		const key = `${rule.label}\0${t}`
+		if (!known.has(key)) known.set(key, inBase(t, rule.find))
+		return known.get(key)
 	}
 	const scan = (
 		/** @type {string} */ file,
@@ -206,30 +235,24 @@ export function scanHygiene({
 	) => {
 		for (const rule of CONTENT_RULES) {
 			const tokens = rule.find(text)
-			if (tokens.some(t => rule.absolute || !published(t)))
-				hits.push({ file, line, label: rule.label })
+			if (tokens.some(t => rule.absolute || !published(rule, t)))
+				hit(file, line, rule.label)
 		}
 		patterns.forEach((re, i) => {
-			if (re.test(text))
-				hits.push({ file, line, label: `deny-list pattern ${i + 1}` })
+			if (re.test(text)) hit(file, line, `deny-list pattern ${i + 1}`)
 		})
 	}
 	const paths = new Set([...changes.map(c => c.path), ...added.keys()])
 	for (const path of paths) {
 		if (/(?:^|\/)\.agents(?:\/|$)/.test(path))
-			hits.push({ file: path, line: 0, label: "private agent path" })
+			hit(path, 0, "private agent path")
 		scan(path, 0, path)
 	}
 	for (const c of changes) {
 		if (c.status === "D") continue
 		if (c.binary && !c.path.startsWith("fixtures/"))
-			hits.push({
-				file: c.path,
-				line: 0,
-				label: "binary file outside fixtures/",
-			})
-		if (c.size > BIG_FILE_BYTES)
-			hits.push({ file: c.path, line: 0, label: "file over 1 MB" })
+			hit(c.path, 0, "binary file outside fixtures/")
+		if (c.size > BIG_FILE_BYTES) hit(c.path, 0, "file over 1 MB")
 	}
 	for (const [file, lines] of added)
 		for (const { line, text } of lines) scan(file, line, text)
@@ -286,16 +309,26 @@ export const untrackedLine = paths =>
 export const WORKERS = 3
 
 /**
- * Greedy longest-first packing into `bins` shards; files missing from `weights` weigh 1. A shard's
- * cost is the time it is expected to take, max(heaviest file, total / WORKERS), and each file goes
- * to the shard whose cost grows least, then the lightest, then the lowest. Deterministic: ties
- * order by path.
+ * Seconds every test file costs beyond its measured duration (vitest's per-file time leaves out
+ * the worker's import and collect phase). Fitted on four checks of 1320 files: per shard,
+ * c = (WORKERS × (job seconds − 18 s of setup) − measured file seconds) / files, summed over the
+ * shards, gave 0.99, 1.12, 0.81 and 1.22 s per file (e.g. 3 × (1352 − 108) − 2449 = 1283 s over
+ * 1320 files = 0.97 s); about 1 s.
+ */
+export const FILE_OVERHEAD_S = 1
+
+/**
+ * Greedy longest-first packing into `bins` shards. A file weighs its `weights` entry (0 when
+ * unlisted: the table keeps files of a second or more) plus FILE_OVERHEAD_S. A shard's cost is the
+ * time it is expected to take, max(heaviest file, total / WORKERS), and each file goes to the
+ * shard whose cost grows least, then the lightest, then the lowest. Deterministic: ties order by
+ * path.
  * @param {string[]} files
  * @param {Record<string, number>} weights
  * @returns {{ files: string[], weight: number, cost: number }[]}
  */
 export function packShards(files, weights, bins = SHARDS) {
-	const w = (/** @type {string} */ f) => weights[f] ?? 1
+	const w = (/** @type {string} */ f) => (weights[f] ?? 0) + FILE_OVERHEAD_S
 	const sorted = [...new Set(files)].sort(
 		(a, b) => w(b) - w(a) || (a < b ? -1 : a > b ? 1 : 0),
 	)
@@ -432,23 +465,14 @@ export const artifactName = job =>
 	`verdict-${job.replace(/ \((\d+)\)$/, "-$1")}`
 
 /**
- * Exit code of a check: 1 any real failure (including local docs), 3 a job without a verdict,
- * 2 flaky only, 0 green.
- * @param {{ verdicts: Map<string, { ok: boolean, flaky?: unknown[] }>, expected: string[], docsOk: boolean }} input
+ * Exit code of a check: 1 any real failure, 2 a job without a verdict, 0 green (flaky tests
+ * included: a file that passed on its rerun is a pass).
+ * @param {{ verdicts: Map<string, { ok: boolean }>, expected: string[] }} input
  */
-export function exitCode({ verdicts, expected, docsOk }) {
-	const present = [...verdicts.values()]
-	if (!docsOk || present.some(v => !v.ok)) return 1
-	if (expected.some(name => !verdicts.has(name))) return 3
-	if (present.some(v => (v.flaky?.length ?? 0) > 0)) return 2
+export function exitCode({ verdicts, expected }) {
+	if ([...verdicts.values()].some(v => !v.ok)) return 1
+	if (expected.some(name => !verdicts.has(name))) return 2
 	return 0
-}
-
-/** Ratio of the slowest to the fastest root shard's test phase; 1 when there is nothing to compare. */
-export function shardSpread(seconds) {
-	const s = seconds.filter(x => x > 0)
-	if (s.length < 2) return 1
-	return Math.max(...s) / Math.min(...s)
 }
 
 /**
@@ -472,14 +496,13 @@ export function durationTable(durations, previous = {}) {
 export const mmss = s =>
 	`${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, "0")}s`
 
-const WORD = { 0: "PASS", 1: "FAIL", 2: "FLAKY", 3: "INFRA" }
+const WORD = { 0: "PASS", 1: "FAIL", 2: "INFRA" }
 
 /**
- * The summary, at most 30 lines.
+ * The summary, at most 30 lines; a FAIL ends with how to force a recheck of the same tree.
  * @param {{
- *   code: 0 | 1 | 2 | 3, tree: string, base: string, seconds: number,
+ *   code: 0 | 1 | 2, tree: string, base: string, seconds: number,
  *   static?: { ok: boolean, seconds: number, steps: Record<string, number> } | undefined,
- *   docsOk: boolean,
  *   root: ({ ok: boolean, seconds: number, steps: Record<string, number>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[] } | undefined)[],
  *   others?: { name: string, ok: boolean, seconds: number, steps: Record<string, number> }[],
  *   missing: string[], url: string, runNote: string, notes?: string[],
@@ -494,14 +517,10 @@ export function formatSummary(s) {
 			.filter(([, c]) => c !== 0)
 			.map(([n]) => n)
 	const st = s.static
-	const staticBad = [
-		...(st ? bad(st.steps) : []),
-		...(s.docsOk ? [] : ["docs"]),
-	]
 	head.push(
 		st
-			? `static ${st.ok && s.docsOk ? "ok" : "FAIL"} ${st.seconds}s${staticBad.length ? `  (${staticBad.join(" ")})` : ""}`
-			: `static MISSING${s.docsOk ? "" : "  (docs)"}`,
+			? `static ${st.ok ? "ok" : "FAIL"} ${st.seconds}s${bad(st.steps).length ? `  (${bad(st.steps).join(" ")})` : ""}`
+			: "static MISSING",
 	)
 	const word = (
 		/** @type {{ ok: boolean, flaky?: unknown[] } | undefined} */ v,
@@ -534,6 +553,7 @@ export function formatSummary(s) {
 	const tail = [...(s.notes ?? [])]
 	if (s.code !== 0 && s.url)
 		tail.push(`run ${s.url}${s.runNote ? `  (${s.runNote})` : ""}`)
+	if (s.code === 1) tail.push(`recheck: rm -r .remote-check/${s.tree}`)
 	const body = []
 	let room = SUMMARY_LINES - head.length - tail.length
 	const list = (
@@ -565,23 +585,6 @@ export function formatSummary(s) {
 }
 
 // ---------------------------------------------------------------- sweep
-
-/**
- * The ci/<12 hex> branches and their runs older than `maxAgeMs`; a branch of unknown age stays.
- * @param {{ branches: { name: string, time: number }[], runs: { id: number, branch: string, createdAt: number }[], now: number, maxAgeMs: number }} input
- */
-export function sweepTargets({ branches, runs, now, maxAgeMs }) {
-	const old = (/** @type {number} */ t) =>
-		Number.isFinite(t) && now - t > maxAgeMs
-	return {
-		branches: branches
-			.filter(b => BRANCH_RE.test(b.name) && old(b.time))
-			.map(b => b.name),
-		runs: runs
-			.filter(r => BRANCH_RE.test(r.branch) && old(r.createdAt))
-			.map(r => r.id),
-	}
-}
 
 // ---------------------------------------------------------------- git inputs
 
@@ -667,21 +670,28 @@ export function refusal(why, hits) {
 }
 
 /**
+ * Paths whose change runs the native job: the Rust crates, and the TypeScript references and
+ * tests its "Kernels against the JS reference" step pins the Wasm kernels to (ci.yml's channelizer
+ * job): the spectrum pipeline, the wideband NFM demodulator, the analog recorder and its decisions.
+ */
+export const NATIVE_PREFIXES = [
+	"native/",
+	"src/core/spectrum/",
+	"src/core/scanner/channel/wideband-nfm",
+	"src/core/scanner/channel/wideband-analog-recorder",
+	"src/core/scanner/channel/recorder-decisions",
+	"tests/unit/core/spectrum/",
+	"tests/unit/core/scanner/channel/",
+	"tests/unit/core/scanner/wideband-analog",
+	"tests/unit/core/scanner/recorder-decisions",
+]
+
+/**
  * The fixed, neutral message of a check commit; ` [native]` makes the workflow run its native job.
  * @param {string[]} paths changed paths
  */
 export const commitMessage = paths =>
-	`ci: remote check${paths.some(p => p.startsWith("native/")) ? " [native]" : ""}`
-
-/** The failing lines of check-docs output, trimmed to 200 characters. @param {string} text */
-export const docsProblem = text =>
-	trimMessage(
-		text
-			.split("\n")
-			.filter(l => /fail|stale|broken|missing|error/i.test(l))
-			.join("\n") || text,
-		200,
-	)
+	`ci: remote check${paths.some(p => NATIVE_PREFIXES.some(n => p.startsWith(n))) ? " [native]" : ""}`
 
 // ---------------------------------------------------------------- client steps
 
@@ -733,7 +743,8 @@ export function writeTree(git) {
 
 /**
  * Every refusal of a check: untracked files, then the hygiene scan of the diff from `mb` to `tree`
- * (a token of a built-in rule is allowed when `git grep` finds it in `mb`). Fails closed.
+ * (a token of a built-in rule is allowed when a line `git grep` finds in `mb` holds it as a whole
+ * token of that rule, so a longer address in the base does not allow its prefix). Fails closed.
  * @param {{ git: Git, mb: string, tree: string, untracked: { path: string, size: number }[], denylist: { patterns: RegExp[] } | { error: string } }} input
  */
 export function refusals({ git, mb, tree, untracked, denylist }) {
@@ -746,7 +757,13 @@ export function refusals({ git, mb, tree, untracked, denylist }) {
 			...scanHygiene({
 				...c,
 				denylist,
-				inBase: t => ok(() => git(["grep", "-F", "-q", "-e", t, mb, "--"])),
+				inBase: (t, find) =>
+					(
+						quiet(() => git(["grep", "-h", "-I", "-F", "-e", t, mb, "--"])) ??
+						""
+					)
+						.split("\n")
+						.some(l => find(l).includes(t)),
 			}),
 		]
 		return { hits, paths: c.changes.map(x => x.path) }
@@ -764,46 +781,40 @@ export function refusals({ git, mb, tree, untracked, denylist }) {
  * @param {{ git: Git, gh: (args: string[]) => string, remote: string, runs: { databaseId: number, headBranch: string, createdAt: string }[], now: number, maxAgeMs: number }} input
  */
 export function sweep({ git, gh, remote, runs, now, maxAgeMs }) {
+	const old = (/** @type {number} */ t) =>
+		Number.isFinite(t) && t > 0 && now - t > maxAgeMs
 	const ls = quiet(() => git(["ls-remote", remote, "refs/heads/ci/*"])) ?? ""
-	const branches = ls
-		.split("\n")
-		.filter(Boolean)
-		.map(l => {
-			const [sha = "", ref = ""] = l.split("\t")
-			const name = ref.replace("refs/heads/", "")
-			const times = runs
-				.filter(r => r.headBranch === name)
-				.map(r => Date.parse(r.createdAt))
-			const local = quiet(
-				() => Number(git(["log", "-1", "--format=%ct", sha]).trim()) * 1000,
-			)
-			return {
-				name,
-				time: times.length ? Math.max(...times) : (local ?? Number.NaN),
-			}
-		})
-	const old = sweepTargets({
-		branches,
-		runs: runs.map(r => ({
-			id: r.databaseId,
-			branch: r.headBranch,
-			createdAt: Date.parse(r.createdAt),
-		})),
-		now,
-		maxAgeMs,
-	})
-	for (const b of old.branches)
+	const branches = []
+	for (const l of ls.split("\n").filter(Boolean)) {
+		const [sha = "", ref = ""] = l.split("\t")
+		const name = ref.replace("refs/heads/", "")
+		if (!BRANCH_RE.test(name)) continue
+		const times = runs
+			.filter(r => r.headBranch === name)
+			.map(r => Date.parse(r.createdAt))
+		const time = times.length
+			? Math.max(...times)
+			: Number(
+					quiet(() => git(["log", "-1", "--format=%ct", sha]).trim()) || 0,
+				) * 1000
+		if (old(time)) branches.push(name)
+	}
+	const ids = runs
+		.filter(r => BRANCH_RE.test(r.headBranch) && old(Date.parse(r.createdAt)))
+		.map(r => r.databaseId)
+	for (const b of branches)
 		quiet(() => git(["push", "-q", remote, "--delete", b]))
-	for (const id of old.runs) quiet(() => gh(["run", "delete", String(id)]))
-	return old
+	for (const id of ids) quiet(() => gh(["run", "delete", String(id)]))
+	return { branches, runs: ids }
 }
 
 /**
  * The verdict of a completed run: exit code and summary from the downloaded verdicts in `dl`.
- * Side files: `<out>/durations.json` (a candidate table, on a green run whose shards drifted; the
- * tracked table is only read) and the flaky ledger under `<home>/.cache/wavekit-remote`.
+ * Side files: `<out>/durations.json` (a refreshed table from every green run with all six shards,
+ * for a maintainer to copy over the tracked one; the tracked table is only read) and the flaky
+ * ledger under `<home>/.cache/wavekit-remote`.
  * @param {{
- *   dl: string, expected: string[], docs: { ok: boolean, text: string }, notes: string[],
+ *   dl: string, expected: string[], notes: string[],
  *   view: { url: string, createdAt: string, updatedAt: string },
  *   tree12: string, mb: string, root: string, out: string, home: string, now: number,
  * }} r
@@ -820,19 +831,19 @@ export function verdictOf(r) {
 	const shards = Array.from({ length: SHARDS }, (_, i) =>
 		verdicts.get(`verdict-root-${i + 1}`),
 	)
-	const code = /** @type {0 | 1 | 2 | 3} */ (
-		exitCode({ verdicts, expected: r.expected, docsOk: r.docs.ok })
+	const code = /** @type {0 | 1 | 2} */ (
+		exitCode({ verdicts, expected: r.expected })
 	)
-	const notes = [...r.notes]
-	if (!r.docs.ok) notes.push(`docs: ${docsProblem(r.docs.text)}`)
-	const spread = shardSpread(shards.map(v => v?.testSeconds ?? 0))
-	if (code === 0 && shards.every(Boolean) && spread > 1.5) {
-		const table = JSON.parse(
-			fs.readFileSync(
-				join(r.root, "scripts/remote-check-durations.json"),
-				"utf8",
-			),
-		)
+	if (code === 0 && shards.every(Boolean)) {
+		const table =
+			quiet(() =>
+				JSON.parse(
+					fs.readFileSync(
+						join(r.root, "scripts/remote-check-durations.json"),
+						"utf8",
+					),
+				),
+			) ?? {}
 		table.files = durationTable(
 			shards.map(v => v?.durations ?? {}),
 			table.files ?? {},
@@ -840,9 +851,6 @@ export function verdictOf(r) {
 		fs.writeFileSync(
 			join(r.out, "durations.json"),
 			`${JSON.stringify(table, null, "\t")}\n`,
-		)
-		notes.push(
-			`durations drifted ${spread.toFixed(1)}x: cp .remote-check/durations.json scripts/remote-check-durations.json`,
 		)
 	}
 	const flaky = shards.flatMap(v => v?.flaky ?? [])
@@ -864,15 +872,14 @@ export function verdictOf(r) {
 		seconds:
 			(Date.parse(r.view.updatedAt) - Date.parse(r.view.createdAt)) / 1000,
 		static: verdicts.get("verdict-static"),
-		docsOk: r.docs.ok,
 		root: shards,
 		others: [...verdicts]
 			.filter(([n]) => n !== "verdict-static" && !n.startsWith("verdict-root-"))
 			.map(([n, v]) => ({ ...v, name: n.slice(8) })),
 		missing: r.expected.filter(n => !verdicts.has(n)).map(n => n.slice(8)),
 		url: r.view.url,
-		runNote: code === 3 ? "kept for inspection" : "deleted",
-		notes,
+		runNote: code === 2 ? "kept for inspection" : "deleted",
+		notes: r.notes,
 	})
 	return { code, text }
 }

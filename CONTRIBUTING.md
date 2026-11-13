@@ -54,13 +54,19 @@ the root suite in six shards on GitHub runners, so your machine stays free. The 
 changes plus untracked files) into one commit with a fixed message, scans the diff for private
 data and refuses on a hit, pushes it to a temporary `ci/<hash>` branch, waits up to 9 minutes and
 prints a short summary (also in `.remote-check/summary.txt`). It deletes the branch and the run
-afterwards, and repeating it for the same tree prints the stored result offline.
+afterwards, and repeating it for the same tree prints the stored result offline, a failure
+included: `rm -r .remote-check/<hash>` (the last line of a failed summary) forces a recheck. It
+does not check the docs: run `node scripts/check-docs.mjs` locally beside it.
 
-Exit codes: 0 green, 1 real failures, 2 flaky only (a failed file passed when rerun), 3
-infrastructure, 4 refused (hygiene or base), 5 still running (run it again to attach). The runs
-always conclude as successful on GitHub; the verdict is in the summary. Files touching `native/`
-also run the channelizer and kernel tests. Put extra private patterns, one regular expression per
-line, in `~/.config/wavekit-remote/denylist`.
+Exit codes: 0 green (a test that failed and then passed on its rerun is listed as flaky, still a
+pass), 1 real failures, 2 infrastructure (the run is kept for inspection), 3 refused (hygiene or
+base), 4 still running (run it again to attach). The runs always conclude as successful on
+GitHub; the verdict is in the summary. Changes to `native/` or to the TypeScript code the Wasm
+kernels are compared with also run the channelizer and kernel tests. Put extra private patterns,
+one regular expression per line, in `~/.config/wavekit-remote/denylist`. Shards are packed by the
+per-file seconds in `scripts/remote-check-durations.json`; every green check leaves a refreshed
+table in `.remote-check/durations.json`, and a maintainer copies it over the tracked one when the
+shard times drift apart.
 
 ## Documentation
 

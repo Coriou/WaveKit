@@ -1,4 +1,4 @@
-/** Types for scripts/remote-check-lib.mjs, so TypeScript tests can import it. */
+/** Types for scripts/remote-check-lib.mjs: the exports TypeScript tests import. */
 export interface Change {
 	path: string
 	status: string
@@ -41,25 +41,15 @@ export interface ShardVerdict {
 	durations?: Record<string, number>
 }
 
-export const SHARDS: number
-export const WORKERS: number
-export const MESSAGE_CHARS: number
 export const SUMMARY_LINES: number
-export const BIG_FILE_BYTES: number
-export const BRANCH_RE: RegExp
-export const DENYLIST_PATH: string
-export const UNTRACKED_DIRS: string[]
-export const RUN_FIELDS: string
-export const VIEW_FIELDS: string
-export const NO_HITS: Hit[]
-export function isLanIpv4(a: number, b: number): boolean
+export const FILE_OVERHEAD_S: number
 export function parseDenylist(read: () => string | undefined): Denylist
 export function addedLines(patch: string): Map<string, AddedLine[]>
 export function scanHygiene(input: {
 	changes: Change[]
 	added: Map<string, AddedLine[]>
 	denylist: Denylist
-	inBase?: (token: string) => boolean
+	inBase?: (token: string, find: (text: string) => string[]) => boolean
 }): Hit[]
 export function untrackedRefusals(
 	untracked: { path: string; size: number }[],
@@ -68,7 +58,6 @@ export function untrackedRefusals(
 export function untrackedLine(paths: string[]): string
 export function refusal(why: string, hits: Hit[]): string
 export function commitMessage(paths: string[]): string
-export function docsProblem(text: string): string
 export function packShards(
 	files: string[],
 	weights: Record<string, number>,
@@ -89,25 +78,21 @@ export function classifyShard(
 ): { failed: Entry[]; flaky: Entry[] }
 export function artifactName(job: string): string
 export function exitCode(input: {
-	verdicts: Map<string, { ok: boolean; flaky?: unknown[] }>
+	verdicts: Map<string, { ok: boolean }>
 	expected: string[]
-	docsOk: boolean
 }): number
-export function shardSpread(seconds: number[]): number
 export function durationTable(
 	durations: Record<string, number>[],
 	previous?: Record<string, number>,
 ): Record<string, number>
-export function mmss(seconds: number): string
 export function formatSummary(s: {
-	code: 0 | 1 | 2 | 3
+	code: 0 | 1 | 2
 	tree: string
 	base: string
 	seconds: number
 	static?:
 		| { ok: boolean; seconds: number; steps: Record<string, number> }
 		| undefined
-	docsOk: boolean
 	root: (ShardVerdict | undefined)[]
 	others?: {
 		name: string
@@ -120,55 +105,17 @@ export function formatSummary(s: {
 	runNote: string
 	notes?: string[]
 }): string
-export function sweepTargets(input: {
-	branches: { name: string; time: number }[]
-	runs: { id: number; branch: string; createdAt: number }[]
-	now: number
-	maxAgeMs: number
-}): { branches: string[]; runs: number[] }
 export function repoSlug(url: string): string
 export function collectChanges(
 	git: (args: string[]) => string,
 	from: string,
 	to: string,
 ): { changes: Change[]; added: Map<string, AddedLine[]> }
-
-export type Git = (
-	args: string[],
-	o?: { env?: Record<string, string> },
-) => string
-export function quiet<T>(f: () => T): T | undefined
-export function ok(f: () => unknown): boolean
-export function listUntracked(
-	git: Git,
-	root: string,
-): { path: string; size: number }[]
-export function writeTree(git: Git): string
-export function refusals(input: {
-	git: Git
-	mb: string
-	tree: string
-	untracked: { path: string; size: number }[]
-	denylist: Denylist
-}): { hits: Hit[]; paths: string[] }
 export function sweep(input: {
-	git: Git
+	git: (args: string[]) => string
 	gh: (args: string[]) => string
 	remote: string
 	runs: { databaseId: number; headBranch: string; createdAt: string }[]
 	now: number
 	maxAgeMs: number
 }): { branches: string[]; runs: number[] }
-export function verdictOf(r: {
-	dl: string
-	expected: string[]
-	docs: { ok: boolean; text: string }
-	notes: string[]
-	view: { url: string; createdAt: string; updatedAt: string }
-	tree12: string
-	mb: string
-	root: string
-	out: string
-	home: string
-	now: number
-}): { code: 0 | 1 | 2 | 3; text: string }

@@ -6,18 +6,17 @@
 // ci/<tree12>, waits for .github/workflows/ci-remote.yml, then deletes the branch and the run. The
 // merge base must already be on GitHub, so only the scanned diff is ever published. Idempotent by
 // tree: a second call prints the stored result offline or attaches to the live run. stdout is only
-// the summary, also written to .remote-check/summary.txt. check-docs runs locally and covers the
-// committed changes only; the summary says so when uncommitted changes touch mapped code.
+// the summary, also written to .remote-check/summary.txt. Docs are not checked here: run
+// scripts/check-docs.mjs locally.
 //
-// Exit: 0 green, 1 failures, 2 flaky only, 3 infrastructure (run kept), 4 refused or not started,
-// 5 still running after 9 minutes: call again.
+// Exit: 0 green (flaky tests included), 1 failures, 2 infrastructure (run kept), 3 refused,
+// 4 still running after 9 minutes: call again.
 
-import { execFileSync, spawnSync } from "node:child_process"
+import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-import { splitZ, stalePages } from "./check-docs.mjs"
 import * as lib from "./remote-check-lib.mjs"
 
 const { ok, quiet } = lib
@@ -48,15 +47,6 @@ export const defaultDeps = {
 	git: (args, o) => run("git", args, o),
 	/** @param {string[]} args */
 	gh: args => run("gh", args),
-	/** @param {string} root @param {string} since */
-	docs: (root, since) => {
-		const r = spawnSync(
-			process.execPath,
-			["scripts/check-docs.mjs", `--since=${since}`],
-			{ cwd: root, encoding: "utf8" },
-		)
-		return { ok: r.status === 0, text: `${r.stdout}\n${r.stderr}` }
-	},
 	/** @param {number} ms */
 	sleep: ms => new Promise(r => setTimeout(r, ms)),
 	now: () => Date.now(),
@@ -79,7 +69,7 @@ export async function remoteCheck(d, argv) {
 		return { text, code }
 	}
 	const refuse = (/** @type {string} */ why, hits = lib.NO_HITS) =>
-		finish(lib.refusal(why, hits), 4)
+		finish(lib.refusal(why, hits), 3)
 	/** @returns {{ databaseId: number, headBranch: string, createdAt: string, status: string }[]} */
 	const ciRuns = (extra = /** @type {string[]} */ ([])) =>
 		JSON.parse(
@@ -103,14 +93,21 @@ export async function remoteCheck(d, argv) {
 	// A stored result answers only the base it was checked against ("<code>\t<base>").
 	const base = argv[0] ?? `${REMOTE}/main`
 	const codeFile = join(cache, "code")
-	const [hit, hitBase] = (quiet(() => fs.readFileSync(codeFile, "utf8")) ?? "")
-		.trim()
-		.split("\t")
-	if (hit && hitBase === base)
-		return finish(
-			fs.readFileSync(join(cache, "summary.txt"), "utf8").trimEnd(),
-			Number(hit),
+	const cached = () => {
+		const [hit, hitBase] = (
+			quiet(() => fs.readFileSync(codeFile, "utf8")) ?? ""
 		)
+			.trim()
+			.split("\t")
+		const text = quiet(() =>
+			fs.readFileSync(join(cache, "summary.txt"), "utf8"),
+		)
+		return hit && hitBase === base && text
+			? finish(text.trimEnd(), Number(hit))
+			: undefined
+	}
+	const hit = cached()
+	if (hit) return hit
 
 	// The merge base with the base must be on GitHub, or the push would publish private history.
 	const ref = /^github\/(.+)$/.exec(base)?.[1] ?? "main"
@@ -137,16 +134,20 @@ export async function remoteCheck(d, argv) {
 		notes.push(`denylist missing: ~/${lib.DENYLIST_PATH}`)
 	const scan = lib.refusals({ git, mb, tree, untracked, denylist })
 	if (scan.hits.length) return refuse(`tree ${tree12}: hygiene`, scan.hits)
-	const docs = d.docs(root, mb)
-	const dirty = [
-		...splitZ(git(["diff", "--name-only", "-z", "HEAD"])),
-		...untracked.map(u => u.path),
-	]
-	const map = quiet(() =>
-		JSON.parse(fs.readFileSync(join(root, "docs/doc-map.json"), "utf8")),
-	)
-	if (map && stalePages(dirty, map).length)
-		notes.push("docs: checked committed changes only")
+
+	// Old checks (an hour or more) are swept here and again at the end; the sweep never fails a call.
+	const sweepOld = () =>
+		quiet(() =>
+			lib.sweep({
+				git,
+				gh,
+				remote: REMOTE,
+				runs: quiet(() => ciRuns()) ?? [],
+				now: d.now(),
+				maxAgeMs: SWEEP_AGE_MS,
+			}),
+		)
+	sweepOld()
 
 	// Attach to this tree's run (state.json) or a live run of its branch; otherwise delete the
 	// branch's completed runs (an earlier INFRA) and push a new one once a slot is free.
@@ -158,7 +159,7 @@ export async function remoteCheck(d, argv) {
 	const save = () => fs.writeFileSync(stateFile, JSON.stringify(state))
 	const deadline = t0 + BUDGET_MS
 	const still = (/** @type {string} */ why) =>
-		finish(`remote-check RUNNING  tree ${tree12}: ${why}, call again`, 5)
+		finish(`remote-check RUNNING  tree ${tree12}: ${why}, call again`, 4)
 	if (state.runId && !ok(() => gh(["run", "view", `${state.runId}`])))
 		delete state.runId
 	if (!state.runId) {
@@ -192,20 +193,25 @@ export async function remoteCheck(d, argv) {
 			}
 			if (!state.runId) {
 				ok(() => git(["push", "-q", REMOTE, "--delete", branch]))
-				return finish(`remote-check INFRA  tree ${tree12}: no run started`, 3)
+				return finish(`remote-check INFRA  tree ${tree12}: no run started`, 2)
 			}
 		}
 		save()
 	}
 	const runId = String(state.runId)
 
-	// Wait; jobs without a verdict are rerun once, and a rerun gh refuses is INFRA at once.
+	// Wait; jobs without a verdict are rerun once, and a rerun gh refuses is INFRA at once. A run
+	// that vanished was finished by another call for this tree: its stored result, else call again.
 	const dl = join(cache, "verdicts")
 	/** @type {{ status: string, attempt: number, url: string, createdAt: string, updatedAt: string, jobs: { name: string, databaseId: number, conclusion: string }[] }} */
 	let view
 	let expected = /** @type {string[]} */ ([])
 	for (;;) {
-		view = JSON.parse(gh(["run", "view", runId, "--json", lib.VIEW_FIELDS]))
+		const viewed = quiet(() =>
+			JSON.parse(gh(["run", "view", runId, "--json", lib.VIEW_FIELDS])),
+		)
+		if (!viewed) return cached() ?? still(`run ${runId} is gone or unreadable`)
+		view = viewed
 		if (
 			view.status === "completed" &&
 			view.attempt > (state.rerunAttempt ?? 0)
@@ -228,7 +234,7 @@ export async function remoteCheck(d, argv) {
 				fs.rmSync(stateFile, { force: true })
 				return finish(
 					`remote-check INFRA  tree ${tree12}: rerun refused, run ${view.url} kept`,
-					3,
+					2,
 				)
 			}
 		}
@@ -239,7 +245,6 @@ export async function remoteCheck(d, argv) {
 	const { code, text } = lib.verdictOf({
 		dl,
 		expected,
-		docs,
 		notes,
 		view,
 		tree12,
@@ -250,15 +255,15 @@ export async function remoteCheck(d, argv) {
 		now: d.now(),
 	})
 
-	// Cache, then delete the branch and, unless the infrastructure failed, the run. An INFRA run is
-	// never reattached: state.json goes, and the next call deletes it and pushes a new one. The
-	// sweep of old checks comes last and never fails the call.
+	// Cache (a FAIL too: `rm -r .remote-check/<tree12>` forces a recheck), then delete the branch
+	// and, unless the infrastructure failed, the run. An INFRA run is never reattached: state.json
+	// goes, and the next call deletes it and pushes a new one.
 	fs.writeFileSync(join(cache, "summary.txt"), `${text}\n`)
-	if (code !== 3) fs.writeFileSync(codeFile, `${code}\t${base}`)
+	if (code !== 2) fs.writeFileSync(codeFile, `${code}\t${base}`)
 	fs.rmSync(dl, { recursive: true, force: true })
 	fs.rmSync(stateFile, { force: true })
 	ok(() => git(["push", "-q", REMOTE, "--delete", branch]))
-	if (code !== 3) ok(() => gh(["run", "delete", runId]))
+	if (code !== 2) ok(() => gh(["run", "delete", runId]))
 	const dirs = fs
 		.readdirSync(out, { withFileTypes: true })
 		.filter(e => e.isDirectory())
@@ -266,11 +271,7 @@ export async function remoteCheck(d, argv) {
 		.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
 	for (const p of dirs.slice(KEEP))
 		fs.rmSync(p, { recursive: true, force: true })
-	const runs = quiet(() => ciRuns()) ?? []
-	const now = d.now()
-	quiet(() =>
-		lib.sweep({ git, gh, remote: REMOTE, runs, now, maxAgeMs: SWEEP_AGE_MS }),
-	)
+	sweepOld()
 	return finish(text, code)
 }
 
@@ -284,7 +285,18 @@ if (
 	} catch (e) {
 		const err = /** @type {{ stderr?: string, message?: string }} */ (e)
 		const why = lib.trimMessage(err.stderr || err.message || String(e), 200)
-		result = { text: `remote-check INFRA  ${why}`, code: 3 }
+		result = { text: `remote-check INFRA  ${why}`, code: 2 }
+		const root = lib.quiet(() =>
+			defaultDeps.git(["rev-parse", "--show-toplevel"]).trim(),
+		)
+		if (root)
+			lib.quiet(() => {
+				fs.mkdirSync(join(root, ".remote-check"), { recursive: true })
+				fs.writeFileSync(
+					join(root, ".remote-check/summary.txt"),
+					`${result.text}\n`,
+				)
+			})
 	}
 	process.stdout.write(`${result.text}\n`)
 	process.exitCode = result.code

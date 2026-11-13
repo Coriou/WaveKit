@@ -8,7 +8,6 @@ name: CI remote
 on:
   push:
     branches: ["ci/**"]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -30,12 +29,12 @@ jobs:
           cat > "$RUNNER_TEMP/step.sh" <<'EOF'
           #!/usr/bin/env bash
           # step.sh <name> <command...>: runs the command until the job's step budget ends and records
-          # its exit code (124: the budget ran out).
+          # its exit code (124: the budget ran out; 137: the command ignored SIGTERM for 15 s).
           name="$1"
           shift
           left=$(( $(cat "$RUNNER_TEMP/verdict-start") + VERDICT_STEPS_S - $(date +%s) ))
           if [ "$left" -gt 0 ]; then
-            timeout "${left}s" "$@"
+            timeout -k 15s "${left}s" "$@"
             code=$?
           else
             code=124
@@ -119,7 +118,8 @@ jobs:
           path: verdict.json
           retention-days: 1
 
-  # The native job runs only when the client marked the commit message: the check touches native/.
+  # The native job runs only when the client marked the commit message: the check touches native/
+  # or a TypeScript reference the kernels are compared with (NATIVE_PREFIXES in remote-check-lib.mjs).
   native:
     if: contains(github.event.head_commit.message, '[native]')
     runs-on: ubuntu-latest

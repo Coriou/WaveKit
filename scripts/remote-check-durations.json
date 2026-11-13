@@ -1,5 +1,5 @@
 {
-	"$comment": "Seconds per root test file on CI, for weight-packing the remote check's shards; unlisted files weigh 1. Refreshed by scripts/remote-check.mjs.",
+	"$comment": "Seconds per root test file on CI, for weight-packing the remote check's shards; unlisted files weigh 0 and every file adds FILE_OVERHEAD_S (scripts/remote-check-lib.mjs). A maintainer refreshes it by copying .remote-check/durations.json over it after a green check.",
 	"files": {
 		"tests/integration/channel-activity-production-path.test.ts": 4,
 		"tests/integration/digital-voice-udp-replay.test.ts": 3,

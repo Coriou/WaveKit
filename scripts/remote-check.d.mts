@@ -6,7 +6,6 @@ export interface RunOpts {
 export interface Deps {
 	git: (args: string[], o?: RunOpts) => string
 	gh: (args: string[]) => string
-	docs: (root: string, since: string) => { ok: boolean; text: string }
 	sleep: (ms: number) => Promise<unknown>
 	now: () => number
 	home: string

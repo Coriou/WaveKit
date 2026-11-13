@@ -63,7 +63,7 @@ pnpm run lint          # eslint .
 pnpm test              # turbo test of workspaces, then root vitest run
 pnpm exec vitest run tests/unit/path/to/file.test.ts   # one file
 pnpm exec vitest run -t "test name"                    # by name
-node scripts/remote-check.mjs [github/<ref>]           # full suite on GitHub runners; exit 0 green, 1 red, 2 flaky, 3 infra, 4 refused, 5 call again
+node scripts/remote-check.mjs [github/<ref>]           # full suite on GitHub runners; exit 0 green (flaky too), 1 red, 2 infra, 3 refused, 4 call again
 pnpm run dev           # esbuild watch + node --watch dist/index.js (no Docker)
 make dev-local         # run natively without a Pi, dongle, Docker or decoders
 make dev-dashboard     # interactive CLI dashboard

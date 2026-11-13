@@ -29,9 +29,9 @@ import {
 	parseVitestReport,
 	repoSlug,
 	scanHygiene,
-	shardSpread,
-	sweepTargets,
+	sweep,
 	trimMessage,
+	FILE_OVERHEAD_S,
 	SUMMARY_LINES,
 	type Change,
 	type ShardVerdict,
@@ -96,6 +96,33 @@ describe("hygiene scan", () => {
 		expect(scanText("see /usr/local/bin")).toEqual([])
 	})
 
+	it("flags references inside the private agent directory, absolutely", () => {
+		const a = ".agents"
+		const all = () => true
+		const labels = (text: string) =>
+			scanHygiene({
+				changes: [],
+				added: new Map([["docs/x.md", [{ line: 3, text }]]]),
+				denylist: none,
+				inBase: all,
+			}).map(h => h.label)
+		for (const text of [
+			`see \`${a}/lane-status.md\``,
+			`cat ${a}/memory/notes.md`,
+			`(${a}/handoff)`,
+			`x/${a}/decode-matrix.md`,
+		])
+			expect(labels(text)).toEqual(["private agent path"])
+		for (const text of [
+			`\`${a}/\` is git-ignored`,
+			`${a}/memory/MEMORY.md links to it`,
+			`if \`${a}/memory\` is missing`,
+			`ignores: ["${a}/**"]`,
+			"agents/x.md and my.agents/x",
+		])
+			expect(labels(text)).toEqual([])
+	})
+
 	it("flags email addresses but not reserved domains or asset names", () => {
 		expect(scanText(at("someone", dot("mail", "com")))[0]?.label).toBe(
 			"email address",
@@ -109,7 +136,12 @@ describe("hygiene scan", () => {
 	it("flags private agent paths and suspicious path names", () => {
 		const hits = scanHygiene({
 			changes: [
-				{ path: ".agents/memory/x.md", status: "A", binary: false, size: 1 },
+				{
+					path: `.agents/${"memory"}/x.md`,
+					status: "A",
+					binary: false,
+					size: 1,
+				},
 				{
 					path: `docs/${dot(192, 168, 0, 1)}.md`,
 					status: "A",
@@ -148,6 +180,29 @@ describe("hygiene scan", () => {
 			"src/now-binary: binary file outside fixtures/",
 			"src/grown.ts: file over 1 MB",
 		])
+	})
+
+	it("allows a built-in rule's token already in the public base as a whole token only", () => {
+		const home = `/${"Users"}/someone`
+		// The base as `git grep` lines; a token counts only where the rule finds it whole.
+		const baseLines = [
+			`connect ${dot(10, 0, 0, 12)}`,
+			`see \`${home}/proj/notes\`.`,
+		]
+		const inBase = (t: string, find: (text: string) => string[]) =>
+			baseLines.some(l => l.includes(t) && find(l).includes(t))
+		const scan = (text: string) =>
+			scanHygiene({
+				changes: [],
+				added: new Map([["src/a.ts", [{ line: 1, text }]]]),
+				denylist: none,
+				inBase,
+			}).map(h => h.label)
+		expect(scan(`url ${dot(10, 0, 0, 12)}`)).toEqual([])
+		expect(scan(`url ${dot(10, 0, 0, 1)}`)).toEqual(["private address"])
+		expect(scan(`(${home}/proj/notes)`)).toEqual([])
+		expect(scan(`"${home}/proj"`)).toEqual(["home directory path"])
+		expect(scan(`${home}/proj/notes/more`)).toEqual(["home directory path"])
 	})
 
 	it("allows a built-in rule's token already in the public base, never a deny-list or secret hit", () => {
@@ -314,8 +369,11 @@ describe("shard packing", () => {
 		// The heaviest file bounds the slowest shard; the light files fill shards below that bound.
 		const bins = packShards(files, weights)
 		expect(bins).toHaveLength(6)
-		expect(Math.max(...bins.map(b => b.cost))).toBe(170)
-		expect(bins.reduce((s, b) => s + b.weight, 0)).toBe(710 + 194)
+		expect(Math.max(...bins.map(b => b.cost))).toBe(170 + FILE_OVERHEAD_S)
+		// Unlisted files weigh only the per-file overhead.
+		expect(bins.reduce((s, b) => s + b.weight, 0)).toBeCloseTo(
+			710 + 200 * FILE_OVERHEAD_S,
+		)
 		// Equal weights: shard time is total / WORKERS, so counts differ by at most one.
 		const even = packShards(files, {})
 		expect(even.map(b => b.files.length)).toEqual([34, 34, 33, 33, 33, 33])
@@ -323,6 +381,20 @@ describe("shard packing", () => {
 		const mid = Object.fromEntries(files.map((f, i) => [f, 5 + (i % 7)]))
 		const costs = packShards(files, mid).map(b => b.cost)
 		expect(Math.max(...costs) - Math.min(...costs)).toBeLessThanOrEqual(11 / 3)
+	})
+
+	it("counts the per-file overhead, so many light files do not crowd one shard", () => {
+		// One heavy file and 60 unlisted ones: without the overhead every light file would weigh
+		// nothing and could share the heavy file's shard for free.
+		const many = Array.from({ length: 60 }, (_, i) => `tests/l${i}.test.ts`)
+		const bins = packShards([...many, "tests/heavy.test.ts"], {
+			"tests/heavy.test.ts": 30,
+		})
+		const heavy = bins.find(b => b.files.includes("tests/heavy.test.ts"))
+		expect(heavy?.files).toEqual(["tests/heavy.test.ts"])
+		expect(bins.map(b => b.files.length).sort()).toEqual([
+			1, 12, 12, 12, 12, 12,
+		])
 	})
 
 	it("puts the heaviest files in different shards", () => {
@@ -452,27 +524,16 @@ describe("exit codes", () => {
 			}),
 		) as Map<string, { ok: boolean; flaky?: unknown[] }>
 
-	it("maps verdict sets to 0, 1, 2 and 3", () => {
-		expect(exitCode({ verdicts: v(ok, ok), expected, docsOk: true })).toBe(0)
+	it("maps verdict sets to 0 (flaky included), 1 and 2", () => {
+		expect(exitCode({ verdicts: v(ok, ok), expected })).toBe(0)
 		expect(
-			exitCode({
-				verdicts: v(ok, { ok: true, flaky: [1] }),
-				expected,
-				docsOk: true,
-			}),
-		).toBe(2)
+			exitCode({ verdicts: v(ok, { ok: true, flaky: [1] }), expected }),
+		).toBe(0)
 		expect(
-			exitCode({
-				verdicts: v(ok, { ok: false, flaky: [1] }),
-				expected,
-				docsOk: true,
-			}),
+			exitCode({ verdicts: v(ok, { ok: false, flaky: [1] }), expected }),
 		).toBe(1)
-		expect(exitCode({ verdicts: v(ok, ok), expected, docsOk: false })).toBe(1)
-		expect(exitCode({ verdicts: v(ok), expected, docsOk: true })).toBe(3)
-		expect(
-			exitCode({ verdicts: v({ ok: false }), expected, docsOk: true }),
-		).toBe(1)
+		expect(exitCode({ verdicts: v(ok), expected })).toBe(2)
+		expect(exitCode({ verdicts: v({ ok: false }), expected })).toBe(1)
 	})
 
 	it("names verdict artifacts after GitHub's matrix job names", () => {
@@ -494,7 +555,6 @@ describe("summary", () => {
 		tree: "3f9a1c2b7d10",
 		base: "189327ec5880",
 		seconds: 271,
-		docsOk: true,
 		static: { ok: true, seconds: 228, steps: { lint: 0 } },
 		missing: [],
 		url: "https://github.com/o/r/actions/runs/1",
@@ -536,26 +596,48 @@ describe("summary", () => {
 		]
 		const text = formatSummary({
 			...base,
+			static: { ok: false, seconds: 228, steps: { lint: 1, typecheck: 0 } },
 			code: 1,
-			docsOk: false,
 			root,
-			notes: ["docs: stale page"],
+			notes: ["untracked 1: src/x.ts"],
 		})
 		const lines = text.split("\n")
 		expect(lines.length).toBeLessThanOrEqual(SUMMARY_LINES)
 		expect(lines[0]).toBe(
 			"remote-check FAIL  tree 3f9a1c2b7d10  base 189327ec  4m31s",
 		)
-		expect(lines[1]).toBe("static FAIL 228s  (docs)")
+		expect(lines[1]).toBe("static FAIL 228s  (lint)")
 		expect(lines[2]).toBe(
 			"root FAIL ok ok ok ok ok  (200 200 200 200 200 200 s)",
 		)
 		expect(lines).toContain("failed 25")
 		expect(lines.filter(l => l.startsWith("  tests/f"))).toHaveLength(10)
 		expect(lines).toContain("  +15 more")
-		expect(lines.at(-1)).toBe(
+		expect(lines.slice(-3)).toEqual([
+			"untracked 1: src/x.ts",
 			"run https://github.com/o/r/actions/runs/1  (deleted)",
-		)
+			"recheck: rm -r .remote-check/3f9a1c2b7d10",
+		])
+	})
+
+	it("passes with flaky tests and lists them", () => {
+		const text = formatSummary({
+			...base,
+			code: 0,
+			root: [
+				shard({
+					flaky: [{ file: "tests/x.test.ts", test: "t", message: "m" }],
+				}),
+				...Array.from({ length: 5 }, () => shard()),
+			],
+		})
+		expect(text.split("\n")).toEqual([
+			"remote-check PASS  tree 3f9a1c2b7d10  base 189327ec  4m31s",
+			"static ok 228s",
+			"root flaky ok ok ok ok ok  (200 200 200 200 200 200 s)",
+			"flaky 1",
+			"  tests/x.test.ts > t",
+		])
 	})
 
 	it("lists flaky tests and missing verdicts", () => {
@@ -568,7 +650,7 @@ describe("summary", () => {
 		]
 		const text = formatSummary({
 			...base,
-			code: 3,
+			code: 2,
 			root,
 			missing: ["root-2"],
 			runNote: "kept for inspection",
@@ -579,13 +661,13 @@ describe("summary", () => {
 		expect(text).toContain("no verdict: root-2")
 		expect(text).toContain("flaky 1\n  tests/x.test.ts > s > t")
 		expect(text).toContain("(kept for inspection)")
+		expect(text.split("\n")[0]).toMatch(/^remote-check INFRA /)
+		expect(text).not.toContain("recheck")
 	})
 })
 
 describe("durations and sweep", () => {
-	it("measures shard spread and keeps files of a second or more", () => {
-		expect(shardSpread([100, 160, 0])).toBeCloseTo(1.6)
-		expect(shardSpread([100])).toBe(1)
+	it("keeps files of a second or more", () => {
 		expect(
 			durationTable([{ "b.ts": 0.4, "a.ts": 12.6 }, { "c.ts": 1 }]),
 		).toEqual({ "a.ts": 13, "c.ts": 1 })
@@ -596,24 +678,60 @@ describe("durations and sweep", () => {
 	})
 
 	it("sweeps only ci/<12 hex> branches and runs older than the limit", () => {
-		const now = 10 * 3600_000
 		const hour = 3600_000
-		const r = sweepTargets({
-			branches: [
-				{ name: "ci/0123456789ab", time: now - 2 * hour },
-				{ name: "ci/aaaaaaaaaaaa", time: now - 10 * 60_000 },
-				{ name: "ci/sharding-trial", time: 0 },
-				{ name: "ci/bbbbbbbbbbbb", time: Number.NaN },
-			],
+		const now = 10 * hour
+		const iso = (t: number) => new Date(t).toISOString()
+		const calls: string[] = []
+		const git = (args: string[]) => {
+			calls.push(`git ${args.join(" ")}`)
+			if (args[0] === "ls-remote")
+				return [
+					"a1\trefs/heads/ci/0123456789ab",
+					"a2\trefs/heads/ci/aaaaaaaaaaaa",
+					"a3\trefs/heads/ci/sharding-trial",
+					"a4\trefs/heads/ci/bbbbbbbbbbbb",
+					"a5\trefs/heads/ci/cccccccccccc",
+				].join("\n")
+			// a4's commit is unknown locally; a5's is three hours old.
+			if (args[0] === "log" && args.includes("a4"))
+				throw new Error("bad object")
+			if (args[0] === "log" && args.includes("a5"))
+				return `${(now - 3 * hour) / 1000}\n`
+			return ""
+		}
+		const gh = (args: string[]) => {
+			calls.push(`gh ${args.join(" ")}`)
+			return ""
+		}
+		const r = sweep({
+			git,
+			gh,
+			remote: "github",
 			runs: [
-				{ id: 1, branch: "ci/0123456789ab", createdAt: now - 2 * hour },
-				{ id: 2, branch: "ci/aaaaaaaaaaaa", createdAt: now - 59 * 60_000 },
-				{ id: 3, branch: "main", createdAt: 0 },
+				{
+					databaseId: 1,
+					headBranch: "ci/0123456789ab",
+					createdAt: iso(now - 2 * hour),
+				},
+				{
+					databaseId: 2,
+					headBranch: "ci/aaaaaaaaaaaa",
+					createdAt: iso(now - 59 * 60_000),
+				},
+				{ databaseId: 3, headBranch: "main", createdAt: iso(0) },
 			],
 			now,
 			maxAgeMs: hour,
 		})
-		expect(r).toEqual({ branches: ["ci/0123456789ab"], runs: [1] })
+		expect(r).toEqual({
+			branches: ["ci/0123456789ab", "ci/cccccccccccc"],
+			runs: [1],
+		})
+		expect(calls.filter(c => / --delete |run delete/.test(c))).toEqual([
+			"git push -q github --delete ci/0123456789ab",
+			"git push -q github --delete ci/cccccccccccc",
+			"gh run delete 1",
+		])
 	})
 })
 
@@ -677,8 +795,17 @@ describe("untracked files and client text", () => {
 
 	it("marks native changes in the fixed commit message and caps refusals", () => {
 		expect(commitMessage(["src/a.ts"])).toBe("ci: remote check")
-		expect(commitMessage(["src/a.ts", "native/x/src/lib.rs"])).toBe(
-			"ci: remote check [native]",
+		for (const p of [
+			"native/x/src/lib.rs",
+			"src/core/spectrum/frame-wasm.ts",
+			"src/core/scanner/channel/wideband-nfm-wasm.ts",
+			"src/core/scanner/channel/wideband-analog-recorder.ts",
+			"src/core/scanner/channel/recorder-decisions.ts",
+			"tests/unit/core/scanner/wideband-analog-recorder.test.ts",
+		])
+			expect(commitMessage(["src/a.ts", p])).toBe("ci: remote check [native]")
+		expect(commitMessage(["src/core/scanner/channel/channel-tap.ts"])).toBe(
+			"ci: remote check",
 		)
 		const hits = Array.from({ length: 40 }, (_, i) => ({
 			file: `f${i}`,
@@ -712,6 +839,11 @@ describe("client with fake git and gh", () => {
 		clock: number
 		missingFirst: string[]
 		listLag: boolean
+		// A diff of one added line in src/a.ts, and the lines `git grep` finds in the base.
+		patch: string
+		baseLines: string[]
+		// Runs `run view` no longer finds (another call for the tree deleted them).
+		gone: Set<number>
 	}
 	let w: World
 
@@ -728,12 +860,17 @@ describe("client with fake git and gh", () => {
 			clock: 1_000_000,
 			missingFirst: [],
 			listLag: false,
+			patch: "",
+			baseLines: [],
+			gone: new Set(),
 		}
+		verdictFor = verdict
 	})
 	afterEach(() => {
 		fs.rmSync(root, { recursive: true, force: true })
 	})
 
+	let verdictFor = (name: string): object => verdict(name)
 	const verdict = (name: string) =>
 		name === "static"
 			? { ok: true, seconds: 100, steps: { lint: 0 }, failed: [], flaky: [] }
@@ -760,7 +897,17 @@ describe("client with fake git and gh", () => {
 		}
 		if (cmd === "merge-base") return `${MB}\n`
 		if (cmd === "commit-tree") return "c0ffee\n"
-		if (cmd === "grep") throw new Error("no match")
+		if (cmd === "grep") {
+			const t = args[args.indexOf("-e") + 1] ?? ""
+			const lines = w.baseLines.filter(l => l.includes(t))
+			if (!lines.length) throw new Error("no match")
+			return `${lines.join("\n")}\n`
+		}
+		if (args.includes("diff") && w.patch) {
+			if (args.includes("--name-status")) return "M\0src/a.ts\0"
+			if (args.includes("-U0"))
+				return `diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,0 +2 @@\n+${w.patch}\n`
+		}
 		if (cmd === "push" && !args.includes("--delete")) {
 			w.pushes++
 			w.runs.push({
@@ -792,7 +939,7 @@ describe("client with fake git and gh", () => {
 					})),
 			)
 		}
-		if (!run) throw new Error(`run ${id} not found`)
+		if (!run || w.gone.has(run.id)) throw new Error(`run ${id} not found`)
 		if (verb === "view") {
 			if (w.clock >= w.doneAt) run.status = "completed"
 			return JSON.stringify({
@@ -816,7 +963,7 @@ describe("client with fake git and gh", () => {
 				fs.mkdirSync(art, { recursive: true })
 				fs.writeFileSync(
 					join(art, "verdict.json"),
-					JSON.stringify(verdict(name)),
+					JSON.stringify(verdictFor(name)),
 				)
 			}
 			return ""
@@ -837,7 +984,6 @@ describe("client with fake git and gh", () => {
 	const deps = (): Deps => ({
 		git,
 		gh,
-		docs: () => ({ ok: true, text: "docs: ok" }),
 		sleep: async ms => {
 			w.clock += ms
 		},
@@ -863,12 +1009,40 @@ describe("client with fake git and gh", () => {
 		)
 		expect(calls).toContain(`git push -q github --delete ${BRANCH}`)
 		expect(w.runs).toEqual([])
+		// The sweep runs before the push and again at the end.
+		const sweeps = calls
+			.map((c, i) =>
+				c.startsWith("git ls-remote github refs/heads/ci/*") ? i : -1,
+			)
+			.filter(i => i >= 0)
+		const push = calls.findIndex(c => c.startsWith("git push -q --force"))
+		expect(sweeps).toHaveLength(2)
+		expect(sweeps[0]).toBeLessThan(push)
+		expect(sweeps[1]).toBeGreaterThan(push)
+		// A green run with all shards leaves a refreshed table, without a note.
+		expect(fs.existsSync(join(root, ".remote-check/durations.json"))).toBe(true)
+		expect(r.text.split("\n")).toHaveLength(4)
+	})
+
+	it("refuses a private address the base holds only inside a longer one", async () => {
+		w.patch = `const host = "${dot(10, 0, 0, 1)}"`
+		w.baseLines = [`host: ${dot(10, 0, 0, 12)}`]
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(3)
+		expect(r.text).toBe(
+			"remote-check REFUSED  tree abcdef012345: hygiene, nothing pushed\n  src/a.ts:2 private address",
+		)
+		expect(w.pushes).toBe(0)
+		expect(calls.filter(c => c.startsWith("gh "))).toEqual([])
+		// The same address whole in the base is published already.
+		w.baseLines = [`host: ${dot(10, 0, 0, 1)}`]
+		expect((await remoteCheck(deps(), [])).code).toBe(0)
 	})
 
 	it("refuses a base whose merge base is not on GitHub, without pushing", async () => {
 		w.onBase = false
 		const r = await remoteCheck(deps(), ["HEAD~1"])
-		expect(r.code).toBe(4)
+		expect(r.code).toBe(3)
 		expect(r.text).toBe(
 			"remote-check REFUSED  merge base 11111111 of HEAD~1 is not on github/main, nothing pushed",
 		)
@@ -886,13 +1060,34 @@ describe("client with fake git and gh", () => {
 		// The stored result is for github/main only: another base is checked again.
 		w.onBase = false
 		const other = await remoteCheck(deps(), ["HEAD~1"])
-		expect(other.code).toBe(4)
+		expect(other.code).toBe(3)
+	})
+
+	it("stores a FAIL too and says how to force a recheck", async () => {
+		const failing = (name: string) =>
+			name === "root (2)"
+				? {
+						...verdict(name),
+						ok: false,
+						steps: { install: 0, "root-tests": 1 },
+						failed: [{ file: "tests/x.test.ts", test: "t", message: "no" }],
+					}
+				: verdict(name)
+		verdictFor = failing
+		const first = await remoteCheck(deps(), [])
+		expect(first.code).toBe(1)
+		expect(first.text.split("\n").at(-1)).toBe(
+			"recheck: rm -r .remote-check/abcdef012345",
+		)
+		calls = []
+		expect(await remoteCheck(deps(), [])).toEqual(first)
+		expect(network()).toEqual([])
 	})
 
 	it("keeps an INFRA run, then deletes it and pushes a new run on the next call", async () => {
 		w.missingFirst = ["root (3)"]
 		const r = await remoteCheck(deps(), [])
-		expect(r.code).toBe(3)
+		expect(r.code).toBe(2)
 		expect(r.text).toContain("no verdict: root-3")
 		expect(r.text).toContain("(kept for inspection)")
 		expect(w.runs.map(x => [x.id, x.status, x.attempt])).toEqual([
@@ -916,17 +1111,17 @@ describe("client with fake git and gh", () => {
 		w.missingFirst = ["static"]
 		w.rerunFails = true
 		const r = await remoteCheck(deps(), [])
-		expect(r.code).toBe(3)
+		expect(r.code).toBe(2)
 		expect(r.text).toBe(
 			"remote-check INFRA  tree abcdef012345: rerun refused, run https://github.com/o/r/actions/runs/7 kept",
 		)
 		expect(calls.filter(c => c.startsWith("gh run view"))).toHaveLength(1)
 	})
 
-	it("returns 5 while the run is live and attaches through state.json on the next call", async () => {
+	it("returns 4 while the run is live and attaches through state.json on the next call", async () => {
 		w.doneAt = Number.POSITIVE_INFINITY
 		const r = await remoteCheck(deps(), [])
-		expect(r.code).toBe(5)
+		expect(r.code).toBe(4)
 		expect(r.text).toMatch(
 			/^remote-check RUNNING {2}tree abcdef012345: run .*\/7 still running, call again$/,
 		)
@@ -946,5 +1141,42 @@ describe("client with fake git and gh", () => {
 		expect(calls).toContain(
 			"gh run view 7 --json status,attempt,url,createdAt,updatedAt,jobs -R o/r",
 		)
+	})
+
+	it("asks to call again, not INFRA, when the attached run vanishes without a stored result", async () => {
+		w.doneAt = Number.POSITIVE_INFINITY
+		const d: Deps = {
+			...deps(),
+			sleep: async ms => {
+				w.clock += ms
+				for (const r of w.runs) w.gone.add(r.id)
+			},
+		}
+		const r = await remoteCheck(d, [])
+		expect(r.code).toBe(4)
+		expect(r.text).toBe(
+			"remote-check RUNNING  tree abcdef012345: run 7 is gone or unreadable, call again",
+		)
+	})
+
+	it("prints the stored result when the run vanishes while it waits", async () => {
+		w.doneAt = Number.POSITIVE_INFINITY
+		const cache = join(root, ".remote-check/abcdef012345")
+		const d: Deps = {
+			...deps(),
+			sleep: async ms => {
+				w.clock += ms
+				if (w.runs[0] && !w.gone.has(w.runs[0].id) && w.clock > 1_100_000) {
+					w.gone.add(w.runs[0].id)
+					fs.writeFileSync(join(cache, "code"), "1\tgithub/main")
+					fs.writeFileSync(
+						join(cache, "summary.txt"),
+						"remote-check FAIL  other\n",
+					)
+				}
+			},
+		}
+		const r = await remoteCheck(d, [])
+		expect(r).toEqual({ code: 1, text: "remote-check FAIL  other" })
 	})
 })
