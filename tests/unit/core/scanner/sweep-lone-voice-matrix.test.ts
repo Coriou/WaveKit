@@ -79,6 +79,8 @@ interface SchedulerInternals {
 		confirmHoldMs: number,
 		hints?: Hints,
 	): unknown[]
+	/** The scheduler's frequency memory (its evidence per frequency). */
+	memory: { centreHz: number; evidence: string }[]
 }
 
 interface Row {
@@ -91,6 +93,11 @@ interface Row {
 	decoy?: { hz: number; toMs: number; fromMs?: number }
 	/** A line whose track's hints are overridden on their way to the scheduler. */
 	line?: { hz: number; hints?: Hints; confirm?: boolean }
+	/**
+	 * Ms of the scene at which the line's frequency must be known as traffic (the scheduler's
+	 * memory of it), asserted: the row's premise.
+	 */
+	lineTrafficAtMs?: number
 	durationMs: number
 	range?: { startHz: number; endHz: number }
 	hops?: number
@@ -119,6 +126,8 @@ async function runRow(row: Row): Promise<RowResult> {
 					},
 				]
 	let hinted = 0
+	/** The line's frequency's evidence at Row.lineTrafficAtMs (null: no memory of it). */
+	let lineEvidence: string | null | undefined
 	const started = Date.now()
 	const r = await runScene({
 		centreHz: CENTRE_HZ,
@@ -133,10 +142,16 @@ async function runRow(row: Row): Promise<RowResult> {
 			const line = row.line
 			if (line === undefined) return
 			let patched = false
+			let elapsed = 0
 			const chunk = w.advance.bind(w)
 			w.advance = async ms => {
 				for (let t = 0; t < ms; t += 25) {
 					const s = w.scheduler() as unknown as SchedulerInternals | undefined
+					const at = row.lineTrafficAtMs
+					if (at !== undefined && lineEvidence === undefined && elapsed >= at)
+						lineEvidence =
+							s?.memory.find(m => near(m.centreHz, line.hz))?.evidence ?? null
+					elapsed += 25
 					if (!patched && s !== undefined) {
 						patched = true
 						const onTrack = s.onTrack.bind(s)
@@ -167,6 +182,7 @@ async function runRow(row: Row): Promise<RowResult> {
 		files: r.wavFiles,
 		holds: r.holds,
 		hinted,
+		lineEvidence,
 		decisions: r.decisions.map(d => d.code),
 	})
 	const out = process.env["MATRIX_OUT"]
@@ -176,6 +192,8 @@ async function runRow(row: Row): Promise<RowResult> {
 			`${JSON.stringify({ row: row.name, perId, whole, wallMs: Date.now() - started, files: r.wavFiles, holds: r.holds, hinted })}\n`,
 		)
 	expect(r.hops, report).toHaveLength(row.hops ?? 2)
+	if (row.lineTrafficAtMs !== undefined)
+		expect(lineEvidence, report).toBe("traffic")
 	return { perId, whole, r, report }
 }
 
@@ -473,4 +491,54 @@ describe("lone-voice matrix row 7: the neighbour gate scene", () => {
 		// Base splits it too, settled: 11.725 + 15.825 s, no ID whole.
 		expectWholeAtLeast(res, 0)
 	}, 600_000)
+})
+
+/**
+ * Row 8: an analog-labelled line (a sub-tone carrier, never voiced) beside a lone ID on a frequency
+ * already known as traffic, so the sweep follows it to what L has left (no carrier watch), no decoy.
+ * The first visit of hop 1 lands at ROW8_VISIT_MS and follows the line, which closes 2 s in and
+ * reopens 1.2 s later (a heard gap: traffic, asserted at ROW8_REKEY_MS), then closes again; quiet
+ * sweeps follow; the line keys again at ROW8_REKEY_MS while the sweep is on hop 0, and stays on.
+ * The ID keys at ROW8_LANDING_MS (hop 1's next visit lands within 1 s of it), 3 s and 6 s later,
+ * 25 kHz and 12.5 kHz above the line. Settled numbers (s), base / head before the fix:
+ * 25 kHz: 29.125 / 29.125, 29.875 / 18.825 + 9.925, 29.875 / 15.825 + 12.925;
+ * 12.5 kHz: 29.775 / 20.975 + 8.1, 30.075 / 18.025 + 10.675, 30.075 / 15.025 + 13.675.
+ */
+/** The first visit of hop 1 (hop 0's dwell, the settle and the first block). */
+const ROW8_VISIT_MS = 1_175
+const ROW8_REKEY_MS = 13_000
+const ROW8_LANDING_MS = 14_000
+const ROW8_DELAYS_MS = [50, 3_000, 6_000] as const
+function row8(offsetHz: number, delayMs: number): Row {
+	const s = id(ROW8_LANDING_MS + delayMs)
+	const hz = ID_HZ - offsetHz
+	const close = ROW8_VISIT_MS + 2_000
+	const reopen = close + 1_200
+	return {
+		name: `8-${offsetHz}-${delayMs}`,
+		emitters: [
+			voice(s),
+			subTone(hz, { fromMs: 0, toMs: close }),
+			subTone(hz, { fromMs: reopen, toMs: reopen + 800 }),
+			subTone(hz, { fromMs: ROW8_REKEY_MS, toMs: s.toMs + 2_000 }),
+		],
+		ids: [s],
+		line: { hz, hints: { followOnAir: true } },
+		lineTrafficAtMs: ROW8_REKEY_MS,
+		durationMs: s.toMs + TAIL_MS,
+	}
+}
+
+describe("lone-voice matrix row 8 traffic 25: an analog line known as traffic, never voiced, 25 kHz from the ID", () => {
+	for (const delayMs of ROW8_DELAYS_MS)
+		it(`row 8 traffic 25: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
+			expectEveryIdWhole(await runRow(row8(25_000, delayMs)))
+		}, 600_000)
+})
+
+describe("lone-voice matrix row 8 traffic 12.5: an analog line known as traffic, never voiced, 12.5 kHz from the ID", () => {
+	for (const delayMs of ROW8_DELAYS_MS)
+		it(`row 8 traffic 12.5: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
+			expectEveryIdWhole(await runRow(row8(12_500, delayMs)))
+		}, 600_000)
 })

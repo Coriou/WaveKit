@@ -800,14 +800,14 @@ interface Visit {
 	 * voice's own track (settleCommitment): its track is held (a probe, follow or hang, never a
 	 * `record` hold) and a check names voice in its band while the committed track has never
 	 * voiced in the visit. Set when the committed track is shown to be no voice of its own: its
-	 * hold was a watch (FollowCap.watch) no decoder confirmed that ran to its cap with it on air,
-	 * whatever the cap's length (endHold), or the commitment was made at a re-check of the wait for
-	 * a voice answer (judging), whose band was the window's, never a held track's. A firm
+	 * hold, a watch or a follow, ran to its cap with it on air and no decoder confirming it
+	 * (ranToCap, endHold), or the commitment was made at a re-check of the wait for a voice
+	 * answer (judging), whose band was the window's, never a held track's. A firm
 	 * never-voiced commitment also reads as tentative while its track has stayed closed
 	 * COMMITTED_CLOSED_LAPSE_MS or more with no successor (committedLapsed): no fade that long is a
 	 * turnaround. A commitment made during any other hold (a follow, probe or recording of voice)
-	 * is firm: the ID case, where the neighbour talks first and the ID voices only after the hold
-	 * moved to the neighbour.
+	 * is firm until then: the ID case, where the neighbour talks first and the ID voices only
+	 * after the hold moved to the neighbour.
 	 */
 	voiceTentative: boolean
 	/** Clock the recording check was last asked during an analog hold (sampleVoice's pace only). */
@@ -2222,8 +2222,8 @@ export class SweepScheduler {
 	 * the visit.
 	 * Made for the track's own voice, the commitment is firm (Visit.voiceTrackVoiced); for a
 	 * neighbour's, `tentative` (the wait for a voice answer: Visit.voiceTentative) or firm until
-	 * the committed track's watch runs to its cap (endHold) or it stays closed past a turnaround
-	 * (committedLapsed).
+	 * the committed track's watch or follow runs to its cap (ranToCap, endHold) or it stays closed
+	 * past a turnaround (committedLapsed).
 	 */
 	private commitVoiceTrack(
 		v: Visit,
@@ -2359,18 +2359,36 @@ export class SweepScheduler {
 	}
 
 	/**
+	 * Hold `hold` of track `t`, at clock `now`, ran to its cap (`now` at or past it) with `t` on air
+	 * and no decoder confirming it: a watch (FollowCap.watch), whatever the cap's length
+	 * (CARRIER_WATCH_MS, a known call's or the hold's bound), or a follow (or its hang) whose cap lay
+	 * past its start, as a follow of a frequency known as traffic runs to what L left (capFor). The
+	 * track showed no voice of its own for as long as the visit could hold it, so a voice beside it
+	 * is the hop's own (a never-voiced line on traffic otherwise names nothing at its cap, and the
+	 * hop leaves under that voice). Before the cap the commitment stays firm: a held track that
+	 * voices after a neighbour talked first keeps its hold. Never a `record` hold, a confirm probe
+	 * (its cap is the probe's length) or a follow capped at its own start (the probe only).
+	 */
+	private ranToCap(hold: Hold, t: TrackInfo, now: number): boolean {
+		if (hold.mode === "record" || hold.decoded || !t.open || now < hold.cap)
+			return false
+		return hold.watch || (hold.mode !== "confirm" && hold.cap > hold.from)
+	}
+
+	/**
 	 * At a keep (keepForRecording) whose check answers voice on air that the held band names no
 	 * hold for (holdVoiceOf null): the open, unflagged analog voice track (followOnAir) other than
 	 * band `bandId`, not held yet in the visit (TrackInfo.tried: a track the visit followed already
 	 * had its own hold, and its voice is a neighbour's to the held band), whose band holds that
 	 * voice (heldVoiceOf; the closest to its centre of
 	 * several), when the held track showed no voice of its own: it cannot be analog voice (neither
-	 * followOnAir nor voiceLater), or its hold was a watch (FollowCap.watch) no decoder confirmed
-	 * that ran to its cap with it on air (`now` at or past the cap), and the visit's commitment,
-	 * if any, never voiced (Visit.voiceTrackVoiced). The voice is then that track's own
+	 * followOnAir nor voiceLater), or its hold ran to its cap un-voiced (ranToCap: a watch, or a
+	 * follow of traffic to its budget), and the visit's commitment, if any, never voiced
+	 * (Visit.voiceTrackVoiced). The voice is then that track's own
 	 * transmission, as the hold of that track would name it (nextCandidate would hold it next), so
 	 * the keep names it at once, as the scheduler did before holds were named by band, and a
-	 * lone voice beside a line watched to its cap is held whole whatever lock the watch left.
+	 * lone voice beside a line watched or followed to its cap is held whole whatever lock that
+	 * hold left.
 	 * Null otherwise: a held track that may still voice (a probe or follow cut short, a `record`
 	 * hold) keeps its band, so a neighbour voiced first is never adopted for it, and a commitment
 	 * to a closed track with no successor (bandId "") is kept.
@@ -2389,12 +2407,8 @@ export class SweepScheduler {
 				? v.voiceTrackId === null
 				: (!band.followOnAir && !band.voiceLater) ||
 					(hold !== null &&
-						hold.mode !== "record" &&
 						hold.trackId === bandId &&
-						hold.watch &&
-						!hold.decoded &&
-						band.open &&
-						now >= hold.cap)
+						this.ranToCap(hold, band, now))
 		if (!showedNone) return null
 		let best: string | null = null
 		let bestOff = Infinity
@@ -3829,20 +3843,16 @@ export class SweepScheduler {
 				this.retryLock = Math.max(this.retryLock, this.plan.hops.length)
 			}
 		}
-		// The committed track, voiced in none of the visit's checks, was held as a watch
-		// (FollowCap.watch) no decoder confirmed that ran to its cap with it on air, whatever the
-		// cap's length (CARRIER_WATCH_MS, a known call's or the hold's bound): it showed no voice of
-		// its own for as long as the visit could watch it. The commitment, made for a neighbour's
-		// voice, is tentative (Visit.voiceTentative).
+		// The committed track, voiced in none of the visit's checks, was held to its cap with it on
+		// air and no decoder confirming it (ranToCap): it showed no voice of its own for as long as
+		// the visit could hold it. The commitment, made for a neighbour's voice, is tentative
+		// (Visit.voiceTentative).
 		const v = this.visit
 		if (
 			v !== null &&
 			v.voiceTrackId === hold.trackId &&
 			!v.voiceTrackVoiced &&
-			hold.watch &&
-			!hold.decoded &&
-			t.open &&
-			now >= hold.cap
+			this.ranToCap(hold, t, now)
 		)
 			v.voiceTentative = true
 		if (m.evidence === "carrier")
