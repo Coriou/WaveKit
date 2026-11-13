@@ -158,6 +158,31 @@ describe("Tracker", () => {
 		)
 	})
 
+	it("measureFrom publishes the track once its restarted measurement holds a whole block, not at the next periodic update", () => {
+		// Updates fall on blocks 2, 5 (class settle), 20 and every 20th: blocks 4 and 6 have none.
+		const t = tracker()
+		const plain = tracker()
+		const id = tracksOf(run(t, 0, [[140, 150, -20]]), "track-open")[0]!.trackId
+		run(plain, 0, [[140, 150, -20]])
+		for (const i of [1, 2]) {
+			run(t, i, [[140, 150, -20]])
+			run(plain, i, [[140, 150, -20]])
+		}
+		// The engine asks at the newest block it saw (2), already accumulated: from block 3 on.
+		t.measureFrom({ stream: 1, epoch: 1, trackId: id, sample: 2 * BLOCK })
+		const first = tracksOf(run(t, 3, [[140, 150, -20]]), "track-update")
+		expect(first).toHaveLength(1)
+		expect(first[0]!.trackId).toBe(id)
+		expect(first[0]!.measuredFromSample).toBe(3 * BLOCK)
+		expect(first[0]!.lastSample - first[0]!.measuredFromSample!).toBe(BLOCK)
+		// Without the request, block 4 publishes nothing; and the update comes once, not per block.
+		expect(tracksOf(run(plain, 3, [[140, 150, -20]]), "track-update")).toEqual(
+			[],
+		)
+		run(t, 4, [[140, 150, -20]])
+		expect(tracksOf(run(t, 5, [[140, 150, -20]]), "track-update")).toEqual([])
+	})
+
 	it("measureFrom restarts the width and shape claims too: OBW (-20 dB and on-bins) from the blocks past the request only", () => {
 		// The same emission, wide on the blocks before the request, narrow after it (strong: -20 dB
 		// OBW from the mean spectrum over the on-bin span; weak: the widest block's on-bins).

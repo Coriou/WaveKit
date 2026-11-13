@@ -404,6 +404,12 @@ interface OpenTrack {
 	measuredFrom: number | null
 	/** measureFrom: the next accumulated block sets the on-bin span afresh (not widens it). */
 	spanRestart: boolean
+	/**
+	 * measureFrom: the restarted measurement just took its first whole block, so the track is
+	 * published (track-update) with it: the engine labels the claim from proven blocks then, not
+	 * at the next periodic update (up to updateEvery blocks later, or the close).
+	 */
+	remeasured: boolean
 	thresholdDb: number
 	spectrum: SpectrumAccumulator
 	env: Float32Array
@@ -1042,9 +1048,11 @@ export class Tracker {
 				t.blocks === CLASS_SETTLE_BLOCKS ||
 				t.blocks === EARLY_LAST_UPDATE_BLOCKS ||
 				t.blocks % this.updateEvery === 0 ||
-				t.flagsChanged
+				t.flagsChanged ||
+				t.remeasured
 			) {
 				t.flagsChanged = false
+				t.remeasured = false
 				events.push({ kind: "track-update", track: this.snapshot(t, n) })
 			}
 		}
@@ -1628,6 +1636,7 @@ export class Tracker {
 			centroidDen: 0,
 			measuredFrom: null,
 			spanRestart: false,
+			remeasured: false,
 			thresholdDb: b.thresholdDb,
 			spectrum: new SpectrumAccumulator(),
 			env: new Float32Array(ENV_MAX_MS),
@@ -1717,6 +1726,7 @@ export class Tracker {
 		if (t.spanRestart) {
 			// measureFrom: the span is this block's (the blocks before the request no longer count).
 			t.spanRestart = false
+			t.remeasured = true
 			t.onMin = s.startBin
 			t.onMax = s.endBin
 		}
