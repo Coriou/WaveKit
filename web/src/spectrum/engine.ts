@@ -14,7 +14,7 @@ import {
 	type SpectrumFrameMeta,
 	type SpectrumLayout,
 	type SpectrumLevels,
-	type SpectrumLinkState,
+	type ConnectionMessage,
 	type SpectrumSize,
 	type SpectrumSubscription,
 	type SpectrumViewSpan,
@@ -42,7 +42,7 @@ export interface SpectrumEngineOptions {
 }
 
 export type SpectrumEngineStatus =
-	| { type: "connection"; state: SpectrumLinkState; message?: string }
+	| ConnectionMessage
 	| { type: "reset"; reason: ResetReason }
 	| { type: "profile"; outcome: string; code?: string; message?: string }
 	| { type: "error"; message: string }
@@ -87,6 +87,7 @@ export class SpectrumEngine {
 	private latestMeta: SpectrumFrameMeta | null = null
 	private disposed = false
 	private paused = false
+	private sourcePaused = false
 	private probeSeq = 0
 	private readonly probes = new Map<number, (db: number | null) => void>()
 
@@ -195,6 +196,16 @@ export class SpectrumEngine {
 		if (this.scene) {
 			if (!paused) this.scheduler?.invalidate()
 		} else this.post({ type: "paused", paused })
+	}
+
+	/**
+	 * The receiver of the subscribed source is paused or resumed: the worker's socket stops
+	 * resubscribing a stream that cannot flow, and resubscribes once on the resume.
+	 */
+	setSourcePaused(paused: boolean): void {
+		if (paused === this.sourcePaused) return
+		this.sourcePaused = paused
+		this.post({ type: "sourcePaused", paused })
 	}
 
 	/** The newest row's peak dBFS over [startHz, endHz] (hover readout); null when nothing is there. */

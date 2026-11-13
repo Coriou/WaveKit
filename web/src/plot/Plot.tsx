@@ -21,6 +21,7 @@ import type { DataLayer, SavedFrequencyRow } from "../data/index.ts"
 import { Store, tunedHz, useStore } from "../data/index.ts"
 import {
 	DEFAULT_LEVELS,
+	SPECTRUM_UNREACHABLE_AFTER_ATTEMPTS,
 	SpectrumCanvas,
 	type SpectrumEngineStatus,
 	type SpectrumFrameMeta,
@@ -148,6 +149,25 @@ const SPECTRUM_BACKFILL_MS = 10_000
 const TRACK_HOLD_MS = 1500
 const DRAG_THRESHOLD_PX = 3
 
+/** The plot's note for the spectrum link; null while live or still within its first tries. */
+function linkNoteFor(link: {
+	state: SpectrumLinkState
+	message?: string | undefined
+	attempts?: number | undefined
+}): string | null {
+	if (link.state === "failed")
+		return link.message ?? "The core refused the spectrum stream"
+	if (link.state === "reconnecting")
+		return "Spectrum stream lost · reconnecting…"
+	const tries = link.attempts ?? 0
+	if (
+		link.state === "connecting" &&
+		tries >= SPECTRUM_UNREACHABLE_AFTER_ATTEMPTS
+	)
+		return "Spectrum stream not reachable · retrying…"
+	return null
+}
+
 export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const sources = useStore(data.sources, s => s.sources)
 	const feeds = useStore(feedControllerFor(data), s => s.bySource)
@@ -203,10 +223,12 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const bins = fftBins(device.fftSize, binsMax)
 	useEffect(() => autoLevelsNow.set(autoScale), [autoScale])
 	const [engineError, setEngineError] = useState<string | null>(null)
-	// the spectrum stream's link: a note while it reconnects, the core's refusal when it failed
+	// the spectrum stream's link: a note while it reconnects or cannot reach the core, the reason
+	// when it failed (this browser is no longer signed in)
 	const [link, setLink] = useState<{
 		state: SpectrumLinkState
 		message?: string | undefined
+		attempts?: number | undefined
 	}>({ state: "connecting" })
 	const heldRef = useRef<{ track: Track; seenAt: number }[]>([])
 	const [tracks, setTracks] = useState<readonly Track[]>([])
@@ -399,7 +421,11 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const onStatus = (status: SpectrumEngineStatus) => {
 		if (status.type === "error") setEngineError(status.message)
 		if (status.type === "connection")
-			setLink({ state: status.state, message: status.message })
+			setLink({
+				state: status.state,
+				message: status.message,
+				attempts: status.attempts,
+			})
 		if (status.type === "reset" && status.reason !== "profile") {
 			heldRef.current = []
 			setTracks([])
@@ -436,6 +462,8 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 		view !== null &&
 		(bandwidthHz / spanWidth(view)) * size.w >= EDGE_GRAB_MIN_PX
 
+	const linkNote = linkNoteFor(link)
+
 	const decimals = view ? readoutDecimals(spanWidth(view)) : 3
 	const ariaLabel =
 		vfoHz !== null
@@ -470,6 +498,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					onFrameMeta={onFrameMeta}
 					onStatus={onStatus}
 					paused={paused ?? false}
+					sourcePaused={receiverPaused}
 					probeRef={probeRef}
 				/>
 				<ReceiverPausedBadge data={data} sourceId={sourceId} />
@@ -612,15 +641,12 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 				{sourceId === null && (
 					<div className="wk-plot-note">No source connected</div>
 				)}
-				{link.state !== "live" &&
-					link.state !== "connecting" &&
+				{linkNote !== null &&
 					engineError === null &&
 					sourceId !== null &&
 					!receiverPaused && (
 						<div className="wk-plot-note" role="status">
-							{link.state === "failed"
-								? (link.message ?? "The core refused the spectrum stream")
-								: "Spectrum stream lost · reconnecting…"}
+							{linkNote}
 						</div>
 					)}
 				{engineError !== null && sourceId !== null && !receiverPaused && (

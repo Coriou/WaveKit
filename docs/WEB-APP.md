@@ -34,11 +34,13 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
 - Labels and tags always sit at their own frequency inside the visible span. After a retune or a
   sample-rate change, the labels from the previous window disappear at once; only signals heard in
   the new window are labelled.
-- The spectrum stream recovers by itself; you never need to reload. If the connection to the core
-  drops, or the stream goes silent (for example after a receiver pause and resume), the plot reads
-  `Spectrum stream lost · reconnecting…` and retries with growing pauses until frames come back.
-  If the core refuses the stream (for example `Access expired`), it stops and says so; reload the
-  page after signing in again.
+- The spectrum stream recovers by itself, a core restart included. If the connection to the core
+  drops, or the stream goes silent, the plot reads `Spectrum stream lost · reconnecting…` and
+  retries with growing pauses (up to 10 s) until frames come back. While the receiver is paused it
+  waits, and it picks the stream up again as soon as you resume. If the page cannot reach the
+  stream from the start, it reads `Spectrum stream not reachable · retrying…`. Only when the core
+  says this browser is no longer signed in does it stop and say so: pair the browser again, then
+  reload the page.
 - Right-click a signal for its menu, which includes **Decode as…** to try a decoder on it.
 - Signals close together share one tag with a count (`DMR · CC 1 +2`). Click it for a list of the
   grouped signals; each row has a **Tune** button.
