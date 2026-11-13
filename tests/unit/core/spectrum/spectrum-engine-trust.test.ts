@@ -61,7 +61,7 @@ function make(hostCentre?: HostCentreReader) {
 		createHost: (_cfg, handlers) => (host = new Host(handlers)),
 		...(hostCentre ? { hostCentre, hostCentrePollMs: 20 } : {}),
 	})
-	return { engine, fanout, tuner, host: () => host! }
+	return { engine, fanout, tuner, sources, host: () => host! }
 }
 
 describe("SpectrumEngine trust", () => {
@@ -87,6 +87,35 @@ describe("SpectrumEngine trust", () => {
 		})
 		expect(engine.warnings().map(w => [w.code, w.deltaHz])).toEqual([
 			["host-centre-mismatch", 150_000],
+		])
+		await engine.stop()
+	})
+
+	it("skips a host reading whose read spanned a retune: the answer is compared with the centre it was asked about", async () => {
+		const pending: ((hz: number) => void)[] = []
+		const { engine, sources, host } = make({
+			read: () => new Promise<number | null>(resolve => pending.push(resolve)),
+		})
+		await engine.start()
+		await new Promise(resolve => setTimeout(resolve, 60))
+		expect(pending.length).toBeGreaterThan(0)
+		// The operator retunes while the reads are in flight; they answer the old centre.
+		const caps = sources.caps.get("rtl")!
+		sources.caps.set("rtl", { ...caps, centerFreq: 446_300_000 })
+		for (const resolve of pending.splice(0)) resolve(446_100_000)
+		await settle()
+		expect(engine.warnings()).toEqual([])
+		expect(
+			host().inputs.filter(
+				i => i.kind === "pending-epoch" && i.pending.centreHz === 446_100_000,
+			),
+		).toEqual([])
+		// A read asked after the retune still compares: a mismatch there is reported.
+		await new Promise(resolve => setTimeout(resolve, 60))
+		for (const resolve of pending.splice(0)) resolve(446_100_000)
+		await settle()
+		expect(engine.warnings().map(w => [w.code, w.deltaHz])).toEqual([
+			["host-centre-mismatch", -200_000],
 		])
 		await engine.stop()
 	})

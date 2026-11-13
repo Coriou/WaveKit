@@ -293,17 +293,29 @@ function sweep(opts: { cpu: CpuMeter }) {
 	return { h, runner, record, arbiter, undecoded, advance, toDecision }
 }
 
-/** Spins the microtask/IO queue until the pool's first probe is confirming on a decoder other than `not`. */
+/** Real time allowed for a probe launch (it awaits a real `mkdir` of its recording dir). */
+const CONFIRMING_DEADLINE_MS = 3_000
+
+/**
+ * Waits until the pool's first probe is confirming on a decoder other than `not`.
+ * The launch awaits real filesystem I/O, so the wait is bounded by real elapsed
+ * time (`performance.now`, not faked here), never by a count of event-loop turns.
+ * The harness clock and the faked timers do not move while waiting.
+ */
 async function confirming(
 	h: ReturnType<typeof poolHarness>,
 	not: string | null = null,
 ): Promise<string> {
-	for (let i = 0; i < 10_000; i++) {
+	const deadline = performance.now() + CONFIRMING_DEADLINE_MS
+	for (;;) {
 		const p = h.pool.status()[0]
 		if (p?.state === "confirming" && p.decoderId !== not) return p.decoderId
+		if (performance.now() > deadline)
+			throw new Error(
+				`probe never reached confirming within ${CONFIRMING_DEADLINE_MS} ms (last state ${p?.state ?? "none"})`,
+			)
 		await flushAsync()
 	}
-	throw new Error("probe never reached confirming")
 }
 
 const modeOf = (h: ReturnType<typeof poolHarness>, id: string | undefined) =>

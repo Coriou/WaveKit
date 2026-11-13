@@ -46,6 +46,48 @@ node scripts/check-docs.mjs
 A new workspace package needs its manifest copied in the root `Dockerfile` node-build stage, or the
 image build breaks.
 
+### Run the full suite remotely
+
+`node scripts/remote-check.mjs [github/<ref>]` runs lint, typecheck, build, the workspace tests and
+the root suite in six shards on GitHub runners, so your machine stays free. The base defaults to
+`github/main` and must be on the public remote. The command squashes your working tree (tracked
+changes plus untracked files) into one commit with a fixed message, scans the diff for private
+data and refuses on a hit, pushes it to a temporary `ci/<hash>` branch (the hash keys the tree and
+its merge base, so checks against different bases never share a run), waits up to 9 minutes and
+prints a short summary (also in `.remote-check/summary.txt`). Run it in the foreground with a
+600 s tool timeout. It deletes the branch and its own run afterwards (never another check's run;
+runs older than an hour are swept), and repeating it for the same tree and merge base prints the
+stored result offline, a failure included: `rm -r .remote-check/<hash>` (the last line of a failed
+summary) forces a recheck. It does not check the docs: run `node scripts/check-docs.mjs` locally
+beside it.
+
+Exit codes: 0 green (a test that failed and then passed on its rerun is listed as flaky, still a
+pass), 1 real failures, 2 infrastructure (not stored; the run is deleted and the summary keeps the
+failed step's last lines), 3 refused (hygiene, base or deny-list), 4 still running (call it again
+to attach). A job whose setup failed (Python packages, Corepack, the Rust toolchain, the dependency
+install, the shared build) is infrastructure, not a failure: each call reruns such jobs once, and a
+later call after INFRA starts a fresh run. The install and the shared build fail the check like
+lint when their output shows your code is the cause: a lockfile or `package.json` error, or a
+TypeScript error (`error TS…`); network errors stay infrastructure. Nothing is rerun once a real
+failure is known. Two worktrees checking the same tree on the same merge base share one run: the
+second call attaches to it and waits for the first call's rerun. Binary files (a media, capture or
+archive extension such as `.png`, `.wav`, `.cu8`, `.iq`, `.bin` or `.zip`, or a NUL byte in the
+first 8000 bytes, whatever `.gitattributes` says) are refused
+when the check adds or changes them, under `fixtures/` too; commit them first through a normal
+pull request. A branch with refreshed screenshots (`docs/**/*.png` from `docs:shots`) is refused
+by design: check the code before regenerating the screenshots, or commit them after the check.
+The runs always conclude as successful on GitHub; the verdict is in the summary, with the last
+lines of a failed step's output (lint, typecheck, build) under it. Changes to `native/`, its build inputs (`Makefile`, the lockfile, the esbuild script) or
+the TypeScript code the Wasm kernels are compared with also run the channelizer and kernel tests.
+The private deny-list `~/.config/wavekit-remote/denylist` is required: one regular expression per
+line (case-insensitive; blank and `#` lines skipped), at least one pattern, for names and addresses
+of your own the built-in rules do not know. The command refuses while it is missing, unreadable,
+empty or holds an invalid line. Shards are packed by the per-file seconds in
+`scripts/remote-check-durations.json` (files of 5 s or more), which the command never writes. A
+green check leaves its own per-file seconds in `.remote-check/<hash>/durations.json`; refreshing
+the tracked table means copying that file over it by hand, only on explicit request. A flaky
+property test shows its fast-check seed for a replay.
+
 ## Documentation
 
 The docs are plain GitHub Markdown in the repository, so they change in the same commit as the

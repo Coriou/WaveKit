@@ -379,7 +379,7 @@ describe("sdr-host anonymous Docker volume detection", () => {
 		const anonSource = line(
 			"/",
 			"/state",
-			`/home/u/.local/share/docker/volumes/${ANON}/_data`,
+			`/srv/rootless/.local/share/docker/volumes/${ANON}/_data`,
 		)
 		expect(
 			isAnonymousVolumeMount([...base, anonSource].join("\n"), "/state"),

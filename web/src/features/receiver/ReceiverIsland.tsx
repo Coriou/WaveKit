@@ -8,7 +8,7 @@
 // "Receiver paused" with Resume (no tuning written: SDR++ may have retuned the dongle meanwhile) and, when the
 // core knows the pre-pause centre, "Resume at <MHz>" (writes the pre-pause tuning back); a failed resume reads
 // as an alert with Retry (the same kind of resume), and the tuner controls wait.
-import { useEffect, useId, useState, type CSSProperties } from "react"
+import { useEffect, useId, useRef, useState, type CSSProperties } from "react"
 import type { TunerState } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
@@ -70,6 +70,7 @@ import {
 	sourceTitle,
 } from "./summary.ts"
 import { ratePolicyNote } from "./notices.ts"
+import { offersTakeBack, takeTuningBack } from "./take-back.ts"
 import "./receiver.css"
 
 /** The value to show: the in-flight target, else the core's. */
@@ -225,6 +226,7 @@ function FeedControl() {
 					</Button>
 				</div>
 				{note}
+				<TuningUnprovenNote />
 			</>
 		)
 	const failed = feed.state === "error"
@@ -273,7 +275,7 @@ function FeedControl() {
 						title={
 							failed
 								? undefined
-								: "Reconnect without changing the receiver's tuning"
+								: "Reconnect; the tuning is written back only when WaveKit is the receiver's only client"
 						}
 						onClick={() =>
 							void (failed ? feeds.retryResume(id) : feeds.resume(id))
@@ -303,6 +305,68 @@ function FeedControl() {
 			</div>
 			{note}
 		</>
+	)
+}
+
+/**
+ * The source's `tuningUnproven` (GET /api/sources): the core's sentence, and "Take the tuning back"
+ * (POST /api/tuner/:sourceId/take-back) unless its cause is one the core always refuses or there is
+ * no connection. A refusal shows the core's message beside it, announced (role="alert").
+ */
+function TuningUnprovenNote() {
+	const { data, source } = useReceiver()
+	const readOnly = useReadOnly()
+	const [busy, setBusy] = useState(false)
+	// Take-back resolves after an await: no state update once the note has unmounted.
+	const mounted = useRef(true)
+	useEffect(() => {
+		mounted.current = true
+		return () => {
+			mounted.current = false
+		}
+	}, [])
+	const [refusal, setRefusal] = useState<{ id: string; text: string } | null>(
+		null,
+	)
+	const unproven = source?.tuningUnproven
+	if (!source || !unproven) return null
+	const id = source.id
+	const offer = offersTakeBack(unproven.cause)
+	const shown = refusal?.id === id ? refusal.text : null
+	const run = async () => {
+		setBusy(true)
+		setRefusal(null)
+		const text = await takeTuningBack(data, id)
+		if (!mounted.current) return
+		setBusy(false)
+		if (text !== null) setRefusal({ id, text })
+	}
+	return (
+		// A plain wrapper: only the refusal is a live region (no live region nested in another).
+		<span
+			className="wkf-warn wkf-rx-error wkf-rx-unproven"
+			data-cause={unproven.cause}
+		>
+			<span className="wkf-grow wkf-rx-toggle-text">
+				<span>{unproven.message}</span>
+				{shown && (
+					<span className="wkf-small" role="alert">
+						{shown}
+					</span>
+				)}
+			</span>
+			{offer && (
+				<Button
+					size="sm"
+					variant="outline"
+					disabled={readOnly || busy}
+					title="Write the held centre and sample rate to the receiver again"
+					onClick={() => void run()}
+				>
+					{busy ? "Taking back…" : "Take the tuning back"}
+				</Button>
+			)}
+		</span>
 	)
 }
 

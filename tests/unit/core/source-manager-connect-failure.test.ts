@@ -58,19 +58,19 @@ describe("connect error classes", () => {
 
 	it("every class has a fixed hint that never carries error text", () => {
 		for (const cls of SOURCE_CONNECT_ERROR_CLASSES) {
-			const hint = connectHint(cls, "rx.local:1234")
-			expect(hint).toContain("rx.local:1234")
+			const hint = connectHint(cls, "rx.example:1234")
+			expect(hint).toContain("rx.example:1234")
 			expect(connectHint(cls, null)).toContain("the configured receiver")
 		}
-		expect(connectHint("refused", "rx.local:1234")).toBe(
-			"Nothing listening at rx.local:1234: is the bridge or rtl_tcp running?",
+		expect(connectHint("refused", "rx.example:1234")).toBe(
+			"Nothing listening at rx.example:1234: is the bridge or rtl_tcp running?",
 		)
 	})
 })
 
 describe("connect target", () => {
 	it("shows plain host names and addresses with a valid port", () => {
-		expect(connectTarget("rx.local", 1234)).toBe("rx.local:1234")
+		expect(connectTarget("rx.example", 1234)).toBe("rx.example:1234")
 		expect(connectTarget("127.0.0.1", 1)).toBe("127.0.0.1:1")
 		expect(connectTarget("::1", 65_535)).toBe("[::1]:65535")
 	})

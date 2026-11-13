@@ -1,0 +1,188 @@
+name: CI remote
+
+# The check behind `node scripts/remote-check.mjs`, run for pushed ci/** branches. Every step
+# records its exit code instead of failing and every job is continue-on-error, so the run always
+# concludes success; the result is in each job's verdict artifact, written by
+# scripts/remote-check-job.mjs. Each job's steps share one budget from its "Start verdict" step
+# (VERDICT_STEPS_S, enforced by step.sh) that ends minutes before timeout-minutes. Every step.sh
+# name is in SETUP_STEPS (a failure makes the verdict infra and the job is rerun once, unless
+# codeCaused finds a lockfile, manifest or TypeScript error in its log) or CHECK_STEPS in
+# scripts/remote-check-lib.mjs.
+on:
+  push:
+    branches: ["ci/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    env:
+      VERDICT_JOB: static
+      VERDICT_STEPS_S: "1260"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start verdict
+        run: &start |
+          date +%s > "$RUNNER_TEMP/verdict-start"
+          : > "$RUNNER_TEMP/verdict-steps"
+          cat > "$RUNNER_TEMP/step.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # step.sh <name> <command...>: runs the command until the job's step budget ends and records
+          # its exit code (124: the budget ran out; 137: the command ignored SIGTERM for 15 s). The
+          # output goes to $RUNNER_TEMP/step-<name>.log (no pipe a lingering child could hold open),
+          # printed afterwards; a failed step's verdict keeps its end.
+          name="$1"
+          shift
+          log="$RUNNER_TEMP/step-$name.log"
+          left=$(( $(cat "$RUNNER_TEMP/verdict-start") + VERDICT_STEPS_S - $(date +%s) ))
+          if [ "$left" -gt 0 ]; then
+            timeout -k 15s "${left}s" "$@" > "$log" 2>&1
+            code=$?
+            cat "$log"
+          else
+            code=124
+          fi
+          printf '%s\t%s\n' "$name" "$code" >> "$RUNNER_TEMP/verdict-steps"
+          echo "step $name exited $code"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/step.sh"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Python packages
+        run: '"$RUNNER_TEMP/step.sh" pip python -m pip install numpy==2.5.3 cryptography protobuf'
+      - name: Enable Corepack
+        run: '"$RUNNER_TEMP/step.sh" corepack corepack enable'
+      - name: Install dependencies
+        run: '"$RUNNER_TEMP/step.sh" install pnpm install --frozen-lockfile'
+      - name: Lint
+        run: '"$RUNNER_TEMP/step.sh" lint pnpm run lint'
+      - name: Typecheck
+        run: '"$RUNNER_TEMP/step.sh" typecheck pnpm run typecheck'
+      - name: Build
+        run: '"$RUNNER_TEMP/step.sh" build pnpm run build'
+      - name: Workspace tests
+        run: '"$RUNNER_TEMP/step.sh" workspace-tests pnpm exec turbo run test --filter=!wavekit'
+      - name: Write verdict
+        if: always()
+        run: node scripts/remote-check-job.mjs verdict pip corepack install lint typecheck build workspace-tests
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verdict-static
+          path: verdict.json
+          retention-days: 1
+
+  # Root tests in six shards packed by weight (scripts/remote-check-durations.json); failed files
+  # are rerun once together, and one that passes then is reported flaky. Budget: setup by 600 s,
+  # tests and verdict by 1260 s (VERDICT_END_S), timeout 1500 s.
+  root:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    env:
+      VERDICT_JOB: root
+      VERDICT_STEPS_S: "600"
+      VERDICT_END_S: "1260"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start verdict
+        run: *start
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      # Fixture composer tests (tests/unit/fixtures) run compose.py.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Python packages
+        run: '"$RUNNER_TEMP/step.sh" pip python -m pip install numpy==2.5.3 cryptography protobuf'
+      - name: Enable Corepack
+        run: '"$RUNNER_TEMP/step.sh" corepack corepack enable'
+      - name: Install dependencies
+        run: '"$RUNNER_TEMP/step.sh" install pnpm install --frozen-lockfile'
+      - name: Build shared packages
+        run: '"$RUNNER_TEMP/step.sh" build-shared bash -c "pnpm --filter @wavekit/shared build && pnpm --filter @wavekit/api-types build"'
+      - name: Root tests and verdict
+        if: always()
+        run: node scripts/remote-check-job.mjs root ${{ matrix.shard }} pip corepack install build-shared
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verdict-root-${{ matrix.shard }}
+          path: verdict.json
+          retention-days: 1
+
+  # The native job runs only when the client marked the commit message: the check touches native/
+  # or a TypeScript reference the kernels are compared with (NATIVE_PREFIXES in remote-check-lib.mjs).
+  native:
+    if: contains(github.event.head_commit.message, '[native]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    env:
+      VERDICT_JOB: native
+      VERDICT_STEPS_S: "1560"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start verdict
+        run: *start
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Enable Corepack
+        run: '"$RUNNER_TEMP/step.sh" corepack corepack enable'
+      - name: Install dependencies
+        run: '"$RUNNER_TEMP/step.sh" install pnpm install --frozen-lockfile'
+      - name: Build shared packages
+        run: '"$RUNNER_TEMP/step.sh" build-shared bash -c "pnpm --filter @wavekit/shared build && pnpm --filter @wavekit/api-types build"'
+      # Same toolchain as the Dockerfile's RUST_IMAGE; the steps mirror ci.yml's channelizer job.
+      - name: Install Rust
+        run: '"$RUNNER_TEMP/step.sh" rust bash -c "rustup toolchain install 1.98.1 --profile minimal && rustup default 1.98.1 && rustup target add wasm32-unknown-unknown --toolchain 1.98.1"'
+      - name: Channelizer
+        env:
+          WAVEKIT_CHAN_BIN: ${{ github.workspace }}/native/wavekit-chan/target/release/wavekit-chan
+        run: '"$RUNNER_TEMP/step.sh" channelizer bash -c "make chan-test && make chan-build && pnpm exec vitest run tests/integration/wavekit-chan-binary.test.ts tests/integration/channelizer-recenter-real-binary.test.ts"'
+      - name: Wasm kernels
+        run: >-
+          "$RUNNER_TEMP/step.sh" kernels bash -c "cargo test --locked --manifest-path native/wavekit-frame/Cargo.toml
+          && cargo test --locked --manifest-path native/wavekit-nfm/Cargo.toml
+          && native/wavekit-frame/build.sh && native/wavekit-nfm/build.sh && pnpm run build
+          && test -s dist/spectrum-frame.wasm && test -s dist/wideband-nfm.wasm && test -s dist/spectrum-worker.js"
+      - name: Kernels against the JS reference
+        env:
+          WAVEKIT_REQUIRE_FRAME_WASM: "1"
+          WAVEKIT_REQUIRE_NFM_WASM: "1"
+          WAVEKIT_RECORDER_DSP_WASM: ${{ github.workspace }}/dist/wideband-nfm.wasm
+        run: >-
+          "$RUNNER_TEMP/step.sh" kernels-js pnpm exec vitest run --maxWorkers=1
+          tests/unit/core/spectrum/frame-wasm
+          tests/unit/core/spectrum/pipeline-frame-linear-golden
+          tests/unit/core/spectrum/pipeline-short-linear-golden
+          tests/unit/core/spectrum/spectrum-worker-build
+          tests/unit/core/spectrum/wasm-artefact
+          tests/unit/core/spectrum/pipeline-profile
+          tests/unit/core/scanner/channel
+          tests/unit/core/scanner/wideband-analog
+          tests/unit/core/scanner/recorder-decisions
+      - name: Write verdict
+        if: always()
+        run: node scripts/remote-check-job.mjs verdict corepack install build-shared rust channelizer kernels kernels-js
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verdict-native
+          path: verdict.json
+          retention-days: 1

@@ -209,6 +209,7 @@ import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
 import {
 	receiverClientsMaxAgeMs,
 	receiverClientsVerdict,
+	sdrHostPairedWithSource,
 } from "./core/tuning-ledger-receiver-free.js"
 import {
 	ReceiverIdentityTracker,
@@ -2321,14 +2322,23 @@ async function main(): Promise<void> {
 					config.resources.sdrHostPoller.pollIntervalMs,
 					config.resources.sdrHostPoller.timeoutMs,
 				)
+				const apiUrlOf = new Map(
+					sdrHostConfigs.map(c => [c.sourceId, c.apiUrl]),
+				)
 				tunerController.setReceiverClientsView(
 					id =>
-						receiverClientsVerdict(
-							poller.clientsReading(id),
-							sourceManager.connectionLocalPort(id),
-							performance.now(),
-							clientsMaxAgeMs,
-						),
+						// A sole client proves nothing about an sdr-host that is not this source's receiver.
+						sdrHostPairedWithSource(
+							apiUrlOf.get(id),
+							sourceManager.getActiveHost(id),
+						)
+							? receiverClientsVerdict(
+									poller.clientsReading(id),
+									sourceManager.connectionLocalPort(id),
+									performance.now(),
+									clientsMaxAgeMs,
+								)
+							: { free: false, reason: "clients-unknown" },
 					id => poller.pollNow(id),
 				)
 				poller.on("status", status =>

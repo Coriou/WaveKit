@@ -54,6 +54,7 @@ Thumbs.db
 # Testing & Coverage
 # -----------------------------------------------------------------------------
 /coverage/
+/.remote-check/
 .nyc_output/
 *.lcov
 
