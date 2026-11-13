@@ -9,8 +9,8 @@
 // the summary, also written to .remote-check/summary.txt. Docs are not checked here: run
 // scripts/check-docs.mjs locally.
 //
-// Exit: 0 green (flaky tests included), 1 failures (run kept when a non-test step failed),
-// 2 infrastructure (run kept), 3 refused, 4 still running after 9 minutes: call again.
+// Exit: 0 green (flaky tests included), 1 failures, 2 infrastructure (run kept), 3 refused,
+// 4 still running after 9 minutes: call again.
 
 import { execFileSync } from "node:child_process"
 import * as fs from "node:fs"
@@ -200,6 +200,8 @@ export async function remoteCheck(d, argv) {
 			).trim()
 			git(["push", "-q", "--force", REMOTE, `${commit}:refs/heads/${branch}`])
 			for (let i = 0; !state.runId && i < 24; i++) {
+				if (d.now() + 5000 > deadline)
+					return still(`run of ${branch} not started yet`)
 				await d.sleep(5000)
 				const r = ciRuns(["--branch", branch])[0]
 				if (r) state.runId = String(r.databaseId)
@@ -262,15 +264,14 @@ export async function remoteCheck(d, argv) {
 		view,
 		tree12,
 		mb,
-		root,
-		out,
+		out: cache,
 		home: d.home,
 		now: d.now(),
 	})
 
 	// Cache (a FAIL too: `rm -r .remote-check/<tree12>` forces a recheck), then delete the branch
-	// and the run unless it is kept (INFRA or a failed non-test step: the sweep takes it). An INFRA
-	// run is never reattached: state.json goes, and the next call deletes it and pushes a new one.
+	// and the run unless it is kept (INFRA: the sweep takes it). An INFRA run is never reattached:
+	// state.json goes, and the next call deletes it and pushes a new one.
 	fs.writeFileSync(join(cache, "summary.txt"), `${text}\n`)
 	if (code !== 2) fs.writeFileSync(codeFile, `${code}\t${base}`)
 	fs.rmSync(dl, { recursive: true, force: true })

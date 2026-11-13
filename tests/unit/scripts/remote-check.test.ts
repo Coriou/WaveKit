@@ -45,144 +45,85 @@ const none = { patterns: [] as RegExp[] }
 function scanText(
 	text: string,
 	denylist: Parameters<typeof scanHygiene>[0]["denylist"] = none,
+	file = "src/a.ts",
 ) {
 	return scanHygiene({
-		changes: [{ path: "src/a.ts", status: "M", binary: false, size: 10 }],
-		added: new Map([["src/a.ts", [{ line: 7, text }]]]),
+		changes: [{ path: file, status: "M", binary: false, size: 10 }],
+		added: new Map([[file, [{ line: 7, text }]]]),
 		denylist,
 	})
 }
 
 describe("hygiene scan", () => {
-	it.each([
-		["10/8", dot(10, 1, 2, 3)],
-		["172.16/12", dot(172, 20, 0, 9)],
-		["192.168/16", `host ${dot(192, 168, 0, 5)}:80`],
-		["link-local", dot(169, 254, 0, 1)],
-		["carrier NAT", dot(100, 64, 3, 4)],
-	])("flags a private address (%s)", (_, text) => {
-		expect(scanText(text)).toEqual([
-			{ file: "src/a.ts", line: 7, label: "private address" },
-		])
+	const c = ":"
+	const local = (...p: string[]) => dot(...p, "local")
+	const key = `-----BEGIN ${"OPENSSH"} PRIVATE KEY-----`
+	const token = `${"ghp"}_${"a1".repeat(18)}`
+	const pat = `${"github"}_pat_${"B2".repeat(15)}`
+	const ip = "private address"
+	const lan = "LAN host name"
+	const home = "home directory path"
+	const mail = "email address"
+
+	// Prose (Markdown, YAML, JSON, text): every rule applies to the whole line.
+	it.each<[string, string[]]>([
+		[dot(10, 1, 2, 3), [ip]],
+		[dot(172, 20, 0, 9), [ip]],
+		[`host ${dot(192, 168, 0, 5)}${c}80`, [ip]],
+		[dot(169, 254, 0, 1), [ip]],
+		[dot(100, 64, 3, 4), [ip]],
+		[dot(127, 0, 0, 1), []],
+		[dot(8, 8, 8, 8), []],
+		[dot(172, 32, 0, 1), []],
+		[dot(10, 300, 0, 1), []],
+		["version 1.2.3", []],
+		[`ssh ${local("receiver")}`, [lan]],
+		[`set ${dot("this", "local")} first`, [lan]],
+		[`http${c}//${local("receiver")}${c}8080/api`, [lan]],
+		[`ssh${c}//${dot("box", "lan")}/x`, [lan]],
+		[`ws${c}//${at("user", local("a", "b"))}/stream`, [lan, mail]],
+		[`see https${c}//${local("my", "box")}`, [lan]],
+		[`open http${c}//${local("raspberrypi")}.`, [lan]],
+		[`ssh ${local("raspberrypi")}.`, [lan]],
+		[`mount ${dot("nas", "home", "lan")} now`, [lan]],
+		[`smb ${"/"}/${local("nas")}/share`, [lan]],
+		[`cp ${dot("config", "local", "yaml")} .${dot("env", "local")}`, []],
+		[`cp .${dot("env", "local")} ${dot("settings", "local", "json")}`, []],
+		[`see ${dot("foo", "local", "example", "com")}`, []],
+		["run /usr/local/bin/node", []],
+		[`file${c}///usr/local/share`, []],
+		[`see https${c}//${dot("example", "com")}/local`, []],
+		[`see /${"Users"}/someone/x`, [home]],
+		[`see /${"home"}/someone/x`, [home]],
+		[at("someone", dot("mail", "com")), [mail]],
+		[at("user", dot("example", "invalid")), []],
+		[at("user", dot("example", "com")), []],
+		[at("logo", dot("2x", "png")), []],
+		['import x from "@wavekit/shared"', []],
+		[`t ${key}`, ["private key"]],
+		[`t ${token}`, ["GitHub token"]],
+		[`t ${pat}`, ["GitHub token"]],
+		[`${"ghp"}_short`, []],
+	])("prose %j -> %j", (text, labels) => {
+		expect(scanText(text, none, "docs/x.md").map(h => h.label)).toEqual(labels)
 	})
 
-	it("passes public, loopback and out-of-range addresses", () => {
-		for (const text of [
-			dot(127, 0, 0, 1),
-			dot(8, 8, 8, 8),
-			dot(172, 32, 0, 1),
-			dot(10, 300, 0, 1),
-			"version 1.2.3",
-		])
-			expect(scanText(text)).toEqual([])
-	})
-
-	it("flags a unique-local IPv6 address and a LAN host name", () => {
-		expect(scanText(`fd12${":"}3456::1`)[0]?.label).toBe("private address")
-		expect(
-			scanText(`ssh pi@${dot("receiver", "local")}`).map(h => h.label),
-		).toContain("LAN host name")
-		expect(
-			scanText(`cp ${dot("config", "local", "yaml")} .${dot("env", "local")}`),
-		).toEqual([])
-	})
-
-	it("takes a whole IPv6 address as the token, so a shorter one in the base allows nothing longer", () => {
-		const c = ":"
-		const scan = (text: string, base: string) =>
-			scanHygiene({
-				changes: [],
-				added: new Map([["src/a.ts", [{ line: 1, text }]]]),
-				denylist: none,
-				inBase: (t, find) => base.includes(t) && find(base).includes(t),
-			}).map(h => h.label)
-		for (const prefix of ["fe80", "fd00"]) {
-			const short = `${prefix}${c}${c}1`
-			const base = `listen [${short}%eth0]${c}80`
-			expect(scan(`host ${short}`, base)).toEqual([])
-			expect(scan(`[${short}]${c}80`, base)).toEqual([])
-			for (const longer of [`${short}${c}2`, `${short}2`, `${short}${c}abcd`])
-				expect(scan(`host ${longer}`, base)).toEqual(["private address"])
-		}
-	})
-
-	it("flags LAN host names inside URLs, not paths", () => {
-		const local = (...p: string[]) => dot(...p, "local")
-		for (const text of [
-			`http${":"}//${local("receiver")}${":"}8080/api`,
-			`ssh${":"}//${dot("box", "lan")}/x`,
-			`ws${":"}//user${"@"}${local("a", "b")}/stream`,
-			`see https${":"}//${local("my", "box")}`,
-		])
-			expect(scanText(text).map(h => h.label)).toContain("LAN host name")
-		for (const text of [
-			"run /usr/local/bin/node",
-			`file${":"}///usr/local/share`,
-			`see https${":"}//${dot("example", "com")}/local`,
-		])
-			expect(scanText(text)).toEqual([])
-	})
-
-	it("flags multi-label and sentence-final LAN names, not file names or public hosts", () => {
-		const pi = dot("raspberrypi", "local")
-		for (const text of [
-			`open http${":"}//${pi}.`,
-			`ssh ${pi}.`,
-			`mount ${dot("nas", "home", "lan")} now`,
-			`smb ${"/"}/${dot("nas", "local")}/share`,
-		])
-			expect(scanText(text).map(h => h.label)).toEqual(["LAN host name"])
-		for (const text of [
-			`cp .${dot("env", "local")} ${dot("settings", "local", "json")}`,
-			`see ${dot("foo", "local", "example", "com")}`,
-		])
-			expect(scanText(text)).toEqual([])
-	})
-
-	it("does not take a Rust or C++ path for an IPv6 address", () => {
-		const c = "::"
-		expect(scanText(`feed${c}Parser${c}new()`)).toEqual([])
-		expect(scanText(`let x: Feed${c}Item`)).toEqual([])
-		expect(scanText(`fd00${c}1 and [fe80${c}2]`).map(h => h.label)).toEqual([
-			"private address",
-		])
-	})
-
-	it("flags MAC addresses, allowed when the base holds the same one", () => {
-		const mac = (sep: string, pairs: string[]) => pairs.join(sep)
-		const one = mac(":", ["b8", "27", "eb", "12", "34", "56"])
-		for (const text of [
-			`hw ${one}`,
-			`hw ${mac("-", ["B8", "27", "EB", "12", "34", "56"])}`,
-		])
-			expect(scanText(text).map(h => h.label)).toEqual(["MAC address"])
-		for (const text of [
-			`time 12${":"}34${":"}56`,
-			`bytes ${mac(":", ["01", "02", "03", "04", "05", "06", "07"])}`,
-			`mixed ${["b8", "27", "eb"].join(":")}-${["12", "34", "56"].join("-")}`,
-		])
-			expect(scanText(text)).toEqual([])
-		const scan = (text: string) =>
-			scanHygiene({
-				changes: [],
-				added: new Map([["src/a.ts", [{ line: 1, text }]]]),
-				denylist: none,
-				inBase: (t, find) => find(`mac: ${one}`).includes(t),
-			}).map(h => h.label)
-		expect(scan(`hw ${one}`)).toEqual([])
-		expect(
-			scan(`hw ${mac(":", ["b8", "27", "eb", "12", "34", "57"])}`),
-		).toEqual(["MAC address"])
-	})
-
-	it("flags home directory paths", () => {
-		expect(scanText(`see /${"Users"}/someone/x`)[0]?.label).toBe(
-			"home directory path",
-		)
-		expect(scanText(`see /${"home"}/someone/x`)[0]?.label).toBe(
-			"home directory path",
-		)
-		expect(scanText("see /usr/local/bin")).toEqual([])
+	// Source code: a bare LAN name counts only inside a string or a comment; a URL host always.
+	it.each<[string, string[]]>([
+		[`${dot("this", "local")} = 1`, []],
+		[`${dot("opts", "lan")} = 1`, []],
+		[`const y = ${dot("x", "local")}?.y`, []],
+		[`if (${dot("prev", "local")} !== "settled") return`, []],
+		[`const host = "${local("receiver")}"`, [lan]],
+		[`const host = '${local("receiver")}'`, [lan]],
+		[`// ssh ${local("nas")}`, [lan]],
+		[`x = 1 /* ${local("nas")} */`, [lan]],
+		[` * see ${local("nas")} for the box`, [lan]],
+		[`fetch(base + http${c}//${local("box")}/x)`, [lan]],
+		[`const ip = "${dot(10, 0, 0, 1)}"`, [ip]],
+		["const x = 1", []],
+	])("code %j -> %j", (text, labels) => {
+		expect(scanText(text).map(h => h.label)).toEqual(labels)
 	})
 
 	it("flags references inside the private agent directory unless the base holds the whole path", () => {
@@ -225,16 +166,6 @@ describe("hygiene scan", () => {
 			"agents/x.md and my.agents/x",
 		])
 			expect(labels(text)).toEqual([])
-	})
-
-	it("flags email addresses but not reserved domains or asset names", () => {
-		expect(scanText(at("someone", dot("mail", "com")))[0]?.label).toBe(
-			"email address",
-		)
-		expect(scanText(at("user", dot("example", "invalid")))).toEqual([])
-		expect(scanText(at("user", dot("example", "com")))).toEqual([])
-		expect(scanText(at("logo", dot("2x", "png")))).toEqual([])
-		expect(scanText('import x from "@wavekit/shared"')).toEqual([])
 	})
 
 	it("flags private agent paths and suspicious path names", () => {
@@ -311,7 +242,8 @@ describe("hygiene scan", () => {
 
 	it("allows a built-in rule's token already in the public base, never a deny-list or secret hit", () => {
 		const host = dot(10, 0, 0, 1)
-		const inBase = (t: string) => t === host || t === "fixed-word"
+		const inBase = (t: string) =>
+			t === host || t === "fixed-word" || t === token
 		const denylist = parseDenylist(() => "fixed-word")
 		const scan = (text: string) =>
 			scanHygiene({
@@ -325,27 +257,7 @@ describe("hygiene scan", () => {
 			"private address",
 		])
 		expect(scan("has fixed-word")).toEqual(["deny-list pattern 1"])
-	})
-
-	it("flags private keys and GitHub tokens", () => {
-		const key = `-----BEGIN ${"OPENSSH"} PRIVATE KEY-----`
-		const token = `${"ghp"}_${"a1".repeat(18)}`
-		const pat = `${"github"}_pat_${"B2".repeat(15)}`
-		const all = () => true
-		for (const [text, label] of [
-			[key, "private key"],
-			[token, "GitHub token"],
-			[pat, "GitHub token"],
-		])
-			expect(
-				scanHygiene({
-					changes: [],
-					added: new Map([["x.md", [{ line: 2, text: `t ${text}` }]]]),
-					denylist: none,
-					inBase: all,
-				}),
-			).toEqual([{ file: "x.md", line: 2, label }])
-		expect(scanText(`${"ghp"}_short`)).toEqual([])
+		expect(scan(`t ${token}`)).toEqual(["GitHub token"])
 	})
 
 	it("applies deny-list patterns case-insensitively and never prints the match", () => {
@@ -375,10 +287,6 @@ describe("hygiene scan", () => {
 			patterns: [],
 			missing: true,
 		})
-	})
-
-	it("passes a clean diff", () => {
-		expect(scanText("const x = 1")).toEqual([])
 	})
 
 	it("reads added lines that look like diff headers by the hunk counts", () => {
@@ -724,7 +632,7 @@ describe("summary", () => {
 		])
 	})
 
-	it("keeps the last 15 trimmed lines of a failed step's output", () => {
+	it("keeps the last 8 trimmed lines of a failed step's output", () => {
 		const out = [
 			...Array.from({ length: 20 }, (_, i) => `\x1b[31mline ${i}\x1b[0m`),
 			"",
@@ -733,14 +641,14 @@ describe("summary", () => {
 			`${"x".repeat(250)}\r`,
 		].join("\n")
 		const lines = tailLines(out)
-		expect(lines).toHaveLength(15)
-		expect(lines[0]).toBe("line 7")
+		expect(lines).toHaveLength(8)
+		expect(lines[0]).toBe("line 14")
 		expect(lines.at(-2)).toBe("progress 100%")
 		expect(lines.at(-1)).toBe(`${"x".repeat(199)}…`)
 		expect(tailLines("")).toEqual([])
 	})
 
-	it("prints failed steps' output tails under their lines, 15 lines at most in all", () => {
+	it("prints the last 8 lines of the first two failed steps' output under their lines", () => {
 		const tail = (n: number, w: string) =>
 			Array.from({ length: n }, (_, i) => `${w} ${i}`)
 		const setup = (tl: string[]) =>
@@ -761,7 +669,8 @@ describe("summary", () => {
 			root: [
 				setup(tail(15, "pnpm")),
 				setup(tail(15, "pnpm")),
-				...Array.from({ length: 4 }, () => shard()),
+				setup(tail(4, "npm")),
+				...Array.from({ length: 3 }, () => shard()),
 			],
 		})
 		const lines = text.split("\n")
@@ -775,15 +684,18 @@ describe("summary", () => {
 		])
 		const at = lines.indexOf("  root 1 > step install")
 		expect(at).toBeGreaterThan(0)
-		// 4 lines went to lint, so the shard's tail keeps its last 11; the same tail of shard 2 is
-		// not repeated.
-		expect(lines.slice(at + 1, at + 12)).toEqual(
+		// The shard's tail keeps its last 8; shard 2's identical tail is not repeated and shard 3's
+		// would be a third step.
+		expect(lines.slice(at + 1, at + 9)).toEqual(
 			tail(15, "pnpm")
-				.slice(-11)
+				.slice(-8)
 				.map(l => `    ${l}`),
 		)
-		expect(lines[at + 12]).toBe("  root 2 > step install")
-		expect(lines.filter(l => /^ {4}(lint|pnpm) /.test(l))).toHaveLength(14)
+		expect(lines.slice(at + 9, at + 11)).toEqual([
+			"  root 2 > step install",
+			"  root 3 > step install",
+		])
+		expect(lines.filter(l => /^ {4}(lint|pnpm|npm) /.test(l))).toHaveLength(11)
 	})
 
 	it("passes with flaky tests and lists them", () => {
@@ -806,7 +718,7 @@ describe("summary", () => {
 		])
 	})
 
-	it("prints a flaky property's seed or counterexample and a replay note", () => {
+	it("prints one line per flaky file with its first replay hint and a replay note", () => {
 		const seed =
 			'Property failed after 3 tests | { seed: -71210566, path: "2" } | Counterexample: [1]'
 		const text = formatSummary({
@@ -815,7 +727,9 @@ describe("summary", () => {
 			root: [
 				shard({
 					flaky: [
-						{ file: "tests/p.test.ts", test: "p", message: seed },
+						{ file: "tests/p.test.ts", test: "p1", message: "timeout" },
+						{ file: "tests/p.test.ts", test: "p2", message: seed },
+						{ file: "tests/p.test.ts", test: "p3", message: "x" },
 						{
 							file: "tests/q.test.ts",
 							test: "q",
@@ -832,7 +746,7 @@ describe("summary", () => {
 		])
 		expect(text.split("\n").slice(3)).toEqual([
 			"flaky 3",
-			"  tests/p.test.ts > p  (seed -71210566)",
+			"  tests/p.test.ts > p1  +2 tests  (seed -71210566)",
 			"  tests/q.test.ts > q  (counterexample [0])",
 			"  tests/r.test.ts > r",
 			"property counterexample hidden by rerun: replay with the seed",
@@ -866,14 +780,10 @@ describe("summary", () => {
 })
 
 describe("durations and sweep", () => {
-	it("keeps files of a second or more", () => {
+	it("merges the shards' seconds and keeps files of 5 s or more", () => {
 		expect(
-			durationTable([{ "b.ts": 0.4, "a.ts": 12.6 }, { "c.ts": 1 }]),
-		).toEqual({ "a.ts": 13, "c.ts": 1 })
-		// One noisy run moves a listed file only halfway.
-		expect(
-			durationTable([{ "a.ts": 100, "n.ts": 3 }], { "a.ts": 50, "gone.ts": 9 }),
-		).toEqual({ "a.ts": 75, "n.ts": 3 })
+			durationTable([{ "b.ts": 4.4, "a.ts": 12.6 }, { "c.ts": 5 }]),
+		).toEqual({ "a.ts": 13, "c.ts": 5 })
 	})
 
 	it("sweeps only ci/<12 hex> branches and runs older than the limit", () => {
@@ -1081,7 +991,6 @@ describe("client with fake git and gh", () => {
 			: {
 					ok: true,
 					seconds: 200,
-					testSeconds: 150,
 					steps: { install: 0, "root-tests": 0 },
 					failed: [],
 					flaky: [],
@@ -1223,20 +1132,28 @@ describe("client with fake git and gh", () => {
 		expect(sweeps).toHaveLength(2)
 		expect(sweeps[0]).toBeLessThan(push)
 		expect(sweeps[1]).toBeGreaterThan(push)
-		// Even shard times leave no refreshed table; the summary has no note for it.
-		expect(fs.existsSync(join(root, ".remote-check/durations.json"))).toBe(
-			false,
-		)
 		expect(r.text.split("\n")).toHaveLength(4)
 	})
 
-	it("refreshes the table only when a shard's test time strays over 20 % from the mean", async () => {
+	it("writes a green run's per-file seconds into its cache directory, silently", async () => {
 		verdictFor = name =>
 			name === "root (1)"
-				? { ...verdict(name), testSeconds: 200 }
+				? {
+						...verdict(name),
+						durations: { "tests/a.test.ts": 7.4, "tests/b.test.ts": 1 },
+					}
 				: verdict(name)
-		expect((await remoteCheck(deps(), [])).code).toBe(0)
-		expect(fs.existsSync(join(root, ".remote-check/durations.json"))).toBe(true)
+		const r = await remoteCheck(deps(), [])
+		expect(r.code).toBe(0)
+		expect(r.text).not.toMatch(/durations/)
+		expect(
+			JSON.parse(
+				fs.readFileSync(
+					join(root, ".remote-check/abcdef012345/durations.json"),
+					"utf8",
+				),
+			),
+		).toEqual({ files: { "tests/a.test.ts": 7 } })
 	})
 
 	it("logs every call, a cached one too, to the private usage ledger", async () => {
@@ -1338,15 +1255,38 @@ describe("client with fake git and gh", () => {
 		expect(del).toBeLessThan(push)
 	})
 
-	it("keeps the run of a failed non-test step and deletes a test failure's", async () => {
+	it("deletes the run of a failure, a failed non-test step's too, and writes no durations", async () => {
 		verdictFor = name =>
 			name === "static"
 				? { ...verdict(name), ok: false, steps: { lint: 1 } }
 				: verdict(name)
 		const r = await remoteCheck(deps(), [])
 		expect(r.code).toBe(1)
-		expect(r.text).toContain("actions/runs/7  (kept)")
-		expect(w.runs.map(x => x.id)).toEqual([7])
+		expect(r.text).toContain("actions/runs/7  (deleted)")
+		expect(w.runs).toEqual([])
+		expect(
+			fs.existsSync(join(root, ".remote-check/abcdef012345/durations.json")),
+		).toBe(false)
+	})
+
+	it("returns 4 at the deadline while the pushed run has not appeared, then attaches", async () => {
+		w.listLag = true
+		const d: Deps = {
+			...deps(),
+			sleep: async ms => {
+				w.clock += ms * 12
+			},
+		}
+		const r = await remoteCheck(d, [])
+		expect(r).toEqual({
+			code: 4,
+			text: "remote-check RUNNING  tree abcdef012345: run of ci/abcdef012345 not started yet, call again",
+		})
+		expect(w.clock - 1_000_000).toBeLessThanOrEqual(9 * 60_000)
+		w.listLag = false
+		const again = await remoteCheck(deps(), [])
+		expect(again.code).toBe(0)
+		expect(w.pushes).toBe(1)
 	})
 
 	it("is INFRA at once when gh refuses the rerun", async () => {

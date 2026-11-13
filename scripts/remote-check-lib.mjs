@@ -38,17 +38,50 @@ export function isLanIpv4(a, b) {
 /** The agent paths AGENTS.md names: the memory link and its index. */
 const AGENT_LINKS = ["memory", "memory/MEMORY.md"].map(p => `.agents/${p}`)
 
+/** Source files, where a bare LAN name counts only inside a string or a comment. */
+const CODE_FILE =
+	/\.(?:[cm]?[jt]sx?|rs|py|go|java|kt|swift|rb|c|cc|cpp|h|hpp|sh)$/
+
 /**
- * Built-in content rules; `find` returns the matched tokens. A token of a plain rule that already
- * appears as a whole token of the same rule in the public base is allowed (it is published
- * already); an `absolute` rule never is.
- * @type {{ label: string, absolute?: boolean, find: (text: string) => string[] }[]}
+ * Which characters of a source line sit inside a string or a comment; a line opening or
+ * continuing a block comment counts whole.
+ * @param {string} line
+ */
+function proseMask(line) {
+	const mask = new Array(line.length).fill(/^\s*(?:\*|\/\*)/.test(line))
+	if (mask[0]) return mask
+	let quote = ""
+	for (let i = 0; i < line.length; i++) {
+		const ch = line[i] ?? ""
+		if (quote) {
+			mask[i] = true
+			if (ch === "\\") mask[++i] = true
+			else if (ch === quote) quote = ""
+		} else if ("\"'`".includes(ch)) {
+			quote = ch
+			mask[i] = true
+		} else if (
+			line.startsWith("//", i) ||
+			line.startsWith("/*", i) ||
+			(ch === "#" && /\s/.test(line[i - 1] ?? " "))
+		)
+			return mask.fill(true, i)
+	}
+	return mask
+}
+
+/**
+ * Built-in content rules; `find` returns the matched tokens of a line of `file` (no file: a base
+ * line or a path, read like prose). A token of a plain rule that already appears as a whole token
+ * of the same rule in the public base is allowed (it is published already); an `absolute` rule
+ * never is.
+ * @type {{ label: string, absolute?: boolean, find: (text: string, file?: string) => string[] }[]}
  */
 const CONTENT_RULES = [
 	{
 		label: "private address",
-		find: text => [
-			...[
+		find: text =>
+			[
 				...text.matchAll(
 					/(?<![\d.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\d])/g,
 				),
@@ -58,44 +91,31 @@ const CONTENT_RULES = [
 					return o.every(n => n <= 255) && isLanIpv4(o[0] ?? 0, o[1] ?? 0)
 				})
 				.map(m => m[0]),
-			// The whole address is the token (no zone, no brackets), so a link-local or unique-local
-			// address in the base does not allow a longer one it is a prefix of. A word character
-			// after it (Feed::Item) makes it a path, not an address.
-			...[
-				...text.matchAll(
-					/(?<![\w:])f[cde][0-9a-f]{2}:[0-9a-f]{0,4}:(?:[0-9a-f:]*[0-9a-f])?(?!\w)/gi,
-				),
-			].map(m => m[0]),
-		],
 	},
 	{
-		// A bare multi-label name ending in the mDNS or home suffix (not a path segment), or the host
-		// after "//" in a URL, with or without a scheme or user; /usr/local/bin has no dot before the
-		// suffix. A sentence-final dot ends a name; a further label (a file extension, a public
-		// domain) means it is none.
+		// The host after "//" in a URL, with or without a scheme or user, anywhere; a bare multi-label
+		// name ending in the mDNS or home suffix (not a path segment) in prose, and in source code only
+		// inside a string or a comment (elsewhere it is a property access). /usr/local/bin has no dot
+		// before the suffix. A sentence-final dot ends a name; a further label (a file extension, a
+		// public domain) means it is none.
 		label: "LAN host name",
-		find: text => [
-			...[
-				...text.matchAll(
-					/(?<![\w.*/-])(?:[a-z0-9][\w-]*\.)+(?:local|lan)(?![\w-]|\.[\w-])/gi,
-				),
-			].map(m => m[0]),
-			...[
-				...text.matchAll(
-					/\/\/(?:[^\s/@]*@)?((?:[a-z0-9][\w-]*\.)+(?:local|lan))(?![\w-]|\.[\w-])/gi,
-				),
-			].map(m => m[1] ?? ""),
-		],
-	},
-	{
-		// Six hex pairs joined by one separator, not part of a longer run of pairs.
-		label: "MAC address",
-		find: text =>
-			[
-				...text.matchAll(
-					/(?<![0-9a-f]|[0-9a-f][:-])[0-9a-f]{2}([:-])(?:[0-9a-f]{2}\1){4}[0-9a-f]{2}(?![0-9a-f]|[:-][0-9a-f])/gi,
-				),
-			].map(m => m[0]),
+		find: (text, file = "") => {
+			const mask = CODE_FILE.test(file) ? proseMask(text) : undefined
+			return [
+				...[
+					...text.matchAll(
+						/(?<![\w.*/-])(?:[a-z0-9][\w-]*\.)+(?:local|lan)(?![\w-]|\.[\w-])/gi,
+					),
+				]
+					.filter(m => !mask || mask[m.index])
+					.map(m => m[0]),
+				...[
+					...text.matchAll(
+						/\/\/(?:[^\s/@]*@)?((?:[a-z0-9][\w-]*\.)+(?:local|lan))(?![\w-]|\.[\w-])/gi,
+					),
+				].map(m => m[1] ?? ""),
+			]
+		},
 	},
 	{
 		label: "home directory path",
@@ -259,9 +279,10 @@ export function scanHygiene({
 		/** @type {string} */ file,
 		/** @type {number} */ line,
 		/** @type {string} */ text,
+		source = "",
 	) => {
 		for (const rule of CONTENT_RULES) {
-			const tokens = rule.find(text)
+			const tokens = rule.find(text, source)
 			if (tokens.some(t => rule.absolute || !published(rule, t)))
 				hit(file, line, rule.label)
 		}
@@ -282,7 +303,7 @@ export function scanHygiene({
 		if (c.size > BIG_FILE_BYTES) hit(c.path, 0, "file over 1 MB")
 	}
 	for (const [file, lines] of added)
-		for (const { line, text } of lines) scan(file, line, text)
+		for (const { line, text } of lines) scan(file, line, text, file)
 	return hits
 }
 
@@ -407,8 +428,8 @@ export function trimMessage(message, max = MESSAGE_CHARS, lines = 3) {
 	return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
-/** Lines of a failed step's output a verdict keeps and a summary prints, in all. */
-export const TAIL_LINES = 15
+/** Lines of a failed step's output a verdict keeps and a summary prints, for two steps at most. */
+export const TAIL_LINES = 8
 
 /**
  * The last `lines` lines of a step's output, trimmed like a message: no colour codes, blank lines
@@ -520,19 +541,15 @@ export function exitCode({ verdicts, expected }) {
 }
 
 /**
- * A new weight table from the durations of a whole run, averaged with the previous table so one
- * noisy run moves it only halfway; files of at least one second are kept.
+ * The weight table of a whole run: its shards' per-file seconds merged, files of 5 s or more.
  * @param {Record<string, number>[]} durations
- * @param {Record<string, number>} [previous]
  */
-export function durationTable(durations, previous = {}) {
+export function durationTable(durations) {
 	/** @type {Record<string, number>} */
 	const files = {}
 	const merged = Object.assign({}, ...durations)
-	for (const f of Object.keys(merged).sort()) {
-		const s = f in previous ? (merged[f] + (previous[f] ?? 0)) / 2 : merged[f]
-		if (s >= 1) files[f] = Math.round(s)
-	}
+	for (const f of Object.keys(merged).sort())
+		if (merged[f] >= 5) files[f] = Math.round(merged[f])
 	return files
 }
 
@@ -556,8 +573,8 @@ const WORD = { 0: "PASS", 1: "FAIL", 2: "INFRA" }
 
 /**
  * The summary, at most 30 lines; a FAIL ends with how to force a recheck of the same tree. The last
- * lines of a failed step's output (a verdict's `tail`, TAIL_LINES at most in all) are indented
- * under the line naming that step; an identical tail of the same step is printed once.
+ * TAIL_LINES lines of a failed step's output (a verdict's `tail`) are indented under the line
+ * naming that step, for the first two such steps; an identical tail of the same step is printed once.
  * @param {{
  *   code: 0 | 1 | 2, tree: string, base: string, seconds: number,
  *   static?: { ok: boolean, seconds: number, steps: Record<string, number>, tail?: Record<string, string[]> } | undefined,
@@ -574,21 +591,17 @@ export function formatSummary(s) {
 		Object.entries(steps)
 			.filter(([, c]) => c !== 0)
 			.map(([n]) => n)
-	let tailRoom = TAIL_LINES
 	const printed = new Set()
-	/** The tail of step `n` that still fits, `extra` lines (a header) reserved; once per text. */
+	/** The last lines of step `n`'s output, for two steps at most, once per text. */
 	const tailOf = (
 		/** @type {Record<string, string[]> | undefined} */ tail,
 		/** @type {string} */ n,
-		extra = 0,
 	) => {
-		const lines = tail?.[n] ?? []
+		const lines = (tail?.[n] ?? []).slice(-TAIL_LINES)
 		const key = `${n}\0${lines.join("\n")}`
-		if (!lines.length || printed.has(key) || tailRoom - extra < 1) return []
+		if (!lines.length || printed.size >= 2 || printed.has(key)) return []
 		printed.add(key)
-		const out = lines.slice(-(tailRoom - extra))
-		tailRoom -= extra + out.length
-		return out
+		return lines
 	}
 	/** A job line, then each failed step's tail under a "  <step>:" line. */
 	const job = (
@@ -597,7 +610,7 @@ export function formatSummary(s) {
 	) => {
 		head.push(line)
 		for (const n of bad(v.steps)) {
-			const t = tailOf(v.tail, n, 1)
+			const t = tailOf(v.tail, n)
 			if (t.length) head.push(`  ${n}:`, ...t.map(l => `    ${l}`))
 		}
 	}
@@ -638,12 +651,20 @@ export function formatSummary(s) {
 		})),
 		...(v?.failed ?? []),
 	])
-	const flaky = s.root
-		.flatMap(v => v?.flaky ?? [])
-		.map(f => {
-			const h = propertyHint(f.message)
-			return h ? { ...f, test: `${f.test}  (${h})` } : f
-		})
+	// One line per flaky file: its first test, how many more, the first replay hint.
+	/** @type {Map<string, { file: string, test: string, message: string }[]>} */
+	const byFile = new Map()
+	for (const f of s.root.flatMap(v => v?.flaky ?? []))
+		byFile.set(f.file, [...(byFile.get(f.file) ?? []), f])
+	const flaky = [...byFile].map(([file, tests]) => {
+		const h = tests.map(f => propertyHint(f.message)).find(Boolean)
+		const more = tests.length > 1 ? `  +${tests.length - 1} tests` : ""
+		return {
+			file,
+			test: `${tests[0]?.test ?? ""}${more}${h ? `  (${h})` : ""}`,
+			message: "",
+		}
+	})
 	const tail = [...(s.notes ?? [])]
 	if (flaky.some(f => / \(seed /.test(f.test)))
 		tail.push("property counterexample hidden by rerun: replay with the seed")
@@ -684,8 +705,6 @@ export function formatSummary(s) {
 	list("flaky", flaky, false)
 	return [...head, ...body, ...tail].slice(0, SUMMARY_LINES).join("\n")
 }
-
-// ---------------------------------------------------------------- sweep
 
 // ---------------------------------------------------------------- git inputs
 
@@ -933,14 +952,12 @@ export function sweep({ git, gh, remote, runs, now, maxAgeMs }) {
 
 /**
  * The verdict of a completed run: exit code and summary from the downloaded verdicts in `dl`.
- * Side files: `<out>/durations.json` (a refreshed table from a green run whose six shards' test
- * seconds stray more than 20 % from their mean, copied over the tracked one only on request; the
- * tracked table is only read) and the flaky ledger under `<home>/<LEDGER_DIR>`. `keep`: leave the
- * run for its logs (INFRA, or a failed non-test step).
+ * Side files: `<out>/durations.json` (a green run's per-file seconds, in the tracked table's
+ * shape) and the flaky ledger under `<home>/<LEDGER_DIR>`. `keep`: leave an INFRA run for its logs.
  * @param {{
  *   dl: string, expected: string[], notes: string[],
  *   view: { url: string, createdAt: string, updatedAt: string },
- *   tree12: string, mb: string, root: string, out: string, home: string, now: number,
+ *   tree12: string, mb: string, out: string, home: string, now: number,
  * }} r
  */
 export function verdictOf(r) {
@@ -958,29 +975,11 @@ export function verdictOf(r) {
 	const code = /** @type {0 | 1 | 2} */ (
 		exitCode({ verdicts, expected: r.expected })
 	)
-	const ts = shards.map(v => v?.testSeconds ?? 0)
-	const mean = ts.reduce((a, b) => a + b, 0) / SHARDS
-	if (
-		code === 0 &&
-		shards.every(Boolean) &&
-		ts.some(t => Math.abs(t - mean) > 0.2 * mean)
-	) {
-		const table =
-			quiet(() =>
-				JSON.parse(
-					fs.readFileSync(
-						join(r.root, "scripts/remote-check-durations.json"),
-						"utf8",
-					),
-				),
-			) ?? {}
-		table.files = durationTable(
-			shards.map(v => v?.durations ?? {}),
-			table.files ?? {},
-		)
+	if (code === 0) {
+		const files = durationTable(shards.map(v => v?.durations ?? {}))
 		fs.writeFileSync(
 			join(r.out, "durations.json"),
-			`${JSON.stringify(table, null, "\t")}\n`,
+			`${JSON.stringify({ files }, null, "\t")}\n`,
 		)
 	}
 	const flaky = shards.flatMap(v => v?.flaky ?? [])
@@ -998,15 +997,7 @@ export function verdictOf(r) {
 				.join(""),
 		)
 	}
-	// A failed non-test step (lint, typecheck, build, native) keeps its run, for the log, until the sweep.
-	const keep =
-		code === 2 ||
-		(code === 1 &&
-			[...verdicts.values()].some(v =>
-				Object.entries(v.steps ?? {}).some(
-					([n, c]) => c !== 0 && n !== "root-tests",
-				),
-			))
+	const keep = code === 2
 	const text = formatSummary({
 		code,
 		tree: r.tree12,
@@ -1027,5 +1018,5 @@ export function verdictOf(r) {
 }
 
 /**
- * @typedef {{ ok: boolean, seconds: number, steps: Record<string, number>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[], testSeconds?: number, durations?: Record<string, number>, tail?: Record<string, string[]> }} ShardVerdictT
+ * @typedef {{ ok: boolean, seconds: number, steps: Record<string, number>, failed: { file: string, test: string, message: string }[], flaky: { file: string, test: string, message: string }[], durations?: Record<string, number>, tail?: Record<string, string[]> }} ShardVerdictT
  */

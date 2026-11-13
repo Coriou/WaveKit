@@ -37,7 +37,6 @@ export interface ShardVerdict {
 	steps: Record<string, number>
 	failed: Entry[]
 	flaky: Entry[]
-	testSeconds?: number
 	durations?: Record<string, number>
 	tail?: Record<string, string[]>
 }
@@ -90,7 +89,6 @@ export function exitCode(input: {
 }): number
 export function durationTable(
 	durations: Record<string, number>[],
-	previous?: Record<string, number>,
 ): Record<string, number>
 export function formatSummary(s: {
 	code: 0 | 1 | 2

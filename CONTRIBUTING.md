@@ -60,17 +60,16 @@ line of a failed summary) forces a recheck. It does not check the docs: run
 `node scripts/check-docs.mjs` locally beside it.
 
 Exit codes: 0 green (a test that failed and then passed on its rerun is listed as flaky, still a
-pass), 1 real failures (the run is kept for an hour when lint, typecheck, build or a native step
-failed), 2 infrastructure (the run is kept for inspection), 3 refused (hygiene or base), 4 still
-running (call it again to attach). The runs always conclude as successful on
-GitHub; the verdict is in the summary, with the last lines of a failed step's output (lint,
-typecheck, build) under it. Changes to `native/`, its build inputs (`Makefile`, the lockfile, the
-esbuild script) or the TypeScript code the Wasm kernels are compared with also run the channelizer
-and kernel tests. Put extra private patterns,
-one regular expression per line, in `~/.config/wavekit-remote/denylist`. Shards are packed by the
-per-file seconds in `scripts/remote-check-durations.json`, which the command never writes. A green
-check whose shard test times stray more than 20 % from their mean leaves a refreshed table in
-`.remote-check/durations.json`; copy it over the tracked one only on explicit request. A flaky
+pass), 1 real failures, 2 infrastructure (the run is kept for an hour for inspection), 3 refused
+(hygiene or base), 4 still running (call it again to attach). The runs always conclude as
+successful on GitHub; the verdict is in the summary, with the last lines of a failed step's output
+(lint, typecheck, build) under it. Changes to `native/`, its build inputs (`Makefile`, the
+lockfile, the esbuild script) or the TypeScript code the Wasm kernels are compared with also run
+the channelizer and kernel tests. Put extra private patterns, one regular expression per line, in
+`~/.config/wavekit-remote/denylist`. Shards are packed by the per-file seconds in
+`scripts/remote-check-durations.json` (files of 5 s or more), which the command never writes. A
+green check leaves its own per-file seconds in `.remote-check/<hash>/durations.json`; refreshing
+the tracked table means copying that file over it by hand, only on explicit request. A flaky
 property test shows its fast-check seed for a replay.
 
 ## Documentation

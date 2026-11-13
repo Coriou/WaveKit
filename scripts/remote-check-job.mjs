@@ -124,11 +124,9 @@ function runShard(shard) {
 		`shard ${shard}/${SHARDS}: ${files.length} files, weight ${bin?.weight ?? 0}, expected ${bin?.cost ?? 0}s`,
 	)
 	if (files.length === 0)
-		return { code: 0, failed: [], flaky: [], durations: {}, testSeconds: 0 }
+		return { code: 0, failed: [], flaky: [], durations: {} }
 	const dir = mkdtempSync(join(runnerTemp, "rc-"))
-	const t0 = Date.now()
 	const first = vitest(files, join(dir, "main.json"), deadline - RERUN_S * 1000)
-	const testSeconds = Math.round((Date.now() - t0) / 1000)
 	if (!first.report)
 		return {
 			code: 1,
@@ -140,7 +138,6 @@ function runShard(shard) {
 			],
 			flaky: [],
 			durations: {},
-			testSeconds,
 		}
 	/** @type {Record<string, number>} */
 	const durations = {}
@@ -163,7 +160,7 @@ function runShard(shard) {
 				`vitest exited ${first.code} with no failed test; see the job log`,
 			),
 		)
-	return { code: failed.length ? 1 : 0, failed, flaky, durations, testSeconds }
+	return { code: failed.length ? 1 : 0, failed, flaky, durations }
 }
 
 function main() {
@@ -183,7 +180,6 @@ function main() {
 				failed = r.failed
 				flaky = r.flaky
 				verdict["durations"] = r.durations
-				verdict["testSeconds"] = r.testSeconds
 			} catch (e) {
 				steps["root-tests"] = 1
 				failed = [
