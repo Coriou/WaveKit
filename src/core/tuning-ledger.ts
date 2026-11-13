@@ -889,19 +889,32 @@ export class TuningLedger {
 	 * A detected scanner marker shows receipt `seq` took effect by `pos`: its boundary may move
 	 * earlier, to `pos`, never below the receipt's own position and never later than the settle
 	 * would put it. Returns false (nothing changed) for anything but a ring receipt of the live
-	 * session and a valid position.
+	 * session and a valid position. With `runFrom` (the marker run's first position, as low as the
+	 * caller maps it), only a marker of the receipt's own bracket lowers: the session's last test-mode
+	 * receipt before `seq` must be an "on" one (still in the ring) at or before `runFrom`, so a
+	 * run seen before this bracket opened (an older hop's marker) lowers nothing.
 	 */
 	lowerBoundary(
 		sourceId: string,
 		session: number,
 		seq: number,
 		pos: number,
+		runFrom?: number,
 	): boolean {
 		try {
 			const live = this.sources.get(sourceId)?.live
 			if (!live || live.session !== session || !validPos(pos)) return false
 			const receipt = live.receipts.find(r => r.seq === seq)
 			if (!receipt) return false
+			if (runFrom !== undefined) {
+				if (!validPos(runFrom)) return false
+				let on: TuningReceipt | undefined
+				for (const r of live.receipts) {
+					if (r.seq >= seq) break
+					if (r.field === "testMode") on = r
+				}
+				if (!on || on.value === 0 || runFrom < on.pos) return false
+			}
 			const at = Math.max(receipt.pos, pos)
 			const prev = live.lowered.get(seq)
 			live.lowered.set(seq, prev === undefined ? at : Math.min(prev, at))

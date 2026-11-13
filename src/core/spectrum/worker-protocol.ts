@@ -146,6 +146,11 @@ export const PipelineInputSchema = z
 			sample: z.number().int().nonnegative(),
 		}),
 		z.object({
+			kind: z.literal("proof-slack"),
+			epoch: z.number().int().nonnegative(),
+			samples: z.number().int().nonnegative(),
+		}),
+		z.object({
 			kind: z.literal("channel-plan"),
 			plan: ChannelPlanBodySchema.nullable(),
 		}),

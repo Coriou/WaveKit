@@ -761,6 +761,39 @@ describe("TuningLedger", () => {
 		expect(ledger.lowerBoundary("nope", 1, 3, 0)).toBe(false)
 	})
 
+	it("with a marker run's start, lowers only for a run at or past the receipt's own test-mode-on receipt", () => {
+		const ledger = ledgerWith(1000)
+		const { conn, session } = started(ledger)
+		flush(conn, Buffer.concat([frame(2, RATE), frame(1, 5)]), OP)
+		// Hop A's bracket at 1200, hop B's at 1600 (on, frequency, off): past the rate's settle.
+		session.pos = 1200
+		flush(conn, Buffer.concat([frame(7, 1), frame(1, 6), frame(7, 0)]), OP)
+		session.pos = 1600
+		flush(conn, Buffer.concat([frame(7, 1), frame(1, 7), frame(7, 0)]), OP)
+		session.pos = 5000
+		const hopB = ledger.receipts("rtl").at(-2)!
+		expect(hopB).toMatchObject({ field: "frequency", value: 7, pos: 1600 })
+		expect(ledger.trustAt("rtl", 1, 1700, 1800).reason).toBe("settling")
+		// A run that began before B's bracket opened (hop A's marker) lowers nothing.
+		expect(ledger.lowerBoundary("rtl", 1, hopB.seq, 1700, 1599)).toBe(false)
+		expect(ledger.lowerBoundary("rtl", 1, hopB.seq, 1700, Number.NaN)).toBe(
+			false,
+		)
+		expect(ledger.trustAt("rtl", 1, 1700, 1800).reason).toBe("settling")
+		// At the on receipt: lowered.
+		expect(ledger.lowerBoundary("rtl", 1, hopB.seq, 1700, 1600)).toBe(true)
+		expect(ledger.trustAt("rtl", 1, 1700, 1800).trust).toBe("commanded")
+		// No bracket before the receipt (the first centre frame), or one closed before it: nothing.
+		const plain = ledger.receipts("rtl")[1]!
+		expect(plain).toMatchObject({ field: "frequency", value: 5 })
+		expect(ledger.lowerBoundary("rtl", 1, plain.seq, 100, 0)).toBe(false)
+		flush(conn, frame(1, 8), OP)
+		const unbracketed = ledger.receipts("rtl").at(-1)!
+		expect(ledger.lowerBoundary("rtl", 1, unbracketed.seq, 5000, 5000)).toBe(
+			false,
+		)
+	})
+
 	it("centre-moving frames push the frequency boundary; ppm and crystals the rate's too", () => {
 		for (const [cmd, rateToo] of [
 			[0x05, true],

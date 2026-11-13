@@ -746,6 +746,9 @@ export class SpectrumPipeline {
 			case "proof-floor":
 				this.onProofFloor(input.epoch, input.sample)
 				break
+			case "proof-slack":
+				this.onProofSlack(input.epoch, input.samples)
+				break
 			case "channel-plan":
 				this.channelPlan = input.plan
 				this.planActive = input.plan !== null
@@ -1026,6 +1029,19 @@ export class SpectrumPipeline {
 			)
 	}
 
+	/**
+	 * The resolving marker hop's slack grew (SpectrumEngine: a gap or an upstream loss since it was
+	 * posted): its marker start takes the larger slack. Another epoch's, a smaller one, or one for
+	 * a hop already started changes nothing.
+	 */
+	private onProofSlack(epoch: number, samples: number): void {
+		const p = this.resolving
+		if (!p || p.epoch !== epoch || !p.expectMarker) return
+		if (!Number.isSafeInteger(samples) || samples <= (p.proofSlackSamples ?? 0))
+			return
+		this.resolving = { ...p, proofSlackSamples: samples }
+	}
+
 	/** WG9 req 3.4: a non-scanner retune caps the stale discard at its own `staleMaxMs`. */
 	private staleBlocksFor(p: PendingEpoch): number {
 		if (p.staleMaxMs === undefined) return this.maxStaleBlocks
@@ -1130,6 +1146,7 @@ export class SpectrumPipeline {
 		startSample: number,
 		mode: SettleMode,
 		markerRunSamples?: number,
+		proofSlackSamples = 0,
 	): void {
 		this.resolving = null
 		const ep = this.ep
@@ -1151,6 +1168,7 @@ export class SpectrumPipeline {
 						startSample,
 						settleMode: mode,
 						markerRunSamples,
+						proofSlackSamples,
 					},
 		)
 	}
@@ -1196,10 +1214,12 @@ export class SpectrumPipeline {
 		if (samples > STUCK_TEST_MODE_S * this.fs) this.stuck = true
 		const p = this.resolving
 		if (p?.expectMarker && run.startSample >= p.commandSample) {
+			const slack = p.proofSlackSamples ?? 0
 			this.resolve(
-				run.endSample + p.pllSettleSamples + (p.proofSlackSamples ?? 0),
+				run.endSample + p.pllSettleSamples + slack,
 				"marker",
 				samples,
+				slack,
 			)
 			return
 		}

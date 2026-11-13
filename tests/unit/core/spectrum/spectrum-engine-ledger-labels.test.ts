@@ -8,6 +8,7 @@
 import pino from "pino"
 import { describe, expect, it } from "vitest"
 import {
+	HOP_GAP_ALLOWANCE,
 	SpectrumEngine,
 	type EngineEpoch,
 } from "../../../../src/core/spectrum/spectrum-engine.js"
@@ -731,13 +732,23 @@ describe("SpectrumEngine labels from the tuning ledger", () => {
 			},
 		])
 		await feed(at + 4 * block - samples())
+		// The floor is the first proven sample plus the allowance for gaps still to come
+		// (HOP_GAP_ALLOWANCE), nothing more: a block one sample before that first one is not proven.
+		const first = at - HOP_GAP_ALLOWANCE
 		events([
 			{
 				kind: "block-summary",
-				summary: summary(0, pending.epoch, at - 1 + block, HOP),
+				summary: summary(0, pending.epoch, first - 1 + block, HOP),
 			},
 		])
 		expect(seen.at(-1)!.trust).toBe("unverified")
+		events([
+			{
+				kind: "block-summary",
+				summary: summary(0, pending.epoch, first + block, HOP),
+			},
+		])
+		expect(seen.at(-1)!.trust).toBe("commanded")
 		events([
 			{
 				kind: "block-summary",
@@ -766,7 +777,10 @@ describe("SpectrumEngine labels from the tuning ledger", () => {
 		const pending = { ...hopPending(engine, HOP), expectMarker: true }
 		engine.suppressExternal(true)
 		engine.submitEpoch(pending)
+		// The arbiter's marker bracket: test mode on, the hop's centre, test mode off.
+		write(frame(0x07, 1), { writer: "scanner", jobId: "j1" })
 		write(frame(0x01, HOP), { writer: "scanner", jobId: "j1" })
+		write(frame(0x07, 0), { writer: "scanner", jobId: "j1" })
 		engine.suppressExternal(false)
 		const posted = host().inputs.find(i => i.kind === "pending-epoch") as {
 			pending: PendingEpoch

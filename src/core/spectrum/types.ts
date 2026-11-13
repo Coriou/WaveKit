@@ -269,6 +269,12 @@ export type PipelineInput =
 	| { kind: "measure-from"; stream: number; epoch: number; trackId: string; sample: number }
 	/** The first sample posted epoch `epoch` (PendingEpoch.epoch) can be proven from (PendingEpoch.awaitProofFloor). */
 	| { kind: "proof-floor"; epoch: number; sample: number }
+	/**
+	 * The posted marker hop `epoch`'s mapping width grew (a gap or an upstream loss since it was
+	 * posted): its marker start takes `samples` of slack instead (PendingEpoch.proofSlackSamples).
+	 * Only a larger slack than the hop's current one changes anything.
+	 */
+	| { kind: "proof-slack"; epoch: number; samples: number }
 
 export type ObservationEndReason =
 	| "quiet"
@@ -303,7 +309,8 @@ export interface UntrackedRetuneEvent {
 
 // prettier-ignore
 export type PipelineEvent =
-	| { kind: "epoch-started"; epoch: number; startSample: number; settleMode: SettleMode; markerRunSamples?: number }
+	/** `proofSlackSamples`: a marker start's slack as applied (PendingEpoch.proofSlackSamples, or a later proof-slack). */
+	| { kind: "epoch-started"; epoch: number; startSample: number; settleMode: SettleMode; markerRunSamples?: number; proofSlackSamples?: number }
 	| { kind: "stale-discard"; epoch: number; blocks: number }
 	| { kind: "track-open"; track: TrackSnapshot }
 	| { kind: "track-update"; track: TrackSnapshot }

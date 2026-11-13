@@ -11,6 +11,8 @@
 import pino from "pino"
 import { describe, expect, it } from "vitest"
 import {
+	ANCHOR_LOSS_BREAKS,
+	HOP_GAP_ALLOWANCE,
 	SpectrumEngine,
 	type EngineEpoch,
 } from "../../../../src/core/spectrum/spectrum-engine.js"
@@ -121,7 +123,11 @@ function track(
 	} as TrackSnapshot
 }
 
-async function make() {
+/**
+ * `heldAtStart`: bytes the absorber holds when the engine starts (upstream of its anchor, so the
+ * anchor is that wide); `make` offers them before returning.
+ */
+async function make(opts: { heldAtStart?: number } = {}) {
 	const sources = new FakeSources()
 	const fanout = new FakeFanout()
 	const ledger = new TuningLedger({
@@ -137,6 +143,9 @@ async function make() {
 		heldBytes: 0,
 		lostBytesTotal: 0,
 	}
+	const heldAtStart = opts.heldAtStart ?? 0
+	session.pos += heldAtStart
+	ingest.heldBytes += heldAtStart
 	const engine = new SpectrumEngine({
 		sourceId: "rtl",
 		sources,
@@ -166,6 +175,26 @@ async function make() {
 		session.pos += bytes
 		ingest.lostBytesTotal += bytes
 	}
+	/** Bytes the source manager handed out that the absorber holds (offered later, by release). */
+	const hold = (n: number) => {
+		session.pos += n * 2
+		ingest.heldBytes += n * 2
+	}
+	const release = async () => {
+		fanout.write(Buffer.alloc(ingest.heldBytes))
+		samples += ingest.heldBytes / 2
+		ingest.heldBytes = 0
+		await settle()
+	}
+	/** `n` samples the branch drops while congested: one gap in the engine's stream. */
+	const gap = async (n: number) => {
+		fanout.congest("scanner-rtl")
+		session.pos += n * 2
+		fanout.write(Buffer.alloc(n * 2))
+		samples += n
+		fanout.drain("scanner-rtl")
+		await settle()
+	}
 	const write = (
 		payload: Buffer,
 		tag: TuningWriterTag = { writer: "operator" },
@@ -190,12 +219,16 @@ async function make() {
 		])
 		return seen.at(-1)!.trust
 	}
+	if (heldAtStart > 0) await release()
 	return {
 		engine,
 		ledger,
 		ingest,
 		feed,
 		lose,
+		hold,
+		release,
+		gap,
 		write,
 		seen,
 		events,
@@ -416,7 +449,11 @@ describe("a detected scanner marker lowers its hop's boundary (F2)", () => {
 		}
 		engine.suppressExternal(true)
 		engine.submitEpoch(pending)
-		write(frame(0x01, HOP), { writer: "scanner", jobId: "j1" })
+		// The arbiter's marker bracket: test mode on, the hop's centre, test mode off.
+		const tag: TuningWriterTag = { writer: "scanner", jobId: "j1" }
+		write(frame(0x07, 1), tag)
+		write(frame(0x01, HOP), tag)
+		write(frame(0x07, 0), tag)
 		engine.suppressExternal(false)
 		return pending
 	}
@@ -531,5 +568,408 @@ describe("a detected scanner marker lowers its hop's boundary (F2)", () => {
 		expect(blockAt(samples(), pending.epoch, HOP)).toBe("unverified")
 		expect(engine.trustShadow()!.markerBoundaries).toBe(0)
 		await engine.stop()
+	})
+
+	it("a marker run that began before the hop's test-mode-on receipt lowers nothing (an older hop's marker)", async () => {
+		const {
+			engine,
+			ledger,
+			feed,
+			write,
+			events,
+			block,
+			blockAt,
+			samples,
+			host,
+		} = await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block * 2)
+		// A run starting a block before the hop's bracket is written, ending a quarter block after.
+		const early = samples()
+		await feed(block)
+		const pending = hop(engine, write)
+		engine.noteHopReceipt(
+			pending.epoch,
+			ledger.fieldState("rtl").frequency.receipt,
+		)
+		await feed(block / 4)
+		const marker = samples()
+		const slack = postedSlack(host().inputs, pending.epoch)
+		events([
+			{
+				kind: "epoch-started",
+				epoch: pending.epoch,
+				startSample: marker + slack,
+				settleMode: "marker",
+				markerRunSamples: marker - early,
+			},
+		])
+		await feed(block + slack)
+		// The receipt's own settle stands.
+		expect(blockAt(marker + slack + block, pending.epoch, HOP)).toBe(
+			"unverified",
+		)
+		expect(engine.labelReason()).toBe("settling")
+		expect(engine.trustShadow()!.markerBoundaries).toBe(0)
+		await engine.stop()
+	})
+
+	it("a run that starts exactly at the hop's test-mode-on receipt (a source that switches at once) lowers it", async () => {
+		const {
+			engine,
+			ledger,
+			feed,
+			write,
+			events,
+			block,
+			blockAt,
+			samples,
+			host,
+		} = await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block * 2)
+		const receiptAt = samples()
+		const pending = hop(engine, write)
+		engine.noteHopReceipt(
+			pending.epoch,
+			ledger.fieldState("rtl").frequency.receipt,
+		)
+		await feed(block / 4)
+		const marker = samples()
+		const slack = postedSlack(host().inputs, pending.epoch)
+		events([
+			{
+				kind: "epoch-started",
+				epoch: pending.epoch,
+				startSample: marker + slack,
+				settleMode: "marker",
+				markerRunSamples: marker - receiptAt,
+			},
+		])
+		await feed(block + slack)
+		expect(blockAt(marker + slack + block, pending.epoch, HOP)).toBe(
+			"commanded",
+		)
+		expect(engine.trustShadow()!.markerBoundaries).toBe(1)
+		await engine.stop()
+	})
+
+	/** The slack the pipeline applies: the posted one, or the largest proof-slack sent since. */
+	function appliedSlack(
+		inputs: readonly PipelineInput[],
+		epoch: number,
+	): number {
+		let slack = postedSlack(inputs, epoch)
+		for (const i of inputs)
+			if (i.kind === "proof-slack" && i.epoch === epoch)
+				slack = Math.max(slack, i.samples)
+		return slack
+	}
+
+	it("an upstream loss seen between a marker hop's posting and its marker grows its slack: its first block stays proven (P2)", async () => {
+		const {
+			engine,
+			ledger,
+			feed,
+			lose,
+			write,
+			events,
+			block,
+			blockAt,
+			samples,
+			host,
+		} = await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block * 2)
+		const receiptAt = samples()
+		const pending = hop(engine, write)
+		engine.noteHopReceipt(
+			pending.epoch,
+			ledger.fieldState("rtl").frequency.receipt,
+		)
+		const posted = postedSlack(host().inputs, pending.epoch)
+		// 2 MiB lost after the bracket; the samples offered before the loss is seen (the next batch
+		// to the pipeline) carry the marker.
+		const loss = 2 * 1024 * 1024
+		lose(loss)
+		await feed(block / 4)
+		// The batch goes to the pipeline on the engine's flush timer (20 ms).
+		await new Promise(resolve => setTimeout(resolve, 30))
+		const marker = samples() - block / 8
+		const slack = appliedSlack(host().inputs, pending.epoch)
+		expect(slack).toBeGreaterThanOrEqual(posted + loss / 2)
+		// Sent before the batch that carries the marker's samples.
+		const inputs = host().inputs
+		const slackAt = inputs.findIndex(
+			i => i.kind === "proof-slack" && i.epoch === pending.epoch,
+		)
+		expect(slackAt).toBeGreaterThanOrEqual(0)
+		expect(inputs.findLastIndex(i => i.kind === "bytes")).toBeGreaterThan(
+			slackAt,
+		)
+		events([
+			{
+				kind: "epoch-started",
+				epoch: pending.epoch,
+				startSample: marker + slack,
+				settleMode: "marker",
+				markerRunSamples: marker - receiptAt - block / 16,
+				proofSlackSamples: slack,
+			},
+		])
+		expect(engine.trustShadow()!.markerBoundaries).toBe(1)
+		await feed(marker + slack + block - samples())
+		expect(blockAt(marker + slack + block, pending.epoch, HOP)).toBe(
+			"commanded",
+		)
+		await engine.stop()
+	})
+
+	it("a wide anchor (bytes upstream when the engine started) gives a bounded slack, and the hop's first block past it is proven (P3)", async () => {
+		// 256 KiB upstream (the branch high-water mark): 128 ms of samples at 1.024 Msps.
+		const held = 256 * 1024
+		const {
+			engine,
+			ledger,
+			feed,
+			write,
+			events,
+			block,
+			blockAt,
+			samples,
+			host,
+		} = await make({ heldAtStart: held })
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block * 2)
+		const receiptAt = samples()
+		const pending = hop(engine, write)
+		engine.noteHopReceipt(
+			pending.epoch,
+			ledger.fieldState("rtl").frequency.receipt,
+		)
+		const slack = postedSlack(host().inputs, pending.epoch)
+		// The anchor width, the gap allowance and one sample of rounding: nothing else.
+		expect(slack).toBe(held / 2 + HOP_GAP_ALLOWANCE + 1)
+		expect((slack / RATE) * 1000).toBeLessThan(129)
+		await feed(block / 4)
+		const marker = samples()
+		events([
+			{
+				kind: "epoch-started",
+				epoch: pending.epoch,
+				startSample: marker + slack,
+				settleMode: "marker",
+				markerRunSamples: marker - receiptAt,
+				proofSlackSamples: slack,
+			},
+		])
+		expect(engine.trustShadow()!.markerBoundaries).toBe(1)
+		await feed(marker + slack + block - samples())
+		expect(blockAt(marker + slack + block, pending.epoch, HOP)).toBe(
+			"commanded",
+		)
+		await engine.stop()
+	})
+})
+
+describe("an absorber loss delays no later proof (N1)", () => {
+	function timerHop(
+		engine: SpectrumEngine,
+		write: (payload: Buffer, tag?: TuningWriterTag) => void,
+	): PendingEpoch {
+		const clock = engine.sampleClock()
+		const pending: PendingEpoch = {
+			epoch: engine.allocateEpoch(),
+			commandSample: clock.commandSample,
+			bufferedSamples: clock.bufferedSamples,
+			settleSamples: 0,
+			expectMarker: false,
+			markerTimeoutSamples: 0,
+			pllSettleSamples: 0,
+			centreHz: HOP,
+			sampleRateHz: RATE,
+			gainKey: "na",
+			tuningTrust: "unverified",
+			centreChanged: true,
+		}
+		engine.suppressExternal(true)
+		engine.submitEpoch(pending)
+		write(frame(0x01, HOP), { writer: "scanner", jobId: "j1" })
+		engine.suppressExternal(false)
+		return pending
+	}
+
+	function proofFloor(inputs: readonly PipelineInput[], epoch: number) {
+		for (const i of inputs)
+			if (i.kind === "proof-floor" && i.epoch === epoch) return i.sample
+		return null
+	}
+
+	/** 2 MiB lost, in `steps` losses each seen by a read (ANCHOR_LOSS_BREAKS: at and past it). */
+	const LOSS = 2 * 1024 * 1024
+	/** One step's loss: whole samples (2 bytes), about LOSS in all. */
+	const step = (steps: number) => 2 * Math.floor(LOSS / steps / 2)
+
+	it.each([1, ANCHOR_LOSS_BREAKS, ANCHOR_LOSS_BREAKS + 1])(
+		"after a 2 MiB loss in %i step(s), the next hop's floor and first proven block are where they would be without it",
+		async steps => {
+			const {
+				engine,
+				ledger,
+				feed,
+				lose,
+				write,
+				events,
+				block,
+				blockAt,
+				samples,
+				host,
+			} = await make()
+			write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+			await feed(SETTLE_BYTES / 2 + block * 2)
+			expect(blockAt(samples())).toBe("commanded")
+			for (let i = 0; i < steps; i++) {
+				lose(step(steps))
+				await feed(block)
+				expect(blockAt(samples())).toBe("commanded")
+			}
+			expect(engine.trustShadow()!.anchorWidenedBytes).toBe(step(steps) * steps)
+			// Every byte offered from here on follows the whole loss: positions = offered + loss.
+			const pending = timerHop(engine, write)
+			const receiptAt = samples()
+			engine.noteHopReceipt(
+				pending.epoch,
+				ledger.fieldState("rtl").frequency.receipt,
+			)
+			await feed(1)
+			// The first sample whose lowest position, (s − gaps − 1) × 2 + loss, is at or past the
+			// receipt's boundary, receiptAt × 2 + loss + settle, gaps taken as the allowance for
+			// gaps still to come (P1): one sample of rounding and the allowance past it.
+			const floor = proofFloor(host().inputs, pending.epoch)
+			expect(floor).toBe(receiptAt + SETTLE_BYTES / 2 + HOP_GAP_ALLOWANCE + 1)
+			events([
+				{
+					kind: "epoch-started",
+					epoch: pending.epoch,
+					startSample: floor!,
+					settleMode: "timer",
+				},
+			])
+			await feed(floor! + block - samples())
+			expect(blockAt(floor! + block, pending.epoch, HOP)).toBe("commanded")
+			expect(engine.labelReason()).toBeNull()
+			await engine.stop()
+		},
+	)
+
+	it.each([1, ANCHOR_LOSS_BREAKS + 1])(
+		"bytes the absorber held when it lost (%i loss(es) seen) keep their lower bound: a pre-loss block inside the settle stays unverified",
+		async steps => {
+			const {
+				engine,
+				feed,
+				lose,
+				hold,
+				release,
+				write,
+				block,
+				blockAt,
+				samples,
+			} = await make()
+			write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+			await feed(block)
+			// Held up to a few samples short of the boundary (SETTLE_BYTES), then 2 MiB lost.
+			hold(SETTLE_BYTES / 2 - block - 4)
+			lose(step(steps))
+			expect(blockAt(samples())).toBe("unverified")
+			await release()
+			const heldEnd = samples()
+			// The held bytes precede the loss: their block ends before the boundary.
+			expect(blockAt(heldEnd)).toBe("unverified")
+			expect(engine.labelReason()).toBe("settling")
+			for (let i = 1; i < steps; i++) {
+				lose(step(steps))
+				await feed(block)
+				blockAt(samples())
+			}
+			// Read late, past every merge: still never above its true position.
+			expect(blockAt(heldEnd)).toBe("unverified")
+			await engine.stop()
+		},
+	)
+
+	/** A timer hop posted and its floor placed, everything proven before it. */
+	async function floored() {
+		const h = await make()
+		h.write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await h.feed(SETTLE_BYTES / 2 + h.block * 2)
+		const pending = timerHop(h.engine, h.write)
+		h.engine.noteHopReceipt(
+			pending.epoch,
+			h.ledger.fieldState("rtl").frequency.receipt,
+		)
+		await h.feed(1)
+		const floor = proofFloor(h.host().inputs, pending.epoch)!
+		const start = () =>
+			h.events([
+				{
+					kind: "epoch-started",
+					epoch: pending.epoch,
+					startSample: floor,
+					settleMode: "timer",
+				},
+			])
+		return { ...h, pending, floor, start }
+	}
+
+	it.each([1, HOP_GAP_ALLOWANCE])(
+		"%i gap(s) applied after the floor is posted and before it leave the first block proven (P1)",
+		async gaps => {
+			const h = await floored()
+			for (let i = 0; i < gaps; i++) await h.gap(4)
+			expect(h.samples()).toBeLessThan(h.floor)
+			h.start()
+			await h.feed(h.floor + h.block - h.samples())
+			expect(h.blockAt(h.floor + h.block, h.pending.epoch, HOP)).toBe(
+				"commanded",
+			)
+			await h.engine.stop()
+		},
+	)
+
+	it("past the allowance the first block is unverified (fail closed), the next proven (P1)", async () => {
+		const h = await floored()
+		for (let i = 0; i <= HOP_GAP_ALLOWANCE; i++) await h.gap(4)
+		h.start()
+		await h.feed(h.floor + h.block * 2 - h.samples())
+		expect(h.blockAt(h.floor + h.block, h.pending.epoch, HOP)).toBe(
+			"unverified",
+		)
+		expect(h.engine.labelReason()).toBe("settling")
+		expect(h.blockAt(h.floor + h.block * 2, h.pending.epoch, HOP)).toBe(
+			"commanded",
+		)
+		await h.engine.stop()
+	})
+
+	it("gaps inside the first block, after its start, do not lower its start's bound, past the allowance too (P1)", async () => {
+		const h = await floored()
+		h.start()
+		await h.feed(h.floor + 10 - h.samples())
+		for (let i = 0; i < HOP_GAP_ALLOWANCE + 2; i++) await h.gap(4)
+		await h.feed(h.floor + h.block - h.samples())
+		expect(h.blockAt(h.floor + h.block, h.pending.epoch, HOP)).toBe("commanded")
+		await h.engine.stop()
+	})
+})
+
+describe("a stopped engine has no label reason (N3)", () => {
+	it("labelReason is null once the engine stops, whatever its last block said", async () => {
+		const { engine, feed, block, blockAt, samples } = await make()
+		await feed(block * 2)
+		expect(blockAt(samples())).toBe("unverified")
+		expect(engine.labelReason()).not.toBeNull()
+		await engine.stop()
+		expect(engine.labelReason()).toBeNull()
 	})
 })

@@ -1156,6 +1156,74 @@ describe("a hop that never proves (V2)", () => {
 		await runner.dispatch({ type: "cancel" })
 	})
 
+	it("a dropout restarts the wait: a hop resumed after a long outage is not left at once (N2)", async () => {
+		let now = 0
+		const { runner, arbiter, record, engine } = runnerHarness(undefined, {
+			now: () => now,
+		})
+		await runner.start()
+		await flush()
+		runner.onEpochStarted(epochAt(11, HOP0))
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		let end = 10_000
+		for (let i = 0; i < 400 && arbiter.retunes.length < 2; i++) {
+			end += 51_200
+			now += 50
+			runner.onBlock(end, false)
+			await flush()
+		}
+		expect(arbiter.retunes).toHaveLength(2)
+		const hop1 = arbiter.retunes[1]!.target.centreHz
+		const unproven = () =>
+			epochAt(12, hop1, { tuningTrust: "unverified", trustedFromSample: null })
+		engine.currentEpoch = unproven
+		arbiter.retunes[1]!.resolve(pendingFor(12, hop1))
+		await flush()
+		runner.onEpochStarted(unproven())
+		await flush()
+		const sentAt = now
+		const sweep = testSettings().sweep
+		const bound = unprovenVisitWaitMs(
+			record.plan.hops[1]?.dwellMs ?? record.spec.dwellMs,
+			Math.max(sweep.settleMs.local, sweep.settleMs.network),
+			1_024_000,
+		)
+		// Half the wait runs, then the source drops for ten bounds.
+		now = sentAt + bound / 2
+		runner.tick(now)
+		await flush()
+		await runner.dispatch({ type: "source-down" })
+		expect(record.state).toBe("paused")
+		now = sentAt + 10 * bound
+		runner.tick(now)
+		// Back: the job re-sends its hop; neither a tick before that send nor one after it leaves.
+		const resumed = runner.dispatch({ type: "source-up" })
+		runner.tick(now)
+		await flush()
+		expect(record.state).toBe("running")
+		expect(arbiter.retunes).toHaveLength(3)
+		expect(arbiter.retunes[2]!.target.centreHz).toBe(hop1)
+		arbiter.retunes[2]!.resolve(pendingFor(13, hop1))
+		await resumed
+		runner.tick(now)
+		await flush()
+		expect(runner.progress().hopSkips).toBeUndefined()
+		// The wait restarted at the resume: left only a full bound later.
+		now += bound - 50
+		runner.tick(now)
+		await flush()
+		expect(runner.progress().hopSkips).toBeUndefined()
+		now += 50
+		runner.tick(now)
+		await flush()
+		await flush()
+		expect(runner.progress().hopSkips).toEqual({ unproven: 1 })
+		expect(arbiter.retunes).toHaveLength(4)
+		arbiter.retunes[3]!.resolve(pendingFor(14, HOP0))
+		await runner.dispatch({ type: "cancel" })
+	})
+
 	it("derives the bound: 4 × the larger of dwell and settle, never under the job start cap (15 s)", () => {
 		// The defaults: 4 × 1 s = 4 s, under the floor.
 		expect(unprovenVisitWaitMs(300, 1000, 2_400_000)).toBe(JOB_STARTUP_CAP_MS)

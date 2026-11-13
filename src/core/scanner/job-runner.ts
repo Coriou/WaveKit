@@ -669,6 +669,11 @@ export class JobRunner implements JobDriver {
 	 */
 	private unprovenSince: number | null = null
 	private unprovenHop: number | undefined
+	/**
+	 * The job stopped driving (pause, outage) while its hop was unproven: the wait restarts at the
+	 * next send or driving tick, so time spent not driving never counts against the hop.
+	 */
+	private unprovenPaused = false
 	/** A hop re-send waits in the action chain, not started yet (onUntrackedRetune). */
 	private resendQueued = false
 	/** Hops left because they never proved within the bound (ScanJobProgress.hopSkips.unproven). */
@@ -1079,6 +1084,11 @@ export class JobRunner implements JobDriver {
 		return endSample - block >= from
 	}
 
+	/** Trust: a job no longer driving keeps no unproven wait running (unprovenPaused). */
+	private noteUnprovenPause(): void {
+		if (!this.driving && this.unprovenSince !== null) this.unprovenPaused = true
+	}
+
 	/**
 	 * Trust: a visit whose hop has not proven within unprovenVisitWaitMs of its first send is left
 	 * (skip reason `unproven`, counted): a standing doubt or hold would otherwise stall the sweep on
@@ -1095,6 +1105,11 @@ export class JobRunner implements JobDriver {
 			this.hopIndex === undefined
 		)
 			return
+		if (this.unprovenPaused) {
+			this.unprovenPaused = false
+			this.unprovenSince = now
+			return
+		}
 		const dwellMs =
 			this.record.plan.hops[this.hopIndex]?.dwellMs ?? this.record.spec.dwellMs
 		const sweep = this.deps.settings().sweep
@@ -1457,6 +1472,7 @@ export class JobRunner implements JobDriver {
 		}
 		if (released) await this.refreshTuning()
 		record.state = prev.state
+		this.noteUnprovenPause()
 		if (prev.reason === undefined) delete record.reason
 		else record.reason = prev.reason
 		if (prev.startedAt === undefined) delete record.startedAt
@@ -1611,6 +1627,7 @@ export class JobRunner implements JobDriver {
 		}
 		const now = this.deps.now()
 		record.state = t.state
+		this.noteUnprovenPause()
 		this.scheduler?.setAccountingActive(this.driving)
 		if (t.reason === undefined) delete record.reason
 		else record.reason = t.reason
@@ -1889,9 +1906,14 @@ export class JobRunner implements JobDriver {
 		this.epochOwn = false
 		// Paused: the hop is remembered and sent by the resume's resend-hop.
 		if (!this.driving) return
-		if (this.unprovenSince === null || this.unprovenHop !== a.hopIndex) {
+		if (
+			this.unprovenSince === null ||
+			this.unprovenHop !== a.hopIndex ||
+			this.unprovenPaused
+		) {
 			this.unprovenSince = this.deps.now()
 			this.unprovenHop = a.hopIndex
+			this.unprovenPaused = false
 		}
 		this.retunes += 1
 		this.scheduler?.noteTuneStarted(a.hopIndex)

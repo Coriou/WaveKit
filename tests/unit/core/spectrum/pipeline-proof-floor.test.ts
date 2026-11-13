@@ -139,4 +139,39 @@ describe("SpectrumPipeline proof floor", () => {
 		expect(started.settleMode).toBe("timer")
 		expect(started.startSample).toBe(floor)
 	})
+
+	it("a marker hop takes a larger proof-slack sent before its marker, and reports the slack it applied (P2)", () => {
+		const h = new Harness()
+		h.start()
+		h.push(noise(4 * BLOCK))
+		const command = h.sample
+		h.pending({
+			epoch: HOP,
+			centreHz: CENTRE + 1e6,
+			expectMarker: true,
+			pllSettleSamples: 1280,
+			proofSlackSamples: 37,
+		})
+		// Another epoch's, and a smaller one, change nothing; the larger one is taken.
+		h.send({ kind: "proof-slack", epoch: HOP + 1, samples: 5000 })
+		h.send({ kind: "proof-slack", epoch: HOP, samples: 20 })
+		h.send({ kind: "proof-slack", epoch: HOP, samples: 900 })
+		h.push(noise(3000))
+		h.pushBytes(counterRun(1024, 17))
+		h.push(noise(1280 + 900 + 6 * BLOCK))
+		const started = h.of("epoch-started")[1]!
+		expect(started).toMatchObject({
+			settleMode: "marker",
+			proofSlackSamples: 900,
+		})
+		expect(started.startSample).toBeGreaterThanOrEqual(
+			command + 3000 + 512 + 1280 + 900,
+		)
+		expect(started.startSample).toBeLessThanOrEqual(
+			command + 3000 + 512 + 1280 + 900 + 1,
+		)
+		// After the start: nothing changes.
+		h.send({ kind: "proof-slack", epoch: HOP, samples: 9000 })
+		expect(h.of("epoch-started")).toHaveLength(2)
+	})
 })

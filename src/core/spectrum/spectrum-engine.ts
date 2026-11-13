@@ -298,10 +298,46 @@ interface LedgerAnchor {
 	oLow: number
 	oHigh: number
 	/**
-	 * The absorber's lost bytes when anchored or last widened: bytes lost after it make later
-	 * offered bytes sit further on in the session, so the anchor widens by them (upstreamLost).
+	 * The absorber's lost bytes counter when anchored or last read: bytes lost after it make later
+	 * offered bytes sit further on in the session (upstreamLost records them in `losses`).
 	 */
 	lost: number | null
+	/**
+	 * Absorber losses seen since anchored, oldest first, each with `at` and `loss` non-decreasing:
+	 * `loss` bytes lost in all since the anchor when the loss was seen, `at` the branch's offered
+	 * bytes then plus the absorber's held bytes (held bytes precede the loss: the absorber drops a
+	 * chunk's tail, never what it holds). A byte offered at or past `at` follows all `loss` bytes;
+	 * one offered before it follows at least the previous entry's loss and at most this one's
+	 * (lossLow, lossHigh). At most ANCHOR_LOSS_BREAKS: the oldest is merged into the next.
+	 */
+	losses: { at: number; loss: number }[]
+}
+
+/**
+ * Absorber losses an anchor keeps apart (LedgerAnchor.losses). Merging the oldest entry into the
+ * next only widens the bounds of the bytes offered before the merged entry's `at` (their lowest
+ * loss becomes the one before it, 0 for the first), so the cap bounds memory and never makes a
+ * bound wrong; bytes offered after the newest loss keep the tight bound whatever the count. 16
+ * entries are 16 distinct loss steps seen by reads (one read per labelled block or more): far
+ * more than one hop's window holds on a link that loses rarely; a link losing on every block
+ * still maps its newest bytes tightly.
+ */
+export const ANCHOR_LOSS_BREAKS = 16
+
+/** Bytes surely lost before offered byte `o` of an anchor (a lower bound; LedgerAnchor.losses). */
+function lossLow(anchor: LedgerAnchor, o: number): number {
+	let lo = 0
+	for (const b of anchor.losses) {
+		if (b.at > o) break
+		lo = b.loss
+	}
+	return lo
+}
+
+/** Bytes possibly lost before offered byte `o` of an anchor (an upper bound; LedgerAnchor.losses). */
+function lossHigh(anchor: LedgerAnchor, o: number): number {
+	for (const b of anchor.losses) if (b.at > o) return b.loss
+	return anchor.losses.at(-1)?.loss ?? 0
 }
 
 /**
@@ -388,6 +424,35 @@ function writableBacklog(stream: Readable | undefined): number {
 
 /** Engine streams whose sample-to-branch-byte map is kept for late block summaries. */
 const SHADOW_STREAM_MAPS = 4
+
+/**
+ * Gap starts a stream map keeps apart (gapAt). Each gap is one drop episode of the branch; past
+ * 64 the oldest are counted for every sample, which only lowers lower bounds before them by one
+ * sample each (fail closed). 64 numbers per map, 4 maps: 2 KiB.
+ */
+const GAP_MARKS = 64
+
+/**
+ * Gaps a hop's start allows for between its posting and its first block (proof floor and marker
+ * slack): each gap applied before a sample lowers that sample's lower bound by one sample, and a
+ * floor or slack is fixed once the pipeline starts the hop. 8 samples are 8 µs at 1 Msps: free;
+ * more than 8 drop episodes in that window only leave the hop's first block unverified (its
+ * later blocks are labelled as ever).
+ */
+export const HOP_GAP_ALLOWANCE = 8
+
+/** Gaps applied in a stream at or before sample `s` (an over-count for `s` before aged gaps). */
+function gapsBefore(
+	map: { gapAt: number[]; gapsAged: number },
+	s: number,
+): number {
+	let n = map.gapsAged
+	for (const g of map.gapAt) {
+		if (g > s) break
+		n += 1
+	}
+	return n
+}
 
 export interface SpectrumEngineDeps {
 	sourceId: string
@@ -561,6 +626,12 @@ interface PendingStart {
 	meta: EngineEpoch
 	/** PendingEpoch.proofSlackSamples posted with a marker hop (0: none). */
 	proofSlack: number
+	/** The slack last sent for it: the posted one, or a larger proof-slack (refreshMarkerSlack). */
+	slack: number
+	/** PendingEpoch.commandSample posted: a marker run starts there or later. */
+	commandSample: number
+	/** PendingEpoch.pllSettleSamples posted (where a marker run ended before the marker start). */
+	pllSettle: number
 }
 
 export class SpectrumEngine extends EventEmitter implements EpochClock {
@@ -643,6 +714,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		hop: number
 		stream: number
 		sample: number
+		runStart: number
 	} | null = null
 	/** Hop boundaries lowered by a detected marker (`trustShadow.markerBoundaries`). */
 	private markerBoundaries = 0
@@ -716,6 +788,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		oLow0: number
 		oHigh0: number
 		gaps: number
+		/**
+		 * First sample of each of the newest GAP_MARKS gaps applied in this stream, ascending: a gap
+		 * rounds only the samples from it on, so a sample's lower bound counts the gaps at or before
+		 * it (gapsBefore). `gapsAged` gaps left the list; they are older, so they are counted for
+		 * every sample (one sample too low before them: fail closed).
+		 */
+		gapAt: number[]
+		gapsAged: number
 		bps: number
 		blockSamples: number | null
 		/**
@@ -981,8 +1061,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	/**
 	 * The first sample `s` of engine stream `stream` whose lowest possible ledger position (the
-	 * lower bound ledgerRange takes, `oLow0 + (s − gaps − 1) × bps − oHigh`) is at or past `pos`:
-	 * `ceil((pos + oHigh − oLow0) / bps) + gaps + 1`. Null when unmapped.
+	 * lower bound ledgerRange takes, `o(s) − oHigh + lossLow(o(s))` with the offered byte
+	 * `o(s) = oLow0 + (s − gaps − 1) × bps`) is at or past `pos`, `gaps` taken as every gap applied
+	 * so far plus HOP_GAP_ALLOWANCE gaps still to come before `s` (the floor is fixed once posted).
+	 * The bound grows with `s` and is `o(s) − oHigh + lo` inside each loss segment (constant `lo`),
+	 * so per segment, oldest first: `need(lo) = ceil((pos + oHigh − lo − oLow0) / bps) + gaps + 1`,
+	 * not before the segment's first sample; the first that lies inside its segment is the answer.
+	 * Null when unmapped.
 	 */
 	private firstSampleFrom(stream: number, pos: number): number | null {
 		const anchor = this.ledgerAnchor
@@ -990,27 +1075,48 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			return null
 		const map = this.streamMaps.find(m => m.stream === stream)
 		if (!map || !Number.isFinite(map.oLow0) || !(map.bps > 0)) return null
-		const sample =
-			Math.ceil((pos + anchor.oHigh - map.oLow0) / map.bps) + map.gaps + 1
+		const gaps = map.gaps + HOP_GAP_ALLOWANCE
+		const need = (lo: number): number =>
+			Math.ceil((pos + anchor.oHigh - lo - map.oLow0) / map.bps) + gaps + 1
+		let lo = 0
+		let from = Number.NEGATIVE_INFINITY
+		let sample: number | null = null
+		for (const b of anchor.losses) {
+			const s = Math.max(from, need(lo))
+			if (map.oLow0 + (s - gaps - 1) * map.bps < b.at) {
+				sample = s
+				break
+			}
+			lo = b.loss
+			// The first sample whose lowest offered byte is at or past the loss.
+			from = Math.ceil((b.at - map.oLow0) / map.bps) + gaps + 1
+		}
+		sample ??= Math.max(from, need(lo))
 		return Number.isSafeInteger(sample) ? Math.max(0, sample) : null
 	}
 
 	/**
 	 * Samples between one sample's highest and lowest possible ledger positions on engine stream
 	 * `stream`, rounded up: upper(s) − lower(s) = (oHigh0 − oLow0) + (anchor.oHigh − anchor.oLow)
-	 * + (gaps + 1) × bps bytes (ledgerRange and lowerHopBoundary). A marker hop that starts this
-	 * many samples past the sample its boundary is lowered to has its first block proven. Null
-	 * when unmapped.
+	 * + (lossHigh − lossLow) + (gaps + 1) × bps bytes (ledgerRange and lowerHopBoundary), for a
+	 * sample at or after `fromSample` (a marker hop's command sample: its run starts there or
+	 * later): its highest loss is at most every loss seen so far, its lowest at least the loss
+	 * before `fromSample`'s lowest offered byte (lossLow there), and its gaps every
+	 * gap applied so far plus HOP_GAP_ALLOWANCE still to come. A marker hop that starts this many
+	 * samples past the sample its boundary is lowered to has its first block proven; a gap or
+	 * loss seen before its marker grows it (refreshMarkerSlack). Null when unmapped.
 	 */
-	private mappingWidth(stream: number): number | null {
+	private mappingWidth(stream: number, fromSample: number): number | null {
 		const anchor = this.ledgerAnchor
 		if (!anchor || this.upstreamLost(anchor)) return null
 		const map = this.streamMaps.find(m => m.stream === stream)
 		if (!map || !Number.isFinite(map.oLow0) || !Number.isFinite(map.oHigh0))
 			return null
 		if (!(map.bps > 0)) return null
-		const bytes = map.oHigh0 - map.oLow0 + (anchor.oHigh - anchor.oLow)
-		const width = Math.ceil(bytes / map.bps) + map.gaps + 1
+		const from = map.oLow0 + (fromSample - map.gaps - 1) * map.bps
+		const losses = (anchor.losses.at(-1)?.loss ?? 0) - lossLow(anchor, from)
+		const bytes = map.oHigh0 - map.oLow0 + (anchor.oHigh - anchor.oLow) + losses
+		const width = Math.ceil(bytes / map.bps) + map.gaps + HOP_GAP_ALLOWANCE + 1
 		return Number.isSafeInteger(width) && width >= 0 ? width : null
 	}
 
@@ -1019,10 +1125,13 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * effect by then (the marker bracket ends after it), so the ledger may trust the hop's blocks
 	 * from that sample on instead of the receipt plus the settle. The sample's position is taken
 	 * by its upper bound (a block is trusted only when its lowest possible position is past the
-	 * highest possible marker position); the ledger never lowers below the receipt itself.
+	 * highest possible marker position); the ledger never lowers below the receipt itself. The
+	 * marker run's start (`runStart`) is passed by its lowest position (less the rounding slack):
+	 * the ledger lowers only when it lies at or past the hop's own test-mode-on receipt, so an
+	 * older hop's marker never lowers this hop's boundary; an unmappable run start lowers nothing.
 	 */
 	private lowerHopBoundary(
-		at: { stream: number; sample: number },
+		at: { stream: number; sample: number; runStart: number },
 		seq: number,
 	): void {
 		const ledger = this.ledger()
@@ -1033,18 +1142,62 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (!map || !Number.isFinite(map.oHigh0)) return
 		const live = ledger.position(this.sourceId)
 		if (!live || live.session !== anchor.session) return
-		const pos = Math.min(
-			live.pos,
-			map.oHigh0 + at.sample * map.bps - anchor.oLow,
-		)
+		const byte = map.oHigh0 + at.sample * map.bps
+		const pos = Math.min(live.pos, byte - anchor.oLow + lossHigh(anchor, byte))
+		// The run's start by its lowest position before the mapping's rounding slack (the gaps + 1
+		// samples ledgerRange takes off a range's first byte): this only names the run's bracket. A
+		// source that switches test mode at once starts the run exactly at the on receipt, which the
+		// rounded bound puts that slack before it; an older hop's run lies a whole dwell earlier.
+		// Not mappable (no finite position): the ledger lowers nothing.
+		const gaps = gapsBefore(map, at.runStart)
+		const runByte = map.oLow0 + (at.runStart - gaps - 1) * map.bps
+		const runFrom =
+			runByte - anchor.oHigh + lossLow(anchor, runByte) + (gaps + 1) * map.bps
 		try {
-			if (ledger.lowerBoundary(this.sourceId, anchor.session, seq, pos)) {
+			if (
+				ledger.lowerBoundary(this.sourceId, anchor.session, seq, pos, runFrom)
+			) {
 				this.markerBoundaries += 1
 				this.newestLabel = null
 			}
 		} catch {
 			// A failing ledger lowers nothing: the settle boundary stands (fail closed).
 		}
+	}
+
+	/**
+	 * A posted marker hop not started yet whose mapping width grew since (a gap applied or an
+	 * upstream loss seen: mappingWidth) gets the larger slack (`proof-slack`), so its first block
+	 * stays proven. Run before each batch of samples goes to the pipeline: a marker in those
+	 * samples starts the hop with the slack known before them.
+	 */
+	private refreshMarkerSlack(): void {
+		for (const start of this.starts) {
+			if (!start.hop || start.proofSlack === 0) continue
+			if (start.meta.stream !== this.stream) continue
+			const width = this.mappingWidth(this.stream, start.commandSample)
+			if (width === null || width <= start.slack) continue
+			start.slack = width
+			this.send({ kind: "proof-slack", epoch: start.key, samples: width })
+		}
+	}
+
+	/**
+	 * The slack a marker hop's start was given, as the pipeline reports it (posted or a later
+	 * proof-slack); a report outside what was sent takes the posted one, the smallest: the marker
+	 * start then maps later, and its upper bound only grows (fail closed).
+	 */
+	private appliedSlack(
+		start: PendingStart,
+		ev: { proofSlackSamples?: number },
+	): number {
+		const s = ev.proofSlackSamples
+		return typeof s === "number" &&
+			Number.isSafeInteger(s) &&
+			s >= start.proofSlack &&
+			s <= start.slack
+			? s
+			: start.proofSlack
 	}
 
 	/** `hop`: a scanner hop (submitEpoch); else an engine-posted DSP epoch (flushExternal). */
@@ -1072,13 +1225,16 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (hop && !pending.expectMarker && ledger?.proofBoundary)
 			posted = { ...pending, awaitProofFloor: true }
 		else if (hop && pending.expectMarker && ledger?.lowerBoundary) {
-			const width = this.mappingWidth(this.stream)
+			const width = this.mappingWidth(this.stream, pending.commandSample)
 			if (width !== null) posted = { ...pending, proofSlackSamples: width }
 		}
 		this.starts.push({
 			key: pending.epoch,
 			hop,
 			proofSlack: posted.proofSlackSamples ?? 0,
+			slack: posted.proofSlackSamples ?? 0,
+			commandSample: pending.commandSample,
+			pllSettle: pending.pllSettleSamples,
 			meta: {
 				stream: this.stream,
 				epoch: pending.epoch,
@@ -1154,9 +1310,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	/**
 	 * Why the current epoch's newest block summary reads `unverified` (a fixed code, see
 	 * `trustShadow.unverifiedBlocks`; `no-block` for an epoch that has labelled none yet), or null
-	 * while it is trusted or the engine has labelled no block since it started.
+	 * while it is trusted, the engine has labelled no block since it started, or it is not running
+	 * (a stopped engine labels nothing: its last reason is no current one).
 	 */
 	labelReason(): string | null {
+		if (!this.running) return null
 		return this.liveLabel === "unverified" ? this.liveReason : null
 	}
 
@@ -1628,7 +1786,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private applyGap(droppedBytes: number): void {
 		this.appliedDropBytes += droppedBytes
 		const map = this.streamMaps.at(-1)
-		if (map?.stream === this.stream) map.gaps += 1
+		if (map?.stream === this.stream) {
+			map.gaps += 1
+			map.gapAt.push(this.nextSample)
+			if (map.gapAt.length > GAP_MARKS) {
+				map.gapAt.shift()
+				map.gapsAged += 1
+			}
+		}
 		const lost = droppedBytes + this.remainder.length
 		this.remainder = new Uint8Array(0)
 		const rem = lost % this.bps
@@ -1704,6 +1869,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.pool.push(batch.buf)
 			return
 		}
+		if (this.starts.length > 0) this.refreshMarkerSlack()
 		this.inflightBytes += batch.buf.byteLength
 		this.send(
 			{
@@ -1811,11 +1977,20 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				}
 				this.rememberEpoch(record)
 				if (markerHop !== null) {
-					// The marker start (run end + PLL settle), before the slack the hop was posted with.
+					// The marker start (run end + PLL settle), before the slack the hop was posted with;
+					// the run's own start that far plus the run before it (Pipeline.onCounterRun).
+					const sample = Math.max(
+						0,
+						ev.startSample - (start ? this.appliedSlack(start, ev) : 0),
+					)
 					const at = {
 						hop: markerHop,
 						stream: record.stream,
-						sample: Math.max(0, ev.startSample - (start?.proofSlack ?? 0)),
+						sample,
+						runStart: Math.max(
+							0,
+							sample - (start?.pllSettle ?? 0) - (ev.markerRunSamples ?? 0),
+						),
 					}
 					const seq = this.hopReceipts.get(markerHop)
 					if (typeof seq === "number") this.lowerHopBoundary(at, seq)
@@ -2403,6 +2578,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			oLow: -at.pos,
 			oHigh: upstream.bytes - at.pos,
 			lost: upstream.lost,
+			losses: [],
 		}
 	}
 
@@ -2426,6 +2602,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			oLow: t.totalBytesWritten,
 			oHigh: t.totalBytesWritten + upstream.bytes,
 			lost: upstream.lost,
+			losses: [],
 		}
 	}
 
@@ -2446,6 +2623,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				? this.shadowBranchByte + t.droppedBytesTotal
 				: Number.POSITIVE_INFINITY,
 			gaps: 0,
+			gapAt: [],
+			gapsAged: 0,
 			summarised: 0,
 			bps: this.bps,
 			blockSamples,
@@ -2694,8 +2873,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const live = ledger.position(this.sourceId)
 		if (!live || live.session !== anchor.session) return null
 		const first = sample - blocksBefore * map.blockSamples
-		const pos = map.oLow0 + (first - map.gaps - 1) * map.bps - anchor.oHigh
-		return Math.max(0, pos)
+		const byte = map.oLow0 + (first - gapsBefore(map, first) - 1) * map.bps
+		return Math.max(0, byte - anchor.oHigh + lossLow(anchor, byte))
 	}
 
 	/**
@@ -2746,20 +2925,35 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	/**
 	 * Bytes the absorber lost since the anchor: each lost byte puts every later offered byte one
-	 * position further on in the session, so the anchor widens by the loss (position 0 may sit
-	 * that much earlier in the offered bytes: `oLow` moves down, `oHigh` stays). Lower bounds stay
-	 * lower bounds and upper bounds grow by the loss, so the map stays fail closed and blocks after
-	 * the next proof are trusted again, without a reconnect. True (unmappable) only when the counter
-	 * went backwards or disappeared (a router reset: nothing known of the loss).
+	 * position further on in the session. The loss is recorded where it was seen
+	 * (LedgerAnchor.losses): a byte offered after the branch's offered bytes plus the absorber's
+	 * held bytes then follows the whole loss, so its bounds shift by it exactly; an older byte's
+	 * span the loss (its lower bound keeps the earlier loss, its upper one takes the new). Lower
+	 * bounds stay lower bounds, so the map stays fail closed, and a hop after a loss proves as
+	 * early as one without, without a reconnect. True (unmappable) only when the counter went
+	 * backwards or disappeared (a router reset: nothing known of the loss).
 	 */
 	private upstreamLost(anchor: LedgerAnchor): boolean {
 		if (anchor.lost === null) return false
-		const lost =
-			this.deps.routing.ingestCounters?.(this.sourceId)?.lostBytesTotal ?? null
+		const ingest = this.deps.routing.ingestCounters?.(this.sourceId) ?? null
+		const lost = ingest?.lostBytesTotal ?? null
 		if (lost === anchor.lost) return false
 		if (lost === null || lost < anchor.lost) return true
 		const delta = lost - anchor.lost
-		anchor.oLow -= delta
+		const prev = anchor.losses.at(-1)
+		const offered = this.fanout?.getBranchTelemetry(
+			this.branchId,
+		)?.totalBytesWritten
+		// Unknown offered bytes: every byte keeps the widened bound (at +∞).
+		const at =
+			offered === undefined || !Number.isFinite(ingest?.heldBytes)
+				? Number.POSITIVE_INFINITY
+				: offered + Math.max(0, ingest?.heldBytes ?? 0)
+		anchor.losses.push({
+			at: Math.max(prev?.at ?? at, at),
+			loss: (prev?.loss ?? 0) + delta,
+		})
+		if (anchor.losses.length > ANCHOR_LOSS_BREAKS) anchor.losses.shift()
 		anchor.lost = lost
 		this.anchorWidenedBytes += delta
 		return false
@@ -2785,9 +2979,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			return unmappedRead("bad-range")
 		const map = this.streamMaps.find(m => m.stream === stream)
 		if (!map) return unmappedRead("no-stream-map")
-		// Lower bound of the first byte: each applied gap can round its samples up by one.
-		const posA = map.oLow0 + (start - map.gaps - 1) * map.bps - anchor.oHigh
-		const posB = map.oHigh0 + end * map.bps - anchor.oLow
+		// Lower bound of the first byte: each applied gap can round its samples up by one. The loss
+		// before each byte by its own offered byte's segment (lossLow, lossHigh).
+		const byteA = map.oLow0 + (start - gapsBefore(map, start) - 1) * map.bps
+		const byteB = map.oHigh0 + end * map.bps
+		const posA = byteA - anchor.oHigh + lossLow(anchor, byteA)
+		const posB = byteB - anchor.oLow + lossHigh(anchor, byteB)
 		const live = ledger.position(this.sourceId)
 		if (!live || live.session !== anchor.session)
 			return unmappedRead("session-ended")
