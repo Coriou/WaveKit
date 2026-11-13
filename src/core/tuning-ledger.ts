@@ -24,8 +24,10 @@
  * over-estimating `posB` can only make the answer stricter. Gain and every other field are recorded
  * and never gate trust.
  *
- * Readers: the TunerController (assert, the skip rule, the API's per-field proof) and the spectrum
- * engine's shadow counter. Trust labels of consumers do not read it yet.
+ * Readers: the TunerController (assert, the skip rule, the API's per-field proof), the spectrum
+ * engine (every label it emits: `trustAt` on each event's sample range), the TunerArbiter (a hop's
+ * frequency receipt, the same-centre skip, the rate re-send), and decoder provenance, live-audio
+ * evidence and the analog transmission frequency (`trustNow`).
  */
 import type { TuningTrust } from "./spectrum/types.js"
 import { settleBytes, type SettleLink } from "./spectrum/network-settle.js"
@@ -115,6 +117,8 @@ export interface TuningReceipt {
 	writer: TuningWriter | undefined
 	jobId?: string
 	pos: number
+	/** Wall-clock time of the receipt (ms since the epoch; TuningLedgerOptions.now): status only. */
+	at: number
 }
 
 export interface TuningDoubt {
@@ -199,6 +203,8 @@ export interface FieldState {
 	 * `withoutHold`: the state the field would have without the hold.
 	 */
 	hold?: { reason: string; answered: boolean; withoutHold: FieldProofState }
+	/** The field's last receipt in the live session (the one `receipt` names); absent without one. */
+	lastReceipt?: { seq: number; pos: number; at: number }
 }
 
 /** What changed in the ledger (TuningLedger.subscribe). */
@@ -206,7 +212,7 @@ export type LedgerChange =
 	| { kind: "session-started"; session: number }
 	| { kind: "session-ended"; session: number }
 	| { kind: "receipt"; field: TuningField; receipt: TuningReceipt }
-	| { kind: "doubt"; field: DoubtField }
+	| { kind: "doubt"; field: DoubtField; reason: string }
 	| { kind: "hold"; field: GatedField }
 
 export type LedgerListener = (sourceId: string, change: LedgerChange) => void
@@ -232,6 +238,8 @@ export interface TuningLedgerOptions {
 	 * first rate receipt; null = none.
 	 */
 	capsRate?: (sourceId: string) => number | null
+	/** The wall clock of receipts (TuningReceipt.at). Default Date.now. */
+	now?: () => number
 }
 
 /** Default configured settle: `scanner.sweep.settleMs.network`'s schema default. */
@@ -753,6 +761,7 @@ export class TuningLedger {
 			writer: frame.tag?.writer,
 			...(frame.tag?.jobId !== undefined ? { jobId: frame.tag.jobId } : {}),
 			pos: live.pos,
+			at: (this.opts.now ?? Date.now)(),
 		}
 		if (frame.field === "sampleRate" && validValue("sampleRate", frame.value))
 			live.maxRate = Math.max(live.maxRate, frame.value)
@@ -817,7 +826,7 @@ export class TuningLedger {
 					: { minPos: gone.pos, maxAfterSeq: gone.afterSeq }
 			}
 		}
-		this.notify(live.sourceId, { kind: "doubt", field })
+		this.notify(live.sourceId, { kind: "doubt", field, reason })
 	}
 
 	/**
@@ -880,25 +889,68 @@ export class TuningLedger {
 	 * A detected scanner marker shows receipt `seq` took effect by `pos`: its boundary may move
 	 * earlier, to `pos`, never below the receipt's own position and never later than the settle
 	 * would put it. Returns false (nothing changed) for anything but a ring receipt of the live
-	 * session and a valid position.
+	 * session and a valid position. With `runFrom` (the marker run's first position, as low as the
+	 * caller maps it), only a marker of the receipt's own bracket lowers: the session's last test-mode
+	 * receipt before `seq` must be an "on" one (still in the ring) at or before `runFrom`, so a
+	 * run seen before this bracket opened (an older hop's marker) lowers nothing.
 	 */
 	lowerBoundary(
 		sourceId: string,
 		session: number,
 		seq: number,
 		pos: number,
+		runFrom?: number,
 	): boolean {
 		try {
 			const live = this.sources.get(sourceId)?.live
 			if (!live || live.session !== session || !validPos(pos)) return false
 			const receipt = live.receipts.find(r => r.seq === seq)
 			if (!receipt) return false
+			if (runFrom !== undefined) {
+				if (!validPos(runFrom)) return false
+				let on: TuningReceipt | undefined
+				for (const r of live.receipts) {
+					if (r.seq >= seq) break
+					if (r.field === "testMode") on = r
+				}
+				if (!on || on.value === 0 || runFrom < on.pos) return false
+			}
 			const at = Math.max(receipt.pos, pos)
 			const prev = live.lowered.get(seq)
 			live.lowered.set(seq, prev === undefined ? at : Math.min(prev, at))
 			return true
 		} catch {
 			return false
+		}
+	}
+
+	/**
+	 * The first position a block can start at and be proven by frequency receipt `seq` of the live
+	 * session `session` (a scanner hop's own): the larger of that receipt's boundary B(R) and the
+	 * boundary of the session's last sample-rate receipt, both as a read up to the live edge would
+	 * see them now (a marker-lowered B(R) is lowered; later moving frames push it). Null for
+	 * anything but a ring frequency receipt of the live session, or a boundary that never comes
+	 * (no usable rate): the caller then starts where it would have, and the labels stay the
+	 * ledger's (a block before the boundary reads `settling`). Never a trust decision: trustAt
+	 * still proves every block.
+	 */
+	proofBoundary(sourceId: string, session: number, seq: number): number | null {
+		try {
+			const live = this.sources.get(sourceId)?.live
+			if (!live || live.session !== session) return null
+			const receipt = live.receipts.find(r => r.seq === seq)
+			if (!receipt || receipt.field !== "frequency") return null
+			const end = live.pos + 1
+			let boundary = this.boundaryOf(live, "frequency", receipt, end)
+			const rate = this.lastReceipt(live, "sampleRate", end)
+			if (rate)
+				boundary = Math.max(
+					boundary,
+					this.boundaryOf(live, "sampleRate", rate, end),
+				)
+			return Number.isFinite(boundary) ? boundary : null
+		} catch {
+			return null
 		}
 	}
 
@@ -991,6 +1043,9 @@ export class TuningLedger {
 				const hold = live.holds.get(field)
 				const proof = this.proveField(live, field, live.pos, end, true)
 				const last = this.lastReceipt(live, field, end)
+				const lastInfo = last
+					? { lastReceipt: { seq: last.seq, pos: last.pos, at: last.at } }
+					: {}
 				const stateOf = (p: FieldProof): FieldProofState =>
 					p.ok ? "proven" : p.reason === "settling" ? "settling" : "unverified"
 				const holdInfo = hold
@@ -1012,6 +1067,7 @@ export class TuningLedger {
 						session: live.session,
 						receipt: proof.receipt.seq,
 						queued,
+						...lastInfo,
 					}
 				const base: FieldState = {
 					state: hold ? "unverified" : stateOf(proof),
@@ -1021,6 +1077,7 @@ export class TuningLedger {
 					receipt: last?.seq ?? null,
 					queued,
 					...holdInfo,
+					...lastInfo,
 				}
 				if (hold) {
 					base.reason = "doubt"
@@ -1047,6 +1104,11 @@ export class TuningLedger {
 						session: live.session,
 						receipt: gainReceipt.seq,
 						queued: gainQueued,
+						lastReceipt: {
+							seq: gainReceipt.seq,
+							pos: gainReceipt.pos,
+							at: gainReceipt.at,
+						},
 					}
 				: { ...none("no-receipt", gainQueued), session: live.session }
 			return {
@@ -1179,6 +1241,22 @@ export class TuningLedger {
 			if (d.field === field || d.field === "both")
 				return { ok: false, reason: "doubt", doubtReason: d.reason }
 		}
+		const boundary = this.boundaryOf(live, field, receipt, posB)
+		if (!(posA >= boundary)) return { ok: false, reason: "settling" }
+		return { ok: true, receipt, boundary }
+	}
+
+	/**
+	 * B(R) of `field`'s receipt `receipt` for a read ending at `posB`: its position plus the settle,
+	 * lowered by a detected marker, pushed by every centre- (rate-) moving frame flushed after it
+	 * before `posB`.
+	 */
+	private boundaryOf(
+		live: SessionRecord,
+		field: GatedField,
+		receipt: TuningReceipt,
+		posB: number,
+	): number {
 		const settle = this.settleFor(live, receipt, posB)
 		let boundary = receipt.pos + settle
 		const lowered = live.lowered.get(receipt.seq)
@@ -1202,8 +1280,7 @@ export class TuningLedger {
 			evictedMover.pos < posB
 		)
 			boundary = Math.max(boundary, evictedMover.pos + settle)
-		if (!(posA >= boundary)) return { ok: false, reason: "settling" }
-		return { ok: true, receipt, boundary }
+		return boundary
 	}
 
 	/**

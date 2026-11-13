@@ -207,9 +207,25 @@ describe("assert on a fresh parked core", () => {
 			[SET_SAMPLE_RATE, RATE],
 			[SET_FREQUENCY, F0],
 		])
+		const [rate, centre] = h.sessionReceipts(1)
+		const lastOf = (r: TuningReceipt) => ({
+			seq: r.seq,
+			pos: r.pos,
+			at: new Date(r.at).toISOString(),
+		})
 		expect(h.proofOf()).toEqual({
-			frequency: { state: "commanded", writer: "assert", session: 1 },
-			sampleRate: { state: "commanded", writer: "assert", session: 1 },
+			frequency: {
+				state: "commanded",
+				writer: "assert",
+				session: 1,
+				lastReceipt: lastOf(centre!),
+			},
+			sampleRate: {
+				state: "commanded",
+				writer: "assert",
+				session: 1,
+				lastReceipt: lastOf(rate!),
+			},
 		})
 		expect(h.ledger.trustNow("rtl")).toMatchObject({
 			trust: "commanded",
@@ -229,12 +245,14 @@ describe("assert on a fresh parked core", () => {
 				writer: null,
 				session: 1,
 				reason: "declared-write-off",
+				blocked: "declared-write-off",
 			},
 			sampleRate: {
 				state: "unverified",
 				writer: null,
 				session: 1,
 				reason: "declared-write-off",
+				blocked: "declared-write-off",
 			},
 		})
 		// An accepted value is still written: the switch is only for the declared fallback.
@@ -592,6 +610,45 @@ describe("a plain resume of a paused feed", () => {
 	}, 30_000)
 })
 
+describe("the plain-resume hold's one decision point", () => {
+	it("plainResumeTakesTuningBack alone decides whether the hold blocks the held tuning (false while the receiver's clients are unknown)", async () => {
+		const h = await harness()
+		await h.sessionFlowing(1)
+		await h.controller.setFrequency("rtl", F1, { origin: "rest" })
+		await until(() => h.proofOf().frequency.state === "commanded")
+		const decision = vi.spyOn(h.controller, "plainResumeTakesTuningBack")
+		await h.manager.pause("rtl")
+		const from = h.fake.frames.length
+		await h.manager.resume("rtl")
+		await h.sessionFlowing(2)
+		await wait(200)
+		// No sdr-host here (clients unknown): consulted, false, nothing written, the hold's reason shown.
+		expect(decision).toHaveBeenCalledWith("rtl")
+		expect(decision.mock.results.every(r => r.value === false)).toBe(true)
+		expect(h.framesFrom(from)).toEqual([])
+		expect(h.proofOf().frequency).toMatchObject({
+			state: "unverified",
+			reason: "plain-resume",
+		})
+		// Flipping that one predicate (nothing else) gives the tuning back as a restore would: assert
+		// writes the rate and the centre accepted before the resume (U1: accepted, else declared),
+		// and they prove.
+		decision.mockReturnValue(true)
+		h.ledger.raiseDoubt("rtl", "both", "test")
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.framesFrom(from)).toEqual([
+			[SET_SAMPLE_RATE, RATE],
+			[SET_FREQUENCY, F1],
+		])
+		expect(h.sessionReceipts(2).map(r => [r.field, r.value, r.writer])).toEqual(
+			[
+				["sampleRate", RATE, "assert"],
+				["frequency", F1, "assert"],
+			],
+		)
+	}, 30_000)
+})
+
 describe("a fight with a client retuning past the relay (Main gate minor 3)", () => {
 	it("counts each assert frame an untracked-retune doubt caused, never other doubts", async () => {
 		const h = await harness()
@@ -612,6 +669,44 @@ describe("a fight with a client retuning past the relay (Main gate minor 3)", ()
 		}
 		// GET /api/tuner shows it on the published state.
 		expect(h.controller.getAllStates()[0]?.proof?.assertFights).toBe(2)
+	}, 30_000)
+})
+
+describe("proof status per field (step 4)", () => {
+	it("names the last receipt, and the block beside a doubt's reason", async () => {
+		const h = await harness()
+		await h.sessionFlowing(1)
+		await until(() => h.proofOf().frequency.state === "commanded")
+		const last = h
+			.sessionReceipts(1)
+			.filter(r => r.field === "frequency")
+			.at(-1)!
+		expect(h.proofOf().frequency).toEqual({
+			state: "commanded",
+			writer: "assert",
+			session: 1,
+			lastReceipt: {
+				seq: last.seq,
+				pos: last.pos,
+				at: new Date(last.at).toISOString(),
+			},
+		})
+		// A relay client attached, then a doubt: the doubt is the reason, the block says why
+		// nothing is written back.
+		const client = net.connect(h.relay.getStatus().port, "127.0.0.1")
+		cleanups.push(() => client.destroy())
+		client.on("data", () => undefined)
+		client.on("error", () => undefined)
+		await once(client, "connect")
+		await until(() => h.relay.getStatus().clientsConnected === 1)
+		h.ledger.raiseDoubt("rtl", "frequency", "untracked-retune")
+		await wait(100)
+		expect(h.proofOf().frequency).toMatchObject({
+			state: "unverified",
+			reason: "untracked-retune",
+			blocked: "relay-attached",
+			lastReceipt: { seq: last.seq, pos: last.pos },
+		})
 	}, 30_000)
 })
 

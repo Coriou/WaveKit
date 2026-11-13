@@ -832,6 +832,11 @@ export interface ScanJobProgress {
 		discoveryId: string | null
 	}
 	replayQueueDepth?: number
+	/**
+	 * Hops the sweep left without hearing them, by reason; absent while none. `unproven`: the hop's
+	 * tuning never proved (a standing doubt) within 4 × the larger of its dwell and its settle (at least 15 s).
+	 */
+	hopSkips?: { unproven: number }
 }
 
 /** WG2 (requirement 13): one discovery's hits in one job (in memory; reset on job start). */

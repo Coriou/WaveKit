@@ -171,6 +171,10 @@ async function setup(options: { declareCentre?: boolean } = {}) {
 	cleanup.push(() => service.stop())
 	const payload = once(manager, "payload-started")
 	await manager.connect({ ...source, stallTimeoutMs: 0 })
+	// The fanout router consumes the source stream in production; here its bytes reach the fake
+	// fanout through "data", so the stream is drained (an unread stream would pause the socket at
+	// its 256 KiB buffer, and its backlog would read as bytes still upstream of the engine).
+	manager.getStream("rtl")?.resume()
 	await payload
 	const spectrum = (service as unknown as { spectrum: SpectrumService })
 		.spectrum
@@ -407,14 +411,14 @@ describe("the spectrum epoch after a tune", { timeout: 30_000 }, () => {
 		expect(res.statusCode).toBe(200)
 		expect(h.connections()).toBe(2)
 		expect(h.controller.getState("rtl")?.unknownFields).toContain("frequency")
-		// The replay's own epoch starts (a timer-settled epoch at the new rate) and reads unverified.
+		// The stream at the new rate starts (a command during a restart posts no epoch of its own:
+		// the restarted stream opens at the source's centre) and reads unverified.
 		await vi.waitFor(async () => {
 			await new Promise<void>(resolve => {
 				setImmediate(resolve)
 			})
 			expect(h.engine.currentEpoch()).toMatchObject({
 				sampleRateHz: TUNE_RATE,
-				settleMode: "timer",
 			})
 		}, WAIT)
 		expect(h.engine.currentEpoch().tuningTrust).toBe("unverified")
@@ -455,10 +459,11 @@ describe("the spectrum epoch after a tune", { timeout: 30_000 }, () => {
 		await restart
 		await h.trustBecomes("commanded")
 		expect(h.engine.currentEpoch()).toMatchObject({ centreHz: TUNE_HZ })
-		// Nothing after the restart reverts to the earlier command's label or centre.
+		// Nothing after the restart reverts to the earlier command's centre. The restarted stream's
+		// opening is not a tuning event (no label); its blocks carry the ledger's.
 		const after = h.started.filter(e => e.stream > before.stream)
 		const last = after[after.length - 1]
-		expect(last).toMatchObject({ centreHz: TUNE_HZ, tuningTrust: "commanded" })
+		expect(last).toMatchObject({ centreHz: TUNE_HZ, tuningTrust: "unverified" })
 		// The recorder's tuning admission reads this label (the harness tone needs the tune rate).
 		await settled(h.service)
 		expect(h.engine.currentEpoch().tuningTrust).toBe("commanded")

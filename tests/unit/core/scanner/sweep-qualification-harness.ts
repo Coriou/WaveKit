@@ -24,6 +24,7 @@ import {
 	testSettings,
 } from "../../../mocks/scanner/engine-fakes.js"
 import { ServiceFakeDecoders } from "../../../mocks/scanner/service-fakes.js"
+import { FakeReceiverLedger } from "../../../mocks/fake-receiver-ledger.js"
 import { NfmSource } from "./wideband-nfm-fixtures.js"
 
 export const FS = 1_024_000
@@ -255,6 +256,18 @@ export function qualificationWorld(opts: {
 	tuner.addSource("rtl")
 	tuner.states.get("rtl")!.sampleRate = FS
 	tuner.states.get("rtl")!.frequency = opts.centreHz
+	// The receiver's tuning ledger: this session holds receipts of the start centre and rate,
+	// settled (the harness's 50 ms link) before the engine's first byte, and every frame the tuner
+	// writes is receipted at the position the fanout has reached.
+	const receiverLedger = new FakeReceiverLedger("rtl", {
+		rateHz: FS,
+		settleMs: 50,
+	})
+	receiverLedger.prove(opts.centreHz, FS)
+	sources.tuningLedger = receiverLedger.ledger
+	fanout.ledgerFeed = receiverLedger
+	tuner.receipts = (_id, command, value, writer, jobId) =>
+		receiverLedger.write(command, value, writer, jobId)
 	// Like TunerController: a successful write updates the source caps before it resolves.
 	tuner.setFrequency = async (sourceId, hz, writeOpts) => {
 		await ArbiterFakeTuner.prototype.setFrequency.call(

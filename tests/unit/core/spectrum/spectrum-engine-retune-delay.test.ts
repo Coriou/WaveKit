@@ -191,6 +191,15 @@ describe("RetuneDelayMeter", () => {
 			maxMsUpper: 1000,
 			maxBytesUpper: 2000,
 			undetected: 0,
+			undetectedReasons: {
+				superseded: 0,
+				unmeasurable: 0,
+				session: 0,
+				noReference: 0,
+				grid: 0,
+				bracket: 0,
+				timeout: 0,
+			},
 		})
 	})
 
@@ -326,6 +335,46 @@ describe("RetuneDelayMeter", () => {
 		expect(m.status().undetected).toBe(2)
 		m.onBlock(block(3200, flat(-50), 2))
 		expect(m.status()).toMatchObject({ count: 0, undetected: 3 })
+		// By reason: they add up to `undetected`.
+		expect(m.status().undetectedReasons).toEqual({
+			superseded: 1,
+			unmeasurable: 0,
+			session: 1,
+			noReference: 0,
+			grid: 0,
+			bracket: 0,
+			timeout: 1,
+		})
+		// No payload rate, no reference, another bin grid.
+		m.onReceipt(
+			{ session: 2, field: "frequency", value: F2, pos: 4000 },
+			F0,
+			null,
+		)
+		m.onReceipt(
+			{ session: 2, field: "frequency", value: F1, pos: 4100 },
+			null,
+			200,
+		)
+		m.onBlock(block(4200, flat(-50), 2))
+		// A reference wholly before the next flush, then a block on another grid.
+		m.onBlock(block(3400, flat(-90), 2))
+		m.onReceipt(
+			{ session: 2, field: "frequency", value: F2, pos: 4400 },
+			null,
+			200,
+		)
+		m.onBlock({ ...block(4500, flat(-50), 2), binHz: 200 })
+		expect(m.status().undetectedReasons).toEqual({
+			superseded: 1,
+			unmeasurable: 1,
+			session: 1,
+			noReference: 1,
+			grid: 1,
+			bracket: 0,
+			timeout: 1,
+		})
+		expect(m.status().undetected).toBe(6)
 	})
 
 	it("skips receipts inside a scanner marker bracket and never takes test-mode blocks as content", () => {
@@ -352,6 +401,7 @@ describe("RetuneDelayMeter", () => {
 		)
 		m.onBlock(block(3000, flat(-90)))
 		expect(m.status()).toMatchObject({ count: 0, undetected: 1 })
+		expect(m.status().undetectedReasons.bracket).toBe(1)
 		// Past that window a clean block is a reference again.
 		const clean = 2000 + 5 * 2000
 		m.onBlock(block(clean, flat(-90)))

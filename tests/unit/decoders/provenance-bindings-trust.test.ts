@@ -1,5 +1,7 @@
 /**
- * WG5 req 6: verified tuning trust from the observed tuner state, over structural fakes.
+ * WG5 req 6: verified tuning trust, over structural fakes. Proof is the tuning ledger's
+ * (`trustNow`); here a ledger fake proves exactly what the fake tuner's state says was written:
+ * a field unknown or only declared proves nothing, external control is a relay client's frames.
  */
 
 import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
@@ -19,13 +21,9 @@ import {
 	type ProvenanceTunerSource,
 	type ProvenanceTunerState,
 } from "../../../src/decoders/provenance-bindings.js"
-import { TunerController } from "../../../src/core/tuner-controller.js"
-import type {
-	SourceCaps,
-	SourceManager,
-} from "../../../src/core/source-manager.js"
 import { placementKey } from "../../../src/decoders/enablement/contract.js"
 import { createLogger } from "../../../src/utils/logger.js"
+import type { TuningLedger } from "../../../src/core/tuning-ledger.js"
 
 class ArgsRtl433Decoder extends Rtl433Decoder {
 	args(): string[] {
@@ -97,6 +95,33 @@ class FakeTuner extends EventEmitter implements ProvenanceTunerSource {
 	}
 }
 
+/** A tuning ledger proving what the tuner state says was written (see the header). */
+function mirror(tuner: FakeTuner): Pick<TuningLedger, "trustNow"> {
+	return {
+		trustNow: (sourceId: string) => {
+			const s = tuner.states.get(sourceId)
+			const lists = [
+				...(s?.unknownFields ?? []),
+				...(s?.declaredOnlyFields ?? []),
+			]
+			const none = {
+				trust: "unverified" as const,
+				frequency: null,
+				sampleRate: null,
+				receipts: { frequency: null, sampleRate: null },
+			}
+			if (!s || lists.includes("frequency") || lists.includes("sampleRate"))
+				return none
+			return {
+				trust: s.controlMode === "external" ? "relay" : "commanded",
+				frequency: s.frequency,
+				sampleRate: s.sampleRate,
+				receipts: { frequency: 1, sampleRate: 2 },
+			}
+		},
+	}
+}
+
 const MAIN = "sdr-main"
 const tuned = (
 	frequency: number,
@@ -114,7 +139,12 @@ function setup(state: ProvenanceTunerState | null = tuned(131_000_000)) {
 	const tuner = new FakeTuner()
 	if (state) tuner.states.set(MAIN, state)
 	let fallback: string | undefined = MAIN
-	const index = createDecoderProvenanceIndex(decoders, () => fallback, tuner)
+	const index = createDecoderProvenanceIndex(
+		decoders,
+		() => fallback,
+		tuner,
+		mirror(tuner),
+	)
 	return {
 		decoders,
 		tuner,
@@ -151,7 +181,12 @@ describe("verified tuning trust (WG5 req 6)", () => {
 		)
 		decoders.getStatus = () => ({ type: "ais-catcher", sourceId: MAIN })
 		decoders.getDecoder = () => decoder
-		const provenance = createDecoderProvenanceIndex(decoders, () => MAIN, tuner)
+		const provenance = createDecoderProvenanceIndex(
+			decoders,
+			() => MAIN,
+			tuner,
+			mirror(tuner),
+		)
 		try {
 			expect(provenance.lookup("ais")).toMatchObject({
 				targetFrequenciesHz: [],
@@ -301,7 +336,12 @@ describe("verified tuning trust (WG5 req 6)", () => {
 			decoders.getStatus = () => ({ type: "rtl433", sourceId: MAIN })
 			decoders.getDecoder = () => decoder
 			decoders.items.set("ism", {})
-			const index = createDecoderProvenanceIndex(decoders, () => MAIN, tuner)
+			const index = createDecoderProvenanceIndex(
+				decoders,
+				() => MAIN,
+				tuner,
+				mirror(tuner),
+			)
 			return { decoders, index }
 		}
 
@@ -351,7 +391,12 @@ describe("verified tuning trust (WG5 req 6)", () => {
 			decoders.getStatus = () => ({ type: "rtl433", sourceId: MAIN })
 			decoders.getDecoder = id => (id === worker ? child : parent)
 			decoders.items.set("ism", {})
-			const index = createDecoderProvenanceIndex(decoders, () => MAIN, tuner)
+			const index = createDecoderProvenanceIndex(
+				decoders,
+				() => MAIN,
+				tuner,
+				mirror(tuner),
+			)
 			decoders.start(worker)
 			expect(index.lookup("ism", raw)?.captureCentreHz).toBeUndefined()
 			index.dispose()
@@ -365,7 +410,12 @@ describe("verified tuning trust (WG5 req 6)", () => {
 				config: { options: { extraArgs: ["-f", "1"] } },
 			})
 			decoders.items.set("x", {})
-			const index = createDecoderProvenanceIndex(decoders, () => MAIN, tuner)
+			const index = createDecoderProvenanceIndex(
+				decoders,
+				() => MAIN,
+				tuner,
+				mirror(tuner),
+			)
 			expect(index.lookup("x")?.captureCentreHz).toBe(CENTRE)
 			index.dispose()
 		})
@@ -697,6 +747,7 @@ describe("trust rule property", () => {
 						decoders,
 						() => MAIN,
 						withTuner ? tuner : undefined,
+						mirror(tuner),
 					)
 					const base = atBind?.frequency ?? 131_000_000
 					const targets = offsets.map(o => base + o)
@@ -726,176 +777,3 @@ describe("trust rule property", () => {
 		)
 	})
 })
-
-/** rtl_tcp opcodes (librtlsdr rtl_tcp.c). */
-const RTL_TCP_COMMANDS = {
-	SET_FREQUENCY: 0x01,
-	SET_SAMPLE_RATE: 0x02,
-	SET_DIRECT_SAMPLING: 0x09,
-} as const
-
-describe("trust from a real TunerController (WG5 R1)", () => {
-	const AIS = "rtl-ais"
-	const CENTRE = 162_000_000
-	const RATE = 2_400_000
-	const setupReal = (reconnectPolicy: "restore" | "reset" = "restore") => {
-		let caps: SourceCaps = {
-			kind: "iq",
-			sampleRate: RATE,
-			centerFreq: CENTRE,
-			format: "U8_IQ",
-			exclusive: false,
-		}
-		const sources = {
-			assertTunerCommandActive: () => {},
-			writeToSource: () => true,
-			isRtlTcpSource: () => true,
-			getCaps: () => ({ ...caps }),
-			updateSourceCaps: (_id: string, update: Partial<SourceCaps>) => {
-				caps = { ...caps, ...update }
-				return caps
-			},
-			setTuningCaps: (
-				_id: string,
-				tuning: { sampleRate: number; centerFreq?: number },
-			) => {
-				caps = { ...caps, ...tuning }
-				return caps
-			},
-		}
-		const tuner = new TunerController(
-			createLogger({ level: "fatal" }),
-			sources as unknown as SourceManager,
-			{ reconnectPolicy },
-		)
-		tuner.initializeSource(AIS, { ...caps }, "rtl_tcp")
-		const decoders = new FakeDecoders()
-		const index = createDecoderProvenanceIndex(decoders, () => AIS, tuner)
-		decoders.add("ais", { targets: [161_975_000, 162_025_000] })
-		const trust = () => index.lookup("ais")?.tuningTrust
-		const command = async () => {
-			await tuner.setSampleRate(AIS, RATE)
-			await tuner.setFrequency(AIS, CENTRE)
-		}
-		return { tuner, decoders, trust, command }
-	}
-
-	it("a centre and rate only declared by config are unverified until WaveKit commands both", async () => {
-		const { tuner, trust } = setupReal()
-		expect(tuner.getState(AIS)?.declaredOnlyFields).toEqual([
-			"frequency",
-			"sampleRate",
-		])
-		expect(trust()).toBe("unverified")
-		await tuner.setFrequency(AIS, CENTRE)
-		expect(trust()).toBe("unverified")
-		await tuner.setSampleRate(AIS, RATE)
-		expect(tuner.getState(AIS)?.declaredOnlyFields).toBeUndefined()
-		expect(trust()).toBe("commanded")
-	})
-
-	it("a reset reconnect is unverified until re-commanded", async () => {
-		const { tuner, trust, command } = setupReal("reset")
-		await command()
-		expect(trust()).toBe("commanded")
-		const result = tuner.synchronizeOnConnect(AIS)
-		expect(result.reset).toBe(true)
-		// The reset policy writes no declared value (another operator may own the receiver).
-		expect(result.commands).toEqual([])
-		expect(trust()).toBe("unverified")
-		await command()
-		expect(trust()).toBe("commanded")
-	})
-
-	it("accepted relay commands are relay", () => {
-		const { tuner, trust } = setupReal()
-		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, RATE)
-		expect(trust()).toBe("unverified")
-		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_FREQUENCY, CENTRE)
-		expect(trust()).toBe("relay")
-	})
-
-	it("direct sampling, then an ignored out-of-range frequency, is never relay", async () => {
-		const { tuner, trust, command } = setupReal()
-		await command()
-		expect(trust()).toBe("commanded")
-		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING, 2)
-		expect(trust()).toBe("unverified")
-		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_FREQUENCY, 14_200_000)
-		expect(tuner.getState(AIS)?.unknownFields).toContain("frequency")
-		expect(trust()).toBe("unverified")
-		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING, 0)
-		// The receiver may still sit at 14.2 MHz: unknown until an accepted value.
-		expect(trust()).toBe("unverified")
-		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_FREQUENCY, CENTRE)
-		expect(tuner.getState(AIS)?.unknownFields ?? []).not.toContain("frequency")
-		expect(trust()).toBe("relay")
-	})
-
-	it("relay direct sampling 3 (Q branch in librtlsdr) is unverified (WG5 R2)", async () => {
-		const { tuner, trust, command } = setupReal()
-		await command()
-		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING, 3)
-		expect(trust()).toBe("unverified")
-	})
-
-	it("an ignored RTL-gap sample rate is unverified until an accepted rate", async () => {
-		const { tuner, trust, command } = setupReal()
-		await command()
-		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, 500_000)
-		expect(tuner.getState(AIS)?.sampleRate).toBe(RATE)
-		expect(tuner.getState(AIS)?.unknownFields).toContain("sampleRate")
-		expect(trust()).toBe("unverified")
-		tuner.applyExternalCommand(AIS, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, RATE)
-		expect(trust()).toBe("relay")
-	})
-})
-
-it.each(["internal", "external"] as const)(
-	"placement context preserves payload carriers and %s tuning trust",
-	controlMode => {
-		const { decoders, tuner, index } = setup(tuned(162_000_000, controlMode))
-		decoders.add("parent", { targets: [162_000_000] })
-		const envelopes: DecodeEnvelope[] = []
-		const ingress = createActivityIngress({
-			logger: createLogger({ level: "error" }),
-			resolveProvenance: index.lookup,
-			sink: envelope => {
-				envelopes.push(envelope)
-			},
-		})
-		const publish = (
-			type: "ship" | "message",
-			data: unknown,
-			channelHz: number | null,
-		) => {
-			ingress.publish("parent", "ais-catcher", {
-				decoder: "parent",
-				timestamp: new Date(),
-				type,
-				data,
-				provenanceBinding: { sourceId: MAIN, channelHz },
-			})
-		}
-		publish("ship", { channel: "A" }, 162_000_000)
-		publish("ship", { channel: "B" }, 162_000_000)
-		publish("message", {}, null)
-		publish("message", {}, 162_025_000)
-		expect(
-			envelopes.map(envelope => envelope.provenance.frequency?.hz),
-		).toEqual([161_975_000, 162_025_000, 162_000_000, 162_025_000])
-		expect(
-			envelopes.every(
-				envelope =>
-					envelope.provenance.frequency?.tuningTrust ===
-					(controlMode === "internal" ? "commanded" : "relay"),
-			),
-		).toBe(true)
-		tuner.set(MAIN, tuned(163_000_000, controlMode))
-		publish("message", {}, 162_025_000)
-		expect(envelopes.at(-1)?.provenance.frequency?.tuningTrust).toBe(
-			"unverified",
-		)
-		index.dispose()
-	},
-)

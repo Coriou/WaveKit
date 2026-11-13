@@ -74,9 +74,45 @@ import type {
 import type { TrackSnapshot } from "../spectrum/types.js"
 import { isRangeEnabled } from "./plan/range-contract.js"
 import type { StoredScanJobSpec } from "./plan/range-contract.js"
+import { settleMs } from "../spectrum/network-settle.js"
 
 /** Bounds first-IQ admission only; running jobs retain their existing stop contract. */
 export const JOB_STARTUP_CAP_MS = 15_000
+
+/**
+ * Trust: how many times the larger of a hop's dwell and its settle a visit waits for its first
+ * proven block before the job leaves it unproven (hopSkips.unproven): one settle for the hop's
+ * own frame, one for the arbiter's re-send after a doubt (assert rule 2), one for the dwell, one
+ * for a pipeline restart or a marker's timeout. Never less than JOB_STARTUP_CAP_MS (a visit gets
+ * at least what a job gets to see its first IQ): the job's settle is an estimate (the link's
+ * configured settle and the default in-flight estimate; a measured link or the pipeline's stale
+ * discard, up to 1 s, can take longer), and leaving a hop that would have proven loses its
+ * dwell. With the defaults (1000 ms network settle, a dwell under it) 4 × 1 s = 4 s, so the floor
+ * binds: 15 s; a 5 s dwell gives 20 s.
+ */
+export const UNPROVEN_VISIT_SETTLES = 4
+
+/**
+ * The bounded wait of a visit for its first proven block, in ms:
+ * max(JOB_STARTUP_CAP_MS, UNPROVEN_VISIT_SETTLES × max(dwell, settle)), with the ledger's settle
+ * rule (network-settle: max(configured, in-flight estimate) at the rate, U8 IQ). A rate that
+ * cannot settle leaves the configured settle (the bound stays finite).
+ */
+export function unprovenVisitWaitMs(
+	dwellMs: number,
+	configuredSettleMs: number,
+	rateHz: number,
+): number {
+	const settle = settleMs(rateHz, 2, { configuredSettleMs })
+	const wait = Math.max(
+		Number.isFinite(dwellMs) ? dwellMs : 0,
+		Number.isFinite(settle) ? settle : configuredSettleMs,
+	)
+	return Math.max(JOB_STARTUP_CAP_MS, UNPROVEN_VISIT_SETTLES * wait)
+}
+
+/** Synthetic block steps that end an unproven visit (the dwell, then its few once-only waits). */
+const UNPROVEN_LEAVE_STEPS = 8
 /**
  * Analog voice classes: no decoder confirms them, so a sweep hold follows them while they stay on
  * air (bounded by `hold.maxHoldMs`) instead of leaving after the confirm probe.
@@ -626,6 +662,22 @@ export class JobRunner implements JobDriver {
 	private resendStream: number | null = null
 	private hopIndex: number | undefined
 	private hopCentre: number | null = null
+	/**
+	 * Trust: when (deps.now) the current visit's hop was first sent without a proven block since,
+	 * or null (proven, left, or no hop). Re-sends of the same hop keep it (a re-send loop is no
+	 * fresh wait). Past unprovenVisitWaitMs the job leaves the hop (leaveUnproven).
+	 */
+	private unprovenSince: number | null = null
+	private unprovenHop: number | undefined
+	/**
+	 * The job stopped driving (pause, outage) while its hop was unproven: the wait restarts at the
+	 * next send or driving tick, so time spent not driving never counts against the hop.
+	 */
+	private unprovenPaused = false
+	/** A hop re-send waits in the action chain, not started yet (onUntrackedRetune). */
+	private resendQueued = false
+	/** Hops left because they never proved within the bound (ScanJobProgress.hopSkips.unproven). */
+	private unprovenSkips = 0
 	private chain: Promise<void> = Promise.resolve()
 	private actionChain: Promise<void> = Promise.resolve()
 	private readonly queued = new Set<JobEvent["type"]>()
@@ -769,6 +821,9 @@ export class JobRunner implements JobDriver {
 				...this.record.counts,
 				discoveries: this.deps.discoveryCounts(this.record.id),
 			},
+			...(this.unprovenSkips > 0
+				? { hopSkips: { unproven: this.unprovenSkips } }
+				: {}),
 		}
 		// Req 1.3: a parked sweep reports no period. In-window already has none.
 		const parked = this.jobParked()
@@ -884,6 +939,7 @@ export class JobRunner implements JobDriver {
 			this.queueEvent({ type: "engine-failed" })
 		if ((state === "running" || state === "holding") && this.scheduler)
 			this.exec(this.scheduler.tick(now))
+		if (state === "running" || state === "holding") this.checkUnproven(now)
 		if (
 			(state === "running" || state === "holding") &&
 			spec.stop.afterMs !== null &&
@@ -963,6 +1019,24 @@ export class JobRunner implements JobDriver {
 		}
 	}
 
+	/**
+	 * Trust: the arbiter asks this holder to re-send its hop (assert rule 2). True when the job
+	 * takes it: a sweep with a hop re-sends it now, or, while it does not drive (source down,
+	 * paused), when it drives again (its resume re-sends the hop): a hop sent meanwhile would start
+	 * an epoch no dwell owns. False (not a sweep, no hop yet, another lease) leaves it to the arbiter.
+	 */
+	private resendForArbiter(lease: Lease): boolean {
+		if (
+			this.lease !== lease ||
+			!this.sweep ||
+			this.hopCentre === null ||
+			this.hopIndex === undefined
+		)
+			return false
+		if (this.driving) this.onUntrackedRetune()
+		return true
+	}
+
 	/** At most one re-send until an own epoch starts (R1). */
 	private resendForStream(stream: number): void {
 		if (!this.lease || this.hopCentre === null) return
@@ -982,9 +1056,104 @@ export class JobRunner implements JobDriver {
 			this.queueEvent({ type: "engine-ready" })
 		if (!this.sweep || !this.driving || !this.epochOwn || !this.scheduler)
 			return
+		// Trust: the dwell counts only a block of its own hop's proven run (the engine labels a
+		// hop's block trusted only on a proof by the hop's own frequency receipt).
+		if (!this.provenHopBlock(endSample)) return
+		this.unprovenSince = null
 		if (overload && this.hopIndex !== undefined)
 			this.scheduler.onOverload(this.hopIndex)
 		this.exec(this.scheduler.onBlock(endSample))
+	}
+
+	/**
+	 * Trust: whether the block ending at `endSample` (just labelled: the engine dispatches each
+	 * block summary as it labels it) is one of the current epoch's trusted run, which for this
+	 * job's own hop means proven by the hop's own frequency receipt. A view without runs (test
+	 * doubles) answers by the epoch's label alone.
+	 */
+	private provenHopBlock(endSample: number): boolean {
+		const engine = this.deps.engine(this.sourceId)
+		if (!engine) return false
+		const epoch = engine.currentEpoch()
+		if (epoch.tuningTrust === "unverified") return false
+		const from = epoch.trustedFromSample
+		if (from === undefined) return true
+		if (from === null) return false
+		const cfg = engine.config()
+		const block = cfg ? blockSamplesOf(cfg) : 0
+		return endSample - block >= from
+	}
+
+	/** Trust: a job no longer driving keeps no unproven wait running (unprovenPaused). */
+	private noteUnprovenPause(): void {
+		if (!this.driving && this.unprovenSince !== null) this.unprovenPaused = true
+	}
+
+	/**
+	 * Trust: a visit whose hop has not proven within unprovenVisitWaitMs of its first send is left
+	 * (skip reason `unproven`, counted): a standing doubt or hold would otherwise stall the sweep on
+	 * it for ever, since its dwell counts only proven blocks.
+	 */
+	private checkUnproven(now: number): void {
+		const since = this.unprovenSince
+		if (
+			since === null ||
+			!this.sweep ||
+			!this.driving ||
+			!this.lease ||
+			!this.scheduler ||
+			this.hopIndex === undefined
+		)
+			return
+		if (this.unprovenPaused) {
+			this.unprovenPaused = false
+			this.unprovenSince = now
+			return
+		}
+		const dwellMs =
+			this.record.plan.hops[this.hopIndex]?.dwellMs ?? this.record.spec.dwellMs
+		const sweep = this.deps.settings().sweep
+		// The larger link settle: the job does not know its link, and a longer wait is the safe side.
+		const configured = Math.max(sweep.settleMs.local, sweep.settleMs.network)
+		const rate =
+			this.deps.engine(this.sourceId)?.config()?.sampleRateHz ??
+			this.record.spec.tuner.sampleRateHz ??
+			0
+		const bound = unprovenVisitWaitMs(dwellMs, configured, rate)
+		if (now - since < bound) return
+		this.unprovenSince = null
+		this.unprovenSkips += 1
+		this.log.warn(
+			{ hopIndex: this.hopIndex, waitedMs: now - since, boundMs: bound },
+			"The hop's tuning never proved within its bound; leaving it (skip reason: unproven)",
+		)
+		this.exec(this.leaveUnproven(this.scheduler))
+		this.deps.changed("progress")
+	}
+
+	/**
+	 * Ends the unproven visit with nothing heard: the visit restarts (its tracks and candidates go,
+	 * as at a skipped tune) and its dwell, with any once-only wait it then asks for, runs out on
+	 * synthetic block positions, so the scheduler leaves the hop on its own path (its next tune or
+	 * the sweep's end). No IQ is counted: the blocks carry no samples to any consumer. Residual:
+	 * the scheduler's statistics count that dwell as heard, and a carrier retry due on the hop reads
+	 * as not heard on this visit.
+	 */
+	private leaveUnproven(scheduler: SweepScheduler): SchedulerAction[] {
+		this.epochOwn = false
+		const out = [...scheduler.onTuneSkipped()]
+		const { blockSamples } = scheduler.blockGeometry()
+		if (!(blockSamples > 0)) return out
+		let end = 0
+		for (let i = 0; i < UNPROVEN_LEAVE_STEPS; i++) {
+			const n = Math.max(1, scheduler.dwellBlocksLeft() ?? 1)
+			end += n * blockSamples
+			const actions = scheduler.onBlocks(end, n)
+			out.push(...actions)
+			if (actions.some(a => a.type === "tune" || a.type === "start-probe"))
+				break
+		}
+		return out
 	}
 
 	onStale(blocks: number): void {
@@ -1303,6 +1472,7 @@ export class JobRunner implements JobDriver {
 		}
 		if (released) await this.refreshTuning()
 		record.state = prev.state
+		this.noteUnprovenPause()
 		if (prev.reason === undefined) delete record.reason
 		else record.reason = prev.reason
 		if (prev.startedAt === undefined) delete record.startedAt
@@ -1447,12 +1617,17 @@ export class JobRunner implements JobDriver {
 				)
 			}
 			this.lease = r.lease
+			// Trust: the arbiter's re-send of the hop on an unproven session goes through this job,
+			// so the re-sent hop's epoch is one of its own (ownEpochs) and its dwell counts it.
+			const lease = r.lease
+			lease.resend = () => this.resendForArbiter(lease)
 			// Finding 2: an open engine takes the new holder's tuning before the hop is re-sent (the
 			// reconfigure starts a new stream, which would drop a hop already in flight).
 			if (this.engineOpened) await this.refreshTuning()
 		}
 		const now = this.deps.now()
 		record.state = t.state
+		this.noteUnprovenPause()
 		this.scheduler?.setAccountingActive(this.driving)
 		if (t.reason === undefined) delete record.reason
 		else record.reason = t.reason
@@ -1649,8 +1824,14 @@ export class JobRunner implements JobDriver {
 	onUntrackedRetune(): void {
 		if (!this.sweep || !this.lease) return
 		this.epochOwn = false
+		// One re-send waits in the chain at a time: asks before it starts are the same re-send.
+		if (this.resendQueued) return
+		this.resendQueued = true
 		this.actionChain = this.actionChain
-			.then(() => this.resendHop())
+			.then(() => {
+				this.resendQueued = false
+				return this.resendHop()
+			})
 			.catch((err: unknown) =>
 				this.log.warn(
 					{ err },
@@ -1725,6 +1906,15 @@ export class JobRunner implements JobDriver {
 		this.epochOwn = false
 		// Paused: the hop is remembered and sent by the resume's resend-hop.
 		if (!this.driving) return
+		if (
+			this.unprovenSince === null ||
+			this.unprovenHop !== a.hopIndex ||
+			this.unprovenPaused
+		) {
+			this.unprovenSince = this.deps.now()
+			this.unprovenHop = a.hopIndex
+			this.unprovenPaused = false
+		}
 		this.retunes += 1
 		this.scheduler?.noteTuneStarted(a.hopIndex)
 		try {

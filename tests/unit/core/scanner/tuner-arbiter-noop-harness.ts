@@ -1,5 +1,8 @@
 // tests/unit/core/scanner/tuner-arbiter-noop-harness.ts
-/** Shared fakes for the R 1.2 arbiter no-op tests: a controllable epoch clock and an arbiter. */
+/**
+ * Shared fakes for the R 1.2 arbiter no-op tests: a controllable epoch clock, a real tuning ledger
+ * the fake tuner's writes are receipted into (settle 0: a receipt proves at once), and an arbiter.
+ */
 import { EventEmitter } from "node:events"
 import pino from "pino"
 import type { TunerStateField } from "@wavekit/api-types"
@@ -14,8 +17,11 @@ import type {
 import type { PendingEpoch } from "../../../../src/core/spectrum/types.js"
 import { ArbiterFakeTuner } from "../../../mocks/scanner/arbiter-fakes.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
+import { FakeReceiverLedger } from "../../../mocks/fake-receiver-ledger.js"
+import type { TuningLedger } from "../../../../src/core/tuning-ledger.js"
 
 class Sources extends EventEmitter {
+	tuningLedger?: TuningLedger
 	isRtlTcpSource(id: string): boolean {
 		return id === "rtl"
 	}
@@ -47,10 +53,13 @@ export class NoopClock implements EpochClock {
 		this.centreHz = p.centreHz
 	}
 	suppressExternal(): void {}
-	/** An epoch nobody commanded (untracked retune, host-centre mismatch). */
+	/** The engine's doubt on an untracked retune (set by the harness). */
+	onExternal: (() => void) | null = null
+	/** An epoch nobody commanded (untracked retune, host-centre mismatch): the engine doubts both. */
 	external(): void {
 		this.epoch += 1
 		this.trust = "unverified"
+		this.onExternal?.()
 	}
 	currentEpoch(): EngineEpoch {
 		return {
@@ -74,6 +83,18 @@ export function noopHarness(
 	tuner.addSource("rtl", unknown)
 	const sources = new Sources()
 	const clock = new NoopClock()
+	// The live session already holds receipts of the tuner's centre and rate (settle 0).
+	const ledger = new FakeReceiverLedger("rtl", {
+		rateHz: 2_048_000,
+		settleMs: 0,
+	})
+	const state = tuner.states.get("rtl")!
+	ledger.prove(state.frequency, state.sampleRate)
+	sources.tuningLedger = ledger.ledger
+	tuner.receipts = (_id, command, value, writer, jobId) =>
+		ledger.write(command, value, writer, jobId)
+	clock.onExternal = () =>
+		ledger.ledger.raiseDoubt("rtl", "both", "untracked-retune")
 	const deps: ArbiterDeps = {
 		tuner: tuner as never,
 		sources: sources as never,
@@ -92,5 +113,5 @@ export function noopHarness(
 		...extra,
 	}
 	const arbiter = new TunerArbiter(deps)
-	return { tuner, sources, clock, arbiter }
+	return { tuner, sources, clock, arbiter, ledger }
 }

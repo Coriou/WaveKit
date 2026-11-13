@@ -65,6 +65,7 @@ function setup(opts: { refuseCommand?: number } = {}) {
 					value,
 					writer: "operator",
 					pos: seq * 100,
+					at: 0,
 				}
 				if (onReceipt) setImmediate(() => onReceipt(receipt))
 				return true

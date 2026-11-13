@@ -46,6 +46,7 @@ import {
 	serviceHarness,
 	tick,
 } from "../../../mocks/scanner/service-fakes.js"
+import { proveSource } from "../../../mocks/fake-receiver-ledger.js"
 
 import { WaveKitError } from "../../../../src/utils/errors.js"
 
@@ -201,6 +202,9 @@ function make(
 		["rtl", new FakeFanout()],
 		["air", new FakeFanout()],
 	])
+	// The receiver was told the source's centre and rate on this session, well before any engine
+	// opens (fail closed without it: every label would read `unverified`).
+	proveSource(sources, "rtl", CENTRE, fs, { fanout: fanouts.get("rtl")! })
 	const mem = memoryPersistence()
 	const settings = testSettings(opts.patch)
 	const hosts: FakeHost[] = []

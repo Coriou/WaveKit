@@ -102,6 +102,7 @@ import {
 	TunerController,
 	TUNER_REST_COMMAND_POLICY,
 } from "./core/tuner-controller.js"
+import type { TuningLedger } from "./core/tuning-ledger.js"
 import { applyConfiguredTuning } from "./core/tuner-config-gain.js"
 import { createRegionalRegistry } from "./core/regional/registry.js"
 import { createRegionalRegistration } from "./core/regional/data.js"
@@ -205,6 +206,10 @@ import {
 } from "./decoders/builtin/lora-meshtastic.js"
 import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
+import {
+	receiverClientsMaxAgeMs,
+	receiverClientsVerdict,
+} from "./core/tuning-ledger-receiver-free.js"
 import {
 	ReceiverIdentityTracker,
 	receiverSdrHostWaitMs,
@@ -699,16 +704,16 @@ export function decoderSettingsPort(
 }
 
 /**
- * WG9 req 3.2: the analog transmission frequency label. The strict state rule, demoted to
- * `unverified` unless the controller wrote both frequency and sample rate on the current
- * connection (a failed reconnect replay proves nothing).
+ * The analog transmission frequency label: the tuning ledger's at the live edge (`trustNow`), for
+ * the tuner's centre only (fail closed without a ledger).
  */
 export function analogFrequencyAt(
-	tuner: Pick<TunerController, "getState" | "tuningWrittenOnConnection">,
+	tuner: Pick<TunerController, "getState">,
+	ledger: Pick<TuningLedger, "trustNow"> | null,
 ): ReturnType<typeof tunerFrequencyAt> {
 	return tunerFrequencyAt(
 		id => tuner.getState(id),
-		id => tuner.tuningWrittenOnConnection(id),
+		ledger ? id => ledger.trustNow(id) : undefined,
 	)
 }
 
@@ -2176,6 +2181,11 @@ async function main(): Promise<void> {
 			})
 			scannerConstructionSettled = true
 			receiverState.setSpectrum(scanner.spectrum)
+			// tuningUnproven: why the engine labels its newest samples unverified on a proven tuning.
+			const labelSpectrum = scanner.spectrum
+			sourceManager.tuningUnproven.setEngineResolver(
+				id => labelSpectrum.engine(id)?.labelReason() ?? null,
+			)
 			scannerConstruction.completeConstruction({ ok: true })
 			await iqCapture?.start()
 			await scanner.start()
@@ -2306,6 +2316,24 @@ async function main(): Promise<void> {
 					)
 						void receiverState.recheckAdoption(sourceId)
 				})
+				// A plain resume takes the tuning back only while rtlmux serves this core alone.
+				const clientsMaxAgeMs = receiverClientsMaxAgeMs(
+					config.resources.sdrHostPoller.pollIntervalMs,
+					config.resources.sdrHostPoller.timeoutMs,
+				)
+				tunerController.setReceiverClientsView(
+					id =>
+						receiverClientsVerdict(
+							poller.clientsReading(id),
+							sourceManager.connectionLocalPort(id),
+							performance.now(),
+							clientsMaxAgeMs,
+						),
+					id => poller.pollNow(id),
+				)
+				poller.on("status", status =>
+					tunerController.noteReceiverClients(status.sourceId),
+				)
 				log.info(
 					{
 						count: sdrHostConfigs.length,
@@ -2584,13 +2612,13 @@ async function main(): Promise<void> {
 		own(15, disposeReceiverAfterApi)
 
 		// WG3 req 5: RF provenance on receptions from each decoder's binding (config and
-		// scanner probes alike), kept current on decoder create/remove. WG5 req 6:
-		// tuningTrust is "commanded" (internal control) or "relay" (external) when the
-		// observed tuner state proves the decoder hears its targets, else "unverified".
+		// scanner probes alike), kept current on decoder create/remove. tuningTrust is the
+		// tuning ledger's at the live edge, for the centre the decoder was started on.
 		const decoderProvenance = createDecoderProvenanceIndex(
 			decoderManager,
 			() => sourceRouting.getDefaultSourceId(),
 			tunerController,
+			sourceManager.tuningLedger,
 		)
 		own(8, () => decoderProvenance.dispose())
 		ambientProvenance = decoderProvenance.lookup
@@ -3003,7 +3031,10 @@ async function main(): Promise<void> {
 		// close. own(7) does the same on a failed startup (Activity is own(8)).
 		const transmissions = wireAnalogTransmissions({
 			source: liveDemod,
-			frequencyAt: analogFrequencyAt(tunerController),
+			frequencyAt: analogFrequencyAt(
+				tunerController,
+				sourceManager.tuningLedger,
+			),
 			broadcast: event => {
 				wsBroadcaster.broadcastLiveAudioTransmission(event)
 			},

@@ -1,9 +1,10 @@
 /**
- * WG7 req 10.8: reproduce the WG5 note "bulk relay-disconnect label relay->commanded".
- * A relay client connects, retunes and disconnects through the real tuner wiring; the
- * provenance index must then follow WG5 req 6: control returns to internal and a
- * reception is `commanded` only while the centre captured at decoder create/start still
- * equals the current centre, else `unverified`.
+ * WG7 req 10.8: a relay client connects, retunes and disconnects through the real tuner wiring.
+ * Trust is the tuning ledger's: the source manager double receipts every frame (the core's own,
+ * and the relay's, which the relay writes upstream before the controller sees it; settle 0).
+ * A reception is `relay` once a relay client's frames prove the centre, `commanded` on WaveKit's
+ * own, and `unverified` whenever the proven centre is not the one captured at decoder
+ * create/start. Connecting or leaving writes no frame, so it changes no label by itself.
  */
 
 import { EventEmitter } from "node:events"
@@ -20,6 +21,7 @@ import {
 	type ProvenanceDecoderSource,
 } from "../../../src/decoders/provenance-bindings.js"
 import { createLogger } from "../../../src/utils/logger.js"
+import { FakeReceiverLedger } from "../../mocks/fake-receiver-ledger.js"
 
 const logger = createLogger({ level: "fatal" })
 const SOURCE = "rtl-1"
@@ -44,6 +46,9 @@ class Decoders extends EventEmitter implements ProvenanceDecoderSource {
 
 class FakeRelay extends EventEmitter {
 	clients = 0
+	constructor(private readonly ledger: FakeReceiverLedger) {
+		super()
+	}
 	getStatus() {
 		return {
 			sourceId: SOURCE,
@@ -61,6 +66,11 @@ class FakeRelay extends EventEmitter {
 		this.emit("client-disconnected")
 	}
 	retune(hz: number): void {
+		// TunerRelay forwards the frame upstream (writer relay), then reports it.
+		const frame = Buffer.alloc(5)
+		frame[0] = SET_FREQUENCY
+		frame.writeUInt32BE(hz, 1)
+		this.ledger.writePayload(frame, { writer: "relay" })
 		this.emit("command-received", {
 			sourceId: SOURCE,
 			command: SET_FREQUENCY,
@@ -77,9 +87,16 @@ async function setup() {
 		format: "U8_IQ",
 		exclusive: false,
 	}
+	const ledger = new FakeReceiverLedger(SOURCE, { rateHz: RATE, settleMs: 0 })
+	ledger.start()
 	const sourceManager = Object.assign(new EventEmitter(), {
 		assertTunerCommandActive: () => {},
-		writeToSource: () => true,
+		writeToSource: (
+			_id: string,
+			payload: Buffer,
+			tag?: { writer: "operator" | "scanner" | "assert" | "relay" },
+			onReceipt?: (r: unknown) => void,
+		) => ledger.writePayload(payload, tag, onReceipt as never),
 		isRtlTcpSource: () => true,
 		getCaps: () => ({ ...caps }),
 		updateSourceCaps: (_id: string, update: Partial<SourceCaps>) => {
@@ -99,7 +116,7 @@ async function setup() {
 		sourceManager as unknown as SourceManager,
 	)
 	tuner.initializeSource(SOURCE, { ...caps }, "rtl_tcp")
-	const relay = new FakeRelay()
+	const relay = new FakeRelay(ledger)
 	wireTunerControl({
 		log: logger,
 		sourceManager: sourceManager as unknown as SourceManager,
@@ -108,7 +125,12 @@ async function setup() {
 		relayEnabled: true,
 	})
 	const decoders = new Decoders()
-	const index = createDecoderProvenanceIndex(decoders, () => SOURCE, tuner)
+	const index = createDecoderProvenanceIndex(
+		decoders,
+		() => SOURCE,
+		tuner,
+		ledger.ledger,
+	)
 	await tuner.setSampleRate(SOURCE, RATE)
 	await tuner.setFrequency(SOURCE, CENTRE)
 	const trust = () => index.lookup("ais")?.tuningTrust
@@ -122,7 +144,8 @@ describe("relay disconnect tuning trust (WG7 req 10.8)", () => {
 		expect(trust()).toBe("commanded")
 		relay.connect()
 		expect(mode()).toBe("external")
-		expect(trust()).toBe("relay")
+		// No relay frame yet: WaveKit's own frames still prove the centre.
+		expect(trust()).toBe("commanded")
 		relay.retune(OTHER)
 		expect(trust()).toBe("unverified")
 		relay.disconnect()
@@ -130,17 +153,18 @@ describe("relay disconnect tuning trust (WG7 req 10.8)", () => {
 		expect(trust()).toBe("unverified")
 	})
 
-	it("a relay that leaves the centre as captured: relay before, commanded after", async () => {
+	it("a relay that leaves the centre as captured: relay before and after (its frames remain the proof)", async () => {
 		const { relay, trust, mode } = await setup()
 		relay.connect()
 		relay.retune(CENTRE)
 		expect(trust()).toBe("relay")
 		relay.disconnect()
 		expect(mode()).toBe("internal")
-		expect(trust()).toBe("commanded")
+		// Leaving writes no frame: the relay's frames are still the proof.
+		expect(trust()).toBe("relay")
 	})
 
-	it("a relay retune away and back: commanded after disconnect (centre equals captured)", async () => {
+	it("a relay retune away and back: relay after disconnect (centre equals captured, the relay's frame proves it)", async () => {
 		const { relay, trust } = await setup()
 		relay.connect()
 		relay.retune(OTHER)
@@ -148,7 +172,7 @@ describe("relay disconnect tuning trust (WG7 req 10.8)", () => {
 		relay.retune(CENTRE)
 		expect(trust()).toBe("relay")
 		relay.disconnect()
-		expect(trust()).toBe("commanded")
+		expect(trust()).toBe("relay")
 	})
 
 	it("a decoder restarted on the relay centre keeps that capture after disconnect", async () => {
@@ -159,18 +183,19 @@ describe("relay disconnect tuning trust (WG7 req 10.8)", () => {
 		decoders.emit("decoder:started", "ais")
 		expect(trust()).toBe("relay")
 		relay.disconnect()
-		expect(trust()).toBe("commanded")
+		expect(trust()).toBe("relay")
 	})
 
 	it("one of two relay clients leaving keeps external control and relay", async () => {
 		const { relay, trust, mode } = await setup()
 		relay.connect()
 		relay.connect()
+		relay.retune(CENTRE)
 		relay.disconnect()
 		expect(mode()).toBe("external")
 		expect(trust()).toBe("relay")
 		relay.disconnect()
 		expect(mode()).toBe("internal")
-		expect(trust()).toBe("commanded")
+		expect(trust()).toBe("relay")
 	})
 })

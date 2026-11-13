@@ -7,6 +7,7 @@
  *
  * In-memory fake transport only (no socket).
  */
+import { tuningHeldOnConnection } from "../../mocks/tuner-ledger-held.js"
 import { EventEmitter } from "node:events"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { TunerCommandOrigin } from "@wavekit/api-types"
@@ -131,7 +132,7 @@ function harness(policy: TunerReconnectPolicy = "restore") {
 				declaredOnlyFields: s.declaredOnlyFields,
 				lastError: s.lastError,
 			},
-			tuningWritten: controller.tuningWrittenOnConnection(SRC),
+			tuningWritten: tuningHeldOnConnection(controller, SRC),
 		}
 		frames.length = 0
 		sent.length = 0
@@ -373,7 +374,7 @@ describe("WG11 GN goldens: connect writes without a configured tuner", () => {
 		const live = h.snapshot()
 		expect(live.tuningWritten).toBe(true)
 		h.sources.emit("connected", SRC)
-		expect(h.controller.tuningWrittenOnConnection(SRC)).toBe(true)
+		expect(tuningHeldOnConnection(h.controller, SRC)).toBe(true)
 		h.sources.emit("payload-started", SRC)
 		expect(h.snapshot()).toEqual({
 			frames: ["0200249f00", "0108a48640"],

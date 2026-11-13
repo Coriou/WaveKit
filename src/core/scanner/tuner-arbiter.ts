@@ -8,7 +8,6 @@ import type {
 	TunerCommandOrigin,
 	TunerControlMode,
 	TunerState,
-	TunerStateField,
 } from "@wavekit/api-types"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DigitalVoiceService } from "../digital-voice.js"
@@ -21,7 +20,7 @@ import { gainKeyOf, type EpochClock } from "../spectrum/spectrum-engine.js"
 import type { LeaseTunerFields, PersistedLease } from "./store/persistence.js"
 import type { Impact, NormalisedJobSpec, ScannerSettings } from "./types.js"
 import type { PendingEpoch } from "../spectrum/types.js"
-import { tuningTrustOf } from "../tuning-trust.js"
+import type { TuningLedger, TuningReceipt } from "../tuning-ledger.js"
 import { ConstructorListenerRegistration } from "./channel/consumer-lifecycle.js"
 
 export type TunerFieldValues = LeaseTunerFields
@@ -32,14 +31,17 @@ export type LeaseLostReason =
 
 /**
  * Centre, rate and gain of a retune this lease has written and accepted, plus the
- * epoch that retune posted. Null after any trust break (R 1.2). Same-centre no-op
- * compares the three target fields; `epoch` is checked against the live clock.
+ * epoch that retune posted and its frequency frame's ledger receipt. Null after any trust
+ * break (R 1.2). Same-centre no-op compares the three target fields and needs the ledger's live
+ * proof of the centre to be this receipt.
  */
 export interface VerifiedTune {
 	centreHz: number
 	sampleRateHz: number | null
 	gainTenthsDb: number | null
 	epoch: number
+	/** The hop's frequency receipt seq (null: none yet, or the frame got none). */
+	frequencyReceipt: number | null
 }
 
 export interface Lease {
@@ -55,6 +57,11 @@ export interface Lease {
 	 * no band gain puts the snapshot's gain mode and gain back first.
 	 */
 	bandGain?: boolean
+	/**
+	 * Set by the holder: re-sends its latest hop itself (true) so the re-sent hop's epoch is its
+	 * own (TunerArbiter.resendHop, assert rule 2); false or absent: the arbiter re-sends it.
+	 */
+	resend?: () => boolean
 }
 
 /**
@@ -95,7 +102,6 @@ export type ArbiterTuner = Pick<
 	Partial<
 		Pick<
 			TunerController,
-			| "tuningWrittenOnConnection"
 			| "bandGainFor"
 			| "noteBandGainApplied"
 			| "gainChoiceCount"
@@ -105,34 +111,12 @@ export type ArbiterTuner = Pick<
 		>
 	>
 
-/**
- * WG9 req 3.1: a hop's epoch trust by the shared fail-closed rule. The hop itself commands the
- * frequency (after the epoch is posted, in the same bracket), so only a frequency entry is
- * exempted; a malformed list stays as it is and answers `unverified`.
- */
-function hopTrust(state: TunerState): PendingEpoch["tuningTrust"] {
-	const exempt = (list: unknown): unknown =>
-		Array.isArray(list)
-			? (list as unknown[]).filter(f => f !== "frequency")
-			: list
-	const unknownFields = exempt(state.unknownFields)
-	const declaredOnlyFields = exempt(state.declaredOnlyFields)
-	return tuningTrustOf({
-		controlMode: state.controlMode,
-		...(unknownFields !== undefined
-			? { unknownFields: unknownFields as TunerStateField[] }
-			: {}),
-		...(declaredOnlyFields !== undefined
-			? { declaredOnlyFields: declaredOnlyFields as TunerStateField[] }
-			: {}),
-	})
-}
-
 export interface ArbiterDeps {
 	tuner: ArbiterTuner
 	sources: Pick<SourceManager, "on" | "off" | "isRtlTcpSource"> &
-		// Optional: test doubles of the source manager predate pause / resume.
-		Partial<Pick<SourceManager, "resumeKind" | "getStatus">>
+		// Optional: test doubles of the source manager predate pause / resume. Without a tuning
+		// ledger nothing is proven: every hop writes the rate and no same-centre retune is skipped.
+		Partial<Pick<SourceManager, "resumeKind" | "getStatus" | "tuningLedger">>
 	epochs: (sourceId: string) => EpochClock | undefined
 	settings: () => ScannerSettings
 	/** Timer-mode settle class of the source's transport (§ 4.6). */
@@ -560,6 +544,18 @@ export class TunerArbiter extends EventEmitter {
 		}
 		// The acceptance is stale: the same centre must write.
 		this.clearVerified(lease)
+		// Through the holder when it can: a hop it did not send would start an epoch it does not
+		// own, and its dwell would drop every block of it.
+		let routed = false
+		try {
+			routed = lease.resend?.() === true
+		} catch (err) {
+			this.log.warn(
+				{ err, sourceId, jobId: lease.jobId },
+				"The lease holder's hop re-send failed; the arbiter re-sends it",
+			)
+		}
+		if (routed) return
 		void this.retune(lease, target).catch((err: unknown) => {
 			this.log.warn(
 				{ err, sourceId, jobId: lease.jobId },
@@ -607,14 +603,11 @@ export class TunerArbiter extends EventEmitter {
 		const opts: TunerWriteOptions = { origin: "scanner", jobId: lease.jobId }
 		let state = this.requireState(sourceId)
 		let rateChanged = false
-		// WG9 req 3.1: the hop commands the rate too whenever it is unproven: declared only, or
-		// not written on this connection (a job without its own rate re-sends the declared one).
-		// An unknown rate is a placeholder, so without a job rate it is never written (unverified).
+		// The hop commands the rate too whenever the ledger does not prove it on this session
+		// (proven or settling; a job without its own rate re-sends the held one). An unknown rate
+		// is a placeholder, so without a job rate it is never written (unverified).
 		const rateUnknown = (state.unknownFields ?? []).includes("sampleRate")
-		const rateUnproven =
-			rateUnknown ||
-			(state.declaredOnlyFields ?? []).includes("sampleRate") ||
-			this.deps.tuner.tuningWrittenOnConnection?.(sourceId) === false
+		const rateUnproven = rateUnknown || this.rateUnproven(sourceId)
 		const rateTarget =
 			target.sampleRateHz ??
 			(rateUnproven && !rateUnknown ? state.sampleRate : null)
@@ -690,8 +683,22 @@ export class TunerArbiter extends EventEmitter {
 					: agcRestore !== null
 						? "agc"
 						: gainKeyOf(state),
-			tuningTrust: hopTrust(state),
+			// The engine labels the hop's samples from the ledger (by this hop's own receipt).
+			tuningTrust: "unverified",
 			centreChanged: target.centreHz !== clock.currentEpoch().centreHz,
+		}
+		// The hop's frequency receipt: the engine trusts the hop's samples only on a proof by it,
+		// and a same-centre retune is skipped only while it is still the ledger's proof.
+		const hopReceipt: { seq: number | null } = { seq: null }
+		const onFrequencyReceipt = (receipt: TuningReceipt | null): void => {
+			hopReceipt.seq = receipt?.seq ?? null
+			try {
+				clock.noteHopReceipt?.(pending.epoch, hopReceipt.seq)
+			} catch {
+				// A failing clock never breaks the socket callback (the hop then reads unverified).
+			}
+			if (lease.verified?.epoch === pending.epoch)
+				lease.verified.frequencyReceipt = hopReceipt.seq
 		}
 		clock.suppressExternal(true)
 		clock.submitEpoch(pending)
@@ -709,7 +716,10 @@ export class TunerArbiter extends EventEmitter {
 			}
 			guard()
 			writesStarted = true
-			await this.deps.tuner.setFrequency(sourceId, target.centreHz, opts)
+			await this.deps.tuner.setFrequency(sourceId, target.centreHz, {
+				...opts,
+				onReceipt: onFrequencyReceipt,
+			})
 			if (gainChange && target.gainTenthsDb !== null) {
 				this.assertHeld(lease)
 				if (needsGainMode) {
@@ -763,6 +773,7 @@ export class TunerArbiter extends EventEmitter {
 			sampleRateHz: target.sampleRateHz,
 			gainTenthsDb: target.gainTenthsDb,
 			epoch: pending.epoch,
+			frequencyReceipt: hopReceipt.seq,
 		}
 		this.accepted.set(lease, {
 			frequency: written.frequency,
@@ -954,15 +965,39 @@ export class TunerArbiter extends EventEmitter {
 		}
 	}
 
-	/** Frequency, rate, gain and gain mode must be known and not declared-only, or we write. */
+	/**
+	 * Gain and gain mode must be known and not declared-only, or we write (frequency and rate are
+	 * the ledger's to prove; gain never gates trust but a skip must not leave a gain unwritten).
+	 */
 	private listsBlockSkip(state: TunerState): boolean {
-		const watched = ["frequency", "sampleRate", "gain", "gainMode"] as const
+		const watched = ["gain", "gainMode"] as const
 		for (const list of [state.unknownFields, state.declaredOnlyFields]) {
 			if (list === undefined) continue
 			if (!Array.isArray(list)) return true
 			for (const field of watched) if (list.includes(field)) return true
 		}
 		return false
+	}
+
+	/** The source manager's tuning ledger, or null (a test double without one). */
+	private ledger(): Pick<TuningLedger, "fieldState"> | null {
+		try {
+			return this.deps.sources.tuningLedger ?? null
+		} catch {
+			return null
+		}
+	}
+
+	/** The sample rate is not proven or settling on the live session (no ledger: unproven). */
+	private rateUnproven(sourceId: string): boolean {
+		const ledger = this.ledger()
+		if (!ledger) return true
+		try {
+			const rate = ledger.fieldState(sourceId).sampleRate
+			return rate.state !== "proven" && rate.state !== "settling"
+		} catch {
+			return true
+		}
 	}
 
 	/**
@@ -990,19 +1025,22 @@ export class TunerArbiter extends EventEmitter {
 			const clock = this.deps.epochs(lease.sourceId)
 			if (!clock) return null
 			const epoch = clock.currentEpoch()
-			if (epoch.epoch !== verified.epoch) return null
-			if (epoch.tuningTrust !== "commanded") return null
 			if (epoch.startSample === null) return null
 			if (epoch.centreHz !== verified.centreHz) return null
-			const writtenOnConnection = this.deps.tuner.tuningWrittenOnConnection
-			if (writtenOnConnection === undefined) return null
-			if (writtenOnConnection.call(this.deps.tuner, lease.sourceId) !== true)
-				return null
+			// The ledger's live proof of the centre is this hop's own receipt (none since, no doubt,
+			// same session), and the rate is proven: nothing to write.
+			const ledger = this.ledger()
+			if (!ledger || verified.frequencyReceipt === null) return null
+			const fields = ledger.fieldState(lease.sourceId)
+			if (fields.frequency.state !== "proven") return null
+			if (fields.frequency.receipt !== verified.frequencyReceipt) return null
+			if (fields.sampleRate.state !== "proven") return null
 			const state = this.deps.tuner.getState(lease.sourceId)
 			if (!state) return null
 			if (state.controlMode !== "internal") return null
 			if (this.listsBlockSkip(state)) return null
 			if (state.frequency !== verified.centreHz) return null
+			if (fields.sampleRate.value !== state.sampleRate) return null
 			if (
 				target.sampleRateHz !== null &&
 				state.sampleRate !== target.sampleRateHz

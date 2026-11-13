@@ -9,6 +9,7 @@ import type { SourceCaps } from "../../../src/config.js"
 import type { TunerState } from "@wavekit/api-types"
 import { ScannerConfigSchema } from "../../../src/config.js"
 import type { ScannerSettings } from "../../../src/core/scanner/types.js"
+import type { TuningLedger } from "../../../src/core/tuning-ledger.js"
 
 const storageDir = makeTmpDir("wk-scanner-")
 
@@ -27,6 +28,9 @@ export function testSettings(
 
 /** FanoutManager double with the same drop-on-congestion accounting (fanout-manager.ts :249-323). */
 export class FakeFanout extends EventEmitter {
+	/** Every source chunk written also advances this ledger feed (FakeReceiverLedger). */
+	ledgerFeed: { advance(bytes: number): void } | null = null
+
 	readonly branches = new Map<
 		string,
 		{
@@ -76,6 +80,8 @@ export class FakeFanout extends EventEmitter {
 
 	/** Distributes one source chunk to every branch (dropped while congested). */
 	write(chunk: Buffer): void {
+		// SourceManager counts the session position before the fanout sees the chunk.
+		this.ledgerFeed?.advance(chunk.length)
 		for (const b of this.branches.values()) {
 			b.total += chunk.length
 			if (b.bp) {
@@ -105,6 +111,11 @@ export class FakeSources extends EventEmitter {
 	readonly caps = new Map<string, SourceCaps>()
 	readonly streams = new Map<string, PassThrough>()
 	rtlTcp = new Set<string>()
+	/**
+	 * The tuning ledger the engine, arbiter and scanner read (SourceManager.tuningLedger); absent
+	 * by default: nothing is proven, every label reads `unverified` (fail closed).
+	 */
+	tuningLedger?: TuningLedger
 
 	constructor(sourceId = "rtl", caps?: Partial<SourceCaps>) {
 		super()

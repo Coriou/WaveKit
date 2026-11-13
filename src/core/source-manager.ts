@@ -57,6 +57,7 @@ import {
 	type ReceiptCallback,
 	type TuningWriterTag,
 } from "./tuning-ledger.js"
+import { TuningUnprovenTracker } from "./tuning-ledger-unproven.js"
 import { convertFloat32ToS16LE } from "../utils/converters.js"
 import {
 	RateTruthTracker,
@@ -593,6 +594,7 @@ export class SourceManager extends EventEmitter {
 		| ((id: string) => SourceFeedRestoreTuning | undefined)
 		| null = null
 	private readonly ledger: TuningLedger
+	private readonly unproven: TuningUnprovenTracker
 
 	constructor(logger: Logger, options: SourceManagerOptions = {}) {
 		super()
@@ -619,11 +621,30 @@ export class SourceManager extends EventEmitter {
 			},
 			capsRate: id => this.sources.get(id)?.config.caps.sampleRate ?? null,
 		})
+		this.unproven = new TuningUnprovenTracker(this.ledger)
 	}
 
 	/** The tuning ledger of every network source (sessions, positions, receipts, doubts). */
 	get tuningLedger(): TuningLedger {
 		return this.ledger
+	}
+
+	/** Why each source's tuning is unproven now, if it is (GET /api/sources `tuningUnproven`). */
+	get tuningUnproven(): TuningUnprovenTracker {
+		return this.unproven
+	}
+
+	/**
+	 * The local TCP port of the source's live connection (an sdr-host lists rtlmux's clients by
+	 * address and port: a plain resume's free-receiver check), or null while not connected.
+	 */
+	connectionLocalPort(id: string): number | null {
+		const state = this.sources.get(id)
+		const socket = state?.connected === true ? state.socket : null
+		const port = socket?.localPort
+		return typeof port === "number" && Number.isInteger(port) && port > 0
+			? port
+			: null
 	}
 
 	private plainSourceData<T>(value: T): T {

@@ -19,6 +19,7 @@ import type {
 	TrackSnapshot,
 } from "../../../src/core/spectrum/types.js"
 import { ArbiterFakeTuner } from "./arbiter-fakes.js"
+import { FakeReceiverLedger } from "../fake-receiver-ledger.js"
 import { FakeFanout, FakeSources, testSettings } from "./engine-fakes.js"
 import { FakeDecoderManager } from "./probe-fakes.js"
 import { addInto, gaussianNoise, mulberry32, packCu8, tone } from "./signals.js"
@@ -104,6 +105,12 @@ export function serviceHarness(
 		liveDemod?: ScannerServiceDeps["liveDemod"]
 		/** The service's clock (default the wall clock). */
 		now?: () => number
+		/**
+		 * The source's tuning ledger (default: a FakeReceiverLedger whose session holds receipts
+		 * of the centre and rate, settled before the engine's first byte). `false`: no ledger,
+		 * nothing is proven.
+		 */
+		ledger?: false
 	} = {},
 ) {
 	const centre = opts.centreHz ?? CENTRE
@@ -121,6 +128,19 @@ export function serviceHarness(
 	tuner.addSource("rtl")
 	tuner.states.get("rtl")!.sampleRate = FS
 	tuner.states.get("rtl")!.frequency = centre
+	// The receiver was told the centre and rate on this session, long enough ago (past the settle
+	// of the harness's 50 ms local link) that the engine's first byte is proven.
+	const receiverLedger =
+		opts.ledger === false
+			? null
+			: new FakeReceiverLedger("rtl", { rateHz: FS, settleMs: 50 })
+	if (receiverLedger) {
+		receiverLedger.prove(centre, FS)
+		sources.tuningLedger = receiverLedger.ledger
+		fanout.ledgerFeed = receiverLedger
+		tuner.receipts = (_id, command, value, writer, jobId) =>
+			receiverLedger.write(command, value, writer, jobId)
+	}
 	// Like TunerController: a successful frequency or rate write updates the source caps before it resolves.
 	tuner.setFrequency = async (sourceId, hz, writeOpts) => {
 		await ArbiterFakeTuner.prototype.setFrequency.call(
@@ -191,6 +211,7 @@ export function serviceHarness(
 		dir,
 		settings,
 		configCaps,
+		receiverLedger,
 	}
 }
 

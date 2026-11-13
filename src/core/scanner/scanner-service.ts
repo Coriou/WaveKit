@@ -170,7 +170,6 @@ import {
 	type LiveAudioEvidence,
 } from "./live-audio-evidence.js"
 import type { JobActivityView } from "./scanner-redesign-contract.js"
-import { tuningTrustOf } from "../tuning-trust.js"
 import { JobHits, emptyHitStats } from "./job-hits.js"
 import {
 	IDENTIFY_KEEP_JOBS,
@@ -453,6 +452,27 @@ export type ChannelLiveCoverage = (
 ) => "covered" | "uncovered" | "uncertain"
 /** Frequency attribution of a replay decode: half a 12.5 kHz paging/DMR raster. */
 export const REPLAY_ATTRIBUTION_HALF_RASTER_HZ = 6_250
+
+/**
+ * A channel tap begun at engine epoch `start` is still current at `now`: the same stream, epoch,
+ * rate, centre, gain and label, and the same trusted run. The tap takes live samples from its
+ * start on, never back: it stays inside the trusted run it began in (a run that broke and
+ * resumed starts later: not this one), so a doubt or a re-proof ends it.
+ */
+export function channelTapEpochCurrent(
+	start: EngineEpoch,
+	now: EngineEpoch,
+): boolean {
+	return (
+		now.stream === start.stream &&
+		now.epoch === start.epoch &&
+		now.sampleRateHz === start.sampleRateHz &&
+		now.centreHz === start.centreHz &&
+		now.gainKey === start.gainKey &&
+		now.tuningTrust === start.tuningTrust &&
+		now.trustedFromSample === start.trustedFromSample
+	)
+}
 
 /**
  * The coverage predicate's containment rule: the track's [hz ± widthHz/2] lies inside the decoder
@@ -1580,6 +1600,7 @@ export class ScannerService extends EventEmitter {
 					),
 				// Recordings share the probes' and live audio's CPU budget (cpuBudgetCores).
 				reserveCores: cores => this.probes.reserveExternal(cores),
+				tuningRefused: sourceId => this.tuningRefused(sourceId, "recording"),
 				logger: deps.logger,
 				now: this.now,
 			})
@@ -4131,7 +4152,23 @@ export class ScannerService extends EventEmitter {
 			this.classifierContext(sourceId, track.centreHz),
 		)
 		// § 4.7: unverified RF: spectral evidence alone never lifts a discovery past `candidate`.
-		return track.tuningTrust === "unverified" ? { ...c, tier: "spectral" } : c
+		if (track.tuningTrust !== "unverified") return c
+		this.tuningRefused(sourceId, "identification")
+		return { ...c, tier: "spectral" }
+	}
+
+	/** A refusal the source's unproven tuning caused (GET /api/sources `tuningUnproven`). */
+	private tuningRefused(
+		sourceId: string,
+		kind: "recording" | "identification",
+	): void {
+		try {
+			;(
+				this.deps.sources as Partial<Pick<SourceManager, "tuningUnproven">>
+			).tuningUnproven?.noteRefusal(sourceId, kind)
+		} catch {
+			// Diagnostics only: a count is never worth a failed classification.
+		}
 	}
 
 	/**
@@ -4265,12 +4302,7 @@ export class ScannerService extends EventEmitter {
 				currentCaps.centerFreq === epoch.centreHz &&
 				!this.consumerLifecycle.admissionSealed &&
 				this.spectrum.engine(live.sourceId) === engine &&
-				now.stream === epoch.stream &&
-				now.epoch === epoch.epoch &&
-				now.sampleRateHz === epoch.sampleRateHz &&
-				now.centreHz === epoch.centreHz &&
-				now.gainKey === epoch.gainKey &&
-				now.tuningTrust === epoch.tuningTrust &&
+				channelTapEpochCurrent(epoch, now) &&
 				!live.encrypted
 			)
 		}
@@ -7520,14 +7552,13 @@ export class ScannerService extends EventEmitter {
 		this.liveAudio = null
 	}
 
-	/** Fail closed: unknown tuner state, an unwritten connection, or a throw. */
+	/** The tuning ledger's label of the live edge; fail closed: no ledger, or a throw. */
 	private liveAudioTrust(sourceId: string): TuningTrust {
 		try {
-			const trust = tuningTrustOf(this.deps.tuner.getState(sourceId))
-			if (trust === "unverified") return trust
-			if (this.deps.tuner.tuningWrittenOnConnection(sourceId) !== true)
-				return "unverified"
-			return trust
+			const ledger = (
+				this.deps.sources as Partial<Pick<SourceManager, "tuningLedger">>
+			).tuningLedger
+			return ledger?.trustNow(sourceId).trust ?? "unverified"
 		} catch {
 			return "unverified"
 		}

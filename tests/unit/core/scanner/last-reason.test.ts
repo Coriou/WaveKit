@@ -68,6 +68,9 @@ describe("safeReasonCode", () => {
 		)
 		// Only logged by the job runner: it never leaves a dispatch.
 		raised.delete("SCANNER_ACTIVITY_VIEW")
+		// Only POST /api/tuner/:sourceId/take-back raises these: never a scanner dispatch.
+		raised.delete("TUNER_TAKE_BACK_BLOCKED")
+		raised.delete("TUNER_NOTHING_HELD")
 		// From the service itself and from the tuner's ownership check, whose code has another prefix.
 		raised.add("SCANNER_JOB_NOT_FOUND")
 		raised.add("ACCESS_UNAVAILABLE")

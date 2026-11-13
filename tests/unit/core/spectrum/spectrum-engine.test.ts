@@ -278,7 +278,8 @@ describe("SpectrumEngine sample accounting", () => {
 			expectMarker: false,
 			settleSamples: Math.round((100 * 1_024_000) / 1000),
 			centreHz: 446_300_000,
-			tuningTrust: "commanded",
+			// A DSP epoch carries no label: the engine labels its samples from the tuning ledger.
+			tuningTrust: "unverified",
 			centreChanged: true,
 		})
 		const at = inputs.findIndex(i => i.kind === "pending-epoch")
@@ -350,7 +351,8 @@ describe("SpectrumEngine sample accounting", () => {
 		const pendings = hosts[0]!.inputs.filter(i => i.kind === "pending-epoch")
 		expect(pendings).toHaveLength(2)
 		expect(pendings[1]).toMatchObject({
-			pending: { centreHz: 433_920_000, tuningTrust: "commanded" },
+			// A DSP epoch carries no label (the ledger's labels its samples).
+			pending: { centreHz: 433_920_000, tuningTrust: "unverified" },
 		})
 		await engine.stop()
 	})
@@ -618,7 +620,8 @@ describe("SpectrumEngine stream events (R2)", () => {
 			epoch,
 			startSample: 1000,
 			centreHz: 446_300_000,
-			tuningTrust: "commanded",
+			// No tuning ledger here: nothing is proven.
+			tuningTrust: "unverified",
 		})
 		expect(log.slice(-2)).toEqual([
 			["pipeline", "epoch-started", 0],

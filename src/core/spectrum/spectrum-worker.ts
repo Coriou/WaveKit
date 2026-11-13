@@ -23,6 +23,8 @@ import type { FrameWasmLoad } from "./frame-wasm.js"
 import { SpectrumPipeline } from "./pipeline.js"
 import { encodeEventsForWire } from "./summary-wire.js"
 import {
+	IgnoredMeasureFrom,
+	isMeasureFromMessage,
 	MainToWorkerSchema,
 	type WorkerPipelineInput,
 	type WorkerToMain,
@@ -35,6 +37,12 @@ if (!port) {
 		"SCANNER_WORKER_CONTEXT",
 	)
 }
+
+/** One logger per worker, built once (every line of this module goes through it). */
+const log = createComponentLogger(
+	createLogger({ level: "info" }),
+	"SpectrumWorker",
+)
 
 let pipeline: SpectrumPipeline | null = null
 let pathLogged = false
@@ -59,10 +67,6 @@ function selectFrameWasm(): FrameWasmLoad {
 function logFramePath(p: SpectrumPipeline, sourceId: string): void {
 	if (pathLogged) return
 	pathLogged = true
-	const log = createComponentLogger(
-		createLogger({ level: "info" }),
-		"SpectrumWorker",
-	)
 	const { path, reason } = p.framePath
 	const wanted =
 		framePathChoice(process.env["WAVEKIT_SPECTRUM_FRAME_PATH"]) === "wasm"
@@ -92,9 +96,22 @@ function returnBuffer(raw: unknown): void {
 	}
 }
 
+const ignoredMeasureFrom = new IgnoredMeasureFrom()
+
 port.on("message", (raw: unknown) => {
 	const parsed = MainToWorkerSchema.safeParse(raw)
 	if (!parsed.success) {
+		// A measurement restart the worker cannot use changes nothing: ignored, never an error;
+		// counted, one line a minute at most (MEASURE_FROM_LOG_MS).
+		if (isMeasureFromMessage(raw)) {
+			const due = ignoredMeasureFrom.note(performance.now())
+			if (due !== null)
+				log.info(
+					due,
+					"Ignored measure-from requests the worker could not validate",
+				)
+			return
+		}
 		post({
 			type: "error",
 			message: `invalid worker message: ${parsed.error.message}`,

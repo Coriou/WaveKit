@@ -153,9 +153,10 @@ export interface SpectrumSourceStatus {
 	/** The latest block summary at the default profile. */
 	latestFrame: SpectrumFrameEventData | null
 	/**
-	 * Tuning-ledger shadow: block summaries the ledger labelled like the engine (`agree`), stricter
-	 * (`ledgerStricter`: unverified where the engine trusts), looser (`ledgerLooser`), or with
-	 * another label, centre or rate (`mismatch`). Diagnostics only; absent without a ledger.
+	 * Tuning-ledger diagnostics. The ledger's label is the engine's only label: `agree` counts the
+	 * block summaries labelled; `ledgerStricter`, `ledgerLooser` and `mismatch` stay 0 and
+	 * `disagreements` empty (cores before 2026-11-12 compared a second label). Absent without a
+	 * ledger.
 	 */
 	trustShadow?: SpectrumTrustShadow
 	lastError?: string
@@ -163,10 +164,16 @@ export interface SpectrumSourceStatus {
 
 export interface SpectrumTrustShadow {
 	agree: number
+	/** @deprecated Always 0 since the ledger's label became the only one (kept for the shape). */
 	ledgerStricter: number
+	/** @deprecated Always 0 since the ledger's label became the only one (kept for the shape). */
 	ledgerLooser: number
+	/** @deprecated Always 0 since the ledger's label became the only one (kept for the shape). */
 	mismatch: number
-	/** The last 32 disagreements, oldest first (older ones stay in the counters). */
+	/**
+	 * @deprecated Always empty since the ledger's label became the only one (kept for the shape).
+	 * Was: the last 32 disagreements, oldest first.
+	 */
 	disagreements: SpectrumTrustDisagreement[]
 	/**
 	 * Measured delay from a centre or rate frame's flush to the first block summary whose content
@@ -175,6 +182,24 @@ export interface SpectrumTrustShadow {
 	 * bin grid, a newer frame first, or nothing within 5 s of payload). Diagnostics only.
 	 */
 	retuneDelay?: SpectrumRetuneDelay
+	/**
+	 * Block summaries labelled `unverified`, by the first failing check: the engine's (`no-anchor`,
+	 * `upstream-loss`, `before-session`, `no-stream-map`, `session-ended`, `bad-range`,
+	 * `no-ledger`, `no-epoch-record`, `value-mismatch`, `hop-receipt`) or the ledger's (`settling`,
+	 * `doubt`, `no-receipt`, ...); at most 32 keys. Optional: absent on cores before 2026-11-13.
+	 */
+	unverifiedBlocks?: Record<string, number>
+	/**
+	 * Bytes the burst absorber lost while the engine read the ledger: the engine's placement of
+	 * its samples widened by them (fail closed) instead of being lost until a reconnect. Optional:
+	 * absent on cores before 2026-11-13.
+	 */
+	anchorWidenedBytes?: number
+	/**
+	 * Scanner hops whose proof a detected test-mode marker moved earlier (from the frame plus the
+	 * settle to the marker). Optional: absent on cores before 2026-11-13.
+	 */
+	markerBoundaries?: number
 }
 
 export interface SpectrumRetuneDelay {
@@ -190,6 +215,22 @@ export interface SpectrumRetuneDelay {
 	maxMsUpper?: number | null
 	maxBytesUpper?: number | null
 	undetected: number
+	/**
+	 * `undetected` by reason (they add up to it): `superseded` (a newer frame first),
+	 * `unmeasurable` (no payload rate), `session` (a reconnect first), `noReference` (no block
+	 * before the flush), `grid` (another bin grid: nearly every rate change), `bracket` (a scanner
+	 * marker's test pattern), `timeout` (nothing within 5 s of payload: a quiet band). Optional:
+	 * absent on cores before 2026-11-13.
+	 */
+	undetectedReasons?: {
+		superseded: number
+		unmeasurable: number
+		session: number
+		noReference: number
+		grid: number
+		bracket: number
+		timeout: number
+	}
 }
 
 export interface SpectrumTrustDisagreement {

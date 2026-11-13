@@ -149,6 +149,35 @@ export interface TunerState {
 	 * on cores without a ledger.
 	 */
 	proof?: TunerTuningProof
+	/**
+	 * After a plain resume (POST /api/sources/:id/resume without restoreTuning): whether the core
+	 * took the receiver's tuning back and why. Present from that resume until a restore resume.
+	 */
+	resumeOutcome?: TunerResumeOutcome
+}
+
+/**
+ * Why a plain resume left the tuning as found or took it back (TunerState.resumeOutcome):
+ * `receiver-free` (the sdr-host lists this core's connection as rtlmux's only client and no relay
+ * client is attached: the core writes its held centre and rate again), `another-client` (rtlmux
+ * lists another client too), `clients-unknown` (no sdr-host answer, an answer too old, or one that
+ * does not list this connection), `relay-attached` (a relay client is attached), `operator`
+ * (POST /api/tuner/:sourceId/take-back).
+ */
+export const TUNER_RESUME_REASONS = [
+	"receiver-free",
+	"another-client",
+	"clients-unknown",
+	"relay-attached",
+	"operator",
+] as const
+export type TunerResumeReason = (typeof TUNER_RESUME_REASONS)[number]
+
+export interface TunerResumeOutcome {
+	outcome: "restored" | "left-as-found"
+	reason: TunerResumeReason
+	/** One fixed sentence, e.g. "another client on the receiver: tuning left as found". */
+	message: string
 }
 
 /** TunerState.proof. */
@@ -178,6 +207,19 @@ export interface TunerFieldProof {
 	/** The connection's ledger session (numbered per source from 1); null without one. */
 	session: number | null
 	reason?: string
+	/**
+	 * When unverified: why the core writes nothing for the field now (`relay-attached`,
+	 * `external-control`, `scanner-lease`, `lost-ownership`, or, with nothing accepted to write,
+	 * `plain-resume`, `reset-policy`, `declared-write-off`). Shown beside a doubt's `reason`, which
+	 * it would otherwise hide.
+	 */
+	blocked?: string
+	/**
+	 * The field's last frame flushed to the receiver on this connection: its ledger `seq` (per
+	 * source, increasing), the payload byte position it left at (`pos`) and when (`at`, ISO 8601).
+	 * Absent before the connection's first frame of the field.
+	 */
+	lastReceipt?: { seq: number; pos: number; at: string }
 }
 
 /**

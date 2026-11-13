@@ -125,6 +125,91 @@ describe("Tracker", () => {
 		expect(c.track.tuningTrust).toBe("commanded")
 	})
 
+	it("measureFrom restarts an open track's centre from a later sample (blocks before it no longer count)", () => {
+		const t = tracker()
+		// Two blocks centred on bin 140.5, then the same emission (overlapping) on bin 144.5.
+		const id = tracksOf(run(t, 0, [[136, 146, -20]]), "track-open")[0]!.trackId
+		run(t, 1, [[136, 146, -20]])
+		// Another epoch's or stream's request, and one not past the start, change nothing.
+		t.measureFrom({ stream: 1, epoch: 2, trackId: id, sample: 2 * BLOCK })
+		t.measureFrom({ stream: 2, epoch: 1, trackId: id, sample: 2 * BLOCK })
+		t.measureFrom({ stream: 1, epoch: 1, trackId: id, sample: 0 })
+		const mixed = t.snapshotOf(id)!
+		expect(mixed.measuredFromSample).toBeUndefined()
+		expect(mixed.centreHz).toBeCloseTo(CENTRE + (140.5 - N / 2) * BIN_HZ, 0)
+		t.measureFrom({ stream: 1, epoch: 1, trackId: id, sample: 2 * BLOCK })
+		run(t, 2, [[140, 150, -20]])
+		const update = tracksOf(run(t, 3, [[140, 150, -20]]), "track-update")
+		const after = update.at(-1) ?? t.snapshotOf(id)!
+		expect(after.trackId).toBe(id)
+		expect(after.measuredFromSample).toBe(2 * BLOCK)
+		// Only the blocks after the request: bin 144.5, not the mean over all four (142.5).
+		expect(after.centreHz).toBeCloseTo(CENTRE + (144.5 - N / 2) * BIN_HZ, 0)
+		// Without the request the centre would mix all four blocks.
+		const plain = tracker()
+		const pid = tracksOf(run(plain, 0, [[136, 146, -20]]), "track-open")[0]!
+			.trackId
+		run(plain, 1, [[136, 146, -20]])
+		run(plain, 2, [[140, 150, -20]])
+		run(plain, 3, [[140, 150, -20]])
+		expect(plain.snapshotOf(pid)!.centreHz).toBeCloseTo(
+			CENTRE + (142.5 - N / 2) * BIN_HZ,
+			0,
+		)
+	})
+
+	it("measureFrom publishes the track once its restarted measurement holds a whole block, not at the next periodic update", () => {
+		// Updates fall on blocks 2, 5 (class settle), 20 and every 20th: blocks 4 and 6 have none.
+		const t = tracker()
+		const plain = tracker()
+		const id = tracksOf(run(t, 0, [[140, 150, -20]]), "track-open")[0]!.trackId
+		run(plain, 0, [[140, 150, -20]])
+		for (const i of [1, 2]) {
+			run(t, i, [[140, 150, -20]])
+			run(plain, i, [[140, 150, -20]])
+		}
+		// The engine asks at the newest block it saw (2), already accumulated: from block 3 on.
+		t.measureFrom({ stream: 1, epoch: 1, trackId: id, sample: 2 * BLOCK })
+		const first = tracksOf(run(t, 3, [[140, 150, -20]]), "track-update")
+		expect(first).toHaveLength(1)
+		expect(first[0]!.trackId).toBe(id)
+		expect(first[0]!.measuredFromSample).toBe(3 * BLOCK)
+		expect(first[0]!.lastSample - first[0]!.measuredFromSample!).toBe(BLOCK)
+		// Without the request, block 4 publishes nothing; and the update comes once, not per block.
+		expect(tracksOf(run(plain, 3, [[140, 150, -20]]), "track-update")).toEqual(
+			[],
+		)
+		run(t, 4, [[140, 150, -20]])
+		expect(tracksOf(run(t, 5, [[140, 150, -20]]), "track-update")).toEqual([])
+	})
+
+	it("measureFrom restarts the width and shape claims too: OBW (-20 dB and on-bins) from the blocks past the request only", () => {
+		// The same emission, wide on the blocks before the request, narrow after it (strong: -20 dB
+		// OBW from the mean spectrum over the on-bin span; weak: the widest block's on-bins).
+		for (const [db, method] of [
+			[-20, "-20dB"],
+			[-50, "on-bins"],
+		] as const) {
+			const t = tracker()
+			const id = tracksOf(run(t, 0, [[120, 160, db]]), "track-open")[0]!.trackId
+			run(t, 1, [[120, 160, db]])
+			t.measureFrom({ stream: 1, epoch: 1, trackId: id, sample: 2 * BLOCK })
+			run(t, 2, [[140, 147, db]])
+			run(t, 3, [[140, 147, db]])
+			const after = t.snapshotOf(id)!
+			expect(after.measuredFromSample).toBe(2 * BLOCK)
+			expect(after.obwMethod).toBe(method)
+			expect(after.obwHz).toBe(7000)
+			// The same narrow blocks alone (never wide) read the same.
+			const plain = tracker()
+			const pid = tracksOf(run(plain, 0, [[140, 147, db]]), "track-open")[0]!
+				.trackId
+			run(plain, 1, [[140, 147, db]])
+			expect(plain.snapshotOf(pid)!.obwHz).toBe(after.obwHz)
+			expect(plain.snapshotOf(pid)!.spectralShape).toBe(after.spectralShape)
+		}
+	})
+
 	it("reports on-bin width below 20 dB SNR", () => {
 		const t = tracker()
 		run(t, 0, [[140, 147, -50]])

@@ -53,7 +53,7 @@ import type {
 } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
 import { ToneDetector } from "./audio-tones/tone-detector.js"
-import { tuningTrustOf } from "./tuning-trust.js"
+import type { TrustVerdict } from "./tuning-ledger.js"
 import type { TonePcmFormat } from "./audio-tones/tone-detector.js"
 import {
 	liveDemodSquelchGates,
@@ -452,17 +452,16 @@ type TunerFrequencyState = Pick<
 
 /**
  * Event-time frequency port from the tuner (WG1 req 3.4): the tuned centre
- * plus the demodulator offset. Trust follows the shared fail-closed rule
- * (`tuningTrustOf`, WG9 req 3.1): `unverified` while frequency or sample rate
- * is unknown or only declared, else "relay" for external control and
- * "commanded" for internal. The optional `writtenOnConnection` (the tuner
- * controller's `tuningWrittenOnConnection`, WG9 req 3.2) demotes a label to
- * `unverified` when it reports false. Null when the source has no tuner state
- * or its centre is a placeholder the core never commanded or observed.
+ * plus the demodulator offset. Its label is the tuning ledger's at the live edge
+ * (`trustNow`, TuningLedger): `commanded` or `relay` only while the ledger proves the
+ * centre and the rate on the live session and its proven centre is the tuner's;
+ * `unverified` otherwise, without a ledger, or when the lookup throws. Null when the
+ * source has no tuner state or its centre is a placeholder the core never commanded or
+ * observed.
  */
 export function tunerFrequencyAt(
 	getState: (sourceId: string) => TunerFrequencyState | undefined,
-	writtenOnConnection?: (sourceId: string) => boolean,
+	trustNow?: (sourceId: string) => Pick<TrustVerdict, "trust" | "frequency">,
 ): AnalogTransmissionTrackerOptions["frequencyAt"] {
 	return (sourceId, offsetHz) => {
 		const state = getState(sourceId)
@@ -474,13 +473,18 @@ export function tunerFrequencyAt(
 				state.unknownFields.includes("frequency"))
 		)
 			return null
-		let tuningTrust = tuningTrustOf(state)
-		if (
-			tuningTrust !== "unverified" &&
-			writtenOnConnection !== undefined &&
-			writtenOnConnection(sourceId) !== true
-		)
+		let tuningTrust: TrustVerdict["trust"] = "unverified"
+		try {
+			const verdict = trustNow?.(sourceId)
+			if (
+				verdict !== undefined &&
+				verdict.trust !== "unverified" &&
+				verdict.frequency === state.frequency
+			)
+				tuningTrust = verdict.trust
+		} catch {
 			tuningTrust = "unverified"
+		}
 		return { hz: state.frequency + offsetHz, tuningTrust }
 	}
 }

@@ -10,14 +10,14 @@ import type {
 import { blockSamplesOf } from "../../../../src/core/spectrum/retune-settle.js"
 import {
 	SpectrumEngine,
-	type EngineLedger,
+	type EngineEpoch,
 } from "../../../../src/core/spectrum/spectrum-engine.js"
 import type {
 	BlockSummary,
 	EngineState,
+	PipelineEvent,
 	PipelineInput,
 } from "../../../../src/core/spectrum/types.js"
-import type { TrustVerdict } from "../../../../src/core/tuning-ledger.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
 import { startStampedRtlTcp } from "../../../mocks/stamped-rtl-tcp.js"
@@ -123,28 +123,29 @@ function summary(
 	stream: number,
 	epoch: number,
 	endSample: number,
+	centreHz: number,
 ): BlockSummary {
 	return {
 		sourceId: "rtl",
 		stream,
 		epoch,
 		endSample,
-		centreHz: F0,
+		centreHz,
 		sampleRateHz: RATE,
 		binHz: 100,
-		startHz: F0 - RATE / 2,
+		startHz: centreHz - RATE / 2,
 		bins: [],
 		floorDbfs: -90,
 		thresholdDb: 10,
 		tracks: [],
-		masks: { dcHz: F0, dcGuardHz: 0, spurRanges: [] },
+		masks: { dcHz: centreHz, dcGuardHz: 0, spurRanges: [] },
 		floorOccupied: false,
 		overload: false,
 	}
 }
 
-describe("SpectrumEngine tuning-ledger shadow (real SourceManager, FanoutManager, stamped fake rtl_tcp)", () => {
-	it("never labels a block trusted whose stamps disagree with the ledger's centre or rate", async () => {
+describe("SpectrumEngine tuning-ledger labels (real SourceManager, FanoutManager, stamped fake rtl_tcp)", () => {
+	it("never labels a block trusted whose stamps disagree with its centre or rate", async () => {
 		const fake = await startStampedRtlTcp({ initialHz: F0, initialRate: RATE })
 		cleanups.push(() => fake.close())
 		// A small configured settle; the 64 KiB in-flight estimate binds (320 ms at this rate).
@@ -174,21 +175,18 @@ describe("SpectrumEngine tuning-ledger shadow (real SourceManager, FanoutManager
 		fanout.attachSource(manager.getStream("rtl")!)
 		cleanups.push(() => fanout.destroy())
 
-		// The engine reads the real ledger; the spy keeps the verdict of each block it labels.
-		let lastVerdict: TrustVerdict | null = null
-		const spy: EngineLedger = {
-			trustAt: (id, session, a, b) => {
-				lastVerdict = ledger.trustAt(id, session, a, b)
-				return lastVerdict
-			},
-			position: id => ledger.position(id),
-			raiseDoubt: (...args) => ledger.raiseDoubt(...args),
-		}
+		// The block summaries' centre: the DSP epoch the engine would post for each write (no
+		// tuner here, so the test names it). A block is trusted only at the centre it was computed at.
+		let epochCentre = F0
 		const settings = testSettings()
 		let block = 0
 		let host: RecordingHost | null = null
 		const counts = { blocks: 0, trusted: 0, foreign: 0 }
 		const trustedAt = new Map<number, number>()
+		// The host-centre detector, polled every 20 ms: the host agrees with the core's centre until
+		// the receiver moves behind the core's back (`moved`).
+		let moved: number | null = null
+		const doubtsAt: number[] = []
 		const engine = new SpectrumEngine({
 			sourceId: "rtl",
 			sources: manager,
@@ -197,33 +195,43 @@ describe("SpectrumEngine tuning-ledger shadow (real SourceManager, FanoutManager
 				releaseUnused: () => undefined,
 			},
 			tuner: null,
-			ledger: spy,
+			hostCentre: {
+				read: () =>
+					Promise.resolve(moved ?? manager.getCaps("rtl")?.centerFreq ?? null),
+			},
+			hostCentrePollMs: 20,
 			settings: () => settings,
 			logger: pino({ level: "silent" }),
 			createHost: (cfg, handlers) => {
 				block = blockSamplesOf(cfg.integrationMs, cfg.sampleRateHz, cfg.fftSize)
 				host = new RecordingHost(handlers, block, (stream, endSample) => {
-					lastVerdict = null
+					let label: EngineEpoch["tuningTrust"] = "unverified"
+					const listen = (ev: PipelineEvent, epoch: EngineEpoch) => {
+						if (ev.kind === "block-summary") label = epoch.tuningTrust
+					}
+					engine.on("pipeline", listen)
 					handlers.events([
 						{
 							kind: "block-summary",
-							summary: summary(stream, engine.currentEpoch().epoch, endSample),
+							summary: summary(
+								stream,
+								engine.currentEpoch().epoch,
+								endSample,
+								epochCentre,
+							),
 						},
 					])
+					engine.off("pipeline", listen)
 					counts.blocks += 1
-					const v = lastVerdict as TrustVerdict | null
-					if (!v || v.trust === "unverified") return
+					if (label === "unverified") return
 					counts.trusted += 1
-					trustedAt.set(v.frequency!, (trustedAt.get(v.frequency!) ?? 0) + 1)
+					trustedAt.set(epochCentre, (trustedAt.get(epochCentre) ?? 0) + 1)
 					const bytes = host!.samples.get(stream)!
 					for (let i = endSample - block; i < endSample; i++) {
 						const c = bytes[i * 2]!
 						const r = bytes[i * 2 + 1]!
 						if (c === 0) continue
-						if (
-							fake.centreOf(c) !== v.frequency ||
-							fake.rateOf(r) !== v.sampleRate
-						) {
+						if (fake.centreOf(c) !== epochCentre || fake.rateOf(r) !== RATE) {
 							counts.foreign += 1
 							break
 						}
@@ -241,23 +249,41 @@ describe("SpectrumEngine tuning-ledger shadow (real SourceManager, FanoutManager
 		expect(counts.blocks).toBeGreaterThan(0)
 		expect(counts.trusted).toBe(0)
 		// Operator tuning, then a retune mid-run; trust only comes from the real flow (time).
+		epochCentre = F1
 		manager.writeToSource(
 			"rtl",
 			Buffer.concat([frame(0x01, F1), frame(0x02, RATE)]),
 			{ writer: "operator" },
 		)
 		await until(() => (trustedAt.get(F1) ?? 0) >= 3, 8000)
+		epochCentre = F2
 		manager.writeToSource("rtl", frame(0x01, F2), { writer: "operator" })
 		await until(() => (trustedAt.get(F2) ?? 0) >= 3, 8000)
+
+		// An untracked retune: no frame. The host reports the move at once; the receiver's bytes
+		// already produced (250 ms here) keep the old stamp, so the doubt lands before them.
+		const trustedBefore = counts.trusted
+		moved = F1
+		fake.retuneSilently(F1, 250)
+		await until(() => ledger.doubts("rtl").length > 0, 2000)
+		doubtsAt.push(counts.trusted)
+		const silentStamp = fake.centreStamp(F1)
+		await wait(800)
+		// Nothing trusted since the doubt (the receiver is elsewhere and nothing re-proves it).
+		expect(counts.trusted).toBe(doubtsAt[0])
+		expect(silentStamp).toBeDefined()
+		expect(ledger.doubts("rtl").at(-1)?.reason).toBe("host-centre-mismatch")
+		expect(trustedBefore).toBeGreaterThanOrEqual(6)
 		await engine.stop()
 
 		// Counts: blocks labelled, trusted, and trusted with a foreign stamp (must be 0).
 		expect(counts.foreign).toBe(0)
 		expect(counts.trusted).toBeGreaterThanOrEqual(6)
+		// The ledger's label is the only one: every block counted, no disagreement.
 		const shadow = engine.trustShadow()!
-		// Without a tuner the engine labels everything unverified: every trusted ledger block is
-		// a looser disagreement, the rest agree.
-		expect(shadow.ledgerLooser).toBe(counts.trusted)
-		expect(shadow.agree + shadow.ledgerLooser).toBe(counts.blocks)
+		expect(shadow.agree).toBe(counts.blocks)
+		expect(shadow.ledgerLooser + shadow.ledgerStricter + shadow.mismatch).toBe(
+			0,
+		)
 	}, 30_000)
 })

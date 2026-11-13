@@ -33,6 +33,7 @@ import {
 	testSettings,
 } from "../../../mocks/scanner/engine-fakes.js"
 import { CENTRE, FS } from "../../../mocks/scanner/service-fakes.js"
+import { proveSource } from "../../../mocks/fake-receiver-ledger.js"
 import { blockSamplesOf } from "../../../../src/core/spectrum/retune-settle.js"
 
 const BINS = 16
@@ -81,8 +82,8 @@ function blockSummary(
 	cfg: PipelineConfig,
 	epoch: number,
 	peak: number,
+	centre = CENTRE,
 ): BlockSummary {
-	const centre = CENTRE
 	return {
 		sourceId: cfg.sourceId,
 		stream: 0,
@@ -115,6 +116,9 @@ function make(patch?: (s: ScannerSettings) => void) {
 	const sources = new FakeSources("rtl", { sampleRate: FS, centerFreq: CENTRE })
 	const tuner = new FakeTuner()
 	const fanout = new FakeFanout()
+	// The receiver was told the source's centre and rate on this session, well before any engine
+	// opens (fail closed without it: every label would read `unverified`).
+	const receiver = proveSource(sources, "rtl", CENTRE, FS, { fanout })
 	const engines = new Map<string, EngineState>()
 	const occupancy = new Map<string, OccupancyState>()
 	const persistence: SpectrumPersistence = {
@@ -172,7 +176,17 @@ function make(patch?: (s: ScannerSettings) => void) {
 			frames.push({ frame, clientIds: [...clientIds] }),
 	)
 	const host = () => hosts.at(-1)!
-	return { service, settings, host, profiles, frames, sources, tuner, fanout }
+	return {
+		service,
+		settings,
+		host,
+		profiles,
+		frames,
+		sources,
+		tuner,
+		fanout,
+		receiver,
+	}
 }
 
 const of = (h: ReturnType<typeof make>, clientId: string) =>
@@ -443,50 +457,58 @@ describe("spectrum service backfill and averaging", () => {
 })
 
 /** One summary of `epoch` ending at `endSample` with its peak at `peak` (WG9 R3). */
+/** The centre the multi-block tests retune to. */
+const RETUNED = CENTRE + 200_000
+
 function summaryAt(
 	host: FakeHost,
 	epoch: number,
 	peak: number,
 	endSample: number,
+	centre = CENTRE,
 ): void {
 	host.emit({
 		kind: "block-summary",
-		summary: { ...blockSummary(host.cfg, epoch, peak), endSample },
+		summary: { ...blockSummary(host.cfg, epoch, peak, centre), endSample },
 	})
 }
 
 describe("multi-block frames carry the worst trust (WG9 R3 minor 1)", () => {
-	/** An operator retune with a 1 s network settle: blocks before it are unverified. */
+	/**
+	 * An operator retune with a 1 s network settle: its frequency frame is receipted after 2000
+	 * samples, so blocks starting before the receipt's boundary (receipt + settle) are unverified.
+	 * `from`: the first sample whose lower-bound ledger position lies at the boundary (the branch
+	 * opened at `opened`, nothing upstream, no gaps: sample s starts no earlier than
+	 * opened + (s - 1) · 2 bytes). The summaries' payload is forwarded before they are fed.
+	 */
 	async function retuned() {
 		const h = make(s => {
 			s.sweep.settleMs.network = 1000
 		})
+		h.receiver.settleMs = 1000
+		const opened = h.receiver.ledger.position("rtl")!.pos
 		await h.service.start()
 		await h.service.acquire("rtl", "job:a")
 		h.host().epoch(1, true)
 		h.fanout.write(Buffer.alloc(4000, 7))
 		await settle()
-		h.tuner.emit(
-			"command-sent",
-			"rtl",
-			"set-frequency",
-			CENTRE + 200_000,
-			"rest",
-		)
-		h.sources.setCaps("rtl", { centerFreq: CENTRE + 200_000 })
+		const receipt = h.receiver.write("set-frequency", RETUNED, "operator")!
+		h.tuner.emit("command-sent", "rtl", "set-frequency", RETUNED, "rest")
+		h.sources.setCaps("rtl", { centerFreq: RETUNED })
 		await settle()
 		const p = h
 			.host()
 			.inputs.flatMap(i => (i.kind === "pending-epoch" ? [i.pending] : []))
 			.at(-1)!
-		expect(p.verifiedFromSample).toBeDefined()
 		const cfg = h.host().cfg
 		const block = blockSamplesOf(
 			cfg.integrationMs,
 			cfg.sampleRateHz,
 			cfg.fftSize,
 		)
-		const from = p.verifiedFromSample!
+		const boundary = receipt.pos + h.receiver.settleBytes()
+		const from = Math.ceil((boundary - opened) / h.receiver.bps) + 1
+		h.receiver.advance(h.receiver.bps * (from + 8 * block))
 		h.host().emit({
 			kind: "epoch-started",
 			epoch: p.epoch,
@@ -507,14 +529,14 @@ describe("multi-block frames carry the worst trust (WG9 R3 minor 1)", () => {
 			averaging: 4,
 		})
 		const at = h.frames.length
-		summaryAt(h.host(), epoch, 3, from + block - 1) // straddles the settle
-		summaryAt(h.host(), epoch, 9, from + block) // first trusted block
+		summaryAt(h.host(), epoch, 3, from + block - 1, RETUNED) // straddles the settle
+		summaryAt(h.host(), epoch, 9, from + block, RETUNED) // first trusted block
 		const first = h.frames.slice(at)
 		expect(first.map(f => [f.frame.profile, f.frame.tuningTrust])).toEqual([
 			["10:2048", "unverified"],
 			["10:2048:a4", "unverified"],
 		])
-		summaryAt(h.host(), epoch, 9, from + 2 * block)
+		summaryAt(h.host(), epoch, 9, from + 2 * block, RETUNED)
 		// an averaged snapshot now is the unverified frame's average
 		await h.service.subscribe("c3", {
 			sourceId: "rtl",
@@ -527,7 +549,7 @@ describe("multi-block frames carry the worst trust (WG9 R3 minor 1)", () => {
 			tuningTrust: "unverified",
 		})
 		const next = h.frames.length
-		summaryAt(h.host(), epoch, 9, from + 3 * block)
+		summaryAt(h.host(), epoch, 9, from + 3 * block, RETUNED)
 		const second = h.frames.slice(next)
 		expect(second.map(f => [f.frame.profile, f.frame.tuningTrust])).toEqual([
 			["10:2048", "commanded"],
@@ -542,11 +564,11 @@ describe("multi-block frames carry the worst trust (WG9 R3 minor 1)", () => {
 
 	it("labels a backfill run unverified when any of its blocks is, and restarts its average", async () => {
 		const { h, epoch, block, from } = await retuned()
-		summaryAt(h.host(), epoch, 3, from + block - 1)
-		summaryAt(h.host(), epoch, 9, from + block)
-		summaryAt(h.host(), epoch, 9, from + 2 * block)
-		summaryAt(h.host(), epoch, 9, from + 3 * block)
-		summaryAt(h.host(), epoch, 9, from + 4 * block)
+		summaryAt(h.host(), epoch, 3, from + block - 1, RETUNED)
+		summaryAt(h.host(), epoch, 9, from + block, RETUNED)
+		summaryAt(h.host(), epoch, 9, from + 2 * block, RETUNED)
+		summaryAt(h.host(), epoch, 9, from + 3 * block, RETUNED)
+		summaryAt(h.host(), epoch, 9, from + 4 * block, RETUNED)
 		for (const averaging of [1, 4]) {
 			const client = `b${averaging}`
 			await h.service.subscribe(client, {

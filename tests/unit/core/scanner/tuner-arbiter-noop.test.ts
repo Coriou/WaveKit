@@ -1,8 +1,9 @@
 // tests/unit/core/scanner/tuner-arbiter-noop.test.ts
 /**
  * Scanner redesign R 1.2: a same-centre retune by the lease holder writes nothing when the
- * centre, rate and gain were written and accepted on this connection and the current epoch is
- * the verified one. Every other input takes today's write path.
+ * centre, rate and gain were written and accepted and the tuning ledger's live proof of the centre
+ * is still that hop's own frequency receipt (no receipt since, no doubt, same session) with the
+ * rate proven. Every other input takes today's write path.
  */
 import { describe, expect, it } from "vitest"
 import type { Lease } from "../../../../src/core/scanner/tuner-arbiter.js"
@@ -53,6 +54,7 @@ describe("TunerArbiter same-centre no-op (R 1.2)", () => {
 			sampleRateHz: 2_048_000,
 			gainTenthsDb: 400,
 			epoch: first.epoch,
+			frequencyReceipt: h.ledger.ledger.fieldState("rtl").frequency.receipt,
 		})
 		const changed = new Set(lease.changedFields)
 		const m = await measure(h, lease)
@@ -90,13 +92,20 @@ describe("TunerArbiter same-centre no-op (R 1.2)", () => {
 		).toContain("set-sample-rate")
 	})
 
-	it("an unverified epoch (operator settle window open) writes", async () => {
+	it("a frequency receipt since the hop (another writer at the same centre) writes", async () => {
 		const h = noopHarness()
 		const { lease } = await verifiedLease(h)
-		h.clock.trust = "unverified"
+		h.ledger.write("set-frequency", C, "operator")
 		const m = await measure(h, lease)
 		expect(m.writes).toContain("set-frequency")
 		expect(m.newEpochs).toBe(1)
+	})
+
+	it("the engine's label of the current epoch does not decide: an unverified label still skips", async () => {
+		const h = noopHarness()
+		const { lease } = await verifiedLease(h)
+		h.clock.trust = "unverified"
+		expect((await measure(h, lease)).writes).toEqual([])
 	})
 
 	it("an epoch that has not started (null startSample) writes", async () => {
@@ -177,15 +186,16 @@ describe("TunerArbiter same-centre no-op (R 1.2)", () => {
 		expect((await measure(h, r.lease)).writes).toContain("set-frequency")
 	})
 
-	it("the rate in declaredOnlyFields writes", async () => {
+	it("a rate the ledger does not prove (a doubt on it) writes", async () => {
 		const h = noopHarness()
 		const { lease } = await verifiedLease(h)
-		h.tuner.declared.set("rtl", new Set(["sampleRate"]))
+		h.ledger.ledger.raiseDoubt("rtl", "sampleRate", "rate-truth-mismatch")
 		expect((await measure(h, lease)).writes).toContain("set-frequency")
 	})
 
 	it("gain or gain mode in unknownFields writes", async () => {
-		for (const f of ["gain", "gainMode", "frequency"] as const) {
+		// Frequency and rate are the ledger's to prove; gain never gates trust but must be known.
+		for (const f of ["gain", "gainMode"] as const) {
 			const h = noopHarness()
 			const { lease } = await verifiedLease(h)
 			h.tuner.known.get("rtl")!.delete(f)
@@ -193,28 +203,29 @@ describe("TunerArbiter same-centre no-op (R 1.2)", () => {
 		}
 	})
 
-	it("tuningWrittenOnConnection false, throwing or absent writes", async () => {
+	it("a new session, a doubt, no ledger or a throwing ledger writes", async () => {
 		const h = noopHarness()
 		const { lease } = await verifiedLease(h)
-		h.tuner.connectionWrites = new Set()
+		h.ledger.reconnect()
+		h.ledger.start()
 		expect((await measure(h, lease)).writes).toContain("set-frequency")
 
-		const t = noopHarness()
-		const v = await verifiedLease(t)
-		t.tuner.tuningWrittenOnConnection = () => {
-			throw new Error("controller gone")
-		}
-		// never a skip: today's path runs, and today it fails on the same call
-		await expect(t.arbiter.retune(v.lease, target())).rejects.toThrow(
-			"controller gone",
-		)
+		const d = noopHarness()
+		const vd = await verifiedLease(d)
+		d.ledger.ledger.raiseDoubt("rtl", "frequency", "host-centre-mismatch")
+		expect((await measure(d, vd.lease)).writes).toContain("set-frequency")
 
-		const a = noopHarness()
-		const va = await verifiedLease(a)
-		Object.defineProperty(a.tuner, "tuningWrittenOnConnection", {
-			value: undefined,
-		})
-		expect((await measure(a, va.lease)).writes).toContain("set-frequency")
+		const n = noopHarness()
+		const vn = await verifiedLease(n)
+		delete n.sources.tuningLedger
+		expect((await measure(n, vn.lease)).writes).toContain("set-frequency")
+
+		const t = noopHarness()
+		const vt = await verifiedLease(t)
+		t.ledger.ledger.fieldState = () => {
+			throw new Error("ledger gone")
+		}
+		expect((await measure(t, vt.lease)).writes).toContain("set-frequency")
 	})
 
 	it("a device state that drifted from the accepted write writes", async () => {

@@ -13,6 +13,7 @@ import {
 	SCANNER_PASSIVE_REASONS,
 	SOURCE_FEED_STATES,
 	SOURCE_VERDICT_CODES,
+	TUNING_UNPROVEN_CAUSES,
 	agentStatusSchema,
 	jsonStringBytes,
 	type AgentStatus,
@@ -646,6 +647,27 @@ describe("agent status", () => {
 				Buffer.byteLength(JSON.stringify(worst)),
 			)
 		}
+		// `tuning` rides only on a row without `verdict`: at its longest it is under the worst row,
+		// and both on one row are refused.
+		const tuned = {
+			...worst,
+			sources: worst.sources.map(({ verdict: _v, ...row }) => ({
+				...row,
+				tuning: "declared-write-off" as const,
+			})),
+		}
+		expect(longest(TUNING_UNPROVEN_CAUSES)).toBe("declared-write-off")
+		expect(agentStatusSchema.parse(tuned)).toEqual(tuned)
+		expect(Buffer.byteLength(JSON.stringify(tuned))).toBe(4_078 - 2 * 3)
+		expect(
+			agentStatusSchema.safeParse({
+				...worst,
+				sources: worst.sources.map(row => ({
+					...row,
+					tuning: "plain-resume" as const,
+				})),
+			}).success,
+		).toBe(false)
 		// A third action on a cause row would take the body past the worst case: refused.
 		expect(
 			agentStatusSchema.safeParse({

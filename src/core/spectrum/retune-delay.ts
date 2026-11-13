@@ -59,6 +59,40 @@ export const SIGNAL_DB = 10
  */
 export const RETUNE_TAINT_WINDOWS = 4
 
+/**
+ * Why a change counted as `undetected` (the counters add up to `undetected`):
+ * - `superseded`: a newer centre or rate frame flushed before the change showed;
+ * - `unmeasurable`: no payload rate to convert the delay (no engine rate);
+ * - `session`: a block of another session came first (a reconnect);
+ * - `noReference`: no block wholly before the flush to compare against (a fresh session, a
+ *   reference dropped by a marker bracket);
+ * - `grid`: the reference was on another bin grid (nearly every sample-rate change);
+ * - `bracket`: the block that would show it may carry a scanner marker's test pattern;
+ * - `timeout`: nothing within RETUNE_DETECT_MAX_MS of payload (a quiet band).
+ */
+export type RetuneUndetectedReason =
+	| "superseded"
+	| "unmeasurable"
+	| "session"
+	| "noReference"
+	| "grid"
+	| "bracket"
+	| "timeout"
+
+export type RetuneUndetectedReasons = Record<RetuneUndetectedReason, number>
+
+function noReasons(): RetuneUndetectedReasons {
+	return {
+		superseded: 0,
+		unmeasurable: 0,
+		session: 0,
+		noReference: 0,
+		grid: 0,
+		bracket: 0,
+		timeout: 0,
+	}
+}
+
 export interface RetuneDelayStatus {
 	/** Measurements made since the engine started. */
 	count: number
@@ -72,6 +106,8 @@ export interface RetuneDelayStatus {
 	maxBytesUpper: number | null
 	/** Changes whose effect was not seen (see the module comment). */
 	undetected: number
+	/** `undetected` by reason (they add up to it). */
+	undetectedReasons: RetuneUndetectedReasons
 }
 
 export interface DelayReceipt {
@@ -161,6 +197,7 @@ export class RetuneDelayMeter {
 	}[] = []
 	private count = 0
 	private undetected = 0
+	private readonly reasons = noReasons()
 	/** An open marker bracket (test mode on), or null. */
 	private bracket: { session: number; from: number } | null = null
 	/**
@@ -245,14 +282,13 @@ export class RetuneDelayMeter {
 		if (prev === null || prev === receipt.value) return
 		// Inside a marker bracket: the hop's frames are skipped (see the module comment).
 		if (this.bracket) return
-		if (this.pending) this.undetected += 1
-		this.pending = null
+		if (this.pending) this.miss("superseded")
 		if (
 			bytesPerSecond === null ||
 			!Number.isFinite(bytesPerSecond) ||
 			bytesPerSecond <= 0
 		) {
-			this.undetected += 1
+			this.miss("unmeasurable")
 			return
 		}
 		const last = this.last
@@ -277,17 +313,17 @@ export class RetuneDelayMeter {
 			// May carry the test pattern: neither a reference nor a detection.
 			this.last = null
 			if (!p) return
-			if (block.session !== p.session) return this.miss()
+			if (block.session !== p.session) return this.miss("session")
 			if (block.posB <= p.pos) {
 				p.ref = null
 				p.floor = null
 				return
 			}
-			return this.miss()
+			return this.miss("bracket")
 		}
 		this.last = block
 		if (!p) return
-		if (block.session !== p.session) return this.miss()
+		if (block.session !== p.session) return this.miss("session")
 		if (block.posB <= p.pos) {
 			// Wholly before the flush: the newest such block is the reference.
 			p.ref = block
@@ -295,12 +331,9 @@ export class RetuneDelayMeter {
 			return
 		}
 		const ref = p.ref
-		if (
-			!ref ||
-			ref.binHz !== block.binHz ||
-			ref.bins.length !== block.bins.length
-		)
-			return this.miss()
+		if (!ref) return this.miss("noReference")
+		if (ref.binHz !== block.binHz || ref.bins.length !== block.bins.length)
+			return this.miss("grid")
 		if (this.reflects(p, ref, block)) {
 			const bytes = Math.max(0, block.posA - p.pos)
 			const ms = (bytes * 1000) / p.bytesPerSecond
@@ -313,7 +346,7 @@ export class RetuneDelayMeter {
 			return
 		}
 		if (block.posA - p.pos > (RETUNE_DETECT_MAX_MS / 1000) * p.bytesPerSecond)
-			this.miss()
+			this.miss("timeout")
 	}
 
 	status(): RetuneDelayStatus {
@@ -335,6 +368,7 @@ export class RetuneDelayMeter {
 			maxMsUpper,
 			maxBytesUpper,
 			undetected: this.undetected,
+			undetectedReasons: { ...this.reasons },
 		}
 	}
 
@@ -367,8 +401,9 @@ export class RetuneDelayMeter {
 		return false
 	}
 
-	private miss(): void {
+	private miss(reason: RetuneUndetectedReason): void {
 		this.undetected += 1
+		this.reasons[reason] += 1
 		this.pending = null
 	}
 

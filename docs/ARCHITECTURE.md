@@ -552,6 +552,55 @@ FanoutManager → branch scanner-<sourceId> → SpectrumEngine → spectrum-work
    → SpectrumService (spectrum:frame per profile, occupancy) → ScannerService (classify, probes, discoveries) → REST/WS
 ```
 
+### Tuning trust
+
+One owner, `TuningLedger` (`src/core/tuning-ledger.ts`), created and fed by `SourceManager`:
+per source, sessions (one connection from its first payload byte to its close), the payload
+position of each session, a receipt for every tuning frame flushed to the receiver (at the
+position of the flush, with its writer: operator, scanner, assert or relay) and doubts (an
+untracked retune, a host-centre mismatch, a pipeline error, a rate mismatch). A sample range is
+trusted only when the last frequency and sample-rate receipts before it were flushed on the same
+session, the range starts at least the settle after them (`network-settle.ts`: the larger of the
+link's configured settle and an in-flight floor, an estimate of 512 KiB for the two TCP buffers
+between the receiver and the core), no doubt was raised since, and their values are the centre
+and rate the result was computed at. A scanner hop's detected test-mode marker moves its frame's
+boundary earlier, to the marker's upper-bound position (`TuningLedger.lowerBoundary`, never below
+the frame's own position). Everything else is `unverified`: a fresh core, a reconnect, a missing
+ledger.
+
+Readers only: the spectrum engine stamps every block summary, track (by the blocks its
+frequency was measured on: a track on air when a proof settles has its centre measured again
+from the first proven block, and is trusted once it comes from proven blocks only, never
+back-dated) and transient by the ledger on its sample range; a scanner hop's samples need the hop's own frequency receipt
+(`TunerArbiter` hands it to the engine), and the arbiter's same-centre skip and rate re-send
+read the ledger too. Engine starts, pipeline restarts and stream openings carry no label;
+pipeline epochs only reset the DSP. The engine places a branch's samples in the session by an
+anchor (bounds on where position 0 lies in the bytes offered to the branch); bytes the burst
+absorber loses widen it (fail closed, never a lost map), and each unverified block is counted by
+the check that failed (`trustShadow.unverifiedBlocks`). A sweep's dwell counts only its hop's
+trusted blocks, and assert rule 2's re-send of a hop goes through the job holding the lease, so
+the re-sent hop's epoch is the job's own (re-send asks while one is still queued are that one). A
+visit whose hop never proves is left after 4 × the larger of its dwell and its settle, at least
+15 s (`hopSkips.unproven` in the job's progress), so a standing doubt cannot stall a sweep. Decoder provenance, live-audio evidence and the analog
+transmission frequency read `trustNow` (the live edge). Recorder, discoveries and IQ capture read
+the label on the epoch or track; the current epoch also names where its trusted run of blocks
+starts (`trustedFromSample`), and a recording's pre-roll never reaches before it; a recording or
+channel tap ends when that run ends or restarts. `TuningUnprovenTracker` (beside the ledger, fed
+by the tuner controller's block reasons) names one cause per source while its centre or rate is
+unproven (`tuningUnproven` on `GET /api/sources`), and the engine's reason while the ledger proves
+both but the engine's newest block reads unverified. A plain resume's hold gives the tuning back
+only while the sdr-host lists this core's connection as rtlmux's only client and no relay client
+is attached (`TunerController.plainResumeTakesTuningBack`, the one decision;
+`tuning-ledger-receiver-free.ts`), on a reading whose poll started after the connection's session
+and the last doubt on its centre or rate (an untracked-retune doubt reads as another client until
+such a reading says free); `POST /api/tuner/:sourceId/take-back` re-proves both fields in one
+call and ends the hold only once both writes succeeded. A command
+whose frame tuned a stream that starts at a queued reconnect boundary gets its DSP epoch once
+that boundary is applied, at its receipt's position in the new stream. A client that retunes the receiver behind the core's back is
+invisible until a detector raises a doubt. A host-centre mismatch also moves the engine's epoch
+to the centre the host reports; the next poll that matches the source's centre again moves it
+back, so the blocks after the core's re-sent tuning can be trusted again.
+
 ### Event Flow
 
 ```

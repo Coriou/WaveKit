@@ -38,6 +38,12 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 				s.passive.enabled = false
 			},
 		})
+		// The source's tuningUnproven count (SourceManager.tuningUnproven) hears each classification
+		// made on unverified tuning.
+		const noteRefusal = vi.fn()
+		;(h.sources as unknown as { tuningUnproven: unknown }).tuningUnproven = {
+			noteRefusal,
+		}
 		await h.service.start()
 		const job = await h.service.createJob({
 			sourceId: "rtl",
@@ -53,6 +59,9 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 			feedTone(h.fanout, 0.1, 0, 0, 40 + i)
 		}
 		expect(h.service.getJob(job.id)?.state).toBe("running")
+		// Samples for the "before" track to be measured on (the ledger proves them).
+		feedTone(h.fanout, 0.3, 0, 0, 99)
+		await tick(5)
 		const engine = h.service.spectrum.engine("rtl")!
 		// What the pipeline delivers around its untracked-retune alarm (Task 10b): the alarm, the
 		// unverified epoch's start, then tracks labelled with that epoch's trust.
@@ -70,7 +79,12 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 		deliver([
 			{
 				kind: "track-open",
-				track: track("before", CENTRE + 50_000, { epoch }),
+				// Measured on the newest samples the engine holds: the tuning ledger proves them.
+				track: track("before", CENTRE + 50_000, {
+					epoch,
+					startSample: 0,
+					lastSample: engine.liveEdge(),
+				}),
 			},
 		])
 		const retuned = epoch + 10
@@ -92,6 +106,7 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 			epoch: retuned,
 			tuningTrust: "unverified",
 		})
+		const before = noteRefusal.mock.calls.length
 		deliver([
 			{
 				kind: "track-open",
@@ -108,6 +123,11 @@ describe("ScannerService trust crediting (§ 4.7)", () => {
 		).live
 		expect(live.get("t-before")?.classification.tier).toBe("channel")
 		expect(live.get("t-after")?.classification.tier).toBe("spectral")
+		// The unverified track: classified on unproven tuning, and its recording refused.
+		expect(noteRefusal.mock.calls.slice(before)).toEqual([
+			["rtl", "identification"],
+			["rtl", "recording"],
+		])
 		await h.service.cancelJob(job.id)
 		await h.service.stop()
 	})

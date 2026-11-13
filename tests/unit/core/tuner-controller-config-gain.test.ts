@@ -6,6 +6,7 @@
  *
  * In-memory fake transport only (no socket).
  */
+import { tuningHeldOnConnection } from "../../mocks/tuner-ledger-held.js"
 import { EventEmitter } from "node:events"
 import fc from "fast-check"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -141,7 +142,7 @@ function harness(
 				declaredOnlyFields: s.declaredOnlyFields,
 				lastError: s.lastError,
 			},
-			tuningWritten: controller.tuningWrittenOnConnection(SRC),
+			tuningWritten: tuningHeldOnConnection(controller, SRC),
 		}
 		frames.length = 0
 		sent.length = 0

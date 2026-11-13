@@ -36,6 +36,7 @@ import {
 	testSettings,
 } from "../../../mocks/scanner/engine-fakes.js"
 import { CENTRE, FS } from "../../../mocks/scanner/service-fakes.js"
+import { proveSource } from "../../../mocks/fake-receiver-ledger.js"
 
 export class FakeHost implements PipelineHost {
 	constructor(
@@ -107,6 +108,9 @@ export function makeService(opts: MakeOptions) {
 	const sources = new FakeSources("rtl", { sampleRate: FS, centerFreq: CENTRE })
 	const tuner = new FakeTuner()
 	const fanout = new FakeFanout()
+	// The receiver was told the source's centre and rate on this session, well before any engine
+	// opens (fail closed without it: every label would read `unverified`).
+	proveSource(sources, "rtl", CENTRE, FS, { fanout })
 	const engines = new Map<string, EngineState>()
 	const occupancy = new Map<string, OccupancyState>()
 	const persistence: SpectrumPersistence = {
@@ -189,6 +193,15 @@ function digestFrame(frame: SpectrumFrameEventData): SpectrumFrameEventData {
 	}
 }
 
+/** A copy of `value` without any `trustShadow` key. */
+function withoutTrustShadow<T>(value: T): T {
+	return JSON.parse(
+		JSON.stringify(value, (key, v: unknown) =>
+			key === "trustShadow" ? undefined : v,
+		),
+	) as T
+}
+
 /** Subscribes one option set on a fresh service and records ack, snapshot, backfill, live frames and status. */
 export async function runScenario(
 	opts: MakeOptions,
@@ -210,7 +223,9 @@ export async function runScenario(
 		h.host().summary(1, 5 + (i % 11), feedBins)
 	const logged = h.profiles.at(-1)
 	const live = h.frames.slice(before).map(f => digestFrame(f.frame))
-	const status = h.service.status()
+	// The engines' tuning-ledger diagnostics (`trustShadow`, present with a ledger) postdate the
+	// golden: not part of the bins-cap contract.
+	const status = withoutTrustShadow(h.service.status())
 	await h.service.stop()
 	return {
 		logged: logged && {

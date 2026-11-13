@@ -92,6 +92,8 @@ const PendingEpochSchema = z.object({
 	centreChanged: z.boolean(),
 	staleMaxMs: z.number().finite().nonnegative().max(1000).optional(),
 	verifiedFromSample: z.number().int().nonnegative().optional(),
+	awaitProofFloor: z.boolean().optional(),
+	proofSlackSamples: z.number().int().nonnegative().optional(),
 })
 
 export const PipelineInputSchema = z
@@ -130,6 +132,25 @@ export const PipelineInputSchema = z
 		}),
 		z.object({ kind: z.literal("spectrum-feed"), enabled: z.boolean() }),
 		z.object({
+			kind: z.literal("measure-from"),
+			stream: z.number().int().nonnegative(),
+			epoch: z.number().int().nonnegative(),
+			// A pipeline track id: `${sourceId}-…` (trackIdPrefixes), as long as its source id, which
+			// has no bound of its own; a stale or unknown id is ignored by the tracker.
+			trackId: z.string().min(1),
+			sample: z.number().int().nonnegative(),
+		}),
+		z.object({
+			kind: z.literal("proof-floor"),
+			epoch: z.number().int().nonnegative(),
+			sample: z.number().int().nonnegative(),
+		}),
+		z.object({
+			kind: z.literal("proof-slack"),
+			epoch: z.number().int().nonnegative(),
+			samples: z.number().int().nonnegative(),
+		}),
+		z.object({
 			kind: z.literal("channel-plan"),
 			plan: ChannelPlanBodySchema.nullable(),
 		}),
@@ -146,6 +167,43 @@ export const PipelineInputSchema = z
 			})
 		}
 	})
+
+/**
+ * An input message whose `input.kind` is `measure-from`: a request the engine may send for a track
+ * the pipeline no longer holds. One the worker cannot validate is dropped without an error (an
+ * error raises a pipeline-error doubt, and the re-proof would ask again: a doubt loop).
+ */
+export function isMeasureFromMessage(raw: unknown): boolean {
+	if (typeof raw !== "object" || raw === null) return false
+	const message = raw as { type?: unknown; input?: { kind?: unknown } }
+	return message.type === "input" && message.input?.kind === "measure-from"
+}
+
+/**
+ * The worker logs the measure-from requests it ignored (isMeasureFromMessage) at most once per
+ * this interval, with their count since the last line: 60 s keeps a burst (one per open track per
+ * label change, at most MEASURE_REQUESTS 512) to one line a minute.
+ */
+export const MEASURE_FROM_LOG_MS = 60_000
+
+/** Counts ignored measure-from requests; `note` answers the count to log now, or null. */
+export class IgnoredMeasureFrom {
+	private pending = 0
+	private total = 0
+	private loggedAt: number | null = null
+
+	/** One ignored request at `now` (ms, monotonic). */
+	note(now: number): { count: number; total: number } | null {
+		this.pending += 1
+		this.total += 1
+		if (this.loggedAt !== null && now - this.loggedAt < MEASURE_FROM_LOG_MS)
+			return null
+		this.loggedAt = now
+		const count = this.pending
+		this.pending = 0
+		return { count, total: this.total }
+	}
+}
 
 /** Opt-in worker stage profile (R 9.2). Absent on init: the pipeline records nothing. */
 export const PipelineProfileOptionSchema = z.object({

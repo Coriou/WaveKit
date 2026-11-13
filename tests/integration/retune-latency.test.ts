@@ -252,7 +252,8 @@ describe.skipIf(BENCH)("operator retune latency harness (structural)", () => {
 			// one epoch per retune, centred on the command value
 			expect(pendings.map(p => p.centreHz)).toEqual(retunes)
 			for (const p of pendings) {
-				expect(p.tuningTrust).toBe("commanded")
+				// a pending carries no trust: the label comes from the receipt once settled
+				expect(p.tuningTrust).toBe("unverified")
 				expect(p.expectMarker).toBe(false)
 				expect(p.staleMaxMs).toBeDefined()
 			}

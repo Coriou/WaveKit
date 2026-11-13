@@ -379,9 +379,100 @@ export const sourceVerdictSchema = {
 	required: ["code", "message", "deviceFacts"],
 } as const
 
+/**
+ * Why a source's centre or sample rate is not proven (`tuningUnproven.cause` on GET /api/sources),
+ * the first that applies: the core writes nothing for it because a plain resume holds the tuning
+ * (`plain-resume`), a relay client is attached (`relay-attached`), the tuner is under external
+ * control (`external-control`), a scanner job holds the tuner (`scanner-lease`), another core owns
+ * the receiver (`lost-ownership`), or nothing accepted is left to write with the declared tuning
+ * switched off (`declared-write-off`, `reset-policy`); else evidence that the receiver moved
+ * (`doubt`, with its reason), no connection (`no-session`), or no frame of it on this connection
+ * yet (`no-receipt`); with both proven or settling, the spectrum engine cannot place its newest
+ * samples after the proof (`engine`, with its reason: `engine:upstream-loss`).
+ */
+export const TUNING_UNPROVEN_CAUSES = [
+	"plain-resume",
+	"relay-attached",
+	"external-control",
+	"scanner-lease",
+	"lost-ownership",
+	"declared-write-off",
+	"reset-policy",
+	"doubt",
+	"no-session",
+	"no-receipt",
+	"engine",
+] as const
+export type TuningUnprovenCause = (typeof TUNING_UNPROVEN_CAUSES)[number]
+
+/** A doubt's reason in `tuningUnproven.cause` (`doubt:<reason>`): a fixed core code. */
+export const TUNING_DOUBT_REASON_PATTERN = "^[a-z0-9][a-z0-9-]{0,31}$"
+
+/**
+ * `tuningUnproven` on GET /api/sources: present while the source's centre or rate is unverified
+ * (recordings and identification of its signals wait meanwhile). One reason per source.
+ */
+export interface SourceTuningUnproven {
+	code: "tuning-unproven"
+	/**
+	 * A TUNING_UNPROVEN_CAUSES code; a doubt and an engine cause name their reason:
+	 * `doubt:untracked-retune`, `engine:upstream-loss`.
+	 */
+	cause: string
+	/** The unproven fields. */
+	fields: ("frequency" | "sampleRate")[]
+	/** One fixed sentence per cause; never carries a value from the receiver or a client. */
+	message: string
+	/** What makes it proven again (fixed text). */
+	fix: string
+	/** When this cause began (ISO 8601); a new cause starts again. */
+	since: string
+	/**
+	 * Refusals it caused since then: `recording`, track snapshots the analog recorder refused
+	 * (`refused:tuning`); `identification`, track snapshots classified on the unproven tuning
+	 * (spectral evidence only: their discoveries stay candidates).
+	 */
+	refusals: { recording: number; identification: number }
+}
+
+/** Fastify response schema of `SourceTuningUnproven`. */
+export const sourceTuningUnprovenSchema = {
+	type: "object",
+	properties: {
+		code: { type: "string", enum: ["tuning-unproven"] },
+		cause: {
+			type: "string",
+			pattern: `^(${TUNING_UNPROVEN_CAUSES.filter(c => c !== "doubt" && c !== "engine").join("|")}|(doubt|engine):${TUNING_DOUBT_REASON_PATTERN.slice(1, -1)})$`,
+		},
+		fields: {
+			type: "array",
+			items: { type: "string", enum: ["frequency", "sampleRate"] },
+			minItems: 1,
+			maxItems: 2,
+		},
+		message: { type: "string" },
+		fix: { type: "string" },
+		since: { type: "string", format: "date-time" },
+		refusals: {
+			type: "object",
+			properties: {
+				recording: { type: "integer", minimum: 0 },
+				identification: { type: "integer", minimum: 0 },
+			},
+			required: ["recording", "identification"],
+		},
+	},
+	required: ["code", "cause", "fields", "message", "fix", "since", "refusals"],
+} as const
+
 export interface ExtendedSourceStatus extends SourceStatus {
 	/** What the source's state means. Absent from older cores. */
 	verdict?: SourceVerdict
+	/**
+	 * Why the source's centre or rate is not proven and what to do; absent while both are proven
+	 * or settling, on sources without a tuning ledger session ever, and on older cores.
+	 */
+	tuningUnproven?: SourceTuningUnproven
 	assignments: DecoderAssignment[]
 	consumers: number
 	available: boolean
