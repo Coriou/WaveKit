@@ -4,6 +4,16 @@
  * reading, a reading too old, a list without ports, or one that does not name this connection's
  * local port is `clients-unknown` (a reading taken before this connection, or a NAT that rewrites
  * ports, never names it); this connection and any other client is `another-client`.
+ *
+ * Matched by the local port alone, not the client's host (assumption, by design): rtlmux sees the
+ * core's address after any NAT (a container network, a Docker or OrbStack gateway), so the host it
+ * lists is not one the core can compare with its own. The port alone cannot make a busy receiver
+ * read as free: a free verdict needs exactly one listed client with this port, and the core only
+ * counts a reading whose poll started after the connection's session (TunerController
+ * plainResumeVerdict), when rtlmux already lists this connection; so a single client with this
+ * port on another host would mean this connection is missing from the list, which a connected
+ * session's fresh reading never shows. Residual: a NAT that rewrites ports reads as
+ * `clients-unknown` (fail closed).
  */
 import type { ReceiverClientsVerdict } from "./tuner-controller.js"
 import type { ReceiverClientsReading } from "./sdr-host-poller.js"
@@ -36,6 +46,8 @@ export function receiverClientsVerdict(
 	if (!Number.isFinite(age) || age < 0 || age > maxAgeMs) return unknown
 	if (reading.ports.length !== reading.clients) return unknown
 	if (!reading.ports.includes(localPort)) return unknown
-	if (reading.clients === 1) return { free: true, reason: "receiver-free" }
-	return { free: false, reason: "another-client" }
+	const readingAt = reading.startedAt
+	if (reading.clients === 1)
+		return { free: true, reason: "receiver-free", readingAt }
+	return { free: false, reason: "another-client", readingAt }
 }

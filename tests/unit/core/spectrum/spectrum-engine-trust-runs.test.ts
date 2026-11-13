@@ -251,10 +251,61 @@ describe("the end of a trusted run (Q1)", () => {
 		await feed(SETTLE_BYTES / 2 + block * 2)
 		const relayed = samples()
 		expect(blockAt(relayed)).toBe("relay")
+		// The run ends where its last commanded block ended (the blocks fed between it and the
+		// relay block were never labelled: V6).
 		expect(engine.currentEpoch()).toMatchObject({
 			trustedFromSample: relayed - block,
-			runEnd: { from: first - block, end: relayed - block },
+			runEnd: { from: first - block, end: first },
 		})
+		await engine.stop()
+	})
+})
+
+describe("a trusted run ends exactly at its last trusted block (V6)", () => {
+	it("blocks missing between the last trusted block and the unverified one stay outside the run", async () => {
+		const { engine, ledger, feed, write, block, blockAt, samples } =
+			await make()
+		write(Buffer.concat([frame(0x02, RATE), frame(0x01, CENTRE)]))
+		await feed(SETTLE_BYTES / 2 + block * 2)
+		const first = samples()
+		expect(blockAt(first)).toBe("commanded")
+		await feed(block)
+		const last = samples()
+		expect(blockAt(last)).toBe("commanded")
+		// Two blocks with no summary (discarded upstream), then a doubt and an unverified block.
+		await feed(block * 2)
+		ledger.raiseDoubt("rtl", "both", "untracked-retune")
+		await feed(block)
+		expect(blockAt(samples())).toBe("unverified")
+		// The run ends where its last trusted block ended, not at the unverified block's start.
+		expect(engine.currentEpoch().runEnd).toEqual({
+			from: first - block,
+			end: last,
+		})
+		await engine.stop()
+	})
+})
+
+describe("a new epoch's label reason (V7)", () => {
+	it("an epoch that has labelled no block yet says no-block, not the last epoch's reason", async () => {
+		const { engine, feed, block, blockAt, samples, events, opening } =
+			await make()
+		await feed(block * 2)
+		// No receipt: the opening's block reads unverified with its reason.
+		expect(blockAt(samples())).toBe("unverified")
+		const before = engine.labelReason()
+		expect(before).not.toBeNull()
+		expect(before).not.toBe("no-block")
+		events([
+			{
+				kind: "epoch-started",
+				epoch: opening + 1,
+				startSample: samples(),
+				settleMode: "timer",
+			},
+		])
+		expect(engine.currentEpoch().tuningTrust).toBe("unverified")
+		expect(engine.labelReason()).toBe("no-block")
 		await engine.stop()
 	})
 })

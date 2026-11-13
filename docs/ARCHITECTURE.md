@@ -579,7 +579,9 @@ anchor (bounds on where position 0 lies in the bytes offered to the branch); byt
 absorber loses widen it (fail closed, never a lost map), and each unverified block is counted by
 the check that failed (`trustShadow.unverifiedBlocks`). A sweep's dwell counts only its hop's
 trusted blocks, and assert rule 2's re-send of a hop goes through the job holding the lease, so
-the re-sent hop's epoch is the job's own. Decoder provenance, live-audio evidence and the analog
+the re-sent hop's epoch is the job's own (re-send asks while one is still queued are that one). A
+visit whose hop never proves is left after 4 × the larger of its dwell and its settle, at least
+15 s (`hopSkips.unproven` in the job's progress), so a standing doubt cannot stall a sweep. Decoder provenance, live-audio evidence and the analog
 transmission frequency read `trustNow` (the live edge). Recorder, discoveries and IQ capture read
 the label on the epoch or track; the current epoch also names where its trusted run of blocks
 starts (`trustedFromSample`), and a recording's pre-roll never reaches before it; a recording or
@@ -589,8 +591,10 @@ unproven (`tuningUnproven` on `GET /api/sources`), and the engine's reason while
 both but the engine's newest block reads unverified. A plain resume's hold gives the tuning back
 only while the sdr-host lists this core's connection as rtlmux's only client and no relay client
 is attached (`TunerController.plainResumeTakesTuningBack`, the one decision;
-`tuning-ledger-receiver-free.ts`); `POST /api/tuner/:sourceId/take-back` re-proves both fields in
-one call. A command
+`tuning-ledger-receiver-free.ts`), on a reading whose poll started after the connection's session
+and the last doubt on its centre or rate (an untracked-retune doubt reads as another client until
+such a reading says free); `POST /api/tuner/:sourceId/take-back` re-proves both fields in one
+call and ends the hold only once both writes succeeded. A command
 whose frame tuned a stream that starts at a queued reconnect boundary gets its DSP epoch once
 that boundary is applied, at its receipt's position in the new stream. A client that retunes the receiver behind the core's back is
 invisible until a detector raises a doubt. A host-centre mismatch also moves the engine's epoch

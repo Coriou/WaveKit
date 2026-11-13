@@ -14,6 +14,8 @@ import {
 	type JobRunnerDeps,
 	type LiveObservation,
 	type ProbeOutcome,
+	unprovenVisitWaitMs,
+	JOB_STARTUP_CAP_MS,
 } from "../../../../src/core/scanner/job-runner.js"
 import type { ProbeStatus } from "../../../../src/core/scanner/probes/probe-pool.js"
 import type { JobActivityView } from "../../../../src/core/scanner/scanner-redesign-contract.js"
@@ -240,7 +242,11 @@ function runnerHarness(
 		sampleRateHz: 1_024_000,
 		fftSize: 2048,
 	}
-	const engine = {
+	const engine: {
+		currentEpoch: () => EngineEpoch
+		config: () => typeof engineCfg
+		stats: () => { observedSamples: number }
+	} = {
 		currentEpoch: () => epochAt(0, 446_100_000, { settleMode: "none" }),
 		config: () => ({ ...engineCfg }),
 		stats: () => ({ observedSamples: 1 }),
@@ -281,7 +287,7 @@ function runnerHarness(
 		now: () => 0,
 		...extra,
 	})
-	return { runner, arbiter, record, engineCfg }
+	return { runner, arbiter, record, engineCfg, engine }
 }
 
 /** Unstarted harness progress at the commit this field set was added. Coverage is NaN: the fake reports observed samples and no settled samples. */
@@ -1090,3 +1096,110 @@ it.each(["pause", "stop-condition"] as const)(
 		).toEqual(before)
 	},
 )
+
+describe("a hop that never proves (V2)", () => {
+	it("leaves the hop after the bounded unproven wait (not before), with the skip reason counted", async () => {
+		let now = 0
+		const { runner, arbiter, record, engine } = runnerHarness(undefined, {
+			now: () => now,
+		})
+		await runner.start()
+		await flush()
+		runner.onEpochStarted(epochAt(11, HOP0))
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		expect(record.state).toBe("running")
+		// Hop 0 proves: its dwell runs to the next hop.
+		let end = 10_000
+		for (let i = 0; i < 400 && arbiter.retunes.length < 2; i++) {
+			end += 51_200
+			now += 50
+			runner.onBlock(end, false)
+			await flush()
+		}
+		expect(arbiter.retunes).toHaveLength(2)
+		const hop1 = arbiter.retunes[1]!.target.centreHz
+		// Hop 1 never proves (a standing doubt): its epoch and blocks read unverified.
+		engine.currentEpoch = () =>
+			epochAt(12, hop1, { tuningTrust: "unverified", trustedFromSample: null })
+		arbiter.retunes[1]!.resolve(pendingFor(12, hop1))
+		await flush()
+		runner.onEpochStarted(
+			epochAt(12, hop1, { tuningTrust: "unverified", trustedFromSample: null }),
+		)
+		await flush()
+		const sentAt = now
+		const sweep = testSettings().sweep
+		const bound = unprovenVisitWaitMs(
+			record.plan.hops[1]?.dwellMs ?? record.spec.dwellMs,
+			Math.max(sweep.settleMs.local, sweep.settleMs.network),
+			1_024_000,
+		)
+		for (let t = 0; t + 50 < bound; t += 50) {
+			end += 51_200
+			now = sentAt + t
+			runner.onBlock(end, false)
+			runner.tick(now)
+			await flush()
+		}
+		expect(arbiter.retunes).toHaveLength(2)
+		expect(runner.progress().hopSkips).toBeUndefined()
+		now = sentAt + bound
+		runner.tick(now)
+		await flush()
+		await flush()
+		// The sweep moves on, the skip named and counted.
+		expect(arbiter.retunes).toHaveLength(3)
+		expect(arbiter.retunes[2]!.target.centreHz).not.toBe(hop1)
+		expect(runner.progress().hopSkips).toEqual({ unproven: 1 })
+		arbiter.retunes[2]!.resolve(pendingFor(13, HOP0))
+		await runner.dispatch({ type: "cancel" })
+	})
+
+	it("derives the bound: 4 × the larger of dwell and settle, never under the job start cap (15 s)", () => {
+		// The defaults: 4 × 1 s = 4 s, under the floor.
+		expect(unprovenVisitWaitMs(300, 1000, 2_400_000)).toBe(JOB_STARTUP_CAP_MS)
+		// At the floor and past it: a 3.75 s dwell gives exactly 15 s, a 5 s dwell 20 s.
+		expect(unprovenVisitWaitMs(3750, 1000, 2_400_000)).toBe(15_000)
+		expect(unprovenVisitWaitMs(5000, 1000, 2_400_000)).toBe(20_000)
+		// A slow rate: the in-flight estimate (512 KiB at 50 ksps U8, 5.24 s) binds.
+		expect(unprovenVisitWaitMs(300, 1000, 50_000)).toBeCloseTo(
+			4 * ((512 * 1024) / 100_000) * 1000,
+			6,
+		)
+		// An unknown rate cannot settle: the bound stays finite (the configured settle).
+		expect(unprovenVisitWaitMs(300, 5000, 0)).toBe(20_000)
+	})
+})
+
+describe("the arbiter's hop re-sends while the job's chain is busy (V3)", () => {
+	it("two re-send asks queued behind a running retune send the hop once", async () => {
+		const { runner, arbiter } = runnerHarness()
+		await runner.start()
+		await flush()
+		runner.onEpochStarted(epochAt(11, HOP0))
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		// A first doubt: the re-send runs and waits on the arbiter (the chain is busy).
+		expect(arbiter.lease!.resend!()).toBe(true)
+		await flush()
+		expect(arbiter.retunes).toHaveLength(2)
+		// Two more doubts while it runs: one re-send is queued behind it, not two.
+		expect(arbiter.lease!.resend!()).toBe(true)
+		expect(arbiter.lease!.resend!()).toBe(true)
+		arbiter.retunes[1]!.resolve(pendingFor(12, HOP0))
+		await flush()
+		await flush()
+		expect(arbiter.retunes).toHaveLength(3)
+		arbiter.retunes[2]!.resolve(pendingFor(13, HOP0))
+		await flush()
+		await flush()
+		expect(arbiter.retunes).toHaveLength(3)
+		// Once it ran, a later ask re-sends again.
+		expect(arbiter.lease!.resend!()).toBe(true)
+		await flush()
+		expect(arbiter.retunes).toHaveLength(4)
+		arbiter.retunes[3]!.resolve(pendingFor(14, HOP0))
+		await runner.idle()
+	})
+})

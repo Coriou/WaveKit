@@ -92,7 +92,16 @@ type HostMode = "free" | "second" | "down"
  */
 async function startFakeSdrHost(localPort: () => number | null) {
 	let mode: HostMode = "free"
+	/** While held, answers wait (a slow poll): `release` sends them in the mode of that time. */
+	let held: (() => void)[] | null = null
 	const server = http.createServer((req, res) => {
+		if (held !== null) {
+			held.push(() => answer(req, res))
+			return
+		}
+		answer(req, res)
+	})
+	const answer = (req: http.IncomingMessage, res: http.ServerResponse) => {
 		if (req.url !== "/api/status" || mode === "down") {
 			res.writeHead(req.url === "/api/status" ? 500 : 404)
 			res.end()
@@ -121,7 +130,7 @@ async function startFakeSdrHost(localPort: () => number | null) {
 				},
 			}),
 		)
-	})
+	}
 	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
 	const { port } = server.address() as net.AddressInfo
 	return {
@@ -129,6 +138,15 @@ async function startFakeSdrHost(localPort: () => number | null) {
 		setMode: (m: HostMode) => {
 			mode = m
 		},
+		hold: () => {
+			held ??= []
+		},
+		release: () => {
+			const waiting = held ?? []
+			held = null
+			for (const send of waiting) send()
+		},
+		heldCount: () => held?.length ?? 0,
 		close: () => new Promise<void>(resolve => server.close(() => resolve())),
 	}
 }
@@ -351,6 +369,67 @@ describe("a plain resume on a free receiver (U1, U3)", () => {
 	}, 30_000)
 })
 
+describe("a free verdict counts only from a reading after the connection and the field's last doubt (V1)", () => {
+	it("a client that joins and retunes after a restore gets no assert frame before a fresh poll, and a fresh poll listing it holds", async () => {
+		const h = await harness()
+		const from = await h.plainResume()
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.state().resumeOutcome?.reason).toBe("receiver-free")
+		const restored = h.framesFrom(from).length
+		// An SDR++-like client joins straight on rtlmux and retunes: the polls in flight stall (the
+		// last answer, under 8 s old, still says free), the engine's alarm raises the doubt.
+		h.host.hold()
+		await until(() => h.host.heldCount() > 0)
+		h.host.setMode("second")
+		h.fake.retuneSilently(F0, 0)
+		h.ledger.raiseDoubt("rtl", "frequency", "untracked-retune")
+		await wait(300)
+		expect(h.framesFrom(from)).toHaveLength(restored)
+		expect(h.proofOf().frequency.state).toBe("unverified")
+		expect(h.state().resumeOutcome).toMatchObject({
+			outcome: "left-as-found",
+			reason: "another-client",
+		})
+		// The fresh poll lists two clients: held, still no frame.
+		h.host.release()
+		await wait(300)
+		expect(h.framesFrom(from)).toHaveLength(restored)
+		expect(h.state().resumeOutcome?.reason).toBe("another-client")
+		expect(h.fake.tuning().centre).toBe(F0)
+		// The client leaves: a poll after the doubt says free, and the tuning is taken back.
+		h.host.setMode("free")
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.framesFrom(from).slice(restored)).toEqual([[SET_FREQUENCY, F1]])
+	}, 30_000)
+
+	it("a free reading whose poll started before the session does not take the tuning back, and a doubt under the hold asks for a fresh poll", async () => {
+		const h = await harness({ sdrHost: false })
+		let readingAt = performance.now()
+		const polls: string[] = []
+		h.controller.setReceiverClientsView(
+			() => ({ free: true, reason: "receiver-free", readingAt }),
+			id => polls.push(id),
+		)
+		const from = await h.plainResume()
+		h.controller.noteReceiverClients("rtl")
+		await wait(200)
+		expect(h.framesFrom(from)).toEqual([])
+		expect(h.state().resumeOutcome?.reason).toBe("clients-unknown")
+		// The session start asked for a reading; a doubt asks again.
+		expect(polls).toEqual(["rtl"])
+		h.ledger.raiseDoubt("rtl", "sampleRate", "pipeline-error")
+		expect(polls).toEqual(["rtl", "rtl"])
+		// A reading after both: the tuning is taken back.
+		readingAt = performance.now()
+		h.controller.noteReceiverClients("rtl")
+		await until(() => h.proofOf().frequency.state === "commanded")
+		expect(h.framesFrom(from)).toEqual([
+			[SET_SAMPLE_RATE, RATE],
+			[SET_FREQUENCY, F1],
+		])
+	}, 30_000)
+})
+
 describe("the plain resume's one decision covers the configured frames (Q4)", () => {
 	it("a reconnect under the hold writes the configured gain only when the predicate gives the tuning back", async () => {
 		const h = await harness({ configuredGain: true })
@@ -464,5 +543,39 @@ describe("POST /api/tuner/:sourceId/take-back (U2)", () => {
 		expect(leased.statusCode).toBe(409)
 		expect(leased.json()).toMatchObject({ code: "TUNER_TAKE_BACK_BLOCKED" })
 		expect(h.framesFrom(from)).toHaveLength(4)
+	}, 30_000)
+})
+
+describe("a take-back whose write fails keeps the hold (V4)", () => {
+	it("a failing centre write leaves the plain resume's hold and its outcome as found; a later call takes it back", async () => {
+		const h = await harness()
+		h.host.setMode("second")
+		const from = await h.plainResume()
+		await until(() => h.state().resumeOutcome?.reason === "another-client")
+		const setFrequency = vi
+			.spyOn(h.controller, "setFrequency")
+			.mockRejectedValueOnce(new Error("write failed"))
+		await expect(h.controller.takeTuningBack("rtl")).rejects.toThrow(
+			"write failed",
+		)
+		// The hold stands: no take-back outcome, the reason still names the plain resume.
+		expect(h.state().resumeOutcome).toMatchObject({
+			outcome: "left-as-found",
+			reason: "another-client",
+		})
+		expect(h.manager.tuningUnproven.view("rtl")?.cause).toBe("plain-resume")
+		// The rate frame went out (it is accepted), the centre did not.
+		await until(() => h.framesFrom(from).length >= 1)
+		await wait(100)
+		expect(h.framesFrom(from)).toEqual([[SET_SAMPLE_RATE, RATE]])
+		setFrequency.mockRestore()
+		await h.controller.takeTuningBack("rtl")
+		await until(() => h.proofOf().frequency.state === "commanded")
+		await until(() => h.framesFrom(from).length >= 3)
+		expect(h.framesFrom(from).slice(1)).toEqual([
+			[SET_SAMPLE_RATE, RATE],
+			[SET_FREQUENCY, F1],
+		])
+		expect(h.state().resumeOutcome?.reason).toBe("operator")
 	}, 30_000)
 })

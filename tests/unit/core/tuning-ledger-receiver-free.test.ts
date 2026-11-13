@@ -29,6 +29,7 @@ describe("receiverClientsVerdict", () => {
 		expect(receiverClientsVerdict(reading([5000]), 5000, 1000, MAX)).toEqual({
 			free: true,
 			reason: "receiver-free",
+			readingAt: 1000,
 		})
 		// At the bound it still counts; past it the reading is unknown.
 		expect(
@@ -42,7 +43,7 @@ describe("receiverClientsVerdict", () => {
 	it("names another client only when this connection is listed beside it", () => {
 		expect(
 			receiverClientsVerdict(reading([5000, 6000]), 5000, 1000, MAX),
-		).toEqual({ free: false, reason: "another-client" })
+		).toEqual({ free: false, reason: "another-client", readingAt: 1000 })
 	})
 
 	it("fails closed on every unknown: no reading, no port, unlisted connection, a bare count, a time in the future", () => {

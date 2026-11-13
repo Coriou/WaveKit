@@ -38,6 +38,12 @@ if (!port) {
 	)
 }
 
+/** One logger per worker, built once (every line of this module goes through it). */
+const log = createComponentLogger(
+	createLogger({ level: "info" }),
+	"SpectrumWorker",
+)
+
 let pipeline: SpectrumPipeline | null = null
 let pathLogged = false
 /** Compiled once per worker: a re-init reuses it. */
@@ -61,10 +67,6 @@ function selectFrameWasm(): FrameWasmLoad {
 function logFramePath(p: SpectrumPipeline, sourceId: string): void {
 	if (pathLogged) return
 	pathLogged = true
-	const log = createComponentLogger(
-		createLogger({ level: "info" }),
-		"SpectrumWorker",
-	)
 	const { path, reason } = p.framePath
 	const wanted =
 		framePathChoice(process.env["WAVEKIT_SPECTRUM_FRAME_PATH"]) === "wasm"
@@ -104,10 +106,7 @@ port.on("message", (raw: unknown) => {
 		if (isMeasureFromMessage(raw)) {
 			const due = ignoredMeasureFrom.note(performance.now())
 			if (due !== null)
-				createComponentLogger(
-					createLogger({ level: "info" }),
-					"SpectrumWorker",
-				).info(
+				log.info(
 					due,
 					"Ignored measure-from requests the worker could not validate",
 				)

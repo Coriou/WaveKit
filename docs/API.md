@@ -1333,7 +1333,11 @@ What a resume writes to the receiver depends on the body:
   poll intervals and a request timeout old (8 s with the defaults). Anything else leaves the
   tuning as found: another client on rtlmux, no sdr-host (or `resources.sdrHostPoller` off), an
   answer that fails, is too old or does not list this connection (one taken before it, or a
-  NAT that rewrites its port), or a relay client. It is re-read at every poll: a client that
+  NAT that rewrites its port), or a relay client. A free answer counts only when its poll started
+  after the connection and after the last doubt on the centre or rate, so a client that joins and
+  retunes is not fought on an older answer: after an untracked retune the receiver reads as
+  another client's until a newer answer says free. The client is matched by its port alone (rtlmux
+  sees the core's address after any NAT). It is re-read at every poll: a client that
   joins later puts the hold back, one that leaves gives the tuning back. `resumeOutcome` on
   the tuner state says which: `{ outcome, reason, message }` with `outcome` `restored` or
   `left-as-found` and `reason` `receiver-free` ("receiver free: tuning restored"),
@@ -2286,6 +2290,8 @@ frames' settle passes. 409 `TUNER_TAKE_BACK_BLOCKED` while a scanner job holds t
 another core owns the receiver, 409 `TUNER_CONTROL_EXTERNAL` under external control (an exclusive
 relay client), 409 `TUNER_NOTHING_HELD` with no held centre or rate (set the tuning with
 [`POST /api/tuner/:sourceId/tune`](#post-apitunersourceidtune) instead); nothing is written then.
+A write that fails answers its error and leaves the hold as it was (a rate already written stays
+accepted); call it again.
 
 ```bash
 curl -X POST http://localhost:9000/api/tuner/rtl-local/take-back
@@ -9050,6 +9056,9 @@ and absent without a sweep scheduler.
 `ScanJobProgress` and `scanner:progress` add optional `phase`, `parked`,
 `holding { discoveryId, frequencyHz, trackId }`,
 `trial { protocol, decoder, transport, discoveryId }` and `replayQueueDepth`.
+Job DTOs of a sweep add `hopSkips { unproven }` once the sweep left a hop without hearing it:
+`unproven` counts visits whose hop's tuning never proved (a standing doubt) within 4 × the larger
+of the hop's dwell and its settle, and at least 15 s.
 Phase precedence is `settling`, `holding`, `trialing` (parked live probe),
 `replaying`, `capturing`, then `watching`. Capturing means an open capture;
 replaying includes the analog replay trial. Queue depth counts waiting replays.

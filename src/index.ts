@@ -2321,13 +2321,15 @@ async function main(): Promise<void> {
 					config.resources.sdrHostPoller.pollIntervalMs,
 					config.resources.sdrHostPoller.timeoutMs,
 				)
-				tunerController.setReceiverClientsView(id =>
-					receiverClientsVerdict(
-						poller.clientsReading(id),
-						sourceManager.connectionLocalPort(id),
-						performance.now(),
-						clientsMaxAgeMs,
-					),
+				tunerController.setReceiverClientsView(
+					id =>
+						receiverClientsVerdict(
+							poller.clientsReading(id),
+							sourceManager.connectionLocalPort(id),
+							performance.now(),
+							clientsMaxAgeMs,
+						),
+					id => poller.pollNow(id),
 				)
 				poller.on("status", status =>
 					tunerController.noteReceiverClients(status.sourceId),

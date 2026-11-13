@@ -367,6 +367,8 @@ interface EpochRecord {
 	 */
 	trustedFrom: number | null
 	trustedLabel: TuningTrust
+	/** End sample of the current trusted run's newest block (the run's exact end), or null. */
+	trustedEnd: number | null
 	/** The newest trusted run of this epoch that ended (`currentEpoch().runEnd`), or null. */
 	runEnd: { from: number; end: number } | null
 }
@@ -824,6 +826,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.hopReceipts.clear()
 		this.markerPending = null
 		this.liveLabel = "unverified"
+		this.liveReason = null
 		this.newestLabel = null
 		this.measureRequests.clear()
 		this.externalAfterBoundary = null
@@ -1072,7 +1075,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	/**
 	 * Why the current epoch's newest block summary reads `unverified` (a fixed code, see
-	 * `trustShadow.unverifiedBlocks`), or null while it is trusted or none was labelled yet.
+	 * `trustShadow.unverifiedBlocks`; `no-block` for an epoch that has labelled none yet), or null
+	 * while it is trusted or the engine has labelled no block since it started.
 	 */
 	labelReason(): string | null {
 		return this.liveLabel === "unverified" ? this.liveReason : null
@@ -1724,6 +1728,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					hop: start?.hop === true ? start.key : null,
 					trustedFrom: null,
 					trustedLabel: "unverified",
+					trustedEnd: null,
 					runEnd: null,
 				}
 				this.rememberEpoch(record)
@@ -1738,6 +1743,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					else if (seq === undefined) this.markerPending = at
 				}
 				this.liveLabel = "unverified"
+				// No block of the new epoch is labelled yet: the old epoch's reason is not its.
+				this.liveReason = "no-block"
 				// Openings and untracked epochs are not tuning events: no claim.
 				const claim =
 					posted && meta !== null ? this.epochClaim(record) : "unverified"
@@ -2388,7 +2395,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		if (!ledger || !map || map.blockSamples === null) {
 			// Unverified like any other: the epoch's trusted run ends here.
 			const start = summary.endSample - (map?.blockSamples ?? 0)
-			if (record !== null) this.noteRun(record, "unverified", start)
+			if (record !== null)
+				this.noteRun(record, "unverified", start, summary.endSample)
 			this.noteBlockLabel(
 				summary,
 				"unverified",
@@ -2420,27 +2428,44 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					})
 		this.labelledBlocks += 1
 		if (record !== null)
-			this.noteRun(record, label.trust, summary.endSample - map.blockSamples)
+			this.noteRun(
+				record,
+				label.trust,
+				summary.endSample - map.blockSamples,
+				summary.endSample,
+			)
 		this.noteBlockLabel(summary, label.trust, label.reason)
 		return label.trust
 	}
 
 	/**
-	 * A block starting at `start` labelled `trust`: the epoch's trusted run goes on, begins, or
-	 * ends there (`runEnd`: a block that reads `unverified` or changes the label ends the run).
+	 * A block `[start, end)` labelled `trust`: the epoch's trusted run goes on, begins, or ends
+	 * (`runEnd`: a block that reads `unverified` or changes the label ends the run, exactly where
+	 * the run's last trusted block ended: samples between it and this block, if any, were never
+	 * labelled, so they stay outside it).
 	 */
 	private noteRun(
 		record: EpochRecord,
 		trust: TuningTrust,
 		start: number,
+		end: number,
 	): void {
 		const ends =
 			record.trustedFrom !== null &&
 			(trust === "unverified" || record.trustedLabel !== trust)
-		if (ends) record.runEnd = { from: record.trustedFrom!, end: start }
-		if (trust === "unverified") record.trustedFrom = null
-		else if (record.trustedFrom === null || record.trustedLabel !== trust)
-			record.trustedFrom = start
+		if (ends)
+			record.runEnd = {
+				from: record.trustedFrom!,
+				end: Math.min(record.trustedEnd ?? start, start),
+			}
+		if (trust === "unverified") {
+			record.trustedFrom = null
+			record.trustedEnd = null
+		} else {
+			if (record.trustedFrom === null || record.trustedLabel !== trust)
+				record.trustedFrom = start
+			record.trustedEnd = end
+		}
 		record.trustedLabel = trust
 	}
 

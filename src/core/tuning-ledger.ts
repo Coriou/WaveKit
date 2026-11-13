@@ -212,7 +212,7 @@ export type LedgerChange =
 	| { kind: "session-started"; session: number }
 	| { kind: "session-ended"; session: number }
 	| { kind: "receipt"; field: TuningField; receipt: TuningReceipt }
-	| { kind: "doubt"; field: DoubtField }
+	| { kind: "doubt"; field: DoubtField; reason: string }
 	| { kind: "hold"; field: GatedField }
 
 export type LedgerListener = (sourceId: string, change: LedgerChange) => void
@@ -826,7 +826,7 @@ export class TuningLedger {
 					: { minPos: gone.pos, maxAfterSeq: gone.afterSeq }
 			}
 		}
-		this.notify(live.sourceId, { kind: "doubt", field })
+		this.notify(live.sourceId, { kind: "doubt", field, reason })
 	}
 
 	/**

@@ -428,6 +428,12 @@ type AssertBlock =
 export interface ReceiverClientsVerdict {
 	free: boolean
 	reason: "receiver-free" | "another-client" | "clients-unknown"
+	/**
+	 * performance.now() (monotonic) when the poll behind the verdict started. A free verdict
+	 * counts only from a reading started after the connection's session and the gated fields'
+	 * last doubt (plainResumeVerdict); without it, a free verdict never counts.
+	 */
+	readingAt?: number
 }
 
 /** TunerState.resumeOutcome messages: fixed text per reason. */
@@ -1613,6 +1619,17 @@ export class TunerController extends EventEmitter {
 	private receiverClients:
 		| ((sourceId: string) => ReceiverClientsVerdict)
 		| null = null
+	/** Asks for a new reading of the receiver's clients now (SdrHostPoller.pollNow). */
+	private receiverClientsPoll: ((sourceId: string) => void) | null = null
+	/**
+	 * performance.now() of the source's last session start or doubt on a gated field: a free
+	 * reading counts only when its poll started after it (plainResumeVerdict). `untracked`: an
+	 * untracked-retune doubt came since the last fresh free reading (a client bypassing the relay
+	 * retuned the receiver): until a fresh reading, the receiver is another client's. Gone with
+	 * the source.
+	 */
+	private clientsStaleBefore: Map<string, { at: number; untracked: boolean }> =
+		new Map()
 	private acceptanceSeq = 0
 	/**
 	 * Intent: the last accepted (operator or relay) centre and rate per source, the value assert
@@ -1771,8 +1788,36 @@ export class TunerController extends EventEmitter {
 	 */
 	setReceiverClientsView(
 		view: ((sourceId: string) => ReceiverClientsVerdict) | null,
+		pollNow: ((sourceId: string) => void) | null = null,
 	): void {
 		this.receiverClients = view
+		this.receiverClientsPoll = pollNow
+	}
+
+	/**
+	 * A session start or a doubt on a gated field: earlier client readings no longer count as
+	 * free (a client may have joined and retuned since), and under a plain resume's hold a fresh
+	 * reading is asked for at once.
+	 */
+	private noteClientsStale(sourceId: string, untracked: boolean): void {
+		const prev = this.clientsStaleBefore.get(sourceId)
+		this.clientsStaleBefore.set(sourceId, {
+			at: performance.now(),
+			untracked: untracked || (prev?.untracked ?? false),
+		})
+		if (this.plainResumeHold.has(sourceId)) this.requestClientsReading(sourceId)
+	}
+
+	/** SdrHostPoller.pollNow through the view, never throwing. */
+	private requestClientsReading(sourceId: string): void {
+		try {
+			this.receiverClientsPoll?.(sourceId)
+		} catch (err) {
+			this.log.debug(
+				{ sourceId, err: safeErrorFields(err) },
+				"Asking for a receiver clients reading failed",
+			)
+		}
 	}
 
 	/**
@@ -1800,6 +1845,7 @@ export class TunerController extends EventEmitter {
 		switch (change.kind) {
 			// The connect sync asserts (wired to the session's start).
 			case "session-started":
+				this.noteClientsStale(sourceId, false)
 				return
 			case "receipt":
 				// Only an untagged frame of either field leaves it unproven (a tagged one settles).
@@ -1809,8 +1855,14 @@ export class TunerController extends EventEmitter {
 				)
 					this.scheduleAssert(sourceId, true)
 				return
-			case "session-ended":
 			case "doubt":
+				this.noteClientsStale(
+					sourceId,
+					change.reason === UNTRACKED_RETUNE_DOUBT,
+				)
+				this.scheduleAssert(sourceId, true)
+				return
+			case "session-ended":
 			case "hold":
 				this.scheduleAssert(sourceId, true)
 				return
@@ -1936,8 +1988,25 @@ export class TunerController extends EventEmitter {
 		} catch {
 			verdict = null
 		}
-		if (verdict?.free === true && verdict.reason === "receiver-free")
-			return { free: true, reason: "receiver-free" }
+		// A free reading counts only when its poll started after the session and the last doubt:
+		// an older one (up to the reading's max age) may predate a client that joined and retuned.
+		const stale = this.clientsStaleBefore.get(sourceId)
+		const fresh =
+			typeof verdict?.readingAt === "number" &&
+			Number.isFinite(verdict.readingAt) &&
+			(stale === undefined || verdict.readingAt > stale.at)
+		if (verdict?.free === true && verdict.reason === "receiver-free") {
+			if (fresh) {
+				if (stale?.untracked === true) stale.untracked = false
+				return { free: true, reason: "receiver-free" }
+			}
+			// An untracked retune since the last fresh reading: another client's until one says free.
+			if (stale?.untracked === true)
+				return { free: false, reason: "another-client" }
+			return { free: false, reason: "clients-unknown" }
+		}
+		if (stale?.untracked === true)
+			return { free: false, reason: "another-client" }
 		return {
 			free: false,
 			reason:
@@ -1954,7 +2023,10 @@ export class TunerController extends EventEmitter {
 	 * from then on assert holds them as after a restore resume. Refused (409) under a relay
 	 * client, a scanner lease or lost ownership (TUNER_TAKE_BACK_BLOCKED), and with no held value
 	 * for either field (TUNER_NOTHING_HELD), before anything changes; external control answers as
-	 * every setter does.
+	 * every setter does: an exclusive relay client's external control is the setters' own
+	 * TUNER_CONTROL_EXTERNAL (validateSourceForControl, checked first). The hold ends only once
+	 * both writes succeeded on the session they were written on; a failed write throws and leaves
+	 * the hold (the rate, if written, is accepted as any operator write).
 	 */
 	async takeTuningBack(
 		sourceId: string,
@@ -1991,14 +2063,18 @@ export class TunerController extends EventEmitter {
 				"TUNER_NOTHING_HELD",
 				409,
 			)
-		if (this.plainResumeHold.delete(sourceId)) this.takenBack.add(sourceId)
-		this.plainResumeAccepted.delete(sourceId)
-		// This session follows the restore policy from here on (declaredBlock), as a restore resume.
 		const session = this.ledger().position(sourceId)?.session
-		if (session !== undefined) this.restoreResumeSession.set(sourceId, session)
 		const write: TunerWriteOptions = { ...opts, origin: opts.origin ?? "rest" }
 		await this.setSampleRate(sourceId, rate, write)
 		await this.setFrequency(sourceId, centre, write)
+		// Only both writes end the hold (a failure throws above and leaves it, as found), and only
+		// on the session they were written on: a plain resume meanwhile is a hold of its own.
+		if (this.ledger().position(sourceId)?.session !== session) return
+		if (this.plainResumeHold.delete(sourceId)) this.takenBack.add(sourceId)
+		this.plainResumeAccepted.delete(sourceId)
+		// This session follows the restore policy from here on (declaredBlock), as a restore resume.
+		if (session !== undefined) this.restoreResumeSession.set(sourceId, session)
+		this.emitStateChanged(sourceId)
 	}
 
 	/** TunerState.resumeOutcome: from a plain resume until a restore resume. */
@@ -2339,6 +2415,7 @@ export class TunerController extends EventEmitter {
 		this.acceptedTuning.delete(sourceId)
 		this.restoreResumeSession.delete(sourceId)
 		this.assertFights.delete(sourceId)
+		this.clientsStaleBefore.delete(sourceId)
 		this.standInConnections.get(sourceId)?.close()
 		this.standInConnections.delete(sourceId)
 		this.baselineCaps.delete(sourceId)
@@ -3991,6 +4068,8 @@ export class TunerController extends EventEmitter {
 		this.appliedBandGain.delete(sourceId)
 		// Nothing configured is owed on this or any later connection (plainResumeHold).
 		this.plainResumeHold.add(sourceId)
+		// Whether the receiver is free decides the take-back: ask for a reading from now.
+		this.requestClientsReading(sourceId)
 
 		const doubt = new Set<TunerStateField>(PLAIN_RESUME_UNVERIFIED)
 		for (const field of dropped) {
