@@ -292,11 +292,14 @@ export async function remoteCheck(d, argv) {
 					: ok(() => gh(["run", "rerun", runId]))
 						? missing
 						: []
-			const live = () =>
-				quiet(
+			// Live only when a status was read and is not completed; an unreadable one is not live.
+			const live = () => {
+				const status = quiet(
 					() =>
 						JSON.parse(gh(["run", "view", runId, "--json", "status"])).status,
-				) !== "completed"
+				)
+				return status !== undefined && status !== "completed"
+			}
 			if (!accepted.length && !live()) {
 				fs.rmSync(stateFile, { force: true })
 				return finish(

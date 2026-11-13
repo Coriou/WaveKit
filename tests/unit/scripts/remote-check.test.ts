@@ -1101,11 +1101,14 @@ describe("binaries whatever .gitattributes says", () => {
 			Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0, 0, 0, 0x0d, 0x2b]),
 		)
 		fs.writeFileSync(join(dir, "a.ts"), "export const x = 1\n")
+		// A tab in a name must not cut the path short and skip the binary check.
+		fs.writeFileSync(join(dir, "a\tb.png"), Buffer.from([0x50, 0, 0x4e]))
 		g("add", "-A")
 		const tree = g("write-tree").trim()
 		const r = collectChanges(args => g(...args), base, tree)
 		expect(r.changes.map(c => [c.path, c.binary])).toEqual([
 			[".gitattributes", false],
+			["a\tb.png", true],
 			["a.ts", false],
 			["shot.png", true],
 		])

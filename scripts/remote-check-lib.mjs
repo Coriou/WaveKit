@@ -810,7 +810,10 @@ export function collectChanges(git, from, to) {
 			.split("\0")
 			.filter(Boolean)
 			.map(l => {
-				const [meta = "", path = ""] = l.split("\t")
+				// Only the first tab ends the metadata: a path may contain tabs.
+				const tab = l.indexOf("\t")
+				const meta = l.slice(0, tab)
+				const path = l.slice(tab + 1)
 				const [, type = "", sha = "", size = ""] = meta.trim().split(/\s+/)
 				return [path, { type, sha, size: Number(size) || 0 }]
 			}),
