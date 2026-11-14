@@ -18,6 +18,8 @@ import { MAX_CLIENT_BUFFER_BYTES } from "./client-buffer.js"
 
 export interface AudioOutputConfig {
 	port: number
+	/** Bind address; absent: every interface. */
+	host?: string | undefined
 	format: "S16LE" | "FLOAT32LE"
 	sampleRate: number
 }
@@ -84,7 +86,7 @@ export class AudioOutput extends EventEmitter {
 				else this.log.error({ err: safeErrorFields(err) }, "Server error")
 			})
 
-			server.listen(this.config.port, () => {
+			const onListening = () => {
 				listening = true
 				this.log.info(
 					{
@@ -96,7 +98,10 @@ export class AudioOutput extends EventEmitter {
 				)
 				this.emit("started", this.config.port)
 				resolve()
-			})
+			}
+			if (this.config.host === undefined)
+				server.listen(this.config.port, onListening)
+			else server.listen(this.config.port, this.config.host, onListening)
 		})
 	}
 

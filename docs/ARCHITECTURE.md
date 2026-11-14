@@ -357,7 +357,7 @@ TCP server for streaming decoded audio.
 
 **Responsibilities**:
 
-- Listen on configured TCP port (default 8080)
+- Listen on configured TCP port (default 8080), on every interface or only on `audio.host`
 - Stream audio to all connected clients
 - Handle client connect/disconnect gracefully
 

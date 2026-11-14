@@ -39,6 +39,15 @@ describe("Configuration Loader", () => {
 	})
 
 	describe("loadConfig", () => {
+		it("leaves audio.host unset by default and takes WAVEKIT_AUDIO_HOST", () => {
+			const configPath = path.join(tempDir, "audio-host.yaml")
+			fs.writeFileSync(configPath, "sources: []\n")
+			delete process.env["WAVEKIT_AUDIO_HOST"]
+			expect(loadConfig(configPath).audio.host).toBeUndefined()
+			process.env["WAVEKIT_AUDIO_HOST"] = "127.0.0.1"
+			expect(loadConfig(configPath).audio.host).toBe("127.0.0.1")
+		})
+
 		it("ignores an incomplete legacy array override name", () => {
 			const configPath = path.join(tempDir, "empty.yaml")
 			fs.writeFileSync(configPath, "sources: []\n")

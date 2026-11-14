@@ -285,6 +285,8 @@ export const DecoderConfigSchema = z.object({
  */
 export const AudioConfigSchema = z.object({
 	tcpPort: z.number().int().min(1).max(65535).default(8080),
+	/** Address the raw audio TCP port binds; unset: every interface (IPv4 and IPv6). */
+	host: z.string().min(1).optional(),
 	format: z.enum(["S16LE", "FLOAT32LE"]).default("S16LE"),
 	sampleRate: z.number().int().positive().default(48000),
 	monitoring: z.boolean().default(false),
@@ -1197,6 +1199,7 @@ const LEGACY_ENV_MAPPINGS: Record<
 	WAVEKIT_API_HOST: { path: ["api", "host"], type: "string" },
 	WAVEKIT_API_PORT: { path: ["api", "port"], type: "number" },
 	WAVEKIT_AUDIO_TCP_PORT: { path: ["audio", "tcpPort"], type: "number" },
+	WAVEKIT_AUDIO_HOST: { path: ["audio", "host"], type: "string" },
 	WAVEKIT_AUDIO_FORMAT: { path: ["audio", "format"], type: "string" },
 	WAVEKIT_AUDIO_SAMPLE_RATE: { path: ["audio", "sampleRate"], type: "number" },
 	WAVEKIT_LOG_LEVEL: { path: ["logging", "level"], type: "string" },

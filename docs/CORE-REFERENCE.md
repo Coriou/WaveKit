@@ -93,7 +93,9 @@ Activity has its own replayable subscription (`activity:subscribe`); see
 
 For listening, use the [live audio HTTP stream](#live-demodulator-http-audio) below. The raw
 TCP audio port (8080) carries the audio of decoders that produce it, as headerless PCM in the
-`audio.format` and `audio.sampleRate` of the configuration:
+`audio.format` and `audio.sampleRate` of the configuration. It listens on every interface;
+set `audio.host` (env `WAVEKIT_AUDIO_HOST`), for example to `127.0.0.1`, to bind one address
+only:
 
 ```bash
 # Play with sox
@@ -447,6 +449,7 @@ api:
 # Audio output
 audio:
   tcpPort: 8080
+  # host: "127.0.0.1" # default: every interface
   format: "S16LE"
   sampleRate: 48000
 

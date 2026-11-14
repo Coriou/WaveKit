@@ -62,3 +62,34 @@ describe("AudioOutput start failure (WG9 5.1)", () => {
 		}
 	})
 })
+
+describe("AudioOutput bind address", () => {
+	it("binds only the configured host", async () => {
+		const output = new AudioOutput(logger, {
+			port: 0,
+			host: "127.0.0.1",
+			format: "S16LE",
+			sampleRate: 48000,
+		})
+		await output.start()
+		try {
+			const server = (output as unknown as { server: net.Server }).server
+			expect((server.address() as net.AddressInfo).address).toBe("127.0.0.1")
+		} finally {
+			await output.stop()
+		}
+	})
+
+	it("binds every interface without a host", async () => {
+		const { output } = make(0)
+		await output.start()
+		try {
+			const server = (output as unknown as { server: net.Server }).server
+			expect(["::", "0.0.0.0"]).toContain(
+				(server.address() as net.AddressInfo).address,
+			)
+		} finally {
+			await output.stop()
+		}
+	})
+})

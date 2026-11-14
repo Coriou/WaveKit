@@ -1408,6 +1408,7 @@ async function main(): Promise<void> {
 		})
 		const audioOutput = new AudioOutput(logger, {
 			port: config.audio.tcpPort,
+			host: config.audio.host,
 			format: config.audio.format,
 			sampleRate: config.audio.sampleRate,
 		})
