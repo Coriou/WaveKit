@@ -138,6 +138,16 @@ const P25_SRC_TG =
 	/\bsrc:\s*\[\s*(?<src>\d+)\s*\]\s*tg:\s*\[\s*(?<tg>\d+)\s*\]/i
 /** P25 frame types (reserved for enhanced frame analysis) */
 const _P25P1_FRAME_TYPE = /\b(LDU1|LDU2|TDULC|TSBK|MPDU|TSDU|HDU)\b/i
+/**
+ * P25 voice link control as p25_lcw.c prints it (" Group Voice Channel User
+ * - Group 4321 Source 1234567", " Unit to Unit Voice Channel User - Target 7
+ * Source 9"). Both callers, LDU1 and TDULC, print it only after the
+ * RS(24,12,13) check passed (otherwise " LCW FEC ERR "), so it is checked.
+ */
+const P25_LCW_VOICE =
+	/\b(?:Group Voice Channel User - Group|Unit to Unit Voice Channel User - Target) (?<tg>\d+) Source (?<src>\d+)\b/
+/** NAC of a P25 sync line ("NAC/CC: 2A5;"); a failed NID prints "duid:EE". */
+const P25_NAC_PRINT = /\bNAC(?:\/CC)?:\s*([0-9A-F]{3});/i
 /** P25 call termination */
 const P25_CALL_TERM = /\b(Call\s+Termination|TDULC)\b/i
 
@@ -157,8 +167,14 @@ const P25_CRYPTO =
 const _YSF_HEAD = /\bSync:\s*\+YSF\b/i
 /** YSF FICH block (reserved - YSF_CRC_OK is preferred) */
 const _YSF_FICH = /\bFICH\b/i
-/** YSF CRC status in same line */
+/** YSF CRC status in same line (the -Z payload print "FICH: [..]") */
 const YSF_CRC_OK = /\bFICH\b(?!.*CRC\s+ERR)/i
+/**
+ * A YSF frame whose FICH decoded: ysf.c prints the frame type and number
+ * ("HC FN: 1/7", "CC FN: 2/7", "TC FN: 1/7") only when the FICH check
+ * passed; a failed FICH prints "FN: 10/10 FICH (CRC ERR)" instead.
+ */
+const YSF_FICH_OK = /\b(?:HC|CC|TC|XX) FN: [1-8]\/[1-8]\b/
 
 // --- NXDN Patterns ---
 /** NXDN sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -178,6 +194,55 @@ const DSTAR_MY = /\bMY[:=]\s*(?<val>[A-Z0-9\/ ]{3,8})\b/i
 const DSTAR_UR = /\bUR[:=]\s*(?<val>[A-Z0-9\/ ]{3,8})\b/i
 const DSTAR_RPT1 = /\bRPT1[:=]\s*(?<val>[A-Z0-9\/ ]{3,8})\b/i
 const DSTAR_RPT2 = /\bRPT2[:=]\s*(?<val>[A-Z0-9\/ ]{3,8})\b/i
+
+/**
+ * D-STAR header as dstar_header.c and dstar.c print it: " RPT 2: %s RPT 1:
+ * %s DST: %s SRC: %s" with 8, 8, 8 and 12 (MY + suffix) characters. On a
+ * "+DSTAR HEADER" line the first block is the radio header, printed without
+ * an FCS check (dstar_header.c TODO); the slow-data copy that may follow is
+ * printed only when its CRC matches (dstar.c processDSTAR_SD, otherwise
+ * " SLOW DATA - HEADER FORMAT (CRC ERR)"). A "+DSTAR VOICE" line carries
+ * only slow data, so its block is the checked one.
+ */
+const DSTAR_HEADER_BLOCK =
+	/ RPT 2: (?<rpt2>.{8}) RPT 1: (?<rpt1>.{8}) DST: (?<ur>.{8}) SRC: (?<my>.{8})(?<suffix>.{4})/g
+const DSTAR_HEADER_SYNC = /\bSync:\s*[+-]DSTAR HEADER\b/
+/** A plausible D-STAR or YSF callsign field once trimmed. */
+const CALLSIGN_FIELD = /^[A-Z0-9][A-Z0-9/-]{0,9}$/
+
+/** The CRC-checked header block of a D-STAR line, if it has one. */
+function checkedDstarHeader(
+	line: string,
+): { my: string; ur: string; rpt1: string; rpt2: string } | undefined {
+	const blocks = [...line.matchAll(DSTAR_HEADER_BLOCK)]
+	const checked = blocks[DSTAR_HEADER_SYNC.test(line) ? 1 : 0]?.groups
+	if (checked === undefined || !SYNC_PATTERN.test(line)) return undefined
+	const my = (checked["my"] ?? "").trim()
+	if (!CALLSIGN_FIELD.test(my)) return undefined
+	return {
+		my,
+		ur: (checked["ur"] ?? "").trim(),
+		rpt1: (checked["rpt1"] ?? "").trim(),
+		rpt2: (checked["rpt2"] ?? "").trim(),
+	}
+}
+
+/**
+ * The source callsign of a YSF line, from a DCH whose own CRC passed (ysf.c
+ * prints "DCH (CRC ERR)" / "DCH2 (CRC ERR)" instead): CSD1 of a header or
+ * terminator "DST: %s SRC: %s" (10 characters each), or V/D type 2 frame 1
+ * "FN: 2/7 SRC: %s".
+ */
+const YSF_CSD1 = /\bDST: (?<dst>.{10}) SRC: (?<src>.{10})/
+const YSF_VD2_SRC = /\bFN: \d\/\d SRC: (?<src>.{1,10})/
+function ysfSourceCallsign(line: string): string | undefined {
+	const src = (
+		YSF_CSD1.exec(line)?.groups?.["src"] ??
+		YSF_VD2_SRC.exec(line)?.groups?.["src"] ??
+		""
+	).trim()
+	return CALLSIGN_FIELD.test(src) ? src : undefined
+}
 
 // --- ProVoice Patterns ---
 /** ProVoice sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -538,6 +603,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	// Current protocol detected from sync (candidate context, not event)
 	private currentProtocol: DsdFmeProtocol = null
+	/** NAC of the last P25 phase 1 sync line whose NID decoded. */
+	private lastP25Nac: string | undefined = undefined
 	private linkDmrCc = new Map<string, { cc: number; at: number }>()
 	private linkDmrMs = false
 	private pendingDmrLink: DsdFmeLinkLine | undefined
@@ -1504,6 +1571,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Update protocol tracking
 		this.currentProtocol = newProtocol
+		if (newProtocol !== "p25p1") this.lastP25Nac = undefined
 
 		// Deduplicate sync events for debug output
 		if (proto === this.lastSyncMode) {
@@ -1752,18 +1820,26 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				const nac =
 					/\bNAC(?:\/CC)?:\s*([0-9A-F]{3});/i.exec(line)?.[1] ??
 					P25_NAC.exec(line)?.groups?.["nac"]
+				const lcw =
+					protocol === "p25p1" ? P25_LCW_VOICE.exec(line)?.groups : undefined
 				const idGroups =
-					P25_SRC_TG.exec(line)?.groups ?? P25P2_VCH.exec(line)?.groups
+					lcw ??
+					P25_SRC_TG.exec(line)?.groups ??
+					P25P2_VCH.exec(line)?.groups
 				const alg = ALG_ID.exec(line)?.groups?.["alg"]
 				if (nac === undefined && idGroups === undefined && alg === undefined)
 					return null
+				// Only the RS-checked LCW print attests talkgroup and source.
+				const lcwChecked = lcw !== undefined && clean
 				return {
 					protocol: "p25",
 					...(nac !== undefined ? { nac: nac.toUpperCase() } : {}),
 					...ids(idGroups, "tg", "src"),
 					...base,
-					verified: false,
-					...(alg !== undefined && !isClearAlgorithm(alg)
+					verified: lcwChecked,
+					...(lcwChecked ? { voiceLc: true } : {}),
+					...((alg !== undefined && !isClearAlgorithm(alg)) ||
+					(lcw !== undefined && DMR_ENCRYPTED.test(line))
 						? { encrypted: true }
 						: {}),
 				}
@@ -1785,15 +1861,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					verified: clean && checkedRan !== undefined,
 				}
 			}
-			case "ysf":
+			case "ysf": {
 				// ysf.c prints CODE as its SQL code; this parser does not map it to DG-ID.
-				// No supported checked identity format: remain sync-only.
+				// A source callsign from a CRC-checked DCH is checked.
+				const callsign = ysfSourceCallsign(line)
+				if (callsign !== undefined)
+					return { protocol: "ysf", callsign, ...base, verified: clean }
 				return sync || /\bFICH\b/i.test(line)
 					? { protocol: "ysf", ...base }
 					: null
+			}
 			case "dstar": {
-				// dstar_header.c has a TODO for header FCS; MY is not proof.
-				// dstar.c slow-data checked header uses SRC, not this MY format.
+				// The CRC-checked slow-data header is proof; the radio header
+				// (dstar_header.c, no FCS check) and the MY format are not.
+				const header = checkedDstarHeader(line)
+				if (header !== undefined)
+					return {
+						protocol: "dstar",
+						callsign: header.my,
+						...base,
+						verified: clean,
+					}
 				const my = DSTAR_MY.exec(line)?.groups?.["val"]?.trim()
 				return my ? { protocol: "dstar", callsign: my, ...base } : null
 			}
@@ -1926,6 +2014,36 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Requires tg+src to start a call.
 	 */
 	private handleP25P1Line(line: string, now: Date): DecoderOutput | null {
+		// The NAC of the last sync line with a decoded NID: the LCW print
+		// that carries talkgroup and source has no NAC of its own.
+		const printedNac = P25_NAC_PRINT.exec(line)?.[1]
+		if (printedNac !== undefined && SYNC_PATTERN.test(line))
+			this.lastP25Nac = /\bduid:EE\b/.test(line)
+				? undefined
+				: printedNac.toUpperCase()
+
+		const lcw = P25_LCW_VOICE.exec(line)?.groups
+		if (lcw) {
+			const tg = parseInt(lcw["tg"] ?? "0", 10)
+			const src = parseInt(lcw["src"] ?? "0", 10)
+			if (tg > 0 || src > 0) {
+				const event = this.processCallMetadata(
+					now,
+					"p25p1",
+					tg,
+					src,
+					undefined,
+					undefined,
+					this.lastP25Nac !== undefined ? { nac: this.lastP25Nac } : undefined,
+				)
+				// LCW service option bit 0x40 prints " Encrypted".
+				const call = this.callState ?? this.pendingCall?.state ?? null
+				if (DMR_ENCRYPTED.test(line) && call?.protocol === "p25p1")
+					this.markEncrypted(call)
+				return event
+			}
+		}
+
 		// Extract NAC
 		const nacMatch = P25_NAC.exec(line)
 		const nac = nacMatch?.groups?.["nac"]
@@ -2034,13 +2152,25 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 */
 	private handleYsfLine(line: string, now: Date): DecoderOutput | null {
 		// YSF requires a CRC-OK FICH block to be considered valid
-		if (!YSF_CRC_OK.test(line)) {
+		if (!YSF_FICH_OK.test(line) && !YSF_CRC_OK.test(line)) {
 			return null
 		}
 
 		// YSF doesn't have traditional TGT/SRC, but we track calls anyway
 		// Use 0 as placeholder for talkgroup/source
-		return this.processCallMetadata(now, "ysf", 0, 0)
+		const callsign = ysfSourceCallsign(line)
+		return this.processCallMetadata(
+			now,
+			"ysf",
+			0,
+			0,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			callsign !== undefined ? { callsign } : undefined,
+		)
 	}
 
 	/**
@@ -2048,7 +2178,23 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Requires MY/UR/RPT1/RPT2 header fields to start a call.
 	 */
 	private handleDStarLine(line: string, now: Date): DecoderOutput | null {
-		// Extract D-Star header fields
+		// The CRC-checked header as dsd-fme prints it (see DSTAR_HEADER_BLOCK).
+		const checked = checkedDstarHeader(line)
+		if (checked !== undefined) {
+			return this.processCallMetadata(
+				now,
+				"dstar",
+				0,
+				0,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				checked,
+			)
+		}
+
+		// Extract D-Star header fields (legacy MY/UR/RPT1/RPT2 prints)
 		const myMatch = DSTAR_MY.exec(line)
 		const urMatch = DSTAR_UR.exec(line)
 		const rpt1Match = DSTAR_RPT1.exec(line)

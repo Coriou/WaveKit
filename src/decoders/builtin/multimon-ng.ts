@@ -165,8 +165,21 @@ export function multimonHasPaging(value: unknown): boolean {
 const POCSAG_PATTERN =
 	/POCSAG(\d+):\s*Address:\s*(\d+)\s+Function:\s*(\d+)\s+(?:(Alpha|Numeric|Tone Only):\s*(.*))?/i
 
-// FLEX format: "FLEX: 1600/2/A 12.345 [1234567] ALN Message text here"
-// or "FLEX|1600/2/A|12.345|1234567|ALN|Message text"
+// FLEX as multimon-ng demod_flex.c prints it (the pinned build):
+// alphanumeric  "FLEX|2026-01-02 03:04:05|1600/2/K/A|05.012|001234567|ALN|text"
+//               (group pages append " 001234568 ..." to the capcode field);
+// numeric, tone and unknown pages
+//               "FLEX: 2026-01-02 03:04:05 1600/2/A 05.012 [001234567] NUM 12345".
+// With timestamps off (flex_disable_timestamp) the first has no date field
+// and the others are "FLEX|1600/2/A|05.012|[001234567]|NUM 12345".
+// The field after the mode is cycle.frame, not a frequency.
+const FLEX_ALN_PATTERN =
+	/^FLEX\|(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\|)?(\d+)\/(\d)\/([KCF?])\/([A-D])\|(\d{2}\.\d{3})\|(\d{9})((?: \d{9})*)\|(ALN)\|(.*)$/
+const FLEX_NUMERIC_PATTERN =
+	/^FLEX(?:: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} |\|)(\d+)\/(\d)\/([A-D])[ |](\d{2}\.\d{3})[ |]\[(\d{9})\][ |](NUM|TON|UNK) ?(.*)$/
+
+// Legacy FLEX shapes (older multimon-ng): "FLEX: 1600/2/A 12.345 [1234567] ALN text"
+// or "FLEX|1600/2/A|12.345|1234567|ALN|text"
 // Note: We use two separate patterns to avoid confusing | in message content with delimiters
 const FLEX_SPACE_PATTERN =
 	/FLEX:\s*(\d+\/\d+\/[A-Z])\s+(\d+\.\d+)\s+\[?(\d+)\]?\s+([A-Z]+)\s*(.*)?/i
@@ -556,7 +569,29 @@ export class MultimonDecoder extends AudioDemodDecoder {
 			return this.parsePocsagOutput(pocsagMatch)
 		}
 
-		// Check for FLEX messages (try space-delimited first, then pipe-delimited)
+		// FLEX as the pinned multimon-ng prints it, then the legacy shapes.
+		const flexAln = FLEX_ALN_PATTERN.exec(line)
+		if (flexAln) {
+			return this.flexMessage({
+				mode: `${flexAln[1]}/${flexAln[2]}/${flexAln[4]}`,
+				fragment: flexAln[3] ?? "?",
+				frequency: flexAln[5] ?? "",
+				capcode: flexAln[6] ?? "",
+				groupCapcodes: (flexAln[7] ?? "").trim(),
+				messageType: "ALN",
+				message: flexAln[9] ?? "",
+			})
+		}
+		const flexNumeric = FLEX_NUMERIC_PATTERN.exec(line)
+		if (flexNumeric) {
+			return this.flexMessage({
+				mode: `${flexNumeric[1]}/${flexNumeric[2]}/${flexNumeric[3]}`,
+				frequency: flexNumeric[4] ?? "",
+				capcode: flexNumeric[5] ?? "",
+				messageType: flexNumeric[6] ?? "",
+				message: flexNumeric[7] ?? "",
+			})
+		}
 		const flexSpaceMatch = FLEX_SPACE_PATTERN.exec(line)
 		if (flexSpaceMatch) {
 			return this.parseFlexOutput(flexSpaceMatch)
@@ -613,26 +648,48 @@ export class MultimonDecoder extends AudioDemodDecoder {
 	}
 
 	/**
-	 * Parses FLEX output into a message event.
+	 * Parses a legacy-shaped FLEX line into a message event.
 	 */
 	private parseFlexOutput(match: RegExpExecArray): DecoderOutput {
-		const mode = match[1] ?? ""
-		const frequency = match[2] ?? ""
-		const capcode = match[3] ?? ""
-		const messageType = match[4] ?? ""
-		const message = match[5]?.trim() ?? ""
+		return this.flexMessage({
+			mode: match[1] ?? "",
+			frequency: match[2] ?? "",
+			capcode: match[3] ?? "",
+			messageType: match[4] ?? "",
+			message: match[5] ?? "",
+		})
+	}
 
+	/**
+	 * A FLEX message event. `frequency` keeps its historical name; it holds
+	 * the cycle.frame field. `fragment` (K complete, C/F a part of a longer
+	 * message) and `groupCapcodes` (members of a group page) only appear when
+	 * multimon-ng printed them.
+	 */
+	private flexMessage(page: {
+		mode: string
+		frequency: string
+		capcode: string
+		messageType: string
+		message: string
+		fragment?: string
+		groupCapcodes?: string
+	}): DecoderOutput {
 		return {
 			timestamp: new Date(),
 			decoder: this.id,
 			type: "message",
 			data: {
 				protocol: "FLEX",
-				mode,
-				frequency,
-				capcode,
-				messageType,
-				message,
+				mode: page.mode,
+				frequency: page.frequency,
+				capcode: page.capcode,
+				messageType: page.messageType,
+				message: page.message.trim(),
+				...(page.fragment !== undefined ? { fragment: page.fragment } : {}),
+				...(page.groupCapcodes
+					? { groupCapcodes: page.groupCapcodes.split(" ") }
+					: {}),
 			},
 		}
 	}
