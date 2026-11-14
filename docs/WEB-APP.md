@@ -16,6 +16,14 @@ and talks to the core over its REST API and WebSocket. The code lives in [`web/`
   ([core reference](CORE-REFERENCE.md)).
 - **Protected core:** the first visit shows a **Pair this browser** chip. Pair once, and the
   browser stays signed in. Signed-in devices are listed in the ⌘K palette.
+- **One address:** a protected core accepts the address named in its access settings and no
+  other. `localhost` and `127.0.0.1` reach the same server, but to the browser and to the core they
+  are two sites, each with its own sign-in. Opened under the one the core refuses, the app shows
+  **This address is not accepted · Open 127.0.0.1:5173 instead**; the chip is a link to the same
+  page on the other name. Off this machine it reads **Allow it in the core's access settings**
+  (`access.allowedAuthorities` and `access.allowedOrigins`, [core reference](CORE-REFERENCE.md)).
+- **Opened before the core:** a page opened while the core is down or restarting shows **Can't
+  reach the receiver · Retrying…** and loads by itself once the core answers.
 
 ## The screen
 

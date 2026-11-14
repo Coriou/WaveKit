@@ -1,7 +1,8 @@
 // A quiet status chip over the plot, in the top-row gap between the Tuner and the Receiver (title only when the
 // gap is tight, under the top row when it is too tight, as beside a full-height drawer): the event socket is down or reconnecting, the core
-// cannot be reached, or a protected core has no session for this browser (read-only; the chip opens
-// the pairing sheet when the core pairs browsers).
+// cannot be reached, the core refuses the page's address (the chip links to the other loopback name), or a
+// protected core has no session for this browser (read-only; the chip opens the pairing sheet when the core
+// pairs browsers).
 import { useLayoutEffect, useRef, useState } from "react"
 
 import { isReadOnly, useServices } from "../../app/context.ts"
@@ -18,7 +19,12 @@ export function ConnectionChip() {
 	const [pairing, setPairing] = useState(false)
 	const [place, setPlace] = useState<ChipPlace | null>(null)
 	const chip = useRef<HTMLElement | null>(null)
-	const notice = connectionNotice(connection, access, isReadOnly(access))
+	const notice = connectionNotice(
+		connection,
+		access,
+		isReadOnly(access),
+		window.location.href,
+	)
 	// natural widths: the title and detail spans report their full text width even while clipped
 	useLayoutEffect(() => {
 		const el = chip.current
@@ -69,6 +75,19 @@ export function ConnectionChip() {
 				>
 					{body}
 				</button>
+			) : notice.href !== undefined ? (
+				<a
+					ref={el => {
+						chip.current = el
+					}}
+					className="wk-island wkf-conn-chip"
+					data-tone={tone}
+					data-title-only={titleOnly}
+					data-action=""
+					href={notice.href}
+				>
+					{body}
+				</a>
 			) : (
 				<div
 					ref={el => {

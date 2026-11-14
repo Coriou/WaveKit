@@ -8,13 +8,49 @@ export interface ConnectionNotice {
 	tone: "quiet" | "amber"
 	/** The chip opens the pairing sheet (a protected core that pairs browsers). */
 	pair: boolean
+	/** The chip is a link: the same page on the address the receiver is likely to accept. */
+	href?: string
 }
 
-/** Null while everything is fine (open socket, legacy core or a protected core with a session). */
+/** The names a browser uses for this machine; a core that accepts one refuses the others. */
+const LOOPBACK_SWAP: Readonly<Record<string, string>> = {
+	localhost: "127.0.0.1",
+	"127.0.0.1": "localhost",
+	"[::1]": "127.0.0.1",
+}
+
+/**
+ * The same page under the other loopback name (localhost and 127.0.0.1 swap, [::1] goes to
+ * 127.0.0.1), or null when `href` is not on this machine. To a browser they are different sites:
+ * the core accepts the one in its access settings, and a session cookie belongs to one name.
+ */
+export function otherLoopbackUrl(href: string): string | null {
+	let url: URL
+	try {
+		url = new URL(href)
+	} catch {
+		return null
+	}
+	const other = LOOPBACK_SWAP[url.hostname]
+	if (other === undefined) return null
+	url.hostname = other
+	return url.toString()
+}
+
+/** The core answered, and refused the address in the address bar (its Host or Origin check). */
+function isAddressRefusal(code: string | null | undefined): boolean {
+	return code === "HOST_FORBIDDEN" || code === "ORIGIN_FORBIDDEN"
+}
+
+/**
+ * Null while everything is fine (open socket, legacy core or a protected core with a session).
+ * `pageHref` is the address bar: with it, a refused loopback address links to the other name.
+ */
 export function connectionNotice(
 	connection: ConnectionState,
 	access: AccessStoreState,
 	readOnly: boolean,
+	pageHref?: string,
 ): ConnectionNotice | null {
 	if (readOnly) {
 		const pair =
@@ -28,6 +64,25 @@ export function connectionNotice(
 			busy: false,
 			tone: "amber",
 			pair,
+		}
+	}
+	if (
+		access.access === null &&
+		isAddressRefusal(access.code) &&
+		connection !== "open"
+	) {
+		// Retrying cannot help: the core answers, and refuses this address every time.
+		const other = pageHref === undefined ? null : otherLoopbackUrl(pageHref)
+		return {
+			title: "This address is not accepted",
+			detail:
+				other === null
+					? "Allow it in the core’s access settings"
+					: `Open ${new URL(other).host} instead`,
+			busy: false,
+			tone: "amber",
+			pair: false,
+			...(other === null ? {} : { href: other }),
 		}
 	}
 	if (access.access === null && access.error !== null && connection !== "open")

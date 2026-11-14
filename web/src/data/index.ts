@@ -7,7 +7,7 @@ import type { AccessDeviceKind, AccessSessionDto } from "@wavekit/api-types"
 import type { AccessState, ApiClientOptions, FetchLike } from "./api-client.ts"
 import { ApiClient, errorMessage, isApiError } from "./api-client.ts"
 import type { ConnectionState, SocketFactory } from "./events-client.ts"
-import { EventsClient } from "./events-client.ts"
+import { EventsClient, backoffDelay } from "./events-client.ts"
 import type { WorkerLike } from "./events-relay.ts"
 import { workerSocketFactory } from "./events-relay.ts"
 import type { Fleets } from "./fleets.ts"
@@ -38,6 +38,11 @@ import { TunerStore } from "./tuner-store.ts"
 export interface AccessStoreState {
 	access: AccessState | null
 	error: string | null
+	/**
+	 * The core's own code when it answered the bootstrap with a refusal (HOST_FORBIDDEN: it does
+	 * not accept the page's address); null or absent for anything else, a network error included.
+	 */
+	code?: string | null
 	/** This browser's session on a protected core (null: not paired, or a legacy core). */
 	session: AccessSessionDto | null
 }
@@ -46,6 +51,11 @@ export interface AccessStoreState {
 export function refreshDelayMs(expiresAt: number, now: number): number {
 	return Math.min(Math.max((expiresAt - now) / 2, 60_000), 2 ** 31 - 1)
 }
+
+/** The first wait before start() asks an unanswering core again (ms); it doubles up to START_RETRY_MAX_MS. */
+export const START_RETRY_BASE_MS = 1000
+/** The longest wait between two such asks (ms): the event socket's own reconnect cap. */
+export const START_RETRY_MAX_MS = 10_000
 
 export interface DataLayer {
 	api: ApiClient
@@ -89,7 +99,12 @@ export interface DataLayer {
 	coverage: CoverageStore
 	/** Stored position history for the Map's trails; attaches on demand. */
 	trailHistory: TrailHistoryStore
-	/** Detects the access mode, reads this browser's session, opens /ws and loads every store. Never rejects. */
+	/**
+	 * Detects the access mode, reads this browser's session, opens /ws and loads every store. Never
+	 * rejects. When the core does not answer the access question (down, restarting, or refusing the
+	 * page's address) it asks again with a growing wait (up to START_RETRY_MAX_MS) and loads the
+	 * stores once it answers, so a page opened during a core restart does not stay empty.
+	 */
 	start(): Promise<void>
 	/** Pairs this browser with a one-time code, then reconnects and reloads. Rejects with an ApiError. */
 	pair(input: {
@@ -148,6 +163,8 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 	})
 	const devices = new AccessDevicesStore(api)
 	let refreshTimer: ReturnType<typeof setTimeout> | null = null
+	let startTimer: ReturnType<typeof setTimeout> | null = null
+	let disposed = false
 	const setSession = (session: AccessSessionDto | null) => {
 		if (refreshTimer) clearTimeout(refreshTimer)
 		refreshTimer = null
@@ -209,19 +226,10 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		coverage: new CoverageStore(api),
 		trailHistory: new TrailHistoryStore(api, events),
 		async start() {
-			try {
-				const state = await api.bootstrap()
-				access.set({ access: state, error: null, session: null })
-				if (
-					state.mode === "protected" &&
-					state.bootstrap.access.sessionAvailable
-				)
-					setSession(await api.getSession())
-			} catch (error) {
-				access.set({ access: null, error: errorMessage(error), session: null })
-			}
+			const answered = await readAccess()
 			events.connect()
 			await loadAll()
+			if (!answered) retryStart(0)
 		},
 		async pair(input) {
 			setSession(await api.pair(input))
@@ -246,9 +254,11 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			}
 		},
 		dispose() {
+			disposed = true
 			offState()
 			offSessionLost()
 			if (refreshTimer) clearTimeout(refreshTimer)
+			if (startTimer) clearTimeout(startTimer)
 			layer.sources.dispose()
 			layer.tuner.dispose()
 			layer.receiver.dispose()
@@ -266,6 +276,50 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			layer.recordings.dispose()
 			events.disconnect()
 		},
+	}
+	/** Reads the access mode and this browser's session; false when the core gave no usable answer. */
+	async function readAccess(): Promise<boolean> {
+		try {
+			const state = await api.bootstrap()
+			access.set({ access: state, error: null, code: null, session: null })
+			if (state.mode === "protected" && state.bootstrap.access.sessionAvailable)
+				setSession(await api.getSession())
+			return true
+		} catch (error) {
+			access.set({
+				access: null,
+				error: errorMessage(error),
+				code: isApiError(error) && error.status !== 0 ? error.code : null,
+				session: null,
+			})
+			return false
+		}
+	}
+	/** Asks again after the backoff; once the core answers, the stores load as at a first start. */
+	function retryStart(attempt: number): void {
+		if (disposed) return
+		startTimer = setTimeout(
+			() => {
+				startTimer = null
+				void readAccess().then(answered => {
+					if (disposed) return
+					if (!answered) {
+						retryStart(attempt + 1)
+						return
+					}
+					// the socket opened before the session was read may have been refused: open it again
+					events.disconnect()
+					events.connect()
+					void loadAll()
+				})
+			},
+			backoffDelay(
+				attempt,
+				START_RETRY_BASE_MS,
+				START_RETRY_MAX_MS,
+				Math.random,
+			),
+		)
 	}
 	async function loadAll(): Promise<void> {
 		await Promise.all([
