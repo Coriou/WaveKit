@@ -106,8 +106,8 @@ export const PROBE_AFTER_FAILED_CONNECTS = 3
 
 /**
  * Whether a close may mean this browser lost its access, so the session is checked before giving
- * up. No close code is final by itself: the core closes every socket with 1008 "Access expired"
- * on a graceful stop too, so a 1008 is retried like any drop; if the reconnect fails as well, an
+ * up. No close code is final by itself: a graceful stop closes with 1001, but older cores sent
+ * 1008 "Access expired" then, so a 1008 is retried like any drop; if the reconnect fails as well, an
  * authenticated HTTP probe (authProbeUrl) decides, and only a 401 or 403 there ends the retries.
  */
 export function closeNeedsAuthCheck(code: number): boolean {

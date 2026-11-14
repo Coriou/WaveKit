@@ -716,11 +716,13 @@ export class ApiServer {
 			this.bandPlansObserver?.()
 			this.bandPlansObserver = undefined
 		})
-		await attempt(() => {
-			this.accessController?.dispose()
-		})
+		// The shutdown close (1001) goes out before the access controller disposes its leases, which
+		// would otherwise close every leased socket with 1008 "Access expired".
 		await attempt(() => {
 			this.wsBroadcaster.closeAll()
+		})
+		await attempt(() => {
+			this.accessController?.dispose()
 		})
 		await attempt(() => {
 			if (this.telemetryInterval) {

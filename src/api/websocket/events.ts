@@ -1353,7 +1353,7 @@ export class WebSocketEventBroadcaster {
 	}
 
 	/**
-	 * Closes all client connections.
+	 * Closes all client connections with 1001 (Going Away): the server is shutting down.
 	 */
 	closeAll(): void {
 		try {
@@ -1365,7 +1365,7 @@ export class WebSocketEventBroadcaster {
 		for (const client of clients) this.handleDisconnect(client)
 		for (const client of clients) {
 			try {
-				client.socket.close(1000, "Server shutting down")
+				client.socket.close(1001, "Server shutting down")
 			} catch {
 				// Ignore errors during shutdown
 			}
