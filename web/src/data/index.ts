@@ -307,9 +307,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 						retryStart(attempt + 1)
 						return
 					}
-					// the socket opened before the session was read may have been refused: open it again
-					events.disconnect()
-					events.connect()
+					// the event socket has been retrying by itself all along: only the stores are due
 					void loadAll()
 				})
 			},
