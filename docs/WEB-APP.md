@@ -21,7 +21,10 @@ and talks to the core over its REST API and WebSocket. The code lives in [`web/`
   are two sites, each with its own sign-in. Opened under the one the core refuses, the app shows
   **This address is not accepted · Open 127.0.0.1:5173 instead**; the chip is a link to the same
   page on the other name. Off this machine it reads **Allow it in the core's access settings**
-  (`access.allowedAuthorities` and `access.allowedOrigins`, [core reference](CORE-REFERENCE.md)).
+  (`access.allowedAuthorities` and `access.allowedOrigins`, [Docker setup](DOCKER-SETUP.md)).
+  The dev and preview servers do the first step for you: a page opened under a loopback name the
+  core refuses is sent to the loopback name it accepts. Only `localhost`, `127.0.0.1` and `[::1]`
+  are ever tried, and the core still decides which one it accepts.
 - **Opened before the core:** a page opened while the core is down or restarting shows **Can't
   reach the receiver · Retrying…** and loads by itself once the core answers.
 

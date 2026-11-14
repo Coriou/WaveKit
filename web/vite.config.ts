@@ -1,6 +1,7 @@
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
+import { canonicalHost } from "./build/canonical-host.ts"
 import { pwa } from "./build/pwa-plugin.ts"
 
 // The dev server proxies the core API. Default target is the mock (pnpm --filter @wavekit/web mock).
@@ -11,7 +12,8 @@ const api = process.env["WAVEKIT_WEB_API"] ?? "http://127.0.0.1:3101"
 const ws = api.replace(/^http/, "ws")
 
 export default defineConfig({
-	plugins: [react(), pwa()],
+	// canonicalHost first: a page opened under a loopback name the core refuses goes to the one it accepts.
+	plugins: [canonicalHost(), react(), pwa()],
 	// packages/brand pulls its own React 18 peer; one copy only.
 	resolve: { dedupe: ["react", "react-dom"] },
 	server: {
