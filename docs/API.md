@@ -3978,7 +3978,8 @@ stopped stay held for identify against new recordings and analog trials until it
 starts: one is refused only when it would leave identify no room once the probes it may stop
 are gone. Holds are pool-wide, at most 8 s from the first stop whatever identifies follow,
 then none for the next 8 s, so a recording waits on them at most 8 s in any 16 s (job probes
-ignore them). A recording that would not fit beside a running identify probe, or would take
+ignore them; in those 8 s identify may still stop a job probe and a recording may take the
+freed cores). A recording that would not fit beside a running identify probe, or would take
 those held cores, waits for the next snapshot and starts late, so its start may be `cut`.
 
 `folders` (absent from older cores and before the scanner state loaded) counts what the
