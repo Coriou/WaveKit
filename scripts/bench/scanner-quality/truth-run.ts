@@ -5,12 +5,11 @@
  *
  * - Tuning is proven (a tuning ledger, as the live receiver's commanded tuning), so the
  *   recorder records as it does live.
- * - Recorded decodes are injected when they reached the live scanner (their recorded offset,
- *   which holds the decoder's own latency), through the seam their path uses in production: an
- *   always-on decoder's evidence (`ambient`) or a live identify probe (`probe`) goes to the
- *   service's ambient evidence handler, which places it on an observation by frequency and time;
- *   an identify replay (`replay`) is applied to the scanner's own IQ capture of that transmission
- *   (`applyReplayResult`), and is lost when the scanner captured none, as it would be live.
+ * - Recorded always-on decodes (`ambient`: multimon-ng or dsd-fme placed on a channel) are
+ *   injected when they reached the live scanner (their recorded offset, which holds the
+ *   decoder's own latency) through the service's ambient evidence handler, which places them on
+ *   an observation by frequency and time. Recorded identify decodes (`probe`, `replay`) are not:
+ *   the revision under test identifies for itself.
  * - Identify replays run in the scanner's own replay queue on its own captures; only the
  *   decoders are doubles, answering from the labels one nominal second per trial
  *   (replayDoubles).
@@ -62,9 +61,10 @@ export const TRUTH_TAIL_MS = 3_000
  * Virtual time then run with no IQ: 30 s. By the noise tail's end the recorder has asked every
  * file's finish (a track closes one 500 ms hang after its signal, the recorder decides up to
  * 1 s later); a provisional file is then held for its late verdict at most 26 s (3 s + 8 s +
- * 15 s, the recorder's late-verdict grace where the scanner has one), and a replay answers at
- * most REPLAY_QUEUE_MS + IQ_REPLAY_MAX_TRIALS (8) × REPLAY_TRIAL_MS = 10 s after its capture
- * ended: 30 s covers the longer with 4 s to spare.
+ * 15 s, the recorder's late-verdict grace where the scanner has one): 30 s covers it with 4 s to
+ * spare. Past it the run goes on until the replay queue drained and every recording settled
+ * (harness `idleUntil`); what is still queued or unsettled at its bound is counted
+ * (`unsettled`), never silently dropped.
  */
 export const TRUTH_IDLE_MS = 30_000
 /** Analog file rate (frames per second, the recorder's 8 kHz WAV). */
@@ -132,6 +132,8 @@ export interface TruthRun {
 	wallSeconds: number
 	/** Steps that gave up waiting for the recorder's I/O (harness `busy`): 0 when deterministic. */
 	busyOverruns: number
+	/** Replays still queued or running, and recordings not settled, when the run stopped. */
+	unsettled: number
 	/**
 	 * What happened, in scene ms order: each replay result applied and each recorder decision
 	 * (diagnostics; not scored).
@@ -142,11 +144,16 @@ export interface TruthRun {
 /** The service's private parts this harness drives (same names on every tree it is run on). */
 interface ServiceInternals {
 	storageDir: string
+	replayQueue: ReplayQueueView | null
 	ambient: { emit(event: "evidence", e: unknown): boolean }
 	widebandAnalog: RecorderInternals
 	spectrum: {
 		engine(sourceId: string): { currentEpoch(): { epoch: number } } | undefined
 	}
+}
+interface ReplayQueueView {
+	size(): number
+	active(): unknown
 }
 interface RecorderInternals {
 	deps: { beginAnalog: (input: BeginInput) => AnalogHandleLike }
@@ -389,10 +396,14 @@ function armDecodes(
  * a replay decoder needs a POCSAG batch (about 1 s at 1 200 Bd) or several DMR bursts, never a
  * capture's edge. The label it holds most decides:
  * - a probe trial decodes when it is the label's protocol (DMR, POCSAG), else no sync;
- * - the analog trial measures voice (`decoded` with the label's CTCSS tone, else `heard`), data
- *   (`data-like`) for DMR and POCSAG, a bare carrier (`carrier-only`); noise, an unknown label or
- *   none holds no frames (`no-sync`: proves nothing either way). The outcome is the production
- *   classifier's own reading of those statistics, so the queue's judge accepts it.
+ * - the analog trial measures voice (`decoded` with the label's CTCSS tone, else `heard`) and a
+ *   bare carrier (`carrier-only`); for DMR, POCSAG, noise, an unknown label or none it holds no
+ *   frames (`no-sync`: proves nothing either way). The real trial measures the audio and can be
+ *   fooled (noise read as voice, data read as FM); the double never claims what only that
+ *   measurement could, so a revision leaning on an analog verdict for digital or noise gains
+ *   nothing here. Its voice verdict is ideal (known limit: a weak voice is always heard). The
+ *   outcome is the production classifier's own reading of those statistics, so the queue's judge
+ *   accepts it.
  */
 export const REPLAY_TRIAL_MS = 1_000
 export const REPLAY_MIN_HELD_MS = 1_000
@@ -442,23 +453,15 @@ export function analogStats(
 					syllabic: 0.5,
 					cluster: 0.1,
 				}
-			: label === "dmr" || label === "pocsag"
+			: label === "carrier"
 				? {
 						carrierDb: -10,
 						hfNoiseDb: -20,
-						audioDb: -12,
-						syllabic: 0.1,
-						cluster: 0.9,
+						audioDb: -60,
+						syllabic: 0,
+						cluster: 0,
 					}
-				: label === "carrier"
-					? {
-							carrierDb: -10,
-							hfNoiseDb: -20,
-							audioDb: -60,
-							syllabic: 0,
-							cluster: 0,
-						}
-					: null
+				: null
 	return {
 		mode,
 		frames:
@@ -587,6 +590,16 @@ export async function runTruthCase(
 	const trace: string[] = []
 	let t0 = 0
 	let busy: () => boolean = () => false
+	let unsettled = 0
+	let queueOf: () => ReplayQueueView | null = () => null
+	/** Replays still to answer and recordings still to settle (the run is not done while > 0). */
+	const pending = (): number => {
+		const q = queueOf()
+		return (
+			(q ? q.size() + (q.active() === null ? 0 : 1) : 0) +
+			recordings.filter(r => r.outcome === "pending").length
+		)
+	}
 	// The replay doubles answer only after the run started (inspect binds the clock and captures).
 	let bound: { sceneNow: () => number; ctx: InspectContext } | null = null
 	const replay = replayDoubles(
@@ -609,17 +622,20 @@ export async function runTruthCase(
 			tailMs: TRUTH_TAIL_MS,
 			idleTailMs: TRUTH_IDLE_MS,
 			busy: () => busy(),
+			idleUntil: () => pending() === 0,
 			replay,
 			decoderTypes: TRUTH_DECODER_TYPES,
 			inspect: (service, sceneNow, ctx) => {
 				const svc = service as unknown as ServiceInternals
 				bound = { sceneNow, ctx }
+				queueOf = () => svc.replayQueue
 				busy = watchRecorder(svc, ctx, recordings)
 				armDecodes(svc, sceneNow, ctx, c, decodes)
 				t0 = Date.now() - sceneNow()
 			},
 			beforeStop: (service: ScannerService) => {
 				const svc = service as unknown as ServiceInternals
+				unsettled = pending()
 				const onDisk = analogFilesOnDisk(svc.storageDir)
 				for (const r of recordings) r.onDisk = onDisk.has(r.operationId)
 				const diag = svc.widebandAnalog.diagnostics()
@@ -640,6 +656,7 @@ export async function runTruthCase(
 			iqSeconds: run.iqSeconds,
 			wallSeconds: run.wallSeconds,
 			busyOverruns: run.busyOverruns ?? 0,
+			unsettled,
 			trace,
 		}
 	} finally {

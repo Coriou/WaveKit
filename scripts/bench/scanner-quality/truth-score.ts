@@ -109,6 +109,8 @@ export interface Totals {
 	 * at 0 by the checked-in limits.
 	 */
 	ioOverruns: number
+	/** Replays and recordings the run stopped before they settled: a verdict never seen. */
+	unsettled: number
 }
 
 export interface Scorecard {
@@ -281,6 +283,7 @@ const emptyTotals = (): Totals => ({
 	identifyWrong: 0,
 	unidentified: 0,
 	ioOverruns: 0,
+	unsettled: 0,
 })
 
 export function scoreCase(c: TruthCase, run: TruthRun): CaseScore {
@@ -316,6 +319,7 @@ export function scoreCase(c: TruthCase, run: TruthRun): CaseScore {
 	t.identifyWrong = identify.filter(i => i.verdict === "wrong").length
 	t.unidentified = identify.filter(i => i.verdict === "unidentified").length
 	t.ioOverruns = run.busyOverruns
+	t.unsettled = run.unsettled
 	return {
 		name: c.name,
 		kind: c.kind,
@@ -349,6 +353,7 @@ function addTotals(a: Totals, b: Totals): Totals {
 		identifyWrong: a.identifyWrong + b.identifyWrong,
 		unidentified: a.unidentified + b.unidentified,
 		ioOverruns: a.ioOverruns + b.ioOverruns,
+		unsettled: a.unsettled + b.unsettled,
 	}
 }
 
@@ -383,7 +388,8 @@ export function scorecard(
 		capture: sum(cases.filter(c => c.kind === "capture")),
 	}
 	const failures: Scorecard["failures"] = []
-	for (const kind of LIMIT_KINDS)
+	// A kind with no case in this run is not gated (its totals are all 0).
+	for (const kind of LIMIT_KINDS.filter(k => byKind[k].cases > 0))
 		for (const [metric, limit] of Object.entries(
 			limits.limits[kind] ?? {},
 		).sort(([a], [b]) => a.localeCompare(b))) {

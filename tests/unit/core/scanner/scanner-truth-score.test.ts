@@ -107,6 +107,7 @@ const runOf = (
 	iqSeconds: 1,
 	wallSeconds: 1,
 	busyOverruns: 0,
+	unsettled: 0,
 	trace: [],
 })
 
@@ -319,8 +320,13 @@ describe("truth scorecard: totals and limits", () => {
 		expect(formatScorecardLine(s)).toContain(
 			"FAIL (synthetic keptFiles 1 < 2, capture digitalKeptAsVoice 1 > 0)",
 		)
-		// A run without captures has capture totals of 0.
-		expect(scorecard([one], t).byKind.capture.keptFiles).toBe(0)
+		// A run without captures has capture totals of 0 and is not gated on them.
+		const synthOnly = scorecard([one], {
+			version: 1,
+			limits: { ...t.limits, capture: { identifyRight: { min: 5 } } },
+		})
+		expect(synthOnly.byKind.capture.keptFiles).toBe(0)
+		expect(synthOnly.failures.map(f => f.kind)).toEqual(["synthetic"])
 	})
 
 	it("adds totals over cases, labels included", () => {

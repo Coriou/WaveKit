@@ -8,7 +8,8 @@
 			"splitVoice": { "max": 0 },
 			"identifyWrong": { "max": 0 },
 			"identifyRight": { "min": 8 },
-			"ioOverruns": { "max": 0 }
+			"ioOverruns": { "max": 0 },
+			"unsettled": { "max": 0 }
 		},
 		"capture": {
 			"falseVoice": { "max": 1 },
@@ -17,7 +18,8 @@
 			"splitVoice": { "max": 0 },
 			"identifyWrong": { "max": 0 },
 			"identifyRight": { "min": 16 },
-			"ioOverruns": { "max": 0 }
+			"ioOverruns": { "max": 0 },
+			"unsettled": { "max": 0 }
 		}
 	},
 	"notes": {

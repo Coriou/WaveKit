@@ -258,6 +258,11 @@ const turn = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
 /** Clock step of the idle tail (no IQ fed): 250 ms. */
 const IDLE_STEP_MS = 250
 /**
+ * Longest the idle tail goes on for `idleUntil`: 120 s of virtual time, 15 captures' full replay
+ * plans (IQ_REPLAY_MAX_TRIALS = 8 trials of a nominal 1 s each) in the queue at the run's end.
+ */
+const IDLE_EXTRA_MAX_MS = 120_000
+/**
  * Real turns one step waits for in-flight I/O (`busy`): 200 000, about 2 s of an idle event loop
  * (10 µs a turn), 20 times a recording's slowest write measured on a loaded host (about 100 ms,
  * an fsync). Past it the step goes on and the run counts an overrun (`busyOverruns`).
@@ -323,6 +328,11 @@ export async function runScanner(
 		 * scanner's timers (a provisional recording's grace, identify deadlines) fire, at no DSP cost.
 		 */
 		idleTailMs?: number
+		/**
+		 * The scanner is done with the run (its replay queue drained, its recordings settled): the
+		 * idle tail goes on, IDLE_STEP_MS at a time, until this holds or IDLE_EXTRA_MAX_MS passed.
+		 */
+		idleUntil?: () => boolean
 		/** Called after the run, before the service stops (its state directory still exists). */
 		beforeStop?: (service: ScannerService) => Promise<void> | void
 		/**
@@ -350,6 +360,9 @@ export async function runScanner(
 	} = {},
 ): Promise<RunRecord> {
 	const fs = source.rateHz
+	// Checked before anything is made (the state dir), so a refused run leaves nothing behind.
+	if (opts.provenTuning === true && source.centreAt)
+		throw new Error("benchmark: provenTuning does not follow retunes")
 	const dir =
 		opts.stateDir ?? mkdtempSync(join(tmpdir(), "wk-scanner-quality-"))
 	const removeDir = (): void => {
@@ -799,6 +812,16 @@ export async function runScanner(
 			await advanceTo(ms)
 			await settle()
 		}
+		// Past the idle tail, on until `idleUntil` holds, at most IDLE_EXTRA_MAX_MS more.
+		if (opts.idleUntil)
+			for (
+				let ms = sceneNow() + IDLE_STEP_MS, end = ms + IDLE_EXTRA_MAX_MS;
+				ms <= end && !opts.idleUntil();
+				ms += IDLE_STEP_MS
+			) {
+				await advanceTo(ms)
+				await settle()
+			}
 		await opts.beforeStop?.(svc)
 		const finalIds = svc
 			.listDiscoveries({ limit: 10_000 })

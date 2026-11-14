@@ -75,6 +75,7 @@ describe("truth scorecard: the recorder in the loop", () => {
 		])
 		expect(s.kept.map(k => k.label)).toEqual(["analog-voice"])
 		expect(s.totals.falseVoice).toBe(0)
+		expect(first.unsettled).toBe(0)
 		// The DMR repeater is decoded, so identify names it.
 		expect(s.identify.find(i => i.label === "dmr")?.verdict).toBe("right")
 		const again = scoreCase(c, await runTruthCase(c))
@@ -143,8 +144,9 @@ describe("truth scorecard: replay decoder doubles", () => {
 		})
 		expect(judged(held("analog-voice"), null)).toBe("heard")
 		expect(judged(held("analog-voice"), 88.5)).toBe("decoded")
-		expect(judged(held("dmr"), null)).toBe("data-like")
-		expect(judged(held("pocsag"), null)).toBe("data-like")
+		// Data is what only a measurement could claim: the double holds no frames for it.
+		expect(judged(held("dmr"), null)).toBe("no-sync")
+		expect(judged(held("pocsag"), null)).toBe("no-sync")
 		expect(judged(held("carrier"), null)).toBe("carrier-only")
 		expect(judged(held("noise"), null)).toBe("no-sync")
 		expect(judged(null, null)).toBe("no-sync")
