@@ -11,6 +11,7 @@ import {
 	barredSnapshot,
 	DIGITAL_CHANNEL_MIN_SHARE,
 	DIGITAL_CHANNEL_MIN_VOTES,
+	DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS,
 	decodeDuring,
 	digitalChannelClasses,
 	DigitalClassLedger,
@@ -24,6 +25,7 @@ import {
 	STRONG_CLASS_MIN_OBSERVATIONS,
 	STRONG_CLASS_TTL_MS,
 	STRONG_PRIOR_TTL_MS,
+	type DigitalProof,
 	type VoicePrior,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import {
@@ -44,6 +46,7 @@ type Label = {
 	owner: boolean
 	at: number | null
 	checkedHint?: boolean
+	observationId?: string | null
 }
 
 /** The verdicts' wall clock (ms); every label is decoded at it unless a row says otherwise. */
@@ -909,7 +912,161 @@ describe("a digital channel (owner digital label within the TTL + its protocol's
 		).toBe("finish")
 	})
 
-	// Feature: analog recorder verdict, Property 2: a digital channel needs the owner's recent decoded, checked or digital-unknown label, a third of the votes in its protocol's classes and no analog proof
+	describe("unchecked DMR sync hints (dsd-fme sync, no verified TG/SRC) and the owner's observation proofs", () => {
+		const unchecked: Label = { ...hint, checkedHint: false }
+		const withProofs = (
+			labels: Label[],
+			proofs: DigitalProof[],
+			votes: Partial<Record<ScannerClass, number>>,
+			total = 240,
+			analogVoice = false,
+		): VoicePrior => ({
+			...voted(labels, votes, total, "fsk4-12k5", analogVoice),
+			digitalProofs: () => proofs,
+		})
+		const sync = (
+			observationId: string,
+			at: number,
+			checked = false,
+			protocol: ScannerProtocol = "dmr",
+		): DigitalProof => ({ protocol, at, checked, observationId })
+		const fsk = { "fsk4-12k5": 200 }
+		const rows: { name: string; prior: VoicePrior; reading: string }[] = [
+			{
+				name: "live shape: an unchecked DMR hint, TDMA votes, no analog proof: tone required",
+				prior: withProofs([unchecked], [sync("o1", recent)], {
+					"tdma-ms": 120,
+					"fsk4-12k5": 60,
+				}),
+				reading: "tone-required",
+			},
+			{
+				name: "unchecked DMR hints from 2 observations in the TTL, 4FSK 12.5 kHz votes: tone required",
+				prior: withProofs(
+					[unchecked],
+					[sync("o1", NOW - 10 * 60_000), sync("o2", recent)],
+					fsk,
+				),
+				reading: "tone-required",
+			},
+			{
+				name: "the same with 1 observation: suspect",
+				prior: withProofs([unchecked], [sync("o1", recent)], fsk),
+				reading: "suspect",
+			},
+			{
+				name: "the same observation twice (its label and its proof): suspect",
+				prior: withProofs(
+					[{ ...unchecked, observationId: "o1" }],
+					[sync("o1", recent)],
+					fsk,
+				),
+				reading: "suspect",
+			},
+			{
+				name: "2 observations, one older than STRONG_PRIOR_TTL_MS: suspect",
+				prior: withProofs(
+					[unchecked],
+					[sync("o1", NOW - STRONG_PRIOR_TTL_MS - 1), sync("o2", recent)],
+					fsk,
+				),
+				reading: "suspect",
+			},
+			{
+				name: "FROZEN: 2 observations' hints but analog voice heard (a CTCSS tone): none",
+				prior: withProofs(
+					[unchecked],
+					[sync("o1", NOW - 10 * 60_000), sync("o2", recent)],
+					fsk,
+					240,
+					true,
+				),
+				reading: "none",
+			},
+			{
+				name: "FROZEN: TDMA votes but analog voice heard: none",
+				prior: withProofs(
+					[unchecked],
+					[sync("o1", recent)],
+					{ "tdma-ms": 200 },
+					240,
+					true,
+				),
+				reading: "none",
+			},
+			{
+				name: "unchecked dPMR hints from 2 observations, 4FSK 6.25 kHz votes: suspect",
+				prior: withProofs(
+					[{ ...unchecked, protocol: "dpmr" }],
+					[
+						sync("o1", NOW - 10 * 60_000, false, "dpmr"),
+						sync("o2", recent, false, "dpmr"),
+					],
+					{ "fsk4-6k25": 240 },
+				),
+				reading: "suspect",
+			},
+			{
+				name: "unchecked DMR hints from 2 observations, 4FSK 6.25 kHz votes (no DMR class): suspect",
+				prior: withProofs(
+					[unchecked],
+					[sync("o1", NOW - 10 * 60_000), sync("o2", recent)],
+					{ "fsk4-6k25": 240 },
+				),
+				reading: "suspect",
+			},
+			{
+				name: "a checked hint followed by a newer unchecked one (the published label): tone required",
+				prior: withProofs(
+					[unchecked],
+					[sync("o1", NOW - 5 * 60_000, true), sync("o2", recent)],
+					fsk,
+				),
+				reading: "tone-required",
+			},
+			{
+				name: "a decode 40 min ago (the published label) and unchecked hints every minute: tone required",
+				prior: withProofs(
+					[{ ...hint, confidence: "decoded", at: NOW - 40 * 60_000 }],
+					[
+						sync("o0", NOW - 40 * 60_000, true),
+						...Array.from({ length: 30 }, (_, k) =>
+							sync(`o${k + 1}`, NOW - k * 60_000),
+						),
+					],
+					fsk,
+				),
+				reading: "tone-required",
+			},
+			{
+				name: "a decode 40 min ago and nothing since: suspect",
+				prior: withProofs(
+					[{ ...hint, confidence: "decoded", at: NOW - 40 * 60_000 }],
+					[sync("o0", NOW - 40 * 60_000, true)],
+					fsk,
+				),
+				reading: "suspect",
+			},
+			{
+				name: "observation proofs but no owner digital label: suspect",
+				prior: withProofs(
+					[],
+					[sync("o1", NOW - 10 * 60_000), sync("o2", recent)],
+					fsk,
+				),
+				reading: "suspect",
+			},
+		]
+		for (const r of rows)
+			it(r.name, () => {
+				expect(readPrior(r.prior, false, NOW)).toBe(r.reading)
+			})
+		it("DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS is 2", () => {
+			expect(DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS).toBe(2)
+		})
+	})
+
+	// Feature: analog recorder verdict, Property 2: a digital channel needs the owner's recent decoded, checked or digital-unknown label and a third of the votes in its protocol's classes (an unchecked DMR hint: a third in tdma-ms), and no analog proof
 	it("strong exactly when the owner has a recent decoded, checked-hint or digital-unknown label, at least a third of DIGITAL_CHANNEL_MIN_VOTES or more votes are in its protocol's classes, and no analog voice was heard", () => {
 		const classes: ScannerClass[] = [
 			"fsk4-12k5",
@@ -965,11 +1122,22 @@ describe("a digital channel (owner digital label within the TTL + its protocol's
 										? c === "fsk4-6k25"
 										: false,
 					).length
+					const tdma = cast.filter(c => c === "tdma-ms").length
+					// An unchecked DMR hint (one published label: one observation) bars by TDMA alone.
+					const uncheckedDmr =
+						owner &&
+						age <= STRONG_PRIOR_TTL_MS &&
+						protocol === "dmr" &&
+						confidence !== "decoded" &&
+						!checkedHint &&
+						tdma > 0 &&
+						tdma >= DIGITAL_CHANNEL_MIN_SHARE * cast.length
 					const strong =
-						digitalLabel &&
+						((digitalLabel &&
+							matched > 0 &&
+							matched >= DIGITAL_CHANNEL_MIN_SHARE * cast.length) ||
+							uncheckedDmr) &&
 						cast.length >= DIGITAL_CHANNEL_MIN_VOTES &&
-						matched > 0 &&
-						matched >= DIGITAL_CHANNEL_MIN_SHARE * cast.length &&
 						!analogVoice
 					expect(readPrior(p, false, NOW) === "tone-required").toBe(strong)
 					expect(admissionVerdict(p, false, NOW)).toBe(

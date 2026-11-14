@@ -47,7 +47,7 @@ import {
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
-import type { VoicePrior } from "../channel/recording-verdict.js"
+import type { DigitalProof, VoicePrior } from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
 import {
@@ -4060,8 +4060,10 @@ export class DiscoveryStore
 	 * observations (cached per observation; at most 9 × OBSERVATIONS_PER_DISCOVERY 256 = 2 304
 	 * reads, only when asked), and a lazy count of the owner's class votes per class (at most
 	 * OBSERVATIONS_PER_DISCOVERY). A label's `checkedHint` is true when the proof behind it is a
-	 * sync hint with checked content (a sync-only proof that is not uncheckedSyncHint). Undefined
-	 * for a folder nobody owns. Reads only.
+	 * sync hint with checked content (a sync-only proof that is not uncheckedSyncHint), and its
+	 * `observationId` the observation that proof cites; `digitalProofs` lazily lists the digital
+	 * proof of each of the owner's kept observations (digitalProofs). Undefined for a folder nobody
+	 * owns. Reads only.
 	 */
 	voicePrior(folderId: string): VoicePrior | undefined {
 		const owner = this.folderOwner(folderId)
@@ -4088,6 +4090,7 @@ export class DiscoveryStore
 					owner: id === d.id,
 					at,
 					checkedHint: this.checkedSyncHint(id),
+					observationId: label.proofObservationId,
 				},
 			]
 		})
@@ -4106,6 +4109,7 @@ export class DiscoveryStore
 				}
 				return { total, votes }
 			},
+			digitalProofs: () => this.digitalProofs(d.id),
 			analogVoice: () =>
 				ids.some(id =>
 					(this.byDiscovery.get(id) ?? []).some(o => {
@@ -4114,6 +4118,32 @@ export class DiscoveryStore
 					}),
 				),
 		}
+	}
+
+	/**
+	 * The digital proof of each kept observation of discovery `id` (VoicePrior.digitalProofs): a
+	 * digital voice decode or a dsd-fme sync hint, any rank, `checked` for a decode or a hint that
+	 * is not uncheckedSyncHint. One pass over at most OBSERVATIONS_PER_DISCOVERY observations' cached
+	 * proofs. Reads only.
+	 */
+	private digitalProofs(id: string): DigitalProof[] {
+		const out: DigitalProof[] = []
+		for (const o of this.byDiscovery.get(id) ?? []) {
+			const proof = this.observationAssessment(o).proof
+			if (proof === null) continue
+			const decoded =
+				proof.kind === "decoded" && familyOf(proof.protocol) === "digital-voice"
+			if (!decoded && !syncOnlyProof(proof)) continue
+			const at = Date.parse(proof.at)
+			if (!Number.isFinite(at)) continue
+			out.push({
+				protocol: proof.protocol,
+				at,
+				checked: decoded || !uncheckedSyncHint(proof),
+				observationId: o.id,
+			})
+		}
+		return out
 	}
 
 	/**

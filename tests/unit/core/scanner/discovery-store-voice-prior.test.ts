@@ -95,6 +95,7 @@ describe("DiscoveryStore.voicePrior", () => {
 			owner: true,
 			at: T0 + 500,
 			checkedHint: false,
+			observationId: "pager",
 		})
 		expect(admissionVerdict(prior, false, T0 + 500)).toBe("tone-required")
 		const last = T0 + 500 + STRONG_PRIOR_TTL_MS
@@ -237,6 +238,106 @@ describe("DiscoveryStore.voicePrior", () => {
 			expect(
 				admissionVerdict(store.voicePrior(id) ?? null, false, T0 + 60_000),
 			).toBeNull()
+		})
+	})
+
+	describe("digitalProofs: the owner's observation proofs of any rank hold the digital-channel bar", () => {
+		type Cls = "fsk4-12k5" | "tdma-ms" | "analog-fm"
+		const MIN = 60_000
+		/**
+		 * Six overs `o0`..`o5` voted `cls`, then on each observation `k` of `hints` an unchecked DMR sync
+		 * hint (no checked content) at `at(k)`; `tgSrc` overs carry verified TG/SRC instead.
+		 */
+		function channel(
+			store: DiscoveryStore,
+			cls: Cls,
+			hints: readonly number[],
+			at: (k: number) => number,
+			tgSrc: readonly number[] = [],
+		): string {
+			let id = ""
+			for (let k = 0; k < 6; k++)
+				id =
+					store.ingest(
+						makeObs({
+							id: `o${k}`,
+							centreHz: CH,
+							startedAt: T0 + k * 10_000,
+							cls,
+							open: false,
+							gate: "passed",
+						}),
+					).discoveryId ?? id
+			for (const k of hints) {
+				const base = evidence("dmr", at(k))
+				const ev = tgSrc.includes(k)
+					? { ...base, metadata: { talkgroups: ["9"], sources: ["1"] } }
+					: base
+				expect(store.appendObservationEvidence(`o${k}`, ev)).toBe(true)
+				store.applyEvidence(store.discoveryIdOf(`o${k}`) ?? id, ev)
+			}
+			return store.discoveryIdOf("o0") ?? id
+		}
+		const read = (store: DiscoveryStore, id: string, now: number) =>
+			readPrior(store.voicePrior(id) ?? null, false, now)
+
+		it("live shape: one unchecked DMR hint on a TDMA channel, no analog proof: tone required", () => {
+			const store = newStore()
+			const id = channel(store, "tdma-ms", [0], () => T0 + 500)
+			expect(store.voicePrior(id)?.digitalProofs?.()).toEqual([
+				{ protocol: "dmr", at: T0 + 500, checked: false, observationId: "o0" },
+			])
+			expect(read(store, id, T0 + MIN)).toBe("tone-required")
+		})
+
+		it("unchecked DMR hints from 2 observations within the TTL on a 4FSK 12.5 kHz channel: tone required", () => {
+			const store = newStore()
+			const id = channel(store, "fsk4-12k5", [0, 1], k => T0 + k * 10 * MIN)
+			expect(read(store, id, T0 + 11 * MIN)).toBe("tone-required")
+		})
+
+		it("the same with 1 observation: suspect", () => {
+			const store = newStore()
+			const id = channel(store, "fsk4-12k5", [0], () => T0 + 500)
+			expect(read(store, id, T0 + MIN)).toBe("suspect")
+		})
+
+		it("2 observations, one older than STRONG_PRIOR_TTL_MS: suspect", () => {
+			const store = newStore()
+			const id = channel(store, "fsk4-12k5", [0, 1], k => T0 + k * 40 * MIN)
+			expect(read(store, id, T0 + 41 * MIN)).toBe("suspect")
+		})
+
+		it("FROZEN: an analog CTCSS tone on that channel keeps recording", () => {
+			const store = newStore()
+			const id = channel(store, "fsk4-12k5", [0, 1], k => T0 + k * 10 * MIN)
+			expect(store.recordAnalog("o5", tone(T0 + 11 * MIN))).toBe(true)
+			expect(read(store, id, T0 + 11 * MIN)).toBe("none")
+		})
+
+		it("a checked hint followed by a newer unchecked one: tone required", () => {
+			const store = newStore()
+			const id = channel(store, "fsk4-12k5", [0, 1], k => T0 + k * 5 * MIN, [0])
+			expect(store.voicePrior(id)?.digitalProofs?.()).toEqual([
+				expect.objectContaining({ observationId: "o0", checked: true }),
+				expect.objectContaining({ observationId: "o1", checked: false }),
+			])
+			expect(read(store, id, T0 + 6 * MIN)).toBe("tone-required")
+		})
+
+		it("a decode 40 min ago and unchecked hints every minute since from 5 overs: tone required", () => {
+			const store = newStore()
+			const id = channel(
+				store,
+				"fsk4-12k5",
+				[1, 2, 3, 4, 5],
+				k => T0 + (35 + k) * MIN,
+			)
+			const ev = evidence("dmr", T0, { identity: dmrCc(1) })
+			expect(store.appendObservationEvidence("o0", ev)).toBe(true)
+			store.applyEvidence(id, ev)
+			const now = T0 + 41 * MIN
+			expect(read(store, id, now)).toBe("tone-required")
 		})
 	})
 

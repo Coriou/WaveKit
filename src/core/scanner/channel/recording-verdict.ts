@@ -172,7 +172,12 @@ export function fileDecodedOwn(
  * how many voted each class (`votes`; a class absent: none); asked only for an owner's digital
  * label. A label's `checkedHint` (absent: false) is true for a dsd-fme sync hint that carries
  * checked content (verified TG/SRC, a talkgroup or encryption: not discovery-store's
- * uncheckedSyncHint); read only for a digital voice label below `decoded`.
+ * uncheckedSyncHint); read only for a digital voice label below `decoded`. A label's
+ * `observationId` (absent or null: unknown) is the observation its proof cites.
+ * `digitalProofs` (absent: none) lists the digital proof of each of the owner's kept observations
+ * (at most OBSERVATIONS_PER_DISCOVERY = 256), any rank: the published label shows only the
+ * highest-ranked, newest one, so the digital-channel bar reads its freshness, checkedness and
+ * distinct observations from these (digitalEvidence); asked only for an owner's digital label.
  */
 export interface VoicePrior {
 	readonly id?: string
@@ -182,10 +187,24 @@ export interface VoicePrior {
 		readonly owner: boolean
 		readonly at: number | null
 		readonly checkedHint?: boolean
+		readonly observationId?: string | null
 	}[]
 	readonly class: ScannerClass
 	analogVoice(): boolean
 	classVotes?(): ClassVotes
+	digitalProofs?(): readonly DigitalProof[]
+}
+
+/**
+ * VoicePrior.digitalProofs: the digital proof of one kept observation of the owner (a digital
+ * voice decode, or a dsd-fme sync hint), whatever its rank: `at` its wall time (ms), `checked`
+ * true for a decode or a hint with checked content.
+ */
+export interface DigitalProof {
+	readonly protocol: ScannerProtocol
+	readonly at: number
+	readonly checked: boolean
+	readonly observationId: string
 }
 
 /** VoicePrior.classVotes: the owner's observations with a class vote, and the count per class. */
@@ -203,15 +222,18 @@ export interface ClassVotes {
  *   recording while the prior was strong, is a shadow that writes nothing unless its own audio
  *   carries speech over a CTCSS tone (the recorder's classByTone); it is never a remembered
  *   refusal.
- *   Also STRONG (digitalChannel): a digital label of the owner itself (a digital voice decode, a
- *   dsd-fme sync hint with checked content, or `digital-unknown` from data-like audio) dated
- *   within STRONG_PRIOR_TTL_MS of now, while at least DIGITAL_CHANNEL_MIN_SHARE of the owner's
- *   class votes (DIGITAL_CHANNEL_MIN_VOTES or more) read a class that label's protocol is
- *   transmitted as (digitalChannelClasses): a channel its own spectrum and its own decoder both
- *   call digital, with no analog proof among its kept observations, is not untoned voice. An
- *   analog proof or label ends it; so does 30 min without a fresh digital label (an active DMR or
- *   dPMR channel refreshes its proof every over). An unchecked sync hint, an undated label, or
- *   votes for another protocol's class are only `suspect`.
+ *   Also STRONG (digitalChannel): a digital sighting of the owner itself (its published label or
+ *   any kept observation's digital proof: a digital voice decode, a dsd-fme sync hint with
+ *   checked content, or `digital-unknown` from data-like audio) dated within STRONG_PRIOR_TTL_MS
+ *   of now, while at least DIGITAL_CHANNEL_MIN_SHARE of the owner's class votes
+ *   (DIGITAL_CHANNEL_MIN_VOTES or more) read a class that protocol is transmitted as
+ *   (digitalChannelClasses): a channel its own spectrum and its own decoder both call digital,
+ *   with no analog proof among its kept observations, is not untoned voice. Unchecked DMR sync
+ *   hints alone also make one when that share reads `tdma-ms` alone, or when they come from
+ *   DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS distinct observations within the TTL. An analog
+ *   proof or label ends it; so does 30 min without a fresh digital sighting (an active DMR or
+ *   dPMR channel refreshes its proof every over). Any other unchecked sync hint, an undated
+ *   label, or votes for another protocol's class are only `suspect`.
  * - `suspect`: WEAK. A digital voice decode (DMR, NXDN, YSF, dPMR, ...) on the owner or a
  *   co-channel discovery: the store keeps analog and digital overs of one channel in one
  *   discovery (a lone merge) as readily as in two, and PMR446 and DMR446, mixed-mode repeaters
@@ -323,42 +345,117 @@ export const DIGITAL_CHANNEL_MIN_SHARE = 1 / 3
 export const DIGITAL_CHANNEL_MIN_VOTES = 4
 
 /**
- * An owner label that can make its channel a digital channel: the owner's, dated within
- * [now − STRONG_PRIOR_TTL_MS, now + STRONG_PRIOR_TTL_MS] (a clock skew either way; undated never),
- * and a digital voice decode, a sync hint with checked content (checkedHint), or a
- * `digital-unknown` label.
+ * Distinct owner observations an UNCHECKED DMR sync hint needs within the TTL on a channel whose
+ * DMR-class votes reach the share without TDMA (digitalChannel, rule b): 2. One spurious sync on
+ * an NFM channel that reads fsk4-12k5 must not bar it; syncs across overs are a DMR channel.
  */
-function digitalChannelLabel(
-	l: VoicePrior["labels"][number],
-	now: number,
-): boolean {
-	if (!l.owner || l.at === null || !Number.isFinite(l.at)) return false
-	if (Math.abs(now - l.at) > STRONG_PRIOR_TTL_MS) return false
-	if (l.protocol === "digital-unknown") return true
-	return (
-		familyOf(l.protocol) === "digital-voice" &&
-		(l.confidence === "decoded" || l.checkedHint === true)
-	)
+export const DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS = 2
+
+/** An owner digital label of any rank, `at` in the TTL window (digitalEvidence's input). */
+interface DigitalSighting {
+	readonly protocol: ScannerProtocol
+	readonly at: number | null
+	readonly checked: boolean
+	readonly observationId: string | null
 }
 
+/** Per protocol, within the TTL: a checked sighting, and the distinct unchecked observations. */
+interface DigitalEvidence {
+	checked: boolean
+	readonly unchecked: Set<string>
+}
+
+const inTtl = (at: number | null, now: number): at is number =>
+	at !== null &&
+	Number.isFinite(at) &&
+	Math.abs(now - at) <= STRONG_PRIOR_TTL_MS
+
+/** A digital voice protocol or `digital-unknown`: the labels digitalChannel reads. */
+const digitalProtocol = (p: ScannerProtocol): boolean =>
+	p === "digital-unknown" || familyOf(p) === "digital-voice"
+
 /**
- * A digital channel (PriorStrength's strong): an owner label digitalChannelLabel accepts at
- * `now`, and votes for that label's classes (digitalChannelClasses) at least
- * DIGITAL_CHANNEL_MIN_SHARE of the owner's class votes, DIGITAL_CHANNEL_MIN_VOTES or more of
- * them. A throwing or absent vote read: not one.
+ * One pass over the owner's digital sightings dated within [now − STRONG_PRIOR_TTL_MS,
+ * now + STRONG_PRIOR_TTL_MS] (a clock skew either way; undated never): its published labels
+ * (`digital-unknown` and a decode or checked hint are checked) and, when the store gives them,
+ * the digital proofs of its kept observations (VoicePrior.digitalProofs), so a newer unchecked
+ * hint never hides a checked one and a decode no longer shown still counts while it is fresh.
+ * An unchecked sighting counts by its observation; a published label citing none counts as one
+ * only when no observation proofs are given (it is one of them otherwise).
+ */
+function digitalEvidence(
+	prior: VoicePrior,
+	now: number,
+): Map<ScannerProtocol, DigitalEvidence> {
+	const out = new Map<ScannerProtocol, DigitalEvidence>()
+	const proofs = prior.digitalProofs?.()
+	const note = (s: DigitalSighting): void => {
+		if (!digitalProtocol(s.protocol) || !inTtl(s.at, now)) return
+		let e = out.get(s.protocol)
+		if (e === undefined) {
+			e = { checked: false, unchecked: new Set() }
+			out.set(s.protocol, e)
+		}
+		if (s.checked) e.checked = true
+		else if (s.observationId !== null) e.unchecked.add(s.observationId)
+		else if (proofs === undefined) e.unchecked.add("label")
+	}
+	for (const l of prior.labels)
+		if (l.owner)
+			note({
+				protocol: l.protocol,
+				at: l.at,
+				checked:
+					l.protocol === "digital-unknown" ||
+					l.confidence === "decoded" ||
+					l.checkedHint === true,
+				observationId: l.observationId ?? null,
+			})
+	for (const p of proofs ?? []) note(p)
+	return out
+}
+
+/** At least DIGITAL_CHANNEL_MIN_SHARE of `v.total` votes (one or more) read one of `classes`. */
+function shareOf(v: ClassVotes, classes: ReadonlySet<ScannerClass>): boolean {
+	let matched = 0
+	for (const c of classes) matched += v.votes[c] ?? 0
+	return matched > 0 && matched >= DIGITAL_CHANNEL_MIN_SHARE * v.total
+}
+
+const TDMA_CLASSES: ReadonlySet<ScannerClass> = new Set(["tdma-ms"])
+
+/**
+ * A digital channel (PriorStrength's strong): DIGITAL_CHANNEL_MIN_VOTES or more owner class votes,
+ * and for one digital protocol seen on the owner within the TTL (digitalEvidence):
+ * - a checked sighting (a decode, a checked sync hint, `digital-unknown`) and
+ *   DIGITAL_CHANNEL_MIN_SHARE of the votes in its classes (digitalChannelClasses); or
+ * - DMR with only unchecked sync hints (dsd-fme sync with no verified TG/SRC) and either
+ *   (a) that share in `tdma-ms` alone (TDMA burst structure is DMR's; NFM never reads it), or
+ *   (b) that share in DMR's classes and hints from DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS
+ *   distinct observations. An unchecked hint of another protocol (dPMR keeps no checked
+ *   content) is never one.
+ * A throwing or absent read: not one.
  */
 function digitalChannel(prior: VoicePrior, now: number): boolean {
-	const labels = prior.labels.filter(l => digitalChannelLabel(l, now))
-	if (labels.length === 0) return false
+	if (!prior.labels.some(l => l.owner && digitalProtocol(l.protocol)))
+		return false
 	try {
+		const evidence = digitalEvidence(prior, now)
+		if (evidence.size === 0) return false
 		const v = prior.classVotes?.()
 		if (v === undefined || v.total < DIGITAL_CHANNEL_MIN_VOTES) return false
-		return labels.some(l => {
-			let matched = 0
-			for (const c of digitalChannelClasses(l.protocol))
-				matched += v.votes[c] ?? 0
-			return matched > 0 && matched >= DIGITAL_CHANNEL_MIN_SHARE * v.total
-		})
+		for (const [protocol, e] of evidence) {
+			const classes = digitalChannelClasses(protocol)
+			if (e.checked && shareOf(v, classes)) return true
+			if (protocol !== "dmr" || e.unchecked.size === 0) continue
+			if (shareOf(v, TDMA_CLASSES)) return true
+			if (
+				e.unchecked.size >= DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS &&
+				shareOf(v, classes)
+			)
+				return true
+		}
+		return false
 	} catch {
 		return false
 	}
