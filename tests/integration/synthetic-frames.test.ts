@@ -30,6 +30,7 @@ import { aprsFrequency } from "../../scripts/fixtures/aprs-afsk.mjs"
 import { dstarFrequency } from "../../scripts/fixtures/dstar-gmsk.mjs"
 import { flexFrequency } from "../../scripts/fixtures/flex-fsk.mjs"
 import { fmCu8 } from "../../scripts/fixtures/fsk-iq.mjs"
+import { nxdnFrequency } from "../../scripts/fixtures/nxdn-4fsk.mjs"
 import { p25Frequency } from "../../scripts/fixtures/p25-c4fm.mjs"
 import { ysfFrequency } from "../../scripts/fixtures/ysf-c4fm.mjs"
 import { presentDecoderOutput } from "../../src/core/activity/presentation/registry.js"
@@ -236,6 +237,45 @@ const firstCall = (r: Replay) =>
 		| Record<string, unknown>
 		| undefined
 
+const nxdnCase = (variant: "nxdn48" | "nxdn96", mode: string): ChainCase => ({
+	name: `${variant.toUpperCase()} (dsd-fme mode ${mode})`,
+	tool: "dsd-fme",
+	freq: () => nxdnFrequency({ ran: 5, source: 1234, destination: 5678 }, { variant }),
+	adapter: (path, capture) => dsd(path, capture, mode),
+	channelHead: DSD_HEAD,
+	interpreter: dsdInterpreter,
+	check: r => {
+		// The RAN can follow the call start (VCALL first): the call's last event.
+		const end = r.outputs.find(o => o.type === "call_end")
+		expect(end?.data, transcript(r)).toMatchObject({
+			protocol: variant,
+			talkgroup: 5678,
+			source: 1234,
+			nxdn: { ran: 5 },
+		})
+		expect(r.links).toContainEqual(
+			expect.objectContaining({ protocol: "nxdn", ran: 5, verified: true }),
+		)
+		expect(r.links).toContainEqual(
+			expect.objectContaining({
+				protocol: "nxdn",
+				tg: "5678",
+				src: "1234",
+				verified: true,
+			}),
+		)
+		expect(r.evidence).toContainEqual(
+			expect.objectContaining({
+				identity: { kind: "nxdn-ran", value: "5" },
+			}),
+		)
+		const row = presentDecoderOutput(end!, "dsd-fme")
+		expect(row).toMatchObject({
+			title: `${variant.toUpperCase()} TG 5678 from 1234`,
+		})
+	},
+})
+
 const CASES: ChainCase[] = [
 	{
 		name: "D-STAR (dsd-fme auto, the catalogue default)",
@@ -349,6 +389,8 @@ const CASES: ChainCase[] = [
 			expect(row).toMatchObject({ title: "P25P1 TG 4321 from 1234567" })
 		},
 	},
+	nxdnCase("nxdn48", "nxdn48"),
+	nxdnCase("nxdn96", "nxdn"),
 	{
 		name: "FLEX (multimon-ng)",
 		tool: "multimon-ng",
@@ -419,7 +461,8 @@ describe("synthetic frames through the production decoder chains", () => {
 			it.skipIf(!toolAvailable(c.tool, ["-h"]) || chanUnavailable !== undefined)(
 				`${label}: channel path decodes`,
 				async () => {
-					const iq = fmCu8(c.freq(), {
+					const freq = c.freq()
+					const iq = fmCu8(freq, {
 						sampleRateHz: capture.rateHz,
 						offsetHz: capture.offsetHz,
 						seed: capture.rateHz,
@@ -441,7 +484,8 @@ describe("synthetic frames through the production decoder chains", () => {
 						[request],
 					)
 					const probe = c.adapter("channel", capture)
-					expect(cf32!.length).toBeGreaterThan(8 * 48_000)
+					// The whole transmission comes out (cf32: 8 bytes a sample at 48 kHz).
+					expect(cf32!.length).toBeGreaterThan(8 * freq.length * 0.9)
 					const stages = probe.pipeline().split(" | ")
 					const soxAt = stages.findIndex(s => s.startsWith("sox "))
 					expect(stages.slice(0, soxAt)).toEqual(c.channelHead.stages)

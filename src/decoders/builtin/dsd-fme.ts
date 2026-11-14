@@ -185,6 +185,22 @@ const NXDN_RAN = /\bRAN\s*=\s*(?<ran>\d+)\b/i
 const NXDN_VOICE_DATA = /\b(VOICE|DATA)\b/i
 /** NXDN TGT/SRC for VCALL */
 const NXDN_TGT_SRC = /\bTGT[:=]\s*(?<tgt>\d+)\b.*\bSRC[:=]\s*(?<src>\d+)\b/i
+/**
+ * NXDN SACCH as nxdn_deperm.c prints it: " RAN 05 PF 2/4" (superframe) or
+ * "PF 1/1". The RAN printed is the one stored by the last SACCH whose CRC-6
+ * passed (it is updated after the print); "PF X/n" marks this frame's SACCH
+ * as failed, a digit as passed.
+ */
+const NXDN_SACCH_RAN = /\bRAN (?<ran>\d{2}) PF (?<pf>[1-4X])\/[14]\b/
+/** A frame whose own SACCH passed its CRC (with or without a RAN print). */
+const NXDN_SACCH_OK = /\bPF [1-4]\/[14]\b/
+/**
+ * NXDN VCALL / TX_REL as nxdn_element.c prints it: "Src=1234 - Dst/TG=5678",
+ * only for a FACCH1 or SACCH superframe whose CRC passed.
+ */
+const NXDN_SRC_DST = /\bSrc=(?<src>\d+) - Dst\/TG=(?<tgt>\d+)\b/
+/** Two NXDN frames 80 ms apart (NXDN48) are consecutive within this window. */
+const NXDN_CONSECUTIVE_MS = 500
 
 // --- D-Star Patterns ---
 /** D-Star sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -605,6 +621,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private currentProtocol: DsdFmeProtocol = null
 	/** NAC of the last P25 phase 1 sync line whose NID decoded. */
 	private lastP25Nac: string | undefined = undefined
+	/**
+	 * When the last NXDN frame line whose own SACCH passed was read, and the RAN
+	 * a following clean frame attests (see nxdnSacchLine).
+	 */
+	private nxdnCleanAt: number | undefined = undefined
+	private nxdnRan: number | undefined = undefined
 	private linkDmrCc = new Map<string, { cc: number; at: number }>()
 	private linkDmrMs = false
 	private pendingDmrLink: DsdFmeLinkLine | undefined
@@ -1572,6 +1594,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Update protocol tracking
 		this.currentProtocol = newProtocol
 		if (newProtocol !== "p25p1") this.lastP25Nac = undefined
+		if (newProtocol !== "nxdn48" && newProtocol !== "nxdn96") {
+			this.nxdnCleanAt = undefined
+			this.nxdnRan = undefined
+		}
 
 		// Deduplicate sync events for debug output
 		if (proto === this.lastSyncMode) {
@@ -1850,15 +1876,25 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// :1390-1437 prints current RAN only inside crc == check,
 				// then " FACCH2"/" UDCH" (two spaces after the RAN).
 				const checkedRan = /\bRAN\s+(\d{2})\s+(?:FACCH2|UDCH)\b/.exec(line)?.[1]
-				const ran = checkedRan ?? NXDN_RAN.exec(line)?.groups?.["ran"]
-				const idGroups = NXDN_TGT_SRC.exec(line)?.groups
+				const sacch = this.nxdnSacchLine(line, at)
+				const ran =
+					checkedRan ??
+					sacch.ran ??
+					NXDN_RAN.exec(line)?.groups?.["ran"]
+				// The VCALL print is gated on its own CRC (NXDN_SRC_DST).
+				const vcall = NXDN_SRC_DST.exec(line)?.groups
+				const idGroups = vcall ?? NXDN_TGT_SRC.exec(line)?.groups
 				if (ran === undefined && idGroups === undefined) return null
 				return {
 					protocol: "nxdn",
 					...(ran !== undefined ? { ran: parseInt(ran, 10) } : {}),
 					...ids(idGroups, "tgt", "src"),
 					...base,
-					verified: clean && checkedRan !== undefined,
+					verified:
+						clean &&
+						(checkedRan !== undefined ||
+							sacch.attested ||
+							(vcall !== undefined && ran === undefined)),
 				}
 			}
 			case "ysf": {
@@ -2108,34 +2144,44 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Requires RAN + VOICE indicator, optionally TGT/SRC.
 	 */
 	private handleNxdnLine(line: string, now: Date): DecoderOutput | null {
-		// Check for VOICE indicator (required for call)
-		if (!NXDN_VOICE_DATA.test(line) || !/\bVOICE\b/i.test(line)) {
-			return null
-		}
+		const protocol = this.currentProtocol as "nxdn48" | "nxdn96"
+		// RAN: the legacy "RAN=50" print, or the SACCH print attested by a
+		// following clean frame (nxdnSacchLine, already run by the link parser).
+		const legacyRan = NXDN_RAN.exec(line)?.groups?.["ran"]
+		const ran =
+			legacyRan !== undefined
+				? parseInt(legacyRan, 10)
+				: NXDN_SACCH_RAN.test(line)
+					? this.nxdnRan
+					: undefined
+		const nxdnMeta: NxdnMetadata | undefined =
+			ran !== undefined
+				? { ran }
+				: this.nxdnRan !== undefined
+					? { ran: this.nxdnRan }
+					: undefined
 
-		// Extract RAN
-		const ranMatch = NXDN_RAN.exec(line)
-		const ran = ranMatch?.groups?.["ran"]
-			? parseInt(ranMatch.groups["ran"], 10)
-			: undefined
-
-		// Try to extract TGT/SRC
-		const tgtSrcMatch = NXDN_TGT_SRC.exec(line)
-		let tgt: number | null = null
-		let src: number | null = null
-		if (tgtSrcMatch?.groups) {
-			tgt = parseInt(tgtSrcMatch.groups["tgt"] ?? "0", 10)
-			src = parseInt(tgtSrcMatch.groups["src"] ?? "0", 10)
-		}
-
-		// For NXDN, we can start a call with just VOICE + RAN
-		if (ran !== undefined) {
-			const nxdnMeta: NxdnMetadata = { ran }
+		// Source and destination: the CRC-gated VCALL print, or the legacy one.
+		const ids = NXDN_SRC_DST.exec(line)?.groups ?? NXDN_TGT_SRC.exec(line)?.groups
+		const ongoing = this.callState ?? this.pendingCall?.state ?? null
+		if (ids) {
+			const tgt = parseInt(ids["tgt"] ?? "0", 10)
+			const src = parseInt(ids["src"] ?? "0", 10)
+			// A call heard by RAN alone (tuned in mid-call) takes its IDs when the
+			// VCALL arrives instead of splitting into a second call.
+			if (
+				ongoing?.protocol === protocol &&
+				ongoing.talkgroup === 0 &&
+				ongoing.source === 0
+			) {
+				ongoing.talkgroup = tgt
+				ongoing.source = src
+			}
 			return this.processCallMetadata(
 				now,
-				this.currentProtocol as "nxdn48" | "nxdn96",
-				tgt ?? 0,
-				src ?? 0,
+				protocol,
+				tgt,
+				src,
 				undefined,
 				undefined,
 				undefined,
@@ -2143,7 +2189,51 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			)
 		}
 
-		return null
+		// Voice frames carry the RAN only: keep the ongoing call, or start one.
+		if (!NXDN_VOICE_DATA.test(line) || !/\bVOICE\b/i.test(line)) return null
+		if (ran === undefined) return null
+		if (ongoing && ongoing.protocol === protocol) {
+			ongoing.lastUpdate = now
+			ongoing.nxdn = { ...ongoing.nxdn, ran }
+			return null
+		}
+		return this.processCallMetadata(
+			now,
+			protocol,
+			0,
+			0,
+			undefined,
+			undefined,
+			undefined,
+			{ ran },
+		)
+	}
+
+	/**
+	 * NXDN SACCH print of one frame line (NXDN_SACCH_RAN). The RAN printed is
+	 * the one the last CRC-passed SACCH stored. When this frame's SACCH also
+	 * passed and the previous frame line, at most NXDN_CONSECUTIVE_MS
+	 * earlier, passed too, that stored RAN is the previous frame's checked
+	 * one: the RAN is attested. Runs once per line (from parseLinkLine).
+	 */
+	private nxdnSacchLine(
+		line: string,
+		at: number,
+	): { ran?: string; attested: boolean } {
+		if (!SYNC_PATTERN.test(line)) return { attested: false }
+		const ok = NXDN_SACCH_OK.test(line) && !CRC_ERR.test(line)
+		const previous = this.nxdnCleanAt
+		this.nxdnCleanAt = ok ? at : undefined
+		const ran = NXDN_SACCH_RAN.exec(line)?.groups?.["ran"]
+		const attested =
+			ok &&
+			ran !== undefined &&
+			previous !== undefined &&
+			at >= previous &&
+			at - previous <= NXDN_CONSECUTIVE_MS
+		if (attested) this.nxdnRan = parseInt(ran, 10)
+		else if (!ok) this.nxdnRan = undefined
+		return ran !== undefined ? { ran, attested } : { attested }
 	}
 
 	/**
