@@ -166,6 +166,10 @@ describe.skipIf(!enabled)(
 
 		it("draws on a page opened while the link is losing samples", async () => {
 			const fresh = await open({ fftSize: 2048 })
+			// the core counts the new page beside the first one, whatever its renderer is doing
+			await expect
+				.poll(() => core.subscribers(), { timeout: RECOVER_MS })
+				.toBeGreaterThanOrEqual(2)
 			await draws(fresh, "upper")
 			core.upstream.setToneSide("lower")
 			await draws(fresh, "lower")
