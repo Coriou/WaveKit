@@ -296,8 +296,9 @@ const SHARED_CHANNEL_PROTOCOLS: ReadonlySet<ScannerProtocol> = new Set(["lora"])
 export const STRONG_PRIOR_TTL_MS = 30 * 60_000
 /**
  * How long the owner's own dedicated-channel decode (a pager, APRS, AIS, ...) stays a strong prior
- * after it was made: 24 × 3 600 000 = 86 400 000 ms. The owner's label is its newest decode, so
- * each page refreshes it; a pager channel quiet for a day reads `suspect` again.
+ * after it was made: 24 × 3 600 000 = 86 400 000 ms, counted from the time of the decode the
+ * owner's published label shows (its highest-ranked, newest proof), so each new page shown
+ * refreshes it; a pager channel quiet for a day reads `suspect` again.
  */
 export const OWNER_DEDICATED_PRIOR_TTL_MS = 24 * 3_600_000
 
@@ -481,31 +482,40 @@ const TDMA_CLASSES: ReadonlySet<ScannerClass> = new Set(["tdma-ms"])
  *   (b) that share in DMR's classes and hints from DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS
  *   distinct observations within the TTL. An unchecked hint of another protocol (dPMR keeps no checked
  *   content) is never one.
- * A throwing or absent read: not one.
+ * Returns how it is one (StrongSource; the strongest when several hold): `checked-digital` (a
+ * checked sighting of a digital voice protocol), `unchecked-dmr` (rule a or b), `digital-unknown`
+ * (a checked `digital-unknown` sighting only); null: not one. A throwing or absent read: not one.
  */
-function digitalChannel(prior: VoicePrior, now: number): boolean {
+function digitalChannel(
+	prior: VoicePrior,
+	now: number,
+): "checked-digital" | "unchecked-dmr" | "digital-unknown" | null {
 	if (!prior.labels.some(l => l.owner && digitalProtocol(l.protocol)))
-		return false
+		return null
 	try {
 		const { byProtocol, latest } = digitalEvidence(prior, now)
-		if (byProtocol.size === 0) return false
+		if (byProtocol.size === 0) return null
 		const v = prior.classVotes?.()
-		if (v === undefined || v.total < DIGITAL_CHANNEL_MIN_VOTES) return false
-		if (!freshDigital(prior, latest, now)) return false
+		if (v === undefined || v.total < DIGITAL_CHANNEL_MIN_VOTES) return null
+		if (!freshDigital(prior, latest, now)) return null
+		let weaker: "unchecked-dmr" | "digital-unknown" | null = null
 		for (const [protocol, e] of byProtocol) {
 			const classes = digitalChannelClasses(protocol)
-			if (e.checked && shareOf(v, classes)) return true
+			if (e.checked && shareOf(v, classes)) {
+				if (protocol !== "digital-unknown") return "checked-digital"
+				weaker ??= "digital-unknown"
+			}
 			if (protocol !== "dmr" || e.unchecked.size === 0) continue
-			if (shareOf(v, TDMA_CLASSES)) return true
 			if (
-				e.unchecked.size >= DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS &&
-				shareOf(v, classes)
+				shareOf(v, TDMA_CLASSES) ||
+				(e.unchecked.size >= DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS &&
+					shareOf(v, classes))
 			)
-				return true
+				weaker = "unchecked-dmr"
 		}
-		return false
+		return weaker
 	} catch {
-		return false
+		return null
 	}
 }
 
@@ -547,23 +557,57 @@ function weakDigital(prior: VoicePrior, now: number): boolean {
 }
 
 /**
- * The prior's strength at `now` (wall ms; PriorStrength); a throwing analogVoice reads as voice
- * heard (keeps).
+ * Where a `tone-required` prior's strength comes from (PriorStrength), strongest first:
+ * `dedicated`, a dedicated-channel decode (strongLabel); `tdma`, a TDMA channel (tdmaChannel);
+ * `checked-digital`, a digital channel with a checked digital voice sighting (digitalChannel);
+ * `unchecked-dmr`, one with unchecked DMR sync hints only (digitalChannel's rule a or b);
+ * `digital-unknown`, one with a `digital-unknown` candidate only. The content check
+ * (contentChecked) trusts only the first three: identify makes `digital-unknown` whenever every
+ * digital trial ends without sync and nothing was heard, and dsd-fme syncs on noise, so a weak NFM
+ * voice reading fsk4-12k5 can reach the last two.
  */
+export type StrongSource =
+	| "dedicated"
+	| "tdma"
+	| "checked-digital"
+	| "unchecked-dmr"
+	| "digital-unknown"
+
+/**
+ * The prior's strength at `now` (wall ms; PriorStrength) and, when `tone-required`, its source
+ * (StrongSource; null otherwise); a throwing analogVoice reads as voice heard (keeps).
+ */
+export function priorReading(
+	prior: VoicePrior | null,
+	backedClass: boolean,
+	now: number,
+): { readonly strength: PriorStrength; readonly source: StrongSource | null } {
+	let source: StrongSource | null = null
+	if (prior !== null) {
+		if (prior.labels.some(l => strongLabel(l, now))) source = "dedicated"
+		else if (tdmaChannel(prior, now)) source = "tdma"
+		else source = digitalChannel(prior, now)
+	}
+	if (
+		source === null &&
+		!backedClass &&
+		(prior === null || !weakDigital(prior, now))
+	)
+		return { strength: "none", source: null }
+	if (prior !== null && analogVoiceHeard(prior))
+		return { strength: "none", source: null }
+	return source !== null
+		? { strength: "tone-required", source }
+		: { strength: "suspect", source: null }
+}
+
+/** The prior's strength at `now` (priorReading). */
 export function readPrior(
 	prior: VoicePrior | null,
 	backedClass: boolean,
 	now: number,
 ): PriorStrength {
-	const strong =
-		prior !== null &&
-		(prior.labels.some(l => strongLabel(l, now)) ||
-			digitalChannel(prior, now) ||
-			tdmaChannel(prior, now))
-	if (!strong && !backedClass && (prior === null || !weakDigital(prior, now)))
-		return "none"
-	if (prior !== null && analogVoiceHeard(prior)) return "none"
-	return strong ? "tone-required" : "suspect"
+	return priorReading(prior, backedClass, now).strength
 }
 
 function analogVoiceHeard(prior: VoicePrior): boolean {
@@ -659,7 +703,8 @@ export type FinishVerdict =
  * a file no snapshot classed analog-fm (`snapshotClassed` false: classed by its own audio only,
  * or a file of a transmission that joined while the prior was strong) is discarded
  * (`discarded:known-non-voice`); where the content check applies (contentChecked: a
- * `tone-required` prior, or backed digital evidence of the owner) a file whose audio clearly
+ * `tone-required` prior from a dedicated-channel decode, a TDMA channel or a checked digital
+ * sighting, or backed digital evidence of the owner) a file whose audio clearly
  * measures as no speech (`notSpeech`, speech-content.ts clearlyNotSpeech: a steady buzz) and that
  * no joined voice shares is discarded (`discarded:not-speech`) at once; otherwise one a snapshot classed under `tone-required`, or any under `suspect`, is held, then
  * kept; with none it is kept at once (no content check: an analog proof or label on the channel
@@ -680,37 +725,51 @@ export function finishVerdict(input: {
 	if (input.ownTone) return "finish"
 	if (input.decodedOwn)
 		return input.joinedVoice ? "finish" : "discarded:late-non-voice"
-	const strength = readPrior(input.prior, input.backedClass, input.now)
+	const { strength, source } = priorReading(
+		input.prior,
+		input.backedClass,
+		input.now,
+	)
 	if (strength === "tone-required" && !input.snapshotClassed)
 		return "discarded:known-non-voice"
 	if (strength === "none") return "finish"
 	if (
 		input.notSpeech &&
 		!input.joinedVoice &&
-		contentChecked(strength, input.prior, input.backedClass, input.now)
+		contentChecked(source, input.prior, input.backedClass, input.now)
 	)
 		return "discarded:not-speech"
 	return input.final ? "finish" : "hold"
 }
 
 /**
- * Where finishVerdict's content check (`notSpeech`) applies under a digital prior: a
- * `tone-required` prior (a dedicated-channel decode, a digital or TDMA channel), or digital
- * evidence of the owner more than its spectrum backs: `backedClass` (DigitalClassLedger: a digital
- * class a verified decode or the channel tier backs), or the owner's own digital voice decode or
- * sync hint with checked content (a published label or a kept observation's proof) dated within
- * STRONG_PRIOR_TTL_MS of `now`. Never for a `suspect` prior read from a spectral class alone (a
- * weak or low-deviation NFM voice reads fsk4-*, gmsk-narrow), an `ism` or LoRa decode, a
- * `digital-unknown` candidate, an unchecked sync hint, or a co-channel decode: untoned voice lives
- * on those channels. A throwing read: not applied.
+ * Where finishVerdict's content check (`notSpeech`) applies under a digital prior, by where its
+ * strength came from (`source`, priorReading's StrongSource): a `tone-required` prior from a
+ * dedicated-channel decode, a TDMA channel or a digital channel with a checked digital voice
+ * sighting (`dedicated`, `tdma`, `checked-digital`), or digital evidence of the owner more than its
+ * spectrum backs: `backedClass` (DigitalClassLedger: a digital class the observation's own
+ * verified decode or the channel tier's discriminator features back, never the spectrum alone), or
+ * the owner's own digital voice decode or sync hint with checked content (a published label or a
+ * kept observation's proof) dated within STRONG_PRIOR_TTL_MS of `now`. Never for a digital channel
+ * made only by a `digital-unknown` candidate or unchecked DMR sync hints (`digital-unknown`,
+ * `unchecked-dmr`: still `tone-required` for admission, but their files are held, then kept), a
+ * `suspect` prior read from a spectral class alone (a weak or low-deviation NFM voice reads
+ * fsk4-*, gmsk-narrow), an `ism` or LoRa decode, or a co-channel decode: untoned voice lives on
+ * those channels. A throwing read: not applied.
  */
 export function contentChecked(
-	strength: PriorStrength,
+	source: StrongSource | null,
 	prior: VoicePrior | null,
 	backedClass: boolean,
 	now: number,
 ): boolean {
-	if (strength === "tone-required" || backedClass) return true
+	if (
+		source === "dedicated" ||
+		source === "tdma" ||
+		source === "checked-digital" ||
+		backedClass
+	)
+		return true
 	if (prior === null) return false
 	try {
 		const backed = (protocol: ScannerProtocol, at: number | null): boolean =>

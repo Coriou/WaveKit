@@ -20,6 +20,7 @@ import {
 	joinedVoiceOverlaps,
 	notVoiceDecode,
 	provisionalRoom,
+	priorReading,
 	readPrior,
 	STRONG_CLASS_MAX_DISCOVERIES,
 	STRONG_CLASS_MIN_OBSERVATIONS,
@@ -1709,16 +1710,169 @@ describe("finishVerdict: a file whose audio clearly measures as no speech (notSp
 		it(`${name}`, () => {
 			expect(verdict(p, over)).toBe(out)
 		})
-	it("contentChecked: tone-required always; a throwing proofs read is not applied", () => {
-		expect(contentChecked("tone-required", null, false, NOW)).toBe(true)
-		expect(contentChecked("suspect", null, true, NOW)).toBe(true)
-		expect(contentChecked("suspect", null, false, NOW)).toBe(false)
+	it("contentChecked: by source; a throwing proofs read is not applied", () => {
+		expect(contentChecked("dedicated", null, false, NOW)).toBe(true)
+		expect(contentChecked("tdma", null, false, NOW)).toBe(true)
+		expect(contentChecked("checked-digital", null, false, NOW)).toBe(true)
+		expect(contentChecked("unchecked-dmr", null, false, NOW)).toBe(false)
+		expect(contentChecked("digital-unknown", null, false, NOW)).toBe(false)
+		expect(contentChecked("digital-unknown", null, true, NOW)).toBe(true)
+		expect(contentChecked(null, null, true, NOW)).toBe(true)
+		expect(contentChecked(null, null, false, NOW)).toBe(false)
 		const throwing: VoicePrior = {
 			...suspect,
 			digitalProofs: () => {
 				throw new Error("read failed")
 			},
 		}
-		expect(contentChecked("suspect", throwing, false, NOW)).toBe(false)
+		expect(contentChecked(null, throwing, false, NOW)).toBe(false)
+	})
+})
+
+describe("finishVerdict: the content check follows where a strong prior's strength came from", () => {
+	// Feature: recording-verdict, the content check under a tone-required prior (StrongSource).
+	const recent = NOW - 60_000
+	const old = NOW - 2 * 3_600_000
+	const channel = (
+		labels: Label[],
+		votes: Partial<Record<ScannerClass, number>>,
+		total: number,
+		extra: Partial<VoicePrior> = {},
+		cls: ScannerClass = "fsk4-12k5",
+	): VoicePrior => ({
+		labels,
+		class: cls,
+		analogVoice: () => false,
+		classVotes: () => ({ total, votes }),
+		...extra,
+	})
+	const unknownCandidate: Label = {
+		protocol: "digital-unknown",
+		confidence: "candidate",
+		owner: true,
+		at: recent,
+	}
+	const uncheckedHint: Label = {
+		protocol: "dmr",
+		confidence: "activity",
+		owner: true,
+		at: recent,
+		checkedHint: false,
+		observationId: "o2",
+	}
+	const sync = (id: string, at: number, checked = false): DigitalProof => ({
+		protocol: "dmr",
+		at,
+		checked,
+		observationId: id,
+	})
+	const rows: {
+		name: string
+		prior: VoicePrior
+		source: string | null
+		out: "hold" | "discarded:not-speech"
+	}[] = [
+		{
+			name: "a digital-unknown candidate, fsk4-12k5 votes",
+			prior: channel([unknownCandidate], { "fsk4-12k5": 200 }, 240),
+			source: "digital-unknown",
+			out: "hold",
+		},
+		{
+			name: "rule (b): unchecked DMR hints from 2 observations, fsk4-12k5 votes",
+			prior: channel([uncheckedHint], { "fsk4-12k5": 200 }, 240, {
+				digitalProofs: () => [sync("o1", recent), sync("o2", recent)],
+			}),
+			source: "unchecked-dmr",
+			out: "hold",
+		},
+		{
+			name: "rule (a): an unchecked DMR hint, a third of the votes tdma-ms (no TDMA channel)",
+			prior: channel(
+				[uncheckedHint],
+				{ "tdma-ms": 100 },
+				240,
+				{ digitalProofs: () => [sync("o2", recent)] },
+				"analog-fm",
+			),
+			source: "unchecked-dmr",
+			out: "hold",
+		},
+		{
+			name: "a checked DMR hint 2 h old, the channel's TTL kept by a fresh tdma-ms vote",
+			prior: channel(
+				[{ ...uncheckedHint, at: old, checkedHint: true }],
+				{ "fsk4-12k5": 200 },
+				240,
+				{ digitalSeenAt: () => recent },
+			),
+			source: "checked-digital",
+			out: "discarded:not-speech",
+		},
+		{
+			name: "a digital-unknown candidate beside the owner's recent DMR decode (backed as today)",
+			prior: channel(
+				[unknownCandidate, { ...uncheckedHint, confidence: "decoded" }],
+				{ "fsk2-wide": 200 },
+				240,
+			),
+			source: "digital-unknown",
+			out: "discarded:not-speech",
+		},
+		{
+			name: "the owner's POCSAG decode",
+			prior: prior([decoded("pocsag")]),
+			source: "dedicated",
+			out: "discarded:not-speech",
+		},
+		{
+			name: "a TDMA channel on its spectrum alone",
+			prior: channel(
+				[],
+				{ "tdma-ms": 8 },
+				8,
+				{ digitalSeenAt: () => recent },
+				"tdma-ms",
+			),
+			source: "tdma",
+			out: "discarded:not-speech",
+		},
+	]
+	for (const r of rows) {
+		it(`${r.name}: ${String(r.source)}, ${r.out}`, () => {
+			expect(priorReading(r.prior, false, NOW)).toEqual({
+				strength: "tone-required",
+				source: r.source,
+			})
+			const verdict = (final: boolean, snapshotClassed = true) =>
+				finishVerdict({
+					prior: r.prior,
+					backedClass: false,
+					ownTone: false,
+					snapshotClassed,
+					decodedOwn: false,
+					joinedVoice: false,
+					notSpeech: true,
+					final,
+					now: NOW,
+				})
+			expect(verdict(false)).toBe(r.out)
+			expect(verdict(true)).toBe(r.out === "hold" ? "finish" : r.out)
+			// Still tone-required for admission: a file no snapshot classed is a shadow's.
+			expect(verdict(false, false)).toBe("discarded:known-non-voice")
+		})
+	}
+	it("a weak or no prior has no source", () => {
+		expect(priorReading(prior([], "fsk4-12k5"), false, NOW)).toEqual({
+			strength: "suspect",
+			source: null,
+		})
+		expect(priorReading(null, false, NOW)).toEqual({
+			strength: "none",
+			source: null,
+		})
+		expect(
+			priorReading(prior([decoded("pocsag")], "unknown", true), false, NOW),
+		).toEqual({ strength: "none", source: null })
 	})
 })

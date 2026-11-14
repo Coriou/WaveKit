@@ -2,8 +2,9 @@
  * Does a finished analog file's audio (8 kHz s16, what the recorder wrote) clearly measure as
  * something other than speech: a steady buzz (FM-demodulated 4FSK, TDMA, 2FSK or GMSK data, the
  * noise of an open squelch)? Its answer discards a file only where recording-verdict.ts
- * contentChecked applies (a `tone-required` prior, or backed digital evidence of the owner: never a
- * spectral class alone, an ism or LoRa decode, or a co-channel decode; finishVerdict,
+ * contentChecked applies (a strong prior from a dedicated decode, a TDMA channel or checked
+ * digital evidence, or backed digital evidence of the owner: never a spectral class alone, a
+ * digital-unknown candidate or unchecked sync hints alone, an ism or LoRa decode, or a co-channel decode; finishVerdict,
  * `discarded:not-speech`); a file with its own CTCSS tone, classed by its own tone, a classed
  * session's roll-over file, or a file of a channel with analog proof is never discarded by it.
  *
