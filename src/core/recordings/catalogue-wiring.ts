@@ -3,10 +3,13 @@
  * retention or a merge changes the listing without a rescan:
  *
  * - scanner `discovery` events: a changed `evidence.recordings` count (a recording attached by a
- *   finalize, deleted, or removed by retention) re-indexes that discovery's folders; a merge or
- *   a deletion re-indexes every id involved and announces their owner change;
- * - digital voice `call` events: a call that ended re-indexes the dsd-fme directories (the file
- *   settles 10 s after its last write, then a timer lists it).
+ *   finalize, or deleted) re-indexes that discovery's folders; a merge re-indexes every id
+ *   involved and announces their owner change; a deletion drops the discovery's unkept files at
+ *   once (its folders are being removed) and re-checks them once the removal is done;
+ * - scanner `recordings-removed` events: retention deleted files (it does not change
+ *   `evidence.recordings`): those discoveries' folders are re-indexed;
+ * - digital voice `call` events: a call that ended checks that decoder's dsd-fme directory for
+ *   newer calls (the file settles 10 s after its last write, then a timer lists it).
  *
  * Keep, unkeep and delete reach the catalogue through `invalidate(id)` (the keep service). The
  * catalogue's slow reconcile catches anything else (a file removed by hand).
@@ -23,21 +26,32 @@ export interface CatalogueDiscoverySource {
 		event: "discovery",
 		listener: (d: ScannerDiscoveryEventData) => void,
 	): unknown
+	on(event: "recordings-removed", listener: (ids: string[]) => void): unknown
 	off(
 		event: "discovery",
 		listener: (d: ScannerDiscoveryEventData) => void,
 	): unknown
+	off(event: "recordings-removed", listener: (ids: string[]) => void): unknown
+}
+
+interface EndedCall {
+	endedAt?: string
+	decoderId?: string
 }
 
 export interface CatalogueCallSource {
-	on(event: "call", listener: (call: { endedAt?: string }) => void): unknown
-	off(event: "call", listener: (call: { endedAt?: string }) => void): unknown
+	on(event: "call", listener: (call: EndedCall) => void): unknown
+	off(event: "call", listener: (call: EndedCall) => void): unknown
 }
 
 export interface CatalogueWiring {
 	inventory: Pick<
 		RecordingInventory,
-		"touchDiscoveries" | "touchCallRecordings" | "ownersChanged" | "onChange"
+		| "touchDiscoveries"
+		| "touchCallRecordings"
+		| "ownersChanged"
+		| "discoveriesRemoved"
+		| "onChange"
 	>
 	scanner?: CatalogueDiscoverySource | null
 	digitalVoice?: CatalogueCallSource | null
@@ -64,10 +78,16 @@ export function wireRecordingCatalogue(w: CatalogueWiring): () => void {
 	const onDiscovery = (d: ScannerDiscoveryEventData): void => {
 		const id = d.discovery.id
 		const n = d.discovery.evidence.recordings
-		if (d.change === "merged" || d.change === "deleted") {
+		if (d.change === "deleted") {
+			// The scanner removes the folders after this event: never re-index them now.
+			counts.delete(id)
+			inv.discoveriesRemoved?.([id])
+			return
+		}
+		if (d.change === "merged") {
 			const ids = [id, ...(d.mergedIds ?? [])]
 			for (const x of ids) counts.delete(x)
-			if (d.change === "merged") remember(id, n)
+			remember(id, n)
 			inv.ownersChanged?.(ids)
 			void inv.touchDiscoveries?.(ids)
 			return
@@ -78,15 +98,21 @@ export function wireRecordingCatalogue(w: CatalogueWiring): () => void {
 		if (before === undefined ? n > 0 : before !== n)
 			void inv.touchDiscoveries?.([id])
 	}
-	const onCall = (call: { endedAt?: string }): void => {
-		if (typeof call.endedAt === "string") void inv.touchCallRecordings?.()
+	const onCall = (call: EndedCall): void => {
+		if (typeof call.endedAt === "string")
+			void inv.touchCallRecordings?.(call.decoderId)
+	}
+	const onRemoved = (ids: string[]): void => {
+		if (Array.isArray(ids) && ids.length > 0) void inv.touchDiscoveries?.(ids)
 	}
 	w.scanner?.on("discovery", onDiscovery)
+	w.scanner?.on("recordings-removed", onRemoved)
 	w.digitalVoice?.on("call", onCall)
 	const unsubscribe =
 		w.broadcast !== undefined ? inv.onChange?.(w.broadcast) : undefined
 	return () => {
 		w.scanner?.off("discovery", onDiscovery)
+		w.scanner?.off("recordings-removed", onRemoved)
 		w.digitalVoice?.off("call", onCall)
 		unsubscribe?.()
 	}

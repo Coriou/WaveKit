@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
+import { EventEmitter } from "node:events"
 import { Readable } from "node:stream"
 import { setTimeout as delay } from "node:timers/promises"
 import fc from "fast-check"
@@ -43,6 +44,7 @@ import type {
 	RecordingStats,
 } from "../../../../src/core/recordings/inventory.js"
 import type { Logger } from "../../../../src/utils/logger.js"
+import { wireRecordingCatalogue } from "../../../../src/core/recordings/catalogue-wiring.js"
 
 // ---------------------------------------------------------------------------------------------
 // Helpers
@@ -1681,5 +1683,170 @@ describe("recordings catalogue", () => {
 		expect((await inv.list({})).items.map(i => i.id)).toEqual([
 			"scan:d_B~two.wav",
 		])
+	})
+})
+
+// ---------------------------------------------------------------------------------------------
+// The incremental view and the writers' narrow refreshes
+
+describe("recordings catalogue view and writers", () => {
+	// Feature: recordings catalogue, Property: the incrementally kept view equals a full sort
+	// Validates: newest-first order and exactly-once pages after any adds, changes and removals
+	it("keeps the view equal to a full sort of the indexed files after any changes", async () => {
+		type Op = { f: number; i: number; t: number; del: boolean; dv: boolean }
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.record({
+						f: fc.integer({ min: 0, max: 3 }),
+						i: fc.integer({ min: 0, max: 5 }),
+						t: fc.integer({ min: 0, max: 4 }),
+						del: fc.boolean(),
+						dv: fc.boolean(),
+					}),
+					{ maxLength: 25 },
+				),
+				async (ops: Op[]) => {
+					const fs = new FakeFs().dir("/r/dsd").dir("/r/scan/dv")
+					const inv = fakeInventory(fs)
+					await inv.start?.()
+					const live = new Map<string, number>()
+					for (const op of ops) {
+						// one discovery can hold the same name under dv and analog: dv is listed
+						const kind = op.dv ? "dv" : "analog"
+						const d = `d_F${op.f}`
+						const p = `/r/scan/${kind}/${d}/r-${op.i}.wav`
+						if (op.del) {
+							fs.nodes.delete(p)
+							fs.children.get(path.dirname(p))?.delete(path.basename(p))
+							live.delete(p)
+						} else {
+							fs.file(p, OLD + op.t)
+							live.set(p, OLD + op.t)
+						}
+						// a full re-read goes through the same incremental add, change and remove
+						inv.invalidate?.()
+						await inv.list({ limit: 1 })
+					}
+					// expected: one entry per id (dv wins over analog), newest first, ties by id
+					const best = new Map<string, { m: number; dv: boolean }>()
+					for (const [p, m] of live) {
+						const [, , , kind, d, name] = p.split("/")
+						const id = `scan:${d}~${name}`
+						const dv = kind === "dv"
+						const cur = best.get(id)
+						if (!cur || (dv && !cur.dv)) best.set(id, { m, dv })
+					}
+					const want = [...best.entries()]
+						.sort(([ai, a], [bi, b]) =>
+							a.m !== b.m ? b.m - a.m : ai < bi ? -1 : ai > bi ? 1 : 0,
+						)
+						.map(([id]) => id)
+					expect(await allPages(inv, { limit: 3 })).toEqual(want)
+					const page = await inv.list({ limit: 200 })
+					expect(page.counts?.total).toBe(want.length)
+					expect(page.matched).toBe(want.length)
+					inv.close?.()
+				},
+			),
+			{ numRuns: 100 },
+		)
+	}, 120_000)
+
+	it("a call end reads only that decoder's directory and lstats only the newer call", async () => {
+		const fs = new FakeFs().dir("/r/other")
+		for (let i = 0; i < 300; i++)
+			fs.file(`/r/dsd/${DSD(String(100000 + i))}`, OLD + i)
+		fs.file(`/r/other/${DSD("100000")}`, OLD)
+		const inv = fakeInventory(fs, {
+			dsdFmeDirs: () => [
+				{ decoderId: "a", dir: "/r/dsd" },
+				{ decoderId: "b", dir: "/r/other" },
+			],
+		})
+		await inv.start?.()
+		fs.file(`/r/dsd/${DSD("120000")}`, OLD + 1_000)
+		const lstats = fs.lstats
+		const readdirs = fs.readdirs
+		await inv.touchCallRecordings?.("a")
+		// the directory check and the new call's lstat (plus its open-time directory check)
+		expect(fs.lstats - lstats).toBeLessThanOrEqual(3)
+		expect(fs.readdirs - readdirs).toBe(1)
+		const page = await inv.list({ limit: 1 })
+		expect(page.items[0]?.id).toBe(`dsd:0~${DSD("120000")}`)
+		expect(page.scannedFiles).toBe(302)
+	})
+
+	it("retention's removed files leave the list through the scanner's recordings-removed event", async () => {
+		const fs = new FakeFs()
+			.dir("/r/dsd")
+			.file("/r/scan/dv/d_A/one.wav", OLD)
+			.file("/r/scan/analog/d_B/two.wav", OLD)
+		const inv = fakeInventory(fs)
+		const scanner = new EventEmitter()
+		const unwire = wireRecordingCatalogue({ inventory: inv, scanner })
+		await inv.start?.()
+		fs.nodes.delete("/r/scan/analog/d_B/two.wav")
+		fs.children.get("/r/scan/analog/d_B")?.delete("two.wav")
+		const touched: string[][] = []
+		let done: Promise<void> | undefined
+		const original = inv.touchDiscoveries?.bind(inv)
+		inv.touchDiscoveries = ids => {
+			touched.push([...ids])
+			done = original?.(ids)
+			return done ?? Promise.resolve()
+		}
+		scanner.emit("recordings-removed", ["d_B"])
+		expect(touched).toEqual([["d_B"]])
+		await done
+		expect((await inv.list({})).items.map(i => i.id)).toEqual([
+			"scan:d_A~one.wav",
+		])
+		unwire()
+		inv.close?.()
+	})
+
+	it("a bulk eviction drops the deleted discoveries at once, keeps kept files, and never re-lists removed ones", async () => {
+		const fs = new FakeFs().dir("/r/dsd")
+		for (let i = 0; i < 30; i++) fs.file(`/r/scan/dv/d_E${i}/r.wav`, OLD + i)
+		fs.file("/r/scan/dv/d_LIVE/r.wav", OLD)
+		const kept = new Set(["scan:d_E7~r.wav"])
+		const inv = fakeInventory(fs, {
+			removedRecheckMs: 50,
+			protection: {
+				isProtected: k => kept.has(k),
+				isDsdFmeFileProtected: () => true,
+				isScannerFileProtected: () => true,
+				discoveryHoldsKept: () => true,
+			},
+		})
+		const scanner = new EventEmitter()
+		const unwire = wireRecordingCatalogue({ inventory: inv, scanner })
+		await inv.start?.()
+		const calls = fs.calls
+		for (let i = 0; i < 30; i++)
+			scanner.emit("discovery", {
+				change: "deleted",
+				discovery: { id: `d_E${i}`, evidence: { recordings: 1 } },
+			})
+		const now = (await inv.list({ limit: 200 })).items.map(i => i.id)
+		expect(now.sort()).toEqual(["scan:d_E7~r.wav", "scan:d_LIVE~r.wav"])
+		// dropped from memory: not one filesystem call
+		expect(fs.calls).toBe(calls)
+		// the scanner then removes the unkept files (the folder of a kept one stays)
+		for (let i = 0; i < 30; i++) {
+			if (i === 7) continue
+			fs.nodes.delete(`/r/scan/dv/d_E${i}/r.wav`)
+			fs.children.get(`/r/scan/dv/d_E${i}`)?.delete("r.wav")
+		}
+		await vi.waitFor(() => expect(fs.calls).toBeGreaterThan(calls), {
+			timeout: 3_000,
+		})
+		await delay(400)
+		expect(
+			(await inv.list({ limit: 200 })).items.map(i => i.id).sort(),
+		).toEqual(["scan:d_E7~r.wav", "scan:d_LIVE~r.wav"])
+		unwire()
+		inv.close?.()
 	})
 })

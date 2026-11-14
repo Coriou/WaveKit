@@ -88,6 +88,7 @@ import {
 	holdsKeptWithAliases,
 	recordingFolderDiscovery,
 } from "./recording-aliases.js"
+import { recordingFolderIdsOf } from "../recordings/names.js"
 import type { SourceCaps } from "../../config.js"
 import type { DecoderConfig } from "../../decoders/types.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -9295,9 +9296,18 @@ export class ScannerService extends EventEmitter {
 		const keep = new Set(
 			[...all.values()].filter(d => d.operator?.keep).map(d => d.id),
 		)
-		await this.evidence
+		const retained = await this.evidence
 			.retention(keep)
-			.catch((err: unknown) => this.log.warn({ err }, "Retention failed"))
+			.catch((err: unknown) => {
+				this.log.warn({ err }, "Retention failed")
+				return null
+			})
+		// Retention removes files without changing a discovery's recording count: the recordings
+		// catalogue hears it here (folder ids only).
+		if (retained !== null && retained.deleted.length > 0) {
+			const folderIds = recordingFolderIdsOf(retained.deleted)
+			if (folderIds.length > 0) this.emit("recordings-removed", folderIds)
+		}
 		// Ownership of recordings listed in other folders ends with their files.
 		if (!this.ownershipLost())
 			this.store.pruneHeldRecordings(

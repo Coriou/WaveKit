@@ -195,3 +195,30 @@ describe("recordings catalogue writers (production wiring)", () => {
 		expect(kindListings()).toBe(builtListings)
 	})
 })
+
+describe("scanner retention tells the catalogue which folders it emptied", () => {
+	it("emits recordings-removed with the folder ids of the files retention deleted", async () => {
+		const h = serviceHarness({ patch: st => void (st.passive.enabled = false) })
+		await h.service.start()
+		stops.push(() => h.service.stop())
+		const internal = h.service as unknown as {
+			maintenance(): Promise<void>
+			evidence: {
+				retention(keep: ReadonlySet<string>): Promise<{ deleted: string[] }>
+			}
+		}
+		vi.spyOn(internal.evidence, "retention").mockResolvedValue({
+			deleted: [
+				"recordings/dv/d_A/call.wav",
+				"recordings/analog/d_B/analog-1.wav",
+				"psd/d_C/psd.json",
+			],
+		})
+		const removed: string[][] = []
+		h.service.on("recordings-removed", (ids: string[]) => removed.push(ids))
+		await internal.maintenance()
+		// start runs a maintenance pass too: every pass reports the same folders
+		expect(removed.length).toBeGreaterThan(0)
+		for (const ids of removed) expect(ids).toEqual(["d_A", "d_B"])
+	})
+})

@@ -6528,27 +6528,33 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   dsd-fme call pattern nor the scanner recording id, symbolic links and
   non-regular files. Files that vanish during a scan are skipped.
 - Catalogue: the list is served from memory, never from a walk of the disk per
-  request. The core builds the catalogue in the background at start, newest
-  folders first; until it is complete a listing waits at most 750 ms and then
-  answers from what is indexed with `indexing: true`. Writers keep it current
-  without a rescan: a scanner finalize, delete or retention (the discovery's
-  recording count changed), a merge (owner and frequency are read at list
-  time), a dsd-fme call that ended, and Keep, unkeep or delete (re-checked at
-  once; the next listing waits for it). A file still being written is listed
-  once it is 10 s old. A slow reconcile re-reads one folder at a time (20 ms
-  between folders, then 60 s of rest) and catches anything else, such as a file
-  removed by hand. `revision` changes with every change to what is listed.
-  Every indexed file passed the download's checks when it was indexed; the
-  download checks again at request time.
-- Bounds: at most 50 000 recordings, newest first. Past it only the oldest are
-  left out: `truncated` is true and `truncatedBefore` is the newest
-  modification time left out. `truncated` is also true past 20 000 recording
-  folders (the folders changed least recently are left out) or 100 000 names in
-  one folder. At most 4 KiB read per header and 8 filesystem operations in
-  flight. Measured on the Mac with 10 000 files in 1 500 folders (host load
-  about 150): the first answer after 760 ms, marked `indexing`; a warm page
-  0.7 ms (p50), a filtered page 2.1 ms (p50), at most 14.5 ms of CPU per
-  listing (p95), and no filesystem call once warm (budget 20 ms).
+  request, and kept sorted as it changes (a listing never sorts). The core
+  builds the catalogue in the background at start, newest folders first; until
+  it is complete a listing waits at most 750 ms and then answers from what is
+  indexed with `indexing: true`. Writers keep it current without a rescan: a
+  scanner finalize or delete (the discovery's recording count changed),
+  retention (the scanner reports the folders it emptied), a deleted discovery
+  (its unkept files leave the list at once and the folders are checked again
+  10 s later), a merge (owner and frequency are read at list time), a dsd-fme
+  call that ended (only that decoder's directory, only newer calls), and Keep,
+  unkeep or delete (re-checked at once; the next listing waits for it). A file
+  still being written is listed once it is 10 s old. A slow reconcile re-reads
+  one folder at a time (20 ms between folders and between chunks of 256 names,
+  then 60 s of rest) and catches anything else, such as a file removed by hand.
+  `revision` changes with every change to what is listed, to `kept` or to an
+  owner. Every indexed file passed the download's checks when it was indexed;
+  the download checks again at request time.
+- Bounds: at most 50 000 recordings, newest first, enforced as files are
+  indexed. Past it only the oldest are left out: `truncated` is true and
+  `truncatedBefore` is the newest modification time left out. `truncated` is
+  also true past 20 000 recording folders (the folders changed least recently
+  are left out) or 100 000 names in one folder. At most 4 KiB read per header
+  and 8 filesystem operations in flight. Measured on the Mac with protection
+  on and a change (a new recording, a Keep, an owner change) before every
+  listing, host load about 85: at 10 000 files a page takes 1.6 ms (p50, 3.4 ms
+  p95) and a filtered page 3.6 ms (p50); at 50 000 files a page takes 13 ms
+  (p50, 20 ms p95) and a filtered page 25 ms (p50). No filesystem call once
+  warm; the first answer comes within 760 ms, marked `indexing`.
 - Live notices: the `recordings` WebSocket channel (protected mode only) sends
   `recordings:changed` with `data` holding `revision`, `added`, `removed`,
   `changed` and `indexing`: counts only, never an id, at most one a second.

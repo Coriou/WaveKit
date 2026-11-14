@@ -39,7 +39,7 @@ import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { Logger } from "../../utils/logger.js"
 import { recordingKeepKeyOf } from "./contract.js"
-import type { RecordingProtection } from "./contract.js"
+import type { RecordingKeepKey, RecordingProtection } from "./contract.js"
 import {
 	afterCursor,
 	compareEntries,
@@ -80,14 +80,26 @@ export const RECORDINGS_SETTLE_SLACK_MS = 50
  * RECORDINGS_CATALOGUE_MAX (45 000), so a full catalogue does not re-open them every reconcile.
  */
 export const RECORDINGS_CATALOGUE_REARM = 0.9
-/** While indexing, the oldest are evicted once the catalogue holds 5 % more than its bound. */
-export const RECORDINGS_CATALOGUE_EVICT_SLACK = 1.05
 /**
  * Names read from one folder: twice the entry bound (100 000 by default), so a folder holding
  * every listed recording plus as many other files is still read whole. Past it, `truncated`
  * (which names were read is then the filesystem's order).
  */
 export const RECORDINGS_FOLDER_NAMES_FACTOR = 2
+/**
+ * A folder listing is sorted (newest dsd-fme names first in the first build) only up to this
+ * many names: a 100 000-name sort would hold the event loop for tens of milliseconds.
+ */
+export const RECORDINGS_SORT_NAMES_MAX = 4_096
+/** The paced reconcile re-checks a large folder in chunks of this many names, pausing between. */
+export const RECORDINGS_RECONCILE_CHUNK_NAMES = 256
+/**
+ * After a discovery is deleted its folders leave the listing at once (kept files stay); they are
+ * re-checked this much later, once the scanner removed the files, so survivors show again.
+ */
+export const RECORDINGS_REMOVED_RECHECK_MS = 10_000
+/** dsd-fme call names start with `YYYYMMDD_HHMMSS`: the part compared to find newer calls. */
+const CALL_STAMP_LENGTH = 15
 /**
  * Longest listed or resolvable id: Fastify's default `maxParamLength` (100) bounds the download
  * route parameter, and a cursor `{"m":<≤ 24>,"i":"<≤ 100>"}` stays ≤ 137 bytes, ≤ 184 base64url
@@ -167,6 +179,8 @@ export interface RecordingInventoryOptions {
 	) => { id: string; frequencyHz: number | null } | null
 	/** Rest between reconciles (RECORDINGS_RECONCILE_INTERVAL_MS by default). */
 	reconcileIntervalMs?: number
+	/** Test seam: RECORDINGS_REMOVED_RECHECK_MS by default. */
+	removedRecheckMs?: number
 	/** Test seam: the entry bound (RECORDINGS_CATALOGUE_MAX by default). */
 	catalogueMax?: number
 	/** Test seam: the folder bound (RECORDINGS_CATALOGUE_MAX_FOLDERS by default). */
@@ -216,8 +230,13 @@ export interface RecordingInventory {
 	close?(): void
 	/** Writers: these discoveries' folders changed (finalize, delete, retention). */
 	touchDiscoveries?(ids: readonly string[]): Promise<void>
-	/** Writers: a dsd-fme call ended (its directory changed). */
-	touchCallRecordings?(): Promise<void>
+	/** Writers: a dsd-fme call of `decoderId` ended (no id: every dsd-fme directory). */
+	touchCallRecordings?(decoderId?: string): Promise<void>
+	/**
+	 * Writers: these discoveries were deleted (their folders are being removed): their unkept
+	 * files leave the listing at once, and the folders are re-checked once removal is done.
+	 */
+	discoveriesRemoved?(ids: readonly string[]): void
 	/** Merges: these folders' owner or frequency changed (no file changed). */
 	ownersChanged?(folderIds: readonly string[]): void
 	/** `recordings:changed` notices (at most one a second); returns the unsubscribe. */
@@ -295,6 +314,10 @@ interface FolderSpec {
 }
 
 interface IndexedEntry extends InventoryEntry {
+	/** The keep key, computed once (null: fail closed, reads kept). */
+	key: RecordingKeepKey | null
+	/** In the sorted view (the winner of its id). */
+	listed: boolean
 	/** The `q` text for `hayHz` (cached: rebuilt only when the owner's frequency changed). */
 	hay?: string
 	hayHz?: number | null
@@ -448,6 +471,9 @@ export function createRecordingInventory(
 	const sem = new Semaphore(RECORDINGS_SCAN_CONCURRENCY)
 	const reconcileIntervalMs =
 		options.reconcileIntervalMs ?? RECORDINGS_RECONCILE_INTERVAL_MS
+	const removedRecheckMs =
+		options.removedRecheckMs ?? RECORDINGS_REMOVED_RECHECK_MS
+	const removedTimers = new Set<ReturnType<typeof setTimeout>>()
 	const maxEntries = options.catalogueMax ?? RECORDINGS_CATALOGUE_MAX
 	const maxFolders =
 		options.catalogueMaxFolders ?? RECORDINGS_CATALOGUE_MAX_FOLDERS
@@ -732,7 +758,17 @@ export function createRecordingInventory(
 	const urgent = new Set<Promise<void>>()
 	const listeners = new Set<(e: RecordingsChangedEventData) => void>()
 	let revision = 0
-	let view: View | null = null
+	/**
+	 * The listed entries, newest first, kept sorted incrementally (binary-search insert and
+	 * remove): a change costs one splice, a listing never sorts. One entry per id (the lowest
+	 * rank, dv before analog); `byId` holds every indexed copy of an id.
+	 */
+	const view: View = {
+		entries: [],
+		bytes: 0,
+		byKind: { "dsd-fme-call": 0, "scanner-dv": 0, "scanner-analog": 0 },
+	}
+	const byId = new Map<string, IndexedEntry[]>()
 	/** First full build: null until started, then its promise. */
 	let build: Promise<void> | null = null
 	let built = false
@@ -743,15 +779,15 @@ export function createRecordingInventory(
 	/** Past RECORDINGS_CATALOGUE_MAX: the first entry left out (newest-first order). */
 	let cutoff: { m: number; i: string } | null = null
 	let configKey: string | null = null
-	/** Files held by attached folder states (the bound is enforced as it grows). */
-	let fileCount = 0
 	/** Bumped for every folder state created (a pass removes only states older than its derive). */
 	let stateSeq = 0
 	let pendingTimer: ReturnType<typeof setTimeout> | null = null
 	let reconcileTimer: ReturnType<typeof setTimeout> | null = null
 	let touchTimer: ReturnType<typeof setTimeout> | null = null
 	const touchedDiscoveries = new Set<string>()
+	/** Decoders whose call ended; null with `touchedCalls`: every dsd-fme directory. */
 	let touchedCalls = false
+	let touchedDecoders: Set<string> | null = new Set()
 	let touchWaiters: (() => void)[] = []
 	let eventTimer: ReturnType<typeof setTimeout> | null = null
 	let lastEventAt = Number.NEGATIVE_INFINITY
@@ -762,10 +798,10 @@ export function createRecordingInventory(
 		if (typeof t === "object" && t !== null && "unref" in t) t.unref()
 	}
 
+	/** A change to what is listed (or to `kept` and owners, read at list time): revision only. */
 	function changed(kind: "added" | "removed" | "changed", n = 1): void {
 		if (n <= 0) return
 		revision++
-		view = null
 		pendingEvent[kind] += n
 		scheduleEvent()
 	}
@@ -829,25 +865,119 @@ export function createRecordingInventory(
 		return folders.get(state.spec.key) === state
 	}
 
+	/** Index in the view where `e` sorts (first position not before it). */
+	function viewIndex(e: InventoryEntry): number {
+		const entries = view.entries
+		let lo = 0
+		let hi = entries.length
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1
+			const at = entries[mid]
+			if (at !== undefined && compareEntries(at, e) < 0) lo = mid + 1
+			else hi = mid
+		}
+		return lo
+	}
+
+	function viewInsert(e: IndexedEntry): void {
+		view.entries.splice(viewIndex(e), 0, e)
+		e.listed = true
+		view.bytes += e.item.bytes
+		view.byKind[e.item.kind]++
+	}
+
+	function viewRemove(e: IndexedEntry): void {
+		if (!e.listed) return
+		const i = viewIndex(e)
+		if (view.entries[i] === e) view.entries.splice(i, 1)
+		else {
+			// Never expected (the order is total); stay correct anyway.
+			const j = view.entries.indexOf(e)
+			if (j >= 0) view.entries.splice(j, 1)
+		}
+		e.listed = false
+		view.bytes -= e.item.bytes
+		view.byKind[e.item.kind]--
+	}
+
+	function winnerOf(copies: readonly IndexedEntry[]): IndexedEntry | undefined {
+		let best: IndexedEntry | undefined
+		for (const c of copies) if (!best || c.rank < best.rank) best = c
+		return best
+	}
+
+	/** Adds an indexed copy; the view lists the id's winner. */
+	function track(e: IndexedEntry): void {
+		const copies = byId.get(e.item.id) ?? []
+		const before = winnerOf(copies)
+		copies.push(e)
+		byId.set(e.item.id, copies)
+		if (winnerOf(copies) === e) {
+			if (before) viewRemove(before)
+			viewInsert(e)
+			enforceBound()
+		}
+	}
+
+	/** Removes an indexed copy; the next copy of its id, if any, is listed instead. */
+	function untrack(e: IndexedEntry): void {
+		const copies = byId.get(e.item.id)
+		if (!copies) return
+		const i = copies.indexOf(e)
+		if (i >= 0) copies.splice(i, 1)
+		if (copies.length === 0) byId.delete(e.item.id)
+		if (e.listed) {
+			viewRemove(e)
+			const next = winnerOf(copies)
+			if (next) {
+				viewInsert(next)
+				enforceBound()
+			}
+		}
+	}
+
+	/**
+	 * The memory and listing bound, kept on every insert: past it the oldest listed entry and
+	 * every copy of its id leave the catalogue, and `cutoff` keeps older files out without
+	 * opening them. Once the catalogue shrinks below the rearm share, a reconcile adds them back.
+	 */
+	function enforceBound(): void {
+		while (view.entries.length > maxEntries) {
+			const last = view.entries[view.entries.length - 1]
+			if (!last) break
+			cutoff = { m: last.mtimeMs, i: last.item.id }
+			for (const c of [...(byId.get(last.item.id) ?? [])]) {
+				const state = folders.get(c.folder)
+				if (state?.files.get(c.name) === c) {
+					state.files.delete(c.name)
+				}
+				untrack(c)
+			}
+		}
+		if (
+			cutoff !== null &&
+			view.entries.length < maxEntries * RECORDINGS_CATALOGUE_REARM
+		)
+			cutoff = null
+	}
+
 	function dropFile(state: FolderState, name: string): boolean {
 		if (!attached(state)) return false
-		const had = state.files.delete(name)
-		if (had) {
-			fileCount--
-			changed("removed")
-		}
-		return had
+		const e = state.files.get(name)
+		if (!e) return false
+		state.files.delete(name)
+		untrack(e)
+		changed("removed")
+		return true
 	}
 
 	function setFile(state: FolderState, name: string, e: IndexedEntry): void {
 		if (!attached(state)) return
-		const had = state.files.has(name)
+		const prev = state.files.get(name)
 		state.files.set(name, e)
-		if (!had) fileCount++
-		changed(had ? "changed" : "added")
-		// The memory bound holds while indexing too, not only when a listing builds the view:
-		// past 5 % over it, the oldest are evicted (once per 5 % of growth).
-		if (fileCount > maxEntries * RECORDINGS_CATALOGUE_EVICT_SLACK) currentView()
+		if (prev) untrack(prev)
+		track(e)
+		changed(prev ? "changed" : "added")
 	}
 
 	function setPending(state: FolderState, name: string, due: number): void {
@@ -864,8 +994,10 @@ export function createRecordingInventory(
 		const state = folders.get(key)
 		if (!state) return
 		folders.delete(key)
-		fileCount -= state.files.size
-		changed("removed", state.files.size)
+		const n = state.files.size
+		for (const e of state.files.values()) untrack(e)
+		state.files.clear()
+		changed("removed", n)
 	}
 
 	/** True when (m, i) sorts at or after the first entry left out past the bound. */
@@ -923,7 +1055,10 @@ export function createRecordingInventory(
 	}
 
 	/** Every folder to index: dsd-fme directories, then scanner folders newest change first. */
-	async function deriveFolders(counts: Counts): Promise<FolderSpec[]> {
+	async function deriveFolders(
+		counts: Counts,
+		report?: { foldersTruncated: boolean },
+	): Promise<FolderSpec[]> {
 		const out: FolderSpec[] = []
 		for (const [n, source] of (await dsdSources(counts)).entries()) {
 			out.push({
@@ -977,7 +1112,7 @@ export function createRecordingInventory(
 			scanner.length = maxFolders
 			truncatedHere = true
 		}
-		foldersTruncated = truncatedHere
+		if (report) report.foldersTruncated = truncatedHere
 		return [...out, ...scanner]
 	}
 
@@ -1018,7 +1153,8 @@ export function createRecordingInventory(
 			}
 		}
 		// Newest first where the name says so (dsd-fme names start with the date and time).
-		return { names: names.sort().reverse(), truncated }
+		if (names.length <= RECORDINGS_SORT_NAMES_MAX) names.sort().reverse()
+		return { names, truncated }
 	}
 
 	/** `fn` over `items` with RECORDINGS_SCAN_CONCURRENCY workers, results in input order. */
@@ -1174,6 +1310,8 @@ export function createRecordingInventory(
 		setFile(state, name, {
 			mtimeMs: entry.mtimeMs,
 			item: entry.item,
+			key: recordingKeepKeyOf(entry.item.id),
+			listed: false,
 			folder: spec.key,
 			name,
 			rank: spec.rank,
@@ -1189,6 +1327,7 @@ export function createRecordingInventory(
 		spec: FolderSpec,
 		counts: Counts,
 		only?: ReadonlySet<string>,
+		paced = false,
 	): Promise<void> {
 		await withFolder(spec.key, async () => {
 			if (closed) return
@@ -1217,7 +1356,24 @@ export function createRecordingInventory(
 				present.add(name)
 				work.push([name, id])
 			}
-			await pool(work, ([name, id]) => refreshName(state, name, id, at, counts))
+			if (paced) {
+				// A large folder never holds the loop or the fs pool for long: chunks, then a pause.
+				for (
+					let i = 0;
+					i < work.length;
+					i += RECORDINGS_RECONCILE_CHUNK_NAMES
+				) {
+					await pool(
+						work.slice(i, i + RECORDINGS_RECONCILE_CHUNK_NAMES),
+						([name, id]) => refreshName(state, name, id, at, counts),
+					)
+					if (i + RECORDINGS_RECONCILE_CHUNK_NAMES < work.length)
+						await pause(RECORDINGS_RECONCILE_FOLDER_GAP_MS)
+				}
+			} else
+				await pool(work, ([name, id]) =>
+					refreshName(state, name, id, at, counts),
+				)
 			if (only) {
 				for (const name of only)
 					if (!present.has(name)) {
@@ -1264,7 +1420,10 @@ export function createRecordingInventory(
 		// States created after this point (a writer indexed a new folder while the derive ran)
 		// are not this pass's to remove.
 		const seqAtDerive = stateSeq
-		const specs = await deriveFolders(counts)
+		namesTruncated = false
+		const out = { foldersTruncated: false }
+		const specs = await deriveFolders(counts, out)
+		foldersTruncated = out.foldersTruncated
 		const keys = new Set(specs.map(s => s.key))
 		const gone = [...folders.entries()].filter(
 			([key, state]) => !keys.has(key) && state.seq <= seqAtDerive,
@@ -1279,7 +1438,7 @@ export function createRecordingInventory(
 		if (paced) {
 			for (const spec of specs) {
 				if (closed) return
-				await indexFolder(spec, counts)
+				await indexFolder(spec, counts, undefined, true)
 				await pause(RECORDINGS_RECONCILE_FOLDER_GAP_MS)
 			}
 		} else {
@@ -1399,46 +1558,7 @@ export function createRecordingInventory(
 		if (timer !== undefined) clearTimeout(timer)
 	}
 
-	/** The listed entries, newest first, bounded; rebuilt only after a change. */
 	function currentView(): View {
-		if (view !== null) return view
-		const best = new Map<string, IndexedEntry>()
-		for (const state of folders.values())
-			for (const e of state.files.values()) {
-				const cur = best.get(e.item.id)
-				if (!cur || e.rank < cur.rank) best.set(e.item.id, e)
-			}
-		const entries = [...best.values()].sort(compareEntries)
-		if (entries.length > maxEntries) {
-			const first = entries[maxEntries]
-			if (first) cutoff = { m: first.mtimeMs, i: first.item.id }
-			// Left out for good (memory bound): only re-indexed once the catalogue shrank.
-			for (const e of entries.slice(maxEntries)) {
-				const state = folders.get(e.folder)
-				if (state?.files.get(e.name) === e) {
-					state.files.delete(e.name)
-					fileCount--
-				}
-			}
-			entries.length = maxEntries
-		} else if (
-			cutoff !== null &&
-			entries.length < maxEntries * RECORDINGS_CATALOGUE_REARM
-		) {
-			cutoff = null
-			// The next reconcile indexes the older files again.
-		}
-		const byKind: Record<RecordingInventoryKind, number> = {
-			"dsd-fme-call": 0,
-			"scanner-dv": 0,
-			"scanner-analog": 0,
-		}
-		let bytes = 0
-		for (const e of entries) {
-			byKind[e.item.kind]++
-			bytes += e.item.bytes
-		}
-		view = { entries, bytes, byKind }
 		return view
 	}
 
@@ -1456,10 +1576,9 @@ export function createRecordingInventory(
 		}
 		const keptOf = (e: IndexedEntry): boolean | undefined => {
 			if (!protection) return undefined
-			const key = recordingKeepKeyOf(e.item.id)
-			if (key === null) return true
+			if (e.key === null) return true
 			try {
-				return protection.isProtected(key) !== false
+				return protection.isProtected(e.key) !== false
 			} catch {
 				return true
 			}
@@ -1509,14 +1628,62 @@ export function createRecordingInventory(
 		let matched = 0
 		let keptTotal = 0
 		let more = false
-		for (const e of v.entries) {
-			const kept = keptOf(e)
-			if (kept === true) keptTotal++
-			if (!keep(e, kept)) continue
-			matched++
-			if (!afterCursor(e, q.cursor)) continue
-			if (selected.length < q.limit) selected.push({ e, kept })
-			else more = true
+		const filtered =
+			q.kind !== null ||
+			q.decoderId !== null ||
+			q.talkgroup !== null ||
+			q.source !== null ||
+			q.sinceMs !== null ||
+			q.untilMs !== null ||
+			q.kept !== null ||
+			wanted !== null ||
+			q.minHz !== null ||
+			q.maxHz !== null ||
+			q.q !== null
+		// One protection answer per entry per listing, reused by the page.
+		const n = v.entries.length
+		if (!filtered) {
+			const keptAt: (boolean | undefined)[] = new Array<boolean | undefined>(n)
+			if (protection)
+				for (let i = 0; i < n; i++) {
+					const e = v.entries[i]
+					const k = e === undefined ? undefined : keptOf(e)
+					keptAt[i] = k
+					if (k === true) keptTotal++
+				}
+			// No filter: the page is a slice after the cursor (binary search), nothing more.
+			matched = v.entries.length
+			let start = 0
+			if (q.cursor !== null) {
+				const c = q.cursor
+				let lo = 0
+				let hi = v.entries.length
+				while (lo < hi) {
+					const mid = (lo + hi) >>> 1
+					const at = v.entries[mid]
+					if (at !== undefined && !afterCursor(at, c)) lo = mid + 1
+					else hi = mid
+				}
+				start = lo
+			}
+			const end = Math.min(n, start + q.limit)
+			for (let i = start; i < end; i++) {
+				const e = v.entries[i]
+				if (e) selected.push({ e, kept: keptAt[i] })
+			}
+			more = end < n
+		} else {
+			for (let i = 0; i < n; i++) {
+				const e = v.entries[i]
+				if (e === undefined) continue
+				const kept = keptOf(e)
+				if (kept === true) keptTotal++
+				if (!keep(e, kept)) continue
+				matched++
+				if (!afterCursor(e, q.cursor)) continue
+				if (selected.length < q.limit) selected.push({ e, kept })
+				else more = true
+			}
 		}
 		const last = selected[selected.length - 1]
 		const items = selected.map(({ e, kept }) => {
@@ -1524,7 +1691,7 @@ export function createRecordingInventory(
 			const item: RecordingInventoryItem = {
 				...e.item,
 				frequencyHz: owner?.frequencyHz ?? null,
-				key: recordingKeepKeyOf(e.item.id) ?? e.item.id,
+				key: e.key ?? e.item.id,
 				ownerDiscoveryId: owner?.id ?? null,
 			}
 			if (kept !== undefined) item.kept = kept
@@ -1601,13 +1768,70 @@ export function createRecordingInventory(
 		logSkipped(counts)
 	}
 
-	async function refreshCalls(): Promise<void> {
+	/**
+	 * A call ended: re-read only that decoder's dsd-fme directory and check only names not
+	 * indexed yet that are at least as new as the newest one indexed (names start with the date
+	 * and time), plus none other: one directory read and one lstat per new call. An unknown
+	 * decoder (no indexed directory yet) re-derives the dsd-fme directories once.
+	 */
+	async function refreshCalls(
+		decoderIds: ReadonlySet<string> | null,
+	): Promise<void> {
 		const counts = newCounts()
-		const specs = (await deriveFolders(counts)).filter(
-			s => s.kind === "dsd-fme-call",
+		const states = [...folders.values()].filter(
+			st =>
+				st.spec.kind === "dsd-fme-call" &&
+				(decoderIds === null ||
+					(st.spec.decoderId !== null && decoderIds.has(st.spec.decoderId))),
 		)
-		await Promise.all(specs.map(s => indexFolder(s, counts)))
+		const known = new Set(states.map(st => st.spec.decoderId))
+		const missing =
+			decoderIds === null ? [] : [...decoderIds].filter(d => !known.has(d))
+		if (missing.length > 0 || states.length === 0) {
+			const specs = (await deriveFolders(counts)).filter(
+				sp =>
+					sp.kind === "dsd-fme-call" &&
+					(decoderIds === null ||
+						(sp.decoderId !== null && decoderIds.has(sp.decoderId))),
+			)
+			await Promise.all(
+				specs
+					.filter(sp => !folders.has(sp.key))
+					.map(sp => indexFolder(sp, counts)),
+			)
+		}
+		await Promise.all(states.map(st => newCalls(st, counts)))
 		logSkipped(counts)
+	}
+
+	async function newCalls(state: FolderState, counts: Counts): Promise<void> {
+		const spec = state.spec
+		await withFolder(spec.key, async () => {
+			if (closed || !attached(state)) return
+			if (!(await dirsHold(spec, counts))) {
+				if (attached(state)) removeFolder(spec.key)
+				return
+			}
+			const listed = await listNames(spec.dir, counts)
+			if (listed === null) {
+				if (attached(state)) removeFolder(spec.key)
+				return
+			}
+			let newest = ""
+			for (const name of state.files.keys()) {
+				const stamp = name.slice(0, CALL_STAMP_LENGTH)
+				if (stamp > newest) newest = stamp
+			}
+			const at = now()
+			const work: [string, string][] = []
+			for (const name of listed.names) {
+				if (state.files.has(name) || state.pending.has(name)) continue
+				if (name.slice(0, CALL_STAMP_LENGTH) < newest) continue
+				const id = idFor(spec, name, counts)
+				if (id !== null) work.push([name, id])
+			}
+			await pool(work, ([name, id]) => refreshName(state, name, id, at, counts))
+		})
 	}
 
 	function flushTouches(): void {
@@ -1615,12 +1839,14 @@ export function createRecordingInventory(
 		const ids = [...touchedDiscoveries]
 		touchedDiscoveries.clear()
 		const calls = touchedCalls
+		const decoders = touchedDecoders
 		touchedCalls = false
+		touchedDecoders = new Set()
 		const waiters = touchWaiters
 		touchWaiters = []
 		const work: Promise<void>[] = []
 		if (ids.length > 0) work.push(refreshDiscoveries(ids))
-		if (calls) work.push(refreshCalls())
+		if (calls) work.push(refreshCalls(decoders))
 		void Promise.all(work)
 			.catch((err: unknown) => {
 				log.warn(
@@ -1827,6 +2053,8 @@ export function createRecordingInventory(
 			closed = true
 			for (const t of [pendingTimer, reconcileTimer, touchTimer, eventTimer])
 				if (t !== null) clearTimeout(t)
+			for (const t of removedTimers) clearTimeout(t)
+			removedTimers.clear()
 			pendingTimer = reconcileTimer = touchTimer = eventTimer = null
 			listeners.clear()
 			for (const w of touchWaiters.splice(0)) w()
@@ -1839,9 +2067,49 @@ export function createRecordingInventory(
 			return touch()
 		},
 
-		touchCallRecordings() {
+		touchCallRecordings(decoderId) {
 			touchedCalls = true
+			if (typeof decoderId === "string" && decoderId.length > 0)
+				touchedDecoders?.add(decoderId)
+			else touchedDecoders = null
 			return touch()
+		},
+
+		discoveriesRemoved(ids) {
+			const set = new Set(
+				ids.filter(
+					id => typeof id === "string" && SCANNER_DISCOVERY_ID.test(id),
+				),
+			)
+			if (set.size === 0) return
+			const protection = options.protection
+			for (const state of [...folders.values()]) {
+				const d = state.spec.discoveryId
+				if (d === null || !set.has(d)) continue
+				// Kept files survive a discovery removal: they stay listed (fail closed: an unknown
+				// answer keeps them). Everything else leaves the listing now, without an fs call.
+				for (const [name, e] of [...state.files]) {
+					let kept = true
+					try {
+						kept =
+							protection === undefined
+								? false
+								: e.key === null || protection.isProtected(e.key) !== false
+					} catch {
+						kept = true
+					}
+					if (!kept) dropFile(state, name)
+				}
+				state.pending.clear()
+			}
+			const t = setTimeout(() => {
+				removedTimers.delete(t)
+				if (closed) return
+				for (const d of set) touchedDiscoveries.add(d)
+				void touch()
+			}, removedRecheckMs)
+			unref(t)
+			removedTimers.add(t)
 		},
 
 		ownersChanged(ids) {

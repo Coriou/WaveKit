@@ -465,9 +465,10 @@ Signal discovery: finds activity on a source, confirms it with a probe decode, a
 dsd-fme call recordings and the scanner recording folders, so a listing makes no filesystem call
 once warm. It is built in the background at start (scanner folders newest change first; listings
 answer `indexing: true` meanwhile), then kept current by targeted re-checks: scanner `discovery`
-events whose recording count changed, merges and deletions, ended digital-voice calls
-(`src/core/recordings/catalogue-wiring.ts`, wired in `src/index.ts`) and Keep or delete through
-`invalidate(id)`. A paced reconcile re-reads one folder at a time for anything else. Every indexed
+events whose recording count changed, merges and deletions, the scanner's `recordings-removed`
+event after retention, ended digital-voice calls (that decoder's directory, newer calls only;
+`src/core/recordings/catalogue-wiring.ts`, wired in `src/index.ts`) and Keep or delete through
+`invalidate(id)`. The listed entries stay sorted incrementally, so a listing never sorts. A paced reconcile re-reads one folder at a time for anything else. Every indexed
 file passed the download's verification when it was indexed; `open(id)` verifies again at request
 time. At most 50 000 entries, newest first; past it only the oldest are left out.
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+	recordingFolderIdsOf,
 	CALL_WAV,
 	SCANNER_DISCOVERY_ID,
 	SCANNER_RECORDING_ID,
@@ -81,5 +82,27 @@ describe("recording name patterns", () => {
 		expect(
 			callNameFields("20261016_120000_01234_1_OTHER_TGT_1_SRC_2.wav").callType,
 		).toBeNull()
+	})
+})
+
+describe("recordingFolderIdsOf", () => {
+	it("takes the discovery folder of each dv or analog path, deduplicated", () => {
+		expect(
+			recordingFolderIdsOf([
+				"recordings/dv/d_A/call.wav",
+				"recordings/analog/d_B/analog-1.wav",
+				"recordings\\analog\\d_C\\analog-2.wav",
+				"recordings/dv/d_A/other.wav",
+				"psd/d_X/psd.json",
+				"recordings/dv/probe-1/x.wav",
+				"recordings/dv/../d_Y/x.wav",
+			]),
+		).toEqual(["d_A", "d_B", "d_C"])
+		expect(
+			recordingFolderIdsOf(
+				["recordings/dv/d_1/a.wav", "recordings/dv/d_2/a.wav"],
+				1,
+			),
+		).toEqual(["d_1"])
 	})
 })
