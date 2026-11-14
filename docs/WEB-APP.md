@@ -60,7 +60,7 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
   in between are drawn as soon as it is ready.
 - With **Spectrum range: Fixed**, a scale the signal has left (another receiver, antenna or gain
   moves the noise floor by tens of dB) would draw an empty plot. The plot then reads `The noise
-  floor is below the fixed scale` (or `above`), with a **Use Auto range** button.
+floor is below the fixed scale` (or `above`), with a **Use Auto range** button.
 - Right-click a signal for its menu, which includes **Decode as…** to try a decoder on it.
 - Signals close together share one tag with a count (`DMR · CC 1 +2`). Click it for a list of the
   grouped signals; each row has a **Tune** button.
