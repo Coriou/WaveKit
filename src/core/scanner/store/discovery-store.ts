@@ -47,7 +47,7 @@ import {
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
-import { FSK_CLASSES, type VoicePrior } from "../channel/recording-verdict.js"
+import type { VoicePrior } from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
 import {
@@ -4058,8 +4058,10 @@ export class DiscoveryStore
 	 * DQ_CO_CHANNEL_MAX (8) live co-channel discoveries, the owner's stored class, and a lazy read of
 	 * analog voice heard on them: an `analog-tone` or `analog-voice` proof of any of their
 	 * observations (cached per observation; at most 9 × OBSERVATIONS_PER_DISCOVERY 256 = 2 304
-	 * reads, only when asked), and a lazy count of the owner's class votes (FSK_CLASSES among them;
-	 * at most OBSERVATIONS_PER_DISCOVERY). Undefined for a folder nobody owns. Reads only.
+	 * reads, only when asked), and a lazy count of the owner's class votes per class (at most
+	 * OBSERVATIONS_PER_DISCOVERY). A label's `checkedHint` is true when the proof behind it is a
+	 * sync hint with checked content (a sync-only proof that is not uncheckedSyncHint). Undefined
+	 * for a folder nobody owns. Reads only.
 	 */
 	voicePrior(folderId: string): VoicePrior | undefined {
 		const owner = this.folderOwner(folderId)
@@ -4074,35 +4076,35 @@ export class DiscoveryStore
 		]
 		const labels = ids.flatMap(id => {
 			const label = this.ownerLabel(id)
-			return label === undefined
-				? []
-				: [
-						{
-							protocol: label.protocol,
-							confidence: label.confidence,
-							owner: id === d.id,
-							at:
-								typeof label.proofAt === "number" &&
-								Number.isFinite(label.proofAt)
-									? label.proofAt
-									: null,
-						},
-					]
+			if (label === undefined) return []
+			const at =
+				typeof label.proofAt === "number" && Number.isFinite(label.proofAt)
+					? label.proofAt
+					: null
+			return [
+				{
+					protocol: label.protocol,
+					confidence: label.confidence,
+					owner: id === d.id,
+					at,
+					checkedHint: this.checkedSyncHint(id),
+				},
+			]
 		})
 		return {
 			id: d.id,
 			labels,
 			class: d.class,
 			classVotes: () => {
-				let fsk = 0
+				const votes: Partial<Record<ScannerClass, number>> = {}
 				let total = 0
 				for (const o of this.byDiscovery.get(d.id) ?? []) {
 					const vote = voteOf(o)
 					if (vote === undefined) continue
 					total++
-					if (FSK_CLASSES.has(vote)) fsk++
+					votes[vote] = (votes[vote] ?? 0) + 1
 				}
-				return { fsk, total }
+				return { total, votes }
 			},
 			analogVoice: () =>
 				ids.some(id =>
@@ -4112,6 +4114,18 @@ export class DiscoveryStore
 					}),
 				),
 		}
+	}
+
+	/**
+	 * Discovery `id`'s shown proof is a dsd-fme sync hint with checked content (syncOnlyProof, not
+	 * uncheckedSyncHint): verified TG/SRC, a talkgroup or encryption. False for a decode anchor,
+	 * a decode or no proof. Reads the cached proof view only.
+	 */
+	private checkedSyncHint(id: string): boolean {
+		const d = this.discoveries.get(id)
+		if (d === undefined || d.anchor === "decode") return false
+		const proof = this.discoveryView(d).proof
+		return syncOnlyProof(proof) && !uncheckedSyncHint(proof)
 	}
 
 	/**

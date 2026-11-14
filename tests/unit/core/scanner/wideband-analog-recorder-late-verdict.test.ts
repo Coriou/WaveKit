@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest"
 import {
 	LATE_VERDICT_GRACE_MS,
 	STRONG_PRIOR_TTL_MS,
+	type ClassVotes,
 	type VoicePrior,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import {
@@ -45,7 +46,7 @@ const refusals = (h: Harness): string[] =>
 function prior(
 	p: Partial<Omit<VoicePrior, "analogVoice" | "classVotes">> & {
 		analogVoice?: boolean
-		votes?: { fsk: number; total: number }
+		votes?: ClassVotes
 	},
 ): VoicePrior {
 	const votes = p.votes
@@ -212,19 +213,28 @@ describe("admission: a strong prior admits only a shadow its own audio must clas
 	}, 120_000)
 })
 
-describe("a digital channel: the owner's own digital proof, FSK class votes, no analog proof", () => {
-	// Synthetic: a dsd-fme sync hint of the owner five hours old, most class votes 4FSK.
+describe("a digital channel: the owner's own recent digital proof, its protocol's class votes, no analog proof", () => {
+	// Synthetic: a checked dsd-fme sync hint of the owner (TG/SRC verified) a minute old, most
+	// class votes 4FSK 12.5 kHz.
+	const recent = HARNESS_T0 - 60_000
 	const hoursAgo = HARNESS_T0 - 5 * 60 * 60_000
-	const syncHint = label("dmr", true, "activity", hoursAgo)
+	const syncHint = {
+		...label("dmr", true, "activity", recent),
+		checkedHint: true,
+	}
+	const fsk = (n: number, total: number, c: ScannerClass = "fsk4-12k5") => ({
+		total,
+		votes: { [c]: n },
+	})
 	const digital = (more: Parameters<typeof prior>[0] = {}) =>
 		prior({
 			labels: [syncHint],
 			class: "fsk4-12k5",
-			votes: { fsk: 200, total: 240 },
+			votes: fsk(200, 240),
 			...more,
 		})
 
-	it("an old sync hint and a 4FSK channel: a later analog-fm over without a tone is a shadow, discarded as known non-voice", async () => {
+	it("A: a recent checked sync hint and a 4FSK channel: a later analog-fm over without a tone is a shadow, discarded as known non-voice", async () => {
 		const h = low(() => digital())
 		await h.feed(1, false)
 		await over(h, "o", 4)
@@ -254,7 +264,7 @@ describe("a digital channel: the owner's own digital proof, FSK class votes, no 
 
 	it("a decoded DMR label of the owner counts alike", async () => {
 		const h = low(() =>
-			digital({ labels: [label("dmr", true, "decoded", hoursAgo)] }),
+			digital({ labels: [label("dmr", true, "decoded", recent)] }),
 		)
 		await h.feed(1, false)
 		await over(h, "o", 4)
@@ -264,9 +274,7 @@ describe("a digital channel: the owner's own digital proof, FSK class votes, no 
 	}, 120_000)
 
 	it("an analog-fm stored class with a third of its votes FSK and the owner's sync hint (analog-read DMR): a shadow, discarded", async () => {
-		const h = low(() =>
-			digital({ class: "analog-fm", votes: { fsk: 120, total: 250 } }),
-		)
+		const h = low(() => digital({ class: "analog-fm", votes: fsk(120, 250) }))
 		await h.feed(1, false)
 		await over(h, "o", 4)
 		await h.rec.idle()
@@ -274,15 +282,25 @@ describe("a digital channel: the owner's own digital proof, FSK class votes, no 
 		expect(codes(h)).toContain("discarded:known-non-voice")
 	}, 120_000)
 
-	// A2: a DMR sync hint (digital-undecoded) on a 4FSK channel; A3: a digital-unknown candidate
-	// (data-like audio, digital-undecoded) on a wide 2FSK channel. Neither ever had an analog proof.
+	// A2: a checked DMR sync hint (digital-undecoded, TG/SRC verified) on a 4FSK channel; A3: a
+	// digital-unknown candidate (data-like audio, digital-undecoded) on a wide 2FSK channel; a
+	// checked dPMR label on a 4FSK 6.25 kHz channel. None ever had an analog proof.
 	for (const [name, base] of [
-		["A2: a DMR sync hint, class fsk4-12k5", digital()],
+		["A2: a checked DMR sync hint, class fsk4-12k5", digital()],
+		[
+			"a checked dPMR sync hint, class fsk4-6k25",
+			digital({
+				labels: [{ ...syncHint, protocol: "dpmr" }],
+				class: "fsk4-6k25",
+				votes: fsk(200, 240, "fsk4-6k25"),
+			}),
+		],
 		[
 			"A3: a digital-unknown candidate, class fsk2-wide",
 			digital({
-				labels: [label("digital-unknown", true, "candidate", hoursAgo)],
+				labels: [label("digital-unknown", true, "candidate", recent)],
 				class: "fsk2-wide",
+				votes: fsk(200, 240, "fsk2-wide"),
 			}),
 		],
 	] as const) {
@@ -321,14 +339,14 @@ describe("a digital channel: the owner's own digital proof, FSK class votes, no 
 	for (const [name, p] of [
 		[
 			"no digital proof of the owner (a 4FSK class from spectral votes alone)",
-			prior({ class: "fsk4-12k5", votes: { fsk: 170, total: 256 } }),
+			prior({ class: "fsk4-12k5", votes: fsk(170, 256) }),
 		],
 		[
 			"the sync hint on a co-channel discovery only",
 			prior({
-				labels: [label("dmr", false, "activity", hoursAgo)],
+				labels: [{ ...syncHint, owner: false }],
 				class: "fsk4-12k5",
-				votes: { fsk: 200, total: 240 },
+				votes: fsk(200, 240),
 			}),
 		],
 		[
@@ -336,7 +354,7 @@ describe("a digital channel: the owner's own digital proof, FSK class votes, no 
 			prior({
 				labels: [syncHint],
 				class: "analog-fm",
-				votes: { fsk: 70, total: 240 },
+				votes: fsk(70, 240),
 			}),
 		],
 		[
@@ -344,7 +362,63 @@ describe("a digital channel: the owner's own digital proof, FSK class votes, no 
 			prior({
 				labels: [syncHint],
 				class: "fsk4-12k5",
-				votes: { fsk: 3, total: 3 },
+				votes: fsk(3, 3),
+			}),
+		],
+		[
+			"an unchecked sync hint, only fsk4-6k25 votes",
+			prior({
+				labels: [label("dpmr", true, "activity", recent)],
+				class: "fsk4-6k25",
+				votes: fsk(240, 240, "fsk4-6k25"),
+			}),
+		],
+		[
+			"an unchecked DMR sync hint on a 4FSK channel",
+			prior({
+				labels: [label("dmr", true, "activity", recent)],
+				class: "fsk4-12k5",
+				votes: fsk(240, 240),
+			}),
+		],
+		[
+			"a checked DMR sync hint, fsk4-6k25 votes (no DMR class)",
+			prior({
+				labels: [syncHint],
+				class: "fsk4-6k25",
+				votes: fsk(240, 240, "fsk4-6k25"),
+			}),
+		],
+		[
+			"a digital-unknown candidate, fsk4-6k25 votes only",
+			prior({
+				labels: [label("digital-unknown", true, "candidate", recent)],
+				class: "fsk4-6k25",
+				votes: fsk(240, 240, "fsk4-6k25"),
+			}),
+		],
+		[
+			"a checked sync hint 1 ms older than STRONG_PRIOR_TTL_MS",
+			prior({
+				labels: [{ ...syncHint, at: HARNESS_T0 - STRONG_PRIOR_TTL_MS - 1 }],
+				class: "fsk4-12k5",
+				votes: fsk(240, 240),
+			}),
+		],
+		[
+			"a DMR decode five hours old",
+			prior({
+				labels: [label("dmr", true, "decoded", hoursAgo)],
+				class: "fsk4-12k5",
+				votes: fsk(240, 240),
+			}),
+		],
+		[
+			"an undated checked sync hint",
+			prior({
+				labels: [{ ...syncHint, at: null }],
+				class: "fsk4-12k5",
+				votes: fsk(240, 240),
 			}),
 		],
 	] as const)

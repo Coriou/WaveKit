@@ -12,6 +12,7 @@ import {
 	DIGITAL_CHANNEL_MIN_SHARE,
 	DIGITAL_CHANNEL_MIN_VOTES,
 	decodeDuring,
+	digitalChannelClasses,
 	DigitalClassLedger,
 	fileDecodedOwn,
 	finishVerdict,
@@ -42,6 +43,7 @@ type Label = {
 	confidence: ScannerConfidence
 	owner: boolean
 	at: number | null
+	checkedHint?: boolean
 }
 
 /** The verdicts' wall clock (ms); every label is decoded at it unless a row says otherwise. */
@@ -618,17 +620,19 @@ describe("recording-verdict table", () => {
 	})
 })
 
-describe("a digital channel (owner digital label + FSK class votes): strong, undated", () => {
-	const hoursAgo = NOW - 5 * 60 * 60_000
+describe("a digital channel (owner digital label within the TTL + its protocol's class votes): strong", () => {
+	const recent = NOW - 60_000
+	/** A dsd-fme sync hint of the owner with checked content (TG/SRC, talkgroup or encryption). */
 	const hint: Label = {
 		protocol: "dmr",
 		confidence: "activity",
 		owner: true,
-		at: hoursAgo,
+		at: recent,
+		checkedHint: true,
 	}
 	const voted = (
 		labels: Label[],
-		fsk: number,
+		votes: Partial<Record<ScannerClass, number>>,
 		total: number,
 		cls: ScannerClass = "fsk4-12k5",
 		analogVoice = false,
@@ -636,79 +640,172 @@ describe("a digital channel (owner digital label + FSK class votes): strong, und
 		labels,
 		class: cls,
 		analogVoice: () => analogVoice,
-		classVotes: () => ({ fsk, total }),
+		classVotes: () => ({ total, votes }),
 	})
+	const unknownCandidate: Label = {
+		protocol: "digital-unknown",
+		confidence: "candidate",
+		owner: true,
+		at: recent,
+	}
 	const rows: { name: string; prior: VoicePrior; reading: string }[] = [
 		{
-			name: "an old owner sync hint, 4FSK votes: tone required",
-			prior: voted([hint], 200, 240),
+			name: "A2: a checked owner DMR sync hint, 4FSK 12.5 kHz votes: tone required",
+			prior: voted([hint], { "fsk4-12k5": 200 }, 240),
 			reading: "tone-required",
 		},
 		{
-			name: "an owner digital-unknown candidate, 4FSK votes: tone required",
-			prior: voted(
-				[{ ...hint, protocol: "digital-unknown", confidence: "candidate" }],
-				200,
-				240,
-			),
+			name: "a checked owner DMR sync hint, TDMA votes: tone required",
+			prior: voted([hint], { "tdma-ms": 200 }, 240, "tdma-ms"),
+			reading: "tone-required",
+		},
+		{
+			name: "A: an owner digital-unknown candidate, 4FSK 12.5 kHz votes: tone required",
+			prior: voted([unknownCandidate], { "fsk4-12k5": 200 }, 240),
 			reading: "tone-required",
 		},
 		{
 			name: "A3: an owner digital-unknown candidate on a wide 2FSK channel: tone required",
+			prior: voted([unknownCandidate], { "fsk2-wide": 200 }, 240, "fsk2-wide"),
+			reading: "tone-required",
+		},
+		{
+			name: "a recent owner DMR decode: tone required",
 			prior: voted(
-				[{ ...hint, protocol: "digital-unknown", confidence: "candidate" }],
-				200,
+				[{ ...hint, confidence: "decoded", checkedHint: false }],
+				{ "fsk4-12k5": 200 },
 				240,
-				"fsk2-wide",
 			),
 			reading: "tone-required",
 		},
 		{
-			name: "an undated owner DMR decode: tone required",
-			prior: voted([{ ...hint, confidence: "decoded", at: null }], 200, 240),
+			name: "a checked owner dPMR sync hint, 4FSK 6.25 kHz votes: tone required",
+			prior: voted(
+				[{ ...hint, protocol: "dpmr" }],
+				{ "fsk4-6k25": 200 },
+				240,
+				"fsk4-6k25",
+			),
 			reading: "tone-required",
 		},
 		{
-			name: "an analog-fm stored class with exactly a third FSK: tone required",
-			prior: voted([hint], 80, 240, "analog-fm"),
+			name: "an unchecked owner sync hint, 4FSK 6.25 kHz votes only: suspect",
+			prior: voted(
+				[{ ...hint, protocol: "dpmr", checkedHint: false }],
+				{ "fsk4-6k25": 240 },
+				240,
+				"fsk4-6k25",
+			),
+			reading: "suspect",
+		},
+		{
+			name: "an owner sync hint with no checkedHint flag: suspect",
+			prior: voted(
+				[{ protocol: "dmr", confidence: "activity", owner: true, at: recent }],
+				{ "fsk4-12k5": 240 },
+				240,
+			),
+			reading: "suspect",
+		},
+		{
+			name: "a checked DMR sync hint, 4FSK 6.25 kHz votes (not a DMR class): suspect",
+			prior: voted([hint], { "fsk4-6k25": 240 }, 240, "fsk4-6k25"),
+			reading: "suspect",
+		},
+		{
+			name: "a decoded dPMR label, 4FSK 12.5 kHz votes (not a dPMR class): suspect",
+			prior: voted(
+				[{ ...hint, protocol: "dpmr", confidence: "decoded" }],
+				{ "fsk4-12k5": 240 },
+				240,
+			),
+			reading: "suspect",
+		},
+		{
+			name: "a digital-unknown candidate, 4FSK 6.25 kHz votes only: suspect",
+			prior: voted([unknownCandidate], { "fsk4-6k25": 240 }, 240, "fsk4-6k25"),
+			reading: "suspect",
+		},
+		{
+			name: "a decoded D-STAR label, GMSK votes: suspect (no FSK class names it)",
+			prior: voted(
+				[{ ...hint, protocol: "dstar", confidence: "decoded" }],
+				{ "gmsk-narrow": 240 },
+				240,
+				"gmsk-narrow",
+			),
+			reading: "suspect",
+		},
+		{
+			name: "an analog-fm stored class with exactly a third DMR-class votes: tone required",
+			prior: voted(
+				[hint],
+				{ "fsk4-12k5": 40, "tdma-ms": 40 },
+				240,
+				"analog-fm",
+			),
 			reading: "tone-required",
 		},
 		{
-			name: "just under a third FSK: suspect",
-			prior: voted([hint], 79, 240, "analog-fm"),
+			name: "just under a third: suspect",
+			prior: voted(
+				[hint],
+				{ "fsk4-12k5": 40, "tdma-ms": 39 },
+				240,
+				"analog-fm",
+			),
+			reading: "suspect",
+		},
+		{
+			name: "a third of all votes FSK but only DMR-foreign classes among them: suspect",
+			prior: voted(
+				[hint],
+				{ "fsk4-12k5": 79, "fsk4-6k25": 1, "fsk2-wide": 0 },
+				240,
+				"analog-fm",
+			),
 			reading: "suspect",
 		},
 		{
 			name: "fewer than DIGITAL_CHANNEL_MIN_VOTES votes: suspect",
 			prior: voted(
 				[hint],
-				DIGITAL_CHANNEL_MIN_VOTES - 1,
+				{ "fsk4-12k5": DIGITAL_CHANNEL_MIN_VOTES - 1 },
 				DIGITAL_CHANNEL_MIN_VOTES - 1,
 			),
 			reading: "suspect",
 		},
 		{
+			name: "exactly DIGITAL_CHANNEL_MIN_VOTES votes: tone required",
+			prior: voted(
+				[hint],
+				{ "fsk4-12k5": DIGITAL_CHANNEL_MIN_VOTES },
+				DIGITAL_CHANNEL_MIN_VOTES,
+			),
+			reading: "tone-required",
+		},
+		{
 			name: "a co-channel sync hint only: suspect",
-			prior: voted([{ ...hint, owner: false }], 200, 240),
+			prior: voted([{ ...hint, owner: false }], { "fsk4-12k5": 200 }, 240),
 			reading: "suspect",
 		},
 		{
 			name: "no digital label (a spectral 4FSK class only): suspect",
-			prior: voted([], 200, 240),
+			prior: voted([], { "fsk4-12k5": 200 }, 240),
 			reading: "suspect",
 		},
 		{
 			name: "an owner ISM decode: suspect (LPD voice shares it)",
 			prior: voted(
 				[{ ...hint, protocol: "ism", confidence: "decoded" }],
-				200,
+				{ "fsk4-12k5": 200 },
 				240,
 			),
 			reading: "suspect",
 		},
 		{
 			name: "FROZEN: analog voice heard on the channel: none",
-			prior: voted([hint], 200, 240, "fsk4-12k5", true),
+			prior: voted([hint], { "fsk4-12k5": 200 }, 240, "fsk4-12k5", true),
 			reading: "none",
 		},
 		{
@@ -723,7 +820,7 @@ describe("a digital channel (owner digital label + FSK class votes): strong, und
 						at: NOW,
 					},
 				],
-				200,
+				{ "fsk4-12k5": 200 },
 				240,
 			),
 			reading: "none",
@@ -733,6 +830,55 @@ describe("a digital channel (owner digital label + FSK class votes): strong, und
 		it(r.name, () => {
 			expect(readPrior(r.prior, false, NOW)).toBe(r.reading)
 		})
+
+	describe("TTL: the owner's digital label holds the bar for STRONG_PRIOR_TTL_MS (30 × 60 000 = 1 800 000 ms)", () => {
+		const at = (t: number | null, l: Label = hint): VoicePrior =>
+			voted([{ ...l, at: t }], { "fsk4-12k5": 200 }, 240)
+		for (const [name, l] of [
+			["checked sync hint", hint],
+			["decode", { ...hint, confidence: "decoded" as const }],
+			["digital-unknown candidate", unknownCandidate],
+		] as const) {
+			it(`${name}: exactly STRONG_PRIOR_TTL_MS old, tone required; 1 ms older, suspect`, () => {
+				expect(readPrior(at(NOW - STRONG_PRIOR_TTL_MS, l), false, NOW)).toBe(
+					"tone-required",
+				)
+				expect(
+					readPrior(at(NOW - STRONG_PRIOR_TTL_MS - 1, l), false, NOW),
+				).toBe("suspect")
+			})
+			it(`${name}: a skew of STRONG_PRIOR_TTL_MS ahead holds; 1 ms past, suspect`, () => {
+				expect(readPrior(at(NOW + STRONG_PRIOR_TTL_MS, l), false, NOW)).toBe(
+					"tone-required",
+				)
+				expect(
+					readPrior(at(NOW + STRONG_PRIOR_TTL_MS + 1, l), false, NOW),
+				).toBe("suspect")
+			})
+			it(`${name}: undated, or hours old: suspect`, () => {
+				expect(readPrior(at(null, l), false, NOW)).toBe("suspect")
+				expect(readPrior(at(Number.NaN, l), false, NOW)).toBe("suspect")
+				expect(readPrior(at(NOW - 5 * 60 * 60_000, l), false, NOW)).toBe(
+					"suspect",
+				)
+			})
+		}
+	})
+
+	it("digitalChannelClasses is derived from the classifier's hypotheses", () => {
+		const of = (p: ScannerProtocol) => [...digitalChannelClasses(p)].sort()
+		expect(of("dmr")).toEqual(["fsk4-12k5", "tdma-ms"])
+		expect(of("ysf")).toEqual(["fsk4-12k5"])
+		expect(of("p25p1")).toEqual(["fsk4-12k5"])
+		expect(of("nxdn96")).toEqual(["fsk4-12k5"])
+		expect(of("dpmr")).toEqual(["fsk4-6k25"])
+		expect(of("nxdn48")).toEqual(["fsk4-6k25"])
+		expect(of("dstar")).toEqual([])
+		expect(of("p25p2")).toEqual([])
+		expect(of("digital-unknown")).toEqual(["fsk2-wide", "fsk4-12k5", "tdma-ms"])
+		expect(of("pocsag")).toEqual([])
+		expect(of("analog-fm")).toEqual([])
+	})
 
 	it("a throwing vote read is no digital channel", () => {
 		const p: VoicePrior = {
@@ -748,7 +894,7 @@ describe("a digital channel (owner digital label + FSK class votes): strong, und
 
 	it("a shadow of a digital channel never classed is discarded; its own CTCSS tone keeps it", () => {
 		const base = {
-			prior: voted([hint], 200, 240),
+			prior: voted([hint], { "fsk4-12k5": 200 }, 240),
 			backedClass: false,
 			decodedOwn: false,
 			joinedVoice: false,
@@ -763,8 +909,16 @@ describe("a digital channel (owner digital label + FSK class votes): strong, und
 		).toBe("finish")
 	})
 
-	// Feature: analog recorder verdict, Property 2: a digital channel needs the owner's digital label, a third FSK votes and no analog proof
-	it("strong exactly when the owner has a digital label, at least a third of DIGITAL_CHANNEL_MIN_VOTES or more votes are FSK, and no analog voice was heard", () => {
+	// Feature: analog recorder verdict, Property 2: a digital channel needs the owner's recent decoded, checked or digital-unknown label, a third of the votes in its protocol's classes and no analog proof
+	it("strong exactly when the owner has a recent decoded, checked-hint or digital-unknown label, at least a third of DIGITAL_CHANNEL_MIN_VOTES or more votes are in its protocol's classes, and no analog voice was heard", () => {
+		const classes: ScannerClass[] = [
+			"fsk4-12k5",
+			"fsk4-6k25",
+			"tdma-ms",
+			"fsk2-wide",
+			"gmsk-narrow",
+			"analog-fm",
+		]
 		fc.assert(
 			fc.property(
 				fc.constantFrom<ScannerProtocol>(
@@ -772,32 +926,52 @@ describe("a digital channel (owner digital label + FSK class votes): strong, und
 					"ysf",
 					"dpmr",
 					"nxdn48",
+					"dstar",
 					"digital-unknown",
 					"unknown",
 					"carrier",
 				),
-				fc.constantFrom<ScannerConfidence>("activity", "candidate"),
+				fc.constantFrom<ScannerConfidence>("activity", "candidate", "decoded"),
 				fc.boolean(),
-				fc.integer({ min: 0, max: 256 }),
-				fc.integer({ min: 0, max: 256 }),
 				fc.boolean(),
-				(protocol, confidence, owner, a, b, analogVoice) => {
-					const total = Math.max(a, b)
-					const fsk = Math.min(a, b)
+				fc.integer({ min: 0, max: 2 * STRONG_PRIOR_TTL_MS }),
+				fc.array(fc.constantFrom(...classes), { maxLength: 256 }),
+				fc.boolean(),
+				(protocol, confidence, owner, checkedHint, age, cast, analogVoice) => {
+					const votes: Partial<Record<ScannerClass, number>> = {}
+					for (const c of cast) votes[c] = (votes[c] ?? 0) + 1
 					const p = voted(
-						[{ protocol, confidence, owner, at: hoursAgo }],
-						fsk,
-						total,
+						[{ protocol, confidence, owner, at: NOW - age, checkedHint }],
+						votes,
+						cast.length,
 						"unknown",
 						analogVoice,
 					)
 					const digitalLabel =
-						owner && protocol !== "unknown" && protocol !== "carrier"
+						owner &&
+						age <= STRONG_PRIOR_TTL_MS &&
+						(protocol === "digital-unknown" ||
+							(protocol !== "unknown" &&
+								protocol !== "carrier" &&
+								(confidence === "decoded" || checkedHint)))
+					const matched = cast.filter(c =>
+						protocol === "digital-unknown"
+							? c === "fsk4-12k5" || c === "tdma-ms" || c === "fsk2-wide"
+							: protocol === "dmr"
+								? c === "fsk4-12k5" || c === "tdma-ms"
+								: protocol === "ysf"
+									? c === "fsk4-12k5"
+									: protocol === "dpmr" || protocol === "nxdn48"
+										? c === "fsk4-6k25"
+										: false,
+					).length
 					const strong =
 						digitalLabel &&
-						total >= DIGITAL_CHANNEL_MIN_VOTES &&
-						fsk >= DIGITAL_CHANNEL_MIN_SHARE * total &&
+						cast.length >= DIGITAL_CHANNEL_MIN_VOTES &&
+						matched > 0 &&
+						matched >= DIGITAL_CHANNEL_MIN_SHARE * cast.length &&
 						!analogVoice
+					expect(readPrior(p, false, NOW) === "tone-required").toBe(strong)
 					expect(admissionVerdict(p, false, NOW)).toBe(
 						strong ? "tone-required" : null,
 					)

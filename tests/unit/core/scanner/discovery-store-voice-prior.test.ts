@@ -94,6 +94,7 @@ describe("DiscoveryStore.voicePrior", () => {
 			confidence: "decoded",
 			owner: true,
 			at: T0 + 500,
+			checkedHint: false,
 		})
 		expect(admissionVerdict(prior, false, T0 + 500)).toBe("tone-required")
 		const last = T0 + 500 + STRONG_PRIOR_TTL_MS
@@ -115,55 +116,123 @@ describe("DiscoveryStore.voicePrior", () => {
 		}
 	})
 
-	describe("classVotes: the owner's class votes, FSK among them", () => {
-		const voted = (
-			id: string,
-			startedAt: number,
-			cls: "fsk4-12k5" | "gmsk-narrow" | "analog-fm",
-		) =>
+	describe("classVotes and checkedHint: the owner's class votes per class, its sync hint checked or not", () => {
+		type Cls = "fsk4-12k5" | "fsk4-6k25" | "gmsk-narrow" | "analog-fm"
+		const voted = (id: string, startedAt: number, cls: Cls) =>
 			makeObs({ id, centreHz: CH, startedAt, cls, open: false, gate: "passed" })
-		/** Six overs, `fsk` of them 4FSK and the rest `other`; a sync hint (no identity) on the first. */
+		/**
+		 * Six overs, `n` of them `cls` and the rest `other`; on the first, a `protocol` sync hint with
+		 * no checked content (`unchecked`), a DMR sync hint with verified TG/SRC (`tg-src`: the only
+		 * checked content a sync hint's proof keeps), or a decode with a colour code (`decoded`).
+		 */
 		function channel(
 			store: DiscoveryStore,
-			fsk: number,
-			other: "gmsk-narrow" | "analog-fm",
+			n: number,
+			cls: Cls,
+			other: Cls,
+			protocol: "dmr" | "dpmr" = "dmr",
+			proof: "unchecked" | "tg-src" | "decoded" = "unchecked",
 		): string {
 			let id = ""
 			for (let k = 0; k < 6; k++)
 				id =
-					store.ingest(
-						voted(`o${k}`, T0 + k * 10_000, k < fsk ? "fsk4-12k5" : other),
-					).discoveryId ?? id
-			const ev = evidence("dmr", T0 + 500)
+					store.ingest(voted(`o${k}`, T0 + k * 10_000, k < n ? cls : other))
+						.discoveryId ?? id
+			const base = evidence(
+				protocol,
+				T0 + 500,
+				proof === "decoded"
+					? {
+							identity:
+								protocol === "dmr" ? dmrCc(1) : { kind: "dpmr-cc", value: "1" },
+						}
+					: {},
+			)
+			const ev =
+				proof === "tg-src"
+					? { ...base, metadata: { talkgroups: ["9"], sources: ["1"] } }
+					: base
 			expect(store.appendObservationEvidence("o0", ev)).toBe(true)
 			store.applyEvidence(id, ev)
 			return store.discoveryIdOf("o0") ?? id
 		}
+		const ownerLabel = (store: DiscoveryStore, id: string) =>
+			store.voicePrior(id)?.labels.find(l => l.owner)
 
-		it("a sync hint of the owner on a 4FSK channel with no analog proof: tone required, hours later too", () => {
+		it("an unchecked DMR sync hint on a 4FSK channel with no analog proof: suspect (held, then kept)", () => {
 			const store = newStore()
-			const id = channel(store, 6, "analog-fm")
+			const id = channel(store, 6, "fsk4-12k5", "analog-fm")
 			const prior = store.voicePrior(id) ?? null
-			expect(prior?.labels).toContainEqual(
-				expect.objectContaining({ protocol: "dmr", owner: true }),
+			expect(ownerLabel(store, id)).toEqual(
+				expect.objectContaining({ protocol: "dmr", checkedHint: false }),
 			)
-			expect(prior?.classVotes?.()).toEqual({ fsk: 6, total: 6 })
-			expect(admissionVerdict(prior, false, T0 + 5 * 60 * 60_000)).toBe(
+			expect(prior?.classVotes?.()).toEqual({
+				total: 6,
+				votes: { "fsk4-12k5": 6 },
+			})
+			expect(readPrior(prior, false, T0 + 60_000)).toBe("suspect")
+		})
+
+		it("an unchecked sync hint and only fsk4-6k25 votes: suspect", () => {
+			const store = newStore()
+			const id = channel(store, 6, "fsk4-6k25", "analog-fm", "dpmr")
+			expect(readPrior(store.voicePrior(id) ?? null, false, T0 + 60_000)).toBe(
+				"suspect",
+			)
+		})
+
+		it("a checked DMR sync hint on a 4FSK channel: tone required within STRONG_PRIOR_TTL_MS of its proof, suspect past it", () => {
+			const store = newStore()
+			const id = channel(store, 6, "fsk4-12k5", "analog-fm", "dmr", "tg-src")
+			const prior = store.voicePrior(id) ?? null
+			const label = ownerLabel(store, id)
+			expect(label).toEqual(
+				expect.objectContaining({ protocol: "dmr", checkedHint: true }),
+			)
+			const at = label?.at ?? Number.NaN
+			expect(Number.isFinite(at)).toBe(true)
+			expect(admissionVerdict(prior, false, at + STRONG_PRIOR_TTL_MS)).toBe(
 				"tone-required",
 			)
+			expect(readPrior(prior, false, at + STRONG_PRIOR_TTL_MS + 1)).toBe(
+				"suspect",
+			)
+			expect(readPrior(prior, false, T0 + 5 * 60 * 60_000)).toBe("suspect")
 		})
 
-		it("GMSK votes are not FSK: a channel read gmsk-narrow stays suspect", () => {
+		it("a checked DMR sync hint with fsk4-6k25 votes (no DMR class): suspect", () => {
 			const store = newStore()
-			const id = channel(store, 1, "gmsk-narrow")
+			const id = channel(store, 6, "fsk4-6k25", "analog-fm", "dmr", "tg-src")
+			expect(readPrior(store.voicePrior(id) ?? null, false, T0 + 60_000)).toBe(
+				"suspect",
+			)
+		})
+
+		it("a dPMR decode with fsk4-6k25 votes: tone required (a dPMR sync hint keeps no checked content)", () => {
+			const store = newStore()
+			const id = channel(store, 6, "fsk4-6k25", "analog-fm", "dpmr", "decoded")
+			expect(ownerLabel(store, id)).toEqual(
+				expect.objectContaining({ protocol: "dpmr", confidence: "decoded" }),
+			)
+			expect(
+				admissionVerdict(store.voicePrior(id) ?? null, false, T0 + 60_000),
+			).toBe("tone-required")
+		})
+
+		it("GMSK votes are no DMR class: a channel read gmsk-narrow stays suspect", () => {
+			const store = newStore()
+			const id = channel(store, 1, "fsk4-12k5", "gmsk-narrow", "dmr", "tg-src")
 			const prior = store.voicePrior(id) ?? null
-			expect(prior?.classVotes?.()).toEqual({ fsk: 1, total: 6 })
-			expect(readPrior(prior, false, T0)).toBe("suspect")
+			expect(prior?.classVotes?.()).toEqual({
+				total: 6,
+				votes: { "fsk4-12k5": 1, "gmsk-narrow": 5 },
+			})
+			expect(readPrior(prior, false, T0 + 60_000)).toBe("suspect")
 		})
 
-		it("FROZEN: an analog tone heard on that channel keeps recording", () => {
+		it("FROZEN: an analog tone heard on a checked digital channel keeps recording", () => {
 			const store = newStore()
-			const id = channel(store, 6, "analog-fm")
+			const id = channel(store, 6, "fsk4-12k5", "analog-fm", "dmr", "tg-src")
 			expect(store.recordAnalog("o5", tone(T0 + 60_000))).toBe(true)
 			expect(
 				admissionVerdict(store.voicePrior(id) ?? null, false, T0 + 60_000),

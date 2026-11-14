@@ -15,9 +15,9 @@
  *   and DMR overs (each decoded, keying up 4 s after the analog over, inside its grace) alternate.
  *   Expected: every analog over kept.
  * - shared: the same with no analog proof at all (a PMR446 channel shared with DMR446). The
- *   owner's DMR decode and its FSK class votes (half its overs) make it a digital channel
- *   (recording-verdict.ts, PriorStrength): an over without CTCSS is a shadow until analog voice
- *   is proven on it. Expected: the first analog over (before the decode) kept, the others not.
+ *   owner's DMR decode (within STRONG_PRIOR_TTL_MS) and its DMR-class votes (fsk4-12k5, half its
+ *   overs) make it a digital channel (recording-verdict.ts, PriorStrength): an over without CTCSS
+ *   is a shadow until analog voice is proven on it. Expected: the first analog over (before the decode) kept, the others not.
  * - shared-late-proof: the same, identify hearing the second analog over as voice once it ended
  *   (an analog voice proof). Expected: that over is lost, every one after it kept.
  * - pager-stored-analog-fm: three 2FSK bursts (1 200 Bd, ±4.5 kHz) whose snapshots read analog-fm,

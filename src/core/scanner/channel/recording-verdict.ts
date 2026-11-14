@@ -17,7 +17,7 @@
  * - DigitalClassLedger: when has a backed digital class been seen often and recently enough on a
  *   discovery to count as a (suspect) prior?
  */
-import { familyOf } from "../classify/classifier.js"
+import { CLASS_HYPOTHESES, familyOf } from "../classify/classifier.js"
 import type { ScannerRecorderDecision } from "@wavekit/api-types"
 import type {
 	ProtocolFamily,
@@ -156,18 +156,23 @@ export function fileDecodedOwn(
 }
 
 /**
- * A discovery's standing prior (DiscoveryStore.voicePrior): what is known about it at any time,
- * not only during one transmission. `id` is its live owner (merge aliases resolved; absent: the
+ * A discovery's standing prior (DiscoveryStore.voicePrior): what its kept observations and
+ * published labels say about it, not only during one transmission. `id` is its live owner (merge aliases resolved; absent: the
  * id asked). `labels` are the published labels of that owner (`owner` true) and of its
  * co-channel discoveries (same frequency key, at most DQ_CO_CHANNEL_MAX = 8; `owner` false;
  * informational: readPrior reads both alike, see PriorStrength);
  * Each label's `at` is its decode's wall time (ms; null unknown), so a strong one lapses
  * (STRONG_PRIOR_TTL_MS). `class` is the owner's stored class (the majority of its observations' spectral votes: weak).
  * `analogVoice` reads whether analog voice was heard on the channel (an analog tone or analog
- * voice proof of any of those observations, or an analog label at `classified` or more); it walks
- * up to 9 × 256 cached proofs, so it is asked only when a digital prior would otherwise apply.
+ * voice proof of an observation those discoveries still keep: each keeps its last
+ * OBSERVATIONS_PER_DISCOVERY = 256, so a proof older than that many transmissions no longer
+ * counts; or an analog label at `classified` or more); it walks up to 9 × 256 cached proofs, so it
+ * is asked only when a digital prior would otherwise apply.
  * `classVotes` (absent: none) counts the owner's observations that voted a class (`total`) and
- * those that voted an FSK class (`fsk`, FSK_CLASSES); asked only for an owner's digital label.
+ * how many voted each class (`votes`; a class absent: none); asked only for an owner's digital
+ * label. A label's `checkedHint` (absent: false) is true for a dsd-fme sync hint that carries
+ * checked content (verified TG/SRC, a talkgroup or encryption: not discovery-store's
+ * uncheckedSyncHint); read only for a digital voice label below `decoded`.
  */
 export interface VoicePrior {
 	readonly id?: string
@@ -176,10 +181,17 @@ export interface VoicePrior {
 		readonly confidence: ScannerConfidence
 		readonly owner: boolean
 		readonly at: number | null
+		readonly checkedHint?: boolean
 	}[]
 	readonly class: ScannerClass
 	analogVoice(): boolean
-	classVotes?(): { readonly fsk: number; readonly total: number }
+	classVotes?(): ClassVotes
+}
+
+/** VoicePrior.classVotes: the owner's observations with a class vote, and the count per class. */
+export interface ClassVotes {
+	readonly total: number
+	readonly votes: Readonly<Partial<Record<ScannerClass, number>>>
 }
 
 /**
@@ -191,11 +203,15 @@ export interface VoicePrior {
  *   recording while the prior was strong, is a shadow that writes nothing unless its own audio
  *   carries speech over a CTCSS tone (the recorder's classByTone); it is never a remembered
  *   refusal.
- *   Also STRONG, with no time limit (digitalChannel): a digital label of the owner itself (a
- *   digital voice decode or dsd-fme sync hint, or `digital-unknown` from data-like audio) while
- *   at least DIGITAL_CHANNEL_MIN_SHARE of the owner's class votes (DIGITAL_CHANNEL_MIN_VOTES or
- *   more) read an FSK class: a channel its own spectrum and its own decoder both call digital,
- *   with no analog proof anywhere on it, is not untoned voice. Any analog proof or label ends it.
+ *   Also STRONG (digitalChannel): a digital label of the owner itself (a digital voice decode, a
+ *   dsd-fme sync hint with checked content, or `digital-unknown` from data-like audio) dated
+ *   within STRONG_PRIOR_TTL_MS of now, while at least DIGITAL_CHANNEL_MIN_SHARE of the owner's
+ *   class votes (DIGITAL_CHANNEL_MIN_VOTES or more) read a class that label's protocol is
+ *   transmitted as (digitalChannelClasses): a channel its own spectrum and its own decoder both
+ *   call digital, with no analog proof among its kept observations, is not untoned voice. An
+ *   analog proof or label ends it; so does 30 min without a fresh digital label (an active DMR or
+ *   dPMR channel refreshes its proof every over). An unchecked sync hint, an undated label, or
+ *   votes for another protocol's class are only `suspect`.
  * - `suspect`: WEAK. A digital voice decode (DMR, NXDN, YSF, dPMR, ...) on the owner or a
  *   co-channel discovery: the store keeps analog and digital overs of one channel in one
  *   discovery (a lone merge) as readily as in two, and PMR446 and DMR446, mixed-mode repeaters
@@ -258,8 +274,8 @@ function strongLabel(l: VoicePrior["labels"][number], now: number): boolean {
 }
 
 /**
- * The FSK classes a digital channel's spectrum reads (digitalChannel): 4FSK at either width, TDMA
- * and wide 2FSK. Not GMSK: a weak NFM voice reads gmsk-narrow, and D-STAR is no PMR mode.
+ * The FSK classes a digital channel's spectrum reads: 4FSK at either width, TDMA and wide 2FSK.
+ * Not GMSK: a weak NFM voice reads gmsk-narrow.
  */
 export const FSK_CLASSES: ReadonlySet<ScannerClass> = new Set([
 	"fsk4-12k5",
@@ -267,34 +283,82 @@ export const FSK_CLASSES: ReadonlySet<ScannerClass> = new Set([
 	"tdma-ms",
 	"fsk2-wide",
 ])
-/** The FSK share of the owner's class votes a digital channel needs (digitalChannel): 1 / 3. */
+/**
+ * The classes a `digital-unknown` candidate's channel may read (digitalChannelClasses): FSK_CLASSES
+ * but `fsk4-6k25`, which a weak or low-deviation NFM voice reads for its whole length, like
+ * gmsk-narrow.
+ */
+const DIGITAL_UNKNOWN_CLASSES: ReadonlySet<ScannerClass> = new Set(
+	[...FSK_CLASSES].filter(c => c !== "fsk4-6k25"),
+)
+const NO_CLASSES: ReadonlySet<ScannerClass> = new Set()
+const protocolClasses = new Map<ScannerProtocol, ReadonlySet<ScannerClass>>()
+
+/**
+ * The class votes that make a channel with `protocol`'s label a digital channel: `digital-unknown`,
+ * DIGITAL_UNKNOWN_CLASSES; a digital voice protocol, the FSK_CLASSES whose classifier hypotheses
+ * (CLASS_HYPOTHESES) name it: dmr tdma-ms and fsk4-12k5; ysf, p25p1 and nxdn96 fsk4-12k5; dpmr and
+ * nxdn48 fsk4-6k25; dstar (gmsk-narrow) and p25p2 (no class) none, so they are never a digital
+ * channel. Any other protocol: none.
+ */
+export function digitalChannelClasses(
+	protocol: ScannerProtocol,
+): ReadonlySet<ScannerClass> {
+	if (protocol === "digital-unknown") return DIGITAL_UNKNOWN_CLASSES
+	if (familyOf(protocol) !== "digital-voice") return NO_CLASSES
+	const hit = protocolClasses.get(protocol)
+	if (hit !== undefined) return hit
+	const classes = new Set(
+		[...FSK_CLASSES].filter(c =>
+			CLASS_HYPOTHESES[c].some(h => h.protocol === protocol),
+		),
+	)
+	protocolClasses.set(protocol, classes)
+	return classes
+}
+
+/** The share of the owner's class votes a digital channel needs (digitalChannel): 1 / 3. */
 export const DIGITAL_CHANNEL_MIN_SHARE = 1 / 3
 /** Class votes of the owner a digital channel needs (digitalChannel) before its share counts. */
 export const DIGITAL_CHANNEL_MIN_VOTES = 4
 
 /**
- * A digital channel (PriorStrength's strong, undated): a digital label of the owner (family
- * digital voice, or `digital-unknown`), at any confidence, and an FSK share of its class votes at
- * least DIGITAL_CHANNEL_MIN_SHARE over DIGITAL_CHANNEL_MIN_VOTES or more. A throwing or absent
- * vote read: not one.
+ * An owner label that can make its channel a digital channel: the owner's, dated within
+ * [now − STRONG_PRIOR_TTL_MS, now + STRONG_PRIOR_TTL_MS] (a clock skew either way; undated never),
+ * and a digital voice decode, a sync hint with checked content (checkedHint), or a
+ * `digital-unknown` label.
  */
-function digitalChannel(prior: VoicePrior): boolean {
-	if (
-		!prior.labels.some(
-			l =>
-				l.owner &&
-				(l.protocol === "digital-unknown" ||
-					familyOf(l.protocol) === "digital-voice"),
-		)
+function digitalChannelLabel(
+	l: VoicePrior["labels"][number],
+	now: number,
+): boolean {
+	if (!l.owner || l.at === null || !Number.isFinite(l.at)) return false
+	if (Math.abs(now - l.at) > STRONG_PRIOR_TTL_MS) return false
+	if (l.protocol === "digital-unknown") return true
+	return (
+		familyOf(l.protocol) === "digital-voice" &&
+		(l.confidence === "decoded" || l.checkedHint === true)
 	)
-		return false
+}
+
+/**
+ * A digital channel (PriorStrength's strong): an owner label digitalChannelLabel accepts at
+ * `now`, and votes for that label's classes (digitalChannelClasses) at least
+ * DIGITAL_CHANNEL_MIN_SHARE of the owner's class votes, DIGITAL_CHANNEL_MIN_VOTES or more of
+ * them. A throwing or absent vote read: not one.
+ */
+function digitalChannel(prior: VoicePrior, now: number): boolean {
+	const labels = prior.labels.filter(l => digitalChannelLabel(l, now))
+	if (labels.length === 0) return false
 	try {
 		const v = prior.classVotes?.()
-		return (
-			v !== undefined &&
-			v.total >= DIGITAL_CHANNEL_MIN_VOTES &&
-			v.fsk >= DIGITAL_CHANNEL_MIN_SHARE * v.total
-		)
+		if (v === undefined || v.total < DIGITAL_CHANNEL_MIN_VOTES) return false
+		return labels.some(l => {
+			let matched = 0
+			for (const c of digitalChannelClasses(l.protocol))
+				matched += v.votes[c] ?? 0
+			return matched > 0 && matched >= DIGITAL_CHANNEL_MIN_SHARE * v.total
+		})
 	} catch {
 		return false
 	}
@@ -320,7 +384,7 @@ export function readPrior(
 ): PriorStrength {
 	const strong =
 		prior !== null &&
-		(prior.labels.some(l => strongLabel(l, now)) || digitalChannel(prior))
+		(prior.labels.some(l => strongLabel(l, now)) || digitalChannel(prior, now))
 	if (!strong && !backedClass && (prior === null || !weakDigital(prior, now)))
 		return "none"
 	if (prior !== null && analogVoiceHeard(prior)) return "none"
