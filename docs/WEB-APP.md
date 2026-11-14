@@ -287,7 +287,9 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   line: `Receiver spur` once confirmed, `Possible spur (unverified)` while the suspicion is not yet
   confirmed (for example just after a restart).
 - **Recordings:** recordings kept by the core, to play, search and keep, including one scanner
-  recording per analog voice transmission the scanner finds. The footer line sums
+  recording per analog voice transmission the scanner finds. The newest 2 000 are listed. Typed
+  text matches what a row shows (frequency, talkgroup, radio, kind and decoder), never the file
+  size or the recording's internal id. The footer line sums
   the disk they use: what you kept, digital-voice calls, scanner evidence and named IQ captures
   (each with its limit), then the free space.
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band

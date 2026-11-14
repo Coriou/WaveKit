@@ -92,6 +92,11 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `running`, and `dataRate` is KiB/s.
 - Spectrum subscriptions honour `backfillMs` like the core (WG1): up to 64 recent frames of the
   current epoch, oldest first, `backfill: true`, counted in the ack's `backfillFrames`.
+- Recordings (`recordings.ts`): `GET /api/recordings` with the core's query parameters (`limit`,
+  `cursor`, `kind`, `decoderId`, `kept`, `discoveryId`, `talkgroup`, `source`, `minHz`, `maxHz`,
+  `since`, `until`, `q`) and page fields (`revision`, `indexing`, `matched`, `counts`,
+  `truncatedBefore`), the file download, Keep and delete. Not mocked: the `recordings` WebSocket
+  notice.
 - Scanner (`scanner.ts`, registered from `server.ts`): the core's `/api/scanner` routes with their
   schemas and error codes: status, settings (GET / PATCH with provenance and bounds), the EU
   bandplans (plus a `pager-431` plan), plan previews from a port of the core's planner (hops,

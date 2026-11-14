@@ -752,6 +752,34 @@ describe("operator-data WebSocket transport and current output authority", () =>
 		}
 	})
 
+	it("ignores a recordings subscription until the protected mount enables the channel", () => {
+		const broadcaster = new WebSocketEventBroadcaster(testLogger)
+		const data = {
+			revision: 3,
+			added: 1,
+			removed: 0,
+			changed: 0,
+			indexing: false,
+		}
+		const message = {
+			type: "recordings:changed" as const,
+			channel: "recordings" as const,
+			data,
+		}
+		const legacy = connectSocket(broadcaster, () => true, ["recordings"])
+		try {
+			broadcaster.broadcast("recordings", message)
+			expect(legacy.socket.messages).toEqual([])
+			broadcaster.enableRecordingsChannel()
+			const enabled = connectSocket(broadcaster, () => true, ["recordings"])
+			broadcaster.broadcast("recordings", message)
+			expect(legacy.socket.messages).toEqual([])
+			expect(enabled.socket.messages.map(m => JSON.parse(m))).toEqual([message])
+		} finally {
+			broadcaster.closeAll()
+		}
+	})
+
 	it("sends canonical three-field snapshots and updates synchronously on repeat subscriptions", () => {
 		const broadcaster = new WebSocketEventBroadcaster(testLogger)
 		broadcaster.enableOperatorDataChannel()

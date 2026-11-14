@@ -198,12 +198,22 @@ export function matchesToken(r: RecordingInventoryItem, t: RecToken): boolean {
 			)
 		case "kind":
 			return r.kind === t.value
-		case "text": {
-			const hay =
-				`${recordingTitle(r)} ${recordingMeta(r)} ${r.id}`.toLowerCase()
-			return hay.includes(t.value.toLowerCase())
-		}
+		case "text":
+			return searchText(r).includes(t.value.toLowerCase())
 	}
+}
+
+/**
+ * What a free-text search reads: the title (frequency or talkgroup), kind, radio and decoder.
+ * Never the opaque id (its ULID and UUID digits match almost any number) nor the size ("446 kB"
+ * is not 446 MHz).
+ */
+export function searchText(r: RecordingInventoryItem): string {
+	const parts = [recordingTitle(r), KIND_LABEL[r.kind]]
+	if (r.talkgroup) parts.push(`tg ${r.talkgroup}`)
+	if (r.source) parts.push(`radio ${r.source}`)
+	if (r.decoderId) parts.push(r.decoderId)
+	return parts.join(" ").toLowerCase()
 }
 
 export function matchesAll(

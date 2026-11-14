@@ -1,7 +1,8 @@
 /**
  * WG8 recordings inventory (docs/specs/web-gaps-8, requirement 4): a read-only, bounded list of
  * the dsd-fme per-call recordings and the scanner recordings, and the id → path lookup of the
- * download route.
+ * download route. The list is served from an in-memory catalogue (see "the catalogue" below),
+ * never from a filesystem walk per request.
  *
  * Trust surface, fail closed: an id is never a path; symbolic links are never followed (every
  * directory level and every file is `lstat`ed, a symlinked configured directory is skipped);
@@ -17,15 +18,17 @@ import type { Readable } from "node:stream"
 import {
 	RECORDING_INVENTORY_ID,
 	RECORDINGS_HEADER_READ_BYTES,
+	RECORDINGS_CATALOGUE_MAX,
+	RECORDINGS_CATALOGUE_MAX_FOLDERS,
 	RECORDINGS_IN_PROGRESS_MS,
 	RECORDINGS_SCAN_CONCURRENCY,
-	RECORDINGS_SCAN_MAX_FILES,
 } from "@wavekit/api-types"
 import type {
 	RecordingInventoryItem,
 	RecordingInventoryKind,
 	RecordingInventoryPage,
 	RecordingInventoryQuery,
+	RecordingsChangedEventData,
 } from "@wavekit/api-types"
 import {
 	DSD_FME_CALL_WAV,
@@ -37,8 +40,13 @@ import { createComponentLogger } from "../../utils/logger.js"
 import type { Logger } from "../../utils/logger.js"
 import { recordingKeepKeyOf } from "./contract.js"
 import type { RecordingProtection } from "./contract.js"
-import { compareEntries, paginate, parseInventoryQuery } from "./cursor.js"
-import type { InventoryEntry } from "./cursor.js"
+import {
+	afterCursor,
+	compareEntries,
+	encodeCursor,
+	parseInventoryQuery,
+} from "./cursor.js"
+import type { InventoryEntry, NormalisedQuery } from "./cursor.js"
 import {
 	SCANNER_DISCOVERY_ID,
 	SCANNER_RECORDING_ID,
@@ -48,17 +56,36 @@ import {
 } from "./names.js"
 import { parseRiffDurationMs } from "./riff.js"
 
-/** Listing cache lifetime (by the injected clock). */
-export const RECORDINGS_LIST_CACHE_MS = 2_000
-/** Header results kept (path + size + mtime); the oldest is dropped first. */
-export const RECORDINGS_HEADER_CACHE_MAX = 4_096
 /**
- * Directory entries read per scan across every directory, matching or not
- * (8 × RECORDINGS_SCAN_MAX_FILES = 16 000). Reaching it stops the scan (truncated).
+ * Pause of the slow reconcile between two folders: 1 500 folders take at least 30 s, so a
+ * reconcile never competes with live work. Folders are re-read one at a time.
  */
-export const RECORDINGS_SCAN_MAX_ENTRIES = 8 * RECORDINGS_SCAN_MAX_FILES
-/** Scanner discovery folders entered per scan. Reaching it stops the scan (truncated). */
-export const RECORDINGS_SCAN_MAX_DIRS = 2_000
+export const RECORDINGS_RECONCILE_FOLDER_GAP_MS = 20
+/** Default rest between the end of one reconcile and the start of the next. */
+export const RECORDINGS_RECONCILE_INTERVAL_MS = 60_000
+/**
+ * Longest a listing waits for the first build or an urgent refresh (a delete, invalidate, a
+ * source change) before it answers from what is indexed (`indexing: true` during the build).
+ * Under the 1 s "usable" budget.
+ */
+export const RECORDINGS_INDEXING_WAIT_MS = 750
+/** A writer's notices within this window are refreshed together. */
+export const RECORDINGS_TOUCH_DEBOUNCE_MS = 250
+/** `recordings:changed` at most once per this interval. */
+export const RECORDINGS_EVENT_MIN_INTERVAL_MS = 1_000
+/** Settle timer slack past an in-progress file's due time. */
+export const RECORDINGS_SETTLE_SLACK_MS = 50
+/**
+ * Past the bound, the oldest files stay out until the catalogue shrinks below this share of
+ * RECORDINGS_CATALOGUE_MAX (45 000), so a full catalogue does not re-open them every reconcile.
+ */
+export const RECORDINGS_CATALOGUE_REARM = 0.9
+/**
+ * Names read from one folder: twice the entry bound (100 000 by default), so a folder holding
+ * every listed recording plus as many other files is still read whole. Past it, `truncated`
+ * (which names were read is then the filesystem's order).
+ */
+export const RECORDINGS_FOLDER_NAMES_FACTOR = 2
 /**
  * Longest listed or resolvable id: Fastify's default `maxParamLength` (100) bounds the download
  * route parameter, and a cursor `{"m":<≤ 24>,"i":"<≤ 100>"}` stays ≤ 137 bytes, ≤ 184 base64url
@@ -129,6 +156,19 @@ export interface RecordingInventoryOptions {
 	 * so the lookup must resolve merge aliases (ScannerService.recordingFolderDiscovery).
 	 */
 	discoveryCentreHz?: (discoveryId: string) => number | null
+	/**
+	 * The live discovery owning a recording folder, through merge aliases: its id and centre
+	 * frequency, or null. Takes precedence over discoveryCentreHz (read at list time, memory only).
+	 */
+	discoveryOwner?: (
+		folderId: string,
+	) => { id: string; frequencyHz: number | null } | null
+	/** Rest between reconciles (RECORDINGS_RECONCILE_INTERVAL_MS by default). */
+	reconcileIntervalMs?: number
+	/** Test seam: the entry bound (RECORDINGS_CATALOGUE_MAX by default). */
+	catalogueMax?: number
+	/** Test seam: the folder bound (RECORDINGS_CATALOGUE_MAX_FOLDERS by default). */
+	catalogueMaxFolders?: number
 	now?: () => number
 	logger: Logger
 	fs?: RecordingFsPort
@@ -162,11 +202,25 @@ export interface RecordingInventory {
 	 */
 	open(id: string): Promise<OpenedRecording | null>
 	/**
-	 * WG9: drops the listing cache (after a delete, Keep or unkeep). Always present on the
-	 * inventory createRecordingInventory returns; optional in the type so WG8 test doubles of
-	 * the interface still type-check.
+	 * WG9: a recording changed (with its id: after a delete, Keep or unkeep, re-checked at once
+	 * and awaited by the next listing) or anything may have (no id: every folder re-read, awaited
+	 * by the next listing). Always present on the inventory createRecordingInventory returns;
+	 * optional in the type so WG8 test doubles of the interface still type-check.
 	 */
-	invalidate?(): void
+	invalidate?(id?: string): void
+	/** Starts the first build (idempotent); resolves when it is done. */
+	start?(): Promise<void>
+	/** Stops timers and listeners. */
+	close?(): void
+	/** Writers: these discoveries' folders changed (finalize, delete, retention). */
+	touchDiscoveries?(ids: readonly string[]): Promise<void>
+	/** Writers: a dsd-fme call ended (its directory changed). */
+	touchCallRecordings?(): Promise<void>
+	/** Merges: these folders' owner or frequency changed (no file changed). */
+	ownersChanged?(folderIds: readonly string[]): void
+	/** `recordings:changed` notices (at most one a second); returns the unsubscribe. */
+	onChange?(listener: (e: RecordingsChangedEventData) => void): () => void
+	status?(): { revision: number; indexing: boolean; files: number }
 }
 
 export class RecordingInventoryError extends WaveKitError {
@@ -214,12 +268,71 @@ interface Location {
 	dirs: string[]
 }
 
-interface Snapshot {
-	at: number
-	entries: InventoryEntry[]
-	scannedFiles: number
-	truncated: boolean
-	scannedAt: string
+/** A folder the catalogue indexes: a dsd-fme directory or a scanner discovery kind folder. */
+interface FolderSpec {
+	/** The folder path (unique). */
+	key: string
+	dir: string
+	/** realpath of the folder, as derived. */
+	real: string
+	/** Configured directories on the way, each re-checked as a real directory. */
+	dirs: string[]
+	kind: RecordingInventoryKind
+	/** dv before analog when one id is in both (as resolve). */
+	rank: number
+	dsdIndex: number | null
+	decoderId: string | null
+	discoveryId: string | null
+	mtimeMs: number
+}
+
+interface IndexedEntry extends InventoryEntry {
+	/** The `q` text for `hayHz` (cached: rebuilt only when the owner's frequency changed). */
+	hay?: string
+	hayHz?: number | null
+	folder: string
+	name: string
+	rank: number
+	discoveryId: string | null
+	dev: number
+	ino: number
+	size: number
+}
+
+interface FolderState {
+	spec: FolderSpec
+	files: Map<string, IndexedEntry>
+	/** In-progress names and when they settle (by the injected clock). */
+	pending: Map<string, number>
+}
+
+interface View {
+	entries: IndexedEntry[]
+	bytes: number
+	byKind: Record<RecordingInventoryKind, number>
+}
+
+interface Owner {
+	id: string | null
+	frequencyHz: number | null
+}
+
+/** Lower-cased text the `q` filter searches: never the opaque id. */
+function haystack(it: RecordingInventoryItem, hz: number | null): string {
+	const mhz =
+		hz === null
+			? ""
+			: (hz / 1e6).toFixed(6).replace(/0+$/, "").replace(/\.$/, "")
+	return [
+		it.talkgroup ?? "",
+		it.source ?? "",
+		it.decoderId ?? "",
+		it.kind,
+		it.startedAtLocal ?? "",
+		mhz,
+	]
+		.join(" ")
+		.toLowerCase()
 }
 
 const SKIP_CODES = new Set(["ENOENT", "ELOOP", "ENOTDIR"])
@@ -323,12 +436,11 @@ export function createRecordingInventory(
 	const fs = options.fs ?? nodeRecordingFs
 	const now = options.now ?? Date.now
 	const sem = new Semaphore(RECORDINGS_SCAN_CONCURRENCY)
-	const headerCache = new Map<string, number | null>()
-	let snapshot: Snapshot | null = null
-	let inFlight: Promise<Snapshot> | null = null
-	/** Bumped by invalidate(): a scan started before it neither serves nor fills the cache. */
-	let generation = 0
-	let inFlightGeneration = 0
+	const reconcileIntervalMs =
+		options.reconcileIntervalMs ?? RECORDINGS_RECONCILE_INTERVAL_MS
+	const maxEntries = options.catalogueMax ?? RECORDINGS_CATALOGUE_MAX
+	const maxFolders =
+		options.catalogueMaxFolders ?? RECORDINGS_CATALOGUE_MAX_FOLDERS
 
 	const lstat = (p: string): Promise<RecordingStats> =>
 		sem.run(() => fs.lstat(p))
@@ -542,48 +654,35 @@ export function createRecordingInventory(
 		}
 	}
 
-	/** RIFF duration from an open handle (cached by path + size + mtime); null when unreadable. */
+	/** RIFF duration from an open handle; null when unreadable. */
 	async function durationOf(
 		h: RecordingFileHandle,
-		file: string,
 		st: RecordingStats,
 	): Promise<number | null> {
-		const key = `${file}\0${st.size}\0${st.mtimeMs}`
-		if (headerCache.has(key)) return headerCache.get(key) ?? null
-		let result: number | null = null
 		try {
 			const length = Math.max(
 				0,
 				Math.min(RECORDINGS_HEADER_READ_BYTES, Math.floor(st.size)),
 			)
-			if (length > 0) {
-				const buf = new Uint8Array(length)
-				const { bytesRead } = await sem.run(() => h.read(buf, 0, length, 0))
-				result = parseRiffDurationMs(buf.subarray(0, bytesRead), st.size)
-			}
+			if (length === 0) return null
+			const buf = new Uint8Array(length)
+			const { bytesRead } = await sem.run(() => h.read(buf, 0, length, 0))
+			return parseRiffDurationMs(buf.subarray(0, bytesRead), st.size)
 		} catch {
 			return null
 		}
-		headerCache.set(key, result)
-		while (headerCache.size > RECORDINGS_HEADER_CACHE_MAX) {
-			const oldest = headerCache.keys().next()
-			if (oldest.done) break
-			headerCache.delete(oldest.value)
-		}
-		return result
 	}
 
 	/**
-	 * One candidate's whole lifecycle (lstat, open, verify, read, close): its entry, or null when
-	 * it is not eligible, vanished or failed verification (non-skip errors are counted).
+	 * One candidate's whole lifecycle after its `lstat` (open, verify, read, close): its entry and
+	 * verified fstat, or null when it vanished or failed verification (non-skip errors counted).
 	 */
-	async function buildEntry(
+	async function buildFrom(
 		c: Candidate,
+		st: RecordingStats,
 		at: number,
 		counts: Counts,
-	): Promise<InventoryEntry | null> {
-		const st = await eligibleStats(c.loc.file, at, counts)
-		if (!st) return null
+	): Promise<(InventoryEntry & { stat: RecordingStats }) | null> {
 		let handle: RecordingFileHandle
 		try {
 			handle = await sem.run(() => fs.open(c.loc.file, OPEN_FLAGS))
@@ -595,8 +694,12 @@ export function createRecordingInventory(
 		try {
 			const hst = await verifyOpened(h, c.loc, at, st)
 			if (!hst) return null
-			const durationMs = await durationOf(h, c.loc.file, hst)
-			return { mtimeMs: hst.mtimeMs, item: toItem(c, hst, durationMs) }
+			const durationMs = await durationOf(h, hst)
+			return {
+				mtimeMs: hst.mtimeMs,
+				item: toItem(c, hst, durationMs),
+				stat: hst,
+			}
 		} catch (err) {
 			note(counts, "fileErrors", err)
 			return null
@@ -605,109 +708,210 @@ export function createRecordingInventory(
 		}
 	}
 
-	async function scan(): Promise<Snapshot> {
-		const scanNow = now()
-		const counts = newCounts()
-		const candidates: Candidate[] = []
-		let claimed = 0
-		let entriesRead = 0
-		let dirsEntered = 0
-		let truncated = false
-		/** Claims one examined name; false once the bound is reached (sets truncated). */
-		const claim = (): boolean => {
-			if (claimed >= RECORDINGS_SCAN_MAX_FILES) {
-				truncated = true
-				return false
-			}
-			claimed++
-			return true
-		}
-		/**
-		 * The names of one directory, read lazily under the per-scan entry budget and then
-		 * sorted. Only the bounded names collected are sorted: when the budget stops a directory
-		 * midway, which names were collected is the filesystem's order (best effort).
-		 */
-		const listDir = async (dir: string): Promise<string[] | null> => {
-			const names: string[] = []
-			let it: AsyncIterator<string> | undefined
-			try {
-				const iterable = await sem.run(() => fs.opendir(dir))
-				const iter = iterable[Symbol.asyncIterator]()
-				it = iter
-				for (;;) {
-					const r = await sem.run(() => iter.next())
-					if (r.done === true) break
-					if (entriesRead >= RECORDINGS_SCAN_MAX_ENTRIES) {
-						truncated = true
-						break
-					}
-					entriesRead++
-					names.push(r.value)
-				}
-			} catch (err) {
-				if (!isSkip(err)) note(counts, "dirErrors", err)
-				return null
-			} finally {
-				const iter = it
-				if (iter?.return) {
-					try {
-						await sem.run(async () => {
-							await iter.return?.()
-						})
-					} catch {
-						// Closing a directory stream cannot leak anything further.
-					}
-				}
-			}
-			return names.sort()
-		}
-		/** A candidate id, or null when it is too long (counted). */
-		const bounded = (id: string | null): string | null => {
-			if (id === null) return null
-			if (id.length > RECORDINGS_ID_MAX_LENGTH) {
-				counts.longIds++
-				return null
-			}
-			return id
-		}
+	// ------------------------------------------------------------------------- the catalogue
+	//
+	// One in-memory index of every eligible recording, built once in the background (newest
+	// folders first), then kept current by targeted refreshes (writers, invalidate, settling
+	// in-progress files) and a slow paced reconcile of every folder. A listing reads memory only.
+	// Each indexed file passed the full open-time verification when it was indexed; `open` and
+	// `resolve` verify again at request time, so the catalogue never widens the trust surface.
 
-		const sources = await dsdSources(counts)
-		for (const [n, source] of sources.entries()) {
-			if (truncated) break
-			const names = await listDir(source.dir)
-			if (!names) continue
-			for (const name of names) {
-				const id = bounded(dsdId(n, name))
-				if (id === null) continue
-				const file = childPath(source.dir, name)
-				const real = childPath(source.real, name)
-				if (file === null || real === null) continue
-				if (!claim()) break
-				candidates.push({
-					loc: { file, name, real, dirs: [source.dir] },
-					name,
-					id,
-					kind: "dsd-fme-call",
-					decoderId: source.decoderId,
-					discoveryId: null,
-					frequencyHz: null,
-				})
-			}
-		}
+	const folders = new Map<string, FolderState>()
+	const folderLocks = new Map<string, Promise<void>>()
+	const handleSem = new Semaphore(RECORDINGS_SCAN_CONCURRENCY)
+	const urgent = new Set<Promise<void>>()
+	const listeners = new Set<(e: RecordingsChangedEventData) => void>()
+	let revision = 0
+	let view: View | null = null
+	/** First full build: null until started, then its promise. */
+	let build: Promise<void> | null = null
+	let built = false
+	let startedAt = now()
+	let lastFullAt: number | null = null
+	let foldersTruncated = false
+	let namesTruncated = false
+	/** Past RECORDINGS_CATALOGUE_MAX: the first entry left out (newest-first order). */
+	let cutoff: { m: number; i: string } | null = null
+	let configKey: string | null = null
+	let pendingCount = 0
+	let pendingTimer: ReturnType<typeof setTimeout> | null = null
+	let reconcileTimer: ReturnType<typeof setTimeout> | null = null
+	let touchTimer: ReturnType<typeof setTimeout> | null = null
+	const touchedDiscoveries = new Set<string>()
+	let touchedCalls = false
+	let touchWaiters: (() => void)[] = []
+	let eventTimer: ReturnType<typeof setTimeout> | null = null
+	let lastEventAt = Number.NEGATIVE_INFINITY
+	const pendingEvent = { added: 0, removed: 0, changed: 0 }
+	let closed = false
 
+	function unref(t: ReturnType<typeof setTimeout>): void {
+		if (typeof t === "object" && t !== null && "unref" in t) t.unref()
+	}
+
+	function changed(kind: "added" | "removed" | "changed", n = 1): void {
+		if (n <= 0) return
+		revision++
+		view = null
+		pendingEvent[kind] += n
+		scheduleEvent()
+	}
+
+	function scheduleEvent(): void {
+		if (closed || eventTimer !== null) return
+		if (listeners.size === 0) {
+			pendingEvent.added = pendingEvent.removed = pendingEvent.changed = 0
+			return
+		}
+		const wait = Math.max(
+			0,
+			lastEventAt + RECORDINGS_EVENT_MIN_INTERVAL_MS - performance.now(),
+		)
+		eventTimer = setTimeout(() => {
+			eventTimer = null
+			lastEventAt = performance.now()
+			const data: RecordingsChangedEventData = {
+				revision,
+				added: pendingEvent.added,
+				removed: pendingEvent.removed,
+				changed: pendingEvent.changed,
+				indexing: !built,
+			}
+			pendingEvent.added = pendingEvent.removed = pendingEvent.changed = 0
+			for (const l of [...listeners]) {
+				try {
+					l(data)
+				} catch (err) {
+					log.debug(
+						{ err: safeErrorFields(err) },
+						"Recordings change listener failed",
+					)
+				}
+			}
+		}, wait)
+		unref(eventTimer)
+	}
+
+	/** Runs `fn` alone for `key` (one folder is never indexed twice at once). */
+	async function withFolder(
+		key: string,
+		fn: () => Promise<void>,
+	): Promise<void> {
+		const prev = folderLocks.get(key) ?? Promise.resolve()
+		const run = prev.then(fn, fn)
+		const tail = run.then(
+			() => undefined,
+			() => undefined,
+		)
+		folderLocks.set(key, tail)
+		try {
+			await run
+		} finally {
+			if (folderLocks.get(key) === tail) folderLocks.delete(key)
+		}
+	}
+
+	function dropFile(state: FolderState, name: string): boolean {
+		const had = state.files.delete(name)
+		if (had) changed("removed")
+		return had
+	}
+
+	function setPending(state: FolderState, name: string, due: number): void {
+		if (!state.pending.has(name)) pendingCount++
+		state.pending.set(name, due)
+		schedulePending()
+	}
+
+	function clearPending(state: FolderState, name: string): void {
+		if (state.pending.delete(name)) pendingCount--
+	}
+
+	function removeFolder(key: string): void {
+		const state = folders.get(key)
+		if (!state) return
+		folders.delete(key)
+		pendingCount -= state.pending.size
+		changed("removed", state.files.size)
+	}
+
+	/** True when (m, i) sorts at or after the first entry left out past the bound. */
+	function beyondBound(m: number, i: string): boolean {
+		if (cutoff === null) return false
+		if (m !== cutoff.m) return m < cutoff.m
+		return i >= cutoff.i
+	}
+
+	/** The scanner kind folder of discovery `d`, or null when it is not a real directory. */
+	async function scannerFolder(
+		root: string,
+		realRoot: string,
+		kindDir: (typeof SCANNER_RECORDING_KINDS)[number],
+		d: string,
+		counts: Counts,
+	): Promise<FolderSpec | null> {
+		const kindPath = childPath(root, kindDir)
+		const folder = kindPath === null ? null : childPath(kindPath, d)
+		if (kindPath === null || folder === null) return null
+		try {
+			const st = await lstat(folder)
+			if (st.isSymbolicLink() || !st.isDirectory()) return null
+			return {
+				key: folder,
+				dir: folder,
+				real: path.join(realRoot, kindDir, d),
+				dirs: [root, kindPath, folder],
+				kind: kindDir === "dv" ? "scanner-dv" : "scanner-analog",
+				rank: kindDir === "dv" ? 0 : 1,
+				dsdIndex: null,
+				decoderId: null,
+				discoveryId: d,
+				mtimeMs: Number.isFinite(st.mtimeMs) ? st.mtimeMs : 0,
+			}
+		} catch (err) {
+			if (!isSkip(err)) note(counts, "dirErrors", err)
+			return null
+		}
+	}
+
+	/** The scanner root and its realpath, or null. */
+	async function scannerBase(
+		counts: Counts,
+	): Promise<{ root: string; realRoot: string } | null> {
 		const root = await scannerRoot(counts)
-		const memo = new Map<string, number | null>()
-		if (root !== null && !truncated) {
-			let realRoot: string | null = null
-			try {
-				if (await isRealDir(root))
-					realRoot = await sem.run(() => fs.realpath(root))
-			} catch (err) {
-				if (!isSkip(err)) note(counts, "dirErrors", err)
-			}
-			for (const kindDir of realRoot !== null ? SCANNER_RECORDING_KINDS : []) {
-				if (truncated) break
-				const kindPath = childPath(root, kindDir)
+		if (root === null) return null
+		try {
+			if (!(await isRealDir(root))) return null
+			return { root, realRoot: await sem.run(() => fs.realpath(root)) }
+		} catch (err) {
+			if (!isSkip(err)) note(counts, "dirErrors", err)
+			return null
+		}
+	}
+
+	/** Every folder to index: dsd-fme directories, then scanner folders newest change first. */
+	async function deriveFolders(counts: Counts): Promise<FolderSpec[]> {
+		const out: FolderSpec[] = []
+		for (const [n, source] of (await dsdSources(counts)).entries()) {
+			out.push({
+				key: source.dir,
+				dir: source.dir,
+				real: source.real,
+				dirs: [source.dir],
+				kind: "dsd-fme-call",
+				rank: 0,
+				dsdIndex: n,
+				decoderId: source.decoderId,
+				discoveryId: null,
+				mtimeMs: Number.POSITIVE_INFINITY,
+			})
+		}
+		const base = await scannerBase(counts)
+		const scanner: FolderSpec[] = []
+		let truncatedHere = false
+		if (base !== null) {
+			for (const kindDir of SCANNER_RECORDING_KINDS) {
+				const kindPath = childPath(base.root, kindDir)
 				if (kindPath === null) continue
 				try {
 					if (!(await isRealDir(kindPath))) continue
@@ -715,130 +919,707 @@ export function createRecordingInventory(
 					note(counts, "dirErrors", err)
 					continue
 				}
-				const discoveries = await listDir(kindPath)
-				if (!discoveries) continue
-				for (const d of discoveries) {
-					if (truncated) break
-					if (!SCANNER_DISCOVERY_ID.test(d)) continue
-					if (dirsEntered >= RECORDINGS_SCAN_MAX_DIRS) {
-						truncated = true
-						break
-					}
-					dirsEntered++
-					const folder = childPath(kindPath, d)
-					if (folder === null) continue
-					try {
-						if (!(await isRealDir(folder))) continue
-					} catch (err) {
-						note(counts, "dirErrors", err)
-						continue
-					}
-					const names = await listDir(folder)
-					if (!names) continue
-					for (const name of names) {
-						const id = bounded(scanId(d, name))
-						if (id === null) continue
-						const file = childPath(folder, name)
-						const real =
-							realRoot === null
-								? null
-								: childPath(path.join(realRoot, kindDir, d), name)
-						if (file === null || real === null) continue
-						if (!claim()) break
-						candidates.push({
-							loc: { file, name, real, dirs: [root, kindPath, folder] },
-							name,
-							id,
-							kind: kindDir === "dv" ? "scanner-dv" : "scanner-analog",
-							decoderId: null,
-							discoveryId: d,
-							frequencyHz: centreHz(d, memo, counts),
-						})
-					}
+				const listed = await listNames(kindPath, counts)
+				if (listed === null) continue
+				if (listed.truncated) truncatedHere = true
+				const ids = listed.names.filter(d => SCANNER_DISCOVERY_ID.test(d))
+				const specs = await pool(ids, d =>
+					scannerFolder(base.root, base.realRoot, kindDir, d, counts),
+				)
+				for (const s of specs) if (s !== null) scanner.push(s)
+			}
+		}
+		// Newest directory change first: the first build lists recent recordings early, and a
+		// folder bound leaves out the folders changed least recently.
+		scanner.sort((a, b) =>
+			a.mtimeMs !== b.mtimeMs
+				? b.mtimeMs - a.mtimeMs
+				: a.key < b.key
+					? -1
+					: a.key > b.key
+						? 1
+						: 0,
+		)
+		if (scanner.length > maxFolders) {
+			scanner.length = maxFolders
+			truncatedHere = true
+		}
+		foldersTruncated = truncatedHere
+		return [...out, ...scanner]
+	}
+
+	/** A folder's entry names, at most RECORDINGS_FOLDER_NAMES_FACTOR × the entry bound. */
+	async function listNames(
+		dir: string,
+		counts: Counts,
+	): Promise<{ names: string[]; truncated: boolean } | null> {
+		const names: string[] = []
+		let truncated = false
+		let it: AsyncIterator<string> | undefined
+		try {
+			const iterable = await sem.run(() => fs.opendir(dir))
+			const iter = iterable[Symbol.asyncIterator]()
+			it = iter
+			for (;;) {
+				const r = await sem.run(() => iter.next())
+				if (r.done === true) break
+				if (names.length >= maxEntries * RECORDINGS_FOLDER_NAMES_FACTOR) {
+					truncated = true
+					break
+				}
+				names.push(r.value)
+			}
+		} catch (err) {
+			if (!isSkip(err)) note(counts, "dirErrors", err)
+			return null
+		} finally {
+			const iter = it
+			if (iter?.return) {
+				try {
+					await sem.run(async () => {
+						await iter.return?.()
+					})
+				} catch {
+					// Closing a directory stream cannot leak anything further.
 				}
 			}
 		}
+		// Newest first where the name says so (dsd-fme names start with the date and time).
+		return { names: names.sort().reverse(), truncated }
+	}
 
-		// A pool of RECORDINGS_SCAN_CONCURRENCY workers, each taking one candidate through its
-		// whole lifecycle (lstat, open, fstat, read, close): at most that many handles live.
-		const built: (InventoryEntry | null)[] = candidates.map(() => null)
-		let nextIndex = 0
+	/** `fn` over `items` with RECORDINGS_SCAN_CONCURRENCY workers, results in input order. */
+	async function pool<T, R>(
+		items: readonly T[],
+		fn: (item: T) => Promise<R>,
+	): Promise<R[]> {
+		const out: R[] = new Array<R>(items.length)
+		let next = 0
 		const worker = async (): Promise<void> => {
-			while (nextIndex < candidates.length) {
-				const i = nextIndex++
-				const c = candidates[i]
-				if (!c) continue
-				built[i] = await buildEntry(c, scanNow, counts)
+			while (next < items.length) {
+				const i = next++
+				const item = items[i] as T
+				out[i] = await fn(item)
 			}
 		}
 		await Promise.all(
 			Array.from(
-				{
-					length: Math.min(RECORDINGS_SCAN_CONCURRENCY, candidates.length),
-				},
+				{ length: Math.min(RECORDINGS_SCAN_CONCURRENCY, items.length) },
 				() => worker(),
 			),
 		)
-		// A scanner id present under both dv and analog: the dv one wins (as in resolve).
-		const byId = new Map<string, InventoryEntry>()
-		for (const e of built) {
-			if (e && !byId.has(e.item.id)) byId.set(e.item.id, e)
-		}
-		const entries = [...byId.values()].sort(compareEntries)
+		return out
+	}
 
+	function idFor(
+		spec: FolderSpec,
+		name: string,
+		counts: Counts,
+	): string | null {
+		const id =
+			spec.dsdIndex !== null
+				? dsdId(spec.dsdIndex, name)
+				: spec.discoveryId !== null
+					? scanId(spec.discoveryId, name)
+					: null
+		if (id === null) return null
+		if (id.length > RECORDINGS_ID_MAX_LENGTH) {
+			counts.longIds++
+			return null
+		}
+		return id
+	}
+
+	function sameSpec(a: FolderSpec, b: FolderSpec): boolean {
+		return (
+			a.dir === b.dir &&
+			a.real === b.real &&
+			a.kind === b.kind &&
+			a.dsdIndex === b.dsdIndex &&
+			a.decoderId === b.decoderId &&
+			a.discoveryId === b.discoveryId &&
+			a.dirs.length === b.dirs.length &&
+			a.dirs.every((d, i) => d === b.dirs[i])
+		)
+	}
+
+	/** The folder's state for `spec` (a changed spec starts over). */
+	function stateFor(spec: FolderSpec): FolderState {
+		const state = folders.get(spec.key)
+		if (state && sameSpec(state.spec, spec)) {
+			state.spec = spec
+			return state
+		}
+		if (state) removeFolder(spec.key)
+		const fresh: FolderState = { spec, files: new Map(), pending: new Map() }
+		folders.set(spec.key, fresh)
+		return fresh
+	}
+
+	/** Every configured directory on the way is still a real directory. */
+	async function dirsHold(spec: FolderSpec, counts: Counts): Promise<boolean> {
+		for (const d of spec.dirs) {
+			try {
+				if (!(await isRealDir(d))) return false
+			} catch (err) {
+				note(counts, "dirErrors", err)
+				return false
+			}
+		}
+		return true
+	}
+
+	/** Re-checks one name of a folder: indexed, pending (still written) or dropped. */
+	async function refreshName(
+		state: FolderState,
+		name: string,
+		id: string,
+		at: number,
+		counts: Counts,
+	): Promise<void> {
+		const spec = state.spec
+		const file = childPath(spec.dir, name)
+		const real = childPath(spec.real, name)
+		if (file === null || real === null) return
+		let st: RecordingStats
+		try {
+			st = await lstat(file)
+		} catch (err) {
+			if (!isSkip(err)) note(counts, "fileErrors", err)
+			clearPending(state, name)
+			dropFile(state, name)
+			return
+		}
+		if (
+			st.isSymbolicLink() ||
+			!st.isFile() ||
+			!Number.isFinite(st.mtimeMs) ||
+			!Number.isFinite(st.size)
+		) {
+			clearPending(state, name)
+			dropFile(state, name)
+			return
+		}
+		if (st.mtimeMs > at - RECORDINGS_IN_PROGRESS_MS) {
+			// Still being written: listed once it settled (a timer and every listing re-check it).
+			dropFile(state, name)
+			setPending(state, name, st.mtimeMs + RECORDINGS_IN_PROGRESS_MS)
+			return
+		}
+		clearPending(state, name)
+		const prev = state.files.get(name)
+		if (
+			prev &&
+			prev.dev === st.dev &&
+			prev.ino === st.ino &&
+			prev.size === st.size &&
+			prev.mtimeMs === st.mtimeMs
+		)
+			return
+		if (!prev && beyondBound(st.mtimeMs, id)) return
+		const c: Candidate = {
+			loc: { file, name, real, dirs: spec.dirs },
+			name,
+			id,
+			kind: spec.kind,
+			decoderId: spec.decoderId,
+			discoveryId: spec.discoveryId,
+			frequencyHz: null,
+		}
+		const entry = await handleSem.run(() => buildFrom(c, st, at, counts))
+		// The folder may have been replaced meanwhile (config change): never write into a stale state.
+		if (folders.get(spec.key) !== state) return
+		if (!entry) {
+			dropFile(state, name)
+			return
+		}
+		state.files.set(name, {
+			mtimeMs: entry.mtimeMs,
+			item: entry.item,
+			folder: spec.key,
+			name,
+			rank: spec.rank,
+			discoveryId: spec.discoveryId,
+			dev: entry.stat.dev,
+			ino: entry.stat.ino,
+			size: entry.stat.size,
+		})
+		changed(prev ? "changed" : "added")
+	}
+
+	/** Indexes a folder: every name (`only` absent) or just `only`. */
+	async function indexFolder(
+		spec: FolderSpec,
+		counts: Counts,
+		only?: ReadonlySet<string>,
+	): Promise<void> {
+		await withFolder(spec.key, async () => {
+			if (closed) return
+			const state = stateFor(spec)
+			const at = now()
+			if (!(await dirsHold(spec, counts))) {
+				if (folders.get(spec.key) === state) removeFolder(spec.key)
+				return
+			}
+			let names: string[]
+			if (only) names = [...only]
+			else {
+				const listed = await listNames(spec.dir, counts)
+				if (listed === null) {
+					if (folders.get(spec.key) === state) removeFolder(spec.key)
+					return
+				}
+				if (listed.truncated) namesTruncated = true
+				names = listed.names
+			}
+			const present = new Set<string>()
+			const work: [string, string][] = []
+			for (const name of names) {
+				const id = idFor(spec, name, counts)
+				if (id === null) continue
+				present.add(name)
+				work.push([name, id])
+			}
+			await pool(work, ([name, id]) => refreshName(state, name, id, at, counts))
+			if (only) {
+				for (const name of only)
+					if (!present.has(name)) {
+						clearPending(state, name)
+						dropFile(state, name)
+					}
+				return
+			}
+			for (const name of [...state.files.keys()])
+				if (!present.has(name)) dropFile(state, name)
+			for (const name of [...state.pending.keys()])
+				if (!present.has(name)) clearPending(state, name)
+		})
+	}
+
+	function logSkipped(counts: Counts): void {
 		const skipped =
 			counts.sourceErrors +
 			counts.dirErrors +
 			counts.fileErrors +
 			counts.lookupErrors +
 			counts.longIds
-		if (skipped > 0) {
-			log.warn(
-				{
-					sourceErrors: counts.sourceErrors,
-					dirErrors: counts.dirErrors,
-					fileErrors: counts.fileErrors,
-					lookupErrors: counts.lookupErrors,
-					longIds: counts.longIds,
-					err: safeErrorFields(counts.firstError),
-				},
-				"Recordings inventory scan skipped entries",
-			)
+		if (skipped === 0) return
+		log.warn(
+			{
+				sourceErrors: counts.sourceErrors,
+				dirErrors: counts.dirErrors,
+				fileErrors: counts.fileErrors,
+				lookupErrors: counts.lookupErrors,
+				longIds: counts.longIds,
+				err: safeErrorFields(counts.firstError),
+			},
+			"Recordings inventory scan skipped entries",
+		)
+	}
+
+	/**
+	 * One pass over every folder. Unpaced (the first build, an explicit invalidate, a source
+	 * change): folders in a pool, newest first. Paced (the reconcile): one folder at a time with
+	 * a pause between folders, so it never competes with live work.
+	 */
+	async function fullPass(paced: boolean): Promise<void> {
+		const counts = newCounts()
+		const specs = await deriveFolders(counts)
+		const keys = new Set(specs.map(s => s.key))
+		for (const key of [...folders.keys()]) if (!keys.has(key)) removeFolder(key)
+		if (paced) {
+			for (const spec of specs) {
+				if (closed) return
+				await indexFolder(spec, counts)
+				await pause(RECORDINGS_RECONCILE_FOLDER_GAP_MS)
+			}
+		} else {
+			await pool(specs, spec => indexFolder(spec, counts))
 		}
-		return {
-			at: scanNow,
-			entries,
-			scannedFiles: claimed,
-			truncated,
-			scannedAt: new Date(scanNow).toISOString(),
+		lastFullAt = now()
+		logSkipped(counts)
+	}
+
+	function trackUrgent(p: Promise<void>): Promise<void> {
+		const tracked = p.catch((err: unknown) => {
+			log.warn(
+				{ err: safeErrorFields(err) },
+				"Recordings catalogue refresh failed",
+			)
+		})
+		urgent.add(tracked)
+		void tracked.finally(() => urgent.delete(tracked))
+		return tracked
+	}
+
+	function pause(ms: number): Promise<void> {
+		return new Promise(resolve => {
+			const t = setTimeout(resolve, ms)
+			unref(t)
+		})
+	}
+
+	function scheduleReconcile(): void {
+		if (closed || reconcileTimer !== null) return
+		reconcileTimer = setTimeout(() => {
+			reconcileTimer = null
+			void fullPass(true)
+				.catch((err: unknown) => {
+					log.warn(
+						{ err: safeErrorFields(err) },
+						"Recordings catalogue reconcile failed",
+					)
+				})
+				.finally(scheduleReconcile)
+		}, reconcileIntervalMs)
+		unref(reconcileTimer)
+	}
+
+	function start(): Promise<void> {
+		if (build === null) {
+			startedAt = now()
+			configKey = sourcesKey()
+			build = fullPass(false)
+				.catch((err: unknown) => {
+					log.warn(
+						{ err: safeErrorFields(err) },
+						"Recordings catalogue build failed",
+					)
+				})
+				.finally(() => {
+					built = true
+					// The first `indexing: false` is announced too.
+					revision++
+					scheduleEvent()
+					scheduleReconcile()
+				})
+		}
+		return build
+	}
+
+	/** The configured sources as plain text (memory only), to notice a configuration change. */
+	function sourcesKey(): string {
+		try {
+			const dsd = options.dsdFmeDirs().map(d => [d.decoderId, d.dir])
+			return JSON.stringify([dsd, options.scannerRecordingsDir()])
+		} catch {
+			return "error"
 		}
 	}
 
-	async function current(): Promise<Snapshot> {
-		const t = now()
-		if (
-			snapshot &&
-			t >= snapshot.at &&
-			t - snapshot.at < RECORDINGS_LIST_CACHE_MS
-		)
-			return snapshot
-		if (!inFlight || inFlightGeneration !== generation) {
-			const p = scan()
-			const gen = generation
-			inFlight = p
-			inFlightGeneration = gen
-			void p
-				.then(
-					s => {
-						if (gen === generation) snapshot = s
-					},
-					() => undefined,
-				)
-				.finally(() => {
-					if (inFlight === p) inFlight = null
-				})
+	/** Settles in-progress files that are due by the injected clock (urgent, awaited by list). */
+	function settleDue(): void {
+		if (pendingCount <= 0) return
+		const at = now()
+		for (const state of folders.values()) {
+			if (state.pending.size === 0) continue
+			const due = new Set<string>()
+			for (const [name, t] of state.pending) if (t <= at) due.add(name)
+			if (due.size > 0)
+				void trackUrgent(indexFolder(state.spec, newCounts(), due))
 		}
-		return inFlight
+	}
+
+	function schedulePending(): void {
+		if (pendingTimer !== null || closed) return
+		let earliest = Number.POSITIVE_INFINITY
+		for (const state of folders.values())
+			for (const t of state.pending.values()) earliest = Math.min(earliest, t)
+		if (!Number.isFinite(earliest)) return
+		const wait = Math.max(0, earliest - now()) + RECORDINGS_SETTLE_SLACK_MS
+		pendingTimer = setTimeout(() => {
+			pendingTimer = null
+			settleDue()
+			if (pendingCount > 0) schedulePending()
+		}, wait)
+		unref(pendingTimer)
+	}
+
+	/** Waits for the first build and urgent refreshes, at most RECORDINGS_INDEXING_WAIT_MS. */
+	async function settle(): Promise<void> {
+		const waits: Promise<void>[] = [...urgent]
+		if (!built && build !== null) waits.push(build)
+		if (waits.length === 0) return
+		let timer: ReturnType<typeof setTimeout> | undefined
+		await Promise.race([
+			Promise.all(waits),
+			new Promise<void>(resolve => {
+				timer = setTimeout(resolve, RECORDINGS_INDEXING_WAIT_MS)
+				unref(timer)
+			}),
+		])
+		if (timer !== undefined) clearTimeout(timer)
+	}
+
+	/** The listed entries, newest first, bounded; rebuilt only after a change. */
+	function currentView(): View {
+		if (view !== null) return view
+		const best = new Map<string, IndexedEntry>()
+		for (const state of folders.values())
+			for (const e of state.files.values()) {
+				const cur = best.get(e.item.id)
+				if (!cur || e.rank < cur.rank) best.set(e.item.id, e)
+			}
+		const entries = [...best.values()].sort(compareEntries)
+		if (entries.length > maxEntries) {
+			const first = entries[maxEntries]
+			if (first) cutoff = { m: first.mtimeMs, i: first.item.id }
+			// Left out for good (memory bound): only re-indexed once the catalogue shrank.
+			for (const e of entries.slice(maxEntries))
+				folders.get(e.folder)?.files.delete(e.name)
+			entries.length = maxEntries
+		} else if (
+			cutoff !== null &&
+			entries.length < maxEntries * RECORDINGS_CATALOGUE_REARM
+		) {
+			cutoff = null
+			// The next reconcile indexes the older files again.
+		}
+		const byKind: Record<RecordingInventoryKind, number> = {
+			"dsd-fme-call": 0,
+			"scanner-dv": 0,
+			"scanner-analog": 0,
+		}
+		let bytes = 0
+		for (const e of entries) {
+			byKind[e.item.kind]++
+			bytes += e.item.bytes
+		}
+		view = { entries, bytes, byKind }
+		return view
+	}
+
+	function page(q: NormalisedQuery): RecordingInventoryPage {
+		const v = currentView()
+		const protection = options.protection
+		const counts = newCounts()
+		const owners = new Map<string, Owner | null>()
+		const ownerOf = (folderId: string): Owner | null => {
+			const known = owners.get(folderId)
+			if (known !== undefined) return known
+			const o = lookupOwner(folderId, counts)
+			owners.set(folderId, o)
+			return o
+		}
+		const keptOf = (e: IndexedEntry): boolean | undefined => {
+			if (!protection) return undefined
+			const key = recordingKeepKeyOf(e.item.id)
+			if (key === null) return true
+			try {
+				return protection.isProtected(key) !== false
+			} catch {
+				return true
+			}
+		}
+		const hzOf = (e: IndexedEntry): number | null =>
+			e.discoveryId === null
+				? null
+				: (ownerOf(e.discoveryId)?.frequencyHz ?? null)
+		const wanted =
+			q.discoveryId === null
+				? null
+				: { id: q.discoveryId, owner: ownerOf(q.discoveryId)?.id ?? null }
+		const keep = (e: IndexedEntry, kept: boolean | undefined): boolean => {
+			const it = e.item
+			if (q.kind !== null && it.kind !== q.kind) return false
+			if (q.decoderId !== null && it.decoderId !== q.decoderId) return false
+			if (q.talkgroup !== null && it.talkgroup !== q.talkgroup) return false
+			if (q.source !== null && it.source !== q.source) return false
+			if (q.sinceMs !== null && e.mtimeMs < q.sinceMs) return false
+			if (q.untilMs !== null && e.mtimeMs > q.untilMs) return false
+			if (q.kept !== null && (kept === true) !== q.kept) return false
+			if (wanted !== null) {
+				if (e.discoveryId === null) return false
+				if (
+					e.discoveryId !== wanted.id &&
+					(wanted.owner === null || ownerOf(e.discoveryId)?.id !== wanted.owner)
+				)
+					return false
+			}
+			if (q.minHz !== null || q.maxHz !== null) {
+				const hz = hzOf(e)
+				if (hz === null) return false
+				if (q.minHz !== null && hz < q.minHz) return false
+				if (q.maxHz !== null && hz > q.maxHz) return false
+			}
+			if (q.q !== null) {
+				const hz = hzOf(e)
+				if (e.hay === undefined || e.hayHz !== hz) {
+					e.hay = haystack(it, hz)
+					e.hayHz = hz
+				}
+				if (!e.hay.includes(q.q)) return false
+			}
+			return true
+		}
+		const selected: { e: IndexedEntry; kept: boolean | undefined }[] = []
+		let matched = 0
+		let keptTotal = 0
+		let more = false
+		for (const e of v.entries) {
+			const kept = keptOf(e)
+			if (kept === true) keptTotal++
+			if (!keep(e, kept)) continue
+			matched++
+			if (!afterCursor(e, q.cursor)) continue
+			if (selected.length < q.limit) selected.push({ e, kept })
+			else more = true
+		}
+		const last = selected[selected.length - 1]
+		const items = selected.map(({ e, kept }) => {
+			const owner = e.discoveryId === null ? null : ownerOf(e.discoveryId)
+			const item: RecordingInventoryItem = {
+				...e.item,
+				frequencyHz: owner?.frequencyHz ?? null,
+				key: recordingKeepKeyOf(e.item.id) ?? e.item.id,
+				ownerDiscoveryId: owner?.id ?? null,
+			}
+			if (kept !== undefined) item.kept = kept
+			return item
+		})
+		if (counts.lookupErrors > 0) logSkipped(counts)
+		return {
+			items,
+			nextCursor:
+				more && last
+					? encodeCursor({ m: last.e.mtimeMs, i: last.e.item.id })
+					: null,
+			scannedFiles: v.entries.length,
+			truncated: cutoff !== null || foldersTruncated || namesTruncated,
+			scannedAt: new Date(lastFullAt ?? startedAt).toISOString(),
+			revision,
+			indexing: !built,
+			matched,
+			counts: {
+				total: v.entries.length,
+				kept: keptTotal,
+				bytes: v.bytes,
+				byKind: { ...v.byKind },
+			},
+			truncatedBefore:
+				cutoff !== null ? new Date(cutoff.m).toISOString() : null,
+		}
+	}
+
+	function lookupOwner(folderId: string, counts: Counts): Owner | null {
+		if (options.discoveryOwner) {
+			try {
+				const o: unknown = options.discoveryOwner(folderId)
+				if (typeof o !== "object" || o === null) return null
+				const { id, frequencyHz } = o as { id?: unknown; frequencyHz?: unknown }
+				return {
+					id:
+						typeof id === "string" && SCANNER_DISCOVERY_ID.test(id) ? id : null,
+					frequencyHz:
+						typeof frequencyHz === "number" &&
+						Number.isFinite(frequencyHz) &&
+						frequencyHz > 0
+							? frequencyHz
+							: null,
+				}
+			} catch (err) {
+				note(counts, "lookupErrors", err)
+				return null
+			}
+		}
+		const hz = centreHz(folderId, new Map(), counts)
+		return hz === null ? null : { id: null, frequencyHz: hz }
+	}
+
+	/** Re-indexes the folders of these discoveries (writers: finalize, delete, retention). */
+	async function refreshDiscoveries(ids: readonly string[]): Promise<void> {
+		const counts = newCounts()
+		const base = await scannerBase(counts)
+		const work: Promise<void>[] = []
+		for (const d of ids) {
+			if (!SCANNER_DISCOVERY_ID.test(d)) continue
+			for (const kindDir of SCANNER_RECORDING_KINDS) {
+				const key = base === null ? null : path.join(base.root, kindDir, d)
+				const spec =
+					base === null
+						? null
+						: await scannerFolder(base.root, base.realRoot, kindDir, d, counts)
+				if (spec !== null) work.push(indexFolder(spec, counts))
+				else if (key !== null && folders.has(key))
+					work.push(withFolder(key, async () => removeFolder(key)))
+			}
+		}
+		await Promise.all(work)
+		logSkipped(counts)
+	}
+
+	async function refreshCalls(): Promise<void> {
+		const counts = newCounts()
+		const specs = (await deriveFolders(counts)).filter(
+			s => s.kind === "dsd-fme-call",
+		)
+		await Promise.all(specs.map(s => indexFolder(s, counts)))
+		logSkipped(counts)
+	}
+
+	function flushTouches(): void {
+		touchTimer = null
+		const ids = [...touchedDiscoveries]
+		touchedDiscoveries.clear()
+		const calls = touchedCalls
+		touchedCalls = false
+		const waiters = touchWaiters
+		touchWaiters = []
+		const work: Promise<void>[] = []
+		if (ids.length > 0) work.push(refreshDiscoveries(ids))
+		if (calls) work.push(refreshCalls())
+		void Promise.all(work)
+			.catch((err: unknown) => {
+				log.warn(
+					{ err: safeErrorFields(err) },
+					"Recordings catalogue refresh failed",
+				)
+			})
+			.finally(() => {
+				for (const w of waiters) w()
+			})
+	}
+
+	function touch(): Promise<void> {
+		if (closed) return Promise.resolve()
+		void start()
+		const done = new Promise<void>(resolve => touchWaiters.push(resolve))
+		if (touchTimer === null) {
+			touchTimer = setTimeout(flushTouches, RECORDINGS_TOUCH_DEBOUNCE_MS)
+			unref(touchTimer)
+		}
+		return done
+	}
+
+	/** The folder states holding an inventory id (dsd index or discovery), for invalidate(id). */
+	function statesOf(id: string): { state: FolderState; name: string }[] {
+		const m = typeof id === "string" ? RECORDING_INVENTORY_ID.exec(id) : null
+		if (!m) return []
+		const out: { state: FolderState; name: string }[] = []
+		const [, n, dsdName, recordingId] = m
+		const sm =
+			recordingId === undefined ? null : SCANNER_RECORDING_ID.exec(recordingId)
+		for (const state of folders.values()) {
+			const s = state.spec
+			if (n !== undefined && dsdName !== undefined) {
+				if (s.dsdIndex === Number(n)) out.push({ state, name: dsdName })
+			} else if (sm?.[1] !== undefined && sm[2] !== undefined) {
+				if (s.discoveryId === sm[1]) out.push({ state, name: sm[2] })
+			}
+		}
+		return out
+	}
+
+	function invalidateId(id: string): void {
+		const targets = statesOf(id)
+		// Keep and unkeep change no file but the listed `kept`: announced as a change.
+		changed("changed")
+		for (const { state, name } of targets)
+			void trackUrgent(indexFolder(state.spec, newCounts(), new Set([name])))
+		if (targets.length === 0 && RECORDING_INVENTORY_ID.test(id)) {
+			const sm = /^scan:(d_[0-9A-Za-z]+)~/.exec(id)
+			if (sm?.[1]) void trackUrgent(refreshDiscoveries([sm[1]]))
+		}
 	}
 
 	/** Every place an id may live, in lookup order (dv before analog). No fs call on a bad id. */
@@ -938,18 +1719,16 @@ export function createRecordingInventory(
 			const q = parseInventoryQuery(query)
 			if (q === null)
 				throw new RecordingInventoryError("RECORDINGS_QUERY_INVALID")
-			const s = await current()
-			const page = paginate(s.entries, q)
-			const protection = options.protection
-			return {
-				items: protection
-					? page.items.map(item => withKept(item, protection))
-					: page.items,
-				nextCursor: page.nextCursor,
-				scannedFiles: s.scannedFiles,
-				truncated: s.truncated,
-				scannedAt: s.scannedAt,
+			void start()
+			// A configuration change (memory only to notice) re-derives every folder, awaited.
+			const key = sourcesKey()
+			if (configKey !== null && key !== configKey) {
+				configKey = key
+				void trackUrgent(fullPass(false))
 			}
+			settleDue()
+			await settle()
+			return page(q)
 		},
 
 		async resolve(id) {
@@ -980,20 +1759,58 @@ export function createRecordingInventory(
 			}
 		},
 
-		invalidate() {
-			generation++
-			snapshot = null
+		invalidate(id?: string) {
+			if (typeof id === "string") {
+				invalidateId(id)
+				return
+			}
+			changed("changed")
+			void trackUrgent(fullPass(false))
+		},
+
+		start,
+
+		close() {
+			closed = true
+			for (const t of [pendingTimer, reconcileTimer, touchTimer, eventTimer])
+				if (t !== null) clearTimeout(t)
+			pendingTimer = reconcileTimer = touchTimer = eventTimer = null
+			listeners.clear()
+			for (const w of touchWaiters.splice(0)) w()
+		},
+
+		touchDiscoveries(ids) {
+			for (const id of ids)
+				if (typeof id === "string" && SCANNER_DISCOVERY_ID.test(id))
+					touchedDiscoveries.add(id)
+			return touch()
+		},
+
+		touchCallRecordings() {
+			touchedCalls = true
+			return touch()
+		},
+
+		ownersChanged(ids) {
+			const set = new Set(ids)
+			let n = 0
+			for (const state of folders.values())
+				if (state.spec.discoveryId !== null && set.has(state.spec.discoveryId))
+					n += state.files.size
+			changed("changed", n)
+		},
+
+		onChange(listener) {
+			listeners.add(listener)
+			return () => {
+				listeners.delete(listener)
+			}
+		},
+
+		status() {
+			return { revision, indexing: !built, files: currentView().entries.length }
 		},
 	}
-}
-
-/** A copy of `item` with `kept` (fail closed: an id without a key reads kept). */
-function withKept(
-	item: RecordingInventoryItem,
-	protection: RecordingProtection,
-): RecordingInventoryItem {
-	const key = recordingKeepKeyOf(item.id)
-	return { ...item, kept: key === null ? true : protection.isProtected(key) }
 }
 
 function toItem(

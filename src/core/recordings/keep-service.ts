@@ -259,9 +259,10 @@ export async function openRecordingKeepService(
 		else deleting.set(key, n)
 	}
 
-	function invalidate(): void {
+	/** The catalogue re-checks this recording (a Keep changes `kept`, a delete the file). */
+	function invalidate(inventoryId: string): void {
 		try {
-			inventory.invalidate?.()
+			inventory.invalidate?.(inventoryId)
 		} catch (error: unknown) {
 			log.debug(
 				{ err: safeErrorFields(error) },
@@ -331,7 +332,7 @@ export async function openRecordingKeepService(
 				log.warn({ err: safeErrorFields(error) }, "Recording Keep failed")
 				throw unavailable()
 			}
-			invalidate()
+			invalidate(inventoryId)
 			log.info({ kept: protecting.size }, "Recording kept")
 			return { id: inventoryId, kept: true, changed: true }
 		})
@@ -361,7 +362,7 @@ export async function openRecordingKeepService(
 				throw unavailable()
 			}
 			unprotect(key)
-			invalidate()
+			invalidate(inventoryId)
 			log.info({ kept: protecting.size }, "Recording unkept")
 			return { id: inventoryId, kept: false, changed: true }
 		})
@@ -419,7 +420,7 @@ export async function openRecordingKeepService(
 			})
 		} finally {
 			clearDeleting(key)
-			invalidate()
+			invalidate(inventoryId)
 		}
 	}
 

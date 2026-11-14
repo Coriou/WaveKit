@@ -4,6 +4,7 @@ import {
 	RECORDINGS_CURSOR_MAX_LENGTH,
 	RECORDINGS_PAGE_LIMIT_DEFAULT,
 	RECORDINGS_PAGE_LIMIT_MAX,
+	RECORDINGS_QUERY_TEXT_MAX,
 } from "@wavekit/api-types"
 import type {
 	RecordingInventoryItem,
@@ -26,6 +27,16 @@ export interface NormalisedQuery {
 	cursor: CursorValue | null
 	kind: RecordingInventoryKind | null
 	decoderId: string | null
+	kept: boolean | null
+	discoveryId: string | null
+	talkgroup: string | null
+	source: string | null
+	minHz: number | null
+	maxHz: number | null
+	sinceMs: number | null
+	untilMs: number | null
+	/** Lower-cased. */
+	q: string | null
 }
 
 const CursorSchema = z
@@ -67,15 +78,68 @@ export function decodeCursor(s: string): CursorValue | null {
 	}
 }
 
-const QUERY_KEYS = new Set(["limit", "cursor", "kind", "decoderId"])
+const QUERY_KEYS = new Set([
+	"limit",
+	"cursor",
+	"kind",
+	"decoderId",
+	"kept",
+	"discoveryId",
+	"talkgroup",
+	"source",
+	"minHz",
+	"maxHz",
+	"since",
+	"until",
+	"q",
+])
 
-export function parseInventoryQuery(raw: unknown): NormalisedQuery | null {
-	const q: NormalisedQuery = {
+/** A scanner discovery id (as SCANNER_DISCOVERY_ID), at most 64 characters. */
+const DISCOVERY_ID = /^d_[0-9A-Za-z]{1,62}$/
+const DIGITS = /^\d{1,12}$/
+/** ISO-8601 with a zone: `2026-11-14T10:00:00Z`, optional fraction, `Z` or `±hh:mm`. */
+const ISO_ZONED =
+	/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/
+/** Hz up to 1e12 (well past any receiver), integer, one value. */
+const HZ_MAX = 1_000_000_000_000
+
+function parseHz(v: unknown): number | null | undefined {
+	if (v === undefined) return undefined
+	let n: number
+	if (typeof v === "number") n = v
+	else if (typeof v === "string" && /^\d{1,13}$/.test(v)) n = Number(v)
+	else return null
+	return Number.isSafeInteger(n) && n >= 0 && n <= HZ_MAX ? n : null
+}
+
+function parseTime(v: unknown): number | null | undefined {
+	if (v === undefined) return undefined
+	if (typeof v !== "string" || !ISO_ZONED.test(v)) return null
+	const ms = Date.parse(v)
+	return Number.isFinite(ms) ? ms : null
+}
+
+/** The query with no parameter: the default page size, no cursor, no filter. */
+export function defaultInventoryQuery(): NormalisedQuery {
+	return {
 		limit: RECORDINGS_PAGE_LIMIT_DEFAULT,
 		cursor: null,
 		kind: null,
 		decoderId: null,
+		kept: null,
+		discoveryId: null,
+		talkgroup: null,
+		source: null,
+		minHz: null,
+		maxHz: null,
+		sinceMs: null,
+		untilMs: null,
+		q: null,
 	}
+}
+
+export function parseInventoryQuery(raw: unknown): NormalisedQuery | null {
+	const q: NormalisedQuery = defaultInventoryQuery()
 	if (raw === undefined || raw === null) return q
 	if (typeof raw !== "object" || Array.isArray(raw)) return null
 	const obj = raw as Record<string, unknown>
@@ -124,30 +188,82 @@ export function parseInventoryQuery(raw: unknown): NormalisedQuery | null {
 			return null
 		q.decoderId = decoderId
 	}
+	const kept = get("kept")
+	if (kept !== undefined) {
+		if (kept === true || kept === "true") q.kept = true
+		else if (kept === false || kept === "false") q.kept = false
+		else return null
+	}
+	const discoveryId = get("discoveryId")
+	if (discoveryId !== undefined) {
+		if (typeof discoveryId !== "string" || !DISCOVERY_ID.test(discoveryId))
+			return null
+		q.discoveryId = discoveryId
+	}
+	for (const key of ["talkgroup", "source"] as const) {
+		const v = get(key)
+		if (v === undefined) continue
+		if (typeof v !== "string" || !DIGITS.test(v)) return null
+		q[key] = v
+	}
+	const minHz = parseHz(get("minHz"))
+	const maxHz = parseHz(get("maxHz"))
+	if (minHz === null || maxHz === null) return null
+	if (minHz !== undefined) q.minHz = minHz
+	if (maxHz !== undefined) q.maxHz = maxHz
+	const since = parseTime(get("since"))
+	const until = parseTime(get("until"))
+	if (since === null || until === null) return null
+	if (since !== undefined) q.sinceMs = since
+	if (until !== undefined) q.untilMs = until
+	const text = get("q")
+	if (text !== undefined) {
+		if (
+			typeof text !== "string" ||
+			text.trim().length < 1 ||
+			text.length > RECORDINGS_QUERY_TEXT_MAX
+		)
+			return null
+		q.q = text.trim().toLowerCase()
+	}
 	return q
 }
 
-export function paginate(
-	sorted: readonly InventoryEntry[],
+/** True when `e` sorts strictly after the cursor (it belongs to a later page). */
+export function afterCursor(e: InventoryEntry, c: CursorValue | null): boolean {
+	return c === null || cmp(e.mtimeMs, e.item.id, c.m, c.i) > 0
+}
+
+/**
+ * One page of `sorted` (newest first): entries after the cursor that pass `keep` (default: the
+ * kind and decoderId filters), at most `q.limit`, and the cursor of the next page.
+ */
+export function paginate<E extends InventoryEntry>(
+	sorted: readonly E[],
 	q: NormalisedQuery,
-): { items: RecordingInventoryItem[]; nextCursor: string | null } {
-	const items: RecordingInventoryItem[] = []
-	let last: InventoryEntry | null = null
+	keep: (e: E) => boolean = e =>
+		(q.kind === null || e.item.kind === q.kind) &&
+		(q.decoderId === null || e.item.decoderId === q.decoderId),
+): {
+	entries: E[]
+	items: RecordingInventoryItem[]
+	nextCursor: string | null
+} {
+	const entries: E[] = []
 	let more = false
 	for (const e of sorted) {
-		if (q.kind !== null && e.item.kind !== q.kind) continue
-		if (q.decoderId !== null && e.item.decoderId !== q.decoderId) continue
-		if (q.cursor && cmp(e.mtimeMs, e.item.id, q.cursor.m, q.cursor.i) <= 0)
-			continue
-		if (items.length >= q.limit) {
+		if (!afterCursor(e, q.cursor)) continue
+		if (!keep(e)) continue
+		if (entries.length >= q.limit) {
 			more = true
 			break
 		}
-		items.push(e.item)
-		last = e
+		entries.push(e)
 	}
+	const last = entries[entries.length - 1]
 	return {
-		items,
+		entries,
+		items: entries.map(e => e.item),
 		nextCursor:
 			more && last ? encodeCursor({ m: last.mtimeMs, i: last.item.id }) : null,
 	}

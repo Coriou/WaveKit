@@ -164,6 +164,24 @@ describe("recording search", () => {
 		)
 	})
 
+	it("matches typed text on what the row shows, never the id or the size", () => {
+		const near = scan({
+			id: "scan:d_01K446ABC~analog-4466a0b1-446c.wav",
+			discoveryId: "d_01K446ABC",
+			frequencyHz: 466_012_500,
+			bytes: 446_000,
+		})
+		const hit = scan({
+			id: "scan:d_02X~analog-2.wav",
+			frequencyHz: 446_006_250,
+		})
+		const list = [near, hit]
+		expect(list.filter(r => matchesAll(r, [], "446")).map(r => r.id)).toEqual([
+			hit.id,
+		])
+		expect(list.filter(r => matchesAll(r, [], "466.01"))).toEqual([near])
+	})
+
 	it("hides deleting rows and shows only kept ones under Kept", () => {
 		const list = [
 			call({ id: "a", kept: true }),

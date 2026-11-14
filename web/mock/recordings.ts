@@ -335,10 +335,33 @@ export function registerRecordingsMock(
 			cursor?: string
 			kind?: string
 			decoderId?: string
+			kept?: string
+			discoveryId?: string
+			talkgroup?: string
+			source?: string
+			minHz?: string
+			maxHz?: string
+			since?: string
+			until?: string
+			q?: string
 		}
 	}>("/api/recordings", async (request, reply) => {
 		const q = request.query
-		const known = new Set(["limit", "cursor", "kind", "decoderId"])
+		const known = new Set([
+			"limit",
+			"cursor",
+			"kind",
+			"decoderId",
+			"kept",
+			"discoveryId",
+			"talkgroup",
+			"source",
+			"minHz",
+			"maxHz",
+			"since",
+			"until",
+			"q",
+		])
 		const invalid = () =>
 			error(
 				reply,
@@ -368,11 +391,33 @@ export function registerRecordingsMock(
 				return invalid()
 			}
 		}
-		let list = sorted().filter(
+		if (q.kept !== undefined && q.kept !== "true" && q.kept !== "false")
+			return invalid()
+		const text = q.q?.trim().toLowerCase()
+		const minHz = q.minHz === undefined ? null : Number(q.minHz)
+		const maxHz = q.maxHz === undefined ? null : Number(q.maxHz)
+		const all = sorted()
+		let list = all.filter(
 			r =>
 				(q.kind === undefined || r.kind === q.kind) &&
-				(q.decoderId === undefined || r.decoderId === q.decoderId),
+				(q.decoderId === undefined || r.decoderId === q.decoderId) &&
+				(q.kept === undefined || (r.kept === true) === (q.kept === "true")) &&
+				(q.discoveryId === undefined || r.discoveryId === q.discoveryId) &&
+				(q.talkgroup === undefined || r.talkgroup === q.talkgroup) &&
+				(q.source === undefined || r.source === q.source) &&
+				(minHz === null || (r.frequencyHz ?? -1) >= minHz) &&
+				(maxHz === null ||
+					(r.frequencyHz !== null && r.frequencyHz <= maxHz)) &&
+				(q.since === undefined || r.modifiedAt >= q.since) &&
+				(q.until === undefined || r.modifiedAt <= q.until) &&
+				(text === undefined ||
+					`${r.talkgroup ?? ""} ${r.source ?? ""} ${r.decoderId ?? ""} ${r.kind} ${
+						r.frequencyHz === null ? "" : String(r.frequencyHz / 1e6)
+					}`
+						.toLowerCase()
+						.includes(text)),
 		)
+		const matched = list.length
 		if (after) {
 			const a = after
 			list = list.filter(
@@ -392,6 +437,20 @@ export function registerRecordingsMock(
 			scannedFiles: recs.size,
 			truncated: false,
 			scannedAt: new Date(now()).toISOString(),
+			revision: recs.size,
+			indexing: false,
+			matched,
+			counts: {
+				total: all.length,
+				kept: all.filter(r => r.kept === true).length,
+				bytes: all.reduce((n, r) => n + r.bytes, 0),
+				byKind: {
+					"dsd-fme-call": all.filter(r => r.kind === "dsd-fme-call").length,
+					"scanner-dv": all.filter(r => r.kind === "scanner-dv").length,
+					"scanner-analog": all.filter(r => r.kind === "scanner-analog").length,
+				},
+			},
+			truncatedBefore: null,
 		}
 		return reply.header("Cache-Control", "no-store").send(page)
 	})

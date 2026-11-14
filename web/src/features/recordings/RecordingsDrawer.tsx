@@ -414,8 +414,7 @@ function List({
 			)}
 			{truncated && (
 				<p className="wkr-note">
-					Only the newest files are listed: the core reads at most 2 000 per
-					scan.
+					Only the newest 2 000 recordings are listed here.
 				</p>
 			)}
 			{visible.length === 0 ? (

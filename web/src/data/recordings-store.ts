@@ -22,7 +22,10 @@ import type { ApiClient } from "./api-client.ts"
 import { ApiError, errorMessage } from "./api-client.ts"
 import { Store } from "./store.ts"
 
-/** Pages read per refresh: the core scans at most RECORDINGS_SCAN_MAX_FILES files. */
+/**
+ * Pages read per refresh: the newest RECORDINGS_SCAN_MAX_FILES recordings (the core lists
+ * newest first; more beyond this read count as truncated here).
+ */
 const MAX_PAGES = Math.ceil(
 	RECORDINGS_SCAN_MAX_FILES / RECORDINGS_PAGE_LIMIT_MAX,
 )
@@ -234,7 +237,9 @@ export class RecordingsStore extends Store<RecordingsState> {
 				if (!isPage(body))
 					throw new Error(`Unexpected answer from ${RECORDINGS_ROUTE}`)
 				for (const item of body.items) if (isItem(item)) items.push(item)
-				truncated = body.truncated === true
+				truncated =
+					body.truncated === true ||
+					(page === MAX_PAGES - 1 && body.nextCursor !== null)
 				scannedAt = typeof body.scannedAt === "string" ? body.scannedAt : null
 				cursor = body.nextCursor
 				// the first page shows at once on the first load

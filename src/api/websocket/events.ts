@@ -75,6 +75,8 @@ import type {
  * - vessels: AIS vessel current state (new, update, lost, stats), WG1
  * - aprs: APRS station, object and item current state (new, update, lost, stats), WG2
  * - mesh: Meshtastic node current state (new, update, lost, stats), WG2
+ * - recordings: `recordings:changed` `{revision, added, removed, changed, indexing}` (counts only,
+ *   at most 1/s), protected mode only; clients refetch the list
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -94,6 +96,7 @@ export type WebSocketChannel =
 	| "vessels"
 	| "aprs"
 	| "mesh"
+	| "recordings"
 
 /**
  * Message sent from client to server. `options` carries per-channel subscribe
@@ -165,6 +168,7 @@ interface ExistingServerMessage {
 		| "scanner:monitor"
 		| "scanner:identify"
 		| "scanner:status"
+		| "recordings:changed"
 		| "spectrum:frame"
 		| "spectrum:profile"
 		| "decoder:created"
@@ -233,7 +237,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "bandplans" ||
 		channel === "vessels" ||
 		channel === "aprs" ||
-		channel === "mesh"
+		channel === "mesh" ||
+		channel === "recordings"
 	)
 }
 
@@ -303,6 +308,7 @@ export class WebSocketEventBroadcaster {
 	private maintenanceTimer: ReturnType<typeof setInterval> | undefined
 	private readonly observers = new Map<WebSocketChannel, ChannelObserver>()
 	private operatorDataEnabled = false
+	private recordingsEnabled = false
 	private subscriptionAdmissionStopped = false
 	private activityHub: ActivitySubscriptionHub | undefined
 
@@ -492,7 +498,9 @@ export class WebSocketEventBroadcaster {
 	): void {
 		if (!this.currentClient(client) || this.subscriptionAdmissionStopped) return
 		const activeChannels = channels.filter(
-			channel => channel !== "operator-data" || this.operatorDataEnabled,
+			channel =>
+				(channel !== "operator-data" || this.operatorDataEnabled) &&
+				(channel !== "recordings" || this.recordingsEnabled),
 		)
 		for (const channel of activeChannels) {
 			client.subscriptions.add(channel)
@@ -801,6 +809,14 @@ export class WebSocketEventBroadcaster {
 	/** Called only by the protected operator mount before listener startup. */
 	enableOperatorDataChannel(): void {
 		this.operatorDataEnabled = true
+	}
+
+	/**
+	 * Protected mode only, where the recordings routes are mounted: until called, a `recordings`
+	 * subscription is ignored (legacy mode never carries recordings notices).
+	 */
+	enableRecordingsChannel(): void {
+		this.recordingsEnabled = true
 	}
 
 	/** Seal new subscriptions while current output remains live during drain. */

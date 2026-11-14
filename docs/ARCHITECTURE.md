@@ -459,6 +459,18 @@ Signal discovery: finds activity on a source, confirms it with a probe decode, a
 
 **Decoder hold:** while a sweep holds a source, every configured decoder on it reports `suspended: true` with `suspension.reasonCode: "tuner-scanning"`, ahead of rate and band checks, and a manual start answers 409 `SOURCE_HELD_BY_SCANNER`. Scanner probes are exempt and appear as `owner: "scanner"`, `ephemeral: true` decoders (`decoder:created` / `decoder:removed`).
 
+### Recordings catalogue
+
+`src/core/recordings/inventory.ts` serves `GET /api/recordings` from an in-memory catalogue of the
+dsd-fme call recordings and the scanner recording folders, so a listing makes no filesystem call
+once warm. It is built in the background at start (scanner folders newest change first; listings
+answer `indexing: true` meanwhile), then kept current by targeted re-checks: scanner `discovery`
+events whose recording count changed, merges and deletions, ended digital-voice calls
+(`src/core/recordings/catalogue-wiring.ts`, wired in `src/index.ts`) and Keep or delete through
+`invalidate(id)`. A paced reconcile re-reads one folder at a time for anything else. Every indexed
+file passed the download's verification when it was indexed; `open(id)` verifies again at request
+time. At most 50 000 entries, newest first; past it only the oldest are left out.
+
 ### Dynamic Sample Rate Handling
 
 Sample rate changes, whether made through the API (the web app) or by a TunerRelay client such
