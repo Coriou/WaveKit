@@ -47,7 +47,7 @@ import {
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
-import type { VoicePrior } from "../channel/recording-verdict.js"
+import { FSK_CLASSES, type VoicePrior } from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
 import {
@@ -4058,7 +4058,8 @@ export class DiscoveryStore
 	 * DQ_CO_CHANNEL_MAX (8) live co-channel discoveries, the owner's stored class, and a lazy read of
 	 * analog voice heard on them: an `analog-tone` or `analog-voice` proof of any of their
 	 * observations (cached per observation; at most 9 × OBSERVATIONS_PER_DISCOVERY 256 = 2 304
-	 * reads, only when asked). Undefined for a folder nobody owns. Reads only.
+	 * reads, only when asked), and a lazy count of the owner's class votes (FSK_CLASSES among them;
+	 * at most OBSERVATIONS_PER_DISCOVERY). Undefined for a folder nobody owns. Reads only.
 	 */
 	voicePrior(folderId: string): VoicePrior | undefined {
 		const owner = this.folderOwner(folderId)
@@ -4092,6 +4093,17 @@ export class DiscoveryStore
 			id: d.id,
 			labels,
 			class: d.class,
+			classVotes: () => {
+				let fsk = 0
+				let total = 0
+				for (const o of this.byDiscovery.get(d.id) ?? []) {
+					const vote = voteOf(o)
+					if (vote === undefined) continue
+					total++
+					if (FSK_CLASSES.has(vote)) fsk++
+				}
+				return { fsk, total }
+			},
 			analogVoice: () =>
 				ids.some(id =>
 					(this.byDiscovery.get(id) ?? []).some(o => {

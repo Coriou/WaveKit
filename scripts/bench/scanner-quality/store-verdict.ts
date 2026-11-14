@@ -14,8 +14,12 @@
  *   an analog voice proof (live audio heard voice), a DMR over (decoded) follows, then analog overs
  *   and DMR overs (each decoded, keying up 4 s after the analog over, inside its grace) alternate.
  *   Expected: every analog over kept.
- * - shared: the same with no analog proof at all (a PMR446 channel shared with DMR446).
- *   Expected: every analog over kept.
+ * - shared: the same with no analog proof at all (a PMR446 channel shared with DMR446). The
+ *   owner's DMR decode and its FSK class votes (half its overs) make it a digital channel
+ *   (recording-verdict.ts, PriorStrength): an over without CTCSS is a shadow until analog voice
+ *   is proven on it. Expected: the first analog over (before the decode) kept, the others not.
+ * - shared-late-proof: the same, identify hearing the second analog over as voice once it ended
+ *   (an analog voice proof). Expected: that over is lost, every one after it kept.
  * - pager-stored-analog-fm: three 2FSK bursts (1 200 Bd, ±4.5 kHz) whose snapshots read analog-fm,
  *   20 s apart; identify's POCSAG decode of each lands DECODE_AT_S = 8 s after its onset, citing
  *   it. The store's class of the channel is analog-fm too. Expected: bursts 2 and 3 never written;
@@ -241,21 +245,26 @@ function report(r: Rig, scene: string, extra: Record<string, unknown>) {
 	}
 }
 
-async function mixed(proof: boolean): Promise<Record<string, unknown>> {
+const heard = (at: number) =>
+	({
+		outcome: "heard",
+		mode: "nfm",
+		voice: true,
+		tone: { ctcssHz: null, dcs: null },
+		transport: "live",
+		at,
+	}) as const
+
+async function mixed(
+	proof: "before" | "none" | "late",
+): Promise<Record<string, unknown>> {
 	const r = rig()
 	let proofRecorded = false
 	await quiet(r, 1)
-	if (proof) {
+	if (proof === "before") {
 		// An earlier analog over that live audio heard as voice (an analog voice proof).
 		ingest(r, "proof", "analog-fm", 3)
-		proofRecorded = r.store.recordAnalog("proof", {
-			outcome: "heard",
-			mode: "nfm",
-			voice: true,
-			tone: { ctcssHz: null, dcs: null },
-			transport: "live",
-			at: r.h.now(),
-		})
+		proofRecorded = r.store.recordAnalog("proof", heard(r.h.now()))
 	}
 	// The channel's first transmission is DMR, decoded.
 	await transmission(r, "d0", 3, "dmr")
@@ -264,6 +273,8 @@ async function mixed(proof: boolean): Promise<Record<string, unknown>> {
 	const voices = [5, 8, 4, 6]
 	for (let k = 0; k < voices.length; k++) {
 		await transmission(r, `v${k}`, voices[k]!, "voice")
+		if (proof === "late" && k === 1)
+			proofRecorded = r.store.recordAnalog("v1", heard(r.h.now()))
 		// A DMR user keys up within the analog file's grace.
 		await quiet(r, 4)
 		if (k < 3) {
@@ -278,7 +289,8 @@ async function mixed(proof: boolean): Promise<Record<string, unknown>> {
 		o => o.outcome === "finalized" && o.input.observationId.startsWith("v"),
 	).length
 	const id = r.store.discoveryIdOf("v0")
-	return report(r, proof ? "mixed" : "shared", {
+	const scene = { before: "mixed", none: "shared", late: "shared-late-proof" }
+	return report(r, scene[proof], {
 		proofRecorded,
 		analogVoiceHeard:
 			id === undefined ? null : priorOf(r.store, id)?.analogVoice(),
@@ -376,11 +388,12 @@ async function lpdIsm(): Promise<Record<string, unknown>> {
 }
 
 for (const scene of [
-	() => mixed(true),
-	() => mixed(false),
+	() => mixed("before"),
+	() => mixed("none"),
 	() => pager("analog-fm"),
 	() => pager("fsk2-wide"),
 	lpdIsm,
 	...[6, 9, 10, 20, 30].map(spacing => () => pagerSequence(spacing)),
+	() => mixed("late"),
 ].filter((_, i) => scenes === null || scenes.includes(i)))
 	process.stdout.write(`${JSON.stringify(await scene())}\n`)

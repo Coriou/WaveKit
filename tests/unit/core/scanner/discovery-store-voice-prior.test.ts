@@ -115,6 +115,62 @@ describe("DiscoveryStore.voicePrior", () => {
 		}
 	})
 
+	describe("classVotes: the owner's class votes, FSK among them", () => {
+		const voted = (
+			id: string,
+			startedAt: number,
+			cls: "fsk4-12k5" | "gmsk-narrow" | "analog-fm",
+		) =>
+			makeObs({ id, centreHz: CH, startedAt, cls, open: false, gate: "passed" })
+		/** Six overs, `fsk` of them 4FSK and the rest `other`; a sync hint (no identity) on the first. */
+		function channel(
+			store: DiscoveryStore,
+			fsk: number,
+			other: "gmsk-narrow" | "analog-fm",
+		): string {
+			let id = ""
+			for (let k = 0; k < 6; k++)
+				id =
+					store.ingest(
+						voted(`o${k}`, T0 + k * 10_000, k < fsk ? "fsk4-12k5" : other),
+					).discoveryId ?? id
+			const ev = evidence("dmr", T0 + 500)
+			expect(store.appendObservationEvidence("o0", ev)).toBe(true)
+			store.applyEvidence(id, ev)
+			return store.discoveryIdOf("o0") ?? id
+		}
+
+		it("a sync hint of the owner on a 4FSK channel with no analog proof: tone required, hours later too", () => {
+			const store = newStore()
+			const id = channel(store, 6, "analog-fm")
+			const prior = store.voicePrior(id) ?? null
+			expect(prior?.labels).toContainEqual(
+				expect.objectContaining({ protocol: "dmr", owner: true }),
+			)
+			expect(prior?.classVotes?.()).toEqual({ fsk: 6, total: 6 })
+			expect(admissionVerdict(prior, false, T0 + 5 * 60 * 60_000)).toBe(
+				"tone-required",
+			)
+		})
+
+		it("GMSK votes are not FSK: a channel read gmsk-narrow stays suspect", () => {
+			const store = newStore()
+			const id = channel(store, 1, "gmsk-narrow")
+			const prior = store.voicePrior(id) ?? null
+			expect(prior?.classVotes?.()).toEqual({ fsk: 1, total: 6 })
+			expect(readPrior(prior, false, T0)).toBe("suspect")
+		})
+
+		it("FROZEN: an analog tone heard on that channel keeps recording", () => {
+			const store = newStore()
+			const id = channel(store, 6, "analog-fm")
+			expect(store.recordAnalog("o5", tone(T0 + 60_000))).toBe(true)
+			expect(
+				admissionVerdict(store.voicePrior(id) ?? null, false, T0 + 60_000),
+			).toBeNull()
+		})
+	})
+
 	it("a discovery with no decode reads no non-voice prior", () => {
 		const store = newStore()
 		const id = store.ingest(obs("v", T0)).discoveryId ?? ""

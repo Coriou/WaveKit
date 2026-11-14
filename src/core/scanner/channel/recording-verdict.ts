@@ -166,6 +166,8 @@ export function fileDecodedOwn(
  * `analogVoice` reads whether analog voice was heard on the channel (an analog tone or analog
  * voice proof of any of those observations, or an analog label at `classified` or more); it walks
  * up to 9 × 256 cached proofs, so it is asked only when a digital prior would otherwise apply.
+ * `classVotes` (absent: none) counts the owner's observations that voted a class (`total`) and
+ * those that voted an FSK class (`fsk`, FSK_CLASSES); asked only for an owner's digital label.
  */
 export interface VoicePrior {
 	readonly id?: string
@@ -177,6 +179,7 @@ export interface VoicePrior {
 	}[]
 	readonly class: ScannerClass
 	analogVoice(): boolean
+	classVotes?(): { readonly fsk: number; readonly total: number }
 }
 
 /**
@@ -188,6 +191,11 @@ export interface VoicePrior {
  *   recording while the prior was strong, is a shadow that writes nothing unless its own audio
  *   carries speech over a CTCSS tone (the recorder's classByTone); it is never a remembered
  *   refusal.
+ *   Also STRONG, with no time limit (digitalChannel): a digital label of the owner itself (a
+ *   digital voice decode or dsd-fme sync hint, or `digital-unknown` from data-like audio) while
+ *   at least DIGITAL_CHANNEL_MIN_SHARE of the owner's class votes (DIGITAL_CHANNEL_MIN_VOTES or
+ *   more) read an FSK class: a channel its own spectrum and its own decoder both call digital,
+ *   with no analog proof anywhere on it, is not untoned voice. Any analog proof or label ends it.
  * - `suspect`: WEAK. A digital voice decode (DMR, NXDN, YSF, dPMR, ...) on the owner or a
  *   co-channel discovery: the store keeps analog and digital overs of one channel in one
  *   discovery (a lone merge) as readily as in two, and PMR446 and DMR446, mixed-mode repeaters
@@ -249,6 +257,49 @@ function strongLabel(l: VoicePrior["labels"][number], now: number): boolean {
 	)
 }
 
+/**
+ * The FSK classes a digital channel's spectrum reads (digitalChannel): 4FSK at either width, TDMA
+ * and wide 2FSK. Not GMSK: a weak NFM voice reads gmsk-narrow, and D-STAR is no PMR mode.
+ */
+export const FSK_CLASSES: ReadonlySet<ScannerClass> = new Set([
+	"fsk4-12k5",
+	"fsk4-6k25",
+	"tdma-ms",
+	"fsk2-wide",
+])
+/** The FSK share of the owner's class votes a digital channel needs (digitalChannel): 1 / 3. */
+export const DIGITAL_CHANNEL_MIN_SHARE = 1 / 3
+/** Class votes of the owner a digital channel needs (digitalChannel) before its share counts. */
+export const DIGITAL_CHANNEL_MIN_VOTES = 4
+
+/**
+ * A digital channel (PriorStrength's strong, undated): a digital label of the owner (family
+ * digital voice, or `digital-unknown`), at any confidence, and an FSK share of its class votes at
+ * least DIGITAL_CHANNEL_MIN_SHARE over DIGITAL_CHANNEL_MIN_VOTES or more. A throwing or absent
+ * vote read: not one.
+ */
+function digitalChannel(prior: VoicePrior): boolean {
+	if (
+		!prior.labels.some(
+			l =>
+				l.owner &&
+				(l.protocol === "digital-unknown" ||
+					familyOf(l.protocol) === "digital-voice"),
+		)
+	)
+		return false
+	try {
+		const v = prior.classVotes?.()
+		return (
+			v !== undefined &&
+			v.total >= DIGITAL_CHANNEL_MIN_VOTES &&
+			v.fsk >= DIGITAL_CHANNEL_MIN_SHARE * v.total
+		)
+	} catch {
+		return false
+	}
+}
+
 function weakDigital(prior: VoicePrior, now: number): boolean {
 	if (digitalClass(prior.class)) return true
 	return prior.labels.some(
@@ -267,7 +318,9 @@ export function readPrior(
 	backedClass: boolean,
 	now: number,
 ): PriorStrength {
-	const strong = prior?.labels.some(l => strongLabel(l, now)) === true
+	const strong =
+		prior !== null &&
+		(prior.labels.some(l => strongLabel(l, now)) || digitalChannel(prior))
 	if (!strong && !backedClass && (prior === null || !weakDigital(prior, now)))
 		return "none"
 	if (prior !== null && analogVoiceHeard(prior)) return "none"

@@ -43,12 +43,17 @@ const refusals = (h: Harness): string[] =>
 	(h.rec.diagnostics().recentRefusals ?? []).map(d => d.code)
 
 function prior(
-	p: Partial<Omit<VoicePrior, "analogVoice">> & { analogVoice?: boolean },
+	p: Partial<Omit<VoicePrior, "analogVoice" | "classVotes">> & {
+		analogVoice?: boolean
+		votes?: { fsk: number; total: number }
+	},
 ): VoicePrior {
+	const votes = p.votes
 	return {
 		labels: p.labels ?? [],
 		class: p.class ?? "unknown",
 		analogVoice: () => p.analogVoice ?? false,
+		...(votes ? { classVotes: () => votes } : {}),
 	}
 }
 
@@ -205,6 +210,154 @@ describe("admission: a strong prior admits only a shadow its own audio must clas
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 	}, 120_000)
+})
+
+describe("a digital channel: the owner's own digital proof, FSK class votes, no analog proof", () => {
+	// Synthetic: a dsd-fme sync hint of the owner five hours old, most class votes 4FSK.
+	const hoursAgo = HARNESS_T0 - 5 * 60 * 60_000
+	const syncHint = label("dmr", true, "activity", hoursAgo)
+	const digital = (more: Parameters<typeof prior>[0] = {}) =>
+		prior({
+			labels: [syncHint],
+			class: "fsk4-12k5",
+			votes: { fsk: 200, total: 240 },
+			...more,
+		})
+
+	it("an old sync hint and a 4FSK channel: a later analog-fm over without a tone is a shadow, discarded as known non-voice", async () => {
+		const h = low(() => digital())
+		await h.feed(1, false)
+		await over(h, "o", 4)
+		await h.rec.idle()
+		expect(h.ops).toHaveLength(0)
+		expect(codes(h)).toEqual(["shadow", "voiced", "discarded:known-non-voice"])
+		expect(refusals(h)).not.toContain("refused:not-analog")
+	}, 120_000)
+
+	it("FROZEN: speech over a CTCSS tone on that channel is classed by its own audio and kept", async () => {
+		const h = low(() => digital(), 88.5, { syllables: true })
+		await h.feed(1, false)
+		await over(h, "o", 6)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		expect(codes(h)).toEqual(["shadow", "voiced", "classed", "finalized"])
+	}, 120_000)
+
+	it("FROZEN: an analog proof on the channel (a mixed PMR channel) keeps the untoned voice at once", async () => {
+		const h = low(() => digital({ analogVoice: true }))
+		await h.feed(1, false)
+		await over(h, "o", 5)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		expect(h.timers).toHaveLength(0)
+	}, 120_000)
+
+	it("a decoded DMR label of the owner counts alike", async () => {
+		const h = low(() =>
+			digital({ labels: [label("dmr", true, "decoded", hoursAgo)] }),
+		)
+		await h.feed(1, false)
+		await over(h, "o", 4)
+		await h.rec.idle()
+		expect(h.ops).toHaveLength(0)
+		expect(codes(h)).toContain("discarded:known-non-voice")
+	}, 120_000)
+
+	it("an analog-fm stored class with a third of its votes FSK and the owner's sync hint (analog-read DMR): a shadow, discarded", async () => {
+		const h = low(() =>
+			digital({ class: "analog-fm", votes: { fsk: 120, total: 250 } }),
+		)
+		await h.feed(1, false)
+		await over(h, "o", 4)
+		await h.rec.idle()
+		expect(h.ops).toHaveLength(0)
+		expect(codes(h)).toContain("discarded:known-non-voice")
+	}, 120_000)
+
+	// A2: a DMR sync hint (digital-undecoded) on a 4FSK channel; A3: a digital-unknown candidate
+	// (data-like audio, digital-undecoded) on a wide 2FSK channel. Neither ever had an analog proof.
+	for (const [name, base] of [
+		["A2: a DMR sync hint, class fsk4-12k5", digital()],
+		[
+			"A3: a digital-unknown candidate, class fsk2-wide",
+			digital({
+				labels: [label("digital-unknown", true, "candidate", hoursAgo)],
+				class: "fsk2-wide",
+			}),
+		],
+	] as const) {
+		it(`${name}: an untoned over is a shadow, discarded as known non-voice`, async () => {
+			const h = low(() => base)
+			await h.feed(1, false)
+			await over(h, "o", 4)
+			await h.rec.idle()
+			expect(h.ops).toHaveLength(0)
+			expect(codes(h)).toEqual([
+				"shadow",
+				"voiced",
+				"discarded:known-non-voice",
+			])
+		}, 120_000)
+
+		it(`FROZEN: ${name}: an analog proof on the channel keeps the untoned voice at once`, async () => {
+			const h = low(() => ({ ...base, analogVoice: () => true }))
+			await h.feed(1, false)
+			await over(h, "o", 5)
+			await h.rec.idle()
+			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+			expect(h.timers).toHaveLength(0)
+		}, 120_000)
+
+		it(`FROZEN: ${name}: speech over its own CTCSS tone is kept`, async () => {
+			const h = low(() => base, 88.5, { syllables: true })
+			await h.feed(1, false)
+			await over(h, "o", 6)
+			await h.rec.idle()
+			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+			expect(codes(h)).toEqual(["shadow", "voiced", "classed", "finalized"])
+		}, 120_000)
+	}
+
+	for (const [name, p] of [
+		[
+			"no digital proof of the owner (a 4FSK class from spectral votes alone)",
+			prior({ class: "fsk4-12k5", votes: { fsk: 170, total: 256 } }),
+		],
+		[
+			"the sync hint on a co-channel discovery only",
+			prior({
+				labels: [label("dmr", false, "activity", hoursAgo)],
+				class: "fsk4-12k5",
+				votes: { fsk: 200, total: 240 },
+			}),
+		],
+		[
+			"under a third of the owner's votes FSK",
+			prior({
+				labels: [syncHint],
+				class: "analog-fm",
+				votes: { fsk: 70, total: 240 },
+			}),
+		],
+		[
+			"fewer than DIGITAL_CHANNEL_MIN_VOTES class votes",
+			prior({
+				labels: [syncHint],
+				class: "fsk4-12k5",
+				votes: { fsk: 3, total: 3 },
+			}),
+		],
+	] as const)
+		it(`FROZEN: ${name}: suspect only, the untoned voice is held, then kept`, async () => {
+			const h = low(() => p)
+			await h.feed(1, false)
+			await over(h, "o", 5)
+			expect(h.ops).toHaveLength(1)
+			expect(h.timers.map(t => t.ms)).toEqual([LATE_VERDICT_GRACE_MS])
+			await h.fire()
+			await h.rec.idle()
+			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		}, 120_000)
 })
 
 describe("frozen voice: weak or mixed priors never lose a voice", () => {
