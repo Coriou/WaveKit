@@ -12,6 +12,7 @@
  *     --outfile=output/bench/scanner-quality.mjs
  *   node output/bench/scanner-quality.mjs [--scene NAME] [--seed N] [--unbounded-captures]
  *   node output/bench/scanner-quality.mjs --file <capture.cu8> --rate <Hz> --centre <Hz> [--seconds S]
+ *   node output/bench/scanner-quality.mjs --truth <labels dir|synthetic> [...]
  *
  * Scenes: small, full, gfsk (one GFSK burst transmitter, ground truth 1 discovery), and the
  * false-discovery scenes noise-1024k, noise-2400k, spurs-1024k, spurs-2400k (120 s each, nothing
@@ -28,7 +29,9 @@
  * per source per minute, a 2 s ring); --unbounded-captures grants every request instead.
  *
  * --file replays a CU8 capture (the first seconds feed the lead-in while the passive job starts)
- * and prints counts only: there is no ground truth, so nothing is scored. Nothing listens on the
+ * and prints counts only: there is no ground truth, so nothing is scored. --truth <dir|synthetic>
+ * is the truth scorecard: labelled captures and synthetic truth scenes with the analog recorder in
+ * the loop, scored for false and missed voice and identify verdicts (scanner-quality/truth-cli.ts). Nothing listens on the
  * network; the scanner state lives in a temp dir removed at the end.
  */
 import { closeSync, openSync, readSync } from "node:fs"
@@ -41,6 +44,7 @@ import {
 	DQ_REPEAT_WINDOW_MS,
 } from "../../src/core/scanner/detection-quality-contract.js"
 import { runScanner, type IqChunkSource } from "./scanner-quality/harness.js"
+import { runTruthCli } from "./scanner-quality/truth-cli.js"
 import {
 	formatReport,
 	formatRetuned,
@@ -282,6 +286,10 @@ function fileSource(
 }
 
 async function main(): Promise<void> {
+	if (process.argv.includes("--truth")) {
+		process.exitCode = await runTruthCli(process.argv.slice(2))
+		return
+	}
 	const file = arg("file")
 	if (file !== undefined) {
 		const rate = num("rate")

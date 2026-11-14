@@ -1,0 +1,16 @@
+{
+	"version": 1,
+	"limits": {
+		"falseVoice": { "max": 3 },
+		"digitalKeptAsVoice": { "max": 2 },
+		"missedVoice": { "max": 1 },
+		"splitVoice": { "max": 0 },
+		"identifyWrong": { "max": 0 },
+		"ioOverruns": { "max": 0 }
+	},
+	"notes": {
+		"digitalKeptAsVoice": "2 known limits: the synthetic DMR handheld's first file, recorded before its channel has the 4 TDMA votes that bar it; and, in a labelled capture set, a DMR transmission that reads analog FM on a channel with no digital prior yet (its replay decode lands during the file, which then finishes as voice).",
+		"falseVoice": "3: the two above, and the synthetic FM carrier whose audio is noise keyed like speech (no digital prior, so no content check).",
+		"missedVoice": "1: the first of the synthetic 12 dB speech overs, never voiced."
+	}
+}

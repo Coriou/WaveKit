@@ -12,8 +12,13 @@ import type { ScannerProtocol } from "../../../src/core/scanner/types.js"
 export type SignalClass =
 	| "nfm-voice"
 	| "nfm-ptt"
+	| "nfm-speech"
+	| "fm-noise"
 	| "dmr"
+	| "dmr-bs"
 	| "pocsag"
+	| "pocsag-msg"
+	| "pocsag-2400"
 	| "ism-ook"
 	| "ism-fsk"
 	| "afsk1200"
@@ -27,8 +32,13 @@ export type SignalClass =
 export const SIGNAL_CLASSES: readonly SignalClass[] = [
 	"nfm-voice",
 	"nfm-ptt",
+	"nfm-speech",
+	"fm-noise",
 	"dmr",
+	"dmr-bs",
 	"pocsag",
+	"pocsag-msg",
+	"pocsag-2400",
 	"ism-ook",
 	"ism-fsk",
 	"afsk1200",
@@ -92,8 +102,18 @@ const NOMINAL: Record<
 > = {
 	"nfm-voice": { bandwidthHz: 11_000, protocol: "analog-fm", spurious: false },
 	"nfm-ptt": { bandwidthHz: 11_000, protocol: "analog-fm", spurious: false },
+	"nfm-speech": {
+		bandwidthHz: 11_000,
+		protocol: "analog-fm",
+		spurious: false,
+	},
+	// An FM carrier whose audio is noise keyed like speech (no voice in it): not analog voice.
+	"fm-noise": { bandwidthHz: 11_000, protocol: null, spurious: false },
 	dmr: { bandwidthHz: 9_000, protocol: "dmr", spurious: false },
+	"dmr-bs": { bandwidthHz: 9_000, protocol: "dmr", spurious: false },
 	pocsag: { bandwidthHz: 11_000, protocol: "pocsag", spurious: false },
+	"pocsag-msg": { bandwidthHz: 11_000, protocol: "pocsag", spurious: false },
+	"pocsag-2400": { bandwidthHz: 14_000, protocol: "pocsag", spurious: false },
 	"ism-ook": { bandwidthHz: 12_000, protocol: "ism", spurious: false },
 	"ism-fsk": { bandwidthHz: 100_000, protocol: "ism", spurious: false },
 	afsk1200: { bandwidthHz: 12_000, protocol: "aprs", spurious: false },
@@ -754,6 +774,61 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 			const symbols = symbolStream(rng, fs, 1200, [-4500, 4500])
 			return { ...base, fill: (from, a, b, dev) => symbols(from, a, b, dev) }
 		}
+		case "pocsag-msg":
+		case "pocsag-2400": {
+			// A POCSAG message: the 576-bit 1010 preamble, then random codewords, ±4.5 kHz, at
+			// 1 200 Bd (pocsag-msg) or 2 400 Bd (pocsag-2400, h = 3.75: its two tone lobes merge
+			// into one hump, as a fast pager's spectrum reads on air). The preamble restarts at each
+			// interval's start.
+			const baud = t.class === "pocsag-2400" ? 2400 : 1200
+			const symbols = symbolStream(rng, fs, baud, [-4500, 4500])
+			const bit = fs / baud
+			return {
+				...base,
+				fill: (from, a, b, dev) => {
+					symbols(from, a, b, dev)
+					const at = ((from + a) * 1000) / fs
+					const iv = t.intervals.find(x => at >= x.startMs - 1 && at < x.endMs)
+					if (!iv) return
+					const startAbs = (iv.startMs * fs) / 1000
+					for (let i = a; i < b; i++) {
+						const k = Math.floor((from + i - startAbs) / bit)
+						if (k >= 0 && k < POCSAG_PREAMBLE_BITS)
+							dev[i] = k % 2 === 0 ? 4500 : -4500
+					}
+				},
+			}
+		}
+		case "dmr-bs": {
+			// A DMR repeater (base station) transmits both slots back to back: continuous 4FSK at
+			// 4 800 symbols/s on ±648 / ±1 944 Hz, one-pole shaped, no TDMA gaps.
+			const alpha = 1 - Math.exp((-TWO_PI * 2_400) / fs)
+			let shaped = 0
+			const symbols = symbolStream(rng, fs, 4800, [-1944, -648, 648, 1944])
+			return {
+				...base,
+				fill: (from, a, b, dev) => {
+					symbols(from, a, b, dev)
+					for (let i = a; i < b; i++) {
+						shaped += alpha * (dev[i]! - shaped)
+						dev[i] = shaped
+					}
+				},
+			}
+		}
+		case "nfm-speech":
+		case "fm-noise": {
+			const audio =
+				t.class === "nfm-speech"
+					? speechAudio(rng, scene.durationMs, true)
+					: noiseAudio(rng, scene.durationMs)
+			return {
+				...base,
+				fill: (from, a, b, dev) => {
+					for (let i = a; i < b; i++) dev[i] = audio((from + i) / fs)
+				},
+			}
+		}
 		case "ism-ook": {
 			// PWM-ish OOK: 4 kbit/s random keying (the keying is staged in `dev`, then cleared).
 			const symbols = symbolStream(rng, fs, 4000, [0, 1])
@@ -872,6 +947,175 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 		case "dc":
 			return { ...base, dc: true, fill: () => undefined }
 	}
+}
+
+/** POCSAG preamble length (bits of alternating 1 and 0). */
+const POCSAG_PREAMBLE_BITS = 576
+/** Audio rate of the synthetic speech and noise modulators (interpolated to the IQ rate). */
+const AUDIO_HZ = 16_000
+/** CTCSS tone of the synthetic speech (Hz) and its deviation (Hz). */
+const SPEECH_CTCSS_HZ = 88.5
+const SPEECH_CTCSS_DEV_HZ = 300
+/** RMS deviation of a voiced syllable (Hz), as a talker on a 12.5 kHz NFM channel. */
+const SPEECH_RMS_DEV_HZ = 1_500
+
+/** One stretch of the speech-like keying: a voiced syllable (pitch, formants) or a pause. */
+interface SpeechSegment {
+	endSec: number
+	voiced: boolean
+	f0a: number
+	f0b: number
+	f1: number
+	f2: number
+	startSec: number
+}
+
+/**
+ * Speech-like keying from `rng` over `durationMs`: words of 2 to 4 syllables (120 to 300 ms
+ * voiced, 30 to 80 ms between them), 150 to 600 ms pauses between words. Each syllable has a
+ * pitch gliding within 95 to 190 Hz and two formants (F1 300 to 800 Hz, F2 900 to 2 200 Hz).
+ */
+function speechSchedule(
+	rng: () => number,
+	durationMs: number,
+): SpeechSegment[] {
+	const out: SpeechSegment[] = []
+	const end = durationMs / 1000 + 1
+	let t = 0
+	const pause = (len: number): void => {
+		out.push({
+			startSec: t,
+			endSec: t + len,
+			voiced: false,
+			f0a: 0,
+			f0b: 0,
+			f1: 0,
+			f2: 0,
+		})
+		t += len
+	}
+	while (t < end) {
+		const syllables = 2 + Math.floor(rng() * 3)
+		for (let k = 0; k < syllables; k++) {
+			const len = 0.12 + rng() * 0.18
+			const f0 = 95 + rng() * 95
+			out.push({
+				startSec: t,
+				endSec: t + len,
+				voiced: true,
+				f0a: f0,
+				f0b: f0 * (0.85 + rng() * 0.3),
+				f1: 300 + rng() * 500,
+				f2: 900 + rng() * 1_300,
+			})
+			t += len
+			if (k < syllables - 1) pause(0.03 + rng() * 0.05)
+		}
+		pause(0.15 + rng() * 0.45)
+	}
+	return out
+}
+
+/** Segment lookup for monotonically increasing times (a moving cursor, no search per sample). */
+function segmentCursor(segments: readonly SpeechSegment[]) {
+	let i = 0
+	return (sec: number): SpeechSegment => {
+		while (i > 0 && sec < segments[i]!.startSec) i--
+		while (i < segments.length - 1 && sec >= segments[i]!.endSec) i++
+		return segments[i]!
+	}
+}
+
+/**
+ * A modulator sampled at AUDIO_HZ and linearly interpolated to any time (seconds from scene
+ * start). `next` yields audio samples in order; the generator only moves forward.
+ */
+function interpolated(next: (k: number) => number): (sec: number) => number {
+	let k0 = -1
+	let y0 = 0
+	let y1 = 0
+	return sec => {
+		const pos = sec * AUDIO_HZ
+		const k = Math.floor(pos)
+		if (k !== k0) {
+			if (k === k0 + 1) {
+				y0 = y1
+			} else {
+				// A jump (the first call, or a time gap between intervals): evaluate in order.
+				for (let j = Math.max(k0 + 1, k - 1); j < k; j++) next(j)
+				y0 = next(k)
+			}
+			y1 = next(k + 1)
+			k0 = k
+		}
+		return y0 + (y1 - y0) * (pos - k)
+	}
+}
+
+/**
+ * Speech-like FM audio (deviation in Hz): harmonics of a gliding pitch shaped by two formant
+ * resonances, keyed by speechSchedule, plus a steady CTCSS tone when `ctcss`. Voiced syllables
+ * are normalised to SPEECH_RMS_DEV_HZ (10 ms attack and release); pauses carry the tone only.
+ */
+function speechAudio(
+	rng: () => number,
+	durationMs: number,
+	ctcss: boolean,
+): (sec: number) => number {
+	const seg = segmentCursor(speechSchedule(rng, durationMs))
+	let phase = 0
+	let last = -1
+	return interpolated(k => {
+		const sec = k / AUDIO_HZ
+		const tone = ctcss
+			? SPEECH_CTCSS_DEV_HZ * Math.sin(TWO_PI * SPEECH_CTCSS_HZ * sec)
+			: 0
+		const s = seg(sec)
+		if (k !== last + 1) phase = 0
+		last = k
+		if (!s.voiced) return tone
+		const u = (sec - s.startSec) / (s.endSec - s.startSec)
+		const f0 = s.f0a + (s.f0b - s.f0a) * u
+		phase += (TWO_PI * f0) / AUDIO_HZ
+		if (phase > TWO_PI * 1_000) phase -= TWO_PI * 1_000
+		let v = 0
+		let power = 0
+		for (let h = 1; h * f0 < 3_400; h++) {
+			const f = h * f0
+			const g =
+				1 / (1 + ((f - s.f1) / 150) ** 2) +
+				0.7 / (1 + ((f - s.f2) / 250) ** 2) +
+				0.03
+			v += g * Math.sin(h * phase)
+			power += (g * g) / 2
+		}
+		const edge = Math.min(1, (sec - s.startSec) / 0.01, (s.endSec - sec) / 0.01)
+		return tone + (edge * SPEECH_RMS_DEV_HZ * v) / Math.sqrt(power)
+	})
+}
+
+/**
+ * Noise FM audio keyed like speech: one-pole low-passed (about 2.5 kHz) white noise at
+ * SPEECH_RMS_DEV_HZ during the "syllables" of a speechSchedule, nothing in its pauses, no tone.
+ * Not voice: no pitch, no formants.
+ */
+function noiseAudio(
+	rng: () => number,
+	durationMs: number,
+): (sec: number) => number {
+	const seg = segmentCursor(speechSchedule(rng, durationMs))
+	const alpha = 1 - Math.exp((-TWO_PI * 2_500) / AUDIO_HZ)
+	let y = 0
+	// The low-passed uniform noise's RMS: (1/√3)·√(α / (2 − α)).
+	const rms = Math.sqrt(alpha / (2 - alpha)) / Math.sqrt(3)
+	return interpolated(k => {
+		const sec = k / AUDIO_HZ
+		y += alpha * (rng() * 2 - 1 - y)
+		const s = seg(sec)
+		if (!s.voiced) return 0
+		const edge = Math.min(1, (sec - s.startSec) / 0.01, (s.endSec - sec) / 0.01)
+		return (edge * SPEECH_RMS_DEV_HZ * y) / rms
+	})
 }
 
 // === retuned scenes (the tuner moves; receiver spurs move with it, real RF does not) ===
