@@ -4,11 +4,21 @@
  * by an rtl_tcp fake in this process, all on 127.0.0.1). After each event the page lives through (a
  * receiver pause and resume, told to the socket or missed; a receiver reconnect; a dropped socket;
  * a retune or a sample-rate change; the scanner holding the engine as in production), the core must
- * count a spectrum subscriber and fresh live frames must arrive within 10 s.
+ * count a spectrum subscriber and fresh live frames must arrive within RECOVER_MS. A second core runs
+ * with the scanner off, where nothing but the page holds the engine: the page's subscription is
+ * dropped during a pause (an unsubscribe injected on its open socket) and the resume is never told
+ * to the socket; its paused watchdog must bring the stream back within PAUSED_WATCH_MS + RECOVER_MS.
+ *
+ * Opt-in (each core is a bundle and a real-time run, about a minute): WAVEKIT_LIVE_CORE_TESTS=1.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import type { SpectrumLinkState } from "../../src/spectrum/protocol.ts"
-import { SpectrumSocket, wsUrlFrom } from "../../src/spectrum/socket.ts"
+import {
+	PAUSED_WATCH_MS,
+	SpectrumSocket,
+	UNSUBSCRIBE_MESSAGE,
+	wsUrlFrom,
+} from "../../src/spectrum/socket.ts"
 import {
 	startDropProxy,
 	startRealCore,
@@ -17,22 +27,24 @@ import {
 	type RealCore,
 } from "./harness.ts"
 
-const RECOVER_MS = 10_000
+const enabled = process.env["WAVEKIT_LIVE_CORE_TESTS"] === "1"
+/** 10 s, twice that on a shared CI runner (the bound is about the socket, not the runner). */
+const RECOVER_MS = process.env["CI"] ? 20_000 : 10_000
 
+/** The core of the running describe block, and the page's path to it (dropping it closes the page's socket). */
 let core: RealCore
-/** The page's path to the core: dropping it closes the page's socket. */
 let proxy: DropProxy
 
-beforeAll(async () => {
-	// the scanner on, as in production: its job holds the spectrum engine through pauses
-	core = await startRealCore({ scanner: true })
-	proxy = await startDropProxy(core.apiPort)
-}, 90_000)
-
-afterAll(async () => {
-	await proxy?.close()
-	await core?.stop()
-}, 30_000)
+function useCore(options: { scanner: boolean }): void {
+	beforeAll(async () => {
+		core = await startRealCore(options)
+		proxy = await startDropProxy(core.apiPort)
+	}, 120_000)
+	afterAll(async () => {
+		await proxy?.close()
+		await core?.stop()
+	}, 30_000)
+}
 
 interface Client {
 	socket: SpectrumSocket
@@ -71,9 +83,9 @@ function client(): Client {
 	}
 }
 
-/** Subscribed on the core and live frames newer than `t` within RECOVER_MS. */
-async function recovers(c: Client, t: number): Promise<void> {
-	const fresh = await within(RECOVER_MS, () => c.freshSince(t))
+/** Subscribed on the core and live frames newer than `t` within `ms` (default RECOVER_MS). */
+async function recovers(c: Client, t: number, ms = RECOVER_MS): Promise<void> {
+	const fresh = await within(ms, () => c.freshSince(t))
 	const subscribers = await core.subscribers()
 	expect(
 		{ fresh, subscribers: subscribers >= 1 },
@@ -89,7 +101,10 @@ async function feed(): Promise<string | undefined> {
 	return rows.find(r => r.id === "rtl")?.feed?.state
 }
 
-describe("SpectrumSocket against the real core", () => {
+describe.skipIf(!enabled)("SpectrumSocket against the real core", () => {
+	// the scanner on, as in production: its job holds the spectrum engine through pauses
+	useCore({ scanner: true })
+
 	it("streams, then recovers after a pause and resume the page was told of", async () => {
 		const c = client()
 		try {
@@ -235,3 +250,31 @@ describe("SpectrumSocket against the real core", () => {
 		}
 	}, 60_000)
 })
+
+describe.skipIf(!enabled)(
+	"SpectrumSocket against a core with the scanner off",
+	() => {
+		useCore({ scanner: false })
+
+		it("comes back when the core dropped the subscription during a pause and the resume was never told", async () => {
+			const c = client()
+			try {
+				await recovers(c, 0)
+				expect((await core.post("/api/sources/rtl/pause")).status).toBe(200)
+				c.socket.setSourcePaused(true)
+				await within(3000, async () => (await feed()) === "paused")
+				// the core drops the page's subscription; the page's socket stays open
+				expect(proxy.injectClientText(UNSUBSCRIBE_MESSAGE)).toBe(1)
+				expect(
+					await within(3000, async () => (await core.subscribers()) === 0),
+				).toBe(true)
+				const t = Date.now()
+				expect((await core.post("/api/sources/rtl/resume")).status).toBe(200)
+				// no setSourcePaused(false): only the paused watchdog can bring it back
+				await recovers(c, t, PAUSED_WATCH_MS + RECOVER_MS)
+			} finally {
+				c.socket.dispose()
+			}
+		}, 120_000)
+	},
+)

@@ -3,13 +3,24 @@
  * esbuild (the production composition: SourceManager, SpectrumService, the Fastify server and its
  * `/ws` broadcaster) and run as a child process, fed by an rtl_tcp fake in this process.
  *
- * Isolation: everything is on 127.0.0.1. The fake listens on an ephemeral port (0); the core's
- * config has no port 0, so its ports are probed in 24000–29999 (outside the OS ephemeral range).
- * Every port is checked against FORBIDDEN_PORTS, the child gets an explicit environment (no
- * inherited WAVEKIT_* or DOTENV_*), its cwd and state dir are fresh temp dirs, and any source
- * endpoint it logs other than the fake kills it. The bundle and the dirs are deleted on stop.
+ * Isolation: the fake listens on 127.0.0.1, ephemeral port (0). The core's config has no port 0,
+ * so its ports are probed in 24000–29999 (outside the OS ephemeral range), and every listener it
+ * has binds 127.0.0.1 (`api.host`, `audio.host`; the relay, live-audio and digital-voice servers
+ * are disabled). After startup and again at stop the child's listening sockets are read from the OS
+ * (assertLoopbackListeners): one on any other address fails the run. Every port is checked against
+ * FORBIDDEN_PORTS, the child gets an explicit environment (no inherited WAVEKIT_* or DOTENV_*), its
+ * cwd and state dir are fresh temp dirs, and any source endpoint it logs other than the fake kills
+ * it. The temp root (bundle, state, config) is deleted on stop, on a failed start, and at process
+ * exit if the run ends first; the child is killed at process exit too.
  */
-import { spawn, type ChildProcess } from "node:child_process"
+import { execFile, spawn, type ChildProcess } from "node:child_process"
+import {
+	existsSync,
+	readFileSync,
+	readdirSync,
+	readlinkSync,
+	rmSync,
+} from "node:fs"
 import {
 	mkdir,
 	mkdtemp,
@@ -23,6 +34,7 @@ import * as net from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
+import { promisify } from "node:util"
 import { fileURLToPath } from "node:url"
 import type * as Esbuild from "esbuild"
 
@@ -234,6 +246,73 @@ function guardLine(line: string, upstreamPort: number): string | null {
 	return `The core logged a source endpoint other than the fake: ${String(r["host"])}:${String(r["port"])}`
 }
 
+/** Listening TCP addresses of `pid` ("host:port"), from lsof, or /proc on Linux without it. */
+async function listeningAddresses(pid: number): Promise<string[]> {
+	try {
+		const { stdout } = await promisify(execFile)(
+			"lsof",
+			["-nP", "-a", "-p", String(pid), "-iTCP", "-sTCP:LISTEN", "-Fn"],
+			{ timeout: 10_000 },
+		)
+		return stdout
+			.split("\n")
+			.filter(line => line.startsWith("n"))
+			.map(line => line.slice(1))
+	} catch (err) {
+		// lsof exits 1 when the process has no listener at all
+		const code = (err as { code?: unknown }).code
+		if (code === 1) return []
+		if (code !== "ENOENT") throw err
+	}
+	const fdDir = `/proc/${pid}/fd`
+	if (!existsSync(fdDir))
+		throw new Error("Cannot list the core's listeners: no lsof and no /proc")
+	const inodes = new Set<string>()
+	for (const fd of readdirSync(fdDir)) {
+		try {
+			const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(join(fdDir, fd)))
+			if (m?.[1]) inodes.add(m[1])
+		} catch {
+			// closed meanwhile
+		}
+	}
+	const out: string[] = []
+	for (const table of ["tcp", "tcp6"]) {
+		const file = `/proc/${pid}/net/${table}`
+		if (!existsSync(file)) continue
+		for (const line of readFileSync(file, "utf8").split("\n").slice(1)) {
+			const f = line.trim().split(/\s+/)
+			// local_address, st (0A = LISTEN), inode
+			if (f.length < 10 || f[3] !== "0A" || !inodes.has(f[9] ?? "")) continue
+			const [hex = "", portHex = "0"] = (f[1] ?? "").split(":")
+			const port = parseInt(portHex, 16)
+			out.push(`${procAddress(hex)}:${port}`)
+		}
+	}
+	return out
+}
+
+/** A /proc/net/tcp{,6} address (little-endian 32-bit words) as text: 127.0.0.1, ::1, 0.0.0.0, :: or the hex. */
+function procAddress(hex: string): string {
+	if (hex.length === 8) {
+		const b = Buffer.from(hex, "hex").reverse()
+		return [...b].join(".")
+	}
+	if (hex === "00000000000000000000000001000000") return "[::1]"
+	if (/^0+$/.test(hex)) return "[::]"
+	return `[${hex}]`
+}
+
+/** Fails unless every TCP listener of `pid` is on 127.0.0.1 or ::1. */
+export async function assertLoopbackListeners(pid: number): Promise<void> {
+	const addresses = await listeningAddresses(pid)
+	const outside = addresses.filter(
+		a => !a.startsWith(`${LOOPBACK}:`) && !a.startsWith("[::1]:"),
+	)
+	if (outside.length > 0)
+		throw new Error(`The test core listens off loopback: ${outside.join(", ")}`)
+}
+
 export interface RealCoreOptions {
 	/** Run the scanner (its jobs hold the spectrum engine, as on a production core). Default false. */
 	scanner?: boolean
@@ -242,20 +321,36 @@ export interface RealCoreOptions {
 export async function startRealCore(
 	options: RealCoreOptions = {},
 ): Promise<RealCore> {
-	const upstream = await startFakeRtlTcp()
 	const root = await realpath(
 		await mkdtemp(join(tmpdir(), "wavekit-web-core-")),
 	)
-	const buildDir = join(root, "build")
-	let entry: string
-	try {
-		await mkdir(buildDir)
-		entry = await buildCore(buildDir)
-	} catch (err) {
-		await upstream.close()
+	// Recorded before anything else can fail: a run that ends before stop() still removes it.
+	const removeRoot = () => rmSync(root, { recursive: true, force: true })
+	process.once("exit", removeRoot)
+	let upstream: FakeRtlTcp | null = null
+	const cleanup = async () => {
+		await upstream?.close()
 		await rm(root, { recursive: true, force: true })
+		process.off("exit", removeRoot)
+	}
+	try {
+		upstream = await startFakeRtlTcp()
+		return await launch(root, upstream, options, cleanup)
+	} catch (err) {
+		await cleanup()
 		throw err
 	}
+}
+
+async function launch(
+	root: string,
+	upstream: FakeRtlTcp,
+	options: RealCoreOptions,
+	cleanup: () => Promise<void>,
+): Promise<RealCore> {
+	const buildDir = join(root, "build")
+	await mkdir(buildDir)
+	const entry = await buildCore(buildDir)
 	const stateDir = join(root, "state")
 	await mkdir(stateDir, { mode: 0o700 })
 	await writeFile(join(root, "empty.env"), "")
@@ -293,7 +388,7 @@ export async function startRealCore(
 			resources: { enabled: false },
 			channelizer: { enabled: false },
 			api: { host: LOOPBACK, port: api },
-			audio: { tcpPort: ports.audio },
+			audio: { tcpPort: ports.audio, host: LOOPBACK },
 			tunerRelay: { enabled: false, port: ports.relay },
 			liveDemod: { enabled: false, httpPort: ports.liveDemod },
 			digitalVoice: { enabled: false, httpPort: ports.digitalVoice },
@@ -359,14 +454,28 @@ export async function startRealCore(
 			if (child.exitCode === null && child.signalCode === null)
 				child.kill("SIGKILL")
 			await exited
-			if (violation !== null || !out.includes("EADDRINUSE") || attempt >= 3) {
-				await upstream.close()
-				await rm(root, { recursive: true, force: true })
+			if (violation !== null || !out.includes("EADDRINUSE") || attempt >= 3)
 				throw new Error(
 					violation ?? `The core did not start:\n${out.slice(-2000)}`,
 				)
-			}
 			continue
+		}
+		const pid = child.pid
+		const killChild = async () => {
+			if (child.exitCode === null && child.signalCode === null) {
+				child.kill("SIGKILL")
+				await exited
+			}
+		}
+		if (pid === undefined) {
+			await killChild()
+			throw new Error("The core has no pid")
+		}
+		try {
+			await assertLoopbackListeners(pid)
+		} catch (err) {
+			await killChild()
+			throw err
 		}
 		const base = `http://${LOOPBACK}:${api}`
 		const get = async (path: string): Promise<unknown> => {
@@ -400,15 +509,22 @@ export async function startRealCore(
 			},
 			output: () => out,
 			stop: async () => {
+				// listeners opened after startup (a lazy server) count too
+				let offLoopback: unknown = null
 				if (child.exitCode === null && child.signalCode === null) {
+					try {
+						await assertLoopbackListeners(pid)
+					} catch (err) {
+						offLoopback = err
+					}
 					child.kill("SIGTERM")
 					const killer = setTimeout(() => child.kill("SIGKILL"), 10_000)
 					await exited
 					clearTimeout(killer)
 				}
-				await upstream.close()
 				// rm removes the node_modules link itself, never the checkout's packages behind it
-				await rm(root, { recursive: true, force: true })
+				await cleanup()
+				if (offLoopback !== null) throw offLoopback
 			},
 		}
 	}
@@ -431,21 +547,48 @@ export async function within(
 export interface DropProxy {
 	readonly base: string
 	dropAll(): void
+	/**
+	 * Sends `text` to the core as a client WebSocket text frame (masked, as a browser sends it) on
+	 * every open /ws connection, as if the page had sent it: e.g. an unsubscribe, so the core drops
+	 * the page's subscription while its socket stays open. Returns the connections written to.
+	 */
+	injectClientText(text: string): number
 	close(): Promise<void>
+}
+
+/** One masked, unfragmented client text frame (RFC 6455 5.2). */
+function clientTextFrame(text: string): Buffer {
+	const payload = Buffer.from(text, "utf8")
+	const mask = Buffer.from([0x5a, 0x17, 0xc3, 0x2e])
+	const len = payload.length
+	const head =
+		len < 126
+			? Buffer.from([0x81, 0x80 | len])
+			: Buffer.from([0x81, 0x80 | 126, len >> 8, len & 0xff])
+	if (len > 0xffff) throw new Error("frame too long for the test proxy")
+	const body = Buffer.alloc(len)
+	for (let i = 0; i < len; i++) body[i] = payload[i]! ^ mask[i % 4]!
+	return Buffer.concat([head, mask, body])
 }
 
 export async function startDropProxy(targetPort: number): Promise<DropProxy> {
 	assertAllowedPort(targetPort)
 	const pairs = new Set<net.Socket>()
+	/** Outbound sockets of connections that upgraded to /ws. */
+	const wsOut = new Set<net.Socket>()
 	const server = net.createServer(inbound => {
 		const outbound = net.connect(targetPort, LOOPBACK)
 		pairs.add(inbound)
 		pairs.add(outbound)
+		inbound.once("data", (first: Buffer) => {
+			if (first.toString("latin1", 0, 8) === "GET /ws ") wsOut.add(outbound)
+		})
 		const end = () => {
 			inbound.destroy()
 			outbound.destroy()
 			pairs.delete(inbound)
 			pairs.delete(outbound)
+			wsOut.delete(outbound)
 		}
 		inbound.on("error", end)
 		outbound.on("error", end)
@@ -462,6 +605,17 @@ export async function startDropProxy(targetPort: number): Promise<DropProxy> {
 		dropAll: () => {
 			for (const s of pairs) s.destroy()
 			pairs.clear()
+			wsOut.clear()
+		},
+		injectClientText: text => {
+			const frame = clientTextFrame(text)
+			let n = 0
+			for (const out of wsOut)
+				if (!out.destroyed && out.writable) {
+					out.write(frame)
+					n++
+				}
+			return n
 		},
 		close: () =>
 			new Promise<void>(resolve => {

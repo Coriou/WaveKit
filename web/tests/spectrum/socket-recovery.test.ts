@@ -514,6 +514,34 @@ describe("SpectrumSocket recovery", () => {
 		t.socket.dispose()
 	})
 
+	it("kick: a session check from before the kick never fails the new socket", async () => {
+		let answer!: (r: AuthProbeResult) => void
+		let calls = 0
+		const slow: AuthProbe = () => {
+			calls++
+			return new Promise(resolve => (answer = resolve))
+		}
+		const t = openSocket(slow)
+		latest().drop(1008, "Access expired")
+		vi.advanceTimersByTime(backoffDelay(0))
+		// the reconnect fails too: the session check starts and is still out
+		latest().drop()
+		expect(calls).toBe(1)
+		// the tab became visible: a new socket, still connecting
+		t.socket.kick()
+		const fresh = latest()
+		expect(fresh.closed).toBe(false)
+		// the old check answers a stale 401
+		answer({ lost: true, status: 401 })
+		await vi.advanceTimersByTimeAsync(0)
+		expect(t.states).not.toContain("failed")
+		expect(fresh.closed).toBe(false)
+		fresh.open()
+		fresh.receive(frameAt(9))
+		expect(t.states.at(-1)).toBe("live")
+		t.socket.dispose()
+	})
+
 	it("a stall check on a socket still closing reconnects instead of waiting on it", () => {
 		const t = openSocket()
 		const ws = latest()

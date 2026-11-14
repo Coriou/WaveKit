@@ -222,6 +222,11 @@ export class SpectrumSocket {
 	private everLive = false
 	private sourcePaused = false
 	private probing = false
+	/**
+	 * Bumped by every kick(): a session check started before it answers for a link that is gone,
+	 * so its result (a stale 401) is ignored and never fails the new socket.
+	 */
+	private generation = 0
 	/** The reason of a 1008 close since the last live frame: the next failed connect checks the session. */
 	private accessSuspect: string | null = null
 	private link: SpectrumLinkState | null = null
@@ -292,6 +297,9 @@ export class SpectrumSocket {
 	 */
 	kick(): void {
 		if (this.disposed || !this.subscription) return
+		this.generation++
+		// a check in flight belongs to the previous generation: the new one may run its own
+		this.probing = false
 		if (this.failed) {
 			this.failed = false
 			this.accessSuspect = null
@@ -452,8 +460,10 @@ export class SpectrumSocket {
 	private checkAccess(closeReason: string | null): void {
 		if (this.probing || this.disposed || this.failed) return
 		this.probing = true
+		const generation = this.generation
 		this.authProbe().then(
 			result => {
+				if (generation !== this.generation) return
 				this.probing = false
 				if (!result.lost || this.disposed || this.failed) return
 				if (this.link === "live") return
@@ -463,7 +473,7 @@ export class SpectrumSocket {
 				)
 			},
 			() => {
-				this.probing = false
+				if (generation === this.generation) this.probing = false
 			},
 		)
 	}
