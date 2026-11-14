@@ -186,6 +186,14 @@ async function buildCore(dir: string): Promise<string> {
 				in: "src/core/activity/query/activity-query-worker.ts",
 				out: "activity-query-worker",
 			},
+			{
+				in: "src/core/scanner/store/snapshot-worker.ts",
+				out: "snapshot-worker",
+			},
+			{
+				in: "src/services/aircraft-info/aircraft-db-worker.ts",
+				out: "aircraft-db-worker",
+			},
 		],
 		bundle: true,
 		outdir: dir,
@@ -239,8 +247,15 @@ export async function startRealCore(
 		await mkdtemp(join(tmpdir(), "wavekit-web-core-")),
 	)
 	const buildDir = join(root, "build")
-	await mkdir(buildDir)
-	const entry = await buildCore(buildDir)
+	let entry: string
+	try {
+		await mkdir(buildDir)
+		entry = await buildCore(buildDir)
+	} catch (err) {
+		await upstream.close()
+		await rm(root, { recursive: true, force: true })
+		throw err
+	}
 	const stateDir = join(root, "state")
 	await mkdir(stateDir, { mode: 0o700 })
 	await writeFile(join(root, "empty.env"), "")
@@ -324,6 +339,10 @@ export async function startRealCore(
 		const exited = new Promise<void>(resolve =>
 			child.once("close", () => resolve()),
 		)
+		// A run that ends before stop() (a hook timeout) must not leave this child behind.
+		const killOnExit = () => child.kill("SIGKILL")
+		process.once("exit", killOnExit)
+		void exited.then(() => process.off("exit", killOnExit))
 		const deadline = Date.now() + 30_000
 		while (
 			!out.includes("WaveKit started successfully") &&

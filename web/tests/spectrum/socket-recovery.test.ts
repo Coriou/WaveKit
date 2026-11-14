@@ -11,6 +11,8 @@ import {
 	type AuthProbe,
 	type AuthProbeResult,
 	BACKOFF_CAP_ATTEMPT,
+	BACKOFF_CAP_MS,
+	KICK_AFTER_SUBSCRIBE_MS,
 	PAUSED_WATCH_MS,
 	PROBE_AFTER_FAILED_CONNECTS,
 	SpectrumSocket,
@@ -430,6 +432,47 @@ describe("SpectrumSocket recovery", () => {
 		t.socket.kick()
 		expect(ws.subscribes).toBe(before + 1)
 		t.socket.dispose()
+	})
+
+	it("kick: a resume and its resync in one render send one subscribe, not two", () => {
+		const t = openSocket()
+		const ws = latest()
+		ws.open()
+		ws.receive(frameAt(1))
+		t.socket.setSourcePaused(true)
+		vi.advanceTimersByTime(PAUSED_WATCH_MS - 1000)
+		const before = ws.subscribes
+		// SpectrumCanvas: the sourcePaused effect, then the resync effect
+		t.socket.setSourcePaused(false)
+		t.socket.kick()
+		expect(ws.subscribes).toBe(before + 1)
+		// past the in-flight window a kick into a silent stream subscribes again
+		vi.advanceTimersByTime(KICK_AFTER_SUBSCRIBE_MS)
+		t.socket.kick()
+		expect(ws.subscribes).toBe(before + 2)
+		t.socket.dispose()
+	})
+
+	it("kick: after a rejected ack waits the backoff cap like the watchdog", () => {
+		const t = openSocket()
+		const ws = latest()
+		ws.open()
+		ws.receive(ack({ outcome: "rejected" }))
+		const before = ws.subscribes
+		vi.advanceTimersByTime(KICK_AFTER_SUBSCRIBE_MS)
+		// repeated feed or tuning changes while the core keeps refusing
+		t.socket.kick()
+		t.socket.kick()
+		expect(ws.subscribes).toBe(before)
+		vi.advanceTimersByTime(BACKOFF_CAP_MS - KICK_AFTER_SUBSCRIBE_MS)
+		expect(ws.subscribes).toBe(before + 1)
+		t.socket.dispose()
+	})
+
+	it("paces the paused watchdog at three backoff caps and kicks within one round trip", () => {
+		expect(BACKOFF_CAP_MS).toBe(10_000)
+		expect(PAUSED_WATCH_MS).toBe(3 * BACKOFF_CAP_MS)
+		expect(KICK_AFTER_SUBSCRIBE_MS).toBeLessThan(stallTimeoutMs(25))
 	})
 
 	it("kick: reconnects a dropped socket at once instead of waiting the backoff", () => {

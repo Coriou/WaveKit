@@ -37,7 +37,7 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
 - The spectrum stream recovers by itself, a core restart included. If the connection to the core
   drops, or the stream goes silent, the plot reads `Spectrum stream lost · reconnecting…` and
   retries with growing pauses (up to 10 s) until frames come back. While the receiver is paused it
-  stays connected and checks every 10 s, so the waterfall comes back after a resume even when this
+  stays connected and checks every 30 s, so the waterfall comes back after a resume even when this
   page missed it (another browser resumed, or the page's connection dropped meanwhile); a resume,
   a retune, a sample-rate change or returning to the tab checks at once. If the page cannot reach
   the stream from the start, it reads `Spectrum stream not reachable · retrying…`. When the core

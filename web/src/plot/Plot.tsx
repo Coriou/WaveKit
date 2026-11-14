@@ -73,12 +73,7 @@ import { isReadOnly } from "../app/context.ts"
 import { confidenceText } from "../data/scanner-format.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
 import { ReceiverPausedBadge } from "../features/receiver/ReceiverIsland.tsx"
-import {
-	feedControllerFor,
-	feedOf,
-	isPaused as feedPaused,
-	shownSourceFor,
-} from "../features/receiver/feed.ts"
+import { feedControllerFor, shownSourceFor } from "../features/receiver/feed.ts"
 import { scanHasReceiver as scanHasReceiverOf } from "../features/tuning.ts"
 import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
 import { SquelchLine, VfoEdges } from "./HandleOverlays.tsx"
@@ -172,18 +167,10 @@ function linkNoteFor(link: {
 export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const sources = useStore(data.sources, s => s.sources)
 	const feeds = useStore(feedControllerFor(data), s => s.bySource)
-	const isPausedSource = (id: string) =>
-		feedPaused(
-			feedOf(
-				sources.find(x => x.id === id),
-				feeds[id],
-			),
-		)
 	// the shown source sticks through a pause (its waterfall freezes under the paused label) and is
 	// only replaced once it is gone or neither connected nor paused (plotSourceId); the Receiver island,
 	// the palette and the P key act on the same one (shownSourceFor)
 	const sourceId = useStore(shownSourceFor(data))
-	const receiverPaused = sourceId !== null && isPausedSource(sourceId)
 	const tuner = useStore(data.tuner, s =>
 		sourceId === null ? undefined : s.bySource[sourceId],
 	)
@@ -652,12 +639,12 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 				{linkNote !== null &&
 					engineError === null &&
 					sourceId !== null &&
-					!receiverPaused && (
+					!stream.paused && (
 						<div className="wk-plot-note" role="status">
 							{linkNote}
 						</div>
 					)}
-				{engineError !== null && sourceId !== null && !receiverPaused && (
+				{engineError !== null && sourceId !== null && !stream.paused && (
 					<div className="wk-plot-note" role="status">
 						{engineError}
 					</div>
