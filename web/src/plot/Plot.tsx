@@ -86,6 +86,7 @@ import { EDGE_GRAB_MIN_PX } from "./handles.ts"
 import { useHandles, type HandleFrame } from "./use-handles.ts"
 import type { SpectrumProbe } from "../spectrum/index.ts"
 import { SavedTags } from "./SavedTags.tsx"
+import { spectrumStream } from "./spectrum-stream.ts"
 import {
 	DISCOVERY_POP_CLASS,
 	DiscoveryTags,
@@ -185,6 +186,12 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const receiverPaused = sourceId !== null && isPausedSource(sourceId)
 	const tuner = useStore(data.tuner, s =>
 		sourceId === null ? undefined : s.bySource[sourceId],
+	)
+	// the stream rests only while the core also says the receiver is down; any change kicks it
+	const stream = spectrumStream(
+		sourceId === null ? undefined : sources.find(x => x.id === sourceId),
+		sourceId === null ? undefined : feeds[sourceId],
+		tuner,
 	)
 	const liveStatus = useStore(data.liveAudio, s => s.status)
 	const plan = useStore(data.bandplan, s => s.view)
@@ -498,7 +505,8 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					onFrameMeta={onFrameMeta}
 					onStatus={onStatus}
 					paused={paused ?? false}
-					sourcePaused={receiverPaused}
+					sourcePaused={stream.paused}
+					resync={stream.resync}
 					probeRef={probeRef}
 				/>
 				<ReceiverPausedBadge data={data} sourceId={sourceId} />

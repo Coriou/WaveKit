@@ -208,6 +208,14 @@ export class SpectrumEngine {
 		this.post({ type: "sourcePaused", paused })
 	}
 
+	/**
+	 * Frames are expected now (the tab became visible, the feed or the tuning changed): the worker's
+	 * socket resubscribes a stream with no recent live frame, or reconnects a dropped one, at once.
+	 */
+	kick(): void {
+		this.post({ type: "kick" })
+	}
+
 	/** The newest row's peak dBFS over [startHz, endHz] (hover readout); null when nothing is there. */
 	probe(startHz: number, endHz: number): Promise<number | null> {
 		if (this.disposed) return Promise.resolve(null)

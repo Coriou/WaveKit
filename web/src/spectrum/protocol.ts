@@ -110,6 +110,8 @@ export type MainToWorker =
 	| { type: "paused"; paused: boolean }
 	/** The receiver of the subscribed source is paused: no stall resubscribes or reconnects until it resumes. */
 	| { type: "sourcePaused"; paused: boolean }
+	/** Frames are expected now (tab visible, feed or tuning changed): resubscribe a stream that is not live. */
+	| { type: "kick" }
 	| { type: "dispose" }
 
 /** The spectrum stream's link changed (worker → main, and on to SpectrumEngine status listeners). */

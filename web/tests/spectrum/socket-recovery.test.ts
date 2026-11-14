@@ -11,6 +11,7 @@ import {
 	type AuthProbe,
 	type AuthProbeResult,
 	BACKOFF_CAP_ATTEMPT,
+	PAUSED_WATCH_MS,
 	PROBE_AFTER_FAILED_CONNECTS,
 	SpectrumSocket,
 	authProbeUrl,
@@ -349,7 +350,7 @@ describe("SpectrumSocket recovery", () => {
 		t.socket.dispose()
 	})
 
-	it("does not resubscribe while the receiver is paused, and resubscribes once at once on resume", () => {
+	it("while the receiver is paused resubscribes only every PAUSED_WATCH_MS, stays live, and resubscribes at once on resume", () => {
 		const t = openSocket()
 		const ws = latest()
 		ws.core = pausedCoreAnswer
@@ -357,27 +358,132 @@ describe("SpectrumSocket recovery", () => {
 		ws.receive(frameAt(1))
 		t.socket.setSourcePaused(true)
 		vi.advanceTimersByTime(10 * 60_000)
-		// no engine start attempts while paused
-		expect(ws.subscribes).toBe(1)
+		// slow checks, never a burst of engine start attempts
+		const gaps = ws.subscribeTimes
+			.slice(1)
+			.map((at, i) => at - ws.subscribeTimes[i]!)
+		expect(gaps.length).toBeGreaterThan(0)
+		expect(Math.min(...gaps)).toBeGreaterThanOrEqual(PAUSED_WATCH_MS)
+		expect(ws.subscribes).toBeLessThanOrEqual(
+			1 + (10 * 60_000) / PAUSED_WATCH_MS,
+		)
+		// a paused receiver sending nothing is not a stalled link
 		expect(t.states).toEqual(["connecting", "live"])
 
+		const before = ws.subscribes
 		t.socket.setSourcePaused(false)
-		expect(ws.subscribes).toBe(2)
+		expect(ws.subscribes).toBe(before + 1)
 		vi.advanceTimersByTime(0)
 		ws.receive(frameAt(40))
 		expect(t.states.at(-1)).toBe("live")
+		t.socket.dispose()
+	})
 
-		// a drop while paused waits for the resume to reconnect
+	it("reconnects a socket dropped during a pause without waiting for the resume", () => {
+		const t = openSocket()
+		const ws = latest()
+		ws.open()
+		ws.receive(frameAt(1))
 		t.socket.setSourcePaused(true)
 		ws.drop()
-		vi.advanceTimersByTime(10 * 60_000)
-		expect(FakeWebSocket.all).toHaveLength(1)
-		t.socket.setSourcePaused(false)
+		vi.advanceTimersByTime(backoffDelay(0))
 		expect(FakeWebSocket.all).toHaveLength(2)
 		latest().open()
 		expect(latest().subscribes).toBe(1)
+		// the receiver resumed but the page never heard: frames flow again on the new socket
 		latest().receive(frameAt(50))
 		expect(t.states.at(-1)).toBe("live")
+		t.socket.dispose()
+	})
+
+	it("keeps resubscribing at the paused pace when the page's pause is stale and the core lost the subscription", () => {
+		const t = openSocket()
+		const ws = latest()
+		ws.open()
+		ws.receive(frameAt(1))
+		t.socket.setSourcePaused(true)
+		// the core answers resubscribes, but only the third one brings frames back
+		let answered = 0
+		ws.core = () => (++answered >= 2 ? [ack(), frameAt(30)] : [ack()])
+		vi.advanceTimersByTime(3 * PAUSED_WATCH_MS + 1000)
+		expect(answered).toBeGreaterThanOrEqual(2)
+		expect(t.frames).toContain(atSecond(30))
+		expect(t.states.at(-1)).toBe("live")
+		t.socket.dispose()
+	})
+
+	it("kick: a live stream is left alone, a silent one resubscribes at once", () => {
+		const t = openSocket()
+		const ws = latest()
+		ws.open()
+		ws.receive(frameAt(1))
+		t.socket.kick()
+		expect(ws.subscribes).toBe(1)
+		vi.advanceTimersByTime(stallTimeoutMs(25) - 1)
+		ws.receive(frameAt(2))
+		t.socket.kick()
+		expect(ws.subscribes).toBe(1)
+		// paused and silent for longer than the stall timeout: the kick does not wait for the watchdog
+		t.socket.setSourcePaused(true)
+		vi.advanceTimersByTime(stallTimeoutMs(25) + 1)
+		const before = ws.subscribes
+		t.socket.kick()
+		expect(ws.subscribes).toBe(before + 1)
+		t.socket.dispose()
+	})
+
+	it("kick: reconnects a dropped socket at once instead of waiting the backoff", () => {
+		const t = openSocket()
+		const ws = latest()
+		ws.open()
+		ws.receive(frameAt(1))
+		ws.drop()
+		// a few failed connects grow the backoff
+		for (let i = 0; i < 3; i++) {
+			vi.advanceTimersByTime(backoffDelay(i))
+			latest().drop()
+		}
+		const count = FakeWebSocket.all.length
+		t.socket.kick()
+		expect(FakeWebSocket.all).toHaveLength(count + 1)
+		latest().open()
+		expect(latest().subscribes).toBe(1)
+		t.socket.dispose()
+	})
+
+	it("kick: tries again after a failed link", async () => {
+		const lost = probe({ lost: true, status: 401 })
+		const t = openSocket(lost)
+		latest().drop(1008, "Access expired")
+		vi.advanceTimersByTime(backoffDelay(0))
+		latest().drop()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(t.states.at(-1)).toBe("failed")
+		const count = FakeWebSocket.all.length
+		vi.advanceTimersByTime(60_000)
+		expect(FakeWebSocket.all).toHaveLength(count)
+		// paired again in another tab, then this tab became visible
+		t.socket.kick()
+		expect(FakeWebSocket.all).toHaveLength(count + 1)
+		latest().open()
+		latest().receive(frameAt(9))
+		expect(t.states.at(-1)).toBe("live")
+		t.socket.dispose()
+	})
+
+	it("a stall check on a socket still closing reconnects instead of waiting on it", () => {
+		const t = openSocket()
+		const ws = latest()
+		ws.open()
+		ws.receive(frameAt(1))
+		// closing, and its close event never comes (a frozen tab's socket)
+		ws.readyState = FakeWebSocket.CLOSING
+		vi.advanceTimersByTime(stallTimeoutMs(25) + 1)
+		expect(ws.closed).toBe(true)
+		vi.advanceTimersByTime(backoffDelay(0))
+		expect(FakeWebSocket.all).toHaveLength(2)
+		latest().open()
+		expect(latest().subscribes).toBe(1)
 		t.socket.dispose()
 	})
 
@@ -606,7 +712,7 @@ describe("SpectrumPipeline over a reconnecting socket", () => {
 		pipeline.dispose()
 	})
 
-	it("passes the receiver's pause to the socket: no resubscribes while paused, one on resume", () => {
+	it("passes the receiver's pause to the socket: slow resubscribes while paused, one at once on resume", () => {
 		const { pipeline } = pipelineOverSocket()
 		pipeline.handle({ type: "sourcePaused", paused: true })
 		const ws = latest()
@@ -614,8 +720,23 @@ describe("SpectrumPipeline over a reconnecting socket", () => {
 		ws.open()
 		ws.receive(frameAt(1))
 		vi.advanceTimersByTime(5 * 60_000)
-		expect(ws.subscribes).toBe(1)
+		const gaps = ws.subscribeTimes
+			.slice(1)
+			.map((at, i) => at - ws.subscribeTimes[i]!)
+		expect(Math.min(...gaps)).toBeGreaterThanOrEqual(PAUSED_WATCH_MS)
+		const before = ws.subscribes
 		pipeline.handle({ type: "sourcePaused", paused: false })
+		expect(ws.subscribes).toBe(before + 1)
+		pipeline.dispose()
+	})
+
+	it("passes a kick to the socket", () => {
+		const { pipeline } = pipelineOverSocket()
+		const ws = latest()
+		ws.open()
+		vi.advanceTimersByTime(stallTimeoutMs(25) - 1000)
+		// no live frame yet: the kick resubscribes at once
+		pipeline.handle({ type: "kick" })
 		expect(ws.subscribes).toBe(2)
 		pipeline.dispose()
 	})

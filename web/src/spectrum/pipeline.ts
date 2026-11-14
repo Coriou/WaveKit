@@ -50,6 +50,8 @@ export interface SocketLike {
 	setSubscription(sub: SpectrumSubscription | null): void
 	/** The receiver of the subscribed source is paused (optional: test fakes may omit it). */
 	setSourcePaused?(paused: boolean): void
+	/** Frames are expected now (optional: test fakes may omit it). */
+	kick?(): void
 	dispose(): void
 }
 
@@ -198,6 +200,9 @@ export class SpectrumPipeline {
 			case "sourcePaused":
 				this.sourcePaused = msg.paused
 				this.socket?.setSourcePaused?.(msg.paused)
+				return
+			case "kick":
+				this.socket?.kick?.()
 				return
 			case "probe":
 				this.deps.post({

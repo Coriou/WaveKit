@@ -98,6 +98,12 @@ export function stallTimeoutMs(hz: number | undefined | null): number {
 	return Math.max(STALL_MIN_MS, period)
 }
 
+/**
+ * While the page believes the receiver paused, the watchdog checks this often (ms): a resume the
+ * page missed is streaming again within it. 10 s, the reconnect backoff cap (backoffDelay(5)).
+ */
+export const PAUSED_WATCH_MS = 10_000
+
 /** backoffDelay attempt index at its 10 s cap: the wait after a `rejected` ack. */
 export const BACKOFF_CAP_ATTEMPT = 5
 
@@ -176,8 +182,11 @@ function isReplay(frame: SpectrumFrameEventData): boolean {
  * - a stream without live frames (the source paused, its spectrum engine gone) is resubscribed on
  *   the same socket, spaced by a backoff growing to its 10 s cap (at once after a `rejected` ack);
  *   a socket that answers nothing at all (not even the ack) is dropped and reconnected;
- * - while the receiver is paused (setSourcePaused) the stall watchdog and reconnects wait, and the
- *   resume resubscribes once at once;
+ * - while the page believes the receiver paused (setSourcePaused) the socket still reconnects and
+ *   the watchdog still runs, only spaced at the backoff cap: that belief can be stale (a missed
+ *   resume), and a socket that waited on it would never come back; the resume resubscribes at once;
+ * - kick() (the tab became visible, the feed or the tuning changed) resubscribes at once a stream
+ *   with no recent live frame, reconnects at once a dropped socket, and retries even after "failed";
  * - a 1008 close followed by another failed connect, or PROBE_AFTER_FAILED_CONNECTS connects in a
  *   row that never opened, checks the session over HTTP; only a 401 or 403 there stops the
  *   retries and reports "failed".
@@ -209,6 +218,8 @@ export class SpectrumSocket {
 	private linkAttempts = -1
 	/** Date.now() of the newest live frame (or of the subscribe that started the wait). */
 	private lastFrameAt = 0
+	/** Date.now() of the newest live frame only. */
+	private lastLiveAt = 0
 	/** Resubscribes sent since the last live frame. */
 	private resubscribes = 0
 	/** The last ack was `rejected`: the next resubscribe waits the backoff cap. */
@@ -246,17 +257,43 @@ export class SpectrumSocket {
 	}
 
 	/**
-	 * The receiver of the subscribed source is paused (no frames are due, and a resubscribe would
-	 * only make the core try to start its spectrum engine): the watchdog and reconnects wait.
+	 * The page believes the receiver of the subscribed source paused (no frames are due): the
+	 * watchdog resubscribes only every PAUSED_WATCH_MS and the link is not reported as stalled. The
+	 * socket stays connected and subscribed, so a resume the page never hears of still streams.
 	 * Unpausing resubscribes once at once (or connects at once when the socket is gone).
 	 */
 	setSourcePaused(paused: boolean): void {
 		if (paused === this.sourcePaused) return
 		this.sourcePaused = paused
 		if (paused) {
-			this.clearStall()
+			if (this.stallTimer !== null) this.armStall(this.stallTimeout())
 			return
 		}
+		this.resync()
+	}
+
+	/**
+	 * The page has a reason to expect frames now (the tab became visible, the feed went live, the
+	 * tuning changed): a stream with no live frame within the stall timeout is resubscribed at
+	 * once, a dropped socket reconnects at once, and a "failed" link tries again.
+	 */
+	kick(): void {
+		if (this.disposed || !this.subscription) return
+		if (this.failed) {
+			this.failed = false
+			this.accessSuspect = null
+			this.failedConnects = 0
+		} else if (
+			this.link === "live" &&
+			Date.now() - this.lastLiveAt <
+				stallTimeoutMs(this.ackedHz ?? this.subscription.hz)
+		)
+			return
+		this.resync()
+	}
+
+	/** Resubscribes at once on an open socket, or connects at once without one. */
+	private resync(): void {
 		const sub = this.subscription
 		if (this.disposed || this.failed || !sub) return
 		const ws = this.ws
@@ -265,7 +302,7 @@ export class SpectrumSocket {
 				ws.send(subscribeMessage(sub))
 				this.restartWatch()
 			}
-			// CONNECTING: onopen subscribes.
+			// CONNECTING: onopen subscribes; CLOSING: onclose reconnects.
 			return
 		}
 		if (this.retryTimer !== null) clearTimeout(this.retryTimer)
@@ -359,7 +396,7 @@ export class SpectrumSocket {
 	}
 
 	private onLiveFrame(): void {
-		this.lastFrameAt = Date.now()
+		this.lastFrameAt = this.lastLiveAt = Date.now()
 		this.resubscribes = 0
 		this.attempt = 0
 		this.rejected = false
@@ -437,13 +474,15 @@ export class SpectrumSocket {
 		this.notLive()
 		this.retryTimer = setTimeout(() => {
 			this.retryTimer = null
-			// While the receiver is paused the reconnect waits for setSourcePaused(false).
-			if (this.subscription && !this.sourcePaused) this.connect()
+			// Also while the page believes the receiver paused: that belief may be stale.
+			if (this.subscription) this.connect()
 		}, delay)
 	}
 
+	/** Silence that counts as a stall; while the page believes the receiver paused, PAUSED_WATCH_MS. */
 	private stallTimeout(): number {
-		return stallTimeoutMs(this.ackedHz ?? this.subscription?.hz)
+		const live = stallTimeoutMs(this.ackedHz ?? this.subscription?.hz)
+		return this.sourcePaused ? Math.max(live, PAUSED_WATCH_MS) : live
 	}
 
 	/** A (re)subscribe was sent: live frames are due within the stall timeout from now. */
@@ -457,7 +496,7 @@ export class SpectrumSocket {
 
 	private armStall(ms: number): void {
 		this.clearStall()
-		if (!this.subscription || this.disposed || this.sourcePaused) return
+		if (!this.subscription || this.disposed) return
 		this.stallTimer = setTimeout(() => {
 			this.stallTimer = null
 			this.checkStall()
@@ -472,8 +511,13 @@ export class SpectrumSocket {
 	private checkStall(): void {
 		const ws = this.ws
 		const sub = this.subscription
-		if (!ws || !sub || ws.readyState !== WebSocket.OPEN || this.sourcePaused)
+		if (!ws || !sub) return
+		if (ws.readyState !== WebSocket.OPEN) {
+			// CLOSING without its close event yet: drop it and reconnect rather than wait on it.
+			this.detach()
+			this.scheduleRetry()
 			return
+		}
 		const timeout = this.stallTimeout()
 		const silent = Date.now() - this.lastFrameAt
 		if (this.resubscribes === 0 && !this.rejected && silent < timeout) {
@@ -489,7 +533,8 @@ export class SpectrumSocket {
 		ws.send(subscribeMessage(sub))
 		this.resubscribes++
 		this.heard = false
-		this.notLive()
+		// A paused receiver sends nothing: that is not a stalled link.
+		if (!this.sourcePaused) this.notLive()
 		const step = this.rejected ? BACKOFF_CAP_ATTEMPT : this.resubscribes
 		this.armStall(Math.max(timeout, backoffDelay(step)))
 	}

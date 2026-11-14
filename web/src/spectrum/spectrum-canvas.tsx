@@ -35,8 +35,13 @@ export interface SpectrumCanvasProps {
 	onStatus?: (status: SpectrumEngineStatus) => void
 	/** Covered by an opaque view: stop drawing, keep the waterfall history. */
 	paused?: boolean
-	/** The receiver of `sourceId` is paused: no frames are due, so the stream is not resubscribed until it resumes. */
+	/** The receiver of `sourceId` is paused: no frames are due, so the stream is resubscribed only slowly until it resumes. */
 	sourcePaused?: boolean
+	/**
+	 * Anything that should make frames flow again (feed state, centre, sample rate): each change
+	 * kicks the stream, which resubscribes at once unless live frames are arriving.
+	 */
+	resync?: string
 	/** Filled with the engine's level probe while mounted (hover readout); null otherwise. */
 	probeRef?: RefObject<SpectrumProbe | null>
 	className?: string
@@ -127,7 +132,14 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 			attributeFilter: THEME_ATTRIBUTES,
 		})
 
+		// A hidden tab may have had its socket closed or its timers held back: check at once on return.
+		const onVisible = () => {
+			if (document.visibilityState === "visible") engine.kick()
+		}
+		document.addEventListener("visibilitychange", onVisible)
+
 		return () => {
+			document.removeEventListener("visibilitychange", onVisible)
 			observer.disconnect()
 			themeObserver.disconnect()
 			if (probeRef) probeRef.current = null
@@ -206,6 +218,17 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 	useEffect(() => {
 		engineRef.current?.setSourcePaused(sourcePaused)
 	}, [sourcePaused])
+
+	const { resync } = props
+	const firstResync = useRef(true)
+	useEffect(() => {
+		// the mount subscribes anyway; only later changes kick
+		if (firstResync.current) {
+			firstResync.current = false
+			return
+		}
+		engineRef.current?.kick()
+	}, [resync])
 
 	const { ramp } = props
 	useEffect(() => {
