@@ -14,6 +14,8 @@ export interface SkeletonProps {
 	rows?: number
 	/** What is loading, for screen readers and the caption a slow load shows ("Activity"). */
 	label: string
+	/** The read has run past 3 s: the caption says WaveKit is busy (panel-state.ts). */
+	busy?: boolean
 }
 
 // Line widths per row (%): uneven, so the placeholder reads as text and not as a grid.
@@ -31,6 +33,7 @@ export function Skeleton({
 	toolbar = false,
 	rows = 8,
 	label,
+	busy = false,
 }: SkeletonProps) {
 	return (
 		<div
@@ -49,7 +52,9 @@ export function Skeleton({
 					</span>
 				</div>
 			)}
-			<p className="wk-skel-caption">Loading {label}…</p>
+			<p className="wk-skel-caption" data-busy={busy || undefined}>
+				{busy ? "Still loading. WaveKit is busy." : `Loading ${label}…`}
+			</p>
 			{Array.from({ length: rows }, (_, i) => (
 				<div
 					key={i}

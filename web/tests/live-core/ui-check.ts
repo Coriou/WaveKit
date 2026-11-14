@@ -38,6 +38,15 @@ import {
 	waterfallToneSide,
 } from "./browser.ts"
 import {
+	SEED_RECORDINGS_MAX,
+	benchPanel,
+	panelOfRoute,
+	seedRecordings,
+	settlePanel,
+	type PanelBench,
+	type PanelLook,
+} from "./panel-check.ts"
+import {
 	FORBIDDEN_PORTS,
 	LOOPBACK,
 	assertAllowedPort,
@@ -57,6 +66,10 @@ const DRAW_WAIT_MS = 60_000
 const LOOK_GAP_MS = 2000
 /** Mean luminance change (0–255) of the newest waterfall rows that counts as moving. */
 const MOVING_LUMA = 0.3
+/** How long a seeded catalogue may take to finish its first build (10 000 files took 14 s on a loaded host). */
+const INDEX_WAIT_MS = 120_000
+/** How long a panel may stay on its first load before the run reports what it shows. */
+const PANEL_WAIT_MS = 30_000
 
 export const ACTIONS = [
 	"pause",
@@ -86,6 +99,14 @@ export interface Options {
 	out: string | null
 	actions: Action[]
 	allow: ActionName[]
+	/** Fake target only: synthetic scanner recordings the core starts with (0: none). */
+	seedRecordings: number
+	/** With a panel route: measure the panel budgets (opens, a scroll through the list, the heap). */
+	measure: boolean
+	/** `--allow=measure`: the live target may be measured (it opens and scrolls the panel many times). */
+	allowMeasure: boolean
+	/** Fake target: the production build (vite build, then vite preview) instead of the dev server. */
+	built: boolean
 }
 
 /** The run cannot start or finish (exit 2); the message never holds a credential. */
@@ -126,12 +147,25 @@ export function parseOptions(argv: readonly string[]): Options {
 		out: null,
 		actions: [],
 		allow: [],
+		seedRecordings: 0,
+		measure: false,
+		allowMeasure: false,
+		built: false,
 	}
 	for (const arg of argv) {
 		const [flag = "", ...rest] = arg.split("=")
 		const value = rest.join("=")
 		if (flag === "--screenshot" && rest.length === 0) options.screenshot = true
-		else if (flag === "--target" && (value === "fake" || value === "live"))
+		else if (flag === "--measure" && rest.length === 0) options.measure = true
+		else if (flag === "--built" && rest.length === 0) options.built = true
+		else if (flag === "--seed-recordings" && /^\d{1,6}$/.test(value)) {
+			const n = Number(value)
+			if (n < 1 || n > SEED_RECORDINGS_MAX)
+				throw new CannotRun(
+					`--seed-recordings takes 1 to ${SEED_RECORDINGS_MAX}`,
+				)
+			options.seedRecordings = n
+		} else if (flag === "--target" && (value === "fake" || value === "live"))
 			options.target = value
 		else if (
 			flag === "--gpu" &&
@@ -145,10 +179,12 @@ export function parseOptions(argv: readonly string[]): Options {
 		else if (flag === "--out" && value) options.out = value
 		else if (flag === "--do" && rest.length > 0)
 			options.actions = parseActions(value)
-		else if (flag === "--allow" && rest.length > 0)
+		else if (flag === "--allow" && rest.length > 0) {
+			const names = value.split(",")
+			options.allowMeasure = names.includes("measure")
 			options.allow = parseActions(
-				value
-					.split(",")
+				names
+					.filter(name => name !== "measure")
 					.map(name =>
 						name === "retune" || name === "rate" || name === "wait"
 							? `${name}:1`
@@ -156,10 +192,14 @@ export function parseOptions(argv: readonly string[]): Options {
 					)
 					.join(","),
 			).map(action => action.name)
-		else throw new CannotRun(`Unknown or incomplete option: ${flag}`)
+		} else throw new CannotRun(`Unknown or incomplete option: ${flag}`)
 	}
 	if (options.route !== "" && !options.route.startsWith("#"))
 		throw new CannotRun("--route is a hash route, e.g. --route=#/scanner")
+	if (options.measure && panelOfRoute(options.route) === null)
+		throw new CannotRun(
+			"--measure needs a panel route: --route=#/recordings or --route=#/activity",
+		)
 	if (options.target === "live") {
 		if (process.env["WAVEKIT_UI_CHECK_LIVE"] !== "1")
 			throw new CannotRun(
@@ -190,6 +230,14 @@ export function parseOptions(argv: readonly string[]): Options {
 		if (refused.length > 0)
 			throw new CannotRun(
 				`On the live target every action must be named in --allow: ${refused.map(a => a.name).join(", ")}`,
+			)
+		if (options.seedRecordings > 0 || options.built)
+			throw new CannotRun(
+				"--seed-recordings and --built belong to --target=fake",
+			)
+		if (options.measure && !options.allowMeasure)
+			throw new CannotRun(
+				"On the live target --measure must be named in --allow: --allow=measure",
 			)
 	} else if (
 		options.url !== null ||
@@ -478,15 +526,46 @@ async function act(page: Page, action: Action): Promise<string> {
 	}
 }
 
-/** The dev server as `pnpm dev` runs it, proxying to the fake core, which sees the browser's host name on its own port. */
-async function startDevServer(
+/**
+ * The production build served as `vite preview` serves it, with the same proxy to the fake core: what a
+ * user's browser runs (React's production build), for measurements.
+ */
+async function startBuiltServer(
 	port: number,
 	corePort: number,
-	cacheDir: string,
-): Promise<ViteDevServer> {
+	scratchDir: string,
+): Promise<{ close(): Promise<void> }> {
 	assertAllowedPort(port)
 	assertAllowedPort(corePort)
-	const { createServer } = await import("vite")
+	const { build, preview } = await import("vite")
+	const outDir = join(scratchDir, "dist")
+	await build({
+		root: webRoot,
+		logLevel: "silent",
+		cacheDir: join(scratchDir, "vite"),
+		build: { outDir, emptyOutDir: true },
+	})
+	const server = await preview({
+		root: webRoot,
+		logLevel: "silent",
+		build: { outDir },
+		preview: {
+			host: LOOPBACK,
+			port,
+			strictPort: true,
+			proxy: coreProxy(corePort),
+		},
+	})
+	return {
+		close: () =>
+			new Promise<void>(resolve => {
+				server.httpServer.close(() => resolve())
+			}),
+	}
+}
+
+/** /api, /health and /ws to the fake core, which sees the browser's host name on its own port. */
+function coreProxy(corePort: number): Record<string, ProxyOptions> {
 	const api = `http://${LOOPBACK}:${corePort}`
 	const withCorePort = (outgoing: ClientRequest, incoming: IncomingMessage) => {
 		const host = incoming.headers.host
@@ -501,6 +580,22 @@ async function startDevServer(
 			proxy.on("proxyReqWs", withCorePort)
 		},
 	})
+	return {
+		"/api": entry(api, false),
+		"/health": entry(api, false),
+		"/ws": entry(api.replace(/^http/, "ws"), true),
+	}
+}
+
+/** The dev server as `pnpm dev` runs it, proxying to the fake core, which sees the browser's host name on its own port. */
+async function startDevServer(
+	port: number,
+	corePort: number,
+	cacheDir: string,
+): Promise<ViteDevServer> {
+	assertAllowedPort(port)
+	assertAllowedPort(corePort)
+	const { createServer } = await import("vite")
 	const server = await createServer({
 		root: webRoot,
 		logLevel: "silent",
@@ -509,11 +604,7 @@ async function startDevServer(
 			host: LOOPBACK,
 			port,
 			strictPort: true,
-			proxy: {
-				"/api": entry(api, false),
-				"/health": entry(api, false),
-				"/ws": entry(api.replace(/^http/, "ws"), true),
-			},
+			proxy: coreProxy(corePort),
 		},
 	})
 	await server.listen()
@@ -556,7 +647,7 @@ export async function run(
 		await mkdir(shotDir, { recursive: true })
 	}
 	let core: RealCore | null = null
-	let dev: ViteDevServer | null = null
+	let dev: { close(): Promise<void> } | null = null
 	let browser: Browser | null = null
 	try {
 		let base: string
@@ -564,10 +655,22 @@ export async function run(
 		if (options.target === "fake") {
 			const port = await loopbackPort()
 			base = `http://${LOOPBACK}:${port}/`
+			const seed = options.seedRecordings
 			core = await startRealCore({
 				protectedOrigins: [`http://${LOOPBACK}:${port}`],
+				// scanner recordings are listed only with a scanner
+				...(seed > 0
+					? {
+							scanner: true,
+							prepareState: (dir: string) => seedRecordings(dir, seed),
+							// the scanner backs the seeded files up before it starts (one link a file)
+							startTimeoutMs: 180_000,
+						}
+					: {}),
 			})
-			dev = await startDevServer(port, core.apiPort, join(scratch, "vite"))
+			dev = options.built
+				? await startBuiltServer(port, core.apiPort, scratch)
+				: await startDevServer(port, core.apiPort, join(scratch, "vite"))
 		} else {
 			base = new URL(options.url ?? "").origin + "/"
 			if (options.accessDir !== null || options.tokenFile !== null)
@@ -737,6 +840,26 @@ export async function run(
 			await page.screenshot({ path: file })
 			shots.push(file)
 		}
+		// a panel route: wait for the catalogue the run seeded, then what the panel shows
+		const panelTitle = panelOfRoute(options.route)
+		if (
+			panelTitle === "Recordings" &&
+			core !== null &&
+			options.seedRecordings > 0
+		)
+			await within(INDEX_WAIT_MS, async () => {
+				const page = (await core?.get("/api/recordings?limit=1")) as {
+					indexing?: boolean
+					counts?: { total?: number }
+				} | null
+				return (
+					page?.indexing === false &&
+					(page.counts?.total ?? 0) >= options.seedRecordings
+				)
+			})
+		let panel: PanelLook | null = null
+		if (panelTitle !== null)
+			panel = await settlePanel(page, panelTitle, PANEL_WAIT_MS)
 		const first = await look(page, core)
 		await shoot("1-loaded")
 		const done: { action: string; result: string }[] = []
@@ -750,6 +873,20 @@ export async function run(
 			})
 		const last = options.actions.length > 0 ? await look(page, core) : null
 		if (last !== null) await shoot("2-after-actions")
+		const panelAfter =
+			panelTitle !== null && options.actions.length > 0
+				? await settlePanel(page, panelTitle, PANEL_WAIT_MS)
+				: null
+		let bench: PanelBench | null = null
+		if (options.measure && panelTitle !== null) {
+			bench = await benchPanel(page, panelTitle, {
+				runs: 20,
+				reloads: 5,
+				scrollTarget: Math.max(options.seedRecordings, 1),
+				built: options.built,
+			})
+			await shoot("3-after-measure")
+		}
 
 		// what the page logged and failed, before the run's own sign-out adds to it
 		const errors = [...consoleErrors]
@@ -779,7 +916,10 @@ export async function run(
 			consoleErrors: errors,
 			failedRequests: failures,
 			spectrum: first,
+			...(panel !== null ? { panel } : {}),
 			...(last !== null ? { actions: done, spectrumAfterActions: last } : {}),
+			...(panelAfter !== null ? { panelAfterActions: panelAfter } : {}),
+			...(bench !== null ? { panelBench: bench } : {}),
 			screenshots: shots,
 		}
 		return { report, healthy }
@@ -800,6 +940,8 @@ export async function run(
 
 /** A run that has not ended after this long (ms) is given up: its device is revoked and it exits 2. */
 const DEADLINE_MS = 6 * 60_000
+/** With --measure: the opens, reloads and a scroll through up to 50 000 rows take longer. */
+const MEASURE_DEADLINE_MS = 15 * 60_000
 
 async function main(): Promise<void> {
 	const pairing = new Pairing()
@@ -821,9 +963,12 @@ async function main(): Promise<void> {
 	}
 	process.once("SIGINT", () => giveUp("Interrupted"))
 	process.once("SIGTERM", () => giveUp("Terminated"))
+	const limit = process.argv.includes("--measure")
+		? MEASURE_DEADLINE_MS
+		: DEADLINE_MS
 	const deadline = setTimeout(
-		() => giveUp(`Not finished after ${DEADLINE_MS / 1000} s`),
-		DEADLINE_MS,
+		() => giveUp(`Not finished after ${limit / 1000} s`),
+		limit,
 	)
 	try {
 		const { report, healthy } = await run(

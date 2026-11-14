@@ -15,11 +15,7 @@ import {
 	suggest,
 	token,
 } from "../../src/features/activity/search.ts"
-import {
-	indexAt,
-	prefixOffsets,
-	virtualWindow,
-} from "../../src/features/activity/virtual.ts"
+import { indexAt, prefixOffsets, virtualWindow } from "../../src/ui/virtual.ts"
 
 const at = (
 	iso: string,

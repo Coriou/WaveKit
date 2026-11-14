@@ -389,6 +389,14 @@ export interface RealCoreOptions {
 	protectedOrigins?: readonly string[]
 	/** The source's sample rate (U8 IQ). Default RATE. */
 	sampleRate?: number
+	/** Fills the core's own temporary state directory before it starts (synthetic data only). */
+	prepareState?: (stateDir: string) => Promise<void>
+	/**
+	 * How long the core may take to say it started (ms). Default 30 s. A prepared state dir holding
+	 * scanner evidence takes longer: the scanner backs its state up (one hard link a file) before it
+	 * starts on a directory with no format marker.
+	 */
+	startTimeoutMs?: number
 }
 
 export async function startRealCore(
@@ -426,6 +434,7 @@ async function launch(
 	const entry = await buildCore(buildDir)
 	const stateDir = join(root, "state")
 	await mkdir(stateDir, { mode: 0o700 })
+	await options.prepareState?.(stateDir)
 	await writeFile(join(root, "empty.env"), "")
 	const configFile = join(root, "config.yaml")
 	const baseEnv: NodeJS.ProcessEnv = {
@@ -548,7 +557,7 @@ async function launch(
 		const killOnExit = () => child.kill("SIGKILL")
 		process.once("exit", killOnExit)
 		void exited.then(() => process.off("exit", killOnExit))
-		const deadline = Date.now() + 30_000
+		const deadline = Date.now() + (options.startTimeoutMs ?? 30_000)
 		while (
 			!out.includes("WaveKit started successfully") &&
 			violation === null &&

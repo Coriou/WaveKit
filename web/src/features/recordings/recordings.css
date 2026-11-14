@@ -25,6 +25,10 @@
 		color: var(--wk-text-3);
 		font-variant-numeric: tabular-nums;
 	}
+	/* a count still loading keeps its last value, dimmed */
+	.wkr-count[data-dim] {
+		opacity: 0.5;
+	}
 
 	.wkr-banner {
 		flex: none;
@@ -138,6 +142,56 @@
 	}
 
 	/* the list */
+	/* the virtual list (ui/virtual-rows.ts): only the rows on screen are mounted */
+	.wkr-listwrap {
+		position: relative;
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.wkr-window {
+		position: absolute;
+		inset: 0 0 auto;
+	}
+	/* "N new", centred on the list */
+	.wkr-newpill {
+		position: absolute;
+		z-index: 3;
+		top: 8px;
+		left: 50%;
+		transform: translateX(-50%);
+		height: var(--wk-h-sm);
+		padding: 0 12px;
+		border: 0;
+		border-radius: var(--wk-r-pill);
+		background: var(--wk-accent);
+		color: var(--wk-on-accent);
+		font: inherit;
+		font-size: var(--wk-fs-xs);
+		font-weight: 700;
+		white-space: nowrap;
+		box-shadow: var(--wk-e2);
+		cursor: pointer;
+	}
+	/* the focused or cursor row, kept mounted where it sits while the window scrolls past it */
+	.wkr-kept-row {
+		position: absolute;
+		left: 0;
+		right: 0;
+	}
+	.wkr-list {
+		overflow-anchor: none;
+	}
+	.wkr-item:focus-visible {
+		outline: none;
+		box-shadow: inset 0 0 0 1.5px var(--wk-focus);
+	}
+	.wkr-foot {
+		margin: 8px 10px 4px;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-4);
+	}
 	.wkr-list {
 		flex: 1;
 		min-height: 0;
@@ -151,11 +205,6 @@
 		box-shadow: inset 0 0 0 1.5px var(--wk-focus);
 		border-radius: var(--wk-r-4);
 	}
-	/* a long list costs nothing off screen */
-	.wkr-day {
-		content-visibility: auto;
-		contain-intrinsic-size: auto 600px;
-	}
 	.wkr-day-label {
 		position: sticky;
 		top: 0;
@@ -165,7 +214,9 @@
 		background: linear-gradient(var(--wka-sticky-hi) 78%, transparent);
 	}
 	.wkr-item {
-		margin-bottom: 2px;
+		/* the gap is part of the measured box (a margin would not be): the virtual list's offsets add up */
+		border-bottom: 2px solid transparent;
+		background-clip: padding-box;
 		border-radius: var(--wk-r-4);
 		scroll-margin: 40px 0 12px;
 		transition: background var(--wk-dur-3) var(--wk-ease-out);

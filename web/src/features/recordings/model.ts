@@ -1,6 +1,7 @@
 // What the Recordings drawer shows of one inventory item, the day groups and the typed-chip search
 // (Recordings board). Only fields the core derives are used: nothing here guesses a frequency, a
-// protocol or a name the core did not give.
+// protocol or a name the core did not give. The search runs on the core (GET /api/recordings
+// filters): each chip is one query key, so a chip replaces the one of its kind.
 import type {
 	RecordingInventoryItem,
 	RecordingInventoryKind,
@@ -8,6 +9,7 @@ import type {
 	StorageReport,
 } from "@wavekit/api-types"
 
+import type { RecordingsQuery } from "../../data/recordings-store.ts"
 import { parseFrequency } from "../activity/search.ts"
 import {
 	clockText,
@@ -79,15 +81,21 @@ const FOOTER_AREAS: readonly (readonly [StorageAreaId, string])[] = [
 	["iq-captures", "IQ captures"],
 ]
 
+/** "1,608": counts in the panels' header, notices and footer. */
+export function countText(n: number): string {
+	return COUNT.format(n)
+}
+const COUNT = new Intl.NumberFormat("en-US")
+
 /**
- * The drawer's footer line: what is kept, each recording area that exists (with its cap),
- * then the free space.
+ * The drawer's footer line: how many are kept (the core's count; absent from an older core), each
+ * recording area that exists (with its cap), then the free space.
  */
 export function storageLine(
 	storage: StorageReport | null | undefined,
-	keptBytes: number,
+	kept: number | null,
 ): string {
-	const parts = [`Kept ${formatBytes(keptBytes)}`]
+	const parts = kept === null ? [] : [`${countText(kept)} kept`]
 	for (const [id, label] of FOOTER_AREAS) {
 		const area = storage?.areas.find(a => a.id === id)
 		if (area?.exists)
@@ -155,6 +163,60 @@ export function groupByDay(
 	return out
 }
 
+/** The virtual list's entries: a day label before each day's rows (the list is newest first). */
+export interface RecRowEntry {
+	type: "row"
+	key: string
+	item: RecordingInventoryItem
+	/** Position among the rows, from 1 (aria-posinset). */
+	position: number
+}
+export type RecEntry = { type: "day"; key: string; label: string } | RecRowEntry
+
+export function dayEntries(
+	items: readonly RecordingInventoryItem[],
+	now: Date,
+): RecEntry[] {
+	const out: RecEntry[] = []
+	let day: number | null = null
+	let position = 0
+	for (const it of items) {
+		const d = recordedAt(it)
+		const key = startOfDay(d)
+		if (key !== day) {
+			day = key
+			out.push({ type: "day", key: `day:${key}`, label: dayLabel(d, now) })
+		}
+		position += 1
+		out.push({ type: "row", key: it.id, item: it, position })
+	}
+	return out
+}
+
+/**
+ * The header count, from the core (never the loaded rows): what the search matches, else every
+ * recording (or the kept ones under Kept); "50,000+" when the catalogue left older ones out. Null
+ * before the first answer, or from a core without counts.
+ */
+export function headerCount(
+	meta: {
+		counts: { total: number; kept: number } | null
+		matched: number | null
+		truncated: boolean
+	} | null,
+	filter: "all" | "kept",
+	searching: boolean,
+): string | null {
+	if (meta === null) return null
+	const n = searching
+		? meta.matched
+		: filter === "kept"
+			? (meta.counts?.kept ?? meta.matched)
+			: (meta.counts?.total ?? meta.matched)
+	if (n === null) return null
+	return `${countText(n)}${meta.truncated && filter === "all" && !searching ? "+" : ""}`
+}
+
 // ---- search
 
 export type RecTokenKind = "talkgroup" | "radio" | "frequency" | "kind" | "text"
@@ -185,47 +247,68 @@ const KIND_WORDS: readonly [RegExp, RecordingInventoryKind, string][] = [
 /** Half width of a typed frequency: one 12.5 kHz channel. */
 const FREQ_SPAN_HZ = 6250
 
-export function matchesToken(r: RecordingInventoryItem, t: RecToken): boolean {
-	switch (t.kind) {
-		case "talkgroup":
-			return r.talkgroup === t.value
-		case "radio":
-			return r.source === t.value
-		case "frequency":
-			return (
-				r.frequencyHz !== null &&
-				Math.abs(r.frequencyHz - Number(t.value)) <= FREQ_SPAN_HZ
-			)
-		case "kind":
-			return r.kind === t.value
-		case "text": {
-			const hay =
-				`${recordingTitle(r)} ${recordingMeta(r)} ${r.id}`.toLowerCase()
-			return hay.includes(t.value.toLowerCase())
-		}
-	}
+/**
+ * Typed text as the core's `q` reads it (talkgroup, radio, decoder, kind, local start time, MHz):
+ * without a leading "tg" or "radio" word, a decimal comma as a point, no unit. Null when nothing is left.
+ */
+export function serverText(text: string): string | null {
+	const t = text
+		.trim()
+		.replace(/^(?:tg|talkgroup|radio|src|from)\s*:?\s*/i, "")
+		.replace(/(\d),(\d)/g, "$1.$2")
+		.replace(/\s*(?:mhz)$/i, "")
+		.trim()
+	return t === "" ? null : t
 }
 
-export function matchesAll(
-	r: RecordingInventoryItem,
+/**
+ * The core query of the drawer's view: Kept, one value per chip kind (a later chip of a kind replaces
+ * an earlier one, see addToken), and the typed text, which wins over a text chip while it is there.
+ */
+export function recordingsQuery(ui: {
+	tokens: readonly RecToken[]
+	text: string
+	filter: "all" | "kept"
+}): RecordingsQuery {
+	const q: RecordingsQuery = {}
+	if (ui.filter === "kept") q.kept = true
+	for (const t of ui.tokens) {
+		if (t.kind === "talkgroup") q.talkgroup = t.value
+		else if (t.kind === "radio") q.source = t.value
+		else if (t.kind === "kind") q.kind = t.value as RecordingInventoryKind
+		else if (t.kind === "frequency") {
+			const hz = Number(t.value)
+			if (Number.isFinite(hz)) {
+				q.minHz = hz - FREQ_SPAN_HZ
+				q.maxHz = hz + FREQ_SPAN_HZ
+			}
+		} else {
+			const text = serverText(t.value)
+			if (text !== null) q.q = text
+		}
+	}
+	const typed = serverText(ui.text)
+	if (typed !== null) q.q = typed
+	return q
+}
+
+/** The chips after adding `t`: it replaces the chip of its kind (one value per query key). */
+export function withToken(
 	tokens: readonly RecToken[],
-	text = "",
-): boolean {
-	if (!tokens.every(t => matchesToken(r, t))) return false
-	const q = text.trim()
-	return q === "" || matchesToken(r, textToken(q))
+	t: RecToken,
+): RecToken[] {
+	return [...tokens.filter(x => x.kind !== t.kind), t]
 }
 
 export function textToken(q: string): RecToken {
 	return { kind: "text", value: q, kindLabel: "Anywhere", label: `“${q}”` }
 }
 
-/** The chips `input` could become, each with how many recordings it would leave (zero ones dropped). */
+/** The chips `input` could become (the core answers how many each leaves once it is chosen). */
 export function suggest(
 	input: string,
-	items: readonly RecordingInventoryItem[],
 	tokens: readonly RecToken[],
-): { token: RecToken; count: number }[] {
+): { token: RecToken }[] {
 	const q = input.trim()
 	if (!q) return []
 	const out: RecToken[] = []
@@ -273,11 +356,7 @@ export function suggest(
 			seen.add(k)
 			return true
 		})
-		.map(token => ({
-			token,
-			count: items.filter(r => matchesAll(r, [...tokens, token])).length,
-		}))
-		.filter(s => s.count > 0)
+		.map(token => ({ token }))
 }
 
 // ---- actions

@@ -83,6 +83,17 @@ when not, 2 when it could not run. It needs a local Chrome or Chromium
   names another one); a path inside the repository is refused.
 - `--do=` runs actions between two looks: `pause`, `resume`, `retune:<Hz>`, `rate:<Hz>`, `hide`,
   `show` (the page is told it left or returned to view), `reload`, `wait:<seconds>`.
+- A panel route (`--route=#/recordings`, or the Activity or Scanner route) adds a `panel` section: what
+  the drawer shows (`rows`, `loading`, `busy`, `error`, `empty`), the rows mounted, the list's
+  size (`aria-setsize`), the header count, the notice and the footer.
+- `--seed-recordings=<N>` (fake target, 1 to 50 000) starts the core with N synthetic scanner
+  recordings (silence, made-up discovery ids) and waits for its catalogue before it looks.
+- `--measure` (with a panel route) measures the panel budgets: 20 opens from the dock (click to
+  drawer, click to first row), 5 opens after a reload (fresh rows), one scroll to the end of the
+  list and back (tasks over 50 ms, most rows mounted) and the page heap, in `panelBench`. On the
+  dev server (React's development build) the figures are an upper bound; `--built` serves the
+  production build (`vite build`, then `vite preview`) to measure what users run. A panel route
+  with `?view=messages` measures over a view with no spectrum behind the panel.
 
 This fake target is the only one for lanes and delegated agents. `--target=live --url=<preview>`
 attaches to a running web server and is refused unless `WAVEKIT_UI_CHECK_LIVE=1`: it is for the
@@ -92,7 +103,7 @@ runs an action only when `--allow=` names it. `--url` must be https, or http on 
 the variable on the one command (`WAVEKIT_UI_CHECK_LIVE=1 node scripts/ui-check.mjs …`), never
 with `export`; lanes never set it.
 
-Whatever ends a run (a failure, a signal, its six-minute deadline), the device it paired is
+Whatever ends a run (a failure, a signal, its six-minute deadline, 15 minutes with `--measure`), the device it paired is
 revoked through the core's machine route and the report says so (`revokedAtEnd`).
 
 ## Drift checks

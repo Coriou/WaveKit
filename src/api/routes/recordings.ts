@@ -20,6 +20,7 @@ import {
 	RECORDINGS_CURSOR_MAX_LENGTH,
 	RECORDINGS_PAGE_LIMIT_DEFAULT,
 	RECORDINGS_PAGE_LIMIT_MAX,
+	RECORDINGS_QUERY_TEXT_MAX,
 	RECORDINGS_ROUTE,
 } from "@wavekit/api-types"
 import type {
@@ -129,6 +130,15 @@ const QUERY_EXPECTED: Readonly<Record<string, string>> = Object.freeze({
 	cursor: "the nextCursor string of the previous page, one value",
 	kind: `one of ${RECORDING_INVENTORY_KINDS.map(k => JSON.stringify(k)).join(" | ")}, one value`,
 	decoderId: "string, 1 to 128 characters, one value",
+	kept: '"true" or "false", one value',
+	discoveryId: "a discovery id (d_ and up to 62 letters or digits), one value",
+	talkgroup: "decimal digits (1 to 12), one value",
+	source: "decimal digits (1 to 12), one value",
+	minHz: "integer Hz (0 to 1e12), one value",
+	maxHz: "integer Hz (0 to 1e12), one value",
+	since: "ISO-8601 date and time with a zone, one value",
+	until: "ISO-8601 date and time with a zone, one value",
+	q: `text, 1 to ${RECORDINGS_QUERY_TEXT_MAX} characters, one value`,
 })
 
 /**
@@ -154,7 +164,7 @@ function queryFields(query: unknown): ValidationField[] {
 			fields.push({ field: key, expected })
 	return fields.length > 0
 		? fields
-		: [{ field: "query", expected: "valid limit, cursor, kind and decoderId" }]
+		: [{ field: "query", expected: "valid recordings list parameters" }]
 }
 
 const LIST_SCHEMA: FastifySchema = {
@@ -172,6 +182,19 @@ const LIST_SCHEMA: FastifySchema = {
 			cursor: { type: "string", maxLength: RECORDINGS_CURSOR_MAX_LENGTH },
 			kind: { type: "string", enum: [...RECORDING_INVENTORY_KINDS] },
 			decoderId: { type: "string", minLength: 1, maxLength: 128 },
+			kept: { type: "string", enum: ["true", "false"] },
+			discoveryId: { type: "string", pattern: "^d_[0-9A-Za-z]{1,62}$" },
+			talkgroup: { type: "string", pattern: "^[0-9]{1,12}$" },
+			source: { type: "string", pattern: "^[0-9]{1,12}$" },
+			minHz: { type: "integer", minimum: 0 },
+			maxHz: { type: "integer", minimum: 0 },
+			since: { type: "string", format: "date-time" },
+			until: { type: "string", format: "date-time" },
+			q: {
+				type: "string",
+				minLength: 1,
+				maxLength: RECORDINGS_QUERY_TEXT_MAX,
+			},
 		},
 		additionalProperties: false,
 	},
@@ -319,8 +342,15 @@ export async function recordingRoutes(
 			const denied = authorize(request)
 			if (denied) return sendDenial(reply, denied)
 			try {
+				const started = performance.now()
 				const page = await inventory.list(request.query)
-				return await reply.header("Cache-Control", "no-store").send(page)
+				// Core time of the listing (catalogue wait + page), for smokes that separate core,
+				// network and render.
+				const dur = (performance.now() - started).toFixed(1)
+				return await reply
+					.header("Cache-Control", "no-store")
+					.header("Server-Timing", `catalogue;dur=${dur}`)
+					.send(page)
 			} catch (err) {
 				if (err instanceof RecordingInventoryError)
 					return sendError(

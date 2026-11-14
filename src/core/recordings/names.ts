@@ -13,6 +13,33 @@ export const SCANNER_RECORDING_ID = /^(d_[0-9A-Za-z]+)~([A-Za-z0-9_.-]+\.wav)$/
 export const SCANNER_DISCOVERY_ID = /^d_[0-9A-Za-z]+$/
 /** Scanner recording kinds, in lookup order (dv first). */
 export const SCANNER_RECORDING_KINDS = ["dv", "analog"] as const
+/**
+ * The discovery folder ids of scanner paths relative to the evidence root (or deeper): each
+ * `d_<id>` segment that follows a `dv` or `analog` segment, deduplicated, at most `max`.
+ */
+export function recordingFolderIdsOf(
+	paths: readonly string[],
+	max = 4_096,
+): string[] {
+	const out = new Set<string>()
+	for (const p of paths) {
+		if (typeof p !== "string") continue
+		const parts = p.split(/[\\/]/)
+		for (let i = 1; i < parts.length; i++) {
+			const prev = parts[i - 1]
+			const seg = parts[i]
+			if (
+				(prev === "dv" || prev === "analog") &&
+				seg !== undefined &&
+				SCANNER_DISCOVERY_ID.test(seg)
+			)
+				out.add(seg)
+		}
+		if (out.size >= max) break
+	}
+	return [...out]
+}
+
 /** dsd-fme close_and_rename_wav_file name (evidence-store CALL_WAV). */
 export const CALL_WAV =
 	/^(\d{8})_(\d{6})_\d{5}_.+_(?:GROUP|PRIVATE|UNIT)_TGT_([^_]+)_SRC_([^_.]+)\.wav$/

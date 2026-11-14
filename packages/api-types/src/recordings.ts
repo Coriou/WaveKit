@@ -19,8 +19,22 @@ export const RECORDINGS_PAGE_LIMIT_DEFAULT = 50
 export const RECORDINGS_PAGE_LIMIT_MAX = 200
 /** WG8 req 4.4: characters of an opaque cursor. */
 export const RECORDINGS_CURSOR_MAX_LENGTH = 512
-/** WG8 req 4.6: files examined per scan (all sources together). */
+/**
+ * WG8 req 4.6: the former per-scan file bound. The catalogue no longer scans per listing; this
+ * stays the size of one index chunk (how many files the first build indexes before a listing
+ * may answer with `indexing: true`).
+ */
 export const RECORDINGS_SCAN_MAX_FILES = 2000
+/**
+ * Recordings catalogue bound: at most this many files are indexed and listed, newest
+ * modification time first. Past it the oldest are left out (`truncated`, `truncatedBefore`).
+ * About 600 bytes of memory per entry: 50 000 entries ≈ 30 MB.
+ */
+export const RECORDINGS_CATALOGUE_MAX = 50_000
+/** Recording folders the catalogue enters (newest directory change first); past it, `truncated`. */
+export const RECORDINGS_CATALOGUE_MAX_FOLDERS = 20_000
+/** Characters of the `q` text filter. */
+export const RECORDINGS_QUERY_TEXT_MAX = 64
 /** WG8 req 4.6: bytes read from a file to find the RIFF `fmt ` and `data` chunks. */
 export const RECORDINGS_HEADER_READ_BYTES = 4096
 /** WG8 req 4.6: concurrent filesystem operations of one scan. */
@@ -72,26 +86,91 @@ export interface RecordingInventoryItem {
 	 * before WG9 (read as not kept). While the keep store is unavailable every item reads true.
 	 */
 	kept?: boolean
+	/**
+	 * The stable keep key (`dsd~<call name>` or `scan:<recordingId>`): unlike `id`, it survives a
+	 * renumbering of the dsd-fme directories. Absent from older cores.
+	 */
+	key?: string
+	/**
+	 * The live discovery owning the recording's folder, through merge aliases (the folder keeps
+	 * the id it was made under, `discoveryId`). Null when no live discovery owns it and for
+	 * dsd-fme recordings. Absent from older cores.
+	 */
+	ownerDiscoveryId?: string | null
 }
 
-/** WG8 req 4.4: GET /api/recordings query. */
+/**
+ * WG8 req 4.4: GET /api/recordings query (query-string values arrive as strings). Every filter
+ * narrows the listing and `matched`; none changes `counts`.
+ */
 export interface RecordingInventoryQuery {
 	limit?: number
 	cursor?: string
 	kind?: RecordingInventoryKind
 	decoderId?: string
+	/** `true` or `false`. */
+	kept?: boolean | "true" | "false"
+	/** A discovery id: matches its own folder and every folder whose live owner it is. */
+	discoveryId?: string
+	/** Decimal digits. */
+	talkgroup?: string
+	/** Decimal digits (the radio id). */
+	source?: string
+	/** Inclusive frequency range in Hz (integers); only recordings with a known frequency match. */
+	minHz?: number | string
+	maxHz?: number | string
+	/** Inclusive modification time range, ISO-8601 with a zone. */
+	since?: string
+	until?: string
+	/**
+	 * Case-insensitive text (1 to RECORDINGS_QUERY_TEXT_MAX characters) in the talkgroup, radio,
+	 * decoder, kind, local start time or frequency in MHz; never in the opaque id.
+	 */
+	q?: string
+}
+
+/** Recordings catalogue totals (over everything listed, whatever the filters). */
+export interface RecordingInventoryCounts {
+	total: number
+	kept: number
+	bytes: number
+	byKind: Record<RecordingInventoryKind, number>
 }
 
 /** WG8 req 4.4: GET /api/recordings 200 body. Newest `modifiedAt` first, ties by id. */
 export interface RecordingInventoryPage {
 	items: RecordingInventoryItem[]
 	nextCursor: string | null
-	/** Files examined by the scan this page comes from. */
+	/** Files in the catalogue this page comes from (at most RECORDINGS_CATALOGUE_MAX). */
 	scannedFiles: number
-	/** The scan stopped at RECORDINGS_SCAN_MAX_FILES. */
+	/**
+	 * Files were left out: only ever the oldest (modified at or before `truncatedBefore`) past
+	 * RECORDINGS_CATALOGUE_MAX, or a folder bound was reached (RECORDINGS_CATALOGUE_MAX_FOLDERS).
+	 */
 	truncated: boolean
-	/** ISO-8601 time of that scan. */
+	/** ISO-8601 time of the last completed catalogue check of every folder (build or reconcile). */
 	scannedAt: string
+	/** Catalogue revision: changes whenever a listed recording is added, removed or changed. */
+	revision?: number
+	/** True while the first build runs: the listing is partial (newest folders first). */
+	indexing?: boolean
+	/** Recordings matching the filters (cursor aside). */
+	matched?: number
+	counts?: RecordingInventoryCounts
+	/** Past the bound: the newest modification time left out (ISO-8601); null otherwise. */
+	truncatedBefore?: string | null
+}
+
+/**
+ * `recordings` WebSocket channel (protected mode only), `recordings:changed` message: the
+ * catalogue changed. Counts only, never an id or a name; at most one message a second. Refetch.
+ */
+export interface RecordingsChangedEventData {
+	revision: number
+	added: number
+	removed: number
+	changed: number
+	indexing: boolean
 }
 
 export type RecordingInventoryErrorCode =

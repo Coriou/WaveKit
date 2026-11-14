@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { afterEach, describe, expect, it } from "vitest"
 import { chromiumPath } from "./browser.ts"
+import { panelOfRoute, stats, viewOfRoute } from "./panel-check.ts"
 import {
 	CannotRun,
 	DEVICE_NAME,
@@ -92,6 +93,63 @@ describe("ui-check options", () => {
 		])
 			expect(() => parseOptions(argv)).toThrow(CannotRun)
 		expect(() => parseActions("wait:-1")).toThrow(CannotRun)
+	})
+
+	it("seeds recordings and measures a panel on the fake target only", () => {
+		expect(
+			parseOptions([
+				"--route=#/recordings",
+				"--seed-recordings=10000",
+				"--measure",
+			]),
+		).toMatchObject({ seedRecordings: 10_000, measure: true, built: false })
+		expect(parseOptions(["--built"]).built).toBe(true)
+		expect(parseOptions([])).toMatchObject({
+			seedRecordings: 0,
+			measure: false,
+		})
+		for (const argv of [
+			["--seed-recordings=0"],
+			["--seed-recordings=50001"],
+			["--seed-recordings=many"],
+			["--measure"],
+			["--route=#/settings", "--measure"],
+		])
+			expect(() => parseOptions(argv)).toThrow(CannotRun)
+		process.env["WAVEKIT_UI_CHECK_LIVE"] = "1"
+		expect(() =>
+			parseOptions([
+				"--target=live",
+				"--url=http://127.0.0.1:1/",
+				"--seed-recordings=5",
+			]),
+		).toThrow(/--target=fake/)
+		const live = [
+			"--target=live",
+			"--url=http://127.0.0.1:1/",
+			"--route=#/recordings",
+			"--measure",
+		]
+		expect(() => parseOptions(live)).toThrow(/--allow=measure/)
+		expect(parseOptions([...live, "--allow=measure"])).toMatchObject({
+			measure: true,
+			allowMeasure: true,
+			allow: [],
+		})
+		expect(parseOptions([...live, "--allow=pause,measure"]).allow).toEqual([
+			"pause",
+		])
+	})
+
+	it("names the panel a route opens", () => {
+		expect(panelOfRoute("#/recordings")).toBe("Recordings")
+		expect(panelOfRoute("#/activity/x?view=map")).toBe("Activity")
+		expect(panelOfRoute("#/settings")).toBeNull()
+		expect(panelOfRoute("")).toBeNull()
+		expect(viewOfRoute("#/recordings?view=messages")).toBe("#/messages")
+		expect(viewOfRoute("#/recordings")).toBe("#/")
+		expect(stats([3, 1, null, 2])).toEqual({ runs: 3, p50: 2, p95: 3, max: 3 })
+		expect(stats([])).toEqual({ runs: 0, p50: null, p95: null, max: null })
 	})
 
 	it("keeps the live target for the session that owns the live core", () => {

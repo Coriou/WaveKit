@@ -4057,8 +4057,11 @@ log limit; snapshot refusals are logged at debug, outside it). The codes are lis
 `SCANNER_RECORDER_DECISIONS` and explained in
 [SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings). Newer cores add the
 snapshot refusal `refused:close-only` (an observation classed `analog-fm` only by the snapshot
-that closed its track, while no recording ran for it), so a client should show an unknown code
-as it is rather than reject it. `discarded:unclassed` also ends a file of a recording classed
+that closed its track, while no recording ran for it) and the discards `discarded:known-non-voice`
+(a shadow on a channel with a recent pager or data decode that its own audio never classed) and
+`discarded:late-non-voice` (a finished or held file whose own signal a decode proved not voice
+after it ended) and `discarded:not-speech` (a finished file on a channel with a strong or decode-backed digital
+prior whose audio clearly measures as no speech), so a client should show an unknown code as it is rather than reject it. `discarded:unclassed` also ends a file of a recording classed
 only by its own audio when the whole file no longer holds that class at its end. `evicted`
 means the recording's slot went to another track: to a track classed `analog-fm`, or, for a
 recording classed only by its own audio past its hold, to any waiting track; such a recording
@@ -6448,11 +6451,18 @@ belong to the recording catalog, which stays gated.
 #### GET /api/recordings
 
 Re-authorized like the other protected operator routes; `Cache-Control:
-no-store`. Query: `limit` (1–200, default 50), `cursor` (opaque, at most 512
-characters), `kind` (`dsd-fme-call`, `scanner-dv`, `scanner-analog`) and
-`decoderId` (exact match). The query is checked strictly (unknown or repeated
-keys, `limit=10abc` or a malformed cursor answer 400
-`RECORDINGS_QUERY_INVALID`).
+no-store`; `Server-Timing: catalogue;dur=<ms>` gives the core time of the
+listing. Query: `limit` (1–200, default 50), `cursor` (opaque, at most 512
+characters), and these filters, all combined: `kind` (`dsd-fme-call`,
+`scanner-dv`, `scanner-analog`), `decoderId` (exact match), `kept` (`true` or
+`false`), `discoveryId` (its own folder and every folder it owns through
+merges), `talkgroup` and `source` (radio id; decimal digits), `minHz` and
+`maxHz` (integer Hz, inclusive; only recordings with a known frequency match),
+`since` and `until` (ISO-8601 with a zone, inclusive, on `modifiedAt`) and `q`
+(1 to 64 characters, case-insensitive, in the talkgroup, radio, decoder, kind,
+local start time or frequency in MHz; never in the opaque id). The query is
+checked strictly (unknown or repeated keys, `limit=10abc` or a malformed cursor
+answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
 
 ```json
 {
@@ -6469,18 +6479,36 @@ keys, `limit=10abc` or a malformed cursor answer 400
 			"callType": "group",
 			"talkgroup": "9",
 			"source": "2301234",
-			"frequencyHz": null
+			"frequencyHz": null,
+			"key": "dsd~20261016_141503_12345_DMR_GROUP_TGT_9_SRC_2301234.wav",
+			"ownerDiscoveryId": null
 		}
 	],
 	"nextCursor": null,
 	"scannedFiles": 1,
 	"truncated": false,
-	"scannedAt": "2026-10-16T12:16:00.000Z"
+	"scannedAt": "2026-10-16T12:16:00.000Z",
+	"revision": 12,
+	"indexing": false,
+	"matched": 1,
+	"counts": {
+		"total": 1,
+		"kept": 0,
+		"bytes": 288044,
+		"byKind": { "dsd-fme-call": 1, "scanner-dv": 0, "scanner-analog": 0 }
+	},
+	"truncatedBefore": null
 }
 ```
 
 - Order: newest `modifiedAt` first, ties by id; follow `nextCursor` (null on
-  the last page). Each item appears exactly once across pages.
+  the last page). Each item appears exactly once across pages. `matched` counts
+  the items the filters select (cursor aside); `counts` covers everything listed
+  whatever the filters (`total`, `kept`, `bytes`, `byKind`).
+- `key` is the stable keep key (`dsd~<call name>` or `scan:<recordingId>`):
+  unlike `id` it survives a renumbering of the dsd-fme directories.
+  `ownerDiscoveryId` is the live discovery owning the folder (through merges),
+  null when none does and for dsd-fme calls.
 - `kept` (optional in `@wavekit/api-types`; older cores omit it): true when
   the recording is kept, a delete of it is in progress, or the keep store is not
   usable (fail closed); read at list time.
@@ -6502,11 +6530,38 @@ keys, `limit=10abc` or a malformed cursor answer 400
   `TEMP_` files, live probe folders (`probe-*`), names that match neither the
   dsd-fme call pattern nor the scanner recording id, symbolic links and
   non-regular files. Files that vanish during a scan are skipped.
-- Bounds: at most 2 000 files examined per scan (`truncated` then true), at
-  most 4 KiB read per header, 8 filesystem operations in flight; the listing is
-  cached for 2 s and header results by path, size and mtime. Measured on the
-  Mac at the 2 000-file bound: about 290 ms cold and about 210 ms warm (every
-  rescan re-verifies each file; budgets 500 ms and 300 ms).
+- Catalogue: the list is served from memory, never from a walk of the disk per
+  request, and kept sorted as it changes (a listing never sorts). The core
+  builds the catalogue in the background at start, newest folders first; until
+  it is complete a listing waits at most 750 ms and then answers from what is
+  indexed with `indexing: true`. Writers keep it current without a rescan: a
+  scanner finalize or delete (the discovery's recording count changed),
+  retention (the scanner reports the folders it emptied), a deleted discovery
+  (its unkept files leave the list at once and the folders are checked again
+  10 s later), a merge (owner and frequency are read at list time), a dsd-fme
+  call that ended (only that decoder's directory, only newer calls), and Keep,
+  unkeep or delete (re-checked at once; the next listing waits for it). A file
+  still being written is listed once it is 10 s old. A slow reconcile re-reads
+  one folder at a time (20 ms between folders and between chunks of 256 names,
+  then 60 s of rest) and catches anything else, such as a file removed by hand.
+  `revision` changes with every change to what is listed, to `kept` or to an
+  owner. Every indexed file passed the download's checks when it was indexed;
+  the download checks again at request time.
+- Bounds: at most 50 000 recordings, newest first, enforced as files are
+  indexed. Past it only the oldest are left out: `truncated` is true and
+  `truncatedBefore` is the newest modification time left out. `truncated` is
+  also true past 20 000 recording folders (the folders changed least recently
+  are left out) or 100 000 names in one folder. At most 4 KiB read per header
+  and 8 filesystem operations in flight. Measured on the Mac with protection
+  on and a change (a new recording, a Keep, an owner change) before every
+  listing, host load about 85: at 10 000 files a page takes 1.6 ms (p50, 3.4 ms
+  p95) and a filtered page 3.6 ms (p50); at 50 000 files a page takes 13 ms
+  (p50, 20 ms p95) and a filtered page 25 ms (p50). No filesystem call once
+  warm; the first answer comes within 760 ms, marked `indexing`.
+- Live notices: the `recordings` WebSocket channel (protected mode only) sends
+  `recordings:changed` with `data` holding `revision`, `added`, `removed`,
+  `changed` and `indexing`: counts only, never an id, at most one a second.
+  Refetch the list.
 
 #### GET /api/recordings/:id/file
 
@@ -7686,7 +7741,8 @@ Channels: `decoders`, `sources`, `metrics`, `health`, `fanout`, `live-audio`,
 `vessels` (AIS vessel state, see [Vessels channel](#vessels-channel)), `aprs`
 (APRS stations, objects and items, see [APRS channel](#aprs-channel)), `mesh`
 (Meshtastic nodes, see [Mesh channel](#mesh-channel)), `aircraft` (ADS-B aircraft, see
-[Aircraft](#aircraft)) and `operator-data` (see [Operator data](#operator-data)).
+[Aircraft](#aircraft)), `operator-data` (see [Operator data](#operator-data)) and
+`recordings` (protected mode only, see [GET /api/recordings](#get-apirecordings)).
 `activity` is not one of these channels. It uses `activity:subscribe` and
 `activity:unsubscribe`. See [Activity](#activity).
 

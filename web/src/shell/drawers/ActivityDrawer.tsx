@@ -39,6 +39,7 @@ import { Chip } from "../../ui/Chip.tsx"
 import { Drawer } from "../../ui/Drawer.tsx"
 import { Icon } from "../../ui/Icon.tsx"
 import { Seg } from "../../ui/Seg.tsx"
+import { useRetryText } from "../../ui/Panel.tsx"
 import { Skeleton } from "../../ui/Skeleton.tsx"
 import { shellStore } from "../store.ts"
 import { showAppToast } from "../toast.ts"
@@ -461,6 +462,9 @@ function LayoutSwitch() {
 function Notices({ feed }: { feed: ActivityFeed }) {
 	const { activity } = useServices()
 	const status = useStore(feed, s => s.status)
+	const busy = useStore(feed, s => s.busy)
+	const retryAt = useStore(feed, s => s.retryAt)
+	const retry = useRetryText(retryAt)
 	const reset = useStore(feed, s => s.reset)
 	const error = useStore(feed, s => s.error)
 	const available = useStore(feed, s => s.available)
@@ -481,11 +485,12 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 	if (status === "error")
 		return (
 			<p className="wka-note" data-tone="warn">
-				Could not load Activity: {error}{" "}
+				Could not load Activity: {error}
+				{retry ? ` · ${retry}` : ""}{" "}
 				<button
 					type="button"
 					className="wka-link"
-					onClick={() => void feed.reload()}
+					onClick={() => void feed.retry()}
 				>
 					Try again
 				</button>
@@ -522,8 +527,14 @@ function Notices({ feed }: { feed: ActivityFeed }) {
 					<Skeleton
 						label={filtered || timed ? "matching events" : "what was heard"}
 						rows={6}
+						busy={busy}
 					/>
 				</div>
+			)}
+			{status === "loading" && !empty && busy && (
+				<p className="wka-note" data-tone="warn" role="status">
+					Still loading. WaveKit is busy.
+				</p>
 			)}
 			{status === "live" && ended && !empty && (
 				<p className="wka-note">

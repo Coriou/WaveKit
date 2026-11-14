@@ -143,7 +143,10 @@ import { toDecoderCoverageView } from "./core/scanner/plan/decoded-elsewhere.js"
 import { bandPlanSkipSources } from "./core/scanner/plan/bandplan-skips.js"
 import { ambientTrustFromBinding } from "./core/scanner/probes/ambient-trust.js"
 import { createBandPlanUrlFetcher } from "./core/bandplan-url/fetch.js"
-import { BANDPLAN_URL_IMPORT_HOSTS } from "@wavekit/api-types"
+import {
+	BANDPLAN_URL_IMPORT_HOSTS,
+	RECORDINGS_REQUIRES_ACCESS,
+} from "@wavekit/api-types"
 import { APP_VERSION } from "./api/routes/health.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
@@ -241,6 +244,7 @@ import { createStationEstimator } from "./core/station-estimate/provider.js"
 import { openStationService } from "./core/station/station-service.js"
 import { resolveSpectrumBinsCap } from "./core/spectrum/bin-cap.js"
 import { createRecordingInventory } from "./core/recordings/inventory.js"
+import { wireRecordingCatalogue } from "./core/recordings/catalogue-wiring.js"
 import { openRecordingKeepService } from "./core/recordings/keep-service.js"
 import { lateBoundRecordingProtection } from "./core/recordings/late-bound-protection.js"
 import type {
@@ -1906,6 +1910,10 @@ async function main(): Promise<void> {
 			},
 			discoveryCentreHz: id =>
 				scanner?.recordingFolderDiscovery(id)?.frequencyHz ?? null,
+			discoveryOwner: id => {
+				const owner = scanner?.recordingFolderDiscovery(id)
+				return owner ? { id: owner.id, frequencyHz: owner.frequencyHz } : null
+			},
 			logger,
 			protection: lateBoundRecordingProtection(() => recordingKeeps),
 		})
@@ -1923,6 +1931,7 @@ async function main(): Promise<void> {
 		})
 		recordingKeeps = keeps
 		own(67, () => keeps.close())
+		own(67, () => recordingInventory.close?.())
 		checkpoint()
 		setCallRecordingProtection(keeps, logger)
 
@@ -3035,6 +3044,28 @@ async function main(): Promise<void> {
 		checkpoint()
 
 		const wsBroadcaster = apiServer.getWebSocketBroadcaster()
+
+		// Recordings catalogue: built in the background from now on, kept current by the writers'
+		// events; `recordings:changed` notices only where the recordings routes exist (protected).
+		const recordingNotices = protectedMode && RECORDINGS_REQUIRES_ACCESS
+		if (recordingNotices) wsBroadcaster.enableRecordingsChannel()
+		const unwireRecordingCatalogue = wireRecordingCatalogue({
+			inventory: recordingInventory,
+			scanner,
+			digitalVoice,
+			...(recordingNotices
+				? {
+						broadcast: data =>
+							wsBroadcaster.broadcast("recordings", {
+								type: "recordings:changed",
+								channel: "recordings",
+								data,
+							}),
+					}
+				: {}),
+		})
+		own(67, unwireRecordingCatalogue)
+		void recordingInventory.start?.()
 
 		// Analog transmissions from the live demodulator's squelch (WG1 req 3, 4).
 		// Started before liveDemod.start(), so a later POST start is covered too.

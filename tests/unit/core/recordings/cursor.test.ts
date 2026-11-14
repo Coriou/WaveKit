@@ -9,7 +9,10 @@ import {
 	paginate,
 } from "../../../../src/core/recordings/cursor.js"
 import type { InventoryEntry } from "../../../../src/core/recordings/cursor.js"
-import { parseInventoryQuery } from "../../../../src/core/recordings/cursor.js"
+import {
+	defaultInventoryQuery,
+	parseInventoryQuery,
+} from "../../../../src/core/recordings/cursor.js"
 import { RECORDINGS_ID_MAX_LENGTH } from "../../../../src/core/recordings/inventory.js"
 
 const ID = "dsd:0~20250101_120000_00001_a.wav"
@@ -66,7 +69,13 @@ describe("cursor codec", () => {
 
 describe("parseInventoryQuery", () => {
 	it("defaults", () => {
-		const d = { limit: 50, cursor: null, kind: null, decoderId: null }
+		const d = defaultInventoryQuery()
+		expect(d).toMatchObject({
+			limit: 50,
+			cursor: null,
+			kind: null,
+			decoderId: null,
+		})
 		expect(parseInventoryQuery(undefined)).toEqual(d)
 		expect(parseInventoryQuery(null)).toEqual(d)
 		expect(parseInventoryQuery({})).toEqual(d)
@@ -81,10 +90,34 @@ describe("parseInventoryQuery", () => {
 				decoderId: "x",
 			}),
 		).toEqual({
+			...defaultInventoryQuery(),
 			limit: 200,
 			cursor: { m: 5, i: ID },
 			kind: "scanner-dv",
 			decoderId: "x",
+		})
+		expect(
+			parseInventoryQuery({
+				kept: "false",
+				discoveryId: "d_01ABC",
+				talkgroup: "9",
+				source: "2001",
+				minHz: "446000000",
+				maxHz: 446_100_000,
+				since: "2026-11-14T10:00:00Z",
+				until: "2026-11-14T12:00:00.5+01:00",
+				q: "  TG 9 ",
+			}),
+		).toMatchObject({
+			kept: false,
+			discoveryId: "d_01ABC",
+			talkgroup: "9",
+			source: "2001",
+			minHz: 446_000_000,
+			maxHz: 446_100_000,
+			sinceMs: Date.UTC(2026, 10, 14, 10),
+			untilMs: Date.UTC(2026, 10, 14, 11, 0, 0, 500),
+			q: "tg 9",
 		})
 		expect(parseInventoryQuery({ limit: 7 })?.limit).toBe(7)
 	})
@@ -113,7 +146,7 @@ describe("paginate", () => {
 		entry(20, "dsd:0~20250101_120000_00002_a.wav", "dsd-fme-call", "d2"),
 		entry(10, "dsd:0~20250101_120000_00003_a.wav"),
 	]
-	const base = { limit: 50, cursor: null, kind: null, decoderId: null }
+	const base = defaultInventoryQuery()
 	it("orders by mtime desc then id asc", () => {
 		const shuffled = [sorted[3]!, sorted[2]!, sorted[0]!, sorted[1]!]
 		expect([...shuffled].sort(compareEntries)).toEqual(sorted)
@@ -171,6 +204,7 @@ describe("paginate", () => {
 						.map(e => e.item.id)
 					const got: string[] = []
 					let q = {
+						...defaultInventoryQuery(),
 						limit,
 						cursor: null as { m: number; i: string } | null,
 						kind,

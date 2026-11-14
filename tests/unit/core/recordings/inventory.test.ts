@@ -17,20 +17,22 @@ import {
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import * as path from "node:path"
+import { EventEmitter } from "node:events"
 import { Readable } from "node:stream"
 import { setTimeout as delay } from "node:timers/promises"
 import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+	RECORDINGS_CATALOGUE_MAX,
+	RECORDINGS_CATALOGUE_MAX_FOLDERS,
 	RECORDINGS_HEADER_READ_BYTES,
 	RECORDINGS_IN_PROGRESS_MS,
 	RECORDINGS_SCAN_CONCURRENCY,
 	RECORDINGS_SCAN_MAX_FILES,
 } from "@wavekit/api-types"
+import type { RecordingsChangedEventData } from "@wavekit/api-types"
 import {
 	RECORDINGS_ID_MAX_LENGTH,
-	RECORDINGS_SCAN_MAX_DIRS,
-	RECORDINGS_SCAN_MAX_ENTRIES,
 	RecordingInventoryError,
 	createRecordingInventory,
 	nodeRecordingFs,
@@ -42,6 +44,7 @@ import type {
 	RecordingStats,
 } from "../../../../src/core/recordings/inventory.js"
 import type { Logger } from "../../../../src/utils/logger.js"
+import { wireRecordingCatalogue } from "../../../../src/core/recordings/catalogue-wiring.js"
 
 // ---------------------------------------------------------------------------------------------
 // Helpers
@@ -98,6 +101,8 @@ class FakeFs implements RecordingFsPort {
 	readonly nodes = new Map<string, FNode>()
 	readonly children = new Map<string, Set<string>>()
 	readonly real = new Map<string, string>()
+	/** Directory mtimes (default 0). */
+	readonly dirTimes = new Map<string, number>()
 	calls = 0
 	active = 0
 	maxActive = 0
@@ -154,13 +159,18 @@ class FakeFs implements RecordingFsPort {
 		}
 	}
 
-	private statsOf(n: FNode): RecordingStats {
+	private statsOf(n: FNode, p?: string): RecordingStats {
 		return {
 			isFile: () => n.t === "file",
 			isDirectory: () => n.t === "dir",
 			isSymbolicLink: () => n.t === "link",
 			size: n.t === "file" ? n.size : 0,
-			mtimeMs: n.t === "file" ? n.mtimeMs : 0,
+			mtimeMs:
+				n.t === "file"
+					? n.mtimeMs
+					: p !== undefined
+						? (this.dirTimes.get(p) ?? 0)
+						: 0,
 			dev: 1,
 			ino: n.ino,
 		}
@@ -204,7 +214,7 @@ class FakeFs implements RecordingFsPort {
 			this.lstats++
 			const n = this.nodes.get(p)
 			if (!n) throw errno("ENOENT")
-			return this.statsOf(n)
+			return this.statsOf(n, p)
 		})
 	}
 
@@ -584,7 +594,8 @@ describe("recordings inventory ids", () => {
 		const { logger, warn } = fakeLogger()
 		const page = await fakeInventory(fs, { logger }).list({})
 		expect(page.items.map(i => i.id)).toEqual([`dsd:0~${DSD("120000")}`])
-		expect(page.scannedFiles).toBe(2)
+		// scannedFiles counts the catalogue (the files listed), not the names examined
+		expect(page.scannedFiles).toBe(1)
 		expect(warn).not.toHaveBeenCalled()
 	})
 
@@ -695,9 +706,12 @@ describe("recordings inventory ids", () => {
 			},
 		}).list({})
 		expect(page.items[0]?.frequencyHz).toBeNull()
-		expect(warn).toHaveBeenCalledTimes(1)
-		const [fields] = warn.mock.calls[0] as [Record<string, unknown>]
-		expect(fields).toMatchObject({ sourceErrors: 1, lookupErrors: 1 })
+		// The build counts the source error; the listing (which reads owners from memory at list
+		// time) counts the lookup error.
+		expect(warn).toHaveBeenCalledTimes(2)
+		const fields = warn.mock.calls.map(c => c[0] as Record<string, unknown>)
+		expect(fields[0]).toMatchObject({ sourceErrors: 1, lookupErrors: 0 })
+		expect(fields[1]).toMatchObject({ sourceErrors: 0, lookupErrors: 1 })
 		expect(JSON.stringify(warn.mock.calls)).not.toContain("secret")
 	})
 
@@ -732,16 +746,43 @@ function manyFiles(n: number, mtimeMs = OLD): FakeFs {
 }
 
 describe("recordings inventory bounds", () => {
-	it("examines at most 2000 names", async () => {
-		const at = await fakeInventory(manyFiles(RECORDINGS_SCAN_MAX_FILES)).list(
-			{},
+	it("lists at most the catalogue bound, newest first, and says the oldest were left out", async () => {
+		expect(RECORDINGS_CATALOGUE_MAX).toBe(50_000)
+		const max = 40
+		const tree = (n: number): FakeFs => {
+			const fs = new FakeFs().dir("/r/dsd")
+			for (let i = 0; i < n; i++) {
+				const t = String(100000 + i).padStart(6, "0")
+				fs.file(`/r/dsd/20261016_${t}_01234_1_GROUP_TGT_1_SRC_2.wav`, OLD + i)
+			}
+			return fs
+		}
+		const at = await fakeInventory(tree(max), { catalogueMax: max }).list({
+			limit: 200,
+		})
+		expect(at).toMatchObject({
+			scannedFiles: max,
+			truncated: false,
+			truncatedBefore: null,
+		})
+		const overFs = tree(max + 1)
+		const overInv = fakeInventory(overFs, { catalogueMax: max })
+		const over = await overInv.list({ limit: 200 })
+		expect(over).toMatchObject({ scannedFiles: max, truncated: true })
+		// Only the oldest file (OLD + 0) is left out.
+		expect(over.truncatedBefore).toBe(new Date(OLD).toISOString())
+		expect(over.items.map(i => i.modifiedAt)).toEqual(
+			Array.from({ length: max }, (_, k) =>
+				new Date(OLD + max - k).toISOString(),
+			),
 		)
-		expect(at).toMatchObject({ scannedFiles: 2000, truncated: false })
-		const over = await fakeInventory(
-			manyFiles(RECORDINGS_SCAN_MAX_FILES + 1),
-		).list({ limit: 200 })
-		expect(over).toMatchObject({ scannedFiles: 2000, truncated: true })
-		expect(over.scannedAt).toBe(new Date(NOW).toISOString())
+		expect(over.counts?.total).toBe(max)
+		// A full re-read keeps the left-out file out without opening it again.
+		const opens = overFs.opens
+		overInv.invalidate?.()
+		const again = await overInv.list({ limit: 200 })
+		expect(again).toMatchObject({ scannedFiles: max, truncated: true })
+		expect(overFs.opens).toBe(opens)
 	})
 
 	it("keeps at most 8 fs operations in flight", async () => {
@@ -766,54 +807,26 @@ describe("recordings inventory bounds", () => {
 		expect(fs.readLengths).toEqual([RECORDINGS_HEADER_READ_BYTES])
 	})
 
-	// Every scan opens and verifies each candidate; the cache saves the header read.
-	it("caches headers by path, size and mtime", async () => {
-		let now = NOW
+	// The catalogue re-opens a file only when its lstat identity (dev, ino, size, mtime) changed.
+	it("re-reads a header only when the file changed", async () => {
 		const fs = new FakeFs().file(`/r/dsd/${DSD("120000")}`, OLD)
-		const inv = fakeInventory(fs, { now: () => now })
+		const inv = fakeInventory(fs)
 		await inv.list({})
 		expect(fs.readLengths.length).toBe(1)
-		now += 3000
+		inv.invalidate?.()
 		await inv.list({})
 		expect(fs.readLengths.length).toBe(1)
 		fs.file(`/r/dsd/${DSD("120000")}`, OLD + 1)
-		now += 3000
+		inv.invalidate?.()
 		await inv.list({})
 		expect(fs.readLengths.length).toBe(2)
 		fs.file(`/r/dsd/${DSD("120000")}`, OLD + 1, new Uint8Array(wav(8000)))
-		now += 3000
+		inv.invalidate?.()
 		expect((await inv.list({})).items[0]?.durationMs).toBe(500)
 		expect(fs.readLengths.length).toBe(3)
 	})
 
-	it("bounds the header cache at 4096 entries, oldest dropped", async () => {
-		let now = NOW
-		const fs = manyFiles(2000, OLD)
-		const inv = fakeInventory(fs, { now: () => now })
-		const setAll = (m: number): void => {
-			for (const n of fs.nodes.values()) if (n.t === "file") n.mtimeMs = m
-		}
-		for (const m of [OLD, OLD - 1, OLD - 2]) {
-			setAll(m)
-			await inv.list({})
-			now += 3000
-		}
-		expect(fs.readLengths.length).toBe(6000)
-		await inv.list({}) // OLD - 2: cached
-		expect(fs.readLengths.length).toBe(6000)
-		now += 3000
-		setAll(OLD - 1) // entries 2000..3999: still cached
-		await inv.list({})
-		expect(fs.readLengths.length).toBe(6000)
-		now += 3000
-		// 1904 of these were evicted; the pool inserts each miss as it goes, so those misses
-		// (first in name order) evict the 96 survivors before the workers reach them.
-		setAll(OLD)
-		await inv.list({})
-		expect(fs.readLengths.length).toBe(6000 + 2000)
-	})
-
-	it("shares one scan between concurrent lists and caches it for 2 s", async () => {
+	it("shares the first build between concurrent lists; a warm list makes no fs call", async () => {
 		let now = NOW
 		const fs = manyFiles(10)
 		fs.delayMs = 1
@@ -822,15 +835,12 @@ describe("recordings inventory bounds", () => {
 		expect(a.items).toHaveLength(10)
 		expect(b.items).toHaveLength(2)
 		expect(fs.readdirs).toBe(1)
-		now += 1999
+		const calls = fs.calls
+		now += 60_000
 		await inv.list({})
-		expect(fs.readdirs).toBe(1)
-		now += 1
-		await inv.list({})
-		expect(fs.readdirs).toBe(2)
-		now -= 10_000 // clock stepped back: rescan
-		await inv.list({})
-		expect(fs.readdirs).toBe(3)
+		now -= 120_000 // clock stepped back
+		await inv.list({ limit: 3 })
+		expect(fs.calls).toBe(calls)
 	})
 
 	it("re-reads sources on every scan", async () => {
@@ -965,44 +975,48 @@ describe("recordings inventory handle bounds and budgets", () => {
 		expect(fs.maxActive).toBeLessThanOrEqual(RECORDINGS_SCAN_CONCURRENCY)
 	})
 
-	it("enters at most 2000 discovery folders", async () => {
+	it("enters at most the folder bound, newest directory change first", async () => {
+		expect(RECORDINGS_CATALOGUE_MAX_FOLDERS).toBe(20_000)
+		const max = 30
 		const tree = (n: number): FakeFs => {
 			const fs = new FakeFs().dir("/r/dsd").dir("/r/scan/dv")
-			for (let i = 0; i < n; i++)
-				fs.dir(`/r/scan/dv/d_${String(i).padStart(5, "0")}`)
+			for (let i = 0; i < n; i++) {
+				const d = `/r/scan/dv/d_${String(i).padStart(5, "0")}`
+				fs.file(`${d}/x.wav`, OLD + i)
+				// a directory's mtime is its last entry change
+				fs.dirTimes.set(d, OLD + i)
+			}
 			return fs
 		}
-		const at = tree(RECORDINGS_SCAN_MAX_DIRS)
-		expect(await fakeInventory(at).list({})).toMatchObject({
-			scannedFiles: 0,
-			truncated: false,
-		})
-		const over = tree(RECORDINGS_SCAN_MAX_DIRS + 1)
-		expect(await fakeInventory(over).list({})).toMatchObject({
-			scannedFiles: 0,
-			truncated: true,
-		})
-		// dsd dir, root, dv and analog at most, plus one lstat per entered folder, plus the
-		// storage root's one-time pin lstat (WG9 R2, once per inventory, not per scan)
-		expect(over.lstats).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 5)
-		expect(over.readdirs).toBeLessThanOrEqual(RECORDINGS_SCAN_MAX_DIRS + 2)
+		const at = await fakeInventory(tree(max), {
+			catalogueMaxFolders: max,
+		}).list({ limit: 200 })
+		expect(at).toMatchObject({ scannedFiles: max, truncated: false })
+		const over = await fakeInventory(tree(max + 1), {
+			catalogueMaxFolders: max,
+		}).list({ limit: 200 })
+		expect(over).toMatchObject({ scannedFiles: max, truncated: true })
+		// The folder changed least recently is the one left out.
+		expect(over.items.map(i => i.discoveryId)).not.toContain("d_00000")
+		expect(over.items[0]?.discoveryId).toBe(`d_${String(max).padStart(5, "0")}`)
 	})
 
-	it("reads at most 16000 directory entries per scan", async () => {
-		expect(RECORDINGS_SCAN_MAX_ENTRIES).toBe(8 * RECORDINGS_SCAN_MAX_FILES)
+	it("reads at most twice the catalogue bound of names per folder", async () => {
+		const max = 10
 		const tree = (n: number): FakeFs => {
 			const fs = new FakeFs().dir("/r/dsd").file(`/r/dsd/${DSD("000000")}`, OLD)
 			for (let i = 1; i < n; i++)
 				fs.file(`/r/dsd/x${i}.txt`, OLD, new Uint8Array(0))
 			return fs
 		}
-		const at = await fakeInventory(tree(RECORDINGS_SCAN_MAX_ENTRIES)).list({})
+		const at = await fakeInventory(tree(2 * max), { catalogueMax: max }).list(
+			{},
+		)
 		expect(at).toMatchObject({ scannedFiles: 1, truncated: false })
-		const fs = tree(RECORDINGS_SCAN_MAX_ENTRIES + 1)
-		const over = await fakeInventory(fs).list({})
+		const over = await fakeInventory(tree(2 * max + 1), {
+			catalogueMax: max,
+		}).list({})
 		expect(over.truncated).toBe(true)
-		// the scan stopped: the scanner root was never visited
-		expect(fs.readdirs).toBe(1)
 	})
 
 	it("drops a FIFO or another file swapped in between lstat and open", async () => {
@@ -1305,6 +1319,8 @@ describe("recordings inventory WG9 kept and invalidate", () => {
 			talkgroup: "100",
 			source: "2001",
 			frequencyHz: null,
+			key: `dsd~${DSD("120000")}`,
+			ownerDiscoveryId: null,
 		},
 		{
 			id: "scan:d_x~call.wav",
@@ -1319,10 +1335,12 @@ describe("recordings inventory WG9 kept and invalidate", () => {
 			talkgroup: null,
 			source: null,
 			frequencyHz: 446_000_000,
+			key: "scan:d_x~call.wav",
+			ownerDiscoveryId: null,
 		},
 	]
 
-	it("without protection lists today's items exactly (golden, no kept property)", async () => {
+	it("without protection lists the items exactly (golden, no kept property)", async () => {
 		const page = await over(await setup()).list({})
 		const items = [...page.items].sort((a, b) => a.id.localeCompare(b.id))
 		expect(items).toStrictEqual(GOLDEN)
@@ -1388,5 +1406,447 @@ describe("recordings inventory WG9 kept and invalidate", () => {
 		expect(opened?.stat.dev).toBe(st.dev)
 		expect(opened?.stat.size).toBe(16_044)
 		await opened?.handle.close()
+	})
+})
+
+// ---------------------------------------------------------------------------------------------
+// The catalogue: newest first whatever the walk order, memory-only listings, writers
+
+/** Every page of a listing, following nextCursor. */
+async function allPages(
+	inv: ReturnType<typeof createRecordingInventory>,
+	query: Record<string, unknown> = {},
+): Promise<string[]> {
+	const ids: string[] = []
+	let cursor: string | null = null
+	for (let n = 0; n < 1000; n++) {
+		const page = await inv.list({
+			limit: 200,
+			...query,
+			...(cursor !== null ? { cursor } : {}),
+		})
+		ids.push(...page.items.map(i => i.id))
+		cursor = page.nextCursor
+		if (cursor === null) break
+	}
+	return ids
+}
+
+/**
+ * `folders` discovery folders under dv, `perFolder` files each. Folder ids ascend in walk order
+ * and so do the files' mtimes: the newest recordings sort last in directory order.
+ */
+function scannerTree(folders: number, perFolder: number): FakeFs {
+	const fs = new FakeFs().dir("/r/dsd").dir("/r/scan/dv")
+	let k = 0
+	for (let f = 0; f < folders; f++) {
+		const d = `/r/scan/dv/d_${String(f).padStart(5, "0")}`
+		for (let i = 0; i < perFolder; i++) fs.file(`${d}/r-${i}.wav`, OLD + k++)
+		fs.dirTimes.set(d, OLD + k)
+	}
+	return fs
+}
+
+describe("recordings catalogue", () => {
+	it("lists the newest recordings first past 2000 files, and every file exactly once across pages", async () => {
+		const fs = scannerTree(300, 8) // 2400 files
+		const inv = fakeInventory(fs)
+		const first = await inv.list({ limit: 50 })
+		expect(first.truncated).toBe(false)
+		expect(first.scannedFiles).toBe(2400)
+		expect(first.items[0]?.id).toBe("scan:d_00299~r-7.wav")
+		expect(first.items[0]?.modifiedAt).toBe(new Date(OLD + 2399).toISOString())
+		const ids = await allPages(inv)
+		expect(ids).toHaveLength(2400)
+		expect(new Set(ids).size).toBe(2400)
+		expect(ids[ids.length - 1]).toBe("scan:d_00000~r-0.wav")
+	})
+
+	it("at 10 000 recordings, warm listings, filters and pages make no fs call", async () => {
+		const fs = scannerTree(1500, 7) // 10 500 files
+		fs.file(`/r/dsd/${DSD("120000")}`, OLD)
+		const inv = fakeInventory(fs, { discoveryCentreHz: () => 446_006_250 })
+		expect((await inv.list({})).scannedFiles).toBe(10_501)
+		const calls = fs.calls
+		await allPages(inv)
+		await inv.list({ kind: "dsd-fme-call" })
+		await inv.list({ minHz: "446000000", maxHz: "446100000", q: "446.006" })
+		await inv.list({ discoveryId: "d_00042", kept: "false" })
+		expect(fs.calls).toBe(calls)
+	})
+
+	it("answers from a partial first build, marked indexing, with the newest folders first", async () => {
+		const fs = scannerTree(60, 8)
+		fs.delayMs = 2
+		const inv = fakeInventory(fs)
+		const t0 = performance.now()
+		const page = await inv.list({ limit: 5 })
+		expect(performance.now() - t0).toBeLessThan(5_000)
+		expect(page.indexing).toBe(true)
+		expect(page.scannedFiles).toBeLessThan(480)
+		expect(page.items[0]?.discoveryId).toBe("d_00059")
+		await inv.start?.()
+		const done = await inv.list({ limit: 5 })
+		expect(done.indexing).toBe(false)
+		expect(done.scannedFiles).toBe(480)
+	})
+
+	it("filters server side and counts the whole catalogue", async () => {
+		const fs = new FakeFs()
+			.file(`/r/dsd/${DSD("120000", "1_GROUP_TGT_446_SRC_2001")}`, OLD + 3)
+			.file(`/r/dsd/${DSD("120001", "1_GROUP_TGT_9_SRC_446")}`, OLD + 2)
+			.file("/r/scan/analog/d_01K446ZZ/analog-4466.wav", OLD + 1)
+			.file("/r/scan/dv/d_B/call.wav", OLD)
+		const owner: Record<string, { id: string; frequencyHz: number }> = {
+			d_01K446ZZ: { id: "d_B", frequencyHz: 466_012_500 },
+			d_B: { id: "d_B", frequencyHz: 466_012_500 },
+		}
+		const kept = new Set([`dsd~${DSD("120000", "1_GROUP_TGT_446_SRC_2001")}`])
+		const inv = fakeInventory(fs, {
+			discoveryOwner: id => owner[id] ?? null,
+			protection: {
+				isProtected: k => kept.has(k),
+				isDsdFmeFileProtected: () => true,
+				isScannerFileProtected: () => true,
+				discoveryHoldsKept: () => true,
+			},
+		})
+		const ids = async (q: Record<string, unknown>): Promise<string[]> =>
+			(await inv.list(q)).items.map(i => i.id)
+		const all = await inv.list({})
+		expect(all.counts).toEqual({
+			total: 4,
+			kept: 1,
+			bytes: 4 * WAV_1S.length,
+			byKind: { "dsd-fme-call": 2, "scanner-dv": 1, "scanner-analog": 1 },
+		})
+		expect(all.items.find(i => i.kind === "scanner-analog")).toMatchObject({
+			discoveryId: "d_01K446ZZ",
+			ownerDiscoveryId: "d_B",
+			frequencyHz: 466_012_500,
+		})
+		// "446" is in a talkgroup and a radio id, in the analog folder id and file name (never
+		// searched) and in no frequency: only the two calls match.
+		expect(await ids({ q: "446" })).toEqual([
+			`dsd:0~${DSD("120000", "1_GROUP_TGT_446_SRC_2001")}`,
+			`dsd:0~${DSD("120001", "1_GROUP_TGT_9_SRC_446")}`,
+		])
+		expect(await ids({ q: "466.0125" })).toHaveLength(2)
+		expect(await ids({ talkgroup: "446" })).toHaveLength(1)
+		expect(await ids({ source: "446" })).toHaveLength(1)
+		expect(await ids({ kept: "true" })).toHaveLength(1)
+		expect(await ids({ kept: "false" })).toHaveLength(3)
+		// a discovery matches its own folder and the folders it owns through merge aliases
+		expect(await ids({ discoveryId: "d_B" })).toEqual([
+			"scan:d_01K446ZZ~analog-4466.wav",
+			"scan:d_B~call.wav",
+		])
+		expect(await ids({ discoveryId: "d_01K446ZZ" })).toHaveLength(2)
+		expect(await ids({ minHz: 466_000_000, maxHz: 466_100_000 })).toHaveLength(
+			2,
+		)
+		expect(await ids({ maxHz: 400_000_000 })).toEqual([])
+		expect(
+			await ids({
+				since: new Date(OLD + 1).toISOString(),
+				until: new Date(OLD + 2).toISOString(),
+			}),
+		).toHaveLength(2)
+		const filtered = await inv.list({ kind: "dsd-fme-call", limit: 1 })
+		expect(filtered.matched).toBe(2)
+		expect(filtered.counts?.total).toBe(4)
+		expect(filtered.nextCursor).not.toBeNull()
+		for (const bad of [
+			{ kept: "yes" },
+			{ discoveryId: "probe-1" },
+			{ talkgroup: "9a" },
+			{ minHz: "-1" },
+			{ since: "2026-11-14" },
+			{ q: "" },
+			{ q: "x".repeat(65) },
+		])
+			await expect(inv.list(bad)).rejects.toBeInstanceOf(
+				RecordingInventoryError,
+			)
+	})
+
+	it("invalidate(id) re-checks only that file, and the next listing waits for it", async () => {
+		const name = DSD("120000")
+		const fs = manyFiles(50).file(`/r/dsd/${name}`, OLD)
+		const inv = fakeInventory(fs)
+		expect((await inv.list({})).scannedFiles).toBe(51)
+		fs.nodes.delete(`/r/dsd/${name}`)
+		fs.children.get("/r/dsd")?.delete(name)
+		const before = fs.calls
+		const rev = (await inv.list({})).revision ?? 0
+		inv.invalidate?.(`dsd:0~${name}`)
+		const page = await inv.list({ limit: 200 })
+		expect(page.scannedFiles).toBe(50)
+		expect(page.items.map(i => i.id)).not.toContain(`dsd:0~${name}`)
+		expect(page.revision).toBeGreaterThan(rev)
+		// the dsd directory check and one lstat: never a rescan
+		expect(fs.calls - before).toBeLessThanOrEqual(3)
+	})
+
+	it("lists a file still being written once it settled, by the injected clock", async () => {
+		let now = NOW
+		const name = DSD("120000")
+		const fs = new FakeFs().file(`/r/dsd/${name}`, NOW - 1_000)
+		const inv = fakeInventory(fs, { now: () => now })
+		expect((await inv.list({})).items).toHaveLength(0)
+		now += RECORDINGS_IN_PROGRESS_MS - 2_000
+		expect((await inv.list({})).items).toHaveLength(0)
+		now += 1_000
+		expect((await inv.list({})).items.map(i => i.id)).toEqual([`dsd:0~${name}`])
+	})
+
+	it("re-indexes a touched discovery and announces changes as counts only", async () => {
+		const fs = new FakeFs().dir("/r/dsd").file("/r/scan/dv/d_A/one.wav", OLD)
+		const inv = fakeInventory(fs)
+		const events: RecordingsChangedEventData[] = []
+		inv.onChange?.(e => events.push(e))
+		await inv.start?.()
+		fs.file("/r/scan/dv/d_A/two.wav", OLD + 1).file(
+			"/r/scan/analog/d_N/three.wav",
+			OLD + 2,
+		)
+		await inv.touchDiscoveries?.(["d_A", "d_N", "../x"])
+		const page = await inv.list({})
+		expect(page.items.map(i => i.id)).toEqual([
+			"scan:d_N~three.wav",
+			"scan:d_A~two.wav",
+			"scan:d_A~one.wav",
+		])
+		await vi.waitFor(
+			() => expect(events.at(-1)?.revision).toBe(page.revision),
+			{ timeout: 3_000 },
+		)
+		const last = events.at(-1)
+		expect(Object.keys(last ?? {}).sort()).toEqual([
+			"added",
+			"changed",
+			"indexing",
+			"removed",
+			"revision",
+		])
+		expect(events.reduce((n, e) => n + e.added, 0)).toBe(3)
+		inv.close?.()
+	})
+
+	it("keeps a folder a writer indexed while a full pass was still deriving its folders", async () => {
+		const fs = scannerTree(200, 1)
+		const inv = fakeInventory(fs)
+		await inv.start?.()
+		fs.delayMs = 2
+		let touched: Promise<void> | undefined
+		fs.afterReaddir = dir => {
+			if (dir !== "/r/scan/dv" || touched) return
+			// created after the pass listed the kind folder: the pass never sees it
+			fs.file("/r/scan/dv/d_NEW/new.wav", OLD + 10_000)
+			touched = inv.touchDiscoveries?.(["d_NEW"])
+		}
+		inv.invalidate?.()
+		await vi.waitFor(() => expect(touched).toBeDefined(), { timeout: 5_000 })
+		await touched
+		await vi.waitFor(() => expect(inv.status?.().refreshing).toBe(false), {
+			timeout: 20_000,
+			interval: 50,
+		})
+		const page = await inv.list({ limit: 1 })
+		expect(page.items[0]?.id).toBe("scan:d_NEW~new.wav")
+		expect(page.scannedFiles).toBe(201)
+	})
+
+	it("evicts past the bound while indexing, without a listing", async () => {
+		const max = 40
+		const fs = scannerTree(60, 1)
+		const inv = fakeInventory(fs, { catalogueMax: max })
+		await inv.start?.()
+		// Newest folders first: once 5 % over the bound the oldest were cut, and every older file
+		// after that was left out without being opened.
+		expect(fs.opens).toBeLessThanOrEqual(Math.ceil(max * 1.05) + 8)
+		expect(inv.status?.().files).toBe(max)
+		const page = await inv.list({ limit: 1 })
+		expect(page.truncated).toBe(true)
+		expect(page.items[0]?.id).toBe("scan:d_00059~r-0.wav")
+	})
+
+	it("drops a whole folder that became a symlink at the next re-index", async () => {
+		const fs = new FakeFs()
+			.dir("/r/dsd")
+			.file("/r/scan/dv/d_A/one.wav", OLD)
+			.file("/r/scan/dv/d_B/two.wav", OLD)
+		const inv = fakeInventory(fs)
+		expect((await inv.list({})).items).toHaveLength(2)
+		fs.link("/r/scan/dv/d_A")
+		await inv.touchDiscoveries?.(["d_A"])
+		expect((await inv.list({})).items.map(i => i.id)).toEqual([
+			"scan:d_B~two.wav",
+		])
+	})
+})
+
+// ---------------------------------------------------------------------------------------------
+// The incremental view and the writers' narrow refreshes
+
+describe("recordings catalogue view and writers", () => {
+	// Feature: recordings catalogue, Property: the incrementally kept view equals a full sort
+	// Validates: newest-first order and exactly-once pages after any adds, changes and removals
+	it("keeps the view equal to a full sort of the indexed files after any changes", async () => {
+		type Op = { f: number; i: number; t: number; del: boolean; dv: boolean }
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(
+					fc.record({
+						f: fc.integer({ min: 0, max: 3 }),
+						i: fc.integer({ min: 0, max: 5 }),
+						t: fc.integer({ min: 0, max: 4 }),
+						del: fc.boolean(),
+						dv: fc.boolean(),
+					}),
+					{ maxLength: 25 },
+				),
+				async (ops: Op[]) => {
+					const fs = new FakeFs().dir("/r/dsd").dir("/r/scan/dv")
+					const inv = fakeInventory(fs)
+					await inv.start?.()
+					const live = new Map<string, number>()
+					for (const op of ops) {
+						// one discovery can hold the same name under dv and analog: dv is listed
+						const kind = op.dv ? "dv" : "analog"
+						const d = `d_F${op.f}`
+						const p = `/r/scan/${kind}/${d}/r-${op.i}.wav`
+						if (op.del) {
+							fs.nodes.delete(p)
+							fs.children.get(path.dirname(p))?.delete(path.basename(p))
+							live.delete(p)
+						} else {
+							fs.file(p, OLD + op.t)
+							live.set(p, OLD + op.t)
+						}
+						// a full re-read goes through the same incremental add, change and remove
+						inv.invalidate?.()
+						await inv.list({ limit: 1 })
+					}
+					// expected: one entry per id (dv wins over analog), newest first, ties by id
+					const best = new Map<string, { m: number; dv: boolean }>()
+					for (const [p, m] of live) {
+						const [, , , kind, d, name] = p.split("/")
+						const id = `scan:${d}~${name}`
+						const dv = kind === "dv"
+						const cur = best.get(id)
+						if (!cur || (dv && !cur.dv)) best.set(id, { m, dv })
+					}
+					const want = [...best.entries()]
+						.sort(([ai, a], [bi, b]) =>
+							a.m !== b.m ? b.m - a.m : ai < bi ? -1 : ai > bi ? 1 : 0,
+						)
+						.map(([id]) => id)
+					expect(await allPages(inv, { limit: 3 })).toEqual(want)
+					const page = await inv.list({ limit: 200 })
+					expect(page.counts?.total).toBe(want.length)
+					expect(page.matched).toBe(want.length)
+					inv.close?.()
+				},
+			),
+			{ numRuns: 100 },
+		)
+	}, 120_000)
+
+	it("a call end reads only that decoder's directory and lstats only the newer call", async () => {
+		const fs = new FakeFs().dir("/r/other")
+		for (let i = 0; i < 300; i++)
+			fs.file(`/r/dsd/${DSD(String(100000 + i))}`, OLD + i)
+		fs.file(`/r/other/${DSD("100000")}`, OLD)
+		const inv = fakeInventory(fs, {
+			dsdFmeDirs: () => [
+				{ decoderId: "a", dir: "/r/dsd" },
+				{ decoderId: "b", dir: "/r/other" },
+			],
+		})
+		await inv.start?.()
+		fs.file(`/r/dsd/${DSD("120000")}`, OLD + 1_000)
+		const lstats = fs.lstats
+		const readdirs = fs.readdirs
+		await inv.touchCallRecordings?.("a")
+		// the directory check and the new call's lstat (plus its open-time directory check)
+		expect(fs.lstats - lstats).toBeLessThanOrEqual(3)
+		expect(fs.readdirs - readdirs).toBe(1)
+		const page = await inv.list({ limit: 1 })
+		expect(page.items[0]?.id).toBe(`dsd:0~${DSD("120000")}`)
+		expect(page.scannedFiles).toBe(302)
+	})
+
+	it("retention's removed files leave the list through the scanner's recordings-removed event", async () => {
+		const fs = new FakeFs()
+			.dir("/r/dsd")
+			.file("/r/scan/dv/d_A/one.wav", OLD)
+			.file("/r/scan/analog/d_B/two.wav", OLD)
+		const inv = fakeInventory(fs)
+		const scanner = new EventEmitter()
+		const unwire = wireRecordingCatalogue({ inventory: inv, scanner })
+		await inv.start?.()
+		fs.nodes.delete("/r/scan/analog/d_B/two.wav")
+		fs.children.get("/r/scan/analog/d_B")?.delete("two.wav")
+		const touched: string[][] = []
+		let done: Promise<void> | undefined
+		const original = inv.touchDiscoveries?.bind(inv)
+		inv.touchDiscoveries = ids => {
+			touched.push([...ids])
+			done = original?.(ids)
+			return done ?? Promise.resolve()
+		}
+		scanner.emit("recordings-removed", ["d_B"])
+		expect(touched).toEqual([["d_B"]])
+		await done
+		expect((await inv.list({})).items.map(i => i.id)).toEqual([
+			"scan:d_A~one.wav",
+		])
+		unwire()
+		inv.close?.()
+	})
+
+	it("a bulk eviction drops the deleted discoveries at once, keeps kept files, and never re-lists removed ones", async () => {
+		const fs = new FakeFs().dir("/r/dsd")
+		for (let i = 0; i < 30; i++) fs.file(`/r/scan/dv/d_E${i}/r.wav`, OLD + i)
+		fs.file("/r/scan/dv/d_LIVE/r.wav", OLD)
+		const kept = new Set(["scan:d_E7~r.wav"])
+		const inv = fakeInventory(fs, {
+			removedRecheckMs: 50,
+			protection: {
+				isProtected: k => kept.has(k),
+				isDsdFmeFileProtected: () => true,
+				isScannerFileProtected: () => true,
+				discoveryHoldsKept: () => true,
+			},
+		})
+		const scanner = new EventEmitter()
+		const unwire = wireRecordingCatalogue({ inventory: inv, scanner })
+		await inv.start?.()
+		const calls = fs.calls
+		for (let i = 0; i < 30; i++)
+			scanner.emit("discovery", {
+				change: "deleted",
+				discovery: { id: `d_E${i}`, evidence: { recordings: 1 } },
+			})
+		const now = (await inv.list({ limit: 200 })).items.map(i => i.id)
+		expect(now.sort()).toEqual(["scan:d_E7~r.wav", "scan:d_LIVE~r.wav"])
+		// dropped from memory: not one filesystem call
+		expect(fs.calls).toBe(calls)
+		// the scanner then removes the unkept files (the folder of a kept one stays)
+		for (let i = 0; i < 30; i++) {
+			if (i === 7) continue
+			fs.nodes.delete(`/r/scan/dv/d_E${i}/r.wav`)
+			fs.children.get(`/r/scan/dv/d_E${i}`)?.delete("r.wav")
+		}
+		await vi.waitFor(() => expect(fs.calls).toBeGreaterThan(calls), {
+			timeout: 3_000,
+		})
+		await delay(400)
+		expect(
+			(await inv.list({ limit: 200 })).items.map(i => i.id).sort(),
+		).toEqual(["scan:d_E7~r.wav", "scan:d_LIVE~r.wav"])
+		unwire()
+		inv.close?.()
 	})
 })

@@ -26,3 +26,15 @@ export function sameSlot(
 		a.gap?.w === b.gap?.w
 	)
 }
+
+/**
+ * The shell root's style beside a full-height drawer: `--wk-free-cx`, the centre of the free plot area, which
+ * the app toast and the plot's status notes centre on (shell.css, plot.css). None without one (they centre on
+ * the window).
+ */
+export function freeAreaStyle(
+	freeW: number | null,
+): Readonly<Record<"--wk-free-cx", string>> | undefined {
+	if (freeW === null || !(freeW > 0)) return undefined
+	return { "--wk-free-cx": `${Math.round(freeW / 2)}px` }
+}

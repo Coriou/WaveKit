@@ -519,14 +519,16 @@
 	/* the app toast: bottom centre, above the dock (or the phone's bottom row). Its own text width
 	   (max-content), not the half width left of `left: 50%`, so a long line is not wrapped into a box
 	   wider than its lines, which read off-centre; 560 px holds about 70 characters at 14 px. */
+	/* centred on the free area: beside a full-height drawer it is [0, 2 × --wk-free-cx] (Shell.tsx), 16 px
+	   from both its edges */
 	.wk-shell-toast {
 		position: absolute;
-		left: 50%;
+		left: var(--wk-free-cx, 50%);
 		bottom: 80px;
 		translate: -50% 0;
 		z-index: 12;
 		width: max-content;
-		max-width: min(560px, calc(100% - 32px));
+		max-width: min(560px, calc(2 * var(--wk-free-cx, 50%) - 32px));
 		height: auto;
 		min-height: var(--wk-h-touch);
 	}

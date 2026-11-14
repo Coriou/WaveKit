@@ -53,7 +53,12 @@ import { Dock } from "./Dock.tsx"
 import { PaneSlot } from "./PaneSlot.tsx"
 import { DRAWER_PANES, paneOf } from "./panes.ts"
 import { appToast, dismissAppToast } from "./toast.ts"
-import { overlaySlot, sameSlot, type OverlaySlot } from "./overlay-slot.ts"
+import {
+	freeAreaStyle,
+	overlaySlot,
+	sameSlot,
+	type OverlaySlot,
+} from "./overlay-slot.ts"
 import {
 	shellStore,
 	type Closed,
@@ -416,6 +421,9 @@ export function Shell({
 			className="wk-shell"
 			data-view={state.view}
 			data-resizing={resizing || undefined}
+			// the centre of the free plot area beside a full-height drawer: toasts and the plot's status notes
+			// centre there (shell.css, plot.css), never under the drawer
+			style={freeAreaStyle(freeW) as CSSProperties | undefined}
 		>
 			<div className="wk-shell-plot">
 				{plot ?? <div className="wk-plot-placeholder" aria-hidden="true" />}
@@ -568,12 +576,7 @@ export function Shell({
 				<CardAnnouncer />
 			</CardPlaceContext.Provider>
 
-			{!state.palette && (
-				<ShellToast
-					lifted={!L.dockHidden}
-					centre={freeW === null ? null : freeW / 2}
-				/>
-			)}
+			{!state.palette && <ShellToast lifted={!L.dockHidden} />}
 
 			{state.palette && (
 				<Suspense fallback={null}>
@@ -650,15 +653,8 @@ function CardTargets({
 	)
 }
 
-/** The app toast (src/shell/toast.ts): bottom centre, above the dock. */
-function ShellToast({
-	lifted,
-	centre,
-}: {
-	lifted: boolean
-	/** Centre of the free plot area beside a full-height drawer, else null (the window's centre). */
-	centre: number | null
-}) {
+/** The app toast (src/shell/toast.ts): bottom centre of the free area (`--wk-free-cx`), above the dock. */
+function ShellToast({ lifted }: { lifted: boolean }) {
 	const toast = useStore(appToast)
 	if (!toast) return null
 	return (
@@ -667,15 +663,6 @@ function ShellToast({
 			className="wk-toast wk-shell-toast"
 			data-tone={toast.tone}
 			data-lifted={lifted || undefined}
-			// beside a drawer the free area is [0, 2 × centre]: 16 px from both its edges, and the CSS 560 px cap
-			style={
-				centre === null
-					? undefined
-					: {
-							left: centre,
-							maxWidth: Math.min(560, Math.max(0, 2 * centre - 32)),
-						}
-			}
 		>
 			<span className="wk-shell-toast-text">{toast.text}</span>
 			{toast.action || toast.undo ? (
