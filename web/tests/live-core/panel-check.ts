@@ -15,14 +15,17 @@ export const PANELS: Readonly<Record<string, string>> = Object.freeze({
 	scanner: "Scanner",
 })
 
-/** The panel a hash route opens (`#/recordings`, `#/map/activity/...`), or null. */
+/** The panel a hash route opens (`#/recordings`, `#/activity/...?view=map`), or null. */
 export function panelOfRoute(route: string): string | null {
-	const parts = route.replace(/^#\/?/, "").split("/")
-	for (const p of parts) {
-		const title = PANELS[p]
-		if (title !== undefined) return title
-	}
-	return null
+	const head = route.replace(/^#\/?/, "").split("?")[0]?.split("/")[0] ?? ""
+	return PANELS[head] ?? null
+}
+
+/** The view a panel route opens over (`#/recordings?view=messages` → `#/messages`; none: `#/`). */
+export function viewOfRoute(route: string): string {
+	const query = route.split("?")[1] ?? ""
+	const view = new URLSearchParams(query).get("view")
+	return view === null || view === "spectrum" ? "#/" : `#/${view}`
 }
 
 export interface PanelLook {
@@ -335,10 +338,18 @@ export interface PanelBench {
 export async function benchPanel(
 	page: Page,
 	title: string,
-	options: { runs: number; reloads: number; scrollTarget: number },
+	options: {
+		runs: number
+		reloads: number
+		scrollTarget: number
+		/** The production build (vite preview), else the dev server. */
+		built: boolean
+	},
 ): Promise<PanelBench> {
 	const route = new URL(page.url())
-	await page.goto(`${route.origin}/#/`, { waitUntil: "load" })
+	// the view the route opens the panel over (`?view=messages`: no spectrum behind the panel)
+	const view = viewOfRoute(route.hash)
+	await page.goto(`${route.origin}/${view}`, { waitUntil: "load" })
 	await page.locator("#root > *").first().waitFor({ timeout: 60_000 })
 	await page.waitForTimeout(1500)
 	const heapMbBaseline = await heapMb(page)
@@ -357,7 +368,7 @@ export async function benchPanel(
 	}
 	const fresh: (number | null)[] = []
 	for (let i = 0; i < options.reloads; i++) {
-		await page.goto(`${route.origin}/#/`, { waitUntil: "load" })
+		await page.goto(`${route.origin}/${view}`, { waitUntil: "load" })
 		await page.locator("#root > *").first().waitFor({ timeout: 60_000 })
 		await page.waitForTimeout(1000)
 		fresh.push((await openOnce(page, title)).rows)
@@ -366,7 +377,9 @@ export async function benchPanel(
 	const scroll = await scrollBench(page, title, options.scrollTarget)
 	return {
 		panel: title,
-		note: "Vite dev server (unbundled modules), headless Chrome on this host; budgets are for the built app",
+		note: options.built
+			? "production build (vite preview), headless Chrome on this host"
+			: "Vite dev server (React development build: an upper bound), headless Chrome on this host; --built measures the production build",
 		coldOpen: { shellMs: cold.shell, rowsMs: cold.rows, paintMs: cold.paint },
 		shellMs: stats(shells),
 		rowsMs: stats(rows),

@@ -90,8 +90,10 @@ when not, 2 when it could not run. It needs a local Chrome or Chromium
   recordings (silence, made-up discovery ids) and waits for its catalogue before it looks.
 - `--measure` (with a panel route) measures the panel budgets: 20 opens from the dock (click to
   drawer, click to first row), 5 opens after a reload (fresh rows), one scroll to the end of the
-  list and back (tasks over 50 ms, most rows mounted) and the page heap, in `panelBench`. The
-  figures come from the dev server, so they are an upper bound for the built app.
+  list and back (tasks over 50 ms, most rows mounted) and the page heap, in `panelBench`. On the
+  dev server (React's development build) the figures are an upper bound; `--built` serves the
+  production build (`vite build`, then `vite preview`) to measure what users run. A panel route
+  with `?view=messages` measures over a view with no spectrum behind the panel.
 
 This fake target is the only one for lanes and delegated agents. `--target=live --url=<preview>`
 attaches to a running web server and is refused unless `WAVEKIT_UI_CHECK_LIVE=1`: it is for the

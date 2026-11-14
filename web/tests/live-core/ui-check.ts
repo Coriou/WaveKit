@@ -105,6 +105,8 @@ export interface Options {
 	measure: boolean
 	/** `--allow=measure`: the live target may be measured (it opens and scrolls the panel many times). */
 	allowMeasure: boolean
+	/** Fake target: the production build (vite build, then vite preview) instead of the dev server. */
+	built: boolean
 }
 
 /** The run cannot start or finish (exit 2); the message never holds a credential. */
@@ -148,12 +150,14 @@ export function parseOptions(argv: readonly string[]): Options {
 		seedRecordings: 0,
 		measure: false,
 		allowMeasure: false,
+		built: false,
 	}
 	for (const arg of argv) {
 		const [flag = "", ...rest] = arg.split("=")
 		const value = rest.join("=")
 		if (flag === "--screenshot" && rest.length === 0) options.screenshot = true
 		else if (flag === "--measure" && rest.length === 0) options.measure = true
+		else if (flag === "--built" && rest.length === 0) options.built = true
 		else if (flag === "--seed-recordings" && /^\d{1,6}$/.test(value)) {
 			const n = Number(value)
 			if (n < 1 || n > SEED_RECORDINGS_MAX)
@@ -227,8 +231,10 @@ export function parseOptions(argv: readonly string[]): Options {
 			throw new CannotRun(
 				`On the live target every action must be named in --allow: ${refused.map(a => a.name).join(", ")}`,
 			)
-		if (options.seedRecordings > 0)
-			throw new CannotRun("--seed-recordings belongs to --target=fake")
+		if (options.seedRecordings > 0 || options.built)
+			throw new CannotRun(
+				"--seed-recordings and --built belong to --target=fake",
+			)
 		if (options.measure && !options.allowMeasure)
 			throw new CannotRun(
 				"On the live target --measure must be named in --allow: --allow=measure",
@@ -520,15 +526,46 @@ async function act(page: Page, action: Action): Promise<string> {
 	}
 }
 
-/** The dev server as `pnpm dev` runs it, proxying to the fake core, which sees the browser's host name on its own port. */
-async function startDevServer(
+/**
+ * The production build served as `vite preview` serves it, with the same proxy to the fake core: what a
+ * user's browser runs (React's production build), for measurements.
+ */
+async function startBuiltServer(
 	port: number,
 	corePort: number,
-	cacheDir: string,
-): Promise<ViteDevServer> {
+	scratchDir: string,
+): Promise<{ close(): Promise<void> }> {
 	assertAllowedPort(port)
 	assertAllowedPort(corePort)
-	const { createServer } = await import("vite")
+	const { build, preview } = await import("vite")
+	const outDir = join(scratchDir, "dist")
+	await build({
+		root: webRoot,
+		logLevel: "silent",
+		cacheDir: join(scratchDir, "vite"),
+		build: { outDir, emptyOutDir: true },
+	})
+	const server = await preview({
+		root: webRoot,
+		logLevel: "silent",
+		build: { outDir },
+		preview: {
+			host: LOOPBACK,
+			port,
+			strictPort: true,
+			proxy: coreProxy(corePort),
+		},
+	})
+	return {
+		close: () =>
+			new Promise<void>(resolve => {
+				server.httpServer.close(() => resolve())
+			}),
+	}
+}
+
+/** /api, /health and /ws to the fake core, which sees the browser's host name on its own port. */
+function coreProxy(corePort: number): Record<string, ProxyOptions> {
 	const api = `http://${LOOPBACK}:${corePort}`
 	const withCorePort = (outgoing: ClientRequest, incoming: IncomingMessage) => {
 		const host = incoming.headers.host
@@ -543,6 +580,22 @@ async function startDevServer(
 			proxy.on("proxyReqWs", withCorePort)
 		},
 	})
+	return {
+		"/api": entry(api, false),
+		"/health": entry(api, false),
+		"/ws": entry(api.replace(/^http/, "ws"), true),
+	}
+}
+
+/** The dev server as `pnpm dev` runs it, proxying to the fake core, which sees the browser's host name on its own port. */
+async function startDevServer(
+	port: number,
+	corePort: number,
+	cacheDir: string,
+): Promise<ViteDevServer> {
+	assertAllowedPort(port)
+	assertAllowedPort(corePort)
+	const { createServer } = await import("vite")
 	const server = await createServer({
 		root: webRoot,
 		logLevel: "silent",
@@ -551,11 +604,7 @@ async function startDevServer(
 			host: LOOPBACK,
 			port,
 			strictPort: true,
-			proxy: {
-				"/api": entry(api, false),
-				"/health": entry(api, false),
-				"/ws": entry(api.replace(/^http/, "ws"), true),
-			},
+			proxy: coreProxy(corePort),
 		},
 	})
 	await server.listen()
@@ -598,7 +647,7 @@ export async function run(
 		await mkdir(shotDir, { recursive: true })
 	}
 	let core: RealCore | null = null
-	let dev: ViteDevServer | null = null
+	let dev: { close(): Promise<void> } | null = null
 	let browser: Browser | null = null
 	try {
 		let base: string
@@ -619,7 +668,9 @@ export async function run(
 						}
 					: {}),
 			})
-			dev = await startDevServer(port, core.apiPort, join(scratch, "vite"))
+			dev = options.built
+				? await startBuiltServer(port, core.apiPort, scratch)
+				: await startDevServer(port, core.apiPort, join(scratch, "vite"))
 		} else {
 			base = new URL(options.url ?? "").origin + "/"
 			if (options.accessDir !== null || options.tokenFile !== null)
@@ -832,6 +883,7 @@ export async function run(
 				runs: 20,
 				reloads: 5,
 				scrollTarget: Math.max(options.seedRecordings, 1),
+				built: options.built,
 			})
 			await shoot("3-after-measure")
 		}

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { afterEach, describe, expect, it } from "vitest"
 import { chromiumPath } from "./browser.ts"
-import { panelOfRoute, stats } from "./panel-check.ts"
+import { panelOfRoute, stats, viewOfRoute } from "./panel-check.ts"
 import {
 	CannotRun,
 	DEVICE_NAME,
@@ -102,7 +102,8 @@ describe("ui-check options", () => {
 				"--seed-recordings=10000",
 				"--measure",
 			]),
-		).toMatchObject({ seedRecordings: 10_000, measure: true })
+		).toMatchObject({ seedRecordings: 10_000, measure: true, built: false })
+		expect(parseOptions(["--built"]).built).toBe(true)
 		expect(parseOptions([])).toMatchObject({
 			seedRecordings: 0,
 			measure: false,
@@ -142,9 +143,11 @@ describe("ui-check options", () => {
 
 	it("names the panel a route opens", () => {
 		expect(panelOfRoute("#/recordings")).toBe("Recordings")
-		expect(panelOfRoute("#/map/activity/tg:9")).toBe("Activity")
+		expect(panelOfRoute("#/activity/x?view=map")).toBe("Activity")
 		expect(panelOfRoute("#/settings")).toBeNull()
 		expect(panelOfRoute("")).toBeNull()
+		expect(viewOfRoute("#/recordings?view=messages")).toBe("#/messages")
+		expect(viewOfRoute("#/recordings")).toBe("#/")
 		expect(stats([3, 1, null, 2])).toEqual({ runs: 3, p50: 2, p95: 3, max: 3 })
 		expect(stats([])).toEqual({ runs: 0, p50: null, p95: null, max: null })
 	})
