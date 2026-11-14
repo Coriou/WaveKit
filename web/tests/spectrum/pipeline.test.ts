@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
-import { SpectrumPipeline } from "../../src/spectrum/pipeline.ts"
+import {
+	RENDERER_FALLBACK_MS,
+	SpectrumPipeline,
+} from "../../src/spectrum/pipeline.ts"
 import {
 	DEFAULT_LAYOUT,
 	DEFAULT_LEVELS,
@@ -50,7 +53,11 @@ function setup(withCanvas: boolean, texWidth = MAX_BINS, started = true) {
 		type: "subscribe",
 		subscription: { sourceId: "rtl", hz: 25, bins: 2048 },
 	})
-	if (started) timers.advance(0)
+	if (started) {
+		// the socket opened and subscribed, then the renderer's own task ran
+		;(handlers as SocketHandlers | null)?.opened?.()
+		timers.advance(0)
+	}
 	posted.length = 0
 	const ofType = <T extends WorkerToMain["type"]>(type: T) =>
 		posted
@@ -331,18 +338,35 @@ describe("SpectrumPipeline probe", () => {
 describe("SpectrumPipeline: the stream does not wait for the renderer", () => {
 	const at = (n: number) => new Date(1_700_000_000_000 + n * 50).toISOString()
 
-	it("connects and subscribes before the renderer is created", () => {
+	it("creates no renderer until the socket has opened and subscribed", () => {
 		const t = setup(true, MAX_BINS, false)
-		expect(t.subs).toEqual([{ sourceId: "rtl", hz: 25, bins: 2048 }])
+		// the handshake is still on its way: tasks run, the renderer does not start
+		t.timers.advance(RENDERER_FALLBACK_MS - 1)
 		expect(t.widths).toEqual([])
 		expect(t.pipeline.rendering).toBe(false)
+		t.handlers()?.opened?.()
+		// not in the socket's own turn either
+		expect(t.widths).toEqual([])
 		t.timers.advance(0)
 		expect(t.widths).toEqual([MAX_BINS])
 		expect(t.pipeline.rendering).toBe(true)
 	})
 
+	it("starts the renderer after the fallback wait when the socket never opens", () => {
+		const t = setup(true, MAX_BINS, false)
+		t.timers.advance(RENDERER_FALLBACK_MS - 1)
+		expect(t.widths).toEqual([])
+		t.timers.advance(1)
+		expect(t.widths).toEqual([MAX_BINS])
+		// a socket that opens later starts no second one
+		t.handlers()?.opened?.()
+		t.timers.advance(RENDERER_FALLBACK_MS)
+		expect(t.widths).toEqual([MAX_BINS])
+	})
+
 	it("holds the rows that arrive meanwhile and draws them once the renderer is up", () => {
 		const t = setup(true, MAX_BINS, false)
+		t.handlers()?.opened?.()
 		for (let i = 0; i < 3; i++)
 			t.pipeline.onServer({
 				type: "spectrum:frame",
@@ -363,10 +387,13 @@ describe("SpectrumPipeline: the stream does not wait for the renderer", () => {
 		expect(t.renderer.rows.map(r => r.first)).toEqual([1, 2, 3, 9])
 	})
 
-	it("never creates a renderer for a worker disposed in the same turn", () => {
-		const t = setup(true, MAX_BINS, false)
-		t.pipeline.handle({ type: "dispose" })
-		t.timers.advance(1000)
-		expect(t.widths).toEqual([])
+	it("never creates a renderer for a worker disposed in the same turn, opened or not", () => {
+		for (const opens of [false, true]) {
+			const t = setup(true, MAX_BINS, false)
+			if (opens) t.handlers()?.opened?.()
+			t.pipeline.handle({ type: "dispose" })
+			t.timers.advance(10 * RENDERER_FALLBACK_MS)
+			expect(t.widths).toEqual([])
+		}
 	})
 })

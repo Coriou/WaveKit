@@ -43,6 +43,12 @@ import type {
 
 /** Meta is posted at most this often (ms). */
 export const META_INTERVAL_MS = 100
+/**
+ * The renderer starts this long (ms) after init when the socket has not opened by then (the core is
+ * down): a few handshake round trips on a slow link, and short enough that the plot is ready when
+ * the core comes back.
+ */
+export const RENDERER_FALLBACK_MS = 1500
 /** Fallback path: rows in flight to the main thread before new ones are dropped. */
 export const MAX_ROWS_IN_FLIGHT = 8
 
@@ -129,6 +135,8 @@ export class SpectrumPipeline {
 	private offscreen = false
 	/** The task that starts the renderer; null once it ran or was cancelled. */
 	private attachTimer: unknown = null
+	/** The transferred canvas whose renderer has not started yet. */
+	private pendingCanvas: OffscreenCanvas | null = null
 	/** The next frame's meta goes out at once (first frame after a reset). */
 	private metaFresh = true
 	/** `at` (ms) of the newest row held. */
@@ -271,6 +279,7 @@ export class SpectrumPipeline {
 		if (this.attachTimer !== null)
 			this.deps.timers.clearTimeout(this.attachTimer)
 		this.attachTimer = null
+		this.pendingCanvas = null
 		this.socket?.dispose()
 		this.socket = null
 		this.scheduler?.dispose()
@@ -290,24 +299,46 @@ export class SpectrumPipeline {
 		}
 		this.texWidth = Math.max(MAX_BINS, msg.texWidth)
 		this.history = new WaterfallHistory(msg.historyRows, this.texWidth)
-		this.socket = this.deps.openSocket(msg.wsUrl, {
-			message: m => this.onServer(m),
-			state: (state, info) => this.onLink(state, info),
-		})
-		if (this.sourcePaused) this.socket.setSourcePaused?.(true)
-		if (this.subscription) this.socket.setSubscription(this.subscription)
-		// The renderer starts in a task of its own, after the socket: creating the WebGL context and
-		// its shaders blocks this worker (seconds on a busy machine or a software GPU), and the stream
-		// must not wait for it. A worker disposed in the same turn (a throwaway mount) never starts
-		// one. Rows that arrive meanwhile are held and drawn as soon as it is up.
+		// The renderer starts only after the socket has opened and sent its subscribe: creating the
+		// WebGL context and its shaders blocks this worker (seconds on a busy machine or a software
+		// GPU), and a renderer started first would hold the handshake's open event, so the core would
+		// see a connection with no subscription for all that time. A socket that does not open still
+		// gets its renderer after RENDERER_FALLBACK_MS. A worker disposed first (a throwaway mount)
+		// never starts one. Rows that arrive meanwhile are held and drawn as soon as it is up.
 		const canvas = msg.canvas
 		if (canvas) {
 			this.offscreen = true
-			this.attachTimer = this.deps.timers.setTimeout(() => {
-				this.attachTimer = null
-				this.rebuild(canvas)
-			}, 0)
+			this.pendingCanvas = canvas
+			this.attachTimer = this.deps.timers.setTimeout(
+				() => this.startRenderer(),
+				RENDERER_FALLBACK_MS,
+			)
 		}
+		this.socket = this.deps.openSocket(msg.wsUrl, {
+			message: m => this.onServer(m),
+			state: (state, info) => this.onLink(state, info),
+			opened: () => this.onSocketOpened(),
+		})
+		if (this.sourcePaused) this.socket.setSourcePaused?.(true)
+		if (this.subscription) this.socket.setSubscription(this.subscription)
+	}
+
+	/** The subscribe is on its way: the renderer may start, in a task of its own. */
+	private onSocketOpened(): void {
+		if (this.pendingCanvas === null) return
+		if (this.attachTimer !== null)
+			this.deps.timers.clearTimeout(this.attachTimer)
+		this.attachTimer = this.deps.timers.setTimeout(
+			() => this.startRenderer(),
+			0,
+		)
+	}
+
+	private startRenderer(): void {
+		this.attachTimer = null
+		const canvas = this.pendingCanvas
+		this.pendingCanvas = null
+		if (canvas) this.rebuild(canvas)
 	}
 
 	/**

@@ -175,6 +175,8 @@ export interface LinkInfo {
 export interface SocketHandlers {
 	message: (msg: SpectrumServerMessage) => void
 	state: (state: SpectrumLinkState, info?: LinkInfo) => void
+	/** A socket opened and its subscribe (when there is a selection) was sent. */
+	opened?: () => void
 }
 
 export interface SpectrumSocketOptions {
@@ -393,6 +395,7 @@ export class SpectrumSocket {
 			this.failedConnects = 0
 			if (this.subscription) this.sendSubscribe(ws, this.subscription)
 			this.restartWatch()
+			this.handlers.opened?.()
 		}
 		ws.onmessage = event => {
 			if (typeof event.data !== "string") return

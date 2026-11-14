@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { SpectrumPipeline } from "../../src/spectrum/pipeline.ts"
+import {
+	RENDERER_FALLBACK_MS,
+	SpectrumPipeline,
+} from "../../src/spectrum/pipeline.ts"
 import {
 	DEFAULT_LAYOUT,
 	DEFAULT_LEVELS,
@@ -729,8 +732,8 @@ function pipelineOverSocket(authProbe: AuthProbe = probe(UNREACHABLE)) {
 		historyRows: 16,
 		texWidth: MAX_BINS,
 	})
-	// the renderer starts in its own task, after the socket
-	timers.advance(0)
+	// these cases are about the stream: the renderer is up before any socket opens (its fallback wait)
+	timers.advance(RENDERER_FALLBACK_MS)
 	const links = () =>
 		posted.flatMap(m => (m.type === "connection" ? [m.state] : []))
 	return { pipeline, renderer, posted, links }
@@ -812,6 +815,49 @@ describe("SpectrumPipeline over a reconnecting socket", () => {
 		// no live frame yet: the kick resubscribes at once
 		pipeline.handle({ type: "kick" })
 		expect(ws.subscribes).toBe(2)
+		pipeline.dispose()
+	})
+})
+
+describe("SpectrumPipeline: a socket that opens after a handshake", () => {
+	it("sends its subscribe before the renderer is created", () => {
+		const timers = new FakeTimers()
+		/** Subscribes on the wire at the moment the renderer was created. */
+		const sentAtRenderer: number[] = []
+		const pipeline = new SpectrumPipeline({
+			post: () => {},
+			openSocket: (url, handlers) =>
+				new SpectrumSocket(url, handlers, { authProbe: probe(UNREACHABLE) }),
+			createRenderer: () => {
+				sentAtRenderer.push(latest().subscribes)
+				return new FakeRenderer()
+			},
+			frame: new FakeFrames(),
+			timers,
+		})
+		pipeline.handle({ type: "subscribe", subscription: SUB })
+		pipeline.handle({
+			type: "init",
+			wsUrl: "ws://core/ws",
+			canvas: {} as OffscreenCanvas,
+			size: { widthCss: 100, heightCss: 100, dpr: 1 },
+			layout: DEFAULT_LAYOUT,
+			levels: DEFAULT_LEVELS,
+			ramp: new Uint8Array(1024),
+			historyRows: 16,
+			texWidth: MAX_BINS,
+		})
+		const ws = latest()
+		// the handshake takes a round trip: the worker's other tasks run meanwhile
+		timers.advance(RENDERER_FALLBACK_MS - 1)
+		expect(ws.subscribes).toBe(0)
+		expect(sentAtRenderer).toEqual([])
+		ws.open()
+		expect(ws.subscribes).toBe(1)
+		expect(sentAtRenderer).toEqual([])
+		timers.advance(0)
+		expect(sentAtRenderer).toEqual([1])
+		expect(pipeline.rendering).toBe(true)
 		pipeline.dispose()
 	})
 })
