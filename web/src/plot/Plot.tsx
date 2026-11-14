@@ -174,11 +174,13 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const tuner = useStore(data.tuner, s =>
 		sourceId === null ? undefined : s.bySource[sourceId],
 	)
+	const sessionId = useStore(data.access, s => s.session?.deviceId ?? null)
 	// the stream rests only while the core also says the receiver is down; any change kicks it
 	const stream = spectrumStream(
 		sourceId === null ? undefined : sources.find(x => x.id === sourceId),
 		sourceId === null ? undefined : feeds[sourceId],
 		tuner,
+		sessionId,
 	)
 	const liveStatus = useStore(data.liveAudio, s => s.status)
 	const plan = useStore(data.bandplan, s => s.view)

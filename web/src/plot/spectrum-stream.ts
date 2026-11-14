@@ -10,14 +10,20 @@ export interface SpectrumStreamHints {
 	 * a connected receiver streams, so it never counts as paused.
 	 */
 	paused: boolean
-	/** Changes whenever frames are due again or differ: receiver up or down, feed state, centre, rate. */
+	/**
+	 * Changes whenever frames are due again or differ: receiver up or down, feed state, centre,
+	 * rate, and this browser's session (a stream the core closed for a lost session starts again
+	 * as soon as the browser is paired, without a reload).
+	 */
 	resync: string
 }
 
+/** `session`: this browser's device id on a protected core; null when signed out or on a core without sessions. */
 export function spectrumStream(
 	row: Pick<ExtendedSourceStatus, "connected" | "feed"> | undefined,
 	entry: FeedEntry | undefined,
 	tuner: Pick<TunerState, "frequency" | "sampleRate"> | undefined,
+	session: string | null = null,
 ): SpectrumStreamHints {
 	const feed = feedOf(row, entry)
 	const connected = row?.connected === true
@@ -28,6 +34,7 @@ export function spectrumStream(
 			feed?.state ?? "none",
 			tuner?.frequency ?? "",
 			tuner?.sampleRate ?? "",
+			session ?? "",
 		].join(":"),
 	}
 }

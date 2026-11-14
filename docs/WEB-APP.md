@@ -41,8 +41,8 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
   page missed it (another browser resumed, or the page's connection dropped meanwhile); a resume,
   a retune, a sample-rate change or returning to the tab checks at once. If the page cannot reach
   the stream from the start, it reads `Spectrum stream not reachable · retrying…`. When the core
-  says this browser is no longer signed in, it stops and says so: pair the browser again, then
-  return to the tab or reload the page.
+  says this browser is no longer signed in, it stops and says so: pair the browser again and the
+  spectrum comes back, with no reload.
 - Right-click a signal for its menu, which includes **Decode as…** to try a decoder on it.
 - Signals close together share one tag with a count (`DMR · CC 1 +2`). Click it for a list of the
   grouped signals; each row has a **Tune** button.

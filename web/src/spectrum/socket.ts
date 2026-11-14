@@ -469,7 +469,7 @@ export class SpectrumSocket {
 				if (this.link === "live") return
 				const why = closeReason ? ` (${closeReason})` : ""
 				this.fail(
-					`Spectrum stream closed${why}: the core answers HTTP ${result.status ?? "401"}, so this browser is no longer signed in. Pair it again, then return to this tab or reload the page.`,
+					`Spectrum stream closed${why}: the core answers HTTP ${result.status ?? "401"}, so this browser is no longer signed in. Pair it again and the spectrum comes back.`,
 				)
 			},
 			() => {
