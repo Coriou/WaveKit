@@ -101,7 +101,20 @@ import {
 	VOICE_WINDOW_BLOCKS,
 } from "./voice-activity.js"
 import { RecorderDecisions, type ReceiptDetail } from "./recorder-decisions.js"
-import { notAnalogVoiceProtocol, type DecodedLabel } from "./voice-veto.js"
+import type { DecodedLabel } from "./voice-veto.js"
+import {
+	admissionVerdict,
+	decodeDuring,
+	finishVerdict,
+	LATE_VERDICT_GRACE_MS,
+	MAX_PROVISIONAL_PER_SOURCE,
+	notVoiceDecode,
+	barredSnapshot,
+	ownVetoEnds,
+	type OwnVeto,
+	type VoicePrior,
+	type Veto,
+} from "./recording-verdict.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 /** Same bound as the channel-tier trigger: a 25 kHz NFM channel's occupied bandwidth. */
@@ -627,6 +640,14 @@ export interface WidebandAnalogDeps {
 	 * it. Absent: no check.
 	 */
 	decodedLabel?(discoveryId: string): DecodedLabel | null
+	/**
+	 * The discovery's standing prior (recording-verdict.ts VoicePrior; DiscoveryStore.voicePrior):
+	 * a strong non-voice one refuses or discards a recording, a suspect one holds a written file
+	 * provisional for LATE_VERDICT_GRACE_MS. Absent: neither (only decodedLabel's checks).
+	 */
+	voicePrior?(discoveryId: string): VoicePrior | null
+	/** Runs `run` after `ms` (a provisional file's grace); returns a cancel. Default setTimeout. */
+	timer?(ms: number, run: () => void): () => void
 	logger: Logger
 	now(): number
 	/** Next-turn scheduler for drain slices; default setImmediate. */
@@ -1054,18 +1075,6 @@ function cleanTrack(track: TrackSnapshot): boolean {
 	return uncleanFlag(track) === null
 }
 
-/** Why a snapshot bars a recording (encrypted, opted out, unclean track), or null when it does not. */
-function barredSnapshot(
-	encrypted: boolean,
-	recordAllowed: boolean,
-	clean: boolean,
-): ScannerRecorderDecision | null {
-	if (encrypted) return "refused:encrypted"
-	if (!recordAllowed) return "refused:record-disabled"
-	if (!clean) return "refused:unclean"
-	return null
-}
-
 /** What counting one more snapshot does to a session (countSnapshot); snapshotBar commits it. */
 interface SnapshotCount {
 	readonly snapshots: number
@@ -1122,53 +1131,6 @@ function countSnapshot(
 }
 
 /**
- * Whether a snapshot's class discards the session (classify): a definite other class (a verified
- * decode, the channel tier) while the session is a shadow or classed by its own audio only.
- */
-/**
- * What evidence about a session's air time says (ownerVeto, decodeVeto): null, nothing; `own`,
- * its own signal is no analog voice (discarded); `joined`, a joined other transmission is (the
- * session ends at that join, the voice before it is kept).
- */
-type Veto = null | "own" | { readonly joined: string }
-
-/**
- * What an own veto of a session does (ownVeto), decided on timing, not on class: `refuse`, no
- * joined observation needs sparing, the whole session is discarded; `keep`, a joined observation
- * with voice evidence (a snapshot classed it analog-fm, or the session's own audio did while it
- * was on the air, Session.joinedVoice) overlaps the owner (started at or before its close, or the
- * owner is still open): not separable, the files overlapping [from, until] are kept (+∞: such a
- * voice is still open) and none other; `split`, joined observations started after the owner's
- * track closed: the owner's part (up to `at`, the first such one's start) is discarded and the
- * ones still on the air (`spare`, whatever their class) start their own session (splitAtVoice),
- * from their onset when the session is live, not parked and the ring holds `at` (`restart`).
- * Only a voice that has already closed (`voiced`) with no restart keeps the session, its files
- * ending by `at` discarded (ownVetoEnds).
- */
-type OwnVeto =
-	| { readonly kind: "refuse" }
-	| { readonly kind: "keep"; readonly from: number; readonly until: number }
-	| OwnVetoSplit
-
-/** OwnVeto's `split`. */
-interface OwnVetoSplit {
-	readonly kind: "split"
-	readonly at: number
-	readonly ownerLast: number
-	readonly restart: boolean
-	readonly voiced: boolean
-	readonly spare: readonly string[]
-}
-
-/** An own veto `own` ends its session (refuse, or a split that is not a kept closed voice). */
-function ownVetoEnds(own: OwnVeto): boolean {
-	return (
-		own.kind === "refuse" ||
-		(own.kind === "split" && (own.restart || !own.voiced))
-	)
-}
-
-/**
  * Voice evidence of joined `observationId` in `s` (Session.joinedVoice): a snapshot classed it
  * analog-fm, or the session's own audio classed it (classByTone) while it was on the air; `last`,
  * the newest sample its track was reported on.
@@ -1194,16 +1156,6 @@ function fileOverlaps(file: FileState, from: number, until: number): boolean {
 		file.startSample <= until &&
 		(file.endSample ?? Number.POSITIVE_INFINITY) > from
 	)
-}
-
-/** `d` was decoded at or after `from` (wall ms); an unknown time never was. */
-function decodedSince(d: DecodedLabel, from: number): boolean {
-	return d.at !== null && Number.isFinite(d.at) && d.at >= from
-}
-
-/** A proof that cites no observation of its own (none, or a channel anchor's `decode:` id). */
-function citesNoObservation(observationId: string | null): boolean {
-	return observationId === null || observationId.startsWith("decode:")
 }
 
 function classVetoes(s: Session, info: ClassInfo): boolean {
@@ -1296,6 +1248,14 @@ export function rememberWaiver(
 }
 
 /** Adds `id` to a bounded remembered set (the oldest entry goes past MAX_REMEMBERED). */
+const NO_JOINS: ReadonlySet<string> = new Set()
+
+function graceTimer(ms: number, run: () => void): () => void {
+	const t = setTimeout(run, ms)
+	t.unref()
+	return () => clearTimeout(t)
+}
+
 function remember(set: Set<string>, id: string): void {
 	set.add(id)
 	if (set.size > MAX_REMEMBERED) {
@@ -1320,6 +1280,10 @@ export class WidebandAnalogRecorder {
 	/** Operations not settled yet per source (a finishing file still holds an analog slot). */
 	private readonly unsettled = new Map<string, number>()
 	private readonly refused = new Set<string>()
+	/** Discoveries a decode- or channel-tier-backed digital class was seen on (MAX_REMEMBERED). */
+	private readonly strongDigital = new Set<string>()
+	/** Provisional files (finishOrHold), oldest first, with their session and grace cancel. */
+	private readonly held = new Map<FileState, [Session, () => void]>()
 	/**
 	 * Observations a classed, voiced recording keeps over a late spur or IQ-image flag
 	 * (keepsOverArtefact), until a veto or refusal of their session revokes it (revokeWaivers) or
@@ -1839,6 +1803,7 @@ export class WidebandAnalogRecorder {
 		for (const s of [...this.parked.values()])
 			this.dropParked(s, false, "discarded:park-expired")
 		for (const s of [...this.sessions.values()]) this.endSession(s, "shutdown")
+		for (const file of [...this.held.keys()]) this.release(file)
 		await this.idle()
 	}
 
@@ -2111,19 +2076,13 @@ export class WidebandAnalogRecorder {
 	 * session's own only when stamped at or after the owner's onset, with no pre-roll or skew.
 	 */
 	private decodeVeto(s: Session, discoveryId: string | null): Veto {
-		const d = this.notVoiceDecode(discoveryId)
-		if (
-			d === null ||
-			!decodedSince(d, this.airStart(s.engine, s.fs, s.vetoFrom))
+		return decodeDuring(
+			notVoiceDecode(this.deps.decodedLabel, discoveryId),
+			s.owner,
+			this.airStart(s.engine, s.fs, s.vetoFrom),
+			this.wallAt(s.engine, s.fs, s.onset),
+			s.joins,
 		)
-			return null
-		const by = d.observationId
-		if (by === s.owner) return "own"
-		if (citesNoObservation(by))
-			return decodedSince(d, this.wallAt(s.engine, s.fs, s.onset))
-				? "own"
-				: null
-		return by !== null && s.joins.has(by) ? { joined: by } : null
 	}
 
 	/**
@@ -2238,24 +2197,28 @@ export class WidebandAnalogRecorder {
 		return true
 	}
 
-	/** `discoveryId`'s (or its merge owner's) decoded label when it is not analog voice. */
-	private notVoiceDecode(discoveryId: string | null): DecodedLabel | null {
-		const lookup = this.deps.decodedLabel
-		if (discoveryId === null || lookup === undefined) return null
+	/** The standing prior of `discoveryId` and whether a strong digital class was seen on it. */
+	private priorOf(discoveryId: string | null): [VoicePrior | null, boolean] {
+		if (discoveryId === null || this.deps.voicePrior === undefined)
+			return [null, false]
+		let prior: VoicePrior | null = null
 		try {
-			const d = lookup(discoveryId)
-			return d !== null && notAnalogVoiceProtocol(d.protocol) ? d : null
+			prior = this.deps.voicePrior(discoveryId)
 		} catch {
-			// An unreadable answer proves nothing: today's behaviour.
-			return null
+			// An unreadable prior proves nothing: today's behaviour.
 		}
+		return [prior, this.strongDigital.has(discoveryId)]
 	}
 
 	private onTrack(input: WidebandTrackInput): void {
 		const { track, observationId } = input
 		// A refused observation may be associated only after its refusal: bind it on every snapshot.
-		if (input.discoveryId !== null)
+		if (input.discoveryId !== null) {
 			this.decisions.bindDiscovery(observationId, input.discoveryId)
+			// A digital class a decode or the channel tier backs: a strong prior of its discovery.
+			if (input.nonAnalog === true && input.digitalClass === true)
+				remember(this.strongDigital, input.discoveryId)
+		}
 		// Encrypted, opted out or unclean: never recorded, and a file it contributes to is discarded.
 		const barred = barredSnapshot(
 			input.encrypted,
@@ -2399,30 +2362,21 @@ export class WidebandAnalogRecorder {
 			return
 		}
 		const settings = this.deps.settings()
-		const decode = this.notVoiceDecode(input.discoveryId)
+		const preRoll = Math.round(
+			(Math.max(0, settings.preRollMs) * epoch.sampleRateHz) / 1000,
+		)
 		if (
-			decode !== null &&
-			(decode.observationId === observationId
-				? decodedSince(
-						decode,
-						this.airStart(
-							engine,
-							epoch.sampleRateHz,
-							track.startSample -
-								Math.round(
-									(Math.max(0, settings.preRollMs) * epoch.sampleRateHz) / 1000,
-								),
-						),
-					)
-				: citesNoObservation(decode.observationId) &&
-					decodedSince(
-						decode,
-						this.wallAt(engine, epoch.sampleRateHz, track.startSample),
-					))
+			decodeDuring(
+				notVoiceDecode(this.deps.decodedLabel, input.discoveryId),
+				observationId,
+				this.airStart(engine, epoch.sampleRateHz, track.startSample - preRoll),
+				this.wallAt(engine, epoch.sampleRateHz, track.startSample),
+				NO_JOINS,
+			) === "own" ||
+			admissionVerdict(...this.priorOf(input.discoveryId)) !== null
 		) {
-			// Decoded during this transmission (its pre-roll on): final, this observation is refused
-			// once, not looked up again per snapshot. An older decode (another transmission on a
-			// mixed-mode channel) or one of another observation refuses nothing.
+			// Decoded during this transmission (its pre-roll on), or a standing non-voice prior of
+			// its discovery (recording-verdict.ts): final, this observation is refused once.
 			remember(this.refused, observationId)
 			this.decisions.note("refused:not-analog", ref)
 			return
@@ -2869,6 +2823,7 @@ export class WidebandAnalogRecorder {
 			this.beginOp(s, file)
 			return
 		}
+		for (const [f, [o]] of [...this.held]) if (o === s) this.release(f)
 		if (s.waiting.length >= MAX_WAITING_FILES) {
 			// The store is not settling files: give up rather than hold more audio.
 			file.failed = true
@@ -4153,8 +4108,48 @@ export class WidebandAnalogRecorder {
 			this.flush(s, file, Number.POSITIVE_INFINITY)
 			return
 		}
-		file.finishAsked = true
-		void file.handle.finish(file.cut).catch(() => undefined)
+		// The session's last file so far may wait for its verdict (a later file ends the wait).
+		this.finishOrHold(s, file, s.file !== null || s.waiting.length > 0)
+	}
+
+	/**
+	 * Finishes a written file, discards it, or holds it provisional until its discovery's verdict
+	 * settles (recording-verdict.ts finishVerdict; `final`: no more holding). A held file keeps
+	 * its operation, so nothing is listed or kept by anyone before its grace ends.
+	 */
+	private finishOrHold(s: Session, file: FileState, final: boolean): void {
+		if (file.handle === null || file.failed || this.held.has(file)) return
+		const [prior, strongClass] = this.priorOf(s.discoveryId)
+		const ownTone = file.toneHz !== null
+		const verdict = this.deps.voicePrior
+			? finishVerdict({ prior, strongClass, ownTone, final })
+			: "finish"
+		if (verdict === "discarded:not-analog") {
+			this.endFile(s, file, verdict)
+			file.failed = true
+			this.fileLost(s)
+			file.handle.cancel("cancelled")
+		} else if (verdict === "hold") {
+			const run = this.deps.timer ?? graceTimer
+			this.held.set(file, [
+				s,
+				run(LATE_VERDICT_GRACE_MS, () => this.release(file)),
+			])
+			const mine = [...this.held].filter(([, [o]]) => o.sourceId === s.sourceId)
+			if (mine.length > MAX_PROVISIONAL_PER_SOURCE) this.release(mine[0]![0])
+		} else {
+			file.finishAsked = true
+			void file.handle.finish(file.cut).catch(() => undefined)
+		}
+	}
+
+	/** Ends a provisional file's grace: its final verdict (finishOrHold). */
+	private release(file: FileState): void {
+		const h = this.held.get(file)
+		if (h === undefined) return
+		this.held.delete(file)
+		h[1]()
+		this.finishOrHold(h[0], file, true)
 	}
 
 	/** Why a finished file that was never admitted is dropped (completeFinish). */

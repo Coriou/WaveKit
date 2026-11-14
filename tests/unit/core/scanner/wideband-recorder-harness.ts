@@ -27,6 +27,7 @@ import {
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import type { RecordingBinding } from "../../../../src/core/scanner/store/recording-operation.js"
 import type { DecodedLabel } from "../../../../src/core/scanner/channel/voice-veto.js"
+import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
 import { IqRing } from "../../../../src/core/spectrum/iq-ring.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
@@ -216,6 +217,8 @@ export function harness(
 		decodedProtocol?: (discoveryId: string) => string | null
 		/** The discovery's (or its merge owner's) decoded label (WidebandAnalogDeps). */
 		decodedLabel?: (discoveryId: string) => DecodedLabel | null
+		/** The discovery's standing prior (WidebandAnalogDeps.voicePrior). */
+		voicePrior?: (discoveryId: string) => VoicePrior | null
 		/**
 		 * The recorder's wall clock follows the fake engine's live edge (HARNESS_T0 at sample 0)
 		 * instead of standing still at HARNESS_T0.
@@ -238,6 +241,8 @@ export function harness(
 	const { ops, begin } = fakeOps(b => rec.bindingLive(b), opts)
 	const queue: (() => void)[] = []
 	const tones: { observationId: string; hz: number }[] = []
+	/** Provisional files' grace timers (WidebandAnalogDeps.timer): `fire` runs the due ones. */
+	const timers: { ms: number; run: () => void; live: boolean }[] = []
 	const warnings: unknown[] = []
 	const logger = pino({ level: "silent" })
 	const now = opts.liveClock
@@ -273,6 +278,14 @@ export function harness(
 		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
 		...(opts.tuningRefused ? { tuningRefused: opts.tuningRefused } : {}),
 		...(decodedLabel ? { decodedLabel } : {}),
+		...(opts.voicePrior ? { voicePrior: opts.voicePrior } : {}),
+		timer: (ms, run) => {
+			const t = { ms, run, live: true }
+			timers.push(t)
+			return () => {
+				t.live = false
+			}
+		},
 		logger,
 		now,
 		schedule: run => queue.push(run),
@@ -320,8 +333,15 @@ export function harness(
 			await pump()
 		}
 	}
+	/** Runs every pending grace timer (the grace ended), then lets the finishes settle. */
+	const fire = async (): Promise<void> => {
+		for (const t of timers.splice(0)) if (t.live) t.run()
+		await microtasks(16)
+	}
 	return {
 		engine,
+		timers,
+		fire,
 		ops,
 		begin,
 		rec,

@@ -47,6 +47,7 @@ import {
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
+import type { VoicePrior } from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
 import {
@@ -4048,6 +4049,44 @@ export class DiscoveryStore
 			answer,
 		})
 		return answer
+	}
+
+	/**
+	 * The analog recorder's standing prior of `folderId`'s live owner (folderOwner; recording-verdict.ts
+	 * VoicePrior): the published labels (ownerLabel, cached) of the owner and of up to
+	 * DQ_CO_CHANNEL_MAX (8) live co-channel discoveries, the owner's stored class, and a lazy read of
+	 * analog voice heard on them: an `analog-tone` or `analog-voice` proof of any of their
+	 * observations (cached per observation; at most 9 × OBSERVATIONS_PER_DISCOVERY 256 = 2 304
+	 * reads, only when asked). Undefined for a folder nobody owns. Reads only.
+	 */
+	voicePrior(folderId: string): VoicePrior | undefined {
+		const owner = this.folderOwner(folderId)
+		const d = owner === undefined ? undefined : this.discoveries.get(owner)
+		if (d === undefined) return undefined
+		const partners = Array.isArray(d.coChannel) ? d.coChannel : []
+		const ids = [
+			d.id,
+			...partners
+				.filter(id => id !== d.id && this.discoveries.has(id))
+				.slice(0, DQ_CO_CHANNEL_MAX),
+		]
+		const labels = ids.flatMap(id => {
+			const label = this.ownerLabel(id)
+			return label === undefined
+				? []
+				: [{ protocol: label.protocol, confidence: label.confidence }]
+		})
+		return {
+			labels,
+			class: d.class,
+			analogVoice: () =>
+				ids.some(id =>
+					(this.byDiscovery.get(id) ?? []).some(o => {
+						const kind = this.observationAssessment(o).proof?.kind
+						return kind === "analog-tone" || kind === "analog-voice"
+					}),
+				),
+		}
 	}
 
 	/**
