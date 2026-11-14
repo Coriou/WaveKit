@@ -8,13 +8,18 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import Fastify from "fastify"
 import { afterEach, describe, expect, it } from "vitest"
+import type { RecordingInventoryPage } from "@wavekit/api-types"
+import { recordingRoutes } from "../../../../src/api/routes/recordings.js"
 import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
 import { recordingFolderDiscovery } from "../../../../src/core/scanner/recording-aliases.js"
+import type { ScannerService } from "../../../../src/core/scanner/scanner-service.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { StoreSnapshot } from "../../../../src/core/scanner/store/discovery-store.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
+import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 
 const CH = 446_006_250
 const PMR = [{ spacingHz: 12_500, firstChannelHz: CH }]
@@ -192,5 +197,58 @@ describe("GET /api/recordings items resolve the folder's owner (inventory wiring
 			page.items.find(i => i.id === `scan:${dropped}~a-1.wav`)?.discoveryId,
 		).toBe(dropped)
 		expect(freq("d_ORPHAN")).toBeNull()
+	})
+})
+
+describe("GET /api/recordings through a real ScannerService (index.ts lambda shape)", () => {
+	it("a recording under a merged discovery's folder lists the owner's frequencyHz", async () => {
+		const merged = newStore()
+		const { survivor, dropped } = mergedPair(merged)
+		const h = serviceHarness()
+		const scanner: ScannerService | null = h.service
+		;(scanner as unknown as { store: DiscoveryStore }).store.restore(
+			merged.snapshot(),
+		)
+		const owner = scanner.getDiscovery(survivor)?.frequencyHz
+		expect(owner).toBeGreaterThan(0)
+		// getDiscovery answers live ids only: the old wiring listed null here.
+		expect(scanner.getDiscovery(dropped)).toBeUndefined()
+
+		const root = await mkdtemp(join(tmpdir(), "wk-rec-owner-route-"))
+		roots.push(root)
+		await mkdir(join(root, "analog", dropped), { recursive: true })
+		await writeFile(join(root, "analog", dropped, "a-1.wav"), wav(16_000))
+		const inventory = createRecordingInventory({
+			dsdFmeDirs: () => [],
+			scannerRecordingsDir: () => root,
+			// The production lambda in src/index.ts, verbatim.
+			discoveryCentreHz: id =>
+				scanner?.recordingFolderDiscovery(id)?.frequencyHz ?? null,
+			now: () => Date.now() + 60_000,
+			logger: quiet,
+		})
+		const app = Fastify({ logger: false })
+		try {
+			await app.register(recordingRoutes, {
+				inventory,
+				authorize: () => undefined,
+				access: {
+					leaseDownload: () => ({
+						kind: "attached",
+						active: () => true,
+						release: () => undefined,
+					}),
+				},
+			})
+			const res = await app.inject({ method: "GET", url: "/api/recordings" })
+			expect(res.statusCode).toBe(200)
+			const item = res
+				.json<RecordingInventoryPage>()
+				.items.find(i => i.id === `scan:${dropped}~a-1.wav`)
+			expect(item?.frequencyHz).toBe(owner)
+			expect(item?.discoveryId).toBe(dropped)
+		} finally {
+			await app.close()
+		}
 	})
 })
