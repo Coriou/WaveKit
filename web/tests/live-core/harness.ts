@@ -217,6 +217,51 @@ async function buildCore(dir: string): Promise<string> {
 	return join(dir, "index.js")
 }
 
+/**
+ * Provisions a private access directory with the core's own storage code (bundled like the core,
+ * run as a child) and returns the machine token it issued.
+ */
+async function provisionAccess(
+	buildDir: string,
+	directory: string,
+	env: NodeJS.ProcessEnv,
+): Promise<string> {
+	const require = createRequire(join(repository, "package.json"))
+	const { build } = require("esbuild") as typeof Esbuild
+	const outfile = join(buildDir, "provision.js")
+	await build({
+		absWorkingDir: repository,
+		stdin: {
+			contents: `import { PrivateAccessStorage } from "./src/access/private-storage.ts"
+const storage = await PrivateAccessStorage.open({
+	directory: process.argv[2],
+	mode: "provision",
+	ownership: "single-host-pid-namespace",
+})
+process.stdout.write(storage.useMachineCredential(value => value))
+await storage.close()
+`,
+			resolveDir: repository,
+			loader: "ts",
+		},
+		bundle: true,
+		outfile,
+		platform: "node",
+		format: "esm",
+		packages: "external",
+		logLevel: "silent",
+	})
+	const { stdout } = await promisify(execFile)(
+		process.execPath,
+		[outfile, directory],
+		{ env, timeout: 30_000 },
+	)
+	const token = stdout.trim()
+	if (!/^[A-Za-z0-9_-]{43}$/.test(token))
+		throw new Error("Provisioning returned no machine token")
+	return token
+}
+
 export interface RealCore {
 	/** http://127.0.0.1:<port> */
 	readonly base: string
@@ -227,6 +272,8 @@ export interface RealCore {
 	post(path: string, body?: unknown): Promise<{ status: number; body: unknown }>
 	/** GET /api/spectrum `subscribers`. */
 	subscribers(): Promise<number>
+	/** A protected core's one-time browser pairing code; rejects on a legacy core. */
+	pairingCode(): Promise<string>
 	output(): string
 	stop(): Promise<void>
 }
@@ -316,6 +363,12 @@ export async function assertLoopbackListeners(pid: number): Promise<void> {
 export interface RealCoreOptions {
 	/** Run the scanner (its jobs hold the spectrum engine, as on a production core). Default false. */
 	scanner?: boolean
+	/**
+	 * Protected access over local HTTP: the page origins (http://127.0.0.1:<port>) the core accepts
+	 * beside its own. The only Host it accepts is its own 127.0.0.1:<api port>, so a proxy in front
+	 * sends that. get(), post() and subscribers() then carry the machine token. Default: legacy.
+	 */
+	protectedOrigins?: readonly string[]
 }
 
 export async function startRealCore(
@@ -355,6 +408,23 @@ async function launch(
 	await mkdir(stateDir, { mode: 0o700 })
 	await writeFile(join(root, "empty.env"), "")
 	const configFile = join(root, "config.yaml")
+	const baseEnv: NodeJS.ProcessEnv = {
+		PATH: process.env["PATH"] ?? "",
+		HOME: root,
+		NODE_ENV: "test",
+		DOTENV_CONFIG_PATH: join(root, "empty.env"),
+		DOTENV_CONFIG_QUIET: "true",
+	}
+	const tmp = process.env["TMPDIR"]
+	if (tmp !== undefined) baseEnv["TMPDIR"] = tmp
+	const pageOrigins = options.protectedOrigins
+	const accessDir = join(root, "access")
+	const token =
+		pageOrigins === undefined
+			? null
+			: await provisionAccess(buildDir, accessDir, baseEnv)
+	const auth: Record<string, string> =
+		token === null ? {} : { authorization: `Bearer ${token}` }
 
 	for (let attempt = 1; ; attempt++) {
 		const taken = new Set<number>([upstream.port])
@@ -393,21 +463,41 @@ async function launch(
 			liveDemod: { enabled: false, httpPort: ports.liveDemod },
 			digitalVoice: { enabled: false, httpPort: ports.digitalVoice },
 			logging: { level: "info" },
-			access: { mode: "legacy" },
+			access:
+				pageOrigins === undefined
+					? { mode: "legacy" }
+					: {
+							mode: "protected",
+							listenerScheme: "http",
+							exposure: "local-http",
+							allowedAuthorities: [`${LOOPBACK}:${api}`],
+							allowedOrigins: [`http://${LOOPBACK}:${api}`, ...pageOrigins],
+							audio: {
+								analog: {
+									allowedAuthorities: [`${LOOPBACK}:${ports.liveDemod}`],
+									bindHost: LOOPBACK,
+								},
+								digital: {
+									allowedAuthorities: [`${LOOPBACK}:${ports.digitalVoice}`],
+									bindHost: LOOPBACK,
+								},
+							},
+							publicOrigins: {
+								api: `http://${LOOPBACK}:${api}`,
+								analogAudio: `http://${LOOPBACK}:${ports.liveDemod}`,
+								digitalAudio: `http://${LOOPBACK}:${ports.digitalVoice}`,
+							},
+							healthProbe: {
+								target: `http://${LOOPBACK}:${api}`,
+								host: `${LOOPBACK}:${api}`,
+							},
+						},
 		}
 		for (const port of [upstream.port, api, ...Object.values(ports)])
 			assertAllowedPort(port)
 		await writeFile(configFile, JSON.stringify(config))
-		const env: NodeJS.ProcessEnv = {
-			PATH: process.env["PATH"] ?? "",
-			HOME: root,
-			NODE_ENV: "test",
-			WAVEKIT_CONFIG: configFile,
-			DOTENV_CONFIG_PATH: join(root, "empty.env"),
-			DOTENV_CONFIG_QUIET: "true",
-		}
-		const tmp = process.env["TMPDIR"]
-		if (tmp !== undefined) env["TMPDIR"] = tmp
+		const env: NodeJS.ProcessEnv = { ...baseEnv, WAVEKIT_CONFIG: configFile }
+		if (token !== null) env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] = accessDir
 		const child: ChildProcess = spawn(process.execPath, [entry], {
 			cwd: root,
 			env,
@@ -479,33 +569,43 @@ async function launch(
 		}
 		const base = `http://${LOOPBACK}:${api}`
 		const get = async (path: string): Promise<unknown> => {
-			const res = await fetch(base + path, { cache: "no-store" })
+			const res = await fetch(base + path, { cache: "no-store", headers: auth })
 			return (await res.json()) as unknown
+		}
+		const post = async (
+			path: string,
+			body?: unknown,
+		): Promise<{ status: number; body: unknown }> => {
+			const res = await fetch(base + path, {
+				method: "POST",
+				headers:
+					body === undefined
+						? auth
+						: { ...auth, "content-type": "application/json" },
+				...(body === undefined ? {} : { body: JSON.stringify(body) }),
+			})
+			const text = await res.text()
+			return {
+				status: res.status,
+				body: text ? (JSON.parse(text) as unknown) : null,
+			}
 		}
 		return {
 			base,
 			apiPort: api,
 			upstream,
 			get,
-			post: async (path, body) => {
-				const res = await fetch(base + path, {
-					method: "POST",
-					...(body === undefined
-						? {}
-						: {
-								headers: { "content-type": "application/json" },
-								body: JSON.stringify(body),
-							}),
-				})
-				const text = await res.text()
-				return {
-					status: res.status,
-					body: text ? (JSON.parse(text) as unknown) : null,
-				}
-			},
+			post,
 			subscribers: async () => {
 				const body = (await get("/api/spectrum")) as { subscribers?: unknown }
 				return typeof body.subscribers === "number" ? body.subscribers : 0
+			},
+			pairingCode: async () => {
+				const issued = await post("/api/access/pairing-codes", {})
+				const code = (issued.body as { code?: unknown } | null)?.code
+				if (issued.status !== 201 || typeof code !== "string")
+					throw new Error(`No pairing code: HTTP ${issued.status}`)
+				return code
 			},
 			output: () => out,
 			stop: async () => {
