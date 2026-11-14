@@ -10,6 +10,7 @@ import {
 	VOICE_GATE_HIGH_PASS_HZ,
 	VOICE_MIN_FINAL_FRAMES,
 	VOICE_MIN_RMS,
+	VOICE_MIN_WINDOWS,
 	VOICE_WINDOW_BLOCKS,
 	VoiceActivityGate,
 	VoiceOnAirMeter,
@@ -48,14 +49,59 @@ describe("VoiceActivityGate", () => {
 		).toBe(false)
 	})
 
-	it("decides only on a full window of VOICE_WINDOW_BLOCKS blocks", () => {
-		const loud = tone(700, 8000, WINDOW)
+	it(`decides on full windows of VOICE_WINDOW_BLOCKS blocks, latching at the ${VOICE_MIN_WINDOWS}th voiced one`, () => {
+		// Windows slide by one block: the 3rd completes VOICE_MIN_WINDOWS − 1 blocks past the first.
+		const latch = WINDOW + (VOICE_MIN_WINDOWS - 1) * VOICE_BLOCK_FRAMES
+		const loud = tone(700, 8000, latch)
 		expect(voiced(loud.subarray(0, WINDOW - 1))).toBe(false)
+		expect(voiced(loud.subarray(0, latch - 1))).toBe(false)
 		expect(voiced(loud)).toBe(true)
+		const g = new VoiceActivityGate()
+		expect(g.push(loud)).toBe(latch)
 		// Chunking does not matter.
 		const gate = new VoiceActivityGate()
-		for (let o = 0; o < WINDOW; o += 333) gate.push(loud.subarray(o, o + 333))
+		for (let o = 0; o < latch; o += 333) gate.push(loud.subarray(o, o + 333))
 		expect(gate.voiced).toBe(true)
+	})
+
+	it("an over that ends before latching qualifies at its end when half its windows (rounded up) were voiced", () => {
+		const one = new VoiceActivityGate()
+		one.push(tone(700, 8000, WINDOW))
+		expect(one.voiced).toBe(false)
+		expect(one.conclude()).toBe(true)
+		// k silent windows' worth then `loud` loud blocks at the end: `loud` windows pass.
+		const end = (blocks: number, loud: number): VoiceActivityGate => {
+			const g = new VoiceActivityGate()
+			g.push(new Int16Array((blocks - loud) * VOICE_BLOCK_FRAMES))
+			g.push(tone(700, 8000, loud * VOICE_BLOCK_FRAMES))
+			return g
+		}
+		// 3 windows (7 blocks), 1 voiced: under ⌈3 / 2⌉ = 2.
+		expect(end(7, 1).conclude()).toBe(false)
+		// 4 windows (8 blocks, a 1 s over), 2 voiced: ⌈4 / 2⌉ = 2.
+		expect(end(8, 2).conclude()).toBe(true)
+		// 9 windows (13 blocks, a 1.5 s over), 2 voiced: under min(3, 5) = 3.
+		expect(end(13, 2).conclude()).toBe(false)
+	})
+
+	it(`a burst that passes only 2 windows of an over never reserves a file; one that passes ${VOICE_MIN_WINDOWS} does`, () => {
+		// A 1.5 s over: 1.3 s of audio past the 100 ms trims, 13 blocks, 13 − 5 + 1 = 9 windows.
+		expect(13 - VOICE_WINDOW_BLOCKS + 1).toBe(9)
+		const quiet = (n: number) => new Int16Array(n * VOICE_BLOCK_FRAMES)
+		// Loud enough that one loud block in a window passes (RMS / √5 > VOICE_MIN_RMS), so k loud
+		// blocks at the over's end pass exactly k windows.
+		const loud = (n: number) => tone(700, 8000, n * VOICE_BLOCK_FRAMES)
+		const over = (k: number): VoiceActivityGate => {
+			const g = new VoiceActivityGate()
+			g.push(quiet(13 - k))
+			g.push(loud(k))
+			return g
+		}
+		const two = over(2)
+		expect(two.voiced).toBe(false)
+		expect(two.conclude()).toBe(false)
+		const three = over(VOICE_MIN_WINDOWS)
+		expect(three.voiced).toBe(true)
 	})
 
 	it("rejects silence (a quieted carrier) and loud flat hiss", () => {

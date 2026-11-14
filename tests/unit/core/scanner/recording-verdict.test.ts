@@ -27,6 +27,8 @@ import {
 	STRONG_CLASS_TTL_MS,
 	STRONG_PRIOR_TTL_MS,
 	OWNER_DEDICATED_PRIOR_TTL_MS,
+	OWN_HINT_OTHER_OBSERVATIONS,
+	ownDmrHint,
 	contentChecked,
 	TDMA_CHANNEL_MIN_SHARE,
 	TDMA_CHANNEL_MIN_VOTES,
@@ -2247,5 +2249,124 @@ describe("finishVerdict: the strict clear-noise check under a weak prior", () =>
 			"none",
 		)
 		expect(priorReading(liveShape, false, NOW).strength).toBe("suspect")
+	})
+})
+
+describe("ownDmrHint: a DMR sync hint on the file's own over opens the content check on a DMR channel", () => {
+	// Feature: recording-verdict, the content check of an over its own decoder synced on.
+	// Validates: docs/SCANNER.md, "Known digital or paging channels" (the content check).
+	const HOUR = 3_600_000
+	const hint = (observationId: string, at: number): DigitalProof => ({
+		protocol: "dmr",
+		at,
+		checked: false,
+		observationId,
+	})
+	/** Live shape: 231 of 256 votes fsk4-12k5, unchecked hints hours apart, the newest the file's own. */
+	const dmrChannel = (
+		proofs: DigitalProof[],
+		votes: Partial<Record<ScannerClass, number>> = {
+			"fsk4-12k5": 231,
+			"analog-fm": 25,
+		},
+		analogVoice = false,
+	): VoicePrior => ({
+		...prior(
+			[
+				{
+					protocol: "dmr",
+					confidence: "decoded",
+					owner: true,
+					at: NOW - 30 * HOUR,
+				},
+			],
+			"fsk4-12k5",
+			analogVoice,
+		),
+		classVotes: () => ({
+			total: Object.values(votes).reduce((a, b) => a + b, 0),
+			votes,
+		}),
+		digitalProofs: () => proofs,
+		digitalSeenAt: () => Math.max(...proofs.map(p => p.at)),
+	})
+	const history = [hint("o-a", NOW - 9 * HOUR), hint("o-b", NOW - 6 * HOUR)]
+	const base = {
+		backedClass: false,
+		ownTone: false,
+		snapshotClassed: true,
+		decodedOwn: false,
+		joinedVoice: false,
+		notSpeech: true,
+		clearNoise: false,
+		ownObservationId: "o-own",
+		final: true,
+		now: NOW,
+	}
+	it("live shape (a 4.6 s over, hints 6 h apart): suspect at its start, unchecked-dmr once its own hint lands, neither content-checked, so the steady file was kept", () => {
+		const before = dmrChannel(history)
+		expect(priorReading(before, false, NOW).strength).toBe("suspect")
+		const p = dmrChannel([...history, hint("o-own", NOW - 20_000)])
+		expect(priorReading(p, false, NOW)).toEqual({
+			strength: "tone-required",
+			source: "unchecked-dmr",
+		})
+		expect(contentChecked("unchecked-dmr", p, false, NOW)).toBe(false)
+		expect(ownDmrHint(p, "o-own")).toBe(true)
+		expect(finishVerdict({ ...base, prior: p })).toBe("discarded:not-speech")
+	})
+	it("FROZEN: speech on that over is kept (the check needs a steady buzz), so is a toned file", () => {
+		const p = dmrChannel([...history, hint("o-own", NOW - 20_000)])
+		expect(finishVerdict({ ...base, prior: p, notSpeech: false })).toBe(
+			"finish",
+		)
+		expect(finishVerdict({ ...base, prior: p, ownTone: true })).toBe("finish")
+		expect(finishVerdict({ ...base, prior: p, joinedVoice: true })).toBe(
+			"finish",
+		)
+	})
+	it("FROZEN: analog voice heard on the channel reads no prior: kept", () => {
+		const p = dmrChannel(
+			[...history, hint("o-own", NOW - 20_000)],
+			undefined,
+			true,
+		)
+		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
+	})
+	it(`needs ${OWN_HINT_OTHER_OBSERVATIONS} other overs with hints: one spurious earlier sync does not open it`, () => {
+		const p = dmrChannel([history[0]!, hint("o-own", NOW - 20_000)])
+		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
+	})
+	it("needs the hint on the file's own over: hints on other overs only do not", () => {
+		const p = dmrChannel([...history, hint("o-c", NOW - HOUR)])
+		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(ownDmrHint(p, null)).toBe(false)
+		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
+	})
+	it("needs DMR's classes on a third of the votes: an analog-fm channel does not", () => {
+		const p = dmrChannel([...history, hint("o-own", NOW - 20_000)], {
+			"analog-fm": 200,
+			"fsk4-12k5": 20,
+		})
+		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
+	})
+	it("another protocol's hint (dPMR) does not count", () => {
+		const dpmr = (id: string): DigitalProof => ({
+			...hint(id, NOW - HOUR),
+			protocol: "dpmr",
+		})
+		const p = dmrChannel([dpmr("o-a"), dpmr("o-b"), dpmr("o-own")])
+		expect(ownDmrHint(p, "o-own")).toBe(false)
+	})
+	it("a throwing read: not applied", () => {
+		const p: VoicePrior = {
+			...dmrChannel(history),
+			digitalProofs: () => {
+				throw new Error("boom")
+			},
+		}
+		expect(ownDmrHint(p, "o-own")).toBe(false)
 	})
 })

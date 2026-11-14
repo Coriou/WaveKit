@@ -47,7 +47,12 @@ import {
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
-import type { DigitalProof, VoicePrior } from "../channel/recording-verdict.js"
+import { notAnalogVoiceProtocol } from "../channel/voice-veto.js"
+import type {
+	DigitalProof,
+	OwnerDecode,
+	VoicePrior,
+} from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
 import {
@@ -460,15 +465,28 @@ function uncheckedSyncHint(proof: ScannerProof | null): boolean {
 		proof.encrypted !== true
 	)
 }
-function publishedOf(view: DiscoveryProofView): EvidenceLabel {
-	return (view.evidence === "proven" || syncOnlyProof(view.proof)) &&
-		view.proof !== null
-		? view.label
-		: UNKNOWN_LABEL
+/**
+ * A view's shown proof publishes its label: a proven proof, or a sync hint that is not lone
+ * (DiscoveryProofView.lone: a dsd-fme DMR sync with no checked content and no colour code, on one
+ * transmission only, stays evidence and publishes unknown).
+ */
+function shownOf(view: DiscoveryProofView): boolean {
+	return (
+		view.proof !== null &&
+		(view.evidence === "proven" ||
+			(syncOnlyProof(view.proof) && view.lone !== true))
+	)
 }
-/** DiscoveryStore.ownerLabel's answer from a proof view: its published label and proof. */
+function publishedOf(view: DiscoveryProofView): EvidenceLabel {
+	return shownOf(view) ? view.label : UNKNOWN_LABEL
+}
+/**
+ * DiscoveryStore.ownerLabel's answer from a proof view: its label and proof as published, but a
+ * lone sync hint's too (the recorder's digital-channel bar reads hints: VoicePrior.digitalProofs).
+ */
 function ownerLabelOf(view: DiscoveryProofView): OwnerLabel {
-	const label = publishedOf(view)
+	const label =
+		view.lone === true && view.proof !== null ? view.label : publishedOf(view)
 	const proof = label === UNKNOWN_LABEL ? null : view.proof
 	const at = proof === null ? Number.NaN : Date.parse(proof.at)
 	return {
@@ -486,6 +504,8 @@ const NO_LINKS: readonly string[] = []
 /** Per-discovery observation window (WG11: exported for the snapshot mirror). */
 export const OBSERVATIONS_PER_DISCOVERY = 256
 const OBSERVATION_DECODE_MAX = 16
+/** DiscoveryStore.ownerDecodes' bound: one entry per record decoded as a protocol not voice. */
+const OWNER_DECODES_MAX = 4096
 const MEDIAN_WINDOW = 64
 const MAX_FLAGGED_IDS = 4096
 /**
@@ -1126,6 +1146,13 @@ interface DiscoveryProofView {
 	proof: ScannerProof | null
 	evidence: ScannerEvidenceLevel
 	label: EvidenceLabel
+	/**
+	 * The shown proof is a dsd-fme DMR sync hint with no checked content (uncheckedSyncHint) and no
+	 * colour code, and no other kept observation of the discovery carries a hint or a decode of
+	 * that protocol: dsd-fme syncs on noise, so one such row is evidence, never the published
+	 * label (publishedOf). Absent: false.
+	 */
+	lone?: boolean
 }
 
 /** Anything only a decode brings; a retracted observation never deletes a discovery that holds it. */
@@ -2958,10 +2985,43 @@ export class DiscoveryStore
 		this.evidenceAccepted = false
 		try {
 			const change = this.applyEvidenceTo(discoveryId, ev, opts)
-			return { change, accepted: change !== null || this.evidenceAccepted }
+			const accepted = change !== null || this.evidenceAccepted
+			if (accepted) this.noteOwnerDecode(discoveryId, ev)
+			return { change, accepted }
 		} finally {
 			this.evidenceAccepted = false
 		}
+	}
+
+	/**
+	 * The newest accepted decode with an identity of a protocol that is not analog voice placed on
+	 * `discoveryId` (VoicePrior.ownerDecode), kept for its live owner (folderOwner) whichever
+	 * record the decode then landed on: a page of another capcode lands on a co-channel twin and
+	 * leaves the owner's published proof as old as its own capcode's last page. Memory only (a
+	 * restart reads the published proofs again); at most OWNER_DECODES_MAX entries, those of
+	 * deleted records dropped first.
+	 */
+	private readonly ownerDecodes = new Map<string, OwnerDecode>()
+
+	private noteOwnerDecode(discoveryId: string, ev: DecodeEvidence): void {
+		if (
+			!ev.crcClean ||
+			ev.identity === undefined ||
+			!Number.isFinite(ev.at) ||
+			!notAnalogVoiceProtocol(ev.protocol)
+		)
+			return
+		const owner = this.folderOwner(discoveryId) ?? discoveryId
+		const prev = this.ownerDecodes.get(owner)
+		if (prev !== undefined && prev.at > ev.at) return
+		this.ownerDecodes.delete(owner)
+		this.ownerDecodes.set(owner, { protocol: ev.protocol, at: ev.at })
+		if (this.ownerDecodes.size <= OWNER_DECODES_MAX) return
+		for (const id of this.ownerDecodes.keys())
+			if (!this.discoveries.has(id)) this.ownerDecodes.delete(id)
+		const oldest = this.ownerDecodes.keys().next()
+		if (this.ownerDecodes.size > OWNER_DECODES_MAX && oldest.done !== true)
+			this.ownerDecodes.delete(oldest.value)
 	}
 
 	private applyEvidenceTo(
@@ -4112,6 +4172,7 @@ export class DiscoveryStore
 				}
 				return { total, votes }
 			},
+			ownerDecode: this.ownerDecodes.get(d.id) ?? null,
 			digitalProofs: () => this.digitalProofs(d.id),
 			digitalSeenAt: () => this.digitalSeenAt(d.id),
 			tdmaSeenAt: () => this.tdmaSeenAt(d.id),
@@ -7891,8 +7952,33 @@ export class DiscoveryStore
 						channel.observationId,
 					)
 				: own
-		this.proofCache.set(d.id, view)
-		return view
+		const shown = this.loneSyncHint(d, view.proof)
+			? { ...view, lone: true }
+			: view
+		this.proofCache.set(d.id, shown)
+		return shown
+	}
+
+	/**
+	 * DiscoveryProofView.lone: `proof` is a dsd-fme DMR sync hint with no checked content and no
+	 * colour code, and no other kept observation of `d` (at most OBSERVATIONS_PER_DISCOVERY) has a
+	 * proof of that protocol (a hint or a decode). Reads only.
+	 */
+	private loneSyncHint(d: Discovery, proof: ScannerProof | null): boolean {
+		if (proof === null || proof.protocol !== "dmr") return false
+		if (!uncheckedSyncHint(proof) || proof.unverifiedCc !== undefined)
+			return false
+		for (const o of this.byDiscovery.get(d.id) ?? []) {
+			if (o.id === proof.observationId) continue
+			const other = this.observationAssessment(o).proof
+			if (
+				other !== null &&
+				other.protocol === proof.protocol &&
+				(other.kind === "decoded" || syncOnlyProof(other))
+			)
+				return false
+		}
+		return true
 	}
 
 	/** The view a spectrum discovery's own (and co-channel) observations give; not cached. */
@@ -8031,10 +8117,7 @@ export class DiscoveryStore
 		const copy = clone(d)
 
 		const view = this.discoveryView(d)
-		if (
-			(view.evidence === "proven" || syncOnlyProof(view.proof)) &&
-			view.proof !== null
-		) {
+		if (shownOf(view) && view.proof !== null) {
 			copy.proof = clone(view.proof)
 			copy.protocol = view.label.protocol
 			copy.family = view.label.family

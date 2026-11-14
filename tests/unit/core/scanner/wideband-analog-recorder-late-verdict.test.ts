@@ -861,6 +861,98 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 	/** The owner's own DMR decode, dated now: backed digital evidence (a suspect lone merge). */
 	const ownDmr = () => prior({ labels: [label("dmr")] })
 
+	/**
+	 * dataOver, but the tuner retunes away 5 s into the data while the track is still on the air
+	 * (cut epoch-changed), and the track's close comes after it, cut by the service.
+	 */
+	async function retunedDataOver(h: Harness): Promise<void> {
+		const fsk = new FskSource({
+			fs: h.fs,
+			offsetHz: LOW_OFFSET,
+			levelsHz: [-1_944, -648, 648, 1_944],
+		})
+		const chunk = h.fs / 40
+		await h.feed(1, false)
+		const onset = h.engine.liveEdge()
+		for (let i = 0; i < 200; i++) {
+			h.engine.write(fsk.next(chunk, true))
+			const edge = h.engine.liveEdge()
+			if (edge - onset >= 0.1 * h.fs)
+				h.rec.track(input("o", snapshot("o", onset, edge, LOW)))
+			await h.pump()
+		}
+		const end = h.engine.liveEdge()
+		h.engine.epoch = {
+			...h.engine.epoch,
+			epoch: h.engine.epoch.epoch + 1,
+			startSample: end,
+		}
+		await h.feed(0.5, false)
+		h.rec.closed("o", snapshot("o", onset, end, LOW), "epoch-changed", {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		await h.feed(3.5, false)
+	}
+
+	it("a retune that ends the over does not bypass the content check: the buzz cut epoch-changed is discarded:not-speech", async () => {
+		const h = low(ownDmr)
+		await retunedDataOver(h)
+		await h.fire()
+		await h.rec.idle()
+		expect(codes(h)).toContain("discarded:not-speech")
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(h.ops.map(o => o.cancelled)).toEqual(["cancelled"])
+	}, 120_000)
+
+	it("FROZEN: the same retune with no prior keeps the file, marked cut epoch-changed", async () => {
+		const h = low(() => null)
+		await retunedDataOver(h)
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops.map(o => [o.cut, o.outcome])).toEqual([
+			["epoch-changed", "finalized"],
+		])
+	}, 120_000)
+
+	it("ownDmrHint (live shape): a channel whose last DMR hint is hours old admits the over normally; its own hint lands on the air; repeated on 2 other overs of a DMR-class channel, it opens the content check: discarded:not-speech", async () => {
+		const hint = (observationId: string, at: number) => ({
+			protocol: "dmr" as const,
+			at,
+			checked: false,
+			observationId,
+		})
+		const hours = 3_600_000
+		const history = [
+			hint("o-a", HARNESS_T0 - 9 * hours),
+			hint("o-b", HARNESS_T0 - 6 * hours),
+		]
+		const dmrChannel = (proofs: typeof history): VoicePrior => ({
+			...prior({
+				labels: [label("dmr", true, "decoded", HARNESS_T0 - 30 * hours)],
+				class: "fsk4-12k5",
+				votes: { total: 256, votes: { "fsk4-12k5": 231, "analog-fm": 25 } },
+			}),
+			digitalProofs: () => proofs,
+			digitalSeenAt: () => Math.max(...proofs.map(p => p.at)),
+		})
+		const { box, voicePrior } = priorBox(dmrChannel(history))
+		const h = low(voicePrior)
+		let i = 0
+		const realTrack = h.rec.track.bind(h.rec)
+		h.rec.track = (t: WidebandTrackInput) => {
+			// 3 s into the over its own decoder syncs (dsd-fme, no verified content).
+			if (++i === 120)
+				box.value = dmrChannel([...history, hint("o", HARNESS_T0)])
+			realTrack(t)
+		}
+		await dataOver(h)
+		await h.fire()
+		await h.rec.idle()
+		expect(codes(h)).toEqual(["started", "voiced", "discarded:not-speech"])
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+	}, 120_000)
+
 	it("B1: backed evidence (the owner's own DMR decode): discarded:not-speech at its finish, nothing kept, no hold", async () => {
 		const h = low(ownDmr)
 		await dataOver(h)

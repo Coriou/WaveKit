@@ -5,9 +5,12 @@
  * CTCSS sub-tone sits under the gate's own 500 Hz high-pass; the hiss of a weakly received
  * carrier is flat after de-emphasis, while the demodulated audio of a voice transmission tilts
  * down (most energy below about 1.2 kHz). A window qualifies when it is both loud enough and
- * tilted; a file qualifies once one window does. CTCSS is never required. Audio too short for
- * one window (a short over, trimmed at both ends) is judged once at its end on all of it, if it
- * holds at least VOICE_MIN_FINAL_FRAMES (`conclude()`).
+ * tilted; a file qualifies once VOICE_MIN_WINDOWS windows do (windows slide by one 100 ms block,
+ * so three span at least 700 ms of audio: one stray window of discriminator noise or a data
+ * burst's edge does not reserve a file). CTCSS is never required. Audio too short for one window
+ * (a short over, trimmed at both ends) is judged once at its end on all of it, if it holds at
+ * least VOICE_MIN_FINAL_FRAMES (`conclude()`); audio that ended before VOICE_MIN_WINDOWS windows
+ * qualified does at its end when half of its windows (rounded up, at least one) did.
  *
  * Measured through WidebandNfmChain on the synthetic test signal (500 ms windows): voice
  * windows at RMS 1100 to 6600 with tilt up to 6.7; a quieted carrier at RMS 11; a 250.3 Hz
@@ -53,6 +56,13 @@ export const VOICE_MIN_RMS = 512
  * high band, with the filter skirts), voice windows of the synthetic signal up to 6.7.
  */
 export const VOICE_MIN_TILT = 1.4
+/**
+ * Qualifying windows a file needs while its audio runs (VoiceActivityGate.push): 3. A 1.5 s over
+ * gives 1.3 s of audio past the recorder's 100 ms trims, 13 blocks and so 13 − 5 + 1 = 9 sliding
+ * windows, of which voice must fill 3. At the over's end (conclude) min(3, ⌈windows / 2⌉) do: a
+ * 1 s over (0.8 s of audio, 4 windows) needs 2, a 0.7 s one (1 window) that one.
+ */
+export const VOICE_MIN_WINDOWS = 3
 
 /**
  * The gate's and the meter's shared DSP: the filters and the last VOICE_WINDOW_BLOCKS completed
@@ -170,27 +180,31 @@ const WINDOW_FRAMES = VOICE_WINDOW_BLOCKS * VOICE_BLOCK_FRAMES
 export class VoiceActivityGate {
 	private readonly dsp = new VoiceBlocks()
 	private qualified = false
-	/** A full window was judged (and failed): the end adds nothing. */
-	private fullWindow = false
+	/** Full windows judged, and how many of them were loud and voice-tilted. */
+	private windows = 0
+	private hits = 0
 	private concluded = false
 
-	/** True once any window was loud and voice-tilted. */
+	/** True once VOICE_MIN_WINDOWS windows were loud and voice-tilted (or at the end, conclude). */
 	get voiced(): boolean {
 		return this.qualified
 	}
 
 	/**
 	 * Feeds frames `start` to `end` (exclusive) of `pcm`; returns how many it consumed: all of
-	 * them, or up to the frame that completed the first voiced window (the gate then latches and
-	 * ignores the rest). 0 once voiced or concluded.
+	 * them, or up to the frame that completed the VOICE_MIN_WINDOWS-th voiced window (the gate then
+	 * latches and ignores the rest). 0 once voiced or concluded.
 	 */
 	push(pcm: ArrayLike<number>, start = 0, end = pcm.length): number {
 		if (this.qualified || this.concluded) return 0
 		const dsp = this.dsp
 		for (let i = start; i < end; i++) {
 			if (!dsp.step(pcm[i]!) || dsp.count < VOICE_WINDOW_BLOCKS) continue
-			this.fullWindow = true
-			if (dsp.voiced(WINDOW_FRAMES, false)) {
+			this.windows++
+			if (
+				dsp.voiced(WINDOW_FRAMES, false) &&
+				++this.hits >= VOICE_MIN_WINDOWS
+			) {
 				this.qualified = true
 				return i + 1 - start
 			}
@@ -200,16 +214,22 @@ export class VoiceActivityGate {
 
 	/**
 	 * The audio ended: audio that never filled a window is judged on all of it (the completed
-	 * blocks and the partial one) when it holds at least VOICE_MIN_FINAL_FRAMES. Idempotent;
-	 * later pushes are ignored.
+	 * blocks and the partial one) when it holds at least VOICE_MIN_FINAL_FRAMES; audio that filled
+	 * windows without latching qualifies when at least half of them (rounded up), and at least
+	 * one, were voiced: a short over cannot give VOICE_MIN_WINDOWS (a 1 s synthetic voice over
+	 * gives 4 windows, the first two holding its onset, and 2 voiced). Idempotent; later pushes
+	 * are ignored.
 	 */
 	conclude(): boolean {
 		if (this.qualified || this.concluded) return this.qualified
 		this.concluded = true
 		const dsp = this.dsp
 		const frames = dsp.count * VOICE_BLOCK_FRAMES + dsp.inBlock
-		if (!this.fullWindow && frames >= VOICE_MIN_FINAL_FRAMES)
+		if (this.windows === 0 && frames >= VOICE_MIN_FINAL_FRAMES)
 			this.qualified = dsp.voiced(frames, true)
+		else if (this.hits > 0)
+			this.qualified =
+				this.hits >= Math.min(VOICE_MIN_WINDOWS, Math.ceil(this.windows / 2))
 		return this.qualified
 	}
 }
