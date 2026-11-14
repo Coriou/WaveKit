@@ -47,7 +47,11 @@ import {
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
-import type { DigitalProof, VoicePrior } from "../channel/recording-verdict.js"
+import {
+	FSK_CLASSES,
+	type DigitalProof,
+	type VoicePrior,
+} from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
 import {
@@ -4062,8 +4066,8 @@ export class DiscoveryStore
 	 * OBSERVATIONS_PER_DISCOVERY). A label's `checkedHint` is true when the proof behind it is a
 	 * sync hint with checked content (a sync-only proof that is not uncheckedSyncHint), and its
 	 * `observationId` the observation that proof cites; `digitalProofs` lazily lists the digital
-	 * proof of each of the owner's kept observations (digitalProofs). Undefined for a folder nobody
-	 * owns. Reads only.
+	 * proof of each of the owner's kept observations (digitalProofs), and `digitalSeenAt` the time
+	 * of its latest digital evidence (digitalSeenAt). Undefined for a folder nobody owns. Reads only.
 	 */
 	voicePrior(folderId: string): VoicePrior | undefined {
 		const owner = this.folderOwner(folderId)
@@ -4110,6 +4114,7 @@ export class DiscoveryStore
 				return { total, votes }
 			},
 			digitalProofs: () => this.digitalProofs(d.id),
+			digitalSeenAt: () => this.digitalSeenAt(d.id),
 			analogVoice: () =>
 				ids.some(id =>
 					(this.byDiscovery.get(id) ?? []).some(o => {
@@ -4144,6 +4149,38 @@ export class DiscoveryStore
 			})
 		}
 		return out
+	}
+
+	/**
+	 * The wall time (ms) of discovery `id`'s latest digital evidence (VoicePrior.digitalSeenAt), or
+	 * null: over its kept observations (at most OBSERVATIONS_PER_DISCOVERY), the newest of an
+	 * observation's end (its start while open) when it voted an FSK class (FSK_CLASSES), and of a
+	 * digital proof's time (`digital-undecoded`: a sync hint or a `digital-unknown` candidate; a
+	 * decode of a digital voice, pager or packet protocol). One pass over cached proofs. Reads only.
+	 */
+	private digitalSeenAt(id: string): number | null {
+		let latest = Number.NEGATIVE_INFINITY
+		for (const o of this.byDiscovery.get(id) ?? []) {
+			const vote = voteOf(o)
+			if (vote !== undefined && FSK_CLASSES.has(vote)) {
+				const at = Date.parse(o.endedAt ?? o.startedAt)
+				if (Number.isFinite(at)) latest = Math.max(latest, at)
+			}
+			const proof = this.observationAssessment(o).proof
+			if (proof === null) continue
+			const family = familyOf(proof.protocol)
+			if (
+				proof.kind === "digital-undecoded" ||
+				(proof.kind === "decoded" &&
+					(family === "digital-voice" ||
+						family === "pager" ||
+						family === "packet"))
+			) {
+				const at = Date.parse(proof.at)
+				if (Number.isFinite(at)) latest = Math.max(latest, at)
+			}
+		}
+		return Number.isFinite(latest) ? latest : null
 	}
 
 	/**

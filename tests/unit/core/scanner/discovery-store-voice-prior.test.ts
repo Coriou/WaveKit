@@ -88,7 +88,7 @@ describe("DiscoveryStore.voicePrior", () => {
 		expect(store.appendObservationEvidence("pager", ev)).toBe(true)
 		store.applyEvidence(id, ev)
 		const prior = store.voicePrior(id) ?? null
-		// With its decode's time: strong for STRONG_PRIOR_TTL_MS after it, suspect past it.
+		// With its decode's time: the owner's own pager decode never lapses (no analog proof ever).
 		expect(prior?.labels).toContainEqual({
 			protocol: "pocsag",
 			confidence: "decoded",
@@ -98,10 +98,15 @@ describe("DiscoveryStore.voicePrior", () => {
 			observationId: "pager",
 		})
 		expect(admissionVerdict(prior, false, T0 + 500)).toBe("tone-required")
-		const last = T0 + 500 + STRONG_PRIOR_TTL_MS
-		expect(admissionVerdict(prior, false, last)).toBe("tone-required")
-		expect(admissionVerdict(prior, false, last + 1)).toBeNull()
-		expect(readPrior(prior, false, last + 1)).toBe("suspect")
+		const day = T0 + 500 + 24 * 60 * 60_000
+		expect(admissionVerdict(prior, false, day)).toBe("tone-required")
+		expect(prior?.digitalSeenAt?.()).toBe(T0 + 500)
+		// FROZEN: an analog tone heard on the channel ends it.
+		expect(store.ingest(obs("voice", T0 + 60_000)).discoveryId).toBe(id)
+		expect(store.recordAnalog("voice", tone(T0 + 61_000))).toBe(true)
+		expect(
+			admissionVerdict(store.voicePrior(id) ?? null, false, day),
+		).toBeNull()
 	})
 
 	it("the same channel with analog voice heard (a recorder tone) keeps recording: frozen voice", () => {
@@ -182,7 +187,7 @@ describe("DiscoveryStore.voicePrior", () => {
 			)
 		})
 
-		it("a checked DMR sync hint on a 4FSK channel: tone required within STRONG_PRIOR_TTL_MS of its proof, suspect past it", () => {
+		it("a checked DMR sync hint on a 4FSK channel: tone required within STRONG_PRIOR_TTL_MS of its latest digital evidence (the last FSK-voted over), suspect past it", () => {
 			const store = newStore()
 			const id = channel(store, 6, "fsk4-12k5", "analog-fm", "dmr", "tg-src")
 			const prior = store.voicePrior(id) ?? null
@@ -190,8 +195,10 @@ describe("DiscoveryStore.voicePrior", () => {
 			expect(label).toEqual(
 				expect.objectContaining({ protocol: "dmr", checkedHint: true }),
 			)
-			const at = label?.at ?? Number.NaN
-			expect(Number.isFinite(at)).toBe(true)
+			expect(Number.isFinite(label?.at ?? Number.NaN)).toBe(true)
+			// The six overs voted fsk4-12k5 from T0, 10 s apart, 1 s each: the last ended T0 + 51 s.
+			const at = prior?.digitalSeenAt?.() ?? Number.NaN
+			expect(at).toBe(T0 + 51_000)
 			expect(admissionVerdict(prior, false, at + STRONG_PRIOR_TTL_MS)).toBe(
 				"tone-required",
 			)
@@ -302,10 +309,65 @@ describe("DiscoveryStore.voicePrior", () => {
 			expect(read(store, id, T0 + MIN)).toBe("suspect")
 		})
 
-		it("2 observations, one older than STRONG_PRIOR_TTL_MS: suspect", () => {
+		it("2 observations, one older than STRONG_PRIOR_TTL_MS: tone required (the TTL runs from the latest digital evidence)", () => {
 			const store = newStore()
 			const id = channel(store, "fsk4-12k5", [0, 1], k => T0 + k * 40 * MIN)
-			expect(read(store, id, T0 + 41 * MIN)).toBe("suspect")
+			expect(store.voicePrior(id)?.digitalSeenAt?.()).toBe(T0 + 40 * MIN)
+			expect(read(store, id, T0 + 41 * MIN)).toBe("tone-required")
+			expect(read(store, id, T0 + 70 * MIN)).toBe("tone-required")
+			expect(read(store, id, T0 + 70 * MIN + 1)).toBe("suspect")
+		})
+
+		// Live audit: DMR hints 57 and 62 min old, the channel's overs still voting fsk4-12k5.
+		it("hints 57 and 62 min old and an fsk4-12k5 over 1 min ago: tone required; its last over 31 min ago: suspect", () => {
+			const store = newStore()
+			const now = T0 + 62 * MIN + 30_000
+			const id = channel(store, "fsk4-12k5", [0, 1], k =>
+				k === 0 ? now - 62 * MIN : now - 57 * MIN,
+			)
+			expect(read(store, id, now)).toBe("suspect")
+			const fresh = makeObs({
+				id: "late",
+				centreHz: CH,
+				startedAt: now - MIN - 1_000,
+				cls: "fsk4-12k5",
+				open: false,
+				gate: "passed",
+			})
+			expect(store.ingest(fresh).discoveryId).toBe(id)
+			expect(store.voicePrior(id)?.digitalSeenAt?.()).toBe(now - MIN)
+			expect(read(store, id, now)).toBe("tone-required")
+			// 31 min after that over: suspect.
+			expect(read(store, id, now - MIN + STRONG_PRIOR_TTL_MS)).toBe(
+				"tone-required",
+			)
+			expect(read(store, id, now + 30 * MIN)).toBe("suspect")
+		})
+
+		it("a class-only TDMA channel (no digital label): tone required while its overs vote tdma-ms", () => {
+			const store = newStore()
+			let id = ""
+			for (let k = 0; k < 6; k++)
+				id =
+					store.ingest(
+						makeObs({
+							id: `t${k}`,
+							centreHz: CH,
+							startedAt: T0 + k * 10_000,
+							cls: "tdma-ms",
+							open: false,
+							gate: "passed",
+						}),
+					).discoveryId ?? id
+			const prior = store.voicePrior(id) ?? null
+			expect(prior?.class).toBe("tdma-ms")
+			expect(prior?.labels.some(l => l.owner && l.protocol !== "unknown")).toBe(
+				false,
+			)
+			expect(readPrior(prior, false, T0 + MIN)).toBe("tone-required")
+			expect(
+				readPrior(prior, false, T0 + 51_000 + STRONG_PRIOR_TTL_MS + 1),
+			).toBe("suspect")
 		})
 
 		it("FROZEN: an analog CTCSS tone on that channel keeps recording", () => {

@@ -100,6 +100,7 @@ import {
 	VOICE_MIN_FINAL_FRAMES,
 	VOICE_WINDOW_BLOCKS,
 } from "./voice-activity.js"
+import { PcmQueue } from "./pcm-queue.js"
 import { RecorderDecisions, type ReceiptDetail } from "./recorder-decisions.js"
 import {
 	bindingKey,
@@ -127,6 +128,7 @@ import {
 	type VoicePrior,
 	type Veto,
 } from "./recording-verdict.js"
+import { clearlyNotSpeech, SpeechContentMeter } from "./speech-content.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 export { rememberWaiver, trustedRunEnd } from "./recorder-memory.js"
@@ -729,58 +731,6 @@ interface Frames {
 	readonly tone: Int16Array | null
 }
 
-/** Audio not written yet, oldest first (views of the demodulated arrays, no copies). */
-class PcmQueue {
-	private readonly parts: Int16Array[] = []
-	length = 0
-	push(pcm: Int16Array): void {
-		if (pcm.length === 0) return
-		this.parts.push(pcm)
-		this.length += pcm.length
-	}
-	/** Removes the oldest `n` frames (a copy only when parts are joined). */
-	take(n: number): Int16Array {
-		const want = Math.min(n, this.length)
-		const head = this.parts[0]
-		if (head && head.length >= want) {
-			this.length -= want
-			if (head.length === want) this.parts.shift()
-			else this.parts[0] = head.subarray(want)
-			return head.subarray(0, want)
-		}
-		const out = new Int16Array(want)
-		let o = 0
-		while (o < want) {
-			// Whole head parts only: each take below is the single-part case.
-			const part = this.take(Math.min(this.parts[0]!.length, want - o))
-			out.set(part, o)
-			o += part.length
-		}
-		return out
-	}
-	/** Removes the newest `n` frames, oldest first. */
-	takeTail(n: number): Int16Array[] {
-		const out: Int16Array[] = []
-		let excess = Math.min(n, this.length)
-		while (excess > 0) {
-			const part = this.parts.at(-1)!
-			if (part.length <= excess) {
-				out.unshift(part)
-				this.parts.pop()
-				excess -= part.length
-				this.length -= part.length
-				continue
-			}
-			const cut = part.length - excess
-			out.unshift(part.subarray(cut))
-			this.parts[this.parts.length - 1] = part.subarray(0, cut)
-			this.length -= excess
-			excess = 0
-		}
-		return out
-	}
-}
-
 interface FileState {
 	readonly generation: number
 	/** Null until admitted: classed, voiced, and the session's previous operation settled. */
@@ -805,6 +755,8 @@ interface FileState {
 	classTone: number | null
 	/** A tone-only session's roll-over file after one its tone classed: it carries that class. */
 	toneCarried: boolean
+	/** What it wrote, measured for speech (speech-content.ts; finishVerdict's `notSpeech`). */
+	readonly speech: SpeechContentMeter
 	/** The start the segmenter planned (onset − preRoll, clamped): the head-cut reference. */
 	readonly planned: number
 	startSample: number
@@ -2771,6 +2723,7 @@ export class WidebandAnalogRecorder {
 			ctcss: new CtcssBank(),
 			toneHz: null,
 			toneClass: new ToneClassEvidence(),
+			speech: new SpeechContentMeter(),
 			classTone: null,
 			toneCarried: false,
 			planned: startSample,
@@ -3772,6 +3725,7 @@ export class WidebandAnalogRecorder {
 		const handle = file.handle
 		if (handle === null) return
 		const chunk = file.queue.take(budget)
+		file.speech.push(chunk)
 		file.writing = true
 		handle.push(chunk).then(
 			() => {
@@ -4123,6 +4077,8 @@ export class WidebandAnalogRecorder {
 						file.startSample < s.strongFrom + s.vetoFrom - s.onset,
 					decodedOwn,
 					joinedVoice: joinedVoiceOverlaps(s, file),
+					notSpeech:
+						file.classTone === null && clearlyNotSpeech(file.speech.result()),
 					final: final || room === 0,
 					now,
 				})

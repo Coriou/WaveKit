@@ -25,6 +25,8 @@ import {
 	STRONG_CLASS_MIN_OBSERVATIONS,
 	STRONG_CLASS_TTL_MS,
 	STRONG_PRIOR_TTL_MS,
+	TDMA_CHANNEL_MIN_SHARE,
+	TDMA_CHANNEL_MIN_VOTES,
 	type DigitalProof,
 	type VoicePrior,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
@@ -412,6 +414,7 @@ describe("recording-verdict table", () => {
 					snapshotClassed,
 					decodedOwn: r.decodedOwn ?? false,
 					joinedVoice: false,
+					notSpeech: false,
 					final,
 					now: NOW,
 				})
@@ -471,7 +474,7 @@ describe("recording-verdict table", () => {
 			expect(provisionalRoom(cap)).toBe(room)
 	})
 
-	describe("STRONG_PRIOR_TTL_MS: a dedicated-channel decode is strong for 30 × 60 000 = 1 800 000 ms", () => {
+	describe("STRONG_PRIOR_TTL_MS: a co-channel dedicated-channel decode is strong for 30 × 60 000 = 1 800 000 ms; the owner's never lapses", () => {
 		const pager = (at: number | null) => prior([decoded("pocsag", true, at)])
 		const coPager = (at: number | null) => prior([decoded("pocsag", false, at)])
 		it("the bound", () => {
@@ -497,22 +500,37 @@ describe("recording-verdict table", () => {
 			],
 			["undated", null, "suspect"],
 		] as const)
-			it(`a POCSAG decode ${name}: ${reading}, of the owner or a co-channel discovery`, () => {
-				expect(readPrior(pager(at), false, NOW)).toBe(reading)
+			it(`a co-channel POCSAG decode ${name}: ${reading}; the owner's: ${at === null ? "suspect" : "tone required"}`, () => {
 				expect(readPrior(coPager(at), false, NOW)).toBe(reading)
-				expect(admissionVerdict(pager(at), false, NOW)).toBe(
+				expect(admissionVerdict(coPager(at), false, NOW)).toBe(
 					reading === "tone-required" ? "tone-required" : null,
 				)
+				expect(readPrior(pager(at), false, NOW)).toBe(
+					at === null ? "suspect" : "tone-required",
+				)
 			})
-		it("an expired pager decode is suspect: a shadow file is held and kept, never discarded for it", () => {
+		// Live audit: a pager channel's POCSAG decode about 24 h old, no analog proof ever.
+		it("the owner's POCSAG decode 24 h old, no analog proof: tone required; with an analog proof: none", () => {
+			const old = NOW - 24 * 60 * 60_000
+			expect(readPrior(pager(old), false, NOW)).toBe("tone-required")
+			expect(
+				readPrior(
+					prior([decoded("pocsag", true, old)], "fsk2-wide", true),
+					false,
+					NOW,
+				),
+			).toBe("none")
+		})
+		it("an expired co-channel pager decode is suspect: a shadow file is held and kept, never discarded for it", () => {
 			const verdict = (final: boolean) =>
 				finishVerdict({
-					prior: pager(NOW - STRONG_PRIOR_TTL_MS - 1),
+					prior: coPager(NOW - STRONG_PRIOR_TTL_MS - 1),
 					backedClass: false,
 					ownTone: false,
 					snapshotClassed: false,
 					decodedOwn: false,
 					joinedVoice: false,
+					notSpeech: false,
 					final,
 					now: NOW,
 				})
@@ -534,6 +552,7 @@ describe("recording-verdict table", () => {
 				snapshotClassed: true,
 				decodedOwn: true,
 				joinedVoice,
+				notSpeech: false,
 				final,
 				now: NOW,
 			})
@@ -901,6 +920,7 @@ describe("a digital channel (owner digital label within the TTL + its protocol's
 			backedClass: false,
 			decodedOwn: false,
 			joinedVoice: false,
+			notSpeech: false,
 			final: false,
 			now: NOW,
 		}
@@ -964,10 +984,22 @@ describe("a digital channel (owner digital label within the TTL + its protocol's
 				reading: "suspect",
 			},
 			{
-				name: "2 observations, one older than STRONG_PRIOR_TTL_MS: suspect",
+				name: "2 observations, one older than STRONG_PRIOR_TTL_MS (a sighting of any age counts; the TTL runs from the latest): tone required",
 				prior: withProofs(
 					[unchecked],
 					[sync("o1", NOW - STRONG_PRIOR_TTL_MS - 1), sync("o2", recent)],
+					fsk,
+				),
+				reading: "tone-required",
+			},
+			{
+				name: "2 observations, both older than STRONG_PRIOR_TTL_MS, no newer digital evidence: suspect",
+				prior: withProofs(
+					[{ ...unchecked, at: NOW - STRONG_PRIOR_TTL_MS - 1 }],
+					[
+						sync("o1", NOW - STRONG_PRIOR_TTL_MS - 2),
+						sync("o2", NOW - STRONG_PRIOR_TTL_MS - 1),
+					],
 					fsk,
 				),
 				reading: "suspect",
@@ -1152,7 +1184,7 @@ describe("a digital channel (owner digital label within the TTL + its protocol's
 
 describe("recording-verdict property", () => {
 	// Feature: analog recorder verdict, Property 1: weak evidence never refuses or discards
-	it("a prior with only weak evidence (no recent decoded pager or dedicated-channel data label; digital voice, ISM and LoRa decodes, lapsed or undated pager decodes and backed classes included) never refuses or discards", () => {
+	it("a prior with only weak evidence (no recent decoded pager or dedicated-channel data label; digital voice, ISM and LoRa decodes, lapsed co-channel or undated pager decodes and backed classes included) never refuses or discards", () => {
 		const classes: ScannerClass[] = [
 			"fsk4-12k5",
 			"fsk4-6k25",
@@ -1209,7 +1241,8 @@ describe("recording-verdict property", () => {
 		const sharedChannel = fc
 			.tuple(fc.constantFrom<ScannerProtocol>("ism", "lora"), fc.boolean())
 			.map(([p, owner]) => decoded(p, owner))
-		// So is a pager or data decode older than STRONG_PRIOR_TTL_MS, or undated.
+		// So is a co-channel pager or data decode older than STRONG_PRIOR_TTL_MS, or an undated one
+		// (the owner's dated one never lapses).
 		const lapsed = fc
 			.tuple(
 				fc.constantFrom<ScannerProtocol>("pocsag", "flex", "aprs", "ais"),
@@ -1222,7 +1255,7 @@ describe("recording-verdict property", () => {
 				),
 			)
 			.map(([p, owner, ago]) =>
-				decoded(p, owner, ago === null ? null : NOW - ago),
+				decoded(p, owner && ago === null, ago === null ? null : NOW - ago),
 			)
 		const analogDecoded = fc.constant<Label>(decoded("analog-fm"))
 		fc.assert(
@@ -1249,6 +1282,7 @@ describe("recording-verdict property", () => {
 							snapshotClassed,
 							decodedOwn: false,
 							joinedVoice: false,
+							notSpeech: false,
 							final,
 							now: NOW,
 						}),
@@ -1315,4 +1349,243 @@ describe("DigitalClassLedger: a backed digital class counts only when seen twice
 		// `a` was the oldest noted past STRONG_CLASS_MAX_DISCOVERIES = 1024: forgotten.
 		expect(l.strong("a", T)).toBe(false)
 	})
+})
+
+describe("a digital channel's TTL runs from its latest digital evidence (VoicePrior.digitalSeenAt)", () => {
+	// Feature: recording-verdict, live audit of a DMR channel identify no longer probes.
+	const min = 60_000
+	const dmrHint: Label = {
+		protocol: "dmr",
+		confidence: "activity",
+		owner: true,
+		at: NOW - 57 * min,
+		checkedHint: false,
+	}
+	const channel = (
+		seenAgo: number | null,
+		analogVoice = false,
+		proofs: DigitalProof[] = [
+			{
+				protocol: "dmr",
+				at: NOW - 57 * min,
+				checked: false,
+				observationId: "o1",
+			},
+			{
+				protocol: "dmr",
+				at: NOW - 62 * min,
+				checked: false,
+				observationId: "o2",
+			},
+		],
+	): VoicePrior => ({
+		labels: [dmrHint],
+		class: "fsk4-12k5",
+		analogVoice: () => analogVoice,
+		classVotes: () => ({
+			total: 40,
+			votes: { "fsk4-12k5": 30, "analog-fm": 10 },
+		}),
+		digitalProofs: () => proofs,
+		digitalSeenAt: () => (seenAgo === null ? null : NOW - seenAgo),
+	})
+	for (const [name, p, reading] of [
+		[
+			"DMR hints 57 and 62 min ago, an fsk4-12k5 vote 1 min ago",
+			channel(min),
+			"tone-required",
+		],
+		[
+			"the same, the latest digital evidence 30 min ago (the TTL)",
+			channel(STRONG_PRIOR_TTL_MS),
+			"tone-required",
+		],
+		[
+			"the same, the latest digital evidence 31 min ago",
+			channel(31 * min),
+			"suspect",
+		],
+		[
+			"the same, no digital evidence time (null): the hints' own times (57 min): suspect",
+			channel(null),
+			"suspect",
+		],
+		["FROZEN: the same with an analog proof", channel(min, true), "none"],
+		[
+			"a checked DMR decode 2 h ago, a vote 1 min ago",
+			channel(min, false, [
+				{
+					protocol: "dmr",
+					at: NOW - 120 * min,
+					checked: true,
+					observationId: "o1",
+				},
+			]),
+			"tone-required",
+		],
+		[
+			"one unchecked hint 57 min ago (one observation, no TDMA share), a vote 1 min ago",
+			channel(min, false, [
+				{
+					protocol: "dmr",
+					at: NOW - 57 * min,
+					checked: false,
+					observationId: "o1",
+				},
+			]),
+			"suspect",
+		],
+	] as const)
+		it(`${name}: ${reading}`, () => {
+			expect(readPrior(p, false, NOW)).toBe(reading)
+		})
+	it("a throwing digitalSeenAt read is no digital channel (suspect)", () => {
+		const p: VoicePrior = {
+			...channel(min),
+			digitalSeenAt: () => {
+				throw new Error("read failed")
+			},
+		}
+		expect(readPrior(p, false, NOW)).toBe("suspect")
+	})
+})
+
+describe("a TDMA channel known by its class alone (tdmaChannel): strong", () => {
+	// Feature: recording-verdict, class-only tdma-ms discoveries (live audit: 7 files kept).
+	const min = 60_000
+	const tdma = (
+		tdmaVotes: number,
+		total: number,
+		seenAgo: number | null = min,
+		cls: ScannerClass = "tdma-ms",
+		analogVoice = false,
+	): VoicePrior => ({
+		labels: [],
+		class: cls,
+		analogVoice: () => analogVoice,
+		classVotes: () => ({
+			total,
+			votes: { "tdma-ms": tdmaVotes, "analog-fm": total - tdmaVotes },
+		}),
+		digitalSeenAt: () => (seenAgo === null ? null : NOW - seenAgo),
+	})
+	it("the bounds: at least 4 tdma-ms votes, at least half of the votes", () => {
+		expect(TDMA_CHANNEL_MIN_VOTES).toBe(4)
+		expect(TDMA_CHANNEL_MIN_SHARE).toBe(0.5)
+	})
+	for (const [name, p, reading] of [
+		["7 of 8 votes tdma-ms, a vote 1 min ago", tdma(7, 8), "tone-required"],
+		["4 of 8 (half)", tdma(4, 8), "tone-required"],
+		["3 of 4 (under 4 votes)", tdma(3, 4), "suspect"],
+		["4 of 9 (under half)", tdma(4, 9), "suspect"],
+		[
+			"7 of 8, the latest digital evidence 31 min ago",
+			tdma(7, 8, 31 * min),
+			"suspect",
+		],
+		["7 of 8, no digital evidence time", tdma(7, 8, null), "suspect"],
+		[
+			"7 of 8 but the stored class is analog-fm",
+			tdma(7, 8, min, "analog-fm"),
+			"none",
+		],
+		[
+			"FROZEN: 7 of 8 with an analog proof",
+			tdma(7, 8, min, "tdma-ms", true),
+			"none",
+		],
+		[
+			"fsk4-12k5 class-only stays suspect (an NFM misread)",
+			{
+				...tdma(0, 8),
+				class: "fsk4-12k5" as ScannerClass,
+				classVotes: () => ({ total: 8, votes: { "fsk4-12k5": 8 } }),
+			},
+			"suspect",
+		],
+		[
+			"gmsk-narrow class-only stays suspect (an NFM misread)",
+			{
+				...tdma(0, 8),
+				class: "gmsk-narrow" as ScannerClass,
+				classVotes: () => ({ total: 8, votes: { "gmsk-narrow": 8 } }),
+			},
+			"suspect",
+		],
+	] as const)
+		it(`${name}: ${reading}`, () => {
+			expect(readPrior(p, false, NOW)).toBe(reading)
+		})
+})
+
+describe("finishVerdict: a file whose audio clearly measures as no speech (notSpeech)", () => {
+	// Feature: recording-verdict, the content check (speech-content.ts).
+	const suspect = prior([], "fsk4-12k5")
+	const strong = prior([decoded("pocsag")])
+	const verdict = (
+		p: VoicePrior | null,
+		over: Partial<Parameters<typeof finishVerdict>[0]> = {},
+	) =>
+		finishVerdict({
+			prior: p,
+			backedClass: false,
+			ownTone: false,
+			snapshotClassed: true,
+			decodedOwn: false,
+			joinedVoice: false,
+			notSpeech: true,
+			final: false,
+			now: NOW,
+			...over,
+		})
+	for (const [name, p, over, out] of [
+		["suspect prior: discarded at once", suspect, {}, "discarded:not-speech"],
+		[
+			"suspect prior, at the end of its grace: discarded",
+			suspect,
+			{ final: true },
+			"discarded:not-speech",
+		],
+		[
+			"strong prior, a snapshot-classed file: discarded",
+			strong,
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"strong prior, never classed: known non-voice first",
+			strong,
+			{ snapshotClassed: false },
+			"discarded:known-non-voice",
+		],
+		[
+			"suspect prior, speech-like audio: held",
+			suspect,
+			{ notSpeech: false },
+			"hold",
+		],
+		["FROZEN: its own CTCSS tone: kept", suspect, { ownTone: true }, "finish"],
+		[
+			"FROZEN: an analog proof on the channel: kept",
+			prior([], "fsk4-12k5", true),
+			{},
+			"finish",
+		],
+		["FROZEN: no prior: kept", null, {}, "finish"],
+		[
+			"a joined voice shares the file: held, then kept",
+			suspect,
+			{ joinedVoice: true },
+			"hold",
+		],
+		[
+			"a decode of its own signal: late non-voice",
+			suspect,
+			{ decodedOwn: true },
+			"discarded:late-non-voice",
+		],
+	] as const)
+		it(`${name}`, () => {
+			expect(verdict(p, over)).toBe(out)
+		})
 })

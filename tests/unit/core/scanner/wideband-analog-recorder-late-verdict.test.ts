@@ -33,6 +33,7 @@ import {
 	input,
 	snapshot,
 } from "./wideband-recorder-harness.js"
+import { FskSource } from "./wideband-nfm-fixtures.js"
 
 type Harness = ReturnType<typeof harness>
 
@@ -805,10 +806,10 @@ describe("joined transmissions and late verdicts", () => {
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
 	}, 120_000)
 
-	it("a joined transmission's files are judged on the prior when it keyed up: a lapsed pager decode (past STRONG_PRIOR_TTL_MS) only holds them, then keeps them", async () => {
+	it("a joined transmission's files are judged on the prior when it keyed up: a lapsed co-channel pager decode (past STRONG_PRIOR_TTL_MS) only holds them, then keeps them", async () => {
 		const lapsed = prior({
 			labels: [
-				label("pocsag", true, "decoded", HARNESS_T0 - STRONG_PRIOR_TTL_MS - 1),
+				label("pocsag", false, "decoded", HARNESS_T0 - STRONG_PRIOR_TTL_MS - 1),
 			],
 		})
 		const { box, voicePrior } = priorBox(null)
@@ -820,5 +821,71 @@ describe("joined transmissions and late verdicts", () => {
 		await h.fire()
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
+	}, 120_000)
+})
+
+describe("the content check: a file on a digital-looking channel whose audio is a steady buzz", () => {
+	// Feature: speech content check (speech-content.ts, finishVerdict's notSpeech).
+	/** A 6 s 4FSK over (4 800 Bd, DMR-like deviation) whose snapshots read analog-fm. */
+	async function dataOver(h: Harness): Promise<void> {
+		const fsk = new FskSource({
+			fs: h.fs,
+			offsetHz: LOW_OFFSET,
+			levelsHz: [-1_944, -648, 648, 1_944],
+		})
+		const chunk = h.fs / 40
+		await h.feed(1, false)
+		const onset = h.engine.liveEdge()
+		const end = onset + 6 * h.fs
+		for (let i = 0; i < 240; i++) {
+			h.engine.write(fsk.next(chunk, true))
+			const edge = h.engine.liveEdge()
+			if (edge - onset >= 0.1 * h.fs)
+				h.rec.track(input("o", snapshot("o", onset, Math.min(edge, end), LOW)))
+			await h.pump()
+		}
+		await h.feed(0.6, false)
+		h.rec.closed("o", snapshot("o", onset, end, LOW), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		await h.feed(3.5, false)
+	}
+
+	it("a suspect prior (spectral fsk4-12k5): discarded:not-speech at its finish, nothing kept, no hold", async () => {
+		const h = low(() => spectral("fsk4-12k5"))
+		await dataOver(h)
+		await h.rec.idle()
+		expect(codes(h)).toContain("discarded:not-speech")
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(h.timers).toHaveLength(0)
+	}, 120_000)
+
+	it("the same audio with no prior is kept at once (no content check)", async () => {
+		const h = low(() => null)
+		await dataOver(h)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		expect(codes(h)).not.toContain("discarded:not-speech")
+	}, 120_000)
+
+	it("FROZEN: the same audio on a channel with analog voice heard is kept at once", async () => {
+		const h = low(() =>
+			prior({ labels: [label("dmr", true, "activity")], analogVoice: true }),
+		)
+		await dataOver(h)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+
+	it("FROZEN: an untoned syllabic NFM voice on the same suspect channel is held, then kept", async () => {
+		const h = low(() => spectral("fsk4-12k5"), null, { syllables: true })
+		await h.feed(1, false)
+		await over(h, "o", 6)
+		expect(h.timers.map(t => t.ms)).toEqual([LATE_VERDICT_GRACE_MS])
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		expect(codes(h)).not.toContain("discarded:not-speech")
 	}, 120_000)
 })
