@@ -9,7 +9,12 @@ import {
 	IDENTIFY_PROBE_PRIORITY,
 	IDENTIFY_SLOT_FREEING_MAX_MS,
 } from "../../../../src/core/scanner/identify.js"
-import { IDENTIFY_PREEMPTION_HOLD_MS } from "../../../../src/core/scanner/probes/probe-pool.js"
+import {
+	IDENTIFY_PREEMPTION_HOLD_GAP_MS,
+	IDENTIFY_PREEMPTION_HOLD_MS,
+	offsetTransport,
+	type TransportStrategy,
+} from "../../../../src/core/scanner/probes/probe-pool.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
 import {
 	flushAsync,
@@ -568,45 +573,167 @@ describe("ProbePool: identify preemption never stops a held recorded call, holds
 		).toEqual(["high", "mid"])
 	})
 
-	it("a recording asked between preemption rounds is refused while identify holds the freed cores; admitted once identify starts", async () => {
+	it("between preemption rounds with equal costs a recording that leaves identify its room is admitted (0.08 + 0.5 + 0.5 + 0.05 + 0.5 = 1.63 before the second stop, 1.13 after)", async () => {
 		const h = await twoVictims()
 		const between: boolean[] = []
 		h.pool.on("probe-state", (_id: string, state: string) => {
 			if (state !== "stopped" || between.length > 0) return
-			// After the first stop: 0.08 + 0.5 + 0.5 = 1.08; 0.05 alone fits (1.13 <= 1.5) but not
-			// beside identify's held 0.5 (1.63 > 1.5).
+			// After the first stop: estimate 0.08 + 0.5 + 0.5 = 1.08. Identify's room with 0.05 more:
+			// 1.08 + 0.05 - 0.5 (the job probe it may still stop) + 0.5 = 1.13 <= 1.5.
 			const release = h.pool.reserveExternal(0.05)
 			between.push(release !== null)
 			release?.()
 		})
 		expect(h.pool.request(identify())).toEqual({ deferred: "budget" })
 		await settle(h)
-		expect(between).toEqual([false])
+		expect(between).toEqual([true])
 		expect(h.pool.status().map(p => p.jobId)).toEqual(["identify"])
-		// Hold released on admission: 0.08 + 0.5 + 0.5 + 0.42 = 1.5 fits.
+		// 0.08 + 0.5 + 0.5 + 0.42 = 1.5 fits.
 		expect(h.pool.reserveExternal(0.42)).not.toBeNull()
 	})
 
-	it("the hold expires IDENTIFY_PREEMPTION_HOLD_MS after the first preemption: refused at 7 999 ms, admitted at 8 000 ms", async () => {
-		const h = await twoVictims()
-		const t0 = h.clock.now
-		const between: boolean[] = []
-		h.pool.on("probe-state", (_id: string, state: string) => {
-			if (state !== "stopped" || between.length > 0) return
-			h.clock.now = t0 + IDENTIFY_PREEMPTION_HOLD_MS - 1
-			const early = h.pool.reserveExternal(0.05)
-			between.push(early !== null)
-			early?.()
-			h.clock.now = t0 + IDENTIFY_PREEMPTION_HOLD_MS
-			between.push(h.pool.reserveExternal(0.05) !== null)
+	// Unequal costs, so a reservation can fit the budget yet leave identify no room: job probes
+	// (dsd-fme) cost `job`, an fsk2-wide identify (multimon-ng) costs `id`, the engine 0.08.
+	function unequal(
+		budget: number,
+		costs: { job: number; id: number },
+	): ReturnType<typeof poolHarness> {
+		const transport: TransportStrategy = {
+			...offsetTransport,
+			cores: decoderType =>
+				decoderType === "multimon-ng" ? costs.id : costs.job,
+		}
+		return poolHarness({
+			settings: settings(budget, 3),
+			transports: [transport],
 		})
-		expect(h.pool.request(identify())).toEqual({ deferred: "budget" })
+	}
+	const costlyIdentify = (tag: string): ReturnType<typeof probeRequest> =>
+		probeRequest({
+			jobId: `identify-${tag}`,
+			priority: IDENTIFY_PROBE_PRIORITY,
+			trackId: `t-${tag}`,
+			observationId: `o-${tag}`,
+			cls: "fsk2-wide",
+		})
+
+	it("reviewer's case: a 0.5 recording during the stop is admitted (budget 3.08, engine 0.08, job probe 1, recording 1.5, identify 1)", async () => {
+		const h = unequal(3.08, { job: 1, id: 1 })
+		await job(h, 1)
+		expect(h.pool.reserveExternal(1.5)).not.toBeNull()
+		const open = gate(h)
+		const req = costlyIdentify("a")
+		// 0.08 + 1 + 1.5 + 1 = 3.58 > 3.08; without the job probe 2.58 <= 3.08.
+		expect(h.pool.request(req)).toEqual({ deferred: "budget" })
+		await flushAsync()
+		expect(h.pool.slotFreeing(req)).toBe(true)
+		// Past the budget: 2.58 + 0.51 = 3.09 > 3.08.
+		expect(h.pool.reserveExternal(0.51)).toBeNull()
+		// At it: 2.58 + 0.5 = 3.08, and identify's room 3.08 - 1 (stopping victim) + 1 = 3.08 <= 3.08.
+		// (Counting the held 1 on top of the stopping victim refused this: 3.08 + 1 > 3.08.)
+		expect(h.pool.reserveExternal(0.5)).not.toBeNull()
+		open()
 		await settle(h)
-		expect(between).toEqual([false, true])
-		// The second victim still makes room: 0.08 + 0.55 + 0.5 = 1.13 <= 1.5.
-		expect(h.pool.status().map(p => p.jobId)).toEqual(["identify"])
-		expect(h.pool.externalCoresInUse()).toBeCloseTo(0.55, 9)
+		// 0.08 + 1.5 + 0.5 + 1 = 3.08: identify starts beside the recording.
+		expect(h.pool.status().map(p => p.jobId)).toEqual(["identify-a"])
 	})
+
+	// Budget 2, job probe 0.5, identify 0.8, 0.7 reserved: estimate 1.28; identify 2.08 > 2, without the
+	// job probe 1.58 <= 2. While the job probe stops, a recording x fits the budget up to 0.72 but leaves
+	// identify its room only up to 1.28 + x - 0.5 + 0.8 <= 2, x <= 0.42.
+	async function breaking(): Promise<{
+		h: ReturnType<typeof poolHarness>
+		req: ReturnType<typeof probeRequest>
+		open: () => void
+		t0: number
+	}> {
+		const h = unequal(2, { job: 0.5, id: 0.8 })
+		await job(h, 1)
+		expect(h.pool.reserveExternal(0.7)).not.toBeNull()
+		const open = gate(h)
+		const t0 = h.clock.now
+		const req = costlyIdentify("a")
+		expect(h.pool.request(req)).toEqual({ deferred: "budget" })
+		await flushAsync()
+		expect(h.pool.slotFreeing(req)).toBe(true)
+		return { h, req, open, t0 }
+	}
+
+	it("a recording that would leave identify no room is refused while the victim stops: 0.43 refused (2.01 > 2), 0.42 admitted (2.0)", async () => {
+		const { h, open } = await breaking()
+		expect(h.pool.reserveExternal(0.43)).toBeNull()
+		expect(h.pool.reserveExternal(0.42)).not.toBeNull()
+		open()
+		await settle(h)
+		// 0.08 + 0.7 + 0.42 + 0.8 = 2.0
+		expect(h.pool.status().map(p => p.jobId)).toEqual(["identify-a"])
+	})
+
+	it("the hold expires IDENTIFY_PREEMPTION_HOLD_MS after the window opened: refused at 7 999 ms, admitted at 8 000 ms", async () => {
+		const { h, req, open, t0 } = await breaking()
+		h.clock.now = t0 + IDENTIFY_PREEMPTION_HOLD_MS - 1
+		expect(h.pool.reserveExternal(0.43)).toBeNull()
+		h.clock.now = t0 + IDENTIFY_PREEMPTION_HOLD_MS
+		expect(h.pool.reserveExternal(0.43)).not.toBeNull()
+		open()
+		await settle(h)
+		// 0.08 + 0.7 + 0.43 + 0.8 = 2.01 > 2: identify still waits.
+		expect(h.pool.queuedDeferral(req)).toMatchObject({ deferral: "budget" })
+		h.pool.sealAdmission()
+	})
+
+	// Identify A preempts at t0 and leaves at t0 + 4 s; a second job probe starts; identify B preempts it
+	// at t0 + `bAt`. Then the estimate is 0.08 + 0.7 + 0.5 = 1.28 and a 0.5 recording (1.78 <= 2) leaves
+	// B no room (1.28 + 0.5 - 0.5 + 0.8 = 2.08 > 2): refused exactly while a hold is in force.
+	async function chained(bAt: number): Promise<{
+		h: ReturnType<typeof poolHarness>
+		t0: number
+		open: () => void
+	}> {
+		const { h, open: openA, t0 } = await breaking()
+		expect(h.pool.reserveExternal(0.5)).toBeNull()
+		h.clock.now = t0 + 4000
+		await h.pool.releaseJob("identify-a")
+		openA()
+		await settle(h)
+		expect(h.pool.status()).toHaveLength(0)
+		await job(h, 2)
+		const open = gate(h)
+		h.clock.now = t0 + bAt
+		const b = costlyIdentify("b")
+		expect(h.pool.request(b)).toEqual({ deferred: "budget" })
+		await flushAsync()
+		expect(h.pool.slotFreeing(b)).toBe(true)
+		return { h, t0, open }
+	}
+
+	it("chained identifies share one window: B's hold (from t0 + 4 s) ends at t0 + 8 s, not t0 + 12 s", async () => {
+		const { h, t0, open } = await chained(4000)
+		h.clock.now = t0 + IDENTIFY_PREEMPTION_HOLD_MS - 1
+		expect(h.pool.reserveExternal(0.5)).toBeNull()
+		h.clock.now = t0 + IDENTIFY_PREEMPTION_HOLD_MS
+		const release = h.pool.reserveExternal(0.5)
+		expect(release).not.toBeNull()
+		release?.()
+		open()
+		h.pool.sealAdmission()
+	})
+
+	it.each([
+		[IDENTIFY_PREEMPTION_HOLD_MS + 1000, true],
+		[IDENTIFY_PREEMPTION_HOLD_MS + IDENTIFY_PREEMPTION_HOLD_GAP_MS - 1, true],
+		[IDENTIFY_PREEMPTION_HOLD_MS + IDENTIFY_PREEMPTION_HOLD_GAP_MS, false],
+	])(
+		"after the window a hold-free gap: B preempting at t0 + %i ms leaves the recording admitted: %s",
+		async (bAt, admitted) => {
+			const { h, open } = await chained(bAt)
+			const release = h.pool.reserveExternal(0.5)
+			expect(release !== null).toBe(admitted)
+			release?.()
+			open()
+			h.pool.sealAdmission()
+		},
+	)
 
 	it("the hold is released when identify leaves the queue and when the pool is sealed", async () => {
 		const h = await twoVictims()
@@ -615,8 +742,7 @@ describe("ProbePool: identify preemption never stops a held recorded call, holds
 		expect(h.pool.request(req)).toEqual({ deferred: "budget" })
 		await flushAsync()
 		expect(h.pool.slotFreeing(req)).toBe(true)
-		// 0.05 fits once the first victim is gone, but not beside the hold: 0.08 + 1.0 + 0.5 + 0.05 > 1.5
-		// even before. Identify's job ends while its victim stops: the hold goes with it.
+		// Identify's job ends while its victim stops: the hold goes with it.
 		await h.pool.releaseJob("identify")
 		open()
 		await settle(h)
@@ -627,7 +753,10 @@ describe("ProbePool: identify preemption never stops a held recorded call, holds
 		expect(h.pool.reserveExternal(0.001)).toBeNull()
 	})
 
-	it("the hold bound is identify's slot-freeing wait", () => {
+	it("the hold bound is identify's slot-freeing wait; the gap makes it at most 8 s in any 16 s", () => {
 		expect(IDENTIFY_PREEMPTION_HOLD_MS).toBe(IDENTIFY_SLOT_FREEING_MAX_MS)
+		expect(IDENTIFY_PREEMPTION_HOLD_MS + IDENTIFY_PREEMPTION_HOLD_GAP_MS).toBe(
+			16_000,
+		)
 	})
 })

@@ -3974,9 +3974,12 @@ Identify never stops a recording, neither a wideband recording nor a job probe h
 recorded voice call, and stops other job probes only when stopping them makes room for its own
 probe (when recordings, analog trials and held calls alone leave no room, job probes keep
 running and identify's trials end `skipped-budget`). The cores freed by a job probe identify
-stopped stay held for identify until its probe starts, for at most 8 s from that stop. A
-recording that would not fit beside a running identify probe, or beside those held cores,
-waits for the next snapshot and starts late, so its start may be `cut`.
+stopped stay held for identify against new recordings and analog trials until its probe
+starts: one is refused only when it would leave identify no room once the probes it may stop
+are gone. Holds are pool-wide, at most 8 s from the first stop whatever identifies follow,
+then none for the next 8 s, so a recording waits on them at most 8 s in any 16 s (job probes
+ignore them). A recording that would not fit beside a running identify probe, or would take
+those held cores, waits for the next snapshot and starts late, so its start may be `cut`.
 
 `folders` (absent from older cores and before the scanner state loaded) counts what the
 start did with recording and evidence folders that no discovery owned: `reattached` folders

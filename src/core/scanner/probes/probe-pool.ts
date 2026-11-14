@@ -122,11 +122,18 @@ export function isIdentifyPriority(priority: number): boolean {
 	return priority > MAX_JOB_PROBE_PRIORITY
 }
 /**
- * The longest an identify keeps the cores its preemption freed from recordings (reserveExternal),
- * from its first preemption: IDENTIFY_SLOT_FREEING_MAX_MS in identify.ts (8 s, a 5 s graceful
- * decoder stop plus 3 s for the kill and channel release), past which identify gives up the wait.
+ * The longest identify keeps the cores its preemptions free from new reservations (recordings,
+ * analog trials: reserveExternal), pool-wide: IDENTIFY_SLOT_FREEING_MAX_MS in identify.ts (8 s, a
+ * 5 s graceful decoder stop plus 3 s for the kill and channel release), past which identify gives up
+ * the wait. Holds live inside a window opened by the first hold; the window lasts this long whatever
+ * identifies follow, and a new window opens only IDENTIFY_PREEMPTION_HOLD_GAP_MS after it closed.
  */
 export const IDENTIFY_PREEMPTION_HOLD_MS = 8000
+/**
+ * The hold-free gap after a hold window closes. Windows start at least 8 + 8 = 16 s apart and each
+ * lasts at most 8 s, so a reservation is refused on hold grounds for at most 8 s in any 16 s.
+ */
+export const IDENTIFY_PREEMPTION_HOLD_GAP_MS = 8000
 /** WG11 req 6.4: queue-driven replay probes run just below identify and above every job's passive probes. */
 export const REPLAY_PROBE_PRIORITY = 100
 /** Settling time after a replay decoder exited cleanly, so its last output lines still count. */
@@ -763,6 +770,8 @@ export class ProbePool extends EventEmitter {
 		cores: number
 		until: number
 	} | null = null
+	/** Start of the current or last hold window (pool-wide): see holdFor. */
+	private holdWindowStart: number | null = null
 	private readonly outputRegistration: ConstructorListenerRegistration
 
 	constructor(private readonly deps: ProbePoolDeps) {
@@ -1240,9 +1249,11 @@ export class ProbePool extends EventEmitter {
 	// would exceed `cpuBudgetCores`: the full estimate (engines, every probe,
 	// identify's included, and reservations) plus `cores`, so the total never
 	// exceeds the budget. While an identify holds the cores its preemption
-	// frees (holdFor, at most IDENTIFY_PREEMPTION_HOLD_MS), those cores count
-	// as taken too. Zero returns a no-op release. Release is idempotent
-	// and never drives the counter negative.
+	// frees (holdFor, at most IDENTIFY_PREEMPTION_HOLD_MS in any
+	// IDENTIFY_PREEMPTION_HOLD_MS + IDENTIFY_PREEMPTION_HOLD_GAP_MS), it is also
+	// null when admitting it would leave that identify no room once the probes it
+	// may stop are gone (identifyRoom, the check its preemption made). Zero returns
+	// a no-op release. Release is idempotent and never drives the counter negative.
 	reserveExternal(cores: number): (() => void) | null {
 		if (this.destroyed) return null
 		if (!Number.isFinite(cores) || cores < 0) return null
@@ -1254,8 +1265,20 @@ export class ProbePool extends EventEmitter {
 			return null
 		}
 		if (!Number.isFinite(budget)) return null
-		if (this.estimatedCores() + cores + this.heldCores() > budget + 1e-9)
+		if (this.estimatedCores() + cores > budget + 1e-9) return null
+		const hold = this.activeHold()
+		if (hold && !this.identifyRoom(hold.req, hold.cores, cores, budget)) {
+			this.log.debug(
+				{
+					cores,
+					heldCores: hold.cores,
+					estimatedCores: this.estimatedCores(),
+					budgetCores: budget,
+				},
+				"Reservation refused: cores held for a preempting identify",
+			)
 			return null
+		}
 		this.externalCores += cores
 		let released = false
 		return () => {
@@ -1467,34 +1490,45 @@ export class ProbePool extends EventEmitter {
 		return cost
 	}
 
-	// An identify that stopped a job probe holds the freed cores for its own admission,
-	// so a recording admitted between preemption rounds cannot take them and leave the probe stopped
-	// for nothing. The hold lasts until that identify starts or leaves the queue, the pool is sealed,
-	// or IDENTIFY_PREEMPTION_HOLD_MS after its first preemption, whichever is first: a later round for
-	// the same identify keeps the first expiry, so no recording is refused for longer than that on its
-	// account. One hold at a time: a later identify's preemption replaces it.
+	// An identify that stopped a job probe holds the freed cores for its own admission, so a
+	// reservation (recording, analog trial: reserveExternal) admitted between preemption rounds cannot
+	// take them and leave the probe stopped for nothing. Job probe admission ignores the hold (it is
+	// weighed against the budget only). The hold lasts until that identify starts or leaves the queue,
+	// the pool is sealed, or its window closes, whichever is first. The window is pool-wide: the first
+	// hold opens it at W and every hold in it, for any identify, ends by W + IDENTIFY_PREEMPTION_HOLD_MS;
+	// no hold starts again before W + IDENTIFY_PREEMPTION_HOLD_MS + IDENTIFY_PREEMPTION_HOLD_GAP_MS.
+	// So windows start >= 16 s apart and last <= 8 s: a reservation is refused on hold grounds for at
+	// most 8 s in any 16 s, however many identifies chain. One hold at a time: a later identify's
+	// preemption replaces it.
 	private holdFor(req: ProbeRequest, cores: number): void {
 		if (!isIdentifyPriority(req.priority) || !Number.isFinite(cores)) return
-		const until =
-			this.identifyHold?.req === req
-				? this.identifyHold.until
-				: this.now() + IDENTIFY_PREEMPTION_HOLD_MS
+		const now = this.now()
+		if (
+			this.holdWindowStart === null ||
+			now >=
+				this.holdWindowStart +
+					IDENTIFY_PREEMPTION_HOLD_MS +
+					IDENTIFY_PREEMPTION_HOLD_GAP_MS
+		)
+			this.holdWindowStart = now
+		const until = this.holdWindowStart + IDENTIFY_PREEMPTION_HOLD_MS
+		if (now >= until) return
 		this.identifyHold = { req, cores, until }
 	}
 
-	/** Cores an active identify hold keeps free (0 when none): see holdFor. */
-	private heldCores(): number {
+	/** The identify hold in force now, or null (expired, identify gone, pool sealed): see holdFor. */
+	private activeHold(): { req: ProbeRequest; cores: number } | null {
 		const hold = this.identifyHold
-		if (!hold) return 0
+		if (!hold) return null
 		if (
 			this.destroyed ||
 			this.now() >= hold.until ||
 			!this.queue.includes(hold.req)
 		) {
 			this.identifyHold = null
-			return 0
+			return null
 		}
-		return hold.cores
+		return hold
 	}
 
 	private preemptionMakesRoom(req: ProbeRequest, cost: number): boolean {
@@ -1504,12 +1538,28 @@ export class ProbePool extends EventEmitter {
 		} catch {
 			return false
 		}
+		return this.identifyRoom(req, cost, 0, budget)
+	}
+
+	// The one room check preemption and the hold share: whether `req` (cost `cost`) fits once every
+	// probe it may stop is gone, with `extra` more cores reserved. Freed: the victim already stopping
+	// for `req` (pendingHandoffs) plus every probe victimFor still lets it stop. So
+	// estimate + extra - freed + cost <= budget. A preemption runs only when this holds with
+	// extra = 0, and a reservation is refused during a hold only when it would make this fail.
+	private identifyRoom(
+		req: ProbeRequest,
+		cost: number,
+		extra: number,
+		budget: number,
+	): boolean {
 		if (!Number.isFinite(budget) || !Number.isFinite(cost)) return false
-		let stoppable = 0
+		const stopping = this.pendingHandoffs.get(req)
+		let freed = 0
 		for (const r of this.records.values())
-			if (r.state !== "stopping" && this.victimFor(req, r, null) !== null)
-				stoppable += r.cores
-		return this.estimatedCores() - stoppable + cost <= budget + 1e-9
+			if (r.state === "stopping") {
+				if (r.probeId === stopping) freed += r.cores
+			} else if (this.victimFor(req, r, null) !== null) freed += r.cores
+		return this.estimatedCores() + extra - freed + cost <= budget + 1e-9
 	}
 
 	// Whether preemptFor may stop `r` for `req`: null when not, else whether the freed slot is
