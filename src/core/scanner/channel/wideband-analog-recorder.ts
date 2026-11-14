@@ -1337,7 +1337,8 @@ export class WidebandAnalogRecorder {
 	 * kept within L only), as true, or as a RecordedSession when it says more: `voiceEnded` when that
 	 * voice lies before the squelch last closed and reopened (Session.reopenAt: the voiced
 	 * transmission ended, the open track is another one; the sweep owes its coarse sweep and is not
-	 * kept); false once no joined track is open (the over's squelch closed: the recorder's `hangMs`
+	 * kept), with the session's `targetHz` so the scheduler ends only a hold of that frequency's
+	 * track (RecordedSession.targetHz); false once no joined track is open (the over's squelch closed: the recorder's `hangMs`
 	 * still joins the next over into the same file, the sweep does not wait for it). Either answer
 	 * names the session's frequency as `recordedHz` (its verified voice history) only once the store
 	 * admitted a file operation of the session (Session.admitted): a voiced session that was never
@@ -1346,6 +1347,8 @@ export class WidebandAnalogRecorder {
 	 * WIDEBAND_EVICT_MIN_HEARD_FRAMES (WIDEBAND_VOICE_JUDGE_MS from its first audio): its answer is
 	 * still to come, whichever way it goes. A shadow or one of another stream or an older epoch (the
 	 * previous hop's window) answers false, so an unclassed shadow on a carrier costs a visit nothing.
+	 * Every voice answer carries its session's frequency (VoiceOnAir.targetHz), so the scheduler
+	 * names the held track's transmission by frequency, not by this order.
 	 * Of several classed, voiced sessions in the window (two channels), the first voiced one answers
 	 * (a session opened earlier first), and an object answer then also carries every voiced
 	 * transmission still on air in the window, by name (VoiceOnAir.transmissions): the scheduler
@@ -1452,15 +1455,20 @@ export class WidebandAnalogRecorder {
 			return {
 				recording: true,
 				...history,
-				...(ended ? { voiceEnded: true as const } : {}),
+				// The session's frequency names whose transmission ended (RecordedSession.targetHz):
+				// a neighbour's turnaround is no end of a hold on another track.
+				...(ended ? { voiceEnded: true as const, targetHz: s.targetHz } : {}),
 			}
 		}
 		s.voiceTx ??= voiced
 		const quiet = Math.max(s.quietGap, s.judgedTo - (s.voiceAt ?? s.judgedTo))
 		s.quietGap = 0
+		// The frequency the session demodulates names its transmission to the hold of a track
+		// (VoiceOnAir.targetHz), whether or not a file of it was admitted.
 		return {
 			voice: s.voiceTx,
 			quietMs: (quiet * 1000) / s.fs,
+			targetHz: s.targetHz,
 			...history,
 		}
 	}

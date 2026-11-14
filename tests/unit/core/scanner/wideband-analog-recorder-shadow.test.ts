@@ -593,6 +593,7 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		expect(h.rec.recordingActive("rtl", at)).toEqual({
 			...RECORDED,
 			voiceEnded: true,
+			targetHz: CENTRE + OFFSET,
 		})
 		h.src.setVoice(true)
 		await h.feed(1.5, true, report2)
@@ -650,6 +651,7 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		expect(h.rec.recordingActive("rtl", at)).toEqual({
 			...RECORDED,
 			voiceEnded: true,
+			targetHz: CENTRE + OFFSET,
 		})
 	}, 60_000)
 
@@ -658,6 +660,7 @@ describe("WidebandAnalogRecorder per-transmission voice (record whole voice)", (
 		expect(h.rec.recordingActive("rtl", at)).toEqual({
 			...RECORDED,
 			voiceEnded: true,
+			targetHz: CENTRE + OFFSET,
 		})
 	}, 60_000)
 

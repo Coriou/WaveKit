@@ -12,6 +12,7 @@ import {
 	addInto,
 	gaussianNoise,
 	mulberry32,
+	toneComb,
 	type Iq,
 	type Rng,
 } from "../../../../mocks/scanner/signals.js"
@@ -310,9 +311,10 @@ export const SIGNALS: readonly SignalDef[] = [
 export const MATRIX_SNRS_DB = [8, 12, 16, 20, 30] as const
 
 /** The 2 m band's channel plan and rasters (12.5 kHz), over the harness's tuned window. */
-function start(h: Harness): void {
+function start(h: Harness, centreHz = CENTRE): void {
 	const half = (N / 2) * BIN_HZ
 	h.start({
+		centreHz,
 		rasters: [{ spacingHz: 12_500, firstChannelHz: CENTRE }],
 		inWindow: false,
 	})
@@ -354,7 +356,103 @@ function engineWith(lines: readonly SeededLine[]): EngineState {
 	}
 }
 
-/** One visit: the signal (absent for `null`: noise only) for `seconds`; its snapshots, in order. */
+/**
+ * LO centres of the warm-up that verifies seeded lines, from CENTRE: 200 bins apart, past the
+ * 18-bin separation a confirmation needs (spur-map.ts: ceil(12.5 kHz / 1 kHz) + 3 + 2). The
+ * scene's window, OFFSET_HZ ± 30 kHz from CENTRE, is +20 to +80 kHz; at either warm-up centre a
+ * line lands at most 127 kHz up from it, so under CENTRE + 27 kHz or past CENTRE + 100 kHz, and
+ * the warm-up's own epochs are dropped from the visit's snapshots in any case.
+ */
+const WARM_UP_CENTRES_HZ = [CENTRE - 100_000, CENTRE + 100_000] as const
+/** Per warm-up centre: 1 s, 20 blocks, past the epoch the key's floor needs before a line counts. */
+const WARM_UP_EPOCH_S = 1
+/** First epoch of the visit itself: new-stream is 1, each warm-up centre after the first one more. */
+const VISIT_EPOCH = WARM_UP_CENTRES_HZ.length + 1
+/**
+ * Per-bin SNR of a warm-up line tone: 9 dB, as the receiver lines of the artefact tests. Over a
+ * 13-bin 12.5 kHz slot of noise one such tone reads 10·log10((12 + 7.9 + 1) / 13) ≈ 2 dB, under
+ * the 6 dB slot level a line must stay under, and a tone every third bin at most 3.4 dB.
+ */
+const WARM_UP_LINE_SNR_DB = 9
+/** Tone-calibrated per-bin noise power at SIGMA (pipeline-artefacts.test.ts). */
+const NOISE_BIN_POWER = (SIGMA * SIGMA * 1.5) / N
+
+/**
+ * Tone bins that verify `lines`: one every third bin of a line, its last bin included. A
+ * confirmed bin masks its ±1 neighbours too (SpurMap's skirt), so the tones cover each line.
+ */
+function lineToneBins(lines: readonly SeededLine[]): number[] {
+	const bins = new Set<number>()
+	for (const [start, width] of lines)
+		for (let b = start + 1; b - 1 < start + width; b += 3)
+			bins.add(Math.min(b, start + width - 1))
+	return [...bins].sort((a, b) => a - b)
+}
+
+/**
+ * A harness at CENTRE whose `lines` are long-learned and verified, as a live map that masks:
+ * loaded from the persisted state (unverified after a restart), then confirmed the way a live
+ * receiver confirms them, the lines on air at their baseband bins under two LO centres; then a
+ * retune to CENTRE, where the visit starts with nothing on air yet. Without `warmUp` (the default
+ * with no line), a fresh stream at CENTRE; with it and no line, the same warm-up with nothing on
+ * air, so a visit with lines has a baseline of the same history. `visit` keeps the visit's own
+ * snapshots, its samples counted from its start.
+ */
+function visitHarness(
+	lines: readonly SeededLine[],
+	integrationMs: number,
+	warmUp = lines.length > 0,
+): {
+	h: Harness
+	visit: (tracks: readonly TrackSnapshot[]) => TrackSnapshot[]
+} {
+	if (!warmUp) {
+		const h = new Harness({ format: "FLOAT32LE", integrationMs })
+		start(h)
+		return { h, visit: tracks => [...tracks] }
+	}
+	const h = new Harness({
+		format: "FLOAT32LE",
+		integrationMs,
+		persistedEngine: engineWith(lines),
+	})
+	const tones = lineToneBins(lines)
+	const tonesHz = tones.map(b => (b - N / 2) * BIN_HZ)
+	const amp = Math.sqrt(NOISE_BIN_POWER * 10 ** (WARM_UP_LINE_SNR_DB / 10))
+	const amps = tones.map(() => amp)
+	const rng = mulberry32(0x5eed)
+	const len = Math.round(WARM_UP_EPOCH_S * FS)
+	WARM_UP_CENTRES_HZ.forEach((centreHz, i) => {
+		if (i === 0) start(h, centreHz)
+		else h.pending({ epoch: i + 1, centreHz, staleMaxMs: 0 })
+		const at = h.sample
+		h.push(
+			addInto(
+				gaussianNoise(rng, len, SIGMA),
+				toneComb(len, FS, tonesHz, amps, at),
+			),
+			8192,
+		)
+	})
+	h.pending({ epoch: VISIT_EPOCH, centreHz: CENTRE, staleMaxMs: 0 })
+	const v0 = h.sample
+	return {
+		h,
+		visit: tracks =>
+			tracks
+				.filter(t => t.epoch === VISIT_EPOCH)
+				.map(t => ({
+					...t,
+					startSample: t.startSample - v0,
+					lastSample: t.lastSample - v0,
+				})),
+	}
+}
+
+/**
+ * One visit: the signal (absent for `null`: noise only) for `seconds`; its snapshots, in order.
+ * `warmUp` (default: with lines) runs the lines' verifying warm-up first (visitHarness).
+ */
 export function runVisit(
 	sig: SignalDef | null,
 	snrDb: number,
@@ -362,22 +460,19 @@ export function runVisit(
 	seconds: number,
 	integrationMs = 50,
 	lines: readonly SeededLine[] = [],
+	warmUp = lines.length > 0,
 ): TrackSnapshot[] {
 	const rng = mulberry32(seed)
-	const h = new Harness({
-		format: "FLOAT32LE",
-		integrationMs,
-		...(lines.length > 0 ? { persistedEngine: engineWith(lines) } : {}),
-	})
-	start(h)
+	const { h, visit } = visitHarness(lines, integrationMs, warmUp)
 	const n = Math.round(seconds * FS)
 	const iq = gaussianNoise(rng, n, SIGMA)
 	if (sig !== null) addInto(iq, sig.gen(rng, n, ampFor(snrDb)))
 	h.push(iq, 8192)
 	const target = CENTRE + OFFSET_HZ
+	const tracks = visit(h.tracks())
 	return sig === null
-		? h.tracks()
-		: h.tracks().filter(t => Math.abs(t.centreHz - target) <= 6250)
+		? tracks
+		: tracks.filter(t => Math.abs(t.centreHz - target) <= 6250)
 }
 
 /** An emission of a scene: its generator, Hz from `OFFSET_HZ`, dB against the scene's SNR. */
@@ -451,12 +546,7 @@ export function runScene(
 	lines: readonly SeededLine[] = [],
 ): TrackSnapshot[] {
 	const rng = mulberry32(seed)
-	const h = new Harness({
-		format: "FLOAT32LE",
-		integrationMs: 50,
-		...(lines.length > 0 ? { persistedEngine: engineWith(lines) } : {}),
-	})
-	start(h)
+	const { h, visit } = visitHarness(lines, 50)
 	const n = Math.round(seconds * FS)
 	const iq = gaussianNoise(rng, n, SIGMA)
 	for (const [gen, offsetHz, levelDb] of emissions) {
@@ -466,7 +556,7 @@ export function runScene(
 	}
 	h.push(iq, 8192)
 	const target = CENTRE + OFFSET_HZ
-	return h.tracks().filter(t => Math.abs(t.centreHz - target) <= 30_000)
+	return visit(h.tracks()).filter(t => Math.abs(t.centreHz - target) <= 30_000)
 }
 
 /** A 2 m band job's range, as the scanner reads priors and rasters from it. */

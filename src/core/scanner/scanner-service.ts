@@ -251,6 +251,8 @@ import {
 } from "../spectrum/spectrum-engine.js"
 import { SpectrumService } from "../spectrum/spectrum-service.js"
 import type { SpectrumPersistence } from "../spectrum/spectrum-service.js"
+import { MAX_REAL_RANGES } from "../spectrum/spur-map.js"
+import { confirmedRealRange } from "./real-ranges.js"
 import {
 	DiscoveryStore,
 	estimateFrequencyError,
@@ -3387,9 +3389,75 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Confirmed real signals per source (real-ranges.ts), by discovery id: seeded from the store
+	 * once it is restored, then kept by every discovery event. The engine's spur masks never
+	 * cover them; it gets the most recently seen MAX_REAL_RANGES.
+	 */
+	private readonly realRanges = new Map<
+		string,
+		Map<string, { startHz: number; endHz: number; seenMs: number }>
+	>()
+	/** Suspensions the source's pipeline last reported (stats `spurMask`), for the log. */
+	private readonly spurSuspensionsSeen = new Map<string, number>()
+
+	/** Seeds a source's confirmed real signals from the store; false while the store restores. */
+	private seedRealRanges(sourceId: string): boolean {
+		if (this.realRanges.has(sourceId)) return true
+		if (this.store.isRestoring()) return false
+		const m = new Map<
+			string,
+			{ startHz: number; endHz: number; seenMs: number }
+		>()
+		for (const r of this.store.confirmedRealRanges(sourceId))
+			m.set(r.id, { startHz: r.startHz, endHz: r.endHz, seenMs: r.seenMs })
+		this.realRanges.set(sourceId, m)
+		return true
+	}
+
+	private pushRealRanges(sourceId: string): void {
+		const engine = this.spectrum.engine(sourceId)
+		const m = this.realRanges.get(sourceId)
+		if (!engine || !m) return
+		const ranges = [...m.values()]
+			.sort((a, b) => b.seenMs - a.seenMs)
+			.slice(0, MAX_REAL_RANGES)
+			.map(r => ({ startHz: r.startHz, endHz: r.endHz }))
+		engine.setRealRanges(ranges)
+	}
+
+	/** A discovery event: a record that is (or stops being) confirmed real changes its sources' list. */
+	private noteRealRange(data: ScannerDiscoveryEventData): void {
+		const d = data.discovery
+		const range = data.change === "deleted" ? null : confirmedRealRange(d)
+		for (const [sourceId, m] of this.realRanges) {
+			let dirty = false
+			for (const id of data.mergedIds ?? []) if (m.delete(id)) dirty = true
+			if (range === null || !d.sourceIds.includes(sourceId)) {
+				if (m.delete(d.id)) dirty = true
+			} else {
+				const prev = m.get(d.id)
+				if (
+					prev === undefined ||
+					prev.startHz !== range.startHz ||
+					prev.endHz !== range.endHz
+				)
+					dirty = true
+				m.set(d.id, { ...range, seenMs: Date.parse(d.lastSeenAt) })
+			}
+			if (dirty) this.pushRealRanges(sourceId)
+		}
+		if (range !== null)
+			for (const sourceId of d.sourceIds)
+				if (!this.realRanges.has(sourceId) && this.seedRealRanges(sourceId))
+					this.pushRealRanges(sourceId)
+	}
+
 	private updateMasks(sourceId: string): void {
 		const engine = this.spectrum.engine(sourceId)
 		if (!engine) return
+		if (!this.realRanges.has(sourceId) && this.seedRealRanges(sourceId))
+			this.pushRealRanges(sourceId)
 		const specs = [...this.jobs.values()]
 			.filter(j => j.spec.sourceId === sourceId && !isTerminal(j.state))
 			.map(j => j.spec)
@@ -3629,8 +3697,24 @@ export class ScannerService extends EventEmitter {
 				this.arbiter.distrust(sourceId)
 				for (const d of drivers) d.onUntrackedRetune()
 				return
-			case "stats":
+			case "stats": {
+				// A spur mask met a confirmed signal and was suspended on its bins (counted by the pipeline).
+				const n = ev.stats.spurMask?.suspensions
+				if (
+					n !== undefined &&
+					n > (this.spurSuspensionsSeen.get(sourceId) ?? 0)
+				)
+					this.log.info(
+						{
+							sourceId,
+							suspensions: n,
+							suspendedBlocks: ev.stats.spurMask?.suspendedBlocks,
+						},
+						"Spur mask suspended on a confirmed signal",
+					)
+				if (n !== undefined) this.spurSuspensionsSeen.set(sourceId, n)
 				return
+			}
 		}
 	}
 
@@ -8790,6 +8874,7 @@ export class ScannerService extends EventEmitter {
 		data: ScannerDiscoveryEventData,
 		revision?: number,
 	): void {
+		this.noteRealRange(data)
 		this.emit("discovery", this.stampDiscoveryEvent(data, revision))
 	}
 

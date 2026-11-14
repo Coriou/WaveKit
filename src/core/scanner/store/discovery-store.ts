@@ -208,6 +208,7 @@ import {
 	planRetirement,
 } from "./fragment-retirement.js"
 import type { FragmentPlan, FragmentRecord } from "./fragment-retirement.js"
+import { confirmedRealRange } from "../real-ranges.js"
 import { SCANNER_LOAD_SLICE_ITEMS, yieldToEventLoop } from "./slices.js"
 import type { YieldTurn } from "./slices.js"
 
@@ -1766,9 +1767,10 @@ export class DiscoveryStore
 	}
 
 	/**
-	 * Restored flags whose offset is learned again within their deadline become ordinary flags. A
-	 * restored flag past its deadline is never confirmed (learning it late does not extend it): it
-	 * stays pending so `loFlagStands` fails and the next settle lifts it.
+	 * Restored flags whose offset is learned again within their deadline become ordinary flags
+	 * (verified: their read loses `possibleSpur`, so each is published). A restored flag past its
+	 * deadline is never confirmed (learning it late does not extend it): it stays pending so
+	 * `loFlagStands` fails and the next settle lifts it.
 	 */
 	private loRestoredConfirm(): void {
 		const now = this.now()
@@ -1778,8 +1780,11 @@ export class DiscoveryStore
 			if (
 				f !== undefined &&
 				this.loSpurs.isLearned(f.sourceId, f.sampleRateHz, f.offsetHz, now)
-			)
+			) {
 				this.loRestored.delete(id)
+				// verified now: its `possibleSpur` goes, published like any change
+				this.loDirtied(id)
+			}
 		}
 	}
 
@@ -4966,6 +4971,33 @@ export class DiscoveryStore
 		while (!steps.next().done);
 	}
 
+	/**
+	 * The RF extent of every discovery of `sourceId` whose content is confirmed real (a decode, an
+	 * identity, a kept voice recording or a proof), most recently seen first: spur masks never
+	 * cover these (spectrum/spur-map.ts). Decode anchors carry no RF extent and are left out.
+	 */
+	confirmedRealRanges(
+		sourceId: string,
+	): { id: string; startHz: number; endHz: number; seenMs: number }[] {
+		const out: {
+			id: string
+			startHz: number
+			endHz: number
+			seenMs: number
+		}[] = []
+		for (const d of this.discoveries.values()) {
+			if (!d.sourceIds.includes(sourceId)) continue
+			const range =
+				confirmedRealRange(d) ??
+				(this.discoveryView(d).proof !== null
+					? confirmedRealRange({ ...d, proof: true })
+					: null)
+			if (range !== null)
+				out.push({ id: d.id, ...range, seenMs: Date.parse(d.lastSeenAt) })
+		}
+		return out.sort((a, b) => b.seenMs - a.seenMs)
+	}
+
 	/** True while restoreInSlices runs: ingest is refused until it completes. */
 	isRestoring(): boolean {
 		return this.restoring
@@ -7710,6 +7742,10 @@ export class DiscoveryStore
 		const spur = this.spurFlagOf(d.id)
 		if (spur !== undefined) copy.receiverSpur = spur
 		else delete copy.receiverSpur
+		// A restored flag stands (hidden) until its offset is learned again: suspected, not verified.
+		if (spur !== undefined && this.loRestored.has(d.id))
+			copy.possibleSpur = { reason: "restored" }
+		else delete copy.possibleSpur
 		copy.evidenceLevel = view.evidence
 		copy.revision = this.published.get(d.id) ?? 1
 		return copy

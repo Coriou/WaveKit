@@ -311,6 +311,15 @@ export interface DiscoveryReceiverSpur {
 	lastAtMs: number
 }
 
+/**
+ * Why a discovery may be a receiver spur that is not verified now (`Discovery.possibleSpur`):
+ * `restored`, a receiver-spur flag saved before a restart whose offset has not been learned again
+ * since (it is verified once learned, and lifts 10 min after the restart otherwise).
+ */
+export interface DiscoveryPossibleSpur {
+	reason: "restored"
+}
+
 /** Spec § 7.1; timestamps ISO 8601. */
 export interface Discovery {
 	/** Decodes locate this emission; RF fields are unmeasured zero placeholders. */
@@ -369,6 +378,12 @@ export interface Discovery {
 	 * change). Absent on older cores.
 	 */
 	receiverSpur?: DiscoveryReceiverSpur
+	/**
+	 * Set while the record is suspected to be a receiver spur but the suspicion is not verified
+	 * now (see `DiscoveryPossibleSpur`); clients say "possible spur (unverified)", never "spur" and
+	 * never a clean signal. Computed on read, never stored. Absent on older cores.
+	 */
+	possibleSpur?: DiscoveryPossibleSpur
 	/**
 	 * The latest Activity event attributed to this discovery: `eventId` names it for
 	 * `GET /api/activity/:eventId`, `producedAt` is its ISO time. Optional and additive: absent when

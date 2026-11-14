@@ -596,4 +596,39 @@ describe("GET /api/scanner/discoveries includeReceiverSpurs", () => {
 		})
 		expect(bad.statusCode).toBe(400)
 	})
+
+	it("serialises possibleSpur on a restored unverified flag, by its declared schema", async () => {
+		const { store, spurIds } = spurStore()
+		app = Fastify({ logger: false })
+		await app.register(scannerRoutes, {
+			scanner: fakeService(store, filter => {
+				const page = store.list(filter)
+				return {
+					...page,
+					items: page.items.map(d =>
+						spurIds.includes(d.id)
+							? Object.assign({}, d, {
+									possibleSpur: { reason: "restored", stray: 1 },
+								})
+							: d,
+					),
+				}
+			}) as unknown as ScannerRouteService,
+		})
+		const res = await app.inject({
+			method: "GET",
+			url: "/api/scanner/discoveries?includeReceiverSpurs=true",
+		})
+		expect(res.statusCode).toBe(200)
+		const items = (
+			res.json() as { items: { id: string; possibleSpur?: unknown }[] }
+		).items
+		const flagged = items.filter(d => spurIds.includes(d.id))
+		expect(flagged).toHaveLength(spurIds.length)
+		// the declared object keeps its one field and drops anything else
+		for (const d of flagged)
+			expect(d.possibleSpur).toEqual({ reason: "restored" })
+		for (const d of items)
+			if (!spurIds.includes(d.id)) expect(d).not.toHaveProperty("possibleSpur")
+	})
 })

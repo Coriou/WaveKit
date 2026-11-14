@@ -67,7 +67,7 @@ function rollover(successorBlocks: 0 | 1 | 2, summaries = true) {
 		if (hop !== 0 || landing === null || visitOf(0) !== 2) return false
 		const ms = rel()
 		if (between || ms >= OVER_END) return false
-		return ms < 1_500 ? "judging" : { voice: "a", quietMs: 0 }
+		return ms < 1_500 ? "judging" : { voice: "a", quietMs: 0, targetHz: HZ }
 	}
 	const s = new SweepScheduler(
 		plan,

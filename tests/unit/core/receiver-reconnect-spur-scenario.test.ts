@@ -16,6 +16,21 @@
  * swap through the weak key. A fourth is a slow sdr-host API at boot (it answers 10 s after
  * rtlmux, past the 7 s bound): the model key settles at the bound, the late answer swaps to the
  * unit key once. No request leaves the process.
+ *
+ * Saved spur lines load verified only from a resumed namespace of a strong receiver key (a unit
+ * key or a strong serial), and only lines saved verified (`verified: true`): a weak model key's
+ * lines load unverified, since every dongle of that model on the source shares the key. Without an sdr-host the key is that weak model key, so a
+ * parked receiver (one centre) cannot verify its lines: even quiet lines stay unmasked and are
+ * tracked (the documented weak-key limit). That variant runs the quiet lines and asserts the
+ * reconnect adds nothing (the same discovery ids before the drop and after the reconnect window).
+ *
+ * Line levels. The fake's noise is σ = 0.04 (total complex power σ²) at a 1024-point FFT, so the
+ * per-bin noise power is σ² · 1.5 / 1024 ≈ 2.34e-6 (Hann, tone-calibrated as in the pipeline
+ * tests) and a bin-centred tone of amplitude a puts r = a² / 2.34e-6 floors on its centre bin and
+ * 1.5 · r over its main lobe; its 12.5 kHz slot level (13 bins) is 1 + 1.5 · r / 13. QUIET_AMP
+ * 0.0045: r ≈ 8.6, slot ≈ 2.0 → +3.0 dB, inside the measured +3.5 dB of real receiver lines and
+ * under the 6 dB lift gate, so a verified line masks. LOUD_AMP 0.25: r ≈ 26 700, slot ≈ +35 dB,
+ * past the gate: a verified mask lifts there (a real carrier never hides behind a spur bin).
  */
 import http from "node:http"
 import net from "node:net"
@@ -63,10 +78,13 @@ const FS = 1_024_000
 const CENTRE = 446_100_000
 /** Baseband offsets of the spur lines (fixed: they follow the receiver, not the RF). */
 const SPUR_OFFSETS = [150_000, -230_000]
+/** Tone amplitudes of the lines (module doc: slot level ≈ +3.0 dB and ≈ +35 dB). */
+const QUIET_AMP = 0.0045
+const LOUD_AMP = 0.25
 /**
  * What this composition learns from that IQ after about 32 s (measured): both lines promoted to
- * provisional spurs at bins 512 + offset / 1 kHz (1024-point FFT at 1.024 Msps, AGC), and the
- * absolute floor. Seeded so the test need not wait for the learning; without it the line at
+ * provisional spurs at bins 512 + offset / 1 kHz (1024-point FFT at 1.024 Msps, AGC), verified
+ * when saved, and the absolute floor. Seeded so the test need not wait for the learning; without it the line at
  * -230 kHz is a discovery within about a second.
  */
 const LEARNED: EngineState = {
@@ -79,6 +97,7 @@ const LEARNED: EngineState = {
 		basebandBin: 512 + offset / 1000,
 		widthBins: 1,
 		comb: false,
+		verified: true,
 	})),
 }
 /** Header-only identity (no sdr-host): the source-scoped model key of tuner 5 with 29 gains. */
@@ -132,8 +151,8 @@ async function fakeSdrHost() {
 	}
 }
 
-/** Noise plus fixed tones in 20 ms chunks; `drop()` ends every client connection. */
-async function spurRtlTcp() {
+/** Noise plus fixed tones of amplitude `amp` in 20 ms chunks; `drop()` ends every client connection. */
+async function spurRtlTcp(amp: number) {
 	const rng = mulberry32(7)
 	const chunkSamples = Math.round(FS * 0.02)
 	const sockets = new Set<net.Socket>()
@@ -153,7 +172,7 @@ async function spurRtlTcp() {
 	const timer = setInterval(() => {
 		const iq = gaussianNoise(rng, chunkSamples, 0.04)
 		for (const offset of SPUR_OFFSETS)
-			addInto(iq, tone(chunkSamples, FS, offset, 0.25))
+			addInto(iq, tone(chunkSamples, FS, offset, amp))
 		const bytes = Buffer.from(packCu8(iq.re, iq.im))
 		for (const s of sockets) if (!s.destroyed) s.write(bytes)
 	}, 20)
@@ -189,14 +208,16 @@ afterEach(async () => {
 /**
  * The scenario; `withSdrHost`: the source has a configured sdr-host (the fake), so both settles
  * wait for this connection's kicked poll and land on the unit key. `sdrHostLate`: the sdr-host API
- * is down (503) from the drop until 2 s after the reconnect.
+ * is down (503) from the drop until 2 s after the reconnect. `amp`: the lines' tone amplitude.
+ * `loud` (unit key, LOUD_AMP): the run ends after the first settle, asserting the lines lift.
  */
 async function runScenario(
 	withSdrHost: boolean,
 	sdrHostLate = false,
 	bootLateMs = 0,
+	amp = LOUD_AMP,
 ): Promise<void> {
-	const server = await spurRtlTcp()
+	const server = await spurRtlTcp(amp)
 	cleanup.push(() => server.close())
 	const stateDir = await mkdtemp(join(tmpdir(), "wk-spur-scenario-"))
 	cleanup.push(() => rm(stateDir, { recursive: true, force: true }))
@@ -346,6 +367,36 @@ async function runScenario(
 		swaps += 1
 		await replace(id, next)
 	}
+	/**
+	 * Each line as the engine sees it now: masked (a spur mask covers its RF) and tracked (a
+	 * tracked segment of the last second, after line filtering, reaches within a bin of it).
+	 */
+	const lineStates = async () => {
+		const masks = await scanner.spectrum.engine("rtl")?.artefactMasks()
+		if (!masks) throw new Error("no artefact masks")
+		return SPUR_OFFSETS.map(offset => {
+			const hz = CENTRE + offset
+			return {
+				offset,
+				masked: masks.spurs.some(m => m.startHz <= hz && hz <= m.endHz),
+				tracked: masks.activity.some(
+					r => r.startHz <= hz + 1000 && hz - 1000 <= r.endHz,
+				),
+			}
+		})
+	}
+	/** lineStates sampled `times` times 500 ms apart: every sample must show `want`. */
+	const expectLines = async (
+		want: { masked: boolean; tracked: boolean },
+		times = 4,
+	) => {
+		for (let n = 0; n < times; n++) {
+			if (n > 0) await new Promise(resolve => setTimeout(resolve, 500))
+			expect(await lineStates()).toEqual(
+				SPUR_OFFSETS.map(offset => ({ offset, ...want })),
+			)
+		}
+	}
 	await scanner.start()
 	if (bootLateMs > 0) sdrHost?.setDown(true)
 	poller?.start()
@@ -366,8 +417,9 @@ async function runScenario(
 		expect(settled).toEqual([RECEIVER_KEY, UNIT_KEY])
 		await learned.idle("rtl")
 		const seen = new Set(discoveries().map(d => d.id))
-		// Past the upgrade: exactly one swap (model -> unit; a swap restarts the pipeline once), the
-		// unit's spur map in use, so no discovery after it.
+		// Past the upgrade: exactly one swap (model -> unit; a swap restarts the pipeline once) and
+		// the unit key resumed, with no new discovery id after it. The swap is a take-over, so the
+		// unit's lines load unverified (never trusted); masks are not asserted here.
 		await new Promise(resolve => setTimeout(resolve, 4_000))
 		expect(swaps).toBe(swapsAtModel + 1)
 		expect(discoveries().filter(d => !seen.has(d.id))).toEqual([])
@@ -379,9 +431,21 @@ async function runScenario(
 	await waitFor(() => settled.length === 1, 10_000)
 	expect(settled).toEqual([key])
 	await learned.idle("rtl")
-	// The seeded map is in use: the lines are no discovery.
+	// The seeded map is in use: under a unit key the lines are no discovery. Under the weak model
+	// key they load unverified (weak-key limit, module doc): even quiet, they are tracked.
 	await new Promise(resolve => setTimeout(resolve, 3_000))
-	expect(discoveries()).toEqual([])
+	const weak = sdrHost === null
+	if (weak) await expectLines({ masked: false, tracked: true })
+	else if (amp === LOUD_AMP) {
+		// Trusted lines, but loud past the 6 dB gate: each mask lifts and the tone is tracked.
+		await expectLines({ masked: false, tracked: true })
+		return
+	} else {
+		// Trusted quiet lines mask at once from one centre: no track, no discovery.
+		await expectLines({ masked: true, tracked: false })
+		expect(discoveries()).toEqual([])
+	}
+	const discoveryIdsBefore = discoveries().map(d => d.id)
 	const swapsBefore = swaps
 	const buildsBefore = builds.mock.calls.length
 	const statusBefore = sdrHost?.statusRequests() ?? 0
@@ -404,9 +468,16 @@ async function runScenario(
 	if (sdrHost) expect(sdrHost.statusRequests()).toBeGreaterThan(statusBefore)
 	// The reconnect window and well past it: nothing new, and the engine was never swapped.
 	await new Promise(resolve => setTimeout(resolve, 6_000))
-	expect(discoveries()).toEqual([])
+	// The same discoveries as before the drop (none, or under the weak key the same one): the
+	// reconnect adds no discovery id.
+	expect(discoveries().map(d => d.id)).toEqual(discoveryIdsBefore)
 	expect(swaps).toBe(swapsBefore)
 	expect(builds.mock.calls.length).toBe(buildsBefore)
+	// Still masked, still no track: the reconnect kept the trusted lines in the same pipeline.
+	// Under the weak key still unmasked and tracked: the reconnect trusted nothing.
+	await expectLines(
+		weak ? { masked: false, tracked: true } : { masked: true, tracked: false },
+	)
 	expect(learned.view("rtl")?.namespaceState).toBe("resumed")
 	expect(learned.view("rtl")?.key).toBe(key)
 	if (sdrHost) {
@@ -419,11 +490,15 @@ async function runScenario(
 }
 
 describe("scenario: reconnect to the same receiver with spur lines in the IQ", () => {
-	it("keeps the spur map across the reconnect: no discovery in the reconnect window", async () => {
-		await runScenario(false)
+	it("under a weak model key the quiet lines are tracked, not masked, and the reconnect adds no discovery: no swap, no pipeline rebuild", async () => {
+		await runScenario(false, false, 0, QUIET_AMP)
 	}, 60_000)
 
-	it("with a fake sdr-host: both settles are the unit key, no swap, no pipeline rebuild, no discovery", async () => {
+	it("with a fake sdr-host the quiet lines stay masked and untracked across the reconnect: the unit key settles twice, no swap, no pipeline rebuild, no discovery", async () => {
+		await runScenario(true, false, 0, QUIET_AMP)
+	}, 60_000)
+
+	it("with a fake sdr-host a loud tone on a saved verified line lifts the mask and is tracked", async () => {
 		await runScenario(true)
 	}, 60_000)
 
@@ -431,7 +506,7 @@ describe("scenario: reconnect to the same receiver with spur lines in the IQ", (
 		await runScenario(true, false, 10_000)
 	}, 60_000)
 
-	it("a Pi reboot (the sdr-host API answers 503 until 2 s after the reconnect): the unit key settles, no swap, no pipeline rebuild, no discovery", async () => {
-		await runScenario(true, true)
+	it("a Pi reboot (the sdr-host API answers 503 until 2 s after the reconnect): the quiet lines stay masked and untracked, the unit key settles, no swap, no pipeline rebuild, no discovery", async () => {
+		await runScenario(true, true, 0, QUIET_AMP)
 	}, 60_000)
 })

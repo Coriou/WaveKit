@@ -116,7 +116,10 @@ function recorder(
 					c >= s.startMs + VOICED_AFTER_MS &&
 					c < s.endMs,
 			)
-			return k < 0 ? false : { voice: `tx-${k}` }
+			// Named with its session's frequency (VoiceOnAir.targetHz), as the recorder names it.
+			return k < 0
+				? false
+				: { voice: `tx-${k}`, targetHz: signals[k]!.centreHz }
 		}
 	return (c, hop) =>
 		signals.some(
@@ -289,7 +292,7 @@ function repeaterScene(
 				const voiced = g.some(
 					o => c >= o.startMs + VOICED_AFTER_MS && c < o.endMs + VOICE_TAIL_MS,
 				)
-				return voiced ? { voice: `carrier-${k}` } : true
+				return voiced ? { voice: `carrier-${k}`, targetHz: hz } : true
 			}
 			const talk = view === "overs" ? overs : carriers
 			const r = simulateSweep(plan, spec, {
@@ -397,7 +400,7 @@ describe("record whole voice: the scheduler", () => {
 				!inHop0(hop, hz0) || c < tx.startMs + VOICED_AFTER_MS || c >= tx.endMs
 					? false
 					: c < 35_000
-						? { voice: "tx" }
+						? { voice: "tx", targetHz: tx.centreHz }
 						: true,
 		})
 		const first = r.visits.find(v => v.hopIndex === 0 && kept(v))!
@@ -422,7 +425,7 @@ describe("record whole voice: the scheduler", () => {
 						c >= o.startMs + VOICED_AFTER_MS &&
 						c < o.endMs,
 				)
-				return k < 0 ? false : { voice: `over-${k}` }
+				return k < 0 ? false : { voice: `over-${k}`, targetHz: hz0 }
 			},
 		})
 		const zero = r.visits.filter(v => v.hopIndex === 0)
@@ -463,7 +466,7 @@ describe("record whole voice: the scheduler", () => {
 			signals: [other, id],
 			recordingActive: (c, hop) =>
 				hop === 1 && c >= id.startMs + VOICED_AFTER_MS && c < id.endMs
-					? { voice: "id" }
+					? { voice: "id", targetHz: id.centreHz }
 					: false,
 		})
 		const watch = r.visits.find(v => v.hopIndex === 2 && kept(v))!
@@ -493,7 +496,7 @@ describe("record whole voice: the scheduler", () => {
 					return false
 				return c >= pausedFrom && c < pausedFrom + 5_000
 					? true
-					: { voice: "tx" }
+					: { voice: "tx", targetHz: tx.centreHz }
 			},
 		})
 		const first = r.visits.find(v => v.hopIndex === 0 && kept(v))!
@@ -511,7 +514,7 @@ describe("record whole voice: the scheduler", () => {
 			signals: [tx],
 			recordingActive: (c, hop) =>
 				hop === 0 && c >= tx.startMs + VOICED_AFTER_MS && c < tx.endMs
-					? { voice: "tx" }
+					? { voice: "tx", targetHz: tx.centreHz }
 					: false,
 		})
 		const held = r.visits.find(v => v.hopIndex === 0 && kept(v))!

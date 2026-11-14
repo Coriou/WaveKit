@@ -139,9 +139,11 @@ const sighting = (id: string, hz: number, blocks = 8): TrackSnapshot => ({
 	trackId: id,
 })
 
-const voiceAnswer = (quietMs = 0): RecordingActivity => ({
+/** A voice answer of a session on `hz` (VoiceOnAir.targetHz: the held track's own, hop 0's). */
+const voiceAnswer = (quietMs = 0, hz = hopHz(0)): RecordingActivity => ({
 	voice: "a",
 	quietMs,
+	targetHz: hz,
 })
 
 /** A voice answer of a session the recorder recorded at `hz` (verified voice history there). */
@@ -149,6 +151,7 @@ const recordedVoice = (hz: number): RecordingActivity => ({
 	voice: "a",
 	quietMs: 0,
 	recordedHz: hz,
+	targetHz: hz,
 })
 
 /** Visit of `hop` with nothing but the settle and its dwell. */
@@ -290,7 +293,7 @@ describe("a voiced landing on a traffic frequency with a follow budget of 0", ()
 
 	it("a voice answer by the floor gets the voice hold, past L and to its end", () => {
 		const { landing } = budgetZeroLanding(into =>
-			into >= 1_400 && into < 25_000 ? voiceAnswer() : false,
+			into >= 1_400 && into < 25_000 ? voiceAnswer(0, hopHz(1)) : false,
 		)
 		const { heldMs } = landing()
 		expect(heldMs).toBeGreaterThanOrEqual(25_000)
@@ -299,7 +302,7 @@ describe("a voiced landing on a traffic frequency with a follow budget of 0", ()
 
 	it("a voice answer past the floor with no session answering by then is too late: it leaves", () => {
 		const { landing } = budgetZeroLanding(into =>
-			into >= 1_800 ? voiceAnswer() : false,
+			into >= 1_800 ? voiceAnswer(0, hopHz(1)) : false,
 		)
 		expect(landing().heldMs).toBeLessThanOrEqual(
 			3 * BLOCK_MS + 1_500 + BLOCK_MS,
@@ -348,7 +351,7 @@ describe("a watch's long-hold lock and a voice on its hop", () => {
 		let watched = false
 		const d = drive(
 			(hop, ms) =>
-				hop === 1 && watched && ms < 120_000 ? voiceAnswer() : false,
+				hop === 1 && watched && ms < 120_000 ? voiceAnswer(0, hopHz(1)) : false,
 			(hop, s, visit) => {
 				if (hop !== 1) return
 				if (visit === 1) {
@@ -685,7 +688,12 @@ describe("a voiced transmission whose squelch closed under the recorder's hang (
 				if (into < first) return recordedVoice(hopHz(0))
 				if (into < first + 2_000) return after
 				if (into < first + 27_000)
-					return { voice: "b", quietMs: 0, recordedHz: hopHz(0) }
+					return {
+						voice: "b",
+						quietMs: 0,
+						recordedHz: hopHz(0),
+						targetHz: hopHz(0),
+					}
 				return false
 			},
 			(hop, s, visit) => {
@@ -700,6 +708,7 @@ describe("a voiced transmission whose squelch closed under the recorder's hang (
 		recording: true,
 		recordedHz: hopHz(0),
 		voiceEnded: true,
+		targetHz: hopHz(0),
 	}
 
 	it("ends the voice hold at the first re-check that reads it, history or not: the forced sweep follows", () => {
@@ -809,6 +818,104 @@ describe('a voice answer still to come ("judging")', () => {
 		expect(heldMs).toBeLessThanOrEqual(3 * BLOCK_MS + 1_500 + 3_000 + BLOCK_MS)
 	})
 
+	/**
+	 * The wait opens the visit's holds (a neighbour's session judging, its track not held), and a
+	 * voice qualifies 500 ms into it on the hop's own channel, its session answering voice
+	 * VOICE_LAG_MS later (still judging until then): the wait's 3000 ms (and its re-check) bound the
+	 * wait only, never the follow its re-check starts, which runs within L and whose end keeps the
+	 * hop for the voice to its end.
+	 */
+	const VOICE_LAG_MS = 1_000
+	const handedOver = (voiceMs: number, lagMs = VOICE_LAG_MS) => {
+		const holdsFrom = 3 * BLOCK_MS
+		const qualifiesAt = holdsFrom + 500
+		let heardFrom: number | null = null
+		const d = drive(
+			(hop, ms) => {
+				if (hop !== 0) return false
+				if (heardFrom === null || ms < heardFrom + lagMs) return "judging"
+				return ms < heardFrom + voiceMs ? voiceAnswer() : false
+			},
+			(hop, s, visit) => {
+				if (hop === 0 && visit === 1)
+					s.onTrack(sighting("n", hopHz(0) - 25_000), false, 0)
+			},
+			0,
+			(hop, s, visit, intoMs) => {
+				if (hop !== 0 || visit !== 1 || intoMs !== qualifiesAt) return
+				s.onTrack(sighting("id", hopHz(0)), false, 0, { followOnAir: true })
+				heardFrom = d.now()
+			},
+		)
+		return { stay: d.stayed(0, 1) - COARSE_MS, qualifiesAt }
+	}
+
+	it("a track that qualifies during it is held past the wait's bound: a 25 s voice is kept to its end", () => {
+		const { stay, qualifiesAt } = handedOver(25_000)
+		// Past the wait's bound (3000 ms and a re-check from the start of the holds) and past L.
+		expect(stay).toBeGreaterThan(3_000 + RECHECK_MS)
+		expect(stay).toBeGreaterThanOrEqual(qualifiesAt - 3 * BLOCK_MS + 25_000)
+		expect(stay).toBeLessThanOrEqual(
+			qualifiesAt - 3 * BLOCK_MS + 25_000 + RECHECK_MS + BLOCK_MS,
+		)
+	})
+
+	it("voice answered in the very re-check the track qualifies in (no lag): the commitment to the wait's band is tentative, passes to the track by its own voice, and a 25 s voice is kept to its end", () => {
+		// The wait's band is the window's (the neighbour "n", 25 kHz below: recordedTrack with no
+		// hold), so the voice, the qualifying track's own, commits there as a neighbour's; firm, the
+		// track's own voice was never named and it was cut within L.
+		const { stay, qualifiesAt } = handedOver(25_000, 0)
+		// It qualifies at the wait's second re-check.
+		expect(qualifiesAt - 3 * BLOCK_MS).toBe(2 * RECHECK_MS)
+		expect(stay).toBeGreaterThan(L3 + RECHECK_MS)
+		expect(stay).toBeGreaterThanOrEqual(qualifiesAt - 3 * BLOCK_MS + 25_000)
+		expect(stay).toBeLessThanOrEqual(
+			qualifiesAt - 3 * BLOCK_MS + 25_000 + RECHECK_MS + BLOCK_MS,
+		)
+	})
+
+	it("a voice hold started and spent during it: a decoded track that qualifies after is held within what L has left, not under the wait's earlier window", () => {
+		// The wait opens the holds at 150 ms; its first re-check (400 ms) answers voice in the
+		// window's band (the neighbour "n"): the voice hold. The next (650 ms) answers another
+		// transmission: spent, the window cut to what L has left (spendVoice). A track that needs a
+		// decoder qualifies at 900 ms and is decoded, its follow running to the window's end
+		// (maxHoldDeadline): L, not `hold.maxHoldMs` (28 000 ms).
+		const holdsFrom = 3 * BLOCK_MS
+		let phase: "judging" | "voice" | "other" = "judging"
+		const d = drive(
+			hop => {
+				if (hop !== 0) return false
+				if (phase === "judging") return "judging"
+				return phase === "voice"
+					? voiceAnswer(0, hopHz(0) - 25_000)
+					: { voice: "b", quietMs: 0, targetHz: hopHz(0) + 100_000 }
+			},
+			(hop, s, visit) => {
+				if (hop === 0 && visit === 1)
+					s.onTrack(sighting("n", hopHz(0) - 25_000), false, 0)
+			},
+			0,
+			(hop, s, visit, intoMs) => {
+				if (hop !== 0 || visit !== 1) return
+				if (intoMs === holdsFrom + RECHECK_MS) phase = "voice"
+				if (intoMs === holdsFrom + 2 * RECHECK_MS) phase = "other"
+				if (intoMs === holdsFrom + 3 * RECHECK_MS)
+					s.onTrack(sighting("d", hopHz(0) + 50_000), true, 60_000)
+				if (intoMs === holdsFrom + 3 * RECHECK_MS + BLOCK_MS)
+					s.onConfirmed("d", true)
+			},
+		)
+		const stay = d.stayed(0, 1) - COARSE_MS
+		expect(stay).toBeGreaterThan(3 * RECHECK_MS)
+		expect(stay).toBeLessThanOrEqual(L3 + BLOCK_MS)
+	})
+
+	it("a track that qualifies during it and voices 2 s is left when its voice ends, within L", () => {
+		const { stay, qualifiesAt } = handedOver(2_000)
+		expect(stay).toBeLessThanOrEqual(L3 + RECHECK_MS)
+		expect(stay).toBeGreaterThanOrEqual(qualifiesAt - 3 * BLOCK_MS + 2_000)
+	})
+
 	it("after the visit's voice hold ended, it keeps only what L has left", () => {
 		const stay = keptFor(into => (into < 5_000 ? voiceAnswer() : "judging"))
 		expect(stay).toBeGreaterThanOrEqual(L3)
@@ -820,7 +927,7 @@ describe("a probe of a track just passed, its label still to come", () => {
 	it("waits for the label once, then follows it instead of leaving at the dwell", () => {
 		let label = false
 		const d = drive(
-			hop => (hop === 1 ? (label ? voiceAnswer() : false) : false),
+			hop => (hop === 1 ? (label ? voiceAnswer(0, hopHz(1)) : false) : false),
 			(hop, s, visit) => {
 				if (hop === 1 && visit === 1) {
 					s.onTrack(sighting("t1", hopHz(1)), true, 1_000, {

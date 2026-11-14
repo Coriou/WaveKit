@@ -6,7 +6,12 @@ import type { EngineState } from "./types.js"
  * Here a narrow line that is on in ≥ 95 % of settled blocks over 30 s becomes a provisional spur:
  * the pipeline drops its segments before tracking, it is never reported, and it is demoted as soon
  * as it falls below 95 %. ≥ 3 lines equally spaced within ± 1 bin form a comb, returned for
- * SpurMap.promote (baseband spurs at once) and kept here as sticky comb lines.
+ * SpurMap.promote (baseband spur candidates) and kept here as comb lines while SpurMap keeps them.
+ *
+ * No line masks on its own: a provisional or comb line masks only while the LineGate (SpurMap)
+ * verifies it (level under the gate's pass level, the same baseband bin under two LO centres far
+ * enough apart, seen within the TTL), persists only once verified (or while a restored line has
+ * not expired), and a comb line leaves when SpurMap lets its candidate bins expire.
  *
  * Per key `${fs}:${gainKey}:${fftSize}`, in FFT-shifted baseband bins. Per bin, `winMs` is the
  * length of the current ≥ 95 % run (capped at the window) and `offMs` the core-off time inside it,
@@ -35,9 +40,29 @@ export interface BinRange {
 	startBin: number
 	endBin: number
 }
-/** A line's core bins; `comb` lines are sticky and promoted to SpurMap. */
+/** A line's core bins; `comb` lines are promoted to SpurMap. */
 export interface ProvisionalLine extends BinRange {
 	comb: boolean
+}
+
+/** SpurMap's verification of a line [startBin, endBin) of a key (spur-map.ts). */
+export interface LineGate {
+	/** Verified and quiet in this block: the line may mask now. */
+	masks(key: string, startBin: number, endBin: number): boolean
+	/** Verified (LO-confirmed and seen within the TTL), whatever its level now: it may persist. */
+	verified(key: string, startBin: number, endBin: number): boolean
+	/**
+	 * Verified on evidence of this run (a trusted line seen since it was restored, never one only
+	 * restored): the line may save `verified: true`.
+	 */
+	saveVerified(key: string, startBin: number, endBin: number): boolean
+	/** A candidate bin of the line has not expired. */
+	alive(key: string, startBin: number, endBin: number): boolean
+}
+
+interface Line extends ProvisionalLine {
+	/** Restored from disk: a comb line is persisted again until its candidate bins expire. */
+	imported: boolean
 }
 type Entry = NonNullable<EngineState["provisionalSpurs"]>[number]
 
@@ -45,8 +70,8 @@ interface KeyState {
 	winMs: Float64Array
 	offMs: Float64Array
 	onAvg: Float32Array
-	provisional: ProvisionalLine[]
-	comb: ProvisionalLine[]
+	provisional: Line[]
+	comb: Line[]
 }
 
 export class ProvisionalSpurs {
@@ -65,7 +90,8 @@ export class ProvisionalSpurs {
 	/**
 	 * One block. `on` is the detector output (provisional lines are not detector-masked), `powerDb`
 	 * the block PSD, `usable` 1 where the detector may turn bins on. Returns the comb lines promoted
-	 * in this block, widened by the ±1-bin Hann skirt, for SpurMap.promote.
+	 * in this block, widened by the ±1-bin Hann skirt, for SpurMap.promote. A comb line whose
+	 * candidate bins `gate` let expire leaves.
 	 */
 	observe(
 		key: string,
@@ -73,6 +99,7 @@ export class ProvisionalSpurs {
 		powerDb: Float32Array,
 		usable: Uint8Array,
 		blockMs: number,
+		gate: LineGate,
 	): BinRange[] {
 		const s = this.state(key)
 		const n = this.n
@@ -107,6 +134,11 @@ export class ProvisionalSpurs {
 				s.offMs[i] = 0
 			}
 		}
+		let expired = false
+		for (const l of s.comb)
+			if (!gate.alive(key, l.startBin, l.endBin)) expired = true
+		if (expired)
+			s.comb = s.comb.filter(l => gate.alive(key, l.startBin, l.endBin))
 		const next = this.findLines(s)
 		if (sameLines(next, s.provisional)) return []
 		s.provisional = next
@@ -118,48 +150,78 @@ export class ProvisionalSpurs {
 		const s = this.keys.get(key)
 		if (s === undefined) return []
 		return [...s.comb, ...s.provisional]
-			.map(l => ({ ...l }))
+			.map(l => ({ startBin: l.startBin, endBin: l.endBin, comb: l.comb }))
 			.sort((a, b) => a.startBin - b.startBin)
 	}
 
-	/** Sets out[i] = 1 on the core bins of every line of `key` (other bins untouched). */
-	mask(key: string, out: Uint8Array): void {
+	/**
+	 * Sets out[i] = 1 on the core bins of every line of `key` that `gate` lets mask now (other bins
+	 * untouched). A bin with protect[i] = 1 stays unmasked; returns how many such bins it left.
+	 */
+	mask(
+		key: string,
+		out: Uint8Array,
+		gate: LineGate,
+		protect?: Uint8Array,
+	): number {
 		const s = this.keys.get(key)
-		if (s === undefined) return
-		for (const l of [...s.comb, ...s.provisional])
-			out.fill(1, l.startBin, l.endBin)
+		if (s === undefined) return 0
+		return (
+			maskLines(key, s.comb, out, gate, protect) +
+			maskLines(key, s.provisional, out, gate, protect)
+		)
 	}
 
-	exportState(): { provisionalSpurs: Entry[] } {
+	/**
+	 * Lines `gate` verifies, and restored comb lines whose candidate bins have not expired. A new
+	 * line persists once verified; a lone provisional line only while verified. A line the gate
+	 * verifies now saves `verified: true`; a restored comb line kept unverified saves no flag.
+	 */
+	exportState(gate: LineGate): { provisionalSpurs: Entry[] } {
 		const out: Entry[] = [...this.foreign]
 		for (const [key, s] of this.keys) {
 			for (const l of [...s.comb, ...s.provisional]) {
+				const restored =
+					l.comb && l.imported && gate.alive(key, l.startBin, l.endBin)
+				const verified = gate.verified(key, l.startBin, l.endBin)
+				if (!restored && !verified) continue
+				// Verified on this run's evidence when saved: only such a line can load trusted
+				// (absent = unverified); a trusted line never seen since its restore saves no flag.
+				const evidenced =
+					verified && gate.saveVerified(key, l.startBin, l.endBin)
 				out.push({
 					key,
 					basebandBin: l.startBin,
 					widthBins: l.endBin - l.startBin,
 					comb: l.comb,
+					...(evidenced ? { verified: true } : {}),
 				})
 			}
 		}
 		return { provisionalSpurs: out }
 	}
 
-	/** Comb lines come back sticky, provisional lines already qualifying: a restart starts masked. */
+	/**
+	 * Comb lines come back as comb lines, provisional lines already qualifying, all unverified: a
+	 * restart masks nothing until the gate re-confirms a line.
+	 */
 	importState(st: Pick<EngineState, "provisionalSpurs">): void {
 		for (const e of st.provisionalSpurs ?? []) {
 			if (Number(e.key.split(":").at(-1)) !== this.n) {
-				this.foreign.push(e)
+				// Kept for its own FFT size, never verified here: saved again with no flag.
+				const { verified: _verified, ...line } = e
+				this.foreign.push(line)
 				continue
 			}
 			const start = e.basebandBin
 			const end = e.basebandBin + e.widthBins
 			if (start < 0 || end > this.n || end <= start) continue
 			const s = this.state(e.key)
-			const line: ProvisionalLine = {
+			const line: Line = {
 				startBin: start,
 				endBin: end,
 				comb: e.comb,
+				imported: true,
 			}
 			if (e.comb) {
 				if (s.comb.length < MAX_LINES) s.comb.push(line)
@@ -170,9 +232,9 @@ export class ProvisionalSpurs {
 		}
 	}
 
-	private findLines(s: KeyState): ProvisionalLine[] {
+	private findLines(s: KeyState): Line[] {
 		const n = this.n
-		const out: ProvisionalLine[] = []
+		const out: Line[] = []
 		for (let i = 0; i < n && out.length < MAX_LINES; ) {
 			if ((s.winMs[i] ?? 0) < this.windowMs) {
 				i++
@@ -186,7 +248,7 @@ export class ProvisionalSpurs {
 				this.isolated(s, i, j) &&
 				!s.comb.some(c => c.startBin < j && c.endBin > i)
 			) {
-				out.push({ startBin: i, endBin: j, comb: false })
+				out.push({ startBin: i, endBin: j, comb: false, imported: false })
 			}
 			i = j
 		}
@@ -265,6 +327,25 @@ export function combMembers(centres: readonly number[]): Set<number> {
 		}
 	}
 	return out
+}
+
+/** ProvisionalSpurs.mask over one list, without allocating: returns the protected bins left unmasked. */
+function maskLines(
+	key: string,
+	lines: readonly Line[],
+	out: Uint8Array,
+	gate: LineGate,
+	protect: Uint8Array | undefined,
+): number {
+	let suspended = 0
+	for (const l of lines) {
+		if (!gate.masks(key, l.startBin, l.endBin)) continue
+		for (let i = l.startBin; i < l.endBin; i++) {
+			if (protect !== undefined && protect[i] === 1) suspended++
+			else out[i] = 1
+		}
+	}
+	return suspended
 }
 
 function sameLines(a: readonly BinRange[], b: readonly BinRange[]): boolean {

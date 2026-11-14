@@ -9049,6 +9049,14 @@ restart `lastAtMs` is the time the flag was set until a new sighting refreshes
 it. A record shown to be more than a spur once (as above) is saved as such and
 never flagged again, across restarts. Older cores never set the field.
 
+A record suspected to be a receiver spur whose suspicion is not verified now
+carries `possibleSpur: { reason }`, computed on read and never stored. Today
+the only reason is `restored`: a saved `receiverSpur` flag after a restart whose
+offset has not been learned again (the record is still hidden as above). The
+field goes once the offset is learned again, published as a discovery update,
+and with the flag when it lifts. Clients say "possible spur (unverified)", not
+"spur", and not a clean signal. Older cores never set the field.
+
 `POST /api/scanner/identify` accepts `waitUntilSignal: true` and optional `waitMs`
 (integer 1 000–600 000, default 300 000; requires `waitUntilSignal: true`). It waits
 for a gated transmission, including one already on air, then counts `timeoutMs`

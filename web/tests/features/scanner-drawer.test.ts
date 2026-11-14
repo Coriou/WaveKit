@@ -21,6 +21,7 @@ import {
 	identityLine,
 	listEntries,
 	spanText,
+	spurText,
 	whyText,
 } from "../../src/features/scanner/drawer/rows.ts"
 import {
@@ -291,6 +292,34 @@ describe("scanner drawer rows", () => {
 			labelled: true,
 			reason: "May be a neighbour's leak · No sync",
 		})
+	})
+
+	it("says a receiver spur, and only a possible one while the core has not verified it", () => {
+		const receiverSpur = {
+			offsetHz: -150_000,
+			sampleRateHz: 1_024_000,
+			centres: 3,
+			lastAtMs: NOW,
+		}
+		const weak = { confidence: "activity", protocol: "unknown" } as const
+		expect(discoveryRow(disc({ ...weak, receiverSpur }), NOW).reason).toBe(
+			"Receiver spur",
+		)
+		const possible = discoveryRow(
+			disc({
+				...weak,
+				receiverSpur,
+				possibleSpur: { reason: "restored" },
+				undecodedReason: "no-sync",
+			}),
+			NOW,
+		)
+		expect(possible.reason).toBe("Possible spur (unverified) · No sync")
+		expect(spurText({ possibleSpur: { reason: "restored" } })).toBe(
+			"Possible spur (unverified)",
+		)
+		expect(spurText({})).toBeNull()
+		expect(discoveryRow(disc(weak), NOW).reason).toBeNull()
 	})
 
 	it("explains the confidence", () => {

@@ -18,6 +18,7 @@ import type {
 } from "../spectrum/types.js"
 import type {
 	DiscoveryCoverage,
+	DiscoveryPossibleSpur,
 	DiscoveryReceiverSpur,
 	DiscoveryTrialMemory,
 	ScannerRecorderDiscovery,
@@ -340,6 +341,8 @@ export interface Discovery {
 	 * while it still stands (a restored flag until its offset is learned again or 10 min pass).
 	 */
 	receiverSpur?: DiscoveryReceiverSpur
+	/** api-types `Discovery.possibleSpur`: set on read while `receiverSpur` is a restored, unverified flag; never stored. */
+	possibleSpur?: DiscoveryPossibleSpur
 	/**
 	 * The latest Activity event attributed to this discovery (api-types `Discovery.lastActivity`).
 	 * Not set by this core yet: the Activity event id is allocated outside the scanner.

@@ -652,6 +652,12 @@ const discoveryResponseSchema = {
 				lastAtMs: { type: "number" },
 			},
 		},
+		possibleSpur: {
+			type: "object",
+			additionalProperties: false,
+			required: ["reason"],
+			properties: { reason: { enum: ["restored"] } },
+		},
 	},
 } as const
 

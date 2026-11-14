@@ -245,7 +245,9 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   search, a filter or the range recounts at once.
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
-  not care about, save presets.
+  not care about, save presets. A row the core suspects is a receiver spur says so on its second
+  line: `Receiver spur` once confirmed, `Possible spur (unverified)` while the suspicion is not yet
+  confirmed (for example just after a restart).
 - **Recordings:** recordings kept by the core, to play, search and keep, including one scanner
   recording per analog voice transmission the scanner finds. The footer line sums
   the disk they use: what you kept, digital-voice calls, scanner evidence and named IQ captures

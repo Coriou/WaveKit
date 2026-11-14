@@ -39,8 +39,9 @@ const LAST = HOPS - 1
 const ID_FROM = 30_000
 const NEIGHBOUR_FROM = ID_FROM + 3_000
 const EVICT_AT = ID_FROM + 6_000
+const ID_HZ = plan.hops[LAST]!.centreHz + 100_000
 const signal = (ms: number): SimSignal => ({
-	centreHz: plan.hops[LAST]!.centreHz + 100_000,
+	centreHz: ID_HZ,
 	startMs: ID_FROM,
 	endMs: ID_FROM + ms,
 	snrDb: 21,
@@ -61,8 +62,11 @@ function recorder(list: boolean, idEndMs: number) {
 		if (hop !== LAST) return false
 		const voiced: VoiceOnAir[] = []
 		const idOn = c >= ID_FROM + VOICED_AFTER_MS && c < idEndMs
-		if (idOn && c < EVICT_AT) voiced.push({ voice: "id", quietMs: 0 })
-		if (c >= NEIGHBOUR_FROM) voiced.push({ voice: "x", quietMs: 0 })
+		// Each with its session's frequency (VoiceOnAir.targetHz); the neighbour 25 kHz up.
+		if (idOn && c < EVICT_AT)
+			voiced.push({ voice: "id", quietMs: 0, targetHz: ID_HZ })
+		if (c >= NEIGHBOUR_FROM)
+			voiced.push({ voice: "x", quietMs: 0, targetHz: ID_HZ + 25_000 })
 		const unrecorded = idOn && c >= EVICT_AT && list
 		const first = voiced[0]
 		if (first === undefined)

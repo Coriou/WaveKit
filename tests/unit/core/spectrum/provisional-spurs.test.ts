@@ -5,7 +5,10 @@ import {
 	PROVISIONAL_WINDOW_MS,
 	ProvisionalSpurs,
 } from "../../../../src/core/spectrum/provisional-spurs.js"
-import type { BinRange } from "../../../../src/core/spectrum/provisional-spurs.js"
+import type {
+	BinRange,
+	LineGate,
+} from "../../../../src/core/spectrum/provisional-spurs.js"
 import { mulberry32 } from "../../../mocks/scanner/signals.js"
 import type { Rng } from "../../../mocks/scanner/signals.js"
 
@@ -15,6 +18,13 @@ const BLOCK_MS = 50
 const WINDOW_BLOCKS = PROVISIONAL_WINDOW_MS / BLOCK_MS // 600
 const FLOOR = -60
 const K = 4 // detector threshold over the floor
+/** A gate that verifies every line: these tests cover line finding, not verification (spur-map.test.ts). */
+const ALL: LineGate = {
+	masks: () => true,
+	verified: () => true,
+	saveVerified: () => true,
+	alive: () => true,
+}
 
 /** Usable bins as the detector reports them: span 26–230, DC guard 126–130 masked. */
 const USABLE = Uint8Array.from({ length: N }, (_, i) =>
@@ -70,7 +80,7 @@ function feed(
 	const promoted: BinRange[] = []
 	for (let b = 0; b < blocks; b++) {
 		const { on, powerDb } = block(rng, scene)
-		promoted.push(...p.observe(KEY, on, powerDb, usable, BLOCK_MS))
+		promoted.push(...p.observe(KEY, on, powerDb, usable, BLOCK_MS, ALL))
 	}
 	return promoted
 }
@@ -125,8 +135,8 @@ describe("ProvisionalSpurs", () => {
 					expect(promoted.sort((a, b) => a.startBin - b.startBin)).toEqual(
 						teeth.map(bin => ({ startBin: bin - 1, endBin: bin + width + 1 })),
 					)
-					const restored = newSpurs() // a restart starts masked
-					restored.importState(p.exportState())
+					const restored = newSpurs() // a restart keeps the lines, unverified
+					restored.importState(p.exportState(ALL))
 					expect(restored.lines(KEY)).toEqual(expected)
 				},
 			),
@@ -198,9 +208,65 @@ describe("ProvisionalSpurs", () => {
 		}
 		const q = newSpurs()
 		q.importState({
-			provisionalSpurs: [...p.exportState().provisionalSpurs, foreign],
+			provisionalSpurs: [...p.exportState(ALL).provisionalSpurs, foreign],
 		})
-		expect(q.exportState().provisionalSpurs).toContainEqual(foreign)
+		expect(q.exportState(ALL).provisionalSpurs).toContainEqual(foreign)
 		expect(q.lines(KEY)).toEqual(p.lines(KEY))
+	})
+
+	it("masks and persists a line only as the gate verifies it, and drops a comb line the gate lets expire", () => {
+		const p = newSpurs()
+		const rng = mulberry32(9)
+		const comb: Scene = {
+			lines: [60, 80, 100].map(bin => ({
+				bin,
+				width: 1 as const,
+				snrDb: 10,
+				duty: 1,
+			})),
+			emissions: [],
+			faProb: 0,
+		}
+		const verified = new Set<number>()
+		let aliveAll = true
+		const gate: LineGate = {
+			masks: (_k, s) => verified.has(s),
+			verified: (_k, s) => verified.has(s),
+			saveVerified: (_k, s) => verified.has(s),
+			alive: () => aliveAll,
+		}
+		for (let b = 0; b < WINDOW_BLOCKS; b++) {
+			const { on, powerDb } = block(rng, comb)
+			p.observe(KEY, on, powerDb, USABLE, BLOCK_MS, gate)
+		}
+		expect(p.lines(KEY).map(l => l.startBin)).toEqual([60, 80, 100])
+		const out = new Uint8Array(N)
+		expect(p.mask(KEY, out, gate)).toBe(0)
+		expect(out.includes(1)).toBe(false) // a comb of 3 regular lines alone masks nothing
+		expect(p.exportState(gate).provisionalSpurs).toEqual([]) // nor persists
+		verified.add(80)
+		const protect = new Uint8Array(N)
+		protect[80] = 1
+		expect(p.mask(KEY, out, gate, protect)).toBe(1) // a confirmed signal there: suspended, counted
+		expect(out.includes(1)).toBe(false)
+		expect(p.mask(KEY, out, gate)).toBe(0)
+		expect([...out.keys()].filter(i => out[i] === 1)).toEqual([80])
+		expect(
+			p.exportState(gate).provisionalSpurs.map(e => e.basebandBin),
+		).toEqual([80])
+		const restored = newSpurs()
+		restored.importState(p.exportState(gate))
+		verified.clear()
+		const again = new Uint8Array(N)
+		restored.mask(KEY, again, gate)
+		expect(again.includes(1)).toBe(false) // restored, unverified: no mask
+		expect(
+			restored.exportState(gate).provisionalSpurs.map(e => e.basebandBin),
+		).toEqual([80]) // persisted again until its candidate bins expire
+		aliveAll = false
+		const { on, powerDb } = block(rng, QUIET)
+		restored.observe(KEY, on, powerDb, USABLE, BLOCK_MS, gate)
+		expect(restored.lines(KEY)).toEqual([])
+		expect(restored.exportState(gate).provisionalSpurs).toEqual([])
 	})
 })

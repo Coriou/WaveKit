@@ -848,4 +848,44 @@ describe("SpectrumEngine.swapLearnedState", () => {
 		expect(configs).toEqual([learned(-60)])
 		await engine.stop()
 	})
+	it("carries the trust of the state it runs from: deps, a swap, a restart keep it; a fresh or untrusted swap drops it", async () => {
+		const trust: Array<boolean | undefined> = []
+		const { engine } = makeEngine({
+			persistedEngine: learned(-91),
+			persistedEngineTrusted: true,
+			createHost: (cfg, handlers) => {
+				trust.push(cfg.persistedEngineTrusted)
+				return new RecordingHost(handlers)
+			},
+		})
+		await engine.start()
+		expect(trust).toEqual([true])
+		// A pipeline restart (retune settings) runs on the same receiver's export: still trusted.
+		await engine.reconfigure()
+		expect(trust).toEqual([true, true])
+		await engine.swapLearnedState(learned(-70))
+		expect(trust.at(-1)).toBeUndefined()
+		await engine.reconfigure()
+		expect(trust).toHaveLength(4)
+		expect(trust.at(-1)).toBeUndefined()
+		await engine.swapLearnedState(learned(-70), true)
+		expect(trust.at(-1)).toBe(true)
+		await engine.swapLearnedState(null, true)
+		expect(trust.at(-1)).toBeUndefined()
+		await engine.stop()
+	})
+
+	it("a trust flag without a persisted state is ignored", async () => {
+		const trust: Array<boolean | undefined> = []
+		const { engine } = makeEngine({
+			persistedEngineTrusted: true,
+			createHost: (cfg, handlers) => {
+				trust.push(cfg.persistedEngineTrusted)
+				return new RecordingHost(handlers)
+			},
+		})
+		await engine.start()
+		expect(trust).toEqual([undefined])
+		await engine.stop()
+	})
 })

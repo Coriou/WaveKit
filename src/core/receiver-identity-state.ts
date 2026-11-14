@@ -43,6 +43,16 @@
  * receiver, then back) reloads the settled key's saved state even when it is the key bound
  * before: what the engine learned in memory meanwhile may be another receiver's (one swap).
  *
+ * Trusted spur lines. The spectrum state of a strong key (`unit:` or a strong `serial:`) resumed
+ * from that key's own namespace is handed over trusted (`replaceLearnedState(…, trusted)`,
+ * `engineTrusted`): the spur and provisional lines this same receiver verified before mask again
+ * at once, even parked on one centre. Own namespace: files only that key ever wrote, so trust
+ * holds whether `namespaceState` reads `resumed` or `fresh` (the record no longer lists a key whose
+ * files exist; a key with no files loads nothing). A legacy adoption or a take-over that moved
+ * another state in at this binding, a weak key (a model key; a weak serial never forms a serial
+ * key), another receiver's state, a connection whose receiver is not settled yet, and nothing to
+ * resume all load unverified.
+ *
  * Scanner discoveries and recordings stay shared. A source the tracker does not follow keeps the
  * un-namespaced files exactly as before.
  */
@@ -57,6 +67,7 @@ import type { EngineState } from "./spectrum/types.js"
 import type { OccupancyState } from "./spectrum/occupancy.js"
 import {
 	isReceiverKey,
+	isWeakSerial,
 	RECEIVER_KEY_MAX_LENGTH,
 	sourceModelKey,
 	type ReceiverIdentity,
@@ -147,9 +158,14 @@ export interface LearnedSpectrum {
 		engine: EngineState | null
 		occupancy: OccupancyState | null
 	}>
+	/** `trusted`: this same receiver's own state from a resumed strong-key namespace. */
 	replaceLearnedState(
 		sourceId: string,
-		next: { engine: EngineState | null; occupancy: OccupancyState | null },
+		next: {
+			engine: EngineState | null
+			occupancy: OccupancyState | null
+			trusted?: boolean
+		},
 	): Promise<void>
 }
 
@@ -245,6 +261,13 @@ export class ReceiverLearnedState {
 	private readonly flushing = new Set<string>()
 	/** A load was refused while a switch ran: an engine opened fresh meanwhile. */
 	private readonly refusedLoads = new Set<string>()
+	/**
+	 * Per source, the bound key when its namespace's engine state loads trusted (a strong key,
+	 * resumed: no adoption or take-over moved another state in); absent: unverified.
+	 */
+	private readonly trustedKey = new Map<string, string>()
+	/** Engine states loadEngine read from a trusted namespace (engineTrusted). */
+	private readonly trustedLoads = new WeakSet<EngineState>()
 	private spectrum: LearnedSpectrum | null = null
 	private store: ReceiverScopedStore | null = null
 	private writable: () => boolean = () => true
@@ -353,10 +376,16 @@ export class ReceiverLearnedState {
 			},
 			loadEngine: async sourceId => {
 				if (!this.options.tracked(sourceId)) return legacy.loadEngine(sourceId)
-				return this.loadBound(sourceId, key =>
-					store.loadEngineIn(sourceId, key),
-				)
+				return this.loadBound(sourceId, async key => {
+					// Pending (a new connection, its receiver not settled yet): unverified.
+					const trusted =
+						!this.pending.has(sourceId) && this.trustedKey.get(sourceId) === key
+					const state = await store.loadEngineIn(sourceId, key)
+					if (state !== null && trusted) this.trustedLoads.add(state)
+					return state
+				})
 			},
+			engineTrusted: (_sourceId, state) => this.trustedLoads.has(state),
 			writeOccupancy: async (sourceId, s, generation) => {
 				if (!this.options.tracked(sourceId))
 					return legacy.writeOccupancy(sourceId, s)
@@ -462,6 +491,8 @@ export class ReceiverLearnedState {
 		this.switching.add(sourceId)
 		try {
 			const moved = await this.adoptSpectrum(sourceId, key, store, record)
+			// The legacy files moved in are of unknown origin: unverified from now on.
+			if (moved) this.trustedKey.delete(sourceId)
 			await this.saveRecords()
 			// Every write or export started before the adoption is of the fresh state: dropped.
 			this.bind(sourceId, key)
@@ -469,9 +500,12 @@ export class ReceiverLearnedState {
 			// adoption was owed (its load was refused: it runs fresh and must not overwrite the
 			// namespace). Otherwise the engine already runs on this receiver's state: kept.
 			if (this.spectrum && (moved || this.refusedLoads.has(sourceId))) {
+				const snap = await this.loadNamespace(sourceId, key, store)
 				await this.spectrum.replaceLearnedState(
 					sourceId,
-					await this.loadNamespace(sourceId, key, store),
+					snap.engine !== null && this.trustedKey.get(sourceId) === key
+						? { ...snap, trusted: true }
+						: snap,
 				)
 				this.refusedLoads.delete(sourceId)
 				// A persist that started between the bind and the swap exported the fresh state.
@@ -935,6 +969,15 @@ export class ReceiverLearnedState {
 				if (changed) legacyRecorded = await this.saveRecords()
 			}
 			this.bind(sourceId, to)
+			// This receiver's own namespace under a strong key, nothing moved in: trusted lines.
+			if (
+				to !== null &&
+				strongReceiverKey(identity) &&
+				!moved &&
+				takeOverFrom === null
+			)
+				this.trustedKey.set(sourceId, to)
+			else this.trustedKey.delete(sourceId)
 			this.pending.delete(sourceId)
 			this.settledIdentity.set(sourceId, { ...identity })
 			if (this.spectrum && store) {
@@ -954,7 +997,16 @@ export class ReceiverLearnedState {
 				if (to !== null) this.held.get(sourceId)?.delete(to)
 				this.refusedLoads.delete(sourceId)
 				if (next !== undefined) {
-					await this.spectrum.replaceLearnedState(sourceId, next)
+					// Trusted only for this key's own namespace (trustedKey is unset after a move or a
+					// take-over, and for a weak or unknown key).
+					const trusted =
+						next.engine !== null &&
+						to !== null &&
+						this.trustedKey.get(sourceId) === to
+					await this.spectrum.replaceLearnedState(
+						sourceId,
+						trusted ? { ...next, trusted: true } : next,
+					)
 					// A persist that started between the bind and the swap exported the previous state.
 					this.bumpGeneration(sourceId)
 				}
@@ -1043,4 +1095,16 @@ export class ReceiverLearnedState {
 		this.fileChain = run
 		return run
 	}
+}
+
+/**
+ * A key whose namespace is one physical receiver's: a `unit:` key, or a `serial:` key of a strong
+ * serial (a weak serial such as the default 00000001 never forms one; checked again here).
+ */
+export function strongReceiverKey(identity: ReceiverIdentity): boolean {
+	if (identity.strength !== "unit") return false
+	if (identity.key.startsWith("unit:")) return true
+	if (!identity.key.startsWith("serial:")) return false
+	const serial = identity.key.split(":").at(-1)
+	return serial !== undefined && serial.length > 0 && !isWeakSerial(serial)
 }

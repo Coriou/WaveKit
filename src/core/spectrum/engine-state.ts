@@ -12,6 +12,7 @@ export const EngineStateSchema = z.object({
 			widthBins: z.number().int().positive(),
 			kind: z.enum(["baseband", "rf"]),
 			rfHz: z.number().optional(),
+			verified: z.boolean().optional(), // absent in older files: unverified
 		}),
 	),
 	kByRange: z.array(
@@ -24,6 +25,7 @@ export const EngineStateSchema = z.object({
 				basebandBin: z.number().int().nonnegative(),
 				widthBins: z.number().int().positive(),
 				comb: z.boolean(),
+				verified: z.boolean().optional(), // absent in older files: unverified
 			}),
 		)
 		.optional(), // Task 7a; absent in files written before it
