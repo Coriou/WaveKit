@@ -9,6 +9,7 @@ import {
 	WIDEBAND_QUALIFY_MS,
 	type WidebandTrackInput,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
+import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import { FskSource, NfmSource } from "./wideband-nfm-fixtures.js"
 import {
 	CENTRE,
@@ -29,6 +30,9 @@ const SHADOW: Partial<WidebandTrackInput> = {
 	shadowAllowed: true,
 	discoveryId: null,
 }
+
+const refusals = (h: Harness): string[] =>
+	(h.rec.diagnostics().recentRefusals ?? []).map(d => d.code)
 
 interface SessionView {
 	owner: string
@@ -201,6 +205,111 @@ describe("WidebandAnalogRecorder unclassed signals and slots", () => {
 		expect(h.rec.owns("a")).toBe(false)
 		expect(h.rec.owns("b")).toBe(true)
 	}, 120_000)
+
+	it("MJ2: at a cap of 2, a held file released for a new voice evicts no live unclassed shadow: the voice is recorded from its onset on a later snapshot, the held file kept", async () => {
+		// A suspect prior (a spectral digital class): every analog file of d_1 is held.
+		const suspect: VoicePrior = {
+			labels: [],
+			class: "fsk2-wide",
+			analogVoice: () => false,
+		}
+		const h = harness({ source: { amp: 0 }, voicePrior: () => suspect })
+		const shadow = fsk(OFFSET - 30_000, 1)
+		shadow.on = false
+		// No CTCSS: a toned file is kept at once, never held.
+		const v: Keyed = {
+			src: new NfmSource({
+				fs: FS,
+				offsetHz: OFFSET,
+				amp: 0.25,
+				seed: 3,
+				ctcssHz: null,
+			}),
+			on: false,
+		}
+		const mix = [shadow, v]
+		let voiceId: string | null = null
+		let voiceAt = 0
+		let shadowAt = 0
+		const report = () => {
+			const edge = h.engine.liveEdge()
+			if (shadow.on)
+				h.rec.track(
+					input(
+						"s",
+						snapshot("s", shadowAt, edge, {
+							centreHz: CENTRE + OFFSET - 30_000,
+						}),
+						SHADOW,
+					),
+				)
+			if (voiceId !== null && edge - voiceAt >= 0.1 * FS)
+				h.rec.track(input(voiceId, snapshot(voiceId, voiceAt, edge)))
+		}
+		const voice = async (id: string, seconds: number): Promise<number> => {
+			voiceId = id
+			v.on = true
+			voiceAt = h.engine.liveEdge()
+			await feedMix(h, mix, seconds, report)
+			const end = h.engine.liveEdge()
+			v.on = false
+			voiceId = null
+			await feedMix(h, mix, 0.6, report)
+			h.rec.closed(id, snapshot(id, voiceAt, end), null, {
+				analogFm: true,
+				discoveryId: "d_1",
+			})
+			return end - voiceAt
+		}
+		await feedMix(h, mix, 0.5, report)
+		await voice("a", 4)
+		await feedMix(h, mix, 3, report)
+		// The first over's file is held (provisional): it keeps its slot.
+		expect(h.ops.map(o => o.outcome)).toEqual([null])
+		shadow.on = true
+		shadowAt = h.engine.liveEdge()
+		await feedMix(h, mix, 3, report)
+		// The 4FSK shadow passed the voice gate: voiced, unclassed, holding the other slot.
+		expect(sessions(h).map(s => [s.owner, s.qualified, s.classed])).toEqual([
+			["s", true, false],
+		])
+		expect(h.rec.activeOn("rtl")).toBe(2)
+		let firstVoiceSnapshot: boolean | null = null
+		voiceId = "b"
+		v.on = true
+		voiceAt = h.engine.liveEdge()
+		await feedMix(h, mix, 0.125, () => {
+			report()
+			if (voiceId !== null && h.engine.liveEdge() - voiceAt >= 0.1 * FS)
+				firstVoiceSnapshot ??= h.rec.owns("b")
+		})
+		// The voice ended the held file's grace (another track on its channel); the voice waits
+		// for that slot to settle, and the shadow keeps its own.
+		expect(firstVoiceSnapshot).toBe(false)
+		expect(h.rec.owns("s")).toBe(true)
+		expect(refusals(h)).toContain("refused:slots")
+		expect(h.ops[0]!.cut).toBe("completed")
+		await feedMix(h, mix, 3.875, report)
+		const txSamples = h.engine.liveEdge() - voiceAt
+		v.on = false
+		voiceId = null
+		await feedMix(h, mix, 0.6, report)
+		h.rec.closed("b", snapshot("b", voiceAt, voiceAt + txSamples), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		// The shadow was never evicted.
+		expect(h.rec.owns("s")).toBe(true)
+		await feedMix(h, mix, 3.5, report)
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops.map(o => [o.input.observationId, o.outcome])).toEqual([
+			["a", "finalized"],
+			["b", "finalized"],
+		])
+		// From its onset: pre-roll 300 ms + the 4 s over (the ring covered the slot's wait).
+		expect(h.ops[1]!.frames).toBeGreaterThanOrEqual(8 * (300 + 4000) - 8 * 30)
+	}, 300_000)
 
 	it(`a voiced conversation keeps recording after a 120 s roll-over and ${WIDEBAND_QUALIFY_MS / 1000}+ s of silence`, async () => {
 		const h = harness({ fs: LOW_FS, offset: LOW_OFFSET })
