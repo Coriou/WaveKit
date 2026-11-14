@@ -1,8 +1,9 @@
 /**
  * DiscoveryStore.voicePrior composed with the recorder's policy (recording-verdict.ts), as
- * scanner-service wires it: a decoded pager discovery refuses at admission at any later time; a
- * channel where analog voice was heard (a recorder tone) keeps recording despite a decode; a
- * weak sync hint only holds; a folder nobody owns reads no prior.
+ * scanner-service wires it: a discovery decoded POCSAG at any earlier time admits a recording only
+ * as a shadow its own tone must class, one decoded DMR only holds; a channel where analog voice
+ * was heard (a recorder tone) keeps recording despite a decode; a folder nobody owns reads no
+ * prior.
  */
 import { describe, expect, it } from "vitest"
 import {
@@ -60,16 +61,36 @@ function decodedDmr(store: DiscoveryStore): string {
 }
 
 describe("DiscoveryStore.voicePrior", () => {
-	it("a discovery decoded DMR at any earlier time refuses a later recording at admission", () => {
+	it("a discovery decoded DMR at any earlier time is a suspect prior (held, never refused), labelled as the owner's", () => {
 		const store = newStore()
 		const id = decodedDmr(store)
 		const prior = store.voicePrior(id) ?? null
+		// The owner's own label, marked as the owner's, with the live owner's id.
+		expect(prior?.id).toBe(id)
 		expect(prior?.labels).toContainEqual({
 			protocol: "dmr",
 			confidence: "decoded",
+			owner: true,
 		})
-		expect(readPrior(prior, false)).toBe("non-voice")
-		expect(admissionVerdict(prior, false)).toBe("refused:not-analog")
+		expect(readPrior(prior, false)).toBe("suspect")
+		expect(admissionVerdict(prior, false)).toBeNull()
+	})
+
+	it("a discovery decoded POCSAG admits a later recording only as a shadow its own tone must class", () => {
+		const store = newStore()
+		const id = store.ingest(obs("pager", T0)).discoveryId ?? ""
+		const ev = evidence("pocsag", T0 + 500, {
+			identity: { kind: "pocsag-capcode", value: "1234" },
+		})
+		expect(store.appendObservationEvidence("pager", ev)).toBe(true)
+		store.applyEvidence(id, ev)
+		const prior = store.voicePrior(id) ?? null
+		expect(prior?.labels).toContainEqual({
+			protocol: "pocsag",
+			confidence: "decoded",
+			owner: true,
+		})
+		expect(admissionVerdict(prior, false)).toBe("tone-required")
 	})
 
 	it("the same channel with analog voice heard (a recorder tone) keeps recording: frozen voice", () => {

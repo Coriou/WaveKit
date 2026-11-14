@@ -11,6 +11,8 @@
  * the recorder behaved before the provisional-recording policy (recording-verdict.ts); --policy
  * on (the default) wires it as scanner-service does.
  *
+ * Hand-written priors; store-verdict.ts runs the same recorder against a real DiscoveryStore.
+ *
  * Scenes:
  * - pager-burst: a 4 s 2FSK burst (1 200 Bd, ±4.5 kHz, a POCSAG-like alternating preamble) whose
  *   snapshots read analog-fm, on a discovery whose stored class is fsk2-wide from the spectrum
@@ -88,7 +90,9 @@ async function pagerBurst(): Promise<Record<string, unknown>> {
 	let decodedAt: number | null = null
 	const prior = (): VoicePrior => ({
 		labels:
-			decodedAt === null ? [] : [{ protocol: "pocsag", confidence: "decoded" }],
+			decodedAt === null
+				? []
+				: [{ protocol: "pocsag", confidence: "decoded", owner: true }],
 		class: "fsk2-wide",
 		analogVoice: () => false,
 	})

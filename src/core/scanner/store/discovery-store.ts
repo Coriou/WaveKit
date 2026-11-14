@@ -4053,7 +4053,8 @@ export class DiscoveryStore
 
 	/**
 	 * The analog recorder's standing prior of `folderId`'s live owner (folderOwner; recording-verdict.ts
-	 * VoicePrior): the published labels (ownerLabel, cached) of the owner and of up to
+	 * VoicePrior): that owner's id, the published labels (ownerLabel, cached; each marked whether it
+	 * is the owner's) of the owner and of up to
 	 * DQ_CO_CHANNEL_MAX (8) live co-channel discoveries, the owner's stored class, and a lazy read of
 	 * analog voice heard on them: an `analog-tone` or `analog-voice` proof of any of their
 	 * observations (cached per observation; at most 9 × OBSERVATIONS_PER_DISCOVERY 256 = 2 304
@@ -4074,9 +4075,16 @@ export class DiscoveryStore
 			const label = this.ownerLabel(id)
 			return label === undefined
 				? []
-				: [{ protocol: label.protocol, confidence: label.confidence }]
+				: [
+						{
+							protocol: label.protocol,
+							confidence: label.confidence,
+							owner: id === d.id,
+						},
+					]
 		})
 		return {
+			id: d.id,
 			labels,
 			class: d.class,
 			analogVoice: () =>
