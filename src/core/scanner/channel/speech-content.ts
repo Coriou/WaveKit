@@ -1,10 +1,11 @@
 /**
  * Does a finished analog file's audio (8 kHz s16, what the recorder wrote) clearly measure as
  * something other than speech: a steady buzz (FM-demodulated 4FSK, TDMA, 2FSK or GMSK data, the
- * noise of an open squelch)? Its answer discards a file only where recording-verdict.ts
- * contentChecked applies (a strong prior from a dedicated decode, a TDMA channel or checked
- * digital evidence, or backed digital evidence of the owner: never a spectral class alone, a
- * digital-unknown candidate or unchecked sync hints alone, an ism or LoRa decode, or a co-channel decode; finishVerdict,
+ * noise of an open squelch)? clearlyNotSpeech discards a file only where recording-verdict.ts
+ * contentChecked applies (a strong prior from a dedicated decode, a TDMA channel or verified
+ * digital evidence, or backed digital evidence of the owner); under any other digital prior (a
+ * spectral class alone, a digital-unknown candidate or unchecked sync hints alone, an ism or LoRa
+ * decode, a co-channel decode) only the stricter clearlyNoise does (finishVerdict,
  * `discarded:not-speech`); a file with its own CTCSS tone, classed by its own tone, a classed
  * session's roll-over file, or a file of a channel with analog proof is never discarded by it.
  *
@@ -23,6 +24,8 @@
  * steady (largest range under SPEECH_STEADY_MAX_RANGE_DB) and a periodic share under
  * SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE. A shorter file, any unsteady window, or a periodic steady
  * signal (a pure or keyed tone, DTMF, a selcall) is kept: missing buzz is preferred to losing voice.
+ * Clear noise (clearlyNoise): the same with the strict bounds SPEECH_NOISE_MAX_RANGE_DB and
+ * SPEECH_NOISE_MAX_PERIODIC_SHARE, the only content check a weak (`suspect`) prior gets.
  *
  * Measured (scripts/bench/scanner-quality/speech-content.ts) on SYNTHETIC signals through
  * WidebandNfmChain, 12 s each (nothing here is a real recording): speech-like audio (pitched and
@@ -75,6 +78,23 @@ export const SPEECH_STEADY_MAX_RANGE_DB = 8.5
  * 0.61 at a CNR of 9 dB or more. A steady periodic file (a tone, a whistle) is kept.
  */
 export const SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE = 0.2
+
+/**
+ * The strict bound (clearlyNoise): every window's envelope range must be under this (dB) for a
+ * file to be clear noise or buzz, the content check under a WEAK prior (recording-verdict.ts
+ * finishVerdict's `clearNoise`). The hardest synthetic speech at a CNR of 6 dB or more measures
+ * at least 10.16 dB (HARD_SPEECH_CASES, 12 s), a 4.16 dB margin; synthetic data and noise at most
+ * 3.5 dB; real open-squelch noise a listener confirmed as such (one channel, 150 files) 3.8 to
+ * 6.8 dB, its 120 s files 5.3 to 5.6 dB (a margin of about 0.4 dB): about nine in ten are caught. Never borderline audio: a file between this and SPEECH_STEADY_MAX_RANGE_DB is
+ * judged only under a strong or backed prior.
+ */
+export const SPEECH_NOISE_MAX_RANGE_DB = 6
+/**
+ * The strict bound's periodic share (clearlyNoise): under 0.1. Synthetic 4FSK, GMSK-like data and
+ * noise measure at most 0.03 and the confirmed real noise at most 0.044; synthetic 2FSK at
+ * 1 200 Bd (0.15) and speech (0.24 or more at a CNR of 9 dB or more) are over it.
+ */
+export const SPEECH_NOISE_MAX_PERIODIC_SHARE = 0.1
 
 const P10 = Math.floor(0.1 * (SPEECH_WINDOW_FRAMES - 1))
 const P90 = Math.ceil(0.9 * (SPEECH_WINDOW_FRAMES - 1))
@@ -179,6 +199,19 @@ export class SpeechContentMeter {
 		if (range > this.maxRange) this.maxRange = range
 		this.measuredAt = this.frames
 	}
+}
+
+/**
+ * The file measures as clear noise or buzz by the strict bounds (SPEECH_NOISE_MAX_RANGE_DB,
+ * SPEECH_NOISE_MAX_PERIODIC_SHARE): the content check under a weak prior. Never on under 3 s;
+ * always implies clearlyNotSpeech.
+ */
+export function clearlyNoise(c: SpeechContent): boolean {
+	return (
+		c.frames >= SPEECH_WINDOW_FRAMES &&
+		c.maxRangeDb < SPEECH_NOISE_MAX_RANGE_DB &&
+		c.periodicShare < SPEECH_NOISE_MAX_PERIODIC_SHARE
+	)
 }
 
 /** The file clearly measures as not speech (see the module comment); never on under 3 s. */

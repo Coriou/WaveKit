@@ -4060,10 +4060,12 @@ export class DiscoveryStore
 	 * observations (cached per observation; at most 9 × OBSERVATIONS_PER_DISCOVERY 256 = 2 304
 	 * reads, only when asked), and a lazy count of the owner's class votes per class (at most
 	 * OBSERVATIONS_PER_DISCOVERY). A label's `checkedHint` is true when the proof behind it is a
-	 * sync hint with checked content (a sync-only proof that is not uncheckedSyncHint), and its
+	 * sync hint with checked content (a sync-only proof that is not uncheckedSyncHint), its
+	 * `verifiedHint` true when that hint has verified TG/SRC, and its
 	 * `observationId` the observation that proof cites; `digitalProofs` lazily lists the digital
 	 * proof of each of the owner's kept observations (digitalProofs), and `digitalSeenAt` the time
-	 * of its latest digital evidence (digitalSeenAt). Undefined for a folder nobody owns. Reads only.
+	 * of its latest digital evidence (digitalSeenAt), `tdmaSeenAt` that of its newest `tdma-ms`
+	 * vote (tdmaSeenAt). Undefined for a folder nobody owns. Reads only.
 	 */
 	voicePrior(folderId: string): VoicePrior | undefined {
 		const owner = this.folderOwner(folderId)
@@ -4090,6 +4092,7 @@ export class DiscoveryStore
 					owner: id === d.id,
 					at,
 					checkedHint: this.checkedSyncHint(id),
+					verifiedHint: this.verifiedSyncHint(id),
 					observationId: label.proofObservationId,
 				},
 			]
@@ -4111,6 +4114,7 @@ export class DiscoveryStore
 			},
 			digitalProofs: () => this.digitalProofs(d.id),
 			digitalSeenAt: () => this.digitalSeenAt(d.id),
+			tdmaSeenAt: () => this.tdmaSeenAt(d.id),
 			analogVoice: () =>
 				ids.some(id =>
 					(this.byDiscovery.get(id) ?? []).some(o => {
@@ -4141,6 +4145,7 @@ export class DiscoveryStore
 				protocol: proof.protocol,
 				at,
 				checked: decoded || !uncheckedSyncHint(proof),
+				verified: decoded || proof.tgSrcVerified === true,
 				observationId: o.id,
 			})
 		}
@@ -4180,6 +4185,33 @@ export class DiscoveryStore
 			}
 		}
 		return Number.isFinite(latest) ? latest : null
+	}
+
+	/**
+	 * The wall time (ms) of discovery `id`'s newest kept observation that voted `tdma-ms`
+	 * (VoicePrior.tdmaSeenAt): its end, its start while open; null: none. One pass over at most
+	 * OBSERVATIONS_PER_DISCOVERY observations. Reads only.
+	 */
+	private tdmaSeenAt(id: string): number | null {
+		let latest = Number.NEGATIVE_INFINITY
+		for (const o of this.byDiscovery.get(id) ?? []) {
+			if (voteOf(o) !== "tdma-ms") continue
+			const at = Date.parse(o.endedAt ?? o.startedAt)
+			if (Number.isFinite(at)) latest = Math.max(latest, at)
+		}
+		return Number.isFinite(latest) ? latest : null
+	}
+
+	/**
+	 * Discovery `id`'s shown proof is a dsd-fme sync hint with verified TG/SRC (VoicePrior's
+	 * `verifiedHint`). False for a decode anchor, a decode or no proof. Reads the cached proof view
+	 * only.
+	 */
+	private verifiedSyncHint(id: string): boolean {
+		const d = this.discoveries.get(id)
+		if (d === undefined || d.anchor === "decode") return false
+		const proof = this.discoveryView(d).proof
+		return syncOnlyProof(proof) && proof?.tgSrcVerified === true
 	}
 
 	/**

@@ -128,7 +128,11 @@ import {
 	type VoicePrior,
 	type Veto,
 } from "./recording-verdict.js"
-import { clearlyNotSpeech, SpeechContentMeter } from "./speech-content.js"
+import {
+	clearlyNoise,
+	clearlyNotSpeech,
+	SpeechContentMeter,
+} from "./speech-content.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 export { rememberWaiver, trustedRunEnd } from "./recorder-memory.js"
@@ -4070,6 +4074,11 @@ export class WidebandAnalogRecorder {
 			this.airStart(s.engine, s.fs, file.startSample),
 			this.wallAt(s.engine, s.fs, Math.max(s.onset, file.startSample)),
 		)
+		// A classed session's roll-over file continues a voiced over: never content-checked.
+		const speech =
+			file.classTone === null && !(file.rollOver && s.classed)
+				? file.speech.result()
+				: null
 		const verdict = this.deps.voicePrior
 			? finishVerdict({
 					prior,
@@ -4081,11 +4090,8 @@ export class WidebandAnalogRecorder {
 						file.startSample < s.strongFrom + s.vetoFrom - s.onset,
 					decodedOwn,
 					joinedVoice: joinedVoiceOverlaps(s, file),
-					// A classed session's roll-over file continues a voiced over: never content-checked.
-					notSpeech:
-						file.classTone === null &&
-						!(file.rollOver && s.classed) &&
-						clearlyNotSpeech(file.speech.result()),
+					notSpeech: speech !== null && clearlyNotSpeech(speech),
+					clearNoise: speech !== null && clearlyNoise(speech),
 					final: final || room === 0,
 					now,
 				})

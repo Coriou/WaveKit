@@ -38,6 +38,16 @@ import {
 	IDENTIFY_QUEUE_WAIT_MS,
 	IDENTIFY_SLOT_FREEING_MAX_MS,
 } from "../../../../src/core/scanner/identify.js"
+import {
+	clearlyNoise,
+	clearlyNotSpeech,
+	SPEECH_NOISE_MAX_PERIODIC_SHARE,
+	SPEECH_NOISE_MAX_RANGE_DB,
+	SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE,
+	SPEECH_STEADY_MAX_RANGE_DB,
+	SPEECH_WINDOW_FRAMES,
+	type SpeechContent,
+} from "../../../../src/core/scanner/channel/speech-content.js"
 import { MAX_ACTIVE_ANALOG_PER_SOURCE } from "../../../../src/core/scanner/store/analog-operations.js"
 import type {
 	ScannerClass,
@@ -51,6 +61,7 @@ type Label = {
 	owner: boolean
 	at: number | null
 	checkedHint?: boolean
+	verifiedHint?: boolean
 	observationId?: string | null
 }
 
@@ -1574,6 +1585,19 @@ describe("finishVerdict: a file whose audio clearly measures as no speech (notSp
 	const ownCheckedProof: VoicePrior = {
 		...prior([weak("dmr", "activity")], "fsk4-12k5"),
 		digitalProofs: () => [
+			{
+				protocol: "dmr",
+				at: NOW - 60_000,
+				checked: true,
+				verified: true,
+				observationId: "o1",
+			},
+		],
+	}
+	// m1: a talkgroup or encryption flag alone (checked, not verified) never opens the content check.
+	const ownTalkgroupProof: VoicePrior = {
+		...prior([weak("dmr", "activity")], "fsk4-12k5"),
+		digitalProofs: () => [
 			{ protocol: "dmr", at: NOW - 60_000, checked: true, observationId: "o1" },
 		],
 	}
@@ -1637,10 +1661,24 @@ describe("finishVerdict: a file whose audio clearly measures as no speech (notSp
 			"hold",
 		],
 		[
-			"the owner's checked sync hint label: discarded",
-			prior([{ ...weak("dmr", "activity"), checkedHint: true }]),
+			"the owner's verified (TG/SRC) sync hint label: discarded",
+			prior([
+				{ ...weak("dmr", "activity"), checkedHint: true, verifiedHint: true },
+			]),
 			{},
 			"discarded:not-speech",
+		],
+		[
+			"the owner's checked sync hint label, a talkgroup or encryption flag only: held",
+			prior([{ ...weak("dmr", "activity"), checkedHint: true }]),
+			{},
+			"hold",
+		],
+		[
+			"a kept observation's checked DMR proof, a talkgroup or encryption flag only: held",
+			ownTalkgroupProof,
+			{},
+			"hold",
 		],
 		[
 			"the owner's unchecked sync hint label: held",
@@ -1649,7 +1687,7 @@ describe("finishVerdict: a file whose audio clearly measures as no speech (notSp
 			"hold",
 		],
 		[
-			"a kept observation's checked DMR proof: discarded",
+			"a kept observation's verified DMR proof: discarded",
 			ownCheckedProof,
 			{},
 			"discarded:not-speech",
@@ -1731,6 +1769,7 @@ describe("finishVerdict: a file whose audio clearly measures as no speech (notSp
 
 describe("finishVerdict: the content check follows where a strong prior's strength came from", () => {
 	// Feature: recording-verdict, the content check under a tone-required prior (StrongSource).
+	// Validates: docs/SCANNER.md, "Known digital or paging channels" (the content check).
 	const recent = NOW - 60_000
 	const old = NOW - 2 * 3_600_000
 	const channel = (
@@ -1799,15 +1838,85 @@ describe("finishVerdict: the content check follows where a strong prior's streng
 			out: "hold",
 		},
 		{
-			name: "a checked DMR hint 2 h old, the channel's TTL kept by a fresh tdma-ms vote",
+			name: "a verified DMR hint 2 h old, the channel's TTL kept by a fresh tdma-ms vote",
+			prior: channel(
+				[{ ...uncheckedHint, at: old, checkedHint: true, verifiedHint: true }],
+				{ "fsk4-12k5": 200 },
+				240,
+				{ digitalSeenAt: () => recent, tdmaSeenAt: () => recent },
+			),
+			source: "checked-digital",
+			out: "discarded:not-speech",
+		},
+		{
+			name: "a checked DMR hint (talkgroup only) 2 h old, a fresh tdma-ms vote",
 			prior: channel(
 				[{ ...uncheckedHint, at: old, checkedHint: true }],
 				{ "fsk4-12k5": 200 },
 				240,
-				{ digitalSeenAt: () => recent },
+				{ digitalSeenAt: () => recent, tdmaSeenAt: () => recent },
+			),
+			source: "digital-unknown",
+			out: "hold",
+		},
+		{
+			name: "a fresh verified DMR hint",
+			prior: channel(
+				[{ ...uncheckedHint, checkedHint: true, verifiedHint: true }],
+				{ "fsk4-12k5": 200 },
+				240,
 			),
 			source: "checked-digital",
 			out: "discarded:not-speech",
+		},
+		{
+			name: "a fresh DMR decode",
+			prior: channel(
+				[{ ...uncheckedHint, confidence: "decoded" }],
+				{ "fsk4-12k5": 200 },
+				240,
+			),
+			source: "checked-digital",
+			out: "discarded:not-speech",
+		},
+		{
+			name: "M1: a verified DMR proof 2 h old, the TTL kept by a fresh unchecked hint only",
+			prior: channel([uncheckedHint], { "fsk4-12k5": 200 }, 240, {
+				digitalProofs: () => [
+					{ ...sync("o1", old, true), verified: true },
+					sync("o2", recent),
+				],
+				digitalSeenAt: () => recent,
+			}),
+			source: "unchecked-dmr",
+			out: "hold",
+		},
+		{
+			name: "M1: a verified DMR proof 2 h old, the TTL kept by a fresh digital-unknown candidate only",
+			prior: channel(
+				[{ ...unknownCandidate, confidence: "activity" }],
+				{ "fsk4-12k5": 200 },
+				240,
+				{
+					digitalProofs: () => [{ ...sync("o1", old, true), verified: true }],
+					digitalSeenAt: () => recent,
+				},
+			),
+			source: "digital-unknown",
+			out: "hold",
+		},
+		{
+			name: "a digital-unknown candidate beside unchecked DMR hints from 2 observations",
+			prior: channel(
+				[unknownCandidate, uncheckedHint],
+				{ "fsk4-12k5": 200 },
+				240,
+				{
+					digitalProofs: () => [sync("o1", recent), sync("o2", recent)],
+				},
+			),
+			source: "unchecked-dmr",
+			out: "hold",
 		},
 		{
 			name: "a digital-unknown candidate beside the owner's recent DMR decode (backed as today)",
@@ -1875,4 +1984,179 @@ describe("finishVerdict: the content check follows where a strong prior's streng
 			priorReading(prior([decoded("pocsag")], "unknown", true), false, NOW),
 		).toEqual({ strength: "none", source: null })
 	})
+})
+
+describe("finishVerdict: the strict clear-noise check under a weak prior", () => {
+	// Feature: recording-verdict, the content check under a weak prior (speech-content.ts clearlyNoise).
+	// Validates: docs/SCANNER.md, "Analog voice recordings" (the content check).
+	/** The hardest synthetic speech at a CNR of 6 dB or more (HARD_SPEECH_CASES, 12 s). */
+	const HARDEST_VOICE_DB = 10.16
+	/** The largest range of the 120 s open-squelch noise files a listener confirmed (private). */
+	const CONFIRMED_NOISE_DB = 5.61
+	it("the strict bound leaves at least 4 dB to the hardest synthetic voice and sits over confirmed noise", () => {
+		expect(HARDEST_VOICE_DB - SPEECH_NOISE_MAX_RANGE_DB).toBeGreaterThanOrEqual(
+			4,
+		)
+		expect(SPEECH_NOISE_MAX_RANGE_DB - CONFIRMED_NOISE_DB).toBeGreaterThan(0.35)
+		expect(SPEECH_NOISE_MAX_RANGE_DB).toBeLessThan(SPEECH_STEADY_MAX_RANGE_DB)
+		expect(SPEECH_NOISE_MAX_PERIODIC_SHARE).toBeLessThan(
+			SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE,
+		)
+	})
+	const c = (
+		maxRangeDb: number,
+		periodicShare: number,
+		frames = SPEECH_WINDOW_FRAMES,
+	): SpeechContent => ({ frames, maxRangeDb, periodicShare })
+	for (const [name, content, notSpeech, noise] of [
+		["confirmed open-squelch noise (4.9 dB, 0.044)", c(4.9, 0.044), true, true],
+		["just under both strict bounds", c(5.99, 0.099), true, true],
+		["at the strict range bound", c(6, 0.01), true, false],
+		["at the strict periodic bound", c(3, 0.1), true, false],
+		["borderline: 7 dB (strong priors only)", c(7, 0.01), true, false],
+		["at the steady bound", c(8.5, 0.01), false, false],
+		["the hardest synthetic voice (10.16 dB)", c(10.16, 0.427), false, false],
+		[
+			"shorter than 3 s, however steady",
+			c(1, 0, SPEECH_WINDOW_FRAMES - 1),
+			false,
+			false,
+		],
+		["steady but pitched (2FSK 1 200 Bd, 0.15)", c(3.36, 0.152), true, false],
+	] as const)
+		it(`${name}: not speech ${notSpeech}, clear noise ${noise}`, () => {
+			expect(clearlyNotSpeech(content)).toBe(notSpeech)
+			expect(clearlyNoise(content)).toBe(noise)
+		})
+
+	const recent = NOW - 60_000
+	const fsk = (
+		labels: Label[],
+		extra: Partial<VoicePrior> = {},
+	): VoicePrior => ({
+		labels,
+		class: "fsk4-12k5",
+		analogVoice: () => false,
+		classVotes: () => ({ total: 240, votes: { "fsk4-12k5": 200 } }),
+		...extra,
+	})
+	const hint: Label = {
+		protocol: "dmr",
+		confidence: "activity",
+		owner: true,
+		at: recent,
+		checkedHint: false,
+		observationId: "o2",
+	}
+	const sync = (id: string): DigitalProof => ({
+		protocol: "dmr",
+		at: recent,
+		checked: false,
+		observationId: id,
+	})
+	const verdict = (
+		p: VoicePrior | null,
+		over: Partial<Parameters<typeof finishVerdict>[0]> = {},
+	) =>
+		finishVerdict({
+			prior: p,
+			backedClass: false,
+			ownTone: false,
+			snapshotClassed: true,
+			decodedOwn: false,
+			joinedVoice: false,
+			notSpeech: true,
+			clearNoise: true,
+			final: false,
+			now: NOW,
+			...over,
+		})
+	// The live shape: one unchecked DMR sync hint on a channel mostly read analog-fm (suspect).
+	const liveShape: VoicePrior = {
+		labels: [hint],
+		class: "analog-fm",
+		analogVoice: () => false,
+		classVotes: () => ({
+			total: 256,
+			votes: {
+				"analog-fm": 150,
+				"fsk4-12k5": 48,
+				"fsk2-wide": 39,
+				"fsk4-6k25": 19,
+			},
+		}),
+	}
+	for (const [name, p, over, out] of [
+		[
+			"suspect (one unchecked DMR hint, mostly analog-fm votes): clear noise discarded",
+			liveShape,
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"suspect: borderline audio (not clear noise) held, then kept",
+			liveShape,
+			{ clearNoise: false },
+			"hold",
+		],
+		[
+			"suspect from a spectral class alone: clear noise discarded",
+			prior([], "fsk4-12k5"),
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"digital-unknown-only channel: clear noise discarded",
+			fsk([
+				{
+					protocol: "digital-unknown",
+					confidence: "candidate",
+					owner: true,
+					at: recent,
+				},
+			]),
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"unchecked-dmr-only channel: clear noise discarded",
+			fsk([hint], { digitalProofs: () => [sync("o1"), sync("o2")] }),
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"unchecked-dmr-only channel: borderline audio held",
+			fsk([hint], { digitalProofs: () => [sync("o1"), sync("o2")] }),
+			{ clearNoise: false },
+			"hold",
+		],
+		[
+			"FROZEN: its own CTCSS tone keeps",
+			liveShape,
+			{ ownTone: true },
+			"finish",
+		],
+		[
+			"FROZEN: an analog proof on the channel keeps",
+			{ ...liveShape, analogVoice: () => true },
+			{},
+			"finish",
+		],
+		[
+			"FROZEN: a joined voice keeps (held)",
+			liveShape,
+			{ joinedVoice: true },
+			"hold",
+		],
+		["FROZEN: no prior keeps", null, {}, "finish"],
+		[
+			"clear noise never without notSpeech (a toned or roll-over file)",
+			liveShape,
+			{ notSpeech: false },
+			"hold",
+		],
+	] as const)
+		it(name, () => {
+			expect(verdict(p, over)).toBe(out)
+		})
 })

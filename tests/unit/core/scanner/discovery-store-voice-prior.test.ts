@@ -96,6 +96,7 @@ describe("DiscoveryStore.voicePrior", () => {
 			owner: true,
 			at: T0 + 500,
 			checkedHint: false,
+			verifiedHint: false,
 			observationId: "pager",
 		})
 		expect(admissionVerdict(prior, false, T0 + 500)).toBe("tone-required")
@@ -216,8 +217,14 @@ describe("DiscoveryStore.voicePrior", () => {
 			const prior = store.voicePrior(id) ?? null
 			const label = ownerLabel(store, id)
 			expect(label).toEqual(
-				expect.objectContaining({ protocol: "dmr", checkedHint: true }),
+				expect.objectContaining({
+					protocol: "dmr",
+					checkedHint: true,
+					verifiedHint: true,
+				}),
 			)
+			// fsk4-12k5 votes only: no tdma-ms vote time.
+			expect(prior?.tdmaSeenAt?.()).toBeNull()
 			expect(Number.isFinite(label?.at ?? Number.NaN)).toBe(true)
 			// The six overs voted fsk4-12k5 (no refresh); the hint was made at T0 + 500 ms.
 			const at = prior?.digitalSeenAt?.() ?? Number.NaN
@@ -315,8 +322,15 @@ describe("DiscoveryStore.voicePrior", () => {
 			const store = newStore()
 			const id = channel(store, "tdma-ms", [0], () => T0 + 500)
 			expect(store.voicePrior(id)?.digitalProofs?.()).toEqual([
-				{ protocol: "dmr", at: T0 + 500, checked: false, observationId: "o0" },
+				{
+					protocol: "dmr",
+					at: T0 + 500,
+					checked: false,
+					verified: false,
+					observationId: "o0",
+				},
 			])
+			expect(store.voicePrior(id)?.tdmaSeenAt?.()).toEqual(expect.any(Number))
 			expect(read(store, id, T0 + MIN)).toBe("tone-required")
 		})
 
