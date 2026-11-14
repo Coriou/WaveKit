@@ -2,9 +2,11 @@ import * as http from "node:http"
 import type { AddressInfo } from "node:net"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+	PROBE_CACHE_MS,
 	canonicalHostRedirect,
 	isNavigation,
 	readProbe,
+	type ProbeCache,
 } from "../../build/canonical-host.ts"
 
 interface Fake {
@@ -203,5 +205,51 @@ describe("a refused name beside a server that is not the core", () => {
 		expect(
 			await canonicalHostRedirect(`localhost:${web.port}`, "/", web.port),
 		).toBeNull()
+	})
+})
+
+describe("the probe's cost on a page load", () => {
+	it("asks the core once for a name, then reuses the verdict until it is stale", async () => {
+		const web = await fake(onlyAccepts("127.0.0.1"))
+		const cache: ProbeCache = new Map()
+		const go = () =>
+			canonicalHostRedirect(`localhost:${web.port}`, "/", web.port, cache)
+		const target = `http://127.0.0.1:${web.port}/`
+		expect(await go()).toBe(target)
+		const asked = web.probes.length
+		expect(asked).toBe(2)
+		expect(await go()).toBe(target)
+		expect(await go()).toBe(target)
+		expect(web.probes.length).toBe(asked)
+		// stale verdicts are read again
+		for (const entry of cache.values()) entry.at -= PROBE_CACHE_MS
+		expect(await go()).toBe(target)
+		expect(web.probes.length).toBe(2 * asked)
+	})
+
+	it("a core that never answers costs one short wait, then none", async () => {
+		let connections = 0
+		const hung = http.createServer(() => {
+			connections++
+			// never answers
+		})
+		await new Promise<void>(resolve => hung.listen(0, "127.0.0.1", resolve))
+		const port = (hung.address() as AddressInfo).port
+		try {
+			const cache: ProbeCache = new Map()
+			// the first load waits the first probe's timeout and is served as it is
+			expect(
+				await canonicalHostRedirect(`127.0.0.1:${port}`, "/", port, cache),
+			).toBeNull()
+			expect(connections).toBe(1)
+			// the next loads do not wait again: no new probe reaches the core
+			expect(
+				await canonicalHostRedirect(`127.0.0.1:${port}`, "/", port, cache),
+			).toBeNull()
+			expect(connections).toBe(1)
+		} finally {
+			hung.closeAllConnections()
+			await new Promise<void>(resolve => hung.close(() => resolve()))
+		}
 	})
 })

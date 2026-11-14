@@ -22,8 +22,23 @@ const LOOPBACK: Readonly<Record<string, string>> = {
 /** The names tried, in order, when the one in the address bar is refused. */
 const PREFERENCE = ["127.0.0.1", "localhost", "[::1]"] as const
 
-/** A probe waits this long (ms) for the core's answer before the name counts as unknown. */
+/**
+ * The probe of the name in the address bar waits this long (ms): it runs before every page load
+ * under a loopback name, so a core that hangs must not hold the page for long. A core on this
+ * machine answers in a few milliseconds.
+ */
+export const FIRST_PROBE_TIMEOUT_MS = 500
+/** A probe of another name (only after the core refused the first) waits this long (ms). */
 export const PROBE_TIMEOUT_MS = 1500
+/**
+ * A verdict is reused this long (ms): reloads and the pages of one session ask the core once, and
+ * a core that hangs costs one wait, not one per navigation. Short enough that a core restarted
+ * with other access settings is seen at the next load.
+ */
+export const PROBE_CACHE_MS = 5000
+
+/** Verdicts by "name:port", with the time they were read. */
+export type ProbeCache = Map<string, { at: number; verdict: Probe }>
 
 /** The paths the core owns (vite.config.ts proxy): never redirected. */
 const CORE_PATHS = /^\/(?:api|ws|health)(?:[/?]|$)/
@@ -63,7 +78,7 @@ export function readProbe(status: number, text: string): Probe {
 }
 
 /** GET /api/access/bootstrap on this server's own `port`, as a browser at `name` would send it. */
-function probe(name: string, port: number): Promise<Probe> {
+function probe(name: string, port: number, timeoutMs: number): Promise<Probe> {
 	return new Promise(resolve => {
 		const request = http.request(
 			{
@@ -73,7 +88,7 @@ function probe(name: string, port: number): Promise<Probe> {
 				method: "GET",
 				setHost: false,
 				headers: { host: `${name}:${port}`, accept: "application/json" },
-				timeout: PROBE_TIMEOUT_MS,
+				timeout: timeoutMs,
 			},
 			response => {
 				const chunks: Buffer[] = []
@@ -104,12 +119,14 @@ function probe(name: string, port: number): Promise<Probe> {
 /**
  * Where a navigation to `url` with the Host header `host` should go instead, or null to serve it
  * as it is. Not null only when `host` is a loopback name on `port` (this server's), the core
- * refuses that name, and it accepts another loopback name that reaches this server.
+ * refuses that name, and it accepts another loopback name that reaches this server. With a `cache`,
+ * verdicts are reused for PROBE_CACHE_MS.
  */
 export async function canonicalHostRedirect(
 	host: string,
 	url: string,
 	port: number,
+	cache?: ProbeCache,
 ): Promise<string | null> {
 	const split = /^(.+):(\d+)$/.exec(host)
 	if (!split?.[1] || Number(split[2]) !== port) return null
@@ -118,11 +135,20 @@ export async function canonicalHostRedirect(
 	// a local path only: nothing that a browser could read as another site
 	if (!url.startsWith("/") || url.startsWith("//") || url.includes("\\"))
 		return null
-	if ((await probe(name, port)) !== "refused") return null
+	const ask = async (candidate: string, timeoutMs: number): Promise<Probe> => {
+		const key = `${candidate}:${port}`
+		const held = cache?.get(key)
+		const now = Date.now()
+		if (held && now - held.at < PROBE_CACHE_MS) return held.verdict
+		const verdict = await probe(candidate, port, timeoutMs)
+		cache?.set(key, { at: Date.now(), verdict })
+		return verdict
+	}
+	if ((await ask(name, FIRST_PROBE_TIMEOUT_MS)) !== "refused") return null
 	for (const other of PREFERENCE) {
 		if (other === name) continue
 		// the refusal came from a protected core: only its own bootstrap document is an acceptance
-		if ((await probe(other, port)) === "accepted")
+		if ((await ask(other, PROBE_TIMEOUT_MS)) === "accepted")
 			return `http://${other}:${port}${url}`
 	}
 	return null
@@ -145,6 +171,7 @@ type Next = (error?: unknown) => void
 
 /** Connect middleware for the dev and preview servers; `port` reads the port actually listened on. */
 export function canonicalHostMiddleware(port: () => number | null) {
+	const cache: ProbeCache = new Map()
 	return (req: IncomingMessage, res: ServerResponse, next: Next): void => {
 		const listening = port()
 		const host = req.headers.host
@@ -157,7 +184,7 @@ export function canonicalHostMiddleware(port: () => number | null) {
 			next()
 			return
 		}
-		void canonicalHostRedirect(host, url, listening)
+		void canonicalHostRedirect(host, url, listening, cache)
 			.catch(() => null)
 			.then(location => {
 				// a client gone during the probe, or anything else here, must not take the server down
