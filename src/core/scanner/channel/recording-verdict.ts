@@ -887,13 +887,14 @@ export function contentChecked(
 
 /**
  * Other observations of the owner, of any age, that a DMR sync hint must also be on before the
- * hint on a file's own transmission opens the content check (ownDmrHint): 2.
+ * hint on the session's first transmission opens the content check (ownDmrHint): 2.
  */
 export const OWN_HINT_OTHER_OBSERVATIONS = 2
 
 /**
- * The content check also applies to a file whose own transmission (`ownObservationId`, the
- * session's first observation) carries a dsd-fme DMR sync hint, checked or not
+ * The content check also applies to a file whose session's first transmission (`ownObservationId`,
+ * the session's owner; a roll-over or joined file is judged on it too) carries a dsd-fme DMR sync
+ * hint, checked or not
  * (VoicePrior.digitalProofs), while hints of DMR are on at least OWN_HINT_OTHER_OBSERVATIONS other
  * kept observations of the owner (any age: a DMR channel heard once in hours syncs over after
  * over) and DIGITAL_CHANNEL_MIN_SHARE of its DIGITAL_CHANNEL_MIN_VOTES or more class votes read

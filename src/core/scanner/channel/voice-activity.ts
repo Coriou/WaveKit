@@ -10,7 +10,7 @@
  * burst's edge does not reserve a file). CTCSS is never required. Audio too short for one window
  * (a short over, trimmed at both ends) is judged once at its end on all of it, if it holds at
  * least VOICE_MIN_FINAL_FRAMES (`conclude()`); audio that ended before VOICE_MIN_WINDOWS windows
- * qualified does at its end when half of its windows (rounded up, at least one) did.
+ * qualified does at its end on fewer (VOICE_MIN_WINDOWS, the end-of-over rule).
  *
  * Measured through WidebandNfmChain on the synthetic test signal (500 ms windows): voice
  * windows at RMS 1100 to 6600 with tilt up to 6.7; a quieted carrier at RMS 11; a 250.3 Hz
@@ -59,10 +59,22 @@ export const VOICE_MIN_TILT = 1.4
 /**
  * Qualifying windows a file needs while its audio runs (VoiceActivityGate.push): 3. A 1.5 s over
  * gives 1.3 s of audio past the recorder's 100 ms trims, 13 blocks and so 13 − 5 + 1 = 9 sliding
- * windows, of which voice must fill 3. At the over's end (conclude) min(3, ⌈windows / 2⌉) do: a
- * 1 s over (0.8 s of audio, 4 windows) needs 2, a 0.7 s one (1 window) that one.
+ * windows, of which voice must fill 3. At the over's end (conclude) fewer do, any of:
+ * - min(3, ⌈windows / 2⌉): a 1 s over (0.8 s of audio, 4 windows) needs 2, a 0.7 s one (1 window)
+ *   that one;
+ * - 2 when the over gave at most VOICE_SHORT_OVER_WINDOWS windows (a 1.5 s over, 9 windows): a
+ *   short or weak word at the start or end of a 1.1 to 1.5 s over (6 to 9 windows, so 3 to 5 by
+ *   the first rule) can pass only 2 windows;
+ * - 2 consecutive windows at any length: a real word spans adjacent windows (they share 4 of
+ *   their 5 blocks), one stray window of noise or a burst's edge passes alone.
+ * Only one isolated voiced window in an over of 3 windows or more never qualifies.
  */
 export const VOICE_MIN_WINDOWS = 3
+/**
+ * The longest over (in windows) whose end accepts any 2 voiced windows: 9, a 1.5 s over (1.3 s
+ * of audio past the trims, 13 blocks, 13 − 5 + 1 = 9 windows).
+ */
+export const VOICE_SHORT_OVER_WINDOWS = 9
 
 /**
  * The gate's and the meter's shared DSP: the filters and the last VOICE_WINDOW_BLOCKS completed
@@ -183,6 +195,9 @@ export class VoiceActivityGate {
 	/** Full windows judged, and how many of them were loud and voice-tilted. */
 	private windows = 0
 	private hits = 0
+	/** The last judged window was voiced; two voiced in a row were seen. */
+	private lastHit = false
+	private pair = false
 	private concluded = false
 
 	/** True once VOICE_MIN_WINDOWS windows were loud and voice-tilted (or at the end, conclude). */
@@ -201,10 +216,10 @@ export class VoiceActivityGate {
 		for (let i = start; i < end; i++) {
 			if (!dsp.step(pcm[i]!) || dsp.count < VOICE_WINDOW_BLOCKS) continue
 			this.windows++
-			if (
-				dsp.voiced(WINDOW_FRAMES, false) &&
-				++this.hits >= VOICE_MIN_WINDOWS
-			) {
+			const hit = dsp.voiced(WINDOW_FRAMES, false)
+			if (hit && this.lastHit) this.pair = true
+			this.lastHit = hit
+			if (hit && ++this.hits >= VOICE_MIN_WINDOWS) {
 				this.qualified = true
 				return i + 1 - start
 			}
@@ -215,10 +230,9 @@ export class VoiceActivityGate {
 	/**
 	 * The audio ended: audio that never filled a window is judged on all of it (the completed
 	 * blocks and the partial one) when it holds at least VOICE_MIN_FINAL_FRAMES; audio that filled
-	 * windows without latching qualifies when at least half of them (rounded up), and at least
-	 * one, were voiced: a short over cannot give VOICE_MIN_WINDOWS (a 1 s synthetic voice over
-	 * gives 4 windows, the first two holding its onset, and 2 voiced). Idempotent; later pushes
-	 * are ignored.
+	 * windows without latching qualifies by the end-of-over rule (VOICE_MIN_WINDOWS): at least half
+	 * of them (rounded up, at least one), or 2 in an over of at most VOICE_SHORT_OVER_WINDOWS
+	 * windows, or 2 consecutive. Idempotent; later pushes are ignored.
 	 */
 	conclude(): boolean {
 		if (this.qualified || this.concluded) return this.qualified
@@ -229,6 +243,8 @@ export class VoiceActivityGate {
 			this.qualified = dsp.voiced(frames, true)
 		else if (this.hits > 0)
 			this.qualified =
+				this.pair ||
+				(this.hits >= 2 && this.windows <= VOICE_SHORT_OVER_WINDOWS) ||
 				this.hits >= Math.min(VOICE_MIN_WINDOWS, Math.ceil(this.windows / 2))
 		return this.qualified
 	}
