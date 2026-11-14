@@ -617,7 +617,7 @@ describe("ProbePool: identify preemption never stops a held recorded call, holds
 			cls: "fsk2-wide",
 		})
 
-	it("reviewer's case: a 0.5 recording during the stop is admitted (budget 3.08, engine 0.08, job probe 1, recording 1.5, identify 1)", async () => {
+	it("a 0.5 recording during the stop is admitted (budget 3.08, engine 0.08, job probe 1, recording 1.5, identify 1)", async () => {
 		const h = unequal(3.08, { job: 1, id: 1 })
 		await job(h, 1)
 		expect(h.pool.reserveExternal(1.5)).not.toBeNull()
