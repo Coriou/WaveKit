@@ -524,6 +524,30 @@ describe("identifyView", () => {
 		expect(none.title).toBe(
 			"LoRa with no decoder: Not available yet (no decoder running here)",
 		)
+		expect(
+			trialRow(trial("dmr", "skipped-budget", { reason: "slot-busy" }), 4)
+				.title,
+		).toBe("DMR with dsd-fme: Skipped (busy) (another identify held the probe)")
+		expect(
+			trialRow(
+				trial("dmr", "skipped-budget", {
+					reason: "cpu-budget",
+					budget: {
+						budgetCores: 1,
+						enginesCores: 0.08,
+						probesCores: 0,
+						recordingsCores: 0.4296,
+					},
+				}),
+				5,
+			).title,
+		).toBe(
+			"DMR with dsd-fme: Skipped (busy) (no CPU budget left: recordings 0.43 of 1 core)",
+		)
+		expect(
+			trialRow(trial("dmr", "skipped-budget", { reason: "cpu-budget" }), 6)
+				.title,
+		).toBe("DMR with dsd-fme: Skipped (busy) (no CPU budget left)")
 		expect(trialRow(trial("acars", "timeout"), 2).protocol).toBe("ACARS")
 		expect(trialRow(trial("vdl2", "no-sync"), 3).protocol).toBe("VDL2")
 		expect(

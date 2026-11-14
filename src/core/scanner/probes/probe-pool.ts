@@ -906,14 +906,16 @@ export class ProbePool extends EventEmitter {
 
 	/**
 	 * Why a queued request still waits, from the check pump() makes: `max-probes` (the slots of the
-	 * transports it can use are held), `budget` (the core estimate leaves no room: for a job probe
-	 * external reservations such as recordings and analog trials included; for identify engines and
-	 * probes only), `cpu` (the CPU guard). With the core estimate behind it. Null for anything not
-	 * queued, or once it would start.
+	 * transports it can use are held), `budget` (the core estimate, engines, probes and external
+	 * reservations such as recordings and analog trials, leaves no room), `cpu` (the CPU guard).
+	 * With the core estimate behind it, split into what holds it. Null for anything not queued, or
+	 * once it would start.
 	 */
 	queuedDeferral(req: ProbeRequest): {
 		deferral: "max-probes" | "budget" | "cpu"
 		estimatedCores: number
+		enginesCores: number
+		probesCores: number
 		externalCores: number
 		budgetCores: number
 	} | null {
@@ -929,9 +931,13 @@ export class ProbePool extends EventEmitter {
 				pick.deferred !== "cpu")
 		)
 			return null
+		const enginesCores = this.enginesCores()
+		const own = this.ownCores()
 		return {
 			deferral: pick.deferred,
 			estimatedCores: this.estimatedCores(),
+			enginesCores,
+			probesCores: Math.max(0, own - enginesCores),
 			externalCores: this.externalCores,
 			budgetCores: this.deps.settings().cpuBudgetCores,
 		}
@@ -1221,10 +1227,10 @@ export class ProbePool extends EventEmitter {
 	// Hold `cores` against the same budget probe admission uses. Null when
 	// the pool is destroyed, `cores` is not a finite non-negative number,
 	// `settings()` throws or has a non-finite budget, or the reservation
-	// would exceed `cpuBudgetCores`. Identify probes do not count here (see
-	// pickTransport): recordings never wait on identify, as identify never
-	// waits on recordings. Zero returns a no-op release. Release is
-	// idempotent and never drives the counter negative.
+	// would exceed `cpuBudgetCores`: the full estimate (engines, every probe,
+	// identify's included, and reservations) plus `cores`, so the total never
+	// exceeds the budget. Zero returns a no-op release. Release is idempotent
+	// and never drives the counter negative.
 	reserveExternal(cores: number): (() => void) | null {
 		if (this.destroyed) return null
 		if (!Number.isFinite(cores) || cores < 0) return null
@@ -1236,8 +1242,7 @@ export class ProbePool extends EventEmitter {
 			return null
 		}
 		if (!Number.isFinite(budget)) return null
-		if (this.nonIdentifyCores() + this.externalCores + cores > budget + 1e-9)
-			return null
+		if (this.estimatedCores() + cores > budget + 1e-9) return null
 		this.externalCores += cores
 		let released = false
 		return () => {
@@ -1251,18 +1256,14 @@ export class ProbePool extends EventEmitter {
 		return this.ownCores() + this.externalCores
 	}
 
-	/** Engines and probes: the estimate without external reservations. */
-	private ownCores(): number {
-		let cores = this.deps.engineCount() * CPU_COST.engine
-		for (const r of this.records.values()) cores += r.cores
-		return cores
+	private enginesCores(): number {
+		return this.deps.engineCount() * CPU_COST.engine
 	}
 
-	/** Engines and every probe but identify's: what a recording's reservation is weighed with. */
-	private nonIdentifyCores(): number {
-		let cores = this.deps.engineCount() * CPU_COST.engine
-		for (const r of this.records.values())
-			if (!isIdentifyPriority(r.req.priority)) cores += r.cores
+	/** Engines and probes: the estimate without external reservations. */
+	private ownCores(): number {
+		let cores = this.enginesCores()
+		for (const r of this.records.values()) cores += r.cores
 		return cores
 	}
 
@@ -1292,19 +1293,14 @@ export class ProbePool extends EventEmitter {
 				reason ??= "max-probes"
 				continue
 			}
-			// Identify (isIdentifyPriority, a user request) and background recordings / analog trials
-			// (reserveExternal) do not wait on each other: identify is weighed against engines and probes
-			// only (E + J + I + new <= B), a reservation against engines, job probes and reservations only
-			// (E + J + X + new <= B), and a job probe against everything (E + J + I + X + new <= B).
-			// Bound: the last two keep E + J + X <= B, the first keeps I <= B, so the full estimate
-			// E + J + I + X <= B + I, and I <= maxProbes.offset x CPU_COST.offsetProbe (0.5 per slot):
-			// that last bound assumes identify runs on offset probes only (the channel transport is not
-			// wired for identify); identify on another transport would need its own bound here.
-			// (E engines, J job probes, I identify probes, X reservations, B cpuBudgetCores.)
-			const held = isIdentifyPriority(ctx.req.priority)
-				? this.ownCores()
-				: this.estimatedCores()
-			if (held + transport.cores(mode.decoderType) > s.cpuBudgetCores + 1e-9) {
+			// One shared budget: every admission (identify, job probe, or a reservation in
+			// reserveExternal) is weighed against the full estimate, engines, every probe and the
+			// reservations (recordings, analog trials), so the total never exceeds cpuBudgetCores.
+			// Identify may preempt job probes (preemptFor) but never cuts a reservation.
+			if (
+				this.estimatedCores() + transport.cores(mode.decoderType) >
+				s.cpuBudgetCores + 1e-9
+			) {
 				reason ??= "budget"
 				continue
 			}

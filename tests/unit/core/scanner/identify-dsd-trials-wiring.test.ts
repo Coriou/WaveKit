@@ -155,7 +155,12 @@ describe("identify dsd-fme trials on a continuous 4FSK signal (real wiring)", ()
 		const { trials } = await run({ holderPriority: 101, stopMs: 0 })
 		const auto = trials.filter(t => AUTO.includes(t.protocol))
 		expect(auto).toHaveLength(AUTO.length)
-		for (const t of auto) expect(t.outcome).toBe("skipped-budget")
+		// The trial carries the skip's real reason; the outcome (and verdict) stay budget.
+		for (const t of auto)
+			expect(t).toMatchObject({
+				outcome: "skipped-budget",
+				reason: "slot-busy",
+			})
 	}, 120_000)
 
 	it("a stop that outlasts the bound: the run waits IDENTIFY_SLOT_FREEING_MAX_MS, no longer, then is skipped", async () => {
@@ -165,7 +170,11 @@ describe("identify dsd-fme trials on a continuous 4FSK signal (real wiring)", ()
 		})
 		const auto = trials.filter(t => AUTO.includes(t.protocol))
 		expect(auto).toHaveLength(AUTO.length)
-		for (const t of auto) expect(t.outcome).toBe("skipped-budget")
+		for (const t of auto)
+			expect(t).toMatchObject({
+				outcome: "skipped-budget",
+				reason: "slot-still-freeing",
+			})
 		// Queued after the job started, skipped once the bound passed (real time only moves on,
 		// so a slow runner cannot fail this) and before the stop ended: an ordering, not a
 		// wall-clock upper bound (the bound itself is pinned with a fake clock in

@@ -1,7 +1,9 @@
 /**
  * ProbePool.slotFreeing: a queued request whose slot a stopping probe is about to free. Identify
- * keeps such a run queued past IDENTIFY_QUEUE_WAIT_MS instead of skipping it.
+ * keeps such a run queued past IDENTIFY_QUEUE_WAIT_MS instead of skipping it. Identify, job probes
+ * and external reservations (recordings, analog trials) share one CPU budget.
  */
+import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { IDENTIFY_PROBE_PRIORITY } from "../../../../src/core/scanner/identify.js"
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
@@ -130,34 +132,41 @@ describe("ProbePool.queuedDeferral: the real reason a queued request waits", () 
 	})
 })
 
-describe("ProbePool: identify is not starved by external reservations", () => {
+describe("ProbePool: one shared CPU budget for identify, job probes and reservations", () => {
 	// Budget arithmetic: one engine 0.08 + one offset probe 0.5 = 0.58.
-	it("identify starts when only external reservations are over; new reservations still fit beside it; held ones stay", async () => {
+	const settings = (
+		budget = 1,
+		offsetSlots = 1,
+	): ReturnType<typeof testSettings> =>
+		testSettings(s => {
+			s.cpuBudgetCores = budget
+			s.maxProbes.offset = offsetSlots
+		})
+
+	it("identify waits on `budget` when reservations leave no room; the reservation is never cut", () => {
 		const h = poolHarness()
 		const budget = h.settings.cpuBudgetCores
 		const held = budget - 0.08 - 0.45
-		const release = h.pool.reserveExternal(held)
-		expect(release).not.toBeNull()
+		expect(h.pool.reserveExternal(held)).not.toBeNull()
 		const req = probeRequest({
 			jobId: "identify",
 			priority: IDENTIFY_PROBE_PRIORITY,
 		})
-		expect(h.pool.request(req)).toHaveProperty("started")
-		await flushAsync()
-		// Identify's 0.5 does not count for a reservation: engine 0.08 + held + 0.01 = budget - 0.44.
-		const extra = h.pool.reserveExternal(0.01)
-		expect(extra).not.toBeNull()
-		expect(h.pool.externalCoresInUse()).toBeCloseTo(held + 0.01, 9)
-		extra?.()
-		release?.()
-		expect(h.pool.externalCoresInUse()).toBe(0)
+		expect(h.pool.request(req)).toEqual({ deferred: "budget" })
+		expect(h.pool.status()).toHaveLength(0)
+		const d = h.pool.queuedDeferral(req)
+		expect(d).toMatchObject({
+			deferral: "budget",
+			budgetCores: budget,
+			probesCores: 0,
+		})
+		expect(d?.enginesCores).toBeCloseTo(0.08, 9)
+		expect(d?.externalCores).toBeCloseTo(held, 9)
+		expect(h.pool.externalCoresInUse()).toBeCloseTo(held, 9)
 	})
 
-	it("at the bound: engines + probes + the identify probe exactly fill the budget, it starts", () => {
-		const settings = testSettings(s => {
-			s.cpuBudgetCores = 0.58
-		})
-		const h = poolHarness({ settings })
+	it("at the bound: engine + reservation + the identify probe exactly fill the budget, it starts", () => {
+		const h = poolHarness({ settings: settings(0.88) })
 		expect(h.pool.reserveExternal(0.3)).not.toBeNull()
 		expect(
 			h.pool.request(
@@ -166,39 +175,7 @@ describe("ProbePool: identify is not starved by external reservations", () => {
 		).toHaveProperty("started")
 	})
 
-	it("past the bound: engines + probes leave no room for the identify probe, it waits on `budget`", () => {
-		const settings = testSettings(s => {
-			s.cpuBudgetCores = 0.57
-		})
-		const h = poolHarness({ settings })
-		const req = probeRequest({
-			jobId: "identify",
-			priority: IDENTIFY_PROBE_PRIORITY,
-		})
-		expect(h.pool.request(req)).toEqual({ deferred: "budget" })
-		expect(h.pool.queuedDeferral(req)).toMatchObject({ deferral: "budget" })
-	})
-
-	it("a job probe still counts external reservations", () => {
-		const h = poolHarness()
-		expect(
-			h.pool.reserveExternal(h.settings.cpuBudgetCores - 0.08 - 0.45),
-		).not.toBeNull()
-		expect(h.pool.request(probeRequest({ priority: 100 }))).toEqual({
-			deferred: "budget",
-		})
-	})
-})
-
-describe("ProbePool.reserveExternal: recordings do not wait on identify", () => {
-	// Budget 1, one engine 0.08. E engines, J job probes, I identify probes, X reservations, B budget.
-	const settings = (offsetSlots = 1): ReturnType<typeof testSettings> =>
-		testSettings(s => {
-			s.cpuBudgetCores = 1
-			s.maxProbes.offset = offsetSlots
-		})
-
-	it("at the bound: with an identify probe running, E + X + new = 0.08 + 0.92 = 1 is admitted", async () => {
+	it("a reservation counts a running identify probe: E + I + new = 0.08 + 0.5 + 0.42 = 1 fits, 0.43 does not", async () => {
 		const h = poolHarness({ settings: settings() })
 		expect(
 			h.pool.request(
@@ -206,25 +183,12 @@ describe("ProbePool.reserveExternal: recordings do not wait on identify", () => 
 			),
 		).toHaveProperty("started")
 		await flushAsync()
-		expect(h.pool.reserveExternal(0.92)).not.toBeNull()
-		// Full estimate: 0.08 + 0.5 + 0.92 = 1.5 = B + I (the bounded overshoot).
-		expect(h.pool.externalCoresInUse()).toBeCloseTo(0.92, 9)
-	})
-
-	it("past the bound: E + X + new = 0.08 + 0.93 > 1 is refused, identify running or not", async () => {
-		const h = poolHarness({ settings: settings() })
-		expect(h.pool.reserveExternal(0.93)).toBeNull()
-		h.pool.request(
-			probeRequest({ jobId: "identify", priority: IDENTIFY_PROBE_PRIORITY }),
-		)
-		await flushAsync()
-		expect(h.pool.reserveExternal(0.93)).toBeNull()
-		expect(h.pool.reserveExternal(0.92)).not.toBeNull()
-		// Now E + X = 1: one more core-thousandth is past it.
+		expect(h.pool.reserveExternal(0.43)).toBeNull()
+		expect(h.pool.reserveExternal(0.42)).not.toBeNull()
 		expect(h.pool.reserveExternal(0.001)).toBeNull()
 	})
 
-	it("a job probe still counts for a reservation: E + J + new = 0.08 + 0.5 + 0.42 = 1 fits, 0.43 does not", async () => {
+	it("a reservation counts a job probe: E + J + new = 0.08 + 0.5 + 0.42 = 1 fits, 0.43 does not", async () => {
 		const h = poolHarness({ settings: settings() })
 		expect(
 			h.pool.request(probeRequest({ jobId: "job", priority: 50 })),
@@ -234,8 +198,8 @@ describe("ProbePool.reserveExternal: recordings do not wait on identify", () => 
 		expect(h.pool.reserveExternal(0.42)).not.toBeNull()
 	})
 
-	it("a job probe still counts identify's cores and reservations: no room at E + I + X = 1.5", async () => {
-		const h = poolHarness({ settings: settings(2) })
+	it("a job probe counts identify's cores and reservations", async () => {
+		const h = poolHarness({ settings: settings(1, 2) })
 		h.pool.request(
 			probeRequest({ jobId: "identify", priority: IDENTIFY_PROBE_PRIORITY }),
 		)
@@ -248,34 +212,76 @@ describe("ProbePool.reserveExternal: recordings do not wait on identify", () => 
 		).toEqual({ deferred: "budget" })
 	})
 
-	it("overshoot bound: two identify slots over full reservations stay at B + I = 1 + 2 x 0.5", async () => {
-		// Identify admission: E + J + I + new <= B, so with E = 0.08 two 0.5-core probes do not fit B = 1;
-		// at B = 1.08 they do (0.08 + 1 = 1.08), and reservations then fill E + X up to B again.
-		const h = poolHarness({
-			settings: testSettings(s => {
-				s.cpuBudgetCores = 1.08
-				s.maxProbes.offset = 2
+	it("property: across identify probes, job probes and reservations the estimate never exceeds the budget", async () => {
+		type Op =
+			| { kind: "identify" | "job"; priority: number }
+			| { kind: "reserve"; cores: number }
+			| { kind: "unreserve"; index: number }
+			| { kind: "releaseProbe"; index: number }
+		const op: fc.Arbitrary<Op> = fc.oneof(
+			fc.record({
+				kind: fc.constant("identify" as const),
+				priority: fc.constant(IDENTIFY_PROBE_PRIORITY),
 			}),
-		})
-		h.pool.request(
-			probeRequest({ jobId: "id1", priority: IDENTIFY_PROBE_PRIORITY }),
-		)
-		h.pool.request(
-			probeRequest({
-				jobId: "id2",
-				priority: IDENTIFY_PROBE_PRIORITY,
-				trackId: "t2",
+			fc.record({
+				kind: fc.constant("job" as const),
+				priority: fc.integer({ min: 0, max: 100 }),
+			}),
+			fc.record({
+				kind: fc.constant("reserve" as const),
+				cores: fc.double({ min: 0, max: 1.2, noNaN: true }),
+			}),
+			fc.record({
+				kind: fc.constant("unreserve" as const),
+				index: fc.nat(),
+			}),
+			fc.record({
+				kind: fc.constant("releaseProbe" as const),
+				index: fc.nat(),
 			}),
 		)
-		await flushAsync()
-		expect(h.pool.status()).toHaveLength(2)
-		expect(h.pool.reserveExternal(1)).not.toBeNull()
-		expect(h.pool.reserveExternal(0.001)).toBeNull()
-		const total =
-			0.08 +
-			h.pool.status().reduce((sum, p) => sum + p.cores, 0) +
-			h.pool.externalCoresInUse()
-		// 0.08 + 1 + 1 = 2.08 = B + I, I = maxProbes.offset x 0.5.
-		expect(total).toBeCloseTo(1.08 + 2 * 0.5, 9)
-	})
+		await fc.assert(
+			fc.asyncProperty(
+				fc.double({ min: 0.5, max: 3, noNaN: true }),
+				fc.integer({ min: 1, max: 3 }),
+				fc.array(op, { minLength: 1, maxLength: 25 }),
+				async (budget, slots, ops) => {
+					const h = poolHarness({ settings: settings(budget, slots) })
+					const releases: (() => void)[] = []
+					const estimate = (): number =>
+						0.08 +
+						h.pool.status().reduce((sum, p) => sum + p.cores, 0) +
+						h.pool.externalCoresInUse()
+					let n = 0
+					for (const o of ops) {
+						n++
+						if (o.kind === "identify" || o.kind === "job")
+							h.pool.request(
+								probeRequest({
+									jobId: `${o.kind}-${n}`,
+									priority: o.priority,
+									trackId: `t${n}`,
+									observationId: `o${n}`,
+								}),
+							)
+						else if (o.kind === "reserve") {
+							const release = h.pool.reserveExternal(o.cores)
+							if (release) releases.push(release)
+						} else if (o.kind === "unreserve") {
+							releases.splice(o.index % Math.max(1, releases.length), 1)[0]?.()
+						} else if (o.kind === "releaseProbe") {
+							const probes = h.pool.status()
+							const p = probes[o.index % Math.max(1, probes.length)]
+							if (p) await h.pool.release(p.probeId)
+						}
+						await flushAsync()
+						h.pool.pump()
+						expect(estimate()).toBeLessThanOrEqual(budget + 1e-9)
+					}
+					h.pool.sealAdmission()
+				},
+			),
+			{ numRuns: 100 },
+		)
+	}, 120_000)
 })

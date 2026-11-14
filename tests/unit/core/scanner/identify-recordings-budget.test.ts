@@ -7,13 +7,11 @@
  * Arithmetic (cpuBudgetCores 1, one engine): engine 0.08 + offset probe 0.5 = 0.58 leaves 0.42 for
  * recordings. One recording at 2.4 Msps is (50 + 9 * 2.4) / 1000 = 0.0716 cores; 5 of them hold
  * 0.358 (fits: 0.938 <= 1, still 0.9972 with the service's own recorder session on the test signal
- * at 1.024 Msps, 0.0592), 6 hold 0.4296 (0.08 + 0.4296 + 0.5 = 1.0096 > 1). Six concurrent
- * recordings used to skip every dsd-fme trial `skipped-budget` with no probe running and a status
- * `cpuCoresInUse` of 0.08. Now identify (a user request) is admitted when only the recordings'
- * reservations are over (engines + probes + its probe <= budget); recordings already running go on,
- * and new ones are admitted beside it (engines + job probes + reservations + new <= budget: identify's
- * 0.5 does not count), so neither waits on the other. Seventh recording: 0.08 + 6 x 0.0716 (+ 0.0592)
- * + 0.0716 = 0.5812 (0.6404) <= 1; the full estimate is then at most budget + identify's 0.5.
+ * at 1.024 Msps, 0.0592), 6 hold 0.4296 (0.08 + 0.4296 + 0.5 = 1.0096 > 1). Identify, job probes
+ * and recordings share one budget (engines + probes + reservations + new <= budget for every
+ * admission), so the estimate never exceeds it: with six recordings every dsd-fme trial ends
+ * `skipped-budget`, reason `cpu-budget`, with the budget split naming the recordings, and no
+ * recording is cut. While identify runs beside five, a sixth recording does not fit and is refused.
  */
 import { describe, expect, it } from "vitest"
 import type { ScannerIdentifyTrial } from "@wavekit/api-types"
@@ -54,7 +52,10 @@ interface Internals {
 	}
 }
 
-async function run(recordings: number): Promise<{
+async function run(
+	recordings: number,
+	budget = BUDGET,
+): Promise<{
 	trials: ScannerIdentifyTrial[]
 	inUseBefore: number
 	inUseDuring: number
@@ -65,7 +66,7 @@ async function run(recordings: number): Promise<{
 	const h = serviceHarness({
 		decoderConfigs: [ambientDsd],
 		patch: s => {
-			s.cpuBudgetCores = BUDGET
+			s.cpuBudgetCores = budget
 		},
 	})
 	await h.service.start()
@@ -140,32 +141,60 @@ describe("identify dsd-fme trials against background recordings (real wiring)", 
 		for (const t of auto) expect(["running", "no-sync"]).toContain(t.outcome)
 	}, 120_000)
 
-	it("past the bound (6 recordings): the auto run still starts; running recordings keep their cores, new ones are still admitted", async () => {
+	it("at the bound (5 recordings) with identify running: a new recording that does not fit is refused, the held five stay", async () => {
+		const r = await run(5)
+		expect(r.newRecordingDuring).toBe(false)
+		expect(r.externalDuring).toBeGreaterThanOrEqual(5 * RECORDING_CORES - 1e-9)
+		expect(r.inUseDuring).toBeLessThanOrEqual(BUDGET + 1e-9)
+	}, 120_000)
+
+	it("past the bound (6 recordings): every dsd-fme trial is skipped-budget, reason cpu-budget, naming the recordings; recordings untouched", async () => {
 		const r = await run(6)
 		const auto = r.trials.filter(t => AUTO.includes(t.protocol))
 		expect(auto).toHaveLength(AUTO.length)
 		for (const t of auto) {
-			expect(t).toMatchObject({ decoder: "dsd-fme", transport: "offset" })
-			expect(["running", "no-sync"]).toContain(t.outcome)
+			expect(t).toMatchObject({
+				decoder: "dsd-fme",
+				outcome: "skipped-budget",
+				reason: "cpu-budget",
+			})
+			const b = t.budget
+			expect(b?.budgetCores).toBe(BUDGET)
+			expect(b?.enginesCores).toBeCloseTo(CPU_COST.engine, 9)
+			expect(b?.probesCores).toBe(0)
+			expect(b?.recordingsCores).toBeGreaterThanOrEqual(
+				6 * RECORDING_CORES - 1e-9,
+			)
+			// The recordings are the largest holder.
+			expect(b?.recordingsCores).toBeGreaterThan(b?.enginesCores ?? 0)
 		}
-		// Identify's probe does not count against a recording: a recording starting now is not cut.
-		expect(r.newRecordingDuring).toBe(true)
+		// No recording was cut.
+		expect(r.externalDuring).toBeGreaterThanOrEqual(r.externalBefore - 1e-9)
 	}, 120_000)
 
-	it("budgets.cpuCoresInUse counts the recordings' reservations", async () => {
-		const r = await run(6)
-		// The six reservations, plus the service's own recorder session on the test signal if one runs.
-		expect(r.externalBefore).toBeGreaterThanOrEqual(6 * RECORDING_CORES - 1e-9)
+	it("no CPU budget for identify's own probe: skipped-budget with reason cpu-budget", async () => {
+		// Engine 0.08 + offset probe 0.5 = 0.58 > 0.4: engines and probes alone leave no room.
+		const tight = 0.4
+		expect(CPU_COST.engine + CPU_COST.offsetProbe).toBeGreaterThan(tight)
+		const { trials } = await run(0, tight)
+		const auto = trials.filter(t => AUTO.includes(t.protocol))
+		expect(auto).toHaveLength(AUTO.length)
+		for (const t of auto)
+			expect(t).toMatchObject({
+				outcome: "skipped-budget",
+				reason: "cpu-budget",
+			})
+	}, 120_000)
+
+	it("budgets.cpuCoresInUse counts the recordings' reservations and the identify probe, within the budget", async () => {
+		const r = await run(5)
+		// The five reservations, plus the service's own recorder session on the test signal if one runs.
+		expect(r.externalBefore).toBeGreaterThanOrEqual(5 * RECORDING_CORES - 1e-9)
 		expect(r.inUseBefore).toBeCloseTo(CPU_COST.engine + r.externalBefore, 9)
 		expect(r.inUseDuring).toBeCloseTo(
 			CPU_COST.engine + r.externalDuring + CPU_COST.offsetProbe,
 			9,
 		)
-		// Over the budget while identify runs (the bounded overshoot), never cut below the held six.
-		expect(r.externalDuring).toBeGreaterThanOrEqual(6 * RECORDING_CORES - 1e-9)
-		expect(r.inUseDuring).toBeGreaterThan(BUDGET)
-		expect(r.inUseDuring).toBeLessThanOrEqual(
-			BUDGET + CPU_COST.offsetProbe + 1e-9,
-		)
+		expect(r.inUseDuring).toBeLessThanOrEqual(BUDGET + 1e-9)
 	}, 120_000)
 })

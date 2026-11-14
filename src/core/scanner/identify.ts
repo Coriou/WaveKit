@@ -39,6 +39,7 @@ import type {
 	ScannerIdentifyResult,
 	ScannerIdentifyState,
 	ScannerIdentifyTrial,
+	ScannerIdentifyTrialBudget,
 	ScannerIdentifyView,
 	ScannerAmbientDecoderType,
 	ScannerProbeDecoderType,
@@ -462,8 +463,8 @@ export function identifyRequestJoins(
 type QueuedDeferral = NonNullable<ReturnType<ProbePool["queuedDeferral"]>>
 /**
  * Why a queued identify run ended `skipped-budget`: `slot-busy`, another job holds the probe slot it
- * needs; `cpu-budget`, engines and probes leave no room for it (recordings and analog trials do not
- * count against identify); `slot-still-freeing`, a probe on its transport was still stopping past
+ * needs; `cpu-budget`, the shared budget (engines, probes, recordings and analog trials) leaves no
+ * room for it; `slot-still-freeing`, a probe on its transport was still stopping past
  * IDENTIFY_SLOT_FREEING_MAX_MS; `unknown`, the pool could not say. Identify runs above the CPU guard
  * (isIdentifyPriority), so a `cpu` deferral is never its reason and maps to `unknown`.
  */
@@ -2600,10 +2601,14 @@ export class IdentifyRunner implements JobDriver {
 					r.queuedUntil - IDENTIFY_QUEUE_WAIT_MS + IDENTIFY_SLOT_FREEING_MAX_MS
 				const freeing = this.slotFreeing(r)
 				if (freeing && !freeingCapped) continue
-				this.logSkipped(r, freeing, now)
+				const { why, budget } = this.logSkipped(r, freeing, now)
 				this.deps.probes.dequeue(r.req)
 				t.active.splice(t.active.indexOf(r), 1)
-				this.setTrials(t, r.runIndex, () => "skipped-budget")
+				this.setTrials(t, r.runIndex, (_protocol, trial) => {
+					if (why !== "unknown") trial.reason = why
+					if (budget) trial.budget = { ...budget }
+					return "skipped-budget"
+				})
 				this.emitTarget(t)
 			}
 		}
@@ -4243,9 +4248,18 @@ export class IdentifyRunner implements JobDriver {
 
 	/**
 	 * A queued run is given up: logs the real reason (identifyQueueSkipWhy) with the pool's core
-	 * estimate, so a `budget` verdict can be told apart from a held slot or the CPU guard.
+	 * estimate, so a `budget` verdict can be told apart from a held slot or the CPU guard. Returns
+	 * that reason, which the skipped trials carry as `reason` unless it is `unknown`, and for
+	 * `cpu-budget` what holds the budget (engines, probes, recordings and analog trials).
 	 */
-	private logSkipped(r: RunState, freeing: boolean, now: number): void {
+	private logSkipped(
+		r: RunState,
+		freeing: boolean,
+		now: number,
+	): {
+		why: IdentifyQueueSkipWhy
+		budget: ScannerIdentifyTrialBudget | null
+	} {
 		let deferral: QueuedDeferral | null = null
 		try {
 			deferral = this.deps.probes.queuedDeferral?.(r.req) ?? null
@@ -4254,11 +4268,12 @@ export class IdentifyRunner implements JobDriver {
 		}
 		const queuedMs =
 			r.queuedUntil === null ? 0 : now - r.queuedUntil + IDENTIFY_QUEUE_WAIT_MS
+		const why = identifyQueueSkipWhy(deferral?.deferral ?? null, freeing)
 		this.log.info(
 			{
 				decoder: r.run.mode.decoderType,
 				protocols: r.run.protocols,
-				why: identifyQueueSkipWhy(deferral?.deferral ?? null, freeing),
+				why,
 				queuedMs,
 				...(deferral
 					? {
@@ -4270,6 +4285,16 @@ export class IdentifyRunner implements JobDriver {
 			},
 			"Identify run skipped: no probe slot",
 		)
+		const budget =
+			why === "cpu-budget" && deferral
+				? {
+						budgetCores: deferral.budgetCores,
+						enginesCores: deferral.enginesCores,
+						probesCores: deferral.probesCores,
+						recordingsCores: deferral.externalCores,
+					}
+				: null
+		return { why, budget }
 	}
 
 	private releaseRuns(runs: readonly RunState[]): void {

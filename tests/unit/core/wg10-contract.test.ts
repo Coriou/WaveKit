@@ -72,6 +72,10 @@ describe("WG10 contract: identify analog evidence and unavailable decoders", () 
 				| "no-live-audio"
 				// an explicit protocol inside the ADS-B window, where only readsb is eligible
 				| "adsb-window"
+				// a skipped-budget run's real reason
+				| "slot-busy"
+				| "cpu-budget"
+				| "slot-still-freeing"
 			>(true),
 		).toBe(true)
 		expect(

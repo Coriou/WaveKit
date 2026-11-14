@@ -3967,12 +3967,11 @@ curl http://localhost:9000/api/scanner
 ```
 
 `budgets.cpuCoresInUse` is the core estimate admission uses: 0.08 per spectrum engine, each
-running probe's cost, and the cores held by analog recordings and analog trials. Identify and
-recordings do not wait on each other: an identify probe is admitted against engines and probes
-only, a recording or analog trial against engines, job probes and other recordings only. So the
-estimate can exceed `cpuBudgetCores` while an identify probe runs, by at most identify's own probe
-cores (0.5 per offset slot, `maxProbes.offset` slots). The bound assumes identify runs on offset
-probes only, as it does today (the channel transport is not wired for identify).
+running probe's cost, and the cores held by analog recordings and analog trials. Identify,
+job probes, recordings and analog trials share this one budget: each is admitted only while
+the estimate plus its own cost stays within `cpuBudgetCores`, so the estimate never exceeds it.
+Identify never stops a recording; a recording that would not fit beside a running identify
+probe is not started.
 
 `folders` (absent from older cores and before the scanner state loaded) counts what the
 start did with recording and evidence folders that no discovery owned: `reattached` folders
@@ -5253,10 +5252,11 @@ which can take up to 10 min and end `no-signal`; and the job's remaining wait co
 At the default 15 s, a repeat joins for the first 1.5 s, so a client retry starts nothing
 and still gets at least 13.5 s of listening; a job that has its signal and is running
 trials joins at any time, unless a gated timeout will cut them first. A later request is a new job with
-its own full wait. If another job holds the probe slot, or the CPU budget (engines and probes;
-recordings and analog trials do not hold identify back) has no room, its runs queue for up to 3 s, then end `skipped-budget`
-(`could-not-test`, `why: "budget"`); the core log names which (`slot-busy`, `cpu-budget`,
-`slot-still-freeing`). Identify runs above the CPU guard. A run for which a probe on its transport
+its own full wait. If another job holds the probe slot, or the shared CPU budget (engines, probes, recordings
+and analog trials) has no room, its runs queue for up to 3 s, then end `skipped-budget`
+(`could-not-test`, `why: "budget"`); the trial's `reason` and the core log name which (`slot-busy`, `cpu-budget`,
+`slot-still-freeing`), and a `cpu-budget` trial carries `budget`:
+`{budgetCores, enginesCores, probesCores, recordingsCores}`. Identify runs above the CPU guard. A run for which a probe on its transport
 is still stopping waits up to 8 s from its request instead, since a decoder can take 5 s to stop. A running job with no
 `protocols` contains a named one only once its plan holds a runnable trial for it. A
 finished job or a finished target never joins, and `target.all` never does. An epoch change preserves an
@@ -8426,9 +8426,14 @@ One stream per identify target (`all: true` sends one per surfaced emission, wit
 most 1/s per (job, target); the latest state is always delivered.
 
 - `state`: `waiting-for-signal` → `trying` → `identified` | `candidate` | `unidentified`.
-- `trials[]`: `{protocol, decoder, mode, transport, outcome, reason?}`. Outcomes:
+- `trials[]`: `{protocol, decoder, mode, transport, outcome, reason?, budget?}`. Outcomes:
   `pending`, `running`, `decoded`, `no-sync`, `crc-errors`, `timeout`,
-  `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
+  `skipped-budget` (with `reason`, when the core knows it: `slot-busy`, another
+  identify or probe held the probe slot; `cpu-budget`, no CPU budget left;
+  `slot-still-freeing`, a probe on its transport was still stopping; a
+  `cpu-budget` trial also carries `budget`, what held the shared budget:
+  `{budgetCores, enginesCores, probesCores, recordingsCores}`; the verdict
+  stays `could-not-test` / `budget`), `unsupported` (with `reason`: `no-decoder`,
   `needs-channelizer`, `unsupported-format`, `no-ambient-decoder`,
   `decoder-unavailable`, `no-live-audio`, `adsb-window`: a protocol the request
   names in `protocols` inside the ADS-B window, where only readsb is eligible;

@@ -125,6 +125,17 @@ describe("identifyTargetVerdict", () => {
 		).toEqual({ code: "could-not-test", why })
 	})
 
+	it.each(["slot-busy", "cpu-budget", "slot-still-freeing"] as const)(
+		"a skipped-budget trial with reason %s stays budget",
+		reason => {
+			expect(
+				identifyTargetVerdict(
+					input({ trials: [trialOf("skipped-budget", { reason })] }),
+				),
+			).toEqual({ code: "could-not-test", why: "budget" })
+		},
+	)
+
 	it("a confirmed identity is decoded; a candidate with the same identity never is", () => {
 		const result = resultOf({
 			protocol: "dmr",
