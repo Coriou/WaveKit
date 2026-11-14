@@ -18,6 +18,7 @@
 import { familyOf } from "../classify/classifier.js"
 import type { ScannerRecorderDecision } from "@wavekit/api-types"
 import type {
+	ProtocolFamily,
 	ScannerClass,
 	ScannerConfidence,
 	ScannerProtocol,
@@ -176,16 +177,18 @@ export interface VoicePrior {
 
 /**
  * How strong a prior is (docs/SCANNER.md, "Known digital or paging channels"):
- * - `tone-required`: STRONG. A decode (confidence `decoded`) of a pager or data protocol
- *   (voice-veto.ts notAnalogVoiceProtocol, any family but digital voice) on the owner or a
- *   co-channel discovery. A new recording starts as a shadow that writes nothing unless its own
+ * - `tone-required`: STRONG. A decode (confidence `decoded`) of a protocol made only on a
+ *   channel of its own (DEDICATED_CHANNEL_FAMILIES: a pager, or APRS, AIS, ACARS, VDL2, ADS-B)
+ *   on the owner or a co-channel discovery. A new recording starts as a shadow that writes nothing unless its own
  *   audio carries speech over a CTCSS tone (the recorder's classByTone); it is never a
  *   remembered refusal.
  * - `suspect`: WEAK. A digital voice decode (DMR, NXDN, YSF, dPMR, ...) on the owner or a
  *   co-channel discovery: the store keeps analog and digital overs of one channel in one
  *   discovery (a lone merge) as readily as in two, and PMR446 and DMR446, mixed-mode repeaters
  *   and shared business channels carry both on one frequency, so such a decode says nothing
- *   about the next over. Also `backedClass` (DigitalClassLedger.strong: the same evidence as such
+ *   about the next over. So is an `ism` (rtl_433 sensor) or LoRa decode, owner's or co-channel:
+ *   untoned LPD voice shares the 433 and 868 MHz channels with sensors and Meshtastic. Also
+ *   `backedClass` (DigitalClassLedger.strong: the same evidence as such
  *   a decode), a digital class read from the spectrum alone (the stored class), a
  *   `digital-unknown` candidate, a dsd-fme sync hint (a digital voice label below `decoded`), or
  *   a non-voice protocol below `decoded`. Never refuses: a written file is held for
@@ -198,9 +201,30 @@ export type PriorStrength = "tone-required" | "suspect" | "none"
 const decodedNotVoice = (l: VoicePrior["labels"][number]): boolean =>
 	l.confidence === "decoded" && notAnalogVoiceProtocol(l.protocol)
 
-/** Strong (PriorStrength): a pager or data decode, of the owner or a co-channel discovery. */
+/**
+ * The families whose decodes are made only on channels of their own (PriorStrength's strong): a
+ * pager (POCSAG, FLEX) and the packet protocols (APRS, AIS, ACARS, VDL2, ADS-B) but those in
+ * SHARED_CHANNEL_PROTOCOLS. Not here: digital voice and `ism` (rtl_433 sensors), which share
+ * channels with untoned analog voice (433 MHz LPD voice beside its sensors).
+ */
+const DEDICATED_CHANNEL_FAMILIES: ReadonlySet<ProtocolFamily> = new Set([
+	"pager",
+	"packet",
+])
+/**
+ * Packet protocols decoded on channels analog voice shares: LoRa (Meshtastic) on the 433 and
+ * 868 MHz LPD and SRD channels. Suspect even as the owner's own label: the store files a voice
+ * and a sensor or mesh burst of one channel in one discovery as readily as in two.
+ */
+const SHARED_CHANNEL_PROTOCOLS: ReadonlySet<ScannerProtocol> = new Set(["lora"])
+
+/** Strong (PriorStrength): a decode of a dedicated-channel protocol, of the owner or a co-channel discovery. */
 function strongLabel(l: VoicePrior["labels"][number]): boolean {
-	return decodedNotVoice(l) && familyOf(l.protocol) !== "digital-voice"
+	return (
+		decodedNotVoice(l) &&
+		DEDICATED_CHANNEL_FAMILIES.has(familyOf(l.protocol)) &&
+		!SHARED_CHANNEL_PROTOCOLS.has(l.protocol)
+	)
 }
 
 function weakDigital(prior: VoicePrior): boolean {
@@ -275,7 +299,8 @@ export type FinishVerdict = "finish" | "hold" | "discarded:not-analog"
 
 /**
  * A written file's fate at its finish (`final` false) or at the end of its grace (`final` true),
- * in this order: a file whose own audio carried a CTCSS tone (`ownTone`) is always kept; one whose
+ * in this order: a file whose own audio carried a CTCSS tone, or whose session its tone classed
+ * (`ownTone`: a roll-over file of a toned over), is always kept; one whose
  * own signal a decode proves not analog voice (`decodedOwn`, fileDecodedOwn) is discarded; under a
  * `tone-required` prior a file no snapshot classed analog-fm (`snapshotClassed` false: classed by
  * its own audio only) is discarded and one a snapshot classed is held, then kept; under a

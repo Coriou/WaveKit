@@ -23,6 +23,9 @@
  * - pager-stored-fsk2-wide: the same, the store's class of the channel fsk2-wide (the spectrum's
  *   majority vote): the first burst is held, and its decode, citing it inside the grace, discards
  *   it. Expected: no burst kept.
+ * - lpd-ism: a 433 MHz LPD channel shared with an rtl_433 sensor: a sensor burst (ingested only,
+ *   ook-burst) decoded `ism` before each of three analog overs without CTCSS. Expected: every
+ *   analog over kept (an ISM decode is only suspect).
  *
  * Nothing touches the network or a device.
  */
@@ -173,7 +176,7 @@ async function quiet(r: Rig, seconds: number): Promise<void> {
 function decode(
 	r: Rig,
 	observationId: string,
-	protocol: "dmr" | "pocsag",
+	protocol: "dmr" | "pocsag" | "ism",
 ): void {
 	const at = r.h.now()
 	const ev = evidence(
@@ -181,7 +184,9 @@ function decode(
 		at,
 		protocol === "dmr"
 			? { identity: dmrCc(1) }
-			: { identity: { kind: "pocsag-capcode", value: "1234" } },
+			: protocol === "ism"
+				? { identity: { kind: "ism-model", value: "sensor" } }
+				: { identity: { kind: "pocsag-capcode", value: "1234" } },
 	)
 	const id = r.store.discoveryIdOf(observationId)
 	if (id === undefined) return
@@ -191,9 +196,10 @@ function decode(
 
 function report(r: Rig, scene: string, extra: Record<string, unknown>) {
 	const ids = new Set(
-		["v0", "v1", "v2", "v3", "d0", "d1", "d2", "p0", "p1", "p2", "proof"].map(
-			o => r.store.discoveryIdOf(o) ?? null,
-		),
+		[
+			...["v0", "v1", "v2", "v3", "d0", "d1", "d2", "p0", "p1", "p2"],
+			...["s0", "s1", "s2", "proof"],
+		].map(o => r.store.discoveryIdOf(o) ?? null),
 	)
 	ids.delete(null)
 	return {
@@ -289,10 +295,35 @@ async function pager(stored: ScannerClass): Promise<Record<string, unknown>> {
 	})
 }
 
+async function lpdIsm(): Promise<Record<string, unknown>> {
+	const r = rig()
+	await quiet(r, 1)
+	const voices = [5, 8, 4]
+	for (let k = 0; k < voices.length; k++) {
+		// The sensor's burst: decoded by rtl_433, never a recorder track.
+		ingest(r, `s${k}`, "ook-burst", 0.2)
+		decode(r, `s${k}`, "ism")
+		await quiet(r, 2)
+		await transmission(r, `v${k}`, voices[k]!, "voice")
+		await quiet(r, 8)
+	}
+	await quiet(r, 30)
+	await r.h.rec.stop()
+	const kept = r.h.ops.filter(
+		o => o.outcome === "finalized" && o.input.observationId.startsWith("v"),
+	).length
+	return report(r, "lpd-ism", {
+		analogOvers: voices.length,
+		analogKept: kept,
+		everyAnalogOverKept: kept === voices.length,
+	})
+}
+
 for (const scene of [
 	() => mixed(true),
 	() => mixed(false),
 	() => pager("analog-fm"),
 	() => pager("fsk2-wide"),
+	lpdIsm,
 ])
 	process.stdout.write(`${JSON.stringify(await scene())}\n`)

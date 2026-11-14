@@ -13,7 +13,10 @@ import {
 	LATE_VERDICT_GRACE_MS,
 	type VoicePrior,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
-import type { WidebandTrackInput } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
+import {
+	WIDEBAND_MAX_FILE_MS,
+	type WidebandTrackInput,
+} from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import type { DecodedLabel } from "../../../../src/core/scanner/channel/voice-veto.js"
 import type {
 	ScannerClass,
@@ -88,11 +91,14 @@ async function over(
 	id: string,
 	seconds: number,
 	extra: Partial<WidebandTrackInput> = {},
+	/** Runs before each 25 ms chunk `i` of the over is written. */
+	each?: (i: number) => void,
 ): Promise<void> {
 	const chunk = h.fs / 40
 	const onset = h.engine.liveEdge()
 	const end = onset + seconds * h.fs
 	for (let i = 0; i < Math.round((seconds * h.fs) / chunk); i++) {
+		each?.(i)
 		h.engine.write(h.src.next(chunk, true))
 		const edge = h.engine.liveEdge()
 		if (edge - onset >= 0.1 * h.fs)
@@ -103,7 +109,7 @@ async function over(
 	}
 	await h.feed(0.6, false)
 	h.rec.closed(id, snapshot(id, onset, end, LOW), null, {
-		analogFm: true,
+		analogFm: extra.analogFm ?? true,
 		discoveryId: "d_1",
 	})
 	await h.feed(3.5, false)
@@ -135,6 +141,24 @@ describe("admission: a strong prior admits only a shadow its own audio must clas
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 		expect(codes(h)).toEqual(["shadow", "voiced", "classed", "finalized"])
+	}, 120_000)
+
+	it("m2: a tone-classed over on a POCSAG-decoded channel rolls over at WIDEBAND_MAX_FILE_MS; its next file, with no tone heard in it, is kept (the session's tone class)", async () => {
+		const h = low(() => pocsagDecoded, 88.5, { syllables: true })
+		await h.feed(1, false)
+		// The tone stops 0.5 s past the roll-over (the first file ends 0.3 s pre-roll earlier).
+		const drop = Math.round(((WIDEBAND_MAX_FILE_MS + 500) / 1000) * 40)
+		// A shadow no snapshot classes analog-fm (weak NFM read as a narrow digital class).
+		const shadow = { analogFm: false, shadowAllowed: true }
+		await over(h, "o", WIDEBAND_MAX_FILE_MS / 1000 + 8, shadow, i => {
+			if (i === drop) h.src.setCtcss(null)
+		})
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops.map(o => [o.cut, o.outcome])).toEqual([
+			["duration-limit", "finalized"],
+			["completed", "finalized"],
+		])
 	}, 120_000)
 
 	it("FROZEN: a DMR decode of the discovery itself (a lone merge of analog and DMR overs) never bars a voice with no tone: held, then kept", async () => {

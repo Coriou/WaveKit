@@ -802,6 +802,8 @@ interface FileState {
 	toneClass: ToneClassEvidence | null
 	/** The tone that classed this file's audio (ToneClassEvidence.result at its finish), or null. */
 	classTone: number | null
+	/** A tone-only session's roll-over file after one its tone classed: it carries that class. */
+	toneCarried: boolean
 	/** The start the segmenter planned (onset − preRoll, clamped): the head-cut reference. */
 	readonly planned: number
 	startSample: number
@@ -1255,8 +1257,9 @@ export class WidebandAnalogRecorder {
 		{ visit: string; unclassed: number }
 	>()
 	/**
-	 * Tone-only sessions that yielded their slot (yieldToneOnly) while a file of theirs is still
-	 * being finished; each leaves when its last store operation settles (at most one per slot).
+	 * Sessions whose slot is freeing while a file of theirs is still being finished: a yielded
+	 * tone-only one (yieldToneOnly; leaves when its last store operation settles) or one whose
+	 * held file was released (release; leaves when that file settles).
 	 */
 	private readonly yielding = new Set<Session>()
 	/**
@@ -2367,7 +2370,7 @@ export class WidebandAnalogRecorder {
 		const toneOnly =
 			admissionVerdict(...this.priorOf(input.discoveryId)) !== null
 		const analog = input.analogFm && !toneOnly
-		// A voice needs a slot a held file keeps: that file's grace ends now (finishOrHold).
+		// A voice needs a slot a held file keeps: that file's grace ends now (release).
 		if (analog && this.activeOn(input.sourceId) >= cap)
 			for (const [f, h] of [...this.held])
 				if (h.s.sourceId === input.sourceId) this.release(f)
@@ -2466,7 +2469,7 @@ export class WidebandAnalogRecorder {
 		cap: number,
 		candidate: { observationId: string; until: number },
 	): void {
-		// A yielded tone-only session's file is still finishing: its slot frees when it settles.
+		// A yielding session's file is still finishing: its slot frees when it settles.
 		for (const y of this.yielding) if (y.sourceId === sourceId) return
 		let spent: Session | undefined
 		let digital: Session | undefined
@@ -2762,6 +2765,7 @@ export class WidebandAnalogRecorder {
 			toneHz: null,
 			toneClass: new ToneClassEvidence(),
 			classTone: null,
+			toneCarried: false,
 			planned: startSample,
 			startSample,
 			endSample: null,
@@ -2869,7 +2873,7 @@ export class WidebandAnalogRecorder {
 				// One at a time: the next waiting file begins when this session holds no slot.
 				while (s.ops === 0 && s.waiting.length > 0)
 					this.beginOp(s, s.waiting.shift()!)
-				if (s.ops === 0) this.yielding.delete(s)
+				if (s.ops === 0 || !s.done) this.yielding.delete(s)
 				this.publishTones(s)
 			})
 		this.settling.add(settled)
@@ -3809,9 +3813,9 @@ export class WidebandAnalogRecorder {
 		file.toneHz = file.ctcss?.result() ?? null
 		file.classTone = file.toneClass?.result() ?? null
 		file.toneClass = null
-		if (s.toneOnly && file.classTone === null && !file.failed) {
+		if (s.toneOnly && file.classTone === null && !file.toneCarried) {
 			// Classed by its audio only, and the whole file no longer holds the evidence (its
-			// prefix did): discarded, a file being written is cancelled (completeFinish).
+			// prefix did; a roll-over file carries it): discarded, one being written cancelled.
 			this.endFile(s, file, "discarded:unclassed")
 			file.failed = true
 		}
@@ -3822,6 +3826,8 @@ export class WidebandAnalogRecorder {
 		if (next !== null && !this.stopped) {
 			this.openFile(s, next)
 			const cont = s.file as FileState | null
+			if (cont && file.cut === "duration-limit" && s.toneOnly && !file.failed)
+				cont.toneCarried = true
 			if (cont && next >= endedAt && next <= s.next) {
 				// The carried frames are samples [endedAt, s.next): keep those from `next` on (not
 				// for the CTCSS bank: their tone twin is gone).
@@ -4100,7 +4106,7 @@ export class WidebandAnalogRecorder {
 			? finishVerdict({
 					prior,
 					backedClass,
-					ownTone: file.toneHz !== null,
+					ownTone: file.toneHz !== null || file.toneCarried,
 					snapshotClassed: s.classed && !s.toneOnly,
 					decodedOwn,
 					final,
@@ -4123,12 +4129,16 @@ export class WidebandAnalogRecorder {
 		}
 	}
 
-	/** Ends a provisional file's grace: its final verdict (finishOrHold). */
+	/**
+	 * Ends a provisional file's grace: its final verdict (finishOrHold). Its slot frees when that
+	 * settles; until then nothing is evicted on its source (yielding) and a voice waits a snapshot.
+	 */
 	private release(file: FileState): void {
 		const h = this.held.get(file)
 		if (h === undefined) return
 		this.held.delete(file)
 		h.cancel()
+		if (h.s.ops > 0) this.yielding.add(h.s)
 		this.finishOrHold(h.s, file, true)
 	}
 

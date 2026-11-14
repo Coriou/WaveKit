@@ -118,6 +118,76 @@ describe("recording-verdict table", () => {
 			byToneFinal: "discarded:not-analog",
 		},
 		{
+			name: "co-channel decoded ISM (an rtl_433 sensor beside LPD voice): suspect only, an untoned voice is kept",
+			prior: prior([decoded("ism", false)]),
+			reading: "suspect",
+			admission: null,
+			finish: "hold",
+			final: "finish",
+			byTone: "hold",
+			byToneFinal: "finish",
+		},
+		{
+			name: "owner decoded ISM (a sensor and a voice filed in one discovery): suspect only, kept",
+			prior: prior([decoded("ism")]),
+			reading: "suspect",
+			admission: null,
+			finish: "hold",
+			final: "finish",
+			byTone: "hold",
+			byToneFinal: "finish",
+		},
+		{
+			name: "co-channel decoded LoRa (Meshtastic beside LPD voice): suspect only, kept",
+			prior: prior([decoded("lora", false)]),
+			reading: "suspect",
+			admission: null,
+			finish: "hold",
+			final: "finish",
+			byTone: "hold",
+			byToneFinal: "finish",
+		},
+		{
+			name: "owner decoded LoRa: suspect only, kept",
+			prior: prior([decoded("lora")]),
+			reading: "suspect",
+			admission: null,
+			finish: "hold",
+			final: "finish",
+			byTone: "hold",
+			byToneFinal: "finish",
+		},
+		{
+			name: "co-channel decoded FLEX (pager): tone required",
+			prior: prior([decoded("flex", false)]),
+			reading: "tone-required",
+			admission: "tone-required",
+			finish: "hold",
+			final: "finish",
+			byTone: "discarded:not-analog",
+			byToneFinal: "discarded:not-analog",
+		},
+		{
+			name: "owner decoded APRS (data on its own channel): tone required",
+			prior: prior([decoded("aprs")]),
+			reading: "tone-required",
+			admission: "tone-required",
+			finish: "hold",
+			final: "finish",
+			byTone: "discarded:not-analog",
+			byToneFinal: "discarded:not-analog",
+		},
+		{
+			name: "a co-channel ISM decode beside an owner POCSAG decode: the pager decode wins, tone required",
+			prior: prior([decoded("ism", false), decoded("pocsag")]),
+			reading: "tone-required",
+			admission: "tone-required",
+			finish: "hold",
+			final: "finish",
+			byTone: "discarded:not-analog",
+			byToneFinal: "discarded:not-analog",
+		},
+		{
 			name: "owner decoded DMR (a lone discovery holding analog and DMR overs): suspect only, held then kept",
 			prior: prior([decoded("dmr")]),
 			reading: "suspect",
@@ -408,7 +478,7 @@ describe("recording-verdict table", () => {
 
 describe("recording-verdict property", () => {
 	// Feature: analog recorder verdict, Property 1: weak evidence never refuses or discards
-	it("a prior with only weak evidence (no decoded pager or data label; digital voice decodes and backed classes included) never refuses or discards", () => {
+	it("a prior with only weak evidence (no decoded pager or dedicated-channel data label; digital voice, ISM and LoRa decodes and backed classes included) never refuses or discards", () => {
 		const classes: ScannerClass[] = [
 			"fsk4-12k5",
 			"fsk4-6k25",
@@ -460,10 +530,14 @@ describe("recording-verdict property", () => {
 				fc.boolean(),
 			)
 			.map(([p, owner]) => decoded(p, owner))
+		// So is an ISM or LoRa decode: those share channels with untoned analog voice.
+		const sharedChannel = fc
+			.tuple(fc.constantFrom<ScannerProtocol>("ism", "lora"), fc.boolean())
+			.map(([p, owner]) => decoded(p, owner))
 		const analogDecoded = fc.constant<Label>(decoded("analog-fm"))
 		fc.assert(
 			fc.property(
-				fc.array(fc.oneof(label, analogDecoded, digitalVoice), {
+				fc.array(fc.oneof(label, analogDecoded, digitalVoice, sharedChannel), {
 					maxLength: 9,
 				}),
 				fc.constantFrom(...classes),
