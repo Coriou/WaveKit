@@ -53,10 +53,10 @@ describe("ApiClient request timeout", () => {
 		})
 	})
 
-	it("applies the client default to GETs only, never to writes", async () => {
+	it("applies a client default to GETs only, never to writes; none unless set", async () => {
 		vi.useFakeTimers()
 		const { fetch } = hanging()
-		const api = new ApiClient({ fetch })
+		const api = new ApiClient({ fetch, getTimeoutMs: REQUEST_TIMEOUT_MS })
 		const read = api.get("/api/system").catch((error: unknown) => error)
 		let writeDone = false
 		void api
@@ -66,6 +66,14 @@ describe("ApiClient request timeout", () => {
 		await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS)
 		expect(await read).toMatchObject({ code: REQUEST_TIMEOUT_CODE })
 		expect(writeDone).toBe(false)
+		const plain = new ApiClient({ fetch })
+		let plainDone = false
+		void plain
+			.get("/api/system")
+			.catch(() => undefined)
+			.finally(() => (plainDone = true))
+		await vi.advanceTimersByTimeAsync(10 * REQUEST_TIMEOUT_MS)
+		expect(plainDone).toBe(false)
 	})
 
 	it("a caller's abort stays an AbortError, and 0 turns the timer off", async () => {

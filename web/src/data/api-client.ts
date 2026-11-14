@@ -52,17 +52,17 @@ export interface RequestOptions {
 	onHeaders?: (headers: Headers) => void
 	/**
 	 * Gives up after this many ms (headers and body) with an ApiError `REQUEST_TIMEOUT` (status 0).
-	 * Default: the client's `getTimeoutMs` for a JSON GET, none for other methods and for blob() (a write's outcome is
+	 * Default: the client's `getTimeoutMs` (none unless set) for a JSON GET, none for other methods and for blob() (a write's outcome is
 	 * unknown once abandoned). 0 turns it off. Each 429 retry gets its own budget.
 	 */
 	timeoutMs?: number
 }
 
 /**
- * A GET still unanswered after this long is abandoned (REQUEST_TIMEOUT): long enough for the
- * slowest read the app makes on a loaded host (a cold recordings catalogue answers within 750 ms,
- * an Activity facets read within its 2 s deadline), short enough that a wedged request does not
- * hold a list's "Loading" forever. Feeds pass their own, shorter budget (FEED_STALL_MS).
+ * A sensible GET timeout for a client that wants one (`getTimeoutMs`): long enough for the slowest
+ * read the app makes on a loaded host (a cold recordings catalogue answers within 750 ms, an Activity
+ * facets read within its 2 s deadline). The app's client sets none by default, so no caller changes
+ * behaviour unasked; the list feeds pass their own budget per read (FEED_STALL_MS).
  */
 export const REQUEST_TIMEOUT_MS = 30_000
 /** The ApiError code of an abandoned request. */
@@ -212,7 +212,7 @@ export interface ApiClientOptions {
 	now?: () => number
 	/** Jitter source in [0, 1). */
 	random?: () => number
-	/** Default timeout of a GET (ms); REQUEST_TIMEOUT_MS by default, 0 for none. */
+	/** Default timeout of a JSON GET (ms); 0 (none) by default. */
 	getTimeoutMs?: number
 }
 
@@ -281,7 +281,7 @@ export class ApiClient {
 		this.sleepImpl = options.sleep ?? sleep
 		this.now = options.now ?? (() => Date.now())
 		this.random = options.random ?? (() => Math.random())
-		this.getTimeoutMs = options.getTimeoutMs ?? REQUEST_TIMEOUT_MS
+		this.getTimeoutMs = options.getTimeoutMs ?? 0
 	}
 
 	/** The CSRF token of the current browser session (protected mode); null clears it. */

@@ -83,7 +83,7 @@ when not, 2 when it could not run. It needs a local Chrome or Chromium
   names another one); a path inside the repository is refused.
 - `--do=` runs actions between two looks: `pause`, `resume`, `retune:<Hz>`, `rate:<Hz>`, `hide`,
   `show` (the page is told it left or returned to view), `reload`, `wait:<seconds>`.
-- A panel route (`--route=#/recordings`, `#/activity`, `#/scanner`) adds a `panel` section: what
+- A panel route (`--route=#/recordings`, or the Activity or Scanner route) adds a `panel` section: what
   the drawer shows (`rows`, `loading`, `busy`, `error`, `empty`), the rows mounted, the list's
   size (`aria-setsize`), the header count, the notice and the footer.
 - `--seed-recordings=<N>` (fake target, 1 to 50 000) starts the core with N synthetic scanner
