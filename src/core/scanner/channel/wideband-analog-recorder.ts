@@ -4046,9 +4046,7 @@ export class WidebandAnalogRecorder {
 			// Admitted: the readiness handler resumes the finish (or a failure cancels).
 			return
 		}
-		// Not ready yet: the readiness handler resumes the finish (or a failure cancels).
-		if (!file.ready) return
-		if (file.writing) return
+		if (!file.ready || file.writing) return // the readiness handler resumes it, as above
 		if (file.queue.length > 0) {
 			this.flush(s, file, Number.POSITIVE_INFINITY)
 			return
@@ -4092,6 +4090,7 @@ export class WidebandAnalogRecorder {
 					joinedVoice: joinedVoiceOverlaps(s, file),
 					notSpeech: speech !== null && clearlyNotSpeech(speech),
 					clearNoise: speech !== null && clearlyNoise(speech),
+					ownObservationId: s.owner,
 					final: final || room === 0,
 					now,
 				})

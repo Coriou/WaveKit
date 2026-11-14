@@ -353,8 +353,10 @@ describe("WidebandAnalogRecorder review regressions", () => {
 			// file) but inside the 1 s holdback, so it follows in the same session.
 			if (i > 0) await h.feed(1.9, false)
 			await transmission(h, id, 1, {}, LOW)
-			// i files wait behind the first: the session lives up to MAX_WAITING_FILES.
-			expect(h.engine.tapCount).toBe(i <= MAX_WAITING_FILES ? 1 : 0)
+			// i files wait behind the first: the session lives up to MAX_WAITING_FILES. A 1 s over
+			// qualifies only at its end (VoiceActivityGate.conclude: 2 of its 4 windows), so the
+			// one past them is judged at its end; the ops below show it never begins.
+			if (i <= MAX_WAITING_FILES) expect(h.engine.tapCount).toBe(1)
 		}
 		await h.feed(1.9, false)
 		// Only the first file began; the fourth (a third waiting file) dropped the session.

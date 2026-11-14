@@ -133,6 +133,61 @@ describe("DiscoveryStore.voicePrior", () => {
 		).toBeNull()
 	})
 
+	it("a page of another capcode placed on the owner refreshes its 24 h window, though it lands on a co-channel twin and the owner's proof stays 30 h old", () => {
+		const store = newStore()
+		const id = store.ingest(obs("pager", T0)).discoveryId ?? ""
+		const old = evidence("pocsag", T0 + 500, {
+			identity: { kind: "pocsag-capcode", value: "1234" },
+		})
+		expect(store.appendObservationEvidence("pager", old)).toBe(true)
+		store.applyEvidence(id, old)
+		const later = T0 + 30 * 60 * 60_000
+		expect(store.ingest(obs("pager2", later)).discoveryId).toBe(id)
+		const page = evidence("pocsag", later + 500, {
+			identity: { kind: "pocsag-capcode", value: "9999" },
+		})
+		store.appendObservationEvidence("pager2", page)
+		expect(store.applyEvidenceResult(id, page).accepted).toBe(true)
+		const prior = store.voicePrior(id) ?? null
+		// The owner's published proof is the old capcode's page, 30 h old.
+		expect(prior?.labels.find(l => l.owner)?.at).toBe(T0 + 500)
+		expect(prior?.ownerDecode).toEqual({ protocol: "pocsag", at: later + 500 })
+		// Past a co-channel partner's 30 min and within 24 h of the new page: strong.
+		const now = later + 500 + 2 * 60 * 60_000
+		expect(readPrior(prior, false, now)).toBe("tone-required")
+		expect(
+			readPrior(prior, false, later + 500 + OWNER_DEDICATED_PRIOR_TTL_MS + 1),
+		).toBe("suspect")
+		// FROZEN: analog voice heard still ends it (priorReading reads analogVoice after the source).
+		expect(readPrior({ ...prior!, analogVoice: () => true }, false, now)).toBe(
+			"none",
+		)
+	})
+
+	it("ownerDecode ignores a decode the store refused and a digital voice decode", () => {
+		const store = newStore()
+		const id = decodedDmr(store)
+		expect(store.voicePrior(id)?.ownerDecode).toEqual({
+			protocol: "dmr",
+			at: T0 + 500,
+		})
+		// A DMR decode stays suspect: ownerDecode reads only like a dedicated-channel label.
+		expect(readPrior(store.voicePrior(id) ?? null, false, T0 + 600)).toBe(
+			"suspect",
+		)
+		const other = store.ingest(obs("o2", T0)).discoveryId ?? ""
+		const dirty = {
+			...evidence("pocsag", T0 + 700, {
+				identity: { kind: "pocsag-capcode", value: "1" },
+			}),
+			crcClean: false,
+		}
+		store.applyEvidence(other, dirty)
+		expect(store.voicePrior(other)?.ownerDecode ?? null).toEqual(
+			store.voicePrior(id)?.ownerDecode ?? null,
+		)
+	})
+
 	it("the same channel with analog voice heard (a recorder tone) keeps recording: frozen voice", () => {
 		const store = newStore()
 		const id = decodedDmr(store)
@@ -467,5 +522,68 @@ describe("DiscoveryStore.voicePrior", () => {
 
 	it("a folder nobody owns reads undefined", () => {
 		expect(newStore().voicePrior("d_nobody")).toBeUndefined()
+	})
+})
+
+describe("a lone sync-only DMR row is evidence, never the published label", () => {
+	// Feature: discovery-store, sync-only dsd-fme rows (docs/SCANNER.md, "Identification from running decoders").
+	const MIN = 60_000
+	const syncRow = (
+		store: DiscoveryStore,
+		obsId: string,
+		at: number,
+		extra: { contentVerified?: boolean; unverifiedCc?: number } = {},
+	): string => {
+		const id = store.ingest(obs(obsId, at)).discoveryId ?? ""
+		const base = evidence("dmr", at + 500, {
+			contentVerified: extra.contentVerified ?? false,
+		})
+		const ev = {
+			...base,
+			...(extra.contentVerified === true
+				? { metadata: { talkgroups: ["9"], sources: ["1"] } }
+				: {}),
+			...(extra.unverifiedCc !== undefined
+				? { unverifiedCc: extra.unverifiedCc }
+				: {}),
+		}
+		store.appendObservationEvidence(obsId, ev)
+		store.applyEvidence(id, ev)
+		return store.discoveryIdOf(obsId) ?? id
+	}
+
+	it("one row with no TG/SRC and no colour code: published unknown, no proof; the recorder still reads the hint", () => {
+		const store = newStore()
+		const id = syncRow(store, "s1", T0)
+		expect(store.get(id)?.protocol).toBe("unknown")
+		expect(store.get(id)?.proof).toBeUndefined()
+		// The recorder's reads keep the hint (owner label and digitalProofs).
+		expect(store.ownerLabel(id)?.protocol).toBe("dmr")
+		const prior = store.voicePrior(id) ?? null
+		expect(prior?.labels.find(l => l.owner)?.protocol).toBe("dmr")
+		expect(prior?.digitalProofs?.().map(p => p.observationId)).toEqual(["s1"])
+	})
+
+	it("the same row repeated on a second over: published dmr (activity) with its proof", () => {
+		const store = newStore()
+		const id = syncRow(store, "s1", T0)
+		expect(syncRow(store, "s2", T0 + MIN)).toBe(id)
+		expect(store.get(id)?.protocol).toBe("dmr")
+		expect(store.get(id)?.confidence).toBe("activity")
+		expect(store.get(id)?.proof?.kind).toBe("digital-undecoded")
+	})
+
+	it("one row with a colour code: published dmr", () => {
+		const store = newStore()
+		const id = syncRow(store, "s1", T0, { unverifiedCc: 7 })
+		expect(store.get(id)?.protocol).toBe("dmr")
+		expect(store.get(id)?.proof?.unverifiedCc).toBe(7)
+	})
+
+	it("one row with verified TG/SRC: published dmr", () => {
+		const store = newStore()
+		const id = syncRow(store, "s1", T0, { contentVerified: true })
+		expect(store.get(id)?.protocol).toBe("dmr")
+		expect(store.get(id)?.proof?.tgSrcVerified).toBe(true)
 	})
 })

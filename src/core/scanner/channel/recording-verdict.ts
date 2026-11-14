@@ -208,6 +208,19 @@ export interface VoicePrior {
 	digitalProofs?(): readonly DigitalProof[]
 	digitalSeenAt?(): number | null
 	tdmaSeenAt?(): number | null
+	readonly ownerDecode?: OwnerDecode | null
+}
+
+/**
+ * VoicePrior.ownerDecode: the newest decode with an identity the decode path placed on the owner
+ * (DiscoveryStore.applyEvidenceResult accepted it for an observation of the owner), whatever
+ * record it then landed on: a page of another capcode lands on a co-channel twin, so the owner's
+ * published label can show a proof a day old while its channel pages every hour. `at` its wall
+ * time (ms). Read like an owner label decoded as `protocol` (strongLabel).
+ */
+export interface OwnerDecode {
+	readonly protocol: ScannerProtocol
+	readonly at: number
 }
 
 /**
@@ -334,6 +347,19 @@ function strongLabel(l: VoicePrior["labels"][number], now: number): boolean {
 		Number.isFinite(l.at) &&
 		Math.abs(now - l.at) <=
 			(l.owner ? OWNER_DEDICATED_PRIOR_TTL_MS : STRONG_PRIOR_TTL_MS)
+	)
+}
+
+/** A fresh dedicated-channel decode the decode path placed on the owner (VoicePrior.ownerDecode). */
+function ownerDecoded(prior: VoicePrior, now: number): boolean {
+	const d = prior.ownerDecode
+	return (
+		d !== undefined &&
+		d !== null &&
+		strongLabel(
+			{ protocol: d.protocol, confidence: "decoded", owner: true, at: d.at },
+			now,
+		)
 	)
 }
 
@@ -644,7 +670,8 @@ export function priorReading(
 ): { readonly strength: PriorStrength; readonly source: StrongSource | null } {
 	let source: StrongSource | null = null
 	if (prior !== null) {
-		if (prior.labels.some(l => strongLabel(l, now))) source = "dedicated"
+		if (prior.labels.some(l => strongLabel(l, now)) || ownerDecoded(prior, now))
+			source = "dedicated"
 		else if (tdmaChannel(prior, now)) source = "tdma"
 		else source = digitalChannel(prior, now)
 	}
@@ -783,6 +810,7 @@ export function finishVerdict(input: {
 	readonly joinedVoice: boolean
 	readonly notSpeech: boolean
 	readonly clearNoise?: boolean
+	readonly ownObservationId?: string | null
 	readonly final: boolean
 	readonly now: number
 }): FinishVerdict {
@@ -801,7 +829,8 @@ export function finishVerdict(input: {
 		input.notSpeech &&
 		!input.joinedVoice &&
 		(input.clearNoise === true ||
-			contentChecked(source, input.prior, input.backedClass, input.now))
+			contentChecked(source, input.prior, input.backedClass, input.now) ||
+			ownDmrHint(input.prior, input.ownObservationId ?? null))
 	)
 		return "discarded:not-speech"
 	return input.final ? "finish" : "hold"
@@ -850,6 +879,48 @@ export function contentChecked(
 			(prior.digitalProofs?.() ?? []).some(
 				p => p.verified === true && backed(p.protocol, p.at),
 			)
+		)
+	} catch {
+		return false
+	}
+}
+
+/**
+ * Other observations of the owner, of any age, that a DMR sync hint must also be on before the
+ * hint on the session's first transmission opens the content check (ownDmrHint): 2.
+ */
+export const OWN_HINT_OTHER_OBSERVATIONS = 2
+
+/**
+ * The content check also applies to a file whose session's first transmission (`ownObservationId`,
+ * the session's owner; a roll-over or joined file is judged on it too) carries a dsd-fme DMR sync
+ * hint, checked or not
+ * (VoicePrior.digitalProofs), while hints of DMR are on at least OWN_HINT_OTHER_OBSERVATIONS other
+ * kept observations of the owner (any age: a DMR channel heard once in hours syncs over after
+ * over) and DIGITAL_CHANNEL_MIN_SHARE of its DIGITAL_CHANNEL_MIN_VOTES or more class votes read
+ * DMR's classes. One spurious sync on an analog channel does not open it, and the check itself
+ * keeps speech (clearlyNotSpeech: synthetic voice spreads 10.2 dB or more, the bound is 8.5 dB):
+ * what it discards is the steady buzz of the over its own decoder synced on. A throwing read: no.
+ */
+export function ownDmrHint(
+	prior: VoicePrior | null,
+	ownObservationId: string | null,
+): boolean {
+	if (prior === null || ownObservationId === null) return false
+	try {
+		const dmr = (prior.digitalProofs?.() ?? []).filter(
+			p => p.protocol === "dmr",
+		)
+		if (!dmr.some(p => p.observationId === ownObservationId)) return false
+		const others = new Set(
+			dmr.map(p => p.observationId).filter(id => id !== ownObservationId),
+		)
+		if (others.size < OWN_HINT_OTHER_OBSERVATIONS) return false
+		const v = prior.classVotes?.()
+		return (
+			v !== undefined &&
+			v.total >= DIGITAL_CHANNEL_MIN_VOTES &&
+			shareOf(v, digitalChannelClasses("dmr"))
 		)
 	} catch {
 		return false
