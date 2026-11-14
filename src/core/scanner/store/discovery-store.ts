@@ -47,6 +47,7 @@ import {
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
+import type { DigitalProof, VoicePrior } from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
 import {
@@ -4048,6 +4049,181 @@ export class DiscoveryStore
 			answer,
 		})
 		return answer
+	}
+
+	/**
+	 * The analog recorder's standing prior of `folderId`'s live owner (folderOwner; recording-verdict.ts
+	 * VoicePrior): that owner's id, the published labels (ownerLabel, cached; each marked whether it
+	 * is the owner's, with its proof's time) of the owner and of up to
+	 * DQ_CO_CHANNEL_MAX (8) live co-channel discoveries, the owner's stored class, and a lazy read of
+	 * analog voice heard on them: an `analog-tone` or `analog-voice` proof of any of their
+	 * observations (cached per observation; at most 9 × OBSERVATIONS_PER_DISCOVERY 256 = 2 304
+	 * reads, only when asked), and a lazy count of the owner's class votes per class (at most
+	 * OBSERVATIONS_PER_DISCOVERY). A label's `checkedHint` is true when the proof behind it is a
+	 * sync hint with checked content (a sync-only proof that is not uncheckedSyncHint), its
+	 * `verifiedHint` true when that hint has verified TG/SRC, and its
+	 * `observationId` the observation that proof cites; `digitalProofs` lazily lists the digital
+	 * proof of each of the owner's kept observations (digitalProofs), and `digitalSeenAt` the time
+	 * of its latest digital evidence (digitalSeenAt), `tdmaSeenAt` that of its newest `tdma-ms`
+	 * vote (tdmaSeenAt). Undefined for a folder nobody owns. Reads only.
+	 */
+	voicePrior(folderId: string): VoicePrior | undefined {
+		const owner = this.folderOwner(folderId)
+		const d = owner === undefined ? undefined : this.discoveries.get(owner)
+		if (d === undefined) return undefined
+		const partners = Array.isArray(d.coChannel) ? d.coChannel : []
+		const ids = [
+			d.id,
+			...partners
+				.filter(id => id !== d.id && this.discoveries.has(id))
+				.slice(0, DQ_CO_CHANNEL_MAX),
+		]
+		const labels = ids.flatMap(id => {
+			const label = this.ownerLabel(id)
+			if (label === undefined) return []
+			const at =
+				typeof label.proofAt === "number" && Number.isFinite(label.proofAt)
+					? label.proofAt
+					: null
+			return [
+				{
+					protocol: label.protocol,
+					confidence: label.confidence,
+					owner: id === d.id,
+					at,
+					checkedHint: this.checkedSyncHint(id),
+					verifiedHint: this.verifiedSyncHint(id),
+					observationId: label.proofObservationId,
+				},
+			]
+		})
+		return {
+			id: d.id,
+			labels,
+			class: d.class,
+			classVotes: () => {
+				const votes: Partial<Record<ScannerClass, number>> = {}
+				let total = 0
+				for (const o of this.byDiscovery.get(d.id) ?? []) {
+					const vote = voteOf(o)
+					if (vote === undefined) continue
+					total++
+					votes[vote] = (votes[vote] ?? 0) + 1
+				}
+				return { total, votes }
+			},
+			digitalProofs: () => this.digitalProofs(d.id),
+			digitalSeenAt: () => this.digitalSeenAt(d.id),
+			tdmaSeenAt: () => this.tdmaSeenAt(d.id),
+			analogVoice: () =>
+				ids.some(id =>
+					(this.byDiscovery.get(id) ?? []).some(o => {
+						const kind = this.observationAssessment(o).proof?.kind
+						return kind === "analog-tone" || kind === "analog-voice"
+					}),
+				),
+		}
+	}
+
+	/**
+	 * The digital proof of each kept observation of discovery `id` (VoicePrior.digitalProofs): a
+	 * digital voice decode or a dsd-fme sync hint, any rank, `checked` for a decode or a hint that
+	 * is not uncheckedSyncHint. One pass over at most OBSERVATIONS_PER_DISCOVERY observations' cached
+	 * proofs. Reads only.
+	 */
+	private digitalProofs(id: string): DigitalProof[] {
+		const out: DigitalProof[] = []
+		for (const o of this.byDiscovery.get(id) ?? []) {
+			const proof = this.observationAssessment(o).proof
+			if (proof === null) continue
+			const decoded =
+				proof.kind === "decoded" && familyOf(proof.protocol) === "digital-voice"
+			if (!decoded && !syncOnlyProof(proof)) continue
+			const at = Date.parse(proof.at)
+			if (!Number.isFinite(at)) continue
+			out.push({
+				protocol: proof.protocol,
+				at,
+				checked: decoded || !uncheckedSyncHint(proof),
+				verified: decoded || proof.tgSrcVerified === true,
+				observationId: o.id,
+			})
+		}
+		return out
+	}
+
+	/**
+	 * The wall time (ms) of discovery `id`'s latest digital evidence (VoicePrior.digitalSeenAt), or
+	 * null: over its kept observations (at most OBSERVATIONS_PER_DISCOVERY), the newest of an
+	 * observation's end (its start while open) when it voted `tdma-ms` (DMR's burst structure, which
+	 * an NFM voice never reads), and of a digital proof's time (`digital-undecoded`: a sync hint or a
+	 * `digital-unknown` candidate; a decode of a digital voice, pager or packet protocol). A plain
+	 * fsk4-*, fsk2 or gmsk spectral vote never refreshes it: a weak or low-deviation NFM voice reads
+	 * those. (A vote a decode backs carries that decode's proof; one the channel tier backs is the
+	 * recorder's DigitalClassLedger, a prior of its own.) One pass over cached proofs. Reads only.
+	 */
+	private digitalSeenAt(id: string): number | null {
+		let latest = Number.NEGATIVE_INFINITY
+		for (const o of this.byDiscovery.get(id) ?? []) {
+			const vote = voteOf(o)
+			if (vote === "tdma-ms") {
+				const at = Date.parse(o.endedAt ?? o.startedAt)
+				if (Number.isFinite(at)) latest = Math.max(latest, at)
+			}
+			const proof = this.observationAssessment(o).proof
+			if (proof === null) continue
+			const family = familyOf(proof.protocol)
+			if (
+				proof.kind === "digital-undecoded" ||
+				(proof.kind === "decoded" &&
+					(family === "digital-voice" ||
+						family === "pager" ||
+						family === "packet"))
+			) {
+				const at = Date.parse(proof.at)
+				if (Number.isFinite(at)) latest = Math.max(latest, at)
+			}
+		}
+		return Number.isFinite(latest) ? latest : null
+	}
+
+	/**
+	 * The wall time (ms) of discovery `id`'s newest kept observation that voted `tdma-ms`
+	 * (VoicePrior.tdmaSeenAt): its end, its start while open; null: none. One pass over at most
+	 * OBSERVATIONS_PER_DISCOVERY observations. Reads only.
+	 */
+	private tdmaSeenAt(id: string): number | null {
+		let latest = Number.NEGATIVE_INFINITY
+		for (const o of this.byDiscovery.get(id) ?? []) {
+			if (voteOf(o) !== "tdma-ms") continue
+			const at = Date.parse(o.endedAt ?? o.startedAt)
+			if (Number.isFinite(at)) latest = Math.max(latest, at)
+		}
+		return Number.isFinite(latest) ? latest : null
+	}
+
+	/**
+	 * Discovery `id`'s shown proof is a dsd-fme sync hint with verified TG/SRC (VoicePrior's
+	 * `verifiedHint`). False for a decode anchor, a decode or no proof. Reads the cached proof view
+	 * only.
+	 */
+	private verifiedSyncHint(id: string): boolean {
+		const d = this.discoveries.get(id)
+		if (d === undefined || d.anchor === "decode") return false
+		const proof = this.discoveryView(d).proof
+		return syncOnlyProof(proof) && proof?.tgSrcVerified === true
+	}
+
+	/**
+	 * Discovery `id`'s shown proof is a dsd-fme sync hint with checked content (syncOnlyProof, not
+	 * uncheckedSyncHint): verified TG/SRC, a talkgroup or encryption. False for a decode anchor,
+	 * a decode or no proof. Reads the cached proof view only.
+	 */
+	private checkedSyncHint(id: string): boolean {
+		const d = this.discoveries.get(id)
+		if (d === undefined || d.anchor === "decode") return false
+		const proof = this.discoveryView(d).proof
+		return syncOnlyProof(proof) && !uncheckedSyncHint(proof)
 	}
 
 	/**

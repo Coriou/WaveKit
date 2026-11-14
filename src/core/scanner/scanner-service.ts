@@ -1611,6 +1611,8 @@ export class ScannerService extends EventEmitter {
 				// The decoded label (and its decode's time) of a discovery, or of the live one it
 				// was merged into.
 				decodedLabel: discoveryId => ownerDecoded(this.store, discoveryId),
+				// Its standing prior (any time; co-channel included): refuses, holds or keeps a file.
+				voicePrior: discoveryId => this.store.voicePrior(discoveryId) ?? null,
 				logger: deps.logger,
 				now: this.now,
 			})
