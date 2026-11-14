@@ -103,6 +103,8 @@ export interface Options {
 	seedRecordings: number
 	/** With a panel route: measure the panel budgets (opens, a scroll through the list, the heap). */
 	measure: boolean
+	/** `--allow=measure`: the live target may be measured (it opens and scrolls the panel many times). */
+	allowMeasure: boolean
 }
 
 /** The run cannot start or finish (exit 2); the message never holds a credential. */
@@ -145,6 +147,7 @@ export function parseOptions(argv: readonly string[]): Options {
 		allow: [],
 		seedRecordings: 0,
 		measure: false,
+		allowMeasure: false,
 	}
 	for (const arg of argv) {
 		const [flag = "", ...rest] = arg.split("=")
@@ -172,10 +175,12 @@ export function parseOptions(argv: readonly string[]): Options {
 		else if (flag === "--out" && value) options.out = value
 		else if (flag === "--do" && rest.length > 0)
 			options.actions = parseActions(value)
-		else if (flag === "--allow" && rest.length > 0)
+		else if (flag === "--allow" && rest.length > 0) {
+			const names = value.split(",")
+			options.allowMeasure = names.includes("measure")
 			options.allow = parseActions(
-				value
-					.split(",")
+				names
+					.filter(name => name !== "measure")
 					.map(name =>
 						name === "retune" || name === "rate" || name === "wait"
 							? `${name}:1`
@@ -183,7 +188,7 @@ export function parseOptions(argv: readonly string[]): Options {
 					)
 					.join(","),
 			).map(action => action.name)
-		else throw new CannotRun(`Unknown or incomplete option: ${flag}`)
+		} else throw new CannotRun(`Unknown or incomplete option: ${flag}`)
 	}
 	if (options.route !== "" && !options.route.startsWith("#"))
 		throw new CannotRun("--route is a hash route, e.g. --route=#/scanner")
@@ -224,6 +229,10 @@ export function parseOptions(argv: readonly string[]): Options {
 			)
 		if (options.seedRecordings > 0)
 			throw new CannotRun("--seed-recordings belongs to --target=fake")
+		if (options.measure && !options.allowMeasure)
+			throw new CannotRun(
+				"On the live target --measure must be named in --allow: --allow=measure",
+			)
 	} else if (
 		options.url !== null ||
 		options.accessDir !== null ||

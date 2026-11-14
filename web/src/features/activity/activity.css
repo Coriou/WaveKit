@@ -249,6 +249,15 @@
 		inset: 0 0 auto;
 		will-change: transform;
 	}
+	/* the cursor row, kept mounted where it sits while the window scrolls past it */
+	.wka-kept {
+		position: absolute;
+		left: 0;
+		right: 0;
+	}
+	.wka-list {
+		overflow-anchor: none;
+	}
 	.wka-group {
 		height: 28px;
 		box-sizing: border-box;

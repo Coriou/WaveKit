@@ -191,6 +191,13 @@ export class RecordingsStore extends PagedFeed<
 	})
 	private attached = 0
 	private detachLive: (() => void) | null = null
+	/**
+	 * Keep outcomes and deletes that landed here, by id, with the number of head reads started when they
+	 * landed: a head asked for before then cannot know them, so they are applied over it; the first head
+	 * asked for after them is the truth and ends them.
+	 */
+	private readonly kept = new Map<string, { kept: boolean; after: number }>()
+	private readonly gone = new Map<string, number>()
 
 	constructor(
 		api: ApiClient,
@@ -253,6 +260,7 @@ export class RecordingsStore extends PagedFeed<
 				? await this.api.put<RecordingKeepResult>(route)
 				: await this.api.delete<RecordingKeepResult>(route)
 			this.patchItem(id, { kept: result.kept })
+			this.kept.set(id, { kept: result.kept, after: this.headReads })
 		} catch (error) {
 			this.patchItem(id, { kept: before.kept === true })
 			if (error instanceof ApiError && error.code === "RECORDING_NOT_FOUND")
@@ -365,6 +373,22 @@ export class RecordingsStore extends PagedFeed<
 			})
 	}
 
+	protected override adjustPage(
+		page: FeedPage<RecordingInventoryItem, RecordingsMeta>,
+		read: number,
+	): FeedPage<RecordingInventoryItem, RecordingsMeta> {
+		for (const [id, after] of this.gone) if (read > after) this.gone.delete(id)
+		for (const [id, k] of this.kept) if (read > k.after) this.kept.delete(id)
+		if (this.gone.size === 0 && this.kept.size === 0) return page
+		const items: RecordingInventoryItem[] = []
+		for (const item of page.items) {
+			if (this.gone.has(item.id)) continue
+			const k = this.kept.get(item.id)
+			items.push(k === undefined ? item : { ...item, kept: k.kept })
+		}
+		return { ...page, items }
+	}
+
 	protected idOf(item: RecordingInventoryItem): string {
 		return item.id
 	}
@@ -402,12 +426,12 @@ export class RecordingsStore extends PagedFeed<
 				hiddenChange = true
 				return
 			}
-			void this.refresh()
+			void this.notify()
 		}
 		const onVisible = () => {
 			if (document.visibilityState !== "visible" || !hiddenChange) return
 			hiddenChange = false
-			void this.refresh()
+			void this.notify()
 		}
 		const offs = [
 			events.subscribe(["recordings"]),
@@ -432,6 +456,8 @@ export class RecordingsStore extends PagedFeed<
 	}
 
 	private drop(id: string): void {
+		this.gone.set(id, this.headReads)
+		this.kept.delete(id)
 		this.patchItems(items => items.filter(i => i.id !== id))
 		this.mark("removing", id, false)
 	}

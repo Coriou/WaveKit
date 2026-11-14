@@ -115,6 +115,13 @@ export function ActivityList({
 		[stacks, now, display, expanded], // group labels follow the time setting
 	)
 	const keys = useMemo(() => entries.map(e => e.key), [entries])
+	// the cursor row stays mounted wherever the scroll is: aria-activedescendant always points at a row
+	const keep = useMemo(() => {
+		if (cursor === null) return []
+		const i = keys.indexOf(cursor)
+		return i < 0 ? [] : [i]
+	}, [cursor, keys])
+	const searchKeyNow = useStore(feed, s => s.searchKey)
 	// Rows and cards measure differently: a layout switch starts from fresh guesses (resetKey), at the top.
 	const virtual = useVirtualRows({
 		keys,
@@ -124,12 +131,20 @@ export function ActivityList({
 		},
 		resetKey: cards,
 		revealMargin: 28,
+		keep,
+		// the same search opened again is where it was left
+		restoreKey: `activity:${column ?? "drawer"}:${searchKeyNow ?? ""}`,
 		onScroll: el => feed.setHolding(el.scrollTop > HOLD_PX),
 		onNearEnd: () => void feed.loadMore(),
 	})
 	const { scroller, measure, win, viewport, reveal } = virtual
 	const toTopOf = virtual.toTop
-	useEffect(() => toTopOf(), [cards, toTopOf])
+	const shownLayout = useRef(cards)
+	useEffect(() => {
+		if (shownLayout.current === cards) return
+		shownLayout.current = cards
+		toTopOf()
+	}, [cards, toTopOf])
 
 	// Stacks that heard live (a decode newer than the newest so far) flash once; older pages do not.
 	const fresh = useMemo(() => {
@@ -148,9 +163,12 @@ export function ActivityList({
 	}, [items, status])
 
 	// A new search starts at the top, folded (a rolling range moving on is the same search).
-	const search = useStore(feed, s => s.searchKey)
+	const search = searchKeyNow
+	const shownSearch = useRef(search)
 	useEffect(() => {
-		toTopOf()
+		// the first run is the mount: a reopened search keeps its place (restoreKey)
+		if (shownSearch.current !== search) toTopOf()
+		shownSearch.current = search
 		setExpanded(new Set())
 		autoPages.current = 0
 		feed.setHolding(false)
@@ -204,6 +222,10 @@ export function ActivityList({
 	const toggle = useCallback((key: string) => setOpen(key, null), [setOpen])
 	const foldsId = useCallback(
 		(stackKey: string) => `${listId}-folded-${encodeURIComponent(stackKey)}`,
+		[listId],
+	)
+	const entryDomId = useCallback(
+		(key: string) => `${listId}-entry-${encodeURIComponent(key)}`,
 		[listId],
 	)
 
@@ -279,6 +301,84 @@ export function ActivityList({
 
 	const refreshing = status === "loading" && items.length > 0
 
+	// the cursor's element (a stack's first folded row carries its toggle's aria-controls id)
+	const cursorAt = cursor === null ? undefined : rowIndex.get(cursor)
+	const cursorEntry = cursorAt === undefined ? undefined : entries[cursorAt]
+	const activeDescendant =
+		cursorEntry === undefined
+			? undefined
+			: cursorEntry.type === "member" && cursorEntry.first
+				? foldsId(cursorEntry.stackKey)
+				: entryDomId(cursorEntry.key)
+
+	const renderEntry = (e: ListEntry) =>
+		e.type === "group" ? (
+			<div
+				key={e.key}
+				data-key={e.key}
+				ref={measure}
+				className="wka-group"
+				role="presentation"
+			>
+				{e.label}
+			</div>
+		) : e.type === "member" ? (
+			<FoldedRow
+				key={e.key}
+				entryKey={e.key}
+				id={e.first ? foldsId(e.stackKey) : entryDomId(e.key)}
+				item={e.item}
+				measure={measure}
+				cursor={cursor === e.key}
+				current={openId === e.item.eventId}
+				onOpen={open}
+			/>
+		) : e.type === "row" ? (
+			<ActivityRow
+				key={e.key}
+				domId={entryDomId(e.key)}
+				item={e.item}
+				measure={measure}
+				cursor={cursor === e.key}
+				current={openId === e.key}
+				fresh={false}
+				onOpen={open}
+			/>
+		) : cards ? (
+			<ActivityCard
+				key={e.key}
+				domId={entryDomId(e.key)}
+				entryKey={e.key}
+				item={e.stack.view}
+				stack={e.stack}
+				expanded={e.expanded}
+				onToggle={toggle}
+				foldsId={foldsId(e.key)}
+				measure={measure}
+				cursor={cursor === e.key}
+				current={openId === e.stack.latest.eventId}
+				fresh={fresh.has(e.key)}
+				readOnly={readOnly}
+				onOpen={open}
+			/>
+		) : (
+			<ActivityRow
+				key={e.key}
+				domId={entryDomId(e.key)}
+				entryKey={e.key}
+				item={e.stack.view}
+				stack={e.stack}
+				expanded={e.expanded}
+				onToggle={toggle}
+				foldsId={foldsId(e.key)}
+				measure={measure}
+				cursor={cursor === e.key}
+				current={openId === e.stack.latest.eventId}
+				fresh={fresh.has(e.key)}
+				onOpen={open}
+			/>
+		)
+
 	return (
 		<div className={className ? `wka-listwrap ${className}` : "wka-listwrap"}>
 			{pending > 0 && (
@@ -303,6 +403,7 @@ export function ActivityList({
 				role="list"
 				aria-label={label}
 				aria-busy={refreshing || undefined}
+				aria-activedescendant={activeDescendant}
 				tabIndex={0}
 				data-act-col={column}
 				onScroll={onScroll}
@@ -313,72 +414,20 @@ export function ActivityList({
 						className="wka-window"
 						style={{ transform: `translateY(${win.offset}px)` }}
 					>
-						{entries.slice(win.start, win.end).map(e =>
-							e.type === "group" ? (
-								<div
-									key={e.key}
-									data-key={e.key}
-									ref={measure}
-									className="wka-group"
-									role="presentation"
-								>
-									{e.label}
-								</div>
-							) : e.type === "member" ? (
-								<FoldedRow
-									key={e.key}
-									entryKey={e.key}
-									id={e.first ? foldsId(e.stackKey) : undefined}
-									item={e.item}
-									measure={measure}
-									cursor={cursor === e.key}
-									current={openId === e.item.eventId}
-									onOpen={open}
-								/>
-							) : e.type === "row" ? (
-								<ActivityRow
-									key={e.key}
-									item={e.item}
-									measure={measure}
-									cursor={cursor === e.key}
-									current={openId === e.key}
-									fresh={false}
-									onOpen={open}
-								/>
-							) : cards ? (
-								<ActivityCard
-									key={e.key}
-									entryKey={e.key}
-									item={e.stack.view}
-									stack={e.stack}
-									expanded={e.expanded}
-									onToggle={toggle}
-									foldsId={foldsId(e.key)}
-									measure={measure}
-									cursor={cursor === e.key}
-									current={openId === e.stack.latest.eventId}
-									fresh={fresh.has(e.key)}
-									readOnly={readOnly}
-									onOpen={open}
-								/>
-							) : (
-								<ActivityRow
-									key={e.key}
-									entryKey={e.key}
-									item={e.stack.view}
-									stack={e.stack}
-									expanded={e.expanded}
-									onToggle={toggle}
-									foldsId={foldsId(e.key)}
-									measure={measure}
-									cursor={cursor === e.key}
-									current={openId === e.stack.latest.eventId}
-									fresh={fresh.has(e.key)}
-									onOpen={open}
-								/>
-							),
-						)}
+						{entries.slice(win.start, win.end).map(renderEntry)}
 					</div>
+					{virtual.kept.map(k => {
+						const e = entries[k.index]
+						return e === undefined ? null : (
+							<div
+								key={`kept:${e.key}`}
+								className="wka-kept"
+								style={{ top: k.top }}
+							>
+								{renderEntry(e)}
+							</div>
+						)
+					})}
 				</div>
 				{loadingMore && <p className="wka-foot">Loading older activity…</p>}
 				{items.length > 0 && status !== "error" && (
@@ -504,6 +553,8 @@ interface RowProps {
 	onToggle?: (key: string) => void
 	/** The id of the stack's first folded row (aria-controls of its toggle). */
 	foldsId?: string
+	/** The entry's element id (the list's aria-activedescendant names it). */
+	domId?: string
 }
 
 function StackToggle({
@@ -545,6 +596,7 @@ export const ActivityRow = memo(function ActivityRow({
 	expanded = false,
 	onToggle,
 	foldsId,
+	domId,
 }: RowProps) {
 	useDisplay() // the time follows Settings › Display
 	const v = rowView(item, useRowAircraft(item.entityKey))
@@ -553,6 +605,7 @@ export const ActivityRow = memo(function ActivityRow({
 	return (
 		<div
 			role="listitem"
+			id={domId}
 			data-key={entryKey ?? item.eventId}
 			ref={measure}
 			className="wka-item"
@@ -662,12 +715,14 @@ export const ActivityCard = memo(function ActivityCard({
 	expanded = false,
 	onToggle,
 	foldsId,
+	domId,
 }: RowProps & { readOnly: boolean }) {
 	const stacked = stack !== undefined && stack.members.length > 1
 	const channels = channelsText(stack)
 	return (
 		<div
 			role="listitem"
+			id={domId}
 			data-key={entryKey ?? item.eventId}
 			ref={measure}
 			className="wka-item wka-carditem"

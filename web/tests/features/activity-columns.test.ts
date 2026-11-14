@@ -307,8 +307,11 @@ describe("activity controller columns", () => {
 				),
 			).toBe(true),
 		)
-		// the marine column is not narrowed by the edit
-		expect(urls.filter(u => u.includes("categories=marine"))).toEqual([])
+		// the marine column is not narrowed by the edit (it may still read its own search: the drawer is
+		// opening, and columns load after the list)
+		expect(
+			urls.filter(u => u.includes("categories=marine") && u.includes("fire")),
+		).toEqual([])
 		off()
 		c.dispose()
 	})
@@ -499,6 +502,79 @@ describe("activity opening budget", () => {
 		expect(order.indexOf("counts")).toBeGreaterThan(0)
 		expect(order.indexOf("counts")).toBeLessThan(order.indexOf("column:voice"))
 		expect(most).toBeLessThanOrEqual(2)
+		off()
+		c.dispose()
+	})
+
+	it("queues an edit made while it opens, and applies it once the columns are read: still 2 at most", async () => {
+		const order: string[] = []
+		const urls: string[] = []
+		let inFlight = 0
+		let most = 0
+		const api = new ApiClient({
+			fetch: async url => {
+				const u = String(url)
+				urls.push(u)
+				const what = u.includes("facets")
+					? "counts"
+					: u.includes("categories=marine")
+						? "column:marine"
+						: u.includes("categories=voice")
+							? "column:voice"
+							: u.includes("text=9")
+								? "column:tg9"
+								: "list"
+				order.push(what)
+				inFlight += 1
+				most = Math.max(most, inFlight)
+				// every read takes a while, as on a loaded host
+				await new Promise(resolve => setTimeout(resolve, 20))
+				inFlight -= 1
+				const body =
+					what === "counts" ? { facets: { category: [] } } : page([item(5)])
+				return new Response(JSON.stringify(body), { status: 200 })
+			},
+		})
+		const sockets = fakeSockets()
+		const events = new EventsClient({ createSocket: sockets.factory })
+		events.connect()
+		sockets.last().open()
+		const c = new ActivityController({ api, events } as unknown as DataLayer)
+		c.addColumn(
+			{ title: "Voice", tokens: [], chip: "voice", categories: null },
+			false,
+		)
+		c.addColumn(
+			{ title: "Positions", tokens: [], chip: null, categories: ["marine"] },
+			false,
+		)
+		c.addColumn(
+			{
+				title: "TG 9",
+				tokens: [token("talkgroup", "9")],
+				chip: null,
+				categories: null,
+			},
+			false,
+		)
+		expect(order).toEqual([])
+		const off = c.attach()
+		// an edit while the list's first page is read, and another while the columns load
+		c.addToken(token("text", "fire"))
+		await vi.waitFor(() => expect(order).toContain("column:voice"))
+		c.addToken(token("text", "smoke"))
+		await vi.waitFor(() =>
+			expect(order.filter(o => o.startsWith("column:"))).toHaveLength(3),
+		)
+		await vi.waitFor(() => expect(inFlight).toBe(0))
+		expect(order[0]).toBe("list")
+		expect(order.indexOf("counts")).toBeGreaterThan(0)
+		expect(order.indexOf("counts")).toBeLessThan(order.indexOf("column:voice"))
+		expect(most).toBeLessThanOrEqual(2)
+		// the queued edit reached the list after the opening
+		await vi.waitFor(() =>
+			expect(urls.some(u => u.includes("smoke"))).toBe(true),
+		)
 		off()
 		c.dispose()
 	})

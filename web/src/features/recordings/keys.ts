@@ -32,6 +32,8 @@ export interface ListKey {
 	altKey?: boolean
 	/** The key went to a text field inside the list. */
 	inField?: boolean
+	/** The key went to a control inside a row (a button, a link): Space and Enter are its own. */
+	inControl?: boolean
 }
 
 /** What a key does on the list, or null (the key goes on to the app). */
@@ -43,6 +45,7 @@ export function listKeyAction(
 	const k = e.key.toLowerCase()
 	if (e.key === "ArrowDown") return { type: "move", by: 1 }
 	if (e.key === "ArrowUp") return { type: "move", by: -1 }
+	if ((e.key === " " || e.key === "Enter") && e.inControl) return null
 	if (e.key === " " && ctx.cursor) return { type: "play" }
 	if (e.key === "Enter" && ctx.cursor) return { type: "toggle-open" }
 	if (e.key === "Escape" && ctx.open) return { type: "close" }

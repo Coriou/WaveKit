@@ -20,7 +20,7 @@ export function PanelNotice({
 }: {
 	tone?: "warn" | undefined
 	children?: ReactNode
-	action?: { label: string; run: () => void } | undefined
+	action?: { label: string; run: () => void; busy?: boolean } | undefined
 }) {
 	const empty =
 		children === undefined || children === null || children === false
@@ -39,8 +39,11 @@ export function PanelNotice({
 					className="wk-btn"
 					data-variant="outline"
 					data-size="sm"
+					aria-busy={action.busy || undefined}
+					disabled={action.busy}
 					onClick={action.run}
 				>
+					{action.busy && <span className="wk-spinner" aria-hidden="true" />}
 					{action.label}
 				</button>
 			)}
@@ -78,12 +81,15 @@ export function PanelFailed({
 	text,
 	retryAt,
 	onRetry,
+	retrying = false,
 	icon,
 }: {
 	title: string
 	text: string
 	retryAt: number | null
 	onRetry: () => void
+	/** A retry is running: the error stays, Try again turns into a spinner. */
+	retrying?: boolean
 	icon?: ReactNode
 }) {
 	const retry = useRetryText(retryAt)
@@ -97,11 +103,16 @@ export function PanelFailed({
 				className="wk-btn"
 				data-variant="outline"
 				data-size="lg"
+				aria-busy={retrying || undefined}
+				disabled={retrying}
 				onClick={onRetry}
 			>
+				{retrying && <span className="wk-spinner" aria-hidden="true" />}
 				Try again
 			</button>
-			{retry && <span className="wk-panel-failed-retry">{retry}</span>}
+			{retry && !retrying && (
+				<span className="wk-panel-failed-retry">{retry}</span>
+			)}
 		</div>
 	)
 }

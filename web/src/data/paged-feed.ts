@@ -68,6 +68,8 @@ export interface PagedFeedState<T, Q, M> {
 	heldNew: number
 	/** The current key has had an answer (its rows, meta and counts are its own). */
 	answered: boolean
+	/** A failed read is being tried again: the error stays shown (Try again turns into a spinner). */
+	retrying: boolean
 }
 
 export interface PagedFeedOptions {
@@ -83,8 +85,27 @@ export interface PagedFeedOptions {
 }
 
 /**
+ * Whether held rows can stay beside a fresh head (both newest first by `compare`): only when the head
+ * reaches back to (or past) the newest held row, so nothing can be missing between them. After more
+ * arrivals than a page while the panel was closed or held, the head lies wholly above the held rows: the
+ * rows in between were never read, so the held rows go and paging starts again from the head.
+ */
+export function headJoins<T>(
+	list: readonly T[],
+	head: readonly T[],
+	complete: boolean,
+	compare: (a: T, b: T) => number,
+): boolean {
+	const last = head.at(-1)
+	const top = list[0]
+	if (complete || last === undefined || top === undefined) return false
+	return compare(last, top) >= 0
+}
+
+/**
  * The list after a fresh head (both newest first by `compare`): the head, then the held rows older than
- * the head's oldest row. A complete head (no next page) is everything there is.
+ * the head's oldest row when the head joins them (headJoins), else the head alone. A complete head (no
+ * next page) is everything there is.
  */
 export function mergeHead<T>(
 	list: readonly T[],
@@ -94,7 +115,8 @@ export function mergeHead<T>(
 	compare: (a: T, b: T) => number,
 ): T[] {
 	const last = head.at(-1)
-	if (complete || list.length === 0 || last === undefined) return [...head]
+	if (last === undefined || !headJoins(list, head, complete, compare))
+		return [...head]
 	const ids = new Set(head.map(idOf))
 	const out = [...head]
 	for (const item of list)
@@ -142,6 +164,8 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 	private again = false
 	/** The newest head read while holding, merged on release. */
 	private held: FeedPage<T, M> | null = null
+	/** Head reads started so far: a page knows whether it was asked for after a local write landed. */
+	protected headReads = 0
 
 	constructor(options: PagedFeedOptions) {
 		super({
@@ -162,6 +186,7 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 			holding: false,
 			heldNew: 0,
 			answered: false,
+			retrying: false,
 		})
 		this.maxItems = options.maxItems
 		this.pageSize = options.pageSize
@@ -241,6 +266,16 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 		return this.inflight
 	}
 
+	/**
+	 * A change notice from the source: read the head, unless a failed read waits for its retry. Then the
+	 * notice changes nothing (the retry reads the head anyway), so a busy core is never read back to back
+	 * at the notices' rate.
+	 */
+	notify(): Promise<void> {
+		if (this.retryTimer !== null) return Promise.resolve()
+		return this.refresh()
+	}
+
 	/** Try again now (the button): the backoff starts over. */
 	retry(): Promise<void> {
 		this.failures = 0
@@ -271,13 +306,15 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 				const ids = new Set(v.items.map(i => this.idOf(i)))
 				const added = page.items.filter(i => !ids.has(this.idOf(i)))
 				const items = [...v.items, ...added]
-				const capped = items.length >= this.maxItems
+				// cut at the window: the cursor pointed past the last row read, so it goes with the cut
+				const cut = items.length > this.maxItems
+				const nextCursor = cut ? null : page.nextCursor
 				return {
 					...v,
 					loadingMore: false,
-					items: capped ? items.slice(0, this.maxItems) : items,
-					nextCursor: page.nextCursor,
-					capped: capped && page.nextCursor !== null,
+					items: cut ? items.slice(0, this.maxItems) : items,
+					nextCursor,
+					capped: items.length >= this.maxItems && (cut || nextCursor !== null),
 				}
 			})
 		} catch (error) {
@@ -316,7 +353,13 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 	stop(): void {
 		this.cancel()
 		const s = this.get()
-		if (s.status === "loading" || s.busy || s.retryAt !== null || s.loadingMore)
+		if (
+			s.status === "loading" ||
+			s.busy ||
+			s.retryAt !== null ||
+			s.loadingMore ||
+			s.retrying
+		)
 			this.update(v => ({
 				...v,
 				status:
@@ -324,6 +367,7 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 				busy: false,
 				loadingMore: false,
 				retryAt: null,
+				retrying: false,
 			}))
 	}
 
@@ -356,8 +400,14 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 		this.clearRetry()
 		const abort = new AbortController()
 		this.headAbort = abort
-		// an older page in flight goes on: the merge keeps rows paged past the head, and their cursor
-		this.update(s => ({ ...s, status: "loading", retryAt: null, busy: false }))
+		// an older page in flight goes on: the merge keeps rows paged past the head, and their cursor.
+		// A retry after an error keeps the error shown until it is answered.
+		const read = ++this.headReads
+		this.update(s =>
+			s.status === "error"
+				? { ...s, retrying: true, retryAt: null, busy: false }
+				: { ...s, status: "loading", retryAt: null, busy: false },
+		)
 		this.clearBusy()
 		this.busyTimer = setTimeout(() => {
 			this.busyTimer = null
@@ -365,7 +415,10 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 				this.update(s => ({ ...s, busy: true }))
 		}, this.busyMs)
 		try {
-			const page = await this.fetchPage(query, null, abort.signal)
+			const page = this.adjustPage(
+				await this.fetchPage(query, null, abort.signal),
+				read,
+			)
 			if (generation !== this.generation) return
 			this.failures = 0
 			this.clearBusy()
@@ -381,6 +434,7 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 					asOf: this.now(),
 					meta: page.meta,
 					answered: true,
+					retrying: false,
 					heldNew: countNew(
 						s.items,
 						page.items,
@@ -402,6 +456,7 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 				...s,
 				status: "error",
 				busy: false,
+				retrying: false,
 				error: errorMessage(error),
 				errorCode: (error as Partial<ApiError>).code ?? null,
 				errorStatus: (error as Partial<ApiError>).status ?? null,
@@ -415,6 +470,16 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 		} finally {
 			if (this.headAbort === abort) this.headAbort = null
 		}
+	}
+
+	/**
+	 * A head page before it is shown: `read` is its number among the head reads started (headReads). The
+	 * default keeps it as it is; a store with local writes re-applies the ones a page asked for before
+	 * they landed cannot know.
+	 */
+	protected adjustPage(page: FeedPage<T, M>, read: number): FeedPage<T, M> {
+		void read
+		return page
 	}
 
 	/** Whether a failed read is tried again by itself (not for an answer that will not change). */
@@ -434,17 +499,19 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 				i => this.idOf(i),
 				(a, b) => this.compare(a, b),
 			)
-			// older pages already read page on from where they ended
+			// older pages already read (the head joined them) page on from where they ended; a cut at the
+			// window drops the cursor, which pointed past the rows cut
 			const pagedPast = merged.length > page.items.length
-			const capped = merged.length >= this.maxItems
-			const nextCursor = pagedPast ? s.nextCursor : page.nextCursor
+			const cut = merged.length > this.maxItems
+			const nextCursor = cut ? null : pagedPast ? s.nextCursor : page.nextCursor
 			return {
 				...s,
 				status: "ready",
 				busy: false,
-				items: capped ? merged.slice(0, this.maxItems) : merged,
+				retrying: false,
+				items: cut ? merged.slice(0, this.maxItems) : merged,
 				nextCursor,
-				capped: capped && nextCursor !== null,
+				capped: merged.length >= this.maxItems && (cut || nextCursor !== null),
 				error: null,
 				errorCode: null,
 				errorStatus: null,

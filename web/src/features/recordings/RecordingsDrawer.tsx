@@ -408,6 +408,7 @@ function List({
 	const loadingMore = useStore(recordings, s => s.loadingMore)
 	const heldNew = useStore(recordings, s => s.heldNew)
 	const answered = useStore(recordings, s => s.answered)
+	const retrying = useStore(recordings, s => s.retrying)
 	const removing = useStore(recordings.marks, m => m.removing)
 	const tokens = useStore(recordingsUi, s => s.tokens)
 	const text = useStore(recordingsUi, s => s.text)
@@ -441,8 +442,26 @@ function List({
 		})
 		return m
 	}, [entries])
+	// roving focus: the cursor row (else the first) is the list's one tab stop; it and the focused row stay
+	// mounted wherever the scroll is, so focus never falls to the page
+	const tabId =
+		cursorId !== null && rowIndex.has(cursorId)
+			? cursorId
+			: (visible[0]?.id ?? null)
+	const [focusedId, setFocusedId] = useState<string | null>(null)
+	const keep = useMemo(() => {
+		const out: number[] = []
+		for (const id of [tabId, focusedId]) {
+			const i = id === null ? undefined : rowIndex.get(id)
+			if (i !== undefined) out.push(i)
+		}
+		return out
+	}, [tabId, focusedId, rowIndex])
+	const searchKey = useStore(recordings, s => s.key)
 	const virtual = useVirtualRows({
 		keys,
+		keep,
+		restoreKey: `recordings:${searchKey ?? ""}`,
 		estimate: i => {
 			const e = entries[i]
 			if (!e) return 0
@@ -458,10 +477,22 @@ function List({
 		const top = scroller.current?.scrollTop ?? 0
 		recordings.setHolding(top > HOLD_PX || playing)
 	}, [playing, recordings, scroller])
-	// a new search starts at the top
-	const searchKey = useStore(recordings, s => s.key)
+	// a new search starts at the top; the same search opened again is where it was left
 	const toTopOf = virtual.toTop
-	useEffect(() => toTopOf(), [searchKey, toTopOf])
+	const shownKey = useRef(searchKey)
+	useEffect(() => {
+		if (shownKey.current === searchKey) return
+		shownKey.current = searchKey
+		toTopOf()
+	}, [searchKey, toTopOf])
+	// a keyboard move focuses the row it lands on (mounted: it is the tab stop, kept)
+	const focusNext = useRef<string | null>(null)
+	useEffect(() => {
+		const id = focusNext.current
+		if (id === null || id !== cursorId) return
+		focusNext.current = null
+		document.getElementById(rowDomId(id))?.focus({ preventScroll: true })
+	})
 	// a list shorter than the viewport asks for the next page by itself
 	useEffect(() => {
 		if (
@@ -503,6 +534,7 @@ function List({
 				ctrlKey: e.ctrlKey,
 				altKey: e.altKey,
 				inField: target.tagName === "INPUT" || target.tagName === "TEXTAREA",
+				inControl: target.closest("button, a, input") !== null,
 			},
 			{
 				cursor: cur !== undefined,
@@ -522,6 +554,7 @@ function List({
 				if (!n) return
 				e.preventDefault()
 				setKb(true)
+				focusNext.current = n.id
 				if (openId !== null) openRow(n.id)
 				else setCursor(n.id)
 				reveal(n.id)
@@ -578,7 +611,11 @@ function List({
 				}
 				action={
 					noticeKind === "error"
-						? { label: "Try again", run: () => void recordings.retry() }
+						? {
+								label: "Try again",
+								run: () => void recordings.retry(),
+								busy: retrying,
+							}
 						: undefined
 				}
 			>
@@ -607,6 +644,7 @@ function List({
 					title="Could not read recordings"
 					text={error ?? "WaveKit did not answer."}
 					retryAt={retryAt}
+					retrying={retrying}
 					onRetry={() => void recordings.retry()}
 				/>
 			</>
@@ -674,10 +712,19 @@ function List({
 						role="list"
 						aria-label="Recordings"
 						aria-busy={view.progress || undefined}
-						tabIndex={0}
 						onScroll={virtual.onScroll}
 						onKeyDown={onKeyDown}
 						onPointerDown={() => setKb(false)}
+						onFocus={e => {
+							const row = (e.target as HTMLElement).closest<HTMLElement>(
+								"[data-row-id]",
+							)
+							setFocusedId(row?.dataset["rowId"] ?? null)
+						}}
+						onBlur={e => {
+							if (!e.currentTarget.contains(e.relatedTarget as Node | null))
+								setFocusedId(null)
+						}}
 					>
 						<div style={{ height: win.total, position: "relative" }}>
 							<div
@@ -686,15 +733,16 @@ function List({
 							>
 								{entries.slice(win.start, win.end).map(e =>
 									e.type === "day" ? (
-										<h3
+										<div
 											key={e.key}
 											data-key={e.key}
 											ref={measure}
+											role="presentation"
 											className="wk-label wkr-day-label"
 											data-strong=""
 										>
 											{e.label}
-										</h3>
+										</div>
 									) : (
 										<Row
 											key={e.key}
@@ -704,6 +752,7 @@ function List({
 											setSize={total ?? visible.length}
 											position={e.position}
 											open={openId === e.item.id}
+											tabStop={tabId === e.item.id}
 											cursor={kb && cursorId === e.item.id}
 											player={player}
 											readOnly={readOnly}
@@ -713,6 +762,32 @@ function List({
 									),
 								)}
 							</div>
+							{virtual.kept.map(k => {
+								const e = entries[k.index]
+								if (e?.type !== "row") return null
+								return (
+									<div
+										key={`kept:${e.key}`}
+										className="wkr-kept-row"
+										style={{ top: k.top }}
+									>
+										<Row
+											entryKey={e.key}
+											measure={measure}
+											item={e.item}
+											setSize={total ?? visible.length}
+											position={e.position}
+											open={openId === e.item.id}
+											tabStop={tabId === e.item.id}
+											cursor={kb && cursorId === e.item.id}
+											player={player}
+											readOnly={readOnly}
+											actions={actions}
+											list={visible}
+										/>
+									</div>
+								)
+							})}
 						</div>
 						<ListFoot />
 					</div>
@@ -834,6 +909,8 @@ interface RowProps {
 	setSize: number
 	/** aria-posinset, from 1. */
 	position: number
+	/** The list's one tab stop (roving focus). */
+	tabStop: boolean
 	item: RecordingInventoryItem
 	open: boolean
 	cursor: boolean
@@ -848,6 +925,7 @@ const Row = memo(function Row({
 	measure,
 	setSize,
 	position,
+	tabStop,
 	item: r,
 	open,
 	cursor,
@@ -877,6 +955,8 @@ const Row = memo(function Row({
 			aria-label={title}
 			aria-setsize={setSize}
 			aria-posinset={position}
+			tabIndex={tabStop ? 0 : -1}
+			data-row-id={r.id}
 			data-open={open || undefined}
 			data-current={phase !== null || undefined}
 			data-kb-cursor={cursor || undefined}

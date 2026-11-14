@@ -240,6 +240,43 @@ describe("RecordingsStore: refresh and live notices", () => {
 		expect(store.get().nextCursor).toBe("c-old")
 	})
 
+	it("after more arrivals than a page, replaces the held rows and pages on from the head (no hidden gap)", async () => {
+		let head = [rec(10), rec(9)]
+		const { api } = scripted(call =>
+			call.url.includes("cursor=")
+				? json(200, page([rec(8), rec(7)], "c-old"))
+				: json(200, page(head, "c-head")),
+		)
+		const store = new RecordingsStore(api, null, { pageSize: 2 })
+		await store.show({})
+		await store.loadMore()
+		// closed meanwhile: 20 arrived, the head is wholly newer than anything held
+		head = [rec(30), rec(29)]
+		await store.refresh()
+		expect(store.get().items.map(i => i.modifiedAt)).toEqual([30, 29].map(at))
+		expect(store.get().nextCursor).toBe("c-head")
+	})
+
+	it("a cut at the window drops the cursor", async () => {
+		let head = [rec(10), rec(9)]
+		const { api } = scripted(call =>
+			call.url.includes("cursor=")
+				? json(200, page([rec(8), rec(7)], "c-old"))
+				: json(200, page(head, "c-head")),
+		)
+		const store = new RecordingsStore(api, null, { pageSize: 2, maxItems: 4 })
+		await store.show({})
+		await store.loadMore()
+		expect(store.get()).toMatchObject({ capped: true, nextCursor: "c-old" })
+		head = [rec(11), rec(10), rec(9)]
+		await store.refresh()
+		expect(store.get().items.map(i => i.modifiedAt)).toEqual(
+			[11, 10, 9, 8].map(at),
+		)
+		// rec(7) was cut: paging on from "c-old" would skip it
+		expect(store.get()).toMatchObject({ capped: true, nextCursor: null })
+	})
+
 	it("holds arrivals while the list is scrolled or playing, and merges them on release", async () => {
 		let head = [rec(10), rec(9)]
 		const { api } = scripted(() => json(200, page(head)))
@@ -295,6 +332,40 @@ describe("RecordingsStore: refresh and live notices", () => {
 		expect(store.get().items.map(i => i.id)).toEqual([A])
 		await vi.waitFor(() => expect(calls).toHaveLength(4))
 		again()
+	})
+
+	it("a head asked for before a Keep or delete landed does not undo it; the next one is the truth", async () => {
+		let release: (() => void) | null = null
+		let kept = false
+		let slow = false
+		const { api } = scripted(call => {
+			if (call.method === "PUT")
+				return json(200, { id: A, kept: true, changed: true })
+			if (call.method === "DELETE") return json(200, { id: B, deleted: true })
+			const body = page([item(A, { kept }), item(B)])
+			return slow
+				? new Promise<Response>(resolve => {
+						release = () => resolve(json(200, body))
+					})
+				: json(200, body)
+		})
+		const store = new RecordingsStore(api)
+		await store.show({})
+		slow = true
+		const stale = store.refresh()
+		await store.setKept(A, true)
+		await store.remove(B)
+		;(release as unknown as () => void)()
+		await stale
+		expect(store.get().items.map(i => [i.id, i.kept])).toEqual([[A, true]])
+		// the core has both now
+		slow = false
+		kept = true
+		await store.refresh()
+		expect(store.get().items.map(i => [i.id, i.kept])).toEqual([
+			[A, true],
+			[B, false],
+		])
 	})
 
 	it("never runs two head reads at once, and never loses one asked meanwhile", async () => {
@@ -397,6 +468,37 @@ describe("recordings panel states (slow and failing core)", () => {
 		expect(calls).toHaveLength(4)
 		// Try again starts the backoff over
 		expect(store.get().retryAt).toBe(Date.now() + (FEED_RETRY_MS[0] ?? 0))
+	})
+
+	it("notices wait for a planned retry, and a retry keeps the error shown", async () => {
+		vi.useFakeTimers()
+		let ok = false
+		const { api, calls } = scripted(() =>
+			ok
+				? new Promise<Response>(resolve =>
+						setTimeout(() => resolve(json(200, page([item(A)]))), 500),
+					)
+				: json(503, {
+						error: "x",
+						code: "RECORDINGS_UNAVAILABLE",
+						message: "down",
+					}),
+		)
+		const store = new RecordingsStore(api)
+		await store.show({})
+		expect(store.get().retryAt).not.toBeNull()
+		// a notice a second against a failing core: no read before the retry
+		for (let i = 0; i < 3; i++) await store.notify()
+		expect(calls).toHaveLength(1)
+		ok = true
+		await vi.advanceTimersByTimeAsync(FEED_RETRY_MS[0] ?? 0)
+		expect(calls).toHaveLength(2)
+		// the retry is in flight: still the error, now retrying
+		expect(store.get()).toMatchObject({ status: "error", retrying: true })
+		expect(view(store.get()).body).toBe("error")
+		await vi.advanceTimersByTimeAsync(500)
+		expect(store.get()).toMatchObject({ status: "ready", retrying: false })
+		expect(view(store.get()).body).toBe("rows")
 	})
 
 	it("rows on screen: a slow refresh shows the progress line then busy; a failed one keeps the rows as of the last answer", async () => {
@@ -514,16 +616,23 @@ describe("paged feed merge", () => {
 	const id = (n: number) => String(n)
 	// newest first: larger first
 	const cmp = (a: number, b: number) => b - a
-	it("keeps the head, then the held rows older than it", () => {
+	it("keeps the head, then the held rows older than it, only when the head reaches them", () => {
 		expect(mergeHead([9, 8, 7, 6], [11, 10, 8], false, id, cmp)).toEqual([
 			11, 10, 8, 7, 6,
+		])
+		expect(mergeHead([9, 8, 7, 6], [11, 10, 9], false, id, cmp)).toEqual([
+			11, 10, 9, 8, 7, 6,
+		])
+		// a gap: the head ends above the newest held row
+		expect(mergeHead([9, 8], [12, 11, 10], false, id, cmp)).toEqual([
+			12, 11, 10,
 		])
 		expect(mergeHead([9, 8, 7], [10], true, id, cmp)).toEqual([10])
 		expect(countNew([9, 8], [11, 10, 9, 8], id, cmp)).toBe(2)
 		expect(countNew([], [3, 2], id, cmp)).toBe(2)
 	})
 
-	// Feature: panels, Property 1: a merged head is sorted, unique and loses no older row
+	// Feature: panels, Property 1: a merged head is sorted, unique, loses no older row it joins, and never keeps rows across a gap
 	it("a merged list is sorted, unique, holds the head and every held row older than it", () => {
 		const list = fc.uniqueArray(fc.integer({ min: 0, max: 400 }), {
 			maxLength: 60,
@@ -537,9 +646,13 @@ describe("paged feed merge", () => {
 					expect(cmp(out[i - 1] ?? 0, out[i] ?? 0)).toBeLessThan(0)
 				for (const h of head) expect(out).toContain(h)
 				const last = head.at(-1)
-				if (!complete && last !== undefined)
-					for (const h of held) if (h < last) expect(out).toContain(h)
-				if (complete) expect(out).toEqual(head)
+				const top = held[0]
+				const joins =
+					!complete && last !== undefined && top !== undefined && last <= top
+				if (joins) {
+					for (const h of held)
+						if (h < (last ?? 0)) expect(out).toContain(h)
+				} else expect(out).toEqual(head)
 			}),
 			{ numRuns: 200 },
 		)

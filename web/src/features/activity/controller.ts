@@ -198,6 +198,9 @@ export class ActivityController extends Store<ActivityViewState> {
 	private openRun = 0
 	/** Columns wait for the opening sequence (they follow their queries once it reaches them). */
 	private openingColumns = false
+	/** The opening sequence runs: an edit meanwhile waits for it (queued), so it stays within budget. */
+	private opening = false
+	private queuedRefresh: { counts: boolean } | null = null
 	private countsAbort: AbortController | null = null
 	private countsTimer: ReturnType<typeof setTimeout> | null = null
 	/** Duration of the last answered counts read and failures since, for the live cadence. */
@@ -296,6 +299,8 @@ export class ActivityController extends Store<ActivityViewState> {
 			if (this.attached === 0) {
 				this.openRun += 1
 				this.openingColumns = false
+				this.opening = false
+				this.queuedRefresh = null
 				this.feed.stop()
 				for (const f of this.columnFeeds.values()) f.stop()
 				this.columnQueries.clear()
@@ -608,6 +613,7 @@ export class ActivityController extends Store<ActivityViewState> {
 		col: ActivityColumn,
 		force: boolean,
 		now = scopeNow(),
+		fromOpening = false,
 	): Promise<void> {
 		const s = this.get()
 		let f = this.columnFeeds.get(col.id)
@@ -628,7 +634,8 @@ export class ActivityController extends Store<ActivityViewState> {
 					this.update(x => ({ ...x, seen: { ...x.seen, [id]: top } }))
 			})
 		}
-		if (this.attached === 0 || this.openingColumns) return Promise.resolve()
+		if (this.attached === 0 || (this.openingColumns && !fromOpening))
+			return Promise.resolve()
 		// while a column's search is being edited, that column previews the drawer's search and the others
 		// show their own (the edit is not a filter on them)
 		const base =
@@ -649,9 +656,11 @@ export class ActivityController extends Store<ActivityViewState> {
 	 * The opening budget: the visible list's first page first (one read), then the chip counts beside the
 	 * pinned columns, which load one after another after the list has painted (two reads at most).
 	 */
-	private async openSequence(): Promise<void> {
+	private async openSequence(force = true): Promise<void> {
 		const run = ++this.openRun
 		this.openingColumns = true
+		this.opening = true
+		this.queuedRefresh = null
 		const s = this.get()
 		this.syncColumns() // makes the column feeds; their reads wait (openingColumns)
 		await this.feed.setQuery(
@@ -662,15 +671,28 @@ export class ActivityController extends Store<ActivityViewState> {
 		this.scheduleCounts(0)
 		await nextFrame()
 		if (run !== this.openRun || this.attached === 0) return
-		this.openingColumns = false
 		for (const col of this.get().columns) {
 			if (run !== this.openRun || this.attached === 0) return
-			await this.syncColumn(col, true)
+			await this.syncColumn(col, force, scopeNow(), true)
 		}
+		if (run !== this.openRun || this.attached === 0) return
+		this.openingColumns = false
+		this.opening = false
+		// an edit made while it opened: applied now, in the same order (list, counts, columns one by one)
+		// (set by refresh() during the awaits above; TypeScript narrows it to the null set before them)
+		const queued = this.queuedRefresh as { counts: boolean } | null
+		this.queuedRefresh = null
+		if (queued !== null) void this.openSequence(false)
 	}
 
 	private refresh(counts = true): void {
 		if (this.attached === 0) return
+		if (this.opening) {
+			this.queuedRefresh = {
+				counts: counts || this.queuedRefresh?.counts === true,
+			}
+			return
+		}
 		const s = this.get()
 		void this.feed.setQuery(
 			this.query(),

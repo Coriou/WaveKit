@@ -123,6 +123,21 @@ describe("ui-check options", () => {
 				"--seed-recordings=5",
 			]),
 		).toThrow(/--target=fake/)
+		const live = [
+			"--target=live",
+			"--url=http://127.0.0.1:1/",
+			"--route=#/recordings",
+			"--measure",
+		]
+		expect(() => parseOptions(live)).toThrow(/--allow=measure/)
+		expect(parseOptions([...live, "--allow=measure"])).toMatchObject({
+			measure: true,
+			allowMeasure: true,
+			allow: [],
+		})
+		expect(parseOptions([...live, "--allow=pause,measure"]).allow).toEqual([
+			"pause",
+		])
 	})
 
 	it("names the panel a route opens", () => {
