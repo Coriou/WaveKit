@@ -1,9 +1,11 @@
 /**
  * Does a finished analog file's audio (8 kHz s16, what the recorder wrote) clearly measure as
  * something other than speech: a steady buzz (FM-demodulated 4FSK, TDMA, 2FSK or GMSK data, the
- * noise of an open squelch)? The recorder asks it only of a file of a channel whose standing prior
- * is digital-looking (recording-verdict.ts finishVerdict, `discarded:not-speech`); a file with its
- * own CTCSS tone, classed by its own tone, or of a channel with analog proof is never asked.
+ * noise of an open squelch)? Its answer discards a file only where recording-verdict.ts
+ * contentChecked applies (a `tone-required` prior, or backed digital evidence of the owner: never a
+ * spectral class alone, an ism or LoRa decode, or a co-channel decode; finishVerdict,
+ * `discarded:not-speech`); a file with its own CTCSS tone, classed by its own tone, a classed
+ * session's roll-over file, or a file of a channel with analog proof is never discarded by it.
  *
  * Two measures, over 32 ms frames (SPEECH_FRAME_SAMPLES = 256):
  * 1. Envelope range: the spread between the 90th and the 10th percentile of the frames' log level in
@@ -21,18 +23,26 @@
  * SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE. A shorter file, any unsteady window, or a periodic steady
  * signal (a pure or keyed tone, DTMF, a selcall) is kept: missing buzz is preferred to losing voice.
  *
- * Measured (scripts/bench/scanner-quality/speech-content.ts) on synthetic signals through
- * WidebandNfmChain, 12 s each: speech-like audio (pitched and unvoiced syllables, with and without pauses) at least 12.1 dB
- * down to a CNR of 5 dB in 12.5 kHz (8.2 to 9.7 dB at 4 dB, below the FM threshold: discarded or
- * kept); 4FSK at 4 800 Bd, 2FSK at 1 200 Bd, GMSK-like 2FSK at 4 800 Bd, an unmodulated carrier
- * and open-squelch noise at most 3.5 dB. Not caught: a TDMA burst train (keyed at 16.7 Hz, an
+ * Measured (scripts/bench/scanner-quality/speech-content.ts) on SYNTHETIC signals through
+ * WidebandNfmChain, 12 s each (nothing here is a real recording): speech-like audio (pitched and
+ * unvoiced syllables, with and without pauses, 2 400 Hz peak) at least 12.1 dB down to a CNR of
+ * 5 dB in 12.5 kHz (8.2 to 8.4 dB at 4 dB, below the FM threshold); hard speech (1 000 or
+ * 1 500 Hz peak deviation, a 30 or 50 % deep syllable envelope, no pauses, and combinations;
+ * tests' HARD_SPEECH_CASES) at least 10.2 dB at a CNR of 5 to 10 dB, the lowest a 1 000 Hz,
+ * 30 %, pause-free talker; 4FSK at 4 800 Bd, 2FSK at 1 200 Bd, GMSK-like 2FSK at 4 800 Bd, an
+ * unmodulated carrier and open-squelch noise at most 3.5 dB. Real FM-demodulated data (DMR,
+ * paging bursts with their edges) measures well above the synthetic data, so the bound leaves
+ * under 2 dB to the hardest synthetic speech; it leans to keeping (missing buzz is preferred to
+ * losing voice). A smoothed envelope and a syllable-rate (2 to 8 Hz) modulation measure were tried
+ * and separate no better (paging bursts modulate at syllable rates). Not caught: a TDMA burst train (keyed at 16.7 Hz, an
  * unsteady envelope; recording-verdict.ts bars a TDMA channel by its class), slow 2FSK (512 Bd:
  * periodic), any tone.
  *
  * Cost: per frame one 256-point complex FFT of the windowed frame and one of its power spectrum
  * (Fft, shared tables), a few hundred multiply-adds, and per 47 frames one sort of 94 numbers; all
- * buffers allocated in the constructor (about 5 KB per file), nothing after. About 1 ms of a core
- * per second of audio (see the bench), off the IQ path (the recorder feeds it what it writes).
+ * buffers allocated in the constructor (about 5 KB per file), nothing after. 0.5 to 2.4 ms of a
+ * core per second of audio (the bench, one Mac core), off the IQ path (the recorder feeds it what
+ * it writes).
  */
 import { Fft } from "../../spectrum/fft.js"
 
@@ -53,10 +63,11 @@ export const SPEECH_PITCH_MAX_LAG = 100
 export const SPEECH_PERIODIC_MIN_CORRELATION = 0.5
 /**
  * Every window's envelope range must be under this (dB) for a steady file: synthetic data and
- * noise through the chain measured at most 3.5, synthetic speech at least 12.1 down to a CNR of
- * 5 dB (8.2 to 9.7 at 4 dB), 33.2 and more at 30 dB.
+ * noise through the chain measured at most 3.5 (real data more); synthetic speech at
+ * least 12.1 down to a CNR of 5 dB (33.2 and more at 30 dB), hard synthetic speech (low
+ * deviation, shallow syllables, no pauses) at least 10.2 at a CNR of 5 to 10 dB.
  */
-export const SPEECH_STEADY_MAX_RANGE_DB = 9
+export const SPEECH_STEADY_MAX_RANGE_DB = 8.5
 /**
  * A steady file's periodic share must be under this to be clearly not speech: synthetic 2FSK at
  * 1 200 Bd measured 0.15, 4FSK, GMSK-like data and noise at most 0.03, synthetic speech 0.24 to

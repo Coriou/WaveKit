@@ -47,11 +47,7 @@ import {
 	type ScannerProbeDecoderType,
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
-import {
-	FSK_CLASSES,
-	type DigitalProof,
-	type VoicePrior,
-} from "../channel/recording-verdict.js"
+import type { DigitalProof, VoicePrior } from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
 import {
@@ -4154,15 +4150,18 @@ export class DiscoveryStore
 	/**
 	 * The wall time (ms) of discovery `id`'s latest digital evidence (VoicePrior.digitalSeenAt), or
 	 * null: over its kept observations (at most OBSERVATIONS_PER_DISCOVERY), the newest of an
-	 * observation's end (its start while open) when it voted an FSK class (FSK_CLASSES), and of a
-	 * digital proof's time (`digital-undecoded`: a sync hint or a `digital-unknown` candidate; a
-	 * decode of a digital voice, pager or packet protocol). One pass over cached proofs. Reads only.
+	 * observation's end (its start while open) when it voted `tdma-ms` (DMR's burst structure, which
+	 * an NFM voice never reads), and of a digital proof's time (`digital-undecoded`: a sync hint or a
+	 * `digital-unknown` candidate; a decode of a digital voice, pager or packet protocol). A plain
+	 * fsk4-*, fsk2 or gmsk spectral vote never refreshes it: a weak or low-deviation NFM voice reads
+	 * those. (A vote a decode backs carries that decode's proof; one the channel tier backs is the
+	 * recorder's DigitalClassLedger, a prior of its own.) One pass over cached proofs. Reads only.
 	 */
 	private digitalSeenAt(id: string): number | null {
 		let latest = Number.NEGATIVE_INFINITY
 		for (const o of this.byDiscovery.get(id) ?? []) {
 			const vote = voteOf(o)
-			if (vote !== undefined && FSK_CLASSES.has(vote)) {
+			if (vote === "tdma-ms") {
 				const at = Date.parse(o.endedAt ?? o.startedAt)
 				if (Number.isFinite(at)) latest = Math.max(latest, at)
 			}

@@ -1036,7 +1036,7 @@ export interface ScannerIqCaptureStatus {
  * `discarded:known-non-voice`, a shadow on a channel with a strong pager or data prior whose own
  * audio never classed it (no speech over a CTCSS tone); `discarded:late-non-voice`, a finished or
  * held file whose own signal a decode proved not voice after its transmission ended;
- * `discarded:not-speech`, a finished file on a channel with a digital-looking prior whose audio
+ * `discarded:not-speech`, a finished file on a channel with a strong or decode-backed digital prior whose audio
  * clearly measures as no speech (a steady buzz, no syllables, no pitch). Every
  * recording that started ends with exactly one terminal decision per file: `finalized`,
  * `evicted`, `refused:*` or `discarded:*`.

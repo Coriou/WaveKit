@@ -21,6 +21,7 @@ import {
 } from "../../../src/core/scanner/channel/speech-content.js"
 import {
 	CONTENT_CASES,
+	HARD_SPEECH_CASES,
 	contentAudio,
 	type ContentSignal,
 } from "../../../tests/unit/core/scanner/speech-content-fixtures.js"
@@ -76,6 +77,8 @@ if (files.length > 0) {
 				signal: { waveform: { kind: "speech", pauses }, cnrDb },
 				speech: true,
 			})
+	// Hard speech (low deviation, shallow syllables, no pauses) at a CNR of 5 to 10 dB.
+	for (const c of HARD_SPEECH_CASES) extra.push({ ...c, speech: true })
 	extra.push(
 		{
 			name: "dmr-4fsk-cnr-9",

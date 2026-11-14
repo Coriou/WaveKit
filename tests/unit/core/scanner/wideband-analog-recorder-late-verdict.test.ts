@@ -826,8 +826,11 @@ describe("joined transmissions and late verdicts", () => {
 
 describe("the content check: a file on a digital-looking channel whose audio is a steady buzz", () => {
 	// Feature: speech content check (speech-content.ts, finishVerdict's notSpeech).
-	/** A 6 s 4FSK over (4 800 Bd, DMR-like deviation) whose snapshots read analog-fm. */
-	async function dataOver(h: Harness): Promise<void> {
+	/**
+	 * A 4FSK over (4 800 Bd, DMR-like deviation) whose snapshots read analog-fm: 6 s of data, after
+	 * `voiceSeconds` of the harness's own (syllabic) source.
+	 */
+	async function dataOver(h: Harness, voiceSeconds = 0): Promise<void> {
 		const fsk = new FskSource({
 			fs: h.fs,
 			offsetHz: LOW_OFFSET,
@@ -836,9 +839,12 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 		const chunk = h.fs / 40
 		await h.feed(1, false)
 		const onset = h.engine.liveEdge()
-		const end = onset + 6 * h.fs
-		for (let i = 0; i < 240; i++) {
-			h.engine.write(fsk.next(chunk, true))
+		const voiceChunks = Math.round(voiceSeconds * 40)
+		const end = onset + (voiceSeconds + 6) * h.fs
+		for (let i = 0; i < voiceChunks + 240; i++) {
+			h.engine.write(
+				i < voiceChunks ? h.src.next(chunk, true) : fsk.next(chunk, true),
+			)
 			const edge = h.engine.liveEdge()
 			if (edge - onset >= 0.1 * h.fs)
 				h.rec.track(input("o", snapshot("o", onset, Math.min(edge, end), LOW)))
@@ -852,13 +858,66 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 		await h.feed(3.5, false)
 	}
 
-	it("a suspect prior (spectral fsk4-12k5): discarded:not-speech at its finish, nothing kept, no hold", async () => {
-		const h = low(() => spectral("fsk4-12k5"))
+	/** The owner's own DMR decode, dated now: backed digital evidence (a suspect lone merge). */
+	const ownDmr = () => prior({ labels: [label("dmr")] })
+
+	it("B1: backed evidence (the owner's own DMR decode): discarded:not-speech at its finish, nothing kept, no hold", async () => {
+		const h = low(ownDmr)
 		await dataOver(h)
 		await h.rec.idle()
 		expect(codes(h)).toContain("discarded:not-speech")
 		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
 		expect(h.timers).toHaveLength(0)
+	}, 120_000)
+
+	it("B1: backedClass (two channel-tier digital observations of the discovery): discarded:not-speech", async () => {
+		// Two channel-tier digital observations of the discovery: backedClass (DigitalClassLedger).
+		const h = low(() => prior({}))
+		await h.feed(1, false)
+		for (let k = 0; k < 2; k++)
+			h.rec.track(
+				input(`o_dig${k}`, snapshot(`o_dig${k}`, 0, 100, LOW), {
+					analogFm: false,
+					nonAnalog: true,
+					digitalClass: true,
+				}),
+			)
+		await dataOver(h)
+		await h.rec.idle()
+		expect(codes(h)).toContain("discarded:not-speech")
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+	}, 120_000)
+
+	for (const [name, p] of [
+		["a spectral-only class (fsk4-12k5)", spectral("fsk4-12k5")],
+		["a spectral-only class (gmsk-narrow)", spectral("gmsk-narrow")],
+		["a co-channel DMR decode", coChannelDmr],
+		["the owner's ism decode", prior({ labels: [label("ism")] })],
+		["the owner's LoRa decode", prior({ labels: [label("lora")] })],
+	] as const)
+		it(`B1: ${name} only (suspect, unbacked): no content check, the buzz is held, then kept`, async () => {
+			const h = low(() => p)
+			await dataOver(h)
+			expect(h.timers.map(t => t.ms)).toEqual([LATE_VERDICT_GRACE_MS])
+			await h.fire()
+			await h.rec.idle()
+			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+			expect(codes(h)).not.toContain("discarded:not-speech")
+		}, 120_000)
+
+	it("M2: a classed session's roll-over file is never content-checked: voice, then a steady buzz past WIDEBAND_MAX_FILE_MS, both files kept", async () => {
+		const h = low(ownDmr, null, { syllables: true })
+		// The voice ends 1 s before the roll-over: the next file is the buzz alone.
+		await dataOver(h, WIDEBAND_MAX_FILE_MS / 1000 - 1)
+		await h.fire()
+		await h.rec.idle()
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops.map(o => [o.cut, o.outcome])).toEqual([
+			["duration-limit", "finalized"],
+			["completed", "finalized"],
+		])
+		expect(codes(h)).not.toContain("discarded:not-speech")
 	}, 120_000)
 
 	it("the same audio with no prior is kept at once (no content check)", async () => {

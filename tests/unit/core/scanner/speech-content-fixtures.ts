@@ -7,7 +7,8 @@
  * Waveforms (deviation in Hz at time t s):
  * - speech: 4 Hz syllables E(t) = (1 − cos 2π·4t) / 2; two syllables in three voiced (harmonics
  *   1 to 24 of a 105 to 145 Hz pitch gliding per syllable, a formant-like weighting peaking near
- *   500 and 1 500 Hz), the third unvoiced (noise); 2 400 Hz peak. `pauses`: "short", 300 ms of
+ *   500 and 1 500 Hz), the third unvoiced (noise); 2 400 Hz peak (`peakHz`), the envelope at full
+ *   depth (`depth` d: E′ = 1 − d·(1 + cos 2π·4t) / 2). `pauses`: "short", 300 ms of
  *   silence every 1.7 s; "long", 1.2 s of speech then 2.5 s of silence; "none", no pause.
  * - fsk: random symbols at `baud` over `levelsHz`; `tdma` keys it 30 ms on, 30 ms off (a DMR
  *   mobile's slot), the carrier staying on.
@@ -25,6 +26,13 @@ const TWO_PI = 2 * Math.PI
 interface SpeechWave {
 	readonly kind: "speech"
 	readonly pauses: "short" | "long" | "none"
+	/** Peak deviation (Hz); default 2 400. A quiet talker or a low-deviation radio: 1 000 to 1 500. */
+	readonly peakHz?: number
+	/**
+	 * Syllable envelope depth (0..1); default 1. The envelope swings from 1 − depth to 1: a
+	 * compressed or shallow talker, 0.3 to 0.5.
+	 */
+	readonly depth?: number
 }
 interface FskWave {
 	readonly kind: "fsk"
@@ -88,7 +96,9 @@ function deviation(w: Waveform, fs: number, rng: () => number): () => number {
 							? t % 3.7 > 1.2
 							: false
 				if (quiet) return 0
-				const e = (1 - Math.cos(TWO_PI * 4 * t)) / 2
+				const depth = w.depth ?? 1
+				const peak = (w.peakHz ?? 2_400) / 2_400
+				const e = peak * (1 - (depth * (1 + Math.cos(TWO_PI * 4 * t))) / 2)
 				const s = syllable(Math.floor(t * 4))
 				if (!s.voiced) return 1_600 * e * (2 * rng() - 1)
 				let v = 0
@@ -252,3 +262,33 @@ export const CONTENT_CASES: readonly {
 		speech: false,
 	},
 ]
+
+/**
+ * Hard speech (M3): low deviation (1 000 or 1 500 Hz peak), a shallow syllable envelope (30 or
+ * 50 % depth), no pauses, and their combinations, each at a CNR of 5, 6, 8 and 10 dB: all speech.
+ */
+export const HARD_SPEECH_CASES: readonly {
+	readonly name: string
+	readonly signal: ContentSignal
+}[] = (
+	[
+		["lowdev-1000", { pauses: "short", peakHz: 1_000 }],
+		["lowdev-1500", { pauses: "short", peakHz: 1_500 }],
+		["shallow-30", { pauses: "short", depth: 0.3 }],
+		["shallow-50", { pauses: "short", depth: 0.5 }],
+		["continuous", { pauses: "none" }],
+		[
+			"lowdev-1000-shallow-30-continuous",
+			{ pauses: "none", peakHz: 1_000, depth: 0.3 },
+		],
+		[
+			"lowdev-1500-shallow-50-continuous",
+			{ pauses: "none", peakHz: 1_500, depth: 0.5 },
+		],
+	] as const
+).flatMap(([name, w]) =>
+	[5, 6, 8, 10].map(cnrDb => ({
+		name: `${name}-cnr-${cnrDb}`,
+		signal: { waveform: { kind: "speech" as const, ...w }, cnrDb },
+	})),
+)

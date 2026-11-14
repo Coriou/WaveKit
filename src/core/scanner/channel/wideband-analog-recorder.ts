@@ -755,6 +755,8 @@ interface FileState {
 	classTone: number | null
 	/** A tone-only session's roll-over file after one its tone classed: it carries that class. */
 	toneCarried: boolean
+	/** A roll-over file (the previous one hit the duration limit): of a classed session, never content-checked. */
+	rollOver: boolean
 	/** What it wrote, measured for speech (speech-content.ts; finishVerdict's `notSpeech`). */
 	readonly speech: SpeechContentMeter
 	/** The start the segmenter planned (onset − preRoll, clamped): the head-cut reference. */
@@ -2726,6 +2728,7 @@ export class WidebandAnalogRecorder {
 			speech: new SpeechContentMeter(),
 			classTone: null,
 			toneCarried: false,
+			rollOver: false,
 			planned: startSample,
 			startSample,
 			endSample: null,
@@ -3787,6 +3790,7 @@ export class WidebandAnalogRecorder {
 		if (next !== null && !this.stopped) {
 			this.openFile(s, next)
 			const cont = s.file as FileState | null
+			if (cont && file.cut === "duration-limit") cont.rollOver = true
 			if (cont && file.cut === "duration-limit" && s.toneOnly && !file.failed)
 				cont.toneCarried = true
 			if (cont && next >= endedAt && next <= s.next) {
@@ -4077,8 +4081,11 @@ export class WidebandAnalogRecorder {
 						file.startSample < s.strongFrom + s.vetoFrom - s.onset,
 					decodedOwn,
 					joinedVoice: joinedVoiceOverlaps(s, file),
+					// A classed session's roll-over file continues a voiced over: never content-checked.
 					notSpeech:
-						file.classTone === null && clearlyNotSpeech(file.speech.result()),
+						file.classTone === null &&
+						!(file.rollOver && s.classed) &&
+						clearlyNotSpeech(file.speech.result()),
 					final: final || room === 0,
 					now,
 				})

@@ -25,9 +25,9 @@
  *   it. The store's class of the channel is analog-fm too. Expected: bursts 2 and 3 never written;
  *   the first one is kept (a known limit: a fresh channel with no digital prior holds nothing).
  * - pager-stored-fsk2-wide: the same, the store's class of the channel fsk2-wide (the spectrum's
- *   majority vote): a suspect prior, so the first burst's file faces the content check
- *   (speech-content.ts) at its finish and is discarded there (`discarded:not-speech`; without it,
- *   its decode citing it inside the grace would). Expected: no burst kept.
+ *   majority vote): a suspect prior read from the spectrum alone, so no content check
+ *   (recording-verdict.ts contentChecked): the first burst is held, and its decode, citing it
+ *   inside the grace, discards it. Expected: no burst kept.
  * - pager-sequence-<spacing>s: SEQUENCE_BURSTS = 8 such 4 s bursts on one channel whose stored
  *   class is analog-fm (live bursts read analog-fm), onsets <spacing> s apart (6 and 9: the next
  *   burst keys up before, or just after, the previous one's decode; 10, 20, 30: realistic paging

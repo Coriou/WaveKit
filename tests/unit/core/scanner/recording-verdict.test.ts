@@ -25,6 +25,8 @@ import {
 	STRONG_CLASS_MIN_OBSERVATIONS,
 	STRONG_CLASS_TTL_MS,
 	STRONG_PRIOR_TTL_MS,
+	OWNER_DEDICATED_PRIOR_TTL_MS,
+	contentChecked,
 	TDMA_CHANNEL_MIN_SHARE,
 	TDMA_CHANNEL_MIN_VOTES,
 	type DigitalProof,
@@ -474,11 +476,12 @@ describe("recording-verdict table", () => {
 			expect(provisionalRoom(cap)).toBe(room)
 	})
 
-	describe("STRONG_PRIOR_TTL_MS: a co-channel dedicated-channel decode is strong for 30 × 60 000 = 1 800 000 ms; the owner's never lapses", () => {
+	describe("STRONG_PRIOR_TTL_MS: a co-channel dedicated-channel decode is strong for 30 × 60 000 = 1 800 000 ms; the owner's for OWNER_DEDICATED_PRIOR_TTL_MS (24 h)", () => {
 		const pager = (at: number | null) => prior([decoded("pocsag", true, at)])
 		const coPager = (at: number | null) => prior([decoded("pocsag", false, at)])
-		it("the bound", () => {
+		it("the bounds", () => {
 			expect(STRONG_PRIOR_TTL_MS).toBe(1_800_000)
+			expect(OWNER_DEDICATED_PRIOR_TTL_MS).toBe(86_400_000)
 		})
 		for (const [name, at, reading] of [
 			["decoded now", NOW, "tone-required"],
@@ -510,9 +513,17 @@ describe("recording-verdict table", () => {
 				)
 			})
 		// Live audit: a pager channel's POCSAG decode about 24 h old, no analog proof ever.
-		it("the owner's POCSAG decode 24 h old, no analog proof: tone required; with an analog proof: none", () => {
+		it("the owner's POCSAG decode 23 h 59 min old: tone required; exactly 24 h: tone required; 24 h + 1 ms: suspect; with an analog proof: none", () => {
 			const old = NOW - 24 * 60 * 60_000
+			expect(readPrior(pager(NOW - (24 * 60 - 1) * 60_000), false, NOW)).toBe(
+				"tone-required",
+			)
 			expect(readPrior(pager(old), false, NOW)).toBe("tone-required")
+			expect(readPrior(pager(old - 1), false, NOW)).toBe("suspect")
+			expect(
+				readPrior(pager(NOW + OWNER_DEDICATED_PRIOR_TTL_MS + 1), false, NOW),
+			).toBe("suspect")
+			expect(admissionVerdict(pager(old - 1), false, NOW)).toBeNull()
 			expect(
 				readPrior(
 					prior([decoded("pocsag", true, old)], "fsk2-wide", true),
@@ -984,10 +995,19 @@ describe("a digital channel (owner digital label within the TTL + its protocol's
 				reading: "suspect",
 			},
 			{
-				name: "2 observations, one older than STRONG_PRIOR_TTL_MS (a sighting of any age counts; the TTL runs from the latest): tone required",
+				name: "2 observations, one older than STRONG_PRIOR_TTL_MS (rule b counts only sightings within the TTL): suspect",
 				prior: withProofs(
 					[unchecked],
 					[sync("o1", NOW - STRONG_PRIOR_TTL_MS - 1), sync("o2", recent)],
+					fsk,
+				),
+				reading: "suspect",
+			},
+			{
+				name: "2 observations both within the TTL, one exactly STRONG_PRIOR_TTL_MS old: tone required",
+				prior: withProofs(
+					[unchecked],
+					[sync("o1", NOW - STRONG_PRIOR_TTL_MS), sync("o2", recent)],
 					fsk,
 				),
 				reading: "tone-required",
@@ -1391,13 +1411,38 @@ describe("a digital channel's TTL runs from its latest digital evidence (VoicePr
 	})
 	for (const [name, p, reading] of [
 		[
-			"DMR hints 57 and 62 min ago, an fsk4-12k5 vote 1 min ago",
+			"DMR hints 57 and 62 min ago (outside the TTL: rule b does not count them), fresh evidence 1 min ago",
 			channel(min),
+			"suspect",
+		],
+		[
+			"DMR hints 5 and 10 min ago, the latest digital evidence 5 min ago",
+			channel(5 * min, false, [
+				{
+					protocol: "dmr",
+					at: NOW - 5 * min,
+					checked: false,
+					observationId: "o1",
+				},
+				{
+					protocol: "dmr",
+					at: NOW - 10 * min,
+					checked: false,
+					observationId: "o2",
+				},
+			]),
 			"tone-required",
 		],
 		[
-			"the same, the latest digital evidence 30 min ago (the TTL)",
-			channel(STRONG_PRIOR_TTL_MS),
+			"a checked DMR decode 2 h ago, the latest digital evidence (a tdma-ms vote) exactly the TTL ago",
+			channel(STRONG_PRIOR_TTL_MS, false, [
+				{
+					protocol: "dmr",
+					at: NOW - 120 * min,
+					checked: true,
+					observationId: "o1",
+				},
+			]),
 			"tone-required",
 		],
 		[
@@ -1412,7 +1457,7 @@ describe("a digital channel's TTL runs from its latest digital evidence (VoicePr
 		],
 		["FROZEN: the same with an analog proof", channel(min, true), "none"],
 		[
-			"a checked DMR decode 2 h ago, a vote 1 min ago",
+			"a checked DMR decode 2 h ago, a tdma-ms vote 1 min ago (digitalSeenAt)",
 			channel(min, false, [
 				{
 					protocol: "dmr",
@@ -1520,8 +1565,17 @@ describe("a TDMA channel known by its class alone (tdmaChannel): strong", () => 
 
 describe("finishVerdict: a file whose audio clearly measures as no speech (notSpeech)", () => {
 	// Feature: recording-verdict, the content check (speech-content.ts).
+	// A spectral class alone (a weak NFM voice reads fsk4-*): suspect, no content check.
 	const suspect = prior([], "fsk4-12k5")
 	const strong = prior([decoded("pocsag")])
+	// The owner's own checked DMR decode (a lone merge: suspect), dated now: backed.
+	const ownDecode = prior([decoded("dmr")])
+	const ownCheckedProof: VoicePrior = {
+		...prior([weak("dmr", "activity")], "fsk4-12k5"),
+		digitalProofs: () => [
+			{ protocol: "dmr", at: NOW - 60_000, checked: true, observationId: "o1" },
+		],
+	}
 	const verdict = (
 		p: VoicePrior | null,
 		over: Partial<Parameters<typeof finishVerdict>[0]> = {},
@@ -1539,12 +1593,79 @@ describe("finishVerdict: a file whose audio clearly measures as no speech (notSp
 			...over,
 		})
 	for (const [name, p, over, out] of [
-		["suspect prior: discarded at once", suspect, {}, "discarded:not-speech"],
 		[
-			"suspect prior, at the end of its grace: discarded",
+			"spectral-only suspect prior (fsk4-12k5): held, no content check",
+			suspect,
+			{},
+			"hold",
+		],
+		[
+			"spectral-only suspect prior, at the end of its grace: kept",
 			suspect,
 			{ final: true },
+			"finish",
+		],
+		[
+			"spectral-only gmsk-narrow suspect prior: held",
+			prior([], "gmsk-narrow"),
+			{},
+			"hold",
+		],
+		[
+			"backedClass (a decode- or channel-tier-backed digital class): discarded",
+			suspect,
+			{ backedClass: true },
 			"discarded:not-speech",
+		],
+		[
+			"the owner's DMR decode now (suspect lone merge): discarded",
+			ownDecode,
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"the owner's DMR decode now, at the end of its grace: discarded",
+			ownDecode,
+			{ final: true },
+			"discarded:not-speech",
+		],
+		[
+			"the owner's DMR decode 1 ms past STRONG_PRIOR_TTL_MS: held",
+			prior([decoded("dmr", true, NOW - STRONG_PRIOR_TTL_MS - 1)]),
+			{},
+			"hold",
+		],
+		[
+			"the owner's checked sync hint label: discarded",
+			prior([{ ...weak("dmr", "activity"), checkedHint: true }]),
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"the owner's unchecked sync hint label: held",
+			prior([{ ...weak("dmr", "activity"), checkedHint: false }]),
+			{},
+			"hold",
+		],
+		[
+			"a kept observation's checked DMR proof: discarded",
+			ownCheckedProof,
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"a co-channel DMR decode only: held",
+			prior([decoded("dmr", false)], "fsk4-12k5"),
+			{},
+			"hold",
+		],
+		["the owner's ism decode: held", prior([decoded("ism")]), {}, "hold"],
+		["the owner's LoRa decode: held", prior([decoded("lora")]), {}, "hold"],
+		[
+			"a digital-unknown candidate: held",
+			prior([weak("digital-unknown", "activity")]),
+			{},
+			"hold",
 		],
 		[
 			"strong prior, a snapshot-classed file: discarded",
@@ -1588,4 +1709,16 @@ describe("finishVerdict: a file whose audio clearly measures as no speech (notSp
 		it(`${name}`, () => {
 			expect(verdict(p, over)).toBe(out)
 		})
+	it("contentChecked: tone-required always; a throwing proofs read is not applied", () => {
+		expect(contentChecked("tone-required", null, false, NOW)).toBe(true)
+		expect(contentChecked("suspect", null, true, NOW)).toBe(true)
+		expect(contentChecked("suspect", null, false, NOW)).toBe(false)
+		const throwing: VoicePrior = {
+			...suspect,
+			digitalProofs: () => {
+				throw new Error("read failed")
+			},
+		}
+		expect(contentChecked("suspect", throwing, false, NOW)).toBe(false)
+	})
 })

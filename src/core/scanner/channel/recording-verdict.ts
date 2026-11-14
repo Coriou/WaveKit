@@ -180,8 +180,8 @@ export function fileDecodedOwn(
  * distinct observations from these (digitalEvidence); asked only for an owner's digital label.
  * `digitalSeenAt` (absent: the digital proofs' newest time) is the wall time (ms; null: none) of
  * the owner's latest digital evidence: the newest kept observation carrying a digital proof (a
- * decode of a non-analog protocol, a dsd-fme sync hint, `digital-unknown`) or an FSK class vote
- * (FSK_CLASSES); a digital channel's TTL runs from it (digitalChannel, tdmaChannel). Asked only
+ * decode of a non-analog protocol, a dsd-fme sync hint, `digital-unknown`) or a `tdma-ms` class
+ * vote (never a plain fsk4-*, fsk2 or gmsk vote: a weak NFM voice reads those); a digital channel's TTL runs from it (digitalChannel, tdmaChannel). Asked only
  * for an owner's digital label or a stored `tdma-ms` class, like `classVotes`.
  */
 export interface VoicePrior {
@@ -223,9 +223,9 @@ export interface ClassVotes {
  * How strong a prior is (docs/SCANNER.md, "Known digital or paging channels"):
  * - `tone-required`: STRONG. A dated decode (confidence `decoded`) of a protocol made only on a
  *   channel of its own (DEDICATED_CHANNEL_FAMILIES: a pager, or APRS, AIS, ACARS, VDL2, ADS-B):
- *   the owner's, however old (with no analog proof on the channel, a pager channel stays one: a
- *   quiet night does not make it a voice channel), or a co-channel discovery's made within
- *   STRONG_PRIOR_TTL_MS of now (an older or undated one is only `suspect`). A new recording, and a file of a transmission that joined a
+ *   the owner's made within OWNER_DEDICATED_PRIOR_TTL_MS (24 h) of now (each new decode refreshes
+ *   it: a quiet night does not make a pager channel a voice channel), or a co-channel discovery's
+ *   made within STRONG_PRIOR_TTL_MS of now (an older or undated one is only `suspect`). A new recording, and a file of a transmission that joined a
  *   recording while the prior was strong, is a shadow that writes nothing unless its own audio
  *   carries speech over a CTCSS tone (the recorder's classByTone); it is never a remembered
  *   refusal.
@@ -237,19 +237,19 @@ export interface ClassVotes {
  *   (digitalChannelClasses): a channel its own spectrum and its own decoder both call digital,
  *   with no analog proof among its kept observations, is not untoned voice. Unchecked DMR sync
  *   hints alone also make one when that share reads `tdma-ms` alone, or when they come from
- *   DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS distinct observations. The sightings are those of
- *   the owner's kept observations, of any age; the TTL runs from the owner's latest digital
- *   evidence (VoicePrior.digitalSeenAt: a digital proof or an FSK class vote of any kept
- *   observation), so a DMR channel identify no longer probes stays one while its overs keep
- *   reading FSK. An analog proof or label ends it; so does STRONG_PRIOR_TTL_MS without any
- *   digital evidence. Any other unchecked sync hint, an undated label, or votes for another
+ *   DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS distinct observations within STRONG_PRIOR_TTL_MS of
+ *   now. Checked sightings are those of the owner's kept observations, of any age; the TTL runs
+ *   from the owner's latest digital evidence (VoicePrior.digitalSeenAt: a digital proof or a
+ *   `tdma-ms` class vote of any kept observation; a plain fsk4-*, fsk2 or gmsk spectral vote never
+ *   refreshes it, since a weak NFM voice reads those), so a DMR channel identify no longer probes
+ *   stays one while its overs keep reading TDMA. An analog proof or label ends it; so does
+ *   STRONG_PRIOR_TTL_MS without any digital evidence. Any other unchecked sync hint, an undated label, or votes for another
  *   protocol's class are only `suspect`.
  *   Also STRONG (tdmaChannel), whatever its label: a stored class of `tdma-ms` read by
  *   at least TDMA_CHANNEL_MIN_VOTES of the owner's observations and TDMA_CHANNEL_MIN_SHARE of
  *   its votes, its latest digital evidence within the TTL. TDMA burst structure is DMR's; an NFM
  *   voice never reads it (unlike fsk4-12k5, fsk4-6k25 or gmsk-narrow, which a weak or
- *   low-deviation voice reads: those stay `suspect`, and their files face the content check,
- *   finishVerdict's `notSpeech`).
+ *   low-deviation voice reads: those stay `suspect`).
  * - `suspect`: WEAK. A digital voice decode (DMR, NXDN, YSF, dPMR, ...) on the owner or a
  *   co-channel discovery: the store keeps analog and digital overs of one channel in one
  *   discovery (a lone merge) as readily as in two, and PMR446 and DMR446, mixed-mode repeaters
@@ -290,15 +290,22 @@ const SHARED_CHANNEL_PROTOCOLS: ReadonlySet<ScannerProtocol> = new Set(["lora"])
  * How long a co-channel discovery's dedicated-channel decode stays a strong prior after it was
  * made, and how long a digital channel stays one after its latest digital evidence: 30 × 60 000 =
  * 1 800 000 ms. Past it the prior is only `suspect`: its files are held and discarded only by a
- * decode of their own signal or by the content check. The owner's own dedicated-channel decode
- * never lapses (strongLabel).
+ * decode of their own signal or by the content check (contentChecked). The owner's own
+ * dedicated-channel decode lasts OWNER_DEDICATED_PRIOR_TTL_MS (strongLabel).
  */
 export const STRONG_PRIOR_TTL_MS = 30 * 60_000
+/**
+ * How long the owner's own dedicated-channel decode (a pager, APRS, AIS, ...) stays a strong prior
+ * after it was made: 24 × 3 600 000 = 86 400 000 ms. The owner's label is its newest decode, so
+ * each page refreshes it; a pager channel quiet for a day reads `suspect` again.
+ */
+export const OWNER_DEDICATED_PRIOR_TTL_MS = 24 * 3_600_000
 
 /**
- * Strong (PriorStrength): a dated decode of a dedicated-channel protocol, the owner's (any age:
- * readPrior's analog proof is what ends it) or a co-channel discovery's made in
- * [now − STRONG_PRIOR_TTL_MS, now + STRONG_PRIOR_TTL_MS] (a clock skew either way).
+ * Strong (PriorStrength): a dated decode of a dedicated-channel protocol, the owner's made in
+ * [now − OWNER_DEDICATED_PRIOR_TTL_MS, now + OWNER_DEDICATED_PRIOR_TTL_MS] or a co-channel
+ * discovery's made in [now − STRONG_PRIOR_TTL_MS, now + STRONG_PRIOR_TTL_MS] (a clock skew
+ * either way).
  */
 function strongLabel(l: VoicePrior["labels"][number], now: number): boolean {
 	return (
@@ -307,7 +314,8 @@ function strongLabel(l: VoicePrior["labels"][number], now: number): boolean {
 		!SHARED_CHANNEL_PROTOCOLS.has(l.protocol) &&
 		l.at !== null &&
 		Number.isFinite(l.at) &&
-		(l.owner || Math.abs(now - l.at) <= STRONG_PRIOR_TTL_MS)
+		Math.abs(now - l.at) <=
+			(l.owner ? OWNER_DEDICATED_PRIOR_TTL_MS : STRONG_PRIOR_TTL_MS)
 	)
 }
 
@@ -375,7 +383,7 @@ interface DigitalSighting {
 	readonly observationId: string | null
 }
 
-/** Per protocol: a checked sighting, and the distinct unchecked observations. */
+/** Per protocol: a checked sighting, and the distinct unchecked observations within the TTL. */
 interface DigitalEvidence {
 	checked: boolean
 	readonly unchecked: Set<string>
@@ -393,15 +401,19 @@ const digitalProtocol = (p: ScannerProtocol): boolean =>
 	p === "digital-unknown" || familyOf(p) === "digital-voice"
 
 /**
- * One pass over the owner's dated digital sightings, of any age (digitalChannel reads freshness
- * from the latest digital evidence instead): its published labels (`digital-unknown` and a decode
+ * One pass over the owner's dated digital sightings: checked ones of any age (digitalChannel reads
+ * freshness from the latest digital evidence instead), unchecked ones only within
+ * STRONG_PRIOR_TTL_MS of `now` (rule b counts recent overs only): its published labels (`digital-unknown` and a decode
  * or checked hint are checked) and, when the store gives them, the digital proofs of its kept
  * observations (VoicePrior.digitalProofs), so a newer unchecked hint never hides a checked one
  * and a decode no longer shown still counts. An unchecked sighting counts by its observation; a
  * published label citing none counts as one only when no observation proofs are given (it is one
  * of them otherwise). `latest`: the newest sighting's time (−∞: none).
  */
-function digitalEvidence(prior: VoicePrior): {
+function digitalEvidence(
+	prior: VoicePrior,
+	now: number,
+): {
 	readonly byProtocol: Map<ScannerProtocol, DigitalEvidence>
 	readonly latest: number
 } {
@@ -411,6 +423,7 @@ function digitalEvidence(prior: VoicePrior): {
 	const note = (s: DigitalSighting): void => {
 		if (!digitalProtocol(s.protocol) || !dated(s.at)) return
 		latest = Math.max(latest, s.at)
+		if (!s.checked && !inTtl(s.at, now)) return
 		let e = out.get(s.protocol)
 		if (e === undefined) {
 			e = { checked: false, unchecked: new Set() }
@@ -466,7 +479,7 @@ const TDMA_CLASSES: ReadonlySet<ScannerClass> = new Set(["tdma-ms"])
  * - DMR with only unchecked sync hints (dsd-fme sync with no verified TG/SRC) and either
  *   (a) that share in `tdma-ms` alone (TDMA burst structure is DMR's; NFM never reads it), or
  *   (b) that share in DMR's classes and hints from DIGITAL_CHANNEL_UNCHECKED_OBSERVATIONS
- *   distinct observations. An unchecked hint of another protocol (dPMR keeps no checked
+ *   distinct observations within the TTL. An unchecked hint of another protocol (dPMR keeps no checked
  *   content) is never one.
  * A throwing or absent read: not one.
  */
@@ -474,7 +487,7 @@ function digitalChannel(prior: VoicePrior, now: number): boolean {
 	if (!prior.labels.some(l => l.owner && digitalProtocol(l.protocol)))
 		return false
 	try {
-		const { byProtocol, latest } = digitalEvidence(prior)
+		const { byProtocol, latest } = digitalEvidence(prior, now)
 		if (byProtocol.size === 0) return false
 		const v = prior.classVotes?.()
 		if (v === undefined || v.total < DIGITAL_CHANNEL_MIN_VOTES) return false
@@ -627,7 +640,7 @@ export function joinedVoiceOverlaps(
  * `discarded:known-non-voice`, a shadow of a channel with a strong prior its own audio never
  * classed; `discarded:late-non-voice`, a decode of its own signal found at its finish or when
  * its hold ends; `discarded:not-speech`, audio that clearly measures as no speech
- * (speech-content.ts) on a channel with a digital-looking prior.
+ * (speech-content.ts) on a channel whose digital prior is backed (contentChecked).
  */
 export type FinishVerdict =
 	| "finish"
@@ -645,10 +658,10 @@ export type FinishVerdict =
  * joinedVoiceOverlaps: kept at once, the two cannot be separated); under a `tone-required` prior
  * a file no snapshot classed analog-fm (`snapshotClassed` false: classed by its own audio only,
  * or a file of a transmission that joined while the prior was strong) is discarded
- * (`discarded:known-non-voice`); under any digital prior (`tone-required` or `suspect`) a file
- * whose audio clearly measures as no speech (`notSpeech`, speech-content.ts clearlyNotSpeech: a
- * steady buzz) and that no joined voice shares is discarded (`discarded:not-speech`) at once;
- * otherwise one a snapshot classed under `tone-required`, or any under `suspect`, is held, then
+ * (`discarded:known-non-voice`); where the content check applies (contentChecked: a
+ * `tone-required` prior, or backed digital evidence of the owner) a file whose audio clearly
+ * measures as no speech (`notSpeech`, speech-content.ts clearlyNotSpeech: a steady buzz) and that
+ * no joined voice shares is discarded (`discarded:not-speech`) at once; otherwise one a snapshot classed under `tone-required`, or any under `suspect`, is held, then
  * kept; with none it is kept at once (no content check: an analog proof or label on the channel
  * reads `none`). A prior alone (a decode of another transmission, a co-channel discovery's) never
  * discards a file a snapshot classed and whose audio may be speech. `now`: wall ms (readPrior).
@@ -671,8 +684,51 @@ export function finishVerdict(input: {
 	if (strength === "tone-required" && !input.snapshotClassed)
 		return "discarded:known-non-voice"
 	if (strength === "none") return "finish"
-	if (input.notSpeech && !input.joinedVoice) return "discarded:not-speech"
+	if (
+		input.notSpeech &&
+		!input.joinedVoice &&
+		contentChecked(strength, input.prior, input.backedClass, input.now)
+	)
+		return "discarded:not-speech"
 	return input.final ? "finish" : "hold"
+}
+
+/**
+ * Where finishVerdict's content check (`notSpeech`) applies under a digital prior: a
+ * `tone-required` prior (a dedicated-channel decode, a digital or TDMA channel), or digital
+ * evidence of the owner more than its spectrum backs: `backedClass` (DigitalClassLedger: a digital
+ * class a verified decode or the channel tier backs), or the owner's own digital voice decode or
+ * sync hint with checked content (a published label or a kept observation's proof) dated within
+ * STRONG_PRIOR_TTL_MS of `now`. Never for a `suspect` prior read from a spectral class alone (a
+ * weak or low-deviation NFM voice reads fsk4-*, gmsk-narrow), an `ism` or LoRa decode, a
+ * `digital-unknown` candidate, an unchecked sync hint, or a co-channel decode: untoned voice lives
+ * on those channels. A throwing read: not applied.
+ */
+export function contentChecked(
+	strength: PriorStrength,
+	prior: VoicePrior | null,
+	backedClass: boolean,
+	now: number,
+): boolean {
+	if (strength === "tone-required" || backedClass) return true
+	if (prior === null) return false
+	try {
+		const backed = (protocol: ScannerProtocol, at: number | null): boolean =>
+			familyOf(protocol) === "digital-voice" && inTtl(at, now)
+		return (
+			prior.labels.some(
+				l =>
+					l.owner &&
+					(l.confidence === "decoded" || l.checkedHint === true) &&
+					backed(l.protocol, l.at),
+			) ||
+			(prior.digitalProofs?.() ?? []).some(
+				p => p.checked && backed(p.protocol, p.at),
+			)
+		)
+	} catch {
+		return false
+	}
 }
 
 /**

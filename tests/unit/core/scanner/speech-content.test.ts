@@ -18,6 +18,7 @@ import {
 } from "../../../../src/core/scanner/channel/speech-content.js"
 import {
 	CONTENT_CASES,
+	HARD_SPEECH_CASES,
 	contentAudio,
 	type ContentSignal,
 } from "./speech-content-fixtures.js"
@@ -57,6 +58,15 @@ describe("speech-content: synthetic signals through the NFM chain", () => {
 			)
 			expect(clearlyNotSpeech(r)).toBe(false)
 			expect(r.maxRangeDb).toBeGreaterThan(SPEECH_STEADY_MAX_RANGE_DB + 2)
+		}, 60_000)
+
+	// Feature: speech content check, hard speech (low deviation, shallow syllables, no pauses).
+	for (const c of HARD_SPEECH_CASES)
+		it(`hard speech ${c.name}: kept, with a margin over the steady bound`, () => {
+			const r = measure(contentAudio(c.signal, SECONDS))
+			expect(clearlyNotSpeech(r)).toBe(false)
+			// The hardest synthetic talkers sit 1.4 dB over the bound at 8 s (1.66 dB at the bench's 12 s).
+			expect(r.maxRangeDb).toBeGreaterThan(SPEECH_STEADY_MAX_RANGE_DB + 1.25)
 		}, 60_000)
 
 	it("a steady tone is kept (periodic), and so is a speech burst after 6 s of data", () => {
