@@ -84,6 +84,7 @@ import { EDGE_GRAB_MIN_PX } from "./handles.ts"
 import { useHandles, type HandleFrame } from "./use-handles.ts"
 import type { SpectrumProbe } from "../spectrum/index.ts"
 import { SavedTags } from "./SavedTags.tsx"
+import { graphicsAfter, type PlotGraphics } from "./graphics.ts"
 import { spectrumStream } from "./spectrum-stream.ts"
 import {
 	DISCOVERY_POP_CLASS,
@@ -225,10 +226,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	useEffect(() => autoLevelsNow.set(autoScale), [autoScale])
 	const [engineError, setEngineError] = useState<string | null>(null)
 	// what draws the spectrum: without WebGL2 it draws in basic mode and says so; with nothing, why
-	const [graphics, setGraphics] = useState<{
-		kind: "webgl2" | "canvas2d" | "none"
-		reason: string | null
-	} | null>(null)
+	const [graphics, setGraphics] = useState<PlotGraphics | null>(null)
 	// bumped when WebGL2 is back: the canvas remounts and draws with it
 	const [graphicsRun, setGraphicsRun] = useState(0)
 	// the spectrum stream's link: a note while it reconnects or cannot reach the core, the reason
@@ -447,7 +445,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const onStatus = (status: SpectrumEngineStatus) => {
 		if (status.type === "error") setEngineError(status.message)
 		if (status.type === "renderer") {
-			setGraphics({ kind: status.kind, reason: status.reason ?? null })
+			setGraphics(graphicsAfter(status))
 			// a renderer is up (again): what an earlier one failed on no longer holds
 			if (status.kind !== "none") setEngineError(null)
 		}
@@ -515,7 +513,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					key={`${bins}:${graphicsRun}`}
 					onWebglBack={() => {
 						// the new canvas says what draws it: no chip from the old one meanwhile
-						setGraphics(null)
+						setGraphics(graphicsAfter({ type: "remount" }))
 						setGraphicsRun(n => n + 1)
 					}}
 					sourceId={sourceId}
