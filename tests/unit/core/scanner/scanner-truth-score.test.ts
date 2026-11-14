@@ -327,6 +327,10 @@ describe("truth scorecard: totals and limits", () => {
 		})
 		expect(synthOnly.byKind.capture.keptFiles).toBe(0)
 		expect(synthOnly.failures.map(f => f.kind)).toEqual(["synthetic"])
+		// A subset of the cases (--only) is checked against the maximums only.
+		expect(scorecard([one, capture], t, { subset: true }).failures).toEqual([
+			{ kind: "capture", metric: "digitalKeptAsVoice", value: 1, max: 0 },
+		])
 	})
 
 	it("adds totals over cases, labels included", () => {

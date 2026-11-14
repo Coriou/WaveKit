@@ -373,10 +373,14 @@ export function unknownMetrics(limits: Thresholds): string[] {
 	return out.sort()
 }
 
-/** The scorecard of all cases, checked against `limits`. A limit on no metric is an error. */
+/**
+ * The scorecard of the cases, checked against `limits`. A limit on no metric is an error.
+ * `subset`: only some cases ran (`--only`), so the minimums are not checked, the maximums are.
+ */
 export function scorecard(
 	cases: readonly CaseScore[],
 	limits: Thresholds,
+	opts: { subset?: boolean } = {},
 ): Scorecard {
 	const unknown = unknownMetrics(limits)
 	if (unknown.length > 0)
@@ -394,9 +398,10 @@ export function scorecard(
 			limits.limits[kind] ?? {},
 		).sort(([a], [b]) => a.localeCompare(b))) {
 			const value = metricOf(byKind[kind], metric)!
+			// A subset of the cases (--only) cannot reach a minimum set for all of them.
 			if (
 				(limit.max !== undefined && value > limit.max) ||
-				(limit.min !== undefined && value < limit.min)
+				(limit.min !== undefined && !opts.subset && value < limit.min)
 			)
 				failures.push({
 					kind,

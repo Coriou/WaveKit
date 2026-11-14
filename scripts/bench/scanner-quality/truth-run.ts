@@ -152,8 +152,8 @@ interface ServiceInternals {
 	}
 }
 interface ReplayQueueView {
+	/** Queued, parked and running captures. */
 	size(): number
-	active(): unknown
 }
 interface RecorderInternals {
 	deps: { beginAnalog: (input: BeginInput) => AnalogHandleLike }
@@ -596,8 +596,8 @@ export async function runTruthCase(
 	const pending = (): number => {
 		const q = queueOf()
 		return (
-			(q ? q.size() + (q.active() === null ? 0 : 1) : 0) +
-			recordings.filter(r => r.outcome === "pending").length
+			// size() counts the capture being replayed too.
+			(q?.size() ?? 0) + recordings.filter(r => r.outcome === "pending").length
 		)
 	}
 	// The replay doubles answer only after the run started (inspect binds the clock and captures).

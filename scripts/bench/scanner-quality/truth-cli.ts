@@ -10,7 +10,7 @@
  *   --synthetic on|off    run the synthetic scenes too (default on)
  *   --thresholds <file>   limits (default scripts/bench/scanner-quality/truth-thresholds.json)
  *   --out <file>          also write the scorecard JSON there
- *   --only <a,b>          only the named cases
+ *   --only <a,b>          only the named cases (the limits' minimums are not checked then)
  *   --unconfirmed         score unconfirmed labels too (proposals nobody checked yet)
  *   --separate            run each capture with a fresh scanner state (default: the captures run
  *                         in name order as one session: each starts at its real offset from the
@@ -174,7 +174,7 @@ export async function runTruthCli(argv: readonly string[]): Promise<number> {
 	} finally {
 		if (stateDir !== null) rmSync(stateDir, { recursive: true, force: true })
 	}
-	const card = scorecard(scores, limits)
+	const card = scorecard(scores, limits, { subset: o.only !== null })
 	const json = JSON.stringify(card)
 	if (o.out !== null) writeFileSync(o.out, `${json}\n`)
 	process.stderr.write(
