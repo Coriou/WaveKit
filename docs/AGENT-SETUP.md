@@ -60,6 +60,36 @@ It never replaces an existing link. It refuses to link when `.agents/` is not ig
 when the memory directory could be committed to a git repository. With no memory
 configured it does nothing.
 
+## Looking at the web app
+
+An agent can see and drive the web app without a person, with one command:
+
+```bash
+node scripts/ui-check.mjs [--route=#/scanner] [--gpu=on|off|software] [--screenshot] [--do=pause,wait:5,resume]
+```
+
+It starts the real core as a child process fed by a fake receiver, in protected mode, behind the
+Vite dev server, all on loopback ports it picks. It pairs a headless Chrome through the pairing
+sheet (the device is named `ui-check` and is signed out when the run ends), loads the route and
+prints a JSON report, one section per line: `healthy`, a one-line `summary` (e.g. `spectrum:
+webgl2, 412 frames received, 410 drawn, waterfall moving`), the target, the access state, console
+errors, failed requests, the spectrum's health readout with whether the trace is drawn and the
+waterfall moving, the notes and chips on screen, and the screenshots. It exits 0 when healthy, 1
+when not, 2 when it could not run. It needs a local Chrome or Chromium
+(`PLAYWRIGHT_CHROMIUM_PATH` names one).
+
+- `--gpu=off` runs the browser without WebGL2 (the basic 2D mode); `software` is the default.
+- `--screenshot` saves PNGs under a fresh directory in the system temp folder (`--out=<dir>`
+  names another one); a path inside the repository is refused.
+- `--do=` runs actions between two looks: `pause`, `resume`, `retune:<Hz>`, `rate:<Hz>`, `hide`,
+  `show` (the page is told it left or returned to view), `reload`, `wait:<seconds>`.
+
+This fake target is the only one for lanes and delegated agents. `--target=live --url=<preview>`
+attaches to a running web server and is refused unless `WAVEKIT_UI_CHECK_LIVE=1`: it is for the
+session that owns the live core. It reads the machine token from `--token-file=<file>` or
+`--access-dir=<dir>` (never from the command line or the environment, and never prints it), and
+runs an action only when `--allow=` names it.
+
 ## Drift checks
 
 `tests/unit/repo/agent-instructions.test.ts` runs with `pnpm test` (and CI). It checks that:

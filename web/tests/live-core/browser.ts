@@ -266,7 +266,7 @@ async function waterfall(page: Page): Promise<Float64Array> {
 }
 
 /** A screenshot of a horizontal band of the plot canvas (fractions of its height), as luminance. */
-async function plotBand(
+export async function plotBand(
 	page: Page,
 	from: number,
 	to: number,

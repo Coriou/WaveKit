@@ -64,6 +64,7 @@ pnpm test              # turbo test of workspaces, then root vitest run
 pnpm exec vitest run tests/unit/path/to/file.test.ts   # one file
 pnpm exec vitest run -t "test name"                    # by name
 node scripts/remote-check.mjs [github/<ref>]           # full suite on GitHub; foreground, 600 s tool timeout; exit 0 green, 1 red, 2 infra, 3 refused, 4 call again
+node scripts/ui-check.mjs [--gpu=off] [--screenshot]  # see and drive the web app headless against a fake core; JSON report, exit 0 healthy
 pnpm run dev           # esbuild watch + node --watch dist/index.js (no Docker)
 make dev-local         # run natively without a Pi, dongle, Docker or decoders
 make dev-dashboard     # interactive CLI dashboard
