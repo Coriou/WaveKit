@@ -16,6 +16,7 @@ import type {
 	DecoderRemovedEventData,
 	DigitalVoiceStatus,
 	DecoderStatusEventData,
+	RecordingsChangedEventData,
 	LiveAudioConfig,
 	LiveAudioLevel,
 	LiveAudioStatus,
@@ -56,6 +57,8 @@ export type EventChannel =
 	| "vessels"
 	| "aprs"
 	| "mesh"
+	/** Protected cores only: `recordings:changed` notices (counts only, at most 1/s). */
+	| "recordings"
 
 /** `data` of each server message type the web app handles. */
 export interface EventMap {
@@ -118,6 +121,8 @@ export interface EventMap {
 	"mesh:new": unknown
 	"mesh:update": unknown
 	"mesh:lost": unknown
+	/** The recordings catalogue changed (counts only, never an id): RecordingsStore refetches its head. */
+	"recordings:changed": RecordingsChangedEventData
 	"activity:subscribed": { id: string }
 	"activity:unsubscribed": { id: string }
 	"activity:records": ActivityRecordsMessage["data"]

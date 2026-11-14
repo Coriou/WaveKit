@@ -172,6 +172,18 @@ export function liveCountsDelayMs(
 	)
 }
 
+/** Reads the opening sequence may have in flight at once (the list, then counts beside one column). */
+export const OPEN_READS_MAX = 2
+
+/** After the next paint (a timer where there is no frame, as in tests). */
+function nextFrame(): Promise<void> {
+	return new Promise(resolve => {
+		if (typeof requestAnimationFrame === "function")
+			requestAnimationFrame(() => setTimeout(resolve, 0))
+		else setTimeout(resolve, 0)
+	})
+}
+
 const newColumnId = () =>
 	`col-${Date.now().toString(36)}-${(columnSeq++).toString(36)}`
 
@@ -179,6 +191,13 @@ export class ActivityController extends Store<ActivityViewState> {
 	readonly feed: ActivityFeed
 	private readonly data: DataLayer
 	private attached = 0
+	/**
+	 * The opening sequence (attach): the list first, then the chip counts, then the pinned columns one at a
+	 * time, so an open never has more than OPEN_READS_MAX reads in flight. Bumped on detach.
+	 */
+	private openRun = 0
+	/** Columns wait for the opening sequence (they follow their queries once it reaches them). */
+	private openingColumns = false
 	private countsAbort: AbortController | null = null
 	private countsTimer: ReturnType<typeof setTimeout> | null = null
 	/** Duration of the last answered counts read and failures since, for the live cadence. */
@@ -271,13 +290,12 @@ export class ActivityController extends Store<ActivityViewState> {
 	/** The drawer mounted: follow the feed and the columns. Returns the detach. */
 	attach(): () => void {
 		this.attached += 1
-		if (this.attached === 1) {
-			this.refresh()
-			this.syncColumns(true)
-		}
+		if (this.attached === 1) void this.openSequence()
 		return () => {
 			this.attached -= 1
 			if (this.attached === 0) {
+				this.openRun += 1
+				this.openingColumns = false
 				this.feed.stop()
 				for (const f of this.columnFeeds.values()) f.stop()
 				this.columnQueries.clear()
@@ -582,39 +600,72 @@ export class ActivityController extends Store<ActivityViewState> {
 				this.columnFeeds.delete(id)
 				this.columnQueries.delete(id)
 			}
-		for (const col of s.columns) {
-			let f = this.columnFeeds.get(col.id)
-			if (!f) {
-				f = new ActivityFeed(this.data.api, this.data.events, {
-					maxItems: 1000,
-					pageSize: 50,
-				})
-				f.setPaused(this.feed.get().paused)
-				this.columnFeeds.set(col.id, f)
-				// the first load marks what the switcher has seen
-				const id = col.id
-				const off = f.subscribe(v => {
-					if (v.status !== "live") return
-					off()
-					const top = v.items[0]?.commitSeq
-					if (top !== undefined && this.get().seen[id] === undefined)
-						this.update(x => ({ ...x, seen: { ...x.seen, [id]: top } }))
-				})
-			}
-			if (this.attached === 0) continue
-			// while a column's search is being edited, that column previews the drawer's search and the others
-			// show their own (the edit is not a filter on them)
-			const base =
-				s.editing === null
-					? columnQuery(col, s)
-					: s.editing === col.id
-						? buildQuery(s.tokens, s.chip)
-						: columnQuery(col, { tokens: [], chip: null })
-			const q = scopedQuery(base, s, now)
-			const key = JSON.stringify(q)
-			if (!force && this.columnQueries.get(col.id) === key) continue
-			this.columnQueries.set(col.id, key)
-			void f.setQuery(q, searchKey(base, s) ?? undefined)
+		for (const col of s.columns) void this.syncColumn(col, force, now)
+	}
+
+	/** One column's feed (made when missing) pointed at its search while attached; resolves once it read. */
+	private syncColumn(
+		col: ActivityColumn,
+		force: boolean,
+		now = scopeNow(),
+	): Promise<void> {
+		const s = this.get()
+		let f = this.columnFeeds.get(col.id)
+		if (!f) {
+			f = new ActivityFeed(this.data.api, this.data.events, {
+				maxItems: 1000,
+				pageSize: 50,
+			})
+			f.setPaused(this.feed.get().paused)
+			this.columnFeeds.set(col.id, f)
+			// the first load marks what the switcher has seen
+			const id = col.id
+			const off = f.subscribe(v => {
+				if (v.status !== "live") return
+				off()
+				const top = v.items[0]?.commitSeq
+				if (top !== undefined && this.get().seen[id] === undefined)
+					this.update(x => ({ ...x, seen: { ...x.seen, [id]: top } }))
+			})
+		}
+		if (this.attached === 0 || this.openingColumns) return Promise.resolve()
+		// while a column's search is being edited, that column previews the drawer's search and the others
+		// show their own (the edit is not a filter on them)
+		const base =
+			s.editing === null
+				? columnQuery(col, s)
+				: s.editing === col.id
+					? buildQuery(s.tokens, s.chip)
+					: columnQuery(col, { tokens: [], chip: null })
+		const q = scopedQuery(base, s, now)
+		const key = JSON.stringify(q)
+		if (!force && this.columnQueries.get(col.id) === key)
+			return Promise.resolve()
+		this.columnQueries.set(col.id, key)
+		return f.setQuery(q, searchKey(base, s) ?? undefined)
+	}
+
+	/**
+	 * The opening budget: the visible list's first page first (one read), then the chip counts beside the
+	 * pinned columns, which load one after another after the list has painted (two reads at most).
+	 */
+	private async openSequence(): Promise<void> {
+		const run = ++this.openRun
+		this.openingColumns = true
+		const s = this.get()
+		this.syncColumns() // makes the column feeds; their reads wait (openingColumns)
+		await this.feed.setQuery(
+			this.query(),
+			searchKey(buildQuery(s.tokens, s.chip), s) ?? undefined,
+		)
+		if (run !== this.openRun || this.attached === 0) return
+		this.scheduleCounts(0)
+		await nextFrame()
+		if (run !== this.openRun || this.attached === 0) return
+		this.openingColumns = false
+		for (const col of this.get().columns) {
+			if (run !== this.openRun || this.attached === 0) return
+			await this.syncColumn(col, true)
 		}
 	}
 

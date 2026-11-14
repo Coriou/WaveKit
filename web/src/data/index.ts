@@ -222,7 +222,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		decoderSettings: new DecoderSettingsStore(api),
 		system: new SystemStore(api),
 		spectrumLimits: new SpectrumLimitsStore(api),
-		recordings: new RecordingsStore(api),
+		recordings: new RecordingsStore(api, events),
 		preferences: new PreferencesStore(api, savedFrequencies),
 		fleets: createFleets(api, events),
 		coverage: new CoverageStore(api),
@@ -477,9 +477,23 @@ export { SpectrumLimitsStore } from "./spectrum-limits-store.ts"
 export { SystemStore } from "./system-store.ts"
 export {
 	RECORDING_DELETE_GRACE_MS,
+	RECORDINGS_WINDOW_MAX,
 	RecordingsStore,
+	recordingsUnavailable,
 } from "./recordings-store.ts"
-export type { RecordingsState } from "./recordings-store.ts"
+export type {
+	RecordingMarks,
+	RecordingsMeta,
+	RecordingsQuery,
+	RecordingsState,
+} from "./recordings-store.ts"
+export {
+	FEED_BUSY_MS,
+	FEED_RETRY_MS,
+	FEED_STALL_MS,
+	PagedFeed,
+} from "./paged-feed.ts"
+export type { FeedPage, FeedStatus, PagedFeedState } from "./paged-feed.ts"
 export type { SpectrumLimitsState } from "./spectrum-limits-store.ts"
 export type { SystemState } from "./system-store.ts"
 export {

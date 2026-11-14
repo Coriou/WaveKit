@@ -5,17 +5,25 @@ import type {
 	StorageAreaId,
 	StorageReport,
 } from "@wavekit/api-types"
+import { listKeyAction } from "../../src/features/recordings/keys.ts"
+import type { ListKeyContext } from "../../src/features/recordings/keys.ts"
 import {
+	countText,
+	dayEntries,
 	dayLabel,
 	deleteBlocker,
 	formatBytes,
 	formatDuration,
 	groupByDay,
-	matchesAll,
+	headerCount,
 	recordingMeta,
 	recordingTitle,
+	recordingsQuery,
+	serverText,
 	storageLine,
 	suggest,
+	textToken,
+	withToken,
 } from "../../src/features/recordings/model.ts"
 import { RecordingPlayer } from "../../src/features/recordings/player.ts"
 import type { AudioLike } from "../../src/features/recordings/player.ts"
@@ -133,67 +141,160 @@ describe("recording text", () => {
 })
 
 describe("recording search", () => {
-	const items = [
-		call(),
-		call({ id: "x2", talkgroup: "9", source: "2081045" }),
-		scan(),
-	]
-
-	it("offers typed chips with how many recordings each leaves", () => {
-		const s = suggest("2081", items, [])
-		expect(s.map(x => [x.token.kind, x.count])).toEqual([
-			["talkgroup", 1],
-			["text", 2],
+	it("offers typed chips; the core counts once one is chosen", () => {
+		expect(suggest("2081", []).map(x => x.token.kind)).toEqual([
+			"talkgroup",
+			"radio",
+			"text",
 		])
-		expect(suggest("156.8", items, []).map(x => x.token.label)).toContain(
+		expect(suggest("156.8", []).map(x => x.token.label)).toContain(
 			"156.800 MHz",
 		)
-		expect(suggest("call", items, []).map(x => x.token.label)).toContain(
-			"Calls",
-		)
-		expect(suggest("zzz", items, [])).toEqual([])
-	})
-
-	it("matches every chip and the typed text", () => {
-		const tg = suggest("9", items, [])[0]?.token
+		expect(suggest("call", []).map(x => x.token.label)).toContain("Calls")
+		expect(suggest("  ", [])).toEqual([])
+		// a chip already there is not offered again
+		const tg = suggest("9", [])[0]?.token
 		expect(tg?.kind).toBe("talkgroup")
 		if (!tg) return
-		expect(items.filter(r => matchesAll(r, [tg]))).toHaveLength(1)
-		expect(items.filter(r => matchesAll(r, [], "radio 2081045"))).toHaveLength(
-			1,
+		expect(suggest("9", [tg]).map(x => x.token.kind)).toEqual(["radio", "text"])
+	})
+
+	it("turns the chips, the typed text and Kept into one core query", () => {
+		const [tg, radio] = suggest("2081", []).map(x => x.token)
+		const freq = suggest("156.8", []).find(x => x.token.kind === "frequency")
+		const kind = suggest("call", []).find(x => x.token.kind === "kind")
+		if (!tg || !radio || !freq || !kind) throw new Error("no chips")
+		expect(
+			recordingsQuery({
+				tokens: [tg, radio, freq.token, kind.token],
+				text: "",
+				filter: "kept",
+			}),
+		).toEqual({
+			kept: true,
+			talkgroup: "2081",
+			source: "2081",
+			kind: "dsd-fme-call",
+			minHz: 156_793_750,
+			maxHz: 156_806_250,
+		})
+		expect(recordingsQuery({ tokens: [], text: "", filter: "all" })).toEqual({})
+	})
+
+	it("sends typed text as the core reads it, the typed text winning over a text chip", () => {
+		expect(serverText(" TG 2081 ")).toBe("2081")
+		expect(serverText("radio: 2081012")).toBe("2081012")
+		expect(serverText("446,006 MHz")).toBe("446.006")
+		expect(serverText("   ")).toBeNull()
+		const chip = textToken("dmr")
+		expect(recordingsQuery({ tokens: [chip], text: "", filter: "all" }).q).toBe(
+			"dmr",
 		)
+		expect(
+			recordingsQuery({ tokens: [chip], text: "161.15", filter: "all" }).q,
+		).toBe("161.15")
 	})
 
-	it("matches typed text on what the row shows, never the id or the size", () => {
-		const near = scan({
-			id: "scan:d_01K446ABC~analog-4466a0b1-446c.wav",
-			discoveryId: "d_01K446ABC",
-			frequencyHz: 466_012_500,
-			bytes: 446_000,
-		})
-		const hit = scan({
-			id: "scan:d_02X~analog-2.wav",
-			frequencyHz: 446_006_250,
-		})
-		const list = [near, hit]
-		expect(list.filter(r => matchesAll(r, [], "446")).map(r => r.id)).toEqual([
-			hit.id,
+	it("keeps one chip per kind: a later one replaces it", () => {
+		const a = suggest("9", [])[0]?.token
+		const b = suggest("2081", [])[0]?.token
+		if (!a || !b) throw new Error("no chips")
+		const tokens = withToken(withToken([], a), b)
+		expect(tokens.map(t => t.value)).toEqual(["2081"])
+		expect(withToken(tokens, textToken("x")).map(t => t.kind)).toEqual([
+			"talkgroup",
+			"text",
 		])
-		expect(list.filter(r => matchesAll(r, [], "466.01"))).toEqual([near])
 	})
 
-	it("hides deleting rows and shows only kept ones under Kept", () => {
-		const list = [
-			call({ id: "a", kept: true }),
-			call({ id: "b" }),
-			call({ id: "c", kept: true }),
-		]
-		const v = visibleRecordings(list, new Set(["c"]), {
-			tokens: [],
-			text: "",
-			filter: "kept",
-		})
-		expect(v.map(r => r.id)).toEqual(["a"])
+	it("hides only the rows being deleted (the core filtered the rest)", () => {
+		const list = [call({ id: "a" }), call({ id: "b" }), call({ id: "c" })]
+		expect(visibleRecordings(list, new Set(["c"])).map(r => r.id)).toEqual([
+			"a",
+			"b",
+		])
+		expect(visibleRecordings(list, new Set())).toBe(list)
+	})
+})
+
+describe("recordings list entries and counts", () => {
+	it("puts a day label before each day's rows and numbers the rows", () => {
+		const now = new Date("2026-10-17T12:00:00")
+		const e = dayEntries(
+			[
+				call({ id: "a", startedAtLocal: "2026-10-17T10:00:00" }),
+				call({ id: "b", startedAtLocal: "2026-10-17T09:00:00" }),
+				call({ id: "c", startedAtLocal: "2026-10-16T22:00:00" }),
+			],
+			now,
+		)
+		expect(
+			e.map(x => (x.type === "day" ? x.label : `${x.item.id}#${x.position}`)),
+		).toEqual(["Today", "a#1", "b#2", "Yesterday", "c#3"])
+	})
+
+	it("counts from the core, never the loaded rows", () => {
+		const meta = {
+			counts: { total: 2350, kept: 12 },
+			matched: 40,
+			truncated: false,
+		}
+		expect(headerCount(meta, "all", false)).toBe("2,350")
+		expect(headerCount(meta, "kept", false)).toBe("12")
+		expect(headerCount(meta, "all", true)).toBe("40")
+		expect(headerCount({ ...meta, truncated: true }, "all", false)).toBe(
+			"2,350+",
+		)
+		expect(headerCount(null, "all", false)).toBeNull()
+		expect(
+			headerCount(
+				{ counts: null, matched: null, truncated: false },
+				"all",
+				false,
+			),
+		).toBeNull()
+		expect(countText(10000)).toBe("10,000")
+	})
+})
+
+describe("recordings keyboard map", () => {
+	const ctx = (patch: Partial<ListKeyContext> = {}): ListKeyContext => ({
+		cursor: true,
+		open: false,
+		loaded: false,
+		readOnly: false,
+		deletable: true,
+		...patch,
+	})
+	it("keeps every key of the list as it was", () => {
+		const k = (key: string, patch: Partial<ListKeyContext> = {}) =>
+			listKeyAction({ key }, ctx(patch))
+		expect(k("ArrowDown")).toEqual({ type: "move", by: 1 })
+		expect(k("ArrowUp")).toEqual({ type: "move", by: -1 })
+		expect(k(" ")).toEqual({ type: "play" })
+		expect(k(" ", { cursor: false })).toBeNull()
+		expect(k("Enter")).toEqual({ type: "toggle-open" })
+		expect(k("Escape")).toBeNull()
+		expect(k("Escape", { open: true })).toEqual({ type: "close" })
+		expect(k("k")).toBeNull()
+		expect(k("k", { loaded: true })).toEqual({ type: "player-toggle" })
+		expect(k("J", { loaded: true })).toEqual({ type: "seek", by: -1 })
+		expect(k("l", { loaded: true })).toEqual({ type: "seek", by: 1 })
+		expect(k("s")).toEqual({ type: "keep" })
+		expect(k("s", { readOnly: true })).toBeNull()
+		expect(k("Delete")).toEqual({ type: "delete" })
+		expect(k("Backspace")).toEqual({ type: "delete" })
+		expect(k("Delete", { deletable: false })).toBeNull()
+		expect(k("Delete", { readOnly: true })).toBeNull()
+		expect(k("x")).toBeNull()
+	})
+	it("leaves modified keys and keys typed in a field to their owner", () => {
+		expect(listKeyAction({ key: "s", metaKey: true }, ctx())).toBeNull()
+		expect(listKeyAction({ key: "ArrowDown", ctrlKey: true }, ctx())).toBeNull()
+		expect(
+			listKeyAction({ key: "j", altKey: true }, ctx({ loaded: true })),
+		).toBeNull()
+		expect(listKeyAction({ key: " ", inField: true }, ctx())).toBeNull()
 	})
 })
 
@@ -229,18 +330,20 @@ describe("storage line", () => {
 					area("iq-captures", 96e6, 640e6),
 					area("digital-voice-wav", 1.6e9, null),
 				]),
-				2e6,
+				3,
 			),
 		).toBe(
-			"Kept 2.0 MB · calls 1.6 GB · scanner 412 MB of 2.0 GB · IQ captures 96.0 MB of 640 MB · 4.0 GB free",
+			"3 kept · calls 1.6 GB · scanner 412 MB of 2.0 GB · IQ captures 96.0 MB of 640 MB · 4.0 GB free",
 		)
 	})
 
 	it("leaves out an area that does not exist and a missing report", () => {
 		expect(storageLine(report([area("iq-captures", 0, 640e6, false)]), 0)).toBe(
-			"Kept 1 kB · 4.0 GB free",
+			"0 kept · 4.0 GB free",
 		)
-		expect(storageLine(null, 0)).toBe("Kept 1 kB")
+		expect(storageLine(null, 1200)).toBe("1,200 kept")
+		// a core without counts: nothing about kept
+		expect(storageLine(null, null)).toBe("")
 	})
 })
 

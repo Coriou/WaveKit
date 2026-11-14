@@ -21,6 +21,7 @@ import { z } from "zod/v4"
 import type { ApiClient, QueryValue } from "./api-client.ts"
 import { errorMessage, validated } from "./api-client.ts"
 import type { EventsClient } from "./events-client.ts"
+import { FEED_BUSY_MS, FEED_RETRY_MS, FEED_STALL_MS } from "./paged-feed.ts"
 import { Store } from "./store.ts"
 
 export type ActivityResetReason =
@@ -55,6 +56,10 @@ export interface ActivityFeedState {
 	error: string | null
 	/** False when the core answered that Activity is off or unavailable (404/503). */
 	available: boolean
+	/** The snapshot read has run past FEED_BUSY_MS ("Still loading. WaveKit is busy."). */
+	busy: boolean
+	/** Date.now() of the next automatic reload after a failed snapshot; null when none is planned. */
+	retryAt: number | null
 }
 
 export const MAX_ITEMS = 5000
@@ -73,6 +78,8 @@ const INITIAL: ActivityFeedState = {
 	reset: null,
 	error: null,
 	available: true,
+	busy: false,
+	retryAt: null,
 }
 
 const fieldSchema = z
@@ -250,6 +257,8 @@ export function queryParams(q: ActivityQuery): Record<string, QueryValue> {
 export interface ActivityFeedOptions {
 	/** Delay that batches live records into one update; default 120 ms. */
 	flushMs?: number
+	/** Per-read timeout of the snapshot and its pages; default FEED_STALL_MS. */
+	timeoutMs?: number
 	pageSize?: number
 	/** Most items kept in the list; default MAX_ITEMS. */
 	maxItems?: number
@@ -263,6 +272,10 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 	private readonly api: ApiClient
 	private readonly events: EventsClient
 	private readonly flushMs: number
+	private readonly timeoutMs: number
+	private busyTimer: ReturnType<typeof setTimeout> | null = null
+	private retryTimer: ReturnType<typeof setTimeout> | null = null
+	private failures = 0
 	private readonly pageSize: number
 	private readonly maxItems: number
 	private readonly id: string
@@ -290,6 +303,7 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 		this.api = api
 		this.events = events
 		this.flushMs = options.flushMs ?? 120
+		this.timeoutMs = options.timeoutMs ?? FEED_STALL_MS
 		this.pageSize = options.pageSize ?? PAGE
 		this.maxItems = options.maxItems ?? MAX_ITEMS
 		feedCount += 1
@@ -359,9 +373,17 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 	async reload(): Promise<void> {
 		const generation = ++this.generation
 		this.stopLive()
+		this.clearTimers()
 		const query = this.get().query
 		if (query === null) {
-			this.update(s => ({ ...s, status: "idle", items: [], pending: [] }))
+			this.update(s => ({
+				...s,
+				status: "idle",
+				items: [],
+				pending: [],
+				busy: false,
+				retryAt: null,
+			}))
 			return
 		}
 		// A reload invalidates any older-page request in flight (its generation check drops it), so the
@@ -371,10 +393,18 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 			status: "loading",
 			error: null,
 			loadingMore: false,
+			retryAt: null,
 		}))
+		this.busyTimer = setTimeout(() => {
+			this.busyTimer = null
+			if (generation === this.generation && this.get().status === "loading")
+				this.update(s => ({ ...s, busy: true }))
+		}, FEED_BUSY_MS)
 		try {
 			const page = await this.fetchPage(query, null)
 			if (generation !== this.generation) return
+			this.failures = 0
+			this.clearTimers()
 			this.update(s => {
 				const cached = [...s.pending, ...s.items]
 				const fresh = [...page.items].sort(newestFirst)
@@ -404,6 +434,7 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 					pending: [],
 					nextPageToken: paging.token,
 					available: true,
+					busy: false,
 				}
 			})
 			this.subId = `${this.id}-${generation}`
@@ -414,14 +445,47 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 			)
 		} catch (error) {
 			if (generation !== this.generation) return
+			this.clearTimers()
 			const status = (error as { status?: number }).status
+			const available = status !== 404 && status !== 503
+			// a failed or timed-out snapshot tries again by itself on the panels' backoff (not when off)
+			const retry =
+				available &&
+				(status === undefined ||
+					status === 0 ||
+					status === 429 ||
+					status >= 500)
+			const delay =
+				FEED_RETRY_MS[Math.min(this.failures, FEED_RETRY_MS.length - 1)] ??
+				30_000
+			this.failures += 1
 			this.update(s => ({
 				...s,
 				status: "error",
 				error: errorMessage(error),
-				available: status !== 404 && status !== 503,
+				available,
+				busy: false,
+				retryAt: retry ? Date.now() + delay : null,
 			}))
+			if (retry)
+				this.retryTimer = setTimeout(() => {
+					this.retryTimer = null
+					if (generation === this.generation) void this.reload()
+				}, delay)
 		}
+	}
+
+	/** Try again now (the button): the backoff starts over. */
+	retry(): Promise<void> {
+		this.failures = 0
+		return this.reload()
+	}
+
+	private clearTimers(): void {
+		if (this.busyTimer !== null) clearTimeout(this.busyTimer)
+		this.busyTimer = null
+		if (this.retryTimer !== null) clearTimeout(this.retryTimer)
+		this.retryTimer = null
 	}
 
 	/**
@@ -519,6 +583,9 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 	stop(): void {
 		this.generation += 1
 		this.stopLive()
+		this.clearTimers()
+		if (this.get().busy || this.get().retryAt !== null)
+			this.update(s => ({ ...s, busy: false, retryAt: null }))
 	}
 
 	dispose(): void {
@@ -560,7 +627,10 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 		}
 		if (pageToken !== null) q["pageToken"] = pageToken
 		return this.api
-			.request<unknown>("GET", "/api/activity", undefined, { query: q })
+			.request<unknown>("GET", "/api/activity", undefined, {
+				query: q,
+				timeoutMs: this.timeoutMs,
+			})
 			.then(body => validated(pageSchema, body, "GET", "/api/activity"))
 	}
 

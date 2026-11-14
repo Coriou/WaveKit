@@ -1,0 +1,90 @@
+/* The list panels' shell parts (ui/Panel.tsx): notice slot, progress line, failed first load. Kit tokens only. */
+@layer wk-app {
+	.wk-panel-notice {
+		flex: none;
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		margin: 0 18px 8px;
+		font-size: var(--wk-fs-md);
+		line-height: 18px;
+		color: var(--wk-text-3);
+	}
+	.wk-panel-notice[data-empty] {
+		margin: 0;
+	}
+	.wk-panel-notice[data-tone="warn"] {
+		color: var(--wk-amber);
+	}
+	.wk-panel-notice-text {
+		flex: 1;
+		min-width: 0;
+	}
+	.wk-panel-progress {
+		flex: none;
+		display: block;
+		height: 2px;
+		margin: -2px 18px 0;
+		border-radius: var(--wk-r-pill);
+		background: transparent;
+		overflow: hidden;
+		position: relative;
+	}
+	.wk-panel-progress[data-on]::after {
+		content: "";
+		position: absolute;
+		inset: 0 auto 0 0;
+		width: 30%;
+		border-radius: inherit;
+		background: rgba(var(--wk-accent-rgb), 0.6);
+		animation: wk-panel-progress 1.2s var(--wk-ease-inout) 300ms infinite both;
+	}
+	@keyframes wk-panel-progress {
+		from {
+			transform: translateX(-100%);
+		}
+		to {
+			transform: translateX(340%);
+		}
+	}
+	.wk-panel-failed {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		text-align: center;
+		gap: 10px;
+		padding: 48px 32px 0;
+	}
+	.wk-panel-failed-icon {
+		width: 48px;
+		height: 48px;
+		border-radius: var(--wk-r-5);
+		background: var(--wk-fill);
+		display: grid;
+		place-items: center;
+		color: var(--wk-text-3);
+	}
+	.wk-panel-failed-title {
+		font-weight: 700;
+		font-size: var(--wk-fs-xl);
+		color: var(--wk-text-soft);
+	}
+	.wk-panel-failed-text {
+		max-width: 300px;
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-3);
+	}
+	.wk-panel-failed-retry {
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-4);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.wk-panel-progress[data-on]::after {
+			animation: none;
+			width: 100%;
+			opacity: 0.5;
+		}
+	}
+}

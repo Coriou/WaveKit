@@ -1,4 +1,4 @@
-// Windowing for the Activity list: rows of measured (or estimated) heights, only the visible ones mounted.
+// Windowing for the list panels (Activity, Recordings): rows of measured (or estimated) heights, only the visible ones mounted.
 
 export interface VirtualWindow {
 	/** First and one-past-last mounted entry. */

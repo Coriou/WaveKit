@@ -50,6 +50,27 @@ export interface RequestOptions {
 	retry429?: boolean
 	/** Called with the response headers of a successful answer (a 204 has nothing else). */
 	onHeaders?: (headers: Headers) => void
+	/**
+	 * Gives up after this many ms (headers and body) with an ApiError `REQUEST_TIMEOUT` (status 0).
+	 * Default: the client's `getTimeoutMs` for a JSON GET, none for other methods and for blob() (a write's outcome is
+	 * unknown once abandoned). 0 turns it off. Each 429 retry gets its own budget.
+	 */
+	timeoutMs?: number
+}
+
+/**
+ * A GET still unanswered after this long is abandoned (REQUEST_TIMEOUT): long enough for the
+ * slowest read the app makes on a loaded host (a cold recordings catalogue answers within 750 ms,
+ * an Activity facets read within its 2 s deadline), short enough that a wedged request does not
+ * hold a list's "Loading" forever. Feeds pass their own, shorter budget (FEED_STALL_MS).
+ */
+export const REQUEST_TIMEOUT_MS = 30_000
+/** The ApiError code of an abandoned request. */
+export const REQUEST_TIMEOUT_CODE = "REQUEST_TIMEOUT"
+
+/** "No answer from WaveKit in 10 s." */
+export function timeoutMessage(ms: number): string {
+	return `No answer from WaveKit in ${Math.max(1, Math.round(ms / 1000))} s`
 }
 
 // ---- 429 (docs/specs/2026-10-25-band-inspection-ux.md req 2.1)
@@ -191,6 +212,8 @@ export interface ApiClientOptions {
 	now?: () => number
 	/** Jitter source in [0, 1). */
 	random?: () => number
+	/** Default timeout of a GET (ms); REQUEST_TIMEOUT_MS by default, 0 for none. */
+	getTimeoutMs?: number
 }
 
 const UNSAFE = new Set(["POST", "PUT", "PATCH", "DELETE"])
@@ -247,6 +270,7 @@ export class ApiClient {
 	) => Promise<void>
 	private readonly now: () => number
 	private readonly random: () => number
+	private readonly getTimeoutMs: number
 	private csrfToken: string | null = null
 	private accessState: AccessState | null = null
 
@@ -257,6 +281,7 @@ export class ApiClient {
 		this.sleepImpl = options.sleep ?? sleep
 		this.now = options.now ?? (() => Date.now())
 		this.random = options.random ?? (() => Math.random())
+		this.getTimeoutMs = options.getTimeoutMs ?? REQUEST_TIMEOUT_MS
 	}
 
 	/** The CSRF token of the current browser session (protected mode); null clears it. */
@@ -572,14 +597,31 @@ export class ApiClient {
 			headers[CSRF_HEADER] = this.csrfToken
 		const init: RequestInit = { method, headers, credentials: "include" }
 		if (body !== undefined) init.body = JSON.stringify(body)
-		if (options.signal) init.signal = options.signal
+		const timeoutMs =
+			options.timeoutMs ?? (method === "GET" ? this.getTimeoutMs : 0)
+		const deadline = withDeadline(options.signal, timeoutMs)
+		if (deadline.signal) init.signal = deadline.signal
 		let response: Response
+		let text: string
 		try {
-			response = await this.fetchImpl(
-				`${this.baseUrl}${path}${buildQuery(options.query)}`,
-				init,
+			// raced against the deadline too: a fetch that ignores its signal still ends on time
+			response = await deadline.race(
+				this.fetchImpl(
+					`${this.baseUrl}${path}${buildQuery(options.query)}`,
+					init,
+				),
 			)
+			text = await deadline.race(response.text())
 		} catch (error) {
+			if (deadline.timedOut())
+				throw new ApiError({
+					status: 0,
+					code: REQUEST_TIMEOUT_CODE,
+					message: timeoutMessage(timeoutMs),
+					body: null,
+					method,
+					path,
+				})
 			if (error instanceof DOMException && error.name === "AbortError")
 				throw error
 			throw new ApiError({
@@ -590,8 +632,9 @@ export class ApiClient {
 				method,
 				path,
 			})
+		} finally {
+			deadline.clear()
 		}
-		const text = await response.text()
 		if (response.ok) options.onHeaders?.(response.headers)
 		let parsed: unknown = null
 		if (text.length > 0) {
@@ -621,6 +664,48 @@ export class ApiClient {
 			throw error
 		}
 		return parsed as T
+	}
+}
+
+/**
+ * The caller's signal, plus a timer that aborts after `ms` (0: no timer). `timedOut()` tells the
+ * timer's abort from the caller's.
+ */
+function withDeadline(
+	signal: AbortSignal | undefined,
+	ms: number,
+): {
+	signal: AbortSignal | undefined
+	timedOut: () => boolean
+	race: <T>(p: Promise<T>) => Promise<T>
+	clear: () => void
+} {
+	if (!(ms > 0))
+		return { signal, timedOut: () => false, race: p => p, clear: () => {} }
+	const controller = new AbortController()
+	let fired = false
+	const onAbort = () => controller.abort()
+	if (signal?.aborted) controller.abort()
+	else signal?.addEventListener("abort", onAbort, { once: true })
+	const timer = setTimeout(() => {
+		fired = true
+		controller.abort()
+	}, ms)
+	const aborted = new Promise<never>((_resolve, reject) => {
+		const fail = () => reject(abortError())
+		if (controller.signal.aborted) fail()
+		else controller.signal.addEventListener("abort", fail, { once: true })
+	})
+	// a race nobody loses still must not leave an unhandled rejection behind
+	aborted.catch(() => undefined)
+	return {
+		signal: controller.signal,
+		timedOut: () => fired && signal?.aborted !== true,
+		race: p => Promise.race([p, aborted]),
+		clear: () => {
+			clearTimeout(timer)
+			signal?.removeEventListener("abort", onAbort)
+		},
 	}
 }
 

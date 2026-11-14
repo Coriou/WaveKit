@@ -34,6 +34,8 @@ and talks to the core over its REST API and WebSocket. The code lives in [`web/`
 The app has three views, picked from the dock at the bottom: **Spectrum**, **Map** and
 **Messages**. Drawers open on the right on top of the view: **Activity**, **Scanner**,
 **Recordings** and **Settings**. On a phone, the ⌘K palette (the search button) is the way around.
+Beside a full-height drawer, toasts and the spectrum's status notes (`No source connected` and
+the like) centre on the free area left of it, never under the drawer.
 
 ### Spectrum and waterfall
 
@@ -281,17 +283,33 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   core is slow to count (a large store on a busy host) they refresh less often, at most once a
   minute: 50 times the last count's duration, and doubling after each failed count. Changing the
   search, a filter or the range recounts at once.
+  Opening the drawer reads the list first, then the filter counts, then each pinned column in
+  turn after the list is on screen, never more than two reads at once. A list read that takes
+  over 3 s says `Still loading. WaveKit is busy.`; one with no answer after 10 s, or a failed
+  one, says what failed with **Try again**, and the list tries again on its own after 2, 4, 8, 16
+  then every 30 s.
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets. A row the core suspects is a receiver spur says so on its second
   line: `Receiver spur` once confirmed, `Possible spur (unverified)` while the suspicion is not yet
   confirmed (for example just after a restart).
 - **Recordings:** recordings kept by the core, to play, search and keep, including one scanner
-  recording per analog voice transmission the scanner finds. The newest 2 000 are listed. Typed
-  text matches what a row shows (frequency, talkgroup, radio, kind and decoder), never the file
-  size or the recording's internal id. The footer line sums
-  the disk they use: what you kept, digital-voice calls, scanner evidence and named IQ captures
-  (each with its limit), then the free space.
+  recording per analog voice transmission the scanner finds. Every recording the core holds is
+  listed, newest first: the list reads a page at a time as you scroll (up to 10 000 in the
+  browser; past that it asks you to search) and keeps only the rows on screen in the page, so it
+  stays quick with thousands. The header count comes from the core (`2,350`, or `50,000+` when the
+  core left the oldest out), and so does Kept. The search runs on the core: one chip per kind
+  (talkgroup, radio, frequency, kind, text; a new chip replaces the one of its kind), and typed
+  text matches the talkgroup, radio, decoder, kind, start time or frequency in MHz, never the file
+  size or the recording's internal id. New recordings appear on their own (the core announces
+  each change on the socket; nothing polls); while you scroll down or play one, they wait under
+  an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,
+  then the placeholder, `Still loading. WaveKit is busy.` after 3 s, and after 10 s (or an error)
+  what failed, **Try again**, and a retry on its own after 2, 4, 8, 16 then every 30 s, the last
+  rows kept and marked with their time. While the core is still indexing its recordings after a
+  start, the list says so and fills in. The footer line says how many are kept and sums the disk
+  the recording areas use: digital-voice calls, scanner evidence and named IQ captures (each with
+  its limit), then the free space.
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band
   plans, spectrum and waterfall, map, units and time, theme, density and motion. A paused decoder
   says why, for example `Paused · the capture is too narrow here` or `Paused · no channel selected yet`.

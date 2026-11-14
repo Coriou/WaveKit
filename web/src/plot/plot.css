@@ -393,9 +393,11 @@
 		background: rgba(var(--wk-ink-rgb), 0.28);
 		pointer-events: none;
 	}
+	/* status notes centre on the free area beside a full-height drawer (--wk-free-cx, set by the shell) */
 	.wk-plot-note {
 		position: absolute;
-		left: 50%;
+		left: var(--wk-free-cx, 50%);
+		max-width: calc(2 * var(--wk-free-cx, 50%) - 32px);
 		top: 40%;
 		transform: translate(-50%, -50%);
 		font-size: 13px;

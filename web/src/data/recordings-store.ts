@@ -1,48 +1,86 @@
 /**
- * Recordings (WG8 inventory, WG9 Keep and delete; protected core only): the list of the WAV files
- * WaveKit writes (dsd-fme per-call recordings, scanner recordings), Keep / unkeep, delete with a
- * grace period for Undo, and the file itself for playback. The core sends no event when a file
- * appears, so the drawer refreshes while it is open; the core caches its scan for 2 s.
+ * Recordings (WG8 inventory, WG9 Keep and delete; protected core only): the WAV files WaveKit writes
+ * (dsd-fme per-call recordings, scanner recordings), read from the core's catalogue page by page with
+ * its server-side filters and counts (a PagedFeed). Keep / unkeep, delete with a grace period for Undo,
+ * and the file itself for playback.
+ *
+ * While the panel is open (`attach`) the store follows the `recordings` socket channel: each
+ * `recordings:changed` notice (at most one a second, counts only) re-reads the head of the list, and so
+ * does a reconnect. Nothing polls.
  */
 import {
 	RECORDING_DELETE_ROUTE,
+	RECORDING_INVENTORY_KINDS,
 	RECORDING_KEEP_ROUTE,
 	RECORDINGS_FILE_ROUTE,
 	RECORDINGS_PAGE_LIMIT_MAX,
+	RECORDINGS_QUERY_TEXT_MAX,
 	RECORDINGS_ROUTE,
-	RECORDINGS_SCAN_MAX_FILES,
 } from "@wavekit/api-types"
 import type {
 	RecordingDeleteResult,
+	RecordingInventoryCounts,
 	RecordingInventoryItem,
-	RecordingInventoryPage,
+	RecordingInventoryKind,
 	RecordingKeepResult,
 } from "@wavekit/api-types"
-import type { ApiClient } from "./api-client.ts"
-import { ApiError, errorMessage } from "./api-client.ts"
+import { z } from "zod/v4"
+
+import type { ApiClient, QueryValue } from "./api-client.ts"
+import { ApiError } from "./api-client.ts"
+import type { EventsClient } from "./events-client.ts"
+import type {
+	FeedPage,
+	PagedFeedOptions,
+	PagedFeedState,
+} from "./paged-feed.ts"
+import { PagedFeed } from "./paged-feed.ts"
 import { Store } from "./store.ts"
 
-/**
- * Pages read per refresh: the newest RECORDINGS_SCAN_MAX_FILES recordings (the core lists
- * newest first; more beyond this read count as truncated here).
- */
-const MAX_PAGES = Math.ceil(
-	RECORDINGS_SCAN_MAX_FILES / RECORDINGS_PAGE_LIMIT_MAX,
-)
 /** How long a delete waits for Undo before it reaches the core. */
 export const RECORDING_DELETE_GRACE_MS = 6000
+/**
+ * Most recordings held in the browser: 50 pages of RECORDINGS_PAGE_LIMIT_MAX. About 1 kB each as
+ * objects, so 10 000 rows stay inside the panels' 30 MB heap budget beside Activity's 5 000 summaries;
+ * past it the list says to search (the counts stay true, from the core).
+ */
+export const RECORDINGS_WINDOW_MAX = 10_000
 
-export interface RecordingsState {
-	/** Every listed recording, newest first (the core's order). */
-	items: readonly RecordingInventoryItem[]
-	loaded: boolean
-	loading: boolean
-	/** `protected-only`: the routes are not mounted (a core without access protection). */
-	unavailable: "protected-only" | null
-	error: string | null
-	/** The core's scan stopped at its file bound: older files are not listed. */
+/** The server-side filters the panel uses (GET /api/recordings query keys). */
+export interface RecordingsQuery {
+	kept?: true
+	kind?: RecordingInventoryKind
+	talkgroup?: string
+	source?: string
+	minHz?: number
+	maxHz?: number
+	/** Text, 1 to RECORDINGS_QUERY_TEXT_MAX characters (longer text is cut there). */
+	q?: string
+}
+
+/** What a page says about the whole catalogue. */
+export interface RecordingsMeta {
+	/** Totals over everything listed, whatever the filters; null from an older core. */
+	counts: RecordingInventoryCounts | null
+	/** Recordings matching the filters; null from an older core. */
+	matched: number | null
+	/** The catalogue left the oldest out (past its bound) or a folder bound was reached. */
 	truncated: boolean
+	truncatedBefore: string | null
+	/** The first build is still running: the list is partial, newest folders first. */
+	indexing: boolean
+	revision: number | null
 	scannedAt: string | null
+	scannedFiles: number
+}
+
+export type RecordingsState = PagedFeedState<
+	RecordingInventoryItem,
+	RecordingsQuery,
+	RecordingsMeta
+>
+
+export interface RecordingMarks {
 	/** Deleted here, waiting for Undo: hidden from the list until the delete lands or is undone. */
 	removing: ReadonlySet<string>
 	/** Keep or unkeep in flight. */
@@ -52,24 +90,83 @@ export interface RecordingsState {
 const path = (route: string, id: string) =>
 	route.replace(":id", encodeURIComponent(id))
 
-function isPage(value: unknown): value is RecordingInventoryPage {
-	if (typeof value !== "object" || value === null) return false
-	const v = value as Record<string, unknown>
-	return (
-		Array.isArray(v["items"]) &&
-		(v["nextCursor"] === null || typeof v["nextCursor"] === "string")
-	)
+const nullableString = z.string().nullable().catch(null)
+const itemSchema = z
+	.object({
+		id: z.string(),
+		kind: z.enum(RECORDING_INVENTORY_KINDS as [RecordingInventoryKind]),
+		modifiedAt: z.string(),
+		bytes: z.number(),
+		decoderId: nullableString,
+		discoveryId: nullableString,
+		startedAtLocal: nullableString,
+		durationMs: z.number().nullable().catch(null),
+		callType: z.enum(["group", "private", "unit"]).nullable().catch(null),
+		talkgroup: nullableString,
+		source: nullableString,
+		frequencyHz: z.number().nullable().catch(null),
+	})
+	.passthrough()
+const countsSchema = z
+	.object({
+		total: z.number(),
+		kept: z.number(),
+		bytes: z.number(),
+		byKind: z.record(z.string(), z.number()),
+	})
+	.passthrough()
+const pageSchema = z
+	.object({
+		items: z.array(z.unknown()),
+		nextCursor: z.string().nullable(),
+		scannedFiles: z.number().catch(0),
+		truncated: z.boolean().catch(false),
+		scannedAt: z.string().nullable().catch(null),
+		revision: z.number().optional(),
+		indexing: z.boolean().optional(),
+		matched: z.number().optional(),
+		counts: countsSchema.optional().catch(undefined),
+		truncatedBefore: z.string().nullable().optional().catch(null),
+	})
+	.passthrough()
+
+/** The GET /api/recordings query string of a query, at most `limit` rows after `cursor`. */
+export function recordingsParams(
+	q: RecordingsQuery,
+	limit: number,
+	cursor: string | null,
+): Record<string, QueryValue> {
+	const p: Record<string, QueryValue> = { limit }
+	if (cursor !== null) p["cursor"] = cursor
+	if (q.kept) p["kept"] = "true"
+	if (q.kind !== undefined) p["kind"] = q.kind
+	if (q.talkgroup !== undefined) p["talkgroup"] = q.talkgroup
+	if (q.source !== undefined) p["source"] = q.source
+	if (q.minHz !== undefined) p["minHz"] = Math.round(q.minHz)
+	if (q.maxHz !== undefined) p["maxHz"] = Math.round(q.maxHz)
+	const text = q.q?.trim().slice(0, RECORDINGS_QUERY_TEXT_MAX)
+	if (text) p["q"] = text
+	return p
 }
 
-function isItem(value: unknown): value is RecordingInventoryItem {
-	if (typeof value !== "object" || value === null) return false
-	const v = value as Record<string, unknown>
-	return (
-		typeof v["id"] === "string" &&
-		typeof v["kind"] === "string" &&
-		typeof v["modifiedAt"] === "string" &&
-		typeof v["bytes"] === "number"
-	)
+/** Newest modification first, ties by id ascending (the core's order). */
+export function compareRecordings(
+	a: RecordingInventoryItem,
+	b: RecordingInventoryItem,
+): number {
+	if (a.modifiedAt !== b.modifiedAt) return a.modifiedAt > b.modifiedAt ? -1 : 1
+	return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+}
+
+/** `protected-only`: the routes are not mounted (a core without access protection). */
+export function recordingsUnavailable(
+	s: Pick<RecordingsState, "status" | "errorStatus" | "errorCode">,
+): "protected-only" | null {
+	return s.status === "error" &&
+		s.errorStatus === 404 &&
+		s.errorCode !== "RECORDING_NOT_FOUND"
+		? "protected-only"
+		: null
 }
 
 const withSet = (set: ReadonlySet<string>, id: string, on: boolean) => {
@@ -79,32 +176,56 @@ const withSet = (set: ReadonlySet<string>, id: string, on: boolean) => {
 	return next
 }
 
-export class RecordingsStore extends Store<RecordingsState> {
+export class RecordingsStore extends PagedFeed<
+	RecordingInventoryItem,
+	RecordingsQuery,
+	RecordingsMeta
+> {
 	private readonly api: ApiClient
-	private inflight: Promise<void> | null = null
+	private readonly events: EventsClient | null
 	private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
+	/** Deletes waiting for Undo and Keeps in flight. */
+	readonly marks = new Store<RecordingMarks>({
+		removing: new Set(),
+		keeping: new Set(),
+	})
+	private attached = 0
+	private detachLive: (() => void) | null = null
 
-	constructor(api: ApiClient) {
+	constructor(
+		api: ApiClient,
+		events: EventsClient | null = null,
+		options: Partial<PagedFeedOptions> = {},
+	) {
 		super({
-			items: [],
-			loaded: false,
-			loading: false,
-			unavailable: null,
-			error: null,
-			truncated: false,
-			scannedAt: null,
-			removing: new Set(),
-			keeping: new Set(),
+			maxItems: RECORDINGS_WINDOW_MAX,
+			pageSize: RECORDINGS_PAGE_LIMIT_MAX,
+			...options,
 		})
 		this.api = api
+		this.events = events
 	}
 
-	/** Reads every page (the first one shows as soon as it lands). Never rejects. */
-	refresh(): Promise<void> {
-		this.inflight ??= this.fetchAll().finally(() => {
-			this.inflight = null
-		})
-		return this.inflight
+	/**
+	 * The panel is open: show `query` (the same search keeps its rows and refreshes them) and follow the
+	 * catalogue's change notices. Returns the detach (the panel closed): the rows stay for the next open.
+	 */
+	attach(query: RecordingsQuery = {}): () => void {
+		this.attached += 1
+		if (this.attached === 1) this.follow()
+		void this.setQuery(query)
+		return () => {
+			this.attached -= 1
+			if (this.attached > 0) return
+			this.detachLive?.()
+			this.detachLive = null
+			this.stop()
+		}
+	}
+
+	/** The search changed. Never rejects. */
+	show(query: RecordingsQuery): Promise<void> {
+		return this.setQuery(query)
 	}
 
 	/** The download link (whole WAV, `Content-Disposition: attachment`). */
@@ -124,11 +245,8 @@ export class RecordingsStore extends Store<RecordingsState> {
 	async setKept(id: string, kept: boolean): Promise<void> {
 		const before = this.get().items.find(i => i.id === id)
 		if (!before) return
-		this.update(s => ({
-			...s,
-			items: s.items.map(i => (i.id === id ? { ...i, kept } : i)),
-			keeping: withSet(s.keeping, id, true),
-		}))
+		this.patchItem(id, { kept })
+		this.mark("keeping", id, true)
 		try {
 			const route = path(RECORDING_KEEP_ROUTE, id)
 			const result = kept
@@ -141,7 +259,7 @@ export class RecordingsStore extends Store<RecordingsState> {
 				this.drop(id)
 			throw error
 		} finally {
-			this.update(s => ({ ...s, keeping: withSet(s.keeping, id, false) }))
+			this.mark("keeping", id, false)
 		}
 	}
 
@@ -155,7 +273,7 @@ export class RecordingsStore extends Store<RecordingsState> {
 		graceMs = RECORDING_DELETE_GRACE_MS,
 	): () => void {
 		this.cancelTimer(id)
-		this.update(s => ({ ...s, removing: withSet(s.removing, id, true) }))
+		this.mark("removing", id, true)
 		this.timers.set(
 			id,
 			setTimeout(() => {
@@ -166,7 +284,7 @@ export class RecordingsStore extends Store<RecordingsState> {
 		return () => {
 			if (!this.timers.has(id)) return
 			this.cancelTimer(id)
-			this.update(s => ({ ...s, removing: withSet(s.removing, id, false) }))
+			this.mark("removing", id, false)
 		}
 	}
 
@@ -190,85 +308,143 @@ export class RecordingsStore extends Store<RecordingsState> {
 				this.drop(id)
 				return
 			}
-			this.update(s => ({ ...s, removing: withSet(s.removing, id, false) }))
+			this.mark("removing", id, false)
 			throw error
 		}
 	}
 
-	dispose(): void {
+	override dispose(): void {
 		this.flushRemovals()
+		this.detachLive?.()
+		this.detachLive = null
+		super.dispose()
+	}
+
+	protected fetchPage(
+		query: RecordingsQuery,
+		cursor: string | null,
+		signal: AbortSignal,
+	): Promise<FeedPage<RecordingInventoryItem, RecordingsMeta>> {
+		return this.api
+			.get<unknown>(RECORDINGS_ROUTE, {
+				query: recordingsParams(query, this.pageSize, cursor),
+				signal,
+				timeoutMs: this.timeoutMs,
+			})
+			.then(body => {
+				const page = pageSchema.safeParse(body)
+				if (!page.success)
+					throw new ApiError({
+						status: 200,
+						code: "RESPONSE_INVALID",
+						message: `Unexpected answer from ${RECORDINGS_ROUTE}`,
+						body,
+						method: "GET",
+						path: RECORDINGS_ROUTE,
+					})
+				const items: RecordingInventoryItem[] = []
+				for (const raw of page.data.items) {
+					const item = itemSchema.safeParse(raw)
+					if (item.success) items.push(item.data as RecordingInventoryItem)
+				}
+				const d = page.data
+				return {
+					items,
+					nextCursor: d.nextCursor,
+					meta: {
+						counts: (d.counts as RecordingInventoryCounts | undefined) ?? null,
+						matched: d.matched ?? null,
+						truncated: d.truncated,
+						truncatedBefore: d.truncatedBefore ?? null,
+						indexing: d.indexing === true,
+						revision: d.revision ?? null,
+						scannedAt: d.scannedAt,
+						scannedFiles: d.scannedFiles,
+					},
+				}
+			})
+	}
+
+	protected idOf(item: RecordingInventoryItem): string {
+		return item.id
+	}
+
+	protected compare(
+		a: RecordingInventoryItem,
+		b: RecordingInventoryItem,
+	): number {
+		return compareRecordings(a, b)
+	}
+
+	protected override keyOf(q: RecordingsQuery): string {
+		return JSON.stringify(recordingsParams(q, 0, null))
+	}
+
+	protected override retryable(error: unknown): boolean {
+		// a core without protection does not grow the routes by itself
+		if (error instanceof ApiError && error.status === 404) return false
+		// a browser paired (or its session refreshed) after the panel opened: the next try reads
+		if (error instanceof ApiError && error.status === 401) return true
+		return super.retryable(error)
+	}
+
+	/** The `recordings` channel while attached; a notice or a reconnect re-reads the head. */
+	private follow(): void {
+		const events = this.events
+		if (events === null) return
+		let hiddenChange = false
+		const changed = (revision: number | null) => {
+			if (revision !== null && revision === this.get().meta?.revision) return
+			if (
+				typeof document !== "undefined" &&
+				document.visibilityState === "hidden"
+			) {
+				hiddenChange = true
+				return
+			}
+			void this.refresh()
+		}
+		const onVisible = () => {
+			if (document.visibilityState !== "visible" || !hiddenChange) return
+			hiddenChange = false
+			void this.refresh()
+		}
+		const offs = [
+			events.subscribe(["recordings"]),
+			events.on("recordings:changed", data =>
+				changed(typeof data?.revision === "number" ? data.revision : null),
+			),
+			events.onReconnected(() => changed(null)),
+		]
+		if (typeof document !== "undefined") {
+			document.addEventListener("visibilitychange", onVisible)
+			offs.push(() =>
+				document.removeEventListener("visibilitychange", onVisible),
+			)
+		}
+		this.detachLive = () => {
+			for (const off of offs) off()
+		}
+	}
+
+	private mark(which: keyof RecordingMarks, id: string, on: boolean): void {
+		this.marks.update(m => ({ ...m, [which]: withSet(m[which], id, on) }))
 	}
 
 	private drop(id: string): void {
-		this.update(s => ({
-			...s,
-			items: s.items.filter(i => i.id !== id),
-			removing: withSet(s.removing, id, false),
-		}))
+		this.patchItems(items => items.filter(i => i.id !== id))
+		this.mark("removing", id, false)
 	}
 
 	private patchItem(id: string, patch: Partial<RecordingInventoryItem>): void {
-		this.update(s => ({
-			...s,
-			items: s.items.map(i => (i.id === id ? { ...i, ...patch } : i)),
-		}))
+		this.patchItems(items =>
+			items.map(i => (i.id === id ? { ...i, ...patch } : i)),
+		)
 	}
 
 	private cancelTimer(id: string): void {
 		const t = this.timers.get(id)
 		if (t) clearTimeout(t)
 		this.timers.delete(id)
-	}
-
-	private async fetchAll(): Promise<void> {
-		this.update(s => ({ ...s, loading: true }))
-		const items: RecordingInventoryItem[] = []
-		let cursor: string | null = null
-		let truncated = false
-		let scannedAt: string | null = null
-		try {
-			for (let page = 0; page < MAX_PAGES; page++) {
-				const body: unknown = await this.api.get<unknown>(RECORDINGS_ROUTE, {
-					query: {
-						limit: RECORDINGS_PAGE_LIMIT_MAX,
-						...(cursor !== null ? { cursor } : {}),
-					},
-				})
-				if (!isPage(body))
-					throw new Error(`Unexpected answer from ${RECORDINGS_ROUTE}`)
-				for (const item of body.items) if (isItem(item)) items.push(item)
-				truncated =
-					body.truncated === true ||
-					(page === MAX_PAGES - 1 && body.nextCursor !== null)
-				scannedAt = typeof body.scannedAt === "string" ? body.scannedAt : null
-				cursor = body.nextCursor
-				// the first page shows at once on the first load
-				if (page === 0 && !this.get().loaded && cursor !== null)
-					this.update(s => ({ ...s, items: [...items], loaded: true }))
-				if (cursor === null) break
-			}
-			this.update(s => ({
-				...s,
-				items,
-				loaded: true,
-				loading: false,
-				unavailable: null,
-				error: null,
-				truncated,
-				scannedAt,
-			}))
-		} catch (error) {
-			const missing =
-				error instanceof ApiError &&
-				error.status === 404 &&
-				error.code !== "RECORDING_NOT_FOUND"
-			this.update(s => ({
-				...s,
-				loading: false,
-				loaded: s.loaded || missing,
-				unavailable: missing ? "protected-only" : null,
-				error: missing ? null : errorMessage(error),
-			}))
-		}
 	}
 }

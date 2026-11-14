@@ -275,3 +275,69 @@ describe("ActivityFeed", () => {
 		expect(urls).toHaveLength(0)
 	})
 })
+
+describe("ActivityFeed panel states (slow and failing core)", () => {
+	function slow(answer: () => Promise<Response>) {
+		const api = new ApiClient({ fetch: () => answer() })
+		const sockets = fakeSockets()
+		const events = new EventsClient({ createSocket: sockets.factory })
+		events.connect()
+		sockets.last().open()
+		return new ActivityFeed(api, events, { flushMs: 50, id: "s" })
+	}
+
+	it("says busy at 3 s, gives up at 10 s and tries again on the backoff", async () => {
+		vi.useFakeTimers()
+		let hang = true
+		const feed = slow(() =>
+			hang
+				? new Promise<Response>(() => {})
+				: Promise.resolve(
+						new Response(JSON.stringify(page([summary(1)], null, 1)), {
+							status: 200,
+						}),
+					),
+		)
+		void feed.setQuery({})
+		await vi.advanceTimersByTimeAsync(2999)
+		expect(feed.get()).toMatchObject({ status: "loading", busy: false })
+		await vi.advanceTimersByTimeAsync(1)
+		expect(feed.get().busy).toBe(true)
+		await vi.advanceTimersByTimeAsync(7000)
+		expect(feed.get()).toMatchObject({
+			status: "error",
+			busy: false,
+			error: "No answer from WaveKit in 10 s",
+		})
+		expect(feed.get().retryAt).toBe(Date.now() + 2000)
+		hang = false
+		await vi.advanceTimersByTimeAsync(2000)
+		expect(feed.get()).toMatchObject({ status: "live", retryAt: null })
+		expect(feed.get().items).toHaveLength(1)
+		feed.dispose()
+		vi.useRealTimers()
+	})
+
+	it("does not retry by itself when Activity is off, and stop() clears a planned retry", async () => {
+		vi.useFakeTimers()
+		let status = 404
+		let calls = 0
+		const feed = slow(async () => {
+			calls += 1
+			return new Response(JSON.stringify({ code: "X", message: "off" }), {
+				status,
+			})
+		})
+		await feed.setQuery({})
+		expect(feed.get()).toMatchObject({ available: false, retryAt: null })
+		status = 500
+		await feed.retry()
+		expect(feed.get().retryAt).not.toBeNull()
+		feed.stop()
+		expect(feed.get().retryAt).toBeNull()
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(calls).toBe(2)
+		feed.dispose()
+		vi.useRealTimers()
+	})
+})

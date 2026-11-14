@@ -15,7 +15,6 @@ import {
 	useCallback,
 	useEffect,
 	useId,
-	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
@@ -42,7 +41,7 @@ import {
 	timeText,
 } from "./rows.ts"
 import type { ListEntry } from "./rows.ts"
-import { prefixOffsets, virtualWindow } from "./virtual.ts"
+import { NEAR_END_PX, useVirtualRows } from "../../ui/virtual-rows.ts"
 import {
 	aircraftKey,
 	useAircraftFleet,
@@ -52,7 +51,7 @@ import { formatMHz } from "../format.ts"
 import { Icon } from "../../ui/Icon.tsx"
 
 const HOLD_PX = 8
-const MORE_PX = 600
+const MORE_PX = NEAR_END_PX
 /**
  * Older pages loaded by themselves while the folded list is shorter than the viewport: folding can turn a
  * 100-row page into a handful of stacks (one aircraft at 2 rows/s is 120 rows a minute), so the list asks for
@@ -91,11 +90,6 @@ export function ActivityList({
 	const loadingMore = useStore(feed, s => s.loadingMore)
 	const full = useStore(feed, s => s.items.length >= feed.capacity)
 	const now = useNow(true, 30_000)
-	const scroller = useRef<HTMLDivElement | null>(null)
-	const heights = useRef(new Map<string, number>())
-	const [version, setVersion] = useState(0)
-	const [scrollTop, setScrollTop] = useState(0)
-	const [viewport, setViewport] = useState(600)
 	const [cursor, setCursor] = useState<string | null>(null)
 	const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
 	const seen = useRef<string | null>(null)
@@ -109,17 +103,6 @@ export function ActivityList({
 	)
 	const estimate = cards ? estimateCardHeight : estimateHeight
 
-	// Rows and cards measure differently: a layout switch starts from fresh guesses, at the top.
-	const lastLayout = useRef(cards)
-	if (lastLayout.current !== cards) {
-		lastLayout.current = cards
-		heights.current = new Map()
-	}
-	useEffect(() => {
-		if (scroller.current) scroller.current.scrollTop = 0
-		setScrollTop(0)
-	}, [cards])
-
 	const display = useDisplay()
 	const stacks = useMemo(() => foldedOf(items, feed), [items, feed])
 	// held arrivals, counted as the stacks they fold into (a beacon heard five times is 1 new)
@@ -131,13 +114,22 @@ export function ActivityList({
 		() => stackEntries(stacks, now, expanded),
 		[stacks, now, display, expanded], // group labels follow the time setting
 	)
-	const offsets = useMemo(() => {
-		void version
-		return prefixOffsets(
-			entries.map(e => heights.current.get(e.key) ?? estimate(e)),
-		)
-	}, [entries, version, estimate])
-	const win = virtualWindow(offsets, scrollTop, viewport)
+	const keys = useMemo(() => entries.map(e => e.key), [entries])
+	// Rows and cards measure differently: a layout switch starts from fresh guesses (resetKey), at the top.
+	const virtual = useVirtualRows({
+		keys,
+		estimate: i => {
+			const e = entries[i]
+			return e ? estimate(e) : 0
+		},
+		resetKey: cards,
+		revealMargin: 28,
+		onScroll: el => feed.setHolding(el.scrollTop > HOLD_PX),
+		onNearEnd: () => void feed.loadMore(),
+	})
+	const { scroller, measure, win, viewport, reveal } = virtual
+	const toTopOf = virtual.toTop
+	useEffect(() => toTopOf(), [cards, toTopOf])
 
 	// Stacks that heard live (a decode newer than the newest so far) flash once; older pages do not.
 	const fresh = useMemo(() => {
@@ -155,57 +147,14 @@ export function ActivityList({
 		seen.current = status === "live" ? (items[0]?.commitSeq ?? null) : null
 	}, [items, status])
 
-	// One ResizeObserver for every mounted row; measurements land in one state bump per frame.
-	const observer = useMemo(() => {
-		if (typeof ResizeObserver === "undefined") return null
-		let frame = 0
-		return new ResizeObserver(records => {
-			let changed = false
-			for (const r of records) {
-				const key = (r.target as HTMLElement).dataset["key"]
-				if (!key) continue
-				const h = Math.round(
-					r.borderBoxSize[0]?.blockSize ?? r.contentRect.height,
-				)
-				if (h > 0 && heights.current.get(key) !== h) {
-					heights.current.set(key, h)
-					changed = true
-				}
-			}
-			if (changed && frame === 0)
-				frame = requestAnimationFrame(() => {
-					frame = 0
-					setVersion(v => v + 1)
-				})
-		})
-	}, [])
-	useEffect(() => () => observer?.disconnect(), [observer])
-	const measure = useCallback(
-		(el: HTMLElement | null) => {
-			if (el && observer) observer.observe(el)
-		},
-		[observer],
-	)
-
-	useLayoutEffect(() => {
-		const el = scroller.current
-		if (!el) return
-		setViewport(el.clientHeight || 600)
-		if (typeof ResizeObserver === "undefined") return
-		const ro = new ResizeObserver(() => setViewport(el.clientHeight || 600))
-		ro.observe(el)
-		return () => ro.disconnect()
-	}, [])
-
 	// A new search starts at the top, folded (a rolling range moving on is the same search).
 	const search = useStore(feed, s => s.searchKey)
 	useEffect(() => {
-		if (scroller.current) scroller.current.scrollTop = 0
-		setScrollTop(0)
+		toTopOf()
 		setExpanded(new Set())
 		autoPages.current = 0
 		feed.setHolding(false)
-	}, [search, feed])
+	}, [search, feed, toTopOf])
 
 	// Folded stacks shorter than the viewport: ask for older pages until it fills (bounded above).
 	useEffect(() => {
@@ -225,21 +174,13 @@ export function ActivityList({
 		void feed.loadMore()
 	}, [status, more, loadingMore, full, win.total, viewport, feed])
 
-	const onScroll = useCallback(() => {
-		const el = scroller.current
-		if (!el) return
-		setScrollTop(el.scrollTop)
-		feed.setHolding(el.scrollTop > HOLD_PX)
-		if (el.scrollHeight - (el.scrollTop + el.clientHeight) < MORE_PX)
-			void feed.loadMore()
-	}, [feed])
+	const onScroll = virtual.onScroll
 
 	const toTop = useCallback(() => {
 		feed.release()
-		if (scroller.current) scroller.current.scrollTop = 0
-		setScrollTop(0)
+		toTopOf()
 		feed.setHolding(false)
-	}, [feed])
+	}, [feed, toTopOf])
 
 	// The detail folds the same list: tell the controller which one this row came from.
 	const open = useCallback(
@@ -273,19 +214,6 @@ export function ActivityList({
 		})
 		return m
 	}, [entries])
-
-	const reveal = useCallback(
-		(index: number) => {
-			const el = scroller.current
-			if (!el) return
-			const top = offsets[index] ?? 0
-			const bottom = offsets[index + 1] ?? top
-			if (top < el.scrollTop) el.scrollTop = Math.max(0, top - 28)
-			else if (bottom > el.scrollTop + el.clientHeight)
-				el.scrollTop = bottom - el.clientHeight
-		},
-		[offsets],
-	)
 
 	const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
 		if (
