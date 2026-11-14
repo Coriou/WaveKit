@@ -1,4 +1,4 @@
-// A page that keeps no service worker (the dev server, any build that is not a production one) removes the one
+// A page served by the dev server keeps no service worker, and removes the one
 // a production build left on the same address, and its cached shell. Left alone, that worker stays for good
 // (the dev server has no worker script to replace it with) and opens its old build whenever the server is down.
 // Pure apart from what is passed in, for the tests.

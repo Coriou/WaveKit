@@ -74,6 +74,13 @@ export function pwa(): Plugin {
 	let isBuild = false
 	return {
 		name: "wavekit-pwa",
+		config(_config, env) {
+			// src/pwa/pwa.ts removes a leftover worker on the dev server only: never in a bundle, whatever
+			// NODE_ENV it is built under (a constant, so the bundler drops the code).
+			return {
+				define: { __WK_DEV_SERVER__: JSON.stringify(env.command === "serve") },
+			}
+		},
 		configResolved(config) {
 			base = config.base
 			isBuild = config.command === "build"
