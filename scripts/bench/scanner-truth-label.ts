@@ -4,12 +4,15 @@
  * finds the occupied channels (spectral peaks, plus the frequencies the capture's
  * `.discoveries.json` and `.activity.json` name), cuts each channel's on-air stretches, FM
  * demodulates each stretch and runs the offline decoders on it: multimon-ng (POCSAG 512, 1 200
- * and 2 400) and dsd-fme (DMR). A stretch a decoder decodes, or one a live decode recorded with
- * the capture (`.activity.json`) falls in, is labelled with that protocol and confirmed (a
- * decoder's CRC or FEC checked it). Every other stretch gets a proposal (`carrier` when its
- * audio holds no modulation, else `unknown`), unconfirmed: a person listens to its WAV in
- * `<out>/<name>.segments/` and sets the label (analog-voice, noise, ...) and `confirmed`. The
- * live decodes are written as the decodes the scorecard injects at their recorded offsets.
+ * and 2 400) and dsd-fme (DMR). A stretch a decoder decodes is labelled with that protocol and
+ * confirmed (the decoder's CRC or FEC checked it). A stretch a live decode recorded with the
+ * capture (`.activity.json`) falls in is proposed with that protocol, unconfirmed: a mixed-mode
+ * channel's decode says nothing about the analog over next to it. Every other stretch is
+ * proposed as `carrier` when its audio holds no modulation, else `unknown`, unconfirmed. A person
+ * listens to its WAV in `<out>/<name>.segments/` and sets the label (analog-voice, noise, ...)
+ * and `confirmed`. The always-on decoders' live decodes are written as the decodes the scorecard
+ * injects at their recorded offsets (`via: ambient`; identify probes' are written as `probe`,
+ * which the scorecard does not inject).
  *
  *   pnpm exec esbuild scripts/bench/scanner-truth-label.ts --bundle --platform=node \
  *     --format=esm --packages=external --outfile=output/bench/scanner-truth-label.mjs
@@ -56,9 +59,12 @@ import {
 /** Channels are snapped to multiples of 3.125 kHz (half the finest land-mobile step, 6.25 kHz). */
 const RASTER_HZ = 3_125
 const RASTER_OFFSET_HZ = 0
-/** A live decode belongs to a stretch on its channel from 1 s before its start to 3 s after its end. */
-const LIVE_BEFORE_MS = 1_000
-const LIVE_AFTER_MS = 3_000
+/**
+ * A live decode belongs to a stretch on its channel when it was produced inside it or within 1 s
+ * after its end (a decoder reports a message once it ended). It is a proposal only: on a channel
+ * that carries analog and digital overs a decode near an analog over says nothing about it.
+ */
+const LIVE_AFTER_MS = 1_000
 /** A live decode names the channel it was placed on to within this (a probe's measured centre). */
 const LIVE_REACH_HZ = 3_125
 /** Audio deviation RMS under which a stretch is proposed as an unmodulated carrier (Hz). */
@@ -97,10 +103,23 @@ const arg = (name: string): string | undefined => {
 	return i >= 0 ? process.argv[i + 1] : undefined
 }
 
+/** A side file of a capture: `fallback` when absent, an error naming it when malformed. */
 function readJson<T>(path: string, schema: z.ZodType<T>, fallback: T): T {
 	if (!existsSync(path)) return fallback
-	const parsed = schema.safeParse(JSON.parse(readFileSync(path, "utf8")))
-	return parsed.success ? parsed.data : fallback
+	let json: unknown
+	try {
+		json = JSON.parse(readFileSync(path, "utf8"))
+	} catch {
+		throw new Error(`${path}: not JSON`)
+	}
+	const parsed = schema.safeParse(json)
+	if (!parsed.success) {
+		const issue = parsed.error.issues[0]
+		throw new Error(
+			`${path}: ${issue ? `${issue.path.join(".")} ${issue.message}` : "invalid"}`,
+		)
+	}
+	return parsed.data
 }
 
 /** Runs a decoder; resolves with its stdout and stderr (a timeout kills it, by its own PID). */
@@ -253,7 +272,7 @@ async function labelCapture(o: {
 					const live = decodes.find(
 						d =>
 							Math.abs(d.frequencyHz - hz) <= LIVE_REACH_HZ &&
-							d.atMs >= seg.startMs - LIVE_BEFORE_MS &&
+							d.atMs >= seg.startMs &&
 							d.atMs <= seg.endMs + LIVE_AFTER_MS,
 					)
 					if (live) {
@@ -271,7 +290,9 @@ async function labelCapture(o: {
 					endMs: seg.endMs,
 					label: proposal,
 					source: protocol === null ? "ear" : source,
-					confirmed: protocol !== null,
+					// Only an offline decode of the stretch itself confirms it (its decoder checked
+					// it); a live decode near it and every other proposal wait for a person.
+					confirmed: protocol !== null && source === "decoded-offline",
 					note,
 				})
 			}

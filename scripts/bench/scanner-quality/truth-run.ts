@@ -11,8 +11,9 @@
  *   service's ambient evidence handler, which places it on an observation by frequency and time;
  *   an identify replay (`replay`) is applied to the scanner's own IQ capture of that transmission
  *   (`applyReplayResult`), and is lost when the scanner captured none, as it would be live.
- * - Identify replays of the scanner's own captures answer from the labels, late as they do live
- *   (armReplayOracle: the replay queue, then one nominal second per planned trial).
+ * - Identify replays run in the scanner's own replay queue on its own captures; only the
+ *   decoders are doubles, answering from the labels one nominal second per trial
+ *   (replayDoubles).
  * - Kept recordings: the recorder's finalized analog files still on disk once the run's idle
  *   tail let every provisional file's grace end. Each file's span is its first sample (the
  *   recorder's file start) plus its frame count at 8 kHz.
@@ -27,7 +28,22 @@ import type {
 	DecodeEvidence,
 	Identity,
 } from "../../../src/core/scanner/types.js"
-import type { IqReplayResult } from "../../../src/core/scanner/iq-capture-contract.js"
+import { guardDsdFmeEvidence } from "../../../src/core/scanner/probes/confirm/dsd-fme.js"
+import {
+	classifyAnalogTrial,
+	isVoice,
+} from "../../../src/core/scanner/analog-trial.js"
+import {
+	ANALOG_TRIAL_FRAME_MS,
+	ANALOG_TRIAL_MAX_FRAMES,
+	type AnalogTrialFrame,
+	type AnalogTrialMode,
+	type AnalogTrialResult,
+	type AnalogTrialStats,
+	type AnalogTrialTones,
+} from "../../../src/core/scanner/scanner-redesign-contract.js"
+import { AMBIENT_PAIR_MS } from "../../../src/core/scanner/types.js"
+import type { IqReplayProbeAnswer } from "../../../src/core/iq-capture/replay-queue.js"
 import {
 	LEAD_IN_MS,
 	runScanner,
@@ -35,6 +51,7 @@ import {
 	type DiscoveryRecord,
 	type InspectContext,
 	type IqChunkSource,
+	type ReplayDoubles,
 } from "./harness.js"
 import { SceneGenerator, buildScene, type Scene } from "./scene.js"
 import type { TruthDecode, TruthInterval } from "./truth-labels.js"
@@ -91,15 +108,17 @@ export interface RecordingRecord {
 }
 
 export interface InjectedDecodes {
+	/** Recorded always-on decodes injected. */
 	ambient: number
-	probe: number
-	replay: number
-	/** Replay decodes with no capture of their transmission, or before the scene started. */
+	/** Recorded probe and replay decodes, not injected (the revision identifies for itself). */
+	skipped: number
+	/** Recorded decodes before the scene started (the lead-in). */
 	dropped: number
-	/** Identify replays the oracle answered (one per finished capture with probe trials). */
-	replays: number
-	/** Of those, replays that decoded (the capture held a labelled DMR or POCSAG transmission). */
+	/** Replay probe trials the decoder doubles answered, and how many decoded. */
+	replayTrials: number
 	replayDecoded: number
+	/** Analog replay trials answered. */
+	analogTrials: number
 }
 
 export interface TruthRun {
@@ -128,7 +147,6 @@ interface ServiceInternals {
 	spectrum: {
 		engine(sourceId: string): { currentEpoch(): { epoch: number } } | undefined
 	}
-	applyReplayResult(result: IqReplayResult): void
 }
 interface RecorderInternals {
 	deps: { beginAnalog: (input: BeginInput) => AnalogHandleLike }
@@ -171,11 +189,6 @@ const IDENTITY_KIND: Record<TruthDecode["protocol"], Identity["kind"]> = {
 const DECODER: Record<TruthDecode["protocol"], "dsd-fme" | "multimon-ng"> = {
 	dmr: "dsd-fme",
 	pocsag: "multimon-ng",
-}
-/** Identity of a decode that names none (a synthetic one): a fixed value per protocol. */
-const DEFAULT_IDENTITY: Record<TruthDecode["protocol"], string> = {
-	dmr: "1",
-	pocsag: "1234567",
 }
 
 /**
@@ -286,41 +299,41 @@ function analogFilesOnDisk(storageDir: string): Set<string> {
 	return ids
 }
 
-/** The labelled transmission a decode belongs to: the latest one on its channel begun by then. */
-function transmissionOf(
-	d: TruthDecode,
-	intervals: readonly TruthInterval[],
-): TruthInterval | null {
-	let best: TruthInterval | null = null
-	for (const iv of intervals) {
-		if (iv.label !== d.protocol) continue
-		if (Math.abs(iv.frequencyHz - d.frequencyHz) > REPLAY_REACH_HZ) continue
-		if (iv.startMs > d.atMs) continue
-		if (best === null || iv.startMs > best.startMs) best = iv
+/**
+ * The identity a decode names: the recorded one, else one fixed per channel (a DMR colour code
+ * 1 to 15, a 7-digit POCSAG capcode, from the channel's 3.125 kHz step), so two channels never
+ * share one and a channel keeps its own across runs.
+ */
+function identityOf(
+	protocol: TruthDecode["protocol"],
+	hz: number,
+	recorded?: string,
+): Identity {
+	const step = Math.round(hz / 3_125)
+	return {
+		kind: IDENTITY_KIND[protocol],
+		value:
+			recorded ??
+			(protocol === "dmr"
+				? String(1 + (step % 15))
+				: String(1_000_000 + (step % 1_000_000))),
 	}
-	return best
 }
 
-/** The scanner's finished capture of `iv` on the decode's channel, newest first. */
-function captureOf(
-	d: TruthDecode,
-	iv: TruthInterval | null,
-	captures: ReadonlyMap<string, CaptureRecord>,
-	now: number,
-): CaptureRecord | null {
-	let best: CaptureRecord | null = null
-	for (const c of captures.values()) {
-		if (c.finishedMs === null || c.finishedMs > now || c.windowMs === null)
-			continue
-		if (Math.abs(c.rfHz - d.frequencyHz) > REPLAY_REACH_HZ) continue
-		const [a, b] = c.windowMs
-		if (iv !== null && (b <= iv.startMs || a >= iv.endMs)) continue
-		if (best === null || c.finishedMs > (best.finishedMs ?? 0)) best = c
-	}
-	return best
+/** The ambient decoder ids the run injects as, and their types (the harness's decoder double). */
+export const TRUTH_DECODER_TYPES: Readonly<Record<string, string>> = {
+	"truth-dsd-fme": "dsd-fme",
+	"truth-multimon-ng": "multimon-ng",
 }
 
-/** Arms one virtual timer per decode (the clock is installed when `inspect` runs). */
+/**
+ * Arms one virtual timer per recorded always-on (`ambient`) decode, at its offset (the clock is
+ * installed when `inspect` runs). It reaches the service's ambient evidence handler as the
+ * decoder's interpreted evidence would: CRC-clean, its recorded identity, and for dsd-fme the
+ * receiver guard applied (no content verification near the tuned centre). `probe` and `replay`
+ * decodes in a label file are not injected (`skipped`): they are what the recorded scanner's own
+ * identify did, which the revision under test does for itself (the replay doubles below).
+ */
 function armDecodes(
 	svc: ServiceInternals,
 	sceneNow: () => number,
@@ -331,57 +344,30 @@ function armDecodes(
 	const epochNow = (): number =>
 		svc.spectrum.engine(ctx.sourceId)?.currentEpoch().epoch ?? 0
 	for (const d of c.decodes) {
+		if (d.via !== "ambient") {
+			counts.skipped++
+			continue
+		}
 		if (d.atMs < 0) {
 			counts.dropped++
 			continue
 		}
-		const identity: Identity = {
-			kind: IDENTITY_KIND[d.protocol],
-			value: d.identity ?? DEFAULT_IDENTITY[d.protocol],
-		}
 		setTimeout(() => {
-			if (d.via === "replay") {
-				const capture = captureOf(
-					d,
-					transmissionOf(d, c.intervals),
-					ctx.captures,
-					sceneNow(),
-				)
-				if (capture === null) {
-					counts.dropped++
-					return
-				}
-				counts.replay++
-				svc.applyReplayResult({
-					captureId: capture.captureId,
-					sourceId: ctx.sourceId,
-					observationId: capture.observationId,
-					epoch: epochNow(),
-					rfHz: capture.rfHz,
-					trials: [
-						{
-							protocol: d.protocol,
-							decoderType: DECODER[d.protocol],
-							known: false,
-							outcome: "decoded",
-						},
-					],
-					decoded: { protocol: d.protocol, identity },
-				})
-				return
-			}
-			counts[d.via]++
-			const ev: DecodeEvidence = {
+			counts.ambient++
+			const raw: DecodeEvidence = {
 				protocol: d.protocol,
-				identity,
+				identity: identityOf(d.protocol, d.frequencyHz, d.identity),
 				metadata: {},
 				crcClean: true,
 				at: Date.now(),
 				epoch: epochNow(),
-				origin: d.via === "probe" ? "probe" : "ambient",
+				origin: "ambient",
 				...(d.protocol === "dmr" ? { contentVerified: true } : {}),
-				...(d.via === "probe" ? { transport: "live" as const } : {}),
 			}
+			const ev =
+				d.protocol === "dmr"
+					? guardDsdFmeEvidence(raw, d.frequencyHz, c.centreHz)
+					: raw
 			svc.ambient.emit("evidence", {
 				decoderId: `truth-${DECODER[d.protocol]}`,
 				sourceId: ctx.sourceId,
@@ -393,98 +379,191 @@ function armDecodes(
 }
 
 /**
- * Identify replays answer from the labels, late as they do live: a finished capture's probe
- * trials (the real replay plan) run one after another, REPLAY_TRIAL_MS each, after
- * REPLAY_QUEUE_MS in the replay queue. A trial decodes when the capture's own IQ window holds a
- * confirmed DMR or POCSAG label on its channel (REPLAY_REACH_HZ) and the trial is that
- * protocol's; the replay result then names the decode and stops there, as the replay does. Every
- * other trial reports no sync. A capture whose plan holds no probe trial gets no result.
+ * Identify's replay trials, answered from the labels by the decoders the scanner's own replay
+ * queue runs (harness `replay`): the queue (FIFO, one capture at a time, the analog trial first
+ * and the digital ones `not-needed` after a heard or toned voice) is production's; only the
+ * decoders are doubles. Each trial takes REPLAY_TRIAL_MS of virtual time.
+ *
+ * A capture holds a label when its own IQ window (pre-roll to end) overlaps a confirmed label on
+ * its channel (REPLAY_REACH_HZ) by at least REPLAY_MIN_HELD_MS, or the whole label when shorter:
+ * a replay decoder needs a POCSAG batch (about 1 s at 1 200 Bd) or several DMR bursts, never a
+ * capture's edge. The label it holds most decides:
+ * - a probe trial decodes when it is the label's protocol (DMR, POCSAG), else no sync;
+ * - the analog trial measures voice (`decoded` with the label's CTCSS tone, else `heard`), data
+ *   (`data-like`) for DMR and POCSAG, a bare carrier (`carrier-only`); noise, an unknown label or
+ *   none holds no frames (`no-sync`: proves nothing either way). The outcome is the production
+ *   classifier's own reading of those statistics, so the queue's judge accepts it.
  */
-export const REPLAY_QUEUE_MS = 2_000
 export const REPLAY_TRIAL_MS = 1_000
-/** How often the oracle looks for newly finished captures (virtual ms). */
-const REPLAY_POLL_MS = 100
+export const REPLAY_MIN_HELD_MS = 1_000
 
-type ReplayTrial = IqReplayResult["trials"][number]
+export interface Held {
+	label: TruthInterval
+	heldMs: number
+}
 
-function armReplayOracle(
-	svc: ServiceInternals,
-	sceneNow: () => number,
-	ctx: InspectContext,
+/** The label a capture holds most on `rfHz`, or null. */
+export function heldBy(
 	c: TruthCase,
+	capture: CaptureRecord | undefined,
+	rfHz: number,
+): Held | null {
+	if (capture?.windowMs == null) return null
+	const [a, b] = capture.windowMs
+	let best: Held | null = null
+	for (const iv of c.intervals) {
+		if (Math.abs(iv.frequencyHz - rfHz) > REPLAY_REACH_HZ) continue
+		const ms = Math.min(b, iv.endMs) - Math.max(a, iv.startMs)
+		if (ms < Math.min(REPLAY_MIN_HELD_MS, iv.endMs - iv.startMs)) continue
+		if (best === null || ms > best.heldMs) best = { label: iv, heldMs: ms }
+	}
+	return best
+}
+
+/** Statistics frames the analog trial reports for a held label (ANALOG_TRIAL_FRAME_MS each). */
+export function analogStats(
+	held: Held | null,
+	mode: AnalogTrialMode,
+): AnalogTrialStats {
+	const n =
+		held === null
+			? 0
+			: Math.min(
+					ANALOG_TRIAL_MAX_FRAMES,
+					Math.floor(held.heldMs / ANALOG_TRIAL_FRAME_MS),
+				)
+	const label = held?.label.label
+	const frame: AnalogTrialFrame | null =
+		label === "analog-voice"
+			? {
+					carrierDb: -10,
+					hfNoiseDb: -20,
+					audioDb: -12,
+					syllabic: 0.5,
+					cluster: 0.1,
+				}
+			: label === "dmr" || label === "pocsag"
+				? {
+						carrierDb: -10,
+						hfNoiseDb: -20,
+						audioDb: -12,
+						syllabic: 0.1,
+						cluster: 0.9,
+					}
+				: label === "carrier"
+					? {
+							carrierDb: -10,
+							hfNoiseDb: -20,
+							audioDb: -60,
+							syllabic: 0,
+							cluster: 0,
+						}
+					: null
+	return {
+		mode,
+		frames:
+			frame === null ? [] : Array.from({ length: n }, () => ({ ...frame })),
+		gapSamples: 0,
+		floorDb: -60,
+	}
+}
+
+function replayDoubles(
+	c: TruthCase,
+	bind: () => { sceneNow: () => number; ctx: InspectContext },
 	counts: InjectedDecodes,
 	trace: string[],
-): void {
-	const seen = new Set<string>()
-	const epochNow = (): number =>
-		svc.spectrum.engine(ctx.sourceId)?.currentEpoch().epoch ?? 0
-	setInterval(() => {
-		for (const cap of ctx.captures.values()) {
-			if (cap.finishedMs === null || seen.has(cap.captureId)) continue
-			seen.add(cap.captureId)
-			const probes = cap.trials.filter(t => t.kind === "probe")
-			if (cap.edge || cap.windowMs === null || probes.length === 0) continue
-			const [a, b] = cap.windowMs
-			let label: TruthInterval["label"] | null = null
-			let best = 0
-			for (const iv of c.intervals) {
-				if (iv.label !== "dmr" && iv.label !== "pocsag") continue
-				if (Math.abs(iv.frequencyHz - cap.rfHz) > REPLAY_REACH_HZ) continue
-				const ms = Math.min(b, iv.endMs) - Math.max(a, iv.startMs)
-				if (ms > best) {
-					best = ms
-					label = iv.label
-				}
-			}
-			const hit =
-				label === null ? -1 : probes.findIndex(t => t.protocol === label)
-			const ran = hit >= 0 ? probes.slice(0, hit + 1) : probes
-			const decoded =
-				label === "dmr" || label === "pocsag" ? (hit >= 0 ? label : null) : null
-			const finished = cap.finishedMs
-			setTimeout(
+): ReplayDoubles {
+	const cancels = new Set<() => void>()
+	/** Settles after REPLAY_TRIAL_MS of virtual time, or at once with `cancelled` on cancel. */
+	const later = <T>(answer: () => T, cancelled: () => T) => {
+		let settle: ((v: T) => void) | null = null
+		const result = new Promise<T>(resolve => {
+			settle = resolve
+		})
+		const timer = setTimeout(() => {
+			cancels.delete(cancel)
+			settle?.(answer())
+		}, REPLAY_TRIAL_MS)
+		const cancel = (): void => {
+			clearTimeout(timer)
+			cancels.delete(cancel)
+			settle?.(cancelled())
+		}
+		cancels.add(cancel)
+		return { result, cancel }
+	}
+	const probes: ReplayDoubles["probes"] = {
+		request: req => ({
+			run: later<IqReplayProbeAnswer>(
 				() => {
-					counts.replays++
+					counts.replayTrials++
+					const { sceneNow, ctx } = bind()
+					const held = heldBy(c, ctx.captures.get(req.captureId), req.rfHz)
+					const protocol = held?.label.label
+					const decoded =
+						(protocol === "dmr" || protocol === "pocsag") &&
+						req.protocol === protocol
+							? protocol
+							: null
 					if (decoded !== null) counts.replayDecoded++
 					trace.push(
-						`${sceneNow()} replay ${cap.captureId} ${Math.round(cap.rfHz)} window ${a}..${b} ${decoded ?? "no decode"}`,
+						`${sceneNow()} replay ${req.captureId} ${req.protocol} ${decoded ?? "no-sync"}`,
 					)
-					svc.applyReplayResult({
-						captureId: cap.captureId,
-						sourceId: ctx.sourceId,
-						observationId: cap.observationId,
-						epoch: epochNow(),
-						rfHz: cap.rfHz,
-						trials: ran.map(
-							(t): ReplayTrial => ({
-								protocol: t.protocol as ReplayTrial["protocol"],
-								decoderType: t.decoder as ReplayTrial["decoderType"],
-								known: false,
-								outcome: t.protocol === decoded ? "decoded" : "no-sync",
-							}),
-						),
+					return {
+						outcome: decoded === null ? "no-sync" : "decoded",
 						decoded:
 							decoded === null
 								? null
 								: {
 										protocol: decoded,
-										identity: {
-											kind: IDENTITY_KIND[decoded],
-											value: DEFAULT_IDENTITY[decoded],
-										},
+										identity: identityOf(decoded, req.rfHz),
 									},
-					})
+					}
 				},
-				Math.max(
-					1,
-					finished +
-						REPLAY_QUEUE_MS +
-						ran.length * REPLAY_TRIAL_MS -
-						sceneNow(),
-				),
+				() => ({ outcome: "cancelled", decoded: null }),
+			),
+		}),
+		onSlotRelease: () => () => undefined,
+		dispose: () => {
+			for (const cancel of [...cancels]) cancel()
+		},
+	}
+	const analog: ReplayDoubles["analog"] = {
+		run: (captureId, mode, signal) => {
+			const run = later<AnalogTrialResult>(
+				() => {
+					counts.analogTrials++
+					const { sceneNow, ctx } = bind()
+					const capture = ctx.captures.get(captureId)
+					const held = capture ? heldBy(c, capture, capture.rfHz) : null
+					const stats = analogStats(held, mode)
+					const tones: AnalogTrialTones = {
+						ctcssHz:
+							held?.label.label === "analog-voice"
+								? (held.label.ctcssHz ?? null)
+								: null,
+						dcs: null,
+						audioSeconds: (held?.heldMs ?? 0) / 1000,
+					}
+					const outcome = classifyAnalogTrial(stats, tones)
+					trace.push(`${sceneNow()} analog ${captureId} ${outcome}`)
+					return { outcome, mode, voice: isVoice(stats), tones, stats }
+				},
+				() => ({
+					outcome: "no-sync",
+					mode,
+					voice: false,
+					tones: { ctcssHz: null, dcs: null, audioSeconds: 0 },
+					stats: null,
+					error: "cancelled",
+				}),
 			)
-		}
-	}, REPLAY_POLL_MS)
+			signal.addEventListener("abort", run.cancel, { once: true })
+			return run.result
+		},
+	}
+	return { probes, analog }
 }
 
 /**
@@ -498,16 +577,30 @@ export async function runTruthCase(
 	const recordings: RecordingRecord[] = []
 	const decodes: InjectedDecodes = {
 		ambient: 0,
-		probe: 0,
-		replay: 0,
+		skipped: 0,
 		dropped: 0,
-		replays: 0,
+		replayTrials: 0,
 		replayDecoded: 0,
+		analogTrials: 0,
 	}
 	let decisions: Record<string, number> = {}
 	const trace: string[] = []
 	let t0 = 0
 	let busy: () => boolean = () => false
+	// The replay doubles answer only after the run started (inspect binds the clock and captures).
+	let bound: { sceneNow: () => number; ctx: InspectContext } | null = null
+	const replay = replayDoubles(
+		c,
+		() => {
+			if (bound === null)
+				throw new Error(
+					"truth scorecard: a replay trial before the run started",
+				)
+			return bound
+		},
+		decodes,
+		trace,
+	)
 	const src = c.open()
 	try {
 		const run = await runScanner(src, {
@@ -516,11 +609,13 @@ export async function runTruthCase(
 			tailMs: TRUTH_TAIL_MS,
 			idleTailMs: TRUTH_IDLE_MS,
 			busy: () => busy(),
+			replay,
+			decoderTypes: TRUTH_DECODER_TYPES,
 			inspect: (service, sceneNow, ctx) => {
 				const svc = service as unknown as ServiceInternals
+				bound = { sceneNow, ctx }
 				busy = watchRecorder(svc, ctx, recordings)
 				armDecodes(svc, sceneNow, ctx, c, decodes)
-				armReplayOracle(svc, sceneNow, ctx, c, decodes, trace)
 				t0 = Date.now() - sceneNow()
 			},
 			beforeStop: (service: ScannerService) => {
@@ -583,8 +678,9 @@ export function syntheticCase(
  * A CU8 capture case. The harness feeds its first LEAD_IN_MS as the lead-in (the noise floor
  * settles on the capture's own floor), so capture time t is scene time t − LEAD_IN_MS: the
  * labels and decodes are shifted by that. A label is clipped to the scene; a decode is kept only
- * within the capture (0 to its length): one the live system recorded after the capture ended
- * belongs to a transmission the capture does not hold.
+ * from the capture's start to AMBIENT_PAIR_MS (2 s) past its end, the reach the scanner places an
+ * ambient decode in after a transmission ends: a later one belongs to a transmission the capture
+ * does not hold.
  */
 export function captureCase(o: {
 	name: string
@@ -614,7 +710,7 @@ export function captureCase(o: {
 		startedAtMs: o.startedAtMs,
 		intervals,
 		decodes: o.decodes
-			.filter(d => d.atMs >= 0 && d.atMs <= o.durationMs)
+			.filter(d => d.atMs >= 0 && d.atMs <= o.durationMs + AMBIENT_PAIR_MS)
 			.map(d => ({ ...d, atMs: d.atMs - LEAD_IN_MS })),
 		open: () => fileSource(o.path, o.rateHz, o.centreHz),
 	}

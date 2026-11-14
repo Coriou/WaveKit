@@ -23,6 +23,8 @@ import type {
 	IqCaptureView,
 	IqCaptureRateHz,
 } from "../../../src/core/scanner/iq-capture-contract.js"
+import type { ReplayPoolAdapter } from "../../../src/core/iq-capture/pool-adapter.js"
+import type { AnalogTrialRunner } from "../../../src/core/scanner/scanner-redesign-contract.js"
 import {
 	IQ_CAPTURE_MAX_CONCURRENT,
 	IQ_CAPTURE_MAX_MS,
@@ -217,6 +219,9 @@ class Sources extends EventEmitter {
 /** No decoder binaries: every ephemeral decoder start fails like a missing program. */
 class Decoders extends EventEmitter {
 	private readonly held = new Map<string, Set<string>>()
+	constructor(private readonly types: Readonly<Record<string, string>> = {}) {
+		super()
+	}
 	createEphemeralDecoder(): Promise<never> {
 		return Promise.reject(new Error("no decoder binaries in the benchmark"))
 	}
@@ -242,8 +247,9 @@ class Decoders extends EventEmitter {
 	getAllStatus(): [] {
 		return []
 	}
-	getStatus(): undefined {
-		return undefined
+	getStatus(id: string): { id: string; type: string } | undefined {
+		const type = this.types[id]
+		return type === undefined ? undefined : { id, type }
 	}
 }
 
@@ -257,6 +263,14 @@ const IDLE_STEP_MS = 250
  * an fsync). Past it the step goes on and the run counts an overrun (`busyOverruns`).
  */
 const BUSY_TURNS_MAX = 200_000
+
+/** What the scanner's replay queue runs its trials on (`runScanner` option `replay`). */
+export interface ReplayDoubles {
+	/** The probe pool as the queue sees it (createPoolReplayProbes' surface). */
+	probes: ReplayPoolAdapter
+	/** The analog replay trial (ScannerServiceDeps.analogTrial). */
+	analog: AnalogTrialRunner
+}
 
 /** What `inspect` may read of the run besides the service. */
 export interface InspectContext {
@@ -324,6 +338,15 @@ export async function runScanner(
 		 * never runs ahead of the disk and two runs decide alike.
 		 */
 		busy?: () => boolean
+		/**
+		 * The scanner's own replay queue runs on the finished captures, as in production: the port
+		 * reports them finished, lets the queue claim, view and settle them, and the queue's probe
+		 * pool view and analog trial are these doubles (no decoder binaries offline). Absent: the
+		 * queue never gets a capture (the published baselines).
+		 */
+		replay?: ReplayDoubles
+		/** Decoder ids the decoder double reports a type for (getStatus), as the manager would. */
+		decoderTypes?: Readonly<Record<string, string>>
 	} = {},
 ): Promise<RunRecord> {
 	const fs = source.rateHz
@@ -347,8 +370,6 @@ export async function runScanner(
 	const sources = new Sources(caps)
 	const fanout = new Fanout()
 	if (opts.provenTuning === true) {
-		if (source.centreAt)
-			throw new Error("benchmark: provenTuning does not follow retunes")
 		const ledger = new FakeReceiverLedger(SOURCE, { rateHz: fs, settleMs: 50 })
 		ledger.prove(source.centreHz, fs)
 		sources.tuningLedger = ledger.ledger
@@ -415,6 +436,30 @@ export async function runScanner(
 		if (c.observationId)
 			c.discoveryId =
 				internals.store.discoveryIdOf(c.observationId) ?? c.discoveryId
+		if (replay) {
+			views.set(c.captureId, view)
+			// The real port reports a capture finished once its file is written, never from inside
+			// the caller's own end(): one virtual millisecond later.
+			setTimeout(() => {
+				if (!views.has(c.captureId)) return
+				for (const l of [...finishedListeners]) l(view)
+			}, 0)
+		}
+	}
+	const replay = opts.replay ?? null
+	/** Finished captures the replay queue may claim (replay mode), and their holders. */
+	const views = new Map<string, IqCaptureView>()
+	const holders = new Map<string, string>()
+	const finishedListeners = new Set<(view: IqCaptureView) => void>()
+	const removedListeners = new Set<
+		(captureId: string, observationId: string | null) => void
+	>()
+	const remove = (captureId: string): void => {
+		const view = views.get(captureId)
+		if (!view) return
+		views.delete(captureId)
+		holders.delete(captureId)
+		for (const l of [...removedListeners]) l(captureId, view.observationId)
 	}
 	let nextCapture = 1
 	const limits = opts.captureLimits !== false
@@ -474,10 +519,19 @@ export async function runScanner(
 			return { captureId }
 		},
 		captureFor: () => ({ refused: "busy" as const }),
-		view: () => null,
-		onFinished: () => () => undefined,
-		onRemoved: () => () => undefined,
-		holderOf: () => undefined,
+		view: (captureId: string) => views.get(captureId) ?? null,
+		onFinished: (l: (view: IqCaptureView) => void) => {
+			finishedListeners.add(l)
+			return () => finishedListeners.delete(l)
+		},
+		onRemoved: (
+			l: (captureId: string, observationId: string | null) => void,
+		) => {
+			removedListeners.add(l)
+			return () => removedListeners.delete(l)
+		},
+		holderOf: (captureId: string) =>
+			views.has(captureId) ? (holders.get(captureId) ?? null) : undefined,
 		discard: (captureId: string) => {
 			const c = captures.get(captureId)
 			if (c && c.finishedMs === null) {
@@ -485,6 +539,7 @@ export async function runScanner(
 				c.endedMs = sceneNow()
 				c.finishedMs = sceneNow()
 			}
+			remove(captureId)
 			return true
 		},
 		end: (captureId: string) => {
@@ -493,8 +548,14 @@ export async function runScanner(
 			c.endedMs = sceneNow()
 			finish(c)
 		},
-		claim: () => false,
-		settle: () => undefined,
+		claim: (captureId: string, holder: string) => {
+			if (!views.has(captureId) || holders.has(captureId)) return false
+			holders.set(captureId, holder)
+			return true
+		},
+		settle: (captureId: string, holder: string) => {
+			if (holders.get(captureId) === holder) remove(captureId)
+		},
 		confirmLive: () => 0,
 		openReplay: () => null,
 		flush: () => undefined,
@@ -529,8 +590,9 @@ export async function runScanner(
 				releaseUnused: () => undefined,
 			} as never,
 			tuner: tuner as never,
-			decoders: new Decoders() as never,
+			decoders: new Decoders(opts.decoderTypes) as never,
 			digitalVoice: null,
+			...(replay ? { analogTrial: replay.analog } : {}),
 			liveDemod: null,
 			logger: pino({ level: "silent" }),
 			now,
@@ -544,6 +606,10 @@ export async function runScanner(
 		throw err
 	}
 	const svc = service
+	// The replay queue's probe pool view (ScannerService.replayProbes): the doubles' instead.
+	if (replay)
+		(svc as unknown as { replayProbes: () => ReplayPoolAdapter }).replayProbes =
+			() => replay.probes
 	// Everything after install runs inside this try: a throwing `inspect`, a failing run or a
 	// rejecting stop() still restores the real timers and clocks (the nested finally).
 	try {

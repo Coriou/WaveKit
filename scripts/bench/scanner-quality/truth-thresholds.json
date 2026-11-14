@@ -1,16 +1,29 @@
 {
 	"version": 1,
 	"limits": {
-		"falseVoice": { "max": 3 },
-		"digitalKeptAsVoice": { "max": 2 },
-		"missedVoice": { "max": 1 },
-		"splitVoice": { "max": 0 },
-		"identifyWrong": { "max": 0 },
-		"ioOverruns": { "max": 0 }
+		"synthetic": {
+			"falseVoice": { "max": 2 },
+			"digitalKeptAsVoice": { "max": 1 },
+			"missedVoice": { "max": 1 },
+			"splitVoice": { "max": 0 },
+			"identifyWrong": { "max": 0 },
+			"identifyRight": { "min": 8 },
+			"ioOverruns": { "max": 0 }
+		},
+		"capture": {
+			"falseVoice": { "max": 1 },
+			"digitalKeptAsVoice": { "max": 1 },
+			"missedVoice": { "max": 0 },
+			"splitVoice": { "max": 0 },
+			"identifyWrong": { "max": 0 },
+			"identifyRight": { "min": 16 },
+			"ioOverruns": { "max": 0 }
+		}
 	},
 	"notes": {
-		"digitalKeptAsVoice": "2 known limits: the synthetic DMR handheld's first file, recorded before its channel has the 4 TDMA votes that bar it; and, in a labelled capture set, a DMR transmission that reads analog FM on a channel with no digital prior yet (its replay decode lands during the file, which then finishes as voice).",
-		"falseVoice": "3: the two above, and the synthetic FM carrier whose audio is noise keyed like speech (no digital prior, so no content check).",
-		"missedVoice": "1: the first of the synthetic 12 dB speech overs, never voiced."
+		"synthetic.digitalKeptAsVoice": "1 known limit: the DMR handheld conversation's first file, recorded before its channel has the 4 TDMA votes that bar it (a fresh channel holds no digital prior yet).",
+		"synthetic.falseVoice": "2: that file, and the FM carrier whose audio is noise keyed like speech (no digital prior, so no content check).",
+		"synthetic.missedVoice": "1: the first of the 12 dB speech overs, never voiced.",
+		"capture": "Calibrated on the reference labelled capture set (18 ten-second captures of one land-mobile band, run as one session). 1 known limit there: a DMR transmission that reads analog FM on a channel with no digital prior yet; its replay decode lands during the file, which finishes as voice. Another capture set needs its own limits (--thresholds)."
 	}
 }

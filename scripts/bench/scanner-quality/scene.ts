@@ -725,7 +725,10 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 					const tn = tones[j]!
 					v += Math.sin(tn.w * sec + tn.p)
 				}
-				return env * toneAmp * v + 300 * Math.sin(TWO_PI * 88.5 * sec)
+				return (
+					env * toneAmp * v +
+					SPEECH_CTCSS_DEV_HZ * Math.sin(TWO_PI * SPEECH_CTCSS_HZ * sec)
+				)
 			}
 			let k0 = -1
 			let y0 = 0
@@ -954,7 +957,7 @@ const POCSAG_PREAMBLE_BITS = 576
 /** Audio rate of the synthetic speech and noise modulators (interpolated to the IQ rate). */
 const AUDIO_HZ = 16_000
 /** CTCSS tone of the synthetic speech (Hz) and its deviation (Hz). */
-const SPEECH_CTCSS_HZ = 88.5
+export const SPEECH_CTCSS_HZ = 88.5
 const SPEECH_CTCSS_DEV_HZ = 300
 /** RMS deviation of a voiced syllable (Hz), as a talker on a 12.5 kHz NFM channel. */
 const SPEECH_RMS_DEV_HZ = 1_500

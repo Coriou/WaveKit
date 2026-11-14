@@ -2,8 +2,9 @@
  * `scanner-quality --truth <dir|synthetic>`: the truth scorecard. Runs the synthetic truth
  * scenes (truth-scenes.ts) and every labelled capture of `<dir>` (truth-labels.ts) through the
  * scanner with the analog recorder in the loop (truth-run.ts), scores them (truth-score.ts),
- * prints the scorecard as one JSON line and then one human line, and exits 1 when a total is
- * above the checked-in limits (truth-thresholds.json), 2 on bad arguments or labels.
+ * prints the scorecard as one JSON line and then one human line (the last two lines of stdout;
+ * the scanner may log before them), and exits 1 when a total misses the checked-in limits
+ * (truth-thresholds.json), 2 on bad arguments, labels or limits.
  *
  *   --truth <dir>         labelled captures (`*.truth.json`); `synthetic` runs the scenes only
  *   --synthetic on|off    run the synthetic scenes too (default on)
@@ -22,7 +23,7 @@ import process from "node:process"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { T0_MS } from "./harness.js"
+import { LEAD_IN_MS, T0_MS } from "./harness.js"
 import {
 	SESSION_MIN_GAP_MS,
 	captureCase,
@@ -35,6 +36,7 @@ import {
 	formatScorecardLine,
 	scoreCase,
 	scorecard,
+	unknownMetrics,
 	type CaseScore,
 } from "./truth-score.js"
 
@@ -120,6 +122,11 @@ export async function runTruthCli(argv: readonly string[]): Promise<number> {
 			o.thresholds,
 			readFileSync(resolve(o.thresholds), "utf8"),
 		)
+		const unknown = unknownMetrics(limits)
+		if (unknown.length > 0)
+			throw new TruthArgsError(
+				`${o.thresholds}: unknown metrics ${unknown.join(", ")}`,
+			)
 		cases = truthCases(o)
 	} catch (err: unknown) {
 		process.stderr.write(
@@ -151,7 +158,10 @@ export async function runTruthCli(argv: readonly string[]): Promise<number> {
 			}
 			const run = await runTruthCase(c, session)
 			if (session)
-				nextT0 = session.t0Ms + run.iqSeconds * 1000 + SESSION_MIN_GAP_MS
+				// The next run's clock starts LEAD_IN_MS before its time 0: after this run's scene
+				// and tails, and SESSION_MIN_GAP_MS more.
+				nextT0 =
+					session.t0Ms + run.iqSeconds * 1000 + LEAD_IN_MS + SESSION_MIN_GAP_MS
 			iq += run.iqSeconds
 			wall += run.wallSeconds
 			const s = scoreCase(c, run)

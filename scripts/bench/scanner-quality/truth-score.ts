@@ -18,6 +18,7 @@
 import type { RecordingRecord, TruthCase, TruthRun } from "./truth-run.js"
 import {
 	DIGITAL_LABELS,
+	LIMIT_KINDS,
 	NON_VOICE_LABELS,
 	type Thresholds,
 	type TruthInterval,
@@ -115,7 +116,16 @@ export interface Scorecard {
 	totals: Totals
 	cases: CaseScore[]
 	/** Limits exceeded (metric, value, max); empty: pass. */
-	failures: { metric: string; value: number; max: number }[]
+	/** Totals of each kind of case (the limits gate these). */
+	byKind: Record<(typeof LIMIT_KINDS)[number], Totals>
+	/** Limits not met (kind, metric, value, the limit); empty: pass. */
+	failures: {
+		kind: (typeof LIMIT_KINDS)[number]
+		metric: string
+		value: number
+		max?: number
+		min?: number
+	}[]
 	pass: boolean
 }
 
@@ -348,27 +358,52 @@ export function metricOf(t: Totals, name: string): number | undefined {
 	return typeof v === "number" ? v : undefined
 }
 
+/** Every metric a limit names that the scorecard has not (none: the limits can be checked). */
+export function unknownMetrics(limits: Thresholds): string[] {
+	const t = emptyTotals()
+	const out: string[] = []
+	for (const kind of LIMIT_KINDS)
+		for (const metric of Object.keys(limits.limits[kind] ?? {}))
+			if (metricOf(t, metric) === undefined) out.push(`${kind}.${metric}`)
+	return out.sort()
+}
+
 /** The scorecard of all cases, checked against `limits`. A limit on no metric is an error. */
 export function scorecard(
 	cases: readonly CaseScore[],
 	limits: Thresholds,
 ): Scorecard {
-	const totals = cases.reduce(
-		(acc, c) => addTotals(acc, c.totals),
-		emptyTotals(),
-	)
-	const failures: Scorecard["failures"] = []
-	for (const [metric, { max }] of Object.entries(limits.limits).sort(
-		([a], [b]) => a.localeCompare(b),
-	)) {
-		const value = metricOf(totals, metric)
-		if (value === undefined)
-			throw new Error(`threshold names an unknown metric: ${metric}`)
-		if (value > max) failures.push({ metric, value, max })
+	const unknown = unknownMetrics(limits)
+	if (unknown.length > 0)
+		throw new Error(`threshold names an unknown metric: ${unknown.join(", ")}`)
+	const sum = (cs: readonly CaseScore[]): Totals =>
+		cs.reduce((acc, c) => addTotals(acc, c.totals), emptyTotals())
+	const byKind = {
+		synthetic: sum(cases.filter(c => c.kind === "synthetic")),
+		capture: sum(cases.filter(c => c.kind === "capture")),
 	}
+	const failures: Scorecard["failures"] = []
+	for (const kind of LIMIT_KINDS)
+		for (const [metric, limit] of Object.entries(
+			limits.limits[kind] ?? {},
+		).sort(([a], [b]) => a.localeCompare(b))) {
+			const value = metricOf(byKind[kind], metric)!
+			if (
+				(limit.max !== undefined && value > limit.max) ||
+				(limit.min !== undefined && value < limit.min)
+			)
+				failures.push({
+					kind,
+					metric,
+					value,
+					...(limit.max !== undefined ? { max: limit.max } : {}),
+					...(limit.min !== undefined ? { min: limit.min } : {}),
+				})
+		}
 	return {
 		version: 1,
-		totals,
+		totals: sum(cases),
+		byKind,
 		cases: [...cases],
 		failures,
 		pass: failures.length === 0,
@@ -380,7 +415,13 @@ export function formatScorecardLine(s: Scorecard): string {
 	const t = s.totals
 	const verdict = s.pass
 		? "PASS"
-		: `FAIL (${s.failures.map(f => `${f.metric} ${f.value} > ${f.max}`).join(", ")})`
+		: `FAIL (${s.failures
+				.map(f =>
+					f.max !== undefined && f.value > f.max
+						? `${f.kind} ${f.metric} ${f.value} > ${f.max}`
+						: `${f.kind} ${f.metric} ${f.value} < ${f.min ?? 0}`,
+				)
+				.join(", ")})`
 	return (
 		`truth scorecard: ${t.cases} cases, ${t.keptFiles} kept files: ` +
 		`false voice ${t.falseVoice} (digital ${t.digitalKeptAsVoice}), ` +

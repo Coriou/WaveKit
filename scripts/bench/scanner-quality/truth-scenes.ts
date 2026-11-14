@@ -17,7 +17,13 @@
  *   ones on another.
  * - repeater-id: one 28 s speech-like NFM over with CTCSS (a repeater's voice ID).
  */
-import { buildScene, nominalOf, type Scene, type SignalClass } from "./scene.js"
+import {
+	SPEECH_CTCSS_HZ,
+	buildScene,
+	nominalOf,
+	type Scene,
+	type SignalClass,
+} from "./scene.js"
 import type { TruthDecode, TruthInterval, TruthLabel } from "./truth-labels.js"
 import { syntheticCase, type TruthCase } from "./truth-run.js"
 
@@ -27,6 +33,9 @@ const NOISE_SIGMA = 0.03
 /** An always-on dsd-fme reports a keyed DMR channel this long after its onset, then every 2 s. */
 const DMR_FIRST_DECODE_MS = 1_500
 const DMR_DECODE_EVERY_MS = 2_000
+
+/** The voice classes whose generator adds the SPEECH_CTCSS_HZ tone (scene.ts). */
+const TONED: readonly SignalClass[] = ["nfm-voice", "nfm-ptt", "nfm-speech"]
 
 const LABEL_OF: Partial<Record<SignalClass, TruthLabel>> = {
 	"nfm-voice": "analog-voice",
@@ -54,6 +63,7 @@ export function truthOf(scene: Scene): TruthInterval[] {
 				source: "synthetic",
 				confirmed: true,
 				bandwidthHz: nominalOf(t.class).bandwidthHz,
+				...(TONED.includes(t.class) ? { ctcssHz: SPEECH_CTCSS_HZ } : {}),
 			})
 	return out
 }

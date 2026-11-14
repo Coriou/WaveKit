@@ -97,11 +97,11 @@ const runOf = (
 	finalIds: discoveries.map(d => d.id),
 	decodes: {
 		ambient: 0,
-		probe: 0,
-		replay: 0,
+		skipped: 0,
 		dropped: 0,
-		replays: 0,
+		replayTrials: 0,
 		replayDecoded: 0,
+		analogTrials: 0,
 	},
 	decisions: {},
 	iqSeconds: 1,
@@ -110,9 +110,14 @@ const runOf = (
 	trace: [],
 })
 
+/** Limits on the synthetic cases' totals (the cases these tests score are synthetic). */
 const limits = (l: Record<string, number>) => ({
 	version: 1 as const,
-	limits: Object.fromEntries(Object.entries(l).map(([k, max]) => [k, { max }])),
+	limits: {
+		synthetic: Object.fromEntries(
+			Object.entries(l).map(([k, max]) => [k, { max }]),
+		),
+	},
 })
 
 describe("truth scorecard: kept files", () => {
@@ -289,15 +294,51 @@ describe("truth scorecard: totals and limits", () => {
 		const fail = scorecard([one, one], limits({ digitalKeptAsVoice: 1 }))
 		expect(fail.pass).toBe(false)
 		expect(fail.failures).toEqual([
-			{ metric: "digitalKeptAsVoice", value: 2, max: 1 },
+			{ kind: "synthetic", metric: "digitalKeptAsVoice", value: 2, max: 1 },
 		])
 		expect(scorecard([one], limits({ digitalKeptAsVoice: 1 })).pass).toBe(true)
+	})
+
+	it("fails below a minimum, and gates each kind on its own totals", () => {
+		const capture = { ...one, kind: "capture" as const }
+		const t = {
+			version: 1 as const,
+			limits: {
+				synthetic: { keptFiles: { min: 2 } },
+				capture: { digitalKeptAsVoice: { max: 0 } },
+			},
+		}
+		const s = scorecard([one, capture], t)
+		expect(s.byKind.synthetic.keptFiles).toBe(1)
+		expect(s.byKind.capture.digitalKeptAsVoice).toBe(1)
+		expect(s.totals.keptFiles).toBe(2)
+		expect(s.failures).toEqual([
+			{ kind: "synthetic", metric: "keptFiles", value: 1, min: 2 },
+			{ kind: "capture", metric: "digitalKeptAsVoice", value: 1, max: 0 },
+		])
+		expect(formatScorecardLine(s)).toContain(
+			"FAIL (synthetic keptFiles 1 < 2, capture digitalKeptAsVoice 1 > 0)",
+		)
+		// A run without captures has capture totals of 0.
+		expect(scorecard([one], t).byKind.capture.keptFiles).toBe(0)
 	})
 
 	it("adds totals over cases, labels included", () => {
 		const s = scorecard([one, one], limits({}))
 		expect(s.totals.cases).toBe(2)
 		expect(s.totals.falseVoiceByLabel).toEqual({ dmr: 2 })
+	})
+
+	it("refuses a limit with neither max nor min", () => {
+		expect(() =>
+			parseThresholds(
+				"t.json",
+				JSON.stringify({
+					version: 1,
+					limits: { synthetic: { falseVoice: {} } },
+				}),
+			),
+		).toThrow(/t\.json: limits\.synthetic\.falseVoice/)
 	})
 
 	it("refuses a limit on a metric the scorecard has not", () => {
@@ -315,7 +356,7 @@ describe("truth scorecard: totals and limits", () => {
 		)
 		expect(line.split("\n")).toHaveLength(1)
 		expect(line).toContain("false voice 1 (digital 1)")
-		expect(line).toContain("FAIL (digitalKeptAsVoice 1 > 0)")
+		expect(line).toContain("FAIL (synthetic digitalKeptAsVoice 1 > 0)")
 	})
 })
 
@@ -398,12 +439,13 @@ describe("truth labels", () => {
 		const { readFileSync } = await import("node:fs")
 		const path = "scripts/bench/scanner-quality/truth-thresholds.json"
 		const t = parseThresholds(path, readFileSync(path, "utf8"))
-		expect(t.limits["digitalKeptAsVoice"]).toBeDefined()
+		expect(t.limits.synthetic?.["digitalKeptAsVoice"]).toBeDefined()
+		expect(t.limits.capture?.["digitalKeptAsVoice"]).toBeDefined()
 		// Every limit names a scorecard total.
 		expect(() => scorecard([], t)).not.toThrow()
 	})
 
-	it("shifts a capture's labels and decodes by the lead-in and keeps decodes inside it", () => {
+	it("shifts a capture's labels and decodes by the lead-in and keeps decodes it can hold", () => {
 		const c = captureCase({
 			name: "c",
 			path: "/nowhere.cu8",
@@ -420,14 +462,15 @@ describe("truth labels", () => {
 			decodes: [
 				{ atMs: -100, frequencyHz: F, protocol: "dmr", via: "ambient" },
 				{ atMs: 1_500, frequencyHz: F, protocol: "dmr", via: "ambient" },
-				{ atMs: 10_000, frequencyHz: F, protocol: "dmr", via: "ambient" },
-				{ atMs: 10_001, frequencyHz: F, protocol: "dmr", via: "ambient" },
+				{ atMs: 12_000, frequencyHz: F, protocol: "dmr", via: "ambient" },
+				{ atMs: 12_001, frequencyHz: F, protocol: "dmr", via: "ambient" },
 			],
 		})
 		expect(c.intervals.map(i => [i.startMs, i.endMs])).toEqual([
 			[0, 1_000],
 			[8_000, 9_000],
 		])
-		expect(c.decodes.map(d => d.atMs)).toEqual([500, 9_000])
+		// Kept from the capture's start to 2 s past its end (AMBIENT_PAIR_MS).
+		expect(c.decodes.map(d => d.atMs)).toEqual([500, 11_000])
 	})
 })

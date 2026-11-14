@@ -61,6 +61,8 @@ export const TruthIntervalSchema = z
 		confirmed: z.boolean(),
 		/** Occupied bandwidth (Hz), when known: widens the channel a recording may match. */
 		bandwidthHz: hz.optional(),
+		/** An analog voice's CTCSS tone (Hz), when known: identify's analog trial hears it. */
+		ctcssHz: hz.optional(),
 		note: z.string().max(200).optional(),
 	})
 	.strict()
@@ -162,21 +164,39 @@ export function loadTruthDir(dir: string): TruthCapture[] {
 	return out
 }
 
-/** One metric's limit: the scorecard fails when the value is above `max`. */
+/** One metric's limit: the scorecard fails when the value is above `max` or below `min`. */
 const LimitSchema = z
-	.object({ max: z.number().finite().nonnegative() })
+	.object({
+		max: z.number().finite().nonnegative().optional(),
+		min: z.number().finite().nonnegative().optional(),
+	})
 	.strict()
+	.refine(
+		l => l.max !== undefined || l.min !== undefined,
+		"a limit needs max or min",
+	)
+const LimitsSchema = z.record(z.string(), LimitSchema)
+
+/** The kinds of case the limits apply to, each on its own totals. */
+export const LIMIT_KINDS = ["synthetic", "capture"] as const
 
 /**
- * The checked-in limits (scanner-quality/truth-thresholds.json). Every metric named must exist
- * in the scorecard's totals; a metric left out is not gated.
+ * The checked-in limits (scanner-quality/truth-thresholds.json), per kind of case: `synthetic`
+ * gates the built-in scenes' totals, `capture` the labelled captures' (a run without captures
+ * has capture totals of 0). Every metric named must exist in the scorecard's totals; a metric
+ * left out is not gated.
  */
 export const ThresholdsSchema = z
 	.object({
 		version: z.literal(1),
-		limits: z.record(z.string(), LimitSchema),
-		/** Why a limit is above 0 (the known limits it allows), per metric. */
-		notes: z.record(z.string(), z.string().max(500)).optional(),
+		limits: z
+			.object({
+				synthetic: LimitsSchema.optional(),
+				capture: LimitsSchema.optional(),
+			})
+			.strict(),
+		/** Why a limit is above 0 (the known limits it allows), per kind and metric. */
+		notes: z.record(z.string(), z.string().max(600)).optional(),
 	})
 	.strict()
 export type Thresholds = z.infer<typeof ThresholdsSchema>
