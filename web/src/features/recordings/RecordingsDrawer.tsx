@@ -187,6 +187,8 @@ function Progress() {
 function HeaderActions({ usable }: { usable: boolean }) {
 	const recordings = useServices().data.recordings
 	const meta = useStore(recordings, s => s.meta)
+	// a count still loading keeps its last value, dimmed
+	const dim = useStore(recordings, s => !s.answered || s.status === "loading")
 	const filter = useStore(recordingsUi, s => s.filter)
 	const searching = useStore(
 		recordingsUi,
@@ -197,7 +199,7 @@ function HeaderActions({ usable }: { usable: boolean }) {
 	const kept = meta?.counts?.kept ?? null
 	return (
 		<>
-			<span className="wkr-count" data-dim={meta === null || undefined}>
+			<span className="wkr-count" data-dim={dim || undefined}>
 				{count ?? ""}
 			</span>
 			<span className="wkr-head-gap" />
@@ -405,6 +407,7 @@ function List({
 	const more = useStore(recordings, s => s.nextCursor !== null)
 	const loadingMore = useStore(recordings, s => s.loadingMore)
 	const heldNew = useStore(recordings, s => s.heldNew)
+	const answered = useStore(recordings, s => s.answered)
 	const removing = useStore(recordings.marks, m => m.removing)
 	const tokens = useStore(recordingsUi, s => s.tokens)
 	const text = useStore(recordingsUi, s => s.text)
@@ -476,12 +479,16 @@ function List({
 		if (i !== undefined) virtual.reveal(i)
 	}
 	// the player's title asks for its row
+	// each request is served once (the row may load later: it is served when it does)
 	const asked = useStore(revealRequest)
+	const served = useRef(revealRequest.get()?.n ?? 0)
 	const revealRow = virtual.reveal
 	useEffect(() => {
-		if (asked === null) return
+		if (asked === null || asked.n === served.current) return
 		const i = rowIndex.get(asked.id)
-		if (i !== undefined) revealRow(i)
+		if (i === undefined) return
+		served.current = asked.n
+		revealRow(i)
 	}, [asked, rowIndex, revealRow])
 
 	const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -556,7 +563,7 @@ function List({
 		status,
 		busy,
 		rows: visible.length,
-		answered: meta !== null,
+		answered,
 		error,
 		truncated: meta?.truncated === true,
 		capped,
@@ -605,7 +612,11 @@ function List({
 			</>
 		)
 	const searching = tokens.length > 0 || text.trim() !== ""
-	const total = meta?.matched ?? null
+	// what the search matches, less what waits for Undo here
+	const total =
+		meta?.matched === null || meta?.matched === undefined
+			? null
+			: Math.max(visible.length, meta.matched - removing.size)
 	return (
 		<>
 			{notice ?? <PanelNotice />}

@@ -66,6 +66,8 @@ export interface PagedFeedState<T, Q, M> {
 	holding: boolean
 	/** Rows a held refresh found above the newest row shown. */
 	heldNew: number
+	/** The current key has had an answer (its rows, meta and counts are its own). */
+	answered: boolean
 }
 
 export interface PagedFeedOptions {
@@ -159,6 +161,7 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 			capped: false,
 			holding: false,
 			heldNew: 0,
+			answered: false,
 		})
 		this.maxItems = options.maxItems
 		this.pageSize = options.pageSize
@@ -209,6 +212,9 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 			retryAt: null,
 			capped: false,
 			heldNew: 0,
+			// another search: nothing it shows yet is its own (no empty state, no "as of" before its answer)
+			answered: false,
+			asOf: null,
 		})
 		return this.refresh()
 	}
@@ -250,7 +256,8 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 			s.nextCursor === null ||
 			s.loadingMore ||
 			s.capped ||
-			s.status !== "ready"
+			!s.answered ||
+			(s.status !== "ready" && s.status !== "loading")
 		)
 			return
 		const generation = this.generation
@@ -308,12 +315,15 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 	/** The panel closed: nothing in flight, no timers; the rows stay for the next open. */
 	stop(): void {
 		this.cancel()
-		if (this.get().status === "loading" || this.get().busy)
-			this.update(s => ({
-				...s,
-				status: s.asOf === null ? "idle" : "ready",
+		const s = this.get()
+		if (s.status === "loading" || s.busy || s.retryAt !== null || s.loadingMore)
+			this.update(v => ({
+				...v,
+				status:
+					v.status === "loading" ? (v.answered ? "ready" : "idle") : v.status,
 				busy: false,
 				loadingMore: false,
+				retryAt: null,
 			}))
 	}
 
@@ -346,14 +356,8 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 		this.clearRetry()
 		const abort = new AbortController()
 		this.headAbort = abort
-		this.update(s => ({
-			...s,
-			status: "loading",
-			retryAt: null,
-			// a pending older page is outrun by the head: its answer is dropped by the generation below
-			loadingMore: false,
-		}))
-		this.moreAbort?.abort()
+		// an older page in flight goes on: the merge keeps rows paged past the head, and their cursor
+		this.update(s => ({ ...s, status: "loading", retryAt: null, busy: false }))
 		this.clearBusy()
 		this.busyTimer = setTimeout(() => {
 			this.busyTimer = null
@@ -376,6 +380,7 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 					errorStatus: null,
 					asOf: this.now(),
 					meta: page.meta,
+					answered: true,
 					heldNew: countNew(
 						s.items,
 						page.items,
@@ -446,6 +451,7 @@ export abstract class PagedFeed<T, Q, M> extends Store<
 				asOf: this.now(),
 				meta: page.meta,
 				heldNew: 0,
+				answered: true,
 			}
 		})
 	}

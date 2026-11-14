@@ -108,15 +108,33 @@ export function useVirtualRows(options: VirtualRowsOptions): VirtualRows {
 		[observer],
 	)
 
+	// The scroller can mount later than the hook (a panel shows its skeleton first) or be replaced (an
+	// empty state in between): follow whichever element the ref holds after each commit.
+	const watched = useRef<{
+		el: HTMLDivElement
+		ro: ResizeObserver | null
+	} | null>(null)
 	useLayoutEffect(() => {
 		const el = scroller.current
+		if (watched.current?.el === el) return
+		watched.current?.ro?.disconnect()
+		watched.current = null
 		if (!el) return
 		setViewport(el.clientHeight || 600)
-		if (typeof ResizeObserver === "undefined") return
-		const ro = new ResizeObserver(() => setViewport(el.clientHeight || 600))
-		ro.observe(el)
-		return () => ro.disconnect()
-	}, [])
+		const ro =
+			typeof ResizeObserver === "undefined"
+				? null
+				: new ResizeObserver(() => setViewport(el.clientHeight || 600))
+		ro?.observe(el)
+		watched.current = { el, ro }
+	})
+	useEffect(
+		() => () => {
+			watched.current?.ro?.disconnect()
+			watched.current = null
+		},
+		[],
+	)
 
 	const onScroll = useCallback(() => {
 		const el = scroller.current

@@ -81,7 +81,7 @@ const view = (s: RecordingsState) =>
 		status: s.status,
 		busy: s.busy,
 		rows: s.items.length,
-		answered: s.meta !== null,
+		answered: s.answered,
 		error: s.error,
 		truncated: s.meta?.truncated === true,
 		capped: s.capped,
@@ -433,6 +433,66 @@ describe("recordings panel states (slow and failing core)", () => {
 		expect(store.get().items).toHaveLength(1)
 		expect(store.get().asOf).not.toBeNull()
 		expect(store.get().asOf).not.toBe(asOf)
+	})
+
+	it("a new search shows the skeleton until its own answer, never the last search's empty state", async () => {
+		vi.useFakeTimers()
+		let slow = false
+		const { api } = scripted(() =>
+			slow
+				? new Promise<Response>(resolve =>
+						setTimeout(() => resolve(json(200, page([]))), 4000),
+					)
+				: json(200, page([item(A)])),
+		)
+		const store = new RecordingsStore(api)
+		await store.show({})
+		slow = true
+		void store.show({ talkgroup: "123" })
+		expect(view(store.get())).toMatchObject({ body: "skeleton", busy: false })
+		expect(store.get().asOf).toBeNull()
+		await vi.advanceTimersByTimeAsync(FEED_BUSY_MS)
+		expect(view(store.get())).toMatchObject({ body: "skeleton", busy: true })
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(view(store.get())).toMatchObject({ body: "empty", notice: null })
+	})
+
+	it("a refresh does not cut short an older page being read", async () => {
+		let releaseMore: (() => void) | null = null
+		const { api, calls } = scripted(call =>
+			call.url.includes("cursor=")
+				? new Promise<Response>(resolve => {
+						releaseMore = () => resolve(json(200, page([rec(8)], null)))
+					})
+				: json(200, page([rec(10), rec(9)], "c1")),
+		)
+		const store = new RecordingsStore(api, null, { pageSize: 2 })
+		await store.show({})
+		const more = store.loadMore()
+		await store.refresh()
+		expect(store.get().loadingMore).toBe(true)
+		;(releaseMore as unknown as () => void)()
+		await more
+		expect(store.get().items.map(i => i.modifiedAt)).toEqual([10, 9, 8].map(at))
+		expect(calls.filter(c => c.url.includes("cursor="))).toHaveLength(1)
+	})
+
+	it("closing clears a planned retry", async () => {
+		vi.useFakeTimers()
+		const { api, calls } = scripted(() =>
+			json(503, {
+				error: "x",
+				code: "RECORDINGS_UNAVAILABLE",
+				message: "down",
+			}),
+		)
+		const store = new RecordingsStore(api)
+		await store.show({})
+		expect(store.get().retryAt).not.toBeNull()
+		store.stop()
+		expect(store.get().retryAt).toBeNull()
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(calls).toHaveLength(1)
 	})
 
 	it("an empty answer is the empty state; indexing and truncation are notices", async () => {

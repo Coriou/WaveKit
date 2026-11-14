@@ -394,6 +394,7 @@ export class ActivityFeed extends Store<ActivityFeedState> {
 			error: null,
 			loadingMore: false,
 			retryAt: null,
+			busy: false,
 		}))
 		this.busyTimer = setTimeout(() => {
 			this.busyTimer = null
