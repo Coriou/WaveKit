@@ -25,7 +25,8 @@
  * SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE. A shorter file, any unsteady window, or a periodic steady
  * signal (a pure or keyed tone, DTMF, a selcall) is kept: missing buzz is preferred to losing voice.
  * Clear noise (clearlyNoise): the same with the strict bounds SPEECH_NOISE_MAX_RANGE_DB and
- * SPEECH_NOISE_MAX_PERIODIC_SHARE, the only content check a weak (`suspect`) prior gets.
+ * SPEECH_NOISE_MAX_PERIODIC_SHARE and at least SPEECH_NOISE_MIN_FRAMES frames (8 s), the only
+ * content check a weak (`suspect`) prior gets.
  *
  * Measured (scripts/bench/scanner-quality/speech-content.ts) on SYNTHETIC signals through
  * WidebandNfmChain, 12 s each (nothing here is a real recording): speech-like audio (pitched and
@@ -95,6 +96,23 @@ export const SPEECH_NOISE_MAX_RANGE_DB = 6
  * 1 200 Bd (0.15) and speech (0.24 or more at a CNR of 9 dB or more) are over it.
  */
 export const SPEECH_NOISE_MAX_PERIODIC_SHARE = 0.1
+/**
+ * The strict bound's own length floor (clearlyNoise): 250 frames, 250 × 32 ms = 8 s. Its margins
+ * were measured on 12 s files; a short file holds one or two windows, so its largest range is a
+ * single-window figure. Measured (scripts/bench/scanner-quality/speech-content.ts, the short-file
+ * table: every 0.5 s cut of a 16 s synthetic run, the smallest of the cuts' largest-window range)
+ * for every voice case at a CNR of 5 dB or more (HARD_SPEECH_CASES' talkers, plain speech, 500 Hz
+ * peak deviation at 5 and 6 dB, a 0.3 to 0.5 s single word at 5 and 6 dB): at 94 frames (3 s)
+ * 6.96 dB, 125 (4 s) 7.94, 188 (6 s) 8.09, 250 (8 s) 8.99, 375 (12 s) 8.99, each time the
+ * shallow (30 or 50 %) talker at 5 dB. The target, 3 dB over the 6 dB bound (9 dB), is met at no
+ * length up to 8 s, so the floor is the 8 s cap: 8.99 − 6 = 2.99 dB of margin. Below a CNR of
+ * 5 dB (under the FM threshold) the strict bounds call some cuts of 3 to 6 s noise; none at 8 s.
+ * Not fixed by any length (the bench): 500 Hz deviation voice at a CNR of 8 to 10 dB (2 to 4 of 8
+ * cuts called noise at 12 s, more when shorter: buried in the demodulator's noise, under the
+ * periodic bound) and a single word under 0.5 s on a clean carrier at 10 to 20 dB (fewer than
+ * a tenth of a window's frames, so the 90th percentile misses it).
+ */
+export const SPEECH_NOISE_MIN_FRAMES = 250
 
 const P10 = Math.floor(0.1 * (SPEECH_WINDOW_FRAMES - 1))
 const P90 = Math.ceil(0.9 * (SPEECH_WINDOW_FRAMES - 1))
@@ -203,12 +221,12 @@ export class SpeechContentMeter {
 
 /**
  * The file measures as clear noise or buzz by the strict bounds (SPEECH_NOISE_MAX_RANGE_DB,
- * SPEECH_NOISE_MAX_PERIODIC_SHARE): the content check under a weak prior. Never on under 3 s;
- * always implies clearlyNotSpeech.
+ * SPEECH_NOISE_MAX_PERIODIC_SHARE): the content check under a weak prior. Never on under
+ * SPEECH_NOISE_MIN_FRAMES (8 s); always implies clearlyNotSpeech.
  */
 export function clearlyNoise(c: SpeechContent): boolean {
 	return (
-		c.frames >= SPEECH_WINDOW_FRAMES &&
+		c.frames >= SPEECH_NOISE_MIN_FRAMES &&
 		c.maxRangeDb < SPEECH_NOISE_MAX_RANGE_DB &&
 		c.periodicShare < SPEECH_NOISE_MAX_PERIODIC_SHARE
 	)

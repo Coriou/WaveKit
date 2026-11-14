@@ -33,6 +33,12 @@ interface SpeechWave {
 	 * compressed or shallow talker, 0.3 to 0.5.
 	 */
 	readonly depth?: number
+	/**
+	 * A single word: speech only from `wordAtS` for `wordS` seconds (0.3 to 0.5), an unmodulated
+	 * carrier before and after it (the carrier tail before the squelch closes).
+	 */
+	readonly wordAtS?: number
+	readonly wordS?: number
 }
 interface FskWave {
 	readonly kind: "fsk"
@@ -89,6 +95,11 @@ function deviation(w: Waveform, fs: number, rng: () => number): () => number {
 				return w.tdma === true && t % 0.06 >= 0.03 ? 0 : level
 			}
 			case "speech": {
+				if (
+					w.wordS !== undefined &&
+					(t < (w.wordAtS ?? 0) || t >= (w.wordAtS ?? 0) + w.wordS)
+				)
+					return 0
 				const quiet =
 					w.pauses === "short"
 						? t % 1.7 > 1.4
@@ -267,26 +278,29 @@ export const CONTENT_CASES: readonly {
  * Hard speech (M3): low deviation (1 000 or 1 500 Hz peak), a shallow syllable envelope (30 or
  * 50 % depth), no pauses, and their combinations, each at a CNR of 5, 6, 8 and 10 dB: all speech.
  */
+export const HARD_SPEECH_WAVES: readonly (readonly [
+	string,
+	Omit<SpeechWave, "kind">,
+])[] = [
+	["lowdev-1000", { pauses: "short", peakHz: 1_000 }],
+	["lowdev-1500", { pauses: "short", peakHz: 1_500 }],
+	["shallow-30", { pauses: "short", depth: 0.3 }],
+	["shallow-50", { pauses: "short", depth: 0.5 }],
+	["continuous", { pauses: "none" }],
+	[
+		"lowdev-1000-shallow-30-continuous",
+		{ pauses: "none", peakHz: 1_000, depth: 0.3 },
+	],
+	[
+		"lowdev-1500-shallow-50-continuous",
+		{ pauses: "none", peakHz: 1_500, depth: 0.5 },
+	],
+]
+
 export const HARD_SPEECH_CASES: readonly {
 	readonly name: string
 	readonly signal: ContentSignal
-}[] = (
-	[
-		["lowdev-1000", { pauses: "short", peakHz: 1_000 }],
-		["lowdev-1500", { pauses: "short", peakHz: 1_500 }],
-		["shallow-30", { pauses: "short", depth: 0.3 }],
-		["shallow-50", { pauses: "short", depth: 0.5 }],
-		["continuous", { pauses: "none" }],
-		[
-			"lowdev-1000-shallow-30-continuous",
-			{ pauses: "none", peakHz: 1_000, depth: 0.3 },
-		],
-		[
-			"lowdev-1500-shallow-50-continuous",
-			{ pauses: "none", peakHz: 1_500, depth: 0.5 },
-		],
-	] as const
-).flatMap(([name, w]) =>
+}[] = HARD_SPEECH_WAVES.flatMap(([name, w]) =>
 	[5, 6, 8, 10].map(cnrDb => ({
 		name: `${name}-cnr-${cnrDb}`,
 		signal: { waveform: { kind: "speech" as const, ...w }, cnrDb },

@@ -41,8 +41,10 @@ import {
 import {
 	clearlyNoise,
 	clearlyNotSpeech,
+	SPEECH_FRAME_SAMPLES,
 	SPEECH_NOISE_MAX_PERIODIC_SHARE,
 	SPEECH_NOISE_MAX_RANGE_DB,
+	SPEECH_NOISE_MIN_FRAMES,
 	SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE,
 	SPEECH_STEADY_MAX_RANGE_DB,
 	SPEECH_WINDOW_FRAMES,
@@ -1993,6 +1995,15 @@ describe("finishVerdict: the strict clear-noise check under a weak prior", () =>
 	const HARDEST_VOICE_DB = 10.16
 	/** The largest range of the 120 s open-squelch noise files a listener confirmed (private). */
 	const CONFIRMED_NOISE_DB = 5.61
+	/**
+	 * The smallest per-cut range of every voice case at a CNR of 5 dB or more at 250 frames (8 s;
+	 * the shallow 50 % talker at 5 dB) and at 188 frames (6 s), from the bench's short-file table.
+	 */
+	const SHORT_VOICE_DB_AT_FLOOR = 8.99
+	const SHORT_VOICE_DB_AT_6_S = 8.09
+	// These guard the CONSTANTS against the measured figures above, copied from the bench
+	// (scripts/bench/scanner-quality/speech-content.ts: the synthetic table and `--short`); they do
+	// not measure audio. Re-run the bench and update the figures when the measure changes.
 	it("the strict bound leaves at least 4 dB to the hardest synthetic voice and sits over confirmed noise", () => {
 		expect(HARDEST_VOICE_DB - SPEECH_NOISE_MAX_RANGE_DB).toBeGreaterThanOrEqual(
 			4,
@@ -2003,10 +2014,23 @@ describe("finishVerdict: the strict clear-noise check under a weak prior", () =>
 			SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE,
 		)
 	})
+	it("the strict bound's length floor is 8 s: no shorter length keeps 3 dB to short-file voice", () => {
+		expect(SPEECH_NOISE_MIN_FRAMES).toBe(250)
+		expect((SPEECH_NOISE_MIN_FRAMES * SPEECH_FRAME_SAMPLES) / 8_000).toBe(8)
+		// Never under two non-overlapping windows (188 frames, 6 s).
+		expect(SPEECH_NOISE_MIN_FRAMES).toBeGreaterThanOrEqual(
+			2 * SPEECH_WINDOW_FRAMES,
+		)
+		// 6 s falls short of 3 dB; 8 s is the cap, at 2.99 dB.
+		expect(SHORT_VOICE_DB_AT_6_S - SPEECH_NOISE_MAX_RANGE_DB).toBeLessThan(3)
+		expect(SHORT_VOICE_DB_AT_FLOOR - SPEECH_NOISE_MAX_RANGE_DB).toBeGreaterThan(
+			2.95,
+		)
+	})
 	const c = (
 		maxRangeDb: number,
 		periodicShare: number,
-		frames = SPEECH_WINDOW_FRAMES,
+		frames = SPEECH_NOISE_MIN_FRAMES,
 	): SpeechContent => ({ frames, maxRangeDb, periodicShare })
 	for (const [name, content, notSpeech, noise] of [
 		["confirmed open-squelch noise (4.9 dB, 0.044)", c(4.9, 0.044), true, true],
@@ -2023,6 +2047,25 @@ describe("finishVerdict: the strict clear-noise check under a weak prior", () =>
 			false,
 		],
 		["steady but pitched (2FSK 1 200 Bd, 0.15)", c(3.36, 0.152), true, false],
+		[
+			"clear noise at the 8 s floor",
+			c(4.9, 0.044, SPEECH_NOISE_MIN_FRAMES),
+			true,
+			true,
+		],
+		["clear noise past the floor (12 s)", c(4.9, 0.044, 375), true, true],
+		[
+			"clear noise one frame under the 8 s floor: not speech only",
+			c(4.9, 0.044, SPEECH_NOISE_MIN_FRAMES - 1),
+			true,
+			false,
+		],
+		[
+			"clear noise at 3 s (one window): not speech only",
+			c(3.2, 0.01, SPEECH_WINDOW_FRAMES),
+			true,
+			false,
+		],
 	] as const)
 		it(`${name}: not speech ${notSpeech}, clear noise ${noise}`, () => {
 			expect(clearlyNotSpeech(content)).toBe(notSpeech)
@@ -2149,6 +2192,18 @@ describe("finishVerdict: the strict clear-noise check under a weak prior", () =>
 			"hold",
 		],
 		["FROZEN: no prior keeps", null, {}, "finish"],
+		[
+			"FROZEN: a `none` prior (analog-fm class, no digital labels) keeps clear noise",
+			prior([], "analog-fm"),
+			{},
+			"finish",
+		],
+		[
+			"FROZEN: a `none` prior keeps clear noise at its final verdict too",
+			prior([], "analog-fm"),
+			{ final: true },
+			"finish",
+		],
 		[
 			"clear noise never without notSpeech (a toned or roll-over file)",
 			liveShape,
