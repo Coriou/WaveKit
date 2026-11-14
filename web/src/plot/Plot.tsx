@@ -513,7 +513,11 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 			>
 				<SpectrumCanvas
 					key={`${bins}:${graphicsRun}`}
-					onWebglBack={() => setGraphicsRun(n => n + 1)}
+					onWebglBack={() => {
+						// the new canvas says what draws it: no chip from the old one meanwhile
+						setGraphics(null)
+						setGraphicsRun(n => n + 1)
+					}}
 					sourceId={sourceId}
 					hz={SPECTRUM_HZ}
 					bins={bins}

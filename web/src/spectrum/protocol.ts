@@ -106,6 +106,8 @@ export type MainToWorker =
 	| { type: "recycle"; buffer: ArrayBuffer }
 	/** The newest row's level over [startHz, endHz] (the hover readout); answered with a `probe`. */
 	| { type: "probe"; id: number; startHz: number; endHz: number }
+	/** Can this worker get a WebGL2 context right now? (a plot in basic mode asks before it remounts) */
+	| { type: "probeWebgl"; id: number }
 	/** Covered by an opaque view (Map, Messages): rows still land in the history, nothing is drawn. */
 	| { type: "paused"; paused: boolean }
 	/** The receiver of the subscribed source is paused: no stall resubscribes or reconnects until it resumes. */
@@ -149,6 +151,8 @@ export type WorkerToMain =
 	| { type: "error"; message: string }
 	/** Answer to a probe: the peak dBFS there, null when no row covers it. */
 	| { type: "probe"; id: number; db: number | null }
+	/** Answer to probeWebgl. */
+	| { type: "webgl"; id: number; available: boolean }
 
 /**
  * The spectrum stream's link: "connecting" until the first live frame, "live" while live frames

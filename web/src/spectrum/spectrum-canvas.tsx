@@ -1,7 +1,6 @@
 import { useEffect, useRef, type RefObject } from "react"
 import {
 	SpectrumEngine,
-	webgl2AvailableNow,
 	type SpectrumEngineStatus,
 	type SpectrumHealth,
 } from "./engine.ts"
@@ -14,6 +13,10 @@ import type {
 import { DEFAULT_LAYOUT } from "./protocol.ts"
 import { rampFromTheme } from "./ramp.ts"
 import { historyDepth } from "./view.ts"
+import { WebglRetry } from "./webgl-retry.ts"
+
+/** One per page: it outlives the canvas a retry remounts, so a failed attempt is remembered. */
+const webglRetry = new WebglRetry()
 
 export interface SpectrumCanvasProps {
 	/** Source to show; null unsubscribes. */
@@ -122,9 +125,10 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 		const offMeta = engine.onFrameMeta(meta =>
 			propsRef.current.onFrameMeta?.(meta),
 		)
-		const offStatus = engine.onStatus(status =>
-			propsRef.current.onStatus?.(status),
-		)
+		const offStatus = engine.onStatus(status => {
+			if (status.type === "renderer") webglRetry.settled(status.kind)
+			propsRef.current.onStatus?.(status)
+		})
 
 		const resize = () => {
 			const rect = host.getBoundingClientRect()
@@ -151,9 +155,14 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 		const onVisible = () => {
 			if (document.visibilityState !== "visible") return
 			engine.kick()
-			// graphics acceleration may be back: draw with WebGL2 again
-			if (engine.health().rendererKind !== "webgl2" && webgl2AvailableNow())
+			// Graphics acceleration may be back. Only a plot in basic mode asks, where its renderer
+			// lives, and not again before the wait a failed attempt left (webgl-retry.ts).
+			if (!webglRetry.due(engine.health().rendererKind, Date.now())) return
+			void engine.probeWebgl2().then(back => {
+				if (!back || engineRef.current !== engine) return
+				webglRetry.attempted(Date.now())
 				propsRef.current.onWebglBack?.()
+			})
 		}
 		document.addEventListener("visibilitychange", onVisible)
 		// for a person or an agent looking at an empty plot: window.__wavekit.spectrumHealth()

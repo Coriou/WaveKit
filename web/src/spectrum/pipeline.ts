@@ -232,6 +232,9 @@ export class SpectrumPipeline {
 					db: this.probe(msg.startHz, msg.endHz),
 				})
 				return
+			case "probeWebgl":
+				// answered by the worker itself (spectrum.worker.ts): it needs the worker's globals
+				return
 			case "dispose":
 				this.dispose()
 				return

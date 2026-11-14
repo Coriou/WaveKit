@@ -51,6 +51,19 @@ scope.onmessage = event => {
 			pipeline.rebuild(canvas),
 		)
 	}
+	if (msg.type === "probeWebgl") {
+		// asked where the renderer lives: the same context type, on this thread
+		let available = false
+		try {
+			const gl = new OffscreenCanvas(1, 1).getContext("webgl2")
+			available = gl !== null
+			gl?.getExtension("WEBGL_lose_context")?.loseContext()
+		} catch {
+			available = false
+		}
+		scope.postMessage({ type: "webgl", id: msg.id, available }, [])
+		return
+	}
 	pipeline.handle(msg)
 	if (msg.type === "dispose") scope.close()
 }

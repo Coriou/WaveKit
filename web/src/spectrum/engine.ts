@@ -101,21 +101,39 @@ export function supportsOffscreenWebgl2(): boolean {
 	return offscreenWebgl2
 }
 
+let offscreen2d: boolean | null = null
+
 /**
- * Whether a WebGL2 context can be had right now, asked afresh (a browser turns graphics
- * acceleration off after GPU crashes and back on later). True also forgets the cached probe, so
- * the next engine draws with WebGL2 again.
+ * Whether a canvas can be transferred and drawn with a 2D context off the main thread (probed once):
+ * a browser without WebGL2 still draws in the worker then, and the page stays free.
  */
-export function webgl2AvailableNow(): boolean {
+export function supportsOffscreen2d(): boolean {
+	if (offscreen2d !== null) return offscreen2d
+	offscreen2d = false
 	try {
-		const gl = document.createElement("canvas").getContext("webgl2")
-		if (!gl) return false
-		gl.getExtension("WEBGL_lose_context")?.loseContext()
-		offscreenWebgl2 = null
-		return true
+		offscreen2d =
+			typeof OffscreenCanvas === "function" &&
+			typeof HTMLCanvasElement.prototype.transferControlToOffscreen ===
+				"function" &&
+			new OffscreenCanvas(1, 1).getContext("2d") !== null
 	} catch {
-		return false
+		offscreen2d = false
 	}
+	return offscreen2d
+}
+
+/**
+ * Where a new engine draws, from what the browser offers: the worker when a canvas can be
+ * transferred and drawn there (WebGL2, else 2D), otherwise the page (WebGL2, else 2D), else nowhere.
+ */
+export function rendererPlan(can: {
+	offscreenWebgl2: boolean
+	offscreen2d: boolean
+	forceMainThread?: boolean
+}): "offscreen" | "main" {
+	return !can.forceMainThread && (can.offscreenWebgl2 || can.offscreen2d)
+		? "offscreen"
+		: "main"
 }
 
 export class SpectrumEngine {
@@ -143,6 +161,7 @@ export class SpectrumEngine {
 	private sourcePaused = false
 	private probeSeq = 0
 	private readonly probes = new Map<number, (db: number | null) => void>()
+	private readonly webglProbes = new Map<number, (available: boolean) => void>()
 
 	constructor(canvas: HTMLCanvasElement, opts: SpectrumEngineOptions = {}) {
 		this.canvas = canvas
@@ -174,7 +193,13 @@ export class SpectrumEngine {
 			historyRows,
 			texWidth,
 		}
-		if (!opts.forceMainThread && supportsOffscreenWebgl2()) {
+		if (
+			rendererPlan({
+				offscreenWebgl2: supportsOffscreenWebgl2(),
+				offscreen2d: supportsOffscreen2d(),
+				...(opts.forceMainThread ? { forceMainThread: true } : {}),
+			}) === "offscreen"
+		) {
 			const offscreen = canvas.transferControlToOffscreen()
 			this.mode = "offscreen"
 			this.post({ ...base, canvas: offscreen }, [offscreen])
@@ -318,6 +343,27 @@ export class SpectrumEngine {
 		return () => this.statusListeners.delete(cb)
 	}
 
+	/**
+	 * Whether a WebGL2 context can be had now, asked where this engine's renderer lives (the worker
+	 * for a transferred canvas, else the page) and for the same context type. True also forgets the
+	 * cached page probe, so the next engine starts on WebGL2.
+	 */
+	probeWebgl2(): Promise<boolean> {
+		if (this.disposed) return Promise.resolve(false)
+		const answer =
+			this.mode === "offscreen"
+				? new Promise<boolean>(resolve => {
+						const id = ++this.probeSeq
+						this.webglProbes.set(id, resolve)
+						this.post({ type: "probeWebgl", id })
+					})
+				: Promise.resolve(pageHasWebgl2())
+		return answer.then(available => {
+			if (available) offscreenWebgl2 = null
+			return available
+		})
+	}
+
 	/** What the spectrum is doing right now. */
 	health(): SpectrumHealth {
 		return {
@@ -355,6 +401,8 @@ export class SpectrumEngine {
 		this.statusListeners.clear()
 		for (const resolve of this.probes.values()) resolve(null)
 		this.probes.clear()
+		for (const resolve of this.webglProbes.values()) resolve(false)
+		this.webglProbes.clear()
 	}
 
 	private post(msg: MainToWorker, transfer: Transferable[] = []): void {
@@ -386,6 +434,10 @@ export class SpectrumEngine {
 				this.probes.get(msg.id)?.(msg.db)
 				this.probes.delete(msg.id)
 				return
+			case "webgl":
+				this.webglProbes.get(msg.id)?.(msg.available)
+				this.webglProbes.delete(msg.id)
+				return
 			case "stats":
 				this.frames = msg.frames
 				this.draws = msg.draws
@@ -411,6 +463,17 @@ export class SpectrumEngine {
 
 	private emitStatus(status: SpectrumEngineStatus): void {
 		for (const cb of this.statusListeners) cb(status)
+	}
+}
+
+/** A WebGL2 context on the page, asked afresh. */
+function pageHasWebgl2(): boolean {
+	try {
+		const gl = document.createElement("canvas").getContext("webgl2")
+		gl?.getExtension("WEBGL_lose_context")?.loseContext()
+		return gl !== null
+	} catch {
+		return false
 	}
 }
 

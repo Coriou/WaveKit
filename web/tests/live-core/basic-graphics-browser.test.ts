@@ -160,7 +160,8 @@ describe.skipIf(!enabled)("a browser without WebGL2", () => {
 		const first = await health()
 		expect(first).toMatchObject({
 			rendererKind: "canvas2d",
-			rendererThread: "main",
+			// the 2D renderer runs off the page too: an OffscreenCanvas needs no WebGL2
+			rendererThread: "worker",
 			reason: expect.stringContaining("WebGL2 is unavailable"),
 			link: "live",
 			lastError: null,

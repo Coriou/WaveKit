@@ -62,8 +62,9 @@ The app has three views, picked from the dock at the bottom: **Spectrum**, **Map
   or blocked; Chrome turns it off by itself after its GPU process crashed a few times) still draws
   the trace and the waterfall, with a plain 2D canvas, and shows the chip **Graphics acceleration
   is off · basic mode** on the frequency axis. In Chrome, `chrome://gpu` says why; restarting the
-  browser usually turns it back on, and the plot goes back to WebGL2 by itself when you return to
-  the tab. If the graphics context is lost while drawing, the plot says so and draws again when
+  browser usually turns it back on. When you return to the tab the plot asks for WebGL2 again and
+  goes back to it by itself (after a try that ended in basic mode again it waits 30 s, then twice
+  as long each time, up to 10 minutes). If the graphics context is lost while drawing, the plot says so and draws again when
   the browser restores it.
 - For a plot that stays empty, the browser console answers `window.__wavekit.spectrumHealth()`:
   what draws (`rendererKind`: `webgl2`, `canvas2d` or `none`, with the `reason`), where
