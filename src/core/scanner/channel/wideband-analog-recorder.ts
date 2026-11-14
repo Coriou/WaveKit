@@ -28,6 +28,25 @@
  * WIDEBAND_DIGITAL_CLASS_MS); a session classed by its own audio only keeps a low priority and
  * a bounded hold (WIDEBAND_TONE_ONLY_HOLD_FRAMES), and each of its files is checked again over
  * the whole file when it finishes.
+ *
+ * Never analog voice (voice-veto.ts), judged on evidence about the session's owner only: a
+ * session whose owner's discovery, or the discovery it was merged into, is decoded as a protocol
+ * that is not analog voice (a pager, packet data, digital voice) during its air time (decodeVeto:
+ * from its pre-roll start to now, the hang included, or from its onset for a decode that names no
+ * observation; a decode of an earlier over on a mixed-mode channel proves nothing), or whose owner's snapshot has a digital class backed by more than the
+ * spectrum (a verified decode, the channel tier), is discarded (`discarded:not-analog`: every
+ * file not finalized yet, one being written is cancelled), and none starts for an observation
+ * so decoded (`refused:not-analog`, once per observation). A spectral reading alone never
+ * discards or refuses (weak or low-deviation NFM voice can read as a digital class for its whole
+ * length). A joined observation with such evidence (another signal on the channel) ends the
+ * session at the join, its file no later than the joined track's start: the files before it are
+ * kept, only the joined observation is refused, and an owner still on the air goes on in a new
+ * session from there (endAtJoin, at most WIDEBAND_MAX_JOIN_RESTARTS per channel in
+ * WIDEBAND_RESTART_WINDOW_MS). An own veto never refuses a joined observation by class (ownVeto):
+ * one that started after the owner's track ended and is still on the air, classed or not, starts
+ * its own session from its onset (splitAtVoice), and one that overlaps the owner keeps the files
+ * it overlaps only with voice evidence of its own. A decode that arrives after a file's finish
+ * was asked does not discard that file.
  */
 import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
@@ -82,12 +101,21 @@ import {
 	VOICE_WINDOW_BLOCKS,
 } from "./voice-activity.js"
 import { RecorderDecisions, type ReceiptDetail } from "./recorder-decisions.js"
+import { notAnalogVoiceProtocol, type DecodedLabel } from "./voice-veto.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 /** Same bound as the channel-tier trigger: a 25 kHz NFM channel's occupied bandwidth. */
 export const WIDEBAND_MAX_OBW_HZ = 16_000
 /** A track this close to a recording channel joins it (under half a 12.5 kHz raster step). */
 export const WIDEBAND_JOIN_TOLERANCE_HZ = 5_000
+/**
+ * Slack (ms) before a transmission's pre-roll start within which a decode still counts as its
+ * own (decodeVeto): the live edge's wall time lags the clock by the source's buffering. A decode
+ * is stamped after the audio it decoded, so it never precedes its transmission otherwise.
+ */
+export const WIDEBAND_DECODE_SKEW_MS = 500
+/** Joined observations a session remembers (Session.joins), oldest dropped first. */
+const WIDEBAND_JOINS_KEPT = 64
 /**
  * How late a decision may be: the engine closes a track one 500 ms track hang after it went
  * quiet and reports opens a few 10 to 50 ms blocks late, so 1000 ms covers both with margin.
@@ -477,6 +505,16 @@ export const WIDEBAND_RESTART_WINDOW_MS = 240_000
  * most that much over its restarts, so they all stay one channel's.
  */
 export const WIDEBAND_RESTART_CHANNEL_HZ = 12_500
+/**
+ * Times one channel's session may end at a decoded join and go on in a new session
+ * (endAtJoin) in any WIDEBAND_RESTART_WINDOW_MS (240 s): 3, so at most 4 files of one over are
+ * cut by joins per 240 s (the first and 3 continuations), each a new session's start (a slot
+ * request, a chain, the pre-roll read back from the ring): (1 + 3) session starts per 240 s per
+ * channel against one per join, however often a decoded other signal keys up. Past it the
+ * joined one is still refused, but the owner keeps recording in one session with its audio
+ * (fails toward voice; the file still rolls over at WIDEBAND_MAX_FILE_MS).
+ */
+export const WIDEBAND_MAX_JOIN_RESTARTS = 3
 /** Observations remembered as refused, and as retried once, per manager. */
 const MAX_REMEMBERED = 1024
 /** Remembered file ends per manager (pre-roll clamp of the next file on the same channel). */
@@ -581,6 +619,14 @@ export interface WidebandAnalogDeps {
 	 * null when the budget is full (the session does not start; the next snapshot retries).
 	 */
 	reserveCores?(cores: number): (() => void) | null
+	/**
+	 * The decoded label of `discoveryId`, or of the live discovery it was merged into (its
+	 * folder's owner), with the decode's time and observation (voice-veto.ts ownerDecoded); null
+	 * while not decoded or unknown. A protocol that is not analog voice (notAnalogVoiceProtocol)
+	 * decoded while a recording's transmission was on the air (decodeVeto) refuses or discards
+	 * it. Absent: no check.
+	 */
+	decodedLabel?(discoveryId: string): DecodedLabel | null
 	logger: Logger
 	now(): number
 	/** Next-turn scheduler for drain slices; default setImmediate. */
@@ -608,6 +654,11 @@ export interface WidebandTrackInput {
 	 * `nonAnalog`): its shadow has the lowest slot priority (WIDEBAND_DIGITAL_CLASS_MS).
 	 */
 	readonly spectralDigital?: boolean
+	/**
+	 * The snapshot's class is a digital one (voice-veto.ts DIGITAL_CLASSES), whatever its tier; it
+	 * counts only with `nonAnalog` (a verified decode or the channel tier backs it).
+	 */
+	readonly digitalClass?: boolean
 	readonly encrypted: boolean
 	/** No covering job, or a covering job with record.analog. */
 	readonly recordAllowed: boolean
@@ -622,6 +673,7 @@ export interface WidebandTrackInput {
 export interface WidebandArtefactInfo {
 	readonly analogFm: boolean
 	readonly nonAnalog?: boolean
+	readonly digitalClass?: boolean
 	readonly encrypted: boolean
 	readonly recordAllowed: boolean
 }
@@ -630,6 +682,7 @@ export interface WidebandArtefactInfo {
 export interface WidebandCloseInfo {
 	readonly analogFm: boolean
 	readonly nonAnalog?: boolean
+	readonly digitalClass?: boolean
 	readonly discoveryId: string | null
 	/** Encrypted evidence arrived (possibly after the last update): the session is discarded. */
 	readonly encrypted?: boolean
@@ -873,6 +926,42 @@ interface Session {
 	readonly seg: TransmissionSegmenter
 	readonly chain: WidebandNfmChain
 	readonly onset: number
+	/**
+	 * Input sample where the session's audio may start (the owner's onset less the pre-roll): a
+	 * discovery decode at or after it (its wall time, decodeVeto) is of this session's air time.
+	 */
+	readonly vetoFrom: number
+	/**
+	 * Observations other than the owner that joined it (another transmission on the channel: a
+	 * turnaround in the hang), with their track's start sample, kept after they close so a late
+	 * decode of one still names it (decodeVeto); at most WIDEBAND_JOINS_KEPT, oldest dropped.
+	 */
+	readonly joins: Map<string, number>
+	/**
+	 * Joined observations (never the owner) with voice evidence: a snapshot classed them analog-fm,
+	 * or the session's own audio did (classByTone) while they were on the air; each with the newest
+	 * sample its track was reported on. Another transmission's voice in this session, which an own
+	 * veto (ownVeto) never discards with the owner's part. At most WIDEBAND_JOINS_KEPT, oldest
+	 * dropped.
+	 */
+	readonly joinedVoice: Map<string, number>
+	/**
+	 * An own veto kept the session going (ownVeto `keep`, or a split at a voice that already
+	 * closed): every later file finish asks ownVeto again (completeFinish), so only the files it
+	 * keeps are written, whatever proved the veto (a snapshot's class is not asked again).
+	 */
+	vetoed: boolean
+	/**
+	 * The owner's track closed: its last sample (closed spans leave `activity` once judged);
+	 * null while it is open.
+	 */
+	ownerClosedAt: number | null
+	/**
+	 * The end its channel remembers when it is disposed (recentEnds, the next session's pre-roll
+	 * floor), clamped to [from, to]; null: the segmenter's previous end as is. Set by a split at a
+	 * joined voice (splitAtVoice): the restarted voice's file starts past the owner's part only.
+	 */
+	endWithin: { readonly from: number; readonly to: number } | null
 	/** Newest sample a joined track was reported on. */
 	lastActive: number
 	readonly groupDelay: number
@@ -912,10 +1001,20 @@ interface ClassInfo {
 	readonly analogFm: boolean
 	readonly nonAnalog?: boolean | undefined
 	readonly spectralDigital?: boolean | undefined
+	readonly digitalClass?: boolean | undefined
 	readonly discoveryId: string | null
 }
 
 type Usable = "commanded" | "relay"
+
+/** One restart of a channel (channelRestarts, joinRestarts). */
+interface RestartEntry {
+	readonly sourceId: string
+	readonly stream: number
+	readonly fs: number
+	readonly hz: number
+	readonly atSample: number
+}
 
 /**
  * The first sample past the trusted run a session started in (`from`, its trustedFromSample),
@@ -1026,6 +1125,87 @@ function countSnapshot(
  * Whether a snapshot's class discards the session (classify): a definite other class (a verified
  * decode, the channel tier) while the session is a shadow or classed by its own audio only.
  */
+/**
+ * What evidence about a session's air time says (ownerVeto, decodeVeto): null, nothing; `own`,
+ * its own signal is no analog voice (discarded); `joined`, a joined other transmission is (the
+ * session ends at that join, the voice before it is kept).
+ */
+type Veto = null | "own" | { readonly joined: string }
+
+/**
+ * What an own veto of a session does (ownVeto), decided on timing, not on class: `refuse`, no
+ * joined observation needs sparing, the whole session is discarded; `keep`, a joined observation
+ * with voice evidence (a snapshot classed it analog-fm, or the session's own audio did while it
+ * was on the air, Session.joinedVoice) overlaps the owner (started at or before its close, or the
+ * owner is still open): not separable, the files overlapping [from, until] are kept (+∞: such a
+ * voice is still open) and none other; `split`, joined observations started after the owner's
+ * track closed: the owner's part (up to `at`, the first such one's start) is discarded and the
+ * ones still on the air (`spare`, whatever their class) start their own session (splitAtVoice),
+ * from their onset when the session is live, not parked and the ring holds `at` (`restart`).
+ * Only a voice that has already closed (`voiced`) with no restart keeps the session, its files
+ * ending by `at` discarded (ownVetoEnds).
+ */
+type OwnVeto =
+	| { readonly kind: "refuse" }
+	| { readonly kind: "keep"; readonly from: number; readonly until: number }
+	| OwnVetoSplit
+
+/** OwnVeto's `split`. */
+interface OwnVetoSplit {
+	readonly kind: "split"
+	readonly at: number
+	readonly ownerLast: number
+	readonly restart: boolean
+	readonly voiced: boolean
+	readonly spare: readonly string[]
+}
+
+/** An own veto `own` ends its session (refuse, or a split that is not a kept closed voice). */
+function ownVetoEnds(own: OwnVeto): boolean {
+	return (
+		own.kind === "refuse" ||
+		(own.kind === "split" && (own.restart || !own.voiced))
+	)
+}
+
+/**
+ * Voice evidence of joined `observationId` in `s` (Session.joinedVoice): a snapshot classed it
+ * analog-fm, or the session's own audio classed it (classByTone) while it was on the air; `last`,
+ * the newest sample its track was reported on.
+ */
+function noteJoinedVoice(
+	s: Session,
+	observationId: string,
+	last: number,
+): void {
+	if (observationId === s.owner) return
+	const before = s.joinedVoice.get(observationId) ?? Number.NEGATIVE_INFINITY
+	s.joinedVoice.delete(observationId)
+	s.joinedVoice.set(observationId, Math.max(before, last))
+	if (s.joinedVoice.size > WIDEBAND_JOINS_KEPT) {
+		const oldest = s.joinedVoice.keys().next()
+		if (oldest.done !== true) s.joinedVoice.delete(oldest.value)
+	}
+}
+
+/** A file overlaps [from, until] (an open file reaches +∞). */
+function fileOverlaps(file: FileState, from: number, until: number): boolean {
+	return (
+		file.startSample <= until &&
+		(file.endSample ?? Number.POSITIVE_INFINITY) > from
+	)
+}
+
+/** `d` was decoded at or after `from` (wall ms); an unknown time never was. */
+function decodedSince(d: DecodedLabel, from: number): boolean {
+	return d.at !== null && Number.isFinite(d.at) && d.at >= from
+}
+
+/** A proof that cites no observation of its own (none, or a channel anchor's `decode:` id). */
+function citesNoObservation(observationId: string | null): boolean {
+	return observationId === null || observationId.startsWith("decode:")
+}
+
 function classVetoes(s: Session, info: ClassInfo): boolean {
 	return !info.analogFm && (!s.classed || s.toneOnly) && info.nonAnalog === true
 }
@@ -1194,13 +1374,13 @@ export class WidebandAnalogRecorder {
 	 * snapshot's last sample, on its source's stream at its rate), pruned past
 	 * WIDEBAND_RESTART_WINDOW_MS and at MAX_REMEMBERED.
 	 */
-	private readonly channelRestarts: {
-		sourceId: string
-		stream: number
-		fs: number
-		hz: number
-		atSample: number
-	}[] = []
+	private readonly channelRestarts: RestartEntry[] = []
+	/**
+	 * Restarts of an owner at a decoded join (endAtJoin) per channel, as channelRestarts; their
+	 * own budget, WIDEBAND_MAX_JOIN_RESTARTS in WIDEBAND_RESTART_WINDOW_MS, never cleared by a
+	 * voice (the owner is the voice).
+	 */
+	private readonly joinRestarts: RestartEntry[] = []
 	private readonly recentEnds: {
 		sourceId: string
 		stream: number
@@ -1290,7 +1470,16 @@ export class WidebandAnalogRecorder {
 			!s.classed ||
 			!s.qualified ||
 			countSnapshot(s, track, barred).bar !== null ||
-			classVetoes(s, { ...info, discoveryId: null })
+			(classVetoes(s, { ...info, discoveryId: null }) &&
+				(observationId !== s.owner || this.ownVetoWouldEnd(s))) ||
+			((s.vetoed ||
+				this.ownerVeto(
+					s,
+					observationId === s.owner
+						? { ...info, discoveryId: null }
+						: undefined,
+				) === "own") &&
+				this.ownVetoWouldEnd(s))
 		)
 			return this.revoke(observationId)
 		rememberWaiver(this.waived, observationId, s.toneOnly)
@@ -1560,6 +1749,12 @@ export class WidebandAnalogRecorder {
 		}
 		this.byObservation.delete(observationId)
 		const parked = this.parked.get(id)
+		const session = parked ?? this.sessions.get(id)
+		if (session !== undefined && observationId === session.owner)
+			session.ownerClosedAt = Math.max(
+				track.lastSample,
+				session.activity.get(observationId)?.last ?? Number.NEGATIVE_INFINITY,
+			)
 		if (parked) {
 			this.updateParked(
 				parked,
@@ -1587,6 +1782,9 @@ export class WidebandAnalogRecorder {
 			span.last = Math.max(span.last, track.lastSample)
 			span.open = false
 		}
+		const heard = s.joinedVoice.get(observationId)
+		if (heard !== undefined && track.lastSample > heard)
+			s.joinedVoice.set(observationId, track.lastSample)
 		if (![...s.activity.values()].some(a => a.open)) {
 			// What a track opening next is measured against (noteActivity, Session.reopenAt).
 			s.lastClose = {
@@ -1673,16 +1871,384 @@ export class WidebandAnalogRecorder {
 		if (info.analogFm) {
 			if (s.toneOnly) this.classedBySnapshot(s, observationId)
 			s.toneOnly = false
+			noteJoinedVoice(
+				s,
+				observationId,
+				s.activity.get(observationId)?.last ?? Number.NEGATIVE_INFINITY,
+			)
 			if (!s.classed) {
 				s.classed = true
 				this.decide(s, "classed")
 			}
-		} else if ((!s.classed || s.toneOnly) && info.nonAnalog === true) {
+		}
+		// A definite other class of the owner before a snapshot class (a shadow, or classed by its
+		// own audio only) is an own veto; of a joined observation, it discards the session.
+		const owned = classVetoes(s, info)
+		if (owned && observationId !== s.owner) {
 			this.refuse(s, "discarded:not-analog", true)
 			return false
 		}
+		const veto =
+			owned || s.vetoed
+				? "own"
+				: this.ownerVeto(s, observationId === s.owner ? info : undefined)
+		if (veto === "own") {
+			if (!this.onOwnVeto(s)) return false
+		} else if (
+			veto !== null &&
+			this.endAtJoin(s, veto.joined, info.discoveryId)
+		)
+			return false
+		if (
+			observationId !== s.owner &&
+			!this.refused.has(observationId) &&
+			this.joinedNotVoice(s, info) &&
+			this.endAtJoin(s, observationId, info.discoveryId)
+		)
+			return false
 		if (s.classed) for (const f of [...s.files]) this.admit(s, f)
 		return !s.done
+	}
+
+	/**
+	 * What evidence about `s`'s owner says (Veto): the owner's snapshot (`info`, when given) has a
+	 * digital class backed by more than the spectrum (a verified decode, the channel tier:
+	 * `nonAnalog`), its own; or the owner's discovery (or the discovery it was merged into) was
+	 * decoded as a protocol that is not analog voice during the session's air time (decodeVeto). A
+	 * spectral reading alone never counts, and a joined observation's own evidence is
+	 * joinedNotVoice's.
+	 */
+	private ownerVeto(s: Session, info: ClassInfo | undefined): Veto {
+		if (
+			info !== undefined &&
+			!info.analogFm &&
+			info.nonAnalog === true &&
+			info.digitalClass === true
+		)
+			return "own"
+		const veto = this.decodeVeto(s, s.discoveryId)
+		if (
+			veto !== null ||
+			info === undefined ||
+			info.discoveryId === s.discoveryId
+		)
+			return veto
+		return this.decodeVeto(s, info.discoveryId)
+	}
+
+	/**
+	 * What an own veto of `s` does (OwnVeto). Reads only. Separability is a matter of timing, not of
+	 * class: a joined observation that started after the owner's closed track's last sample holds
+	 * none of the owner's audio, so it is never refused with it, whether or not a snapshot classed
+	 * it yet (its first snapshots may be shadows, its class may come after the veto); one that
+	 * overlaps the owner keeps the files it overlaps only with voice evidence of its own
+	 * (Session.joinedVoice), else it is refused with the owner, as before. The owner's end is its
+	 * closed track's last sample, or, while its close is not reported yet, its newest report: a
+	 * track still on the air is reported every snapshot, so a joined track starting past that
+	 * report started after the owner went quiet.
+	 */
+	private ownVeto(s: Session): OwnVeto {
+		// An owner still open ends no earlier than its newest report: a joined track that started
+		// after that (its close not reported yet) holds none of its audio either.
+		const ownerLast = s.ownerClosedAt ?? s.activity.get(s.owner)?.last ?? null
+		let from = Number.POSITIVE_INFINITY
+		let until = Number.NEGATIVE_INFINITY
+		let at = Number.POSITIVE_INFINITY
+		let atOpen = false
+		let voiced = false
+		const spare: string[] = []
+		for (const [id, joined] of s.joins) {
+			if (id === s.owner) continue
+			const span = s.activity.get(id)
+			const start = Math.min(joined, span?.start ?? Number.POSITIVE_INFINITY)
+			const open = s.observations.has(id) && span?.open !== false
+			const heard = s.joinedVoice.get(id)
+			if (ownerLast === null || start <= ownerLast) {
+				if (heard === undefined) continue
+				from = Math.min(from, start)
+				until = Math.max(
+					until,
+					open
+						? Number.POSITIVE_INFINITY
+						: Math.max(heard, span?.last ?? Number.NEGATIVE_INFINITY),
+				)
+				continue
+			}
+			if (!open && heard === undefined) continue
+			if (open) spare.push(id)
+			if (heard !== undefined) voiced = true
+			if (start < at) {
+				at = start
+				atOpen = open
+			}
+		}
+		if (Number.isFinite(from)) return { kind: "keep", from, until }
+		if (ownerLast === null || !Number.isFinite(at)) return { kind: "refuse" }
+		const restart =
+			atOpen &&
+			!s.done &&
+			!this.parked.has(s.id) &&
+			s.engine.liveEdge() - at <= s.maxBacklog
+		return { kind: "split", at, ownerLast, restart, voiced, spare }
+	}
+
+	/** An own veto of `s` ends it (ownVetoEnds, onOwnVeto). Reads only. */
+	private ownVetoWouldEnd(s: Session): boolean {
+		const own = this.ownVeto(s)
+		return (
+			ownVetoEnds(own) ||
+			(own.kind === "keep" && Number.isFinite(own.until) && s.next >= own.until)
+		)
+	}
+
+	/**
+	 * An own veto of live `s` (OwnVeto): false, the session ended. A refuse discards it; a split
+	 * that ends it spares the joined observations after the owner (splitAtVoice); a kept closed
+	 * voice (`split`, `voiced`, no restart) or an overlapping voice still open (`keep`) keeps it
+	 * going (`vetoed`: each file finish asks again); an overlapping voice that has closed, once
+	 * demodulated past its end, ends the session there (endAtVoiceEnd): the owner's audio after it
+	 * is not recorded.
+	 */
+	private onOwnVeto(s: Session): boolean {
+		const own = this.ownVeto(s)
+		if (own.kind === "keep") {
+			s.vetoed = true
+			if (!Number.isFinite(own.until) || s.next < own.until) return true
+			this.endAtVoiceEnd(s, own.until)
+			return false
+		}
+		if (!ownVetoEnds(own)) {
+			s.vetoed = true
+			return true
+		}
+		this.splitAtVoice(s, own)
+		return false
+	}
+
+	/**
+	 * An own veto of `s` that ends it (ownVetoEnds): every file of the session is discarded
+	 * (`discarded:not-analog`, the owner's decision) and its observations are refused, but not the
+	 * joined ones that started after the owner's track closed and are still on the air (`spare`):
+	 * the next snapshot of each starts its own session (a shadow, or classed, the usual rules
+	 * decide whether it is voice), whose file reads the ring back from its onset (its pre-roll
+	 * floored past the owner's last sample, Session.endWithin), so nothing of the owner's part is
+	 * in it; past the ring's reach its head is cut and the file says so (`source-lost`).
+	 */
+	private splitAtVoice(s: Session, own: OwnVeto): void {
+		if (own.kind === "keep") return
+		if (own.kind === "split" && own.spare.length > 0)
+			s.endWithin = { from: own.ownerLast, to: own.at }
+		this.refuse(s, "discarded:not-analog", true)
+		if (own.kind === "split")
+			for (const id of own.spare) this.refused.delete(id)
+	}
+
+	/**
+	 * An own veto of `s` whose overlapping joined voice closed at `until` (ownVeto `keep`), the
+	 * session demodulated past it: the current file ends there and is kept (it overlaps the voice;
+	 * completeFinish keeps only such files), the owner and every joined observation overlapping it
+	 * are refused (`refused:not-analog` for the owner), and a joined one that started after the
+	 * owner's close and is still on the air starts its own session past the kept file's end.
+	 */
+	private endAtVoiceEnd(s: Session, until: number): void {
+		const spare = new Set<string>()
+		const ownerLast = s.ownerClosedAt ?? s.activity.get(s.owner)?.last ?? null
+		if (ownerLast !== null)
+			for (const id of s.observations) {
+				const start = s.joins.get(id)
+				if (id !== s.owner && start !== undefined && start > ownerLast)
+					spare.add(id)
+			}
+		for (const id of s.observations)
+			if (!spare.has(id)) remember(this.refused, id)
+		this.decisions.note("refused:not-analog", {
+			sourceId: s.sourceId,
+			observationId: s.owner,
+			discoveryId: s.discoveryId,
+		})
+		const file = s.file
+		const written = this.writtenTo(s, file)
+		this.endSession(s, "cancelled", until)
+		this.rememberEnd(s, Math.max(until, written))
+	}
+
+	/**
+	 * Input sample past the last frame of `file` already pushed to its operation (−∞: none, or no
+	 * file): a file ended earlier than that still holds those frames.
+	 */
+	private writtenTo(s: Session, file: FileState | null): number {
+		if (file === null || file.failed || file.handle === null)
+			return Number.NEGATIVE_INFINITY
+		const written = file.frames - file.queue.length
+		if (written <= 0) return Number.NEGATIVE_INFINITY
+		return file.startSample + (written * s.fs) / ANALOG_AUDIO_RATE_HZ
+	}
+
+	/** The channel's next file starts no earlier than `end` (recentEnds, the pre-roll floor). */
+	private rememberEnd(s: Session, end: number): void {
+		if (!Number.isFinite(end)) return
+		this.recentEnds.push({
+			sourceId: s.sourceId,
+			stream: s.stream,
+			epoch: s.epoch,
+			hz: s.targetHz,
+			end,
+		})
+		if (this.recentEnds.length > RECENT_ENDS) this.recentEnds.shift()
+	}
+
+	/**
+	 * A decode of `discoveryId` (or of its merge owner) that is not analog voice, judged against
+	 * `s`'s air time: only one decoded at or after the session's first possible audio (the owner's
+	 * onset less the pre-roll, mapped to wall time through the live edge, less
+	 * WIDEBAND_DECODE_SKEW_MS) up to now (the hang included) counts. An older one is another
+	 * transmission's (a mixed-mode repeater's earlier digital over): nothing. The observation it
+	 * cites names whose: the owner, the session's own (`own`); a joined other one
+	 * (Session.joins), that join; any other observation (a channel proof frozen to an earlier
+	 * over, or `channel:` for a decode of either over at a turnaround), another transmission's.
+	 * One that cites none (null, a channel anchor's or unpaired channel proof's `decode:`) can
+	 * be of the over before the owner's (a decoder's lag reaches past an onset): it is the
+	 * session's own only when stamped at or after the owner's onset, with no pre-roll or skew.
+	 */
+	private decodeVeto(s: Session, discoveryId: string | null): Veto {
+		const d = this.notVoiceDecode(discoveryId)
+		if (
+			d === null ||
+			!decodedSince(d, this.airStart(s.engine, s.fs, s.vetoFrom))
+		)
+			return null
+		const by = d.observationId
+		if (by === s.owner) return "own"
+		if (citesNoObservation(by))
+			return decodedSince(d, this.wallAt(s.engine, s.fs, s.onset))
+				? "own"
+				: null
+		return by !== null && s.joins.has(by) ? { joined: by } : null
+	}
+
+	/**
+	 * Wall time (ms) of input sample `fromSample`, less WIDEBAND_DECODE_SKEW_MS: now less the
+	 * span from it to the live edge (`engine` at `fs`).
+	 */
+	private airStart(
+		engine: WidebandEngineView,
+		fs: number,
+		fromSample: number,
+	): number {
+		return this.wallAt(engine, fs, fromSample) - WIDEBAND_DECODE_SKEW_MS
+	}
+
+	/** Wall time (ms) of input sample `sample`: now less the span from it to the live edge. */
+	private wallAt(
+		engine: WidebandEngineView,
+		fs: number,
+		sample: number,
+	): number {
+		return (
+			this.deps.now() - (Math.max(0, engine.liveEdge() - sample) * 1000) / fs
+		)
+	}
+
+	/**
+	 * Whether a joined observation (not the owner) is another signal that is no analog voice: its
+	 * snapshot has a definite digital class while the session is classed by a snapshot (a shadow
+	 * or a class by its own audio only is classVetoes'), or its discovery, another than the
+	 * session's, was decoded as a protocol that is not analog voice during the session's air time.
+	 */
+	private joinedNotVoice(s: Session, info: ClassInfo): boolean {
+		if (!info.analogFm && info.nonAnalog === true && info.digitalClass === true)
+			return true
+		return (
+			info.discoveryId !== s.discoveryId &&
+			this.decodeVeto(s, info.discoveryId) !== null
+		)
+	}
+
+	/**
+	 * A joined observation that is no analog voice (joinedNotVoice, decodeVeto) ends the session
+	 * at the join: what it recorded before stays (its current file ends no later than the joined
+	 * track's start, then is finished and checked as usual), and only the joined one is refused
+	 * (`refused:not-analog`). The session's other observations still on the air are not: the
+	 * owner's next snapshot (a voice going on past the join) starts a new session, whose file
+	 * starts where the kept file ended (past the joined signal's end once it closed, and past the
+	 * frames already written to the kept file, its pre-roll floored by recentEnds) and holds
+	 * whatever of the joined signal overlaps the voice after that. Such a restart counts against
+	 * the channel's WIDEBAND_MAX_JOIN_RESTARTS: past it the joined one is still refused, but the
+	 * session goes on with its audio in the file (fails toward voice). True: the session ended.
+	 * Once per joined observation: one already refused changes nothing.
+	 */
+	private endAtJoin(
+		s: Session,
+		observationId: string,
+		discoveryId: string | null,
+	): boolean {
+		if (this.refused.has(observationId)) return false
+		remember(this.refused, observationId)
+		this.decisions.note("refused:not-analog", {
+			sourceId: s.sourceId,
+			observationId,
+			discoveryId,
+		})
+		// Something else of the session is still on the air: its next snapshot restarts it.
+		const restarts = [...s.observations].some(id => id !== observationId)
+		if (restarts) {
+			const atSample = s.engine.liveEdge()
+			if (
+				this.restartsOf(this.joinRestarts, s, atSample) >=
+				WIDEBAND_MAX_JOIN_RESTARTS
+			)
+				return false
+			this.joinRestarts.push({
+				sourceId: s.sourceId,
+				stream: s.stream,
+				fs: s.fs,
+				hz: s.targetHz,
+				atSample,
+			})
+			if (this.joinRestarts.length > MAX_REMEMBERED) this.joinRestarts.shift()
+		}
+		const span = s.activity.get(observationId)
+		const joinedAt = s.joins.get(observationId) ?? span?.start
+		const joinedLast =
+			span === undefined
+				? Number.NEGATIVE_INFINITY
+				: span.open
+					? Number.POSITIVE_INFINITY
+					: span.last
+		const file = s.file
+		const written = this.writtenTo(s, file)
+		this.endSession(s, "cancelled", joinedAt, joinedLast)
+		// A continuation never repeats the kept file's audio (what it ends with, or what was already
+		// written past that), nor a joined signal that has ended. A dropped file (empty, or opened
+		// inside the joined signal) ends where it started.
+		const kept =
+			file === null
+				? Number.NEGATIVE_INFINITY
+				: file.failed
+					? file.startSample
+					: Math.max(file.endSample ?? file.startSample, written)
+		this.rememberEnd(
+			s,
+			Math.max(
+				kept,
+				joinedAt ?? Number.NEGATIVE_INFINITY,
+				Number.isFinite(joinedLast) ? joinedLast : Number.NEGATIVE_INFINITY,
+			),
+		)
+		return true
+	}
+
+	/** `discoveryId`'s (or its merge owner's) decoded label when it is not analog voice. */
+	private notVoiceDecode(discoveryId: string | null): DecodedLabel | null {
+		const lookup = this.deps.decodedLabel
+		if (discoveryId === null || lookup === undefined) return null
+		try {
+			const d = lookup(discoveryId)
+			return d !== null && notAnalogVoiceProtocol(d.protocol) ? d : null
+		} catch {
+			// An unreadable answer proves nothing: today's behaviour.
+			return null
+		}
 	}
 
 	private onTrack(input: WidebandTrackInput): void {
@@ -1787,6 +2353,14 @@ export class WidebandAnalogRecorder {
 				epoch.trustedFromSample ?? Number.NEGATIVE_INFINITY,
 			)
 			s.observations.add(observationId)
+			if (observationId !== s.owner) {
+				s.joins.delete(observationId)
+				s.joins.set(observationId, track.startSample)
+				if (s.joins.size > WIDEBAND_JOINS_KEPT) {
+					const oldest = s.joins.keys().next()
+					if (!oldest.done) s.joins.delete(oldest.value)
+				}
+			}
 			s.lastActive = Math.max(s.lastActive, track.lastSample)
 			this.noteActivity(s, observationId, track)
 			this.byObservation.set(observationId, s.id)
@@ -1824,6 +2398,35 @@ export class WidebandAnalogRecorder {
 			this.decisions.note("refused:not-analog", ref)
 			return
 		}
+		const settings = this.deps.settings()
+		const decode = this.notVoiceDecode(input.discoveryId)
+		if (
+			decode !== null &&
+			(decode.observationId === observationId
+				? decodedSince(
+						decode,
+						this.airStart(
+							engine,
+							epoch.sampleRateHz,
+							track.startSample -
+								Math.round(
+									(Math.max(0, settings.preRollMs) * epoch.sampleRateHz) / 1000,
+								),
+						),
+					)
+				: citesNoObservation(decode.observationId) &&
+					decodedSince(
+						decode,
+						this.wallAt(engine, epoch.sampleRateHz, track.startSample),
+					))
+		) {
+			// Decoded during this transmission (its pre-roll on): final, this observation is refused
+			// once, not looked up again per snapshot. An older decode (another transmission on a
+			// mixed-mode channel) or one of another observation refuses nothing.
+			remember(this.refused, observationId)
+			this.decisions.note("refused:not-analog", ref)
+			return
+		}
 		if (
 			!widebandNfmSupported(epoch.sampleRateHz, track.centreHz - epoch.centreHz)
 		) {
@@ -1833,7 +2436,6 @@ export class WidebandAnalogRecorder {
 			this.decisions.note("refused:unsupported", ref)
 			return
 		}
-		const settings = this.deps.settings()
 		const cap = widebandRecordingCap(
 			epoch.sampleRateHz,
 			settings.cpuBudgetCores,
@@ -2137,6 +2739,13 @@ export class WidebandAnalogRecorder {
 			seg,
 			chain,
 			onset: track.startSample,
+			vetoFrom:
+				track.startSample - Math.round(Math.max(0, settings.preRollMs) * perMs),
+			joins: new Map(),
+			joinedVoice: new Map(),
+			vetoed: false,
+			ownerClosedAt: null,
+			endWithin: null,
 			lastActive: track.lastSample,
 			groupDelay: chain.groupDelaySeconds(fs) * 48_000,
 			next: 0,
@@ -2349,6 +2958,9 @@ export class WidebandAnalogRecorder {
 		observationId: string,
 		track: TrackSnapshot,
 	): void {
+		const heard = s.joinedVoice.get(observationId)
+		if (heard !== undefined && track.lastSample > heard)
+			s.joinedVoice.set(observationId, track.lastSample)
 		const span = s.activity.get(observationId)
 		if (span) {
 			span.last = Math.max(span.last, track.lastSample)
@@ -2559,8 +3171,16 @@ export class WidebandAnalogRecorder {
 	 * (another stream's samples are not this one's).
 	 */
 	private channelRestartsOf(s: Session, atSample: number): number {
+		return this.restartsOf(this.channelRestarts, s, atSample)
+	}
+
+	/** channelRestartsOf over `list` (channelRestarts, or joinRestarts for endAtJoin). */
+	private restartsOf(
+		list: RestartEntry[],
+		s: Session,
+		atSample: number,
+	): number {
 		const window = (WIDEBAND_RESTART_WINDOW_MS * s.fs) / 1000
-		const list = this.channelRestarts
 		let kept = 0
 		let n = 0
 		for (const e of list) {
@@ -2872,7 +3492,14 @@ export class WidebandAnalogRecorder {
 		)
 		this.judge(s, file, this.framesAt(s, file, until))
 		if (s.done || s.file !== file) return
-		this.flush(s, file, until)
+		// Writes stay WIDEBAND_HOLDBACK_MS behind the edge in the hang too (the segmenter's bound
+		// is the edge there): a track opening in it is reported late, and a joined other signal's
+		// audio must still be cut off the kept file (endAtJoin). The finish writes the rest.
+		this.flush(
+			s,
+			file,
+			Math.min(until, edge - Math.round((WIDEBAND_HOLDBACK_MS * s.fs) / 1000)),
+		)
 		if (file.endSample !== null && s.next >= file.endSample && !file.finishing)
 			this.finishFile(s, file)
 		if (more) this.wake(s)
@@ -3067,6 +3694,9 @@ export class WidebandAnalogRecorder {
 		if (toneHz === null || s.classed || s.done) return
 		s.classed = true
 		s.toneOnly = true
+		// Voice evidence of the joined observations on the air (ownVeto never refuses them with
+		// an owner vetoed later).
+		for (const [id, a] of s.activity) if (a.open) noteJoinedVoice(s, id, a.last)
 		this.decide(s, "classed")
 		for (const f of [...s.files]) this.admit(s, f)
 	}
@@ -3353,11 +3983,30 @@ export class WidebandAnalogRecorder {
 			if (info.analogFm) {
 				if (s.toneOnly) this.classedBySnapshot(s, observationId)
 				s.toneOnly = false
+				noteJoinedVoice(
+					s,
+					observationId,
+					s.activity.get(observationId)?.last ?? Number.NEGATIVE_INFINITY,
+				)
 				if (!s.classed) {
 					s.classed = true
 					this.decide(s, "classed")
 				}
-			} else if ((!s.classed || s.toneOnly) && info.nonAnalog === true) {
+			}
+			const owned = classVetoes(s, info)
+			if (owned && observationId !== s.owner) {
+				this.dropParked(s, true, "discarded:not-analog")
+				return
+			}
+			// A parked session cannot restart a joined observation (its epoch is over): a joined
+			// voice is kept whole; one without voice evidence goes with the owner's part.
+			if (
+				(owned ||
+					s.vetoed ||
+					this.ownerVeto(s, observationId === s.owner ? info : undefined) ===
+						"own") &&
+				ownVetoEnds(this.ownVeto(s))
+			) {
 				this.dropParked(s, true, "discarded:not-analog")
 				return
 			}
@@ -3429,6 +4078,35 @@ export class WidebandAnalogRecorder {
 
 	/** Writes the rest of a finishing file's queue, then finishes its operation. */
 	private completeFinish(s: Session, file: FileState): void {
+		// The last chance before the file is finalized: a decode of its discovery (or of the one it
+		// was merged into) during its air time may have arrived after the last snapshot. One
+		// arriving after the finish was asked no longer discards (the file is being finalized),
+		// and neither does one of a joined other transmission (its join ends the session).
+		if (
+			!file.failed &&
+			!file.finishAsked &&
+			(s.vetoed || this.ownerVeto(s, undefined) === "own")
+		) {
+			// A joined voice is never discarded with the owner's part (ownVeto).
+			const own = this.ownVeto(s)
+			if (ownVetoEnds(own) && !s.done && !this.parked.has(s.id)) {
+				// Every file of the live session goes (refuse cancels this one too); the joined
+				// observations after the owner start their own session (splitAtVoice).
+				this.splitAtVoice(s, own)
+				return
+			}
+			// Only files overlapping a joined voice (keep), or past the owner's part (split).
+			if (
+				own.kind === "refuse" ||
+				(own.kind === "keep" && !fileOverlaps(file, own.from, own.until)) ||
+				(own.kind === "split" &&
+					file.endSample !== null &&
+					file.endSample <= own.at)
+			) {
+				this.endFile(s, file, "discarded:not-analog")
+				file.failed = true
+			}
+		}
 		if (file.failed) {
 			this.fileLost(s)
 			file.handle?.cancel("cancelled")
@@ -3493,17 +4171,38 @@ export class WidebandAnalogRecorder {
 		return "refused:store"
 	}
 
-	/** Ends every open file now (kept, cut), e.g. stream loss or shutdown. */
-	private endSession(s: Session, cut: AnalogCut): void {
+	/**
+	 * Ends every open file now (kept, cut), e.g. stream loss or shutdown; no later than `endAt`
+	 * (a joined other signal's start, endAtJoin, its track last reported at `joinedLast`: +∞ while
+	 * open, −∞ unknown). A join at or before the current file's start (it opened after a roll-over
+	 * or a new transmission): while the joined signal was still on the air at that start, the file
+	 * opened inside it and nothing of it precedes the join, so it ends at its start and is dropped
+	 * as empty; when the joined signal had ended by then (or that is unknown), the file holds no
+	 * audio of it and ends now, judged as usual (a voice after a short digital burst is never lost).
+	 * Files before the current one are never touched.
+	 */
+	private endSession(
+		s: Session,
+		cut: AnalogCut,
+		endAt = Number.POSITIVE_INFINITY,
+		joinedLast = Number.NEGATIVE_INFINITY,
+	): void {
 		const file = s.file
 		s.pendingStart = null
 		if (file && !file.finishing) {
-			file.endSample = Math.min(file.endSample ?? s.next, s.next)
+			const inside = endAt <= file.startSample && joinedLast >= file.startSample
+			file.endSample = Math.min(
+				file.endSample ?? s.next,
+				s.next,
+				endAt > file.startSample ? endAt : Number.POSITIVE_INFINITY,
+			)
 			file.cut = cut
-			if (file.frames === 0) {
+			if (file.frames === 0 || inside) {
 				file.failed = true
 				s.file = null
 				s.files.delete(file)
+				const waiting = s.waiting.indexOf(file)
+				if (waiting >= 0) s.waiting.splice(waiting, 1)
 				file.handle?.cancel(cut)
 				this.endFile(s, file, "discarded:empty")
 			} else this.finishFile(s, file)
@@ -3555,7 +4254,11 @@ export class WidebandAnalogRecorder {
 		if (!keepMappings)
 			for (const id of s.observations)
 				if (this.byObservation.get(id) === s.id) this.byObservation.delete(id)
-		const end = s.seg.previousEnd
+		const w = s.endWithin
+		const end =
+			w === null
+				? s.seg.previousEnd
+				: Math.max(w.from, Math.min(s.seg.previousEnd, w.to))
 		if (Number.isFinite(end)) {
 			this.recentEnds.push({
 				sourceId: s.sourceId,

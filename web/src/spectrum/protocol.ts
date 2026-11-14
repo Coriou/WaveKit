@@ -108,7 +108,19 @@ export type MainToWorker =
 	| { type: "probe"; id: number; startHz: number; endHz: number }
 	/** Covered by an opaque view (Map, Messages): rows still land in the history, nothing is drawn. */
 	| { type: "paused"; paused: boolean }
+	/** The receiver of the subscribed source is paused: no stall resubscribes or reconnects until it resumes. */
+	| { type: "sourcePaused"; paused: boolean }
 	| { type: "dispose" }
+
+/** The spectrum stream's link changed (worker → main, and on to SpectrumEngine status listeners). */
+export interface ConnectionMessage {
+	type: "connection"
+	state: SpectrumLinkState
+	/** Why the link failed. */
+	message?: string
+	/** Tries since the last live frame (connects and resubscribes); set while connecting or reconnecting. */
+	attempts?: number
+}
 
 export type WorkerToMain =
 	| { type: "meta"; meta: SpectrumFrameMeta }
@@ -116,11 +128,27 @@ export type WorkerToMain =
 	| { type: "reset"; reason: ResetReason }
 	/** Fallback path only: one decoded row (byte v ↔ v / 2 − 127.5 dBFS), `binCount` bytes used. */
 	| { type: "row"; axis: RowAxis; buffer: ArrayBuffer; binCount: number }
-	| { type: "connection"; state: "connecting" | "open" | "closed" }
+	| ConnectionMessage
 	| { type: "profile"; outcome: string; code?: string; message?: string }
 	| { type: "error"; message: string }
 	/** Answer to a probe: the peak dBFS there, null when no row covers it. */
 	| { type: "probe"; id: number; db: number | null }
+
+/**
+ * The spectrum stream's link: "connecting" until the first live frame, "live" while live frames
+ * flow (the backfill and snapshot replayed after each ack do not count), "reconnecting" after a
+ * dropped socket or a silent stream until they flow again, "failed" when the core answers 401 or
+ * 403 to a session check after a 1008 close or repeated failed connects (no more attempts;
+ * `message` says why).
+ */
+export type SpectrumLinkState =
+	| "connecting"
+	| "live"
+	| "reconnecting"
+	| "failed"
+
+/** A first connection still without a live frame after this many tries says the stream is not reachable. */
+export const SPECTRUM_UNREACHABLE_AFTER_ATTEMPTS = 3
 
 export type ResetReason = "profile" | "subscription" | "source" | "axis"
 

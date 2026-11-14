@@ -19,6 +19,7 @@ import {
 	type SpectrumFrameMeta,
 	type SpectrumLayout,
 	type SpectrumLevels,
+	type SpectrumLinkState,
 	type SpectrumSize,
 	type SpectrumSubscription,
 	type SpectrumViewSpan,
@@ -34,7 +35,11 @@ import {
 	Throttle,
 	type TimerApi,
 } from "./schedule.ts"
-import type { SocketHandlers, SpectrumServerMessage } from "./socket.ts"
+import type {
+	LinkInfo,
+	SocketHandlers,
+	SpectrumServerMessage,
+} from "./socket.ts"
 
 /** Meta is posted at most this often (ms). */
 export const META_INTERVAL_MS = 100
@@ -43,6 +48,8 @@ export const MAX_ROWS_IN_FLIGHT = 8
 
 export interface SocketLike {
 	setSubscription(sub: SpectrumSubscription | null): void
+	/** The receiver of the subscribed source is paused (optional: test fakes may omit it). */
+	setSourcePaused?(paused: boolean): void
 	dispose(): void
 }
 
@@ -108,6 +115,7 @@ export class SpectrumPipeline {
 	private renderer: SceneRenderer | null = null
 	private scheduler: RenderScheduler | null = null
 	private paused = false
+	private sourcePaused = false
 	private readonly meta: Throttle<SpectrumFrameEventData>
 	private subscription: SpectrumSubscription | null = null
 	private readonly pool: ArrayBuffer[] = []
@@ -186,6 +194,10 @@ export class SpectrumPipeline {
 			case "paused":
 				this.paused = msg.paused
 				if (!msg.paused) this.scheduler?.invalidate()
+				return
+			case "sourcePaused":
+				this.sourcePaused = msg.paused
+				this.socket?.setSourcePaused?.(msg.paused)
 				return
 			case "probe":
 				this.deps.post({
@@ -269,9 +281,26 @@ export class SpectrumPipeline {
 		if (msg.canvas) this.attachRenderer(msg.canvas, msg.historyRows)
 		this.socket = this.deps.openSocket(msg.wsUrl, {
 			message: m => this.onServer(m),
-			state: state => this.deps.post({ type: "connection", state }),
+			state: (state, info) => this.onLink(state, info),
 		})
+		if (this.sourcePaused) this.socket.setSourcePaused?.(true)
 		if (this.subscription) this.socket.setSubscription(this.subscription)
+	}
+
+	/**
+	 * Link changes from the socket. A reconnect or resubscribe starts a new stream: an ack hold left
+	 * from the lost one must not swallow its frames, and its first frame posts meta at once.
+	 */
+	private onLink(state: SpectrumLinkState, info?: LinkInfo): void {
+		if (state === "reconnecting") {
+			this.heldUntil = null
+			this.metaFresh = true
+			this.decodeErrorReported = false
+		}
+		const out: WorkerToMain = { type: "connection", state }
+		if (info?.message !== undefined) out.message = info.message
+		if (info?.attempts !== undefined) out.attempts = info.attempts
+		this.deps.post(out)
 	}
 
 	private attachRenderer(canvas: OffscreenCanvas, depth: number): void {
@@ -342,6 +371,14 @@ export class SpectrumPipeline {
 			if (at <= this.heldUntil) return
 			this.heldUntil = null
 		}
+		// A replay (backfill or the ack's snapshot) of a row already held is not drawn twice.
+		if (
+			(frame.backfill === true || frame.snapshot === true) &&
+			this.newestAt !== null &&
+			history.axis?.epoch === frame.epoch &&
+			at <= this.newestAt
+		)
+			return
 		const axis = axisOf(frame)
 		const epochChanged =
 			history.axis !== null && history.axis.epoch !== frame.epoch

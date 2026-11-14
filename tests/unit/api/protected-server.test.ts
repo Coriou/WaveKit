@@ -632,6 +632,25 @@ describe("actual protected ApiServer mount", () => {
 		expect((await closed)[0]).toBe(1008)
 	})
 
+	it("server stop closes an access-leased WebSocket with 1001 Going Away, not 1008", async () => {
+		const env = await setup()
+		await env.server.start()
+		const paired = await env.pair()
+		const socket = new WebSocket(
+			address(env.server).replace("http:", "ws:") + "/ws",
+			{ headers: paired.headers },
+		)
+		await once(socket, "open")
+		const message = once(socket, "message")
+		socket.send(JSON.stringify({ type: "subscribe", channels: ["decoders"] }))
+		await message
+		const closed = once(socket, "close")
+		await env.server.stop()
+		const [code, reason] = (await closed) as [number, Buffer]
+		expect(code).toBe(1001)
+		expect(reason.toString()).toBe("Server shutting down")
+	})
+
 	it("gates all new admissions synchronously when the server stops admission", async () => {
 		const env = await setup()
 		await env.server.start()

@@ -648,7 +648,8 @@ describe("channel decode at a stored spectrum discovery", () => {
 						protocol: ev.protocol,
 						transport: "ambient",
 						identity: ev.identity,
-						observationId: "o1",
+						// No observation of the decode's epoch was on the air: it cites none.
+						observationId: `decode:${id}`,
 					},
 				})
 				expect(d.proof!.summary).toContain(ev.identity!.value)
@@ -678,6 +679,80 @@ describe("channel decode at a stored spectrum discovery", () => {
 			} finally {
 				s.stopAnchorExpiry()
 			}
+		}
+	})
+
+	it("M1: a channel proof cites the observation on the air when its decode arrived, frozen when a later over joins", () => {
+		const s = store()
+		try {
+			// o1 runs T0 - 10 000 .. T0 - 9 000; a later decode identity pairs with no observation
+			// evidence (another identity), so it is a channel proof.
+			const id = spectrum(s, "o1", 0)
+			s.anchorDecode("rtl", CH_A, acars("TEST01", PAIRED_AT), "commanded")
+			const ev = acars("TEST02", PAIRED_AT + 500)
+			expect(s.anchorDecode("rtl", CH_A, ev, "commanded").discoveryId).toBe(id)
+			expect(s.get(id)!.proof).toMatchObject({
+				identity: ev.identity,
+				observationId: "o1",
+			})
+			// A new over joins the discovery 30 s later: the proof (rebuilt) still names o1.
+			s.ingest(
+				makeObs({
+					id: "o2",
+					centreHz: CH_A,
+					startedAt: T0 + 20_000,
+					blocks: 2,
+					obwHz: 9_000,
+					sourceId: "rtl",
+				}),
+			)
+			// It joined the same discovery (its newest observation).
+			expect(
+				s.snapshot().observations.find(o => o.id === "o2")?.discoveryId,
+			).toBe(id)
+			expect(s.get(id)!.proof).toMatchObject({
+				identity: ev.identity,
+				observationId: "o1",
+			})
+			expect(s.ownerLabel(id)).toMatchObject({
+				protocol: "acars",
+				confidence: "decoded",
+				proofAt: ev.at,
+				proofObservationId: "o1",
+			})
+		} finally {
+			s.stopAnchorExpiry()
+		}
+	})
+
+	it("M1: a channel decode at a turnaround (two overs on the air within the pairing window) names neither", () => {
+		const s = store()
+		try {
+			const id = spectrum(s, "o1", 0)
+			s.anchorDecode("rtl", CH_A, acars("TEST01", PAIRED_AT), "commanded")
+			// o2 starts 500 ms after o1 ended (T0 - 9 000): a decode 800 ms into o2 is within the
+			// pairing window of both.
+			s.ingest(
+				makeObs({
+					id: "o2",
+					centreHz: CH_A,
+					startedAt: T0 - 8_500,
+					blocks: 2,
+					obwHz: 9_000,
+					sourceId: "rtl",
+				}),
+			)
+			expect(
+				s.snapshot().observations.find(o => o.id === "o2")?.discoveryId,
+			).toBe(id)
+			const ev = acars("TEST02", T0 - 7_700)
+			expect(s.anchorDecode("rtl", CH_A, ev, "commanded").discoveryId).toBe(id)
+			expect(s.ownerLabel(id)).toMatchObject({
+				proofAt: ev.at,
+				proofObservationId: `channel:${id}`,
+			})
+		} finally {
+			s.stopAnchorExpiry()
 		}
 	})
 

@@ -215,6 +215,23 @@ import type { YieldTurn } from "./slices.js"
 export { labelFromEvidence } from "../classify/label-from-evidence.js"
 export type { EvidenceLabel } from "../classify/label-from-evidence.js"
 
+/** DiscoveryStore.ownerLabel: a published label and the proof behind it (null: none, no time). */
+export interface OwnerLabel extends EvidenceLabel {
+	/**
+	 * The time (ms since the epoch) the proof behind the published label states, not the newest
+	 * decode the discovery holds: the shown proof is the strongest kind, the newest of that kind
+	 * (strongestKnownProof), so for a decoded label it is the newest decoded proof among the
+	 * discovery's observations (each states its newest decode) or its channel proof's decode time,
+	 * whichever shows; a decode anchor's, its latest published confirmation (last seen).
+	 */
+	readonly proofAt: number | null
+	/**
+	 * The observation the proof cites: the decoded one, a channel proof's frozen one, or a
+	 * synthetic id naming none (`decode:` none on the air, `channel:` two at a turnaround).
+	 */
+	readonly proofObservationId: string | null
+}
+
 export type StoreChange =
 	| "created"
 	| "updated"
@@ -448,6 +465,19 @@ function publishedOf(view: DiscoveryProofView): EvidenceLabel {
 		? view.label
 		: UNKNOWN_LABEL
 }
+/** DiscoveryStore.ownerLabel's answer from a proof view: its published label and proof. */
+function ownerLabelOf(view: DiscoveryProofView): OwnerLabel {
+	const label = publishedOf(view)
+	const proof = label === UNKNOWN_LABEL ? null : view.proof
+	const at = proof === null ? Number.NaN : Date.parse(proof.at)
+	return {
+		protocol: label.protocol,
+		family: label.family,
+		confidence: label.confidence,
+		proofAt: Number.isFinite(at) ? at : null,
+		proofObservationId: proof?.observationId ?? null,
+	}
+}
 /** The classifier's burst limit (scanner-redesign 3.11 `short`). */
 const SHORT_TRACK_BLOCKS = 4
 const LINKS_MAX = 64
@@ -548,6 +578,55 @@ interface ChannelProof {
 	/** Decoded from a replayed capture (origin probe), else ambient. */
 	replayed: boolean
 	at: number
+	/**
+	 * The observation the proof cites, frozen when the decode arrived (channelProofObservation):
+	 * never re-read at a view rebuild, so a later transmission joining the discovery is not named
+	 * by an earlier decode.
+	 */
+	observationId: string
+}
+
+/**
+ * How many of a discovery's newest observations channelProofObservation looks at: a decode is
+ * stamped within the pairing window of the transmission it decoded, so only the last few can.
+ */
+const CHANNEL_PROOF_SCAN = 16
+
+/**
+ * The observation of `list` (a discovery's observations, oldest first) a channel decode at wall
+ * time `at` of `epoch` cites, frozen when it arrives (proveByChannel): the one observation of
+ * that epoch on the air then (from AMBIENT_PAIR_MS before its start to AMBIENT_PAIR_MS after its
+ * end, an open one to now: the decoder's lag). None: `decode:<id>` (the recorder counts it only
+ * from a track's onset on). Two or more (a turnaround: the decode may be of either over):
+ * `channel:<id>`, which names no transmission, so no recording is refused or discarded on it; the
+ * next decode, past the window of the other one, names its own.
+ */
+function channelProofObservation(
+	discoveryId: string,
+	list: readonly Observation[],
+	epoch: number,
+	at: number,
+): string {
+	let found: string | null = null
+	const stop = Math.max(0, list.length - CHANNEL_PROOF_SCAN)
+	for (let i = list.length - 1; i >= stop; i--) {
+		const o = list[i]!
+		if (o.sampleRange.epoch !== epoch) continue
+		const start = Date.parse(o.startedAt)
+		const end =
+			o.endedAt === undefined ? Number.POSITIVE_INFINITY : Date.parse(o.endedAt)
+		if (
+			!Number.isFinite(at) ||
+			!Number.isFinite(start) ||
+			Number.isNaN(end) ||
+			at < start - AMBIENT_PAIR_MS ||
+			at > end + AMBIENT_PAIR_MS
+		)
+			continue
+		if (found !== null) return `channel:${discoveryId}`
+		found = o.id
+	}
+	return found ?? `decode:${discoveryId}`
 }
 
 /** Comparable text of a staged anchor identity ("" for none). */
@@ -2644,6 +2723,12 @@ export class DiscoveryStore
 			identity: { kind: ev.identity.kind, value: ev.identity.value },
 			replayed: ev.origin === "probe",
 			at: ev.at,
+			observationId: channelProofObservation(
+				d.id,
+				this.byDiscovery.get(d.id) ?? [],
+				ev.epoch,
+				ev.at,
+			),
 		})
 		this.invalidateLabel(d.id)
 		const after = this.discoveryView(d)
@@ -3909,6 +3994,62 @@ export class DiscoveryStore
 		this.aliasTable.setFolderLookup(lookup)
 	}
 
+	/** ownerLabel's answer per cached proof view (a new view, a new answer; no parse per call). */
+	private readonly ownerLabels = new WeakMap<DiscoveryProofView, OwnerLabel>()
+	/**
+	 * ownerLabel's answer per decode-anchored discovery (channel anchor, ADS-B), whose proof view is
+	 * built per call (not cached): kept with what that view reads (protocol, last seen time, and
+	 * whether a channel anchor holds a published identity), so a change of any reads afresh. One
+	 * entry per anchor, removed with it.
+	 */
+	private readonly anchorLabels = new Map<
+		string,
+		{
+			readonly protocol: ScannerProtocol
+			readonly lastSeenAt: string
+			readonly proven: boolean
+			readonly answer: OwnerLabel
+		}
+	>()
+
+	/**
+	 * The published label (the protocol and confidence `get` presents) of `folderId`'s live owner
+	 * (folderOwner), with the time and observation of the proof behind it (OwnerLabel.proofAt: the
+	 * shown proof's time, not necessarily the newest decode): no copy of the discovery, no hint or
+	 * spur lookup; the answer is cached per proof view, or per decode anchor (anchorLabels). Undefined for a folder nobody owns. The analog recorder's per-snapshot check
+	 * (voice-veto.ts).
+	 */
+	ownerLabel(folderId: string): OwnerLabel | undefined {
+		const owner = this.folderOwner(folderId)
+		const d = owner === undefined ? undefined : this.discoveries.get(owner)
+		if (d === undefined) return undefined
+		if (d.anchor !== "decode") {
+			const view = this.discoveryView(d)
+			const hit = this.ownerLabels.get(view)
+			if (hit !== undefined) return hit
+			const answer = ownerLabelOf(view)
+			this.ownerLabels.set(view, answer)
+			return answer
+		}
+		const proven = d.protocol === "adsb" || this.anchorIdentity.has(d.id)
+		const cached = this.anchorLabels.get(d.id)
+		if (
+			cached !== undefined &&
+			cached.protocol === d.protocol &&
+			cached.lastSeenAt === d.lastSeenAt &&
+			cached.proven === proven
+		)
+			return cached.answer
+		const answer = ownerLabelOf(this.discoveryView(d))
+		this.anchorLabels.set(d.id, {
+			protocol: d.protocol,
+			lastSeenAt: d.lastSeenAt,
+			proven,
+			answer,
+		})
+		return answer
+	}
+
 	/**
 	 * The live discovery whose files `folderId`'s folder holds: itself, or the owner of the alias.
 	 * Undefined for a folder nobody owns (an alias released before folders were checked, a
@@ -5084,6 +5225,7 @@ export class DiscoveryStore
 		this.anchorIdentity.clear()
 		this.anchorReplayed.clear()
 		this.channelProofs.clear()
+		this.anchorLabels.clear()
 		this.channelRefusalLogged.clear()
 		this.anchorHeld.clear()
 		this.anchorHolds.clear()
@@ -7498,7 +7640,8 @@ export class DiscoveryStore
 
 	/**
 	 * The decoded view a checked channel identity gives: an anchor's (channelAnchorView) or a
-	 * spectrum owner's channel proof (proveByChannel), which cites the owner's newest observation.
+	 * spectrum owner's channel proof (proveByChannel), which cites the observation frozen when the
+	 * decode arrived (channelProofObservation).
 	 * An owner's label is its proof's (labelOfProof: a leak or intermod cap still ceilings it).
 	 */
 	private channelDecodedView(
@@ -7569,7 +7712,7 @@ export class DiscoveryStore
 						channel.identity,
 						channel.replayed,
 						iso(channel.at),
-						this.byDiscovery.get(d.id)?.at(-1)?.id ?? `decode:${d.id}`,
+						channel.observationId,
 					)
 				: own
 		this.proofCache.set(d.id, view)
@@ -7804,6 +7947,7 @@ export class DiscoveryStore
 		this.anchorIdentity.delete(id)
 		this.anchorReplayed.delete(id)
 		this.channelProofs.delete(id)
+		this.anchorLabels.delete(id)
 		this.channelRefusalLogged.delete(id)
 		this.anchorPending.delete(id)
 		this.anchorPublished.delete(id)
@@ -8384,6 +8528,7 @@ export class DiscoveryStore
 	 */
 	private invalidateLabel(id: string): void {
 		this.proofCache.delete(id)
+		this.anchorLabels.delete(id)
 		this.countsDirty.add(id)
 		// The centre list is keyed by the effective family, so a new label moves it.
 		this.indexDirty.add(id)

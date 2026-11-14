@@ -5,6 +5,7 @@ import type {
 	ScannerIdentifyEventData,
 	ScannerIdentifyResult,
 	ScannerIdentifyTrial,
+	ScannerIdentifyTrialBudget,
 } from "@wavekit/api-types"
 import type { IdentifyState } from "../../src/data/index.ts"
 import {
@@ -524,6 +525,61 @@ describe("identifyView", () => {
 		expect(none.title).toBe(
 			"LoRa with no decoder: Not available yet (no decoder running here)",
 		)
+		expect(
+			trialRow(trial("dmr", "skipped-budget", { reason: "slot-busy" }), 4)
+				.title,
+		).toBe("DMR with dsd-fme: Skipped (busy) (another probe held the slot)")
+		expect(
+			trialRow(
+				trial("dmr", "skipped-budget", {
+					reason: "cpu-budget",
+					budget: {
+						budgetCores: 1,
+						enginesCores: 0.08,
+						probesCores: 0,
+						recordingsCores: 0.4296,
+					},
+				}),
+				5,
+			).title,
+		).toBe(
+			"DMR with dsd-fme: Skipped (busy) (no CPU budget left: recordings and analog trials 0.43 of 1 core)",
+		)
+		// A malformed split (non-finite, negative or missing field) falls back to the plain label.
+		for (const budget of [
+			{
+				budgetCores: Number.NaN,
+				enginesCores: 0.08,
+				probesCores: 0,
+				recordingsCores: 0.4,
+			},
+			{
+				budgetCores: 1,
+				enginesCores: 0.08,
+				probesCores: -0.5,
+				recordingsCores: 0.4,
+			},
+			{
+				budgetCores: 1,
+				enginesCores: Number.POSITIVE_INFINITY,
+				probesCores: 0,
+				recordingsCores: 0.4,
+			},
+			{ budgetCores: 1, enginesCores: 0.08, probesCores: 0 },
+		])
+			expect(
+				trialRow(
+					trial("dmr", "skipped-budget", {
+						reason: "cpu-budget",
+						budget: budget as ScannerIdentifyTrialBudget,
+					}),
+					7,
+				).title,
+			).toBe("DMR with dsd-fme: Skipped (busy) (no CPU budget left)")
+		expect(
+			trialRow(trial("dmr", "skipped-budget", { reason: "cpu-budget" }), 6)
+				.title,
+		).toBe("DMR with dsd-fme: Skipped (busy) (no CPU budget left)")
 		expect(trialRow(trial("acars", "timeout"), 2).protocol).toBe("ACARS")
 		expect(trialRow(trial("vdl2", "no-sync"), 3).protocol).toBe("VDL2")
 		expect(

@@ -1903,7 +1903,8 @@ async function main(): Promise<void> {
 					"recordings",
 				)
 			},
-			discoveryCentreHz: id => scanner?.getDiscovery(id)?.frequencyHz ?? null,
+			discoveryCentreHz: id =>
+				scanner?.recordingFolderDiscovery(id)?.frequencyHz ?? null,
 			logger,
 			protection: lateBoundRecordingProtection(() => recordingKeeps),
 		})

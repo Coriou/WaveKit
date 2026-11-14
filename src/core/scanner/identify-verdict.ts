@@ -63,6 +63,10 @@ const REASON_WHY: Readonly<
 	"unsupported-format": "unsupported-format",
 	"decoder-unavailable": "decoders-unavailable",
 	"no-live-audio": "no-live-audio",
+	// A skipped-budget run's real reason (its outcome already reads `budget`).
+	"slot-busy": "budget",
+	"cpu-budget": "budget",
+	"slot-still-freeing": "budget",
 }
 
 /** The most useful single reason when several trials could not run. */

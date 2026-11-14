@@ -12,9 +12,11 @@ export {
 export {
 	DEFAULT_LAYOUT,
 	DEFAULT_LEVELS,
+	SPECTRUM_UNREACHABLE_AFTER_ATTEMPTS,
 	type SpectrumFrameMeta,
 	type SpectrumLayout,
 	type SpectrumLevels,
+	type SpectrumLinkState,
 	type SpectrumSubscription,
 	type SpectrumViewSpan,
 	type TuningTrust,

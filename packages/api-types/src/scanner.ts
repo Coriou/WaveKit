@@ -1603,7 +1603,10 @@ export interface ScannerIdentifyTrial {
 	 * window; `decoder-unavailable` also when the probe pool remembers the decoder type as
 	 * unavailable (PROBE_UNAVAILABLE_MEMO_MS) and the trial is not spawned. `adsb-window` for a
 	 * protocol the request names explicitly inside the ADS-B window (1089 to 1091 MHz), where only
-	 * readsb is eligible: listed, never run.
+	 * readsb is eligible: listed, never run. On a `skipped-budget` trial, the run's real reason when
+	 * the core knows it: `slot-busy`, another identify or probe held the probe slot; `cpu-budget`,
+	 * the shared CPU budget (engines, probes, recordings and analog trials) left no room;
+	 * `slot-still-freeing`, a probe on its transport was still stopping when the wait ended. Absent when the core could not say, and on older cores.
 	 */
 	reason?:
 		| "no-decoder"
@@ -1613,6 +1616,25 @@ export interface ScannerIdentifyTrial {
 		| "decoder-unavailable"
 		| "no-live-audio"
 		| "adsb-window"
+		| "slot-busy"
+		| "cpu-budget"
+		| "slot-still-freeing"
+	/**
+	 * On a `skipped-budget` trial with reason `cpu-budget`: what held the shared CPU budget when the
+	 * run gave up, in cores (identify, job probes, recordings and analog trials all share `cpuBudgetCores`).
+	 * Absent otherwise, and on older cores.
+	 */
+	budget?: ScannerIdentifyTrialBudget | undefined
+}
+/** `ScannerIdentifyTrial.budget`: the core estimate split by holder, against the budget. */
+export interface ScannerIdentifyTrialBudget {
+	budgetCores: number
+	/** Spectrum engines. */
+	enginesCores: number
+	/** Running probes (job and identify). */
+	probesCores: number
+	/** Wideband analog recordings and analog trials (external reservations). */
+	recordingsCores: number
 }
 /** WG7 req 1.2: decoder types whose running instances name ambient-only protocols. */
 export type ScannerAmbientDecoderType =

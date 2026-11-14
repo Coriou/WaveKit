@@ -300,3 +300,26 @@ export function withAliasFolders(
 		for (const alias of aliasesOf(owner)) (out ??= new Set(keep)).add(alias)
 	return out ?? keep
 }
+
+/**
+ * Requirement 3: the live discovery a recording folder belongs to, for every recording DTO
+ * (frequency, and the title clients derive from it). A folder named for a discovery merged into
+ * another resolves to its owner (`folderOwner`: itself, or its alias owner; a chain A into B, B
+ * into C leaves A an alias of C, so one O(1) lookup). Undefined for a folder no live discovery
+ * owns (deleted, released, never known) and when a lookup throws: callers answer "unknown"
+ * (frequency null), never a guess.
+ */
+export function recordingFolderDiscovery<D>(
+	store: {
+		folderOwner(folderId: string): string | undefined
+		get(id: string): D | undefined
+	},
+	folderId: string,
+): D | undefined {
+	try {
+		const owner = store.folderOwner(folderId)
+		return owner === undefined ? undefined : store.get(owner)
+	} catch {
+		return undefined
+	}
+}

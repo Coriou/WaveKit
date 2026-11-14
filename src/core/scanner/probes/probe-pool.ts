@@ -111,6 +111,29 @@ export interface ProbeRequest {
 	replay?: { captureId: string }
 }
 
+/**
+ * The highest priority a scanner job's probe carries: job priority is 0–100 (the route schema and
+ * store/persistence.ts cap it). Anything above is an identify request (IDENTIFY_PROBE_PRIORITY is
+ * MAX_JOB_PROBE_PRIORITY + 1), a user asking now.
+ */
+export const MAX_JOB_PROBE_PRIORITY = 100
+/** An identify probe (a user request): priority above every job's 0–MAX_JOB_PROBE_PRIORITY. */
+export function isIdentifyPriority(priority: number): boolean {
+	return priority > MAX_JOB_PROBE_PRIORITY
+}
+/**
+ * The longest identify keeps the cores its preemptions free from new reservations (recordings,
+ * analog trials: reserveExternal), pool-wide: IDENTIFY_SLOT_FREEING_MAX_MS in identify.ts (8 s, a
+ * 5 s graceful decoder stop plus 3 s for the kill and channel release), past which identify gives up
+ * the wait. Holds live inside a window opened by the first hold; the window lasts this long whatever
+ * identifies follow, and a new window opens only IDENTIFY_PREEMPTION_HOLD_GAP_MS after it closed.
+ */
+export const IDENTIFY_PREEMPTION_HOLD_MS = 8000
+/**
+ * The hold-free gap after a hold window closes. Windows start at least 8 + 8 = 16 s apart and each
+ * lasts at most 8 s, so a reservation is refused on hold grounds for at most 8 s in any 16 s.
+ */
+export const IDENTIFY_PREEMPTION_HOLD_GAP_MS = 8000
 /** WG11 req 6.4: queue-driven replay probes run just below identify and above every job's passive probes. */
 export const REPLAY_PROBE_PRIORITY = 100
 /** Settling time after a replay decoder exited cleanly, so its last output lines still count. */
@@ -741,6 +764,14 @@ export class ProbePool extends EventEmitter {
 	private destroyed = false
 	/** Cores held by reserveExternal, counted in estimatedCores. */
 	private externalCores = 0
+	/** An identify's claim on the cores its preemption frees: see holdFor. */
+	private identifyHold: {
+		req: ProbeRequest
+		cores: number
+		until: number
+	} | null = null
+	/** Start of the current or last hold window (pool-wide): see holdFor. */
+	private holdWindowStart: number | null = null
 	private readonly outputRegistration: ConstructorListenerRegistration
 
 	constructor(private readonly deps: ProbePoolDeps) {
@@ -824,11 +855,8 @@ export class ProbePool extends EventEmitter {
 				this.enqueue(req)
 				// Under the CPU guard only identify (priority above every job's 0–100, Task 35a) preempts: a stopped
 				// decoder is the CPU the guard is waiting for. pump() retries the queue every service tick.
-				if (pick.deferred !== "cpu" || req.priority > 100)
-					this.preemptFor(
-						req,
-						pick.deferred === "max-probes" ? this.fullKinds(first, ctx) : null,
-					)
+				if (pick.deferred !== "cpu" || isIdentifyPriority(req.priority))
+					this.preemptDeferred(req, pick.deferred, first, ctx)
 			}
 			return pick
 		}
@@ -868,6 +896,71 @@ export class ProbePool extends EventEmitter {
 		return this.queue.length < before
 	}
 
+	/**
+	 * Whether a slot may be freed for this queued request: it is still queued and a probe on a
+	 * transport it could use is still stopping (any such probe, not only one preempted for this
+	 * request: another request may take the slot first). That teardown ends by itself: a decoder
+	 * stop has its own kill fallback, and a failed
+	 * cleanup seals the pool, which empties the queue. pump() runs the queue when it ends. A mode
+	 * step keeps its slot, so it frees nothing. False for anything not queued.
+	 */
+	slotFreeing(req: ProbeRequest): boolean {
+		if (this.destroyed || !this.queue.includes(req)) return false
+		const ctx = this.liveOrReplayContext(req)
+		const first = (req.modes ?? probeModesFor(req.cls, req.protocols))[0]
+		if (!ctx || !first) return false
+		const replaying = req.replay !== undefined
+		const kinds = new Set(
+			this.deps.transports
+				.filter(
+					t => (t.kind === "replay") === replaying && t.supports(first, ctx),
+				)
+				.map(t => t.kind),
+		)
+		return [...this.records.values()].some(
+			r => r.state === "stopping" && !r.stepping && kinds.has(r.transport.kind),
+		)
+	}
+
+	/**
+	 * Why a queued request still waits, from the check pump() makes: `max-probes` (the slots of the
+	 * transports it can use are held), `budget` (the core estimate, engines, probes and external
+	 * reservations such as recordings and analog trials, leaves no room), `cpu` (the CPU guard).
+	 * With the core estimate behind it, split into what holds it. Null for anything not queued, or
+	 * once it would start.
+	 */
+	queuedDeferral(req: ProbeRequest): {
+		deferral: "max-probes" | "budget" | "cpu"
+		estimatedCores: number
+		enginesCores: number
+		probesCores: number
+		externalCores: number
+		budgetCores: number
+	} | null {
+		if (this.destroyed || !this.queue.includes(req)) return null
+		const ctx = this.liveOrReplayContext(req)
+		const first = (req.modes ?? probeModesFor(req.cls, req.protocols))[0]
+		if (!ctx || !first) return null
+		const pick = this.pickTransport(first, ctx)
+		if (
+			!("deferred" in pick) ||
+			(pick.deferred !== "max-probes" &&
+				pick.deferred !== "budget" &&
+				pick.deferred !== "cpu")
+		)
+			return null
+		const enginesCores = this.enginesCores()
+		const own = this.ownCores()
+		return {
+			deferral: pick.deferred,
+			estimatedCores: this.estimatedCores(),
+			enginesCores,
+			probesCores: Math.max(0, own - enginesCores),
+			externalCores: this.externalCores,
+			budgetCores: this.deps.settings().cpuBudgetCores,
+		}
+	}
+
 	async onEpoch(
 		sourceId: string,
 		epoch: number,
@@ -890,7 +983,7 @@ export class ProbePool extends EventEmitter {
 		for (const rec of stale) {
 			// Identify (priority above every job's 0–100, Task 35a) re-plans on its own: a re-request would only
 			// spawn a decoder it gives back, and preempt a lower-priority probe for nothing.
-			if (rec.req.priority > 100) continue
+			if (isIdentifyPriority(rec.req.priority)) continue
 			const engine = this.deps.engines(sourceId)
 			if (!engine) continue
 			const halfSpan =
@@ -947,6 +1040,7 @@ export class ProbePool extends EventEmitter {
 	sealAdmission(): void {
 		this.destroyed = true
 		this.queue.length = 0
+		this.identifyHold = null
 		// Fence every original capability before any cleanup callback can reenter.
 		const records = [...this.records.values()]
 		for (const rec of records) this.fence(rec)
@@ -1152,8 +1246,14 @@ export class ProbePool extends EventEmitter {
 	// Hold `cores` against the same budget probe admission uses. Null when
 	// the pool is destroyed, `cores` is not a finite non-negative number,
 	// `settings()` throws or has a non-finite budget, or the reservation
-	// would exceed `cpuBudgetCores`. Zero returns a no-op release. Release is
-	// idempotent and never drives the counter negative.
+	// would exceed `cpuBudgetCores`: the full estimate (engines, every probe,
+	// identify's included, and reservations) plus `cores`, so the total never
+	// exceeds the budget. While an identify holds the cores its preemption
+	// frees (holdFor, at most IDENTIFY_PREEMPTION_HOLD_MS in any
+	// IDENTIFY_PREEMPTION_HOLD_MS + IDENTIFY_PREEMPTION_HOLD_GAP_MS), it is also
+	// null when admitting it would leave that identify no room once the probes it
+	// may stop are gone (identifyRoom, the check its preemption made). Zero returns
+	// a no-op release. Release is idempotent and never drives the counter negative.
 	reserveExternal(cores: number): (() => void) | null {
 		if (this.destroyed) return null
 		if (!Number.isFinite(cores) || cores < 0) return null
@@ -1166,6 +1266,19 @@ export class ProbePool extends EventEmitter {
 		}
 		if (!Number.isFinite(budget)) return null
 		if (this.estimatedCores() + cores > budget + 1e-9) return null
+		const hold = this.activeHold()
+		if (hold && !this.identifyRoom(hold.req, hold.cores, cores, budget)) {
+			this.log.debug(
+				{
+					cores,
+					heldCores: hold.cores,
+					estimatedCores: this.estimatedCores(),
+					budgetCores: budget,
+				},
+				"Reservation refused: cores held for a preempting identify",
+			)
+			return null
+		}
 		this.externalCores += cores
 		let released = false
 		return () => {
@@ -1176,9 +1289,26 @@ export class ProbePool extends EventEmitter {
 	}
 
 	private estimatedCores(): number {
-		let cores = this.deps.engineCount() * CPU_COST.engine + this.externalCores
+		return this.ownCores() + this.externalCores
+	}
+
+	private enginesCores(): number {
+		return this.deps.engineCount() * CPU_COST.engine
+	}
+
+	/** Engines and probes: the estimate without external reservations. */
+	private ownCores(): number {
+		let cores = this.enginesCores()
 		for (const r of this.records.values()) cores += r.cores
 		return cores
+	}
+
+	/**
+	 * Cores held by reserveExternal (wideband recordings, analog trials), for the status estimate
+	 * (`budgets.cpuCoresInUse`).
+	 */
+	externalCoresInUse(): number {
+		return this.externalCores
 	}
 
 	private pickTransport(
@@ -1199,6 +1329,10 @@ export class ProbePool extends EventEmitter {
 				reason ??= "max-probes"
 				continue
 			}
+			// One shared budget: every admission (identify, job probe, or a reservation in
+			// reserveExternal) is weighed against the full estimate, engines, every probe and the
+			// reservations (recordings, analog trials), so the total never exceeds cpuBudgetCores.
+			// Identify may preempt job probes (preemptFor) but never cuts a reservation.
 			if (
 				this.estimatedCores() + transport.cores(mode.decoderType) >
 				s.cpuBudgetCores + 1e-9
@@ -1207,7 +1341,11 @@ export class ProbePool extends EventEmitter {
 				continue
 			}
 			const cpu = this.deps.cpu.normalisedPercent
-			if (ctx.req.priority <= 100 && cpu !== null && cpu > s.cpuGuardPercent) {
+			if (
+				!isIdentifyPriority(ctx.req.priority) &&
+				cpu !== null &&
+				cpu > s.cpuGuardPercent
+			) {
 				reason ??= "cpu"
 				continue
 			}
@@ -1284,7 +1422,8 @@ export class ProbePool extends EventEmitter {
 		this.queue.push(req)
 		this.queue.sort(
 			(a, b) =>
-				Number(b.priority > 100) - Number(a.priority > 100) ||
+				Number(isIdentifyPriority(b.priority)) -
+					Number(isIdentifyPriority(a.priority)) ||
 				(this.queuedRounds.get(a) ?? 0) - (this.queuedRounds.get(b) ?? 0) ||
 				b.priority - a.priority ||
 				(this.lastServed.get(this.candidateKey(a)) ?? -Infinity) -
@@ -1300,6 +1439,7 @@ export class ProbePool extends EventEmitter {
 				this.freshStrongHolders.delete(this.queue[i]!)
 				this.pendingHandoffs.delete(this.queue[i]!)
 				this.queuedRounds.delete(this.queue[i]!)
+				if (this.identifyHold?.req === this.queue[i]) this.identifyHold = null
 				this.queue.splice(i, 1)
 			}
 	}
@@ -1316,16 +1456,165 @@ export class ProbePool extends EventEmitter {
 		)
 	}
 
+	// A `max-probes` deferral frees a slot on a full transport the request could use. A `budget`
+	// deferral preempts only when stopping every probe preemptFor could stop for this request (the
+	// same victimFor test) makes room for its cheapest transport: reservations (recordings, analog
+	// trials) and held recorded calls are never cut, so when they alone leave no room a preemption
+	// would kill job probes for nothing. preemptFor stops one victim per round and every later round
+	// comes back here, so each further victim is stopped only if the probes still stoppable then make
+	// room against the reservations of that moment.
+	private preemptDeferred(
+		req: ProbeRequest,
+		deferred: "max-probes" | "budget" | "cpu",
+		mode: ProbeMode,
+		ctx: TransportContext,
+	): void {
+		const cost = this.cheapestCores(mode, ctx)
+		if (deferred === "max-probes") {
+			if (this.preemptFor(req, this.fullKinds(mode, ctx)))
+				this.holdFor(req, cost)
+			return
+		}
+		if (deferred === "budget" && !this.preemptionMakesRoom(req, cost)) return
+		if (this.preemptFor(req, null)) this.holdFor(req, cost)
+	}
+
+	private cheapestCores(mode: ProbeMode, ctx: TransportContext): number {
+		let cost = Number.POSITIVE_INFINITY
+		for (const transport of this.deps.transports) {
+			if (transport.kind === "replay" || !transport.supports(mode, ctx))
+				continue
+			const c = transport.cores(mode.decoderType)
+			if (Number.isFinite(c) && c < cost) cost = c
+		}
+		return cost
+	}
+
+	// An identify that stopped a job probe holds the freed cores for its own admission, so a
+	// reservation (recording, analog trial: reserveExternal) admitted between preemption rounds cannot
+	// take them and leave the probe stopped for nothing. Job probe admission ignores the hold (it is
+	// weighed against the budget only). The hold lasts until that identify starts or leaves the queue,
+	// the pool is sealed, or its window closes, whichever is first. The window is pool-wide: the first
+	// hold opens it at W and every hold in it, for any identify, ends by W + IDENTIFY_PREEMPTION_HOLD_MS;
+	// no hold starts again before W + IDENTIFY_PREEMPTION_HOLD_MS + IDENTIFY_PREEMPTION_HOLD_GAP_MS.
+	// So windows start >= 16 s apart and last <= 8 s: a reservation is refused on hold grounds for at
+	// most 8 s in any 16 s, however many identifies chain. One hold at a time: a later identify's
+	// preemption replaces it.
+	private holdFor(req: ProbeRequest, cores: number): void {
+		if (!isIdentifyPriority(req.priority) || !Number.isFinite(cores)) return
+		const now = this.now()
+		if (
+			this.holdWindowStart === null ||
+			now >=
+				this.holdWindowStart +
+					IDENTIFY_PREEMPTION_HOLD_MS +
+					IDENTIFY_PREEMPTION_HOLD_GAP_MS
+		)
+			this.holdWindowStart = now
+		const until = this.holdWindowStart + IDENTIFY_PREEMPTION_HOLD_MS
+		if (now >= until) return
+		this.identifyHold = { req, cores, until }
+	}
+
+	/** The identify hold in force now, or null (expired, identify gone, pool sealed): see holdFor. */
+	private activeHold(): { req: ProbeRequest; cores: number } | null {
+		const hold = this.identifyHold
+		if (!hold) return null
+		if (
+			this.destroyed ||
+			this.now() >= hold.until ||
+			!this.queue.includes(hold.req)
+		) {
+			this.identifyHold = null
+			return null
+		}
+		return hold
+	}
+
+	private preemptionMakesRoom(req: ProbeRequest, cost: number): boolean {
+		let budget: number
+		try {
+			budget = this.deps.settings().cpuBudgetCores
+		} catch {
+			return false
+		}
+		return this.identifyRoom(req, cost, 0, budget)
+	}
+
+	// The one room check preemption and the hold share: whether `req` (cost `cost`) fits once every
+	// probe it may stop is gone, with `extra` more cores reserved. Freed: the victim already stopping
+	// for `req` (pendingHandoffs) plus every probe victimFor still lets it stop. So
+	// estimate + extra - freed + cost <= budget. A preemption runs only when this holds with
+	// extra = 0, and a reservation is refused during a hold only when it would make this fail.
+	private identifyRoom(
+		req: ProbeRequest,
+		cost: number,
+		extra: number,
+		budget: number,
+	): boolean {
+		if (!Number.isFinite(budget) || !Number.isFinite(cost)) return false
+		const stopping = this.pendingHandoffs.get(req)
+		let freed = 0
+		for (const r of this.records.values())
+			if (r.state === "stopping") {
+				if (r.probeId === stopping) freed += r.cores
+			} else if (this.victimFor(req, r, null) !== null) freed += r.cores
+		return this.estimatedCores() + extra - freed + cost <= budget + 1e-9
+	}
+
+	// Whether preemptFor may stop `r` for `req`: null when not, else whether the freed slot is
+	// reserved for `req`. A held recorded call (`following` with `record`) is never stopped, for any
+	// requester, identify included: identify never stops a recording.
+	private victimFor(
+		req: ProbeRequest,
+		r: ProbeRecord,
+		kinds: ReadonlySet<TransportStrategy["kind"]> | null,
+	): { reserve: boolean } | null {
+		if (r.state === "stopping" || isIdentifyPriority(r.req.priority))
+			return null
+		if (r.state === "following" && r.req.record) return null
+		const runningMs =
+			r.turnStartedAt === null ? 0 : this.now() - r.turnStartedAt
+		const capped =
+			r.turnStartedAt !== null && runningMs >= JOB_PROBE_TURN_CAP_MS
+		if (!this.isStrong(req, r))
+			this.freshStrongHolders.get(req)?.delete(r.probeId)
+		const strongPreemption =
+			req.priority === r.req.priority &&
+			this.freshStrongHolders.get(req)?.has(r.probeId) === true &&
+			this.isStrong(req, r) &&
+			r.turnStartedAt !== null &&
+			runningMs >= JOB_PROBE_MIN_RUN_MS
+		if (
+			req.priority < 101 &&
+			!capped &&
+			!strongPreemption &&
+			(req.priority <= r.req.priority ||
+				this.queue[0] !== req ||
+				(this.queuedRounds.get(req) ?? 0) >
+					(this.serviceRounds.get(this.candidateKey(r.req)) ?? 0))
+		)
+			return null
+		if (r.req.replay !== undefined) return null
+		// A max-probes deferral frees a slot only on a full transport the request could use.
+		if (kinds && !kinds.has(r.transport.kind)) return null
+		return {
+			reserve:
+				isIdentifyPriority(req.priority) || (!capped && strongPreemption),
+		}
+	}
+
 	// WG11 review M1: a replay request never preempts (its single slot is held by another replay, which
 	// ends by itself faster than real time), and a live request never preempts a replay probe (a lost
 	// replay trial would cascade back into the queue's retries). Live requests preempt live probes only.
+	// True when it stopped a victim this call.
 	private preemptFor(
 		req: ProbeRequest,
 		kinds: ReadonlySet<TransportStrategy["kind"]> | null,
-	): void {
-		if (req.replay !== undefined) return
+	): boolean {
+		if (req.replay !== undefined) return false
 		const pending = this.pendingHandoffs.get(req)
-		if (pending && this.records.has(pending)) return
+		if (pending && this.records.has(pending)) return false
 		// A teardown already in flight may supply this slot, including a handoff
 		// whose original waiter closed. Wait for admission to retry after cleanup.
 		if (
@@ -1336,58 +1625,30 @@ export class ProbePool extends EventEmitter {
 					(!kinds || kinds.has(r.transport.kind)),
 			)
 		)
-			return
+			return false
 		let victim: ProbeRecord | null = null
 		let reserve = false
 		for (const r of this.records.values()) {
-			if (r.state === "stopping" || r.req.priority > 100) continue
-			const runningMs =
-				r.turnStartedAt === null ? 0 : this.now() - r.turnStartedAt
-			const capped =
-				r.turnStartedAt !== null && runningMs >= JOB_PROBE_TURN_CAP_MS
-			if (!this.isStrong(req, r))
-				this.freshStrongHolders.get(req)?.delete(r.probeId)
-			const strongPreemption =
-				req.priority === r.req.priority &&
-				this.freshStrongHolders.get(req)?.has(r.probeId) === true &&
-				this.isStrong(req, r) &&
-				r.turnStartedAt !== null &&
-				runningMs >= JOB_PROBE_MIN_RUN_MS
-			if (req.priority < 101) {
-				if (r.state === "following" && r.req.record) continue
-				if (
-					!capped &&
-					!strongPreemption &&
-					(req.priority <= r.req.priority ||
-						this.queue[0] !== req ||
-						(this.queuedRounds.get(req) ?? 0) >
-							(this.serviceRounds.get(this.candidateKey(r.req)) ?? 0))
-				)
-					continue
-			}
-
-			if (r.req.replay !== undefined) continue
-			// A max-probes deferral frees a slot only on a full transport the request could use.
-			if (kinds && !kinds.has(r.transport.kind)) continue
-			if (!victim || r.req.priority < victim.req.priority) {
+			const v = this.victimFor(req, r, kinds)
+			if (v && (!victim || r.req.priority < victim.req.priority)) {
 				victim = r
-				reserve = req.priority > 100 || (!capped && strongPreemption)
+				reserve = v.reserve
 			}
 		}
-		if (victim) {
-			const original = victim
-			this.pendingHandoffs.set(req, original.probeId)
-			if (reserve) this.reserved.add(req)
-			void this.stopProbe(original, "preempted").catch((err: unknown) => {
-				this.cleanupFailed = true
-				this.retainedCleanup.add(original)
-				this.sealAdmission()
-				this.log.warn(
-					{ err, probeId: original.probeId },
-					"Preempted probe cleanup failed",
-				)
-			})
-		}
+		if (!victim) return false
+		const original = victim
+		this.pendingHandoffs.set(req, original.probeId)
+		if (reserve) this.reserved.add(req)
+		void this.stopProbe(original, "preempted").catch((err: unknown) => {
+			this.cleanupFailed = true
+			this.retainedCleanup.add(original)
+			this.sealAdmission()
+			this.log.warn(
+				{ err, probeId: original.probeId },
+				"Preempted probe cleanup failed",
+			)
+		})
+		return true
 	}
 
 	/** A queued request's context now: a replay's from its capture, a live one's from its current engine. */
@@ -1415,7 +1676,8 @@ export class ProbePool extends EventEmitter {
 		if (this.destroyed) return
 		for (const req of [...this.queue].sort(
 			(a, b) =>
-				Number(b.priority > 100) - Number(a.priority > 100) ||
+				Number(isIdentifyPriority(b.priority)) -
+					Number(isIdentifyPriority(a.priority)) ||
 				Number(this.reserved.has(b)) - Number(this.reserved.has(a)),
 		)) {
 			if (this.destroyed) return
@@ -1437,12 +1699,9 @@ export class ProbePool extends EventEmitter {
 				if (
 					pick.deferred === "max-probes" ||
 					pick.deferred === "budget" ||
-					(pick.deferred === "cpu" && req.priority > 100)
+					(pick.deferred === "cpu" && isIdentifyPriority(req.priority))
 				)
-					this.preemptFor(
-						req,
-						pick.deferred === "max-probes" ? this.fullKinds(first, ctx) : null,
-					)
+					this.preemptDeferred(req, pick.deferred, first, ctx)
 				continue
 			}
 			if (this.destroyed) return

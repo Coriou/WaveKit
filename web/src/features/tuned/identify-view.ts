@@ -5,6 +5,7 @@ import type {
 	ScannerIdentifyMeasurements,
 	ScannerIdentifyResult,
 	ScannerIdentifyTrial,
+	ScannerIdentifyTrialBudget,
 	ScannerProtocol,
 	ScannerClass,
 	ScannerTrialOutcome,
@@ -273,6 +274,32 @@ const REASON: Readonly<
 	"decoder-unavailable": "decoder could not start",
 	"no-live-audio": "live audio was not on it",
 	"adsb-window": "only ADS-B decodes 1089 to 1091 MHz",
+	"slot-busy": "another probe held the slot",
+	"cpu-budget": "no CPU budget left",
+	"slot-still-freeing": "the probe slot did not free in time",
+}
+
+/**
+ * "no CPU budget left: recordings and analog trials 0.43 of 1 core", naming the largest holder of
+ * the budget. A split with a missing, non-finite or negative field reads as the plain label.
+ */
+function budgetWhy(budget: ScannerIdentifyTrialBudget): string {
+	const fields = [
+		budget.budgetCores,
+		budget.enginesCores,
+		budget.probesCores,
+		budget.recordingsCores,
+	]
+	if (!fields.every(v => Number.isFinite(v) && v >= 0))
+		return REASON["cpu-budget"]
+	const holders: [string, number][] = [
+		["recordings and analog trials", budget.recordingsCores],
+		["probes", budget.probesCores],
+		["engines", budget.enginesCores],
+	]
+	const [name, cores] = holders.reduce((a, b) => (b[1] > a[1] ? b : a))
+	const total = Number(budget.budgetCores.toFixed(2))
+	return `${REASON["cpu-budget"]}: ${name} ${cores.toFixed(2)} of ${total} ${total === 1 ? "core" : "cores"}`
 }
 
 export function trialRow(
@@ -291,7 +318,12 @@ export function trialRow(
 				? `${named ?? "decoder"} from capture`
 				: (named ?? "no decoder")
 	const word = WORD[trial.outcome]
-	const why = trial.reason ? REASON[trial.reason] : null
+	const why =
+		trial.reason === "cpu-budget" && trial.budget
+			? budgetWhy(trial.budget)
+			: trial.reason
+				? REASON[trial.reason]
+				: null
 	return {
 		key: `${index}-${trial.protocol}-${trial.mode ?? ""}`,
 		protocol,

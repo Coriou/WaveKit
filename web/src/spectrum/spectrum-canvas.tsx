@@ -35,6 +35,8 @@ export interface SpectrumCanvasProps {
 	onStatus?: (status: SpectrumEngineStatus) => void
 	/** Covered by an opaque view: stop drawing, keep the waterfall history. */
 	paused?: boolean
+	/** The receiver of `sourceId` is paused: no frames are due, so the stream is not resubscribed until it resumes. */
+	sourcePaused?: boolean
 	/** Filled with the engine's level probe while mounted (hover readout); null otherwise. */
 	probeRef?: RefObject<SpectrumProbe | null>
 	className?: string
@@ -199,6 +201,11 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 	useEffect(() => {
 		engineRef.current?.setPaused(paused)
 	}, [paused])
+
+	const sourcePaused = props.sourcePaused ?? false
+	useEffect(() => {
+		engineRef.current?.setSourcePaused(sourcePaused)
+	}, [sourcePaused])
 
 	const { ramp } = props
 	useEffect(() => {

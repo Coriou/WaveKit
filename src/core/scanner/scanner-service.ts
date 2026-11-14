@@ -84,7 +84,10 @@ import type {
 	ScannerRecordingDeleter,
 } from "../recordings/contract.js"
 import { createScannerRecordingDeleter } from "./recording-delete.js"
-import { holdsKeptWithAliases } from "./recording-aliases.js"
+import {
+	holdsKeptWithAliases,
+	recordingFolderDiscovery,
+} from "./recording-aliases.js"
 import type { SourceCaps } from "../../config.js"
 import type { DecoderConfig } from "../../decoders/types.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -156,6 +159,7 @@ import type {
 } from "./scanner-redesign-contract.js"
 import { replayMissEligible } from "../iq-capture/replay-miss.js"
 import { createKnownProtocolMemory } from "./known-protocol.js"
+import { digitalClass, ownerDecoded } from "./channel/voice-veto.js"
 import { narrowRasterAt } from "./narrow-digital.js"
 import { planReplayTrials } from "./replay-plan.js"
 import { TrialMemory, type TrialMemoryEntry } from "./trial-memory.js"
@@ -1603,6 +1607,9 @@ export class ScannerService extends EventEmitter {
 				// Recordings share the probes' and live audio's CPU budget (cpuBudgetCores).
 				reserveCores: cores => this.probes.reserveExternal(cores),
 				tuningRefused: sourceId => this.tuningRefused(sourceId, "recording"),
+				// The decoded label (and its decode's time) of a discovery, or of the live one it
+				// was merged into.
+				decodedLabel: discoveryId => ownerDecoded(this.store, discoveryId),
 				logger: deps.logger,
 				now: this.now,
 			})
@@ -2300,7 +2307,9 @@ export class ScannerService extends EventEmitter {
 				cpuBudgetCores: s.cpuBudgetCores,
 				cpuCoresInUse:
 					this.spectrum.sourceIds().length * CPU_COST.engine +
-					probes.reduce((sum, p) => sum + p.cores, 0),
+					probes.reduce((sum, p) => sum + p.cores, 0) +
+					// Recordings and analog trials hold cores in the same budget (reserveExternal).
+					this.probes.externalCoresInUse(),
 				maxProbes: { offset: s.maxProbes.offset, channel: s.maxProbes.channel },
 				probesInUse: {
 					offset: probes.filter(p => p.transport === "offset").length,
@@ -2942,6 +2951,17 @@ export class ScannerService extends EventEmitter {
 
 	getDiscovery(id: string): Discovery | undefined {
 		const d = this.store.get(id)
+		return d ? { ...d, ...this.storeMeta() } : undefined
+	}
+
+	/**
+	 * Requirement 3: the live discovery whose recordings `folderId`'s folder holds, resolved through
+	 * merge aliases (recordingFolderDiscovery), so a recording made under a discovery merged since
+	 * carries its owner's frequency. Undefined for a folder no live discovery owns. The recordings
+	 * inventory's `discoveryCentreHz` reads this, not getDiscovery (which answers live ids only).
+	 */
+	recordingFolderDiscovery(folderId: string): Discovery | undefined {
+		const d = recordingFolderDiscovery(this.store, folderId)
 		return d ? { ...d, ...this.storeMeta() } : undefined
 	}
 
@@ -3866,6 +3886,7 @@ export class ScannerService extends EventEmitter {
 			{
 				analogFm: live.classification.class === "analog-fm",
 				nonAnalog: definitelyNotAnalogFm(live),
+				digitalClass: digitalClass(live.classification.class),
 				discoveryId: this.store.discoveryIdOf(live.observationId) ?? null,
 				// Encrypted evidence may arrive after the last update: vetoed here too.
 				encrypted: live.encrypted,
@@ -4132,6 +4153,7 @@ export class ScannerService extends EventEmitter {
 			this.widebandAnalog.keepsOverArtefact(live.observationId, track, {
 				analogFm: live.classification.class === "analog-fm",
 				nonAnalog: definitelyNotAnalogFm(live),
+				digitalClass: digitalClass(live.classification.class),
 				encrypted: live.encrypted,
 				recordAllowed: this.widebandRecordAllowed(live),
 			})
@@ -4268,6 +4290,7 @@ export class ScannerService extends EventEmitter {
 			track,
 			analogFm,
 			nonAnalog: definitelyNotAnalogFm(live),
+			digitalClass: digitalClass(live.classification.class),
 			// A spectral class other than analog FM alone: its shadow has the lowest slot priority.
 			spectralDigital:
 				nonAnalogFmClass(live.classification.class) &&
