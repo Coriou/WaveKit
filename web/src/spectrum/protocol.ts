@@ -115,6 +115,17 @@ export type MainToWorker =
 	| { type: "dispose" }
 
 /** The spectrum stream's link changed (worker → main, and on to SpectrumEngine status listeners). */
+/** What draws the spectrum: WebGL2, the 2D-canvas stand-in, or nothing (with the reason). */
+export type RendererKind = "webgl2" | "canvas2d" | "none"
+
+/** The renderer came up, changed or went away (a lost graphics context). */
+export interface RendererMessage {
+	type: "renderer"
+	kind: RendererKind
+	/** Why it is not WebGL2. */
+	reason?: string
+}
+
 export interface ConnectionMessage {
 	type: "connection"
 	state: SpectrumLinkState
@@ -131,6 +142,9 @@ export type WorkerToMain =
 	/** Fallback path only: one decoded row (byte v ↔ v / 2 − 127.5 dBFS), `binCount` bytes used. */
 	| { type: "row"; axis: RowAxis; buffer: ArrayBuffer; binCount: number }
 	| ConnectionMessage
+	| RendererMessage
+	/** Frames taken from the stream and draws made, since the worker started (posted with the meta). */
+	| { type: "stats"; frames: number; draws: number }
 	| { type: "profile"; outcome: string; code?: string; message?: string }
 	| { type: "error"; message: string }
 	/** Answer to a probe: the peak dBFS there, null when no row covers it. */

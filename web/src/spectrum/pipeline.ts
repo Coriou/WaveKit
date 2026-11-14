@@ -74,6 +74,10 @@ export interface PipelineDeps {
 	timers: TimerApi
 }
 
+/** Said when the spectrum is drawn without WebGL2. */
+export const NO_WEBGL2_REASON =
+	"Graphics acceleration is off in this browser (WebGL2 is unavailable)"
+
 /** Track peaks are rounded to this many dB so the labels anchored on them do not jitter. */
 const TRACK_PEAK_STEP_DB = 3
 
@@ -135,6 +139,9 @@ export class SpectrumPipeline {
 	private offscreen = false
 	/** The task that starts the renderer; null once it ran or was cancelled. */
 	private attachTimer: unknown = null
+	/** Frames taken into the history, and draws made (the health readout). */
+	private frames = 0
+	private draws = 0
 	/** The transferred canvas whose renderer has not started yet. */
 	private pendingCanvas: OffscreenCanvas | null = null
 	/** The next frame's meta goes out at once (first frame after a reset). */
@@ -155,11 +162,13 @@ export class SpectrumPipeline {
 		this.deps = deps
 		this.meta = new Throttle(
 			META_INTERVAL_MS,
-			frame =>
+			frame => {
 				deps.post({
 					type: "meta",
 					meta: frameMeta(frame, this.history?.row(0) ?? null),
-				}),
+				})
+				deps.post({ type: "stats", frames: this.frames, draws: this.draws })
+			},
 			deps.timers,
 		)
 	}
@@ -255,6 +264,18 @@ export class SpectrumPipeline {
 			return
 		}
 		this.onFrame(msg.data)
+	}
+
+	/** The graphics context was lost: nothing can draw until the browser restores it (rebuild). */
+	contextLost(): void {
+		this.renderer = null
+		this.scene = null
+		this.deps.post({
+			type: "renderer",
+			kind: "none",
+			reason:
+				"The graphics context was lost · waiting for the browser to restore it",
+		})
 	}
 
 	/** A new renderer (the first one, or after a restored context) gets the ramp and the whole history. */
@@ -374,11 +395,26 @@ export class SpectrumPipeline {
 				type: "error",
 				message: "WebGL2 is unavailable on the OffscreenCanvas",
 			})
+			this.deps.post({
+				type: "renderer",
+				kind: "none",
+				reason: "This browser gave the spectrum no graphics context",
+			})
 			return
 		}
 		this.renderer = renderer
+		const kind = renderer.kind ?? "webgl2"
+		this.deps.post(
+			kind === "webgl2"
+				? { type: "renderer", kind }
+				: { type: "renderer", kind, reason: NO_WEBGL2_REASON },
+		)
 		this.scheduler ??= new RenderScheduler(
-			() => this.scene?.render(),
+			() => {
+				if (!this.scene) return
+				this.scene.render()
+				this.draws++
+			},
 			this.deps.frame.request,
 			this.deps.frame.cancel,
 		)
@@ -455,6 +491,7 @@ export class SpectrumPipeline {
 		}
 		const count = Math.min(n, frame.binCount)
 		history.commit()
+		this.frames++
 		this.newestAt = Number.isFinite(at) ? at : null
 		if (this.scene) {
 			this.scene.addRow(axis, slot, count)

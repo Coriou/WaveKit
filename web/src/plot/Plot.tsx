@@ -224,6 +224,13 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	const bins = fftBins(device.fftSize, binsMax)
 	useEffect(() => autoLevelsNow.set(autoScale), [autoScale])
 	const [engineError, setEngineError] = useState<string | null>(null)
+	// what draws the spectrum: without WebGL2 it draws in basic mode and says so; with nothing, why
+	const [graphics, setGraphics] = useState<{
+		kind: "webgl2" | "canvas2d" | "none"
+		reason: string | null
+	} | null>(null)
+	// bumped when WebGL2 is back: the canvas remounts and draws with it
+	const [graphicsRun, setGraphicsRun] = useState(0)
 	// the spectrum stream's link: a note while it reconnects or cannot reach the core, the reason
 	// when it failed (this browser is no longer signed in)
 	const [link, setLink] = useState<{
@@ -439,6 +446,11 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 	}
 	const onStatus = (status: SpectrumEngineStatus) => {
 		if (status.type === "error") setEngineError(status.message)
+		if (status.type === "renderer") {
+			setGraphics({ kind: status.kind, reason: status.reason ?? null })
+			// a renderer is up (again): what an earlier one failed on no longer holds
+			if (status.kind !== "none") setEngineError(null)
+		}
 		if (status.type === "connection")
 			setLink({
 				state: status.state,
@@ -500,7 +512,8 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 				aria-label={ariaLabel}
 			>
 				<SpectrumCanvas
-					key={bins}
+					key={`${bins}:${graphicsRun}`}
+					onWebglBack={() => setGraphicsRun(n => n + 1)}
 					sourceId={sourceId}
 					hz={SPECTRUM_HZ}
 					bins={bins}
@@ -555,6 +568,15 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 							data-unverified={unverified ? "" : undefined}
 						>
 							<FreqAxis view={view} widthPx={size.w} />
+							{graphics?.kind === "canvas2d" && (
+								<span
+									className="wk-plot-chip wk-plot-basic"
+									role="status"
+									title="This browser gave the spectrum no WebGL2, so it is drawn with a plain 2D canvas. In Chrome, chrome://gpu says why; restarting the browser usually turns graphics acceleration back on."
+								>
+									Graphics acceleration is off · basic mode
+								</span>
+							)}
 							{unverified && (
 								<span
 									className="wk-plot-chip wk-plot-unverified"
@@ -674,6 +696,14 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 						{engineError}
 					</div>
 				)}
+				{graphics?.kind === "none" &&
+					graphics.reason !== null &&
+					engineError === null &&
+					sourceId !== null && (
+						<div className="wk-plot-note" role="status">
+							{graphics.reason}
+						</div>
+					)}
 				{starting &&
 					linkNote === null &&
 					engineError === null &&

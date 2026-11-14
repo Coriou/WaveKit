@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+	NO_WEBGL2_REASON,
 	RENDERER_FALLBACK_MS,
 	SpectrumPipeline,
 } from "../../src/spectrum/pipeline.ts"
@@ -395,5 +396,70 @@ describe("SpectrumPipeline: the stream does not wait for the renderer", () => {
 			t.timers.advance(10 * RENDERER_FALLBACK_MS)
 			expect(t.widths).toEqual([])
 		}
+	})
+})
+
+describe("SpectrumPipeline: what draws, and how much", () => {
+	const rendererNotes = (t: ReturnType<typeof setup>) =>
+		t.ofType("renderer").map(m => ({ kind: m.kind, reason: m.reason }))
+
+	it("says WebGL2 once its renderer is up", () => {
+		const t = setup(true, MAX_BINS, false)
+		t.handlers()?.opened?.()
+		t.timers.advance(0)
+		expect(rendererNotes(t)).toEqual([{ kind: "webgl2", reason: undefined }])
+	})
+
+	it("says basic mode, with the reason, when the renderer is the 2D stand-in", () => {
+		const t = setup(true, MAX_BINS, false)
+		;(t.renderer as { kind?: string }).kind = "canvas2d"
+		t.handlers()?.opened?.()
+		t.timers.advance(0)
+		expect(rendererNotes(t)).toEqual([
+			{ kind: "canvas2d", reason: NO_WEBGL2_REASON },
+		])
+		expect(t.pipeline.rendering).toBe(true)
+	})
+
+	it("says so when the graphics context is lost, and again when it is back", () => {
+		const t = setup(true)
+		t.pipeline.contextLost()
+		expect(t.pipeline.rendering).toBe(false)
+		expect(rendererNotes(t)).toEqual([
+			{
+				kind: "none",
+				reason:
+					"The graphics context was lost · waiting for the browser to restore it",
+			},
+		])
+		// rows keep landing in the history meanwhile
+		t.pipeline.onServer({
+			type: "spectrum:frame",
+			data: frame({ bytes: [7, 0, 0, 0] }),
+		})
+		t.posted.length = 0
+		t.pipeline.rebuild({} as OffscreenCanvas)
+		expect(rendererNotes(t)).toEqual([{ kind: "webgl2", reason: undefined }])
+		expect(t.pipeline.rendering).toBe(true)
+		expect(t.renderer.rows.at(-1)?.first).toBe(7)
+	})
+
+	it("counts the frames taken and the draws made", () => {
+		const t = setup(true)
+		for (let i = 0; i < 3; i++)
+			t.pipeline.onServer({
+				type: "spectrum:frame",
+				data: frame({
+					bytes: [i, 0, 0, 0],
+					at: new Date(1_700_000_000_000 + i * 50).toISOString(),
+				}),
+			})
+		t.frames.tick()
+		t.timers.advance(1000)
+		expect(t.ofType("stats").at(-1)).toEqual({
+			type: "stats",
+			frames: 3,
+			draws: 1,
+		})
 	})
 })

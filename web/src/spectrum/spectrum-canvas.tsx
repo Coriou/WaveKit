@@ -1,5 +1,10 @@
 import { useEffect, useRef, type RefObject } from "react"
-import { SpectrumEngine, type SpectrumEngineStatus } from "./engine.ts"
+import {
+	SpectrumEngine,
+	webgl2AvailableNow,
+	type SpectrumEngineStatus,
+	type SpectrumHealth,
+} from "./engine.ts"
 import type {
 	SpectrumFrameMeta,
 	SpectrumLayout,
@@ -42,6 +47,11 @@ export interface SpectrumCanvasProps {
 	 * kicks the stream, which resubscribes at once unless live frames are arriving.
 	 */
 	resync?: string
+	/**
+	 * The plot draws without WebGL2 and the browser has it again (the tab came back into view):
+	 * remount the canvas (a new `key`) to draw with it.
+	 */
+	onWebglBack?: () => void
 	/** Filled with the engine's level probe while mounted (hover readout); null otherwise. */
 	probeRef?: RefObject<SpectrumProbe | null>
 	className?: string
@@ -52,6 +62,11 @@ export type SpectrumProbe = (
 	startHz: number,
 	endHz: number,
 ) => Promise<number | null>
+
+/** The page's debugging handle. */
+interface WaveKitWindow {
+	__wavekit?: { spectrumHealth?: () => SpectrumHealth }
+}
 
 const fill = { position: "relative", width: "100%", height: "100%" } as const
 const THEME_ATTRIBUTES = [
@@ -134,11 +149,20 @@ export function SpectrumCanvas(props: SpectrumCanvasProps) {
 
 		// A hidden tab may have had its socket closed or its timers held back: check at once on return.
 		const onVisible = () => {
-			if (document.visibilityState === "visible") engine.kick()
+			if (document.visibilityState !== "visible") return
+			engine.kick()
+			// graphics acceleration may be back: draw with WebGL2 again
+			if (engine.health().rendererKind !== "webgl2" && webgl2AvailableNow())
+				propsRef.current.onWebglBack?.()
 		}
 		document.addEventListener("visibilitychange", onVisible)
+		// for a person or an agent looking at an empty plot: window.__wavekit.spectrumHealth()
+		const debug = ((window as WaveKitWindow).__wavekit ??= {})
+		const health = (): SpectrumHealth => engine.health()
+		debug.spectrumHealth = health
 
 		return () => {
+			if (debug.spectrumHealth === health) delete debug.spectrumHealth
 			document.removeEventListener("visibilitychange", onVisible)
 			observer.disconnect()
 			themeObserver.disconnect()

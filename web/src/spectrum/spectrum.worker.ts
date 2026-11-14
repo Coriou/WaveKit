@@ -3,6 +3,7 @@
  * and WebGL2 drawing on a transferred OffscreenCanvas (or decoded rows posted back as a fallback).
  */
 
+import { Canvas2dRenderer } from "./canvas2d-renderer.ts"
 import { SpectrumPipeline } from "./pipeline.ts"
 import type { MainToWorker, WorkerToMain } from "./protocol.ts"
 import { CONTEXT_OPTIONS, SpectrumRenderer } from "./renderer.ts"
@@ -22,7 +23,17 @@ const pipeline = new SpectrumPipeline({
 	openSocket: (url, handlers) => new SpectrumSocket(url, handlers),
 	createRenderer: (canvas, texWidth, depth) => {
 		const gl = canvas.getContext("webgl2", CONTEXT_OPTIONS)
-		return gl ? new SpectrumRenderer(gl, texWidth, depth) : null
+		if (gl) return new SpectrumRenderer(gl, texWidth, depth)
+		// no WebGL2 here after all (the page's probe had one): the 2D stand-in on the same canvas
+		const ctx = canvas.getContext("2d")
+		const buffer = new OffscreenCanvas(1, 1)
+		const bufferCtx = buffer.getContext("2d")
+		return ctx && bufferCtx
+			? new Canvas2dRenderer(ctx, texWidth, depth, {
+					canvas: buffer,
+					ctx: bufferCtx,
+				})
+			: null
 	},
 	frame: animationFrame(),
 	timers: realTimers,
@@ -32,7 +43,10 @@ scope.onmessage = event => {
 	const msg = event.data
 	if (msg.type === "init" && msg.canvas) {
 		const canvas = msg.canvas
-		canvas.addEventListener("webglcontextlost", e => e.preventDefault())
+		canvas.addEventListener("webglcontextlost", e => {
+			e.preventDefault()
+			pipeline.contextLost()
+		})
 		canvas.addEventListener("webglcontextrestored", () =>
 			pipeline.rebuild(canvas),
 		)

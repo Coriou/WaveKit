@@ -34,6 +34,8 @@ export interface DrawParams {
 
 /** What SpectrumScene needs from a renderer (a fake in unit tests). */
 export interface SceneRenderer {
+	/** How it draws (absent on test fakes, read as webgl2). */
+	readonly kind?: "webgl2" | "canvas2d"
 	resize(widthPx: number, heightPx: number): void
 	uploadRow(index: number, row: Uint8Array, count: number): void
 	uploadPeak(row: Uint8Array, count: number): void
@@ -231,6 +233,7 @@ type Uniforms = Record<
 >
 
 export class SpectrumRenderer implements SceneRenderer {
+	readonly kind = "webgl2"
 	private readonly gl: WebGL2RenderingContext
 	private readonly program: WebGLProgram
 	private readonly vao: WebGLVertexArrayObject

@@ -212,6 +212,17 @@
 		background: var(--wk-accent);
 		color: var(--wk-on-accent);
 	}
+	/* drawn without WebGL2 (Plot.tsx): on the axis band's left, the unverified chip keeps the right */
+	.wk-plot-basic {
+		left: 8px;
+		display: flex;
+		align-items: center;
+		padding: 0 7px;
+		background: var(--wk-amber-fill);
+		box-shadow: inset 0 0 0 1px rgba(var(--wk-amber-rgb), 0.32);
+		color: var(--wk-amber);
+		pointer-events: auto;
+	}
 	.wk-plot-unverified {
 		right: 8px;
 		display: flex;

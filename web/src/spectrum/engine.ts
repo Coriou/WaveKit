@@ -15,13 +15,22 @@ import {
 	type SpectrumLayout,
 	type SpectrumLevels,
 	type ConnectionMessage,
+	type RendererKind,
+	type RendererMessage,
+	type SpectrumLinkState,
 	type SpectrumSize,
 	type SpectrumSubscription,
 	type SpectrumViewSpan,
 	type WorkerToMain,
 } from "./protocol.ts"
 import { DEFAULT_THEME, matchAccentRamp } from "./ramp.ts"
-import { CONTEXT_OPTIONS, SpectrumRenderer } from "./renderer.ts"
+import { Canvas2dRenderer } from "./canvas2d-renderer.ts"
+import { NO_WEBGL2_REASON } from "./pipeline.ts"
+import {
+	CONTEXT_OPTIONS,
+	SpectrumRenderer,
+	type SceneRenderer,
+} from "./renderer.ts"
 import { SpectrumScene } from "./scene.ts"
 import { RenderScheduler, animationFrame } from "./schedule.ts"
 import { wsUrlFrom } from "./socket.ts"
@@ -41,8 +50,29 @@ export interface SpectrumEngineOptions {
 	forceMainThread?: boolean
 }
 
+/**
+ * What the spectrum is doing, for a person or an agent looking at an empty plot
+ * (`window.__wavekit.spectrumHealth()`).
+ */
+export interface SpectrumHealth {
+	/** What draws: WebGL2, the 2D-canvas stand-in (no graphics acceleration), or nothing. */
+	rendererKind: RendererKind
+	/** Where it draws: the spectrum worker (a transferred canvas) or the page. */
+	rendererThread: "worker" | "main"
+	/** Why the renderer is not WebGL2; null when it is. */
+	reason: string | null
+	/** Frames taken from the stream, and draws made, since the plot was mounted. */
+	framesReceived: number
+	framesDrawn: number
+	/** The stream's link: connecting, live, reconnecting or failed. */
+	link: SpectrumLinkState
+	/** The last error the engine reported; null when none. */
+	lastError: string | null
+}
+
 export type SpectrumEngineStatus =
 	| ConnectionMessage
+	| RendererMessage
 	| { type: "reset"; reason: ResetReason }
 	| { type: "profile"; outcome: string; code?: string; message?: string }
 	| { type: "error"; message: string }
@@ -71,6 +101,23 @@ export function supportsOffscreenWebgl2(): boolean {
 	return offscreenWebgl2
 }
 
+/**
+ * Whether a WebGL2 context can be had right now, asked afresh (a browser turns graphics
+ * acceleration off after GPU crashes and back on later). True also forgets the cached probe, so
+ * the next engine draws with WebGL2 again.
+ */
+export function webgl2AvailableNow(): boolean {
+	try {
+		const gl = document.createElement("canvas").getContext("webgl2")
+		if (!gl) return false
+		gl.getExtension("WEBGL_lose_context")?.loseContext()
+		offscreenWebgl2 = null
+		return true
+	} catch {
+		return false
+	}
+}
+
 export class SpectrumEngine {
 	/** "offscreen": the worker draws; "main": this thread draws; "none": no WebGL2 at all. */
 	readonly mode: "offscreen" | "main" | "none"
@@ -81,7 +128,13 @@ export class SpectrumEngine {
 		(status: SpectrumEngineStatus) => void
 	>()
 	private scene: SpectrumScene | null = null
-	private renderer: SpectrumRenderer | null = null
+	private renderer: SceneRenderer | null = null
+	private rendererKind: RendererKind = "none"
+	private rendererReason: string | null = "The renderer is starting"
+	private frames = 0
+	private draws = 0
+	private link: SpectrumLinkState = "connecting"
+	private lastError: string | null = null
 	private scheduler: RenderScheduler | null = null
 	private layout: SpectrumLayout
 	private latestMeta: SpectrumFrameMeta | null = null
@@ -127,13 +180,37 @@ export class SpectrumEngine {
 			this.post({ ...base, canvas: offscreen }, [offscreen])
 			return
 		}
+		// No OffscreenCanvas WebGL2: draw here, with WebGL2 if this thread has it, else with a 2D canvas
+		// (graphics acceleration off or blocked: the trace and the waterfall still draw, in basic mode).
 		const gl = canvas.getContext("webgl2", CONTEXT_OPTIONS)
-		this.mode = gl ? "main" : "none"
-		if (gl) {
-			const renderer = new SpectrumRenderer(gl, texWidth, historyRows)
+		let renderer: SceneRenderer | null = null
+		if (gl) renderer = new SpectrumRenderer(gl, texWidth, historyRows)
+		else {
+			const ctx = canvas.getContext("2d")
+			const buffer = document.createElement("canvas")
+			const bufferCtx = buffer.getContext("2d")
+			if (ctx && bufferCtx)
+				renderer = new Canvas2dRenderer(ctx, texWidth, historyRows, {
+					canvas: buffer,
+					ctx: bufferCtx,
+				})
+		}
+		this.mode = renderer ? "main" : "none"
+		this.rendererKind = renderer?.kind ?? "none"
+		this.rendererReason =
+			this.rendererKind === "webgl2"
+				? null
+				: this.rendererKind === "canvas2d"
+					? NO_WEBGL2_REASON
+					: "This browser gave the spectrum no graphics context (no WebGL2, no 2D canvas)"
+		if (renderer) {
 			const frame = animationFrame()
 			const scheduler = new RenderScheduler(
-				() => this.scene?.render(),
+				() => {
+					if (!this.scene) return
+					this.scene.render()
+					this.draws++
+				},
 				frame.request,
 				frame.cancel,
 			)
@@ -150,9 +227,7 @@ export class SpectrumEngine {
 				},
 			})
 			this.scene.setRamp(ramp)
-		} else {
-			this.emitStatus({ type: "error", message: "WebGL2 is unavailable" })
-		}
+		} else this.lastError = this.rendererReason
 		this.post(base)
 	}
 
@@ -233,10 +308,37 @@ export class SpectrumEngine {
 		return () => this.metaListeners.delete(cb)
 	}
 
-	/** Connection, reset, profile outcome and error notices. Returns an unsubscribe function. */
+	/**
+	 * Connection, renderer, reset, profile outcome and error notices; the renderer's current state
+	 * is told at once. Returns an unsubscribe function.
+	 */
 	onStatus(cb: (status: SpectrumEngineStatus) => void): () => void {
 		this.statusListeners.add(cb)
+		if (this.mode !== "offscreen") cb(this.rendererStatus())
 		return () => this.statusListeners.delete(cb)
+	}
+
+	/** What the spectrum is doing right now. */
+	health(): SpectrumHealth {
+		return {
+			rendererKind: this.rendererKind,
+			rendererThread: this.mode === "offscreen" ? "worker" : "main",
+			reason: this.rendererReason,
+			framesReceived: this.frames,
+			framesDrawn: this.draws,
+			link: this.link,
+			lastError: this.lastError,
+		}
+	}
+
+	private rendererStatus(): RendererMessage {
+		return this.rendererReason === null
+			? { type: "renderer", kind: this.rendererKind }
+			: {
+					type: "renderer",
+					kind: this.rendererKind,
+					reason: this.rendererReason,
+				}
 	}
 
 	dispose(): void {
@@ -267,6 +369,7 @@ export class SpectrumEngine {
 				for (const cb of this.metaListeners) cb(msg.meta)
 				return
 			case "row":
+				this.frames++
 				this.scene?.addRow(
 					msg.axis,
 					new Uint8Array(msg.buffer, 0, msg.binCount),
@@ -283,9 +386,24 @@ export class SpectrumEngine {
 				this.probes.get(msg.id)?.(msg.db)
 				this.probes.delete(msg.id)
 				return
+			case "stats":
+				this.frames = msg.frames
+				this.draws = msg.draws
+				return
+			case "renderer":
+				this.rendererKind = msg.kind
+				this.rendererReason = msg.reason ?? null
+				this.emitStatus(msg)
+				return
 			case "connection":
-			case "profile":
+				this.link = msg.state
+				this.emitStatus(msg)
+				return
 			case "error":
+				this.lastError = msg.message
+				this.emitStatus(msg)
+				return
+			case "profile":
 				this.emitStatus(msg)
 				return
 		}
