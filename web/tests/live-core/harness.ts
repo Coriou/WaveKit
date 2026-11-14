@@ -71,13 +71,20 @@ export interface FakeRtlTcp {
 	open(): number
 	/** Drops every connection (a receiver restart): the core reconnects by itself. */
 	dropConnections(): void
+	/**
+	 * The share of the commanded rate actually sent (1: all of it). Below 1 the link loses samples,
+	 * as an overloaded receiver host or network does.
+	 */
+	setDelivery(fraction: number): void
+	/** Moves the tone a quarter of the rate above ("upper", the default) or below the centre. */
+	setToneSide(side: "upper" | "lower"): void
 	close(): Promise<void>
 }
 
-function iqBlock(samples: number, phase0: number): Buffer {
+function iqBlock(samples: number, phase0: number, side: 1 | -1 = 1): Buffer {
 	const out = Buffer.alloc(samples * 2)
 	for (let i = 0; i < samples; i++) {
-		const phase = phase0 + (i * Math.PI) / 2
+		const phase = phase0 + (side * i * Math.PI) / 2
 		const noiseI = (Math.random() - 0.5) * 12
 		const noiseQ = (Math.random() - 0.5) * 12
 		out[2 * i] = Math.max(
@@ -92,15 +99,20 @@ function iqBlock(samples: number, phase0: number): Buffer {
 	return out
 }
 
-export async function startFakeRtlTcp(): Promise<FakeRtlTcp> {
+export async function startFakeRtlTcp(
+	initialRate: number = RATE,
+): Promise<FakeRtlTcp> {
 	let accepted = 0
+	let delivery = 1
 	const sockets = new Set<net.Socket>()
 	// One pre-built second of samples, cycled: the tone's phase is continuous at the block edges.
-	const second = iqBlock(4_000_000 / 2, 0)
+	const upper = iqBlock(4_000_000 / 2, 0)
+	const lower = iqBlock(4_000_000 / 2, 0, -1)
+	let second = upper
 	const server = net.createServer(socket => {
 		accepted++
 		sockets.add(socket)
-		let rate = RATE
+		let rate = initialRate
 		let offset = 0
 		let pending = Buffer.alloc(0)
 		socket.on("error", () => undefined)
@@ -123,7 +135,7 @@ export async function startFakeRtlTcp(): Promise<FakeRtlTcp> {
 		const timer = setInterval(() => {
 			if (socket.destroyed || !socket.writable) return
 			const now = Date.now()
-			const bytes = Math.floor(((now - last) * rate) / 1000) * 2
+			const bytes = Math.floor(((now - last) * rate * delivery) / 1000) * 2
 			last = now
 			if (bytes <= 0 || socket.writableLength > 4 * rate) return
 			let left = bytes
@@ -148,6 +160,12 @@ export async function startFakeRtlTcp(): Promise<FakeRtlTcp> {
 		open: () => sockets.size,
 		dropConnections: () => {
 			for (const s of sockets) s.destroy()
+		},
+		setToneSide: side => {
+			second = side === "upper" ? upper : lower
+		},
+		setDelivery: fraction => {
+			delivery = Math.max(0, Math.min(1, fraction))
 		},
 		close: () =>
 			new Promise<void>(resolve => {
@@ -369,6 +387,8 @@ export interface RealCoreOptions {
 	 * sends that. get(), post() and subscribers() then carry the machine token. Default: legacy.
 	 */
 	protectedOrigins?: readonly string[]
+	/** The source's sample rate (U8 IQ). Default RATE. */
+	sampleRate?: number
 }
 
 export async function startRealCore(
@@ -387,7 +407,7 @@ export async function startRealCore(
 		process.off("exit", removeRoot)
 	}
 	try {
-		upstream = await startFakeRtlTcp()
+		upstream = await startFakeRtlTcp(options.sampleRate ?? RATE)
 		return await launch(root, upstream, options, cleanup)
 	} catch (err) {
 		await cleanup()
@@ -445,7 +465,7 @@ async function launch(
 					caps: {
 						kind: "iq",
 						format: "U8_IQ",
-						sampleRate: RATE,
+						sampleRate: options.sampleRate ?? RATE,
 						centerFreq: CENTRE_HZ,
 						exclusive: false,
 					},

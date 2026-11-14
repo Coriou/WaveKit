@@ -265,6 +265,74 @@ async function waterfall(page: Page): Promise<Float64Array> {
 	return pngLuma(png).luma
 }
 
+/** A screenshot of a horizontal band of the plot canvas (fractions of its height), as luminance. */
+async function plotBand(
+	page: Page,
+	from: number,
+	to: number,
+): Promise<{ width: number; height: number; luma: Float64Array }> {
+	const box = await page.locator(".wk-plot-body canvas").first().boundingBox()
+	if (!box) throw new Error("no plot canvas")
+	return pngLuma(
+		await page.screenshot({
+			clip: {
+				x: box.x,
+				y: box.y + box.height * from,
+				width: box.width,
+				height: box.height * (to - from),
+			},
+		}),
+	)
+}
+
+/**
+ * Whether the spectrum trace is drawn: its light line crosses most of the plot's width (a column
+ * counts when it holds a pixel far lighter than the ground). An empty plot has the grid only.
+ */
+export async function traceDrawn(page: Page): Promise<boolean> {
+	const { width, height, luma } = await plotBand(page, 0.02, 0.45)
+	let lit = 0
+	for (let x = 0; x < width; x++) {
+		let max = 0
+		for (let y = 0; y < height; y++) {
+			const v = luma[y * width + x] ?? 0
+			if (v > max) max = v
+		}
+		if (max > 140) lit++
+	}
+	return lit > width * 0.6
+}
+
+/**
+ * Which side of the centre the waterfall's brightest column is on, in a band of rows under the
+ * newest ones: the side of the test tone. It changes only when rows that arrived after the tone
+ * moved are drawn. The middle (the tuned-frequency marker) and the left edge (the tuned card lies
+ * over it) are left out, so the page needs a viewport at least 1600 px wide.
+ */
+export async function waterfallToneSide(
+	page: Page,
+): Promise<"upper" | "lower" | null> {
+	const { width, height, luma } = await plotBand(page, 0.6, 0.64)
+	let best = -1
+	let bestX = 0
+	let total = 0
+	let columns = 0
+	for (let x = Math.ceil(width * 0.22); x < width; x++) {
+		if (Math.abs(x - width / 2) < width * 0.03) continue
+		let sum = 0
+		for (let y = 0; y < height; y++) sum += luma[y * width + x] ?? 0
+		total += sum
+		columns++
+		if (sum > best) {
+			best = sum
+			bestX = x
+		}
+	}
+	// a flat band has no tone to place
+	if (columns === 0 || best < (total / columns) * 1.5 + height) return null
+	return bestX > width / 2 ? "upper" : "lower"
+}
+
 function stddev(v: Float64Array): number {
 	let sum = 0
 	for (const x of v) sum += x
