@@ -80,6 +80,8 @@ export const RECORDINGS_SETTLE_SLACK_MS = 50
  * RECORDINGS_CATALOGUE_MAX (45 000), so a full catalogue does not re-open them every reconcile.
  */
 export const RECORDINGS_CATALOGUE_REARM = 0.9
+/** While indexing, the oldest are evicted once the catalogue holds 5 % more than its bound. */
+export const RECORDINGS_CATALOGUE_EVICT_SLACK = 1.05
 /**
  * Names read from one folder: twice the entry bound (100 000 by default), so a folder holding
  * every listed recording plus as many other files is still read whole. Past it, `truncated`
@@ -220,7 +222,13 @@ export interface RecordingInventory {
 	ownersChanged?(folderIds: readonly string[]): void
 	/** `recordings:changed` notices (at most one a second); returns the unsubscribe. */
 	onChange?(listener: (e: RecordingsChangedEventData) => void): () => void
-	status?(): { revision: number; indexing: boolean; files: number }
+	/** `refreshing`: an urgent refresh (invalidate, source change, settling file) is running. */
+	status?(): {
+		revision: number
+		indexing: boolean
+		files: number
+		refreshing: boolean
+	}
 }
 
 export class RecordingInventoryError extends WaveKitError {
@@ -304,6 +312,8 @@ interface FolderState {
 	files: Map<string, IndexedEntry>
 	/** In-progress names and when they settle (by the injected clock). */
 	pending: Map<string, number>
+	/** Creation order (stateSeq). */
+	seq: number
 }
 
 interface View {
@@ -733,7 +743,10 @@ export function createRecordingInventory(
 	/** Past RECORDINGS_CATALOGUE_MAX: the first entry left out (newest-first order). */
 	let cutoff: { m: number; i: string } | null = null
 	let configKey: string | null = null
-	let pendingCount = 0
+	/** Files held by attached folder states (the bound is enforced as it grows). */
+	let fileCount = 0
+	/** Bumped for every folder state created (a pass removes only states older than its derive). */
+	let stateSeq = 0
 	let pendingTimer: ReturnType<typeof setTimeout> | null = null
 	let reconcileTimer: ReturnType<typeof setTimeout> | null = null
 	let touchTimer: ReturnType<typeof setTimeout> | null = null
@@ -811,27 +824,47 @@ export function createRecordingInventory(
 		}
 	}
 
+	/** True while `state` is the folder's live state (a removed or replaced one is never written). */
+	function attached(state: FolderState): boolean {
+		return folders.get(state.spec.key) === state
+	}
+
 	function dropFile(state: FolderState, name: string): boolean {
+		if (!attached(state)) return false
 		const had = state.files.delete(name)
-		if (had) changed("removed")
+		if (had) {
+			fileCount--
+			changed("removed")
+		}
 		return had
 	}
 
+	function setFile(state: FolderState, name: string, e: IndexedEntry): void {
+		if (!attached(state)) return
+		const had = state.files.has(name)
+		state.files.set(name, e)
+		if (!had) fileCount++
+		changed(had ? "changed" : "added")
+		// The memory bound holds while indexing too, not only when a listing builds the view:
+		// past 5 % over it, the oldest are evicted (once per 5 % of growth).
+		if (fileCount > maxEntries * RECORDINGS_CATALOGUE_EVICT_SLACK) currentView()
+	}
+
 	function setPending(state: FolderState, name: string, due: number): void {
-		if (!state.pending.has(name)) pendingCount++
+		if (!attached(state)) return
 		state.pending.set(name, due)
 		schedulePending()
 	}
 
 	function clearPending(state: FolderState, name: string): void {
-		if (state.pending.delete(name)) pendingCount--
+		state.pending.delete(name)
 	}
 
 	function removeFolder(key: string): void {
 		const state = folders.get(key)
 		if (!state) return
 		folders.delete(key)
-		pendingCount -= state.pending.size
+		fileCount -= state.files.size
 		changed("removed", state.files.size)
 	}
 
@@ -1051,7 +1084,12 @@ export function createRecordingInventory(
 			return state
 		}
 		if (state) removeFolder(spec.key)
-		const fresh: FolderState = { spec, files: new Map(), pending: new Map() }
+		const fresh: FolderState = {
+			spec,
+			files: new Map(),
+			pending: new Map(),
+			seq: ++stateSeq,
+		}
 		folders.set(spec.key, fresh)
 		return fresh
 	}
@@ -1128,12 +1166,12 @@ export function createRecordingInventory(
 		}
 		const entry = await handleSem.run(() => buildFrom(c, st, at, counts))
 		// The folder may have been replaced meanwhile (config change): never write into a stale state.
-		if (folders.get(spec.key) !== state) return
+		if (!attached(state)) return
 		if (!entry) {
 			dropFile(state, name)
 			return
 		}
-		state.files.set(name, {
+		setFile(state, name, {
 			mtimeMs: entry.mtimeMs,
 			item: entry.item,
 			folder: spec.key,
@@ -1144,7 +1182,6 @@ export function createRecordingInventory(
 			ino: entry.stat.ino,
 			size: entry.stat.size,
 		})
-		changed(prev ? "changed" : "added")
 	}
 
 	/** Indexes a folder: every name (`only` absent) or just `only`. */
@@ -1224,9 +1261,21 @@ export function createRecordingInventory(
 	 */
 	async function fullPass(paced: boolean): Promise<void> {
 		const counts = newCounts()
+		// States created after this point (a writer indexed a new folder while the derive ran)
+		// are not this pass's to remove.
+		const seqAtDerive = stateSeq
 		const specs = await deriveFolders(counts)
 		const keys = new Set(specs.map(s => s.key))
-		for (const key of [...folders.keys()]) if (!keys.has(key)) removeFolder(key)
+		const gone = [...folders.entries()].filter(
+			([key, state]) => !keys.has(key) && state.seq <= seqAtDerive,
+		)
+		await Promise.all(
+			gone.map(([key, state]) =>
+				withFolder(key, async () => {
+					if (folders.get(key) === state) removeFolder(key)
+				}),
+			),
+		)
 		if (paced) {
 			for (const spec of specs) {
 				if (closed) return
@@ -1309,7 +1358,6 @@ export function createRecordingInventory(
 
 	/** Settles in-progress files that are due by the injected clock (urgent, awaited by list). */
 	function settleDue(): void {
-		if (pendingCount <= 0) return
 		const at = now()
 		for (const state of folders.values()) {
 			if (state.pending.size === 0) continue
@@ -1330,7 +1378,7 @@ export function createRecordingInventory(
 		pendingTimer = setTimeout(() => {
 			pendingTimer = null
 			settleDue()
-			if (pendingCount > 0) schedulePending()
+			schedulePending()
 		}, wait)
 		unref(pendingTimer)
 	}
@@ -1365,8 +1413,13 @@ export function createRecordingInventory(
 			const first = entries[maxEntries]
 			if (first) cutoff = { m: first.mtimeMs, i: first.item.id }
 			// Left out for good (memory bound): only re-indexed once the catalogue shrank.
-			for (const e of entries.slice(maxEntries))
-				folders.get(e.folder)?.files.delete(e.name)
+			for (const e of entries.slice(maxEntries)) {
+				const state = folders.get(e.folder)
+				if (state?.files.get(e.name) === e) {
+					state.files.delete(e.name)
+					fileCount--
+				}
+			}
 			entries.length = maxEntries
 		} else if (
 			cutoff !== null &&
@@ -1808,7 +1861,12 @@ export function createRecordingInventory(
 		},
 
 		status() {
-			return { revision, indexing: !built, files: currentView().entries.length }
+			return {
+				revision,
+				indexing: !built,
+				files: currentView().entries.length,
+				refreshing: urgent.size > 0,
+			}
 		},
 	}
 }

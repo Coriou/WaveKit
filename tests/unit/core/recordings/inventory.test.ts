@@ -1631,6 +1631,44 @@ describe("recordings catalogue", () => {
 		inv.close?.()
 	})
 
+	it("keeps a folder a writer indexed while a full pass was still deriving its folders", async () => {
+		const fs = scannerTree(200, 1)
+		const inv = fakeInventory(fs)
+		await inv.start?.()
+		fs.delayMs = 2
+		let touched: Promise<void> | undefined
+		fs.afterReaddir = dir => {
+			if (dir !== "/r/scan/dv" || touched) return
+			// created after the pass listed the kind folder: the pass never sees it
+			fs.file("/r/scan/dv/d_NEW/new.wav", OLD + 10_000)
+			touched = inv.touchDiscoveries?.(["d_NEW"])
+		}
+		inv.invalidate?.()
+		await vi.waitFor(() => expect(touched).toBeDefined(), { timeout: 5_000 })
+		await touched
+		await vi.waitFor(() => expect(inv.status?.().refreshing).toBe(false), {
+			timeout: 20_000,
+			interval: 50,
+		})
+		const page = await inv.list({ limit: 1 })
+		expect(page.items[0]?.id).toBe("scan:d_NEW~new.wav")
+		expect(page.scannedFiles).toBe(201)
+	})
+
+	it("evicts past the bound while indexing, without a listing", async () => {
+		const max = 40
+		const fs = scannerTree(60, 1)
+		const inv = fakeInventory(fs, { catalogueMax: max })
+		await inv.start?.()
+		// Newest folders first: once 5 % over the bound the oldest were cut, and every older file
+		// after that was left out without being opened.
+		expect(fs.opens).toBeLessThanOrEqual(Math.ceil(max * 1.05) + 8)
+		expect(inv.status?.().files).toBe(max)
+		const page = await inv.list({ limit: 1 })
+		expect(page.truncated).toBe(true)
+		expect(page.items[0]?.id).toBe("scan:d_00059~r-0.wav")
+	})
+
 	it("drops a whole folder that became a symlink at the next re-index", async () => {
 		const fs = new FakeFs()
 			.dir("/r/dsd")
