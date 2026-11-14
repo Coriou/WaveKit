@@ -10,6 +10,7 @@ import { chromiumPath } from "./browser.ts"
 import {
 	CannotRun,
 	DEVICE_NAME,
+	Pairing,
 	formatReport,
 	insideRepository,
 	lookHealthy,
@@ -110,6 +111,107 @@ describe("ui-check options", () => {
 				"--allow=pause,resume",
 			]).actions,
 		).toHaveLength(3)
+	})
+})
+
+describe("ui-check: the address the token goes to", () => {
+	afterEach(() => {
+		delete process.env["WAVEKIT_UI_CHECK_LIVE"]
+	})
+
+	it("takes https anywhere and plain http on this machine only", () => {
+		process.env["WAVEKIT_UI_CHECK_LIVE"] = "1"
+		for (const url of [
+			"http://127.0.0.1:1/",
+			"http://localhost:1/",
+			"http://[::1]:1/",
+			"https://radio.example/",
+		])
+			expect(parseOptions(["--target=live", `--url=${url}`]).url).toBe(url)
+		for (const url of [
+			"http://radio.example/",
+			"http://192.0.2.7:5199/",
+			"http://localhost.example/",
+			"ftp://127.0.0.1/",
+			"not a url",
+		])
+			expect(() => parseOptions(["--target=live", `--url=${url}`])).toThrow(
+				CannotRun,
+			)
+	})
+})
+
+describe("ui-check: a device it paired is revoked however the run ends", () => {
+	const DEVICE = `device_${"d".repeat(43)}`
+	function pairing(over: Partial<Pairing> = {}) {
+		const log: string[] = []
+		const p = new Pairing()
+		p.submitted = true
+		p.deviceId = DEVICE
+		p.machinePost = async (path, body) => {
+			log.push(`machine ${path} ${JSON.stringify(body)}`)
+			return 200
+		}
+		p.machineHolds = async () => false
+		p.logout = async () => {
+			log.push("logout")
+			return true
+		}
+		Object.assign(p, over)
+		return { p, log }
+	}
+
+	it("revokes through the machine route, by device id, without the browser", async () => {
+		const { p, log } = pairing({ logout: null })
+		expect(await p.revoke()).toBe(true)
+		expect(p.revoked).toBe(true)
+		expect(log).toEqual([
+			`machine /api/access/machine/devices/revoke {"deviceId":"${DEVICE}"}`,
+		])
+	})
+
+	it("revokes once, however many endings ask (the finally, a signal, the deadline)", async () => {
+		const { p, log } = pairing()
+		expect(await Promise.all([p.revoke(), p.revoke(), p.revoke()])).toEqual([
+			true,
+			true,
+			true,
+		])
+		expect(log).toHaveLength(1)
+	})
+
+	it("reads the device id late when the run stopped between the submit and the read", async () => {
+		const { p, log } = pairing({
+			deviceId: null,
+			readDeviceId: async () => DEVICE,
+		})
+		expect(await p.revoke()).toBe(true)
+		expect(log[0]).toContain(DEVICE)
+	})
+
+	it("falls back to signing the page out when the machine route refuses or still lists the device", async () => {
+		const refused = pairing({ machinePost: async () => 403 })
+		expect(await refused.p.revoke()).toBe(true)
+		expect(refused.log).toEqual(["logout"])
+		const listed = pairing({ machineHolds: async () => true })
+		expect(await listed.p.revoke()).toBe(true)
+		expect(listed.log.at(-1)).toBe("logout")
+	})
+
+	it("says false when nothing could take the device back, and null when nothing was paired", async () => {
+		const stuck = pairing({
+			machinePost: async () => {
+				throw new Error("core gone")
+			},
+			logout: async () => {
+				throw new Error("browser gone")
+			},
+		})
+		expect(await stuck.p.revoke()).toBe(false)
+		expect(stuck.p.revoked).toBe(false)
+		const none = new Pairing()
+		expect(await none.revoke()).toBeNull()
+		expect(none.revoked).toBeNull()
 	})
 })
 
@@ -240,5 +342,30 @@ describe.skipIf(!browser)("node scripts/ui-check.mjs --target=fake", () => {
 			if (shot)
 				await rm(dirname(dirname(shot)), { recursive: true, force: true })
 		}
+	}, 420_000)
+
+	it("revokes the device when the run fails right after pairing, and says so in its report", async () => {
+		const outcome = await promisify(execFile)(
+			process.execPath,
+			[join(repository, "scripts", "ui-check.mjs")],
+			{
+				timeout: 400_000,
+				maxBuffer: 4 * 1024 * 1024,
+				env: { ...process.env, WAVEKIT_UI_CHECK_FAULT: "after-pairing" },
+			},
+		).then(
+			() => ({ code: 0, stdout: "" }),
+			(error: { code?: number; stdout?: string }) => ({
+				code: error.code ?? -1,
+				stdout: error.stdout ?? "",
+			}),
+		)
+		expect(outcome.code).toBe(2)
+		// revokedAtEnd is true only after the machine route answered and the core no longer lists the device
+		expect(JSON.parse(outcome.stdout)).toEqual({
+			healthy: false,
+			cannotRun: "ui-check failed: fault injected after pairing",
+			revokedAtEnd: true,
+		})
 	}, 420_000)
 })

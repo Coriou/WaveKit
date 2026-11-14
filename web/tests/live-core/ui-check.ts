@@ -16,7 +16,14 @@
  * Exit: 0 healthy, 1 unhealthy, 2 could not run.
  */
 import type { ClientRequest, IncomingMessage } from "node:http"
-import { mkdir, mkdtemp, readFile, readdir, realpath } from "node:fs/promises"
+import {
+	mkdir,
+	mkdtemp,
+	readFile,
+	readdir,
+	realpath,
+	rm,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
@@ -31,6 +38,7 @@ import {
 	waterfallToneSide,
 } from "./browser.ts"
 import {
+	FORBIDDEN_PORTS,
 	LOOPBACK,
 	assertAllowedPort,
 	startRealCore,
@@ -159,6 +167,23 @@ export function parseOptions(argv: readonly string[]): Options {
 			)
 		if (options.url === null)
 			throw new CannotRun("--target=live needs --url=<the preview>")
+		let preview: URL
+		try {
+			preview = new URL(options.url)
+		} catch {
+			throw new CannotRun("--url is not a URL")
+		}
+		// the machine token goes to this host: never in clear text beyond this machine
+		if (
+			preview.protocol !== "https:" &&
+			!(
+				preview.protocol === "http:" &&
+				["localhost", "127.0.0.1", "[::1]"].includes(preview.hostname)
+			)
+		)
+			throw new CannotRun(
+				"--url must be https, or http on this machine (localhost, 127.0.0.1, [::1])",
+			)
 		const refused = options.actions.filter(
 			action => action.name !== "wait" && !options.allow.includes(action.name),
 		)
@@ -226,6 +251,54 @@ export async function readToken(
 	if (!/^[A-Za-z0-9_-]{43}$/.test(token))
 		throw new CannotRun("The token file does not hold a machine token")
 	return token
+}
+
+/**
+ * What a run paired, and how it takes it back. One per run, shared with the signal handlers, the
+ * deadline and the report, so a device is revoked however the run ends: through the machine
+ * route (it needs no browser), else by signing the page out.
+ */
+export class Pairing {
+	/** The pairing form was submitted: from here on a device may exist on the core. */
+	submitted = false
+	deviceId: string | null = null
+	/** null: nothing was paired; true or false: whether the device is gone. */
+	revoked: boolean | null = null
+	/** POST with the machine token; the HTTP status. */
+	machinePost: ((path: string, body: unknown) => Promise<number>) | null = null
+	/** Whether the core still lists the device (asked with the machine token). */
+	machineHolds: ((deviceId: string) => Promise<boolean>) | null = null
+	/** The device id of the page's session, null when it has none. */
+	readDeviceId: (() => Promise<string | null>) | null = null
+	/** Signs the page's session out; whether it is gone. */
+	logout: (() => Promise<boolean>) | null = null
+	private running: Promise<boolean | null> | null = null
+
+	/** Revokes what was paired, once; later calls wait for the same outcome. */
+	revoke(): Promise<boolean | null> {
+		this.running ??= this.run()
+		return this.running
+	}
+
+	private async run(): Promise<boolean | null> {
+		if (!this.submitted) return null
+		if (this.deviceId === null && this.readDeviceId)
+			this.deviceId = await this.readDeviceId().catch(() => null)
+		const id = this.deviceId
+		let gone = false
+		if (id !== null && this.machinePost) {
+			const status = await this.machinePost(
+				"/api/access/machine/devices/revoke",
+				{ deviceId: id },
+			).catch(() => 0)
+			gone = status >= 200 && status < 300
+			if (gone && this.machineHolds)
+				gone = !(await this.machineHolds(id).catch(() => false))
+		}
+		if (!gone && this.logout) gone = await this.logout().catch(() => false)
+		this.revoked = gone
+		return gone
+	}
 }
 
 export interface SpectrumHealth {
@@ -461,7 +534,10 @@ export function formatReport(report: Record<string, unknown>): string {
 	return `{\n${lines.join(",\n")}\n}`
 }
 
-export async function run(options: Options): Promise<{
+export async function run(
+	options: Options,
+	pairing: Pairing = new Pairing(),
+): Promise<{
 	report: Record<string, unknown>
 	healthy: boolean
 }> {
@@ -497,6 +573,37 @@ export async function run(options: Options): Promise<{
 			if (options.accessDir !== null || options.tokenFile !== null)
 				token = await readToken(options)
 		}
+		// the machine route revokes without a browser: wired as soon as there is a credential
+		const machine = async (
+			method: "GET" | "POST",
+			path: string,
+			body?: unknown,
+		): Promise<{ status: number; text: string }> => {
+			if (core !== null) {
+				if (method === "GET")
+					return { status: 200, text: JSON.stringify(await core.get(path)) }
+				const answer = await core.post(path, body)
+				return { status: answer.status, text: JSON.stringify(answer.body) }
+			}
+			if (token === null) token = await readToken(options)
+			const answer = await fetch(base + path.replace(/^\//, ""), {
+				method,
+				headers: {
+					authorization: `Bearer ${token}`,
+					...(body === undefined ? {} : { "content-type": "application/json" }),
+				},
+				...(body === undefined ? {} : { body: JSON.stringify(body) }),
+			})
+			return { status: answer.status, text: await answer.text() }
+		}
+		if (core !== null || token !== null) {
+			pairing.machinePost = async (path, body) =>
+				(await machine("POST", path, body)).status
+			pairing.machineHolds = async deviceId =>
+				(await machine("GET", "/api/access/machine/devices")).text.includes(
+					deviceId,
+				)
+		}
 		browser = await chromium.launch({
 			executablePath: exe,
 			headless: true,
@@ -507,12 +614,18 @@ export async function run(options: Options): Promise<{
 			viewport: { width: 2000, height: 900 },
 		})
 		if (options.target === "fake") {
-			const loopback = (href: string) => new URL(href).hostname === LOOPBACK
+			// only this machine, and never a port of the live receiver or its tools (harness.ts)
+			const allowed = (href: string) => {
+				const url = new URL(href)
+				const secure = url.protocol === "https:" || url.protocol === "wss:"
+				const port = Number(url.port || (secure ? 443 : 80))
+				return url.hostname === LOOPBACK && !FORBIDDEN_PORTS.has(port)
+			}
 			await context.route("**/*", route =>
-				loopback(route.request().url()) ? route.continue() : route.abort(),
+				allowed(route.request().url()) ? route.continue() : route.abort(),
 			)
 			await context.routeWebSocket(
-				url => !loopback(url.href),
+				url => !allowed(url.href),
 				ws => ws.close(),
 			)
 		}
@@ -581,10 +694,36 @@ export async function run(options: Options): Promise<{
 				.click({ timeout: DRAW_WAIT_MS })
 			await page.getByPlaceholder("ABCDE-FGHIJ").fill(code)
 			await page.getByPlaceholder("Kitchen tablet").fill(DEVICE_NAME)
+			pairing.readDeviceId = () =>
+				page.evaluate(async () => {
+					const session = await fetch("/api/access/session")
+					return session.ok
+						? (((await session.json()) as { deviceId?: string }).deviceId ??
+								null)
+						: null
+				})
+			pairing.logout = async () => {
+				const status = await postFromPage(
+					page,
+					"/api/access/session/logout",
+					{},
+				)
+				const still = await page.evaluate(
+					async () => (await fetch("/api/access/session")).ok,
+				)
+				return status === 200 && !still
+			}
+			// from the click on, a device may exist: it is revoked however this run ends
+			pairing.submitted = true
 			await page.locator('button[type="submit"]').click()
-			await page
-				.locator("button.wkf-conn-chip")
-				.waitFor({ state: "detached", timeout: DRAW_WAIT_MS })
+			await within(DRAW_WAIT_MS, async () => {
+				pairing.deviceId = (await pairing.readDeviceId?.()) ?? null
+				return pairing.deviceId !== null
+			})
+			if (pairing.deviceId === null)
+				throw new CannotRun("Pairing did not complete")
+			if (process.env["WAVEKIT_UI_CHECK_FAULT"] === "after-pairing")
+				throw new Error("fault injected after pairing")
 			pairedByRun = true
 			// what failed before the browser was paired is the pairing chip's business, not a finding
 			failed.clear()
@@ -615,19 +754,8 @@ export async function run(options: Options): Promise<{
 		// what the page logged and failed, before the run's own sign-out adds to it
 		const errors = [...consoleErrors]
 		const failures = [...failed].map(([what, times]) => ({ what, times }))
-		// leave no session behind
-		let revoked: boolean | null = null
-		if (pairedByRun) {
-			const status = await postFromPage(
-				page,
-				"/api/access/session/logout",
-				{},
-			).catch(() => 0)
-			const still = await page
-				.evaluate(async () => (await fetch("/api/access/session")).ok)
-				.catch(() => true)
-			revoked = status === 200 && !still
-		}
+		// leave no device behind (the finally below does the same when the run ends early)
+		const revoked = await pairing.revoke()
 		const final = last ?? first
 		const healthy =
 			lookHealthy(final) &&
@@ -656,15 +784,52 @@ export async function run(options: Options): Promise<{
 		}
 		return { report, healthy }
 	} finally {
+		// first of all, while the core (and maybe the browser) is still there
+		await pairing.revoke().catch(() => null)
 		await browser?.close().catch(() => undefined)
 		await dev?.close().catch(() => undefined)
 		await core?.stop().catch(() => undefined)
+		// the scratch directory goes, unless the screenshots were saved in it
+		const keepShots = options.screenshot && options.out === null
+		await rm(keepShots ? join(scratch, "vite") : scratch, {
+			recursive: true,
+			force: true,
+		}).catch(() => undefined)
 	}
 }
 
+/** A run that has not ended after this long (ms) is given up: its device is revoked and it exits 2. */
+const DEADLINE_MS = 6 * 60_000
+
 async function main(): Promise<void> {
+	const pairing = new Pairing()
+	/** Ends the process after revoking what was paired: a signal, or the deadline. */
+	const giveUp = (why: string) => {
+		void pairing
+			.revoke()
+			.catch(() => false)
+			.then(() => {
+				process.stdout.write(
+					formatReport({
+						healthy: false,
+						cannotRun: why,
+						revokedAtEnd: pairing.revoked,
+					}) + "\n",
+				)
+				process.exit(2)
+			})
+	}
+	process.once("SIGINT", () => giveUp("Interrupted"))
+	process.once("SIGTERM", () => giveUp("Terminated"))
+	const deadline = setTimeout(
+		() => giveUp(`Not finished after ${DEADLINE_MS / 1000} s`),
+		DEADLINE_MS,
+	)
 	try {
-		const { report, healthy } = await run(parseOptions(process.argv.slice(2)))
+		const { report, healthy } = await run(
+			parseOptions(process.argv.slice(2)),
+			pairing,
+		)
 		process.stdout.write(formatReport(report) + "\n")
 		process.stderr.write(String(report["summary"]) + "\n")
 		process.exitCode = healthy ? 0 : 1
@@ -674,9 +839,15 @@ async function main(): Promise<void> {
 				? error.message
 				: `ui-check failed: ${error instanceof Error ? error.message.split("\n")[0] : "unknown error"}`
 		process.stdout.write(
-			formatReport({ healthy: false, cannotRun: message }) + "\n",
+			formatReport({
+				healthy: false,
+				cannotRun: message,
+				revokedAtEnd: pairing.revoked,
+			}) + "\n",
 		)
 		process.exitCode = 2
+	} finally {
+		clearTimeout(deadline)
 	}
 }
 

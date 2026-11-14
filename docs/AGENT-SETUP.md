@@ -88,7 +88,12 @@ This fake target is the only one for lanes and delegated agents. `--target=live 
 attaches to a running web server and is refused unless `WAVEKIT_UI_CHECK_LIVE=1`: it is for the
 session that owns the live core. It reads the machine token from `--token-file=<file>` or
 `--access-dir=<dir>` (never from the command line or the environment, and never prints it), and
-runs an action only when `--allow=` names it.
+runs an action only when `--allow=` names it. `--url` must be https, or http on this machine. Set
+the variable on the one command (`WAVEKIT_UI_CHECK_LIVE=1 node scripts/ui-check.mjs …`), never
+with `export`; lanes never set it.
+
+Whatever ends a run (a failure, a signal, its six-minute deadline), the device it paired is
+revoked through the core's machine route and the report says so (`revokedAtEnd`).
 
 ## Drift checks
 
