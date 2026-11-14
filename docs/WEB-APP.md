@@ -307,7 +307,9 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   then the placeholder, `Still loading. WaveKit is busy.` after 3 s, and after 10 s (or an error)
   what failed, **Try again**, and a retry on its own after 2, 4, 8, 16 then every 30 s, the last
   rows kept and marked with their time. While the core is still indexing its recordings after a
-  start, the list says so and fills in. The footer line says how many are kept and sums the disk
+  start, the list says so and fills in. Closing and opening the drawer again on the same search
+  keeps the scroll position. The list is one Tab stop: the row under the cursor; the arrows move
+  it and focus follows; Space and Enter on a button inside a row press that button. The footer line says how many are kept and sums the disk
   the recording areas use: digital-voice calls, scanner evidence and named IQ captures (each with
   its limit), then the free space.
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band
