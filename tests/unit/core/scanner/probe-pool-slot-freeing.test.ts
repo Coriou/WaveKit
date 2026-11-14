@@ -212,6 +212,58 @@ describe("ProbePool: one shared CPU budget for identify, job probes and reservat
 		).toEqual({ deferred: "budget" })
 	})
 
+	it("identify on `budget` does not preempt a job probe when reservations alone leave no room: the job probe keeps running", async () => {
+		const h = poolHarness({ settings: settings(1, 2) })
+		expect(
+			h.pool.request(probeRequest({ jobId: "job", priority: 50 })),
+		).toHaveProperty("started")
+		await flushAsync()
+		expect(h.pool.reserveExternal(0.42)).not.toBeNull()
+		// The operator lowers the budget: the reservation now exceeds budget - engine - probe
+		// (0.42 > 0.95 - 0.08 - 0.5), so stopping the job probe cannot make room for identify.
+		h.settings.cpuBudgetCores = 0.95
+		const req = probeRequest({
+			jobId: "identify",
+			priority: IDENTIFY_PROBE_PRIORITY,
+			trackId: "t2",
+		})
+		expect(h.pool.request(req)).toEqual({ deferred: "budget" })
+		for (let i = 0; i < 5; i++) {
+			await flushAsync()
+			h.pool.pump()
+		}
+		expect(h.pool.status().map(p => [p.jobId, p.state])).toEqual([
+			["job", expect.not.stringMatching(/^stopping$/)],
+		])
+		// Nothing is being freed, so identify stops waiting and skips the trial as cpu-budget.
+		expect(h.pool.slotFreeing(req)).toBe(false)
+		expect(h.pool.queuedDeferral(req)).toMatchObject({ deferral: "budget" })
+		expect(h.pool.externalCoresInUse()).toBeCloseTo(0.42, 9)
+		h.pool.sealAdmission()
+	})
+
+	it("identify on `budget` preempts a job probe when stopping it makes room", async () => {
+		const h = poolHarness({ settings: settings(1, 2) })
+		expect(
+			h.pool.request(probeRequest({ jobId: "job", priority: 50 })),
+		).toHaveProperty("started")
+		await flushAsync()
+		expect(h.pool.reserveExternal(0.3)).not.toBeNull()
+		// 0.08 + 0.5 + 0.3 + 0.5 > 1, but 0.08 + 0.3 + 0.5 <= 1 once the job probe stops.
+		const req = probeRequest({
+			jobId: "identify",
+			priority: IDENTIFY_PROBE_PRIORITY,
+			trackId: "t2",
+		})
+		expect(h.pool.request(req)).toEqual({ deferred: "budget" })
+		for (let i = 0; i < 5; i++) {
+			await flushAsync()
+			h.pool.pump()
+		}
+		expect(h.pool.status().map(p => p.jobId)).toEqual(["identify"])
+		expect(h.pool.externalCoresInUse()).toBeCloseTo(0.3, 9)
+	})
+
 	it("property: across identify probes, job probes and reservations the estimate never exceeds the budget", async () => {
 		type Op =
 			| { kind: "identify" | "job"; priority: number }

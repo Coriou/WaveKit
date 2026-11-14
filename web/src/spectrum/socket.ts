@@ -345,9 +345,10 @@ export class SpectrumSocket {
 			this.clearStall()
 			if (!opened) this.failedConnects++
 			this.scheduleRetry()
-			// After a 1008 the session is checked only once the next connect fails too: the core
-			// stopping sends 1008 while its access controller is already gone, so a check right
-			// away could read a 401 from a core that is merely restarting.
+			// After a 1008 the session is checked only once the next connect fails too: a graceful
+			// core stop sends 1001, but older cores sent 1008 while their access controller was
+			// already gone, so a check right away could read a 401 from a core that is merely
+			// restarting.
 			const suspect = this.accessSuspect
 			if (closeNeedsAuthCheck(event.code) && suspect === null)
 				this.accessSuspect = event.reason || `close code ${event.code}`

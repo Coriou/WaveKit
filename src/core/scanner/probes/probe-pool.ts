@@ -835,10 +835,7 @@ export class ProbePool extends EventEmitter {
 				// Under the CPU guard only identify (priority above every job's 0–100, Task 35a) preempts: a stopped
 				// decoder is the CPU the guard is waiting for. pump() retries the queue every service tick.
 				if (pick.deferred !== "cpu" || isIdentifyPriority(req.priority))
-					this.preemptFor(
-						req,
-						pick.deferred === "max-probes" ? this.fullKinds(first, ctx) : null,
-					)
+					this.preemptDeferred(req, pick.deferred, first, ctx)
 			}
 			return pick
 		}
@@ -1419,6 +1416,61 @@ export class ProbePool extends EventEmitter {
 		)
 	}
 
+	// A `max-probes` deferral frees a slot on a full transport the request could use. A `budget`
+	// deferral preempts only when stopping every probe preemptFor could stop makes room for the
+	// request's cheapest transport: reservations (recordings, analog trials) are never cut, so when
+	// they alone leave no room a preemption would kill job probes for nothing.
+	private preemptDeferred(
+		req: ProbeRequest,
+		deferred: "max-probes" | "budget" | "cpu",
+		mode: ProbeMode,
+		ctx: TransportContext,
+	): void {
+		if (deferred === "max-probes") {
+			this.preemptFor(req, this.fullKinds(mode, ctx))
+			return
+		}
+		if (deferred === "budget" && !this.preemptionMakesRoom(req, mode, ctx))
+			return
+		this.preemptFor(req, null)
+	}
+
+	private preemptionMakesRoom(
+		req: ProbeRequest,
+		mode: ProbeMode,
+		ctx: TransportContext,
+	): boolean {
+		let budget: number
+		try {
+			budget = this.deps.settings().cpuBudgetCores
+		} catch {
+			return false
+		}
+		if (!Number.isFinite(budget)) return false
+		let cost = Number.POSITIVE_INFINITY
+		for (const transport of this.deps.transports) {
+			if (transport.kind === "replay" || !transport.supports(mode, ctx))
+				continue
+			const c = transport.cores(mode.decoderType)
+			if (Number.isFinite(c) && c < cost) cost = c
+		}
+		if (!Number.isFinite(cost)) return false
+		let stoppable = 0
+		for (const r of this.records.values()) {
+			if (
+				r.state === "stopping" ||
+				isIdentifyPriority(r.req.priority) ||
+				r.req.replay !== undefined
+			)
+				continue
+			// The same exemption preemptFor honours for a job request.
+			if (req.priority < 101 && r.state === "following" && r.req.record)
+				continue
+			stoppable += r.cores
+		}
+		return this.estimatedCores() - stoppable + cost <= budget + 1e-9
+	}
+
 	// WG11 review M1: a replay request never preempts (its single slot is held by another replay, which
 	// ends by itself faster than real time), and a live request never preempts a replay probe (a lost
 	// replay trial would cascade back into the queue's retries). Live requests preempt live probes only.
@@ -1544,10 +1596,7 @@ export class ProbePool extends EventEmitter {
 					pick.deferred === "budget" ||
 					(pick.deferred === "cpu" && isIdentifyPriority(req.priority))
 				)
-					this.preemptFor(
-						req,
-						pick.deferred === "max-probes" ? this.fullKinds(first, ctx) : null,
-					)
+					this.preemptDeferred(req, pick.deferred, first, ctx)
 				continue
 			}
 			if (this.destroyed) return

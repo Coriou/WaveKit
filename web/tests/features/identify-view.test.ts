@@ -5,6 +5,7 @@ import type {
 	ScannerIdentifyEventData,
 	ScannerIdentifyResult,
 	ScannerIdentifyTrial,
+	ScannerIdentifyTrialBudget,
 } from "@wavekit/api-types"
 import type { IdentifyState } from "../../src/data/index.ts"
 import {
@@ -527,7 +528,7 @@ describe("identifyView", () => {
 		expect(
 			trialRow(trial("dmr", "skipped-budget", { reason: "slot-busy" }), 4)
 				.title,
-		).toBe("DMR with dsd-fme: Skipped (busy) (another identify held the probe)")
+		).toBe("DMR with dsd-fme: Skipped (busy) (another probe held the slot)")
 		expect(
 			trialRow(
 				trial("dmr", "skipped-budget", {
@@ -542,8 +543,39 @@ describe("identifyView", () => {
 				5,
 			).title,
 		).toBe(
-			"DMR with dsd-fme: Skipped (busy) (no CPU budget left: recordings 0.43 of 1 core)",
+			"DMR with dsd-fme: Skipped (busy) (no CPU budget left: recordings and analog trials 0.43 of 1 core)",
 		)
+		// A malformed split (non-finite, negative or missing field) falls back to the plain label.
+		for (const budget of [
+			{
+				budgetCores: Number.NaN,
+				enginesCores: 0.08,
+				probesCores: 0,
+				recordingsCores: 0.4,
+			},
+			{
+				budgetCores: 1,
+				enginesCores: 0.08,
+				probesCores: -0.5,
+				recordingsCores: 0.4,
+			},
+			{
+				budgetCores: 1,
+				enginesCores: Number.POSITIVE_INFINITY,
+				probesCores: 0,
+				recordingsCores: 0.4,
+			},
+			{ budgetCores: 1, enginesCores: 0.08, probesCores: 0 },
+		])
+			expect(
+				trialRow(
+					trial("dmr", "skipped-budget", {
+						reason: "cpu-budget",
+						budget: budget as ScannerIdentifyTrialBudget,
+					}),
+					7,
+				).title,
+			).toBe("DMR with dsd-fme: Skipped (busy) (no CPU budget left)")
 		expect(
 			trialRow(trial("dmr", "skipped-budget", { reason: "cpu-budget" }), 6)
 				.title,

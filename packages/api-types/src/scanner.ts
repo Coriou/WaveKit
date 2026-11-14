@@ -1590,8 +1590,8 @@ export interface ScannerIdentifyTrial {
 	 * protocol the request names explicitly inside the ADS-B window (1089 to 1091 MHz), where only
 	 * readsb is eligible: listed, never run. On a `skipped-budget` trial, the run's real reason when
 	 * the core knows it: `slot-busy`, another identify or probe held the probe slot; `cpu-budget`,
-	 * engines and probes left no CPU budget; `slot-still-freeing`, a probe on its transport was still
-	 * stopping when the wait ended. Absent when the core could not say, and on older cores.
+	 * the shared CPU budget (engines, probes, recordings and analog trials) left no room;
+	 * `slot-still-freeing`, a probe on its transport was still stopping when the wait ended. Absent when the core could not say, and on older cores.
 	 */
 	reason?:
 		| "no-decoder"
@@ -1606,7 +1606,7 @@ export interface ScannerIdentifyTrial {
 		| "slot-still-freeing"
 	/**
 	 * On a `skipped-budget` trial with reason `cpu-budget`: what held the shared CPU budget when the
-	 * run gave up, in cores (identify, job probes and recordings all share `cpuBudgetCores`).
+	 * run gave up, in cores (identify, job probes, recordings and analog trials all share `cpuBudgetCores`).
 	 * Absent otherwise, and on older cores.
 	 */
 	budget?: ScannerIdentifyTrialBudget | undefined
