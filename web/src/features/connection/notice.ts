@@ -42,15 +42,28 @@ function isAddressRefusal(code: string | null | undefined): boolean {
 	return code === "HOST_FORBIDDEN" || code === "ORIGIN_FORBIDDEN"
 }
 
+/** Whether the page was reached from `other` (same origin as the referrer): its link was already followed. */
+function cameFrom(other: string, referrer: string | undefined): boolean {
+	if (!referrer) return false
+	try {
+		return new URL(referrer).origin === new URL(other).origin
+	} catch {
+		return false
+	}
+}
+
 /**
  * Null while everything is fine (open socket, legacy core or a protected core with a session).
- * `pageHref` is the address bar: with it, a refused loopback address links to the other name.
+ * `pageHref` is the address bar: with it, a refused loopback address links to the other name,
+ * unless the page was just sent here from that name (`referrer`): the core accepts neither, and
+ * the chip names its access settings instead of sending the reader back and forth.
  */
 export function connectionNotice(
 	connection: ConnectionState,
 	access: AccessStoreState,
 	readOnly: boolean,
 	pageHref?: string,
+	referrer?: string,
 ): ConnectionNotice | null {
 	if (readOnly) {
 		const pair =
@@ -72,7 +85,9 @@ export function connectionNotice(
 		connection !== "open"
 	) {
 		// Retrying cannot help: the core answers, and refuses this address every time.
-		const other = pageHref === undefined ? null : otherLoopbackUrl(pageHref)
+		const swapped = pageHref === undefined ? null : otherLoopbackUrl(pageHref)
+		const other =
+			swapped !== null && cameFrom(swapped, referrer) ? null : swapped
 		return {
 			title: "This address is not accepted",
 			detail:

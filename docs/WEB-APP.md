@@ -20,7 +20,8 @@ and talks to the core over its REST API and WebSocket. The code lives in [`web/`
   other. `localhost` and `127.0.0.1` reach the same server, but to the browser and to the core they
   are two sites, each with its own sign-in. Opened under the one the core refuses, the app shows
   **This address is not accepted · Open 127.0.0.1:5173 instead**; the chip is a link to the same
-  page on the other name. Off this machine it reads **Allow it in the core's access settings**
+  page on the other name. When that one is refused too, or off this machine, it reads **Allow it
+  in the core's access settings**
   (`access.allowedAuthorities` and `access.allowedOrigins`, [Docker setup](DOCKER-SETUP.md)).
   The dev and preview servers do the first step for you: a page opened under a loopback name the
   core refuses is sent to the loopback name it accepts. Only `localhost`, `127.0.0.1` and `[::1]`
@@ -576,7 +577,8 @@ The address bar names what is on screen, so a link reopens it: `#/map`, `#/activ
 ## Install it
 
 WaveKit is a PWA: use **Install WaveKit** in the ⌘K palette, or your browser's install button.
-Browsers only install from HTTPS or `localhost`.
+Browsers only install from HTTPS or `localhost`. Install it from the address the core accepts: an
+app installed under another name is sent out of its own window to that address.
 
 A production build keeps its files in a service worker, so the app opens at once and still opens
 when the server is down. A page load always asks the server first, so a new build is what you get

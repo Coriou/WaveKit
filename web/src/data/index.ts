@@ -168,6 +168,8 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 	const setSession = (session: AccessSessionDto | null) => {
 		if (refreshTimer) clearTimeout(refreshTimer)
 		refreshTimer = null
+		// an answer that arrives after dispose() must not arm a refresh on a layer nobody holds
+		if (disposed) return
 		access.set({ ...access.get(), session })
 		if (session === null) {
 			devices.clear()
@@ -228,8 +230,9 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		async start() {
 			const answered = await readAccess()
 			events.connect()
-			await loadAll()
+			// before the stores load: against a core that is down their requests can take long to fail
 			if (!answered) retryStart(0)
+			await loadAll()
 		},
 		async pair(input) {
 			setSession(await api.pair(input))

@@ -28,7 +28,39 @@ export const PROBE_TIMEOUT_MS = 1500
 /** The paths the core owns (vite.config.ts proxy): never redirected. */
 const CORE_PATHS = /^\/(?:api|ws|health)(?:[/?]|$)/
 
-type Probe = "accepted" | "refused" | "unknown"
+/** `open`: a core without access control (it has no bootstrap); it accepts any name. */
+type Probe = "accepted" | "open" | "refused" | "unknown"
+
+/** The most of an answer's body a probe reads (bytes): a bootstrap document is well under 1 KiB. */
+const PROBE_BODY_MAX = 16 * 1024
+
+/**
+ * What an answer to the bootstrap probe says, from its JSON body (the core does not label every
+ * answer as JSON, so the content type is not asked for). Only the core's own answers count: a 403
+ * with its HOST_FORBIDDEN code is a refusal, its bootstrap document (200) an acceptance, a JSON
+ * 404 a core without access control. Anything else (another server's page, a proxy error) is unknown.
+ */
+export function readProbe(status: number, text: string): Probe {
+	let body: unknown
+	try {
+		body = JSON.parse(text)
+	} catch {
+		return "unknown"
+	}
+	if (typeof body !== "object" || body === null || Array.isArray(body))
+		return "unknown"
+	const fields = body as Record<string, unknown>
+	if (status === 403)
+		return fields["code"] === "HOST_FORBIDDEN" ? "refused" : "unknown"
+	if (status === 404) return "open"
+	if (status === 200)
+		return typeof fields["version"] === "number" &&
+			typeof fields["access"] === "object" &&
+			fields["access"] !== null
+			? "accepted"
+			: "unknown"
+	return "unknown"
+}
 
 /** GET /api/access/bootstrap on this server's own `port`, as a browser at `name` would send it. */
 function probe(name: string, port: number): Promise<Probe> {
@@ -44,32 +76,23 @@ function probe(name: string, port: number): Promise<Probe> {
 				timeout: PROBE_TIMEOUT_MS,
 			},
 			response => {
-				const status = response.statusCode ?? 0
 				const chunks: Buffer[] = []
 				let size = 0
 				response.on("data", (chunk: Buffer) => {
 					size += chunk.length
-					if (size <= 4096) chunks.push(chunk)
+					if (size <= PROBE_BODY_MAX) chunks.push(chunk)
 				})
 				response.on("error", () => resolve("unknown"))
-				response.on("end", () => {
-					if (status === 403) {
-						let code: unknown
-						try {
-							code = (
-								JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
-									code?: unknown
-								} | null
-							)?.code
-						} catch {
-							code = undefined
-						}
-						resolve(code === "HOST_FORBIDDEN" ? "refused" : "unknown")
-						return
-					}
-					// 200: a protected core that accepts the name; 404: a core without access control.
-					resolve(status === 200 || status === 404 ? "accepted" : "unknown")
-				})
+				response.on("end", () =>
+					resolve(
+						size > PROBE_BODY_MAX
+							? "unknown"
+							: readProbe(
+									response.statusCode ?? 0,
+									Buffer.concat(chunks).toString("utf8"),
+								),
+					),
+				)
 			},
 		)
 		request.on("timeout", () => request.destroy())
@@ -98,6 +121,7 @@ export async function canonicalHostRedirect(
 	if ((await probe(name, port)) !== "refused") return null
 	for (const other of PREFERENCE) {
 		if (other === name) continue
+		// the refusal came from a protected core: only its own bootstrap document is an acceptance
 		if ((await probe(other, port)) === "accepted")
 			return `http://${other}:${port}${url}`
 	}
@@ -133,17 +157,24 @@ export function canonicalHostMiddleware(port: () => number | null) {
 			next()
 			return
 		}
-		canonicalHostRedirect(host, url, listening).then(
-			location => {
-				if (location === null) {
-					next()
-					return
+		void canonicalHostRedirect(host, url, listening)
+			.catch(() => null)
+			.then(location => {
+				// a client gone during the probe, or anything else here, must not take the server down
+				try {
+					if (location === null) {
+						next()
+						return
+					}
+					res.writeHead(307, {
+						Location: location,
+						"Cache-Control": "no-store",
+					})
+					res.end()
+				} catch {
+					if (!res.headersSent) next()
 				}
-				res.writeHead(307, { Location: location, "Cache-Control": "no-store" })
-				res.end()
-			},
-			() => next(),
-		)
+			})
 	}
 }
 

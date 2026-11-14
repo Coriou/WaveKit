@@ -19,8 +19,8 @@ export interface ShellCaches {
 }
 
 /**
- * Unregisters the workers registered for exactly `scope` (the app's base URL: other apps on the same
- * origin keep theirs) and deletes the `wavekit-shell-*` caches. Returns how many it unregistered; never rejects.
+ * Unregisters the workers registered for exactly `scope` (the app's base URL: a worker under another
+ * scope of the same origin stays) and deletes the `wavekit-shell-*` caches. Returns how many it unregistered; never rejects.
  */
 export async function dropWorkers(
 	scope: string,

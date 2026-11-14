@@ -24,6 +24,7 @@ export function ConnectionChip() {
 		access,
 		isReadOnly(access),
 		window.location.href,
+		document.referrer,
 	)
 	// natural widths: the title and detail spans report their full text width even while clipped
 	useLayoutEffect(() => {
@@ -85,6 +86,7 @@ export function ConnectionChip() {
 					data-title-only={titleOnly}
 					data-action=""
 					href={notice.href}
+					title={notice.detail ?? undefined}
 				>
 					{body}
 				</a>

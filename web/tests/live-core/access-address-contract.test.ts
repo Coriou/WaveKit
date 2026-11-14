@@ -5,7 +5,7 @@
  */
 import * as http from "node:http"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { canonicalHostRedirect } from "../../build/canonical-host.ts"
+import { canonicalHostRedirect, readProbe } from "../../build/canonical-host.ts"
 import type { FetchLike } from "../../src/data/api-client.ts"
 import { createDataLayer } from "../../src/data/index.ts"
 import { connectionNotice } from "../../src/features/connection/notice.ts"
@@ -60,6 +60,9 @@ describe.skipIf(!enabled)("a protected core and the page's address", () => {
 		expect(JSON.parse(refused.body)).toMatchObject({ code: "HOST_FORBIDDEN" })
 		const accepted = await getAs(core, LOOPBACK, "/api/access/bootstrap")
 		expect(accepted.status).toBe(200)
+		// what the web server's probe reads (build/canonical-host.ts readProbe)
+		expect(readProbe(refused.status, refused.body)).toBe("refused")
+		expect(readProbe(accepted.status, accepted.body)).toBe("accepted")
 	})
 
 	it("the web server's redirect sends localhost to 127.0.0.1 and leaves 127.0.0.1 alone", async () => {

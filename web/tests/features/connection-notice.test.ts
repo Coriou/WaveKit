@@ -57,6 +57,32 @@ describe("the chip when the core does not accept the page's address", () => {
 		expect(notice?.href).toBeUndefined()
 	})
 
+	it("stops sending the reader back once both loopback names are refused", () => {
+		const notice = connectionNotice(
+			"closed",
+			refused("HOST_FORBIDDEN"),
+			false,
+			"http://127.0.0.1:5199/#/map",
+			// arrived by the chip's link on the other name
+			"http://localhost:5199/",
+		)
+		expect(notice).toMatchObject({
+			title: "This address is not accepted",
+			detail: "Allow it in the core’s access settings",
+		})
+		expect(notice?.href).toBeUndefined()
+		// any other referrer changes nothing
+		expect(
+			connectionNotice(
+				"closed",
+				refused("HOST_FORBIDDEN"),
+				false,
+				"http://127.0.0.1:5199/",
+				"https://example.org/",
+			)?.href,
+		).toBe("http://localhost:5199/")
+	})
+
 	it("still says it retries when the core cannot be reached at all", () => {
 		expect(
 			connectionNotice(

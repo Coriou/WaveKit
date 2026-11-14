@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
 	canonicalHostRedirect,
 	isNavigation,
+	readProbe,
 } from "../../build/canonical-host.ts"
 
 interface Fake {
@@ -49,7 +50,7 @@ const onlyAccepts =
 	(name: string) =>
 	(host: string, port: number): { status: number; body: unknown } =>
 		host === `${name}:${port}`
-			? { status: 200, body: { version: 1 } }
+			? { status: 200, body: { version: 1, access: { mode: "protected" } } }
 			: { status: 403, body: { code: "HOST_FORBIDDEN" } }
 
 afterEach(async () => {
@@ -165,5 +166,42 @@ describe("isNavigation", () => {
 				"sec-fetch-dest": "iframe",
 			}),
 		).toBe(false)
+	})
+})
+
+describe("readProbe", () => {
+	const bootstrap = JSON.stringify({
+		version: 1,
+		access: { mode: "protected" },
+	})
+
+	it("takes only the core's own answers", () => {
+		expect(readProbe(200, bootstrap)).toBe("accepted")
+		expect(readProbe(404, '{"statusCode":404}')).toBe("open")
+		expect(readProbe(403, '{"code":"HOST_FORBIDDEN"}')).toBe("refused")
+	})
+
+	it("does not take another server's page, or any other answer, for the core", () => {
+		// a second web server on the other address family answers its HTML fallback
+		expect(readProbe(200, "<!doctype html>")).toBe("unknown")
+		expect(readProbe(200, "{}")).toBe("unknown")
+		expect(readProbe(200, "[1]")).toBe("unknown")
+		expect(readProbe(404, "Not found")).toBe("unknown")
+		expect(readProbe(403, '{"code":"ORIGIN_FORBIDDEN"}')).toBe("unknown")
+		expect(readProbe(401, '{"code":"AUTH_REQUIRED"}')).toBe("unknown")
+		expect(readProbe(502, "{}")).toBe("unknown")
+	})
+})
+
+describe("a refused name beside a server that is not the core", () => {
+	it("does not redirect to a name where something else answers, even with JSON", async () => {
+		const web = await fake(host =>
+			host.startsWith("localhost")
+				? { status: 403, body: { code: "HOST_FORBIDDEN" } }
+				: { status: 404, body: { statusCode: 404 } },
+		)
+		expect(
+			await canonicalHostRedirect(`localhost:${web.port}`, "/", web.port),
+		).toBeNull()
 	})
 })
