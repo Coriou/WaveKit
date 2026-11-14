@@ -3970,10 +3970,13 @@ curl http://localhost:9000/api/scanner
 running probe's cost, and the cores held by analog recordings and analog trials. Identify,
 job probes, recordings and analog trials share this one budget: each is admitted only while
 the estimate plus its own cost stays within `cpuBudgetCores`, so the estimate never exceeds it.
-Identify never stops a recording, and stops a job probe only when that makes room for its own
-probe (when recordings and analog trials alone leave no room, job probes keep running and
-identify's trials end `skipped-budget`). A recording that would not fit beside a running
-identify probe waits for the next snapshot and starts late, so its start may be `cut`.
+Identify never stops a recording, neither a wideband recording nor a job probe holding a
+recorded voice call, and stops other job probes only when stopping them makes room for its own
+probe (when recordings, analog trials and held calls alone leave no room, job probes keep
+running and identify's trials end `skipped-budget`). The cores freed by a job probe identify
+stopped stay held for identify until its probe starts, for at most 8 s from that stop. A
+recording that would not fit beside a running identify probe, or beside those held cores,
+waits for the next snapshot and starts late, so its start may be `cut`.
 
 `folders` (absent from older cores and before the scanner state loaded) counts what the
 start did with recording and evidence folders that no discovery owned: `reattached` folders
