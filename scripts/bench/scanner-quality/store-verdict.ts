@@ -7,7 +7,7 @@
  *   pnpm exec esbuild scripts/bench/scanner-quality/store-verdict.ts --bundle \
  *     --platform=node --format=esm --packages=external \
  *     --outfile=output/bench/store-verdict.mjs
- *   node output/bench/store-verdict.mjs
+ *   node output/bench/store-verdict.mjs [--scenes 5,6]   # by index, default every scene
  *
  * Scenes (one JSON line each):
  * - mixed: one channel carrying analog FM voice without CTCSS and DMR. An earlier analog over left
@@ -23,6 +23,12 @@
  * - pager-stored-fsk2-wide: the same, the store's class of the channel fsk2-wide (the spectrum's
  *   majority vote): the first burst is held, and its decode, citing it inside the grace, discards
  *   it. Expected: no burst kept.
+ * - pager-sequence-<spacing>s: SEQUENCE_BURSTS = 8 such 4 s bursts on one channel whose stored
+ *   class is analog-fm (live bursts read analog-fm), onsets <spacing> s apart (6 and 9: the next
+ *   burst keys up before, or just after, the previous one's decode; 10, 20, 30: realistic paging
+ *   spacing), each one's POCSAG decode landing DECODE_AT_S after its onset, citing it, after the
+ *   first one's file was finalized. Expected: the first burst at most is kept (a fresh channel),
+ *   none after it.
  * - lpd-ism: a 433 MHz LPD channel shared with an rtl_433 sensor: a sensor burst (ingested only,
  *   ook-burst) decoded `ism` before each of three analog overs without CTCSS. Expected: every
  *   analog over kept (an ISM decode is only suspect).
@@ -50,7 +56,13 @@ import { FskSource } from "../../../tests/unit/core/scanner/wideband-nfm-fixture
 import type { ScannerClass } from "../../../src/core/scanner/types.js"
 
 const CH = CENTRE + LOW_OFFSET
+/** `--scenes 0,5`: run only those scenes (by index); default every scene. */
+const scenes = (() => {
+	const i = process.argv.indexOf("--scenes")
+	return i >= 0 ? (process.argv[i + 1] ?? "").split(",").map(Number) : null
+})()
 const DECODE_AT_S = 8
+const SEQUENCE_BURSTS = 8
 
 interface Due {
 	at: number
@@ -82,8 +94,13 @@ function rig() {
 		h as { timers?: { ms: number; run: () => void; live: boolean }[] }
 	).timers
 	const due: Due[] = []
+	/** Decodes identify makes later: run once the recorder's clock reaches `at`. */
+	const decodes: { at: number; run: () => void }[] = []
 	let seen = 0
 	const tick = (): void => {
+		for (const d of decodes.splice(0))
+			if (d.at <= h.now()) d.run()
+			else decodes.push(d)
 		if (timers === undefined) return
 		for (; seen < timers.length; seen++) {
 			const t = timers[seen]!
@@ -94,7 +111,7 @@ function rig() {
 				if (d.t.live) d.t.run()
 			} else due.push(d)
 	}
-	return { h, store, tick }
+	return { h, store, tick, decodes }
 }
 
 type Rig = ReturnType<typeof rig>
@@ -295,6 +312,45 @@ async function pager(stored: ScannerClass): Promise<Record<string, unknown>> {
 	})
 }
 
+async function pagerSequence(
+	spacingS: number,
+): Promise<Record<string, unknown>> {
+	const r = rig()
+	await quiet(r, 1)
+	for (let k = 0; k < SEQUENCE_BURSTS; k++) {
+		const id = `p${k}`
+		const onset = r.h.now()
+		await transmission(r, id, 4, "pager", "analog-fm")
+		r.decodes.push({
+			at: onset + DECODE_AT_S * 1000,
+			run: () => decode(r, id, "pocsag"),
+		})
+		await quiet(r, Math.max(0, (onset + spacingS * 1000 - r.h.now()) / 1000))
+	}
+	await quiet(r, 40)
+	await r.h.rec.stop()
+	const kept = r.h.ops
+		.filter(o => o.outcome === "finalized")
+		.map(o => o.input.observationId)
+	return {
+		scene: `pager-sequence-${spacingS}s`,
+		bursts: SEQUENCE_BURSTS,
+		spacingS,
+		decodeAtS: DECODE_AT_S,
+		written: r.h.ops.length,
+		burstsKept: kept.length,
+		kept,
+		/** Each file in order: its outcome and seconds of audio. */
+		files: r.h.ops.map(o => [
+			o.outcome,
+			Math.round((o.frames / 8000) * 10) / 10,
+		]),
+		decisions: r.h.rec
+			.diagnostics()
+			.recent.map(d => `${d.observationId ?? "?"}:${d.code}`),
+	}
+}
+
 async function lpdIsm(): Promise<Record<string, unknown>> {
 	const r = rig()
 	await quiet(r, 1)
@@ -325,5 +381,6 @@ for (const scene of [
 	() => pager("analog-fm"),
 	() => pager("fsk2-wide"),
 	lpdIsm,
-])
+	...[6, 9, 10, 20, 30].map(spacing => () => pagerSequence(spacing)),
+].filter((_, i) => scenes === null || scenes.includes(i)))
 	process.stdout.write(`${JSON.stringify(await scene())}\n`)

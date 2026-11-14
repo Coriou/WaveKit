@@ -10,8 +10,10 @@
  *   the air (the transmission's own, or a joined other one's)? fileDecodedOwn asks the same of a
  *   finished file.
  * - admissionVerdict and finishVerdict: does the discovery's standing prior (a decode or class
- *   of it at any time, readPrior) admit the recording only as a shadow its own audio must class,
- *   discard it at its finish, hold it provisional for LATE_VERDICT_GRACE_MS, or keep it?
+ *   of it, readPrior) admit the recording only as a shadow its own audio must class, discard it
+ *   at its finish, hold it provisional for LATE_VERDICT_GRACE_MS, or keep it?
+ * - joinedVoiceOverlaps: does a joined voice share a finished file (never discarded with it)?
+ * - provisionalRoom: how many files of a source may be held at once?
  * - DigitalClassLedger: when has a backed digital class been seen often and recently enough on a
  *   discovery to count as a (suspect) prior?
  */
@@ -159,7 +161,8 @@ export function fileDecodedOwn(
  * id asked). `labels` are the published labels of that owner (`owner` true) and of its
  * co-channel discoveries (same frequency key, at most DQ_CO_CHANNEL_MAX = 8; `owner` false;
  * informational: readPrior reads both alike, see PriorStrength);
- * `class` is the owner's stored class (the majority of its observations' spectral votes: weak).
+ * Each label's `at` is its decode's wall time (ms; null unknown), so a strong one lapses
+ * (STRONG_PRIOR_TTL_MS). `class` is the owner's stored class (the majority of its observations' spectral votes: weak).
  * `analogVoice` reads whether analog voice was heard on the channel (an analog tone or analog
  * voice proof of any of those observations, or an analog label at `classified` or more); it walks
  * up to 9 × 256 cached proofs, so it is asked only when a digital prior would otherwise apply.
@@ -170,6 +173,7 @@ export interface VoicePrior {
 		readonly protocol: ScannerProtocol
 		readonly confidence: ScannerConfidence
 		readonly owner: boolean
+		readonly at: number | null
 	}[]
 	readonly class: ScannerClass
 	analogVoice(): boolean
@@ -179,9 +183,11 @@ export interface VoicePrior {
  * How strong a prior is (docs/SCANNER.md, "Known digital or paging channels"):
  * - `tone-required`: STRONG. A decode (confidence `decoded`) of a protocol made only on a
  *   channel of its own (DEDICATED_CHANNEL_FAMILIES: a pager, or APRS, AIS, ACARS, VDL2, ADS-B)
- *   on the owner or a co-channel discovery. A new recording starts as a shadow that writes nothing unless its own
- *   audio carries speech over a CTCSS tone (the recorder's classByTone); it is never a
- *   remembered refusal.
+ *   on the owner or a co-channel discovery, made within STRONG_PRIOR_TTL_MS of now (an older or
+ *   undated one is only `suspect`). A new recording, and a file of a transmission that joined a
+ *   recording while the prior was strong, is a shadow that writes nothing unless its own audio
+ *   carries speech over a CTCSS tone (the recorder's classByTone); it is never a remembered
+ *   refusal.
  * - `suspect`: WEAK. A digital voice decode (DMR, NXDN, YSF, dPMR, ...) on the owner or a
  *   co-channel discovery: the store keeps analog and digital overs of one channel in one
  *   discovery (a lone merge) as readily as in two, and PMR446 and DMR446, mixed-mode repeaters
@@ -218,31 +224,51 @@ const DEDICATED_CHANNEL_FAMILIES: ReadonlySet<ProtocolFamily> = new Set([
  */
 const SHARED_CHANNEL_PROTOCOLS: ReadonlySet<ScannerProtocol> = new Set(["lora"])
 
-/** Strong (PriorStrength): a decode of a dedicated-channel protocol, of the owner or a co-channel discovery. */
-function strongLabel(l: VoicePrior["labels"][number]): boolean {
+/**
+ * How long a dedicated-channel decode stays a strong prior after it was made: 30 × 60 000 =
+ * 1 800 000 ms. A discovery shows its newest decode, so a pager channel that pages at least once
+ * per 30 min stays strong; past it (a quiet channel, a misattributed or merged decode, a channel
+ * now used for voice) the label is only `suspect`: its files are held and discarded only by a
+ * decode of their own signal, so at most the first burst after each silence longer than this is
+ * kept, and an untoned voice is never locked out for longer.
+ */
+export const STRONG_PRIOR_TTL_MS = 30 * 60_000
+
+/**
+ * Strong (PriorStrength): a decode of a dedicated-channel protocol, of the owner or a co-channel
+ * discovery, made in [now − STRONG_PRIOR_TTL_MS, now + STRONG_PRIOR_TTL_MS] (a clock skew either
+ * way; an undated one never is).
+ */
+function strongLabel(l: VoicePrior["labels"][number], now: number): boolean {
 	return (
 		decodedNotVoice(l) &&
 		DEDICATED_CHANNEL_FAMILIES.has(familyOf(l.protocol)) &&
-		!SHARED_CHANNEL_PROTOCOLS.has(l.protocol)
+		!SHARED_CHANNEL_PROTOCOLS.has(l.protocol) &&
+		l.at !== null &&
+		Math.abs(now - l.at) <= STRONG_PRIOR_TTL_MS
 	)
 }
 
-function weakDigital(prior: VoicePrior): boolean {
+function weakDigital(prior: VoicePrior, now: number): boolean {
 	if (digitalClass(prior.class)) return true
 	return prior.labels.some(
 		l =>
 			l.protocol === "digital-unknown" ||
-			(notAnalogVoiceProtocol(l.protocol) && !strongLabel(l)),
+			(notAnalogVoiceProtocol(l.protocol) && !strongLabel(l, now)),
 	)
 }
 
-/** The prior's strength (PriorStrength); a throwing analogVoice reads as voice heard (keeps). */
+/**
+ * The prior's strength at `now` (wall ms; PriorStrength); a throwing analogVoice reads as voice
+ * heard (keeps).
+ */
 export function readPrior(
 	prior: VoicePrior | null,
 	backedClass: boolean,
+	now: number,
 ): PriorStrength {
-	const strong = prior?.labels.some(strongLabel) === true
-	if (!strong && !backedClass && (prior === null || !weakDigital(prior)))
+	const strong = prior?.labels.some(l => strongLabel(l, now)) === true
+	if (!strong && !backedClass && (prior === null || !weakDigital(prior, now)))
 		return "none"
 	if (prior !== null && analogVoiceHeard(prior)) return "none"
 	return strong ? "tone-required" : "suspect"
@@ -272,8 +298,9 @@ function analogVoiceHeard(prior: VoicePrior): boolean {
 export function admissionVerdict(
 	prior: VoicePrior | null,
 	backedClass: boolean,
+	now: number,
 ): "tone-required" | null {
-	return readPrior(prior, backedClass) === "tone-required"
+	return readPrior(prior, backedClass, now) === "tone-required"
 		? "tone-required"
 		: null
 }
@@ -287,25 +314,60 @@ export function admissionVerdict(
  */
 export const LATE_VERDICT_GRACE_MS = 3_000 + 8_000 + 15_000
 /**
- * Provisional files held at once per source: the store admits MAX_ACTIVE_ANALOG_PER_SOURCE = 2
- * operations per source and a held file keeps its operation, so 2 − 1 = 1 is held and one stays
- * free for a new recording; a second one to hold finishes the older one now (kept), and so does a
- * track classed analog-fm that finds every recording slot of the source taken.
+ * Provisional files held at once on a source recording at most `cap` at once
+ * (widebandRecordingCap, 1 or 2: the store's MAX_ACTIVE_ANALOG_PER_SOURCE = 2): a held file keeps
+ * its slot, so cap − 1 are held and one slot stays free for a new recording; at cap 1 none is
+ * (0: every file is finished at once). A file to hold past it finishes the oldest held one now
+ * (kept), and so does any candidate that finds every slot taken and is not known non-voice.
  */
-export const MAX_PROVISIONAL_PER_SOURCE = 1
+export function provisionalRoom(cap: number): number {
+	return Number.isFinite(cap) ? Math.max(0, Math.floor(cap) - 1) : 0
+}
 
-/** What finishing a written file does: finish it (kept), hold it provisional, or discard it. */
-export type FinishVerdict = "finish" | "hold" | "discarded:not-analog"
+/**
+ * A joined observation with voice evidence (`joinedVoice`: id → the newest sample its track was
+ * reported on; `joins`: id → its track's start sample) was on the air in the file's
+ * [startSample, endSample] (+∞ while open): that file is not the session owner's alone.
+ */
+export function joinedVoiceOverlaps(
+	s: {
+		readonly joins: ReadonlyMap<string, number>
+		readonly joinedVoice: ReadonlyMap<string, number>
+	},
+	file: { readonly startSample: number; readonly endSample: number | null },
+): boolean {
+	const until = file.endSample ?? Number.POSITIVE_INFINITY
+	for (const [id, last] of s.joinedVoice)
+		if ((s.joins.get(id) ?? last) <= until && last >= file.startSample)
+			return true
+	return false
+}
+
+/**
+ * What finishing a written file does: finish it (kept), hold it provisional, or discard it:
+ * `discarded:known-non-voice`, a shadow of a channel with a strong prior its own audio never
+ * classed; `discarded:late-non-voice`, a decode of its own signal found at its finish or when
+ * its hold ends.
+ */
+export type FinishVerdict =
+	| "finish"
+	| "hold"
+	| "discarded:known-non-voice"
+	| "discarded:late-non-voice"
 
 /**
  * A written file's fate at its finish (`final` false) or at the end of its grace (`final` true),
  * in this order: a file whose own audio carried a CTCSS tone, or whose session its tone classed
  * (`ownTone`: a roll-over file of a toned over), is always kept; one whose
- * own signal a decode proves not analog voice (`decodedOwn`, fileDecodedOwn) is discarded; under a
- * `tone-required` prior a file no snapshot classed analog-fm (`snapshotClassed` false: classed by
- * its own audio only) is discarded and one a snapshot classed is held, then kept; under a
- * `suspect` prior it is held, then kept; with none it is kept at once. A prior alone (a decode of
- * another transmission, a co-channel discovery's) never discards a file a snapshot classed.
+ * own signal a decode proves not analog voice (`decodedOwn`, fileDecodedOwn) is discarded
+ * (`discarded:late-non-voice`) unless a joined voice was on the air in it (`joinedVoice`,
+ * joinedVoiceOverlaps: kept at once, the two cannot be separated); under a `tone-required` prior
+ * a file no snapshot classed analog-fm (`snapshotClassed` false: classed by its own audio only,
+ * or a file of a transmission that joined while the prior was strong) is discarded
+ * (`discarded:known-non-voice`) and one a snapshot classed is held, then kept; under a `suspect`
+ * prior it is held, then kept; with none it is kept at once. A prior alone (a decode of another
+ * transmission, a co-channel discovery's) never discards a file a snapshot classed. `now`: wall
+ * ms (readPrior).
  */
 export function finishVerdict(input: {
 	readonly prior: VoicePrior | null
@@ -313,13 +375,16 @@ export function finishVerdict(input: {
 	readonly ownTone: boolean
 	readonly snapshotClassed: boolean
 	readonly decodedOwn: boolean
+	readonly joinedVoice: boolean
 	readonly final: boolean
+	readonly now: number
 }): FinishVerdict {
 	if (input.ownTone) return "finish"
-	if (input.decodedOwn) return "discarded:not-analog"
-	const strength = readPrior(input.prior, input.backedClass)
+	if (input.decodedOwn)
+		return input.joinedVoice ? "finish" : "discarded:late-non-voice"
+	const strength = readPrior(input.prior, input.backedClass, input.now)
 	if (strength === "tone-required" && !input.snapshotClassed)
-		return "discarded:not-analog"
+		return "discarded:known-non-voice"
 	return strength === "none" || input.final ? "finish" : "hold"
 }
 

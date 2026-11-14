@@ -117,9 +117,10 @@ import {
 	fileDecodedOwn,
 	finishVerdict,
 	graceTimer,
+	joinedVoiceOverlaps,
 	LATE_VERDICT_GRACE_MS,
-	MAX_PROVISIONAL_PER_SOURCE,
 	notVoiceDecode,
+	provisionalRoom,
 	barredSnapshot,
 	ownVetoEnds,
 	type OwnVeto,
@@ -863,6 +864,8 @@ interface Session {
 	 * `digital` throughout.
 	 */
 	readonly toneRequired: boolean
+	/** A join keyed up here under a strong prior: from its pre-roll, files need their own audio's class. */
+	strongFrom: number
 	/**
 	 * The owner's latest snapshot has a spectral class other than analog FM (`spectralDigital`):
 	 * the lowest slot priority, and a bounded time to be classed (WIDEBAND_DIGITAL_*_MS).
@@ -1062,7 +1065,7 @@ function usableTrust(trust: TuningTrust): trust is Usable {
 
 /** A session that ends never classed: a tone-required one is not analog voice. */
 function unclassedCode(s: Session): ScannerRecorderDecision {
-	return s.toneRequired ? "discarded:not-analog" : "discarded:unclassed"
+	return s.toneRequired ? "discarded:known-non-voice" : "discarded:unclassed"
 }
 
 /** A track a recording may use: narrow, in the usable span, no image or spur, trusted tuning. */
@@ -2161,9 +2164,10 @@ export class WidebandAnalogRecorder {
 	private priorOf(
 		discoveryId: string | null,
 		seen?: string,
-	): [VoicePrior | null, boolean] {
+	): [VoicePrior | null, boolean, number] {
+		const now = this.deps.now()
 		if (discoveryId === null || this.deps.voicePrior === undefined)
-			return [null, false]
+			return [null, false, now]
 		let prior: VoicePrior | null = null
 		try {
 			prior = this.deps.voicePrior(discoveryId)
@@ -2171,8 +2175,8 @@ export class WidebandAnalogRecorder {
 			// An unreadable prior proves nothing: today's behaviour.
 		}
 		const key = prior?.id ?? discoveryId
-		if (seen !== undefined) this.digitalSeen.note(key, seen, this.deps.now())
-		return [prior, this.digitalSeen.strong(key, this.deps.now())]
+		if (seen !== undefined) this.digitalSeen.note(key, seen, now)
+		return [prior, this.digitalSeen.strong(key, now), now]
 	}
 
 	private onTrack(input: WidebandTrackInput): void {
@@ -2291,6 +2295,8 @@ export class WidebandAnalogRecorder {
 			)
 			s.observations.add(observationId)
 			if (observationId !== s.owner) {
+				if (admissionVerdict(...this.priorOf(s.discoveryId)) !== null)
+					s.strongFrom = Math.min(s.strongFrom, track.startSample)
 				s.joins.delete(observationId)
 				s.joins.set(observationId, track.startSample)
 				if (s.joins.size > WIDEBAND_JOINS_KEPT) {
@@ -2370,8 +2376,8 @@ export class WidebandAnalogRecorder {
 		const toneOnly =
 			admissionVerdict(...this.priorOf(input.discoveryId)) !== null
 		const analog = input.analogFm && !toneOnly
-		// A voice needs a slot a held file keeps: that file's grace ends now (release).
-		if (analog && this.activeOn(input.sourceId) >= cap)
+		// A candidate not known non-voice needs a slot a held file keeps: its grace ends (release).
+		if (!toneOnly && this.activeOn(input.sourceId) >= cap)
 			for (const [f, h] of [...this.held])
 				if (h.s.sourceId === input.sourceId) this.release(f)
 		// A yielded tone-only session's observations wait for the candidate it yielded to.
@@ -2634,6 +2640,7 @@ export class WidebandAnalogRecorder {
 			classed: input.analogFm && !toneRequired,
 			toneOnly: false,
 			toneRequired,
+			strongFrom: Number.POSITIVE_INFINITY,
 			digital:
 				toneRequired || (input.spectralDigital === true && !input.analogFm),
 			stale:
@@ -4095,7 +4102,10 @@ export class WidebandAnalogRecorder {
 	 */
 	private finishOrHold(s: Session, file: FileState, final: boolean): void {
 		if (file.handle === null || file.failed || this.held.has(file)) return
-		const [prior, backedClass] = this.priorOf(s.discoveryId)
+		const [prior, backedClass, now] = this.priorOf(s.discoveryId)
+		const room = provisionalRoom(
+			widebandRecordingCap(s.fs, this.deps.settings().cpuBudgetCores),
+		)
 		const decodedOwn = fileDecodedOwn(
 			notVoiceDecode(this.deps.decodedLabel, s.discoveryId),
 			s.owner,
@@ -4107,12 +4117,17 @@ export class WidebandAnalogRecorder {
 					prior,
 					backedClass,
 					ownTone: file.toneHz !== null || file.toneCarried,
-					snapshotClassed: s.classed && !s.toneOnly,
+					snapshotClassed:
+						s.classed &&
+						!s.toneOnly &&
+						file.startSample < s.strongFrom + s.vetoFrom - s.onset,
 					decodedOwn,
-					final,
+					joinedVoice: joinedVoiceOverlaps(s, file),
+					final: final || room === 0,
+					now,
 				})
 			: "finish"
-		if (verdict === "discarded:not-analog") {
+		if (verdict !== "finish" && verdict !== "hold") {
 			this.endFile(s, file, verdict)
 			file.failed = true
 			this.fileLost(s)
@@ -4122,7 +4137,7 @@ export class WidebandAnalogRecorder {
 			const cancel = run(LATE_VERDICT_GRACE_MS, () => this.release(file))
 			this.held.set(file, { s, cancel })
 			const mine = [...this.held].filter(([, h]) => h.s.sourceId === s.sourceId)
-			if (mine.length > MAX_PROVISIONAL_PER_SOURCE) this.release(mine[0]![0])
+			if (mine.length > room) this.release(mine[0]![0])
 		} else {
 			file.finishAsked = true
 			void file.handle.finish(file.cut).catch(() => undefined)

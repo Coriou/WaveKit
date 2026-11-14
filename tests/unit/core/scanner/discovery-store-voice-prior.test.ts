@@ -1,6 +1,6 @@
 /**
  * DiscoveryStore.voicePrior composed with the recorder's policy (recording-verdict.ts), as
- * scanner-service wires it: a discovery decoded POCSAG at any earlier time admits a recording only
+ * scanner-service wires it: a discovery decoded POCSAG within STRONG_PRIOR_TTL_MS admits a recording only
  * as a shadow its own tone must class, one decoded DMR only holds; a channel where analog voice
  * was heard (a recorder tone) keeps recording despite a decode; a folder nobody owns reads no
  * prior.
@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest"
 import {
 	admissionVerdict,
 	readPrior,
+	STRONG_PRIOR_TTL_MS,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { ProofAnalogInput } from "../../../../src/core/scanner/scanner-redesign-contract.js"
@@ -67,13 +68,15 @@ describe("DiscoveryStore.voicePrior", () => {
 		const prior = store.voicePrior(id) ?? null
 		// The owner's own label, marked as the owner's, with the live owner's id.
 		expect(prior?.id).toBe(id)
-		expect(prior?.labels).toContainEqual({
-			protocol: "dmr",
-			confidence: "decoded",
-			owner: true,
-		})
-		expect(readPrior(prior, false)).toBe("suspect")
-		expect(admissionVerdict(prior, false)).toBeNull()
+		expect(prior?.labels).toContainEqual(
+			expect.objectContaining({
+				protocol: "dmr",
+				confidence: "decoded",
+				owner: true,
+			}),
+		)
+		expect(readPrior(prior, false, T0)).toBe("suspect")
+		expect(admissionVerdict(prior, false, T0)).toBeNull()
 	})
 
 	it("a discovery decoded POCSAG admits a later recording only as a shadow its own tone must class", () => {
@@ -85,12 +88,18 @@ describe("DiscoveryStore.voicePrior", () => {
 		expect(store.appendObservationEvidence("pager", ev)).toBe(true)
 		store.applyEvidence(id, ev)
 		const prior = store.voicePrior(id) ?? null
+		// With its decode's time: strong for STRONG_PRIOR_TTL_MS after it, suspect past it.
 		expect(prior?.labels).toContainEqual({
 			protocol: "pocsag",
 			confidence: "decoded",
 			owner: true,
+			at: T0 + 500,
 		})
-		expect(admissionVerdict(prior, false)).toBe("tone-required")
+		expect(admissionVerdict(prior, false, T0 + 500)).toBe("tone-required")
+		const last = T0 + 500 + STRONG_PRIOR_TTL_MS
+		expect(admissionVerdict(prior, false, last)).toBe("tone-required")
+		expect(admissionVerdict(prior, false, last + 1)).toBeNull()
+		expect(readPrior(prior, false, last + 1)).toBe("suspect")
 	})
 
 	it("the same channel with analog voice heard (a recorder tone) keeps recording: frozen voice", () => {
@@ -102,14 +111,14 @@ describe("DiscoveryStore.voicePrior", () => {
 		for (const which of [id, voice]) {
 			const prior = store.voicePrior(which) ?? null
 			expect(prior).not.toBeNull()
-			expect(admissionVerdict(prior, false)).toBeNull()
+			expect(admissionVerdict(prior, false, at)).toBeNull()
 		}
 	})
 
 	it("a discovery with no decode reads no non-voice prior", () => {
 		const store = newStore()
 		const id = store.ingest(obs("v", T0)).discoveryId ?? ""
-		expect(admissionVerdict(store.voicePrior(id) ?? null, false)).toBeNull()
+		expect(admissionVerdict(store.voicePrior(id) ?? null, false, T0)).toBeNull()
 	})
 
 	it("a folder nobody owns reads undefined", () => {

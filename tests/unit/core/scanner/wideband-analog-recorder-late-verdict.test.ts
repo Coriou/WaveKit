@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest"
 import {
 	LATE_VERDICT_GRACE_MS,
+	STRONG_PRIOR_TTL_MS,
 	type VoicePrior,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import {
@@ -24,6 +25,7 @@ import type {
 	ScannerProtocol,
 } from "../../../../src/core/scanner/types.js"
 import {
+	HARNESS_T0,
 	LOW_FS,
 	LOW_OFFSET,
 	harness,
@@ -50,11 +52,13 @@ function prior(
 	}
 }
 
+/** A label decoded at the harness's (fixed) wall clock: a recent decode. */
 const label = (
 	protocol: ScannerProtocol,
 	owner = true,
 	confidence: ScannerConfidence = "decoded",
-) => ({ protocol, confidence, owner })
+	at: number | null = HARNESS_T0,
+) => ({ protocol, confidence, owner, at })
 const spectral = (c: ScannerClass): VoicePrior => prior({ class: c })
 const pocsagDecoded = prior({ labels: [label("pocsag")] })
 const coChannelDmr = prior({
@@ -122,7 +126,7 @@ describe("admission: a strong prior admits only a shadow its own audio must clas
 		await over(h, "o", 4)
 		await h.rec.idle()
 		expect(h.ops).toHaveLength(0)
-		expect(codes(h)).toEqual(["shadow", "voiced", "discarded:not-analog"])
+		expect(codes(h)).toEqual(["shadow", "voiced", "discarded:known-non-voice"])
 		expect(refusals(h)).not.toContain("refused:not-analog")
 	}, 120_000)
 
@@ -272,7 +276,7 @@ describe("late verdict within the grace", () => {
 		await h.fire()
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["aborted"])
-		expect(codes(h)).toContain("discarded:not-analog")
+		expect(codes(h)).toContain("discarded:late-non-voice")
 		expect(codes(h)).not.toContain("finalized")
 	}, 120_000)
 
@@ -359,11 +363,11 @@ describe("late verdict within the grace", () => {
 		const ends = codes(h).filter(
 			c => c.startsWith("discarded") || c === "finalized",
 		)
-		expect(ends).toEqual(["discarded:not-analog"])
+		expect(ends).toEqual(["discarded:late-non-voice"])
 		expect(h.rec.owns("o")).toBe(false)
 	}, 120_000)
 
-	it("a second provisional file on the source (past MAX_PROVISIONAL_PER_SOURCE = 1) ends the first one's grace (kept)", async () => {
+	it("a second provisional file on the source (past provisionalRoom(2) = 1) ends the first one's grace (kept)", async () => {
 		const h = low(() => spectral("fsk2-wide"))
 		await h.feed(1, false)
 		await over(h, "a", 4)
@@ -378,21 +382,88 @@ describe("late verdict within the grace", () => {
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
 	}, 120_000)
 
-	it("M2: at a cap of 1 recording, a held file gives its slot to a new voice: the voice is recorded, the held file finalized", async () => {
+	it("M2: at a cap of 1 recording nothing is held (provisionalRoom(1) = 0): a file under a suspect prior is finalized at once and the next voice is recorded whole", async () => {
 		// cpuBudgetCores 0.3 at 96 kHz: floor(0.25 × 0.3 × 1000 / (50 + 9 × 0.096)) = floor(1.47) = 1.
 		const h = low(() => spectral("fsk2-wide"), null, { budget: 0.3 })
 		await h.feed(1, false)
 		await over(h, "a", 4)
-		expect(h.ops.map(o => o.outcome)).toEqual([null])
-		expect(h.rec.activeOn("rtl")).toBe(1)
+		expect(h.timers).toHaveLength(0)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		expect(h.rec.activeOn("rtl")).toBe(0)
 		await over(h, "b", 4)
-		expect(h.ops[0]!.outcome).toBe("finalized")
-		expect(h.ops).toHaveLength(2)
-		await h.fire()
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
-		// Its whole over: 4 s + 0.3 s pre-roll at least (the 3 s ring covered the slot's wait).
+		expect(h.timers).toHaveLength(0)
+		expect(refusals(h)).not.toContain("refused:slots")
+		// Its whole over: 4 s + 0.3 s pre-roll at least.
 		expect(h.ops[1]!.frames / 8000).toBeGreaterThanOrEqual(4.25)
+	}, 120_000)
+
+	/**
+	 * At a cap of 2 (budget 1 core at 96 kHz: floor(250 / 50.9) = 4 → 2): a file held on the
+	 * channel, a live session on a second channel, then a candidate on a third channel finding
+	 * both slots taken.
+	 */
+	const fullSource = async (
+		candidate: Partial<WidebandTrackInput>,
+		strong = false,
+	) => {
+		const h = low(id =>
+			strong && id === "d_c" ? pocsagDecoded : spectral("fsk2-wide"),
+		)
+		await h.feed(1, false)
+		await over(h, "a", 4)
+		expect(h.ops.map(o => o.outcome)).toEqual([null])
+		const on = h.engine.liveEdge()
+		const at = (id: string, hz: number, extra: Partial<WidebandTrackInput>) =>
+			h.rec.track(
+				input(id, snapshot(id, on, h.engine.liveEdge(), { centreHz: hz }), {
+					discoveryId: `d_${id}`,
+					...extra,
+				}),
+			)
+		await h.feed(0.3, false, () => at("b", 100_000_000 - 20_000, {}))
+		expect(h.rec.activeOn("rtl")).toBe(2)
+		await h.feed(0.5, false, () => {
+			at("b", 100_000_000 - 20_000, {})
+			at("c", 100_000_000 - 5_000, candidate)
+		})
+		return h
+	}
+
+	for (const [name, candidate] of [
+		[
+			"an unclassed shadow (weak NFM read as a narrow digital class)",
+			{ analogFm: false, shadowAllowed: true, spectralDigital: true },
+		],
+		[
+			"an unclassed shadow with no spectral class",
+			{ analogFm: false, shadowAllowed: true },
+		],
+		["a track classed analog-fm", {}],
+	] as const)
+		it(`M2: at a cap of 2, ${name} finding every slot taken ends the held file's grace (kept) and is then recorded`, async () => {
+			const h = await fullSource(candidate)
+			expect(h.ops[0]!.outcome).toBe("finalized")
+			expect(h.rec.owns("c")).toBe(true)
+			expect(
+				h.rec
+					.diagnostics()
+					.recent.filter(d => d.observationId === "c")
+					.map(d => d.code)[0],
+			).toMatch(/^(?:started|shadow)$/)
+		}, 120_000)
+
+	it("M2: a candidate known non-voice (a shadow under a strong prior) never ends a hold: it waits for the slot", async () => {
+		const h = await fullSource({ analogFm: true }, true)
+		// d_c's pager decode makes c a tone-required shadow: the held file stays held.
+		expect(h.ops[0]!.outcome).toBeNull()
+		expect(h.rec.owns("c")).toBe(false)
+		expect(refusals(h)).toContain("refused:slots")
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops[0]!.outcome).toBe("finalized")
 	}, 120_000)
 
 	it("stop ends every grace: a held file is finished, its final verdict applied", async () => {
@@ -401,5 +472,126 @@ describe("late verdict within the grace", () => {
 		await over(h, "o", 4)
 		await h.rec.stop()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+})
+
+/**
+ * Two transmissions on one channel: `a` for `aSeconds`, closed at its end, `gap` s of quiet,
+ * `beforeB` (a decode landing, the prior changing), then `b` for `bSeconds` (joining `a`'s session
+ * within its 2 s hang), closed 600 ms late, then 3.5 s of quiet.
+ */
+async function twoOvers(
+	h: Harness,
+	a: string,
+	aSeconds: number,
+	gap: number,
+	b: string,
+	bSeconds: number,
+	beforeB?: () => void,
+): Promise<void> {
+	const one = async (id: string, seconds: number) => {
+		const on = h.engine.liveEdge()
+		await h.feed(seconds, true, () => {
+			const edge = h.engine.liveEdge()
+			if (edge - on >= 0.1 * h.fs)
+				h.rec.track(input(id, snapshot(id, on, edge, LOW)))
+		})
+		return { on, end: h.engine.liveEdge() }
+	}
+	const ta = await one(a, aSeconds)
+	h.rec.closed(a, snapshot(a, ta.on, ta.end, LOW), null, {
+		analogFm: true,
+		discoveryId: "d_1",
+	})
+	await h.feed(gap, false)
+	beforeB?.()
+	const tb = await one(b, bSeconds)
+	await h.feed(0.6, false)
+	h.rec.closed(b, snapshot(b, tb.on, tb.end, LOW), null, {
+		analogFm: true,
+		discoveryId: "d_1",
+	})
+	await h.feed(3.5, false)
+}
+
+describe("joined transmissions and late verdicts", () => {
+	it("M1: a pager owner burst (read analog-fm), an analog reply joined in its hang, the owner's decode landing in the grace: the reply's audio survives", async () => {
+		const { box, voicePrior } = priorBox(spectral("fsk2-wide"))
+		let decode: DecodedLabel | null = null
+		const h = low(voicePrior, null, { decodedLabel: () => decode })
+		await h.feed(1, false)
+		await twoOvers(h, "o", 3, 0.2, "r", 4)
+		// The owner's decode lands (the store's prior turns strong), citing the burst.
+		box.value = pocsagDecoded
+		decode = { protocol: "pocsag", at: h.now(), observationId: "o" }
+		await h.fire()
+		await h.rec.idle()
+		const kept = h.ops.filter(o => o.outcome === "finalized")
+		// The reply's whole 4 s is in a kept file.
+		expect(kept.length).toBeGreaterThanOrEqual(1)
+		expect(Math.max(...kept.map(o => o.frames)) / 8000).toBeGreaterThanOrEqual(
+			4,
+		)
+		expect(codes(h)).not.toContain("discarded:late-non-voice")
+	}, 120_000)
+
+	it("without a joined voice the owner's decode in the grace still discards its file late", async () => {
+		const { box, voicePrior } = priorBox(spectral("fsk2-wide"))
+		let decode: DecodedLabel | null = null
+		const h = low(voicePrior, null, { decodedLabel: () => decode })
+		await h.feed(1, false)
+		await over(h, "o", 3)
+		box.value = pocsagDecoded
+		decode = { protocol: "pocsag", at: h.now(), observationId: "o" }
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["aborted"])
+		expect(codes(h)).toContain("discarded:late-non-voice")
+	}, 120_000)
+
+	it("item 5: a burst keying up in an earlier burst's hang after the channel's pager decode landed is a shadow: its file is discarded as known non-voice", async () => {
+		const { box, voicePrior } = priorBox(null)
+		const h = low(voicePrior)
+		await h.feed(1, false)
+		await twoOvers(h, "p0", 4, 2.1, "p1", 4, () => {
+			box.value = pocsagDecoded
+		})
+		await h.fire()
+		await h.rec.idle()
+		// p0's file (kept: nothing marked the channel when it ran); p1's discarded.
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "aborted"])
+		expect(codes(h)).toContain("discarded:known-non-voice")
+		// p1 joined p0's session (no session of its own was started or shadowed).
+		expect(codes(h)).not.toContain("shadow")
+		expect(codes(h).filter(c => c === "started")).toHaveLength(1)
+	}, 120_000)
+
+	it("FROZEN: speech over a CTCSS tone keying up in the hang of a pager-decoded channel's session is kept", async () => {
+		const { box, voicePrior } = priorBox(null)
+		const h = low(voicePrior, 88.5, { syllables: true })
+		await h.feed(1, false)
+		await twoOvers(h, "p0", 4, 2.1, "v", 6, () => {
+			box.value = pocsagDecoded
+		})
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
+	}, 120_000)
+
+	it("a joined transmission's files are judged on the prior when it keyed up: a lapsed pager decode (past STRONG_PRIOR_TTL_MS) only holds them, then keeps them", async () => {
+		const lapsed = prior({
+			labels: [
+				label("pocsag", true, "decoded", HARNESS_T0 - STRONG_PRIOR_TTL_MS - 1),
+			],
+		})
+		const { box, voicePrior } = priorBox(null)
+		const h = low(voicePrior)
+		await h.feed(1, false)
+		await twoOvers(h, "p0", 4, 2.1, "p1", 4, () => {
+			box.value = lapsed
+		})
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
 	}, 120_000)
 })

@@ -1032,7 +1032,10 @@ export interface ScannerIqCaptureStatus {
  * observation. `refused:store` is retried once (a second one is final; a finishing or waiting
  * file's store failure refuses that file only). `refused:unsupported` and `refused:start-failed`
  * are final. `refused:close-only`: the observation was classed analog-fm only by a snapshot that
- * closed it while no recording ran for it (nothing is left to record). A `discarded:*` code means audio was held and dropped without a file. Every
+ * closed it while no recording ran for it (nothing is left to record). A `discarded:*` code means audio was held and dropped without a file:
+ * `discarded:known-non-voice`, a shadow on a channel with a strong pager or data prior whose own
+ * audio never classed it (no speech over a CTCSS tone); `discarded:late-non-voice`, a finished or
+ * held file whose own signal a decode proved not voice after its transmission ended. Every
  * recording that started ends with exactly one terminal decision per file: `finalized`,
  * `evicted`, `refused:*` or `discarded:*`.
  */
@@ -1057,6 +1060,8 @@ export const SCANNER_RECORDER_DECISIONS = [
 	"refused:store",
 	"refused:close-only",
 	"discarded:not-analog",
+	"discarded:known-non-voice",
+	"discarded:late-non-voice",
 	"discarded:unclassed",
 	"discarded:no-discovery",
 	"discarded:unvoiced",

@@ -92,7 +92,14 @@ async function pagerBurst(): Promise<Record<string, unknown>> {
 		labels:
 			decodedAt === null
 				? []
-				: [{ protocol: "pocsag", confidence: "decoded", owner: true }],
+				: [
+						{
+							protocol: "pocsag",
+							confidence: "decoded",
+							owner: true,
+							at: decodedAt,
+						},
+					],
 		class: "fsk2-wide",
 		analogVoice: () => false,
 	})
