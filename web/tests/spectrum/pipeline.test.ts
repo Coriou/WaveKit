@@ -12,7 +12,8 @@ import type { SocketHandlers } from "../../src/spectrum/socket.ts"
 import { FakeFrames, FakeRenderer, FakeTimers } from "./fakes.ts"
 import { frame } from "./frames.ts"
 
-function setup(withCanvas: boolean, texWidth = MAX_BINS) {
+/** `started`: the renderer's own task has run (as it has by the time a page shows anything). */
+function setup(withCanvas: boolean, texWidth = MAX_BINS, started = true) {
 	const posted: { msg: WorkerToMain; transfer: Transferable[] }[] = []
 	const subs: (SpectrumSubscription | null)[] = []
 	const renderer = new FakeRenderer()
@@ -49,6 +50,7 @@ function setup(withCanvas: boolean, texWidth = MAX_BINS) {
 		type: "subscribe",
 		subscription: { sourceId: "rtl", hz: 25, bins: 2048 },
 	})
+	if (started) timers.advance(0)
 	posted.length = 0
 	const ofType = <T extends WorkerToMain["type"]>(type: T) =>
 		posted
@@ -323,5 +325,48 @@ describe("SpectrumPipeline probe", () => {
 			id: 2,
 			db: 70 / 2 - 127.5,
 		})
+	})
+})
+
+describe("SpectrumPipeline: the stream does not wait for the renderer", () => {
+	const at = (n: number) => new Date(1_700_000_000_000 + n * 50).toISOString()
+
+	it("connects and subscribes before the renderer is created", () => {
+		const t = setup(true, MAX_BINS, false)
+		expect(t.subs).toEqual([{ sourceId: "rtl", hz: 25, bins: 2048 }])
+		expect(t.widths).toEqual([])
+		expect(t.pipeline.rendering).toBe(false)
+		t.timers.advance(0)
+		expect(t.widths).toEqual([MAX_BINS])
+		expect(t.pipeline.rendering).toBe(true)
+	})
+
+	it("holds the rows that arrive meanwhile and draws them once the renderer is up", () => {
+		const t = setup(true, MAX_BINS, false)
+		for (let i = 0; i < 3; i++)
+			t.pipeline.onServer({
+				type: "spectrum:frame",
+				data: frame({ bytes: [i + 1, 0, 0, 0], at: at(i) }),
+			})
+		// nothing drawn yet, and nothing sent to the main thread to draw
+		expect(t.renderer.rows).toEqual([])
+		expect(t.ofType("row")).toEqual([])
+		// the axes can follow the stream already
+		expect(t.ofType("meta").length).toBeGreaterThan(0)
+		t.timers.advance(0)
+		expect(t.renderer.rows.map(r => r.first)).toEqual([1, 2, 3])
+		// and later rows go straight to it
+		t.pipeline.onServer({
+			type: "spectrum:frame",
+			data: frame({ bytes: [9, 0, 0, 0], at: at(3) }),
+		})
+		expect(t.renderer.rows.map(r => r.first)).toEqual([1, 2, 3, 9])
+	})
+
+	it("never creates a renderer for a worker disposed in the same turn", () => {
+		const t = setup(true, MAX_BINS, false)
+		t.pipeline.handle({ type: "dispose" })
+		t.timers.advance(1000)
+		expect(t.widths).toEqual([])
 	})
 })

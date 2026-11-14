@@ -221,6 +221,31 @@ export function autoLevels(
 	return { minDb: Math.min(minDb, maxDb - 20), maxDb }
 }
 
+/** The noise floor counts as under a scale once it is this far (dB) below its bottom: past frame-to-frame wobble. */
+export const OFF_SCALE_MARGIN_DB = 5
+
+/**
+ * Where the noise floor sits against a scale the user fixed: "below" its bottom by more than
+ * OFF_SCALE_MARGIN_DB (the trace runs under the plot and the waterfall stays at its ground colour:
+ * the plot looks empty unless a signal is strong enough to reach the scale), "above" its top
+ * (everything saturates), or null when it is on the scale or unknown. A fixed scale outlives what
+ * it was set on: another receiver, antenna or gain moves the floor by tens of dB.
+ */
+export function floorOffScale(
+	levels: SpectrumLevels,
+	floorDbfs: number | null | undefined,
+): "below" | "above" | null {
+	if (
+		floorDbfs === null ||
+		floorDbfs === undefined ||
+		!Number.isFinite(floorDbfs)
+	)
+		return null
+	if (floorDbfs < levels.minDb - OFF_SCALE_MARGIN_DB) return "below"
+	if (floorDbfs > levels.maxDb) return "above"
+	return null
+}
+
 /** dB labels on the trace: a 10/20/30 dB step leaving at least 36 px between labels. */
 export function dbTicks(levels: SpectrumLevels, traceCss: number): DbTick[] {
 	const range = levels.maxDb - levels.minDb

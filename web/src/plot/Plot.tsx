@@ -33,6 +33,7 @@ import {
 	type PlacedLabel,
 	type Track,
 	autoLevels,
+	floorOffScale,
 	dbTicks,
 	describeTracks,
 	formatMHz,
@@ -57,10 +58,12 @@ import {
 } from "./plot-store.ts"
 import {
 	AVERAGING_ALPHA,
+	devicePrefsStore,
 	fftBins,
 	spectrumLevels,
 } from "../shell/device-prefs.ts"
 import { useDevicePrefs } from "../shell/hooks.ts"
+import { Button } from "../ui/index.ts"
 import {
 	AXIS_CSS,
 	DISCOVERY_ROW_CSS,
@@ -141,6 +144,8 @@ export interface PlotProps {
 const SPECTRUM_HZ = 25
 /** Ask the core for its whole backfill window (it clamps to its own limits). */
 const SPECTRUM_BACKFILL_MS = 10_000
+/** With a source shown and no frame drawn for this long (ms), the plot reads "Starting the spectrum…". */
+const SPECTRUM_STARTING_AFTER_MS = 2000
 /** Bursty signals keep their label this long after the last burst. */
 const TRACK_HOLD_MS = 1500
 const DRAG_THRESHOLD_PX = 3
@@ -273,6 +278,24 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 				}
 			: null
 	const capStart = capture?.startHz ?? null
+	// A source is shown and no frame has been drawn yet: after a moment the plot says it is starting
+	// (the worker's renderer can take seconds on a busy machine), instead of showing an empty grid.
+	const startingKey = sourceId !== null && shownMeta === null ? sourceId : null
+	const [startedSlow, setStartedSlow] = useState<string | null>(null)
+	useEffect(() => {
+		if (startingKey === null) return
+		const timer = setTimeout(
+			() => setStartedSlow(startingKey),
+			SPECTRUM_STARTING_AFTER_MS,
+		)
+		return () => clearTimeout(timer)
+	}, [startingKey])
+	const starting = startingKey !== null && startedSlow === startingKey
+	// a fixed scale the signal is no longer on draws an empty plot: say so, with the way out
+	const offScale =
+		device.spectrumRange === "fixed" && device.fixedLevels !== null
+			? floorOffScale(levels, shownMeta?.floorDbfs)
+			: null
 	const capEnd = capture?.endHz ?? null
 	// A view slid past the capture (plot-store.ts `free`) shows as is until the frames catch up.
 	const view = useMemo(
@@ -651,6 +674,31 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 						{engineError}
 					</div>
 				)}
+				{starting &&
+					linkNote === null &&
+					engineError === null &&
+					!stream.paused && (
+						<div className="wk-plot-note" role="status">
+							Starting the spectrum…
+						</div>
+					)}
+				{offScale !== null &&
+					linkNote === null &&
+					engineError === null &&
+					!stream.paused && (
+						<div className="wk-plot-note wk-plot-note-action" role="status">
+							{offScale === "below"
+								? "The noise floor is below the fixed scale"
+								: "The noise floor is above the fixed scale"}
+							<Button
+								size="sm"
+								variant="tonal"
+								onClick={() => devicePrefsStore.set({ spectrumRange: "auto" })}
+							>
+								Use Auto range
+							</Button>
+						</div>
+					)}
 			</div>
 			{size.w > 0 && view && capture && (
 				<BandRuler

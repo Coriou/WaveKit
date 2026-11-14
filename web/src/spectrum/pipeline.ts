@@ -125,6 +125,10 @@ export class SpectrumPipeline {
 	private texWidth = MAX_BINS
 	private inFlight = 0
 	private decodeErrorReported = false
+	/** This pipeline draws on a transferred canvas (set at init, before its renderer is up). */
+	private offscreen = false
+	/** The task that starts the renderer; null once it ran or was cancelled. */
+	private attachTimer: unknown = null
 	/** The next frame's meta goes out at once (first frame after a reset). */
 	private metaFresh = true
 	/** `at` (ms) of the newest row held. */
@@ -245,7 +249,7 @@ export class SpectrumPipeline {
 		this.onFrame(msg.data)
 	}
 
-	/** Context restored: a new renderer gets the ramp and the whole history again. */
+	/** A new renderer (the first one, or after a restored context) gets the ramp and the whole history. */
 	rebuild(canvas: OffscreenCanvas): void {
 		const state = this.state
 		const history = this.history
@@ -264,6 +268,9 @@ export class SpectrumPipeline {
 	}
 
 	dispose(): void {
+		if (this.attachTimer !== null)
+			this.deps.timers.clearTimeout(this.attachTimer)
+		this.attachTimer = null
 		this.socket?.dispose()
 		this.socket = null
 		this.scheduler?.dispose()
@@ -283,13 +290,24 @@ export class SpectrumPipeline {
 		}
 		this.texWidth = Math.max(MAX_BINS, msg.texWidth)
 		this.history = new WaterfallHistory(msg.historyRows, this.texWidth)
-		if (msg.canvas) this.attachRenderer(msg.canvas, msg.historyRows)
 		this.socket = this.deps.openSocket(msg.wsUrl, {
 			message: m => this.onServer(m),
 			state: (state, info) => this.onLink(state, info),
 		})
 		if (this.sourcePaused) this.socket.setSourcePaused?.(true)
 		if (this.subscription) this.socket.setSubscription(this.subscription)
+		// The renderer starts in a task of its own, after the socket: creating the WebGL context and
+		// its shaders blocks this worker (seconds on a busy machine or a software GPU), and the stream
+		// must not wait for it. A worker disposed in the same turn (a throwaway mount) never starts
+		// one. Rows that arrive meanwhile are held and drawn as soon as it is up.
+		const canvas = msg.canvas
+		if (canvas) {
+			this.offscreen = true
+			this.attachTimer = this.deps.timers.setTimeout(() => {
+				this.attachTimer = null
+				this.rebuild(canvas)
+			}, 0)
+		}
 	}
 
 	/**
@@ -409,6 +427,8 @@ export class SpectrumPipeline {
 		this.newestAt = Number.isFinite(at) ? at : null
 		if (this.scene) {
 			this.scene.addRow(axis, slot, count)
+		} else if (this.offscreen) {
+			// the renderer is still starting: the row is held in the history and drawn by rebuild()
 		} else if (this.inFlight < MAX_ROWS_IN_FLIGHT) {
 			const buffer = this.pool.pop() ?? new ArrayBuffer(this.texWidth)
 			new Uint8Array(buffer, 0, count).set(slot.subarray(0, count))

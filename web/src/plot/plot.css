@@ -391,6 +391,14 @@
 		color: var(--wk-text-3);
 		pointer-events: none;
 	}
+	/* a note with a way out (the fixed scale misses the signal: Use Auto range) */
+	.wk-plot-note-action {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		pointer-events: auto;
+		white-space: nowrap;
+	}
 
 	/* Right-click signal menu (SignalMenu.tsx): anchored at the pointer, opening towards the room left */
 	.wk-plot-sigmenu {

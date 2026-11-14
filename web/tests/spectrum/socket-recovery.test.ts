@@ -708,13 +708,14 @@ describe("SpectrumSocket recovery", () => {
 function pipelineOverSocket(authProbe: AuthProbe = probe(UNREACHABLE)) {
 	const posted: WorkerToMain[] = []
 	const renderer = new FakeRenderer()
+	const timers = new FakeTimers()
 	const pipeline = new SpectrumPipeline({
 		post: msg => posted.push(msg),
 		openSocket: (url, handlers) =>
 			new SpectrumSocket(url, handlers, { authProbe }),
 		createRenderer: () => renderer,
 		frame: new FakeFrames(),
-		timers: new FakeTimers(),
+		timers,
 	})
 	pipeline.handle({ type: "subscribe", subscription: SUB })
 	pipeline.handle({
@@ -728,6 +729,8 @@ function pipelineOverSocket(authProbe: AuthProbe = probe(UNREACHABLE)) {
 		historyRows: 16,
 		texWidth: MAX_BINS,
 	})
+	// the renderer starts in its own task, after the socket
+	timers.advance(0)
 	const links = () =>
 		posted.flatMap(m => (m.type === "connection" ? [m.state] : []))
 	return { pipeline, renderer, posted, links }
