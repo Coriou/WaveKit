@@ -575,6 +575,14 @@ The address bar names what is on screen, so a link reopens it: `#/map`, `#/activ
 WaveKit is a PWA: use **Install WaveKit** in the ⌘K palette, or your browser's install button.
 Browsers only install from HTTPS or `localhost`.
 
+A production build keeps its files in a service worker, so the app opens at once and still opens
+when the server is down. A page load always asks the server first, so a new build is what you get
+whenever the server answers; the **WaveKit was updated** toast only replaces the stored copy. The
+dev server keeps no service worker. If an address that served a production build now serves the
+dev server, the leftover worker and its stored copy are removed by themselves: the page removes
+them when it loads, and a window still showing the old build reloads into the dev server at its
+next update check.
+
 ## For contributors
 
 - Design system and decisions: [`docs/web/DESIGN.md`](web/DESIGN.md), tokens in

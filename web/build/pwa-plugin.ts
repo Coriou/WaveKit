@@ -1,6 +1,7 @@
 // Makes the web app an installable PWA (Chrome, Edge, Safari's Add to Dock): the web manifest, the brand's app
 // icons and, in production builds, the service worker (src/pwa/sw.ts) with this build's file list baked in.
-// The dev server serves the manifest and icons too, so install can be tried there; it never registers the worker.
+// The dev server serves the manifest and icons too, so install can be tried there; it never registers the worker,
+// and answers /sw.js with a script that removes one a production build left on the same address (kill-switch.ts).
 
 import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
@@ -9,6 +10,7 @@ import { fileURLToPath } from "node:url"
 import type { HtmlTagDescriptor, Plugin } from "vite"
 
 import { isPrecached } from "../src/pwa/sw-policy.ts"
+import { KILL_SWITCH_WORKER } from "./kill-switch.ts"
 
 const brandExports = fileURLToPath(
 	new URL("../../packages/brand/exports/", import.meta.url),
@@ -86,6 +88,13 @@ export function pwa(): Plugin {
 				if (path === `${base}manifest.webmanifest`) {
 					res.setHeader("Content-Type", "application/manifest+json")
 					res.end(JSON.stringify(webManifest(), null, "\t"))
+					return
+				}
+				if (path === `${base}sw.js`) {
+					// no worker in dev: this one removes a production build's (kill-switch.ts)
+					res.setHeader("Content-Type", "text/javascript")
+					res.setHeader("Cache-Control", "no-store")
+					res.end(KILL_SWITCH_WORKER)
 					return
 				}
 				const icon = PWA_ICONS.find(i => path === `${base}icons/${i.file}`)

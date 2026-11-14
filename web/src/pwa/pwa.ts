@@ -1,4 +1,5 @@
-// The page's side of the PWA: registers the service worker (production builds, secure contexts), offers a new
+// The page's side of the PWA: registers the service worker (production builds, secure contexts; any other build
+// removes a worker a production build left on the address, stale.ts), offers a new
 // build through the app toast, keeps Chrome's install prompt for ⌘K « Install WaveKit », marks <html> with
 // data-wk-display="standalone" in an installed window and keeps <meta name="theme-color"> on the theme's ground
 // (an installed window's title bar takes that colour).
@@ -6,6 +7,7 @@
 import { Store } from "../data/store.ts"
 import { themeStore } from "../shell/theme.ts"
 import { showAppToast } from "../shell/toast.ts"
+import { dropWorkers } from "./stale.ts"
 import { isStandalone, type PwaState } from "./state.ts"
 
 /** Chrome's install prompt event (not in the dom lib). */
@@ -127,10 +129,15 @@ export function startPwa(): void {
 		deferred = null
 		pwaState.update(s => ({ ...s, canPrompt: false }))
 	})
-	if (
-		import.meta.env.PROD &&
-		window.isSecureContext &&
-		"serviceWorker" in navigator
+	if (!("serviceWorker" in navigator)) return
+	if (import.meta.env.PROD) {
+		if (window.isSecureContext) registerWorker()
+		return
+	}
+	// Not a production build (the dev server): no worker here, and none left from a production build.
+	void dropWorkers(
+		new URL(import.meta.env.BASE_URL, window.location.href).href,
+		navigator.serviceWorker,
+		typeof caches === "undefined" ? undefined : caches,
 	)
-		registerWorker()
 }
