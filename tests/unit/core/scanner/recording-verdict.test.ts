@@ -42,6 +42,7 @@ import {
 	clearlyNoise,
 	clearlyNotSpeech,
 	SPEECH_FRAME_SAMPLES,
+	SPEECH_NOISE_MAX_BURST_FRAMES,
 	SPEECH_NOISE_MAX_PERIODIC_SHARE,
 	SPEECH_NOISE_MAX_RANGE_DB,
 	SPEECH_NOISE_MIN_FRAMES,
@@ -2014,14 +2015,14 @@ describe("finishVerdict: the strict clear-noise check under a weak prior", () =>
 			SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE,
 		)
 	})
-	it("the strict bound's length floor is 8 s: no shorter length keeps 3 dB to short-file voice", () => {
+	it("the strict bound's length floor is 8 s: 6 s falls short of 3 dB to short-file voice, 8 s keeps 2.99 dB", () => {
 		expect(SPEECH_NOISE_MIN_FRAMES).toBe(250)
 		expect((SPEECH_NOISE_MIN_FRAMES * SPEECH_FRAME_SAMPLES) / 8_000).toBe(8)
 		// Never under two non-overlapping windows (188 frames, 6 s).
 		expect(SPEECH_NOISE_MIN_FRAMES).toBeGreaterThanOrEqual(
 			2 * SPEECH_WINDOW_FRAMES,
 		)
-		// 6 s falls short of 3 dB; 8 s is the cap, at 2.99 dB.
+		// 6 s falls short of 3 dB; 8 s, the longest floor tried, keeps 2.99 dB.
 		expect(SHORT_VOICE_DB_AT_6_S - SPEECH_NOISE_MAX_RANGE_DB).toBeLessThan(3)
 		expect(SHORT_VOICE_DB_AT_FLOOR - SPEECH_NOISE_MAX_RANGE_DB).toBeGreaterThan(
 			2.95,
@@ -2031,7 +2032,8 @@ describe("finishVerdict: the strict clear-noise check under a weak prior", () =>
 		maxRangeDb: number,
 		periodicShare: number,
 		frames = SPEECH_NOISE_MIN_FRAMES,
-	): SpeechContent => ({ frames, maxRangeDb, periodicShare })
+		maxBurstFrames = 0,
+	): SpeechContent => ({ frames, maxRangeDb, periodicShare, maxBurstFrames })
 	for (const [name, content, notSpeech, noise] of [
 		["confirmed open-squelch noise (4.9 dB, 0.044)", c(4.9, 0.044), true, true],
 		["just under both strict bounds", c(5.99, 0.099), true, true],
@@ -2063,6 +2065,30 @@ describe("finishVerdict: the strict clear-noise check under a weak prior", () =>
 		[
 			"clear noise at 3 s (one window): not speech only",
 			c(3.2, 0.01, SPEECH_WINDOW_FRAMES),
+			true,
+			false,
+		],
+		[
+			"a burst one frame under the veto: clear noise",
+			c(4.9, 0.044, SPEECH_NOISE_MIN_FRAMES, SPEECH_NOISE_MAX_BURST_FRAMES - 1),
+			true,
+			true,
+		],
+		[
+			"a burst at the veto (96 ms): not speech only",
+			c(4.9, 0.044, SPEECH_NOISE_MIN_FRAMES, SPEECH_NOISE_MAX_BURST_FRAMES),
+			true,
+			false,
+		],
+		[
+			"a 0.3 s word on a quiet carrier (4 frames, the shortest synthetic burst): not speech only",
+			c(3.3, 0.02, SPEECH_NOISE_MIN_FRAMES, 4),
+			true,
+			false,
+		],
+		[
+			"a long burst leaves clearlyNotSpeech alone (the strong path): steady 4.9 dB",
+			c(4.9, 0.044, SPEECH_NOISE_MIN_FRAMES, 40),
 			true,
 			false,
 		],
@@ -2214,4 +2240,12 @@ describe("finishVerdict: the strict clear-noise check under a weak prior", () =>
 		it(name, () => {
 			expect(verdict(p, over)).toBe(out)
 		})
+
+	it("the FROZEN no-prior and `none`-prior rows are `none` priors", () => {
+		expect(priorReading(null, false, NOW).strength).toBe("none")
+		expect(priorReading(prior([], "analog-fm"), false, NOW).strength).toBe(
+			"none",
+		)
+		expect(priorReading(liveShape, false, NOW).strength).toBe("suspect")
+	})
 })

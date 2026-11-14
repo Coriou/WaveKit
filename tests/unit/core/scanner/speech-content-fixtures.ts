@@ -39,6 +39,11 @@ interface SpeechWave {
 	 */
 	readonly wordAtS?: number
 	readonly wordS?: number
+	/**
+	 * Sparse speech: speech only inside these [start s, length s] words, an unmodulated carrier
+	 * between them ("uh… yes… ok" on a quiet carrier).
+	 */
+	readonly words?: readonly (readonly [number, number])[]
 }
 interface FskWave {
 	readonly kind: "fsk"
@@ -98,6 +103,11 @@ function deviation(w: Waveform, fs: number, rng: () => number): () => number {
 				if (
 					w.wordS !== undefined &&
 					(t < (w.wordAtS ?? 0) || t >= (w.wordAtS ?? 0) + w.wordS)
+				)
+					return 0
+				if (
+					w.words !== undefined &&
+					!w.words.some(([at, len]) => t >= at && t < at + len)
 				)
 					return 0
 				const quiet =

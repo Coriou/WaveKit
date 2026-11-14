@@ -25,8 +25,13 @@
  * SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE. A shorter file, any unsteady window, or a periodic steady
  * signal (a pure or keyed tone, DTMF, a selcall) is kept: missing buzz is preferred to losing voice.
  * Clear noise (clearlyNoise): the same with the strict bounds SPEECH_NOISE_MAX_RANGE_DB and
- * SPEECH_NOISE_MAX_PERIODIC_SHARE and at least SPEECH_NOISE_MIN_FRAMES frames (8 s), the only
- * content check a weak (`suspect`) prior gets.
+ * SPEECH_NOISE_MAX_PERIODIC_SHARE, at least SPEECH_NOISE_MIN_FRAMES frames (8 s), and no burst
+ * (3. below) of SPEECH_NOISE_MAX_BURST_FRAMES frames or more, the only content check a weak
+ * (`suspect`) prior gets.
+ * 3. Longest burst (clearlyNoise only): the longest run of consecutive frames whose band level is
+ *    SPEECH_NOISE_BURST_DB or more over its window's median, the largest over the file's windows.
+ *    A short word on a quiet carrier fills too few of a window's frames to move its 90th
+ *    percentile (the range), but it is one run of loud frames; noise and data have none.
  *
  * Measured (scripts/bench/scanner-quality/speech-content.ts) on SYNTHETIC signals through
  * WidebandNfmChain, 12 s each (nothing here is a real recording): speech-like audio (pitched and
@@ -44,7 +49,8 @@
  * periodic), any tone.
  *
  * Cost: per frame one 256-point complex FFT of the windowed frame and one of its power spectrum
- * (Fft, shared tables), a few hundred multiply-adds, and per 47 frames one sort of 94 numbers; all
+ * (Fft, shared tables), a few hundred multiply-adds, and per 47 frames one sort of 94 numbers and
+ * one walk of them (the burst); all
  * buffers allocated in the constructor (about 5 KB per file), nothing after. 0.5 to 2.4 ms of a
  * core per second of audio (the bench, one Mac core), off the IQ path (the recorder feeds it what
  * it writes).
@@ -86,8 +92,10 @@ export const SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE = 0.2
  * finishVerdict's `clearNoise`). The hardest synthetic speech at a CNR of 6 dB or more measures
  * at least 10.16 dB (HARD_SPEECH_CASES, 12 s), a 4.16 dB margin; synthetic data and noise at most
  * 3.5 dB; real open-squelch noise a listener confirmed as such (one channel, 150 files) 3.8 to
- * 6.8 dB, its 120 s files 5.3 to 5.6 dB (a margin of about 0.4 dB): about nine in ten are caught. Never borderline audio: a file between this and SPEECH_STEADY_MAX_RANGE_DB is
- * judged only under a strong or backed prior.
+ * 6.8 dB, its 120 s files 5.3 to 5.6 dB (a margin of about 0.4 dB): of its files of 8 s or more
+ * (SPEECH_NOISE_MIN_FRAMES) 92 of 108 are caught, of all its files 92 of 151 (the bench, after
+ * the burst veto too). Never borderline audio: a file between this and SPEECH_STEADY_MAX_RANGE_DB
+ * is judged only under a strong or backed prior.
  */
 export const SPEECH_NOISE_MAX_RANGE_DB = 6
 /**
@@ -107,15 +115,46 @@ export const SPEECH_NOISE_MAX_PERIODIC_SHARE = 0.1
  * shallow (30 or 50 %) talker at 5 dB. The target, 3 dB over the 6 dB bound (9 dB), is met at no
  * length up to 8 s, so the floor is the 8 s cap: 8.99 − 6 = 2.99 dB of margin. Below a CNR of
  * 5 dB (under the FM threshold) the strict bounds call some cuts of 3 to 6 s noise; none at 8 s.
- * Not fixed by any length (the bench): 500 Hz deviation voice at a CNR of 8 to 10 dB (2 to 4 of 8
- * cuts called noise at 12 s, more when shorter: buried in the demodulator's noise, under the
- * periodic bound) and a single word under 0.5 s on a clean carrier at 10 to 20 dB (fewer than
- * a tenth of a window's frames, so the 90th percentile misses it).
+ * A single word under 0.5 s on a clean carrier at 10 to 30 dB (fewer than a tenth of a window's
+ * frames, so the 90th percentile misses it) is not fixed by any length either; the burst veto
+ * (SPEECH_NOISE_MAX_BURST_FRAMES) keeps it. THE ONE ACCEPTED EXCEPTION: voice at only 500 Hz
+ * peak deviation at a CNR of 8 to 10 dB (2 to 4 of 8 cuts called noise at 12 s, more when
+ * shorter). Physically its audio SNR is about 0 dB: FM's demodulated SNR grows with the square of
+ * the deviation ratio, and 500 Hz is a fifth of the 2 400 Hz the voice cases use (about 14 dB
+ * less audio SNR), so near the FM threshold the voice sits at the level of the demodulator's own
+ * noise: no syllable range, no pitched frames and no burst over the median (its longest burst
+ * measures 2 frames, under the veto). No measure of the audio can tell it from noise; such a
+ * talker is rare (a misset radio), and it is only at risk under a weak prior.
  */
 export const SPEECH_NOISE_MIN_FRAMES = 250
+/**
+ * A burst frame's band level over its window's median (dB): 6 dB, four times the power. Steady
+ * noise or data spreads little frame to frame (the band's 39 bins hold at most 78 degrees of
+ * freedom, so a frame's level varies by roughly 4.34·√(2/78) ≈ 0.7 dB rms, somewhat more with the
+ * Hann window's correlated bins): 6 dB is several standard deviations, and a lone noise spike
+ * fills one frame, not a run. A word on a quiet carrier at a CNR of 10 dB or more stays over it
+ * for 4 to 7 frames (SPEECH_NOISE_MAX_BURST_FRAMES).
+ */
+export const SPEECH_NOISE_BURST_DB = 6
+/**
+ * The burst veto (clearlyNoise only, not clearlyNotSpeech): a file with a burst of this many
+ * frames or more (3 × 32 ms = 96 ms) is never clear noise. Measured (the bench, `--burst`: a
+ * 0.3, 0.4 or 0.5 s word at the start, middle or tail of an 8 or 12 s file, and three or four
+ * words of 0.3 to 0.4 s over 10 s, at a CNR of 5 to 30 dB): every voice the other strict bounds
+ * call noise (11 words at 10 dB, 11 at 12, 8 at 20, 6 at 30, the sparse speech at 10) has a
+ * longest burst of 4 to 7 frames, the shortest the 0.3 s word at 10 to 12 dB (a 0.3 s word is
+ * 9.4 frames, but its raised-cosine syllable stays 6 dB over the carrier for only about 4 of
+ * them); every synthetic data and noise case the other bounds catch (4FSK, GMSK-like data,
+ * open-squelch noise, an unmodulated carrier at 10 dB or more) at most 1, the confirmed real
+ * noise (151 files) 0. So 3 leaves one frame each way and leans to keeping: a carrier near the
+ * FM threshold (6 to 8 dB) clicks in bursts of 2 to 4 frames, but its range keeps it anyway.
+ */
+export const SPEECH_NOISE_MAX_BURST_FRAMES = 3
 
 const P10 = Math.floor(0.1 * (SPEECH_WINDOW_FRAMES - 1))
 const P90 = Math.ceil(0.9 * (SPEECH_WINDOW_FRAMES - 1))
+const MEDIAN_LO = Math.floor((SPEECH_WINDOW_FRAMES - 1) / 2)
+const MEDIAN_HI = Math.ceil((SPEECH_WINDOW_FRAMES - 1) / 2)
 
 let sharedFft: Fft | null = null
 const HANN = new Float32Array(SPEECH_FRAME_SAMPLES)
@@ -130,6 +169,11 @@ export interface SpeechContent {
 	readonly maxRangeDb: number
 	/** Periodic frames over all frames (0 with none). */
 	readonly periodicShare: number
+	/**
+	 * The longest run of consecutive frames at least SPEECH_NOISE_BURST_DB over its window's
+	 * median band level, the largest over the file's windows (0 under one window): a word.
+	 */
+	readonly maxBurstFrames: number
 }
 
 /** Streaming measure of one file's audio (SpeechContent); `push` allocates nothing. */
@@ -143,6 +187,7 @@ export class SpeechContentMeter {
 	private frames = 0
 	private periodic = 0
 	private maxRange = 0
+	private maxBurst = 0
 	/** Frame count at the last window measured (−1: none). */
 	private measuredAt = -1
 
@@ -163,6 +208,7 @@ export class SpeechContentMeter {
 			frames: this.frames,
 			maxRangeDb: this.maxRange,
 			periodicShare: this.frames === 0 ? 0 : this.periodic / this.frames,
+			maxBurstFrames: this.maxBurst,
 		}
 	}
 
@@ -209,26 +255,41 @@ export class SpeechContentMeter {
 		return peak / r0
 	}
 
-	/** The envelope range of the last SPEECH_WINDOW_FRAMES frames. */
+	/**
+	 * The envelope range of the last SPEECH_WINDOW_FRAMES frames, and their longest burst over the
+	 * window's median (walked in time order: the oldest frame sits at `frames % SPEECH_WINDOW_FRAMES`).
+	 */
 	private measureWindow(): void {
-		this.sorted.set(this.ring)
-		this.sorted.sort()
-		const range = this.sorted[P90]! - this.sorted[P10]!
+		const { ring, sorted } = this
+		sorted.set(ring)
+		sorted.sort()
+		const range = sorted[P90]! - sorted[P10]!
 		if (range > this.maxRange) this.maxRange = range
+		const floor =
+			(sorted[MEDIAN_LO]! + sorted[MEDIAN_HI]!) / 2 + SPEECH_NOISE_BURST_DB
+		const oldest = this.frames % SPEECH_WINDOW_FRAMES
+		let run = 0
+		for (let i = 0; i < SPEECH_WINDOW_FRAMES; i++) {
+			if (ring[(oldest + i) % SPEECH_WINDOW_FRAMES]! >= floor) {
+				if (++run > this.maxBurst) this.maxBurst = run
+			} else run = 0
+		}
 		this.measuredAt = this.frames
 	}
 }
 
 /**
  * The file measures as clear noise or buzz by the strict bounds (SPEECH_NOISE_MAX_RANGE_DB,
- * SPEECH_NOISE_MAX_PERIODIC_SHARE): the content check under a weak prior. Never on under
- * SPEECH_NOISE_MIN_FRAMES (8 s); always implies clearlyNotSpeech.
+ * SPEECH_NOISE_MAX_PERIODIC_SHARE) with no burst of SPEECH_NOISE_MAX_BURST_FRAMES frames (a word):
+ * the content check under a weak prior. Never on under SPEECH_NOISE_MIN_FRAMES (8 s); always
+ * implies clearlyNotSpeech.
  */
 export function clearlyNoise(c: SpeechContent): boolean {
 	return (
 		c.frames >= SPEECH_NOISE_MIN_FRAMES &&
 		c.maxRangeDb < SPEECH_NOISE_MAX_RANGE_DB &&
-		c.periodicShare < SPEECH_NOISE_MAX_PERIODIC_SHARE
+		c.periodicShare < SPEECH_NOISE_MAX_PERIODIC_SHARE &&
+		c.maxBurstFrames < SPEECH_NOISE_MAX_BURST_FRAMES
 	)
 }
 

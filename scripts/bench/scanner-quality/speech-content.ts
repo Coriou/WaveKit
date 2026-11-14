@@ -7,6 +7,7 @@
  *     --outfile=output/bench/speech-content.mjs
  *   node output/bench/speech-content.mjs                 # the synthetic table
  *   node output/bench/speech-content.mjs --short         # the short-file table only
+ *   node output/bench/speech-content.mjs --burst         # the burst-veto table only
  *   node output/bench/speech-content.mjs a.wav b.wav     # 8 kHz s16 mono files
  *
  * One JSON line per signal or file: its largest envelope range (dB), periodic share, frames,
@@ -15,7 +16,12 @@
  * SPEECH_NOISE_MIN_FRAMES): each case cut from a 16 s run at every 0.5 s start (from 0.5 s), the
  * smallest, median and largest of the cuts' largest-window ranges, and how many cuts the strict
  * bounds alone (no length floor) would call clear noise (`noiseCuts`); a single word (0.3 to
- * 0.5 s) at the file's start or followed by a 3 s carrier tail at its end. A
+ * 0.5 s) at the file's start or followed by a 3 s carrier tail at its end. The burst table
+ * (`burst: true`; SPEECH_NOISE_MAX_BURST_FRAMES): a single word (0.3 to 0.5 s) at the start,
+ * middle or tail of an 8 or 12 s file and sparse speech (four words of 0.3 to 0.4 s over 10 s) on
+ * a quiet carrier, and the synthetic data and noise, each with its longest burst
+ * (`maxBurstFrames`) and clear noise with (`noise`) and without (`noiseNoVeto`) the burst veto.
+ * Files print the same two columns and close with a count line (`summary: true`). A
  * file is named by a short hash of its path only, so private paths are not printed.
  */
 import { createHash } from "node:crypto"
@@ -25,8 +31,11 @@ import {
 	SPEECH_FRAME_SAMPLES,
 	SPEECH_NOISE_MAX_PERIODIC_SHARE,
 	SPEECH_NOISE_MAX_RANGE_DB,
+	SPEECH_NOISE_MIN_FRAMES,
 	SpeechContentMeter,
+	clearlyNoise,
 	clearlyNotSpeech,
+	type SpeechContent,
 } from "../../../src/core/scanner/channel/speech-content.js"
 import {
 	CONTENT_CASES,
@@ -53,9 +62,21 @@ function measure(pcm: Int16Array): Record<string, number | boolean> {
 		frames: c.frames,
 		maxRangeDb: Math.round(c.maxRangeDb * 100) / 100,
 		periodicShare: Math.round(c.periodicShare * 1000) / 1000,
+		maxBurstFrames: c.maxBurstFrames,
 		notSpeech: clearlyNotSpeech(c),
+		noise: clearlyNoise(c),
+		noiseNoVeto: noiseNoVeto(c),
 		msPerSecond: Math.round((ms / (pcm.length / 8_000)) * 1000) / 1000,
 	}
+}
+
+/** clearlyNoise without its burst veto (the bound before SPEECH_NOISE_MAX_BURST_FRAMES). */
+function noiseNoVeto(c: SpeechContent): boolean {
+	return (
+		c.frames >= SPEECH_NOISE_MIN_FRAMES &&
+		c.maxRangeDb < SPEECH_NOISE_MAX_RANGE_DB &&
+		c.periodicShare < SPEECH_NOISE_MAX_PERIODIC_SHARE
+	)
 }
 
 function wavPcm(path: string): Int16Array {
@@ -78,11 +99,26 @@ function wavPcm(path: string): Int16Array {
 const files = process.argv.slice(2)
 if (files.length === 1 && files[0] === "--short") {
 	shortFiles()
+} else if (files.length === 1 && files[0] === "--burst") {
+	burstTable()
 } else if (files.length > 0) {
+	let noise = 0
+	let noVeto = 0
 	for (const f of files) {
 		const id = createHash("sha1").update(f).digest("hex").slice(0, 6)
-		console.log(JSON.stringify({ file: id, ...measure(wavPcm(f)) }))
+		const row = measure(wavPcm(f))
+		if (row["noise"] === true) noise++
+		if (row["noiseNoVeto"] === true) noVeto++
+		console.log(JSON.stringify({ file: id, ...row }))
 	}
+	console.log(
+		JSON.stringify({
+			summary: true,
+			files: files.length,
+			noise,
+			noiseNoVeto: noVeto,
+		}),
+	)
 } else {
 	const extra: { name: string; signal: ContentSignal; speech: boolean }[] = []
 	for (const cnrDb of [6, 5, 4])
@@ -252,4 +288,96 @@ function shortFiles(): void {
 		for (const frames of SHORT_FRAMES)
 			shortRow(c.name, false, c.signal.cnrDb, frames, cuts(pcm, frames))
 	}
+}
+
+/** The burst veto: words on a quiet carrier (kept) against data and noise (still caught). */
+function burstTable(): void {
+	const rows: {
+		name: string
+		signal: ContentSignal
+		seconds: number
+		speech: boolean
+	}[] = []
+	for (const cnrDb of [5, 6, 8, 10, 12, 20, 30])
+		for (const seconds of [8, 12])
+			for (const wordS of [0.3, 0.4, 0.5])
+				for (const at of ["start", "middle", "tail"] as const) {
+					const wordAtS =
+						at === "start"
+							? 0.6
+							: at === "middle"
+								? seconds / 2
+								: seconds - 0.2 - wordS
+					rows.push({
+						name: `word-${wordS}s-${at}-${seconds}s-cnr-${cnrDb}`,
+						signal: {
+							waveform: { kind: "speech", pauses: "none", wordAtS, wordS },
+							cnrDb,
+						},
+						seconds,
+						speech: true,
+					})
+				}
+	const sparse: readonly (readonly [number, number])[] = [
+		[1, 0.35],
+		[4, 0.3],
+		[7.5, 0.4],
+		[10.6, 0.3],
+	]
+	for (const cnrDb of [5, 6, 8, 10, 12, 20, 30]) {
+		rows.push({
+			name: `sparse-4-words-cnr-${cnrDb}`,
+			signal: {
+				waveform: { kind: "speech", pauses: "none", words: sparse },
+				cnrDb,
+			},
+			seconds: 12,
+			speech: true,
+		})
+		rows.push({
+			name: `sparse-3-words-cnr-${cnrDb}`,
+			signal: {
+				waveform: { kind: "speech", pauses: "none", words: sparse.slice(0, 3) },
+				cnrDb,
+			},
+			seconds: 12,
+			speech: true,
+		})
+	}
+	// The accepted exception (speech-content.ts SPEECH_NOISE_MIN_FRAMES): 500 Hz peak deviation.
+	for (const cnrDb of [8, 10])
+		rows.push({
+			name: `lowdev-500-cnr-${cnrDb}`,
+			signal: {
+				waveform: { kind: "speech", pauses: "short", peakHz: 500 },
+				cnrDb,
+			},
+			seconds: 12,
+			speech: true,
+		})
+	for (const c of CONTENT_CASES.filter(c => !c.speech))
+		rows.push({ ...c, seconds: SECONDS })
+	for (const cnrDb of [5, 6, 8, 10, 12, 20, 30])
+		rows.push({
+			name: `silent-carrier-cnr-${cnrDb}`,
+			signal: { waveform: { kind: "silent" }, cnrDb },
+			seconds: SECONDS,
+			speech: false,
+		})
+	for (const seed of [1, 2, 3, 9])
+		rows.push({
+			name: `noise-open-squelch-seed-${seed}`,
+			signal: { waveform: { kind: "silent" }, cnrDb: 30, carrier: false, seed },
+			seconds: SECONDS,
+			speech: false,
+		})
+	for (const r of rows)
+		console.log(
+			JSON.stringify({
+				burst: true,
+				signal: r.name,
+				speech: r.speech,
+				...measure(contentAudio(r.signal, r.seconds + 0.5).subarray(4_000)),
+			}),
+		)
 }
