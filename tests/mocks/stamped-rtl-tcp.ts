@@ -39,6 +39,8 @@ export interface StampedRtlTcp {
 	reportedCentre(): number
 	/** Connections accepted so far. */
 	connections(): number
+	/** Starts sending samples after `holdSamples` (headers go out at once either way). */
+	releaseSamples(): void
 	close(): Promise<void>
 }
 
@@ -62,6 +64,11 @@ export async function startStampedRtlTcp(opts: {
 	 * switches it off again before the next chunk (a USB transfer is under way). Default: ignored.
 	 */
 	testModeRamp?: boolean
+	/**
+	 * No samples until `releaseSamples()` (each connection's header still goes out): a test that
+	 * needs something to happen before the first payload orders it, whatever the host's load.
+	 */
+	holdSamples?: boolean
 }): Promise<StampedRtlTcp> {
 	const frames: [number, number][] = []
 	const centres: number[] = []
@@ -86,6 +93,7 @@ export async function startStampedRtlTcp(opts: {
 	/** The pending stamp change of an untracked retune (retuneSilently), or null. */
 	let silent: NodeJS.Timeout | null = null
 	let testMode = false
+	let held = opts.holdSamples === true
 	let rampDue = false
 	let ramp = 0
 	const apply = (cmd: number, value: number) => {
@@ -142,6 +150,7 @@ export async function startStampedRtlTcp(opts: {
 	})
 	const chunkBytes = opts.chunkBytes ?? 1024
 	const timer = setInterval(() => {
+		if (held) return
 		const bytes = Buffer.alloc(chunkBytes)
 		if (testMode || rampDue) {
 			rampDue = false
@@ -205,6 +214,9 @@ export async function startStampedRtlTcp(opts: {
 		},
 		reportedCentre: () => reported,
 		connections: () => accepted,
+		releaseSamples: () => {
+			held = false
+		},
 		close: async () => {
 			for (const t of timers) clearTimeout(t)
 			clearInterval(timer)

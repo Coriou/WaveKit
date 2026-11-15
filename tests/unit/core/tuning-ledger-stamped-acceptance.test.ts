@@ -109,6 +109,8 @@ async function compose(host: "inline" | "thread") {
 		initialRate: RATE,
 		chunkBytes: 8192,
 		intervalMs: 5,
+		// The boot-order phase opens the engine before the first payload: held until it has.
+		holdSamples: true,
 	})
 	cleanups.push(() => fake.close())
 	const dir = mkdtempSync(join(tmpdir(), "wk-ledger-acceptance-"))
@@ -238,14 +240,16 @@ async function scenario(host: "inline" | "thread"): Promise<void> {
 	const { fake, source, sourceManager, tuner, scanner } = await compose(host)
 	await scanner.start()
 	// Boot order: the engine opens before the source's first payload (as soon as its caps exist).
+	// The fake holds its samples until then: polled, a loaded host let the first chunk in first.
 	const connected = sourceManager.connect(source)
 	await until(() => sourceManager.getCaps("rtl") !== undefined)
 	const engine = await scanner.spectrum.acquire("rtl", "ledger-acceptance")
 	const openedBeforePayload =
 		sourceManager.tuningLedger.position("rtl") === null
 	const { counts, claims } = watch(engine, fake)
+	fake.releaseSamples()
 	await connected
-	expect(openedBeforePayload).toBe(true)
+	expect(openedBeforePayload, "engine opened before the first payload").toBe(true)
 
 	// Fresh core: nothing carried; the assert writes the held centre and rate, proven past the settle.
 	await until(() => (counts.trustedAt.get(F0) ?? 0) >= 3)
@@ -290,6 +294,7 @@ async function scenario(host: "inline" | "thread"): Promise<void> {
 		sourceManager.tuningLedger
 			.doubts("rtl")
 			.some(d => d.reason === "pipeline-error"),
+		"pipeline-error doubt",
 	).toBe(true)
 	await until(
 		() => (counts.trustedAt.get(F1) ?? 0) >= marked + 1,
@@ -319,6 +324,7 @@ async function scenario(host: "inline" | "thread"): Promise<void> {
 		sourceManager.tuningLedger
 			.doubts("rtl")
 			.some(d => d.reason === "host-centre-mismatch"),
+		"host-centre-mismatch doubt",
 	).toBe(true)
 	// The assert answers the doubt with a frame of the held centre (writer assert).
 	await until(
