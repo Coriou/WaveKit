@@ -9,6 +9,7 @@ import * as path from "node:path"
 import { z } from "zod"
 import type { RecordingCut } from "@wavekit/api-types"
 import type { RecordingFsPort } from "./inventory.js"
+import { startedAtLocalFromName } from "./names.js"
 
 /**
  * Bytes read of a receipt: the store bounds an operation's metadata to 16 KiB
@@ -130,16 +131,41 @@ export async function readRecordingReceipt(
 }
 
 /**
- * Part numbers of an observation's listed files: each entry's 1-based place in finish order
- * (modification time, then id) and the count. A single file gets none (null, null).
+ * The file name of an inventory id (`scan:<discovery>~<file>`: the part after the last `~` or
+ * `/`), or the id itself when it has neither.
  */
-export function recordingParts<T extends { mtimeMs: number; id: string }>(
-	files: readonly T[],
-): Map<T, { part: number | null; parts: number | null }> {
+function fileNameOf(id: string): string {
+	return id.slice(Math.max(id.lastIndexOf("~"), id.lastIndexOf("/")) + 1)
+}
+
+/**
+ * Part numbers of an observation's listed files: each entry's 1-based place in start order and
+ * the count. The start is the leading `YYYYMMDD_HHMMSS_` stamp of the file's name (`name`, else
+ * the file part of its id), ordered then by modification time and id; when any file of the group
+ * has no parseable stamp (the store's `analog-<operation uuid>.wav` names carry none) the whole
+ * group falls back to finish order (modification time, then id), so stamped and unstamped files
+ * are never interleaved by two different clocks. A single file gets none (null, null).
+ */
+export function recordingParts<
+	T extends { mtimeMs: number; id: string; name?: string },
+>(files: readonly T[]): Map<T, { part: number | null; parts: number | null }> {
 	const out = new Map<T, { part: number | null; parts: number | null }>()
-	const sorted = [...files].sort((a, b) =>
-		a.mtimeMs !== b.mtimeMs ? a.mtimeMs - b.mtimeMs : a.id < b.id ? -1 : 1,
+	const starts = new Map<T, string | null>(
+		files.map(f => [f, startedAtLocalFromName(f.name ?? fileNameOf(f.id))]),
 	)
+	const byStart = files.every(f => starts.get(f) !== null)
+	const sorted = [...files].sort((a, b) => {
+		if (byStart) {
+			const sa = starts.get(a) ?? ""
+			const sb = starts.get(b) ?? ""
+			if (sa !== sb) return sa < sb ? -1 : 1
+		}
+		return a.mtimeMs !== b.mtimeMs
+			? a.mtimeMs - b.mtimeMs
+			: a.id < b.id
+				? -1
+				: 1
+	})
 	const parts = sorted.length > 1 ? sorted.length : null
 	sorted.forEach((f, i) =>
 		out.set(f, { part: parts === null ? null : i + 1, parts }),

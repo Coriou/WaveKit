@@ -1,7 +1,8 @@
 /**
  * A scanner analog recording's `cut`, `part` and `parts` in the inventory: read from its receipt
  * (`.analog-operations/<id>/receipt.json` beside `recordings/`), mapped without guessing,
- * fail closed on a missing or malformed receipt, and numbered per observation in finish order.
+ * fail closed on a missing or malformed receipt, and numbered per observation in start order (a
+ * name's leading stamp), else finish order.
  */
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -188,7 +189,7 @@ describe("readRecordingReceipt", () => {
 })
 
 describe("recordingParts", () => {
-	it("numbers files in finish order (time, then id); a single file has none", () => {
+	it("numbers unstamped files in finish order (time, then id); a single file has none", () => {
 		const a = { mtimeMs: 30, id: "a" }
 		const b = { mtimeMs: 10, id: "b" }
 		const c = { mtimeMs: 10, id: "c" }
@@ -197,6 +198,36 @@ describe("recordingParts", () => {
 		expect(out.get(c)).toEqual({ part: 2, parts: 3 })
 		expect(out.get(a)).toEqual({ part: 3, parts: 3 })
 		expect(recordingParts([a]).get(a)).toEqual({ part: null, parts: null })
+	})
+
+	it("numbers files whose names carry a start stamp in start order, whatever their finish times", () => {
+		// A part promoted late (parked for its close) finished after the part that followed it.
+		const early = { mtimeMs: 50, id: "scan:d~20261115_101500_a.wav" }
+		const late = { mtimeMs: 20, id: "scan:d~20261115_101700_b.wav" }
+		const out = recordingParts([late, early])
+		expect(out.get(early)).toEqual({ part: 1, parts: 2 })
+		expect(out.get(late)).toEqual({ part: 2, parts: 2 })
+		// An explicit name wins over the id's file part; equal starts fall back to finish order.
+		const x = { mtimeMs: 9, id: "x", name: "20261115_101500_x.wav" }
+		const y = { mtimeMs: 3, id: "y", name: "20261115_101500_y.wav" }
+		const z = { mtimeMs: 1, id: "z", name: "20261115_101400_z.wav" }
+		const named = recordingParts([x, y, z])
+		expect([
+			named.get(z)!.part,
+			named.get(y)!.part,
+			named.get(x)!.part,
+		]).toEqual([1, 2, 3])
+	})
+
+	it("falls back to finish order for the whole group when any name has no parseable stamp", () => {
+		// The store's analog names (analog-<uuid>.wav) carry no start; a bad date is unparseable.
+		const stamped = { mtimeMs: 30, id: "scan:d~20261115_101500_a.wav" }
+		const analog = { mtimeMs: 10, id: `scan:d~analog-${uuid(1)}.wav` }
+		const bad = { mtimeMs: 20, id: "scan:d~20261345_101500_c.wav" }
+		const out = recordingParts([stamped, analog, bad])
+		expect(out.get(analog)).toEqual({ part: 1, parts: 3 })
+		expect(out.get(bad)).toEqual({ part: 2, parts: 3 })
+		expect(out.get(stamped)).toEqual({ part: 3, parts: 3 })
 	})
 })
 
