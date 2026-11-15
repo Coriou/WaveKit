@@ -2668,34 +2668,38 @@ export class AnalogOperations {
 			)
 			// WG9 R2: refuse before the first mutation when any owned artifact is kept now.
 			if (owned.some(intent => this.keptArtifact(intent))) throw keptRefusal()
-			for (const intent of owned) {
-				this.auditTouched?.add(intent.operationId)
-				// WG9 R2: a Keep committed during an earlier intent's awaits refuses here, in the same
-				// exclusive section, before the alias, the marker or the metadata is touched.
-				if (this.keptArtifact(intent)) throw keptRefusal()
-				// Owned when the removal began; asked again before each step and in the media
-				// unlink's own turn: a split or a mark since leaves the file to its new owner.
-				const stillOwned = (): boolean =>
-					this.heldElsewhere(intent, removing) === undefined
-				if (!stillOwned()) continue
-				const slot = this.available.get(intent.alias)
-				this.available.delete(intent.alias)
-				// Explicit DELETE may remove quarantined media only under strict matching ownership.
-				await this.validateCleanupMarker(intent)
-				if (!stillOwned()) {
-					if (slot) this.available.set(intent.alias, slot)
-					continue
+			try {
+				for (const intent of owned) {
+					this.auditTouched?.add(intent.operationId)
+					// WG9 R2: a Keep committed during an earlier intent's awaits refuses here, in the same
+					// exclusive section, before the alias, the marker or the metadata is touched.
+					if (this.keptArtifact(intent)) throw keptRefusal()
+					// Owned when the removal began; asked again before each step and in the media
+					// unlink's own turn: a split or a mark since leaves the file to its new owner.
+					const stillOwned = (): boolean =>
+						this.heldElsewhere(intent, removing) === undefined
+					if (!stillOwned()) continue
+					const slot = this.available.get(intent.alias)
+					this.available.delete(intent.alias)
+					// Explicit DELETE may remove quarantined media only under strict matching ownership.
+					await this.validateCleanupMarker(intent)
+					if (!stillOwned()) {
+						if (slot) this.available.set(intent.alias, slot)
+						continue
+					}
+					await this.context.adapter.inverse(intent.operationId)
+					try {
+						await this.cleanupOwned(intent, true, true, stillOwned)
+					} catch (cause) {
+						// Held elsewhere since: the file and its operation stay whole (its new owner's).
+						if (!(cause instanceof ScannerApiError) || stillOwned()) throw cause
+						if (slot) this.available.set(intent.alias, slot)
+					}
 				}
-				await this.context.adapter.inverse(intent.operationId)
-				try {
-					await this.cleanupOwned(intent, true, true, stillOwned)
-				} catch (cause) {
-					// Held elsewhere since: the file and its operation stay whole (its new owner's).
-					if (!(cause instanceof ScannerApiError) || stillOwned()) throw cause
-					if (slot) this.available.set(intent.alias, slot)
-				}
+			} finally {
+				// What is on disk now, whether every cleanup ended or one stopped part-way.
+				await this.refresh(owned.map(intent => intent.operationId))
 			}
-			await this.refresh(owned.map(intent => intent.operationId))
 			if (
 				this.inventory.unknown ||
 				[...this.uncertainResidue.values()].some(
@@ -2971,11 +2975,15 @@ export class AnalogOperations {
 				await this.validateCleanupMarker(intent)
 				if (!stillRetirable()) return
 				this.auditTouched?.add(intent.operationId)
-				await this.context.adapter.inverse(intent.operationId)
-				await this.cleanupOwned(intent, true, true, stillRetirable)
-				this.available.delete(intent.alias)
-				deleted.push(intent.artifact)
-				await this.refresh([intent.operationId])
+				try {
+					await this.context.adapter.inverse(intent.operationId)
+					await this.cleanupOwned(intent, true, true, stillRetirable)
+					this.available.delete(intent.alias)
+					deleted.push(intent.artifact)
+				} finally {
+					// What is on disk now, whether the cleanup ended or stopped part-way.
+					await this.refresh([intent.operationId])
+				}
 			})
 		})
 	}

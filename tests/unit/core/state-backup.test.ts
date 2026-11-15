@@ -8,7 +8,6 @@ import {
 	readFile,
 	rm,
 	stat,
-	utimes,
 	writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -16,6 +15,7 @@ import { join } from "node:path"
 import {
 	BACKUP_EXPIRY_CLEAN_LOADS,
 	BACKUP_EXPIRY_MS,
+	BACKUP_LINKS_FILE,
 	BACKUP_MAX_KEPT,
 	BACKUP_MIN_FREE_BYTES,
 	BACKUP_OUTSIDE_DIR,
@@ -1199,7 +1199,7 @@ describe("pre-migration backup: the recordings are linked after the start", () =
 		).toEqual([])
 	})
 
-	it("leaves out recordings written after the backup was taken and those removed meanwhile", async () => {
+	it("links exactly the recordings the first half listed: not one written since, not one removed meanwhile", async () => {
 		await seedState()
 		await mkdir(join(dir, "recordings", "d_2"), { recursive: true })
 		await writeFile(join(dir, "recordings", "d_2", "gone.wav"), AUDIO)
@@ -1209,11 +1209,8 @@ describe("pre-migration backup: the recordings are linked after the start", () =
 			now: () => NOW,
 			statfs: roomy,
 		})
-		// After the start: a new recording, and retention removing an old one.
-		const fresh = join(dir, "recordings", "d_2", "new.wav")
-		await writeFile(fresh, AUDIO)
-		const later = new Date(NOW + 60_000)
-		await utimes(fresh, later, later)
+		// After the start: a new recording, and a delete removing an old one.
+		await writeFile(join(dir, "recordings", "d_2", "new.wav"), AUDIO)
 		await rm(join(dir, "recordings", "d_2", "gone.wav"))
 		const [done] = await completeDeferredLinks({
 			dir,
@@ -1225,6 +1222,66 @@ describe("pre-migration backup: the recordings are linked after the start", () =
 		const saved = join(dir, BACKUPS_DIR, finalName, "recordings")
 		expect(await readdir(join(saved, "d_1"))).toEqual(["a.wav"])
 		expect(await readdir(join(saved, "d_2")).catch(() => [])).toEqual([])
+		// The list was the first half's working file: not part of the backup in place.
+		expect(await readdir(join(dir, BACKUPS_DIR, finalName))).not.toContain(
+			BACKUP_LINKS_FILE,
+		)
+	})
+
+	it("no clock decides: a wall clock far behind the recordings still links every one", async () => {
+		await seedState()
+		// A receiver without a real-time clock before NTP: years before the files were written.
+		const behind = new Date("2001-01-01T00:00:00Z").getTime()
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => behind,
+			statfs: roomy,
+		})
+		const [done] = await completeDeferredLinks({
+			dir,
+			logger,
+			now: () => behind,
+			statfs: roomy,
+		})
+		expect(done).toMatchObject({ kind: "taken", linkedFiles: 1 })
+	})
+
+	it("flushes the copies, the link list and the pending receipt before the marker says the state migrated", async () => {
+		const old = { fileVersion: 1, heldJournalFormat: 2, revision: 1 }
+		await seedState()
+		await writeMarker(old)
+		const synced: Array<{ path: string; markerOld: boolean }> = []
+		const out = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+			fsync: async path => {
+				const marker = await readFile(join(dir, STATE_FORMAT_FILE), "utf8")
+				synced.push({ path, markerOld: marker === JSON.stringify(old) })
+			},
+		})
+		expect(out).toMatchObject({ kind: "pending" })
+		const partial = join(
+			dir,
+			BACKUPS_DIR,
+			`.pre-${formatLabel(old)}.partial-${NOW}`,
+		)
+		expect(synced.map(e => e.path)).toEqual(
+			expect.arrayContaining([
+				join(partial, "jobs.json"),
+				join(partial, BACKUP_LINKS_FILE),
+				join(partial, BACKUP_RECEIPT_FILE),
+				partial,
+				join(dir, BACKUPS_DIR),
+			]),
+		)
+		expect(synced.every(e => e.markerOld)).toBe(true)
+		// And the marker is this build's afterwards.
+		expect(
+			JSON.parse(await readFile(join(dir, STATE_FORMAT_FILE), "utf8")),
+		).toEqual(CURRENT_SCANNER_STATE_FORMAT)
 	})
 
 	it("links an interrupted completion made already count, none is made twice", async () => {

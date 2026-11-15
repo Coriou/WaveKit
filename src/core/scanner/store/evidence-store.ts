@@ -467,6 +467,18 @@ export class EvidenceStore {
 	private legacy: { bytes: number; atMs: number } | null = null
 	/** The walk refreshing `legacy` (one at a time). */
 	private legacyWalk: Promise<number> | null = null
+	/** setDeletionGate: what a deletion waits for first, while it is pending (null otherwise). */
+	private deletionGate: () => Promise<void> | null = () => null
+
+	/**
+	 * Deletions of recordings (retention, a discovery's removal, one recording's delete) wait for
+	 * `gate()` first while it answers a promise: the scanner passes the state backup's second half,
+	 * so no recording the pre-migration backup is still linking is removed before it is linked.
+	 * A null answer (nothing pending) keeps every deletion's synchronous start as it is.
+	 */
+	setDeletionGate(gate: () => Promise<void> | null): void {
+		this.deletionGate = gate
+	}
 
 	constructor(opts: {
 		dir: string
@@ -1145,6 +1157,8 @@ export class EvidenceStore {
 		const discoveryId = m?.[1]
 		const file = m?.[2]
 		if (discoveryId === undefined || file === undefined) return "not-found"
+		const gate = this.deletionGate()
+		if (gate) await gate
 		if (/^analog-[0-9a-f-]{36}\.wav$/i.test(file))
 			throw new RecordingKeepError(
 				"RECORDING_DELETE_UNSUPPORTED",
@@ -1217,6 +1231,8 @@ export class EvidenceStore {
 
 	async removeDiscovery(discoveryId: string): Promise<void> {
 		assertDiscoveryId(discoveryId)
+		const gate = this.deletionGate()
+		if (gate) await gate
 		const pending = this.removals.get(discoveryId)
 		if (pending) return pending
 		// WG9 req 2.6: no cascade to kept media (fixed text; the id is not echoed).
@@ -1532,13 +1548,19 @@ export class EvidenceStore {
 	async retention(
 		keepDiscoveryIds: ReadonlySet<string>,
 	): Promise<{ deleted: string[] }> {
+		const gate = this.deletionGate()
+		if (gate) await gate
 		// WG9 R2: a pinned root whose identity changed deletes nothing (fail closed).
 		if (!(await this.rootIntact())) return { deleted: [] }
 		// Outside changes to the analog operation folders reach its inventory (no lock held).
 		await this.analog?.audit()
 		const now = this.now()
 		const walkedAtMs = performance.now()
-		const files = await this.collect()
+		const files = await this.collect().catch((err: unknown) => {
+			// A failed walk is not trusted: the next admission waits for one of its own.
+			this.legacy = null
+			throw err
+		})
 		// WG10 req 1.5: an operator keep of a survivor protects its alias folders.
 		keepDiscoveryIds = withAliasFolders(keepDiscoveryIds, this.aliasesOf)
 		const keep = keepDiscoveryIds

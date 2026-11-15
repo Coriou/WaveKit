@@ -341,10 +341,14 @@ describe("the other recordings' bytes are walked, not per admission", () => {
 		await mkdir(legacy, { recursive: true })
 		await writeFile(join(legacy, "call-1.wav"), Buffer.alloc(1024))
 		const life = await start(root, s)
+		// A warm count first (the walk the first admission waits for)...
+		expect((await life.record()).outcome).toBe("finalized")
 		await chmod(legacy, 0o000)
 		try {
-			// Recovery's background walk may have counted it first: retention walks again (fails).
-			await life.evidence.retention(new Set([s.discoveryId])).catch(() => null)
+			// ...then a retention pass whose walk fails: the count is dropped, not kept.
+			await expect(
+				life.evidence.retention(new Set([s.discoveryId])),
+			).rejects.toThrow()
 			const op = life.evidence.beginAnalog({
 				discoveryId: s.discoveryId,
 				observationId: "o1",

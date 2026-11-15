@@ -1578,6 +1578,8 @@ export class ScannerService extends EventEmitter {
 			this.store.setFolderLookup(id => this.evidence.folders.holds(id))
 			// WG10 req 1.6: a capacity eviction removes the evicted folders like an inactive prune.
 			this.store.on("evicted", this.onStoreEvicted)
+			// No recording is removed while a pre-migration backup is still linking recordings in.
+			this.evidence.setDeletionGate(() => this.persistence.backupPending())
 			this.recordingDeleter = createScannerRecordingDeleter({
 				evidence: this.evidence,
 				discovery: this.store,

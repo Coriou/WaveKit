@@ -122,6 +122,12 @@ export const BACKUP_EXPIRY_CLEAN_LOADS = 3
  * restarts; the expiry thresholds are far below it).
  */
 export const BACKUP_RECEIPT_COUNT_MAX = 1_000_000
+/**
+ * The first half's list of recordings to link, inside a pending partial (a JSON array of paths
+ * relative to the state directory, flushed before the marker is written): the second half links
+ * exactly these, so no clock decides what belongs to the backup. Removed before the rename.
+ */
+export const BACKUP_LINKS_FILE = "links.json"
 /** Folder inside a backup for files from outside the state directory (the keep store). */
 export const BACKUP_OUTSIDE_DIR = "outside"
 /**
@@ -811,6 +817,12 @@ async function decide(
 			await doFsync(keepsCopy, "file")
 			await syncDir(join(partialDir, BACKUP_OUTSIDE_DIR))
 		}
+		const linksPath = join(partialDir, BACKUP_LINKS_FILE)
+		await writeFile(
+			linksPath,
+			JSON.stringify(plan.files.filter(f => f.hardLink).map(f => f.rel)),
+		)
+		await doFsync(linksPath, "file")
 		const receipt = {
 			fromFormat,
 			toFormat,
@@ -852,17 +864,23 @@ async function decide(
 	}
 }
 
+/** Whether a backup waits for its second half (completeDeferredLinks). Never throws. */
+export async function hasPendingBackup(dir: string): Promise<boolean> {
+	return (await listBackups(join(resolve(dir), BACKUPS_DIR))).pending.length > 0
+}
+
 /** Options of completeDeferredLinks: the backup's, without the keep store. */
 export type DeferredLinkOptions = Omit<PreMigrationBackupOptions, "keepsFile">
 
 /**
  * The second half of a backup ensurePreMigrationBackup left pending (`linksPending` in the
- * receipt of a `.pre-*.partial-*` folder): every recording file (the write-once trees, as the
- * first half's plan) whose last write is not after the backup was taken is hard linked in (a
- * copy where the link is refused, counted against the free-space margin as before), every
- * folder is flushed, the receipt rewritten complete (its other fields kept), and the folder is
- * renamed into place, then retention runs. Runs after the start, so the scanner never waits on
- * one link per recording; a recording removed meanwhile is simply not in the backup. A crash
+ * receipt of a `.pre-*.partial-*` folder): every recording the first half listed
+ * (BACKUP_LINKS_FILE) is hard linked in (a copy where the link is refused, counted against the
+ * free-space margin as before), every folder is flushed, the receipt rewritten complete (its
+ * other fields kept, tmp file and rename), and the folder is renamed into place, then retention
+ * runs. Runs after the start, so the scanner never waits on one link per recording; the
+ * scanner's deletions wait for it (EvidenceStore.setDeletionGate), and a recording removed by
+ * anything else meanwhile is simply not in the backup. A crash
  * leaves the partial, which the next start completes the same way (links already made count).
  * A failure removes the partial: the outcome is then `skipped`, with the reason a first half
  * would give (`low-disk`, `disk-unknown`, `too-many-files`, `copy-failed`). Never throws; one
@@ -931,11 +949,12 @@ async function completeOne(
 	}
 	let files: string[]
 	try {
-		files = await writeOnceFiles(dir, opts.maxFiles ?? BACKUP_MAX_FILES)
-	} catch (err) {
-		return abandon(
-			skipped(err instanceof TooManyFiles ? "too-many-files" : "copy-failed"),
+		files = await readLinkList(
+			join(partialDir, BACKUP_LINKS_FILE),
+			opts.maxFiles ?? BACKUP_MAX_FILES,
 		)
+	} catch {
+		return abandon(skipped("copy-failed"))
 	}
 	// Free space now, never more than the first half measured less what it copied (a test
 	// seam or a file system that reports late must not make the margin looser).
@@ -976,8 +995,8 @@ async function completeOne(
 				if ((err as NodeJS.ErrnoException).code === "ENOENT") return
 				throw err
 			}
-			// Written after the backup was taken: not the state it saves.
-			if (!st.isFile() || st.mtimeMs > takenAtMs) return
+			// Replaced by something else since the first half listed it: not a recording to link.
+			if (!st.isFile()) return
 			await ensureDir(dirname(rel))
 			try {
 				await doLink(src, dst)
@@ -1010,7 +1029,9 @@ async function completeOne(
 			...kept
 		} = fields as Record<string, unknown>
 		const total = (receipt.files ?? 0) + linkedFiles + copiedFiles
-		await writeFile(
+		// Tmp file, flush, rename: a crash mid-write never leaves an unreadable receipt (a partial
+		// without one would be pruned as a leftover, losing the only pre-migration copy).
+		await atomicWrite(
 			receiptPath,
 			`${JSON.stringify(
 				{
@@ -1024,6 +1045,8 @@ async function completeOne(
 			)}\n`,
 		)
 		await doFsync(receiptPath, "file")
+		// The list is the first half's working file, not state: the backup in place is the state.
+		await rm(join(partialDir, BACKUP_LINKS_FILE), { force: true })
 		// Every directory's entries (links included) before the rename: a power cut never leaves
 		// a backup counted as taken with missing entries.
 		const dirs = await treeDirs(partialDir)
@@ -1071,39 +1094,26 @@ async function completeOne(
 	}
 }
 
-/** The walk of the write-once trees found more than the file bound. */
-class TooManyFiles extends WaveKitError {
-	constructor() {
-		super("Too many files to back up", "STATE_BACKUP_TOO_MANY_FILES")
-	}
-}
+/** Paths a link list may hold: relative, inside the state directory, a written-once tree's. */
+const LinkListSchema = z.array(z.string().min(1).max(4096))
 
-/** Relative paths of the files a backup links (writtenOnce), at most `maxFiles` (else throws). */
-async function writeOnceFiles(
-	root: string,
-	maxFiles: number,
-): Promise<string[]> {
-	const files: string[] = []
-	const stack = [...WRITE_ONCE_TREES]
-	while (stack.length > 0) {
-		const rel = stack.pop() ?? ""
-		let entries: Awaited<ReturnType<typeof readdirEntries>>
-		try {
-			entries = await readdirEntries(join(root, rel))
-		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code === "ENOENT") continue
-			throw err
-		}
-		for (const e of entries) {
-			const childRel = join(rel, e.name)
-			if (e.isDirectory()) stack.push(childRel)
-			else if (e.isFile() && writtenOnce(childRel)) {
-				if (files.length >= maxFiles) throw new TooManyFiles()
-				files.push(childRel)
-			}
-		}
-	}
-	return files
+/** The first half's list of recordings to link (BACKUP_LINKS_FILE), validated; throws otherwise. */
+async function readLinkList(path: string, maxFiles: number): Promise<string[]> {
+	const st = await lstat(path)
+	// 4 KiB per path at most, maxFiles of them: anything larger is not this module's file.
+	if (!st.isFile() || st.size > maxFiles * 4100 + 2)
+		throw new WaveKitError("Invalid backup link list", "STATE_BACKUP_LINKS")
+	const list = LinkListSchema.parse(JSON.parse(await readFile(path, "utf8")))
+	if (list.length > maxFiles)
+		throw new WaveKitError("Invalid backup link list", "STATE_BACKUP_LINKS")
+	for (const rel of list)
+		if (
+			rel.startsWith(sep) ||
+			rel.split(sep).includes("..") ||
+			!writtenOnce(rel)
+		)
+			throw new WaveKitError("Invalid backup link list", "STATE_BACKUP_LINKS")
+	return list
 }
 
 function readdirEntries(path: string) {
