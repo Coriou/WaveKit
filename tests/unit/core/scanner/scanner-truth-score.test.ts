@@ -462,6 +462,46 @@ describe("truth scorecard: named exceptions", () => {
 		).toEqual(["exception:fresh-dmr"])
 	})
 
+	it("pinned to a channel and a time, never takes a same-label row elsewhere", () => {
+		// Two DMR files: one on F at 0..5 s, one 25 kHz away at 6..9 s.
+		const two = scoreCase(
+			caseOf([iv("dmr", 0, 5_000), iv("dmr", 6_000, 9_000, F + 25_000)]),
+			runOf([kept(0, 5_000), kept(6_000, 3_000, F + 25_000)]),
+		)
+		const c = { ...two, name: "dmr" }
+		const pinned = (over: Record<string, unknown>) =>
+			scorecard([c], { ...zero, exceptions: [exception(over)] })
+		const right = pinned({ frequencyHz: F + 25_000, atMs: 7_000 })
+		expect(right.cases[0]!.kept.map(k => k.excepted)).toEqual([
+			undefined,
+			"fresh-dmr",
+		])
+		// The wrong time on that channel finds nothing: stale, and both files count.
+		const wrongTime = pinned({ frequencyHz: F + 25_000, atMs: 2_000 })
+		expect(wrongTime.totals.digitalKeptAsVoice).toBe(2)
+		expect(wrongTime.failures.map(f => f.metric)).toContain(
+			"exception:fresh-dmr",
+		)
+		// Half a 12.5 kHz channel off still matches; more does not.
+		expect(
+			pinned({ frequencyHz: F + 25_000 + 6_250, atMs: 7_000 }).totals.excepted,
+		).toBe(1)
+		expect(
+			pinned({ frequencyHz: F + 25_000 + 6_251, atMs: 7_000 }).totals.excepted,
+		).toBe(0)
+	})
+
+	it("refuses a label on a missed-voice exception", () => {
+		const json = JSON.stringify({
+			version: 1,
+			limits: {},
+			exceptions: [exception({ metric: "missedVoice", label: "analog-voice" })],
+		})
+		expect(() => parseThresholds("t.json", json)).toThrow(
+			/t\.json: exceptions\.0\.label/,
+		)
+	})
+
 	it("refuses two exceptions of one name", () => {
 		const json = JSON.stringify({
 			version: 1,
@@ -555,9 +595,14 @@ describe("truth labels", () => {
 		const t = parseThresholds(path, readFileSync(path, "utf8"))
 		expect(t.limits.synthetic?.["digitalKeptAsVoice"]).toEqual({ max: 0 })
 		expect(t.limits.capture?.["digitalKeptAsVoice"]).toEqual({ max: 0 })
-		// Every exception carries its reason.
-		for (const e of t.exceptions ?? [])
+		// Every exception carries its reason; a synthetic one is pinned to its channel and time.
+		for (const e of t.exceptions ?? []) {
 			expect(e.reason.length).toBeGreaterThan(20)
+			if (e.kind === "synthetic") {
+				expect(e.frequencyHz).toBeDefined()
+				expect(e.atMs).toBeDefined()
+			}
+		}
 		// Every limit names a scorecard total.
 		expect(() => scorecard([], t)).not.toThrow()
 	})

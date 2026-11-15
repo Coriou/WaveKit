@@ -161,9 +161,12 @@ every step `CACHED`.
 `make truth` scores the scanner of any checkout against labelled transmissions
 (the truth scorecard, [SCANNER.md](SCANNER.md#truth-scorecard)): check out the
 commit an image is built from with `git worktree add`, then run
-`make truth TREE=<checkout> TRUTH=<labels dir>` from this checkout. It exits 1
-when the scanner keeps more paging, DMR or noise as voice, misses more voice or
-identifies less than the checked-in limits allow. `TRUTH=synthetic` (the
+`make truth TREE=<checkout> TRUTH=<labels dir>` from this checkout. It fails
+(make exits 2) when the scanner keeps more paging, DMR or noise as voice, misses
+more voice or identifies less than the checked-in limits allow, and also when a
+named exception in the limits no longer occurs (the scanner got better: remove
+the exception). Run `node output/bench/truth-scorecard.mjs` after it for the
+scorecard's own codes: 1 worse than the limits, 2 bad arguments or labels. `TRUTH=synthetic` (the
 default) runs the built-in scenes only and needs no captures. It runs on the
 host with Node, not in a container.
 

@@ -968,8 +968,9 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 }
 
 /**
- * Premodulation low-pass of a shaped pager (pocsag-shaped): two one-pole stages at 700 Hz, a
- * bandwidth-time product of about 0.6 at 1 200 Bd, like a paging transmitter's data filter. The
+ * Premodulation low-pass of a shaped pager (pocsag-shaped): two one-pole stages at 700 Hz, whose
+ * cascade falls 3 dB at 700 · √(√2 − 1) ≈ 450 Hz: a bandwidth-time product of about 0.38 at
+ * 1 200 Bd, the Gaussian-like data shaping of a narrowband paging transmitter. The
  * frequency then dwells between the ±4.5 kHz tones on every bit change, which fills the valley
  * between them: the spectrum is one hump, which the classifier reads as analog FM (as a live
  * pager's does), while the unfiltered pocsag-msg shows two tones (fsk2-wide).

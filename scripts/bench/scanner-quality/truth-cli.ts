@@ -122,6 +122,16 @@ export async function runTruthCli(argv: readonly string[]): Promise<number> {
 			o.thresholds,
 			readFileSync(resolve(o.thresholds), "utf8"),
 		)
+		// An exception for a scene that no longer exists would never be checked (stale unseen).
+		const scenes = new Set(syntheticCases().map(c => c.name))
+		const lost = (limits.exceptions ?? []).filter(
+			e =>
+				e.kind === "synthetic" && e.case !== undefined && !scenes.has(e.case),
+		)
+		if (lost.length > 0)
+			throw new TruthArgsError(
+				`${o.thresholds}: exceptions for no scene: ${lost.map(e => e.name).join(", ")}`,
+			)
 		const unknown = unknownMetrics(limits)
 		if (unknown.length > 0)
 			throw new TruthArgsError(
@@ -168,7 +178,7 @@ export async function runTruthCli(argv: readonly string[]): Promise<number> {
 			scores.push(s)
 			const t = s.totals
 			process.stderr.write(
-				`  ${c.name}: kept ${t.keptFiles}, false voice ${t.falseVoice}, missed voice ${t.missedVoice}/${t.voiceTransmissions}, identify ${t.identifyRight}/${t.labelledSignals} (${run.wallSeconds.toFixed(1)} s)\n`,
+				`  ${c.name}: kept ${t.keptFiles}, false voice ${t.falseVoice} (before exceptions), missed voice ${t.missedVoice}/${t.voiceTransmissions}, identify ${t.identifyRight}/${t.labelledSignals} (${run.wallSeconds.toFixed(1)} s)\n`,
 			)
 		}
 	} finally {

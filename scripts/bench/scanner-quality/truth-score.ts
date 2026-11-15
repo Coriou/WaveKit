@@ -380,13 +380,32 @@ function applyExceptions(
 		for (const c of out) {
 			if (c.kind !== e.kind || (e.case !== undefined && c.name !== e.case))
 				continue
+			const on = (hz: number): boolean =>
+				e.frequencyHz === undefined ||
+				Math.abs(hz - e.frequencyHz) <= CHANNEL_MATCH_HZ
+			const holds = (from: number | null, to: number | null): boolean =>
+				e.atMs === undefined ||
+				(from !== null && to !== null && from <= e.atMs && e.atMs <= to)
 			const rows: { excepted?: string }[] =
 				e.metric === "falseVoice"
 					? c.kept.filter(
 							k =>
-								k.falseVoice && (e.label === undefined || k.label === e.label),
+								k.falseVoice &&
+								(e.label === undefined || k.label === e.label) &&
+								on(k.frequencyHz) &&
+								holds(
+									k.startMs,
+									k.startMs === null || k.durationMs === null
+										? null
+										: k.startMs + k.durationMs,
+								),
 						)
-					: c.voice.filter(v => v.recorded !== "whole")
+					: c.voice.filter(
+							v =>
+								v.recorded !== "whole" &&
+								on(v.frequencyHz) &&
+								holds(v.startMs, v.endMs),
+						)
 			for (const row of rows) {
 				if (n >= e.count) break
 				if (row.excepted !== undefined) continue
@@ -519,6 +538,7 @@ export function formatScorecardLine(s: Scorecard): string {
 	return (
 		`truth scorecard: ${t.cases} cases, ${t.keptFiles} kept files: ` +
 		`false voice ${t.falseVoice} (digital ${t.digitalKeptAsVoice}), ` +
+		`${t.excepted} excepted, ` +
 		`missed voice ${t.missedVoice}/${t.voiceTransmissions} (split ${t.splitVoice}), ` +
 		`identify ${t.identifyRight}/${t.labelledSignals} right, ${t.identifyWrong} wrong: ${verdict}`
 	)

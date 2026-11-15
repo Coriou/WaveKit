@@ -196,13 +196,25 @@ export const ExceptionSchema = z
 		/** The case it occurs in (a synthetic scene's name); absent: any case of its kind. */
 		case: z.string().min(1).max(64).optional(),
 		metric: z.enum(["falseVoice", "missedVoice"]),
-		/** For falseVoice: the kept file's label. */
+		/** For falseVoice only: the kept file's label. */
 		label: z.enum(TRUTH_LABELS).optional(),
+		/**
+		 * The row's channel (Hz, within half a 12.5 kHz channel): a kept file's frequency, a missed
+		 * transmission's. Synthetic exceptions name it; a capture's would put a real frequency in
+		 * this public file, so capture exceptions match by kind and label only.
+		 */
+		frequencyHz: z.number().finite().positive().optional(),
+		/** A scene time (ms) inside the row: a kept file's span, a missed transmission's. */
+		atMs: z.number().finite().optional(),
 		count: z.number().int().positive().max(100),
 		/** Why the scanner keeps (or misses) it, and what would fix it. */
 		reason: z.string().min(1).max(600),
 	})
 	.strict()
+	.refine(e => e.label === undefined || e.metric === "falseVoice", {
+		message: "label narrows a falseVoice exception only",
+		path: ["label"],
+	})
 export type TruthException = z.infer<typeof ExceptionSchema>
 
 /**
