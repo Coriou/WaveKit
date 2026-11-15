@@ -627,14 +627,29 @@ function retuneSample(value: number | null | undefined): number | null {
 
 /**
  * The first sample a session may not read yet: the live edge, its epoch limit and a held retune's
- * command position, whichever comes first (the drain loop, the catch-up grant and the reported
- * backlog all measure against it).
+ * command position, whichever comes first. It is the read and segmenter target only: ring
+ * urgency is measured by ringBacklog, since the ring overwrites relative to the live edge.
  */
 function readableEdge(
 	s: { readonly limit: number; readonly retuneAt: number | null },
 	liveEdge: number,
 ): number {
 	return Math.min(liveEdge, s.limit, s.retuneAt ?? Number.POSITIVE_INFINITY)
+}
+
+/**
+ * The session's ring backlog (samples): live edge − next while it has input left to read before
+ * its epoch limit, else 0. The ring overwrites its oldest sample once this passes the ring, so a
+ * held retune does not shorten it: a session 1.5 s behind at the command is 1.5 s + the hold
+ * behind (its readable backlog, to the command position, stays 1.5 s). The catch-up grant, its
+ * eligibility (past maxBacklog) and the reported backlog measure it. Once everything before the
+ * limit is read (next ≥ min(live edge, limit)) nothing it still reads is at risk: 0.
+ */
+function ringBacklog(
+	s: { readonly limit: number; readonly next: number },
+	liveEdge: number,
+): number {
+	return s.next >= Math.min(liveEdge, s.limit) ? 0 : liveEdge - s.next
 }
 
 /** The engine surface the recorder reads (SpectrumEngine satisfies it). */
@@ -1606,9 +1621,10 @@ export class WidebandAnalogRecorder {
 		const sessions: ScannerRecorderSession[] = []
 		for (const s of this.sessions.values()) {
 			if (s.done) continue
-			let edge = s.next
+			let backlog = 0
 			try {
-				edge = readableEdge(s, s.engine.liveEdge())
+				// The true ring backlog (from the live edge), not to a held retune's command.
+				backlog = ringBacklog(s, s.engine.liveEdge())
 			} catch {
 				// An engine closing under us: no backlog to report.
 			}
@@ -1618,7 +1634,7 @@ export class WidebandAnalogRecorder {
 				discoveryId: s.discoveryId,
 				state: !s.classed ? "shadow" : s.qualified ? "voiced" : "classed",
 				writing: s.ops > 0,
-				backlogMs: Math.max(0, Math.round(((edge - s.next) * 1000) / s.fs)),
+				backlogMs: Math.max(0, Math.round((backlog * 1000) / s.fs)),
 			})
 		}
 		return { sessions, parked: this.parked.size, ...this.decisions.status() }
@@ -3373,10 +3389,15 @@ export class WidebandAnalogRecorder {
 		}
 	}
 
-	/** Ring headroom (ring − backlog) in ms; Infinity when the session is within maxBacklog. */
+	/**
+	 * Ring headroom (ring − ringBacklog) in ms; Infinity when the session is within maxBacklog or
+	 * has nothing readable left (held at a retune's command or at its limit: a grant buys nothing).
+	 */
 	private headroomMs(s: Session): number {
 		if (s.done || !s.file) return Number.POSITIVE_INFINITY
-		const backlog = readableEdge(s, s.engine.liveEdge()) - s.next
+		const live = s.engine.liveEdge()
+		if (s.next >= readableEdge(s, live)) return Number.POSITIVE_INFINITY
+		const backlog = ringBacklog(s, live)
 		if (backlog <= s.maxBacklog) return Number.POSITIVE_INFINITY
 		return ((s.maxBacklog + s.margin - backlog) * 1000) / s.fs
 	}
@@ -3457,8 +3478,16 @@ export class WidebandAnalogRecorder {
 				// bounded the file: the settle (1-2 s) does not shorten it.
 				s.parkFrom = start
 			} else if (capped) {
-				s.limit = s.retuneAt ?? s.next
-				s.parkFrom = liveEdge
+				// A trusted-run end seen in the same drain bounds it too (the earlier wins), as
+				// it would alone.
+				s.limit = untrusted
+					? Math.min(
+							s.retuneAt ?? s.next,
+							s.next,
+							trustedRunEnd(epoch, s.trustedFrom),
+						)
+					: (s.retuneAt ?? s.next)
+				s.parkFrom = untrusted ? s.limit : liveEdge
 			} else {
 				s.limit = Math.min(s.next, trustedRunEnd(epoch, s.trustedFrom))
 				s.parkFrom = s.limit
@@ -3500,7 +3529,10 @@ export class WidebandAnalogRecorder {
 			if (catching && this.grant !== null)
 				this.grant.left = Math.max(0, this.grant.left - demodulated)
 			if (this.clock() - started < WIDEBAND_TURN_BUDGET_MS) continue
-			if (edge - s.next <= s.maxBacklog || this.catchUp(s) <= 0) break
+			// Eligibility is the ring backlog (from the live edge), not the readable edge: a
+			// session held at a retune's command still falls out of the ring as the edge moves.
+			if (ringBacklog(s, liveEdge) <= s.maxBacklog || this.catchUp(s) <= 0)
+				break
 			catching = true
 		}
 		const more = s.next < target()

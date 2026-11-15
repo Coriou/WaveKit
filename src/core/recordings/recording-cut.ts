@@ -153,6 +153,10 @@ export function recordingParts<
 	const starts = new Map<T, string | null>(
 		files.map(f => [f, startedAtLocalFromName(f.name ?? fileNameOf(f.id))]),
 	)
+	// The name stamp is local wall time to the second (no offset): parts recorded across a DST
+	// fall-back hour can misorder by it (a part started in the repeated hour may sort before one
+	// started earlier, in its first pass); parts started in the same second tie and fall back to
+	// the mtime and id order below.
 	const byStart = files.every(f => starts.get(f) !== null)
 	const sorted = [...files].sort((a, b) => {
 		if (byStart) {

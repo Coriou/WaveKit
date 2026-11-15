@@ -2,8 +2,9 @@
  * WidebandAnalogRecorder holding back a pending retune (WidebandEngineView.pendingRetuneSample):
  * the park window of a retune-ended shadow still counts from the new epoch's settled start; a
  * retune pending past maxBacklog (ring − margin) ends the open file at its command position; the
- * reported backlog stops at the held position; a hang that would end inside the settle ends at
- * the command (cut epoch-changed: the tuner moved), not completed.
+ * reported backlog is the true ring backlog (from the live edge), the hold included; a hang
+ * that would end inside the settle ends at the command (cut epoch-changed: the tuner moved),
+ * not completed.
  */
 import { describe, expect, it } from "vitest"
 import {
@@ -111,9 +112,10 @@ describe("WidebandAnalogRecorder holding a pending retune", () => {
 		// At the bound: still held, the file is open.
 		expect(h.ops[0]!.cut).toBeNull()
 		expect(h.rec.owns("o")).toBe(true)
-		// Its backlog is measured to the held position, not the live edge.
+		// Its reported backlog is the true ring backlog, from the live edge: read up to the
+		// command, it is the whole hold (maxBacklog, 2000 ms), not the ~0 left to the command.
 		const held = h.rec.diagnostics().sessions[0]!
-		expect(held.backlogMs).toBeLessThan(100)
+		expect(held.backlogMs).toBe((MAX_BACKLOG * 1000) / FS)
 		// One sample past the bound: the file ends at the command, cut epoch-changed.
 		h.engine.write(new Uint8Array([127, 127]))
 		for (let i = 0; i < 4; i++) await h.pump()
