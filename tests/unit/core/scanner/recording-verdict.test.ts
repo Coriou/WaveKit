@@ -34,6 +34,7 @@ import {
 	TDMA_CHANNEL_MIN_VOTES,
 	NO_VOICE_CHANNEL_MIN_TRIALS,
 	noVoiceChannel,
+	analogTrialsHeard,
 	type DigitalProof,
 	type VoicePrior,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
@@ -2457,6 +2458,83 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 			},
 		}
 		expect(ownDmrHint(p, "o-own")).toBe(false)
+	})
+})
+
+describe("analogTrialsHeard: the owner's trials and its linked partners' heard ones (VoicePrior.analogTrials)", () => {
+	// Feature: recording-verdict, channels whose trials never heard voice (docs/SCANNER.md).
+	const N = NO_VOICE_CHANNEL_MIN_TRIALS
+	const owner = (attempts: number, decoded = 0, syllabic = 0) => ({
+		attempts,
+		decoded,
+		syllabic,
+	})
+	const asPrior = (t: ReturnType<typeof analogTrialsHeard>): VoicePrior => ({
+		...prior([], "analog-fm"),
+		analogTrials: () => t,
+	})
+	for (const [name, o, partners, out, noVoice] of [
+		["no owner trial: null", null, [owner(5, 2)], null, false],
+		[
+			"the owner alone, none heard",
+			owner(52),
+			[],
+			{ attempts: 52, decoded: 0 },
+			true,
+		],
+		[
+			"the owner's 3-syllabic-frame miss counts as heard: the rule is off",
+			owner(52, 0, 1),
+			[],
+			{ attempts: 52, decoded: 1 },
+			false,
+		],
+		[
+			"a partner's heard trial adds to the owner's count",
+			owner(52),
+			[owner(3, 1)],
+			{ attempts: 52, decoded: 1 },
+			false,
+		],
+		[
+			"a partner's syllabic miss counts as its heard trial",
+			owner(52),
+			[owner(3, 0, 1)],
+			{ attempts: 52, decoded: 1 },
+			false,
+		],
+		[
+			"a partner's misses never add (attempts stay the owner's)",
+			owner(N),
+			[owner(400), null],
+			{ attempts: N, decoded: 0 },
+			true,
+		],
+		[
+			"partners sum: owner 1 + partners 2 + 3 + syllabic 1",
+			owner(20, 1),
+			[owner(9, 2), owner(9, 3, 1), null],
+			{ attempts: 20, decoded: 7 },
+			false,
+		],
+		[
+			"a count without `syllabic` reads it as 0",
+			{ attempts: 12, decoded: 0 },
+			[{ attempts: 4, decoded: 0 }],
+			{ attempts: 12, decoded: 0 },
+			true,
+		],
+	] as const)
+		it(name, () => {
+			const t = analogTrialsHeard(o, partners)
+			expect(t).toEqual(out)
+			expect(noVoiceChannel(asPrior(t))).toBe(noVoice)
+		})
+	it("partners default to none", () => {
+		expect(analogTrialsHeard(owner(12, 0, 2))).toEqual({
+			attempts: 12,
+			decoded: 2,
+		})
 	})
 })
 

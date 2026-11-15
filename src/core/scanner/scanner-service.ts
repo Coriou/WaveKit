@@ -164,6 +164,8 @@ import { digitalClass, ownerDecoded } from "./channel/voice-veto.js"
 import { narrowRasterAt } from "./narrow-digital.js"
 import { planReplayTrials } from "./replay-plan.js"
 import { TrialMemory, type TrialMemoryEntry } from "./trial-memory.js"
+import { syllabicHeard } from "./analog-trial.js"
+import { analogTrialsHeard } from "./channel/recording-verdict.js"
 import { PendingCaptureLimiter, admittedAtClose } from "./pending-capture.js"
 import {
 	replayTrialWeight,
@@ -1620,14 +1622,13 @@ export class ScannerService extends EventEmitter {
 					return {
 						...prior,
 						// The owner's trials; a linked co-channel partner's trial that heard counts.
-						analogTrials: () => {
-							const t = this.trialMemory.analogFmTrials(owner)
-							if (t === null) return null
-							let decoded = t.decoded
-							for (const id of prior.partnerIds ?? [])
-								decoded += this.trialMemory.analogFmTrials(id)?.decoded ?? 0
-							return { attempts: t.attempts, decoded }
-						},
+						analogTrials: () =>
+							analogTrialsHeard(
+								this.trialMemory.analogFmTrials(owner),
+								(prior.partnerIds ?? []).map(id =>
+									this.trialMemory.analogFmTrials(id),
+								),
+							),
 					}
 				},
 				logger: deps.logger,
@@ -6676,12 +6677,16 @@ export class ScannerService extends EventEmitter {
 				: undefined) ??
 			fallback
 		if (!discoveryId) return
+		// The analog trial's frames: a failed one that saw speech-like modulation is remembered
+		// (analog-trial.ts syllabicHeard; recording-verdict.ts analogTrialsHeard).
+		const syllabic = syllabicHeard(result.analog?.stats)
 		for (const t of result.trials)
 			this.trialMemory.record(
 				discoveryId,
 				t.protocol,
 				t.mode !== undefined ? "analog-demod" : t.decoderType,
 				t.outcome,
+				t.mode !== undefined && syllabic,
 			)
 	}
 

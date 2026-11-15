@@ -192,9 +192,10 @@ export function fileDecodedOwn(
  * (DMR burst structure), so a verified sighting older than the TTL is `checked-digital` only while
  * these or a verified sighting keep the channel fresh (digitalChannel). Asked like `classVotes`.
  * `analogTrials` (absent or null: none remembered) reads the owner's analog FM replay trials
- * (trial-memory.ts TrialMemory.analogFmTrials: how often they ran, how often they heard speech or
- * a tone; `decoded` adds those of its linked co-channel discoveries, `partnerIds`, that heard);
- * asked only for a file that measured no speech (noVoiceChannel).
+ * (trial-memory.ts TrialMemory.analogFmTrials: how often they ran, how often they heard: speech, a
+ * tone, or a failed trial that held a run of speech-like frames; `decoded` adds those of its linked
+ * co-channel discoveries, `partnerIds`, that heard: analogTrialsHeard); asked only for a file that
+ * measured no speech (noVoiceChannel).
  */
 export interface VoicePrior {
 	readonly id?: string
@@ -226,6 +227,39 @@ export interface AnalogTrials {
 	readonly decoded: number
 }
 
+/** TrialMemory.analogFmTrials of one discovery (analogTrialsHeard's input). */
+export interface AnalogTrialCounts {
+	readonly attempts: number
+	/** Trials that heard speech or a tone (`heard` or `decoded`). */
+	readonly decoded: number
+	/**
+	 * Failed trials that still held a run of ANALOG_TRIAL_SYLLABIC_RUN_FRAMES (3) consecutive syllabic frames
+	 * (analog-trial.ts syllabicHeard; absent: 0).
+	 */
+	readonly syllabic?: number
+}
+
+/**
+ * VoicePrior.analogTrials from trial memory: the owner's attempts, and every trial that heard,
+ * the owner's and its linked co-channel partners' alike. A trial heard when it decoded (speech or
+ * a tone) or, whatever its own outcome (no-sync, carrier-only, low audio), held a run of 3 consecutive
+ * syllabic frames (a syllable; scattered noise frames do not count): a weak, distant repeater whose
+ * trials keep failing still shows such runs, so it
+ * never becomes a no-voice channel by trial count alone. A partner's misses never add (its
+ * attempts are not counted). Null owner: null (no trial remembered).
+ */
+export function analogTrialsHeard(
+	owner: AnalogTrialCounts | null,
+	partners: readonly (AnalogTrialCounts | null)[] = [],
+): AnalogTrials | null {
+	if (owner === null) return null
+	const heard = (t: AnalogTrialCounts | null): number =>
+		t === null ? 0 : t.decoded + (t.syllabic ?? 0)
+	let decoded = heard(owner)
+	for (const p of partners) decoded += heard(p)
+	return { attempts: owner.attempts, decoded }
+}
+
 /**
  * Analog FM replay trials of the owner that must have run, none hearing anything, before its
  * channel is a no-voice channel (noVoiceChannel): 10. One trial replays one captured over and
@@ -238,8 +272,8 @@ export const NO_VOICE_CHANNEL_MIN_TRIALS = 10
 
 /**
  * A no-voice channel (docs/SCANNER.md, "Channels whose trials never heard voice"): the owner's
- * analog FM replay trials ran NO_VOICE_CHANNEL_MIN_TRIALS times or more and never heard speech
- * or a tone (VoicePrior.analogTrials), and no analog voice was heard on the channel (an analog
+ * analog FM replay trials ran NO_VOICE_CHANNEL_MIN_TRIALS times or more and never heard speech,
+ * a tone or a run of 3 consecutive syllabic frames (VoicePrior.analogTrials, analogTrialsHeard), and no analog voice was heard on the channel (an analog
  * tone or voice proof, or an analog label at `classified` or more: analogVoiceHeard). Its files
  * are kept only when their own audio shows speech (finishVerdict's `speechHeard`). A throwing
  * read: not one (keeps).
