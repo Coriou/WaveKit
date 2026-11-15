@@ -277,14 +277,21 @@ export async function measurePoint(
 		}) as DecoderChannelRequest),
 		...variant.request,
 	}
+	const delays: number[] = []
 	const [cf32] = await channelize(
 		chanBinary,
 		iq,
 		{ rateHz: MARGIN_CAPTURE.rateHz, centerHz: MARGIN_CENTRE_HZ },
 		[request],
+		delays,
 	)
-	// fmCu8's default lead of noise before the transmission, at the channel rate.
-	const residual = residualOffset(cf32!, signal, Math.round(0.1 * 48_000))
+	// fmCu8's default lead of noise before the transmission, at the channel rate, plus the
+	// channel's group delay (its filters and any carrier-correction lookahead).
+	const residual = residualOffset(
+		cf32!,
+		signal,
+		Math.round(0.1 * 48_000 + (delays[0] ?? 0)),
+	)
 	const probe = adapter(signal, variant, "channel")
 	const { head, tail, gain } = channelCommand(probe)
 	const dir = workDir(root, "margin")
