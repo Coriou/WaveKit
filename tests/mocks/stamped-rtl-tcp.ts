@@ -41,6 +41,8 @@ export interface StampedRtlTcp {
 	connections(): number
 	/** Starts sending samples after `holdSamples` (headers go out at once either way). */
 	releaseSamples(): void
+	/** Sample chunks sent so far (to any connection). */
+	samplesSent(): number
 	close(): Promise<void>
 }
 
@@ -94,6 +96,7 @@ export async function startStampedRtlTcp(opts: {
 	let silent: NodeJS.Timeout | null = null
 	let testMode = false
 	let held = opts.holdSamples === true
+	let sent = 0
 	let rampDue = false
 	let ramp = 0
 	const apply = (cmd: number, value: number) => {
@@ -160,7 +163,11 @@ export async function startStampedRtlTcp(opts: {
 				bytes[i] = centre
 				bytes[i + 1] = rate
 			}
-		for (const s of sockets) if (!s.destroyed) s.write(bytes)
+		for (const s of sockets)
+			if (!s.destroyed) {
+				s.write(bytes)
+				sent += 1
+			}
 	}, opts.intervalMs ?? 5)
 	timer.unref()
 	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
@@ -217,6 +224,7 @@ export async function startStampedRtlTcp(opts: {
 		releaseSamples: () => {
 			held = false
 		},
+		samplesSent: () => sent,
 		close: async () => {
 			for (const t of timers) clearTimeout(t)
 			clearInterval(timer)
