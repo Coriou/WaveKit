@@ -97,7 +97,7 @@ the hook lines in `src/core/live-demodulator.ts` named below, tests. No change t
       repeated fades, batched, delayed and split delivery, run2 boundary regression, fallback),
       `tests/unit/core/analog-transmission-carrier.property.test.ts` (Properties 13, 14), the
       `CarrierBlockLog` unit test in the carrier suite, STE tests (3.8.12), and the deliberate
-      `tests/unit/core/live-demodulator-wg7.test.ts` changes (carrier blocks matching PCM).
+      `tests/unit/core/live-demodulator-squelch-modes.test.ts` changes (carrier blocks matching PCM).
   - _Requirements: 3.8.10, 3.8.12_
   - **Property 13: Spans bound transmissions**, **Property 14: Tone hears only carrier**
 - [x] A1.6 Review fixes: Rust gate history by position and per-block gate state with metrics

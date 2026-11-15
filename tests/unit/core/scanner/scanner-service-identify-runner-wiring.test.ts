@@ -78,7 +78,7 @@ const depsOf = (h: ReturnType<typeof harness>, id: string) =>
 	(internals(h).drivers.get(id) as unknown as { deps: Record<string, unknown> })
 		.deps
 
-describe("ScannerService WG11 identify wiring", () => {
+describe("ScannerService identify runner wiring", () => {
 	it("passes narrowRasterAt and the shared memory to the identify runner and its inner driver", async () => {
 		const h = harness()
 		await h.service.start()
@@ -160,7 +160,7 @@ describe("ScannerService WG11 identify wiring", () => {
 			} as unknown as JobDriver,
 		])
 
-	it("fills the band plan ISM prior only for a sweep silent at the frequency (review M1)", async () => {
+	it("fills the band plan ISM prior only for a sweep silent at the frequency", async () => {
 		const h = harness()
 		await h.service.start()
 		// Nothing covering (passive off) or an in-window job: today's priors.

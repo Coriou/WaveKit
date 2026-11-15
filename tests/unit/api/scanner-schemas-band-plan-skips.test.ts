@@ -14,7 +14,7 @@ const SKIPS = [
 	},
 ]
 
-describe("WG7 scanner schemas", () => {
+describe("scanner schemas: band-plan skip ranges", () => {
 	let app: FastifyInstance
 	afterEach(async () => {
 		await app.close()

@@ -81,7 +81,7 @@ Research status: rust-demod-a has only its spec, with all 9 tasks unchecked and 
 - Modify: `src/config.ts` (`ScannerConfigSchema.iqCapture.allowLegacy`, boolean, default false; `enabled` default unchanged false)
 - Modify: `src/api/routes/scanner-schemas.ts` (accepted fields only)
 - Modify: `cli/source/data/scanner-guards.ts`
-- Test: `tests/unit/core/scanner-redesign-contract.test.ts` (new), `tests/unit/cli/scanner-guards.test.ts`, `tests/unit/core/wg10-contract.test.ts`, `tests/unit/core/wg11-contract.test.ts`, `tests/unit/api/scanner-dto-contract.test.ts`
+- Test: `tests/unit/core/scanner-redesign-contract.test.ts` (new), `tests/unit/cli/scanner-guards.test.ts`, `tests/unit/core/web-gaps-10-contract.test.ts`, `tests/unit/core/web-gaps-11-contract.test.ts`, `tests/unit/api/scanner-dto-contract.test.ts`
 
 **Interfaces (produces, frozen by name; lanes import from these):**
 
@@ -270,7 +270,7 @@ export const ANALYZE_EVENT_MAX_BYTES = 16_384
   - Live audio (ID.3): `recordAnalog` with transport `live`.
   - Decodes keep using the existing `appendObservationEvidence`, which is persisted. The proof's `decodes` input comes from `Observation.decode`.
 
-- [ ] **Step 1: Write the failing contract test** `tests/unit/core/scanner-redesign-contract.test.ts`, following the style of `tests/unit/core/wg11-contract.test.ts`:
+- [ ] **Step 1: Write the failing contract test** `tests/unit/core/scanner-redesign-contract.test.ts`, following the style of `tests/unit/core/web-gaps-11-contract.test.ts`:
 
 ```ts
 it("pins the gate arithmetic", () => {
@@ -400,7 +400,7 @@ it("pins the evidence sink bounds (A12)", () => {
 	expect(sink.nextTrialOrder()).toBe(1)
 })
 it("route schemas: waitMs without waitUntilSignal and toleranceHz without nearHz are refused", async () => {
-	// Fastify app with identifyBodySchema and discoveryQuerySchema, as in tests/unit/api/scanner-schemas-wg6.test.ts
+	// Fastify app with identifyBodySchema and discoveryQuerySchema, as in tests/unit/api/scanner-schemas-decoded-elsewhere.test.ts
 	const target = { frequencyHz: 446_006_250 }
 	expect(
 		(await postIdentify({ sourceId: "rtl", target, waitMs: 5_000 })).statusCode,
@@ -456,7 +456,7 @@ it("DiscoveryNearQuery is structural", () => {
 - [ ] **Step 2: Run to verify it fails.** Run: `pnpm exec vitest run tests/unit/core/scanner-redesign-contract.test.ts`. Expected: FAIL (module `scanner-redesign-contract.js` not found).
 - [ ] **Step 3: Add the contract files, DTO copies, config key, accepted route fields and CLI guard widening** (`trial outcome` enum + `data-like`, `carrier-only`; `ended: z.enum(["window-moved", "no-signal"])`). Amend `wg10-contract`/`wg11-contract` where they pinned `ended` as a literal or the old outcome list. Extend `tests/unit/cli/scanner-guards.test.ts` with the new values.
 - [ ] **Step 4: Design amendments.** design.md § Contract › Amendments (task 0.1) already records A4 (analyze as an argv subcommand with its event on fd 4, `openAnalyze`; the § Analog replay trial command text and tasks.md RP.2 are amended to match), A12 (`ObservationEvidenceSink` and `DiscoveryNearQuery`, the two bounds, in-memory-only trial, analog and unavailable evidence, weak after a restart; open item "persist trial evidence across restart", WG13) and the `createAnalogTrialRunner` deps without `process`. Main confirms that text against the committed contract and appends A5 (`unsupported` replay outcome) there. tasks.md already carries A7 (the `spectrum-engine.ts` allocation) and the `tests/mocks/iq/analog-synth.ts` allocation for RP. Do not renumber anything.
-- [ ] **Step 5: Verify.** Run: `pnpm exec vitest run tests/unit/core/scanner-redesign-contract.test.ts tests/unit/cli/scanner-guards.test.ts tests/unit/core/wg10-contract.test.ts tests/unit/core/wg11-contract.test.ts tests/unit/api/scanner-dto-contract.test.ts && pnpm run typecheck && pnpm run lint`. Expected: PASS. Then `pnpm run build` (api-types dist for the CLI).
+- [ ] **Step 5: Verify.** Run: `pnpm exec vitest run tests/unit/core/scanner-redesign-contract.test.ts tests/unit/cli/scanner-guards.test.ts tests/unit/core/web-gaps-10-contract.test.ts tests/unit/core/web-gaps-11-contract.test.ts tests/unit/api/scanner-dto-contract.test.ts && pnpm run typecheck && pnpm run lint`. Expected: PASS. Then `pnpm run build` (api-types dist for the CLI).
 - [ ] **Step 6: Commit** `feat(scanner): freeze the scanner redesign contract` with only the paths above. Lanes branch from this commit.
 
 ---
@@ -622,7 +622,7 @@ it("widths clamp to [6250, 200000]", () => {})
   - `channel-gate-report.test.ts`: the measured report as assertions at the reference FFT size (2048) and 50 ms blocks. Noise false-alarm passes: 0 in 20 000 synthetic channel-blocks at default `kCh`. Detection probability for NFM, 4FSK, GMSK and OOK bursts at channel SNR 3, 6, 9, 12 dB is printed, and asserted ≥ 0.95 at 9 dB and ≥ 0.5 at 6 dB for 500 ms bursts. The lane report carries the printed table.
 - [ ] **Step 2: Run.** `pnpm exec vitest run tests/unit/core/spectrum/frame-tracks.test.ts tests/unit/core/spectrum/frame-track-gate-size.test.ts tests/unit/core/spectrum/summary-wire-tracks.test.ts tests/unit/core/spectrum/channel-gate-report.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the above plus `frame-tracks-property.test.ts frame-tracks-golden.test.ts frame-track-rollover.test.ts frame-track-id-bound-log.test.ts tests/unit/core/wg11-contract.test.ts`. Expected: PASS. List each changed golden with R 2.6.
+- [ ] **Step 4: Run** the above plus `frame-tracks-property.test.ts frame-tracks-golden.test.ts frame-track-rollover.test.ts frame-track-id-bound-log.test.ts tests/unit/core/web-gaps-11-contract.test.ts`. Expected: PASS. List each changed golden with R 2.6.
 - [ ] **Step 5: Re-run DT.0's bench** and record the gate stage cost (budget ≈ 10 µs per block, 0.0002 core).
 - [ ] **Step 6: Commit** `feat(spectrum): frame tracks carry the channel gate; surfaced means passed`.
 

@@ -43,8 +43,8 @@ type Same<A, B> =
 		: false
 const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 
-describe("WG10 contract: identify analog evidence and unavailable decoders", () => {
-	it("widens trial decoder and reason, keeps the state list (WG11 adds the heard outcome)", () => {
+describe("web-gaps-10 contract: identify analog evidence and unavailable decoders", () => {
+	it("widens trial decoder and reason, keeps the state list (web-gaps-11 adds the heard outcome)", () => {
 		type Decoder = Api.ScannerIdentifyTrial["decoder"]
 		expect(
 			same<
@@ -177,7 +177,7 @@ describe("WG10 contract: identify analog evidence and unavailable decoders", () 
 		expect(same<Optional<"decodersUnavailable">, true>(true)).toBe(true)
 	})
 
-	it("is accepted by the CLI identify guard (closed outcome list; WG11 adds heard)", () => {
+	it("is accepted by the CLI identify guard (closed outcome list; web-gaps-11 adds heard)", () => {
 		const target = SCAN_JOB.identify!.targets[0]!
 		const job = {
 			...SCAN_JOB,
@@ -241,7 +241,7 @@ describe("WG10 contract: identify analog evidence and unavailable decoders", () 
 	})
 })
 
-describe("WG10 contract: spectrum warnings, storage kept, live audio bounds", () => {
+describe("web-gaps-10 contract: spectrum warnings, storage kept, live audio bounds", () => {
 	it("adds optional warning fields and the log interval", () => {
 		expect(
 			same<
@@ -303,7 +303,7 @@ describe("WG10 contract: spectrum warnings, storage kept, live audio bounds", ()
 	})
 })
 
-describe("WG10 contract: recording delete progress, sweep, aliases, ports", () => {
+describe("web-gaps-10 contract: recording delete progress, sweep, aliases, ports", () => {
 	it("accepts only mkdtemp-shaped private directory names", () => {
 		for (const ok of [".wavekit-delete-abc123", ".wavekit-delete-ZZZZZZ"])
 			expect(RECORDING_DELETE_PRIVATE_DIR.test(ok)).toBe(true)
@@ -379,7 +379,7 @@ describe("WG10 contract: recording delete progress, sweep, aliases, ports", () =
 		).toHaveLength(1)
 	})
 
-	it("keeps the WG9 recording codes and statuses", () => {
+	it("keeps the web-gaps-9 recording codes and statuses", () => {
 		expect(RECORDING_ERROR_STATUS.RECORDING_DELETE_UNSUPPORTED).toBe(409)
 		expect(RECORDING_ERROR_STATUS.RECORDING_BUSY).toBe(409)
 		expect(RECORDING_ERROR_STATUS.RECORDING_KEPT).toBe(409)

@@ -23,7 +23,7 @@ WG2 ([design](../web-gaps-2/design.md): presentation, APRS and mesh coalescing, 
 | `packages/api-types/src/mesh.ts`                     | optional `MeshNode.telemetry`/`neighbours`, `MeshDeviceTelemetry`, `MeshNeighbour`, optional `MeshTrackerStats.telemetryPackets`/`neighbourReports`                                                                                                                            |
 
 `tests/unit/core/activity/api-types-compat.test.ts` asserts the retention copies are identical;
-`tests/unit/core/wg3-contract.test.ts` pins the defaults. No `events.ts` change: mesh fields
+`tests/unit/core/web-gaps-3-contract.test.ts` pins the defaults. No `events.ts` change: mesh fields
 ride `mesh:update`, coverage is REST only. Every addition is optional or new.
 
 The freeze also anchors the Activity test store clock (`fixtureClock` in

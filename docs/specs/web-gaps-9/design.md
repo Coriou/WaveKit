@@ -16,7 +16,7 @@ audit, the viewed-slice-spectrum budgets and the WG8 bins cap measurer.
 | `packages/api-types/src/index.ts`                | barrel export of `access-pairing.js`                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `src/core/recordings/contract.ts` (new)          | `RECORDING_KEEPS_SCHEMA_VERSION`, `RECORDING_KEEP_KEY`, `RecordingKeepKey`, `recordingKeepKeyOf`, `dsdFmeKeepKey`, `scannerKeepKey`, `RecordingKeepEntry`, `RecordingKeepsFile`, `RecordingProtection` (the deletion decision port), `RecordingKeepService`, `RecordingKeepError`                                                                                                                                                                                                  |
 
-`tests/unit/core/wg9-contract.test.ts` pins the routes, cookie name, CSRF header, preflight
+`tests/unit/core/web-gaps-9-contract.test.ts` pins the routes, cookie name, CSRF header, preflight
 cache bound, the pair request rules (accepted and refused bodies), the session body, the access
 code union against the core denial codes, the Keep bounds with their arithmetic, the error
 statuses, the keep keys (accepted and refused, traversal included, the index not part of the key),

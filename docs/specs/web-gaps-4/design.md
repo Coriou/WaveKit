@@ -24,7 +24,7 @@ Status: implemented. Requirement 6.9 is decided: protected-only (see "Station wr
 | `src/core/station/contract.ts` (new)                                 | `STATION_WRITE_REQUIRES_ACCESS` (`true`, E1 decided), `STATION_STORE_FILE`, `STATION_STORE_SCHEMA_VERSION` (1), `STATION_STORE_MAX_BYTES` (4 096), `STATION_STORE_CORRUPT_KEEP` (1), `STATION_COVERAGE_RESET_M` (1 000), `StationStoredValue`, `StationStoreFile`, `StationService`, `StationServiceOptions`                                                                                                                                                                                |
 | `src/api/server.ts`                                                  | optional `ApiServerDependencies.storageReport`, `stationEstimate`, `stationService` (accepted, not mounted until Main wires each lane)                                                                                                                                                                                                                                                                                                                                                      |
 
-`tests/unit/core/wg4-contract.test.ts` pins the constants, the trails copy identity, the
+`tests/unit/core/web-gaps-4-contract.test.ts` pins the constants, the trails copy identity, the
 `agc` key without a default, `stationOrigins` and the optional slots. The frozen
 `contract.ts` files under `src/core/{station,station-estimate,storage-report}/` are read-only
 for their lanes. Names a lane creates and Main consumes at merge (not frozen as code, frozen

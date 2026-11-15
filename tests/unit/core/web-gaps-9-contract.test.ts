@@ -59,7 +59,7 @@ const DSD_NAME = "20261017_081500_12345_DMR_GROUP_TGT_9_SRC_1234.wav"
 const DEVICE_ID = `device_${"A".repeat(43)}`
 const CSRF = "B".repeat(43)
 
-describe("WG9 contract", () => {
+describe("web-gaps-9 contract", () => {
 	it("freezes the pairing routes, cookie name, CSRF header and preflight cache bound", () => {
 		expect(ACCESS_PAIR_ROUTE).toBe("/api/access/pair")
 		expect(ACCESS_SESSION_ROUTE).toBe("/api/access/session")
@@ -289,7 +289,7 @@ describe("WG9 contract", () => {
 		).toBe(true)
 	})
 
-	it("keeps the tuning trust vocabulary (the WG9 fix changes derivation, not values)", () => {
+	it("keeps the tuning trust vocabulary (the web-gaps-9 fix changes derivation, not values)", () => {
 		expect(
 			same<Api.TuningTrust, "commanded" | "relay" | "unverified">(true),
 		).toBe(true)

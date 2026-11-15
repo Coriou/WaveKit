@@ -62,7 +62,7 @@ const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 const NEVER_PATCHABLE_KEY =
 	/(path|file|dir|host|addr|port|device|serial|url|callsign|^lat$|^lon$|^output|^udp|record|prune|debug|inputIqFormat|extraArgs|voiceSlot)/i
 
-describe("WG8 contract", () => {
+describe("web-gaps-8 contract", () => {
 	it("freezes the decoder settings bounds, access switch and error statuses", () => {
 		expect(DECODER_SETTINGS_REQUIRES_ACCESS).toBe(true)
 		expect(DECODER_SETTINGS_FILE_NAME).toBe("decoder-settings.json")

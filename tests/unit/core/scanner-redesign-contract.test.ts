@@ -285,7 +285,7 @@ describe("WG12 scanner redesign contract", () => {
 		expect(sink.nextTrialOrder()).toBe(1)
 	})
 	it("route schemas: waitMs without waitUntilSignal and toleranceHz without nearHz are refused", async () => {
-		// Fastify app with identifyBodySchema and discoveryQuerySchema, as in tests/unit/api/scanner-schemas-wg6.test.ts
+		// Fastify app with identifyBodySchema and discoveryQuerySchema, as in tests/unit/api/scanner-schemas-decoded-elsewhere.test.ts
 		const target = { frequencyHz: 446_006_250 }
 		expect(
 			(await postIdentify({ sourceId: "rtl", target, waitMs: 5_000 }))

@@ -748,7 +748,7 @@ Rules (requirements 3.2, 3.3, 3.7, 3.9, 8.1, 8.2):
       `"five band-plan channels are capped to four nearest the centre"` and `"cap 0 yields none"`.
       `reach-hook.test.ts`: readsb `"raw"`, lora-meshtastic `"centre"`, ais-catcher/acarsdec/dumpvdl2/rtl433/
       multimon-ng/dsd-fme/direwolf `"channel"`; argv goldens of all adapters unchanged (run existing
-      `tests/unit/decoders/argv-golden-wg7-b.test.ts` and `argv-golden-wg7-c.test.ts`).
+      `tests/unit/decoders/argv-golden-base-adapters.test.ts` and `argv-golden-example-configs.test.ts`).
 - [ ] **Step 2:** **Property 5: Channel sources** (Validates 3.4, 3.5, 3.7) and **Property 13: VFO follows —
       planner half** (Validates 3.5, 5.5) in `channel-sources.property.test.ts`: dsd-fme/multimon-ng placements
       equal configured ∪ in-range VFO ∪ ≤4 qualifying band-plan channels in 3.7 order; for arbitrary timed VFO

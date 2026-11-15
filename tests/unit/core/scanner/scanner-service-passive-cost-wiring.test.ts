@@ -31,7 +31,7 @@ async function started(
 	return { h, engine, openedAt, reason }
 }
 
-describe("passive cost guard wiring (WG11 req 2)", () => {
+describe("passive cost guard wiring (web-gaps-11 req 2)", () => {
 	it("disables above the configured limit, not above the 0.25 default", async () => {
 		const a = await started(s => {
 			s.passive.maxEngineUtilization = 0.5
@@ -201,7 +201,7 @@ function fakeElu(engine: SpectrumEngine, profile: (tMs: number) => number) {
 	return clock
 }
 
-describe("passive cost guard: no ELU sample (review regression, DQ 8.2)", () => {
+describe("passive cost guard: no ELU sample (DQ 8.2)", () => {
 	it("a sole engine without a sample is not judged on its whole-life average", async () => {
 		const { h, engine, openedAt, reason } = await started()
 		engine.utilization = () => 0.99
@@ -213,7 +213,7 @@ describe("passive cost guard: no ELU sample (review regression, DQ 8.2)", () => 
 	})
 })
 
-describe("passive cost guard: windowed utilization (WG11 review M1)", () => {
+describe("passive cost guard: windowed utilization", () => {
 	it("judges a sole engine over the window since the last check, not its whole life", async () => {
 		const { h, engine, openedAt, reason } = await started()
 		// about three hours in, on a recheck boundary
@@ -239,7 +239,7 @@ describe("passive cost guard: windowed utilization (WG11 review M1)", () => {
 	})
 })
 
-describe("passive cost guard: worker replacement (WG11 review MAJOR, DQ 8.2)", () => {
+describe("passive cost guard: worker replacement (DQ 8.2)", () => {
 	it("discards the window at a new worker generation and never clears on the old worker's counters", async () => {
 		const { h, engine, openedAt, reason } = await started()
 		await h.service.spectrum.acquire("rtl", "ws:wg11-sc-gen")
@@ -271,7 +271,7 @@ describe("passive cost guard: worker replacement (WG11 review MAJOR, DQ 8.2)", (
 	})
 })
 
-describe("passive cost guard: probation with no display (WG11 review M2)", () => {
+describe("passive cost guard: probation with no display", () => {
 	async function disabledHeadless() {
 		const s = await started()
 		const clock = fakeElu(s.engine, () => 0.9)
@@ -322,7 +322,7 @@ describe("passive cost guard: probation with no display (WG11 review M2)", () =>
 	})
 })
 
-describe("trackIdentity through the store's identity accessor (WG11 identity accessor)", () => {
+describe("trackIdentity through the store's identity accessor", () => {
 	it("resolves a merged survivor without store.get or structuredClone", async () => {
 		const h = serviceHarness()
 		await h.service.start()

@@ -14,7 +14,7 @@ import {
 	resolveActivityLimits,
 } from "../../../src/core/activity/storage/limits.js"
 
-describe("WG3 contract", () => {
+describe("web-gaps-3 contract", () => {
 	it("defaults the retention policy to fair-share and keeps the caps", () => {
 		// Feature: web-gaps-3, requirement 1.1 and 1.16
 		expect(ACTIVITY_RETENTION_POLICY_DEFAULT).toBe("fair-share")
@@ -51,7 +51,7 @@ describe("WG3 contract", () => {
 		expect(activityConfigOptions(parsed).retention?.policy).toBe("oldest-first")
 	})
 
-	it("keeps hole fields and WG3 DTO fields optional", () => {
+	it("keeps hole fields and web-gaps-3 DTO fields optional", () => {
 		const identity: StoreIdentity = {
 			storeUuid: "u",
 			restoreGeneration: 0,

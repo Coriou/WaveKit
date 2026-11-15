@@ -21,7 +21,7 @@ function hit(lastDurationMs: number | null) {
 	}
 }
 
-describe("WG6 scanner schemas", () => {
+describe("scanner schemas: decoded-elsewhere skip and hit duration", () => {
 	let app: FastifyInstance
 	afterEach(async () => {
 		await app.close()

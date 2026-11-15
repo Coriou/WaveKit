@@ -480,7 +480,7 @@ const BUILD: Record<
 	direwolf: DirewolfDecoder,
 }
 
-describe("WG7 HW.2 argv goldens (in-bounds configs unchanged)", () => {
+describe("argv goldens of the example and fixture configs (in-bounds configs unchanged)", () => {
 	for (const [type, rows] of Object.entries(GOLDEN)) {
 		it.each(rows.map((row, index) => ({ row, index })))(
 			`${type} case $index`,

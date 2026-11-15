@@ -101,7 +101,7 @@ describe("Live Audio Routes", () => {
 			autoMarginDb: 8,
 		})
 		for (const payload of [
-			// WG7: "noise" is a mode now (live-audio-wg7.test.ts); unknown modes stay refused.
+			// WG7: "noise" is a mode now (live-audio-squelch-modes.test.ts); unknown modes stay refused.
 			{ squelchMode: "loud" },
 			{ autoMarginDb: -1 },
 			{ autoMarginDb: 41 },

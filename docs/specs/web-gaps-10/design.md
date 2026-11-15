@@ -17,7 +17,7 @@ WG5/WG9 strict tuning trust; the spectrum engine § 4.7 discontinuity alarm; WG7
 | `src/core/recordings/contract.ts`                    | `RECORDING_DELETE_PRIVATE_DIR`, `RECORDING_DELETE_VERIFIED_NAME` (`verified`), `RECORDING_DELETE_SWEEP_MAX_DIRS` (64), `DISCOVERY_RECORDING_ALIASES_MAX` (64), `RecordingKeepTotals`, `RecordingKeepTotalsSource`, `ScannerRecordingDeleter`, `RecordingDeleteSweepResult`                                                                                                                                 |
 | `src/core/scanner/identify-analog-contract.ts` (new) | `AnalogEvidenceTransmission`, `IdentifyAnalogEvidence` (types only)                                                                                                                                                                                                                                                                                                                                        |
 
-`tests/unit/core/wg10-contract.test.ts` pins every constant with its arithmetic, the identify
+`tests/unit/core/web-gaps-10-contract.test.ts` pins every constant with its arithmetic, the identify
 trial `decoder` and `reason` unions with the outcome and state lists unchanged, the result
 fields, the CLI guard acceptance of a payload carrying every new field, the warning suspects,
 the storage `kept` shapes, the private directory grammar (accepted and refused names), the port
@@ -477,7 +477,7 @@ evidence): same stream. Recordings: unaffected.
 ### Deliberate test changes
 
 Existing tracker suites use fakes without `carrierBlockLog`, so they take the fallback and stay
-as they are. Changed deliberately in `live-demodulator-wg7.test.ts`: the noise-mode transmission
+as they are. Changed deliberately in `live-demodulator-squelch-modes.test.ts`: the noise-mode transmission
 and mode-switch tests feed 60 carrier blocks (600 ms) instead of 20 and 10, because span audio
 now counts blocks, not the test clock; the tone-gate integration test feeds one carrier block per
 10 ms of PCM, because PCM is matched to blocks by position. A teardown squelch edge (stop or a
