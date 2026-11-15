@@ -3002,6 +3002,21 @@ export class DiscoveryStore
 	 * deleted records dropped first.
 	 */
 	private readonly ownerDecodes = new Map<string, OwnerDecode>()
+	/**
+	 * The same decodes per channel (channelKey: the owner's first source and frequency key, the
+	 * key co-channel twins share), newest time per protocol (VoicePrior.channelDecodes): a paging
+	 * channel holds one discovery per capcode and its links need not join every twin to every
+	 * other. At most OWNER_DECODES_MAX channels (oldest written dropped first) × the protocols
+	 * decoded on each (a handful). Memory only.
+	 */
+	private readonly channelDecodes = new Map<
+		string,
+		Map<ScannerProtocol, number>
+	>()
+
+	private channelKey(d: Discovery): string {
+		return `${d.sourceIds[0] ?? ""}\u0000${d.frequencyKey}`
+	}
 
 	private noteOwnerDecode(discoveryId: string, ev: DecodeEvidence): void {
 		if (
@@ -3012,6 +3027,21 @@ export class DiscoveryStore
 		)
 			return
 		const owner = this.folderOwner(discoveryId) ?? discoveryId
+		const d = this.discoveries.get(owner)
+		if (d !== undefined) {
+			const key = this.channelKey(d)
+			const byProtocol =
+				this.channelDecodes.get(key) ?? new Map<ScannerProtocol, number>()
+			byProtocol.set(
+				ev.protocol,
+				Math.max(byProtocol.get(ev.protocol) ?? ev.at, ev.at),
+			)
+			this.channelDecodes.delete(key)
+			this.channelDecodes.set(key, byProtocol)
+			const oldest = this.channelDecodes.keys().next()
+			if (this.channelDecodes.size > OWNER_DECODES_MAX && oldest.done !== true)
+				this.channelDecodes.delete(oldest.value)
+		}
 		const prev = this.ownerDecodes.get(owner)
 		if (prev !== undefined && prev.at > ev.at) return
 		this.ownerDecodes.delete(owner)
@@ -4125,7 +4155,10 @@ export class DiscoveryStore
 	 * `observationId` the observation that proof cites; `digitalProofs` lazily lists the digital
 	 * proof of each of the owner's kept observations (digitalProofs), and `digitalSeenAt` the time
 	 * of its latest digital evidence (digitalSeenAt), `tdmaSeenAt` that of its newest `tdma-ms`
-	 * vote (tdmaSeenAt). Undefined for a folder nobody owns. Reads only.
+	 * vote (tdmaSeenAt). `ownerDecode` is the owner's ownerDecodes memo entry, `channelDecodes` the
+	 * owner's channel's (channelDecodes: newest per protocol) and those of the co-channel
+	 * discoveries above (1 + at most 8 map reads): the channel's pager prior.
+	 * Undefined for a folder nobody owns. Reads only.
 	 */
 	voicePrior(folderId: string): VoicePrior | undefined {
 		const owner = this.folderOwner(folderId)
@@ -4173,6 +4206,15 @@ export class DiscoveryStore
 				return { total, votes }
 			},
 			ownerDecode: this.ownerDecodes.get(d.id) ?? null,
+			channelDecodes: [
+				...[...(this.channelDecodes.get(this.channelKey(d)) ?? [])].map(
+					([protocol, at]) => ({ protocol, at }),
+				),
+				...ids.slice(1).flatMap(id => {
+					const e = this.ownerDecodes.get(id)
+					return e === undefined ? [] : [e]
+				}),
+			],
 			digitalProofs: () => this.digitalProofs(d.id),
 			digitalSeenAt: () => this.digitalSeenAt(d.id),
 			tdmaSeenAt: () => this.tdmaSeenAt(d.id),
@@ -4189,7 +4231,8 @@ export class DiscoveryStore
 	/**
 	 * The digital proof of each kept observation of discovery `id` (VoicePrior.digitalProofs): a
 	 * digital voice decode or a dsd-fme sync hint, any rank, `checked` for a decode or a hint that
-	 * is not uncheckedSyncHint. One pass over at most OBSERVATIONS_PER_DISCOVERY observations' cached
+	 * is not uncheckedSyncHint, `colourCode` for a hint that read one. One pass over at most
+	 * OBSERVATIONS_PER_DISCOVERY observations' cached
 	 * proofs. Reads only.
 	 */
 	private digitalProofs(id: string): DigitalProof[] {
@@ -4207,6 +4250,7 @@ export class DiscoveryStore
 				at,
 				checked: decoded || !uncheckedSyncHint(proof),
 				verified: decoded || proof.tgSrcVerified === true,
+				colourCode: !decoded && proof.unverifiedCc !== undefined,
 				observationId: o.id,
 			})
 		}

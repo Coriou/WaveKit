@@ -1,6 +1,6 @@
 /**
  * DiscoveryStore.voicePrior composed with the recorder's policy (recording-verdict.ts), as
- * scanner-service wires it: a discovery decoded POCSAG within STRONG_PRIOR_TTL_MS admits a recording only
+ * scanner-service wires it: a channel decoded POCSAG within OWNER_DEDICATED_PRIOR_TTL_MS admits a recording only
  * as a shadow its own tone must class, one decoded DMR only holds; a channel where analog voice
  * was heard (a recorder tone) keeps recording despite a decode; a folder nobody owns reads no
  * prior.
@@ -152,7 +152,7 @@ describe("DiscoveryStore.voicePrior", () => {
 		// The owner's published proof is the old capcode's page, 30 h old.
 		expect(prior?.labels.find(l => l.owner)?.at).toBe(T0 + 500)
 		expect(prior?.ownerDecode).toEqual({ protocol: "pocsag", at: later + 500 })
-		// Past a co-channel partner's 30 min and within 24 h of the new page: strong.
+		// Within 24 h of the new page: strong.
 		const now = later + 500 + 2 * 60 * 60_000
 		expect(readPrior(prior, false, now)).toBe("tone-required")
 		expect(
@@ -162,6 +162,104 @@ describe("DiscoveryStore.voicePrior", () => {
 		expect(readPrior({ ...prior!, analogVoice: () => true }, false, now)).toBe(
 			"none",
 		)
+	})
+
+	describe("the pager prior is per channel: three capcode twins on one channel", () => {
+		// Feature: recording-verdict, the per-channel pager prior (docs/SCANNER.md, "Known digital or paging channels").
+		const H = 3_600_000
+		/** Twins d1, d2, d3 (capcodes 1, 2, 3 paged at T0), then pages of capcode 1 only. */
+		function twins(pageAt: readonly number[], cls: "fsk2-wide" = "fsk2-wide") {
+			let now = T0
+			const store = new DiscoveryStore({
+				maxDiscoveries: 100,
+				now: () => now,
+				newId: counterIds(),
+				rasters: () => PMR,
+			})
+			const page = (o: string, at: number, cap: string): string => {
+				now = at
+				const id =
+					store.ingest(
+						makeObs({
+							id: o,
+							centreHz: CH,
+							startedAt: at,
+							cls,
+							open: false,
+							gate: "passed",
+						}),
+					).discoveryId ?? ""
+				const ev = evidence("pocsag", at + 500, {
+					identity: { kind: "pocsag-capcode", value: cap },
+				})
+				store.appendObservationEvidence(o, ev)
+				expect(store.applyEvidenceResult(id, ev).accepted).toBe(true)
+				return store.discoveryIdOf(o) ?? id
+			}
+			const ids = [
+				page("p1", T0, "1"),
+				page("p2", T0 + 60_000, "2"),
+				page("p3", T0 + 120_000, "3"),
+			]
+			expect(new Set(ids).size).toBe(3)
+			pageAt.forEach((at, k) => page(`a${k}`, at, "1"))
+			return { store, ids, setNow: (t: number) => (now = t) }
+		}
+		it("pages of capcode 1 only, 2 h old, 34 h after the twins' own: every twin reads strong", () => {
+			const last = T0 + 32 * H
+			const { store, ids } = twins([T0 + 30 * H, last])
+			const now = last + 2 * H
+			// The leak's shape: twins 2 and 3 publish their own 34 h old pages.
+			const stale = ids.filter(id => {
+				const at = store.ownerLabel(id)?.proofAt
+				return typeof at === "number" && now - at > OWNER_DEDICATED_PRIOR_TTL_MS
+			})
+			expect(stale.length).toBeGreaterThanOrEqual(2)
+			for (const id of ids) {
+				const prior = store.voicePrior(id) ?? null
+				expect(readPrior(prior, false, now)).toBe("tone-required")
+				expect(admissionVerdict(prior, false, now)).toBe("tone-required")
+				// The channel memo holds the newest page, whichever twin it was placed on.
+				expect(prior?.channelDecodes).toContainEqual({
+					protocol: "pocsag",
+					at: last + 500,
+				})
+			}
+		})
+
+		it("every page older than 24 h: each twin reads suspect", () => {
+			const last = T0 + 30 * H
+			const { store, ids } = twins([last])
+			const now = last + 500 + OWNER_DEDICATED_PRIOR_TTL_MS + 1
+			for (const id of ids)
+				expect(readPrior(store.voicePrior(id) ?? null, false, now)).toBe(
+					"suspect",
+				)
+		})
+
+		it("FROZEN: analog voice heard on the channel: none, fresh pages notwithstanding", () => {
+			const last = T0 + 32 * H
+			const { store, setNow } = twins([last])
+			const at = last + H
+			setNow(at)
+			const voiced = store.ingest(obs("voice", at)).discoveryId ?? ""
+			expect(store.recordAnalog("voice", tone(at + 1_000))).toBe(true)
+			const owner = store.discoveryIdOf("voice") ?? voiced
+			expect(
+				readPrior(store.voicePrior(owner) ?? null, false, at + 2_000),
+			).toBe("none")
+		})
+
+		it("a DMR decode on the channel never gets the 24 h treatment: an hour later, suspect", () => {
+			const store = newStore()
+			const id = decodedDmr(store)
+			const prior = store.voicePrior(id) ?? null
+			expect(prior?.channelDecodes).toContainEqual({
+				protocol: "dmr",
+				at: T0 + 500,
+			})
+			expect(readPrior(prior, false, T0 + 3_600_000)).toBe("suspect")
+		})
 	})
 
 	it("ownerDecode ignores a decode the store refused and a digital voice decode", () => {
@@ -382,6 +480,7 @@ describe("DiscoveryStore.voicePrior", () => {
 					at: T0 + 500,
 					checked: false,
 					verified: false,
+					colourCode: false,
 					observationId: "o0",
 				},
 			])
@@ -562,6 +661,7 @@ describe("a lone sync-only DMR row is evidence, never the published label", () =
 		const prior = store.voicePrior(id) ?? null
 		expect(prior?.labels.find(l => l.owner)?.protocol).toBe("dmr")
 		expect(prior?.digitalProofs?.().map(p => p.observationId)).toEqual(["s1"])
+		expect(prior?.digitalProofs?.()[0]?.colourCode).toBe(false)
 	})
 
 	it("the same row repeated on a second over: published dmr (activity) with its proof", () => {
@@ -578,6 +678,11 @@ describe("a lone sync-only DMR row is evidence, never the published label", () =
 		const id = syncRow(store, "s1", T0, { unverifiedCc: 7 })
 		expect(store.get(id)?.protocol).toBe("dmr")
 		expect(store.get(id)?.proof?.unverifiedCc).toBe(7)
+		// ownDmrHint counts it (VoicePrior.digitalProofs `colourCode`).
+		expect(store.voicePrior(id)?.digitalProofs?.()[0]).toMatchObject({
+			checked: false,
+			colourCode: true,
+		})
 	})
 
 	it("one row with verified TG/SRC: published dmr", () => {

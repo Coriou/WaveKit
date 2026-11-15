@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest"
 import {
 	LATE_VERDICT_GRACE_MS,
+	OWNER_DEDICATED_PRIOR_TTL_MS,
 	STRONG_PRIOR_TTL_MS,
 	type ClassVotes,
 	type VoicePrior,
@@ -806,10 +807,15 @@ describe("joined transmissions and late verdicts", () => {
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
 	}, 120_000)
 
-	it("a joined transmission's files are judged on the prior when it keyed up: a lapsed co-channel pager decode (past STRONG_PRIOR_TTL_MS) only holds them, then keeps them", async () => {
+	it("a joined transmission's files are judged on the prior when it keyed up: a lapsed co-channel pager decode (past OWNER_DEDICATED_PRIOR_TTL_MS) only holds them, then keeps them", async () => {
 		const lapsed = prior({
 			labels: [
-				label("pocsag", false, "decoded", HARNESS_T0 - STRONG_PRIOR_TTL_MS - 1),
+				label(
+					"pocsag",
+					false,
+					"decoded",
+					HARNESS_T0 - OWNER_DEDICATED_PRIOR_TTL_MS - 1,
+				),
 			],
 		})
 		const { box, voicePrior } = priorBox(null)
@@ -916,16 +922,18 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 	}, 120_000)
 
 	it("ownDmrHint (live shape): a channel whose last DMR hint is hours old admits the over normally; its own hint lands on the air; repeated on 2 other overs of a DMR-class channel, it opens the content check: discarded:not-speech", async () => {
-		const hint = (observationId: string, at: number) => ({
+		const hint = (observationId: string, at: number, colourCode = false) => ({
 			protocol: "dmr" as const,
 			at,
 			checked: false,
+			colourCode,
 			observationId,
 		})
 		const hours = 3_600_000
+		// The earlier overs' syncs read colour code 7 (live shape); the own over's need not.
 		const history = [
-			hint("o-a", HARNESS_T0 - 9 * hours),
-			hint("o-b", HARNESS_T0 - 6 * hours),
+			hint("o-a", HARNESS_T0 - 9 * hours, true),
+			hint("o-b", HARNESS_T0 - 6 * hours, true),
 		]
 		const dmrChannel = (proofs: typeof history): VoicePrior => ({
 			...prior({

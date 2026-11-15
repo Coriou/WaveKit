@@ -493,9 +493,10 @@ describe("recording-verdict table", () => {
 			expect(provisionalRoom(cap)).toBe(room)
 	})
 
-	describe("STRONG_PRIOR_TTL_MS: a co-channel dedicated-channel decode is strong for 30 × 60 000 = 1 800 000 ms; the owner's for OWNER_DEDICATED_PRIOR_TTL_MS (24 h)", () => {
+	describe("OWNER_DEDICATED_PRIOR_TTL_MS: a dedicated-channel decode on the channel, the owner's or a co-channel discovery's, is strong for 24 × 3 600 000 = 86 400 000 ms", () => {
 		const pager = (at: number | null) => prior([decoded("pocsag", true, at)])
 		const coPager = (at: number | null) => prior([decoded("pocsag", false, at)])
+		const TTL = OWNER_DEDICATED_PRIOR_TTL_MS
 		it("the bounds", () => {
 			expect(STRONG_PRIOR_TTL_MS).toBe(1_800_000)
 			expect(OWNER_DEDICATED_PRIOR_TTL_MS).toBe(86_400_000)
@@ -503,31 +504,23 @@ describe("recording-verdict table", () => {
 		for (const [name, at, reading] of [
 			["decoded now", NOW, "tone-required"],
 			[
-				"decoded exactly the TTL ago",
-				NOW - STRONG_PRIOR_TTL_MS,
+				"decoded 31 min ago (past the old co-channel window)",
+				NOW - 31 * 60_000,
 				"tone-required",
 			],
-			["decoded 1 ms past the TTL", NOW - STRONG_PRIOR_TTL_MS - 1, "suspect"],
-			[
-				"stamped the TTL ahead (clock skew)",
-				NOW + STRONG_PRIOR_TTL_MS,
-				"tone-required",
-			],
-			[
-				"stamped 1 ms past the TTL ahead",
-				NOW + STRONG_PRIOR_TTL_MS + 1,
-				"suspect",
-			],
+			["decoded exactly the TTL ago", NOW - TTL, "tone-required"],
+			["decoded 1 ms past the TTL", NOW - TTL - 1, "suspect"],
+			["stamped the TTL ahead (clock skew)", NOW + TTL, "tone-required"],
+			["stamped 1 ms past the TTL ahead", NOW + TTL + 1, "suspect"],
 			["undated", null, "suspect"],
 		] as const)
-			it(`a co-channel POCSAG decode ${name}: ${reading}; the owner's: ${at === null ? "suspect" : "tone required"}`, () => {
-				expect(readPrior(coPager(at), false, NOW)).toBe(reading)
-				expect(admissionVerdict(coPager(at), false, NOW)).toBe(
-					reading === "tone-required" ? "tone-required" : null,
-				)
-				expect(readPrior(pager(at), false, NOW)).toBe(
-					at === null ? "suspect" : "tone-required",
-				)
+			it(`a POCSAG decode ${name}: ${reading}, owner's or co-channel`, () => {
+				for (const p of [coPager(at), pager(at)]) {
+					expect(readPrior(p, false, NOW)).toBe(reading)
+					expect(admissionVerdict(p, false, NOW)).toBe(
+						reading === "tone-required" ? "tone-required" : null,
+					)
+				}
 			})
 		// Live audit: a pager channel's POCSAG decode about 24 h old, no analog proof ever.
 		it("the owner's POCSAG decode 23 h 59 min old: tone required; exactly 24 h: tone required; 24 h + 1 ms: suspect; with an analog proof: none", () => {
@@ -537,9 +530,6 @@ describe("recording-verdict table", () => {
 			)
 			expect(readPrior(pager(old), false, NOW)).toBe("tone-required")
 			expect(readPrior(pager(old - 1), false, NOW)).toBe("suspect")
-			expect(
-				readPrior(pager(NOW + OWNER_DEDICATED_PRIOR_TTL_MS + 1), false, NOW),
-			).toBe("suspect")
 			expect(admissionVerdict(pager(old - 1), false, NOW)).toBeNull()
 			expect(
 				readPrior(
@@ -552,7 +542,7 @@ describe("recording-verdict table", () => {
 		it("an expired co-channel pager decode is suspect: a shadow file is held and kept, never discarded for it", () => {
 			const verdict = (final: boolean) =>
 				finishVerdict({
-					prior: coPager(NOW - STRONG_PRIOR_TTL_MS - 1),
+					prior: coPager(NOW - TTL - 1),
 					backedClass: false,
 					ownTone: false,
 					snapshotClassed: false,
@@ -564,6 +554,69 @@ describe("recording-verdict table", () => {
 				})
 			expect(verdict(false)).toBe("hold")
 			expect(verdict(true)).toBe("finish")
+		})
+	})
+
+	// Live leak: a paging channel holds one discovery per capcode; a file was kept on a twin whose
+	// own page was 34 h old while fresh pages refreshed another twin's memo entry.
+	describe("the pager prior is per channel: the newest dedicated decode of the owner or a co-channel twin (ownerDecode, channelDecodes)", () => {
+		const H = 3_600_000
+		const twin = (
+			ownAt: number,
+			memo: { protocol: ScannerProtocol; at: number }[],
+			analogVoice = false,
+			labels: Label[] = [],
+		): VoicePrior => ({
+			labels: [decoded("pocsag", true, ownAt), ...labels],
+			class: "fsk2-wide",
+			analogVoice: () => analogVoice,
+			ownerDecode: { protocol: "pocsag", at: ownAt },
+			channelDecodes: memo,
+		})
+		it("3 twins, pages land only on twin A within 24 h: twins B and C read strong (tone required)", () => {
+			const a = { protocol: "pocsag" as const, at: NOW - 2 * H }
+			const b = twin(NOW - 34 * H, [
+				a,
+				{ protocol: "pocsag", at: NOW - 40 * H },
+			])
+			const c = twin(NOW - 30 * H, [
+				{ protocol: "pocsag", at: NOW - 34 * H },
+				a,
+			])
+			for (const p of [b, c]) {
+				expect(readPrior(p, false, NOW)).toBe("tone-required")
+				expect(admissionVerdict(p, false, NOW)).toBe("tone-required")
+			}
+		})
+		it("a twin's fresh published label (its last page 2 h old) makes the channel strong without any memo", () => {
+			const p = prior([
+				decoded("pocsag", true, NOW - 34 * H),
+				decoded("pocsag", false, NOW - 2 * H),
+				decoded("pocsag", false, NOW - 30 * H),
+			])
+			expect(readPrior(p, false, NOW)).toBe("tone-required")
+		})
+		it("every page of the channel older than 24 h: suspect", () => {
+			const p = twin(NOW - 34 * H, [
+				{ protocol: "pocsag", at: NOW - 24 * H - 1 },
+				{ protocol: "flex", at: NOW - 30 * H },
+			])
+			expect(readPrior(p, false, NOW)).toBe("suspect")
+			expect(admissionVerdict(p, false, NOW)).toBeNull()
+		})
+		it("analog voice heard on the channel: none, fresh twin pages notwithstanding", () => {
+			const p = twin(NOW - H, [{ protocol: "pocsag", at: NOW }], true)
+			expect(readPrior(p, false, NOW)).toBe("none")
+			expect(admissionVerdict(p, false, NOW)).toBeNull()
+		})
+		it("a DMR co-channel decode never gets the 24 h treatment (memo or label, 1 h or 1 min old): suspect", () => {
+			const memo = twin(NOW - 34 * H, [{ protocol: "dmr", at: NOW - 60_000 }])
+			expect(readPrior(memo, false, NOW)).toBe("suspect")
+			const label = prior([
+				decoded("pocsag", true, NOW - 34 * H),
+				decoded("dmr", false, NOW - H),
+			])
+			expect(readPrior(label, false, NOW)).toBe("suspect")
 		})
 	})
 
@@ -1278,21 +1331,21 @@ describe("recording-verdict property", () => {
 		const sharedChannel = fc
 			.tuple(fc.constantFrom<ScannerProtocol>("ism", "lora"), fc.boolean())
 			.map(([p, owner]) => decoded(p, owner))
-		// So is a co-channel pager or data decode older than STRONG_PRIOR_TTL_MS, or an undated one
-		// (the owner's dated one never lapses).
+		// So is a pager or data decode, owner's or co-channel, older than OWNER_DEDICATED_PRIOR_TTL_MS,
+		// or an undated one.
 		const lapsed = fc
 			.tuple(
 				fc.constantFrom<ScannerProtocol>("pocsag", "flex", "aprs", "ais"),
 				fc.boolean(),
 				fc.option(
 					fc.integer({
-						min: STRONG_PRIOR_TTL_MS + 1,
-						max: 10 * STRONG_PRIOR_TTL_MS,
+						min: OWNER_DEDICATED_PRIOR_TTL_MS + 1,
+						max: 10 * OWNER_DEDICATED_PRIOR_TTL_MS,
 					}),
 				),
 			)
 			.map(([p, owner, ago]) =>
-				decoded(p, owner && ago === null, ago === null ? null : NOW - ago),
+				decoded(p, owner, ago === null ? null : NOW - ago),
 			)
 		const analogDecoded = fc.constant<Label>(decoded("analog-fm"))
 		fc.assert(
@@ -2290,7 +2343,12 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 		digitalProofs: () => proofs,
 		digitalSeenAt: () => Math.max(...proofs.map(p => p.at)),
 	})
-	const history = [hint("o-a", NOW - 9 * HOUR), hint("o-b", NOW - 6 * HOUR)]
+	/** Live shape: the earlier hints read colour code 7 (unverified CC), the own over's need not. */
+	const cc = (observationId: string, at: number): DigitalProof => ({
+		...hint(observationId, at),
+		colourCode: true,
+	})
+	const history = [cc("o-a", NOW - 9 * HOUR), cc("o-b", NOW - 6 * HOUR)]
 	const base = {
 		backedClass: false,
 		ownTone: false,
@@ -2338,8 +2396,36 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 		expect(ownDmrHint(p, "o-own")).toBe(false)
 		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
 	})
+	it("bare syncs (no colour code, no checked content) on other overs never count, however recent: a weak fsk4-reading voice channel is not checked", () => {
+		const p = dmrChannel([
+			hint("o-a", NOW - 2 * 60_000),
+			hint("o-b", NOW - 60_000),
+			hint("o-own", NOW - 20_000),
+		])
+		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
+		const mixed = dmrChannel([
+			cc("o-a", NOW - 9 * HOUR),
+			hint("o-b", NOW - 60_000),
+			hint("o-own", NOW - 20_000),
+		])
+		expect(ownDmrHint(mixed, "o-own")).toBe(false)
+	})
+	it("hints with checked content (a talkgroup, verified TG/SRC) or DMR decodes count like colour-coded ones, any age", () => {
+		const checked = (id: string, at: number): DigitalProof => ({
+			...hint(id, at),
+			checked: true,
+		})
+		const p = dmrChannel([
+			checked("o-a", NOW - 40 * HOUR),
+			{ ...checked("o-b", NOW - 30 * HOUR), verified: true },
+			hint("o-own", NOW - 20_000),
+		])
+		expect(ownDmrHint(p, "o-own")).toBe(true)
+		expect(finishVerdict({ ...base, prior: p })).toBe("discarded:not-speech")
+	})
 	it("needs the hint on the file's own over: hints on other overs only do not", () => {
-		const p = dmrChannel([...history, hint("o-c", NOW - HOUR)])
+		const p = dmrChannel([...history, cc("o-c", NOW - HOUR)])
 		expect(ownDmrHint(p, "o-own")).toBe(false)
 		expect(ownDmrHint(p, null)).toBe(false)
 		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
@@ -2354,7 +2440,7 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 	})
 	it("another protocol's hint (dPMR) does not count", () => {
 		const dpmr = (id: string): DigitalProof => ({
-			...hint(id, NOW - HOUR),
+			...cc(id, NOW - HOUR),
 			protocol: "dpmr",
 		})
 		const p = dmrChannel([dpmr("o-a"), dpmr("o-b"), dpmr("o-own")])

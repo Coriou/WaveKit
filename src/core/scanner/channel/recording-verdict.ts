@@ -209,6 +209,7 @@ export interface VoicePrior {
 	digitalSeenAt?(): number | null
 	tdmaSeenAt?(): number | null
 	readonly ownerDecode?: OwnerDecode | null
+	readonly channelDecodes?: readonly OwnerDecode[]
 }
 
 /**
@@ -217,6 +218,11 @@ export interface VoicePrior {
  * record it then landed on: a page of another capcode lands on a co-channel twin, so the owner's
  * published label can show a proof a day old while its channel pages every hour. `at` its wall
  * time (ms). Read like an owner label decoded as `protocol` (strongLabel).
+ * VoicePrior.channelDecodes (absent: none): the same memo per channel (the owner's source and
+ * frequency key, which co-channel twins share: the newest decode per protocol) and the entry of
+ * each live co-channel discovery (at most DQ_CO_CHANNEL_MAX = 8), read alike: a paging channel
+ * holds one discovery per capcode, and a page refreshes only the twin it was placed on, so the
+ * prior is the channel's newest dedicated-channel decode, whichever twin holds it (ownerDecoded).
  */
 export interface OwnerDecode {
 	readonly protocol: ScannerProtocol
@@ -227,13 +233,15 @@ export interface OwnerDecode {
  * VoicePrior.digitalProofs: the digital proof of one kept observation of the owner (a digital
  * voice decode, or a dsd-fme sync hint), whatever its rank: `at` its wall time (ms), `checked`
  * true for a decode or a hint with checked content, `verified` (absent: false) true for a decode
- * or a hint with verified TG/SRC (a talkgroup or an encryption flag alone is checked only).
+ * or a hint with verified TG/SRC (a talkgroup or an encryption flag alone is checked only),
+ * `colourCode` (absent: false) true for a sync hint that read a colour code (unverified CC).
  */
 export interface DigitalProof {
 	readonly protocol: ScannerProtocol
 	readonly at: number
 	readonly checked: boolean
 	readonly verified?: boolean
+	readonly colourCode?: boolean
 	readonly observationId: string
 }
 
@@ -247,9 +255,11 @@ export interface ClassVotes {
  * How strong a prior is (docs/SCANNER.md, "Known digital or paging channels"):
  * - `tone-required`: STRONG. A dated decode (confidence `decoded`) of a protocol made only on a
  *   channel of its own (DEDICATED_CHANNEL_FAMILIES: a pager, or APRS, AIS, ACARS, VDL2, ADS-B):
- *   the owner's made within OWNER_DEDICATED_PRIOR_TTL_MS (24 h) of now (each new decode refreshes
- *   it: a quiet night does not make a pager channel a voice channel), or a co-channel discovery's
- *   made within STRONG_PRIOR_TTL_MS of now (an older or undated one is only `suspect`). A new recording, and a file of a transmission that joined a
+ *   the newest of the owner's and its co-channel discoveries' (published labels and the decode
+ *   path's memo, VoicePrior.ownerDecode and channelDecodes: a paging channel holds one discovery
+ *   per capcode) made within OWNER_DEDICATED_PRIOR_TTL_MS (24 h) of now (each new decode on the
+ *   channel refreshes it: a quiet night does not make a pager channel a voice channel; an older or
+ *   undated one is only `suspect`). A new recording, and a file of a transmission that joined a
  *   recording while the prior was strong, is a shadow that writes nothing unless its own audio
  *   carries speech over a CTCSS tone (the recorder's classByTone); it is never a remembered
  *   refusal.
@@ -317,26 +327,25 @@ const DEDICATED_CHANNEL_FAMILIES: ReadonlySet<ProtocolFamily> = new Set([
 const SHARED_CHANNEL_PROTOCOLS: ReadonlySet<ScannerProtocol> = new Set(["lora"])
 
 /**
- * How long a co-channel discovery's dedicated-channel decode stays a strong prior after it was
- * made, and how long a digital channel stays one after its latest digital evidence: 30 × 60 000 =
+ * How long a digital channel stays a strong prior after its latest digital evidence: 30 × 60 000 =
  * 1 800 000 ms. Past it the prior is only `suspect`: its files are held and discarded only by a
- * decode of their own signal or by the content check (contentChecked). The owner's own
- * dedicated-channel decode lasts OWNER_DEDICATED_PRIOR_TTL_MS (strongLabel).
+ * decode of their own signal or by the content check (contentChecked). A dedicated-channel decode
+ * (the owner's or a co-channel discovery's) lasts OWNER_DEDICATED_PRIOR_TTL_MS (strongLabel).
  */
 export const STRONG_PRIOR_TTL_MS = 30 * 60_000
 /**
- * How long the owner's own dedicated-channel decode (a pager, APRS, AIS, ...) stays a strong prior
- * after it was made: 24 × 3 600 000 = 86 400 000 ms, counted from the time of the decode the
- * owner's published label shows (its highest-ranked, newest proof), so each new page shown
- * refreshes it; a pager channel quiet for a day reads `suspect` again.
+ * How long a dedicated-channel decode (a pager, APRS, AIS, ...) on the channel stays a strong prior
+ * after it was made: 24 × 3 600 000 = 86 400 000 ms, counted from the newest such decode of the
+ * owner or a co-channel discovery (a published label's proof, or the decode path's memo), so each
+ * new page on the channel refreshes it, whichever capcode's twin it lands on; a pager channel
+ * quiet for a day reads `suspect` again.
  */
 export const OWNER_DEDICATED_PRIOR_TTL_MS = 24 * 3_600_000
 
 /**
- * Strong (PriorStrength): a dated decode of a dedicated-channel protocol, the owner's made in
- * [now − OWNER_DEDICATED_PRIOR_TTL_MS, now + OWNER_DEDICATED_PRIOR_TTL_MS] or a co-channel
- * discovery's made in [now − STRONG_PRIOR_TTL_MS, now + STRONG_PRIOR_TTL_MS] (a clock skew
- * either way).
+ * Strong (PriorStrength): a dated decode of a dedicated-channel protocol, the owner's or a
+ * co-channel discovery's, made in [now − OWNER_DEDICATED_PRIOR_TTL_MS,
+ * now + OWNER_DEDICATED_PRIOR_TTL_MS] (a clock skew either way).
  */
 function strongLabel(l: VoicePrior["labels"][number], now: number): boolean {
 	return (
@@ -345,22 +354,23 @@ function strongLabel(l: VoicePrior["labels"][number], now: number): boolean {
 		!SHARED_CHANNEL_PROTOCOLS.has(l.protocol) &&
 		l.at !== null &&
 		Number.isFinite(l.at) &&
-		Math.abs(now - l.at) <=
-			(l.owner ? OWNER_DEDICATED_PRIOR_TTL_MS : STRONG_PRIOR_TTL_MS)
+		Math.abs(now - l.at) <= OWNER_DEDICATED_PRIOR_TTL_MS
 	)
 }
 
-/** A fresh dedicated-channel decode the decode path placed on the owner (VoicePrior.ownerDecode). */
+/**
+ * A fresh dedicated-channel decode the decode path placed on the owner or a co-channel discovery
+ * (VoicePrior.ownerDecode, channelDecodes): at most 1 + DQ_CO_CHANNEL_MAX = 9 reads.
+ */
 function ownerDecoded(prior: VoicePrior, now: number): boolean {
-	const d = prior.ownerDecode
-	return (
+	const fresh = (d: OwnerDecode | null | undefined): boolean =>
 		d !== undefined &&
 		d !== null &&
 		strongLabel(
 			{ protocol: d.protocol, confidence: "decoded", owner: true, at: d.at },
 			now,
 		)
-	)
+	return fresh(prior.ownerDecode) || (prior.channelDecodes ?? []).some(fresh)
 }
 
 /**
@@ -887,7 +897,8 @@ export function contentChecked(
 
 /**
  * Other observations of the owner, of any age, that a DMR sync hint must also be on before the
- * hint on the session's first transmission opens the content check (ownDmrHint): 2.
+ * hint on the session's first transmission opens the content check (ownDmrHint): 2. Only hints
+ * with a colour code or checked content (or decodes) count.
  */
 export const OWN_HINT_OTHER_OBSERVATIONS = 2
 
@@ -895,9 +906,11 @@ export const OWN_HINT_OTHER_OBSERVATIONS = 2
  * The content check also applies to a file whose session's first transmission (`ownObservationId`,
  * the session's owner; a roll-over or joined file is judged on it too) carries a dsd-fme DMR sync
  * hint, checked or not
- * (VoicePrior.digitalProofs), while hints of DMR are on at least OWN_HINT_OTHER_OBSERVATIONS other
+ * (VoicePrior.digitalProofs), while DMR hints that read a colour code or carry checked content
+ * (verified TG/SRC, a talkgroup; or DMR decodes) are on at least OWN_HINT_OTHER_OBSERVATIONS other
  * kept observations of the owner (any age: a DMR channel heard once in hours syncs over after
- * over) and DIGITAL_CHANNEL_MIN_SHARE of its DIGITAL_CHANNEL_MIN_VOTES or more class votes read
+ * over, and its syncs read its colour code; a spurious sync on a weak NFM voice reads none, so
+ * bare syncs never count however recent) and DIGITAL_CHANNEL_MIN_SHARE of its DIGITAL_CHANNEL_MIN_VOTES or more class votes read
  * DMR's classes. One spurious sync on an analog channel does not open it, and the check itself
  * keeps speech (clearlyNotSpeech: synthetic voice spreads 10.2 dB or more, the bound is 8.5 dB):
  * what it discards is the steady buzz of the over its own decoder synced on. A throwing read: no.
@@ -913,7 +926,10 @@ export function ownDmrHint(
 		)
 		if (!dmr.some(p => p.observationId === ownObservationId)) return false
 		const others = new Set(
-			dmr.map(p => p.observationId).filter(id => id !== ownObservationId),
+			dmr
+				.filter(p => p.checked || p.colourCode === true)
+				.map(p => p.observationId)
+				.filter(id => id !== ownObservationId),
 		)
 		if (others.size < OWN_HINT_OTHER_OBSERVATIONS) return false
 		const v = prior.classVotes?.()
