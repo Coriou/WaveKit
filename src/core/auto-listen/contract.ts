@@ -4,8 +4,10 @@
  */
 import {
 	LIVE_AUDIO_AUTO_ROUTE_BLOCK_MS,
+	LIVE_AUDIO_AUTO_ROUTE_DIGITAL_START_MS,
 	LIVE_AUDIO_AUTO_ROUTE_FIFO_MS,
 	LIVE_AUDIO_AUTO_ROUTE_FORMAT,
+	LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS,
 	LIVE_AUDIO_AUTO_ROUTE_RATE,
 } from "@wavekit/api-types"
 import type { StreamFormat } from "../audio-stream-server.js"
@@ -24,6 +26,36 @@ export const AUTO_ROUTE_BLOCK_BYTES = AUTO_ROUTE_BLOCK_SAMPLES * 2
 /** 48 000 × 3 000 / 1 000 = 144 000 samples per source FIFO. */
 export const AUTO_ROUTE_FIFO_SAMPLES =
 	(LIVE_AUDIO_AUTO_ROUTE_RATE * LIVE_AUDIO_AUTO_ROUTE_FIFO_MS) / 1000
+
+/**
+ * Pending voice: decoded voice a decoder hands over before its call is active and explicitly
+ * clear is kept this long (per decoder, by arrival time and by content) and admitted when the
+ * call turns active and clear. Sized from the PROVISIONAL dv-latency seeds
+ * (tests/mocks/fixtures/synthetic/dv-latency-*.json, 19 overs): the first `VC*` voice line to
+ * the first `SLOT` line (the call start) is 600.0 ms at most (direct mode, every scene but one
+ * short over; 240 ms behind a repeater). In that time the decoder produces the voice of 11
+ * bursts of 60 ms (the `VC*` burst through the burst whose embedded LC starts the call):
+ * 600 + 60 = 660 ms, plus one 60 ms burst of margin for the seeds' guessed 40 ms line latency:
+ * 720 ms (5 760 samples at 8 kHz, 11.5 kB per decoder).
+ */
+export const AUTO_ROUTE_PENDING_VOICE_MS = 720
+
+/**
+ * Takeover: an admitted clear call replaces analog that no content check governs (Voice only
+ * off, a manual or carrier squelch, no evidence gate and no tone squelch) once its start buffer
+ * is ready: 200 ms (`LIVE_AUDIO_AUTO_ROUTE_DIGITAL_START_MS`), not the 1 500 ms preemption bound,
+ * because that analog is the call's own carrier (the decoder covers the tuned channel).
+ */
+export const AUTO_ROUTE_TAKEOVER_MS = LIVE_AUDIO_AUTO_ROUTE_DIGITAL_START_MS
+
+/**
+ * An operator's listen mode change (a config change: `listenMode` or the open squelch) that waits
+ * on a source still audible is put in force at most this long after it was made: the 1 500 ms
+ * preemption bound (`LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS`), so a continuous carrier never holds
+ * it forever. Automatic route decisions never switch mid-over for a mode.
+ */
+export const AUTO_ROUTE_OPERATOR_MODE_MAX_MS =
+	LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS
 
 export interface VoiceTapCall {
 	callId: string

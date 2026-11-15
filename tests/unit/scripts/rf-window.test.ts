@@ -11,7 +11,8 @@ import { describe, expect, it } from "vitest"
 import {
 	DCS_STANDARD_CODES,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
-	LIVE_AUDIO_SQUELCH_MODES,
+	LIVE_AUDIO_SQUELCH_INPUT_MODES,
+	LIVE_AUDIO_VOICE_ONLY_DEFAULT,
 	type AnalogTransmissionDcs,
 	type AnalogTransmissionTone,
 	type LiveAudioConfig,
@@ -135,7 +136,10 @@ function concat(...parts: Float32Array[]): Float32Array {
 describe("rf-window lib: parity with the frozen contract", () => {
 	it("CTCSS tones, squelch modes and the noise default match the core", () => {
 		expect([...lib.CTCSS_HZ]).toEqual([...CTCSS_HZ])
-		expect([...lib.SQUELCH_MODES]).toEqual([...LIVE_AUDIO_SQUELCH_MODES])
+		expect([...lib.SQUELCH_MODES]).toEqual([...LIVE_AUDIO_SQUELCH_INPUT_MODES])
+		expect(lib.LIVE_AUDIO_ABSENT_DEFAULTS["voiceOnly"]).toBe(
+			LIVE_AUDIO_VOICE_ONLY_DEFAULT,
+		)
 		expect(lib.LIVE_AUDIO_ABSENT_DEFAULTS["noiseQuietingDb"]).toBe(
 			LIVE_AUDIO_NOISE_QUIETING_DB.default,
 		)
@@ -432,6 +436,40 @@ describe("rf-window lib: restore plans and config refusals", () => {
 			body: { squelchMode: "manual", toneSquelch: { kind: "none" } },
 			unrestorable: ["offsetHz"],
 		})
+		// squelch-tail's restore: squelchMode and voiceOnly (noise is stored as voiceOnly false).
+		expect(
+			lib.restorePatch(
+				{ squelchMode: "auto", voiceOnly: false },
+				{ squelchMode: true, voiceOnly: true },
+			),
+		).toEqual({
+			body: { squelchMode: "auto", voiceOnly: false },
+			unrestorable: [],
+		})
+		expect(
+			lib.restorePatch({}, { squelchMode: true, voiceOnly: true }),
+		).toEqual({
+			body: { squelchMode: "manual", voiceOnly: true },
+			unrestorable: [],
+		})
+	})
+
+	it("accepts open (any modulation) and a boolean voiceOnly", () => {
+		expect(
+			lib.liveAudioPatchProblems({ modulation: "am" }, { squelchMode: "open" }),
+		).toEqual([])
+		expect(
+			lib.liveAudioPatchProblems(
+				{ modulation: "nfm" },
+				{ squelchMode: "auto", voiceOnly: false },
+			),
+		).toEqual([])
+		expect(
+			lib.liveAudioPatchProblems(
+				{ modulation: "nfm" },
+				{ voiceOnly: "no" as unknown as boolean },
+			),
+		).toHaveLength(1)
 	})
 
 	it("mirrors the frozen FM-only rules for noise and tone squelch", () => {

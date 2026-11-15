@@ -14,8 +14,11 @@ export const CTCSS_HZ = Object.freeze([
 	233.6, 241.8, 250.3, 254.1,
 ])
 
-/** Squelch modes of the frozen contract (LIVE_AUDIO_SQUELCH_MODES). */
-export const SQUELCH_MODES = Object.freeze(["manual", "auto", "noise"])
+/**
+ * Squelch modes a core accepts (LIVE_AUDIO_SQUELCH_INPUT_MODES): the positions auto, manual and
+ * open, plus the deprecated noise (stored as auto with voiceOnly false).
+ */
+export const SQUELCH_MODES = Object.freeze(["auto", "manual", "open", "noise"])
 
 export class UsageError extends Error {
 	constructor(message) {
@@ -363,6 +366,7 @@ export function summarizeTones(expected, closedEvents) {
  */
 export const LIVE_AUDIO_ABSENT_DEFAULTS = Object.freeze({
 	squelchMode: "manual",
+	voiceOnly: true,
 	noiseQuietingDb: 6,
 	toneSquelch: Object.freeze({ kind: "none" }),
 })
@@ -395,6 +399,8 @@ export function liveAudioPatchProblems(config, patch) {
 		problems.push(
 			`noise squelch needs nfm or wfm (live audio is ${modulation})`,
 		)
+	if (patch.voiceOnly !== undefined && typeof patch.voiceOnly !== "boolean")
+		problems.push(`voiceOnly must be true or false (got ${patch.voiceOnly})`)
 	const tone = patch.toneSquelch ?? config.toneSquelch
 	if (tone !== undefined && tone.kind !== "none" && modulation !== "nfm")
 		problems.push(`tone squelch needs nfm (live audio is ${modulation})`)

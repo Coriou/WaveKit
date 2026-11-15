@@ -2636,18 +2636,22 @@ droppedMs, clockRebases, latencyMs, listenMode?, pendingListenMode?, reason? }`.
   any amount; `zeroFilledSamples` (cumulative, absent from older cores) counts the
   samples those blocks filled with zeros, so the time lost is that divided by 48 000,
   except the wait after a digital call's last frame, which counts only if the call goes on;
-  `droppedMs` the audio dropped on overflow, preemption or invalidation,
+  `droppedMs` the audio dropped on overflow, preemption or invalidation (not the
+  analog a decoded call takes over, nor decoded voice still waiting for its call to turn
+  clear: see [GET /auto](#get-httplocalhost8081auto-and-autowav)),
   `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
   selected source's backlog plus one 20 ms block. `listenMode` is the listen mode in
   force on the route: `config.listenMode`, except `analog` while the squelch is `open`,
   and the previous mode while a change waits for the playing transmission to end;
-  `pendingListenMode` is present only while such a change waits. `reason` is present only
+  `pendingListenMode` is present only while such a change waits (at most 1.5 s). `reason` is present only
   when something limits the route: `squelch-open` (the open squelch forces `analog` over a
   configured `auto` or `digital`) or `no-decoder` (`digital` is in force and no digital
   voice decoder covers the tuned channel, so the route plays silence). `no-decoder` is
-  reported only when the core can list its digital voice decoders and each one answers
-  that it does not cover the channel; when coverage is not known, `reason` is absent and
-  the route still plays silence until a decoder that covers the channel delivers a call. Optional in
+  reported when every digital voice decoder (configured or a scanner probe) answers that it
+  does not cover the channel, or there is none (digital voice disabled included); when
+  coverage is not known (the tuner has not settled on the live frequency yet), `reason` is
+  absent and the route still plays silence until a decoder that covers the channel delivers
+  a call. Optional in
   `@wavekit/api-types`; absent from older cores (`listenMode`, `pendingListenMode` and
   `reason` from cores before Listen).
 - `autoSquelch.diagnostics` — DIAGNOSTIC AND UNSTABLE (2026-10-24): only on
@@ -2755,11 +2759,16 @@ Configuration notes:
   playing transmission's source applies at once (`auto` always; `analog`, including the
   `open` squelch, during an analog over; `digital` during a decoded call). A change that
   would switch away from it waits for that transmission to end
-  (`autoRoute.pendingListenMode`), so one transmission is heard from one source: `digital`
-  set during an analog over (or an open squelch closed under `digital`) waits until the
-  analog audio stops, and decoded calls are not played or buffered meanwhile; `analog` set
-  during a decoded call lets the call finish. Made while nothing plays, a change applies at
-  once (an analog over already in progress is then heard from that point).
+  (`autoRoute.pendingListenMode`), so one transmission is heard from one source, but never
+  longer than 1.5 s: a continuous carrier (an open squelch, a stuck manual line) cannot hold
+  it, and at 1.5 s it applies mid-over. `digital` set during an analog over waits until the
+  analog audio stops; coming from `auto`, a clear call meanwhile is still queued and played
+  as `auto` would (it preempts the analog after the bound, or takes it over, see
+  [GET /auto](#get-httplocalhost8081auto-and-autowav)); coming from `analog` (or an open
+  squelch closed under `digital`), decoded calls are not played or buffered meanwhile.
+  `analog` set during a decoded call lets the call finish, up to the same 1.5 s. Made while
+  nothing plays, a change applies at once (an analog over already in progress is then heard
+  from that point).
 - `squelchMode: "noise"` (NFM and WFM only, deprecated) — no longer stored: input is
   stored as `auto` with `voiceOnly: false` (above), whatever `voiceOnly` the request
   sends with it. The FM quieting squelch it used to
@@ -2883,7 +2892,16 @@ squelch that governs `/stream` lets it through (exactly the `/stream` samples,
 resampled), decoded digital voice while a digital voice decoder covering the tuned
 channel produces voice (never an encrypted call), and exact silence otherwise. One
 source plays at a time; digital wins over analog after the analog over releases
-(300 ms), or after at most 1.5 s. That is `listenMode: auto`; `analog` plays the
+(300 ms), or after at most 1.5 s. When the analog playing passed no check of its content
+(`voiceOnly: false`, a `manual` squelch, a modulation without the voice check, and no tone
+squelch), a clear call takes it over as soon as its 200 ms start buffer is ready: that analog
+is the call's own carrier, so it (buzz) plays from the call's start until the decoder reports
+the clear call with 200 ms of its voice queued, then only the decoded call, with no buzz after
+it; the analog let go is not counted in `droppedMs`. Decoded voice that arrives
+before its call is active and explicitly clear (the decoder has not yet reported the call, or
+its encryption is not known yet) waits, up to 720 ms per decoder, and plays first, in order,
+when the call turns clear; it is let go (not counted) if the call ends encrypted or still
+unresolved, or if the decoder stops covering the tuned channel. That is `listenMode: auto`; `analog` plays the
 analog audio only and `digital` the decoded voice only (silence otherwise), and the
 `open` squelch always plays analog (see `listenMode` under
 [GET /api/live-audio/status](#get-apilive-audiostatus)).

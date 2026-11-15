@@ -404,32 +404,96 @@ describe("AutoListenRouter listen mode", () => {
 			expect("pendingListenMode" in sim.status()).toBe(false)
 		})
 
-		it("analog -> digital on a continuous carrier waits for the carrier's release; no voice is queued meanwhile", () => {
+		// Fable major (2026-11-15): an operator change no longer waits forever on a continuous
+		// carrier; it is in force at the 1.5 s bound (AUTO_ROUTE_OPERATOR_MODE_MAX_MS).
+		it("analog -> digital on a continuous carrier applies at the 1.5 s operator bound; no voice is queued before", () => {
 			const sim = new Sim()
 			sim.router.setListenPolicy("analog", false)
 			sim.connect()
 			sim.steps(10, { analog: true })
+			const changedAt = sim.clock.t
 			sim.router.setListenPolicy("digital", false)
 			expect(sim.status().listenMode).toBe("analog")
 			expect(sim.status().pendingListenMode).toBe("digital")
-			// A call during the carrier: digital cannot start without cutting the over, and voice
-			// it would queue meanwhile would age out (counted); it is not queued.
-			sim.steps(200, { analog: true, frame: call() })
+			// A call during the carrier: while analog is in force its voice is not queued.
+			sim.steps(73, { analog: true, frame: call() })
+			// 73 blocks: 1 460 ms after the change, under the bound: still pending, still analog.
+			expect(sim.clock.t - changedAt).toBe(1_460)
+			expect(sim.status().pendingListenMode).toBe("digital")
 			expect(sim.actives.slice(10).every(a => a === "analog")).toBe(true)
 			expect(
 				sim.traces.some(t => t.source === "dmr" && t.kind === "write"),
 			).toBe(false)
-			expect(sim.router.droppedSamples).toBe(0)
+			sim.step({ analog: true, frame: call() })
+			// 1 480 ms: still under.
 			expect(sim.status().pendingListenMode).toBe("digital")
-			// The carrier releases: digital in force, the call (still on) plays decoded.
-			sim.steps(40, { analog: false, frame: call() })
+			sim.step({ analog: true, frame: call() })
+			// 1 500 ms: at the bound, in force mid-carrier; pending cleared.
+			expect(sim.clock.t - changedAt).toBe(1_500)
 			expect(sim.status().listenMode).toBe("digital")
 			expect("pendingListenMode" in sim.status()).toBe(false)
+			expect(sim.actives.at(-1)).not.toBe("analog")
+			// The call (still on) plays decoded after its start buffer; analog never again.
+			const analogRead = sim.read("analog")
+			sim.steps(30, { analog: true, frame: call() })
 			expect(sim.actives.at(-1)).toBe("digital")
+			expect(sim.read("analog")).toBe(analogRead)
+			// Analog queued at the switch is let go uncounted (the mode never plays it).
 			expect(sim.router.droppedSamples).toBe(0)
 		})
 
-		it("digital requested during a call applies at once; analog requested during a call queues no other decoder", () => {
+		it("auto -> digital with unchecked analog (Voice only off) on continuous analog applies within 1.5 s", () => {
+			const sim = new Sim()
+			sim.router.setAnalogVoiceChecked(false)
+			sim.connect()
+			sim.steps(10, { analog: true })
+			expect(sim.actives.at(-1)).toBe("analog")
+			const changedAt = sim.clock.t
+			sim.router.setListenPolicy("digital", false)
+			expect(sim.status().pendingListenMode).toBe("digital")
+			// Repeating the same change (a config re-sync) does not restart the bound.
+			sim.steps(40, { analog: true })
+			sim.router.setListenPolicy("digital", false)
+			sim.steps(34, { analog: true })
+			expect(sim.clock.t - changedAt).toBe(1_480)
+			expect(sim.status().pendingListenMode).toBe("digital")
+			sim.step({ analog: true })
+			expect(sim.status().listenMode).toBe("digital")
+			expect("pendingListenMode" in sim.status()).toBe(false)
+			sim.steps(100, { analog: true })
+			expect(sim.actives.slice(-100).every(a => a === "none")).toBe(true)
+			expect(sim.router.droppedSamples).toBe(0)
+		})
+
+		it("a newer operator change restarts the bound from that change", () => {
+			const sim = new Sim()
+			sim.connect()
+			sim.steps(10, { analog: true })
+			sim.router.setListenPolicy("digital", false)
+			sim.steps(50, { analog: true })
+			// Back to auto (plays analog: at once), then digital again 1 s after the first change.
+			sim.router.setListenPolicy("auto", false)
+			expect("pendingListenMode" in sim.status()).toBe(false)
+			const changedAt = sim.clock.t
+			sim.router.setListenPolicy("digital", false)
+			sim.steps(74, { analog: true })
+			expect(sim.clock.t - changedAt).toBe(1_480)
+			expect(sim.status().pendingListenMode).toBe("digital")
+			sim.step({ analog: true })
+			expect(sim.status().listenMode).toBe("digital")
+		})
+
+		it("without an operator change the route never switches mid-over: a checked analog over outlasts the bound", () => {
+			const sim = new Sim()
+			sim.connect()
+			// 4 s of continuous analog, no call: analog plays throughout, no mode change pending.
+			sim.steps(200, { analog: true })
+			expect(sim.actives.every(a => a === "analog")).toBe(true)
+			expect(sim.status().listenMode).toBe("auto")
+			expect("pendingListenMode" in sim.status()).toBe(false)
+		})
+
+		it("digital requested during a call applies at once; analog requested during a call queues no other decoder and applies at the 1.5 s bound", () => {
 			const sim = new Sim()
 			sim.connect()
 			sim.steps(30, { analog: false, frame: call() })
@@ -437,17 +501,32 @@ describe("AutoListenRouter listen mode", () => {
 			sim.router.setListenPolicy("digital", false)
 			expect(sim.status().listenMode).toBe("digital")
 			expect("pendingListenMode" in sim.status()).toBe(false)
+			const changedAt = sim.clock.t
 			sim.router.setListenPolicy("analog", false)
 			expect(sim.status().pendingListenMode).toBe("analog")
 			// A second decoder's call while the first plays on: never queued under pending analog.
-			for (let i = 0; i < 200; i++) {
-				sim.voice.tap?.frame("p25", bytes(noise(160, lcg(i + 1))), call())
+			const second = () => {
+				sim.voice.tap?.frame(
+					"p25",
+					bytes(noise(160, lcg(sim.clock.t + 1))),
+					call(),
+				)
 				sim.step({ frame: call() })
 			}
+			for (let i = 0; i < 74; i++) second()
+			expect(sim.clock.t - changedAt).toBe(1_480)
+			expect(sim.status().pendingListenMode).toBe("analog")
+			expect(sim.actives.slice(30).every(a => a === "digital")).toBe(true)
+			// The call is continuous: at the 1.5 s bound the operator's analog is in force.
+			second()
+			expect(sim.status().listenMode).toBe("analog")
+			expect("pendingListenMode" in sim.status()).toBe(false)
+			for (let i = 0; i < 125; i++) second()
+			expect(sim.actives.slice(105).every(a => a !== "digital")).toBe(true)
 			expect(
 				sim.traces.some(t => t.source === "p25" && t.kind === "write"),
 			).toBe(false)
-			expect(sim.actives.slice(30).every(a => a === "digital")).toBe(true)
+			// The cut call's queue is let go uncounted (analog never plays decoded voice).
 			expect(sim.router.droppedSamples).toBe(0)
 		})
 

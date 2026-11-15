@@ -298,6 +298,15 @@ export class DigitalVoiceService
 		}
 	}
 
+	/**
+	 * The decoders with a voice channel (configured and scanner probes), for the auto listen
+	 * route's `autoRoute.reason: "no-decoder"`: none of them covering the tuned channel (or none
+	 * at all, digital voice disabled included) means `digital` plays silence for that reason.
+	 */
+	voiceDecoderIds(): readonly string[] {
+		return [...this.channels.keys()]
+	}
+
 	private notifyTaps(fn: (tap: VoiceTap) => void): void {
 		for (const tap of this.voiceTaps) {
 			try {

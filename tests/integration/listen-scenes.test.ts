@@ -19,10 +19,20 @@
  *
  * Decoded voice comes from a voice-tap double with DV-harness timings: call start once the
  * second Voice LC header is decoded (340 ms after the DMR start), then three 20 ms frames at the
- * end of every 60 ms slot-1 burst, the first at 460 ms, and the call end at the DMR end.
+ * end of every 60 ms slot-1 burst, the first at 460 ms, and the call end at the DMR end. The
+ * `seed` timing replays the PROVISIONAL dv-latency seed instead
+ * (tests/mocks/fixtures/synthetic/dv-latency-dmr-repeater-gaps-same.json, first over): voice from
+ * the first `VC*` line (127.5 ms after the over start), before the call, and the call start at
+ * the first `SLOT` line (367.5 ms), so the voice before it waits as pending voice.
+ *
+ * Takeover (Voice only off, Auto and Manual): the DMR transmission's own carrier plays raw until
+ * the decoded call is ready (its 200 ms start buffer), then decoded. "One source per
+ * transmission" then means one switch, analog to digital at the takeover, and no analog of that
+ * transmission after its first decoded sample; with Voice only on it means 0 switches.
  */
 import type * as http from "node:http"
 import type { ChildProcess } from "node:child_process"
+import { readFileSync } from "node:fs"
 import { afterEach, describe, expect, it } from "vitest"
 import type {
 	AnalogTransmissionEventData,
@@ -77,6 +87,50 @@ const OUT_PER_MS = 48
 const DV_CALL_START_MS = 340
 const DV_FIRST_FRAME_MS = 460
 const DV_BURST_MS = 60
+
+interface DvTiming {
+	/** Call start event, ms after the DMR start. */
+	callStartMs: number
+	/** First voice frames (the end of the first voice burst), ms after the DMR start. */
+	firstFrameMs: number
+}
+
+const DV_HARNESS: DvTiming = {
+	callStartMs: DV_CALL_START_MS,
+	firstFrameMs: DV_FIRST_FRAME_MS,
+}
+
+/** The repeater seed's first over: first `VC*` line and first `SLOT` line after its start. */
+function seedTiming(): DvTiming {
+	const seed = JSON.parse(
+		readFileSync(
+			new URL(
+				"../mocks/fixtures/synthetic/dv-latency-dmr-repeater-gaps-same.json",
+				import.meta.url,
+			),
+			"utf8",
+		),
+	) as {
+		overs: Array<{ startMs: number; endMs: number }>
+		lines: Array<{ atMs: number; text: string }>
+	}
+	const over = seed.overs[0]
+	if (over === undefined) throw new Error("no over in the seed")
+	const inOver = seed.lines.filter(
+		l => l.atMs >= over.startMs && l.atMs <= over.endMs,
+	)
+	const vc = inOver.find(
+		l => l.text.includes("[slot1]") && l.text.includes("VC*"),
+	)
+	const slot = inOver.find(l => l.text.includes("SLOT 1 "))
+	if (vc === undefined || slot === undefined) throw new Error("seed lines")
+	return {
+		callStartMs: slot.atMs - over.startMs,
+		firstFrameMs: vc.atMs - over.startMs,
+	}
+}
+
+const DV_SEED = seedTiming()
 
 type Kind = "noise" | "voice" | "toned" | "dmr" | "pager" | "carrier"
 
@@ -317,6 +371,7 @@ class VoiceDouble implements VoiceTapSource, VoiceCoveragePort {
 function dvSchedule(
 	DMR: Segment,
 	encrypted: boolean,
+	timing: DvTiming,
 ): Array<{ at: number; run: (tap: VoiceTap) => void }> {
 	const call = (active: boolean): VoiceTapCall => ({
 		callId: "dmr-call-1",
@@ -330,14 +385,16 @@ function dvSchedule(
 		? new Float32Array(3 * 8_000)
 		: voiceLike({ rate: 8_000, seconds: 3, seed: 31, level: 0.5 })
 	const events: Array<{ at: number; run: (tap: VoiceTap) => void }> = []
+	const callAt = DMR.from + timing.callStartMs
 	events.push({
-		at: DMR.from + DV_CALL_START_MS,
+		at: callAt,
 		run: tap => tap.call("dmr-1", call(true)),
 	})
-	// Seven superframes of six bursts from 400 ms; bursts ending inside the over carry voice.
+	// Bursts every 60 ms from the first voice burst; bursts ending inside the over carry voice.
+	// Frames before the call start carry no call (the service has no active call yet).
 	let frame = 0
 	for (
-		let end = DMR.from + DV_FIRST_FRAME_MS;
+		let end = DMR.from + timing.firstFrameMs;
 		end <= DMR.to - DV_BURST_MS + 20;
 		end += DV_BURST_MS
 	) {
@@ -350,13 +407,17 @@ function dvSchedule(
 			}
 			frames.push(buf)
 		}
+		const inCall = end >= callAt
 		events.push({
 			at: end,
 			run: tap => {
-				for (const buf of frames) tap.frame("dmr-1", buf, call(true))
+				for (const buf of frames)
+					tap.frame("dmr-1", buf, inCall ? call(true) : null)
 			},
 		})
 	}
+	// Same block: the call event first (as the service hands it over).
+	events.sort((a, b) => a.at - b.at)
 	events.push({ at: DMR.to, run: tap => tap.call("dmr-1", call(false)) })
 	return events
 }
@@ -369,6 +430,8 @@ interface Column {
 	encrypted?: boolean
 	/** A runtime reconfigure at this channel time (ms), awaited before that block. */
 	reconfigure?: { at: number; updates: Record<string, unknown> }
+	/** Voice-tap double timing (default: the DV-harness timing). */
+	dv?: DvTiming
 }
 
 interface SegStats {
@@ -377,6 +440,8 @@ interface SegStats {
 	analogLoud: number
 	voice: number
 	firstAnalogOut: number | null
+	/** Output time of the last loud analog sample played from the segment. */
+	lastLoudAnalogOut: number | null
 	firstAnalogWrite: number | null
 	firstVoiceOut: number | null
 	/** Source changes among the output blocks carrying this segment's audio. */
@@ -396,6 +461,8 @@ interface RunResult {
 	spawned: number
 	/** The listen mode in force at each block. */
 	modeAt: string[]
+	/** The double's first voice frames, ms after the DMR start. */
+	firstFrameMs: number
 }
 
 type Internals = {
@@ -532,8 +599,11 @@ async function runScene(column: Column, name: SceneName): Promise<RunResult> {
 	}
 	let backBytes: Buffer[] = []
 	run.back.stdin.on("data", (chunk: Buffer) => backBytes.push(chunk))
+	const timing = column.dv ?? DV_HARNESS
 	const schedule =
-		column.covering === false ? [] : dvSchedule(dmr, column.encrypted === true)
+		column.covering === false
+			? []
+			: dvSchedule(dmr, column.encrypted === true, timing)
 	const reasons = new Set<string>()
 	const modes = new Set<string>()
 	const modeAt: string[] = []
@@ -595,6 +665,7 @@ async function runScene(column: Column, name: SceneName): Promise<RunResult> {
 		analogLoud: 0,
 		voice: 0,
 		firstAnalogOut: null,
+		lastLoudAnalogOut: null,
 		firstAnalogWrite: null,
 		firstVoiceOut: null,
 		switches: 0,
@@ -615,7 +686,10 @@ async function runScene(column: Column, name: SceneName): Promise<RunResult> {
 			const value = block?.readInt16LE(2 * k) ?? 0
 			if (r.source === "analog") {
 				st.analog++
-				if (Math.abs(value) > MINUS_60_DBFS) st.analogLoud++
+				if (Math.abs(value) > MINUS_60_DBFS) {
+					st.analogLoud++
+					st.lastLoudAnalogOut = outAt
+				}
 				st.firstAnalogOut ??= outAt
 				st.firstAnalogWrite ??= ms
 			} else {
@@ -637,6 +711,7 @@ async function runScene(column: Column, name: SceneName): Promise<RunResult> {
 		edges,
 		spawned: processes.length,
 		modeAt,
+		firstFrameMs: timing.firstFrameMs,
 	}
 	await demod.stop()
 	process.kill = realKill
@@ -657,9 +732,22 @@ function spanSamples(s: Segment): number {
 
 type Verdict = "silence" | "plays" | "raw" | "decoded"
 
-/** What a column did with one segment, as the table says it. */
-function verdict(st: SegStats): Verdict {
+/**
+ * What a column did with one segment, as the table says it. With `takeover` (Voice only off: the
+ * call's own carrier plays raw until the decoded call is ready), decoded voice preceded by raw
+ * analog counts as decoded when no analog of the segment plays after the first decoded sample;
+ * how much raw analog leads it is the buzz number, asserted on its own.
+ */
+function verdict(st: SegStats, takeover = false): Verdict {
 	if (st.voice > 0 && st.analogLoud === 0) return "decoded"
+	if (
+		takeover &&
+		st.voice > 0 &&
+		st.firstVoiceOut !== null &&
+		st.lastLoudAnalogOut !== null &&
+		st.lastLoudAnalogOut < st.firstVoiceOut
+	)
+		return "decoded"
 	if (st.analogLoud === 0 && st.voice === 0) return "silence"
 	// Analog played: "raw" for data, "plays" for the rest (the table's words).
 	return st.seg.kind === "dmr" || st.seg.kind === "pager" ? "raw" : "plays"
@@ -717,10 +805,10 @@ function headCutMs(st: SegStats): number {
 }
 
 /** Decoded voice's time to audio after the double's first frame. */
-function ttvMs(st: SegStats): number {
+function ttvMs(st: SegStats, firstFrameMs = DV_FIRST_FRAME_MS): number {
 	return st.firstVoiceOut === null
 		? Number.POSITIVE_INFINITY
-		: st.firstVoiceOut - (st.seg.from + DV_FIRST_FRAME_MS)
+		: st.firstVoiceOut - (st.seg.from + firstFrameMs)
 }
 
 /** Analog above -60 dBFS played from the segment, ms. */
@@ -785,11 +873,10 @@ const TABLE: Record<ColumnKey, Record<Row, Verdict>> = {
 const PENDING: Partial<Record<`${ColumnKey}.${Row}`, string>> = {
 	"autoVoiceOnly.toned":
 		"the 0.6 s toned over is never latched: tone evidence needs 750 ms of audio (LIVE_AUDIO_AUTO_SQUELCH_TONE_MIN_MS) and the voice window 1 s, so it is silence, not plays",
-	"auto.dmr":
-		"pending the 200 ms takeover: analog buzz plays 1 960 ms (first frame 460 ms + the 1 500 ms preemption bound), then decoded, then the buzz queued during the call (raw, 2 switches, 20 ms dropped)",
-	"manual.dmr":
-		"pending the 200 ms takeover: as Auto with Voice only off (buzz 1 960 ms, then decoded, then the queued buzz)",
 }
+
+/** Columns whose analog is unchecked: a clear call takes over its own carrier (see the header). */
+const TAKEOVER: ReadonlySet<ColumnKey> = new Set(["auto", "manual"])
 
 function rowStats(clear: RunResult, enc: RunResult, row: Row): SegStats {
 	if (row === "encrypted") return seg(enc, "dmr")
@@ -818,7 +905,9 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 				const rows = Object.keys(TABLE[key]) as Row[]
 				for (const row of rows) {
 					if (PENDING[`${key}.${row}`] !== undefined) continue
-					expect({ row, verdict: verdict(rowStats(clear, enc, row)) }).toEqual({
+					const st = rowStats(clear, enc, row)
+					const takeover = TAKEOVER.has(key) && row === "dmr"
+					expect({ row, verdict: verdict(st, takeover) }).toEqual({
 						row,
 						verdict: TABLE[key][row],
 					})
@@ -851,11 +940,35 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 			const { clear } = await column("autoVoiceOnly")
 			// Measured 200 ms: the 200 ms start buffer.
 			expect(ttvMs(seg(clear, "dmr"))).toBeLessThanOrEqual(300)
+			// Seed timing (voice before the call, pending): measured 252.5 ms, no buzz, no switch.
+			const seed = await cached("autoVoiceOnly:seed", {
+				...(COLUMNS["autoVoiceOnly"] as Column),
+				dv: DV_SEED,
+			})
+			const dmr = seg(seed, "dmr")
+			expect(ttvMs(dmr, DV_SEED.firstFrameMs)).toBeLessThanOrEqual(300)
+			expect(buzzMs(dmr)).toBe(0)
+			expect(dmr.switches).toBe(0)
+			expect(verdict(dmr)).toBe("decoded")
+			expect(seed.droppedMs).toBe(0)
 		}, 60_000)
 
-		it.todo(
-			"time to audio: decoded voice <= first frame + 300 ms with Voice only off (Auto, Manual): measured 1 500 ms, the preemption bound, until the 200 ms takeover round",
-		)
+		it("time to audio: decoded voice <= first frame + 300 ms with Voice only off (Auto, Manual): the 200 ms takeover", async () => {
+			for (const key of ["auto", "manual"] as const) {
+				const { clear } = await column(key)
+				// Measured 200 ms: the start buffer, no longer the 1 500 ms preemption bound.
+				expect(ttvMs(seg(clear, "dmr"))).toBeLessThanOrEqual(300)
+				const seed = await cached(`${key}:seed`, {
+					...(COLUMNS[key] as Column),
+					dv: DV_SEED,
+				})
+				// Seed timing: voice from 127.5 ms waits pending until the call at 367.5 ms, then
+				// plays at once (its age already passes the start buffer). Measured 252.5 ms.
+				expect(
+					ttvMs(seg(seed, "dmr"), DV_SEED.firstFrameMs),
+				).toBeLessThanOrEqual(300)
+			}
+		}, 120_000)
 
 		it("analog head cut: 0 ms beyond the router's resampler edge; overs play whole", async () => {
 			for (const key of COLUMN_KEYS) {
@@ -875,26 +988,22 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 			}
 		}, 120_000)
 
-		it("autoRoute.droppedMs is 0 over the scene (Auto + Voice only, Open; encrypted in every column)", async () => {
+		it("autoRoute.droppedMs is 0 over the scene (every column, clear and encrypted; takeover included)", async () => {
 			for (const key of COLUMN_KEYS) {
 				const { clear, enc } = await column(key)
 				expect(enc.droppedMs).toBe(0)
 				expect(enc.routeStatus?.droppedMs).toBe(0)
-				if (key === "auto" || key === "manual") continue
+				// Voice only off: the carrier queued at the takeover is let go uncounted.
 				expect(clear.droppedMs).toBe(0)
 				expect(clear.routeStatus?.droppedMs).toBe(0)
 			}
 		}, 120_000)
 
-		it.todo(
-			"autoRoute.droppedMs 0 with Voice only off on a clear DMR over (Auto, Manual): measured 20 ms, analog's queue dropped at the 1.5 s preemption, until the takeover round",
-		)
-
-		it("one source per transmission: 0 mid-over switches (Auto + Voice only, Open; every analog over)", async () => {
+		it("one source per transmission: 0 mid-over switches (every analog over; DMR with Voice only on, Open, encrypted)", async () => {
 			for (const key of COLUMN_KEYS) {
 				const { clear, enc } = await column(key)
 				for (const st of [...clear.stats, ...enc.stats]) {
-					if (st.seg.kind === "dmr" && (key === "auto" || key === "manual"))
+					if (st.seg.kind === "dmr" && TAKEOVER.has(key) && st.voice > 0)
 						continue
 					expect({ kind: st.seg.kind, switches: st.switches }).toEqual({
 						kind: st.seg.kind,
@@ -904,22 +1013,48 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 			}
 		}, 120_000)
 
-		it.todo(
-			"0 mid-over switches on a clear DMR over with Voice only off (Auto, Manual): measured 2 (buzz, decoded, queued buzz) until the takeover and pending-buffer rounds",
-		)
+		it("takeover (Voice only off, Auto and Manual): a clear DMR over switches once, analog to digital, and no analog follows", async () => {
+			for (const key of ["auto", "manual"] as const) {
+				const { clear } = await column(key)
+				const dmr = seg(clear, "dmr")
+				// One switch: the raw carrier before the takeover, then only decoded voice.
+				expect(dmr.switches).toBe(1)
+				expect(dmr.voice).toBeGreaterThan(0)
+				expect(dmr.lastLoudAnalogOut).not.toBeNull()
+				expect(dmr.lastLoudAnalogOut ?? 0).toBeLessThan(
+					dmr.firstVoiceOut ?? Number.NEGATIVE_INFINITY,
+				)
+			}
+		}, 120_000)
 
 		it("buzz with Voice only on: 0 analog samples above -60 dBFS during the DMR over", async () => {
 			const { clear, enc } = await column("autoVoiceOnly")
 			expect(buzzMs(seg(clear, "dmr"))).toBe(0)
 			expect(buzzMs(seg(enc, "dmr"))).toBe(0)
-			// The same scene with Voice only off plays buzz (the pending item below): the measure
-			// sees it.
+			// The same scene with Voice only off plays buzz until the takeover: the measure sees it.
 			const { clear: off } = await column("auto")
-			expect(buzzMs(seg(off, "dmr"))).toBeGreaterThan(400)
+			expect(buzzMs(seg(off, "dmr"))).toBeGreaterThan(0)
 		}, 60_000)
 
+		it("buzz with Voice only off <= 400 ms before a clear call (Auto, Manual; seed timing)", async () => {
+			for (const key of ["auto", "manual"] as const) {
+				const r = await cached(`${key}:seed`, {
+					...(COLUMNS[key] as Column),
+					dv: DV_SEED,
+				})
+				const dmr = seg(r, "dmr")
+				// The carrier from stage 1's open until the call at 367.5 ms admits the pending
+				// voice and takes over: measured 358 ms (638 ms with the DV-harness double).
+				expect(buzzMs(dmr)).toBeLessThanOrEqual(400)
+				expect(buzzMs(dmr)).toBeGreaterThan(0)
+				expect(dmr.switches).toBe(1)
+				expect(verdict(dmr, true)).toBe("decoded")
+				expect(r.droppedMs).toBe(0)
+			}
+		}, 120_000)
+
 		it.todo(
-			"buzz with Voice only off <= 400 ms before a clear call (Auto, Manual): measured 1 960 ms before the preemption (2 973 ms with the queued buzz after the call), until the takeover round",
+			"buzz with Voice only off <= 400 ms when the call starts late after the first voice (Auto, Manual): measured 638 ms with the DV-harness double (first frame 460 ms + the 200 ms start buffer) and modelled about 720 ms with the direct-mode seed (call 600 ms after the first voice); the takeover cannot come before the call is active and clear, so this needs an earlier call start (DV capture phase 1, call-first) or the 300 ms analog lookahead (phase 3)",
 		)
 
 		it("Open: transmission events and stage-1 edges equal Auto's on the same scene", async () => {
@@ -1004,7 +1139,10 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 			expect(r.routeStatus?.listenMode).toBe("analog")
 		}, 60_000)
 
-		it("a runtime change mid-over waits for the over's end: no restart, the over plays whole", async () => {
+		// Fable major (2026-11-15): an operator change waits for the playing over at most the 1.5 s
+		// bound (AUTO_ROUTE_OPERATOR_MODE_MAX_MS), so a continuous carrier never holds it forever.
+		// Voice A plays about 1 s late (Voice only), so the bound falls inside its audio.
+		it("a runtime change mid-over applies at the 1.5 s operator bound: no restart, the over plays up to it", async () => {
 			const baseline = await column("autoVoiceOnly")
 			// auto -> digital at 3.5 s, while voice A (2-5 s) is playing.
 			const r = await cached("listen:switch", {
@@ -1014,15 +1152,21 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 			})
 			expect(r.spawned).toBe(2)
 			const voice = seg(r, "voice")
-			expect(voice.analog).toBe(seg(baseline.clear, "voice").analog)
 			expect(voice.switches).toBe(0)
-			// Still auto at the change; digital only after voice A released.
+			// Still auto at the change and until the bound; digital from 3.5 + 1.5 = 5 s.
 			expect(r.modeAt[3_500 / BLOCK_MS]).toBe("auto")
+			expect(r.modeAt[4_980 / BLOCK_MS]).toBe("auto")
 			const firstDigital = r.modeAt.indexOf("digital") * BLOCK_MS
-			expect(firstDigital).toBeGreaterThanOrEqual(voice.seg.to)
-			expect(firstDigital).toBeLessThan(seg(r, "dmr").seg.from)
+			expect(firstDigital).toBeGreaterThanOrEqual(3_500 + 1_500 - 20)
+			expect(firstDigital).toBeLessThanOrEqual(3_500 + 1_500 + 20)
+			// Voice A played contiguously up to the bound (measured 95 008 of 143 968 samples), the
+			// rest let go uncounted.
+			const whole = seg(baseline.clear, "voice").analog
+			expect(voice.analog).toBeLessThan(whole)
+			expect(voice.analog).toBeGreaterThan(0)
 			expect(verdict(seg(r, "dmr"))).toBe("decoded")
 			expect(r.droppedMs).toBe(0)
+			expect(r.routeStatus?.pendingListenMode).toBeUndefined()
 		}, 60_000)
 
 		it("open set mid analog over, then a DMR call: analog in force at once, nothing pending, nothing dropped", async () => {

@@ -34,7 +34,9 @@ import type { Logger } from "../../utils/logger.js"
 import {
 	AUTO_ROUTE_BLOCK_BYTES,
 	AUTO_ROUTE_BLOCK_SAMPLES,
+	AUTO_ROUTE_OPERATOR_MODE_MAX_MS,
 	AUTO_ROUTE_STREAM,
+	AUTO_ROUTE_TAKEOVER_MS,
 } from "./contract.js"
 import type {
 	AutoRouteClock,
@@ -87,6 +89,17 @@ type Selected = AnalogInput | VoiceInput | null
 
 function validCoverage(value: unknown): VoiceCoverage {
 	return value === "yes" || value === "no" ? value : "unknown"
+}
+
+/**
+ * Seam for a call event's optional `encryptionKnown` (not in `VoiceTapCall` yet): true only when
+ * the event says outright that its encryption is not known yet. Such a call is not clear (fail
+ * closed): its voice waits as pending voice and is let go if the call ends so.
+ */
+export function encryptionUnresolved(call: VoiceTapCall): boolean {
+	const known: unknown = (call as Partial<Record<"encryptionKnown", unknown>>)
+		.encryptionKnown
+	return known === false
 }
 
 /** Listen: an unknown listen mode keeps the default `auto` (the route as it always was). */
@@ -146,6 +159,14 @@ export class AutoListenRouter extends EventEmitter {
 	private coveredAt = Number.NaN
 	private coveredIds = ""
 	private coveredAny: boolean | null = false
+	/** Clock time of the operator's pending listen mode change (NaN: none pending). */
+	private operatorAt = Number.NaN
+	/**
+	 * Takeover: whether the analog played now passed a check of its content (the evidence gate or
+	 * a tone squelch). Unchecked analog yields to an admitted clear call after the 200 ms takeover
+	 * instead of the 1.5 s preemption bound. Defaults to checked (the route as it was).
+	 */
+	private analogChecked = true
 	/** While `choose` runs, `auto-route-changed` is emitted once at its end (one event per block). */
 	private holdEmit = false
 	private heldEmit = false
@@ -221,14 +242,22 @@ export class AutoListenRouter extends EventEmitter {
 		stream: StreamFormat,
 	): void {
 		if (!this.running) return
-		this.analog.push(
-			chunk,
-			start,
-			end,
-			audible ? FLAG_AUDIBLE : FLAG_SILENT,
-			stream,
-			this.clock.now(),
-		)
+		const flag = audible ? FLAG_AUDIBLE : FLAG_SILENT
+		// Listen: `digital` in force with nothing pending never plays analog (every block discards
+		// it): no resampling, the audibility state and the sample grid kept.
+		if (this.mode === "digital" && this.requested === "digital")
+			this.analog.skip(chunk, start, end, flag, stream, this.clock.now())
+		else this.analog.push(chunk, start, end, flag, stream, this.clock.now())
+	}
+
+	/**
+	 * Takeover: whether the analog handed over now passed a check of its content (the evidence
+	 * gate or a tone squelch governs it). Unchecked analog (Voice only off, a manual or carrier
+	 * squelch) is taken over by an admitted clear call after `AUTO_ROUTE_TAKEOVER_MS`, and while
+	 * that call plays the analog queued meanwhile (its own carrier) is let go uncounted.
+	 */
+	setAnalogVoiceChecked(checked: boolean): void {
+		this.analogChecked = checked !== false
 	}
 
 	/** Retune, offset or modulation change, pipeline stop (requirement 5.1). */
@@ -247,10 +276,18 @@ export class AutoListenRouter extends EventEmitter {
 	setListenPolicy(listenMode: LiveAudioListenMode, squelchOpen: boolean): void {
 		this.configuredMode = validListenMode(listenMode)
 		this.squelchOpen = squelchOpen === true
+		const before = this.requested
 		this.requested = this.squelchOpen ? "analog" : this.configuredMode
-		if (this.requested === this.mode) return
-		if (!this.running) this.applyMode(this.clock.now())
-		else this.applyWithoutSwitch(this.clock.now())
+		if (this.requested === this.mode) {
+			this.operatorAt = Number.NaN
+			return
+		}
+		const now = this.clock.now()
+		// An operator change: it waits at most AUTO_ROUTE_OPERATOR_MODE_MAX_MS from the latest one.
+		if (this.requested !== before || Number.isNaN(this.operatorAt))
+			this.operatorAt = now
+		if (!this.running) this.applyMode(now)
+		else this.applyWithoutSwitch(now)
 	}
 
 	/** Listen: the listen mode in force (see `setListenPolicy`). */
@@ -388,6 +425,7 @@ export class AutoListenRouter extends EventEmitter {
 	 */
 	private applyMode(now: number): void {
 		const next = this.requested
+		this.operatorAt = Number.NaN
 		if (next === this.mode) return
 		this.mode = next
 		if (next === "analog") for (const v of this.voiceList) v.discard()
@@ -498,6 +536,10 @@ export class AutoListenRouter extends EventEmitter {
 		// Silent audio of a source that is not playing is never kept (4.3); under `digital` no
 		// analog is kept at all (uncounted: the mode never plays it).
 		if (this.mode === "digital") this.analog.discardQueued()
+		else if (sel instanceof VoiceInput && !this.analogChecked)
+			// Takeover: unchecked analog queued while a covering call plays is that call's own
+			// carrier (raw buzz), let go uncounted so it never plays after the call.
+			this.analog.discardQueued()
 		else if (sel !== this.analog) this.analog.out.discardUntilAudible()
 		for (let i = 0; i < this.voiceList.length; i++) {
 			const v = this.voiceList[i]
@@ -541,6 +583,15 @@ export class AutoListenRouter extends EventEmitter {
 			// The selection may have changed (a preemption, a start): a pending mode that plays it
 			// is in force from this block.
 			this.applyWithoutSwitch(now)
+			// An operator change still waiting on an audible source is in force at its bound: the
+			// only switch a mode makes mid-over.
+			if (
+				this.requested !== this.mode &&
+				now - this.operatorAt >= AUTO_ROUTE_OPERATOR_MODE_MAX_MS
+			) {
+				this.applyMode(now)
+				this.chooseSource(now)
+			}
 		} finally {
 			this.holdEmit = false
 			if (this.heldEmit) {
@@ -573,8 +624,11 @@ export class AutoListenRouter extends EventEmitter {
 				// 4.5: analog's remaining queued audio is dropped and counted. Its silent head is
 				// discarded first, uncounted (4.3), so a preemption after analog has gone quiet
 				// (including one in the same block as its release) loses and counts nothing.
+				// Takeover of unchecked analog: what is queued is the call's own carrier (raw
+				// buzz), let go uncounted.
 				this.analog.out.discardUntilAudible()
-				this.analog.out.dropAll()
+				if (this.analogChecked) this.analog.out.dropAll()
+				else this.analog.discardQueued()
 				this.select(pre, now)
 				return
 			}
@@ -639,16 +693,21 @@ export class AutoListenRouter extends EventEmitter {
 		return best
 	}
 
+	/** The 200 ms start buffer (4.6), also the takeover bound of unchecked analog. */
 	private startReady(v: VoiceInput, now: number): boolean {
 		if (v.out.queuedQualified >= START_SAMPLES) return true
 		const at = v.out.oldestAt
-		return at !== null && now - at >= LIVE_AUDIO_AUTO_ROUTE_DIGITAL_START_MS
+		return at !== null && now - at >= AUTO_ROUTE_TAKEOVER_MS
 	}
 
-	/** An eligible voice whose oldest queued sample has waited the preemption bound (4.5). */
+	/**
+	 * An eligible voice whose oldest queued sample has waited the preemption bound (4.5), or for
+	 * unchecked analog the takeover bound (its start buffer, `AUTO_ROUTE_TAKEOVER_MS`).
+	 */
 	private preemptor(now: number): VoiceInput | null {
 		const v = this.oldestEligible()
 		if (v === null) return null
+		if (!this.analogChecked) return this.startReady(v, now) ? v : null
 		const at = v.out.oldestAt
 		return at !== null && now - at >= LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS
 			? v
@@ -735,7 +794,10 @@ export class AutoListenRouter extends EventEmitter {
 				v.coverage = "unknown"
 			}
 		}
-		if (v.coverage !== "yes" && (v.out.queued > 0 || v.armed))
+		if (
+			v.coverage !== "yes" &&
+			(v.out.queued > 0 || v.armed || v.pending.length > 0)
+		)
 			this.invalidate(v)
 	}
 
@@ -760,6 +822,7 @@ export class AutoListenRouter extends EventEmitter {
 		snap.active = call.active === true
 		// Anything but an explicit false is treated as encrypted (fail closed).
 		snap.encrypted = call.encrypted !== false
+		v.unresolved = encryptionUnresolved(call)
 		snap.protocol = typeof call.protocol === "string" ? call.protocol : null
 		snap.slot =
 			typeof call.slot === "number" && Number.isFinite(call.slot)
@@ -793,8 +856,21 @@ export class AutoListenRouter extends EventEmitter {
 			if (v.out.queued > 0 || v.armed) v.discard()
 			return
 		}
-		if (v.coverage === "yes" && c !== null && c.active) v.admit(pcm, now)
-		else v.flush(now)
+		if (v.coverage !== "yes") {
+			// Never kept for a decoder that does not cover the tuned channel (refreshCoverage
+			// already let its pending voice go).
+			v.flush(now)
+			return
+		}
+		if (c !== null && c.active && !v.unresolved) {
+			// Active and explicitly clear: the pending head first, in order, then this frame.
+			v.admitPending(now)
+			v.admit(pcm, now)
+		} else {
+			// No call yet, or one whose encryption is unresolved: pending, never played as is.
+			v.flush(now)
+			v.pending.write(pcm, now)
+		}
 	}
 
 	private onCall(decoderId: string, call: VoiceTapCall): void {
@@ -802,8 +878,23 @@ export class AutoListenRouter extends EventEmitter {
 		const v = this.voice(decoderId)
 		if (v === null) return
 		this.noteCall(v, call)
+		const now = this.clock.now()
 		if (v.call?.encrypted === true) this.invalidate(v)
-		else if (v.call?.active !== true) v.flush(this.clock.now())
+		else if (v.call?.active !== true) {
+			// Ended (clear or unresolved): voice still pending was never admitted; let it go.
+			v.pending.clear()
+			v.flush(now)
+		} else if (!v.unresolved && v.pending.length > 0) {
+			// Turned active and clear: admit the pending voice now if this decoder covers the
+			// tuned channel and the mode plays decoded voice.
+			this.refreshCoverage(v)
+			if (
+				v.coverage === "yes" &&
+				this.mode !== "analog" &&
+				this.requested !== "analog"
+			)
+				v.admitPending(now)
+		}
 	}
 
 	private onDetach(decoderId: string): void {

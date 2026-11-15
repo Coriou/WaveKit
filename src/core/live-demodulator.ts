@@ -2328,6 +2328,10 @@ export class LiveDemodulator extends EventEmitter {
 		const tone = run?.tone ?? null
 		const evidence =
 			run !== null && tone === null ? this.syncEvidence(run) : null
+		// Takeover: analog that no content check governs (no evidence gate, no tone squelch)
+		// yields to a covering clear call after its start buffer, not the preemption bound.
+		if (this.autoRoute.wanted)
+			this.autoRoute.setAnalogVoiceChecked(evidence !== null || tone !== null)
 		if (run !== null && evidence !== null) {
 			run.pcmTailMuted = false
 			// Decode regardless of listening: pcm listeners see the chunk before any rewrite.

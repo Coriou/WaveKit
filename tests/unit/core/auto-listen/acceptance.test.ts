@@ -364,7 +364,11 @@ describe("auto listen route acceptance: 9.2 scenarios", () => {
 		expect(h.router.droppedSamples).toBe(0)
 	}, 30_000)
 
-	it("a stuck-open manual squelch: digital preempts at 1.5 s and the drop is counted", async () => {
+	// Listen (2026-11-15): a manual squelch is unchecked analog, so the call takes over after its
+	// 200 ms start buffer (AUTO_ROUTE_TAKEOVER_MS), no longer the 1.5 s preemption bound, and the
+	// analog let go is the call's own carrier, uncounted. Checked analog keeps the 1.5 s bound
+	// (router.test.ts and listen-mode.test.ts).
+	it("a stuck-open manual squelch: a clear call takes over after its 200 ms start buffer, nothing counted", async () => {
 		const h = await harness({ ...MANUAL, decoders: ["dsd-a"] })
 		const { transport } = h.addAutoClient()
 		const frames = callFrames(100, 11)
@@ -384,13 +388,13 @@ describe("auto listen route acceptance: 9.2 scenarios", () => {
 		expect(actives(h)).toEqual(["analog", "digital", "analog"])
 		const a0 = changeAt(h, "analog")
 		const d0 = changeAt(h, "digital")
-		// Selected for the first block whose time passes the 1 500 ms bound (one block of slack).
+		// Selected for the first block whose time passes the 200 ms takeover (one block of slack).
 		const selectedMs = d0 / 48
-		expect(selectedMs - firstQueuedMs).toBeGreaterThanOrEqual(1_500 - 20)
-		expect(selectedMs - firstQueuedMs).toBeLessThanOrEqual(1_500 + 20)
-		// Analog played contiguously until the preemption, then its queue was dropped and counted.
+		expect(selectedMs - firstQueuedMs).toBeGreaterThanOrEqual(200 - 20)
+		expect(selectedMs - firstQueuedMs).toBeLessThanOrEqual(200 + 20)
+		// Analog played contiguously until the takeover; its queue was let go uncounted.
 		expectAnalogOver(h, auto, a0, d0 - a0 - 2 * BLOCK)
-		expect(h.router.droppedSamples).toBeGreaterThan(0)
+		expect(h.router.droppedSamples).toBe(0)
 		const dEnd = expectDigitalCall(h, auto, frames, d0)
 		// Analog never preempted digital: it came back only after the whole call.
 		expect(changeAt(h, "analog", 1)).toBeGreaterThanOrEqual(dEnd)
