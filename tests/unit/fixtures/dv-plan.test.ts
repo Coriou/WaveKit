@@ -28,6 +28,7 @@ import {
 } from "../../../scripts/fixtures/dv-latency-seeds.mjs"
 import {
 	DV_APART_MS,
+	DV_GAPS_MS,
 	DV_HANG_MS,
 	DV_PROTOCOLS,
 	DV_SCENES,
@@ -36,7 +37,10 @@ import {
 	scenePlan,
 	transmissionPlan,
 } from "../../../scripts/fixtures/dv-plan.mjs"
-import { AIR_SHAPES } from "../../../scripts/fixtures/fsk-iq.mjs"
+import {
+	AIR_SHAPES,
+	shapeFrequency,
+} from "../../../scripts/fixtures/fsk-iq.mjs"
 import {
 	nxdnCallDibits,
 	nxdnCallsFrequency,
@@ -265,7 +269,7 @@ describe("the scenes", () => {
 	it("hold the design's grid scenes, apart by more than a call timeout", () => {
 		const names = DV_SCENES.map(s => s.name)
 		expect(new Set(names).size).toBe(names.length)
-		expect(names).toHaveLength(21)
+		expect(names).toHaveLength(22)
 		for (const p of ["dstar", "ysf", "p25", "nxdn48", "dpmr"])
 			expect(names).toEqual(
 				expect.arrayContaining([`${p}-lengths`, `${p}-gaps`]),
@@ -285,6 +289,86 @@ describe("the scenes", () => {
 		expect(b!.slot).toBe(2)
 		expect(b!.startMs).toBeLessThan(a!.endMs)
 	})
+})
+
+describe("the back-to-back scenes", () => {
+	it("key each over up the scene's gap after the previous over's sent key-down", () => {
+		const gaps = DV_SCENES.filter(s => /-gaps(-same|-other)?$/.test(s.name))
+		// DMR direct and repeater, same and other radio, and the five others.
+		expect(gaps.map(s => s.protocol).sort()).toEqual([
+			"dmr",
+			"dmr",
+			"dmr",
+			"dmr",
+			"dpmr",
+			"dstar",
+			"nxdn48",
+			"p25",
+			"ysf",
+		])
+		expect(DV_GAPS_MS).toEqual([200, 700, 1500])
+		for (const s of gaps) {
+			const plan = scenePlan(s, { trace: false })
+			const actual = plan.overs
+				.slice(1)
+				.map((o, i) => o.startMs - plan.overs[i]!.endMs)
+			// One symbol; DMR starts sit on the 60 ms TDMA frame grid, so half a frame.
+			const tolerance = s.protocol === "dmr" ? 30 : symbolMs(plan.symbolRate)
+			actual.forEach((gap, i) =>
+				expect(
+					Math.abs(gap - DV_GAPS_MS[i]!),
+					`${s.name} gap ${i}`,
+				).toBeLessThanOrEqual(tolerance),
+			)
+			// The sent lengths are not the asked ones: the gap does not inherit their rounding.
+			for (const o of plan.overs) expect(o.nominalMs).toBe(2000)
+		}
+		// Past the bound: the old placement (asked start + asked length + gap)
+		// would leave NXDN48's gaps 240 ms (2 000 - 1 760) longer than asked.
+		const nxdn = scenePlan(DV_SCENES.find(s => s.name === "nxdn48-gaps")!, {
+			trace: false,
+		})
+		const short = 2000 - (nxdn.overs[0]!.endMs - nxdn.overs[0]!.startMs)
+		expect(short).toBeCloseTo(240, 6)
+		expect(short).toBeGreaterThan(symbolMs(nxdn.symbolRate))
+	})
+
+	it("re-key a DMR radio 0.2 s after an over whose terminator was lost", () => {
+		const scene = DV_SCENES.find(s => s.name === "dmr-direct-rekey-no-tlc")!
+		const plan = scenePlan(scene, { trace: false })
+		expect(plan.overs.map(o => o.terminator)).toEqual([false, true])
+		expect(
+			Math.abs(plan.overs[1]!.startMs - plan.overs[0]!.endMs - 200),
+		).toBeLessThanOrEqual(30)
+		expect(plan.overs.map(o => o.ids)).toEqual([D, D])
+	})
+})
+
+describe("the transmitter's symbol clock phase", () => {
+	const bits = Array.from({ length: 200 }, (_, i) => ((i * 7) % 5) % 2)
+	const gmsk = (delaySymbols?: number) =>
+		shapeFrequency(bits, {
+			symbolRate: 4800,
+			shaping: "gauss",
+			bt: 0.5,
+			deviationHz: b => (b ? -1200 : 1200),
+			...(delaySymbols === undefined ? {} : { delaySymbols }),
+		})
+
+	it("moves D-STAR's Gaussian NRZ, and leaves phase 0 as it was", () => {
+		// The hash before delaySymbols reached the Gaussian branch.
+		expect(hash(gmsk())).toBe("b5c2715430a07748")
+		expect(hash(gmsk(0))).toBe("b5c2715430a07748")
+		const phases = [0, 0.25, 0.5, 0.75].map(d => hash(gmsk(d)))
+		expect(new Set(phases).size).toBe(4)
+		// Through the plan: a D-STAR scene's four phases give four traces.
+		const scene = DV_SCENES.find(s => s.name === "dstar-gaps")!
+		const traces = [0, 0.25, 0.5, 0.75].map(d =>
+			hash(scenePlan(scene, { shape: { delaySymbols: d } }).freq),
+		)
+		expect(new Set(traces).size).toBe(4)
+		expect(traces[0]).toBe(hash(scenePlan(scene).freq))
+	}, 60_000)
 })
 
 describe("provisional latency seeds", () => {

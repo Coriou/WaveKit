@@ -6,6 +6,9 @@
  *
  * Per over:
  * - `calls`: the calls that hold it (must be 1); `splits` = calls - 1;
+ * - `missed`: its calls overlap it by less than min(HOLD_MIN_MS, half the
+ *   over) in all (`heldMs`), so no call or only a nearby one (a 0 ms call at
+ *   a late terminator line, given to it by the widened span) holds it;
  * - `merged`: one of its calls also holds another over (two overs, one call);
  * - `headCutMs`: its first call's start minus key-up (late is positive;
  *   negative in the settle-replay variant when the call began on the
@@ -35,6 +38,8 @@ export interface DvOver {
 	clear?: boolean
 	/** Identities sent (talkgroup, source; YSF src; D-STAR my). */
 	ids?: Readonly<Record<string, unknown>>
+	/** The length the plan asked (dv-plan.mjs SentOver nominalMs). */
+	nominalMs?: number
 }
 
 /** A call the adapter reported (its call_end, or its call_start alone). */
@@ -59,10 +64,16 @@ export interface DvOverScore {
 	protocol: string
 	slot: 1 | 2 | null
 	durationMs: number
+	/** The length the plan asked; null: not known (a recorded seed). */
+	nominalMs: number | null
 	terminator: boolean
 	clear: boolean
 	calls: number
 	splits: number
+	/** Its calls' overlap with it, summed (ms). */
+	heldMs: number
+	/** heldMs short of min(HOLD_MIN_MS, half the over): no call really holds it. */
+	missed: boolean
 	merged: boolean
 	headCutMs: number | null
 	endErrMs: number | null
@@ -191,15 +202,24 @@ export function scoreOvers(
 			(_, c) => holds[c]!.includes(i) && holds[c]!.length > 1,
 		)
 		const window = lines.filter((_, k) => owner[k] === i)
+		const heldMs = mine.reduce(
+			(n, c) => n + overlap(c.startedAtMs, c.endedAtMs, o.startMs, o.endMs),
+			0,
+		)
 		return {
 			index: o.index,
 			protocol: o.protocol,
 			slot: o.slot,
 			durationMs: o.endMs - o.startMs,
+			nominalMs: o.nominalMs ?? null,
 			terminator: o.terminator,
 			clear: o.clear ?? true,
 			calls: mine.length,
 			splits: Math.max(0, mine.length - 1),
+			heldMs,
+			missed:
+				mine.length === 0 ||
+				heldMs < Math.min(HOLD_MIN_MS, (o.endMs - o.startMs) / 2),
 			merged,
 			headCutMs:
 				mine.length === 0
@@ -232,14 +252,17 @@ export interface DvSummary {
 	overs: number
 	/** Overs held by exactly one call that holds no other over. */
 	exactlyOne: number
+	/** Overs no call really holds (DvOverScore missed). */
 	missed: number
 	splits: number
 	merged: number
+	/** Over the timed overs (timedRow): not merged, not missed. */
 	headCutP50Ms: number | null
 	headCutP90Ms: number | null
-	/** endErrMs p90 of overs sent with their terminator, and without. */
+	/** endErrMs p90 of the timed overs sent with their terminator, without, and all. */
 	endErrP90Ms: number | null
 	endErrNoTermP90Ms: number | null
+	endErrAllP90Ms: number | null
 	tFirstP90Ms: number | null
 	framesSent: number
 	framesChecked: number
@@ -247,25 +270,40 @@ export interface DvSummary {
 	recordingMissing: number
 }
 
+/**
+ * An over whose head cut and end error are timings of its own call: not
+ * merged (the call's start or end is another over's) and not missed (a
+ * nearby 0 ms call's times say nothing of this over).
+ */
+export const timedRow = (r: DvOverScore): boolean => !r.merged && !r.missed
+
+const num = (xs: (number | null)[]): number[] =>
+	xs.filter((x): x is number => x !== null)
+
+/** The head cuts of the timed overs of `rows`. */
+export const headCuts = (rows: readonly DvOverScore[]): number[] =>
+	num(rows.filter(timedRow).map(r => r.headCutMs))
+/** The end errors of the timed overs of `rows`. */
+export const endErrs = (rows: readonly DvOverScore[]): number[] =>
+	num(rows.filter(timedRow).map(r => r.endErrMs))
+
 export function summarise(rows: readonly DvOverScore[]): DvSummary {
-	const num = (xs: (number | null)[]): number[] =>
-		xs.filter((x): x is number => x !== null)
+	const timed = rows.filter(timedRow)
 	return {
 		overs: rows.length,
-		exactlyOne: rows.filter(r => r.calls === 1 && !r.merged).length,
-		missed: rows.filter(r => r.calls === 0).length,
+		exactlyOne: rows.filter(r => r.calls === 1 && !r.merged && !r.missed)
+			.length,
+		missed: rows.filter(r => r.missed).length,
 		splits: rows.reduce((n, r) => n + r.splits, 0),
 		merged: rows.filter(r => r.merged).length,
-		headCutP50Ms: percentile(num(rows.map(r => r.headCutMs)), 50),
-		headCutP90Ms: percentile(num(rows.map(r => r.headCutMs)), 90),
-		endErrP90Ms: percentile(
-			num(rows.filter(r => r.terminator).map(r => r.endErrMs)),
-			90,
-		),
+		headCutP50Ms: percentile(headCuts(rows), 50),
+		headCutP90Ms: percentile(headCuts(rows), 90),
+		endErrP90Ms: percentile(endErrs(timed.filter(r => r.terminator)), 90),
 		endErrNoTermP90Ms: percentile(
-			num(rows.filter(r => !r.terminator).map(r => r.endErrMs)),
+			endErrs(timed.filter(r => !r.terminator)),
 			90,
 		),
+		endErrAllP90Ms: percentile(endErrs(rows), 90),
 		tFirstP90Ms: percentile(num(rows.map(r => r.tFirstMs)), 90),
 		framesSent: rows.reduce((n, r) => n + r.framesSent, 0),
 		framesChecked: rows.reduce((n, r) => n + r.framesChecked, 0),
@@ -280,19 +318,32 @@ export interface DvPoint {
 	cnrDb: number
 	errorHz: number
 	phase: number
+	/** Empty when the point failed. */
 	rows: DvOverScore[]
+	/** Why the point failed (dv-capture.ts runDvGrid): it has no rows then. */
+	error?: string
+	/**
+	 * The decoder's non-zero exit or signal after it read all its input and
+	 * printed lines (dv-capture.ts createShellRunner): recorded, not a failure.
+	 */
+	exit?: string
 }
 
 const ms = (v: number | null): string =>
 	v === null ? "n/a" : `${Math.round(v)}`
+/** Text safe in one markdown table cell: no pipe, no line break, at most 300 characters. */
+const cell = (s: string): string =>
+	s.replace(/\s+/g, " ").replace(/\|/g, "\\|").slice(0, 300)
 const share = (n: number, d: number): string =>
 	d === 0 ? "n/a" : `${((100 * n) / d).toFixed(1)} %`
 
 /**
  * Markdown: one row per scene, variant, CNR and frequency error (the phases
- * and overs summed), then one row per over of every point. headCut can be
+ * and overs summed, `Failed` its points that failed), then one row per over
+ * of every point (a failed point: one row with its error). headCut can be
  * negative (settle-replay: the call started on the replayed copy of the
- * over's head, before its key-up); the headers say so.
+ * over's head, before its key-up); the headers say so. Nominal is the length
+ * the plan asked, Length the one sent.
  */
 export function dvTable(points: readonly DvPoint[]): string {
 	const groups = new Map<string, DvPoint[]>()
@@ -301,8 +352,8 @@ export function dvTable(points: readonly DvPoint[]): string {
 		groups.set(key, [...(groups.get(key) ?? []), p])
 	}
 	const out = [
-		"| Scene | Variant | CNR | Error | Overs | One call | Missed | Splits | Merged | headCut p50 / p90 ms (< 0: began on the settle-replay copy) | endErr p90 ms (TLC / none) | tFirst p90 ms | Frames checked |",
-		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+		"| Scene | Variant | CNR | Error | Failed | Overs | One call | Missed | Splits | Merged | headCut p50 / p90 ms (< 0: began on the settle-replay copy) | endErr p90 ms (TLC / none) | tFirst p90 ms | Frames checked |",
+		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
 	]
 	for (const [key, ps] of groups) {
 		const [scene, variant, cnr, err] = key.split("|") as [
@@ -312,19 +363,35 @@ export function dvTable(points: readonly DvPoint[]): string {
 			string,
 		]
 		const s = summarise(ps.flatMap(p => p.rows))
+		const failed = ps.filter(p => p.error !== undefined).length
 		out.push(
-			`| ${scene} | ${variant} | ${cnr} dB | ${err} Hz | ${s.overs} | ${share(s.exactlyOne, s.overs)} | ${s.missed} | ${s.splits} | ${s.merged} | ${ms(s.headCutP50Ms)} / ${ms(s.headCutP90Ms)} | ${ms(s.endErrP90Ms)} / ${ms(s.endErrNoTermP90Ms)} | ${ms(s.tFirstP90Ms)} | ${share(s.framesChecked, s.framesSent)} |`,
+			`| ${scene} | ${variant} | ${cnr} dB | ${err} Hz | ${failed} | ${s.overs} | ${share(s.exactlyOne, s.overs)} | ${s.missed} | ${s.splits} | ${s.merged} | ${ms(s.headCutP50Ms)} / ${ms(s.headCutP90Ms)} | ${ms(s.endErrP90Ms)} / ${ms(s.endErrNoTermP90Ms)} | ${ms(s.tFirstP90Ms)} | ${share(s.framesChecked, s.framesSent)} |`,
 		)
 	}
 	out.push(
 		"",
-		"| Scene | Variant | CNR | Error | Phase | Over | Slot | Length ms | Calls | Merged | headCut ms (< 0: began on the settle-replay copy) | endErr ms | tFirst ms | Frames |",
-		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+		"| Scene | Variant | CNR | Error | Phase | Over | Slot | Nominal ms | Length ms | Calls | Merged | headCut ms (< 0: began on the settle-replay copy) | endErr ms | tFirst ms | Frames | Note |",
+		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
 	)
-	for (const p of points)
-		for (const r of p.rows)
+	for (const p of points) {
+		const at = `| ${p.scene} | ${p.variant} | ${p.cnrDb} dB | ${p.errorHz} Hz | ${p.phase} |`
+		if (p.error !== undefined) {
 			out.push(
-				`| ${p.scene} | ${p.variant} | ${p.cnrDb} dB | ${p.errorHz} Hz | ${p.phase} | ${r.index} | ${r.slot ?? "-"} | ${Math.round(r.durationMs)} | ${r.calls} | ${r.merged ? "yes" : "no"} | ${ms(r.headCutMs)} | ${ms(r.endErrMs)} | ${ms(r.tFirstMs)} | ${r.framesChecked}/${r.framesSent}${r.terminator ? "" : " (no TLC)"} |`,
+				`${at} - | - | - | - | - | - | - | - | - | - | failed: ${cell(p.error)} |`,
 			)
+			continue
+		}
+		for (const r of p.rows) {
+			const note = [
+				r.missed ? `missed (held ${Math.round(r.heldMs)} ms)` : "",
+				p.exit === undefined ? "" : cell(p.exit),
+			]
+				.filter(n => n !== "")
+				.join("; ")
+			out.push(
+				`${at} ${r.index} | ${r.slot ?? "-"} | ${r.nominalMs === null ? "-" : Math.round(r.nominalMs)} | ${Math.round(r.durationMs)} | ${r.calls} | ${r.merged ? "yes" : "no"} | ${ms(r.headCutMs)} | ${ms(r.endErrMs)} | ${ms(r.tFirstMs)} | ${r.framesChecked}/${r.framesSent}${r.terminator ? "" : " (no TLC)"} | ${note} |`,
+			)
+		}
+	}
 	return out.join("\n")
 }

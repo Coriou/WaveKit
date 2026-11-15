@@ -7,7 +7,14 @@
  * against the real binaries is dv-capture.test.ts (WAVEKIT_DVCAP=1).
  */
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readdirSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -15,21 +22,28 @@ import { DV_SCENES } from "../../../scripts/fixtures/dv-plan.mjs"
 import type { DvScene } from "../../../scripts/fixtures/dv-plan.mjs"
 import {
 	AUDIO_RATE_HZ,
+	CHUNK_MS,
 	DVCAP_CNR_DB,
 	DVCAP_READY,
 	DVCAP_ERRORS_HZ,
 	DVCAP_PHASES,
 	LEAD_MS,
+	POINT_FIXED_S,
+	POINT_PER_SCENE_S,
+	POST_EOF_TIMEOUT_MS,
 	QUICK_BUDGET_S,
 	QUICK_SCENES,
 	SETTLE_FRAME_MS,
 	SETTLE_REPEAT_MS,
 	STDERR_TAIL_CHARS,
 	createShellRunner,
+	dockerArgs,
 	dvGrid,
 	feedRealTime,
 	gridSeconds,
+	gridTimeoutMs,
 	measureDvPoint,
+	runDvGrid,
 	recordedSceneName,
 	recordedSeed,
 	settleReplay,
@@ -52,10 +66,15 @@ describe("the grid", () => {
 				DVCAP_ERRORS_HZ.length *
 				DVCAP_PHASES.length,
 		)
-		expect(DV_SCENES.length * 4 * 3 * 4).toBe(1008)
+		expect(DVCAP_CNR_DB).toEqual([10, 12, 15, 20, 30])
+		expect(DV_SCENES.length * 5 * 3 * 4).toBe(1320)
+		// Every point of the full grid has its own noise seed.
+		expect(
+			new Set(full.map(p => `${p.scene.name}|${p.errorHz}|${p.seed}`)).size,
+		).toBe(full.length)
 		const quick = dvGrid({ quick: true })
 		expect(quick.map(p => p.scene.name)).toEqual(QUICK_SCENES.map(s => s.name))
-		expect(quick).toHaveLength(11)
+		expect(quick).toHaveLength(12)
 		for (const p of quick)
 			expect([p.scene.protocol, p.cnrDb, p.errorHz, p.phase]).toEqual([
 				"dmr",
@@ -69,16 +88,22 @@ describe("the grid", () => {
 	})
 
 	it("runs the quick subset inside its budget, and not twice its phases", () => {
-		// 11 DMR scenes, 226.6 s of scene, + 11 x (0.1 s lead + 10 s overhead) = 337.7 s.
+		expect([POINT_FIXED_S, POINT_PER_SCENE_S]).toEqual([5, 0.35])
+		// 12 DMR scenes, 236.1 s of scene + 12 x 0.1 s lead = 237.3 s of IQ, at
+		// real time plus 0.35 s per IQ second, + 12 x 5 s: 237.3 x 1.35 + 60 = 380.4 s.
 		const quick = gridSeconds(dvGrid({ quick: true }))
-		expect(quick).toBeCloseTo(337.7, 0)
+		expect(quick).toBeCloseTo(380.4, 0)
 		expect(quick).toBeLessThanOrEqual(QUICK_BUDGET_S)
-		// Past the bound: a second phase doubles it (675 s > 600 s).
+		// Past the bound: a second phase doubles it (761 s > 600 s).
 		expect(
 			gridSeconds(dvGrid({ quick: true, phases: [0, 0.5] })),
 		).toBeGreaterThan(QUICK_BUDGET_S)
-		// The full grid: 520.6 s of scenes and 21 x 10.1 s, 48 points each, about 9.8 h.
-		expect(gridSeconds(dvGrid()) / 3600).toBeCloseTo(9.8, 1)
+		// The full grid: 22 scenes of 60 points, about 13.7 h.
+		expect(gridSeconds(dvGrid()) / 3600).toBeCloseTo(13.7, 1)
+		// The test's timeout: twice the estimate plus 600 s.
+		expect(gridTimeoutMs(dvGrid({ quick: true }))).toBe(
+			Math.ceil((2 * quick + 600) * 1000),
+		)
 	})
 })
 
@@ -213,7 +238,7 @@ describe("feedRealTime", () => {
 		const pcm = Buffer.alloc(2 * AUDIO_RATE_HZ * 2)
 		for (let k = AUDIO_RATE_HZ; k < 1.5 * AUDIO_RATE_HZ; k++)
 			pcm.writeInt16LE(5000, 2 * k)
-		const lines = await feedRealTime("ignored", pcm, {
+		const { lines } = await feedRealTime("ignored", pcm, {
 			run: decoderDouble,
 			speed: 10,
 		})
@@ -227,6 +252,23 @@ describe("feedRealTime", () => {
 		expect(lines[0]!.atMs).toBeGreaterThanOrEqual(1000 - 20)
 		expect(lines[0]!.atMs).toBeLessThan(1000 + 200)
 		expect(lines[2]!.atMs).toBeGreaterThanOrEqual(1500 - 20)
+	})
+
+	it("hands each chunk over at its end time, the last at the end of the audio", async () => {
+		// 5 whole chunks and a 10 ms one: due at 20, 40, ... 100 and 110 ms.
+		const pcm = Buffer.alloc((2 * ((5 * CHUNK_MS + 10) * AUDIO_RATE_HZ)) / 1000)
+		let k = 0
+		const stamp: DvRunner = async (_command, input, onLine) => {
+			for await (const _chunk of input) onLine(String(k++))
+		}
+		const { lines } = await feedRealTime("ignored", pcm, { run: stamp })
+		const due = [20, 40, 60, 80, 100, 110]
+		expect(lines.map(l => l.text)).toEqual(["0", "1", "2", "3", "4", "5"])
+		lines.forEach((l, i) => {
+			// Never before its end (the feeder waits on performance.now), soon after it.
+			expect(l.atMs).toBeGreaterThanOrEqual(due[i]!)
+			expect(l.atMs).toBeLessThan(due[i]! + 15)
+		})
 	})
 })
 
@@ -244,7 +286,7 @@ describe("the ready handshake", () => {
 				break
 			}
 		}
-		const lines = await feedRealTime("ignored", pcm, { run: slow })
+		const { lines } = await feedRealTime("ignored", pcm, { run: slow })
 		expect(lines.map(l => l.text)).toEqual(["first"])
 		expect(lines[0]!.atMs).toBeGreaterThanOrEqual(0)
 		expect(lines[0]!.atMs).toBeLessThan(200)
@@ -262,7 +304,7 @@ describe("the ready handshake", () => {
 
 	it("holds the input until the script's marker and drops the marker", async () => {
 		const run = createShellRunner({ spawnChild: delayed(1.5) })
-		const lines = await feedRealTime(
+		const { lines } = await feedRealTime(
 			"sh -c 'head -c 1 >/dev/null; echo first; cat >/dev/null'",
 			pcm,
 			{ run },
@@ -283,7 +325,7 @@ describe("the ready handshake", () => {
 					readyTimeoutMs: 2000,
 				}),
 			}),
-		).resolves.toEqual([])
+		).resolves.toEqual({ lines: [] })
 		// Past it: 3 s against 300 ms.
 		await expect(
 			feedRealTime("cat >/dev/null", pcm, {
@@ -296,16 +338,41 @@ describe("the ready handshake", () => {
 		expect(kids[0]!.killed).toBe(true)
 	}, 10_000)
 
-	it("fails a non-zero exit, an exit before the marker and a spawn error, quoting a bounded tail", async () => {
+	it("records a non-zero exit after all the input, with the lines it printed", async () => {
 		const run = createShellRunner({ spawnChild: delayed(0) })
 		await expect(
-			feedRealTime("cat >/dev/null; echo broken; exit 3", pcm, { run }),
-		).rejects.toThrow(/exit 3.*output tail: broken/s)
+			feedRealTime("cat >/dev/null; echo decoded; exit 3", pcm, { run }),
+		).resolves.toMatchObject({
+			lines: [{ text: "decoded" }],
+			exit: "exit 3",
+		})
+		// Exit 0: nothing recorded.
+		await expect(
+			feedRealTime("cat >/dev/null; echo decoded", pcm, { run }),
+		).resolves.not.toHaveProperty("exit")
+	}, 10_000)
+
+	it("fails a non-zero exit before all the input, an exit before the marker and a spawn error, quoting a bounded tail", async () => {
+		const run = createShellRunner({ spawnChild: delayed(0) })
+		// 2 s of audio (192 kB, more than a pipe holds): the command exits after
+		// reading 1 byte, so the rest is never written.
+		const long2s = Buffer.alloc(2 * 2 * AUDIO_RATE_HZ)
+		await expect(
+			feedRealTime("head -c 1 >/dev/null; echo broken; exit 3", long2s, {
+				run,
+				speed: 20,
+			}),
+		).rejects.toThrow(
+			/exit 3\) before it read all its input.*output tail: broken/s,
+		)
 		const long = await feedRealTime(
-			`cat >/dev/null; head -c ${4 * STDERR_TAIL_CHARS} /dev/zero | tr '\\0' x; echo; exit 1`,
-			pcm,
-			{ run },
-		).catch((e: unknown) => (e instanceof Error ? e.message : ""))
+			`head -c 1 >/dev/null; head -c ${4 * STDERR_TAIL_CHARS} /dev/zero | tr '\\0' x; echo; exit 1`,
+			long2s,
+			{ run, speed: 20 },
+		).then(
+			() => "",
+			(e: unknown) => (e instanceof Error ? e.message : ""),
+		)
 		expect(long).toMatch(/exit 1/)
 		expect(long.length).toBeLessThan(STDERR_TAIL_CHARS + 200)
 		await expect(
@@ -329,6 +396,57 @@ describe("the ready handshake", () => {
 			}),
 		).rejects.toThrow(/ENOENT/)
 	}, 10_000)
+
+	it("fails a command that does not exit after EOF, and kills it by its handle", async () => {
+		// 10 s: five times a container's stop and removal after EOF.
+		expect(POST_EOF_TIMEOUT_MS).toBe(10_000)
+		const kids: { exitCode: number | null; killed?: boolean }[] = []
+		/** A /bin/sh double that prints the marker, never reads, never exits. */
+		const stuck: DvSpawn = () => {
+			const child = spawn(
+				"/bin/sh",
+				["-c", `echo ${DVCAP_READY}; while :; do sleep 0.1; done`],
+				{ stdio: ["pipe", "pipe", "pipe"] },
+			)
+			kids.push(child)
+			return child
+		}
+		const started = performance.now()
+		await expect(
+			feedRealTime("ignored", pcm, {
+				run: createShellRunner({ spawnChild: stuck, postEofTimeoutMs: 300 }),
+				speed: 20,
+			}),
+		).rejects.toThrow(/did not exit within 300 ms after its input ended/)
+		expect(kids[0]!.killed).toBe(true)
+		// At the bound, not the 10 s default.
+		expect(performance.now() - started).toBeLessThan(3000)
+		// A command that exits inside the wait passes.
+		await expect(
+			feedRealTime("cat >/dev/null; sleep 0.1", pcm, {
+				run: createShellRunner({
+					spawnChild: delayed(0),
+					postEofTimeoutMs: 2000,
+				}),
+			}),
+		).resolves.toEqual({ lines: [] })
+	}, 10_000)
+
+	it("runs the core image with an init, no network and no tty", () => {
+		expect(dockerArgs("img", "echo")).toEqual([
+			"run",
+			"-i",
+			"--init",
+			"--rm",
+			"--network",
+			"none",
+			"--entrypoint",
+			"/bin/sh",
+			"img",
+			"-c",
+			"echo",
+		])
+	})
 
 	it("ends stdin and kills the child when the input fails", async () => {
 		const kids: { exitCode: number | null; killed?: boolean }[] = []
@@ -492,5 +610,97 @@ describe("measureDvPoint with doubles", () => {
 		expect(r.overs[1]!.startMs).toBeCloseTo(3000 + 1.7 + LEAD_MS + 720, 0)
 		// The copy keys the double up 360 ms early: the call starts at key-up.
 		for (const row of r.rows) expect(row.headCutMs!).toBeLessThan(250)
+	}, 60_000)
+
+	it("writes the table after every point and keeps a failed point as a row", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "dv-grid-"))
+		const out = join(dir, "capture.md")
+		const linesDir = join(dir, "lines")
+		const spec = (cnrDb: number): DvPointSpec => ({
+			scene: SCENE,
+			variant: "baseline",
+			cnrDb,
+			errorHz: 0,
+			phase: 0,
+			seed: cnrDb,
+		})
+		const seen: string[] = []
+		try {
+			mkdirSync(linesDir)
+			const { points, failed } = await runDvGrid(
+				[spec(30), spec(10), spec(20)],
+				{
+					measure: async s => {
+						// The table on disk already holds every earlier point.
+						if (s.cnrDb !== 30) seen.push(readFileSync(out, "utf8"))
+						if (s.cnrDb === 10) throw new Error("decoder | crashed\nbadly")
+						return measureDvPoint(s, {
+							channelize: channelDouble,
+							run: decoderDouble,
+							speed: 20,
+						})
+					},
+					out,
+					linesDir,
+					frequencyHz: 433_162_500,
+				},
+			)
+			expect(points.map(p => p.error ?? "ok")).toEqual([
+				"ok",
+				"decoder | crashed\nbadly",
+				"ok",
+			])
+			expect(failed.map(p => p.cnrDb)).toEqual([10])
+			expect(seen[0]).toContain("| double | baseline | 30 dB | 0 Hz | 0 | 2 |")
+			expect(seen[1]).toContain("failed: decoder \\| crashed badly")
+			const final = readFileSync(out, "utf8")
+			expect(final).toContain("| double | baseline | 10 dB | 0 Hz | 1 | 0 |")
+			expect(final).toContain("| double | baseline | 20 dB | 0 Hz | 0 | 2 |")
+			// No temporary file is left; seeds only for the measured points, valid.
+			expect(readdirSync(dir).sort()).toEqual(["capture.md", "lines"])
+			const seeds = readdirSync(linesDir).sort()
+			expect(seeds).toEqual([
+				"dv-latency-double-baseline-20db-0hz-p0.json",
+				"dv-latency-double-baseline-30db-0hz-p0.json",
+			])
+			for (const f of seeds)
+				parseDvSeed(f, readFileSync(join(linesDir, f), "utf8"))
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	}, 60_000)
+
+	it("fails a point whose recorded seed the scorecard would refuse", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "dv-grid-"))
+		try {
+			const { failed } = await runDvGrid(
+				[
+					{
+						// A scene name the seed schema refuses (upper case).
+						scene: { ...SCENE, name: "Bad" },
+						variant: "baseline",
+						cnrDb: 30,
+						errorHz: 0,
+						phase: 0,
+						seed: 1,
+					},
+				],
+				{
+					measure: s =>
+						measureDvPoint(s, {
+							channelize: channelDouble,
+							run: decoderDouble,
+							speed: 20,
+						}),
+					out: join(dir, "capture.md"),
+					linesDir: dir,
+					frequencyHz: 433_162_500,
+				},
+			)
+			expect(failed[0]!.error).toMatch(/dv-latency-Bad-baseline.*scene/)
+			expect(readdirSync(dir)).toEqual(["capture.md"])
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
 	}, 60_000)
 })

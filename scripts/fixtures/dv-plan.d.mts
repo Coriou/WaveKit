@@ -30,6 +30,8 @@ export interface SentOver {
 	startMs: number
 	endMs: number
 	ids: DvIds
+	/** The length asked (PlanOver durationMs); the sent one is endMs - startMs. */
+	nominalMs: number
 	frames: number
 	terminator: boolean
 }

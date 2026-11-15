@@ -15,7 +15,13 @@
  * Every number is a count of labelled things, never of time, so two runs of the same truth set
  * give the same scorecard (the runs are on the virtual clock).
  */
-import { percentile, summarise, type DvOverScore } from "./dv-metrics.js"
+import {
+	endErrs,
+	headCuts,
+	percentile,
+	summarise,
+	type DvOverScore,
+} from "./dv-metrics.js"
 import type { RecordingRecord, TruthCase, TruthRun } from "./truth-run.js"
 import {
 	DIGITAL_LABELS,
@@ -140,14 +146,16 @@ export interface Totals {
 	excepted: number
 	/** Digital voice overs scored (truth-dv.ts). */
 	dvOvers: number
-	/** Overs no call holds. */
+	/** Overs no call holds by min(HOLD_MIN_MS, half the over) of overlap (dv-metrics.ts). */
 	dvMissed: number
 	/** Extra calls of an over (calls - 1, summed). */
 	dvSplit: number
 	/** Overs whose call also holds another over. */
 	dvMerged: number
-	/** p90 of call start minus key-up over the held overs (ms, 0 when none). */
+	/** p90 of call start minus key-up over the timed overs, not merged or missed (ms, 0 when none). */
 	dvHeadCutP90Ms: number
+	/** p90 of call end minus key-down over the timed overs, with or without a terminator (ms, 0 when none). */
+	dvEndErrP90Ms: number
 	/** Clear overs no call's recording holds. */
 	dvRecordingMissing: number
 }
@@ -328,6 +336,7 @@ const emptyTotals = (): Totals => ({
 	dvSplit: 0,
 	dvMerged: 0,
 	dvHeadCutP90Ms: 0,
+	dvEndErrP90Ms: 0,
 	dvRecordingMissing: 0,
 })
 
@@ -340,6 +349,7 @@ function dvTotals(rows: readonly DvOverScore[]): Partial<Totals> {
 		dvSplit: s.splits,
 		dvMerged: s.merged,
 		dvHeadCutP90Ms: Math.round(s.headCutP90Ms ?? 0),
+		dvEndErrP90Ms: Math.round(s.endErrAllP90Ms ?? 0),
 		dvRecordingMissing: s.recordingMissing,
 	}
 }
@@ -502,6 +512,7 @@ function addTotals(a: Totals, b: Totals): Totals {
 		dvMerged: a.dvMerged + b.dvMerged,
 		// A percentile does not add: scorecard() recomputes it from the rows.
 		dvHeadCutP90Ms: Math.max(a.dvHeadCutP90Ms, b.dvHeadCutP90Ms),
+		dvEndErrP90Ms: Math.max(a.dvEndErrP90Ms, b.dvEndErrP90Ms),
 		dvRecordingMissing: a.dvRecordingMissing + b.dvRecordingMissing,
 	}
 }
@@ -538,10 +549,12 @@ export function scorecard(
 	const cases = applied.cases
 	const sum = (cs: readonly CaseScore[]): Totals => {
 		const t = cs.reduce((acc, c) => addTotals(acc, c.totals), emptyTotals())
-		const heads = cs
-			.flatMap(c => c.dv ?? [])
-			.flatMap(r => (r.headCutMs === null ? [] : [r.headCutMs]))
-		return { ...t, dvHeadCutP90Ms: Math.round(percentile(heads, 90) ?? 0) }
+		const rows = cs.flatMap(c => c.dv ?? [])
+		return {
+			...t,
+			dvHeadCutP90Ms: Math.round(percentile(headCuts(rows), 90) ?? 0),
+			dvEndErrP90Ms: Math.round(percentile(endErrs(rows), 90) ?? 0),
+		}
 	}
 	const byKind = {
 		synthetic: sum(cases.filter(c => c.kind === "synthetic")),
@@ -611,6 +624,6 @@ export function formatScorecardLine(s: Scorecard): string {
 		`missed voice ${t.missedVoice}/${t.voiceTransmissions} (split ${t.splitVoice}), ` +
 		`identify ${t.identifyRight}/${t.labelledSignals} right, ${t.identifyWrong} wrong, ` +
 		`digital voice ${t.dvOvers} overs: missed ${t.dvMissed}, split ${t.dvSplit}, merged ${t.dvMerged}, ` +
-		`head cut p90 ${t.dvHeadCutP90Ms} ms, no recording ${t.dvRecordingMissing}: ${verdict}`
+		`head cut p90 ${t.dvHeadCutP90Ms} ms, end error p90 ${t.dvEndErrP90Ms} ms, no recording ${t.dvRecordingMissing}: ${verdict}`
 	)
 }

@@ -97,3 +97,10 @@ core image). `dv-latency-seeds.mjs` writes the line timings the truth scorecard'
 digital voice scenes replay (`tests/mocks/fixtures/synthetic/dv-latency-*.json`). They
 are provisional: they model the current adapter's inputs, not a recorded run. A capture
 run with `WAVEKIT_DVCAP_LINES=<dir>` writes recorded ones in the same format.
+
+When the recorded baseline is committed, delete the provisional
+`dv-latency-*.json` seeds in the same commit (a provisional seed left beside
+the recorded ones is still scored, so modelled timings would mix with measured
+ones), drop them from `DV_SEED_SCENES`, and recalibrate the `dv*`
+limits in `scripts/bench/scanner-quality/truth-thresholds.json` to what the
+recorded seeds score: the current limits are the modelled seeds' numbers.

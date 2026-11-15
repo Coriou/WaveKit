@@ -228,7 +228,8 @@ export function keyedEnvelope(
  *
  * Returns the symbols, the frequency trace and carrier envelope at `rateHz`,
  * and the overs as sent (the truth): index, protocol, slot (DMR) or null,
- * start and end ms in the trace, identities, checked frames, terminator.
+ * start and end ms in the trace, identities, the length asked (`nominalMs`),
+ * checked frames, terminator.
  */
 export function transmissionPlan(
 	overs,
@@ -262,6 +263,7 @@ export function transmissionPlan(
 				startMs: toMs((o.startMs / 1000) * symbolRate),
 				endMs: toMs((o.endMs / 1000) * symbolRate),
 				ids: { talkgroup: o.talkgroup, source: o.source },
+				nominalMs: overs[index].durationMs,
 				frames: o.frames,
 				terminator: o.terminator,
 			}),
@@ -283,6 +285,7 @@ export function transmissionPlan(
 				startMs: toMs(start),
 				endMs: toMs(symbols.length),
 				ids,
+				nominalMs: over.durationMs,
 				frames: built.frames,
 				terminator: built.terminator,
 			})
@@ -337,14 +340,33 @@ export const DV_HANG_MS = 3000
  */
 export const DV_OTHER = { talkgroup: 4322, source: 7_654_321 }
 
-/** Overs back to back, `apart` (one gap, or one per pair) from each other. */
-function sequence(lengths, apart, extra = () => ({})) {
+/**
+ * Overs of `base`'s protocol back to back, `apart` (one gap, or one per pair)
+ * from each other: each next over keys up `apart` after the previous over's
+ * key-down as SENT (its length rounded to frames or superframes, so shorter
+ * or, for DMR, up to half a burst longer than asked), not as asked. The other
+ * protocols then hit the gap to half a symbol; DMR to half a 60 ms frame,
+ * since its starts are on the TDMA frame grid.
+ */
+function sequence(base, lengths, apart, extra = () => ({})) {
+	const overs = []
 	let at = DV_LEAD_MS
-	return lengths.map((durationMs, i) => {
+	lengths.forEach((durationMs, i) => {
 		const over = { startMs: at, durationMs, ...extra(i) }
-		at += durationMs + (Array.isArray(apart) ? (apart[i] ?? 0) : apart)
-		return over
+		overs.push(over)
+		// The over alone: its sent end does not depend on the overs around it.
+		const plan = transmissionPlan([over], {
+			protocol: base.protocol,
+			dmrMode: base.dmrMode ?? "direct",
+			trace: false,
+		})
+		const padMs = (PAD_SYMBOLS / plan.symbolRate) * 1000
+		at =
+			plan.overs[0].endMs -
+			padMs +
+			(Array.isArray(apart) ? (apart[i] ?? 0) : apart)
 	})
+	return overs
 }
 
 const dmrScenes = mode => {
@@ -360,30 +382,43 @@ const dmrScenes = mode => {
 		{
 			...base,
 			name: `dmr-${mode}-lengths`,
-			overs: sequence(DV_OVER_MS, DV_APART_MS),
+			overs: sequence(base, DV_OVER_MS, DV_APART_MS),
 		},
 		{
 			...base,
 			name: `dmr-${mode}-gaps-same`,
-			overs: sequence(gaps, DV_GAPS_MS),
+			overs: sequence(base, gaps, DV_GAPS_MS),
 		},
 		{
 			...base,
 			name: `dmr-${mode}-gaps-other`,
-			overs: sequence(gaps, DV_GAPS_MS, i => (i % 2 ? { ids: DV_OTHER } : {})),
+			overs: sequence(base, gaps, DV_GAPS_MS, i =>
+				i % 2 ? { ids: DV_OTHER } : {},
+			),
 		},
 		{
 			// Joins at voice burst C: no header, the first superframe incomplete.
 			...base,
 			name: `dmr-${mode}-late-entry`,
-			overs: sequence([3000], 0, () => ({ lateEntry: 2 })),
+			overs: sequence(base, [3000], 0, () => ({ lateEntry: 2 })),
 		},
 		{
 			...base,
 			name: repeater ? "dmr-repeater-hang-no-tlc" : "dmr-direct-no-terminator",
-			overs: sequence([1000, 3000], DV_APART_MS, () => ({ terminator: false })),
+			overs: sequence(base, [1000, 3000], DV_APART_MS, () => ({
+				terminator: false,
+			})),
 		},
 	]
+	if (!repeater)
+		scenes.push({
+			// The same radio re-keys 0.2 s after an over whose terminator was lost.
+			...base,
+			name: "dmr-direct-rekey-no-tlc",
+			overs: sequence(base, [2000, 2000], DV_GAPS_MS[0], i =>
+				i === 0 ? { terminator: false } : {},
+			),
+		})
 	if (repeater)
 		scenes.push({
 			// Slot 2 busy with another radio's over while slot 1 talks.
@@ -405,7 +440,8 @@ const dmrScenes = mode => {
 /**
  * The scenes of the design's measurement grid, as plan inputs: DMR direct
  * and repeater (lengths, back-to-back same and other radio, late entry, a
- * missing terminator, two busy slots), and for D-STAR, YSF, P25, NXDN48 and
+ * missing terminator, two busy slots; direct: a 0.2 s re-key after a lost
+ * terminator), and for D-STAR, YSF, P25, NXDN48 and
  * dPMR the length and back-to-back scenes. Every over is a cold key-up (one
  * header, no settle).
  */
@@ -417,13 +453,13 @@ export const DV_SCENES = [
 			name: `${protocol}-lengths`,
 			protocol,
 			tailMs: DV_APART_MS,
-			overs: sequence(DV_OVER_MS, DV_APART_MS),
+			overs: sequence({ protocol }, DV_OVER_MS, DV_APART_MS),
 		},
 		{
 			name: `${protocol}-gaps`,
 			protocol,
 			tailMs: DV_APART_MS,
-			overs: sequence([2000, 2000, 2000, 2000], DV_GAPS_MS),
+			overs: sequence({ protocol }, [2000, 2000, 2000, 2000], DV_GAPS_MS),
 		},
 	]),
 ]

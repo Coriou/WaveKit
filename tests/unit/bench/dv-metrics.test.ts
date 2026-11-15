@@ -117,10 +117,74 @@ describe("scoreOvers", () => {
 			[1, true],
 			[1, true],
 		])
-		expect(summarise(merged)).toMatchObject({ exactlyOne: 0, merged: 2 })
+		expect(summarise(merged)).toMatchObject({
+			exactlyOne: 0,
+			merged: 2,
+			// A merged over's head cut is the other over's call: not timed.
+			headCutP50Ms: null,
+			headCutP90Ms: null,
+			endErrAllP90Ms: null,
+		})
 		const missed = scoreOvers(two, [call(1500, 2500)], [], checkedLine)
 		expect(summarise(missed)).toMatchObject({ missed: 1, exactlyOne: 1 })
 		expect(missed[1]).toMatchObject({ headCutMs: null, endErrMs: null })
+	})
+
+	it("misses an over its calls overlap by less than min(HOLD_MIN_MS, half the over)", () => {
+		const o = [over(0, 1000, 3000)]
+		// A 0 ms call at a late terminator line, given to the over by the widened span.
+		const late = scoreOvers(o, [call(3100, 3100)], [], checkedLine)
+		expect(late[0]).toMatchObject({ calls: 1, heldMs: 0, missed: true })
+		expect(summarise(late)).toMatchObject({
+			missed: 1,
+			exactlyOne: 0,
+			headCutP90Ms: null,
+			endErrAllP90Ms: null,
+		})
+		// At the bound (200 ms of a 2 s over) held; 1 ms short missed.
+		const at = scoreOvers(o, [call(2800, 3000)], [], checkedLine)
+		expect(at[0]).toMatchObject({ heldMs: HOLD_MIN_MS, missed: false })
+		const short = scoreOvers(o, [call(2801, 3000)], [], checkedLine)
+		expect(short[0]).toMatchObject({ calls: 1, missed: true })
+		// A 300 ms over needs half of itself, 150 ms, summed over its calls.
+		const brief = [over(0, 1000, 1300)]
+		expect(
+			scoreOvers(brief, [call(1150, 1300)], [], checkedLine)[0]!.missed,
+		).toBe(false)
+		expect(
+			scoreOvers(brief, [call(1151, 1300)], [], checkedLine)[0]!.missed,
+		).toBe(true)
+		expect(
+			scoreOvers(
+				brief,
+				[call(1000, 1075), call(1225, 1300)],
+				[],
+				checkedLine,
+			)[0]!.missed,
+		).toBe(false)
+	})
+
+	it("times only overs neither merged nor missed, and totals the end error of all of them", () => {
+		const o = [
+			over(0, 1000, 3000),
+			over(1, 6000, 8000, { terminator: false }),
+			over(2, 8200, 10_200),
+			over(3, 10_400, 12_400),
+		]
+		// Over 0: 700 / +40; over 1: 300 / +400; overs 2 and 3 one call (merged, 5 000 head cut ignored).
+		const rows = scoreOvers(
+			o,
+			[call(1700, 3040), call(6300, 8400 - 200 + 1), call(8200, 12_500)],
+			[],
+			checkedLine,
+		)
+		expect(rows.map(r => r.merged)).toEqual([false, false, true, true])
+		const s = summarise(rows)
+		expect(s.headCutP90Ms).toBe(700)
+		expect(s.headCutP50Ms).toBe(300)
+		expect(s.endErrP90Ms).toBe(40)
+		expect(s.endErrNoTermP90Ms).toBe(201)
+		expect(s.endErrAllP90Ms).toBe(201)
 	})
 
 	it("holds an over only by HOLD_MIN_MS of overlap, at the bound and below it", () => {
@@ -273,13 +337,53 @@ describe("dvTable", () => {
 		const lines = table.split("\n")
 		expect(lines[0]).toMatch(/^\| Scene \| Variant \| CNR/)
 		expect(lines[2]).toBe(
-			"| s | baseline | 20 dB | 0 Hz | 4 | 100.0 % | 0 | 0 | 0 | 700 / 700 | 40 / 400 | 720 | 10.0 % |",
+			"| s | baseline | 20 dB | 0 Hz | 0 | 4 | 100.0 % | 0 | 0 | 0 | 700 / 700 | 40 / 400 | 720 | 10.0 % |",
 		)
 		expect(
 			lines.filter(l => l.startsWith("| s | baseline | 20 dB")),
 		).toHaveLength(1 + 4)
 		expect(table).toContain(
-			"| 1 | 1 | 2000 | 1 | no | 700 | 400 | n/a | 0/5 (no TLC) |",
+			"| 1 | 1 | - | 2000 | 1 | no | 700 | 400 | n/a | 0/5 (no TLC) |  |",
+		)
+	})
+
+	it("shows the nominal length, a missed over, a recorded exit and a failed point", () => {
+		const rows = scoreOvers(
+			[over(0, 1000, 2980, { nominalMs: 2000 }), over(1, 4000, 6000)],
+			[call(1700, 3040), call(6100, 6100)],
+			[],
+			checkedLine,
+		)
+		const table = dvTable([
+			{
+				scene: "s",
+				variant: "baseline",
+				cnrDb: 20,
+				errorHz: 0,
+				phase: 0,
+				rows,
+				exit: "exit 3",
+			},
+			{
+				scene: "s",
+				variant: "baseline",
+				cnrDb: 20,
+				errorHz: 0,
+				phase: 0.5,
+				rows: [],
+				error: "no | line\nat all",
+			},
+		])
+		// One of two points failed; 1 of 2 overs missed.
+		expect(table).toContain(
+			"| s | baseline | 20 dB | 0 Hz | 1 | 2 | 50.0 % | 1 |",
+		)
+		expect(table).toContain("| 0 | 1 | 2000 | 1980 | 1 | no |")
+		expect(table).toMatch(
+			/\| 1 \| 1 \| - \| 2000 \| 1 \| no .*\| missed \(held 0 ms\); exit 3 \|$/m,
+		)
+		expect(table).toContain(
+			"| s | baseline | 20 dB | 0 Hz | 0.5 | - | - | - | - | - | - | - | - | - | - | failed: no \\| line at all |",
 		)
 	})
 })
@@ -358,11 +462,23 @@ describe("truth DV scenes", () => {
 		const by = Object.fromEntries(
 			cases.map(c => [c.name, summarise(runDvCase(c))]),
 		)
-		// Direct: the first decoded embedded LC starts the call, 727 ms after key-up.
+		// Direct: the first decoded embedded LC starts the call, 727 ms after
+		// key-up: too late for the 0.5 s over (a call holding 200 ms of it, its
+		// half, 250 ms, is more than the 0.5 - 0.727 s left), so it is missed.
 		expect(by["dv-dmr-direct-lengths"]).toMatchObject({
 			overs: 5,
-			exactlyOne: 5,
+			exactlyOne: 4,
+			missed: 1,
 		})
+		const missed = cases.flatMap(c =>
+			runDvCase(c)
+				.filter(r => r.missed)
+				.map(r => `${c.name} ${r.index} ${r.terminator}`),
+		)
+		expect(missed).toEqual([
+			"dv-dmr-direct-lengths 0 true",
+			"dv-dmr-direct-no-terminator 0 false",
+		])
 		// 60 + 360 + 4 x 60 + 27.5 + 40 ms of line latency (dv-latency-seeds.mjs).
 		expect(by["dv-dmr-direct-lengths"]!.headCutP90Ms).toBeCloseTo(727.5, 0)
 		// Hang-time idles refresh a call whose terminator was missed: one call, two overs.
@@ -387,15 +503,41 @@ describe("truth DV scenes", () => {
 		const card = scorecard(scores, limits, { subset: true })
 		expect(card.byKind.synthetic).toMatchObject({
 			dvOvers: 19,
-			dvMissed: 0,
+			dvMissed: 2,
 			dvSplit: 2,
 			dvMerged: 2,
 			dvHeadCutP90Ms: 727,
+			dvEndErrP90Ms: 40,
 			dvRecordingMissing: 19,
 		})
 		expect(card.failures).toEqual([])
 		expect(formatScorecardLine(card)).toContain(
-			"digital voice 19 overs: missed 0, split 2, merged 2, head cut p90 727 ms, no recording 19",
+			"digital voice 19 overs: missed 2, split 2, merged 2, head cut p90 727 ms, end error p90 40 ms, no recording 19",
+		)
+		// The miss and end error ratchets: at their limits they pass, past them they fail.
+		expect(limits.limits.synthetic?.["dvMissed"]).toEqual({ max: 2 })
+		expect(limits.limits.synthetic?.["dvEndErrP90Ms"]).toEqual({ max: 40 })
+		const late = scorecard(
+			[
+				...scores,
+				withTotals(
+					dvCaseScore(cases[0]!, [
+						// 3 more timed overs 5 s late: 3 of 18 timed end errors (rank 17 is 5 000 ms) move the p90.
+						...[1, 2, 3].map(() => ({
+							...runDvCase(cases[0]!)[1]!,
+							endErrMs: 5000,
+							recording: true,
+						})),
+						{ ...runDvCase(cases[0]!)[1]!, missed: true, recording: true },
+					]),
+				),
+			],
+			limits,
+			{ subset: true },
+		)
+		expect(late.byKind.synthetic?.dvMissed).toBe(3)
+		expect(late.failures.map(f => f.metric).sort()).toEqual(
+			["dvEndErrP90Ms", "dvMissed"].sort(),
 		)
 		// One more split than the ratchet allows fails.
 		const worse = scorecard(
