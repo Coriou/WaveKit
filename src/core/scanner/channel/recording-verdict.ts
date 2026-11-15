@@ -307,22 +307,31 @@ export function trialsHeardVoice(t: AnalogTrials): boolean {
  * speech, a tone or a run of 3 consecutive syllabic frames: VoicePrior.analogTrials,
  * analogTrialsHeard), and no analog voice was heard on the channel (an analog tone or voice
  * proof, or an analog label at `classified` or more: analogVoiceHeard). Its files are kept only
- * when their own audio shows speech (finishVerdict's `speechHeard`). A throwing read: not one
- * (keeps).
+ * when their own audio shows speech (finishVerdict's `speechHeard`). Not one when its trials
+ * cannot be read (noVoiceReading null: keeps).
  */
 export function noVoiceChannel(prior: VoicePrior | null): boolean {
-	if (prior?.analogTrials === undefined) return false
+	return noVoiceReading(prior) === true
+}
+
+/**
+ * noVoiceChannel as read: true or false when the owner's trials were read (none remembered:
+ * false), null when they could not be (no prior, no trial reader, a throwing read).
+ */
+export function noVoiceReading(prior: VoicePrior | null): boolean | null {
+	if (prior?.analogTrials === undefined) return null
+	let t: AnalogTrials | null
 	try {
-		const t = prior.analogTrials()
-		return (
-			t !== null &&
-			t.attempts >= NO_VOICE_CHANNEL_MIN_TRIALS &&
-			!trialsHeardVoice(t) &&
-			!analogVoiceHeard(prior)
-		)
+		t = prior.analogTrials()
 	} catch {
-		return false
+		return null
 	}
+	return (
+		t !== null &&
+		t.attempts >= NO_VOICE_CHANNEL_MIN_TRIALS &&
+		!trialsHeardVoice(t) &&
+		!analogVoiceHeard(prior)
+	)
 }
 
 /**
@@ -1008,8 +1017,8 @@ export type FinishReason =
 
 /**
  * finishVerdict's decision with what it read: the prior's strength and source (priorReading),
- * whether the channel is a no-voice one (noVoiceChannel; null: not read, the file showed speech
- * or was not measured), whether a joined voice of another
+ * whether the channel is a no-voice one (noVoiceReading, read for every file; null: its trials
+ * could not be read), whether a joined voice of another
  * transmission shares the file (joinedOtherVoice) and the file's own speech reading
  * (`speechHeard`; null: not measured). Only enumerated values and booleans: safe to log.
  */
@@ -1081,9 +1090,8 @@ export function finishPath(input: FinishInput): FinishPath {
 		input.backedClass,
 		input.now,
 	)
-	// Read only for a file without speech (analogVoice may scan the channel's observations).
-	const noVoice =
-		input.speechHeard === false ? noVoiceChannel(input.prior) : null
+	// Read for every file, so its kept line says what the channel is (once per finish or release).
+	const noVoice = noVoiceReading(input.prior)
 	const joinedOther = joinedOtherVoice(
 		input.prior,
 		input.joinedVoice,
@@ -1105,7 +1113,7 @@ export function finishPath(input: FinishInput): FinishPath {
 			: path("discarded:late-non-voice", "late-non-voice")
 	if (strength === "tone-required" && !input.snapshotClassed)
 		return path("discarded:known-non-voice", "known-non-voice")
-	if (noVoice === true && !joinedOther)
+	if (noVoice === true && input.speechHeard === false && !joinedOther)
 		return path("discarded:not-speech", "no-voice")
 	if (strength === "none") return path("finish", "prior-none")
 	if (
@@ -1121,8 +1129,9 @@ export function finishPath(input: FinishInput): FinishPath {
 
 /**
  * The log fields of a kept file (the recorder logs one line per file it keeps): its operation id
- * (the WAV's name), finishPath's readings and the file's speech measure (speech-content.ts). Ids
- * the recorder made and numbers it measured only; nothing from the air or a decoder.
+ * (the WAV's name), its session's discovery (the folder's owner; null: none yet) and the centre it
+ * demodulates (`frequencyHz`, whole Hz), finishPath's readings and the file's speech measure
+ * (speech-content.ts). Ids the core made and numbers it measured only; nothing a decoder read.
  */
 export function keptLog(
 	path: FinishPath,
@@ -1130,10 +1139,13 @@ export function keptLog(
 		readonly speech: { result(): SpeechContent }
 		readonly handle: { readonly operationId: string } | null
 	},
+	session: { readonly discoveryId: string | null; readonly targetHz: number },
 ): Record<string, string | number | boolean | null> {
 	const c = file.speech.result()
 	return {
 		operationId: file.handle?.operationId ?? null,
+		discoveryId: session.discoveryId,
+		frequencyHz: Math.round(session.targetHz),
 		reason: path.reason,
 		strength: path.strength,
 		source: path.source,

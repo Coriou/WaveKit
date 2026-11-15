@@ -4095,7 +4095,7 @@ export class WidebandAnalogRecorder {
 			const mine = [...this.held].filter(([, h]) => h.s.sourceId === s.sourceId)
 			if (mine.length > room) this.release(mine[0]![0])
 		} else {
-			if (path) this.log.info(keptLog(path, file), "Analog file kept")
+			if (path) this.log.info(keptLog(path, file, s), "Analog file kept")
 			file.finishAsked = true
 			void file.handle.finish(file.cut).catch(() => undefined)
 		}

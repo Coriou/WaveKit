@@ -13,6 +13,7 @@
  */
 import "./recorder-dsp-required.js"
 import pino from "pino"
+import type { Logger } from "../../../../src/utils/logger.js"
 import {
 	WidebandAnalogRecorder,
 	type WidebandEngineView,
@@ -229,6 +230,8 @@ export function harness(
 		 * recorder assumes 3 s, the FakeEngine's default ring).
 		 */
 		ringSeconds?: number
+		/** The recorder's logger; default silent. */
+		logger?: Logger
 		/** Wraps the fake store's beginAnalog (failure injection: a throw, a rejected push). */
 		beginWrap?: (
 			begin: (input: AnalogInput) => AnalogHandle,
@@ -244,7 +247,7 @@ export function harness(
 	/** Provisional files' grace timers (WidebandAnalogDeps.timer): `fire` runs the due ones. */
 	const timers: { ms: number; run: () => void; live: boolean }[] = []
 	const warnings: unknown[] = []
-	const logger = pino({ level: "silent" })
+	const logger = opts.logger ?? pino({ level: "silent" })
 	const now = opts.liveClock
 		? () => HARNESS_T0 + (engine.liveEdge() * 1000) / fs
 		: () => HARNESS_T0

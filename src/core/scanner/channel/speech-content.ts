@@ -323,12 +323,30 @@ export function clearlyNotSpeech(c: SpeechContent): boolean {
 }
 
 /**
+ * The range a file of SPEECH_NOISE_MIN_FRAMES (8 s) or more must reach for speechHeard to pass by
+ * its range alone (neither pitched nor a burst): 8 dB. Measured (SYNTHETIC, the 8 and 12 s cuts of
+ * a 12 s run through WidebandNfmChain): of the voice cases no pitch or burst keeps, the lowest is
+ * 9.96 dB (HARD_SPEECH_CASES' 1 500 Hz, 50 %, pause-free talker at 5 dB), 1.96 dB over it; real
+ * noise a listener confirmed measures at most 6.8 dB and two live noise files kept by the 6 dB
+ * bound (9.8 and 13.5 s, a periodic share at most 0.023, bursts at most 2 frames) 6.52 and
+ * 6.69 dB, 1.2 dB or more under it. Under it fall only voice at 500 Hz peak deviation at a CNR
+ * of 8 to 10 dB (7.25 to 7.71 dB, no pitch, bursts of 1 or 2 frames): clearlyNoise's accepted
+ * exception, whose audio SNR is about 0 dB. A pitched share or a burst still keeps such a file
+ * (periodic share or burst alone is not enough on noise of this kind: hard speech at a CNR of
+ * 5 dB measures 0.011 to 0.021 pitched with bursts of 1, inside the live noise's 0.005 to 0.023
+ * and 0 to 2).
+ */
+export const SPEECH_NO_VOICE_LONG_MIN_RANGE_DB = 8
+
+/**
  * The file's audio shows speech by the strict bounds at any length (from SPEECH_SHORT_MIN_FRAMES,
  * 0.512 s; a short file's one partial window): its envelope range reaches
- * SPEECH_NOISE_MAX_RANGE_DB (6 dB), its periodic share SPEECH_NOISE_MAX_PERIODIC_SHARE (0.1), or
- * it has a burst of SPEECH_NOISE_MAX_BURST_FRAMES frames (a word): clearlyNoise without its 8 s
- * floor, inverted. What a file of a no-voice channel (recording-verdict.ts noVoiceChannel) must
- * show to be kept. Measured (SYNTHETIC, the lowest of every 0.5 s cut of a 13 s run through
+ * SPEECH_NOISE_MAX_RANGE_DB (6 dB; from SPEECH_NOISE_MIN_FRAMES, 8 s, on:
+ * SPEECH_NO_VOICE_LONG_MIN_RANGE_DB, 8 dB), its periodic share SPEECH_NOISE_MAX_PERIODIC_SHARE
+ * (0.1), or it has a burst of SPEECH_NOISE_MAX_BURST_FRAMES frames (a word): clearlyNoise without
+ * its 8 s floor, inverted, with a higher range bound for a long file. What a file of a no-voice
+ * channel (recording-verdict.ts noVoiceChannel) must show to be kept. Measured (SYNTHETIC, the
+ * lowest of every 0.5 s cut of a 13 s run through
  * WidebandNfmChain, cuts that start in speech): plain speech at a CNR of 5 dB or more passes from
  * 1 s (lowest range 6.54 dB, the pause-free talker at 5 dB: 0.54 dB of margin);
  * HARD_SPEECH_CASES at 5 to 20 dB pass from 1.5 s (lowest 6.31 dB, the 1 000 Hz talker at 8 dB;
@@ -339,14 +357,19 @@ export function clearlyNotSpeech(c: SpeechContent): boolean {
  * a periodic signal (2FSK, a tone) passes (kept). Real noise a listener confirmed (two channels,
  * eight files of 2.9 to 35.5 s) measures 2.84 to 5.56 dB, periodic share at most 0.02, no burst:
  * all fail (0.44 dB under the bound); that receiver's real voice measures 28.6 dB or more. THE
- * ACCEPTED EXCEPTION: a 1 s over of hard speech (1 000 or 1 500 Hz peak deviation, or a 30 %
- * shallow envelope) at a CNR of 5 to 10 dB can fail, and so does anything under 0.512 s; a
- * channel is a no-voice one only after ten trials heard nothing there.
+ * ACCEPTED EXCEPTIONS: a 1 s over of hard speech (1 000 or 1 500 Hz peak deviation, or a 30 %
+ * shallow envelope) at a CNR of 5 to 10 dB can fail, and so does anything under 0.512 s, and an
+ * 8 s or longer over at 500 Hz peak deviation at 8 to 10 dB (SPEECH_NO_VOICE_LONG_MIN_RANGE_DB);
+ * a channel is a no-voice one only after ten trials heard nothing there.
  */
 export function speechHeard(c: SpeechContent): boolean {
+	const minRange =
+		c.frames >= SPEECH_NOISE_MIN_FRAMES
+			? SPEECH_NO_VOICE_LONG_MIN_RANGE_DB
+			: SPEECH_NOISE_MAX_RANGE_DB
 	return (
 		c.frames >= SPEECH_SHORT_MIN_FRAMES &&
-		(c.maxRangeDb >= SPEECH_NOISE_MAX_RANGE_DB ||
+		(c.maxRangeDb >= minRange ||
 			c.periodicShare >= SPEECH_NOISE_MAX_PERIODIC_SHARE ||
 			c.maxBurstFrames >= SPEECH_NOISE_MAX_BURST_FRAMES)
 	)

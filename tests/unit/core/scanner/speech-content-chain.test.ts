@@ -16,6 +16,7 @@ import {
 	SPEECH_FRAME_SAMPLES,
 	SPEECH_NOISE_MAX_BURST_FRAMES,
 	SPEECH_NOISE_MIN_FRAMES,
+	SPEECH_NO_VOICE_LONG_MIN_RANGE_DB,
 	SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE,
 	SPEECH_STEADY_MAX_RANGE_DB,
 	SpeechContentMeter,
@@ -91,6 +92,23 @@ describe("speech-content: synthetic signals through the NFM chain", () => {
 			expect(clearlyNotSpeech(r)).toBe(false)
 			// The hardest synthetic talkers sit 1.4 dB over the bound at 8 s (1.66 dB at the bench's 12 s).
 			expect(r.maxRangeDb).toBeGreaterThan(SPEECH_STEADY_MAX_RANGE_DB + 1.25)
+			// A long file of a no-voice channel: heard by range alone, with 1.5 dB over its 8 dB bound.
+			expect(r.frames).toBeGreaterThanOrEqual(SPEECH_NOISE_MIN_FRAMES)
+			expect(r.maxRangeDb).toBeGreaterThan(
+				SPEECH_NO_VOICE_LONG_MIN_RANGE_DB + 1.5,
+			)
+			expect(speechHeard(r)).toBe(true)
+		}, 60_000)
+
+	// A long (8 s) file of a no-voice channel (speechHeard's SPEECH_NO_VOICE_LONG_MIN_RANGE_DB):
+	// speech is heard, unpitched data and noise are not; 2FSK and TDMA are kept (disclosed).
+	for (const c of CONTENT_CASES)
+		it(`${c.name} (8 s): speechHeard ${String(c.speech || c.kept === true || c.name === "pager-2fsk-1200")}`, async () => {
+			const r = await measureSignal(c.signal, SECONDS)
+			expect(r.frames).toBeGreaterThanOrEqual(SPEECH_NOISE_MIN_FRAMES)
+			expect(speechHeard(r)).toBe(
+				c.speech || c.kept === true || c.name === "pager-2fsk-1200",
+			)
 		}, 60_000)
 
 	it("a steady tone is kept (periodic), and so is a speech burst after 6 s of data", async () => {
