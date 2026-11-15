@@ -136,7 +136,6 @@ describe("planReplayTrials analog order", () => {
 		})
 	})
 
-
 	// Feature: scanner-redesign, Property 12: Replay order and stop
 	// Validates: Requirements 4.4, 4.6, 5.5
 	// known first, ≤ 1 analog, digital by score; no digital after analog decoded/heard; ≤ 8 run;

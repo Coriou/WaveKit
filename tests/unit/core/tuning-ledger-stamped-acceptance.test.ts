@@ -249,7 +249,9 @@ async function scenario(host: "inline" | "thread"): Promise<void> {
 	const { counts, claims } = watch(engine, fake)
 	fake.releaseSamples()
 	await connected
-	expect(openedBeforePayload, "engine opened before the first payload").toBe(true)
+	expect(openedBeforePayload, "engine opened before the first payload").toBe(
+		true,
+	)
 
 	// Fresh core: nothing carried; the assert writes the held centre and rate, proven past the settle.
 	await until(() => (counts.trustedAt.get(F0) ?? 0) >= 3)
