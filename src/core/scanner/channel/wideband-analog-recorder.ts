@@ -116,9 +116,10 @@ import {
 	decodeDuring,
 	DigitalClassLedger,
 	fileDecodedOwn,
-	finishVerdict,
+	finishPath,
 	graceTimer,
-	joinedVoiceOverlaps,
+	joinedVoiceOf,
+	keptLog,
 	LATE_VERDICT_GRACE_MS,
 	notVoiceDecode,
 	provisionalRoom,
@@ -4075,8 +4076,8 @@ export class WidebandAnalogRecorder {
 			file.classTone === null && !(file.rollOver && s.classed)
 				? file.speech.result()
 				: null
-		const verdict = this.deps.voicePrior
-			? finishVerdict({
+		const path = this.deps.voicePrior
+			? finishPath({
 					prior,
 					backedClass,
 					ownTone: file.toneHz !== null || file.toneCarried,
@@ -4085,13 +4086,14 @@ export class WidebandAnalogRecorder {
 						!s.toneOnly &&
 						file.startSample < s.strongFrom + s.vetoFrom - s.onset,
 					decodedOwn,
-					joinedVoice: joinedVoiceOverlaps(s, file),
+					...joinedVoiceOf(s, file),
 					...speechReadings(speech),
 					ownObservationId: s.owner,
 					final: final || room === 0,
 					now,
 				})
-			: "finish"
+			: null
+		const verdict = path?.verdict ?? "finish"
 		if (verdict !== "finish" && verdict !== "hold") {
 			this.endFile(s, file, verdict)
 			file.failed = true
@@ -4104,6 +4106,7 @@ export class WidebandAnalogRecorder {
 			const mine = [...this.held].filter(([, h]) => h.s.sourceId === s.sourceId)
 			if (mine.length > room) this.release(mine[0]![0])
 		} else {
+			if (path) this.log.info(keptLog(path, file), "Analog file kept")
 			file.finishAsked = true
 			void file.handle.finish(file.cut).catch(() => undefined)
 		}

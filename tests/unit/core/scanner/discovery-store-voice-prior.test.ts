@@ -69,6 +69,29 @@ function decodedDmr(store: DiscoveryStore): string {
 }
 
 describe("DiscoveryStore.voicePrior", () => {
+	it("channelObservation: the owner's own observations are the channel's; another channel's and an unknown id are not", () => {
+		const store = newStore()
+		const id = store.ingest(obs("a1", T0)).discoveryId ?? ""
+		store.ingest(obs("a2", T0 + 5_000))
+		expect(store.discoveryIdOf("a2")).toBe(id)
+		const other = store.ingest(
+			makeObs({
+				id: "b1",
+				centreHz: CH + 100_000,
+				startedAt: T0 + 6_000,
+				cls: "analog-fm",
+				open: false,
+				gate: "passed",
+			}),
+		).discoveryId
+		expect(other).not.toBe(id)
+		const prior = store.voicePrior(id)
+		expect(prior?.channelObservation?.("a1")).toBe(true)
+		expect(prior?.channelObservation?.("a2")).toBe(true)
+		expect(prior?.channelObservation?.("b1")).toBe(false)
+		expect(prior?.channelObservation?.("nope")).toBe(false)
+	})
+
 	it("a discovery decoded DMR at any earlier time is a suspect prior (held, never refused), labelled as the owner's", () => {
 		const store = newStore()
 		const id = decodedDmr(store)

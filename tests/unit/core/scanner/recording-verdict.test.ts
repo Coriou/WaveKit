@@ -17,6 +17,9 @@ import {
 	DigitalClassLedger,
 	fileDecodedOwn,
 	finishVerdict,
+	finishPath,
+	joinedVoiceOf,
+	keptLog,
 	joinedVoiceOverlaps,
 	notVoiceDecode,
 	provisionalRoom,
@@ -28,6 +31,7 @@ import {
 	STRONG_PRIOR_TTL_MS,
 	OWNER_DEDICATED_PRIOR_TTL_MS,
 	OWN_HINT_OTHER_OBSERVATIONS,
+	DMR_CHANNEL_HINT_OBSERVATIONS,
 	ownDmrHint,
 	contentChecked,
 	TDMA_CHANNEL_MIN_SHARE,
@@ -2428,11 +2432,32 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 		expect(ownDmrHint(p, "o-own")).toBe(true)
 		expect(finishVerdict({ ...base, prior: p })).toBe("discarded:not-speech")
 	})
-	it("needs the hint on the file's own over: hints on other overs only do not", () => {
+	it(`without a hint on the file's own over it needs colour-coded hints on ${DMR_CHANNEL_HINT_OBSERVATIONS} other overs`, () => {
+		// Live shape (a DMR beacon heard again hours after its last sync): the session's own over
+		// carried no hint, the prior was only suspect, and its steady files were kept.
+		const two = dmrChannel(history)
+		expect(ownDmrHint(two, "o-own")).toBe(false)
+		expect(finishVerdict({ ...base, prior: two })).toBe("finish")
 		const p = dmrChannel([...history, cc("o-c", NOW - HOUR)])
-		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(priorReading(p, false, NOW).strength).toBe("suspect")
+		expect(ownDmrHint(p, "o-own")).toBe(true)
 		expect(ownDmrHint(p, null)).toBe(false)
-		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
+		expect(finishVerdict({ ...base, prior: p })).toBe("discarded:not-speech")
+		// FROZEN: speech on such an over, a toned one or a joined other voice is kept.
+		expect(finishVerdict({ ...base, prior: p, notSpeech: false })).toBe(
+			"finish",
+		)
+		expect(finishVerdict({ ...base, prior: p, ownTone: true })).toBe("finish")
+		expect(finishVerdict({ ...base, prior: p, joinedVoice: true })).toBe(
+			"finish",
+		)
+		// Bare syncs on the other overs never count.
+		const bare = dmrChannel([
+			hint("o-a", NOW - HOUR),
+			hint("o-b", NOW - HOUR),
+			hint("o-c", NOW - HOUR),
+		])
+		expect(ownDmrHint(bare, "o-own")).toBe(false)
 	})
 	it("needs DMR's classes on a third of the votes: an analog-fm channel does not", () => {
 		const p = dmrChannel([...history, hint("o-own", NOW - 20_000)], {
@@ -2699,6 +2724,162 @@ describe("a no-voice channel: its analog trials never heard, no analog proof (no
 				),
 			).toBe(out)
 		})
+
+	describe("a joined voice of the channel itself never exempts its files (joinedOtherVoice)", () => {
+		// Live shape: a session on a busy no-voice channel (one burst every 1.3 s) joins many of its
+		// own discovery's observations; any whose snapshot reads analog-fm by its spectrum was
+		// noted as a joined voice, which kept every file of the session without speech.
+		const own = new Set(["o-own-2", "o-own-3", "o-partner"])
+		const channel = (p: VoicePrior): VoicePrior => ({
+			...p,
+			channelObservation: id => own.has(id),
+		})
+		it("joined observations all of the channel: the no-voice rule applies", () => {
+			expect(
+				verdict(channel(trials(68)), {
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-2", "o-partner"],
+				}),
+			).toBe("discarded:not-speech")
+		})
+		it("FROZEN: a joined observation of another discovery: kept", () => {
+			expect(
+				verdict(channel(trials(68)), {
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-2", "o-other"],
+				}),
+			).toBe("finish")
+		})
+		it("FROZEN: no channelObservation read, or no ids given: a joined voice keeps, as before", () => {
+			expect(
+				verdict(trials(68), { joinedVoice: true, joinedVoiceIds: ["o-own-2"] }),
+			).toBe("finish")
+			expect(verdict(channel(trials(68)), { joinedVoice: true })).toBe("finish")
+		})
+		it("FROZEN: a throwing channelObservation read keeps", () => {
+			const p: VoicePrior = {
+				...trials(68),
+				channelObservation: () => {
+					throw new Error("x")
+				},
+			}
+			expect(
+				verdict(p, { joinedVoice: true, joinedVoiceIds: ["o-own-2"] }),
+			).toBe("finish")
+		})
+		it("FROZEN: speech heard keeps a file whatever its joins", () => {
+			expect(
+				verdict(channel(trials(68)), {
+					speechHeard: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-2"],
+				}),
+			).toBe("finish")
+		})
+		it("the content check too: a steady buzz a joined own analog-fm snapshot shared is discarded under a checked prior", () => {
+			const p = channel({ ...prior([], "fsk4-12k5"), analogTrials: () => null })
+			expect(
+				verdict(p, {
+					speechHeard: true,
+					notSpeech: true,
+					clearNoise: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-3"],
+				}),
+			).toBe("discarded:not-speech")
+			expect(
+				verdict(p, {
+					speechHeard: true,
+					notSpeech: true,
+					clearNoise: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-other"],
+					final: true,
+				}),
+			).toBe("finish")
+		})
+		it("joinedVoiceOf lists the joined voices on the air in the file", () => {
+			const s = {
+				joins: new Map([
+					["a", 100],
+					["b", 5_000],
+				]),
+				joinedVoice: new Map([
+					["a", 900],
+					["b", 6_000],
+					["c", 50],
+				]),
+			}
+			expect(joinedVoiceOf(s, { startSample: 200, endSample: 1_000 })).toEqual({
+				joinedVoice: true,
+				joinedVoiceIds: ["a"],
+			})
+			expect(
+				joinedVoiceOf(s, { startSample: 2_000, endSample: 3_000 }),
+			).toEqual({ joinedVoice: false, joinedVoiceIds: [] })
+			expect(joinedVoiceOf(s, { startSample: 2_000, endSample: null })).toEqual(
+				{ joinedVoice: true, joinedVoiceIds: ["b"] },
+			)
+		})
+	})
+
+	it("finishPath and keptLog: why a file was kept, from enumerated readings and measured numbers only", () => {
+		const p = trials(68, 0, prior([weak("dmr", "activity")], "analog-fm"))
+		const path = finishPath({
+			prior: p,
+			backedClass: false,
+			ownTone: false,
+			snapshotClassed: true,
+			decodedOwn: false,
+			joinedVoice: true,
+			notSpeech: false,
+			speechHeard: false,
+			final: true,
+			now: NOW,
+		})
+		expect(path).toMatchObject({
+			verdict: "finish",
+			noVoice: true,
+			joinedOther: true,
+			speechHeard: false,
+		})
+		const log = keptLog(path, {
+			speech: {
+				result: () => ({
+					frames: 340,
+					maxRangeDb: 5.876,
+					periodicShare: 0.0091,
+					maxBurstFrames: 0,
+				}),
+			},
+			handle: { operationId: "op-1" },
+		})
+		expect(log).toMatchObject({
+			operationId: "op-1",
+			reason: path.reason,
+			noVoice: true,
+			joinedOther: true,
+			speechHeard: false,
+			frames: 340,
+			rangeDb: 5.88,
+			periodicShare: 0.009,
+			burstFrames: 0,
+		})
+		expect(
+			finishPath({
+				prior: trials(68),
+				backedClass: false,
+				ownTone: true,
+				snapshotClassed: true,
+				decodedOwn: false,
+				joinedVoice: false,
+				notSpeech: false,
+				speechHeard: true,
+				final: true,
+				now: NOW,
+			}),
+		).toMatchObject({ reason: "own-tone", noVoice: null })
+	})
 
 	it("speechReadings: an unmeasured file never discards; a measured one reads each check", () => {
 		expect(speechReadings(null)).toEqual({

@@ -30,6 +30,7 @@ import {
 	notAnalogVoiceProtocol,
 	type DecodedLabel,
 } from "./voice-veto.js"
+import type { SpeechContent } from "./speech-content.js"
 
 /** Why a snapshot bars a recording (encrypted, opted out, unclean track), or null when it does not. */
 export function barredSnapshot(
@@ -196,6 +197,9 @@ export function fileDecodedOwn(
  * tone, or a failed trial that held a run of speech-like frames; `decoded` adds those of its linked
  * co-channel discoveries, `partnerIds`, that heard: analogTrialsHeard); asked only for a file that
  * measured no speech (noVoiceChannel).
+ * `channelObservation` (absent: none is) says a joined observation is one of the owner's or of
+ * a linked co-channel discovery's (`partnerIds`): its analog-fm snapshot class is the channel's
+ * own spectral reading, not another transmission's voice (finishVerdict's `joinedVoiceIds`).
  */
 export interface VoicePrior {
 	readonly id?: string
@@ -219,6 +223,7 @@ export interface VoicePrior {
 	readonly ownerDecode?: OwnerDecode | null
 	readonly channelDecodes?: readonly OwnerDecode[]
 	analogTrials?(): AnalogTrials | null
+	channelObservation?(observationId: string): boolean
 }
 
 /** VoicePrior.analogTrials: the owner's analog FM replay trials run, and those that heard. */
@@ -850,11 +855,48 @@ export function joinedVoiceOverlaps(
 	},
 	file: { readonly startSample: number; readonly endSample: number | null },
 ): boolean {
+	return joinedVoiceOf(s, file).joinedVoice
+}
+
+/**
+ * finishVerdict's joined-voice inputs of a file: `joinedVoice` (joinedVoiceOverlaps) and the ids
+ * of those joined observations (`joinedVoiceIds`, at most WIDEBAND_JOINS_KEPT).
+ */
+export function joinedVoiceOf(
+	s: {
+		readonly joins: ReadonlyMap<string, number>
+		readonly joinedVoice: ReadonlyMap<string, number>
+	},
+	file: { readonly startSample: number; readonly endSample: number | null },
+): { readonly joinedVoice: boolean; readonly joinedVoiceIds: string[] } {
 	const until = file.endSample ?? Number.POSITIVE_INFINITY
+	const ids: string[] = []
 	for (const [id, last] of s.joinedVoice)
 		if ((s.joins.get(id) ?? last) <= until && last >= file.startSample)
-			return true
-	return false
+			ids.push(id)
+	return { joinedVoice: ids.length > 0, joinedVoiceIds: ids }
+}
+
+/**
+ * The joined voice of a file is another transmission's: some joined observation in
+ * `joinedVoiceIds` is not the channel's own (VoicePrior.channelObservation: the owner's or a
+ * linked co-channel discovery's). `joinedVoiceIds` absent: `joinedVoice` as given. A joined
+ * observation of the channel itself carries only its spectral analog-fm class, which a no-voice
+ * channel's trials or a content check already outweigh. A throwing read: another's (keeps).
+ */
+export function joinedOtherVoice(
+	prior: VoicePrior | null,
+	joinedVoice: boolean,
+	joinedVoiceIds: readonly string[] | undefined,
+): boolean {
+	if (!joinedVoice || joinedVoiceIds === undefined) return joinedVoice
+	const own = prior?.channelObservation
+	if (own === undefined) return joinedVoiceIds.length > 0
+	try {
+		return joinedVoiceIds.some(id => !own(id))
+	} catch {
+		return true
+	}
 }
 
 /**
@@ -872,6 +914,58 @@ export type FinishVerdict =
 	| "discarded:not-speech"
 
 /**
+ * Why finishVerdict decided what it did (finishPath; the recorder logs it for every file it
+ * keeps, so an audit can tell each file's path): `no-voice` (discarded by noVoiceChannel),
+ * `own-tone`, `late-non-voice`, `joined-decode` (a decode of its own signal, a joined voice on the
+ * air), `known-non-voice`, `prior-none` (kept at once), `content` (discarded by the content
+ * check), `held`, `final` (kept at the end of its grace or with no room to hold).
+ */
+export type FinishReason =
+	| "no-voice"
+	| "own-tone"
+	| "late-non-voice"
+	| "joined-decode"
+	| "known-non-voice"
+	| "prior-none"
+	| "content"
+	| "held"
+	| "final"
+
+/**
+ * finishVerdict's decision with what it read: the prior's strength and source (priorReading),
+ * whether the channel is a no-voice one (noVoiceChannel; null: not read, the file showed speech
+ * or was not measured), whether a joined voice of another
+ * transmission shares the file (joinedOtherVoice) and the file's own speech reading
+ * (`speechHeard`; null: not measured). Only enumerated values and booleans: safe to log.
+ */
+export interface FinishPath {
+	readonly verdict: FinishVerdict
+	readonly reason: FinishReason
+	readonly strength: PriorStrength
+	readonly source: StrongSource | null
+	readonly noVoice: boolean | null
+	readonly joinedOther: boolean
+	readonly speechHeard: boolean | null
+}
+
+/** finishVerdict's input (see there). */
+export interface FinishInput {
+	readonly prior: VoicePrior | null
+	readonly backedClass: boolean
+	readonly ownTone: boolean
+	readonly snapshotClassed: boolean
+	readonly decodedOwn: boolean
+	readonly joinedVoice: boolean
+	readonly joinedVoiceIds?: readonly string[]
+	readonly notSpeech: boolean
+	readonly clearNoise?: boolean
+	readonly speechHeard?: boolean
+	readonly ownObservationId?: string | null
+	readonly final: boolean
+	readonly now: number
+}
+
+/**
  * A written file's fate at its finish (`final` false) or at the end of its grace (`final` true),
  * in this order: a file whose own audio carried a CTCSS tone, or whose session its tone classed
  * (`ownTone`: a roll-over file of a toned over), is always kept; one whose
@@ -880,63 +974,101 @@ export type FinishVerdict =
  * joinedVoiceOverlaps: kept at once, the two cannot be separated); under a `tone-required` prior
  * a file no snapshot classed analog-fm (`snapshotClassed` false: classed by its own audio only,
  * or a file of a transmission that joined while the prior was strong) is discarded
- * (`discarded:known-non-voice`); where the content check applies (contentChecked: a
+ * (`discarded:known-non-voice`); whatever the prior's strength, a file of a no-voice channel
+ * (noVoiceChannel: its analog trials ran NO_VOICE_CHANNEL_MIN_TRIALS times and never heard, no
+ * analog proof) whose audio shows no speech (`speechHeard` false: speech-content.ts speechHeard,
+ * any length) and that no joined voice of another transmission shares (joinedOtherVoice: a joined
+ * observation of the channel itself, `joinedVoiceIds` read through VoicePrior.channelObservation,
+ * carries only its own spectral analog-fm class) is discarded (`discarded:not-speech`;
+ * `speechHeard` absent: not measured, a file classed by its own tone or a classed session's
+ * roll-over, kept); where the content check applies (contentChecked: a
  * `tone-required` prior from a dedicated-channel decode, a TDMA channel or a verified digital
- * sighting (`checked-digital`), or backed digital evidence of the owner) a file whose audio clearly
- * measures as no speech (`notSpeech`, speech-content.ts clearlyNotSpeech: a steady buzz) and that
- * no joined voice shares is discarded (`discarded:not-speech`) at once; under any other digital
+ * sighting (`checked-digital`), or backed digital evidence of the owner; or ownDmrHint) a file
+ * whose audio clearly measures as no speech (`notSpeech`, speech-content.ts clearlyNotSpeech: a
+ * steady buzz) and that no joined voice of another transmission shares (joinedOtherVoice) is
+ * discarded (`discarded:not-speech`) at once; under any other digital
  * prior (`suspect`, or a `tone-required` one from a `digital-unknown` candidate or unchecked DMR
  * hints) only a file that also measures as clear noise (`clearNoise`, absent false: clearlyNoise,
  * the strict bounds, never borderline audio) is; otherwise one a snapshot classed under `tone-required`, or any under `suspect`, is held, then
  * kept; with none it is kept at once (no content check: an analog proof or label on the channel
- * reads `none`). Before those, whatever the prior's strength, a file of a no-voice channel
- * (noVoiceChannel: its analog trials ran NO_VOICE_CHANNEL_MIN_TRIALS times and never heard, no
- * analog proof) whose audio shows no speech (`speechHeard` false: speech-content.ts speechHeard,
- * any length) and that no joined voice shares is discarded (`discarded:not-speech`); `speechHeard`
- * absent: not measured (a file classed by its own tone, a classed session's roll-over), kept.
- * A prior alone (a decode of another transmission, a co-channel discovery's) never
+ * reads `none`). A prior alone (a decode of another transmission, a co-channel discovery's) never
  * discards a file a snapshot classed and whose audio may be speech. `now`: wall ms (readPrior).
  */
-export function finishVerdict(input: {
-	readonly prior: VoicePrior | null
-	readonly backedClass: boolean
-	readonly ownTone: boolean
-	readonly snapshotClassed: boolean
-	readonly decodedOwn: boolean
-	readonly joinedVoice: boolean
-	readonly notSpeech: boolean
-	readonly clearNoise?: boolean
-	readonly speechHeard?: boolean
-	readonly ownObservationId?: string | null
-	readonly final: boolean
-	readonly now: number
-}): FinishVerdict {
-	if (input.ownTone) return "finish"
-	if (input.decodedOwn)
-		return input.joinedVoice ? "finish" : "discarded:late-non-voice"
+export function finishVerdict(input: FinishInput): FinishVerdict {
+	return finishPath(input).verdict
+}
+
+/** finishVerdict with the readings behind it (FinishPath). */
+export function finishPath(input: FinishInput): FinishPath {
 	const { strength, source } = priorReading(
 		input.prior,
 		input.backedClass,
 		input.now,
 	)
-	if (strength === "tone-required" && !input.snapshotClassed)
-		return "discarded:known-non-voice"
-	if (
-		input.speechHeard === false &&
-		!input.joinedVoice &&
-		noVoiceChannel(input.prior)
+	// Read only for a file without speech (analogVoice may scan the channel's observations).
+	const noVoice =
+		input.speechHeard === false ? noVoiceChannel(input.prior) : null
+	const joinedOther = joinedOtherVoice(
+		input.prior,
+		input.joinedVoice,
+		input.joinedVoiceIds,
 	)
-		return "discarded:not-speech"
-	if (strength === "none") return "finish"
+	const path = (verdict: FinishVerdict, reason: FinishReason): FinishPath => ({
+		verdict,
+		reason,
+		strength,
+		source,
+		noVoice,
+		joinedOther,
+		speechHeard: input.speechHeard ?? null,
+	})
+	if (input.ownTone) return path("finish", "own-tone")
+	if (input.decodedOwn)
+		return input.joinedVoice
+			? path("finish", "joined-decode")
+			: path("discarded:late-non-voice", "late-non-voice")
+	if (strength === "tone-required" && !input.snapshotClassed)
+		return path("discarded:known-non-voice", "known-non-voice")
+	if (noVoice === true && !joinedOther)
+		return path("discarded:not-speech", "no-voice")
+	if (strength === "none") return path("finish", "prior-none")
 	if (
 		input.notSpeech &&
-		!input.joinedVoice &&
+		!joinedOther &&
 		(input.clearNoise === true ||
 			contentChecked(source, input.prior, input.backedClass, input.now) ||
 			ownDmrHint(input.prior, input.ownObservationId ?? null))
 	)
-		return "discarded:not-speech"
-	return input.final ? "finish" : "hold"
+		return path("discarded:not-speech", "content")
+	return input.final ? path("finish", "final") : path("hold", "held")
+}
+
+/**
+ * The log fields of a kept file (the recorder logs one line per file it keeps): its operation id
+ * (the WAV's name), finishPath's readings and the file's speech measure (speech-content.ts). Ids
+ * the recorder made and numbers it measured only; nothing from the air or a decoder.
+ */
+export function keptLog(
+	path: FinishPath,
+	file: {
+		readonly speech: { result(): SpeechContent }
+		readonly handle: { readonly operationId: string } | null
+	},
+): Record<string, string | number | boolean | null> {
+	const c = file.speech.result()
+	return {
+		operationId: file.handle?.operationId ?? null,
+		reason: path.reason,
+		strength: path.strength,
+		source: path.source,
+		noVoice: path.noVoice,
+		joinedOther: path.joinedOther,
+		speechHeard: path.speechHeard,
+		frames: c.frames,
+		rangeDb: Math.round(c.maxRangeDb * 100) / 100,
+		periodicShare: Math.round(c.periodicShare * 1000) / 1000,
+		burstFrames: c.maxBurstFrames,
+	}
 }
 
 /**
@@ -997,6 +1129,15 @@ export function contentChecked(
 export const OWN_HINT_OTHER_OBSERVATIONS = 2
 
 /**
+ * Observations of the owner, of any age, whose DMR sync hints read a colour code or carry checked
+ * content (or DMR decodes) before the content check applies to a file whose own over carried no
+ * hint (ownDmrHint): 3. A DMR beacon or idle channel heard again after hours away syncs on only
+ * some of its overs, and its stale hints leave the prior `suspect`; one or two spurious syncs on
+ * an analog channel do not reach it, and the check itself keeps speech.
+ */
+export const DMR_CHANNEL_HINT_OBSERVATIONS = 3
+
+/**
  * The content check also applies to a file whose session's first transmission (`ownObservationId`,
  * the session's owner; a roll-over or joined file is judged on it too) carries a dsd-fme DMR sync
  * hint, checked or not
@@ -1007,7 +1148,10 @@ export const OWN_HINT_OTHER_OBSERVATIONS = 2
  * bare syncs never count however recent) and DIGITAL_CHANNEL_MIN_SHARE of its DIGITAL_CHANNEL_MIN_VOTES or more class votes read
  * DMR's classes. One spurious sync on an analog channel does not open it, and the check itself
  * keeps speech (clearlyNotSpeech: synthetic voice spreads 10.2 dB or more, the bound is 8.5 dB):
- * what it discards is the steady buzz of the over its own decoder synced on. A throwing read: no.
+ * what it discards is the steady buzz of the over its own decoder synced on. A session whose own
+ * over carried no hint (dsd-fme syncs on only some overs of a DMR beacon) gets the check too once
+ * such hints are on DMR_CHANNEL_HINT_OBSERVATIONS other observations of the owner (with the same
+ * vote share). A throwing read: no.
  */
 export function ownDmrHint(
 	prior: VoicePrior | null,
@@ -1018,14 +1162,18 @@ export function ownDmrHint(
 		const dmr = (prior.digitalProofs?.() ?? []).filter(
 			p => p.protocol === "dmr",
 		)
-		if (!dmr.some(p => p.observationId === ownObservationId)) return false
+		const own = dmr.some(p => p.observationId === ownObservationId)
 		const others = new Set(
 			dmr
 				.filter(p => p.checked || p.colourCode === true)
 				.map(p => p.observationId)
 				.filter(id => id !== ownObservationId),
 		)
-		if (others.size < OWN_HINT_OTHER_OBSERVATIONS) return false
+		if (
+			others.size <
+			(own ? OWN_HINT_OTHER_OBSERVATIONS : DMR_CHANNEL_HINT_OBSERVATIONS)
+		)
+			return false
 		const v = prior.classVotes?.()
 		return (
 			v !== undefined &&

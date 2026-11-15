@@ -1151,6 +1151,67 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 	}, 120_000)
 
+	/**
+	 * noiseOver with a second burst of the same carrier tracked as observation `j` (classed
+	 * analog-fm by its snapshot, joined to the session) in the middle of the over: a busy channel's
+	 * next burst. `channelObservation` says whether `j` is the channel's own.
+	 */
+	async function joinedNoiseOver(h: Harness, seconds: number): Promise<void> {
+		const fsk = new FskSource({
+			fs: h.fs,
+			offsetHz: LOW_OFFSET,
+			levelsHz: [-1_944, -648, 648, 1_944],
+		})
+		const chunk = h.fs / 40
+		let onset = 0
+		let end = 0
+		let jOnset = 0
+		const data = async (n: number, track: boolean): Promise<void> => {
+			for (let i = 0; i < n; i++) {
+				h.engine.write(fsk.next(chunk, true))
+				const edge = h.engine.liveEdge()
+				if (track && edge - onset >= 0.1 * h.fs)
+					h.rec.track(
+						input("o", snapshot("o", onset, Math.min(edge, end), LOW)),
+					)
+				if (track && edge - onset >= h.fs) {
+					if (jOnset === 0) jOnset = edge
+					h.rec.track(input("j", snapshot("j", jOnset, edge, LOW)))
+				}
+				await h.pump()
+			}
+		}
+		await data(40, false)
+		onset = h.engine.liveEdge()
+		end = onset + seconds * h.fs
+		await data(seconds * 40, true)
+		await data(24, false)
+		h.rec.closed("j", snapshot("j", jOnset, end, LOW), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		h.rec.closed("o", snapshot("o", onset, end, LOW), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		await data(140, false)
+	}
+
+	it("a joined burst of the channel itself (its own spectral analog-fm class) does not exempt the file: discarded", async () => {
+		const h = low(() => ({ ...noVoice(), channelObservation: () => true }))
+		await joinedNoiseOver(h, 4)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(codes(h)).toContain("discarded:not-speech")
+	}, 120_000)
+
+	it("FROZEN: a joined observation of another discovery (another transmission's voice) keeps the file", async () => {
+		const h = low(() => ({ ...noVoice(), channelObservation: () => false }))
+		await joinedNoiseOver(h, 4)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+
 	for (const [name, p] of [
 		["one trial heard", noVoice(1)],
 		["analog proof on the channel", noVoice(0, true)],
