@@ -5,6 +5,8 @@ export interface P25Call {
 	source: number
 	superframes?: number
 	rekeys?: number
+	/** A true key-up: no pre-roll, no leading TDUs (dv-plan.mjs). */
+	coldKeyUp?: boolean
 }
 export function p25NidBits(nac: number, duid: number): number[]
 export function rs63Parity(data: number[], tt: number): number[]

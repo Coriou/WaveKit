@@ -55,3 +55,33 @@ export function dmrDirectEnvelope(
 	call: Omit<DmrCall, "settle">,
 	options?: { rateHz?: number; rampSeconds?: number; padSymbols?: number },
 ): Float64Array
+export const DMR_FRAME_MS: number
+export interface DmrPlanOver {
+	startMs: number
+	durationMs: number
+	slot?: 1 | 2
+	talkgroup: number
+	source: number
+	headers?: number
+	terminator?: boolean
+	lateEntry?: number
+}
+export interface DmrSentOver {
+	slot: 1 | 2
+	talkgroup: number
+	source: number
+	startMs: number
+	endMs: number
+	frames: number
+	terminator: boolean
+	bursts: number
+}
+export function dmrPlanDibits(
+	overs: DmrPlanOver[],
+	options?: {
+		mode?: "direct" | "repeater"
+		hangMs?: number
+		colourCode?: number
+		seed?: number
+	},
+): { dibits: number[]; symbolRate: number; overs: DmrSentOver[] }

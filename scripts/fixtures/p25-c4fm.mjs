@@ -267,7 +267,9 @@ export function p25TduDibits({ nac }) {
 /**
  * Dibits of one call after a 0.1 s pre-roll: two TDUs, HDU, `superframes`
  * LDU1/LDU2 pairs, TDU. `rekeys` more calls of the same talkgroup and source follow,
- * each from its own HDU, as a station keying up again.
+ * each from its own HDU, as a station keying up again. `coldKeyUp` sends a
+ * true key-up instead (dv-plan.mjs): no pre-roll and no leading TDUs, the HDU
+ * first.
  */
 export function p25CallDibits({
 	nac,
@@ -275,16 +277,19 @@ export function p25CallDibits({
 	source,
 	superframes = 2,
 	rekeys = 0,
+	coldKeyUp = false,
 }) {
 	const lc = p25GroupVoiceLc({ talkgroup, source })
 	// Pre-roll: 0.1 s of seeded random dibits for the receiver's symbol timing.
 	const random = rng(3)
-	const out = [...Array(480)].map(() => Math.floor(random() * 4))
+	const out = coldKeyUp
+		? []
+		: [...Array(480)].map(() => Math.floor(random() * 4))
 	for (let call = 0; call <= rekeys; call++) {
 		// Two TDUs first (a repeater's hang): dsd-fme sets its symbol levels
 		// from the first frame syncs and loses those frames (measured: the HDU
 		// and the first LDU1 otherwise fail).
-		out.push(...p25TduDibits({ nac }), ...p25TduDibits({ nac }))
+		if (!coldKeyUp) out.push(...p25TduDibits({ nac }), ...p25TduDibits({ nac }))
 		out.push(...p25HduDibits({ nac, talkgroup }))
 		for (let i = 0; i < superframes; i++) {
 			out.push(...p25Ldu1Dibits({ nac, lc, seed: 7 + 2 * i }))

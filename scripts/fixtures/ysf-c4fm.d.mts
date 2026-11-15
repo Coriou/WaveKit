@@ -7,6 +7,8 @@ export interface YsfCall {
 	superframes?: number
 	badCsd1?: boolean
 	seed?: number
+	/** A true key-up: no noise lead, no settle frames (dv-plan.mjs). */
+	coldKeyUp?: boolean
 }
 export function golay2412(data: number[]): number[]
 export function ysfCrc(bits: number[]): number[]
