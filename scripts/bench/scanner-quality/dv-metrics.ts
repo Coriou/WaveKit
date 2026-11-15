@@ -7,10 +7,14 @@
  * Per over:
  * - `calls`: the calls that hold it (must be 1); `splits` = calls - 1;
  * - `merged`: one of its calls also holds another over (two overs, one call);
- * - `headCutMs`: its first call's start minus key-up (late is positive);
+ * - `headCutMs`: its first call's start minus key-up (late is positive;
+ *   negative in the settle-replay variant when the call began on the
+ *   replayed copy fed just before the over);
  * - `endErrMs`: its last call's end minus key-down;
  * - `tFirstMs`: key-up to the first line that prints a checked field of it
- *   (a line belongs to the over whose span holds it, else the nearest);
+ *   (a line belongs to the over whose span holds it, else the nearest, but
+ *   never to an over less than one frame past its key-up while an earlier
+ *   over can still own it: see lineOwner);
  * - `framesChecked` / `framesSent`: such lines against the checked frames sent;
  * - `recording`: one of its calls names a WAV file.
  *
@@ -115,6 +119,41 @@ function nearestOver(
 	return best
 }
 
+/**
+ * One frame of each protocol, the soonest after key-up a decoder can print a
+ * field of the new over: DMR one 60 ms TDMA frame, P25 one 180 ms LDU, YSF one
+ * 100 ms frame, NXDN48 and dPMR one 80 ms frame, D-STAR one 20 ms voice frame.
+ * Unknown protocols: 0 (no guard).
+ */
+export const DV_FRAME_MS: Readonly<Record<string, number>> = {
+	dmr: 60,
+	p25: 180,
+	ysf: 100,
+	nxdn48: 80,
+	dpmr: 80,
+	dstar: 20,
+}
+
+/**
+ * The over a checked line belongs to: nearestOver among the overs at least
+ * one frame (DV_FRAME_MS) past their key-up at the line's time, else among
+ * all of them. A line that arrives before the next over could have printed
+ * anything (the late terminator of an over re-keyed 0.2 s later, same ids)
+ * stays with the over already on air.
+ */
+function lineOwner(
+	overs: readonly DvOver[],
+	t: number,
+	ok: (o: DvOver) => boolean,
+): number {
+	const settled = nearestOver(
+		overs,
+		t,
+		o => ok(o) && t >= o.startMs + (DV_FRAME_MS[o.protocol] ?? 0),
+	)
+	return settled >= 0 ? settled : nearestOver(overs, t, ok)
+}
+
 /** The overs (indexes into `overs`) each call holds. */
 export function holdsOf(
 	overs: readonly DvOver[],
@@ -142,9 +181,9 @@ export function scoreOvers(
 	checked: (line: string, over: DvOver) => boolean,
 ): DvOverScore[] {
 	const holds = holdsOf(overs, calls)
-	// Each checked line counts for the one over it belongs to (nearestOver).
+	// Each checked line counts for the one over it belongs to (lineOwner).
 	const owner = lines.map(l =>
-		nearestOver(overs, l.atMs, o => checked(l.text, o)),
+		lineOwner(overs, l.atMs, o => checked(l.text, o)),
 	)
 	return overs.map((o, i) => {
 		const mine = calls.filter((_, c) => holds[c]!.includes(i))
@@ -251,7 +290,9 @@ const share = (n: number, d: number): string =>
 
 /**
  * Markdown: one row per scene, variant, CNR and frequency error (the phases
- * and overs summed), then one row per over of every point.
+ * and overs summed), then one row per over of every point. headCut can be
+ * negative (settle-replay: the call started on the replayed copy of the
+ * over's head, before its key-up); the headers say so.
  */
 export function dvTable(points: readonly DvPoint[]): string {
 	const groups = new Map<string, DvPoint[]>()
@@ -260,7 +301,7 @@ export function dvTable(points: readonly DvPoint[]): string {
 		groups.set(key, [...(groups.get(key) ?? []), p])
 	}
 	const out = [
-		"| Scene | Variant | CNR | Error | Overs | One call | Missed | Splits | Merged | headCut p50 / p90 ms | endErr p90 ms (TLC / none) | tFirst p90 ms | Frames checked |",
+		"| Scene | Variant | CNR | Error | Overs | One call | Missed | Splits | Merged | headCut p50 / p90 ms (< 0: began on the settle-replay copy) | endErr p90 ms (TLC / none) | tFirst p90 ms | Frames checked |",
 		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
 	]
 	for (const [key, ps] of groups) {
@@ -277,7 +318,7 @@ export function dvTable(points: readonly DvPoint[]): string {
 	}
 	out.push(
 		"",
-		"| Scene | Variant | CNR | Error | Phase | Over | Slot | Length ms | Calls | Merged | headCut ms | endErr ms | tFirst ms | Frames |",
+		"| Scene | Variant | CNR | Error | Phase | Over | Slot | Length ms | Calls | Merged | headCut ms (< 0: began on the settle-replay copy) | endErr ms | tFirst ms | Frames |",
 		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
 	)
 	for (const p of points)

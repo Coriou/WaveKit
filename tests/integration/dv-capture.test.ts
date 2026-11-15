@@ -35,6 +35,7 @@ import {
 	dvGrid,
 	gridSeconds,
 	measureDvPoint,
+	recordedSceneName,
 	recordedSeed,
 	type DvChannelize,
 	type DvVariant,
@@ -117,10 +118,7 @@ describe.skipIf(!ENABLED || chanUnavailable !== undefined)(
 				})
 				if (linesDir !== undefined)
 					writeFileSync(
-						join(
-							linesDir,
-							`dv-latency-${spec.scene.name}-${spec.variant}-${spec.cnrDb}dB-${spec.errorHz}Hz-p${spec.phase}.json`,
-						),
+						join(linesDir, `dv-latency-${recordedSceneName(spec)}.json`),
 						`${JSON.stringify(recordedSeed(r, MARGIN_CENTRE_HZ + MARGIN_CAPTURE.offsetHz), null, "\t")}\n`,
 					)
 			}

@@ -6,12 +6,17 @@
  * decoder that prints DMR lines from the audio it was fed so far). The run
  * against the real binaries is dv-capture.test.ts (WAVEKIT_DVCAP=1).
  */
+import { spawn } from "node:child_process"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { DV_SCENES } from "../../../scripts/fixtures/dv-plan.mjs"
 import type { DvScene } from "../../../scripts/fixtures/dv-plan.mjs"
 import {
 	AUDIO_RATE_HZ,
 	DVCAP_CNR_DB,
+	DVCAP_READY,
 	DVCAP_ERRORS_HZ,
 	DVCAP_PHASES,
 	LEAD_MS,
@@ -19,16 +24,24 @@ import {
 	QUICK_SCENES,
 	SETTLE_FRAME_MS,
 	SETTLE_REPEAT_MS,
+	STDERR_TAIL_CHARS,
+	createShellRunner,
 	dvGrid,
 	feedRealTime,
 	gridSeconds,
 	measureDvPoint,
+	recordedSceneName,
 	recordedSeed,
 	settleReplay,
 	type DvChannelize,
+	type DvPointSpec,
 	type DvRunner,
+	type DvSpawn,
 } from "../../integration/dv-capture.js"
-import { parseDvSeed } from "../../../scripts/bench/scanner-quality/truth-dv.js"
+import {
+	loadDvCases,
+	parseDvSeed,
+} from "../../../scripts/bench/scanner-quality/truth-dv.js"
 
 describe("the grid", () => {
 	it("is every scene at every CNR, error and phase; quick is DMR at 20 dB, 0 Hz, phase 0", () => {
@@ -217,6 +230,120 @@ describe("feedRealTime", () => {
 	})
 })
 
+describe("the ready handshake", () => {
+	/** 200 ms of silence. */
+	const pcm = Buffer.alloc(2 * 0.2 * AUDIO_RATE_HZ)
+
+	it("starts the clock when the runner pulls, not when it starts", async () => {
+		// A runner whose command takes 1.5 s to be ready, then prints a line
+		// as soon as it reads the first chunk.
+		const slow: DvRunner = async (_command, input, onLine) => {
+			await new Promise(r => setTimeout(r, 1500))
+			for await (const chunk of input) {
+				if (chunk.length > 0) onLine("first")
+				break
+			}
+		}
+		const lines = await feedRealTime("ignored", pcm, { run: slow })
+		expect(lines.map(l => l.text)).toEqual(["first"])
+		expect(lines[0]!.atMs).toBeGreaterThanOrEqual(0)
+		expect(lines[0]!.atMs).toBeLessThan(200)
+	}, 10_000)
+
+	/** /bin/sh, after `delay` seconds; records the child. */
+	const delayed = (delay: number, kids: { exitCode: number | null }[] = []) =>
+		(script => {
+			const child = spawn("/bin/sh", ["-c", `sleep ${delay}; ${script}`], {
+				stdio: ["pipe", "pipe", "pipe"],
+			})
+			kids.push(child)
+			return child
+		}) satisfies DvSpawn
+
+	it("holds the input until the script's marker and drops the marker", async () => {
+		const run = createShellRunner({ spawnChild: delayed(1.5) })
+		const lines = await feedRealTime(
+			"sh -c 'head -c 1 >/dev/null; echo first; cat >/dev/null'",
+			pcm,
+			{ run },
+		)
+		expect(lines.map(l => l.text)).toEqual(["first"])
+		expect(lines.some(l => l.text.includes(DVCAP_READY))).toBe(false)
+		// About 0, not the 1 500 ms the container start took.
+		expect(lines[0]!.atMs).toBeLessThan(500)
+	}, 10_000)
+
+	it("fails a marker later than its wait, and kills the child", async () => {
+		const kids: { exitCode: number | null; killed?: boolean }[] = []
+		// Within the wait: 0.1 s against 2 s.
+		await expect(
+			feedRealTime("cat >/dev/null", pcm, {
+				run: createShellRunner({
+					spawnChild: delayed(0.1),
+					readyTimeoutMs: 2000,
+				}),
+			}),
+		).resolves.toEqual([])
+		// Past it: 3 s against 300 ms.
+		await expect(
+			feedRealTime("cat >/dev/null", pcm, {
+				run: createShellRunner({
+					spawnChild: delayed(3, kids),
+					readyTimeoutMs: 300,
+				}),
+			}),
+		).rejects.toThrow(`no ${DVCAP_READY} within 300 ms`)
+		expect(kids[0]!.killed).toBe(true)
+	}, 10_000)
+
+	it("fails a non-zero exit, an exit before the marker and a spawn error, quoting a bounded tail", async () => {
+		const run = createShellRunner({ spawnChild: delayed(0) })
+		await expect(
+			feedRealTime("cat >/dev/null; echo broken; exit 3", pcm, { run }),
+		).rejects.toThrow(/exit 3.*output tail: broken/s)
+		const long = await feedRealTime(
+			`cat >/dev/null; head -c ${4 * STDERR_TAIL_CHARS} /dev/zero | tr '\\0' x; echo; exit 1`,
+			pcm,
+			{ run },
+		).catch((e: unknown) => (e instanceof Error ? e.message : ""))
+		expect(long).toMatch(/exit 1/)
+		expect(long.length).toBeLessThan(STDERR_TAIL_CHARS + 200)
+		await expect(
+			feedRealTime("cat", pcm, {
+				run: createShellRunner({
+					spawnChild: () =>
+						spawn("/bin/sh", ["-c", "echo nope >&2; exit 5"], {
+							stdio: ["pipe", "pipe", "pipe"],
+						}),
+				}),
+			}),
+		).rejects.toThrow(/exited \(5\) before __DVCAP_READY__.*nope/s)
+		await expect(
+			feedRealTime("cat", pcm, {
+				run: createShellRunner({
+					spawnChild: () =>
+						spawn("/nonexistent/dvcap-binary", [], {
+							stdio: ["pipe", "pipe", "pipe"],
+						}),
+				}),
+			}),
+		).rejects.toThrow(/ENOENT/)
+	}, 10_000)
+
+	it("ends stdin and kills the child when the input fails", async () => {
+		const kids: { exitCode: number | null; killed?: boolean }[] = []
+		const run = createShellRunner({ spawnChild: delayed(0, kids) })
+		async function* broken(): AsyncGenerator<Buffer> {
+			yield Buffer.alloc(64)
+			throw new Error("input failed")
+		}
+		await expect(
+			run("cat >/dev/null; sleep 5", broken(), () => {}),
+		).rejects.toThrow("input failed")
+		expect(kids[0]!.killed).toBe(true)
+	}, 10_000)
+})
+
 describe("measureDvPoint with doubles", () => {
 	it("maps the plan onto the audio and scores the adapter's calls", async () => {
 		const r = await measureDvPoint(
@@ -247,9 +374,107 @@ describe("measureDvPoint with doubles", () => {
 			"recorded.json",
 			JSON.stringify(recordedSeed(r, 433_162_500)),
 		)
-		expect(seed).toMatchObject({ provisional: false, scene: "double" })
+		expect(seed).toMatchObject({
+			provisional: false,
+			scene: "double-baseline-30db-0hz-p0",
+		})
 		expect(seed.lines.length).toBe(r.lines.length)
 	}, 60_000)
+
+	it("fails a point whose decoder printed no line at all", async () => {
+		const mute: DvRunner = async (_command, input) => {
+			for await (const _chunk of input) void _chunk
+		}
+		await expect(
+			measureDvPoint(
+				{
+					scene: SCENE,
+					variant: "baseline",
+					cnrDb: 30,
+					errorHz: 0,
+					phase: 0,
+					seed: 1,
+				},
+				{ channelize: channelDouble, run: mute, speed: 20 },
+			),
+		).rejects.toThrow(/double \(baseline, 30 dB.*no line at all/)
+	}, 60_000)
+
+	it("names a recorded seed by its grid point, and the loader refuses two of one name", () => {
+		const spec = (over: Partial<DvPointSpec>): DvPointSpec => ({
+			scene: SCENE,
+			variant: "baseline",
+			cnrDb: 20,
+			errorHz: 0,
+			phase: 0,
+			seed: 1,
+			...over,
+		})
+		const names = [
+			spec({}),
+			spec({ errorHz: -600 }),
+			spec({ errorHz: 600 }),
+			spec({ phase: 0.25 }),
+			spec({ cnrDb: 10 }),
+			spec({ variant: "settle-replay" }),
+		].map(recordedSceneName)
+		expect(names[1]).toBe("double-baseline-20db-m600hz-p0")
+		expect(names[3]).toBe("double-baseline-20db-0hz-p25")
+		expect(new Set(names).size).toBe(names.length)
+		// The longest: every name fits the seed schema's 64 characters.
+		const longest = Math.max(
+			...DV_SCENES.map(
+				s =>
+					recordedSceneName(
+						spec({
+							scene: s,
+							variant: "settle-replay",
+							errorHz: -600,
+							phase: 0.75,
+						}),
+					).length,
+			),
+		)
+		expect(longest).toBeLessThanOrEqual(64)
+		const seed = (scene: string) =>
+			JSON.stringify({
+				version: 1,
+				provisional: false,
+				note: "test",
+				scene,
+				protocol: "dmr",
+				frequencyHz: 1,
+				overs: [
+					{
+						index: 0,
+						protocol: "dmr",
+						slot: 1,
+						startMs: 0,
+						endMs: 1,
+						frames: 1,
+						terminator: true,
+						clear: true,
+						ids: {},
+					},
+				],
+				lines: [],
+			})
+		const dir = mkdtempSync(join(tmpdir(), "dv-seeds-"))
+		try {
+			writeFileSync(join(dir, "dv-latency-a.json"), seed(names[0]!))
+			writeFileSync(join(dir, "dv-latency-b.json"), seed(names[1]!))
+			expect(loadDvCases(dir).map(c => c.name)).toEqual([
+				`dv-${names[0]}`,
+				`dv-${names[1]}`,
+			])
+			writeFileSync(join(dir, "dv-latency-c.json"), seed(names[0]!))
+			expect(() => loadDvCases(dir)).toThrow(
+				/dv-latency-c\.json: case dv-double-baseline-20db-0hz-p0 is already dv-latency-a\.json's/,
+			)
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	})
 
 	it("shifts the overs past each settle replay copy", async () => {
 		const r = await measureDvPoint(

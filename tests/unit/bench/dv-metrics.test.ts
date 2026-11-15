@@ -7,6 +7,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	DV_FRAME_MS,
 	HOLD_MIN_MS,
 	MATCH_LEAD_MS,
 	MATCH_TAIL_MS,
@@ -169,6 +170,30 @@ describe("scoreOvers", () => {
 		expect(checkedLine(slotLine(0, 2).text, o)).toBe(false)
 		expect(checkedLine(slotLine(0, 1, 99).text, o)).toBe(false)
 		expect(checkedLine(slotLine(0).text, o)).toBe(true)
+	})
+
+	it("keeps a late line with the over already on air until the next is one frame in", () => {
+		// Re-keyed 0.2 s later with the same ids: the first over's terminator
+		// line arrives 150 ms late, 50 ms before the second over's key-up.
+		const late = scoreOvers(
+			two,
+			[call(1700, 3040), call(3900, 5240)],
+			[slotLine(3150), slotLine(3900)],
+			checkedLine,
+		)
+		expect(late.map(r => r.tFirstMs)).toEqual([2150, 700])
+		expect(late.map(r => r.framesChecked)).toEqual([1, 1])
+		// Inside the second over, short of one DMR frame: still the first's.
+		const frame = DV_FRAME_MS["dmr"]!
+		expect(frame).toBe(60)
+		const short = scoreOvers(two, [], [slotLine(3200 + frame - 1)], checkedLine)
+		expect(short.map(r => r.framesChecked)).toEqual([1, 0])
+		// At one frame past its key-up the line is the second over's.
+		const at = scoreOvers(two, [], [slotLine(3200 + frame)], checkedLine)
+		expect(at.map(r => r.framesChecked)).toEqual([0, 1])
+		// With no earlier over to keep it, a line before one frame is the first's own.
+		const first = scoreOvers(two, [], [slotLine(1010)], checkedLine)
+		expect(first.map(r => r.tFirstMs)).toEqual([10, null])
 	})
 
 	it("counts a clear over without a recording", () => {
@@ -386,5 +411,22 @@ describe("truth DV scenes", () => {
 			{ subset: true },
 		)
 		expect(worse.failures.map(f => f.metric)).toContain("dvSplit")
+		// The merge ratchet: at its limit (2) it passes, one more merged over fails.
+		expect(limits.limits.synthetic?.["dvMerged"]).toEqual({ max: 2 })
+		const merged = scorecard(
+			[
+				...scores,
+				withTotals(
+					dvCaseScore(cases[0]!, [
+						// Its recording held, so only the merge moves.
+						{ ...runDvCase(cases[0]!)[0]!, merged: true, recording: true },
+					]),
+				),
+			],
+			limits,
+			{ subset: true },
+		)
+		expect(merged.byKind.synthetic?.dvMerged).toBe(3)
+		expect(merged.failures.map(f => f.metric)).toEqual(["dvMerged"])
 	})
 })

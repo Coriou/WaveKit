@@ -24,7 +24,8 @@
  * settle on real symbols and still see the header. The repeat is whole frames
  * of the protocol (DMR: whole 60 ms TDMA frames, so slot parity holds).
  */
-import { spawn } from "node:child_process"
+import { spawn, type ChildProcessByStdio } from "node:child_process"
+import type { Readable, Writable } from "node:stream"
 import pino from "pino"
 import {
 	DV_SCENES,
@@ -53,6 +54,7 @@ import {
 	plain,
 } from "./dsd-fme-margin.js"
 import { SYNTH_IMAGE, csdrFmHead } from "./synthetic-chain.js"
+import { WaveKitError } from "../../src/utils/errors.js"
 
 /** The design's grid (section B). */
 export const DVCAP_CNR_DB = [10, 15, 20, 30]
@@ -222,64 +224,191 @@ export function settleReplay(
 	return { pcm: Buffer.concat(parts), shift, repeatsMs }
 }
 
-/** Runs a shell command, feeding it `input` chunks and handing back every output line. */
+/**
+ * Runs a shell command, feeding it `input` chunks and handing back every
+ * output line. A runner pulls the first chunk only once the command can read
+ * it (feedRealTime starts its clock at that pull), and rejects when the
+ * command fails.
+ */
 export type DvRunner = (
 	command: string,
 	input: AsyncIterable<Buffer>,
 	onLine: (text: string) => void,
 ) => Promise<void>
 
+/** Printed by the runner's script just before the command starts reading. */
+export const DVCAP_READY = "__DVCAP_READY__"
 /**
- * The default runner: /bin/sh here, or the core image (`docker run -i
- * --network none`) with WAVEKIT_SYNTH_IMAGE. `cat` reads stdin first: sox
- * stops early when it reads node's stdin socket itself (synthetic-chain.ts).
+ * Longest wait for DVCAP_READY: a container start is about 2 s
+ * (POINT_OVERHEAD_S), 15 times that (30 s) covers a cold image cache on a
+ * loaded host. Past it the point fails: a later start would only be hidden in
+ * the first over's latency.
  */
-export const shellRunner: DvRunner = async (command, input, onLine) => {
-	const script = `(cat | ${command}) 2>&1`
-	const child =
-		SYNTH_IMAGE === ""
-			? spawn("/bin/sh", ["-c", script], {
-					stdio: ["pipe", "pipe", "ignore"],
-				})
-			: spawn(
-					"docker",
-					[
-						"run",
-						"-i",
-						"--rm",
-						"--network",
-						"none",
-						"--entrypoint",
-						"/bin/sh",
-						SYNTH_IMAGE,
-						"-c",
-						script,
-					],
-					{ stdio: ["pipe", "pipe", "ignore"] },
-				)
-	let rest = ""
-	child.stdout.on("data", (chunk: Buffer) => {
-		rest += chunk.toString("latin1")
-		let nl: number
-		while ((nl = rest.indexOf("\n")) >= 0) {
-			onLine(rest.slice(0, nl).replace(/\r$/, ""))
-			rest = rest.slice(nl + 1)
-		}
-	})
-	const exited = new Promise<void>((done, fail) => {
-		child.once("error", fail)
-		child.once("close", () => done())
-	})
-	child.stdin.on("error", () => {
-		// The command exited before reading everything: its lines still count.
-	})
-	for await (const chunk of input)
-		if (!child.stdin.write(chunk))
-			await new Promise(resume => child.stdin.once("drain", resume))
-	child.stdin.end()
-	await exited
-	if (rest !== "") onLine(rest)
+export const READY_TIMEOUT_MS = 30_000
+/**
+ * The most an error quotes of what the child printed (its stderr, and its
+ * output: the command's stderr is merged into it), last characters first.
+ */
+export const STDERR_TAIL_CHARS = 1000
+
+/** Starts the runner's /bin/sh script: here, or in the core image. */
+export type DvSpawn = (
+	script: string,
+) => ChildProcessByStdio<Writable, Readable, Readable>
+
+/**
+ * /bin/sh here, or the core image (`docker run -i --network none`) with
+ * WAVEKIT_SYNTH_IMAGE.
+ */
+export const defaultSpawn: DvSpawn = script =>
+	SYNTH_IMAGE === ""
+		? spawn("/bin/sh", ["-c", script], { stdio: ["pipe", "pipe", "pipe"] })
+		: spawn(
+				"docker",
+				[
+					"run",
+					"-i",
+					"--rm",
+					"--network",
+					"none",
+					"--entrypoint",
+					"/bin/sh",
+					SYNTH_IMAGE,
+					"-c",
+					script,
+				],
+				{ stdio: ["pipe", "pipe", "pipe"] },
+			)
+
+/** Keeps the last `max` characters of what is appended. */
+function keepTail(max: number): {
+	add: (s: string) => void
+	text: () => string
+} {
+	let kept = ""
+	return {
+		add: s => {
+			kept = (kept + s).slice(-max)
+		},
+		text: () => kept.trim(),
+	}
 }
+
+const runnerError = (message: string, output: string): WaveKitError =>
+	new WaveKitError(
+		output === "" ? message : `${message}; output tail: ${output}`,
+		"DVCAP_RUNNER",
+	)
+
+/**
+ * A runner on `spawnChild`. The script prints DVCAP_READY, then runs
+ * `(cat | command) 2>&1`: `cat` reads stdin first, as sox stops early when it
+ * reads node's stdin socket itself (synthetic-chain.ts). The input is not
+ * pulled until the marker arrives (at most `readyTimeoutMs`), the marker is
+ * not a decoder line, and a non-zero exit, a signal or a spawn error rejects
+ * with the last STDERR_TAIL_CHARS the child printed. On any failure stdin is ended
+ * and the child killed by its own handle.
+ */
+export function createShellRunner({
+	spawnChild = defaultSpawn,
+	readyTimeoutMs = READY_TIMEOUT_MS,
+}: { spawnChild?: DvSpawn; readyTimeoutMs?: number } = {}): DvRunner {
+	return async (command, input, onLine) => {
+		const child = spawnChild(`echo ${DVCAP_READY}; (cat | ${command}) 2>&1`)
+		const stderr = keepTail(STDERR_TAIL_CHARS)
+		let ready = false
+		const readyNow = Promise.withResolvers<void>()
+		let rest = ""
+		const line = (text: string) => {
+			if (!ready && text === DVCAP_READY) {
+				ready = true
+				readyNow.resolve()
+				return
+			}
+			stderr.add(`${text}\n`)
+			if (ready) onLine(text)
+		}
+		child.stdout.on("data", (chunk: Buffer) => {
+			rest += chunk.toString("latin1")
+			let nl: number
+			while ((nl = rest.indexOf("\n")) >= 0) {
+				line(rest.slice(0, nl).replace(/\r$/, ""))
+				rest = rest.slice(nl + 1)
+			}
+		})
+		child.stderr.on("data", (chunk: Buffer) =>
+			stderr.add(chunk.toString("latin1")),
+		)
+		const exited = new Promise<{
+			code: number | null
+			signal: NodeJS.Signals | null
+		}>((done, fail) => {
+			child.once("error", fail)
+			child.once("close", (code, signal) => done({ code, signal }))
+		})
+		// Seen by the awaits below; keeps an early rejection from going unhandled.
+		exited.catch(() => {})
+		child.stdin.on("error", () => {
+			// The command exited before reading everything: its lines still count.
+		})
+		let failed = true
+		let timer: NodeJS.Timeout | undefined
+		try {
+			await Promise.race([
+				readyNow.promise,
+				// Settles only before the marker: once ready, `await exited` below
+				// sees the exit (and a spawn error) instead.
+				exited.then(
+					({ code, signal }) => {
+						if (!ready)
+							throw runnerError(
+								`the command exited (${signal ?? code}) before ${DVCAP_READY}`,
+								stderr.text(),
+							)
+					},
+					(error: unknown) => {
+						if (!ready) throw error
+					},
+				),
+				new Promise<never>((_, fail) => {
+					timer = setTimeout(
+						() =>
+							fail(
+								runnerError(
+									`no ${DVCAP_READY} within ${readyTimeoutMs} ms`,
+									stderr.text(),
+								),
+							),
+						readyTimeoutMs,
+					)
+				}),
+			])
+			clearTimeout(timer)
+			for await (const chunk of input)
+				if (!child.stdin.write(chunk))
+					await new Promise(resume => child.stdin.once("drain", resume))
+			child.stdin.end()
+			const { code, signal } = await exited
+			if (rest !== "") line(rest)
+			if (code !== 0)
+				throw runnerError(
+					`the command failed (${signal ?? `exit ${code}`})`,
+					stderr.text(),
+				)
+			failed = false
+		} finally {
+			clearTimeout(timer)
+			if (failed) {
+				child.stdin.end()
+				if (child.exitCode === null && child.signalCode === null)
+					child.kill("SIGTERM")
+			}
+		}
+	}
+}
+
+/** The default runner (defaultSpawn). */
+export const shellRunner: DvRunner = createShellRunner()
 
 /**
  * Feeds `pcm` (s16, AUDIO_RATE_HZ) to `command` at `speed` times real time in
@@ -294,6 +423,8 @@ export async function feedRealTime(
 	const lines: DvLine[] = []
 	const chunk = bytesOf(CHUNK_MS)
 	let t0 = 0
+	// The clock starts at the runner's first pull (after its ready handshake),
+	// not at its spawn: a container start is not decoder latency.
 	async function* chunks(): AsyncGenerator<Buffer> {
 		t0 = performance.now()
 		for (let k = 0; k * chunk < pcm.length; k++) {
@@ -409,6 +540,11 @@ export async function measureDvPoint(
 		shift = replayed.shift
 	}
 	const lines = await feedRealTime(tail.join(" | "), pcm, { run, speed })
+	if (lines.length === 0)
+		throw new WaveKitError(
+			`${scene.name} (${spec.variant}, ${spec.cnrDb} dB, ${spec.errorHz} Hz, phase ${spec.phase}): the decoder printed no line at all`,
+			"DVCAP_NO_LINES",
+		)
 	const overs = audioOvers(plan.overs, offsetMs, shift)
 	const calls = replayDvLines(lines, mode)
 	return {
@@ -417,6 +553,20 @@ export async function measureDvPoint(
 		overs,
 		lines,
 	}
+}
+
+/**
+ * A point's name in a recorded seed (its `scene`, so its case `dv-<name>`
+ * and file `dv-latency-<name>.json`): the scene and the grid point, so two
+ * points of one scene never collide. Lower case, digits and dashes (the
+ * seed schema): `-m600hz` for -600 Hz, phase in hundredths of a symbol
+ * (`p25` for 0.25). At most 24 + 14 + 6 + 7 + 5 = 56 characters, under the
+ * schema's 64.
+ */
+export function recordedSceneName(spec: DvPointSpec): string {
+	const hz = `${spec.errorHz < 0 ? "m" : ""}${Math.abs(spec.errorHz)}hz`
+	const phase = `p${Math.round(spec.phase * 100)}`
+	return `${spec.scene.name}-${spec.variant}-${spec.cnrDb}db-${hz}-${phase}`
 }
 
 /**
@@ -430,7 +580,7 @@ export function recordedSeed(r: DvPointResult, frequencyHz: number): unknown {
 		version: 1,
 		provisional: false,
 		note: `Recorded by tests/integration/dv-capture.test.ts: ${r.spec.variant}, ${r.spec.cnrDb} dB, ${r.spec.errorHz} Hz, phase ${r.spec.phase}.`,
-		scene: r.spec.scene.name,
+		scene: recordedSceneName(r.spec),
 		protocol: r.spec.scene.protocol,
 		frequencyHz,
 		overs: r.overs.map(o => ({

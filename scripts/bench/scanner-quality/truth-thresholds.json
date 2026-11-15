@@ -32,6 +32,9 @@
 			"dvSplit": {
 				"max": 2
 			},
+			"dvMerged": {
+				"max": 2
+			},
 			"dvHeadCutP90Ms": {
 				"max": 727
 			},
@@ -69,7 +72,8 @@
 	"notes": {
 		"ratchet": "Every limit is what the newest honesty round achieves, with no slack. Each file or transmission it still gets wrong is a named exception below. An exception that no longer occurs fails the run: remove it, so the limits only tighten.",
 		"capture": "The capture limits and the capture exception are calibrated on the reference labelled capture set (18 ten-second captures of one land-mobile band, run as one session). Another capture set needs its own file (--thresholds). A capture exception matches by kind and label only: pinning its channel would put a real frequency in this public file.",
-		"digital-voice": "The dv limits score the digital voice scenes (truth-dv.ts) on provisional, modelled line timings (scripts/fixtures/dv-latency-seeds.mjs): 19 DMR overs. Today's adapter starts a call at its first decoded embedded LC (head cut p90 727 ms), one busy slot splits the other's call (2), and no call has a recording (19). Ratchet: lower them as the lifecycle improves; rerun when the in-image baseline replaces the seeds."
+		"digital-voice": "The dv limits score the digital voice scenes (truth-dv.ts) on provisional, modelled line timings (scripts/fixtures/dv-latency-seeds.mjs): 19 DMR overs. Today's adapter starts a call at its first decoded embedded LC (head cut p90 727 ms), one busy slot splits the other's call (2), hang-time idles merge the two overs of the repeater scene without a terminator into one call (2), and no call has a recording (19). Ratchet: lower them as the lifecycle improves; rerun when the in-image baseline replaces the seeds.",
+		"digital-voice-gaps": "dvRecordingMissing is a phase-1 placeholder: the DV scenes give the adapter no recording directory, so every clear over counts as missing until they do. Encrypted overs are not covered yet: every scene sends clear voice."
 	},
 	"exceptions": [
 		{

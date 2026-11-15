@@ -85,14 +85,25 @@ export function parseDvSeed(path: string, text: string): DvSeed {
 	return parsed.data
 }
 
-/** Every seed of `dir`, by file name. */
+/**
+ * Every seed of `dir`, by file name. Two seeds of one scene (so one case
+ * name, which `--only` and the exceptions match by) fail the load.
+ */
 export function loadDvCases(dir = DV_SEED_DIR): DvCase[] {
+	const files = new Map<string, string>()
 	return readdirSync(dir)
 		.filter(f => f.startsWith(DV_SEED_PREFIX) && f.endsWith(".json"))
 		.sort()
 		.map(f => {
 			const seed = parseDvSeed(join(dir, f), readFileSync(join(dir, f), "utf8"))
-			return { name: `dv-${seed.scene}`, seed }
+			const name = `dv-${seed.scene}`
+			const first = files.get(name)
+			if (first !== undefined)
+				throw new Error(
+					`${join(dir, f)}: case ${name} is already ${first}'s: one seed per scene`,
+				)
+			files.set(name, f)
+			return { name, seed }
 		})
 }
 

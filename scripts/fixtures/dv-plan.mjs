@@ -330,7 +330,11 @@ export const DV_LEAD_MS = 1000
 export const DV_APART_MS = 5000
 /** A repeater's hang time in the repeater scenes (design: 3 s). */
 export const DV_HANG_MS = 3000
-/** A second radio's identities (the "other radio" gaps, slot 2). */
+/**
+ * A second radio's identities: every other over of the "other radio" gaps
+ * scenes (on slot 1, the same slot as the first radio), and the slot 2 over
+ * of the two-slot repeater scene.
+ */
 export const DV_OTHER = { talkgroup: 4322, source: 7_654_321 }
 
 /** Overs back to back, `apart` (one gap, or one per pair) from each other. */
