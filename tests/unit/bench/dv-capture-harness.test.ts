@@ -27,6 +27,7 @@ import {
 	DVCAP_READY,
 	DVCAP_ERRORS_HZ,
 	DVCAP_PHASES,
+	DV_GRID_ABORT_STREAK,
 	LEAD_MS,
 	POINT_FIXED_S,
 	POINT_PER_SCENE_S,
@@ -479,9 +480,10 @@ describe("measureDvPoint with doubles", () => {
 		expect(r.overs[0]!.startMs).toBeCloseTo(600 + 1.7 + LEAD_MS, 0)
 		expect(r.rows.map(x => x.calls)).toEqual([1, 1])
 		for (const row of r.rows) {
-			// The double prints the IDs one superframe in.
-			expect(row.headCutMs!).toBeGreaterThanOrEqual(360 - 25)
-			expect(row.headCutMs!).toBeLessThan(360 + 250)
+			// The double prints the IDs one superframe in; the call is
+			// back-dated to its first voice sync, printed at key-up (call-first).
+			expect(row.headCutMs!).toBeGreaterThanOrEqual(-25)
+			expect(row.headCutMs!).toBeLessThan(250)
 			// And ends at its terminator line, about 50 ms after key-down.
 			expect(row.endErrMs!).toBeGreaterThan(0)
 			expect(row.endErrMs!).toBeLessThan(400)
@@ -669,6 +671,81 @@ describe("measureDvPoint with doubles", () => {
 			rmSync(dir, { recursive: true, force: true })
 		}
 	}, 60_000)
+
+	it("stops after DV_GRID_ABORT_STREAK (3) consecutive identical failures, not after other or interrupted ones", async () => {
+		expect(DV_GRID_ABORT_STREAK).toBe(3)
+		const dir = mkdtempSync(join(tmpdir(), "dv-grid-"))
+		const out = join(dir, "capture.md")
+		const spec = (cnrDb: number): DvPointSpec => ({
+			scene: SCENE,
+			variant: "baseline",
+			cnrDb,
+			errorHz: 0,
+			phase: 0,
+			seed: cnrDb,
+		})
+		const grid = [10, 12, 15, 20, 30].map(spec)
+		try {
+			const same = await runDvGrid(grid, {
+				measure: () => Promise.reject(new Error("no image")),
+				out,
+				frequencyHz: 433_162_500,
+			})
+			// The third identical failure stops the run: 2 points never ran.
+			expect(same.points).toHaveLength(3)
+			expect(same.failed).toHaveLength(3)
+			expect(same.aborted).toBe("no image")
+			// Two alike, then another error, then two alike again: never three in a row.
+			const errors = ["a", "a", "b", "a", "a"]
+			let k = 0
+			const mixed = await runDvGrid(grid, {
+				measure: () => Promise.reject(new Error(errors[k++])),
+				out,
+				frequencyHz: 433_162_500,
+			})
+			expect(mixed.points).toHaveLength(5)
+			expect(mixed.aborted).toBeUndefined()
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	})
+
+	it("counts a point whose decoder was killed by a signal in the summary row", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "dv-grid-"))
+		const out = join(dir, "capture.md")
+		const at = (cnrDb: number): DvPointSpec => ({
+			scene: SCENE,
+			variant: "baseline",
+			cnrDb: 20,
+			errorHz: 0,
+			phase: cnrDb,
+			seed: cnrDb,
+		})
+		try {
+			const exits = ["SIGSEGV", "exit 3", undefined]
+			let k = 0
+			await runDvGrid([at(0), at(0.25), at(0.5)], {
+				measure: s => {
+					const exit = exits[k++]
+					return Promise.resolve({
+						spec: s,
+						rows: [],
+						overs: [],
+						lines: [],
+						...(exit === undefined ? {} : { exit }),
+					})
+				},
+				out,
+				frequencyHz: 433_162_500,
+			})
+			// One of three points signalled; a non-zero exit is not abnormal.
+			expect(readFileSync(out, "utf8")).toMatch(
+				/^\| double \| baseline \| 20 dB \| 0 Hz \| 0 \|.* \| 1 \|$/m,
+			)
+		} finally {
+			rmSync(dir, { recursive: true, force: true })
+		}
+	})
 
 	it("fails a point whose recorded seed the scorecard would refuse", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "dv-grid-"))

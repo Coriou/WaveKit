@@ -32,6 +32,12 @@ export interface DigitalVoiceCall {
 	slot: number | null
 	/** Encrypted calls are never decoded: the stream stays silent. */
 	encrypted: boolean
+	/**
+	 * false: the call started on its voice frames before its link control said
+	 * whether it is encrypted, so it is NOT clear (treat as encrypted); true
+	 * once known (`encrypted` then says which). Absent: known (legacy).
+	 */
+	encryptionKnown?: boolean
 	/** true from call_start until call_end. */
 	active: boolean
 	/** ISO 8601 */

@@ -584,7 +584,20 @@ export class AutoListenRouter extends EventEmitter {
 			this.invalidate(v)
 			return
 		}
-		if (v.coverage === "yes" && c !== null && c.active) v.admit(pcm, now)
+		// A call whose encryption is not known yet (`encryptionKnown` present and
+		// not true, call-first) is not clear: its voice is not admitted.
+		if (
+			v.coverage === "yes" &&
+			c !== null &&
+			c.active &&
+			!(
+				call !== null &&
+				"encryptionKnown" in call &&
+				call.encryptionKnown !== undefined &&
+				call.encryptionKnown !== true
+			)
+		)
+			v.admit(pcm, now)
 		else v.flush(now)
 	}
 

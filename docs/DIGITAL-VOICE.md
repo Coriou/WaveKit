@@ -119,9 +119,16 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   played but logged once: it means the mode or output format was overridden.
 - **Call state**: the decoder's `call_start` / `call_end` stay authoritative.
   dsd-fme publishes a `voice-call` event in the same tick as each of them
-  (`emitOutput`), plus one when a running call turns out encrypted. The stream
-  maps these to `digital-voice:call` (`decoderId`, `callId`, `protocol`,
-  `talkgroup`, `source`, `slot`, `encrypted`, `active`, `startedAt`, `endedAt`).
+  (`emitOutput`), plus one when a running call turns out encrypted or learns it
+  is clear. The stream maps these to `digital-voice:call` (`decoderId`, `callId`,
+  `protocol`, `talkgroup`, `source`, `slot`, `encrypted`, `encryptionKnown`,
+  `active`, `startedAt`, `endedAt`).
+- **Encryption not known yet**: a DMR or P25 call starts on its voice frames,
+  before its link control says whether it is encrypted
+  ([DECODER-GUIDE.md](DECODER-GUIDE.md), call lifecycle), and carries
+  `encryptionKnown: false` until it does (absent means known). Such a call is not
+  clear: the auto route (`/auto`) admits none of its voice while the field is
+  present and not `true`, and admits it once the call is known clear.
 - **Encryption**: DMR from the voice link control line, where `dmr_flco.c`
   appends `Encrypted ` after `TGT=… SRC=…` (only on a line with TGT/SRC, so
   `Slot N - Encrypted PDU` data bursts do not count), or from a non-zero

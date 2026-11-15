@@ -8460,6 +8460,11 @@ Optional call metadata, present only when dsd-fme reported it:
 (`{ crc, fec }` counts). A malformed optional field is dropped and counted; the
 call is still published.
 
+`encryptionKnown` (optional): `false` while a call that started on its voice
+frames, before its link control said whether it is encrypted, is not known to be
+clear: treat it as encrypted. It turns `true` (with `encrypted` set) in an update
+once known; absent means known from the start.
+
 #### digital-voice:status
 
 On the `digital-voice` channel: the full `GET /api/digital-voice/status` body,

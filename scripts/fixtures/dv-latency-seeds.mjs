@@ -39,6 +39,7 @@ export const DV_SEED_SCENES = [
 	"dmr-repeater-gaps-same",
 	"dmr-repeater-hang-no-tlc",
 	"dmr-repeater-two-slots",
+	"dmr-direct-rekey-no-tlc",
 ]
 
 const BURST_MS = 27.5
@@ -143,6 +144,7 @@ export function dmrSeed(scene) {
 			terminator: o.terminator,
 			clear: true,
 			ids: o.ids,
+			nominalMs: o.nominalMs,
 		})),
 		lines: lines.map(l => ({
 			atMs: Math.round(l.atMs * 10) / 10,

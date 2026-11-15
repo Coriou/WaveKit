@@ -96,7 +96,11 @@ dsd-fme at real time and scores the adapter's calls per over (`WAVEKIT_DVCAP=1`,
 core image). `dv-latency-seeds.mjs` writes the line timings the truth scorecard's
 digital voice scenes replay (`tests/mocks/fixtures/synthetic/dv-latency-*.json`). They
 are provisional: they model the current adapter's inputs, not a recorded run. A capture
-run with `WAVEKIT_DVCAP_LINES=<dir>` writes recorded ones in the same format.
+run with `WAVEKIT_DVCAP_LINES=<dir>` writes recorded ones in the same format. Each over
+carries `nominalMs`, the length the plan asked, so the scorecard's `dvMissedLong` counts
+missed overs asked for 1 s or more (gated at 0). A grid run stops after three
+consecutive points fail with the same error, and its summary rows count the points
+whose decoder was killed by a signal.
 
 When the recorded baseline is committed, delete the provisional
 `dv-latency-*.json` seeds in the same commit (a provisional seed left beside

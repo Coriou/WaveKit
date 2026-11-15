@@ -8,6 +8,7 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
 	DV_FRAME_MS,
+	DV_LONG_OVER_MS,
 	HOLD_MIN_MS,
 	MATCH_LEAD_MS,
 	MATCH_TAIL_MS,
@@ -278,6 +279,27 @@ describe("scoreOvers", () => {
 	})
 })
 
+describe("summarise missedLong", () => {
+	it("counts a missed over asked for DV_LONG_OVER_MS (1 000 ms) or more, not one asked for less or unknown", () => {
+		expect(DV_LONG_OVER_MS).toBe(1000)
+		// No call at all: every over is missed.
+		const rows = scoreOvers(
+			[
+				over(0, 0, 990, { nominalMs: 999 }),
+				over(1, 2000, 2990, { nominalMs: 1000 }),
+				over(2, 4000, 6000, { nominalMs: 2000 }),
+				over(3, 7000, 9000),
+			],
+			[],
+			[],
+			() => false,
+		)
+		const s = summarise(rows)
+		expect(s.missed).toBe(4)
+		expect(s.missedLong).toBe(2)
+	})
+})
+
 describe("percentile", () => {
 	it("is the nearest rank", () => {
 		expect(percentile([], 90)).toBeNull()
@@ -337,7 +359,7 @@ describe("dvTable", () => {
 		const lines = table.split("\n")
 		expect(lines[0]).toMatch(/^\| Scene \| Variant \| CNR/)
 		expect(lines[2]).toBe(
-			"| s | baseline | 20 dB | 0 Hz | 0 | 4 | 100.0 % | 0 | 0 | 0 | 700 / 700 | 40 / 400 | 720 | 10.0 % |",
+			"| s | baseline | 20 dB | 0 Hz | 0 | 4 | 100.0 % | 0 | 0 | 0 | 700 / 700 | 40 / 400 | 720 | 10.0 % | 0 |",
 		)
 		expect(
 			lines.filter(l => l.startsWith("| s | baseline | 20 dB")),
@@ -392,12 +414,13 @@ const T = (lines: [number, string][]): DvLine[] =>
 	lines.map(([atMs, text]) => ({ atMs, text }))
 
 describe("replayDvLines", () => {
-	it("starts a DMR call at its first TG/SRC line and ends it at the terminator", () => {
+	it("starts a DMR call back-dated to its first voice sync, IDs attached, and ends it at the terminator", () => {
 		const calls = replayDvLines(
 			T([
 				[100, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
 				[420, " SLOT 1 TGT=9 SRC=100 Group Call "],
-				[780, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
+				// One superframe (360 ms) on from the first sync: the same over.
+				[820, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
 				[1500, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC "],
 				[1500, " SLOT 1 TGT=9 SRC=100 Group Call "],
 			]),
@@ -405,7 +428,7 @@ describe("replayDvLines", () => {
 		)
 		expect(calls).toEqual([
 			expect.objectContaining({
-				startedAtMs: 420,
+				startedAtMs: 100,
 				endedAtMs: 1500,
 				talkgroup: 9,
 				source: 100,
@@ -422,13 +445,16 @@ describe("replayDvLines", () => {
 			T([
 				[100, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
 				[420, " SLOT 1 TGT=9 SRC=100 Group Call "],
-				[780, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
+				// One superframe (360 ms) on from the first sync: the same over.
+				[820, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
 				[1140, " SLOT 1 TGT=9 SRC=100 Group Call "],
 			]),
 			"auto",
 		)
 		expect(calls).toHaveLength(1)
 		expect(calls[0]!.timeout).toBe(true)
+		// Back-dated to the first sync, ended at the last voice line.
+		expect(calls[0]).toMatchObject({ startedAtMs: 100, endedAtMs: 1140 })
 		// 4 000 ms timeout + 500 ms timer < DV_IDLE_MS.
 		expect(DV_IDLE_MS).toBeGreaterThan(4000 + 500)
 	})
@@ -442,6 +468,7 @@ describe("truth DV scenes", () => {
 			"dv-dmr-direct-gaps-other",
 			"dv-dmr-direct-lengths",
 			"dv-dmr-direct-no-terminator",
+			"dv-dmr-direct-rekey-no-tlc",
 			"dv-dmr-repeater-gaps-same",
 			"dv-dmr-repeater-hang-no-tlc",
 			"dv-dmr-repeater-two-slots",
@@ -458,33 +485,40 @@ describe("truth DV scenes", () => {
 		expect(() => parseDvSeed("x.json", "{}")).toThrow(/x\.json: version/)
 	})
 
-	it("score today's adapter on the provisional seeds", () => {
+	it("score the call-first adapter on the provisional seeds", () => {
 		const by = Object.fromEntries(
 			cases.map(c => [c.name, summarise(runDvCase(c))]),
 		)
-		// Direct: the first decoded embedded LC starts the call, 727 ms after
-		// key-up: too late for the 0.5 s over (a call holding 200 ms of it, its
-		// half, 250 ms, is more than the 0.5 - 0.727 s left), so it is missed.
+		// Direct: the call starts on the over's second clean voice sync,
+		// back-dated to its first, so even the 0.5 s over (voice sync and
+		// terminator) is held by exactly one call.
 		expect(by["dv-dmr-direct-lengths"]).toMatchObject({
 			overs: 5,
-			exactlyOne: 4,
-			missed: 1,
+			exactlyOne: 5,
+			missed: 0,
+			missedLong: 0,
 		})
-		const missed = cases.flatMap(c =>
-			runDvCase(c)
-				.filter(r => r.missed)
-				.map(r => `${c.name} ${r.index} ${r.terminator}`),
+		expect(cases.flatMap(c => runDvCase(c).filter(r => r.missed))).toEqual([])
+		// The lost header burst (60) + 27.5 + 40 ms of line latency (dv-latency-seeds.mjs).
+		expect(by["dv-dmr-direct-lengths"]!.headCutP90Ms).toBeCloseTo(127.5, 0)
+		// Hang-time idles no longer hold a call whose terminator was missed.
+		expect(by["dv-dmr-repeater-hang-no-tlc"]).toMatchObject({
+			merged: 0,
+			exactlyOne: 2,
+		})
+		// Two busy slots: one call per slot, concurrent, no split.
+		expect(by["dv-dmr-repeater-two-slots"]).toMatchObject({
+			splits: 0,
+			exactlyOne: 2,
+		})
+		// The modelled re-key's first sync is on the lost over's superframe
+		// grid and its header is lost: nothing in the lines splits it.
+		expect(by["dv-dmr-direct-rekey-no-tlc"]).toMatchObject({ merged: 2 })
+		// Without a terminator the call ends at its last voice line (40 ms latency).
+		expect(by["dv-dmr-direct-no-terminator"]!.endErrNoTermP90Ms).toBeCloseTo(
+			40,
+			-1,
 		)
-		expect(missed).toEqual([
-			"dv-dmr-direct-lengths 0 true",
-			"dv-dmr-direct-no-terminator 0 false",
-		])
-		// 60 + 360 + 4 x 60 + 27.5 + 40 ms of line latency (dv-latency-seeds.mjs).
-		expect(by["dv-dmr-direct-lengths"]!.headCutP90Ms).toBeCloseTo(727.5, 0)
-		// Hang-time idles refresh a call whose terminator was missed: one call, two overs.
-		expect(by["dv-dmr-repeater-hang-no-tlc"]).toMatchObject({ merged: 2 })
-		// Two busy slots: slot 1's call is split by slot 2's link control.
-		expect(by["dv-dmr-repeater-two-slots"]).toMatchObject({ splits: 2 })
 	})
 
 	it("total into the scorecard and pass the checked-in limits", () => {
@@ -502,27 +536,29 @@ describe("truth DV scenes", () => {
 		// Only the DV scenes: the other synthetic minimums do not apply.
 		const card = scorecard(scores, limits, { subset: true })
 		expect(card.byKind.synthetic).toMatchObject({
-			dvOvers: 19,
-			dvMissed: 2,
-			dvSplit: 2,
+			dvOvers: 21,
+			dvMissed: 0,
+			dvMissedLong: 0,
+			dvSplit: 0,
 			dvMerged: 2,
-			dvHeadCutP90Ms: 727,
+			dvHeadCutP90Ms: 127,
 			dvEndErrP90Ms: 40,
-			dvRecordingMissing: 19,
+			dvRecordingMissing: 21,
 		})
 		expect(card.failures).toEqual([])
 		expect(formatScorecardLine(card)).toContain(
-			"digital voice 19 overs: missed 2, split 2, merged 2, head cut p90 727 ms, end error p90 40 ms, no recording 19",
+			"digital voice 21 overs: missed 0 (long 0), split 0, merged 2, head cut p90 127 ms, end error p90 40 ms, no recording 21",
 		)
 		// The miss and end error ratchets: at their limits they pass, past them they fail.
-		expect(limits.limits.synthetic?.["dvMissed"]).toEqual({ max: 2 })
+		expect(limits.limits.synthetic?.["dvMissed"]).toEqual({ max: 0 })
+		expect(limits.limits.synthetic?.["dvMissedLong"]).toEqual({ max: 0 })
 		expect(limits.limits.synthetic?.["dvEndErrP90Ms"]).toEqual({ max: 40 })
 		const late = scorecard(
 			[
 				...scores,
 				withTotals(
 					dvCaseScore(cases[0]!, [
-						// 3 more timed overs 5 s late: 3 of 18 timed end errors (rank 17 is 5 000 ms) move the p90.
+						// 3 more timed overs 5 s late: 3 of 22 timed end errors (rank 20 is 5 000 ms) move the p90.
 						...[1, 2, 3].map(() => ({
 							...runDvCase(cases[0]!)[1]!,
 							endErrMs: 5000,
@@ -535,9 +571,11 @@ describe("truth DV scenes", () => {
 			limits,
 			{ subset: true },
 		)
-		expect(late.byKind.synthetic?.dvMissed).toBe(3)
+		// The missed copy was asked for 2 s: it is long too.
+		expect(late.byKind.synthetic?.dvMissed).toBe(1)
+		expect(late.byKind.synthetic?.dvMissedLong).toBe(1)
 		expect(late.failures.map(f => f.metric).sort()).toEqual(
-			["dvEndErrP90Ms", "dvMissed"].sort(),
+			["dvEndErrP90Ms", "dvMissed", "dvMissedLong"].sort(),
 		)
 		// One more split than the ratchet allows fails.
 		const worse = scorecard(

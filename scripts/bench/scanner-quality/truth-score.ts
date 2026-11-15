@@ -148,6 +148,11 @@ export interface Totals {
 	dvOvers: number
 	/** Overs no call holds by min(HOLD_MIN_MS, half the over) of overlap (dv-metrics.ts). */
 	dvMissed: number
+	/**
+	 * Missed overs the plan asked to last at least DV_LONG_OVER_MS (1 000 ms;
+	 * seeds without nominalMs: none count). The acceptance bar is 0.
+	 */
+	dvMissedLong: number
 	/** Extra calls of an over (calls - 1, summed). */
 	dvSplit: number
 	/** Overs whose call also holds another over. */
@@ -333,6 +338,7 @@ const emptyTotals = (): Totals => ({
 	excepted: 0,
 	dvOvers: 0,
 	dvMissed: 0,
+	dvMissedLong: 0,
 	dvSplit: 0,
 	dvMerged: 0,
 	dvHeadCutP90Ms: 0,
@@ -346,6 +352,7 @@ function dvTotals(rows: readonly DvOverScore[]): Partial<Totals> {
 	return {
 		dvOvers: s.overs,
 		dvMissed: s.missed,
+		dvMissedLong: s.missedLong,
 		dvSplit: s.splits,
 		dvMerged: s.merged,
 		dvHeadCutP90Ms: Math.round(s.headCutP90Ms ?? 0),
@@ -508,6 +515,7 @@ function addTotals(a: Totals, b: Totals): Totals {
 		excepted: a.excepted + b.excepted,
 		dvOvers: a.dvOvers + b.dvOvers,
 		dvMissed: a.dvMissed + b.dvMissed,
+		dvMissedLong: a.dvMissedLong + b.dvMissedLong,
 		dvSplit: a.dvSplit + b.dvSplit,
 		dvMerged: a.dvMerged + b.dvMerged,
 		// A percentile does not add: scorecard() recomputes it from the rows.
@@ -623,7 +631,7 @@ export function formatScorecardLine(s: Scorecard): string {
 		`${t.excepted} excepted, ` +
 		`missed voice ${t.missedVoice}/${t.voiceTransmissions} (split ${t.splitVoice}), ` +
 		`identify ${t.identifyRight}/${t.labelledSignals} right, ${t.identifyWrong} wrong, ` +
-		`digital voice ${t.dvOvers} overs: missed ${t.dvMissed}, split ${t.dvSplit}, merged ${t.dvMerged}, ` +
+		`digital voice ${t.dvOvers} overs: missed ${t.dvMissed} (long ${t.dvMissedLong}), split ${t.dvSplit}, merged ${t.dvMerged}, ` +
 		`head cut p90 ${t.dvHeadCutP90Ms} ms, end error p90 ${t.dvEndErrP90Ms} ms, no recording ${t.dvRecordingMissing}: ${verdict}`
 	)
 }

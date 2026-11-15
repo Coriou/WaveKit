@@ -49,6 +49,8 @@ const SeedSchema = z
 						terminator: z.boolean(),
 						clear: z.boolean(),
 						ids: z.record(z.string(), z.union([z.string(), z.number()])),
+						/** The length the plan asked (dv-plan.mjs SentOver nominalMs). */
+						nominalMs: ms.positive().optional(),
 					})
 					.strict()
 					.refine(o => o.endMs > o.startMs, "an over ends after it starts"),

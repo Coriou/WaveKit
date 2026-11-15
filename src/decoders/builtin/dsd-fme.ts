@@ -368,6 +368,12 @@ export interface DsdFmeVoiceCallState {
 	source: number | null
 	slot: number | null
 	encrypted: boolean
+	/**
+	 * false: the call started before its link control said whether it is
+	 * encrypted (call-first), so it is not clear yet; true once that is known
+	 * (`encrypted` then says which). Absent: known from the start.
+	 */
+	encryptionKnown?: boolean
 	active: boolean
 	startedAt: string
 	endedAt?: string
@@ -478,7 +484,59 @@ interface DsdFmeCallState {
 	quality: CallQuality
 	// Flags
 	flags: CallFlags
+	/** Its call_start went out (callStartEvent). */
+	announced?: boolean | undefined
+	/** Started on its voice frames (startOnFrames), not on an identity. */
+	onFrames?: boolean | undefined
+	/**
+	 * false: started on its voice frames before a link control said whether
+	 * it is encrypted; true: learned since. Absent: known from the start.
+	 */
+	encryptionKnown?: boolean | undefined
 }
+
+/** The terminator's own link control, expected right after it (TERMINATOR_TRAILER_MS). */
+interface CallTrailer {
+	protocol: DsdFmeProtocol
+	talkgroup: number | null
+	source: number | null
+	untilMs: number
+}
+
+/**
+ * The run of voice frame syncs of one protocol on one lane, each at most
+ * SYNC_CHAIN_MS of the protocol after the previous: the frames an over
+ * printed before its call starts. `clean` counts the frames without an error.
+ */
+interface SyncChain {
+	protocol: NonNullable<DsdFmeProtocol>
+	startMs: number
+	lastMs: number
+	clean: number
+	/** DMR colour code / P25 NAC the chain's syncs printed (a frame printing another starts a new chain). */
+	tag?: string | undefined
+}
+
+/**
+ * One call lane: DMR repeater slot 1 or 2, or 0 for every other line (one
+ * channel). Each lane runs its own call, so two busy TDMA slots give two
+ * concurrent calls.
+ */
+interface CallLane {
+	callState: DsdFmeCallState | null
+	pendingCall: PendingCall | null
+	recentlyTerminated: CallTrailer | null
+	chain: SyncChain | null
+	lastVoiceSyncMs: number | undefined
+}
+
+const emptyLane = (): CallLane => ({
+	callState: null,
+	pendingCall: null,
+	recentlyTerminated: null,
+	chain: null,
+	lastVoiceSyncMs: undefined,
+})
 
 /**
  * Configuration options for the DSD-FME decoder.
@@ -580,6 +638,55 @@ const CALL_START_DELAY_MS = 100
 /** Prune per-call recordings this long after a call ends (dsd-fme closes the file). */
 const RECORDING_PRUNE_DELAY_MS = 2000
 
+/**
+ * Call-first: the longest step between two voice frame syncs of one over
+ * that still chains them (SyncChain), per protocol: two of its sync periods
+ * (one sync may be lost between them) plus 40 ms of line latency jitter.
+ * DMR one sync per 360 ms voice superframe per slot: 2 × 360 + 40 = 760;
+ * P25 phase 1 one HDU/LDU per 180 ms: 2 × 180 + 40 = 400; D-STAR one sync
+ * per 420 ms superframe: 2 × 420 + 40 = 880; YSF 100 ms frames: 2 × 100 +
+ * 40 = 240; NXDN48 and dPMR 80 ms frames: 2 × 80 + 40 = 200 (NXDN96's 40 ms
+ * frames fit too).
+ */
+export const SYNC_CHAIN_MS: Readonly<
+	Partial<Record<NonNullable<DsdFmeProtocol>, number>>
+> = {
+	dmr: 760,
+	p25p1: 400,
+	dstar: 880,
+	ysf: 240,
+	nxdn48: 200,
+	nxdn96: 200,
+	dpmr: 200,
+}
+
+/**
+ * A voice frame after at least this long without voice from the ongoing call
+ * may be a re-key (a new over): DMR when it is off the call's superframe
+ * grid or a voice LC header, P25 when it is a header (HDU).
+ */
+export const REKEY_GAP_MS = 200
+
+/** DMR voice superframe: 6 bursts of 60 ms per slot. */
+export const DMR_SUPERFRAME_MS = 360
+
+/**
+ * A DMR voice sync within this of the ongoing call's 360 ms superframe grid
+ * is the same over: half a 60 ms TDMA frame. An over starts on the 60 ms
+ * frame grid, so a re-key lands a multiple of 60 ms off (60 to 300 ms mod
+ * 360), at least 60 - 30 = 30 ms beyond this; line jitter up to 30 ms
+ * keeps a faded over whole.
+ */
+export const DMR_GRID_TOLERANCE_MS = 30
+
+/** A DMR sync line's burst type (dmr_dburst.c labels after the last "|"). */
+const DMR_BURST = /\|\s*(?<burst>VLC|VC[1-6*]|TLC)(?=\s|$)/
+/** A P25 phase 1 voice over's frame (header or voice): HDU, LDU1, LDU2. */
+const P25_VOICE_FRAME = /\b(?<duid>HDU|LDU1|LDU2)\b/
+const DSTAR_VOICE_SYNC = /\bSync:\s*[+-]DSTAR (?:VOICE|HEADER)\b/
+/** An error printed on the line (the frame did not decode clean). */
+const LINE_ERR = /\b(?:CRC|FEC)(?:16|32)?\s+ERR\b/i
+
 /** Algorithm ids that mean "no encryption" (P25 0x80, DMR/none 0x00). */
 function isClearAlgorithm(alg: string): boolean {
 	const value = parseInt(alg, 16)
@@ -633,6 +740,7 @@ interface CallEventData {
 	startedAt?: string
 	endedAt?: string
 	encrypted?: boolean
+	encryptionKnown?: boolean
 	protocol?: DsdFmeProtocol
 	talkgroup?: number | null
 	source?: number | null
@@ -691,8 +799,6 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private nxdnVcallNext = false
 	/** VCALL unit IDs of the line being parsed (nxdnVcallIds). */
 	private nxdnLineIds: Record<string, string> | undefined = undefined
-	/** The call whose call_start was emitted (checkPendingCallEmission). */
-	private announcedCallId: string | undefined = undefined
 	/** The last dPMR ID print and when it was read (handleDpmrLine). */
 	private dpmrLastPrint: { print: string; at: number } | undefined = undefined
 	private linkDmrCc = new Map<string, { cc: number; at: number }>()
@@ -726,12 +832,22 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private pruneTimer: NodeJS.Timeout | null = null
 	private pruning = false
 
-	private recentlyTerminated: {
-		protocol: DsdFmeProtocol
-		talkgroup: number | null
-		source: number | null
-		untilMs: number
-	} | null = null
+	private recentlyTerminated: CallTrailer | null = null
+
+	/** The current lane's voice frame sync chain and last DMR voice sync (ms). */
+	private chain: SyncChain | null = null
+	private lastVoiceSyncMs: number | undefined = undefined
+
+	/**
+	 * The lane whose call the fields above hold (useLane), and the other
+	 * lanes' calls. Lines of a DMR repeater (BS mode) go to their slot's lane,
+	 * every other line to lane 0.
+	 */
+	private laneKey = 0
+	private lanes = new Map<number, CallLane>()
+	/** The last DMR sync was BS mode, and the slot it bracketed. */
+	private dmrBs = false
+	private dmrBsSlot = 1
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -965,19 +1081,21 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.pruneTimer = null
 		}
 
-		// End any active or pending call before stopping
+		// End every lane's active or pending call before stopping
 		const now = new Date()
-		if (this.pendingCall) {
-			// Promote pending call to active and end it
-			this.callState = this.pendingCall.state
-			this.pendingCall = null
-		}
-		if (this.callState) {
-			const endEvent = this.endCall(now, true)
-			if (endEvent) {
-				this.emitOutput(endEvent)
+		this.forEachLane(() => {
+			if (this.pendingCall) {
+				// Promote pending call to active and end it
+				this.callState = this.pendingCall.state
+				this.pendingCall = null
 			}
-		}
+			if (this.callState) {
+				const endEvent = this.endCall(now, true)
+				if (endEvent) {
+					this.emitOutput(endEvent)
+				}
+			}
+		})
 
 		this.flushPendingDmrLink(false)
 		await super.stop()
@@ -999,7 +1117,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const encrypted = active
 			? data.encrypted === true
 			: data.flags?.encrypted === true
-		const live = this.callState?.callId === data.callId ? this.callState : null
+		const live = this.liveCall(data.callId)
 		const state: DsdFmeVoiceCallState = {
 			callId: data.callId,
 			protocol: data.protocol ?? null,
@@ -1007,6 +1125,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			source: data.source ?? null,
 			slot: data.slot ?? null,
 			encrypted,
+			...(data.encryptionKnown !== undefined
+				? { encryptionKnown: data.encryptionKnown }
+				: {}),
 			active,
 			startedAt: data.startedAt ?? output.timestamp.toISOString(),
 			...(data.endedAt !== undefined ? { endedAt: data.endedAt } : {}),
@@ -1029,6 +1150,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private markEncrypted(call: DsdFmeCallState): void {
 		if (call.flags.encrypted) return
 		call.flags.encrypted = true
+		if (call.encryptionKnown === false) call.encryptionKnown = true
 		this.logger.info(
 			{
 				callId: call.callId,
@@ -1037,14 +1159,34 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			},
 			"Encrypted call: voice stays muted",
 		)
-		if (call !== this.callState) return
+		this.publishCallUpdate(call)
+	}
+
+	/**
+	 * A call that started before its encryption was known (call-first) learned
+	 * it is clear: an announced one publishes the change (with the identities
+	 * that came with it) on "voice-call", so its voice may play from now on.
+	 */
+	private markKnown(call: DsdFmeCallState | null): void {
+		if (call?.encryptionKnown !== false) return
+		call.encryptionKnown = true
+		this.publishCallUpdate(call)
+	}
+
+	/** The running announced call's state on "voice-call" (encryption or identity learned). */
+	private publishCallUpdate(call: DsdFmeCallState): void {
+		if (call !== this.callState || call.announced !== true) return
+		const encrypted = call.flags.encrypted
 		const state: DsdFmeVoiceCallState = {
 			callId: call.callId,
 			protocol: call.protocol,
 			talkgroup: call.talkgroup,
 			source: call.source,
 			slot: call.slot ?? null,
-			encrypted: true,
+			encrypted,
+			...(call.encryptionKnown !== undefined
+				? { encryptionKnown: call.encryptionKnown }
+				: {}),
 			active: true,
 			startedAt: call.startTime.toISOString(),
 		}
@@ -1053,9 +1195,69 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			p25: call.p25,
 			nxdn: call.nxdn,
 			quality: call.quality,
-			encrypted: true,
+			encrypted,
 		})
 		this.emit("voice-call", state)
+	}
+
+	/** The announced call `callId` of any lane. */
+	private liveCall(callId: string): DsdFmeCallState | null {
+		if (this.callState?.callId === callId) return this.callState
+		for (const lane of this.lanes.values())
+			if (lane.callState?.callId === callId) return lane.callState
+		return null
+	}
+
+	/** Makes `key` the current lane: its call is in callState / pendingCall. */
+	private useLane(key: number): void {
+		if (key === this.laneKey) return
+		this.lanes.set(this.laneKey, {
+			callState: this.callState,
+			pendingCall: this.pendingCall,
+			recentlyTerminated: this.recentlyTerminated,
+			chain: this.chain,
+			lastVoiceSyncMs: this.lastVoiceSyncMs,
+		})
+		const next = this.lanes.get(key) ?? emptyLane()
+		this.lanes.delete(key)
+		this.callState = next.callState
+		this.pendingCall = next.pendingCall
+		this.recentlyTerminated = next.recentlyTerminated
+		this.chain = next.chain
+		this.lastVoiceSyncMs = next.lastVoiceSyncMs
+		this.laneKey = key
+	}
+
+	/** Runs `fn` on every lane in turn, then makes the current lane current again. */
+	private forEachLane(fn: () => void): void {
+		const back = this.laneKey
+		for (const key of [this.laneKey, ...this.lanes.keys()]) {
+			this.useLane(key)
+			fn()
+		}
+		this.useLane(back)
+	}
+
+	/**
+	 * The lane of a line: a DMR repeater (BS mode) line's slot (a sync line's
+	 * bracketed slot, an LC print's SLOT, else the last bracketed slot); 0 for
+	 * every other line (direct mode is one channel: its prints say SLOT 1).
+	 */
+	private lineLane(line: string): number {
+		const sync = SYNC_PATTERN.exec(line)
+		if (sync) {
+			if (sync.groups?.["proto"]?.toUpperCase() !== "DMR") return 0
+			const bracket = DMR_CURRENT_SLOT.exec(line)?.groups?.["slot"]
+			this.dmrBs = bracket !== undefined
+			if (bracket === undefined) return 0
+			this.dmrBsSlot = Number(bracket)
+			return this.dmrBsSlot
+		}
+		if (this.currentProtocol !== "dmr" || !this.dmrBs) return 0
+		const slot =
+			DMR_SLOT_WORD.exec(line)?.groups?.["slot"] ??
+			DMR_SLOT_INLINE.exec(line)?.groups?.["slot"]
+		return slot !== undefined ? Number(slot) : this.dmrBsSlot
 	}
 
 	/** Runs per-call recording retention after `delayMs` (debounced). */
@@ -1116,17 +1318,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (pending && nowMs - pending.at > CALL_TIMEOUT_MS)
 			this.flushPendingDmrLink(false)
 
-		// First, check if pending call should be promoted to active
-		const promotedEvent = this.checkPendingCallEmission(now, nowMs)
-		if (promotedEvent) {
-			this.emitOutput(promotedEvent)
-		}
+		this.forEachLane(() => {
+			// First, check if pending call should be promoted to active
+			const promotedEvent = this.checkPendingCallEmission(now, nowMs)
+			if (promotedEvent) {
+				this.emitOutput(promotedEvent)
+			}
 
-		// Then check for call timeout
-		const timeoutEvent = this.checkCallTimeout(now)
-		if (timeoutEvent) {
-			this.emitOutput(timeoutEvent)
-		}
+			// Then check for call timeout
+			const timeoutEvent = this.checkCallTimeout(now)
+			if (timeoutEvent) {
+				this.emitOutput(timeoutEvent)
+			}
+		})
 	}
 
 	/**
@@ -1141,6 +1345,16 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Check if delay has expired
 		if (nowMs < this.pendingCall.emitAfter) return null
+		// A call started on its voice frames alone is announced only once they
+		// span the false-positive minimum (endCall drops it otherwise).
+		const pending = this.pendingCall.state
+		if (
+			pending.onFrames === true &&
+			this.weakMetadata(pending) &&
+			pending.lastUpdate.getTime() - pending.startTime.getTime() <
+				(this.options.minCallDurationMs ?? MIN_CALL_DURATION_MS)
+		)
+			return null
 
 		// Promote pending call to active call
 		this.callState = this.pendingCall.state
@@ -1158,7 +1372,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		call: DsdFmeCallState,
 		timestamp: Date,
 	): DecoderOutput {
-		this.announcedCallId = call.callId
+		call.announced = true
 		this.logger.info(
 			{
 				protocol: call.protocol,
@@ -1177,6 +1391,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				callId: call.callId,
 				startedAt: call.startTime.toISOString(),
 				encrypted: call.flags.encrypted,
+				...(call.encryptionKnown !== undefined
+					? { encryptionKnown: call.encryptionKnown }
+					: {}),
 				protocol: call.protocol,
 				talkgroup: call.talkgroup,
 				source: call.source,
@@ -1521,13 +1738,29 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// STEP 1: Strip ANSI escape codes from colored output
 		const cleanLine = line.replace(ANSI_ESCAPE, "")
 
-		// STEP 2: Check for stale calls (timeout-based call end). Publish the
-		// end now and keep parsing: this line may start the next call.
-		const timeoutEvent = this.checkCallTimeout(now)
-		if (timeoutEvent) {
-			this.emitOutput(timeoutEvent)
+		// STEP 2: Check for stale calls (timeout-based call end) on every lane.
+		// Publish the end now and keep parsing: this line may start the next call.
+		this.forEachLane(() => {
+			const timeoutEvent = this.checkCallTimeout(now)
+			if (timeoutEvent) {
+				this.emitOutput(timeoutEvent)
+			}
+		})
+		// The line's call is its lane's (a DMR repeater slot, else lane 0).
+		this.useLane(this.lineLane(cleanLine))
+		try {
+			return this.parseLaneLine(cleanLine, now, nowMs)
+		} finally {
+			this.useLane(0)
 		}
+	}
 
+	/** parseOutput's steps 3 to 7, on the line's lane. */
+	private parseLaneLine(
+		cleanLine: string,
+		now: Date,
+		nowMs: number,
+	): DecoderOutput | null {
 		// STEP 3: Track errors for quality metrics (rolling window)
 		this.updateErrorWindow(cleanLine, nowMs)
 
@@ -1553,6 +1786,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// STEP 4: Check for sync (protocol detection)
 		const syncResult = this.handleSync(cleanLine, now)
+		// STEP 4b: Call-first: a voice frame sync joins its lane's chain.
+		this.trackChain(cleanLine, nowMs)
 		if (syncResult !== undefined) {
 			return syncResult
 		}
@@ -1713,8 +1948,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// parsed as the new protocol's: a "+DSTAR HEADER" line's checked
 		// callsign must not be lost (one arrives only every few seconds).
 		if (newProtocol !== this.currentProtocol) {
-			const ended = this.endOngoingCall(now)
-			if (ended) this.emitOutput(ended)
+			this.forEachLane(() => {
+				const ended = this.endOngoingCall(now)
+				if (ended) this.emitOutput(ended)
+			})
 		}
 
 		// Update protocol tracking
@@ -1799,7 +2036,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				return this.endOngoing("dstar", now)
 			if (this.currentProtocol === "ysf" && YSF_FICH_OK.test(line))
 				return this.handleYsfLine(line, now)
-			this.touchOngoing(now)
+			this.touchOngoing(now, line)
 			return null
 		}
 		switch (this.currentProtocol) {
@@ -1826,12 +2063,237 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 	}
 
-	/** Keeps the ongoing call of the current protocol from timing out. */
-	private touchOngoing(now: Date): void {
+	/**
+	 * Keeps the ongoing call of the current protocol from timing out. A DMR
+	 * call only on its own bursts (a voice burst sync or a slot print): a
+	 * repeater's idle and data bursts in hang time are not the call.
+	 */
+	private touchOngoing(now: Date, line: string): void {
+		const ongoing = this.ongoingCall(this.currentProtocol)
+		if (ongoing === null) return
+		if (
+			ongoing.protocol === "dmr" &&
+			!DMR_BURST.test(line) &&
+			!DMR_SLOT_WORD.test(line)
+		)
+			return
+		ongoing.lastUpdate = now
+	}
+
+	/** The lane's call (announced or pending) when it is of `protocol`. */
+	private ongoingCall(protocol: DsdFmeProtocol): DsdFmeCallState | null {
 		const ongoing = this.callState ?? this.pendingCall?.state ?? null
-		if (ongoing && ongoing.protocol === this.currentProtocol) {
-			ongoing.lastUpdate = now
+		return ongoing !== null && ongoing.protocol === protocol ? ongoing : null
+	}
+
+	/**
+	 * Call-first: adds a voice frame sync of the current protocol to the
+	 * lane's chain (SyncChain): DMR voice bursts (VLC, VC*, VC1 to VC6; a TLC
+	 * only extends a chain), P25 phase 1 HDU / LDU1 / LDU2 whose NID decoded,
+	 * D-STAR header and voice syncs, NXDN voice frames, every YSF and dPMR
+	 * sync. A sync more than SYNC_CHAIN_MS after the chain's last one, or one
+	 * printing another DMR colour code or P25 NAC, starts a new chain.
+	 */
+	private trackChain(line: string, nowMs: number): void {
+		const protocol = this.currentProtocol
+		if (protocol === null || !SYNC_PATTERN.test(line)) return
+		const window = SYNC_CHAIN_MS[protocol]
+		if (window === undefined) return
+		let tag: string | undefined
+		let extendOnly = false
+		if (protocol === "dmr") {
+			const burst = DMR_BURST.exec(line)?.groups?.["burst"]
+			if (burst === undefined) return
+			extendOnly = burst === "TLC"
+			const cc = DMR_COLOR_CODE.exec(line)?.groups?.["cc"]
+			tag = cc === undefined ? undefined : String(Number(cc))
+		} else if (protocol === "p25p1") {
+			if (!P25_VOICE_FRAME.test(line) || /\bduid:EE\b/.test(line)) return
+			tag = this.lastP25Nac
+		} else if (protocol === "dstar") {
+			if (!DSTAR_VOICE_SYNC.test(line)) return
+		} else if (protocol === "nxdn48" || protocol === "nxdn96") {
+			if (!/\bVOICE\b/i.test(line)) return
 		}
+		const clean = !LINE_ERR.test(line)
+		const chain = this.chain
+		const fresh =
+			chain !== null &&
+			chain.protocol === protocol &&
+			nowMs >= chain.lastMs &&
+			nowMs - chain.lastMs <= window &&
+			(tag === undefined || chain.tag === undefined || chain.tag === tag)
+		if (!fresh) {
+			this.chain = extendOnly
+				? null
+				: { protocol, startMs: nowMs, lastMs: nowMs, clean: clean ? 1 : 0, tag }
+			return
+		}
+		chain.lastMs = nowMs
+		chain.tag ??= tag
+		if (clean) chain.clean++
+	}
+
+	/** When the lane's chain of `protocol` (still running at `nowMs`) began, else undefined. */
+	private chainStart(
+		protocol: NonNullable<DsdFmeProtocol>,
+		nowMs: number,
+	): Date | undefined {
+		const chain = this.chain
+		const window = SYNC_CHAIN_MS[protocol]
+		if (
+			chain === null ||
+			window === undefined ||
+			chain.protocol !== protocol ||
+			nowMs < chain.lastMs ||
+			nowMs - chain.lastMs > window
+		)
+			return undefined
+		return new Date(chain.startMs)
+	}
+
+	/**
+	 * Call-first start: on the over's second clean voice frame (this line,
+	 * clean) the lane's call starts without identities, back-dated to the
+	 * chain's first sync. A single sync (noise) starts nothing. A DMR or P25
+	 * call does not know yet whether it is encrypted (`encryptionKnown:
+	 * false`) until its link control says.
+	 */
+	private startOnFrames(
+		protocol: "dmr" | "p25p1" | "dstar",
+		now: Date,
+		clean: boolean,
+	): void {
+		const chain = this.chain
+		const nowMs = now.getTime()
+		if (
+			!clean ||
+			chain === null ||
+			chain.protocol !== protocol ||
+			chain.lastMs !== nowMs ||
+			chain.clean < 2 ||
+			this.callState !== null ||
+			this.pendingCall !== null
+		)
+			return
+		// D-STAR calls are keyed 0 / 0 (callsigns attach); DMR and P25 by IDs, unknown yet.
+		const id = protocol === "dstar" ? 0 : null
+		const p25: P25Metadata | undefined =
+			protocol === "p25p1" && this.lastP25Nac !== undefined
+				? { nac: this.lastP25Nac }
+				: undefined
+		const call = this.startPendingCall(
+			now,
+			nowMs,
+			protocol,
+			id,
+			id,
+			protocol === "dmr" && this.laneKey > 0 ? this.laneKey : undefined,
+			undefined,
+			p25,
+		)
+		call.onFrames = true
+		if (protocol !== "dstar") call.encryptionKnown = false
+	}
+
+	/**
+	 * A DMR sync line without IDs. Idle, CSBK and data bursts are not call
+	 * activity. A voice burst or terminator joins the ongoing call of the
+	 * lane, or starts one on the over's second clean frame (startOnFrames). A
+	 * voice burst after REKEY_GAP_MS without voice from the call that is a
+	 * voice LC header or off the call's superframe grid is a re-key: the call
+	 * ends at its last voice (no terminator) and this burst begins the next
+	 * over's chain.
+	 */
+	private handleDmrSync(line: string, now: Date): DecoderOutput | null {
+		const burst = DMR_BURST.exec(line)?.groups?.["burst"]
+		if (burst === undefined) return null
+		const nowMs = now.getTime()
+		const voice = burst !== "TLC"
+		const clean = !LINE_ERR.test(line)
+		const ongoing = this.ongoingCall("dmr")
+		if (ongoing === null) {
+			if (voice) {
+				// A voice burst after a terminator is the next over: the trailer is over.
+				this.recentlyTerminated = null
+				this.lastVoiceSyncMs = nowMs
+			}
+			this.startOnFrames("dmr", now, clean)
+			return null
+		}
+		if (voice && this.dmrRekey(ongoing, burst, nowMs)) {
+			const chain = this.chain
+			const ended = this.endOngoingCall(now, true)
+			this.chain = chain
+			this.lastVoiceSyncMs = nowMs
+			if (chain !== null && chain.lastMs === nowMs) {
+				chain.startMs = nowMs
+				chain.clean = clean ? 1 : 0
+			}
+			return ended
+		}
+		ongoing.lastUpdate = now
+		if (voice) this.lastVoiceSyncMs = nowMs
+		const cc = DMR_COLOR_CODE.exec(line)?.groups?.["cc"]
+		if (cc !== undefined && ongoing.dmr?.cc === undefined)
+			ongoing.dmr = { ...ongoing.dmr, cc: parseInt(cc, 10) }
+		return null
+	}
+
+	/** No identity: no talkgroup or source, no D-STAR or YSF callsign. */
+	private weakMetadata(call: DsdFmeCallState): boolean {
+		return (
+			(call.talkgroup === 0 || call.talkgroup === null) &&
+			(call.source === 0 || call.source === null) &&
+			call.dstar?.my === undefined &&
+			call.ysf?.callsign === undefined
+		)
+	}
+
+	/** Whether a DMR voice burst at `nowMs` re-keys (see handleDmrSync). */
+	private dmrRekey(
+		ongoing: DsdFmeCallState,
+		burst: string,
+		nowMs: number,
+	): boolean {
+		if (nowMs - ongoing.lastUpdate.getTime() < REKEY_GAP_MS) return false
+		if (burst === "VLC") return true
+		const last = this.lastVoiceSyncMs
+		if (last === undefined || nowMs < last) return false
+		const elapsed = nowMs - last
+		const k = Math.max(1, Math.round(elapsed / DMR_SUPERFRAME_MS))
+		return Math.abs(elapsed - k * DMR_SUPERFRAME_MS) > DMR_GRID_TOLERANCE_MS
+	}
+
+	/**
+	 * A P25 phase 1 HDU / LDU sync whose NID decoded joins the ongoing call or
+	 * starts one on the second (startOnFrames). A header after REKEY_GAP_MS
+	 * without voice from the call is the next over.
+	 */
+	private handleP25Frame(line: string, now: Date): DecoderOutput | null {
+		const duid = P25_VOICE_FRAME.exec(line)?.groups?.["duid"]
+		if (duid === undefined || /\bduid:EE\b/.test(line)) return null
+		const ongoing = this.ongoingCall("p25p1")
+		if (ongoing === null) {
+			this.startOnFrames("p25p1", now, !LINE_ERR.test(line))
+			return null
+		}
+		const nowMs = now.getTime()
+		if (
+			duid === "HDU" &&
+			nowMs - ongoing.lastUpdate.getTime() >= REKEY_GAP_MS
+		) {
+			const chain = this.chain
+			const ended = this.endOngoingCall(now, true)
+			this.chain = chain
+			if (chain !== null && chain.lastMs === nowMs) {
+				chain.startMs = nowMs
+				chain.clean = 1
+			}
+			return ended
+		}
+		ongoing.lastUpdate = now
+		return null
 	}
 
 	/** Only a following DMR sync can attest the previous burst tail. */
@@ -2165,23 +2627,18 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				slot,
 				dmrMeta,
 			)
+			// A checked link control says whether the call is encrypted (its
+			// service options): a call started on its voice frames learns it here.
 			if (encrypted) this.markDmrEncrypted(slot)
+			else this.markKnown(this.ongoingCall("dmr"))
 			return event
 		}
 		if (encrypted) this.markDmrEncrypted(slot)
+		else if (alg !== undefined) this.markKnown(this.ongoingCall("dmr"))
 
-		// Any DMR line (voice superframe, data burst) keeps the call alive.
-		const ongoing = this.callState ?? this.pendingCall?.state ?? null
-		if (ongoing && ongoing.protocol === "dmr") {
-			if (cc !== undefined && !ongoing.dmr?.cc) {
-				ongoing.dmr = { ...ongoing.dmr, cc }
-			}
-			if (slot !== undefined && ongoing.slot === undefined) {
-				ongoing.slot = slot
-			}
-			ongoing.lastUpdate = now
-		}
-
+		// Only the over's own voice bursts keep its call alive or start one
+		// (handleDmrSync): idle and data bursts do not.
+		if (SYNC_PATTERN.test(line)) return this.handleDmrSync(line, now)
 		return null
 	}
 
@@ -2206,6 +2663,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (alg !== undefined) call.p25 = { ...call.p25, alg }
 		if (keyId !== undefined) call.p25 = { ...call.p25, keyId }
 		if (alg !== undefined && !isClearAlgorithm(alg)) this.markEncrypted(call)
+		else if (alg !== undefined) this.markKnown(call)
 	}
 
 	/**
@@ -2213,6 +2671,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Requires tg+src to start a call.
 	 */
 	private handleP25P1Line(line: string, now: Date): DecoderOutput | null {
+		if (SYNC_PATTERN.test(line)) {
+			const framed = this.handleP25Frame(line, now)
+			if (framed) return framed
+		}
 		// The LCW print that carries talkgroup and source has no NAC of its
 		// own: the call takes the last sync line's (trackSyncState).
 		const lcw = P25_LCW_GROUP.exec(line)?.groups
@@ -2245,10 +2707,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					undefined,
 					p25.nac !== undefined || target !== undefined ? p25 : undefined,
 				)
-				// LCW service option bit 0x40 prints " Encrypted".
-				const call = this.callState ?? this.pendingCall?.state ?? null
-				if (DMR_ENCRYPTED.test(line) && call?.protocol === "p25p1")
-					this.markEncrypted(call)
+				// LCW service option bit 0x40 prints " Encrypted"; without it the
+				// call is known clear.
+				const call = this.ongoingCall("p25p1")
+				if (DMR_ENCRYPTED.test(line) && call !== null) this.markEncrypted(call)
+				else this.markKnown(call)
 				if (split && event) this.emitOutput(split)
 				return event ?? split
 			}
@@ -2480,13 +2943,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return split ?? event
 	}
 
-	/** Ends the ongoing call, announced or pending (a pending one starts first). */
-	private endOngoingCall(now: Date): DecoderOutput | null {
+	/**
+	 * Ends the ongoing call, announced or pending (a pending one starts
+	 * first); `noTerminator`: at its last line (endCall's timeout end).
+	 */
+	private endOngoingCall(
+		now: Date,
+		noTerminator = false,
+	): DecoderOutput | null {
 		if (!this.callState && this.pendingCall) {
 			this.callState = this.pendingCall.state
 			this.pendingCall = null
 		}
-		return this.endCall(now, false)
+		return this.endCall(now, noTerminator)
 	}
 
 	/** Ends (or drops, if not yet announced) the ongoing call of `protocol`. */
@@ -2498,6 +2967,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (ongoing?.protocol !== protocol) return null
 		if (this.callState === ongoing) return this.endCall(now, false)
 		this.pendingCall = null
+		this.chain = null
 		return null
 	}
 
@@ -2518,6 +2988,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (current === undefined || current === callsign) return null
 		if (this.callState === ongoing) return this.endCall(now, false)
 		this.pendingCall = null
+		this.chain = null
 		return null
 	}
 
@@ -2547,9 +3018,24 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			return split ?? event
 		}
 		// A superframe without the header in its slow data (text, GPS) still
-		// belongs to the ongoing over; a radio header starts the next one.
-		if (DSTAR_HEADER_SYNC.test(line)) return this.endOngoing("dstar", now)
-		if (SYNC_PATTERN.test(line)) this.touchOngoing(now)
+		// belongs to the ongoing over; a radio header starts the next one,
+		// and its chain (call-first: the next voice sync starts the call).
+		if (DSTAR_HEADER_SYNC.test(line)) {
+			const chain = this.chain
+			const ended = this.endOngoing("dstar", now)
+			const nowMs = now.getTime()
+			if (chain !== null && chain.lastMs === nowMs) {
+				chain.startMs = nowMs
+				chain.clean = LINE_ERR.test(line) ? 0 : 1
+				this.chain = chain
+			}
+			return ended
+		}
+		if (DSTAR_VOICE_SYNC.test(line)) {
+			const ongoing = this.ongoingCall("dstar")
+			if (ongoing !== null) ongoing.lastUpdate = now
+			else this.startOnFrames("dstar", now, !LINE_ERR.test(line))
+		}
 		return null
 	}
 
@@ -2744,6 +3230,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	): DecoderOutput | null {
 		const nowMs = now.getTime()
 
+		// Call-first: a call that started on its voice frames takes the IDs of
+		// the first link control that names them (they attach, no new call).
+		const unnamed = this.ongoingCall(protocol)
+		if (
+			unnamed !== null &&
+			unnamed.talkgroup === null &&
+			unnamed.source === null &&
+			(tgt !== 0 || src !== 0)
+		) {
+			unnamed.talkgroup = tgt
+			unnamed.source = src
+		}
+
 		// Check if we have an active call that matches
 		const activeKeyMatches =
 			this.callState &&
@@ -2829,16 +3328,18 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			trailer &&
 			nowMs <= trailer.untilMs &&
 			trailer.protocol === protocol &&
-			trailer.talkgroup === tgt &&
-			trailer.source === src
+			// A call ended before its IDs arrived: its terminator's LC names them.
+			((trailer.talkgroup === null && trailer.source === null) ||
+				(trailer.talkgroup === tgt && trailer.source === src))
 		) {
 			this.recentlyTerminated = null
 			return null
 		}
 
-		// Case 3: Different call detected - end previous, start new pending
+		// Case 3: Different call detected - end previous (at its last line: its
+		// terminator was missed), start new pending
 		if (this.callState) {
-			const endEvent = this.endCall(now, false)
+			const endEvent = this.endCall(now, false, this.callState.lastUpdate)
 			this.logger.debug(
 				{
 					oldProtocol: this.callState?.protocol,
@@ -2905,15 +3406,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		now: Date,
 		nowMs: number,
 		protocol: NonNullable<DsdFmeProtocol>,
-		tgt: number,
-		src: number,
+		tgt: number | null,
+		src: number | null,
 		slot?: number,
 		dmr?: DmrMetadata,
 		p25?: P25Metadata,
 		nxdn?: NxdnMetadata,
 		dstar?: DStarMetadata,
 		ysf?: YsfMetadata,
-	): void {
+	): DsdFmeCallState {
 		const delayMs = this.options.callStartDelayMs ?? CALL_START_DELAY_MS
 
 		this.pendingCall = {
@@ -2923,7 +3424,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				talkgroup: tgt,
 				source: src,
 				slot,
-				startTime: now,
+				// Call-first: the over began at the first sync of its chain.
+				startTime: this.chainStart(protocol, nowMs) ?? now,
 				lastUpdate: now,
 				dmr,
 				p25,
@@ -2945,6 +3447,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			{ protocol, tgt, src, slot, delayMs },
 			"Pending call created, will emit after delay",
 		)
+		return this.pendingCall.state
 	}
 
 	/**
@@ -3175,11 +3678,18 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Ends the current call and returns a call_end event.
 	 * Generates expected WAV filename if per-call recording is enabled.
 	 */
-	private endCall(now: Date, timeout: boolean): DecoderOutput | null {
+	private endCall(
+		now: Date,
+		timeout: boolean,
+		endAt?: Date,
+	): DecoderOutput | null {
 		if (!this.callState) return null
+		// The lane's next call starts on its own frames.
+		this.chain = null
+		this.lastVoiceSyncMs = undefined
 
 		// A timeout is detected late: the call really ended at its last line.
-		const endTime = timeout ? this.callState.lastUpdate : now
+		const endTime = endAt ?? (timeout ? this.callState.lastUpdate : now)
 		const duration = endTime.getTime() - this.callState.startTime.getTime()
 		const callInfo = this.callState
 
@@ -3190,13 +3700,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Check for false positive suppression
 		const minDuration = this.options.minCallDurationMs ?? MIN_CALL_DURATION_MS
-		const hasWeakMetadata =
-			(callInfo.talkgroup === 0 || callInfo.talkgroup === null) &&
-			(callInfo.source === 0 || callInfo.source === null) &&
-			callInfo.dstar?.my === undefined &&
-			callInfo.ysf?.callsign === undefined
+		const hasWeakMetadata = this.weakMetadata(callInfo)
 		// A call whose call_start went out always gets its call_end.
-		const announced = this.announcedCallId === callInfo.callId
+		const announced = callInfo.announced === true
 
 		if (duration < minDuration && hasWeakMetadata && !announced) {
 			callInfo.flags.falsePositiveSuppressed = true
@@ -3215,12 +3721,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (!announced)
 			this.emitOutput(this.callStartEvent(callInfo, callInfo.startTime))
 
+		// A call that ended before its encryption was known is never linked to
+		// a recording: its audio may be encrypted voice.
+		const linkable = callInfo.encryptionKnown !== false
 		// Try to find the WAV file immediately
-		const wavFile = this.findWavFile(callInfo, endTime)
+		const wavFile = linkable ? this.findWavFile(callInfo, endTime) : undefined
 
 		// Also trigger async search with retries - dsd-fme may still be writing
 		// This will emit an update event if the file is found later
-		if (!wavFile) {
+		if (!wavFile && linkable) {
 			this.findWavFileAsync(callInfo, endTime)
 		}
 
@@ -3252,6 +3761,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				callId: callInfo.callId,
 				startedAt: callInfo.startTime.toISOString(),
 				endedAt: endTime.toISOString(),
+				...(callInfo.encryptionKnown !== undefined
+					? { encryptionKnown: callInfo.encryptionKnown }
+					: {}),
 				protocol: callInfo.protocol,
 				talkgroup: callInfo.talkgroup,
 				source: callInfo.source,
