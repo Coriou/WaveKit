@@ -1619,7 +1619,15 @@ export class ScannerService extends EventEmitter {
 					const owner = prior.id ?? discoveryId
 					return {
 						...prior,
-						analogTrials: () => this.trialMemory.analogFmTrials(owner),
+						// The owner's trials; a linked co-channel partner's trial that heard counts.
+						analogTrials: () => {
+							const t = this.trialMemory.analogFmTrials(owner)
+							if (t === null) return null
+							let decoded = t.decoded
+							for (const id of prior.partnerIds ?? [])
+								decoded += this.trialMemory.analogFmTrials(id)?.decoded ?? 0
+							return { attempts: t.attempts, decoded }
+						},
 					}
 				},
 				logger: deps.logger,

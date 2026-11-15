@@ -193,10 +193,13 @@ export function fileDecodedOwn(
  * these or a verified sighting keep the channel fresh (digitalChannel). Asked like `classVotes`.
  * `analogTrials` (absent or null: none remembered) reads the owner's analog FM replay trials
  * (trial-memory.ts TrialMemory.analogFmTrials: how often they ran, how often they heard speech or
- * a tone); asked only for a file that measured no speech (noVoiceChannel).
+ * a tone; `decoded` adds those of its linked co-channel discoveries, `partnerIds`, that heard);
+ * asked only for a file that measured no speech (noVoiceChannel).
  */
 export interface VoicePrior {
 	readonly id?: string
+	/** The owner's linked co-channel discoveries `labels` reads (at most 8; absent: none). */
+	readonly partnerIds?: readonly string[]
 	readonly labels: readonly {
 		readonly protocol: ScannerProtocol
 		readonly confidence: ScannerConfidence

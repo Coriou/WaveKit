@@ -8,7 +8,7 @@
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
 	admissionVerdict,
 	readPrior,
@@ -421,6 +421,48 @@ describe("DiscoveryStore.voicePrior", () => {
 					last + 500 + OWNER_DEDICATED_PRIOR_TTL_MS + 1,
 				),
 			).not.toBe("tone-required")
+		})
+
+		it("after a restart, the rebuild assesses no observation last seen more than 24 h ago, nor any discovery not seen in 24 h", () => {
+			// d1 (capcode 1): paged at T0 and at T0 + 30 h; d2, d3 last seen at T0 (a minute or two after).
+			const { store } = twins([T0 + 30 * H])
+			const at = T0 + 32 * H
+			const restarted = new DiscoveryStore({
+				maxDiscoveries: 100,
+				now: () => at,
+				newId: () => "R1".padEnd(26, "0"),
+				rasters: () => PMR,
+			})
+			restarted.restore(store.snapshot())
+			const fresh =
+				restarted.ingest(
+					makeObs({
+						id: "after",
+						centreHz: CH,
+						startedAt: at,
+						cls: "analog-fm",
+						open: false,
+						gate: "passed",
+					}),
+				).discoveryId ?? ""
+			expect(fresh).not.toBe("")
+			const target = restarted as unknown as {
+				observationAssessment(o: { readonly id: string }): unknown
+			}
+			const spy = vi.spyOn(target, "observationAssessment")
+			const prior = restarted.voicePrior(fresh) ?? null
+			const assessed = spy.mock.calls.map(([o]) => o.id)
+			spy.mockRestore()
+			expect(assessed).toContain("a0")
+			for (const old of ["p1", "p2", "p3"]) expect(assessed).not.toContain(old)
+			expect(prior?.channelDecodes).toContainEqual({
+				protocol: "pocsag",
+				at: T0 + 30 * H + 500,
+			})
+			expect(prior?.channelDecodes).not.toContainEqual({
+				protocol: "pocsag",
+				at: T0 + 500,
+			})
 		})
 
 		it("after a restart through ScannerPersistence (save, then a new store loading the same state dir): strong", async () => {

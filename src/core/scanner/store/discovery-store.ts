@@ -48,10 +48,11 @@ import {
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
 import { notAnalogVoiceProtocol } from "../channel/voice-veto.js"
-import type {
-	DigitalProof,
-	OwnerDecode,
-	VoicePrior,
+import {
+	OWNER_DEDICATED_PRIOR_TTL_MS,
+	type DigitalProof,
+	type OwnerDecode,
+	type VoicePrior,
 } from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
@@ -3053,9 +3054,15 @@ export class DiscoveryStore
 	 * `d`'s frequency key and not seeded since this store was made, reads the decoded proofs (a
 	 * decode of a protocol not analog voice) of the kept observations of the channel's discoveries
 	 * on each of `d`'s sources (atKey, newest seen first, at most CHANNEL_KEY_SOURCES_MAX sources
-	 * and CHANNEL_VOICE_SCAN_MAX discoveries in all: 64 × OBSERVATIONS_PER_DISCOVERY 256 = 16 384
-	 * cached proof reads, once per channel) and notes the newest per protocol. Their age is judged
-	 * where the memo is read (OWNER_DEDICATED_PRIOR_TTL_MS).
+	 * and CHANNEL_VOICE_SCAN_MAX discoveries in all) and notes the newest per protocol. Only what
+	 * the memo's reader could still use is read (it judges age by OWNER_DEDICATED_PRIOR_TTL_MS,
+	 * 24 h): the walk stops at the first discovery last seen longer ago than that (atKey is newest
+	 * first, so the rest are older), and an observation last seen (its end, else its start) longer
+	 * ago is skipped before its proof is assessed. So at most 64 discoveries seen in the last 24 h
+	 * × OBSERVATIONS_PER_DISCOVERY 256 of their observations seen in it = 16 384 proof reads, once
+	 * per channel per process, and a restarted core's quiet channels cost one atKey read. Only
+	 * `d`'s own sources are read: a pager decoded only on another source of the channel is not
+	 * re-seeded after a restart (the prior errs weaker, never stronger).
 	 */
 	private seedChannel(d: Discovery): void {
 		const key = d.frequencyKey
@@ -3065,11 +3072,14 @@ export class DiscoveryStore
 			const oldest = this.channelSeeded.keys().next()
 			if (oldest.done !== true) this.channelSeeded.delete(oldest.value)
 		}
+		const cutoff = this.now() - OWNER_DEDICATED_PRIOR_TTL_MS
 		let budget = CHANNEL_VOICE_SCAN_MAX
 		for (const source of d.sourceIds.slice(0, CHANNEL_KEY_SOURCES_MAX))
 			for (const twin of this.atKey(source, key)) {
+				if (!(Date.parse(twin.lastSeenAt) >= cutoff)) break
 				if (budget-- <= 0) return
 				for (const o of this.byDiscovery.get(twin.id) ?? []) {
+					if (!(Date.parse(o.endedAt ?? o.startedAt) >= cutoff)) continue
 					const proof = this.observationAssessment(o).proof
 					if (
 						proof?.kind !== "decoded" ||
@@ -4250,6 +4260,7 @@ export class DiscoveryStore
 		this.seedChannel(d)
 		return {
 			id: d.id,
+			partnerIds: ids.slice(1),
 			labels,
 			class: d.class,
 			classVotes: () => {
