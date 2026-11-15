@@ -26,6 +26,13 @@
  * Expiry trusts the wall clock (`now`): a clock far ahead (a receiver without a real-time clock
  * before NTP corrects it) can age a backup early; the clean-load count still has to be reached.
  *
+ * Two halves, so a start never waits on one link per recording: before the state is read, every
+ * other file is copied and flushed under a partial name with a receipt saying the links are
+ * pending, then the marker is written (ensurePreMigrationBackup); after the start, the recordings
+ * are linked in, the folders flushed and the backup renamed into place (completeDeferredLinks).
+ * A crash in between leaves the pending partial, which the next start completes; until it is in
+ * place, it is not reported (`stateBackup` absent) nor counted as a backup by retention.
+ *
  * Files under `recordings/`, `captures/` and `iq-captures/` are hard links (finished files are
  * renamed into place, removed by unlink, never rewritten; staging `.tmp` paths excepted), everything
  * else is copied with a copy-on-write clone where the file system supports
@@ -53,7 +60,7 @@ import {
 	statfs,
 	writeFile,
 } from "node:fs/promises"
-import { join, resolve, sep } from "node:path"
+import { dirname, join, resolve, sep } from "node:path"
 import { z } from "zod"
 import { RECORDING_KEEPS_FILE_NAME } from "@wavekit/api-types"
 import type { ScannerStateBackupStatus } from "@wavekit/api-types"
@@ -224,8 +231,25 @@ export interface StateBackupNone {
 	toFormat: string
 }
 
+/**
+ * The state files are backed up (copied and flushed) and the marker written; the recordings'
+ * links are added after the start (completeDeferredLinks), which then renames the backup into
+ * place (`taken`) or abandons it (`skipped`).
+ */
+export interface StateBackupPending {
+	kind: "pending"
+	fromFormat: string
+	toFormat: string
+	/** Files planned: those copied now plus the recordings to link. */
+	files: number
+	copiedBytes: number
+	linkFiles: number
+	keepsCopied: boolean
+}
+
 export type StateBackupOutcome =
 	| StateBackupTaken
+	| StateBackupPending
 	| StateBackupSkipped
 	| StateBackupNone
 
@@ -233,7 +257,8 @@ export type StateBackupOutcome =
 export function backupStatusOf(
 	outcome: StateBackupOutcome | null,
 ): ScannerStateBackupStatus | null {
-	if (outcome === null) return null
+	// Not in place yet: reported once its recordings are linked (taken) or it is abandoned.
+	if (outcome === null || outcome.kind === "pending") return null
 	if (outcome.kind === "none")
 		return {
 			outcome: "none",
@@ -433,6 +458,14 @@ const ReceiptSchema = z.object({
 		.max(BACKUP_RECEIPT_COUNT_MAX)
 		.optional(),
 	seq: z.number().int().min(0).max(BACKUP_RECEIPT_COUNT_MAX).optional(),
+	files: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+	copiedBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+	linkedFiles: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+	keepsCopied: z.boolean().optional(),
+	/** The first half is done, the recordings' links are not (completeDeferredLinks). */
+	linksPending: z.literal(true).optional(),
+	/** Free bytes the first half measured (the margin of the second half's fallback copies). */
+	freeBytes: z.number().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
 })
 type Receipt = z.infer<typeof ReceiptSchema>
 
@@ -471,17 +504,24 @@ function receiptTime(r: Receipt | null): number {
 	return Number.isFinite(t) ? t : 0
 }
 
-/** Complete backups (`pre-*` real directories) and leftover partial ones (`.pre-*.partial-*`). */
-async function listBackups(
-	backupsDir: string,
-): Promise<{ complete: KeptBackup[]; partial: string[] }> {
+/**
+ * Complete backups (`pre-*` real directories), pending ones (`.pre-*.partial-*` whose receipt
+ * says its links are pending: completeDeferredLinks finishes them) and leftover partial ones
+ * (any other `.pre-*.partial-*`, deleted by the next backup or retention).
+ */
+async function listBackups(backupsDir: string): Promise<{
+	complete: KeptBackup[]
+	partial: string[]
+	pending: KeptBackup[]
+}> {
 	const complete: KeptBackup[] = []
 	const partial: string[] = []
+	const pending: KeptBackup[] = []
 	let names: string[]
 	try {
 		names = await readdir(backupsDir)
 	} catch {
-		return { complete, partial }
+		return { complete, partial, pending }
 	}
 	for (const n of names) {
 		const isPartial = n.startsWith(".pre-") && n.includes(".partial-")
@@ -489,14 +529,16 @@ async function listBackups(
 		// Only real directories this module made; never follow a symlink out of the backups dir.
 		const st = await lstat(join(backupsDir, n)).catch(() => null)
 		if (st === null || !st.isDirectory()) continue
+		const receipt = await readReceipt(join(backupsDir, n, BACKUP_RECEIPT_FILE))
 		if (isPartial) {
-			partial.push(n)
+			if (receipt?.linksPending === true)
+				pending.push({ name: n, receipt, at: receiptTime(receipt) })
+			else partial.push(n)
 			continue
 		}
-		const receipt = await readReceipt(join(backupsDir, n, BACKUP_RECEIPT_FILE))
 		complete.push({ name: n, receipt, at: receiptTime(receipt) })
 	}
-	return { complete, partial }
+	return { complete, partial, pending }
 }
 
 /**
@@ -604,9 +646,12 @@ async function defaultRemove(path: string): Promise<void> {
 }
 
 /**
- * Compares the on-disk format marker with this build's and, when they differ, takes a backup
- * (see the module comment), prunes older ones, then writes this build's marker. Call once per
- * process, before anything in the directory is read for migration or rewritten.
+ * Compares the on-disk format marker with this build's and, when they differ, takes the first
+ * half of a backup (see the module comment): every file but the recordings copied and flushed
+ * with a pending receipt, under the partial name. Then writes this build's marker. Returns
+ * `pending` for such a backup: completeDeferredLinks (after the start) adds the recordings'
+ * links, renames it into place and prunes older ones. Call once per process, before anything in
+ * the directory is read for migration or rewritten.
  */
 export async function ensurePreMigrationBackup(
 	opts: PreMigrationBackupOptions,
@@ -629,6 +674,11 @@ export async function ensurePreMigrationBackup(
 	}
 	if (outcome.kind === "taken")
 		log.info(outcome, "Scanner state backed up before a format change")
+	else if (outcome.kind === "pending")
+		log.info(
+			outcome,
+			"Scanner state backed up before a format change; its recordings are linked into the backup after the start",
+		)
 	else if (outcome.kind === "skipped")
 		log.warn(
 			outcome,
@@ -706,7 +756,8 @@ async function decide(
 	if (freeBytes - copyBytes < BACKUP_MIN_FREE_BYTES)
 		return skipped("low-disk", { neededBytes: copyBytes, freeBytes })
 
-	// Leftover partial copies of a crashed start go first; complete backups stay for now.
+	// Leftover partial copies of a crashed start go first (never one whose links are pending:
+	// completeDeferredLinks finishes it); complete backups stay for now.
 	const { partial, complete } = await listBackups(backupsDir)
 	for (const p of partial)
 		await remove(join(backupsDir, p)).catch(() => undefined)
@@ -718,51 +769,35 @@ async function decide(
 
 	const takenAtMs = opts.now()
 	const partialDir = join(backupsDir, `.pre-${fromFormat}.partial-${takenAtMs}`)
-	const doLink = opts.link ?? link
 	const doFsync = opts.fsync ?? defaultFsync
 	const syncDir = (path: string): Promise<void> =>
 		doFsync(path, "dir").catch(() => undefined)
-	let linkedFiles = 0
-	// Bytes copied where a hard link failed (EPERM, EXDEV): reserved against the margin before
-	// each such copy, in the same synchronous step as the check, so concurrent copies share it.
-	let fallbackBytes = 0
-	let finalName: string
-	const linkedCount = plan.files.filter(f => f.hardLink).length
+	const copied = plan.files.filter(f => !f.hardLink)
+	const linkedCount = plan.files.length - copied.length
 	log.info(
 		{
 			files: plan.files.length,
-			copyFiles: plan.files.length - linkedCount,
+			copyFiles: copied.length,
 			linkFiles: linkedCount,
 			copyMb: Math.round(copyBytes / (1024 * 1024)),
 		},
 		`Backing up ${plan.files.length} files (~${Math.round(copyBytes / (1024 * 1024))} MB to copy) before the scanner state format change`,
 	)
+	// Only the folders the copies need (and their parents) now; the recordings' folders are
+	// made, and every folder flushed, when their links are added after the start.
+	const copyDirs = new Set<string>()
+	for (const f of copied)
+		for (let d = dirname(f.rel); d !== "." && d !== ""; d = dirname(d))
+			copyDirs.add(d)
 	try {
 		await mkdir(partialDir, { recursive: true })
 		// `recursive` makes the order irrelevant: a child's mkdir creates its parent if first.
-		await forEachLimited(plan.dirs, BACKUP_IO_CONCURRENCY, async d => {
+		await forEachLimited([...copyDirs], BACKUP_IO_CONCURRENCY, async d => {
 			await mkdir(join(partialDir, d), { recursive: true })
 		})
-		await forEachLimited(plan.files, BACKUP_IO_CONCURRENCY, async f => {
-			const src = join(dir, f.rel)
+		await forEachLimited(copied, BACKUP_IO_CONCURRENCY, async f => {
 			const dst = join(partialDir, f.rel)
-			if (f.hardLink) {
-				try {
-					await doLink(src, dst)
-					linkedFiles++
-					return
-				} catch {
-					// EXDEV, EPERM, a file system without links: fall back to a copy, which costs space.
-				}
-				const size = (await lstat(src)).size
-				if (
-					freeBytes - copyBytes - fallbackBytes - size <
-					BACKUP_MIN_FREE_BYTES
-				)
-					throw new FallbackLowDisk(size)
-				fallbackBytes += size
-			}
-			await copyFile(src, dst, constants.COPYFILE_FICLONE)
+			await copyFile(join(dir, f.rel), dst, constants.COPYFILE_FICLONE)
 			await doFsync(dst, "file")
 		})
 		if (opts.keepsFile !== undefined && keepsSize !== null) {
@@ -784,53 +819,311 @@ async function decide(
 			seq,
 			cleanLoads: 0,
 			ownFormatCleanLoads: 0,
-			files: plan.files.length,
-			copiedBytes: copyBytes + fallbackBytes,
-			linkedFiles,
+			files: copied.length,
+			copiedBytes: copyBytes,
+			linkedFiles: 0,
 			keepsCopied: keepsSize !== null,
+			linksPending: true,
+			freeBytes,
 		}
 		const receiptPath = join(partialDir, BACKUP_RECEIPT_FILE)
 		await writeFile(receiptPath, `${JSON.stringify(receipt, null, "\t")}\n`)
 		await doFsync(receiptPath, "file")
-		// Every copied file is on disk, then every directory's entries (links included), before the
-		// rename: a power cut never leaves a backup counted as taken with empty copies.
-		await forEachLimited(plan.dirs, BACKUP_IO_CONCURRENCY, d =>
+		// The copies and the pending receipt survive a power cut (the marker written next says the
+		// state was migrated): a crash before the links are done leaves a partial the next start
+		// completes, never a backup lost.
+		await forEachLimited([...copyDirs], BACKUP_IO_CONCURRENCY, d =>
 			syncDir(join(partialDir, d)),
 		)
 		await syncDir(partialDir)
-		finalName = await freeName(backupsDir, `pre-${fromFormat}.${takenAtMs}`)
+		await syncDir(backupsDir)
+	} catch {
+		await remove(partialDir).catch(() => undefined)
+		return skipped("copy-failed")
+	}
+	return {
+		kind: "pending",
+		fromFormat,
+		toFormat,
+		files: plan.files.length,
+		copiedBytes: copyBytes,
+		linkFiles: linkedCount,
+		keepsCopied: keepsSize !== null,
+	}
+}
+
+/** Options of completeDeferredLinks: the backup's, without the keep store. */
+export type DeferredLinkOptions = Omit<PreMigrationBackupOptions, "keepsFile">
+
+/**
+ * The second half of a backup ensurePreMigrationBackup left pending (`linksPending` in the
+ * receipt of a `.pre-*.partial-*` folder): every recording file (the write-once trees, as the
+ * first half's plan) whose last write is not after the backup was taken is hard linked in (a
+ * copy where the link is refused, counted against the free-space margin as before), every
+ * folder is flushed, the receipt rewritten complete (its other fields kept), and the folder is
+ * renamed into place, then retention runs. Runs after the start, so the scanner never waits on
+ * one link per recording; a recording removed meanwhile is simply not in the backup. A crash
+ * leaves the partial, which the next start completes the same way (links already made count).
+ * A failure removes the partial: the outcome is then `skipped`, with the reason a first half
+ * would give (`low-disk`, `disk-unknown`, `too-many-files`, `copy-failed`). Never throws; one
+ * outcome per pending partial (normally none or one).
+ */
+export async function completeDeferredLinks(
+	opts: DeferredLinkOptions,
+): Promise<StateBackupOutcome[]> {
+	const log = createComponentLogger(opts.logger, "StateBackup")
+	const dir = resolve(opts.dir)
+	const backupsDir = join(dir, BACKUPS_DIR)
+	const toFormat = formatLabel(opts.format ?? CURRENT_SCANNER_STATE_FORMAT)
+	const outcomes: StateBackupOutcome[] = []
+	let pending: KeptBackup[]
+	try {
+		pending = (await listBackups(backupsDir)).pending
+	} catch {
+		return outcomes
+	}
+	for (const p of pending) {
+		const outcome = await completeOne(dir, backupsDir, p, toFormat, opts)
+		if (outcome.kind === "taken")
+			log.info(outcome, "Scanner state backup complete with its recordings")
+		else
+			log.warn(
+				outcome,
+				"Scanner state backup abandoned while linking its recordings",
+			)
+		outcomes.push(outcome)
+	}
+	return outcomes
+}
+
+async function completeOne(
+	dir: string,
+	backupsDir: string,
+	p: KeptBackup,
+	toFormat: string,
+	opts: DeferredLinkOptions,
+): Promise<StateBackupOutcome> {
+	const receipt = p.receipt!
+	const fromFormat = receipt.fromFormat
+	const takenAtMs = receiptTime(receipt)
+	const partialDir = join(backupsDir, p.name)
+	const remove = opts.remove ?? defaultRemove
+	const doLink = opts.link ?? link
+	const doFsync = opts.fsync ?? defaultFsync
+	const syncDir = (path: string): Promise<void> =>
+		doFsync(path, "dir").catch(() => undefined)
+	const copiedBytes = receipt.copiedBytes ?? 0
+	const skipped = (
+		reason: BackupSkipReason,
+		extra: { neededBytes?: number; freeBytes?: number } = {},
+	): StateBackupOutcome => ({
+		kind: "skipped",
+		reason,
+		fromFormat,
+		toFormat,
+		...extra,
+	})
+	const abandon = async (
+		outcome: StateBackupOutcome,
+	): Promise<StateBackupOutcome> => {
+		await remove(partialDir).catch(() => undefined)
+		return outcome
+	}
+	let files: string[]
+	try {
+		files = await writeOnceFiles(dir, opts.maxFiles ?? BACKUP_MAX_FILES)
+	} catch (err) {
+		return abandon(
+			skipped(err instanceof TooManyFiles ? "too-many-files" : "copy-failed"),
+		)
+	}
+	// Free space now, never more than the first half measured less what it copied (a test
+	// seam or a file system that reports late must not make the margin looser).
+	let freeBytes: number
+	try {
+		const fsStat = await (opts.statfs ?? defaultStatfs)(dir)
+		freeBytes = toNumber(fsStat.bavail) * toNumber(fsStat.bsize)
+	} catch {
+		return abandon(skipped("disk-unknown"))
+	}
+	if (!Number.isFinite(freeBytes) || freeBytes < 0)
+		return abandon(skipped("disk-unknown"))
+	const measured = receipt.freeBytes ?? freeBytes + copiedBytes
+	const margin = Math.min(freeBytes, measured - copiedBytes)
+	let linkedFiles = 0
+	let copiedFiles = 0
+	let fallbackBytes = 0
+	const madeDirs = new Map<string, Promise<void>>()
+	const ensureDir = (rel: string): Promise<void> => {
+		let made = madeDirs.get(rel)
+		if (!made) {
+			made = mkdir(join(partialDir, rel), { recursive: true }).then(
+				() => undefined,
+			)
+			madeDirs.set(rel, made)
+		}
+		return made
+	}
+	try {
+		await forEachLimited(files, BACKUP_IO_CONCURRENCY, async rel => {
+			const src = join(dir, rel)
+			const dst = join(partialDir, rel)
+			let st: Awaited<ReturnType<typeof lstat>>
+			try {
+				st = await lstat(src)
+			} catch (err) {
+				// Removed since the walk (retention, a delete): not in the backup.
+				if ((err as NodeJS.ErrnoException).code === "ENOENT") return
+				throw err
+			}
+			// Written after the backup was taken: not the state it saves.
+			if (!st.isFile() || st.mtimeMs > takenAtMs) return
+			await ensureDir(dirname(rel))
+			try {
+				await doLink(src, dst)
+				linkedFiles++
+				return
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException).code
+				// Made by an earlier, interrupted completion.
+				if (code === "EEXIST") {
+					linkedFiles++
+					return
+				}
+				if (code === "ENOENT") return
+				// EXDEV, EPERM, a file system without links: fall back to a copy, which costs space.
+			}
+			if (margin - fallbackBytes - st.size < BACKUP_MIN_FREE_BYTES)
+				throw new FallbackLowDisk(st.size)
+			fallbackBytes += st.size
+			await copyFile(src, dst, constants.COPYFILE_FICLONE)
+			await doFsync(dst, "file")
+			copiedFiles++
+		})
+		const receiptPath = join(partialDir, BACKUP_RECEIPT_FILE)
+		const raw: unknown = JSON.parse(await readFile(receiptPath, "utf8"))
+		const fields =
+			raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
+		const {
+			linksPending: _pending,
+			freeBytes: _free,
+			...kept
+		} = fields as Record<string, unknown>
+		const total = (receipt.files ?? 0) + linkedFiles + copiedFiles
+		await writeFile(
+			receiptPath,
+			`${JSON.stringify(
+				{
+					...kept,
+					files: total,
+					copiedBytes: copiedBytes + fallbackBytes,
+					linkedFiles,
+				},
+				null,
+				"\t",
+			)}\n`,
+		)
+		await doFsync(receiptPath, "file")
+		// Every directory's entries (links included) before the rename: a power cut never leaves
+		// a backup counted as taken with missing entries.
+		const dirs = await treeDirs(partialDir)
+		await forEachLimited(dirs, BACKUP_IO_CONCURRENCY, d =>
+			syncDir(join(partialDir, d)),
+		)
+		await syncDir(partialDir)
+		const finalName = await freeName(
+			backupsDir,
+			`pre-${fromFormat}.${takenAtMs}`,
+		)
 		// The new backup is in place before any older one goes (pruneBackups below).
 		await rename(partialDir, join(backupsDir, finalName))
 		await syncDir(backupsDir)
+		const log = createComponentLogger(opts.logger, "StateBackup")
+		const replaced = await pruneBackups(
+			backupsDir,
+			toFormat,
+			finalName,
+			opts.now(),
+			remove,
+			log,
+		)
+		return {
+			kind: "taken",
+			fromFormat,
+			toFormat,
+			path: join(BACKUPS_DIR, finalName),
+			files: total,
+			copiedBytes: copiedBytes + fallbackBytes,
+			linkedFiles,
+			keepsCopied: receipt.keepsCopied ?? false,
+			replaced,
+		}
 	} catch (err) {
-		await remove(partialDir).catch(() => undefined)
-		return err instanceof FallbackLowDisk
-			? skipped("low-disk", {
-					// The copy that tripped the check is needed too (it was never reserved).
-					neededBytes: copyBytes + fallbackBytes + err.size,
-					freeBytes,
-				})
-			: skipped("copy-failed")
+		return abandon(
+			err instanceof FallbackLowDisk
+				? skipped("low-disk", {
+						// The copy that tripped the check is needed too (it was never reserved).
+						neededBytes: copiedBytes + fallbackBytes + err.size,
+						freeBytes: measured,
+					})
+				: skipped("copy-failed"),
+		)
 	}
-	const replaced = await pruneBackups(
-		backupsDir,
-		toFormat,
-		finalName,
-		takenAtMs,
-		remove,
-		log,
-	)
-	return {
-		kind: "taken",
-		fromFormat,
-		toFormat,
-		path: join(BACKUPS_DIR, finalName),
-		files: plan.files.length,
-		copiedBytes: copyBytes + fallbackBytes,
-		linkedFiles,
-		keepsCopied: keepsSize !== null,
-		replaced,
+}
+
+/** The walk of the write-once trees found more than the file bound. */
+class TooManyFiles extends WaveKitError {
+	constructor() {
+		super("Too many files to back up", "STATE_BACKUP_TOO_MANY_FILES")
 	}
+}
+
+/** Relative paths of the files a backup links (writtenOnce), at most `maxFiles` (else throws). */
+async function writeOnceFiles(
+	root: string,
+	maxFiles: number,
+): Promise<string[]> {
+	const files: string[] = []
+	const stack = [...WRITE_ONCE_TREES]
+	while (stack.length > 0) {
+		const rel = stack.pop() ?? ""
+		let entries: Awaited<ReturnType<typeof readdirEntries>>
+		try {
+			entries = await readdirEntries(join(root, rel))
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") continue
+			throw err
+		}
+		for (const e of entries) {
+			const childRel = join(rel, e.name)
+			if (e.isDirectory()) stack.push(childRel)
+			else if (e.isFile() && writtenOnce(childRel)) {
+				if (files.length >= maxFiles) throw new TooManyFiles()
+				files.push(childRel)
+			}
+		}
+	}
+	return files
+}
+
+function readdirEntries(path: string) {
+	return readdir(path, { withFileTypes: true })
+}
+
+/** Every directory below `root`, relative (symlinks are not followed). */
+async function treeDirs(root: string): Promise<string[]> {
+	const dirs: string[] = []
+	const stack = [""]
+	while (stack.length > 0) {
+		const rel = stack.pop() ?? ""
+		for (const e of await readdirEntries(join(root, rel))) {
+			if (!e.isDirectory()) continue
+			const childRel = rel === "" ? e.name : join(rel, e.name)
+			dirs.push(childRel)
+			stack.push(childRel)
+		}
+	}
+	return dirs
 }
 
 /** `base`, else `base-1`... (BACKUP_NAME_TRIES in all); throws when none is free. */
@@ -869,10 +1162,11 @@ export async function noteCleanLoad(opts: CleanLoadOptions): Promise<string[]> {
 	const own = formatLabel(opts.format ?? CURRENT_SCANNER_STATE_FORMAT)
 	const remove = opts.remove ?? defaultRemove
 	const expired: string[] = []
-	const { complete } = await listBackups(backupsDir)
+	// A pending backup counts too: the load in the process that took it is one of its loads.
+	const { complete, pending } = await listBackups(backupsDir)
 	const bump = (n: number | undefined): number =>
 		Math.min((n ?? 0) + 1, BACKUP_RECEIPT_COUNT_MAX)
-	for (const b of complete) {
+	for (const b of [...complete, ...pending]) {
 		if (b.receipt === null) continue
 		const field =
 			b.receipt.toFormat === own

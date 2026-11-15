@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import {
 	chmod,
+	link,
 	mkdir,
 	mkdtemp,
 	readdir,
 	readFile,
 	rm,
 	stat,
+	utimes,
 	writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -21,15 +23,36 @@ import {
 	BACKUP_RECEIPT_FILE,
 	BACKUPS_DIR,
 	CURRENT_SCANNER_STATE_FORMAT,
+	backupStatusOf,
 	backupsToPrune,
+	completeDeferredLinks,
 	ensurePreMigrationBackup,
 	formatLabel,
 	noteCleanLoad,
 	STATE_FORMAT_FILE,
 } from "../../../src/core/state-backup.js"
-import type { StateFormat, StatFsLike } from "../../../src/core/state-backup.js"
+import type {
+	PreMigrationBackupOptions,
+	StateBackupOutcome,
+	StateFormat,
+	StatFsLike,
+} from "../../../src/core/state-backup.js"
 import { ScannerPersistence } from "../../../src/core/scanner/store/persistence.js"
 import { createLogger } from "../../../src/utils/logger.js"
+
+/**
+ * Both halves of a backup, as a start (ensurePreMigrationBackup) and the completion it starts
+ * after the load (completeDeferredLinks): the outcome the scanner then reports.
+ */
+async function backUp(
+	opts: PreMigrationBackupOptions,
+): Promise<StateBackupOutcome> {
+	const first = await ensurePreMigrationBackup(opts)
+	if (first.kind !== "pending") return first
+	const { keepsFile: _keeps, ...rest } = opts
+	const [done] = await completeDeferredLinks(rest)
+	return done ?? first
+}
 
 const logger = createLogger({ level: "fatal" })
 const NOW = 1_800_000_000_000
@@ -84,7 +107,7 @@ const backups = async (): Promise<string[]> =>
 
 describe("pre-migration backup of scanner state", () => {
 	it("a fresh directory needs no backup and gets this build's marker", async () => {
-		const out = await ensurePreMigrationBackup({
+		const out = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -100,7 +123,7 @@ describe("pre-migration backup of scanner state", () => {
 
 	it("state without a marker is backed up once; the same format later is not", async () => {
 		const copied = await seedState()
-		const first = await ensurePreMigrationBackup({
+		const first = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -142,7 +165,7 @@ describe("pre-migration backup of scanner state", () => {
 			files: 3,
 		})
 
-		const second = await ensurePreMigrationBackup({
+		const second = await backUp({
 			dir,
 			logger,
 			now: () => NOW + 1,
@@ -159,7 +182,7 @@ describe("pre-migration backup of scanner state", () => {
 	it("a version change backs up under the old format with its marker; the next change keeps both (the cap)", async () => {
 		await seedState()
 		await writeMarker({ fileVersion: 1, heldJournalFormat: 2, revision: 1 })
-		const first = await ensurePreMigrationBackup({
+		const first = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -180,7 +203,7 @@ describe("pre-migration backup of scanner state", () => {
 		).toEqual({ fileVersion: 1, heldJournalFormat: 2, revision: 1 })
 
 		const next = { fileVersion: 2, heldJournalFormat: 9, revision: 1 }
-		const second = await ensurePreMigrationBackup({
+		const second = await backUp({
 			dir,
 			logger,
 			now: () => NOW + 1,
@@ -201,7 +224,7 @@ describe("pre-migration backup of scanner state", () => {
 	it("a malformed marker is an unknown format and is backed up (safe answer)", async () => {
 		await seedState()
 		await writeFile(join(dir, STATE_FORMAT_FILE), "{not json")
-		const out = await ensurePreMigrationBackup({
+		const out = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -213,7 +236,7 @@ describe("pre-migration backup of scanner state", () => {
 			heldJournalFormat: 3,
 			revision: 1,
 		})
-		const out2 = await ensurePreMigrationBackup({
+		const out2 = await backUp({
 			dir,
 			logger,
 			now: () => NOW + 1,
@@ -239,7 +262,7 @@ describe("pre-migration backup of scanner state", () => {
 			Buffer.byteLength(JSON.stringify(old))
 		const space = (bytes: number) => (): Promise<StatFsLike> =>
 			Promise.resolve({ bavail: bytes, bsize: 1 })
-		const low = await ensurePreMigrationBackup({
+		const low = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -256,7 +279,7 @@ describe("pre-migration backup of scanner state", () => {
 		expect(await backups()).toEqual([])
 		// The marker is still written: the state is migrated this run, so a later backup would be mislabelled.
 		await writeMarker(old)
-		const exact = await ensurePreMigrationBackup({
+		const exact = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -267,7 +290,7 @@ describe("pre-migration backup of scanner state", () => {
 
 	it("unknown free space skips the backup", async () => {
 		await seedState()
-		const out = await ensurePreMigrationBackup({
+		const out = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -282,7 +305,7 @@ describe("pre-migration backup of scanner state", () => {
 
 	it("a tree past the file bound is skipped; one at the bound is taken", async () => {
 		await seedState()
-		const at = await ensurePreMigrationBackup({
+		const at = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -292,7 +315,7 @@ describe("pre-migration backup of scanner state", () => {
 		expect(at).toMatchObject({ kind: "taken", files: 3 })
 		await writeMarker({ fileVersion: 1, heldJournalFormat: 2, revision: 1 })
 		await writeFile(join(dir, "settings.json"), "{}")
-		const past = await ensurePreMigrationBackup({
+		const past = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -306,7 +329,7 @@ describe("pre-migration backup of scanner state", () => {
 		await mkdir(join(dir, "captures", ".tmp"), { recursive: true })
 		await writeFile(join(dir, "captures", "c1.cu8"), "iq")
 		await writeFile(join(dir, "captures", ".tmp", "c2.cu8"), "iq")
-		const out = await ensurePreMigrationBackup({
+		const out = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -324,7 +347,7 @@ describe("pre-migration backup of scanner state", () => {
 
 	it("falls back to a copy when a hard link is refused", async () => {
 		await seedState()
-		const out = await ensurePreMigrationBackup({
+		const out = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -356,9 +379,17 @@ describe("pre-migration backup of scanner state", () => {
 		})
 		expect(p.preMigrationBackup()).toBeNull()
 		await p.load()
+		// The load returns before the recordings are linked: the backup is not in place yet.
+		expect(p.preMigrationBackup()).toMatchObject({
+			kind: "pending",
+			fromFormat: "unmarked",
+			linkFiles: 1,
+		})
+		await p.backupSettled()
 		expect(p.preMigrationBackup()).toMatchObject({
 			kind: "taken",
 			fromFormat: "unmarked",
+			linkedFiles: 1,
 		})
 		await p.load()
 		expect(p.preMigrationBackup()).toMatchObject({
@@ -386,7 +417,7 @@ describe("pre-migration backup of scanner state", () => {
 		await seedState()
 		await writeMarker(A)
 		const step = (format: StateFormat, at: number) =>
-			ensurePreMigrationBackup({
+			backUp({
 				dir,
 				logger,
 				now: () => at,
@@ -511,14 +542,14 @@ describe("pre-migration backup of scanner state", () => {
 	it("a crash between the new backup's rename and the old one's delete leaves both complete; the next start prunes", async () => {
 		await seedState()
 		await writeMarker({ fileVersion: 9, heldJournalFormat: 9, revision: 9 })
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW,
 			statfs: roomy,
 		})
 		await writeMarker({ fileVersion: 9, heldJournalFormat: 9, revision: 9 })
-		const crashed = await ensurePreMigrationBackup({
+		const crashed = await backUp({
 			dir,
 			logger,
 			now: () => NOW + 1,
@@ -538,7 +569,7 @@ describe("pre-migration backup of scanner state", () => {
 				),
 			).toMatchObject({ fromFormat: "f9-h9-r9" })
 		// The next start (same format) finishes the retention: the newer one stays.
-		const next = await ensurePreMigrationBackup({
+		const next = await backUp({
 			dir,
 			logger,
 			now: () => NOW + 2,
@@ -551,7 +582,7 @@ describe("pre-migration backup of scanner state", () => {
 	it("a failed copy keeps the earlier backup and leaves no partial one", async () => {
 		await seedState()
 		await writeMarker({ fileVersion: 9, heldJournalFormat: 9, revision: 9 })
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -559,7 +590,7 @@ describe("pre-migration backup of scanner state", () => {
 		})
 		await writeMarker({ fileVersion: 9, heldJournalFormat: 9, revision: 9 })
 		// The recording vanishes mid-backup: its link and then its fallback copy fail.
-		const out = await ensurePreMigrationBackup({
+		const out = await backUp({
 			dir,
 			logger,
 			now: () => NOW + 1,
@@ -576,7 +607,7 @@ describe("pre-migration backup of scanner state", () => {
 	it("the snapshot and the journal in the backup never share an inode with the live files", async () => {
 		await seedState()
 		await writeFile(join(dir, "discoveries.json"), '{"version":1}\n')
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -600,7 +631,7 @@ describe("pre-migration backup of scanner state", () => {
 		try {
 			const keeps = join(outside, "recording-keeps.json")
 			await writeFile(keeps, '{"schemaVersion":1,"keeps":[]}\n')
-			const out = await ensurePreMigrationBackup({
+			const out = await backUp({
 				dir,
 				logger,
 				now: () => NOW,
@@ -621,7 +652,7 @@ describe("pre-migration backup of scanner state", () => {
 			expect((await stat(saved)).ino).not.toBe((await stat(keeps)).ino)
 			// A missing keep store is no failure.
 			await writeMarker({ fileVersion: 9, heldJournalFormat: 9, revision: 9 })
-			const none = await ensurePreMigrationBackup({
+			const none = await backUp({
 				dir,
 				logger,
 				now: () => NOW + 1,
@@ -641,7 +672,7 @@ describe("pre-migration backup of scanner state", () => {
 			// Write and search, no read: readdir fails (EACCES) while a marker write would succeed.
 			await chmod(dir, 0o300)
 			try {
-				const out = await ensurePreMigrationBackup({
+				const out = await backUp({
 					dir,
 					logger,
 					now: () => NOW,
@@ -665,7 +696,7 @@ describe("pre-migration backup of scanner state", () => {
 		expect(BACKUP_EXPIRY_MS).toBe(1_209_600_000)
 		expect(BACKUP_EXPIRY_CLEAN_LOADS).toBe(3)
 		await seedState()
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -702,7 +733,7 @@ describe("pre-migration backup of scanner state", () => {
 			heldJournalFormat: 7,
 			revision: 7,
 		}
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -728,7 +759,7 @@ describe("pre-migration backup of scanner state", () => {
 		await seedState()
 		await writeMarker(A)
 		const step = (format: StateFormat, at: number) =>
-			ensurePreMigrationBackup({
+			backUp({
 				dir,
 				logger,
 				now: () => at,
@@ -778,7 +809,7 @@ describe("pre-migration backup of scanner state", () => {
 	it("crash recovery keeps the latest-taken backup of a format by sequence, even after a clock step back", async () => {
 		await seedState()
 		await writeMarker({ fileVersion: 9, heldJournalFormat: 9, revision: 9 })
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW + 10_000,
@@ -786,7 +817,7 @@ describe("pre-migration backup of scanner state", () => {
 		})
 		await writeMarker({ fileVersion: 9, heldJournalFormat: 9, revision: 9 })
 		// The wall clock stepped back 10 s; the second start dies before its deletes.
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -797,7 +828,7 @@ describe("pre-migration backup of scanner state", () => {
 		const newer = `pre-f9-h9-r9.${NOW}`
 		expect(await receiptOf(older)).toMatchObject({ seq: 1 })
 		expect(await receiptOf(newer)).toMatchObject({ seq: 2 })
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW + 1,
@@ -809,7 +840,7 @@ describe("pre-migration backup of scanner state", () => {
 	it("receipt counters stop at the schema bound and the receipt stays valid", async () => {
 		expect(BACKUP_RECEIPT_COUNT_MAX).toBe(1_000_000)
 		await seedState()
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -840,7 +871,7 @@ describe("pre-migration backup of scanner state", () => {
 			revision: 7,
 		}
 		// An older build (other) starts on this build's state: the copy's source is this build's.
-		await ensurePreMigrationBackup({
+		await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -857,7 +888,7 @@ describe("pre-migration backup of scanner state", () => {
 			ownFormatCleanLoads: BACKUP_RECEIPT_COUNT_MAX,
 		})
 		// The next backup's sequence is clamped, not one past the schema.
-		const taken = await ensurePreMigrationBackup({
+		const taken = await backUp({
 			dir,
 			logger,
 			now: () => NOW + 2,
@@ -895,6 +926,7 @@ describe("pre-migration backup of scanner state", () => {
 		await p.load()
 		expect(p.recoveryHealth()).toBe("healthy")
 		await p.load()
+		await p.backupSettled()
 		const receipt: unknown = JSON.parse(
 			await readFile(
 				join(dir, BACKUPS_DIR, `pre-unmarked.${NOW}`, BACKUP_RECEIPT_FILE),
@@ -921,7 +953,7 @@ describe("pre-migration backup: read-only copies", () => {
 		// copyFile keeps the mode: the copy is read-only too, which an "r+" open refuses.
 		await chmod(join(dir, "jobs.json"), 0o444)
 		try {
-			const result = await ensurePreMigrationBackup({
+			const result = await backUp({
 				dir,
 				logger,
 				now: () => NOW,
@@ -949,7 +981,7 @@ describe("pre-migration backup: link fallbacks and durability", () => {
 			Buffer.byteLength(JOURNAL) +
 			Buffer.byteLength(JSON.stringify(old))
 		const audio = Buffer.byteLength(AUDIO)
-		const short = await ensurePreMigrationBackup({
+		const short = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -965,7 +997,7 @@ describe("pre-migration backup: link fallbacks and durability", () => {
 		})
 		expect(await backups()).toEqual([])
 		await writeMarker(old)
-		const exact = await ensurePreMigrationBackup({
+		const exact = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -979,7 +1011,7 @@ describe("pre-migration backup: link fallbacks and durability", () => {
 		})
 		// Links that work cost nothing: the same space takes the backup with one byte less.
 		await writeMarker(old)
-		const linked = await ensurePreMigrationBackup({
+		const linked = await backUp({
 			dir,
 			logger,
 			now: () => NOW + 1,
@@ -996,7 +1028,7 @@ describe("pre-migration backup: link fallbacks and durability", () => {
 			await writeFile(keepsFile, '{"version":1}\n')
 			const synced: Array<{ path: string; kind: string; renamed: boolean }> = []
 			const backupsDir = join(dir, BACKUPS_DIR)
-			const out = await ensurePreMigrationBackup({
+			const out = await backUp({
 				dir,
 				logger,
 				now: () => NOW,
@@ -1043,7 +1075,7 @@ describe("pre-migration backup: link fallbacks and durability", () => {
 
 	it("a failed file flush fails the backup and leaves no partial one; a refused directory flush does not", async () => {
 		await seedState()
-		const failed = await ensurePreMigrationBackup({
+		const failed = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -1054,7 +1086,7 @@ describe("pre-migration backup: link fallbacks and durability", () => {
 		expect(failed).toMatchObject({ kind: "skipped", reason: "copy-failed" })
 		expect(await backups()).toEqual([])
 		await rm(join(dir, STATE_FORMAT_FILE))
-		const dirRefused = await ensurePreMigrationBackup({
+		const dirRefused = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
@@ -1069,12 +1101,180 @@ describe("pre-migration backup: link fallbacks and durability", () => {
 
 	it("the default flush works on the real file system", async () => {
 		await seedState()
-		const out = await ensurePreMigrationBackup({
+		const out = await backUp({
 			dir,
 			logger,
 			now: () => NOW,
 			statfs: roomy,
 		})
 		expect(out).toMatchObject({ kind: "taken" })
+	})
+})
+
+describe("pre-migration backup: the recordings are linked after the start", () => {
+	const refuseLinks = () =>
+		Promise.reject(Object.assign(new Error("not permitted"), { code: "EPERM" }))
+	const space = (bytes: number) => (): Promise<StatFsLike> =>
+		Promise.resolve({ bavail: bytes, bsize: 1 })
+	const partialName = `.pre-unmarked.partial-${NOW}`
+	const finalName = `pre-unmarked.${NOW}`
+
+	it("the first half makes no link and leaves a pending partial the status does not report", async () => {
+		await seedState()
+		let links = 0
+		const first = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+			link: async () => {
+				links++
+			},
+		})
+		expect(first).toMatchObject({ kind: "pending", linkFiles: 1 })
+		expect(links).toBe(0)
+		expect(await backups()).toEqual([partialName])
+		expect(await receiptOf(partialName)).toMatchObject({ linksPending: true })
+		expect(backupStatusOf(first)).toBeNull()
+		// The state files are already copied (the migration may now rewrite the live ones).
+		expect(
+			await readFile(join(dir, BACKUPS_DIR, partialName, "jobs.json"), "utf8"),
+		).toBe(JOBS)
+		// The marker is written: the next start backs up nothing more.
+		expect(
+			await ensurePreMigrationBackup({
+				dir,
+				logger,
+				now: () => NOW + 1,
+				statfs: roomy,
+			}),
+		).toMatchObject({ kind: "none", reason: "same-format" })
+	})
+
+	it("a crash between the halves: the next start keeps the partial and completes it", async () => {
+		await seedState()
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+		})
+		// The process ended before the links: the next start (same format) prunes, keeps it.
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW + 5,
+			statfs: roomy,
+		})
+		expect(await backups()).toEqual([partialName])
+		await noteCleanLoad({ dir, logger, now: () => NOW + 5 })
+		const [done] = await completeDeferredLinks({
+			dir,
+			logger,
+			now: () => NOW + 5,
+			statfs: roomy,
+		})
+		expect(done).toMatchObject({
+			kind: "taken",
+			fromFormat: "unmarked",
+			path: join(BACKUPS_DIR, finalName),
+			files: 3,
+			linkedFiles: 1,
+		})
+		expect(await backups()).toEqual([finalName])
+		const receipt = await receiptOf(finalName)
+		expect(receipt).toMatchObject({ files: 3, linkedFiles: 1, cleanLoads: 1 })
+		expect(receipt).not.toHaveProperty("linksPending")
+		expect(receipt).not.toHaveProperty("freeBytes")
+		expect(
+			(
+				await stat(
+					join(dir, BACKUPS_DIR, finalName, "recordings", "d_1", "a.wav"),
+				)
+			).ino,
+		).toBe((await stat(join(dir, "recordings", "d_1", "a.wav"))).ino)
+		// Nothing left pending: a later completion does nothing.
+		expect(
+			await completeDeferredLinks({ dir, logger, now: () => NOW + 6 }),
+		).toEqual([])
+	})
+
+	it("leaves out recordings written after the backup was taken and those removed meanwhile", async () => {
+		await seedState()
+		await mkdir(join(dir, "recordings", "d_2"), { recursive: true })
+		await writeFile(join(dir, "recordings", "d_2", "gone.wav"), AUDIO)
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+		})
+		// After the start: a new recording, and retention removing an old one.
+		const fresh = join(dir, "recordings", "d_2", "new.wav")
+		await writeFile(fresh, AUDIO)
+		const later = new Date(NOW + 60_000)
+		await utimes(fresh, later, later)
+		await rm(join(dir, "recordings", "d_2", "gone.wav"))
+		const [done] = await completeDeferredLinks({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+		})
+		expect(done).toMatchObject({ kind: "taken", linkedFiles: 1, files: 3 })
+		const saved = join(dir, BACKUPS_DIR, finalName, "recordings")
+		expect(await readdir(join(saved, "d_1"))).toEqual(["a.wav"])
+		expect(await readdir(join(saved, "d_2")).catch(() => [])).toEqual([])
+	})
+
+	it("links an interrupted completion made already count, none is made twice", async () => {
+		await seedState()
+		await writeFile(join(dir, "recordings", "d_1", "b.wav"), AUDIO)
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+		})
+		await mkdir(join(dir, BACKUPS_DIR, partialName, "recordings", "d_1"), {
+			recursive: true,
+		})
+		await link(
+			join(dir, "recordings", "d_1", "a.wav"),
+			join(dir, BACKUPS_DIR, partialName, "recordings", "d_1", "a.wav"),
+		)
+		const [done] = await completeDeferredLinks({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+		})
+		expect(done).toMatchObject({ kind: "taken", linkedFiles: 2, files: 4 })
+	})
+
+	it("a failed link fallback past the margin abandons the partial (skipped low-disk), never half in place", async () => {
+		const old = { fileVersion: 1, heldJournalFormat: 2, revision: 1 }
+		await seedState()
+		await writeMarker(old)
+		const copied =
+			Buffer.byteLength(JOBS) +
+			Buffer.byteLength(JOURNAL) +
+			Buffer.byteLength(JSON.stringify(old))
+		const first = await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: space(copied + BACKUP_MIN_FREE_BYTES),
+		})
+		expect(first).toMatchObject({ kind: "pending" })
+		const [done] = await completeDeferredLinks({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: space(copied + BACKUP_MIN_FREE_BYTES),
+			link: refuseLinks,
+		})
+		expect(done).toMatchObject({ kind: "skipped", reason: "low-disk" })
+		expect(await backups()).toEqual([])
 	})
 })

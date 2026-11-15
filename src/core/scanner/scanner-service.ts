@@ -2300,6 +2300,14 @@ export class ScannerService extends EventEmitter {
 		return this.settings().enabled
 	}
 
+	/**
+	 * Settles once a pre-migration backup this start took has its recordings linked and is in
+	 * place (or was abandoned): the start never waits on it (ScannerPersistence.backupSettled).
+	 */
+	stateBackupSettled(): Promise<void> {
+		return this.persistence.backupSettled()
+	}
+
 	status(): ScannerStatus {
 		const captureCounters = this.deps.iqCapture?.counters?.()
 		const s = this.settings()

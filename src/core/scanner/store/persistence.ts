@@ -29,6 +29,7 @@ import { join, resolve } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
 import {
+	completeDeferredLinks,
 	ensurePreMigrationBackup,
 	noteCleanLoad,
 	SCANNER_STATE_FILE_VERSION,
@@ -681,6 +682,16 @@ export class ScannerPersistence {
 	>
 	/** A clean load is counted toward the backup's expiry once per process (noteCleanLoad). */
 	private cleanLoadNoted = false
+	/** The backup's second half (completeDeferredLinks), started by the first load; never rejects. */
+	private backupLinks: Promise<void> | null = null
+
+	/**
+	 * Settles once the recordings of a pending backup are linked and it is in place (or it was
+	 * abandoned); at once when there was none. The load never waits on it.
+	 */
+	backupSettled(): Promise<void> {
+		return this.backupLinks ?? Promise.resolve()
+	}
 
 	/** Outcome of the pre-migration backup check (null before the first load). */
 	preMigrationBackup(): StateBackupOutcome | null {
@@ -741,20 +752,55 @@ export class ScannerPersistence {
 			now: this.now,
 			...this.backupOptions,
 		})
-		let loaded: LoadedState
 		try {
-			loaded = await this.loadState()
-		} catch (err) {
-			this.authorityHealth = "degraded"
-			this.loaded = false
-			throw err
+			let loaded: LoadedState
+			try {
+				loaded = await this.loadState()
+			} catch (err) {
+				this.authorityHealth = "degraded"
+				this.loaded = false
+				throw err
+			}
+			if (this.authorityHealth === "healthy" && !this.cleanLoadNoted) {
+				this.cleanLoadNoted = true
+				// Counts toward the backup's expiry; never throws.
+				await noteCleanLoad({ dir: this.root, logger: this.log, now: this.now })
+			}
+			return loaded
+		} finally {
+			// After the clean load is counted (both rewrite the receipt), never awaited.
+			this.startBackupLinks()
 		}
-		if (this.authorityHealth === "healthy" && !this.cleanLoadNoted) {
-			this.cleanLoadNoted = true
-			// Counts toward the backup's expiry; never throws.
-			await noteCleanLoad({ dir: this.root, logger: this.log, now: this.now })
-		}
-		return loaded
+	}
+
+	private startBackupLinks(): void {
+		// The recordings' links (one per recording) never hold up the start: this run's pending
+		// backup, or one an earlier start left pending, is completed in the background.
+		this.backupLinks ??= completeDeferredLinks({
+			dir: this.root,
+			logger: this.log,
+			now: this.now,
+			...(this.backupOptions.statfs
+				? { statfs: this.backupOptions.statfs }
+				: {}),
+			...(this.backupOptions.link ? { link: this.backupOptions.link } : {}),
+		})
+			.then(outcomes => {
+				const own = this.backupOutcome
+				if (own?.kind !== "pending") return
+				const done = outcomes.find(
+					o => o.kind !== "none" && o.fromFormat === own.fromFormat,
+				)
+				this.backupOutcome = done ?? {
+					kind: "skipped",
+					reason: "copy-failed",
+					fromFormat: own.fromFormat,
+					toFormat: own.toFormat,
+				}
+			})
+			.catch((err: unknown) =>
+				this.log.warn({ err }, "Completing the scanner state backup failed"),
+			)
 	}
 
 	private async loadState(): Promise<LoadedState> {
