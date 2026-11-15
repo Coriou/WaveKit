@@ -1,0 +1,14 @@
+# dsd-fme -i /dev/stdin -fa -o null: output for scripts/fixtures/dstar-gmsk.mjs (synthetic, see synthetic-frames.test.ts)
+02:34:44 Sync: +DSTAR HEADER  RPT 2: DIRECT   RPT 1: DIRECT   DST: CQCQCQ   SRC: N0CALL  TEST _UNK: b @SYNTHAETIC BD-STACR TX U   DIURECT U DIREUCT  CUQCQCQU
+02:34:44 Sync: +DSTAR VOICE   SLOW DATA - HEADER FORMAT (CRC ERR)
+02:34:44 Sync: +DSTAR VOICE   SLOW DATA - HEADER FORMAT (CRC ERR)
+02:34:44 Sync: +DSTAR VOICE   RPT 2: DIRECT   RPT 1: DIRECT   DST: CQCQCQ   SRC: N0CALL  TEST INTERRUPTED
+02:34:44 Sync: +DSTAR VOICE   _UNK: ETIC BD-STACR TX U   DIURECT U DIREUCT  CUQCQCQU  N0CUALL
+02:34:44 Sync: +DSTAR VOICE   SLOW DATA - HEADER FORMAT (CRC ERR)
+
+End of /dev/stdin
+
+Total audio errors: 0
+Total header errors: 0
+Total irrecoverable header errors: 0
+Exiting.

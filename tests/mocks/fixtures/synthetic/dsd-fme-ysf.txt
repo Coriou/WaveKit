@@ -1,0 +1,19 @@
+# dsd-fme -i /dev/stdin -fa -o null: output for scripts/fixtures/ysf-c4fm.mjs (synthetic, see synthetic-frames.test.ts)
+02:34:45 Sync: +YSF  FN: 10/10 [31mFICH (CRC ERR) [0m[31mDCH (CRC ERR) [0m[31mDCH (CRC ERR) [0m[0m
+02:34:45 Sync: +YSF  FN: 10/10 [31mFICH (CRC ERR) [0m[31mDCH (CRC ERR) [0m[31mDCH (CRC ERR) [0m[0m
+02:34:45 Sync: +YSF  V/D2 Group/CQ -Simplex HC FN: 1/7 DST: ALL        SRC: N0CALL     U/L:            D/L:            [0m
+02:34:45 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 1/7 DST: ALL        [0m
+02:34:45 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 2/7 SRC: N0CALL    [0m
+02:34:45 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 3/7 U/L:           [0m
+02:34:45 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 4/7 D/L:           [0m
+02:34:45 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 5/7 RM1:       RM2:       [0m
+02:34:45 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 6/7 RM3:       RM4:       [0m
+02:34:45 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 7/7 [0m
+02:34:45 Sync: +YSF  V/D2 Group/CQ -Simplex TC FN: 1/7 DST: ALL        SRC: N0CALL     U/L:            D/L:            [0m
+
+End of /dev/stdin
+
+Total audio errors: 19
+Total header errors: 0
+Total irrecoverable header errors: 0
+Exiting.

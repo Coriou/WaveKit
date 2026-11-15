@@ -498,15 +498,23 @@ describe("dsd-fme voice-call metadata", () => {
 		expect(absent.voice[0]?.errors).toEqual({ crc: 0, fec: 0 })
 	})
 
-	it("publishes an NXDN RAN, including 0 and 99", () => {
-		const ran = (value: number) =>
-			replayVoice(
+	it("publishes an NXDN RAN, including 0 and 63", () => {
+		// dsd-fme's SACCH RAN print, attested by two clean frames, then the VCALL.
+		const ran = (value: number) => {
+			const v = String(value).padStart(2, "0")
+			return replayVoice(
 				[
-					{ atMs: 0, text: "Sync: +NXDN96" },
-					{ atMs: 0, text: `VOICE RAN=${value} TGT=7 SRC=8` },
+					{ atMs: 0, text: `Sync: NXDN96  RDCH Voice  RAN ${v} PF 1/4` },
+					{ atMs: 40, text: `Sync: NXDN96  RDCH Voice  RAN ${v} PF 2/4` },
+					{ atMs: 80, text: `Sync: NXDN96  RDCH Voice  RAN ${v} PF 3/4 VCALL` },
+					{
+						atMs: 80,
+						text: " Group Call - Half Duplex 4800bps/EHR (00) - Src=8 - Dst/TG=7 ",
+					},
 				],
 				500,
 			).voice[0]
+		}
 		expect(ran(12)).toMatchObject({
 			protocol: "nxdn96",
 			talkgroup: 7,
@@ -515,7 +523,7 @@ describe("dsd-fme voice-call metadata", () => {
 			errors: { crc: 0, fec: 0 },
 		})
 		expect(ran(0)?.ran).toBe(0)
-		expect(ran(99)?.ran).toBe(99)
+		expect(ran(63)?.ran).toBe(63)
 		expect(ran(12)).not.toHaveProperty("colourCode")
 	})
 

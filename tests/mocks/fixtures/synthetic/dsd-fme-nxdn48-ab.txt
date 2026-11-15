@@ -1,0 +1,36 @@
+# dsd-fme -i /dev/stdin -fi -o null: output for scripts/fixtures/nxdn-4fsk.mjs (synthetic, see synthetic-frames.test.ts)
+02:34:48 Sync: NXDN48  RDCH [36mData  [0m[36m        [0mPF 1/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=1234 - Dst/TG=5678 [0m
+02:34:48 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 1/4
+02:34:48 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 2/4
+02:34:48 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 3/4
+02:34:48 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 4/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=1234 - Dst/TG=5678 [0m
+02:34:48 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 1/4
+02:34:48 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 2/4
+02:34:48 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 3/4
+02:34:48 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 4/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=1234 - Dst/TG=5678 [0m
+02:34:49 Sync: NXDN48  RDCH [36mData  [0m[36m RAN 05 [0mPF 1/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=4321 - Dst/TG=5678 [0m
+02:34:49 Sync: NXDN48  RDCH [36mData  [0m[36m RAN 05 [0mPF 1/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=4321 - Dst/TG=5678 [0m
+02:34:49 Sync: NXDN48  RDCH [36mData  [0m[36m RAN 05 [0mPF 1/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=4321 - Dst/TG=5678 [0m
+02:34:49 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 1/4
+02:34:49 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 2/4
+02:34:49 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 3/4
+02:34:49 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 4/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=4321 - Dst/TG=5678 [0m
+02:34:49 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 1/4
+02:34:49 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 2/4
+02:34:49 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 3/4
+02:34:49 Sync: NXDN48  RDCH [32mVoice [0m[36m RAN 05 [0mPF 4/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=4321 - Dst/TG=5678 [0m
+
+End of /dev/stdin
+
+Total audio errors: 192
+Total header errors: 0
+Total irrecoverable header errors: 0
+Exiting.

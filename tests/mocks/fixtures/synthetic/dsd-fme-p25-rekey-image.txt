@@ -1,0 +1,22 @@
+# dsd-fme ed1d1d6 (core image) -fa output for scripts/fixtures/p25-c4fm.mjs (rekeys: 1) through wavekit-chan at 1.024 Msps (synthetic)
+02:30:31 Sync: +P25p1 NAC: 000;  duid:EE
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  TDU
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  HDU
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  LDU1
+ Group Voice Channel User - Group 4321 Source 1234567
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  LDU2
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  LDU1
+ Group Voice Channel User - Group 4321 Source 1234567
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  LDU2
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  TDU
+Sync: no sync
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  duid:EE
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  TDU
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  HDU
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  LDU1
+ Group Voice Channel User - Group 4321 Source 1234567
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  LDU2
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  LDU1
+ Group Voice Channel User - Group 4321 Source 1234567
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  LDU2
+02:30:31 Sync: +P25p1 NAC/CC: 2A5;  TDU

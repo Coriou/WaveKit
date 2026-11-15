@@ -693,6 +693,24 @@ describe("HfdlDecoder", () => {
    `["-Y", "minlevel=<dB>"]` sets the lowest level rtl_433 may use, and
    `["-Y", "autolevel"]` keeps the automatic level.
 
+multimon-ng prints FLEX alphanumeric pages as
+`FLEX|2026-01-02 03:04:05|1600/2/K/A|05.012|001234567|ALN|text` and numeric,
+tone and unknown pages as `FLEX: 2026-01-02 03:04:05 1600/2/A 05.012 [001234567] NUM 12345`.
+With timestamps off they are `FLEX|1600/2/K/A|05.012|001234567|ALN|text` and
+`FLEX|1600/2/A|05.012|[001234567]|NUM 12345`; group pages list the member
+capcodes after the first (`groupCapcodes`). The adapter's `frequency` field
+holds the cycle.frame value, `fragment` the K/C/F flag.
+
+To check a whole chain without on-air traffic,
+`tests/integration/synthetic-frames.test.ts` builds bit-level synthetic
+transmissions (APRS, FLEX, D-STAR, YSF, P25 phase 1, NXDN48/96, dPMR; generators
+in `scripts/fixtures/`) as cu8 IQ at 1.024 and 2.4 Msps, runs them through
+wavekit-chan and each adapter's production command line, and checks the decoded
+fields, scanner evidence and Activity row. Cases whose binaries are missing skip;
+`WAVEKIT_SYNTH_IMAGE=<core image> pnpm exec vitest run tests/integration/synthetic-frames.test.ts`
+runs every command inside the core image instead (raw csdr path and direwolf
+included).
+
 ### Wireless M-Bus meters (868.95 MHz)
 
 Mode C/T uplinks need at least 1.2 Msps: 100,000 bits/s × 12 samples/bit.
@@ -1031,8 +1049,53 @@ failures and `-RAS` output never count. MBCC has no own CRC
 MS voice LC does not borrow CC from a pending checked header: the opening CC
 precedes slot-type decoding (`dmr_ms.c:676–686`). Checked TG/SRC remain usable
 with CC unknown while that header awaits its closing-sync check.
-NXDN accepts only current CRC-checked ` RAN 03  FACCH2`/UDCH output
+NXDN accepts current CRC-checked ` RAN 03  FACCH2`/UDCH output
 (`nxdn_deperm.c:1390–1437`); failure omits RAN, and SACCH/CAC print cached RAN.
+A SACCH ` RAN 05 PF 2/4` print counts only when two consecutive frame lines (at
+most 500 ms apart) both passed their own SACCH CRC (`PF` digit, not `X`) and
+printed the same RAN: the print is the RAN stored by the last passing SACCH.
+`Src=1234 - Dst/TG=5678` counts only on the line after a traffic-channel frame
+line (`RDCH`/`RTCH`, never `RCCH`) ending in `VCALL`, printed after that FACCH1 or
+SACCH-superframe CRC; the same print after `VCALL_ASSGN`, `DCALL_ASSGN`, `TX_REL`
+or `DISC` names another channel's call or an ending, and is ignored. A call heard
+by RAN alone takes the unit IDs only within 960 ms of its start (three NXDN48
+superframes: a tune-in may wait up to five frames and one failed SACCH costs a
+superframe); later IDs are another over. A clean frame ending in `TX_REL`,
+`TX_REL_EX` or `DISC` ends the call. The older `RAN=` and `TGT=/SRC=` prints are
+no longer read.
+P25 phase 1 talkgroup and source come from the link control print ` Group Voice
+Channel User - Group 4321 Source 1234567`, which both callers (LDU1, TDULC) print
+only after the RS(24,12,13) check; ` Unit to Unit Voice Channel User - Target 7
+Source 9` gives the source and a target unit (`p25.unitTarget`, no talkgroup). The
+NAC on the call is the last sync line whose NID decoded. A `TDU` (or TDULC) ends
+the call, so a station keying up again starts a new one. A call that ends before it
+was announced still emits its `call_start` first, and a failed NID (`duid:EE`) gives
+no NAC.
+D-STAR uses the slow-data copy of the header (` RPT 2: … RPT 1: … DST: … SRC: …`,
+printed only when its CRC matches; the radio header before it on a `+DSTAR
+HEADER` line has no FCS check): MY is the callsign, DST the UR call. A `+DSTAR
+HEADER` line ends the ongoing call (a new over, even from the same station or
+with a failed slow-data copy), and a different checked MY starts the next
+station's call. Without a checked header there is no D-STAR call; the older
+`MY:`/`UR:` prints and free-text (`TEXT:`) slow data are never an identity.
+dsd-fme checks a slow-data header only in a superframe whose slow data starts
+with a header group: with a synthetic spec-shaped stream (data sync in voice
+frame 0, a 20-character text message before the header) that is one superframe
+in thirteen. Whether real radios yield a callsign therefore depends on their
+slow-data cycle; no real radio has been tested.
+YSF uses the source callsign of a header/terminator CSD1 (`DST: … SRC: …`) or V/D
+type 2 frame (`FN: 2/7 SRC: …`), each printed only after its own DCH CRC; a CSD1
+that passed counts even when the CSD2 after it printed `DCH (CRC ERR)`, but such a
+line's link stays unverified. A YSF call starts on a frame whose FICH decoded
+(`HC|CC FN: n/m`), whatever its DCHs printed; a header frame (`HC`) ends the
+ongoing call and the terminator (`TC`) ends the call, also when a DCH failed,
+and starts none. Its callsign can follow its start. dPMR TG/Src
+prints are not used: dsd-fme marks an ID OK when its CRC failed but two Hamming
+words looked correctable, so a dPMR call carries the protocol only and starts on
+two identical ID prints at most 240 ms apart (one per FS2 pair, every 160 ms).
+Calls of the catalogue's `auto` mode (`-fa`) cover DMR, P25, YSF, D-STAR and
+X2-TDMA; dsd-fme turns NXDN and dPMR off in that mode, so they need a decoder with
+`mode: nxdn`, `nxdn48` or `dpmr`.
 Other protocols also require a known checked print format;
 unknown formats default to unverified. Activity placement protection follows the
 same clean check: only `verified: true`, `crcErr: false`, absent/zero `fecErrs`

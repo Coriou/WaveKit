@@ -1,0 +1,11 @@
+# dsd-fme ed1d1d6 (core image) -fa output for scripts/fixtures/ysf-c4fm.mjs through wavekit-chan at 2.4 Msps (synthetic)
+01:14:56 Sync: +YSF  FN: 10/10 FICH (CRC ERR) DCH (CRC ERR) DCH (CRC ERR)
+01:14:56 Sync: +YSF  V/D2 Group/CQ -Simplex HC FN: 1/7 DST: ALL        SRC: N0CALL     DCH (CRC ERR)
+01:14:56 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 1/7 DST: ALL
+01:14:56 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 2/7 SRC: N0CALL
+01:14:56 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 3/7 U/L:
+01:14:56 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 4/7 D/L:
+01:14:56 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 5/7 RM1:       RM2:
+01:14:56 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 6/7 RM3:       RM4:
+01:14:56 Sync: +YSF  V/D2 Group/CQ -Simplex CC FN: 7/7
+01:14:56 Sync: +YSF  V/D2 Group/CQ -Simplex TC FN: 1/7 DST: ALL        SRC: N0CALL     U/L:            D/L:
