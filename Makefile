@@ -16,7 +16,8 @@
 	sdr-host-clean \
 	fixtures-download fixtures-download-all fixtures-convert \
 	fixtures-test fixtures-test-local \
-	chan-build chan-test
+	chan-build chan-test \
+	truth
 
 # SDR-host variables (preserved from prior Makefile)
 SDR_HOST_TAG ?= latest
@@ -24,6 +25,11 @@ SDR_HOST_PLATFORMS ?= linux/arm64
 SDR_HOST_BUNDLE_ARGS ?=
 SDR_HOST_IMAGE_ARGS ?=
 SDR_HOST_IMAGER_ARGS ?=
+
+# Truth scorecard (make truth): the labels, the scanner checkout scored, extra flags.
+TRUTH ?= synthetic
+TREE ?= .
+TRUTH_ARGS ?=
 
 # Dev container (used by fixtures-test which exec's into the dev stack)
 DEV_CONTAINER ?= wavekit-api
@@ -206,3 +212,9 @@ chan-build: ## Build wavekit-chan and wavekit-iqcap on the host (needs a Rust to
 
 chan-test: ## Run wavekit-chan unit/property tests (crate only; no benches)
 	@cargo test --release --locked --manifest-path native/wavekit-chan/Cargo.toml
+
+# === Truth scorecard ===
+
+truth: ## Score a scanner revision against labels: TRUTH=<labels dir|synthetic> [TREE=<checkout>] [TRUTH_ARGS=...]; exit 1 if worse than the limits
+	@node scripts/bench/scanner-quality/build-against.mjs --tree "$(TREE)" --out output/bench/truth-scorecard.mjs
+	@node output/bench/truth-scorecard.mjs --truth "$(TRUTH)" $(TRUTH_ARGS)

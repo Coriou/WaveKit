@@ -23,6 +23,8 @@ import type {
 	IqCaptureView,
 	IqCaptureRateHz,
 } from "../../../src/core/scanner/iq-capture-contract.js"
+import type { ReplayPoolAdapter } from "../../../src/core/iq-capture/pool-adapter.js"
+import type { AnalogTrialRunner } from "../../../src/core/scanner/scanner-redesign-contract.js"
 import {
 	IQ_CAPTURE_MAX_CONCURRENT,
 	IQ_CAPTURE_MAX_MS,
@@ -39,6 +41,7 @@ import type {
 } from "../../../src/core/spectrum/types.js"
 import type { ScannerDiscoveryEventData } from "@wavekit/api-types"
 import { ArbiterFakeTuner } from "../../../tests/mocks/scanner/arbiter-fakes.js"
+import { FakeReceiverLedger } from "../../../tests/mocks/fake-receiver-ledger.js"
 import { VirtualClock } from "./virtual-clock.js"
 
 const SOURCE = "rtl"
@@ -133,6 +136,8 @@ export interface RunRecord {
 	transients: number
 	/** Capture requests the modelled port refused. */
 	refusedCaptures: { busy: number; rateLimited: number }
+	/** Steps that gave up waiting for in-flight I/O (`busy`): 0 for a deterministic run. */
+	busyOverruns?: number
 }
 
 export interface IqChunkSource {
@@ -151,6 +156,8 @@ export interface IqChunkSource {
 
 class Fanout extends EventEmitter {
 	readonly branches = new Map<string, PassThrough>()
+	/** The source's tuning ledger: every chunk advances its position, as SourceManager does. */
+	ledgerFeed: FakeReceiverLedger | null = null
 	addBranch(config: { id: string; highWaterMark?: number }): PassThrough {
 		const stream = new PassThrough({
 			highWaterMark: config.highWaterMark ?? 262_144,
@@ -179,12 +186,14 @@ class Fanout extends EventEmitter {
 		}
 	}
 	write(chunk: Buffer): void {
+		this.ledgerFeed?.advance(chunk.length)
 		for (const s of this.branches.values()) s.write(chunk)
 	}
 }
 
 class Sources extends EventEmitter {
 	readonly caps = new Map<string, SourceCaps>()
+	tuningLedger: FakeReceiverLedger["ledger"] | undefined
 	readonly streams = new Map<string, PassThrough>()
 	constructor(caps: SourceCaps) {
 		super()
@@ -210,6 +219,9 @@ class Sources extends EventEmitter {
 /** No decoder binaries: every ephemeral decoder start fails like a missing program. */
 class Decoders extends EventEmitter {
 	private readonly held = new Map<string, Set<string>>()
+	constructor(private readonly types: Readonly<Record<string, string>> = {}) {
+		super()
+	}
 	createEphemeralDecoder(): Promise<never> {
 		return Promise.reject(new Error("no decoder binaries in the benchmark"))
 	}
@@ -235,12 +247,47 @@ class Decoders extends EventEmitter {
 	getAllStatus(): [] {
 		return []
 	}
-	getStatus(): undefined {
-		return undefined
+	getStatus(id: string): { id: string; type: string } | undefined {
+		const type = this.types[id]
+		return type === undefined ? undefined : { id, type }
 	}
 }
 
 const turn = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
+
+/** Clock step of the idle tail (no IQ fed): 250 ms. */
+const IDLE_STEP_MS = 250
+/**
+ * Longest the idle tail goes on for `idleUntil`: 120 s of virtual time, 15 captures' full replay
+ * plans (IQ_REPLAY_MAX_TRIALS = 8 trials of a nominal 1 s each) in the queue at the run's end.
+ */
+const IDLE_EXTRA_MAX_MS = 120_000
+/**
+ * Real turns one step waits for in-flight I/O (`busy`): 200 000, about 2 s of an idle event loop
+ * (10 µs a turn), 20 times a recording's slowest write measured on a loaded host (about 100 ms,
+ * an fsync). Past it the step goes on and the run counts an overrun (`busyOverruns`).
+ */
+const BUSY_TURNS_MAX = 200_000
+
+/** What the scanner's replay queue runs its trials on (`runScanner` option `replay`). */
+export interface ReplayDoubles {
+	/** The probe pool as the queue sees it (createPoolReplayProbes' surface). */
+	probes: ReplayPoolAdapter
+	/** The analog replay trial (ScannerServiceDeps.analogTrial). */
+	analog: AnalogTrialRunner
+}
+
+/** What `inspect` may read of the run besides the service. */
+export interface InspectContext {
+	/** Scene ms of an engine sample index (the engine counts from its branch's first byte). */
+	sceneMsOfSample(sample: number): number
+	/** The capture requests so far, by capture id (live: updated as the run goes). */
+	readonly captures: ReadonlyMap<string, CaptureRecord>
+	/** The scanner's state directory (removed after the run). */
+	readonly stateDir: string
+	/** The source id the run feeds. */
+	readonly sourceId: string
+}
 
 interface Internals {
 	store: { discoveryIdOf(observationId: string): string | undefined }
@@ -263,14 +310,69 @@ export async function runScanner(
 		 */
 		captureLimits?: boolean
 		/** Diagnostics: called once with the service before it starts (wrap internals to trace). */
-		inspect?: (service: ScannerService, sceneNow: () => number) => void
+		inspect?: (
+			service: ScannerService,
+			sceneNow: () => number,
+			ctx: InspectContext,
+		) => void
+		/**
+		 * Prove the tuned centre and rate in a tuning ledger, as the live receiver's commanded tuning
+		 * is: tracks are `commanded`, so the analog recorder records (unverified tuning refuses
+		 * every recording). Default off (the published baselines ran unproven). Not with `centreAt`.
+		 */
+		provenTuning?: boolean
+		/** Noise fed after the scene (ms; default 1 000) so open tracks close and captures finish. */
+		tailMs?: number
+		/**
+		 * Virtual time (ms; default 0) the clock then runs on with no IQ, in IDLE_STEP_MS steps: the
+		 * scanner's timers (a provisional recording's grace, identify deadlines) fire, at no DSP cost.
+		 */
+		idleTailMs?: number
+		/**
+		 * The scanner is done with the run (its replay queue drained, its recordings settled): the
+		 * idle tail goes on, IDLE_STEP_MS at a time, until this holds or IDLE_EXTRA_MAX_MS passed.
+		 */
+		idleUntil?: () => boolean
+		/** Called after the run, before the service stops (its state directory still exists). */
+		beforeStop?: (service: ScannerService) => Promise<void> | void
+		/**
+		 * The scanner's state directory, kept after the run (default: a fresh temp dir, removed):
+		 * runs that share one continue its discovery store, as a restarted core does.
+		 */
+		stateDir?: string
+		/** Virtual epoch of scene time 0 (default T0_MS); runs sharing a state dir move it on. */
+		t0Ms?: number
+		/**
+		 * Real I/O the scanner started is still in flight (a recording being written): each step
+		 * then yields real turns until it is done (at most BUSY_TURNS_MAX), so the virtual clock
+		 * never runs ahead of the disk and two runs decide alike.
+		 */
+		busy?: () => boolean
+		/**
+		 * The scanner's own replay queue runs on the finished captures, as in production: the port
+		 * reports them finished, lets the queue claim, view and settle them, and the queue's probe
+		 * pool view and analog trial are these doubles (no decoder binaries offline). Absent: the
+		 * queue never gets a capture (the published baselines).
+		 */
+		replay?: ReplayDoubles
+		/** Decoder ids the decoder double reports a type for (getStatus), as the manager would. */
+		decoderTypes?: Readonly<Record<string, string>>
 	} = {},
 ): Promise<RunRecord> {
 	const fs = source.rateHz
-	const dir = mkdtempSync(join(tmpdir(), "wk-scanner-quality-"))
-	const clock = new VirtualClock(T0_MS - LEAD_IN_MS)
+	// Checked before anything is made (the state dir), so a refused run leaves nothing behind.
+	if (opts.provenTuning === true && source.centreAt)
+		throw new Error("benchmark: provenTuning does not follow retunes")
+	const dir =
+		opts.stateDir ?? mkdtempSync(join(tmpdir(), "wk-scanner-quality-"))
+	const removeDir = (): void => {
+		if (opts.stateDir === undefined)
+			rmSync(dir, { recursive: true, force: true })
+	}
+	const t0 = opts.t0Ms ?? T0_MS
+	const clock = new VirtualClock(t0 - LEAD_IN_MS)
 	const now = (): number => clock.now()
-	const sceneNow = (): number => clock.now() - T0_MS
+	const sceneNow = (): number => clock.now() - t0
 	const caps: SourceCaps = {
 		kind: "iq",
 		format: "U8_IQ",
@@ -280,6 +382,12 @@ export async function runScanner(
 	}
 	const sources = new Sources(caps)
 	const fanout = new Fanout()
+	if (opts.provenTuning === true) {
+		const ledger = new FakeReceiverLedger(SOURCE, { rateHz: fs, settleMs: 50 })
+		ledger.prove(source.centreHz, fs)
+		sources.tuningLedger = ledger.ledger
+		fanout.ledgerFeed = ledger
+	}
 	const tuner = new ArbiterFakeTuner()
 	tuner.addSource(SOURCE)
 	tuner.states.get(SOURCE)!.sampleRate = fs
@@ -295,6 +403,7 @@ export async function runScanner(
 	const discoveries = new Map<string, DiscoveryRecord>()
 	const captures = new Map<string, CaptureRecord>()
 	let transients = 0
+	let busyOverruns = 0
 	/** Engine sample index of scene time 0 (the engine counts from its branch's first byte). */
 	let engineSampleAtZero = 0
 	let fedSamples = 0
@@ -319,7 +428,7 @@ export async function runScanner(
 			epoch: 1,
 			rfHz: c.rfHz,
 			tuningTrust: "commanded",
-			capturedAtMs: T0_MS + start,
+			capturedAtMs: t0 + start,
 			durationMs: end - start,
 			gapSamples: 0,
 			...(c.rateHz !== 48_000 ? { rateHz: c.rateHz } : {}),
@@ -340,6 +449,30 @@ export async function runScanner(
 		if (c.observationId)
 			c.discoveryId =
 				internals.store.discoveryIdOf(c.observationId) ?? c.discoveryId
+		if (replay) {
+			views.set(c.captureId, view)
+			// The real port reports a capture finished once its file is written, never from inside
+			// the caller's own end(): one virtual millisecond later.
+			setTimeout(() => {
+				if (!views.has(c.captureId)) return
+				for (const l of [...finishedListeners]) l(view)
+			}, 0)
+		}
+	}
+	const replay = opts.replay ?? null
+	/** Finished captures the replay queue may claim (replay mode), and their holders. */
+	const views = new Map<string, IqCaptureView>()
+	const holders = new Map<string, string>()
+	const finishedListeners = new Set<(view: IqCaptureView) => void>()
+	const removedListeners = new Set<
+		(captureId: string, observationId: string | null) => void
+	>()
+	const remove = (captureId: string): void => {
+		const view = views.get(captureId)
+		if (!view) return
+		views.delete(captureId)
+		holders.delete(captureId)
+		for (const l of [...removedListeners]) l(captureId, view.observationId)
 	}
 	let nextCapture = 1
 	const limits = opts.captureLimits !== false
@@ -399,10 +532,19 @@ export async function runScanner(
 			return { captureId }
 		},
 		captureFor: () => ({ refused: "busy" as const }),
-		view: () => null,
-		onFinished: () => () => undefined,
-		onRemoved: () => () => undefined,
-		holderOf: () => undefined,
+		view: (captureId: string) => views.get(captureId) ?? null,
+		onFinished: (l: (view: IqCaptureView) => void) => {
+			finishedListeners.add(l)
+			return () => finishedListeners.delete(l)
+		},
+		onRemoved: (
+			l: (captureId: string, observationId: string | null) => void,
+		) => {
+			removedListeners.add(l)
+			return () => removedListeners.delete(l)
+		},
+		holderOf: (captureId: string) =>
+			views.has(captureId) ? (holders.get(captureId) ?? null) : undefined,
 		discard: (captureId: string) => {
 			const c = captures.get(captureId)
 			if (c && c.finishedMs === null) {
@@ -410,6 +552,7 @@ export async function runScanner(
 				c.endedMs = sceneNow()
 				c.finishedMs = sceneNow()
 			}
+			remove(captureId)
 			return true
 		},
 		end: (captureId: string) => {
@@ -418,8 +561,14 @@ export async function runScanner(
 			c.endedMs = sceneNow()
 			finish(c)
 		},
-		claim: () => false,
-		settle: () => undefined,
+		claim: (captureId: string, holder: string) => {
+			if (!views.has(captureId) || holders.has(captureId)) return false
+			holders.set(captureId, holder)
+			return true
+		},
+		settle: (captureId: string, holder: string) => {
+			if (holders.get(captureId) === holder) remove(captureId)
+		},
 		confirmLive: () => 0,
 		openReplay: () => null,
 		flush: () => undefined,
@@ -454,8 +603,9 @@ export async function runScanner(
 				releaseUnused: () => undefined,
 			} as never,
 			tuner: tuner as never,
-			decoders: new Decoders() as never,
+			decoders: new Decoders(opts.decoderTypes) as never,
 			digitalVoice: null,
+			...(replay ? { analogTrial: replay.analog } : {}),
 			liveDemod: null,
 			logger: pino({ level: "silent" }),
 			now,
@@ -465,14 +615,23 @@ export async function runScanner(
 		})
 	} catch (err: unknown) {
 		clock.uninstall()
-		rmSync(dir, { recursive: true, force: true })
+		removeDir()
 		throw err
 	}
 	const svc = service
+	// The replay queue's probe pool view (ScannerService.replayProbes): the doubles' instead.
+	if (replay)
+		(svc as unknown as { replayProbes: () => ReplayPoolAdapter }).replayProbes =
+			() => replay.probes
 	// Everything after install runs inside this try: a throwing `inspect`, a failing run or a
 	// rejecting stop() still restores the real timers and clocks (the nested finally).
 	try {
-		opts.inspect?.(svc, sceneNow)
+		opts.inspect?.(svc, sceneNow, {
+			sceneMsOfSample,
+			captures,
+			stateDir: dir,
+			sourceId: SOURCE,
+		})
 		svc.spectrum.on("pipeline", (sourceId: string, ev: PipelineEvent) => {
 			if (sourceId !== SOURCE) return
 			if (ev.kind === "transient") transients++
@@ -568,10 +727,17 @@ export async function runScanner(
 		const settle = async (): Promise<void> => {
 			await turn()
 			await turn()
+			for (let i = 0; opts.busy?.() === true; i++) {
+				if (i >= BUSY_TURNS_MAX) {
+					busyOverruns++
+					break
+				}
+				await turn()
+			}
 		}
 		/** Fires the scanner timers due up to scene time `ms`, then holds the clock there. */
 		const advanceTo = (ms: number): Promise<void> =>
-			clock.advanceTo(T0_MS + ms, settle)
+			clock.advanceTo(t0 + ms, settle)
 		await svc.start()
 		// Start-up: the passive job and its engine branch come up on real turns (state load and
 		// job start are async I/O). No IQ is fed and the virtual clock does not move, so how many
@@ -627,7 +793,8 @@ export async function runScanner(
 		}
 		// Let the open tracks close on quiet (hang) and finish what is pending.
 		const sceneEnd = sceneNow()
-		for (let ms = CHUNK_MS; ms <= TAIL_MS; ms += CHUNK_MS) {
+		const tailMs = opts.tailMs ?? TAIL_MS
+		for (let ms = CHUNK_MS; ms <= tailMs; ms += CHUNK_MS) {
 			const cpu0 = process.cpuUsage()
 			await advanceTo(sceneEnd + ms)
 			fanout.write(source.leadIn(chunk))
@@ -636,6 +803,26 @@ export async function runScanner(
 			cpuMicros += d.user + d.system
 		}
 		for (const c of captures.values()) finish(c)
+		const idleEnd = sceneNow() + (opts.idleTailMs ?? 0)
+		for (
+			let ms = sceneNow() + IDLE_STEP_MS;
+			ms <= idleEnd;
+			ms += IDLE_STEP_MS
+		) {
+			await advanceTo(ms)
+			await settle()
+		}
+		// Past the idle tail, on until `idleUntil` holds, at most IDLE_EXTRA_MAX_MS more.
+		if (opts.idleUntil)
+			for (
+				let ms = sceneNow() + IDLE_STEP_MS, end = ms + IDLE_EXTRA_MAX_MS;
+				ms <= end && !opts.idleUntil();
+				ms += IDLE_STEP_MS
+			) {
+				await advanceTo(ms)
+				await settle()
+			}
+		await opts.beforeStop?.(svc)
 		const finalIds = svc
 			.listDiscoveries({ limit: 10_000 })
 			.items.map((d: Discovery) => d.id)
@@ -660,13 +847,14 @@ export async function runScanner(
 			flaggedIds,
 			transients,
 			refusedCaptures: { ...refused },
+			busyOverruns,
 		}
 	} finally {
 		try {
 			await svc.stop()
 		} finally {
 			clock.uninstall()
-			rmSync(dir, { recursive: true, force: true })
+			removeDir()
 		}
 	}
 }

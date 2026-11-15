@@ -567,6 +567,56 @@ Quiet-band scenes run in the CI test too: `lo-spur` (1.024 Msps, 40 s; the tuner
 
 More scenes are for manual runs (`--scene`): `noise-1024k`, `noise-2400k` (120 s of noise only) and `spurs-1024k`, `spurs-2400k` (the same with a DC spike and three birdies), where every discovery is false and the report adds false discoveries per IQ hour, and `gfsk` (60 s of 40 ms narrowband GFSK bursts every 300 ms at 18 to 24 dB, each up to ±2 kHz off; ground truth one discovery). `--rule1 on|off` (the duty-aware TDMA median above, default on) and `--rule2 on|off` (the repeated-pass rule, default off) switch the two weak-signal rules for A/B runs, and the report lists every admission the repeated-pass rule made.
 
+### Truth scorecard
+
+`scripts/bench/scanner-quality.ts --truth <dir>` checks recorder honesty and identify verdicts against labelled transmissions, offline and deterministically. It runs the real scanner on the virtual clock as the quality benchmark does, with the analog recorder in the loop and the tuning proven (as the receiver's commanded tuning is live, so the recorder records as it does live), and scores the recordings it keeps:
+
+- **False voice**: a kept analog recording whose label on its channel is not analog voice (DMR, POCSAG, a carrier, noise). `digitalKeptAsVoice` counts the DMR and POCSAG ones.
+- **Missed voice**: an analog voice transmission that no single kept recording holds whole (start and end within 300 ms). A transmission split over two files counts as missed (`splitVoice`).
+- **Identify**: per labelled signal, whether the discovery holding it names the label's protocol (right), another protocol (wrong) or none (unidentified).
+
+A recording counts as kept when its file is finalized and still on disk after the run, once every late verdict had time to settle: a 3 s noise tail, then 30 s of virtual time with no IQ, and on until the replay queue drained and every recording settled (at most 120 s more; what is left then counts in `unsettled`, gated at 0). Identify runs as in production: the scanner's own replay queue takes its finished captures one at a time and runs the real replay plan, the analog trial first. Only the decoders are doubles. They answer from the labels, 1 s of virtual time per trial. A capture holds a label when its IQ window covers at least 1 s of it (or all of it when shorter); a probe trial decodes when the label is its protocol (DMR, POCSAG). The analog trial reports voice for analog voice (with the label's CTCSS tone when it has one) and a bare carrier for a carrier. For DMR, POCSAG, noise or an unknown label it holds no measurement: the real trial measures audio and can be fooled, so the double never claims what only that measurement could (its voice verdict is ideal: a weak voice is always heard). A recorded always-on decode (multimon-ng or dsd-fme placed on a channel) is injected at its recorded offset through the scanner's ambient evidence path, with the receiver guard dsd-fme evidence gets. Recorded identify decodes (probe and replay) are not injected: the revision under test identifies for itself.
+
+The run prints the scorecard as one JSON line, then one line for a person to read (the last two lines of stdout), and exits 1 when a total misses the checked-in limits in `scripts/bench/scanner-quality/truth-thresholds.json`, 2 on bad arguments, labels or limits. Limits are per kind of case (`synthetic`, `capture`; a kind with no case in the run is not gated), each a `max` or a `min` on a total (`identifyRight` has a minimum, so an identify regression fails too; a run of some cases only, `--only`, checks the maximums alone). They ratchet: each is what the newest accepted scanner achieves, with no slack, and every file or transmission it still gets wrong is a named `exceptions` entry with its reason (its kind, case, metric, label and count). An exception takes exactly its count out of the totals (`excepted`, shown in the summary line), only rows on its channel (`frequencyHz`) and holding its time (`atMs`) when it names them, as every synthetic one does; a capture exception names neither (that would publish a real frequency), only its kind and label. One that no longer finds its rows fails the run, so an upstream fix removes it and the limits only tighten; one naming a scene that does not exist is refused. The capture limits are calibrated on one reference capture set, so another set brings its own file (`--thresholds`). `--truth synthetic` runs only the built-in scenes: 4 s POCSAG messages; the live pager shape, a paging channel whose bursts read analog FM (a transmitter's premodulation filter fills the valley between the tones), on a quiet band where a second capcode's pages land on a co-channel twin discovery and on a busy band where identify's replays come late; a DMR repeater (continuous 4FSK) with an always-on decoder, a DMR handheld conversation that only identify decodes, FM with noise keyed like speech next to a steady carrier, speech-like NFM with CTCSS on two channels, and a whole 28 s repeater ID. They run with a directory's captures too, unless `--synthetic off`.
+
+**Labels.** Captures stay where they are, read only; their labels live in a directory of their own, one `<name>.truth.json` per capture. Times are ms from the capture's first sample. A path-only example:
+
+```json
+{
+	"version": 1,
+	"capture": "/path/to/captures/<name>.cu8",
+	"centreHz": 455000000,
+	"rateHz": 1024000,
+	"startedAt": "2026-01-01T12:00:00.000Z",
+	"durationMs": 10000,
+	"complete": false,
+	"intervals": [
+		{
+			"frequencyHz": 455106250,
+			"startMs": 1200,
+			"endMs": 5200,
+			"label": "pocsag",
+			"source": "decoded-offline",
+			"confirmed": true
+		}
+	],
+	"decodes": [
+		{
+			"atMs": 5600,
+			"frequencyHz": 455106250,
+			"protocol": "pocsag",
+			"via": "ambient"
+		}
+	]
+}
+```
+
+`label` is `analog-voice`, `dmr`, `pocsag`, `carrier`, `noise` or `unknown` (never scored); `source` is `decoded-offline`, `decoded-live`, `ear` or `repeater-list`. Only `confirmed` intervals are scored (`--unconfirmed` scores proposals too). An analog voice interval may name its CTCSS tone (`ctcssHz`). With `complete: true` every transmission is labelled, so a kept recording that matches no label is false voice. `via` is `ambient`, `probe` or `replay`; only `ambient` decodes are injected, from the capture's start to 2 s past its end. A directory's captures run in name order as one session: each starts at its real offset from the first on the virtual clock, with the scanner state the earlier ones left, as a restarted core continues its discovery store. `--separate` gives each capture a fresh state.
+
+**Proposing labels.** `scripts/bench/scanner-truth-label.ts --captures <dir> --out <labels dir>` reads each `<name>.cu8` with its `.capture.json` (and its `.discoveries.json` and `.activity.json` when present). It finds the occupied channels (spectral peaks and the frequencies those files name, snapped to 3.125 kHz) and cuts each channel's on-air stretches. Each stretch is FM-demodulated and run through multimon-ng (POCSAG 512, 1 200 and 2 400) and dsd-fme (DMR: at least 3 frames with the same colour code and no CRC error). A stretch a decoder decodes is labelled and confirmed. A stretch a recorded live decode falls in (from its start to 1 s after its end) is proposed with that protocol, unconfirmed: on a channel that carries analog and digital overs, a decode next to an analog over says nothing about it. Every other stretch is proposed as `carrier` (its audio holds no modulation) or `unknown`, unconfirmed: listen to its WAV in `<labels dir>/<name>.segments/`, then set the label, `ctcssHz` if you hear a tone, and `confirmed`. The live decodes become the file's `decodes` (always-on decoders as `ambient`, identify probes as `probe`). Existing label files are kept unless `--force`. It writes only under `--out`; a malformed side file stops it with the file's path.
+
+**Scoring a revision.** `make truth TRUTH=<labels dir|synthetic> TREE=<checkout>` scores any checkout (a `git worktree add` of a candidate image's commit; `TREE` defaults to this one; `TRUTH_ARGS` passes more flags) and fails when the scorecard does (make reports any failure as exit 2; the bundle it builds, `output/bench/truth-scorecard.mjs`, keeps the scorecard's 1 and 2). It runs `node scripts/bench/scanner-quality/build-against.mjs --tree <checkout> --out <file.mjs>`, which bundles this harness against that checkout's scanner (`src/`, the test doubles and the workspace packages resolve there), so the same truth set and limits score every revision. `TRUTH=synthetic` needs no private data. A run of the synthetic scenes and 18 ten-second captures takes 2 to 4 minutes on a laptop, and two runs give the same scorecard: the virtual clock waits for every recording write in flight, and a step that waits too long counts in `ioOverruns`, gated at 0. Usage: [scripts/README.md](../scripts/README.md#benchscanner-qualityts).
+
 ### Why a DMR band scan found only Heard signals
 
 A sweep decides whether to probe a track at the end of its hop dwell, about 150 ms (3 blocks) after the settle, or at its gate's answer if a qualification lengthens the visit (at most 450 ms). A track that young carries no TDMA signature yet: the envelope autocorrelation needs at least 300 ms and the first track update that has it comes after 1 s. The spectral classifier labels a track of up to 4 blocks an OOK burst unless the band's ISM prior is below 1, and in a sweep the classifier saw no band prior when no job range at that frequency named protocols (a 135 to 174 MHz range is enclosed by no single built-in plan). So every young land-mobile track became an ISM burst, which has no probe mode: no probe, no deferral, no decode, and the discovery stayed `activity` or `candidate`. Identify was not affected because it uses the band-plan priors. Fixed: a sweep over a range that names no protocols takes the band plan's ISM prior at that frequency, except inside the OOK short-range-device allocations (314 to 316, 433.05 to 434.79, 863 to 870 and 902 to 928 MHz), where a short burst stays an OOK burst. A second cause: the dsd-fme `auto` (DMR) mode held for 600 ms, below a DMR late entry (about 1.8 s); its hold is now 1 800 ms (which also lengthens P25 and other `auto` probes). Ruled out: hop dwell and the probe budget. Still conditional: the CPU guard defers probes when the container runs above 90 % of its CPU quota, and such deferrals are recorded as `budget`.

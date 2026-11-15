@@ -84,6 +84,27 @@ node output/bench/scanner-quality.mjs --file capture.cu8 --rate 2400000 --centre
 `--file` replays a CU8 capture. With no ground truth it prints counts only: tracks, gate passes,
 discoveries, labels and planned trials.
 
+`--truth <dir>` is the truth scorecard ([SCANNER.md](../docs/SCANNER.md#truth-scorecard)): the
+synthetic truth scenes plus the labelled captures of `<dir>` (`*.truth.json`), with the analog
+recorder in the loop. It prints the scorecard JSON and one summary line and exits 1 when it is
+worse than `scripts/bench/scanner-quality/truth-thresholds.json`. Labels are proposed by
+`scanner-truth-label.ts` (offline multimon-ng and dsd-fme on each on-air stretch, plus the live
+decodes recorded with the capture); a person confirms the rest by ear.
+
+```bash
+node output/bench/scanner-quality.mjs --truth synthetic
+node output/bench/scanner-quality.mjs --truth /path/to/labels [--synthetic off] [--separate] \
+  [--only a,b] [--unconfirmed] [--thresholds file.json] [--out scorecard.json]
+pnpm exec esbuild scripts/bench/scanner-truth-label.ts --bundle --platform=node --format=esm \
+  --packages=external --outfile=output/bench/scanner-truth-label.mjs
+node output/bench/scanner-truth-label.mjs --captures /path/to/captures --out /path/to/labels \
+  [--only <name>] [--multimon <path>] [--dsd-fme <path>] [--no-decoders] [--force]
+# the same scorecard against another revision's scanner (a git worktree of it), or:
+#   make truth TRUTH=/path/to/labels TREE=/path/to/checkout
+node scripts/bench/scanner-quality/build-against.mjs --tree /path/to/checkout --out output/bench/sq-other.mjs
+node output/bench/sq-other.mjs --truth /path/to/labels
+```
+
 ### `demod-test.sh`
 
 A shell script to test the manual demodulation pipeline on recorded IQ files. Useful for replicating the production `csdr` pipeline and verifying decodability with `multimon-ng`.
