@@ -107,9 +107,10 @@ function scoresOf(input: IqReplayPlanInput): Map<ScannerProtocol, number> {
 
 describe("planReplayTrials analog order", () => {
 	// A paging prior whose pager probe the track rules out (500 Hz, narrow): no pager trial is
-	// planned, so the known analog trial leads the data burst as it does outside a paging range.
-	// The property below found it (seed 1159340361, path 88:1:4:6:9:8).
-	it("a known analog leads a data burst in a paging range with no pager trial", () => {
+	// planned, and in a paging range a data burst still runs its data trials (here rtl433) before
+	// the analog trial, the known one included, which is then planned unflagged. The property below
+	// once expected the known analog first here (seed 1159340361, path 88:1:4:6:9:8): a stale oracle.
+	it("a data burst in a paging range runs its data trials before a known analog, even with no pager trial", () => {
 		const out = planReplayTrials({
 			capture: {
 				captureId: "c1",
@@ -129,10 +130,11 @@ describe("planReplayTrials analog order", () => {
 			narrowRaster: false,
 		})
 		expect(out.some(t => familyOf(t.protocol) === "pager")).toBe(false)
-		expect(out[0]).toMatchObject({
+		expect(out[0]).toMatchObject({ protocol: "ism", known: false })
+		expect(out.at(-1)).toMatchObject({
 			kind: "analog",
 			protocol: "analog-fm",
-			known: true,
+			known: false,
 		})
 	})
 
@@ -199,32 +201,33 @@ describe("planReplayTrials analog order", () => {
 						c.known !== null &&
 						c.priors[c.known] !== 0 &&
 						REPLAYABLE.has(c.known)
-					const analogBehindPager =
-						knownAnalog &&
+					// In a paging range the pager trials, and on a data burst any other decoder, run before
+					// the analog trial (the planner's paging groups); a known analog trial behind them is
+					// planned unflagged. As in replay-plan.test.ts.
+					const pagerTrials = out.filter(
+						t => t.kind !== "analog" && familyOf(t.protocol) === "pager",
+					)
+					const othersFirst =
 						inPagerRange(c.priors) &&
-						out.some(
-							t => t.kind !== "analog" && familyOf(t.protocol) === "pager",
-						)
-					const knownPlanned = replayable || (knownAnalog && !analogBehindPager)
+						(pagerTrials.length > 0 ||
+							(input.track !== null &&
+								isDataBurst(input.track, c.priors) &&
+								out.some(t => t.kind !== "analog")))
+					const knownPlanned = replayable || (knownAnalog && !othersFirst)
 					if (knownPlanned)
 						expect(out[0]).toMatchObject({ protocol: c.known, known: true })
 					expect(out.filter(t => t.known)).toHaveLength(knownPlanned ? 1 : 0)
 					if (analogs.length === 1) {
 						const analog = analogs[0]!
-						// In a paging range a known analog trial runs after the pager trials, unflagged.
-						const pagerTrials = out.filter(
-							t => t.kind !== "analog" && familyOf(t.protocol) === "pager",
-						)
-						const pagerFirst = inPagerRange(c.priors) && pagerTrials.length > 0
 						// A bursty data emission runs its analog trial last (unless it is the known lead).
 						const dataLast =
 							input.track !== null &&
 							isDataBurst(input.track, c.priors) &&
-							!(knownAnalog && !pagerFirst)
+							!(knownAnalog && !othersFirst)
 						if (dataLast) {
 							expect(out.indexOf(analog)).toBe(out.length - 1)
 							if (knownAnalog) expect(analog.known).toBe(false)
-						} else if (knownAnalog && pagerFirst) {
+						} else if (knownAnalog && othersFirst) {
 							expect(analog.known).toBe(false)
 							expect(out.indexOf(analog)).toBe(pagerTrials.length)
 						} else if (knownAnalog) {

@@ -397,7 +397,30 @@ describe("planReplayTrials", () => {
 		expect(capped.some(t => t.mode.options["mode"] === "m7")).toBe(false)
 	})
 
-	// Feature: web-gaps-11, Property 14: Known first, decays safely (replay planner side)
+	// The property below found it on main (seed -219528448, path 65:5:7:1:1:10:8:11): a wide flat
+	// data burst under a paging prior with no pager trial planned. The paging groups still run its
+	// data trials before the known analog trial, which is then planned unflagged.
+	it("a known analog runs after a paging-range data burst's data trials, unflagged", () => {
+		const track = trackOf({ obwHz: 22_501, spectralShape: "flat" })
+		const priors = { pocsag: 1, ism: 2 }
+		expect(isDataBurst(track, priors)).toBe(true)
+		const out = planReplayTrials(
+			input({
+				track,
+				knownProtocol: "analog-fm",
+				priors,
+				narrowRaster: false,
+			}),
+		)
+		expect(out.some(t => t.kind !== "analog")).toBe(true)
+		expect(out.at(-1)).toMatchObject({
+			kind: "analog",
+			protocol: "analog-fm",
+			known: false,
+		})
+		expect(out.filter(t => t.known)).toEqual([])
+	})
+
 	// Validates: Requirements 1.7, 6.4
 	it("property: at most 8, known first when replayable, unique modes, rtl433 only for ISM, never ambient; analog only as the one replay trial", () => {
 		fc.assert(
