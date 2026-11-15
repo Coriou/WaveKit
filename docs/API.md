@@ -6578,7 +6578,7 @@ filename="<basename>"`, `Accept-Ranges: none`, `Cache-Control: no-store`. No
 browser player must buffer the file to seek. The id is a listed `id` or a
 recording key: an Activity row's `recording.id` plays as it is (`scan:…` keys
 are inventory ids; a `dsd~<call name>` key is served from the first dsd-fme
-directory that holds it). The id is checked against `RECORDING_INVENTORY_ID`
+directory that holds it, for a name the listing would list only). The id is checked against `RECORDING_INVENTORY_ID`
 or `RECORDING_DSD_KEY` before any filesystem lookup and resolved again at
 request time with the listing's rules; the opened file is verified (regular,
 not fresh, the same file the directory names, no symbolic link on the way). An
@@ -7246,12 +7246,12 @@ Which rows link:
 A link goes when its file goes (pruned, deleted, retention, a removed
 discovery, removed by hand): once a complete catalogue has lacked the key on
 two sweeps at least 90 s apart (sweeps every 60 s), the row loses `recording`
-and its `recordingId` ref; the row itself stays. A sweep proves nothing, and
-unlinks nothing, while the catalogue cannot tell: its first build, a full pass
-or refresh re-indexing folders, a pass that met a directory error, files left
-out at a bound, and, for a `dsd~` key, a configured dsd-fme directory that is
-missing (not created yet, or unmounted). So a deleted file's link usually goes
-within two to three minutes. Only the summary and the refs change: the stored record stays as it
+and its `recordingId` ref; the row itself stays. A sweep leaves a key as it is
+while the catalogue cannot tell about it: its first build, a full pass or
+refresh re-indexing folders, a pass that met a directory error, files left out
+at a bound, and, for a `dsd~` key only, a configured dsd-fme directory that is
+missing (not created yet, or unmounted); other keys are still judged. So a
+deleted file's link usually goes within two to three minutes. Only the summary and the refs change: the stored record stays as it
 was received. dsd-fme reports the file as an absolute path; Activity stores and
 serves its file name only (`decodedData.wavFile`), never a path, and drops a
 `wavFile` that is not a call file name. Rows stored by cores before links are

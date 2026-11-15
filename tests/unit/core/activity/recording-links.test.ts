@@ -131,6 +131,47 @@ describe("the recording link sweep", () => {
 		expect(ops).toEqual([{ type: "unlink", recordingIds: [key(1)] }])
 	})
 
+	it("a dsd-fme directory not created yet holds back only dsd keys: a deleted scanner file's link goes", () => {
+		let now = 0
+		const scanKey =
+			"scan:d_01JTEST~analog-6f0a2c1e-1111-4222-8333-444455556666.wav"
+		const { links, ops } = fakeLinks([key(1), scanKey])
+		const w = wireRecordingLinks({
+			links,
+			// As the catalogue with one configured dsd-fme directory missing: every dsd~ key unknown.
+			catalogue: { hasKey: k => (k.startsWith("dsd~") ? null : false) },
+			logger,
+			now: () => now,
+		})
+		closers.push(() => w.close())
+		w.sweep()
+		now = RECORDING_LINK_MISSING_MS
+		w.sweep()
+		expect(ops).toEqual([{ type: "unlink", recordingIds: [scanKey] }])
+	})
+
+	it("an unknown answer leaves that key's missing time as it was", () => {
+		let now = 0
+		let answer: boolean | null = false
+		const { links, ops } = fakeLinks([key(1)])
+		const w = wireRecordingLinks({
+			links,
+			catalogue: { hasKey: () => answer },
+			logger,
+			now: () => now,
+		})
+		closers.push(() => w.close())
+		w.sweep()
+		answer = null
+		now = RECORDING_LINK_MISSING_MS
+		w.sweep()
+		expect(ops).toEqual([])
+		answer = false
+		now += 1
+		w.sweep()
+		expect(ops).toEqual([{ type: "unlink", recordingIds: [key(1)] }])
+	})
+
 	it("unlinks many keys in chunks of RECORDING_LINK_UNLINK_CHUNK", () => {
 		let now = 0
 		const n = RECORDING_LINK_UNLINK_CHUNK + 1

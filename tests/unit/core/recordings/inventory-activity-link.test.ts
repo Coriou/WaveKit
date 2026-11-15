@@ -6,8 +6,13 @@
 import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import Fastify from "fastify"
 import pino from "pino"
 import { afterEach, describe, expect, it } from "vitest"
+import {
+	recordingRoutes,
+	type RecordingRoutesOptions,
+} from "../../../../src/api/routes/recordings.js"
 import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
 
 const logger = pino({ level: "silent" })
@@ -122,6 +127,35 @@ describe("catalogue links to Activity", () => {
 		expect(opened?.path).toBe(join(b, NAME))
 		await opened?.handle.close()
 		expect(await inv.open(`dsd~../${NAME}`)).toBeNull()
+		// A .wav that is no dsd-fme call name (the catalogue never lists it) is never served.
+		const other = "20261012_100000_12345_notes.wav"
+		await writeFile(join(b, other), Buffer.alloc(64))
+		const old = (Date.now() - 60_000) / 1000
+		await utimes(join(b, other), old, old)
+		expect(await inv.open(`dsd~${other}`)).toBeNull()
+		const app = Fastify({ logger: false })
+		await app.register(recordingRoutes, {
+			inventory: inv,
+			authorize: () => undefined,
+			access: {
+				leaseDownload: () => ({
+					kind: "attached",
+					active: () => true,
+					release: () => undefined,
+				}),
+			},
+		} as unknown as RecordingRoutesOptions)
+		try {
+			const get = (id: string) =>
+				app.inject({
+					method: "GET",
+					url: `/api/recordings/${encodeURIComponent(id)}/file`,
+				})
+			expect((await get(`dsd~${other}`)).statusCode).toBe(404)
+			expect((await get(`dsd~${NAME}`)).statusCode).toBe(200)
+		} finally {
+			await app.close()
+		}
 		expect(await inv.open(`dsd~${NAME.replace("12345", "54321")}`)).toBeNull()
 	})
 })

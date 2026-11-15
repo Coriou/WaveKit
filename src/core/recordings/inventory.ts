@@ -1984,6 +1984,8 @@ export function createRecordingInventory(
 		const key = RECORDING_DSD_KEY.exec(id)
 		if (key?.[1] !== undefined) {
 			const name = key[1]
+			// Only a name the catalogue lists (a dsd-fme call name, never TEMP_): dsdId's check.
+			if (dsdId(0, name) === null) return []
 			const out: Location[] = []
 			for (const source of await dsdSources(newCounts())) {
 				const file = childPath(source.dir, name)

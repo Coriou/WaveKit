@@ -169,9 +169,10 @@ export function wireRecordingLinks(
 			} catch {
 				present = null
 			}
-			// The catalogue cannot tell now (building, re-indexing, an error, a bound): this sweep
-			// proves nothing and unlinks nothing; the next one looks again.
-			if (present === null) return
+			// The catalogue cannot tell for this key now (building, re-indexing, an error, a bound, a
+			// dsd-fme directory not created yet): this sweep proves nothing about it, and its
+			// `missing` entry stays as it was. Other keys are still judged.
+			if (present === null) continue
 			if (present) {
 				missing.delete(key)
 				continue

@@ -100,7 +100,11 @@ function linkStatements(db: SqliteDatabase): LinkStatements {
 	return prepared
 }
 
-/** Sets (or, with null, removes) one row's link. False when its summary cannot carry one. */
+/**
+ * Sets (or, with null, removes) one row's link. False when its summary cannot carry one, or when
+ * the row is gone (pruned since it was read: a backfill's call waiting across chunks), so no ref
+ * is ever added for a row that does not exist (its foreign key would fail).
+ */
 function setLink(
 	db: SqliteDatabase,
 	row: LinkedRow,
@@ -110,7 +114,7 @@ function setLink(
 	if (summary === null) return false
 	const seq = bindInteger(row.seq)
 	const st = linkStatements(db)
-	st.summary.run(summary, seq)
+	if (Number(st.summary.run(summary, seq).changes) !== 1) return false
 	st.dropRef.run(seq)
 	if (link !== null) st.addRef.run(seq, link.id)
 	return true
@@ -319,7 +323,15 @@ export function backfillRecordingLinks(
 			}
 			if (target === undefined || key === null) continue
 			const link = recordingLinkOf(key, target.durationMs)
-			if (link === null || !setLink(db, target, link)) continue
+			if (link === null) continue
+			// One row that cannot be linked is skipped; it never stops the backfill.
+			let set = false
+			try {
+				set = setLink(db, target, link)
+			} catch {
+				set = false
+			}
+			if (!set) continue
 			events.push({
 				recordingId: link.id,
 				eventId: target.eventId,

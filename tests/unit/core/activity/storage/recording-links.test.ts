@@ -361,6 +361,47 @@ describe("recording links in the store", () => {
 		await q.close()
 	})
 
+	it("a waiting call pruned between chunks is skipped: the backfill goes on", async () => {
+		const stateDir = await tempDir()
+		const first = await openStore({ stateDir })
+		const pending = callEnd("call-17")
+		const lateRow = callEnd("call-17", {
+			wavFile: `/c/${NAME_B}`,
+			late: true,
+		})
+		const next = callEnd("call-18", { wavFile: `/c/${NAME_A}` })
+		for (const e of [pending, lateRow, next]) {
+			const { refs: _refs, ...legacy } = e
+			first.admit(legacy)
+		}
+		await first.close()
+		const db = await openSqliteFile(first.dbPath)
+		// As the writer runs it: foreign keys on (a ref of a missing row fails its insert).
+		db.exec("PRAGMA foreign_keys=ON")
+		db.prepare("UPDATE store_meta SET value = '0' WHERE key = ?").run(
+			"recordingLinkBackfill",
+		)
+		const carry = new Map()
+		expect(backfillRecordingLinks(db, carry, 1).events).toEqual([])
+		// A prune removes the waiting call's row before the chunk of its late file.
+		db.prepare("DELETE FROM activity WHERE event_id = ?").run(pending.eventId)
+		const late = backfillRecordingLinks(db, carry, 1)
+		expect(late.events).toEqual([])
+		expect(late.done).toBe(false)
+		const last = backfillRecordingLinks(db, carry, 1)
+		expect(last.events.map(e => [e.recordingId, e.eventId])).toEqual([
+			[KEY_A, next.eventId],
+		])
+		const refs = db
+			.prepare(
+				"SELECT COUNT(*) AS n FROM activity_refs WHERE ref_type = 'recordingId'",
+			)
+			.get()?.["n"]
+		expect(Number(refs)).toBe(1)
+		expect(backfillRecordingLinks(db, carry, 1).done).toBe(true)
+		db.close()
+	})
+
 	it("the backfill stops at the newest row stored before the open", async () => {
 		const stateDir = await tempDir()
 		const first = await openStore({ stateDir })
