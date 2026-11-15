@@ -354,15 +354,16 @@ export function speechHeard(c: SpeechContent): boolean {
 
 /**
  * finishVerdict's three content readings of a file's measure (`c` null: not measured, so none
- * discards it): clearlyNotSpeech, clearlyNoise, speechHeard.
+ * discards it, and `speechHeard` is null, logged as not measured): clearlyNotSpeech,
+ * clearlyNoise, speechHeard.
  */
 export function speechReadings(c: SpeechContent | null): {
 	readonly notSpeech: boolean
 	readonly clearNoise: boolean
-	readonly speechHeard: boolean
+	readonly speechHeard: boolean | null
 } {
 	return c === null
-		? { notSpeech: false, clearNoise: false, speechHeard: true }
+		? { notSpeech: false, clearNoise: false, speechHeard: null }
 		: {
 				notSpeech: clearlyNotSpeech(c),
 				clearNoise: clearlyNoise(c),

@@ -1212,8 +1212,16 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 	}, 120_000)
 
+	it("one stray heard trial of 52 (under 2 heard): still a no-voice channel, the file is discarded", async () => {
+		const h = low(() => noVoice(1))
+		await noiseOver(h, 4)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(codes(h)).toContain("discarded:not-speech")
+	}, 120_000)
+
 	for (const [name, p] of [
-		["one trial heard", noVoice(1)],
+		["two trials heard (2 of 52, over 2 %)", noVoice(2)],
 		["analog proof on the channel", noVoice(0, true)],
 		["no trial memory (a fresh channel)", prior({ class: "analog-fm" })],
 	] as const)

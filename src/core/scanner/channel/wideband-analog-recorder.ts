@@ -122,6 +122,7 @@ import {
 	keptLog,
 	LATE_VERDICT_GRACE_MS,
 	notVoiceDecode,
+	noteJoinedVoice,
 	provisionalRoom,
 	barredSnapshot,
 	ownVetoEnds,
@@ -939,8 +940,8 @@ interface Session {
 	 * Joined observations (never the owner) with voice evidence: a snapshot classed them analog-fm,
 	 * or the session's own audio did (classByTone) while they were on the air; each with the newest
 	 * sample its track was reported on. Another transmission's voice in this session, which an own
-	 * veto (ownVeto) never discards with the owner's part. At most WIDEBAND_JOINS_KEPT, oldest
-	 * dropped.
+	 * veto (ownVeto) never discards with the owner's part. At most WIDEBAND_JOINS_KEPT, the
+	 * channel's own oldest dropped first (capJoinedVoice).
 	 */
 	readonly joinedVoice: Map<string, number>
 	/**
@@ -1080,26 +1081,6 @@ function countSnapshot(
 		flagLate,
 		flag,
 		bar: kept ? null : barred,
-	}
-}
-
-/**
- * Voice evidence of joined `observationId` in `s` (Session.joinedVoice): a snapshot classed it
- * analog-fm, or the session's own audio classed it (classByTone) while it was on the air; `last`,
- * the newest sample its track was reported on.
- */
-function noteJoinedVoice(
-	s: Session,
-	observationId: string,
-	last: number,
-): void {
-	if (observationId === s.owner) return
-	const before = s.joinedVoice.get(observationId) ?? Number.NEGATIVE_INFINITY
-	s.joinedVoice.delete(observationId)
-	s.joinedVoice.set(observationId, Math.max(before, last))
-	if (s.joinedVoice.size > WIDEBAND_JOINS_KEPT) {
-		const oldest = s.joinedVoice.keys().next()
-		if (oldest.done !== true) s.joinedVoice.delete(oldest.value)
 	}
 }
 
@@ -1783,7 +1764,13 @@ export class WidebandAnalogRecorder {
 		if (s.toneOnly) this.classedBySnapshot(s, observationId)
 		s.toneOnly = false
 		const last = s.activity.get(observationId)?.last
-		noteJoinedVoice(s, observationId, last ?? Number.NEGATIVE_INFINITY)
+		noteJoinedVoice(
+			s,
+			observationId,
+			last ?? Number.NEGATIVE_INFINITY,
+			WIDEBAND_JOINS_KEPT,
+			() => this.priorOf(s.discoveryId)[0],
+		)
 		if (!s.classed) {
 			s.classed = true
 			this.decide(s, "classed")
@@ -3603,7 +3590,9 @@ export class WidebandAnalogRecorder {
 		s.toneOnly = true
 		// Voice evidence of the joined observations on the air (ownVeto never refuses them with
 		// an owner vetoed later).
-		for (const [id, a] of s.activity) if (a.open) noteJoinedVoice(s, id, a.last)
+		const prior = () => this.priorOf(s.discoveryId)[0]
+		for (const [id, a] of s.activity)
+			if (a.open) noteJoinedVoice(s, id, a.last, WIDEBAND_JOINS_KEPT, prior)
 		this.decide(s, "classed")
 		for (const f of [...s.files]) this.admit(s, f)
 	}
