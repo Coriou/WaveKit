@@ -613,6 +613,18 @@ function retuneSample(value: number | null | undefined): number | null {
 		: null
 }
 
+/**
+ * The first sample a session may not read yet: the live edge, its epoch limit and a held retune's
+ * command position, whichever comes first (the drain loop, the catch-up grant and the reported
+ * backlog all measure against it).
+ */
+function readableEdge(
+	s: { readonly limit: number; readonly retuneAt: number | null },
+	liveEdge: number,
+): number {
+	return Math.min(liveEdge, s.limit, s.retuneAt ?? Number.POSITIVE_INFINITY)
+}
+
 /** The engine surface the recorder reads (SpectrumEngine satisfies it). */
 export interface WidebandEngineView {
 	readonly format: string
@@ -1020,6 +1032,13 @@ interface Session {
 	 * ends here) or the retune is no longer pending; null: none.
 	 */
 	retuneAt: number | null
+	/**
+	 * Where a retune-ended file's park window (WIDEBAND_PARK_MS) counts from: the new epoch's
+	 * start sample (its settled start, not the command position `limit` may end at), the stream
+	 * position a held retune was capped at (the hold cap in drain), or `limit` for a trusted-run
+	 * end. Infinity until the session's input ends.
+	 */
+	parkFrom: number
 	/** Cut reason of the next non-quiet end (retune, stream change); null = completed. */
 	endCut: AnalogCut | null
 	file: FileState | null
@@ -1569,7 +1588,7 @@ export class WidebandAnalogRecorder {
 			if (s.done) continue
 			let edge = s.next
 			try {
-				edge = Math.min(s.engine.liveEdge(), s.limit)
+				edge = readableEdge(s, s.engine.liveEdge())
 			} catch {
 				// An engine closing under us: no backlog to report.
 			}
@@ -2690,6 +2709,7 @@ export class WidebandAnalogRecorder {
 			margin: Math.ceil(ring - maxBacklog),
 			limit: Number.POSITIVE_INFINITY,
 			retuneAt: null,
+			parkFrom: Number.POSITIVE_INFINITY,
 			endCut: null,
 			file: null,
 			waiting: [],
@@ -3334,7 +3354,7 @@ export class WidebandAnalogRecorder {
 	/** Ring headroom (ring − backlog) in ms; Infinity when the session is within maxBacklog. */
 	private headroomMs(s: Session): number {
 		if (s.done || !s.file) return Number.POSITIVE_INFINITY
-		const backlog = Math.min(s.engine.liveEdge(), s.limit) - s.next
+		const backlog = readableEdge(s, s.engine.liveEdge()) - s.next
 		if (backlog <= s.maxBacklog) return Number.POSITIVE_INFINITY
 		return ((s.maxBacklog + s.margin - backlog) * 1000) / s.fs
 	}
@@ -3378,6 +3398,17 @@ export class WidebandAnalogRecorder {
 		// command on read as this epoch's, though the tuner may have moved. They are held back
 		// here (never demodulated, so never written), and cut off at the start.
 		if (!retuned) s.retuneAt = retuneSample(epoch.pendingRetuneSample)
+		const liveEdge = engine.liveEdge()
+		// Hold cap: a retune pending past maxBacklog of stream (ring − margin: held longer, the
+		// ring would overwrite what is held back before the file could read it) or that never
+		// starts must not freeze the session with an open file. It ends at the command position as
+		// at the retune's start (cut epoch-changed: the tuner moved). At exactly maxBacklog it
+		// still holds; one sample past it ends.
+		const capped =
+			!retuned &&
+			s.retuneAt !== null &&
+			s.limit === Number.POSITIVE_INFINITY &&
+			liveEdge - s.retuneAt > s.maxBacklog
 		// The trusted run it started in ended (a doubt: null) or another began (re-proven): its
 		// samples from here on are not proven by the run the file is labelled with. Ended like at a
 		// retune (cut epoch-changed), at what it demodulated so far; a later snapshot starts a new
@@ -3386,17 +3417,30 @@ export class WidebandAnalogRecorder {
 			!retuned &&
 			s.trustedFrom !== undefined &&
 			epoch.trustedFromSample !== s.trustedFrom
-		if ((retuned || untrusted) && s.limit === Number.POSITIVE_INFINITY) {
+		if (
+			(retuned || untrusted || capped) &&
+			s.limit === Number.POSITIVE_INFINITY
+		) {
 			// A retune: nothing at or past the new epoch's start is this channel. The file ends
 			// at the earlier of its own end target and that start; no later file follows. A
 			// sweep that hops after the hang has a complete file.
-			s.limit = retuned
-				? Math.min(
-						epoch.startSample ?? s.next,
-						s.retuneAt ?? Number.POSITIVE_INFINITY,
-						retuneSample(epoch.retunedFromSample) ?? Number.POSITIVE_INFINITY,
-					)
-				: Math.min(s.next, trustedRunEnd(epoch, s.trustedFrom))
+			if (retuned) {
+				const start = epoch.startSample ?? s.next
+				s.limit = Math.min(
+					start,
+					s.retuneAt ?? Number.POSITIVE_INFINITY,
+					retuneSample(epoch.retunedFromSample) ?? Number.POSITIVE_INFINITY,
+				)
+				// The park window counts from the settled start, as before the command position
+				// bounded the file: the settle (1-2 s) does not shorten it.
+				s.parkFrom = start
+			} else if (capped) {
+				s.limit = s.retuneAt ?? s.next
+				s.parkFrom = liveEdge
+			} else {
+				s.limit = Math.min(s.next, trustedRunEnd(epoch, s.trustedFrom))
+				s.parkFrom = s.limit
+			}
 			s.retuneAt = null
 			const target = s.seg.endTarget
 			const end = Math.min(target ?? s.limit, s.limit)
@@ -3411,11 +3455,7 @@ export class WidebandAnalogRecorder {
 				s.file.cut = cut
 			}
 		}
-		const edge = Math.min(
-			engine.liveEdge(),
-			s.limit,
-			s.retuneAt ?? Number.POSITIVE_INFINITY,
-		)
+		const edge = readableEdge(s, liveEdge)
 		this.applyEvents(s, s.seg.advance(edge))
 		const file = s.file
 		if (!file) {
@@ -4124,7 +4164,8 @@ export class WidebandAnalogRecorder {
 			if (file.handle === null && !s.waiting.includes(file)) {
 				if (this.parkable(s, file)) {
 					// A retune ended it before its class: kept for the close (finishFile parks).
-					s.parkedUntil = s.limit + Math.round((WIDEBAND_PARK_MS * s.fs) / 1000)
+					s.parkedUntil =
+						s.parkFrom + Math.round((WIDEBAND_PARK_MS * s.fs) / 1000)
 					return
 				}
 				// Not voiced, never classed or no discovery: nothing was written, nothing is kept.
