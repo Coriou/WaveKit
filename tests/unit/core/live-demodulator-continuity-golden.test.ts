@@ -1,8 +1,14 @@
 /**
- * WG10 req 2.5 goldens, recorded from the frozen code (1e5b4c1f) before the
+ * Continuity goldens, recorded from the frozen code (1e5b4c1f) before the
  * continuity work: planned argv of both stages, start/stop/full-restart
  * logs, the status DTO, the stream headers and the close-on-rate/format
  * behaviour.
+ *
+ * The goldens pin the configured `httpPort` (it shows in the status URLs
+ * and logs), but the listener binds an ephemeral port: a fixed port in the
+ * OS ephemeral range collided with other sockets on a loaded runner
+ * (EADDRINUSE). The start spy still checks the configured port reaches the
+ * listener.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
@@ -11,7 +17,9 @@ import * as http from "node:http"
 import type { ChildProcess } from "node:child_process"
 import { LiveDemodConfigSchema } from "../../../src/config.js"
 import type { LiveDemodulator as LiveDemodulatorType } from "../../../src/core/live-demodulator.js"
+import type { AddressInfo } from "node:net"
 import {
+	AudioHttpServer,
 	streamHeaders,
 	wavStreamHeader,
 } from "../../../src/core/audio-stream-server.js"
@@ -48,9 +56,13 @@ function normalise(lines: CapturedLog[]): unknown[] {
 	})
 }
 
-describe("LiveDemodulator WG10 goldens (frozen behaviour)", () => {
+describe("LiveDemodulator continuity goldens (frozen behaviour)", () => {
 	let processes: FakeProcess[]
 	let killSpy: MockInstance<(pid: number, signal?: string | number) => true>
+	let startSpy: MockInstance<AudioHttpServer["start"]>
+	/** Ports the demodulator asked to listen on, and the ports actually bound. */
+	let requestedPorts: number[]
+	let boundPort: number | undefined
 	let liveDemod: LiveDemodulatorType
 	let lines: CapturedLog[]
 	let LiveDemodulatorClass: new (...args: unknown[]) => LiveDemodulatorType
@@ -82,6 +94,22 @@ describe("LiveDemodulator WG10 goldens (frozen behaviour)", () => {
 			...args: unknown[]
 		) => LiveDemodulatorType
 		processes = []
+		requestedPorts = []
+		boundPort = undefined
+		const originalStart = AudioHttpServer.prototype.start
+		startSpy = vi
+			.spyOn(AudioHttpServer.prototype, "start")
+			.mockImplementation(async function (
+				this: AudioHttpServer,
+				port: number,
+				host?: string,
+			) {
+				requestedPorts.push(port)
+				await originalStart.call(this, 0, host)
+				const server = (this as unknown as { server: http.Server | null })
+					.server
+				boundPort = (server?.address() as AddressInfo | null)?.port
+			})
 		spawnMock.mockImplementation((_cmd: string, args: string[]) => {
 			const proc = new FakeProcess(args[1] ?? "")
 			processes.push(proc)
@@ -108,7 +136,9 @@ describe("LiveDemodulator WG10 goldens (frozen behaviour)", () => {
 			// cleanup only
 		}
 		killSpy.mockRestore()
+		startSpy.mockRestore()
 		spawnMock.mockReset()
+		for (const port of requestedPorts) expect(port).toBe(PORT)
 	})
 
 	const variants: Array<[string, Record<string, unknown>]> = [
@@ -172,9 +202,11 @@ describe("LiveDemodulator WG10 goldens (frozen behaviour)", () => {
 
 	it("served stream headers on /stream and /stream.wav", async () => {
 		await create().start()
+		const port = boundPort
+		expect(port).toBeGreaterThan(0)
 		const get = (path: string) =>
 			new Promise<Record<string, unknown>>((resolve, reject) => {
-				const req = http.get({ host: "127.0.0.1", port: PORT, path }, res => {
+				const req = http.get({ host: "127.0.0.1", port, path }, res => {
 					const headers = { ...res.headers }
 					delete headers["date"]
 					resolve({ status: res.statusCode, headers })

@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > keeps clients on an offset, gain or squelch change and closes them on a rate or format change 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > keeps clients on an offset, gain or squelch change and closes them on a rate or format change 1`] = `
 [
   "after keep-changes 1",
   "closed client-1",
@@ -10,7 +10,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > keeps clients on an o
 ]
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: am bandwidth 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > planned argv of both stages: am bandwidth 1`] = `
 [
   [
     "/bin/sh",
@@ -41,7 +41,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both 
 ]
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: default 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > planned argv of both stages: default 1`] = `
 [
   [
     "/bin/sh",
@@ -72,7 +72,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both 
 ]
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: offset 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > planned argv of both stages: offset 1`] = `
 [
   [
     "/bin/sh",
@@ -103,7 +103,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both 
 ]
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: usb gain 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > planned argv of both stages: usb gain 1`] = `
 [
   [
     "/bin/sh",
@@ -134,7 +134,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both 
 ]
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both stages: wfm f32le 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > planned argv of both stages: wfm f32le 1`] = `
 [
   [
     "/bin/sh",
@@ -165,7 +165,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > planned argv of both 
 ]
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > served stream headers on /stream and /stream.wav 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > served stream headers on /stream and /stream.wav 1`] = `
 {
   "raw": {
     "headers": {
@@ -198,7 +198,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > served stream headers
 }
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > start, full restart and stop logs 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > start, full restart and stop logs 1`] = `
 {
   "restart": [
     {
@@ -249,7 +249,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > start, full restart a
 }
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > status DTO while running and after stop 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > status DTO while running and after stop 1`] = `
 {
   "afterOffset": {
     "agc": "off",
@@ -410,7 +410,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > status DTO while runn
 }
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > stream headers and WAV header 1`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > stream headers and WAV header 1`] = `
 {
   "headers": {
     "Access-Control-Expose-Headers": "X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
@@ -423,7 +423,7 @@ exports[`LiveDemodulator WG10 goldens (frozen behaviour) > stream headers and WA
 }
 `;
 
-exports[`LiveDemodulator WG10 goldens (frozen behaviour) > stream headers and WAV header 2`] = `
+exports[`LiveDemodulator continuity goldens (frozen behaviour) > stream headers and WAV header 2`] = `
 {
   "headers": {
     "Access-Control-Expose-Headers": "X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
