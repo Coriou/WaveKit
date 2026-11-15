@@ -15,7 +15,8 @@
  * lists for analog FM (or no band plan covers) starts a shadow session as soon as it appears.
  * Its audio stays in memory (no store operation, nothing on disk) until the observation is
  * classed analog-fm (any snapshot, the closing one included, or its own audio: speech over a
- * stable standard CTCSS tone, `classByTone` and tone-class.ts, a class of the recorder only) and
+ * stable standard CTCSS tone, `classByTone` and tone-class.ts, or strong speech on a channel whose
+ * analog trials heard voice, `classBySpeech`; a class of the recorder only) and
  * the file's audio sounds like voice (`VoiceActivityGate`); then the store operation begins and
  * the buffered audio is written. A session closed without that class, or given a definite other
  * class (the caller's `nonAnalog`: decoded or channel-tier, never a spectral class alone) before
@@ -126,11 +127,16 @@ import {
 	provisionalRoom,
 	barredSnapshot,
 	ownVetoEnds,
+	trialsVoiceChannel,
 	type OwnVeto,
 	type VoicePrior,
 	type Veto,
 } from "./recording-verdict.js"
-import { SpeechContentMeter, speechReadings } from "./speech-content.js"
+import {
+	SpeechContentMeter,
+	speechReadings,
+	strongSpeech,
+} from "./speech-content.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 export { rememberWaiver, trustedRunEnd } from "./recorder-memory.js"
@@ -782,6 +788,12 @@ interface FileState {
 	rollOver: boolean
 	/** What it wrote, measured for speech (speech-content.ts; finishVerdict's `notSpeech`). */
 	readonly speech: SpeechContentMeter
+	/**
+	 * The judged audio so far, measured for speech while its session is unclassed (classBySpeech:
+	 * nothing is written before a class, so `speech` has not heard it yet). Not fed under a strong
+	 * prior (`toneRequired`: never classed by speech) or once classed.
+	 */
+	readonly judgedSpeech: SpeechContentMeter
 	/** The start the segmenter planned (onset − preRoll, clamped): the head-cut reference. */
 	readonly planned: number
 	startSample: number
@@ -835,6 +847,12 @@ interface Session {
 	 * definite other class (`nonAnalog`) still discards it, and no tone evidence is published.
 	 */
 	toneOnly: boolean
+	/**
+	 * Of `toneOnly`: classed by strong speech on a channel whose trials heard voice
+	 * (classBySpeech), not by a tone; each file is checked again for strong speech over the whole
+	 * file when it finishes (`discarded:not-speech`), and carries no tone class to a roll-over.
+	 */
+	speechOnly: boolean
 	/**
 	 * Admitted under a strong prior (recording-verdict.ts `tone-required`): only its own audio
 	 * classes it (classByTone), a snapshot's analog-fm class counts only after that, and it is
@@ -1790,6 +1808,7 @@ export class WidebandAnalogRecorder {
 		if (s.toneRequired && !s.classed) return
 		if (s.toneOnly) this.classedBySnapshot(s, observationId)
 		s.toneOnly = false
+		s.speechOnly = false
 		const last = s.activity.get(observationId)?.last
 		noteJoinedVoice(
 			s,
@@ -2608,6 +2627,7 @@ export class WidebandAnalogRecorder {
 			discoveryId: input.discoveryId,
 			classed: input.analogFm && !toneRequired,
 			toneOnly: false,
+			speechOnly: false,
 			toneRequired,
 			// Admitted before its discovery is known: no prior read, so a strong one at finish
 			// treats every file as joined under it (a new capcode twin's first page).
@@ -2744,6 +2764,7 @@ export class WidebandAnalogRecorder {
 			toneHz: null,
 			toneClass: new ToneClassEvidence(),
 			speech: new SpeechContentMeter(),
+			judgedSpeech: new SpeechContentMeter(),
 			classTone: null,
 			toneCarried: false,
 			rollOver: false,
@@ -3566,6 +3587,8 @@ export class WidebandAnalogRecorder {
 				}
 			if (head.tone !== null)
 				this.toneFrames(s, file, file.judged, head.tone.subarray(0, n))
+			if (!s.classed && !s.toneRequired)
+				file.judgedSpeech.push(head.pcm.subarray(0, n))
 			this.gateFrames(s, file, file.judged, head.pcm.subarray(0, n))
 			file.judged += n
 		}
@@ -3576,6 +3599,7 @@ export class WidebandAnalogRecorder {
 			}
 			s.qualified = true
 			if (!s.classed) this.classByTone(s, file.toneClass?.result() ?? null)
+			if (!s.classed) this.classBySpeech(s, file)
 			this.admit(s, file)
 		} else if (
 			!s.qualified &&
@@ -3628,8 +3652,36 @@ export class WidebandAnalogRecorder {
 	 */
 	private classByTone(s: Session, toneHz: number | null): void {
 		if (toneHz === null || s.classed || s.done) return
+		this.classByOwnAudio(s)
+	}
+
+	/**
+	 * The second own-audio class, next to the tone (docs/SCANNER.md, "Own-audio class"): a voiced
+	 * shadow with no tone is classed analog-fm (`toneOnly` and `speechOnly`) when, in this order
+	 * (cheapest first, the prior read last): its owner's latest snapshot has no digital spectral
+	 * class (`digital` false: carrier, unknown or analog-fm), it was not admitted under a strong
+	 * prior (`toneRequired` false), the file so far reads strong speech (speech-content.ts
+	 * strongSpeech: 3 s or more, a 15 dB range, a 0.05 periodic share), no strong prior stands now
+	 * and no backed digital class was seen on the owner (admissionVerdict null with
+	 * DigitalClassLedger's reading), and the channel's analog trials heard voice
+	 * (recording-verdict.ts trialsVoiceChannel: 10 or more heard and 30 % or more of the
+	 * attempts). Each file is checked again over the whole file at its finish (finishOrHold).
+	 */
+	private classBySpeech(s: Session, file: FileState): void {
+		if (s.classed || s.done || s.digital || s.toneRequired) return
+		if (!strongSpeech(file.judgedSpeech.result())) return
+		const [prior, backedClass, now] = this.priorOf(s.discoveryId)
+		if (backedClass || admissionVerdict(prior, backedClass, now) !== null)
+			return
+		if (!trialsVoiceChannel(prior)) return
+		this.classByOwnAudio(s, true)
+	}
+
+	/** Classes `s` by its own audio (classByTone, or classBySpeech when `speech`). */
+	private classByOwnAudio(s: Session, speech = false): void {
 		s.classed = true
 		s.toneOnly = true
+		s.speechOnly = speech
 		// Voice evidence of the joined observations on the air (ownVeto never refuses them with
 		// an owner vetoed later).
 		const prior = () => this.priorOf(s.discoveryId)[0]
@@ -3811,7 +3863,12 @@ export class WidebandAnalogRecorder {
 		file.toneHz = file.ctcss?.result() ?? null
 		file.classTone = file.toneClass?.result(true) ?? null
 		file.toneClass = null
-		if (s.toneOnly && file.classTone === null && !file.toneCarried) {
+		if (
+			s.toneOnly &&
+			!s.speechOnly &&
+			file.classTone === null &&
+			!file.toneCarried
+		) {
 			// Classed by its audio only, and the whole file no longer holds the evidence (its
 			// prefix did; a roll-over file carries it): discarded, one being written cancelled.
 			this.endFile(s, file, "discarded:unclassed")
@@ -3825,7 +3882,13 @@ export class WidebandAnalogRecorder {
 			this.openFile(s, next)
 			const cont = s.file as FileState | null
 			if (cont && file.cut === "duration-limit") cont.rollOver = true
-			if (cont && file.cut === "duration-limit" && s.toneOnly && !file.failed)
+			if (
+				cont &&
+				file.cut === "duration-limit" &&
+				s.toneOnly &&
+				!s.speechOnly &&
+				!file.failed
+			)
 				cont.toneCarried = true
 			if (cont && next >= endedAt && next <= s.next) {
 				// The carried frames are samples [endedAt, s.next): keep those from `next` on (not
@@ -4092,6 +4155,18 @@ export class WidebandAnalogRecorder {
 	 */
 	private finishOrHold(s: Session, file: FileState, final: boolean): void {
 		if (file.handle === null || file.failed || this.held.has(file)) return
+		if (
+			s.speechOnly &&
+			file.classTone === null &&
+			!strongSpeech(file.speech.result())
+		) {
+			// Classed by strong speech so far (classBySpeech), and the whole file no longer reads it.
+			this.endFile(s, file, "discarded:not-speech")
+			file.failed = true
+			this.fileLost(s)
+			file.handle.cancel("cancelled")
+			return
+		}
 		const [prior, backedClass, now] = this.priorOf(s.discoveryId)
 		const room = provisionalRoom(
 			widebandRecordingCap(s.fs, this.deps.settings().cpuBudgetCores),

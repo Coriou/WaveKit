@@ -376,6 +376,35 @@ export function speechHeard(c: SpeechContent): boolean {
 }
 
 /**
+ * The envelope range strongSpeech needs (dB): 15. Measured on kept files: real voice at least
+ * 31.1 dB (p10), every digital voice, flat carrier and noise file at most 10.1 dB (p90); 15 leaves
+ * 4.9 dB over the highest non-voice file and 16.1 dB under the lowest voice one.
+ */
+export const SPEECH_STRONG_MIN_RANGE_DB = 15
+/**
+ * The periodic share strongSpeech needs: 0.05. Measured on kept files: real voice at least 0.05
+ * (p10 of a voice channel with its own tone; others 0.30), digital and noise files 0.01 to 0.05;
+ * the share alone does not separate them, the range does, and this keeps a file with no pitched
+ * frame (a bare carrier with noise bursts) out.
+ */
+export const SPEECH_STRONG_MIN_PERIODIC_SHARE = 0.05
+
+/**
+ * Strong speech (the recorder's class by speech alone, wideband-analog-recorder.ts
+ * classBySpeech): at least SPEECH_WINDOW_FRAMES frames (94 × 32 ms = 3.008 s, the first whole
+ * window: "3 s or more"), an envelope range of SPEECH_STRONG_MIN_RANGE_DB or more and a periodic
+ * share of SPEECH_STRONG_MIN_PERIODIC_SHARE or more. Paging audio passes it too: the class also
+ * needs a channel whose trials heard voice (recording-verdict.ts trialsVoiceChannel).
+ */
+export function strongSpeech(c: SpeechContent): boolean {
+	return (
+		c.frames >= SPEECH_WINDOW_FRAMES &&
+		c.maxRangeDb >= SPEECH_STRONG_MIN_RANGE_DB &&
+		c.periodicShare >= SPEECH_STRONG_MIN_PERIODIC_SHARE
+	)
+}
+
+/**
  * finishVerdict's three content readings of a file's measure (`c` null: not measured, so none
  * discards it, and `speechHeard` is null, logged as not measured): clearlyNotSpeech,
  * clearlyNoise, speechHeard.

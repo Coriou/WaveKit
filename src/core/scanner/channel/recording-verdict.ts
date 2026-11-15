@@ -306,6 +306,46 @@ export function trialsHeardVoice(t: AnalogTrials): boolean {
 }
 
 /**
+ * Heard trials (VoicePrior.analogTrials `decoded`) a channel needs before the recorder's own-audio
+ * class may class an untoned voiced shadow by its speech alone (trialsVoiceChannel): 10. Ten
+ * heard replays are ten overs the analog trial called speech, a tone or a syllabic run; a stray
+ * syllabic run on a data channel is one or two (measured: no pager, DMR, P25 or D-STAR channel
+ * reached 10 % of its trials heard).
+ */
+export const VOICE_CHANNEL_MIN_HEARD = 10
+/**
+ * The share of the owner's attempts, in percent, its heard trials must reach (at least): 30.
+ * Measured: voice channels 70 to 91 %, the highest non-voice channel 9 % (7 of 81), none
+ * between; 30 leaves 21 points over the highest non-voice share and 40 under the lowest voice
+ * one. Compared in integers: heard × 100 ≥ attempts × 30 (10 of 33 = 30.3 % passes, 10 of 34 =
+ * 29.4 % fails).
+ */
+export const VOICE_CHANNEL_MIN_HEARD_PERCENT = 30
+
+/**
+ * The channel's analog FM replay trials heard voice often (VoicePrior.analogTrials: at least
+ * VOICE_CHANNEL_MIN_HEARD heard and VOICE_CHANNEL_MIN_HEARD_PERCENT of the owner's attempts):
+ * the trial-memory half of the recorder's class by speech alone (wideband-analog-recorder.ts
+ * classBySpeech). No prior, no trial reader, none remembered or a throwing read: false.
+ */
+export function trialsVoiceChannel(prior: VoicePrior | null): boolean {
+	if (prior?.analogTrials === undefined) return false
+	let t: AnalogTrials | null
+	try {
+		t = prior.analogTrials()
+	} catch {
+		return false
+	}
+	return (
+		t !== null &&
+		Number.isFinite(t.decoded) &&
+		Number.isFinite(t.attempts) &&
+		t.decoded >= VOICE_CHANNEL_MIN_HEARD &&
+		t.decoded * 100 >= t.attempts * VOICE_CHANNEL_MIN_HEARD_PERCENT
+	)
+}
+
+/**
  * A no-voice channel (docs/SCANNER.md, "Channels whose trials never heard voice"): the owner's
  * analog FM replay trials ran NO_VOICE_CHANNEL_MIN_TRIALS times or more and did not hear voice
  * (trialsHeardVoice: fewer than 2 heard trials, or 2 % of the attempts or less; a trial heard
