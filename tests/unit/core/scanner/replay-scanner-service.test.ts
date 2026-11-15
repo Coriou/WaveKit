@@ -845,6 +845,74 @@ describe("ScannerService.applyReplayResult (WG11 req 6.4)", () => {
 		}
 	})
 
+	// The no-voice channel rule (recording-verdict.ts analogTrialsHeard): a failed analog trial whose
+	// frames held a run of 3 syllabic frames is remembered as such; 3 scattered or a run of 2 are
+	// not; digital trials never are.
+	for (const [name, on, syllabic] of [
+		["a run of 3", [5, 6, 7], 1],
+		["3 scattered", [2, 10, 30], 0],
+		["a run of 2", [5, 6], 0],
+	] as const)
+		it(`remembers a failed analog trial with ${name} syllabic frames: syllabic ${syllabic}`, async () => {
+			const lit: readonly number[] = on
+			const { h, internals, live } = setup()
+			await h.service.start()
+			try {
+				internals.live.set("t1", live())
+				internals.replayPlans.set("cap-1", plan)
+				const frame = (s: number) => ({
+					carrierDb: -40,
+					hfNoiseDb: -2,
+					audioDb: -35,
+					syllabic: s,
+					cluster: 0,
+				})
+				h.service.applyReplayResult(
+					result({
+						trials: [
+							{
+								protocol: "analog-fm",
+								decoderType: "dsd-fme",
+								known: false,
+								outcome: "no-sync",
+								decoder: "analog-demod",
+								mode: "nfm",
+							},
+							{
+								protocol: "dmr",
+								decoderType: "dsd-fme",
+								known: true,
+								outcome: "no-sync",
+							},
+						],
+						analog: {
+							outcome: "no-sync",
+							mode: "nfm",
+							voice: false,
+							tones: { ctcssHz: null, dcs: null, audioSeconds: 2 },
+							stats: {
+								mode: "nfm",
+								frames: Array.from({ length: 40 }, (_, k) =>
+									frame(lit.includes(k) ? 0.4 : 0.1),
+								),
+								gapSamples: 0,
+								floorDb: -120,
+							},
+						},
+					}),
+				)
+				const memory = h.service.trialMemoryOf("d_1")
+				expect(
+					memory.map(e => [e.protocol, e.decoder, e.syllabicMisses ?? 0]),
+				).toEqual([
+					["analog-fm", "analog-demod", syllabic],
+					["dmr", "dsd-fme", 0],
+				])
+			} finally {
+				await h.service.stop()
+			}
+		})
+
 	it("the plan input carries the memory's known protocol of the captured discovery", async () => {
 		const { h, known, internals, live } = setup()
 		await h.service.start()

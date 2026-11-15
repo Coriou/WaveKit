@@ -18,7 +18,7 @@
 				"max": 0
 			},
 			"identifyRight": {
-				"min": 13
+				"min": 14
 			},
 			"ioOverruns": {
 				"max": 0
@@ -91,17 +91,6 @@
 			"atMs": 4000,
 			"count": 1,
 			"reason": "A DMR handheld's first over on a busy band, recorded before its channel has the 4 TDMA votes or a decode that bar it. A DMR decode is digital voice, so it only holds a file provisional, and the content check does not call TDMA buzz clearly not speech."
-		},
-		{
-			"name": "fresh-dmr-handheld",
-			"kind": "synthetic",
-			"case": "dmr",
-			"metric": "falseVoice",
-			"label": "dmr",
-			"frequencyHz": 455256250,
-			"atMs": 9000,
-			"count": 1,
-			"reason": "The DMR handheld conversation's first kept file (one session over its second to fourth overs; the first over is discarded unclassed), opened before the channel has the 4 TDMA votes that bar it. The later overs are discarded as known non-voice."
 		},
 		{
 			"name": "noise-keyed-like-speech",

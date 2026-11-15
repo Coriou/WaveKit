@@ -151,6 +151,12 @@ export const SPEECH_NOISE_BURST_DB = 6
  */
 export const SPEECH_NOISE_MAX_BURST_FRAMES = 3
 
+/**
+ * A short file's partial window (SpeechContentMeter.result under SPEECH_WINDOW_FRAMES): measured
+ * from 16 frames (0.512 s) on; shorter, nothing (0, 0: speechHeard fails it).
+ */
+export const SPEECH_SHORT_MIN_FRAMES = 16
+
 const P10 = Math.floor(0.1 * (SPEECH_WINDOW_FRAMES - 1))
 const P90 = Math.ceil(0.9 * (SPEECH_WINDOW_FRAMES - 1))
 const MEDIAN_LO = Math.floor((SPEECH_WINDOW_FRAMES - 1) / 2)
@@ -165,13 +171,17 @@ for (let i = 0; i < SPEECH_FRAME_SAMPLES; i++)
 export interface SpeechContent {
 	/** Whole frames heard. */
 	readonly frames: number
-	/** The largest envelope range of a window (dB); 0 under one window. */
+	/**
+	 * The largest envelope range of a window (dB); a file shorter than one window: that of its one
+	 * partial window from SPEECH_SHORT_MIN_FRAMES on (speechHeard only), 0 under it.
+	 */
 	readonly maxRangeDb: number
 	/** Periodic frames over all frames (0 with none). */
 	readonly periodicShare: number
 	/**
 	 * The longest run of consecutive frames at least SPEECH_NOISE_BURST_DB over its window's
-	 * median band level, the largest over the file's windows (0 under one window): a word.
+	 * median band level, the largest over the file's windows (a shorter file: its partial window,
+	 * as maxRangeDb): a word.
 	 */
 	readonly maxBurstFrames: number
 }
@@ -202,8 +212,11 @@ export class SpeechContentMeter {
 	}
 
 	result(): SpeechContent {
-		if (this.frames >= SPEECH_WINDOW_FRAMES && this.measuredAt !== this.frames)
-			this.measureWindow()
+		if (this.measuredAt !== this.frames) {
+			if (this.frames >= SPEECH_WINDOW_FRAMES) this.measureWindow()
+			else if (this.frames >= SPEECH_SHORT_MIN_FRAMES)
+				this.measureWindow(this.frames)
+		}
 		return {
 			frames: this.frames,
 			maxRangeDb: this.maxRange,
@@ -258,18 +271,25 @@ export class SpeechContentMeter {
 	/**
 	 * The envelope range of the last SPEECH_WINDOW_FRAMES frames, and their longest burst over the
 	 * window's median (walked in time order: the oldest frame sits at `frames % SPEECH_WINDOW_FRAMES`).
+	 * `n` under SPEECH_WINDOW_FRAMES: a short file's one partial window, its frames 0 to n − 1 (the
+	 * ring has not wrapped), with the same percentiles of n.
 	 */
-	private measureWindow(): void {
-		const { ring, sorted } = this
-		sorted.set(ring)
+	private measureWindow(n: number = SPEECH_WINDOW_FRAMES): void {
+		const { ring } = this
+		const sorted = this.sorted.subarray(0, n)
+		sorted.set(ring.subarray(0, n))
 		sorted.sort()
-		const range = sorted[P90]! - sorted[P10]!
+		const full = n === SPEECH_WINDOW_FRAMES
+		const range =
+			sorted[full ? P90 : Math.ceil(0.9 * (n - 1))]! -
+			sorted[full ? P10 : Math.floor(0.1 * (n - 1))]!
 		if (range > this.maxRange) this.maxRange = range
-		const floor =
-			(sorted[MEDIAN_LO]! + sorted[MEDIAN_HI]!) / 2 + SPEECH_NOISE_BURST_DB
-		const oldest = this.frames % SPEECH_WINDOW_FRAMES
+		const lo = full ? MEDIAN_LO : Math.floor((n - 1) / 2)
+		const hi = full ? MEDIAN_HI : Math.ceil((n - 1) / 2)
+		const floor = (sorted[lo]! + sorted[hi]!) / 2 + SPEECH_NOISE_BURST_DB
+		const oldest = full ? this.frames % SPEECH_WINDOW_FRAMES : 0
 		let run = 0
-		for (let i = 0; i < SPEECH_WINDOW_FRAMES; i++) {
+		for (let i = 0; i < n; i++) {
 			if (ring[(oldest + i) % SPEECH_WINDOW_FRAMES]! >= floor) {
 				if (++run > this.maxBurst) this.maxBurst = run
 			} else run = 0
@@ -300,4 +320,53 @@ export function clearlyNotSpeech(c: SpeechContent): boolean {
 		c.maxRangeDb < SPEECH_STEADY_MAX_RANGE_DB &&
 		c.periodicShare < SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE
 	)
+}
+
+/**
+ * The file's audio shows speech by the strict bounds at any length (from SPEECH_SHORT_MIN_FRAMES,
+ * 0.512 s; a short file's one partial window): its envelope range reaches
+ * SPEECH_NOISE_MAX_RANGE_DB (6 dB), its periodic share SPEECH_NOISE_MAX_PERIODIC_SHARE (0.1), or
+ * it has a burst of SPEECH_NOISE_MAX_BURST_FRAMES frames (a word): clearlyNoise without its 8 s
+ * floor, inverted. What a file of a no-voice channel (recording-verdict.ts noVoiceChannel) must
+ * show to be kept. Measured (SYNTHETIC, the lowest of every 0.5 s cut of a 13 s run through
+ * WidebandNfmChain, cuts that start in speech): plain speech at a CNR of 5 dB or more passes from
+ * 1 s (lowest range 6.54 dB, the pause-free talker at 5 dB: 0.54 dB of margin);
+ * HARD_SPEECH_CASES at 5 to 20 dB pass from 1.5 s (lowest 6.31 dB, the 1 000 Hz talker at 8 dB;
+ * the pitched low-deviation shallow talker under 6 dB passes by its periodic share, 0.19 or
+ * more), 0.85 dB or more of range margin from 3 s; a single word or sparse words on a quiet
+ * carrier pass by their burst (4 frames or more). Open-squelch noise, 4FSK, GMSK-like data and an
+ * unmodulated carrier at a CNR of 10 dB or more measure at most 5.26 dB with no burst: they fail;
+ * a periodic signal (2FSK, a tone) passes (kept). Real noise a listener confirmed (two channels,
+ * eight files of 2.9 to 35.5 s) measures 2.84 to 5.56 dB, periodic share at most 0.02, no burst:
+ * all fail (0.44 dB under the bound); that receiver's real voice measures 28.6 dB or more. THE
+ * ACCEPTED EXCEPTION: a 1 s over of hard speech (1 000 or 1 500 Hz peak deviation, or a 30 %
+ * shallow envelope) at a CNR of 5 to 10 dB can fail, and so does anything under 0.512 s; a
+ * channel is a no-voice one only after ten trials heard nothing there.
+ */
+export function speechHeard(c: SpeechContent): boolean {
+	return (
+		c.frames >= SPEECH_SHORT_MIN_FRAMES &&
+		(c.maxRangeDb >= SPEECH_NOISE_MAX_RANGE_DB ||
+			c.periodicShare >= SPEECH_NOISE_MAX_PERIODIC_SHARE ||
+			c.maxBurstFrames >= SPEECH_NOISE_MAX_BURST_FRAMES)
+	)
+}
+
+/**
+ * finishVerdict's three content readings of a file's measure (`c` null: not measured, so none
+ * discards it, and `speechHeard` is null, logged as not measured): clearlyNotSpeech,
+ * clearlyNoise, speechHeard.
+ */
+export function speechReadings(c: SpeechContent | null): {
+	readonly notSpeech: boolean
+	readonly clearNoise: boolean
+	readonly speechHeard: boolean | null
+} {
+	return c === null
+		? { notSpeech: false, clearNoise: false, speechHeard: null }
+		: {
+				notSpeech: clearlyNotSpeech(c),
+				clearNoise: clearlyNoise(c),
+				speechHeard: speechHeard(c),
+			}
 }

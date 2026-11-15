@@ -17,6 +17,9 @@ import {
 	DigitalClassLedger,
 	fileDecodedOwn,
 	finishVerdict,
+	finishPath,
+	joinedVoiceOf,
+	keptLog,
 	joinedVoiceOverlaps,
 	notVoiceDecode,
 	provisionalRoom,
@@ -26,12 +29,21 @@ import {
 	STRONG_CLASS_MIN_OBSERVATIONS,
 	STRONG_CLASS_TTL_MS,
 	STRONG_PRIOR_TTL_MS,
+	capJoinedVoice,
+	noteJoinedVoice,
+	trialsHeardVoice,
+	NO_VOICE_CHANNEL_MIN_HEARD,
+	NO_VOICE_CHANNEL_MIN_HEARD_PERCENT,
 	OWNER_DEDICATED_PRIOR_TTL_MS,
 	OWN_HINT_OTHER_OBSERVATIONS,
+	DMR_CHANNEL_HINT_OBSERVATIONS,
 	ownDmrHint,
 	contentChecked,
 	TDMA_CHANNEL_MIN_SHARE,
 	TDMA_CHANNEL_MIN_VOTES,
+	NO_VOICE_CHANNEL_MIN_TRIALS,
+	noVoiceChannel,
+	analogTrialsHeard,
 	type DigitalProof,
 	type VoicePrior,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
@@ -51,6 +63,7 @@ import {
 	SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE,
 	SPEECH_STEADY_MAX_RANGE_DB,
 	SPEECH_WINDOW_FRAMES,
+	speechReadings,
 	type SpeechContent,
 } from "../../../../src/core/scanner/channel/speech-content.js"
 import { MAX_ACTIVE_ANALOG_PER_SOURCE } from "../../../../src/core/scanner/store/analog-operations.js"
@@ -2370,7 +2383,7 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 			source: "unchecked-dmr",
 		})
 		expect(contentChecked("unchecked-dmr", p, false, NOW)).toBe(false)
-		expect(ownDmrHint(p, "o-own")).toBe(true)
+		expect(ownDmrHint(p, "o-own", NOW)).toBe(true)
 		expect(finishVerdict({ ...base, prior: p })).toBe("discarded:not-speech")
 	})
 	it("FROZEN: speech on that over is kept (the check needs a steady buzz), so is a toned file", () => {
@@ -2393,7 +2406,7 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 	})
 	it(`needs ${OWN_HINT_OTHER_OBSERVATIONS} other overs with hints: one spurious earlier sync does not open it`, () => {
 		const p = dmrChannel([history[0]!, hint("o-own", NOW - 20_000)])
-		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(ownDmrHint(p, "o-own", NOW)).toBe(false)
 		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
 	})
 	it("bare syncs (no colour code, no checked content) on other overs never count, however recent: a weak fsk4-reading voice channel is not checked", () => {
@@ -2402,14 +2415,14 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 			hint("o-b", NOW - 60_000),
 			hint("o-own", NOW - 20_000),
 		])
-		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(ownDmrHint(p, "o-own", NOW)).toBe(false)
 		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
 		const mixed = dmrChannel([
 			cc("o-a", NOW - 9 * HOUR),
 			hint("o-b", NOW - 60_000),
 			hint("o-own", NOW - 20_000),
 		])
-		expect(ownDmrHint(mixed, "o-own")).toBe(false)
+		expect(ownDmrHint(mixed, "o-own", NOW)).toBe(false)
 	})
 	it("hints with checked content (a talkgroup, verified TG/SRC) or DMR decodes count like colour-coded ones, any age", () => {
 		const checked = (id: string, at: number): DigitalProof => ({
@@ -2421,21 +2434,84 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 			{ ...checked("o-b", NOW - 30 * HOUR), verified: true },
 			hint("o-own", NOW - 20_000),
 		])
-		expect(ownDmrHint(p, "o-own")).toBe(true)
+		expect(ownDmrHint(p, "o-own", NOW)).toBe(true)
 		expect(finishVerdict({ ...base, prior: p })).toBe("discarded:not-speech")
 	})
-	it("needs the hint on the file's own over: hints on other overs only do not", () => {
-		const p = dmrChannel([...history, cc("o-c", NOW - HOUR)])
-		expect(ownDmrHint(p, "o-own")).toBe(false)
-		expect(ownDmrHint(p, null)).toBe(false)
-		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
+	it(`without a hint on the file's own over it needs recent colour-coded hints on ${DMR_CHANNEL_HINT_OBSERVATIONS} other overs`, () => {
+		// Live shape (a DMR beacon that syncs on only some overs): the session's own over carried
+		// no hint, the prior was only suspect, and its steady files were kept.
+		const recent = [cc("o-a", NOW - 25 * 60_000), cc("o-b", NOW - 12 * 60_000)]
+		const two = dmrChannel(recent)
+		expect(ownDmrHint(two, "o-own", NOW)).toBe(false)
+		expect(finishVerdict({ ...base, prior: two })).toBe("finish")
+		const p = dmrChannel([...recent, cc("o-c", NOW - 60_000)])
+		// Recent unchecked hints make the prior tone-required for admission, but not content-checked
+		// by their source: ownDmrHint is what opens the check.
+		const { source } = priorReading(p, false, NOW)
+		expect(contentChecked(source, p, false, NOW)).toBe(false)
+		expect(ownDmrHint(p, "o-own", NOW)).toBe(true)
+		expect(ownDmrHint(p, null, NOW)).toBe(false)
+		expect(finishVerdict({ ...base, prior: p })).toBe("discarded:not-speech")
+		// FROZEN: speech on such an over, a toned one or a joined other voice is kept.
+		expect(finishVerdict({ ...base, prior: p, notSpeech: false })).toBe(
+			"finish",
+		)
+		expect(finishVerdict({ ...base, prior: p, ownTone: true })).toBe("finish")
+		expect(finishVerdict({ ...base, prior: p, joinedVoice: true })).toBe(
+			"finish",
+		)
+		// Bare syncs on the other overs never count.
+		const bare = dmrChannel([
+			hint("o-a", NOW - 60_000),
+			hint("o-b", NOW - 60_000),
+			hint("o-c", NOW - 60_000),
+		])
+		expect(ownDmrHint(bare, "o-own", NOW)).toBe(false)
+	})
+	it(`without an own hint, the ${DMR_CHANNEL_HINT_OBSERVATIONS} hints must each be within STRONG_PRIOR_TTL_MS (30 min): older hints do not count`, () => {
+		expect(STRONG_PRIOR_TTL_MS).toBe(30 * 60_000)
+		const at = (age: number) => [
+			cc("o-a", NOW - 10 * 60_000),
+			cc("o-b", NOW - 5 * 60_000),
+			cc("o-c", NOW - age),
+		]
+		// At the bound (exactly 30 min old): counts.
+		expect(ownDmrHint(dmrChannel(at(STRONG_PRIOR_TTL_MS)), "o-own", NOW)).toBe(
+			true,
+		)
+		// Past it (30 min + 1 ms): only 2 recent hints, not checked.
+		const old = dmrChannel(at(STRONG_PRIOR_TTL_MS + 1))
+		expect(ownDmrHint(old, "o-own", NOW)).toBe(false)
+		expect(finishVerdict({ ...base, prior: old })).toBe("finish")
+		// The history hours old (the earlier live shape): not checked.
+		const stale = dmrChannel([...history, cc("o-c", NOW - HOUR)])
+		expect(ownDmrHint(stale, "o-own", NOW)).toBe(false)
+		expect(finishVerdict({ ...base, prior: stale })).toBe("finish")
+		// FROZEN: with a hint on the file's own over, the other hints still count at any age.
+		const own = dmrChannel([...history, hint("o-own", NOW - 20_000)])
+		expect(ownDmrHint(own, "o-own", NOW)).toBe(true)
+		// An undated (non-finite) hint without an own one does not count either.
+		const undated = dmrChannel([
+			cc("o-a", NOW - 60_000),
+			cc("o-b", NOW - 60_000),
+			cc("o-c", Number.NaN),
+		])
+		expect(ownDmrHint(undated, "o-own", NOW)).toBe(false)
+	})
+	it("bare syncs hours old: not checked", () => {
+		const bare = dmrChannel([
+			hint("o-a", NOW - HOUR),
+			hint("o-b", NOW - HOUR),
+			hint("o-c", NOW - HOUR),
+		])
+		expect(ownDmrHint(bare, "o-own", NOW)).toBe(false)
 	})
 	it("needs DMR's classes on a third of the votes: an analog-fm channel does not", () => {
 		const p = dmrChannel([...history, hint("o-own", NOW - 20_000)], {
 			"analog-fm": 200,
 			"fsk4-12k5": 20,
 		})
-		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(ownDmrHint(p, "o-own", NOW)).toBe(false)
 		expect(finishVerdict({ ...base, prior: p })).toBe("finish")
 	})
 	it("another protocol's hint (dPMR) does not count", () => {
@@ -2444,7 +2520,7 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 			protocol: "dpmr",
 		})
 		const p = dmrChannel([dpmr("o-a"), dpmr("o-b"), dpmr("o-own")])
-		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(ownDmrHint(p, "o-own", NOW)).toBe(false)
 	})
 	it("a throwing read: not applied", () => {
 		const p: VoicePrior = {
@@ -2453,6 +2529,657 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 				throw new Error("boom")
 			},
 		}
-		expect(ownDmrHint(p, "o-own")).toBe(false)
+		expect(ownDmrHint(p, "o-own", NOW)).toBe(false)
+	})
+})
+
+describe("analogTrialsHeard: the owner's trials and its linked partners' heard ones (VoicePrior.analogTrials)", () => {
+	// Feature: recording-verdict, channels whose trials never heard voice (docs/SCANNER.md).
+	const N = NO_VOICE_CHANNEL_MIN_TRIALS
+	const owner = (attempts: number, decoded = 0, syllabic = 0) => ({
+		attempts,
+		decoded,
+		syllabic,
+	})
+	const asPrior = (t: ReturnType<typeof analogTrialsHeard>): VoicePrior => ({
+		...prior([], "analog-fm"),
+		analogTrials: () => t,
+	})
+	for (const [name, o, partners, out, noVoice] of [
+		["no owner trial: null", null, [owner(5, 2)], null, false],
+		[
+			"the owner alone, none heard",
+			owner(52),
+			[],
+			{ attempts: 52, decoded: 0 },
+			true,
+		],
+		[
+			"the owner's 3-syllabic-frame misses count as heard: 2 of 52 (3.8 %), the rule is off",
+			owner(52, 0, 2),
+			[],
+			{ attempts: 52, decoded: 2 },
+			false,
+		],
+		[
+			"one syllabic miss alone (1 of 52) is under the minimum: still no-voice",
+			owner(52, 0, 1),
+			[],
+			{ attempts: 52, decoded: 1 },
+			true,
+		],
+		[
+			"a partner's heard trials add to the owner's count",
+			owner(52, 1),
+			[owner(3, 1)],
+			{ attempts: 52, decoded: 2 },
+			false,
+		],
+		[
+			"a partner's syllabic misses count as its heard trials",
+			owner(52),
+			[owner(3, 0, 2)],
+			{ attempts: 52, decoded: 2 },
+			false,
+		],
+		[
+			"a partner's misses never add (attempts stay the owner's)",
+			owner(N),
+			[owner(400), null],
+			{ attempts: N, decoded: 0 },
+			true,
+		],
+		[
+			"partners sum: owner 1 + partners 2 + 3 + syllabic 1",
+			owner(20, 1),
+			[owner(9, 2), owner(9, 3, 1), null],
+			{ attempts: 20, decoded: 7 },
+			false,
+		],
+		[
+			"a count without `syllabic` reads it as 0",
+			{ attempts: 12, decoded: 0 },
+			[{ attempts: 4, decoded: 0 }],
+			{ attempts: 12, decoded: 0 },
+			true,
+		],
+	] as const)
+		it(name, () => {
+			const t = analogTrialsHeard(o, partners)
+			expect(t).toEqual(out)
+			expect(noVoiceChannel(asPrior(t))).toBe(noVoice)
+		})
+	it("partners default to none", () => {
+		expect(analogTrialsHeard(owner(12, 0, 2))).toEqual({
+			attempts: 12,
+			decoded: 2,
+		})
+	})
+})
+
+describe("a no-voice channel: its analog trials never heard, no analog proof (noVoiceChannel)", () => {
+	// Feature: recording-verdict, channels whose trials never heard voice (docs/SCANNER.md).
+	const N = NO_VOICE_CHANNEL_MIN_TRIALS
+	const trials = (
+		attempts: number,
+		decodedN = 0,
+		base: VoicePrior = prior([], "analog-fm"),
+	): VoicePrior => ({
+		...base,
+		analogTrials: () => ({ attempts, decoded: decodedN }),
+	})
+	const verdict = (
+		p: VoicePrior | null,
+		over: Partial<Parameters<typeof finishVerdict>[0]> = {},
+	) =>
+		finishVerdict({
+			prior: p,
+			backedClass: false,
+			ownTone: false,
+			snapshotClassed: true,
+			decodedOwn: false,
+			joinedVoice: false,
+			notSpeech: false,
+			speechHeard: false,
+			final: false,
+			now: NOW,
+			...over,
+		})
+	it("N is 10", () => {
+		expect(N).toBe(10)
+	})
+	for (const [name, p, out] of [
+		["N trials, none heard, no proof: one", trials(N), true],
+		["the live shape (a): 52 trials, none heard", trials(52), true],
+		[
+			"the live shape (b): 579 trials, a DMR activity label",
+			trials(579, 0, prior([weak("dmr", "activity")], "analog-fm")),
+			true,
+		],
+		["N − 1 trials: not one", trials(N - 1), false],
+		["one trial heard (of 579): still one", trials(579, 1), true],
+		// Minimum share (NO_VOICE_CHANNEL_MIN_HEARD 2, more than 2 % of the owner's attempts).
+		["1 heard of 146: still one", trials(146, 1), true],
+		["2 heard of 146 (1.37 %, ≤ 2 %): still one", trials(146, 2), true],
+		["3 heard of 146 (2.05 %): heard, not one", trials(146, 3), false],
+		["2 heard of 50 (4 %): heard, not one", trials(50, 2), false],
+		["1 heard of 20 (5 %, under 2 heard): still one", trials(20, 1), true],
+		["2 heard of 100 (exactly 2 %): still one", trials(100, 2), true],
+		["3 heard of 100 (3 %): heard, not one", trials(100, 3), false],
+		["2 heard of 10 (20 %): heard, not one", trials(N, 2), false],
+		["no trial memory: not one", prior([], "analog-fm"), false],
+		[
+			"analogTrials null: not one",
+			{ ...prior(), analogTrials: () => null },
+			false,
+		],
+		[
+			"FROZEN: an analog proof on the channel (analogVoice): not one",
+			trials(52, 0, prior([], "analog-fm", true)),
+			false,
+		],
+		[
+			"FROZEN: an analog label at classified: not one",
+			trials(52, 0, prior([weak("analog-fm", "classified")])),
+			false,
+		],
+		[
+			"a throwing trial read: not one",
+			{
+				...prior(),
+				analogTrials: () => {
+					throw new Error("x")
+				},
+			},
+			false,
+		],
+		[
+			"a throwing analogVoice: not one (voice heard)",
+			{
+				...trials(52),
+				analogVoice: () => {
+					throw new Error("x")
+				},
+			},
+			false,
+		],
+		["no prior: not one", null, false],
+	] as const)
+		it(`${name}`, () => {
+			expect(noVoiceChannel(p as VoicePrior | null)).toBe(out)
+		})
+
+	for (const [name, p, over, out] of [
+		[
+			"no speech heard on a no-voice channel: discarded at once, any length",
+			trials(52),
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"the same at the end of its grace",
+			trials(52),
+			{ final: true },
+			"discarded:not-speech",
+		],
+		[
+			"speech heard (a short over passes the check): kept",
+			trials(52),
+			{ speechHeard: true },
+			"finish",
+		],
+		[
+			"not measured (speechHeard absent: own-tone class, a classed roll-over): kept",
+			trials(52),
+			{ speechHeard: undefined },
+			"finish",
+		],
+		[
+			"not measured (speechHeard null, speechReadings(null)): kept",
+			trials(52),
+			{ speechHeard: null },
+			"finish",
+		],
+		[
+			"FROZEN: its own CTCSS tone: kept",
+			trials(52),
+			{ ownTone: true },
+			"finish",
+		],
+		[
+			"FROZEN: a joined voice on the air in it: kept",
+			trials(52),
+			{ joinedVoice: true },
+			"finish",
+		],
+		[
+			"FROZEN: analog proof on the channel: kept",
+			trials(52, 0, prior([], "analog-fm", true)),
+			{},
+			"finish",
+		],
+		[
+			"analog trials that heard voice (2 of 52): kept",
+			trials(52, 2),
+			{},
+			"finish",
+		],
+		[
+			"one stray heard trial of 52: discarded",
+			trials(52, 1),
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"fresh channel (no failed-trial history): kept",
+			prior([], "analog-fm"),
+			{},
+			"finish",
+		],
+		["9 failed trials: kept", trials(N - 1), {}, "finish"],
+		[
+			"under a suspect prior (spectral digital class): discarded, not held",
+			trials(52, 0, prior([], "fsk4-12k5")),
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"under a strong pager prior, unclassed: known non-voice first",
+			trials(52, 0, prior([decoded("pocsag")])),
+			{ snapshotClassed: false },
+			"discarded:known-non-voice",
+		],
+		[
+			"a decode of its own signal: late non-voice first",
+			trials(52),
+			{ decodedOwn: true },
+			"discarded:late-non-voice",
+		],
+	] as const)
+		it(`${name}`, () => {
+			expect(
+				verdict(
+					p as VoicePrior | null,
+					over as Partial<Parameters<typeof finishVerdict>[0]>,
+				),
+			).toBe(out)
+		})
+
+	describe("a joined voice of the channel itself never exempts its files (joinedOtherVoice)", () => {
+		// Live shape: a session on a busy no-voice channel (one burst every 1.3 s) joins many of its
+		// own discovery's observations; any whose snapshot reads analog-fm by its spectrum was
+		// noted as a joined voice, which kept every file of the session without speech.
+		const own = new Set(["o-own-2", "o-own-3", "o-partner"])
+		const channel = (p: VoicePrior): VoicePrior => ({
+			...p,
+			channelObservation: id => own.has(id),
+		})
+		it("joined observations all of the channel: the no-voice rule applies", () => {
+			expect(
+				verdict(channel(trials(68)), {
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-2", "o-partner"],
+				}),
+			).toBe("discarded:not-speech")
+		})
+		it("FROZEN: a joined observation of another discovery: kept", () => {
+			expect(
+				verdict(channel(trials(68)), {
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-2", "o-other"],
+				}),
+			).toBe("finish")
+		})
+		it("FROZEN: no channelObservation read, or no ids given: a joined voice keeps, as before", () => {
+			expect(
+				verdict(trials(68), { joinedVoice: true, joinedVoiceIds: ["o-own-2"] }),
+			).toBe("finish")
+			expect(verdict(channel(trials(68)), { joinedVoice: true })).toBe("finish")
+		})
+		it("FROZEN: a throwing channelObservation read keeps", () => {
+			const p: VoicePrior = {
+				...trials(68),
+				channelObservation: () => {
+					throw new Error("x")
+				},
+			}
+			expect(
+				verdict(p, { joinedVoice: true, joinedVoiceIds: ["o-own-2"] }),
+			).toBe("finish")
+		})
+		it("a decode of its own signal: a joined burst of the channel itself does not keep it, another discovery's voice does", () => {
+			expect(
+				verdict(channel(trials(68)), {
+					speechHeard: true,
+					decodedOwn: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-2", "o-partner"],
+				}),
+			).toBe("discarded:late-non-voice")
+			expect(
+				finishPath({
+					prior: channel(prior([], "analog-fm")),
+					backedClass: false,
+					ownTone: false,
+					snapshotClassed: true,
+					decodedOwn: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-3"],
+					notSpeech: false,
+					final: false,
+					now: NOW,
+				}),
+			).toMatchObject({
+				verdict: "discarded:late-non-voice",
+				reason: "late-non-voice",
+				joinedOther: false,
+			})
+			// FROZEN: another transmission's voice on the air in it keeps it at once.
+			expect(
+				verdict(channel(trials(68)), {
+					speechHeard: true,
+					decodedOwn: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-2", "o-other"],
+				}),
+			).toBe("finish")
+			expect(
+				verdict(trials(68), {
+					decodedOwn: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-2"],
+				}),
+			).toBe("finish")
+		})
+		it("FROZEN: speech heard keeps a file whatever its joins", () => {
+			expect(
+				verdict(channel(trials(68)), {
+					speechHeard: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-2"],
+				}),
+			).toBe("finish")
+		})
+		it("the content check too: a steady buzz a joined own analog-fm snapshot shared is discarded under a checked prior", () => {
+			const p = channel({ ...prior([], "fsk4-12k5"), analogTrials: () => null })
+			expect(
+				verdict(p, {
+					speechHeard: true,
+					notSpeech: true,
+					clearNoise: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-own-3"],
+				}),
+			).toBe("discarded:not-speech")
+			expect(
+				verdict(p, {
+					speechHeard: true,
+					notSpeech: true,
+					clearNoise: true,
+					joinedVoice: true,
+					joinedVoiceIds: ["o-other"],
+					final: true,
+				}),
+			).toBe("finish")
+		})
+		it("joinedVoiceOf lists the joined voices on the air in the file", () => {
+			const s = {
+				joins: new Map([
+					["a", 100],
+					["b", 5_000],
+				]),
+				joinedVoice: new Map([
+					["a", 900],
+					["b", 6_000],
+					["c", 50],
+				]),
+			}
+			expect(joinedVoiceOf(s, { startSample: 200, endSample: 1_000 })).toEqual({
+				joinedVoice: true,
+				joinedVoiceIds: ["a"],
+			})
+			expect(
+				joinedVoiceOf(s, { startSample: 2_000, endSample: 3_000 }),
+			).toEqual({ joinedVoice: false, joinedVoiceIds: [] })
+			expect(joinedVoiceOf(s, { startSample: 2_000, endSample: null })).toEqual(
+				{ joinedVoice: true, joinedVoiceIds: ["b"] },
+			)
+		})
+	})
+
+	it("finishPath and keptLog: why a file was kept, from enumerated readings and measured numbers only", () => {
+		const p = trials(68, 0, prior([weak("dmr", "activity")], "analog-fm"))
+		const path = finishPath({
+			prior: p,
+			backedClass: false,
+			ownTone: false,
+			snapshotClassed: true,
+			decodedOwn: false,
+			joinedVoice: true,
+			notSpeech: false,
+			speechHeard: false,
+			final: true,
+			now: NOW,
+		})
+		expect(path).toMatchObject({
+			verdict: "finish",
+			noVoice: true,
+			joinedOther: true,
+			speechHeard: false,
+		})
+		const log = keptLog(path, {
+			speech: {
+				result: () => ({
+					frames: 340,
+					maxRangeDb: 5.876,
+					periodicShare: 0.0091,
+					maxBurstFrames: 0,
+				}),
+			},
+			handle: { operationId: "op-1" },
+		})
+		expect(log).toMatchObject({
+			operationId: "op-1",
+			reason: path.reason,
+			noVoice: true,
+			joinedOther: true,
+			speechHeard: false,
+			frames: 340,
+			rangeDb: 5.88,
+			periodicShare: 0.009,
+			burstFrames: 0,
+		})
+		expect(
+			finishPath({
+				prior: trials(68),
+				backedClass: false,
+				ownTone: true,
+				snapshotClassed: true,
+				decodedOwn: false,
+				joinedVoice: false,
+				notSpeech: false,
+				speechHeard: true,
+				final: true,
+				now: NOW,
+			}),
+		).toMatchObject({ reason: "own-tone", noVoice: null })
+		// A file classed by its own tone or a classed roll-over is not measured: its kept line
+		// reads speechHeard null (not measured), never true.
+		const unmeasured = finishPath({
+			prior: trials(68),
+			backedClass: false,
+			ownTone: true,
+			snapshotClassed: true,
+			decodedOwn: false,
+			joinedVoice: false,
+			...speechReadings(null),
+			final: true,
+			now: NOW,
+		})
+		expect(unmeasured).toMatchObject({
+			reason: "own-tone",
+			noVoice: null,
+			speechHeard: null,
+		})
+		expect(
+			keptLog(unmeasured, {
+				speech: {
+					result: () => ({
+						frames: 0,
+						maxRangeDb: 0,
+						periodicShare: 0,
+						maxBurstFrames: 0,
+					}),
+				},
+				handle: null,
+			})["speechHeard"],
+		).toBeNull()
+	})
+
+	it("speechReadings: an unmeasured file never discards and logs speechHeard as not measured (null); a measured one reads each check", () => {
+		expect(speechReadings(null)).toEqual({
+			notSpeech: false,
+			clearNoise: false,
+			speechHeard: null,
+		})
+		const flat: SpeechContent = {
+			frames: 90,
+			maxRangeDb: 3,
+			periodicShare: 0,
+			maxBurstFrames: 0,
+		}
+		expect(speechReadings(flat)).toEqual({
+			notSpeech: false,
+			clearNoise: false,
+			speechHeard: false,
+		})
+		expect(speechReadings({ ...flat, maxBurstFrames: 3 }).speechHeard).toBe(
+			true,
+		)
+	})
+})
+
+describe("trialsHeardVoice: at least 2 heard trials and more than 2 % of the owner's attempts", () => {
+	// Feature: recording-verdict, channels whose trials never heard voice (docs/SCANNER.md).
+	it("the bounds are 2 and 2 %", () => {
+		expect(NO_VOICE_CHANNEL_MIN_HEARD).toBe(2)
+		expect(NO_VOICE_CHANNEL_MIN_HEARD_PERCENT).toBe(2)
+	})
+	for (const [attempts, decoded, out] of [
+		[146, 0, false],
+		[146, 1, false],
+		[146, 2, false], // 1.37 %
+		[146, 3, true], // 2.05 %
+		[50, 2, true], // 4 %
+		[50, 1, false], // under 2 heard
+		[20, 1, false],
+		[100, 2, false], // exactly 2 %: not more
+		[100, 3, true],
+		[150, 3, false], // exactly 2 %
+		[149, 3, true],
+		[10, 2, true],
+	] as const)
+		it(`${decoded} heard of ${attempts}: ${out ? "heard" : "not heard"}`, () => {
+			expect(trialsHeardVoice({ attempts, decoded })).toBe(out)
+		})
+})
+
+describe("capJoinedVoice / noteJoinedVoice: past the cap the channel's own joins go first", () => {
+	// Feature: recording-verdict, a channel's own bursts never count as a joined voice.
+	const CAP = 64
+	const own = (id: string): boolean => id.startsWith("own-")
+	const channelPrior = (): VoicePrior => ({
+		...prior([], "analog-fm"),
+		channelObservation: own,
+	})
+	it("a burst-heavy session: one other station's voice early stays after hundreds of own bursts", () => {
+		const s = { owner: "o-owner", joinedVoice: new Map<string, number>() }
+		let reads = 0
+		const read = (): VoicePrior => {
+			reads++
+			return channelPrior()
+		}
+		noteJoinedVoice(s, "own-0", 10, CAP, read)
+		noteJoinedVoice(s, "other-1", 20, CAP, read)
+		for (let i = 1; i <= 400; i++)
+			noteJoinedVoice(s, `own-${i}`, 100 + i, CAP, read)
+		expect(s.joinedVoice.size).toBe(CAP)
+		expect(s.joinedVoice.get("other-1")).toBe(20)
+		// The newest own bursts are kept, the oldest went first.
+		expect(s.joinedVoice.has("own-400")).toBe(true)
+		expect(s.joinedVoice.has("own-0")).toBe(false)
+		// The prior is read only to evict: once per entry past the cap.
+		expect(reads).toBe(402 - CAP)
+		expect(
+			joinedVoiceOf(
+				{ joins: new Map(), joinedVoice: s.joinedVoice },
+				{
+					startSample: 0,
+					endSample: 30,
+				},
+			).joinedVoiceIds,
+		).toEqual(["other-1"])
+	})
+	it("the owner is never noted", () => {
+		const s = { owner: "o-owner", joinedVoice: new Map<string, number>() }
+		noteJoinedVoice(s, "o-owner", 5, CAP, channelPrior)
+		expect(s.joinedVoice.size).toBe(0)
+	})
+	it("a re-noted observation keeps its newest sample and moves to the newest place", () => {
+		const s = { owner: "o", joinedVoice: new Map<string, number>() }
+		noteJoinedVoice(s, "a", 50, 2, () => null)
+		noteJoinedVoice(s, "b", 60, 2, () => null)
+		noteJoinedVoice(s, "a", 40, 2, () => null)
+		expect([...s.joinedVoice]).toEqual([
+			["b", 60],
+			["a", 50],
+		])
+	})
+	it("only other discoveries' joins: the oldest goes", () => {
+		const m = new Map([
+			["x", 1],
+			["y", 2],
+			["z", 3],
+		])
+		capJoinedVoice(m, 2, channelPrior)
+		expect([...m.keys()]).toEqual(["y", "z"])
+	})
+	it("no prior, no channelObservation, or a throwing read: the oldest goes", () => {
+		const fresh = () =>
+			new Map([
+				["other-a", 1],
+				["own-b", 2],
+				["other-c", 3],
+			])
+		for (const p of [
+			() => null,
+			() => prior([], "analog-fm"),
+			(): VoicePrior => ({
+				...prior([], "analog-fm"),
+				channelObservation: () => {
+					throw new Error("x")
+				},
+			}),
+			(): VoicePrior => {
+				throw new Error("x")
+			},
+		]) {
+			const m = fresh()
+			capJoinedVoice(m, 2, p)
+			expect([...m.keys()]).toEqual(["own-b", "other-c"])
+		}
+		const m = fresh()
+		capJoinedVoice(m, 2, channelPrior)
+		expect([...m.keys()]).toEqual(["other-a", "other-c"])
+	})
+	it("under the cap nothing is read or dropped", () => {
+		const m = new Map([["own-a", 1]])
+		let reads = 0
+		capJoinedVoice(m, 1, () => {
+			reads++
+			return channelPrior()
+		})
+		expect(m.size).toBe(1)
+		expect(reads).toBe(0)
 	})
 })

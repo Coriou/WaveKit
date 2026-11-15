@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest"
 import {
+	ANALOG_TRIAL_SYLLABIC_RUN_FRAMES,
 	classifyAnalogTrial,
 	isVoice,
+	syllabicHeard,
+	syllabicRun,
 } from "../../../../src/core/scanner/analog-trial.js"
 import type {
 	AnalogTrialFrame,
@@ -330,5 +333,98 @@ describe("classifyAnalogTrial", () => {
 			floorDb: -100,
 		})
 		expect(classifyAnalogTrial(nfmSame, SILENT_TONES)).toBe("no-sync")
+	})
+})
+
+describe("syllabicHeard: a failed trial that held a run of speech-like frames (no-voice channel rule)", () => {
+	// Weak, distant repeater: no quieting (no-sync), low audio; `on` lists the frames at the index.
+	const weak = (on: readonly number[], length = 40): AnalogTrialStats =>
+		stats(
+			Array.from({ length }, (_, k) =>
+				frame({
+					hfNoiseDb: -2,
+					syllabic: on.includes(k) ? 0.3 : 0.1,
+					audioDb: -55,
+				}),
+			),
+		)
+	it("needs a run of 3 frames", () => {
+		expect(ANALOG_TRIAL_SYLLABIC_RUN_FRAMES).toBe(3)
+	})
+	for (const [name, s, run, heard, outcome] of [
+		[
+			"3 consecutive syllabic frames, no-sync, low audio: heard",
+			weak([10, 11, 12]),
+			3,
+			true,
+			"no-sync",
+		],
+		[
+			"3 scattered syllabic frames: not heard",
+			weak([2, 10, 30]),
+			1,
+			false,
+			"no-sync",
+		],
+		[
+			"2 consecutive syllabic frames: not heard",
+			weak([10, 11]),
+			2,
+			false,
+			"no-sync",
+		],
+		[
+			"many scattered pairs (12 frames, no run of 3): not heard",
+			weak([0, 1, 4, 5, 8, 9, 12, 13, 16, 17, 20, 21]),
+			2,
+			false,
+			"no-sync",
+		],
+		["a run at the very end counts", weak([37, 38, 39]), 3, true, "no-sync"],
+		[
+			"steady noise (0 syllabic frames, quieted, loud): not heard",
+			stats(
+				Array.from({ length: 80 }, () =>
+					frame({ syllabic: 0.05, audioDb: -10 }),
+				),
+			),
+			0,
+			false,
+			"carrier-only",
+		],
+		[
+			"a run of 3 under a carrier-only outcome: heard",
+			stats([
+				...Array.from({ length: 3 }, () => frame({ syllabic: 0.6 })),
+				...Array.from({ length: 37 }, () => frame()),
+			]),
+			3,
+			true,
+			"carrier-only",
+		],
+	] as const)
+		it(name, () => {
+			expect(classifyAnalogTrial(s, SILENT_TONES)).toBe(outcome)
+			expect(syllabicRun(s)).toBe(run)
+			expect(syllabicHeard(s)).toBe(heard)
+		})
+	it("null, missing or non-finite statistics count nothing; a non-finite frame breaks a run", () => {
+		expect(syllabicRun(null)).toBe(0)
+		expect(syllabicRun(undefined)).toBe(0)
+		expect(
+			syllabicRun(
+				stats([frame({ syllabic: Number.NaN }), frame({ syllabic: Infinity })]),
+			),
+		).toBe(0)
+		expect(
+			syllabicRun(
+				stats([
+					frame({ syllabic: 0.5 }),
+					frame({ syllabic: 0.5 }),
+					frame({ syllabic: Number.NaN }),
+					frame({ syllabic: 0.5 }),
+				]),
+			),
+		).toBe(2)
 	})
 })
