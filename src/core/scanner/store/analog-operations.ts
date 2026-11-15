@@ -1875,6 +1875,25 @@ export class AnalogOperations {
 		id: string,
 		has: Presence,
 	): Promise<OperationScan> {
+		try {
+			return await this.readOperation(id, has)
+		} catch {
+			// Any read the checks did not settle (an over-bound or unreadable folder): unknown.
+			return {
+				id,
+				bytes: 0,
+				metadataBytes: 0,
+				unknown: true,
+				intent: null,
+				cleanup: false,
+				residue: [],
+			}
+		}
+	}
+	private async readOperation(
+		id: string,
+		has: Presence,
+	): Promise<OperationScan> {
 		const out: OperationScan = {
 			id,
 			bytes: 0,

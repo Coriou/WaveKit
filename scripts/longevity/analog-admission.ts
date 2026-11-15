@@ -21,16 +21,7 @@
  *   node output/longevity/analog-admission.mjs [--ops 2500] [--legacy 7500] [--records 40]
  */
 import { randomUUID } from "node:crypto"
-import {
-	mkdir,
-	mkdtemp,
-	readFile,
-	readdir,
-	realpath,
-	rm,
-	unlink,
-	writeFile,
-} from "node:fs/promises"
+import { mkdtemp, realpath, rm, unlink } from "node:fs/promises"
 import os from "node:os"
 import { join } from "node:path"
 import { performance } from "node:perf_hooks"
@@ -44,6 +35,7 @@ import { EvidenceStore } from "../../src/core/scanner/store/evidence-store.js"
 import type { RecordingBinding } from "../../src/core/scanner/store/recording-operation.js"
 import { createLogger } from "../../src/utils/logger.js"
 import { counterIds, makeObs } from "../../tests/mocks/scanner/observations.js"
+import { cloneAnalogStore } from "./analog-store-fixture.js"
 
 const arg = (name: string, fallback: number): number => {
 	const i = process.argv.indexOf(`--${name}`)
@@ -221,41 +213,14 @@ try {
 	if (template.outcome !== "finalized")
 		throw new Error(`template recording ${template.outcome}`)
 	await seed.stopAnalog()
-	const opsDir = join(root, ".analog-operations")
-	const [seedId] = (await readdir(opsDir)).filter(n => !n.startsWith("."))
-	if (!seedId) throw new Error("template operation folder missing")
-	const intentText = await readFile(join(opsDir, seedId, "intent.json"), "utf8")
-	const receiptText = await readFile(
-		join(opsDir, seedId, "receipt.json"),
-		"utf8",
-	)
-	const media = await readFile(
-		join(root, "recordings", "analog", discoveryId, `analog-${seedId}.wav`),
-	)
-
 	const t0 = performance.now()
-	for (let i = 0; i < OPS; i++) {
-		const id = randomUUID()
-		const folder = `d_B${String(i % FOLDERS).padStart(4, "0")}`
-		const swap = (text: string): string =>
-			text.replaceAll(seedId, id).replaceAll(discoveryId, folder)
-		await mkdir(join(opsDir, id))
-		await writeFile(join(opsDir, id, "intent.json"), swap(intentText))
-		await writeFile(join(opsDir, id, "receipt.json"), swap(receiptText))
-		const mediaDir = join(root, "recordings", "analog", folder)
-		await mkdir(mediaDir, { recursive: true })
-		await writeFile(join(mediaDir, `analog-${id}.wav`), media)
-	}
-	for (let i = 0; i < LEGACY; i++) {
-		const dir = join(
-			root,
-			"recordings",
-			"dv",
-			`d_B${String(i % FOLDERS).padStart(4, "0")}`,
-		)
-		await mkdir(dir, { recursive: true })
-		await writeFile(join(dir, `call-${i}.wav`), media)
-	}
+	await cloneAnalogStore({
+		root,
+		seedDiscoveryId: discoveryId,
+		ops: OPS,
+		legacy: LEGACY,
+		folders: FOLDERS,
+	})
 	console.log(
 		`store: ${OPS + 1} analog operations, ${LEGACY} other recordings, ${FOLDERS} folders (built in ${ms(performance.now() - t0)} ms)`,
 	)

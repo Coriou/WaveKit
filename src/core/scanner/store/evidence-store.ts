@@ -831,7 +831,9 @@ export class EvidenceStore {
 			const bytes = (await this.collect())
 				.filter(file => file.category === "recordings")
 				.reduce((sum, file) => sum + file.bytes, 0)
-			this.legacy = { bytes, atMs }
+			// A retention pass that walked later keeps its newer count.
+			if (!this.legacy || this.legacy.atMs <= atMs)
+				this.legacy = { bytes, atMs }
 			return bytes
 		} catch (err) {
 			// Unknown: the next admission waits for a walk of its own.
