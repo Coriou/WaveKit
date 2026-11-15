@@ -215,6 +215,15 @@ export const ExceptionSchema = z
 		message: "label narrows a falseVoice exception only",
 		path: ["label"],
 	})
+	.refine(
+		e =>
+			e.kind !== "synthetic" ||
+			(e.frequencyHz !== undefined && e.atMs !== undefined),
+		{
+			message: "a synthetic exception names its channel and a time in its row",
+			path: ["frequencyHz"],
+		},
+	)
 export type TruthException = z.infer<typeof ExceptionSchema>
 
 /**

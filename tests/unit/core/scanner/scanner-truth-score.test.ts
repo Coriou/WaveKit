@@ -491,6 +491,34 @@ describe("truth scorecard: named exceptions", () => {
 		).toBe(0)
 	})
 
+	it("refuses a synthetic exception that names no channel or time", () => {
+		const {
+			frequencyHz: _f,
+			atMs: _a,
+			...bare
+		} = exception({
+			frequencyHz: F,
+			atMs: 1_000,
+		}) as Record<string, unknown>
+		expect(() =>
+			parseThresholds(
+				"t.json",
+				JSON.stringify({ version: 1, limits: {}, exceptions: [bare] }),
+			),
+		).toThrow(/t\.json: exceptions\.0\.frequencyHz/)
+		// A capture exception may name neither.
+		expect(() =>
+			parseThresholds(
+				"t.json",
+				JSON.stringify({
+					version: 1,
+					limits: {},
+					exceptions: [{ ...bare, kind: "capture" }],
+				}),
+			),
+		).not.toThrow()
+	})
+
 	it("refuses a label on a missed-voice exception", () => {
 		const json = JSON.stringify({
 			version: 1,
@@ -506,7 +534,10 @@ describe("truth scorecard: named exceptions", () => {
 		const json = JSON.stringify({
 			version: 1,
 			limits: {},
-			exceptions: [exception(), exception()],
+			exceptions: [
+				exception({ frequencyHz: F, atMs: 0 }),
+				exception({ frequencyHz: F, atMs: 0 }),
+			],
 		})
 		expect(() => parseThresholds("t.json", json)).toThrow(
 			"t.json: exception fresh-dmr twice",

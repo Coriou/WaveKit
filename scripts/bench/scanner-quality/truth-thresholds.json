@@ -101,7 +101,7 @@
 			"frequencyHz": 455256250,
 			"atMs": 9000,
 			"count": 1,
-			"reason": "The DMR handheld conversation's first file, opened before the channel has the 4 TDMA votes that bar it. The later overs are discarded as known non-voice."
+			"reason": "The DMR handheld conversation's first kept file (one session over its second to fourth overs; the first over is discarded unclassed), opened before the channel has the 4 TDMA votes that bar it. The later overs are discarded as known non-voice."
 		},
 		{
 			"name": "noise-keyed-like-speech",
