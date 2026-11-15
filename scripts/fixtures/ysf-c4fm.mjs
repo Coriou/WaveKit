@@ -185,16 +185,19 @@ export function ysfVd2Dibits({ fn, ft, dest, src, dgid = 0, seed = 11 }) {
 }
 
 /**
- * Dibits of one YSF over: two settle frames, HC, `frames` V/D2 CC frames, TC.
- * dsd-fme sets its symbol levels from the first frame syncs and loses those
- * frames, so two frames of sync and noise (no valid FICH) lead.
- * `badCsd1` sends a header whose CSD1 fails its CRC.
+ * Dibits of one YSF over: two settle frames, HC, `superframes` times the
+ * `frames` V/D2 CC frames (FN 0 to frames - 1 each time, as a longer over
+ * repeats them; FN 1 names the source), TC. dsd-fme sets its symbol levels
+ * from the first frame syncs and loses those frames, so two frames of sync
+ * and noise (no valid FICH) lead. `badCsd1` sends a header whose CSD1 fails
+ * its CRC.
  */
 export function ysfCallDibits({
 	dest,
 	src,
 	dgid = 0,
 	frames = 7,
+	superframes = 1,
 	badCsd1 = false,
 	seed = 5,
 }) {
@@ -204,8 +207,18 @@ export function ysfCallDibits({
 	for (let i = 0; i < 2; i++)
 		out.push(...bitsToDibits(bitsOf(FRAME_SYNC, 40)), ...noise(460))
 	out.push(...ysfHeaderDibits({ fi: 0, dest, src, dgid, badCsd1 }))
-	for (let fn = 0; fn < frames; fn++)
-		out.push(...ysfVd2Dibits({ fn, ft: frames - 1, dest, src, dgid }))
+	for (let sf = 0; sf < superframes; sf++)
+		for (let fn = 0; fn < frames; fn++)
+			out.push(
+				...ysfVd2Dibits({
+					fn,
+					ft: frames - 1,
+					dest,
+					src,
+					dgid,
+					seed: 11 + 8 * sf,
+				}),
+			)
 	out.push(...ysfHeaderDibits({ fi: 2, dest, src, dgid }))
 	return out
 }

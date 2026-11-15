@@ -4,6 +4,7 @@ export interface YsfCall {
 	src: string
 	dgid?: number
 	frames?: number
+	superframes?: number
 	badCsd1?: boolean
 	seed?: number
 }

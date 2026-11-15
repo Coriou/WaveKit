@@ -1143,7 +1143,15 @@ generator (`scripts/fixtures/dmr-4fsk.mjs`). The frame error rate counts the fra
 whose CRC- or FEC-checked field dsd-fme did not print as passing; the symbol error
 rate compares dsd-fme's symbol decisions (its `-c` capture) with the sent symbols
 over the stretches where they align (at most 25 % mismatches), so it understates
-errors at low CNR. It runs only with `WAVEKIT_MARGIN=1`, on the host's dsd-fme or,
+errors at low CNR. Each seed delays the symbols by a different fraction of a symbol
+(a transmitter's clock has no fixed phase to the receiver's samples): dsd-fme corrects
+timing only by whole samples, and without noise it lost 0 to 26 % of YSF frames
+depending on that phase alone, with or without a filter, so a fixed phase measures
+one lucky or unlucky receiver. `WAVEKIT_MARGIN_PHASE` fixes it,
+`WAVEKIT_MARGIN_RATE=2400000` uses the 2.4 Msps capture instead of 1.024 Msps. A
+wider low-pass (-6 dB at 3.5 or 4 kHz) left this YSF floor (3 to 6 % at 30 to 40 dB)
+as it was and lost part of the gain at 10 dB. It runs only with `WAVEKIT_MARGIN=1`,
+on the host's dsd-fme or,
 with `WAVEKIT_SYNTH_IMAGE=<image>`, the core image's:
 
 ```bash

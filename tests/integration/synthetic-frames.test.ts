@@ -204,7 +204,15 @@ const CASES: ChainCase[] = [
 	{
 		name: "YSF (dsd-fme auto, the catalogue default)",
 		tool: "dsd-fme",
-		freq: () => ysfFrequency(SYNTHETIC.ysf, { shape: AIR_SHAPES.ysf }),
+		// Four V/D2 superframes: the checked SRC comes in six frames (HC, each
+		// FN 2/7, TC). dsd-fme loses up to a quarter of YSF frames at some symbol
+		// clock phases even without noise (dsd-fme-margin.test.ts), and each
+		// capture rate fixes one phase, so one superframe can miss them all.
+		freq: () =>
+			ysfFrequency(
+				{ ...SYNTHETIC.ysf, superframes: 4 },
+				{ shape: AIR_SHAPES.ysf },
+			),
 		adapter: (path, capture) => dsd(path, capture, "auto"),
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,

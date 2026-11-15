@@ -152,6 +152,9 @@ function tabulatedPulse(shape, span) {
  * standards define it), "gauss" (rectangular NRZ through a Gaussian of
  * bandwidth-time `bt`, GMSK) or "rect". `padSymbols` of zero deviation (an
  * unmodulated carrier) frame the burst so the pulse tails are not cut.
+ * `delaySymbols` (0 to 1, "rc"/"rrc"/"c4fm") delays every symbol by that
+ * fraction of a symbol: a transmitter's symbol clock has no fixed phase to
+ * the receiver's samples, and dsd-fme's decisions depend on that phase.
  */
 export function shapeFrequency(
 	symbols,
@@ -164,6 +167,7 @@ export function shapeFrequency(
 		isinc = false,
 		bt = 0.5,
 		padSymbols = 8,
+		delaySymbols = 0,
 	},
 ) {
 	const sps = rateHz / symbolRate
@@ -185,7 +189,7 @@ export function shapeFrequency(
 				? t => raisedCosine(t, alpha)
 				: tabulatedPulse({ shaping, alpha, isinc }, span)
 		for (let k = 0; k < values.length; k++) {
-			const centre = (k + padSymbols + 0.5) * sps
+			const centre = (k + padSymbols + 0.5 + delaySymbols) * sps
 			const lo = Math.max(0, Math.floor(centre - span * sps))
 			const hi = Math.min(n - 1, Math.ceil(centre + span * sps))
 			for (let i = lo; i <= hi; i++)
