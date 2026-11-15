@@ -90,6 +90,10 @@ describe("DiscoveryStore.voicePrior", () => {
 		expect(prior?.channelObservation?.("a2")).toBe(true)
 		expect(prior?.channelObservation?.("b1")).toBe(false)
 		expect(prior?.channelObservation?.("nope")).toBe(false)
+		// knownObservation: any observation the store indexes, whatever its discovery.
+		expect(prior?.knownObservation?.("a1")).toBe(true)
+		expect(prior?.knownObservation?.("b1")).toBe(true)
+		expect(prior?.knownObservation?.("nope")).toBe(false)
 	})
 
 	it("a discovery decoded DMR at any earlier time is a suspect prior (held, never refused), labelled as the owner's", () => {

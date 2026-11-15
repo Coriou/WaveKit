@@ -4225,7 +4225,8 @@ export class DiscoveryStore
 	 * rebuilt once per channel after a restart, seedChannel) and those of the co-channel
 	 * discoveries above (1 + at most 8 map reads): the channel's pager prior, a new twin's from
 	 * its first read, before any link of its own. `channelObservation` says an observation (by id;
-	 * one map read and folderOwner) is of the owner or of one of those co-channel discoveries.
+	 * one map read and folderOwner) is of the owner or of one of those co-channel discoveries;
+	 * `knownObservation` that the store indexes it at all (one map read).
 	 * Undefined for a folder nobody owns. Reads only (but the memo's one-time rebuild).
 	 */
 	voicePrior(folderId: string): VoicePrior | undefined {
@@ -4291,6 +4292,8 @@ export class DiscoveryStore
 				if (of === undefined) return false
 				return ids.includes(this.folderOwner(of) ?? of)
 			},
+			knownObservation: observationId =>
+				this.observationIndex.has(observationId),
 			digitalProofs: () => this.digitalProofs(d.id),
 			digitalSeenAt: () => this.digitalSeenAt(d.id),
 			tdmaSeenAt: () => this.tdmaSeenAt(d.id),
