@@ -3324,15 +3324,15 @@ The 2026-10-16 core adds `patchable` to a descriptor: `true` when the protected
 older core reads as not patchable. Patchable keys are receive tuning and
 decode parameters whose value is a bounded number, a boolean or a closed set:
 
-| Type              | Patchable keys                                                                                     |
-| ----------------- | -------------------------------------------------------------------------------------------------- |
-| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                                     |
-| `ais-catcher`     | `gain`, `ppm`                                                                                      |
-| `readsb`          | `ppm`                                                                                              |
-| `dsd-fme`         | `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc`, `receiveFilter` |
-| `multimon-ng`     | `fmGain`, `modes`, `verbosity`                                                                     |
-| `rtl433`          | `analyze`, `protocols`                                                                             |
-| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                                   |
+| Type              | Patchable keys                                                                                                          |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                                                          |
+| `ais-catcher`     | `gain`, `ppm`                                                                                                           |
+| `readsb`          | `ppm`                                                                                                                   |
+| `dsd-fme`         | `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc`, `receiveFilter`, `carrierCorrection` |
+| `multimon-ng`     | `fmGain`, `modes`, `verbosity`                                                                                          |
+| `rtl433`          | `analyze`, `protocols`                                                                                                  |
+| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                                                        |
 
 Never patchable, by meaning: `extraArgs`; secrets; free-text `string` and
 `object` options; a `string-list` without a closed set; anything naming a path,

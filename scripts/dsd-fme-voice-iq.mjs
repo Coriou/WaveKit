@@ -23,6 +23,8 @@ import { setTimeout as sleep } from "node:timers/promises"
 
 /** dsd-fme's channel bandwidth, demod and output rate (DsdFmeDecoder.getDemodConfig). */
 const CHANNEL_BANDWIDTH_HZ = 12_500
+/** DsdFmeDecoder's carrier frequency correction bound (DSD_FME_CARRIER_CORRECTION_MAX_HZ; a unit test keeps them equal). */
+const CARRIER_CORRECTION_MAX_HZ = 2000
 const DEMOD_RATE_HZ = 48_000
 /** A recording has no RF: only the offset from the capture centre matters. */
 export const NOMINAL_CENTER_HZ = 100_000_000
@@ -56,6 +58,7 @@ export function parseIqArgs(argv) {
 		front,
 		chanBin: option("--chan-bin") ?? "wavekit-chan",
 		paced: !argv.includes("--unpaced"),
+		afc: !argv.includes("--no-afc"),
 	}
 }
 
@@ -120,8 +123,11 @@ export function chanArgs(rate, socketDir) {
 	]
 }
 
-/** The v1 open request; the queue holds a whole short capture's output. */
-export function openRequest(offset) {
+/**
+ * The v1 open request; the queue holds a whole short capture's output. `afc`
+ * asks for the carrier frequency correction, as DsdFmeDecoder does by default.
+ */
+export function openRequest(offset, afc = true) {
 	return {
 		v: 1,
 		type: "open",
@@ -131,6 +137,7 @@ export function openRequest(offset) {
 		transitionHz: CHANNEL_BANDWIDTH_HZ / 2,
 		outputRateHz: DEMOD_RATE_HZ,
 		format: "cf32",
+		...(afc ? { afcMaxHz: CARRIER_CORRECTION_MAX_HZ } : {}),
 		queueBytes: 64 * 1024 * 1024,
 	}
 }
@@ -167,7 +174,10 @@ export function pace(
  * before it, so a truncated tail cannot pass silently. Resolves on exit with
  * { discontinuities, error }.
  */
-export function chanFeed({ chanBin, iq, rate, offset, paced }, sink) {
+export function chanFeed(
+	{ chanBin, iq, rate, offset, paced, afc = true },
+	sink,
+) {
 	const dir = mkdtempSync(join(tmpdir(), "wkchan-"))
 	const chan = spawn(chanBin, chanArgs(rate, dir), {
 		stdio: ["pipe", "pipe", "inherit", "pipe"],
@@ -206,7 +216,7 @@ export function chanFeed({ chanBin, iq, rate, offset, paced }, sink) {
 		}
 		if (event.type === "ready")
 			chan.stdio[3].write(
-				`${JSON.stringify(openRequest(offset))}\n`,
+				`${JSON.stringify(openRequest(offset, afc))}\n`,
 				err => err && fail(`control fd: ${err.message}`),
 			)
 		else if (event.type === "rejected")

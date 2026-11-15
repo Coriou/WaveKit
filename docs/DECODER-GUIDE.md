@@ -1157,8 +1157,63 @@ to 14 % of SACCH frames, dPMR from 15 % to 6 % of control channels and DMR from
 44 % to 37 % of link controls (aligned symbol errors 6.0 % to 3.0 %). A recorded
 on-air DMR transmission decodes identically. A carrier frequency error of 600 Hz
 still loses most YSF frames: a DC blocker on the discriminator would fix that but
-mutes DMR direct-mode bursts (the recorded transmission decodes nothing), so it
-needs a frequency correction in the channel instead.
+mutes DMR direct-mode bursts (the recorded transmission decodes nothing), so the
+channel corrects the frequency instead ([below](#dsd-fme-carrier-frequency-correction)).
+
+### dsd-fme carrier frequency correction
+
+A handheld's or repeater's crystal and the receiver's ppm error often put a carrier
+a few hundred Hz off its channel, which the FM discriminator turns into a DC offset
+on every 4FSK symbol. A channelised dsd-fme (`useChannelizer` with the core
+channelizer) therefore asks its channel for a carrier frequency correction of up to
+2 kHz (`carrierCorrection`, default `true`; `false` turns it off). 2 kHz is what
+the 12.5 kHz channel allows: it is flat to ±6.25 kHz and 4800 symbols/s 4FSK
+occupies about ±4.25 kHz. The raw-IQ csdr chain has no correction.
+
+`wavekit-chan` runs it on the channel output (`native/wavekit-chan/src/afc.rs`),
+only while a carrier is present:
+
+- a 5 ms block counts as carrier when its envelope is nearly constant
+  (`(Σ|z|²)² / (N·Σ|z|⁴)` at least 0.68: noise alone gives 0.5 and never reached
+  0.6, an FM carrier at 6 dB SNR about 0.74), so it needs no level or noise floor;
+- the offset is the mean phase step over a 4-sample lag, summed over the
+  transmission's carrier blocks (the first block of each burst skipped), measured on
+  the uncorrected samples: there is no loop, so it never chases the modulation;
+- after 40 ms of carrier it engages, once the estimate is at least 200 Hz off
+  (below that the data's own mean, up to 152 Hz on the synthetic signals, is all it
+  would correct, and the output stays bit for bit the uncorrected one); then it
+  follows the growing sum, each block moving it by about 1/n of its own error;
+- it holds through gaps shorter than 250 ms (a DMR direct-mode radio keys a 27.5 ms
+  burst every 60 ms) and resets after a longer one, on a retune and on an input gap.
+
+The mixer is phase continuous. The cost is about 8 ns per output sample, 0.04 % of
+a desktop core per 48 kHz channel next to 6.2 % for the channel itself
+(`native/wavekit-chan/examples/chan_bench.rs`, Mac i5, load average 22 to 48;
+Raspberry Pi not measured).
+
+The margin harness above measures it: `before` is the receive filter alone,
+`after` adds the correction, and each cell also shows the residual carrier offset
+dsd-fme still sees, which does not depend on the dsd-fme build. `DMR (direct)` is a
+direct-mode call (MS syncs, keyed bursts). On the host's dsd-fme build, one seed,
+the correction left a residual within ±50 Hz on P25, YSF, NXDN48 and dPMR and
+of -55 to -145 Hz on DMR and D-STAR (their data's own mean). At -600 Hz it took YSF
+from 100 % of frames lost to 0 % at 20 and 30 dB CNR and 40.7 % at 10 dB, D-STAR
+at 10 dB from 100 % to 25 %, and dPMR at 30 dB from 31 % to 6 %. At +600 Hz it
+took YSF at 10 dB from 63 % to 26 % and D-STAR at 10 dB from 100 % to 38 %. At
+0 Hz every protocol lost the same frames as before. Direct-mode DMR still decodes;
+it loses about half its link controls even at 0 Hz and 30 dB (the early
+superframes), with and without the correction. Over three seeds that build decoded
+it better at +600 Hz uncorrected (37 % lost at 30 dB, 41 % at 20 dB) than at 0 Hz
+(52 %, 48 %), so the correction, which brings it back to about 0 Hz, loses more
+there (52 %, 56 %), and fewer at -600 Hz (63 % from 67 %, 41 % from 59 %). To run the
+full matrix in the core image:
+
+```bash
+WAVEKIT_MARGIN=1 WAVEKIT_SYNTH_IMAGE=<core image> \
+  WAVEKIT_MARGIN_SIGNALS="DMR,DMR (direct),P25 (C4FM),YSF (C4FM),NXDN48,dPMR,D-STAR" \
+  WAVEKIT_MARGIN_ERROR_HZ=0,300,-300,600,-600,1000,-1000 \
+  pnpm exec vitest run --maxWorkers=1 tests/integration/dsd-fme-margin.test.ts
+```
 
 ### readsb aircraft evidence
 

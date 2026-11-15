@@ -57,6 +57,15 @@ import type {
 import type { DecoderCounterName } from "@wavekit/api-types"
 import type { Logger } from "../../utils/logger.js"
 import type { DsdFmeLinkLine } from "./dsd-fme-link.js"
+import type { DecoderChannelRequestResult } from "../../core/channelizer/types.js"
+
+/**
+ * Largest carrier frequency correction (Hz either way). The 12.5 kHz channel is
+ * flat to +-6.25 kHz and 4800 symbols/s 4FSK (DMR, P25, YSF) occupies about
+ * +-4.25 kHz, so a carrier up to 6.25 - 4.25 = 2 kHz off still lies inside the
+ * passband; past that the channel filter cuts the signal anyway.
+ */
+export const DSD_FME_CARRIER_CORRECTION_MAX_HZ = 2000
 
 // =============================================================================
 // REGEX PATTERNS - Protocol-specific patterns for parsing dsd-fme output
@@ -512,6 +521,12 @@ export interface DsdFmeOptions {
 	 * (dsd-fme-filter.ts); default true, false feeds dsd-fme unfiltered.
 	 */
 	receiveFilter: boolean
+	/**
+	 * Carrier frequency correction in the channelizer while a carrier is present
+	 * (DSD_FME_CARRIER_CORRECTION_MAX_HZ); default true. Channel IQ only: the
+	 * raw-IQ csdr chain has none.
+	 */
+	carrierCorrection: boolean
 	/** Per-call recordings: prune oldest beyond this total size (default: 512 MB) */
 	perCallRecordingMaxTotalMb: number
 	/** Per-call recordings: delete files older than this (default: 168 h) */
@@ -794,7 +809,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				CALL_TIMEOUT_MS,
 			),
 			voiceSlot: this.parseVoiceSlot(options["voiceSlot"]),
-			receiveFilter: this.parseReceiveFilter(options["receiveFilter"]),
+			receiveFilter: this.parseFlag("receiveFilter", options["receiveFilter"]),
+			carrierCorrection: this.parseFlag(
+				"carrierCorrection",
+				options["carrierCorrection"],
+			),
 			perCallRecordingMaxTotalMb: positive(
 				"perCallRecordingMaxTotalMb",
 				DSD_FME_RECORDING_MAX_TOTAL_MB_MAX,
@@ -827,11 +846,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return outOfRange ? undefined : port
 	}
 
-	/** Non-boolean values keep the default filter (key-only warning, never the value). */
-	private parseReceiveFilter(value: unknown): boolean {
+	/** A default-on flag: non-boolean values keep it on (key-only warning, never the value). */
+	private parseFlag(
+		key: "receiveFilter" | "carrierCorrection",
+		value: unknown,
+	): boolean {
 		if (value === undefined || value === null) return true
 		if (typeof value === "boolean") return value
-		this.optionWarn("receiveFilter", "invalid")
+		this.optionWarn(key, "invalid")
 		return true
 	}
 
@@ -1214,6 +1236,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 */
 	protected override channelizerSupported(): boolean {
 		return true
+	}
+
+	/** The audio family's channel, with the carrier frequency correction unless it is off. */
+	override getChannelRequest(input: {
+		sampleRateHz: number
+		centerHz?: number
+	}): DecoderChannelRequestResult | undefined {
+		const request = super.getChannelRequest(input)
+		if (
+			request === undefined ||
+			"invalid" in request ||
+			!this.options.carrierCorrection
+		)
+			return request
+		return {
+			...request,
+			afcMaxHz: Math.min(
+				DSD_FME_CARRIER_CORRECTION_MAX_HZ,
+				request.bandwidthHz / 2,
+			),
+		}
 	}
 
 	/**
