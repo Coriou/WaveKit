@@ -866,7 +866,12 @@ async function decide(
 
 /** Whether a backup waits for its second half (completeDeferredLinks). Never throws. */
 export async function hasPendingBackup(dir: string): Promise<boolean> {
-	return (await listBackups(join(resolve(dir), BACKUPS_DIR))).pending.length > 0
+	const { pending, complete } = await listBackups(
+		join(resolve(dir), BACKUPS_DIR),
+	)
+	return (
+		pending.length > 0 || complete.some(b => b.receipt?.linksPending === true)
+	)
 }
 
 /** Options of completeDeferredLinks: the backup's, without the keep store. */
@@ -895,11 +900,17 @@ export async function completeDeferredLinks(
 	const toFormat = formatLabel(opts.format ?? CURRENT_SCANNER_STATE_FORMAT)
 	const outcomes: StateBackupOutcome[] = []
 	let pending: KeptBackup[]
+	let placed: KeptBackup[]
 	try {
-		pending = (await listBackups(backupsDir)).pending
+		const listed = await listBackups(backupsDir)
+		pending = listed.pending
+		placed = listed.complete.filter(b => b.receipt?.linksPending === true)
 	} catch {
 		return outcomes
 	}
+	// In place, receipt still pending (a stop between the rename and the receipt): finish it.
+	for (const b of placed)
+		await finishPlaced(join(backupsDir, b.name), null, opts)
 	for (const p of pending) {
 		const outcome = await completeOne(dir, backupsDir, p, toFormat, opts)
 		if (outcome.kind === "taken")
@@ -983,6 +994,8 @@ async function completeOne(
 		}
 		return made
 	}
+	let finalName: string
+	let totals: { files: number; copiedBytes: number; linkedFiles: number }
 	try {
 		await forEachLimited(files, BACKUP_IO_CONCURRENCY, async rel => {
 			const src = join(dir, rel)
@@ -1019,34 +1032,7 @@ async function completeOne(
 			await doFsync(dst, "file")
 			copiedFiles++
 		})
-		const receiptPath = join(partialDir, BACKUP_RECEIPT_FILE)
-		const raw: unknown = JSON.parse(await readFile(receiptPath, "utf8"))
-		const fields =
-			raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
-		const {
-			linksPending: _pending,
-			freeBytes: _free,
-			...kept
-		} = fields as Record<string, unknown>
 		const total = (receipt.files ?? 0) + linkedFiles + copiedFiles
-		// Tmp file, flush, rename: a crash mid-write never leaves an unreadable receipt (a partial
-		// without one would be pruned as a leftover, losing the only pre-migration copy).
-		await atomicWrite(
-			receiptPath,
-			`${JSON.stringify(
-				{
-					...kept,
-					files: total,
-					copiedBytes: copiedBytes + fallbackBytes,
-					linkedFiles,
-				},
-				null,
-				"\t",
-			)}\n`,
-		)
-		await doFsync(receiptPath, "file")
-		// The list is the first half's working file, not state: the backup in place is the state.
-		await rm(join(partialDir, BACKUP_LINKS_FILE), { force: true })
 		// Every directory's entries (links included) before the rename: a power cut never leaves
 		// a backup counted as taken with missing entries.
 		const dirs = await treeDirs(partialDir)
@@ -1054,32 +1040,16 @@ async function completeOne(
 			syncDir(join(partialDir, d)),
 		)
 		await syncDir(partialDir)
-		const finalName = await freeName(
-			backupsDir,
-			`pre-${fromFormat}.${takenAtMs}`,
-		)
-		// The new backup is in place before any older one goes (pruneBackups below).
+		finalName = await freeName(backupsDir, `pre-${fromFormat}.${takenAtMs}`)
+		// Renamed while its receipt still says pending: from here it is a complete backup whatever
+		// happens next (a `pre-*` folder is never pruned as a leftover); the receipt is finished in
+		// place, and a stop before that is finished by the next start (finishPlaced).
 		await rename(partialDir, join(backupsDir, finalName))
 		await syncDir(backupsDir)
-		const log = createComponentLogger(opts.logger, "StateBackup")
-		const replaced = await pruneBackups(
-			backupsDir,
-			toFormat,
-			finalName,
-			opts.now(),
-			remove,
-			log,
-		)
-		return {
-			kind: "taken",
-			fromFormat,
-			toFormat,
-			path: join(BACKUPS_DIR, finalName),
+		totals = {
 			files: total,
 			copiedBytes: copiedBytes + fallbackBytes,
 			linkedFiles,
-			keepsCopied: receipt.keepsCopied ?? false,
-			replaced,
 		}
 	} catch (err) {
 		return abandon(
@@ -1090,6 +1060,85 @@ async function completeOne(
 						freeBytes: measured,
 					})
 				: skipped("copy-failed"),
+		)
+	}
+	await finishPlaced(join(backupsDir, finalName), totals, opts)
+	const log = createComponentLogger(opts.logger, "StateBackup")
+	// The new backup is in place before any older one goes.
+	const replaced = await pruneBackups(
+		backupsDir,
+		toFormat,
+		finalName,
+		opts.now(),
+		remove,
+		log,
+	)
+	return {
+		kind: "taken",
+		fromFormat,
+		toFormat,
+		path: join(BACKUPS_DIR, finalName),
+		...totals,
+		keepsCopied: receipt.keepsCopied ?? false,
+		replaced,
+	}
+}
+
+/**
+ * Finishes a backup already in place whose receipt still says its links are pending: the receipt
+ * rewritten complete (tmp file and rename; `totals`, or counted again from the link list when a
+ * stop came between the rename and this), then the link list removed. Never throws: a failure
+ * leaves it for the next start, the backup in place either way.
+ */
+async function finishPlaced(
+	dir: string,
+	totals: { files: number; copiedBytes: number; linkedFiles: number } | null,
+	opts: DeferredLinkOptions,
+): Promise<void> {
+	const receiptPath = join(dir, BACKUP_RECEIPT_FILE)
+	const linksPath = join(dir, BACKUP_LINKS_FILE)
+	try {
+		const raw: unknown = JSON.parse(await readFile(receiptPath, "utf8"))
+		const fields =
+			raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {}
+		const {
+			linksPending: _pending,
+			freeBytes: _free,
+			...kept
+		} = fields as Record<string, unknown>
+		let counts = totals
+		if (counts === null) {
+			const receipt = ReceiptSchema.parse(raw)
+			let linked = 0
+			const list = await readLinkList(
+				linksPath,
+				opts.maxFiles ?? BACKUP_MAX_FILES,
+			).catch(() => [] as string[])
+			await forEachLimited(list, BACKUP_IO_CONCURRENCY, async rel => {
+				if (
+					await lstat(join(dir, rel)).then(
+						() => true,
+						() => false,
+					)
+				)
+					linked++
+			})
+			counts = {
+				files: (receipt.files ?? 0) + linked,
+				copiedBytes: receipt.copiedBytes ?? 0,
+				linkedFiles: linked,
+			}
+		}
+		await atomicWrite(
+			receiptPath,
+			`${JSON.stringify({ ...kept, ...counts }, null, "\t")}\n`,
+		)
+		// The list is the first half's working file, not state: the backup in place is the state.
+		await rm(linksPath, { force: true })
+	} catch (err) {
+		createComponentLogger(opts.logger, "StateBackup").warn(
+			{ err },
+			"Could not finish a scanner state backup receipt; retried on the next start",
 		)
 	}
 }

@@ -696,8 +696,19 @@ export class ScannerPersistence {
 	}
 	/** The backup's second half while it runs; null before it starts and once it settled. */
 	backupPending(): Promise<void> | null {
-		return this.backupLinksDone ? null : this.backupLinks
+		if (this.backupLinksDone) return null
+		if (this.backupLinks) return this.backupLinks
+		// Known pending, the second half not started yet (the state is still loading).
+		return this.backupWaiting
+			? this.linksStarted.then(() => this.backupLinks ?? undefined)
+			: null
 	}
+	/** A backup waits for its links (decided right after the first half): gates from then. */
+	private backupWaiting = false
+	private releaseLinksStarted: () => void = () => undefined
+	private readonly linksStarted = new Promise<void>(resolve => {
+		this.releaseLinksStarted = resolve
+	})
 
 	/** Outcome of the pre-migration backup check (null before the first load). */
 	preMigrationBackup(): StateBackupOutcome | null {
@@ -752,12 +763,18 @@ export class ScannerPersistence {
 
 	async load(): Promise<LoadedState> {
 		// Before any read can set a file aside or a later write migrate it (never throws).
-		this.backupOutcome ??= await ensurePreMigrationBackup({
-			dir: this.root,
-			logger: this.log,
-			now: this.now,
-			...this.backupOptions,
-		})
+		if (this.backupOutcome === null) {
+			this.backupOutcome = await ensurePreMigrationBackup({
+				dir: this.root,
+				logger: this.log,
+				now: this.now,
+				...this.backupOptions,
+			})
+			// Deletions wait from here, the load included (backupPending).
+			this.backupWaiting =
+				this.backupOutcome.kind === "pending" ||
+				(await hasPendingBackup(this.root))
+		}
 		try {
 			let loaded: LoadedState
 			try {
@@ -773,7 +790,8 @@ export class ScannerPersistence {
 				// receipt: after an earlier failed load started the second half, it follows it.
 				const note = (): Promise<string[]> =>
 					noteCleanLoad({ dir: this.root, logger: this.log, now: this.now })
-				const running = this.backupPending()
+				// Only a second half already running (started by an earlier, failed load).
+				const running = this.backupLinksDone ? null : this.backupLinks
 				if (running) this.backupLinks = running.then(note).then(() => undefined)
 				else await note()
 			}
@@ -787,13 +805,10 @@ export class ScannerPersistence {
 	private async startBackupLinks(): Promise<void> {
 		if (this.backupLinks) return
 		// Only a backup waiting for its links starts the second half (and gates deletions).
-		const pending =
-			this.backupOutcome?.kind === "pending" ||
-			(await hasPendingBackup(this.root))
-		if (this.backupLinks) return
-		if (!pending) {
+		if (!this.backupWaiting) {
 			this.backupLinks = Promise.resolve()
 			this.backupLinksDone = true
+			this.releaseLinksStarted()
 			return
 		}
 		// The recordings' links (one per recording) never hold up the start: this run's pending
@@ -826,6 +841,7 @@ export class ScannerPersistence {
 			.finally(() => {
 				this.backupLinksDone = true
 			})
+		this.releaseLinksStarted()
 	}
 
 	private async loadState(): Promise<LoadedState> {

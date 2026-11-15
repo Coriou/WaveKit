@@ -1231,8 +1231,6 @@ export class EvidenceStore {
 
 	async removeDiscovery(discoveryId: string): Promise<void> {
 		assertDiscoveryId(discoveryId)
-		const gate = this.deletionGate()
-		if (gate) await gate
 		const pending = this.removals.get(discoveryId)
 		if (pending) return pending
 		// WG9 req 2.6: no cascade to kept media (fixed text; the id is not echoed).
@@ -1246,9 +1244,12 @@ export class EvidenceStore {
 		const aliases = this.aliasesOf(discoveryId).filter(
 			alias => alias !== discoveryId && DISCOVERY_ID.test(alias),
 		)
-		// Fence admission synchronously and drain accepted writes/moves before removal.
+		// Fence admission synchronously and drain accepted writes/moves before removal; the
+		// files themselves wait for a pending state backup (setDeletionGate), after the fence.
+		const gate = this.deletionGate()
 		const removal = Promise.resolve()
 			.then(async () => {
+				if (gate) await gate
 				// WG9 R2: a pinned root whose identity changed stays pending (fail closed).
 				if (!(await this.rootIntact()))
 					throw new WaveKitError(

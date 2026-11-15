@@ -6,6 +6,7 @@ import {
 	mkdtemp,
 	readdir,
 	readFile,
+	rename,
 	rm,
 	stat,
 	writeFile,
@@ -28,6 +29,7 @@ import {
 	completeDeferredLinks,
 	ensurePreMigrationBackup,
 	formatLabel,
+	hasPendingBackup,
 	noteCleanLoad,
 	STATE_FORMAT_FILE,
 } from "../../../src/core/state-backup.js"
@@ -385,7 +387,10 @@ describe("pre-migration backup of scanner state", () => {
 			fromFormat: "unmarked",
 			linkFiles: 1,
 		})
+		// Deletions wait for it (the scanner's EvidenceStore.setDeletionGate) until it settles.
+		expect(p.backupPending()).not.toBeNull()
 		await p.backupSettled()
+		expect(p.backupPending()).toBeNull()
 		expect(p.preMigrationBackup()).toMatchObject({
 			kind: "taken",
 			fromFormat: "unmarked",
@@ -407,6 +412,8 @@ describe("pre-migration backup of scanner state", () => {
 			kind: "none",
 			reason: "same-format",
 		})
+		// No backup waiting: nothing is gated.
+		expect(again.backupPending()).toBeNull()
 	})
 
 	it("an upgrade, a downgrade and the next upgrade each keep the copy that undoes them", async () => {
@@ -1226,6 +1233,45 @@ describe("pre-migration backup: the recordings are linked after the start", () =
 		expect(await readdir(join(dir, BACKUPS_DIR, finalName))).not.toContain(
 			BACKUP_LINKS_FILE,
 		)
+	})
+
+	it("a stop between the rename into place and the receipt's finish: the next start keeps it and finishes it", async () => {
+		await seedState()
+		await ensurePreMigrationBackup({
+			dir,
+			logger,
+			now: () => NOW,
+			statfs: roomy,
+		})
+		// The second half linked and renamed, then the core stopped before finishing the receipt.
+		const partial = join(dir, BACKUPS_DIR, partialName)
+		await mkdir(join(partial, "recordings", "d_1"), { recursive: true })
+		await link(
+			join(dir, "recordings", "d_1", "a.wav"),
+			join(partial, "recordings", "d_1", "a.wav"),
+		)
+		await rename(partial, join(dir, BACKUPS_DIR, finalName))
+		// The next start (same format): pruning keeps a backup in place whatever its receipt says.
+		expect(
+			await ensurePreMigrationBackup({
+				dir,
+				logger,
+				now: () => NOW + 5,
+				statfs: roomy,
+			}),
+		).toMatchObject({ kind: "none", reason: "same-format" })
+		expect(await backups()).toEqual([finalName])
+		expect(await hasPendingBackup(dir)).toBe(true)
+		expect(
+			await completeDeferredLinks({ dir, logger, now: () => NOW + 5 }),
+		).toEqual([])
+		const receipt = await receiptOf(finalName)
+		expect(receipt).toMatchObject({ files: 3, linkedFiles: 1 })
+		expect(receipt).not.toHaveProperty("linksPending")
+		expect(await readdir(join(dir, BACKUPS_DIR, finalName))).not.toContain(
+			BACKUP_LINKS_FILE,
+		)
+		expect(await hasPendingBackup(dir)).toBe(false)
 	})
 
 	it("no clock decides: a wall clock far behind the recordings still links every one", async () => {

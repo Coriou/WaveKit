@@ -1661,11 +1661,15 @@ export class ScannerService extends EventEmitter {
 			)
 			this.recorder.on("captured", (capture: { observationId: string }) => {
 				this.burstInFlight.delete(capture.observationId)
-				this.captures
-					.retention(this.settings().storage.maxCapturesMb * 1024 * 1024)
-					.catch((err: unknown) =>
-						this.log.warn({ err }, "Capture retention failed"),
+				const retain = (): Promise<unknown> =>
+					this.captures.retention(
+						this.settings().storage.maxCapturesMb * 1024 * 1024,
 					)
+				// Captures are linked into a pending state backup too: none is removed before.
+				const gate = this.persistence.backupPending()
+				;(gate ? gate.then(retain) : retain()).catch((err: unknown) =>
+					this.log.warn({ err }, "Capture retention failed"),
+				)
 			})
 			this.arbiter = new TunerArbiter({
 				ownConstructorListener: this.ownConstructorListener,
@@ -3304,7 +3308,11 @@ export class ScannerService extends EventEmitter {
 	}
 
 	deleteCapture(id: string): Promise<boolean> {
-		return this.captures.delete(id)
+		// Not before a pending state backup has linked the capture in (setDeletionGate).
+		const gate = this.persistence.backupPending()
+		return gate
+			? gate.then(() => this.captures.delete(id))
+			: this.captures.delete(id)
 	}
 
 	/**
