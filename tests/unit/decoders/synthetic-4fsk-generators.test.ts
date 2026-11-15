@@ -6,8 +6,14 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	DMR_DIRECT_BURST_SYMBOLS,
+	DMR_DIRECT_FRAME_SYMBOLS,
+	DMR_KEYED_OFF,
 	bptc19696,
 	dmrCallDibits,
+	dmrDirectCallDibits,
+	dmrDirectEnvelope,
+	dmrDirectFrequency,
 	dmrGroupVoiceLc,
 	embeddedLcFragments,
 	golay208,
@@ -18,6 +24,7 @@ import {
 import {
 	AIR_SHAPES,
 	bitsOf,
+	fmCu8,
 	noiseForCnr,
 	pulseResponse,
 	shapeFrequency,
@@ -25,6 +32,7 @@ import {
 	receiveSpectrum,
 } from "../../../scripts/fixtures/fsk-iq.mjs"
 import { ysfCallDibits } from "../../../scripts/fixtures/ysf-c4fm.mjs"
+import { residualOffset } from "../../integration/dsd-fme-margin.js"
 
 /** Minimum Hamming distance of a systematic code over every k-bit message. */
 function minimumDistance(encode: (d: number[]) => number[], k: number): number {
@@ -156,5 +164,102 @@ describe("synthetic 4FSK generators", () => {
 		// Per slot-1 burst one slot-2 burst: 3 settle, 2 headers, 12 voice,
 		// 2 terminators, 2 idle.
 		expect(dmrCallDibits(call)).toHaveLength(480 + 2 * 21 * 144)
+	})
+
+	it("keys a direct-mode call: one 132-symbol burst per 288-symbol frame with the MS syncs", () => {
+		const call = { talkgroup: 4321, source: 1_234_567, superframes: 2 }
+		const dibits = dmrDirectCallDibits(call)
+		const off = DMR_DIRECT_FRAME_SYMBOLS - DMR_DIRECT_BURST_SYMBOLS
+		// Off, then per burst (2 headers, 12 voice, 2 terminators) the burst and an off gap.
+		expect(dibits).toHaveLength(off + 16 * DMR_DIRECT_FRAME_SYMBOLS)
+		const hex = (v: number) =>
+			bitsOf(v, 48)
+				.join("")
+				.match(/../g)!
+				.map(b => parseInt(b, 2))
+				.join("")
+		for (let b = 0; b < 16; b++) {
+			const start = off + b * DMR_DIRECT_FRAME_SYMBOLS
+			const burst = dibits.slice(start, start + DMR_DIRECT_BURST_SYMBOLS)
+			expect(burst).not.toContain(DMR_KEYED_OFF)
+			expect(
+				dibits.slice(
+					start + DMR_DIRECT_BURST_SYMBOLS,
+					start + DMR_DIRECT_FRAME_SYMBOLS,
+				),
+			).toEqual(new Array(off).fill(DMR_KEYED_OFF))
+			// The sync (or EMB and embedded LC) sits in the middle 24 symbols.
+			const middle = burst.slice(54, 78).join("")
+			const isData = b < 2 || b >= 14
+			if (isData) expect(middle).toBe(hex(0xd5d7f77fd757))
+			else if ((b - 2) % 6 === 0) expect(middle).toBe(hex(0x7f7d5dd57dfd))
+		}
+		// The envelope is full over every burst, zero mid-gap, and ramps within 1.25 ms.
+		const freq = dmrDirectFrequency(call)
+		const env = dmrDirectEnvelope(call)
+		expect(env).toHaveLength(freq.length)
+		const sps = 10
+		const pad = 8
+		for (let b = 0; b < 16; b++) {
+			const s = (pad + off + b * DMR_DIRECT_FRAME_SYMBOLS) * sps
+			for (let i = s; i < s + DMR_DIRECT_BURST_SYMBOLS * sps; i++)
+				expect(env[i]).toBe(1)
+			expect(env[s - 61]).toBe(0)
+			expect(env[s - 30]).toBeGreaterThan(0)
+			expect(env[s + DMR_DIRECT_BURST_SYMBOLS * sps + 61]).toBe(0)
+			expect(freq[s - 100]).toBeCloseTo(0, 6)
+		}
+	})
+
+	it("keys the carrier of fmCu8 with an envelope", () => {
+		const freq = new Float64Array(4800).fill(500)
+		const envelope = new Float64Array(4800)
+		envelope.fill(1, 2400)
+		const iq = fmCu8(freq, {
+			sampleRateHz: 48_000,
+			amplitude: 0.5,
+			noise: 0,
+			leadSeconds: 0,
+			envelope,
+		})
+		const mag = (k: number) =>
+			Math.hypot(iq[2 * k]! - 127.5, iq[2 * k + 1]! - 127.5) / 127.5
+		for (const k of [10, 1000, 2300]) expect(mag(k)).toBeLessThan(0.01)
+		for (const k of [2500, 3000, 4700]) expect(mag(k)).toBeCloseTo(0.5, 1)
+	})
+
+	it("measures the residual carrier offset over the second half of the carrier-on samples", () => {
+		// cf32 at 48 kHz: 0.1 s of nothing, then a carrier 300 Hz off modulated by +-1 kHz squares.
+		const lead = 4800
+		const n = 9600
+		const freq = new Float64Array(n).map((_, j) =>
+			j % 480 < 240 ? 1000 : -1000,
+		)
+		const run = (offsetHz: number, envelope?: Float64Array) => {
+			const cf32 = Buffer.alloc(8 * (lead + n))
+			let phase = 0
+			for (let j = 0; j < n; j++) {
+				phase += (2 * Math.PI * (offsetHz + freq[j]!)) / 48_000
+				cf32.writeFloatLE(Math.cos(phase), 8 * (lead + j))
+				cf32.writeFloatLE(Math.sin(phase), 8 * (lead + j) + 4)
+			}
+			return residualOffset(
+				cf32,
+				{ freq, ...(envelope ? { envelope } : {}) },
+				lead,
+			)
+		}
+		const steady = run(300)
+		expect(steady.hz).toBeCloseTo(300, 1)
+		expect(steady.samples).toBeGreaterThan(n / 2 - 2)
+		expect(steady.samples).toBeLessThanOrEqual(n / 2)
+		expect(run(0).hz).toBeCloseTo(0, 1)
+		// Keyed: only the on samples count.
+		const envelope = new Float64Array(n).map((_, j) => (j % 960 < 480 ? 1 : 0))
+		const keyed = run(-450, envelope)
+		expect(keyed.hz).toBeCloseTo(-450, 1)
+		expect(keyed.samples).toBeLessThan(n / 4)
+		// Nothing on: nothing weighed.
+		expect(run(100, new Float64Array(n))).toEqual({ hz: 0, samples: 0 })
 	})
 })

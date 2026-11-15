@@ -577,6 +577,7 @@ impl Runtime {
             output_rate: o.output_rate_hz,
             format: o.format,
             gain: o.gain,
+            afc_max_hz: o.afc_max_hz,
         };
         let (preparation, observed) = match attempt {
             Some(p) => (Some(p.preparation), Some(p.runtime)),
@@ -893,8 +894,13 @@ impl Runtime {
         let admitted = !refused
             && self.channels.get_mut(&channel_id).is_some_and(|ch| {
                 if let Engine::Iq(dsp) = &mut ch.dsp {
+                    let moved = capture + dsp.offset_hz() != center_hz;
                     if let Ok(offset) = dsp.admit_retune(center_hz, capture, fraction) {
                         dsp.retune(offset);
+                        // Another frequency is another signal; a same-centre retune keeps the correction.
+                        if moved {
+                            dsp.restart_afc();
+                        }
                         return true;
                     }
                 }
@@ -1846,7 +1852,7 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
         let mut stdout = std::io::stdout().lock();
         let ready = json!({"v": 1, "type": "ready", "generation": args.generation,
             "pid": std::process::id(), "observerCapability": disposal::CAPABILITY,
-            "recenter": true});
+            "recenter": true, "afc": true});
         if serde_json::to_writer(&mut stdout, &ready).is_err()
             || stdout.write_all(b"\n").is_err()
             || stdout.flush().is_err()
@@ -1893,7 +1899,7 @@ fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
     let mut rt = Runtime::new(args, sink);
     rt.disposal = disposal;
     if !observed {
-        rt.emit(json!({"type": "ready", "pid": std::process::id(), "recenter": true}));
+        rt.emit(json!({"type": "ready", "pid": std::process::id(), "recenter": true, "afc": true}));
     }
     loop {
         let wait = if rt.pending.is_empty() {
@@ -2543,6 +2549,49 @@ mod tests {
     }
 
     #[test]
+    fn a_recentre_keeps_the_carrier_correction_and_a_move_restarts_it() {
+        let dir = TempDir::new();
+        let (mut r, _ev) = rt(&dir.0);
+        r.request_and_wait(parse_request(r#"{"v":1,"type":"open","id":"afc","centerHz":162000000,"bandwidthHz":12500,"transitionHz":5000,"outputRateHz":48000,"format":"cf32","afcMaxHz":2000,"queueBytes":4096}"#).unwrap());
+        let correction = |r: &mut Runtime| match &r.channels.get("afc").unwrap().dsp {
+            Engine::Iq(dsp) => dsp.afc_correction_hz().unwrap(),
+            _ => unreachable!(),
+        };
+        // 0.3 s of a carrier 700 Hz above the channel, FM by a 1200 Hz sine at ±1944 Hz (an
+        // unmodulated carrier never counts), straight into its DSP.
+        let n = 614_400;
+        let mut phase = 0.0f64;
+        let (i, q): (Vec<f32>, Vec<f32>) = (0..n)
+            .map(|k| {
+                let t = k as f64 / 2_048_000.0;
+                let f = 700.0 + 1944.0 * (std::f64::consts::TAU * 1200.0 * t).sin();
+                phase = (phase + std::f64::consts::TAU * f / 2_048_000.0)
+                    .rem_euclid(std::f64::consts::TAU);
+                (phase.cos() as f32 * 0.5, phase.sin() as f32 * 0.5)
+            })
+            .unzip();
+        if let Engine::Iq(dsp) = &mut r.channels.get_mut("afc").unwrap().dsp {
+            dsp.process_f32(&i, &q);
+        }
+        let held = correction(&mut r);
+        assert!((held - 700.0).abs() < 15.0, "{held}");
+        r.on_request(recenter(162.1e6));
+        assert_eq!(iq_offset(&r, "afc"), -100_000.0);
+        assert_eq!(correction(&mut r), held, "same signal after a recentre");
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"afc","centerHz":162000000}"#)
+                .unwrap(),
+        );
+        assert_eq!(correction(&mut r), held, "a retune to the same centre");
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"afc","centerHz":162010000}"#)
+                .unwrap(),
+        );
+        assert_eq!(correction(&mut r), 0.0, "another frequency, another signal");
+        r.shutdown();
+    }
+
+    #[test]
     fn later_opens_and_retunes_admit_against_the_new_centre() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
@@ -2718,6 +2767,7 @@ mod tests {
             output_rate: 48_000,
             format: crate::channel::Format::Cf32,
             gain: 1.0,
+            afc_max_hz: None,
         })
         .unwrap();
         let mut want = Vec::new();

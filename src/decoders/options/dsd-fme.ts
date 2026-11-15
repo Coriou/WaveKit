@@ -127,6 +127,7 @@ export const dsdFmeOptionsSchema = z
 			.optional(),
 		perCallRecordingPrune: z.boolean().nullable().optional(),
 		receiveFilter: z.boolean().nullable().optional(),
+		carrierCorrection: z.boolean().nullable().optional(),
 		udpHost: z.string().nullable().optional(),
 		// Only in the `udp:${host}:${port}` argument, guarded by truthiness.
 		udpPort: numberOrText(z.number().int().min(1).max(65535), INTEGER_TEXT)
@@ -377,6 +378,16 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 		effect: "restart",
 		description:
 			"Filter the discriminator output before dsd-fme: a 3 kHz low-pass for DMR, P25, YSF and D-STAR, the NXDN receive filter for NXDN48, a 1.3 kHz low-pass for dPMR; none for NXDN96 and ProVoice.",
+	},
+	{
+		key: "carrierCorrection",
+		patchable: true,
+		type: "boolean",
+		default: true,
+		secret: false,
+		effect: "restart",
+		description:
+			"Correct the carrier frequency error (up to 2 kHz) in the channelizer while a carrier is present; channelised instances only.",
 	},
 	{
 		key: "udpHost",

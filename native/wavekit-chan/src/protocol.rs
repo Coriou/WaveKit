@@ -50,6 +50,8 @@ pub struct OpenReq {
     pub output_rate_hz: u64,
     pub format: Format,
     pub gain: f32,
+    /// Carrier frequency correction bound in Hz (`afcMaxHz`), or `None` for no correction.
+    pub afc_max_hz: Option<f64>,
     pub queue_bytes: usize,
 }
 
@@ -292,6 +294,7 @@ pub fn parse_request(line: &str) -> Result<Request, (String, String)> {
                     "outputRateHz",
                     "format",
                     "gain",
+                    "afcMaxHz",
                     "queueBytes",
                 ],
             )
@@ -321,14 +324,27 @@ pub fn parse_request(line: &str) -> Result<Request, (String, String)> {
                     "queueBytes must be within 1..={MAX_QUEUE_BYTES}"
                 )));
             }
+            let bandwidth_hz = num("bandwidthHz")?;
+            // Same rule as Node's admitChannel: a correction stays within the half passband.
+            let afc_max_hz = match obj.get("afcMaxHz") {
+                None => None,
+                Some(a) => Some(
+                    a.as_f64()
+                        .filter(|a| *a > 0.0 && *a <= bandwidth_hz / 2.0)
+                        .ok_or_else(|| {
+                            err("afcMaxHz must be a number in (0, bandwidthHz / 2]".into())
+                        })?,
+                ),
+            };
             Ok(Request::Open(OpenReq {
                 id,
                 center_hz: num("centerHz")?,
-                bandwidth_hz: num("bandwidthHz")?,
+                bandwidth_hz,
                 transition_hz: num("transitionHz")?,
                 output_rate_hz: uint("outputRateHz")?,
                 format,
                 gain,
+                afc_max_hz,
                 queue_bytes: queue_bytes as usize,
             }))
         }
@@ -1035,6 +1051,7 @@ mod tests {
                 output_rate_hz: 384_000,
                 format: Format::Cu8,
                 gain: 1.0,
+                afc_max_hz: None,
                 queue_bytes: 192_000,
             }
         );
@@ -1042,6 +1059,24 @@ mod tests {
             panic!("gain must parse")
         };
         assert_eq!((o.gain, o.queue_bytes), (2.5, 2));
+        let Ok(Request::Open(o)) = open_with(r#""format":"cf32","afcMaxHz":2000,"queueBytes":8"#)
+        else {
+            panic!("afcMaxHz must parse")
+        };
+        assert_eq!(o.afc_max_hz, Some(2000.0));
+        // At the bound (half of bandwidthHz 364800) and past it.
+        let at = format!(
+            r#""format":"cf32","afcMaxHz":{},"queueBytes":8"#,
+            364_800.0 / 2.0
+        );
+        assert!(matches!(open_with(&at), Ok(Request::Open(o)) if o.afc_max_hz == Some(182_400.0)));
+        for bad in ["182400.5", "0", "-1", "\"2000\"", "null"] {
+            let e = open_with(&format!(
+                r#""format":"cf32","afcMaxHz":{bad},"queueBytes":8"#
+            ))
+            .unwrap_err();
+            assert!(e.1.contains("afcMaxHz"), "{bad}: {}", e.1);
+        }
     }
 
     // Mirrors Node's admission checks (Task 16) so the two agree (Property 1).

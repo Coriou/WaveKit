@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import pino from "pino"
 import type { DecoderFactory } from "../../../src/decoders/registry.js"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
+import type { DecoderChannelRequest } from "../../../src/core/channelizer/types.js"
 import {
 	AcarsdecDecoder,
 	createAcarsdecDecoder,
@@ -11,6 +12,7 @@ import {
 import { createAisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import { createDirewolfDecoder } from "../../../src/decoders/builtin/direwolf.js"
 import {
+	DSD_FME_CARRIER_CORRECTION_MAX_HZ,
 	DsdFmeDecoder,
 	createDsdFmeDecoder,
 } from "../../../src/decoders/builtin/dsd-fme.js"
@@ -254,6 +256,7 @@ describe("channel requests (addendum §1, §2)", () => {
 			transitionHz: 6_250,
 			outputRateHz: 48_000,
 			format: "cf32",
+			afcMaxHz: DSD_FME_CARRIER_CORRECTION_MAX_HZ,
 		})
 		const chan = pipelineOf(
 			make("dsd-fme", { inputSampleRate: 48_000, inputIqFormat: "cf32" }),
@@ -263,6 +266,35 @@ describe("channel requests (addendum §1, §2)", () => {
 		expect(chan.match(/\bsox /g)).toHaveLength(1)
 		expect(chan).toContain(
 			`sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(48000)} | dsd-fme`,
+		)
+	})
+
+	it("dsd-fme asks for the carrier frequency correction unless carrierCorrection is false", () => {
+		const input = { sampleRateHz: 2_048_000, centerHz: 438.5e6 }
+		expect(DSD_FME_CARRIER_CORRECTION_MAX_HZ).toBe(2000)
+		const on = make("dsd-fme").getChannelRequest?.(input)
+		expect(on).toMatchObject({ afcMaxHz: 2000 })
+		// Within the bound the channelizer accepts: half the passband.
+		expect(admitChannel(on as DecoderChannelRequest, input, 0.8)).toEqual({
+			admitted: true,
+			offsetHz: 0,
+		})
+		const off = make("dsd-fme", {
+			carrierCorrection: false,
+		}).getChannelRequest?.(input)
+		expect(off).not.toHaveProperty("afcMaxHz")
+		expect(off).toEqual({ ...on, afcMaxHz: undefined })
+		// Anything but a boolean keeps the default.
+		for (const value of ["false", 0, null])
+			expect(
+				make("dsd-fme", { carrierCorrection: value }).getChannelRequest?.(
+					input,
+				),
+			).toEqual(on)
+		// The audio command line is the same either way: the correction is in the channel.
+		const channel = { inputSampleRate: 48_000, inputIqFormat: "cf32" }
+		expect(pipelineOf(make("dsd-fme", channel))).toBe(
+			pipelineOf(make("dsd-fme", { ...channel, carrierCorrection: false })),
 		)
 	})
 
@@ -383,6 +415,7 @@ describe("channel requests (addendum §1, §2)", () => {
 			transitionHz: 6_250,
 			outputRateHz: 48_000,
 			format: "cf32",
+			afcMaxHz: DSD_FME_CARRIER_CORRECTION_MAX_HZ,
 		})
 		// Pure: computing the request leaves the raw pipeline untouched.
 		expect(pipelineOf(d)).toBe(raw)

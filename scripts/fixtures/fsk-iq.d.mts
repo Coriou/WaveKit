@@ -66,6 +66,7 @@ export function fmCu8(
 		noiseBandwidthHz?: number
 		seed?: number
 		leadSeconds?: number
+		envelope?: Float64Array
 	},
 ): Buffer
 export function fmAudioS16(

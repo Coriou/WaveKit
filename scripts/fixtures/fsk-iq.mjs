@@ -278,7 +278,9 @@ export function noiseForCnr({
  * at `offsetHz` from the capture centre. Amplitude `amplitude` of full scale,
  * complex noise sigma `noise` (of full scale per rail), `leadSeconds` of
  * noise only before and after. `cnrDb` (with `noiseBandwidthHz`) replaces
- * `amplitude` and `noise` by noiseForCnr.
+ * `amplitude` and `noise` by noiseForCnr (the CNR of the carrier while on).
+ * `envelope`, at `freqRateHz` like `freqHz`, keys the carrier: its amplitude
+ * times the envelope (0 to 1), as a TDMA radio's bursts.
  */
 export function fmCu8(
 	freqHz,
@@ -292,6 +294,7 @@ export function fmCu8(
 		noiseBandwidthHz = 12_500,
 		seed = 1,
 		leadSeconds = 0.1,
+		envelope,
 	} = {},
 ) {
 	const { amplitude, noise } =
@@ -321,8 +324,15 @@ export function fmCu8(
 			phase += (2 * Math.PI * f) / sampleRateHz
 			if (phase > Math.PI) phase -= 2 * Math.PI
 			else if (phase < -Math.PI) phase += 2 * Math.PI
-			I = amplitude * Math.cos(phase)
-			Q = amplitude * Math.sin(phase)
+			const a =
+				envelope === undefined
+					? amplitude
+					: amplitude *
+						(envelope[j] +
+							(envelope[Math.min(envelope.length - 1, j + 1)] - envelope[j]) *
+								(x - j))
+			I = a * Math.cos(phase)
+			Q = a * Math.sin(phase)
 		}
 		I += noise * gauss()
 		Q += noise * gauss()

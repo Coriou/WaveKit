@@ -66,17 +66,18 @@ Environment overrides follow the usual convention:
 
 Per-decoder dsd-fme options:
 
-| Option                                                                  | Effect                                                                                                                                                     |
-| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `output` unset                                                          | Stream to the digital voice stream (dsd-fme `-o udp:127.0.0.1:<ephemeral port>`)                                                                           |
-| `output: "null"`                                                        | Call metadata only (opt out)                                                                                                                               |
-| `output: "udp"` + `udpHost` + `udpPort`                                 | Send voice to your own listener (not the stream)                                                                                                           |
-| `output: "wav"` + `wavDir`                                              | Per-call WAV files, no live audio (now `-7 <dir> -P`; it used to pass the single-file `-w`)                                                                |
-| `voiceSlot`                                                             | Overrides `digitalVoice.voiceSlot` for this decoder                                                                                                        |
-| `enablePerCallRecording`, `perCallRecordingDir`                         | Per-call WAVs alongside the stream (`-7 <dir> -P`), default off                                                                                            |
-| `perCallRecordingMaxTotalMb` (512), `perCallRecordingMaxAgeHours` (168) | Retention: expired files are deleted, then the oldest until the total fits; files written in the last 10 s are kept. Runs at start and 2 s after each call |
-| `receiveFilter` (true)                                                  | Filter the discriminator output before dsd-fme, per mode ([DECODER-GUIDE](DECODER-GUIDE.md#dsd-fme-receive-filter)); `false` feeds it unfiltered           |
-| `extraArgs`                                                             | Passed through, except `-f*` (mode), `-o` (output) and `-y` (float audio), which are dropped with a warning: they would desync the stream format           |
+| Option                                                                  | Effect                                                                                                                                                                  |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `output` unset                                                          | Stream to the digital voice stream (dsd-fme `-o udp:127.0.0.1:<ephemeral port>`)                                                                                        |
+| `output: "null"`                                                        | Call metadata only (opt out)                                                                                                                                            |
+| `output: "udp"` + `udpHost` + `udpPort`                                 | Send voice to your own listener (not the stream)                                                                                                                        |
+| `output: "wav"` + `wavDir`                                              | Per-call WAV files, no live audio (now `-7 <dir> -P`; it used to pass the single-file `-w`)                                                                             |
+| `voiceSlot`                                                             | Overrides `digitalVoice.voiceSlot` for this decoder                                                                                                                     |
+| `enablePerCallRecording`, `perCallRecordingDir`                         | Per-call WAVs alongside the stream (`-7 <dir> -P`), default off                                                                                                         |
+| `perCallRecordingMaxTotalMb` (512), `perCallRecordingMaxAgeHours` (168) | Retention: expired files are deleted, then the oldest until the total fits; files written in the last 10 s are kept. Runs at start and 2 s after each call              |
+| `receiveFilter` (true)                                                  | Filter the discriminator output before dsd-fme, per mode ([DECODER-GUIDE](DECODER-GUIDE.md#dsd-fme-receive-filter)); `false` feeds it unfiltered                        |
+| `carrierCorrection` (true)                                              | Correct a carrier frequency error of up to 2 kHz in the channelizer while a carrier is present ([DECODER-GUIDE](DECODER-GUIDE.md#dsd-fme-carrier-frequency-correction)) |
+| `extraArgs`                                                             | Passed through, except `-f*` (mode), `-o` (output) and `-y` (float audio), which are dropped with a warning: they would desync the stream format                        |
 
 Relative recording directories are resolved to absolute paths. Retention only
 deletes files dsd-fme named (`dsd_file.c` in the pinned build):
@@ -290,15 +291,16 @@ capture instead of the discriminator output (`scripts/dsd-fme-voice-iq.mjs`):
 docker run --rm --network none --entrypoint node -v "$PWD:/w:ro" \
   wavekit:local-core /w/scripts/dsd-fme-voice-ab.mjs \
   --iq <capture.cu8> --rate <fs> --offset <hz> --front csdr|chan \
-  [--chan-bin wavekit-chan] [--unpaced]
+  [--chan-bin wavekit-chan] [--unpaced] [--no-afc]
 ```
 
 `--offset` is the signal's offset from the capture centre (run 8: 6000).
 `--front csdr` runs the decoder's raw front (convert, shift, matched
 firdecimate, fmdemod, then the back chain). `--front chan` runs the csdr front
 first as the reference, then `wavekit-chan` (one 48 kHz cf32 channel at
-capture centre + offset, 12 500 / 6 250 Hz, as the channelised decoder
-requests it) into fmdemod and the back chain. Both fronts run the three-way
+capture centre + offset, 12 500 / 6 250 Hz with the carrier frequency
+correction, as the channelised decoder requests it; `--no-afc` leaves the
+correction out) into fmdemod and the back chain. Both fronts run the three-way
 check above. The chan front must also decode the same TGT/SRC lines as the
 csdr front, and its AMBE errors must not exceed max(1.25 x csdr, csdr + 20).
 That tolerance is provisional until the user confirms it. The chan front feeds

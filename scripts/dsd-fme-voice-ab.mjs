@@ -31,7 +31,7 @@
  * instead of the discriminator output (scripts/dsd-fme-voice-iq.mjs):
  *
  *   ... /w/scripts/dsd-fme-voice-ab.mjs --iq <cu8> --rate <fs> \
- *     --offset <hz> --front csdr|chan [--chan-bin wavekit-chan] [--unpaced]
+ *     --offset <hz> --front csdr|chan [--chan-bin wavekit-chan] [--unpaced] [--no-afc]
  *
  * --front csdr   the decoder's raw front: convert | shift | matched
  *                firdecimate | fmdemod, then BACK_CHAIN and the WAV wrapper.
@@ -48,6 +48,8 @@
  *                the absolute limits (QH-12); it stays a harness golden.
  * --unpaced     feed the chan front as fast as it reads (default: real time,
  *                2 bytes per sample, as the voice gate runs paced).
+ * --no-afc      open the chan front's channel without the carrier frequency
+ *                correction the decoder asks for by default.
  * Exit code 0 on success, 1 on failure.
  */
 
@@ -262,7 +264,7 @@ async function checkIq(iq) {
 	if (iq.front === "csdr") return csdr
 	const chanStages = chanFeedStages(chain)
 	process.stdout.write(
-		`front chan: ${iq.chanBin} ${JSON.stringify(openRequest(iq.offset))} | ${chanStages.join(" | ")}\n`,
+		`front chan: ${iq.chanBin} ${JSON.stringify(openRequest(iq.offset, iq.afc))} | ${chanStages.join(" | ")}\n`,
 	)
 	const chan = await checkFront({
 		command: chanStages.join(" | "),

@@ -4,6 +4,8 @@
 // so the fanout branch really drops and then really drains (Task 21). Anchoring to `opened` keeps slow spawns out of the window.
 // ignore-shutdown: `shutdown`, control EOF and input EOF are all ignored, so only a signal ends it (stop escalation).
 // runaway-line: after \`ready\`, stdout gets one endless line (never a newline) until the process ends.
+// FAKE_CHAN_AFC=1: \`ready\` offers \`afc\` (the binary takes \`afcMaxHz\`); otherwise it is an older binary that
+// rejects an open carrying the field, as protocol.rs did.
 // Like the real binary there is no signal handler: SIGTERM ends it with (null, "SIGTERM").
 // Channels are identity pass-through, so a discontinuity's output sampleIndex equals the input sample index.
 // Like runtime.rs, `shutdown` and control EOF close every channel with reason "requested" and exit 0; every exit
@@ -19,12 +21,14 @@ const quit = code => process.stdout.write("", () => process.exit(code))
 const shutdown = () => { if (exiting || mode === "ignore-shutdown") return; exiting = true; for (const id of channels) { clients.get(id)?.end(); emit({ type: "closed", id, reason: "requested" }) } quit(0) }
 if (mode === "ignore-shutdown") setInterval(() => {}, 1 << 30)
 if (mode === "garbage") process.stdout.write("not json\\n")
-if (mode !== "no-ready") emit({ type: "ready", pid: process.pid })
+const afc = process.env.FAKE_CHAN_AFC === "1"
+if (mode !== "no-ready") emit({ type: "ready", pid: process.pid, ...(afc ? { afc: true } : {}) })
 if (mode === "runaway-line") { const chunk = "x".repeat(16384); const spew = () => { if (!exiting) process.stdout.write(chunk, spew) }; spew() }
 readline.createInterface({ input: new net.Socket({ fd: 3, readable: true, writable: false }) }).on("line", line => {
   let r; try { r = JSON.parse(line) } catch { return emit({ type: "rejected", id: "", reasonCode: "channel-request-invalid", detail: "json" }) }
   if (r.type === "open") {
     if (r.centerHz > 1e12) return emit({ type: "rejected", id: r.id, reasonCode: "channel-outside-capture", detail: "fake" })
+    if (r.afcMaxHz !== undefined && !afc) return emit({ type: "rejected", id: r.id, reasonCode: "channel-request-invalid", detail: "unknown field afcMaxHz" })
     const sock = path.join(dir, r.id + ".sock"); try { fs.unlinkSync(sock) } catch {}
     const server = net.createServer(c => { clients.set(r.id, c); server.close() }); server.listen(sock, () => {
       channels.add(r.id); emit({ type: "opened", id: r.id, socket: sock, outputRateHz: r.outputRateHz, format: r.format, filterTaps: 11, groupDelaySamples: 5 })

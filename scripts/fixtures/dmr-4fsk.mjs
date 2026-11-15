@@ -31,6 +31,9 @@ import {
 
 const BS_VOICE_SYNC = 0x755fd7df75f7
 const BS_DATA_SYNC = 0xdff57d75df5d
+/** MS-sourced syncs (Table 9.2): a radio transmitting on its own, as in direct mode. */
+const MS_VOICE_SYNC = 0x7f7d5dd57dfd
+const MS_DATA_SYNC = 0xd5d7f77fd757
 
 /** Data types (slot type, Table 6.13). */
 export const DMR_DATA_TYPE = { voiceLcHeader: 1, terminatorLc: 2, idle: 9 }
@@ -212,13 +215,18 @@ export function cachBits(slot) {
 }
 
 /** One data burst (264 bits) of `dataType` carrying the 96 info bits. */
-export function dataBurstBits({ colourCode, dataType, info96 }) {
+export function dataBurstBits({
+	colourCode,
+	dataType,
+	info96,
+	sync = BS_DATA_SYNC,
+}) {
 	const info = bptc19696(info96)
 	const slotType = golay208([...bitsOf(colourCode, 4), ...bitsOf(dataType, 4)])
 	return [
 		...info.slice(0, 98),
 		...slotType.slice(0, 10),
-		...bitsOf(BS_DATA_SYNC, 48),
+		...bitsOf(sync, 48),
 		...slotType.slice(10),
 		...info.slice(98),
 	]
@@ -233,11 +241,17 @@ export function lcInfoBits(lcBytes, mask) {
 }
 
 /** One voice burst (264 bits): A carries the sync, B to F the EMB. */
-export function voiceBurstBits({ index, colourCode, fragments, random }) {
+export function voiceBurstBits({
+	index,
+	colourCode,
+	fragments,
+	random,
+	sync = BS_VOICE_SYNC,
+}) {
 	const vocoder = () => [...Array(216)].map(() => (random() < 0.5 ? 0 : 1))
 	const frames = vocoder()
 	let middle
-	if (index === 0) middle = bitsOf(BS_VOICE_SYNC, 48)
+	if (index === 0) middle = bitsOf(sync, 48)
 	else {
 		// LCSS: B first fragment, C and D continuation, E last, F none.
 		const lcss = [0, 1, 3, 3, 2, 0][index]
@@ -318,4 +332,117 @@ export function dmrFrequency(
 		...shape,
 		deviationHz: dibit => [648, 1944, -648, -1944][dibit],
 	})
+}
+
+/** Direct-mode frame: one 27.5 ms burst (132 symbols) per 60 ms (288 symbols). */
+export const DMR_DIRECT_BURST_SYMBOLS = 132
+export const DMR_DIRECT_FRAME_SYMBOLS = 288
+/** A symbol of carrier-off time in dmrDirectCallDibits. */
+export const DMR_KEYED_OFF = 4
+
+/**
+ * Dibits of one direct-mode call (a radio to radios, no repeater): the same
+ * call as dmrCallDibits (Voice LC headers, `superframes` voice superframes,
+ * two terminators) with the MS-sourced syncs, one 264-bit burst per 60 ms
+ * frame and the carrier off for the other 156 symbols (DMR_KEYED_OFF; the
+ * carrier ramps inside that guard, dmrDirectEnvelope). No CACH: only a
+ * repeater sends one.
+ */
+export function dmrDirectCallDibits({
+	colourCode = 1,
+	talkgroup,
+	source,
+	superframes = 3,
+	headers = 2,
+	seed = 19,
+}) {
+	const random = rng(seed)
+	const lc = dmrGroupVoiceLc({ talkgroup, source })
+	const fragments = embeddedLcFragments(lc)
+	const bursts = []
+	for (let i = 0; i < headers; i++)
+		bursts.push(
+			dataBurstBits({
+				colourCode,
+				dataType: DMR_DATA_TYPE.voiceLcHeader,
+				info96: lcInfoBits(lc, 0x969696),
+				sync: MS_DATA_SYNC,
+			}),
+		)
+	for (let s = 0; s < superframes; s++)
+		for (let index = 0; index < 6; index++)
+			bursts.push(
+				voiceBurstBits({
+					index,
+					colourCode,
+					fragments,
+					random,
+					sync: MS_VOICE_SYNC,
+				}),
+			)
+	for (let i = 0; i < 2; i++)
+		bursts.push(
+			dataBurstBits({
+				colourCode,
+				dataType: DMR_DATA_TYPE.terminatorLc,
+				info96: lcInfoBits(lc, 0x999999),
+				sync: MS_DATA_SYNC,
+			}),
+		)
+	const off = () =>
+		new Array(DMR_DIRECT_FRAME_SYMBOLS - DMR_DIRECT_BURST_SYMBOLS).fill(
+			DMR_KEYED_OFF,
+		)
+	const out = off()
+	for (const burst of bursts) out.push(...bitsToDibits(burst), ...off())
+	return out
+}
+
+/** FM deviation (Hz, 48 kHz) of a direct-mode call; zero while keyed off. */
+export function dmrDirectFrequency(
+	call,
+	{ rateHz = 48_000, shape = AIR_SHAPES.dmr } = {},
+) {
+	return shapeFrequency(dmrDirectCallDibits(call), {
+		symbolRate: 4800,
+		rateHz,
+		...shape,
+		deviationHz: dibit => [648, 1944, -648, -1944, 0][dibit],
+	})
+}
+
+/**
+ * Carrier amplitude (0 to 1) per sample of dmrDirectFrequency: full over each
+ * burst, a raised-cosine ramp of `rampSeconds` just outside it (inside the
+ * guard time), off otherwise. Same length and padding as the frequency trace.
+ */
+export function dmrDirectEnvelope(
+	call,
+	{ rateHz = 48_000, rampSeconds = 0.00125, padSymbols = 8 } = {},
+) {
+	const symbols = dmrDirectCallDibits(call)
+	const sps = rateHz / 4800
+	const n = Math.ceil((symbols.length + 2 * padSymbols) * sps)
+	const on = new Uint8Array(n)
+	for (let i = 0; i < n; i++) {
+		const k = Math.floor(i / sps) - padSymbols
+		on[i] = k >= 0 && k < symbols.length && symbols[k] !== DMR_KEYED_OFF ? 1 : 0
+	}
+	const ramp = Math.max(1, Math.round(rampSeconds * rateHz))
+	const rise = d => 0.5 + 0.5 * Math.cos((Math.PI * d) / ramp)
+	const out = new Float64Array(n)
+	// Distance to the nearest on sample, from the left then from the right.
+	let last = -Infinity
+	for (let i = 0; i < n; i++) {
+		if (on[i]) {
+			out[i] = 1
+			last = i
+		} else if (i - last <= ramp) out[i] = rise(i - last)
+	}
+	let next = Infinity
+	for (let i = n - 1; i >= 0; i--) {
+		if (on[i]) next = i
+		else if (next - i <= ramp) out[i] = Math.max(out[i], rise(next - i))
+	}
+	return out
 }

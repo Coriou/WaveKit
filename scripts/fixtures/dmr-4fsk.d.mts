@@ -28,6 +28,7 @@ export function dataBurstBits(burst: {
 	colourCode: number
 	dataType: number
 	info96: number[]
+	sync?: number
 }): number[]
 export function lcInfoBits(lcBytes: number[], mask: number): number[]
 export function voiceBurstBits(burst: {
@@ -35,9 +36,22 @@ export function voiceBurstBits(burst: {
 	colourCode: number
 	fragments: number[][]
 	random: () => number
+	sync?: number
 }): number[]
 export function dmrCallDibits(call: DmrCall): number[]
 export function dmrFrequency(
 	call: DmrCall,
 	options?: { rateHz?: number; shape?: PulseShape },
+): Float64Array
+export const DMR_DIRECT_BURST_SYMBOLS: number
+export const DMR_DIRECT_FRAME_SYMBOLS: number
+export const DMR_KEYED_OFF: number
+export function dmrDirectCallDibits(call: Omit<DmrCall, "settle">): number[]
+export function dmrDirectFrequency(
+	call: Omit<DmrCall, "settle">,
+	options?: { rateHz?: number; shape?: PulseShape },
+): Float64Array
+export function dmrDirectEnvelope(
+	call: Omit<DmrCall, "settle">,
+	options?: { rateHz?: number; rampSeconds?: number; padSymbols?: number },
 ): Float64Array

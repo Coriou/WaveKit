@@ -1228,6 +1228,7 @@ function requestMatches(
 		actual.transitionHz === expected.transitionHz &&
 		actual.outputRateHz === expected.outputRateHz &&
 		actual.format === expected.format &&
+		actual.afcMaxHz === expected.afcMaxHz &&
 		(actual.format === "cu8"
 			? (actual.gain ?? 1) === (expected.gain ?? 1)
 			: actual.gain === undefined && expected.gain === undefined)

@@ -1167,8 +1167,103 @@ to 14 % of SACCH frames, dPMR from 15 % to 6 % of control channels and DMR from
 44 % to 37 % of link controls (aligned symbol errors 6.0 % to 3.0 %). A recorded
 on-air DMR transmission decodes identically. A carrier frequency error of 600 Hz
 still loses most YSF frames: a DC blocker on the discriminator would fix that but
-mutes DMR direct-mode bursts (the recorded transmission decodes nothing), so it
-needs a frequency correction in the channel instead.
+mutes DMR direct-mode bursts (the recorded transmission decodes nothing), so the
+channel corrects the frequency instead ([below](#dsd-fme-carrier-frequency-correction)).
+
+### dsd-fme carrier frequency correction
+
+A handheld's or repeater's crystal and the receiver's ppm error often put a carrier
+a few hundred Hz off its channel, which the FM discriminator turns into a DC offset
+on every 4FSK symbol. A channelised dsd-fme (`useChannelizer` with the core
+channelizer) therefore asks its channel for a carrier frequency correction of up to
+2 kHz (`carrierCorrection`, default `true`; `false` turns it off). 2 kHz is what
+the 12.5 kHz channel allows: it is flat to ±6.25 kHz and 4800 symbols/s 4FSK
+occupies about ±4.25 kHz. The raw-IQ csdr chain has no correction.
+
+`wavekit-chan` runs it on the channel output (`native/wavekit-chan/src/afc.rs`),
+only while a modulated carrier is present, and so that dsd-fme never sees the
+correction change during a call:
+
+- it measures on its own copy of the uncorrected samples, low-passed to 6.3 kHz so
+  that an adjacent 12.5 kHz channel does not reach the estimate (a neighbour 10 dB
+  stronger moved it by at most 20 Hz; 250 Hz without the filter). There is no loop,
+  so it never chases the modulation;
+- each 5 ms block is a gap (its envelope is not nearly constant, `(Σ|z|²)² / (N·Σ|z|⁴)`
+  under 0.68, or its power is 6 dB below the transmission's), unmodulated (its phase
+  turns alike over 4 and 8 samples: a spur, a birdie, the centre leak, an unkeyed
+  carrier or a long run of one symbol, none of which counts) or modulated. A
+  modulated block 6 dB above the transmission's power starts a new transmission
+  (another radio keyed up);
+- the target is the midpoint of the outer frequency levels (the 5 % and 95 % points
+  of a power-weighted histogram of the instantaneous frequency), not the mean: the
+  mean follows the data, the outer levels do not, and dsd-fme reads its own centre
+  from the extremes of a sync. On the synthetic signals that left DMR within 30 Hz
+  of the carrier, where the mean was 100 to 150 Hz off;
+- it decides each transmission's correction once, from its first 85 ms, and keeps it
+  to the end of the transmission: dsd-fme averages its symbol levels over many syncs,
+  so any change it can see during a call costs frames (a DMR call corrected 280 ms in
+  lost 11-19 % of link controls, an NXDN48 call corrected 40 ms in 35-43 % against
+  18 % uncorrected, measured). The output is delayed by 90 ms, so the decision applies
+  from the transmission's first sample, and within a transmission there is no step;
+- the correction is the target if at least 200 Hz plus 2.5 standard deviations of
+  the data's own mean off (380 Hz at the decision), else 0 Hz. Smaller errors are left
+  alone: uncorrected, ±300 Hz cost DMR no frames;
+- a transmission that has had a gap by then (TDMA bursts: DMR direct mode, whose
+  bursts the 85 ms always span) is never corrected: correcting a +600 Hz direct-mode
+  call, even with the step in a gap and the residual near 0 Hz, doubled its symbol
+  errors, while the uncorrected offset cost nothing;
+- it holds through gaps shorter than 250 ms (a direct-mode radio keys a 27.5 ms burst
+  every 60 ms) and resets after a longer one, on a retune to another frequency and on
+  an input gap (a capture recentre keeps it: the signal is the same). A radio keying
+  up 6 dB stronger than the transmission was when its correction was decided starts
+  its own, corrected from its first block (the previous radio's tail keeps its own; a
+  fade that recovers is not taken for one). Two cases still change the correction
+  under a carrier: a radio of about the same power keying within 250 ms of the first
+  continues its transmission and keeps its correction; a weaker one goes out with the
+  first one's correction, then 0 Hz from the end of the hang, then its own.
+
+The mixer is phase continuous and returns to phase 0 when a transmission ends. The
+90 ms lookahead is part of the channel's reported group delay; it starts with 90 ms of
+zeros whenever the stage starts afresh (a channel open, an input gap, a retune to
+another frequency, so also each scanner probe), and the last 90 ms of a stream are not
+delivered. A
+`wavekit-chan` older than the correction does not offer `afc` in its `ready` line;
+the core then opens dsd-fme's channels without it (one warning per source).
+Recorded-capture replay (`wavekit-iqcap replay`, scanner snapshot replay) runs
+without the correction, so a capture with a carrier offset may decode worse there
+than on the live channel. The cost is about 100 ns per output sample, 0.5 % of a
+desktop core per 48 kHz channel, next to 4 % for the channel itself (fastest block,
+`native/wavekit-chan/examples/chan_bench.rs`, Mac i5, load average 80; Raspberry Pi
+not measured).
+
+The margin harness above measures it: `before` is the receive filter alone,
+`after` adds the correction, and each cell also shows the residual carrier offset
+dsd-fme still sees (aligned on the channel's group delay), which does not depend on
+the dsd-fme build. `DMR (direct)` is a direct-mode call (MS syncs, keyed bursts). On
+the host's dsd-fme build, three seeds:
+
+- DMR downlink: no cell worse than before at 0, ±300, ±600 and ±1000 Hz and 10 to
+  30 dB CNR; better at ±1000 Hz (10 dB: 40.7 % of link controls lost to 29.6 %,
+  18.5 % to 11.1 %) and −600 Hz (10 dB: 29.6 % to 25.9 %). Residual −75 to +13 Hz;
+  ±300 Hz stays uncorrected.
+- DMR direct mode: uncorrected, as before at every offset (cells within one frame:
+  the 90 ms delay; over nine seeds at +300 Hz and 10 dB 65.4 % against 66.7 %).
+- At −600 Hz YSF went from 100 % of frames lost to 4.9 % at 30 dB (13.6 % at 15 dB,
+  51 % at 10 dB), D-STAR at 10 dB from 100 % to 33 %, dPMR from 15-33 % to 6.3 %,
+  NXDN48 from 7-49 % to 0-24 %; at +600 Hz YSF at 10 dB from 53 % to 33 % and at
+  15 dB from 25 % to 9.9 %, dPMR from 15-35 % to 6-15 % and D-STAR at 10 dB from
+  100 % to 38 %. The residual is −100 to +80 Hz, the target being decided from 85 ms
+  of data. That build's NXDN48 results move by up to 25 points between runs of the
+  same input, so its cells are not comparisons.
+
+To run the full matrix in the core image:
+
+```bash
+WAVEKIT_MARGIN=1 WAVEKIT_SYNTH_IMAGE=<core image> \
+  WAVEKIT_MARGIN_SIGNALS="DMR,DMR (direct),P25 (C4FM),YSF (C4FM),NXDN48,dPMR,D-STAR" \
+  WAVEKIT_MARGIN_ERROR_HZ=0,300,-300,600,-600,1000,-1000 \
+  pnpm exec vitest run --maxWorkers=1 tests/integration/dsd-fme-margin.test.ts
+```
 
 ### readsb aircraft evidence
 

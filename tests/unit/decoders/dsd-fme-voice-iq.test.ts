@@ -14,7 +14,10 @@ import {
 	vi,
 } from "vitest"
 import pino from "pino"
-import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
+import {
+	DSD_FME_CARRIER_CORRECTION_MAX_HZ,
+	DsdFmeDecoder,
+} from "../../../src/decoders/builtin/dsd-fme.js"
 import { buildChannelizerArgs } from "../../../src/core/channelizer/channelizer-process.js"
 import { encodeRequest } from "../../../src/core/channelizer/protocol.js"
 import type { ChannelizerRequest } from "../../../src/core/channelizer/protocol.js"
@@ -28,6 +31,8 @@ interface IqOptions {
 	front: "csdr" | "chan"
 	chanBin: string
 	paced: boolean
+	/** chanFeed defaults it to true, as parseIqArgs does without --no-afc. */
+	afc?: boolean
 }
 interface FeedResult {
 	discontinuities: number
@@ -45,7 +50,7 @@ interface VoiceIq {
 	csdrFeedStages(rate: number, offset: number, chain: string): string[]
 	chanFeedStages(chain: string): string[]
 	chanArgs(rate: number, socketDir: string): string[]
-	openRequest(offset: number): ChannelizerRequest
+	openRequest(offset: number, afc?: boolean): ChannelizerRequest
 	chanFeed(options: IqOptions, sink: PassThrough): Promise<FeedResult>
 	pace(
 		bytesPerSecond: number | null,
@@ -99,6 +104,7 @@ describe("dsd-fme voice A/B IQ mode", () => {
 			front: "chan",
 			chanBin: "wavekit-chan",
 			paced: true,
+			afc: true,
 		})
 		expect(
 			iq.parseIqArgs([
@@ -116,6 +122,9 @@ describe("dsd-fme voice A/B IQ mode", () => {
 		expect(
 			iq.parseIqArgs([...base, "--front", "chan", "--unpaced"]),
 		).toMatchObject({ paced: false })
+		expect(
+			iq.parseIqArgs([...base, "--front", "chan", "--no-afc"]),
+		).toMatchObject({ afc: false })
 		expect(() => iq.parseIqArgs(base)).toThrow(/--front/)
 		expect(() => iq.parseIqArgs([...base, "--front", "sdr"])).toThrow(/--front/)
 		expect(() =>
@@ -164,6 +173,13 @@ describe("dsd-fme voice A/B IQ mode", () => {
 			centerHz: iq.NOMINAL_CENTER_HZ,
 		})
 		expect(req).toMatchObject({ type: "open", ...want })
+		expect(req).toMatchObject({ afcMaxHz: DSD_FME_CARRIER_CORRECTION_MAX_HZ })
+		// --no-afc: the same channel without the correction.
+		const plain = iq.openRequest(6000, false)
+		expect(plain).not.toHaveProperty("afcMaxHz")
+		expect({ ...plain, afcMaxHz: DSD_FME_CARRIER_CORRECTION_MAX_HZ }).toEqual(
+			req,
+		)
 		expect(iq.chanArgs(2_048_000, "/tmp/s")).toEqual(
 			buildChannelizerArgs({
 				binaryPath: "wavekit-chan",

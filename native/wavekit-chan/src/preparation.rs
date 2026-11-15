@@ -363,6 +363,7 @@ mod tests {
             transition_hz: out as f64 * 0.025,
             format: Format::Cf32,
             gain: 1.0,
+            afc_max_hz: None,
         }
     }
     fn job(spec: ChannelSpec) -> Job {

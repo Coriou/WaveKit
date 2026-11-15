@@ -420,6 +420,7 @@ export class ChannelizerProcess
 											generation: ready.generation,
 											pid: ready.pid,
 											...(ready.recenter ? { recenter: ready.recenter } : {}),
+											...(ready.afc ? { afc: ready.afc } : {}),
 										})
 									},
 									() =>

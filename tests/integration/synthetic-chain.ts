@@ -107,12 +107,16 @@ export function csdrFmHead(cf32: Buffer, gain: number): Buffer {
 	return pcm
 }
 
-/** Opens every request on one wavekit-chan run, feeds `iq`, returns each channel's cf32. */
+/**
+ * Opens every request on one wavekit-chan run, feeds `iq`, returns each channel's cf32.
+ * `groupDelays`, when given, receives each channel's `opened` groupDelaySamples.
+ */
 export async function channelize(
 	binary: string,
 	iq: Buffer,
 	input: { rateHz: number; centerHz: number },
 	requests: DecoderChannelRequest[],
+	groupDelays?: number[],
 ): Promise<Buffer[]> {
 	const dir = mkdtempSync("/tmp/wkc-")
 	const child = spawn(
@@ -156,6 +160,7 @@ export async function channelize(
 						transitionHz: r.transitionHz,
 						outputRateHz: r.outputRateHz,
 						format: r.format,
+						...(r.afcMaxHz === undefined ? {} : { afcMaxHz: r.afcMaxHz }),
 						queueBytes: 64 * 1024 * 1024,
 					}) + "\n",
 				)
@@ -168,6 +173,7 @@ export async function channelize(
 					const event = JSON.parse(lines.slice(0, nl)) as {
 						type: string
 						socket?: string
+						groupDelaySamples?: number
 					}
 					lines = lines.slice(nl + 1)
 					if (event.type === "ready") open(0)
@@ -175,6 +181,8 @@ export async function channelize(
 						fail(new Error(`channel rejected: ${JSON.stringify(event)}`))
 					else if (event.type === "opened") {
 						const index = opened++
+						if (groupDelays !== undefined)
+							groupDelays[index] = event.groupDelaySamples ?? 0
 						const socket = createConnection(event.socket!)
 						socket.on("data", (data: Buffer) => out[index]!.push(data))
 						ended.push(

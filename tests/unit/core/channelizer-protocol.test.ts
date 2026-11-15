@@ -69,6 +69,10 @@ describe("channelizer protocol v1", () => {
 			{ ...open, gain: MIN_GAIN },
 			{ ...open, gain: MAX_GAIN },
 			{ ...open, id: "a".repeat(64) },
+			// protocol.rs: afcMaxHz within (0, bandwidthHz / 2], either format.
+			{ ...open, afcMaxHz: 2000 },
+			{ ...open, afcMaxHz: open.bandwidthHz / 2 },
+			{ ...open, format: "cf32", queueBytes: 8, afcMaxHz: 1e-9 },
 		]
 		for (const req of accepted) expect(() => encodeRequest(req)).not.toThrow()
 		const rejected = [
@@ -86,6 +90,13 @@ describe("channelizer protocol v1", () => {
 			{ ...open, gain: 1e-39 },
 			{ ...open, gain: 1_000_000.0001 },
 			{ ...open, gain: 1e39 },
+			{ ...open, afcMaxHz: open.bandwidthHz / 2 + 0.5 },
+			{ ...open, afcMaxHz: 0 },
+			{ ...open, afcMaxHz: -1 },
+			{ ...open, afcMaxHz: Number.NaN },
+			{ ...open, afcMaxHz: Number.POSITIVE_INFINITY },
+			{ ...open, afcMaxHz: "2000" },
+			{ ...open, afcMaxHz: null },
 			{ ...open, format: "cs16" },
 			{ ...open, outputRateHz: 48_000.5 },
 			{ ...open, outputRateHz: -1 },
@@ -203,11 +214,20 @@ describe("channelizer protocol v1", () => {
 		expect(
 			parseEventLine('{"v":2,"type":"ready","generation":1,"pid":3}').ok,
 		).toBe(false)
+		// `afc`: present and true only, as runtime.rs writes it.
+		for (const afc of ["false", "1", '"true"', "null"])
+			expect(
+				parseEventLine(
+					`{"v":1,"type":"ready","generation":1,"pid":3,"afc":${afc}}`,
+				).ok,
+				afc,
+			).toBe(false)
 	})
 
 	it("parses the exact lines native/wavekit-chan/src/runtime.rs emits (serde_json key order, 0.0 floats)", () => {
 		const lines = [
 			'{"generation":7,"pid":4242,"type":"ready","v":1}',
+			'{"afc":true,"generation":7,"pid":4242,"recenter":true,"type":"ready","v":1}',
 			'{"filterTaps":312,"format":"cf32","generation":7,"groupDelaySamples":30.5,"id":"a","outputRateHz":48000,"socket":"/tmp/wkc-1-0/a.sock","type":"opened","v":1}',
 			'{"filterTaps":0,"format":"cu8","generation":7,"groupDelaySamples":0.0,"id":"full","outputRateHz":2048000,"socket":"/tmp/full.sock","type":"opened","v":1}',
 			'{"detail":"invalid JSON: expected value at line 1 column 1","generation":7,"id":"","reasonCode":"channel-request-invalid","type":"rejected","v":1}',

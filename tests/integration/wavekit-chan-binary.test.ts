@@ -217,6 +217,10 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 						// The §2 default passband, bw = out·(1−t), tr = out·t/2, sits on bw/2 + tr = out/2.
 						defaultPassband: fc.boolean(),
 						format: fc.constantFrom("cu8" as const, "cf32" as const),
+						// A carrier correction bound up to half the passband (protocol.rs) never changes admission.
+						afcF: fc.option(fc.double({ min: 1e-6, max: 0.5, noNaN: true }), {
+							nil: undefined,
+						}),
 					}),
 					async c => {
 						const id = `p1-${n++}`
@@ -235,6 +239,9 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 							transitionHz,
 							outputRateHz: c.out,
 							format: c.format,
+							...(c.afcF === undefined
+								? {}
+								: { afcMaxHz: c.afcF * bandwidthHz }),
 						}
 						chan.p.send({ v: 1, type: "open", id, ...req, queueBytes: 1 << 16 })
 						const e = await chan.next(
@@ -399,6 +406,62 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 		chan.p.send(open48k("alive", CENTER, 96_000))
 		await chan.next(is("opened", "alive"))
 	}, 60_000)
+
+	it("corrects a carrier 700 Hz off when the channel asks for afcMaxHz, and leaves it alone otherwise", async () => {
+		// A carrier 700 Hz above a 12.5 kHz channel, FM by a 1200 Hz sine at ±1944 Hz (an unmodulated
+		// carrier never counts), 0.5 s of cu8.
+		const offset = 25_000
+		const n = FS / 2
+		const input = Buffer.alloc(2 * n)
+		let ph = 0
+		for (let k = 0; k < n; k++) {
+			const f = offset + 700 + 1944 * Math.sin((2 * Math.PI * 1200 * k) / FS)
+			ph += (2 * Math.PI * f) / FS
+			input[2 * k] = Math.round(127.5 + 100 * Math.cos(ph))
+			input[2 * k + 1] = Math.round(127.5 + 100 * Math.sin(ph))
+		}
+		const chan = await spawnChan(FS)
+		const request = (id: string, afc: boolean): ChannelizerRequest => ({
+			v: 1,
+			type: "open",
+			id,
+			centerHz: CENTER + offset,
+			bandwidthHz: 12_500,
+			transitionHz: 6_250,
+			outputRateHz: 48_000,
+			format: "cf32",
+			...(afc ? { afcMaxHz: 2000 } : {}),
+			queueBytes: 1 << 22,
+		})
+		chan.p.send(request("plain", false))
+		const plain = collect(
+			connect((await chan.next(is("opened", "plain"))).socket),
+		)
+		chan.p.send(request("afc", true))
+		const afc = collect(connect((await chan.next(is("opened", "afc"))).socket))
+		chan.p.input.end(input)
+		expect(await chan.exited()).toBe(0)
+		// Mean frequency over the last 0.2 s of each output.
+		const meanHz = (b: Buffer) => {
+			let re = 0
+			let im = 0
+			const samples = b.length / 8
+			for (let k = samples - 9600; k < samples; k++) {
+				const [i, q, pi, pq] = [
+					b.readFloatLE(8 * k),
+					b.readFloatLE(8 * k + 4),
+					b.readFloatLE(8 * k - 8),
+					b.readFloatLE(8 * k - 4),
+				]
+				re += i * pi + q * pq
+				im += q * pi - i * pq
+			}
+			return (Math.atan2(im, re) * 48_000) / (2 * Math.PI)
+		}
+		// Symmetric modulation: the mean frequency is the carrier's.
+		expect(Math.abs(meanHz(await plain.closed()) - 700)).toBeLessThan(5)
+		expect(Math.abs(meanHz(await afc.closed()))).toBeLessThan(20)
+	}, 30_000)
 
 	// Feature: core-channelizer, Property 13: EOF tail
 	// Validates: addendum §11, §12.13

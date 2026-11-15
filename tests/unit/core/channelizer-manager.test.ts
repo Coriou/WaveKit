@@ -173,6 +173,7 @@ afterEach(async () => {
 	await Promise.all(managers.splice(0).map(m => m.destroy()))
 	delete process.env["FAKE_CHAN_MODE"]
 	delete process.env["FAKE_CHAN_STALL_MS"]
+	delete process.env["FAKE_CHAN_AFC"]
 })
 
 describe("ChannelizerManager", () => {
@@ -738,6 +739,35 @@ describe("ChannelizerManager", () => {
 			id: "ais-g1",
 			queueBytes: 96_000,
 		}) // addendum §6 table
+	})
+	it("sends afcMaxHz only to a binary whose ready offered afc, and warns once for one that did not", async () => {
+		const warn = vi.fn()
+		const logger = Object.assign(pino({ level: "silent" }), {
+			child: () => logger,
+			warn,
+		})
+		for (const afc of [true, false]) {
+			if (afc) process.env["FAKE_CHAN_AFC"] = "1"
+			else delete process.env["FAKE_CHAN_AFC"]
+			const sent: ChannelizerRequest[] = []
+			const m = manager({}, { createProcess: recordingProcess(sent), logger })
+			const asked = { ...req(), afcMaxHz: 2000 }
+			for (const decoder of ["dsd", "dsd2"])
+				expect(
+					(await m.requestChannel("rtl", decoder, asked, caps())).ok,
+					`${afc} ${decoder}`,
+				).toBe(true)
+			const opens = sent.filter(r => r.type === "open")
+			expect(opens).toHaveLength(2)
+			for (const open of opens)
+				if (afc) expect(open).toMatchObject({ afcMaxHz: 2000 })
+				else expect(open).not.toHaveProperty("afcMaxHz")
+			await m.destroy()
+		}
+		const warned = warn.mock.calls.filter(c =>
+			String(c[1]).includes("no carrier frequency correction"),
+		)
+		expect(warned).toHaveLength(1)
 	})
 	// Feature: core-channelizer, Property 2: Admission rule (no side effects)
 	// Validates: addendum §12.2

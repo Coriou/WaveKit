@@ -2,6 +2,7 @@
 //! timing follows one absolute schedule for the whole chain (plan A12).
 
 use crate::{
+    afc::Afc,
     convert::f32_to_cu8,
     plan::{plan_chain, ChainPlan},
     stages::{Nco, RationalFir},
@@ -46,6 +47,9 @@ pub struct ChannelSpec {
     pub output_rate: u64,
     pub format: Format,
     pub gain: f32,
+    /// Carrier frequency correction on the output, up to this many Hz either way ([`Afc`]);
+    /// `None` leaves the output exactly as the chain makes it.
+    pub afc_max_hz: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +62,7 @@ pub struct ChannelDsp {
     spec: ChannelSpec,
     nco: Nco,
     stages: Vec<RationalFir>,
+    afc: Option<Afc>,
     filter_taps: usize,
     group_delay: f64,
     // One absolute output schedule for the whole chain (plan A12): cumulative output is ⌊n_in·num/den⌋.
@@ -105,9 +110,13 @@ impl ChannelDsp {
             stages.push(RationalFir::new(s.l, s.m, proto));
         }
         let g = gcd(spec.output_rate, spec.input_rate);
+        let afc = spec.afc_max_hz.map(|max| Afc::new(spec.output_rate, max));
+        // The carrier correction's lookahead delays every output sample too.
+        let lookahead = afc.as_ref().map_or(0, Afc::delay_samples) as f64;
         ChannelDsp {
             nco: Nco::new(spec.offset_hz, spec.input_rate as f64),
-            group_delay: delay_s * spec.output_rate as f64,
+            afc,
+            group_delay: delay_s * spec.output_rate as f64 + lookahead,
             filter_taps: taps,
             stages,
             num: spec.output_rate / g,
@@ -129,11 +138,25 @@ impl ChannelDsp {
         self.spec.offset_hz
     }
 
-    /// Changes only the NCO step, preserving its phase, FIR histories and output schedule.
+    /// Changes only the NCO step, preserving its phase, FIR histories, output schedule and
+    /// carrier correction (a capture recentre keeps the channel on the same signal); a move to
+    /// another frequency also calls [`Self::restart_afc`].
     pub fn retune(&mut self, offset_hz: f64) {
         self.nco
             .set_frequency(offset_hz, self.spec.input_rate as f64);
         self.spec.offset_hz = offset_hz;
+    }
+
+    /// Starts the carrier correction again, when the channel has one: it now looks at another signal.
+    pub fn restart_afc(&mut self) {
+        if let Some(afc) = &mut self.afc {
+            afc.reset();
+        }
+    }
+
+    /// The carrier correction now applied, in Hz, when the channel has one.
+    pub fn afc_correction_hz(&self) -> Option<f64> {
+        self.afc.as_ref().map(Afc::correction_hz)
     }
 
     pub(crate) fn admit_retune(
@@ -187,6 +210,9 @@ impl ChannelDsp {
         for s in &mut self.stages {
             s.reset();
         }
+        if let Some(afc) = &mut self.afc {
+            afc.reset();
+        }
         self.n_in = 0;
         self.emitted = 0;
         self.held_i.clear();
@@ -227,6 +253,10 @@ impl ChannelDsp {
             self.held_i.len()
         );
         let release = want.min(self.held_i.len());
+        // Each sample is corrected once, when it is released; the held surplus waits for its turn.
+        if let Some(afc) = &mut self.afc {
+            afc.process(&mut self.held_i[..release], &mut self.held_q[..release]);
+        }
         self.emitted += release as u64;
         debug_assert!(
             self.held_i.len() - release <= self.stages.len(),
@@ -299,6 +329,7 @@ mod tests {
             output_rate: out,
             format,
             gain,
+            afc_max_hz: None,
         }
     }
 
@@ -402,6 +433,189 @@ mod tests {
                 }
             }
             proptest::prop_assert_eq!(a,b);
+        }
+    }
+
+    /// A 4FSK-like carrier (±648/±1944 Hz steps every 500 input samples, 4800 symbols/s at
+    /// 2.4 Msps) at `offset` Hz from the capture centre, no noise.
+    fn fsk_carrier(fs: u64, offset: f64, n: usize) -> (Vec<f32>, Vec<f32>) {
+        let mut seed = 0x9e37_79b9u32;
+        let (mut phase, mut dev) = (0.0f64, 0.0f64);
+        (0..n)
+            .map(|k| {
+                if k % (fs as usize / 4800) == 0 {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    dev = [648.0, 1944.0, -648.0, -1944.0][(seed >> 30) as usize];
+                }
+                phase = (phase + std::f64::consts::TAU * (offset + dev) / fs as f64)
+                    .rem_euclid(std::f64::consts::TAU);
+                ((phase.cos() * 0.5) as f32, (phase.sin() * 0.5) as f32)
+            })
+            .unzip()
+    }
+
+    /// Random 4FSK (4800 symbols/s, rectangular) of amplitude `amp` at `offset` Hz.
+    fn fsk_at(fs: u64, offset: f64, amp: f64, mut seed: u32, n: usize) -> Vec<(f64, f64)> {
+        let (mut phase, mut dev) = (0.0f64, 0.0f64);
+        (0..n)
+            .map(|k| {
+                if k % (fs as usize / 4800) == 0 {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    dev = [648.0, 1944.0, -648.0, -1944.0][(seed >> 30) as usize];
+                }
+                phase = (phase + std::f64::consts::TAU * (offset + dev) / fs as f64)
+                    .rem_euclid(std::f64::consts::TAU);
+                (amp * phase.cos(), amp * phase.sin())
+            })
+            .collect()
+    }
+
+    // Feature: carrier-frequency-correction, Property 3: an adjacent channel does not pull it
+    // Validates: the measurement path's own low-pass
+    #[test]
+    fn an_adjacent_channel_ten_db_up_does_not_pull_the_correction() {
+        let fs = 2_400_000;
+        let n = fs as usize * 3 / 2;
+        // dsd-fme's channel: 12.5 kHz, 6.25 kHz transition, 48 kHz out, 2 kHz bound.
+        let spec = ChannelSpec {
+            bandwidth_hz: 12_500.0,
+            transition_hz: 6_250.0,
+            ..afc_spec(fs, Some(2_000.0))
+        };
+        for (wanted, side, seed) in [
+            (0.0, 12_500.0, 3u32),
+            (0.0, -12_500.0, 5),
+            (600.0, 12_500.0, 7),
+            (600.0, -12_500.0, 11),
+            (-600.0, 12_500.0, 13),
+        ] {
+            let a = fsk_at(fs, 25_000.0 + wanted, 0.1, seed, n);
+            let b = fsk_at(
+                fs,
+                25_000.0 + side,
+                0.1 * 10f64.sqrt(),
+                seed.wrapping_mul(31),
+                n,
+            );
+            let (i, q): (Vec<f32>, Vec<f32>) = a
+                .iter()
+                .zip(&b)
+                .map(|(x, y)| ((x.0 + y.0) as f32, (x.1 + y.1) as f32))
+                .unzip();
+            let correction = |i: &[f32], q: &[f32]| {
+                let mut dsp = ChannelDsp::new(spec.clone()).unwrap();
+                dsp.process_f32(i, q);
+                dsp.afc_correction_hz().unwrap()
+            };
+            let hz = correction(&i, &q);
+            // The same wanted signal alone: the neighbour may move the decision by under 50 Hz
+            // (the data's own error at the commit is the same in both).
+            let (ai, aq): (Vec<f32>, Vec<f32>) = a.iter().map(|x| (x.0 as f32, x.1 as f32)).unzip();
+            let alone = correction(&ai, &aq);
+            assert!(
+                (hz - alone).abs() < 50.0,
+                "wanted {wanted}, neighbour {side}: {hz} against {alone} alone"
+            );
+            if wanted == 0.0 {
+                assert_eq!(hz, 0.0);
+            } else {
+                assert!((hz - wanted).abs() < 250.0, "{hz}");
+            }
+        }
+    }
+
+    fn afc_spec(fs: u64, max: Option<f64>) -> ChannelSpec {
+        ChannelSpec {
+            input_rate: fs,
+            offset_hz: 25_000.0,
+            bandwidth_hz: 12_500.0,
+            transition_hz: 5_000.0,
+            output_rate: 48_000,
+            format: Format::Cf32,
+            gain: 1.0,
+            afc_max_hz: max,
+        }
+    }
+
+    #[test]
+    fn afc_centres_an_off_frequency_carrier_and_off_changes_nothing() {
+        let fs = 2_400_000;
+        // The carrier sits 600 Hz above the channel centre.
+        let (i, q) = fsk_carrier(fs, 25_600.0, fs as usize / 2);
+        let mut plain = ChannelDsp::new(afc_spec(fs, None)).unwrap();
+        let mut corrected = ChannelDsp::new(afc_spec(fs, Some(2_000.0))).unwrap();
+        let (a, b) = plain.process_f32(&i, &q);
+        let (c, d) = corrected.process_f32(&i, &q);
+        assert_eq!(plain.afc_correction_hz(), None);
+        let hz = corrected.afc_correction_hz().unwrap();
+        assert!((hz - 600.0).abs() < 100.0, "{hz}");
+        let mean_hz = |x: &[f32], y: &[f32]| {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for k in x.len() / 2 + 1..x.len() {
+                re += x[k] as f64 * x[k - 1] as f64 + y[k] as f64 * y[k - 1] as f64;
+                im += y[k] as f64 * x[k - 1] as f64 - x[k] as f64 * y[k - 1] as f64;
+            }
+            im.atan2(re) * 48_000.0 / std::f64::consts::TAU
+        };
+        assert!((mean_hz(&a, &b) - 600.0).abs() < 100.0);
+        assert!(mean_hz(&c, &d).abs() < 100.0, "{}", mean_hz(&c, &d));
+        // The correction rotates samples, after its lookahead; it never changes their magnitude.
+        let lookahead = crate::afc::DELAY_BLOCKS * 240;
+        for k in 0..a.len() - lookahead {
+            let (m, n) = (a[k].hypot(b[k]), c[k + lookahead].hypot(d[k + lookahead]));
+            assert!((m - n).abs() <= 1e-5 * m.max(1e-3), "{k}: {m} {n}");
+        }
+        // Without a correction the output is the plain chain's, bit for bit.
+        let mut again = ChannelDsp::new(spec(fs, 48_000, 25_000.0, Format::Cf32, 1.0)).unwrap();
+        let mut same = ChannelDsp::new(spec(fs, 48_000, 25_000.0, Format::Cf32, 1.0)).unwrap();
+        assert_eq!(again.process_f32(&i, &q), same.process_f32(&i, &q));
+    }
+
+    #[test]
+    fn afc_survives_a_recentre_and_restarts_on_a_move_and_reset() {
+        let fs = 2_400_000;
+        let (i, q) = fsk_carrier(fs, 25_600.0, fs as usize / 4);
+        let mut dsp = ChannelDsp::new(afc_spec(fs, Some(2_000.0))).unwrap();
+        dsp.process_f32(&i, &q);
+        let held = dsp.afc_correction_hz().unwrap();
+        assert!(held != 0.0);
+        // A recentre moves only the NCO: same signal, same correction.
+        dsp.retune(30_000.0);
+        assert_eq!(dsp.afc_correction_hz(), Some(held));
+        dsp.restart_afc();
+        assert_eq!(dsp.afc_correction_hz(), Some(0.0));
+        dsp.retune(25_000.0);
+        dsp.process_f32(&i, &q);
+        assert!(dsp.afc_correction_hz().unwrap() != 0.0);
+        dsp.reset();
+        assert_eq!(dsp.afc_correction_hz(), Some(0.0));
+        // Without a correction, restarting it is a no-op.
+        let mut plain = ChannelDsp::new(afc_spec(fs, None)).unwrap();
+        plain.restart_afc();
+        assert_eq!(plain.afc_correction_hz(), None);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(100))]
+        // Feature: carrier-frequency-correction, Property 1: chunk-split invariance
+        // Validates: decisions on absolute block boundaries
+        #[test]
+        fn afc_channel_chunk_split_invariance(chunk in 1usize..20_000, offset in -1500i32..1500) {
+            let fs = 2_400_000;
+            let (i, q) = fsk_carrier(fs, 25_000.0 + offset as f64, 240_000);
+            let mut whole = ChannelDsp::new(afc_spec(fs, Some(2_000.0))).unwrap();
+            let mut parts = ChannelDsp::new(afc_spec(fs, Some(2_000.0))).unwrap();
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            whole.process(&i, &q, &mut a);
+            for (ci, cq) in i.chunks(chunk).zip(q.chunks(chunk)) {
+                parts.process(ci, cq, &mut b);
+            }
+            proptest::prop_assert_eq!(a, b);
+            proptest::prop_assert_eq!(whole.afc_correction_hz(), parts.afc_correction_hz());
         }
     }
 
@@ -698,6 +912,7 @@ mod tests {
                 },
                 format,
                 gain: 1.7,
+                afc_max_hz: None,
             };
             let plan =
                 crate::plan::plan_chain_bounded(fs, out, s.bandwidth_hz, s.transition_hz, &cancel)

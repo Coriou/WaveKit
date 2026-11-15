@@ -265,6 +265,8 @@ interface SourceChannelizer {
 	lastStats?: Extract<ChannelizerEvent, { type: "stats" }>["channels"]
 	/** This binary's `ready` said it takes `recenter`. One that did not is restarted on a move instead. */
 	takesRecenter: boolean
+	/** This binary's `ready` said it takes `afcMaxHz`. One that did not opens channels without it. */
+	takesAfc: boolean
 	/** `recenter` lines written and not yet answered, oldest first; the process answers in this order. */
 	movesUnanswered: { centerHz: number; atInputBytes: number }[]
 }
@@ -366,6 +368,8 @@ export class ChannelizerManager
 	private readonly centreMoves = new Map<string, number>()
 	/** Sources already warned about a binary without `recenter`: it would log on every hop otherwise. */
 	private readonly warnedNoRecenter = new Set<string>()
+	/** Sources already warned about a binary without `afc`. */
+	private readonly warnedNoAfc = new Set<string>()
 	/** Process stops in flight; `destroy()` awaits them all (PF14). */
 	private readonly stops = new Set<Promise<void>>()
 	private readonly releases = new Map<string, Promise<void>>()
@@ -811,6 +815,7 @@ export class ChannelizerManager
 			outputRateHz: req.outputRateHz,
 			format: req.format,
 			...(req.gain !== undefined ? { gain: req.gain } : {}),
+			...(req.afcMaxHz !== undefined ? { afcMaxHz: req.afcMaxHz } : {}),
 			queueBytes,
 		}
 		const parsed = ChannelizerRequestSchema.safeParse(open)
@@ -892,7 +897,28 @@ export class ChannelizerManager
 			this.stopIfIdle(s, "socket-path-unavailable")
 			return unavailable("channel socket path unavailable")
 		}
-		return this.open(s, open, ctx, superseded)
+		return this.open(s, this.forBinary(s, open), ctx, superseded)
+	}
+
+	/**
+	 * The open line this process takes: `afcMaxHz` only when its `ready` offered `afc`. An older
+	 * binary would reject the unknown field, so its channel opens without the carrier correction.
+	 */
+	private forBinary(s: SourceChannelizer, open: OpenRequest): OpenRequest {
+		if (open.afcMaxHz === undefined || s.takesAfc) return open
+		if (!this.warnedNoAfc.has(s.sourceId)) {
+			this.warnedNoAfc.add(s.sourceId)
+			this.log.warn(
+				{
+					sourceId: s.sourceId,
+					generation: s.generation,
+					binaryPath: this.deps.config.binaryPath,
+				},
+				"wavekit-chan has no carrier frequency correction (an older binary); opening channels without it",
+			)
+		}
+		const { afcMaxHz: _afcMaxHz, ...plain } = open
+		return plain
 	}
 
 	private async open(
@@ -1465,10 +1491,12 @@ export class ChannelizerManager
 		if (directoryOwner) this.directoryClaims.set(proc, directoryOwner)
 		let readyGeneration: number | undefined
 		let takesRecenter = false
+		let takesAfc = false
 		const onReady = (e: ChannelizerEvent) => {
 			if (e.type !== "ready") return
 			readyGeneration = e.generation
 			takesRecenter = e.recenter === true
+			takesAfc = e.afc === true
 		}
 		proc.on("event", onReady)
 		try {
@@ -1576,6 +1604,7 @@ export class ChannelizerManager
 			},
 			...(settlement ? { settlement } : {}),
 			takesRecenter,
+			takesAfc,
 			movesUnanswered: [],
 		}
 		void pipeline(branch, proc.input).catch((err: unknown) =>
