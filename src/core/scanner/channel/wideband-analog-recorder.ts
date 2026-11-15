@@ -600,6 +600,13 @@ export function widebandSessionCores(inputRateHz: number): number {
 	)
 }
 
+/** A retune's command position from the engine view, or null when absent or not a sample index. */
+function retuneSample(value: number | null | undefined): number | null {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+		? value
+		: null
+}
+
 /** The engine surface the recorder reads (SpectrumEngine satisfies it). */
 export interface WidebandEngineView {
 	readonly format: string
@@ -620,6 +627,20 @@ export interface WidebandEngineView {
 		 * it. Absent or null: none ended (or a view without runs), trustedFromSample alone bounds.
 		 */
 		runEnd?: { from: number; end: number } | null
+		/**
+		 * The first sample a retune posted on this stream but not started yet may have moved (its
+		 * command position: samples received or buffered before the command was sent, so every
+		 * earlier sample is of the current tuning); null or absent: none pending. The pending
+		 * epoch starts only after its settle, so without it the samples in between read as the
+		 * current epoch's.
+		 */
+		pendingRetuneSample?: number | null
+		/**
+		 * The command position of the retune that started the current epoch (as
+		 * `pendingRetuneSample` read while it was pending); null or absent: an opening, an
+		 * untracked epoch, or a view without it (its `startSample` alone bounds the epoch before).
+		 */
+		retunedFromSample?: number | null
 	}
 	liveEdge(): number
 	readRing(
@@ -975,6 +996,12 @@ interface Session {
 	readonly margin: number
 	/** No sample at or past this is read (an epoch change). */
 	limit: number
+	/**
+	 * A retune pending on its epoch's stream moves the tuner at this sample
+	 * (`pendingRetuneSample`): nothing at or past it is read until the epoch starts (the file then
+	 * ends here) or the retune is no longer pending; null: none.
+	 */
+	retuneAt: number | null
 	/** Cut reason of the next non-quiet end (retune, stream change); null = completed. */
 	endCut: AnalogCut | null
 	file: FileState | null
@@ -2642,6 +2669,7 @@ export class WidebandAnalogRecorder {
 			maxBacklog,
 			margin: Math.ceil(ring - maxBacklog),
 			limit: Number.POSITIVE_INFINITY,
+			retuneAt: null,
 			endCut: null,
 			file: null,
 			waiting: [],
@@ -3324,6 +3352,11 @@ export class WidebandAnalogRecorder {
 			return
 		}
 		const retuned = epoch.epoch !== s.epoch
+		// A retune commanded on this epoch but not started: the pending epoch starts only after
+		// its settle (`startSample` is its settled start), and until then the samples from the
+		// command on read as this epoch's, though the tuner may have moved. They are held back
+		// here (never demodulated, so never written), and cut off at the start.
+		if (!retuned) s.retuneAt = retuneSample(epoch.pendingRetuneSample)
 		// The trusted run it started in ended (a doubt: null) or another began (re-proven): its
 		// samples from here on are not proven by the run the file is labelled with. Ended like at a
 		// retune (cut epoch-changed), at what it demodulated so far; a later snapshot starts a new
@@ -3337,8 +3370,13 @@ export class WidebandAnalogRecorder {
 			// at the earlier of its own end target and that start; no later file follows. A
 			// sweep that hops after the hang has a complete file.
 			s.limit = retuned
-				? (epoch.startSample ?? s.next)
+				? Math.min(
+						epoch.startSample ?? s.next,
+						s.retuneAt ?? Number.POSITIVE_INFINITY,
+						retuneSample(epoch.retunedFromSample) ?? Number.POSITIVE_INFINITY,
+					)
 				: Math.min(s.next, trustedRunEnd(epoch, s.trustedFrom))
+			s.retuneAt = null
 			const target = s.seg.endTarget
 			const end = Math.min(target ?? s.limit, s.limit)
 			const cut: AnalogCut =
@@ -3352,7 +3390,11 @@ export class WidebandAnalogRecorder {
 				s.file.cut = cut
 			}
 		}
-		const edge = Math.min(engine.liveEdge(), s.limit)
+		const edge = Math.min(
+			engine.liveEdge(),
+			s.limit,
+			s.retuneAt ?? Number.POSITIVE_INFINITY,
+		)
 		this.applyEvents(s, s.seg.advance(edge))
 		const file = s.file
 		if (!file) {
