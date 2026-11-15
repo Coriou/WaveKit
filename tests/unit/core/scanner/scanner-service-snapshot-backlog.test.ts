@@ -912,12 +912,19 @@ describe("ScannerService main-thread budget at the real fallback", () => {
 		)
 		const window = 60_000
 		const from = clock.t
+		// The virtual clock only moves once every snapshot write has settled: a main-thread build
+		// writes real files, and letting the clock run on during that I/O made the build spacing,
+		// and so the counts below, depend on the runner's disk latency.
+		const drain = async () => {
+			await Promise.allSettled(write.mock.results.map(r => r.value as unknown))
+			await settle()
+		}
 		try {
 			while (clock.t - from < window) {
 				internals.onStoreMutation(entry())
-				await settle()
+				await drain()
 				internals.tick()
-				await settle()
+				await drain()
 				clock.t += 100
 			}
 		} finally {
