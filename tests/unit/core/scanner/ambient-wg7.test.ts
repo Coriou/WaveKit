@@ -754,7 +754,11 @@ describe("WG7 properties", () => {
 								at: clock.v,
 							}
 							inst.emit("link", line)
-						} else decoders.out("cfg", s.o)
+						} else
+							// A decoder stamps a line when it decodes it: the clock's time now. A
+							// fixed stamp under a moving clock made the baseline (paired by stamp)
+							// see 0 ms where the current code (paired by its clock) saw the tick.
+							decoders.out("cfg", { ...s.o, timestamp: new Date(clock.v) })
 						const oldEvents = a.slice(oldCount)
 						const newEvents = b.slice(newCount)
 						// Every baseline rejection must remain a rejection. Acceptance
