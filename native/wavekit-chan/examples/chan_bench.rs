@@ -12,7 +12,8 @@
 //! inflates the mean, not a minimum.
 //! `output hash` covers every output float's bits, to compare builds on the same request.
 //! `afc` is the carrier frequency correction a channel may ask for (`afcMaxHz`), timed apart on
-//! the same seconds of output-rate samples: a carrier 600 Hz off, so it measures and corrects.
+//! the same seconds of output-rate samples: a modulated carrier 600 Hz off, so it measures and
+//! corrects (the measurement filter, the per-sample frequency and histogram, the lookahead).
 
 use std::hint::black_box;
 use std::time::Instant;
@@ -133,21 +134,26 @@ fn main() {
         fs
     );
     println!("output hash: {hash:016x}");
-    // AFC: an unmodulated carrier 600 Hz off at the output rate, corrected once acquired.
+    // AFC: a carrier 600 Hz off at the output rate, FM by a 1200 Hz sine at ±1944 Hz (an
+    // unmodulated one never counts), corrected once acquired. One second repeats seamlessly.
     let block = (out as usize).clamp(1, BLOCK);
     let (ti, tq): (Vec<f32>, Vec<f32>) = (0..block)
         .map(|k| {
-            let ph = std::f64::consts::TAU * 600.0 * k as f64 / out as f64;
+            let t = k as f64 / out as f64;
+            let tau = std::f64::consts::TAU;
+            let ph = tau * 600.0 * t - 1944.0 / 1200.0 * (tau * 1200.0 * t).cos();
             (ph.cos() as f32 * 0.5, ph.sin() as f32 * 0.5)
         })
         .unzip();
     let mut afc = Afc::new(out, (bw / 2.0).min(2_000.0));
-    let (mut afc_ns, mut afc_n) = (0u128, 0usize);
+    let (mut afc_ns, mut afc_n, mut afc_best) = (0u128, 0usize, u128::MAX);
     while afc_n < (out * seconds) as usize {
         let (mut ai, mut aq) = (ti.clone(), tq.clone());
         let t = Instant::now();
         afc.process(&mut ai, &mut aq);
-        afc_ns += t.elapsed().as_nanos();
+        let spent = t.elapsed().as_nanos();
+        afc_ns += spent;
+        afc_best = afc_best.min(spent);
         black_box((&ai, &aq));
         afc_n += block;
     }
@@ -159,6 +165,12 @@ fn main() {
         per_out * out as f64 / 1e9,
         out,
         afc.correction_hz()
+    );
+    println!(
+        "afc fastest block: {:.2} ns/output sample, {:.5} core at {} sps out",
+        afc_best as f64 / block as f64,
+        afc_best as f64 / block as f64 * out as f64 / 1e9,
+        out
     );
     let fastest = best.iter().sum::<u128>() as f64 / BLOCK as f64;
     println!(

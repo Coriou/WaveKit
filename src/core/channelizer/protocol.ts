@@ -142,7 +142,8 @@ export const ChannelizerEventSchema = z.discriminatedUnion("type", [
 		})
 		.strict(),
 	// `recenter`: this binary takes the `recenter` line. Optional because a binary older than it does not say so, and
-	// must then be restarted on a centre move: it would ignore the line and mix against the old centre.
+	// must then be restarted on a centre move: it would ignore the line and mix against the old centre. `afc`: it
+	// takes `afcMaxHz` on an `open`; an older binary rejects the field, so its opens leave it out.
 	z
 		.object({
 			v,
@@ -150,6 +151,7 @@ export const ChannelizerEventSchema = z.discriminatedUnion("type", [
 			generation,
 			pid: z.number().int().positive(),
 			recenter: z.literal(true).optional(),
+			afc: z.literal(true).optional(),
 		})
 		.strict(),
 	OpenedEventSchema,
@@ -301,6 +303,7 @@ const ObservedReadySchema = z
 		pid: z.number().int().positive(),
 		observerCapability: z.literal("attempt-disposal-v1"),
 		recenter: z.literal(true).optional(),
+		afc: z.literal(true).optional(),
 	})
 	.strict()
 export type ObservedReadyEvent = z.infer<typeof ObservedReadySchema>

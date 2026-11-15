@@ -408,12 +408,15 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 	}, 60_000)
 
 	it("corrects a carrier 700 Hz off when the channel asks for afcMaxHz, and leaves it alone otherwise", async () => {
-		// An unmodulated carrier 700 Hz above a 12.5 kHz channel, 0.5 s of cu8.
+		// A carrier 700 Hz above a 12.5 kHz channel, FM by a 1200 Hz sine at ±1944 Hz (an unmodulated
+		// carrier never counts), 0.5 s of cu8.
 		const offset = 25_000
 		const n = FS / 2
 		const input = Buffer.alloc(2 * n)
+		let ph = 0
 		for (let k = 0; k < n; k++) {
-			const ph = (2 * Math.PI * (offset + 700) * k) / FS
+			const f = offset + 700 + 1944 * Math.sin((2 * Math.PI * 1200 * k) / FS)
+			ph += (2 * Math.PI * f) / FS
 			input[2 * k] = Math.round(127.5 + 100 * Math.cos(ph))
 			input[2 * k + 1] = Math.round(127.5 + 100 * Math.sin(ph))
 		}
@@ -455,8 +458,9 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 			}
 			return (Math.atan2(im, re) * 48_000) / (2 * Math.PI)
 		}
-		expect(meanHz(await plain.closed())).toBeCloseTo(700, 0)
-		expect(Math.abs(meanHz(await afc.closed()))).toBeLessThan(5)
+		// Symmetric modulation: the mean frequency is the carrier's.
+		expect(Math.abs(meanHz(await plain.closed()) - 700)).toBeLessThan(5)
+		expect(Math.abs(meanHz(await afc.closed()))).toBeLessThan(20)
 	}, 30_000)
 
 	// Feature: core-channelizer, Property 13: EOF tail

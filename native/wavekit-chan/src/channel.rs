@@ -110,10 +110,13 @@ impl ChannelDsp {
             stages.push(RationalFir::new(s.l, s.m, proto));
         }
         let g = gcd(spec.output_rate, spec.input_rate);
+        let afc = spec.afc_max_hz.map(|max| Afc::new(spec.output_rate, max));
+        // The carrier correction's lookahead delays every output sample too.
+        let lookahead = afc.as_ref().map_or(0, Afc::delay_samples) as f64;
         ChannelDsp {
             nco: Nco::new(spec.offset_hz, spec.input_rate as f64),
-            afc: spec.afc_max_hz.map(|max| Afc::new(spec.output_rate, max)),
-            group_delay: delay_s * spec.output_rate as f64,
+            afc,
+            group_delay: delay_s * spec.output_rate as f64 + lookahead,
             filter_taps: taps,
             stages,
             num: spec.output_rate / g,
@@ -453,6 +456,66 @@ mod tests {
             .unzip()
     }
 
+    /// Random 4FSK (4800 symbols/s, rectangular) of amplitude `amp` at `offset` Hz.
+    fn fsk_at(fs: u64, offset: f64, amp: f64, mut seed: u32, n: usize) -> Vec<(f64, f64)> {
+        let (mut phase, mut dev) = (0.0f64, 0.0f64);
+        (0..n)
+            .map(|k| {
+                if k % (fs as usize / 4800) == 0 {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    dev = [648.0, 1944.0, -648.0, -1944.0][(seed >> 30) as usize];
+                }
+                phase = (phase + std::f64::consts::TAU * (offset + dev) / fs as f64)
+                    .rem_euclid(std::f64::consts::TAU);
+                (amp * phase.cos(), amp * phase.sin())
+            })
+            .collect()
+    }
+
+    // Feature: carrier-frequency-correction, Property 3: an adjacent channel does not pull it
+    // Validates: the measurement path's own low-pass
+    #[test]
+    fn an_adjacent_channel_ten_db_up_does_not_pull_the_correction() {
+        let fs = 2_400_000;
+        let n = fs as usize * 3 / 2;
+        // dsd-fme's channel: 12.5 kHz, 6.25 kHz transition, 48 kHz out, 2 kHz bound.
+        let spec = ChannelSpec {
+            bandwidth_hz: 12_500.0,
+            transition_hz: 6_250.0,
+            ..afc_spec(fs, Some(2_000.0))
+        };
+        for (wanted, side, seed) in [
+            (0.0, 12_500.0, 3u32),
+            (0.0, -12_500.0, 5),
+            (600.0, 12_500.0, 7),
+            (600.0, -12_500.0, 11),
+            (-600.0, 12_500.0, 13),
+        ] {
+            let a = fsk_at(fs, 25_000.0 + wanted, 0.1, seed, n);
+            let b = fsk_at(
+                fs,
+                25_000.0 + side,
+                0.1 * 10f64.sqrt(),
+                seed.wrapping_mul(31),
+                n,
+            );
+            let (i, q): (Vec<f32>, Vec<f32>) = a
+                .iter()
+                .zip(&b)
+                .map(|(x, y)| ((x.0 + y.0) as f32, (x.1 + y.1) as f32))
+                .unzip();
+            let mut dsp = ChannelDsp::new(spec.clone()).unwrap();
+            dsp.process_f32(&i, &q);
+            let hz = dsp.afc_correction_hz().unwrap();
+            assert!(
+                (hz - wanted).abs() < 50.0 || (wanted == 0.0 && hz == 0.0),
+                "wanted {wanted}, neighbour {side}: {hz}"
+            );
+        }
+    }
+
     fn afc_spec(fs: u64, max: Option<f64>) -> ChannelSpec {
         ChannelSpec {
             input_rate: fs,
@@ -488,9 +551,10 @@ mod tests {
         };
         assert!((mean_hz(&a, &b) - 600.0).abs() < 100.0);
         assert!(mean_hz(&c, &d).abs() < 100.0, "{}", mean_hz(&c, &d));
-        // The correction rotates samples; it never changes their magnitude.
-        for k in 0..a.len() {
-            let (m, n) = (a[k].hypot(b[k]), c[k].hypot(d[k]));
+        // The correction rotates samples, after its lookahead; it never changes their magnitude.
+        let lookahead = crate::afc::DELAY_BLOCKS * 240;
+        for k in 0..a.len() - lookahead {
+            let (m, n) = (a[k].hypot(b[k]), c[k + lookahead].hypot(d[k + lookahead]));
             assert!((m - n).abs() <= 1e-5 * m.max(1e-3), "{k}: {m} {n}");
         }
         // Without a correction the output is the plain chain's, bit for bit.
