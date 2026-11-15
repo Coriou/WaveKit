@@ -1,3 +1,4 @@
+import type { PulseShape } from "./fsk-iq.mjs"
 export interface P25Call {
 	nac: number
 	talkgroup: number
@@ -29,5 +30,5 @@ export function p25CallDibits(call: P25Call): number[]
 export const p25Deviation: (dibit: number) => number
 export function p25Frequency(
 	call: P25Call,
-	options?: { rateHz?: number },
+	options?: { rateHz?: number; shape?: PulseShape },
 ): Float64Array

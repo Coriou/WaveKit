@@ -1,3 +1,4 @@
+import type { PulseShape } from "./fsk-iq.mjs"
 export interface YsfCall {
 	dest: string
 	src: string
@@ -41,9 +42,9 @@ export function ysfCallDibits(call: YsfCall): number[]
 export function ysfOversDibits(overs: YsfCall[]): number[]
 export function ysfOversFrequency(
 	overs: YsfCall[],
-	options?: { rateHz?: number },
+	options?: { rateHz?: number; shape?: PulseShape },
 ): Float64Array
 export function ysfFrequency(
 	call: YsfCall,
-	options?: { rateHz?: number },
+	options?: { rateHz?: number; shape?: PulseShape },
 ): Float64Array

@@ -16,7 +16,13 @@
  * ConvertAirInterfaceID). Dibit 01 is +3, 00 +1, 10 -1, 11 -3;
  * raised-cosine shaping, roll-off 0.5.
  */
-import { bitsOf, bitsToDibits, rng, shapeFrequency } from "./fsk-iq.mjs"
+import {
+	EASY_SHAPE,
+	bitsOf,
+	bitsToDibits,
+	rng,
+	shapeFrequency,
+} from "./fsk-iq.mjs"
 
 const FS2 = 0x5ff77d
 /** Channel codes 0-63 (ETSI TS 102 658 6.1.5.2.2), as dsd-fme decodes them. */
@@ -127,12 +133,14 @@ export function dpmrCallDibits({
 }
 
 /** FM deviation (Hz, 48 kHz) of one dPMR call. */
-export function dpmrFrequency(call, { rateHz = 48_000 } = {}) {
+export function dpmrFrequency(
+	call,
+	{ rateHz = 48_000, shape = EASY_SHAPE } = {},
+) {
 	return shapeFrequency(dpmrCallDibits(call), {
 		symbolRate: 2400,
 		rateHz,
-		shaping: "rc",
-		alpha: 0.5,
+		...shape,
 		deviationHz: dibit => [350, 1050, -350, -1050][dibit],
 	})
 }

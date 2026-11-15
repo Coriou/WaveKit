@@ -27,6 +27,7 @@ import {
 	bytesToBits,
 	rng,
 	shapeFrequency,
+	EASY_SHAPE,
 } from "./fsk-iq.mjs"
 
 const FRAME_SYNC = 0xd471c9634d
@@ -217,24 +218,30 @@ export function ysfOversDibits(overs) {
 	])
 }
 
-/** FM deviation (Hz, 48 kHz) of one YSF call. */
-export function ysfFrequency(call, { rateHz = 48_000 } = {}) {
-	return ysfShape(ysfCallDibits(call), rateHz)
+/**
+ * FM deviation (Hz, 48 kHz) of one YSF call. `shape` defaults to a raised
+ * cosine 0.5 (the chain tests); AIR_SHAPES.ysf / ysfC4fm are the real ones.
+ */
+export function ysfFrequency(
+	call,
+	{ rateHz = 48_000, shape = EASY_SHAPE } = {},
+) {
+	return ysfShape(ysfCallDibits(call), rateHz, shape)
 }
 
 /** FM deviation (Hz, 48 kHz) of back-to-back YSF overs. */
-export function ysfOversFrequency(overs, { rateHz = 48_000 } = {}) {
-	return ysfShape(ysfOversDibits(overs), rateHz)
+export function ysfOversFrequency(
+	overs,
+	{ rateHz = 48_000, shape = EASY_SHAPE } = {},
+) {
+	return ysfShape(ysfOversDibits(overs), rateHz, shape)
 }
 
-function ysfShape(dibits, rateHz) {
+function ysfShape(dibits, rateHz, shape) {
 	return shapeFrequency(dibits, {
 		symbolRate: 4800,
 		rateHz,
-		// Raised cosine 0.5: dsd-fme's integrate-and-slice symbol decision has
-		// residual ISI from a 0.2 roll-off (measured: 5 of 11 FICH CRC failures).
-		shaping: "rc",
-		alpha: 0.5,
+		...shape,
 		deviationHz: dibit => [600, 1800, -600, -1800][dibit],
 	})
 }

@@ -22,7 +22,13 @@
  * CRC-6 and CRC-12 are dsd-fme's crc6 / crc12f (all-ones register). Dibit
  * 01 is +3, 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5.
  */
-import { bitsOf, bitsToDibits, rng, shapeFrequency } from "./fsk-iq.mjs"
+import {
+	EASY_SHAPE,
+	bitsOf,
+	bitsToDibits,
+	rng,
+	shapeFrequency,
+} from "./fsk-iq.mjs"
 import { conv5Dibits } from "./ysf-c4fm.mjs"
 
 const FSW = 0xcdf59
@@ -193,27 +199,36 @@ export const NXDN_RATES = {
 /** FM deviation (Hz, 48 kHz) of one NXDN call. */
 export function nxdnFrequency(
 	call,
-	{ variant = "nxdn48", rateHz = 48_000 } = {},
+	{ variant = "nxdn48", rateHz = 48_000, shape = EASY_SHAPE } = {},
 ) {
-	return nxdnShape(nxdnCallDibits(call), variant, rateHz)
+	return nxdnShape(nxdnCallDibits(call), variant, rateHz, shape)
 }
 
 /** FM deviation (Hz, 48 kHz) of back-to-back NXDN calls. */
 export function nxdnCallsFrequency(
 	calls,
-	{ variant = "nxdn48", rateHz = 48_000, gapSymbols = 480 } = {},
+	{
+		variant = "nxdn48",
+		rateHz = 48_000,
+		gapSymbols = 480,
+		shape = EASY_SHAPE,
+	} = {},
 ) {
-	return nxdnShape(nxdnCallsDibits(calls, { gapSymbols }), variant, rateHz)
+	return nxdnShape(
+		nxdnCallsDibits(calls, { gapSymbols }),
+		variant,
+		rateHz,
+		shape,
+	)
 }
 
-function nxdnShape(dibits, variant, rateHz) {
+function nxdnShape(dibits, variant, rateHz, shape) {
 	const { symbolRate, outerHz } = NXDN_RATES[variant]
 	const inner = outerHz / 3
 	return shapeFrequency(dibits, {
 		symbolRate,
 		rateHz,
-		shaping: "rc",
-		alpha: 0.5,
+		...shape,
 		deviationHz: dibit => [inner, outerHz, -inner, -outerHz][dibit],
 	})
 }

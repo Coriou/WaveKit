@@ -1,3 +1,4 @@
+import type { PulseShape } from "./fsk-iq.mjs"
 export interface DpmrCall {
 	calledId: string
 	callingId: string
@@ -11,5 +12,5 @@ export function dpmrCchBits(cch: { fn: number; idPart: number }): number[]
 export function dpmrCallDibits(call: DpmrCall): number[]
 export function dpmrFrequency(
 	call: DpmrCall,
-	options?: { rateHz?: number },
+	options?: { rateHz?: number; shape?: PulseShape },
 ): Float64Array

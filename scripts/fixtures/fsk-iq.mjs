@@ -5,14 +5,17 @@
  * Two steps, so a frame builder only produces symbols:
  *
  * 1. shapeFrequency: symbols -> instantaneous frequency deviation (Hz) at an
- *    audio-like rate (48 kHz by default), with raised-cosine (4FSK C4FM
- *    family), Gaussian (GMSK) or rectangular (2FSK pager) pulse shaping.
+ *    audio-like rate (48 kHz by default), with raised-cosine, the standard
+ *    4FSK transmit filters ("rrc", "c4fm", see pulseSpectrum), Gaussian
+ *    (GMSK) or rectangular (2FSK pager) pulse shaping.
  *    afskFrequency does the same for Bell 202 AFSK (APRS): the tones are the
  *    modulating audio and the frequency is that audio times the deviation.
  * 2. fmCu8: the deviation, linearly interpolated to the capture rate, is
  *    integrated into the phase of a carrier at `offsetHz` from the capture
  *    centre and written as cu8 IQ (interleaved unsigned 8-bit I/Q, 127.5 is
- *    zero) with seeded Gaussian noise and leading/trailing noise only.
+ *    zero) with seeded Gaussian noise and leading/trailing noise only. With
+ *    `cnrDb` the noise is set from a carrier-to-noise ratio instead
+ *    (noiseForCnr).
  *
  * fmAudioS16 is the audio the core's FM discriminator chain would produce
  * from the same deviation (csdr fmdemod, gain, limit, s16), for tests that
@@ -41,11 +44,114 @@ function raisedCosine(t, alpha) {
 }
 
 /**
+ * One-sided amplitude spectrum of a 4FSK transmit filter at `x` = f / symbol
+ * rate, for the shapes the air interfaces specify:
+ *
+ * - "rc": raised cosine, roll-off `alpha` (zero ISI at the symbol centres of
+ *   the frequency trace itself);
+ * - "rrc": root raised cosine (DMR, ETSI TS 102 361-1 10.2.2; dPMR, ETSI TS
+ *   102 490; the MMDVM YSF transmitter), its receive filter is the same RRC;
+ * - "c4fm": raised cosine times the inverse sinc x / sin x, x = pi f / Rs
+ *   (P25 phase 1, TIA-102.BAAA 5.2: the Nyquist filter and the shaping
+ *   filter), its receiver is an integrate-and-dump over one symbol, whose
+ *   sinc response cancels the shaping filter.
+ *
+ * `isinc` multiplies any of them by x / sin x (NXDN, whose transmit filter is
+ * a root raised cosine times x / sin x; its receive filter is a root raised
+ * cosine times sin x / x).
+ */
+export function pulseSpectrum(x, { shaping, alpha, isinc = false }) {
+	const a = Math.abs(x)
+	const lo = (1 - alpha) / 2
+	const hi = (1 + alpha) / 2
+	let rc = 0
+	if (a <= lo) rc = 1
+	else if (a <= hi) rc = 0.5 * (1 + Math.cos((Math.PI / alpha) * (a - lo)))
+	let v = shaping === "rrc" ? Math.sqrt(rc) : rc
+	if (shaping === "c4fm" || isinc)
+		v *= a < 1e-9 ? 1 : (Math.PI * a) / Math.sin(Math.PI * a)
+	return v
+}
+
+/** Receive-filter spectrum that, with pulseSpectrum, gives a raised cosine. */
+export function receiveSpectrum(x, { shaping, alpha, isinc = false }) {
+	const a = Math.abs(x)
+	let v = 1
+	if (shaping === "rrc")
+		v = Math.sqrt(pulseSpectrum(a, { shaping: "rc", alpha }))
+	if (shaping === "c4fm" || isinc)
+		v *= a < 1e-9 ? 1 : Math.sin(Math.PI * a) / (Math.PI * a)
+	return v
+}
+
+/**
+ * The transmit filter each air interface specifies (pulseSpectrum). YSF has
+ * no public filter specification: "rrc" is the MMDVM transmitter's, and a
+ * radio may use the P25 C4FM filter instead, so a margin test runs both. The
+ * MMDVM P25 transmitter uses a plain raised cosine 0.2 (p25Rc).
+ */
+export const AIR_SHAPES = {
+	p25: { shaping: "c4fm", alpha: 0.2 },
+	// The MMDVM P25 transmitter: raised cosine 0.2 without the shaping filter.
+	p25Rc: { shaping: "rc", alpha: 0.2 },
+	dmr: { shaping: "rrc", alpha: 0.2 },
+	dpmr: { shaping: "rrc", alpha: 0.2 },
+	nxdn: { shaping: "rrc", alpha: 0.2, isinc: true },
+	ysf: { shaping: "rrc", alpha: 0.2 },
+	ysfC4fm: { shaping: "c4fm", alpha: 0.2 },
+}
+
+/** The shaping the existing chain tests use: raised cosine, roll-off 0.5. */
+export const EASY_SHAPE = { shaping: "rc", alpha: 0.5 }
+
+/**
+ * Impulse response h(t), t in symbols, of a real even spectrum S(x) that is
+ * zero above x = (1 + alpha) / 2: h(t) = 2 * integral of S(x) cos(2 pi x t)
+ * over [0, (1 + alpha) / 2] (Simpson's rule). With S(0) = 1 the response
+ * through the matching receiver (pulse times receive spectrum = raised
+ * cosine) is 1 at t = 0 and 0 at every other symbol centre.
+ */
+export function pulseResponse(t, spectrum, alpha, steps = 600) {
+	const top = (1 + alpha) / 2
+	const h = top / steps
+	let sum = 0
+	for (let i = 0; i <= steps; i++) {
+		const x = i * h
+		const w = i === 0 || i === steps ? 1 : i % 2 === 1 ? 4 : 2
+		sum += w * spectrum(x) * Math.cos(2 * Math.PI * x * t)
+	}
+	return (2 * sum * h) / 3
+}
+
+/**
+ * Pulse h(t) of a numeric shaping, tabulated at 1/64 symbol over +-`span`
+ * symbols and linearly interpolated (zero outside).
+ */
+function tabulatedPulse(shape, span) {
+	const res = 64
+	const table = new Float64Array(2 * span * res + 1)
+	for (let i = 0; i < table.length; i++)
+		table[i] = pulseResponse(
+			i / res - span,
+			x => pulseSpectrum(x, shape),
+			shape.alpha,
+		)
+	return t => {
+		const u = (t + span) * res
+		if (u < 0 || u >= table.length - 1) return 0
+		const j = Math.floor(u)
+		return table[j] + (table[j + 1] - table[j]) * (u - j)
+	}
+}
+
+/**
  * Instantaneous frequency (Hz) at `rateHz` for `symbols`, each mapped to a
  * deviation by `deviationHz(symbol)`. `shaping`: "rc" (raised cosine, roll-off
- * `alpha`), "gauss" (rectangular NRZ through a Gaussian of bandwidth-time
- * `bt`, GMSK) or "rect". `padSymbols` of zero deviation (an unmodulated
- * carrier) frame the burst so the pulse tails are not cut.
+ * `alpha`), "rrc" or "c4fm" (pulseSpectrum, with `isinc`; the deviation is
+ * the one at the symbol centres after the matching receive filter, as the
+ * standards define it), "gauss" (rectangular NRZ through a Gaussian of
+ * bandwidth-time `bt`, GMSK) or "rect". `padSymbols` of zero deviation (an
+ * unmodulated carrier) frame the burst so the pulse tails are not cut.
  */
 export function shapeFrequency(
 	symbols,
@@ -55,6 +161,7 @@ export function shapeFrequency(
 		rateHz = 48_000,
 		shaping = "rc",
 		alpha = 0.2,
+		isinc = false,
 		bt = 0.5,
 		padSymbols = 8,
 	},
@@ -71,14 +178,18 @@ export function shapeFrequency(
 		}
 		return out
 	}
-	if (shaping === "rc") {
+	if (shaping === "rc" || shaping === "rrc" || shaping === "c4fm") {
 		const span = 8
+		const pulse =
+			shaping === "rc" && !isinc
+				? t => raisedCosine(t, alpha)
+				: tabulatedPulse({ shaping, alpha, isinc }, span)
 		for (let k = 0; k < values.length; k++) {
 			const centre = (k + padSymbols + 0.5) * sps
 			const lo = Math.max(0, Math.floor(centre - span * sps))
 			const hi = Math.min(n - 1, Math.ceil(centre + span * sps))
 			for (let i = lo; i <= hi; i++)
-				out[i] += values[k] * raisedCosine((i - centre) / sps, alpha)
+				out[i] += values[k] * pulse((i - centre) / sps)
 		}
 		return out
 	}
@@ -138,11 +249,32 @@ export function afskFrequency(
 }
 
 /**
+ * Carrier amplitude and per-rail noise sigma (both of full scale) for a
+ * carrier-to-noise ratio `cnrDb` measured in `noiseBandwidthHz` around the
+ * carrier, at capture rate `sampleRateHz`. White complex noise of sigma s per
+ * rail has power 2 s^2 over the capture rate, so 2 s^2 B / fs in the
+ * bandwidth B, and CNR = A^2 / (2 s^2 B / fs). The total power
+ * A^2 + 2 s^2 is held at 2 * `rms`^2 (rms per rail) so that cu8 neither
+ * clips (4 sigma within full scale at the 0.25 default) nor loses the carrier
+ * to quantisation at low CNR, as a receiver's gain setting would.
+ */
+export function noiseForCnr({
+	cnrDb,
+	sampleRateHz,
+	noiseBandwidthHz = 12_500,
+	rms = 0.25,
+}) {
+	const k = sampleRateHz / (2 * noiseBandwidthHz * 10 ** (cnrDb / 10))
+	const amplitude = Math.sqrt((2 * rms * rms) / (1 + 2 * k))
+	return { amplitude, noise: amplitude * Math.sqrt(k) }
+}
+
+/**
  * cu8 IQ for a frequency trace `freqHz` sampled at `freqRateHz`, on a carrier
  * at `offsetHz` from the capture centre. Amplitude `amplitude` of full scale,
  * complex noise sigma `noise` (of full scale per rail), `leadSeconds` of
- * noise only before and after. `gapSeconds` > 0 repeats the burst `repeat`
- * times with that much noise in between.
+ * noise only before and after. `cnrDb` (with `noiseBandwidthHz`) replaces
+ * `amplitude` and `noise` by noiseForCnr.
  */
 export function fmCu8(
 	freqHz,
@@ -150,12 +282,18 @@ export function fmCu8(
 		freqRateHz = 48_000,
 		sampleRateHz = 1_024_000,
 		offsetHz = 0,
-		amplitude = 0.5,
-		noise = 0.02,
+		amplitude: carrier = 0.5,
+		noise: sigma = 0.02,
+		cnrDb,
+		noiseBandwidthHz = 12_500,
 		seed = 1,
 		leadSeconds = 0.1,
 	} = {},
 ) {
+	const { amplitude, noise } =
+		cnrDb === undefined
+			? { amplitude: carrier, noise: sigma }
+			: noiseForCnr({ cnrDb, sampleRateHz, noiseBandwidthHz })
 	const lead = Math.round(leadSeconds * sampleRateHz)
 	const burst = Math.floor(((freqHz.length - 1) / freqRateHz) * sampleRateHz)
 	const n = lead + burst + lead

@@ -1,12 +1,42 @@
 export function rng(seed: number): () => number
+export interface PulseShape {
+	shaping: "rc" | "rrc" | "c4fm"
+	alpha: number
+	isinc?: boolean
+}
+export const AIR_SHAPES: {
+	p25: PulseShape
+	p25Rc: PulseShape
+	dmr: PulseShape
+	dpmr: PulseShape
+	nxdn: PulseShape
+	ysf: PulseShape
+	ysfC4fm: PulseShape
+}
+export const EASY_SHAPE: PulseShape
+export function pulseSpectrum(x: number, shape: PulseShape): number
+export function receiveSpectrum(x: number, shape: PulseShape): number
+export function pulseResponse(
+	t: number,
+	spectrum: (x: number) => number,
+	alpha: number,
+	steps?: number,
+): number
+export function noiseForCnr(options: {
+	cnrDb: number
+	sampleRateHz: number
+	noiseBandwidthHz?: number
+	rms?: number
+}): { amplitude: number; noise: number }
 export function shapeFrequency(
 	symbols: number[],
 	options: {
 		symbolRate: number
 		deviationHz: (symbol: number) => number
 		rateHz?: number
-		shaping?: "rc" | "gauss" | "rect"
+		shaping?: "rc" | "rrc" | "c4fm" | "gauss" | "rect"
 		alpha?: number
+		isinc?: boolean
 		bt?: number
 		padSymbols?: number
 	},
@@ -30,6 +60,8 @@ export function fmCu8(
 		offsetHz?: number
 		amplitude?: number
 		noise?: number
+		cnrDb?: number
+		noiseBandwidthHz?: number
 		seed?: number
 		leadSeconds?: number
 	},
