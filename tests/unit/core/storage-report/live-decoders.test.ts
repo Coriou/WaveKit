@@ -49,7 +49,7 @@ function wavPaths(): readonly string[] | undefined {
 		.find((a: StorageAreaSource) => a.id === "digital-voice-wav")?.paths
 }
 
-describe("storage report decoder list (WG7)", () => {
+describe("storage report decoder list", () => {
 	it("lists a decoder created after startup and drops it once removed", async () => {
 		expect(wavPaths()).toEqual([])
 		manager.createDecoder({

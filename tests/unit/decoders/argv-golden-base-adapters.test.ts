@@ -913,7 +913,7 @@ const GOLDEN: Row[] = [
 	},
 ]
 
-describe("WG7 HW.2 argv goldens, lane B (in-bounds configs unchanged)", () => {
+describe("argv goldens of multimon-ng, rtl433, dsd-fme and the base adapters (in-bounds configs unchanged)", () => {
 	it.each(GOLDEN.map((row, index) => ({ ...row, index })))(
 		"$type $source #$index",
 		row => {

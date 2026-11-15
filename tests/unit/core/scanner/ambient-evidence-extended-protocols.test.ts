@@ -304,7 +304,7 @@ const twice = (r: Rig, id: string, o: DecoderOutputLike): void => {
 
 // ---------------------------------------------------------------------------
 
-describe("AmbientEvidence WG7 new types", () => {
+describe("AmbientEvidence: AIS, ACARS, VDL2 and LoRa", () => {
 	it("names AIS, ACARS, VDL2 and LoRa at the decode's own frequency on the second clean decode", () => {
 		const r = rig({
 			add: d => {
@@ -565,7 +565,7 @@ describe("AmbientEvidence.coverageAt", () => {
 
 // ---------------------------------------------------------------------------
 
-describe("WG7 properties", () => {
+describe("AmbientEvidence properties", () => {
 	// Feature: web-gaps-7, Property 1: Ambient trust rule
 	// Validates: Requirements 1.2, 1.3
 	it("emits a new-type decode only for an eligible decoder with commanded or relay trust", () => {
@@ -850,7 +850,7 @@ describe("WG7 properties", () => {
 	})
 })
 
-describe("AmbientEvidence WG7 review fixes", () => {
+describe("AmbientEvidence trust and pairing regressions", () => {
 	it("an untrusted decode never primes the double match (trust checked at decode hz before acceptance)", () => {
 		let trusted = false
 		const r = rig({

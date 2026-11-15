@@ -64,10 +64,10 @@ type Same<A, B> =
 		: false
 const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 
-describe("WG4 contract", () => {
+describe("web-gaps-4 contract", () => {
 	let directory: string
 	beforeEach(() => {
-		directory = mkdtempSync(join(tmpdir(), "wg4-contract-"))
+		directory = mkdtempSync(join(tmpdir(), "web-gaps-4-contract-"))
 	})
 	afterEach(() => {
 		vi.unstubAllEnvs()
@@ -199,7 +199,7 @@ describe("WG4 contract", () => {
 		expect(STORAGE_SCAN_FS_CONCURRENCY).toBe(8)
 	})
 
-	it("keeps every WG4 DTO field and server slot optional", () => {
+	it("keeps every web-gaps-4 DTO field and server slot optional", () => {
 		const position: Pick<Api.MeshPosition, "fixAt"> = {}
 		const host: Pick<Api.SdrHostStatus, "version"> = {}
 		const audio: Pick<Api.LiveAudioConfig, "agc"> = {}

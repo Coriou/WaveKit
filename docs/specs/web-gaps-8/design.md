@@ -20,7 +20,7 @@ scanner evidence store, the WG1 spectrum profiles and the viewed-slice spectrum 
 | `src/core/spectrum/subscribe-options.ts`                         | `PROFILE_BINS_CEILING`, `PROFILE_BINS_FLOOR`; `PROFILE_LIMITS` unchanged (its `bins.max` is the floor cap)                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `src/decoders/settings/contract.ts` (new)                        | `DECODER_SETTINGS_SCHEMA_VERSION`, `DecoderOverride`, `DecoderSettingsFile`, `DecoderSettingsManagerPort`, `DecoderSettingsService`, `DecoderSettingsServiceOptions`, `DecoderSettingsError`                                                                                                                                                                                                                                                                                                                                 |
 
-`tests/unit/core/wg8-contract.test.ts` pins the constants, the error statuses and bodies, the
+`tests/unit/core/web-gaps-8-contract.test.ts` pins the constants, the error statuses and bodies, the
 patchable invariants by meaning (secret, type, closed set, never-patchable key meanings), the
 inventory id pattern (accepted and refused examples, traversal included), the bins cap setting
 and budgets, today's profile limits, the config defaults and refusals, the settings type

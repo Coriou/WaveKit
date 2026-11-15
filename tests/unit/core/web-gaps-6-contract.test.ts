@@ -70,7 +70,7 @@ const rotate = (w: number, k: number): number =>
 const codeByWord = new Map<number, number>()
 for (let c = 0; c < 512; c++) codeByWord.set(golayWord(c), c)
 
-describe("WG6 contract", () => {
+describe("web-gaps-6 contract", () => {
 	it("freezes decoded-elsewhere DTOs as copies and the K bounds", () => {
 		expect(
 			same<Api.DecodedElsewhereRange, Core.DecodedElsewhereRange>(true),

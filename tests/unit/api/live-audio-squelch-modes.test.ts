@@ -59,7 +59,7 @@ function createLiveDemod() {
 	})
 }
 
-describe("Live Audio Routes WG7", () => {
+describe("Live Audio Routes: noise and tone squelch", () => {
 	let app: FastifyInstance
 	let liveDemod: ReturnType<typeof createLiveDemod>
 

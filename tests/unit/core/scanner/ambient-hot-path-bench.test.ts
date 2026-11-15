@@ -42,7 +42,7 @@ const targets: Record<string, number[]> = {
 	"lora-meshtastic": [869_525_000],
 }
 
-describe.skipIf(!process.env["AMB_BENCH"])("ambient WG7 bench", () => {
+describe.skipIf(!process.env["AMB_BENCH"])("ambient hot-path bench", () => {
 	it("reports µs per message (no timing assertion)", () => {
 		const status = new Map<string, object>()
 		const decoders = Object.assign(new EventEmitter(), {

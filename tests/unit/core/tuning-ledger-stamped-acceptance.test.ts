@@ -240,18 +240,28 @@ async function scenario(host: "inline" | "thread"): Promise<void> {
 	const { fake, source, sourceManager, tuner, scanner } = await compose(host)
 	await scanner.start()
 	// Boot order: the engine opens before the source's first payload (as soon as its caps exist).
-	// The fake holds its samples until then: polled, a loaded host let the first chunk in first.
+	// The fake holds its samples until the engine has opened (polled, a loaded host let the first
+	// chunk in first), so the open must not need a payload: acquire has to resolve while the fake
+	// has sent none. A regression that waits for one gets them only after the `until` guard (the
+	// test's usual 15 s), and fails the count below instead of hanging.
 	const connected = sourceManager.connect(source)
 	await until(() => sourceManager.getCaps("rtl") !== undefined)
-	const engine = await scanner.spectrum.acquire("rtl", "ledger-acceptance")
-	const openedBeforePayload =
-		sourceManager.tuningLedger.position("rtl") === null
-	const { counts, claims } = watch(engine, fake)
+	let chunksAtOpen: number | null = null
+	const acquiring = scanner.spectrum
+		.acquire("rtl", "ledger-acceptance")
+		.then(engine => {
+			chunksAtOpen = fake.samplesSent()
+			return engine
+		})
+	// A rejected open surfaces at `await acquiring` below, not as an unhandled rejection meanwhile.
+	void acquiring.catch(() => undefined)
+	await until(() => chunksAtOpen !== null).catch(() => undefined)
 	fake.releaseSamples()
+	const engine = await acquiring
+	const openedBeforePayload = chunksAtOpen === 0
+	const { counts, claims } = watch(engine, fake)
 	await connected
-	expect(openedBeforePayload, "engine opened before the first payload").toBe(
-		true,
-	)
+	expect(chunksAtOpen, "sample chunks sent when the engine opened").toBe(0)
 
 	// Fresh core: nothing carried; the assert writes the held centre and rate, proven past the settle.
 	await until(() => (counts.trustedAt.get(F0) ?? 0) >= 3)

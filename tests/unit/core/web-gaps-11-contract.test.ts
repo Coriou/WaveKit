@@ -64,7 +64,7 @@ type Same<A, B> =
 		: false
 const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 
-describe("WG11 contract: identify outcomes and transports", () => {
+describe("web-gaps-11 contract: identify outcomes and transports", () => {
 	it("adds heard to the outcome list and replay to both transports", () => {
 		expect(
 			same<
@@ -168,7 +168,7 @@ describe("WG11 contract: identify outcomes and transports", () => {
 	})
 })
 
-describe("WG11 contract: stable frame tracks", () => {
+describe("web-gaps-11 contract: stable frame tracks", () => {
 	const full: Api.SpectrumFrameTrack = {
 		startHz: 446_000_000,
 		endHz: 446_012_500,
@@ -253,7 +253,7 @@ describe("WG11 contract: stable frame tracks", () => {
 	})
 })
 
-describe("WG11 contract: tuner config and command origin", () => {
+describe("web-gaps-11 contract: tuner config and command origin", () => {
 	it("adds the config origin", () => {
 		expect(
 			same<
@@ -303,7 +303,7 @@ describe("WG11 contract: tuner config and command origin", () => {
 	})
 })
 
-describe("WG11 contract: passive cost and IQ capture config", () => {
+describe("web-gaps-11 contract: passive cost and IQ capture config", () => {
 	it("enables capture by default without a passive utilization override", () => {
 		const parsed = ScannerConfigSchema.parse({})
 		expect("maxEngineUtilization" in parsed.passive).toBe(false)
@@ -376,7 +376,7 @@ describe("WG11 contract: passive cost and IQ capture config", () => {
 	})
 })
 
-describe("WG11 contract: IQ capture bounds and port", () => {
+describe("web-gaps-11 contract: IQ capture bounds and port", () => {
 	it("pins the capture constants with their arithmetic", () => {
 		expect(IQ_CAPTURE_RATE_HZ).toBe(48_000)
 		expect(IQ_CAPTURE_BYTES_PER_SAMPLE).toBe(8)

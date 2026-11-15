@@ -23,7 +23,9 @@
  * Synthetic signals only; a report's numbers, no wall clock.
  *
  * Each row runs about 1.5 times its world's length on a loaded host, so the rows are grouped in
- * describe blocks a run selects with `-t` (each block well under 10 min). MATRIX_OUT, when set,
+ * describe blocks a run selects with `-t` (each block well under 10 min), and the blocks are
+ * spread over test files of a few minutes each (sweep-lone-voice-matrix-*.test.ts): the root
+ * shards run files in parallel, never the tests of one file. MATRIX_OUT, when set,
  * names a file each row appends its per-ID files to (one JSON line), for the base/head table.
  */
 import { appendFileSync } from "node:fs"
@@ -241,47 +243,51 @@ const carrier = (hz: number, span: Span, amp = NEIGHBOUR_AMP): Emitter => ({
 })
 const DECOY = { hz: DECOY_HZ, toMs: DECOY_TO_MS }
 
-describe("lone-voice matrix row 1: a lone ID", () => {
-	// Base: one file (whole).
-	it("row 1: a lone 28 s ID, no neighbour, is one file", async () => {
-		const s = id(30_000)
-		const res = await runRow({
-			name: "1",
-			emitters: [voice(s)],
-			ids: [s],
-			durationMs: s.toMs + TAIL_MS,
-		})
-		expectEveryIdWhole(res)
-	}, 600_000)
-})
+export function row1LoneId(): void {
+	describe("lone-voice matrix row 1: a lone ID", () => {
+		// Base: one file (whole).
+		it("row 1: a lone 28 s ID, no neighbour, is one file", async () => {
+			const s = id(30_000)
+			const res = await runRow({
+				name: "1",
+				emitters: [voice(s)],
+				ids: [s],
+				durationMs: s.toMs + TAIL_MS,
+			})
+			expectEveryIdWhole(res)
+		}, 600_000)
+	})
+}
 
 /**
  * Row 2: a line 25 kHz below keys 4 s before the ID and stays on past its end; the sweep lands on
  * it before the ID keys and watches it as a carrier (its 8 s watch caps under the ID).
  */
-describe("lone-voice matrix row 2: a line keying before a lone ID", () => {
-	const s = id(30_000)
-	const line = { fromMs: s.fromMs - 4_000, toMs: s.toMs + 2_000 }
-	it("row 2a: a plain carrier 25 kHz below, keyed 4 s before, leaves the ID one file", async () => {
-		const res = await runRow({
-			name: "2a",
-			emitters: [voice(s), carrier(ID_HZ - 25_000, line)],
-			ids: [s],
-			durationMs: s.toMs + TAIL_MS,
-		})
-		expectEveryIdWhole(res)
-	}, 600_000)
+export function row2LineKeyingBefore(): void {
+	describe("lone-voice matrix row 2: a line keying before a lone ID", () => {
+		const s = id(30_000)
+		const line = { fromMs: s.fromMs - 4_000, toMs: s.toMs + 2_000 }
+		it("row 2a: a plain carrier 25 kHz below, keyed 4 s before, leaves the ID one file", async () => {
+			const res = await runRow({
+				name: "2a",
+				emitters: [voice(s), carrier(ID_HZ - 25_000, line)],
+				ids: [s],
+				durationMs: s.toMs + TAIL_MS,
+			})
+			expectEveryIdWhole(res)
+		}, 600_000)
 
-	it("row 2b: a sub-tone-only carrier 25 kHz below, keyed 4 s before, leaves the ID one file", async () => {
-		const res = await runRow({
-			name: "2b",
-			emitters: [voice(s), subTone(ID_HZ - 25_000, line)],
-			ids: [s],
-			durationMs: s.toMs + TAIL_MS,
-		})
-		expectEveryIdWhole(res)
-	}, 600_000)
-})
+		it("row 2b: a sub-tone-only carrier 25 kHz below, keyed 4 s before, leaves the ID one file", async () => {
+			const res = await runRow({
+				name: "2b",
+				emitters: [voice(s), subTone(ID_HZ - 25_000, line)],
+				ids: [s],
+				durationMs: s.toMs + TAIL_MS,
+			})
+			expectEveryIdWhole(res)
+		}, 600_000)
+	})
+}
 
 /**
  * Row 3: a line 25 kHz below on air at the landing (keyed during the decoy's hold, so no earlier
@@ -314,45 +320,56 @@ function row3(
 const LINE_BEFORE_LANDING_MS = DECOY_TO_MS - 2_000
 const LINE_ONSET_SEEN_MS = LANDING_MS + 500
 
-describe("lone-voice matrix row 3 steady: a steady line kept, then the ID followed", () => {
-	for (const delayMs of ROW3_DELAYS_MS)
-		it(`row 3 steady: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
-			const res = await runRow(
-				row3(`3-steady-${delayMs}`, LINE_BEFORE_LANDING_MS, undefined, delayMs),
-			)
-			expectEveryIdWhole(res)
-		}, 600_000)
-})
+export function row3SteadyLine(): void {
+	describe("lone-voice matrix row 3 steady: a steady line kept, then the ID followed", () => {
+		for (const delayMs of ROW3_DELAYS_MS)
+			it(`row 3 steady: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
+				const res = await runRow(
+					row3(
+						`3-steady-${delayMs}`,
+						LINE_BEFORE_LANDING_MS,
+						undefined,
+						delayMs,
+					),
+				)
+				expectEveryIdWhole(res)
+			}, 600_000)
+	})
+}
 
-describe("lone-voice matrix row 3 analog: an analog-labelled line kept, then the ID followed", () => {
-	for (const delayMs of ROW3_DELAYS_MS)
-		it(`row 3 analog: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
-			const res = await runRow(
-				row3(
-					`3-analog-${delayMs}`,
-					LINE_BEFORE_LANDING_MS,
-					{ hz: LINE_HZ, hints: { followOnAir: true } },
-					delayMs,
-				),
-			)
-			expectEveryIdWhole(res)
-		}, 600_000)
-})
+export function row3AnalogLine(): void {
+	describe("lone-voice matrix row 3 analog: an analog-labelled line kept, then the ID followed", () => {
+		for (const delayMs of ROW3_DELAYS_MS)
+			it(`row 3 analog: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
+				const res = await runRow(
+					row3(
+						`3-analog-${delayMs}`,
+						LINE_BEFORE_LANDING_MS,
+						{ hz: LINE_HZ, hints: { followOnAir: true } },
+						delayMs,
+					),
+				)
+				expectEveryIdWhole(res)
+			}, 600_000)
+	})
+}
 
-describe("lone-voice matrix row 3 followed: a followed, probed-for-confirm line with its onset seen, then the ID", () => {
-	for (const delayMs of ROW3_DELAYS_MS)
-		it(`row 3 followed: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
-			const res = await runRow(
-				row3(
-					`3-followed-${delayMs}`,
-					LINE_ONSET_SEEN_MS,
-					{ hz: LINE_HZ, hints: { followOnAir: true }, confirm: true },
-					delayMs,
-				),
-			)
-			expectEveryIdWhole(res)
-		}, 600_000)
-})
+export function row3FollowedLine(): void {
+	describe("lone-voice matrix row 3 followed: a followed, probed-for-confirm line with its onset seen, then the ID", () => {
+		for (const delayMs of ROW3_DELAYS_MS)
+			it(`row 3 followed: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
+				const res = await runRow(
+					row3(
+						`3-followed-${delayMs}`,
+						LINE_ONSET_SEEN_MS,
+						{ hz: LINE_HZ, hints: { followOnAir: true }, confirm: true },
+						delayMs,
+					),
+				)
+				expectEveryIdWhole(res)
+			}, 600_000)
+	})
+}
 
 /**
  * Row 4: a steady line beside a lone ID, its track hinted as voice to come (voiceLater: a spectrum
@@ -385,113 +402,123 @@ function row4(
 	}
 }
 
-describe("lone-voice matrix row 4: a voiceLater-hinted, record-held line beside a lone ID", () => {
-	it("row 4 steady: the ID is one file", async () => {
-		const res = await runRow(
-			row4("4-steady", LINE_HZ, LINE_BEFORE_LANDING_MS, false),
-		)
-		expectEveryIdWhole(res)
-	}, 600_000)
+export function row4VoiceLaterLine(): void {
+	describe("lone-voice matrix row 4: a voiceLater-hinted, record-held line beside a lone ID", () => {
+		it("row 4 steady: the ID is one file", async () => {
+			const res = await runRow(
+				row4("4-steady", LINE_HZ, LINE_BEFORE_LANDING_MS, false),
+			)
+			expectEveryIdWhole(res)
+		}, 600_000)
 
-	it("row 4 probed: the ID is one file", async () => {
-		const res = await runRow(
-			row4("4-probed", LINE_HZ, LINE_BEFORE_LANDING_MS, true),
-		)
-		expectEveryIdWhole(res)
-	}, 600_000)
+		it("row 4 probed: the ID is one file", async () => {
+			const res = await runRow(
+				row4("4-probed", LINE_HZ, LINE_BEFORE_LANDING_MS, true),
+			)
+			expectEveryIdWhole(res)
+		}, 600_000)
 
-	it("row 4 seen late: the ID is one file", async () => {
-		const res = await runRow(row4("4-late", LINE_HZ, LANDING_MS + 1_500, false))
-		expectEveryIdWhole(res)
-	}, 600_000)
+		it("row 4 seen late: the ID is one file", async () => {
+			const res = await runRow(
+				row4("4-late", LINE_HZ, LANDING_MS + 1_500, false),
+			)
+			expectEveryIdWhole(res)
+		}, 600_000)
 
-	it("row 4 12.5 kHz below: the ID is one file", async () => {
-		const res = await runRow(
-			row4("4-12k5", ID_HZ - 12_500, LINE_BEFORE_LANDING_MS, false),
-		)
-		expectEveryIdWhole(res)
-	}, 600_000)
-})
+		it("row 4 12.5 kHz below: the ID is one file", async () => {
+			const res = await runRow(
+				row4("4-12k5", ID_HZ - 12_500, LINE_BEFORE_LANDING_MS, false),
+			)
+			expectEveryIdWhole(res)
+		}, 600_000)
+	})
+}
 
 /**
  * Row 5: a carrier 25 kHz below on air from the scene's start, so the first sweep's visit of hop 1
  * saw it before the decoy held hop 0; the ID keys at the landing or 3 s into the visit. A plain
  * carrier and a sub-tone-only one.
  */
-describe("lone-voice matrix row 5: a carrier seen in an earlier sweep, then the ID", () => {
-	const cases = [
-		{ name: "5-carrier-0", subtone: false, delayMs: 50 },
-		{ name: "5-carrier-3", subtone: false, delayMs: 3_000 },
-		{ name: "5-subtone-0", subtone: true, delayMs: 50 },
-		{ name: "5-subtone-3", subtone: true, delayMs: 3_000 },
-	]
-	for (const c of cases)
-		it(`row ${c.name}: the ID is one file`, async () => {
-			const s = id(LANDING_MS + c.delayMs)
-			const span = { fromMs: 0, toMs: s.toMs + 2_000 }
-			const res = await runRow({
-				name: c.name,
-				emitters: [
-					voice(s),
-					c.subtone ? subTone(LINE_HZ, span) : carrier(LINE_HZ, span),
-				],
-				ids: [s],
-				decoy: DECOY,
-				durationMs: s.toMs + TAIL_MS,
-			})
-			expectEveryIdWhole(res)
-		}, 600_000)
-})
+export function row5EarlierCarrier(): void {
+	describe("lone-voice matrix row 5: a carrier seen in an earlier sweep, then the ID", () => {
+		const cases = [
+			{ name: "5-carrier-0", subtone: false, delayMs: 50 },
+			{ name: "5-carrier-3", subtone: false, delayMs: 3_000 },
+			{ name: "5-subtone-0", subtone: true, delayMs: 50 },
+			{ name: "5-subtone-3", subtone: true, delayMs: 3_000 },
+		]
+		for (const c of cases)
+			it(`row ${c.name}: the ID is one file`, async () => {
+				const s = id(LANDING_MS + c.delayMs)
+				const span = { fromMs: 0, toMs: s.toMs + 2_000 }
+				const res = await runRow({
+					name: c.name,
+					emitters: [
+						voice(s),
+						c.subtone ? subTone(LINE_HZ, span) : carrier(LINE_HZ, span),
+					],
+					ids: [s],
+					decoy: DECOY,
+					durationMs: s.toMs + TAIL_MS,
+				})
+				expectEveryIdWhole(res)
+			}, 600_000)
+	})
+}
 
 /**
  * Row 6: two QSOs 12.5 kHz apart taking turns, simplex: 28 s overs, 3 s between one's end and the
  * other's start, A, B, A. Each over scored as an ID.
  */
-describe("lone-voice matrix row 6: two adjacent QSOs 12.5 kHz apart, alternating", () => {
-	it("row 6: every over is one file", async () => {
-		const b = ID_HZ - 12_500
-		const overs = [id(4_000), id(35_000, b), id(66_000)]
-		const res = await runRow({
-			name: "6",
-			emitters: overs.map(o => voice(o)),
-			ids: overs,
-			durationMs: overs[2]!.toMs + TAIL_MS,
-		})
-		expectEveryIdWhole(res)
-	}, 600_000)
-})
+export function row6AdjacentQsos(): void {
+	describe("lone-voice matrix row 6: two adjacent QSOs 12.5 kHz apart, alternating", () => {
+		it("row 6: every over is one file", async () => {
+			const b = ID_HZ - 12_500
+			const overs = [id(4_000), id(35_000, b), id(66_000)]
+			const res = await runRow({
+				name: "6",
+				emitters: overs.map(o => voice(o)),
+				ids: overs,
+				durationMs: overs[2]!.toMs + TAIL_MS,
+			})
+			expectEveryIdWhole(res)
+		}, 600_000)
+	})
+}
 
 /**
  * Row 7: the gate scene of a neighbour that keys before the ID and ends under it: three hops (a
  * 1.8 MHz range), a decoy voice on hop 0 to 28 150 ms (the landing on hop 1 at 29 950 ms), a
  * neighbour 25 kHz below and 6 dB under the ID on air 22 to 40 s, the ID 30 to 58 s.
  */
-describe("lone-voice matrix row 7: the neighbour gate scene", () => {
-	it("row 7: no fewer IDs whole than the base", async () => {
-		const hop1 = CENTRE_HZ + 800_000
-		const s = id(30_000, hop1 + 100_437)
-		const res = await runRow({
-			name: "7",
-			emitters: [
-				voice(s),
-				{
-					hz: s.hz - 25_000,
-					kind: "voice",
-					fromMs: 22_000,
-					toMs: 40_000,
-					amp: NEIGHBOUR_AMP,
-				},
-			],
-			ids: [s],
-			decoy: { hz: DECOY_HZ, fromMs: 2_000, toMs: 28_150 },
-			range: { startHz: CENTRE_HZ - 400_000, endHz: CENTRE_HZ + 1_400_000 },
-			hops: 3,
-			durationMs: 64_000,
-		})
-		// Base splits it too, settled: 11.725 + 15.825 s, no ID whole.
-		expectWholeAtLeast(res, 0)
-	}, 600_000)
-})
+export function row7NeighbourGate(): void {
+	describe("lone-voice matrix row 7: the neighbour gate scene", () => {
+		it("row 7: no fewer IDs whole than the base", async () => {
+			const hop1 = CENTRE_HZ + 800_000
+			const s = id(30_000, hop1 + 100_437)
+			const res = await runRow({
+				name: "7",
+				emitters: [
+					voice(s),
+					{
+						hz: s.hz - 25_000,
+						kind: "voice",
+						fromMs: 22_000,
+						toMs: 40_000,
+						amp: NEIGHBOUR_AMP,
+					},
+				],
+				ids: [s],
+				decoy: { hz: DECOY_HZ, fromMs: 2_000, toMs: 28_150 },
+				range: { startHz: CENTRE_HZ - 400_000, endHz: CENTRE_HZ + 1_400_000 },
+				hops: 3,
+				durationMs: 64_000,
+			})
+			// Base splits it too, settled: 11.725 + 15.825 s, no ID whole.
+			expectWholeAtLeast(res, 0)
+		}, 600_000)
+	})
+}
 
 /**
  * Row 8: an analog-labelled line (a sub-tone carrier, never voiced) beside a lone ID on a frequency
@@ -529,16 +556,20 @@ function row8(offsetHz: number, delayMs: number): Row {
 	}
 }
 
-describe("lone-voice matrix row 8 traffic 25: an analog line known as traffic, never voiced, 25 kHz from the ID", () => {
-	for (const delayMs of ROW8_DELAYS_MS)
-		it(`row 8 traffic 25: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
-			expectEveryIdWhole(await runRow(row8(25_000, delayMs)))
-		}, 600_000)
-})
+export function row8Traffic25(): void {
+	describe("lone-voice matrix row 8 traffic 25: an analog line known as traffic, never voiced, 25 kHz from the ID", () => {
+		for (const delayMs of ROW8_DELAYS_MS)
+			it(`row 8 traffic 25: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
+				expectEveryIdWhole(await runRow(row8(25_000, delayMs)))
+			}, 600_000)
+	})
+}
 
-describe("lone-voice matrix row 8 traffic 12.5: an analog line known as traffic, never voiced, 12.5 kHz from the ID", () => {
-	for (const delayMs of ROW8_DELAYS_MS)
-		it(`row 8 traffic 12.5: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
-			expectEveryIdWhole(await runRow(row8(12_500, delayMs)))
-		}, 600_000)
-})
+export function row8Traffic12k5(): void {
+	describe("lone-voice matrix row 8 traffic 12.5: an analog line known as traffic, never voiced, 12.5 kHz from the ID", () => {
+		for (const delayMs of ROW8_DELAYS_MS)
+			it(`row 8 traffic 12.5: the ID keyed ${delayMs / 1000} s in is one file`, async () => {
+				expectEveryIdWhole(await runRow(row8(12_500, delayMs)))
+			}, 600_000)
+	})
+}

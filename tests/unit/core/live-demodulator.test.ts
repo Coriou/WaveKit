@@ -462,7 +462,7 @@ describe("LiveDemodulator", () => {
 		await liveDemod.reconfigure({ squelchMode: "manual", squelch: 0 })
 		expect(liveDemod.getStatus().thresholdDbfs).toBe(0)
 		expect(spawnMock).toHaveBeenCalledTimes(2)
-		// WG7: "noise" is a mode now (live-demodulator-wg7.test.ts); unknown modes stay refused.
+		// web-gaps-7: "noise" is a mode now (live-demodulator-squelch-modes.test.ts); unknown modes stay refused.
 		await expect(
 			liveDemod.reconfigure({
 				squelchMode: "loud",

@@ -54,7 +54,7 @@ const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 // ADS-B (readsb) joined the ambient-only protocols after WG7.
 const AMBIENT = ["ais", "acars", "vdl2", "lora", "adsb"] as const
 
-describe("WG7 contract", () => {
+describe("web-gaps-7 contract", () => {
 	it("adds the ambient-only protocols and identity kinds everywhere", () => {
 		expect(same<Api.ScannerProtocol, Core.ScannerProtocol>(true)).toBe(true)
 		expect(same<Api.IdentityKind, Core.IdentityKind>(true)).toBe(true)

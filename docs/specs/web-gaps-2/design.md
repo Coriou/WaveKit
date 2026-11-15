@@ -20,7 +20,7 @@ amendment ([core access policy](../core-access-policy/requirements.md) 4.9–4.1
 | `src/decoders/builtin/direwolf.ts`                                            | `APRSData` optional `objectName`, `objectKind`, `objectKilled` (types only; lane R parses)                                                                                                                                                                        |
 | `src/api/websocket/events.ts`                                                 | channels `aprs`, `mesh`; `AprsServerMessage`, `MeshServerMessage` in `ServerMessage`; `broadcastAprs{New,Update,Lost,Stats}`, `broadcastMesh{New,Update,Lost,Stats}` (unwired)                                                                                    |
 
-`tests/unit/core/wg2-contract-compat.test.ts` asserts the copied types are identical and the
+`tests/unit/core/web-gaps-2-contract-compat.test.ts` asserts the copied types are identical and the
 access schemas accept old and new device rows. Every addition is optional, new, or a new
 union member.
 

@@ -92,8 +92,8 @@ const WORST_CASES: [string, string[]][] = [
 	["64 × 4096 plain", Array(64).fill("x".repeat(4096))],
 ]
 
-describe("extraArgs: the serialized form is bounded (R2 MAJOR 1)", () => {
-	it("R1 repro: 16 × 4096 quotes no longer yields a 262 KB pipeline", () => {
+describe("extraArgs: the serialized form is bounded", () => {
+	it("16 × 4096 quotes no longer yield a 262 KB pipeline", () => {
 		const extra = Array(16).fill("'".repeat(4096))
 		const pipeline = finalArgv(Rtl433Decoder, "rtl433", extra)[1]!
 		expect(Buffer.byteLength(pipeline)).toBeLessThan(MAX_ARG_STRLEN)
@@ -144,7 +144,7 @@ describe("extraArgs: the serialized form is bounded (R2 MAJOR 1)", () => {
 	})
 })
 
-describe("safeErrorFields (R2 MAJOR 2)", () => {
+describe("safeErrorFields", () => {
 	it("keeps code, errno, syscall and class; drops message, stack, path, spawnargs", () => {
 		const err = Object.assign(new Error("spawn readsb ENOENT SECRET-a"), {
 			errno: -2,
@@ -239,7 +239,7 @@ class TestNetwork extends NetworkProducerDecoder {
 	}
 }
 
-describe("decoder error logs carry no argv or hosts (R2 MAJOR 2 repros)", () => {
+describe("decoder error logs carry no argv or hosts", () => {
 	it("an ENOENT spawn error logs no spawnargs or path", async () => {
 		const { logs, logger } = capture()
 		const d = new ReadsbDecoder(
@@ -287,7 +287,7 @@ describe("decoder error logs carry no argv or hosts (R2 MAJOR 2 repros)", () => 
 	})
 })
 
-describe("option issue logs name known keys only (R2 MINOR 3)", () => {
+describe("option issue logs name known keys only", () => {
 	it("counts unknown keys, names known schema keys, never values", async () => {
 		const { logs, logger } = capture()
 		const manager = new DecoderManager(
@@ -320,7 +320,7 @@ describe("option issue logs name known keys only (R2 MINOR 3)", () => {
 	})
 })
 
-describe("safeErrorFields never throws and never trusts forged names (R3)", () => {
+describe("safeErrorFields never throws and never trusts forged names", () => {
 	it("survives a throwing constructor getter, revoked proxies and descriptor traps", () => {
 		const getterBomb = {}
 		Object.defineProperty(getterBomb, "constructor", {

@@ -70,7 +70,7 @@ const base = {
 	current: true,
 }
 
-describe("WG2 contract", () => {
+describe("web-gaps-2 contract", () => {
 	it("keeps the copied declarations identical", () => {
 		expect([
 			payloadSame,
@@ -85,7 +85,7 @@ describe("WG2 contract", () => {
 		expect(meshMessage.nodeId).toBe("!a1b2c3d4")
 	})
 
-	it("accepts pre-WG2 and WG2 device rows", () => {
+	it("accepts pre-web-gaps-2 and web-gaps-2 device rows", () => {
 		expect(accessDeviceDtoSchema.safeParse(base).success).toBe(true)
 		expect(
 			accessDeviceDtoSchema.safeParse({

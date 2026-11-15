@@ -67,6 +67,8 @@ export interface Speech {
 	dipMs?: number
 	/** Scales every voice tone's deviation (1): 6 spreads it past a 25 kHz channel, as broadcast FM. */
 	deviationScale?: number
+	/** The CTCSS sub-tone (67 Hz); null: an untoned voice, whose files no tone keeps. */
+	subToneHz?: number | null
 }
 
 /** From `fromMs` to `toMs` of the world. */
@@ -90,6 +92,7 @@ function fmVoice(
 	const phraseS = (speech.phraseMs ?? 1_700) / 1000
 	const dipS = (speech.dipMs ?? 300) / 1000
 	const scale = speech.deviationScale ?? 1
+	const subToneHz = speech.subToneHz === undefined ? 67 : speech.subToneHz
 	const TONES = [
 		{ hz: 410, dev: 1900 },
 		{ hz: 730, dev: 1500 },
@@ -111,7 +114,8 @@ function fmVoice(
 				: t % phraseS > phraseS - dipS
 					? 0.15
 					: 0.55 - 0.45 * Math.cos(2 * Math.PI * syllableHz * t)
-			let dev = 350 * Math.sin(2 * Math.PI * 67 * t)
+			let dev =
+				subToneHz === null ? 0 : 350 * Math.sin(2 * Math.PI * subToneHz * t)
 			for (const tone of TONES)
 				dev += envelope * scale * tone.dev * Math.sin(2 * Math.PI * tone.hz * t)
 			phase = (phase + (2 * Math.PI * (offsetHz + dev)) / FS) % (2 * Math.PI)
@@ -335,7 +339,7 @@ export function qualificationWorld(opts: {
 	const internals = service as unknown as Internals
 	const settle =
 		opts.settled === true
-			? settledChunks(service, opts.recorderClockStepMs)
+			? settledChunks(service, () => clock() - T0, opts.recorderClockStepMs)
 			: null
 	const visits: VisitLog[] = []
 	const tracks: TrackLog[] = []
@@ -450,6 +454,7 @@ export function qualificationWorld(opts: {
 				fanout.write(Buffer.from(iq))
 				settle?.flush()
 				internals.tick()
+				settle?.fireTimers()
 				await turn()
 				await turn()
 				await turn()
@@ -485,9 +490,13 @@ const SETTLE_ROUNDS = 50
  * the store's analog operations (admission, writes, finish) and the job runners' chains (a hop's
  * lease persist before its write, a hold's job persist) are awaited before the next chunk is fed.
  * The sample clock does not move while they run, so they land at the same chunk on every run.
+ * The recorder's grace timer (a provisional file's LATE_VERDICT_GRACE_MS, a real setTimeout in
+ * production) runs on the sample clock: a held file is released at the chunk its grace ends.
  */
 interface Settled {
 	flush(): void
+	/** Runs the recorder timers due by the sample clock, earliest first. */
+	fireTimers(): void
 	drain(runners: Runners, turn: () => Promise<void>): Promise<void>
 }
 
@@ -499,7 +508,10 @@ interface Runners {
 
 interface RecorderSettling {
 	clock: () => number
-	deps: { beginAnalog(input: unknown): AnalogHandleLike }
+	deps: {
+		beginAnalog(input: unknown): AnalogHandleLike
+		timer?: (ms: number, run: () => void) => () => void
+	}
 }
 interface AnalogHandleLike {
 	ready: Promise<void>
@@ -509,7 +521,11 @@ interface AnalogHandleLike {
 	settled: Promise<unknown>
 }
 
-function settledChunks(service: ScannerService, clockStepMs?: number): Settled {
+function settledChunks(
+	service: ScannerService,
+	nowMs: () => number,
+	clockStepMs?: number,
+): Settled {
 	const inFlight = new Set<Promise<unknown>>()
 	const track = <T>(p: Promise<T>): Promise<T> => {
 		const settled = p.then(
@@ -536,6 +552,16 @@ function settledChunks(service: ScannerService, clockStepMs?: number): Settled {
 		let at = 0
 		rec.clock = () => (at += clockStepMs)
 	}
+	const timers: { at: number; seq: number; run: () => void }[] = []
+	let seq = 0
+	rec.deps.timer = (ms, run) => {
+		const timer = { at: nowMs() + ms, seq: seq++, run }
+		timers.push(timer)
+		return () => {
+			const i = timers.indexOf(timer)
+			if (i >= 0) timers.splice(i, 1)
+		}
+	}
 	const begin = rec.deps.beginAnalog.bind(rec.deps)
 	rec.deps.beginAnalog = input => {
 		const h = begin(input)
@@ -556,6 +582,21 @@ function settledChunks(service: ScannerService, clockStepMs?: number): Settled {
 			| { flushBatch?(): void }
 			| undefined
 	return {
+		fireTimers: () => {
+			for (;;) {
+				const at = nowMs()
+				let next: (typeof timers)[number] | undefined
+				for (const t of timers)
+					if (
+						t.at <= at &&
+						(!next || t.at < next.at || (t.at === next.at && t.seq < next.seq))
+					)
+						next = t
+				if (next === undefined) return
+				timers.splice(timers.indexOf(next), 1)
+				next.run()
+			}
+		},
 		flush: () => {
 			const e = engine()
 			if (e === undefined) return

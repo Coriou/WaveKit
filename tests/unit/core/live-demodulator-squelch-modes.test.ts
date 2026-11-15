@@ -133,7 +133,7 @@ function pcmBlocks(pcm: Buffer): Buffer[] {
 	return out
 }
 
-describe("LiveDemodulator WG7", () => {
+describe("LiveDemodulator noise and tone squelch", () => {
 	let LiveDemodulatorClass: new (...args: unknown[]) => LiveDemodulatorType
 	let liveDemod: LiveDemodulatorType
 	let port: number
@@ -380,7 +380,7 @@ describe("LiveDemodulator WG7", () => {
 			}
 		}
 
-		it("manual holds a marginal fading carrier through the hysteresis band as before WG7", async () => {
+		it("manual holds a marginal fading carrier through the hysteresis band as before noise mode", async () => {
 			expect(await fadingCarrierCloses(false)).toBe(0)
 			expect(await fadingCarrierCloses(true)).toBe(0)
 		})
@@ -861,7 +861,7 @@ describe("LiveDemodulator WG7", () => {
 			).toBe(true)
 		})
 
-		it("mutes whole samples only when chunks start mid-sample (R1)", async () => {
+		it("mutes whole samples only when chunks start mid-sample", async () => {
 			liveDemod = create({
 				toneSquelch: { kind: "ctcss", frequencyTenthsHz: 1000 },
 			})

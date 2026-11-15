@@ -57,11 +57,11 @@ type Same<A, B> =
 		: false
 const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 
-describe("WG5 contract", () => {
+describe("web-gaps-5 contract", () => {
 	let directory: string
 	const services: BandPlanService[] = []
 	beforeEach(() => {
-		directory = mkdtempSync(join(tmpdir(), "wg5-contract-"))
+		directory = mkdtempSync(join(tmpdir(), "web-gaps-5-contract-"))
 	})
 	afterEach(async () => {
 		for (const service of services.splice(0)) await service.close()
@@ -161,7 +161,7 @@ describe("WG5 contract", () => {
 		})
 	})
 
-	it("keeps the WG5 vessel fields optional", () => {
+	it("keeps the web-gaps-5 vessel fields optional", () => {
 		// Feature: web-gaps-5, requirement 5.5
 		expect(
 			same<
