@@ -38,6 +38,9 @@ async function sweepReading(obwHz: number) {
 		world: synthWorld([
 			{ hz: SIGNAL_HZ, kind: "voice", fromMs: FROM_MS, toMs: END_MS },
 		]),
+		// Each chunk's work lands at the same chunk on every run: unsettled, a loaded host's
+		// recorder lagged its wall-clock turn budget and the finish fell past SETTLED_MS.
+		settled: true,
 	})
 	stops.push(() => w.stop())
 	await w.service.start()

@@ -42,6 +42,9 @@ async function sweep(
 		centreHz: CENTRE_HZ,
 		world: synthWorld(emitters),
 		...(logger ? { logger } : {}),
+		// Each chunk's work lands at the same chunk on every run: unsettled, a loaded host's
+		// recorder lagged its wall-clock turn budget and the finish fell past SETTLED_MS.
+		settled: true,
 	})
 	stops.push(() => w.stop())
 	await w.service.start()
