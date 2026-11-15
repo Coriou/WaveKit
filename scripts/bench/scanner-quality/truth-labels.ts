@@ -15,6 +15,8 @@ import { z } from "zod"
 
 export const TRUTH_LABELS = [
 	"analog-voice",
+	/** One over of digital voice: its `protocol` (and DMR `slot`) name the decode expected. */
+	"digital-voice",
 	"dmr",
 	"pocsag",
 	"carrier",
@@ -38,13 +40,28 @@ export const TRUTH_SOURCES = [
  * `unknown` interval is not scored either way.
  */
 export const NON_VOICE_LABELS: readonly TruthLabel[] = [
+	"digital-voice",
 	"dmr",
 	"pocsag",
 	"carrier",
 	"noise",
 ]
 /** Non-voice labels that are digital (data or digital voice): the honesty failure that matters. */
-export const DIGITAL_LABELS: readonly TruthLabel[] = ["dmr", "pocsag"]
+export const DIGITAL_LABELS: readonly TruthLabel[] = [
+	"digital-voice",
+	"dmr",
+	"pocsag",
+]
+
+/** The protocols a digital-voice interval names (dsd-fme's voice modes). */
+export const DV_LABEL_PROTOCOLS = [
+	"dmr",
+	"dstar",
+	"ysf",
+	"p25",
+	"nxdn48",
+	"dpmr",
+] as const
 
 const hz = z.number().finite().positive()
 const ms = z.number().finite()
@@ -68,10 +85,22 @@ export const TruthIntervalSchema = z
 			.string()
 			.regex(/^\d{1,10}$/)
 			.optional(),
+		/** A digital-voice over's protocol. */
+		protocol: z.enum(DV_LABEL_PROTOCOLS).optional(),
+		/** A DMR over's timeslot. */
+		slot: z.union([z.literal(1), z.literal(2)]).optional(),
 		note: z.string().max(200).optional(),
 	})
 	.strict()
 	.refine(i => i.endMs > i.startMs, "an interval ends after it starts")
+	.refine(
+		i => (i.label === "digital-voice") === (i.protocol !== undefined),
+		"a digital-voice interval names its protocol, and only it does",
+	)
+	.refine(
+		i => i.slot === undefined || i.protocol === "dmr",
+		"only a DMR over names a slot",
+	)
 export type TruthInterval = z.infer<typeof TruthIntervalSchema>
 
 /** How a recorded decode reaches the scanner (its production path). */

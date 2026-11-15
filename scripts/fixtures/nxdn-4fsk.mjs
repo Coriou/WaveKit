@@ -144,7 +144,11 @@ function frame(lich, sacch, halves) {
 	return [...bitsToDibits(bitsOf(FSW, 20)), ...nxdnScramble(body)]
 }
 
-/** Dibits of one call: pre-roll, FACCH1 VCALL frames, then voice superframes. */
+/**
+ * Dibits of one call: pre-roll, FACCH1 VCALL frames, then voice superframes.
+ * `coldKeyUp` sends a true key-up instead (dv-plan.mjs): no pre-roll and one
+ * VCALL frame, not three.
+ */
 export function nxdnCallDibits({
 	ran,
 	source,
@@ -152,14 +156,17 @@ export function nxdnCallDibits({
 	superframes = 2,
 	release = false,
 	seed = 9,
+	coldKeyUp = false,
 }) {
 	const random = rng(seed)
 	const noise = n => [...Array(n)].map(() => (random() < 0.5 ? 0 : 1))
 	const vcall = nxdnVcallBits({ source, destination })
 	const facch = nxdnFacch1Bits(vcall)
-	const out = [...Array(480)].map(() => Math.floor(random() * 4))
+	const out = coldKeyUp
+		? []
+		: [...Array(480)].map(() => Math.floor(random() * 4))
 	const idle = nxdnSacchBits({ sf: 3, ran, fragment: Array(18).fill(0) })
-	for (let i = 0; i < 3; i++)
+	for (let i = 0; i < (coldKeyUp ? 1 : 3); i++)
 		out.push(...frame(LICH_FACCH1, idle, [...facch, ...facch]))
 	for (let s = 0; s < superframes; s++)
 		for (let part = 0; part < 4; part++) {

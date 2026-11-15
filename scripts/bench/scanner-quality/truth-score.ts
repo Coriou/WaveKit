@@ -15,6 +15,7 @@
  * Every number is a count of labelled things, never of time, so two runs of the same truth set
  * give the same scorecard (the runs are on the virtual clock).
  */
+import { percentile, summarise, type DvOverScore } from "./dv-metrics.js"
 import type { RecordingRecord, TruthCase, TruthRun } from "./truth-run.js"
 import {
 	DIGITAL_LABELS,
@@ -44,12 +45,29 @@ export const SIGNAL_MERGE_HZ = 3_125
 /** The protocol a right identify verdict names for a label; null: no protocol (not a signal). */
 const EXPECTED_PROTOCOL: Record<TruthLabel, string | null> = {
 	"analog-voice": "analog-fm",
+	// Named by the interval's own protocol (expectedProtocol).
+	"digital-voice": null,
 	dmr: "dmr",
 	pocsag: "pocsag",
 	carrier: null,
 	noise: null,
 	unknown: null,
 }
+/** The scanner protocol a digital-voice interval's protocol is identified as. */
+const DV_SCANNER_PROTOCOL: Readonly<Record<string, string>> = {
+	dmr: "dmr",
+	dstar: "dstar",
+	ysf: "ysf",
+	p25: "p25p1",
+	nxdn48: "nxdn48",
+	dpmr: "dpmr",
+}
+
+const expectedProtocol = (iv: TruthInterval): string | null =>
+	iv.label === "digital-voice"
+		? (DV_SCANNER_PROTOCOL[iv.protocol ?? ""] ?? null)
+		: EXPECTED_PROTOCOL[iv.label]
+
 /** Protocols that name nothing (an unidentified discovery). */
 const NO_PROTOCOL = new Set(["unknown", "digital-unknown", "carrier"])
 
@@ -90,6 +108,8 @@ export interface CaseScore {
 	kept: KeptFile[]
 	voice: VoiceScore[]
 	identify: IdentifyScore[]
+	/** Digital voice overs (a DV scene, truth-dv.ts); absent: none. */
+	dv?: DvOverScore[]
 	decodes: TruthRun["decodes"]
 	decisions: Record<string, number>
 	totals: Totals
@@ -118,6 +138,18 @@ export interface Totals {
 	unsettled: number
 	/** False voice files and missed voice transmissions named exceptions account for. */
 	excepted: number
+	/** Digital voice overs scored (truth-dv.ts). */
+	dvOvers: number
+	/** Overs no call holds. */
+	dvMissed: number
+	/** Extra calls of an over (calls - 1, summed). */
+	dvSplit: number
+	/** Overs whose call also holds another over. */
+	dvMerged: number
+	/** p90 of call start minus key-up over the held overs (ms, 0 when none). */
+	dvHeadCutP90Ms: number
+	/** Clear overs no call's recording holds. */
+	dvRecordingMissing: number
 }
 
 export interface Scorecard {
@@ -248,7 +280,7 @@ function scoreIdentify(group: TruthInterval[], run: TruthRun): IdentifyScore {
 		)
 			best = d
 	}
-	const expected = EXPECTED_PROTOCOL[first.label]
+	const expected = expectedProtocol(first)
 	const protocol = best?.protocol ?? null
 	const named = protocol !== null && !NO_PROTOCOL.has(protocol)
 	let verdict: IdentifyScore["verdict"]
@@ -291,7 +323,26 @@ const emptyTotals = (): Totals => ({
 	ioOverruns: 0,
 	unsettled: 0,
 	excepted: 0,
+	dvOvers: 0,
+	dvMissed: 0,
+	dvSplit: 0,
+	dvMerged: 0,
+	dvHeadCutP90Ms: 0,
+	dvRecordingMissing: 0,
 })
+
+/** The DV totals of some overs (the p90 over all of them, not summed). */
+function dvTotals(rows: readonly DvOverScore[]): Partial<Totals> {
+	const s = summarise(rows)
+	return {
+		dvOvers: s.overs,
+		dvMissed: s.missed,
+		dvSplit: s.splits,
+		dvMerged: s.merged,
+		dvHeadCutP90Ms: Math.round(s.headCutP90Ms ?? 0),
+		dvRecordingMissing: s.recordingMissing,
+	}
+}
 
 export function scoreCase(c: TruthCase, run: TruthRun): CaseScore {
 	const keptRecords = run.recordings.filter(
@@ -325,7 +376,13 @@ export function scoreCase(c: TruthCase, run: TruthRun): CaseScore {
 	return { ...score, totals: recount(score) }
 }
 
-/** A case's totals from its kept files, voice and identify rows; excepted rows count apart. */
+/** A case that ran no scanner (a digital voice scene, truth-dv.ts), with its totals. */
+export function withTotals(c: Omit<CaseScore, "totals">): CaseScore {
+	const score: CaseScore = { ...c, totals: emptyTotals() }
+	return { ...score, totals: recount(score) }
+}
+
+/** A case's totals from its kept files, voice, identify and DV rows; excepted rows count apart. */
 function recount(c: CaseScore): Totals {
 	const t = emptyTotals()
 	t.cases = 1
@@ -358,7 +415,7 @@ function recount(c: CaseScore): Totals {
 	t.unidentified = c.identify.filter(i => i.verdict === "unidentified").length
 	t.ioOverruns = c.totals.ioOverruns
 	t.unsettled = c.totals.unsettled
-	return t
+	return { ...t, ...dvTotals(c.dv ?? []) }
 }
 
 /**
@@ -439,6 +496,13 @@ function addTotals(a: Totals, b: Totals): Totals {
 		ioOverruns: a.ioOverruns + b.ioOverruns,
 		unsettled: a.unsettled + b.unsettled,
 		excepted: a.excepted + b.excepted,
+		dvOvers: a.dvOvers + b.dvOvers,
+		dvMissed: a.dvMissed + b.dvMissed,
+		dvSplit: a.dvSplit + b.dvSplit,
+		dvMerged: a.dvMerged + b.dvMerged,
+		// A percentile does not add: scorecard() recomputes it from the rows.
+		dvHeadCutP90Ms: Math.max(a.dvHeadCutP90Ms, b.dvHeadCutP90Ms),
+		dvRecordingMissing: a.dvRecordingMissing + b.dvRecordingMissing,
 	}
 }
 
@@ -472,8 +536,13 @@ export function scorecard(
 		throw new Error(`threshold names an unknown metric: ${unknown.join(", ")}`)
 	const applied = applyExceptions(scored, limits.exceptions ?? [])
 	const cases = applied.cases
-	const sum = (cs: readonly CaseScore[]): Totals =>
-		cs.reduce((acc, c) => addTotals(acc, c.totals), emptyTotals())
+	const sum = (cs: readonly CaseScore[]): Totals => {
+		const t = cs.reduce((acc, c) => addTotals(acc, c.totals), emptyTotals())
+		const heads = cs
+			.flatMap(c => c.dv ?? [])
+			.flatMap(r => (r.headCutMs === null ? [] : [r.headCutMs]))
+		return { ...t, dvHeadCutP90Ms: Math.round(percentile(heads, 90) ?? 0) }
+	}
 	const byKind = {
 		synthetic: sum(cases.filter(c => c.kind === "synthetic")),
 		capture: sum(cases.filter(c => c.kind === "capture")),
@@ -540,6 +609,8 @@ export function formatScorecardLine(s: Scorecard): string {
 		`false voice ${t.falseVoice} (digital ${t.digitalKeptAsVoice}), ` +
 		`${t.excepted} excepted, ` +
 		`missed voice ${t.missedVoice}/${t.voiceTransmissions} (split ${t.splitVoice}), ` +
-		`identify ${t.identifyRight}/${t.labelledSignals} right, ${t.identifyWrong} wrong: ${verdict}`
+		`identify ${t.identifyRight}/${t.labelledSignals} right, ${t.identifyWrong} wrong, ` +
+		`digital voice ${t.dvOvers} overs: missed ${t.dvMissed}, split ${t.dvSplit}, merged ${t.dvMerged}, ` +
+		`head cut p90 ${t.dvHeadCutP90Ms} ms, no recording ${t.dvRecordingMissing}: ${verdict}`
 	)
 }

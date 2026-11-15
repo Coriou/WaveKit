@@ -190,7 +190,8 @@ export function ysfVd2Dibits({ fn, ft, dest, src, dgid = 0, seed = 11 }) {
  * repeats them; FN 1 names the source), TC. dsd-fme sets its symbol levels
  * from the first frame syncs and loses those frames, so two frames of sync
  * and noise (no valid FICH) lead. `badCsd1` sends a header whose CSD1 fails
- * its CRC.
+ * its CRC. `coldKeyUp` sends a true key-up instead (dv-plan.mjs): no noise
+ * lead and no settle frames, the header first.
  */
 export function ysfCallDibits({
 	dest,
@@ -200,12 +201,14 @@ export function ysfCallDibits({
 	superframes = 1,
 	badCsd1 = false,
 	seed = 5,
+	coldKeyUp = false,
 }) {
 	const random = rng(seed)
 	const noise = n => [...Array(n)].map(() => Math.floor(random() * 4))
-	const out = noise(480)
-	for (let i = 0; i < 2; i++)
-		out.push(...bitsToDibits(bitsOf(FRAME_SYNC, 40)), ...noise(460))
+	const out = coldKeyUp ? [] : noise(480)
+	if (!coldKeyUp)
+		for (let i = 0; i < 2; i++)
+			out.push(...bitsToDibits(bitsOf(FRAME_SYNC, 40)), ...noise(460))
 	out.push(...ysfHeaderDibits({ fi: 0, dest, src, dgid, badCsd1 }))
 	for (let sf = 0; sf < superframes; sf++)
 		for (let fn = 0; fn < frames; fn++)

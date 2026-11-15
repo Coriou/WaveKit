@@ -1,0 +1,386 @@
+{
+	"version": 1,
+	"provisional": true,
+	"note": "Modelled, not measured (scripts/fixtures/dv-latency-seeds.mjs): replace with the in-image capture baseline.",
+	"scene": "dmr-direct-lengths",
+	"protocol": "dmr",
+	"frequencyHz": 454906250,
+	"overs": [
+		{
+			"index": 0,
+			"protocol": "dmr",
+			"slot": 1,
+			"startMs": 1022.9,
+			"endMs": 1470.4,
+			"frames": 3,
+			"terminator": true,
+			"clear": true,
+			"ids": {
+				"talkgroup": 4321,
+				"source": 1234567
+			}
+		},
+		{
+			"index": 1,
+			"protocol": "dmr",
+			"slot": 1,
+			"startMs": 6482.9,
+			"endMs": 7470.4,
+			"frames": 4,
+			"terminator": true,
+			"clear": true,
+			"ids": {
+				"talkgroup": 4321,
+				"source": 1234567
+			}
+		},
+		{
+			"index": 2,
+			"protocol": "dmr",
+			"slot": 1,
+			"startMs": 12482.9,
+			"endMs": 14430.4,
+			"frames": 7,
+			"terminator": true,
+			"clear": true,
+			"ids": {
+				"talkgroup": 4321,
+				"source": 1234567
+			}
+		},
+		{
+			"index": 3,
+			"protocol": "dmr",
+			"slot": 1,
+			"startMs": 19502.9,
+			"endMs": 22470.4,
+			"frames": 10,
+			"terminator": true,
+			"clear": true,
+			"ids": {
+				"talkgroup": 4321,
+				"source": 1234567
+			}
+		},
+		{
+			"index": 4,
+			"protocol": "dmr",
+			"slot": 1,
+			"startMs": 27482.9,
+			"endMs": 37470.4,
+			"frames": 29,
+			"terminator": true,
+			"clear": true,
+			"ids": {
+				"talkgroup": 4321,
+				"source": 1234567
+			}
+		}
+	],
+	"lines": [
+		{
+			"atMs": 1150.4,
+			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 1510.4,
+			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC "
+		},
+		{
+			"atMs": 1510.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 6610.4,
+			"text": "00:00:06 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 6970.4,
+			"text": "00:00:06 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 7210.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 7330.4,
+			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 7510.4,
+			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC "
+		},
+		{
+			"atMs": 7510.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 12610.4,
+			"text": "00:00:12 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 12970.4,
+			"text": "00:00:12 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 13210.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 13330.4,
+			"text": "00:00:13 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 13690.4,
+			"text": "00:00:13 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 13930.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 14050.4,
+			"text": "00:00:14 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 14410.4,
+			"text": "00:00:14 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 14470.4,
+			"text": "00:00:14 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC "
+		},
+		{
+			"atMs": 14470.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 19630.4,
+			"text": "00:00:19 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 19990.4,
+			"text": "00:00:19 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 20230.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 20350.4,
+			"text": "00:00:20 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 20710.4,
+			"text": "00:00:20 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 20950.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 21070.4,
+			"text": "00:00:21 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 21430.4,
+			"text": "00:00:21 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 21670.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 21790.4,
+			"text": "00:00:21 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 22150.4,
+			"text": "00:00:22 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 22390.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 22510.4,
+			"text": "00:00:22 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC "
+		},
+		{
+			"atMs": 22510.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 27610.4,
+			"text": "00:00:27 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 27970.4,
+			"text": "00:00:27 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 28210.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 28330.4,
+			"text": "00:00:28 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 28690.4,
+			"text": "00:00:28 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 28930.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 29050.4,
+			"text": "00:00:29 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 29410.4,
+			"text": "00:00:29 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 29650.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 29770.4,
+			"text": "00:00:29 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 30130.4,
+			"text": "00:00:30 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 30370.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 30490.4,
+			"text": "00:00:30 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 30850.4,
+			"text": "00:00:30 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 31090.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 31210.4,
+			"text": "00:00:31 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 31570.4,
+			"text": "00:00:31 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 31810.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 31930.4,
+			"text": "00:00:31 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 32290.4,
+			"text": "00:00:32 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 32530.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 32650.4,
+			"text": "00:00:32 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 33010.4,
+			"text": "00:00:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 33250.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 33370.4,
+			"text": "00:00:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 33730.4,
+			"text": "00:00:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 33970.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 34090.4,
+			"text": "00:00:34 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 34450.4,
+			"text": "00:00:34 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 34690.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 34810.4,
+			"text": "00:00:34 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 35170.4,
+			"text": "00:00:35 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 35410.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 35530.4,
+			"text": "00:00:35 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 35890.4,
+			"text": "00:00:35 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 36130.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 36250.4,
+			"text": "00:00:36 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 36610.4,
+			"text": "00:00:36 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 36850.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 36970.4,
+			"text": "00:00:36 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 37330.4,
+			"text": "00:00:37 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 37510.4,
+			"text": "00:00:37 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC "
+		},
+		{
+			"atMs": 37510.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		}
+	]
+}

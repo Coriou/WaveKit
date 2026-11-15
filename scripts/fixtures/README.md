@@ -77,3 +77,23 @@ easier raised cosine 0.5.
 adapters' production command lines, and `tests/integration/dsd-fme-margin.test.ts`
 measures dsd-fme's frame and symbol error rates against CNR and carrier frequency error with them (`fmCu8` keys the carrier with an `envelope` for TDMA bursts); `tests/mocks/fixtures/synthetic/` holds the
 decoder output they produced, replayed by `tests/unit/decoders/synthetic-decoder-lines.test.ts`.
+
+## Transmission plans (digital voice capture)
+
+The generators above are kind to the decoder: settle bursts, duplicate headers and a
+0.1 s lead before each transmission. `dv-plan.mjs` is not. `transmissionPlan(overs,
+{ protocol })` lays out overs `{ startMs, durationMs, slot?, ids? }` with a true key-up
+and key-down, carrier off (noise only) between them, for DMR, D-STAR, YSF, P25, NXDN48
+and dPMR. DMR runs direct (one keyed burst per 60 ms) or through a repeater (CACH, idle
+slot, `hangMs` of idles after an over). A DMR over can start mid-superframe
+(`lateEntry`) or lose its terminator (`terminator: false`). The other generators take
+`coldKeyUp: true` for the same key-up, and their defaults are unchanged. The plan is the
+truth: it returns each over as sent (start, end, slot, identities, checked frames), and
+`DV_SCENES` lists the scenes of the capture grid.
+
+`tests/integration/dv-capture.test.ts` feeds the scenes through wavekit-chan, sox and
+dsd-fme at real time and scores the adapter's calls per over (`WAVEKIT_DVCAP=1`, in the
+core image). `dv-latency-seeds.mjs` writes the line timings the truth scorecard's
+digital voice scenes replay (`tests/mocks/fixtures/synthetic/dv-latency-*.json`). They
+are provisional: they model the current adapter's inputs, not a recorded run. A capture
+run with `WAVEKIT_DVCAP_LINES=<dir>` writes recorded ones in the same format.
