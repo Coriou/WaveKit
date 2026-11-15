@@ -12,6 +12,8 @@
  * - pager-twin and pager-analog: the live pager shape, bursts whose spectrum reads analog FM, two
  *   capcodes on one channel, on a quiet band (a co-channel twin) and on a busy one (decoded late)
  *   (pagerAnalog).
+ * - pager-new-twin: a new capcode's first pages on a paging channel already decoded
+ *   (pagerNewTwin).
  * - dmr: a DMR repeater keyed for 20 s (both slots, continuous 4FSK) with an always-on dsd-fme
  *   decode every 2 s from 1.5 s after its onset, and a direct-mode handheld conversation (TDMA
  *   bursts, seven overs of 3 to 4 s) that only identify's replays decode.
@@ -269,12 +271,59 @@ function pagerAnalog(busy: boolean): TruthCase {
 	return syntheticCase(s, intervals, [])
 }
 
+/**
+ * A new capcode on a known paging channel (pager-new-twin): capcode A pages three times at
+ * 20 dB, each read by an always-on pager decoder, then capcode B, never paged before, pages twice at
+ * 14 dB, under the create SNR (DQ_CREATE_SNR_DB 18), so its first observation may wait for
+ * admission (pending) and the recorder can see it before its discovery exists: B's bursts are
+ * the fresh twin's, and the channel's pages say they are not voice.
+ */
+export const PAGER_NEW_TWIN_CAPCODES = ["2345671", "2345672"] as const
+const PAGER_NEW_TWIN_OFFSET_HZ = 118_750
+
+function pagerNewTwin(): TruthCase {
+	const at = (startMs: number) => ({ startMs, endMs: startMs + 4_000 })
+	const s = scene("pager-new-twin", 70_000, 20_261_207, [
+		{
+			class: "pocsag-shaped",
+			offsetHz: PAGER_NEW_TWIN_OFFSET_HZ,
+			snrDb: 20,
+			intervals: [at(2_000), at(14_000), at(26_000)],
+		},
+		{
+			class: "pocsag-shaped",
+			offsetHz: PAGER_NEW_TWIN_OFFSET_HZ,
+			snrDb: 14,
+			intervals: [at(40_000), at(55_000)],
+		},
+	])
+	const intervals = truthOf(s).map(iv =>
+		iv.frequencyHz === CENTRE_HZ + PAGER_NEW_TWIN_OFFSET_HZ
+			? {
+					...iv,
+					identity: PAGER_NEW_TWIN_CAPCODES[iv.startMs < 40_000 ? 0 : 1]!,
+				}
+			: iv,
+	)
+	// An always-on pager decoder (ambient) reads capcode A's pages 1.5 s into each: the
+	// channel's pager evidence, before capcode B's twin exists.
+	const decodes: TruthDecode[] = [2_000, 14_000, 26_000].map(startMs => ({
+		atMs: startMs + 1_500,
+		frequencyHz: CENTRE_HZ + PAGER_NEW_TWIN_OFFSET_HZ,
+		protocol: "pocsag",
+		via: "ambient",
+		identity: PAGER_NEW_TWIN_CAPCODES[0],
+	}))
+	return syntheticCase(s, intervals, decodes)
+}
+
 /** Every synthetic case, in a fixed order. */
 export function syntheticCases(): TruthCase[] {
 	return [
 		pagerLate(),
 		pagerAnalog(false),
 		pagerAnalog(true),
+		pagerNewTwin(),
 		dmr(),
 		noiseFm(),
 		voice(),

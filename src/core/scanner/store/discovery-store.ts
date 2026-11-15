@@ -48,10 +48,11 @@ import {
 } from "@wavekit/api-types"
 import { familyOf, steadyLine } from "../classify/classifier.js"
 import { notAnalogVoiceProtocol } from "../channel/voice-veto.js"
-import type {
-	DigitalProof,
-	OwnerDecode,
-	VoicePrior,
+import {
+	OWNER_DEDICATED_PRIOR_TTL_MS,
+	type DigitalProof,
+	type OwnerDecode,
+	type VoicePrior,
 } from "../channel/recording-verdict.js"
 import { hintOf } from "../classify/hint.js"
 import type { DiscoveryCompact } from "@wavekit/api-types"
@@ -512,6 +513,8 @@ const OWNER_DECODES_MAX = 4096
  * cached proof reads, lazily, only when a digital prior would otherwise apply.
  */
 const CHANNEL_VOICE_SCAN_MAX = 64
+/** The most of a discovery's sources seedChannel reads the channel's discoveries on. */
+const CHANNEL_KEY_SOURCES_MAX = 4
 const MEDIAN_WINDOW = 64
 const MAX_FLAGGED_IDS = 4096
 /**
@@ -3009,20 +3012,85 @@ export class DiscoveryStore
 	 */
 	private readonly ownerDecodes = new Map<string, OwnerDecode>()
 	/**
-	 * The same decodes per channel (channelKey: the owner's first source and frequency key, the
-	 * key co-channel twins share), newest time per protocol (VoicePrior.channelDecodes): a paging
+	 * The same decodes per channel (the owner's frequency key, the key co-channel twins share,
+	 * whatever the source: a twin first heard on another source, after a retune or a source change,
+	 * reads the same channel), newest time per protocol (VoicePrior.channelDecodes): a paging
 	 * channel holds one discovery per capcode and its links need not join every twin to every
 	 * other. At most OWNER_DECODES_MAX channels (oldest written dropped first) × the protocols
-	 * decoded on each (a handful). Memory only. An owner whose frequency key changes leaves its
-	 * entries under the old key (read no more), so the prior errs weaker, never stronger.
+	 * decoded on each (a handful). Memory only, rebuilt after a restart from the kept decodes
+	 * (seedChannel). An owner whose frequency key changes leaves its entries under the old key
+	 * (read no more), so the prior errs weaker, never stronger.
 	 */
 	private readonly channelDecodes = new Map<
 		string,
 		Map<ScannerProtocol, number>
 	>()
+	/**
+	 * Frequency keys seedChannel has read since this store was made (at most OWNER_DECODES_MAX,
+	 * oldest dropped first): each is read once per process unless dropped.
+	 */
+	private readonly channelSeeded = new Set<string>()
 
-	private channelKey(d: Discovery): string {
-		return `${d.sourceIds[0] ?? ""}\u0000${d.frequencyKey}`
+	/** Notes a decode of `protocol` at `at` on channel `key` (channelDecodes), bounded. */
+	private noteChannelDecode(
+		key: string,
+		protocol: ScannerProtocol,
+		at: number,
+	): void {
+		const byProtocol =
+			this.channelDecodes.get(key) ?? new Map<ScannerProtocol, number>()
+		byProtocol.set(protocol, Math.max(byProtocol.get(protocol) ?? at, at))
+		this.channelDecodes.delete(key)
+		this.channelDecodes.set(key, byProtocol)
+		const oldest = this.channelDecodes.keys().next()
+		if (this.channelDecodes.size > OWNER_DECODES_MAX && oldest.done !== true)
+			this.channelDecodes.delete(oldest.value)
+	}
+
+	/**
+	 * Rebuilds the memo (channelDecodes) of `d`'s channel from the store after a restart, once:
+	 * the memo is memory only, so a restarted process would read a paging channel's prior from its
+	 * published labels alone, often days old while the channel pages hourly. With no entry yet for
+	 * `d`'s frequency key and not seeded since this store was made, reads the decoded proofs (a
+	 * decode of a protocol not analog voice) of the kept observations of the channel's discoveries
+	 * on each of `d`'s sources (atKey, newest seen first, at most CHANNEL_KEY_SOURCES_MAX sources
+	 * and CHANNEL_VOICE_SCAN_MAX discoveries in all) and notes the newest per protocol. Only what
+	 * the memo's reader could still use is read (it judges age by OWNER_DEDICATED_PRIOR_TTL_MS,
+	 * 24 h): the walk stops at the first discovery last seen longer ago than that (atKey is newest
+	 * first, so the rest are older), and an observation last seen (its end, else its start) longer
+	 * ago is skipped before its proof is assessed. So at most 64 discoveries seen in the last 24 h
+	 * × OBSERVATIONS_PER_DISCOVERY 256 of their observations seen in it = 16 384 proof reads, once
+	 * per channel per process, and a restarted core's quiet channels cost one atKey read. Only
+	 * `d`'s own sources are read: a pager decoded only on another source of the channel is not
+	 * re-seeded after a restart (the prior errs weaker, never stronger).
+	 */
+	private seedChannel(d: Discovery): void {
+		const key = d.frequencyKey
+		if (this.channelDecodes.has(key) || this.channelSeeded.has(key)) return
+		this.channelSeeded.add(key)
+		if (this.channelSeeded.size > OWNER_DECODES_MAX) {
+			const oldest = this.channelSeeded.keys().next()
+			if (oldest.done !== true) this.channelSeeded.delete(oldest.value)
+		}
+		const cutoff = this.now() - OWNER_DEDICATED_PRIOR_TTL_MS
+		let budget = CHANNEL_VOICE_SCAN_MAX
+		for (const source of d.sourceIds.slice(0, CHANNEL_KEY_SOURCES_MAX))
+			for (const twin of this.atKey(source, key)) {
+				if (!(Date.parse(twin.lastSeenAt) >= cutoff)) break
+				if (budget-- <= 0) return
+				for (const o of this.byDiscovery.get(twin.id) ?? []) {
+					if (!(Date.parse(o.endedAt ?? o.startedAt) >= cutoff)) continue
+					const proof = this.observationAssessment(o).proof
+					if (
+						proof?.kind !== "decoded" ||
+						!notAnalogVoiceProtocol(proof.protocol)
+					)
+						continue
+					const at = Date.parse(proof.at)
+					if (Number.isFinite(at))
+						this.noteChannelDecode(key, proof.protocol, at)
+				}
+			}
 	}
 
 	private noteOwnerDecode(discoveryId: string, ev: DecodeEvidence): void {
@@ -3035,20 +3103,8 @@ export class DiscoveryStore
 			return
 		const owner = this.folderOwner(discoveryId) ?? discoveryId
 		const d = this.discoveries.get(owner)
-		if (d !== undefined) {
-			const key = this.channelKey(d)
-			const byProtocol =
-				this.channelDecodes.get(key) ?? new Map<ScannerProtocol, number>()
-			byProtocol.set(
-				ev.protocol,
-				Math.max(byProtocol.get(ev.protocol) ?? ev.at, ev.at),
-			)
-			this.channelDecodes.delete(key)
-			this.channelDecodes.set(key, byProtocol)
-			const oldest = this.channelDecodes.keys().next()
-			if (this.channelDecodes.size > OWNER_DECODES_MAX && oldest.done !== true)
-				this.channelDecodes.delete(oldest.value)
-		}
+		if (d !== undefined)
+			this.noteChannelDecode(d.frequencyKey, ev.protocol, ev.at)
 		const prev = this.ownerDecodes.get(owner)
 		if (prev !== undefined && prev.at > ev.at) return
 		this.ownerDecodes.delete(owner)
@@ -4165,9 +4221,12 @@ export class DiscoveryStore
 	 * proof of each of the owner's kept observations (digitalProofs), and `digitalSeenAt` the time
 	 * of its latest digital evidence (digitalSeenAt), `tdmaSeenAt` that of its newest `tdma-ms`
 	 * vote (tdmaSeenAt). `ownerDecode` is the owner's ownerDecodes memo entry, `channelDecodes` the
-	 * owner's channel's (channelDecodes: newest per protocol) and those of the co-channel
-	 * discoveries above (1 + at most 8 map reads): the channel's pager prior.
-	 * Undefined for a folder nobody owns. Reads only.
+	 * owner's channel's (channelDecodes by its frequency key, any source: newest per protocol;
+	 * rebuilt once per channel after a restart, seedChannel) and those of the co-channel
+	 * discoveries above (1 + at most 8 map reads): the channel's pager prior, a new twin's from
+	 * its first read, before any link of its own. `channelObservation` says an observation (by id;
+	 * one map read and folderOwner) is of the owner or of one of those co-channel discoveries.
+	 * Undefined for a folder nobody owns. Reads only (but the memo's one-time rebuild).
 	 */
 	voicePrior(folderId: string): VoicePrior | undefined {
 		const owner = this.folderOwner(folderId)
@@ -4199,8 +4258,10 @@ export class DiscoveryStore
 				},
 			]
 		})
+		this.seedChannel(d)
 		return {
 			id: d.id,
+			partnerIds: ids.slice(1),
 			labels,
 			class: d.class,
 			classVotes: () => {
@@ -4216,7 +4277,7 @@ export class DiscoveryStore
 			},
 			ownerDecode: this.ownerDecodes.get(d.id) ?? null,
 			channelDecodes: [
-				...[...(this.channelDecodes.get(this.channelKey(d)) ?? [])].map(
+				...[...(this.channelDecodes.get(d.frequencyKey) ?? [])].map(
 					([protocol, at]) => ({ protocol, at }),
 				),
 				...ids.slice(1).flatMap(id => {
@@ -4224,6 +4285,12 @@ export class DiscoveryStore
 					return e === undefined ? [] : [e]
 				}),
 			],
+			// A joined observation of the owner or a listed partner (its live owner: merges).
+			channelObservation: observationId => {
+				const of = this.observationIndex.get(observationId)?.discoveryId
+				if (of === undefined) return false
+				return ids.includes(this.folderOwner(of) ?? of)
+			},
 			digitalProofs: () => this.digitalProofs(d.id),
 			digitalSeenAt: () => this.digitalSeenAt(d.id),
 			tdmaSeenAt: () => this.tdmaSeenAt(d.id),

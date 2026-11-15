@@ -9,10 +9,11 @@
  * - TRIAL_MEMORY_MAX_TRIALS = 16 trials per discovery: twice IQ_REPLAY_MAX_TRIALS (8), so two full
  *   plans of distinct trials fit; at the cap the least recently updated trial is dropped.
  * - TRIAL_MEMORY_MAX_DISCOVERIES = 2 048 discoveries; at the cap the least recently updated
- *   discovery is dropped. One serialised trial is at most about 160 B (protocol ≤ 15 chars,
- *   decoder ≤ 32 chars, outcome ≤ 13 chars, four integers ≤ 16 digits, keys), one discovery id at
- *   most 128 B, so the file is at most 2 048 × (128 + 16 × 160) B = 5 505 024 B ≈ 5.3 MiB; the
- *   loader refuses a file above TRIAL_MEMORY_FILE_MAX_BYTES = 8 MiB without parsing it.
+ *   discovery is dropped. One serialised trial is at most about 184 B (protocol ≤ 15 chars,
+ *   decoder ≤ 32 chars, outcome ≤ 13 chars, four integers ≤ 16 digits, the optional
+ *   `syllabicMisses` ≤ 7 digits, keys), one discovery id at most 128 B, so the file is at most
+ *   2 048 × (128 + 16 × 184) B = 6 291 456 B = 6 MiB; the loader refuses a file above
+ *   TRIAL_MEMORY_FILE_MAX_BYTES = 8 MiB without parsing it.
  * - Counters saturate at TRIAL_MEMORY_COUNT_MAX = 1 000 000 (no overflow, still "many").
  * - Backoff after k consecutive failures: TRIAL_BACKOFF_BASE_MS × 2^(k−1), capped at
  *   TRIAL_BACKOFF_MAX_MS: 60 s, 120 s, 240 s, …, 3 840 s → 3 600 s from k = 7 on.
@@ -74,6 +75,13 @@ export interface TrialMemoryEntry {
 	lastAt: number
 	/** Time of the last success; absent when it never succeeded. */
 	lastDecodedAt?: number
+	/**
+	 * Failed attempts of an analog trial that still saw speech-like modulation
+	 * (analog-trial.ts syllabicHeard: a run of ANALOG_TRIAL_SYLLABIC_RUN_FRAMES consecutive syllabic
+	 * frames or more);
+	 * absent: none. At most `attempts − decoded`.
+	 */
+	syllabicMisses?: number
 }
 
 const count = z.number().int().min(0).max(TRIAL_MEMORY_COUNT_MAX)
@@ -96,9 +104,15 @@ const EntrySchema = z
 		]),
 		lastAt: time,
 		lastDecodedAt: time.optional(),
+		syllabicMisses: count.optional(),
 	})
 	.strict()
-	.refine(e => e.decoded <= e.attempts && e.consecutiveFailures <= e.attempts)
+	.refine(
+		e =>
+			e.decoded <= e.attempts &&
+			e.consecutiveFailures <= e.attempts &&
+			e.decoded + (e.syllabicMisses ?? 0) <= e.attempts,
+	)
 const FileSchema = z
 	.object({
 		version: z.literal(1),
@@ -144,11 +158,14 @@ export function parseTrialMemory(
 			const key = trialKey(e.data.protocol, e.data.decoder)
 			if (seen.has(key)) continue
 			seen.add(key)
-			const { lastDecodedAt, ...rest } = e.data
+			const { lastDecodedAt, syllabicMisses, ...rest } = e.data
 			entries.push({
 				...rest,
 				protocol: rest.protocol as ScannerProtocol,
 				...(lastDecodedAt !== undefined ? { lastDecodedAt } : {}),
+				...(syllabicMisses !== undefined && syllabicMisses > 0
+					? { syllabicMisses }
+					: {}),
 			})
 		}
 		if (entries.length > 0) out.set(id, entries)
@@ -187,12 +204,15 @@ export class TrialMemory {
 	/**
 	 * One replay trial outcome of the discovery. Outcomes that are no attempt (pending, running,
 	 * cancelled, skipped-budget, unsupported, not-needed) and malformed input change nothing.
+	 * `syllabic` (absent: false) says the trial saw speech-like modulation (analog-trial.ts
+	 * syllabicHeard); a failed attempt with it counts in `syllabicMisses`.
 	 */
 	record(
 		discoveryId: string,
 		protocol: ScannerProtocol,
 		decoder: string,
 		outcome: string,
+		syllabic = false,
 	): boolean {
 		if (
 			typeof discoveryId !== "string" ||
@@ -214,11 +234,18 @@ export class TrialMemory {
 		const key = trialKey(protocol, decoder)
 		const index = list.findIndex(e => trialKey(e.protocol, e.decoder) === key)
 		const prev = index >= 0 ? list.splice(index, 1)[0] : undefined
+		const attempts = sat((prev?.attempts ?? 0) + 1)
+		const decoded = sat((prev?.decoded ?? 0) + (success ? 1 : 0))
+		// Capped so decoded + syllabicMisses never exceeds attempts (saturated counters included).
+		const misses = Math.min(
+			(prev?.syllabicMisses ?? 0) + (!success && syllabic ? 1 : 0),
+			attempts - decoded,
+		)
 		const next: TrialMemoryEntry = {
 			protocol,
 			decoder,
-			attempts: sat((prev?.attempts ?? 0) + 1),
-			decoded: sat((prev?.decoded ?? 0) + (success ? 1 : 0)),
+			attempts,
+			decoded,
 			consecutiveFailures: success
 				? 0
 				: sat((prev?.consecutiveFailures ?? 0) + 1),
@@ -229,6 +256,7 @@ export class TrialMemory {
 				: prev?.lastDecodedAt !== undefined
 					? { lastDecodedAt: prev.lastDecodedAt }
 					: {}),
+			...(misses > 0 ? { syllabicMisses: misses } : {}),
 		}
 		list.push(next)
 		while (list.length > TRIAL_MEMORY_MAX_TRIALS) list.shift()
@@ -240,6 +268,30 @@ export class TrialMemory {
 		}
 		this.schedule()
 		return true
+	}
+
+	/**
+	 * The discovery's analog FM replay trials (protocol `analog-fm`, decoder `analog-demod`): how
+	 * often they ran, how often they succeeded (`decoded` counts `heard` too: speech or a tone
+	 * was heard) and how many failed ones still saw speech-like modulation (`syllabic`:
+	 * TrialMemoryEntry.syllabicMisses); null when none is remembered. Reads only
+	 * (recording-verdict.ts analogTrialsHeard).
+	 */
+	analogFmTrials(discoveryId: string): {
+		readonly attempts: number
+		readonly decoded: number
+		readonly syllabic: number
+	} | null {
+		const e = (this.byDiscovery.get(discoveryId) ?? []).find(
+			x => x.protocol === "analog-fm" && x.decoder === "analog-demod",
+		)
+		return e === undefined
+			? null
+			: {
+					attempts: e.attempts,
+					decoded: e.decoded,
+					syllabic: e.syllabicMisses ?? 0,
+				}
 	}
 
 	forget(discoveryId: string): void {

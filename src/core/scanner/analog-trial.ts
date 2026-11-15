@@ -48,6 +48,49 @@ export function isVoice(stats: AnalogTrialStats): boolean {
 }
 
 /**
+ * Consecutive syllabic frames one analog trial must hold for the recorder's no-voice channel rule
+ * to count it as heard whatever its own outcome (recording-verdict.ts noVoiceChannel): 3, i.e. an
+ * unbroken 150 ms of speech-like envelope (ANALOG_TRIAL_FRAME_MS = 50) in at most 80 frames (4 s),
+ * as a syllable produces. A run, not a count: open-squelch noise scatters single frames over the
+ * index, and one such trial would end the rule for the channel for good (the heard count never
+ * decays). No audio-level condition: the weak, distant repeater this protects is low-audio.
+ */
+export const ANALOG_TRIAL_SYLLABIC_RUN_FRAMES = 3
+
+/**
+ * The trial's longest run of consecutive frames whose syllabic index meets
+ * ANALOG_TRIAL_VOICE_INDEX (at most ANALOG_TRIAL_MAX_FRAMES). Missing statistics count nothing; a
+ * missing, non-number or non-finite frame breaks the run.
+ */
+export function syllabicRun(
+	stats: AnalogTrialStats | null | undefined,
+): number {
+	const frames = framesOf(stats)
+	if (frames === null) return 0
+	let run = 0
+	let longest = 0
+	for (const frame of frames) {
+		const s = (frame as { syllabic?: unknown } | null | undefined)?.syllabic
+		if (
+			typeof s === "number" &&
+			Number.isFinite(s) &&
+			s >= ANALOG_TRIAL_VOICE_INDEX
+		) {
+			run += 1
+			if (run > longest) longest = run
+		} else run = 0
+	}
+	return longest
+}
+
+/** The trial held ANALOG_TRIAL_SYLLABIC_RUN_FRAMES consecutive syllabic frames or more (syllabicRun). */
+export function syllabicHeard(
+	stats: AnalogTrialStats | null | undefined,
+): boolean {
+	return syllabicRun(stats) >= ANALOG_TRIAL_SYLLABIC_RUN_FRAMES
+}
+
+/**
  * Decision order: a qualified CTCSS tone or DCS code, then a discrete discriminator, then FM quieting (AM:
  * carrier above the capture floor) with voice, otherwise a bare carrier. No frames, a malformed tone, or a
  * non-finite statistic is `no-sync`.

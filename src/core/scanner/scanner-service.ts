@@ -164,6 +164,8 @@ import { digitalClass, ownerDecoded } from "./channel/voice-veto.js"
 import { narrowRasterAt } from "./narrow-digital.js"
 import { planReplayTrials } from "./replay-plan.js"
 import { TrialMemory, type TrialMemoryEntry } from "./trial-memory.js"
+import { syllabicHeard } from "./analog-trial.js"
+import { analogTrialsHeard } from "./channel/recording-verdict.js"
 import { PendingCaptureLimiter, admittedAtClose } from "./pending-capture.js"
 import {
 	replayTrialWeight,
@@ -1635,8 +1637,24 @@ export class ScannerService extends EventEmitter {
 				// The decoded label (and its decode's time) of a discovery, or of the live one it
 				// was merged into.
 				decodedLabel: discoveryId => ownerDecoded(this.store, discoveryId),
-				// Its standing prior (any time; co-channel included): refuses, holds or keeps a file.
-				voicePrior: discoveryId => this.store.voicePrior(discoveryId) ?? null,
+				// Its standing prior (any time; co-channel included): refuses, holds or keeps a file,
+				// with the owner's analog FM replay trials (a channel they never heard voice on).
+				voicePrior: discoveryId => {
+					const prior = this.store.voicePrior(discoveryId)
+					if (prior === undefined) return null
+					const owner = prior.id ?? discoveryId
+					return {
+						...prior,
+						// The owner's trials; a linked co-channel partner's trial that heard counts.
+						analogTrials: () =>
+							analogTrialsHeard(
+								this.trialMemory.analogFmTrials(owner),
+								(prior.partnerIds ?? []).map(id =>
+									this.trialMemory.analogFmTrials(id),
+								),
+							),
+					}
+				},
 				logger: deps.logger,
 				now: this.now,
 			})
@@ -6711,12 +6729,16 @@ export class ScannerService extends EventEmitter {
 				: undefined) ??
 			fallback
 		if (!discoveryId) return
+		// The analog trial's frames: a failed one that saw speech-like modulation is remembered
+		// (analog-trial.ts syllabicHeard; recording-verdict.ts analogTrialsHeard).
+		const syllabic = syllabicHeard(result.analog?.stats)
 		for (const t of result.trials)
 			this.trialMemory.record(
 				discoveryId,
 				t.protocol,
 				t.mode !== undefined ? "analog-demod" : t.decoderType,
 				t.outcome,
+				t.mode !== undefined && syllabic,
 			)
 	}
 

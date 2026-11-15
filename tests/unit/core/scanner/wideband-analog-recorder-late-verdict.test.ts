@@ -1048,3 +1048,187 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 		expect(codes(h)).not.toContain("discarded:not-speech")
 	}, 120_000)
 })
+
+describe("a capcode twin admitted before its discovery is known", () => {
+	// Feature: recording-verdict, the per-channel pager prior (docs/SCANNER.md, "Known digital or paging channels").
+	/** The prior only a known discovery reads: a pager channel (the channel memo). */
+	const channelPager = (id: string): VoicePrior | null =>
+		id === "d_1" ? pocsagDecoded : null
+
+	it("its first burst, tracked with no discovery and bound to a pager channel's twin at its close: nothing written", async () => {
+		const h = low(channelPager)
+		await h.feed(1, false)
+		await over(h, "o", 4, { discoveryId: null })
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(codes(h)).toContain("discarded:known-non-voice")
+	}, 120_000)
+
+	it("FROZEN: speech over a CTCSS tone admitted the same way: kept", async () => {
+		const h = low(channelPager, 88.5, { syllables: true })
+		await h.feed(1, false)
+		await over(h, "o", 6, { discoveryId: null })
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+
+	it("no prior on the discovery it binds to: kept as before", async () => {
+		const h = low(() => null)
+		await h.feed(1, false)
+		await over(h, "o", 4, { discoveryId: null })
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+})
+
+describe("a no-voice channel: 52 analog trials, none heard, no analog proof", () => {
+	// Feature: recording-verdict, channels whose trials never heard voice (docs/SCANNER.md).
+	const noVoice = (heardN = 0, analogVoice = false): VoicePrior => ({
+		...prior({ class: "analog-fm", analogVoice }),
+		analogTrials: () => ({ attempts: 52, decoded: heardN }),
+	})
+	/**
+	 * One analog-fm over of `seconds` of 4FSK data (it passes the voice gate and measures as no
+	 * speech: what the no-voice channels' noise files look like to the check), closed, then quiet.
+	 */
+	async function noiseOver(h: Harness, seconds: number): Promise<void> {
+		const fsk = new FskSource({
+			fs: h.fs,
+			offsetHz: LOW_OFFSET,
+			levelsHz: [-1_944, -648, 648, 1_944],
+		})
+		const chunk = h.fs / 40
+		/** `n` chunks of the data carrier, the over tracked while `track`. */
+		const data = async (n: number, track: boolean): Promise<void> => {
+			for (let i = 0; i < n; i++) {
+				h.engine.write(fsk.next(chunk, true))
+				const edge = h.engine.liveEdge()
+				if (track && edge - onset >= 0.1 * h.fs)
+					h.rec.track(
+						input("o", snapshot("o", onset, Math.min(edge, end), LOW)),
+					)
+				await h.pump()
+			}
+		}
+		// The carrier is up before and after the track (its pre-roll and hang are the same data).
+		let onset = 0
+		let end = 0
+		await data(40, false)
+		onset = h.engine.liveEdge()
+		end = onset + seconds * h.fs
+		await data(seconds * 40, true)
+		await data(24, false)
+		h.rec.closed("o", snapshot("o", onset, end, LOW), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		await data(140, false)
+	}
+
+	for (const seconds of [2, 4, 9])
+		it(`a ${seconds} s file with no speech in it: discarded (not speech), at once`, async () => {
+			const h = low(() => noVoice())
+			await noiseOver(h, seconds)
+			await h.rec.idle()
+			expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+			expect(codes(h)).toContain("discarded:not-speech")
+			expect(h.timers).toHaveLength(0)
+		}, 120_000)
+
+	it("FROZEN: a speech-like over (syllables) on that channel: kept", async () => {
+		const h = low(() => noVoice(), null, { syllables: true })
+		await h.feed(1, false)
+		await over(h, "o", 3)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+
+	it("FROZEN: speech over a CTCSS tone on that channel: kept", async () => {
+		const h = low(() => noVoice(), 88.5, { syllables: true })
+		await h.feed(1, false)
+		await over(h, "o", 3)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+
+	/**
+	 * noiseOver with a second burst of the same carrier tracked as observation `j` (classed
+	 * analog-fm by its snapshot, joined to the session) in the middle of the over: a busy channel's
+	 * next burst. `channelObservation` says whether `j` is the channel's own.
+	 */
+	async function joinedNoiseOver(h: Harness, seconds: number): Promise<void> {
+		const fsk = new FskSource({
+			fs: h.fs,
+			offsetHz: LOW_OFFSET,
+			levelsHz: [-1_944, -648, 648, 1_944],
+		})
+		const chunk = h.fs / 40
+		let onset = 0
+		let end = 0
+		let jOnset = 0
+		const data = async (n: number, track: boolean): Promise<void> => {
+			for (let i = 0; i < n; i++) {
+				h.engine.write(fsk.next(chunk, true))
+				const edge = h.engine.liveEdge()
+				if (track && edge - onset >= 0.1 * h.fs)
+					h.rec.track(
+						input("o", snapshot("o", onset, Math.min(edge, end), LOW)),
+					)
+				if (track && edge - onset >= h.fs) {
+					if (jOnset === 0) jOnset = edge
+					h.rec.track(input("j", snapshot("j", jOnset, edge, LOW)))
+				}
+				await h.pump()
+			}
+		}
+		await data(40, false)
+		onset = h.engine.liveEdge()
+		end = onset + seconds * h.fs
+		await data(seconds * 40, true)
+		await data(24, false)
+		h.rec.closed("j", snapshot("j", jOnset, end, LOW), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		h.rec.closed("o", snapshot("o", onset, end, LOW), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		await data(140, false)
+	}
+
+	it("a joined burst of the channel itself (its own spectral analog-fm class) does not exempt the file: discarded", async () => {
+		const h = low(() => ({ ...noVoice(), channelObservation: () => true }))
+		await joinedNoiseOver(h, 4)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(codes(h)).toContain("discarded:not-speech")
+	}, 120_000)
+
+	it("FROZEN: a joined observation of another discovery (another transmission's voice) keeps the file", async () => {
+		const h = low(() => ({ ...noVoice(), channelObservation: () => false }))
+		await joinedNoiseOver(h, 4)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+
+	it("one stray heard trial of 52 (under 2 heard): still a no-voice channel, the file is discarded", async () => {
+		const h = low(() => noVoice(1))
+		await noiseOver(h, 4)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(codes(h)).toContain("discarded:not-speech")
+	}, 120_000)
+
+	for (const [name, p] of [
+		["two trials heard (2 of 52, over 2 %)", noVoice(2)],
+		["analog proof on the channel", noVoice(0, true)],
+		["no trial memory (a fresh channel)", prior({ class: "analog-fm" })],
+	] as const)
+		it(`${name}: the same file is kept`, async () => {
+			const h = low(() => p)
+			await noiseOver(h, 4)
+			await h.rec.idle()
+			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		}, 120_000)
+})

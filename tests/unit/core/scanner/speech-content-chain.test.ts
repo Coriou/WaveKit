@@ -19,6 +19,7 @@ import {
 	SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE,
 	SPEECH_STEADY_MAX_RANGE_DB,
 	SpeechContentMeter,
+	speechHeard,
 	type SpeechContent,
 } from "../../../../src/core/scanner/channel/speech-content.js"
 import {
@@ -187,4 +188,118 @@ describe("speech-content: the burst veto on the NFM chain (clearlyNoise only)", 
 		expect(r.maxBurstFrames).toBeLessThan(SPEECH_NOISE_MAX_BURST_FRAMES)
 		expect(clearlyNoise(r)).toBe(true)
 	}, 60_000)
+})
+
+describe("speechHeard: a short file of a no-voice channel must show speech (any length)", () => {
+	// Feature: recording-verdict, channels whose trials never heard voice (docs/SCANNER.md).
+	/** The first `seconds` of one 3 s chain run of `signal` (an over starts with its voice). */
+	async function heard(
+		signal: ContentSignal,
+		seconds: number,
+	): Promise<boolean> {
+		const pcm = await pcmOf(signal)
+		const n =
+			Math.round((seconds * 8_000) / SPEECH_FRAME_SAMPLES) *
+			SPEECH_FRAME_SAMPLES
+		return speechHeard(measure(pcm.subarray(0, n)))
+	}
+	const runs = new Map<string, Int16Array>()
+	async function pcmOf(signal: ContentSignal): Promise<Int16Array> {
+		const key = JSON.stringify(signal)
+		const hit = runs.get(key)
+		if (hit !== undefined) return hit
+		await yieldToLoop()
+		const pcm = contentAudio(signal, 3)
+		runs.set(key, pcm)
+		return pcm
+	}
+	it("hard speech (HARD_SPEECH_CASES, CNR 5 to 10 dB): heard at 1.5 and 3 s", async () => {
+		for (const c of HARD_SPEECH_CASES)
+			for (const seconds of [1.5, 3])
+				expect(await heard(c.signal, seconds), `${c.name} ${seconds} s`).toBe(
+					true,
+				)
+	}, 600_000)
+	it("plain speech at a CNR of 5 dB or more: heard from 1 s", async () => {
+		for (const cnrDb of [5, 6, 10, 30])
+			for (const pauses of ["short", "none"] as const)
+				for (const seconds of [1, 2, 3])
+					expect(
+						await heard(
+							{ waveform: { kind: "speech", pauses }, cnrDb },
+							seconds,
+						),
+						`${pauses} ${cnrDb} dB ${seconds} s`,
+					).toBe(true)
+	}, 600_000)
+	it("a single 0.3 to 0.5 s word on a quiet carrier, and sparse words: heard by their burst", async () => {
+		for (const cnrDb of [6, 10, 20, 30]) {
+			for (const wordS of [0.3, 0.5])
+				expect(
+					await heard(
+						{
+							waveform: { kind: "speech", pauses: "none", wordAtS: 0.3, wordS },
+							cnrDb,
+						},
+						2,
+					),
+					`word ${wordS} s ${cnrDb} dB`,
+				).toBe(true)
+			expect(
+				await heard(
+					{
+						waveform: {
+							kind: "speech",
+							pauses: "none",
+							words: [
+								[0.2, 0.3],
+								[1.2, 0.4],
+								[2.2, 0.35],
+							],
+						},
+						cnrDb,
+					},
+					3,
+				),
+				`sparse ${cnrDb} dB`,
+			).toBe(true)
+		}
+	}, 600_000)
+	it("open-squelch noise, an unmodulated carrier and 4FSK: not heard (1.5 and 3 s)", async () => {
+		const quiet: [string, ContentSignal][] = [
+			...[3, 9, 11].map(
+				seed =>
+					[
+						`noise seed ${seed}`,
+						{
+							waveform: { kind: "silent" },
+							cnrDb: 30,
+							carrier: false,
+							seed,
+						},
+					] as [string, ContentSignal],
+			),
+			["carrier 10 dB", { waveform: { kind: "silent" }, cnrDb: 10 }],
+			["carrier 30 dB", { waveform: { kind: "silent" }, cnrDb: 30 }],
+			[
+				"4FSK 20 dB",
+				{
+					waveform: {
+						kind: "fsk",
+						baud: 4_800,
+						levelsHz: [-1_944, -648, 648, 1_944],
+					},
+					cnrDb: 20,
+				},
+			],
+		]
+		for (const [name, signal] of quiet)
+			for (const seconds of [1.5, 3])
+				expect(await heard(signal, seconds), `${name} ${seconds} s`).toBe(false)
+	}, 600_000)
+	it("under 16 frames (0.512 s): nothing measured, not heard", () => {
+		const m = new SpeechContentMeter()
+		m.push(new Int16Array(15 * SPEECH_FRAME_SAMPLES))
+		expect(speechHeard(m.result())).toBe(false)
+	})
 })
