@@ -20,6 +20,9 @@ import { join, resolve } from "node:path"
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import {
 	dmrCallDibits,
+	dmrDirectCallDibits,
+	dmrDirectEnvelope,
+	dmrDirectFrequency,
 	dmrFrequency,
 } from "../../scripts/fixtures/dmr-4fsk.mjs"
 import {
@@ -65,7 +68,17 @@ const list = (name: string) =>
 const CNRS = (list("WAVEKIT_MARGIN_CNR") ?? ["10", "15", "20", "30"]).map(
 	Number,
 )
-const ERRORS_HZ = (list("WAVEKIT_MARGIN_ERROR_HZ") ?? ["0", "1000"]).map(Number)
+const ERRORS_HZ = (
+	list("WAVEKIT_MARGIN_ERROR_HZ") ?? [
+		"0",
+		"300",
+		"-300",
+		"600",
+		"-600",
+		"1000",
+		"-1000",
+	]
+).map(Number)
 const SEEDS = Number(process.env["WAVEKIT_MARGIN_SEEDS"] ?? "3")
 
 const count = (lines: string[], pattern: RegExp) =>
@@ -136,6 +149,16 @@ function signals(): MarginSignal[] {
 			checked: lines =>
 				count(lines, /^ ?SLOT 1 TGT=4321 SRC=1234567 (?!.*ERR)/),
 		},
+		{
+			// A radio to radios: one 27.5 ms burst per 60 ms, carrier off between.
+			name: "DMR (direct)",
+			mode: "auto",
+			freq: dmrDirectFrequency(DMR_CALL),
+			envelope: dmrDirectEnvelope(DMR_CALL),
+			dibits: dmrDirectCallDibits(DMR_CALL),
+			frames: 4 + DMR_SUPERFRAMES,
+			checked: lines => count(lines, /TGT=4321 SRC=1234567 (?!.*ERR)/),
+		},
 		p25Signal("P25 (C4FM)", AIR_SHAPES.p25),
 		// Wider than any standard (the chain tests' easy shaping): how a
 		// transmitter that filters less fares.
@@ -171,28 +194,33 @@ function signals(): MarginSignal[] {
 }
 
 /**
- * Chains compared. "before" is the chain without the receive filter, the
- * base command line (tests/unit/decoders/dsd-fme-filter.test.ts pins it);
- * "after" is today's default. The others document alternatives that were
- * measured: a slow DC blocker for carrier frequency error (sox highpass
- * 2 Hz), dsd-fme without its own input filters (-l), the matched root
- * raised cosine 0.2 at 4800 symbols/s instead of the low-pass (it cut more
- * noise but left YSF a frame error floor on strong signals), and the plain
- * 1.3 kHz low-pass dPMR now uses, for the 2400 symbols/s signals.
+ * Chains compared. "before" is the chain without the carrier frequency
+ * correction (the receive filter only); "after" is today's default, with the
+ * correction in the channelizer (afcMaxHz in the channel request). The others
+ * document alternatives that were measured: no receive filter and no
+ * correction (the base command line, tests/unit/decoders/dsd-fme-filter.test.ts
+ * pins it), a slow DC blocker for carrier frequency error instead of the
+ * correction (sox highpass 2 Hz; it fixed YSF but muted DMR direct-mode
+ * bursts), dsd-fme without its own input filters (-l), the matched root raised
+ * cosine 0.2 at 4800 symbols/s instead of the low-pass (it cut more noise but
+ * left YSF a frame error floor on strong signals), and the plain 1.3 kHz
+ * low-pass dPMR now uses, for the 2400 symbols/s signals.
  */
+const NO_AFC = { carrierCorrection: false }
 const VARIANTS: MarginVariant[] = [
-	{ name: "before", options: { receiveFilter: false } },
+	{ name: "before", options: NO_AFC },
 	{ name: "after", options: {} },
-	{ name: "after+hp2", options: {}, soxEffects: "highpass -1 2" },
+	{ name: "unfiltered", options: { ...NO_AFC, receiveFilter: false } },
+	{ name: "dc-blocker", options: NO_AFC, soxEffects: "highpass -1 2" },
 	{ name: "after-l", options: {}, dsdArgs: ["-l"] },
 	{
 		name: "lp1300",
-		options: { receiveFilter: false },
+		options: { ...NO_AFC, receiveFilter: false },
 		soxEffects: "sinc -t 500 -1300",
 	},
 	{
 		name: "rrc4800",
-		options: { receiveFilter: false },
+		options: { ...NO_AFC, receiveFilter: false },
 		soxEffects: `fir ${receiveFilterTaps(4800, 48_000)
 			.map(t => t.toFixed(7))
 			.join(" ")}`,
@@ -245,7 +273,7 @@ describe.skipIf(
 							)
 		const tables = ERRORS_HZ.map(
 			e =>
-				`### Frequency error ${e} Hz: FER (SER)\n\n${marginTable(points, e)}`,
+				`### Frequency error ${e} Hz: FER (SER) [residual carrier offset]\n\n${marginTable(points, e)}`,
 		).join("\n\n")
 		const out =
 			process.env["WAVEKIT_MARGIN_OUT"] ??

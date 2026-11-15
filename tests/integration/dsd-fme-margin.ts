@@ -9,12 +9,14 @@
  * channel IQ (synthetic-chain.ts runs it, in the core image with
  * WAVEKIT_SYNTH_IMAGE). dsd-fme also writes its symbol decisions (-c).
  *
- * Two numbers per point:
+ * Three numbers per point:
  * - FER: the share of the frames with a CRC- or FEC-checked field that
  *   dsd-fme did not print as checked (frameCount below says which, per
  *   protocol);
  * - SER: dsd-fme's symbol decisions (the -c capture) against the sent
- *   symbols, counted only where the capture is aligned (symbolErrors).
+ *   symbols, counted only where the capture is aligned (symbolErrors);
+ * - the residual carrier offset dsd-fme's input still has (residualHz): it
+ *   shows what a carrier frequency correction did whatever the dsd-fme build.
  */
 import { readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -47,6 +49,8 @@ export interface MarginSignal {
 	/** Adapter mode that decodes it (the catalogue default where it can). */
 	mode: string
 	freq: Float64Array
+	/** Carrier keying (0 to 1) per sample of `freq`, for TDMA bursts; absent: always on. */
+	envelope?: Float64Array
 	/** Sent symbols, dsd-fme's dibit codes (1 = +3, 0 = +1, 2 = -1, 3 = -3). */
 	dibits: number[]
 	/** Frames sent that carry the checked field `checked` counts. */
@@ -80,6 +84,9 @@ export interface MarginPoint {
 	checked: number
 	symbols: number
 	symbolErrors: number
+	/** Sum over the points of residualHz, and of the carrier-on samples it weighs. */
+	residualHz: number
+	carrierSamples: number
 }
 
 /** ANSI colour codes off, as the adapter's parser strips them. */
@@ -199,6 +206,46 @@ export function channelCommand(probe: DsdMarginProbe): {
 	return { head, tail: stages.slice(soxAt), gain: Number(gain) }
 }
 
+/**
+ * Residual carrier offset of channel IQ `cf32` (48 kHz, the signal starting
+ * `leadSamples` in): the mean instantaneous frequency over the second half of
+ * the transmission's carrier-on samples (after any correction has acquired),
+ * minus the sent modulation's own mean there. Returns the mean (Hz) and the
+ * samples it weighs.
+ */
+export function residualOffset(
+	cf32: Buffer,
+	signal: Pick<MarginSignal, "freq" | "envelope">,
+	leadSamples: number,
+	rateHz = 48_000,
+): { hz: number; samples: number } {
+	const n = Math.floor(cf32.length / 8)
+	const on = (j: number) => (signal.envelope?.[j] ?? 1) >= 0.999
+	let total = 0
+	for (let j = 1; j < signal.freq.length; j++) if (on(j)) total++
+	let seen = 0
+	let sum = 0
+	let sent = 0
+	let samples = 0
+	for (let j = 1; j < signal.freq.length && leadSamples + j < n; j++) {
+		if (!on(j) || !on(j - 1) || ++seen <= total / 2) continue
+		const k = leadSamples + j
+		const i = cf32.readFloatLE(8 * k)
+		const q = cf32.readFloatLE(8 * k + 4)
+		const pi = cf32.readFloatLE(8 * (k - 1))
+		const pq = cf32.readFloatLE(8 * (k - 1) + 4)
+		sum += Math.atan2(q * pi - i * pq, i * pi + q * pq)
+		sent += signal.freq[j]!
+		samples++
+	}
+	return samples === 0
+		? { hz: 0, samples: 0 }
+		: {
+				hz: (sum / samples) * (rateHz / (2 * Math.PI)) - sent / samples,
+				samples,
+			}
+}
+
 /** Runs one point through wavekit-chan and the adapter's channel command. */
 export async function measurePoint(
 	chanBinary: string,
@@ -212,6 +259,7 @@ export async function measurePoint(
 		offsetHz: MARGIN_CAPTURE.offsetHz + errorHz,
 		cnrDb,
 		seed,
+		...(signal.envelope === undefined ? {} : { envelope: signal.envelope }),
 	})
 	const request = {
 		...(adapter(signal, variant, "raw").getChannelRequest({
@@ -226,6 +274,8 @@ export async function measurePoint(
 		{ rateHz: MARGIN_CAPTURE.rateHz, centerHz: MARGIN_CENTRE_HZ },
 		[request],
 	)
+	// fmCu8's default lead of noise before the transmission, at the channel rate.
+	const residual = residualOffset(cf32!, signal, Math.round(0.1 * 48_000))
 	const probe = adapter(signal, variant, "channel")
 	const { head, tail, gain } = channelCommand(probe)
 	const dir = workDir(root, "margin")
@@ -275,6 +325,8 @@ export async function measurePoint(
 			checked: Math.min(signal.frames, signal.checked(lines.map(plain))),
 			symbols: ser.symbols,
 			symbolErrors: ser.errors,
+			residualHz: residual.hz * residual.samples,
+			carrierSamples: residual.samples,
 		}
 	} finally {
 		rmSync(dir, { recursive: true, force: true })
@@ -293,6 +345,8 @@ export function aggregate(points: MarginPoint[]): MarginPoint[] {
 			sum.checked += p.checked
 			sum.symbols += p.symbols
 			sum.symbolErrors += p.symbolErrors
+			sum.residualHz += p.residualHz
+			sum.carrierSamples += p.carrierSamples
 		}
 	}
 	return [...byKey.values()]
@@ -301,7 +355,7 @@ export function aggregate(points: MarginPoint[]): MarginPoint[] {
 const percent = (n: number, d: number) =>
 	d === 0 ? "n/a" : `${((100 * n) / d).toFixed(1)} %`
 
-/** Markdown: one row per signal and variant, FER (SER) per CNR column. */
+/** Markdown: one row per signal and variant, FER (SER) [residual offset] per CNR column. */
 export function marginTable(points: MarginPoint[], errorHz: number): string {
 	const rows = aggregate(points).filter(p => p.errorHz === errorHz)
 	const cnrs = [...new Set(rows.map(p => p.cnrDb))].sort((a, b) => a - b)
@@ -318,7 +372,7 @@ export function marginTable(points: MarginPoint[], errorHz: number): string {
 			)
 			return p === undefined
 				? ""
-				: `${percent(p.frames - p.checked, p.frames)} (${percent(p.symbolErrors, p.symbols)})`
+				: `${percent(p.frames - p.checked, p.frames)} (${percent(p.symbolErrors, p.symbols)}) [${p.carrierSamples === 0 ? "n/a" : `${Math.round(p.residualHz / p.carrierSamples)} Hz`}]`
 		})
 		out.push(`| ${signal} | ${variant} | ${cells.join(" | ")} |`)
 	}

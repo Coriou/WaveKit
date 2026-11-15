@@ -156,6 +156,7 @@ export async function channelize(
 						transitionHz: r.transitionHz,
 						outputRateHz: r.outputRateHz,
 						format: r.format,
+						...(r.afcMaxHz === undefined ? {} : { afcMaxHz: r.afcMaxHz }),
 						queueBytes: 64 * 1024 * 1024,
 					}) + "\n",
 				)

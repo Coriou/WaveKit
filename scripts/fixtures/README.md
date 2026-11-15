@@ -71,8 +71,9 @@ easier raised cosine 0.5.
 | `nxdn-4fsk.mjs`  | NXDN48/96 FACCH1 VCALL frames and voice SACCH superframes                                             | dsd-fme `nxdn_*.c`                 |
 | `dpmr-4fsk.mjs`  | dPMR voice superframes (IDs, channel code)                                                            | dsd-fme `dpmr_voice.c`             |
 | `dmr-4fsk.mjs`   | DMR repeater downlink: Voice LC headers, voice superframes with embedded LC, terminators, Idle slot 2 | dsd-fme `dmr_bs.c`, `dmr_dburst.c` |
+| `dmr-4fsk.mjs`   | DMR direct mode (`dmrDirect*`): the same call with MS syncs, one keyed 27.5 ms burst per 60 ms        | dsd-fme `dmr_ms.c`                 |
 
 `tests/integration/synthetic-frames.test.ts` runs them through wavekit-chan and the
 adapters' production command lines, and `tests/integration/dsd-fme-margin.test.ts`
-measures dsd-fme's frame and symbol error rates against CNR with them; `tests/mocks/fixtures/synthetic/` holds the
+measures dsd-fme's frame and symbol error rates against CNR and carrier frequency error with them (`fmCu8` keys the carrier with an `envelope` for TDMA bursts); `tests/mocks/fixtures/synthetic/` holds the
 decoder output they produced, replayed by `tests/unit/decoders/synthetic-decoder-lines.test.ts`.
