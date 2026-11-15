@@ -370,6 +370,110 @@ describe("truth scorecard: totals and limits", () => {
 	})
 })
 
+describe("truth scorecard: named exceptions", () => {
+	const dmrKept = scoreCase(
+		caseOf([iv("dmr", 0, 5_000), iv("noise", 6_000, 9_000, F + 50_000)]),
+		runOf([kept(0, 5_000), kept(6_000, 3_000, F + 50_000)]),
+	)
+	const named = { ...dmrKept, name: "dmr" }
+	const exception = (over: Record<string, unknown> = {}) => ({
+		name: "fresh-dmr",
+		kind: "synthetic" as const,
+		case: "dmr",
+		metric: "falseVoice" as const,
+		label: "dmr" as const,
+		count: 1,
+		reason: "a known limit",
+		...over,
+	})
+	const zero = {
+		version: 1 as const,
+		limits: {
+			synthetic: { falseVoice: { max: 0 }, digitalKeptAsVoice: { max: 0 } },
+		},
+	}
+
+	it("takes exactly its count of matching rows out of the totals and names them", () => {
+		const s = scorecard([named], { ...zero, exceptions: [exception()] })
+		expect(s.totals.digitalKeptAsVoice).toBe(0)
+		expect(s.totals.falseVoice).toBe(1)
+		expect(s.totals.excepted).toBe(1)
+		expect(s.cases[0]!.kept.map(k => k.excepted)).toEqual([
+			"fresh-dmr",
+			undefined,
+		])
+		expect(s.failures).toEqual([
+			{ kind: "synthetic", metric: "falseVoice", value: 1, max: 0 },
+		])
+		// The input scores are not changed.
+		expect(named.kept.some(k => k.excepted !== undefined)).toBe(false)
+	})
+
+	it("fails when it finds fewer rows than its count (stale: the ratchet)", () => {
+		const s = scorecard([named], {
+			...zero,
+			exceptions: [
+				exception({ count: 2 }),
+				exception({ name: "noise", label: "noise" }),
+			],
+		})
+		expect(s.totals.falseVoice).toBe(0)
+		expect(s.failures).toEqual([
+			{ kind: "synthetic", metric: "exception:fresh-dmr", value: 1, min: 2 },
+		])
+		const fixed = scorecard([{ ...named, kept: [] }], {
+			...zero,
+			exceptions: [exception()],
+		})
+		expect(fixed.pass).toBe(false)
+		expect(formatScorecardLine(fixed)).toContain(
+			"synthetic exception:fresh-dmr 0 < 1",
+		)
+	})
+
+	it("is not stale when its case did not run, or its kind ran only in part", () => {
+		const other = { ...dmrKept, name: "other" }
+		expect(
+			scorecard([other], { version: 1, limits: {}, exceptions: [exception()] })
+				.failures,
+		).toEqual([])
+		const anyCase = exception({ case: undefined, kind: "capture" })
+		const capture = {
+			...dmrKept,
+			name: "c",
+			kind: "capture" as const,
+			kept: [],
+		}
+		expect(
+			scorecard(
+				[capture],
+				{ version: 1, limits: {}, exceptions: [anyCase] },
+				{
+					subset: true,
+				},
+			).failures,
+		).toEqual([])
+		expect(
+			scorecard([capture], {
+				version: 1,
+				limits: {},
+				exceptions: [anyCase],
+			}).failures.map(f => f.metric),
+		).toEqual(["exception:fresh-dmr"])
+	})
+
+	it("refuses two exceptions of one name", () => {
+		const json = JSON.stringify({
+			version: 1,
+			limits: {},
+			exceptions: [exception(), exception()],
+		})
+		expect(() => parseThresholds("t.json", json)).toThrow(
+			"t.json: exception fresh-dmr twice",
+		)
+	})
+})
+
 describe("truth labels", () => {
 	const file = {
 		version: 1,
@@ -449,8 +553,11 @@ describe("truth labels", () => {
 		const { readFileSync } = await import("node:fs")
 		const path = "scripts/bench/scanner-quality/truth-thresholds.json"
 		const t = parseThresholds(path, readFileSync(path, "utf8"))
-		expect(t.limits.synthetic?.["digitalKeptAsVoice"]).toBeDefined()
-		expect(t.limits.capture?.["digitalKeptAsVoice"]).toBeDefined()
+		expect(t.limits.synthetic?.["digitalKeptAsVoice"]).toEqual({ max: 0 })
+		expect(t.limits.capture?.["digitalKeptAsVoice"]).toEqual({ max: 0 })
+		// Every exception carries its reason.
+		for (const e of t.exceptions ?? [])
+			expect(e.reason.length).toBeGreaterThan(20)
 		// Every limit names a scorecard total.
 		expect(() => scorecard([], t)).not.toThrow()
 	})

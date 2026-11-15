@@ -21,6 +21,7 @@ import {
 	LIMIT_KINDS,
 	NON_VOICE_LABELS,
 	type Thresholds,
+	type TruthException,
 	type TruthInterval,
 	type TruthLabel,
 } from "./truth-labels.js"
@@ -59,6 +60,8 @@ export interface KeptFile {
 	/** The label it overlaps most on its channel; "unmatched" when none. */
 	label: TruthLabel | "unmatched"
 	falseVoice: boolean
+	/** The named exception that accounts for it (a false voice file only). */
+	excepted?: string
 }
 
 export interface VoiceScore {
@@ -67,6 +70,8 @@ export interface VoiceScore {
 	endMs: number
 	/** whole: one kept file holds it; split: kept files cover it only together; partial; none. */
 	recorded: "whole" | "split" | "partial" | "none"
+	/** The named exception that accounts for it (a missed transmission only). */
+	excepted?: string
 }
 
 export interface IdentifyScore {
@@ -111,13 +116,14 @@ export interface Totals {
 	ioOverruns: number
 	/** Replays and recordings the run stopped before they settled: a verdict never seen. */
 	unsettled: number
+	/** False voice files and missed voice transmissions named exceptions account for. */
+	excepted: number
 }
 
 export interface Scorecard {
 	version: 1
 	totals: Totals
 	cases: CaseScore[]
-	/** Limits exceeded (metric, value, max); empty: pass. */
 	/** Totals of each kind of case (the limits gate these). */
 	byKind: Record<(typeof LIMIT_KINDS)[number], Totals>
 	/** Limits not met (kind, metric, value, the limit); empty: pass. */
@@ -284,6 +290,7 @@ const emptyTotals = (): Totals => ({
 	unidentified: 0,
 	ioOverruns: 0,
 	unsettled: 0,
+	excepted: 0,
 })
 
 export function scoreCase(c: TruthCase, run: TruthRun): CaseScore {
@@ -301,26 +308,9 @@ export function scoreCase(c: TruthCase, run: TruthRun): CaseScore {
 		.map(iv => scoreVoice(iv, keptRecords))
 	const identify = signalsOf(c.intervals).map(g => scoreIdentify(g, run))
 	const t = emptyTotals()
-	t.cases = 1
-	t.keptFiles = kept.length
-	for (const k of kept) {
-		if (k.label === "unmatched") t.unmatchedKept++
-		if (!k.falseVoice) continue
-		t.falseVoice++
-		t.falseVoiceByLabel[k.label] = (t.falseVoiceByLabel[k.label] ?? 0) + 1
-		if (k.label !== "unmatched" && DIGITAL_LABELS.includes(k.label))
-			t.digitalKeptAsVoice++
-	}
-	t.voiceTransmissions = voice.length
-	t.missedVoice = voice.filter(v => v.recorded !== "whole").length
-	t.splitVoice = voice.filter(v => v.recorded === "split").length
-	t.labelledSignals = identify.length
-	t.identifyRight = identify.filter(i => i.verdict === "right").length
-	t.identifyWrong = identify.filter(i => i.verdict === "wrong").length
-	t.unidentified = identify.filter(i => i.verdict === "unidentified").length
 	t.ioOverruns = run.busyOverruns
 	t.unsettled = run.unsettled
-	return {
+	const score: CaseScore = {
 		name: c.name,
 		kind: c.kind,
 		kept,
@@ -332,6 +322,81 @@ export function scoreCase(c: TruthCase, run: TruthRun): CaseScore {
 		),
 		totals: t,
 	}
+	return { ...score, totals: recount(score) }
+}
+
+/** A case's totals from its kept files, voice and identify rows; excepted rows count apart. */
+function recount(c: CaseScore): Totals {
+	const t = emptyTotals()
+	t.cases = 1
+	t.keptFiles = c.kept.length
+	for (const k of c.kept) {
+		if (k.label === "unmatched") t.unmatchedKept++
+		if (!k.falseVoice) continue
+		if (k.excepted !== undefined) {
+			t.excepted++
+			continue
+		}
+		t.falseVoice++
+		t.falseVoiceByLabel[k.label] = (t.falseVoiceByLabel[k.label] ?? 0) + 1
+		if (k.label !== "unmatched" && DIGITAL_LABELS.includes(k.label))
+			t.digitalKeptAsVoice++
+	}
+	t.voiceTransmissions = c.voice.length
+	for (const v of c.voice) {
+		if (v.recorded === "whole") continue
+		if (v.excepted !== undefined) {
+			t.excepted++
+			continue
+		}
+		t.missedVoice++
+		if (v.recorded === "split") t.splitVoice++
+	}
+	t.labelledSignals = c.identify.length
+	t.identifyRight = c.identify.filter(i => i.verdict === "right").length
+	t.identifyWrong = c.identify.filter(i => i.verdict === "wrong").length
+	t.unidentified = c.identify.filter(i => i.verdict === "unidentified").length
+	t.ioOverruns = c.totals.ioOverruns
+	t.unsettled = c.totals.unsettled
+	return t
+}
+
+/**
+ * Marks the rows each named exception accounts for (cases in run order, rows in order) on copies
+ * of the cases, recounts their totals, and says how many rows each exception found.
+ */
+function applyExceptions(
+	cases: readonly CaseScore[],
+	exceptions: readonly TruthException[],
+): { cases: CaseScore[]; found: Map<string, number> } {
+	const out: CaseScore[] = cases.map(c => ({
+		...c,
+		kept: c.kept.map(({ excepted: _e, ...k }) => k),
+		voice: c.voice.map(({ excepted: _e, ...v }) => v),
+	}))
+	const found = new Map<string, number>()
+	for (const e of exceptions) {
+		let n = 0
+		for (const c of out) {
+			if (c.kind !== e.kind || (e.case !== undefined && c.name !== e.case))
+				continue
+			const rows: { excepted?: string }[] =
+				e.metric === "falseVoice"
+					? c.kept.filter(
+							k =>
+								k.falseVoice && (e.label === undefined || k.label === e.label),
+						)
+					: c.voice.filter(v => v.recorded !== "whole")
+			for (const row of rows) {
+				if (n >= e.count) break
+				if (row.excepted !== undefined) continue
+				row.excepted = e.name
+				n++
+			}
+		}
+		found.set(e.name, n)
+	}
+	return { cases: out.map(c => ({ ...c, totals: recount(c) })), found }
 }
 
 function addTotals(a: Totals, b: Totals): Totals {
@@ -354,6 +419,7 @@ function addTotals(a: Totals, b: Totals): Totals {
 		unidentified: a.unidentified + b.unidentified,
 		ioOverruns: a.ioOverruns + b.ioOverruns,
 		unsettled: a.unsettled + b.unsettled,
+		excepted: a.excepted + b.excepted,
 	}
 }
 
@@ -378,13 +444,15 @@ export function unknownMetrics(limits: Thresholds): string[] {
  * `subset`: only some cases ran (`--only`), so the minimums are not checked, the maximums are.
  */
 export function scorecard(
-	cases: readonly CaseScore[],
+	scored: readonly CaseScore[],
 	limits: Thresholds,
 	opts: { subset?: boolean } = {},
 ): Scorecard {
 	const unknown = unknownMetrics(limits)
 	if (unknown.length > 0)
 		throw new Error(`threshold names an unknown metric: ${unknown.join(", ")}`)
+	const applied = applyExceptions(scored, limits.exceptions ?? [])
+	const cases = applied.cases
 	const sum = (cs: readonly CaseScore[]): Totals =>
 		cs.reduce((acc, c) => addTotals(acc, c.totals), emptyTotals())
 	const byKind = {
@@ -411,11 +479,26 @@ export function scorecard(
 					...(limit.min !== undefined ? { min: limit.min } : {}),
 				})
 		}
+	// A stale exception (fewer rows than its count where it applies) fails: the ratchet.
+	for (const e of limits.exceptions ?? []) {
+		const applies =
+			e.case !== undefined
+				? cases.some(c => c.kind === e.kind && c.name === e.case)
+				: byKind[e.kind].cases > 0 && opts.subset !== true
+		const n = applied.found.get(e.name) ?? 0
+		if (applies && n < e.count)
+			failures.push({
+				kind: e.kind,
+				metric: `exception:${e.name}`,
+				value: n,
+				min: e.count,
+			})
+	}
 	return {
 		version: 1,
 		totals: sum(cases),
 		byKind,
-		cases: [...cases],
+		cases,
 		failures,
 		pass: failures.length === 0,
 	}

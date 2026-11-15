@@ -99,7 +99,8 @@ pnpm exec esbuild scripts/bench/scanner-truth-label.ts --bundle --platform=node 
   --packages=external --outfile=output/bench/scanner-truth-label.mjs
 node output/bench/scanner-truth-label.mjs --captures /path/to/captures --out /path/to/labels \
   [--only <name>] [--multimon <path>] [--dsd-fme <path>] [--no-decoders] [--force]
-# the same scorecard against another revision's scanner (a git worktree of it):
+# the same scorecard against another revision's scanner (a git worktree of it), or:
+#   make truth TRUTH=/path/to/labels TREE=/path/to/checkout
 node scripts/bench/scanner-quality/build-against.mjs --tree /path/to/checkout --out output/bench/sq-other.mjs
 node output/bench/sq-other.mjs --truth /path/to/labels
 ```

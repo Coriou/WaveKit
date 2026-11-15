@@ -2,18 +2,18 @@
 	"version": 1,
 	"limits": {
 		"synthetic": {
-			"falseVoice": { "max": 2 },
-			"digitalKeptAsVoice": { "max": 1 },
-			"missedVoice": { "max": 1 },
+			"falseVoice": { "max": 0 },
+			"digitalKeptAsVoice": { "max": 0 },
+			"missedVoice": { "max": 0 },
 			"splitVoice": { "max": 0 },
 			"identifyWrong": { "max": 0 },
-			"identifyRight": { "min": 8 },
+			"identifyRight": { "min": 13 },
 			"ioOverruns": { "max": 0 },
 			"unsettled": { "max": 0 }
 		},
 		"capture": {
-			"falseVoice": { "max": 1 },
-			"digitalKeptAsVoice": { "max": 1 },
+			"falseVoice": { "max": 0 },
+			"digitalKeptAsVoice": { "max": 0 },
 			"missedVoice": { "max": 0 },
 			"splitVoice": { "max": 0 },
 			"identifyWrong": { "max": 0 },
@@ -23,9 +23,70 @@
 		}
 	},
 	"notes": {
-		"synthetic.digitalKeptAsVoice": "1 known limit: the DMR handheld conversation's first file, recorded before its channel has the 4 TDMA votes that bar it (a fresh channel holds no digital prior yet).",
-		"synthetic.falseVoice": "2: that file, and the FM carrier whose audio is noise keyed like speech (no digital prior, so no content check).",
-		"synthetic.missedVoice": "1: the first of the 12 dB speech overs, never voiced.",
-		"capture": "Calibrated on the reference labelled capture set (18 ten-second captures of one land-mobile band, run as one session). 1 known limit there: a DMR transmission that reads analog FM on a channel with no digital prior yet; its replay decode lands during the file, which finishes as voice. Another capture set needs its own limits (--thresholds)."
-	}
+		"ratchet": "Every limit is what the newest honesty round achieves, with no slack. Each file or transmission it still gets wrong is a named exception below. An exception that no longer occurs fails the run: remove it, so the limits only tighten.",
+		"capture": "The capture limits and the capture exception are calibrated on the reference labelled capture set (18 ten-second captures of one land-mobile band, run as one session). Another capture set needs its own file (--thresholds)."
+	},
+	"exceptions": [
+		{
+			"name": "fresh-pager-twin",
+			"kind": "synthetic",
+			"case": "pager-twin",
+			"metric": "falseVoice",
+			"label": "pocsag",
+			"count": 1,
+			"reason": "The first message on a pager channel that reads analog FM, before any decode: the channel holds no digital prior yet, and its replay decode lands after the file finished. Its later messages are refused."
+		},
+		{
+			"name": "fresh-pager-busy",
+			"kind": "synthetic",
+			"case": "pager-analog",
+			"metric": "falseVoice",
+			"label": "pocsag",
+			"count": 1,
+			"reason": "The same first message on a busy band (the replay queue is behind): no prior yet. Later messages are held provisional and discarded when their late decode lands."
+		},
+		{
+			"name": "fresh-dmr-handheld-busy",
+			"kind": "synthetic",
+			"case": "pager-analog",
+			"metric": "falseVoice",
+			"label": "dmr",
+			"count": 1,
+			"reason": "A DMR handheld's first over on a busy band, recorded before its channel has the 4 TDMA votes or a decode that bar it. A DMR decode is digital voice, so it only holds a file provisional, and the content check does not call TDMA buzz clearly not speech."
+		},
+		{
+			"name": "fresh-dmr-handheld",
+			"kind": "synthetic",
+			"case": "dmr",
+			"metric": "falseVoice",
+			"label": "dmr",
+			"count": 1,
+			"reason": "The DMR handheld conversation's first file, opened before the channel has the 4 TDMA votes that bar it. The later overs are discarded as known non-voice."
+		},
+		{
+			"name": "noise-keyed-like-speech",
+			"kind": "synthetic",
+			"case": "noise-fm",
+			"metric": "falseVoice",
+			"label": "noise",
+			"count": 1,
+			"reason": "An FM carrier whose audio is noise keyed like speech, on a channel with no digital prior: the content check runs only under a prior, and the keying passes the voice gate."
+		},
+		{
+			"name": "weak-speech-over",
+			"kind": "synthetic",
+			"case": "voice",
+			"metric": "missedVoice",
+			"count": 1,
+			"reason": "The first of the 12 dB speech overs is never voiced (the voice gate needs several windows above its level), so it is not recorded."
+		},
+		{
+			"name": "fresh-dmr-reads-analog",
+			"kind": "capture",
+			"metric": "falseVoice",
+			"label": "dmr",
+			"count": 1,
+			"reason": "In the reference capture set, a DMR transmission that reads analog FM on a channel with no digital prior: its replay decode lands during the file, but a DMR decode only holds a file provisional and the audio does not measure clearly not speech, so it finishes as voice."
+		}
+	]
 }

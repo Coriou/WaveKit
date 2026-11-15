@@ -19,6 +19,7 @@ export type SignalClass =
 	| "pocsag"
 	| "pocsag-msg"
 	| "pocsag-2400"
+	| "pocsag-shaped"
 	| "ism-ook"
 	| "ism-fsk"
 	| "afsk1200"
@@ -39,6 +40,7 @@ export const SIGNAL_CLASSES: readonly SignalClass[] = [
 	"pocsag",
 	"pocsag-msg",
 	"pocsag-2400",
+	"pocsag-shaped",
 	"ism-ook",
 	"ism-fsk",
 	"afsk1200",
@@ -114,6 +116,7 @@ const NOMINAL: Record<
 	pocsag: { bandwidthHz: 11_000, protocol: "pocsag", spurious: false },
 	"pocsag-msg": { bandwidthHz: 11_000, protocol: "pocsag", spurious: false },
 	"pocsag-2400": { bandwidthHz: 14_000, protocol: "pocsag", spurious: false },
+	"pocsag-shaped": { bandwidthHz: 13_000, protocol: "pocsag", spurious: false },
 	"ism-ook": { bandwidthHz: 12_000, protocol: "ism", spurious: false },
 	"ism-fsk": { bandwidthHz: 100_000, protocol: "ism", spurious: false },
 	afsk1200: { bandwidthHz: 12_000, protocol: "aprs", spurious: false },
@@ -778,7 +781,8 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 			return { ...base, fill: (from, a, b, dev) => symbols(from, a, b, dev) }
 		}
 		case "pocsag-msg":
-		case "pocsag-2400": {
+		case "pocsag-2400":
+		case "pocsag-shaped": {
 			// A POCSAG message: the 576-bit 1010 preamble, then random codewords, ±4.5 kHz, at
 			// 1 200 Bd (pocsag-msg) or 2 400 Bd (pocsag-2400, h = 3.75: its two tone lobes merge
 			// into one hump, as a fast pager's spectrum reads on air). The preamble restarts at each
@@ -786,6 +790,11 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 			const baud = t.class === "pocsag-2400" ? 2400 : 1200
 			const symbols = symbolStream(rng, fs, baud, [-4500, 4500])
 			const bit = fs / baud
+			// pocsag-shaped: the transmitter's premodulation low-pass (PAGER_PREMOD_LPF_HZ).
+			const shaped = t.class === "pocsag-shaped"
+			const alpha = 1 - Math.exp((-TWO_PI * PAGER_PREMOD_LPF_HZ) / fs)
+			let y1 = 0
+			let y2 = 0
 			return {
 				...base,
 				fill: (from, a, b, dev) => {
@@ -799,6 +808,12 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 						if (k >= 0 && k < POCSAG_PREAMBLE_BITS)
 							dev[i] = k % 2 === 0 ? 4500 : -4500
 					}
+					if (shaped)
+						for (let i = a; i < b; i++) {
+							y1 += alpha * (dev[i]! - y1)
+							y2 += alpha * (y1 - y2)
+							dev[i] = y2
+						}
 				},
 			}
 		}
@@ -952,6 +967,14 @@ function emitterFor(t: TruthSignal, scene: Scene, rng: () => number): Emitter {
 	}
 }
 
+/**
+ * Premodulation low-pass of a shaped pager (pocsag-shaped): two one-pole stages at 700 Hz, a
+ * bandwidth-time product of about 0.6 at 1 200 Bd, like a paging transmitter's data filter. The
+ * frequency then dwells between the ±4.5 kHz tones on every bit change, which fills the valley
+ * between them: the spectrum is one hump, which the classifier reads as analog FM (as a live
+ * pager's does), while the unfiltered pocsag-msg shows two tones (fsk2-wide).
+ */
+const PAGER_PREMOD_LPF_HZ = 700
 /** POCSAG preamble length (bits of alternating 1 and 0). */
 const POCSAG_PREAMBLE_BITS = 576
 /** Audio rate of the synthetic speech and noise modulators (interpolated to the IQ rate). */

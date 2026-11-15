@@ -520,7 +520,11 @@ function replayDoubles(
 								? null
 								: {
 										protocol: decoded,
-										identity: identityOf(decoded, req.rfHz),
+										identity: identityOf(
+											decoded,
+											req.rfHz,
+											held?.label.identity,
+										),
 									},
 					}
 				},

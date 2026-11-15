@@ -9,6 +9,9 @@
  *   identify replay of the scanner's capture (truth-run.ts, the replay oracle): the capture ends
  *   with the burst, the replay answers 2 s later plus 1 s per trial, after the recorder asked for
  *   the file's finish (the burst's end, its hang and the recorder's 1 s holdback).
+ * - pager-twin and pager-analog: the live pager shape, bursts whose spectrum reads analog FM, two
+ *   capcodes on one channel, on a quiet band (a co-channel twin) and on a busy one (decoded late)
+ *   (pagerAnalog).
  * - dmr: a DMR repeater keyed for 20 s (both slots, continuous 4FSK) with an always-on dsd-fme
  *   decode every 2 s from 1.5 s after its onset, and a direct-mode handheld conversation (TDMA
  *   bursts, seven overs of 3 to 4 s) that only identify's replays decode.
@@ -46,6 +49,7 @@ const LABEL_OF: Partial<Record<SignalClass, TruthLabel>> = {
 	pocsag: "pocsag",
 	"pocsag-msg": "pocsag",
 	"pocsag-2400": "pocsag",
+	"pocsag-shaped": "pocsag",
 	carrier: "carrier",
 	"fm-noise": "noise",
 }
@@ -192,7 +196,88 @@ function repeaterId(): TruthCase {
 	return syntheticCase(s, truthOf(s), [])
 }
 
+/**
+ * The live pager shape: a paging channel whose bursts read analog FM (pocsag-shaped: the
+ * transmitter's premodulation filter fills the valley between the tones), five 4 s messages
+ * 15 s apart for two capcodes in turn, each decoded only by identify's replay of the scanner's
+ * own capture. `busy`: the band also carries two two-tone pagers and a DMR handheld
+ * conversation, which keep the replay queue (one capture at a time) and the capture budget in
+ * use, so a page's decode lands after the recorder asked for its file's finish (pager-analog).
+ * Quiet (pager-twin): the replay answers within the burst, and a page of the other capcode lands
+ * on a co-channel twin discovery, not on the one the recorder records for.
+ */
+export const PAGER_ANALOG_CAPCODES = ["1234567", "1234568"] as const
+const PAGER_ANALOG_OFFSET_HZ = -168_750
+
+function pagerAnalog(busy: boolean): TruthCase {
+	const bursts = [2_000, 17_000, 32_000, 47_000, 62_000].map(startMs => ({
+		startMs,
+		endMs: startMs + 4_000,
+	}))
+	// A busy band, as the live one: two more pagers (two-tone) and a DMR handheld conversation
+	// keep identify's replay queue (one capture at a time) and the capture budget in use.
+	const every = (first: number, period: number, length: number) =>
+		Array.from(
+			{ length: Math.floor((70_000 - first - length) / period) + 1 },
+			(_, k) => ({
+				startMs: first + k * period,
+				endMs: first + k * period + length,
+			}),
+		)
+	const pager = {
+		class: "pocsag-shaped" as const,
+		offsetHz: PAGER_ANALOG_OFFSET_HZ,
+		snrDb: 20,
+		intervals: bursts,
+	}
+	const traffic = [
+		{
+			class: "pocsag-msg" as const,
+			offsetHz: 31_250,
+			snrDb: 20,
+			intervals: every(1_000, 9_000, 3_000),
+		},
+		{
+			class: "pocsag-msg" as const,
+			offsetHz: 231_250,
+			snrDb: 20,
+			intervals: every(5_500, 11_000, 3_000),
+		},
+		{
+			class: "dmr" as const,
+			offsetHz: -293_750,
+			snrDb: 18,
+			intervals: every(3_000, 8_000, 4_000),
+		},
+	] as const
+	const s = scene(
+		busy ? "pager-analog" : "pager-twin",
+		70_000,
+		20_261_206,
+		busy ? [pager, ...traffic] : [pager],
+	)
+	// The shaped pager's messages alternate two capcodes.
+	let n = 0
+	const intervals = truthOf(s).map(iv =>
+		iv.frequencyHz === CENTRE_HZ + PAGER_ANALOG_OFFSET_HZ
+			? {
+					...iv,
+					identity: PAGER_ANALOG_CAPCODES[n++ % PAGER_ANALOG_CAPCODES.length]!,
+				}
+			: iv,
+	)
+	return syntheticCase(s, intervals, [])
+}
+
 /** Every synthetic case, in a fixed order. */
 export function syntheticCases(): TruthCase[] {
-	return [pagerLate(), dmr(), noiseFm(), voice(), repeaterId()]
+	return [
+		pagerLate(),
+		pagerAnalog(false),
+		pagerAnalog(true),
+		dmr(),
+		noiseFm(),
+		voice(),
+		repeaterId(),
+	]
 }

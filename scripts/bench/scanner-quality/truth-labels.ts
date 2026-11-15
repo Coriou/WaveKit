@@ -63,6 +63,11 @@ export const TruthIntervalSchema = z
 		bandwidthHz: hz.optional(),
 		/** An analog voice's CTCSS tone (Hz), when known: identify's analog trial hears it. */
 		ctcssHz: hz.optional(),
+		/** The identity a decode of it names (POCSAG capcode, DMR colour code), when known. */
+		identity: z
+			.string()
+			.regex(/^\d{1,10}$/)
+			.optional(),
 		note: z.string().max(200).optional(),
 	})
 	.strict()
@@ -180,6 +185,26 @@ const LimitsSchema = z.record(z.string(), LimitSchema)
 /** The kinds of case the limits apply to, each on its own totals. */
 export const LIMIT_KINDS = ["synthetic", "capture"] as const
 
+export const ExceptionSchema = z
+	.object({
+		/** A short kebab-case name, unique in the file. */
+		name: z
+			.string()
+			.regex(/^[a-z0-9]+(-[a-z0-9]+)*$/)
+			.max(64),
+		kind: z.enum(LIMIT_KINDS),
+		/** The case it occurs in (a synthetic scene's name); absent: any case of its kind. */
+		case: z.string().min(1).max(64).optional(),
+		metric: z.enum(["falseVoice", "missedVoice"]),
+		/** For falseVoice: the kept file's label. */
+		label: z.enum(TRUTH_LABELS).optional(),
+		count: z.number().int().positive().max(100),
+		/** Why the scanner keeps (or misses) it, and what would fix it. */
+		reason: z.string().min(1).max(600),
+	})
+	.strict()
+export type TruthException = z.infer<typeof ExceptionSchema>
+
 /**
  * The checked-in limits (scanner-quality/truth-thresholds.json), per kind of case: `synthetic`
  * gates the built-in scenes' totals, `capture` the labelled captures' (a run without captures
@@ -195,8 +220,15 @@ export const ThresholdsSchema = z
 				capture: LimitsSchema.optional(),
 			})
 			.strict(),
-		/** Why a limit is above 0 (the known limits it allows), per kind and metric. */
+		/** Why a limit is what it is, per kind and metric (free text). */
 		notes: z.record(z.string(), z.string().max(600)).optional(),
+		/**
+		 * Named, documented exceptions: kept files (falseVoice) or missed voice transmissions
+		 * (missedVoice) a known limit of the scanner accounts for, not counted against the limits.
+		 * Each absorbs exactly `count` of them in its kind (and case, when named); one that finds
+		 * fewer fails the scorecard (stale: the limit was fixed upstream, remove the exception).
+		 */
+		exceptions: z.array(ExceptionSchema).max(100).optional(),
 	})
 	.strict()
 export type Thresholds = z.infer<typeof ThresholdsSchema>
@@ -214,6 +246,11 @@ export function parseThresholds(path: string, text: string): Thresholds {
 		throw new Error(
 			`${path}: ${issue ? `${issue.path.join(".")} ${issue.message}` : "invalid"}`,
 		)
+	}
+	const names = new Set<string>()
+	for (const e of parsed.data.exceptions ?? []) {
+		if (names.has(e.name)) throw new Error(`${path}: exception ${e.name} twice`)
+		names.add(e.name)
 	}
 	return parsed.data
 }

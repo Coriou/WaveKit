@@ -156,6 +156,17 @@ after the cache is populated take 2-5 min. A second consecutive
 `make docker-build` with no source changes completes in under 30 seconds —
 every step `CACHED`.
 
+## Scoring a candidate image's scanner
+
+`make truth` scores the scanner of any checkout against labelled transmissions
+(the truth scorecard, [SCANNER.md](SCANNER.md#truth-scorecard)): check out the
+commit an image is built from with `git worktree add`, then run
+`make truth TREE=<checkout> TRUTH=<labels dir>` from this checkout. It exits 1
+when the scanner keeps more paging, DMR or noise as voice, misses more voice or
+identifies less than the checked-in limits allow. `TRUTH=synthetic` (the
+default) runs the built-in scenes only and needs no captures. It runs on the
+host with Node, not in a container.
+
 ## Demod test environment
 
 `make demod-test` launches an interactive shell in the `final-demod` image:
