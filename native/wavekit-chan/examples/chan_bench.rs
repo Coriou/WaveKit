@@ -11,10 +11,13 @@
 //! each stage's fastest block, so it is not one observed block: on a shared host preemption
 //! inflates the mean, not a minimum.
 //! `output hash` covers every output float's bits, to compare builds on the same request.
+//! `afc` is the carrier frequency correction a channel may ask for (`afcMaxHz`), timed apart on
+//! the same seconds of output-rate samples: a carrier 600 Hz off, so it measures and corrects.
 
 use std::hint::black_box;
 use std::time::Instant;
 
+use wavekit_chan::afc::Afc;
 use wavekit_chan::convert::{cu8_to_f32, InputAssembler};
 use wavekit_chan::plan::plan_chain;
 use wavekit_chan::stages::{Nco, RationalFir};
@@ -130,6 +133,33 @@ fn main() {
         fs
     );
     println!("output hash: {hash:016x}");
+    // AFC: an unmodulated carrier 600 Hz off at the output rate, corrected once acquired.
+    let block = (out as usize).clamp(1, BLOCK);
+    let (ti, tq): (Vec<f32>, Vec<f32>) = (0..block)
+        .map(|k| {
+            let ph = std::f64::consts::TAU * 600.0 * k as f64 / out as f64;
+            (ph.cos() as f32 * 0.5, ph.sin() as f32 * 0.5)
+        })
+        .unzip();
+    let mut afc = Afc::new(out, (bw / 2.0).min(2_000.0));
+    let (mut afc_ns, mut afc_n) = (0u128, 0usize);
+    while afc_n < (out * seconds) as usize {
+        let (mut ai, mut aq) = (ti.clone(), tq.clone());
+        let t = Instant::now();
+        afc.process(&mut ai, &mut aq);
+        afc_ns += t.elapsed().as_nanos();
+        black_box((&ai, &aq));
+        afc_n += block;
+    }
+    let per_out = afc_ns as f64 / afc_n as f64;
+    println!(
+        "afc: {:.2} ns/output sample ({:.3} ns/input sample), {:.5} core at {} sps out, correcting {:.0} Hz",
+        per_out,
+        per_out * out as f64 / fs as f64,
+        per_out * out as f64 / 1e9,
+        out,
+        afc.correction_hz()
+    );
     let fastest = best.iter().sum::<u128>() as f64 / BLOCK as f64;
     println!(
         "sum of stage minima: {:.2} ns/input sample ({:.2} in the NCO), {:.3} core at {} sps",

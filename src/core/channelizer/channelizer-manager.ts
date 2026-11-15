@@ -811,6 +811,7 @@ export class ChannelizerManager
 			outputRateHz: req.outputRateHz,
 			format: req.format,
 			...(req.gain !== undefined ? { gain: req.gain } : {}),
+			...(req.afcMaxHz !== undefined ? { afcMaxHz: req.afcMaxHz } : {}),
 			queueBytes,
 		}
 		const parsed = ChannelizerRequestSchema.safeParse(open)

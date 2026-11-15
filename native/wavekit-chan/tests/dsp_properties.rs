@@ -16,6 +16,7 @@ fn spec(fs: u64, out: u64, off: f64, format: Format) -> ChannelSpec {
         output_rate: out,
         format,
         gain: 1.0,
+        afc_max_hz: None,
     }
 }
 
@@ -149,7 +150,7 @@ proptest! {
     fn pass_through_identity(fs in fs_strategy(), bytes in proptest::collection::vec(any::<u8>(), 0..20_000)) {
         let mut bytes = bytes;
         bytes.truncate(bytes.len() / 2 * 2);
-        let mut dsp = ChannelDsp::new(ChannelSpec { input_rate: fs, offset_hz: 0.0, bandwidth_hz: fs as f64 * 0.9, transition_hz: fs as f64 * 0.04, output_rate: fs, format: Format::Cu8, gain: 1.0 }).unwrap();
+        let mut dsp = ChannelDsp::new(ChannelSpec { input_rate: fs, offset_hz: 0.0, bandwidth_hz: fs as f64 * 0.9, transition_hz: fs as f64 * 0.04, output_rate: fs, format: Format::Cu8, gain: 1.0, afc_max_hz: None }).unwrap();
         let (mut i, mut q) = (Vec::new(), Vec::new());
         InputAssembler::default().push(&bytes, &mut i, &mut q);
         let mut out = Vec::new();

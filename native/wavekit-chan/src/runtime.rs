@@ -577,6 +577,7 @@ impl Runtime {
             output_rate: o.output_rate_hz,
             format: o.format,
             gain: o.gain,
+            afc_max_hz: o.afc_max_hz,
         };
         let (preparation, observed) = match attempt {
             Some(p) => (Some(p.preparation), Some(p.runtime)),
@@ -2718,6 +2719,7 @@ mod tests {
             output_rate: 48_000,
             format: crate::channel::Format::Cf32,
             gain: 1.0,
+            afc_max_hz: None,
         })
         .unwrap();
         let mut want = Vec::new();

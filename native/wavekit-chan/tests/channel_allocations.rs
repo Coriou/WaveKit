@@ -41,7 +41,12 @@ static GLOBAL: Counting = Counting;
 
 #[test]
 fn a_warm_channel_does_not_allocate_per_block() {
-    for (format, block) in [(Format::Cu8, 16_384usize), (Format::Cf32, 2_048)] {
+    // With and without the carrier frequency correction (afc.rs keeps fixed-size state only).
+    for (format, block, afc_max_hz) in [
+        (Format::Cu8, 16_384usize, None),
+        (Format::Cf32, 2_048, None),
+        (Format::Cf32, 2_048, Some(2_000.0)),
+    ] {
         let mut dsp = ChannelDsp::new(ChannelSpec {
             input_rate: 2_048_000,
             offset_hz: 100_000.0,
@@ -50,6 +55,7 @@ fn a_warm_channel_does_not_allocate_per_block() {
             output_rate: 48_000,
             format,
             gain: 1.0,
+            afc_max_hz,
         })
         .unwrap();
         let i: Vec<f32> = (0..block).map(|n| (n as f32 * 0.1).sin()).collect();
@@ -92,6 +98,7 @@ fn a_warm_wide_channel_does_not_allocate_per_block() {
                 output_rate,
                 format: Format::Cf32,
                 gain: 1.0,
+                afc_max_hz: None,
             })
             .unwrap();
             let i: Vec<f32> = (0..block).map(|n| (n as f32 * 0.1).sin()).collect();

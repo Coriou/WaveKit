@@ -79,6 +79,7 @@ fn main() {
             output_rate: rate,
             format: Format::Cu8,
             gain: 1.0,
+            afc_max_hz: None,
         };
         let (mut plans, mut states, mut dsps) = (vec![], vec![], vec![]);
         let mut runtime_times: Vec<(&str, Vec<f64>, Vec<f64>)> = [
@@ -147,6 +148,7 @@ fn main() {
                         Format::Cu8
                     },
                     gain: if *name == "warm_gain" { 2.0 } else { 1.0 },
+                    afc_max_hz: None,
                     queue_bytes: 1 << 20,
                 };
                 let (queued_ms, opened_ms) = runtime_open(&mut runtime, &events, request);

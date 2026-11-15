@@ -26,7 +26,7 @@ const invalid = (detail: string): AdmissionVerdict => ({
 
 /**
  * Pure. Never touches a tuner. Same check order and arithmetic as native/wavekit-chan/src/admission.rs
- * (Property 1); the integer-rate and gain checks are the ones the process makes while parsing the
+ * (Property 1); the integer-rate, gain and afcMaxHz checks are the ones the process makes while parsing the
  * `open` request (protocol.rs), so they also classify as `channel-request-invalid` ahead of the span.
  * A usable fraction outside (0, 1] is a caller bug (config allows 0.5–0.95), so it throws.
  */
@@ -68,6 +68,11 @@ export function admitChannel(
 		return invalid(
 			`gain is cu8 only and must be within ${MIN_GAIN}..=${MAX_GAIN}`,
 		)
+	if (
+		req.afcMaxHz !== undefined &&
+		!(req.afcMaxHz > 0 && req.afcMaxHz <= req.bandwidthHz / 2)
+	)
+		return invalid("afcMaxHz must be within (0, bandwidthHz / 2]")
 	const halfOccupied = req.bandwidthHz / 2 + req.transitionHz
 	if (halfOccupied > req.outputRateHz / 2 + ADMISSION_EPSILON_HZ)
 		return invalid(

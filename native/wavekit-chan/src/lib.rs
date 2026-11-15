@@ -1,4 +1,5 @@
 pub mod admission;
+pub mod afc;
 pub mod args;
 pub mod channel;
 pub mod convert;

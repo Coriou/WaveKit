@@ -16,6 +16,11 @@ export interface DecoderChannelRequest {
 	format: ChannelFormat
 	/** cu8 only, default 1.0 (addendum §3). */
 	gain?: number
+	/**
+	 * Carrier frequency correction on the channel output, up to this many Hz either way, while a
+	 * carrier is present (native/wavekit-chan/src/afc.rs); within (0, bandwidthHz / 2]. Absent: none.
+	 */
+	afcMaxHz?: number
 }
 export type DecoderChannelRequestResult =
 	| DecoderChannelRequest

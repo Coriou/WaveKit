@@ -155,6 +155,26 @@ describe("admitChannel", () => {
 		}
 	})
 
+	it("mirrors the process's afcMaxHz rule: within (0, bandwidthHz / 2]", () => {
+		const half = base.bandwidthHz / 2
+		for (const afcMaxHz of [2000, half, 1e-9])
+			expect(admitChannel({ ...base, afcMaxHz }, capture, 0.8).admitted).toBe(
+				true,
+			)
+		for (const afcMaxHz of [
+			0,
+			-1,
+			half + 0.5,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+		]) {
+			const v = admitChannel({ ...base, afcMaxHz }, capture, 0.8)
+			expect(v.admitted ? "admitted" : v.reasonCode).toBe(
+				"channel-request-invalid",
+			)
+		}
+	})
+
 	it("checks in the process's order: finite, then rates, then out/2, then the capture span", () => {
 		const both = admitChannel(
 			{ ...base, centerHz: Number.NaN, outputRateHz: 3_000_000 },

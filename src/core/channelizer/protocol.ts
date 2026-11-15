@@ -39,6 +39,7 @@ export const ChannelizerRequestSchema = z
 				outputRateHz: z.number().int().positive(),
 				format,
 				gain: z.number().min(MIN_GAIN).max(MAX_GAIN).optional(),
+				afcMaxHz: z.number().positive().finite().optional(),
 				queueBytes: z.number().int().min(1).max(MAX_QUEUE_BYTES),
 			})
 			.strict(),
@@ -80,6 +81,12 @@ export const ChannelizerRequestSchema = z
 				code: z.ZodIssueCode.custom,
 				path: ["gain"],
 				message: "gain is cu8 only",
+			})
+		if (req.afcMaxHz !== undefined && req.afcMaxHz > req.bandwidthHz / 2)
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["afcMaxHz"],
+				message: "afcMaxHz above bandwidthHz / 2",
 			})
 		if (req.queueBytes < SAMPLE_BYTES[req.format])
 			ctx.addIssue({

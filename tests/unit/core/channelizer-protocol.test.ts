@@ -69,6 +69,10 @@ describe("channelizer protocol v1", () => {
 			{ ...open, gain: MIN_GAIN },
 			{ ...open, gain: MAX_GAIN },
 			{ ...open, id: "a".repeat(64) },
+			// protocol.rs: afcMaxHz within (0, bandwidthHz / 2], either format.
+			{ ...open, afcMaxHz: 2000 },
+			{ ...open, afcMaxHz: open.bandwidthHz / 2 },
+			{ ...open, format: "cf32", queueBytes: 8, afcMaxHz: 1e-9 },
 		]
 		for (const req of accepted) expect(() => encodeRequest(req)).not.toThrow()
 		const rejected = [
@@ -86,6 +90,13 @@ describe("channelizer protocol v1", () => {
 			{ ...open, gain: 1e-39 },
 			{ ...open, gain: 1_000_000.0001 },
 			{ ...open, gain: 1e39 },
+			{ ...open, afcMaxHz: open.bandwidthHz / 2 + 0.5 },
+			{ ...open, afcMaxHz: 0 },
+			{ ...open, afcMaxHz: -1 },
+			{ ...open, afcMaxHz: Number.NaN },
+			{ ...open, afcMaxHz: Number.POSITIVE_INFINITY },
+			{ ...open, afcMaxHz: "2000" },
+			{ ...open, afcMaxHz: null },
 			{ ...open, format: "cs16" },
 			{ ...open, outputRateHz: 48_000.5 },
 			{ ...open, outputRateHz: -1 },
