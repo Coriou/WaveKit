@@ -30,6 +30,7 @@ import {
 	unlink,
 } from "node:fs/promises"
 import { join, relative, resolve } from "node:path"
+import { performance } from "node:perf_hooks"
 import { z } from "zod"
 import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
 import type { RecordingProtection } from "../../recordings/contract.js"
@@ -81,6 +82,14 @@ const TEMP_WAV = /^TEMP_(\d{8})_(\d{6})_[0-9A-F]{4}\.wav$/
 const RECORDING_KINDS = ["dv", "analog"] as const
 const MATCH_SLACK_MS = 2_000
 const MIB = 1024 * 1024
+/**
+ * How old the recordings byte count analog admission uses may be before a walk refreshes it:
+ * 60 s = 60,000 ms. Within it, admission costs no walk at any store size; the count can miss
+ * what other producers wrote since (a digital call file grows at 8 kHz x 2 B = 16 kB/s, so
+ * about 1 MB per call over 60 s), against caps of hundreds of MB. Retention, every 5 min,
+ * enforces the cap on the files themselves.
+ */
+export const LEGACY_BYTES_MAX_AGE_MS = 60_000
 const DAY_MS = 86_400_000
 
 export interface LinkCandidate {
@@ -451,6 +460,25 @@ export class EvidenceStore {
 	private unknownHeldFiles = 0
 	/** The recordings quota the last retention pass left exceeded; null within it. */
 	private quotaExceeded: RecordingsQuotaExceeded | null = null
+	/**
+	 * Bytes of the recordings outside analog operations (`legacyRecordingBytes`), from the last
+	 * walk or retention pass, with the monotonic time that walk began; null: none trusted yet.
+	 */
+	private legacy: { bytes: number; atMs: number } | null = null
+	/** The walk refreshing `legacy` (one at a time). */
+	private legacyWalk: Promise<number> | null = null
+	/** setDeletionGate: what a deletion waits for first, while it is pending (null otherwise). */
+	private deletionGate: () => Promise<void> | null = () => null
+
+	/**
+	 * Deletions of recordings (retention, a discovery's removal, one recording's delete) wait for
+	 * `gate()` first while it answers a promise: the scanner passes the state backup's second half,
+	 * so no recording the pre-migration backup is still linking is removed before it is linked.
+	 * A null answer (nothing pending) keeps every deletion's synchronous start as it is.
+	 */
+	setDeletionGate(gate: () => Promise<void> | null): void {
+		this.deletionGate = gate
+	}
 
 	constructor(opts: {
 		dir: string
@@ -719,10 +747,7 @@ export class EvidenceStore {
 			serialise: (id, job) => this.serialise(id, job),
 			heldUnknown: id => this.heldFolderUnknown(id),
 			listers: (id, name) => this.listers(id, name),
-			legacyBytes: async () =>
-				(await this.collect())
-					.filter(file => file.category === "recordings")
-					.reduce((sum, file) => sum + file.bytes, 0),
+			legacyBytes: () => this.legacyRecordingBytes(),
 			limits: () => ({
 				maxBytes: this.caps.maxRecordingsMb * MIB,
 				minFreeBytes: this.caps.minFreeDiskMb * MIB,
@@ -773,14 +798,60 @@ export class EvidenceStore {
 		return handle
 	}
 	recoverAnalog(): Promise<AnalogReconciliation[]> {
-		return this.analog?.recover() ?? Promise.resolve([])
+		const recovery = this.analog?.recover() ?? Promise.resolve([])
+		// The first admission's count of the other recordings: walked now, in the background.
+		if (this.analog && !this.legacy)
+			recovery.then(() => this.legacyRecordingBytes()).catch(() => undefined)
+		return recovery
 	}
 	hasAnalogCleanup(id: string): Promise<boolean> {
 		assertDiscoveryId(id)
 		return this.analog?.hasCleanup(id) ?? Promise.resolve(false)
 	}
+	/** Re-reads the analog operation folders for outside changes (AnalogOperations.audit). */
+	auditAnalog(): Promise<void> {
+		return this.analog?.audit() ?? Promise.resolve()
+	}
 	stopAnalog(): Promise<void> {
 		return this.analog?.stop() ?? Promise.resolve()
+	}
+
+	/**
+	 * The recordings bytes analog admission and retention count beside their own (every file
+	 * `collect` lists under recordings/), without walking them on each admission: the last walk's
+	 * answer while it is at most LEGACY_BYTES_MAX_AGE_MS old; past that, the same answer while
+	 * one walk refreshes it in the background (nothing waits on it); none yet, or the last walk
+	 * failed: this call waits for a walk (and fails with it, as before). A retention pass sets
+	 * it from its own walk.
+	 */
+	private legacyRecordingBytes(): Promise<number> {
+		const cached = this.legacy
+		if (cached && performance.now() - cached.atMs <= LEGACY_BYTES_MAX_AGE_MS)
+			return Promise.resolve(cached.bytes)
+		const walk = (this.legacyWalk ??= this.walkLegacyBytes().finally(() => {
+			this.legacyWalk = null
+		}))
+		if (cached) {
+			walk.catch(() => undefined)
+			return Promise.resolve(cached.bytes)
+		}
+		return walk
+	}
+	private async walkLegacyBytes(): Promise<number> {
+		const atMs = performance.now()
+		try {
+			const bytes = (await this.collect())
+				.filter(file => file.category === "recordings")
+				.reduce((sum, file) => sum + file.bytes, 0)
+			// A retention pass that walked later keeps its newer count.
+			if (!this.legacy || this.legacy.atMs <= atMs)
+				this.legacy = { bytes, atMs }
+			return bytes
+		} catch (err) {
+			// Unknown: the next admission waits for a walk of its own.
+			this.legacy = null
+			throw err
+		}
 	}
 
 	private admits(id: string): boolean {
@@ -1086,6 +1157,8 @@ export class EvidenceStore {
 		const discoveryId = m?.[1]
 		const file = m?.[2]
 		if (discoveryId === undefined || file === undefined) return "not-found"
+		const gate = this.deletionGate()
+		if (gate) await gate
 		if (/^analog-[0-9a-f-]{36}\.wav$/i.test(file))
 			throw new RecordingKeepError(
 				"RECORDING_DELETE_UNSUPPORTED",
@@ -1171,9 +1244,12 @@ export class EvidenceStore {
 		const aliases = this.aliasesOf(discoveryId).filter(
 			alias => alias !== discoveryId && DISCOVERY_ID.test(alias),
 		)
-		// Fence admission synchronously and drain accepted writes/moves before removal.
+		// Fence admission synchronously and drain accepted writes/moves before removal; the
+		// files themselves wait for a pending state backup (setDeletionGate), after the fence.
+		const gate = this.deletionGate()
 		const removal = Promise.resolve()
 			.then(async () => {
+				if (gate) await gate
 				// WG9 R2: a pinned root whose identity changed stays pending (fail closed).
 				if (!(await this.rootIntact()))
 					throw new WaveKitError(
@@ -1473,10 +1549,19 @@ export class EvidenceStore {
 	async retention(
 		keepDiscoveryIds: ReadonlySet<string>,
 	): Promise<{ deleted: string[] }> {
+		const gate = this.deletionGate()
+		if (gate) await gate
 		// WG9 R2: a pinned root whose identity changed deletes nothing (fail closed).
 		if (!(await this.rootIntact())) return { deleted: [] }
+		// Outside changes to the analog operation folders reach its inventory (no lock held).
+		await this.analog?.audit()
 		const now = this.now()
-		const files = await this.collect()
+		const walkedAtMs = performance.now()
+		const files = await this.collect().catch((err: unknown) => {
+			// A failed walk is not trusted: the next admission waits for one of its own.
+			this.legacy = null
+			throw err
+		})
 		// WG10 req 1.5: an operator keep of a survivor protects its alias folders.
 		keepDiscoveryIds = withAliasFolders(keepDiscoveryIds, this.aliasesOf)
 		const keep = keepDiscoveryIds
@@ -1557,6 +1642,8 @@ export class EvidenceStore {
 			}
 			if (category === "recordings") recordingsLeft = total
 		}
+		// This pass's walk, less what it removed: as fresh as a walk of legacyRecordingBytes.
+		this.legacy = { bytes: recordingsLeft, atMs: walkedAtMs }
 		if (this.analog)
 			deleted.push(
 				...(await this.analog.retained(

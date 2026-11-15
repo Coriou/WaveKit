@@ -34,6 +34,8 @@ describe("ScannerService pre-migration backup", () => {
 		})
 		await h.service.start()
 		try {
+			// The start does not wait for the recordings' links: nothing is reported until then.
+			await h.service.stateBackupSettled()
 			const names = await readdir(join(scannerDir, BACKUPS_DIR))
 			const backup = names.find(n => n.startsWith("pre-unmarked."))
 			expect(backup).toBeDefined()

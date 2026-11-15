@@ -385,7 +385,10 @@ client such as SDR++).
 
 `src/core/state-backup.ts` takes one bounded backup of the scanner state directory before a
 build that writes another format reads it (`ScannerPersistence.load`): see the rollback note in
-[SCANNER.md](SCANNER.md).
+[SCANNER.md](SCANNER.md). It has two halves so the start never waits on one link per recording:
+`ensurePreMigrationBackup` copies every other file under a pending partial name before the load,
+and `completeDeferredLinks`, started by the load and not awaited, links the recordings in and
+renames the backup into place (a stop in between is completed by the next start).
 
 ### TunerRelay
 

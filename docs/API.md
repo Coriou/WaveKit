@@ -3991,7 +3991,8 @@ them: `noAlias`, no merge alias names the folder; `aliasWithoutOwner`, its alias
 no live discovery (either way no observation listing its recordings named a single owner).
 Nothing is moved or deleted. One info line at startup carries the same counts.
 
-`stateBackup` (absent from older cores and before the scanner state loaded) is this start's
+`stateBackup` (absent from older cores, before the scanner state loaded, and while a backup
+this start took is still having its recordings linked in, seconds after the start) is this start's
 pre-migration backup of the scanner state ([SCANNER.md](SCANNER.md), upgrade and rollback):
 `outcome` `taken` with `fromFormat`, `toFormat` and `path` (relative to `scanner.storage.dir`,
 `.backups/pre-<format>.<ms>`); `skipped` with `fromFormat`, `toFormat` and a fixed `reason`

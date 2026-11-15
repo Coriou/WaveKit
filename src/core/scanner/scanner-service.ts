@@ -1580,6 +1580,8 @@ export class ScannerService extends EventEmitter {
 			this.store.setFolderLookup(id => this.evidence.folders.holds(id))
 			// WG10 req 1.6: a capacity eviction removes the evicted folders like an inactive prune.
 			this.store.on("evicted", this.onStoreEvicted)
+			// No recording is removed while a pre-migration backup is still linking recordings in.
+			this.evidence.setDeletionGate(() => this.persistence.backupPending())
 			this.recordingDeleter = createScannerRecordingDeleter({
 				evidence: this.evidence,
 				discovery: this.store,
@@ -1677,11 +1679,15 @@ export class ScannerService extends EventEmitter {
 			)
 			this.recorder.on("captured", (capture: { observationId: string }) => {
 				this.burstInFlight.delete(capture.observationId)
-				this.captures
-					.retention(this.settings().storage.maxCapturesMb * 1024 * 1024)
-					.catch((err: unknown) =>
-						this.log.warn({ err }, "Capture retention failed"),
+				const retain = (): Promise<unknown> =>
+					this.captures.retention(
+						this.settings().storage.maxCapturesMb * 1024 * 1024,
 					)
+				// Captures are linked into a pending state backup too: none is removed before.
+				const gate = this.persistence.backupPending()
+				;(gate ? gate.then(retain) : retain()).catch((err: unknown) =>
+					this.log.warn({ err }, "Capture retention failed"),
+				)
 			})
 			this.arbiter = new TunerArbiter({
 				ownConstructorListener: this.ownConstructorListener,
@@ -2316,6 +2322,14 @@ export class ScannerService extends EventEmitter {
 	/** `status().enabled` alone: the status poll needs no engine, probe or recorder rows. */
 	scannerEnabled(): boolean {
 		return this.settings().enabled
+	}
+
+	/**
+	 * Settles once a pre-migration backup this start took has its recordings linked and is in
+	 * place (or was abandoned): the start never waits on it (ScannerPersistence.backupSettled).
+	 */
+	stateBackupSettled(): Promise<void> {
+		return this.persistence.backupSettled()
 	}
 
 	status(): ScannerStatus {
@@ -3312,7 +3326,11 @@ export class ScannerService extends EventEmitter {
 	}
 
 	deleteCapture(id: string): Promise<boolean> {
-		return this.captures.delete(id)
+		// Not before a pending state backup has linked the capture in (setDeletionGate).
+		const gate = this.persistence.backupPending()
+		return gate
+			? gate.then(() => this.captures.delete(id))
+			: this.captures.delete(id)
 	}
 
 	/**
