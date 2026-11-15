@@ -393,7 +393,7 @@ describe("analog operation crash safety: leftovers never poison the inventory", 
 			lastReason: "invalid-intent",
 		})
 	}, 60_000)
-	it("a staging folder removed between the listing and its check does not refuse another admission", async () => {
+	it("a staging folder removed between an audit's listing and its check does not refuse admission", async () => {
 		const { root, store } = await fresh()
 		await start(root, store)
 		let vanish: string | null = null
@@ -408,7 +408,7 @@ describe("analog operation crash safety: leftovers never poison the inventory", 
 				unlink: path => unlink(path),
 				rmdir: path => rmdir(path),
 				checkpoint: async name => {
-					// A concurrent cleanupStaging finishing right after the admission scan listed.
+					// A concurrent cleanupStaging finishing right after the audit listed.
 					if (name !== "inventory-listed" || !vanish) return
 					const dir = vanish
 					vanish = null
@@ -424,6 +424,9 @@ describe("analog operation crash safety: leftovers never poison the inventory", 
 		await mkdir(staging)
 		await writeFile(join(staging, "intent.tmp"), "{")
 		vanish = staging
+		await evidence.auditAnalog()
+		expect(vanish).toBeNull()
+		expect(evidence.analogAuthorityReady).toBe(true)
 		const op = evidence.beginAnalog({
 			discoveryId: store.list({}).items[0]!.id,
 			observationId: "o1",
@@ -896,17 +899,21 @@ describe("analog operation crash safety: directory fsync and repeated residue se
 			},
 			checkpoint: async () => undefined,
 		})
-		// Start, then each admission's and settlement's scan: one folder searched once.
+		// Admissions never scan; the start and each audit (which meets the residue and runs the
+		// full scan) try the move again: one folder searched once.
 		expect((await record(life)).outcome).toBe("finalized")
+		expect(refused).toBe(1)
+		await life.evidence.auditAnalog()
+		await life.evidence.auditAnalog()
 		expect((await record(life)).outcome).toBe("finalized")
-		expect(refused).toBeGreaterThanOrEqual(3)
+		expect(refused).toBe(3)
 		expect(probes).toBe(1)
 		// A new analog folder may hold the media: the next scan searches again (two folders).
 		await mkdir(join(root, "recordings", "analog", "d_new"))
-		const before = refused
-		expect((await record(life)).outcome).toBe("finalized")
-		expect(refused).toBeGreaterThan(before)
+		await life.evidence.auditAnalog()
+		expect(refused).toBe(4)
 		expect(probes).toBe(3)
+		expect(life.evidence.analogAuthorityReady).toBe(true)
 		expect(existsSync(join(ops(root), id))).toBe(true)
 	})
 })

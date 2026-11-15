@@ -372,6 +372,105 @@ interface Inventory {
 	cleanup: Set<string>
 	intents: Map<string, Intent>
 	opBytes: Map<string, number>
+	/** Metadata bytes per operation id, so a refreshed id credits back exactly what it added. */
+	opMetadata: Map<string, number>
+	/** Artifact (root-relative path) to its operation id: ownsArtifact without a walk. */
+	artifacts: Map<string, string>
+}
+/** Which of an operation id's three names (cleanup marker, staging folder, folder) exist. */
+interface Presence {
+	cleanup: boolean
+	staging: boolean
+	folder: boolean
+}
+interface OperationListing {
+	ids: Map<string, Presence>
+	/** A name that is none of them: fail closed. */
+	invalid: boolean
+	setAsidePresent: boolean
+}
+/** One operation id's share of the inventory (scanOperation). */
+interface OperationScan {
+	id: string
+	bytes: number
+	metadataBytes: number
+	unknown: boolean
+	/** Its folder's intent.json, else its cleanup marker's; null when neither parses. */
+	intent: Intent | null
+	cleanup: boolean
+	/** Verified crash residue to move aside (staging folder, folder). */
+	residue: { name: string; id: string; reason: AnalogSetAsideReason }[]
+}
+function emptyInventory(): Inventory {
+	return {
+		bytes: 0,
+		metadataBytes: 0,
+		unknown: false,
+		cleanup: new Set(),
+		intents: new Map(),
+		opBytes: new Map(),
+		opMetadata: new Map(),
+		artifacts: new Map(),
+	}
+}
+/** Removes `id`'s share from the totals and indexes (the inverse of addOperation). */
+function dropOperation(inventory: Inventory, id: string): void {
+	inventory.bytes -= inventory.opBytes.get(id) ?? 0
+	inventory.metadataBytes -= inventory.opMetadata.get(id) ?? 0
+	inventory.opBytes.delete(id)
+	inventory.opMetadata.delete(id)
+	const intent = inventory.intents.get(id)
+	if (intent && inventory.artifacts.get(intent.artifact) === id)
+		inventory.artifacts.delete(intent.artifact)
+	inventory.intents.delete(id)
+	inventory.cleanup.delete(id)
+}
+/** Adds a scanned id's share (after dropOperation of the same id, or into a fresh inventory). */
+function addOperation(inventory: Inventory, scan: OperationScan): void {
+	if (scan.unknown) inventory.unknown = true
+	if (scan.bytes > 0) {
+		inventory.bytes += scan.bytes
+		inventory.opBytes.set(scan.id, scan.bytes)
+	}
+	if (scan.metadataBytes > 0) {
+		inventory.metadataBytes += scan.metadataBytes
+		inventory.opMetadata.set(scan.id, scan.metadataBytes)
+	}
+	if (scan.cleanup) inventory.cleanup.add(scan.id)
+	if (scan.intent) {
+		inventory.intents.set(scan.id, scan.intent)
+		inventory.artifacts.set(scan.intent.artifact, scan.id)
+	}
+}
+/**
+ * Operation ids a full scan reads at once: 8 = twice libuv's default thread pool of 4, enough
+ * to keep every pool thread busy (each id is a chain of dependent lstat/open/read calls), small
+ * enough that MAX_RECOVERY_OPERATIONS ids never queue more than 8 chains.
+ */
+const SCAN_CONCURRENCY = 8
+/**
+ * Operation ids an audit reads at once: 1, so a background audit never queues more than one
+ * file system call ahead of a recording's own writes on the shared thread pool.
+ */
+const AUDIT_CONCURRENCY = 1
+/** Runs `fn` over `items` with at most `limit` in flight; results in input order. */
+async function mapLimited<T, R>(
+	items: readonly T[],
+	limit: number,
+	fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+	const results = new Array<R>(items.length)
+	let next = 0
+	const worker = async (): Promise<void> => {
+		while (next < items.length) {
+			const index = next++
+			results[index] = await fn(items[index]!)
+		}
+	}
+	await Promise.all(
+		Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+	)
+	return results
 }
 interface Operation {
 	intent: Intent
@@ -477,14 +576,13 @@ export class AnalogOperations {
 	private readonly unconfirmedReads = new Set<FileHandle>()
 	private readonly io: AnalogOperationIo
 	private lock: Promise<void> = Promise.resolve()
-	private inventory: Inventory = {
-		bytes: 0,
-		metadataBytes: 0,
-		unknown: true,
-		cleanup: new Set(),
-		intents: new Map(),
-		opBytes: new Map(),
-	}
+	private inventory: Inventory = { ...emptyInventory(), unknown: true }
+	/** Counts full scans: an audit begun before one never applies its older reads. */
+	private scanEpoch = 0
+	/** A refresh or an audit met crash residue: the next audit runs the full scan (set-aside). */
+	private residuePending = false
+	/** Ids this process changed since the running audit began (null: no audit running). */
+	private auditTouched: Set<string> | null = null
 	private readonly uncertainResidue = new Map<
 		string,
 		{ discoveryId: string; bytes: number; descriptors: ReadonlySet<WavHandle> }
@@ -694,89 +792,122 @@ export class AnalogOperations {
 		if (!this.context.admits(op.intent.discoveryId)) return "discovery-removed"
 		return null
 	}
+	/**
+	 * Admission. Only the reservation is exclusive: the capacity checks against the inventory and
+	 * the outstanding reservations, then the reservation itself, in one synchronous step under the
+	 * lock, so concurrent admissions never share free space. The measurements it compares (free
+	 * disk, the other recordings' bytes) are taken before it, and the operation's folder is built
+	 * after it: an admitted, active operation's files are its own (every scan counts an active
+	 * id's folders as owned, retention and deletion leave its discovery alone), so no other step
+	 * needs the lock to exclude them. The inventory is kept current by every change this process
+	 * makes (refresh) and by the audit for outside ones: no scan here, so admission costs the same
+	 * at any store size.
+	 */
 	private async admit(op: Operation): Promise<void> {
+		const unavailable = (): WaveKitError =>
+			coded("recovery-incomplete", "Analog inventory/authority unavailable")
+		if (!this.ready) throw unavailable()
+		this.valid(op)
+		await this.checkpoint("reserve", op.intent.operationId)
+		this.valid(op)
+		await this.safeDirectory(dirname(this.finalPath(op.intent)), true, op)
+		this.valid(op)
+		let free: number
+		try {
+			free = await this.context.freeBytes()
+		} catch (cause) {
+			throw coded("disk-unavailable", "Free disk unavailable", cause)
+		}
+		if (!Number.isFinite(free) || free < 0)
+			throw coded("disk-unavailable", "Invalid free disk measurement")
+		const legacy = await this.context.legacyBytes()
+		this.valid(op)
 		await this.exclusive(async () => {
-			if (!this.ready)
-				throw coded(
-					"recovery-incomplete",
-					"Analog inventory/authority unavailable",
-				)
-			this.valid(op)
-			await this.checkpoint("reserve", op.intent.operationId)
-			this.valid(op)
-			await this.safeDirectory(dirname(this.finalPath(op.intent)), true, op)
-			this.valid(op)
-			await this.scanInventory()
+			if (!this.ready) throw unavailable()
 			if (this.inventory.unknown)
 				throw coded("recovery-incomplete", "Unknown recording inventory")
-			if (this.inventory.intents.size >= MAX_RECOVERY_OPERATIONS)
+			if (
+				this.inventory.intents.size + this.unpublished() >=
+				MAX_RECOVERY_OPERATIONS
+			)
 				throw coded("storage-cap", "Operation inventory limit")
-			let free: number
-			try {
-				free = await this.context.freeBytes()
-			} catch (cause) {
-				throw coded("disk-unavailable", "Free disk unavailable", cause)
-			}
-			if (!Number.isFinite(free) || free < 0)
-				throw coded("disk-unavailable", "Invalid free disk measurement")
 			this.valid(op)
+			// Space reserved and not yet written: free disk measured before the lock has not seen
+			// it, so it is subtracted here (writes since only make the check stricter).
 			const outstanding = this.reservedUnused() + this.uncertainUnused()
 			if (free - outstanding - RESERVATION < this.context.limits().minFreeBytes)
 				throw coded("disk-low", "Insufficient reserved free disk")
 			if (
-				this.inventory.bytes +
-					(await this.context.legacyBytes()) +
-					outstanding +
-					RESERVATION >
+				this.inventory.bytes + legacy + outstanding + RESERVATION >
 				this.context.limits().maxBytes
 			)
 				throw coded("storage-cap", "Recording storage cap")
-			this.valid(op)
 			op.reservation = true
-			await this.safeDirectory(
-				dirname(this.opDir(op.intent.operationId)),
-				true,
-				op,
-			)
-			// Built under a staging name, published by one rename once intent.json is synced: a
-			// crash anywhere before leaves a folder recovery recognises as residue (no media).
-			const id = op.intent.operationId
-			const staging = this.stagingDir(id)
-			await mkdir(staging)
-			op.ownedDirectory = true
-			op.staged = true
-			await this.checkpoint("staging-dir", id)
-			await this.safeDirectory(staging, false, op)
-			this.valid(op)
-			await this.publishIntent(op, staging)
-			this.valid(op)
-			await this.syncDirectory(staging, "staging")
-			await this.checkpoint("staging-synced", id)
-			this.valid(op)
-			await this.safeDirectory(dirname(this.opDir(id)), false, op)
-			// rename(2) silently replaces an existing empty directory on Linux and macOS, so the
-			// lstat below is a check, not an exclusive create. Acceptable: the id is a fresh random
-			// UUID and admission holds the lock, so only an outside writer guessing it between this
-			// lstat and the rename could be replaced, and only by an empty directory (no media lost).
-			try {
-				await lstat(this.opDir(id))
-				throw coded("recovery-ambiguous", "Operation folder already exists")
-			} catch (cause) {
-				if (nativeCode(cause) !== "ENOENT") throw cause
-			}
-			await this.moveDirectory(staging, this.opDir(id))
-			op.staged = false
-			await this.syncDirectory(dirname(this.opDir(id)), "operations")
-			this.valid(op)
-			await this.checkpoint("intent", id)
-			this.valid(op)
-			op.writer = await WavFileWriter.open(this.stagePath(op.intent), 8000, {
-				io: this.writerIo(op),
-			})
-			this.valid(op)
-			await this.checkpoint("stage", op.intent.operationId)
-			this.valid(op)
 		})
+		this.valid(op)
+		await this.safeDirectory(
+			dirname(this.opDir(op.intent.operationId)),
+			true,
+			op,
+		)
+		// Built under a staging name, published by one rename once intent.json is synced: a
+		// crash anywhere before leaves a folder recovery recognises as residue (no media).
+		const id = op.intent.operationId
+		const staging = this.stagingDir(id)
+		await mkdir(staging)
+		op.ownedDirectory = true
+		op.staged = true
+		await this.checkpoint("staging-dir", id)
+		await this.safeDirectory(staging, false, op)
+		this.valid(op)
+		await this.publishIntent(op, staging)
+		this.valid(op)
+		await this.syncDirectory(staging, "staging")
+		await this.checkpoint("staging-synced", id)
+		this.valid(op)
+		await this.safeDirectory(dirname(this.opDir(id)), false, op)
+		// rename(2) silently replaces an existing empty directory on Linux and macOS, so the
+		// lstat below is a check, not an exclusive create. Acceptable: the id is a fresh random
+		// UUID nothing else in this process names, so only an outside writer guessing it between
+		// this lstat and the rename could be replaced, and only by an empty directory (no media lost).
+		try {
+			await lstat(this.opDir(id))
+			throw coded("recovery-ambiguous", "Operation folder already exists")
+		} catch (cause) {
+			if (nativeCode(cause) !== "ENOENT") throw cause
+		}
+		await this.moveDirectory(staging, this.opDir(id))
+		op.staged = false
+		// Published: its intent counts toward the operation bound from here (the bytes are
+		// within its reservation). The settlement's refresh replaces this with what is on disk.
+		this.auditTouched?.add(id)
+		dropOperation(this.inventory, id)
+		addOperation(this.inventory, {
+			id,
+			bytes: 0,
+			metadataBytes: 0,
+			unknown: false,
+			intent: op.intent,
+			cleanup: false,
+			residue: [],
+		})
+		await this.syncDirectory(dirname(this.opDir(id)), "operations")
+		this.valid(op)
+		await this.checkpoint("intent", id)
+		this.valid(op)
+		op.writer = await WavFileWriter.open(this.stagePath(op.intent), 8000, {
+			io: this.writerIo(op),
+		})
+		this.valid(op)
+		await this.checkpoint("stage", op.intent.operationId)
+		this.valid(op)
+	}
+	/** Reserved operations whose intent is not inventoried yet (their folder is being built). */
+	private unpublished(): number {
+		let count = 0
+		for (const [id, op] of this.active)
+			if (op.reservation && !this.inventory.intents.has(id)) count++
+		return count
 	}
 	private reservedUnused(): number {
 		let bytes = 0
@@ -1164,14 +1295,7 @@ export class AnalogOperations {
 					cleanup = "pending"
 					error = op.foreignMarker ? "recovery-ambiguous" : "cleanup-failed"
 				}
-				await this.exclusive(async () => {
-					try {
-						await this.scanInventory()
-					} catch {
-						this.inventory.unknown = true
-					}
-					op.reservation = false
-				})
+				await this.settleInventory(op)
 				const slot = this.available.get(op.intent.alias)
 				if (slot && !slot.available) this.available.delete(op.intent.alias)
 				op.decision = this.makeReceipt(
@@ -1201,19 +1325,34 @@ export class AnalogOperations {
 			} catch {
 				/* retained and inventoried */
 			}
-			await this.exclusive(async () => {
-				try {
-					await this.scanInventory()
-				} catch {
-					this.inventory.unknown = true
-				}
-				op.reservation = false
-			})
+			await this.settleInventory(op)
 		}
 		const result = op.decision!
 		this.active.delete(op.intent.operationId)
 		op.resolve(result)
 		return result
+	}
+	/**
+	 * A settling operation's files are final (no step of this process changes them any more):
+	 * they are read outside the lock, then swapped into the inventory with its reservation
+	 * released in one synchronous step under it. An unknown inventory runs the full scan instead.
+	 */
+	private async settleInventory(op: Operation): Promise<void> {
+		let scans: OperationScan[] | null
+		try {
+			scans = await this.scanIds([op.intent.operationId])
+		} catch {
+			scans = null
+		}
+		await this.exclusive(async () => {
+			try {
+				if (scans === null || this.inventory.unknown) await this.scanInventory()
+				else this.applyScans(scans)
+			} catch {
+				this.inventory.unknown = true
+			}
+			op.reservation = false
+		})
 	}
 	private makeReceipt(
 		op: Operation,
@@ -1622,11 +1761,8 @@ export class AnalogOperations {
 			// An operation folder's files were counted as metadata by the scan; a staging folder's
 			// never were (its name differs from the id). Moved out, they no longer count.
 			if (item.name === item.id) {
-				const bytes = next.opBytes.get(item.id) ?? 0
-				next.bytes -= bytes
-				next.metadataBytes -= bytes
 				// A staging item leaves the id's bytes alone: they belong to a published folder.
-				next.opBytes.delete(item.id)
+				dropOperation(next, item.id)
 			}
 			await this.checkpoint("set-aside", item.id)
 		}
@@ -1660,25 +1796,96 @@ export class AnalogOperations {
 			return false
 		}
 	}
-	private async scanInventory(): Promise<void> {
-		if (this.unconfirmedReads.size) {
-			this.inventory.unknown = true
-			return
+	/**
+	 * The `.analog-operations/` listing grouped by operation id: which of its cleanup marker,
+	 * staging folder and operation folder are present. `invalid` when a name is not one of
+	 * them (fail closed). Throws when the root or the folder is unsafe or unlistable.
+	 */
+	private async listOperations(): Promise<OperationListing> {
+		await this.anchorRoot()
+		await this.safeDirectory(this.root, true)
+		const base = join(this.root, ".analog-operations")
+		await this.safeDirectory(base, true)
+		const all = await this.children(base, MAX_RECOVERY_OPERATIONS * 2)
+		// Cleanups run outside the lock: any listed entry may vanish from here on.
+		await this.checkpoint("inventory-listed", "")
+		const ids = new Map<string, Presence>()
+		let invalid = false
+		let setAsidePresent = false
+		const presence = (id: string): Presence => {
+			let entry = ids.get(id)
+			if (!entry) {
+				entry = { cleanup: false, staging: false, folder: false }
+				ids.set(id, entry)
+			}
+			return entry
 		}
-		const next: Inventory = {
+		for (const name of all) {
+			if (name === SET_ASIDE_DIR) {
+				setAsidePresent = true
+				continue
+			}
+			const id = name.startsWith(STAGING_PREFIX)
+				? name.slice(STAGING_PREFIX.length)
+				: name.endsWith(".cleanup")
+					? name.slice(0, -8)
+					: name
+			if (!UUIDSchema.safeParse(id).success) {
+				invalid = true
+				continue
+			}
+			const entry = presence(id)
+			if (name.startsWith(STAGING_PREFIX)) entry.staging = true
+			else if (name.endsWith(".cleanup")) entry.cleanup = true
+			else entry.folder = true
+		}
+		// Staging names never counted toward the operation bound (they carry no published intent).
+		const published = [...ids.values()].filter(
+			entry => entry.cleanup || entry.folder,
+		).length
+		if (published > MAX_RECOVERY_OPERATIONS)
+			throw coded("recovery-incomplete", "Operation inventory overflow")
+		return { ids, invalid, setAsidePresent }
+	}
+	/** One id's entries on disk now (lstat of each name): a doubt other than ENOENT is unknown. */
+	private async presenceOf(id: string): Promise<Presence | null> {
+		const present = async (path: string): Promise<boolean | null> => {
+			try {
+				await lstat(path)
+				return true
+			} catch (cause) {
+				return nativeCode(cause) === "ENOENT" ? false : null
+			}
+		}
+		const [cleanup, staging, folder] = await Promise.all([
+			present(this.cleanupPath(id)),
+			present(this.stagingDir(id)),
+			present(this.opDir(id)),
+		])
+		if (cleanup === null || staging === null || folder === null) return null
+		return { cleanup, staging, folder }
+	}
+	/**
+	 * One operation id's share of the inventory: its cleanup marker, staging folder and operation
+	 * folder (as `has` says they were listed) and the media its intent names. Reads only; the
+	 * checks are the full scan's, per id. Hard links are counted once within the id (a link
+	 * across ids, never made here, counts twice: more, never less).
+	 */
+	private async scanOperation(
+		id: string,
+		has: Presence,
+	): Promise<OperationScan> {
+		const out: OperationScan = {
+			id,
 			bytes: 0,
 			metadataBytes: 0,
-			unknown: this.unconfirmedReads.size > 0,
-			cleanup: new Set(),
-			intents: new Map(),
-			opBytes: new Map(),
+			unknown: false,
+			intent: null,
+			cleanup: false,
+			residue: [],
 		}
 		const inodes = new Set<string>()
-		const account = async (
-			path: string,
-			id: string,
-			metadata: boolean,
-		): Promise<void> => {
+		const account = async (path: string, metadata: boolean): Promise<void> => {
 			try {
 				const info = await lstat(path)
 				if (
@@ -1687,199 +1894,209 @@ export class AnalogOperations {
 					!Number.isSafeInteger(info.size) ||
 					info.size < 0
 				) {
-					next.unknown = true
+					out.unknown = true
 					return
 				}
 				const inode = `${info.dev}:${info.ino}`
 				if (inodes.has(inode)) return
 				inodes.add(inode)
-				next.bytes += info.size
-				if (metadata) next.metadataBytes += info.size
-				next.opBytes.set(id, (next.opBytes.get(id) ?? 0) + info.size)
+				out.bytes += info.size
+				if (metadata) out.metadataBytes += info.size
 			} catch (cause) {
-				if (nativeCode(cause) !== "ENOENT") next.unknown = true
+				if (nativeCode(cause) !== "ENOENT") out.unknown = true
 			}
 		}
-		try {
-			await this.anchorRoot()
-			await this.safeDirectory(this.root, true)
-			const base = join(this.root, ".analog-operations")
-			await this.safeDirectory(base, true)
-			const all = await this.children(base, MAX_RECOVERY_OPERATIONS * 2)
-			// Cleanups run outside the lock: any listed entry may vanish from here on.
-			await this.checkpoint("inventory-listed", "")
-			const setAsidePresent = all.includes(SET_ASIDE_DIR)
-			const stagingNames = all.filter(name => name.startsWith(STAGING_PREFIX))
-			const names = all.filter(
-				name => name !== SET_ASIDE_DIR && !name.startsWith(STAGING_PREFIX),
-			)
-			/** Verified crash residue (no media, nothing published) to move aside. */
-			const residue: {
-				name: string
-				id: string
-				reason: AnalogSetAsideReason
-			}[] = []
-			const operationIds = new Set(
-				names.map(name =>
-					name.endsWith(".cleanup") ? name.slice(0, -8) : name,
-				),
-			)
-			if (operationIds.size > MAX_RECOVERY_OPERATIONS)
-				throw coded("recovery-incomplete", "Operation inventory overflow")
-			const cleanup = new Map<string, Intent>()
-			for (const name of names.filter(name => name.endsWith(".cleanup"))) {
-				const id = name.slice(0, -8)
-				try {
-					if (!UUIDSchema.safeParse(id).success)
-						throw coded("recovery-incomplete", "Invalid cleanup owner")
-					const intent = IntentSchema.parse(
-						await this.readJson(this.cleanupPath(id)),
-					)
-					if (intent.operationId !== id)
-						throw coded("recovery-incomplete", "Cleanup ownership mismatch")
-					cleanup.set(id, intent)
-					next.cleanup.add(id)
-					next.intents.set(id, intent)
-					await account(this.cleanupPath(id), id, true)
-				} catch {
-					next.unknown = true
-				}
-			}
-			for (const name of stagingNames) {
-				const id = name.slice(STAGING_PREFIX.length)
-				const dir = this.stagingDir(id)
-				if (!UUIDSchema.safeParse(id).success) {
-					next.unknown = true
-					continue
-				}
-				// Ownership first: this process's own creation, or its unverifiable residue, is
-				// counted and kept whatever its state, and a staging folder never holds media, so
-				// one gone since the listing (a concurrent cleanupStaging) is simply gone.
-				const owned = this.active.has(id) || this.uncertainResidue.has(id)
-				try {
-					await this.safeDirectory(dir)
-				} catch (cause) {
-					if (nativeCode(cause) !== "ENOENT") next.unknown = true
-					continue
-				}
-				if (owned) {
-					for (const child of await this.children(dir, 8))
-						await account(join(dir, child), id, true)
-					continue
-				}
-				if (await this.metadataOnly(dir, ["intent.tmp", "intent.json"]))
-					residue.push({ name, id, reason: "staging-residue" })
-				else next.unknown = true
-			}
-			for (const id of names.filter(name => !name.endsWith(".cleanup"))) {
-				if (!UUIDSchema.safeParse(id).success) {
-					next.unknown = true
-					continue
-				}
-				const dir = this.opDir(id)
-				// An operation of this process mid-cleanup, or one a cleanup marker governs, may
-				// remove its folder after the listing: gone, not unknown. Anyone else's: fail closed.
-				const removable = this.active.has(id) || cleanup.has(id)
-				try {
-					await this.safeDirectory(dir)
-				} catch (cause) {
-					if (!removable || nativeCode(cause) !== "ENOENT") next.unknown = true
-					continue
-				}
-				let metadataBytes = 0
-				const directoryNames = await this.children(dir, 8)
-				if (
-					cleanup.has(id) &&
-					directoryNames.some(name => name !== "intent.json")
+		let cleanup: Intent | null = null
+		if (has.cleanup) {
+			try {
+				if (!UUIDSchema.safeParse(id).success)
+					throw coded("recovery-incomplete", "Invalid cleanup owner")
+				const intent = IntentSchema.parse(
+					await this.readJson(this.cleanupPath(id)),
 				)
-					next.unknown = true
-				for (const name of directoryNames) {
-					const metadata = name !== "payload.wav.part"
-					if (
-						![
-							"intent.json",
-							"intent.tmp",
-							"receipt.json",
-							"receipt.tmp",
-							"payload.wav.part",
-						].includes(name)
-					)
-						next.unknown = true
-					const before = next.bytes
-					await account(join(dir, name), id, metadata)
-					if (metadata) metadataBytes += next.bytes - before
-				}
-				if (metadataBytes > MAX_OPERATION_METADATA_BYTES) next.unknown = true
-				try {
-					const intent = IntentSchema.parse(
-						await this.readJson(join(dir, "intent.json")),
-					)
-					if (intent.operationId !== id) {
-						next.unknown = true
-						continue
-					}
-					if (
-						cleanup.has(id) &&
-						JSON.stringify(cleanup.get(id)) !== JSON.stringify(intent)
-					)
-						next.unknown = true
-					next.intents.set(id, intent)
-					await this.safeDirectory(dirname(this.finalPath(intent)))
-					await account(this.finalPath(intent), id, false)
-				} catch (cause) {
-					if (nativeCode(cause) === "ENOENT" && cleanup.has(id)) {
-						// Transferred authority only permits a known empty leftover directory.
-						if ((await this.children(dir, 1)).length) next.unknown = true
-						continue
-					}
-					if (nativeCode(cause) === "ENOENT" && next.intents.has(id)) continue
-					// An operation of this process mid-cleanup (cleanup runs outside the lock).
-					if (this.active.has(id)) continue
-					if (cleanup.has(id) || this.uncertainResidue.has(id)) {
-						next.unknown = true
-						continue
-					}
-					// Crash residue of an older image (mkdir before the intent link) or an intent
-					// that cannot parse: set aside only when provably holding no media and no
-					// receipt; anything else (a read error, other files) stays fail closed.
-					const parseFailure =
-						cause instanceof SyntaxError || cause instanceof z.ZodError
-					let reason: AnalogSetAsideReason | null = null
-					if (nativeCode(cause) === "ENOENT") {
-						if (
-							(await this.metadataOnly(dir, ["intent.tmp"])) &&
-							(await this.mediaAbsent(id))
-						)
-							reason = "missing-intent"
-					} else if (
-						parseFailure &&
-						(await this.metadataOnly(dir, ["intent.json", "intent.tmp"])) &&
-						(await this.mediaAbsent(id))
-					)
-						reason = "invalid-intent"
-					if (reason) residue.push({ name: id, id, reason })
-					else next.unknown = true
-				}
+				if (intent.operationId !== id)
+					throw coded("recovery-incomplete", "Cleanup ownership mismatch")
+				cleanup = intent
+				out.cleanup = true
+				out.intent = intent
+				await account(this.cleanupPath(id), true)
+			} catch {
+				out.unknown = true
 			}
-			for (const id of [...this.mediaBearing])
-				if (!operationIds.has(id)) this.mediaBearing.delete(id)
-			for (const id of [...this.mediaFree.keys()])
-				if (!operationIds.has(id)) this.mediaFree.delete(id)
-			if (residue.length || setAsidePresent)
-				await this.tendSetAside(base, residue, next)
+		}
+		if (has.staging) await this.scanStaging(id, out, account)
+		if (has.folder) await this.scanFolder(id, cleanup, out, account)
+		if (cleanup) {
+			await account(this.finalPath(cleanup), false)
+			try {
+				await lstat(this.finalPath(cleanup))
+				out.unknown = true // A cleanup disposition never authorizes unexpected replacement media.
+			} catch (cause) {
+				if (nativeCode(cause) !== "ENOENT") out.unknown = true
+			}
+			if (out.bytes > MAX_OPERATION_METADATA_BYTES) out.unknown = true
+		}
+		return out
+	}
+	private async scanStaging(
+		id: string,
+		out: OperationScan,
+		account: (path: string, metadata: boolean) => Promise<void>,
+	): Promise<void> {
+		const dir = this.stagingDir(id)
+		if (!UUIDSchema.safeParse(id).success) {
+			out.unknown = true
+			return
+		}
+		// Ownership first: this process's own creation, or its unverifiable residue, is
+		// counted and kept whatever its state, and a staging folder never holds media, so
+		// one gone since the listing (a concurrent cleanupStaging) is simply gone.
+		const owned = this.active.has(id) || this.uncertainResidue.has(id)
+		try {
+			await this.safeDirectory(dir)
+		} catch (cause) {
+			if (nativeCode(cause) !== "ENOENT") out.unknown = true
+			return
+		}
+		if (owned) {
+			for (const child of await this.children(dir, 8))
+				await account(join(dir, child), true)
+			return
+		}
+		if (await this.metadataOnly(dir, ["intent.tmp", "intent.json"]))
+			out.residue.push({
+				name: `${STAGING_PREFIX}${id}`,
+				id,
+				reason: "staging-residue",
+			})
+		else out.unknown = true
+	}
+	private async scanFolder(
+		id: string,
+		cleanup: Intent | null,
+		out: OperationScan,
+		account: (path: string, metadata: boolean) => Promise<void>,
+	): Promise<void> {
+		if (!UUIDSchema.safeParse(id).success) {
+			out.unknown = true
+			return
+		}
+		const dir = this.opDir(id)
+		// An operation of this process mid-cleanup, or one a cleanup marker governs, may
+		// remove its folder after the listing: gone, not unknown. Anyone else's: fail closed.
+		const removable = this.active.has(id) || cleanup !== null
+		try {
+			await this.safeDirectory(dir)
+		} catch (cause) {
+			if (!removable || nativeCode(cause) !== "ENOENT") out.unknown = true
+			return
+		}
+		let metadataBytes = 0
+		const directoryNames = await this.children(dir, 8)
+		if (cleanup && directoryNames.some(name => name !== "intent.json"))
+			out.unknown = true
+		for (const name of directoryNames) {
+			const metadata = name !== "payload.wav.part"
+			if (
+				![
+					"intent.json",
+					"intent.tmp",
+					"receipt.json",
+					"receipt.tmp",
+					"payload.wav.part",
+				].includes(name)
+			)
+				out.unknown = true
+			const before = out.bytes
+			await account(join(dir, name), metadata)
+			if (metadata) metadataBytes += out.bytes - before
+		}
+		if (metadataBytes > MAX_OPERATION_METADATA_BYTES) out.unknown = true
+		try {
+			const intent = IntentSchema.parse(
+				await this.readJson(join(dir, "intent.json")),
+			)
+			if (intent.operationId !== id) {
+				out.unknown = true
+				return
+			}
+			if (cleanup && JSON.stringify(cleanup) !== JSON.stringify(intent))
+				out.unknown = true
+			out.intent = intent
+			await this.safeDirectory(dirname(this.finalPath(intent)))
+			await account(this.finalPath(intent), false)
+		} catch (cause) {
+			if (nativeCode(cause) === "ENOENT" && cleanup) {
+				// Transferred authority only permits a known empty leftover directory.
+				if ((await this.children(dir, 1)).length) out.unknown = true
+				return
+			}
+			// The intent parsed, its media folder is gone: no media to count.
+			if (nativeCode(cause) === "ENOENT" && out.intent) return
+			// An operation of this process mid-cleanup (cleanup runs outside the lock).
+			if (this.active.has(id)) return
+			if (cleanup || this.uncertainResidue.has(id)) {
+				out.unknown = true
+				return
+			}
+			// Crash residue of an older image (mkdir before the intent link) or an intent
+			// that cannot parse: set aside only when provably holding no media and no
+			// receipt; anything else (a read error, other files) stays fail closed.
+			const parseFailure =
+				cause instanceof SyntaxError || cause instanceof z.ZodError
+			let reason: AnalogSetAsideReason | null = null
+			if (nativeCode(cause) === "ENOENT") {
+				if (
+					(await this.metadataOnly(dir, ["intent.tmp"])) &&
+					(await this.mediaAbsent(id))
+				)
+					reason = "missing-intent"
+			} else if (
+				parseFailure &&
+				(await this.metadataOnly(dir, ["intent.json", "intent.tmp"])) &&
+				(await this.mediaAbsent(id))
+			)
+				reason = "invalid-intent"
+			if (reason) out.residue.push({ name: id, id, reason })
+			else out.unknown = true
+		}
+	}
+	/**
+	 * The full scan: every operation id listed, SCAN_CONCURRENCY at once (reads only), then the
+	 * set-aside moves, under the lock. Replaces the inventory; the only path that can clear an
+	 * unknown one. Startup recovery runs it, so does any refresh while the inventory is unknown
+	 * and an audit that met crash residue; steady-state work refreshes single ids instead.
+	 */
+	private async scanInventory(): Promise<void> {
+		this.scanEpoch++
+		this.residuePending = false
+		if (this.unconfirmedReads.size) {
+			this.inventory.unknown = true
+			return
+		}
+		const next = emptyInventory()
+		try {
+			const listing = await this.listOperations()
+			if (listing.invalid) next.unknown = true
+			const scans = await mapLimited(
+				[...listing.ids],
+				SCAN_CONCURRENCY,
+				([id, has]) => this.scanOperation(id, has),
+			)
+			const residue: OperationScan["residue"] = []
+			for (const scan of scans) {
+				addOperation(next, scan)
+				residue.push(...scan.residue)
+			}
+			this.pruneSearches(listing.ids)
+			if (residue.length || listing.setAsidePresent)
+				await this.tendSetAside(
+					join(this.root, ".analog-operations"),
+					residue,
+					next,
+				)
 			else this.setAsideHeld = 0
 			if (next.intents.size > MAX_RECOVERY_OPERATIONS) next.unknown = true
-			for (const [id, intent] of cleanup) {
-				await account(this.finalPath(intent), id, false)
-				try {
-					await lstat(this.finalPath(intent))
-					next.unknown = true // A cleanup disposition never authorizes unexpected replacement media.
-				} catch (cause) {
-					if (nativeCode(cause) !== "ENOENT") next.unknown = true
-				}
-				if ((next.opBytes.get(id) ?? 0) > MAX_OPERATION_METADATA_BYTES)
-					next.unknown = true
-			}
 		} catch {
 			next.unknown = true
 		}
@@ -1889,6 +2106,123 @@ export class AnalogOperations {
 			for (const id of [...this.quarantine.keys()])
 				if (!next.intents.has(id)) this.quarantine.delete(id)
 		this.inventory = next
+	}
+	/** Forgets media searches of ids no longer listed. */
+	private pruneSearches(listed: ReadonlyMap<string, Presence>): void {
+		for (const id of [...this.mediaBearing])
+			if (!listed.has(id)) this.mediaBearing.delete(id)
+		for (const id of [...this.mediaFree.keys()])
+			if (!listed.has(id)) this.mediaFree.delete(id)
+	}
+	/** Scans of `ids` now (reads only, no lock needed); null when a full scan is required. */
+	private async scanIds(
+		ids: Iterable<string>,
+	): Promise<OperationScan[] | null> {
+		if (this.inventory.unknown || this.unconfirmedReads.size) return null
+		try {
+			await this.anchorRoot()
+			await this.safeDirectory(join(this.root, ".analog-operations"), true)
+		} catch {
+			return null
+		}
+		const scans = await mapLimited([...new Set(ids)], 1, async id => {
+			const has = await this.presenceOf(id)
+			if (has) return this.scanOperation(id, has)
+			return {
+				id,
+				bytes: 0,
+				metadataBytes: 0,
+				unknown: true,
+				intent: null,
+				cleanup: false,
+				residue: [],
+			} satisfies OperationScan
+		})
+		return this.unconfirmedReads.size ? null : scans
+	}
+	/**
+	 * Replaces each scanned id's share of the inventory (synchronous: call under the lock). A
+	 * doubtful scan makes the inventory unknown (only a full scan clears it); crash residue
+	 * found here stays counted until a full scan sets it aside.
+	 */
+	private applyScans(scans: readonly OperationScan[]): void {
+		for (const scan of scans) {
+			this.auditTouched?.add(scan.id)
+			dropOperation(this.inventory, scan.id)
+			addOperation(this.inventory, scan)
+			if (scan.residue.length) this.residuePending = true
+			// An explicit delete removed it: no longer quarantined.
+			if (!scan.unknown && !scan.intent) this.quarantine.delete(scan.id)
+		}
+		if (this.inventory.intents.size > MAX_RECOVERY_OPERATIONS)
+			this.inventory.unknown = true
+	}
+	/**
+	 * Brings `ids` up to date after this process changed their files (call under the lock): a
+	 * scan of those ids only, or the full scan while the inventory is unknown.
+	 */
+	private async refresh(ids: Iterable<string>): Promise<void> {
+		const scans = await this.scanIds(ids)
+		if (scans === null) await this.scanInventory()
+		else this.applyScans(scans)
+	}
+	/**
+	 * Re-reads every operation without holding the lock (AUDIT_CONCURRENCY at once), so changes
+	 * made from outside this process (hand edits, tampering) reach the inventory and an
+	 * unexpected one makes it unknown, fail closed, as the full scan would. Each id's result is
+	 * applied under the lock only when nothing of this process touched that id since the audit
+	 * began (an active operation, a refresh, a full scan). Crash residue, or an unknown
+	 * inventory, runs the full scan under the lock instead (it sets residue aside, and only it
+	 * may clear an unknown inventory). One audit at a time; the retention pass runs it.
+	 */
+	async audit(): Promise<void> {
+		if (this.auditTouched || this.stopped || !this.initialized) return
+		if (this.inventory.unknown || this.residuePending) {
+			if (this.context.adapter.authorityHealthy())
+				await this.exclusive(() => this.scanInventory())
+			return
+		}
+		const epoch = this.scanEpoch
+		const touched = new Set<string>()
+		this.auditTouched = touched
+		try {
+			let listing: OperationListing | null
+			try {
+				listing = await this.listOperations()
+			} catch {
+				listing = null
+			}
+			const ids = new Map(listing?.ids ?? [])
+			// Known ids the listing did not show are gone (or a doubtful listing: scanned anyway).
+			for (const id of [
+				...this.inventory.opBytes.keys(),
+				...this.inventory.intents.keys(),
+			])
+				if (!ids.has(id))
+					ids.set(id, { cleanup: false, staging: false, folder: false })
+			const scans = await mapLimited([...ids], AUDIT_CONCURRENCY, ([id, has]) =>
+				this.scanOperation(id, has),
+			)
+			await this.exclusive(async () => {
+				// A full scan replaced the inventory meanwhile: it is newer than this audit.
+				if (this.scanEpoch !== epoch) return
+				if (listing === null || listing.invalid || this.unconfirmedReads.size) {
+					this.inventory.unknown = true
+					return
+				}
+				const fresh = scans.filter(
+					scan => !this.active.has(scan.id) && !touched.has(scan.id),
+				)
+				if (fresh.some(scan => scan.residue.length)) {
+					await this.scanInventory()
+					return
+				}
+				this.applyScans(fresh)
+				this.pruneSearches(listing.ids)
+			})
+		} finally {
+			this.auditTouched = null
+		}
 	}
 
 	recover(): Promise<AnalogReconciliation[]> {
@@ -1931,11 +2265,14 @@ export class AnalogOperations {
 						: (this.inventory.opBytes.get(intent.operationId) ?? null),
 				}))
 			}
+			// The ids reconciliation changed on disk (cleanups, receipt.tmp unlinks): only they
+			// are read again, not every operation.
+			const changed = new Set<string>()
 			for (const intent of this.inventory.intents.values()) {
 				if (this.active.has(intent.operationId)) continue
-				results.push(await this.reconcile(intent))
+				results.push(await this.reconcile(intent, changed))
 			}
-			await this.scanInventory()
+			await this.refresh(changed)
 			this.initialized = true
 			return results
 		})
@@ -1963,7 +2300,10 @@ export class AnalogOperations {
 		if (this.closureUncertain(operationId))
 			throw coded("cleanup-failed", "Descriptor closure remains unconfirmed")
 	}
-	private async reconcile(intent: Intent): Promise<AnalogReconciliation> {
+	private async reconcile(
+		intent: Intent,
+		changed?: Set<string>,
+	): Promise<AnalogReconciliation> {
 		const result = (
 			status: AnalogReconciliation["status"],
 			errorCode: AnalogError | null,
@@ -1992,6 +2332,7 @@ export class AnalogOperations {
 			return result("quarantined", "recovery-incomplete", "authority-unhealthy")
 		if (this.inventory.cleanup.has(intent.operationId)) {
 			try {
+				changed?.add(intent.operationId)
 				await this.context.adapter.inverse(intent.operationId)
 				await this.cleanupOwned(intent, true, false)
 				return { ...result("cleaned", null), residueBytes: 0 }
@@ -2030,6 +2371,7 @@ export class AnalogOperations {
 			)
 				return result("quarantined", "recovery-ambiguous", "unfinalized-listed")
 			try {
+				changed?.add(intent.operationId)
 				await this.context.adapter.inverse(intent.operationId)
 				if (!this.context.adapter.authorityHealthy())
 					return result(
@@ -2081,9 +2423,12 @@ export class AnalogOperations {
 				await this.io.unlink(
 					join(this.opDir(intent.operationId), "receipt.tmp"),
 				)
+				changed?.add(intent.operationId)
 			} catch (cause) {
-				if (nativeCode(cause) !== "ENOENT")
+				if (nativeCode(cause) !== "ENOENT") {
+					changed?.add(intent.operationId)
 					return result("available", "cleanup-failed")
+				}
 			}
 			return result("available", null)
 		} catch {
@@ -2121,7 +2466,7 @@ export class AnalogOperations {
 		return this.exclusive(async () => {
 			if (!this.context.adapter.authorityHealthy())
 				throw coded("recovery-incomplete", "Unknown metadata authority")
-			await this.scanInventory()
+			await this.refresh(this.operationsOf(id))
 			if (this.inventory.unknown)
 				throw coded("recovery-incomplete", "Unknown operation inventory")
 			return (
@@ -2136,6 +2481,13 @@ export class AnalogOperations {
 				)
 			)
 		})
+	}
+	/** Inventoried operation ids of `discoveryId`'s folder. */
+	private operationsOf(discoveryId: string): string[] {
+		const ids: string[] = []
+		for (const [id, intent] of this.inventory.intents)
+			if (intent.discoveryId === discoveryId) ids.push(id)
+		return ids
 	}
 	/**
 	 * A live discovery other than the folder's own and outside `removing` that lists this
@@ -2280,7 +2632,7 @@ export class AnalogOperations {
 		await this.exclusive(async () => {
 			if (!this.context.adapter.authorityHealthy())
 				throw coded("cleanup-failed", "Unknown metadata authority")
-			await this.scanInventory()
+			await this.refresh(this.operationsOf(id))
 			if (this.inventory.unknown)
 				throw coded("cleanup-failed", "Unknown operation inventory")
 			if (
@@ -2298,6 +2650,7 @@ export class AnalogOperations {
 			// WG9 R2: refuse before the first mutation when any owned artifact is kept now.
 			if (owned.some(intent => this.keptArtifact(intent))) throw keptRefusal()
 			for (const intent of owned) {
+				this.auditTouched?.add(intent.operationId)
 				// WG9 R2: a Keep committed during an earlier intent's awaits refuses here, in the same
 				// exclusive section, before the alias, the marker or the metadata is touched.
 				if (this.keptArtifact(intent)) throw keptRefusal()
@@ -2323,7 +2676,7 @@ export class AnalogOperations {
 					if (slot) this.available.set(intent.alias, slot)
 				}
 			}
-			await this.scanInventory()
+			await this.refresh(owned.map(intent => intent.operationId))
 			if (
 				this.inventory.unknown ||
 				[...this.uncertainResidue.values()].some(
@@ -2467,12 +2820,10 @@ export class AnalogOperations {
 		}
 	}
 	ownsArtifact(relativePath: string): boolean {
-		return (
-			[...this.inventory.intents.values()].some(
-				intent => intent.artifact === relativePath,
-			) ||
-			[...this.active.values()].some(op => op.intent.artifact === relativePath)
-		)
+		if (this.inventory.artifacts.has(relativePath)) return true
+		for (const op of this.active.values())
+			if (op.intent.artifact === relativePath) return true
+		return false
 	}
 	/** Fail closed: a throwing port answers protected. */
 	private keptArtifact(intent: Intent): boolean {
@@ -2600,11 +2951,12 @@ export class AnalogOperations {
 					return
 				await this.validateCleanupMarker(intent)
 				if (!stillRetirable()) return
+				this.auditTouched?.add(intent.operationId)
 				await this.context.adapter.inverse(intent.operationId)
 				await this.cleanupOwned(intent, true, true, stillRetirable)
 				this.available.delete(intent.alias)
 				deleted.push(intent.artifact)
-				await this.scanInventory()
+				await this.refresh([intent.operationId])
 			})
 		})
 	}
