@@ -31,7 +31,8 @@ interface IqOptions {
 	front: "csdr" | "chan"
 	chanBin: string
 	paced: boolean
-	afc: boolean
+	/** chanFeed defaults it to true, as parseIqArgs does without --no-afc. */
+	afc?: boolean
 }
 interface FeedResult {
 	discontinuities: number
