@@ -28,17 +28,47 @@ export const AUTO_ROUTE_FIFO_SAMPLES =
 	(LIVE_AUDIO_AUTO_ROUTE_RATE * LIVE_AUDIO_AUTO_ROUTE_FIFO_MS) / 1000
 
 /**
+ * First `VC*` voice line to the first `SLOT` line of an over, at most, in the PROVISIONAL
+ * dv-latency seeds (tests/mocks/fixtures/synthetic/dv-latency-*.json, 19 overs): 600.0 ms in
+ * direct mode (every direct scene but one short over), 240.0 ms behind a repeater.
+ */
+export const AUTO_ROUTE_SEED_VOICE_TO_SLOT_MS = 600
+/** One DMR voice burst: 60 ms (a 360 ms superframe of six bursts). */
+export const AUTO_ROUTE_DMR_BURST_MS = 60
+/**
+ * dsd-fme adapter announce hold: the first `SLOT` line creates a pending call announced no
+ * earlier than this after it (`CALL_START_DELAY_MS = 100`, src/decoders/builtin/dsd-fme.ts:578;
+ * `emitAfter: nowMs + delayMs`, dsd-fme.ts:2917 and 2941).
+ */
+export const AUTO_ROUTE_ADAPTER_ANNOUNCE_HOLD_MS = 100
+/**
+ * dsd-fme adapter promotion period: the pending call is promoted (call_start, and the
+ * `voice-call` event the router hears, dsd-fme.ts:1021) only by the call timer, every
+ * `CALL_TIMEOUT_CHECK_INTERVAL_MS = 500` (dsd-fme.ts:575, the setInterval at 943-945,
+ * `checkPendingCallEmission` at 1120 and 1136-1149). The timer's phase is free, so the call
+ * event comes 100 to 600 ms after the `SLOT` line.
+ */
+export const AUTO_ROUTE_ADAPTER_PROMOTION_PERIOD_MS = 500
+/** The seeds' guessed line latency (decoded voice to its printed line): 40 ms. */
+export const AUTO_ROUTE_SEED_LINE_LATENCY_MS = 40
+
+/**
  * Pending voice: decoded voice a decoder hands over before its call is active and explicitly
  * clear is kept this long (per decoder, by arrival time and by content) and admitted when the
- * call turns active and clear. Sized from the PROVISIONAL dv-latency seeds
- * (tests/mocks/fixtures/synthetic/dv-latency-*.json, 19 overs): the first `VC*` voice line to
- * the first `SLOT` line (the call start) is 600.0 ms at most (direct mode, every scene but one
- * short over; 240 ms behind a repeater). In that time the decoder produces the voice of 11
- * bursts of 60 ms (the `VC*` burst through the burst whose embedded LC starts the call):
- * 600 + 60 = 660 ms, plus one 60 ms burst of margin for the seeds' guessed 40 ms line latency:
- * 720 ms (5 760 samples at 8 kHz, 11.5 kB per decoder).
+ * call turns active and clear. The router learns of the call only from its `voice-call` event,
+ * so the bound runs from the first voice to that event: the seeds' first voice to `SLOT`
+ * (600 ms), the voice of the burst that line closes (60 ms), the adapter's announce hold
+ * (100 ms) and its promotion period (500 ms, the worst timer phase), plus one burst of margin
+ * (60 ms) and the seeds' line latency (40 ms): 600 + 60 + 100 + 500 + 60 + 40 = 1 360 ms
+ * (10 880 samples at 8 kHz). Memory per decoder: see `PendingVoice`.
  */
-export const AUTO_ROUTE_PENDING_VOICE_MS = 720
+export const AUTO_ROUTE_PENDING_VOICE_MS =
+	AUTO_ROUTE_SEED_VOICE_TO_SLOT_MS +
+	AUTO_ROUTE_DMR_BURST_MS +
+	AUTO_ROUTE_ADAPTER_ANNOUNCE_HOLD_MS +
+	AUTO_ROUTE_ADAPTER_PROMOTION_PERIOD_MS +
+	AUTO_ROUTE_DMR_BURST_MS +
+	AUTO_ROUTE_SEED_LINE_LATENCY_MS
 
 /**
  * End guard of pending voice: after a clear call ends, voice handed over with no call is the

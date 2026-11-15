@@ -2627,7 +2627,7 @@ Fields:
 - `autoRoute` — the auto listen route (`GET /auto`), present whenever the live
   audio HTTP server listens: `{ active, protocol?, decoderId?, slot?, since,
 httpUrl, wavUrl, clientCount, digitalAvailable, underruns, zeroFilledSamples?,
-droppedMs, clockRebases, latencyMs, listenMode?, pendingListenMode?, reason? }`. `active` is `analog`, `digital` or `none`;
+droppedMs, pendingOverwrittenMs?, clockRebases, latencyMs, listenMode?, pendingListenMode?, reason? }`. `active` is `analog`, `digital` or `none`;
   `protocol` (when the call reports one), `decoderId` and `slot` (a number or
   `null`) are present only while `active` is `digital`. `since` is the ISO time of
   the last switch. `httpUrl` and `wavUrl` follow the `/stream` URL rules above
@@ -2639,6 +2639,9 @@ droppedMs, clockRebases, latencyMs, listenMode?, pendingListenMode?, reason? }`.
   `droppedMs` the audio dropped on overflow, preemption or invalidation (not the
   analog a decoded call takes over, nor decoded voice still waiting for its call to turn
   clear: see [GET /auto](#get-httplocalhost8081auto-and-autowav)),
+  `pendingOverwrittenMs` (cumulative, a diagnostic outside `droppedMs`; absent from older
+  cores) the decoded voice that waited for its call and was let go by the 1 360 ms pending
+  bound, so a non-zero value means a call's start was cut,
   `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
   selected source's backlog plus one 20 ms block. `listenMode` is the listen mode in
   force on the route: `config.listenMode`, except `analog` while the squelch is `open`,
@@ -2899,9 +2902,16 @@ is the call's own carrier, so it (buzz) plays from the call's start until the de
 the clear call with 200 ms of its voice queued, then only the decoded call, with no buzz after
 it; the analog let go is not counted in `droppedMs`. Decoded voice that arrives
 before its call is active and explicitly clear (the decoder has not yet reported the call, or
-its encryption is not known yet) waits, up to 720 ms per decoder, and plays first, in order,
+its encryption is not known yet) waits, up to 1 360 ms per decoder, and plays first, in order,
 when the call turns clear; it is let go (not counted) if the call ends encrypted or still
-unresolved, or if the decoder stops covering the tuned channel. Voice the decoder hands over
+unresolved, or if the decoder stops covering the tuned channel. The bound covers the time
+dsd-fme takes to report a call: up to 600 ms from the first voice to the call's first link
+control line, then up to 600 ms more before the adapter announces the call (a 100 ms hold,
+then its 500 ms call timer), plus margin. Voice older than that is let go silently, oldest
+first, and counted in `autoRoute.pendingOverwrittenMs` (not in `droppedMs`). The wait also
+delays the call: decoded voice starts when the call is reported, up to about 1.2 s after its
+first voice, and with `voiceOnly: false` the carrier plays raw until then. A clear call whose
+encryption later turns unknown has its queued voice dropped (counted in `droppedMs`). Voice the decoder hands over
 after a call ends never becomes the next call's start: after an encrypted or unresolved end
 none is kept until the decoder reports its next call, and after a clear end none for 120 ms
 (two 60 ms bursts: that over's late voice). Known limit: with `voiceOnly: false`, once a call

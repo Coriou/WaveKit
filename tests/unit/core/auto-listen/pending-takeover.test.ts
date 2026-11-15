@@ -41,7 +41,7 @@ import { createLogger } from "../../../../src/utils/logger.js"
 import { lcg } from "./helpers.js"
 
 const logger = createLogger({ level: "fatal" })
-/** 8 000 × 720 / 1 000 = 5 760 samples: 36 frames of 160 (20 ms at 8 kHz). */
+/** 8 000 × 1 360 / 1 000 = 10 880 samples: 68 frames of 160 (20 ms at 8 kHz). */
 const PENDING_FRAMES = (8_000 * AUTO_ROUTE_PENDING_VOICE_MS) / 1000 / 160
 
 class FakeClock implements AutoRouteClock {
@@ -229,15 +229,21 @@ function playCall(
 	// Every frame came before the call event: it comes after the last one.
 	if (pre >= list.length) sim.voice.tap?.call("dmr", start)
 	sim.voice.tap?.call("dmr", call({ active: false }))
-	for (let i = 0; i < 40; i++) sim.step()
+	// 2 s: drains a backlog up to the 1 360 ms bound (admitted pending voice plays behind).
+	for (let i = 0; i < 100; i++) sim.step()
 	return sim
 }
 
 describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
-	it("the bound is 720 ms: 36 frames of 20 ms at 8 kHz", () => {
-		expect(AUTO_ROUTE_PENDING_VOICE_MS).toBe(720)
-		expect(PENDING_FRAMES).toBe(36)
-		expect(new PendingVoice(8_000).capacity).toBe(5_760)
+	it("the bound is 1 360 ms: 68 frames of 20 ms at 8 kHz, 136 arrival records", () => {
+		// 600 (seed VC* to SLOT) + 60 (that burst) + 100 (announce hold) + 500 (promotion period)
+		// + 60 (one burst of margin) + 40 (line latency).
+		expect(AUTO_ROUTE_PENDING_VOICE_MS).toBe(1_360)
+		expect(PENDING_FRAMES).toBe(68)
+		const p = new PendingVoice(8_000)
+		expect(p.capacity).toBe(10_880)
+		// 10 880 / 80 (half a 160-sample datagram).
+		expect(p.recordCapacity).toBe(136)
 	})
 
 	it("voice before the call turns active and clear is admitted in order: the same audio as a call active from its first frame", () => {
@@ -265,7 +271,7 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 		expect(sim.actives.at(-1)).toBe("digital")
 	})
 
-	it("at the bound all 36 frames are kept; past it the oldest go first (frames handed over at once)", () => {
+	it("at the bound all 68 frames are kept; past it the oldest go first, counted in pendingOverwrittenMs (frames handed over at once)", () => {
 		for (const extra of [0, 1, 5]) {
 			const list = frames(PENDING_FRAMES + extra)
 			const sim = new Sim()
@@ -274,7 +280,11 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 			for (let i = 0; i < 60; i++) sim.step()
 			sim.voice.tap?.call("dmr", call({ active: false }))
 			for (let i = 0; i < 40; i++) sim.step()
-			// The reference: only the newest 36 frames, admitted as a call.
+			expect(sim.router.pendingOverwrittenMs).toBeCloseTo(extra * 20, 9)
+			expect(
+				sim.router.status({ httpUrl: "h", wavUrl: "w" }).pendingOverwrittenMs,
+			).toBeCloseTo(extra * 20, 9)
+			// The reference: only the newest 68 frames, admitted as a call.
 			const ref = new Sim()
 			ref.voice.tap?.call("dmr", call())
 			for (const f of list.slice(extra)) ref.voice.tap?.frame("dmr", f, call())
@@ -286,17 +296,21 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 		}
 	})
 
-	it("voice older than 720 ms at the call event is let go: 1 s before the call keeps the newest 36 frames", () => {
-		const list = frames(50)
-		const sim = playCall(list, 50)
-		// No frame arrived during the call; the call event admits the frames from 280 ms on.
+	it("voice older than 1 360 ms at the call event is let go: 1.8 s before the call keeps the newest 68 frames", () => {
+		const list = frames(90)
+		const sim = playCall(list, 90)
+		// No frame arrived during the call; the call event admits the frames from 440 ms on.
+		expect(sim.router.pendingOverwrittenMs).toBeCloseTo(
+			(90 - PENDING_FRAMES) * 20,
+			9,
+		)
 		const ref = new Sim()
-		for (let i = 0; i < 50; i++) ref.step()
+		for (let i = 0; i < 90; i++) ref.step()
 		ref.voice.tap?.call("dmr", call())
-		for (const f of list.slice(50 - PENDING_FRAMES))
+		for (const f of list.slice(90 - PENDING_FRAMES))
 			ref.voice.tap?.frame("dmr", f, call())
 		ref.voice.tap?.call("dmr", call({ active: false }))
-		for (let i = 0; i < 40; i++) ref.step()
+		for (let i = 0; i < 100; i++) ref.step()
 		expect(sim.played.get("dmr")).toEqual(ref.played.get("dmr"))
 		expect(sim.router.droppedSamples).toBe(0)
 	})
@@ -384,7 +398,7 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 			expect(sim.router.droppedSamples).toBe(0)
 		})
 
-		it("encryptionKnown false then resolved clear: the voice of the last 720 ms is admitted in order", () => {
+		it("encryptionKnown false then resolved clear: the voice of the last 1 360 ms is admitted in order", () => {
 			const list = frames(60)
 			const sim = new Sim()
 			const unresolved = callWithKnown(false)
@@ -414,15 +428,21 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 	})
 
 	// Feature: listen-modes, Property 3: Pending voice is admitted in order or not at all
-	// Validates: Router change (a): pending voice up to 720 ms, admitted when active and clear, fail-closed
+	// Validates: Router change (a): pending voice up to 1 360 ms, admitted when active and clear, fail-closed
 	it("property: whatever the split before the call event, the played voice is a suffix of the call's audio (no gap, no duplicate)", () => {
-		const list = frames(70, 17)
+		const list = frames(110, 17)
 		const full = playCall(list, 0).played.get("dmr") ?? []
 		fc.assert(
-			fc.property(fc.integer({ min: 0, max: 60 }), pre => {
-				const got = playCall(list, pre).played.get("dmr") ?? []
+			fc.property(fc.integer({ min: 0, max: 100 }), pre => {
+				const sim = playCall(list, pre)
+				const got = sim.played.get("dmr") ?? []
 				expect(got.length).toBeGreaterThan(0)
-				// Up to 36 pending frames are kept: with at most 36 before the call, all of it plays.
+				// What the bound let go is counted: the frames past the 68 kept.
+				expect(sim.router.pendingOverwrittenMs).toBeCloseTo(
+					Math.max(0, pre - PENDING_FRAMES) * 20,
+					9,
+				)
+				// Up to 68 pending frames are kept: with at most 68 before the call, all of it plays.
 				if (pre <= PENDING_FRAMES) expect(got).toEqual(full)
 				else {
 					// Older frames were let go: what plays is the call's audio from a later frame on,
@@ -690,7 +710,7 @@ describe("pending voice after a call ends (AUTO_ROUTE_PENDING_END_GUARD_MS)", ()
 	it("after an encrypted end, voice with no call is dropped until the next call event, however late", () => {
 		const enc = call({ callId: "e1", encrypted: true })
 		const end = call({ callId: "e1", active: false, encrypted: true })
-		// 1 s after the end: past the guard, still within 720 ms of the clear call.
+		// 1 s after the end: past the guard, still within 1 360 ms of the clear call.
 		expect(overThenClear(enc, end, all, 50)).toEqual(
 			overThenClear(enc, end, none, 50),
 		)
@@ -797,5 +817,159 @@ describe("analogChecked returns to the safe default", () => {
 				)
 			}),
 		).toBeGreaterThanOrEqual(1_500)
+	})
+})
+
+describe("pending admitted, then the call turns not clear", () => {
+	it("pending admitted, then encrypted within 200 ms: nothing plays after the encrypted event, at most the blocks before it", () => {
+		for (const afterSteps of [0, 1, 5, 9]) {
+			const sim = new Sim()
+			const list = frames(60, 41)
+			// 20 frames (400 ms) pending, then the call turns active and clear.
+			for (let i = 0; i < 20; i++) sim.step({ frames: [list[i] as Buffer] })
+			sim.voice.tap?.call("dmr", call())
+			for (let i = 0; i < afterSteps; i++)
+				sim.step({ frames: [list[20 + i] as Buffer], call: call() })
+			const before = sim.read("dmr")
+			// Within 200 ms of the admission (afterSteps × 20 ms ≤ 180 ms): encrypted.
+			sim.voice.tap?.call("dmr", call({ encrypted: true }))
+			// Bounded before it: one 960-sample block per 20 ms step since the admission.
+			expect(before).toBeLessThanOrEqual(afterSteps * 960)
+			for (let i = 20 + afterSteps; i < 60; i++)
+				sim.step({
+					frames: [list[i] as Buffer],
+					call: call({ encrypted: true }),
+				})
+			sim.voice.tap?.call("dmr", call({ active: false, encrypted: true }))
+			for (let i = 0; i < 40; i++) sim.step()
+			expect({ afterSteps, after: sim.read("dmr") - before }).toEqual({
+				afterSteps,
+				after: 0,
+			})
+			expect(sim.actives.at(-1)).toBe("none")
+			expect(sim.router.pendingOverwrittenMs).toBe(0)
+		}
+	})
+
+	it("a clear call turning unresolved (encryptionKnown false) invalidates its queued voice: nothing more plays until it resolves clear", () => {
+		for (const via of ["call", "frame"] as const) {
+			const sim = new Sim()
+			const list = frames(60, 43)
+			const clear = callWithKnown(true)
+			sim.voice.tap?.call("dmr", clear)
+			// 400 ms of clear voice at once: queued well past what one block plays.
+			for (let i = 0; i < 20; i++)
+				sim.voice.tap?.frame("dmr", list[i] as Buffer, clear)
+			for (let i = 0; i < 12; i++) sim.step()
+			expect(sim.read("dmr")).toBeGreaterThan(0)
+			const before = sim.read("dmr")
+			const unresolved = callWithKnown(false)
+			if (via === "call") sim.voice.tap?.call("dmr", unresolved)
+			else sim.voice.tap?.frame("dmr", list[20] as Buffer, unresolved)
+			// The queued clear voice was invalidated (counted, as an encrypted turn).
+			expect(sim.router.droppedSamples).toBeGreaterThan(0)
+			for (let i = 21; i < 40; i++)
+				sim.step({ frames: [list[i] as Buffer], call: unresolved })
+			expect({ via, after: sim.read("dmr") - before }).toEqual({
+				via,
+				after: 0,
+			})
+			// Resolved clear again: its pending voice (since the turn) plays.
+			sim.voice.tap?.call("dmr", clear)
+			for (let i = 0; i < 40; i++) sim.step()
+			expect(sim.read("dmr")).toBeGreaterThan(before)
+		}
+	})
+
+	it("an unresolved call that was never clear invalidates nothing (its voice only waits)", () => {
+		const sim = new Sim()
+		const unresolved = callWithKnown(false)
+		sim.voice.tap?.call("dmr", unresolved)
+		for (const f of frames(10, 45)) sim.step({ frames: [f], call: unresolved })
+		sim.voice.tap?.call("dmr", unresolved)
+		expect(sim.router.droppedSamples).toBe(0)
+	})
+})
+
+describe("PendingVoice arrival records", () => {
+	function pcm(values: readonly number[]): Buffer {
+		return bytes(Int16Array.from(values))
+	}
+
+	it("one record per hand-over: 1-sample hand-overs past the record capacity overwrite the oldest, counted", () => {
+		const counter = { overwrittenMs: 0 }
+		const p = new PendingVoice(8_000, counter)
+		const rcap = p.recordCapacity
+		for (let i = 0; i < rcap; i++) p.write(pcm([i + 1]), i)
+		expect(p.length).toBe(rcap)
+		expect(counter.overwrittenMs).toBe(0)
+		// Past the record capacity: each new hand-over lets the oldest go (1 sample = 0.125 ms).
+		for (let i = rcap; i < rcap + 3; i++) p.write(pcm([i + 1]), i)
+		expect(p.length).toBe(rcap)
+		expect(p.oldestAt).toBe(3)
+		expect(counter.overwrittenMs).toBeCloseTo(3 * 0.125, 12)
+		const got: number[] = []
+		p.drain((view, start, end) => {
+			for (let k = start; k < end; k++) got.push(view[k] ?? 0)
+		})
+		expect(got).toEqual(Array.from({ length: rcap }, (_, k) => k + 4))
+	})
+
+	it("hand-overs at one time merge into one record; drain splits only at the ring's wrap", () => {
+		const p = new PendingVoice(8_000)
+		const cap = p.capacity
+		const frame = Array.from({ length: 160 }, (_, k) => k + 1)
+		// Three frames at one time, then frames that wrap the ring.
+		for (let k = 0; k < 3; k++) p.write(pcm(frame), 0)
+		for (let t = 1; t <= 67; t++) p.write(pcm(frame), t * 60)
+		// 70 frames × 160 = 11 200 samples in a 10 880 ring: 320 overwritten.
+		expect(p.length).toBe(cap)
+		const runs: Array<{ len: number; at: number }> = []
+		let total = 0
+		p.drain((_view, start, end, at) => {
+			runs.push({ len: end - start, at })
+			total += end - start
+		})
+		expect(total).toBe(cap)
+		// The merged record lost two of its three frames: 160 samples at time 0.
+		expect(runs[0]).toEqual({ len: 160, at: 0 })
+		// Contiguous by time, never more runs than records plus one wrap.
+		expect(runs.length).toBeLessThanOrEqual(68 + 1)
+		expect(p.length).toBe(0)
+		expect(p.oldestAt).toBeNull()
+	})
+
+	it("expire forgets by arrival; only the counted expiry adds to pendingOverwrittenMs", () => {
+		const counter = { overwrittenMs: 0 }
+		const p = new PendingVoice(8_000, counter)
+		const frame = new Array<number>(160).fill(7)
+		for (let t = 0; t < 10; t++) p.write(pcm(frame), t * 20)
+		p.expire(40)
+		expect(p.length).toBe(8 * 160)
+		expect(counter.overwrittenMs).toBe(0)
+		p.expire(100, true)
+		expect(p.length).toBe(5 * 160)
+		expect(p.oldestAt).toBe(100)
+		// 3 frames of 20 ms.
+		expect(counter.overwrittenMs).toBeCloseTo(60, 9)
+	})
+})
+
+describe("AnalogInput.skip appending to a split sample", () => {
+	it("keeps the split sample's first span's flag, as push completes it", () => {
+		const stream = { rate: 48_000, format: "f32le" as const }
+		const input = new AnalogInput({ droppedSamples: 0 }, undefined)
+		const buf = Buffer.alloc(64)
+		const flagOf = (): number =>
+			(input as unknown as { remFlag: number }).remFlag
+		// One whole f32 sample and one byte of the next, audible.
+		input.push(buf, 0, 5, FLAG_AUDIBLE, stream, 0)
+		expect(flagOf()).toBe(FLAG_AUDIBLE)
+		// A 1-byte silent span appended to that split sample: still the audible span's sample.
+		input.skip(buf, 5, 6, FLAG_SILENT, stream, 1)
+		expect(flagOf()).toBe(FLAG_AUDIBLE)
+		// A span that completes it and starts a new split sample: the new one takes its flag.
+		input.skip(buf, 6, 9, FLAG_SILENT, stream, 2)
+		expect(flagOf()).toBe(FLAG_SILENT)
 	})
 })

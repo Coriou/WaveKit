@@ -5,6 +5,7 @@
  * the router can count drops (requirements 4.3, 4.10) and trace provenance.
  */
 import type { PcmFormat, StreamFormat } from "../audio-stream-server.js"
+import { DSD_FME_DATAGRAM_FRAMES } from "../dsd-fme-voice-format.js"
 import {
 	AUTO_ROUTE_PENDING_END_GUARD_MS,
 	AUTO_ROUTE_PENDING_VOICE_MS,
@@ -316,10 +317,16 @@ export class AnalogInput {
 		}
 		this.skipped = true
 		const keep = (this.remLen + (e - s)) % this.frameBytes
-		if (e - s >= keep) chunk.copy(this.rem, 0, e - keep, e)
-		else chunk.copy(this.rem, this.remLen, s, e)
+		if (e - s >= keep) {
+			// The new split sample starts in this span: it takes this span's flag.
+			chunk.copy(this.rem, 0, e - keep, e)
+			this.remFlag = flag
+		} else {
+			// Appended to a split sample begun in an earlier span: it keeps that span's flag, as
+			// `push` completes it.
+			chunk.copy(this.rem, this.remLen, s, e)
+		}
 		this.remLen = keep
-		this.remFlag = flag
 	}
 
 	/** Clears the FIFO (counted) and the resampler state (requirement 5.1). */
@@ -380,27 +387,59 @@ export class AnalogInput {
 	}
 }
 
+/** Shared counter of `autoRoute.pendingOverwrittenMs` (diagnostic, never in `droppedMs`). */
+export interface PendingCounter {
+	overwrittenMs: number
+}
+
 /**
- * Pending voice of one decoder: decoded voice (input rate) that is not admitted yet, with its
- * arrival time, in a preallocated ring of `AUTO_ROUTE_PENDING_VOICE_MS`. A write past the
- * capacity overwrites the oldest samples. Nothing here is ever counted dropped: pending voice
- * was never admitted, so letting it go is the fail-closed rule, not lost route audio.
+ * Samples per arrival record: half a dsd-fme datagram (160 sample frames, one 20 ms vocoder
+ * frame: src/core/dsd-fme-voice-format.ts), so voice handed over in datagrams half the usual size
+ * still fills the whole ring before its records run out: 160 / 2 = 80.
+ */
+const PENDING_SAMPLES_PER_RECORD = DSD_FME_DATAGRAM_FRAMES / 2
+
+/**
+ * Pending voice of one decoder: decoded voice (input rate) that is not admitted yet, in a
+ * preallocated ring of `AUTO_ROUTE_PENDING_VOICE_MS`, with one arrival record (time and sample
+ * count) per hand-over (a datagram, or the frames of one burst handed over at one time). A
+ * write past the capacity, or past the record capacity, overwrites the oldest samples. Nothing
+ * here is ever counted dropped: pending voice was never admitted, so letting it go is the
+ * fail-closed rule, not lost route audio; what the bound overwrites, and what is older than the
+ * bound when the call is admitted, is added to the `PendingCounter` (`pendingOverwrittenMs`).
+ *
+ * Memory at 8 kHz: 10 880 samples × 2 B = 21 760 B, plus 10 880 / 80 = 136 records × (8 B
+ * time + 4 B count) = 1 632 B: 23 392 B per decoder, allocated once.
  */
 export class PendingVoice {
 	readonly capacity: number
+	readonly recordCapacity: number
 	private readonly samples: Int16Array
-	private readonly arrivals: Float64Array
+	private readonly recAt: Float64Array
+	private readonly recCount: Uint32Array
+	private readonly msPerSample: number
+	private readonly counter: PendingCounter | undefined
 	private head = 0
 	private size = 0
+	private recHead = 0
+	private recSize = 0
 
-	constructor(voiceRate: number) {
-		// 8 000 × 720 / 1 000 = 5 760 samples at the tap rate.
+	constructor(voiceRate: number, counter?: PendingCounter) {
+		// 8 000 × 1 360 / 1 000 = 10 880 samples at the tap rate.
 		this.capacity = Math.max(
 			1,
 			Math.ceil((voiceRate * AUTO_ROUTE_PENDING_VOICE_MS) / 1000),
 		)
+		// 10 880 / 80 = 136 records; at least two (the newest and one being overwritten).
+		this.recordCapacity = Math.max(
+			2,
+			Math.ceil(this.capacity / PENDING_SAMPLES_PER_RECORD),
+		)
 		this.samples = new Int16Array(this.capacity)
-		this.arrivals = new Float64Array(this.capacity)
+		this.recAt = new Float64Array(this.recordCapacity)
+		this.recCount = new Uint32Array(this.recordCapacity)
+		this.msPerSample = 1000 / voiceRate
+		this.counter = counter
 	}
 
 	get length(): number {
@@ -409,35 +448,56 @@ export class PendingVoice {
 
 	/** Arrival time of the oldest pending sample, null when empty. */
 	get oldestAt(): number | null {
-		return this.size === 0 ? null : (this.arrivals[this.head] ?? null)
+		return this.recSize === 0 ? null : (this.recAt[this.recHead] ?? null)
 	}
 
 	/** Appends whole s16le samples of `pcm` (a trailing odd byte is ignored), oldest overwritten. */
 	write(pcm: Buffer, at: number): void {
 		const n = pcm.length >> 1
+		if (n === 0) return
 		const cap = this.capacity
 		// Only the newest `capacity` samples can stay.
 		const skip = Math.max(0, n - cap)
-		for (let i = skip; i < n; i++) {
-			const idx = (this.head + this.size) % cap
-			this.samples[idx] = pcm.readInt16LE(i * 2)
-			this.arrivals[idx] = at
-			if (this.size < cap) this.size++
-			else this.head = (this.head + 1) % cap
+		if (skip > 0) this.noteOverwritten(skip)
+		const keep = n - skip
+		this.evict(this.size + keep - cap)
+		const rcap = this.recordCapacity
+		const last = (this.recHead + this.recSize - 1 + rcap) % rcap
+		if (this.recSize > 0 && this.recAt[last] === at) {
+			this.recCount[last] = (this.recCount[last] ?? 0) + keep
+		} else {
+			// Out of records: the oldest hand-over goes whole (overwritten like samples).
+			if (this.recSize === rcap) this.evict(this.recCount[this.recHead] ?? 0)
+			const idx = (this.recHead + this.recSize) % rcap
+			this.recAt[idx] = at
+			this.recCount[idx] = keep
+			this.recSize++
 		}
+		let w = (this.head + this.size) % cap
+		for (let i = skip; i < n; i++) {
+			this.samples[w] = pcm.readInt16LE(i * 2)
+			w = w + 1 === cap ? 0 : w + 1
+		}
+		this.size += keep
 	}
 
-	/** Forgets samples that arrived before `since`. */
-	expire(since: number): void {
-		while (this.size > 0 && (this.arrivals[this.head] ?? since) < since) {
-			this.head = (this.head + 1) % this.capacity
-			this.size--
+	/**
+	 * Forgets samples that arrived before `since`; with `counted`, adds them to
+	 * `pendingOverwrittenMs` (the bound let them go, not a policy).
+	 */
+	expire(since: number, counted = false): void {
+		while (this.recSize > 0 && (this.recAt[this.recHead] ?? since) < since) {
+			const c = this.recCount[this.recHead] ?? 0
+			this.popRecord(c)
+			if (counted) this.noteOverwritten(c)
 		}
 	}
 
 	clear(): void {
 		this.head = 0
 		this.size = 0
+		this.recHead = 0
+		this.recSize = 0
 	}
 
 	/**
@@ -448,17 +508,50 @@ export class PendingVoice {
 		sink: (view: Int16Array, start: number, end: number, at: number) => void,
 	): void {
 		const cap = this.capacity
-		let left = this.size
+		const rcap = this.recordCapacity
 		let at = this.head
-		while (left > 0) {
-			const t = this.arrivals[at] ?? 0
-			let end = at + 1
-			while (end < cap && end - at < left && this.arrivals[end] === t) end++
-			sink(this.samples, at, end, t)
-			left -= end - at
-			at = end % cap
+		for (let r = 0; r < this.recSize; r++) {
+			const idx = (this.recHead + r) % rcap
+			const t = this.recAt[idx] ?? 0
+			let left = this.recCount[idx] ?? 0
+			while (left > 0) {
+				const end = Math.min(cap, at + left)
+				sink(this.samples, at, end, t)
+				left -= end - at
+				at = end === cap ? 0 : end
+			}
 		}
 		this.clear()
+	}
+
+	/** Removes the `k` oldest samples (the bound overwrote them) and counts them. */
+	private evict(k: number): void {
+		if (k <= 0) return
+		this.noteOverwritten(k)
+		while (k > 0 && this.recSize > 0) {
+			const c = this.recCount[this.recHead] ?? 0
+			if (c <= k) {
+				this.popRecord(c)
+				k -= c
+			} else {
+				this.recCount[this.recHead] = c - k
+				this.head = (this.head + k) % this.capacity
+				this.size -= k
+				k = 0
+			}
+		}
+	}
+
+	private popRecord(count: number): void {
+		this.head = (this.head + count) % this.capacity
+		this.size -= count
+		this.recHead = (this.recHead + 1) % this.recordCapacity
+		this.recSize--
+	}
+
+	private noteOverwritten(samples: number): void {
+		if (this.counter !== undefined)
+			this.counter.overwrittenMs += samples * this.msPerSample
 	}
 }
 
@@ -504,12 +597,13 @@ export class VoiceInput {
 		voiceRate: number,
 		counter: DropCounter,
 		trace: AutoRouteTraceFn | undefined,
+		pendingCounter?: PendingCounter,
 	) {
 		this.id = id
 		this.out = new RoutedFifo(id, counter, trace)
 		this.res = new PolyphaseResampler(voiceRate, LIVE_AUDIO_AUTO_ROUTE_RATE)
 		this.zeros = new Int16Array(this.res.taps)
-		this.pending = new PendingVoice(voiceRate)
+		this.pending = new PendingVoice(voiceRate, pendingCounter)
 	}
 
 	get taps(): number {
@@ -542,13 +636,11 @@ export class VoiceInput {
 	admitPending(now: number): void {
 		const p = this.pending
 		// Never the previous over's tail: nothing that arrived within the end guard of the last
-		// call's end (the router does not pend it either; this bound holds regardless).
-		p.expire(
-			Math.max(
-				now - AUTO_ROUTE_PENDING_VOICE_MS,
-				this.endedAt + AUTO_ROUTE_PENDING_END_GUARD_MS,
-			),
-		)
+		// call's end (the router does not pend it either; this bound holds regardless). That is
+		// policy, uncounted; voice older than the bound is what the bound let go (counted in
+		// `pendingOverwrittenMs`).
+		p.expire(this.endedAt + AUTO_ROUTE_PENDING_END_GUARD_MS)
+		p.expire(now - AUTO_ROUTE_PENDING_VOICE_MS, true)
 		if (p.length === 0) return
 		p.drain(this.pendingSink)
 		this.lastAdmittedAt = now

@@ -48,7 +48,7 @@ import type {
 	VoiceTapSource,
 } from "./contract.js"
 import { AnalogInput, VoiceInput } from "./inputs.js"
-import type { AutoRouteTraceFn, DropCounter } from "./inputs.js"
+import type { AutoRouteTraceFn, DropCounter, PendingCounter } from "./inputs.js"
 import { FLAG_AUDIBLE, FLAG_SILENT } from "./source-fifo.js"
 
 /** 48 000 / 1 000 = 48 output samples per millisecond. */
@@ -95,7 +95,14 @@ function validCoverage(value: unknown): VoiceCoverage {
 /**
  * Seam for a call event's optional `encryptionKnown` (not in `VoiceTapCall` yet): true only when
  * the event says outright that its encryption is not known yet. Such a call is not clear (fail
- * closed): its voice waits as pending voice and is let go if the call ends so.
+ * closed): its voice waits as pending voice and is let go if the call ends so. A clear call that
+ * turns unresolved (this snapshot after an active, clear one) invalidates its queued voice
+ * (counted, as an encrypted turn does; see `noteCall`).
+ *
+ * When the field lands, it must also be forwarded by the digital voice service: its
+ * `handleVoiceCall` (src/core/digital-voice.ts) rebuilds the `DigitalVoiceCall` it hands to the
+ * taps field by field, so a field the decoder sets but that rebuild omits never reaches here and
+ * every call reads as resolved.
  */
 export function encryptionUnresolved(call: VoiceTapCall): boolean {
 	const known: unknown = (call as Partial<Record<"encryptionKnown", unknown>>)
@@ -115,6 +122,8 @@ export class AutoListenRouter extends EventEmitter {
 	private readonly wallClock: () => number
 	private readonly traceFn: AutoRouteTraceFn | undefined
 	private readonly counter: DropCounter = { droppedSamples: 0 }
+	/** `autoRoute.pendingOverwrittenMs`: pending voice the bound let go (diagnostic, uncounted). */
+	private readonly pendingCounter: PendingCounter = { overwrittenMs: 0 }
 	private readonly analog: AnalogInput
 	private readonly voices = new Map<string, VoiceInput>()
 	/** Same inputs as `voices`, for index loops (no iterator object per block). */
@@ -226,6 +235,11 @@ export class AutoListenRouter extends EventEmitter {
 		return this.counter.droppedSamples
 	}
 
+	/** Pending voice overwritten by its bound (or older than it at admission), ms, cumulative. */
+	get pendingOverwrittenMs(): number {
+		return this.pendingCounter.overwrittenMs
+	}
+
 	/** Output samples emitted since the pacer started. */
 	get emittedSamples(): number {
 		return this.emitted
@@ -325,6 +339,7 @@ export class AutoListenRouter extends EventEmitter {
 			underruns: this.underrunCount,
 			zeroFilledSamples: this.zeroFilled,
 			droppedMs: this.counter.droppedSamples / SAMPLES_PER_MS,
+			pendingOverwrittenMs: this.pendingCounter.overwrittenMs,
 			clockRebases: this.rebases,
 			latencyMs:
 				(sel === null ? 0 : sel.out.queued) / SAMPLES_PER_MS +
@@ -750,6 +765,7 @@ export class AutoListenRouter extends EventEmitter {
 				source.voiceSampleRate,
 				this.counter,
 				this.traceFn,
+				this.pendingCounter,
 			)
 		} catch {
 			// An unsupported voice rate: nothing from this source can be routed.
@@ -810,7 +826,14 @@ export class AutoListenRouter extends EventEmitter {
 		if (this.selected === v) this.select(null, this.clock.now())
 	}
 
-	private noteCall(v: VoiceInput, call: VoiceTapCall, now: number): void {
+	/**
+	 * Takes the call snapshot. Returns true when a call that was active and explicitly clear is
+	 * now unresolved (`encryptionKnown === false`): its queued voice must be invalidated (fail
+	 * closed, as an encrypted turn).
+	 */
+	private noteCall(v: VoiceInput, call: VoiceTapCall, now: number): boolean {
+		const wasClear =
+			v.call !== null && v.call.active && !v.call.encrypted && !v.unresolved
 		let snap = v.call
 		if (snap === null) {
 			snap = {
@@ -841,6 +864,7 @@ export class AutoListenRouter extends EventEmitter {
 			typeof call.slot === "number" && Number.isFinite(call.slot)
 				? call.slot
 				: null
+		return wasClear && v.unresolved && !snap.encrypted
 	}
 
 	private onFrame(
@@ -852,7 +876,12 @@ export class AutoListenRouter extends EventEmitter {
 		const v = this.voice(decoderId)
 		if (v === null) return
 		const now = this.clock.now()
-		if (call !== null && typeof call === "object") this.noteCall(v, call, now)
+		if (
+			call !== null &&
+			typeof call === "object" &&
+			this.noteCall(v, call, now)
+		)
+			this.invalidate(v)
 		this.refreshCoverage(v)
 		const c = call === null ? null : v.call
 		if (c !== null && c.encrypted) {
@@ -898,8 +927,8 @@ export class AutoListenRouter extends EventEmitter {
 		const v = this.voice(decoderId)
 		if (v === null) return
 		const now = this.clock.now()
-		this.noteCall(v, call, now)
-		if (v.call?.encrypted === true) this.invalidate(v)
+		const turnedUnresolved = this.noteCall(v, call, now)
+		if (v.call?.encrypted === true || turnedUnresolved) this.invalidate(v)
 		else if (v.call?.active !== true) {
 			// Ended (clear or unresolved): voice still pending was never admitted; let it go.
 			v.pending.clear()

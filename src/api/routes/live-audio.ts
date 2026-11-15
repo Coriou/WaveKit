@@ -212,6 +212,7 @@ const liveDemodStatusSchema = {
 				underruns: { type: "number" },
 				zeroFilledSamples: { type: "number" },
 				droppedMs: { type: "number" },
+				pendingOverwrittenMs: { type: "number" },
 				clockRebases: { type: "number" },
 				latencyMs: { type: "number" },
 				// Listen: the mode in force, a waiting change and why the route plays less.

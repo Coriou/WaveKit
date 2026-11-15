@@ -940,6 +940,7 @@ export async function buildMockServer(
 				underruns: 0,
 				zeroFilledSamples: 0,
 				droppedMs: 0,
+				pendingOverwrittenMs: 0,
 				clockRebases: 0,
 				latencyMs: 80,
 				listenMode: autoListenMode(),
