@@ -690,8 +690,8 @@ Digital voice rows (`src/core/activity/presentation/digital-voice.ts`) are keyed
 by talkgroup. D-STAR and YSF calls have none: their rows are keyed
 `callsign:<MY / source>` and titled `DSTAR from N0CALL to CQCQCQ` or
 `YSF from N0CALL`, with the UR and repeater calls as fields. D-STAR, YSF, dPMR
-and ProVoice calls carry 0 / 0 as talkgroup and source placeholders, which the
-row omits.
+and ProVoice calls, and NXDN calls heard before their VCALL, carry 0 / 0 as
+talkgroup and source placeholders, which the row omits.
 
 ### Aircraft identity and enrichment
 

@@ -168,13 +168,15 @@ const _YSF_HEAD = /\bSync:\s*\+YSF\b/i
 /** YSF FICH block (reserved - YSF_CRC_OK is preferred) */
 const _YSF_FICH = /\bFICH\b/i
 /** YSF CRC status in same line (the -Z payload print "FICH: [..]") */
-const YSF_CRC_OK = /\bFICH\b(?!.*CRC\s+ERR)/i
+const YSF_CRC_OK = /\bFICH\b(?!.*(?:CRC|FEC)\s+ERR)/i
 /**
  * A YSF frame whose FICH decoded: ysf.c prints the frame type and number
  * ("HC FN: 1/7", "CC FN: 2/7", "TC FN: 1/7") only when the FICH check
  * passed; a failed FICH prints "FN: 10/10 FICH (CRC ERR)" instead.
  */
 const YSF_FICH_OK = /\b(?:HC|CC|TC|XX) FN: [1-8]\/[1-8]\b/
+/** A YSF terminator frame whose FICH decoded: the end of the over. */
+const YSF_TERMINATOR = /\bTC FN: [1-8]\/[1-8]\b/
 
 // --- NXDN Patterns ---
 /** NXDN sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -199,8 +201,18 @@ const NXDN_SACCH_OK = /\bPF [1-4]\/[14]\b/
  * only for a FACCH1 or SACCH superframe whose CRC passed.
  */
 const NXDN_SRC_DST = /\bSrc=(?<src>\d+) - Dst\/TG=(?<tgt>\d+)\b/
-/** Two NXDN frames 80 ms apart (NXDN48) are consecutive within this window. */
+/**
+ * Two NXDN frames are consecutive within this window: 500 ms is 6 NXDN48
+ * frames of 80 ms (12 NXDN96 frames of 40 ms), above line-delivery jitter.
+ */
 const NXDN_CONSECUTIVE_MS = 500
+/**
+ * nxdn_deperm.c nxdn_message_type prints the message name at the end of the
+ * frame line; the IDs line that follows belongs to it. Only VCALL (0x01) is a
+ * call on this channel: VCALL_ASSGN / DCALL_ASSGN grant another channel, and
+ * TX_REL / DISC end a call (DISC may be dsd-fme's own Src=0 lock-out).
+ */
+const NXDN_VCALL_LINE = /\bVCALL\s*$/
 
 // --- D-Star Patterns ---
 /** D-Star sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -630,6 +642,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 */
 	private nxdnCleanAt: number | undefined = undefined
 	private nxdnRan: number | undefined = undefined
+	/** The RAN the previous clean NXDN frame line printed. */
+	private nxdnPrintedRan: string | undefined = undefined
+	/** The previous NXDN line ended with the VCALL message name. */
+	private nxdnVcallNext = false
+	/** VCALL unit IDs of the line being parsed (nxdnVcallIds). */
+	private nxdnLineIds: Record<string, string> | undefined = undefined
 	private linkDmrCc = new Map<string, { cc: number; at: number }>()
 	private linkDmrMs = false
 	private pendingDmrLink: DsdFmeLinkLine | undefined
@@ -1585,6 +1603,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		const proto = syncMatch.groups["proto"]?.toUpperCase() ?? ""
 		const newProtocol = this.parseProtocol(proto)
+		this.trackSyncState(line, newProtocol)
 
 		// If protocol changed, we may need to end the current call
 		if (this.callState && newProtocol !== this.currentProtocol) {
@@ -1596,11 +1615,6 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Update protocol tracking
 		this.currentProtocol = newProtocol
-		if (newProtocol !== "p25p1") this.lastP25Nac = undefined
-		if (newProtocol !== "nxdn48" && newProtocol !== "nxdn96") {
-			this.nxdnCleanAt = undefined
-			this.nxdnRan = undefined
-		}
 
 		// Deduplicate sync events for debug output
 		if (proto === this.lastSyncMode) {
@@ -1620,6 +1634,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Keep parsing: a sync line also carries the burst type (VLC/VC*/TLC).
 		return undefined
+	}
+
+	/**
+	 * Per-protocol state a sync line updates, before any early return: the
+	 * NAC of the last P25 phase 1 NID that decoded ("duid:EE" clears it); the
+	 * P25 and NXDN state is dropped on another protocol's sync.
+	 */
+	private trackSyncState(line: string, protocol: DsdFmeProtocol): void {
+		if (protocol === "p25p1") {
+			const printed = P25_NAC_PRINT.exec(line)?.[1]
+			if (printed !== undefined)
+				this.lastP25Nac = /\bduid:EE\b/.test(line)
+					? undefined
+					: printed.toUpperCase()
+		} else this.lastP25Nac = undefined
+		if (protocol !== "nxdn48" && protocol !== "nxdn96") {
+			this.nxdnCleanAt = undefined
+			this.nxdnRan = undefined
+			this.nxdnPrintedRan = undefined
+			this.nxdnVcallNext = false
+		}
 	}
 
 	/**
@@ -1708,6 +1743,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * current one). Returns null for lines without identity fields.
 	 */
 	private parseLinkLine(line: string, at: number): DsdFmeLinkLine | null {
+		this.nxdnLineIds = undefined
 		const sync = SYNC_PATTERN.exec(line)
 		const dmrSync = sync?.groups?.["proto"]?.toUpperCase() === "DMR"
 		const pending = this.pendingDmrLink ?? this.pendingDmrVoiceLinks[0]
@@ -1882,8 +1918,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				const sacch = this.nxdnSacchLine(line, at)
 				const ran =
 					checkedRan ?? sacch.ran ?? NXDN_RAN.exec(line)?.groups?.["ran"]
-				// The VCALL print is gated on its own CRC (NXDN_SRC_DST).
-				const vcall = NXDN_SRC_DST.exec(line)?.groups
+				// The VCALL print is gated on its own CRC (nxdnVcallIds).
+				const vcall = this.nxdnVcallIds(line)
 				const idGroups = vcall ?? NXDN_TGT_SRC.exec(line)?.groups
 				if (ran === undefined && idGroups === undefined) return null
 				return {
@@ -2051,14 +2087,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Requires tg+src to start a call.
 	 */
 	private handleP25P1Line(line: string, now: Date): DecoderOutput | null {
-		// The NAC of the last sync line with a decoded NID: the LCW print
-		// that carries talkgroup and source has no NAC of its own.
-		const printedNac = P25_NAC_PRINT.exec(line)?.[1]
-		if (printedNac !== undefined && SYNC_PATTERN.test(line))
-			this.lastP25Nac = /\bduid:EE\b/.test(line)
-				? undefined
-				: printedNac.toUpperCase()
-
+		// The LCW print that carries talkgroup and source has no NAC of its
+		// own: the call takes the last sync line's (trackSyncState).
 		const lcw = P25_LCW_VOICE.exec(line)?.groups
 		if (lcw) {
 			const tg = parseInt(lcw["tg"] ?? "0", 10)
@@ -2162,13 +2192,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					? { ran: this.nxdnRan }
 					: undefined
 
-		// Source and destination: the CRC-gated VCALL print, or the legacy one.
-		const ids =
-			NXDN_SRC_DST.exec(line)?.groups ?? NXDN_TGT_SRC.exec(line)?.groups
+		// Source and destination: the CRC-gated VCALL print (nxdnVcallIds, run
+		// by the link parser for this line), or the legacy one.
+		const ids = this.nxdnLineIds ?? NXDN_TGT_SRC.exec(line)?.groups
 		const ongoing = this.callState ?? this.pendingCall?.state ?? null
 		if (ids) {
 			const tgt = parseInt(ids["tgt"] ?? "0", 10)
 			const src = parseInt(ids["src"] ?? "0", 10)
+			if (tgt === 0 && src === 0) return null
 			// A call heard by RAN alone (tuned in mid-call) takes its IDs when the
 			// VCALL arrives instead of splitting into a second call.
 			if (
@@ -2223,19 +2254,42 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		at: number,
 	): { ran?: string; attested: boolean } {
 		if (!SYNC_PATTERN.test(line)) return { attested: false }
-		const ok = NXDN_SACCH_OK.test(line) && !CRC_ERR.test(line)
+		const ok =
+			NXDN_SACCH_OK.test(line) &&
+			!CRC_ERR.test(line) &&
+			!/\bFEC\s+ERR\b/i.test(line)
 		const previous = this.nxdnCleanAt
+		const previousRan = this.nxdnPrintedRan
 		this.nxdnCleanAt = ok ? at : undefined
 		const ran = NXDN_SACCH_RAN.exec(line)?.groups?.["ran"]
+		this.nxdnPrintedRan = ok ? ran : undefined
+		// The same RAN printed by two consecutive clean frames: CRC-6 passes in
+		// a row stored it, so one chance pass cannot attest a RAN.
 		const attested =
 			ok &&
 			ran !== undefined &&
+			ran === previousRan &&
 			previous !== undefined &&
 			at >= previous &&
 			at - previous <= NXDN_CONSECUTIVE_MS
 		if (attested) this.nxdnRan = parseInt(ran, 10)
 		else if (!ok) this.nxdnRan = undefined
 		return ran !== undefined ? { ran, attested } : { attested }
+	}
+
+	/**
+	 * VCALL unit IDs of an NXDN line: "Src=1234 - Dst/TG=5678" right after a
+	 * frame line ending in VCALL (NXDN_VCALL_LINE), printed only after that
+	 * FACCH1 or SACCH superframe passed its CRC. Grant, release and
+	 * disconnect IDs are not this channel's call. Runs once per line (from
+	 * parseLinkLine) and keeps the result for handleNxdnLine.
+	 */
+	private nxdnVcallIds(line: string): Record<string, string> | undefined {
+		const after = this.nxdnVcallNext
+		this.nxdnVcallNext = NXDN_VCALL_LINE.test(line) && !CRC_ERR.test(line)
+		const ids = after ? NXDN_SRC_DST.exec(line)?.groups : undefined
+		this.nxdnLineIds = ids
+		return ids
 	}
 
 	/**
@@ -2251,7 +2305,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// YSF doesn't have traditional TGT/SRC, but we track calls anyway
 		// Use 0 as placeholder for talkgroup/source
 		const callsign = ysfSourceCallsign(line)
-		return this.processCallMetadata(
+		const split =
+			callsign !== undefined ? this.endOnNewStation("ysf", callsign, now) : null
+		const event = this.processCallMetadata(
 			now,
 			"ysf",
 			0,
@@ -2263,6 +2319,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			undefined,
 			callsign !== undefined ? { callsign } : undefined,
 		)
+		return split ?? event
+	}
+
+	/**
+	 * D-STAR and YSF calls are keyed 0 / 0, so a checked callsign that differs
+	 * from the ongoing call's is the next station: end (or drop, if not yet
+	 * announced) that call so the new one starts on its own.
+	 */
+	private endOnNewStation(
+		protocol: "dstar" | "ysf",
+		callsign: string,
+		now: Date,
+	): DecoderOutput | null {
+		const ongoing = this.callState ?? this.pendingCall?.state ?? null
+		if (ongoing?.protocol !== protocol) return null
+		const current =
+			protocol === "dstar" ? ongoing.dstar?.my : ongoing.ysf?.callsign
+		if (current === undefined || current === callsign) return null
+		if (this.callState === ongoing) return this.endCall(now, false)
+		this.pendingCall = null
+		return null
 	}
 
 	/**
@@ -2273,7 +2350,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// The CRC-checked header as dsd-fme prints it (see DSTAR_HEADER_BLOCK).
 		const checked = checkedDstarHeader(line)
 		if (checked !== undefined) {
-			return this.processCallMetadata(
+			const split = this.endOnNewStation("dstar", checked.my, now)
+			const event = this.processCallMetadata(
 				now,
 				"dstar",
 				0,
@@ -2284,7 +2362,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				undefined,
 				checked,
 			)
+			return split ?? event
 		}
+		// A superframe without the header in its slow data (text, GPS) still
+		// belongs to the ongoing over.
+		if (SYNC_PATTERN.test(line)) this.touchOngoing(now)
 
 		// Extract D-Star header fields (legacy MY/UR/RPT1/RPT2 prints)
 		const myMatch = DSTAR_MY.exec(line)
@@ -2410,6 +2492,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			case "p25p1":
 			case "p25p2":
 				isTerminator = P25_CALL_TERM.test(line)
+				break
+			case "ysf":
+				isTerminator = YSF_TERMINATOR.test(line) && !CRC_ERR.test(line)
 				break
 			default:
 				// Other protocols mostly rely on timeout

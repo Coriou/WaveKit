@@ -6994,7 +6994,7 @@ reception: the row is stored without it. Rows stored before the 2026-10-13 core 
 | Meshtastic (`from` in `0..0xffffffff`)    | `node:!<8 lowercase hex>`                                      |
 | POCSAG / FLEX                             | `capcode:<decimal, no leading zeros>`                          |
 | AFSK1200 with a callsign `from`           | `callsign:<UPPER>`                                             |
-| DMR / P25 / YSF call (`talkgroup >= 0`)   | `talkgroup:<tg>`                                               |
+| DMR / P25 / NXDN call (`talkgroup >= 0`)  | `talkgroup:<tg>`                                               |
 | D-STAR / YSF call (no talkgroup)          | `callsign:<MY / source callsign>`                              |
 | ACARS                                     | `reg:<UPPER tail, dots removed>`                               |
 | VDL2                                      | `icao:<UPPER 6 hex>` when `icao` is valid, else the ACARS tail |

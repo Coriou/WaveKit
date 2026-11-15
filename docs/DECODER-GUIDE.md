@@ -695,8 +695,10 @@ describe("HfdlDecoder", () => {
 
 multimon-ng prints FLEX alphanumeric pages as
 `FLEX|2026-01-02 03:04:05|1600/2/K/A|05.012|001234567|ALN|text` and numeric,
-tone and unknown pages as `FLEX: 2026-01-02 03:04:05 1600/2/A 05.012 [001234567] NUM 12345`
-(both without the date when timestamps are off). The adapter's `frequency` field
+tone and unknown pages as `FLEX: 2026-01-02 03:04:05 1600/2/A 05.012 [001234567] NUM 12345`.
+With timestamps off they are `FLEX|1600/2/K/A|05.012|001234567|ALN|text` and
+`FLEX|1600/2/A|05.012|[001234567]|NUM 12345`; group pages list the member
+capcodes after the first (`groupCapcodes`). The adapter's `frequency` field
 holds the cycle.frame value, `fragment` the K/C/F flag.
 
 To check a whole chain without on-air traffic,
@@ -1049,21 +1051,26 @@ precedes slot-type decoding (`dmr_ms.c:676–686`). Checked TG/SRC remain usable
 with CC unknown while that header awaits its closing-sync check.
 NXDN accepts current CRC-checked ` RAN 03  FACCH2`/UDCH output
 (`nxdn_deperm.c:1390–1437`); failure omits RAN, and SACCH/CAC print cached RAN.
-A SACCH ` RAN 05 PF 2/4` print counts only when this frame's SACCH and the
-previous frame's (at most 500 ms earlier) both passed (`PF` digit, not `X`): the
-cached RAN is then the previous frame's checked one. VCALL `Src=1234 -
-Dst/TG=5678` is printed only after its FACCH1 or SACCH-superframe CRC, so it
-verifies the unit IDs; a call heard by RAN alone takes them when they arrive.
+A SACCH ` RAN 05 PF 2/4` print counts only when two consecutive frame lines (at
+most 500 ms apart) both passed their own SACCH CRC (`PF` digit, not `X`) and
+printed the same RAN: the print is the RAN stored by the last passing SACCH.
+`Src=1234 - Dst/TG=5678` counts only on the line after a frame line ending in
+`VCALL`, printed after that FACCH1 or SACCH-superframe CRC; the same print after
+`VCALL_ASSGN`, `DCALL_ASSGN`, `TX_REL` or `DISC` names another channel's call or
+an ending, and is ignored. A call heard by RAN alone takes the unit IDs when the
+VCALL arrives.
 P25 phase 1 talkgroup and source come from the link control print ` Group Voice
 Channel User - Group 4321 Source 1234567` (or `Unit to Unit … - Target`), which
 both callers (LDU1, TDULC) print only after the RS(24,12,13) check; the NAC on
 the call is the last sync line whose NID decoded. D-STAR uses the slow-data copy
 of the header (` RPT 2: … RPT 1: … DST: … SRC: …`, printed only when its CRC
 matches; the radio header before it on a `+DSTAR HEADER` line has no FCS check):
-MY is the callsign, DST the UR call. YSF uses the source callsign of a
+MY is the callsign, DST the UR call. Without that checked header (radios that
+never send it in slow data) there is no D-STAR call; a different checked MY (or
+YSF source) starts the next station's call. YSF uses the source callsign of a
 header/terminator CSD1 (`DST: … SRC: …`) or V/D type 2 frame (`FN: 2/7 SRC: …`),
 each printed only after its own DCH CRC; a YSF call starts on a frame whose FICH
-decoded (`HC|CC|TC FN: n/m`). dPMR TG/Src prints are not used: dsd-fme marks an
+decoded (`HC|CC|TC FN: n/m`) and ends at the terminator (`TC`). dPMR TG/Src prints are not used: dsd-fme marks an
 ID OK when its CRC failed but two Hamming words looked correctable, so a dPMR call
 carries the protocol only. Calls of the catalogue's `auto` mode (`-fa`) cover
 DMR, P25, YSF, D-STAR and X2-TDMA; dsd-fme turns NXDN and dPMR off in that mode,

@@ -43,6 +43,9 @@ const NO_TALKGROUP_PROTOCOLS: ReadonlySet<string> = new Set([
 	"YSF",
 	"DPMR",
 	"PROVOICE",
+	// NXDN calls heard by RAN alone, before a VCALL names the units.
+	"NXDN48",
+	"NXDN96",
 ])
 
 function nestedNumber(

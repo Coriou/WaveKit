@@ -378,16 +378,29 @@ describe("synthetic frames through the production decoder chains", () => {
 			const file = join(dir, "in")
 			writeFileSync(file, cf32!)
 			const kiss = join(dir, "kiss.bin")
-			const client = [
-				"const net=require('net'),fs=require('fs');const out=[];let t=0;",
-				"const go=()=>{const s=net.connect(" + kissPort + ",'127.0.0.1');",
-				"s.on('data',d=>out.push(d));s.on('close',()=>{fs.writeFileSync(" +
-					JSON.stringify(kiss) +
-					",Buffer.concat(out));process.exit(0)});",
-				"s.on('error',()=>{if(++t<100)setTimeout(go,100);else process.exit(1)})};go()",
-			].join("")
-			// direwolf binds KISS at start; the audio waits until the client is in.
-			const command = `(sleep 3; cat) | (${probe.pipeline()}) & node -e "${client}"; wait`
+			// The KISS client, a file (no shell quoting): appends every chunk and
+			// exits when direwolf closes the port or 20 s after connecting.
+			const client = join(dir, "kiss-client.cjs")
+			writeFileSync(
+				client,
+				[
+					"const net = require('net'), fs = require('fs')",
+					`const out = ${JSON.stringify(kiss)}`,
+					"fs.writeFileSync(out, Buffer.alloc(0))",
+					"let tries = 0",
+					"const go = () => {",
+					`  const s = net.connect(${kissPort}, '127.0.0.1')`,
+					"  s.on('connect', () => setTimeout(() => process.exit(0), 20000))",
+					"  s.on('data', d => fs.appendFileSync(out, d))",
+					"  s.on('close', () => { if (s.bytesRead > 0 || tries >= 100) process.exit(0) })",
+					"  s.on('error', () => { if (++tries < 100) setTimeout(go, 100) })",
+					"}",
+					"go()",
+				].join("\n"),
+			)
+			// dash gives a background list /dev/null as stdin: the audio is read
+			// from the file explicitly, 3 s after direwolf starts binding KISS.
+			const command = `(sleep 3; cat "${file}") | (${probe.pipeline()}) & P=$!; node "${client}"; kill $P 2>/dev/null; wait`
 			const { lines } = runShell(command, file, dir, 90_000)
 			const bytes = readFileSync(kiss)
 			rmSync(dir, { recursive: true, force: true })
