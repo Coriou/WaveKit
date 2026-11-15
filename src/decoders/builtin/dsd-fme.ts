@@ -1103,36 +1103,40 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Promote pending call to active call
 		this.callState = this.pendingCall.state
 		this.pendingCall = null
-		this.announcedCallId = this.callState.callId
 
+		return this.callStartEvent(this.callState, now)
+	}
+
+	/** The call_start of `call`; marks it announced. */
+	private callStartEvent(call: DsdFmeCallState, now: Date): DecoderOutput {
+		this.announcedCallId = call.callId
 		this.logger.info(
 			{
-				protocol: this.callState.protocol,
-				talkgroup: this.callState.talkgroup,
-				source: this.callState.source,
-				slot: this.callState.slot,
-				dmrCc: this.callState.dmr?.cc,
+				protocol: call.protocol,
+				talkgroup: call.talkgroup,
+				source: call.source,
+				slot: call.slot,
+				dmrCc: call.dmr?.cc,
 			},
 			"Call started (after metadata accumulation)",
 		)
-
 		return {
 			timestamp: now,
 			decoder: this.id,
 			type: "call_start",
 			data: {
-				callId: this.callState.callId,
-				startedAt: this.callState.startTime.toISOString(),
-				encrypted: this.callState.flags.encrypted,
-				protocol: this.callState.protocol,
-				talkgroup: this.callState.talkgroup,
-				source: this.callState.source,
-				slot: this.callState.slot,
-				dmr: this.callState.dmr,
-				p25: this.callState.p25,
-				nxdn: this.callState.nxdn,
-				dstar: this.callState.dstar,
-				ysf: this.callState.ysf,
+				callId: call.callId,
+				startedAt: call.startTime.toISOString(),
+				encrypted: call.flags.encrypted,
+				protocol: call.protocol,
+				talkgroup: call.talkgroup,
+				source: call.source,
+				slot: call.slot,
+				dmr: call.dmr,
+				p25: call.p25,
+				nxdn: call.nxdn,
+				dstar: call.dstar,
+				ysf: call.ysf,
 			},
 		}
 	}
@@ -1917,9 +1921,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// a current checked DUID. It updates only on NAC correction at
 				// 390-396; even plain NAC is stored state. No supported print
 				// explicitly binds NAC to this frame's checked NID: hints only.
-				const nac =
-					/\bNAC(?:\/CC)?:\s*([0-9A-F]{3});/i.exec(line)?.[1] ??
-					P25_NAC.exec(line)?.groups?.["nac"]
+				// A failed NID ("duid:EE") prints a NAC it did not decode.
+				const nac = /\bduid:EE\b/.test(line)
+					? undefined
+					: (/\bNAC(?:\/CC)?:\s*([0-9A-F]{3});/i.exec(line)?.[1] ??
+						P25_NAC.exec(line)?.groups?.["nac"])
 				const lcw =
 					protocol === "p25p1" ? P25_LCW_GROUP.exec(line)?.groups : undefined
 				const unit =
@@ -2541,6 +2547,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Protocol-specific termination patterns
 		let isTerminator = false
+		/** The terminator carries link control of its own (TDULC, DMR TLC). */
+		let carriesLc = true
 
 		switch (targetCall.protocol) {
 			case "dmr": {
@@ -2555,6 +2563,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			}
 			case "p25p1":
 			case "p25p2":
+				// A plain TDU (DUID 3) carries no link control; TDULC does.
+				carriesLc = P25_CALL_TERM.test(line)
 				isTerminator =
 					P25_CALL_TERM.test(line) ||
 					(targetCall.protocol === "p25p1" &&
@@ -2588,10 +2598,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				this.callState = this.pendingCall.state
 				this.pendingCall = null
 			}
-			// The trailer ignores the terminator's own link control; YSF and
-			// D-STAR print none, and their next over may follow at once.
+			// The trailer ignores the terminator's own link control. A plain P25
+			// TDU, YSF and NXDN releases print none (NXDN's IDs line is never
+			// read as a VCALL), so the next over may follow at once.
 			this.recentlyTerminated =
-				targetCall.protocol === "ysf" || targetCall.protocol === "dstar"
+				!carriesLc ||
+				targetCall.protocol === "ysf" ||
+				targetCall.protocol === "dstar" ||
+				targetCall.protocol === "nxdn48" ||
+				targetCall.protocol === "nxdn96"
 					? null
 					: {
 							protocol: targetCall.protocol,
@@ -3088,6 +3103,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.frameCount = 0
 			return null // Don't emit for likely false positives
 		}
+
+		// A call that ends before the timer announced it (a terminator, a
+		// protocol switch or a timeout of a pending call) still starts first:
+		// a call_end never comes without its call_start.
+		if (!announced) this.emitOutput(this.callStartEvent(callInfo, now))
 
 		// Try to find the WAV file immediately
 		const wavFile = this.findWavFile(callInfo, endTime)

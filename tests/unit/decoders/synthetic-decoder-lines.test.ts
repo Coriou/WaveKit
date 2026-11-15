@@ -170,6 +170,29 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 			checkYsf(replay(lines, dsd("auto"), dsdInterpreter()))
 		})
 
+	// The core image's dsd-fme on the P25 re-key: the second over's first
+	// link control lands right after the first TDU, and its TDU can end it
+	// before the call timer announced it. At every timer phase: two calls,
+	// each call_start before its call_end.
+	for (const lead of [0, 1, 2, 3, 4])
+		it(`dsd-fme image: P25 re-key with ${lead} lines before the first frame`, () => {
+			const lines = [
+				...Array(lead).fill("Audio In Device: /dev/stdin"),
+				...recorded("dsd-fme-p25-rekey-image"),
+			]
+			const r = replay(lines, dsd("auto"), dsdInterpreter())
+			checkP25Rekey(r)
+			const order = r.outputs
+				.filter(o => o.type === "call_start" || o.type === "call_end")
+				.map(o => `${o.type}:${(o.data as { callId: string }).callId}`)
+			const ids = [...new Set(order.map(e => e.split(":")[1]))]
+			expect(order).toEqual(
+				ids.flatMap(id => [`call_start:${id}`, `call_end:${id}`]),
+			)
+			// The failed NID's "NAC: 000" is no hint and not the call's NAC.
+			expect(r.links.some(l => l.nac === "000")).toBe(false)
+		})
+
 	describe("trust edges of the checked formats", () => {
 		const run = (mode: string, lines: string[], lineMs?: number) =>
 			replay(lines, dsd(mode), dsdInterpreter(), lineMs)

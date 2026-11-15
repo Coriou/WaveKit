@@ -1068,7 +1068,9 @@ Channel User - Group 4321 Source 1234567`, which both callers (LDU1, TDULC) prin
 only after the RS(24,12,13) check; ` Unit to Unit Voice Channel User - Target 7
 Source 9` gives the source and a target unit (`p25.unitTarget`, no talkgroup). The
 NAC on the call is the last sync line whose NID decoded. A `TDU` (or TDULC) ends
-the call, so a station keying up again starts a new one.
+the call, so a station keying up again starts a new one. A call that ends before it
+was announced still emits its `call_start` first, and a failed NID (`duid:EE`) gives
+no NAC.
 D-STAR uses the slow-data copy of the header (` RPT 2: … RPT 1: … DST: … SRC: …`,
 printed only when its CRC matches; the radio header before it on a `+DSTAR
 HEADER` line has no FCS check): MY is the callsign, DST the UR call. A `+DSTAR
