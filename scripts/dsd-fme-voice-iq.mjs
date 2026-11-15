@@ -215,8 +215,9 @@ export function chanFeed(
 			return fail(`unparsable event: ${line}`)
 		}
 		if (event.type === "ready")
+			// afcMaxHz only for a binary that offers it (an older one rejects the field).
 			chan.stdio[3].write(
-				`${JSON.stringify(openRequest(offset, afc))}\n`,
+				`${JSON.stringify(openRequest(offset, afc && event.afc === true))}\n`,
 				err => err && fail(`control fd: ${err.message}`),
 			)
 		else if (event.type === "rejected")

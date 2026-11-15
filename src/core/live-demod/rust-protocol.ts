@@ -44,8 +44,10 @@ const ReadyEventSchema = z
 		type: z.literal("ready"),
 		generation,
 		pid: z.number().int().nonnegative(),
-		// The binary's capability for the channelizer's parent; this parent never recentres.
+		// The binary's capabilities for the channelizer's parent; this parent never recentres and
+		// never asks for a carrier correction (afcMaxHz).
 		recenter: z.literal(true).optional(),
+		afc: z.literal(true).optional(),
 	})
 	.strict()
 

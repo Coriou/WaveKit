@@ -212,7 +212,7 @@ describe.skipIf(!bin || !existsSync(bin))(
 			const parsed = parseEventLine(line)
 			expect(parsed).toMatchObject({
 				ok: true,
-				event: { type: "ready", recenter: true },
+				event: { type: "ready", recenter: true, afc: true },
 			})
 			// Live demod reads the same binary with its own strict schema, and a line it cannot parse fails its start.
 			expect(parseDemodEventLine(line)).toMatchObject({

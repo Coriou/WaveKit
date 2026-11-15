@@ -49,7 +49,11 @@ describe("the ready line of a binary that takes recenter", () => {
 	const ready = { v: 1, type: "ready", generation: 1, pid: 7 }
 
 	it("parses here with or without the capability, which only the channelizer's parent reads", () => {
-		for (const line of [ready, { ...ready, recenter: true }])
+		for (const line of [
+			ready,
+			{ ...ready, recenter: true },
+			{ ...ready, recenter: true, afc: true },
+		])
 			expect(parseDemodEventLine(JSON.stringify(line))).toMatchObject({
 				ok: true,
 				event: { type: "ready", pid: 7 },
@@ -59,6 +63,7 @@ describe("the ready line of a binary that takes recenter", () => {
 	it("stays strict about everything else", () => {
 		for (const line of [
 			{ ...ready, recenter: false },
+			{ ...ready, afc: false },
 			{ ...ready, other: true },
 		])
 			expect(parseDemodEventLine(JSON.stringify(line))).toEqual({ ok: false })
