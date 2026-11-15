@@ -1,4 +1,5 @@
 import { audioChannelRequest } from "../../../decoders/audio-demod-decoder.js"
+import { DSD_FME_CARRIER_CORRECTION_MAX_HZ } from "../../../decoders/builtin/dsd-fme.js"
 import {
 	MULTIMON_CHANNEL_BANDWIDTH_HZ,
 	MULTIMON_CHANNEL_TRANSITION_HZ,
@@ -38,6 +39,7 @@ function requestShape(request: DecoderChannelRequest) {
 		transitionHz: request.transitionHz,
 		outputRateHz: request.outputRateHz,
 		format: request.format,
+		...(request.afcMaxHz === undefined ? {} : { afcMaxHz: request.afcMaxHz }),
 	})
 }
 
@@ -48,7 +50,11 @@ export const PROBE_CHANNEL_REQUESTS: Readonly<
 		Readonly<Omit<DecoderChannelRequest, "centerHz">>
 	>
 > = Object.freeze({
-	"dsd-fme": requestShape(audioChannelRequest(audioDefault, input)),
+	// The decoder adds its carrier frequency correction to the audio channel.
+	"dsd-fme": requestShape({
+		...audioChannelRequest(audioDefault, input),
+		afcMaxHz: DSD_FME_CARRIER_CORRECTION_MAX_HZ,
+	}),
 	// The decoder's 12 kHz paging channel filter (decoder-enablement 3.18).
 	"multimon-ng": requestShape({
 		...audioChannelRequest({ ...audioDefault, filterTransition: 0.012 }, input),
