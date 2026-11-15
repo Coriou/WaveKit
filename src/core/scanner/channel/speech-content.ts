@@ -202,8 +202,9 @@ export class SpeechContentMeter {
 	/**
 	 * A short file's one partial window (under SPEECH_WINDOW_FRAMES frames), measured apart: it is
 	 * reported only while the file is shorter than a window and never folds into `maxRange` or
-	 * `maxBurst`, so a meter read on every step (the recorder's judged audio) reads at
-	 * SPEECH_WINDOW_FRAMES and on exactly what a meter read once at the end reads.
+	 * `maxBurst`, so a meter read on every step (the recorder's judged audio) never reads a
+	 * partial window once it has a whole one (below SPEECH_WINDOW_FRAMES it reads what a meter
+	 * read once at the end reads; past it, whole windows only, possibly more of them).
 	 */
 	private partialRange = 0
 	private partialBurst = 0
