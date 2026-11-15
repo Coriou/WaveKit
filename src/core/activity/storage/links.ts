@@ -33,8 +33,9 @@ export const ACTIVITY_LINKS_MAX = RECORDINGS_CATALOGUE_MAX
 
 /**
  * Voice rows the backfill examines per transaction. A write waits for at most one chunk: 2 000
- * rows took up to 286 ms on a 250 000-row store at load 5 (half of them linked), 500 keep a chunk
- * near 70 ms (docs/PERFORMANCE.md, scripts/longevity/recording-links.ts).
+ * rows took up to 286 ms on a 250 000-row store at load 5 (half of them linked); 500 take 18 ms
+ * (median, at most 89 ms) alone and at most 82 ms beside writes at load 5 (docs/PERFORMANCE.md,
+ * scripts/longevity/recording-links.ts).
  */
 export const ACTIVITY_LINK_BACKFILL_CHUNK = 500
 
@@ -151,7 +152,12 @@ export function applyActivityLinks(
 				continue
 			}
 			for (const id of op.recordingIds) {
-				for (const row of linkedRows(db, LINKED_ROWS, id)) {
+				const rows = linkedRows(db, LINKED_ROWS, id)
+				// No row holds the key any more (pruned meanwhile): the parent forgets it
+				// (eventId ""), so a sweep does not ask again.
+				if (rows.length === 0)
+					events.push({ recordingId: id, eventId: "", seq: "0", linked: false })
+				for (const row of rows) {
 					if (setLink(db, row, null))
 						events.push({
 							recordingId: id,
@@ -232,6 +238,11 @@ export function backfillRecordingLinks(
 	db: SqliteDatabase,
 	pending: Map<string, LinkedRow & { durationMs: unknown }>,
 	chunk: number = ACTIVITY_LINK_BACKFILL_CHUNK,
+	/**
+	 * The newest row stored before this open (null: no limit). Rows after it came through the
+	 * live path, which already linked them or chose not to (a probe's call).
+	 */
+	untilSeq: bigint | null = null,
 ): LinkBackfillStep {
 	const cursor = readLinkBackfill(db)
 	if (cursor === "done") return { done: true, examined: 0, events: [] }
@@ -244,10 +255,14 @@ export function backfillRecordingLinks(
 				json_extract(record_json, '$.payload.decodedData.flags.wavFileUpdate') AS late,
 				json_extract(record_json, '$.payload.decodedData.duration') AS duration
 			 FROM activity
-			 WHERE category = 'voice' AND kind = 'decoder-reception' AND seq > ?
+			 WHERE category = 'voice' AND kind = 'decoder-reception' AND seq > ? AND seq <= ?
 			 ORDER BY seq LIMIT ?`,
 		)
-		.all(bindInteger(BigInt(cursor)), chunk)
+		.all(
+			bindInteger(BigInt(cursor)),
+			bindInteger(untilSeq ?? BigInt(Number.MAX_SAFE_INTEGER)),
+			chunk,
+		)
 	const events: ActivityLinkEvent[] = []
 	let last = BigInt(cursor)
 	db.exec("BEGIN IMMEDIATE")

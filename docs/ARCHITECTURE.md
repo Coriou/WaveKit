@@ -488,7 +488,9 @@ the row (`activityEventId`, from the store's in-memory link index). Producers:
 
 A link only changes `summary_json` and `activity_refs`; `record_json` and `record_bytes` stay as
 received, so retention counters never move. `recording-links.ts` also removes links of deleted
-files: a key missing from a complete catalogue for 90 s is unlinked. Stores written before links are
+files: a key a complete catalogue lacked on two sweeps 90 s apart is unlinked (`hasKey` answers
+null, "cannot tell", while the catalogue re-indexes, met an error or left files out). Rows a
+fair-share delete removes report their links, so the index never names a deleted row for long. Stores written before links are
 backfilled on the writer thread after the open, 500 voice rows per transaction with writes between
 chunks, resumed from `store_meta.recordingLinkBackfill`; then the writer sends the full link set
 for the index.

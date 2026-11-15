@@ -658,7 +658,7 @@ class ActivityStore implements ActivityStoreHandle {
 				this.links.set(event.recordingId, { eventId: event.eventId, seq })
 				if (this.linksMinSeq === null || seq < this.linksMinSeq)
 					this.linksMinSeq = seq
-			} else if (known?.eventId === event.eventId) {
+			} else if (event.eventId === "" || known?.eventId === event.eventId) {
 				this.links.delete(event.recordingId)
 			}
 		}
@@ -703,7 +703,7 @@ class ActivityStore implements ActivityStoreHandle {
 	}
 
 	linkedRecordings(): readonly string[] {
-		return [...this.links.keys()].reverse()
+		return [...this.links.keys()]
 	}
 
 	onLinks(
@@ -1052,6 +1052,11 @@ class ActivityStore implements ActivityStoreHandle {
 	): void {
 		if (result.note !== undefined)
 			this.logger.warn({ err: result.note }, "activity retention step failed")
+		if (result.linkError !== undefined)
+			this.logger.warn(
+				{ err: result.linkError, ops: this.linkOpsInFlight.length },
+				"activity recording link changes failed; dropped",
+			)
 		this.ingress.noteSkipped(batch, result.commit.writeFailedEventIds)
 		this.armCoalesceTimer()
 		const done = new Set<string>([
@@ -1063,9 +1068,10 @@ class ActivityStore implements ActivityStoreHandle {
 		this.duplicates += result.commit.duplicates
 		this.linkOpsInFlight = []
 		this.adopt(result.snapshot)
-		this.dropPrunedLinks()
-		// Older writers' replies (test doubles) carry no links.
+		// Older writers' replies (test doubles) carry no links. Then the prefix prune of this write
+		// (its watermark): a row linked and pruned in one write is not remembered.
 		this.applyLinkEvents(result.links ?? [])
+		this.dropPrunedLinks()
 		this.publish()
 		if (this.ingress.paused) this.armPause()
 		else this.clearPause()

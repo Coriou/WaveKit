@@ -260,9 +260,8 @@ export interface RecordingChangeRecord extends ActivityRecordBase {
 }
 
 /**
- * The recording a row links to: a dsd-fme call's file (its `call_end` row) or a scanner
- * recording (its `recording-change` row, or a probe call's row once the scanner kept the file).
- * Removed when the file is deleted.
+ * The recording a row links to: a dsd-fme call's file (its `call_end` row) or a scanner analog
+ * recording (its `recording-change` row). Removed when the file is deleted.
  */
 export interface ActivityRecordingLink {
 	/**

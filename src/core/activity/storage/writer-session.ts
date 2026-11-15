@@ -38,6 +38,7 @@ import {
 import type { FairStepPlan } from "./fair-share.js"
 import type { ActivityLimits } from "./limits.js"
 import {
+	ACTIVITY_LINK_BACKFILL_CHUNK,
 	applyActivityLinks,
 	backfillRecordingLinks,
 	readRecordingLinks,
@@ -71,6 +72,8 @@ export interface WriterWorkSuccess {
 	snapshot: ActivityWorkerSnapshot
 	/** Recording links committed: rows stored with one, then the link ops applied after them. */
 	links: ActivityLinkEvent[]
+	/** The link ops of this write failed and were dropped (the rows committed). */
+	linkError?: string
 	note?: string
 }
 
@@ -151,6 +154,10 @@ export function createActivitySession(
 	let seedScans = 0
 	/** Backfill: calls waiting for their late file row, between chunks. */
 	const backfillPending: BackfillPending = new Map()
+	/** Links of rows a fair delete removed during this write (reported with its links). */
+	const prunedLinks: ActivityLinkEvent[] = []
+	/** The backfill stops at the newest row stored before this open (committedMax). */
+	const backfillUntil = BigInt(state.identity.committedMax)
 	const seed = (): boolean => {
 		const started = performance.now()
 		seedScans += 1
@@ -363,6 +370,7 @@ export function createActivitySession(
 		const runFair = (chosen: readonly FairDeleteTarget[]): PruneResult => {
 			const done = pruneActivityFair(db, limits, chosen, reading)
 			counters.subtract(done.deletedRows)
+			prunedLinks.push(...done.unlinked)
 			if (done.vacuumError !== undefined)
 				stepNote = `activity incremental vacuum failed: ${done.vacuumError}`
 			if (done.changed) {
@@ -454,7 +462,12 @@ export function createActivitySession(
 			return build
 		},
 		backfillLinks() {
-			return backfillRecordingLinks(db, backfillPending)
+			return backfillRecordingLinks(
+				db,
+				backfillPending,
+				ACTIVITY_LINK_BACKFILL_CHUNK,
+				backfillUntil,
+			)
 		},
 		readLinks() {
 			return readRecordingLinks(db)
@@ -469,16 +482,17 @@ export function createActivitySession(
 				failures -= 1
 				return { ok: false, message: "injected write failure" }
 			}
+			prunedLinks.length = 0
 			const commit = commitActivityBatch(db, rows)
 			if (!commit.ok) return { ok: false, message: commit.message }
 			if (counters.live) counters.addCommitted(rows, commit.committedIndexes)
 			const links = [...commit.linked]
-			let linkNote: string | undefined
+			let linkError: string | undefined
 			try {
 				links.push(...applyActivityLinks(db, linkOps))
 			} catch (error) {
 				// The rows are committed; the link changes are dropped (logged by the store).
-				linkNote = `activity recording links failed: ${messageOf(error)}`
+				linkError = messageOf(error)
 			}
 			const previous = state.identity
 			let prune: PruneResult = {
@@ -489,7 +503,7 @@ export function createActivitySession(
 				rowCount: state.rows,
 				dbBytes: state.dbBytes,
 			}
-			let note: string | undefined = pendingNote ?? linkNote
+			let note: string | undefined = pendingNote
 			pendingNote = undefined
 			stepNote = undefined
 			try {
@@ -531,10 +545,14 @@ export function createActivitySession(
 			} catch (error) {
 				note = messageOf(error)
 			}
+			// After the links applied: a row linked and then pruned by this write ends unlinked.
+			links.push(...prunedLinks)
+			prunedLinks.length = 0
 			const shot = snapshot()
+			const linked = linkError === undefined ? { links } : { links, linkError }
 			if (note !== undefined)
-				return { ok: true, commit, prune, snapshot: shot, links, note }
-			return { ok: true, commit, prune, snapshot: shot, links }
+				return { ok: true, commit, prune, snapshot: shot, ...linked, note }
+			return { ok: true, commit, prune, snapshot: shot, ...linked }
 		},
 		checkpoint(reason) {
 			refresh(reason)

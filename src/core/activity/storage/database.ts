@@ -437,6 +437,11 @@ export interface FairDeleteTarget {
 
 export interface FairPruneResult extends PruneResult {
 	deletedRows: PrunedActivityRow[]
+	/**
+	 * The recording links of the deleted rows (`linked: false`): a fair delete opens holes above
+	 * the prune watermark, so the parent's link index learns of them here.
+	 */
+	unlinked: ActivityLinkEvent[]
 	holeWatermark: string
 	holeGeneration: number
 	holeOpened: boolean
@@ -563,6 +568,7 @@ export function pruneActivityFair(
 	if (!Number.isSafeInteger(vacuumPages) || vacuumPages < 0)
 		throw new ActivityUnavailableError("Activity vacuum page cap is invalid")
 	const deletedRows: PrunedActivityRow[] = []
+	const unlinked: ActivityLinkEvent[] = []
 	let result: FairPruneResult
 	db.exec("BEGIN IMMEDIATE")
 	try {
@@ -577,6 +583,11 @@ export function pruneActivityFair(
 		)
 		const dropFts = db.prepare("DELETE FROM activity_fts WHERE rowid = ?")
 		const dropRow = db.prepare("DELETE FROM activity WHERE seq = ?")
+		const linksOf = db.prepare(
+			`SELECT r.ref_value AS ref_value, a.event_id AS event_id
+			 FROM activity_refs r JOIN activity a ON a.seq = r.seq
+			 WHERE r.seq = ? AND r.ref_type = 'recordingId'`,
+		)
 		for (const target of targets) {
 			if (!Number.isSafeInteger(target.rows) || target.rows < 1) continue
 			const rows =
@@ -596,6 +607,17 @@ export function pruneActivityFair(
 				taken += 1
 				retained -= row.recordBytes
 				const bound = bindInteger(row.seq)
+				for (const link of linksOf.all(bound)) {
+					const id = cell(link, "ref_value")
+					const eventId = cell(link, "event_id")
+					if (typeof id === "string" && typeof eventId === "string")
+						unlinked.push({
+							recordingId: id,
+							eventId,
+							seq: row.seq.toString(10),
+							linked: false,
+						})
+				}
 				dropFts.run(bound)
 				dropRow.run(bound)
 				deletedRows.push(row)
@@ -654,6 +676,7 @@ export function pruneActivityFair(
 			rowCount: before.rowCount,
 			dbBytes: before.dbBytes,
 			deletedRows,
+			unlinked,
 			holeWatermark: nextHole.toString(10),
 			holeGeneration,
 			holeOpened,

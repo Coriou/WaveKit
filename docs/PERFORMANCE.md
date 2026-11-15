@@ -1014,12 +1014,16 @@ Stores written before links are backfilled once, on the writer thread after the 
 rows per transaction (read through `activity_category`), resumed from
 `store_meta.recordingLinkBackfill`. Each next chunk is queued from `setImmediate`, after the
 writes that arrived meanwhile, so a write waits for at most one chunk (queued from the chunk's
-own continuation, every chunk ran before any write: a reception waited 3 s). On that store (14 700
-voice rows, half of them linked) with a decoder admitting 50 receptions a second at the row cap:
-30 chunks of at most 82 ms, done in 17.7 s in the background; the main thread's event-loop delay
-peaked at 27 ms (25.6 ms over the same window without the backfill) and admit-to-commit took at
-most 1.54 s, 0.88 s median (1.42 s and 0.77 s without it: most of both is the open's retention seed
-and the cap's prune). Then the writer sends the parent the full link set (at most 50 000, the
+own continuation, every chunk ran before any write: a reception waited 3 s). It stops at the newest
+row stored before the open: later rows came through the live path. On that store (14 700 voice
+rows, half of them linked) with a decoder admitting 50 receptions a second at the row cap, the
+backfill runs 30 chunks in 17 to 18 s in the background. A chunk alone takes 18 ms (median, at
+most 89 ms); beside the writes and the cap's prunes, at most 82 ms at load 5 and 200 to 250 ms at
+load 8. The main thread's event-loop delay peaked at 23 to 47 ms, as without the backfill (26 to
+35 ms over the same window). Admit-to-commit took at most 1.54 s at load 5 (0.88 s median; 1.42
+s and 0.77 s without the backfill) and 1.8 to 1.96 s at load 8 (0.9 s median; 1.38 s and 0.77 s
+without it): most of it is the open's retention seed and the cap's prune, and the backfill adds
+at most about one chunk. Then the writer sends the parent the full link set (at most 50 000, the
 catalogue bound), about 100 bytes each.
 
 The web app's chip counts (`liveCountsDelayMs` in

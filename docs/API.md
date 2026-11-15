@@ -7244,11 +7244,14 @@ Which rows link:
 | scanner digital voice (a probe's call file)         | not linked yet: the probe's call rows name no file of the catalogue                                                                                                                      |
 
 A link goes when its file goes (pruned, deleted, retention, a removed
-discovery, removed by hand): once a complete catalogue has lacked the key for
-90 s (one 60 s sweep plus 30 s, longer than a folder refresh), the row loses
-`recording` and its `recordingId` ref; the row itself stays. While the
-catalogue is still building or has left files out (a bound), nothing is
-unlinked. Only the summary and the refs change: the stored record stays as it
+discovery, removed by hand): once a complete catalogue has lacked the key on
+two sweeps at least 90 s apart (sweeps every 60 s), the row loses `recording`
+and its `recordingId` ref; the row itself stays. A sweep proves nothing, and
+unlinks nothing, while the catalogue cannot tell: its first build, a full pass
+or refresh re-indexing folders, a pass that met a directory error, files left
+out at a bound, and, for a `dsd~` key, a configured dsd-fme directory that is
+missing (not created yet, or unmounted). So a deleted file's link usually goes
+within two to three minutes. Only the summary and the refs change: the stored record stays as it
 was received. dsd-fme reports the file as an absolute path; Activity stores and
 serves its file name only (`decodedData.wavFile`), never a path, and drops a
 `wavFile` that is not a call file name. Rows stored by cores before links are

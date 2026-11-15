@@ -96,7 +96,7 @@ describe("the recording link sweep", () => {
 		expect(ops).toEqual([])
 	})
 
-	it("never unlinks while the catalogue cannot tell (first build, a bound reached, a throw)", () => {
+	it("never unlinks on an answer that cannot tell (first build, a bound, a refresh, a throw)", () => {
 		let now = 0
 		let answer: boolean | null = null
 		let throws = false
@@ -117,18 +117,18 @@ describe("the recording link sweep", () => {
 			w.sweep()
 			now += RECORDING_LINK_MISSING_MS
 		}
+		expect(ops).toEqual([])
+		// Missing from a complete catalogue once, then unknown: still linked.
 		answer = false
 		w.sweep()
 		throws = true
 		now += RECORDING_LINK_MISSING_MS
 		w.sweep()
 		expect(ops).toEqual([])
-		// Missing, then unknown, then missing again: the wait starts over.
+		// Missing again from a complete catalogue the missing time after the first: unlinked.
 		throws = false
 		w.sweep()
-		now += RECORDING_LINK_MISSING_MS - 1
-		w.sweep()
-		expect(ops).toEqual([])
+		expect(ops).toEqual([{ type: "unlink", recordingIds: [key(1)] }])
 	})
 
 	it("unlinks many keys in chunks of RECORDING_LINK_UNLINK_CHUNK", () => {

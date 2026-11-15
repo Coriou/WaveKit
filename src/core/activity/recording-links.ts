@@ -12,7 +12,8 @@
  * A link goes when its file goes. Every deleter (the dsd-fme pruner, Delete, scanner retention,
  * discovery removal, a file removed by hand) shows up as a key the catalogue no longer indexes;
  * the catalogue also drops and re-adds files while it refreshes a folder, so a key is unlinked
- * only after it was missing from a complete catalogue for RECORDING_LINK_MISSING_MS.
+ * only after a complete catalogue (hasKey not null) lacked it on two sweeps at least
+ * RECORDING_LINK_MISSING_MS apart.
  */
 import { scannerKeepKey } from "../recordings/contract.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
@@ -168,11 +169,9 @@ export function wireRecordingLinks(
 			} catch {
 				present = null
 			}
-			// The catalogue cannot tell (first build, a bound reached): nothing is unlinked.
-			if (present === null) {
-				missing.clear()
-				return
-			}
+			// The catalogue cannot tell now (building, re-indexing, an error, a bound): this sweep
+			// proves nothing and unlinks nothing; the next one looks again.
+			if (present === null) return
 			if (present) {
 				missing.delete(key)
 				continue

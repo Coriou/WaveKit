@@ -15,6 +15,7 @@ import type {
 	ActivityStoreHandle,
 	RecordingChangePayload,
 } from "../../../../../src/core/activity/storage/contract.js"
+import { pruneActivityFair } from "../../../../../src/core/activity/storage/database.js"
 import { backfillRecordingLinks } from "../../../../../src/core/activity/storage/links.js"
 import { openSqliteFile } from "../../../../../src/core/activity/storage/probe.js"
 import { openActivityStore } from "../../../../../src/core/activity/storage/store.js"
@@ -221,6 +222,52 @@ describe("recording links in the store", () => {
 		}
 	})
 
+	it("an unlink of a key no row holds any more makes the index forget it", async () => {
+		const store = await openStore()
+		const events: ActivityLinkEvent[] = []
+		store.onLinks?.(e => events.push(...e))
+		const call = callEnd("call-12")
+		store.admit(call, undefined, { id: KEY_A, durationMs: 1 })
+		expect(store.recordingEventId?.(KEY_A)).toBe(call.eventId)
+		// The row goes behind the index's back (as a fair-share delete of an older core would).
+		const db = await openSqliteFile(store.dbPath)
+		db.prepare("DELETE FROM activity WHERE event_id = ?").run(call.eventId)
+		db.close()
+		store.link?.({ type: "unlink", recordingIds: [KEY_A] })
+		expect(store.recordingEventId?.(KEY_A)).toBeNull()
+		expect(store.linkedRecordings?.()).toEqual([])
+		expect(events.at(-1)).toEqual({
+			recordingId: KEY_A,
+			eventId: "",
+			seq: "0",
+			linked: false,
+		})
+	})
+
+	it("a fair-share delete reports the links of the rows it removes", async () => {
+		const store = await openStore()
+		const linked = callEnd("call-13")
+		store.admit(linked, undefined, { id: KEY_B, durationMs: 1 })
+		store.admit(callEnd("call-14"))
+		await store.close()
+		const db = await openSqliteFile(store.dbPath)
+		const done = pruneActivityFair(
+			db,
+			{ incrementalVacuumPages: 0 },
+			[{ decoderId: "dsd-a", kind: "decoder-reception", rows: 2 }],
+			{ rowCount: 2, dbBytes: 0 },
+		)
+		db.close()
+		expect(done.deleted).toBe(2)
+		expect(done.unlinked).toEqual([
+			expect.objectContaining({
+				recordingId: KEY_B,
+				eventId: linked.eventId,
+				linked: false,
+			}),
+		])
+	})
+
 	it("a kept scanner recording is one recording-change row linked to its file, discovery and observation", async () => {
 		const store = await openStore()
 		const payload: RecordingChangePayload = {
@@ -312,6 +359,31 @@ describe("recording links in the store", () => {
 		).toBe("done")
 		meta.close()
 		await q.close()
+	})
+
+	it("the backfill stops at the newest row stored before the open", async () => {
+		const stateDir = await tempDir()
+		const first = await openStore({ stateDir })
+		const before = callEnd("call-15", { wavFile: `/c/${NAME_A}` })
+		const after = callEnd("call-16", { wavFile: `/c/${NAME_B}` })
+		for (const e of [before, after]) {
+			const { refs: _refs, ...legacy } = e
+			first.admit(legacy)
+		}
+		await first.close()
+		const db = await openSqliteFile(first.dbPath)
+		db.prepare("UPDATE store_meta SET value = '0' WHERE key = ?").run(
+			"recordingLinkBackfill",
+		)
+		const until = BigInt(
+			String(
+				db.prepare("SELECT MIN(seq) AS s FROM activity").get()?.["s"] ?? "0",
+			),
+		)
+		const step = backfillRecordingLinks(db, new Map(), 500, until)
+		db.close()
+		expect(step.done).toBe(true)
+		expect(step.events.map(e => e.eventId)).toEqual([before.eventId])
 	})
 
 	it("the backfill resumes chunk by chunk from its cursor, a late file matched across chunks", async () => {

@@ -88,7 +88,7 @@ export interface ActivityRecordingLinks {
 	link(op: ActivityLinkOp): void
 	/** The newest row linked to a recording key, or null. */
 	recordingEventId(recordingId: string): string | null
-	/** The linked keys, newest row first (at most ACTIVITY_LINKS_MAX). */
+	/** The linked keys, in no order (at most ACTIVITY_LINKS_MAX). */
 	linkedRecordings(): readonly string[]
 	/** Link changes as they commit; returns the unsubscribe. */
 	onLinks(listener: (events: readonly ActivityLinkEvent[]) => void): () => void

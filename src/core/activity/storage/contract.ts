@@ -128,9 +128,8 @@ export interface RecordingChangeRecord extends ActivityRecordBase {
 }
 
 /**
- * The recording a row links to: a dsd-fme call's file (its `call_end` row) or a scanner
- * recording (its `recording-change` row, or a probe call's row once the scanner kept the file).
- * Removed when the file is deleted.
+ * The recording a row links to: a dsd-fme call's file (its `call_end` row) or a scanner analog
+ * recording (its `recording-change` row). Removed when the file is deleted.
  */
 export interface ActivityRecordingLink {
 	/**
@@ -337,7 +336,7 @@ export interface ActivityStoreHandle {
 	link?(op: ActivityLinkOp): void
 	/** The eventId of the newest row linked to a recording key, from memory; null when none. */
 	recordingEventId?(recordingId: string): string | null
-	/** The linked recording keys (memory, newest first): what the link sweep checks. */
+	/** The linked recording keys (memory, in no order): what the link sweep checks. */
 	linkedRecordings?(): readonly string[]
 	/** Link changes as they commit (and the full set when the writer loads it); returns off. */
 	onLinks?(listener: (events: readonly ActivityLinkEvent[]) => void): () => void
@@ -368,7 +367,10 @@ export interface ActivityUnlinkOp {
 	recordingIds: readonly string[]
 }
 
-/** One row gaining (`linked`) or losing a recording link, as committed. */
+/**
+ * One row gaining (`linked`) or losing a recording link, as committed. An unlink with `eventId`
+ * "" means no row holds the key any more.
+ */
 export interface ActivityLinkEvent {
 	recordingId: string
 	eventId: string

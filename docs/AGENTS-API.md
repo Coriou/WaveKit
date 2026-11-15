@@ -407,8 +407,8 @@ curl --fail --get --header "$AUTH" --data-urlencode "refs=recordingId:$KEY" \
   "$API_ORIGIN/api/activity"
 ```
 
-The recordings routes exist in protected mode only. A deleted file's link goes within about
-90 s; the row stays.
+The recordings routes exist in protected mode only. A deleted file's link usually goes within
+two to three minutes; the row stays.
 
 ## Capture IQ
 

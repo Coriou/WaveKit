@@ -79,6 +79,33 @@ describe("catalogue links to Activity", () => {
 		expect(inv.hasKey?.(`dsd~${NAME.replace("12345", "54321")}`)).toBe(false)
 	})
 
+	it("hasKey cannot tell while a refresh runs, nor after a pass that met a directory error", async () => {
+		const { a, b } = await callDirs()
+		let dirs = [
+			{ decoderId: "dsd-a", dir: a },
+			{ decoderId: "dsd-b", dir: b },
+		]
+		const inv = createRecordingInventory({
+			dsdFmeDirs: () => dirs,
+			scannerRecordingsDir: () => null,
+			logger,
+		})
+		closers.push(() => inv.close?.())
+		await inv.start?.()
+		inv.invalidate?.()
+		expect(inv.hasKey?.(`dsd~${NAME}`)).toBeNull()
+		await inv.list({})
+		expect(inv.hasKey?.(`dsd~${NAME}`)).toBe(true)
+		// A configured directory that is not a directory any more: its files read unknown, not gone.
+		dirs = [
+			{ decoderId: "dsd-a", dir: a },
+			{ decoderId: "dsd-b", dir: join(b, NAME) },
+		]
+		inv.invalidate?.()
+		await inv.list({})
+		expect(inv.hasKey?.(`dsd~${NAME}`)).toBeNull()
+	})
+
 	it("opens a dsd-fme call by its stable key in whichever dsd-fme directory holds it", async () => {
 		const { a, b } = await callDirs()
 		const inv = createRecordingInventory({
