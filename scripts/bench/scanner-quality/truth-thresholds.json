@@ -115,16 +115,6 @@
 			"reason": "An FM carrier whose audio is noise keyed like speech, on a channel with no digital prior: the content check runs only under a prior, and the keying passes the voice gate."
 		},
 		{
-			"name": "weak-speech-over",
-			"kind": "synthetic",
-			"case": "voice",
-			"metric": "missedVoice",
-			"frequencyHz": 455343750,
-			"atMs": 5000,
-			"count": 1,
-			"reason": "The first of the 12 dB speech overs is never voiced (the voice gate needs several windows above its level), so it is not recorded."
-		},
-		{
 			"name": "fresh-dmr-reads-analog",
 			"kind": "capture",
 			"metric": "falseVoice",

@@ -52,9 +52,15 @@
  * discovery.
  *
  * Whole file: the recorder classes a session as soon as `result()` holds over the file so far,
- * and checks it again over the whole file when the file finishes; a file of a session classed
- * only by its audio that fails then is discarded (`discarded:unclassed`), e.g. 5 s of speech
- * followed by 11 s of a bare carrier.
+ * and checks it again over the whole file when the file finishes (`result(true)`); a file of a
+ * session classed only by its audio that fails then is discarded (`discarded:unclassed`), e.g.
+ * 5 s of speech followed by 11 s of a bare carrier (the speech test fails). The whole-file check
+ * keeps every test but the tone's share of all blocks and its gap rule: those two measure how
+ * much speech took the sub-audible band, not whether the file is voice. A voice's pitch (95 to
+ * 190 Hz in the scorecard's synthetic speech, the CTCSS band) takes blocks from the tone through
+ * every syllable: under the truth scorecard's speech over 300 Hz CTCSS the tone won 27 to 59 % of
+ * an over's blocks and missed 9 in a row (2.25 s) in a 12 dB over its prefix had classed. The
+ * same whole-file verdict classes a voiced shadow parked before its audio was judged.
  *
  * Cost: one VoiceFrameMeter per file while its session is unclassed or classed by its audio only
  * (three biquads per frame and one histogram k-means per 50 ms frame), one autocorrelation
@@ -298,8 +304,11 @@ export class ToneClassEvidence {
 		}
 	}
 
-	/** The tone (Hz) when all three tests above hold; otherwise null. */
-	result(): number | null {
+	/**
+	 * The tone (Hz) when all three tests above hold; otherwise null. `wholeFile`: the check of a
+	 * finished file, without the share and gap rules of test 1 (see Whole file above).
+	 */
+	result(wholeFile = false): number | null {
 		let best = -1
 		let won = 0
 		for (let i = 0; i < CTCSS_HZ.length; i++)
@@ -312,8 +321,10 @@ export class ToneClassEvidence {
 		if (
 			won < TONE_CLASS_MIN_WINS ||
 			won < atLeast(TONE_CLASS_MIN_PURITY, this.wonAny) ||
-			won < atLeast(TONE_CLASS_MIN_SHARE, this.blocks) ||
-			Math.max(this.maxGap[best] ?? 0, trailing) > TONE_CLASS_MAX_GAP_BLOCKS
+			(!wholeFile &&
+				(won < atLeast(TONE_CLASS_MIN_SHARE, this.blocks) ||
+					Math.max(this.maxGap[best] ?? 0, trailing) >
+						TONE_CLASS_MAX_GAP_BLOCKS))
 		)
 			return null
 		const hz = CTCSS_HZ[best]!

@@ -105,6 +105,20 @@ describe("VoiceActivityGate", () => {
 		expect(13 - VOICE_WINDOW_BLOCKS + 1).toBe(VOICE_SHORT_OVER_WINDOWS)
 		expect(edges(13).conclude()).toBe(true)
 		expect(edges(14).conclude()).toBe(false)
+		// The same loud blocks at the start of the audio count as at its end: the gate is
+		// symmetric (its filters start cold on the first frame and settle within a block).
+		const start = (blocks: number, first: number): VoiceActivityGate => {
+			const g = new VoiceActivityGate()
+			g.push(loud(first))
+			g.push(quiet(blocks - first))
+			return g
+		}
+		for (const blocks of [8, 13, 24]) {
+			expect(start(blocks, 2).conclude()).toBe(end(blocks, 2).conclude())
+			expect(start(blocks, 2).conclude()).toBe(true)
+		}
+		for (const blocks of [7, 10, 13, 24])
+			expect(start(blocks, 1).conclude()).toBe(false)
 	})
 
 	it(`a burst that passes 2 windows of an over latches nothing while it runs; one that passes ${VOICE_MIN_WINDOWS} does`, () => {
@@ -168,9 +182,33 @@ describe("VoiceActivityGate", () => {
 		})
 
 		it("a 0.2 s word at the start of a 1.2 s or 1.5 s over passes one isolated window: not voiced", () => {
+			// Not a start transient: the fixture's 4 Hz syllable envelope runs on absolute time and is
+			// null at 0.25 s, so this 0.1 to 0.3 s word holds one loud 100 ms block (RMS 3 500, the
+			// next 980 at 10 dB, 770 at 15 dB), while the end word (0.9 to 1.1 s, null at 1.0 s) splits
+			// its energy over its two blocks. Measured: the gate's windows are the same to the digit
+			// with its filters warmed on the trimmed 100 ms first.
 			for (const overS of [1.2, 1.5])
 				for (const cnrDb of [10, 15])
 					expect(word(overS, cnrDb, "start", 0.2).conclude()).toBe(false)
+		})
+
+		it("a 0.2 s word whose energy spans two blocks at the start (0.15 to 0.35 s) is voiced, as at the end", () => {
+			for (const overS of [1.2, 1.5])
+				for (const cnrDb of [10, 15]) {
+					const pcm = contentAudio(
+						{
+							waveform: {
+								kind: "speech",
+								pauses: "none",
+								wordAtS: 0.15,
+								wordS: 0.2,
+							},
+							cnrDb,
+						},
+						overS,
+					)
+					expect(gateOn(pcm).conclude()).toBe(true)
+				}
 		})
 
 		it("a bare carrier over of the same lengths above the FM threshold is not voiced", () => {

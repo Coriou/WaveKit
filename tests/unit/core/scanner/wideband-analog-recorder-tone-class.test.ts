@@ -969,6 +969,25 @@ describe("tone-only files are checked again over the whole file", () => {
 		expect(h.tones).toEqual([])
 	}, 120_000)
 
+	it("16 s of speech whose tone the voice masks for 3 s mid-over (a gap past the classing rule) passes the whole-file check and is finalized", async () => {
+		// The truth scorecard's 12 dB over: its pitch took the CTCSS band for 9 blocks in a row
+		// after its prefix classed it; the whole-file check judges the speech, not the gap.
+		const h = lowHarness(SPEECH)
+		await h.feed(1, false)
+		let classedAt: number | null = null
+		await over(h, 16, {
+			extra: at => {
+				if (classedAt === null && codes(h).includes("classed")) classedAt = at
+				h.src.setCtcss(at >= 6 && at < 9 ? null : 67)
+				return DIGITAL
+			},
+		})
+		expect(classedAt).not.toBeNull()
+		expect(classedAt!).toBeLessThan(6)
+		expect(codes(h)).toEqual(["shadow", "voiced", "classed", "finalized"])
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+
 	it("16 s of speech over the tone passes the whole-file check and is finalized", async () => {
 		const h = lowHarness(SPEECH)
 		await h.feed(1, false)

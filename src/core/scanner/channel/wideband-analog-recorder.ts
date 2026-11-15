@@ -755,7 +755,7 @@ interface FileState {
 	 * its verdict is in `classTone`.
 	 */
 	toneClass: ToneClassEvidence | null
-	/** The tone that classed this file's audio (ToneClassEvidence.result at its finish), or null. */
+	/** The tone that classed this file's audio (ToneClassEvidence.result(true) at its finish), or null. */
 	classTone: number | null
 	/** A tone-only session's roll-over file after one its tone classed: it carries that class. */
 	toneCarried: boolean
@@ -3779,7 +3779,7 @@ export class WidebandAnalogRecorder {
 		)
 			file.cut = "source-lost"
 		file.toneHz = file.ctcss?.result() ?? null
-		file.classTone = file.toneClass?.result() ?? null
+		file.classTone = file.toneClass?.result(true) ?? null
 		file.toneClass = null
 		if (s.toneOnly && file.classTone === null && !file.toneCarried) {
 			// Classed by its audio only, and the whole file no longer holds the evidence (its

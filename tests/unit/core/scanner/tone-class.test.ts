@@ -127,6 +127,24 @@ describe("ToneClassEvidence", () => {
 		expect(evidence([...all(12), ...gap(9)]).result()).toBeNull()
 	})
 
+	it("over a whole file (result(true)) the share and gap rules give way; wins, purity and speech still hold", () => {
+		const gap = (n: number) => all(n, NONE)
+		// 12 of 29 blocks with a 9-block run without the tone: barred for a class, held over a file.
+		const masked = [...all(8), ...gap(9), ...all(4), ...gap(8)]
+		expect(masked).toHaveLength(29)
+		expect(evidence(masked).result()).toBeNull()
+		expect(evidence(masked).result(true)).toBe(HZ)
+		// 8 of 30 blocks (27 %).
+		const thin = [...all(8), ...gap(22)]
+		expect(evidence(thin).result()).toBeNull()
+		expect(evidence(thin).result(true)).toBe(HZ)
+		expect(evidence([...all(7), ...gap(9)]).result(true)).toBeNull()
+		expect(
+			evidence([...all(9), OTHER, OTHER, ...gap(9)]).result(true),
+		).toBeNull()
+		expect(evidence(masked, rmsFor(350), 0).result(true)).toBeNull()
+	})
+
 	it(`refuses a sub-audible line above ${TONE_CLASS_MAX_DEVIATION_HZ} Hz deviation (a data fundamental)`, () => {
 		expect(
 			evidence(
