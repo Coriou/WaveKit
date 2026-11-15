@@ -5,6 +5,9 @@
  * was heard (a recorder tone) keeps recording despite a decode; a folder nobody owns reads no
  * prior.
  */
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
 	admissionVerdict,
@@ -13,6 +16,9 @@ import {
 	STRONG_PRIOR_TTL_MS,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
+import type { JournalEntry } from "../../../../src/core/scanner/store/discovery-store.js"
+import { ScannerPersistence } from "../../../../src/core/scanner/store/persistence.js"
+import { createLogger } from "../../../../src/utils/logger.js"
 import type { ProofAnalogInput } from "../../../../src/core/scanner/scanner-redesign-contract.js"
 import {
 	counterIds,
@@ -299,6 +305,201 @@ describe("DiscoveryStore.voicePrior", () => {
 			expect(prior?.channelDecodes?.length ?? 0).toBeGreaterThan(0)
 			expect(prior?.analogVoice()).toBe(true)
 			expect(readPrior(prior, false, at + 2_000)).toBe("none")
+		})
+
+		it("a fresh twin created after the pages, with no link of its own yet (first heard on another source, as after a retune): strong at its first read (the channel memo by its frequency key)", () => {
+			const last = T0 + 32 * H
+			const { store, ids, setNow } = twins([last])
+			const at = last + H
+			setNow(at)
+			const fresh =
+				store.ingest(
+					makeObs({
+						id: "fresh",
+						centreHz: CH,
+						startedAt: at,
+						cls: "analog-fm",
+						open: false,
+						gate: "passed",
+						sourceId: "src-2",
+					}),
+				).discoveryId ?? ""
+			expect(ids).not.toContain(fresh)
+			expect(store.get(fresh)?.coChannel ?? []).toEqual([])
+			const prior = store.voicePrior(fresh) ?? null
+			expect(prior?.labels.filter(l => !l.owner)).toEqual([])
+			expect(prior?.channelDecodes).toContainEqual({
+				protocol: "pocsag",
+				at: last + 500,
+			})
+			expect(readPrior(prior, false, at)).toBe("tone-required")
+			expect(admissionVerdict(prior, false, at)).toBe("tone-required")
+		})
+
+		it("a twin first heard on another source of the same channel reads the memo too (keyed by frequency, any source)", () => {
+			let now = T0
+			const store = new DiscoveryStore({
+				maxDiscoveries: 100,
+				now: () => now,
+				newId: counterIds(),
+				rasters: () => PMR,
+			})
+			const o = (id: string, at: number, sourceId: string) =>
+				makeObs({
+					id,
+					centreHz: CH,
+					startedAt: at,
+					cls: "fsk2-wide",
+					open: false,
+					gate: "passed",
+					sourceId,
+				})
+			// The pager owner was heard on src-b first, then on src-a.
+			const owner = store.ingest(o("b0", T0, "src-b")).discoveryId ?? ""
+			now = T0 + 1_000
+			store.ingest(o("a0", T0 + 1_000, "src-a"))
+			expect(store.get(store.discoveryIdOf("a0") ?? "")?.sourceIds).toContain(
+				"src-a",
+			)
+			now = T0 + 2 * H
+			const page = evidence("pocsag", now, {
+				identity: { kind: "pocsag-capcode", value: "7" },
+			})
+			store.appendObservationEvidence("a0", page)
+			expect(
+				store.applyEvidenceResult(store.discoveryIdOf("a0") ?? owner, page)
+					.accepted,
+			).toBe(true)
+			// A new twin on src-a only (its first source differs from the owner's).
+			now = T0 + 3 * H
+			const fresh = store.ingest(o("fresh", now, "src-a")).discoveryId ?? ""
+			const prior = store.voicePrior(fresh) ?? null
+			expect(prior?.channelDecodes).toContainEqual({
+				protocol: "pocsag",
+				at: T0 + 2 * H,
+			})
+			expect(readPrior({ ...prior!, labels: [] }, false, now)).toBe(
+				"tone-required",
+			)
+		})
+
+		it("after a restart (snapshot restored into a new store): the memo is rebuilt from the kept pages, a fresh twin reads strong", () => {
+			const last = T0 + 32 * H
+			const { store } = twins([T0 + 30 * H, last])
+			const at = last + 90 * 60_000
+			const restarted = new DiscoveryStore({
+				maxDiscoveries: 100,
+				now: () => at,
+				newId: () => "R1".padEnd(26, "0"),
+				rasters: () => PMR,
+			})
+			restarted.restore(store.snapshot())
+			const fresh =
+				restarted.ingest(
+					makeObs({
+						id: "after",
+						centreHz: CH,
+						startedAt: at,
+						cls: "analog-fm",
+						open: false,
+						gate: "passed",
+					}),
+				).discoveryId ?? ""
+			const prior = restarted.voicePrior(fresh) ?? null
+			expect(prior?.channelDecodes).toContainEqual({
+				protocol: "pocsag",
+				at: last + 500,
+			})
+			expect(readPrior({ ...prior!, labels: [] }, false, at)).toBe(
+				"tone-required",
+			)
+			// 24 h after the newest kept page: suspect again (the rebuild keeps the TTL).
+			expect(
+				readPrior(
+					{ ...prior!, labels: [] },
+					false,
+					last + 500 + OWNER_DEDICATED_PRIOR_TTL_MS + 1,
+				),
+			).not.toBe("tone-required")
+		})
+
+		it("after a restart through ScannerPersistence (save, then a new store loading the same state dir): strong", async () => {
+			const dir = await mkdtemp(join(tmpdir(), "wavekit-voice-prior-"))
+			try {
+				const logger = createLogger({ level: "fatal" })
+				let now = T0
+				const p = new ScannerPersistence({ dir, logger, now: () => now })
+				await p.load()
+				const store = new DiscoveryStore({
+					maxDiscoveries: 100,
+					now: () => now,
+					newId: counterIds(),
+					rasters: () => PMR,
+				})
+				const writes: Promise<number>[] = []
+				store.on("mutation", (e: Omit<JournalEntry, "seq">) =>
+					writes.push(p.append(e)),
+				)
+				for (const [k, cap] of ["1", "2", "1"].entries()) {
+					now = T0 + k * H
+					const o = `p${k}`
+					const id =
+						store.ingest(
+							makeObs({
+								id: o,
+								centreHz: CH,
+								startedAt: now,
+								cls: "fsk2-wide",
+								open: false,
+								gate: "passed",
+							}),
+						).discoveryId ?? ""
+					const ev = evidence("pocsag", now + 500, {
+						identity: { kind: "pocsag-capcode", value: cap },
+					})
+					store.appendObservationEvidence(o, ev)
+					expect(store.applyEvidenceResult(id, ev).accepted).toBe(true)
+				}
+				await Promise.all(writes)
+				await p.writeSnapshot(store.snapshot())
+				await p.closeSnapshotWorker()
+				// The restarted process: 90 min after the last page.
+				now = T0 + 2 * H + 90 * 60_000
+				const loaded = await new ScannerPersistence({
+					dir,
+					logger,
+					now: () => now,
+				}).load()
+				const replica = new DiscoveryStore({
+					maxDiscoveries: 100,
+					now: () => now,
+					newId: () => "R1".padEnd(26, "0"),
+					rasters: () => PMR,
+				})
+				replica.restore(loaded)
+				for (const e of loaded.entries) replica.replay(e)
+				const fresh =
+					replica.ingest(
+						makeObs({
+							id: "after",
+							centreHz: CH,
+							startedAt: now,
+							cls: "analog-fm",
+							open: false,
+							gate: "passed",
+						}),
+					).discoveryId ?? ""
+				const prior = replica.voicePrior(fresh) ?? null
+				expect(prior?.channelDecodes).toContainEqual({
+					protocol: "pocsag",
+					at: T0 + 2 * H + 500,
+				})
+				expect(readPrior({ ...prior!, labels: [] }, false, now)).toBe(
+					"tone-required",
+				)
+			} finally {
+				await rm(dir, { recursive: true, force: true })
+			}
 		})
 
 		it("a DMR decode on the channel never gets the 24 h treatment: an hour later, suspect", () => {

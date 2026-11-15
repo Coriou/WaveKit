@@ -32,6 +32,8 @@ import {
 	contentChecked,
 	TDMA_CHANNEL_MIN_SHARE,
 	TDMA_CHANNEL_MIN_VOTES,
+	NO_VOICE_CHANNEL_MIN_TRIALS,
+	noVoiceChannel,
 	type DigitalProof,
 	type VoicePrior,
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
@@ -51,6 +53,7 @@ import {
 	SPEECH_NOT_SPEECH_MAX_PERIODIC_SHARE,
 	SPEECH_STEADY_MAX_RANGE_DB,
 	SPEECH_WINDOW_FRAMES,
+	speechReadings,
 	type SpeechContent,
 } from "../../../../src/core/scanner/channel/speech-content.js"
 import { MAX_ACTIVE_ANALOG_PER_SOURCE } from "../../../../src/core/scanner/store/analog-operations.js"
@@ -2454,5 +2457,190 @@ describe("ownDmrHint: a DMR sync hint on the file's own over opens the content c
 			},
 		}
 		expect(ownDmrHint(p, "o-own")).toBe(false)
+	})
+})
+
+describe("a no-voice channel: its analog trials never heard, no analog proof (noVoiceChannel)", () => {
+	// Feature: recording-verdict, channels whose trials never heard voice (docs/SCANNER.md).
+	const N = NO_VOICE_CHANNEL_MIN_TRIALS
+	const trials = (
+		attempts: number,
+		decodedN = 0,
+		base: VoicePrior = prior([], "analog-fm"),
+	): VoicePrior => ({
+		...base,
+		analogTrials: () => ({ attempts, decoded: decodedN }),
+	})
+	const verdict = (
+		p: VoicePrior | null,
+		over: Partial<Parameters<typeof finishVerdict>[0]> = {},
+	) =>
+		finishVerdict({
+			prior: p,
+			backedClass: false,
+			ownTone: false,
+			snapshotClassed: true,
+			decodedOwn: false,
+			joinedVoice: false,
+			notSpeech: false,
+			speechHeard: false,
+			final: false,
+			now: NOW,
+			...over,
+		})
+	it("N is 10", () => {
+		expect(N).toBe(10)
+	})
+	for (const [name, p, out] of [
+		["N trials, none heard, no proof: one", trials(N), true],
+		["the live shape (a): 52 trials, none heard", trials(52), true],
+		[
+			"the live shape (b): 579 trials, a DMR activity label",
+			trials(579, 0, prior([weak("dmr", "activity")], "analog-fm")),
+			true,
+		],
+		["N − 1 trials: not one", trials(N - 1), false],
+		["one trial heard (of 579): not one", trials(579, 1), false],
+		["no trial memory: not one", prior([], "analog-fm"), false],
+		[
+			"analogTrials null: not one",
+			{ ...prior(), analogTrials: () => null },
+			false,
+		],
+		[
+			"FROZEN: an analog proof on the channel (analogVoice): not one",
+			trials(52, 0, prior([], "analog-fm", true)),
+			false,
+		],
+		[
+			"FROZEN: an analog label at classified: not one",
+			trials(52, 0, prior([weak("analog-fm", "classified")])),
+			false,
+		],
+		[
+			"a throwing trial read: not one",
+			{
+				...prior(),
+				analogTrials: () => {
+					throw new Error("x")
+				},
+			},
+			false,
+		],
+		[
+			"a throwing analogVoice: not one (voice heard)",
+			{
+				...trials(52),
+				analogVoice: () => {
+					throw new Error("x")
+				},
+			},
+			false,
+		],
+		["no prior: not one", null, false],
+	] as const)
+		it(`${name}`, () => {
+			expect(noVoiceChannel(p as VoicePrior | null)).toBe(out)
+		})
+
+	for (const [name, p, over, out] of [
+		[
+			"no speech heard on a no-voice channel: discarded at once, any length",
+			trials(52),
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"the same at the end of its grace",
+			trials(52),
+			{ final: true },
+			"discarded:not-speech",
+		],
+		[
+			"speech heard (a short over passes the check): kept",
+			trials(52),
+			{ speechHeard: true },
+			"finish",
+		],
+		[
+			"not measured (speechHeard absent: own-tone class, a classed roll-over): kept",
+			trials(52),
+			{ speechHeard: undefined },
+			"finish",
+		],
+		[
+			"FROZEN: its own CTCSS tone: kept",
+			trials(52),
+			{ ownTone: true },
+			"finish",
+		],
+		[
+			"FROZEN: a joined voice on the air in it: kept",
+			trials(52),
+			{ joinedVoice: true },
+			"finish",
+		],
+		[
+			"FROZEN: analog proof on the channel: kept",
+			trials(52, 0, prior([], "analog-fm", true)),
+			{},
+			"finish",
+		],
+		["any analog trial ever heard: kept", trials(52, 1), {}, "finish"],
+		[
+			"fresh channel (no failed-trial history): kept",
+			prior([], "analog-fm"),
+			{},
+			"finish",
+		],
+		["9 failed trials: kept", trials(N - 1), {}, "finish"],
+		[
+			"under a suspect prior (spectral digital class): discarded, not held",
+			trials(52, 0, prior([], "fsk4-12k5")),
+			{},
+			"discarded:not-speech",
+		],
+		[
+			"under a strong pager prior, unclassed: known non-voice first",
+			trials(52, 0, prior([decoded("pocsag")])),
+			{ snapshotClassed: false },
+			"discarded:known-non-voice",
+		],
+		[
+			"a decode of its own signal: late non-voice first",
+			trials(52),
+			{ decodedOwn: true },
+			"discarded:late-non-voice",
+		],
+	] as const)
+		it(`${name}`, () => {
+			expect(
+				verdict(
+					p as VoicePrior | null,
+					over as Partial<Parameters<typeof finishVerdict>[0]>,
+				),
+			).toBe(out)
+		})
+
+	it("speechReadings: an unmeasured file never discards; a measured one reads each check", () => {
+		expect(speechReadings(null)).toEqual({
+			notSpeech: false,
+			clearNoise: false,
+			speechHeard: true,
+		})
+		const flat: SpeechContent = {
+			frames: 90,
+			maxRangeDb: 3,
+			periodicShare: 0,
+			maxBurstFrames: 0,
+		}
+		expect(speechReadings(flat)).toEqual({
+			notSpeech: false,
+			clearNoise: false,
+			speechHeard: false,
+		})
+		expect(speechReadings({ ...flat, maxBurstFrames: 3 }).speechHeard).toBe(
+			true,
+		)
 	})
 })

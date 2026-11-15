@@ -191,6 +191,9 @@ export function fileDecodedOwn(
  * observation that voted `tdma-ms`: the part of `digitalSeenAt` that is checked by its spectrum
  * (DMR burst structure), so a verified sighting older than the TTL is `checked-digital` only while
  * these or a verified sighting keep the channel fresh (digitalChannel). Asked like `classVotes`.
+ * `analogTrials` (absent or null: none remembered) reads the owner's analog FM replay trials
+ * (trial-memory.ts TrialMemory.analogFmTrials: how often they ran, how often they heard speech or
+ * a tone); asked only for a file that measured no speech (noVoiceChannel).
  */
 export interface VoicePrior {
 	readonly id?: string
@@ -211,6 +214,46 @@ export interface VoicePrior {
 	tdmaSeenAt?(): number | null
 	readonly ownerDecode?: OwnerDecode | null
 	readonly channelDecodes?: readonly OwnerDecode[]
+	analogTrials?(): AnalogTrials | null
+}
+
+/** VoicePrior.analogTrials: the owner's analog FM replay trials run, and those that heard. */
+export interface AnalogTrials {
+	readonly attempts: number
+	readonly decoded: number
+}
+
+/**
+ * Analog FM replay trials of the owner that must have run, none hearing anything, before its
+ * channel is a no-voice channel (noVoiceChannel): 10. One trial replays one captured over and
+ * hears speech or a CTCSS tone when either is there; a voice channel's trials hear (a
+ * measured voice channel: more than half), so ten misses of every over tried is a channel the
+ * spectrum calls analog FM but that carries none (measured noise channels: dozens to hundreds
+ * of trials, none heard).
+ */
+export const NO_VOICE_CHANNEL_MIN_TRIALS = 10
+
+/**
+ * A no-voice channel (docs/SCANNER.md, "Channels whose trials never heard voice"): the owner's
+ * analog FM replay trials ran NO_VOICE_CHANNEL_MIN_TRIALS times or more and never heard speech
+ * or a tone (VoicePrior.analogTrials), and no analog voice was heard on the channel (an analog
+ * tone or voice proof, or an analog label at `classified` or more: analogVoiceHeard). Its files
+ * are kept only when their own audio shows speech (finishVerdict's `speechHeard`). A throwing
+ * read: not one (keeps).
+ */
+export function noVoiceChannel(prior: VoicePrior | null): boolean {
+	if (prior?.analogTrials === undefined) return false
+	try {
+		const t = prior.analogTrials()
+		return (
+			t !== null &&
+			t.attempts >= NO_VOICE_CHANNEL_MIN_TRIALS &&
+			t.decoded === 0 &&
+			!analogVoiceHeard(prior)
+		)
+	} catch {
+		return false
+	}
 }
 
 /**
@@ -809,7 +852,12 @@ export type FinishVerdict =
  * hints) only a file that also measures as clear noise (`clearNoise`, absent false: clearlyNoise,
  * the strict bounds, never borderline audio) is; otherwise one a snapshot classed under `tone-required`, or any under `suspect`, is held, then
  * kept; with none it is kept at once (no content check: an analog proof or label on the channel
- * reads `none`). A prior alone (a decode of another transmission, a co-channel discovery's) never
+ * reads `none`). Before those, whatever the prior's strength, a file of a no-voice channel
+ * (noVoiceChannel: its analog trials ran NO_VOICE_CHANNEL_MIN_TRIALS times and never heard, no
+ * analog proof) whose audio shows no speech (`speechHeard` false: speech-content.ts speechHeard,
+ * any length) and that no joined voice shares is discarded (`discarded:not-speech`); `speechHeard`
+ * absent: not measured (a file classed by its own tone, a classed session's roll-over), kept.
+ * A prior alone (a decode of another transmission, a co-channel discovery's) never
  * discards a file a snapshot classed and whose audio may be speech. `now`: wall ms (readPrior).
  */
 export function finishVerdict(input: {
@@ -821,6 +869,7 @@ export function finishVerdict(input: {
 	readonly joinedVoice: boolean
 	readonly notSpeech: boolean
 	readonly clearNoise?: boolean
+	readonly speechHeard?: boolean
 	readonly ownObservationId?: string | null
 	readonly final: boolean
 	readonly now: number
@@ -835,6 +884,12 @@ export function finishVerdict(input: {
 	)
 	if (strength === "tone-required" && !input.snapshotClassed)
 		return "discarded:known-non-voice"
+	if (
+		input.speechHeard === false &&
+		!input.joinedVoice &&
+		noVoiceChannel(input.prior)
+	)
+		return "discarded:not-speech"
 	if (strength === "none") return "finish"
 	if (
 		input.notSpeech &&

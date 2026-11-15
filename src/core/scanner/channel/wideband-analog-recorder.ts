@@ -128,11 +128,7 @@ import {
 	type VoicePrior,
 	type Veto,
 } from "./recording-verdict.js"
-import {
-	clearlyNoise,
-	clearlyNotSpeech,
-	SpeechContentMeter,
-} from "./speech-content.js"
+import { SpeechContentMeter, speechReadings } from "./speech-content.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 export { rememberWaiver, trustedRunEnd } from "./recorder-memory.js"
@@ -2598,7 +2594,9 @@ export class WidebandAnalogRecorder {
 			classed: input.analogFm && !toneRequired,
 			toneOnly: false,
 			toneRequired,
-			strongFrom: Number.POSITIVE_INFINITY,
+			// Admitted before its discovery is known: no prior read, so a strong one at finish
+			// treats every file as joined under it (a new capcode twin's first page).
+			strongFrom: input.discoveryId === null ? -Infinity : Infinity,
 			digital:
 				toneRequired || (input.spectralDigital === true && !input.analogFm),
 			stale:
@@ -4088,8 +4086,7 @@ export class WidebandAnalogRecorder {
 						file.startSample < s.strongFrom + s.vetoFrom - s.onset,
 					decodedOwn,
 					joinedVoice: joinedVoiceOverlaps(s, file),
-					notSpeech: speech !== null && clearlyNotSpeech(speech),
-					clearNoise: speech !== null && clearlyNoise(speech),
+					...speechReadings(speech),
 					ownObservationId: s.owner,
 					final: final || room === 0,
 					now,

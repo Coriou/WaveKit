@@ -1611,8 +1611,17 @@ export class ScannerService extends EventEmitter {
 				// The decoded label (and its decode's time) of a discovery, or of the live one it
 				// was merged into.
 				decodedLabel: discoveryId => ownerDecoded(this.store, discoveryId),
-				// Its standing prior (any time; co-channel included): refuses, holds or keeps a file.
-				voicePrior: discoveryId => this.store.voicePrior(discoveryId) ?? null,
+				// Its standing prior (any time; co-channel included): refuses, holds or keeps a file,
+				// with the owner's analog FM replay trials (a channel they never heard voice on).
+				voicePrior: discoveryId => {
+					const prior = this.store.voicePrior(discoveryId)
+					if (prior === undefined) return null
+					const owner = prior.id ?? discoveryId
+					return {
+						...prior,
+						analogTrials: () => this.trialMemory.analogFmTrials(owner),
+					}
+				},
 				logger: deps.logger,
 				now: this.now,
 			})

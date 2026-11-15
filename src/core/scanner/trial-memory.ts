@@ -242,6 +242,21 @@ export class TrialMemory {
 		return true
 	}
 
+	/**
+	 * The discovery's analog FM replay trials (protocol `analog-fm`, decoder `analog-demod`): how
+	 * often they ran and how often they succeeded (`decoded` counts `heard` too: speech or a tone
+	 * was heard); null when none is remembered. Reads only (recording-verdict.ts
+	 * VoicePrior.analogTrials).
+	 */
+	analogFmTrials(
+		discoveryId: string,
+	): { readonly attempts: number; readonly decoded: number } | null {
+		const e = (this.byDiscovery.get(discoveryId) ?? []).find(
+			x => x.protocol === "analog-fm" && x.decoder === "analog-demod",
+		)
+		return e === undefined ? null : { attempts: e.attempts, decoded: e.decoded }
+	}
+
 	forget(discoveryId: string): void {
 		if (this.byDiscovery.delete(discoveryId)) this.schedule()
 	}
