@@ -5,7 +5,10 @@
  * the router can count drops (requirements 4.3, 4.10) and trace provenance.
  */
 import type { PcmFormat, StreamFormat } from "../audio-stream-server.js"
-import { AUTO_ROUTE_PENDING_VOICE_MS } from "./contract.js"
+import {
+	AUTO_ROUTE_PENDING_END_GUARD_MS,
+	AUTO_ROUTE_PENDING_VOICE_MS,
+} from "./contract.js"
 import type { VoiceCoverage, VoiceTapCall } from "./contract.js"
 import { LIVE_AUDIO_AUTO_ROUTE_RATE } from "@wavekit/api-types"
 import { PolyphaseResampler, rationalRate } from "./resampler.js"
@@ -305,11 +308,11 @@ export class AnalogInput {
 		this.audibleNow = audible
 		if (audible) this.lastAudibleAt = now
 		if (stream.rate !== this.rate || stream.format !== this.format) {
-			// The next push rebuilds (and starts a new sample grid, as a rebuild always does).
-			this.res = null
-			this.rate = 0
-			this.remLen = 0
-			return
+			// Never set up for this stream (the route started under `digital`, or the rate or
+			// format changed while skipping): take its geometry now, as a push would (a new
+			// sample grid; the resampler is built only on this change), then keep the split
+			// sample below so a later push stays byte-aligned.
+			if (!this.rebuild(stream)) return
 		}
 		this.skipped = true
 		const keep = (this.remLen + (e - s)) % this.frameBytes
@@ -481,6 +484,14 @@ export class VoiceInput {
 	unresolved = false
 	/** Last call snapshot (frame or call event). */
 	call: VoiceTapCall | null = null
+	/** Clock time the last call snapshot said the call ended (-Infinity: none yet). */
+	endedAt = Number.NEGATIVE_INFINITY
+	/**
+	 * The last call snapshot is encrypted, or ended unresolved: voice with no call (late
+	 * datagrams of that call) is dropped, never pending, until the next call snapshot (fail
+	 * closed).
+	 */
+	callClosed = false
 	lastAdmittedAt = Number.NEGATIVE_INFINITY
 	/** Real samples entered the resampler since the last flush or reset. */
 	armed = false
@@ -530,7 +541,14 @@ export class VoiceInput {
 	 */
 	admitPending(now: number): void {
 		const p = this.pending
-		p.expire(now - AUTO_ROUTE_PENDING_VOICE_MS)
+		// Never the previous over's tail: nothing that arrived within the end guard of the last
+		// call's end (the router does not pend it either; this bound holds regardless).
+		p.expire(
+			Math.max(
+				now - AUTO_ROUTE_PENDING_VOICE_MS,
+				this.endedAt + AUTO_ROUTE_PENDING_END_GUARD_MS,
+			),
+		)
 		if (p.length === 0) return
 		p.drain(this.pendingSink)
 		this.lastAdmittedAt = now
@@ -590,5 +608,7 @@ export class VoiceInput {
 		this.armed = false
 		this.pending.clear()
 		this.lastAdmittedAt = Number.NEGATIVE_INFINITY
+		// endedAt and callClosed stay, as the call snapshot does: a stop never reopens the
+		// tail of an encrypted call.
 	}
 }

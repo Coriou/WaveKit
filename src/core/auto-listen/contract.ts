@@ -41,6 +41,15 @@ export const AUTO_ROUTE_FIFO_SAMPLES =
 export const AUTO_ROUTE_PENDING_VOICE_MS = 720
 
 /**
+ * End guard of pending voice: after a clear call ends, voice handed over with no call is the
+ * ended over's late datagrams for this long and is never kept as the next call's pre-voice.
+ * The decoder hands voice over per 60 ms DMR burst (voice of one burst: 60 ms) and at most the
+ * burst being decoded plus the one queued behind it trail the end: 2 × 60 = 120 ms. After an
+ * encrypted or unresolved end no such voice is kept at all until the next call snapshot.
+ */
+export const AUTO_ROUTE_PENDING_END_GUARD_MS = 2 * 60
+
+/**
  * Takeover: an admitted clear call replaces analog that no content check governs (Voice only
  * off, a manual or carrier squelch, no evidence gate and no tone squelch) once its start buffer
  * is ready: 200 ms (`LIVE_AUDIO_AUTO_ROUTE_DIGITAL_START_MS`), not the 1 500 ms preemption bound,

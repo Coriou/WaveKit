@@ -10,6 +10,7 @@ import type * as http from "node:http"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	AUTO_ROUTE_PENDING_END_GUARD_MS,
 	AUTO_ROUTE_PENDING_VOICE_MS,
 	AUTO_ROUTE_STREAM,
 	AUTO_ROUTE_TAKEOVER_MS,
@@ -539,5 +540,262 @@ describe("digital in force skips analog resampling (pushAnalog)", () => {
 		// Past the fresh resampler's edge the constant comes back: no byte-swapped samples.
 		const tail = Array.from(out.slice(-200))
 		expect(tail.every(v => Math.abs(v - 1_000) <= 2)).toBe(true)
+	})
+})
+
+describe("AnalogInput.skip before the input was set up for the stream", () => {
+	/** 1 001-byte spans: no span is whole samples, so every boundary splits a sample. */
+	const SPAN = 1_001
+	const SPANS = 20
+	const SKIPPED = 3
+
+	/**
+	 * A constant in `format`, `SKIPPED` spans skipped, then the rest pushed; optionally a
+	 * first push of another stream (the format changes while skipping). Returns the output.
+	 */
+	function skipThenPush(
+		format: "s16le" | "f32le",
+		prior: "s16le" | "f32le" | null,
+	): Int16Array {
+		const stream = { rate: 48_000, format }
+		const fb = format === "f32le" ? 4 : 2
+		const pcm = Buffer.alloc(Math.ceil((SPAN * SPANS) / fb) * fb)
+		for (let i = 0; i < pcm.length / fb; i++)
+			if (format === "f32le") pcm.writeFloatLE(0.5, i * 4)
+			else pcm.writeInt16LE(1_000, i * 2)
+		const input = new AnalogInput({ droppedSamples: 0 }, undefined)
+		if (prior !== null) {
+			const other = Buffer.alloc(1_000)
+			input.push(
+				other,
+				0,
+				999,
+				FLAG_AUDIBLE,
+				{ rate: 48_000, format: prior },
+				0,
+			)
+			input.out.read(new Int16Array(input.out.queued), input.out.queued)
+		}
+		let at = 0
+		for (let k = 0; k < SKIPPED; k++) {
+			input.skip(pcm, at, at + SPAN, FLAG_AUDIBLE, stream, 1 + k)
+			at += SPAN
+		}
+		expect(input.out.queued).toBe(0)
+		expect(input.audibleNow).toBe(true)
+		for (let k = SKIPPED; k < SPANS; k++) {
+			input.push(pcm, at, at + SPAN, FLAG_AUDIBLE, stream, 1 + k)
+			at += SPAN
+		}
+		const out = new Int16Array(input.out.queued)
+		input.out.read(out, out.length)
+		return out
+	}
+
+	it("f32le: a constant 0.5 resumes exact after skipped odd spans (route started under digital)", () => {
+		const out = skipThenPush("f32le", null)
+		// 17 pushed spans of 1 001 bytes: 4 254 whole f32 samples at 48 kHz in, as many out.
+		expect(out.length).toBeGreaterThan(4_000)
+		// 0.5 × 32 767 = 16 383.5, rounded half away: 16 384; past the fresh resampler's edge.
+		const tail = Array.from(out.slice(-2_000))
+		expect(tail.every(v => Math.abs(v - 16_384) <= 2)).toBe(true)
+	})
+
+	it("s16le: a constant resumes exact after skipped odd spans (route started under digital)", () => {
+		const out = skipThenPush("s16le", null)
+		const tail = Array.from(out.slice(-4_000))
+		expect(tail.every(v => Math.abs(v - 1_000) <= 2)).toBe(true)
+	})
+
+	it("a format change while skipping (s16le → f32le) takes the new geometry: the constant resumes exact", () => {
+		const out = skipThenPush("f32le", "s16le")
+		const tail = Array.from(out.slice(-2_000))
+		expect(tail.every(v => Math.abs(v - 16_384) <= 2)).toBe(true)
+	})
+
+	it("router: started under digital with f32le analog, then auto plays the analog exact", () => {
+		const sim = new Sim()
+		sim.router.setListenPolicy("digital", false)
+		const stream = { rate: 48_000, format: "f32le" as const }
+		const pcm = Buffer.alloc(SPAN * 60 + 3)
+		for (let i = 0; i < pcm.length / 4 - 1; i++) pcm.writeFloatLE(0.5, i * 4)
+		let at = 0
+		for (let k = 0; k < SKIPPED; k++) {
+			sim.router.pushAnalog(pcm, at, at + SPAN, true, stream)
+			at += SPAN
+			sim.clock.tick(20)
+		}
+		expect(sim.written("analog")).toBe(0)
+		sim.router.setListenPolicy("auto", false)
+		for (let k = SKIPPED; k < 60; k++) {
+			sim.router.pushAnalog(pcm, at, at + SPAN, true, stream)
+			at += SPAN
+			sim.clock.tick(20)
+		}
+		const played = sim.played.get("analog") ?? []
+		expect(played.length).toBeGreaterThan(5_000)
+		expect(played.slice(-3_000).every(v => Math.abs(v - 16_384) <= 2)).toBe(
+			true,
+		)
+	})
+})
+
+describe("pending voice after a call ends (AUTO_ROUTE_PENDING_END_GUARD_MS)", () => {
+	it("the guard is two 60 ms bursts: 120 ms", () => {
+		expect(AUTO_ROUTE_PENDING_END_GUARD_MS).toBe(120)
+	})
+
+	/**
+	 * A first call (frames 0..9) ends with `end`; then 10 steps of 20 ms whose voice comes with
+	 * no call (step i at i × 20 ms after the end, kept when `late(i)`), `gap` empty steps, then a
+	 * clear call (frames 20..34) and its end. Returns the played decoded voice.
+	 */
+	function overThenClear(
+		first: VoiceTapCall,
+		end: VoiceTapCall,
+		late: (i: number) => boolean,
+		gap = 0,
+	): number[] {
+		const sim = new Sim()
+		const list = frames(35, 9)
+		sim.voice.tap?.call("dmr", first)
+		for (let i = 0; i < 10; i++)
+			sim.step({ frames: [list[i] as Buffer], call: first })
+		sim.voice.tap?.call("dmr", end)
+		for (let i = 0; i < gap; i++) sim.step()
+		for (let i = 0; i < 10; i++)
+			sim.step(late(i) ? { frames: [list[10 + i] as Buffer] } : {})
+		const next = call({ callId: "c2" })
+		sim.voice.tap?.call("dmr", next)
+		for (let i = 20; i < 35; i++)
+			sim.step({ frames: [list[i] as Buffer], call: next })
+		sim.voice.tap?.call("dmr", call({ callId: "c2", active: false }))
+		for (let i = 0; i < 60; i++) sim.step()
+		expect(sim.router.droppedSamples).toBe(0)
+		return sim.played.get("dmr") ?? []
+	}
+
+	const all = (): boolean => true
+	const none = (): boolean => false
+
+	it("an encrypted call's late voice (no call) is never admitted at a clear call's head", () => {
+		const enc = call({ callId: "e1", encrypted: true })
+		const end = call({ callId: "e1", active: false, encrypted: true })
+		const played = overThenClear(enc, end, all)
+		expect(played.length).toBeGreaterThan(0)
+		// Exactly the clear call's own voice: the same as with no late voice at all.
+		expect(played).toEqual(overThenClear(enc, end, none))
+	})
+
+	it("after an encrypted end, voice with no call is dropped until the next call event, however late", () => {
+		const enc = call({ callId: "e1", encrypted: true })
+		const end = call({ callId: "e1", active: false, encrypted: true })
+		// 1 s after the end: past the guard, still within 720 ms of the clear call.
+		expect(overThenClear(enc, end, all, 50)).toEqual(
+			overThenClear(enc, end, none, 50),
+		)
+	})
+
+	it("an unresolved end (encryptionKnown false) drops the late voice the same way", () => {
+		const unresolved = callWithKnown(false, { callId: "u1" })
+		const end = callWithKnown(false, { callId: "u1", active: false })
+		const played = overThenClear(unresolved, end, all)
+		expect(played.length).toBeGreaterThan(0)
+		expect(played).toEqual(overThenClear(unresolved, end, none))
+	})
+
+	it("after a clear end, voice within 120 ms is the over's tail (not prepended); from 120 ms on it is the next call's pre-voice", () => {
+		const first = call({ callId: "c1" })
+		const end = call({ callId: "c1", active: false })
+		const played = overThenClear(first, end, all)
+		// Steps 0..5 (0..100 ms after the end) are let go; step 6 (120 ms, at the bound) is kept.
+		expect(played).toEqual(overThenClear(first, end, i => i >= 6))
+		expect(played).not.toEqual(overThenClear(first, end, i => i >= 7))
+		expect(played).not.toEqual(overThenClear(first, end, none))
+	})
+
+	it("an active encrypted call's voice with no call is never pending either", () => {
+		const sim = new Sim()
+		const list = frames(30, 3)
+		sim.voice.tap?.call("dmr", call({ callId: "e1", encrypted: true }))
+		for (let i = 0; i < 10; i++) sim.step({ frames: [list[i] as Buffer] })
+		// The same call turns out clear: only its voice from now on plays.
+		const clear = call({ callId: "e1" })
+		sim.voice.tap?.call("dmr", clear)
+		expect(sim.written("dmr")).toBe(0)
+	})
+})
+
+describe("analog requested lets pending voice go", () => {
+	it("voice pending on another decoder while a call plays and analog waits is let go, not admitted later", () => {
+		const sim = new Sim()
+		const a = frames(20, 21)
+		const b = frames(10, 22)
+		const other = call({ callId: "o1" })
+		sim.voice.tap?.call("dmr2", other)
+		// dmr2 plays its call; dmr hands over voice with no call meanwhile (pending).
+		for (let i = 0; i < 15; i++) {
+			sim.voice.tap?.frame("dmr2", a[i] as Buffer, other)
+			sim.step(i >= 10 ? { frames: [b[i - 10] as Buffer] } : {})
+		}
+		expect(sim.actives.at(-1)).toBe("digital")
+		sim.router.setListenPolicy("analog", false)
+		expect(
+			sim.router.status({ httpUrl: "h", wavUrl: "w" }).pendingListenMode,
+		).toBe("analog")
+		sim.step({ frames: [b[5] as Buffer] })
+		sim.router.setListenPolicy("auto", false)
+		sim.voice.tap?.call("dmr2", call({ callId: "o1", active: false }))
+		sim.voice.tap?.call("dmr", call({ callId: "c9" }))
+		expect(sim.written("dmr")).toBe(0)
+	})
+})
+
+describe("analogChecked returns to the safe default", () => {
+	function preemptMs(prepare: (sim: Sim) => void): number {
+		const sim = new Sim()
+		sim.router.setAnalogVoiceChecked(false)
+		prepare(sim)
+		const list = frames(100)
+		let firstFrameAt = 0
+		for (let b = 0; b < 200; b++) {
+			if (b === 50) {
+				sim.voice.tap?.call("dmr", call())
+				firstFrameAt = sim.clock.t
+			}
+			const f = b >= 50 && b < 150 ? list[b - 50] : undefined
+			sim.step({
+				analog: true,
+				...(f !== undefined ? { frames: [f], call: call() } : {}),
+			})
+		}
+		return (sim.actives.indexOf("digital") + 1) * 20 - firstFrameAt
+	}
+
+	it("unchecked stays unchecked without a reset: the 200 ms takeover", () => {
+		expect(preemptMs(() => undefined)).toBeLessThanOrEqual(
+			AUTO_ROUTE_TAKEOVER_MS + 20,
+		)
+	})
+
+	it("resetAnalog: checked again, the 1.5 s preemption bound", () => {
+		expect(
+			preemptMs(sim => {
+				sim.router.resetAnalog()
+			}),
+		).toBeGreaterThanOrEqual(1_500)
+	})
+
+	it("a route stop (last client gone): checked again on the next start", () => {
+		expect(
+			preemptMs(sim => {
+				sim.router.registry.closeAll("test", false)
+				sim.router.registry.register(
+					new FakeResponse() as unknown as http.ServerResponse,
+					"127.0.0.1",
+					AUTO_ROUTE_STREAM,
+				)
+			}),
+		).toBeGreaterThanOrEqual(1_500)
 	})
 })

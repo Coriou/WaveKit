@@ -35,6 +35,7 @@ import {
 	AUTO_ROUTE_BLOCK_BYTES,
 	AUTO_ROUTE_BLOCK_SAMPLES,
 	AUTO_ROUTE_OPERATOR_MODE_MAX_MS,
+	AUTO_ROUTE_PENDING_END_GUARD_MS,
 	AUTO_ROUTE_STREAM,
 	AUTO_ROUTE_TAKEOVER_MS,
 } from "./contract.js"
@@ -263,6 +264,8 @@ export class AutoListenRouter extends EventEmitter {
 	/** Retune, offset or modulation change, pipeline stop (requirement 5.1). */
 	resetAnalog(): void {
 		this.analog.reset()
+		// The next analog is checked until the demodulator says otherwise (the safe default).
+		this.analogChecked = true
 		if (this.selected === this.analog) this.select(null, this.clock.now())
 	}
 
@@ -489,6 +492,7 @@ export class AutoListenRouter extends EventEmitter {
 		this.removeTap?.()
 		this.removeTap = null
 		this.analog.stop()
+		this.analogChecked = true
 		for (const v of this.voiceList) v.stop()
 		this.select(null, this.clock.now())
 	}
@@ -806,7 +810,7 @@ export class AutoListenRouter extends EventEmitter {
 		if (this.selected === v) this.select(null, this.clock.now())
 	}
 
-	private noteCall(v: VoiceInput, call: VoiceTapCall): void {
+	private noteCall(v: VoiceInput, call: VoiceTapCall, now: number): void {
 		let snap = v.call
 		if (snap === null) {
 			snap = {
@@ -823,6 +827,15 @@ export class AutoListenRouter extends EventEmitter {
 		// Anything but an explicit false is treated as encrypted (fail closed).
 		snap.encrypted = call.encrypted !== false
 		v.unresolved = encryptionUnresolved(call)
+		if (snap.active) {
+			// An encrypted call's voice with no call never waits as pending (fail closed).
+			v.callClosed = snap.encrypted
+		} else {
+			// Ended: its late datagrams (no call) never become the next call's pre-voice; after
+			// an encrypted or unresolved end none is kept until the next call snapshot.
+			v.endedAt = now
+			v.callClosed = snap.encrypted || v.unresolved
+		}
 		snap.protocol = typeof call.protocol === "string" ? call.protocol : null
 		snap.slot =
 			typeof call.slot === "number" && Number.isFinite(call.slot)
@@ -839,7 +852,7 @@ export class AutoListenRouter extends EventEmitter {
 		const v = this.voice(decoderId)
 		if (v === null) return
 		const now = this.clock.now()
-		if (call !== null && typeof call === "object") this.noteCall(v, call)
+		if (call !== null && typeof call === "object") this.noteCall(v, call, now)
 		this.refreshCoverage(v)
 		const c = call === null ? null : v.call
 		if (c !== null && c.encrypted) {
@@ -853,7 +866,7 @@ export class AutoListenRouter extends EventEmitter {
 			(this.mode === "analog" || this.requested === "analog") &&
 			v !== this.selected
 		) {
-			if (v.out.queued > 0 || v.armed) v.discard()
+			if (v.out.queued > 0 || v.armed || v.pending.length > 0) v.discard()
 			return
 		}
 		if (v.coverage !== "yes") {
@@ -869,6 +882,13 @@ export class AutoListenRouter extends EventEmitter {
 		} else {
 			// No call yet, or one whose encryption is unresolved: pending, never played as is.
 			v.flush(now)
+			// Not after an ended call, though: after an encrypted or unresolved end until the
+			// next call snapshot, after a clear end for the end guard (its late datagrams).
+			if (
+				(c === null || !c.active) &&
+				(v.callClosed || now - v.endedAt < AUTO_ROUTE_PENDING_END_GUARD_MS)
+			)
+				return
 			v.pending.write(pcm, now)
 		}
 	}
@@ -877,8 +897,8 @@ export class AutoListenRouter extends EventEmitter {
 		if (!this.running || call === null || typeof call !== "object") return
 		const v = this.voice(decoderId)
 		if (v === null) return
-		this.noteCall(v, call)
 		const now = this.clock.now()
+		this.noteCall(v, call, now)
 		if (v.call?.encrypted === true) this.invalidate(v)
 		else if (v.call?.active !== true) {
 			// Ended (clear or unresolved): voice still pending was never admitted; let it go.

@@ -2762,7 +2762,7 @@ Configuration notes:
   (`autoRoute.pendingListenMode`), so one transmission is heard from one source, but never
   longer than 1.5 s: a continuous carrier (an open squelch, a stuck manual line) cannot hold
   it, and at 1.5 s it applies mid-over. `digital` set during an analog over waits until the
-  analog audio stops; coming from `auto`, a clear call meanwhile is still queued and played
+  analog audio stops (at most 1.5 s); coming from `auto`, a clear call meanwhile is still queued and played
   as `auto` would (it preempts the analog after the bound, or takes it over, see
   [GET /auto](#get-httplocalhost8081auto-and-autowav)); coming from `analog` (or an open
   squelch closed under `digital`), decoded calls are not played or buffered meanwhile.
@@ -2901,7 +2901,13 @@ it; the analog let go is not counted in `droppedMs`. Decoded voice that arrives
 before its call is active and explicitly clear (the decoder has not yet reported the call, or
 its encryption is not known yet) waits, up to 720 ms per decoder, and plays first, in order,
 when the call turns clear; it is let go (not counted) if the call ends encrypted or still
-unresolved, or if the decoder stops covering the tuned channel. That is `listenMode: auto`; `analog` plays the
+unresolved, or if the decoder stops covering the tuned channel. Voice the decoder hands over
+after a call ends never becomes the next call's start: after an encrypted or unresolved end
+none is kept until the decoder reports its next call, and after a clear end none for 120 ms
+(two 60 ms bursts: that over's late voice). Known limit: with `voiceOnly: false`, once a call
+has taken analog over, the analog queued while the call plays is treated as the call's carrier
+and let go, so an analog over that starts during or just after a DMR call on the same channel
+can lose up to the rest of that call's length (not counted in `droppedMs`). That is `listenMode: auto`; `analog` plays the
 analog audio only and `digital` the decoded voice only (silence otherwise), and the
 `open` squelch always plays analog (see `listenMode` under
 [GET /api/live-audio/status](#get-apilive-audiostatus)).
