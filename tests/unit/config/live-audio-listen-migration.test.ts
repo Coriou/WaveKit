@@ -63,6 +63,23 @@ describe("migrateLiveAudioSquelch", () => {
 		expect(migrateLiveAudioSquelch(below)).toBe(below)
 	})
 
+	it("manual at 0 with a CTCSS or DCS tone stays manual (a tone-only squelch)", () => {
+		for (const toneSquelch of [
+			{ kind: "ctcss", frequencyTenthsHz: 885 },
+			{ kind: "dcs", code: "023", polarity: "normal" },
+		]) {
+			const config = { squelchMode: "manual" as const, squelch: 0, toneSquelch }
+			expect(migrateLiveAudioSquelch(config)).toBe(config)
+		}
+		expect(
+			migrateLiveAudioSquelch({
+				squelchMode: "manual",
+				squelch: 0,
+				toneSquelch: { kind: "none" },
+			}),
+		).toMatchObject({ squelchMode: "open" })
+	})
+
 	it("returns every other config unchanged (same object)", () => {
 		for (const config of [
 			{ squelch: 0 },
@@ -154,6 +171,51 @@ describe("migrateLiveAudioSquelchUpdate", () => {
 		expect(migrateLiveAudioSquelchUpdate(auto, moved)).toBe(moved)
 	})
 
+	const ctcss = { kind: "ctcss" as const, frequencyTenthsHz: 885 }
+
+	it("PATCH manual at 0 with a tone, stored or sent, keeps manual", () => {
+		expect(
+			migrateLiveAudioSquelchUpdate(
+				{ ...manual, toneSquelch: ctcss },
+				{ squelch: 0 },
+			),
+		).toEqual({ squelch: 0 })
+		const sent = { squelchMode: "manual" as const, toneSquelch: ctcss }
+		expect(migrateLiveAudioSquelchUpdate(auto, sent)).toBe(sent)
+	})
+
+	it("PATCH tone none on a manual-at-0 tone config stores open", () => {
+		expect(
+			migrateLiveAudioSquelchUpdate(
+				{ ...manual, squelch: 0, toneSquelch: ctcss },
+				{ toneSquelch: { kind: "none" } },
+			),
+		).toEqual({ toneSquelch: { kind: "none" }, squelchMode: "open" })
+	})
+
+	it("PATCH auto without voiceOnly turns the voice check back on", () => {
+		const stored = { ...auto, voiceOnly: false }
+		expect(
+			migrateLiveAudioSquelchUpdate(stored, { squelchMode: "auto" }),
+		).toEqual({ squelchMode: "auto", voiceOnly: true })
+		expect(
+			migrateLiveAudioSquelchUpdate(
+				{ ...manual, voiceOnly: false },
+				{ squelchMode: "auto", squelch: -30 },
+			),
+		).toEqual({ squelchMode: "auto", squelch: -30, voiceOnly: true })
+	})
+
+	it("PATCH auto with voiceOnly keeps it; a PATCH without squelchMode keeps the stored one", () => {
+		const explicit = { squelchMode: "auto" as const, voiceOnly: false }
+		expect(migrateLiveAudioSquelchUpdate(auto, explicit)).toBe(explicit)
+		const stored = { ...auto, voiceOnly: false }
+		const level = { autoMarginDb: 8, squelch: -40 }
+		expect(migrateLiveAudioSquelchUpdate(stored, level)).toBe(level)
+		const other = { squelchMode: "open" as const }
+		expect(migrateLiveAudioSquelchUpdate(stored, other)).toBe(other)
+	})
+
 	it("leaves unrelated updates as they are", () => {
 		const updates = { voiceOnly: true, listenMode: "digital" as const }
 		expect(migrateLiveAudioSquelchUpdate(auto, updates)).toBe(updates)
@@ -178,6 +240,25 @@ describe("startup config", () => {
 			squelchMode: "manual",
 			squelch: -40,
 		})
+	})
+
+	it("a loaded manual at 0 with a tone stays manual", () => {
+		expect(
+			load({
+				modulation: "nfm",
+				squelchMode: "manual",
+				squelch: 0,
+				toneSquelch: { kind: "dcs", code: "023", polarity: "normal" },
+			}),
+		).toMatchObject({ squelchMode: "manual", squelch: 0 })
+		expect(
+			load({
+				modulation: "nfm",
+				squelchMode: "manual",
+				squelch: 0,
+				toneSquelch: { kind: "none" },
+			}),
+		).toMatchObject({ squelchMode: "open" })
 	})
 
 	it("keeps the parsed config as written: no voiceOnly or listenMode defaults", () => {

@@ -348,15 +348,21 @@ tuner:
 #                            # behind; short toneless overs are not heard.
 #                            # Other modulations (am too) keep the floor gate
 #                            # alone. manual: any carrier above squelch opens
-#                            # (manual with squelch 0 is stored as open).
+#                            # (manual with squelch 0 is stored as open,
+#                            # unless a CTCSS/DCS toneSquelch is set).
 #                            # open: everything plays raw, tone squelch
-#                            # ignored; overs are still detected as in auto.
+#                            # ignored; overs are still detected as in auto
+#                            # (engine rust: plays ungated, no overs yet).
 #                            # noise is deprecated: stored as auto with
 #                            # voiceOnly false
 #   voiceOnly: true          # auto on nfm: the voice check above (default
 #                            # true); false plays every carrier. Live audio
 #                            # only, scanner recordings are unaffected
-#   listenMode: "auto"       # what /auto plays: auto | analog | digital
+#   listenMode: "auto"       # what /auto plays: auto (analog, or decoded
+#                            # voice during a clear call) | analog (demod
+#                            # audio only) | digital (decoded voice only,
+#                            # silent without a decoder). open squelch
+#                            # forces analog; a change waits for the over
 #   autoMarginDb: 6          # dB above the floor estimate, auto mode (0-40)
 #   noiseReduction: "off"    # off | voice | noaa-apt | narrow-band
 #   lowPass: 0               # Hz (0 disables)

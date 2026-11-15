@@ -508,6 +508,39 @@ describe("live demod rust fallback and retune", () => {
 		expect(edges).toContain(true)
 	})
 
+	// Listen: open stops detecting on Rust, so an auto -> open switch mid-over ends it as config.
+	it("switching auto to open during an over closes it with reason config", async () => {
+		await boot({ squelchMode: "auto", modulation: "nfm" })
+		const tracker = wireAnalogTransmissions({
+			source: demod as unknown as AnalogTransmissionSource,
+			frequencyAt: (_id, offsetHz) => ({
+				hz: 446_000_000 + offsetHz,
+				tuningTrust: "commanded",
+			}),
+			broadcast: () => undefined,
+			sink: () => null,
+		})
+		const events: AnalogTransmissionEventData[] = []
+		tracker.on("transmission", event => events.push(event))
+		channels[0]?.emitLine(demodEvent("gate", { open: true, atOutputSample: 0 }))
+		for (let b = 0; b < 6; b++)
+			channels[0]?.emitLine(
+				demodEvent("metrics", {
+					atOutputSample: 4800 * b,
+					powerDbfs: new Array<number>(10).fill(-30),
+					quietingDb: new Array<number>(10).fill(30),
+				}),
+			)
+		expect(tracker.current()).not.toBeNull()
+		await demod?.reconfigure({ squelchMode: "open" })
+		expect(tracker.current()).toBeNull()
+		expect(events.at(-1)).toMatchObject({
+			state: "closed",
+			closeReason: "config",
+		})
+		tracker.stop()
+	})
+
 	it("feeds metrics power into the auto floor and sends one squelch update", async () => {
 		await boot({ squelchMode: "auto", autoMarginDb: 6 })
 		channels[0]?.emitLine(

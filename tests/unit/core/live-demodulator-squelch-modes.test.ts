@@ -23,7 +23,7 @@ import type {
 	AnalogTransmissionPayload,
 } from "@wavekit/api-types"
 import { createLogger } from "../../../src/utils/logger.js"
-import { LiveDemodConfigSchema } from "../../../src/config.js"
+import { ConfigSchema, LiveDemodConfigSchema } from "../../../src/config.js"
 import type {
 	LiveDemodConfig,
 	LiveDemodulator as LiveDemodulatorType,
@@ -617,6 +617,41 @@ describe("LiveDemodulator noise and tone squelch", () => {
 				true,
 			)
 			expect(heard.length).toBe(blocks.reduce((n, b) => n + b.length, 0))
+		})
+
+		// Listen: manual at 0 with a tone is a tone-only squelch, so the migration keeps it manual.
+		it("a loaded manual-at-0 tone-only squelch stays manual and mutes until the tone matches", async () => {
+			const loaded = ConfigSchema.parse({
+				sources: [],
+				decoders: [],
+				liveDemod: {
+					modulation: "nfm",
+					squelchMode: "manual",
+					squelch: 0,
+					toneSquelch: CTCSS_885,
+				},
+			}).liveDemod
+			expect(loaded?.squelchMode).toBe("manual")
+			liveDemod = create({
+				squelchMode: loaded?.squelchMode,
+				squelch: loaded?.squelch,
+				toneSquelch: loaded?.toneSquelch,
+			})
+			await liveDemod.start()
+			expect(liveDemod.getStatus().config.squelchMode).toBe("manual")
+			const client = new ClientTransport()
+			internals().registerClient(
+				client as unknown as http.ServerResponse,
+				"local",
+			)
+			for (const block of pcmBlocks(tonePcm(91.5, 1, 8)))
+				internals().handleAudioData(block)
+			expect(liveDemod.getStatus().toneSquelch).toEqual({ state: "waiting" })
+			expect(client.received().every(b => b === 0)).toBe(true)
+			for (const block of pcmBlocks(tonePcm(88.5, 1.5, 9)))
+				internals().handleAudioData(block)
+			expect(liveDemod.getStatus().toneSquelch).toEqual({ state: "open" })
+			expect(client.received().some(b => b !== 0)).toBe(true)
 		})
 
 		it("an adjacent standard tone never opens it", async () => {

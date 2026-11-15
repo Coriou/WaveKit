@@ -253,6 +253,44 @@ describe("mock server REST", () => {
 		expect(restore.statusCode).toBe(200)
 	})
 
+	it("keeps manual at 0 with a tone and restores the voice check on Auto, as the core", async () => {
+		const ctcss = { kind: "ctcss", frequencyTenthsHz: 885 }
+		const toned = await inject("PATCH", "/api/live-audio/config", {
+			modulation: "nfm",
+			squelchMode: "manual",
+			squelch: 0,
+			toneSquelch: ctcss,
+		})
+		expect(toned.statusCode).toBe(200)
+		expect(toned.json<LiveAudioStatus>().config).toMatchObject({
+			squelchMode: "manual",
+			squelch: 0,
+			toneSquelch: ctcss,
+		})
+		const cleared = await inject("PATCH", "/api/live-audio/config", {
+			toneSquelch: { kind: "none" },
+		})
+		expect(cleared.json<LiveAudioStatus>().config.squelchMode).toBe("open")
+		const quiet = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "auto",
+			voiceOnly: false,
+			squelch: -60,
+		})
+		expect(quiet.json<LiveAudioStatus>().config.voiceOnly).toBe(false)
+		const kept = await inject("PATCH", "/api/live-audio/config", {
+			autoMarginDb: 7,
+		})
+		expect(kept.json<LiveAudioStatus>().config.voiceOnly).toBe(false)
+		const auto = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "auto",
+			autoMarginDb: 6,
+		})
+		expect(auto.json<LiveAudioStatus>().config).toMatchObject({
+			squelchMode: "auto",
+			voiceOnly: true,
+		})
+	})
+
 	it("serves the resolved band plan", async () => {
 		const view = (
 			await inject("GET", "/api/bandplans/resolved")

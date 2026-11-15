@@ -2669,24 +2669,28 @@ Configuration notes:
 
 - `squelchMode` — `auto` (default), `manual` (`squelch` is the threshold) or `open`
   (everything plays). Migration (2026-11-15): `manual` with `squelch: 0` (the former
-  "squelch off") is accepted and stored and reported as `open`; `noise` is deprecated,
+  "squelch off") is accepted and stored and reported as `open`, unless a `toneSquelch`
+  (`ctcss` or `dcs`) is set: `manual` at 0 with a tone is a tone-only squelch (the tone
+  alone decides) and stays `manual`, and a later request that sets `toneSquelch` to
+  `none` on it stores `open`; `noise` is deprecated,
   still accepted on input with its old modulation rule, and stored and reported as
   `auto` with `voiceOnly: false`, even when the same request sends `voiceOnly: true`.
   A loaded config file is migrated the same way at startup. To choose `manual`, send
-  `squelchMode: "manual"` and a non-zero `squelch` in the same request: `manual` at 0
-  is stored as `open`, and a `squelch` level sent alone while the mode is `open` keeps
+  `squelchMode: "manual"` and a non-zero `squelch` (or a tone) in the same request:
+  `manual` at 0 without a tone is stored as `open`, and a `squelch` level sent alone while the mode is `open` keeps
   it `open` (the level is stored for a later `manual`). `open` plays every block raw: no stage-1 replacement of closed IQ, no
   stage 2 and no tone squelch gate (a configured `toneSquelch` is kept for the return
   to `auto` or `manual`), so noise, pagers and data are heard. Stage 1 still detects at
   the `auto` threshold (the same floor, margin and FM quieting assist), so
   `squelchOpen`, `thresholdDbfs`, `live-audio:transmission` events and Activity rows
-  continue as in `auto`; a switch between `auto` and `open` keeps the floor estimate
-  and does not end an open transmission. On the Rust engine (`engine: "rust"`) `open`
+  continue as in `auto`; on csdr a switch between `auto` and `open` keeps the floor
+  estimate and does not end an open transmission. On the Rust engine (`engine: "rust"`) `open`
   plays ungated until the engine gets a detect-only stage: it maps to the engine's `off`
   squelch, as `manual` at 0 did, so everything plays, `squelchOpen` stays `true` for the
   whole run (a switch to `open` opens a closed gate at once), and no
   `live-audio:transmission` events, Activity rows or scanner operator activity come from
-  it. `auto`
+  it; a switch between `auto` and `open` there ends an open transmission with
+  `closeReason: "config"`, since detection stops or starts. `auto`
   stage 1 is an estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB,
   default 6, and delimits transmissions. On `nfm` on the csdr engine, with
   `voiceOnly` on (the default),
@@ -2732,7 +2736,12 @@ Configuration notes:
   `false` keeps stage 1 alone, as on AM: every carrier the floor gate passes plays at
   once, including carriers, data and digital buzz. Only `false` turns it off. It governs
   live audio only (`/stream` and the analog side of `/auto`); the scanner's recordings
-  run their own speech check and ignore it. Applies without a restart.
+  run their own speech check and ignore it. Applies without a restart. A request that
+  sets `squelchMode: "auto"` without a `voiceOnly` key turns the voice check back on
+  (`voiceOnly: true`), so a client that once sent the deprecated `noise` gets it back by
+  choosing Auto; a request that sends `voiceOnly` keeps the value sent, and a request
+  without `squelchMode` keeps the stored `voiceOnly`. Clients that want Auto with Voice
+  only off send `voiceOnly: false` together with `squelchMode: "auto"`.
 - `listenMode` — what `/auto` plays, a core setting shared by every client: `auto`
   (default: analog while the squelch passes it, decoded voice while a clear call is on the
   tuned channel), `analog` (demodulated audio only, decoded voice never plays) or `digital`

@@ -2031,15 +2031,20 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		open: OpenTransmission,
 		config: LiveDemodConfig,
 	): boolean {
+		let engine: "csdr" | "rust" | undefined
 		try {
-			if (this.source.getStatus().sourceId !== open.sourceId) return true
+			const status = this.source.getStatus()
+			if (status.sourceId !== open.sourceId) return true
+			engine = status.engine
 		} catch {
 			// A status failure still honours the config identity below.
 		}
+		// Listen: on Rust, auto <-> open changes the detection (open runs ungated there).
 		return liveDemodTransmissionConfigChanged(
 			open.config,
 			config,
 			open.sourceId,
+			engine,
 		)
 	}
 

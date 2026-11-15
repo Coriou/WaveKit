@@ -110,6 +110,29 @@ describe("live demod transmission gating", () => {
 		).toBe(true)
 	})
 
+	it("auto to open keeps the identity on csdr and changes it on Rust", () => {
+		const base = {
+			sourceId: "rtl0",
+			modulation: "nfm" as const,
+			bandwidth: 12_500,
+			squelchMode: "auto" as const,
+		}
+		const open = { ...base, squelchMode: "open" as const }
+		expect(liveDemodTransmissionConfigChanged(base, open)).toBe(false)
+		expect(
+			liveDemodTransmissionConfigChanged(base, open, undefined, "csdr"),
+		).toBe(false)
+		expect(
+			liveDemodTransmissionConfigChanged(base, open, undefined, "rust"),
+		).toBe(true)
+		expect(
+			liveDemodTransmissionConfigChanged(open, base, undefined, "rust"),
+		).toBe(true)
+		expect(
+			liveDemodTransmissionConfigChanged(open, open, undefined, "rust"),
+		).toBe(false)
+	})
+
 	it("closes on source, modulation, bandwidth, offset or squelch mode only", () => {
 		const base = {
 			sourceId: "rtl0",

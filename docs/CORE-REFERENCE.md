@@ -359,13 +359,19 @@ ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:808
 - `iqDcBlock` — Deprecated and ignored (it corrupted I/Q); use `offsetHz`
 - `squelchMode` — `auto` (default, below), `manual` (the `squelch` threshold) or
   `open` (everything plays; stage 1 still detects at the auto threshold, so transmission
-  events and Activity rows continue). `manual` with `squelch: 0` is read as `open`.
+  events and Activity rows continue). On the Rust engine (`engine: rust`) `open` plays
+  ungated and emits no transmission events or Activity rows until the engine has a
+  detect-only stage. `manual` with `squelch: 0` is read as `open`, unless a
+  `toneSquelch` (CTCSS or DCS) is set: that is a tone-only squelch and stays `manual`.
   The deprecated `noise` is still accepted and read as `auto` with `voiceOnly: false`
 - `voiceOnly` — `true` (default): on NFM in `auto`, stage 2 (below) holds the audio until
   it hears voice or a tone. `false` plays every over the carrier gate passes. Live audio
   only; the scanner recorder's speech check is separate
-- `listenMode` — `auto` (default), `analog` or `digital`: which source the `/auto` route
-  plays. Shared by every client of the core
+- `listenMode` — what the `/auto` route plays, shared by every client of the core:
+  `auto` (default: analog while the squelch passes it, decoded voice while a clear call
+  is on the tuned channel), `analog` (demodulated audio only) or `digital` (decoded voice
+  only; silent when no digital voice decoder covers the tuned channel). The `open`
+  squelch forces `analog`. A change made while a transmission plays waits for it to end
 - `engine` — `csdr` (default) or `rust` (opt-in). The Rust engine (the `wavekit-chan` binary,
   shipped in the image; `chanBinaryPath` overrides the path) demodulates NFM and AM;
   WFM, USB, LSB, DSB, CW, raw, a non-CU8 source, a bandwidth outside 2 500–40 000 Hz,

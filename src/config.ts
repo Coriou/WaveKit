@@ -508,20 +508,33 @@ export interface LiveAudioSquelchKeys {
 	squelchMode?: LiveAudioSquelchSetting | undefined
 	squelch: number
 	voiceOnly?: boolean | undefined
+	/** Read only: a tone squelch keeps manual at 0 (a tone-only squelch) from becoming open. */
+	toneSquelch?: { kind: string } | undefined
+}
+
+/** Whether a stored tone squelch gates the audio (`ctcss` or `dcs`; absent and `none` do not). */
+function hasToneGate(tone: { kind: string } | undefined): boolean {
+	return tone !== undefined && tone.kind !== "none"
 }
 
 /**
  * Listen migration (2026-11-15) of a whole live-audio config: deprecated `noise` becomes `auto`
  * with `voiceOnly: false` (an FM carrier squelch without the voice check, which Auto already
- * opens on since 2026-10-17), and `manual` with `squelch: 0` (the old Off) becomes `open`. Every
- * other config is returned as it is (same object).
+ * opens on since 2026-10-17), and `manual` with `squelch: 0` (the old Off) becomes `open`, unless
+ * a tone squelch (`ctcss` or `dcs`) is set: manual at 0 with a tone is a tone-only squelch, which
+ * open (it ignores the tone) would silently drop, so it stays manual. Every other config is
+ * returned as it is (same object).
  */
 export function migrateLiveAudioSquelch<T extends LiveAudioSquelchKeys>(
 	config: T,
 ): T {
 	if (config.squelchMode === "noise")
 		return { ...config, squelchMode: "auto", voiceOnly: false }
-	if (config.squelchMode === "manual" && config.squelch === 0)
+	if (
+		config.squelchMode === "manual" &&
+		config.squelch === 0 &&
+		!hasToneGate(config.toneSquelch)
+	)
 		return { ...config, squelchMode: "open" }
 	return config
 }
@@ -529,7 +542,10 @@ export function migrateLiveAudioSquelch<T extends LiveAudioSquelchKeys>(
 /**
  * Listen migration of a partial update against the current config: the keys to add to `updates`
  * so that the merged config is stored migrated. A `noise` update on a modulation noise squelch
- * does not support is passed through unchanged, so validation still refuses it (400).
+ * does not support is passed through unchanged, so validation still refuses it (400). An update
+ * that sets `squelchMode: "auto"` without a `voiceOnly` key turns the voice check back on (an
+ * old client that once sent `noise` gets it back by choosing Auto); an explicit `voiceOnly` is
+ * kept, and an update without `squelchMode` keeps the stored `voiceOnly`.
  */
 export function migrateLiveAudioSquelchUpdate<
 	U extends Partial<LiveAudioSquelchKeys> & {
@@ -544,7 +560,10 @@ export function migrateLiveAudioSquelchUpdate<
 	const merged = {
 		squelchMode: updates.squelchMode ?? current.squelchMode,
 		squelch: updates.squelch ?? current.squelch,
-		voiceOnly: updates.voiceOnly ?? current.voiceOnly,
+		voiceOnly:
+			updates.voiceOnly ??
+			(updates.squelchMode === "auto" ? true : current.voiceOnly),
+		toneSquelch: updates.toneSquelch ?? current.toneSquelch,
 	}
 	const modulation = updates.modulation ?? current.modulation
 	if (
@@ -552,10 +571,14 @@ export function migrateLiveAudioSquelchUpdate<
 		!LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(modulation)
 	)
 		return updates
+	const restoredVoice =
+		updates.squelchMode === "auto" && updates.voiceOnly === undefined
+			? { ...updates, voiceOnly: true }
+			: updates
 	const migrated = migrateLiveAudioSquelch(merged)
-	if (migrated === merged) return updates
+	if (migrated === merged) return restoredVoice
 	return {
-		...updates,
+		...restoredVoice,
 		squelchMode: migrated.squelchMode,
 		...(migrated.voiceOnly !== merged.voiceOnly
 			? { voiceOnly: migrated.voiceOnly }

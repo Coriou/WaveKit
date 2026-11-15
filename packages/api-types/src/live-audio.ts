@@ -270,14 +270,16 @@ export interface LiveAudioConfig {
 	 * keep the stage-1 auto squelch; `voiceOnly: false` keeps it on NFM too). `manual`: the
 	 * configured threshold. `open`: everything plays, tone squelch ignored, while stage 1 keeps
 	 * detecting transmissions at the auto threshold. `manual` with `squelch: 0` is stored and
-	 * reported as `open`. `noise` is deprecated: accepted on input and stored as `auto` with
-	 * `voiceOnly: false`.
+	 * reported as `open`, unless a `toneSquelch` (`ctcss` or `dcs`) is set (a tone-only
+	 * squelch stays `manual`). `noise` is deprecated: accepted on input and stored as `auto`
+	 * with `voiceOnly: false`.
 	 */
 	squelchMode?: LiveAudioSquelchSetting
 	/**
 	 * Listen: the voice check (the evidence gate) under `auto` on `nfm`; default true. False plays
 	 * every carrier stage 1 passes. Governs live audio only, never the scanner's recordings. A
-	 * core reports it on every status.
+	 * core reports it on every status. A request that sets `squelchMode: "auto"` without this
+	 * key turns it back on; send `voiceOnly: false` with `squelchMode: "auto"` to keep it off.
 	 */
 	voiceOnly?: boolean
 	/** Listen: what `/auto` plays (default `auto`); reported on every status. */

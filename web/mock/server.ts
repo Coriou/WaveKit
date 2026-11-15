@@ -2353,12 +2353,6 @@ export async function buildMockServer(
 					message:
 						"Configuration validation failed:\n  - squelchMode: noise squelch requires nfm or wfm modulation",
 				})
-			// Listen migration, as the core: noise is auto without the voice check, manual at 0 is open
-			if (next.squelchMode === "noise") {
-				next.squelchMode = "auto"
-				next.voiceOnly = false
-			} else if (next.squelchMode === "manual" && next.squelch === 0)
-				next.squelchMode = "open"
 			const agc = body["agc"]
 			if (agc !== undefined) {
 				if (agc === null) delete next.agc
@@ -2424,6 +2418,20 @@ export async function buildMockServer(
 					message:
 						"Configuration validation failed:\n  - toneSquelch: tone squelch requires nfm modulation",
 				})
+			// Listen migration, as the core: Auto chosen without voiceOnly turns the voice check back
+			// on, noise is auto without the voice check, and manual at 0 is open unless a tone squelch
+			// is set (manual at 0 with a tone is a tone-only squelch).
+			if (squelchMode === "auto" && voiceOnly === undefined)
+				next.voiceOnly = true
+			if (next.squelchMode === "noise") {
+				next.squelchMode = "auto"
+				next.voiceOnly = false
+			} else if (
+				next.squelchMode === "manual" &&
+				next.squelch === 0 &&
+				(next.toneSquelch === undefined || next.toneSquelch.kind === "none")
+			)
+				next.squelchMode = "open"
 			const format = body["audioFormat"]
 			if (format !== undefined) {
 				if (format !== "s16le" && format !== "f32le")

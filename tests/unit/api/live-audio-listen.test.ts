@@ -151,6 +151,59 @@ describe("Live Audio Routes: Listen squelch contract", () => {
 		})
 	})
 
+	const ctcss = { kind: "ctcss", frequencyTenthsHz: 885 }
+
+	it("keeps manual at 0 with a tone (a tone-only squelch); tone none then stores open", async () => {
+		await mount({ modulation: "nfm", squelchMode: "manual", squelch: -50 })
+		const set = await patch({ squelch: 0, toneSquelch: ctcss })
+		expect(set.statusCode).toBe(200)
+		expect(liveDemod.reconfigure).toHaveBeenLastCalledWith({
+			squelch: 0,
+			toneSquelch: ctcss,
+		})
+		expect(set.json<Body>().config).toMatchObject({
+			squelchMode: "manual",
+			squelch: 0,
+			toneSquelch: ctcss,
+		})
+		const cleared = await patch({ toneSquelch: { kind: "none" } })
+		expect(cleared.json<Body>().config["squelchMode"]).toBe("open")
+		expect(liveDemod.status.config.squelchMode).toBe("open")
+	})
+
+	it("reports a stored manual at 0 with a tone as manual", async () => {
+		await mount({
+			modulation: "nfm",
+			squelchMode: "manual",
+			squelch: 0,
+			toneSquelch: ctcss,
+		})
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/live-audio/status",
+		})
+		expect(response.json<Body>().config["squelchMode"]).toBe("manual")
+	})
+
+	it("auto without voiceOnly turns the voice check back on; an explicit voiceOnly is kept", async () => {
+		await mount({ squelchMode: "auto", voiceOnly: false })
+		const restored = await patch({ squelchMode: "auto" })
+		expect(liveDemod.reconfigure).toHaveBeenLastCalledWith({
+			squelchMode: "auto",
+			voiceOnly: true,
+		})
+		expect(restored.json<Body>().config["voiceOnly"]).toBe(true)
+		const explicit = await patch({ squelchMode: "auto", voiceOnly: false })
+		expect(explicit.json<Body>().config["voiceOnly"]).toBe(false)
+		// A request without squelchMode keeps the stored voiceOnly.
+		const level = await patch({ autoMarginDb: 9 })
+		expect(level.json<Body>().config).toMatchObject({
+			squelchMode: "auto",
+			voiceOnly: false,
+			autoMarginDb: 9,
+		})
+	})
+
 	it("reports an unmigrated stored noise or manual at 0 migrated", async () => {
 		await mount({ squelchMode: "noise" })
 		const noise = await app.inject({

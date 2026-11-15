@@ -96,9 +96,11 @@ describe("Live Audio Routes", () => {
 			payload: { squelchMode: "auto", autoMarginDb: 8 },
 		})
 		expect(response.statusCode).toBe(200)
+		// Listen: choosing Auto without a voiceOnly key turns the voice check back on.
 		expect(mockLiveDemod.reconfigure).toHaveBeenCalledWith({
 			squelchMode: "auto",
 			autoMarginDb: 8,
+			voiceOnly: true,
 		})
 		for (const payload of [
 			// web-gaps-7: "noise" is a mode now (live-audio-squelch-modes.test.ts); unknown modes stay refused.

@@ -810,18 +810,13 @@ export class LiveDemodulator extends EventEmitter {
 		if (
 			restarting ||
 			sourceChanged ||
+			// Listen: auto and open detect alike on csdr, so a switch between them keeps the
+			// over; on Rust open plays ungated and stops detecting, so the switch ends it.
 			liveDemodTransmissionConfigChanged(
-				// Listen: auto and open detect alike, so a switch between them keeps the over.
-				{
-					...previous,
-					sourceId: undefined,
-					squelchMode: detectionMode(previous.squelchMode),
-				},
-				{
-					...validated,
-					sourceId: undefined,
-					squelchMode: detectionMode(validated.squelchMode),
-				},
+				{ ...previous, sourceId: undefined },
+				{ ...validated, sourceId: undefined },
+				undefined,
+				this.run?.rust ? "rust" : "csdr",
 			)
 		)
 			this.closeOverride = "config"

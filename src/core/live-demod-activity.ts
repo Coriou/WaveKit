@@ -44,9 +44,24 @@ export function liveDemodDetectionMode(
 }
 
 /**
+ * Listen: the detection a squelch setting runs on an engine. On csdr open detects as auto; on
+ * the Rust engine (no detect-only stage yet) open plays ungated and detects nothing, so a switch
+ * between auto and open changes the detection there.
+ */
+function engineDetection(
+	mode: LiveAudioSquelchSetting | undefined,
+	engine: "csdr" | "rust" | undefined,
+): LiveAudioSquelchMode | "ungated" {
+	if (mode === "open" && engine === "rust") return "ungated"
+	return liveDemodDetectionMode(mode)
+}
+
+/**
  * True when a live-demod config change must end an open transmission.
  * Threshold-only edits (including `squelch` and `autoMarginDb`) do not.
  * `offsetHz` and `squelchMode` use the same defaults the demodulator applies.
+ * `engine` (the running engine) makes a switch between auto and open end the transmission on
+ * Rust, where open stops detecting; omitted, open detects as auto.
  *
  * An absent `sourceId` means the resolved default (`resolvedSourceId`, the
  * demodulator status source). It is the same source as an explicit id equal
@@ -57,6 +72,7 @@ export function liveDemodTransmissionConfigChanged(
 	previous: TransmissionConfigIdentity,
 	next: TransmissionConfigIdentity,
 	resolvedSourceId?: string,
+	engine?: "csdr" | "rust",
 ): boolean {
 	return (
 		effectiveSourceId(previous.sourceId, resolvedSourceId) !==
@@ -64,8 +80,8 @@ export function liveDemodTransmissionConfigChanged(
 		previous.modulation !== next.modulation ||
 		previous.bandwidth !== next.bandwidth ||
 		(previous.offsetHz ?? 0) !== (next.offsetHz ?? 0) ||
-		liveDemodDetectionMode(previous.squelchMode) !==
-			liveDemodDetectionMode(next.squelchMode)
+		engineDetection(previous.squelchMode, engine) !==
+			engineDetection(next.squelchMode, engine)
 	)
 }
 

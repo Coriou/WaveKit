@@ -37,6 +37,7 @@ class FakeSource extends EventEmitter implements AnalogTransmissionSource {
 	hang = 250
 	override: "stopped" | "config" | null = null
 	throwFrequency = false
+	engine: "csdr" | "rust" | undefined = undefined
 
 	getStatus(): LiveDemodStatus {
 		return {
@@ -56,6 +57,7 @@ class FakeSource extends EventEmitter implements AnalogTransmissionSource {
 			pipelineRestarts: 0,
 			squelchOpen: this.squelchOpen,
 			thresholdDbfs: this.thresholdDbfs,
+			...(this.engine !== undefined ? { engine: this.engine } : {}),
 		}
 	}
 
@@ -281,6 +283,30 @@ describe("analog transmission tracker", () => {
 			expect(tracker.current()).toBeNull()
 			expect(events).toHaveLength(2)
 		}
+	})
+
+	// Listen: open detects as auto on csdr, but the Rust engine runs open ungated (no
+	// detect-only stage), so there an auto <-> open switch changes the detection.
+	it("keeps the over across auto to open on csdr and closes it as config on Rust", () => {
+		const csdr = harness()
+		csdr.source.engine = "csdr"
+		csdr.source.squelchMode = "auto"
+		csdr.source.gate(true)
+		csdr.source.reconfigure({ squelchMode: "open" })
+		expect(csdr.tracker.current()?.transmissionId).toBe("tx-1")
+		expect(csdr.events).toHaveLength(1)
+
+		const rust = harness()
+		rust.source.engine = "rust"
+		rust.source.squelchMode = "auto"
+		rust.source.gate(true)
+		rust.source.reconfigure({ squelchMode: "open" })
+		expect(rust.events[1]?.closeReason).toBe("config")
+		expect(rust.tracker.current()).toBeNull()
+		// Open on Rust does not gate, so the still-open gate starts nothing new.
+		rust.source.gate(false)
+		rust.source.gate(true)
+		expect(rust.events).toHaveLength(2)
 	})
 
 	it("ends a retune at the retune time, without subtracting the squelch hang", () => {
