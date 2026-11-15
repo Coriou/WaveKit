@@ -1,15 +1,15 @@
 # dsd-fme -i /dev/stdin -fm -o null: output for scripts/fixtures/dpmr-4fsk.mjs (synthetic, see synthetic-frames.test.ts)
-00:54:03 Sync: +dPMR  dPMR Frame Sync 2 
+00:54:03 Sync: +dPMR  dPMR Frame Sync 2
 [31m TG=(CRC ERR)[0m[31m Src=(CRC ERR) Channel Code =(CRC ERR)[0m
-00:54:03 Sync: +dPMR  dPMR Frame Sync 2 
+00:54:03 Sync: +dPMR  dPMR Frame Sync 2
 [31m TG=(CRC ERR)[0m[32m Src=0150707[0m[32m Channel Code=05[0m
-00:54:03 Sync: +dPMR  dPMR Frame Sync 2 
+00:54:03 Sync: +dPMR  dPMR Frame Sync 2
 [32m TG=0001234[0m[32m Src=0150707[0m[32m Channel Code=05[0m
-00:54:03 Sync: +dPMR  dPMR Frame Sync 2 
+00:54:03 Sync: +dPMR  dPMR Frame Sync 2
 [32m TG=0001234[0m[32m Src=0005678[0m[32m Channel Code=05[0m
-00:54:03 Sync: +dPMR  dPMR Frame Sync 2 
+00:54:03 Sync: +dPMR  dPMR Frame Sync 2
 [32m TG=0001234[0m[32m Src=0005678[0m[32m Channel Code=05[0m
-00:54:03 Sync: +dPMR  dPMR Frame Sync 2 
+00:54:03 Sync: +dPMR  dPMR Frame Sync 2
 [32m TG=0001234[0m[32m Src=0005678[0m[32m Channel Code=05[0m
 
 End of /dev/stdin

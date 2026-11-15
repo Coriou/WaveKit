@@ -1,10 +1,10 @@
 # dsd-fme -i /dev/stdin -fa -o null: output for scripts/fixtures/p25-c4fm.mjs (synthetic, see synthetic-frames.test.ts)
-00:54:02 Sync: +P25p1 [36mNAC: 000; [0m duid:EE 
-00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1  
+00:54:02 Sync: +P25p1 [36mNAC: 000; [0m duid:EE
+00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1
 [31m LCW FEC ERR [0m
-00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1  
+00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1
 [33m Group Voice Channel User - Group 4321 Source 1234567
-[0m00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1  
+[0m00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1
 [33m Group Voice Channel User - Group 4321 Source 1234567
 [0m00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m TDU
 
