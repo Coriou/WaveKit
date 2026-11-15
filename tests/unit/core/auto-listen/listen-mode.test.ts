@@ -268,7 +268,7 @@ describe("AutoListenRouter listen mode", () => {
 			expect(sim.status().reason).toBe("no-decoder")
 			voice.ids = ["dmr", "p25"]
 			sim.coverage.answer.set("dmr", "no")
-			sim.coverage.answer.set("p25", "unknown")
+			sim.coverage.answer.set("p25", "no")
 			expect(sim.status().reason).toBe("no-decoder")
 			const calls = sim.coverage.calls
 			sim.router.level()
@@ -276,6 +276,31 @@ describe("AutoListenRouter listen mode", () => {
 			expect(sim.coverage.calls).toBe(calls)
 			sim.coverage.answer.set("p25", "yes")
 			sim.coverage.generation++
+			expect("reason" in sim.status()).toBe(false)
+		})
+
+		it("unknown coverage (an unknown answer or a throwing covers) reports no reason, and still routes silence", () => {
+			const voice = new ListingVoice()
+			const sim = new Sim(voice)
+			sim.router.setListenPolicy("digital", false)
+			voice.ids = ["dmr", "p25"]
+			sim.coverage.answer.set("dmr", "no")
+			sim.coverage.answer.set("p25", "unknown")
+			expect("reason" in sim.status()).toBe(false)
+			expect(sim.router.level()).toEqual({ active: "none" })
+			const throwing = new Sim(voice)
+			throwing.router.setListenPolicy("digital", false)
+			throwing.coverage.covers = () => {
+				throw new Error("down")
+			}
+			expect("reason" in throwing.status()).toBe(false)
+			// Routed as not covered: the call of an unknown-coverage decoder is silence.
+			sim.coverage.answer.set("dmr", "unknown")
+			sim.coverage.generation++
+			sim.connect()
+			sim.steps(30, { analog: true, frame: call() })
+			expect(sim.actives.every(a => a === "none")).toBe(true)
+			expect(sim.read("dmr")).toBe(0)
 			expect("reason" in sim.status()).toBe(false)
 		})
 
@@ -353,6 +378,95 @@ describe("AutoListenRouter listen mode", () => {
 			expect(sim.actives.at(-1)).toBe("none")
 		})
 
+		it("open set mid analog over, then a DMR call: analog applies at once, no voice queued, nothing dropped", () => {
+			const sim = new Sim()
+			sim.connect()
+			sim.steps(10, { analog: true })
+			expect(sim.actives.at(-1)).toBe("analog")
+			const events = sim.events.length
+			sim.router.setListenPolicy("auto", true)
+			// Analog still plays analog: no switch follows, so the mode is in force at once.
+			expect(sim.status().listenMode).toBe("analog")
+			expect("pendingListenMode" in sim.status()).toBe(false)
+			expect(sim.status().reason).toBe("squelch-open")
+			expect(sim.events.length).toBe(events + 1)
+			// The open squelch passes everything: analog never releases; a 4 s DMR call comes.
+			sim.steps(200, { analog: true, frame: call() })
+			expect(sim.actives.slice(10).every(a => a === "analog")).toBe(true)
+			expect(
+				sim.traces.some(t => t.source === "dmr" && t.kind === "write"),
+			).toBe(false)
+			expect(sim.status().droppedMs).toBe(0)
+			expect("pendingListenMode" in sim.status()).toBe(false)
+			// Squelch closed again: auto plays analog too, so auto is in force at once.
+			sim.router.setListenPolicy("auto", false)
+			expect(sim.status().listenMode).toBe("auto")
+			expect("pendingListenMode" in sim.status()).toBe(false)
+		})
+
+		it("analog -> digital on a continuous carrier waits for the carrier's release; no voice is queued meanwhile", () => {
+			const sim = new Sim()
+			sim.router.setListenPolicy("analog", false)
+			sim.connect()
+			sim.steps(10, { analog: true })
+			sim.router.setListenPolicy("digital", false)
+			expect(sim.status().listenMode).toBe("analog")
+			expect(sim.status().pendingListenMode).toBe("digital")
+			// A call during the carrier: digital cannot start without cutting the over, and voice
+			// it would queue meanwhile would age out (counted); it is not queued.
+			sim.steps(200, { analog: true, frame: call() })
+			expect(sim.actives.slice(10).every(a => a === "analog")).toBe(true)
+			expect(
+				sim.traces.some(t => t.source === "dmr" && t.kind === "write"),
+			).toBe(false)
+			expect(sim.router.droppedSamples).toBe(0)
+			expect(sim.status().pendingListenMode).toBe("digital")
+			// The carrier releases: digital in force, the call (still on) plays decoded.
+			sim.steps(40, { analog: false, frame: call() })
+			expect(sim.status().listenMode).toBe("digital")
+			expect("pendingListenMode" in sim.status()).toBe(false)
+			expect(sim.actives.at(-1)).toBe("digital")
+			expect(sim.router.droppedSamples).toBe(0)
+		})
+
+		it("digital requested during a call applies at once; analog requested during a call queues no other decoder", () => {
+			const sim = new Sim()
+			sim.connect()
+			sim.steps(30, { analog: false, frame: call() })
+			expect(sim.actives.at(-1)).toBe("digital")
+			sim.router.setListenPolicy("digital", false)
+			expect(sim.status().listenMode).toBe("digital")
+			expect("pendingListenMode" in sim.status()).toBe(false)
+			sim.router.setListenPolicy("analog", false)
+			expect(sim.status().pendingListenMode).toBe("analog")
+			// A second decoder's call while the first plays on: never queued under pending analog.
+			for (let i = 0; i < 200; i++) {
+				sim.voice.tap?.frame("p25", bytes(noise(160, lcg(i + 1))), call())
+				sim.step({ frame: call() })
+			}
+			expect(
+				sim.traces.some(t => t.source === "p25" && t.kind === "write"),
+			).toBe(false)
+			expect(sim.actives.slice(30).every(a => a === "digital")).toBe(true)
+			expect(sim.router.droppedSamples).toBe(0)
+		})
+
+		it("one route event per mode change applied in a block", () => {
+			const sim = new Sim()
+			sim.connect()
+			sim.steps(30, { analog: false, frame: call() })
+			sim.router.setListenPolicy("analog", false)
+			sim.voice.tap?.call("dmr", call({ active: false }))
+			const before = sim.events.length
+			sim.steps(40, { analog: true })
+			// Release: analog in force and analog selected in the same block, one event.
+			const after = sim.events.slice(before)
+			expect(sim.status().listenMode).toBe("analog")
+			expect(after.filter(e => e.active === "analog")).toHaveLength(1)
+			expect(after.at(-1)).toEqual({ active: "analog" })
+			expect(after.some(e => e.active === "digital")).toBe(false)
+		})
+
 		it("a pending analog keeps the analog over from digital preemption", () => {
 			const sim = new Sim()
 			sim.connect()
@@ -417,6 +531,63 @@ describe("AutoListenRouter listen mode", () => {
 							for (let b = first; b < to; b++) expect(blocks).toContain(b)
 						}
 						expect(sim.router.droppedSamples).toBe(0)
+					},
+				),
+				{ numRuns: 100 },
+			)
+		}, 120_000)
+
+		// Feature: listen-modes, Property 2: A pending mode never stalls on a source it still plays
+		// Validates: Source "decision per transmission, never mid-over"; Open forces Analog
+		it("property: open toggled mid-over with continuous audibility never leaves a stuck pending mode or queued voice under analog", () => {
+			const modes: LiveAudioListenMode[] = ["auto", "analog", "digital"]
+			fc.assert(
+				fc.property(
+					fc.constantFrom(...modes),
+					fc.boolean(),
+					fc.array(
+						fc.record({
+							at: fc.integer({ min: 0, max: 239 }),
+							mode: fc.constantFrom(...modes),
+							open: fc.boolean(),
+						}),
+						{ maxLength: 8 },
+					),
+					(startMode, startOpen, changes) => {
+						const sim = new Sim()
+						sim.record = false
+						sim.router.setListenPolicy(startMode, startOpen)
+						sim.connect()
+						// Analog audible throughout (an open squelch's noise or a long carrier) but a
+						// 0.6 s release at 2.4-3 s; a DMR call 0.8-4 s overlapping both.
+						const audible = (b: number) => b < 120 || b >= 150
+						const inCall = (b: number) => b >= 40 && b < 200
+						for (let b = 0; b < 240; b++) {
+							for (const c of changes)
+								if (c.at === b) sim.router.setListenPolicy(c.mode, c.open)
+							const modeBefore = sim.router.listenMode
+							const before = sim.traces.length
+							sim.step({ analog: audible(b), frame: inCall(b) ? call() : null })
+							if (b === 200) sim.voice.tap?.call("dmr", call({ active: false }))
+							const st = sim.status()
+							// A pending mode waits only on a source it does not play.
+							if (st.pendingListenMode !== undefined) {
+								expect(st.pendingListenMode).not.toBe("auto")
+								expect(st.active).toBe(
+									st.pendingListenMode === "analog" ? "digital" : "analog",
+								)
+							}
+							// Under analog in force for the whole block, no decoded voice is queued.
+							if (modeBefore === "analog" && st.listenMode === "analog")
+								for (let i = before; i < sim.traces.length; i++) {
+									const t = sim.traces[i]
+									expect(t?.source === "dmr" && t.kind === "write").toBe(false)
+								}
+						}
+						// After the scene, quiet for the 3 s FIFO bound (an analog backlog queued during a
+						// call plays out first): whatever was pending is in force.
+						sim.steps(170, { analog: false })
+						expect("pendingListenMode" in sim.status()).toBe(false)
 					},
 				),
 				{ numRuns: 100 },

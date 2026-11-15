@@ -134,8 +134,9 @@ export class AutoListenRouter extends EventEmitter {
 
 	/**
 	 * Listen policy. `mode` is in force; `requested` (`analog` while the squelch is open, else the
-	 * configured mode) replaces it at the next transmission boundary: when nothing plays, or when
-	 * the playing source releases. The route never switches source mid-over for a mode change.
+	 * configured mode) replaces it at once when it still plays the source playing now (or nothing
+	 * plays), since no switch follows; otherwise at the playing source's release (a transmission
+	 * boundary). The route never switches source mid-over for a mode change.
 	 */
 	private mode: LiveAudioListenMode = "auto"
 	private requested: LiveAudioListenMode = "auto"
@@ -144,7 +145,10 @@ export class AutoListenRouter extends EventEmitter {
 	/** Cached "does any decoder cover the tuned channel", per coverage generation and id list. */
 	private coveredAt = Number.NaN
 	private coveredIds = ""
-	private coveredAny = false
+	private coveredAny: boolean | null = false
+	/** While `choose` runs, `auto-route-changed` is emitted once at its end (one event per block). */
+	private holdEmit = false
+	private heldEmit = false
 
 	constructor(log: Logger, options: AutoListenRouterOptions = {}) {
 		super()
@@ -235,16 +239,18 @@ export class AutoListenRouter extends EventEmitter {
 
 	/**
 	 * Listen: the configured `listenMode` and whether the squelch is `open` (which forces
-	 * `analog`). Applies at once when nothing plays (or no client listens); otherwise when the
-	 * playing transmission releases, so one transmission is heard from one source.
+	 * `analog`). Applies at once when nothing plays (or no client listens) or when the new mode
+	 * still plays the source playing now (no switch follows: `analog` during an analog over,
+	 * `auto` always, `digital` during a call); otherwise when the playing transmission releases,
+	 * so one transmission is heard from one source.
 	 */
 	setListenPolicy(listenMode: LiveAudioListenMode, squelchOpen: boolean): void {
 		this.configuredMode = validListenMode(listenMode)
 		this.squelchOpen = squelchOpen === true
 		this.requested = this.squelchOpen ? "analog" : this.configuredMode
 		if (this.requested === this.mode) return
-		if (!this.running || this.selected === null)
-			this.applyMode(this.clock.now())
+		if (!this.running) this.applyMode(this.clock.now())
+		else this.applyWithoutSwitch(this.clock.now())
 	}
 
 	/** Listen: the listen mode in force (see `setListenPolicy`). */
@@ -312,8 +318,10 @@ export class AutoListenRouter extends EventEmitter {
 
 	/**
 	 * Listen: `squelch-open` when the open squelch overrides a configured `auto` or `digital`;
-	 * `no-decoder` while `digital` is in force and no decoder is known to cover the tuned channel.
-	 * Unknown coverage reports nothing (the route still plays only decoded voice).
+	 * `no-decoder` while `digital` is in force and every decoder answers that it does not cover
+	 * the tuned channel (or none exists). Unknown coverage (a decoder answering `unknown`, a
+	 * throwing `covers` or id list) reports nothing; the route still treats it as not covered
+	 * and plays only decoded voice of covering decoders (silence otherwise).
 	 */
 	private reason(): LiveAudioAutoRouteReason | null {
 		if (this.squelchOpen && this.configuredMode !== "analog")
@@ -324,9 +332,10 @@ export class AutoListenRouter extends EventEmitter {
 	}
 
 	/**
-	 * True when a decoder covers the tuned channel, false when none does, null when unknown. With
-	 * the source's `voiceDecoderIds` the answer is computed once per coverage generation and id
-	 * list (`covers` is called only then); without it only decoders heard from count.
+	 * True when a decoder covers the tuned channel, false when every decoder answers `no` (or
+	 * there is none), null when any answer is unknown and none is `yes`. With the source's
+	 * `voiceDecoderIds` the answer is computed once per coverage generation and id list
+	 * (`covers` is called only then); without it only decoders heard from count.
 	 */
 	private digitalCovered(): boolean | null {
 		const source = this.voiceSource
@@ -347,15 +356,24 @@ export class AutoListenRouter extends EventEmitter {
 		if (typeof g !== "number" || !Number.isFinite(g)) return null
 		const key = ids.join("\u0000")
 		if (g !== this.coveredAt || key !== this.coveredIds) {
-			let any = false
+			let any: boolean | null = false
 			for (const id of ids) {
-				if (typeof id !== "string") continue
-				try {
-					if (validCoverage(port.covers(id)) === "yes") any = true
-				} catch {
-					// "unknown" counts as not covering.
+				if (typeof id !== "string") {
+					any = null
+					continue
 				}
-				if (any) break
+				let answer: VoiceCoverage
+				try {
+					answer = validCoverage(port.covers(id))
+				} catch {
+					answer = "unknown"
+				}
+				if (answer === "yes") {
+					any = true
+					break
+				}
+				// Unknown is not "no": it routes as not covering but never reports no-decoder.
+				if (answer === "unknown") any = null
 			}
 			this.coveredAt = g
 			this.coveredIds = key
@@ -376,13 +394,26 @@ export class AutoListenRouter extends EventEmitter {
 		if (next === "digital") this.analog.discardQueued()
 		if (this.selected !== null && !this.plays(this.selected))
 			this.select(null, now)
-		else this.emit("auto-route-changed", this.level())
+		else this.changed()
 	}
 
 	/** Whether the listen mode in force plays this input. */
 	private plays(input: AnalogInput | VoiceInput): boolean {
-		if (input === this.analog) return this.mode !== "digital"
-		return this.mode !== "analog"
+		return AutoListenRouter.playsUnder(input === this.analog, this.mode)
+	}
+
+	/** Whether `mode` plays analog (`isAnalog`) or decoded voice. */
+	private static playsUnder(
+		isAnalog: boolean,
+		mode: LiveAudioListenMode,
+	): boolean {
+		return isAnalog ? mode !== "digital" : mode !== "analog"
+	}
+
+	/** `auto-route-changed`, or noted for the end of `choose` (one event per block). */
+	private changed(): void {
+		if (this.holdEmit) this.heldEmit = true
+		else this.emit("auto-route-changed", this.level())
 	}
 
 	destroy(): void {
@@ -498,10 +529,39 @@ export class AutoListenRouter extends EventEmitter {
 
 	/**
 	 * Switching rules (4.1, 4.4, 4.5, 4.6, 4.9), then the listen mode: a pending mode is put in
-	 * force only here, past the release of the playing source (a transmission boundary). `analog`
-	 * never selects a voice; `digital` never selects analog (silence when no call plays).
+	 * force at once when it still plays the playing source (or nothing plays), else past that
+	 * source's release (a transmission boundary). `analog` never selects a voice; `digital`
+	 * never selects analog (silence when no call plays). Emits at most one route event.
 	 */
 	private choose(now: number): void {
+		this.holdEmit = true
+		try {
+			this.applyWithoutSwitch(now)
+			this.chooseSource(now)
+			// The selection may have changed (a preemption, a start): a pending mode that plays it
+			// is in force from this block.
+			this.applyWithoutSwitch(now)
+		} finally {
+			this.holdEmit = false
+			if (this.heldEmit) {
+				this.heldEmit = false
+				this.emit("auto-route-changed", this.level())
+			}
+		}
+	}
+
+	/** A pending mode that still plays the playing source (or nothing plays) needs no switch. */
+	private applyWithoutSwitch(now: number): void {
+		const playing = this.selected
+		if (
+			this.requested !== this.mode &&
+			(playing === null ||
+				AutoListenRouter.playsUnder(playing === this.analog, this.requested))
+		)
+			this.applyMode(now)
+	}
+
+	private chooseSource(now: number): void {
 		const sel = this.selected
 		if (sel === this.analog) {
 			// Preemption is part of `auto` only; a pending `analog` keeps the analog over.
@@ -604,7 +664,7 @@ export class AutoListenRouter extends EventEmitter {
 		this.voiceFillPending = 0
 		this.selectedAt = now
 		this.sinceWall = this.wallClock()
-		this.emit("auto-route-changed", this.level())
+		this.changed()
 	}
 
 	// --- voice ---
@@ -723,8 +783,16 @@ export class AutoListenRouter extends EventEmitter {
 			this.invalidate(v)
 			return
 		}
-		// Listen: `analog` in force never queues decoded voice.
-		if (this.mode === "analog") return
+		// Listen: `analog` in force or requested never queues decoded voice (so nothing ages out
+		// and counts dropped while an analog over goes on, `digital` pending included), except
+		// the call playing now, which plays to its release (the pending `analog` applies then).
+		if (
+			(this.mode === "analog" || this.requested === "analog") &&
+			v !== this.selected
+		) {
+			if (v.out.queued > 0 || v.armed) v.discard()
+			return
+		}
 		if (v.coverage === "yes" && c !== null && c.active) v.admit(pcm, now)
 		else v.flush(now)
 	}

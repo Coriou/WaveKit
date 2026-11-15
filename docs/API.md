@@ -2644,7 +2644,10 @@ droppedMs, clockRebases, latencyMs, listenMode?, pendingListenMode?, reason? }`.
   `pendingListenMode` is present only while such a change waits. `reason` is present only
   when something limits the route: `squelch-open` (the open squelch forces `analog` over a
   configured `auto` or `digital`) or `no-decoder` (`digital` is in force and no digital
-  voice decoder covers the tuned channel, so the route plays silence). Optional in
+  voice decoder covers the tuned channel, so the route plays silence). `no-decoder` is
+  reported only when the core can list its digital voice decoders and each one answers
+  that it does not cover the channel; when coverage is not known, `reason` is absent and
+  the route still plays silence until a decoder that covers the channel delivers a call. Optional in
   `@wavekit/api-types`; absent from older cores (`listenMode`, `pendingListenMode` and
   `reason` from cores before Listen).
 - `autoSquelch.diagnostics` — DIAGNOSTIC AND UNSTABLE (2026-10-24): only on
@@ -2748,9 +2751,14 @@ Configuration notes:
   (decoded voice only, silence otherwise, never analog; with no digital voice decoder on
   the tuned channel `/auto` is silent and `autoRoute.reason` is `no-decoder`). The `open`
   squelch forces `analog` whatever `listenMode` says (`autoRoute.reason: "squelch-open"`).
-  Applies without a restart and without reconnecting `/auto`: a change made while a
-  transmission plays waits for that transmission to end (`autoRoute.pendingListenMode`),
-  so one transmission is heard from one source; made while nothing plays it applies at
+  Applies without a restart and without reconnecting `/auto`. A change that keeps the
+  playing transmission's source applies at once (`auto` always; `analog`, including the
+  `open` squelch, during an analog over; `digital` during a decoded call). A change that
+  would switch away from it waits for that transmission to end
+  (`autoRoute.pendingListenMode`), so one transmission is heard from one source: `digital`
+  set during an analog over (or an open squelch closed under `digital`) waits until the
+  analog audio stops, and decoded calls are not played or buffered meanwhile; `analog` set
+  during a decoded call lets the call finish. Made while nothing plays, a change applies at
   once (an analog over already in progress is then heard from that point).
 - `squelchMode: "noise"` (NFM and WFM only, deprecated) — no longer stored: input is
   stored as `auto` with `voiceOnly: false` (above), whatever `voiceOnly` the request

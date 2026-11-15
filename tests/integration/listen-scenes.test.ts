@@ -1024,6 +1024,35 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 			expect(verdict(seg(r, "dmr"))).toBe("decoded")
 			expect(r.droppedMs).toBe(0)
 		}, 60_000)
+
+		it("open set mid analog over, then a DMR call: analog in force at once, nothing pending, nothing dropped", async () => {
+			// Auto + Voice only, the squelch set to open at 3.5 s while voice A (2-5 s) plays. The open
+			// squelch passes the noise too, so analog never releases afterwards.
+			const r = await cached("listen:open-mid-over", {
+				name: "auto then open",
+				config: base,
+				reconfigure: { at: 3_500, updates: { squelchMode: "open" } },
+			})
+			const voice = seg(r, "voice")
+			expect(voice.switches).toBe(0)
+			// Analog plays analog: the change needs no switch, so it is in force in that block.
+			expect(r.modeAt[3_500 / BLOCK_MS - 1]).toBe("auto")
+			expect(r.modeAt[3_500 / BLOCK_MS]).toBe("analog")
+			expect(new Set(r.modeAt.slice(3_500 / BLOCK_MS))).toEqual(
+				new Set(["analog"]),
+			)
+			expect(r.routeStatus?.listenMode).toBe("analog")
+			expect(r.routeStatus?.pendingListenMode).toBeUndefined()
+			expect(r.routeStatus?.reason).toBe("squelch-open")
+			// The DMR call is heard raw from analog; decoded voice is never queued, so it never
+			// ages out: nothing is counted dropped.
+			const dmr = seg(r, "dmr")
+			expect(dmr.voice).toBe(0)
+			expect(verdict(dmr)).toBe("raw")
+			expect(dmr.switches).toBe(0)
+			expect(r.droppedMs).toBe(0)
+			expect(r.routeStatus?.droppedMs).toBe(0)
+		}, 60_000)
 	})
 })
 
