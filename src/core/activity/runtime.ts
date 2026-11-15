@@ -12,9 +12,12 @@ import type {
 } from "./ingress.js"
 import type { ActivityQueryService } from "./storage/contract.js"
 import type {
+	ActivityLinkEvent,
+	ActivityLinkOp,
 	ActivityRetentionPolicy,
 	ActivityStoreStats,
 	AnalogTransmissionPayload,
+	RecordingChangePayload,
 } from "./storage/contract.js"
 import type { ActivityLimits } from "./storage/limits.js"
 import type { ActivityProvenanceLookup, DecodeEnvelope } from "./types.js"
@@ -66,7 +69,29 @@ export interface ActivityRuntime {
 	 * receivedAt with Date.now() and sets producedAt to payload.endedAt.
 	 */
 	transmissionSink(): ((payload: AnalogTransmissionPayload) => void) | null
+	/**
+	 * Recording links (recording-links.ts); null when disabled, unavailable or closed. Optional
+	 * so runtime doubles without links still type-check; absent reads as null.
+	 */
+	recordingLinks?(): ActivityRecordingLinks | null
 	close(): Promise<void>
+}
+
+/**
+ * The store's recording link surface. Every method is memory only and never throws; a store
+ * that is not open answers nothing (null, empty) and drops changes.
+ */
+export interface ActivityRecordingLinks {
+	/** A scanner recording kept for good: one `recording-change` row (receivedAt is now). */
+	admitRecording(payload: RecordingChangePayload): void
+	/** A link change (ActivityLinkOp). */
+	link(op: ActivityLinkOp): void
+	/** The newest row linked to a recording key, or null. */
+	recordingEventId(recordingId: string): string | null
+	/** The linked keys, newest row first (at most ACTIVITY_LINKS_MAX). */
+	linkedRecordings(): readonly string[]
+	/** Link changes as they commit; returns the unsubscribe. */
+	onLinks(listener: (events: readonly ActivityLinkEvent[]) => void): () => void
 }
 
 /**
@@ -130,6 +155,11 @@ export interface StartActivityRuntimeOptions {
 	 * `aircraftIdentity`): memory only, never a lookup or an await.
 	 */
 	aircraftIdentity?: ActivityAircraftIdentityLookup | null
+	/**
+	 * True when the recordings catalogue lists this decoder's call files (ingress.ts
+	 * `callRecordings`). Omitted: no dsd-fme call links to its file.
+	 */
+	callRecordings?: ((decoderId: string) => boolean) | null
 }
 
 /** Service that routes never call while Activity is disabled or unavailable. */
@@ -198,6 +228,7 @@ interface RuntimeParts {
 	stats: () => ActivityStoreStats
 	closeSteps: Array<() => Promise<void> | void>
 	admitTransmission?: (payload: AnalogTransmissionPayload) => void
+	links?: ActivityRecordingLinks
 }
 
 function assemble(
@@ -245,6 +276,31 @@ function assemble(
 				} catch {
 					// The live-demod listener must not see a store failure.
 				}
+			}
+		},
+		recordingLinks() {
+			const links = parts.links
+			if (closed || !links) return null
+			return {
+				admitRecording: payload => {
+					if (closed) return
+					try {
+						links.admitRecording(payload)
+					} catch {
+						// The scanner must not see a store failure.
+					}
+				},
+				link: op => {
+					if (closed) return
+					try {
+						links.link(op)
+					} catch {
+						// Never into the caller.
+					}
+				},
+				recordingEventId: id => (closed ? null : links.recordingEventId(id)),
+				linkedRecordings: () => (closed ? [] : links.linkedRecordings()),
+				onLinks: listener => links.onLinks(listener),
 			}
 		},
 		async close() {
@@ -359,10 +415,10 @@ export async function startActivityRuntime(
 			throw error
 		}
 		const ingress = ingressMod.createActivityIngress({
-			sink: (envelope, present) => {
+			sink: (envelope, present, recording) => {
 				const onEnvelope = options.onEnvelope
 				if (onEnvelope === undefined) {
-					store.admit(envelope, present)
+					store.admit(envelope, present, recording)
 					return
 				}
 				// The store presents only a kept reception; the callback reuses that result.
@@ -373,7 +429,7 @@ export async function startActivityRuntime(
 					merged === undefined
 						? (presented ??= present())
 						: (presented = present(merged))
-				const result = store.admit(envelope, lazy)
+				const result = store.admit(envelope, lazy, recording)
 				if (!result.admitted) return
 				try {
 					onEnvelope(presented ?? lazy())
@@ -384,6 +440,8 @@ export async function startActivityRuntime(
 			logger: options.logger,
 			resolveProvenance: options.resolveProvenance ?? null,
 			aircraftIdentity: options.aircraftIdentity ?? null,
+			callRecordings: options.callRecordings ?? null,
+			link: op => store.link?.(op),
 		})
 		try {
 			options.setPublisher((decoderId, decoderType, output) => {
@@ -415,6 +473,18 @@ export async function startActivityRuntime(
 					producedAt: payload.endedAt,
 					receivedAt: new Date(Date.now()).toISOString(),
 				})
+			},
+			links: {
+				admitRecording: payload => {
+					store.admitRecording?.({
+						payload,
+						receivedAt: new Date(Date.now()).toISOString(),
+					})
+				},
+				link: op => store.link?.(op),
+				recordingEventId: id => store.recordingEventId?.(id) ?? null,
+				linkedRecordings: () => store.linkedRecordings?.() ?? [],
+				onLinks: listener => store.onLinks?.(listener) ?? (() => {}),
 			},
 		})
 	} catch (error) {

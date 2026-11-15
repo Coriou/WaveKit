@@ -385,10 +385,30 @@ curl --fail --get --header "$AUTH" \
 
 Filters: `kinds`, `sourceIds`, `decoderIds`, `protocols`, `categories` (comma lists or
 repeated), `frequencyMin`/`frequencyMax` (Hz), `producedFrom`/`producedTo` (ISO times),
-`entityKey`, `text`, `refs`, `order` (`asc` or `desc`), `limit` (default 100, at most 200),
-`pageToken`. Pass `nextPageToken` from the answer as `pageToken` for the next page; a token
-expires with its snapshot after 5 minutes. A 429 `ACTIVITY_QUERY_BUSY` carries
-`Retry-After` ([GET /api/activity](API.md#get-apiactivity)).
+`entityKey`, `text`, `refs`, `hasRecording` (`true` or `false`), `order` (`asc` or `desc`),
+`limit` (default 100, at most 200), `pageToken`. Pass `nextPageToken` from the answer as
+`pageToken` for the next page; a token expires with its snapshot after 5 minutes. A 429
+`ACTIVITY_QUERY_BUSY` carries `Retry-After` ([GET /api/activity](API.md#get-apiactivity)).
+
+### Play what a row recorded
+
+A row with audio carries `recording: { id, durationMs }`. The id is the recording's stable key,
+in both directions ([Recording links](API.md#recording-links)):
+
+```sh
+# Rows with a playable recording (a dsd-fme call, a kept scanner recording)
+curl --fail --get --header "$AUTH" --data-urlencode "hasRecording=true" \
+  "$API_ORIGIN/api/activity"
+# The audio of a row: its recording.id, URL-encoded
+curl --fail --header "$AUTH" --output call.wav \
+  "$API_ORIGIN/api/recordings/$(jq -rn --arg id "$ID" '$id|@uri')/file"
+# The rows of a recording: its catalogue item's key (or read its activityEventId)
+curl --fail --get --header "$AUTH" --data-urlencode "refs=recordingId:$KEY" \
+  "$API_ORIGIN/api/activity"
+```
+
+The recordings routes exist in protected mode only. A deleted file's link goes within about
+90 s; the row stays.
 
 ## Capture IQ
 

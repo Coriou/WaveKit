@@ -245,6 +245,10 @@ import { openStationService } from "./core/station/station-service.js"
 import { resolveSpectrumBinsCap } from "./core/spectrum/bin-cap.js"
 import { createRecordingInventory } from "./core/recordings/inventory.js"
 import { wireRecordingCatalogue } from "./core/recordings/catalogue-wiring.js"
+import {
+	wireRecordingLinks,
+	type RecordingLinkWiring,
+} from "./core/activity/recording-links.js"
 import { openRecordingKeepService } from "./core/recordings/keep-service.js"
 import { lateBoundRecordingProtection } from "./core/recordings/late-bound-protection.js"
 import type {
@@ -1898,6 +1902,8 @@ async function main(): Promise<void> {
 		// WG9 req 2.5, 2.7: built before any decoder with the deletion decision bound late (the
 		// keep service needs the inventory); until it is bound every answer is "protected".
 		let recordingKeeps: RecordingKeepService | undefined
+		// Activity ↔ recording links (wired below, once Activity and the scanner exist).
+		let recordingLinks: RecordingLinkWiring | null = null
 		const recordingInventory = createRecordingInventory({
 			dsdFmeDirs: () => recordingDsdFmeDirs(decoderManager),
 			scannerRecordingsDir: () => {
@@ -1916,6 +1922,7 @@ async function main(): Promise<void> {
 			},
 			logger,
 			protection: lateBoundRecordingProtection(() => recordingKeeps),
+			activityEventId: key => recordingLinks?.activityEventId(key) ?? null,
 		})
 		// WG9 req 2.3-2.5: the keep store (<stateDir>/recording-keeps.json), loaded in both modes
 		// before any decoder exists, so no pruner runs while it loads; a bad file leaves it failed
@@ -2043,6 +2050,12 @@ async function main(): Promise<void> {
 			onEnvelope: env => {
 				dataGate.noteEnvelope(env)
 			},
+			// A call links to its file only where the catalogue lists it (configured dsd-fme
+			// decoders, never scanner probes).
+			callRecordings: decoderId =>
+				recordingDsdFmeDirs(decoderManager).some(
+					d => d.decoderId === decoderId,
+				),
 			aircraftIdentity: icao => {
 				const id = activityAircraft?.get(icao)?.identification
 				return id
@@ -3065,6 +3078,14 @@ async function main(): Promise<void> {
 				: {}),
 		})
 		own(67, unwireRecordingCatalogue)
+		// Kept scanner recordings become Activity rows; links of deleted files are removed.
+		recordingLinks = wireRecordingLinks({
+			links: activity.recordingLinks?.() ?? null,
+			catalogue: recordingInventory,
+			scanner,
+			logger,
+		})
+		own(67, () => recordingLinks?.close())
 		void recordingInventory.start?.()
 
 		// Analog transmissions from the live demodulator's squelch (WG1 req 3, 4).

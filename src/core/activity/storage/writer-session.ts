@@ -1,4 +1,6 @@
 import type {
+	ActivityLinkEvent,
+	ActivityLinkOp,
 	ActivityRetentionPolicy,
 	ActivityRetentionShare,
 	ActivityRetentionStats,
@@ -35,6 +37,12 @@ import {
 } from "./fair-share.js"
 import type { FairStepPlan } from "./fair-share.js"
 import type { ActivityLimits } from "./limits.js"
+import {
+	applyActivityLinks,
+	backfillRecordingLinks,
+	readRecordingLinks,
+} from "./links.js"
+import type { BackfillPending, LinkBackfillStep } from "./links.js"
 import type { BuiltActivityRow } from "./row.js"
 import type { SqliteDatabase } from "./sqlite.js"
 
@@ -61,6 +69,8 @@ export interface WriterWorkSuccess {
 	commit: CommitBatchSuccess
 	prune: PruneResult
 	snapshot: ActivityWorkerSnapshot
+	/** Recording links committed: rows stored with one, then the link ops applied after them. */
+	links: ActivityLinkEvent[]
 	note?: string
 }
 
@@ -84,7 +94,19 @@ export interface ActivitySession {
 	 * rowid scan (still correct) and is retried on the next open.
 	 */
 	buildFacetsIndex(): FacetsIndexBuild
-	write(rows: readonly BuiltActivityRow[], nowMs: number): WriterWorkResult
+	/** `links` are applied after the rows commit (applyActivityLinks). */
+	write(
+		rows: readonly BuiltActivityRow[],
+		nowMs: number,
+		links?: readonly ActivityLinkOp[],
+	): WriterWorkResult
+	/**
+	 * One chunk of the recording link backfill (links.ts); `done` once the store is linked.
+	 * The worker runs it on its serial chain until done, between writes.
+	 */
+	backfillLinks(): LinkBackfillStep
+	/** The links the parent remembers (newest first, at most ACTIVITY_LINKS_MAX). */
+	readLinks(): ActivityLinkEvent[]
 	checkpoint(reason: "threshold" | "close"): ActivityWorkerSnapshot
 	close(): void
 }
@@ -127,6 +149,8 @@ export function createActivitySession(
 	/** Wall time of the last seed scan (design F seed budget). */
 	let seedMs = 0
 	let seedScans = 0
+	/** Backfill: calls waiting for their late file row, between chunks. */
+	const backfillPending: BackfillPending = new Map()
 	const seed = (): boolean => {
 		const started = performance.now()
 		seedScans += 1
@@ -429,7 +453,13 @@ export function createActivitySession(
 			}
 			return build
 		},
-		write(rows, nowMs) {
+		backfillLinks() {
+			return backfillRecordingLinks(db, backfillPending)
+		},
+		readLinks() {
+			return readRecordingLinks(db)
+		},
+		write(rows, nowMs, linkOps = []) {
 			seedOnce()
 			if (throws > 0) {
 				throws -= 1
@@ -442,6 +472,14 @@ export function createActivitySession(
 			const commit = commitActivityBatch(db, rows)
 			if (!commit.ok) return { ok: false, message: commit.message }
 			if (counters.live) counters.addCommitted(rows, commit.committedIndexes)
+			const links = [...commit.linked]
+			let linkNote: string | undefined
+			try {
+				links.push(...applyActivityLinks(db, linkOps))
+			} catch (error) {
+				// The rows are committed; the link changes are dropped (logged by the store).
+				linkNote = `activity recording links failed: ${messageOf(error)}`
+			}
 			const previous = state.identity
 			let prune: PruneResult = {
 				deleted: 0,
@@ -451,7 +489,7 @@ export function createActivitySession(
 				rowCount: state.rows,
 				dbBytes: state.dbBytes,
 			}
-			let note: string | undefined = pendingNote
+			let note: string | undefined = pendingNote ?? linkNote
 			pendingNote = undefined
 			stepNote = undefined
 			try {
@@ -495,8 +533,8 @@ export function createActivitySession(
 			}
 			const shot = snapshot()
 			if (note !== undefined)
-				return { ok: true, commit, prune, snapshot: shot, note }
-			return { ok: true, commit, prune, snapshot: shot }
+				return { ok: true, commit, prune, snapshot: shot, links, note }
+			return { ok: true, commit, prune, snapshot: shot, links }
 		},
 		checkpoint(reason) {
 			refresh(reason)

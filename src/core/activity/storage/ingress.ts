@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto"
 import { ACTIVITY_RECORD_VERSION } from "./contract.js"
 import type {
+	ActivityRecordingLink,
 	AdmitRejection,
 	AdmitResult,
 	AnalogTransmissionAdmission,
 	IngestionGapPayload,
+	RecordingChangeAdmission,
 } from "./contract.js"
 import type { ActivityLimits } from "./limits.js"
-import { buildActivityRow } from "./row.js"
+import { buildActivityRow, rowRecordingId, rowWithRecording } from "./row.js"
 import type { BuiltActivityRow } from "./row.js"
 import { isTelemetryOutput } from "./telemetry.js"
 import { PositionCoalescer } from "./coalesce.js"
@@ -260,7 +262,11 @@ export class ActivityIngress {
 	 * entity's merged latest state (coalesce.ts) and must present that data;
 	 * a held reception keeps it until its entity's row is stored.
 	 */
-	admit(envelope: DecodeEnvelope, present?: CoalescePresenter): AdmitResult {
+	admit(
+		envelope: DecodeEnvelope,
+		present?: CoalescePresenter,
+		recording?: ActivityRecordingLink,
+	): AdmitResult {
 		if (this.closed) {
 			this.dropped.closed++
 			return { admitted: false, reason: "closed" }
@@ -292,6 +298,7 @@ export class ActivityIngress {
 			coalesce.commit,
 			floodKey,
 			now,
+			recording,
 		)
 		// An evicted entity's held receptions are flushed right away.
 		if (result.admitted) this.flushCoalesced(now)
@@ -305,6 +312,7 @@ export class ActivityIngress {
 		commit: (keepHeld?: boolean) => CoalesceUndo,
 		floodKey: FloodKey | undefined,
 		now: number,
+		recording?: ActivityRecordingLink,
 	): AdmitResult {
 		if (this.paused) return this.rejectEnvelope(envelope, "store-paused")
 		if (this.itemOverflow()) return this.rejectEnvelope(envelope, "queue-full")
@@ -315,7 +323,9 @@ export class ActivityIngress {
 			present,
 			merge,
 		)
-		const row = buildReceptionRow(stored)
+		const built = buildReceptionRow(stored)
+		const row =
+			recording === undefined ? built : rowWithRecording(built, recording)
 		if (this.byteOverflow(row)) {
 			this.refundTokens(envelope.decoderId)
 			this.noteDrop("queue-full", envelope.receivedAt, envelope.decoderId, now)
@@ -388,6 +398,96 @@ export class ActivityIngress {
 		this.queueBytes += row.recordBytes
 		this.admitted++
 		return { admitted: true }
+	}
+
+	/**
+	 * Admits one `recording-change` record (a scanner recording kept for good). The bucket is
+	 * `recording:<sourceId>`, so recordings have their own budget per source. Never telemetry.
+	 */
+	admitRecording(input: RecordingChangeAdmission): AdmitResult {
+		if (this.closed) {
+			this.dropped.closed++
+			return { admitted: false, reason: "closed" }
+		}
+		const now = this.now()
+		const bucket = `recording:${input.payload.sourceId ?? "unknown"}`
+		const receivedAt = input.receivedAt
+		if (this.paused) return this.rejectKey(receivedAt, bucket, "store-paused")
+		if (this.itemOverflow())
+			return this.rejectKey(receivedAt, bucket, "queue-full")
+		if (!this.takeTokens(bucket, now))
+			return this.rejectKey(receivedAt, bucket, "rate-limited")
+		let row: BuiltActivityRow
+		try {
+			row = buildActivityRow({
+				version: ACTIVITY_RECORD_VERSION,
+				eventId: randomUUID(),
+				commitSeq: "0",
+				producedAt: input.payload.finalizedAt,
+				receivedAt,
+				kind: "recording-change",
+				payload: input.payload,
+			})
+		} catch (error) {
+			this.refundTokens(bucket)
+			throw error
+		}
+		if (this.byteOverflow(row)) {
+			this.refundTokens(bucket)
+			this.noteDrop("queue-full", receivedAt, bucket, now)
+			return { admitted: false, reason: "queue-full" }
+		}
+		this.stageDueEpisode(now)
+		this.queue.push(row)
+		this.queueBytes += row.recordBytes
+		this.admitted++
+		return { admitted: true }
+	}
+
+	private rejectKey(
+		receivedAt: string,
+		key: string,
+		reason: "store-paused" | "queue-full" | "rate-limited",
+	): AdmitResult {
+		this.noteDrop(reason, receivedAt, key, this.now())
+		return { admitted: false, reason }
+	}
+
+	/**
+	 * A late call file: the call's `call_end` row (its `callId` ref) still queued (not yet sent to
+	 * the writer) gains the link in place. True when one did; false sends the change to the writer.
+	 */
+	linkQueuedCall(
+		decoderId: string,
+		callId: string,
+		recording: ActivityRecordingLink,
+	): boolean {
+		let found = false
+		for (let i = 0; i < this.queue.length; i++) {
+			const row = this.queue[i]
+			if (
+				row === undefined ||
+				row.kind !== "decoder-reception" ||
+				row.decoderId !== decoderId ||
+				!row.refs.some(ref => ref.type === "callId" && ref.value === callId)
+			)
+				continue
+			this.queue[i] = rowWithRecording(row, recording)
+			found = true
+		}
+		return found
+	}
+
+	/** Deleted files: queued rows linked to them lose the link (the writer handles stored ones). */
+	unlinkQueued(recordingIds: readonly string[]): void {
+		const ids = new Set(recordingIds)
+		for (let i = 0; i < this.queue.length; i++) {
+			const row = this.queue[i]
+			if (row === undefined) continue
+			const id = rowRecordingId(row)
+			if (id !== null && ids.has(id))
+				this.queue[i] = rowWithRecording(row, null)
+		}
 	}
 
 	/** Set by the store when the WAL cap is in force. */

@@ -472,6 +472,27 @@ event after retention, ended digital-voice calls (that decoder's directory, newe
 file passed the download's verification when it was indexed; `open(id)` verifies again at request
 time. At most 50 000 entries, newest first; past it only the oldest are left out.
 
+### Activity ↔ recording links
+
+One id joins an Activity row and its recording in both directions: the recording's keep key. The
+row carries it in its summary (`recording`) and in one `recordingId` ref; the catalogue item names
+the row (`activityEventId`, from the store's in-memory link index). Producers:
+
+- dsd-fme calls (`src/core/activity/ingress.ts`): a `call_end` of a decoder the catalogue lists
+  gets `dsd~<name>` and a `callId` ref; `wavFile` is reduced to the file name. A file found late
+  (`wavFileUpdate`) is a link change of that call's row: the store patches the row in its queue,
+  or the writer updates the stored row by its `callId` ref (`storage/links.ts`). It is never a row.
+- scanner analog recordings: the scanner emits `recording-kept` at the irrevocable commit of a file
+  (after any provisional hold), and `src/core/activity/recording-links.ts` admits one
+  `recording-change` row. A discarded file never commits, so it never gets a row.
+
+A link only changes `summary_json` and `activity_refs`; `record_json` and `record_bytes` stay as
+received, so retention counters never move. `recording-links.ts` also removes links of deleted
+files: a key missing from a complete catalogue for 90 s is unlinked. Stores written before links are
+backfilled on the writer thread after the open, 500 voice rows per transaction with writes between
+chunks, resumed from `store_meta.recordingLinkBackfill`; then the writer sends the full link set
+for the index.
+
 ### Dynamic Sample Rate Handling
 
 Sample rate changes, whether made through the API (the web app) or by a TunerRelay client such

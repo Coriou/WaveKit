@@ -97,6 +97,12 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `since`, `until`, `q`) and page fields (`revision`, `indexing`, `matched`, `counts`,
   `truncatedBefore`), the file download, Keep and delete. Not mocked: the `recordings` WebSocket
   notice.
+- Recording links, as the core: every dsd-fme call recording has its `call_end` Activity row and
+  every scanner analog recording a `recording-change` row (seeded ones within the 45 min history,
+  each new call as it lands), linked by the summary's `recording: { id, durationMs }` (the item's
+  `key`) and the item's `activityEventId`. `GET /api/activity` takes `hasRecording` and
+  `refs=recordingId:<key>` (other ref types match nothing: mock rows carry no refs), and the file
+  route plays a `dsd~<name>` key. Scanner DV files have no row, as on the core.
 - Scanner (`scanner.ts`, registered from `server.ts`): the core's `/api/scanner` routes with their
   schemas and error codes: status, settings (GET / PATCH with provenance and bounds), the EU
   bandplans (plus a `pager-431` plan), plan previews from a port of the core's planner (hops,

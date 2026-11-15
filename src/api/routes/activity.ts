@@ -64,6 +64,7 @@ const REF_TYPES = new Set<ActivityRefType>([
 	"jobId",
 	"probeId",
 	"channelId",
+	"recordingId",
 ])
 
 const SEARCH_PARAMS = new Set([
@@ -79,6 +80,7 @@ const SEARCH_PARAMS = new Set([
 	"entityKey",
 	"text",
 	"refs",
+	"hasRecording",
 	"order",
 	"limit",
 	"pageToken",
@@ -369,6 +371,7 @@ const PARAM_EXPECTED: Readonly<Record<string, string>> = Object.freeze({
 	entityKey: "string (repeat the parameter for several where allowed)",
 	text: "string, a full-text query",
 	refs: "comma-separated type:value references",
+	hasRecording: '"true" (only rows with a playable recording) or "false"',
 	order: '"asc" or "desc"',
 	limit: "positive integer within the page limit",
 	pageToken: "the pageToken string from the previous page",
@@ -722,6 +725,18 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 	else if (params["text"] !== undefined) {
 		throw new ActivityQueryError(
 			"text must be a string",
+			"ACTIVITY_QUERY_INVALID",
+			400,
+		)
+	}
+	const hasRecording = params["hasRecording"]
+	if (hasRecording === "true" || hasRecording === true)
+		query.hasRecording = true
+	else if (hasRecording === "false" || hasRecording === false)
+		query.hasRecording = false
+	else if (hasRecording !== undefined) {
+		throw new ActivityQueryError(
+			"hasRecording must be true or false",
 			"ACTIVITY_QUERY_INVALID",
 			400,
 		)

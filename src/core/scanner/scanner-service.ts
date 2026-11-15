@@ -262,6 +262,7 @@ import {
 	DiscoveryStore,
 	estimateFrequencyError,
 	type DiscoveryFilter,
+	type RecordingCommitPlan,
 	type StoreChange,
 } from "./store/discovery-store.js"
 import {
@@ -842,6 +843,22 @@ function definitelyNotAnalogFm(live: LiveObservation): boolean {
 		nonAnalogFmClass(live.classification.class) &&
 		(live.classification.tier !== "spectral" || live.decoded)
 	)
+}
+
+/** `recording-kept` event data (ScannerService.emitRecordingKept). */
+export interface ScannerRecordingKept {
+	/** The scanner recording id (`<discoveryId>~<file>.wav`); its keep key is `scan:<id>`. */
+	recordingId: string
+	/** The discovery whose folder holds the file. */
+	discoveryId: string
+	observationId: string
+	sourceId: string | null
+	frequencyHz: number | null
+	/** ISO start of the recorded observation. */
+	observationStartedAt: string
+	durationMs: number
+	/** Epoch ms of the commit. */
+	at: number
 }
 
 export class ScannerService extends EventEmitter {
@@ -1590,7 +1607,14 @@ export class ScannerService extends EventEmitter {
 				buildCommitPlan: operationId =>
 					this.store.buildRecordingCommitPlan(operationId),
 				commitPlanCurrent: plan => this.store.recordingCommitPlanCurrent(plan),
-				publishCommit: plan => this.store.publishRecordingCommit(plan),
+				publishCommit: plan => {
+					try {
+						this.store.publishRecordingCommit(plan)
+					} finally {
+						// The commit is irrevocable here (after any provisional hold): never a discarded file.
+						this.emitRecordingKept(plan)
+					}
+				},
 			})
 			this.widebandAnalog = new WidebandAnalogRecorder({
 				engine: sourceId => this.spectrum.engine(sourceId),
@@ -4872,6 +4896,34 @@ export class ScannerService extends EventEmitter {
 			if (written) this.store.setEvidenceFlags(live.discoveryId, { psd: true })
 		} finally {
 			release()
+		}
+	}
+
+	/**
+	 * `recording-kept`: an analog recording committed for good (its provisional hold, if any, is
+	 * over and the file kept). A file discarded at its finish or after its hold never commits, so it
+	 * is never announced. Activity writes its `recording-change` row from this.
+	 */
+	private emitRecordingKept(plan: RecordingCommitPlan): void {
+		const m = plan.metadata
+		const out = m.expectedOutput
+		const kept: ScannerRecordingKept = {
+			recordingId: m.alias,
+			discoveryId: m.discoveryId,
+			observationId: m.observationId,
+			sourceId: m.binding.sourceId,
+			frequencyHz: m.binding.targetHz ?? plan.observation.centerHz,
+			observationStartedAt: plan.observation.startedAt,
+			durationMs: Math.round((out.outputFrames * 1000) / out.sampleRateHz),
+			at: this.now(),
+		}
+		try {
+			this.emit("recording-kept", kept)
+		} catch (err) {
+			this.log.warn(
+				{ err: safeErrorFields(err) },
+				"Recording kept listener failed",
+			)
 		}
 	}
 

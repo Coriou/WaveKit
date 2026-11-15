@@ -3,11 +3,15 @@ import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { Worker } from "node:worker_threads"
 import type {
+	ActivityLinkEvent,
+	ActivityLinkOp,
+	ActivityRecordingLink,
 	ActivityRetentionStats,
 	ActivityStoreHandle,
 	ActivityStoreStats,
 	AdmitResult,
 	AnalogTransmissionAdmission,
+	RecordingChangeAdmission,
 	StoreIdentity,
 } from "./contract.js"
 import {
@@ -19,6 +23,7 @@ import {
 	errnoCode,
 } from "./errors.js"
 import { ActivityIngress } from "./ingress.js"
+import { ACTIVITY_LINK_OPS_MAX, ACTIVITY_LINKS_MAX } from "./links.js"
 import type { ActivityLimits } from "./limits.js"
 import { resolveActivityLimits } from "./limits.js"
 import type { ActivityLock } from "./lock.js"
@@ -75,12 +80,24 @@ export interface ActivityWriter {
 	onGone(listener: () => void): void
 	onSeeded(listener: (snapshot: ActivityWorkerSnapshot) => void): void
 	onIndexed(listener: (snapshot: ActivityWorkerSnapshot) => void): void
+	/** Unsolicited link messages (backfill chunks, then the full set: `reset`). */
+	onLinks?(listener: (message: WriterLinksMessage) => void): void
 	write(
 		rows: readonly BuiltActivityRow[],
 		nowMs: number,
+		links?: readonly ActivityLinkOp[],
 	): Promise<WriterWorkResult>
 	checkpoint(reason: "threshold" | "close"): Promise<ActivityWorkerSnapshot>
 	close(): Promise<void>
+}
+
+/** An unsolicited `links` message of the writer (writer-protocol.ts). */
+export interface WriterLinksMessage {
+	reset: boolean
+	events: readonly ActivityLinkEvent[]
+	examined?: number
+	ms?: number
+	error?: string
 }
 
 interface OpenWorkerRequest {
@@ -95,9 +112,16 @@ interface OpenWorkerRequest {
 	seedThrows?: boolean
 }
 
+interface WriteWorkerRequest {
+	type: "write"
+	rows: BuiltActivityRow[]
+	nowMs: number
+	links?: ActivityLinkOp[]
+}
+
 type WorkerRequestBody =
 	| OpenWorkerRequest
-	| { type: "write"; rows: BuiltActivityRow[]; nowMs: number }
+	| WriteWorkerRequest
 	| { type: "checkpoint"; reason: "threshold" | "close" }
 	| { type: "close" }
 
@@ -181,6 +205,10 @@ export async function openActivityStore(
 			}
 			// Inline (tests, harnesses): the worker's post-open facets index build, on the caller.
 			session.buildFacetsIndex()
+			// and its recording link backfill (to the end) and link load.
+			for (let step = session.backfillLinks(); !step.done; )
+				step = session.backfillLinks()
+			const links = session.readLinks()
 			const writer = options.inlineWriter?.(session)
 			const store = new ActivityStore(
 				dbPath,
@@ -192,6 +220,7 @@ export async function openActivityStore(
 				writer,
 				session.snapshot(),
 			)
+			store.loadLinks(links)
 			store.restrictFiles()
 			return store
 		} catch (error) {
@@ -238,6 +267,9 @@ export class ActivityWriterClient implements ActivityWriter {
 	private lastSeeded: ActivityWorkerSnapshot | undefined
 	private indexed: ((snapshot: ActivityWorkerSnapshot) => void) | undefined
 	private lastIndexed: ActivityWorkerSnapshot | undefined
+	private linksListener: ((message: WriterLinksMessage) => void) | undefined
+	/** Link messages that arrived before the listener (replayed to it in order). */
+	private earlyLinks: WriterLinksMessage[] = []
 	private readonly pending = new Map<
 		number,
 		{
@@ -335,9 +367,15 @@ export class ActivityWriterClient implements ActivityWriter {
 	write(
 		rows: readonly BuiltActivityRow[],
 		nowMs: number,
+		links: readonly ActivityLinkOp[] = [],
 	): Promise<WriterWorkResult> {
 		return this.request(
-			{ type: "write", rows: [...rows], nowMs },
+			{
+				type: "write",
+				rows: [...rows],
+				nowMs,
+				...(links.length > 0 ? { links: [...links] } : {}),
+			},
 			this.writeTimeoutMs,
 			() => new ActivityWriteTimeoutError(),
 		).then(response => {
@@ -423,8 +461,28 @@ export class ActivityWriterClient implements ActivityWriter {
 		if (this.lastIndexed !== undefined) listener(this.lastIndexed)
 	}
 
+	onLinks(listener: (message: WriterLinksMessage) => void): void {
+		this.linksListener = listener
+		const early = this.earlyLinks
+		this.earlyLinks = []
+		for (const message of early) listener(message)
+	}
+
 	private onMessage(raw: unknown): void {
 		if (!isActivityWorkerResponse(raw)) return
+		if (raw.type === "links") {
+			const message: WriterLinksMessage = {
+				reset: raw.reset,
+				events: raw.events,
+				...(raw.examined !== undefined ? { examined: raw.examined } : {}),
+				...(raw.ms !== undefined ? { ms: raw.ms } : {}),
+				...(raw.error !== undefined ? { error: raw.error } : {}),
+			}
+			if (this.linksListener) this.linksListener(message)
+			// Bounded: the writer posts one message per backfill chunk, then the reset.
+			else if (this.earlyLinks.length < 4_096) this.earlyLinks.push(message)
+			return
+		}
 		if (raw.type === "seeded") {
 			this.lastSeeded = raw.snapshot
 			this.seeded?.(raw.snapshot)
@@ -490,6 +548,22 @@ class ActivityStore implements ActivityStoreHandle {
 	private coalesceTimer: ReturnType<typeof setTimeout> | undefined
 	private flight: Promise<void> | undefined
 	private closing: Promise<void> | undefined
+	/** Link changes waiting for the next write (at most ACTIVITY_LINK_OPS_MAX). */
+	private linkOps: ActivityLinkOp[] = []
+	/** Link changes in the write in flight (queued again in front when it fails). */
+	private linkOpsInFlight: ActivityLinkOp[] = []
+	private linkOpsDropped = 0
+	/** Recording key → its newest linked row, at most ACTIVITY_LINKS_MAX (oldest seq out). */
+	private readonly links = new Map<string, { eventId: string; seq: bigint }>()
+	/** Smallest seq in `links` (a prune past it drops entries). */
+	private linksMinSeq: bigint | null = null
+	private readonly linkListeners = new Set<
+		(events: readonly ActivityLinkEvent[]) => void
+	>()
+	private backfillExamined = 0
+	private backfillLinked = 0
+	private backfillChunks = 0
+	private backfillMaxChunkMs = 0
 
 	constructor(
 		dbPath: string,
@@ -526,6 +600,159 @@ class ActivityStore implements ActivityStoreHandle {
 			// An armed pause timer stays: its retry flushes the held rows once unpaused.
 			if (this.ingress.paused) this.armPause()
 		})
+		this.threaded?.onLinks?.(message => {
+			this.onWriterLinks(message)
+		})
+	}
+
+	/** The writer's full link set (open, inline execution): replaces the index. */
+	loadLinks(events: readonly ActivityLinkEvent[]): void {
+		this.onWriterLinks({ reset: true, events })
+	}
+
+	private onWriterLinks(message: WriterLinksMessage): void {
+		if (message.error !== undefined)
+			this.logger.warn(
+				{ err: message.error },
+				"activity recording link backfill failed; it resumes on the next open",
+			)
+		if (message.examined !== undefined) {
+			this.backfillExamined += message.examined
+			this.backfillLinked += message.events.length
+			this.backfillChunks += 1
+			this.backfillMaxChunkMs = Math.max(
+				this.backfillMaxChunkMs,
+				message.ms ?? 0,
+			)
+		}
+		if (message.reset) {
+			this.links.clear()
+			this.linksMinSeq = null
+			if (this.backfillExamined > 0)
+				this.logger.info(
+					{
+						examined: this.backfillExamined,
+						linked: this.backfillLinked,
+						chunks: this.backfillChunks,
+						maxChunkMs: Math.round(this.backfillMaxChunkMs),
+					},
+					"activity recording links backfilled",
+				)
+		}
+		this.applyLinkEvents(message.events)
+	}
+
+	private applyLinkEvents(events: readonly ActivityLinkEvent[]): void {
+		if (events.length === 0) return
+		for (const event of events) {
+			let seq: bigint
+			try {
+				seq = BigInt(event.seq)
+			} catch {
+				continue
+			}
+			const known = this.links.get(event.recordingId)
+			if (event.linked) {
+				if (known !== undefined && known.seq > seq) continue
+				this.links.delete(event.recordingId)
+				this.links.set(event.recordingId, { eventId: event.eventId, seq })
+				if (this.linksMinSeq === null || seq < this.linksMinSeq)
+					this.linksMinSeq = seq
+			} else if (known?.eventId === event.eventId) {
+				this.links.delete(event.recordingId)
+			}
+		}
+		this.boundLinks()
+		for (const listener of [...this.linkListeners]) {
+			try {
+				listener(events)
+			} catch (error) {
+				this.logger.error({ err: error }, "activity link listener failed")
+			}
+		}
+	}
+
+	/** Past ACTIVITY_LINKS_MAX, the links of the oldest rows are forgotten (5 % at once). */
+	private boundLinks(): void {
+		if (this.links.size <= ACTIVITY_LINKS_MAX) return
+		const keep = Math.floor(ACTIVITY_LINKS_MAX * 0.95)
+		const sorted = [...this.links].sort((a, b) =>
+			a[1].seq > b[1].seq ? -1 : a[1].seq < b[1].seq ? 1 : 0,
+		)
+		this.links.clear()
+		for (const [key, entry] of sorted.slice(0, keep)) this.links.set(key, entry)
+		this.linksMinSeq = sorted[keep - 1]?.[1].seq ?? null
+	}
+
+	/** A prefix prune removed every row up to the watermark: their links go with them. */
+	private dropPrunedLinks(): void {
+		const min = this.linksMinSeq
+		if (min === null) return
+		const watermark = BigInt(this.identityCache.pruneWatermark)
+		if (watermark < min) return
+		let next: bigint | null = null
+		for (const [key, entry] of this.links) {
+			if (entry.seq <= watermark) this.links.delete(key)
+			else if (next === null || entry.seq < next) next = entry.seq
+		}
+		this.linksMinSeq = next
+	}
+
+	recordingEventId(recordingId: string): string | null {
+		return this.links.get(recordingId)?.eventId ?? null
+	}
+
+	linkedRecordings(): readonly string[] {
+		return [...this.links.keys()].reverse()
+	}
+
+	onLinks(
+		listener: (events: readonly ActivityLinkEvent[]) => void,
+	): () => void {
+		this.linkListeners.add(listener)
+		return () => {
+			this.linkListeners.delete(listener)
+		}
+	}
+
+	link(op: ActivityLinkOp): void {
+		if (this.stopped) return
+		if (op.type === "link-call") {
+			// Still queued: stored with the link, as if the file had been there at call end.
+			if (this.ingress.linkQueuedCall(op.decoderId, op.callId, op.recording))
+				return
+		} else {
+			if (op.recordingIds.length === 0) return
+			this.ingress.unlinkQueued(op.recordingIds)
+		}
+		this.linkOps.push(op)
+		while (this.linkOps.length > ACTIVITY_LINK_OPS_MAX) {
+			this.linkOps.shift()
+			this.linkOpsDropped += 1
+			if (this.linkOpsDropped === 1 || this.linkOpsDropped % 1_000 === 0)
+				this.logger.warn(
+					{ dropped: this.linkOpsDropped },
+					"activity recording link changes dropped (writer backlog)",
+				)
+		}
+		this.onQueued()
+	}
+
+	/** Link changes for the next write: the ones queued so far, in order. */
+	private takeLinkOps(): ActivityLinkOp[] {
+		const ops = this.linkOps
+		this.linkOps = []
+		this.linkOpsInFlight = ops
+		return ops
+	}
+
+	/** The write carrying them failed: they go back in front, still bounded. */
+	private requeueLinkOps(): void {
+		if (this.linkOpsInFlight.length === 0) return
+		this.linkOps = [...this.linkOpsInFlight, ...this.linkOps].slice(
+			-ACTIVITY_LINK_OPS_MAX,
+		)
+		this.linkOpsInFlight = []
 	}
 
 	identity(): StoreIdentity {
@@ -543,10 +770,17 @@ class ActivityStore implements ActivityStoreHandle {
 		}
 	}
 
-	/** `present` runs only for a reception that is kept; see ActivityIngress.admit. */
-	admit(envelope: DecodeEnvelope, present?: CoalescePresenter): AdmitResult {
+	/**
+	 * `present` runs only for a reception that is kept; see ActivityIngress.admit. `recording`
+	 * links the stored row to its recording.
+	 */
+	admit(
+		envelope: DecodeEnvelope,
+		present?: CoalescePresenter,
+		recording?: ActivityRecordingLink,
+	): AdmitResult {
 		const before = this.ingress.admitted
-		const result = this.ingress.admit(envelope, present)
+		const result = this.ingress.admit(envelope, present, recording)
 		this.armCoalesceTimer()
 		// A held entity row can be queued even when this reception is held.
 		if (result.admitted || this.ingress.admitted !== before) {
@@ -573,6 +807,17 @@ class ActivityStore implements ActivityStoreHandle {
 			result.reason !== "closed" &&
 			result.reason !== "coalesced"
 		) {
+			this.armGapTimer()
+		}
+		return result
+	}
+
+	admitRecording(input: RecordingChangeAdmission): AdmitResult {
+		const result = this.ingress.admitRecording(input)
+		if (result.admitted) {
+			this.onQueued()
+			if (!this.ingress.hasOpenEpisode()) this.clearGapTimer()
+		} else if (result.reason !== "closed") {
 			this.armGapTimer()
 		}
 		return result
@@ -673,6 +918,11 @@ class ActivityStore implements ActivityStoreHandle {
 		)
 	}
 
+	/** Rows or link changes wait for a write. */
+	private hasWork(): boolean {
+		return this.ingress.pendingCount() > 0 || this.linkOps.length > 0
+	}
+
 	private flushNow(): void {
 		this.clearBatchTimer()
 		if (this.inline) this.flushInline(false)
@@ -695,10 +945,11 @@ class ActivityStore implements ActivityStoreHandle {
 					this.limits.batchMaxItems,
 					this.limits.batchMaxBytes,
 				)
-				if (batch.length === 0) break
+				if (batch.length === 0 && this.linkOps.length === 0) break
+				const ops = this.takeLinkOps()
 				let result: WriterWorkResult
 				try {
-					result = session.write(batch, this.now())
+					result = session.write(batch, this.now(), ops)
 				} catch (error) {
 					if (!this.stopped) {
 						this.nackInFlight()
@@ -718,7 +969,7 @@ class ActivityStore implements ActivityStoreHandle {
 				this.apply(batch, result)
 				this.restrictFiles()
 				if (force || this.needsFlush || this.shouldFlushSoon()) continue
-				if (!this.stopped && this.ingress.pendingCount() > 0) this.armTimer()
+				if (!this.stopped && this.hasWork()) this.armTimer()
 				break
 			}
 		} finally {
@@ -751,7 +1002,7 @@ class ActivityStore implements ActivityStoreHandle {
 				}
 				if (step === "empty") break
 				if (force || this.needsFlush || this.shouldFlushSoon()) continue
-				if (!this.stopped && this.ingress.pendingCount() > 0) this.armTimer()
+				if (!this.stopped && this.hasWork()) this.armTimer()
 				break
 			}
 		} finally {
@@ -769,9 +1020,10 @@ class ActivityStore implements ActivityStoreHandle {
 			this.limits.batchMaxItems,
 			this.limits.batchMaxBytes,
 		)
-		if (batch.length === 0) return "empty"
+		if (batch.length === 0 && this.linkOps.length === 0) return "empty"
+		const ops = this.takeLinkOps()
 		try {
-			const result = await client.write(batch, this.now())
+			const result = await client.write(batch, this.now(), ops)
 			if (!result.ok) {
 				this.nackInFlight()
 				this.logger.error({ err: result.message }, "activity write failed")
@@ -809,7 +1061,11 @@ class ActivityStore implements ActivityStoreHandle {
 		this.ingress.ack(done)
 		this.committed += result.commit.committed
 		this.duplicates += result.commit.duplicates
+		this.linkOpsInFlight = []
 		this.adopt(result.snapshot)
+		this.dropPrunedLinks()
+		// Older writers' replies (test doubles) carry no links.
+		this.applyLinkEvents(result.links ?? [])
 		this.publish()
 		if (this.ingress.paused) this.armPause()
 		else this.clearPause()
@@ -841,6 +1097,7 @@ class ActivityStore implements ActivityStoreHandle {
 
 	/** Receptions held again only a timer can carry: the source may stay silent. */
 	private nackInFlight(): void {
+		this.requeueLinkOps()
 		this.ingress.nack()
 		this.armGapTimer()
 		this.armCoalesceTimer()
@@ -939,7 +1196,7 @@ class ActivityStore implements ActivityStoreHandle {
 			this.adopt(snapshot)
 			if (!this.ingress.paused) {
 				this.clearPause()
-				if (this.ingress.pendingCount() > 0) this.onQueued()
+				if (this.hasWork()) this.onQueued()
 				return
 			}
 		} catch (error) {
@@ -981,7 +1238,10 @@ class ActivityStore implements ActivityStoreHandle {
 			if (this.flight) await this.flight
 			const deadline = Date.now() + this.limits.closeTimeoutMs
 			const drain = async (): Promise<void> => {
-				while (this.ingress.hasPending() && Date.now() < deadline) {
+				while (
+					(this.ingress.hasPending() || this.linkOps.length > 0) &&
+					Date.now() < deadline
+				) {
 					if (this.inline) {
 						if (!this.flushInline(true)) break
 					} else {

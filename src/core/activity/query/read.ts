@@ -16,6 +16,7 @@ import {
 	ActivityQueryInvalidError,
 	ActivityReaderFailedError,
 } from "./errors.js"
+import { recordWithoutRecordingPath } from "../recording-path.js"
 import { bindSeq, formatSeq, MAX_SEQ, parseSeq, seqFromSqlite } from "./seq.js"
 import type { SqlDatabase, SqlValue } from "./sqlite.js"
 import { readTrails, type TrailsReadInput } from "./trails.js"
@@ -168,11 +169,23 @@ function appendFilters(
 		params.push(query.entityKey)
 	}
 	for (const ref of query.refs) {
+		// A recording key names one or two rows: read them from the refs key (ref_type, ref_value,
+		// seq) instead of probing every newer row (280 ms for no match on 250 000 rows). Other
+		// refs (a job's id) can match most rows, where the per-row probe stops sooner.
 		where.push(
-			"EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = ? AND activity_refs.ref_value = ?)",
+			ref.type === "recordingId"
+				? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = ? AND ref_value = ?)"
+				: "EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = ? AND activity_refs.ref_value = ?)",
 		)
 		params.push(ref.type, ref.value)
 	}
+	// The (ref_type, ref_value, seq) key lists every linked row: one ref per link.
+	if (query.hasRecording !== null)
+		where.push(
+			query.hasRecording
+				? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')"
+				: "seq NOT IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')",
+		)
 	if (query.fts.kind === "impossible") where.push("1 = 0")
 	else if (query.fts.kind === "match") {
 		where.push(
@@ -243,7 +256,10 @@ function readRecord(seq: bigint, json: unknown): ActivityRecord {
 	for (const [key, value] of Object.entries(parsed)) {
 		if (key !== "commitSeq") rest[key] = value
 	}
-	return { ...rest, commitSeq: formatSeq(seq) } as ActivityRecord
+	return recordWithoutRecordingPath({
+		...rest,
+		commitSeq: formatSeq(seq),
+	}) as unknown as ActivityRecord
 }
 
 function search(

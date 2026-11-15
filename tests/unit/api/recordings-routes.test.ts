@@ -155,12 +155,23 @@ describe("recordingRoutes", () => {
 		"%2Fetc%2Fpasswd",
 		"scan:d_1~a%2Fb.wav",
 		"scan:d_1~a%5Cb.wav",
+		"dsd~..%2F..%2Fetc%2Fpasswd",
+		"dsd~20260101_120000_00001_a%2Fb.wav",
+		"dsd~notes.wav",
 		"nonsense",
 	])("rejects invalid id %s with 404 and no open", async id => {
 		const res = await get(`/api/recordings/${id}/file`)
 		expect(res.statusCode).toBe(404)
 		expect(openRec).not.toHaveBeenCalled()
 		expect(res.body).not.toContain("passwd")
+	})
+
+	it("serves a dsd-fme call by its stable key (an Activity row's recording id)", async () => {
+		const key = "dsd~20260101_120000_00001_call.wav"
+		const res = await get(`/api/recordings/${encodeURIComponent(key)}/file`)
+		expect(res.statusCode).toBe(200)
+		expect(openRec).toHaveBeenCalledWith(key)
+		expect(res.rawPayload.equals(BYTES)).toBe(true)
 	})
 
 	it("404s when open returns null", async () => {

@@ -6,7 +6,7 @@ import {
 	ACTIVITY_SCHEMA_VERSION,
 	ACTIVITY_SCHEMA_V1,
 } from "./contract.js"
-import type { StoreIdentity } from "./contract.js"
+import type { ActivityLinkEvent, StoreIdentity } from "./contract.js"
 import {
 	MAX_INDEXED_TEXT_BYTES,
 	MAX_RECORD_BYTES,
@@ -33,6 +33,8 @@ export interface CommitBatchSuccess {
 	committed: number
 	duplicates: number
 	writeFailed: number
+	/** Committed rows that carry a recording link (their `recordingId` ref). */
+	linked: ActivityLinkEvent[]
 	committedEventIds: string[]
 	/**
 	 * Batch index of each committed row, parallel to committedEventIds. A skipped or
@@ -150,6 +152,7 @@ export function commitActivityBatch(
 			committed: 0,
 			duplicates: 0,
 			writeFailed: 0,
+			linked: [],
 			committedEventIds: [],
 			committedIndexes: [],
 			duplicateEventIds: [],
@@ -170,6 +173,7 @@ export function commitActivityBatch(
 	const committedIndexes: number[] = []
 	const duplicateEventIds: string[] = []
 	const writeFailedEventIds: string[] = []
+	const linked: ActivityLinkEvent[] = []
 	db.exec("BEGIN IMMEDIATE")
 	try {
 		for (const [index, row] of rows.entries()) {
@@ -203,7 +207,16 @@ export function commitActivityBatch(
 				)
 				const seq = inserted.lastInsertRowid
 				fts.run(seq, text)
-				for (const item of row.refs) ref.run(seq, item.type, item.value)
+				for (const item of row.refs) {
+					ref.run(seq, item.type, item.value)
+					if (item.type === "recordingId")
+						linked.push({
+							recordingId: item.value,
+							eventId: row.eventId,
+							seq: String(seq),
+							linked: true,
+						})
+				}
 				committedEventIds.push(row.eventId)
 				committedIndexes.push(index)
 			} catch (error) {
@@ -227,6 +240,7 @@ export function commitActivityBatch(
 		committed: committedEventIds.length,
 		duplicates: duplicateEventIds.length,
 		writeFailed: writeFailedEventIds.length,
+		linked,
 		committedEventIds,
 		committedIndexes,
 		duplicateEventIds,
@@ -764,6 +778,8 @@ function writeSchema(
 			["cursorKey", cursorKey.toString("hex")],
 			["holeWatermark", "0"],
 			["holeGeneration", "0"],
+			// A new store has no rows from before recording links: nothing to backfill.
+			["recordingLinkBackfill", "done"],
 		]
 		for (const [key, value] of rows) insert.run(key, value)
 		db.exec("COMMIT")
@@ -860,6 +876,8 @@ function ensureHoleMeta(db: SqliteDatabase): void {
 	)
 	insert.run("holeWatermark")
 	insert.run("holeGeneration")
+	// A store written before recording links: its call rows are linked from seq 0 (links.ts).
+	insert.run("recordingLinkBackfill")
 }
 
 function parseSeq(value: string, name: string): string {

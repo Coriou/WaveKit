@@ -11,7 +11,14 @@ import {
 import { fitAircraftIdentity } from "./presentation/budget.js"
 import { presentDecoderOutputResult } from "./presentation/registry.js"
 import { resolveProvenance } from "./provenance/resolve.js"
+import { recordingBaseName } from "./recording-path.js"
 import type { CoalesceMerge } from "./storage/coalesce.js"
+import type {
+	ActivityLinkOp,
+	ActivityRecordingLink,
+} from "./storage/contract.js"
+import { recordingLinkOf } from "./storage/row.js"
+import { dsdFmeKeepKey } from "../recordings/contract.js"
 import type {
 	ActivityProvenanceLookup,
 	DecodeAircraftIdentity,
@@ -80,8 +87,21 @@ export interface ActivityIngressOptions {
 	 * Receives the presentation-free envelope and a presenter. The store calls
 	 * the presenter only once it has decided to keep the reception (after
 	 * coalescing and admission), so dropped receptions are never presented.
+	 * `recording`: the row's playable recording (a dsd-fme call's file).
 	 */
-	sink: (envelope: DecodeEnvelope, present: ActivityPresenter) => void
+	sink: (
+		envelope: DecodeEnvelope,
+		present: ActivityPresenter,
+		recording?: ActivityRecordingLink,
+	) => void
+	/**
+	 * True when this decoder instance's call files are listed by the recordings catalogue (a
+	 * configured dsd-fme decoder, not a scanner probe, whose files move into discovery folders).
+	 * Only such calls link to `dsd~<name>`. Omitted: none.
+	 */
+	callRecordings?: ((decoderId: string) => boolean) | null
+	/** A call's file found after its `call_end` row (`wavFileUpdate`): the link change. */
+	link?: ((op: ActivityLinkOp) => void) | null
 	logger: Logger
 	now?: () => Date
 	randomUUID?: () => string
@@ -99,6 +119,57 @@ export interface ActivityIngressOptions {
 }
 
 const ICAO_ENTITY = /^icao:([0-9A-F]{6})$/
+
+/** A call id as envelope refs accept it (envelope.ts): 1 to 128 characters. */
+function callIdOf(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 && value.length <= 128
+		? value
+		: undefined
+}
+
+/** What a `call_end` output says about its recording (dsd-fme's `wavFile` and flags). */
+interface CallEndFile {
+	callId: string | undefined
+	/** A file found after the call's row (`flags.wavFileUpdate`): never a row of its own. */
+	late: boolean
+	/** The output's data with `wavFile` reduced to a call file name (or removed): never a path. */
+	data: unknown
+	/** The `dsd~<name>` key of a call file name, or null. */
+	key: string | null
+	durationMs: unknown
+}
+
+function callEndFile(output: DecoderOutput): CallEndFile | null {
+	if (output.type !== "call_end") return null
+	const data = output.data
+	if (typeof data !== "object" || data === null || Array.isArray(data))
+		return null
+	const body = data as Record<string, unknown>
+	const flags = body["flags"]
+	const late =
+		typeof flags === "object" &&
+		flags !== null &&
+		(flags as Record<string, unknown>)["wavFileUpdate"] === true
+	const wav = body["wavFile"]
+	let key: string | null = null
+	let clean: unknown = data
+	if (typeof wav === "string") {
+		const name = recordingBaseName(wav)
+		key = dsdFmeKeepKey(name)
+		const rest: Record<string, unknown> = {}
+		for (const [field, value] of Object.entries(body))
+			if (field !== "wavFile") rest[field] = value
+		// A name that is not a call file name (or a path elsewhere) is not kept at all.
+		clean = key === null ? rest : { ...rest, wavFile: name }
+	}
+	return {
+		callId: callIdOf(body["callId"]),
+		late,
+		data: clean,
+		key,
+		durationMs: body["duration"],
+	}
+}
 
 /** A clean identity string, or undefined (wrong type, blank, control characters, over 64 bytes). */
 function identityText(value: unknown): string | undefined {
@@ -191,6 +262,8 @@ export function createActivityIngress(
 	const sink = options.sink
 	const lookup = options.resolveProvenance ?? null
 	const identityLookup = options.aircraftIdentity ?? null
+	const callRecordings = options.callRecordings ?? null
+	const linkSink = options.link ?? null
 	const log = createComponentLogger(options.logger, "ActivityIngress")
 	const counts: ActivityIngressCounters = {
 		published: 0,
@@ -236,8 +309,49 @@ export function createActivityIngress(
 		logFailure(decoderId, "provenance", err, at)
 	}
 
+	/** The call's recording when the catalogue lists this decoder's files; never throws. */
+	const callRecording = (
+		decoderId: string,
+		file: CallEndFile,
+	): ActivityRecordingLink | null => {
+		if (file.key === null || callRecordings === null) return null
+		try {
+			if (!callRecordings(decoderId)) return null
+		} catch {
+			return null
+		}
+		return recordingLinkOf(file.key, file.durationMs)
+	}
+
 	return {
-		publish(decoderId, decoderType, output) {
+		publish(decoderId, decoderType, sourceOutput) {
+			// dsd-fme calls: the file is a link, never a row or a path. A file found after the call's
+			// row updates that row instead of adding one.
+			const file = callEndFile(sourceOutput)
+			if (file?.late === true) {
+				const recording = callRecording(decoderId, file)
+				if (
+					recording !== null &&
+					file.callId !== undefined &&
+					linkSink !== null
+				)
+					try {
+						linkSink({
+							type: "link-call",
+							decoderId,
+							callId: file.callId,
+							recording,
+						})
+					} catch (err) {
+						note(decoderId, "sink", err, Date.now())
+					}
+				return
+			}
+			const output: DecoderOutput =
+				file === null || file.data === sourceOutput.data
+					? sourceOutput
+					: { ...sourceOutput, data: file.data }
+			const recording = file === null ? null : callRecording(decoderId, file)
 			let eventId: string
 			let receivedAt: Date
 			try {
@@ -267,6 +381,10 @@ export function createActivityIngress(
 				decoderId,
 				...(decoderType === undefined ? {} : { decoderType }),
 				provenance: provenance ?? { sourceId: null, frequency: null },
+				// A call's end row is found again by its call id (a late file, links.ts).
+				...(file?.callId === undefined
+					? {}
+					: { refs: { callId: file.callId } }),
 			}
 			let envelope: DecodeEnvelope
 			try {
@@ -371,7 +489,8 @@ export function createActivityIngress(
 				}
 			}
 			try {
-				sink(envelope, present)
+				if (recording === null) sink(envelope, present)
+				else sink(envelope, present, recording)
 			} catch (err) {
 				note(decoderId, "sink", err, receivedAt.getTime())
 				return

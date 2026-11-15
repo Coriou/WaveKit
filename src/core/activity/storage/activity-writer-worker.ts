@@ -61,7 +61,7 @@ async function dispatch(raw: unknown): Promise<void> {
 			post({
 				id: raw.id,
 				type: "wrote",
-				result: session.write(raw.rows, raw.nowMs),
+				result: session.write(raw.rows, raw.nowMs, raw.links ?? []),
 			})
 			return
 		}
@@ -162,6 +162,56 @@ async function openSession(
 		.catch(() => {
 			// Never reject the chain; buildFacetsIndex reports its own failures.
 		})
+	// Recording links: the backfill of rows stored before links, one chunk per chain task, then the
+	// full link set for the parent's index. Each next chunk is queued from setImmediate, after the
+	// poll phase has queued the writes that arrived during the chunk: a write waits for at most
+	// one chunk (a chunk queued from the chunk's own continuation would run before any message).
+	const backfill = (): void => {
+		chain = chain
+			.then(() => {
+				if (session !== opened) return
+				let step: ReturnType<ActivitySession["backfillLinks"]>
+				const started = performance.now()
+				try {
+					step = opened.backfillLinks()
+				} catch (error) {
+					post({
+						id: 0,
+						type: "links",
+						reset: false,
+						events: [],
+						error: error instanceof Error ? error.message : String(error),
+					})
+					loadLinks()
+					return
+				}
+				if (step.events.length > 0 || step.examined > 0)
+					post({
+						id: 0,
+						type: "links",
+						reset: false,
+						events: step.events,
+						examined: step.examined,
+						ms: performance.now() - started,
+					})
+				if (step.done) loadLinks()
+				else setImmediate(backfill)
+			})
+			.catch(() => {
+				// Never reject the chain.
+			})
+	}
+	const loadLinks = (): void => {
+		chain = chain
+			.then(() => {
+				if (session !== opened) return
+				post({ id: 0, type: "links", reset: true, events: opened.readLinks() })
+			})
+			.catch(() => {
+				// Never reject the chain; the parent keeps the links writes report.
+			})
+	}
+	backfill()
 }
 
 function errorResponse(id: number, error: unknown): ActivityWorkerResponse {

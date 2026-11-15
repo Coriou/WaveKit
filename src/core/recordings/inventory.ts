@@ -16,6 +16,7 @@ import type { Dir } from "node:fs"
 import * as path from "node:path"
 import type { Readable } from "node:stream"
 import {
+	RECORDING_DSD_KEY,
 	RECORDING_INVENTORY_ID,
 	RECORDINGS_HEADER_READ_BYTES,
 	RECORDINGS_CATALOGUE_MAX,
@@ -193,6 +194,11 @@ export interface RecordingInventoryOptions {
 	 * time, not cached); when absent the items are exactly the WG8 items (no `kept` property).
 	 */
 	protection?: RecordingProtection
+	/**
+	 * The Activity row linked to a recording key (memory only, read at list time). When given,
+	 * every listed item carries `activityEventId` (null when none); absent, no such property.
+	 */
+	activityEventId?: (key: string) => string | null
 }
 
 /** WG9: an opened, verified recording (the caller owns and closes `handle`). */
@@ -228,6 +234,11 @@ export interface RecordingInventory {
 	start?(): Promise<void>
 	/** Stops timers and listeners. */
 	close?(): void
+	/**
+	 * Memory only: whether a recording key is indexed now. Null while the answer cannot prove a
+	 * file is gone: the first build runs, or files were left out (a bound reached).
+	 */
+	hasKey?(key: string): boolean | null
 	/** Writers: these discoveries' folders changed (finalize, delete, retention). */
 	touchDiscoveries?(ids: readonly string[]): Promise<void>
 	/** Writers: a dsd-fme call of `decoderId` ended (no id: every dsd-fme directory). */
@@ -769,6 +780,8 @@ export function createRecordingInventory(
 		byKind: { "dsd-fme-call": 0, "scanner-dv": 0, "scanner-analog": 0 },
 	}
 	const byId = new Map<string, IndexedEntry[]>()
+	/** Indexed copies per keep key (hasKey). */
+	const byKey = new Map<string, number>()
 	/** First full build: null until started, then its promise. */
 	let build: Promise<void> | null = null
 	let built = false
@@ -908,6 +921,7 @@ export function createRecordingInventory(
 
 	/** Adds an indexed copy; the view lists the id's winner. */
 	function track(e: IndexedEntry): void {
+		if (e.key !== null) byKey.set(e.key, (byKey.get(e.key) ?? 0) + 1)
 		const copies = byId.get(e.item.id) ?? []
 		const before = winnerOf(copies)
 		copies.push(e)
@@ -924,7 +938,14 @@ export function createRecordingInventory(
 		const copies = byId.get(e.item.id)
 		if (!copies) return
 		const i = copies.indexOf(e)
-		if (i >= 0) copies.splice(i, 1)
+		if (i >= 0) {
+			copies.splice(i, 1)
+			if (e.key !== null) {
+				const left = (byKey.get(e.key) ?? 1) - 1
+				if (left > 0) byKey.set(e.key, left)
+				else byKey.delete(e.key)
+			}
+		}
 		if (copies.length === 0) byId.delete(e.item.id)
 		if (e.listed) {
 			viewRemove(e)
@@ -1565,6 +1586,7 @@ export function createRecordingInventory(
 	function page(q: NormalisedQuery): RecordingInventoryPage {
 		const v = currentView()
 		const protection = options.protection
+		const eventIdOf = options.activityEventId
 		const counts = newCounts()
 		const owners = new Map<string, Owner | null>()
 		const ownerOf = (folderId: string): Owner | null => {
@@ -1695,6 +1717,16 @@ export function createRecordingInventory(
 				ownerDiscoveryId: owner?.id ?? null,
 			}
 			if (kept !== undefined) item.kept = kept
+			if (eventIdOf !== undefined) {
+				let eventId: string | null = null
+				try {
+					const found = eventIdOf(item.key ?? item.id)
+					eventId = typeof found === "string" ? found : null
+				} catch {
+					eventId = null
+				}
+				item.activityEventId = eventId
+			}
 			return item
 		})
 		if (counts.lookupErrors > 0) logSkipped(counts)
@@ -1905,6 +1937,20 @@ export function createRecordingInventory(
 	async function locations(id: string): Promise<Location[]> {
 		if (typeof id !== "string" || id.length > RECORDINGS_ID_MAX_LENGTH)
 			return []
+		// A dsd-fme call's stable key (an Activity row's recording id): every dsd-fme directory in
+		// order, as its keep key protects the name in each.
+		const key = RECORDING_DSD_KEY.exec(id)
+		if (key?.[1] !== undefined) {
+			const name = key[1]
+			const out: Location[] = []
+			for (const source of await dsdSources(newCounts())) {
+				const file = childPath(source.dir, name)
+				const real = childPath(source.real, name)
+				if (file !== null && real !== null)
+					out.push({ file, name, real, dirs: [source.dir] })
+			}
+			return out
+		}
 		const m = RECORDING_INVENTORY_ID.exec(id)
 		if (!m) return []
 		const [, n, dsdName, recordingId] = m
@@ -2126,6 +2172,12 @@ export function createRecordingInventory(
 			return () => {
 				listeners.delete(listener)
 			}
+		},
+
+		hasKey(key) {
+			if (!built || cutoff !== null || foldersTruncated || namesTruncated)
+				return null
+			return byKey.has(key)
 		},
 
 		status() {

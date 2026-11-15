@@ -6,6 +6,8 @@ import {
 import { isCtcssToneHz } from "../../audio-tones/ctcss.js"
 import { isDtmfDigitString } from "../../audio-tones/dtmf.js"
 import { WaveKitError } from "../../../utils/errors.js"
+import { RECORDING_KEEP_KEY } from "../../recordings/contract.js"
+import { withoutRecordingPath } from "../recording-path.js"
 import {
 	ACTIVITY_RECORD_VERSION,
 	MAX_INDEXED_TEXT_BYTES,
@@ -15,10 +17,12 @@ import type {
 	ActivityCategory,
 	ActivityKind,
 	ActivityRecord,
+	ActivityRecordingLink,
 	ActivityRefType,
 	ActivitySummary,
 	AnalogTransmissionPayload,
 	IngestionGapPayload,
+	RecordingChangePayload,
 } from "./contract.js"
 import type { DecodeEnvelope, DecodeField, JsonValue } from "../types.js"
 
@@ -110,6 +114,14 @@ export function buildActivityRow(record: ActivityRecord): BuiltActivityRow {
 		payload: record.payload,
 	}
 	const recordJson = JSON.stringify(stored)
+	if (record.kind === "recording-change")
+		return recordingChangeRow(
+			record.payload,
+			record,
+			producedAtMs,
+			receivedAtMs,
+			recordJson,
+		)
 	if (record.kind === "ingestion-gap")
 		return gapRow(
 			record.payload,
@@ -150,6 +162,18 @@ export function parseStoredRecord(row: StoredActivityRow): ActivityRecord {
 	const payload = body["payload"]
 	if (kind === "decoder-reception") {
 		if (!isEnvelope(payload)) return corrupt("payload")
+		return {
+			version: ACTIVITY_RECORD_VERSION,
+			eventId: row.event_id,
+			commitSeq: seq,
+			producedAt: body["producedAt"],
+			receivedAt: body["receivedAt"],
+			kind,
+			payload: withoutRecordingPath(payload),
+		}
+	}
+	if (kind === "recording-change") {
+		if (!isRecordingChange(payload)) return corrupt("payload")
 		return {
 			version: ACTIVITY_RECORD_VERSION,
 			eventId: row.event_id,
@@ -231,11 +255,255 @@ export function parseStoredSummary(row: StoredActivityRow): ActivitySummary {
 		? { ...summary, coalesced }
 		: summary
 	const aircraft = body["aircraft"]
-	const withSpan: ActivitySummary = isAircraftIdentity(aircraft)
+	const identified: ActivitySummary = isAircraftIdentity(aircraft)
 		? { ...spanned, aircraft }
 		: spanned
+	const recording = body["recording"]
+	const withSpan: ActivitySummary = isRecordingLink(recording)
+		? { ...identified, recording: { ...recording } }
+		: identified
 	if (isPosition(position)) return { ...withSpan, position }
 	return withSpan
+}
+
+// ---------------------------------------------------------------- recording links
+
+/**
+ * A recording link's id: a recording keep key (`dsd~<call name>` or
+ * `scan:<discoveryId>~<file>`), at most 256 characters. Never a path.
+ */
+export function isRecordingLinkId(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length <= 256 &&
+		RECORDING_KEEP_KEY.test(value)
+	)
+}
+
+/** A well-formed `recording` summary member. */
+export function isRecordingLink(
+	value: unknown,
+): value is ActivityRecordingLink {
+	const body = plain(value)
+	if (!body) return false
+	const keys = Object.keys(body)
+	if (keys.length !== 2 || !("id" in body) || !("durationMs" in body))
+		return false
+	const duration = body["durationMs"]
+	return (
+		isRecordingLinkId(body["id"]) &&
+		(duration === null ||
+			(typeof duration === "number" &&
+				Number.isSafeInteger(duration) &&
+				duration >= 0))
+	)
+}
+
+/**
+ * The link as stored: the id checked, the duration a whole non-negative number of ms below a
+ * day, else null. Null when the id is not a recording key.
+ */
+export function recordingLinkOf(
+	id: unknown,
+	durationMs: unknown,
+): ActivityRecordingLink | null {
+	if (!isRecordingLinkId(id)) return null
+	const ms =
+		typeof durationMs === "number" && Number.isFinite(durationMs)
+			? Math.round(durationMs)
+			: null
+	return {
+		id,
+		durationMs: ms !== null && ms >= 0 && ms < 86_400_000 ? ms : null,
+	}
+}
+
+/**
+ * The summary JSON with `recording` set (a link) or removed (null): the other members kept,
+ * fields and title shrunk first when the link would push it past MAX_SUMMARY_BYTES (fitSummary).
+ * Null when the summary is not one a link may be set on (corrupt, or an analog transmission:
+ * those rows never carry a recording).
+ */
+export function summaryWithRecording(
+	summaryJson: string,
+	link: ActivityRecordingLink | null,
+): string | null {
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(summaryJson)
+	} catch {
+		return null
+	}
+	const body = plain(parsed)
+	if (!body) return null
+	const kind = body["kind"]
+	if (kind !== "decoder-reception" && kind !== "recording-change") return null
+	if (!isCategory(body["category"])) return null
+	const fields = body["fields"]
+	if (!Array.isArray(fields) || !fields.every(isField)) return null
+	const text = (v: unknown): string | null => (typeof v === "string" ? v : null)
+	const eventId = body["eventId"]
+	const producedAt = body["producedAt"]
+	const receivedAt = body["receivedAt"]
+	if (
+		typeof eventId !== "string" ||
+		typeof producedAt !== "string" ||
+		typeof receivedAt !== "string"
+	)
+		return null
+	const frequency = body["frequencyHz"]
+	const position = body["position"]
+	const coalesced = body["coalesced"]
+	const aircraft = body["aircraft"]
+	return fitSummary({
+		eventId,
+		kind,
+		producedAt,
+		receivedAt,
+		decoderId: text(body["decoderId"]),
+		sourceId: text(body["sourceId"]),
+		protocol: text(body["protocol"]),
+		category: body["category"],
+		frequencyHz:
+			typeof frequency === "number" && Number.isFinite(frequency)
+				? frequency
+				: null,
+		entityKey: text(body["entityKey"]),
+		title: text(body["title"]),
+		fields: fields.map(field => ({ ...field })),
+		...(isPosition(position) ? { position } : {}),
+		...(isCoalesced(coalesced) ? { coalesced } : {}),
+		...(isAircraftIdentity(aircraft) ? { aircraft } : {}),
+		...(link === null ? {} : { recording: link }),
+	})
+}
+
+/**
+ * A built row with its recording link set or removed: the summary refitted and the one
+ * `recordingId` ref replaced. The record JSON is never touched (it is what was received).
+ * Unchanged when the summary cannot carry a link.
+ */
+export function rowWithRecording(
+	row: BuiltActivityRow,
+	link: ActivityRecordingLink | null,
+): BuiltActivityRow {
+	const summaryJson = summaryWithRecording(row.summaryJson, link)
+	if (summaryJson === null) return row
+	const refs = row.refs.filter(ref => ref.type !== "recordingId")
+	if (link !== null) refs.push({ type: "recordingId", value: link.id })
+	return { ...row, summaryJson, refs }
+}
+
+/** The `recordingId` ref of a built row, or null. */
+export function rowRecordingId(row: BuiltActivityRow): string | null {
+	return row.refs.find(ref => ref.type === "recordingId")?.value ?? null
+}
+
+const RECORDING_CHANGE_KEYS = [
+	"change",
+	"recordingId",
+	"recordingKind",
+	"discoveryId",
+	"observationId",
+	"sourceId",
+	"frequencyHz",
+	"observationStartedAt",
+	"durationMs",
+	"finalizedAt",
+] as const
+
+function isRecordingChange(value: unknown): value is RecordingChangePayload {
+	const body = plain(value)
+	if (!body) return false
+	if (!sameKeys(body, RECORDING_CHANGE_KEYS)) return false
+	const short = (v: unknown): boolean =>
+		typeof v === "string" && v.length > 0 && v.length <= 128
+	const frequency = body["frequencyHz"]
+	const started = body["observationStartedAt"]
+	const duration = body["durationMs"]
+	return (
+		body["change"] === "finalized" &&
+		body["recordingKind"] === "scanner-analog" &&
+		typeof body["recordingId"] === "string" &&
+		body["recordingId"].startsWith("scan:") &&
+		isRecordingLinkId(body["recordingId"]) &&
+		short(body["discoveryId"]) &&
+		short(body["observationId"]) &&
+		(body["sourceId"] === null || short(body["sourceId"])) &&
+		(frequency === null ||
+			(typeof frequency === "number" &&
+				Number.isFinite(frequency) &&
+				frequency >= 0)) &&
+		(started === null || isIso(started)) &&
+		typeof duration === "number" &&
+		Number.isSafeInteger(duration) &&
+		duration >= 0 &&
+		isIso(body["finalizedAt"])
+	)
+}
+
+function recordingChangeRow(
+	payload: RecordingChangePayload,
+	record: ActivityRecord,
+	producedAtMs: number,
+	receivedAtMs: number,
+	recordJson: string,
+): BuiltActivityRow {
+	if (!isRecordingChange(payload)) return corrupt("payload")
+	const frequencyHz =
+		payload.frequencyHz === null ? null : roundHz(payload.frequencyHz)
+	const title =
+		frequencyHz === null
+			? "Scanner recording"
+			: `Recording ${formatMHz(frequencyHz)} MHz`
+	const link = recordingLinkOf(payload.recordingId, payload.durationMs)
+	if (link === null) return corrupt("payload")
+	const summaryJson = fitSummary({
+		eventId: record.eventId,
+		kind: "recording-change",
+		producedAt: record.producedAt,
+		receivedAt: record.receivedAt,
+		decoderId: null,
+		sourceId: payload.sourceId,
+		protocol: "analog",
+		category: "voice",
+		frequencyHz,
+		entityKey: null,
+		title,
+		fields: [
+			{
+				key: "durationMs",
+				label: "Duration",
+				value: payload.durationMs,
+				unit: "ms",
+			},
+		],
+		recording: link,
+	})
+	const ftsParts = ["recording", "analog", title]
+	if (frequencyHz !== null) ftsParts.push(String(frequencyHz))
+	if (payload.sourceId !== null) ftsParts.push(payload.sourceId)
+	return {
+		eventId: record.eventId,
+		kind: "recording-change",
+		producedAtMs,
+		receivedAtMs,
+		sourceId: payload.sourceId,
+		decoderId: null,
+		protocol: "analog",
+		category: "voice",
+		frequencyHz,
+		entityKey: null,
+		summaryJson,
+		recordJson,
+		recordBytes: Buffer.byteLength(recordJson, "utf8"),
+		ftsText: truncateUtf8(ftsParts.join("\n"), MAX_INDEXED_TEXT_BYTES),
+		refs: [
+			{ type: "recordingId", value: link.id },
+			{ type: "discoveryId", value: payload.discoveryId },
+			{ type: "observationId", value: payload.observationId },
+		],
+	}
 }
 
 /** UTF-8 truncation that never splits a code point. Exported for the property test. */
@@ -575,6 +843,7 @@ interface SummaryDraft {
 	position?: DecodeEnvelope["position"]
 	coalesced?: DecodeEnvelope["coalesced"]
 	aircraft?: DecodeEnvelope["aircraft"]
+	recording?: ActivityRecordingLink
 }
 
 /**
@@ -636,6 +905,12 @@ function fitSummary(draft: SummaryDraft): string {
 		// At most about 400 bytes; dropped only after fields and title.
 		if (includeAircraft && draft.aircraft !== undefined)
 			summary["aircraft"] = draft.aircraft
+		// At most about 290 bytes (a 256-character id), kept whole: fields and title shrink first.
+		if (draft.recording !== undefined)
+			summary["recording"] = {
+				id: draft.recording.id,
+				durationMs: draft.recording.durationMs,
+			}
 		return JSON.stringify(summary)
 	}
 	let json = build()

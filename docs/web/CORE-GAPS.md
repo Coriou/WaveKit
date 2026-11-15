@@ -208,7 +208,8 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
   while the squelch is open; older cores still get the last closed tone from Activity.
 - [x] DTMF on the tuned analog channel: digits on each closed transmission as `tone.dtmf` (up to
   32 symbols, WG2 §7), one per transmission, rather than a separate `audio:dtmf` event.
-- [ ] The recording id on the event (see Recordings).
+- [ ] The recording id on the event (see Recordings). Done in core: an Activity summary carries
+  `recording: { id, durationMs }` ([Recording links](../API.md#recording-links)). Not wired yet.
 
 **Activity and events**
 - [x] Common decode envelope, published live and stored: `/api/activity`, `/:eventId`, the
@@ -222,7 +223,8 @@ packs, presets; writes protected mode only), the `bandplans` WS channel and revi
 - [ ] Facet counts for "With audio". Partly: `POST /api/activity/facets` counts category,
   protocol, decoder, source and kind for the current query and time range (≤32 values each).
   Until the recording id is on the event, the web app's "With audio" keeps the voice category
-  (transmissions and calls), recorded or not (2026-10-17).
+  (transmissions and calls), recorded or not (2026-10-17). The core now filters on it:
+  `hasRecording=true` (`GET /api/activity`, facets and replay queries); not wired yet.
 - [ ] Digital call metadata: DMR tier, talker alias and error rate. Partly: `colourCode`, `nac`,
   `ran` and `algorithmId` on digital voice calls (WG2 §10); P25 phase is the protocol value.
 - [x] Message rate history per decoder: `decoderStatus.rateHistory` (messages per minute, last 15,
