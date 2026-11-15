@@ -375,21 +375,11 @@ export const WORKERS = 3
 export const FILE_OVERHEAD_S = 1
 
 /**
- * Seconds from which a test file counts as CPU-heavy (the production-composition scene files:
- * spectrum pipeline, scanner and wideband recorder in one process). Heavy files on one 4-vCPU
- * runner contend instead of running side by side: in two checks of the same files, three heavy
- * files packed together took 204, 203 and 189 s where each took 140, 93 and 90 s in shards of
- * their own, and the shard's tests took about their serial sum (shard 6: 99 + 111 + 132 = 342 s
- * serial, about 324 s measured). packShards counts a shard's heavy files in sequence.
- */
-export const HEAVY_FILE_S = 60
-
-/**
  * Greedy longest-first packing into `bins` shards. A file weighs its `weights` entry (0 when
  * unlisted: the table keeps files of a second or more) plus FILE_OVERHEAD_S. A shard's cost is the
- * time it is expected to take, max(heaviest file, total / WORKERS, its heavy files in sequence:
- * the sum of those of HEAVY_FILE_S or more), and each file goes to the shard whose cost grows
- * least, then the lightest, then the lowest. Deterministic: ties order by path.
+ * time it is expected to take, max(heaviest file, total / WORKERS), and each file goes to the
+ * shard whose cost grows least, then the lightest, then the lowest. Deterministic: ties order by
+ * path.
  * @param {string[]} files
  * @param {Record<string, number>} weights
  * @returns {{ files: string[], weight: number, cost: number }[]}
@@ -404,14 +394,11 @@ export function packShards(files, weights, bins = SHARDS) {
 		weight: 0,
 		cost: 0,
 		max: 0,
-		heavy: 0,
 	}))
 	for (const f of sorted) {
 		const fw = w(f)
-		const fh = (weights[f] ?? 0) >= HEAVY_FILE_S ? fw : 0
-		const costIf = (
-			/** @type {{ weight: number, max: number, heavy: number }} */ b,
-		) => Math.max(b.max, fw, (b.weight + fw) / WORKERS, b.heavy + fh)
+		const costIf = (/** @type {{ weight: number, max: number }} */ b) =>
+			Math.max(b.max, fw, (b.weight + fw) / WORKERS)
 		let best = out[0]
 		for (const bin of out) {
 			if (!best) break
@@ -422,12 +409,7 @@ export function packShards(files, weights, bins = SHARDS) {
 		best.files.push(f)
 		best.weight += fw
 		best.max = Math.max(best.max, fw)
-		best.cost = costIf({
-			weight: best.weight - fw,
-			max: best.max,
-			heavy: best.heavy,
-		})
-		best.heavy += fh
+		best.cost = costIf({ weight: best.weight - fw, max: best.max })
 	}
 	return out.map(({ files: fs, weight, cost }) => ({
 		files: fs.sort(),

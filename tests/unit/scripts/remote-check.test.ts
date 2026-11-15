@@ -428,34 +428,6 @@ describe("shard packing", () => {
 		])
 	})
 
-	it("spreads CPU-heavy files: they contend on a runner, so a shard's heavy files count in sequence", () => {
-		// Twelve scene-sized files (HEAVY_FILE_S or more) and light ones: counted as parallel, the
-		// smaller heavy files would stack in the shards of the smaller big ones for free.
-		const heavy: Record<string, number> = Object.fromEntries(
-			[179, 171, 161, 156, 140, 132, 111, 99, 93, 91, 90, 81].map((w, i) => [
-				`tests/h${String(i).padStart(2, "0")}.test.ts`,
-				w,
-			]),
-		)
-		const all = [...files, ...Object.keys(heavy)]
-		const bins = packShards(all, heavy)
-		const heavyIn = bins.map(b =>
-			b.files.reduce((s, f) => s + (heavy[f] ?? 0), 0),
-		)
-		const sum = Object.values(heavy).reduce((s, w) => s + w, 0)
-		// No shard runs much more heavy work than an even share plus one file.
-		for (const h of heavyIn)
-			expect(h).toBeLessThanOrEqual(sum / bins.length + 81)
-		for (const b of bins)
-			expect(b.cost).toBeGreaterThanOrEqual(
-				b.files.reduce(
-					(s, f) =>
-						s + (heavy[f] === undefined ? 0 : heavy[f] + FILE_OVERHEAD_S),
-					0,
-				),
-			)
-	})
-
 	it("puts the heaviest files in different shards", () => {
 		const bins = packShards(files, weights)
 		for (const f of Object.keys(weights))
