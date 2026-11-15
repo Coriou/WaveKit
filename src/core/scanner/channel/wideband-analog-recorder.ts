@@ -133,6 +133,7 @@ import {
 	type Veto,
 } from "./recording-verdict.js"
 import {
+	SPEECH_WINDOW_FRAMES,
 	SpeechContentMeter,
 	speechReadings,
 	strongSpeech,
@@ -180,6 +181,17 @@ export const WIDEBAND_MAX_BUFFERED_FRAMES =
 export const WIDEBAND_QUALIFY_MS = 8_000
 export const WIDEBAND_QUALIFY_FRAMES =
 	(WIDEBAND_QUALIFY_MS / 1000) * ANALOG_AUDIO_RATE_HZ
+/**
+ * classBySpeech's wait after the prior refused the class (a strong prior, a backed digital class,
+ * or trials that did not hear voice often): 1 s = 8 000 judged frames of the file. A refusal at
+ * judged frame J reads the prior again only once the file has judged J + 8 000 frames (at
+ * J + 7 999 not), so a strong-speech file on a refused channel reads the store about once a
+ * second instead of on every 25 ms judging step; a prior that turns favourable classes the file
+ * at most 1 s (plus one step) later, inside the 60 s buffer bound (WIDEBAND_MAX_BUFFERED_MS).
+ */
+export const WIDEBAND_SPEECH_PRIOR_RETRY_MS = 1_000
+export const WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES =
+	(WIDEBAND_SPEECH_PRIOR_RETRY_MS / 1000) * ANALOG_AUDIO_RATE_HZ
 /**
  * A classed session not qualified after this much in-track audio (2 s = 16 000 frames, four
  * gate windows) may be evicted for a candidate classed analog-fm when every slot is held; a
@@ -802,10 +814,18 @@ interface FileState {
 	readonly speech: SpeechContentMeter
 	/**
 	 * The judged audio so far, measured for speech while its session is unclassed (classBySpeech:
-	 * nothing is written before a class, so `speech` has not heard it yet). Not fed under a strong
-	 * prior (`toneRequired`: never classed by speech) or once classed.
+	 * nothing is written before a class, so `speech` has not heard it yet). Null when it can never
+	 * be read: a file opened classed (a roll-over, a snapshot class) or under a strong prior
+	 * (`toneRequired`: never classed by speech), and dropped at the first judging step after a
+	 * class. A spectrally digital shadow is still fed: `digital` follows the owner's latest
+	 * snapshot and may clear mid-file, and the class then reads the whole file so far.
 	 */
-	readonly judgedSpeech: SpeechContentMeter
+	judgedSpeech: SpeechContentMeter | null
+	/**
+	 * classBySpeech reads the prior again only once `judged` reaches this
+	 * (WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES after a refusal; 0: never refused).
+	 */
+	speechPriorAt: number
 	/** The start the segmenter planned (onset − preRoll, clamped): the head-cut reference. */
 	readonly planned: number
 	startSample: number
@@ -2784,7 +2804,9 @@ export class WidebandAnalogRecorder {
 			toneHz: null,
 			toneClass: new ToneClassEvidence(),
 			speech: new SpeechContentMeter(),
-			judgedSpeech: new SpeechContentMeter(),
+			judgedSpeech:
+				s.classed || s.toneRequired ? null : new SpeechContentMeter(),
+			speechPriorAt: 0,
 			classTone: null,
 			toneCarried: false,
 			rollOver: false,
@@ -3627,8 +3649,8 @@ export class WidebandAnalogRecorder {
 				}
 			if (head.tone !== null)
 				this.toneFrames(s, file, file.judged, head.tone.subarray(0, n))
-			if (!s.classed && !s.toneRequired)
-				file.judgedSpeech.push(head.pcm.subarray(0, n))
+			if (s.classed) file.judgedSpeech = null
+			else file.judgedSpeech?.push(head.pcm.subarray(0, n))
 			this.gateFrames(s, file, file.judged, head.pcm.subarray(0, n))
 			file.judged += n
 		}
@@ -3706,14 +3728,25 @@ export class WidebandAnalogRecorder {
 	 * DigitalClassLedger's reading), and the channel's analog trials heard voice
 	 * (recording-verdict.ts trialsVoiceChannel: 10 or more heard and 30 % or more of the
 	 * attempts). Each file is checked again over the whole file at its finish (finishOrHold).
+	 * The meter is read only from its first whole window (SPEECH_WINDOW_FRAMES): earlier reads
+	 * would measure partial windows strongSpeech must never see. After a refusal by the prior the
+	 * prior is read again only WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES judged frames later.
 	 */
 	private classBySpeech(s: Session, file: FileState): void {
 		if (s.classed || s.done || s.digital || s.toneRequired) return
-		if (!strongSpeech(file.judgedSpeech.result())) return
+		const meter = file.judgedSpeech
+		if (meter === null || meter.frames < SPEECH_WINDOW_FRAMES) return
+		if (file.judged < file.speechPriorAt) return
+		if (!strongSpeech(meter.result())) return
 		const [prior, backedClass, now] = this.priorOf(s.discoveryId)
-		if (backedClass || admissionVerdict(prior, backedClass, now) !== null)
+		if (
+			backedClass ||
+			admissionVerdict(prior, backedClass, now) !== null ||
+			!trialsVoiceChannel(prior)
+		) {
+			file.speechPriorAt = file.judged + WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES
 			return
-		if (!trialsVoiceChannel(prior)) return
+		}
 		this.classByOwnAudio(s, true)
 	}
 

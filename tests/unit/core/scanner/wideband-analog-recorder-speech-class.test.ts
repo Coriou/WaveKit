@@ -22,6 +22,9 @@ import {
 } from "../../../../src/core/scanner/channel/speech-content.js"
 import {
 	WIDEBAND_HOLDBACK_MS,
+	WIDEBAND_MAX_FILE_MS,
+	WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES,
+	WIDEBAND_SPEECH_PRIOR_RETRY_MS,
 	type WidebandCloseInfo,
 	type WidebandTrackInput,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
@@ -52,14 +55,20 @@ const trials = (decoded: number, attempts: number): VoicePrior => ({
 	analogTrials: () => ({ attempts, decoded }),
 })
 
-/** Syllabic speech with no CTCSS tone (classByTone never classes it). */
-const low = (prior: VoicePrior | null): Harness =>
+/** Syllabic speech with no CTCSS tone (classByTone never classes it), or `source`. */
+const low = (
+	prior: VoicePrior | null | (() => VoicePrior | null),
+	source: NonNullable<Parameters<typeof harness>[0]>["source"] = {
+		syllables: true,
+		ctcssHz: null,
+	},
+): Harness =>
 	harness({
 		fs: LOW_FS,
 		offset: LOW_OFFSET,
-		source: { syllables: true, ctcssHz: null },
+		source,
 		decodedLabel: () => null,
-		voicePrior: () => prior,
+		voicePrior: typeof prior === "function" ? prior : () => prior,
 	})
 
 const codes = (h: Harness): string[] =>
@@ -269,4 +278,111 @@ describe("an untoned voice the spectrum reads as a carrier", () => {
 		])
 		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
 	}, 300_000)
+
+	it("a loud pre-roll burst then a steady tone: a partial window would read 15 dB, the whole windows do not, so not classed", async () => {
+		// The file opens on 300 ms of pre-roll (open-squelch noise, about 9 frames: loud in the
+		// envelope band), then a steady in-band tone the voice gate passes (periodic, no syllables).
+		// A partial window of 16 to 93 frames holds the burst over its 10 % tail and reads well over
+		// 15 dB; every whole 3 s window holds it under its 10 % tail. Measured on the meter read at
+		// every judging step before the fix: classed at 3.7 s on both tones.
+		for (const tone of [
+			{ ctcssHz: 600, ctcssDeviationHz: 300 },
+			{ ctcssHz: 1000, ctcssDeviationHz: 500 },
+		]) {
+			const h = low(trials(262, 339), { voice: false, ...tone })
+			await over(h, 8)
+			expect(codes(h)).toEqual(["shadow", "voiced", "discarded:unclassed"])
+			expect(h.ops).toEqual([])
+		}
+	}, 120_000)
+
+	it("a backed digital class of the owner (two channel-tier digital observations, DigitalClassLedger): not classed by speech", async () => {
+		const h = low(trials(262, 339))
+		await h.feed(1, false)
+		for (let k = 0; k < 2; k++)
+			h.rec.track(
+				input(`o_dig${k}`, snapshot(`o_dig${k}`, 0, 100, LOW), {
+					analogFm: false,
+					nonAnalog: true,
+					digitalClass: true,
+				}),
+			)
+		await over(h, 8)
+		expect(codes(h)).not.toContain("classed")
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+	}, 120_000)
+
+	it("a refused prior is read again every WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES judged frames (1 s), not on every step; a prior that turns favourable classes within 1 s", async () => {
+		expect(WIDEBAND_SPEECH_PRIOR_RETRY_MS).toBe(1_000)
+		expect(WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES).toBe(8_000)
+		let at = 0
+		let favourable = false
+		const reads: number[] = []
+		const prior: VoicePrior = {
+			labels: [],
+			class: "carrier",
+			analogVoice: () => false,
+			analogTrials: () => {
+				reads.push(at)
+				return favourable
+					? { attempts: 339, decoded: 262 }
+					: { attempts: 81, decoded: 7 }
+			},
+		}
+		const h = low(prior)
+		let classedAt: number | null = null
+		await over(h, 12, CARRIER, t => {
+			at = t
+			if (t >= 8) favourable = true
+			if (classedAt === null && codes(h).includes("classed")) classedAt = t
+		})
+		const before = reads.filter(t => t < 8)
+		// Strong speech from about 3.7 s (judged 1 s behind the air): a read at most once a
+		// second up to 8 s, not one per 25 ms step (about 170).
+		expect(before.length).toBeGreaterThanOrEqual(3)
+		expect(before.length).toBeLessThanOrEqual(6)
+		// Each wait is exactly 8 000 judged frames (40 steps of 200 frames, 1 s of air): a read
+		// at 7 999 frames (39 steps) would be 0.975 s.
+		for (let i = 1; i < before.length; i++)
+			expect(before[i]! - before[i - 1]!).toBeCloseTo(1, 6)
+		expect(classedAt).not.toBeNull()
+		expect(classedAt!).toBeGreaterThanOrEqual(8)
+		expect(classedAt!).toBeLessThanOrEqual(8 + 1 + 0.05)
+		expect(codes(h)).toEqual(["shadow", "voiced", "classed", "finalized"])
+	}, 120_000)
+
+	it("roll-over of a session classed by speech: each file is judged on its own at its finish", async () => {
+		// Speech for the whole first file and 6 s into the next: both files read strong speech, both kept.
+		const kept = low(trials(262, 339))
+		await over(kept, WIDEBAND_MAX_FILE_MS / 1000 + 6)
+		expect(kept.ops.map(o => [o.cut, o.outcome])).toEqual([
+			["duration-limit", "finalized"],
+			["completed", "finalized"],
+		])
+		expect(codes(kept)).toEqual([
+			"shadow",
+			"voiced",
+			"classed",
+			"finalized",
+			"finalized",
+		])
+		// Speech runs 2 s into the next file, then a bare carrier for 60 s: the first file is kept;
+		// the next one is voiced, but over its own 62 s its periodic share falls under 0.05, so it
+		// no longer reads strong speech and is discarded (the first file's speech does not carry).
+		const tail = low(trials(262, 339))
+		await over(tail, WIDEBAND_MAX_FILE_MS / 1000 + 62, CARRIER, t => {
+			if (t >= WIDEBAND_MAX_FILE_MS / 1000 + 2) tail.src.setVoice(false)
+		})
+		expect(tail.ops.map(o => o.outcome)).toContain("finalized")
+		expect(tail.ops[0]!.cut).toBe("duration-limit")
+		expect(tail.ops[0]!.outcome).toBe("finalized")
+		expect(tail.ops.filter(o => o.outcome === "finalized")).toHaveLength(1)
+		expect(codes(tail)).toEqual([
+			"shadow",
+			"voiced",
+			"classed",
+			"finalized",
+			"discarded:not-speech",
+		])
+	}, 600_000)
 })
