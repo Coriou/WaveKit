@@ -1107,8 +1107,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return this.callStartEvent(this.callState, now)
 	}
 
-	/** The call_start of `call`; marks it announced. */
-	private callStartEvent(call: DsdFmeCallState, now: Date): DecoderOutput {
+	/**
+	 * The call_start of `call`, stamped `timestamp` (the timer's now, or the
+	 * call's own start when it is announced late, at its end); marks it
+	 * announced.
+	 */
+	private callStartEvent(
+		call: DsdFmeCallState,
+		timestamp: Date,
+	): DecoderOutput {
 		this.announcedCallId = call.callId
 		this.logger.info(
 			{
@@ -1121,7 +1128,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			"Call started (after metadata accumulation)",
 		)
 		return {
-			timestamp: now,
+			timestamp,
 			decoder: this.id,
 			type: "call_start",
 			data: {
@@ -1631,12 +1638,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const newProtocol = this.parseProtocol(proto)
 		this.trackSyncState(line, newProtocol)
 
-		// If protocol changed, we may need to end the current call
-		if (this.callState && newProtocol !== this.currentProtocol) {
-			const endEvent = this.endCall(now, false)
-			this.currentProtocol = newProtocol
-			this.lastSyncMode = proto
-			return endEvent
+		// A protocol switch ends the old protocol's call, announced or still
+		// pending (endCall announces a pending one first), then this line is
+		// parsed as the new protocol's: a "+DSTAR HEADER" line's checked
+		// callsign must not be lost (one arrives only every few seconds).
+		if (newProtocol !== this.currentProtocol) {
+			const ended = this.endOngoingCall(now)
+			if (ended) this.emitOutput(ended)
 		}
 
 		// Update protocol tracking
@@ -2144,6 +2152,16 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			const src = parseInt((lcw ?? unit)?.["src"] ?? "0", 10)
 			const target = unit ? parseInt(unit["target"] ?? "0", 10) : undefined
 			if (tg > 0 || src > 0) {
+				// Unit to unit calls are keyed (0, source): another target is
+				// another call, so start and end always name the same target.
+				const ongoing = this.callState ?? this.pendingCall?.state ?? null
+				const split =
+					ongoing?.protocol === "p25p1" &&
+					ongoing.talkgroup === tg &&
+					ongoing.source === src &&
+					ongoing.p25?.unitTarget !== target
+						? this.endOngoingCall(now)
+						: null
 				const p25: P25Metadata = {
 					...(this.lastP25Nac !== undefined ? { nac: this.lastP25Nac } : {}),
 					...(target !== undefined ? { unitTarget: target } : {}),
@@ -2161,7 +2179,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				const call = this.callState ?? this.pendingCall?.state ?? null
 				if (DMR_ENCRYPTED.test(line) && call?.protocol === "p25p1")
 					this.markEncrypted(call)
-				return event
+				if (split && event) this.emitOutput(split)
+				return event ?? split
 			}
 		}
 
@@ -2389,6 +2408,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			callsign !== undefined ? { callsign } : undefined,
 		)
 		return split ?? event
+	}
+
+	/** Ends the ongoing call, announced or pending (a pending one starts first). */
+	private endOngoingCall(now: Date): DecoderOutput | null {
+		if (!this.callState && this.pendingCall) {
+			this.callState = this.pendingCall.state
+			this.pendingCall = null
+		}
+		return this.endCall(now, false)
 	}
 
 	/** Ends (or drops, if not yet announced) the ongoing call of `protocol`. */
@@ -3107,7 +3135,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// A call that ends before the timer announced it (a terminator, a
 		// protocol switch or a timeout of a pending call) still starts first:
 		// a call_end never comes without its call_start.
-		if (!announced) this.emitOutput(this.callStartEvent(callInfo, now))
+		if (!announced)
+			this.emitOutput(this.callStartEvent(callInfo, callInfo.startTime))
 
 		// Try to find the WAV file immediately
 		const wavFile = this.findWavFile(callInfo, endTime)

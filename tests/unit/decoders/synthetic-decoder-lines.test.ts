@@ -290,6 +290,138 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 			])
 		})
 
+		const lifecycle = (r: Replay) =>
+			r.outputs
+				.filter(o => o.type === "call_start" || o.type === "call_end")
+				.map(o => {
+					const d = o.data as { protocol: string; callId: string }
+					return `${o.type}:${d.protocol}:${d.callId}`
+				})
+
+		it("a protocol switch ends a still-pending call (start, then end) before the new one", () => {
+			// 20 ms apart: the DMR sync arrives before the call timer announced P25.
+			const r = run(
+				"auto",
+				[
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+					" Group Voice Channel User - Group 4321 Source 1234567",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+					" Group Voice Channel User - Group 4321 Source 1234567",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+					" Group Voice Channel User - Group 4321 Source 1234567",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+					" Group Voice Channel User - Group 4321 Source 1234567",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+					" Group Voice Channel User - Group 4321 Source 1234567",
+					"00:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VLC",
+				],
+				20,
+			)
+			const events = lifecycle(r)
+			expect(events.filter(e => e.includes(":p25p1:"))).toHaveLength(2)
+			const [start, end] = events
+			expect(start).toMatch(/^call_start:p25p1:/)
+			expect(end).toBe(start!.replace("call_start", "call_end"))
+			// Nothing of P25 is announced after the channel turned DMR: the call
+			// ends at the switch (not by timeout), announced no later than it.
+			expect(events.slice(2).some(e => e.includes(":p25p1:"))).toBe(false)
+			const p25 = r.outputs.filter(
+				o =>
+					(o.type === "call_start" || o.type === "call_end") &&
+					(o.data as { protocol: string }).protocol === "p25p1",
+			)
+			const switchAt = r.outputs.find(o => o.type === "call_end")!.timestamp
+			for (const o of p25)
+				expect(o.timestamp.getTime()).toBeLessThanOrEqual(switchAt.getTime())
+			expect(
+				(p25[1]?.data as { flags: { timeout: boolean } }).flags.timeout,
+			).toBe(false)
+		})
+
+		it("a protocol switch keeps parsing the line: a D-STAR header's checked callsign starts its call", () => {
+			const r = run("auto", [
+				ysf(
+					"HC FN: 1/7",
+					" DST: ALL        SRC: AA1AAA     U/L:            D/L:",
+				),
+				ysf("CC FN: 1/7", " DST: ALL"),
+				ysf("CC FN: 2/7", " SRC: AA1AAA"),
+				ysf("CC FN: 3/7", " U/L:"),
+				ysf("CC FN: 4/7", " D/L:"),
+				ysf("CC FN: 5/7", " RM1:"),
+				header(
+					"HEADER",
+					"N0CALL",
+					" RPT 2: DIRECT   RPT 1: DIRECT   DST: CQCQCQ   SRC: N0CALL  TEST INTERRUPTED",
+				),
+			])
+			expect(
+				r.outputs
+					.filter(o => o.type === "call_start")
+					.map(o => o.data as { protocol: string; dstar?: { my?: string } })
+					.map(d => [d.protocol, d.dstar?.my]),
+			).toEqual([
+				["ysf", undefined],
+				["dstar", "N0CALL"],
+			])
+		})
+
+		it("a call announced at its end keeps its own start time", () => {
+			// The TDU ends the call before the 500 ms timer announced it.
+			const r = run(
+				"p25",
+				[
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+					" Group Voice Channel User - Group 4321 Source 1234567",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+					" Group Voice Channel User - Group 4321 Source 1234567",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+					" Group Voice Channel User - Group 4321 Source 1234567",
+					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  TDU",
+				],
+				40,
+			)
+			const start = r.outputs.find(o => o.type === "call_start")
+			const end = r.outputs.find(o => o.type === "call_end")
+			expect(start?.timestamp.toISOString()).toBe(
+				(start?.data as { startedAt: string }).startedAt,
+			)
+			expect(start!.timestamp.getTime()).toBeLessThan(end!.timestamp.getTime())
+		})
+
+		it("P25: a unit to unit call to another target is another call", () => {
+			const unit = (target: number) => [
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+				` Unit to Unit Voice Channel User - Target ${target} Source 9`,
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
+			]
+			const r = run("p25", [...unit(7), ...unit(7), ...unit(8), ...unit(8)])
+			const pairs = r.outputs
+				.filter(o => o.type === "call_start" || o.type === "call_end")
+				.map(o => [
+					o.type,
+					(o.data as { callId: string }).callId,
+					(o.data as { p25?: { unitTarget?: number } }).p25?.unitTarget,
+				])
+			// Each call's start and end name the same target.
+			const byCall = new Map<unknown, Set<unknown>>()
+			for (const [, id, target] of pairs)
+				byCall.set(id, (byCall.get(id) ?? new Set()).add(target))
+			expect([...byCall.values()].map(t => [...t])).toEqual([[7], [8]])
+			expect(pairs.map(p => p[0])).toEqual([
+				"call_start",
+				"call_end",
+				"call_start",
+				"call_end",
+			])
+		})
+
 		it("P25: another system's TDU does not end the call", () => {
 			const r = run("p25", [
 				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
