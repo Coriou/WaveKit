@@ -19,6 +19,7 @@
  *   DCH (80 bits whitened, CRC-16, tail, K = 5, 20 x 5) holds the
  *   destination in FN 0 and the source in FN 1.
  * Dibit 01 is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5.
+ * Each over leads with two settle frames (sync and noise, no valid FICH).
  */
 import {
 	bitsOf,
@@ -137,12 +138,11 @@ export function ysfFichDibits({
 }
 
 /** DCH dibits for `bytes` (20 bytes: 180 dibits, 20 x 9; 10 bytes: 100 dibits, 20 x 5). */
-function dchDibits(bytes) {
+function dchDibits(bytes, { badCrc = false } = {}) {
 	const data = bytesToBits(bytes).map((bit, i) => bit ^ PN[i])
-	return interleave(
-		conv5Dibits([...data, ...ysfCrc(data)]),
-		bytes.length === 20 ? 9 : 5,
-	)
+	// badCrc: a valid code word whose CRC does not match (a corrupted block).
+	const crc = ysfCrc(data).map(bit => (badCrc ? bit ^ 1 : bit))
+	return interleave(conv5Dibits([...data, ...crc]), bytes.length === 20 ? 9 : 5)
 }
 
 const callsign = text => [
@@ -156,8 +156,10 @@ function frame(fich, payload) {
 }
 
 /** HC (fi 0) or TC (fi 2) frame dibits. */
-export function ysfHeaderDibits({ fi, dest, src, dgid = 0 }) {
-	const csd1 = dchDibits([...callsign(dest), ...callsign(src)])
+export function ysfHeaderDibits({ fi, dest, src, dgid = 0, badCsd1 = false }) {
+	const csd1 = dchDibits([...callsign(dest), ...callsign(src)], {
+		badCrc: badCsd1,
+	})
 	const csd2 = dchDibits([...callsign(""), ...callsign("")])
 	const payload = []
 	for (let i = 0; i < 10; i++) {
@@ -180,22 +182,53 @@ export function ysfVd2Dibits({ fn, ft, dest, src, dgid = 0, seed = 11 }) {
 	return frame(ysfFichDibits({ fi: 1, dt: 2, fn, ft, dgid }), payload)
 }
 
-/** Dibits of one YSF call: pre-roll, HC twice, `frames` V/D2 CC frames, TC. */
-export function ysfCallDibits({ dest, src, dgid = 0, frames = 7 }) {
-	const random = rng(5)
-	const out = [...Array(480)].map(() => Math.floor(random() * 4))
-	// The receiver settles its symbol levels on the first frame: send the header twice.
-	out.push(...ysfHeaderDibits({ fi: 0, dest, src, dgid }))
-	out.push(...ysfHeaderDibits({ fi: 0, dest, src, dgid }))
+/**
+ * Dibits of one YSF over: two settle frames, HC, `frames` V/D2 CC frames, TC.
+ * dsd-fme sets its symbol levels from the first frame syncs and loses those
+ * frames, so two frames of sync and noise (no valid FICH) lead.
+ * `badCsd1` sends a header whose CSD1 fails its CRC.
+ */
+export function ysfCallDibits({
+	dest,
+	src,
+	dgid = 0,
+	frames = 7,
+	badCsd1 = false,
+	seed = 5,
+}) {
+	const random = rng(seed)
+	const noise = n => [...Array(n)].map(() => Math.floor(random() * 4))
+	const out = noise(480)
+	for (let i = 0; i < 2; i++)
+		out.push(...bitsToDibits(bitsOf(FRAME_SYNC, 40)), ...noise(460))
+	out.push(...ysfHeaderDibits({ fi: 0, dest, src, dgid, badCsd1 }))
 	for (let fn = 0; fn < frames; fn++)
 		out.push(...ysfVd2Dibits({ fn, ft: frames - 1, dest, src, dgid }))
 	out.push(...ysfHeaderDibits({ fi: 2, dest, src, dgid }))
 	return out
 }
 
+/** Dibits of back-to-back overs (`ysfCallDibits` each), 0.25 s of noise apart. */
+export function ysfOversDibits(overs) {
+	const random = rng(17)
+	return overs.flatMap((over, i) => [
+		...(i > 0 ? [...Array(1200)].map(() => Math.floor(random() * 4)) : []),
+		...ysfCallDibits({ ...over, seed: 5 + i }),
+	])
+}
+
 /** FM deviation (Hz, 48 kHz) of one YSF call. */
 export function ysfFrequency(call, { rateHz = 48_000 } = {}) {
-	return shapeFrequency(ysfCallDibits(call), {
+	return ysfShape(ysfCallDibits(call), rateHz)
+}
+
+/** FM deviation (Hz, 48 kHz) of back-to-back YSF overs. */
+export function ysfOversFrequency(overs, { rateHz = 48_000 } = {}) {
+	return ysfShape(ysfOversDibits(overs), rateHz)
+}
+
+function ysfShape(dibits, rateHz) {
+	return shapeFrequency(dibits, {
 		symbolRate: 4800,
 		rateHz,
 		// Raised cosine 0.5: dsd-fme's integrate-and-slice symbol decision has

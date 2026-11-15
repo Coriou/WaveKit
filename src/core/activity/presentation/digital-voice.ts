@@ -29,7 +29,10 @@ const voicePayload = objectSchema({
 	colourCode: asNumber,
 	nac: asString,
 	dmr: z.object({ cc: asNumber }).passthrough().nullish(),
-	p25: z.object({ nac: asString }).passthrough().nullish(),
+	p25: z
+		.object({ nac: asString, unitTarget: asNumber })
+		.passthrough()
+		.nullish(),
 	dstar: z
 		.object({ my: asString, ur: asString, rpt1: asString, rpt2: asString })
 		.passthrough()
@@ -94,10 +97,14 @@ export function presentVoice(data: unknown): DecodePresentation | undefined {
 	const sourceRaw = integerField(payload, "source")
 	const placeholders =
 		NO_TALKGROUP_PROTOCOLS.has(label) && talkgroupRaw === 0 && sourceRaw === 0
-	const talkgroup = placeholders ? undefined : talkgroupRaw
+	// A P25 unit to unit call targets a unit: it has no talkgroup.
+	const unitTarget = nestedNumber(payload, "p25", "unitTarget")
+	const talkgroup =
+		placeholders || unitTarget !== undefined ? undefined : talkgroupRaw
 	const source = placeholders ? undefined : sourceRaw
 	let titleText = label === "" ? "Voice" : label
 	if (talkgroup !== undefined) titleText += ` TG ${talkgroup}`
+	if (unitTarget !== undefined) titleText += ` to unit ${unitTarget}`
 	if (source !== undefined) titleText += ` from ${source}`
 	else if (callsign !== undefined) titleText += ` from ${callsign}`
 	if (urCall !== undefined && urCall !== "") titleText += ` to ${urCall}`
@@ -118,6 +125,7 @@ export function presentVoice(data: unknown): DecodePresentation | undefined {
 		fields: takeFields(
 			[
 				{ key: "talkgroup", label: "Talkgroup", value: talkgroup },
+				{ key: "unitTarget", label: "Target unit", value: unitTarget },
 				{ key: "source", label: "Radio", value: source },
 				{ key: "slot", label: "Slot", value: integerField(payload, "slot") },
 				{ key: "encrypted", label: "Encrypted", value: payload["encrypted"] },

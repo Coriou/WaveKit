@@ -691,7 +691,8 @@ by talkgroup. D-STAR and YSF calls have none: their rows are keyed
 `callsign:<MY / source>` and titled `DSTAR from N0CALL to CQCQCQ` or
 `YSF from N0CALL`, with the UR and repeater calls as fields. D-STAR, YSF, dPMR
 and ProVoice calls, and NXDN calls heard before their VCALL, carry 0 / 0 as
-talkgroup and source placeholders, which the row omits.
+talkgroup and source placeholders, which the row omits. A P25 unit to unit call has
+no talkgroup: its row reads `P25P1 to unit 7 from 9` and has no talkgroup key.
 
 ### Aircraft identity and enrichment
 

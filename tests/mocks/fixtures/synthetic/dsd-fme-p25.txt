@@ -1,16 +1,21 @@
 # dsd-fme -i /dev/stdin -fa -o null: output for scripts/fixtures/p25-c4fm.mjs (synthetic, see synthetic-frames.test.ts)
-00:54:02 Sync: +P25p1 [36mNAC: 000; [0m duid:EE
-00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1
-[31m LCW FEC ERR [0m
-00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1
+02:34:46 Sync: +P25p1 [36mNAC: 000; [0m duid:EE
+02:34:46 Sync: +P25p1 [36mNAC/CC: 2A5; [0m TDU
+02:34:46 Sync: +P25p1 [36mNAC/CC: 2A5; [0m HDU
+[33m HDU  ALG ID: 0x80 KEY ID: 0x0000 MI: 0x0000000000000000[0m
+02:34:46 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1
 [33m Group Voice Channel User - Group 4321 Source 1234567
-[0m00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1
+[0m02:34:46 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU2
+[33m LDU2 ALG ID: 0x80 KEY ID: 0x0000 MI: 0x0000000000000000[0m[0m
+02:34:46 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU1
 [33m Group Voice Channel User - Group 4321 Source 1234567
-[0m00:54:02 Sync: +P25p1 [36mNAC/CC: 2A5; [0m TDU
+[0m02:34:46 Sync: +P25p1 [36mNAC/CC: 2A5; [0m LDU2
+[33m LDU2 ALG ID: 0x80 KEY ID: 0x0000 MI: 0x0000000000000000[0m[0m
+02:34:46 Sync: +P25p1 [36mNAC/CC: 2A5; [0m TDU
 
 End of /dev/stdin
 
-Total audio errors: 235
-Total header errors: 14
-Total irrecoverable header errors: 4
+Total audio errors: 301
+Total header errors: 1
+Total irrecoverable header errors: 1
 Exiting.

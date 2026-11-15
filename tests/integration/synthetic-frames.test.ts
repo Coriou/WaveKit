@@ -28,12 +28,22 @@ import pino from "pino"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { aprsFrequency } from "../../scripts/fixtures/aprs-afsk.mjs"
 import { dpmrFrequency } from "../../scripts/fixtures/dpmr-4fsk.mjs"
-import { dstarFrequency } from "../../scripts/fixtures/dstar-gmsk.mjs"
+import {
+	dstarFrequency,
+	dstarOversFrequency,
+	dstarSpecFrequency,
+} from "../../scripts/fixtures/dstar-gmsk.mjs"
 import { flexFrequency } from "../../scripts/fixtures/flex-fsk.mjs"
 import { fmCu8 } from "../../scripts/fixtures/fsk-iq.mjs"
-import { nxdnFrequency } from "../../scripts/fixtures/nxdn-4fsk.mjs"
+import {
+	nxdnCallsFrequency,
+	nxdnFrequency,
+} from "../../scripts/fixtures/nxdn-4fsk.mjs"
 import { p25Frequency } from "../../scripts/fixtures/p25-c4fm.mjs"
-import { ysfFrequency } from "../../scripts/fixtures/ysf-c4fm.mjs"
+import {
+	ysfFrequency,
+	ysfOversFrequency,
+} from "../../scripts/fixtures/ysf-c4fm.mjs"
 import { presentDecoderOutput } from "../../src/core/activity/presentation/registry.js"
 import type { DecoderChannelRequest } from "../../src/core/channelizer/types.js"
 import {
@@ -44,13 +54,19 @@ import {
 import { DsdFmeDecoder } from "../../src/decoders/builtin/dsd-fme.js"
 import { MultimonDecoder } from "../../src/decoders/builtin/multimon-ng.js"
 import {
+	DSTAR_LINE_MS,
 	SYNTHETIC,
 	checkDpmr,
 	checkDstar,
+	checkDstarOvers,
+	checkDstarSpec,
 	checkFlex,
 	checkNxdn,
+	checkNxdnAB,
 	checkP25,
+	checkP25Rekey,
 	checkYsf,
+	checkYsfOvers,
 	dsdInterpreter,
 	multimonInterpreter,
 	replay,
@@ -125,6 +141,8 @@ interface ChainCase {
 	channelHead: { stages: string[]; gain: number }
 	interpreter: () => Interpreter
 	check: (result: Replay) => void
+	/** Replay spacing of the decoder's lines (default one frame, 100 ms). */
+	lineMs?: number
 }
 
 const dsd = (path: Path, capture: (typeof CAPTURES)[number], mode: string) =>
@@ -163,6 +181,7 @@ const CASES: ChainCase[] = [
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,
 		check: checkDstar,
+		lineMs: DSTAR_LINE_MS,
 	},
 	{
 		name: "YSF (dsd-fme auto, the catalogue default)",
@@ -192,6 +211,64 @@ const CASES: ChainCase[] = [
 			channelHead: DSD_HEAD,
 			interpreter: dsdInterpreter,
 			check: checkNxdn(variant),
+		}),
+	),
+	{
+		name: "P25 phase 1 keyed up twice (HDU/LDU1/LDU2/TDU each)",
+		tool: "dsd-fme",
+		freq: () => p25Frequency({ ...SYNTHETIC.p25, rekeys: 1 }),
+		adapter: (path, capture) => dsd(path, capture, "auto"),
+		channelHead: DSD_HEAD,
+		interpreter: dsdInterpreter,
+		check: checkP25Rekey,
+	},
+	{
+		name: "D-STAR back to back, the second slow-data header failed",
+		tool: "dsd-fme",
+		freq: () =>
+			dstarOversFrequency([
+				{ header: SYNTHETIC.dstar },
+				{ header: SYNTHETIC.dstar, badFirstSlowData: true },
+			]),
+		adapter: (path, capture) => dsd(path, capture, "auto"),
+		channelHead: DSD_HEAD,
+		interpreter: dsdInterpreter,
+		check: checkDstarOvers,
+		lineMs: DSTAR_LINE_MS,
+	},
+	{
+		name: "D-STAR spec-shaped (sync in frame 0, text before the header)",
+		tool: "dsd-fme",
+		freq: () => dstarSpecFrequency(SYNTHETIC.dstar),
+		adapter: (path, capture) => dsd(path, capture, "auto"),
+		channelHead: DSD_HEAD,
+		interpreter: dsdInterpreter,
+		check: checkDstarSpec,
+		lineMs: DSTAR_LINE_MS,
+	},
+	{
+		name: "YSF back to back, the second header's CSD1 failed",
+		tool: "dsd-fme",
+		freq: () =>
+			ysfOversFrequency([SYNTHETIC.ysf, { ...SYNTHETIC.ysf, badCsd1: true }]),
+		adapter: (path, capture) => dsd(path, capture, "auto"),
+		channelHead: DSD_HEAD,
+		interpreter: dsdInterpreter,
+		check: checkYsfOvers,
+	},
+	...([true, false] as const).map(
+		(release): ChainCase => ({
+			name: `NXDN48 A then B ${release ? "with" : "without"} TX_REL`,
+			tool: "dsd-fme",
+			freq: () =>
+				nxdnCallsFrequency([
+					{ ...SYNTHETIC.nxdn, release },
+					{ ...SYNTHETIC.nxdnB, release },
+				]),
+			adapter: (path, capture) => dsd(path, capture, "nxdn48"),
+			channelHead: DSD_HEAD,
+			interpreter: dsdInterpreter,
+			check: checkNxdnAB(release),
 		}),
 	),
 	{
@@ -302,7 +379,14 @@ describe("synthetic frames through the production decoder chains", () => {
 						: stages.slice(soxAt).join(" | ")
 					const { lines } = runShell(command, file, dir)
 					rmSync(dir, { recursive: true, force: true })
-					c.check(replay(lines, c.adapter("channel", capture), c.interpreter()))
+					c.check(
+						replay(
+							lines,
+							c.adapter("channel", capture),
+							c.interpreter(),
+							c.lineMs,
+						),
+					)
 				},
 				120_000,
 			)
@@ -320,7 +404,9 @@ describe("synthetic frames through the production decoder chains", () => {
 					writeFileSync(file, iq)
 					const { lines } = runShell(probe.pipeline(), file, dir)
 					rmSync(dir, { recursive: true, force: true })
-					c.check(replay(lines, c.adapter("raw", capture), c.interpreter()))
+					c.check(
+						replay(lines, c.adapter("raw", capture), c.interpreter(), c.lineMs),
+					)
 				},
 				120_000,
 			)

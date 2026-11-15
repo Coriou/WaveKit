@@ -11,13 +11,20 @@ import pino from "pino"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
 import { MultimonDecoder } from "../../../src/decoders/builtin/multimon-ng.js"
+import { presentDecoderOutput } from "../../../src/core/activity/presentation/registry.js"
 import {
+	DSTAR_LINE_MS,
 	checkDpmr,
 	checkDstar,
+	checkDstarOvers,
+	checkDstarSpec,
 	checkFlex,
 	checkNxdn,
+	checkNxdnAB,
 	checkP25,
+	checkP25Rekey,
 	checkYsf,
+	checkYsfOvers,
 	dsdInterpreter,
 	multimonInterpreter,
 	replay,
@@ -47,12 +54,52 @@ const CASES: {
 	fixture: string
 	mode: string
 	check: (r: Replay) => void
+	lineMs?: number
 }[] = [
 	{
 		name: "D-STAR header and checked slow data",
 		fixture: "dsd-fme-dstar",
 		mode: "auto",
 		check: checkDstar,
+		lineMs: DSTAR_LINE_MS,
+	},
+	{
+		name: "D-STAR back to back, the second slow-data header failed",
+		fixture: "dsd-fme-dstar-overs",
+		mode: "auto",
+		check: checkDstarOvers,
+		lineMs: DSTAR_LINE_MS,
+	},
+	{
+		name: "D-STAR spec-shaped slow data",
+		fixture: "dsd-fme-dstar-spec",
+		mode: "auto",
+		check: checkDstarSpec,
+		lineMs: DSTAR_LINE_MS,
+	},
+	{
+		name: "YSF back to back, the second header's CSD1 failed",
+		fixture: "dsd-fme-ysf-overs",
+		mode: "auto",
+		check: checkYsfOvers,
+	},
+	{
+		name: "P25 HDU/LDU1/LDU2/TDU keyed up twice",
+		fixture: "dsd-fme-p25-rekey",
+		mode: "auto",
+		check: checkP25Rekey,
+	},
+	{
+		name: "NXDN48 A then B with TX_REL",
+		fixture: "dsd-fme-nxdn48-ab-rel",
+		mode: "nxdn48",
+		check: checkNxdnAB(true),
+	},
+	{
+		name: "NXDN48 A then B without a release",
+		fixture: "dsd-fme-nxdn48-ab",
+		mode: "nxdn48",
+		check: checkNxdnAB(false),
 	},
 	{
 		name: "YSF CSD1 / V/D2 callsigns",
@@ -93,7 +140,9 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 
 	for (const c of CASES)
 		it(`dsd-fme: ${c.name}`, () => {
-			c.check(replay(recorded(c.fixture), dsd(c.mode), dsdInterpreter()))
+			c.check(
+				replay(recorded(c.fixture), dsd(c.mode), dsdInterpreter(), c.lineMs),
+			)
 		})
 
 	it("multimon-ng: FLEX alphanumeric page (pipe format with timestamp)", () => {
@@ -108,6 +157,18 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 		)
 		checkFlex(replay(recorded("multimon-flex"), decoder, multimonInterpreter()))
 	})
+
+	// The core image's dsd-fme (ed1d1d6) on the same YSF transmission. The
+	// call timer fires every 500 ms: at every phase against the lines, one
+	// call, its start never carrying an unchecked callsign.
+	for (const lead of [0, 1, 2, 3, 4])
+		it(`dsd-fme image: YSF with ${lead} lines before the first frame`, () => {
+			const lines = [
+				...Array(lead).fill("Audio In Device: /dev/stdin"),
+				...recorded("dsd-fme-ysf-image"),
+			]
+			checkYsf(replay(lines, dsd("auto"), dsdInterpreter()))
+		})
 
 	describe("trust edges of the checked formats", () => {
 		const run = (mode: string, lines: string[]) =>
@@ -173,6 +234,70 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 				[6, false],
 				[6, true],
 			])
+		})
+
+		it("P25: unit to unit names a target unit, not a talkgroup", () => {
+			const r = run("p25", [
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+				" Unit to Unit Voice Channel User - Target 7 Source 9",
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+				" Unit to Unit Voice Channel User - Target 7 Source 9",
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  TDU",
+			])
+			expect(r.links.filter(l => l.src !== undefined)).toEqual([
+				expect.objectContaining({ src: "9", verified: true }),
+				expect.objectContaining({ src: "9", verified: true }),
+			])
+			expect(r.links.some(l => l.tg !== undefined)).toBe(false)
+			const end = r.outputs.find(o => o.type === "call_end")
+			expect(end?.data).toMatchObject({
+				talkgroup: 0,
+				source: 9,
+				p25: { unitTarget: 7 },
+				flags: { timeout: false },
+			})
+			const row = presentDecoderOutput(end!, "dsd-fme")
+			expect(row?.title).toBe("P25P1 to unit 7 from 9")
+			// No talkgroup key: a unit target is not a talkgroup.
+			expect(row?.entityKey ?? null).toBeNull()
+		})
+
+		it("NXDN: a VCALL on a control channel frame is ignored", () => {
+			const r = run("nxdn48", [
+				"00:00:01 Sync: NXDN48  RCCH Data          PF 1/1 VCALL",
+				" Group Call - Half Duplex 4800bps/EHR (00) - Src=111 - Dst/TG=222 ",
+			])
+			expect(r.links.some(l => l.tg !== undefined)).toBe(false)
+			expect(starts(r)).toEqual([])
+		})
+
+		it("NXDN: a call heard by RAN alone takes VCALL IDs only near its start", () => {
+			const voice = (pf: string) =>
+				`00:00:01 Sync: NXDN48  RDCH Voice  RAN 05 PF ${pf}`
+			const lines = [voice("1/4"), voice("2/4"), voice("3/4"), voice("4/4")]
+			const vcall = [
+				"00:00:01 Sync: NXDN48  RDCH Voice  RAN 05 PF 4/4 VCALL",
+				" Group Call - Half Duplex 4800bps/EHR (00) - Src=1234 - Dst/TG=5678 ",
+			]
+			// Soon after the RAN-only start: the same call.
+			const near = run("nxdn48", [...lines, ...vcall])
+			expect(near.outputs.filter(o => o.type === "call_end")).toHaveLength(1)
+			// Well after it (another station keying up): a call of its own.
+			const far = run("nxdn48", [...lines, ...lines, ...lines, ...vcall])
+			expect(
+				far.outputs
+					.filter(o => o.type === "call_end")
+					.map(o => (o.data as { source: number }).source),
+			).toEqual([0, 1234])
+		})
+
+		it("dPMR: one ID print does not start a call", () => {
+			const r = run("dpmr", [
+				"00:00:01 Sync: +dPMR  dPMR Frame Sync 2",
+				" TG=0001234 Src=0005678 Channel Code=05",
+			])
+			expect(starts(r)).toEqual([])
 		})
 
 		it("P25: link control on a line with a FEC error is not checked", () => {

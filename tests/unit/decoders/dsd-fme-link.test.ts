@@ -262,16 +262,24 @@ describe("link events (spec § 6.4)", () => {
 		})
 	})
 
-	it("emits P25 NAC/TG/SRC, NXDN RAN and D-STAR callsign lines", () => {
+	it("emits P25 NAC/TG/SRC, NXDN RAN and IDs and D-STAR callsign lines", () => {
 		const { links } = replay(
 			createDecoder(),
 			[
 				{ atMs: 0, text: "Sync: +P25p1 " },
 				{ atMs: 10, text: " nac: [ 1B] src: [   1234] tg: [  56] " },
-				{ atMs: 20, text: "Sync: +NXDN96 " },
-				{ atMs: 30, text: " VOICE RAN=50 TGT=7 SRC=8 " },
-				{ atMs: 40, text: "Sync: +DSTAR " },
+				{ atMs: 20, text: "Sync: NXDN96  RDCH Data   RAN 50 PF 1/4 VCALL" },
+				{
+					atMs: 30,
+					text: " Group Call - Half Duplex 4800bps/EHR (00) - Src=8 - Dst/TG=7 ",
+				},
+				{ atMs: 40, text: "Sync: +DSTAR VOICE " },
+				// An unchecked legacy print is not a callsign.
 				{ atMs: 50, text: " MY: DL1ABC UR: CQCQCQ RPT1: DB0XYZ B " },
+				{
+					atMs: 60,
+					text: "Sync: +DSTAR VOICE   RPT 2: DB0XYZ B RPT 1: DB0XYZ C DST: CQCQCQ   SRC: DL1ABC  ID51",
+				},
 			],
 			100,
 		)
@@ -284,15 +292,10 @@ describe("link events (spec § 6.4)", () => {
 				crcErr: false,
 				verified: false,
 			},
-			{
-				protocol: "nxdn",
-				ran: 50,
-				tg: "7",
-				src: "8",
-				crcErr: false,
-				verified: false,
-			},
-			{ protocol: "dstar", callsign: "DL1ABC", crcErr: false, verified: false },
+			// The first RAN print alone is not attested.
+			{ protocol: "nxdn", ran: 50, crcErr: false, verified: false },
+			{ protocol: "nxdn", tg: "7", src: "8", crcErr: false, verified: true },
+			{ protocol: "dstar", callsign: "DL1ABC", crcErr: false, verified: true },
 		])
 	})
 })

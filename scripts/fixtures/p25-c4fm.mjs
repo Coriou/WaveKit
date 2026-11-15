@@ -1,7 +1,7 @@
 /**
  * Synthetic P25 phase 1 transmission (C4FM 4800 sym/s, +-600 / +-1800 Hz)
- * for the decoder chain tests: LDU1 frames carrying a Group Voice Channel
- * User link control word, then a TDU. No side effects on import; NAC,
+ * for the decoder chain tests: HDU, LDU1/LDU2 superframes whose LDU1 carries
+ * a Group Voice Channel User link control word, then a TDU. No side effects on import; NAC,
  * talkgroup and source are made up. Voice payload is seeded noise (no IMBE).
  *
  * Layout (TIA-102.BAAA, as dsd-fme dsd_frame.c / p25p1_ldu1.c read it):
@@ -10,6 +10,10 @@
  *   (generator octal 6331141367235453, message first, highest degree
  *   first), then a parity bit (1 for LDU1/LDU2);
  * - a status dibit after every 35 dibits from the start of the frame sync;
+ * - HDU: 20 data hex words (MI, MFID, ALGID, KID, TGID) and 16
+ *   RS(36,20,17) parity words, each with Golay(24,12) parity;
+ * - LDU2: like LDU1, with the encryption sync (MI, ALGID 0x80 clear, KID)
+ *   as 16 data and 8 RS(24,16,9) parity hex words;
  * - LDU1: nine 144-bit voice codewords; after voice 2, 3 and 4 the 12
  *   link-control data hex words (LC bits 0-71, six bits each, the first word
  *   first), after voice 5, 6 and 7 the 12 RS(24,12,13) parity hex words, each
@@ -137,34 +141,113 @@ function frameHead(nac, duid) {
 	]
 }
 
-/** Dibits of one LDU1 (864 dibits, status included). */
-export function p25Ldu1Dibits({ nac, lc, seed = 7 }) {
+/** Hex words (6-bit values, word `n - 1` first) of a bit string, `n` words. */
+function hexWords(bits, n) {
+	return [...Array(n)].map((_, w) =>
+		parseInt(bits.slice(6 * (n - 1 - w), 6 * (n - w)).join(""), 2),
+	)
+}
+
+/**
+ * Golay(24,12) parity (12 bits) of a hex word, as dsd-fme's DSDGolay24
+ * encode_6: data bit i at codeword bit 6 + i, [23,12] check bits by POLY
+ * 0xAE3, overall parity at bit 23, parity bit i = codeword bit 12 + i.
+ */
+export function golay246(hex) {
+	const word = bitsOf(hex, 6)
+	let data = 0
+	for (let i = 0; i < 6; i++) data |= word[i] << (6 + i)
+	let cw = data
+	for (let i = 0; i < 12; i++) {
+		if (cw & 1) cw ^= 0xae3
+		cw >>= 1
+	}
+	let codeword = ((cw << 12) | data) >>> 0
+	let ones = 0
+	for (let x = codeword; x; x >>>= 1) ones += x & 1
+	if (ones & 1) codeword |= 0x800000
+	return [...Array(12)].map((_, i) => (codeword >>> (12 + i)) & 1)
+}
+
+/** The 120 HDU / 96 LDU2 encryption-sync bits (clear: ALGID 0x80, KID 0, MI 0). */
+const clearSync = () => [
+	...Array(72).fill(0),
+	...bitsOf(0x80, 8),
+	...bitsOf(0, 16),
+]
+
+/** Dibits of an HDU (396 dibits, status included): clear, talkgroup `talkgroup`. */
+export function p25HduDibits({ nac, talkgroup }) {
+	const [mi, algidKid] = [clearSync().slice(0, 72), clearSync().slice(72)]
+	const bits = [...mi, ...bitsOf(0, 8), ...algidKid, ...bitsOf(talkgroup, 16)]
+	const hexData = hexWords(bits, 20)
+	const hexParity = rs63Parity(hexData, 8)
+	const word = hex => bitsToDibits([...bitsOf(hex, 6), ...golay246(hex)])
+	const data = frameHead(nac, DUID.hdu)
+	for (let i = 19; i >= 0; i--) data.push(...word(hexData[i]))
+	for (let i = 15; i >= 0; i--) data.push(...word(hexParity[i]))
+	data.push(...Array(5).fill(0))
+	const frame = withStatus(data)
+	if (frame.length !== 396) throw new Error(`HDU is ${frame.length} dibits`)
+	return frame
+}
+
+/**
+ * Dibits of one LDU (864 dibits, status included): LDU1 carries the link
+ * control (12 data + 12 RS(24,12,13) parity hex words), LDU2 the clear
+ * encryption sync (16 data + 8 RS(24,16,9) parity hex words); each hex
+ * word is followed by its Hamming(10,6,3) parity.
+ */
+function lduDibits({ nac, duid, hexData, hexParity, seed }) {
 	const random = rng(seed)
 	const noise = n => [...Array(n)].map(() => Math.floor(random() * 4))
-	const lcBits = lc.flatMap(b => bitsOf(b, 8))
-	const hexData = [...Array(12)].map((_, w) =>
-		parseInt(lcBits.slice(66 - 6 * w, 72 - 6 * w).join(""), 2),
-	)
-	const hexParity = rs63Parity(hexData, 6)
 	const word = hex => bitsToDibits([...bitsOf(hex, 6), ...hamming1063(hex)])
-	const data = frameHead(nac, DUID.ldu1)
-	const groups = [
-		[11, 10, 9, 8].map(i => hexData[i]),
-		[7, 6, 5, 4].map(i => hexData[i]),
-		[3, 2, 1, 0].map(i => hexData[i]),
-		[11, 10, 9, 8].map(i => hexParity[i]),
-		[7, 6, 5, 4].map(i => hexParity[i]),
-		[3, 2, 1, 0].map(i => hexParity[i]),
+	const order = [
+		...[...Array(hexData.length)].map(
+			(_, i) => hexData[hexData.length - 1 - i],
+		),
+		...[...Array(hexParity.length)].map(
+			(_, i) => hexParity[hexParity.length - 1 - i],
+		),
 	]
+	const data = frameHead(nac, duid)
 	for (let v = 1; v <= 9; v++) {
 		data.push(...noise(72))
 		if (v >= 2 && v <= 7)
-			for (const hex of groups[v - 2]) data.push(...word(hex))
+			for (const hex of order.slice(4 * (v - 2), 4 * (v - 1)))
+				data.push(...word(hex))
 		if (v === 8) data.push(...noise(16))
 	}
 	const frame = withStatus(data)
-	if (frame.length !== 864) throw new Error(`LDU1 is ${frame.length} dibits`)
+	if (frame.length !== 864) throw new Error(`LDU is ${frame.length} dibits`)
 	return frame
+}
+
+/** Dibits of one LDU1 (864 dibits, status included). */
+export function p25Ldu1Dibits({ nac, lc, seed = 7 }) {
+	const hexData = hexWords(
+		lc.flatMap(b => bitsOf(b, 8)),
+		12,
+	)
+	return lduDibits({
+		nac,
+		duid: DUID.ldu1,
+		hexData,
+		hexParity: rs63Parity(hexData, 6),
+		seed,
+	})
+}
+
+/** Dibits of one LDU2 (864 dibits): clear encryption sync. */
+export function p25Ldu2Dibits({ nac, seed = 8 }) {
+	const hexData = hexWords(clearSync(), 16)
+	return lduDibits({
+		nac,
+		duid: DUID.ldu2,
+		hexData,
+		hexParity: rs63Parity(hexData, 4),
+		seed,
+	})
 }
 
 /** Dibits of a TDU (72 dibits, status included). */
@@ -174,15 +257,37 @@ export function p25TduDibits({ nac }) {
 	return frame
 }
 
-/** Dibits of one call: `ldus` LDU1 frames and a TDU, after a 0.1 s pre-roll. */
-export function p25CallDibits({ nac, talkgroup, source, ldus = 4 }) {
+/**
+ * Dibits of one call after a 0.1 s pre-roll: two TDUs, HDU, `superframes`
+ * LDU1/LDU2 pairs, TDU. `rekeys` more calls of the same talkgroup and source follow,
+ * each from its own HDU, as a station keying up again.
+ */
+export function p25CallDibits({
+	nac,
+	talkgroup,
+	source,
+	superframes = 2,
+	rekeys = 0,
+}) {
 	const lc = p25GroupVoiceLc({ talkgroup, source })
 	// Pre-roll: 0.1 s of seeded random dibits for the receiver's symbol timing.
 	const random = rng(3)
 	const out = [...Array(480)].map(() => Math.floor(random() * 4))
-	for (let i = 0; i < ldus; i++)
-		out.push(...p25Ldu1Dibits({ nac, lc, seed: 7 + i }))
-	out.push(...p25TduDibits({ nac }))
+	for (let call = 0; call <= rekeys; call++) {
+		// Two TDUs first (a repeater's hang): dsd-fme sets its symbol levels
+		// from the first frame syncs and loses those frames (measured: the HDU
+		// and the first LDU1 otherwise fail).
+		out.push(...p25TduDibits({ nac }), ...p25TduDibits({ nac }))
+		out.push(...p25HduDibits({ nac, talkgroup }))
+		for (let i = 0; i < superframes; i++) {
+			out.push(...p25Ldu1Dibits({ nac, lc, seed: 7 + 2 * i }))
+			out.push(...p25Ldu2Dibits({ nac, seed: 8 + 2 * i }))
+		}
+		out.push(...p25TduDibits({ nac }))
+		// 0.5 s of carrier-off noise between overs.
+		if (call < rekeys)
+			out.push(...[...Array(2400)].map(() => Math.floor(random() * 4)))
+	}
 	return out
 }
 

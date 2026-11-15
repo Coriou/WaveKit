@@ -88,11 +88,12 @@ export function nxdnVcallBits({
 	destination,
 	callType = 1,
 	voiceOption = 0,
+	messageType = 0x01,
 }) {
 	return [
 		0,
 		0,
-		...bitsOf(0x01, 6), // flags, message type VCALL
+		...bitsOf(messageType, 6), // flags, message type (VCALL 0x01, TX_REL 0x08)
 		...bitsOf(0, 8), // CC option
 		...bitsOf(callType, 3),
 		...bitsOf(voiceOption, 5),
@@ -142,6 +143,7 @@ export function nxdnCallDibits({
 	source,
 	destination,
 	superframes = 2,
+	release = false,
 	seed = 9,
 }) {
 	const random = rng(seed)
@@ -161,7 +163,25 @@ export function nxdnCallDibits({
 			})
 			out.push(...frame(LICH_VOICE, sacch, noise(288)))
 		}
+	// TX_REL (message type 0x08, same fields as VCALL) in FACCH1: the end.
+	if (release) {
+		const rel = nxdnFacch1Bits(
+			nxdnVcallBits({ source, destination, messageType: 0x08 }),
+		)
+		out.push(...frame(LICH_FACCH1, idle, [...rel, ...rel]))
+	}
 	return out
+}
+
+/** Dibits of back-to-back calls (`nxdnCallDibits` each), `gapSymbols` of noise apart. */
+export function nxdnCallsDibits(calls, { gapSymbols = 480 } = {}) {
+	const random = rng(23)
+	return calls.flatMap((call, i) => [
+		...(i > 0
+			? [...Array(gapSymbols)].map(() => Math.floor(random() * 4))
+			: []),
+		...nxdnCallDibits({ ...call, seed: 9 + i }),
+	])
 }
 
 /** The two NXDN rates: symbol rate and outer deviation (Hz). */
@@ -175,9 +195,21 @@ export function nxdnFrequency(
 	call,
 	{ variant = "nxdn48", rateHz = 48_000 } = {},
 ) {
+	return nxdnShape(nxdnCallDibits(call), variant, rateHz)
+}
+
+/** FM deviation (Hz, 48 kHz) of back-to-back NXDN calls. */
+export function nxdnCallsFrequency(
+	calls,
+	{ variant = "nxdn48", rateHz = 48_000, gapSymbols = 480 } = {},
+) {
+	return nxdnShape(nxdnCallsDibits(calls, { gapSymbols }), variant, rateHz)
+}
+
+function nxdnShape(dibits, variant, rateHz) {
 	const { symbolRate, outerHz } = NXDN_RATES[variant]
 	const inner = outerHz / 3
-	return shapeFrequency(nxdnCallDibits(call), {
+	return shapeFrequency(dibits, {
 		symbolRate,
 		rateHz,
 		shaping: "rc",

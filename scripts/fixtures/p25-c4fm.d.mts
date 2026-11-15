@@ -2,7 +2,8 @@ export interface P25Call {
 	nac: number
 	talkgroup: number
 	source: number
-	ldus?: number
+	superframes?: number
+	rekeys?: number
 }
 export function p25NidBits(nac: number, duid: number): number[]
 export function rs63Parity(data: number[], tt: number): number[]
@@ -18,6 +19,12 @@ export function p25Ldu1Dibits(frame: {
 	seed?: number
 }): number[]
 export function p25TduDibits(frame: { nac: number }): number[]
+export function golay246(hex: number): number[]
+export function p25HduDibits(frame: {
+	nac: number
+	talkgroup: number
+}): number[]
+export function p25Ldu2Dibits(frame: { nac: number; seed?: number }): number[]
 export function p25CallDibits(call: P25Call): number[]
 export const p25Deviation: (dibit: number) => number
 export function p25Frequency(
