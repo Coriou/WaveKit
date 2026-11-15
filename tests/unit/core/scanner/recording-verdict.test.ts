@@ -43,6 +43,7 @@ import {
 	TDMA_CHANNEL_MIN_VOTES,
 	NO_VOICE_CHANNEL_MIN_TRIALS,
 	noVoiceChannel,
+	noVoiceReading,
 	analogTrialsHeard,
 	type DigitalProof,
 	type VoicePrior,
@@ -2967,19 +2968,25 @@ describe("a no-voice channel: its analog trials never heard, no analog proof (no
 			joinedOther: true,
 			speechHeard: false,
 		})
-		const log = keptLog(path, {
-			speech: {
-				result: () => ({
-					frames: 340,
-					maxRangeDb: 5.876,
-					periodicShare: 0.0091,
-					maxBurstFrames: 0,
-				}),
+		const log = keptLog(
+			path,
+			{
+				speech: {
+					result: () => ({
+						frames: 340,
+						maxRangeDb: 5.876,
+						periodicShare: 0.0091,
+						maxBurstFrames: 0,
+					}),
+				},
+				handle: { operationId: "op-1" },
 			},
-			handle: { operationId: "op-1" },
-		})
+			{ discoveryId: "d_1", targetHz: 446_006_249.6 },
+		)
 		expect(log).toMatchObject({
 			operationId: "op-1",
+			discoveryId: "d_1",
+			frequencyHz: 446_006_250,
 			reason: path.reason,
 			noVoice: true,
 			joinedOther: true,
@@ -3002,9 +3009,9 @@ describe("a no-voice channel: its analog trials never heard, no analog proof (no
 				final: true,
 				now: NOW,
 			}),
-		).toMatchObject({ reason: "own-tone", noVoice: null })
+		).toMatchObject({ reason: "own-tone", noVoice: true })
 		// A file classed by its own tone or a classed roll-over is not measured: its kept line
-		// reads speechHeard null (not measured), never true.
+		// reads speechHeard null (not measured), never true; noVoice is still read.
 		const unmeasured = finishPath({
 			prior: trials(68),
 			backedClass: false,
@@ -3018,11 +3025,12 @@ describe("a no-voice channel: its analog trials never heard, no analog proof (no
 		})
 		expect(unmeasured).toMatchObject({
 			reason: "own-tone",
-			noVoice: null,
+			noVoice: true,
 			speechHeard: null,
 		})
-		expect(
-			keptLog(unmeasured, {
+		const unmeasuredLog = keptLog(
+			unmeasured,
+			{
 				speech: {
 					result: () => ({
 						frames: 0,
@@ -3032,8 +3040,120 @@ describe("a no-voice channel: its analog trials never heard, no analog proof (no
 					}),
 				},
 				handle: null,
-			})["speechHeard"],
-		).toBeNull()
+			},
+			{ discoveryId: null, targetHz: 145_500_000 },
+		)
+		expect(unmeasuredLog).toMatchObject({
+			speechHeard: null,
+			operationId: null,
+			discoveryId: null,
+			frequencyHz: 145_500_000,
+		})
+	})
+
+	it("finishPath reads noVoice for every file: true or false when the trials were read, null only when they could not be", () => {
+		const base = {
+			backedClass: false,
+			ownTone: false,
+			snapshotClassed: true,
+			decodedOwn: false,
+			joinedVoice: false,
+			notSpeech: false,
+			final: true,
+			now: NOW,
+		}
+		// The live shape (a): a kept file of a never-voice channel that showed speech reads true.
+		expect(
+			finishPath({ ...base, prior: trials(72), speechHeard: true }),
+		).toMatchObject({ verdict: "finish", noVoice: true, speechHeard: true })
+		for (const [name, p, out] of [
+			["a voice channel (heard trials): false", trials(50, 30), false],
+			["fresh (N − 1 trials): false", trials(9), false],
+			[
+				"no trial remembered (null): false",
+				{ ...prior(), analogTrials: () => null },
+				false,
+			],
+			["no trial reader: null", prior([], "analog-fm"), null],
+			["no prior: null", null, null],
+			[
+				"a throwing trial read: null",
+				{
+					...prior(),
+					analogTrials: () => {
+						throw new Error("x")
+					},
+				},
+				null,
+			],
+		] as const) {
+			const q = p as VoicePrior | null
+			expect(noVoiceReading(q), name).toBe(out)
+			for (const speechHeard of [true, false, null])
+				expect(
+					finishPath({ ...base, prior: q, speechHeard }).noVoice,
+					`${name} speechHeard ${String(speechHeard)}`,
+				).toBe(out)
+		}
+	})
+
+	it("the live kept files: two long noise files on no-voice channels now fail speechHeard and are discarded; the short 2FSK one is still kept (a disclosed limit)", () => {
+		const live: [string, SpeechContent, boolean][] = [
+			// (a) 13.5 s, range only.
+			[
+				"a",
+				{
+					frames: 421,
+					maxRangeDb: 6.69,
+					periodicShare: 0.005,
+					maxBurstFrames: 0,
+				},
+				false,
+			],
+			// (b) 9.8 s, range only, a 2-frame burst.
+			[
+				"b",
+				{
+					frames: 307,
+					maxRangeDb: 6.52,
+					periodicShare: 0.023,
+					maxBurstFrames: 2,
+				},
+				false,
+			],
+			// (c) 4.1 s of paging 2FSK: pitched (0.178), under the 8 s floor; still heard.
+			[
+				"c",
+				{
+					frames: 129,
+					maxRangeDb: 8.07,
+					periodicShare: 0.178,
+					maxBurstFrames: 0,
+				},
+				true,
+			],
+		]
+		for (const [name, c, heard] of live) {
+			const r = speechReadings(c)
+			expect(r.speechHeard, name).toBe(heard)
+			expect(
+				finishPath({
+					prior: trials(32, 0, prior([weak("dmr", "activity")], "fsk4-12k5")),
+					backedClass: false,
+					ownTone: false,
+					snapshotClassed: true,
+					decodedOwn: false,
+					joinedVoice: false,
+					...r,
+					final: true,
+					now: NOW,
+				}),
+				name,
+			).toMatchObject({
+				verdict: heard ? "finish" : "discarded:not-speech",
+				noVoice: true,
+			})
+		}
 	})
 
 	it("speechReadings: an unmeasured file never discards and logs speechHeard as not measured (null); a measured one reads each check", () => {

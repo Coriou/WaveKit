@@ -35,6 +35,7 @@ import {
 	snapshot,
 } from "./wideband-recorder-harness.js"
 import { FskSource } from "./wideband-nfm-fixtures.js"
+import pino from "pino"
 
 type Harness = ReturnType<typeof harness>
 
@@ -182,6 +183,41 @@ describe("admission: a strong prior admits only a shadow its own audio must clas
 		await h.fire()
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+
+	it("a kept file logs one `Analog file kept` line with its folder's discovery and the centre it demodulates", async () => {
+		const lines: Record<string, unknown>[] = []
+		const logger = pino(
+			{ level: "info" },
+			{
+				write: (line: string) =>
+					void lines.push(JSON.parse(line) as Record<string, unknown>),
+			},
+		)
+		const h = harness({
+			fs: LOW_FS,
+			offset: LOW_OFFSET,
+			source: { ctcssHz: null, syllables: false },
+			decodedLabel: () => null,
+			voicePrior: () => prior({ labels: [label("dmr")] }),
+			logger,
+		})
+		await h.feed(1, false)
+		await over(h, "o", 5)
+		await h.fire()
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		const kept = lines.filter(l => l["msg"] === "Analog file kept")
+		expect(kept).toHaveLength(1)
+		expect(kept[0]).toMatchObject({
+			operationId: expect.stringMatching(/^op-/) as unknown,
+			discoveryId: "d_1",
+			frequencyHz: Math.round(LOW.centreHz),
+			reason: "final",
+			strength: "suspect",
+			// No trial reader on this prior: not read.
+			noVoice: null,
+		})
 	}, 120_000)
 
 	for (const [n, held] of [
