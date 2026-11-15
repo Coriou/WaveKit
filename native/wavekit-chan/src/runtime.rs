@@ -894,8 +894,13 @@ impl Runtime {
         let admitted = !refused
             && self.channels.get_mut(&channel_id).is_some_and(|ch| {
                 if let Engine::Iq(dsp) = &mut ch.dsp {
+                    let moved = capture + dsp.offset_hz() != center_hz;
                     if let Ok(offset) = dsp.admit_retune(center_hz, capture, fraction) {
                         dsp.retune(offset);
+                        // Another frequency is another signal; a same-centre retune keeps the correction.
+                        if moved {
+                            dsp.restart_afc();
+                        }
                         return true;
                     }
                 }
@@ -2540,6 +2545,44 @@ mod tests {
             .map(|e| (e["id"].as_str().unwrap(), e["reason"].as_str().unwrap()))
             .collect();
         assert_eq!(closed, [("far", "requested"), ("near", "requested")]);
+        r.shutdown();
+    }
+
+    #[test]
+    fn a_recentre_keeps_the_carrier_correction_and_a_move_restarts_it() {
+        let dir = TempDir::new();
+        let (mut r, _ev) = rt(&dir.0);
+        r.request_and_wait(parse_request(r#"{"v":1,"type":"open","id":"afc","centerHz":162000000,"bandwidthHz":12500,"transitionHz":5000,"outputRateHz":48000,"format":"cf32","afcMaxHz":2000,"queueBytes":4096}"#).unwrap());
+        let correction = |r: &mut Runtime| match &r.channels.get("afc").unwrap().dsp {
+            Engine::Iq(dsp) => dsp.afc_correction_hz().unwrap(),
+            _ => unreachable!(),
+        };
+        // 0.3 s of a carrier 700 Hz above the channel, straight into its DSP.
+        let n = 614_400;
+        let (i, q): (Vec<f32>, Vec<f32>) = (0..n)
+            .map(|k| {
+                let ph = std::f64::consts::TAU * 700.0 * k as f64 / 2_048_000.0;
+                (ph.cos() as f32 * 0.5, ph.sin() as f32 * 0.5)
+            })
+            .unzip();
+        if let Engine::Iq(dsp) = &mut r.channels.get_mut("afc").unwrap().dsp {
+            dsp.process_f32(&i, &q);
+        }
+        let held = correction(&mut r);
+        assert!((held - 700.0).abs() < 1.0, "{held}");
+        r.on_request(recenter(162.1e6));
+        assert_eq!(iq_offset(&r, "afc"), -100_000.0);
+        assert_eq!(correction(&mut r), held, "same signal after a recentre");
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"afc","centerHz":162000000}"#)
+                .unwrap(),
+        );
+        assert_eq!(correction(&mut r), held, "a retune to the same centre");
+        r.on_request(
+            parse_request(r#"{"v":1,"type":"retune","channelId":"afc","centerHz":162010000}"#)
+                .unwrap(),
+        );
+        assert_eq!(correction(&mut r), 0.0, "another frequency, another signal");
         r.shutdown();
     }
 

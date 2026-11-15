@@ -135,12 +135,17 @@ impl ChannelDsp {
         self.spec.offset_hz
     }
 
-    /// Changes only the NCO step, preserving its phase, FIR histories and output schedule.
-    /// A carrier correction starts again: the channel now looks at another signal.
+    /// Changes only the NCO step, preserving its phase, FIR histories, output schedule and
+    /// carrier correction (a capture recentre keeps the channel on the same signal); a move to
+    /// another frequency also calls [`Self::restart_afc`].
     pub fn retune(&mut self, offset_hz: f64) {
         self.nco
             .set_frequency(offset_hz, self.spec.input_rate as f64);
         self.spec.offset_hz = offset_hz;
+    }
+
+    /// Starts the carrier correction again, when the channel has one: it now looks at another signal.
+    pub fn restart_afc(&mut self) {
         if let Some(afc) = &mut self.afc {
             afc.reset();
         }
@@ -495,19 +500,27 @@ mod tests {
     }
 
     #[test]
-    fn afc_restarts_on_retune_and_reset() {
+    fn afc_survives_a_recentre_and_restarts_on_a_move_and_reset() {
         let fs = 2_400_000;
         let (i, q) = fsk_carrier(fs, 25_600.0, fs as usize / 4);
         let mut dsp = ChannelDsp::new(afc_spec(fs, Some(2_000.0))).unwrap();
         dsp.process_f32(&i, &q);
-        assert!(dsp.afc_correction_hz().unwrap() != 0.0);
+        let held = dsp.afc_correction_hz().unwrap();
+        assert!(held != 0.0);
+        // A recentre moves only the NCO: same signal, same correction.
         dsp.retune(30_000.0);
+        assert_eq!(dsp.afc_correction_hz(), Some(held));
+        dsp.restart_afc();
         assert_eq!(dsp.afc_correction_hz(), Some(0.0));
         dsp.retune(25_000.0);
         dsp.process_f32(&i, &q);
         assert!(dsp.afc_correction_hz().unwrap() != 0.0);
         dsp.reset();
         assert_eq!(dsp.afc_correction_hz(), Some(0.0));
+        // Without a correction, restarting it is a no-op.
+        let mut plain = ChannelDsp::new(afc_spec(fs, None)).unwrap();
+        plain.restart_afc();
+        assert_eq!(plain.afc_correction_hz(), None);
     }
 
     proptest::proptest! {

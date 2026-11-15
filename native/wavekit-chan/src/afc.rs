@@ -30,7 +30,9 @@
 //!   correction returns to 0 Hz for the next one.
 //!
 //! The mixer is the channel's phase-continuous [`Nco`], so a correction change never steps the
-//! phase. Every decision falls on a block boundary counted in output samples, so any split of
+//! phase (it returns to phase 0 only when a transmission ends). One sum spans a transmission and
+//! its hang, so a second radio keying within [`HANG_MS`] of the first starts from the first
+//! one's estimate and takes over only as its own blocks outnumber the first's. Every decision falls on a block boundary counted in output samples, so any split of
 //! the same input gives the same bits.
 
 use std::f64::consts::TAU;
@@ -59,8 +61,13 @@ pub const HANG_MS: f64 = 250.0;
 pub const ENGAGE_HZ: f64 = 200.0;
 /// Narrowband FM peak deviation the measurement lag allows for (12.5 kHz channels: 2.5 kHz).
 pub const PEAK_DEVIATION_HZ: f64 = 2_500.0;
-/// Largest phase over the lag, in turns: below half a turn, so `arg R` never wraps.
+/// Largest phase over the lag, in turns, at the bound plus the peak deviation: below half a
+/// turn, so `arg R` never wraps.
 pub const LAG_TURN: f64 = 0.4;
+/// Largest phase of the peak deviation alone over the lag, in turns: within a quarter turn the
+/// modulation's mean phasor stays on the positive side, so its sum keeps a clear sign whatever
+/// the bound (a small `max_hz` would otherwise lengthen the lag).
+pub const DEVIATION_TURN: f64 = 0.25;
 /// Longest measurement lag.
 pub const MAX_LAG: usize = 8;
 
@@ -98,9 +105,10 @@ impl Afc {
         let rate = rate as f64;
         let block = ((rate * BLOCK_MS / 1000.0).round() as u32).max(1);
         let block_s = block as f64 / rate;
-        // 48 kHz, 2 kHz: ⌊0.4 · 48 000 / 4 500⌋ = 4.
-        let lag = ((LAG_TURN * rate / (max_hz.max(0.0) + PEAK_DEVIATION_HZ)).floor() as usize)
-            .clamp(1, MAX_LAG);
+        // 48 kHz, 2 kHz: min(⌊0.4 · 48 000 / 4 500⌋, ⌊0.25 · 48 000 / 2 500⌋) = min(4, 4) = 4.
+        let by_bound = (LAG_TURN * rate / (max_hz.max(0.0) + PEAK_DEVIATION_HZ)).floor();
+        let by_deviation = (DEVIATION_TURN * rate / PEAK_DEVIATION_HZ).floor();
+        let lag = (by_bound.min(by_deviation) as usize).clamp(1, MAX_LAG);
         Afc {
             rate,
             max_hz,
@@ -146,7 +154,7 @@ impl Afc {
         self.block
     }
 
-    /// Fresh state: no transmission, no correction, the mixer at phase 0 (input gaps, retunes).
+    /// Fresh state: no transmission, no correction, the mixer at phase 0 (input gaps, moves).
     pub fn reset(&mut self) {
         *self = Afc::new(self.rate as u64, self.max_hz);
     }
@@ -222,6 +230,9 @@ impl Afc {
                     self.acc_re = 0.0;
                     self.acc_im = 0.0;
                     self.set_correction(0.0);
+                    // No carrier: a phase step is harmless, and the mixer is the identity again,
+                    // so the next transmission is bit for bit the input until it engages.
+                    self.nco.reset();
                 }
             }
         }
@@ -373,20 +384,87 @@ mod tests {
     }
 
     #[test]
-    fn the_lag_keeps_the_phase_over_it_under_half_a_turn() {
+    fn the_lag_keeps_the_phase_over_it_within_its_turns() {
         for (rate, max) in [
             (48_000u64, 2_000.0),
             (48_000, 6_250.0),
+            (48_000, 100.0),
+            (48_000, 1e-9),
             (24_000, 2_000.0),
             (2_400_000, 2_000.0),
             (8_000, 2_000.0),
         ] {
             let afc = Afc::new(rate, max);
-            let turn = afc.lag() as f64 * (max + PEAK_DEVIATION_HZ) / rate as f64;
+            let lag = afc.lag() as f64;
             assert!(afc.lag() >= 1 && afc.lag() <= MAX_LAG);
-            assert!(turn <= LAG_TURN || afc.lag() == 1, "{rate} {max}: {turn}");
+            let bound = lag * (max + PEAK_DEVIATION_HZ) / rate as f64;
+            let deviation = lag * PEAK_DEVIATION_HZ / rate as f64;
+            assert!(
+                afc.lag() == 1 || (bound <= LAG_TURN && deviation <= DEVIATION_TURN),
+                "{rate} {max}: {bound} {deviation}"
+            );
         }
         assert_eq!(Afc::new(48_000, 2_000.0).lag(), 4);
+        // A small bound does not lengthen the lag past the deviation's quarter turn.
+        assert_eq!(Afc::new(48_000, 100.0).lag(), 4);
+    }
+
+    /// An unmodulated carrier at `hz` for `ms`, no noise.
+    fn tone(hz: f64, ms: f64) -> (Vec<f32>, Vec<f32>) {
+        (0..(ms * FS as f64 / 1000.0) as usize)
+            .map(|k| {
+                let ph = TAU * hz * k as f64 / FS as f64;
+                (ph.cos() as f32, ph.sin() as f32)
+            })
+            .unzip()
+    }
+
+    #[test]
+    fn engages_at_the_threshold_and_not_below_it() {
+        let cases = [
+            (ENGAGE_HZ + 5.0, true),
+            (-(ENGAGE_HZ + 5.0), true),
+            (ENGAGE_HZ - 5.0, false),
+            (-(ENGAGE_HZ - 5.0), false),
+        ];
+        for (hz, engages) in cases {
+            let (i, q) = tone(hz, 200.0);
+            let mut afc = Afc::new(FS, 2000.0);
+            run(&mut afc, &i, &q);
+            assert_eq!(afc.engaged, engages, "{hz}");
+            if engages {
+                assert!(
+                    (afc.correction_hz() - hz).abs() < 0.5,
+                    "{hz}: {}",
+                    afc.correction_hz()
+                );
+            } else {
+                assert_eq!(afc.correction_hz(), 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn after_a_corrected_transmission_ends_the_output_is_the_input_again() {
+        let (a, b) = tone(700.0, 300.0);
+        let mut afc = Afc::new(FS, 2000.0);
+        run(&mut afc, &a, &b);
+        assert!(afc.engaged);
+        let gap = [Seg {
+            on: false,
+            ms: HANG_MS + 50.0,
+        }];
+        let (gi, gq) = signal(&gap, 0.0, 20.0, 3);
+        run(&mut afc, &gi, &gq);
+        assert!(!afc.active());
+        // A transmission under the threshold, then noise: both untouched.
+        let (mut c, mut d) = tone(120.0, 300.0);
+        let (ni, nq) = signal(&gap, 0.0, 20.0, 4);
+        c.extend(ni);
+        d.extend(nq);
+        let out = run(&mut afc, &c, &d);
+        assert!(!afc.engaged);
+        assert_eq!(out, (c, d));
     }
 
     #[test]

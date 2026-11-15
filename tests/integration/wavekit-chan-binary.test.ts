@@ -407,8 +407,6 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 		await chan.next(is("opened", "alive"))
 	}, 60_000)
 
-	// Feature: core-channelizer, Property 13: EOF tail
-	// Validates: addendum §11, §12.13
 	it("corrects a carrier 700 Hz off when the channel asks for afcMaxHz, and leaves it alone otherwise", async () => {
 		// An unmodulated carrier 700 Hz above a 12.5 kHz channel, 0.5 s of cu8.
 		const offset = 25_000
@@ -461,6 +459,8 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 		expect(Math.abs(meanHz(await afc.closed()))).toBeLessThan(5)
 	}, 30_000)
 
+	// Feature: core-channelizer, Property 13: EOF tail
+	// Validates: addendum §11, §12.13
 	it("emits input-eof with the odd byte, flushes the channel and exits 0", async () => {
 		const cases = [
 			{ input: Buffer.from([1, 2, 3]), samples: 1, discarded: 1 },

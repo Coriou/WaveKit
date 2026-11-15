@@ -1194,9 +1194,16 @@ only while a carrier is present:
   would correct, and the output stays bit for bit the uncorrected one); then it
   follows the growing sum, each block moving it by about 1/n of its own error;
 - it holds through gaps shorter than 250 ms (a DMR direct-mode radio keys a 27.5 ms
-  burst every 60 ms) and resets after a longer one, on a retune and on an input gap.
+  burst every 60 ms) and resets after a longer one, on a retune to another frequency
+  and on an input gap (a capture recentre keeps it: the signal is the same). One sum
+  spans a transmission and its hang, so a second radio keying within 250 ms of the
+  first starts from the first one's estimate and takes over as its own blocks
+  outnumber the first's.
 
-The mixer is phase continuous. The cost is about 8 ns per output sample, 0.04 % of
+The mixer is phase continuous during a transmission and returns to phase 0 when it
+ends. Recorded-capture replay (`wavekit-iqcap replay`, scanner snapshot replay) runs
+without the correction, so a capture with a carrier offset may decode worse there
+than on the live channel. The cost is about 8 ns per output sample, 0.04 % of
 a desktop core per 48 kHz channel next to 6.2 % for the channel itself
 (`native/wavekit-chan/examples/chan_bench.rs`, Mac i5, load average 22 to 48;
 Raspberry Pi not measured).
