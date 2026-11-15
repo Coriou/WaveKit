@@ -459,12 +459,17 @@ export function planReplayTrialsDetailed(
 			opts,
 		).map(x => x.trial)
 	let ordered: IqReplayTrial[]
-	if (inPagerRange(input.priors)) {
+	const pagerPlanned = candidates.some(
+		c => c.kind !== "analog" && familyOf(c.protocol) === "pager",
+	)
+	if (inPagerRange(input.priors) && pagerPlanned) {
 		// In a paging range the groups are fixed: the known digital and pager trials, then the
 		// analog trial (known or not), then the rest. An analog `decoded`/`heard` ends the later
 		// trials `not-needed`, so the pager trials always run before it, whatever the memory says.
 		// Memory reorders only inside a group (a remembered POCSAG success runs before a known
-		// DMR); the first group is never cut for backoff.
+		// DMR); the first group is never cut for backoff. With no pager trial planned (the track
+		// rules every pager probe out) there is nothing to run first, and the plan is the one
+		// outside a paging range: a known analog trial still leads a data burst.
 		const group = (c: IqReplayTrial): number =>
 			c.kind === "analog"
 				? 1

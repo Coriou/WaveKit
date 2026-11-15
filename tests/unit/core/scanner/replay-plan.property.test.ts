@@ -1,4 +1,4 @@
-/** WG12 Property 12, planner half: known first, one analog, digital by score, at most 8. */
+/** Property 12, planner half: known first, one analog, digital by score, at most 8. */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
@@ -106,6 +106,37 @@ function scoresOf(input: IqReplayPlanInput): Map<ScannerProtocol, number> {
 }
 
 describe("planReplayTrials analog order", () => {
+	// A paging prior whose pager probe the track rules out (500 Hz, narrow): no pager trial is
+	// planned, so the known analog trial leads the data burst as it does outside a paging range.
+	// The property below found it (seed 1159340361, path 88:1:4:6:9:8).
+	it("a known analog leads a data burst in a paging range with no pager trial", () => {
+		const out = planReplayTrials({
+			capture: {
+				captureId: "c1",
+				sourceId: "rtl",
+				observationId: "o",
+				epoch: 1,
+				rfHz: TARGET_HZ,
+				tuningTrust: "commanded",
+				capturedAtMs: 0,
+				durationMs: 2000,
+				gapSamples: 0,
+				rateHz: 192_000,
+			},
+			track: trackOf({ obwHz: 500, spectralShape: "narrow" }),
+			knownProtocol: "analog-fm",
+			priors: { flex: 2, ism: 1 },
+			narrowRaster: false,
+		})
+		expect(out.some(t => familyOf(t.protocol) === "pager")).toBe(false)
+		expect(out[0]).toMatchObject({
+			kind: "analog",
+			protocol: "analog-fm",
+			known: true,
+		})
+	})
+
+
 	// Feature: scanner-redesign, Property 12: Replay order and stop
 	// Validates: Requirements 4.4, 4.6, 5.5
 	// known first, ≤ 1 analog, digital by score; no digital after analog decoded/heard; ≤ 8 run;
