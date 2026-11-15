@@ -164,10 +164,11 @@ export function fileDecodedOwn(
  * Each label's `at` is its decode's wall time (ms; null unknown), so a strong one lapses
  * (STRONG_PRIOR_TTL_MS). `class` is the owner's stored class (the majority of its observations' spectral votes: weak).
  * `analogVoice` reads whether analog voice was heard on the channel (an analog tone or analog
- * voice proof of an observation those discoveries still keep: each keeps its last
- * OBSERVATIONS_PER_DISCOVERY = 256, so a proof older than that many transmissions no longer
- * counts; or an analog label at `classified` or more); it walks up to 9 × 256 cached proofs, so it
- * is asked only when a digital prior would otherwise apply.
+ * voice proof of an observation those discoveries, or the channel's other discoveries (same
+ * source and frequency key, newest seen first, 64 discoveries in all), still keep: each keeps its
+ * last OBSERVATIONS_PER_DISCOVERY = 256, so a proof older than that many transmissions no longer
+ * counts; or an analog label at `classified` or more); it walks up to 64 × 256 cached proofs, so
+ * it is asked only when a digital prior would otherwise apply.
  * `classVotes` (absent: none) counts the owner's observations that voted a class (`total`) and
  * how many voted each class (`votes`; a class absent: none); asked only for an owner's digital
  * label. A label's `checkedHint` (absent: false) is true for a dsd-fme sync hint that carries
@@ -859,8 +860,9 @@ export function finishVerdict(input: {
  * made only by a `digital-unknown` candidate or unchecked DMR sync hints (`digital-unknown`,
  * `unchecked-dmr`: still `tone-required` for admission, but their files are held, then kept), a
  * `suspect` prior read from a spectral class alone (a weak or low-deviation NFM voice reads
- * fsk4-*, gmsk-narrow), an `ism` or LoRa decode, or a co-channel decode: untoned voice lives on
- * those channels. A throwing read: not applied.
+ * fsk4-*, gmsk-narrow), a decode of a shared-channel protocol (`ism`, LoRa) or a digital decode
+ * of a co-channel discovery: untoned voice lives on those channels. A co-channel pager (or other
+ * dedicated-channel) decode within 24 h is `dedicated`. A throwing read: not applied.
  */
 export function contentChecked(
 	source: StrongSource | null,

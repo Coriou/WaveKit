@@ -250,6 +250,57 @@ describe("DiscoveryStore.voicePrior", () => {
 			).toBe("none")
 		})
 
+		it("FROZEN: ten capcode twins, analog voice on a discovery past a twin's linked partners: none", () => {
+			let now = T0
+			const store = new DiscoveryStore({
+				maxDiscoveries: 100,
+				now: () => now,
+				newId: counterIds(),
+				rasters: () => PMR,
+			})
+			const ids: string[] = []
+			for (let k = 0; k < 10; k++) {
+				const at = T0 + k * 60_000
+				now = at
+				const o = `p${k}`
+				const id =
+					store.ingest(
+						makeObs({
+							id: o,
+							centreHz: CH,
+							startedAt: at,
+							cls: "fsk2-wide",
+							open: false,
+							gate: "passed",
+						}),
+					).discoveryId ?? ""
+				const ev = evidence("pocsag", at + 500, {
+					identity: { kind: "pocsag-capcode", value: String(k + 1) },
+				})
+				store.appendObservationEvidence(o, ev)
+				expect(store.applyEvidenceResult(id, ev).accepted).toBe(true)
+				ids.push(store.discoveryIdOf(o) ?? id)
+			}
+			expect(new Set(ids).size).toBe(10)
+			const at = T0 + 20 * 60_000
+			now = at
+			const voiced = store.ingest(obs("voice", at)).discoveryId ?? ""
+			expect(store.recordAnalog("voice", tone(at + 1_000))).toBe(true)
+			const voiceOwner = store.discoveryIdOf("voice") ?? voiced
+			// A twin that owns the folder and does not list the voice discovery among its (at
+			// most 8) partners: before the per-channel read it saw a fresh page and no voice.
+			const folder = ids.find(
+				id =>
+					id !== voiceOwner &&
+					!(store.get(id)?.coChannel ?? []).includes(voiceOwner),
+			)
+			expect(folder).toBeDefined()
+			const prior = store.voicePrior(folder ?? "") ?? null
+			expect(prior?.channelDecodes?.length ?? 0).toBeGreaterThan(0)
+			expect(prior?.analogVoice()).toBe(true)
+			expect(readPrior(prior, false, at + 2_000)).toBe("none")
+		})
+
 		it("a DMR decode on the channel never gets the 24 h treatment: an hour later, suspect", () => {
 			const store = newStore()
 			const id = decodedDmr(store)

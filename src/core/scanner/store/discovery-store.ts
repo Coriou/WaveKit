@@ -506,6 +506,12 @@ export const OBSERVATIONS_PER_DISCOVERY = 256
 const OBSERVATION_DECODE_MAX = 16
 /** DiscoveryStore.ownerDecodes' bound: one entry per record decoded as a protocol not voice. */
 const OWNER_DECODES_MAX = 4096
+/**
+ * The most discoveries of one channel (source and frequency key) VoicePrior.analogVoice reads,
+ * the owner and its linked partners first: at most 64 × OBSERVATIONS_PER_DISCOVERY 256 = 16 384
+ * cached proof reads, lazily, only when a digital prior would otherwise apply.
+ */
+const CHANNEL_VOICE_SCAN_MAX = 64
 const MEDIAN_WINDOW = 64
 const MAX_FLAGGED_IDS = 4096
 /**
@@ -3007,7 +3013,8 @@ export class DiscoveryStore
 	 * key co-channel twins share), newest time per protocol (VoicePrior.channelDecodes): a paging
 	 * channel holds one discovery per capcode and its links need not join every twin to every
 	 * other. At most OWNER_DECODES_MAX channels (oldest written dropped first) × the protocols
-	 * decoded on each (a handful). Memory only.
+	 * decoded on each (a handful). Memory only. An owner whose frequency key changes leaves its
+	 * entries under the old key (read no more), so the prior errs weaker, never stronger.
 	 */
 	private readonly channelDecodes = new Map<
 		string,
@@ -4146,9 +4153,11 @@ export class DiscoveryStore
 	 * VoicePrior): that owner's id, the published labels (ownerLabel, cached; each marked whether it
 	 * is the owner's, with its proof's time) of the owner and of up to
 	 * DQ_CO_CHANNEL_MAX (8) live co-channel discoveries, the owner's stored class, and a lazy read of
-	 * analog voice heard on them: an `analog-tone` or `analog-voice` proof of any of their
-	 * observations (cached per observation; at most 9 × OBSERVATIONS_PER_DISCOVERY 256 = 2 304
-	 * reads, only when asked), and a lazy count of the owner's class votes per class (at most
+	 * analog voice heard on the channel: an `analog-tone` or `analog-voice` proof of any
+	 * observation of those discoveries, then of the channel's other discoveries (atKey: the owner's
+	 * first source and frequency key, newest seen first; CHANNEL_VOICE_SCAN_MAX 64 discoveries in
+	 * all, cached per observation; at most 64 × OBSERVATIONS_PER_DISCOVERY 256 = 16 384 reads, only
+	 * when asked), and a lazy count of the owner's class votes per class (at most
 	 * OBSERVATIONS_PER_DISCOVERY). A label's `checkedHint` is true when the proof behind it is a
 	 * sync hint with checked content (a sync-only proof that is not uncheckedSyncHint), its
 	 * `verifiedHint` true when that hint has verified TG/SRC, and its
@@ -4218,13 +4227,27 @@ export class DiscoveryStore
 			digitalProofs: () => this.digitalProofs(d.id),
 			digitalSeenAt: () => this.digitalSeenAt(d.id),
 			tdmaSeenAt: () => this.tdmaSeenAt(d.id),
-			analogVoice: () =>
-				ids.some(id =>
+			analogVoice: () => {
+				const heard = (id: string): boolean =>
 					(this.byDiscovery.get(id) ?? []).some(o => {
 						const kind = this.observationAssessment(o).proof?.kind
 						return kind === "analog-tone" || kind === "analog-voice"
-					}),
-				),
+					})
+				if (ids.some(heard)) return true
+				// The rest of the channel (the same key channelDecodes reads): a voice discovery
+				// past the first DQ_CO_CHANNEL_MAX partners, or never linked, of a busy paging
+				// channel clears the prior too. Newest seen first, at most
+				// CHANNEL_VOICE_SCAN_MAX discoveries in all.
+				const seen = new Set(ids)
+				let budget = CHANNEL_VOICE_SCAN_MAX - ids.length
+				for (const o of this.atKey(d.sourceIds[0] ?? "", d.frequencyKey)) {
+					if (budget <= 0) break
+					if (seen.has(o.id)) continue
+					budget--
+					if (heard(o.id)) return true
+				}
+				return false
+			},
 		}
 	}
 
