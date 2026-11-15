@@ -1000,6 +1000,32 @@ reader, the startup path and the open reply do not wait. Plans checked after the
 row count and retention reads keep `activity_received`, `activity_decoder` and
 `activity_kind`, and the timeline and band map walks keep `activity_produced`.
 
+**Recording links** (`src/core/activity/storage/links.ts`). Nothing new is indexed: a link is one
+`recordingId` row in `activity_refs`, whose key (`ref_type, ref_value, seq`) serves every link
+read. `hasRecording` reads `seq IN (SELECT seq FROM activity_refs WHERE ref_type =
+'recordingId')` (the list of linked rows, then the rowid), and a recording's rows (`refs` of type
+`recordingId`) read the key directly instead of probing every newer row: on a 250 000-row
+synthetic store with 7 300 links (`scripts/longevity/recording-links.ts`, load 6) the newest page
+reads in 3.8 ms, `hasRecording` true in 5.8 ms and false in 6.1 ms, one recording's rows in 2.1 ms
+(280 ms with the per-row probe, for a key that matched nothing). The other ref types keep the
+per-row probe (a job's id matches most rows, where it stops early).
+
+Stores written before links are backfilled once, on the writer thread after the open: 500 voice
+rows per transaction (read through `activity_category`), resumed from
+`store_meta.recordingLinkBackfill`. Each next chunk is queued from `setImmediate`, after the
+writes that arrived meanwhile, so a write waits for at most one chunk (queued from the chunk's
+own continuation, every chunk ran before any write: a reception waited 3 s). It stops at the newest
+row stored before the open: later rows came through the live path. On that store (14 700 voice
+rows, half of them linked) with a decoder admitting 50 receptions a second at the row cap, the
+backfill runs 30 chunks in 17 to 18 s in the background. A chunk alone takes 18 ms (median, at
+most 89 ms); beside the writes and the cap's prunes, at most 82 ms at load 5 and 200 to 250 ms at
+load 8. The main thread's event-loop delay peaked at 23 to 47 ms, as without the backfill (26 to
+35 ms over the same window). Admit-to-commit took at most 1.54 s at load 5 (0.88 s median; 1.42
+s and 0.77 s without the backfill) and 1.8 to 1.96 s at load 8 (0.9 s median; 1.38 s and 0.77 s
+without it): most of it is the open's retention seed and the cap's prune, and the backfill adds
+at most about one chunk. Then the writer sends the parent the full link set (at most 50 000, the
+catalogue bound), about 100 bytes each.
+
 The web app's chip counts (`liveCountsDelayMs` in
 `web/src/features/activity/controller.ts`) follow live rows every 4 s while a count
 takes under 80 ms. A slower count stretches the interval to 50 times its duration, so

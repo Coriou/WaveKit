@@ -41,7 +41,16 @@ export class DsdMarginProbe extends DsdFmeDecoder {
 }
 
 export const MARGIN_CENTRE_HZ = 433_000_000
-export const MARGIN_CAPTURE = { rateHz: 1_024_000, offsetHz: 162_500 } as const
+/** The captures the chain tests use (synthetic-frames.test.ts CAPTURES). */
+export const MARGIN_CAPTURES = {
+	"1024000": { rateHz: 1_024_000, offsetHz: 162_500 },
+	"2400000": { rateHz: 2_400_000, offsetHz: -287_500 },
+} as const
+/** WAVEKIT_MARGIN_RATE picks one (default 1.024 Msps). */
+export const MARGIN_CAPTURE =
+	process.env["WAVEKIT_MARGIN_RATE"] === "2400000"
+		? MARGIN_CAPTURES["2400000"]
+		: MARGIN_CAPTURES["1024000"]
 
 /** A transmission: what was sent, and how to count its checked frames. */
 export interface MarginSignal {

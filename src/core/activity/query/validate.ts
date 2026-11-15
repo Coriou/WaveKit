@@ -61,6 +61,7 @@ const REF_TYPES = [
 	"jobId",
 	"probeId",
 	"channelId",
+	"recordingId",
 ] as const satisfies readonly ActivityRefType[]
 
 const FACET_DIMENSIONS = [
@@ -91,6 +92,8 @@ export interface NormalisedQuery {
 	producedToMs: number | null
 	refs: { type: ActivityRefType; value: string }[]
 	entityKey: string | null
+	/** null: no filter; true / false: only rows with / without a recording link. */
+	hasRecording: boolean | null
 	fts: FtsConstraint
 }
 
@@ -136,6 +139,7 @@ const querySchema = z
 			.optional(),
 		entityKey: idSchema.optional(),
 		text: z.string().optional(),
+		hasRecording: z.boolean().optional(),
 	})
 	.strict()
 
@@ -231,6 +235,7 @@ export function normaliseQuery(
 				return left.value < right.value ? -1 : left.value > right.value ? 1 : 0
 			}),
 		entityKey: raw.entityKey ?? null,
+		hasRecording: raw.hasRecording ?? null,
 		fts,
 	}
 	const terms = countTerms(query)
@@ -255,6 +260,7 @@ export function countTerms(query: NormalisedQuery): number {
 	if (query.producedFromMs !== null) terms += 1
 	if (query.producedToMs !== null) terms += 1
 	if (query.entityKey !== null) terms += 1
+	if (query.hasRecording !== null) terms += 1
 	if (query.fts.kind !== "none") terms += 1
 	return terms
 }
@@ -283,6 +289,7 @@ export function hashQuery(query: NormalisedQuery): string {
 	if (Object.keys(producedAt).length > 0) body["producedAt"] = producedAt
 	if (query.refs.length > 0) body["refs"] = query.refs
 	if (query.entityKey !== null) body["entityKey"] = query.entityKey
+	if (query.hasRecording !== null) body["hasRecording"] = query.hasRecording
 	if (query.fts.kind === "match") body["text"] = query.fts.match
 	else if (query.fts.kind === "impossible") body["text"] = ""
 	return sha256Hex(canonicalJson(body))

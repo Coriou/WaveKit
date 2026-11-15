@@ -3,6 +3,7 @@ export interface PulseShape {
 	shaping: "rc" | "rrc" | "c4fm"
 	alpha: number
 	isinc?: boolean
+	delaySymbols?: number
 }
 export const AIR_SHAPES: {
 	p25: PulseShape
@@ -39,6 +40,7 @@ export function shapeFrequency(
 		isinc?: boolean
 		bt?: number
 		padSymbols?: number
+		delaySymbols?: number
 	},
 ): Float64Array
 export function afskFrequency(

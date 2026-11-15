@@ -204,11 +204,40 @@ export interface AnalogTransmissionPayload {
 	}
 }
 
+/**
+ * Payload of a `recording-change` record: one scanner analog recording kept for good (its
+ * provisional hold over, the file committed). Written once per such file, never for a discarded
+ * one. The row's `recording` and `recordingId` ref name the file while it exists.
+ */
+export interface RecordingChangePayload {
+	change: "finalized"
+	/** The recording's stable key, `scan:<discoveryId>~<file>` (also its inventory id). */
+	recordingId: string
+	recordingKind: "scanner-analog"
+	/** The discovery whose folder holds the file. */
+	discoveryId: string
+	observationId: string
+	/** The source the recorder heard; null when unknown. */
+	sourceId: string | null
+	/** The recorded channel's centre in Hz; null when unknown. */
+	frequencyHz: number | null
+	/**
+	 * When the recorded observation started (ISO). A long transmission rolls over into several
+	 * files: a later file starts after this.
+	 */
+	observationStartedAt: string | null
+	/** Audio length of the file. */
+	durationMs: number
+	/** When the file was kept (ISO); the record's producedAt. */
+	finalizedAt: string
+}
+
 /** Stored and returned record. commitSeq is assigned by the writer. */
 export type ActivityRecord =
 	| DecoderReceptionRecord
 	| IngestionGapRecord
 	| AnalogTransmissionRecord
+	| RecordingChangeRecord
 
 export interface DecoderReceptionRecord extends ActivityRecordBase {
 	kind: "decoder-reception"
@@ -223,6 +252,26 @@ export interface IngestionGapRecord extends ActivityRecordBase {
 export interface AnalogTransmissionRecord extends ActivityRecordBase {
 	kind: "analog-transmission"
 	payload: AnalogTransmissionPayload
+}
+
+export interface RecordingChangeRecord extends ActivityRecordBase {
+	kind: "recording-change"
+	payload: RecordingChangePayload
+}
+
+/**
+ * The recording a row links to: a dsd-fme call's file (its `call_end` row) or a scanner analog
+ * recording (its `recording-change` row). Removed when the file is deleted.
+ */
+export interface ActivityRecordingLink {
+	/**
+	 * The recording's stable key (RECORDING_KEEP_KEY: `dsd~<call name>` or
+	 * `scan:<discoveryId>~<file>`), also accepted by the recordings file route. Equals the
+	 * catalogue item's `key`.
+	 */
+	id: string
+	/** Audio length when known (a call's duration, a scanner file's length); null otherwise. */
+	durationMs: number | null
 }
 
 export interface ActivityRecordBase {
@@ -255,9 +304,14 @@ export interface ActivitySummary {
 	coalesced?: DecodeEnvelope["coalesced"]
 	/** The envelope's `aircraft`: who the row's aircraft is, as known when it was stored. */
 	aircraft?: DecodeEnvelope["aircraft"]
+	/** The row's playable recording; absent when it has none (or its file was deleted). */
+	recording?: ActivityRecordingLink
 }
 
-/** ref_type values; ref_value is the matching provenance/refs string. */
+/**
+ * ref_type values; ref_value is the matching provenance/refs string. `recordingId` is the
+ * linked recording's key (ActivityRecordingLink.id), present exactly while `recording` is.
+ */
 export type ActivityRefType =
 	| "callId"
 	| "discoveryId"
@@ -265,6 +319,7 @@ export type ActivityRefType =
 	| "jobId"
 	| "probeId"
 	| "channelId"
+	| "recordingId"
 
 /** Query filters shared by REST, facets and WS replay. */
 export interface ActivityQuery {
@@ -280,6 +335,8 @@ export interface ActivityQuery {
 	entityKey?: string
 	/** Plain text, at most 256 UTF-8 bytes; never raw FTS syntax. */
 	text?: string
+	/** true: only rows with a playable recording (`recording`); false: only rows without one. */
+	hasRecording?: boolean
 }
 
 export interface ActivitySearchPage {

@@ -312,14 +312,16 @@ describe("deferred retention seed on the worker protocol", () => {
 				rows: [shareRow("new", "b", FIXTURE_CLOCK_ANCHOR_MS)],
 				nowMs: FIXTURE_CLOCK_ANCHOR_MS,
 			})
-			const [, , indexed, wrote] = await w.received(4)
+			const [, , indexed, links, wrote] = await w.received(5)
 			// The store was created with the facets index: the post-seed check builds nothing.
 			expect(indexed).toMatchObject({ id: 0, type: "indexed", built: false })
+			// Then the recording links (nothing to backfill in a store created linked).
+			expect(links).toMatchObject({ id: 0, type: "links", reset: true })
 			expect(wrote).toMatchObject({ id: 2, type: "wrote" })
 			if (wrote?.type !== "wrote" || !wrote.result.ok) return
 			expect(wrote.result.snapshot.seedScans).toBe(1)
 			w.worker.postMessage({ id: 3, type: "close" })
-			expect((await w.received(5))[4]).toMatchObject({ id: 3, type: "closed" })
+			expect((await w.received(6))[5]).toMatchObject({ id: 3, type: "closed" })
 		} finally {
 			await w.worker.terminate()
 		}
@@ -416,9 +418,12 @@ describe("facets covering index migration on the worker protocol", () => {
 				rows: [shareRow("new", "b", FIXTURE_CLOCK_ANCHOR_MS)],
 				nowMs: FIXTURE_CLOCK_ANCHOR_MS,
 			})
-			expect((await w.received(4))[3]).toMatchObject({ id: 2, type: "wrote" })
+			// The recording link backfill (no voice rows here), then the full link set.
+			const [, , , links, wrote] = await w.received(5)
+			expect(links).toMatchObject({ id: 0, type: "links", reset: true })
+			expect(wrote).toMatchObject({ id: 2, type: "wrote" })
 			w.worker.postMessage({ id: 3, type: "close" })
-			expect((await w.received(5))[4]).toMatchObject({ id: 3, type: "closed" })
+			expect((await w.received(6))[5]).toMatchObject({ id: 3, type: "closed" })
 		} finally {
 			await w.worker.terminate()
 		}

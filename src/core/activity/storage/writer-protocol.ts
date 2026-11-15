@@ -1,3 +1,4 @@
+import type { ActivityLinkEvent, ActivityLinkOp } from "./contract.js"
 import type { ActivityLimits } from "./limits.js"
 import type { BuiltActivityRow } from "./row.js"
 import type {
@@ -51,6 +52,24 @@ interface IndexedActivityWorkerMessage {
 	snapshot: ActivityWorkerSnapshot
 }
 
+/**
+ * Unsolicited (id 0): recording links from the open-time work on the serial chain. A backfill
+ * chunk's links (`reset` false), then, once the backfill is done, every link (`reset` true: the
+ * parent's index is replaced). Write replies after it carry their own links.
+ */
+interface LinksActivityWorkerMessage {
+	id: 0
+	type: "links"
+	reset: boolean
+	events: ActivityLinkEvent[]
+	/** Backfill progress: voice rows examined by this chunk; absent on the reset. */
+	examined?: number
+	/** Backfill progress: wall time of this chunk's transaction (ms). */
+	ms?: number
+	/** The backfill failed (it resumes from its cursor on the next open). */
+	error?: string
+}
+
 interface ErrorActivityWorkerResponse {
 	id: number
 	type: "error"
@@ -60,9 +79,18 @@ interface ErrorActivityWorkerResponse {
 	lockPath?: string
 }
 
+interface WriteActivityWorkerRequest {
+	id: number
+	type: "write"
+	rows: BuiltActivityRow[]
+	nowMs: number
+	/** Link changes applied after the rows commit (links.ts applyActivityLinks). */
+	links?: ActivityLinkOp[]
+}
+
 export type ActivityWorkerRequest =
 	| OpenActivityWorkerRequest
-	| { id: number; type: "write"; rows: BuiltActivityRow[]; nowMs: number }
+	| WriteActivityWorkerRequest
 	| { id: number; type: "checkpoint"; reason: "threshold" | "close" }
 	| { id: number; type: "close" }
 
@@ -73,6 +101,7 @@ export type ActivityWorkerResponse =
 	| { id: number; type: "closed" }
 	| SeededActivityWorkerMessage
 	| IndexedActivityWorkerMessage
+	| LinksActivityWorkerMessage
 	| ErrorActivityWorkerResponse
 
 const REQUEST_TYPES = new Set(["open", "write", "checkpoint", "close"])
@@ -100,7 +129,11 @@ export function isActivityWorkerRequest(
 		)
 	}
 	if (type === "write")
-		return Array.isArray(value["rows"]) && typeof value["nowMs"] === "number"
+		return (
+			Array.isArray(value["rows"]) &&
+			typeof value["nowMs"] === "number" &&
+			(value["links"] === undefined || Array.isArray(value["links"]))
+		)
 	if (type === "checkpoint")
 		return value["reason"] === "threshold" || value["reason"] === "close"
 	return true
@@ -119,6 +152,7 @@ export function isActivityWorkerResponse(
 		type === "closed" ||
 		type === "seeded" ||
 		type === "indexed" ||
+		type === "links" ||
 		type === "error"
 	)
 }

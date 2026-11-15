@@ -31,6 +31,7 @@ import type {
 	LiveAudioConfig,
 	LiveAudioLevel,
 	LiveAudioStatus,
+	RecordingInventoryItem,
 	ScanJob,
 	ScannerIdentifyEventData,
 	ScannerIdentifyResult,
@@ -96,7 +97,12 @@ import {
 import type { MockMessage, MockSignal } from "./data.ts"
 import { registerMapMock } from "./map.ts"
 import type { MapMock } from "./map.ts"
-import { registerRecordingsMock } from "./recordings.ts"
+import {
+	createRecordingsState,
+	linkRecordingActivity,
+	recordingSeeds,
+	registerRecordingsMock,
+} from "./recordings.ts"
 import { registerOperatorData } from "./operator-data.ts"
 import { registerBandPlansMock } from "./bandplans.ts"
 import {
@@ -287,6 +293,8 @@ const ACTIVITY_PARAMS = new Set([
 	"producedTo",
 	"entityKey",
 	"text",
+	"refs",
+	"hasRecording",
 	"order",
 	"limit",
 	"pageToken",
@@ -340,6 +348,15 @@ function matchesQuery(item: ActivitySummary, q: ActivityQuery): boolean {
 		return false
 	if (q.categories && !q.categories.includes(item.category)) return false
 	if (q.entityKey !== undefined && item.entityKey !== q.entityKey) return false
+	if (
+		q.hasRecording !== undefined &&
+		(item.recording !== undefined) !== q.hasRecording
+	)
+		return false
+	// Mock rows carry no refs but their recording: only `recordingId` can match.
+	for (const ref of q.refs ?? [])
+		if (ref.type !== "recordingId" || item.recording?.id !== ref.value)
+			return false
 	if (q.frequencyHz) {
 		if (item.frequencyHz === null) return false
 		if (q.frequencyHz.min !== undefined && item.frequencyHz < q.frequencyHz.min)
@@ -426,6 +443,24 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 	}
 	if (typeof params["entityKey"] === "string") q.entityKey = params["entityKey"]
 	if (typeof params["text"] === "string") q.text = params["text"]
+	const has = params["hasRecording"]
+	if (has === "true") q.hasRecording = true
+	else if (has === "false") q.hasRecording = false
+	else if (has !== undefined)
+		throw new QueryError("hasRecording must be true or false")
+	if (params["refs"] !== undefined) {
+		const refs: { type: "recordingId"; value: string }[] = []
+		for (const entry of asStrings(params["refs"])) {
+			const colon = entry.indexOf(":")
+			if (colon <= 0 || colon === entry.length - 1)
+				throw new QueryError("refs entries must be type:value")
+			refs.push({
+				type: entry.slice(0, colon) as "recordingId",
+				value: entry.slice(colon + 1),
+			})
+		}
+		q.refs = refs
+	}
 	return q
 }
 
@@ -1077,9 +1112,97 @@ export async function buildMockServer(
 		return summary
 	}
 
+	// Recordings (./recordings.ts) are seeded before the history so their Activity rows are in it.
+	const recordingsState = createRecordingsState()
+	/**
+	 * A recording's Activity row, as the core writes it: a dsd-fme call's `call_end` row, or a
+	 * scanner analog recording's `recording-change` row, linked by `recording`. Scanner DV files
+	 * (probe calls) have no row.
+	 */
+	const recordingSummary = (
+		item: RecordingInventoryItem,
+		t: number,
+	): ActivitySummary | null => {
+		const id = item.key ?? item.id
+		const recording = { id, durationMs: item.durationMs }
+		const iso = new Date(t).toISOString()
+		if (item.kind === "dsd-fme-call") {
+			seq += 1
+			return {
+				eventId: `evt_${seq.toString(36)}`,
+				commitSeq: String(seq),
+				kind: "decoder-reception",
+				producedAt: iso,
+				receivedAt: iso,
+				decoderId: item.decoderId,
+				sourceId: "rtl-sdr",
+				protocol: "dmr",
+				category: "voice",
+				frequencyHz: null,
+				entityKey: `talkgroup:${item.talkgroup ?? "0"}`,
+				title: `DMR TG ${item.talkgroup ?? "0"} from ${item.source ?? "0"}`,
+				fields: [
+					{
+						key: "talkgroup",
+						label: "Talkgroup",
+						value: Number(item.talkgroup ?? 0),
+					},
+					{ key: "source", label: "Radio", value: Number(item.source ?? 0) },
+					{
+						key: "duration",
+						label: "Duration",
+						unit: "ms",
+						value: item.durationMs ?? 0,
+					},
+				],
+				recording,
+			}
+		}
+		if (item.kind !== "scanner-analog") return null
+		seq += 1
+		const mhz = item.frequencyHz === null ? null : item.frequencyHz / 1e6
+		return {
+			eventId: `evt_${seq.toString(36)}`,
+			commitSeq: String(seq),
+			kind: "recording-change",
+			producedAt: iso,
+			receivedAt: iso,
+			decoderId: null,
+			sourceId: "rtl-sdr",
+			protocol: "analog",
+			category: "voice",
+			frequencyHz: item.frequencyHz,
+			entityKey: null,
+			title: mhz === null ? "Scanner recording" : `Recording ${mhz} MHz`,
+			fields: [
+				{
+					key: "durationMs",
+					label: "Duration",
+					value: item.durationMs ?? 0,
+					unit: "ms",
+				},
+			],
+			recording,
+		}
+	}
+
 	const seedHistory = () => {
 		const now = Date.now()
 		const items: { at: number; build: (at: number) => ActivitySummary }[] = []
+		for (const rec of recordingSeeds(recordingsState)) {
+			const at = Date.parse(rec.modifiedAt)
+			const rowed = rec.kind === "dsd-fme-call" || rec.kind === "scanner-analog"
+			if (at < now - 45 * 60_000 || !rowed) continue
+			items.push({
+				at,
+				build: t => {
+					const summary = recordingSummary(rec, t)
+					if (summary === null) throw new Error("recording row kind changed")
+					linkRecordingActivity(recordingsState, rec.id, summary.eventId)
+					return summary
+				},
+			})
+		}
 		let at = now - 45 * 60_000
 		for (let round = 0; round < 3; round++) {
 			for (const m of MOCK_MESSAGES) {
@@ -1713,7 +1836,15 @@ export async function buildMockServer(
 		},
 	})
 	// --- Recordings (./recordings.ts): the WG8 inventory, WG9 Keep and delete, synthetic WAV files.
-	const recordings = registerRecordingsMock(app)
+	const recordings = registerRecordingsMock(app, {
+		state: recordingsState,
+		onRecording: item => {
+			const summary = recordingSummary(item, Date.now())
+			if (summary === null) return null
+			pushActivity(summary)
+			return summary.eventId
+		},
+	})
 	// GET /api/access/bootstrap is deliberately not mounted: a legacy core answers it with 404.
 
 	app.get("/api/sources", async () => sourceStatuses())

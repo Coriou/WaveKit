@@ -1,4 +1,6 @@
 import type {
+	ActivityLinkEvent,
+	ActivityLinkOp,
 	ActivityRetentionPolicy,
 	ActivityRetentionShare,
 	ActivityRetentionStats,
@@ -35,6 +37,13 @@ import {
 } from "./fair-share.js"
 import type { FairStepPlan } from "./fair-share.js"
 import type { ActivityLimits } from "./limits.js"
+import {
+	ACTIVITY_LINK_BACKFILL_CHUNK,
+	applyActivityLinks,
+	backfillRecordingLinks,
+	readRecordingLinks,
+} from "./links.js"
+import type { BackfillPending, LinkBackfillStep } from "./links.js"
 import type { BuiltActivityRow } from "./row.js"
 import type { SqliteDatabase } from "./sqlite.js"
 
@@ -61,6 +70,10 @@ export interface WriterWorkSuccess {
 	commit: CommitBatchSuccess
 	prune: PruneResult
 	snapshot: ActivityWorkerSnapshot
+	/** Recording links committed: rows stored with one, then the link ops applied after them. */
+	links: ActivityLinkEvent[]
+	/** The link ops of this write failed and were dropped (the rows committed). */
+	linkError?: string
 	note?: string
 }
 
@@ -84,7 +97,19 @@ export interface ActivitySession {
 	 * rowid scan (still correct) and is retried on the next open.
 	 */
 	buildFacetsIndex(): FacetsIndexBuild
-	write(rows: readonly BuiltActivityRow[], nowMs: number): WriterWorkResult
+	/** `links` are applied after the rows commit (applyActivityLinks). */
+	write(
+		rows: readonly BuiltActivityRow[],
+		nowMs: number,
+		links?: readonly ActivityLinkOp[],
+	): WriterWorkResult
+	/**
+	 * One chunk of the recording link backfill (links.ts); `done` once the store is linked.
+	 * The worker runs it on its serial chain until done, between writes.
+	 */
+	backfillLinks(): LinkBackfillStep
+	/** The links the parent remembers (newest first, at most ACTIVITY_LINKS_MAX). */
+	readLinks(): ActivityLinkEvent[]
 	checkpoint(reason: "threshold" | "close"): ActivityWorkerSnapshot
 	close(): void
 }
@@ -127,6 +152,12 @@ export function createActivitySession(
 	/** Wall time of the last seed scan (design F seed budget). */
 	let seedMs = 0
 	let seedScans = 0
+	/** Backfill: calls waiting for their late file row, between chunks. */
+	const backfillPending: BackfillPending = new Map()
+	/** Links of rows a fair delete removed during this write (reported with its links). */
+	const prunedLinks: ActivityLinkEvent[] = []
+	/** The backfill stops at the newest row stored before this open (committedMax). */
+	const backfillUntil = BigInt(state.identity.committedMax)
 	const seed = (): boolean => {
 		const started = performance.now()
 		seedScans += 1
@@ -339,6 +370,7 @@ export function createActivitySession(
 		const runFair = (chosen: readonly FairDeleteTarget[]): PruneResult => {
 			const done = pruneActivityFair(db, limits, chosen, reading)
 			counters.subtract(done.deletedRows)
+			prunedLinks.push(...done.unlinked)
 			if (done.vacuumError !== undefined)
 				stepNote = `activity incremental vacuum failed: ${done.vacuumError}`
 			if (done.changed) {
@@ -429,7 +461,18 @@ export function createActivitySession(
 			}
 			return build
 		},
-		write(rows, nowMs) {
+		backfillLinks() {
+			return backfillRecordingLinks(
+				db,
+				backfillPending,
+				ACTIVITY_LINK_BACKFILL_CHUNK,
+				backfillUntil,
+			)
+		},
+		readLinks() {
+			return readRecordingLinks(db)
+		},
+		write(rows, nowMs, linkOps = []) {
 			seedOnce()
 			if (throws > 0) {
 				throws -= 1
@@ -439,9 +482,18 @@ export function createActivitySession(
 				failures -= 1
 				return { ok: false, message: "injected write failure" }
 			}
+			prunedLinks.length = 0
 			const commit = commitActivityBatch(db, rows)
 			if (!commit.ok) return { ok: false, message: commit.message }
 			if (counters.live) counters.addCommitted(rows, commit.committedIndexes)
+			const links = [...commit.linked]
+			let linkError: string | undefined
+			try {
+				links.push(...applyActivityLinks(db, linkOps))
+			} catch (error) {
+				// The rows are committed; the link changes are dropped (logged by the store).
+				linkError = messageOf(error)
+			}
 			const previous = state.identity
 			let prune: PruneResult = {
 				deleted: 0,
@@ -493,10 +545,14 @@ export function createActivitySession(
 			} catch (error) {
 				note = messageOf(error)
 			}
+			// After the links applied: a row linked and then pruned by this write ends unlinked.
+			links.push(...prunedLinks)
+			prunedLinks.length = 0
 			const shot = snapshot()
+			const linked = linkError === undefined ? { links } : { links, linkError }
 			if (note !== undefined)
-				return { ok: true, commit, prune, snapshot: shot, note }
-			return { ok: true, commit, prune, snapshot: shot }
+				return { ok: true, commit, prune, snapshot: shot, ...linked, note }
+			return { ok: true, commit, prune, snapshot: shot, ...linked }
 		},
 		checkpoint(reason) {
 			refresh(reason)

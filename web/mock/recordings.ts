@@ -13,6 +13,7 @@
  */
 import type { FastifyInstance, FastifyReply } from "fastify"
 import {
+	RECORDING_DSD_KEY,
 	RECORDING_INVENTORY_ID,
 	RECORDINGS_PAGE_LIMIT_DEFAULT,
 	RECORDINGS_PAGE_LIMIT_MAX,
@@ -153,6 +154,8 @@ function makeRec(s: Seed, at: Date): Rec {
 			seed: n,
 			item: {
 				id: `dsd:0~${name}`,
+				key: `dsd~${name}`,
+				activityEventId: null,
 				kind: s.kind,
 				decoderId: "dsd-fme",
 				discoveryId: null,
@@ -177,6 +180,8 @@ function makeRec(s: Seed, at: Date): Rec {
 		seed: n,
 		item: {
 			id: `scan:${discoveryId}~${prefix}-${localStamp(at)}.wav`,
+			key: `scan:${discoveryId}~${prefix}-${localStamp(at)}.wav`,
+			activityEventId: null,
 			kind: s.kind,
 			decoderId: null,
 			discoveryId,
@@ -269,18 +274,57 @@ export interface RecordingsMock {
 	stop(): void
 }
 
-export function registerRecordingsMock(
-	app: FastifyInstance,
-	options: { now?: () => number; newCallMs?: number } = {},
-): RecordingsMock {
-	const now = options.now ?? Date.now
+/** The seeded recordings, made before the routes so Activity history can link them. */
+export interface RecordingsState {
+	readonly started: number
+	readonly recs: Map<string, Rec>
+}
+
+export function createRecordingsState(
+	now: () => number = Date.now,
+): RecordingsState {
 	const started = now()
 	const recs = new Map<string, Rec>()
-	const files = new Map<string, Buffer>()
 	for (const s of SEEDS) {
 		const r = makeRec(s, new Date(started - s.agoMin * 60_000))
 		recs.set(r.item.id, r)
 	}
+	return { started, recs }
+}
+
+/** The seeded recordings, oldest first. */
+export function recordingSeeds(
+	state: RecordingsState,
+): readonly RecordingInventoryItem[] {
+	return [...state.recs.values()]
+		.map(r => r.item)
+		.sort((a, b) => a.modifiedAt.localeCompare(b.modifiedAt))
+}
+
+/** As the core's link index: the recording's Activity row (`activityEventId`). */
+export function linkRecordingActivity(
+	state: RecordingsState,
+	id: string,
+	eventId: string,
+): void {
+	const r = state.recs.get(id)
+	if (r) r.item = { ...r.item, activityEventId: eventId }
+}
+
+export function registerRecordingsMock(
+	app: FastifyInstance,
+	options: {
+		now?: () => number
+		newCallMs?: number
+		state?: RecordingsState
+		/** A new call's Activity row (a `call_end` with its link); returns its eventId. */
+		onRecording?: (item: RecordingInventoryItem) => string | null
+	} = {},
+): RecordingsMock {
+	const now = options.now ?? Date.now
+	const state = options.state ?? createRecordingsState(now)
+	const recs = state.recs
+	const files = new Map<string, Buffer>()
 	const sorted = () => [...recs.values()].map(r => r.item).sort(compare)
 
 	const NEW_CALLS: readonly Seed[] = [
@@ -315,6 +359,8 @@ export function registerRecordingsMock(
 		if (!s) throw new Error("no new call seed")
 		const r = makeRec(s, new Date(now() - s.durationS * 1000 - 2000))
 		recs.set(r.item.id, r)
+		const eventId = options.onRecording?.(r.item) ?? null
+		if (eventId !== null) r.item = { ...r.item, activityEventId: eventId }
 		return r.item
 	}
 	const timer = setInterval(addCall, options.newCallMs ?? NEW_CALL_MS)
@@ -326,6 +372,14 @@ export function registerRecordingsMock(
 		RECORDING_INVENTORY_ID.test(id)
 			? (recs.get(id) ?? null)
 			: null
+	/** The file route also takes a dsd-fme call's stable key (an Activity row's recording id). */
+	const lookupFile = (id: unknown): Rec | null => {
+		const r = lookup(id)
+		if (r !== null || typeof id !== "string" || !RECORDING_DSD_KEY.test(id))
+			return r
+		for (const x of recs.values()) if (x.item.key === id) return x
+		return null
+	}
 	const notFound = (reply: FastifyReply) =>
 		error(reply, 404, "RECORDING_NOT_FOUND", "Recording not found", "Not Found")
 
@@ -458,7 +512,7 @@ export function registerRecordingsMock(
 	app.get<{ Params: { id: string } }>(
 		"/api/recordings/:id/file",
 		async (request, reply) => {
-			const r = lookup(request.params.id)
+			const r = lookupFile(request.params.id)
 			if (!r) return notFound(reply)
 			let wav = files.get(r.item.id)
 			if (!wav) {

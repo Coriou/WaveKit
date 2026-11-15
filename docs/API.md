@@ -6509,6 +6509,11 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   unlike `id` it survives a renumbering of the dsd-fme directories.
   `ownerDiscoveryId` is the live discovery owning the folder (through merges),
   null when none does and for dsd-fme calls.
+- `activityEventId` is the Activity row linked to the recording (a dsd-fme
+  call's `call_end` row, a scanner analog recording's `recording-change` row;
+  `GET /api/activity/:eventId`), read at list time from memory; null when no
+  row is known (no such row, the row was pruned, or Activity is off). Older
+  cores omit it. See "Recording links" under Activity.
 - `kept` (optional in `@wavekit/api-types`; older cores omit it): true when
   the recording is kept, a delete of it is in progress, or the keep store is not
   usable (fail closed); read at list time.
@@ -6570,8 +6575,11 @@ Whole-file download under the protected download lease (429 `ACCESS_CAPACITY`,
 `Content-Type: audio/wav`, `Content-Disposition: attachment;
 filename="<basename>"`, `Accept-Ranges: none`, `Cache-Control: no-store`. No
 `Range` support: a request with `Range` gets the whole file with 200, so a
-browser player must buffer the file to seek. The id is checked against
-`RECORDING_INVENTORY_ID` before any filesystem lookup and resolved again at
+browser player must buffer the file to seek. The id is a listed `id` or a
+recording key: an Activity row's `recording.id` plays as it is (`scan:…` keys
+are inventory ids; a `dsd~<call name>` key is served from the first dsd-fme
+directory that holds it, for a name the listing would list only). The id is checked against `RECORDING_INVENTORY_ID`
+or `RECORDING_DSD_KEY` before any filesystem lookup and resolved again at
 request time with the listing's rules; the opened file is verified (regular,
 not fresh, the same file the directory names, no symbolic link on the way). An
 unknown, malformed or no longer eligible id is 404 `RECORDING_NOT_FOUND`.
@@ -7144,8 +7152,9 @@ Search summaries inside one snapshot.
 
 Query parameters: `kinds`, `sourceIds`, `decoderIds`, `protocols`,
 `categories`, `frequencyMin`, `frequencyMax`, `producedFrom`, `producedTo`,
-`entityKey`, `text`, `refs` (`type:value`, repeated), `order` (`asc` or
-`desc`), `limit`, `pageToken`. An unknown parameter is 400
+`entityKey`, `text`, `refs` (`type:value`, repeated), `hasRecording` (`true`
+or `false`), `order` (`asc` or `desc`), `limit`, `pageToken`. An unknown
+parameter is 400
 `ACTIVITY_QUERY_INVALID`; its message names the rejected parameter and lists
 all accepted parameters, derived from the same list that validates the query.
 
@@ -7208,6 +7217,57 @@ registered operator. Search matches these values, so an
 aircraft's history is found by registration after it has left the live fleet.
 Default page size is 100 and the maximum is 200. A page token is bound to
 the same query and expires with the snapshot (5 minutes).
+
+#### Recording links
+
+A row with a playable recording has `recording: { id, durationMs }` in its
+summary (search, replay frames). `id` is the recording's stable key, the same
+string as the recordings catalogue item's `key`; `GET
+/api/recordings/<id>/file` plays it (protected mode). `durationMs` is the
+call's duration or the scanner file's length, null when unknown. One id joins
+both directions:
+
+- row → recording: `recording.id`;
+- recording → rows: `GET /api/activity?refs=recordingId:<key>` (read from the
+  refs index, a few ms at 250,000 rows), or the catalogue item's
+  `activityEventId`;
+- `hasRecording=true` keeps only rows with a recording, `false` only rows
+  without one (also in facets and replay queries: `hasRecording` in the query
+  object). "With audio" is this filter.
+
+Which rows link:
+
+| Recording                                           | Activity row                                                                                                                                                                             |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| dsd-fme call (a configured decoder's per-call file) | its `call_end` row (`decoder-reception`, `outputType: "call_end"`, a `callId` ref). A file dsd-fme finds after the call ended (`wavFileUpdate`) updates that row: never a row of its own |
+| scanner analog recording                            | one `recording-change` row, written when the scanner keeps the file for good (after any provisional hold). A file discarded at its finish or when its hold ends never gets a row         |
+| scanner digital voice (a probe's call file)         | not linked yet: the probe's call rows name no file of the catalogue                                                                                                                      |
+
+A link goes when its file goes (pruned, deleted, retention, a removed
+discovery, removed by hand): once a complete catalogue has lacked the key on
+two sweeps at least 90 s apart (sweeps every 60 s), the row loses `recording`
+and its `recordingId` ref; the row itself stays. A sweep leaves a key as it is
+while the catalogue cannot tell about it: its first build, a full pass or
+refresh re-indexing folders, a pass that met a directory error, files left out
+at a bound, and, for a `dsd~` key only, a configured dsd-fme directory that is
+missing (not created yet, or unmounted); other keys are still judged. So a
+deleted file's link usually goes within two to three minutes. Only the summary and the refs change: the stored record stays as it
+was received. dsd-fme reports the file as an absolute path; Activity stores and
+serves its file name only (`decodedData.wavFile`), never a path, and drops a
+`wavFile` that is not a call file name. Rows stored by cores before links are
+linked once, in the background, after the store opens (rows of a probe whose
+file is not in the catalogue are unlinked by the sweep), and their `wavFile` is
+served as a file name.
+
+A `recording-change` record's `payload`: `change` (`"finalized"`),
+`recordingId` (the key, `scan:<discoveryId>~<file>`), `recordingKind`
+(`"scanner-analog"`), `discoveryId` (the folder's discovery), `observationId`,
+`sourceId`, `frequencyHz` (the recorded channel's centre; null when unknown),
+`observationStartedAt` (the observation's start: a long transmission rolls over
+into several files, so a later file starts after it), `durationMs` and
+`finalizedAt` (its `producedAt`). Its summary: category `voice`, protocol
+`analog`, title `Recording <MHz> MHz`, one `durationMs` field, refs
+`recordingId`, `discoveryId` and `observationId`.
 
 ### GET /api/activity/trails
 

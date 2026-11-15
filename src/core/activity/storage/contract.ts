@@ -72,11 +72,40 @@ export interface AnalogTransmissionPayload {
 	}
 }
 
+/**
+ * Payload of a `recording-change` record: one scanner analog recording kept for good (its
+ * provisional hold over, the file committed). Written once per such file, never for a discarded
+ * one. The row's `recording` and `recordingId` ref name the file while it exists.
+ */
+export interface RecordingChangePayload {
+	change: "finalized"
+	/** The recording's stable key, `scan:<discoveryId>~<file>` (also its inventory id). */
+	recordingId: string
+	recordingKind: "scanner-analog"
+	/** The discovery whose folder holds the file. */
+	discoveryId: string
+	observationId: string
+	/** The source the recorder heard; null when unknown. */
+	sourceId: string | null
+	/** The recorded channel's centre in Hz; null when unknown. */
+	frequencyHz: number | null
+	/**
+	 * When the recorded observation started (ISO). A long transmission rolls over into several
+	 * files: a later file starts after this.
+	 */
+	observationStartedAt: string | null
+	/** Audio length of the file. */
+	durationMs: number
+	/** When the file was kept (ISO); the record's producedAt. */
+	finalizedAt: string
+}
+
 /** Stored and returned record. commitSeq is assigned by the writer. */
 export type ActivityRecord =
 	| DecoderReceptionRecord
 	| IngestionGapRecord
 	| AnalogTransmissionRecord
+	| RecordingChangeRecord
 
 export interface DecoderReceptionRecord extends ActivityRecordBase {
 	kind: "decoder-reception"
@@ -91,6 +120,26 @@ export interface IngestionGapRecord extends ActivityRecordBase {
 export interface AnalogTransmissionRecord extends ActivityRecordBase {
 	kind: "analog-transmission"
 	payload: AnalogTransmissionPayload
+}
+
+export interface RecordingChangeRecord extends ActivityRecordBase {
+	kind: "recording-change"
+	payload: RecordingChangePayload
+}
+
+/**
+ * The recording a row links to: a dsd-fme call's file (its `call_end` row) or a scanner analog
+ * recording (its `recording-change` row). Removed when the file is deleted.
+ */
+export interface ActivityRecordingLink {
+	/**
+	 * The recording's stable key (RECORDING_KEEP_KEY: `dsd~<call name>` or
+	 * `scan:<discoveryId>~<file>`), also accepted by the recordings file route. Equals the
+	 * catalogue item's `key`.
+	 */
+	id: string
+	/** Audio length when known (a call's duration, a scanner file's length); null otherwise. */
+	durationMs: number | null
 }
 
 export interface ActivityRecordBase {
@@ -123,6 +172,8 @@ export interface ActivitySummary {
 	coalesced?: DecodeEnvelope["coalesced"]
 	/** The envelope's `aircraft`: who the row's aircraft is, as known when it was stored. */
 	aircraft?: DecodeEnvelope["aircraft"]
+	/** The row's playable recording; absent when it has none (or its file was deleted). */
+	recording?: ActivityRecordingLink
 }
 
 export const MAX_RECORD_BYTES = 144 * 1024
@@ -144,6 +195,12 @@ export type StoreMetaKey =
 	| "holeWatermark"
 	/** WG3 (req 3.2): increments once per transaction that opens a hole; "0" when none. */
 	| "holeGeneration"
+	/**
+	 * Recording links: the greatest seq the backfill of stores written before the links has
+	 * examined ("0" when it has not started), or "done". Inserted OR IGNORE on open; a new store
+	 * starts "done". schemaVersion stays 1.
+	 */
+	| "recordingLinkBackfill"
 
 /**
  * v1 schema. The writer applies it inside one transaction on first open;
@@ -211,7 +268,10 @@ CREATE VIRTUAL TABLE activity_fts USING fts5 (
 export const ACTIVITY_FACETS_INDEX = "activity_facets"
 export const ACTIVITY_FACETS_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${ACTIVITY_FACETS_INDEX} ON activity (seq, category, protocol, decoder_id, source_id, kind, produced_at_ms)`
 
-/** ref_type values; ref_value is the matching provenance/refs string. */
+/**
+ * ref_type values; ref_value is the matching provenance/refs string. `recordingId` is the
+ * linked recording's key (ActivityRecordingLink.id), present exactly while `recording` is.
+ */
 export type ActivityRefType =
 	| "callId"
 	| "discoveryId"
@@ -219,6 +279,7 @@ export type ActivityRefType =
 	| "jobId"
 	| "probeId"
 	| "channelId"
+	| "recordingId"
 
 export interface StoreIdentity {
 	storeUuid: string
@@ -250,15 +311,79 @@ export interface ActivityStoreHandle {
 	 * Non-blocking; never throws on overload, counts loss instead. `present`
 	 * runs only for a kept reception; its envelope is stored instead.
 	 */
-	admit(envelope: DecodeEnvelope, present?: CoalescePresenter): AdmitResult
+	admit(
+		envelope: DecodeEnvelope,
+		present?: CoalescePresenter,
+		/** The stored row's playable recording (row.ts rowWithRecording). */
+		recording?: ActivityRecordingLink,
+	): AdmitResult
 	/**
 	 * WG1: admits one closed analog transmission as an `analog-transmission` record (eventId =
 	 * payload.transmissionId), with the same non-blocking, loss-counting semantics as admit().
 	 * Never "telemetry".
 	 */
 	admitTransmission(input: AnalogTransmissionAdmission): AdmitResult
+	/**
+	 * Admits one `recording-change` record (eventId allocated here), with admit()'s non-blocking,
+	 * loss-counting semantics; the per-source bucket is `recording:<sourceId>`.
+	 */
+	admitRecording?(input: RecordingChangeAdmission): AdmitResult
+	/**
+	 * Queues a link change (ActivityLinkOp). A row still queued is changed in place (it is then
+	 * stored with the link); stored rows change in the writer's next transaction. Never throws;
+	 * at most ACTIVITY_LINK_OPS_MAX wait, the oldest is dropped (counted) past that.
+	 */
+	link?(op: ActivityLinkOp): void
+	/** The eventId of the newest row linked to a recording key, from memory; null when none. */
+	recordingEventId?(recordingId: string): string | null
+	/** The linked recording keys (memory, in no order): what the link sweep checks. */
+	linkedRecordings?(): readonly string[]
+	/** Link changes as they commit (and the full set when the writer loads it); returns off. */
+	onLinks?(listener: (events: readonly ActivityLinkEvent[]) => void): () => void
 	stats(): ActivityStoreStats
 	close(): Promise<void>
+}
+
+/**
+ * A change to recording links (summary `recording` and the `recordingId` ref), applied by the
+ * writer after the rows queued before it. `link-call`: the `call_end` row of that decoder's call
+ * (its `callId` ref) gains the link (a file found after the row was stored). `unlink`: every row
+ * linked to these recordings loses the link (the files were deleted). Stored records are never
+ * rewritten.
+ */
+export type ActivityLinkOp = ActivityLinkCallOp | ActivityUnlinkOp
+
+/** A late call file: that decoder's call's `call_end` row gains the link. */
+export interface ActivityLinkCallOp {
+	type: "link-call"
+	decoderId: string
+	callId: string
+	recording: ActivityRecordingLink
+}
+
+/** Deleted files: every row linked to these recordings loses the link. */
+export interface ActivityUnlinkOp {
+	type: "unlink"
+	recordingIds: readonly string[]
+}
+
+/**
+ * One row gaining (`linked`) or losing a recording link, as committed. An unlink with `eventId`
+ * "" means no row holds the key any more.
+ */
+export interface ActivityLinkEvent {
+	recordingId: string
+	eventId: string
+	/** The row's commitSeq (decimal). */
+	seq: string
+	linked: boolean
+}
+
+/** A scanner recording kept for good, admitted as a `recording-change` record. */
+export interface RecordingChangeAdmission {
+	payload: RecordingChangePayload
+	/** ISO; when Activity received it. */
+	receivedAt: string
 }
 
 export interface AnalogTransmissionAdmission {
@@ -418,6 +543,8 @@ export interface ActivityQuery {
 	entityKey?: string
 	/** Plain text, at most 256 UTF-8 bytes; never raw FTS syntax. */
 	text?: string
+	/** true: only rows with a playable recording (`recording`); false: only rows without one. */
+	hasRecording?: boolean
 }
 
 /** Provided by the query lane; Main mounts it. */

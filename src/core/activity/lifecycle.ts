@@ -12,11 +12,13 @@ import {
 	inertActivityService,
 	startActivityRuntime,
 	type ActivityFailureCode,
+	type ActivityRecordingLinks,
 	type ActivityRuntime,
 	type StartActivityRuntimeOptions,
 } from "./runtime.js"
 import type {
 	ActivityLifecycleStatus,
+	ActivityLinkEvent,
 	ActivityQueryService,
 	ActivityStoreStats,
 	AnalogTransmissionPayload,
@@ -177,6 +179,15 @@ export function startActivityLifecycle(
 		}
 		if (runtime.status === "ready") {
 			current = runtime
+			runtime.recordingLinks?.()?.onLinks(events => {
+				for (const listener of [...linkListeners]) {
+					try {
+						listener(events)
+					} catch {
+						// A listener must not stop the others.
+					}
+				}
+			})
 			state = "available"
 			reason = null
 			nextAttemptAt = null
@@ -306,6 +317,36 @@ export function startActivityLifecycle(
 		}
 	}
 
+	const linkListeners = new Set<
+		(events: readonly ActivityLinkEvent[]) => void
+	>()
+	/** Stable across opens: a store that is not open answers nothing and drops changes. */
+	const links: ActivityRecordingLinks = {
+		admitRecording: payload => {
+			const open = current?.recordingLinks?.() ?? null
+			if (open === null) {
+				if (!closed) dropped += 1
+				return
+			}
+			open.admitRecording(payload)
+		},
+		link: op => {
+			current?.recordingLinks?.()?.link(op)
+		},
+		recordingEventId: id =>
+			current?.recordingLinks?.()?.recordingEventId(id) ?? null,
+		linkedRecordings: () =>
+			current?.recordingLinks?.()?.linkedRecordings() ?? [],
+		onLinks: listener => {
+			linkListeners.add(listener)
+			return () => {
+				linkListeners.delete(listener)
+			}
+		},
+	}
+	const recordingLinks = (): ActivityRecordingLinks | null =>
+		closed || !enabled ? null : links
+
 	const bindSubscriptions = (next: { close(): void }): void => {
 		hub = next
 		if (!closed) return
@@ -324,6 +365,7 @@ export function startActivityLifecycle(
 			stats: closedStats,
 			bindSubscriptions,
 			transmissionSink: () => null,
+			recordingLinks: () => null,
 			close,
 		}
 		return {
@@ -347,6 +389,7 @@ export function startActivityLifecycle(
 		},
 		bindSubscriptions,
 		transmissionSink,
+		recordingLinks,
 		close,
 	}
 
@@ -365,6 +408,7 @@ export function startActivityLifecycle(
 		},
 		bindSubscriptions,
 		transmissionSink,
+		recordingLinks,
 		close,
 		lifecycle,
 		api,

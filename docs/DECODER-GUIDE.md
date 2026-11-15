@@ -1131,7 +1131,9 @@ x / sin x, which only the matched NXDN filter undoes. NXDN96 stays unfiltered
 until it is measured: the synthetic NXDN96 transmission decoded only with a
 roll-off of 0.5, which the low-pass cuts. P25 phase 2 (6000 symbols/s) is wider
 than the low-pass; in `auto` dsd-fme looks for it at the 4800 symbols/s timing and
-switches only on a trunking grant, so it was not measured. The sox effect costs
+switches only on a trunking grant, so it was not measured. A low-pass is left out
+when the sox input rate is below twice its stop edge (7 kHz, or 3.1 kHz for dPMR),
+which only a raw capture slower than that gives. The sox effect costs
 about 0.1 % of a desktop core per decoder (Raspberry Pi not measured).
 
 `tests/integration/dsd-fme-margin.test.ts` measures per protocol, CNR (in
@@ -1141,7 +1143,15 @@ generator (`scripts/fixtures/dmr-4fsk.mjs`). The frame error rate counts the fra
 whose CRC- or FEC-checked field dsd-fme did not print as passing; the symbol error
 rate compares dsd-fme's symbol decisions (its `-c` capture) with the sent symbols
 over the stretches where they align (at most 25 % mismatches), so it understates
-errors at low CNR. It runs only with `WAVEKIT_MARGIN=1`, on the host's dsd-fme or,
+errors at low CNR. Each seed delays the symbols by a different fraction of a symbol
+(a transmitter's clock has no fixed phase to the receiver's samples): dsd-fme corrects
+timing only by whole samples, and without noise it lost 0 to 26 % of YSF frames
+depending on that phase alone, with or without a filter, so a fixed phase measures
+one lucky or unlucky receiver. `WAVEKIT_MARGIN_PHASE` fixes it,
+`WAVEKIT_MARGIN_RATE=2400000` uses the 2.4 Msps capture instead of 1.024 Msps. A
+wider low-pass (-6 dB at 3.5 or 4 kHz) left this YSF floor (3 to 6 % at 30 to 40 dB)
+as it was and lost part of the gain at 10 dB. It runs only with `WAVEKIT_MARGIN=1`,
+on the host's dsd-fme or,
 with `WAVEKIT_SYNTH_IMAGE=<image>`, the core image's:
 
 ```bash

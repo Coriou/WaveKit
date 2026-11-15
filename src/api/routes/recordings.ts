@@ -11,6 +11,7 @@ import type {
 	FastifySchema,
 } from "fastify"
 import {
+	RECORDING_DSD_KEY,
 	RECORDING_INVENTORY_ID,
 	RECORDINGS_FILE_ROUTE,
 	RECORDING_DELETE_ROUTE,
@@ -397,7 +398,7 @@ export async function recordingRoutes(
 				const id = request.params.id
 				if (
 					id.length > RECORDINGS_ID_MAX_LENGTH ||
-					!RECORDING_INVENTORY_ID.test(id)
+					!(RECORDING_INVENTORY_ID.test(id) || RECORDING_DSD_KEY.test(id))
 				)
 					return sendError(reply, 404, "RECORDING_NOT_FOUND")
 				// The inventory opens and verifies the handle (fstat, realpath, inode, directories).

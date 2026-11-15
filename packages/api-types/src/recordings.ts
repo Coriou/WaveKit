@@ -50,6 +50,14 @@ export const RECORDINGS_IN_PROGRESS_MS = 10_000
 export const RECORDING_INVENTORY_ID =
 	/^(?:dsd:(0|[1-9]\d{0,3})~(\d{8}_\d{6}_\d{5}_[A-Za-z0-9_.-]{1,200}\.wav)|scan:(d_[0-9A-Za-z]+~[A-Za-z0-9_.-]{1,200}\.wav))$/
 
+/**
+ * A dsd-fme call recording's stable key (`dsd~<call name>`, an Activity row's
+ * `recording.id`). The file route also takes it: the first configured dsd-fme directory that
+ * holds the file serves it. Checked before any lookup, like RECORDING_INVENTORY_ID.
+ */
+export const RECORDING_DSD_KEY =
+	/^dsd~(\d{8}_\d{6}_\d{5}_[A-Za-z0-9_.-]{1,200}\.wav)$/
+
 export type RecordingInventoryKind =
 	| "dsd-fme-call"
 	| "scanner-dv"
@@ -97,6 +105,12 @@ export interface RecordingInventoryItem {
 	 * dsd-fme recordings. Absent from older cores.
 	 */
 	ownerDiscoveryId?: string | null
+	/**
+	 * The Activity row linked to this recording (`GET /api/activity/:eventId`): a dsd-fme call's
+	 * `call_end` row or a scanner recording's `recording-change` row. Null when none is known (no
+	 * such row, or Activity is off). Absent from older cores.
+	 */
+	activityEventId?: string | null
 }
 
 /**

@@ -12,7 +12,10 @@
  * builds wavekit-chan from native/ unless WAVEKIT_CHAN_BIN is set.
  * Narrower or wider runs: WAVEKIT_MARGIN_SIGNALS, _VARIANTS (comma-separated
  * names; default "before,after", the others are listed in VARIANTS),
- * _CNR (dB list), _ERROR_HZ (frequency error list), _SEEDS (count).
+ * _CNR (dB list), _ERROR_HZ (frequency error list), _SEEDS (count), _PHASE
+ * (symbol clock phase, symbolPhase below), _RATE
+ * (capture rate: 1024000, the default, at +162.5 kHz, or 2400000 at
+ * -287.5 kHz, the chain tests' two captures).
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -80,6 +83,16 @@ const ERRORS_HZ = (
 	]
 ).map(Number)
 const SEEDS = Number(process.env["WAVEKIT_MARGIN_SEEDS"] ?? "3")
+/**
+ * Symbol clock phase of seed n (WAVEKIT_MARGIN_PHASE: "spread", the default,
+ * or a fixed fraction of a symbol). Spread: 0 for seed 1, then steps of the
+ * golden ratio, so any number of seeds covers the symbol evenly. dsd-fme
+ * corrects timing only by whole samples, so a fixed phase measures one
+ * receiver timing offset, and the captures put it at a different one each.
+ */
+const PHASE = process.env["WAVEKIT_MARGIN_PHASE"] ?? "spread"
+const symbolPhase = (seed: number) =>
+	PHASE === "spread" ? ((seed - 1) * 0.618_034) % 1 : Number(PHASE)
 
 const count = (lines: string[], pattern: RegExp) =>
 	lines.filter(line => pattern.test(line)).length
@@ -97,14 +110,18 @@ const DMR_CALL = {
 	superframes: DMR_SUPERFRAMES,
 }
 
-/** The signals, each with its standard transmit filter. */
-function signals(): MarginSignal[] {
+/**
+ * The signals, each with its standard transmit filter, its symbols delayed by
+ * `delaySymbols` (the transmitter's symbol clock phase against the samples).
+ */
+function signals(delaySymbols: number): MarginSignal[] {
+	const at = (shape: PulseShape): PulseShape => ({ ...shape, delaySymbols })
 	const ysf = (name: string, shape: PulseShape): MarginSignal => {
 		const overs = Array.from({ length: YSF_OVERS }, () => SYNTHETIC.ysf)
 		return {
 			name,
 			mode: "auto",
-			freq: ysfOversFrequency(overs, { shape }),
+			freq: ysfOversFrequency(overs, { shape: at(shape) }),
 			dibits: ysfOversDibits(overs),
 			// Header, 7 V/D2 frames and terminator per over, each with its FICH CRC.
 			frames: 9 * YSF_OVERS,
@@ -116,7 +133,7 @@ function signals(): MarginSignal[] {
 		return {
 			name: variant.toUpperCase(),
 			mode: variant === "nxdn96" ? "nxdn" : "nxdn48",
-			freq: nxdnFrequency(call, { variant, shape: AIR_SHAPES.nxdn }),
+			freq: nxdnFrequency(call, { variant, shape: at(AIR_SHAPES.nxdn) }),
 			dibits: nxdnCallDibits(call),
 			// Voice frames: each SACCH part prints "PF n/4" only when its CRC6 passes.
 			frames: 4 * NXDN_SUPERFRAMES,
@@ -129,7 +146,7 @@ function signals(): MarginSignal[] {
 	const p25Signal = (name: string, shape: PulseShape): MarginSignal => ({
 		name,
 		mode: "auto",
-		freq: p25Frequency(p25, { shape }),
+		freq: p25Frequency(p25, { shape: at(shape) }),
 		dibits: p25CallDibits(p25),
 		// LDU1 link control, printed only after its RS(24,12,13) check.
 		frames: P25_SUPERFRAMES,
@@ -140,7 +157,7 @@ function signals(): MarginSignal[] {
 		{
 			name: "DMR",
 			mode: "auto",
-			freq: dmrFrequency(DMR_CALL),
+			freq: dmrFrequency(DMR_CALL, { shape: at(AIR_SHAPES.dmr) }),
 			dibits: dmrCallDibits(DMR_CALL),
 			// The call's link control: 2 Voice LC headers and 2 terminators
 			// (RS(12,9)) and one embedded LC per superframe (5-bit checksum).
@@ -153,7 +170,7 @@ function signals(): MarginSignal[] {
 			// A radio to radios: one 27.5 ms burst per 60 ms, carrier off between.
 			name: "DMR (direct)",
 			mode: "auto",
-			freq: dmrDirectFrequency(DMR_CALL),
+			freq: dmrDirectFrequency(DMR_CALL, { shape: at(AIR_SHAPES.dmr) }),
 			envelope: dmrDirectEnvelope(DMR_CALL),
 			dibits: dmrDirectCallDibits(DMR_CALL),
 			frames: 4 + DMR_SUPERFRAMES,
@@ -172,7 +189,7 @@ function signals(): MarginSignal[] {
 		{
 			name: "dPMR",
 			mode: "dpmr",
-			freq: dpmrFrequency(dpmr, { shape: AIR_SHAPES.dpmr }),
+			freq: dpmrFrequency(dpmr, { shape: at(AIR_SHAPES.dpmr) }),
 			dibits: dpmrCallDibits(dpmr),
 			// Two control channels per superframe, the channel code CRC7-checked.
 			frames: 2 * DPMR_SUPERFRAMES,
@@ -184,7 +201,7 @@ function signals(): MarginSignal[] {
 			freq: dstarFrequency(SYNTHETIC.dstar, {
 				superframes: DSTAR_SUPERFRAMES,
 			}),
-			// GMSK, two-level: no 4FSK symbol capture to compare.
+			// GMSK, two-level: no 4FSK symbol capture to compare; no phase.
 			dibits: [],
 			// One voice sync line per superframe, with the checked header's callsign.
 			frames: DSTAR_SUPERFRAMES,
@@ -197,14 +214,14 @@ function signals(): MarginSignal[] {
  * Chains compared. "before" is the chain without the carrier frequency
  * correction (the receive filter only); "after" is today's default, with the
  * correction in the channelizer (afcMaxHz in the channel request). The others
- * document alternatives that were measured: no receive filter and no
- * correction (the base command line, tests/unit/decoders/dsd-fme-filter.test.ts
+ * document alternatives that were measured, all without the correction: no
+ * receive filter (the base command line, tests/unit/decoders/dsd-fme-filter.test.ts
  * pins it), a slow DC blocker for carrier frequency error instead of the
  * correction (sox highpass 2 Hz; it fixed YSF but muted DMR direct-mode
- * bursts), dsd-fme without its own input filters (-l), the matched root raised
- * cosine 0.2 at 4800 symbols/s instead of the low-pass (it cut more noise but
- * left YSF a frame error floor on strong signals), and the plain 1.3 kHz
- * low-pass dPMR now uses, for the 2400 symbols/s signals.
+ * bursts), dsd-fme without its own input filters (-l, with the correction),
+ * wider 4800 symbols/s low-passes (lp3500, lp4000: -6 dB at 3.5 / 4 kHz), the
+ * matched root raised cosine 0.2 at 4800 symbols/s instead of the low-pass (it
+ * cut more noise but left YSF a frame error floor on strong signals).
  */
 const NO_AFC = { carrierCorrection: false }
 const VARIANTS: MarginVariant[] = [
@@ -213,11 +230,13 @@ const VARIANTS: MarginVariant[] = [
 	{ name: "unfiltered", options: { ...NO_AFC, receiveFilter: false } },
 	{ name: "dc-blocker", options: NO_AFC, soxEffects: "highpass -1 2" },
 	{ name: "after-l", options: {}, dsdArgs: ["-l"] },
-	{
-		name: "lp1300",
-		options: { ...NO_AFC, receiveFilter: false },
-		soxEffects: "sinc -t 500 -1300",
-	},
+	...[3500, 4000].map(
+		(hz): MarginVariant => ({
+			name: `lp${hz}`,
+			options: { ...NO_AFC, receiveFilter: false },
+			soxEffects: `sinc -t 1000 -${hz}`,
+		}),
+	),
 	{
 		name: "rrc4800",
 		options: { ...NO_AFC, receiveFilter: false },
@@ -254,16 +273,16 @@ describe.skipIf(
 	it("measures FER and SER per protocol, chain, CNR and frequency error", async () => {
 		const onlySignals = list("WAVEKIT_MARGIN_SIGNALS")
 		const onlyVariants = list("WAVEKIT_MARGIN_VARIANTS") ?? ["before", "after"]
-		const chosen = signals().filter(
-			s => onlySignals === undefined || onlySignals.includes(s.name),
-		)
 		const variants = VARIANTS.filter(v => onlyVariants.includes(v.name))
 		const points: MarginPoint[] = []
-		for (const signal of chosen)
-			for (const variant of variants)
-				for (const errorHz of ERRORS_HZ)
-					for (const cnrDb of CNRS)
-						for (let seed = 1; seed <= SEEDS; seed++)
+		for (let seed = 1; seed <= SEEDS; seed++) {
+			const chosen = signals(symbolPhase(seed)).filter(
+				s => onlySignals === undefined || onlySignals.includes(s.name),
+			)
+			for (const signal of chosen)
+				for (const variant of variants)
+					for (const errorHz of ERRORS_HZ)
+						for (const cnrDb of CNRS)
 							points.push(
 								await measurePoint(CHAN, ROOT, signal, variant, {
 									cnrDb,
@@ -271,6 +290,7 @@ describe.skipIf(
 									seed: 1000 * seed + cnrDb,
 								}),
 							)
+		}
 		const tables = ERRORS_HZ.map(
 			e =>
 				`### Frequency error ${e} Hz: FER (SER) [residual carrier offset]\n\n${marginTable(points, e)}`,

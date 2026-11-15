@@ -27,9 +27,11 @@ import {
 	fmCu8,
 	noiseForCnr,
 	pulseResponse,
+	shapeFrequency,
 	pulseSpectrum,
 	receiveSpectrum,
 } from "../../../scripts/fixtures/fsk-iq.mjs"
+import { ysfCallDibits } from "../../../scripts/fixtures/ysf-c4fm.mjs"
 import { residualOffset } from "../../integration/dsd-fme-margin.js"
 
 /** Minimum Hamming distance of a systematic code over every k-bit message. */
@@ -96,6 +98,29 @@ describe("synthetic 4FSK generators", () => {
 					1e-6,
 				)
 		}
+	})
+
+	it("delays every symbol by delaySymbols (the transmitter's clock phase)", () => {
+		const symbols = [1, 3, 0, 2, 1, 1, 3, 2, 0, 0]
+		const options = {
+			symbolRate: 4800,
+			deviationHz: (d: number) => [600, 1800, -600, -1800][d]!,
+			shaping: "rrc" as const,
+			alpha: 0.2,
+		}
+		const base = shapeFrequency(symbols, options)
+		// Half a symbol is 5 samples at 48 kHz: the same trace, 5 samples later.
+		const late = shapeFrequency(symbols, { ...options, delaySymbols: 0.5 })
+		for (let i = 0; i + 5 < base.length; i++)
+			expect(late[i + 5]).toBeCloseTo(base[i]!, 9)
+	})
+
+	it("repeats the YSF V/D2 superframe: 7 more frames of 480 symbols each", () => {
+		const call = { dest: "ALL", src: "N0CALL" }
+		const one = ysfCallDibits(call).length
+		expect(ysfCallDibits({ ...call, superframes: 4 }).length - one).toBe(
+			3 * 7 * 480,
+		)
 	})
 
 	it("encodes the DMR block codes at their design distances", () => {
