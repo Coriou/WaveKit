@@ -31,6 +31,7 @@ import {
 	LIVE_AUDIO_FRONT_SWAP_TIMEOUT_MS,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
+	LIVE_AUDIO_LISTEN_MODE_DEFAULT,
 	LIVE_AUDIO_SQUELCH_INPUT_MODES,
 	type AnalogTransmissionDcs,
 	type LiveAudioAutoRoute,
@@ -106,6 +107,7 @@ import {
 } from "./evidence-squelch/wiring.js"
 import { PreRoll } from "./evidence-squelch/pre-roll.js"
 import { AutoListenRouter } from "./auto-listen/router.js"
+import type { AutoRouteTraceFn } from "./auto-listen/inputs.js"
 import { AUTO_ROUTE_STREAM } from "./auto-listen/contract.js"
 import type {
 	AutoRouteClock,
@@ -280,11 +282,14 @@ export interface LiveDemodulatorOptions {
 	evidenceSquelch?: EvidenceSquelchFactory
 	/** Auto listen route pacer clock (tests inject one; default monotonic). */
 	autoRouteClock?: AutoRouteClock
+	/** Auto listen route FIFO trace (diagnostics and the scene tests; default none). */
+	autoRouteTrace?: AutoRouteTraceFn
 }
 
 type InjectedOptionKeys =
 	| "evidenceSquelch"
 	| "autoRouteClock"
+	| "autoRouteTrace"
 	| "httpAccess"
 	| "publicOrigin"
 	| "httpHost"
@@ -554,6 +559,9 @@ export class LiveDemodulator extends EventEmitter {
 			...(options.autoRouteClock !== undefined
 				? { clock: options.autoRouteClock }
 				: {}),
+			...(options.autoRouteTrace !== undefined
+				? { trace: options.autoRouteTrace }
+				: {}),
 		})
 		// A first client (connect or reconnect) re-aligns the next analog span.
 		this.autoRoute.registry.on("client-connected", () => {
@@ -562,6 +570,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.autoRoute.on("auto-route-changed", (level: LiveAudioAutoRouteLevel) =>
 			this.emit("auto-route-changed", level),
 		)
+		this.syncListenPolicy()
 		this.clock = options.clock ?? systemSilenceClock
 		this.silence = new SilenceFill(this.audio, this.clock)
 		this.http = new AudioHttpServer(
@@ -616,6 +625,7 @@ export class LiveDemodulator extends EventEmitter {
 				// restored modulation that does not allow it), only the squelch mode and
 				// tone go back too, so unrelated edits (httpPort, squelch level) stay.
 				this.config = repairedRollback(candidate, acked)
+				this.syncListenPolicy()
 				if (this.run) {
 					this.applySquelchConfig(this.run)
 					this.applySquelchThreshold(this.run)
@@ -786,6 +796,7 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		this.config = validated
+		this.syncListenPolicy()
 		this.rustRuns.noteEngineSelection(validated)
 		// WG12 req 6.4: a centre move (offset) or a source change leaves the channel.
 		// Squelch-only changes keep the tone of the transmission still on frequency.
@@ -2242,6 +2253,18 @@ export class LiveDemodulator extends EventEmitter {
 		coverage: VoiceCoveragePort,
 	): void {
 		this.autoRoute.attachVoice(source, coverage)
+	}
+
+	/**
+	 * Listen: hands the configured `listenMode` and the open squelch (which forces analog) to the
+	 * `/auto` route. No restart and no reattach: the route puts the change in force at the next
+	 * transmission boundary.
+	 */
+	private syncListenPolicy(): void {
+		this.autoRoute.setListenPolicy(
+			this.config.listenMode ?? LIVE_AUDIO_LISTEN_MODE_DEFAULT,
+			this.config.squelchMode === "open",
+		)
 	}
 
 	/** One sample-aligned `/auto` span of the client bytes (requirement 3.6). */

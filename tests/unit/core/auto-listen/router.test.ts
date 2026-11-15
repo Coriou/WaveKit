@@ -752,6 +752,8 @@ describe("AutoListenRouter", () => {
 			droppedMs: 0,
 			clockRebases: 0,
 			latencyMs: 20,
+			// Listen (2026-11-15): additive, the listen mode in force (default auto).
+			listenMode: "auto",
 		})
 		const sim = new Sim()
 		const rand = lcg(18)

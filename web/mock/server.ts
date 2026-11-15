@@ -780,15 +780,44 @@ export async function buildMockServer(
 		return { state: "waiting" }
 	}
 
-	/** What `/auto` plays now: the decoded call while one talks (and voice runs), else the analog channel. */
+	/** Listen: the listen mode in force (open squelch forces analog; the mock applies changes at once). */
+	const autoListenMode = (): "auto" | "analog" | "digital" =>
+		live.config.squelchMode === "open"
+			? "analog"
+			: (live.config.listenMode ?? "auto")
+	/** Listen: why `/auto` plays less than `listenMode` asks, as the core reports it. */
+	const autoRouteReason = (): "squelch-open" | "no-decoder" | null => {
+		const configured = live.config.listenMode ?? "auto"
+		if (live.config.squelchMode === "open" && configured !== "analog")
+			return "squelch-open"
+		if (
+			autoListenMode() === "digital" &&
+			(!voice.running || voiceCall().hz === null)
+		)
+			return "no-decoder"
+		return null
+	}
+	/**
+	 * What `/auto` plays now: the decoded call while one talks (and voice runs), else the analog
+	 * channel; `analog` never plays the call and `digital` never plays analog.
+	 */
 	const autoRouteLevel = (): NonNullable<LiveAudioLevel["autoRoute"]> => {
-		const digital = voice.running && voiceCall().talking
-		const active = digital ? "digital" : level().squelchOpen ? "analog" : "none"
+		const mode = autoListenMode()
+		const digital = mode !== "analog" && voice.running && voiceCall().talking
+		// Open passes everything; otherwise the squelch decides.
+		const passes = live.config.squelchMode === "open" || level().squelchOpen
+		const analog = mode !== "digital" && passes
+		const active = digital ? "digital" : analog ? "analog" : "none"
 		if (active !== live.autoActive) {
 			live.autoActive = active
 			live.autoSince = Date.now()
 		}
-		return digital ? { active, protocol: "dmr" } : { active }
+		const reason = autoRouteReason()
+		return {
+			active,
+			...(digital ? { protocol: "dmr" } : {}),
+			...(reason !== null ? { reason } : {}),
+		}
 	}
 
 	// --- Digital voice (dsd-fme): the decoded voice stream on the audio port's /voice. ---
@@ -913,6 +942,7 @@ export async function buildMockServer(
 				droppedMs: 0,
 				clockRebases: 0,
 				latencyMs: 80,
+				listenMode: autoListenMode(),
 			}
 		}
 		return status

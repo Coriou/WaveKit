@@ -2627,7 +2627,7 @@ Fields:
 - `autoRoute` — the auto listen route (`GET /auto`), present whenever the live
   audio HTTP server listens: `{ active, protocol?, decoderId?, slot?, since,
 httpUrl, wavUrl, clientCount, digitalAvailable, underruns, zeroFilledSamples?,
-droppedMs, clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`;
+droppedMs, clockRebases, latencyMs, listenMode?, pendingListenMode?, reason? }`. `active` is `analog`, `digital` or `none`;
   `protocol` (when the call reports one), `decoderId` and `slot` (a number or
   `null`) are present only while `active` is `digital`. `since` is the ISO time of
   the last switch. `httpUrl` and `wavUrl` follow the `/stream` URL rules above
@@ -2638,8 +2638,15 @@ droppedMs, clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`
   except the wait after a digital call's last frame, which counts only if the call goes on;
   `droppedMs` the audio dropped on overflow, preemption or invalidation,
   `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
-  selected source's backlog plus one 20 ms block. Optional in `@wavekit/api-types`;
-  absent from older cores.
+  selected source's backlog plus one 20 ms block. `listenMode` is the listen mode in
+  force on the route: `config.listenMode`, except `analog` while the squelch is `open`,
+  and the previous mode while a change waits for the playing transmission to end;
+  `pendingListenMode` is present only while such a change waits. `reason` is present only
+  when something limits the route: `squelch-open` (the open squelch forces `analog` over a
+  configured `auto` or `digital`) or `no-decoder` (`digital` is in force and no digital
+  voice decoder covers the tuned channel, so the route plays silence). Optional in
+  `@wavekit/api-types`; absent from older cores (`listenMode`, `pendingListenMode` and
+  `reason` from cores before Listen).
 - `autoSquelch.diagnostics` — DIAGNOSTIC AND UNSTABLE (2026-10-24): only on
   `GET /api/live-audio/status?diagnostics=true` while the evidence gate runs, never on
   level events; it may change or disappear without notice. The gate's current voice
@@ -2727,9 +2734,15 @@ Configuration notes:
   live audio only (`/stream` and the analog side of `/auto`); the scanner's recordings
   run their own speech check and ignore it. Applies without a restart.
 - `listenMode` — what `/auto` plays, a core setting shared by every client: `auto`
-  (default), `analog` or `digital`. Stored and reported now; the route does not read it
-  yet, so `/auto` plays as described under `GET /auto` in every mode. Applies without a
-  restart.
+  (default: analog while the squelch passes it, decoded voice while a clear call is on the
+  tuned channel), `analog` (demodulated audio only, decoded voice never plays) or `digital`
+  (decoded voice only, silence otherwise, never analog; with no digital voice decoder on
+  the tuned channel `/auto` is silent and `autoRoute.reason` is `no-decoder`). The `open`
+  squelch forces `analog` whatever `listenMode` says (`autoRoute.reason: "squelch-open"`).
+  Applies without a restart and without reconnecting `/auto`: a change made while a
+  transmission plays waits for that transmission to end (`autoRoute.pendingListenMode`),
+  so one transmission is heard from one source; made while nothing plays it applies at
+  once (an analog over already in progress is then heard from that point).
 - `squelchMode: "noise"` (NFM and WFM only, deprecated) — no longer stored: input is
   stored as `auto` with `voiceOnly: false` (above), whatever `voiceOnly` the request
   sends with it. The FM quieting squelch it used to
@@ -2853,7 +2866,10 @@ squelch that governs `/stream` lets it through (exactly the `/stream` samples,
 resampled), decoded digital voice while a digital voice decoder covering the tuned
 channel produces voice (never an encrypted call), and exact silence otherwise. One
 source plays at a time; digital wins over analog after the analog over releases
-(300 ms), or after at most 1.5 s.
+(300 ms), or after at most 1.5 s. That is `listenMode: auto`; `analog` plays the
+analog audio only and `digital` the decoded voice only (silence otherwise), and the
+`open` squelch always plays analog (see `listenMode` under
+[GET /api/live-audio/status](#get-apilive-audiostatus)).
 
 - Always 48 000 Hz, `s16le`, mono (`X-Audio-Format: s16le`, `X-Sample-Rate: 48000`,
   `X-Channels: 1`); `/auto.wav` adds the streaming WAV header.
@@ -8321,8 +8337,9 @@ On the `live-audio` channel while the live demodulator runs, published at
 first complete IQ block; `thresholdDbfs` is the threshold in effect. `squelchOpen`
 is stage 1; the optional `autoSquelch` is the evidence gate at the measured block,
 as in [GET /api/live-audio/status](#get-apilive-audiostatus). While `/auto` has a
-client, the optional `autoRoute` is `{ active, protocol? }` (`protocol` only while
-`active` is `digital` and the call reports one).
+client, the optional `autoRoute` is `{ active, protocol?, reason? }` (`protocol` only while
+`active` is `digital` and the call reports one; `reason`, `squelch-open` or `no-decoder`,
+only when set, as on the status).
 
 ```json
 {

@@ -52,6 +52,13 @@ export interface VoiceTapSource {
 	/** Registers a tap; returns its remover. */
 	addVoiceTap(tap: VoiceTap): () => void
 	readonly voiceSampleRate: number
+	/**
+	 * Listen: the decoders whose voice this source can hand to taps, so the route can tell that no
+	 * decoder covers the tuned channel before any call (`autoRoute.reason: "no-decoder"`). Optional:
+	 * without it the route knows only the decoders it has heard from and reports no reason until
+	 * one of them covers the channel.
+	 */
+	voiceDecoderIds?(): readonly string[]
 }
 
 /** "unknown" is treated exactly like "no". */

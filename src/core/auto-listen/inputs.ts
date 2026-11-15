@@ -286,6 +286,14 @@ export class AnalogInput {
 		this.audibleNow = false
 	}
 
+	/**
+	 * Listen: the listen mode in force does not play analog (`digital`): empty the FIFO without
+	 * counting, keeping the resampler and the split sample so the stream stays continuous.
+	 */
+	discardQueued(): void {
+		if (this.out.queued > 0) this.out.clearUncounted()
+	}
+
 	/** Route stopped: empty everything without counting. */
 	stop(): void {
 		this.out.clearUncounted()
@@ -401,6 +409,16 @@ export class VoiceInput {
 	/** Clears queued audio (counted) and the resampler, without a flush. */
 	invalidate(): void {
 		this.out.dropAll()
+		this.res.reset()
+		this.armed = false
+	}
+
+	/**
+	 * Listen: the listen mode in force does not play decoded voice (`analog`): queued voice and
+	 * the resampler history are emptied without counting (policy, not lost audio).
+	 */
+	discard(): void {
+		this.out.clearUncounted()
 		this.res.reset()
 		this.armed = false
 	}

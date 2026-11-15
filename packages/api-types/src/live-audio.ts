@@ -168,11 +168,32 @@ export interface LiveAudioAutoRoute {
 	clockRebases: number
 	/** Selected source's backlog plus one block, ms. */
 	latencyMs: number
+	/**
+	 * Listen: the listen mode in force on the route: `config.listenMode`, except `analog` while the
+	 * squelch is `open`, and the previous mode while a change waits for the playing transmission
+	 * to end (`pendingListenMode`). Absent from older cores.
+	 */
+	listenMode?: LiveAudioListenMode
+	/** Listen: present only while a listen mode change waits for the playing transmission to end. */
+	pendingListenMode?: LiveAudioListenMode
+	/** Listen: why the route plays less than `config.listenMode` asks; absent when nothing limits it. */
+	reason?: LiveAudioAutoRouteReason
 }
+
+/**
+ * Listen: why `/auto` plays less than `config.listenMode` asks. `squelch-open`: the open squelch
+ * forces `analog` (configured `auto` or `digital`). `no-decoder`: `digital` is in force and no
+ * digital voice decoder covers the tuned channel, so the route plays silence (never analog).
+ */
+export type LiveAudioAutoRouteReason = "squelch-open" | "no-decoder"
+export const LIVE_AUDIO_AUTO_ROUTE_REASONS: readonly LiveAudioAutoRouteReason[] =
+	Object.freeze(["squelch-open", "no-decoder"])
 
 export interface LiveAudioAutoRouteLevel {
 	active: LiveAudioAutoRouteSource
 	protocol?: string
+	/** Listen: as `LiveAudioAutoRoute.reason`; present only when set. */
+	reason?: LiveAudioAutoRouteReason
 }
 
 export type LiveAudioAutoSquelchEvidence = "voice" | "ctcss" | "dcs"

@@ -17,6 +17,7 @@ import type {
 } from "../../core/live-demodulator.js"
 import { deriveLegacyAudioUrl, requestHostHeader } from "./legacy-audio-host.js"
 import {
+	LIVE_AUDIO_AUTO_ROUTE_REASONS,
 	LIVE_AUDIO_LISTEN_MODES,
 	LIVE_AUDIO_LISTEN_MODE_DEFAULT,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
@@ -213,6 +214,13 @@ const liveDemodStatusSchema = {
 				droppedMs: { type: "number" },
 				clockRebases: { type: "number" },
 				latencyMs: { type: "number" },
+				// Listen: the mode in force, a waiting change and why the route plays less.
+				listenMode: { type: "string", enum: [...LIVE_AUDIO_LISTEN_MODES] },
+				pendingListenMode: {
+					type: "string",
+					enum: [...LIVE_AUDIO_LISTEN_MODES],
+				},
+				reason: { type: "string", enum: [...LIVE_AUDIO_AUTO_ROUTE_REASONS] },
 			},
 			required: [
 				"active",
