@@ -22,7 +22,7 @@ export const PROFILE_LIMITS = {
 
 /** WG8 req 5.4: the largest client bins any host cap allows. */
 export const PROFILE_BINS_CEILING = SPECTRUM_BINS_CAP_CEILING
-/** WG8: the floor cap equals PROFILE_LIMITS.bins.max (pinned by wg8-contract). */
+/** WG8: the floor cap equals PROFILE_LIMITS.bins.max (pinned by web-gaps-8-contract). */
 export const PROFILE_BINS_FLOOR = SPECTRUM_BINS_CAP_FLOOR
 
 /**

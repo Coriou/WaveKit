@@ -61,7 +61,7 @@ outcomes, `ended: "no-signal"`, discovery with `proof` and `evidenceLevel`, prog
 `phase` … `replayQueueDepth`, a frame track with `gate` and `channelSnrDb`, 256 tracks still
 accepted), the config shapes (absent `iqCapture` parses to the WG11 output; `allowLegacy`
 default false), the proof summary grammar examples of § Proof, and the query and body bounds.
-`wg10-contract` and `wg11-contract` are amended where they pinned `ended` as a literal or the old
+`web-gaps-10-contract` and `web-gaps-11-contract` are amended where they pinned `ended` as a literal or the old
 outcome list.
 
 Names a lane creates and Main consumes at merge (frozen here by name):

@@ -61,7 +61,7 @@ describe("web-gaps-5 contract", () => {
 	let directory: string
 	const services: BandPlanService[] = []
 	beforeEach(() => {
-		directory = mkdtempSync(join(tmpdir(), "wg5-contract-"))
+		directory = mkdtempSync(join(tmpdir(), "web-gaps-5-contract-"))
 	})
 	afterEach(async () => {
 		for (const service of services.splice(0)) await service.close()

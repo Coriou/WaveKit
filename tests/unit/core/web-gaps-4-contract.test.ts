@@ -67,7 +67,7 @@ const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 describe("web-gaps-4 contract", () => {
 	let directory: string
 	beforeEach(() => {
-		directory = mkdtempSync(join(tmpdir(), "wg4-contract-"))
+		directory = mkdtempSync(join(tmpdir(), "web-gaps-4-contract-"))
 	})
 	afterEach(() => {
 		vi.unstubAllEnvs()

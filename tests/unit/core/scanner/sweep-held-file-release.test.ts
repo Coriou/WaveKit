@@ -93,9 +93,11 @@ describe("a held recording in a sweep", () => {
 		await w.advance(releaseAt - w.nowMs() - CHUNK_MS)
 		expect(rec.held.size).toBe(1)
 		expect(w.wavSeconds()).toEqual([])
-		// At the grace's end the file is released and kept.
-		await w.advance(CHUNK_MS + SETTLED_MS)
+		// At the chunk the grace ends the file is released (the timer fires after that chunk's tick)...
+		await w.advance(CHUNK_MS)
 		expect(rec.held.size).toBe(0)
+		// ...and kept once its finish has settled.
+		await w.advance(SETTLED_MS)
 		expect(codes()).toContain("finalized")
 		expect(w.wavSeconds()).toHaveLength(1)
 	}, 180_000)

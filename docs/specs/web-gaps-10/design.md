@@ -481,7 +481,7 @@ as they are. Changed deliberately in `live-demodulator-squelch-modes.test.ts`: t
 and mode-switch tests feed 60 carrier blocks (600 ms) instead of 20 and 10, because span audio
 now counts blocks, not the test clock; the tone-gate integration test feeds one carrier block per
 10 ms of PCM, because PCM is matched to blocks by position. A teardown squelch edge (stop or a
-transmission-closing reconfigure) still closes at once on the carrier path. Suites with a real `LiveDemodulator` and a tracker (`live-demodulator-wg7`) and the
+transmission-closing reconfigure) still closes at once on the carrier path. Suites with a real `LiveDemodulator` and a tracker (`live-demodulator-squelch-modes`) and the
 identify and Activity consumers (`scanner/identify-analog`, `scanner/live-audio-evidence`,
 `activity/runtime-transmission`) are run unchanged; any change is listed with 3.8.
 

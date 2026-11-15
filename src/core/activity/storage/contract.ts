@@ -439,7 +439,7 @@ export interface ActivityQueryService {
 	close(): Promise<void>
 }
 
-/** WG5: identical copies of the api-types aggregate DTOs (wg5-contract test asserts identity). */
+/** WG5: identical copies of the api-types aggregate DTOs (web-gaps-5-contract test asserts identity). */
 export type ActivityAggregateTruncation = "scan-rows" | "time-limit"
 export type ActivityBandMapTruncation = ActivityAggregateTruncation | "buckets"
 
@@ -522,7 +522,7 @@ export interface ActivityTimeline {
 	generatedAt: string
 }
 
-/** WG4: identical copies of the api-types trails DTOs (wg4-contract test asserts identity). */
+/** WG4: identical copies of the api-types trails DTOs (web-gaps-4-contract test asserts identity). */
 export interface ActivityTrailsQuery {
 	producedFrom?: string
 	producedTo?: string

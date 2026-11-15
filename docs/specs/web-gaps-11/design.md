@@ -27,7 +27,7 @@ unions (outcome, transports, command origin), the frame track shape and its CLI 
 (every new field present, 256 tracks still accepted), the CLI identify guard accepting `heard`
 and `replay`, the config shapes (absent keys parse to the frozen output; bounds; `manual` needs
 `gainDb`; `agc` refuses it), the capture file grammar (accepted and refused names) and the port
-shapes. `wg7-contract`, `wg9-contract` and `wg10-contract` are amended where they pinned the old
+shapes. `web-gaps-7-contract`, `web-gaps-9-contract` and `web-gaps-10-contract` are amended where they pinned the old
 unions.
 
 Names a lane creates and Main consumes at merge (frozen here by name):

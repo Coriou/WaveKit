@@ -253,6 +253,8 @@ async function scenario(host: "inline" | "thread"): Promise<void> {
 			chunksAtOpen = fake.samplesSent()
 			return engine
 		})
+	// A rejected open surfaces at `await acquiring` below, not as an unhandled rejection meanwhile.
+	void acquiring.catch(() => undefined)
 	await until(() => chunksAtOpen !== null).catch(() => undefined)
 	fake.releaseSamples()
 	const engine = await acquiring
