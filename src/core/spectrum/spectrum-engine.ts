@@ -161,6 +161,23 @@ export interface EngineEpoch {
 	 * old pipeline). Its poster learns its hop never started and re-sends it (no dwell credit).
 	 */
 	supersededEpoch?: number
+	/**
+	 * In `currentEpoch()` only: the earliest command position (`PendingStart.retuneSample`) of the
+	 * retunes posted on the current epoch's stream that have not started yet: every sample before
+	 * it is of the current tuning, the ones from it on may be of a pending one (a pending epoch
+	 * starts only after its settle, so until then they read as the current epoch's). A post
+	 * superseded by a later one still counts: its command moved the tuner. Absent: none pending
+	 * (or none with a known position). Never on an event.
+	 */
+	pendingRetuneSample?: number | null
+	/**
+	 * On a posted epoch's `epoch-started`, and in `currentEpoch()` for that epoch: the smallest
+	 * command position of the retune that started it and of the posts its start superseded (they
+	 * never start, but moved the tuner first), so the previous epoch's samples end there. Absent:
+	 * an opening, an untracked epoch or a post without a known position (its `startSample` alone
+	 * bounds the epoch before).
+	 */
+	retunedFromSample?: number | null
 }
 
 export interface EngineMasks {
@@ -648,6 +665,24 @@ interface PendingStart {
 	commandSample: number
 	/** PendingEpoch.pllSettleSamples posted (where a marker run ended before the marker start). */
 	pllSettle: number
+	/**
+	 * Its command position on its stream: `commandSample + bufferedSamples` posted (every sample
+	 * received or held in the core when the command was written), so every earlier sample is of
+	 * the tuning before it; null when the post's clock is not a sample index.
+	 */
+	retuneSample: number | null
+}
+
+/** A post's command position (PendingStart.retuneSample), or null when not a sample index. */
+function commandPosition(pending: PendingEpoch): number | null {
+	const at = pending.commandSample + pending.bufferedSamples
+	return Number.isSafeInteger(pending.commandSample) &&
+		Number.isSafeInteger(pending.bufferedSamples) &&
+		pending.bufferedSamples >= 0 &&
+		Number.isSafeInteger(at) &&
+		at >= 0
+		? at
+		: null
 }
 
 export class SpectrumEngine extends EventEmitter implements EpochClock {
@@ -727,6 +762,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private startedThrough = 0
 	/** The untracked epoch the pipeline just announced, until its own start. */
 	private untrackedStart: EngineEpoch | null = null
+	/**
+	 * The current epoch's `retunedFromSample` (set at each epoch-started: null for an opening, an
+	 * untracked epoch or an unmatched start). Kept apart from `current` so data events never
+	 * carry it.
+	 */
+	private currentRetunedFrom: number | null = null
 	/** Started epochs, newest last (EPOCH_RECORDS): what late events are labelled against. */
 	private readonly epochRecords: EpochRecord[] = []
 	/** Scanner hop id → its frequency receipt seq, or null when it got none (HOP_RECEIPTS). */
@@ -933,6 +974,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.starts.length = 0
 		this.supersededLost = null
 		this.untrackedStart = null
+		this.currentRetunedFrom = null
 		this.openingStreams.length = 0
 		this.epochRecords.length = 0
 		this.hopReceipts.clear()
@@ -1264,6 +1306,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			slack: posted.proofSlackSamples ?? 0,
 			commandSample: pending.commandSample,
 			pllSettle: pending.pllSettleSamples,
+			retuneSample: commandPosition(pending),
 			meta: {
 				stream: this.stream,
 				epoch: pending.epoch,
@@ -1293,22 +1336,47 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	 * matches: the queue no longer describes the host, so it is dropped (its epoch then has no
 	 * poster: not a hop, so a hop's samples are never trusted on another epoch's start).
 	 */
-	private takeStart(epoch: number): PendingStart | null {
+	private takeStart(
+		epoch: number,
+	): { start: PendingStart; retunedFrom: number | null } | null {
 		let id = this.startedThrough
 		let i = 0
+		// The smallest command position among the entries this start supersedes and its own.
+		let retunedFrom: number | null = null
 		for (; i < this.starts.length; i++) {
 			const entry = this.starts[i]!
 			if (entry.meta.stream !== this.current.stream) break
 			id = Math.max(entry.key, id + 1)
-			if (id < epoch) continue
 			if (id > epoch) break
+			if (
+				entry.retuneSample !== null &&
+				(retunedFrom === null || entry.retuneSample < retunedFrom)
+			)
+				retunedFrom = entry.retuneSample
+			if (id < epoch) continue
 			this.dropStarts(i)
 			this.starts.shift()
-			return entry
+			return { start: entry, retunedFrom }
 		}
 		while (this.starts[i]?.meta.stream === this.current.stream) i += 1
 		this.dropStarts(i)
 		return null
+	}
+
+	/**
+	 * The earliest command position among the starts pending on the current epoch's stream
+	 * (`EngineEpoch.pendingRetuneSample`); null when none (or none with a known position). A
+	 * post on a newer stream is in that stream's numbering and is left out.
+	 */
+	private pendingRetuneSample(): number | null {
+		let least: number | null = null
+		for (const start of this.starts) {
+			if (start.meta.stream !== this.current.stream) continue
+			if (start.retuneSample === null) continue
+			if (least === null || start.retuneSample < least)
+				least = start.retuneSample
+		}
+		return least
 	}
 
 	/** Drops the first `count` pending starts, which never start. */
@@ -1328,11 +1396,16 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			record.trustedLabel !== this.liveLabel
 				? null
 				: record.trustedFrom
+		const pending = this.pendingRetuneSample()
 		return {
 			...this.current,
 			tuningTrust: this.liveLabel,
 			trustedFromSample: from,
 			runEnd: record?.runEnd ? { ...record.runEnd } : null,
+			...(pending !== null ? { pendingRetuneSample: pending } : {}),
+			...(this.currentRetunedFrom !== null
+				? { retunedFromSample: this.currentRetunedFrom }
+				: {}),
 		}
 	}
 
@@ -1562,6 +1635,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.failed = true
 		this.generation++
 		this.lastStats = null
+		this.currentRetunedFrom = null
 		this.current = {
 			...this.current,
 			startSample: null,
@@ -1976,6 +2050,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
 				let meta: EngineEpoch | null = null
 				let start: PendingStart | null = null
+				let retunedFrom: number | null = null
 				let posted = false
 				if (this.untrackedStart?.epoch === ev.epoch) {
 					// The untracked retune announced just before (below), under the pipeline's own id.
@@ -1983,7 +2058,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					this.untrackedStart = null
 				} else if (ev.settleMode !== "none") {
 					// A posted pending epoch's start, found by the pipeline's numbering, never by key.
-					start = this.takeStart(ev.epoch)
+					const taken = this.takeStart(ev.epoch)
+					start = taken?.start ?? null
+					retunedFrom = taken?.retunedFrom ?? null
 					meta = start?.meta ?? null
 					posted = true
 				} else {
@@ -2002,6 +2079,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					}
 				}
 				this.startedThrough = ev.epoch
+				this.currentRetunedFrom = retunedFrom
 				// Late old-stream events keep the old stream's centre (thread host).
 				this.current = {
 					...(meta ?? this.current),
@@ -2068,6 +2146,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 						? { requestedEpoch: start.key }
 						: {}),
 					...(superseded !== null ? { supersededEpoch: superseded } : {}),
+					...(retunedFrom !== null ? { retunedFromSample: retunedFrom } : {}),
 				})
 				continue
 			} else if (ev.kind === "untracked-retune" && ev.newEpoch === false) {
