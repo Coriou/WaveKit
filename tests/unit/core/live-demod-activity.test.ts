@@ -99,6 +99,17 @@ describe("live demod transmission gating", () => {
 		)
 	})
 
+	it("open gates on csdr (detect-only stage 1) but not on Rust (ungated)", () => {
+		const open = { squelch: 0, squelchMode: "open" as const }
+		expect(liveDemodSquelchGates(open)).toBe(true)
+		expect(liveDemodSquelchGates(open, "csdr")).toBe(true)
+		expect(liveDemodSquelchGates(open, "rust")).toBe(false)
+		expect(liveDemodSquelchGates({ ...open, squelch: -40 }, "rust")).toBe(false)
+		expect(
+			liveDemodSquelchGates({ squelch: 0, squelchMode: "auto" }, "rust"),
+		).toBe(true)
+	})
+
 	it("closes on source, modulation, bandwidth, offset or squelch mode only", () => {
 		const base = {
 			sourceId: "rtl0",

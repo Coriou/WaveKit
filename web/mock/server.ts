@@ -649,6 +649,8 @@ export async function buildMockServer(
 			bandwidth: 12500,
 			squelch: -60,
 			squelchMode: "auto",
+			voiceOnly: true,
+			listenMode: "auto",
 			autoMarginDb: 6,
 			noiseQuietingDb: LIVE_AUDIO_NOISE_QUIETING_DB.default,
 			noiseReduction: "off",
@@ -720,8 +722,9 @@ export async function buildMockServer(
 			keyed && signal
 				? signal.powerDbfs + (Math.random() - 0.5) * 2
 				: floor + (Math.random() - 0.5) * 3
+		// Listen: open detects at the auto threshold (and plays everything).
 		const threshold =
-			live.config.squelchMode === "auto"
+			live.config.squelchMode === "auto" || live.config.squelchMode === "open"
 				? floor + (live.config.autoMarginDb ?? 6)
 				: live.config.squelch
 		// WG7 noise mode: FM quieting opens on any carrier; thresholdDbfs reports the stored squelch
@@ -758,7 +761,11 @@ export async function buildMockServer(
 	const autoSquelchOf = (
 		open: boolean,
 	): NonNullable<LiveAudioStatus["autoSquelch"]> => {
-		if (live.config.modulation !== "nfm" || live.config.squelchMode !== "auto")
+		if (
+			live.config.modulation !== "nfm" ||
+			live.config.squelchMode !== "auto" ||
+			live.config.voiceOnly === false
+		)
 			return { state: "off" }
 		if (!open) {
 			live.carrierSince = null
@@ -2284,10 +2291,27 @@ export async function buildMockServer(
 				if (
 					squelchMode !== "manual" &&
 					squelchMode !== "auto" &&
+					squelchMode !== "open" &&
 					squelchMode !== "noise"
 				)
 					return bad("squelchMode: invalid value")
 				next.squelchMode = squelchMode
+			}
+			const voiceOnly = body["voiceOnly"]
+			if (voiceOnly !== undefined) {
+				if (typeof voiceOnly !== "boolean")
+					return bad("voiceOnly: must be a boolean")
+				next.voiceOnly = voiceOnly
+			}
+			const listenMode = body["listenMode"]
+			if (listenMode !== undefined) {
+				if (
+					listenMode !== "auto" &&
+					listenMode !== "analog" &&
+					listenMode !== "digital"
+				)
+					return bad("listenMode: invalid value")
+				next.listenMode = listenMode
 			}
 			// WG7 req 2.3: noise squelch is FM-only (also when a PATCH moves a noise config off FM)
 			if (
@@ -2299,6 +2323,12 @@ export async function buildMockServer(
 					message:
 						"Configuration validation failed:\n  - squelchMode: noise squelch requires nfm or wfm modulation",
 				})
+			// Listen migration, as the core: noise is auto without the voice check, manual at 0 is open
+			if (next.squelchMode === "noise") {
+				next.squelchMode = "auto"
+				next.voiceOnly = false
+			} else if (next.squelchMode === "manual" && next.squelch === 0)
+				next.squelchMode = "open"
 			const agc = body["agc"]
 			if (agc !== undefined) {
 				if (agc === null) delete next.agc

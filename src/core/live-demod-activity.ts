@@ -1,15 +1,25 @@
+import type {
+	LiveAudioSquelchMode,
+	LiveAudioSquelchSetting,
+} from "@wavekit/api-types"
 import type { OperatorActivityPort } from "./scanner/auto-resume.js"
 import type { LiveDemodConfig, LiveDemodStatus } from "./live-demodulator.js"
 
 /**
  * Manual mode gates only when the threshold is non-zero. Squelch 0 stays open
  * for the whole run, so it is not operator activity and not a transmission.
- * Auto and (WG7 req 2.4) noise mode always gate.
+ * Auto, open (Listen: detects at the auto threshold) and (WG7 req 2.4) noise mode always gate.
+ * Open on the Rust engine does not gate: the engine has no detect-only stage yet and plays
+ * ungated, so its gate stays open for the whole run like the old manual 0.
  */
-export function liveDemodSquelchGates(config: {
-	squelchMode?: "manual" | "auto" | "noise" | undefined
-	squelch: number
-}): boolean {
+export function liveDemodSquelchGates(
+	config: {
+		squelchMode?: LiveAudioSquelchSetting | undefined
+		squelch: number
+	},
+	engine?: "csdr" | "rust",
+): boolean {
+	if (config.squelchMode === "open") return engine !== "rust"
 	return (
 		config.squelchMode === "auto" ||
 		config.squelchMode === "noise" ||
@@ -23,7 +33,14 @@ export interface TransmissionConfigIdentity {
 	modulation: LiveDemodConfig["modulation"]
 	bandwidth: number
 	offsetHz?: number | undefined
-	squelchMode?: "manual" | "auto" | "noise" | undefined
+	squelchMode?: LiveAudioSquelchSetting | undefined
+}
+
+/** Listen: the detection a squelch setting runs (open detects as auto); absent is manual. */
+export function liveDemodDetectionMode(
+	mode: LiveAudioSquelchSetting | undefined,
+): LiveAudioSquelchMode {
+	return mode === undefined ? "manual" : mode === "open" ? "auto" : mode
 }
 
 /**
@@ -47,7 +64,8 @@ export function liveDemodTransmissionConfigChanged(
 		previous.modulation !== next.modulation ||
 		previous.bandwidth !== next.bandwidth ||
 		(previous.offsetHz ?? 0) !== (next.offsetHz ?? 0) ||
-		(previous.squelchMode ?? "manual") !== (next.squelchMode ?? "manual")
+		liveDemodDetectionMode(previous.squelchMode) !==
+			liveDemodDetectionMode(next.squelchMode)
 	)
 }
 
@@ -83,9 +101,10 @@ export interface ActivitySource {
  *
  * Audio holds the resume timer only while someone is listening (at least one
  * audio client) through a squelch that actually gates: manual mode with a
- * non-zero threshold, auto mode or noise mode. Squelch 0 is open for the whole run, so
- * counting it would hold an always-on demodulator forever and no scan would
- * resume. No recorder reports activity yet, so `recording` stays false.
+ * non-zero threshold, auto mode, noise mode or open on csdr. Squelch 0 and open on
+ * Rust are open for the whole run, so counting them would hold an always-on
+ * demodulator forever and no scan would resume. No recorder reports activity yet,
+ * so `recording` stays false.
  */
 export function liveDemodOperatorActivity(
 	liveDemod: ActivitySource,
@@ -93,7 +112,7 @@ export function liveDemodOperatorActivity(
 	return {
 		current: () => {
 			const status = liveDemod.getStatus()
-			const gated = liveDemodSquelchGates(status.config)
+			const gated = liveDemodSquelchGates(status.config, status.engine)
 			return {
 				audio:
 					status.running &&

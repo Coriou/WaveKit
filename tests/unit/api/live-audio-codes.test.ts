@@ -5,8 +5,10 @@ import { describe, expect, it, vi } from "vitest"
 import { liveAudioRoutes } from "../../../src/api/routes/live-audio.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
 
+// Listen (2026-11-15): manual at squelch 0 is reported as `open`; `voiceOnly` and `listenMode`
+// are always reported (additive).
 const SUCCESS_GOLDEN =
-	'{"enabled":true,"running":true,"sourceId":"rtl-pi","sourceConnected":true,"sourceIqSampleRate":2400000,"config":{"enabled":true,"httpPort":8081,"modulation":"nfm","bandwidth":12500,"squelch":0,"noiseReduction":"off","lowPass":0,"highPass":0,"gain":10,"deEmphasis":false,"deEmphasisTau":50,"audioFormat":"s16le","iqDcBlock":true,"sourceId":"rtl-pi","squelchMode":"manual","autoMarginDb":6,"noiseQuietingDb":6,"offsetHz":0},"effectiveSampleRate":25000,"decimationFactor":96,"httpUrl":"http://localhost:8081/stream","clientCount":0,"bytesStreamed":0,"pipelineHealth":"running","wavUrl":"http://localhost:8081/stream.wav","pipelineRestarts":0,"engine":"csdr"}'
+	'{"enabled":true,"running":true,"sourceId":"rtl-pi","sourceConnected":true,"sourceIqSampleRate":2400000,"config":{"enabled":true,"httpPort":8081,"modulation":"nfm","bandwidth":12500,"squelch":0,"noiseReduction":"off","lowPass":0,"highPass":0,"gain":10,"deEmphasis":false,"deEmphasisTau":50,"audioFormat":"s16le","iqDcBlock":true,"sourceId":"rtl-pi","squelchMode":"open","voiceOnly":true,"listenMode":"auto","autoMarginDb":6,"noiseQuietingDb":6,"offsetHz":0},"effectiveSampleRate":25000,"decimationFactor":96,"httpUrl":"http://localhost:8081/stream","clientCount":0,"bytesStreamed":0,"pipelineHealth":"running","wavUrl":"http://localhost:8081/stream.wav","pipelineRestarts":0,"engine":"csdr"}'
 
 const HOSTILE = "SECRET-<script>-9999"
 

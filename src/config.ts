@@ -1,4 +1,6 @@
 import type {
+	LiveAudioListenMode,
+	LiveAudioSquelchSetting,
 	StationField,
 	StationIdentity,
 	StationProvenance,
@@ -6,6 +8,7 @@ import type {
 } from "@wavekit/api-types"
 import {
 	DCS_STANDARD_CODES,
+	LIVE_AUDIO_LISTEN_MODES,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_TONE_SQUELCH_MODULATIONS,
@@ -357,9 +360,21 @@ const liveDemodFields = z.object({
 	squelch: z.number().min(-160).max(0).default(0),
 	/**
 	 * manual: `squelch` is the threshold; auto: noise-floor estimate + `autoMarginDb`;
-	 * WG7 noise (NFM/WFM): FM discriminator quieting of at least `noiseQuietingDb`.
+	 * open (Listen, 2026-11-15): everything plays while stage 1 keeps detecting at the auto
+	 * threshold. WG7 noise (NFM/WFM, deprecated): FM discriminator quieting of at least
+	 * `noiseQuietingDb`; a loaded config and the API store it as auto with `voiceOnly: false`
+	 * (`migrateLiveAudioSquelch`).
 	 */
-	squelchMode: z.enum(["manual", "auto", "noise"]).optional(),
+	squelchMode: z.enum(["manual", "auto", "noise", "open"]).optional(),
+	/**
+	 * Listen: the voice check under auto on nfm (runtime default true, no schema default so the
+	 * parsed config stays as written). Live audio only; the scanner's recorder ignores it.
+	 */
+	voiceOnly: z.boolean().optional(),
+	/** Listen: what `/auto` plays (runtime default `auto`), shared by every client. */
+	listenMode: z
+		.enum(LIVE_AUDIO_LISTEN_MODES as [LiveAudioListenMode])
+		.optional(),
 	autoMarginDb: z.number().finite().min(0).max(40).optional(),
 	/** WG7: noise squelch quieting threshold in dB (runtime default 6). */
 	noiseQuietingDb: z
@@ -487,6 +502,66 @@ export const LiveDemodConfigSchema = liveDemodFields
 			.optional(),
 	})
 	.superRefine(refineLiveDemod)
+
+/** The squelch keys `migrateLiveAudioSquelch` reads and rewrites. */
+export interface LiveAudioSquelchKeys {
+	squelchMode?: LiveAudioSquelchSetting | undefined
+	squelch: number
+	voiceOnly?: boolean | undefined
+}
+
+/**
+ * Listen migration (2026-11-15) of a whole live-audio config: deprecated `noise` becomes `auto`
+ * with `voiceOnly: false` (an FM carrier squelch without the voice check, which Auto already
+ * opens on since 2026-10-17), and `manual` with `squelch: 0` (the old Off) becomes `open`. Every
+ * other config is returned as it is (same object).
+ */
+export function migrateLiveAudioSquelch<T extends LiveAudioSquelchKeys>(
+	config: T,
+): T {
+	if (config.squelchMode === "noise")
+		return { ...config, squelchMode: "auto", voiceOnly: false }
+	if (config.squelchMode === "manual" && config.squelch === 0)
+		return { ...config, squelchMode: "open" }
+	return config
+}
+
+/**
+ * Listen migration of a partial update against the current config: the keys to add to `updates`
+ * so that the merged config is stored migrated. A `noise` update on a modulation noise squelch
+ * does not support is passed through unchanged, so validation still refuses it (400).
+ */
+export function migrateLiveAudioSquelchUpdate<
+	U extends Partial<LiveAudioSquelchKeys> & {
+		modulation?: z.infer<typeof liveDemodFields>["modulation"] | undefined
+	},
+>(
+	current: LiveAudioSquelchKeys & {
+		modulation: z.infer<typeof liveDemodFields>["modulation"]
+	},
+	updates: U,
+): U {
+	const merged = {
+		squelchMode: updates.squelchMode ?? current.squelchMode,
+		squelch: updates.squelch ?? current.squelch,
+		voiceOnly: updates.voiceOnly ?? current.voiceOnly,
+	}
+	const modulation = updates.modulation ?? current.modulation
+	if (
+		merged.squelchMode === "noise" &&
+		!LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(modulation)
+	)
+		return updates
+	const migrated = migrateLiveAudioSquelch(merged)
+	if (migrated === merged) return updates
+	return {
+		...updates,
+		squelchMode: migrated.squelchMode,
+		...(migrated.voiceOnly !== merged.voiceOnly
+			? { voiceOnly: migrated.voiceOnly }
+			: {}),
+	}
+}
 
 /**
  * Runtime live demodulation fields: the startup schema without the config-only
@@ -1005,7 +1080,10 @@ export const ConfigSchema = z
 		audio: AudioConfigSchema.default({}),
 		tunerRelay: TunerRelayConfigSchema.default({}),
 		tuner: TunerConfigSchema.default({}),
-		liveDemod: LiveDemodConfigSchema.optional(),
+		// Listen: a loaded config stores deprecated squelch values migrated.
+		liveDemod: LiveDemodConfigSchema.transform(
+			migrateLiveAudioSquelch,
+		).optional(),
 		digitalVoice: DigitalVoiceConfigSchema.optional(),
 		api: ApiConfigSchema.default({}),
 		access: AccessRuntimeConfigSchema,

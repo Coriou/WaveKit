@@ -192,18 +192,21 @@ describe("mock server REST", () => {
 		})
 	})
 
-	it("takes the WG7 noise squelch on FM only, as the core", async () => {
+	// Listen (2026-11-15): noise is deprecated and stored as auto without the voice check.
+	it("takes the deprecated noise squelch on FM only and stores it migrated, as the core", async () => {
 		const ok = await inject("PATCH", "/api/live-audio/config", {
 			squelchMode: "noise",
 			noiseQuietingDb: 9,
 		})
 		expect(ok.statusCode).toBe(200)
 		expect(ok.json<LiveAudioStatus>().config).toMatchObject({
-			squelchMode: "noise",
+			squelchMode: "auto",
+			voiceOnly: false,
 			noiseQuietingDb: 9,
 		})
 		const am = await inject("PATCH", "/api/live-audio/config", {
 			modulation: "am",
+			squelchMode: "noise",
 		})
 		expect(am.statusCode).toBe(400)
 		expect(am.json()).toMatchObject({ error: "Bad Request" })
@@ -212,12 +215,42 @@ describe("mock server REST", () => {
 		})
 		expect(out.statusCode).toBe(400)
 		const back = await inject("PATCH", "/api/live-audio/config", {
-			modulation: "am",
 			squelchMode: "auto",
+			voiceOnly: true,
 			noiseQuietingDb: 6,
 		})
 		expect(back.statusCode).toBe(200)
-		await inject("PATCH", "/api/live-audio/config", { modulation: "nfm" })
+	})
+
+	it("takes open, voiceOnly and listenMode; manual at 0 is open, as the core", async () => {
+		const status = (
+			await inject("GET", "/api/live-audio/status")
+		).json<LiveAudioStatus>()
+		expect(status.config).toMatchObject({ voiceOnly: true, listenMode: "auto" })
+		const open = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "open",
+			listenMode: "digital",
+		})
+		expect(open.statusCode).toBe(200)
+		expect(open.json<LiveAudioStatus>().config).toMatchObject({
+			squelchMode: "open",
+			listenMode: "digital",
+		})
+		const off = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "manual",
+			squelch: 0,
+		})
+		expect(off.json<LiveAudioStatus>().config.squelchMode).toBe("open")
+		for (const bad of [{ voiceOnly: "no" }, { listenMode: "decoded" }])
+			expect(
+				(await inject("PATCH", "/api/live-audio/config", bad)).statusCode,
+			).toBe(400)
+		const restore = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "auto",
+			squelch: -60,
+			listenMode: "auto",
+		})
+		expect(restore.statusCode).toBe(200)
 	})
 
 	it("serves the resolved band plan", async () => {

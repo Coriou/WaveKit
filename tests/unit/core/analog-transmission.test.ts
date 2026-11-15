@@ -24,7 +24,7 @@ class FakeSource extends EventEmitter implements AnalogTransmissionSource {
 	running = true
 	squelchOpen = false
 	squelch = -40
-	squelchMode: "manual" | "auto" | "noise" = "manual"
+	squelchMode: "manual" | "auto" | "noise" | "open" = "manual"
 	sourceId = "rtl0"
 	/** When set, config events omit sourceId while status keeps `sourceId`. */
 	omitConfiguredSourceId = false

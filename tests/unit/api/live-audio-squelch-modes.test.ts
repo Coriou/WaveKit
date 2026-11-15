@@ -84,7 +84,8 @@ describe("Live Audio Routes: noise and tone squelch", () => {
 			payload: payload as Record<string, unknown>,
 		})
 
-	it("accepts noise mode, the quieting threshold and a tone, and returns them", async () => {
+	// Listen (2026-11-15): deprecated noise is accepted and stored as auto with voiceOnly false.
+	it("accepts noise mode (stored as auto without the voice check), the quieting threshold and a tone, and returns them", async () => {
 		const response = await patch({
 			squelchMode: "noise",
 			noiseQuietingDb: 10,
@@ -92,7 +93,8 @@ describe("Live Audio Routes: noise and tone squelch", () => {
 		})
 		expect(response.statusCode).toBe(200)
 		expect(liveDemod.reconfigure).toHaveBeenCalledWith({
-			squelchMode: "noise",
+			squelchMode: "auto",
+			voiceOnly: false,
 			noiseQuietingDb: 10,
 			toneSquelch: { kind: "ctcss", frequencyTenthsHz: 885 },
 		})
@@ -100,7 +102,8 @@ describe("Live Audio Routes: noise and tone squelch", () => {
 			config: Record<string, unknown>
 			toneSquelch: unknown
 		}>()
-		expect(body.config["squelchMode"]).toBe("noise")
+		expect(body.config["squelchMode"]).toBe("auto")
+		expect(body.config["voiceOnly"]).toBe(false)
 		expect(body.config["noiseQuietingDb"]).toBe(10)
 		expect(body.config["toneSquelch"]).toEqual({
 			kind: "ctcss",
@@ -148,14 +151,20 @@ describe("Live Audio Routes: noise and tone squelch", () => {
 		expect(liveDemod.status.config.toneSquelch).toBeUndefined()
 	})
 
-	it("refuses moving a noise-mode config to a non-FM modulation", async () => {
-		expect((await patch({ squelchMode: "noise" })).statusCode).toBe(200)
-		const response = await patch({ modulation: "usb" })
-		expect(response.statusCode).toBe(400)
-		expect(response.json<{ message: string }>().message).toContain(
-			'squelchMode: one of "manual" | "auto" | "noise"; "noise" needs modulation "nfm" or "wfm"',
+	// Listen: noise is no longer stored, so a later modulation change has no noise rule to break;
+	// noise sent with a non-FM modulation is still refused with the WG7 rule.
+	it("refuses noise together with a non-FM modulation; a stored (migrated) noise config may move", async () => {
+		const refused = await patch({ squelchMode: "noise", modulation: "usb" })
+		expect(refused.statusCode).toBe(400)
+		expect(refused.json<{ message: string }>().message).toContain(
+			'"noise" needs modulation "nfm" or "wfm"',
 		)
 		expect(liveDemod.status.config.modulation).toBe("nfm")
+		expect((await patch({ squelchMode: "noise" })).statusCode).toBe(200)
+		expect(liveDemod.status.config.squelchMode).toBe("auto")
+		const moved = await patch({ modulation: "usb" })
+		expect(moved.statusCode).toBe(200)
+		expect(liveDemod.status.config.modulation).toBe("usb")
 	})
 
 	it("GET status carries toneSquelch and the noise quieting default", async () => {
@@ -170,7 +179,8 @@ describe("Live Audio Routes: noise and tone squelch", () => {
 		}>()
 		expect(body.toneSquelch).toEqual({ state: "off" })
 		expect(body.config["noiseQuietingDb"]).toBe(6)
-		expect(body.config["squelchMode"]).toBe("manual")
+		// Listen: the stand-in's manual at squelch 0 is reported as open.
+		expect(body.config["squelchMode"]).toBe("open")
 		expect("toneSquelch" in body.config).toBe(false)
 	})
 })

@@ -31,12 +31,13 @@ import {
 	LIVE_AUDIO_FRONT_SWAP_TIMEOUT_MS,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
-	LIVE_AUDIO_SQUELCH_MODES,
+	LIVE_AUDIO_SQUELCH_INPUT_MODES,
 	type AnalogTransmissionDcs,
 	type LiveAudioAutoRoute,
 	type LiveAudioAutoRouteLevel,
 	type LiveAudioAutoSquelch,
 	type LiveAudioSquelchMode,
+	type LiveAudioSquelchSetting,
 } from "@wavekit/api-types"
 import {
 	LiveDemodRuntimeBaseSchema,
@@ -129,7 +130,7 @@ import type { SourceManager } from "./source-manager.js"
 export const LiveDemodRuntimeConfigSchema = LiveDemodRuntimeBaseSchema.and(
 	z.object({
 		squelchMode: z
-			.enum(LIVE_AUDIO_SQUELCH_MODES as [LiveAudioSquelchMode])
+			.enum(LIVE_AUDIO_SQUELCH_INPUT_MODES as [LiveAudioSquelchSetting])
 			.default("auto"),
 		autoMarginDb: z.number().finite().min(0).max(40).default(6),
 		noiseQuietingDb: z
@@ -141,7 +142,7 @@ export const LiveDemodRuntimeConfigSchema = LiveDemodRuntimeBaseSchema.and(
 	}),
 )
 export type LiveDemodConfig = BaseLiveDemodConfig & {
-	squelchMode?: "manual" | "auto" | "noise" | undefined
+	squelchMode?: LiveAudioSquelchSetting | undefined
 	autoMarginDb?: number | undefined
 	noiseQuietingDb?: number | undefined
 }
@@ -424,6 +425,8 @@ const NODE_ONLY_KEYS = new Set<keyof LiveDemodConfig>([
 	"autoMarginDb",
 	"noiseQuietingDb",
 	"toneSquelch",
+	"voiceOnly",
+	"listenMode",
 	"iqDcBlock",
 ])
 
@@ -797,13 +800,27 @@ export class LiveDemodulator extends EventEmitter {
 			restarting ||
 			sourceChanged ||
 			liveDemodTransmissionConfigChanged(
-				{ ...previous, sourceId: undefined },
-				{ ...validated, sourceId: undefined },
+				// Listen: auto and open detect alike, so a switch between them keeps the over.
+				{
+					...previous,
+					sourceId: undefined,
+					squelchMode: detectionMode(previous.squelchMode),
+				},
+				{
+					...validated,
+					sourceId: undefined,
+					squelchMode: detectionMode(validated.squelchMode),
+				},
 			)
 		)
 			this.closeOverride = "config"
 		try {
-			if (this.run && validated.squelchMode !== previous.squelchMode) {
+			// Listen: auto and open detect alike, so a switch between them keeps the floor.
+			if (
+				this.run &&
+				detectionMode(validated.squelchMode) !==
+					detectionMode(previous.squelchMode)
+			) {
 				this.run.noiseFloorDbfs = null
 				this.run.retuneFloorDbfs = null
 			}
@@ -1102,7 +1119,7 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private effectiveThreshold(run: PipelineRun): number {
-		if (this.config.squelchMode !== "auto") return this.config.squelch
+		if (!detectsAsAuto(this.config.squelchMode)) return this.config.squelch
 		return Math.min(
 			-0.001,
 			Math.max(
@@ -1122,9 +1139,11 @@ export class LiveDemodulator extends EventEmitter {
 			this.config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
 		)
 		run.squelch.setMode(this.config.squelchMode === "noise" ? "noise" : "power")
+		// Listen: open detects like auto but passes every block to the demodulator.
+		run.squelch.setDetectOnly(this.config.squelchMode === "open")
 		// WG10 req 2.6: squelchMode changes without a restart (modulation restarts).
 		run.squelch.setCarrierObserver(
-			this.config.squelchMode === "auto" &&
+			detectsAsAuto(this.config.squelchMode) &&
 				LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation),
 		)
 		// WG10 activity hygiene: carrier evidence for transmissions, every squelch mode.
@@ -1181,7 +1200,7 @@ export class LiveDemodulator extends EventEmitter {
 		// A runtime switch out of auto keeps the run's observer: gate on the mode.
 		const quieted = sampled
 			? sample.quieted
-			: this.config.squelchMode === "auto" && run.squelch.blockQuieted()
+			: detectsAsAuto(this.config.squelchMode) && run.squelch.blockQuieted()
 		if (power !== null) {
 			// Constant-memory lower envelope: falls are immediate; a slower open
 			// rise preserves calls but eventually recovers from sustained noise steps.
@@ -1192,8 +1211,9 @@ export class LiveDemodulator extends EventEmitter {
 					// WG9 req 5.6: after a retune, a carrier already present must not
 					// become its own floor; the previous floor bounds the seed once.
 					// Auto squelch only: manual and noise modes seed from power alone.
-					const previous =
-						this.config.squelchMode === "auto" ? run.retuneFloorDbfs : null
+					const previous = detectsAsAuto(this.config.squelchMode)
+						? run.retuneFloorDbfs
+						: null
 					run.retuneFloorDbfs = null
 					run.noiseFloorDbfs =
 						previous !== null && previous < power ? previous : power
@@ -1537,7 +1557,7 @@ export class LiveDemodulator extends EventEmitter {
 
 	/** WG9 req 5.6 retune floor handling (also applied by a front swap, WG10 2.3). */
 	private resetFloorForRetune(run: PipelineRun): void {
-		if (this.config.squelchMode === "auto" && run.noiseFloorDbfs !== null)
+		if (detectsAsAuto(this.config.squelchMode) && run.noiseFloorDbfs !== null)
 			run.retuneFloorDbfs = run.noiseFloorDbfs
 		run.noiseFloorDbfs = null
 	}
@@ -1721,17 +1741,20 @@ export class LiveDemodulator extends EventEmitter {
 		}
 		const squelch = new ChannelSquelch({
 			sampleRate: plan.channelSampleRate,
-			thresholdDbfs:
-				this.config.squelchMode === "auto" ? -0.001 : this.config.squelch,
+			thresholdDbfs: detectsAsAuto(this.config.squelchMode)
+				? -0.001
+				: this.config.squelch,
 			hangMs: SQUELCH_HANG_MS,
 			mode: this.config.squelchMode === "noise" ? "noise" : "power",
+			// Listen: open detects like auto and passes every block raw.
+			...(this.config.squelchMode === "open" ? { detectOnly: true } : {}),
 			noiseQuietingDb:
 				this.config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
 			...(this.config.bandwidth > 0
 				? { bandwidthHz: this.config.bandwidth }
 				: {}),
 			// WG10 req 2.6: the FM quieting observer exists only in auto nfm/wfm.
-			...(this.config.squelchMode === "auto" &&
+			...(detectsAsAuto(this.config.squelchMode) &&
 			LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(this.config.modulation)
 				? { carrierObserver: true }
 				: {}),
@@ -2298,8 +2321,15 @@ export class LiveDemodulator extends EventEmitter {
 		if (run === null || tone === null) {
 			if (run !== null) {
 				run.pcmTailMuted = false
+				// Listen: the open squelch passes every byte, so /auto hears it as audible too.
 				if (this.autoRoute.wanted)
-					this.pushAuto(chunk, 0, chunk.length, runGateOpen(run), run.stream)
+					this.pushAuto(
+						chunk,
+						0,
+						chunk.length,
+						runAnalogPasses(run, this.config),
+						run.stream,
+					)
 			}
 			this.audio.write(chunk)
 			this.emitPcm(chunk)
@@ -2699,16 +2729,44 @@ function standardDcs(
 	return { code: dcs.code, polarity: dcs.polarity }
 }
 
-/** The configured tone of a tone squelch gate, or null (absent, `none` or not NFM). */
+/**
+ * The configured tone of a tone squelch gate, or null (absent, `none`, not NFM, or the open
+ * squelch, which ignores the tone gate and keeps the stored tone for the return to auto/manual).
+ */
 function configuredTone(config: LiveDemodConfig): ToneSquelchTone | null {
 	const tone = config.toneSquelch
 	if (tone === undefined || tone.kind === "none") return null
+	if (config.squelchMode === "open") return null
 	if (config.modulation !== "nfm") return null
 	return tone
 }
 
+/**
+ * Listen: `open` detects transmissions exactly like `auto` (floor + margin, FM quieting assist);
+ * only the audio differs. The runtime schema always sets a mode; an absent one stays non-auto,
+ * as before.
+ */
+function detectsAsAuto(mode: LiveAudioSquelchSetting | undefined): boolean {
+	return mode === "auto" || mode === "open"
+}
+
+/** The detection a squelch mode runs: `open` counts as `auto` (floor handling, identity). */
+function detectionMode(
+	mode: LiveAudioSquelchSetting | undefined,
+): LiveAudioSquelchMode | undefined {
+	return mode === "open" ? "auto" : mode
+}
+
 function runGateOpen(run: PipelineRun): boolean {
 	return run.externalGate ?? run.squelch.open
+}
+
+/**
+ * Listen: whether the run's analog output passes to clients. The open squelch passes every byte
+ * (csdr detect-only, Rust ungated) whatever stage 1 decides; otherwise the stage-1 gate.
+ */
+function runAnalogPasses(run: PipelineRun, config: LiveDemodConfig): boolean {
+	return config.squelchMode === "open" || runGateOpen(run)
 }
 
 /** The rollback candidate, with the squelch mode and tone from `acked` when it is invalid. */

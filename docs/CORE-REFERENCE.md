@@ -358,7 +358,14 @@ ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:808
 - `audioFormat` — `s16le` or `f32le`
 - `iqDcBlock` — Deprecated and ignored (it corrupted I/Q); use `offsetHz`
 - `squelchMode` — `auto` (default, below), `manual` (the `squelch` threshold) or
-  `noise` (an FM quieting squelch, NFM and WFM only)
+  `open` (everything plays; stage 1 still detects at the auto threshold, so transmission
+  events and Activity rows continue). `manual` with `squelch: 0` is read as `open`.
+  The deprecated `noise` is still accepted and read as `auto` with `voiceOnly: false`
+- `voiceOnly` — `true` (default): on NFM in `auto`, stage 2 (below) holds the audio until
+  it hears voice or a tone. `false` plays every over the carrier gate passes. Live audio
+  only; the scanner recorder's speech check is separate
+- `listenMode` — `auto` (default), `analog` or `digital`: which source the `/auto` route
+  plays. Shared by every client of the core
 - `engine` — `csdr` (default) or `rust` (opt-in). The Rust engine (the `wavekit-chan` binary,
   shipped in the image; `chanBinaryPath` overrides the path) demodulates NFM and AM;
   WFM, USB, LSB, DSB, CW, raw, a non-CU8 source, a bandwidth outside 2 500–40 000 Hz,

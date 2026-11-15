@@ -15,8 +15,10 @@ import {
 	SQUELCH_REJECTED_REASON,
 } from "../../../src/core/live-demod/rust-run.js"
 import { RUST_FALLBACK_LOG } from "../../../src/core/live-demod/select-engine.js"
+import { liveDemodOperatorActivity } from "../../../src/core/live-demod-activity.js"
 import type { LiveDemodulator as LiveDemodulatorType } from "../../../src/core/live-demodulator.js"
 import {
+	ClientTransport,
 	FakeProcess,
 	capturingLogger,
 	createFakeFanout,
@@ -443,6 +445,67 @@ describe("live demod rust fallback and retune", () => {
 		)
 		expect(edges).toEqual([true, false])
 		expect(demod?.isSquelchOpen()).toBe(false)
+	})
+
+	// Listen: the engine has no detect-only stage yet, so open plays ungated like the old manual 0.
+	it("open plays ungated with no transmission and no operator activity", async () => {
+		await boot({ squelchMode: "open", modulation: "nfm" })
+		expect(demod?.getStatus().engine).toBe("rust")
+		const opened = controlMessages(channels[0]?.controlText ?? "").find(
+			message => message["type"] === "open",
+		)
+		expect(opened?.["squelch"]).toEqual({ mode: "off" })
+		const tracker = wireAnalogTransmissions({
+			source: demod as unknown as AnalogTransmissionSource,
+			frequencyAt: (_id, offsetHz) => ({
+				hz: 446_000_000 + offsetHz,
+				tuningTrust: "commanded",
+			}),
+			broadcast: () => undefined,
+			sink: () => null,
+		})
+		const events: AnalogTransmissionEventData[] = []
+		tracker.on("transmission", event => events.push(event))
+		;(
+			demod as unknown as {
+				registerClient(response: unknown, remoteAddress: string): unknown
+			}
+		).registerClient(new ClientTransport(), "local")
+		expect(demod?.getStatus().clientCount).toBe(1)
+		expect(demod?.isSquelchOpen()).toBe(true)
+		for (let b = 0; b < 6; b++)
+			channels[0]?.emitLine(
+				demodEvent("metrics", {
+					atOutputSample: 4800 * b,
+					powerDbfs: new Array<number>(10).fill(-30),
+					quietingDb: new Array<number>(10).fill(30),
+				}),
+			)
+		expect(demod?.isSquelchOpen()).toBe(true)
+		expect(events).toEqual([])
+		const activity = liveDemodOperatorActivity(
+			demod as unknown as Parameters<typeof liveDemodOperatorActivity>[0],
+		)
+		expect(activity.current().audio).toBe(false)
+		tracker.stop()
+	})
+
+	it("switching to open at runtime opens a closed gate at once", async () => {
+		await boot({ squelchMode: "auto", modulation: "nfm" })
+		channels[0]?.emitLine(
+			demodEvent("gate", { open: false, atOutputSample: 0 }),
+		)
+		expect(demod?.isSquelchOpen()).toBe(false)
+		const edges: boolean[] = []
+		demod?.on("squelch-changed", open => edges.push(open))
+		await demod?.reconfigure({ squelchMode: "open" })
+		const squelch = controlMessages(channels[0]?.controlText ?? "").filter(
+			message => message["type"] === "squelch",
+		)
+		expect(squelch.at(-1)).toMatchObject({ mode: "off" })
+		expect(demod?.isSquelchOpen()).toBe(true)
+		expect(demod?.getStatus().squelchOpen).toBe(true)
+		expect(edges).toContain(true)
 	})
 
 	it("feeds metrics power into the auto floor and sends one squelch update", async () => {

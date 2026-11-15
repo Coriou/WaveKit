@@ -17,8 +17,39 @@ export const LIVE_AUDIO_AGC_MODES: readonly LiveAudioAgcMode[] = [
  * `noiseQuietingDb` below its noise-only reference.
  */
 export type LiveAudioSquelchMode = "manual" | "auto" | "noise"
+/** WG7 squelch modes (frozen list; the detection modes a transmission event reports). */
 export const LIVE_AUDIO_SQUELCH_MODES: readonly LiveAudioSquelchMode[] =
 	Object.freeze(["manual", "auto", "noise"])
+/**
+ * Listen (2026-11-15): the configured squelch (`LiveAudioConfig.squelchMode`), the detection
+ * modes plus `open`. A transmission event keeps `LiveAudioSquelchMode`: an open squelch detects
+ * as `auto`.
+ */
+export type LiveAudioSquelchSetting = LiveAudioSquelchMode | "open"
+/**
+ * Listen (2026-11-15): the squelch positions a core reports and a client offers: `auto` (carrier
+ * squelch, plus the voice check when `voiceOnly`), `manual` (the `squelch` threshold) and `open`
+ * (everything plays raw while stage 1 keeps detecting transmissions at the auto threshold).
+ */
+export const LIVE_AUDIO_SQUELCH_POSITIONS: readonly LiveAudioSquelchSetting[] =
+	Object.freeze(["auto", "manual", "open"])
+/**
+ * Every `squelchMode` a core accepts on input: the positions plus the deprecated `noise`, which a
+ * core stores as `auto` with `voiceOnly: false`. A client never offers `noise`.
+ */
+export const LIVE_AUDIO_SQUELCH_INPUT_MODES: readonly LiveAudioSquelchSetting[] =
+	Object.freeze(["auto", "manual", "open", "noise"])
+/** Listen: `voiceOnly` when a config omits it (the voice check is on). */
+export const LIVE_AUDIO_VOICE_ONLY_DEFAULT = true
+/**
+ * Listen: what `/auto` plays, one core setting shared by every client: `auto` (analog or decoded
+ * voice per transmission), `analog` (demodulated audio only), `digital` (decoded voice only).
+ */
+export type LiveAudioListenMode = "auto" | "analog" | "digital"
+export const LIVE_AUDIO_LISTEN_MODES: readonly LiveAudioListenMode[] =
+	Object.freeze(["auto", "analog", "digital"])
+/** Listen: `listenMode` when a config omits it. */
+export const LIVE_AUDIO_LISTEN_MODE_DEFAULT: LiveAudioListenMode = "auto"
 /** WG7 req 2.2: noise squelch quieting threshold in dB (default, inclusive range). */
 /** WG10 req 2.2: silence chunk length while a restart keeps the stream format. */
 export const LIVE_AUDIO_SILENCE_CHUNK_MS = 20
@@ -215,10 +246,21 @@ export interface LiveAudioConfig {
 	/**
 	 * `auto` is the runtime default: a channel-power floor estimate + margin and, on NFM only,
 	 * client audio gated on voice or tone evidence with a pre-roll (AM and the other modulations
-	 * keep the stage-1 auto squelch). `manual` (configured
-	 * threshold) and WG7 `noise` (FM quieting) are unchanged.
+	 * keep the stage-1 auto squelch; `voiceOnly: false` keeps it on NFM too). `manual`: the
+	 * configured threshold. `open`: everything plays, tone squelch ignored, while stage 1 keeps
+	 * detecting transmissions at the auto threshold. `manual` with `squelch: 0` is stored and
+	 * reported as `open`. `noise` is deprecated: accepted on input and stored as `auto` with
+	 * `voiceOnly: false`.
 	 */
-	squelchMode?: LiveAudioSquelchMode
+	squelchMode?: LiveAudioSquelchSetting
+	/**
+	 * Listen: the voice check (the evidence gate) under `auto` on `nfm`; default true. False plays
+	 * every carrier stage 1 passes. Governs live audio only, never the scanner's recordings. A
+	 * core reports it on every status.
+	 */
+	voiceOnly?: boolean
+	/** Listen: what `/auto` plays (default `auto`); reported on every status. */
+	listenMode?: LiveAudioListenMode
 	/** Auto threshold margin above the estimate, 0–40 dB; default 6. */
 	autoMarginDb?: number
 	/** WG7: noise squelch quieting threshold, 1–30 dB; default 6 (used in `noise` mode only). */

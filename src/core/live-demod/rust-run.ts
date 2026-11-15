@@ -16,6 +16,7 @@ import type { Logger } from "../../utils/logger.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { CARRIER_LOG_GAPS } from "../analog-transmission.js"
 import { ChannelSquelch } from "../channel-squelch.js"
+import { liveDemodDetectionMode } from "../live-demod-activity.js"
 import type { SilenceFillClock } from "../live-audio-silence.js"
 import type { LiveDemodConfig, PipelineRun } from "../live-demodulator.js"
 import type { DemodRetune, DemodSquelch } from "./engine.js"
@@ -365,6 +366,17 @@ export class RustLiveRun {
 		this.lastSentSquelch = encoded
 		engine.applySquelch(squelch)
 		if (this.controlWrite !== "retune") this.controlWrite = "squelch"
+		// Listen: open plays ungated (no detect-only stage in the engine yet). A gate closed
+		// before the switch must not keep open muted until the engine reports the new gate.
+		if (
+			squelch.mode === "off" &&
+			run.externalGate !== true &&
+			this.host.currentRun() === run &&
+			!run.stopping
+		) {
+			run.externalGate = true
+			this.host.publishSquelchChange()
+		}
 	}
 
 	/**
@@ -399,8 +411,9 @@ export class RustLiveRun {
 			if (pre.fallback) this.noteFallback(pre.fallback)
 			return false
 		}
+		// Listen: open detects as auto (the node floor and threshold), as on csdr.
 		const threshold =
-			config.squelchMode === "auto"
+			liveDemodDetectionMode(config.squelchMode) === "auto"
 				? RUST_AUTO_INITIAL_THRESHOLD_DBFS
 				: config.squelch
 		const squelch = squelchFor(config, threshold)
@@ -877,7 +890,8 @@ export function metricsQuieted(
 	config: LiveDemodConfig,
 	quietingDb: number | null,
 ): boolean {
-	if (config.squelchMode !== "auto") return false
+	// Listen: open detects as auto, so its floor takes the same quieting assist.
+	if (liveDemodDetectionMode(config.squelchMode) !== "auto") return false
 	if (!LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS.includes(config.modulation))
 		return false
 	// +∞ is the silent-discriminator token. It is quieted carrier evidence.
