@@ -14,7 +14,8 @@
  * columns and read by rows, then scrambled with x^9 + x^5 + 1 (all ones).
  * IDs are air-interface IDs of 7-digit strings (dpmr_voice.c
  * ConvertAirInterfaceID). Dibit 01 is +3, 00 +1, 10 -1, 11 -3;
- * raised-cosine shaping, roll-off 0.5.
+ * raised-cosine shaping, roll-off 0.5,
+ * unless `shape` names another (fsk-iq.mjs AIR_SHAPES).
  */
 import {
 	EASY_SHAPE,

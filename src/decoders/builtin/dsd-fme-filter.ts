@@ -15,12 +15,21 @@
  *   nearly unchanged. A matched root raised cosine cuts more noise, but its
  *   narrower pulse made dsd-fme lose YSF frame sync on strong signals (2.5 to
  *   11 % of frames at 30 to 40 dB CNR, measured), so auto does not use it.
- * - NXDN (nxdn48, nxdn): the NXDN receive filter, root raised cosine 0.2
- *   times sin x / x at the symbol rate. NXDN transmitters add x / sin x, whose
- *   intersymbol interference a plain low-pass leaves: without this filter
- *   dsd-fme decoded almost no standard-shaped NXDN48 frame at any CNR.
- * - dPMR: the root raised cosine 0.2 (ETSI TS 102 490) at 2400 symbols/s.
+ * - NXDN48: the NXDN receive filter, root raised cosine 0.2 times sin x / x
+ *   at 2400 symbols/s. NXDN transmitters add x / sin x, whose intersymbol
+ *   interference a plain low-pass leaves: without this filter dsd-fme decoded
+ *   almost no standard-shaped NXDN48 frame at any CNR.
+ * - NXDN96 (nxdn): none yet. The synthetic NXDN96 transmission decoded on
+ *   the host's dsd-fme build only with a roll-off of 0.5, which the 3 kHz
+ *   low-pass cuts, so no filter is measured for it.
+ * - dPMR (2400 symbols/s): the same kind of low-pass, flat to 1.05 kHz and
+ *   stopped from 1.55 kHz. Its matched root raised cosine 0.2 (ETSI TS 102
+ *   490) did as well without carrier error but lost 72 % of control channels
+ *   at 30 dB CNR with a 600 Hz error (19 % unfiltered), measured.
  * - ProVoice: none (9600 bit/s two-level FSK, wider than these filters).
+ *   P25 phase 2 (6000 symbols/s) is wider than the low-pass too; dsd-fme's
+ *   auto mode searches for it at the 4800 symbols/s timing and switches only
+ *   on a trunking grant, so it is not measured here.
  *
  * tests/integration/dsd-fme-margin.test.ts measures each per protocol and
  * CNR. It runs as an effect in the sox WAV wrapper the pipeline already has.
@@ -31,18 +40,20 @@
  */
 import type { DsdFmeMode } from "./dsd-fme.js"
 
-/** Roll-off of the NXDN and dPMR filters. */
+/** Roll-off of the NXDN filter. */
 export const RECEIVE_FILTER_ROLL_OFF = 0.2
 /** FIR span +-8 symbols: the 0.2 tails are below 1 % of the peak there. */
 export const RECEIVE_FILTER_SPAN_SYMBOLS = 8
 /** The 4800 symbols/s low-pass: sox `sinc`, -6 dB at 3 kHz, 1 kHz wide edge. */
 export const RECEIVE_LOWPASS_EFFECT = "sinc -t 1000 -3000"
+/** The dPMR low-pass: -6 dB at 1.3 kHz, 500 Hz wide edge. */
+export const RECEIVE_LOWPASS_2400_EFFECT = "sinc -t 500 -1300"
 
 export type ReceiveFilterPlan =
-	| { kind: "lowpass" }
+	| { kind: "lowpass"; effect: string }
 	| { kind: "rrc"; symbolRate: number; sinc: boolean }
 
-/** The filter for a mode, or undefined (ProVoice). */
+/** The filter for a mode, or undefined (NXDN96, ProVoice). */
 export function receiveFilterPlan(
 	mode: DsdFmeMode,
 ): ReceiveFilterPlan | undefined {
@@ -52,59 +63,52 @@ export function receiveFilterPlan(
 		case "p25":
 		case "ysf":
 		case "dstar":
-			return { kind: "lowpass" }
-		case "nxdn":
-			return { kind: "rrc", symbolRate: 4800, sinc: true }
+			return { kind: "lowpass", effect: RECEIVE_LOWPASS_EFFECT }
 		case "nxdn48":
 			return { kind: "rrc", symbolRate: 2400, sinc: true }
 		case "dpmr":
-			return { kind: "rrc", symbolRate: 2400, sinc: false }
+			return { kind: "lowpass", effect: RECEIVE_LOWPASS_2400_EFFECT }
+		case "nxdn":
 		case "provoice":
 			return undefined
 	}
 }
 
-/**
- * One-sided receive spectrum at x = f / symbol rate: the root of the raised
- * cosine of roll-off `alpha`, times sin(pi x) / (pi x) when `sinc`.
- */
-export function receiveSpectrum(
-	x: number,
-	alpha: number,
-	sinc: boolean,
-): number {
-	const a = Math.abs(x)
-	const lo = (1 - alpha) / 2
-	const hi = (1 + alpha) / 2
-	let rc = 0
-	if (a <= lo) rc = 1
-	else if (a <= hi) rc = 0.5 * (1 + Math.cos((Math.PI / alpha) * (a - lo)))
-	const v = Math.sqrt(rc)
-	return sinc && a > 1e-12 ? (v * Math.sin(Math.PI * a)) / (Math.PI * a) : v
+/** Root raised cosine h(t), t in symbols, roll-off `alpha` (closed form). */
+export function rootRaisedCosine(t: number, alpha: number): number {
+	if (Math.abs(t) < 1e-12) return 1 - alpha + (4 * alpha) / Math.PI
+	if (Math.abs(Math.abs(t) - 1 / (4 * alpha)) < 1e-9)
+		return (
+			(alpha / Math.SQRT2) *
+			((1 + 2 / Math.PI) * Math.sin(Math.PI / (4 * alpha)) +
+				(1 - 2 / Math.PI) * Math.cos(Math.PI / (4 * alpha)))
+		)
+	const num =
+		Math.sin(Math.PI * t * (1 - alpha)) +
+		4 * alpha * t * Math.cos(Math.PI * t * (1 + alpha))
+	return num / (Math.PI * t * (1 - (4 * alpha * t) ** 2))
 }
 
 /**
- * Impulse response h(t), t in symbols: 2 * integral over [0, (1 + alpha) / 2]
- * of the spectrum times cos(2 pi x t) (Simpson, 600 steps; exact to about
- * 1e-9 for these smooth spectra).
+ * Receive impulse response h(t), t in symbols: the root raised cosine, or
+ * with `sinc` the root raised cosine times sin x / x in frequency, which in
+ * time is its mean over one symbol around t (integrate and dump; Simpson,
+ * `steps` even, within about 1e-8 at 32).
  */
 export function receiveImpulse(
 	t: number,
 	alpha: number,
 	sinc: boolean,
-	steps = 600,
+	steps = 32,
 ): number {
-	const top = (1 + alpha) / 2
-	const h = top / steps
+	if (!sinc) return rootRaisedCosine(t, alpha)
+	const h = 1 / steps
 	let sum = 0
 	for (let i = 0; i <= steps; i++) {
 		const w = i === 0 || i === steps ? 1 : i % 2 === 1 ? 4 : 2
-		sum +=
-			w *
-			receiveSpectrum(i * h, alpha, sinc) *
-			Math.cos(2 * Math.PI * i * h * t)
+		sum += w * rootRaisedCosine(t - 0.5 + i * h, alpha)
 	}
-	return (2 * sum * h) / 3
+	return (sum * h) / 3
 }
 
 /**
@@ -123,12 +127,23 @@ export function receiveFilterTaps(
 ): number[] {
 	const sps = rateHz / symbolRate
 	const half = Math.floor(span * sps)
-	const taps: number[] = []
-	for (let n = -half; n <= half; n++)
-		taps.push(receiveImpulse(n / sps, alpha, sinc))
+	// Even response: compute one side only.
+	const side: number[] = []
+	for (let n = 0; n <= half; n++)
+		side.push(receiveImpulse(n / sps, alpha, sinc))
+	const taps = [...side.slice(1).reverse(), ...side]
 	const sum = taps.reduce((a, b) => a + b, 0)
 	return taps.map(t => t / sum)
 }
+
+/**
+ * Effects already built, by mode and sox input rate: a decoder rebuilds its
+ * command on every start and scanner probes start often, so the FIR design
+ * runs once per mode and rate. A decoder sees one or two rates; the cache is
+ * cleared past EFFECTS_MAX entries.
+ */
+const effects = new Map<string, string>()
+const EFFECTS_MAX = 32
 
 /**
  * The sox effect for a mode at the sox input rate `rateHz`, or undefined.
@@ -141,8 +156,13 @@ export function receiveFilterEffect(
 ): string | undefined {
 	const plan = receiveFilterPlan(mode)
 	if (plan === undefined) return undefined
-	if (plan.kind === "lowpass") return RECEIVE_LOWPASS_EFFECT
-	return `fir ${receiveFilterTaps(plan.symbolRate, rateHz, { sinc: plan.sinc })
-		.map(t => t.toFixed(7))
-		.join(" ")}`
+	if (plan.kind === "lowpass") return plan.effect
+	const key = `${mode}|${rateHz}`
+	const cached = effects.get(key)
+	if (cached !== undefined) return cached
+	const taps = receiveFilterTaps(plan.symbolRate, rateHz, { sinc: plan.sinc })
+	const effect = `fir ${taps.map(t => t.toFixed(7)).join(" ")}`
+	if (effects.size >= EFFECTS_MAX) effects.clear()
+	effects.set(key, effect)
+	return effect
 }

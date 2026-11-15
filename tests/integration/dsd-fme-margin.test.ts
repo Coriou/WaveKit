@@ -10,7 +10,8 @@
  * Without WAVEKIT_SYNTH_IMAGE it uses the host's dsd-fme and sox (and csdr
  * when installed; otherwise the csdr FM head runs in-process). The host
  * builds wavekit-chan from native/ unless WAVEKIT_CHAN_BIN is set.
- * Narrower runs: WAVEKIT_MARGIN_SIGNALS, _VARIANTS (comma-separated names),
+ * Narrower or wider runs: WAVEKIT_MARGIN_SIGNALS, _VARIANTS (comma-separated
+ * names; default "before,after", the others are listed in VARIANTS),
  * _CNR (dB list), _ERROR_HZ (frequency error list), _SEEDS (count).
  */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
@@ -131,7 +132,9 @@ function signals(): MarginSignal[] {
 			// The call's link control: 2 Voice LC headers and 2 terminators
 			// (RS(12,9)) and one embedded LC per superframe (5-bit checksum).
 			frames: 4 + DMR_SUPERFRAMES,
-			checked: lines => count(lines, /SLOT 1 TGT=4321 SRC=1234567 /),
+			// A failed check prints the same line with "(CRC ERR)" or "FEC ERR".
+			checked: lines =>
+				count(lines, /^ ?SLOT 1 TGT=4321 SRC=1234567 (?!.*ERR)/),
 		},
 		p25Signal("P25 (C4FM)", AIR_SHAPES.p25),
 		// Wider than any standard (the chain tests' easy shaping): how a
@@ -172,15 +175,21 @@ function signals(): MarginSignal[] {
  * base command line (tests/unit/decoders/dsd-fme-filter.test.ts pins it);
  * "after" is today's default. The others document alternatives that were
  * measured: a slow DC blocker for carrier frequency error (sox highpass
- * 2 Hz), dsd-fme without its own input filters (-l), and the matched root
+ * 2 Hz), dsd-fme without its own input filters (-l), the matched root
  * raised cosine 0.2 at 4800 symbols/s instead of the low-pass (it cut more
- * noise but left YSF a frame error floor on strong signals).
+ * noise but left YSF a frame error floor on strong signals), and the plain
+ * 1.3 kHz low-pass dPMR now uses, for the 2400 symbols/s signals.
  */
 const VARIANTS: MarginVariant[] = [
 	{ name: "before", options: { receiveFilter: false } },
 	{ name: "after", options: {} },
 	{ name: "after+hp2", options: {}, soxEffects: "highpass -1 2" },
 	{ name: "after-l", options: {}, dsdArgs: ["-l"] },
+	{
+		name: "lp1300",
+		options: { receiveFilter: false },
+		soxEffects: "sinc -t 500 -1300",
+	},
 	{
 		name: "rrc4800",
 		options: { receiveFilter: false },
@@ -216,13 +225,11 @@ describe.skipIf(
 
 	it("measures FER and SER per protocol, chain, CNR and frequency error", async () => {
 		const onlySignals = list("WAVEKIT_MARGIN_SIGNALS")
-		const onlyVariants = list("WAVEKIT_MARGIN_VARIANTS")
+		const onlyVariants = list("WAVEKIT_MARGIN_VARIANTS") ?? ["before", "after"]
 		const chosen = signals().filter(
 			s => onlySignals === undefined || onlySignals.includes(s.name),
 		)
-		const variants = VARIANTS.filter(
-			v => onlyVariants === undefined || onlyVariants.includes(v.name),
-		)
+		const variants = VARIANTS.filter(v => onlyVariants.includes(v.name))
 		const points: MarginPoint[] = []
 		for (const signal of chosen)
 			for (const variant of variants)

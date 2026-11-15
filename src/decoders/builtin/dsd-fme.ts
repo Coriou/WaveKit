@@ -1285,7 +1285,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Join csdr stages
 		let pipelineStr = boundCsdrPipeline(csdrStages, this.logger)
 
-		// DEBUG: Record raw audio at demod rate before sox processing
+		// DEBUG: Record raw audio at demod rate before sox processing (so also
+		// before the receive filter, which runs in sox)
 		if (debugFile && this.debugRecording) {
 			pipelineStr += ` | ${shellCommand("tee", [debugFile])}`
 			this.logger.warn(

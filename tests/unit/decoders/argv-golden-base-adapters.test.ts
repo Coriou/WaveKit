@@ -672,7 +672,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			`csdr convert -i char -o float | csdr shift -0.0029296875 | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - ${receiveFilterEffect("nxdn", 47627.90697674418)!} | dsd-fme -i /dev/stdin -fn -o null -g 0`,
+			`csdr convert -i char -o float | csdr shift -0.0029296875 | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -fn -o null -g 0`,
 		],
 		getDecoderArgs: ["-i", "/dev/stdin", "-fn", "-o", "null", "-g", "0"],
 	},

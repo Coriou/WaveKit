@@ -21,7 +21,8 @@
  *   low-speed data (32 bits).
  * RS(24,12,13) is the shortened RS(63,51) over GF(2^6) with x^6 + x + 1 and
  * zeros alpha^1..alpha^12, as dsd-fme's ReedSolomon.hpp encodes it. Dibit 01
- * is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5.
+ * is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5,
+ * unless `shape` names another (fsk-iq.mjs AIR_SHAPES).
  */
 import {
 	EASY_SHAPE,

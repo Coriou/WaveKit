@@ -18,7 +18,8 @@
  * - V/D mode 2 CC: five blocks of 20 DCH dibits and 52 VeCH dibits; the
  *   DCH (80 bits whitened, CRC-16, tail, K = 5, 20 x 5) holds the
  *   destination in FN 0 and the source in FN 1.
- * Dibit 01 is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5.
+ * Dibit 01 is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5,
+ * unless `shape` names another (fsk-iq.mjs AIR_SHAPES).
  * Each over leads with two settle frames (sync and noise, no valid FICH).
  */
 import {

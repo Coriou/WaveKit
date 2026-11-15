@@ -376,7 +376,7 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 		secret: false,
 		effect: "restart",
 		description:
-			"Filter the discriminator output before dsd-fme: a 3 kHz low-pass for 4800 symbols/s modes, the standard receive filter for NXDN and dPMR.",
+			"Filter the discriminator output before dsd-fme: a 3 kHz low-pass for DMR, P25, YSF and D-STAR, the NXDN receive filter for NXDN48, a 1.3 kHz low-pass for dPMR; none for NXDN96 and ProVoice.",
 	},
 	{
 		key: "udpHost",

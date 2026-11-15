@@ -54,28 +54,34 @@ function rootRaisedCosine(t: number, a: number): number {
 }
 
 describe("dsd-fme receive filter design", () => {
-	it("picks the filter by mode: low-pass at 4800 symbols/s, the standard FIR for NXDN and dPMR, none for ProVoice", () => {
+	it("picks the filter by mode: low-pass at 4800 symbols/s, the NXDN filter for NXDN48, a 1.3 kHz low-pass for dPMR, none for NXDN96 and ProVoice", () => {
 		expect(DSD_FME_MODES.map(m => [m, receiveFilterPlan(m)])).toEqual([
-			["auto", { kind: "lowpass" }],
-			["dmr", { kind: "lowpass" }],
-			["p25", { kind: "lowpass" }],
-			["ysf", { kind: "lowpass" }],
-			["dstar", { kind: "lowpass" }],
-			["nxdn", { kind: "rrc", symbolRate: 4800, sinc: true }],
+			["auto", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
+			["dmr", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
+			["p25", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
+			["ysf", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
+			["dstar", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
+			["nxdn", undefined],
 			["nxdn48", { kind: "rrc", symbolRate: 2400, sinc: true }],
-			["dpmr", { kind: "rrc", symbolRate: 2400, sinc: false }],
+			["dpmr", { kind: "lowpass", effect: "sinc -t 500 -1300" }],
 			["provoice", undefined],
 		])
 		expect(receiveFilterEffect("auto", 47_000)).toBe("sinc -t 1000 -3000")
 		expect(receiveFilterEffect("provoice", 48_000)).toBeUndefined()
 	})
 
-	it("is the textbook root raised cosine without sinc (closed form)", () => {
+	it("is the textbook root raised cosine without sinc, and builds one effect per mode and rate", () => {
 		for (const t of [0, 0.3, 1, 1.7, 2.5, 4, 7])
 			expect(receiveImpulse(t, 0.2, false)).toBeCloseTo(
 				rootRaisedCosine(t, 0.2),
 				6,
 			)
+		expect(receiveFilterEffect("nxdn48", 44_100)).toBe(
+			receiveFilterEffect("nxdn48", 44_100),
+		)
+		expect(receiveFilterEffect("nxdn48", 44_100)).not.toBe(
+			receiveFilterEffect("dpmr", 44_100),
+		)
 	})
 
 	it("is the receive filter the synthetic generators' transmit filters assume", () => {
@@ -84,14 +90,15 @@ describe("dsd-fme receive filter design", () => {
 			{ shaping: "rrc" as const, alpha: 0.2 },
 			{ shaping: "rrc" as const, alpha: 0.2, isinc: true },
 		])
-			for (const t of [0, 0.5, 1, 2.25])
+			// 1.25 = 1 / (4 alpha), the closed form's removable singularity.
+			for (const t of [0, 0.5, 1, 1.25, 2.25])
 				expect(receiveImpulse(t, 0.2, shape.isinc === true)).toBeCloseTo(
 					pulseResponse(t, x => generatorReceiveSpectrum(x, shape), 0.2),
 					6,
 				)
 	})
 
-	it("cancels the transmit filter's intersymbol interference: dPMR RRC x RRC and NXDN (RRC x/sin x) x (RRC sin x/x)", () => {
+	it("cancels the transmit filter's intersymbol interference: RRC x RRC and NXDN (RRC x/sin x) x (RRC sin x/x)", () => {
 		for (const { shape, sinc, symbolRate } of [
 			{
 				shape: { shaping: "rrc" as const, alpha: 0.2 },
@@ -158,9 +165,9 @@ describe("dsd-fme receiveFilter option", () => {
 		// The FIR is designed at the sox input rate: raw path at 2.048 Msps,
 		// decimation 43, sox reads 47 627.9 Hz.
 		expect(
-			soxStage(pipelineOf({ mode: "dpmr", inputSampleRate: 2_048_000 })),
+			soxStage(pipelineOf({ mode: "nxdn48", inputSampleRate: 2_048_000 })),
 		).toBe(
-			`sox -t raw -r ${2_048_000 / 43} -e signed -b 16 -c 1 - -t wav -r 48000 - ${receiveFilterEffect("dpmr", 2_048_000 / 43)}`,
+			`sox -t raw -r ${2_048_000 / 43} -e signed -b 16 -c 1 - -t wav -r 48000 - ${receiveFilterEffect("nxdn48", 2_048_000 / 43)}`,
 		)
 		expect(soxStage(pipelineOf({ ...CHANNEL, mode: "nxdn48" }))).toBe(
 			`${SOX_48K} ${receiveFilterEffect("nxdn48", 48_000)}`,

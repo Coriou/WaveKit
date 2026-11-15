@@ -20,7 +20,8 @@
  *   call option, source and destination IDs, cipher, key), CRC-12, tail,
  *   K = 5, punctured {1,0,1,1}, interleaved PERM_16_9[i] = 16 (i mod 9) + i div 9.
  * CRC-6 and CRC-12 are dsd-fme's crc6 / crc12f (all-ones register). Dibit
- * 01 is +3, 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5.
+ * 01 is +3, 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5,
+ * unless `shape` names another (fsk-iq.mjs AIR_SHAPES).
  */
 import {
 	EASY_SHAPE,
