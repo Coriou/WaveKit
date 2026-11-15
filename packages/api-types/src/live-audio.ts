@@ -168,8 +168,8 @@ export interface LiveAudioAutoRoute {
 	/**
 	 * Listen: decoded voice that waited for its call to turn active and clear and was let go by
 	 * the pending bound (overwritten, or older than the bound when the call was admitted), ms,
-	 * cumulative over every decoder. A diagnostic, never part of `droppedMs`: non-zero means a
-	 * call's head was cut. Absent from older cores.
+	 * cumulative over every decoder. A diagnostic, never part of `droppedMs`: non-zero may mean a
+	 * call's head was cut (it also grows while voice arrives with no call announced). Absent from older cores.
 	 */
 	pendingOverwrittenMs?: number
 	clockRebases: number

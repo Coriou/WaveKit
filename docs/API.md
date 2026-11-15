@@ -2641,7 +2641,9 @@ droppedMs, pendingOverwrittenMs?, clockRebases, latencyMs, listenMode?, pendingL
   clear: see [GET /auto](#get-httplocalhost8081auto-and-autowav)),
   `pendingOverwrittenMs` (cumulative, a diagnostic outside `droppedMs`; absent from older
   cores) the decoded voice that waited for its call and was let go by the 1 360 ms pending
-  bound, so a non-zero value means a call's start was cut,
+  bound, so a non-zero value may mean a call's start was cut (it also grows while decoded
+  voice arrives with no call announced, and the bound assumes the decoder's default
+  100 ms call-start hold),
   `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
   selected source's backlog plus one 20 ms block. `listenMode` is the listen mode in
   force on the route: `config.listenMode`, except `analog` while the squelch is `open`,
