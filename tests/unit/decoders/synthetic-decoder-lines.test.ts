@@ -193,6 +193,19 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 			expect(r.links.some(l => l.nac === "000")).toBe(false)
 		})
 
+	// The core image's dsd-fme on dPMR (raw 1.024 Msps): during acquisition
+	// it printed a wrong Src twice with TG=(CRC ERR), and sox wrote its
+	// warning onto the first correct ID line. At every timer phase: one
+	// protocol-only call, no identity.
+	for (const lead of [0, 1, 2, 3, 4])
+		it(`dsd-fme image: dPMR with ${lead} lines before the first frame`, () => {
+			const lines = [
+				...Array(lead).fill("Audio In Device: /dev/stdin"),
+				...recorded("dsd-fme-dpmr-image"),
+			]
+			checkDpmr(replay(lines, dsd("dpmr"), dsdInterpreter()))
+		})
+
 	describe("trust edges of the checked formats", () => {
 		const run = (mode: string, lines: string[], lineMs?: number) =>
 			replay(lines, dsd(mode), dsdInterpreter(), lineMs)
@@ -557,6 +570,17 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 					.filter(o => o.type === "call_end")
 					.map(o => (o.data as { source: number }).source),
 			).toEqual([0, 1234])
+		})
+
+		it("dPMR: a repeated print with TG=(CRC ERR) starts nothing and names nobody", () => {
+			const pair = [
+				"00:00:01 Sync: +dPMR  dPMR Frame Sync 2",
+				" TG=(CRC ERR) Src=0150707 Channel Code=05",
+			]
+			const r = run("dpmr", [...pair, ...pair, ...pair])
+			expect(starts(r)).toEqual([])
+			expect(r.links.some(l => l.verified || l.src !== undefined)).toBe(false)
+			expect(r.evidence.some(e => e.identity !== undefined)).toBe(false)
 		})
 
 		it("dPMR: one ID print does not start a call", () => {

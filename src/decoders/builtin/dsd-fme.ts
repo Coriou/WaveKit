@@ -285,6 +285,11 @@ function ysfSourceCallsign(line: string): string | undefined {
 /** A dPMR called or calling ID print that is not "(CRC ERR)". */
 const DPMR_ID_PRINT = /\b(?:TG|Src)=[0-9*]{7}\b/
 /**
+ * The ID values of a dPMR print, compared between consecutive prints. Only
+ * the values: another process (sox) may write onto the same stderr line.
+ */
+const DPMR_IDS = /\bTG=(?<tg>[0-9*]{7}) Src=(?<src>[0-9*]{7})\b/
+/**
  * A dPMR call needs two identical ID prints this close: one print per FS2
  * pair, every 160 ms (2 x 80 ms frames), plus 50 % for delivery jitter.
  */
@@ -2494,9 +2499,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (!DPMR_ID_PRINT.test(line)) return null
 		// Two identical prints of consecutive FS2 pairs: one Hamming-correctable
 		// word passes on noise too often for a single print to start a call.
-		const print = line.trim()
+		// Both IDs must be printed (a "TG=(CRC ERR)" line never reaches here:
+		// handleProtocolLine stops CRC-error lines), and only their values are
+		// compared. Even then the IDs stay out of the call (protocol only).
+		const ids = DPMR_IDS.exec(line)?.groups
+		const print =
+			ids !== undefined ? `${ids["tg"] ?? ""}/${ids["src"] ?? ""}` : undefined
 		const previous = this.dpmrLastPrint
-		this.dpmrLastPrint = { print, at: now.getTime() }
+		this.dpmrLastPrint =
+			print !== undefined ? { print, at: now.getTime() } : undefined
 		const ongoing = this.callState ?? this.pendingCall?.state ?? null
 		if (ongoing?.protocol === "dpmr") {
 			ongoing.lastUpdate = now
@@ -2504,6 +2515,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 		const at = now.getTime()
 		if (
+			print === undefined ||
 			previous === undefined ||
 			previous.print !== print ||
 			at < previous.at ||
