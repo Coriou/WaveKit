@@ -200,6 +200,10 @@ export function fileDecodedOwn(
  * `channelObservation` (absent: none is) says a joined observation is one of the owner's or of
  * a linked co-channel discovery's (`partnerIds`): its analog-fm snapshot class is the channel's
  * own spectral reading, not another transmission's voice (finishVerdict's `joinedVoiceIds`).
+ * `knownObservation` (absent: every id counts as known) says the store indexes an observation at
+ * all: an id it does not (never stored, retracted as a spur or image, trimmed or not yet
+ * ingested) names no other discovery, so on a no-voice channel it does not exempt a file
+ * (joinedOtherKnownVoice).
  */
 export interface VoicePrior {
 	readonly id?: string
@@ -224,6 +228,7 @@ export interface VoicePrior {
 	readonly channelDecodes?: readonly OwnerDecode[]
 	analogTrials?(): AnalogTrials | null
 	channelObservation?(observationId: string): boolean
+	knownObservation?(observationId: string): boolean
 }
 
 /** VoicePrior.analogTrials: the owner's analog FM replay trials run, and those that heard. */
@@ -936,6 +941,30 @@ export function joinedOtherVoice(
 }
 
 /**
+ * joinedOtherVoice counting only joined observations the store indexes
+ * (VoicePrior.knownObservation): one it does not know names no other discovery, so it is not
+ * another transmission's voice. Read only for a no-voice channel's speech check (finishPath):
+ * elsewhere an unknown id still keeps (joinedOtherVoice). `knownObservation` absent:
+ * joinedOtherVoice. A throwing read: another's (keeps).
+ */
+export function joinedOtherKnownVoice(
+	prior: VoicePrior | null,
+	joinedVoice: boolean,
+	joinedVoiceIds: readonly string[] | undefined,
+): boolean {
+	const other = joinedOtherVoice(prior, joinedVoice, joinedVoiceIds)
+	const known = prior?.knownObservation
+	if (!other || joinedVoiceIds === undefined || known === undefined)
+		return other
+	const own = prior?.channelObservation
+	try {
+		return joinedVoiceIds.some(id => known(id) && !(own?.(id) ?? false))
+	} catch {
+		return true
+	}
+}
+
+/**
  * Caps a session's joined voice (`joined`: observation id → its newest sample, oldest first) at
  * `cap` entries (WIDEBAND_JOINS_KEPT): past it the oldest joined observation of the channel itself
  * (VoicePrior.channelObservation of `prior()`, read once per eviction) goes first, the oldest
@@ -1044,6 +1073,7 @@ export interface FinishInput {
 	readonly notSpeech: boolean
 	readonly clearNoise?: boolean
 	readonly speechHeard?: boolean | null
+	readonly rollOver?: boolean
 	readonly ownObservationId?: string | null
 	readonly final: boolean
 	readonly now: number
@@ -1065,8 +1095,11 @@ export interface FinishInput {
  * any length) and that no joined voice of another transmission shares (joinedOtherVoice: a joined
  * observation of the channel itself, `joinedVoiceIds` read through VoicePrior.channelObservation,
  * carries only its own spectral analog-fm class) is discarded (`discarded:not-speech`;
- * `speechHeard` absent or null: not measured, a file classed by its own tone or a classed
- * session's roll-over, kept); where the content check applies (contentChecked: a
+ * `speechHeard` absent or null: not measured, a file classed by its own tone, kept; a joined
+ * observation the store does not index, joinedOtherKnownVoice, does not exempt it either);
+ * a classed session's roll-over file (`rollOver`: it continues a voiced over) gets that speech
+ * check only, and only on a no-voice channel (elsewhere its readings are ignored: kept as its
+ * session); where the content check applies (contentChecked: a
  * `tone-required` prior from a dedicated-channel decode, a TDMA channel or a verified digital
  * sighting (`checked-digital`), or backed digital evidence of the owner; or ownDmrHint) a file
  * whose audio clearly measures as no speech (`notSpeech`, speech-content.ts clearlyNotSpeech: a
@@ -1097,6 +1130,11 @@ export function finishPath(input: FinishInput): FinishPath {
 		input.joinedVoice,
 		input.joinedVoiceIds,
 	)
+	// A classed session's roll-over: only a no-voice channel's speech check reads its audio.
+	const rolled = input.rollOver === true
+	const speechHeard =
+		rolled && noVoice !== true ? null : (input.speechHeard ?? null)
+	const notSpeech = !rolled && input.notSpeech
 	const path = (verdict: FinishVerdict, reason: FinishReason): FinishPath => ({
 		verdict,
 		reason,
@@ -1104,7 +1142,7 @@ export function finishPath(input: FinishInput): FinishPath {
 		source,
 		noVoice,
 		joinedOther,
-		speechHeard: input.speechHeard ?? null,
+		speechHeard,
 	})
 	if (input.ownTone) return path("finish", "own-tone")
 	if (input.decodedOwn)
@@ -1113,11 +1151,15 @@ export function finishPath(input: FinishInput): FinishPath {
 			: path("discarded:late-non-voice", "late-non-voice")
 	if (strength === "tone-required" && !input.snapshotClassed)
 		return path("discarded:known-non-voice", "known-non-voice")
-	if (noVoice === true && input.speechHeard === false && !joinedOther)
+	if (
+		noVoice === true &&
+		speechHeard === false &&
+		!joinedOtherKnownVoice(input.prior, input.joinedVoice, input.joinedVoiceIds)
+	)
 		return path("discarded:not-speech", "no-voice")
 	if (strength === "none") return path("finish", "prior-none")
 	if (
-		input.notSpeech &&
+		notSpeech &&
 		!joinedOther &&
 		(input.clearNoise === true ||
 			contentChecked(source, input.prior, input.backedClass, input.now) ||

@@ -18,6 +18,7 @@ import {
 	fileDecodedOwn,
 	finishVerdict,
 	finishPath,
+	joinedOtherKnownVoice,
 	joinedVoiceOf,
 	keptLog,
 	joinedVoiceOverlaps,
@@ -2945,6 +2946,131 @@ describe("a no-voice channel: its analog trials never heard, no analog proof (no
 			expect(joinedVoiceOf(s, { startSample: 2_000, endSample: null })).toEqual(
 				{ joinedVoice: true, joinedVoiceIds: ["b"] },
 			)
+		})
+		describe("a joined observation the store does not index (knownObservation)", () => {
+			// Live shape: a no-voice channel's 120 s roll-over file logged joinedOther true while
+			// every observation on that channel in the window was the owner's own discovery: an
+			// id the store's index did not hold read as another transmission's voice.
+			const indexed = new Set(["o-own-2", "o-other"])
+			const known = (p: VoicePrior): VoicePrior => ({
+				...channel(p),
+				knownObservation: id => indexed.has(id),
+			})
+			it("an unknown joined id on a no-voice channel does not exempt a file without speech", () => {
+				expect(
+					verdict(known(trials(68)), {
+						joinedVoice: true,
+						joinedVoiceIds: ["o-own-2", "o-gone"],
+					}),
+				).toBe("discarded:not-speech")
+				expect(joinedOtherKnownVoice(known(trials(68)), true, ["o-gone"])).toBe(
+					false,
+				)
+			})
+			it("FROZEN: a known joined observation of another discovery still keeps it", () => {
+				expect(
+					verdict(known(trials(68)), {
+						joinedVoice: true,
+						joinedVoiceIds: ["o-gone", "o-other"],
+					}),
+				).toBe("finish")
+			})
+			it("FROZEN: off a no-voice channel an unknown id keeps, as before (a decode of its own signal)", () => {
+				expect(
+					verdict(known(prior([], "analog-fm")), {
+						speechHeard: true,
+						decodedOwn: true,
+						joinedVoice: true,
+						joinedVoiceIds: ["o-gone"],
+					}),
+				).toBe("finish")
+			})
+			it("FROZEN: no knownObservation read, or a throwing one: joinedOtherVoice as before (keeps)", () => {
+				expect(
+					joinedOtherKnownVoice(channel(trials(68)), true, ["o-gone"]),
+				).toBe(true)
+				const p: VoicePrior = {
+					...channel(trials(68)),
+					knownObservation: () => {
+						throw new Error("x")
+					},
+				}
+				expect(
+					verdict(p, { joinedVoice: true, joinedVoiceIds: ["o-gone"] }),
+				).toBe("finish")
+			})
+		})
+	})
+
+	describe("a classed session's roll-over file (rollOver)", () => {
+		// Live shape: a continuous noise carrier on a no-voice channel rolled over every 120 s;
+		// each roll-over file skipped the speech check (speechHeard null) and was kept.
+		it("on a no-voice channel it gets the speech check: no speech, discarded; speech, kept", () => {
+			expect(
+				finishPath({
+					prior: trials(68),
+					backedClass: false,
+					ownTone: false,
+					snapshotClassed: true,
+					decodedOwn: false,
+					joinedVoice: false,
+					notSpeech: true,
+					clearNoise: true,
+					speechHeard: false,
+					rollOver: true,
+					final: false,
+					now: NOW,
+				}),
+			).toMatchObject({
+				verdict: "discarded:not-speech",
+				reason: "no-voice",
+				speechHeard: false,
+			})
+			expect(
+				verdict(trials(68), {
+					speechHeard: true,
+					notSpeech: true,
+					rollOver: true,
+				}),
+			).toBe("finish")
+		})
+		it("FROZEN: classed by its own tone (ownTone, a tone-carried roll-over) it is kept", () => {
+			expect(
+				verdict(trials(68), {
+					speechHeard: false,
+					ownTone: true,
+					rollOver: true,
+				}),
+			).toBe("finish")
+		})
+		it("FROZEN: off a no-voice channel its readings are ignored, as before (never content-checked)", () => {
+			const p = { ...prior([], "fsk4-12k5"), analogTrials: () => null }
+			const roll = finishPath({
+				prior: p,
+				backedClass: true,
+				ownTone: false,
+				snapshotClassed: true,
+				decodedOwn: false,
+				joinedVoice: false,
+				notSpeech: true,
+				clearNoise: true,
+				speechHeard: false,
+				rollOver: true,
+				final: true,
+				now: NOW,
+			})
+			expect(roll).toMatchObject({ verdict: "finish", speechHeard: null })
+			expect(
+				verdict(p, {
+					backedClass: true,
+					notSpeech: true,
+					clearNoise: true,
+					speechHeard: false,
+				}),
+			).toBe("discarded:not-speech")
+			expect(
+				verdict(trials(N - 1), { speechHeard: false, rollOver: true }),
+			).toBe("finish")
 		})
 	})
 

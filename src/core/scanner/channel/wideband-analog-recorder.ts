@@ -757,7 +757,7 @@ interface FileState {
 	classTone: number | null
 	/** A tone-only session's roll-over file after one its tone classed: it carries that class. */
 	toneCarried: boolean
-	/** A roll-over file (the previous one hit the duration limit): of a classed session, never content-checked. */
+	/** A roll-over file (the previous one hit the duration limit): of a classed session, content-checked only on a no-voice channel. */
 	rollOver: boolean
 	/** What it wrote, measured for speech (speech-content.ts; finishVerdict's `notSpeech`). */
 	readonly speech: SpeechContentMeter
@@ -4060,11 +4060,8 @@ export class WidebandAnalogRecorder {
 			this.airStart(s.engine, s.fs, file.startSample),
 			this.wallAt(s.engine, s.fs, Math.max(s.onset, file.startSample)),
 		)
-		// A classed session's roll-over file continues a voiced over: never content-checked.
-		const speech =
-			file.classTone === null && !(file.rollOver && s.classed)
-				? file.speech.result()
-				: null
+		// A classed session's roll-over: only a no-voice channel's speech check (finishPath).
+		const speech = file.classTone === null ? file.speech.result() : null
 		const path = this.deps.voicePrior
 			? finishPath({
 					prior,
@@ -4077,6 +4074,7 @@ export class WidebandAnalogRecorder {
 					decodedOwn,
 					...joinedVoiceOf(s, file),
 					...speechReadings(speech),
+					rollOver: file.rollOver && s.classed,
 					ownObservationId: s.owner,
 					final: final || room === 0,
 					now,

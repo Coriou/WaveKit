@@ -1248,6 +1248,29 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 	}, 120_000)
 
+	it("a joined observation the store does not index (never stored, retracted or trimmed) does not exempt the file: discarded", async () => {
+		const h = low(() => ({
+			...noVoice(),
+			channelObservation: () => false,
+			knownObservation: () => false,
+		}))
+		await joinedNoiseOver(h, 4)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(codes(h)).toContain("discarded:not-speech")
+	}, 120_000)
+
+	it("FROZEN: a joined observation the store indexes under another discovery still keeps the file", async () => {
+		const h = low(() => ({
+			...noVoice(),
+			channelObservation: () => false,
+			knownObservation: () => true,
+		}))
+		await joinedNoiseOver(h, 4)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+	}, 120_000)
+
 	it("one stray heard trial of 52 (under 2 heard): still a no-voice channel, the file is discarded", async () => {
 		const h = low(() => noVoice(1))
 		await noiseOver(h, 4)
