@@ -51,12 +51,15 @@
 //!   (below that the data's own mean would be all it corrects); otherwise 0 Hz. It then stays
 //!   until the transmission ends: no step dsd-fme could see, and no drift tracking.
 //! - **Transmission.** It starts at the first modulated block after none was active, or at a
-//!   modulated block [`POWER_STEP`] above the transmission's power (another radio keyed up: its
-//!   correction then starts at its own first block, and the previous radio's tail keeps its
-//!   own). Gaps and unmodulated blocks totalling less than [`HANG_MS`] in a row keep it; a longer
-//!   run ends it, and the correction returns to 0 Hz and the mixer to phase 0 while the output
-//!   is still in that gap. A weaker radio keying within the hang (its blocks are gaps) is
-//!   corrected only from its first block after the hang.
+//!   modulated block [`POWER_STEP`] above the power the transmission had when its correction
+//!   was decided (another radio keyed up: its correction then starts at its own first block,
+//!   and the previous radio's tail keeps its own; a fade that recovers stays below it). Gaps and
+//!   unmodulated blocks totalling less than [`HANG_MS`] in a row keep it; a longer run ends it,
+//!   and the correction returns to 0 Hz and the mixer to phase 0 while the output is still in
+//!   that run. Two cases still change the correction under a carrier: a radio of about the
+//!   same power keying within the hang continues the first one's transmission and keeps its
+//!   correction; a weaker one (its blocks are gaps against the first one's power) goes out with
+//!   the first one's correction, then 0 Hz from the hang's end, then its own.
 //!
 //! The lookahead starts with [`DELAY_BLOCKS`] blocks of zeros whenever the stage starts afresh
 //! (an open, an input gap, a retune to another frequency), and the last 90 ms of a stream are
@@ -258,11 +261,15 @@ impl Afc {
         let by_deviation = (DEVIATION_TURN * rate / PEAK_DEVIATION_HZ).floor();
         let lag = (by_bound.min(by_deviation) as usize).clamp(1, MAX_LAG);
         let half = (rate / (2.0 * lag as f64) / BIN_HZ).ceil() as usize;
+        let hang_blocks = ((HANG_MS / 1000.0) / block_s).ceil().max(1.0) as u32;
+        // The hang reset happens while the output is still in the gap only if it outlasts the
+        // lookahead: 50 blocks against 18 at every rate (5 ms blocks, 250 ms).
+        debug_assert!(hang_blocks as usize > DELAY_BLOCKS);
         Afc {
             rate,
             max_hz,
             block,
-            hang_blocks: ((HANG_MS / 1000.0) / block_s).ceil().max(1.0) as u32,
+            hang_blocks,
             // 48 kHz, 2 kHz: -3 dB at 6.3 kHz; 19 dB down at 8.25 kHz, where a 12.5 kHz
             // neighbour starts, on top of the channel filter's transition band.
             filter: MeasureFilter::new(rate, FILTER_MARGIN * (max + PEAK_DEVIATION_HZ)),
@@ -432,12 +439,12 @@ impl Afc {
                 }
                 self.quiet = 0;
                 self.run = self.run.saturating_add(1);
-                if self.run > 1 {
+                // The transmission's power is learnt with its correction and then frozen, so a
+                // fade that recovers is never taken for another radio keying up.
+                if self.run > 1 && !self.committed {
                     self.power += (p2 - self.power) / 4.0;
-                    if !self.committed {
-                        self.add_block();
-                        self.used = self.used.saturating_add(1);
-                    }
+                    self.add_block();
+                    self.used = self.used.saturating_add(1);
                 }
             }
             Class::Gap | Class::Unmodulated => {
@@ -447,9 +454,11 @@ impl Afc {
                     self.quiet = self.quiet.saturating_add(1);
                     if self.quiet >= self.hang_blocks {
                         self.restart();
-                        // The output is still in this gap (the hang is longer than the
-                        // lookahead): no carrier, so a phase step is harmless, and the mixer is
-                        // the identity again until a transmission engages it.
+                        // The output is still in this run (the hang is longer than the
+                        // lookahead): normally no carrier, so a phase step is harmless, and the
+                        // mixer is the identity again until a transmission engages it. A weaker
+                        // radio that keyed within the hang (its blocks are gaps here) sees this
+                        // step; it gets its own correction from its first block after the hang.
                         self.set_correction(0.0);
                         self.nco.reset();
                     }
@@ -850,19 +859,31 @@ mod tests {
             "{}",
             afc.correction_hz()
         );
-        // In the output the transmission starts at 10 blocks + the lookahead, already corrected:
-        // its first 20 ms after the skipped block turn at about 0 Hz on average.
+        assert_eq!(afc.start, 10);
+        // In the output the transmission starts at sample 10 blocks + the lookahead: everything
+        // before is the delayed input untouched, and from its first sample on each output sample
+        // is the input's rotated by a phase that advances by −2π·c/fs per sample.
         a.extend(c);
         b.extend(d);
-        let first = 10 * block + afc.delay_samples() + block;
-        let (mut re, mut im) = (0.0f64, 0.0f64);
-        for k in first + 1..first + 4 * block {
-            let (x, y, px, py) = (a[k] as f64, b[k] as f64, a[k - 1] as f64, b[k - 1] as f64);
-            re += x * px + y * py;
-            im += y * px - x * py;
+        let (d0, first) = (afc.delay_samples(), 10 * block + afc.delay_samples());
+        for k in 0..first {
+            let src = k.checked_sub(d0).map_or((0.0, 0.0), |j| (i[j], q[j]));
+            assert_eq!((a[k], b[k]), src, "sample {k} before the transmission");
         }
-        let hz = im.atan2(re) * FS as f64 / TAU;
-        assert!(hz.abs() < 30.0, "{hz}");
+        let rot = |k: usize| {
+            let (x, y) = (a[k] as f64, b[k] as f64);
+            let (u, v) = (i[k - d0] as f64, q[k - d0] as f64);
+            // out · conj(in)
+            (y * u - x * v).atan2(x * u + y * v)
+        };
+        let want = -TAU * afc.correction_hz() / FS as f64;
+        for k in first..first + block {
+            let step = (rot(k + 1) - rot(k) + 3.0 * PI).rem_euclid(TAU) - PI;
+            assert!(
+                (step - want).abs() < 1e-4,
+                "sample {k}: {step} against {want}"
+            );
+        }
     }
 
     /// DMR direct-mode keying: 32.5 ms off, 27.5 ms on, `n` times, ending on a burst.
@@ -907,6 +928,37 @@ mod tests {
             .collect();
         assert_eq!(changes, vec![commit_at(0)], "{:?}", changes);
         assert!((after[after.len() - 1] - 600.0).abs() < tolerance(&afc) + 20.0);
+    }
+
+    #[test]
+    fn a_fade_that_recovers_is_not_another_radio() {
+        // 300 ms at full power, 100 ms fading 8 dB down, 100 ms held there, then straight back
+        // up for 500 ms: one transmission, one change (the commit), no restart.
+        let mut v = fsk(1_000.0, 800.0, 1.0, 91);
+        let (full, fade, hold) = (samples(300.0), samples(100.0), samples(100.0));
+        let low = 10f64.powf(-8.0 / 20.0);
+        for (k, x) in v.iter_mut().enumerate() {
+            let g = if k < full {
+                1.0
+            } else if k < full + fade {
+                1.0 - (1.0 - low) * (k - full) as f64 / fade as f64
+            } else if k < full + fade + hold {
+                low
+            } else {
+                1.0
+            };
+            x.0 *= g;
+            x.1 *= g;
+        }
+        let len = v.len();
+        add(&mut v, &noise(len, 30.0, 92), 0);
+        let mut afc = Afc::new(FS, 2000.0);
+        let after = trace(&mut afc, &v);
+        let changes = (1..after.len())
+            .filter(|&k| after[k] != after[k - 1])
+            .count();
+        assert_eq!(changes, 1);
+        assert_eq!(afc.start, 0, "restarted at {}", afc.start);
     }
 
     #[test]

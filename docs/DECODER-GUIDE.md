@@ -1204,7 +1204,7 @@ correction change during a call:
   so any change it can see during a call costs frames (a DMR call corrected 280 ms in
   lost 11-19 % of link controls, an NXDN48 call corrected 40 ms in 35-43 % against
   18 % uncorrected, measured). The output is delayed by 90 ms, so the decision applies
-  from the transmission's first sample, and dsd-fme never sees a step;
+  from the transmission's first sample, and within a transmission there is no step;
 - the correction is the target if at least 200 Hz plus 2.5 standard deviations of
   the data's own mean off (380 Hz at the decision), else 0 Hz. Smaller errors are left
   alone: uncorrected, ±300 Hz cost DMR no frames;
@@ -1214,10 +1214,13 @@ correction change during a call:
   errors, while the uncorrected offset cost nothing;
 - it holds through gaps shorter than 250 ms (a direct-mode radio keys a 27.5 ms burst
   every 60 ms) and resets after a longer one, on a retune to another frequency and on
-  an input gap (a capture recentre keeps it: the signal is the same). A stronger
-  radio keying up starts its own transmission, corrected from its first block (the
-  previous radio's tail keeps its own); a weaker one within 250 ms of the first is
-  corrected only from its first block after the hang.
+  an input gap (a capture recentre keeps it: the signal is the same). A radio keying
+  up 6 dB stronger than the transmission was when its correction was decided starts
+  its own, corrected from its first block (the previous radio's tail keeps its own; a
+  fade that recovers is not taken for one). Two cases still change the correction
+  under a carrier: a radio of about the same power keying within 250 ms of the first
+  continues its transmission and keeps its correction; a weaker one goes out with the
+  first one's correction, then 0 Hz from the end of the hang, then its own.
 
 The mixer is phase continuous and returns to phase 0 when a transmission ends. The
 90 ms lookahead is part of the channel's reported group delay; it starts with 90 ms of
