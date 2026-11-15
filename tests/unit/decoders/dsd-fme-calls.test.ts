@@ -18,6 +18,10 @@ import type {
 	DecoderConfig,
 	DecoderOutput,
 } from "../../../src/decoders/types.js"
+import { receiveFilterEffect } from "../../../src/decoders/builtin/dsd-fme-filter.js"
+
+/** The sox receive-filter effect of the 4800 symbols/s modes (auto, dmr, p25, ysf, dstar). */
+const rx = (rateHz: number) => receiveFilterEffect("auto", rateHz)!
 
 const logger = pino({ level: "silent" })
 const T0 = Date.parse("2026-10-09T12:13:33.000Z")
@@ -301,7 +305,7 @@ describe("dsd-fme pipeline", () => {
 			}) as unknown as Internals
 		).buildPipelineCommand()
 		expect(pipeline).toContain(
-			"csdr shift -0.0029296875 | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -fa",
+			`csdr shift -0.0029296875 | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(47627.90697674418)} | dsd-fme -i /dev/stdin -fa`,
 		)
 		expect(pipeline).not.toContain("dcblock")
 	})
@@ -323,7 +327,7 @@ describe("dsd-fme pipeline", () => {
 			createDecoder({ inputSampleRate: 2_048_000 }) as unknown as Internals
 		).buildPipelineCommand()
 		expect(pipeline).toContain(
-			`csdr fmdemod | ${backChain} | csdr convert -i float -o s16 | sox -t raw -r ${2_048_000 / 43} -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme`,
+			`csdr fmdemod | ${backChain} | csdr convert -i float -o s16 | sox -t raw -r ${2_048_000 / 43} -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(2_048_000 / 43)} | dsd-fme`,
 		)
 	})
 
