@@ -126,6 +126,7 @@ export const dsdFmeOptionsSchema = z
 			.nullable()
 			.optional(),
 		perCallRecordingPrune: z.boolean().nullable().optional(),
+		receiveFilter: z.boolean().nullable().optional(),
 		udpHost: z.string().nullable().optional(),
 		// Only in the `udp:${host}:${port}` argument, guarded by truthiness.
 		udpPort: numberOrText(z.number().int().min(1).max(65535), INTEGER_TEXT)
@@ -366,6 +367,16 @@ export const dsdFmeOptionDescriptors: DecoderOptionDescriptor[] = [
 		secret: false,
 		effect: "restart",
 		description: "Prune per-call recordings by age and total size.",
+	},
+	{
+		key: "receiveFilter",
+		patchable: true,
+		type: "boolean",
+		default: true,
+		secret: false,
+		effect: "restart",
+		description:
+			"Filter the discriminator output before dsd-fme: a 3 kHz low-pass for DMR, P25, YSF and D-STAR, the NXDN receive filter for NXDN48, a 1.3 kHz low-pass for dPMR; none for NXDN96 and ProVoice.",
 	},
 	{
 		key: "udpHost",

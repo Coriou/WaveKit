@@ -130,6 +130,7 @@ export const SYNTHETIC = {
 	},
 	ysf: { dest: "ALL", src: "N0CALL", dgid: 21 },
 	p25: { nac: 0x2a5, talkgroup: 4321, source: 1_234_567 },
+	dmr: { talkgroup: 4321, source: 1_234_567 },
 	nxdn: { ran: 5, source: 1234, destination: 5678 },
 	dpmr: { calledId: "0001234", callingId: "0005678", colourCode: 5 },
 	/** NXDN A then B on the same talkgroup. */
@@ -294,6 +295,36 @@ export function checkP25(r: Replay): void {
 	)
 	expect(row(callStart(r), "dsd-fme")).toMatchObject({
 		title: "P25P1 TG 4321 from 1234567",
+	})
+}
+
+/** DMR repeater downlink (dmr-4fsk.mjs): slot 1 group call, checked link control. */
+export function checkDmr(r: Replay): void {
+	expect(callStart(r)?.data, transcript(r)).toMatchObject({
+		protocol: "dmr",
+		talkgroup: 4321,
+		source: 1_234_567,
+	})
+	expect(r.links).toContainEqual(
+		expect.objectContaining({
+			protocol: "dmr",
+			tg: "4321",
+			src: "1234567",
+			verified: true,
+		}),
+	)
+	expect(r.evidence).toContainEqual(
+		expect.objectContaining({
+			protocol: "dmr",
+			metadata: expect.objectContaining({
+				talkgroups: ["4321"],
+				sources: ["1234567"],
+			}),
+		}),
+	)
+	expect(row(callStart(r), "dsd-fme")).toMatchObject({
+		title: "DMR TG 4321 from 1234567",
+		entityKey: "talkgroup:4321",
 	})
 }
 

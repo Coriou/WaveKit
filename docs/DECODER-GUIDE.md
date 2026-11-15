@@ -1107,6 +1107,69 @@ budget apply. Recent checked voice decodes override non-voice exclusion; exclusi
 associates only within one quarter of the channel width (3,125 Hz at 12,500 Hz),
 so adjacent paging does not remove confirmed DMR. See [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
 
+### dsd-fme receive filter
+
+dsd-fme decides each 4FSK symbol from the mean of a few samples and, before a
+sync, reads the FM discriminator output unfiltered, so the discriminator's noise
+above the 4FSK band (it rises with frequency up to the channel edge) reaches the
+decision. The adapter therefore filters the discriminator output in its sox WAV
+wrapper (`receiveFilter`, default `true`; `false` restores the unfiltered chain):
+
+| Mode                                 | Filter                                                                              |
+| ------------------------------------ | ----------------------------------------------------------------------------------- |
+| `auto`, `dmr`, `p25`, `ysf`, `dstar` | Linear-phase low-pass, flat to 2.5 kHz, stopped from 3.5 kHz (`sinc -t 1000 -3000`) |
+| `nxdn48`                             | NXDN receive filter: root raised cosine 0.2 times sin x / x at 2400 symbols/s       |
+| `dpmr`                               | Linear-phase low-pass, flat to 1.05 kHz, stopped from 1.55 kHz                      |
+| `nxdn` (NXDN96), `provoice`          | None                                                                                |
+
+The 4800 symbols/s low-pass passes every transmit filter in use there (P25 raised
+cosine 0.2 with or without its x / sin x shaping filter, DMR and YSF root raised
+cosine 0.2, D-STAR GMSK). A matched root raised cosine cut more noise but made
+dsd-fme lose YSF frame sync on strong signals, and for dPMR it lost more frames
+with a carrier frequency error, so neither uses one. NXDN transmitters add
+x / sin x, which only the matched NXDN filter undoes. NXDN96 stays unfiltered
+until it is measured: the synthetic NXDN96 transmission decoded only with a
+roll-off of 0.5, which the low-pass cuts. P25 phase 2 (6000 symbols/s) is wider
+than the low-pass; in `auto` dsd-fme looks for it at the 4800 symbols/s timing and
+switches only on a trunking grant, so it was not measured. A low-pass is left out
+when the sox input rate is below twice its stop edge (7 kHz, or 3.1 kHz for dPMR),
+which only a raw capture slower than that gives. The sox effect costs
+about 0.1 % of a desktop core per decoder (Raspberry Pi not measured).
+
+`tests/integration/dsd-fme-margin.test.ts` measures per protocol, CNR (in
+12.5 kHz) and carrier frequency error, with each air interface's own transmit
+filter (`scripts/fixtures/fsk-iq.mjs` `AIR_SHAPES`) and a DMR repeater downlink
+generator (`scripts/fixtures/dmr-4fsk.mjs`). The frame error rate counts the frames
+whose CRC- or FEC-checked field dsd-fme did not print as passing; the symbol error
+rate compares dsd-fme's symbol decisions (its `-c` capture) with the sent symbols
+over the stretches where they align (at most 25 % mismatches), so it understates
+errors at low CNR. Each seed delays the symbols by a different fraction of a symbol
+(a transmitter's clock has no fixed phase to the receiver's samples): dsd-fme corrects
+timing only by whole samples, and without noise it lost 0 to 26 % of YSF frames
+depending on that phase alone, with or without a filter, so a fixed phase measures
+one lucky or unlucky receiver. `WAVEKIT_MARGIN_PHASE` fixes it,
+`WAVEKIT_MARGIN_RATE=2400000` uses the 2.4 Msps capture instead of 1.024 Msps. A
+wider low-pass (-6 dB at 3.5 or 4 kHz) left this YSF floor (3 to 6 % at 30 to 40 dB)
+as it was and lost part of the gain at 10 dB. It runs only with `WAVEKIT_MARGIN=1`,
+on the host's dsd-fme or,
+with `WAVEKIT_SYNTH_IMAGE=<image>`, the core image's:
+
+```bash
+WAVEKIT_MARGIN=1 WAVEKIT_SYNTH_IMAGE=<core image> \
+  pnpm exec vitest run --maxWorkers=1 tests/integration/dsd-fme-margin.test.ts
+```
+
+Measured with a host dsd-fme build older than the image's pinned one (the image
+has not been measured yet), at CNR 10 dB and no frequency error, the filter took
+P25 from 100 % of link controls lost to 7 %, YSF from 85-98 % of FICH frames lost to
+31-56 %, D-STAR from 100 % to 25 % of superframes, standard-shaped NXDN48 from 99 %
+to 14 % of SACCH frames, dPMR from 15 % to 6 % of control channels and DMR from
+44 % to 37 % of link controls (aligned symbol errors 6.0 % to 3.0 %). A recorded
+on-air DMR transmission decodes identically. A carrier frequency error of 600 Hz
+still loses most YSF frames: a DC blocker on the discriminator would fix that but
+mutes DMR direct-mode bursts (the recorded transmission decodes nothing), so it
+needs a frequency correction in the channel instead.
+
 ### readsb aircraft evidence
 
 The default `outputFormat: "sbs"` selects `--net-sbs-port`; the adapter maps each

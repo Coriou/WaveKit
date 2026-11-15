@@ -13,7 +13,8 @@
  * mono at 2048000/43 Hz: tests/mocks/fixtures/dsd-fme/run8-dmr-tx2-fmdemod.s16.
  * The rest of the dsd-fme input chain (BACK_CHAIN below, which must match
  * DsdFmeDecoder.buildPipelineCommand: a unit test checks it) and the sox
- * WAV wrapper are applied here, then dsd-fme runs three times:
+ * WAV wrapper with the receive filter (RX_FILTER) are applied
+ * here, then dsd-fme runs three times:
  *
  * 1. Voice on vs off: `-o null`, `-o udp:... -V 3` (the digital voice
  *    stream) and `-o udp:...` must decode identically (normalised stderr).
@@ -64,6 +65,7 @@ import {
 	linkLines,
 	openRequest,
 	parseIqArgs,
+	RX_FILTER,
 } from "./dsd-fme-voice-iq.mjs"
 
 /** Stages after `csdr fmdemod` in DsdFmeDecoder.buildPipelineCommand. */
@@ -92,7 +94,7 @@ function feedCommand() {
 		`csdr convert -i s16 -o float < '${input}'`,
 		chain,
 		"csdr convert -i float -o s16",
-		`sox -t raw -r ${DEMOD_RATE} -e signed -b 16 -c 1 - -t wav -r 48000 -`,
+		`sox -t raw -r ${DEMOD_RATE} -e signed -b 16 -c 1 - -t wav -r 48000 - ${RX_FILTER}`,
 	].join(" | ")
 }
 

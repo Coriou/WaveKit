@@ -21,9 +21,16 @@
  *   low-speed data (32 bits).
  * RS(24,12,13) is the shortened RS(63,51) over GF(2^6) with x^6 + x + 1 and
  * zeros alpha^1..alpha^12, as dsd-fme's ReedSolomon.hpp encodes it. Dibit 01
- * is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5.
+ * is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5,
+ * unless `shape` names another (fsk-iq.mjs AIR_SHAPES).
  */
-import { bitsOf, bitsToDibits, rng, shapeFrequency } from "./fsk-iq.mjs"
+import {
+	EASY_SHAPE,
+	bitsOf,
+	bitsToDibits,
+	rng,
+	shapeFrequency,
+} from "./fsk-iq.mjs"
 
 const FRAME_SYNC = 0x5575f5ff77ff
 const DUID = { hdu: 0x0, tdu: 0x3, ldu1: 0x5, ldu2: 0xa }
@@ -294,15 +301,19 @@ export function p25CallDibits({
 /** C4FM deviation of a dibit (Hz). */
 export const p25Deviation = dibit => [600, 1800, -600, -1800][dibit]
 
-/** FM deviation (Hz, 48 kHz) of one P25 phase 1 call. */
-export function p25Frequency(call, { rateHz = 48_000 } = {}) {
+/**
+ * FM deviation (Hz, 48 kHz) of one P25 phase 1 call. `shape` defaults to a
+ * raised cosine 0.5, which the chain tests use; the standard C4FM filter is
+ * AIR_SHAPES.p25 (fsk-iq.mjs).
+ */
+export function p25Frequency(
+	call,
+	{ rateHz = 48_000, shape = EASY_SHAPE } = {},
+) {
 	return shapeFrequency(p25CallDibits(call), {
 		symbolRate: 4800,
 		rateHz,
-		// Raised cosine 0.5: dsd-fme's integrate-and-slice symbol decision has
-		// residual ISI from a 0.2 roll-off (measured: 20 Hamming corrections per call).
-		shaping: "rc",
-		alpha: 0.5,
+		...shape,
 		deviationHz: p25Deviation,
 	})
 }

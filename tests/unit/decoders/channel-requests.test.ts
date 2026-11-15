@@ -29,6 +29,10 @@ import {
 import { audioChannelRequest } from "../../../src/decoders/audio-demod-decoder.js"
 import { admitChannel } from "../../../src/core/channelizer/admission.js"
 import { vdl2DefaultChannelsHz } from "../../../src/decoders/options/dumpvdl2.js"
+import { receiveFilterEffect } from "../../../src/decoders/builtin/dsd-fme-filter.js"
+
+/** The sox receive-filter effect of the 4800 symbols/s modes (auto, dmr, p25, ysf, dstar). */
+const rx = (rateHz: number) => receiveFilterEffect("auto", rateHz)!
 
 const logger = pino({ level: "silent" })
 // src/decoders/registry.ts has no default-registry helper; src/index.ts registers these same factories inline.
@@ -258,7 +262,7 @@ describe("channel requests (addendum §1, §2)", () => {
 			expect(chan).not.toContain(stage)
 		expect(chan.match(/\bsox /g)).toHaveLength(1)
 		expect(chan).toContain(
-			"sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme",
+			`sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(48000)} | dsd-fme`,
 		)
 	})
 
@@ -342,7 +346,7 @@ describe("channel requests (addendum §1, §2)", () => {
 		)
 		expect(
 			cmd.startsWith(
-				`csdr fmdemod | ${backChain} | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme`,
+				`csdr fmdemod | ${backChain} | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(48000)} | dsd-fme`,
 			),
 		).toBe(true)
 		for (const stage of ["convert -i char", "shift", "dcblock", "firdecimate"])

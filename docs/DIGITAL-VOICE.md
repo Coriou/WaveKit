@@ -75,6 +75,7 @@ Per-decoder dsd-fme options:
 | `voiceSlot`                                                             | Overrides `digitalVoice.voiceSlot` for this decoder                                                                                                        |
 | `enablePerCallRecording`, `perCallRecordingDir`                         | Per-call WAVs alongside the stream (`-7 <dir> -P`), default off                                                                                            |
 | `perCallRecordingMaxTotalMb` (512), `perCallRecordingMaxAgeHours` (168) | Retention: expired files are deleted, then the oldest until the total fits; files written in the last 10 s are kept. Runs at start and 2 s after each call |
+| `receiveFilter` (true)                                                  | Filter the discriminator output before dsd-fme, per mode ([DECODER-GUIDE](DECODER-GUIDE.md#dsd-fme-receive-filter)); `false` feeds it unfiltered           |
 | `extraArgs`                                                             | Passed through, except `-f*` (mode), `-o` (output) and `-y` (float audio), which are dropped with a warning: they would desync the stream format           |
 
 Relative recording directories are resolved to absolute paths. Retention only

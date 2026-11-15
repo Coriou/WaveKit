@@ -59,12 +59,19 @@ export function parseIqArgs(argv) {
 	}
 }
 
-/** sox WAV wrapper at the demod rate, after the back chain (DsdFmeDecoder). */
+/**
+ * The receive filter DsdFmeDecoder puts in its sox WAV wrapper for the
+ * 4800 symbols/s modes (dsd-fme-filter.ts RECEIVE_LOWPASS_EFFECT; a unit test
+ * keeps them equal).
+ */
+export const RX_FILTER = "sinc -t 1000 -3000"
+
+/** sox WAV wrapper and receive filter at the demod rate, after the back chain (DsdFmeDecoder). */
 function wavStages(chain, demodRate) {
 	return [
 		chain,
 		"csdr convert -i float -o s16",
-		`sox -t raw -r ${demodRate} -e signed -b 16 -c 1 - -t wav -r ${DEMOD_RATE_HZ} -`,
+		`sox -t raw -r ${demodRate} -e signed -b 16 -c 1 - -t wav -r ${DEMOD_RATE_HZ} - ${RX_FILTER}`,
 	]
 }
 

@@ -18,7 +18,8 @@
  * - V/D mode 2 CC: five blocks of 20 DCH dibits and 52 VeCH dibits; the
  *   DCH (80 bits whitened, CRC-16, tail, K = 5, 20 x 5) holds the
  *   destination in FN 0 and the source in FN 1.
- * Dibit 01 is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5.
+ * Dibit 01 is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5,
+ * unless `shape` names another (fsk-iq.mjs AIR_SHAPES).
  * Each over leads with two settle frames (sync and noise, no valid FICH).
  */
 import {
@@ -27,6 +28,7 @@ import {
 	bytesToBits,
 	rng,
 	shapeFrequency,
+	EASY_SHAPE,
 } from "./fsk-iq.mjs"
 
 const FRAME_SYNC = 0xd471c9634d
@@ -183,16 +185,19 @@ export function ysfVd2Dibits({ fn, ft, dest, src, dgid = 0, seed = 11 }) {
 }
 
 /**
- * Dibits of one YSF over: two settle frames, HC, `frames` V/D2 CC frames, TC.
- * dsd-fme sets its symbol levels from the first frame syncs and loses those
- * frames, so two frames of sync and noise (no valid FICH) lead.
- * `badCsd1` sends a header whose CSD1 fails its CRC.
+ * Dibits of one YSF over: two settle frames, HC, `superframes` times the
+ * `frames` V/D2 CC frames (FN 0 to frames - 1 each time, as a longer over
+ * repeats them; FN 1 names the source), TC. dsd-fme sets its symbol levels
+ * from the first frame syncs and loses those frames, so two frames of sync
+ * and noise (no valid FICH) lead. `badCsd1` sends a header whose CSD1 fails
+ * its CRC.
  */
 export function ysfCallDibits({
 	dest,
 	src,
 	dgid = 0,
 	frames = 7,
+	superframes = 1,
 	badCsd1 = false,
 	seed = 5,
 }) {
@@ -202,8 +207,18 @@ export function ysfCallDibits({
 	for (let i = 0; i < 2; i++)
 		out.push(...bitsToDibits(bitsOf(FRAME_SYNC, 40)), ...noise(460))
 	out.push(...ysfHeaderDibits({ fi: 0, dest, src, dgid, badCsd1 }))
-	for (let fn = 0; fn < frames; fn++)
-		out.push(...ysfVd2Dibits({ fn, ft: frames - 1, dest, src, dgid }))
+	for (let sf = 0; sf < superframes; sf++)
+		for (let fn = 0; fn < frames; fn++)
+			out.push(
+				...ysfVd2Dibits({
+					fn,
+					ft: frames - 1,
+					dest,
+					src,
+					dgid,
+					seed: 11 + 8 * sf,
+				}),
+			)
 	out.push(...ysfHeaderDibits({ fi: 2, dest, src, dgid }))
 	return out
 }
@@ -217,24 +232,30 @@ export function ysfOversDibits(overs) {
 	])
 }
 
-/** FM deviation (Hz, 48 kHz) of one YSF call. */
-export function ysfFrequency(call, { rateHz = 48_000 } = {}) {
-	return ysfShape(ysfCallDibits(call), rateHz)
+/**
+ * FM deviation (Hz, 48 kHz) of one YSF call. `shape` defaults to a raised
+ * cosine 0.5 (the chain tests); AIR_SHAPES.ysf / ysfC4fm are the real ones.
+ */
+export function ysfFrequency(
+	call,
+	{ rateHz = 48_000, shape = EASY_SHAPE } = {},
+) {
+	return ysfShape(ysfCallDibits(call), rateHz, shape)
 }
 
 /** FM deviation (Hz, 48 kHz) of back-to-back YSF overs. */
-export function ysfOversFrequency(overs, { rateHz = 48_000 } = {}) {
-	return ysfShape(ysfOversDibits(overs), rateHz)
+export function ysfOversFrequency(
+	overs,
+	{ rateHz = 48_000, shape = EASY_SHAPE } = {},
+) {
+	return ysfShape(ysfOversDibits(overs), rateHz, shape)
 }
 
-function ysfShape(dibits, rateHz) {
+function ysfShape(dibits, rateHz, shape) {
 	return shapeFrequency(dibits, {
 		symbolRate: 4800,
 		rateHz,
-		// Raised cosine 0.5: dsd-fme's integrate-and-slice symbol decision has
-		// residual ISI from a 0.2 roll-off (measured: 5 of 11 FICH CRC failures).
-		shaping: "rc",
-		alpha: 0.5,
+		...shape,
 		deviationHz: dibit => [600, 1800, -600, -1800][dibit],
 	})
 }

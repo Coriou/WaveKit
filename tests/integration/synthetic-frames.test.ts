@@ -27,6 +27,7 @@ import { join, resolve } from "node:path"
 import pino from "pino"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { aprsFrequency } from "../../scripts/fixtures/aprs-afsk.mjs"
+import { dmrFrequency } from "../../scripts/fixtures/dmr-4fsk.mjs"
 import { dpmrFrequency } from "../../scripts/fixtures/dpmr-4fsk.mjs"
 import {
 	dstarFrequency,
@@ -34,7 +35,11 @@ import {
 	dstarSpecFrequency,
 } from "../../scripts/fixtures/dstar-gmsk.mjs"
 import { flexFrequency } from "../../scripts/fixtures/flex-fsk.mjs"
-import { fmCu8 } from "../../scripts/fixtures/fsk-iq.mjs"
+import {
+	AIR_SHAPES,
+	EASY_SHAPE,
+	fmCu8,
+} from "../../scripts/fixtures/fsk-iq.mjs"
 import {
 	nxdnCallsFrequency,
 	nxdnFrequency,
@@ -56,6 +61,7 @@ import { MultimonDecoder } from "../../src/decoders/builtin/multimon-ng.js"
 import {
 	DSTAR_LINE_MS,
 	SYNTHETIC,
+	checkDmr,
 	checkDpmr,
 	checkDstar,
 	checkDstarOvers,
@@ -93,6 +99,8 @@ const CAPTURES = [
 	{ rateHz: 2_400_000, offsetHz: -287_500 },
 ] as const
 const T0 = Date.UTC(2026, 0, 2, 3, 4, 5)
+/** One DMR burst per printed line (30 ms; both slots print). */
+const DMR_LINE_MS = 30
 
 const CRATE = resolve(__dirname, "../../native/wavekit-chan")
 const chanUnavailable =
@@ -174,6 +182,16 @@ const DSD_HEAD = {
 
 const CASES: ChainCase[] = [
 	{
+		name: "DMR repeater downlink (dsd-fme auto, the catalogue default)",
+		tool: "dsd-fme",
+		freq: () => dmrFrequency(SYNTHETIC.dmr),
+		adapter: (path, capture) => dsd(path, capture, "auto"),
+		channelHead: DSD_HEAD,
+		interpreter: dsdInterpreter,
+		check: checkDmr,
+		lineMs: DMR_LINE_MS,
+	},
+	{
 		name: "D-STAR (dsd-fme auto, the catalogue default)",
 		tool: "dsd-fme",
 		freq: () => dstarFrequency(SYNTHETIC.dstar),
@@ -186,7 +204,15 @@ const CASES: ChainCase[] = [
 	{
 		name: "YSF (dsd-fme auto, the catalogue default)",
 		tool: "dsd-fme",
-		freq: () => ysfFrequency(SYNTHETIC.ysf),
+		// Four V/D2 superframes: the checked SRC comes in six frames (HC, each
+		// FN 2/7, TC). dsd-fme loses up to a quarter of YSF frames at some symbol
+		// clock phases even without noise (dsd-fme-margin.test.ts), and each
+		// capture rate fixes one phase, so one superframe can miss them all.
+		freq: () =>
+			ysfFrequency(
+				{ ...SYNTHETIC.ysf, superframes: 4 },
+				{ shape: AIR_SHAPES.ysf },
+			),
 		adapter: (path, capture) => dsd(path, capture, "auto"),
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,
@@ -195,7 +221,7 @@ const CASES: ChainCase[] = [
 	{
 		name: "P25 phase 1 (dsd-fme auto, the catalogue default)",
 		tool: "dsd-fme",
-		freq: () => p25Frequency(SYNTHETIC.p25),
+		freq: () => p25Frequency(SYNTHETIC.p25, { shape: AIR_SHAPES.p25 }),
 		adapter: (path, capture) => dsd(path, capture, "auto"),
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,
@@ -205,7 +231,16 @@ const CASES: ChainCase[] = [
 		(variant): ChainCase => ({
 			name: `${variant.toUpperCase()} (dsd-fme mode ${variant === "nxdn96" ? "nxdn" : variant})`,
 			tool: "dsd-fme",
-			freq: () => nxdnFrequency(SYNTHETIC.nxdn, { variant }),
+			// NXDN48 with its standard transmit filter (root raised cosine 0.2
+			// times x / sin x), which the adapter's NXDN receive filter matches.
+			// NXDN96 keeps the raised cosine 0.5: dsd-fme's NXDN96 frame sync did
+			// not lock on a roll-off below 0.5 with any input filter (measured on
+			// the host build; dsd-fme-margin.test.ts).
+			freq: () =>
+				nxdnFrequency(SYNTHETIC.nxdn, {
+					variant,
+					shape: variant === "nxdn48" ? AIR_SHAPES.nxdn : EASY_SHAPE,
+				}),
 			adapter: (path, capture) =>
 				dsd(path, capture, variant === "nxdn96" ? "nxdn" : variant),
 			channelHead: DSD_HEAD,
@@ -216,7 +251,8 @@ const CASES: ChainCase[] = [
 	{
 		name: "P25 phase 1 keyed up twice (HDU/LDU1/LDU2/TDU each)",
 		tool: "dsd-fme",
-		freq: () => p25Frequency({ ...SYNTHETIC.p25, rekeys: 1 }),
+		freq: () =>
+			p25Frequency({ ...SYNTHETIC.p25, rekeys: 1 }, { shape: AIR_SHAPES.p25 }),
 		adapter: (path, capture) => dsd(path, capture, "auto"),
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,
@@ -250,7 +286,9 @@ const CASES: ChainCase[] = [
 		name: "YSF back to back, the second header's CSD1 failed",
 		tool: "dsd-fme",
 		freq: () =>
-			ysfOversFrequency([SYNTHETIC.ysf, { ...SYNTHETIC.ysf, badCsd1: true }]),
+			ysfOversFrequency([SYNTHETIC.ysf, { ...SYNTHETIC.ysf, badCsd1: true }], {
+				shape: AIR_SHAPES.ysf,
+			}),
 		adapter: (path, capture) => dsd(path, capture, "auto"),
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,
@@ -261,10 +299,13 @@ const CASES: ChainCase[] = [
 			name: `NXDN48 A then B ${release ? "with" : "without"} TX_REL`,
 			tool: "dsd-fme",
 			freq: () =>
-				nxdnCallsFrequency([
-					{ ...SYNTHETIC.nxdn, release },
-					{ ...SYNTHETIC.nxdnB, release },
-				]),
+				nxdnCallsFrequency(
+					[
+						{ ...SYNTHETIC.nxdn, release },
+						{ ...SYNTHETIC.nxdnB, release },
+					],
+					{ shape: AIR_SHAPES.nxdn },
+				),
 			adapter: (path, capture) => dsd(path, capture, "nxdn48"),
 			channelHead: DSD_HEAD,
 			interpreter: dsdInterpreter,
@@ -274,7 +315,7 @@ const CASES: ChainCase[] = [
 	{
 		name: "dPMR (dsd-fme mode dpmr)",
 		tool: "dsd-fme",
-		freq: () => dpmrFrequency(SYNTHETIC.dpmr),
+		freq: () => dpmrFrequency(SYNTHETIC.dpmr, { shape: AIR_SHAPES.dpmr }),
 		adapter: (path, capture) => dsd(path, capture, "dpmr"),
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,

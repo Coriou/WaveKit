@@ -24,6 +24,10 @@ import { AcarsdecDecoder } from "../../../src/decoders/builtin/acarsdec.js"
 import { Dumpvdl2Decoder } from "../../../src/decoders/builtin/dumpvdl2.js"
 import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import { LoraMeshtasticDecoder } from "../../../src/decoders/builtin/lora-meshtastic.js"
+import { receiveFilterEffect } from "../../../src/decoders/builtin/dsd-fme-filter.js"
+
+/** The sox receive-filter effect of the 4800 symbols/s modes (auto, dmr, p25, ysf, dstar). */
+const rx = (rateHz: number) => receiveFilterEffect("auto", rateHz)!
 
 /** Every golden builds its decoder with id "g": the per-instance direwolf config path. */
 const DW_CONF = direwolfConfigPath("g")
@@ -96,7 +100,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - | (mkdir -p /app/decoded_calls && cd /app/decoded_calls && dsd-fme -i /dev/stdin -7 /app/decoded_calls -P -fa -o null)",
+			`csdr convert -i char -o float | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(47627.90697674418)} | (mkdir -p /app/decoded_calls && cd /app/decoded_calls && dsd-fme -i /dev/stdin -7 /app/decoded_calls -P -fa -o null)`,
 		],
 		getDecoderArgs: [
 			"-i",
@@ -576,7 +580,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -fa -o null",
+			`csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(48000)} | dsd-fme -i /dev/stdin -fa -o null`,
 		],
 		getDecoderArgs: ["-i", "/dev/stdin", "-fa", "-o", "null"],
 	},
@@ -592,7 +596,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -fs -o udp:127.0.0.1:23456 -V 2",
+			`csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(48000)} | dsd-fme -i /dev/stdin -fs -o udp:127.0.0.1:23456 -V 2`,
 		],
 		getDecoderArgs: [
 			"-i",
@@ -618,7 +622,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 3.5 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -f1 -o udp:127.0.0.1:7355 -V 3",
+			`csdr convert -i char -o float | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 3.5 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(47627.90697674418)} | dsd-fme -i /dev/stdin -f1 -o udp:127.0.0.1:7355 -V 3`,
 		],
 		getDecoderArgs: [
 			"-i",
@@ -643,7 +647,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | (mkdir -p /app/decoded_calls && cd /app/decoded_calls && dsd-fme -i /dev/stdin -7 /app/decoded_calls -P -fy -o null)",
+			`csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(48000)} | (mkdir -p /app/decoded_calls && cd /app/decoded_calls && dsd-fme -i /dev/stdin -7 /app/decoded_calls -P -fy -o null)`,
 		],
 		getDecoderArgs: [
 			"-i",
@@ -668,7 +672,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr shift -0.0029296875 | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -fn -o null -g 0",
+			`csdr convert -i char -o float | csdr shift -0.0029296875 | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -fn -o null -g 0`,
 		],
 		getDecoderArgs: ["-i", "/dev/stdin", "-fn", "-o", "null", "-g", "0"],
 	},
@@ -680,7 +684,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -fa -o null",
+			`csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(48000)} | dsd-fme -i /dev/stdin -fa -o null`,
 		],
 		getDecoderArgs: ["-i", "/dev/stdin", "-fa", "-o", "null"],
 	},
@@ -699,7 +703,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			"csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -fa -o null -V 3",
+			`csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(48000)} | dsd-fme -i /dev/stdin -fa -o null -V 3`,
 		],
 		getDecoderArgs: ["-i", "/dev/stdin", "-fa", "-o", "null", "-V", "3"],
 	},
@@ -713,7 +717,7 @@ const GOLDEN: Row[] = [
 		},
 		getArgs: [
 			"-c",
-			`csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | (mkdir -p ${CWD_CALLS} && cd ${CWD_CALLS} && dsd-fme -i /dev/stdin -7 ${CWD_CALLS} -P -fa -o null)`,
+			`csdr convert -i char -o float | csdr firdecimate 50 0.002604 --cutoff 0.1953 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - ${rx(48000)} | (mkdir -p ${CWD_CALLS} && cd ${CWD_CALLS} && dsd-fme -i /dev/stdin -7 ${CWD_CALLS} -P -fa -o null)`,
 		],
 		getDecoderArgs: [
 			"-i",

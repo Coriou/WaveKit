@@ -47,6 +47,7 @@ import {
 	DSD_FME_SAMPLE_RATE_MIN_HZ,
 } from "../options/dsd-fme.js"
 import { pruneCallRecordings } from "./call-recordings.js"
+import { receiveFilterEffect } from "./dsd-fme-filter.js"
 import type {
 	DecoderCaps,
 	DecoderConfig,
@@ -506,6 +507,11 @@ export interface DsdFmeOptions {
 	callTimeoutMs?: number | undefined
 	/** TDMA voice slots to synthesise (`-V`); omitted leaves dsd-fme's default (both) */
 	voiceSlot?: DsdFmeVoiceSlot | undefined
+	/**
+	 * Receive filter on the discriminator output, chosen per mode
+	 * (dsd-fme-filter.ts); default true, false feeds dsd-fme unfiltered.
+	 */
+	receiveFilter: boolean
 	/** Per-call recordings: prune oldest beyond this total size (default: 512 MB) */
 	perCallRecordingMaxTotalMb: number
 	/** Per-call recordings: delete files older than this (default: 168 h) */
@@ -788,6 +794,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				CALL_TIMEOUT_MS,
 			),
 			voiceSlot: this.parseVoiceSlot(options["voiceSlot"]),
+			receiveFilter: this.parseReceiveFilter(options["receiveFilter"]),
 			perCallRecordingMaxTotalMb: positive(
 				"perCallRecordingMaxTotalMb",
 				DSD_FME_RECORDING_MAX_TOTAL_MB_MAX,
@@ -818,6 +825,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			},
 		)
 		return outOfRange ? undefined : port
+	}
+
+	/** Non-boolean values keep the default filter (key-only warning, never the value). */
+	private parseReceiveFilter(value: unknown): boolean {
+		if (value === undefined || value === null) return true
+		if (typeof value === "boolean") return value
+		this.optionWarn("receiveFilter", "invalid")
+		return true
 	}
 
 	private parseVoiceSlot(value: unknown): DsdFmeVoiceSlot | undefined {
@@ -1270,7 +1285,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Join csdr stages
 		let pipelineStr = boundCsdrPipeline(csdrStages, this.logger)
 
-		// DEBUG: Record raw audio at demod rate before sox processing
+		// DEBUG: Record raw audio at demod rate before sox processing (so also
+		// before the receive filter, which runs in sox)
 		if (debugFile && this.debugRecording) {
 			pipelineStr += ` | ${shellCommand("tee", [debugFile])}`
 			this.logger.warn(
@@ -1281,6 +1297,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Build sox command for WAV wrapper
 		// CRITICAL: Use actualDemodRate (not configured rate) to match csdr output
+		// The receive filter runs in this sox, before its rate conversion, so its
+		// taps are designed at the sox input rate (dsd-fme-filter.ts).
+		const receiveFilter = this.options.receiveFilter
+			? receiveFilterEffect(this.options.mode, actualDemodRate)
+			: undefined
 		const soxCommand = [
 			"sox",
 			"-t raw",
@@ -1290,6 +1311,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			"-t wav",
 			`-r ${csdrNumber(outputRate)}`, // Output rate for dsd-fme
 			"-",
+			...(receiveFilter === undefined ? [] : [receiveFilter]),
 		].join(" ")
 
 		pipelineStr += ` | ${soxCommand}`

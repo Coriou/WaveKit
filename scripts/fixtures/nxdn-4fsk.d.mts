@@ -1,3 +1,4 @@
+import type { PulseShape } from "./fsk-iq.mjs"
 export interface NxdnCall {
 	ran: number
 	source: number
@@ -36,10 +37,15 @@ export function nxdnCallsFrequency(
 	options?: {
 		variant?: "nxdn48" | "nxdn96"
 		rateHz?: number
+		shape?: PulseShape
 		gapSymbols?: number
 	},
 ): Float64Array
 export function nxdnFrequency(
 	call: NxdnCall,
-	options?: { variant?: "nxdn48" | "nxdn96"; rateHz?: number },
+	options?: {
+		variant?: "nxdn48" | "nxdn96"
+		rateHz?: number
+		shape?: PulseShape
+	},
 ): Float64Array
