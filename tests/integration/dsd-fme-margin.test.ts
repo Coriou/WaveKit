@@ -177,19 +177,13 @@ function signals(): MarginSignal[] {
  * measured: a slow DC blocker for carrier frequency error (sox highpass
  * 2 Hz), dsd-fme without its own input filters (-l), the matched root
  * raised cosine 0.2 at 4800 symbols/s instead of the low-pass (it cut more
- * noise but left YSF a frame error floor on strong signals), and the plain
- * 1.3 kHz low-pass dPMR now uses, for the 2400 symbols/s signals.
+ * noise but left YSF a frame error floor on strong signals).
  */
 const VARIANTS: MarginVariant[] = [
 	{ name: "before", options: { receiveFilter: false } },
 	{ name: "after", options: {} },
 	{ name: "after+hp2", options: {}, soxEffects: "highpass -1 2" },
 	{ name: "after-l", options: {}, dsdArgs: ["-l"] },
-	{
-		name: "lp1300",
-		options: { receiveFilter: false },
-		soxEffects: "sinc -t 500 -1300",
-	},
 	{
 		name: "rrc4800",
 		options: { receiveFilter: false },

@@ -50,7 +50,7 @@ export const RECEIVE_LOWPASS_EFFECT = "sinc -t 1000 -3000"
 export const RECEIVE_LOWPASS_2400_EFFECT = "sinc -t 500 -1300"
 
 export type ReceiveFilterPlan =
-	| { kind: "lowpass"; effect: string }
+	| { kind: "lowpass"; effect: string; stopHz: number }
 	| { kind: "rrc"; symbolRate: number; sinc: boolean }
 
 /** The filter for a mode, or undefined (NXDN96, ProVoice). */
@@ -63,11 +63,15 @@ export function receiveFilterPlan(
 		case "p25":
 		case "ysf":
 		case "dstar":
-			return { kind: "lowpass", effect: RECEIVE_LOWPASS_EFFECT }
+			return { kind: "lowpass", effect: RECEIVE_LOWPASS_EFFECT, stopHz: 3500 }
 		case "nxdn48":
 			return { kind: "rrc", symbolRate: 2400, sinc: true }
 		case "dpmr":
-			return { kind: "lowpass", effect: RECEIVE_LOWPASS_2400_EFFECT }
+			return {
+				kind: "lowpass",
+				effect: RECEIVE_LOWPASS_2400_EFFECT,
+				stopHz: 1550,
+			}
 		case "nxdn":
 		case "provoice":
 			return undefined
@@ -137,18 +141,24 @@ export function receiveFilterTaps(
 }
 
 /**
- * Effects already built, by mode and sox input rate: a decoder rebuilds its
- * command on every start and scanner probes start often, so the FIR design
- * runs once per mode and rate. A decoder sees one or two rates; the cache is
- * cleared past EFFECTS_MAX entries.
+ * FIR effects already built, by mode and sox input rate (the low-pass modes
+ * need no design and skip it). A decoder rebuilds its command on every start
+ * and scanner probes start often; the NXDN48 design takes about 1 ms at
+ * 48 kHz on a desktop (a few ms the first time in a process, while the JIT
+ * warms up), so it runs once per mode and rate. A decoder sees one or two
+ * rates; the cache is cleared past EFFECTS_MAX entries.
  */
 const effects = new Map<string, string>()
 const EFFECTS_MAX = 32
 
 /**
  * The sox effect for a mode at the sox input rate `rateHz`, or undefined.
- * FIR taps with seven decimals: about 1e-6 of the largest tap, far below
- * 16-bit audio.
+ * A low-pass needs its stop edge below the input Nyquist: under 2 * stopHz
+ * (7000 Hz for the 4800 symbols/s modes, 3100 Hz for dPMR) it is left out,
+ * as sox refuses a cutoff at or past Nyquist and exits, which would
+ * restart-loop the decoder (the minimum sampleRate is 1000 Hz). FIR taps
+ * with seven decimals: about 1e-6 of the largest tap, far below 16-bit
+ * audio.
  */
 export function receiveFilterEffect(
 	mode: DsdFmeMode,
@@ -156,7 +166,8 @@ export function receiveFilterEffect(
 ): string | undefined {
 	const plan = receiveFilterPlan(mode)
 	if (plan === undefined) return undefined
-	if (plan.kind === "lowpass") return plan.effect
+	if (plan.kind === "lowpass")
+		return rateHz >= 2 * plan.stopHz ? plan.effect : undefined
 	const key = `${mode}|${rateHz}`
 	const cached = effects.get(key)
 	if (cached !== undefined) return cached

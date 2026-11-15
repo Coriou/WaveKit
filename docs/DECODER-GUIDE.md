@@ -1131,7 +1131,9 @@ x / sin x, which only the matched NXDN filter undoes. NXDN96 stays unfiltered
 until it is measured: the synthetic NXDN96 transmission decoded only with a
 roll-off of 0.5, which the low-pass cuts. P25 phase 2 (6000 symbols/s) is wider
 than the low-pass; in `auto` dsd-fme looks for it at the 4800 symbols/s timing and
-switches only on a trunking grant, so it was not measured. The sox effect costs
+switches only on a trunking grant, so it was not measured. A low-pass is left out
+when the sox input rate is below twice its stop edge (7 kHz, or 3.1 kHz for dPMR),
+which only a raw capture slower than that gives. The sox effect costs
 about 0.1 % of a desktop core per decoder (Raspberry Pi not measured).
 
 `tests/integration/dsd-fme-margin.test.ts` measures per protocol, CNR (in

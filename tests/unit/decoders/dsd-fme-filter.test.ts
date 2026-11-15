@@ -56,14 +56,17 @@ function rootRaisedCosine(t: number, a: number): number {
 describe("dsd-fme receive filter design", () => {
 	it("picks the filter by mode: low-pass at 4800 symbols/s, the NXDN filter for NXDN48, a 1.3 kHz low-pass for dPMR, none for NXDN96 and ProVoice", () => {
 		expect(DSD_FME_MODES.map(m => [m, receiveFilterPlan(m)])).toEqual([
-			["auto", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
-			["dmr", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
-			["p25", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
-			["ysf", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
-			["dstar", { kind: "lowpass", effect: "sinc -t 1000 -3000" }],
+			["auto", { kind: "lowpass", effect: "sinc -t 1000 -3000", stopHz: 3500 }],
+			["dmr", { kind: "lowpass", effect: "sinc -t 1000 -3000", stopHz: 3500 }],
+			["p25", { kind: "lowpass", effect: "sinc -t 1000 -3000", stopHz: 3500 }],
+			["ysf", { kind: "lowpass", effect: "sinc -t 1000 -3000", stopHz: 3500 }],
+			[
+				"dstar",
+				{ kind: "lowpass", effect: "sinc -t 1000 -3000", stopHz: 3500 },
+			],
 			["nxdn", undefined],
 			["nxdn48", { kind: "rrc", symbolRate: 2400, sinc: true }],
-			["dpmr", { kind: "lowpass", effect: "sinc -t 500 -1300" }],
+			["dpmr", { kind: "lowpass", effect: "sinc -t 500 -1300", stopHz: 1550 }],
 			["provoice", undefined],
 		])
 		expect(receiveFilterEffect("auto", 47_000)).toBe("sinc -t 1000 -3000")
@@ -149,6 +152,25 @@ describe("dsd-fme receive filter design", () => {
 				},
 			),
 			{ numRuns: 100 },
+		)
+	})
+
+	it("leaves a low-pass out below twice its stop edge, where sox would exit", () => {
+		// At and past the bound (7000 / 3100 Hz) the effect is there.
+		expect(receiveFilterEffect("auto", 7000)).toBe("sinc -t 1000 -3000")
+		expect(receiveFilterEffect("dpmr", 3100)).toBe("sinc -t 500 -1300")
+		for (const rate of [6999, 6000, 3100, 1000])
+			expect(receiveFilterEffect("auto", rate)).toBeUndefined()
+		for (const rate of [3099, 2000, 1000])
+			expect(receiveFilterEffect("dpmr", rate)).toBeUndefined()
+		// A raw capture below 7 kHz (the inputSampleRate floor is 1000 Hz)
+		// demodulates at its own rate: sox then runs without the effect.
+		for (const inputSampleRate of [1000, 6000])
+			expect(soxStage(pipelineOf({ inputSampleRate }))).toBe(
+				`sox -t raw -r ${inputSampleRate} -e signed -b 16 -c 1 - -t wav -r 48000 -`,
+			)
+		expect(soxStage(pipelineOf({ inputSampleRate: 7000 }))).toBe(
+			"sox -t raw -r 7000 -e signed -b 16 -c 1 - -t wav -r 48000 - sinc -t 1000 -3000",
 		)
 	})
 
