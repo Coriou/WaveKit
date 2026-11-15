@@ -506,13 +506,25 @@ mod tests {
                 .zip(&b)
                 .map(|(x, y)| ((x.0 + y.0) as f32, (x.1 + y.1) as f32))
                 .unzip();
-            let mut dsp = ChannelDsp::new(spec.clone()).unwrap();
-            dsp.process_f32(&i, &q);
-            let hz = dsp.afc_correction_hz().unwrap();
+            let correction = |i: &[f32], q: &[f32]| {
+                let mut dsp = ChannelDsp::new(spec.clone()).unwrap();
+                dsp.process_f32(i, q);
+                dsp.afc_correction_hz().unwrap()
+            };
+            let hz = correction(&i, &q);
+            // The same wanted signal alone: the neighbour may move the decision by under 50 Hz
+            // (the data's own error at the commit is the same in both).
+            let (ai, aq): (Vec<f32>, Vec<f32>) = a.iter().map(|x| (x.0 as f32, x.1 as f32)).unzip();
+            let alone = correction(&ai, &aq);
             assert!(
-                (hz - wanted).abs() < 50.0 || (wanted == 0.0 && hz == 0.0),
-                "wanted {wanted}, neighbour {side}: {hz}"
+                (hz - alone).abs() < 50.0,
+                "wanted {wanted}, neighbour {side}: {hz} against {alone} alone"
             );
+            if wanted == 0.0 {
+                assert_eq!(hz, 0.0);
+            } else {
+                assert!((hz - wanted).abs() < 250.0, "{hz}");
+            }
         }
     }
 
