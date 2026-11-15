@@ -67,6 +67,24 @@ export const RECORDING_INVENTORY_KINDS: readonly RecordingInventoryKind[] =
 
 export type RecordingCallType = "group" | "private" | "unit"
 
+/**
+ * Why a scanner analog recording's file ended before its transmission did, from the file's own
+ * receipt: `scanner-moved` (the sweep retuned away), `duration-rollover` (the file reached its
+ * length limit; the transmission continues in the next part), `source-lost` (the input stopped),
+ * `shutdown` (WaveKit stopped). Null when the file was not cut short or the reason is unknown.
+ */
+export type RecordingCut =
+	| "scanner-moved"
+	| "duration-rollover"
+	| "source-lost"
+	| "shutdown"
+export const RECORDING_CUTS: readonly RecordingCut[] = Object.freeze([
+	"scanner-moved",
+	"duration-rollover",
+	"source-lost",
+	"shutdown",
+])
+
 /** WG8 req 4.3: one recording. Every field is derived; nothing is guessed. */
 export interface RecordingInventoryItem {
 	id: string
@@ -111,6 +129,20 @@ export interface RecordingInventoryItem {
 	 * such row, or Activity is off). Absent from older cores.
 	 */
 	activityEventId?: string | null
+	/**
+	 * Scanner analog recordings only: why the file ended early (RecordingCut), null when it was
+	 * not cut short or its receipt is missing, unreadable or names no such reason. Absent on
+	 * other kinds and from older cores.
+	 */
+	cut?: RecordingCut | null
+	/**
+	 * Scanner analog recordings only: this file's place (1-based) among the listed files of one
+	 * observation (a transmission split by roll-overs), in the order they were finished; null
+	 * when the observation is unknown or this is its only listed file. Absent from older cores.
+	 */
+	part?: number | null
+	/** The number of listed files of that observation (null with `part`). */
+	parts?: number | null
 }
 
 /**

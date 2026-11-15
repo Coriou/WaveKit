@@ -56,6 +56,11 @@ import {
 	startedAtLocalFromName,
 } from "./names.js"
 import { parseRiffDurationMs } from "./riff.js"
+import {
+	readRecordingReceipt,
+	recordingParts,
+	type RecordingReceiptFacts,
+} from "./recording-cut.js"
 
 /**
  * Pause of the slow reconcile between two folders: 1 500 folders take at least 30 s, so a
@@ -344,6 +349,14 @@ interface IndexedEntry extends InventoryEntry {
 	dev: number
 	ino: number
 	size: number
+	/** A scanner analog file's receipt facts (read when indexed); null: unknown or not analog. */
+	receipt: RecordingReceiptFacts | null
+}
+
+/** A listed analog file's roll-over place (RecordingInventoryItem.part, parts). */
+interface PartOf {
+	part: number | null
+	parts: number | null
 }
 
 interface FolderState {
@@ -791,6 +804,8 @@ export function createRecordingInventory(
 	const byId = new Map<string, IndexedEntry[]>()
 	/** Indexed copies per keep key (hasKey). */
 	const byKey = new Map<string, number>()
+	/** Indexed scanner analog copies per receipt observation (roll-over parts). */
+	const byObservation = new Map<string, IndexedEntry[]>()
 	/** First full build: null until started, then its promise. */
 	let build: Promise<void> | null = null
 	let built = false
@@ -944,6 +959,12 @@ export function createRecordingInventory(
 
 	/** Adds an indexed copy; the view lists the id's winner. */
 	function track(e: IndexedEntry): void {
+		const observationId = e.receipt?.observationId
+		if (observationId) {
+			const group = byObservation.get(observationId) ?? []
+			group.push(e)
+			byObservation.set(observationId, group)
+		}
 		if (e.key !== null) byKey.set(e.key, (byKey.get(e.key) ?? 0) + 1)
 		const copies = byId.get(e.item.id) ?? []
 		const before = winnerOf(copies)
@@ -958,6 +979,13 @@ export function createRecordingInventory(
 
 	/** Removes an indexed copy; the next copy of its id, if any, is listed instead. */
 	function untrack(e: IndexedEntry): void {
+		const observationId = e.receipt?.observationId
+		if (observationId) {
+			const group = byObservation.get(observationId)
+			const at = group?.indexOf(e) ?? -1
+			if (group && at >= 0) group.splice(at, 1)
+			if (group?.length === 0) byObservation.delete(observationId)
+		}
 		const copies = byId.get(e.item.id)
 		if (!copies) return
 		const i = copies.indexOf(e)
@@ -1348,6 +1376,11 @@ export function createRecordingInventory(
 			frequencyHz: null,
 		}
 		const entry = await handleSem.run(() => buildFrom(c, st, at, counts))
+		const root = spec.dirs[0]
+		const receipt =
+			entry && spec.kind === "scanner-analog" && root !== undefined
+				? await handleSem.run(() => readRecordingReceipt(fs, root, name))
+				: null
 		// The folder may have been replaced meanwhile (config change): never write into a stale state.
 		if (!attached(state)) return
 		if (!entry) {
@@ -1366,6 +1399,7 @@ export function createRecordingInventory(
 			dev: entry.stat.dev,
 			ino: entry.stat.ino,
 			size: entry.stat.size,
+			receipt,
 		})
 	}
 
@@ -1750,6 +1784,25 @@ export function createRecordingInventory(
 			}
 		}
 		const last = selected[selected.length - 1]
+		// Roll-over parts, per observation of a listed analog file: computed once per listing.
+		const parts = new Map<string, Map<IndexedEntry, PartOf>>()
+		const partsOf = (e: IndexedEntry): PartOf | null => {
+			const observationId = e.receipt?.observationId ?? null
+			if (observationId === null) return null
+			let group = parts.get(observationId)
+			if (!group) {
+				const listed = (byObservation.get(observationId) ?? []).filter(
+					f => f.listed,
+				)
+				group = new Map<IndexedEntry, PartOf>()
+				for (const [f, at] of recordingParts(
+					listed.map(f => ({ mtimeMs: f.mtimeMs, id: f.item.id, f })),
+				))
+					group.set(f.f, at)
+				parts.set(observationId, group)
+			}
+			return group.get(e) ?? null
+		}
 		const items = selected.map(({ e, kept }) => {
 			const owner = e.discoveryId === null ? null : ownerOf(e.discoveryId)
 			const item: RecordingInventoryItem = {
@@ -1757,6 +1810,12 @@ export function createRecordingInventory(
 				frequencyHz: owner?.frequencyHz ?? null,
 				key: e.key ?? e.item.id,
 				ownerDiscoveryId: owner?.id ?? null,
+			}
+			if (e.item.kind === "scanner-analog") {
+				const at = partsOf(e)
+				item.cut = e.receipt?.cut ?? null
+				item.part = at?.part ?? null
+				item.parts = at?.parts ?? null
 			}
 			if (kept !== undefined) item.kept = kept
 			if (eventIdOf !== undefined) {

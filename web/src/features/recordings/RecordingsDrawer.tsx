@@ -50,6 +50,7 @@ import {
 	headerCount,
 	recordedAt,
 	recordingIcon,
+	recordingCutLabel,
 	recordingMeta,
 	recordingTitle,
 	recordingsQuery,
@@ -1301,6 +1302,7 @@ function PlayerBar({
 						{error ??
 							[
 								item ? timeLabel(recordedAt(item)) : null,
+								item ? recordingCutLabel(item) : null,
 								liveWanted ? "live audio muted" : null,
 							]
 								.filter(Boolean)

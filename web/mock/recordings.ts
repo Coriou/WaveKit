@@ -19,6 +19,7 @@ import {
 	RECORDINGS_PAGE_LIMIT_MAX,
 } from "@wavekit/api-types"
 import type {
+	RecordingCut,
 	RecordingInventoryItem,
 	RecordingInventoryKind,
 	RecordingInventoryPage,
@@ -39,6 +40,10 @@ interface Seed {
 	/** Scanner recordings: the seeded discovery's frequency (MHz). */
 	mhz?: number
 	kept?: boolean
+	/** Scanner analog recordings: why the file ended early, and its roll-over part. */
+	cut?: RecordingCut | null
+	part?: number
+	parts?: number
 }
 
 const SEEDS: readonly Seed[] = [
@@ -59,6 +64,48 @@ const SEEDS: readonly Seed[] = [
 		source: "2081045",
 	},
 	{ kind: "scanner-analog", agoMin: 26, durationS: 42, mhz: 156.8, kept: true },
+	// One long transmission split by roll-overs, its last part cut when the sweep moved on.
+	{
+		kind: "scanner-analog",
+		agoMin: 32,
+		durationS: 60,
+		mhz: 156.8,
+		cut: "duration-rollover",
+		part: 1,
+		parts: 3,
+	},
+	{
+		kind: "scanner-analog",
+		agoMin: 31,
+		durationS: 60,
+		mhz: 156.8,
+		cut: "duration-rollover",
+		part: 2,
+		parts: 3,
+	},
+	{
+		kind: "scanner-analog",
+		agoMin: 30,
+		durationS: 21,
+		mhz: 156.8,
+		cut: "scanner-moved",
+		part: 3,
+		parts: 3,
+	},
+	{
+		kind: "scanner-analog",
+		agoMin: 40,
+		durationS: 12,
+		mhz: 156.8,
+		cut: "source-lost",
+	},
+	{
+		kind: "scanner-analog",
+		agoMin: 44,
+		durationS: 9,
+		mhz: 156.8,
+		cut: "shutdown",
+	},
 	{
 		kind: "dsd-fme-call",
 		agoMin: 48,
@@ -194,6 +241,13 @@ function makeRec(s: Seed, at: Date): Rec {
 			source: null,
 			frequencyHz: hz,
 			kept: s.kept === true,
+			...(s.kind === "scanner-analog"
+				? {
+						cut: s.cut ?? null,
+						part: s.part ?? null,
+						parts: s.parts ?? null,
+					}
+				: {}),
 		},
 	}
 }

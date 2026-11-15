@@ -54,7 +54,30 @@ export function recordingMeta(r: RecordingInventoryItem): string {
 	if (r.source && r.callType !== "unit") parts.push(`radio ${r.source}`)
 	if (r.decoderId) parts.push(r.decoderId)
 	parts.push(formatBytes(r.bytes))
+	const cut = recordingCutLabel(r)
+	if (cut) parts.push(cut)
 	return parts.join(" · ")
+}
+
+/**
+ * Why a scanner file ended early and where it sits in a split transmission, as the core reports
+ * it: "Part 2 of 5 · Continues in next part", "Cut: scanner moved on". Null when the core says
+ * nothing (an older core, a file that was not cut short, an unknown reason).
+ */
+export function recordingCutLabel(r: RecordingInventoryItem): string | null {
+	const out: string[] = []
+	const part = r.part ?? null
+	const parts = r.parts ?? null
+	if (part !== null && parts !== null && parts > 1)
+		out.push(`Part ${part} of ${parts}`)
+	if (r.cut === "scanner-moved") out.push("Cut: scanner moved on")
+	else if (r.cut === "duration-rollover") {
+		// The last part's roll-over was the transmission's last file so far: nothing listed follows.
+		if (part === null || parts === null || part < parts)
+			out.push("Continues in next part")
+	} else if (r.cut === "source-lost") out.push("Cut: source lost")
+	else if (r.cut === "shutdown") out.push("Cut: WaveKit stopped")
+	return out.length > 0 ? out.join(" · ") : null
 }
 
 /** "0:42", "12:05", "1:02:10". */

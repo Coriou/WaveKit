@@ -6516,6 +6516,15 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   `GET /api/activity/:eventId`), read at list time from memory; null when no
   row is known (no such row, the row was pruned, or Activity is off). Older
   cores omit it. See "Recording links" under Activity.
+- `cut`, `part`, `parts` (scanner analog recordings only; other kinds and older
+  cores omit them): `cut` says why the file ended early, read from the file's
+  own receipt: `scanner-moved` (the sweep retuned away), `duration-rollover`
+  (the file reached its length limit and the transmission continues in the next
+  file), `source-lost` (the input stopped) or `shutdown`; null when the file
+  was not cut short, or its receipt is missing, unreadable or names another
+  reason. `part` (1-based) and `parts` number the listed files of one
+  observation in the order they were finished (a transmission split by
+  roll-overs); both null for an observation's only file or an unknown one.
 - `kept` (optional in `@wavekit/api-types`; older cores omit it): true when
   the recording is kept, a delete of it is in progress, or the keep store is not
   usable (fail closed); read at list time.
