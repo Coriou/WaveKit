@@ -171,8 +171,120 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 		})
 
 	describe("trust edges of the checked formats", () => {
-		const run = (mode: string, lines: string[]) =>
-			replay(lines, dsd(mode), dsdInterpreter())
+		const run = (mode: string, lines: string[], lineMs?: number) =>
+			replay(lines, dsd(mode), dsdInterpreter(), lineMs)
+		const ends = (r: Replay) =>
+			r.outputs
+				.filter(o => o.type === "call_end")
+				.map(o => o.data as Record<string, unknown>)
+		const ysf = (frame: string, tail = "") =>
+			`00:00:01 Sync: +YSF  V/D2 Group/CQ -Simplex ${frame}${tail}`
+
+		it("YSF: a terminator ends the call even when its DCH failed", () => {
+			const r = run("ysf", [
+				ysf(
+					"HC FN: 1/7",
+					" DST: ALL        SRC: N0CALL     U/L:            D/L:",
+				),
+				ysf("CC FN: 1/7", " DST: ALL"),
+				ysf("CC FN: 2/7", " SRC: N0CALL"),
+				ysf("CC FN: 3/7", " U/L:"),
+				ysf("TC FN: 1/7", " DST: ALL        SRC: N0CALL     DCH (CRC ERR)"),
+			])
+			expect(ends(r)).toEqual([
+				expect.objectContaining({
+					ysf: { callsign: "N0CALL" },
+					flags: expect.objectContaining({ timeout: false }),
+				}),
+			])
+		})
+
+		it("YSF: a terminator alone (tuned in at the end) is not a call", () => {
+			const r = run("ysf", [
+				ysf("TC FN: 1/7", " DST: ALL        SRC: N0CALL     DCH (CRC ERR)"),
+				ysf(
+					"TC FN: 1/7",
+					" DST: ALL        SRC: N0CALL     U/L:            D/L:",
+				),
+			])
+			expect(r.outputs.filter(o => o.type.startsWith("call"))).toEqual([])
+		})
+
+		it("YSF: the next over's header right after a terminator names its station", () => {
+			const r = run("ysf", [
+				ysf(
+					"HC FN: 1/7",
+					" DST: ALL        SRC: AA1AAA     U/L:            D/L:",
+				),
+				ysf("CC FN: 1/7", " DST: ALL"),
+				ysf("CC FN: 2/7", " SRC: AA1AAA"),
+				ysf("CC FN: 3/7", " U/L:"),
+				ysf(
+					"TC FN: 1/7",
+					" DST: ALL        SRC: AA1AAA     U/L:            D/L:",
+				),
+				ysf(
+					"HC FN: 1/7",
+					" DST: ALL        SRC: BB2BBB     U/L:            D/L:",
+				),
+				ysf("CC FN: 1/7", " DST: ALL"),
+				ysf("CC FN: 2/7", " SRC: BB2BBB"),
+				ysf("CC FN: 3/7", " U/L:"),
+				ysf(
+					"TC FN: 1/7",
+					" DST: ALL        SRC: BB2BBB     U/L:            D/L:",
+				),
+			])
+			expect(starts(r).map(o => (o.data as { ysf?: unknown }).ysf)).toEqual([
+				{ callsign: "AA1AAA" },
+				{ callsign: "BB2BBB" },
+			])
+		})
+
+		it("NXDN: tuned in mid-call with one failed SACCH, the VCALL names the same call", () => {
+			const voice = (pf: string, tail = "") =>
+				`00:00:01 Sync: NXDN48  RDCH Voice  RAN 05 PF ${pf}${tail}`
+			const r = run(
+				"nxdn48",
+				[
+					voice("2/4"),
+					voice("3/4"),
+					voice("4/4"),
+					voice("1/4"),
+					voice("X/4"),
+					voice("3/4"),
+					voice("4/4"),
+					voice("1/4"),
+					voice("2/4"),
+					voice("3/4"),
+					voice("4/4", " VCALL"),
+					" Group Call - Half Duplex 4800bps/EHR (00) - Src=1234 - Dst/TG=5678 ",
+				],
+				80,
+			)
+			expect(ends(r).map(e => [e["talkgroup"], e["source"]])).toEqual([
+				[5678, 1234],
+			])
+		})
+
+		it("P25: another system's TDU does not end the call", () => {
+			const r = run("p25", [
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+				" Group Voice Channel User - Group 4321 Source 1234567",
+				"00:00:01 Sync: +P25p1 NAC/CC: 1B3;  TDU",
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
+				" Group Voice Channel User - Group 4321 Source 1234567",
+				"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  TDU",
+			])
+			expect(ends(r)).toEqual([
+				expect.objectContaining({
+					talkgroup: 4321,
+					flags: expect.objectContaining({ timeout: false }),
+				}),
+			])
+			expect(starts(r)).toHaveLength(1)
+		})
 		const header = (sync: string, my: string, tail = "") =>
 			`00:00:01 Sync: +DSTAR ${sync}  RPT 2: DIRECT   RPT 1: DIRECT   DST: CQCQCQ   SRC: ${my.padEnd(8)}TEST${tail}`
 		const starts = (r: Replay) => r.outputs.filter(o => o.type === "call_start")

@@ -1058,8 +1058,9 @@ printed the same RAN: the print is the RAN stored by the last passing SACCH.
 line (`RDCH`/`RTCH`, never `RCCH`) ending in `VCALL`, printed after that FACCH1 or
 SACCH-superframe CRC; the same print after `VCALL_ASSGN`, `DCALL_ASSGN`, `TX_REL`
 or `DISC` names another channel's call or an ending, and is ignored. A call heard
-by RAN alone takes the unit IDs only within 640 ms of its start (two NXDN48
-superframes); later IDs are another over. A clean frame ending in `TX_REL`,
+by RAN alone takes the unit IDs only within 960 ms of its start (three NXDN48
+superframes: a tune-in may wait up to five frames and one failed SACCH costs a
+superframe); later IDs are another over. A clean frame ending in `TX_REL`,
 `TX_REL_EX` or `DISC` ends the call. The older `RAN=` and `TGT=/SRC=` prints are
 no longer read.
 P25 phase 1 talkgroup and source come from the link control print ` Group Voice
@@ -1084,8 +1085,9 @@ YSF uses the source callsign of a header/terminator CSD1 (`DST: … SRC: …`) o
 type 2 frame (`FN: 2/7 SRC: …`), each printed only after its own DCH CRC; a CSD1
 that passed counts even when the CSD2 after it printed `DCH (CRC ERR)`, but such a
 line's link stays unverified. A YSF call starts on a frame whose FICH decoded
-(`HC|CC|TC FN: n/m`), a header frame (`HC`) ends the ongoing call, and the
-terminator (`TC`) ends the call. Its callsign can follow its start. dPMR TG/Src
+(`HC|CC FN: n/m`), whatever its DCHs printed; a header frame (`HC`) ends the
+ongoing call and the terminator (`TC`) ends the call, also when a DCH failed,
+and starts none. Its callsign can follow its start. dPMR TG/Src
 prints are not used: dsd-fme marks an ID OK when its CRC failed but two Hamming
 words looked correctable, so a dPMR call carries the protocol only and starts on
 two identical ID prints at most 240 ms apart (one per FS2 pair, every 160 ms).

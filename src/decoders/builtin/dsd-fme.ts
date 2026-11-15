@@ -222,10 +222,12 @@ const NXDN_TRAFFIC_LINE = /\b(?:RDCH|RTCH|RTCH_C|RTCH2)\b/
 const NXDN_RELEASE_LINE = /\b(?:TX_REL|TX_REL_EX|DISC)\s*$/
 /**
  * A call heard by RAN alone takes the VCALL IDs only this soon after it
- * started: two NXDN48 SACCH superframes (2 x 4 frames x 80 ms = 640 ms), the
- * longest wait for a complete superframe VCALL when tuning in mid-call.
+ * started: three NXDN48 SACCH superframes (3 x 4 frames x 80 ms = 960 ms).
+ * Tuned in mid-superframe, the next complete superframe ends up to 5 frames
+ * (400 ms) after the call starts; one failed SACCH costs one superframe more
+ * (720 ms); the third superframe leaves margin. NXDN96 frames are 40 ms.
  */
-const NXDN_ADOPT_IDS_MS = 640
+const NXDN_ADOPT_IDS_MS = 960
 
 // --- D-Star Patterns ---
 /** D-Star sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -663,6 +665,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private nxdnVcallNext = false
 	/** VCALL unit IDs of the line being parsed (nxdnVcallIds). */
 	private nxdnLineIds: Record<string, string> | undefined = undefined
+	/** The call whose call_start was emitted (checkPendingCallEmission). */
+	private announcedCallId: string | undefined = undefined
 	/** The last dPMR ID print and when it was read (handleDpmrLine). */
 	private dpmrLastPrint: { print: string; at: number } | undefined = undefined
 	private linkDmrCc = new Map<string, { cc: number; at: number }>()
@@ -1099,6 +1103,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Promote pending call to active call
 		this.callState = this.pendingCall.state
 		this.pendingCall = null
+		this.announcedCallId = this.callState.callId
 
 		this.logger.info(
 			{
@@ -1700,20 +1705,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private handleProtocolLine(line: string, now: Date): DecoderOutput | null {
 		// A CRC-error line keeps the ongoing call alive but never sets identity,
 		// starts or switches a call, or marks one encrypted (run8 key-up garbage).
-		// Except a YSF frame whose FICH decoded: ysf.c checks each DCH on its
-		// own, prints a header's CSD1 "DST: … SRC: …" only when that DCH passed,
-		// and "DCH (CRC ERR)" for a failed CSD2 after it. The passed block's
-		// callsign is the call's; the line's link stays unverified (crcErr).
+		// Except a YSF frame whose FICH decoded (the frame type is checked):
+		// ysf.c checks each DCH on its own and prints a header's CSD1 "DST: …
+		// SRC: …" only when that DCH passed, "DCH (CRC ERR)" for a failed one.
+		// A passed block's callsign is the call's; the line's link stays
+		// unverified (crcErr). A failed DCH starts or ends nothing by itself.
 		if (CRC_ERR.test(line)) {
 			// A D-STAR radio header is the next over even when its slow-data copy
 			// failed: end the ongoing one (no identity is taken from this line).
 			if (this.currentProtocol === "dstar" && DSTAR_HEADER_SYNC.test(line))
 				return this.endOngoing("dstar", now)
-			if (
-				this.currentProtocol === "ysf" &&
-				YSF_FICH_OK.test(line) &&
-				(ysfSourceCallsign(line) !== undefined || YSF_HEADER_FRAME.test(line))
-			)
+			if (this.currentProtocol === "ysf" && YSF_FICH_OK.test(line))
 				return this.handleYsfLine(line, now)
 			this.touchOngoing(now)
 			return null
@@ -2350,6 +2352,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// YSF doesn't have traditional TGT/SRC, but we track calls anyway
 		// Use 0 as placeholder for talkgroup/source
 		const callsign = ysfSourceCallsign(line)
+		// A terminator ends the ongoing over (handleTermination) and starts
+		// nothing: tuning in at the end of an over is not a call.
+		if (YSF_TERMINATOR.test(line)) {
+			const ongoing = this.callState ?? this.pendingCall?.state ?? null
+			if (ongoing?.protocol === "ysf") {
+				ongoing.lastUpdate = now
+				if (callsign !== undefined && ongoing.ysf?.callsign === undefined)
+					ongoing.ysf = { ...ongoing.ysf, callsign }
+			}
+			return null
+		}
 		// A header frame whose FICH decoded is a new over, even from the same
 		// station or with a failed CSD1.
 		const split = YSF_HEADER_FRAME.test(line)
@@ -2547,10 +2560,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					(targetCall.protocol === "p25p1" &&
 						SYNC_PATTERN.test(line) &&
 						P25_TDU.test(line) &&
-						!CRC_ERR.test(line))
+						!CRC_ERR.test(line) &&
+						// Another system's TDU on the channel does not end this call.
+						(targetCall.p25?.nac === undefined ||
+							this.lastP25Nac === undefined ||
+							targetCall.p25.nac === this.lastP25Nac))
 				break
 			case "ysf":
-				isTerminator = YSF_TERMINATOR.test(line) && !CRC_ERR.test(line)
+				// The FICH (TC FN:) is the frame-type check; a failed DCH is payload.
+				isTerminator = YSF_TERMINATOR.test(line)
 				break
 			case "nxdn48":
 			case "nxdn96":
@@ -2570,12 +2588,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				this.callState = this.pendingCall.state
 				this.pendingCall = null
 			}
-			this.recentlyTerminated = {
-				protocol: targetCall.protocol,
-				talkgroup: targetCall.talkgroup,
-				source: targetCall.source,
-				untilMs: now.getTime() + TERMINATOR_TRAILER_MS,
-			}
+			// The trailer ignores the terminator's own link control; YSF and
+			// D-STAR print none, and their next over may follow at once.
+			this.recentlyTerminated =
+				targetCall.protocol === "ysf" || targetCall.protocol === "dstar"
+					? null
+					: {
+							protocol: targetCall.protocol,
+							talkgroup: targetCall.talkgroup,
+							source: targetCall.source,
+							untilMs: now.getTime() + TERMINATOR_TRAILER_MS,
+						}
 			return this.endCall(now, false)
 		}
 
@@ -3049,9 +3072,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const minDuration = this.options.minCallDurationMs ?? MIN_CALL_DURATION_MS
 		const hasWeakMetadata =
 			(callInfo.talkgroup === 0 || callInfo.talkgroup === null) &&
-			(callInfo.source === 0 || callInfo.source === null)
+			(callInfo.source === 0 || callInfo.source === null) &&
+			callInfo.dstar?.my === undefined &&
+			callInfo.ysf?.callsign === undefined
+		// A call whose call_start went out always gets its call_end.
+		const announced = this.announcedCallId === callInfo.callId
 
-		if (duration < minDuration && hasWeakMetadata) {
+		if (duration < minDuration && hasWeakMetadata && !announced) {
 			callInfo.flags.falsePositiveSuppressed = true
 			this.logger.debug(
 				{ protocol: callInfo.protocol, duration },
