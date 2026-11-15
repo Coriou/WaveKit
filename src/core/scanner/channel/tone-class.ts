@@ -18,7 +18,8 @@
  *    (its energy under 300 Hz breaks the band test), so the tone need not win most blocks; the
  *    synthetic voices of the tests have no energy under 300 Hz and their tone wins every block,
  *    so 40 % and the 8-block gap are design margins for real speech, not measurements. (The
- *    bank's own `result()`, 60 % of all blocks, is not used for the same reason.)
+ *    bank's own `result()`, 60 % of all blocks, is not used for the same reason.) These two hold
+ *    for the file so far only: a finished file's check drops them (Whole file, below).
  * 2. A tone not stronger than any CTCSS encoder's: the tone band's RMS over the blocks the tone
  *    won (where the line holds most of the band), read as deviation at the tone's frequency
  *    through the chain's calibration, at most TONE_CLASS_MAX_DEVIATION_HZ. This only rejects a

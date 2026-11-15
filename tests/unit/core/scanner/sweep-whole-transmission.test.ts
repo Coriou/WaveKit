@@ -37,6 +37,7 @@ afterEach(async () => {
 async function sweep(
 	emitters: Emitter[],
 	logger?: Parameters<typeof qualificationWorld>[0]["logger"],
+	settle?: { recorderClockStepMs?: number },
 ) {
 	const w = qualificationWorld({
 		centreHz: CENTRE_HZ,
@@ -45,6 +46,7 @@ async function sweep(
 		// Each chunk's work lands at the same chunk on every run: unsettled, a loaded host's
 		// recorder lagged its wall-clock turn budget and the finish fell past SETTLED_MS.
 		settled: true,
+		...(settle ?? {}),
 	})
 	stops.push(() => w.stop())
 	await w.service.start()
@@ -184,6 +186,12 @@ describe("a sweep records a transmission whole", () => {
 })
 
 describe("a voiced file discarded after its finish says why", () => {
+	/**
+	 * Settled (sweep-qualification-harness.ts): unsettled, a loaded host moved the store's
+	 * admission and finish against the sample clock, so the decision fell outside the advance
+	 * and these failed on some runs whatever the recorder's code.
+	 */
+	const SETTLE = {}
 	const captureLog = () => {
 		const lines: Record<string, unknown>[] = []
 		const stream = new Writable({
@@ -202,6 +210,7 @@ describe("a voiced file discarded after its finish says why", () => {
 		const w = await sweep(
 			[{ hz: SIGNAL_HZ, kind: "voice", fromMs: 0, toMs: END_MS }],
 			logger,
+			SETTLE,
 		)
 		await w.advance(3_000)
 		expect(decisions(w).map(d => d.code)).toContain("voiced")
@@ -230,6 +239,7 @@ describe("a voiced file discarded after its finish says why", () => {
 		const w = await sweep(
 			[{ hz: SIGNAL_HZ, kind: "voice", fromMs: 0, toMs: 20_000 }],
 			logger,
+			SETTLE,
 		)
 		await w.advance(3_000)
 		const [discovery] = w.service.listDiscoveries({}).items

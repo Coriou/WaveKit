@@ -988,6 +988,46 @@ describe("tone-only files are checked again over the whole file", () => {
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 	}, 120_000)
 
+	it("a voiced shadow whose tone the voice masked past the gap rule, parked by a retune, is classed at its close by the whole-file check and written", async () => {
+		// The live check never classes it (a 3 s gap); the parked session's finished file does.
+		const h = lowHarness(SPEECH)
+		await h.feed(1, false)
+		const chunk = h.fs / 40
+		const onset = h.engine.liveEdge()
+		for (let i = 0; i < 8 * 40; i++) {
+			const at = (h.engine.liveEdge() - onset) / h.fs
+			h.src.setCtcss(at >= 1.5 && at < 4.5 ? null : 67)
+			h.engine.write(h.src.next(chunk, true))
+			const edge = h.engine.liveEdge()
+			if (edge - onset >= 0.1 * h.fs)
+				h.rec.track(input("o", snapshot("o", onset, edge, LOW), SHADOW))
+			await h.pump()
+		}
+		expect(codes(h)).toEqual(["shadow", "voiced"])
+		const end = h.engine.liveEdge()
+		h.engine.epoch = {
+			...h.engine.epoch,
+			epoch: h.engine.epoch.epoch + 1,
+			startSample: end,
+		}
+		await quiet(h, 0.3, h.src)
+		// Parked for its close, nothing written yet.
+		expect(h.rec.owns("o")).toBe(true)
+		expect(h.ops).toEqual([])
+		h.rec.closed(
+			"o",
+			snapshot("o", onset, end, LOW),
+			"epoch-changed",
+			NOT_ANALOG,
+		)
+		await quiet(h, 0.5, h.src)
+		await h.rec.idle()
+		expect(codes(h)).toEqual(["shadow", "voiced", "classed", "finalized"])
+		expect(h.ops.map(o => [o.outcome, o.cut])).toEqual([
+			["finalized", "epoch-changed"],
+		])
+	}, 120_000)
+
 	it("16 s of speech over the tone passes the whole-file check and is finalized", async () => {
 		const h = lowHarness(SPEECH)
 		await h.feed(1, false)

@@ -750,12 +750,12 @@ interface FileState {
 	ctcss: CtcssBank | null
 	/** The tone heard over this file (taken when it finished), reported once it is finalized. */
 	toneHz: number | null
-	/**
-	 * The stricter evidence classByTone needs (tone-class.ts); null once the file finished, when
-	 * its verdict is in `classTone`.
-	 */
+	/** The stricter evidence classByTone needs (tone-class.ts); null once the file finished. */
 	toneClass: ToneClassEvidence | null
-	/** The tone that classed this file's audio (ToneClassEvidence.result(true) at its finish), or null. */
+	/**
+	 * Its verdict at the finish (ToneClassEvidence.result(true), no share or gap rule): the tone
+	 * that classed this file's audio, or null. A file with one skips finishOrHold's content check.
+	 */
 	classTone: number | null
 	/** A tone-only session's roll-over file after one its tone classed: it carries that class. */
 	toneCarried: boolean
