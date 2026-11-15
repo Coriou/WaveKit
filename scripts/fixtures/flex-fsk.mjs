@@ -61,7 +61,8 @@ for (let bit = 0; bit < 21; bit++) {
 /** 32-bit FLEX codeword of 21 data bits. */
 export function flexCodeword(data21) {
 	let parity = 0
-	for (let bit = 0; bit < 21; bit++) if ((data21 >>> bit) & 1) parity ^= PARITY[bit]
+	for (let bit = 0; bit < 21; bit++)
+		if ((data21 >>> bit) & 1) parity ^= PARITY[bit]
 	let word = ((data21 & 0x1fffff) | (parity << 21)) >>> 0
 	let ones = 0
 	for (let x = word; x; x >>>= 1) ones += x & 1
@@ -82,7 +83,7 @@ export function flexPageWords({ capcode, message }) {
 	// First message word: header, then a signature character slot and two characters.
 	const body = []
 	const first = [chars.shift() ?? 0x03, chars.shift() ?? 0x03]
-	body.push((0x7f) | (first[0] << 7) | (first[1] << 14))
+	body.push(0x7f | (first[0] << 7) | (first[1] << 14))
 	while (chars.length)
 		body.push(
 			(chars.shift() ?? 0x03) |
@@ -130,7 +131,10 @@ export function flexFrameBits({ capcode, message, cycle = 0, frame = 0 }) {
 }
 
 /** FM deviation (Hz, 48 kHz) of one FLEX frame: +-4.8 kHz, 1600 baud. */
-export function flexFrequency(page, { deviationHz = 4800, rateHz = 48_000 } = {}) {
+export function flexFrequency(
+	page,
+	{ deviationHz = 4800, rateHz = 48_000 } = {},
+) {
 	return shapeFrequency(flexFrameBits(page), {
 		symbolRate: 1600,
 		rateHz,

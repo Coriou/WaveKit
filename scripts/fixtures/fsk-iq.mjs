@@ -206,21 +206,22 @@ export function fmAudioS16(freqHz, { rateHz = 48_000, gain = 2 } = {}) {
 /** Big-endian bits (0/1) of `value`, `width` bits wide (width <= 52). */
 export function bitsOf(value, width) {
 	const bits = []
-	for (let b = width - 1; b >= 0; b--)
-		bits.push(Math.floor(value / 2 ** b) % 2)
+	for (let b = width - 1; b >= 0; b--) bits.push(Math.floor(value / 2 ** b) % 2)
 	return bits
 }
 
 /** Bits (MSB first) of each byte. */
 export function bytesToBits(bytes) {
 	const bits = []
-	for (const byte of bytes) for (let b = 7; b >= 0; b--) bits.push((byte >> b) & 1)
+	for (const byte of bytes)
+		for (let b = 7; b >= 0; b--) bits.push((byte >> b) & 1)
 	return bits
 }
 
 /** Dibits (0..3) of a bit array, first bit most significant. */
 export function bitsToDibits(bits) {
 	const out = []
-	for (let i = 0; i + 1 < bits.length; i += 2) out.push((bits[i] << 1) | bits[i + 1])
+	for (let i = 0; i + 1 < bits.length; i += 2)
+		out.push((bits[i] << 1) | bits[i + 1])
 	return out
 }

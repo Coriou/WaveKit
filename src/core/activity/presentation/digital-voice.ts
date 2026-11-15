@@ -37,6 +37,14 @@ const voicePayload = objectSchema({
 	ysf: z.object({ callsign: asString }).passthrough().nullish(),
 })
 
+/** dsd-fme protocols whose calls have no talkgroup or numeric source. */
+const NO_TALKGROUP_PROTOCOLS: ReadonlySet<string> = new Set([
+	"DSTAR",
+	"YSF",
+	"DPMR",
+	"PROVOICE",
+])
+
 function nestedNumber(
 	payload: Record<string, unknown>,
 	objectKey: string,
@@ -72,17 +80,19 @@ export function presentVoice(data: unknown): DecodePresentation | undefined {
 		typeof call.protocol === "string" ? call.protocol : undefined
 	const protocol =
 		protocolRaw === undefined ? undefined : safeProtocol(protocolRaw)
-	// D-STAR and YSF calls carry 0 as talkgroup and source placeholders.
 	const callsign =
-		nestedString(payload, "dstar", "my") ?? nestedString(payload, "ysf", "callsign")
+		nestedString(payload, "dstar", "my") ??
+		nestedString(payload, "ysf", "callsign")
 	const urCall = nestedString(payload, "dstar", "ur")
-	const talkgroupRaw = integerField(payload, "talkgroup")
-	const sourceRaw = integerField(payload, "source")
-	const talkgroup =
-		callsign !== undefined && talkgroupRaw === 0 ? undefined : talkgroupRaw
-	const source = callsign !== undefined && sourceRaw === 0 ? undefined : sourceRaw
 	const label =
 		protocolRaw === undefined ? "Voice" : protocolRaw.trim().toUpperCase()
+	// dsd-fme calls of protocols without talkgroups carry 0 / 0 placeholders.
+	const talkgroupRaw = integerField(payload, "talkgroup")
+	const sourceRaw = integerField(payload, "source")
+	const placeholders =
+		NO_TALKGROUP_PROTOCOLS.has(label) && talkgroupRaw === 0 && sourceRaw === 0
+	const talkgroup = placeholders ? undefined : talkgroupRaw
+	const source = placeholders ? undefined : sourceRaw
 	let titleText = label === "" ? "Voice" : label
 	if (talkgroup !== undefined) titleText += ` TG ${talkgroup}`
 	if (source !== undefined) titleText += ` from ${source}`

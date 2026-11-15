@@ -59,7 +59,8 @@ function rsGenerator(tt) {
 	for (let i = 2; i <= nk; i++) {
 		gg[i] = 1
 		for (let j = i - 1; j > 0; j--)
-			gg[j] = gg[j] !== 0 ? gg[j - 1] ^ ALPHA[(INDEX[gg[j]] + i) % 63] : gg[j - 1]
+			gg[j] =
+				gg[j] !== 0 ? gg[j - 1] ^ ALPHA[(INDEX[gg[j]] + i) % 63] : gg[j - 1]
 		gg[0] = ALPHA[(INDEX[gg[0]] + i) % 63]
 	}
 	return gg.map(g => INDEX[g])
@@ -76,7 +77,8 @@ export function rs63Parity(data, tt) {
 		const feedback = INDEX[full[i] ^ bb[nk - 1]]
 		if (feedback !== -1) {
 			for (let j = nk - 1; j > 0; j--)
-				bb[j] = gg[j] !== -1 ? bb[j - 1] ^ ALPHA[(gg[j] + feedback) % 63] : bb[j - 1]
+				bb[j] =
+					gg[j] !== -1 ? bb[j - 1] ^ ALPHA[(gg[j] + feedback) % 63] : bb[j - 1]
 			bb[0] = ALPHA[(gg[0] + feedback) % 63]
 		} else {
 			for (let j = nk - 1; j > 0; j--) bb[j] = bb[j - 1]
@@ -92,7 +94,11 @@ export function hamming1063(hex) {
 	const data = bitsOf(hex, 6)
 	for (let p = 0; p < 16; p++) {
 		const word = [...data, ...bitsOf(p, 4)]
-		if (HAMMING_H.every(row => [...row].reduce((s, h, i) => s ^ (Number(h) & word[i]), 0) === 0))
+		if (
+			HAMMING_H.every(
+				row => [...row].reduce((s, h, i) => s ^ (Number(h) & word[i]), 0) === 0,
+			)
+		)
 			return bitsOf(p, 4)
 	}
 	throw new Error("no Hamming(10,6,3) parity")
@@ -125,7 +131,10 @@ function withStatus(data, status = 2) {
 }
 
 function frameHead(nac, duid) {
-	return [...bitsToDibits(bitsOf(FRAME_SYNC, 48)), ...bitsToDibits(p25NidBits(nac, duid))]
+	return [
+		...bitsToDibits(bitsOf(FRAME_SYNC, 48)),
+		...bitsToDibits(p25NidBits(nac, duid)),
+	]
 }
 
 /** Dibits of one LDU1 (864 dibits, status included). */
@@ -133,7 +142,9 @@ export function p25Ldu1Dibits({ nac, lc, seed = 7 }) {
 	const random = rng(seed)
 	const noise = n => [...Array(n)].map(() => Math.floor(random() * 4))
 	const lcBits = lc.flatMap(b => bitsOf(b, 8))
-	const hexData = [...Array(12)].map((_, w) => parseInt(lcBits.slice(66 - 6 * w, 72 - 6 * w).join(""), 2))
+	const hexData = [...Array(12)].map((_, w) =>
+		parseInt(lcBits.slice(66 - 6 * w, 72 - 6 * w).join(""), 2),
+	)
 	const hexParity = rs63Parity(hexData, 6)
 	const word = hex => bitsToDibits([...bitsOf(hex, 6), ...hamming1063(hex)])
 	const data = frameHead(nac, DUID.ldu1)
@@ -147,7 +158,8 @@ export function p25Ldu1Dibits({ nac, lc, seed = 7 }) {
 	]
 	for (let v = 1; v <= 9; v++) {
 		data.push(...noise(72))
-		if (v >= 2 && v <= 7) for (const hex of groups[v - 2]) data.push(...word(hex))
+		if (v >= 2 && v <= 7)
+			for (const hex of groups[v - 2]) data.push(...word(hex))
 		if (v === 8) data.push(...noise(16))
 	}
 	const frame = withStatus(data)
@@ -168,7 +180,8 @@ export function p25CallDibits({ nac, talkgroup, source, ldus = 4 }) {
 	// Pre-roll: 0.1 s of seeded random dibits for the receiver's symbol timing.
 	const random = rng(3)
 	const out = [...Array(480)].map(() => Math.floor(random() * 4))
-	for (let i = 0; i < ldus; i++) out.push(...p25Ldu1Dibits({ nac, lc, seed: 7 + i }))
+	for (let i = 0; i < ldus; i++)
+		out.push(...p25Ldu1Dibits({ nac, lc, seed: 7 + i }))
 	out.push(...p25TduDibits({ nac }))
 	return out
 }

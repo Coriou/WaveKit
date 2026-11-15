@@ -63,22 +63,36 @@ export function nxdnCrc12(bits) {
 function channelBits(info, puncture, perm) {
 	const coded = conv5Dibits(info).flatMap(d => [d >> 1, d & 1])
 	const kept = coded.filter((_, i) => puncture[i % puncture.length])
-	if (kept.length !== perm.length) throw new Error(`channel is ${kept.length} bits`)
+	if (kept.length !== perm.length)
+		throw new Error(`channel is ${kept.length} bits`)
 	return perm.map(p => kept[p])
 }
 const PERM_12_5 = [...Array(60)].map((_, i) => 12 * (i % 5) + Math.floor(i / 5))
-const PERM_16_9 = [...Array(144)].map((_, i) => 16 * (i % 9) + Math.floor(i / 9))
+const PERM_16_9 = [...Array(144)].map(
+	(_, i) => 16 * (i % 9) + Math.floor(i / 9),
+)
 
 /** The 60 on-air SACCH bits. */
 export function nxdnSacchBits({ sf, ran, fragment }) {
 	const info = [...bitsOf(sf, 2), ...bitsOf(ran, 6), ...fragment]
-	return channelBits([...info, ...nxdnCrc6(info)], [1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0], PERM_12_5)
+	return channelBits(
+		[...info, ...nxdnCrc6(info)],
+		[1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0],
+		PERM_12_5,
+	)
 }
 
 /** The 80 bits of a VCALL message (group call, no cipher). */
-export function nxdnVcallBits({ source, destination, callType = 1, voiceOption = 0 }) {
+export function nxdnVcallBits({
+	source,
+	destination,
+	callType = 1,
+	voiceOption = 0,
+}) {
 	return [
-		0, 0, ...bitsOf(0x01, 6), // flags, message type VCALL
+		0,
+		0,
+		...bitsOf(0x01, 6), // flags, message type VCALL
 		...bitsOf(0, 8), // CC option
 		...bitsOf(callType, 3),
 		...bitsOf(voiceOption, 5),
@@ -92,7 +106,11 @@ export function nxdnVcallBits({ source, destination, callType = 1, voiceOption =
 
 /** The 144 on-air FACCH1 bits of an 80-bit message. */
 export function nxdnFacch1Bits(message) {
-	return channelBits([...message, ...nxdnCrc12(message)], [1, 0, 1, 1], PERM_16_9)
+	return channelBits(
+		[...message, ...nxdnCrc12(message)],
+		[1, 0, 1, 1],
+		PERM_16_9,
+	)
 }
 
 /** PN95 dibit scrambler (nxdn_pn95_dibit_scrambler, seed 0xE4). */
@@ -119,14 +137,21 @@ function frame(lich, sacch, halves) {
 }
 
 /** Dibits of one call: pre-roll, FACCH1 VCALL frames, then voice superframes. */
-export function nxdnCallDibits({ ran, source, destination, superframes = 2, seed = 9 }) {
+export function nxdnCallDibits({
+	ran,
+	source,
+	destination,
+	superframes = 2,
+	seed = 9,
+}) {
 	const random = rng(seed)
 	const noise = n => [...Array(n)].map(() => (random() < 0.5 ? 0 : 1))
 	const vcall = nxdnVcallBits({ source, destination })
 	const facch = nxdnFacch1Bits(vcall)
 	const out = [...Array(480)].map(() => Math.floor(random() * 4))
 	const idle = nxdnSacchBits({ sf: 3, ran, fragment: Array(18).fill(0) })
-	for (let i = 0; i < 3; i++) out.push(...frame(LICH_FACCH1, idle, [...facch, ...facch]))
+	for (let i = 0; i < 3; i++)
+		out.push(...frame(LICH_FACCH1, idle, [...facch, ...facch]))
 	for (let s = 0; s < superframes; s++)
 		for (let part = 0; part < 4; part++) {
 			const sacch = nxdnSacchBits({
@@ -146,7 +171,10 @@ export const NXDN_RATES = {
 }
 
 /** FM deviation (Hz, 48 kHz) of one NXDN call. */
-export function nxdnFrequency(call, { variant = "nxdn48", rateHz = 48_000 } = {}) {
+export function nxdnFrequency(
+	call,
+	{ variant = "nxdn48", rateHz = 48_000 } = {},
+) {
 	const { symbolRate, outerHz } = NXDN_RATES[variant]
 	const inner = outerHz / 3
 	return shapeFrequency(nxdnCallDibits(call), {

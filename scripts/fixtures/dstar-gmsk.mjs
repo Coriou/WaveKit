@@ -37,12 +37,29 @@ const HEADER_SYNC = [1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0]
 const DATA_SYNC = [...Array(10)].map((_, i) => (i % 2 ? 0 : 1))
 DATA_SYNC.push(1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0)
 
-const lsbBits = bytes => bytes.flatMap(b => [...Array(8)].map((_, i) => (b >> i) & 1))
+const lsbBits = bytes =>
+	bytes.flatMap(b => [...Array(8)].map((_, i) => (b >> i) & 1))
 
 /** The 41 header bytes, FCS included. */
-export function dstarHeaderBytes({ rpt2, rpt1, ur, my, suffix = "", flags = [0, 0, 0] }) {
-	const field = (text, width) => [...Buffer.from(text.padEnd(width, " ").slice(0, width), "latin1")]
-	const bytes = [...flags, ...field(rpt2, 8), ...field(rpt1, 8), ...field(ur, 8), ...field(my, 8), ...field(suffix, 4)]
+export function dstarHeaderBytes({
+	rpt2,
+	rpt1,
+	ur,
+	my,
+	suffix = "",
+	flags = [0, 0, 0],
+}) {
+	const field = (text, width) => [
+		...Buffer.from(text.padEnd(width, " ").slice(0, width), "latin1"),
+	]
+	const bytes = [
+		...flags,
+		...field(rpt2, 8),
+		...field(rpt1, 8),
+		...field(ur, 8),
+		...field(my, 8),
+		...field(suffix, 4),
+	]
 	const fcs = ax25Fcs(bytes)
 	bytes.push(fcs & 0xff, fcs >>> 8)
 	return bytes
@@ -98,7 +115,10 @@ export function dstarBits(header, { superframes = 3 } = {}) {
 }
 
 /** FM deviation (Hz, 48 kHz) of one D-STAR transmission. */
-export function dstarFrequency(header, { superframes = 3, deviationHz = 1200, rateHz = 48_000 } = {}) {
+export function dstarFrequency(
+	header,
+	{ superframes = 3, deviationHz = 1200, rateHz = 48_000 } = {},
+) {
 	return shapeFrequency(dstarBits(header, { superframes }), {
 		symbolRate: 4800,
 		rateHz,

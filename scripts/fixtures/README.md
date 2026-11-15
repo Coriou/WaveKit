@@ -48,3 +48,24 @@ bandwidth.
 it. It then FM-modulates the audio at 3 kHz peak deviation into 1.024 Msps, at +200 kHz
 (centre 144.6 MHz, channel 144.8 MHz) or at 0 Hz. Last, it adds noise at the stated
 CNR, measured in 12.5 kHz.
+
+## Bit-level frame generators (JavaScript)
+
+These modules write no files; the chain tests call them. Each builds one valid
+transmission at the bit level (sync, framing, CRC/FEC, interleaving, scrambling)
+with made-up identities, and `fsk-iq.mjs` turns its symbols into FM deviation and
+cu8 IQ at any rate and offset, with seeded noise. Voice payloads are seeded noise.
+
+| Module           | Transmission                                                    | Checked against                |
+| ---------------- | --------------------------------------------------------------- | ------------------------------ |
+| `aprs-afsk.mjs`  | AX.25 UI frame, Bell 202 AFSK                                   | multimon-ng AFSK1200, direwolf |
+| `flex-fsk.mjs`   | FLEX 1600/2 frame, one alphanumeric page                        | multimon-ng `demod_flex.c`     |
+| `dstar-gmsk.mjs` | D-STAR radio header and voice superframes with slow-data header | dsd-fme `dstar*.c`             |
+| `p25-c4fm.mjs`   | P25 phase 1 LDU1 frames (group voice LC) and TDU                | dsd-fme `p25p1_*.c`            |
+| `ysf-c4fm.mjs`   | YSF header, V/D type 2 frames and terminator                    | dsd-fme `ysf.c`                |
+| `nxdn-4fsk.mjs`  | NXDN48/96 FACCH1 VCALL frames and voice SACCH superframes       | dsd-fme `nxdn_*.c`             |
+| `dpmr-4fsk.mjs`  | dPMR voice superframes (IDs, channel code)                      | dsd-fme `dpmr_voice.c`         |
+
+`tests/integration/synthetic-frames.test.ts` runs them through wavekit-chan and the
+adapters' production command lines; `tests/mocks/fixtures/synthetic/` holds the
+decoder output they produced, replayed by `tests/unit/decoders/synthetic-decoder-lines.test.ts`.

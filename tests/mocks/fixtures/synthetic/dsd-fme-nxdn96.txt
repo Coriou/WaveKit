@@ -1,0 +1,21 @@
+# dsd-fme -i /dev/stdin -fn -o null: output for scripts/fixtures/nxdn-4fsk.mjs (synthetic, see synthetic-frames.test.ts)
+00:54:03 Sync: NXDN96  RDCH [36mData  [0m[36m        [0mPF 1/4
+00:54:03 Sync: NXDN96  RDCH [36mData  [0m[36m        [0mPF 1/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=1234 - Dst/TG=5678 [0m
+00:54:03 Sync: NXDN96  RDCH [32mVoice [0m[36m RAN 05 [0mPF 1/4
+00:54:03 Sync: NXDN96  RDCH [32mVoice [0m[36m RAN 05 [0mPF 2/4
+00:54:03 Sync: NXDN96  RDCH [32mVoice [0m[36m RAN 05 [0mPF 3/4
+00:54:03 Sync: NXDN96  RDCH [32mVoice [0m[36m RAN 05 [0mPF 4/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=1234 - Dst/TG=5678 [0m
+00:54:03 Sync: NXDN96  RDCH [32mVoice [0m[36m RAN 05 [0mPF 1/4
+00:54:03 Sync: NXDN96  RDCH [32mVoice [0m[36m RAN 05 [0mPF 2/4
+00:54:03 Sync: NXDN96  RDCH [32mVoice [0m[36m RAN 05 [0mPF 3/4
+00:54:03 Sync: NXDN96  RDCH [32mVoice [0m[36m RAN 05 [0mPF 4/4[33m VCALL[0m[32m
+ Group Call - Half Duplex 4800bps/EHR (00) - Src=1234 - Dst/TG=5678 [0m
+
+End of /dev/stdin
+
+Total audio errors: 91
+Total header errors: 0
+Total irrecoverable header errors: 0
+Exiting.

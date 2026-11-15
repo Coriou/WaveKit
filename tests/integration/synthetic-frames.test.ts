@@ -27,6 +27,7 @@ import { join, resolve } from "node:path"
 import pino from "pino"
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import { aprsFrequency } from "../../scripts/fixtures/aprs-afsk.mjs"
+import { dpmrFrequency } from "../../scripts/fixtures/dpmr-4fsk.mjs"
 import { dstarFrequency } from "../../scripts/fixtures/dstar-gmsk.mjs"
 import { flexFrequency } from "../../scripts/fixtures/flex-fsk.mjs"
 import { fmCu8 } from "../../scripts/fixtures/fsk-iq.mjs"
@@ -35,19 +36,26 @@ import { p25Frequency } from "../../scripts/fixtures/p25-c4fm.mjs"
 import { ysfFrequency } from "../../scripts/fixtures/ysf-c4fm.mjs"
 import { presentDecoderOutput } from "../../src/core/activity/presentation/registry.js"
 import type { DecoderChannelRequest } from "../../src/core/channelizer/types.js"
-import { createInterpreterState } from "../../src/core/scanner/probes/confirm/double-match.js"
-import { interpretDsdFme } from "../../src/core/scanner/probes/confirm/dsd-fme.js"
-import { interpretMultimon } from "../../src/core/scanner/probes/confirm/multimon.js"
-import type { DecodeEvidence } from "../../src/core/scanner/types.js"
 import {
 	DirewolfDecoder,
 	extractKissFrames,
 	parseKissFrame,
 } from "../../src/decoders/builtin/direwolf.js"
 import { DsdFmeDecoder } from "../../src/decoders/builtin/dsd-fme.js"
-import type { DsdFmeLinkLine } from "../../src/decoders/builtin/dsd-fme-link.js"
 import { MultimonDecoder } from "../../src/decoders/builtin/multimon-ng.js"
-import type { DecoderOutput } from "../../src/decoders/types.js"
+import {
+	SYNTHETIC,
+	checkDpmr,
+	checkDstar,
+	checkFlex,
+	checkNxdn,
+	checkP25,
+	checkYsf,
+	dsdInterpreter,
+	multimonInterpreter,
+	replay,
+} from "../helpers/synthetic-decodes.js"
+import type { Interpreter, Replay } from "../helpers/synthetic-decodes.js"
 import {
 	HAS_CSDR,
 	SYNTH_IMAGE,
@@ -69,10 +77,6 @@ const CAPTURES = [
 	{ rateHz: 2_400_000, offsetHz: -287_500 },
 ] as const
 const T0 = Date.UTC(2026, 0, 2, 3, 4, 5)
-/** Spacing of replayed decoder lines: about one frame each. */
-const LINE_MS = 100
-/** DsdFmeDecoder's call timer period (CALL_TIMEOUT_CHECK_INTERVAL_MS). */
-const TIMER_MS = 500
 
 const CRATE = resolve(__dirname, "../../native/wavekit-chan")
 const chanUnavailable =
@@ -84,9 +88,6 @@ let TARGET = ""
 let ROOT = ""
 
 const silent = pino({ level: "silent" })
-type Feed = (line: string) => void
-const feeder = (decoder: object): Feed => line =>
-	(decoder as { handleOutputLine(line: string): void }).handleOutputLine(line)
 
 class DsdProbe extends DsdFmeDecoder {
 	pipeline(): string {
@@ -109,75 +110,6 @@ class DirewolfProbe extends DirewolfDecoder {
 	}
 }
 
-interface Replay {
-	outputs: DecoderOutput[]
-	links: DsdFmeLinkLine[]
-	evidence: DecodeEvidence[]
-	lines: string[]
-}
-
-/** Feeds decoder lines on a fake clock, then idles past the call timeout. */
-function replay(
-	lines: string[],
-	decoder: DsdFmeDecoder | MultimonDecoder,
-	interpret: (out: DecoderOutput, link?: DsdFmeLinkLine) => DecodeEvidence[],
-): Replay {
-	const outputs: DecoderOutput[] = []
-	const links: DsdFmeLinkLine[] = []
-	const evidence: DecodeEvidence[] = []
-	decoder.on("output", (out: DecoderOutput) => {
-		outputs.push(out)
-		evidence.push(...interpret(out))
-	})
-	decoder.on("link", (line: DsdFmeLinkLine) => {
-		links.push(line)
-		evidence.push(...interpret(undefined as unknown as DecoderOutput, line))
-	})
-	const feed = feeder(decoder)
-	// dsd-fme's call_start/call_end timer (every 500 ms once started).
-	const timer = (
-		decoder as unknown as { checkCallTimeoutAsync?: () => void }
-	).checkCallTimeoutAsync?.bind(decoder)
-	let at = T0
-	let tick = T0 + TIMER_MS
-	const advance = (to: number) => {
-		for (; tick <= to; tick += TIMER_MS) {
-			vi.setSystemTime(tick)
-			timer?.()
-		}
-		vi.setSystemTime(to)
-	}
-	for (const line of lines) {
-		if (line.trim() === "") continue
-		at += LINE_MS
-		advance(at)
-		feed(line)
-	}
-	advance(at + 10_000)
-	return { outputs, links, evidence, lines }
-}
-
-function dsdInterpreter() {
-	const state = createInterpreterState({ epoch: 1, origin: "probe" })
-	return (out: DecoderOutput, link?: DsdFmeLinkLine) => {
-		if (link) return interpretDsdFme({ kind: "link", line: link }, state)
-		if (out.type !== "call_start" && out.type !== "call_end") return []
-		return interpretDsdFme(
-			{
-				kind: out.type,
-				at: out.timestamp.getTime(),
-				call: out.data as never,
-			},
-			state,
-		)
-	}
-}
-
-function multimonInterpreter() {
-	const state = createInterpreterState({ epoch: 1, origin: "probe" })
-	return (out: DecoderOutput) => (out ? interpretMultimon(out, state) : [])
-}
-
 type Path = "channel" | "raw"
 
 interface ChainCase {
@@ -191,10 +123,7 @@ interface ChainCase {
 	) => DsdProbe | MultimonProbe
 	/** The csdr head stages of the channel command, with the gain the JS head applies. */
 	channelHead: { stages: string[]; gain: number }
-	interpreter: () => (
-		out: DecoderOutput,
-		link?: DsdFmeLinkLine,
-	) => DecodeEvidence[]
+	interpreter: () => Interpreter
 	check: (result: Replay) => void
 }
 
@@ -207,7 +136,11 @@ const dsd = (path: Path, capture: (typeof CAPTURES)[number], mode: string) =>
 			options:
 				path === "channel"
 					? { mode, inputSampleRate: 48_000, inputIqFormat: "cf32" }
-					: { mode, inputSampleRate: capture.rateHz, offsetHz: capture.offsetHz },
+					: {
+							mode,
+							inputSampleRate: capture.rateHz,
+							offsetHz: capture.offsetHz,
+						},
 		},
 		silent,
 	)
@@ -221,181 +154,59 @@ const DSD_HEAD = {
 	gain: 2,
 }
 
-/** The decoder lines worth showing in a failure message. */
-const transcript = (r: Replay) =>
-	r.lines
-		.map(line => line.replace(/\x1b\[[0-9;]*m/g, ""))
-		.filter(line => /Sync:|FLEX|Group|Source|SRC/.test(line))
-		.concat(
-			r.outputs.map(o => `output ${o.type} ${JSON.stringify(o.data)}`),
-			r.links.map(l => `link ${JSON.stringify(l)}`),
-		)
-		.join("\n")
-
-const firstCall = (r: Replay) =>
-	r.outputs.find(o => o.type === "call_start")?.data as
-		| Record<string, unknown>
-		| undefined
-
-const nxdnCase = (variant: "nxdn48" | "nxdn96", mode: string): ChainCase => ({
-	name: `${variant.toUpperCase()} (dsd-fme mode ${mode})`,
-	tool: "dsd-fme",
-	freq: () => nxdnFrequency({ ran: 5, source: 1234, destination: 5678 }, { variant }),
-	adapter: (path, capture) => dsd(path, capture, mode),
-	channelHead: DSD_HEAD,
-	interpreter: dsdInterpreter,
-	check: r => {
-		// The RAN can follow the call start (VCALL first): the call's last event.
-		const end = r.outputs.find(o => o.type === "call_end")
-		expect(end?.data, transcript(r)).toMatchObject({
-			protocol: variant,
-			talkgroup: 5678,
-			source: 1234,
-			nxdn: { ran: 5 },
-		})
-		expect(r.links).toContainEqual(
-			expect.objectContaining({ protocol: "nxdn", ran: 5, verified: true }),
-		)
-		expect(r.links).toContainEqual(
-			expect.objectContaining({
-				protocol: "nxdn",
-				tg: "5678",
-				src: "1234",
-				verified: true,
-			}),
-		)
-		expect(r.evidence).toContainEqual(
-			expect.objectContaining({
-				identity: { kind: "nxdn-ran", value: "5" },
-			}),
-		)
-		const row = presentDecoderOutput(end!, "dsd-fme")
-		expect(row).toMatchObject({
-			title: `${variant.toUpperCase()} TG 5678 from 1234`,
-		})
-	},
-})
-
 const CASES: ChainCase[] = [
 	{
 		name: "D-STAR (dsd-fme auto, the catalogue default)",
 		tool: "dsd-fme",
-		freq: () =>
-			dstarFrequency({
-				rpt2: "DIRECT",
-				rpt1: "DIRECT",
-				ur: "CQCQCQ",
-				my: "N0CALL",
-				suffix: "TEST",
-			}),
+		freq: () => dstarFrequency(SYNTHETIC.dstar),
 		adapter: (path, capture) => dsd(path, capture, "auto"),
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,
-		check: r => {
-			const call = firstCall(r)
-			expect(call, transcript(r)).toMatchObject({
-				protocol: "dstar",
-				dstar: { my: "N0CALL", ur: "CQCQCQ", rpt1: "DIRECT", rpt2: "DIRECT" },
-			})
-			expect(r.links).toContainEqual(
-				expect.objectContaining({
-					protocol: "dstar",
-					callsign: "N0CALL",
-					verified: true,
-				}),
-			)
-			expect(r.evidence).toContainEqual(
-				expect.objectContaining({
-					protocol: "dstar",
-					identity: { kind: "dstar-call", value: "N0CALL" },
-				}),
-			)
-			const row = presentDecoderOutput(
-				r.outputs.find(o => o.type === "call_start")!,
-				"dsd-fme",
-			)
-			expect(row?.title).toContain("N0CALL")
-		},
+		check: checkDstar,
 	},
 	{
 		name: "YSF (dsd-fme auto, the catalogue default)",
 		tool: "dsd-fme",
-		freq: () => ysfFrequency({ dest: "ALL", src: "N0CALL", dgid: 21 }),
+		freq: () => ysfFrequency(SYNTHETIC.ysf),
 		adapter: (path, capture) => dsd(path, capture, "auto"),
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,
-		check: r => {
-			const call = firstCall(r)
-			expect(call, transcript(r)).toMatchObject({
-				protocol: "ysf",
-				ysf: { callsign: "N0CALL" },
-			})
-			expect(r.links).toContainEqual(
-				expect.objectContaining({
-					protocol: "ysf",
-					callsign: "N0CALL",
-					verified: true,
-				}),
-			)
-			expect(r.evidence).toContainEqual(
-				expect.objectContaining({
-					protocol: "ysf",
-					metadata: expect.objectContaining({ callsigns: ["N0CALL"] }),
-				}),
-			)
-			const row = presentDecoderOutput(
-				r.outputs.find(o => o.type === "call_start")!,
-				"dsd-fme",
-			)
-			expect(row?.title).toContain("N0CALL")
-		},
+		check: checkYsf,
 	},
 	{
 		name: "P25 phase 1 (dsd-fme auto, the catalogue default)",
 		tool: "dsd-fme",
-		freq: () => p25Frequency({ nac: 0x2a5, talkgroup: 4321, source: 1_234_567 }),
+		freq: () => p25Frequency(SYNTHETIC.p25),
 		adapter: (path, capture) => dsd(path, capture, "auto"),
 		channelHead: DSD_HEAD,
 		interpreter: dsdInterpreter,
-		check: r => {
-			const call = firstCall(r)
-			expect(call, transcript(r)).toMatchObject({
-				protocol: "p25p1",
-				talkgroup: 4321,
-				source: 1_234_567,
-				p25: { nac: "2A5" },
-			})
-			expect(r.links).toContainEqual(
-				expect.objectContaining({
-					protocol: "p25",
-					tg: "4321",
-					src: "1234567",
-					verified: true,
-				}),
-			)
-			expect(r.evidence).toContainEqual(
-				expect.objectContaining({
-					protocol: "p25p1",
-					metadata: expect.objectContaining({
-						talkgroups: ["4321"],
-						sources: ["1234567"],
-					}),
-				}),
-			)
-			const row = presentDecoderOutput(
-				r.outputs.find(o => o.type === "call_start")!,
-				"dsd-fme",
-			)
-			expect(row).toMatchObject({ title: "P25P1 TG 4321 from 1234567" })
-		},
+		check: checkP25,
 	},
-	nxdnCase("nxdn48", "nxdn48"),
-	nxdnCase("nxdn96", "nxdn"),
+	...(["nxdn48", "nxdn96"] as const).map(
+		(variant): ChainCase => ({
+			name: `${variant.toUpperCase()} (dsd-fme mode ${variant === "nxdn96" ? "nxdn" : variant})`,
+			tool: "dsd-fme",
+			freq: () => nxdnFrequency(SYNTHETIC.nxdn, { variant }),
+			adapter: (path, capture) =>
+				dsd(path, capture, variant === "nxdn96" ? "nxdn" : variant),
+			channelHead: DSD_HEAD,
+			interpreter: dsdInterpreter,
+			check: checkNxdn(variant),
+		}),
+	),
+	{
+		name: "dPMR (dsd-fme mode dpmr)",
+		tool: "dsd-fme",
+		freq: () => dpmrFrequency(SYNTHETIC.dpmr),
+		adapter: (path, capture) => dsd(path, capture, "dpmr"),
+		channelHead: DSD_HEAD,
+		interpreter: dsdInterpreter,
+		check: checkDpmr,
+	},
 	{
 		name: "FLEX (multimon-ng)",
 		tool: "multimon-ng",
-		freq: () =>
-			flexFrequency({ capcode: 1_234_567, message: "SYNTHETIC FLEX PAGE 42" }),
+		freq: () => flexFrequency(SYNTHETIC.flex),
 		adapter: (path, capture) =>
 			new MultimonProbe(
 				{
@@ -404,7 +215,11 @@ const CASES: ChainCase[] = [
 					enabled: true,
 					options:
 						path === "channel"
-							? { modes: ["FLEX"], inputSampleRate: 48_000, inputIqFormat: "cf32" }
+							? {
+									modes: ["FLEX"],
+									inputSampleRate: 48_000,
+									inputIqFormat: "cf32",
+								}
 							: {
 									modes: ["FLEX"],
 									inputSampleRate: capture.rateHz,
@@ -424,20 +239,7 @@ const CASES: ChainCase[] = [
 			gain: 3,
 		},
 		interpreter: multimonInterpreter,
-		check: r => {
-			const page = r.outputs.find(o => o.type === "message")
-			expect(page?.data, transcript(r)).toMatchObject({
-				protocol: "FLEX",
-				capcode: "001234567",
-				messageType: "ALN",
-				message: "SYNTHETIC FLEX PAGE 42",
-			})
-			expect(r.evidence).toContainEqual(
-				expect.objectContaining({ protocol: "flex" }),
-			)
-			const row = presentDecoderOutput(page!, "multimon-ng")
-			expect(row?.title).toContain("SYNTHETIC FLEX PAGE 42")
-		},
+		check: checkFlex,
 	},
 ]
 
@@ -458,7 +260,9 @@ describe("synthetic frames through the production decoder chains", () => {
 	for (const c of CASES)
 		for (const capture of CAPTURES) {
 			const label = `${c.name} at ${capture.rateHz / 1e6} Msps, ${capture.offsetHz} Hz`
-			it.skipIf(!toolAvailable(c.tool, ["-h"]) || chanUnavailable !== undefined)(
+			it.skipIf(
+				!toolAvailable(c.tool, ["-h"]) || chanUnavailable !== undefined,
+			)(
 				`${label}: channel path decodes`,
 				async () => {
 					const freq = c.freq()
@@ -469,12 +273,10 @@ describe("synthetic frames through the production decoder chains", () => {
 					})
 					// The production adapter (raw options, offsetHz) asks for its channel;
 					// the manager then feeds it channel IQ (inputIqFormat cf32).
-					const request = c
-						.adapter("raw", capture)
-						.getChannelRequest({
-							sampleRateHz: capture.rateHz,
-							centerHz: CENTRE_HZ,
-						}) as DecoderChannelRequest
+					const request = c.adapter("raw", capture).getChannelRequest({
+						sampleRateHz: capture.rateHz,
+						centerHz: CENTRE_HZ,
+					}) as DecoderChannelRequest
 					expect(request.centerHz).toBe(CENTRE_HZ + capture.offsetHz)
 					expect(request.outputRateHz).toBe(48_000)
 					const [cf32] = await channelize(
@@ -491,7 +293,10 @@ describe("synthetic frames through the production decoder chains", () => {
 					expect(stages.slice(0, soxAt)).toEqual(c.channelHead.stages)
 					const dir = workDir(ROOT, "chan")
 					const file = join(dir, "in")
-					writeFileSync(file, HAS_CSDR ? cf32! : csdrFmHead(cf32!, c.channelHead.gain))
+					writeFileSync(
+						file,
+						HAS_CSDR ? cf32! : csdrFmHead(cf32!, c.channelHead.gain),
+					)
 					const command = HAS_CSDR
 						? stages.join(" | ")
 						: stages.slice(soxAt).join(" | ")
@@ -554,7 +359,10 @@ describe("synthetic frames through the production decoder chains", () => {
 					id: "aprs-raw",
 					type: "direwolf",
 					enabled: true,
-					options: { inputSampleRate: capture.rateHz, offsetHz: capture.offsetHz },
+					options: {
+						inputSampleRate: capture.rateHz,
+						offsetHz: capture.offsetHz,
+					},
 				},
 				silent,
 			).getChannelRequest({

@@ -35,7 +35,9 @@ function address(text, last) {
 /** Frame bytes (no flags) of a UI frame, FCS included. */
 export function ax25UiFrame({ source, destination, path = [], info }) {
 	const calls = [destination, source, ...path]
-	const bytes = calls.flatMap((call, i) => address(call, i === calls.length - 1))
+	const bytes = calls.flatMap((call, i) =>
+		address(call, i === calls.length - 1),
+	)
 	bytes.push(0x03, 0xf0, ...Buffer.from(info, "latin1"))
 	const fcs = ax25Fcs(bytes)
 	bytes.push(fcs & 0xff, fcs >>> 8)
@@ -43,7 +45,10 @@ export function ax25UiFrame({ source, destination, path = [], info }) {
 }
 
 /** Line bits (after stuffing and NRZI) of `frames`, each between flags. */
-export function ax25LineBits(frames, { preambleFlags = 40, tailFlags = 4 } = {}) {
+export function ax25LineBits(
+	frames,
+	{ preambleFlags = 40, tailFlags = 4 } = {},
+) {
 	const raw = []
 	const flag = () => {
 		for (let b = 0; b < 8; b++) raw.push((0x7e >> b) & 1)

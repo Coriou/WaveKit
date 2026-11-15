@@ -23,7 +23,10 @@ const hostHas = (cmd: string, args: string[]) =>
 	spawnSync(cmd, args, { stdio: "ignore" }).error === undefined
 
 /** Whether `cmd` can run where commands run (always true in the image). */
-export function toolAvailable(cmd: string, args: string[] = ["--help"]): boolean {
+export function toolAvailable(
+	cmd: string,
+	args: string[] = ["--help"],
+): boolean {
 	return SYNTH_IMAGE !== "" || hostHas(cmd, args)
 }
 

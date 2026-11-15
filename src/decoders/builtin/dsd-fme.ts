@@ -260,6 +260,9 @@ function ysfSourceCallsign(line: string): string | undefined {
 	return CALLSIGN_FIELD.test(src) ? src : undefined
 }
 
+/** A dPMR called or calling ID print that is not "(CRC ERR)". */
+const DPMR_ID_PRINT = /\b(?:TG|Src)=[0-9*]{7}\b/
+
 // --- ProVoice Patterns ---
 /** ProVoice sync (reserved - protocol detection uses SYNC_PATTERN) */
 const _PROVOICE_HEAD = /\bSync:\s*[-+]ProVoice\b/i
@@ -1665,6 +1668,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				return this.handleDStarLine(line, now)
 			case "provoice":
 				return this.handleProVoiceLine(line, now)
+			case "dpmr":
+				return this.handleDpmrLine(line, now)
 			default:
 				// No protocol detected yet, try to extract metadata anyway
 				return this.handleUnknownProtocol(line, now)
@@ -1849,9 +1854,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				const lcw =
 					protocol === "p25p1" ? P25_LCW_VOICE.exec(line)?.groups : undefined
 				const idGroups =
-					lcw ??
-					P25_SRC_TG.exec(line)?.groups ??
-					P25P2_VCH.exec(line)?.groups
+					lcw ?? P25_SRC_TG.exec(line)?.groups ?? P25P2_VCH.exec(line)?.groups
 				const alg = ALG_ID.exec(line)?.groups?.["alg"]
 				if (nac === undefined && idGroups === undefined && alg === undefined)
 					return null
@@ -1878,9 +1881,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				const checkedRan = /\bRAN\s+(\d{2})\s+(?:FACCH2|UDCH)\b/.exec(line)?.[1]
 				const sacch = this.nxdnSacchLine(line, at)
 				const ran =
-					checkedRan ??
-					sacch.ran ??
-					NXDN_RAN.exec(line)?.groups?.["ran"]
+					checkedRan ?? sacch.ran ?? NXDN_RAN.exec(line)?.groups?.["ran"]
 				// The VCALL print is gated on its own CRC (NXDN_SRC_DST).
 				const vcall = NXDN_SRC_DST.exec(line)?.groups
 				const idGroups = vcall ?? NXDN_TGT_SRC.exec(line)?.groups
@@ -2162,7 +2163,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					: undefined
 
 		// Source and destination: the CRC-gated VCALL print, or the legacy one.
-		const ids = NXDN_SRC_DST.exec(line)?.groups ?? NXDN_TGT_SRC.exec(line)?.groups
+		const ids =
+			NXDN_SRC_DST.exec(line)?.groups ?? NXDN_TGT_SRC.exec(line)?.groups
 		const ongoing = this.callState ?? this.pendingCall?.state ?? null
 		if (ids) {
 			const tgt = parseInt(ids["tgt"] ?? "0", 10)
@@ -2312,6 +2314,23 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		return null
+	}
+
+	/**
+	 * dPMR voice: dpmr_voice.c prints " TG=0001234 Src=0005678 Channel
+	 * Code=05" after each FS2 pair, but marks an ID "OK" when its CRC failed
+	 * and two Hamming words merely looked correctable (a synthetic
+	 * acquisition printed a wrong Src that way). So the IDs stay out of the
+	 * call: a printed TG or Src only shows the protocol is being decoded.
+	 */
+	private handleDpmrLine(line: string, now: Date): DecoderOutput | null {
+		if (!DPMR_ID_PRINT.test(line)) return null
+		const ongoing = this.callState ?? this.pendingCall?.state ?? null
+		if (ongoing?.protocol === "dpmr") {
+			ongoing.lastUpdate = now
+			return null
+		}
+		return this.processCallMetadata(now, "dpmr", 0, 0)
 	}
 
 	/**

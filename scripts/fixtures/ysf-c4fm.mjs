@@ -20,15 +20,30 @@
  *   destination in FN 0 and the source in FN 1.
  * Dibit 01 is +3 (+1800 Hz), 00 +1, 10 -1, 11 -3; raised-cosine shaping, roll-off 0.5.
  */
-import { bitsOf, bitsToDibits, bytesToBits, rng, shapeFrequency } from "./fsk-iq.mjs"
+import {
+	bitsOf,
+	bitsToDibits,
+	bytesToBits,
+	rng,
+	shapeFrequency,
+} from "./fsk-iq.mjs"
 
 const FRAME_SYNC = 0xd471c9634d
 
 // Golay_24_12_m_G parity columns (fec.c), one 12-bit row per data bit.
 const GOLAY_P = [
-	"110001110101", "011000111011", "111101101000", "011110110100",
-	"001111011010", "110110011001", "011011001101", "001101100111",
-	"110111000110", "101010010111", "100100111110", "100011101011",
+	"110001110101",
+	"011000111011",
+	"111101101000",
+	"011110110100",
+	"001111011010",
+	"110110011001",
+	"011011001101",
+	"001101100111",
+	"110111000110",
+	"101010010111",
+	"100100111110",
+	"100011101011",
 ]
 
 /** Golay(24,12) codeword bits (data first) of 12 data bits. */
@@ -80,29 +95,59 @@ export function conv5Dibits(bits) {
 /** Transmit order of a block deinterleaved by buf[j + rows i] = in[i + 20 j]. */
 function interleave(coded, rows) {
 	const out = new Array(coded.length)
-	for (let i = 0; i < 20; i++) for (let j = 0; j < rows; j++) out[i + 20 * j] = coded[j + rows * i]
+	for (let i = 0; i < 20; i++)
+		for (let j = 0; j < rows; j++) out[i + 20 * j] = coded[j + rows * i]
 	return out
 }
 
 /** The 100 FICH dibits. */
-export function ysfFichDibits({ fi, cm = 0, bn = 0, bt = 0, fn = 0, ft = 0, dt = 2, vp = 0, mr = 0, dgid = 0 }) {
+export function ysfFichDibits({
+	fi,
+	cm = 0,
+	bn = 0,
+	bt = 0,
+	fn = 0,
+	ft = 0,
+	dt = 2,
+	vp = 0,
+	mr = 0,
+	dgid = 0,
+}) {
 	const info = [
-		...bitsOf(fi, 2), ...bitsOf(0, 2), ...bitsOf(cm, 2), ...bitsOf(bn, 2), ...bitsOf(bt, 2),
-		...bitsOf(fn, 3), ...bitsOf(ft, 3), 0, 0, ...bitsOf(mr, 3), vp, ...bitsOf(dt, 2),
-		0, ...bitsOf(dgid, 7),
+		...bitsOf(fi, 2),
+		...bitsOf(0, 2),
+		...bitsOf(cm, 2),
+		...bitsOf(bn, 2),
+		...bitsOf(bt, 2),
+		...bitsOf(fn, 3),
+		...bitsOf(ft, 3),
+		0,
+		0,
+		...bitsOf(mr, 3),
+		vp,
+		...bitsOf(dt, 2),
+		0,
+		...bitsOf(dgid, 7),
 	]
 	const fich = [...info, ...ysfCrc(info)]
-	const golay = [0, 1, 2, 3].flatMap(i => golay2412(fich.slice(12 * i, 12 * i + 12)))
+	const golay = [0, 1, 2, 3].flatMap(i =>
+		golay2412(fich.slice(12 * i, 12 * i + 12)),
+	)
 	return interleave(conv5Dibits(golay), 5)
 }
 
 /** DCH dibits for `bytes` (20 bytes: 180 dibits, 20 x 9; 10 bytes: 100 dibits, 20 x 5). */
 function dchDibits(bytes) {
 	const data = bytesToBits(bytes).map((bit, i) => bit ^ PN[i])
-	return interleave(conv5Dibits([...data, ...ysfCrc(data)]), bytes.length === 20 ? 9 : 5)
+	return interleave(
+		conv5Dibits([...data, ...ysfCrc(data)]),
+		bytes.length === 20 ? 9 : 5,
+	)
 }
 
-const callsign = text => [...Buffer.from(text.padEnd(10, " ").slice(0, 10), "latin1")]
+const callsign = text => [
+	...Buffer.from(text.padEnd(10, " ").slice(0, 10), "latin1"),
+]
 
 function frame(fich, payload) {
 	const out = [...bitsToDibits(bitsOf(FRAME_SYNC, 40)), ...fich, ...payload]
@@ -142,7 +187,8 @@ export function ysfCallDibits({ dest, src, dgid = 0, frames = 7 }) {
 	// The receiver settles its symbol levels on the first frame: send the header twice.
 	out.push(...ysfHeaderDibits({ fi: 0, dest, src, dgid }))
 	out.push(...ysfHeaderDibits({ fi: 0, dest, src, dgid }))
-	for (let fn = 0; fn < frames; fn++) out.push(...ysfVd2Dibits({ fn, ft: frames - 1, dest, src, dgid }))
+	for (let fn = 0; fn < frames; fn++)
+		out.push(...ysfVd2Dibits({ fn, ft: frames - 1, dest, src, dgid }))
 	out.push(...ysfHeaderDibits({ fi: 2, dest, src, dgid }))
 	return out
 }
