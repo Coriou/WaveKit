@@ -686,6 +686,13 @@ Empty function-zero pages carry a `tone only` label; they remain stored events,
 with compact notice presentation in the web app. Message presentation budgets
 still apply to list fields and titles.
 
+Digital voice rows (`src/core/activity/presentation/digital-voice.ts`) are keyed
+by talkgroup. D-STAR and YSF calls have none: their rows are keyed
+`callsign:<MY / source>` and titled `DSTAR from N0CALL to CQCQCQ` or
+`YSF from N0CALL`, with the UR and repeater calls as fields. D-STAR, YSF, dPMR
+and ProVoice calls carry 0 / 0 as talkgroup and source placeholders, which the
+row omits.
+
 ### Aircraft identity and enrichment
 
 Two services name aircraft; `src/index.ts` wires them together.
