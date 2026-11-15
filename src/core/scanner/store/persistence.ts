@@ -29,6 +29,7 @@ import { join, resolve } from "node:path"
 import { z } from "zod"
 import { WaveKitError } from "../../../utils/errors.js"
 import {
+	BACKUP_INLINE_LINKS,
 	completeDeferredLinks,
 	ensurePreMigrationBackup,
 	hasPendingBackup,
@@ -705,6 +706,8 @@ export class ScannerPersistence {
 	}
 	/** A backup waits for its links (decided right after the first half): gates from then. */
 	private backupWaiting = false
+	/** BACKUP_INLINE_LINKS unless a test sets it (`backup.inlineLinks`). */
+	private readonly inlineLinks: number
 	private releaseLinksStarted: () => void = () => undefined
 	private readonly linksStarted = new Promise<void>(resolve => {
 		this.releaseLinksStarted = resolve
@@ -744,9 +747,17 @@ export class ScannerPersistence {
 		 * The pre-migration backup (state-backup.ts): `keepsFile`, the recording keep store outside
 		 * this directory, is copied into the backup; `statfs` and `link` are test seams.
 		 */
-		backup?: Pick<PreMigrationBackupOptions, "statfs" | "link" | "keepsFile">
+		backup?: Pick<
+			PreMigrationBackupOptions,
+			"statfs" | "link" | "keepsFile"
+		> & {
+			/** Recordings linked before the load at most (BACKUP_INLINE_LINKS by default). */
+			inlineLinks?: number
+		}
 	}) {
-		this.backupOptions = opts.backup ?? {}
+		const { inlineLinks, ...backup } = opts.backup ?? {}
+		this.backupOptions = backup
+		this.inlineLinks = inlineLinks ?? BACKUP_INLINE_LINKS
 		this.yieldTurn = opts.yieldTurn ?? yieldToEventLoop
 		this.loadSliceClock = opts.loadSliceClock ?? (() => deadlineSliceClock())
 		this.buildClock = opts.buildClock ?? (() => performance.now())
@@ -770,6 +781,13 @@ export class ScannerPersistence {
 				now: this.now,
 				...this.backupOptions,
 			})
+			// A small backup is completed now, before the state is read; a larger one after the
+			// start (BACKUP_INLINE_LINKS).
+			if (
+				this.backupOutcome.kind === "pending" &&
+				this.backupOutcome.linkFiles <= this.inlineLinks
+			)
+				await this.completeBackupLinks()
 			// Deletions wait from here, the load included (backupPending).
 			this.backupWaiting =
 				this.backupOutcome.kind === "pending" ||
@@ -802,6 +820,30 @@ export class ScannerPersistence {
 		}
 	}
 
+	/** The backup's second half; the outcome of this run's pending backup follows it. */
+	private async completeBackupLinks(): Promise<void> {
+		const outcomes = await completeDeferredLinks({
+			dir: this.root,
+			logger: this.log,
+			now: this.now,
+			...(this.backupOptions.statfs
+				? { statfs: this.backupOptions.statfs }
+				: {}),
+			...(this.backupOptions.link ? { link: this.backupOptions.link } : {}),
+		})
+		const own = this.backupOutcome
+		if (own?.kind !== "pending") return
+		const done = outcomes.find(
+			o => o.kind !== "none" && o.fromFormat === own.fromFormat,
+		)
+		this.backupOutcome = done ?? {
+			kind: "skipped",
+			reason: "copy-failed",
+			fromFormat: own.fromFormat,
+			toFormat: own.toFormat,
+		}
+	}
+
 	private async startBackupLinks(): Promise<void> {
 		if (this.backupLinks) return
 		// Only a backup waiting for its links starts the second half (and gates deletions).
@@ -813,28 +855,7 @@ export class ScannerPersistence {
 		}
 		// The recordings' links (one per recording) never hold up the start: this run's pending
 		// backup, or one an earlier start left pending, is completed in the background.
-		this.backupLinks = completeDeferredLinks({
-			dir: this.root,
-			logger: this.log,
-			now: this.now,
-			...(this.backupOptions.statfs
-				? { statfs: this.backupOptions.statfs }
-				: {}),
-			...(this.backupOptions.link ? { link: this.backupOptions.link } : {}),
-		})
-			.then(outcomes => {
-				const own = this.backupOutcome
-				if (own?.kind !== "pending") return
-				const done = outcomes.find(
-					o => o.kind !== "none" && o.fromFormat === own.fromFormat,
-				)
-				this.backupOutcome = done ?? {
-					kind: "skipped",
-					reason: "copy-failed",
-					fromFormat: own.fromFormat,
-					toFormat: own.toFormat,
-				}
-			})
+		this.backupLinks = this.completeBackupLinks()
 			.catch((err: unknown) =>
 				this.log.warn({ err }, "Completing the scanner state backup failed"),
 			)

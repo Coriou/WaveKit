@@ -128,6 +128,13 @@ export const BACKUP_RECEIPT_COUNT_MAX = 1_000_000
  * exactly these, so no clock decides what belongs to the backup. Removed before the rename.
  */
 export const BACKUP_LINKS_FILE = "links.json"
+/**
+ * Recordings a backup links before the state is read instead of after the start: 256. At the
+ * slowest rate measured (10,000 links in 30 s on a loaded virtual disk, 3 ms each) that holds the
+ * start at most 256 x 3 ms = 0.77 s, as before the halves existed; a larger backup defers them
+ * (ScannerPersistence.load), so the start never waits on one link per recording at scale.
+ */
+export const BACKUP_INLINE_LINKS = 256
 /** Folder inside a backup for files from outside the state directory (the keep store). */
 export const BACKUP_OUTSIDE_DIR = "outside"
 /**

@@ -16,6 +16,7 @@ import { join } from "node:path"
 import {
 	BACKUP_EXPIRY_CLEAN_LOADS,
 	BACKUP_EXPIRY_MS,
+	BACKUP_INLINE_LINKS,
 	BACKUP_LINKS_FILE,
 	BACKUP_MAX_KEPT,
 	BACKUP_MIN_FREE_BYTES,
@@ -373,11 +374,13 @@ describe("pre-migration backup of scanner state", () => {
 
 	it("ScannerPersistence.load backs up before reading, once per instance", async () => {
 		await seedState()
+		// Deferred whatever its size (a backup of BACKUP_INLINE_LINKS or fewer links completes
+		// before the load reads the state, see below).
 		const p = new ScannerPersistence({
 			dir,
 			logger,
 			now: () => NOW,
-			backup: { statfs: roomy },
+			backup: { statfs: roomy, inlineLinks: 0 },
 		})
 		expect(p.preMigrationBackup()).toBeNull()
 		await p.load()
@@ -414,6 +417,46 @@ describe("pre-migration backup of scanner state", () => {
 		})
 		// No backup waiting: nothing is gated.
 		expect(again.backupPending()).toBeNull()
+	})
+
+	it("a backup of at most BACKUP_INLINE_LINKS recordings is completed before the load reads the state", async () => {
+		expect(BACKUP_INLINE_LINKS).toBe(256)
+		await seedState()
+		const at = new ScannerPersistence({
+			dir,
+			logger,
+			now: () => NOW,
+			backup: { statfs: roomy, inlineLinks: 1 },
+		})
+		await at.load()
+		// One link, at the bound: in place when the load returns, nothing gated.
+		expect(at.preMigrationBackup()).toMatchObject({
+			kind: "taken",
+			linkedFiles: 1,
+		})
+		expect(at.backupPending()).toBeNull()
+		expect(await backups()).toEqual([`pre-unmarked.${NOW}`])
+	})
+
+	it("past BACKUP_INLINE_LINKS the links are deferred after the load", async () => {
+		await seedState()
+		await writeFile(join(dir, "recordings", "d_1", "b.wav"), AUDIO)
+		const past = new ScannerPersistence({
+			dir,
+			logger,
+			now: () => NOW,
+			backup: { statfs: roomy, inlineLinks: 1 },
+		})
+		await past.load()
+		expect(past.preMigrationBackup()).toMatchObject({
+			kind: "pending",
+			linkFiles: 2,
+		})
+		await past.backupSettled()
+		expect(past.preMigrationBackup()).toMatchObject({
+			kind: "taken",
+			linkedFiles: 2,
+		})
 	})
 
 	it("an upgrade, a downgrade and the next upgrade each keep the copy that undoes them", async () => {
