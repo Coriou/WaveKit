@@ -1,0 +1,13 @@
+# dsd-fme ed1d1d6 (core image) -fm output for scripts/fixtures/dpmr-4fsk.mjs, raw 1.024 Msps path (synthetic); sox wrote onto one line
+03:37:01 Sync: +dPMR  dPMR Frame Sync 2
+ TG=(CRC ERR) Src=(CRC ERR) Channel Code =(CRC ERR)
+03:37:01 Sync: +dPMR  dPMR Frame Sync 2
+ TG=(CRC ERR) Src=0150707 Channel Code=05
+03:37:01 Sync: +dPMR  dPMR Frame Sync 2
+ TG=(CRC ERR) Src=0150707 Channel Code=05
+03:37:01 Sync: +dPMR  dPMR Frame Sync 2
+ TG=(CRC ERR) Src=0005678 Channel Code=05
+03:37:01 Sync: +dPMR  dPMR Frame Sync 2
+ TG=0001234 Src=0005678 Channel Code=05sox WARN rate: rate clipped 194 samples; decrease volume?
+03:37:01 Sync: +dPMR  dPMR Frame Sync 2
+ TG=0001234 Src=0005678 Channel Code=05
