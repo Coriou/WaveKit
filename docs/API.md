@@ -954,7 +954,10 @@ applies) says why, each with a closed `code`, fixed `message` text and the `fix`
   A job takes its ended state first and then stops its probes, puts the tuner back (waiting up to
   1 second for the source to show the restored tuning) and only then releases the decoders, which
   can take a few seconds; a job that ended within 30 seconds still accounts for the hold, which
-  reads as `sweep-suspends-decoders` meanwhile.
+  reads as `sweep-suspends-decoders` meanwhile. The 30 seconds run from the job's `updatedAt`,
+  which a later write after its end can bump: that only extends them. A job deleted during that
+  teardown (about a second) has no row left, so its hold can briefly read as
+  `sweep-hold-without-job` until the decoders are released.
 - `recorder-refusal-streak` (`warn`): the wideband analog recorder has kept no file and started
   no recording that went on (a recording that started and then failed with one of the codes
   below does not count as started) for over 5 minutes while refusing candidates with a code an
@@ -964,15 +967,20 @@ applies) says why, each with a closed `code`, fixed `message` text and the `fix`
   `discarded:buffer-full`), no two of them in a row more than 5 minutes apart and the newest at
   most 5 minutes old. `refused:tuning` counts only while its source's tuning is unproven
   (`tuningUnproven` on [`GET /api/sources`](#get-apisources)): the recorder also refuses a
-  snapshot from before a retune with it. `refused:slots` counts only while no recording runs
-  (`recorder.sessions` empty on `GET /api/scanner`): with one running, every slot is busy
-  recording, which is no fault. Classification outcomes (`refused:not-analog`,
+  snapshot from before a retune with it. `refused:slots` counts only while no recording runs on
+  its source (no `recorder.sessions` entry with that `sourceId` on `GET /api/scanner`): with one
+  running, every slot is busy recording, which is no fault. Classification outcomes (`refused:not-analog`,
   `discarded:unvoiced`, ...) and `refused:record-disabled` (recording turned off on the job, an
   operator's choice) never make a streak. `fix` is the call for the newest code; `streak` is the
   same object as on [`GET /api/scanner/recorder/decisions`](#get-apiscannerrecorderdecisions).
-  Exactly 5 minutes does not raise it; any longer does. While a recording that started since has
-  no outcome yet, `streak.pending` is true and it does not raise: if that recording then fails
-  with one of the codes, the streak goes on from its first refusal; any other end breaks it.
+  Exactly 5 minutes does not raise it; any longer does. A recording's outcome is its terminal
+  decision (`finalized`, `refused:*`, `discarded:*`), never a step such as `classed` or `voiced`.
+  While a recording that started has no outcome yet (still recording, or done and waiting for its
+  store receipt), `streak.pending` is true: it neither breaks the streak nor ends it, and it holds
+  back only a raise the streak would first earn while it runs (it started within 5 minutes of the
+  streak's start, or before it), never one already earned before it started. If that recording
+  then fails with one of the codes, the streak goes on from its first refusal; any other end
+  breaks it, including one whose start already rolled out of `recent`.
 
 `load` holds the CPU and event-loop figures of the shared
 [`GET /api/diagnostics`](#get-apidiagnostics) sample: status reuses the newest sample when it

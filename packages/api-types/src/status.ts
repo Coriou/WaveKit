@@ -207,9 +207,11 @@ export interface RecorderRefusalStreak {
 	 */
 	raisesStatus: boolean
 	/**
-	 * A session the recorder started has no outcome yet while it holds a session: it may be
-	 * recording, so the streak does not raise until that session ends (a blocking end continues it,
-	 * any other end breaks it).
+	 * A session the recorder started has no terminal decision yet (`finalized`, `refused:*`,
+	 * `discarded:*`; progress codes such as `classed` or `voiced` are none): it may be recording.
+	 * It neither breaks nor ends the streak, and holds back only a raise the streak would first
+	 * earn while it runs (started within `raiseAfterMs` of `since`, or before it), never one already
+	 * earned. A blocking end continues the streak, any other end breaks it.
 	 */
 	pending: boolean
 	fix: string

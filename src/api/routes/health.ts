@@ -506,7 +506,10 @@ export const SWEEP_RELEASE_GRACE_MS = 30_000
  * The sources a scanner job may still hold, from the compact job rows: a live job (starting,
  * running, holding, paused), or one that ended at most SWEEP_RELEASE_GRACE_MS ago (`updatedAt`,
  * set when it took its terminal state) and may still be releasing. An unreadable `updatedAt` on a
- * terminal row counts as still releasing (never guessed leaked).
+ * terminal row counts as still releasing (never guessed leaked). `updatedAt` can be bumped after
+ * the terminal state (a later write to the row), which only extends the grace. A job deleted during
+ * its ~1 s teardown leaves no row, so its hold can read as sweep-hold-without-job until the decoders
+ * are released.
  */
 export function liveScannerJobSources(
 	rows: readonly { state: string; sourceId: string; updatedAt?: string }[],
