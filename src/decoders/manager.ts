@@ -5935,15 +5935,17 @@ export class DecoderManager extends EventEmitter {
 			)
 				this.startMovedListening(state)
 			const cause: CapsRestartCause | null =
-				previous?.sampleRate !== caps.sampleRate
-					? "sample-rate"
-					: inputChanged
-						? "input-format"
-						: !passive
-							? "active-pipeline"
-							: state.channelStale
-								? "channel-stale"
-								: null
+				previous === undefined
+					? "input-format"
+					: previous.sampleRate !== caps.sampleRate
+						? "sample-rate"
+						: inputChanged
+							? "input-format"
+							: !passive
+								? "active-pipeline"
+								: state.channelStale
+									? "channel-stale"
+									: null
 			if (cause !== null) restartDecoders.set(decoderId, { state, cause })
 			else if (referenceMoved) {
 				// A reference move is not a new start: crash accounting survives it,
@@ -5994,8 +5996,14 @@ export class DecoderManager extends EventEmitter {
 				continue
 			}
 			if (state.intentionallyStopped) continue
-			// Only its channel was stale and something rewired it meanwhile.
-			if (planned.cause === "channel-stale" && !state.channelStale) continue
+			// Only its channel was stale and something rewired it meanwhile. Unwiring
+			// clears the flag too, so skip only a worker that is running or starting.
+			if (
+				planned.cause === "channel-stale" &&
+				!state.channelStale &&
+				(state.decoder.getStatus().running || state.processStartPending)
+			)
+				continue
 			if (state.channelStale || referenceRestarts.has(decoderId))
 				state.keepFailureAccounting = true
 			try {
