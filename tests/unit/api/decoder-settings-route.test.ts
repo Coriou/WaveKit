@@ -52,6 +52,7 @@ let denial: DeniedAdmission | undefined
 let authorize: ReturnType<typeof vi.fn>
 let getDecoder: ReturnType<typeof vi.fn>
 let running: boolean
+let statusExtra: Record<string, unknown>
 let logLines: string[]
 let app: FastifyInstance
 
@@ -71,6 +72,7 @@ beforeEach(async () => {
 	viewFn = vi.fn((id: string) => (id === "d" ? view : undefined))
 	denial = undefined
 	running = false
+	statusExtra = {}
 	authorize = vi.fn(() => denial)
 	getDecoder = vi.fn((id: string) =>
 		id === "d" || id === "probe" || id === "ghost" ? {} : undefined,
@@ -90,7 +92,7 @@ beforeEach(async () => {
 				id === "probe"
 					? { owner: "scanner" }
 					: id === "d"
-						? { owner: "config", running }
+						? { owner: "config", running, ...statusExtra }
 						: undefined,
 		} as unknown as DecoderRoutesOptions["decoderManager"],
 		settings: service(),
@@ -257,6 +259,48 @@ describe("protected PATCH", () => {
 			restartCall: "POST /api/decoders/d/restart",
 		})
 		expect(res.json().message).toContain("POST /api/decoders/d/restart")
+	})
+	it.each([
+		[{ health: "restarting" }],
+		[{ restartInFlight: true }],
+		[{ nextRestartAt: new Date(0) }],
+	])(
+		"a decoder backing off or restarting (%o) applies them at its supervised restart, no call named",
+		async extra => {
+			statusExtra = extra
+			const res = await patch({ options: { gain: 12 } })
+			expect(res.json()).toMatchObject({
+				restartRequired: false,
+				restartCall: null,
+				message:
+					"Saved; the decoder is restarting under supervision and applies them at its next restart",
+			})
+			expect(res.json().message).not.toContain("/start")
+		},
+	)
+	it.each([
+		[{ suspended: true }],
+		[{ efficiency: { detail: "cpu" } }],
+		[{ mode: "off" }],
+	])("a decoder held back (%o) is not told to start", async extra => {
+		statusExtra = extra
+		const res = await patch({ options: { gain: 12 } })
+		expect(res.json().message).toBe(
+			"Saved; the decoder is not running and applies them at its next start",
+		)
+	})
+	it("a disabled decoder is not told to start", async () => {
+		update.mockResolvedValueOnce({
+			...result,
+			settings: {
+				...result.settings,
+				enabled: { value: false, source: "settings" },
+			},
+		})
+		const res = await patch({ options: { gain: 12 } })
+		expect(res.json().message).toBe(
+			"Saved; the decoder is not running and applies them at its next start",
+		)
 	})
 	it("enabled alone on a running decoder needs no restart", async () => {
 		running = true

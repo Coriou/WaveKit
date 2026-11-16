@@ -138,6 +138,16 @@ describe("Tuner Routes", () => {
 		)
 	})
 
+	it("an unknown source's 404 never echoes the requested id", async () => {
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/tuner/probe-zz9",
+		})
+		expect(response.statusCode).toBe(404)
+		expect(response.body).not.toContain("probe-zz9")
+		expect(response.json().message).toContain("No tuner source has that id")
+	})
+
 	it("a source named status still answers its own state", async () => {
 		tunerController.getState.mockImplementation((sourceId: string) =>
 			sourceId === "status" ? { ...state, sourceId: "status" } : undefined,

@@ -279,7 +279,11 @@ access runtime has one opt-in rule for `local-http` deployments
 address. A remote peer gains nothing from it, a DNS-rebinding name is never a loopback
 Host, and Origin, CSRF and credential checks are unchanged. It is not set under
 `container-loopback`, where the peer address seen in the container cannot tell a local
-client from a remote one, and the core does not yet expose it as a configuration key.
+client from a remote one, and the core does not yet expose it as a configuration key;
+the runtime refuses it under any exposure but `local-http` (`ACCESS_CONFIG_INVALID`).
+Do not enable it behind a same-host reverse proxy either: the proxy forwards from a
+loopback peer, often with a loopback Host, so every client behind it would look local
+to this rule.
 
 The root policy runs before routes, documentation and CORS plugins. Only the exact
 credential-free `GET /health`, validated preflight and explicitly mounted exact
@@ -2305,7 +2309,8 @@ and `notApplied` say which, and with `restoreAfterS` no restore comes (reason `s
 ahead, send `preempt: true`, wait for the job to end, or cancel it (`POST /api/scanner/jobs/:id/cancel`).
 Pausing a job does not free the tuner: a paused job keeps its lease so that resume carries on at the
 same hop. The 409 then says so: `jobPaused: true`, `pauseReason` (for example `operator`), and a
-`message` that starts with the pause and names `"preempt": true`; with `preempt` the job stays paused. The separate routes below and the web app do not ask: they preempt as
+`message` of its own that names the pause and `"preempt": true`, says the job stays paused when
+preempted, and names its resume and cancel calls. The separate routes below and the web app do not ask: they preempt as
 they always have.
 
 With `preempt: true` and a lease held, the next frame takes the lease (`preempted-operator`), and the
@@ -3951,8 +3956,11 @@ pendingRestart, restartRequired, restartOptions, restartCall, message }`, where
 `changed` lists the keys whose effective value changed (`enabled` first, then
 options in descriptor order). `restartRequired` is true when the decoder is running
 and does not yet use the effective options; `restartCall` then names the call that
-applies them (`POST /api/decoders/<id>/restart`), else it is null. A stopped decoder
-applies them when it next starts. `restartOptions` lists the option keys this PATCH
+applies them (`POST /api/decoders/<id>/restart`), else it is null. A decoder that is not
+running applies them when it next starts: `message` names `POST /api/decoders/<id>/start`
+only for a stopped decoder that call would run; one restarting or backing off applies them
+at its next supervised restart, and one disabled, in mode `off`, suspended or
+efficiency-gated gets no call. `restartOptions` lists the option keys this PATCH
 changed. `enabled` and `mode` never need a restart. `message` says it in a sentence.
 
 Each patched key is validated with its own option schema, and the merged
@@ -4976,12 +4984,6 @@ Each returns the `ScanJob`. `resume` takes an optional body
 
 - from `paused(operator)` with the lease (no operator or relay write since
   the pause): resumes at the same hop;
-  Every 409 `SCANNER_TAKEOVER_REQUIRED` (create or resume) carries
-  `retryWith: {"takeover": true}`, the body field that makes the same call go ahead; on
-  `resume` its `message` ends by naming the call
-  (`POST /api/scanner/jobs/<id>/resume with the body {"takeover": true}`). A
-  `SCANNER_SOURCE_BUSY` has no `retryWith`: takeover does not help there.
-
 - from `paused(operator)` after an operator or relay write took the lease:
   re-acquires it. 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact` when
   the impact grew beyond what was consented and `takeover` is not set (the
@@ -5024,6 +5026,12 @@ Each returns the `ScanJob`. `resume` takes an optional body
   `paused(preempted-job)` whose holder ended meanwhile gets the lease, and a
   `paused(core-restart)` with a pending `resume.onBoot` restarts; any other waits for
   another resume. The `message` says which.
+
+Every 409 `SCANNER_TAKEOVER_REQUIRED` (create or resume) carries
+`retryWith: {"takeover": true}`, the body field that makes the same call go ahead; on
+`resume` its `message` ends by naming the call
+(`POST /api/scanner/jobs/<id>/resume with the body {"takeover": true}`). A
+`SCANNER_SOURCE_BUSY` has no `retryWith`: takeover does not help there.
 
 | Paused reason                                          | Source has no data                                                                                                                                                   | Source has data                                                        |
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |

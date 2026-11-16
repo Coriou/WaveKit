@@ -414,7 +414,15 @@ const tuneFailureSchema = {
  * design (an operator pause resumes at the same hop), so pausing never frees the tuner: the
  * message says so, and names the field and the calls that do.
  */
-function leaseHeldFacts(err: TunerLeaseHeldError): Record<string, unknown> {
+/**
+ * `midTune`: the refusal came between frames, so `applied` in the same answer says what was
+ * written; otherwise nothing was. Paused is read from the lease view's `reason` (non-null
+ * only while the job is paused): the view carries no job state of its own.
+ */
+function leaseHeldFacts(
+	err: TunerLeaseHeldError,
+	midTune = false,
+): Record<string, unknown> {
 	const { job } = err
 	const facts: Record<string, unknown> = {
 		jobId: job.jobId,
@@ -424,10 +432,15 @@ function leaseHeldFacts(err: TunerLeaseHeldError): Record<string, unknown> {
 		retryWith: { preempt: true },
 	}
 	if (job.reason === null) return facts
-	// Prepended to the controller's own refusal, which names the job and how to go ahead.
+	// The controller's own text says a preempted job stops; a paused one stays paused, so
+	// the paused case gets one message of its own rather than a prefix that contradicts it.
+	const named = job.name !== null ? ` "${job.name}"` : ""
+	const written = midTune
+		? "the tune stopped here: `applied` says what was written"
+		: "nothing was written"
 	return {
 		...facts,
-		message: `Job ${job.jobId} is paused (${job.reason}) and keeps the tuner: a paused job holds its lease so that resume carries on at the same hop, so pausing never frees the tuner. With "preempt": true it stays paused, and "preempted" in the answer says whether it comes back by itself. ${err.message}`,
+		message: `Scanner job ${job.jobId}${named} is paused (${job.reason}) and still holds this tuner, and ${written}. A paused job keeps its lease so that resume carries on at the same hop: pausing never frees the tuner. Send "preempt": true to take it: the job stays paused, and "preempted" in the answer says whether it resumes by itself or waits for POST /api/scanner/jobs/${job.jobId}/resume. Or cancel it with POST /api/scanner/jobs/${job.jobId}/cancel`,
 	}
 }
 
@@ -857,7 +870,8 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			const state = tunerController.getState(request.params.sourceId)
 			if (!state) {
 				// A source may be named "status", so the path stays a source id; a miss names
-				// the routes that answer instead (the configured ids are not request data).
+				// the routes that answer instead (the configured ids are not request data, and
+				// the requested id is never echoed).
 				const known = tunerController
 					.getAllStates()
 					.map(tuner => tuner.sourceId)
@@ -871,7 +885,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					message:
 						request.params.sourceId === "status"
 							? `No tuner source is named "status": the tuner status of every source is GET /api/tuner, one source's is GET /api/tuner/:sourceId, and GET /api/agent/status sums them up.${ids}`
-							: `Tuner source not found: ${request.params.sourceId}. GET /api/tuner lists every tuner with its sourceId.${ids}`,
+							: `No tuner source has that id. GET /api/tuner lists every tuner with its sourceId.${ids}`,
 					routes: TUNER_STATUS_ROUTES,
 					sourceIds: known,
 				})
@@ -1698,8 +1712,8 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 			notApplied: outcome.notApplied,
 			...(outcome.preempted ? { preempted: outcome.preempted } : {}),
 		})
-		const leaseFacts = (err: unknown) =>
-			err instanceof TunerLeaseHeldError ? leaseHeldFacts(err) : {}
+		const leaseFacts = (err: unknown, midTune = false) =>
+			err instanceof TunerLeaseHeldError ? leaseHeldFacts(err, midTune) : {}
 
 		// POST /api/tuner/:sourceId/tune - Rate, centre and gain in one call
 		fastify.post<{
@@ -1752,7 +1766,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 						return { ...outcome.state, ...tuneResult(outcome) }
 					return handleTunerError(reply, outcome.error, TUNE_EXPECTED, {
 						...tuneResult(outcome),
-						...leaseFacts(outcome.error),
+						...leaseFacts(outcome.error, true),
 						...(outcome.inFlight ? { inFlight: true } : {}),
 						...(outcome.state ? { state: outcome.state } : {}),
 						...(outcome.sourceVerdict

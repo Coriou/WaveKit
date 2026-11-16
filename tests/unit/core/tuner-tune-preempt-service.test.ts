@@ -381,8 +381,16 @@ describe("what the answer says about the job and the jobs behind it", () => {
 			pauseReason: "operator",
 			retryWith: { preempt: true },
 		})
-		expect(res.json().message).toContain(`Job ${job.id} is paused (operator)`)
-		expect(res.json().message).toContain('"preempt": true')
+		const message = res.json().message as string
+		expect(message).toContain(
+			`Scanner job ${job.id} "Night sweep" is paused (operator) and still holds this tuner, and nothing was written`,
+		)
+		expect(message).toContain('"preempt": true')
+		expect(message).toContain("the job stays paused")
+		expect(message).toContain(`POST /api/scanner/jobs/${job.id}/resume`)
+		// One message: nothing says a preempted paused job stops.
+		expect(message).not.toContain("the job stops")
+		expect(message).not.toContain("own resume rules apply")
 		expect(res.json().message).toContain(
 			`POST /api/scanner/jobs/${job.id}/cancel`,
 		)

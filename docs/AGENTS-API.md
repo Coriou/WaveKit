@@ -410,7 +410,9 @@ applies them:
 curl --fail-with-body --header "$AUTH" --request POST "$API_ORIGIN/api/decoders/$DECODER/restart"
 ```
 
-A stopped decoder applies them when it next starts; `enabled` and `mode` never need a restart.
+A decoder that is not running applies them when it next starts (one restarting or backing off, at
+its next supervised restart); `message` names the start call only when that call would run it.
+`enabled` and `mode` never need a restart.
 
 ## Read activity
 

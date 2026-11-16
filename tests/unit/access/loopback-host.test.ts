@@ -206,7 +206,14 @@ describe("the runtime passes the rule to every listener", () => {
 			await fs.rm(root, { recursive: true, force: true })
 	})
 
-	async function open(loopbackHostFromLoopbackPeer?: boolean) {
+	async function open(
+		loopbackHostFromLoopbackPeer?: boolean,
+		exposure:
+			| "local-http"
+			| "tls-termination"
+			| "container-loopback"
+			| null = "local-http",
+	) {
 		const root = await fs.mkdtemp(join(tmpdir(), "wavekit-loopback-host-"))
 		roots.push(root)
 		const directory = join(root, "private")
@@ -242,6 +249,7 @@ describe("the runtime passes the rule to every listener", () => {
 			...(loopbackHostFromLoopbackPeer === undefined
 				? {}
 				: { loopbackHostFromLoopbackPeer }),
+			...(exposure === null ? {} : { exposure }),
 		})
 		contexts.push(context)
 		return { context, machine }
@@ -298,5 +306,55 @@ describe("the runtime passes the rule to every listener", () => {
 		expect(
 			ask(context.api, "api", "localhost:9000", "127.0.0.1", machine),
 		).toMatchObject({ code: "HOST_FORBIDDEN" })
+	})
+
+	it.each(["tls-termination", "container-loopback", null] as const)(
+		"refuses the rule under exposure %s with ACCESS_CONFIG_INVALID",
+		async exposure => {
+			await expect(open(true, exposure)).rejects.toMatchObject({
+				code: "ACCESS_CONFIG_INVALID",
+			})
+		},
+	)
+
+	it("any exposure opens with the rule off", async () => {
+		for (const exposure of [
+			"tls-termination",
+			"container-loopback",
+			null,
+		] as const)
+			await expect(open(false, exposure)).resolves.toBeDefined()
+	})
+})
+
+describe("loopback Host spellings", () => {
+	it("admits an uppercase LOCALHOST:9000 from a loopback peer", async () => {
+		const p = await policy("api", true)
+		expect(
+			p.evaluate(request("api", "http", "LOCALHOST:9000", "127.0.0.1")).kind,
+		).toBe("authenticated")
+	})
+
+	it("rejects a trailing-dot localhost.:9000 with 400", async () => {
+		const p = await policy("api", true)
+		expect(
+			p.evaluate(request("api", "http", "localhost.:9000", "127.0.0.1")),
+		).toMatchObject({ kind: "deny", status: 400 })
+	})
+
+	it("refuses an IPv4-mapped [::ffff:127.0.0.1]:9000 Host", async () => {
+		const p = await policy("api", true)
+		expect(
+			p.evaluate(request("api", "http", "[::ffff:127.0.0.1]:9000", "127.0.0.1"))
+				.kind,
+		).toBe("deny")
+	})
+
+	it("refuses a loopback Host from an IPv4-mapped non-loopback peer", async () => {
+		const p = await policy("api", true)
+		for (const host of ["127.0.0.1:9000", "localhost:9000", "[::1]:9000"])
+			expect(
+				p.evaluate(request("api", "http", host, "::ffff:203.0.113.7")),
+			).toMatchObject({ kind: "deny", status: 403, code: "HOST_FORBIDDEN" })
 	})
 })
