@@ -32,6 +32,7 @@ import type {
 	DecoderRatePreviewItem,
 	DecoderTypeInfo,
 	DecoderStatus as ApiDecoderStatus,
+	DecoderSettingsUpdateResult,
 } from "@wavekit/api-types"
 import type { DecoderStatus as InternalDecoderStatus } from "../../decoders/types.js"
 import {
@@ -348,6 +349,40 @@ export interface DecoderRoutesOptions {
 /** WG8 req 2.2: `W/"n"`, `"n"` or bare `n` (station rules plus the weak form). */
 const IF_MATCH = /^(?:(?:W\/)?"(\d{1,19})"|(\d{1,19}))$/
 const PATCH_BODY_KEYS = new Set(["enabled", "options", "mode"])
+
+/**
+ * A settings PATCH says what it needs: options wait for the decoder's next start, so a running
+ * decoder needs `restartCall`; a stopped one applies them when it starts. `enabled` is autostart
+ * at boot and `mode` applies at once: neither needs a restart. `id` is a configured decoder id
+ * (the route found it), never request data.
+ */
+function withRestartAnswer(
+	id: string,
+	result: DecoderSettingsUpdateResult,
+	status: { running: boolean } | undefined,
+): DecoderSettingsUpdateResult {
+	const running = status?.running === true
+	const restartOptions = result.changed.filter(
+		key => key !== "enabled" && key !== "mode",
+	)
+	const restartRequired = result.pendingRestart && running
+	const restartCall = restartRequired
+		? `POST /api/decoders/${id}/restart`
+		: null
+	const keys = restartOptions.length > 0 ? restartOptions.join(", ") : null
+	const message = restartRequired
+		? `Saved; the running decoder still uses its old options${keys !== null ? ` (${keys} changed)` : ""}. ${restartCall} applies them`
+		: result.pendingRestart
+			? `Saved; the decoder is stopped and applies them when it next starts (POST /api/decoders/${id}/start)`
+			: "Saved; nothing waits for a restart"
+	return {
+		...result,
+		restartRequired,
+		restartOptions,
+		restartCall,
+		message,
+	}
+}
 
 function sendJson(reply: FastifyReply, status: number, body: unknown) {
 	return reply
@@ -1280,7 +1315,11 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 						body,
 						ifMatch === undefined ? undefined : { ifMatch },
 					)
-					return sendJson(reply, 200, result)
+					return sendJson(
+						reply,
+						200,
+						withRestartAnswer(id, result, decoderManager.getStatus(id)),
+					)
 				} catch (error) {
 					if (error instanceof DecoderSettingsError)
 						return sendJson(reply, error.statusCode, settingsErrorBody(error))

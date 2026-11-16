@@ -362,6 +362,56 @@ describe("what the answer says about the job and the jobs behind it", () => {
 		})
 	})
 
+	it("pausing keeps the lease: a tune without preempt is refused and the answer says what to send", async () => {
+		const h = await setup()
+		const job = await h.service.createJob(sweep(50, 300))
+		await h.running(job.id)
+		await h.service.pauseJob(job.id)
+		await settled(h.service)
+		// The measurement: an operator pause holds the lease (resume carries on at the same hop).
+		expect(h.service.tunerLeaseHolder("rtl")).toBe(job.id)
+		const before = h.frames.length
+		const res = await h.post({ frequencyHz: 120_000_000 })
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toMatchObject({
+			code: "TUNER_LEASE_HELD",
+			jobId: job.id,
+			jobName: "Night sweep",
+			jobPaused: true,
+			pauseReason: "operator",
+			retryWith: { preempt: true },
+		})
+		expect(res.json().message).toContain(`Job ${job.id} is paused (operator)`)
+		expect(res.json().message).toContain('"preempt": true')
+		expect(res.json().message).toContain(
+			`POST /api/scanner/jobs/${job.id}/cancel`,
+		)
+		expect(h.frames.slice(before)).toEqual([])
+		// What the answer named goes ahead, and the job stays paused.
+		const took = await h.post({ frequencyHz: 120_000_000, preempt: true })
+		expect(took.statusCode).toBe(200)
+		await settled(h.service)
+		expect(h.service.getJob(job.id)).toMatchObject({
+			state: "paused",
+			reason: "operator",
+		})
+	})
+
+	it("a running holder's refusal says it is not paused and names preempt", async () => {
+		const h = await setup()
+		const job = await h.service.createJob(sweep(50))
+		await h.running(job.id)
+		const res = await h.post({ frequencyHz: 120_000_000 })
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toMatchObject({
+			jobId: job.id,
+			jobPaused: false,
+			pauseReason: null,
+			retryWith: { preempt: true },
+		})
+		expect(res.json().message).toContain('Send "preempt": true')
+	})
+
 	it("names a waiting job that can take the tuner back, and only such a job", async () => {
 		const h = await setup()
 		const able = await h.service.createJob(sweep(30, 300))

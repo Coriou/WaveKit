@@ -209,6 +209,10 @@ it("enabled and options patches are byte-identical to before", async () => {
 						'"settings":{',
 					)
 		}
+		// The restart answer is appended last; the rest stays byte-identical.
+		const restart = `,"restartRequired":false,"restartOptions":${JSON.stringify(index === 0 ? [] : ["frequency"])},"restartCall":null,"message":"Saved; nothing waits for a restart"}`
+		expect(legacyBody.endsWith(restart)).toBe(true)
+		legacyBody = `${legacyBody.slice(0, -restart.length)}}`
 		expect(legacyBody).toBe(expected[index])
 		expect(response.headers["cache-control"]).toBe("no-store")
 	}

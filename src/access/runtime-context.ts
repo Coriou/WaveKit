@@ -26,6 +26,11 @@ export interface AccessRuntimeOptions {
 	readonly directory: string
 	readonly ownership: "single-host-pid-namespace"
 	readonly sessionCookieName?: string
+	/**
+	 * Every listener (API and audio) also admits a loopback Host from a loopback peer
+	 * (`AccessPolicyOptions.loopbackHostFromLoopbackPeer`). Only for `exposure: local-http`.
+	 */
+	readonly loopbackHostFromLoopbackPeer?: boolean
 	/** Shared boot observations; storage rechecks the current heartbeat. */
 	readonly lockWait?: LockWaitOptions
 	/** Parent logger; the session store logs through a "SessionStore" component logger. */
@@ -99,6 +104,7 @@ const optionsSchema = z
 			.max(64)
 			.regex(/^[A-Za-z0-9_-]+$/)
 			.default("wavekit_session"),
+		loopbackHostFromLoopbackPeer: z.boolean().optional(),
 		/** Parent logger for the session store's component logger. */
 		logger: z.custom<Logger>(isLogger).optional(),
 		lockWait: z.custom<LockWaitOptions>().optional(),
@@ -226,6 +232,8 @@ export async function openAccessRuntime(
 		const ownedStorage = storage
 		const common = {
 			allowedOrigins: bootstrap.allowedOrigins,
+			loopbackHostFromLoopbackPeer:
+				config.loopbackHostFromLoopbackPeer === true,
 			sessionCookieName: config.sessionCookieName,
 			machineSecretDigest: storage.machineSecretDigest(),
 			sessions,

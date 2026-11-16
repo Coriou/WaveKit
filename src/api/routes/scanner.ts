@@ -249,6 +249,10 @@ function sendError(
 			code: err.code,
 			message: err.message,
 			...(err.details ? { details: err.details } : {}),
+			// The one body field that makes the same call go ahead.
+			...(err.code === "SCANNER_TAKEOVER_REQUIRED"
+				? { retryWith: { takeover: true } }
+				: {}),
 		})
 	}
 	if (err instanceof ZodError) {
@@ -894,6 +898,21 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 						takeover: request.body?.takeover === true,
 					})
 				} catch (err) {
+					// The job exists (the service found it), so its id is no echo of request data.
+					if (
+						action === "resume" &&
+						err instanceof ScannerApiError &&
+						err.code === "SCANNER_TAKEOVER_REQUIRED"
+					)
+						return sendError(
+							reply,
+							new ScannerApiError(
+								`${err.message} Resend as POST /api/scanner/jobs/${request.params.id}/resume with the body {"takeover": true}.`,
+								err.code,
+								err.statusCode,
+								err.details,
+							),
+						)
 					return sendError(reply, err)
 				}
 			},

@@ -270,6 +270,17 @@ as under `local-http`. See
 See [protected deployment constraints](DOCKER-SETUP.md#protected-runtime-deployment)
 for required proxy, private-volume and probe checks.
 
+Each listener admits only the Host values in its own allowlist, so the API (HTTP and
+`/ws`) and the audio ports each want their own exact `host:port`, and a `localhost`
+spelling of an allowed `127.0.0.1` authority is refused with 403 `HOST_FORBIDDEN`. The
+access runtime has one opt-in rule for `local-http` deployments
+(`loopbackHostFromLoopbackPeer`): every listener then also admits a loopback Host
+(`127.0.0.1`, `localhost` or `[::1]`, any port) when the TCP peer itself is a loopback
+address. A remote peer gains nothing from it, a DNS-rebinding name is never a loopback
+Host, and Origin, CSRF and credential checks are unchanged. It is not set under
+`container-loopback`, where the peer address seen in the container cannot tell a local
+client from a remote one, and the core does not yet expose it as a configuration key.
+
 The root policy runs before routes, documentation and CORS plugins. Only the exact
 credential-free `GET /health`, validated preflight and explicitly mounted exact
 `GET`/`HEAD /api/access/bootstrap` are public; status, unknown
@@ -2214,6 +2225,12 @@ Get tuner state for a single source.
 curl http://localhost:9000/api/tuner/rtl-pi
 ```
 
+There is no `GET /api/tuner/status`: the path segment is a source id, so a source named
+`status` keeps working. For any id that is not a tuner source the answer is 404
+`TUNER_SOURCE_NOT_FOUND` with `routes` (`GET /api/tuner`, `GET /api/tuner/:sourceId`,
+`GET /api/agent/status`, the routes that carry tuner status) and `sourceIds`, the
+configured tuner source ids.
+
 #### POST /api/tuner/:sourceId/tune
 
 Set the rate, the centre and the gain in one call. The answer comes only when the source can be
@@ -2247,17 +2264,17 @@ IQ on its current connection, after any reconnect restore. As with every tuner r
 **Any failure after the settings were accepted** carries `usable`, `applied`, `notApplied` and
 `state`, so a partial tune is never silent:
 
-| Status | `code`                        | Meaning                                                                                                                                                                                                                                                                        |
-| ------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 503    | `TUNER_NOT_USABLE`            | The source was not usable within 18 s (or its feed is paused, which answers at once). `sourceVerdict` says why. `applied` can be non-empty: those settings were written and return with the source. `inFlight: true`: one was being written at the deadline and may still land |
-| 503    | `TUNER_TUNE_PARTIAL`          | The source is usable but shows other values, as after a `tuner.reconnectPolicy: reset` reconnect discards what was written                                                                                                                                                     |
-| 409    | `TUNER_TUNE_OVERRIDDEN`       | Another write changed the tuner during or after this tune, and it stands. The tune sends no further frame after it, temporary or not; `applied` says what stands. `state.lastChange` says who. No `Retry-After`: tuning again would overwrite that choice, so decide first     |
-| 503    | `SOURCE_DISCONNECTED`         | The source dropped during the writes; `applied` stops where it did                                                                                                                                                                                                             |
-| 409    | `TUNER_CONTROL_EXTERNAL`      | An external client has the tuner                                                                                                                                                                                                                                               |
-| 409    | `TUNER_LEASE_HELD`            | A scanner job holds the tuner's lease and the body has no `preempt: true`. `jobId` and `jobName` name it; nothing more was written, and `applied` says what stands. See [tune and a scanner job](#tune-and-a-scanner-job)                                                      |
-| 409    | `TUNER_TUNE_BUSY`             | One tune per source: another is running, or `restoreAfterS` while a restore is putting tuning back. It is not queued; retry when it answers. A tune without `restoreAfterS` during a restore ends the restore and queues behind it                                             |
-| 409    | `TUNER_RESTORE_PRIOR_UNKNOWN` | `restoreAfterS` with a setting whose prior value the core does not know (see `unknownFields`): nothing is written. Set it first, or tune without a restore                                                                                                                     |
-| 404    | `TUNER_SOURCE_NOT_FOUND`      | No tuner for this source                                                                                                                                                                                                                                                       |
+| Status | `code`                        | Meaning                                                                                                                                                                                                                                                                                                                                                    |
+| ------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 503    | `TUNER_NOT_USABLE`            | The source was not usable within 18 s (or its feed is paused, which answers at once). `sourceVerdict` says why. `applied` can be non-empty: those settings were written and return with the source. `inFlight: true`: one was being written at the deadline and may still land                                                                             |
+| 503    | `TUNER_TUNE_PARTIAL`          | The source is usable but shows other values, as after a `tuner.reconnectPolicy: reset` reconnect discards what was written                                                                                                                                                                                                                                 |
+| 409    | `TUNER_TUNE_OVERRIDDEN`       | Another write changed the tuner during or after this tune, and it stands. The tune sends no further frame after it, temporary or not; `applied` says what stands. `state.lastChange` says who. No `Retry-After`: tuning again would overwrite that choice, so decide first                                                                                 |
+| 503    | `SOURCE_DISCONNECTED`         | The source dropped during the writes; `applied` stops where it did                                                                                                                                                                                                                                                                                         |
+| 409    | `TUNER_CONTROL_EXTERNAL`      | An external client has the tuner                                                                                                                                                                                                                                                                                                                           |
+| 409    | `TUNER_LEASE_HELD`            | A scanner job holds the tuner's lease and the body has no `preempt: true`. `jobId` and `jobName` name it, `jobPaused` and `pauseReason` say whether it is paused, and `retryWith` is the body field that goes ahead (`{"preempt": true}`); nothing more was written, and `applied` says what stands. See [tune and a scanner job](#tune-and-a-scanner-job) |
+| 409    | `TUNER_TUNE_BUSY`             | One tune per source: another is running, or `restoreAfterS` while a restore is putting tuning back. It is not queued; retry when it answers. A tune without `restoreAfterS` during a restore ends the restore and queues behind it                                                                                                                         |
+| 409    | `TUNER_RESTORE_PRIOR_UNKNOWN` | `restoreAfterS` with a setting whose prior value the core does not know (see `unknownFields`): nothing is written. Set it first, or tune without a restore                                                                                                                                                                                                 |
+| 404    | `TUNER_SOURCE_NOT_FOUND`      | No tuner for this source                                                                                                                                                                                                                                                                                                                                   |
 
 503 answers carry `Retry-After: 1`. The 18 s is one command (9 s) plus one sample-rate recovery (9 s,
 [above](#tuner-commands-during-a-sample-rate-restart)). Waiting for a source that was already
@@ -2276,8 +2293,10 @@ lease cannot be read, the tune answers 409 `TUNER_LEASE_HELD` with `jobId` and `
 nothing. This is checked on arrival, when the tune's turn in the command queue comes, and before each
 frame. A lease that arrives between frames stops the tune there: what already went out stands, `applied`
 and `notApplied` say which, and with `restoreAfterS` no restore comes (reason `scanner-lease`). To go
-ahead, send `preempt: true`, wait for the job to end, or cancel it (`POST /api/scanner/jobs/:id/cancel`;
-pausing a job keeps its lease). The separate routes below and the web app do not ask: they preempt as
+ahead, send `preempt: true`, wait for the job to end, or cancel it (`POST /api/scanner/jobs/:id/cancel`).
+Pausing a job does not free the tuner: a paused job keeps its lease so that resume carries on at the
+same hop. The 409 then says so: `jobPaused: true`, `pauseReason` (for example `operator`), and a
+`message` that starts with the pause and names `"preempt": true`; with `preempt` the job stays paused. The separate routes below and the web app do not ask: they preempt as
 they always have.
 
 With `preempt: true` and a lease held, the next frame takes the lease (`preempted-operator`), and the
@@ -3919,8 +3938,13 @@ curl -X PATCH http://localhost:9000/api/decoders/dsd-main \
 ```
 
 200 `DecoderSettingsUpdateResult`: `{ settings, revision, changed,
-pendingRestart }`, where `changed` lists the keys whose effective value changed
-(`enabled` first, then options in descriptor order).
+pendingRestart, restartRequired, restartOptions, restartCall, message }`, where
+`changed` lists the keys whose effective value changed (`enabled` first, then
+options in descriptor order). `restartRequired` is true when the decoder is running
+and does not yet use the effective options; `restartCall` then names the call that
+applies them (`POST /api/decoders/<id>/restart`), else it is null. A stopped decoder
+applies them when it next starts. `restartOptions` lists the option keys this PATCH
+changed. `enabled` and `mode` never need a restart. `message` says it in a sentence.
 
 Each patched key is validated with its own option schema, and the merged
 effective options with the type's cross-key rules; a problem already present in
@@ -4943,6 +4967,12 @@ Each returns the `ScanJob`. `resume` takes an optional body
 
 - from `paused(operator)` with the lease (no operator or relay write since
   the pause): resumes at the same hop;
+  Every 409 `SCANNER_TAKEOVER_REQUIRED` (create or resume) carries
+  `retryWith: {"takeover": true}`, the body field that makes the same call go ahead; on
+  `resume` its `message` ends by naming the call
+  (`POST /api/scanner/jobs/<id>/resume with the body {"takeover": true}`). A
+  `SCANNER_SOURCE_BUSY` has no `retryWith`: takeover does not help there.
+
 - from `paused(operator)` after an operator or relay write took the lease:
   re-acquires it. 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact` when
   the impact grew beyond what was consented and `takeover` is not set (the

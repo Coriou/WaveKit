@@ -51,6 +51,7 @@ let viewFn: ReturnType<typeof vi.fn>
 let denial: DeniedAdmission | undefined
 let authorize: ReturnType<typeof vi.fn>
 let getDecoder: ReturnType<typeof vi.fn>
+let running: boolean
 let logLines: string[]
 let app: FastifyInstance
 
@@ -69,6 +70,7 @@ beforeEach(async () => {
 	update = vi.fn(async () => result)
 	viewFn = vi.fn((id: string) => (id === "d" ? view : undefined))
 	denial = undefined
+	running = false
 	authorize = vi.fn(() => denial)
 	getDecoder = vi.fn((id: string) =>
 		id === "d" || id === "probe" || id === "ghost" ? {} : undefined,
@@ -88,7 +90,7 @@ beforeEach(async () => {
 				id === "probe"
 					? { owner: "scanner" }
 					: id === "d"
-						? { owner: "config" }
+						? { owner: "config", running }
 						: undefined,
 		} as unknown as DecoderRoutesOptions["decoderManager"],
 		settings: service(),
@@ -233,9 +235,43 @@ describe("protected PATCH", () => {
 		const body = { enabled: null, options: { gain: 12 } }
 		const res = await patch(body)
 		expect(res.statusCode).toBe(200)
-		expect(res.json()).toEqual(result)
+		expect(res.json()).toEqual({
+			...result,
+			restartRequired: false,
+			restartOptions: ["gain"],
+			restartCall: null,
+			message:
+				"Saved; the decoder is stopped and applies them when it next starts (POST /api/decoders/d/start)",
+		})
 		expect(res.headers["cache-control"]).toBe("no-store")
 		expect(update).toHaveBeenCalledWith("d", body, undefined)
+	})
+	it("a running decoder whose options wait says restartRequired and names the call", async () => {
+		running = true
+		const res = await patch({ options: { gain: 12 } })
+		expect(res.statusCode).toBe(200)
+		expect(res.json()).toMatchObject({
+			pendingRestart: true,
+			restartRequired: true,
+			restartOptions: ["gain"],
+			restartCall: "POST /api/decoders/d/restart",
+		})
+		expect(res.json().message).toContain("POST /api/decoders/d/restart")
+	})
+	it("enabled alone on a running decoder needs no restart", async () => {
+		running = true
+		update.mockResolvedValueOnce({
+			...result,
+			changed: ["enabled"],
+			pendingRestart: false,
+		})
+		const res = await patch({ enabled: false })
+		expect(res.json()).toMatchObject({
+			restartRequired: false,
+			restartOptions: [],
+			restartCall: null,
+			message: "Saved; nothing waits for a restart",
+		})
 	})
 	it.each([
 		['W/"7"', 7],

@@ -214,6 +214,7 @@ describe("scanner routes", () => {
 			code: "SCANNER_TAKEOVER_REQUIRED",
 			message: "needs takeover",
 			details: { impact },
+			retryWith: { takeover: true },
 		})
 		await build({
 			createJob: vi.fn(() =>
@@ -618,11 +619,16 @@ describe("scanner routes", () => {
 				url: "/api/scanner/jobs/j_1/resume",
 			})
 			expect(res.statusCode).toBe(409)
+			const takeover = code === "SCANNER_TAKEOVER_REQUIRED"
 			expect(res.json()).toEqual({
 				error: "ScannerApiError",
 				code,
-				message,
+				// A needed takeover names the field and the exact call; nothing else changes.
+				message: takeover
+					? `${message} Resend as POST /api/scanner/jobs/j_1/resume with the body {"takeover": true}.`
+					: message,
 				details,
+				...(takeover ? { retryWith: { takeover: true } } : {}),
 			})
 			await app.close()
 		}

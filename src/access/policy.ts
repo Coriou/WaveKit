@@ -1,3 +1,4 @@
+import { isIP } from "node:net"
 import { ACCESS_PREFLIGHT_MAX_AGE_SECONDS } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
 import { normalizeAuthority, normalizeOrigin } from "./authority.js"
@@ -113,9 +114,24 @@ function validTarget(raw: string): boolean {
 	)
 }
 
+/** A normalized authority naming this machine's loopback: exact names only, any port. */
+function isLoopbackAuthority(authority: string): boolean {
+	const host = authority.slice(0, authority.lastIndexOf(":"))
+	return host === "127.0.0.1" || host === "localhost" || host === "[::1]"
+}
+
+/** The socket's own peer address (never a forwarded header): IPv4 127/8, ::1 or its mapped form. */
+function isLoopbackPeer(address: string): boolean {
+	const v4 = address.startsWith("::ffff:") ? address.slice(7) : address
+	if (address === "::1") return true
+	if (isIP(v4) !== 4) return false
+	return v4.split(".", 1)[0] === "127"
+}
+
 /** Pure admission boundary. Adapters must apply headers and attach session leases. */
 export class AccessPolicy {
 	#authorities: Set<string>
+	#loopbackHosts: boolean
 	#origins: Set<string>
 	#scheme: "http" | "https"
 	#cookieName: string
@@ -157,6 +173,7 @@ export class AccessPolicy {
 				"ACCESS_CONFIG_INVALID",
 			)
 		this.#authorities = new Set(authorities as string[])
+		this.#loopbackHosts = options.loopbackHostFromLoopbackPeer === true
 		this.#origins = new Set(origins as string[])
 		this.#scheme = config.listenerScheme
 		this.#cookieName = config.sessionCookieName
@@ -248,7 +265,15 @@ export class AccessPolicy {
 		const authority =
 			host === undefined ? null : normalizeAuthority(host, this.#scheme)
 		if (!authority) return deny(400, "MALFORMED_REQUEST")
-		if (!this.#authorities.has(authority)) return deny(403, "HOST_FORBIDDEN")
+		if (
+			!this.#authorities.has(authority) &&
+			!(
+				this.#loopbackHosts &&
+				isLoopbackAuthority(authority) &&
+				isLoopbackPeer(input.remoteAddress)
+			)
+		)
+			return deny(403, "HOST_FORBIDDEN")
 		if (!validTarget(input.rawTarget)) return deny(400, "MALFORMED_REQUEST")
 		if (values.get("authorization")?.includes(","))
 			return deny(400, "MALFORMED_REQUEST")

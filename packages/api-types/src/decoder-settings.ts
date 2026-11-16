@@ -92,6 +92,18 @@ export interface DecoderSettingsUpdateResult {
 	/** Keys whose effective value changed: "enabled" first, then options in descriptor order. */
 	changed: string[]
 	pendingRestart: boolean
+	/**
+	 * Set by the route: true while the running decoder does not yet use the effective options
+	 * (the same fact as `pendingRestart`, for a stopped decoder false: its next start applies
+	 * them). The PATCH itself never restarts anything.
+	 */
+	restartRequired?: boolean
+	/** Option keys whose effective value this PATCH changed, in descriptor order: they apply at the next start. */
+	restartOptions?: string[]
+	/** The call that applies them, e.g. "POST /api/decoders/<id>/restart"; null when none is needed. */
+	restartCall?: string | null
+	/** What happens to this PATCH, in a sentence. */
+	message?: string
 }
 
 export type DecoderSettingsErrorCode =

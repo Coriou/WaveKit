@@ -101,6 +101,55 @@ describe("Tuner Routes", () => {
 		expect(body.code).toBe("TUNER_SOURCE_NOT_FOUND")
 	})
 
+	it("GET /api/tuner/status is a 404 that names the routes with tuner status", async () => {
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/tuner/status",
+		})
+		expect(response.statusCode).toBe(404)
+		const body = response.json<{
+			code: string
+			message: string
+			routes: string[]
+			sourceIds: string[]
+		}>()
+		expect(body.code).toBe("TUNER_SOURCE_NOT_FOUND")
+		expect(body.message).toContain('No tuner source is named "status"')
+		expect(body.message).toContain("GET /api/tuner")
+		expect(body.routes).toEqual([
+			"GET /api/tuner",
+			"GET /api/tuner/:sourceId",
+			"GET /api/agent/status",
+		])
+		expect(body.sourceIds).toEqual(["rtl-1"])
+	})
+
+	it("an unknown source's 404 lists the configured ids", async () => {
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/tuner/unknown",
+		})
+		expect(response.json()).toMatchObject({
+			code: "TUNER_SOURCE_NOT_FOUND",
+			sourceIds: ["rtl-1"],
+		})
+		expect(response.json().message).toContain(
+			"GET /api/tuner lists every tuner",
+		)
+	})
+
+	it("a source named status still answers its own state", async () => {
+		tunerController.getState.mockImplementation((sourceId: string) =>
+			sourceId === "status" ? { ...state, sourceId: "status" } : undefined,
+		)
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/tuner/status",
+		})
+		expect(response.statusCode).toBe(200)
+		expect(response.json()).toMatchObject({ sourceId: "status" })
+	})
+
 	it("POST /api/tuner/:sourceId/frequency updates frequency", async () => {
 		const response = await app.inject({
 			method: "POST",

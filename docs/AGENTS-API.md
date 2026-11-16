@@ -165,9 +165,12 @@ not yet written was not sent: read `state.lastChange` before tuning again. Read 
 ### When a scan holds the tuner
 
 A tune never takes the receiver from a running scan unasked. While a job holds the tuner's lease the
-answer is 409 `TUNER_LEASE_HELD` with `jobId` and `jobName`, and nothing is written. A lease that
-arrives while your tune is writing stops it the same way, and `applied` says what stands. Decide with
-whoever runs the scan, then send `"preempt": true`:
+answer is 409 `TUNER_LEASE_HELD` with `jobId` and `jobName`, and nothing is written; `retryWith`
+(`{"preempt": true}`) is the field that goes ahead. A lease that
+arrives while your tune is writing stops it the same way, and `applied` says what stands. **Pausing the
+job does not free the tuner**: a paused job keeps its lease so that resume carries on at the same hop,
+and the 409 says so with `jobPaused: true` and `pauseReason`. Decide with whoever runs the scan, then
+send `"preempt": true` (a paused job stays paused):
 
 ```sh
 curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
@@ -190,6 +193,21 @@ coming back:
 `waiters` lists other jobs that lost this tuner, to a job or to an operator, and can take it once it is
 idle, each with its own `autoAfterIdleMs`, so the job you stopped may not be the one that moves the receiver next. Cancel
 one if you need longer.
+
+To give the tuner back, resume the job. When that would interrupt someone the job had not interrupted
+before, the answer is 409 `SCANNER_TAKEOVER_REQUIRED` with `retryWith: {"takeover": true}`, and its
+`message` names the call to send:
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"takeover":true}' "$API_ORIGIN/api/scanner/jobs/$JOB/resume"
+```
+
+A 409 `SCANNER_SOURCE_BUSY` has no `retryWith`: another job holds the lease, and takeover does not
+help; stop that job or wait for it.
+
+Tuner status lives at `GET /api/tuner` (every source) and `GET /api/tuner/:sourceId`; there is no
+`/api/tuner/status`, and its 404 names those routes and the configured `sourceIds`.
 
 ### Tune for a while
 
@@ -381,6 +399,17 @@ is a failing process ([table](API.md#get-apidecoderssummary)).
 For a failing decoder, `lastError` on `GET /api/decoders/:id` gives the cause, kept across
 automatic restarts, and [`GET /api/decoders/:id/log?lines=50`](API.md#get-apidecodersidlog) its
 recent output. That output is raw and can contain decoded data, so treat it like Activity rows.
+
+Changing a decoder's options (`PATCH /api/decoders/:id`, [contract](API.md#patch-apidecodersid))
+restarts nothing. Read `restartRequired` in the answer: when it is true the running decoder still
+uses its old options (`restartOptions` names the changed ones) and `restartCall` is the call that
+applies them:
+
+```sh
+curl --fail-with-body --header "$AUTH" --request POST "$API_ORIGIN/api/decoders/$DECODER/restart"
+```
+
+A stopped decoder applies them when it next starts; `enabled` and `mode` never need a restart.
 
 ## Read activity
 
