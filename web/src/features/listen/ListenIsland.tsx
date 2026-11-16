@@ -77,6 +77,7 @@ import {
 	type ListenSource,
 	type VoiceRoute,
 } from "./sound.ts"
+import { syncVoiceStart } from "./voice-start.ts"
 
 /** The decoded-voice stream for the tuned channel (a dsd-fme decoder on it), or null. */
 export function useVoiceRoute(): VoiceRoute | null {
@@ -121,15 +122,15 @@ export function AudioOutput() {
 		listenModeOf(status?.config) === "analog" ||
 		squelchSetting(status).kind === "open"
 	const needsVoice = route !== null && !analogOnly
-	useEffect(() => {
-		if (!wanted || !needsVoice || voiceRunning) return
-		data.digitalVoice.ensureRunning().catch((error: unknown) => {
-			showAppToast(
-				`Decoded voice could not start: ${error instanceof Error ? error.message : "the core refused"}`,
-				{ tone: "warn" },
-			)
-		})
-	}, [data, wanted, needsVoice, voiceRunning])
+	// a failed start is the `voice-start` condition: one toast until a start succeeds or listening stops
+	useEffect(
+		() =>
+			syncVoiceStart(
+				{ wanted, voiceRunning: voiceRunning === true, needsVoice },
+				() => data.digitalVoice.ensureRunning(),
+			),
+		[data, wanted, needsVoice, voiceRunning],
+	)
 	// the per-browser "What you hear" of earlier versions: dropped, never sent (Source is shared)
 	useEffect(() => dropHearKey(globalThis.localStorage), [])
 	const key = audioAttachKey(source)

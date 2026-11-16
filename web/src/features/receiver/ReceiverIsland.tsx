@@ -69,6 +69,7 @@ import {
 	receiverSummary,
 	sourceTitle,
 } from "./summary.ts"
+import { LinkLossMarker, ReceiverConditions } from "./LinkStatus.tsx"
 import { ratePolicyNote } from "./notices.ts"
 import { offersTakeBack, takeTuningBack } from "./take-back.ts"
 import "./receiver.css"
@@ -371,7 +372,7 @@ function TuningUnprovenNote() {
 }
 
 function ReceiverHead({ open, trigger }: Parameters<IslandSlot["head"]>[0]) {
-	const { tuner, source, feed, paused } = useReceiver()
+	const { tuner, sourceId, source, feed, paused } = useReceiver()
 	const connected = (source?.connected ?? false) && !paused
 	const state = feedLabel(feed)
 	return (
@@ -389,6 +390,7 @@ function ReceiverHead({ open, trigger }: Parameters<IslandSlot["head"]>[0]) {
 			<span className="wk-shell-sub" data-paused={paused || undefined}>
 				{state ?? receiverSummary(tuner, source)}
 			</span>
+			<LinkLossMarker sourceId={sourceId} />
 			<span className="wk-sr">
 				{paused ? "paused" : connected ? "connected" : "not connected"}
 			</span>
@@ -912,6 +914,7 @@ function ReceiverPanel() {
 				</span>
 			</div>
 			<FeedControl />
+			<ReceiverConditions sourceId={sourceId} />
 			<dl className="wkf-rx-stats">
 				{stats.map(s => (
 					<div key={s.k}>

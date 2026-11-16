@@ -82,10 +82,12 @@ describe("ui-check options", () => {
 	it("drives the Listen flow on the fake target alone", () => {
 		expect(parseOptions([]).flow).toBeNull()
 		expect(parseOptions(["--flow=listen"]).flow).toBe("listen")
+		expect(parseOptions(["--flow=notices"]).flow).toBe("notices")
 		for (const argv of [
 			["--flow=scan"],
 			["--flow"],
 			["--flow=listen", "--seed-recordings=5"],
+			["--flow=notices", "--measure", "--route=#/recordings"],
 		])
 			expect(() => parseOptions(argv)).toThrow(CannotRun)
 		process.env["WAVEKIT_UI_CHECK_LIVE"] = "1"

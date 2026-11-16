@@ -22,6 +22,13 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Retune latency: `WAVEKIT_MOCK_RETUNE_MS=<ms>` delays each `POST /api/tuner/:sourceId/frequency`
   before it takes effect and answers (`retuneMs`), to try dragging the spectrum past the capture
   as on a real receiver (about 300 ms to the first frame at the new centre, ROADMAP §8).
+- Link advisories (`link-advisories.ts`): `GET /api/resources` and a `resources:snapshot` every 2 s
+  (`WAVEKIT_MOCK_RESOURCES_MS`, `resourcesIntervalMs`) carry `linkAdvisories` for `rtl-0`, kept by the
+  core's episode rule (`episodeSince` from the first `dropping` until 60 s without one). It starts with no
+  entry. `POST /__mock/link-advisory` drives it: `{ "level": "dropping", "lossReason": "core-busy" }`
+  (`lossReason` defaults to `source` on `dropping`), `{ "level": "none" }`, `{ "level": "absent" }` (no
+  entry), `{ "endEpisode": true }` (as if 60 s had passed without dropping; 409 while dropping). Each
+  change is broadcast at once. `node scripts/ui-check.mjs --flow=notices` uses it.
 - Retune sweep: `WAVEKIT_MOCK_RETUNE_SWEEP=1` (`retuneSweep` in `buildMockServer()`, `retune-sweep.ts`)
   retunes, from the first spectrum subscription, through 1090, 131, 136, 119.7, 144.6, 98, 438.9,
   446.1, 431.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 431.0125 MHz at 1.024 MS/s. Each window

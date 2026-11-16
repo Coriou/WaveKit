@@ -914,6 +914,26 @@ Condensed + Noto Sans, Tabler-based icons).
 - **Immersive is the interface the web app implements (owner, 2026-10-16).** Sub-project C builds
   C · Immersive, the chosen shell, with the boards it embeds; their states and interactions are
   the acceptance criteria (see "Handoff to the dev team").
+- **Notices: receipts and conditions in one top-centre region (2026-11-16).** The app toast moved
+  from bottom centre to a notice region at the top centre of the free plot area
+  (`--wk-free-cx`), 8 px under the top island row and under anything already at the top centre
+  (the connection chip when it drops under the top row, and any overlay marked
+  `data-wk-top-centre`); below 1100 px it takes the top row from the shell layout. One service
+  (`web/src/shell/notices/`) holds two classes. A *receipt* says what a user action did (Saved,
+  Copied, with Undo): 6 s, a newer receipt replaces it. A *condition* is keyed state
+  (`link:<source>`, `pwa-update`, `voice-start`, `rate-policy-skip:<source>`): its toast shows
+  8 s and folds into its status place (the Receiver chip's amber triangle and "Samples lost",
+  the Receiver panel's full line, both grey while the facts are stale). The region shows at most
+  one condition toast and one receipt; neither removes the other. The update toast stays until
+  Reload or ✕ and is never displaced. Timers pause while ⌘K is open and while a toast is hovered
+  or holds focus; a toast never takes focus; ✕ is a labelled button; warnings carry a triangle
+  and words, not colour alone; the rise is 150 ms (`--wk-dur-2`), none under reduced motion.
+  While the region shows something the tuned card keeps off its top-centre anchor, and no
+  floating link toast shows while the Receiver panel (which lists it) is open. The scan plan's
+  in-drawer toasts are receipts in the same region now. *Why:* a link warning repeated on every
+  cause flip and buried the Undo of the last action at the bottom, next to Listen and the dock;
+  a condition is state, so it belongs in a status place, with one announcement per episode
+  (rules in [WEB-APP.md](../WEB-APP.md#notices)).
 
 ## Open questions and next topics
 

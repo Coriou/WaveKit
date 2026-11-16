@@ -52,7 +52,8 @@ import { ShellIsland, type IslandSlot } from "./ShellIsland.tsx"
 import { Dock } from "./Dock.tsx"
 import { PaneSlot } from "./PaneSlot.tsx"
 import { DRAWER_PANES, paneOf } from "./panes.ts"
-import { appToast, dismissAppToast } from "./toast.ts"
+import { NoticeRegion } from "./notices/NoticeRegion.tsx"
+import { notices } from "./notices/service.ts"
 import {
 	freeAreaStyle,
 	overlaySlot,
@@ -144,6 +145,8 @@ export function Shell({
 	// the shell re-renders when the wanted anchor changes or a drag starts or ends, never on pointer moves
 	const cardAt = useStore(cardStore, s => s.at)
 	const dragging = useStore(cardStore, s => s.drag !== null)
+	// while the notice region shows something, the tuned card keeps off its top-centre anchor
+	const noticeTop = useStore(notices.occupied)
 
 	// ---- focus return: each panel, drawer and the palette remembers the control that opens it
 	const triggers = useRef(new Map<string, HTMLElement>())
@@ -232,6 +235,7 @@ export function Shell({
 		{
 			at: cardAt,
 			rxOpen: state.panel === "receiver",
+			noticeTop,
 			...(state.drawer ? { drawerW: wantedDrawerW(widths, state.drawer) } : {}),
 		},
 	)
@@ -576,7 +580,11 @@ export function Shell({
 				<CardAnnouncer />
 			</CardPlaceContext.Provider>
 
-			{!state.palette && <ShellToast lifted={!L.dockHidden} />}
+			<NoticeRegion
+				topRowBottom={L.topRow - G}
+				palette={state.palette}
+				receiverOpen={state.panel === "receiver"}
+			/>
 
 			{state.palette && (
 				<Suspense fallback={null}>
@@ -649,47 +657,6 @@ function CardTargets({
 					transform: `translate(${land.x}px, ${land.y}px)`,
 				}}
 			/>
-		</div>
-	)
-}
-
-/** The app toast (src/shell/toast.ts): bottom centre of the free area (`--wk-free-cx`), above the dock. */
-function ShellToast({ lifted }: { lifted: boolean }) {
-	const toast = useStore(appToast)
-	if (!toast) return null
-	return (
-		<div
-			role="status"
-			className="wk-toast wk-shell-toast"
-			data-tone={toast.tone}
-			data-lifted={lifted || undefined}
-		>
-			<span className="wk-shell-toast-text">{toast.text}</span>
-			{toast.action || toast.undo ? (
-				<button
-					type="button"
-					className="wk-btn"
-					data-variant="tonal"
-					data-size="sm"
-					onClick={() => {
-						if (toast.action) toast.action.run()
-						else toast.undo?.()
-						dismissAppToast()
-					}}
-				>
-					{toast.action?.label ?? "Undo"}
-				</button>
-			) : (
-				<button
-					type="button"
-					className="wk-icon-btn"
-					data-size="sm"
-					aria-label="Dismiss"
-					onClick={dismissAppToast}
-				>
-					<Icon name="close" size={14} />
-				</button>
-			)}
 		</div>
 	)
 }

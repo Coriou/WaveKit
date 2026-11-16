@@ -34,8 +34,46 @@ and talks to the core over its REST API and WebSocket. The code lives in [`web/`
 The app has three views, picked from the dock at the bottom: **Spectrum**, **Map** and
 **Messages**. Drawers open on the right on top of the view: **Activity**, **Scanner**,
 **Recordings** and **Settings**. On a phone, the ⌘K palette (the search button) is the way around.
-Beside a full-height drawer, toasts and the spectrum's status notes (`No source connected` and
+Beside a full-height drawer, notices and the spectrum's status notes (`No source connected` and
 the like) centre on the free area left of it, never under the drawer.
+
+### Notices
+
+Notices appear at the top centre of the spectrum, just under the Tuner and Receiver (and under the
+connection chip when it sits there). There are two kinds, and at most one of each shows at once:
+
+- **What you just did**, such as `Saved`, `Copied` or `Removed`, often with **Undo**. It stays
+  6 seconds; the next one replaces it.
+- **Something that is going on**, such as lost samples or an update waiting. It shows for
+  8 seconds, then stays visible in its usual place: lost samples on the Receiver island
+  (`Samples lost` with a warning triangle, and the full sentence in the Receiver panel). Neither
+  kind removes the other, so an Undo is never pushed away by a warning.
+
+**WaveKit was updated · Reload** stays until you reload or close it. Notices wait while the ⌘K
+palette is open and while the pointer or keyboard focus is on them. ✕ closes one.
+
+When WaveKit loses receiver samples, the notice says why:
+
+| Cause                                                  | Notice                                                          |
+| ------------------------------------------------------ | --------------------------------------------------------------- |
+| The link from the receiver cannot carry the rate       | `Receiver link dropping samples — lower the sample rate`        |
+| The same, while the 1090 MHz rate policy holds a raise | `Receiver link dropping samples at 2.4 MS/s (raised for ADS-B)` |
+| WaveKit itself was too busy to read the samples        | `Samples lost: WaveKit is too busy to keep up`                  |
+| WaveKit cannot tell which                              | `Receiver samples lost`                                         |
+
+Only the first asks for a lower sample rate. The notice comes once the loss has lasted 6 seconds,
+and once per episode: an episode starts with the first loss and lasts until the link has been clean
+for a minute, so a link that recovers and drops again does not repeat it. A different cause in the
+same episode shows once more, except a change to an unknown cause. After ✕ nothing more shows in
+that episode; the Receiver island still says `Samples lost` while samples are being lost. A page
+reloaded during an episode shows it on the Receiver island only. If the app stops hearing from
+WaveKit for 10 seconds, the notice goes and the Receiver island's marker turns grey until fresh
+news arrives. Samples dropped inside WaveKit after they all arrived, or a link that has not yet
+shown it can carry the rate, raise nothing. While the Receiver panel is open, it lists these instead
+of a notice, and a notice held back that way counts as shown: closing the panel does not bring it
+up. A notice waiting behind **WaveKit was updated** counts only once it shows. A sample-rate raise or restore by the rate policy is a short notice of its own; a raise
+it had to skip (another client has the tuner, or the receiver refused the rate) stays listed in the
+Receiver panel for 5 minutes.
 
 ### Spectrum and waterfall
 
@@ -456,10 +494,8 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
   frequency; turning the switch on shows nothing until your next retune. When the scanner sees broadband
   blanking rise at a manual gain, the line `Front end may be overloaded at this gain (49.6 dB,
 7.5 % of frames blanked)` suggests a lower gain; it is a hint, not a measurement.
-- When samples are lost on the way from the receiver to WaveKit, a notice at the bottom says
-  `Receiver link dropping samples — lower the sample rate`. It shows only for loss on the receiver
-  link. Samples dropped inside WaveKit, or a link that has not yet shown it can carry the rate,
-  raise no notice.
+- When samples are lost on the way from the receiver to WaveKit, the Receiver island says
+  `Samples lost` and a notice says why (see [Notices](#notices)).
 
 ### Scanner observations
 

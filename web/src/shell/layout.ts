@@ -302,6 +302,8 @@ export interface CardOptions {
 	readonly rxOpen?: boolean
 	/** The open drawer's wanted width (src/shell/drawer-width.ts); its default when omitted. */
 	readonly drawerW?: number
+	/** The notice region shows something at the top centre: the top-centre anchor is not free. */
+	readonly noticeTop?: boolean
 }
 
 export function shellLayout(
@@ -410,7 +412,9 @@ export function shellLayout(
 			})
 		}
 		const r = cardAnchors(islands, freeW, H, g.cardH, listenLiveH)
-		anchors = r.anchors
+		anchors = cardOpts.noticeTop
+			? r.anchors.filter(a => a.id !== "tc")
+			: r.anchors
 		const at = toCardAnchorId(cardOpts.at) ?? DEFAULT_CARD_ANCHOR
 		const want = r.spots[at]
 		home =

@@ -47,7 +47,10 @@ export function App() {
 		let disposed = false
 		setServices(s)
 		const offLinks = followDeepLinks(s)
-		const offNotices = watchReceiverNotices(s.data.events)
+		const offNotices = watchReceiverNotices(s.data.events, {
+			api: s.data.api,
+			tunerOf: id => s.data.tuner.get().bySource[id],
+		})
 		queueMicrotask(() => {
 			if (!disposed) void s.start()
 		})

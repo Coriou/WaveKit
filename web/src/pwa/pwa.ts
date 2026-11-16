@@ -6,7 +6,7 @@
 
 import { Store } from "../data/store.ts"
 import { themeStore } from "../shell/theme.ts"
-import { showAppToast } from "../shell/toast.ts"
+import { notices } from "../shell/notices/service.ts"
 import { dropWorkers } from "./stale.ts"
 import { isStandalone, type PwaState } from "./state.ts"
 
@@ -77,16 +77,22 @@ function registerWorker(): void {
 	const offer = (reg: ServiceWorkerRegistration) => {
 		if (!reg.waiting || !sw.controller || asked) return
 		asked = true
-		showAppToast("WaveKit was updated", {
-			persist: true,
-			action: {
-				label: "Reload",
-				run: () => {
-					reloading = true
-					reg.waiting?.postMessage({ type: "skip-waiting" })
+		notices.raise(
+			"pwa-update",
+			{
+				text: "WaveKit was updated",
+				persist: true,
+				dismissEnds: true,
+				action: {
+					label: "Reload",
+					run: () => {
+						reloading = true
+						reg.waiting?.postMessage({ type: "skip-waiting" })
+					},
 				},
 			},
-		})
+			true,
+		)
 	}
 	sw.addEventListener("controllerchange", () => {
 		if (reloading) window.location.reload()
