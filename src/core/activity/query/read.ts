@@ -153,19 +153,33 @@ function appendChannel(
 	channel: { minHz: number; maxHz: number },
 ): void {
 	where.push(
-		`(seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'channelHz' AND ref_value BETWEEN ? AND ?) OR (frequency_hz >= ? AND frequency_hz < ? AND ${NO_CHANNEL_REF}))`,
+		`(seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'channelHz' AND ref_value BETWEEN ? AND ?) OR (${CHANNEL_FALLBACK}))`,
 	)
 	params.push(
 		channelRefValue(channel.minHz),
 		channelRefValue(channel.maxHz),
+		...channelFallbackParams(channel),
+	)
+}
+
+/** The fallback half of the channel scope: no stored channel, the row's own frequency in range. */
+const CHANNEL_FALLBACK = `frequency_hz >= ? AND frequency_hz < ? AND ${NO_CHANNEL_REF}`
+
+function channelFallbackParams(channel: {
+	minHz: number
+	maxHz: number
+}): [number, number] {
+	return [
 		channel.minHz - ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ,
 		channel.maxHz + ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ,
-	)
+	]
 }
 
 /**
  * `mixed` when a row of the scope in (low, high] matched by its own frequency (no stored
- * channel), else `exact`: one indexed probe of the same filters, stopped at the first such row.
+ * channel), else `exact`: one probe per request of the other filters and only the fallback half
+ * of the scope (a row matching the stored-channel half has a channel ref, so it never counts),
+ * a frequency range the activity_frequency index serves, stopped at the first such row.
  */
 function channelMatchOf(
 	db: SqlDatabase,
@@ -174,8 +188,11 @@ function channelMatchOf(
 	high: string,
 ): "exact" | "mixed" {
 	const { where, params } = bounds({ low, high, before: null, after: null })
-	appendFilters(where, params, query)
-	where.push(NO_CHANNEL_REF)
+	appendFilters(where, params, { ...query, channel: null })
+	if (query.channel !== null) {
+		where.push(CHANNEL_FALLBACK)
+		params.push(...channelFallbackParams(query.channel))
+	}
 	const found = db
 		.prepare(
 			`SELECT 1 AS one FROM activity WHERE ${where.join(" AND ")} LIMIT 1`,

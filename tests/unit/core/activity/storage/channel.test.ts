@@ -281,6 +281,93 @@ describe("a row's channel", () => {
 		await q.close()
 	})
 
+	it("channelMatch is exact when every in-scope row carries a channel, even one whose carrier sits in the fallback window", async () => {
+		const store = await openStore()
+		const rows = [
+			voice("on-a", CHANNEL_HZ + 400, {
+				discoveryId: DISCOVERY,
+				frequencyHz: CHANNEL_HZ,
+			}),
+			voice("on-a-2", CHANNEL_HZ - 700, {
+				discoveryId: null,
+				frequencyHz: CHANNEL_HZ,
+			}),
+			// Its carrier is inside this channel's fallback window, but it is stored on the next
+			// channel: it neither matches nor makes the answer mixed.
+			voice("on-next", CHANNEL_HZ + 1_000, {
+				discoveryId: null,
+				frequencyHz: CHANNEL_HZ + 12_500,
+			}),
+		]
+		for (const row of rows) expect(store.admit(row)).toEqual({ admitted: true })
+		const q = service(store)
+		const page = await q.search({ query: { channelHz: CHANNEL_HZ } })
+		expect(page.items.map(i => i.eventId).sort()).toEqual(["on-a", "on-a-2"])
+		expect(page.channelMatch).toBe("exact")
+		const facets = await q.facets({
+			query: { channelHz: CHANNEL_HZ },
+			dimensions: ["channel"],
+		})
+		expect(facets.channelMatch).toBe("exact")
+		expect(facets.facets["channel"]).toEqual([
+			{ value: String(CHANNEL_HZ), count: 2 },
+		])
+		const near = await q.search({
+			query: { nearHz: CHANNEL_HZ, toleranceHz: 12_500 },
+		})
+		expect(near.items).toHaveLength(3)
+		expect(near.channelMatch).toBe("exact")
+		await q.close()
+	})
+
+	it("channelMatch is mixed for a single old row in scope, and the other filters decide whether it counts", async () => {
+		const store = await openStore()
+		const rows = [
+			voice("on-a", CHANNEL_HZ + 400, {
+				discoveryId: DISCOVERY,
+				frequencyHz: CHANNEL_HZ,
+			}),
+			// One old row (no stored channel) of another decoder, inside the fallback window.
+			envelope({
+				eventId: "old-other-decoder",
+				decoderId: "scan-abc1234-nfm-1",
+				outputType: "call_start",
+				protocol: "nfm",
+				category: "voice",
+				entityKey: null,
+				title: "FM voice",
+				frequencyHz: CHANNEL_HZ + 2_000,
+			}),
+			// An old row outside the window never makes the answer mixed.
+			voice("old-outside", CHANNEL_HZ + ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ),
+		]
+		for (const row of rows) expect(store.admit(row)).toEqual({ admitted: true })
+		const q = service(store)
+		const all = await q.search({ query: { channelHz: CHANNEL_HZ } })
+		expect(all.items.map(i => i.eventId).sort()).toEqual([
+			"old-other-decoder",
+			"on-a",
+		])
+		expect(all.channelMatch).toBe("mixed")
+		const allFacets = await q.facets({
+			query: { channelHz: CHANNEL_HZ },
+			dimensions: ["channel"],
+		})
+		expect(allFacets.channelMatch).toBe("mixed")
+		// The decoder filter leaves the old row out: the probe applies it too.
+		const filtered = await q.search({
+			query: { channelHz: CHANNEL_HZ, decoderIds: ["scan-abc1234-dstar-1"] },
+		})
+		expect(filtered.items.map(i => i.eventId)).toEqual(["on-a"])
+		expect(filtered.channelMatch).toBe("exact")
+		const filteredFacets = await q.facets({
+			query: { channelHz: CHANNEL_HZ, decoderIds: ["scan-abc1234-dstar-1"] },
+			dimensions: ["channel"],
+		})
+		expect(filteredFacets.channelMatch).toBe("exact")
+		await q.close()
+	})
+
 	it("refuses contradictory or out-of-range channel scopes", async () => {
 		const store = await openStore()
 		const q = service(store)
@@ -443,5 +530,139 @@ describe("channel values", () => {
 			),
 			{ numRuns: 100 },
 		)
+	})
+
+	it("a summary at every member's largest size stays within 4 KiB and keeps coalesced, recording and channel whole", () => {
+		// The members a fit never drops, at their bounds (JSON bytes): eventId, decoderId and
+		// sourceId 128 characters each, every one escaped ('"' writes 2 bytes, 256), protocol 64
+		// (128), entityKey 128 (about 254), two timestamps (2 × 24), coalesced (about 110), a
+		// 256-character recording id (about 290) and a channel whose 128-character id is
+		// multi-byte: '→' (3 bytes, 384) or a lone surrogate written as \udXXX (6 bytes, 768).
+		// Their sum, with the member names, is below 3 KiB; fields, title, aircraft and position
+		// shrink or go first.
+		const quoted = (n: number): string => '"'.repeat(n)
+		const recordingId = `dsd~20261012_100000_12345_${"A".repeat(200)}.wav`
+		expect(recordingId.length).toBeLessThanOrEqual(256)
+		for (const discoveryId of ["→".repeat(128), "\ud800".repeat(128)]) {
+			expect(
+				isActivityChannel({ discoveryId, frequencyHz: CHANNEL_MAX_HZ }),
+			).toBe(true)
+			const base = envelope({
+				eventId: quoted(128),
+				decoderId: quoted(128),
+				sourceId: quoted(128),
+				protocol: quoted(64),
+				entityKey: `a:${quoted(126)}`,
+				category: "voice",
+				title: "→".repeat(256),
+				fields: Array.from({ length: 64 }, (_, i) => ({
+					key: `k${i}`,
+					label: quoted(128),
+					value: quoted(4096),
+				})),
+			})
+			// Set on the envelope directly: ingress holds ids to 128 bytes, the store's check
+			// (activityChannelOf) to 128 characters, the wider bound this measures.
+			const env: DecodeEnvelope = {
+				...base,
+				coalesced: {
+					receptions: Number.MAX_SAFE_INTEGER,
+					firstSeenAt: "2026-10-12T00:00:00.000Z",
+					lastSeenAt: "2026-10-12T00:00:01.000Z",
+				},
+				aircraft: {
+					callsign: quoted(64),
+					registration: quoted(64),
+					typeCode: quoted(64),
+					typeDescription: quoted(64),
+					operator: quoted(64),
+				},
+				position: {
+					lat: -89.123456789,
+					lon: -179.123456789,
+					altM: -12345.6789,
+				},
+				channel: { discoveryId, frequencyHz: CHANNEL_MAX_HZ },
+			}
+			const row = rowWithRecording(
+				buildActivityRow({
+					version: 1,
+					eventId: env.eventId,
+					commitSeq: "0",
+					producedAt: env.producedAt,
+					receivedAt: env.receivedAt,
+					kind: "decoder-reception",
+					payload: env,
+				}),
+				{ id: recordingId, durationMs: 86_399_999 },
+			)
+			expect(Buffer.byteLength(row.summaryJson, "utf8")).toBeLessThanOrEqual(
+				MAX_SUMMARY_BYTES,
+			)
+			const summary = JSON.parse(row.summaryJson) as Record<string, unknown>
+			expect(summary).toMatchObject({
+				eventId: quoted(128),
+				decoderId: quoted(128),
+				sourceId: quoted(128),
+				coalesced: env.coalesced,
+				recording: { id: recordingId, durationMs: 86_399_999 },
+				channel: { discoveryId, frequencyHz: CHANNEL_MAX_HZ },
+			})
+
+			// The scanner recording row at its bounds: 128-character ids, the channel's multi-byte.
+			const scanKey = `scan:d_${"Z".repeat(40)}~${"a".repeat(200)}.wav`
+			expect(scanKey.length).toBeLessThanOrEqual(256)
+			const recordingRow = buildActivityRow({
+				version: 1,
+				eventId: quoted(128),
+				commitSeq: "0",
+				producedAt: "2026-10-12T00:00:30.000Z",
+				receivedAt: "2026-10-12T00:00:30.100Z",
+				kind: "recording-change",
+				payload: kept(
+					{ discoveryId, frequencyHz: CHANNEL_MAX_HZ },
+					{
+						recordingId: scanKey,
+						discoveryId: "\ud800".repeat(128),
+						observationId: "\ud800".repeat(128),
+						sourceId: "\ud800".repeat(128),
+					},
+				),
+			})
+			expect(
+				Buffer.byteLength(recordingRow.summaryJson, "utf8"),
+			).toBeLessThanOrEqual(MAX_SUMMARY_BYTES)
+			expect(JSON.parse(recordingRow.summaryJson)).toMatchObject({
+				title: SCANNER_RECORDING_TITLE,
+				recording: { id: scanKey },
+				channel: { discoveryId, frequencyHz: CHANNEL_MAX_HZ },
+			})
+		}
+
+		// Past the bound: a 129-character id is not a channel, so a row never stores it.
+		const past = "→".repeat(129)
+		expect(isActivityChannel({ discoveryId: past, frequencyHz: 1 })).toBe(false)
+		expect(activityChannelOf({ discoveryId: past, frequencyHz: 1 })).toBeNull()
+		// Ingress refuses it; a row built from an envelope carrying it anyway stores no channel.
+		expect(() =>
+			voice("past", CHANNEL_HZ, { discoveryId: past, frequencyHz: CHANNEL_HZ }),
+		).toThrow(/Invalid decoder event envelope/)
+		const pastEnv: DecodeEnvelope = {
+			...voice("past", CHANNEL_HZ),
+			channel: { discoveryId: past, frequencyHz: CHANNEL_HZ },
+		}
+		const pastRow = buildActivityRow({
+			version: 1,
+			eventId: pastEnv.eventId,
+			commitSeq: "0",
+			producedAt: pastEnv.producedAt,
+			receivedAt: pastEnv.receivedAt,
+			kind: "decoder-reception",
+			payload: pastEnv,
+		})
+		expect(
+			(JSON.parse(pastRow.summaryJson) as Record<string, unknown>)["channel"],
+		).toBeUndefined()
+		expect(pastRow.refs.some(ref => ref.type === "channelHz")).toBe(false)
 	})
 })

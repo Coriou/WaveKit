@@ -222,6 +222,9 @@ describe("recordings of a channel", () => {
 		expect(a.matchedByChannel).toBeUndefined()
 		const b = await inv.list({ channelHz: String(Math.round(B.hz)) })
 		expect(b.items.map(i => i.id)).toEqual(onB)
+		// The item's frequency is the owner's in whole Hz, rounded as the Activity channel is.
+		expect(b.items[0]?.frequencyHz).toBe(Math.round(B.hz))
+		expect(a.items.every(i => i.frequencyHz === A.hz)).toBe(true)
 		// The default tolerance (6.25 kHz) holds A only; 12.5 kHz holds both.
 		const near = await inv.list({ nearHz: A.hz })
 		expect(near.matched).toBe(2)

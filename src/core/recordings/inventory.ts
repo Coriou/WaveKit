@@ -1884,7 +1884,9 @@ export function createRecordingInventory(
 			const owner = e.discoveryId === null ? null : ownerOf(e.discoveryId)
 			const item: RecordingInventoryItem = {
 				...e.item,
-				frequencyHz: owner?.frequencyHz ?? null,
+				// In whole Hz, rounded as the Activity row's channel is (activityChannelOf).
+				frequencyHz:
+					owner?.frequencyHz == null ? null : Math.round(owner.frequencyHz),
 				key: e.key ?? e.item.id,
 				ownerDiscoveryId: owner?.id ?? null,
 			}

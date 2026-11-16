@@ -6946,8 +6946,11 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   provisional hold). Unknown values read `unchecked` and null, never guessed;
   other kinds read null, `unchecked`, null, null. Nothing here changes what the
   recorder keeps.
-- `frequencyHz` of a scanner recording is its channel frequency: the owning
-  discovery's, the same value as the `channel.frequencyHz` of its Activity row.
+- `frequencyHz` of a scanner recording is its channel frequency: the frequency
+  of the discovery that owns it now, in whole Hz (rounded as the Activity row's
+  `channel.frequencyHz` is). The two agree until a merge: the catalogue item
+  follows the current owner, while the Activity row keeps the owner it had when
+  the file was kept.
   With `nearHz`, `matchedByChannel` lists the matches per channel
   (`{ frequencyHz, count }`, count descending then frequency, at most 32): its
   counts sum to `matched` while 32 or fewer channels match.

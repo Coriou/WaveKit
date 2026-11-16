@@ -39,7 +39,31 @@ describe("mock channel contract", () => {
 			`/api/activity?channelHz=${channelHz}&limit=500`,
 		)
 		expect(exact.status).toBe(200)
-		expect(exact.body.channelMatch).toBeDefined()
+		// The channel's analog transmissions carry no channel and match by their frequency: mixed.
+		expect(exact.body.items.some(i => i.channel === undefined)).toBe(true)
+		expect(exact.body.channelMatch).toBe("mixed")
+		// Its recordings alone all carry the channel: exact.
+		const recordings = await get<ActivitySearchPage>(
+			`/api/activity?channelHz=${channelHz}&kinds=recording-change&limit=500`,
+		)
+		expect(recordings.body.items.length).toBeGreaterThan(0)
+		expect(recordings.body.channelMatch).toBe("exact")
+		const recordingFacets = (
+			await server.app.inject({
+				method: "POST",
+				url: "/api/activity/facets",
+				payload: {
+					query: { channelHz, kinds: ["recording-change"] },
+					dimensions: ["channel"],
+				},
+			})
+		).json<ActivityFacetResult>()
+		expect(recordingFacets.channelMatch).toBe("exact")
+		// No channel scope: no channelMatch.
+		expect(
+			(await get<ActivitySearchPage>("/api/activity?limit=1")).body
+				.channelMatch,
+		).toBeUndefined()
 		expect(exact.body.items.map(i => i.eventId)).toContain(row?.eventId)
 		const res = await server.app.inject({
 			method: "POST",
@@ -52,7 +76,7 @@ describe("mock channel contract", () => {
 			0,
 		)
 		expect(sum).toBe(exact.body.items.length)
-		expect(facets.channelMatch).toBe(exact.body.channelMatch)
+		expect(facets.channelMatch).toBe("mixed")
 		expect((await get(`/api/activity?toleranceHz=10`)).status).toBe(400)
 	})
 

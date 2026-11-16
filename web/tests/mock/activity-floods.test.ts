@@ -104,7 +104,8 @@ describe("mock activity floods", () => {
 		})
 		// the first start has no radio yet; every later row has it
 		expect(keys(0)).not.toContain("source")
-		expect(call[0]?.summary.title).toBe("DMR TG 99")
+		expect(call[0]?.summary.title).toBe("TG 99")
+		expect(call[1]?.summary.title).toBe("TG 99 · radio 4242")
 		expect(
 			call.slice(1).every(e => e.summary.fields.some(f => f.key === "source")),
 		).toBe(true)

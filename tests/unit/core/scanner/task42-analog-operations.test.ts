@@ -1571,7 +1571,56 @@ describe("analog receipt verdict facts", () => {
 			keptBy: "prior-none",
 			startedAt: "2026-11-16T10:00:00.000Z",
 		})
+		// An older core's receipt has none of the three: rewrite one so, as such a core left it.
+		const oldPath = join(
+			privateDir(h.root, badReceipt.operationId),
+			"receipt.json",
+		)
+		const old = JSON.parse(await readFile(oldPath, "utf8")) as Record<
+			string,
+			unknown
+		>
+		delete old["keptBy"]
+		delete old["speechHeard"]
+		delete old["startedAt"]
+		await writeFile(oldPath, JSON.stringify(old))
+		expect(AnalogReceiptSchema.safeParse(old).success).toBe(true)
+		// The schema is strict: a member it does not know is refused (why a core older than these
+		// fields cannot read a receipt that carries them).
+		expect(
+			AnalogReceiptSchema.safeParse({ ...old, notYetKnown: true }).success,
+		).toBe(false)
+		expect(
+			await readRecordingReceipt(
+				nodeRecordingFs,
+				join(h.root, "recordings"),
+				`analog-${badReceipt.operationId}.wav`,
+			),
+		).toEqual({
+			cut: null,
+			observationId: "o1",
+			speech: "unchecked",
+			keptBy: null,
+			startedAt: null,
+		})
 		await h.evidence.stopAnalog()
+		const recovered = new EvidenceStore({
+			dir: h.root,
+			caps,
+			logger,
+			now: () => NOW,
+			statfs: async () => ({ freeBytes: 1e9 }),
+			isDiscoveryLive: id => !!h.store.get(id),
+		})
+		recovered.configureAnalog(h.adapter)
+		const reconciled = await recovered.recoverAnalog()
+		for (const r of [receipt, badReceipt])
+			expect(reconciled).toContainEqual(
+				expect.objectContaining({
+					operationId: r.operationId,
+					status: "available",
+				}),
+			)
 	})
 })
 
