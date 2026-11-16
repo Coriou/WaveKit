@@ -409,7 +409,7 @@ describe("storage line", () => {
 				3,
 			),
 		).toBe(
-			"Call recordings: 1.6 GB. Auto-clean keeps the newest 2.0 GB of scanner recordings (412 MB used). IQ captures: 96.0 MB of 640 MB (new captures are refused at the limit). Kept items are never removed (3). 4.0 GB free on disk.",
+			"Call recordings: 1.6 GB. Scanner folder: 412 MB. Auto-clean keeps scanner recordings under 2.0 GB. IQ captures: 96.0 MB of 640 MB (new captures are refused at the limit). Kept items are never removed (3). 4.0 GB free on disk.",
 		)
 	})
 

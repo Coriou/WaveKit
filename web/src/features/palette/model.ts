@@ -49,7 +49,7 @@ import {
 	savedMeta,
 } from "../tuner/saved.ts"
 import { DECODE_AS } from "../tuned/identify-view.ts"
-import { historyLabel, savedNameAt } from "../naming.ts"
+import { channelName, historyLabel, savedNameAt } from "../naming.ts"
 import { tuningStep } from "../../plot/maths.ts"
 import type { GlyphName } from "./glyphs.ts"
 import {
@@ -572,10 +572,15 @@ export class PaletteModel {
 	}
 
 	discoveryItem(d: Discovery): PaletteItem {
+		const title = channelName({
+			saved: this.#savedAt(d.frequencyHz),
+			label: d.operator?.label ?? null,
+			proven: discoveryTitle(d),
+		})
 		return {
 			...this.tuneItem(d.frequencyHz, {
 				id: `disc:${d.id}`,
-				title: discoveryTitle(d),
+				title,
 				sub: [
 					mhz(d.frequencyHz),
 					"Found by the scanner",
@@ -585,18 +590,29 @@ export class PaletteModel {
 			}),
 			keys: [formatMHz(d.frequencyHz), protocolName(d.protocol), "discovery"],
 			action: { kind: "discovery", id: d.id },
-			done: `Tuned to ${discoveryTitle(d)} · ${mhz(d.frequencyHz)}`,
+			done: `Tuned to ${title} · ${mhz(d.frequencyHz)}`,
 		}
 	}
 
-	/** Everything a name can tune to: saved frequencies, then discoveries not at a saved frequency. */
+	/** The saved name of the channel at `hz` (naming.ts): on the band plan's raster, not exact Hz. */
+	#savedAt(hz: number): string | null {
+		const c = this.#c
+		return savedNameAt(hz, c.saved ?? [], tuningStep(c.bandplan, hz))
+	}
+
+	/**
+	 * Everything a name can tune to: saved frequencies, then discoveries not on a saved channel (matched on the
+	 * band plan's raster like every other saved name, so a carrier measured a few hundred Hz off is not listed twice).
+	 */
 	tuneTargets(): PaletteItem[] {
 		const saved = this.#c.saved ?? []
 		const at = new Set(saved.map(f => f.frequencyHz))
 		return [
 			...saved.map(f => this.savedItem(f)),
 			...this.#c.discoveries
-				.filter(d => !at.has(d.frequencyHz))
+				.filter(
+					d => !at.has(d.frequencyHz) && this.#savedAt(d.frequencyHz) === null,
+				)
 				.map(d => this.discoveryItem(d)),
 		]
 	}
