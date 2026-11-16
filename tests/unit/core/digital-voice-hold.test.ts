@@ -815,6 +815,87 @@ describe("digital voice /stream hold of voice not known clear", () => {
 		])
 	})
 
+	it("late-entry voice behind a released call's backlog is dropped when an encrypted call starts; the backlog plays whole", async () => {
+		const voice = await started("auto", {
+			jitterBufferMs: 400,
+			maxBufferMs: 1000,
+		})
+		const client = voice.connect()
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: false }))
+		send(
+			voice,
+			range(1, 50).map(v => stereo(v, 0)),
+		)
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: true }))
+		send(
+			voice,
+			range(51, 60).map(v => stereo(v, 0)),
+		)
+		voice.decoder.emit(
+			"voice-call",
+			s1({ encryptionKnown: true, active: false }),
+		)
+		// Voice of a call not announced yet, queued behind the backlog.
+		send(
+			voice,
+			range(1, 20).map(() => stereo(999, 0)),
+		)
+		const encrypted = {
+			callId: "dsd-fme-enc",
+			encryptionKnown: true,
+			encrypted: true,
+		}
+		voice.decoder.emit("voice-call", s1(encrypted))
+		send(
+			voice,
+			range(1, 20).map(() => stereo(999, 0)),
+		)
+		voice.decoder.emit("voice-call", s1({ ...encrypted, active: false }))
+		vi.advanceTimersByTime(5000)
+		const out = client.samples()
+		expect(out.includes(999)).toBe(false)
+		expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 60)))
+		expect(hold(voice).discardedMs).toBeGreaterThan(0)
+	})
+
+	it("mono: late-entry voice behind a released call's backlog is dropped when an encrypted call starts", async () => {
+		const voice = await started("p25", {
+			jitterBufferMs: 400,
+			maxBufferMs: 1000,
+		})
+		const client = voice.connect()
+		const p25 = (o: Record<string, unknown>) =>
+			state({ protocol: "P25", slot: null, ...o })
+		voice.decoder.emit("voice-call", p25({ encryptionKnown: false }))
+		send(voice, range(1, 50).map(mono))
+		voice.decoder.emit("voice-call", p25({ encryptionKnown: true }))
+		send(voice, range(51, 60).map(mono))
+		voice.decoder.emit(
+			"voice-call",
+			p25({ encryptionKnown: true, active: false }),
+		)
+		send(
+			voice,
+			range(1, 20).map(() => mono(999)),
+		)
+		const encrypted = {
+			callId: "dsd-fme-enc",
+			encryptionKnown: true,
+			encrypted: true,
+		}
+		voice.decoder.emit("voice-call", p25(encrypted))
+		send(
+			voice,
+			range(1, 20).map(() => mono(999)),
+		)
+		voice.decoder.emit("voice-call", p25({ ...encrypted, active: false }))
+		vi.advanceTimersByTime(5000)
+		const out = client.samples()
+		expect(out.includes(999)).toBe(false)
+		expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 60)))
+		expect(hold(voice).discardedMs).toBeGreaterThan(0)
+	})
+
 	it("a malformed datagram is rejected the same held or not", async () => {
 		const voice = await started()
 		voice.connect()

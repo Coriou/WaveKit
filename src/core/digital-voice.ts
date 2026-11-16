@@ -503,6 +503,14 @@ class HoldLane {
 		return k
 	}
 
+	/**
+	 * Drops the releasable tail no call owns (voice of a call not announced
+	 * yet, queued behind a backlog). Returns samples dropped.
+	 */
+	dropUnownedTail(): number {
+		return this.tailOwner === null ? this.dropOwned() : 0
+	}
+
 	/** Drops everything (no listener, detach). Returns the held samples dropped. */
 	reset(): number {
 		const dropped = this.length - this.releasable
@@ -1584,6 +1592,28 @@ export class DigitalVoiceService
 		stats.held += before + (take - ownFrom)
 	}
 
+	/**
+	 * A restricted call starts unheld: the voice no call owns, queued in the
+	 * lanes its voice passes (`key`: its slot, 0 unknown) behind a released
+	 * backlog, is its late entry and is dropped (counted). Returns whether a
+	 * clear backlog still lags on that path: then everything newer is in the
+	 * lanes and the pacer queues only older clear voice, so it is kept.
+	 */
+	private dropLateEntry(channel: VoiceChannel, key: SlotKey): boolean {
+		const hold = channel.hold
+		if (hold === null) return false
+		const [whole, lane1, lane2] = hold.lanes
+		const stats = channel.holdStats
+		stats.discarded += whole.dropUnownedTail()
+		if (lane1 === null || lane2 === null) return whole.releasable > 0
+		const drop1 = key !== 2
+		const drop2 = key !== 1
+		if (drop1) stats.discarded += lane1.dropUnownedTail()
+		if (drop2) stats.discarded += lane2.dropUnownedTail()
+		if (whole.releasable > 0) return true
+		return (!drop1 || lane1.releasable > 0) && (!drop2 || lane2.releasable > 0)
+	}
+
 	/** The channel's lanes, allocated on first use (see VOICE_HOLD_MAX_MS). */
 	private holdFor(channel: VoiceChannel): VoiceHold {
 		if (channel.hold !== null) return channel.hold
@@ -1677,7 +1707,8 @@ export class DigitalVoiceService
 			call.active &&
 			isRestricted(call) &&
 			!held &&
-			!holdsCall(channel.hold, call.callId)
+			!holdsCall(channel.hold, call.callId) &&
+			!this.dropLateEntry(channel, key)
 		)
 			this.clearPaced(channel)
 		channel.paced.setCallActive(channel.call !== null)
