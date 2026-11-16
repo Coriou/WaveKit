@@ -6518,13 +6518,18 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   cores omit it. See "Recording links" under Activity.
 - `cut`, `part`, `parts` (scanner analog recordings only; other kinds and older
   cores omit them): `cut` says why the file ended early, read from the file's
-  own receipt: `scanner-moved` (the sweep retuned away), `duration-rollover`
-  (the file reached its length limit and the transmission continues in the next
-  file), `source-lost` (the input stopped) or `shutdown`; null when the file
-  was not cut short, or its receipt is missing, unreadable or names another
-  reason. `part` (1-based) and `parts` number the listed files of one
-  observation in the order they were finished (a transmission split by
-  roll-overs); both null for an observation's only file or an unknown one.
+  own receipt: `scanner-moved` (the tuner moved under the file: a sweep hop,
+  an operator retune or gain change, or a retune held longer than the IQ ring
+  allows; or the trusted tuning run the file was recorded in ended),
+  `duration-rollover` (the file reached its length limit; the transmission may
+  continue in the next file), `source-lost` (the input stopped) or `shutdown`;
+  null when the file was not cut short, or its receipt is missing, unreadable
+  or names another reason. A receipt written after the file is indexed is read
+  on a later pass while the file is under 5 minutes old. `part` (1-based) and
+  `parts` number the listed files of one observation (a transmission split by
+  roll-overs) by the start stamp in their names when every name carries one,
+  else in the order they were finished; both null for an observation's only
+  file or an unknown one.
 - `kept` (optional in `@wavekit/api-types`; older cores omit it): true when
   the recording is kept, a delete of it is in progress, or the keep store is not
   usable (fail closed); read at list time.

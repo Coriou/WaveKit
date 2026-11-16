@@ -3446,10 +3446,14 @@ export class WidebandAnalogRecorder {
 		// ring would overwrite what is held back before the file could read it) or that never
 		// starts must not freeze the session with an open file. It ends at the command position as
 		// at the retune's start (cut epoch-changed: the tuner moved). At exactly maxBacklog it
-		// still holds; one sample past it ends.
+		// still holds; one sample past it ends. Only a session still behind the command
+		// (`next` < `retuneAt`) has unread IQ in the ring at risk; one that has read up to it
+		// holds nothing back, so it is never ended by the cap (the retune's start or the trusted
+		// run's end still ends it).
 		const capped =
 			!retuned &&
 			s.retuneAt !== null &&
+			s.next < s.retuneAt &&
 			s.limit === Number.POSITIVE_INFINITY &&
 			liveEdge - s.retuneAt > s.maxBacklog
 		// The trusted run it started in ended (a doubt: null) or another began (re-proven): its

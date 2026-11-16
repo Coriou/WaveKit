@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import {
 	createRecordingInventory,
 	nodeRecordingFs,
+	RECORDINGS_RECEIPT_WAIT_MS,
 } from "../../../../src/core/recordings/inventory.js"
 import {
 	RECORDING_RECEIPT_MAX_BYTES,
@@ -306,5 +307,46 @@ describe("inventory cut and parts", () => {
 				part: null,
 				parts: null,
 			})
+	})
+	it("re-reads a missing receipt of a young analog file on each pass up to RECORDINGS_RECEIPT_WAIT_MS after its last write, not past it", async () => {
+		expect(RECORDINGS_RECEIPT_WAIT_MS).toBe(300_000)
+		for (const [ageMs, read] of [
+			[RECORDINGS_RECEIPT_WAIT_MS, true],
+			[RECORDINGS_RECEIPT_WAIT_MS + 1, false],
+		] as const) {
+			const root = await storage()
+			const n = read ? 1 : 2
+			const id = uuid(n)
+			const file = join(root, "recordings", "analog", D, `analog-${id}.wav`)
+			await writeFile(file, wav())
+			// A whole-second mtime well in the past: the injected clock sets its age exactly.
+			const mtimeMs = Math.floor(Date.now() / 1000) * 1000 - 3_600_000
+			await utimes(file, mtimeMs / 1000, mtimeMs / 1000)
+			// First pass 60 s after the last write (settled, past the in-progress window): the
+			// store linked the WAV but has not written its receipt yet.
+			let clock = mtimeMs + 60_000
+			const inv = createRecordingInventory({
+				dsdFmeDirs: () => [],
+				scannerRecordingsDir: () => join(root, "recordings"),
+				logger,
+				now: () => clock,
+			})
+			closers.push(() => inv.close?.())
+			const key = `scan:${D}~analog-${id}.wav`
+			const first = (await inv.list({})).items.find(i => i.id === key)
+			expect(first).toMatchObject({ cut: null })
+			// The receipt appears; the next pass runs at `ageMs` after the last write.
+			const dir = join(root, ".analog-operations", id)
+			await mkdir(dir, { recursive: true })
+			await writeFile(
+				join(dir, "receipt.json"),
+				JSON.stringify(receipt(id, { cutReason: "epoch-changed" })),
+			)
+			clock = mtimeMs + ageMs
+			await inv.touchDiscoveries?.([D])
+			const second = (await inv.list({})).items.find(i => i.id === key)
+			// At the bound it is read again (cut known); one ms past it the null stands.
+			expect(second).toMatchObject({ cut: read ? "scanner-moved" : null })
+		}
 	})
 })

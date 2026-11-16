@@ -1,7 +1,8 @@
 /**
  * WidebandAnalogRecorder holding back a pending retune (WidebandEngineView.pendingRetuneSample):
  * the park window of a retune-ended shadow still counts from the new epoch's settled start; a
- * retune pending past maxBacklog (ring − margin) ends the open file at its command position; the
+ * session caught up to the command is never ended by the hold cap (the cap ending a session
+ * still behind it: wideband-analog-recorder-retune-backlog.test.ts); the
  * reported backlog is the true ring backlog (from the live edge), the hold included; a hang
  * that would end inside the settle ends at the command (cut epoch-changed: the tuner moved),
  * not completed.
@@ -96,7 +97,7 @@ describe("WidebandAnalogRecorder holding a pending retune", () => {
 		expect(op.frames).toBeGreaterThanOrEqual(frames(at - fileStart) - 8 * 60)
 	}, 120_000)
 
-	it(`a retune held exactly maxBacklog keeps the file open; one sample past it the file ends at the command`, async () => {
+	it(`a session caught up to the command is never ended by the hold cap: held past maxBacklog it stays open, and ends at the command when the retune starts`, async () => {
 		const h = harness()
 		await h.feed(0.5, false)
 		const { onset } = await voice(h, 2)
@@ -109,16 +110,24 @@ describe("WidebandAnalogRecorder holding a pending retune", () => {
 		// (No idle() here: it waits for the open file's operation.)
 		await h.pump()
 		expect(h.ops).toHaveLength(1)
-		// At the bound: still held, the file is open.
 		expect(h.ops[0]!.cut).toBeNull()
-		expect(h.rec.owns("o")).toBe(true)
 		// Its reported backlog is the true ring backlog, from the live edge: read up to the
 		// command, it is the whole hold (maxBacklog, 2000 ms), not the ~0 left to the command.
 		const held = h.rec.diagnostics().sessions[0]!
 		expect(held.backlogMs).toBe((MAX_BACKLOG * 1000) / FS)
-		// One sample past the bound: the file ends at the command, cut epoch-changed.
+		// One sample past the bound, then 0.5 s more (the retune still pending): read up to the
+		// command, nothing it still needs is in the ring at risk, so the cap never ends it.
 		h.engine.write(new Uint8Array([127, 127]))
 		for (let i = 0; i < 4; i++) await h.pump()
+		await h.feed(0.5, true)
+		await h.pump()
+		expect(h.engine.liveEdge() - at).toBeGreaterThan(MAX_BACKLOG)
+		expect(h.ops).toHaveLength(1)
+		expect(h.ops[0]!.cut).toBeNull()
+		expect(h.rec.owns("o")).toBe(true)
+		// The retune starts: the file ends at the command, cut epoch-changed.
+		start(h, at)
+		await h.feed(0.5, false)
 		await h.rec.idle()
 		const op = h.ops[0]!
 		expect(op.cut).toBe("epoch-changed")
@@ -126,10 +135,6 @@ describe("WidebandAnalogRecorder holding a pending retune", () => {
 		const fileStart = onset - Math.round(0.3 * FS)
 		expect(op.frames).toBeLessThanOrEqual(frames(at - fileStart))
 		expect(op.frames).toBeGreaterThanOrEqual(frames(at - fileStart) - 8 * 60)
-		// The retune never starts: no later file of this channel follows.
-		await h.feed(1, true)
-		await h.rec.idle()
-		expect(h.ops).toHaveLength(1)
 	}, 120_000)
 
 	it("a hang that would end inside the settle ends at the command, cut epoch-changed (the tuner moved)", async () => {

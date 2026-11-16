@@ -72,9 +72,11 @@ export function recordingCutLabel(r: RecordingInventoryItem): string | null {
 		out.push(`Part ${part} of ${parts}`)
 	if (r.cut === "scanner-moved") out.push("Cut: scanner moved on")
 	else if (r.cut === "duration-rollover") {
-		// The last part's roll-over was the transmission's last file so far: nothing listed follows.
-		if (part === null || parts === null || part < parts)
-			out.push("Continues in next part")
+		// A next part is named only when one is listed (part < parts); the last listed part's
+		// roll-over names none, and a lone file whose part is unknown says only why it ended.
+		if (part !== null && parts !== null) {
+			if (part < parts) out.push("Continues in next part")
+		} else out.push("Cut: length limit")
 	} else if (r.cut === "source-lost") out.push("Cut: source lost")
 	else if (r.cut === "shutdown") out.push("Cut: WaveKit stopped")
 	return out.length > 0 ? out.join(" · ") : null

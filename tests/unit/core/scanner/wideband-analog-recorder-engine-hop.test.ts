@@ -4,8 +4,9 @@
  * (pendingRetuneSample while the hop settles, retunedFromSample once it started). No position is
  * filled by hand: the engine's ring, live edge, epoch numbering and command positions are its own,
  * fed by a fake fanout; a recording host stands in for the pipeline and answers the hop's start
- * 1.5 s after the command. The view only relabels the tuning trust (no tuning ledger here, so
- * every label reads `unverified`) and passes every other field through.
+ * 1.5 s after the command. The engine itself is the recorder's view, as scanner-service passes
+ * it; a real tuning ledger (FakeReceiverLedger) holds receipts of the start tuning, so the
+ * engine labels it `commanded` on its own.
  */
 import pino from "pino"
 import { describe, expect, it } from "vitest"
@@ -31,6 +32,7 @@ import {
 	settle,
 	testSettings,
 } from "../../../mocks/scanner/engine-fakes.js"
+import { FakeReceiverLedger } from "../../../mocks/fake-receiver-ledger.js"
 import { NfmSource } from "./wideband-nfm-fixtures.js"
 import {
 	CENTRE,
@@ -74,6 +76,16 @@ describe("WidebandAnalogRecorder at a hop through the real SpectrumEngine", () =
 			sampleRate: FS,
 		})
 		const fanout = new FakeFanout()
+		// The receiver's tuning ledger: this session holds receipts of the start centre and rate,
+		// and every byte the fanout writes advances its position, so the engine labels the old
+		// tuning `commanded` itself.
+		const receiver = new FakeReceiverLedger("rtl", {
+			rateHz: FS,
+			settleMs: 100,
+		})
+		receiver.prove(CENTRE, FS)
+		sources.tuningLedger = receiver.ledger
+		fanout.ledgerFeed = receiver
 		const hosts: RecordingHost[] = []
 		const engine = new SpectrumEngine({
 			sourceId: "rtl",
@@ -98,35 +110,20 @@ describe("WidebandAnalogRecorder at a hop through the real SpectrumEngine", () =
 			{ kind: "epoch-started", epoch: 1, startSample: 0, settleMode: "none" },
 		])
 
-		// The recorder's reads, to check no sample at or past the command was demodulated.
+		// The recorder's reads, to check no sample at or past the command was demodulated: the
+		// real engine is the view (as scanner-service passes it), its readRing observed in place.
 		const reads: { from: number; to: number }[] = []
-		const view: WidebandEngineView = {
-			format: engine.format,
-			currentEpoch: () => {
-				const e = engine.currentEpoch()
-				return {
-					stream: e.stream,
-					epoch: e.epoch,
-					startSample: e.startSample,
-					centreHz: e.centreHz,
-					sampleRateHz: e.sampleRateHz,
-					tuningTrust: "commanded",
-					pendingRetuneSample: e.pendingRetuneSample ?? null,
-					retunedFromSample: e.retunedFromSample ?? null,
-				}
-			},
-			liveEdge: () => engine.liveEdge(),
-			readRing: (from, to) => {
-				const got = engine.readRing(from, to)
-				if (got)
-					reads.push({
-						from: got.startSample,
-						to: got.startSample + got.bytes.length / 2,
-					})
-				return got
-			},
-			tap: listener => engine.tap(listener),
+		const readRing = engine.readRing.bind(engine)
+		engine.readRing = (from, to) => {
+			const got = readRing(from, to)
+			if (got)
+				reads.push({
+					from: got.startSample,
+					to: got.startSample + got.bytes.length / 2,
+				})
+			return got
 		}
+		const view: WidebandEngineView = engine
 		const queue: (() => void)[] = []
 		let rec!: WidebandAnalogRecorder
 		const { ops, begin } = fakeOps(b => rec.bindingLive(b))
@@ -142,6 +139,34 @@ describe("WidebandAnalogRecorder at a hop through the real SpectrumEngine", () =
 		// The new tuning: another loud carrier at the same offset (what the settle would record).
 		const newTuning = new NfmSource({ fs: FS, offsetHz: OFFSET, seed: 99 })
 		let pumps = 0
+		// The pipeline's block summaries of the old tuning, which the engine labels from the
+		// ledger (the only label); none once the hop is commanded (its settle is not reported).
+		let summaries = true
+		const block = (): void => {
+			const e = engine.currentEpoch()
+			events([
+				{
+					kind: "block-summary",
+					summary: {
+						sourceId: "rtl",
+						stream: e.stream,
+						epoch: e.epoch,
+						endSample: engine.liveEdge(),
+						centreHz: CENTRE,
+						sampleRateHz: FS,
+						binHz: 1000,
+						startHz: CENTRE - FS / 2,
+						bins: [],
+						floorDbfs: -90,
+						thresholdDb: 10,
+						tracks: [],
+						masks: { dcHz: CENTRE, dcGuardHz: 0, spurRanges: [] },
+						floorOccupied: false,
+						overload: false,
+					},
+				},
+			])
+		}
 		const feed = async (
 			src: NfmSource,
 			seconds: number,
@@ -152,6 +177,7 @@ describe("WidebandAnalogRecorder at a hop through the real SpectrumEngine", () =
 			for (let i = 0; i < Math.round((seconds * FS) / chunk); i++) {
 				fanout.write(Buffer.from(src.next(chunk, on)))
 				await settle()
+				if (summaries) block()
 				each?.()
 				for (let k = 0; k < 1000 && queue.length > 0; k++) {
 					queue.shift()!()
@@ -173,6 +199,9 @@ describe("WidebandAnalogRecorder at a hop through the real SpectrumEngine", () =
 				)
 		}
 		await feed(oldTuning, 2.5, true, track)
+		// The engine's own label of the old tuning, from the ledger's receipts.
+		expect(engine.currentEpoch().tuningTrust).toBe("commanded")
+		summaries = false
 		// The arbiter's hop: its command position is the engine's own clock.
 		const clock = engine.sampleClock()
 		const hop: PendingEpoch = {
@@ -189,6 +218,7 @@ describe("WidebandAnalogRecorder at a hop through the real SpectrumEngine", () =
 			tuningTrust: "commanded",
 			centreChanged: true,
 		}
+		receiver.write("set-frequency", hop.centreHz, "scanner")
 		engine.submitEpoch(hop)
 		const command = clock.commandSample + clock.bufferedSamples
 		expect(engine.currentEpoch().pendingRetuneSample).toBe(command)

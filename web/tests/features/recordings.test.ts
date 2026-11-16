@@ -112,6 +112,15 @@ describe("recording text", () => {
 		expect(
 			recordingCutLabel(scan({ cut: "duration-rollover", part: 5, parts: 5 })),
 		).toBe("Part 5 of 5")
+		// A lone roll-over file (no part known) names no next part, only why it ended.
+		expect(
+			recordingCutLabel(
+				scan({ cut: "duration-rollover", part: null, parts: null }),
+			),
+		).toBe("Cut: length limit")
+		expect(recordingCutLabel(scan({ cut: "duration-rollover" }))).toBe(
+			"Cut: length limit",
+		)
 		expect(
 			recordingCutLabel(scan({ cut: "scanner-moved", part: 3, parts: 3 })),
 		).toBe("Part 3 of 3 · Cut: scanner moved on")

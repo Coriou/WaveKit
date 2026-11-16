@@ -4,7 +4,8 @@
  * is measured from the live edge (its ring backlog), not from the command position it may read
  * to. Measured to the command, a session 1.5 s behind looked 1.5 s behind for the whole hold,
  * never earned the catch-up grant, and lost the old tuning's tail once the ring passed it.
- * Also: a hold cap and a trusted-run end seen in the same drain end the file at the earlier.
+ * Also: a session still behind the command is ended by the hold cap past maxBacklog; a hold cap
+ * and a trusted-run end seen in the same drain end the file at the earlier.
  */
 import { describe, expect, it } from "vitest"
 import {
@@ -165,6 +166,48 @@ describe("WidebandAnalogRecorder ring backlog while a retune is held", () => {
 		expect(opA.frames).toBeGreaterThanOrEqual(expected - 8 * 60)
 	}, 120_000)
 
+	it("a session still behind the command when the hold passes maxBacklog is ended by the cap at the command; at exactly maxBacklog it holds", async () => {
+		for (const past of [false, true]) {
+			const h = harness({ fs: LOW_FS, offset: LOW_OFFSET })
+			await h.feed(0.5, false)
+			const hz = CENTRE + LOW_OFFSET
+			const onset = h.engine.liveEdge()
+			await h.feed(3, true, () => {
+				if (h.engine.liveEdge() - onset >= ms(100)) report(h, "a", onset, hz)
+			})
+			await h.pump()
+			const [a] = sessions(h)
+			// 400 ms written with no recorder turn: the session is 400 ms behind at the command.
+			write(h, 400, true)
+			expect(h.engine.liveEdge() - a!.next).toBeGreaterThanOrEqual(ms(400))
+			const at = command(h)
+			// Held with no recorder turn: exactly maxBacklog (2000 ms), or one 25 ms chunk past
+			// it; the ring (3 s) still holds the 2.4 s the session has not read.
+			write(h, past ? 2025 : 2000, true)
+			expect(h.engine.liveEdge() - at).toBe(
+				past ? MAX_BACKLOG + ms(25) : MAX_BACKLOG,
+			)
+			expect(h.engine.liveEdge() - a!.next).toBeLessThan(RING)
+			report(h, "a", onset, hz)
+			await h.turn()
+			if (!past) {
+				expect(a!.limit).toBe(Number.POSITIVE_INFINITY)
+				continue
+			}
+			expect(a!.limit).toBe(at)
+			for (let i = 0; i < 40 && !h.ops[0]?.outcome; i++) {
+				await h.turn()
+				await h.pump()
+			}
+			await h.rec.idle()
+			expect(h.ops).toHaveLength(1)
+			const op = h.ops[0]!
+			expect(op.outcome).toBe("finalized")
+			expect(op.cut).toBe("epoch-changed")
+			expect(a!.next).toBe(at)
+		}
+	}, 120_000)
+
 	it("a hold cap and a trusted-run end in the same drain end the file at the earlier (the run's end)", async () => {
 		const h = harness()
 		const trust: {
@@ -180,22 +223,24 @@ describe("WidebandAnalogRecorder ring backlog while a retune is held", () => {
 			if (edge - onset >= 0.1 * FS)
 				h.rec.track(input("o", snapshot("o", onset, edge)))
 		})
-		const at = command(h)
-		// Held exactly maxBacklog (3 s ring − 1 s margin): still open.
-		await h.feed(2, true, () =>
-			h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge()))),
-		)
-		expect(h.engine.liveEdge() - at).toBe(2 * FS)
 		await h.pump()
 		const s = sessions(h)[0]!
 		expect(s.limit).toBe(Number.POSITIVE_INFINITY)
-		expect(s.next).toBe(at)
+		// 400 ms with no recorder turn: the session is behind the command (the cap ends only a
+		// session still behind it).
+		for (let i = 0; i < 16; i++) h.engine.write(h.src.next(FS / 40, true))
+		const at = command(h)
+		expect(s.next).toBeLessThan(at)
+		// Held maxBacklog (3 s ring − 1 s margin) and one sample past it, still with no turn.
+		for (let i = 0; i < 80; i++) h.engine.write(h.src.next(FS / 40, true))
+		h.engine.write(new Uint8Array([127, 127]))
+		expect(h.engine.liveEdge() - at).toBe(2 * FS + 1)
 		// One drain sees both: one sample past the cap, and the trusted run ended 0.5 s before
 		// the command (a doubt).
 		const doubtAt = at - Math.round(0.5 * FS)
 		trust.trustedFromSample = null
 		trust.runEnd = { from: 0, end: doubtAt }
-		h.engine.write(new Uint8Array([127, 127]))
+		h.rec.track(input("o", snapshot("o", onset, h.engine.liveEdge())))
 		for (let i = 0; i < 4; i++) await h.pump()
 		expect(s.limit).toBe(doubtAt)
 		expect(s.file?.endSample ?? doubtAt).toBe(doubtAt)

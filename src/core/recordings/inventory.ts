@@ -70,6 +70,23 @@ export const RECORDINGS_RECONCILE_FOLDER_GAP_MS = 20
 /** Default rest between the end of one reconcile and the start of the next. */
 export const RECORDINGS_RECONCILE_INTERVAL_MS = 60_000
 /**
+ * How long after a scanner analog file's last write (its mtime) a missing receipt may still
+ * appear (ms): 300 000 (5 min). The store links the WAV before it writes the operation's
+ * receipt.json, so a pass may index the file first; while the file is this young a null receipt
+ * is not kept as final and the next pass reads it again. It covers the in-progress window
+ * (RECORDINGS_IN_PROGRESS_MS, 10 s), the late-verdict hold (26 s) and the prepare and commit
+ * after the link (well under a second, minutes on a stalled disk) with room to spare; a pass
+ * runs at least every RECORDINGS_RECONCILE_INTERVAL_MS (60 s), so a late receipt is read within
+ * about a minute. At exactly the bound (now − mtime = 300 000) it is still read again; past it
+ * the null stands (an older analog file without a receipt keeps none: unknown cut and part).
+ */
+export const RECORDINGS_RECEIPT_WAIT_MS = 300_000
+
+/** A file last written at `mtimeMs` may still get its receipt at `at` (RECORDINGS_RECEIPT_WAIT_MS). */
+function receiptMayFollow(mtimeMs: number, at: number): boolean {
+	return at - mtimeMs <= RECORDINGS_RECEIPT_WAIT_MS
+}
+/**
  * Longest a listing waits for the first build or an urgent refresh (a delete, invalidate, a
  * source change) before it answers from what is indexed (`indexing: true` during the build).
  * Under the 1 s "usable" budget.
@@ -1362,7 +1379,14 @@ export function createRecordingInventory(
 			prev.dev === st.dev &&
 			prev.ino === st.ino &&
 			prev.size === st.size &&
-			prev.mtimeMs === st.mtimeMs
+			prev.mtimeMs === st.mtimeMs &&
+			// A young scanner analog file indexed before its receipt was written (the store links
+			// the WAV first) is read again on every pass until RECORDINGS_RECEIPT_WAIT_MS.
+			!(
+				prev.receipt === null &&
+				spec.kind === "scanner-analog" &&
+				receiptMayFollow(st.mtimeMs, at)
+			)
 		)
 			return
 		if (!prev && beyondBound(st.mtimeMs, id)) return
