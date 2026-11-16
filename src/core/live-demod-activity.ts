@@ -8,7 +8,7 @@ import type { LiveDemodConfig, LiveDemodStatus } from "./live-demodulator.js"
 /**
  * Manual mode gates only when the threshold is non-zero. Squelch 0 stays open
  * for the whole run, so it is not operator activity and not a transmission.
- * Auto, open (Listen: detects at the auto threshold) and (WG7 req 2.4) noise mode always gate.
+ * Auto, open (Listen: detects at the auto threshold) and noise mode always gate.
  * Open on the Rust engine does not gate: the engine has no detect-only stage yet and plays
  * ungated, so its gate stays open for the whole run like the old manual 0.
  */

@@ -152,7 +152,7 @@ describe("Live Audio Routes: noise and tone squelch", () => {
 	})
 
 	// Listen: noise is no longer stored, so a later modulation change has no noise rule to break;
-	// noise sent with a non-FM modulation is still refused with the WG7 rule.
+	// noise sent with a non-FM modulation is still refused with the original noise rule.
 	it("refuses noise together with a non-FM modulation; a stored (migrated) noise config may move", async () => {
 		const refused = await patch({ squelchMode: "noise", modulation: "usb" })
 		expect(refused.statusCode).toBe(400)

@@ -22,7 +22,7 @@ import {
 import { evidenceGateApplies } from "../../../src/core/evidence-squelch/contract.js"
 
 describe("Listen contract constants", () => {
-	it("adds positions, inputs and listen modes; the WG7 list is unchanged", () => {
+	it("adds positions, inputs and listen modes; the original modes list is unchanged", () => {
 		expect(LIVE_AUDIO_SQUELCH_MODES).toEqual(["manual", "auto", "noise"])
 		expect(LIVE_AUDIO_SQUELCH_POSITIONS).toEqual(["auto", "manual", "open"])
 		expect(LIVE_AUDIO_SQUELCH_INPUT_MODES).toEqual([
@@ -283,7 +283,7 @@ describe("startup config", () => {
 			{ listenMode: "decoded" },
 		])
 			expect(LiveDemodConfigSchema.safeParse(bad).success).toBe(false)
-		// The deprecated input keeps its WG7 rule: noise on AM is refused.
+		// The deprecated input keeps its original rule: noise on AM is refused.
 		expect(
 			LiveDemodConfigSchema.safeParse({
 				squelchMode: "noise",

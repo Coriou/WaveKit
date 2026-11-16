@@ -156,7 +156,7 @@ async function main(args) {
 			const samples = decodePcm(audio.data, audio.format)
 			const tails = findNoiseTails(samples, audio.sampleRate, classifier)
 			const releases = tails.filter(t => t.after === "audio")
-			// WG7 req 4.1 bounds manual and auto mode; noise and open (everything plays) are
+			// The squelch-tail requirement bounds manual and auto mode; noise and open (everything plays) are
 			// reported without one.
 			const bound =
 				mode === "noise" || mode === "open"

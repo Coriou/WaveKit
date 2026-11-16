@@ -361,7 +361,7 @@ const liveDemodFields = z.object({
 	/**
 	 * manual: `squelch` is the threshold; auto: noise-floor estimate + `autoMarginDb`;
 	 * open (Listen, 2026-11-15): everything plays while stage 1 keeps detecting at the auto
-	 * threshold. WG7 noise (NFM/WFM, deprecated): FM discriminator quieting of at least
+	 * threshold. Noise (NFM/WFM, deprecated): FM discriminator quieting of at least
 	 * `noiseQuietingDb`; a loaded config and the API store it as auto with `voiceOnly: false`
 	 * (`migrateLiveAudioSquelch`).
 	 */
