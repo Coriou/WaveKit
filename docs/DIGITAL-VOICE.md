@@ -150,7 +150,15 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   call starts, that unannounced live voice is dropped, counted in
   `voiceHold.discardedMs` (the new call's own slot holds it instead when the call
   is not known yet), and only released voice of calls known clear keeps playing.
-  Beyond 2 s the oldest held voice is dropped.
+  Released voice itself is only proven its call's once one dsd-fme line clump
+  (340 ms) has passed since the release: the hold cannot tell where one call's
+  voice ends and the next begins, and dsd-fme's lines arrive in clumps, so a
+  call that is known clear, ends and is followed by an encrypted or
+  not-yet-known call within one clump may have held the next call's early
+  voice as its own. A restricted call starting within that window drops (or,
+  when not known yet, holds) what of the released voice has not played yet; a
+  clear call starting then loses nothing. `discardedMs` counts voiced samples
+  only (silence is not lost voice). Beyond 2 s the oldest held voice is dropped.
   The hold starts at the call's `call_start`, which for a call started on its
   voice frames alone comes after the evidence that it is an over (dsd-fme
   announces it on the line that completes it). The call's voice still queued

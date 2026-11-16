@@ -36,6 +36,7 @@ import { z } from "zod"
 import type { DigitalVoiceConfig } from "../config.js"
 import type { DecoderConfig } from "../decoders/types.js"
 import {
+	DSD_FME_LINE_CLUMP_MS,
 	DSD_FME_MODES,
 	dsdFmeUdpChannels,
 	type DsdFmeMode,
@@ -357,16 +358,41 @@ const RUN_LIVE_SLOT = 1
 const RUN_LIVE_MIX = 2
 
 /**
+ * How long a release stays unproven (340 ms, DSD_FME_LINE_CLUMP_MS). A lane
+ * holds its call's voice until the line saying it is clear arrives, but the
+ * hold cannot tell where that call's voice ends: dsd-fme may already carry
+ * the next call's over, and its lines reach us in clumps 340 ms apart, so a
+ * release and the next call's start less than one clump apart can come out
+ * of one clump, with the next call's early voice already held (and released)
+ * as the first call's. So a released run is only final for a restricted call
+ * starting on its path at least 340 ms after the release (`runAt`); one
+ * starting sooner treats the run's samples still in the lane like live voice:
+ * dropped (counted) when it is encrypted, held for it when it is not known
+ * yet (played if it turns out clear). The window starts at the release, not
+ * at the call's end: every sample after the release is live voice, already
+ * unproven (dropLive). A clear call starting sooner drops nothing. At most
+ * one lane ring (16 000 samples, 2 s) goes per start; what of the run the
+ * pacer already queues (popped since the release, under 340 ms of it) is
+ * cleared or taken back with the slot's other queued voice (dropLateEntry,
+ * takeQueued).
+ */
+const HOLD_RELEASE_PROOF_MS = DSD_FME_LINE_CLUMP_MS
+
+/**
  * One /stream lane: a fixed ring of mono samples. The head `releasable`
  * samples are clear (play them in order before live voice); the rest is held
  * for `callId`, whose encryption is not known yet. Held voice only exists
  * while `callId` is set. The releasable part is split, oldest first, into
  * runs (`runCount[i]` samples, summing to `releasable`), each with the call
  * that governed it (`runOwner[i]`; null: none) and its kind (`runKind[i]`):
- * voice a call released, or live voice queued behind the backlog. Only
- * released voice is proven its call's: live voice may already be the next
- * call's (dsd-fme carries the next over before announcing it), so a
+ * voice a call released, or live voice queued behind the backlog; released
+ * voice also keeps its release time (`runAt[i]`) and whether it holds one
+ * voice dsd-fme copied to both channels (`runShared[i]`: its slot is not
+ * known). Only released voice is proven its call's, and only from
+ * HOLD_RELEASE_PROOF_MS after its release: live voice may already be the
+ * next call's (dsd-fme carries the next over before announcing it), so a
  * restricted call starting drops it (dropRuns) or holds it (holdLiveTail).
+ * Discards count voiced (non-zero) samples only: silence is no lost voice.
  */
 class HoldLane {
 	private readonly ring = new Int16Array(VOICE_HOLD_SAMPLES)
@@ -374,14 +400,18 @@ class HoldLane {
 	length = 0
 	releasable = 0
 	callId: string | null = null
+	/** The held part holds voice copied to both channels (slot not known). */
+	private heldShared = false
 	private readonly runOwner: (string | null)[] = []
 	private readonly runCount: number[] = []
 	private readonly runKind: number[] = []
+	private readonly runAt: number[] = []
+	private readonly runShared: boolean[] = []
 
 	/**
 	 * Appends src[from, to), releasable when `clear` (live voice of `kind`,
-	 * governed by `owner`); beyond the bound drops the oldest. Returns samples
-	 * dropped.
+	 * governed by `owner`), else held (of `kind` too); beyond the bound drops
+	 * the oldest. Returns samples dropped.
 	 */
 	push(
 		src: Int16Array,
@@ -416,18 +446,29 @@ class HoldLane {
 		this.length += count
 		if (clear) {
 			this.releasable += count
-			this.appendRun(owner, count, kind)
-		}
+			this.appendRun(owner, count, kind, 0, false)
+		} else if (kind === RUN_LIVE_MIX && count > 0) this.heldShared = true
 		return dropped
 	}
 
 	/**
 	 * Puts src[from, to) ahead of everything and makes the whole lane held
-	 * (the head of a call not known yet, still queued in the pacer). Beyond
-	 * the bound drops the oldest. Returns samples dropped.
+	 * (the head of a call not known yet, still queued in the pacer; `shared`:
+	 * it holds voice copied to both channels). Beyond the bound drops the
+	 * oldest. Returns samples dropped.
 	 */
-	prependHeld(src: Int16Array, from: number, to: number): number {
+	prependHeld(
+		src: Int16Array,
+		from: number,
+		to: number,
+		shared: boolean,
+	): number {
 		const cap = VOICE_HOLD_SAMPLES
+		const heldShared =
+			shared ||
+			this.heldShared ||
+			this.runKind.includes(RUN_LIVE_MIX) ||
+			this.runShared.includes(true)
 		const excess = Math.max(0, this.length + (to - from) - cap)
 		const start = from + Math.min(excess, to - from)
 		const count = to - start
@@ -440,19 +481,28 @@ class HoldLane {
 		this.length += count
 		this.releasable = 0
 		this.clearRuns()
+		this.heldShared = heldShared
 		return excess
 	}
 
 	/**
-	 * The live tail (every live run newer than the last released one), not
-	 * proven any call's, becomes held for the call starting. Returns samples.
+	 * The unproven tail (every live run, and every run released at `since` or
+	 * later, newer than the last proven released run) becomes held for the
+	 * call starting. Returns samples.
 	 */
-	holdLiveTail(): number {
+	holdLiveTail(since: number): number {
 		let held = 0
-		while (this.runKind.length > 0 && this.runKind.at(-1) !== RUN_RELEASED) {
+		for (let last = this.runKind.length - 1; last >= 0; last--) {
+			const kind = this.runKind[last]!
+			if (kind === RUN_RELEASED && this.runAt[last]! < since) break
+			if (kind === RUN_LIVE_MIX || this.runShared[last] === true)
+				this.heldShared = true
+			held += this.runCount[last]!
 			this.runOwner.pop()
+			this.runCount.pop()
 			this.runKind.pop()
-			held += this.runCount.pop()!
+			this.runAt.pop()
+			this.runShared.pop()
 		}
 		this.releasable -= held
 		return held
@@ -480,37 +530,59 @@ class HoldLane {
 		return p
 	}
 
-	/** The held part becomes releasable, owned by its call. Returns samples released. */
-	release(): number {
+	/**
+	 * The held part becomes releasable, owned by its call, released `at`
+	 * (performance.now()). Returns samples released.
+	 */
+	release(at: number): number {
 		const released = this.length - this.releasable
 		this.releasable = this.length
-		this.appendRun(this.callId, released, RUN_RELEASED)
+		this.appendRun(this.callId, released, RUN_RELEASED, at, this.heldShared)
+		this.heldShared = false
 		return released
 	}
 
-	/** Drops the held part, keeping the releasable head. Returns samples dropped. */
+	/** Drops the held part, keeping the releasable head. Returns voiced samples dropped. */
 	discardHeld(): number {
-		const discarded = this.length - this.releasable
+		const cap = VOICE_HOLD_SAMPLES
+		const voiced = this.voiced(
+			(this.head + this.releasable) % cap,
+			this.length - this.releasable,
+		)
 		this.length = this.releasable
-		return discarded
+		this.heldShared = false
+		return voiced
 	}
 
 	/**
-	 * Drops every releasable run `drop` accepts (by owner and kind), wherever
-	 * it is, keeping the others and any held part in order. Call events only
-	 * (copies the ring). Returns samples dropped.
+	 * Drops every releasable run `drop` accepts (by owner, kind, whether it
+	 * was released at `since` or later, and whether it holds voice copied to
+	 * both channels), wherever it is, keeping the others and any held part in
+	 * order. Call events only (copies the ring). Returns voiced samples dropped.
 	 */
-	dropRuns(drop: (owner: string | null, kind: number) => boolean): number {
+	dropRuns(
+		drop: (
+			owner: string | null,
+			kind: number,
+			recent: boolean,
+			shared: boolean,
+		) => boolean,
+		since = Number.POSITIVE_INFINITY,
+	): number {
 		const cap = VOICE_HOLD_SAMPLES
 		let r = this.head
 		let w = this.head
 		let dropped = 0
+		let voiced = 0
 		let kept = 0
 		for (let i = 0; i < this.runCount.length; i++) {
 			const owner = this.runOwner[i] ?? null
 			const count = this.runCount[i]!
 			const kind = this.runKind[i]!
-			if (drop(owner, kind)) {
+			const at = this.runAt[i]!
+			const shared = this.runShared[i] === true
+			if (drop(owner, kind, kind === RUN_RELEASED && at >= since, shared)) {
+				voiced += this.voiced(r, count)
 				r = (r + count) % cap
 				dropped += count
 				continue
@@ -524,32 +596,49 @@ class HoldLane {
 				this.runKind[last] === kind
 			) {
 				this.runCount[last]! += count
+				this.runAt[last] = Math.max(this.runAt[last]!, at)
+				if (shared) this.runShared[last] = true
 				continue
 			}
 			this.runOwner[kept] = owner
 			this.runCount[kept] = count
 			this.runKind[kept] = kind
+			this.runAt[kept] = at
+			this.runShared[kept] = shared
 			kept++
 		}
 		this.runOwner.length = kept
 		this.runCount.length = kept
 		this.runKind.length = kept
+		this.runAt.length = kept
+		this.runShared.length = kept
 		if (dropped === 0) return 0
 		// The held part (if any) moves back over the dropped spans.
 		this.copy(r, w, this.length - this.releasable)
 		this.length -= dropped
 		this.releasable -= dropped
-		return dropped
+		return voiced
 	}
 
-	/** Drops everything (no listener, detach). Returns the held samples dropped. */
+	/** Drops everything (no listener, detach). Returns the voiced held samples dropped. */
 	reset(): number {
-		const dropped = this.length - this.releasable
+		const dropped = this.discardHeld()
 		this.head = 0
 		this.length = 0
 		this.releasable = 0
 		this.clearRuns()
 		return dropped
+	}
+
+	/** Non-zero samples among count ring samples from r. */
+	private voiced(r: number, count: number): number {
+		const cap = VOICE_HOLD_SAMPLES
+		let voiced = 0
+		for (let i = 0; i < count; i++) {
+			if (this.ring[r] !== 0) voiced++
+			r = r + 1 === cap ? 0 : r + 1
+		}
+		return voiced
 	}
 
 	/** Copies count ring samples from r back to w (w never ahead of r). Returns the new w. */
@@ -564,7 +653,13 @@ class HoldLane {
 		return w
 	}
 
-	private appendRun(owner: string | null, count: number, kind: number): void {
+	private appendRun(
+		owner: string | null,
+		count: number,
+		kind: number,
+		at: number,
+		shared: boolean,
+	): void {
 		if (count === 0) return
 		const last = this.runOwner.length - 1
 		if (
@@ -573,21 +668,26 @@ class HoldLane {
 			this.runKind[last] === kind
 		) {
 			this.runCount[last]! += count
+			this.runAt[last] = Math.max(this.runAt[last]!, at)
+			if (shared) this.runShared[last] = true
 			return
 		}
 		if (this.runOwner.length === HOLD_LANE_MAX_RUNS) {
-			// The oldest two merge; differing owners fail closed as a mix, and
-			// live voice in it keeps the merge live (never proven released).
+			// The oldest two merge; differing owners fail closed as a mix, live
+			// voice in it keeps the merge live (never proven released), and it
+			// keeps the newer release time and any copied voice.
 			if (this.runOwner[0] !== this.runOwner[1]) this.runOwner[1] = MIXED_OWNER
 			this.runCount[1]! += this.runCount[0]!
 			this.runKind[1] = Math.max(this.runKind[0]!, this.runKind[1]!)
-			this.runOwner.shift()
-			this.runCount.shift()
-			this.runKind.shift()
+			this.runAt[1] = Math.max(this.runAt[0]!, this.runAt[1]!)
+			if (this.runShared[0] === true) this.runShared[1] = true
+			this.shiftRun()
 		}
 		this.runOwner.push(owner)
 		this.runCount.push(count)
 		this.runKind.push(kind)
+		this.runAt.push(at)
+		this.runShared.push(shared)
 	}
 
 	/** The oldest n releasable samples left the lane. */
@@ -600,16 +700,24 @@ class HoldLane {
 				return
 			}
 			left -= first
-			this.runOwner.shift()
-			this.runCount.shift()
-			this.runKind.shift()
+			this.shiftRun()
 		}
+	}
+
+	private shiftRun(): void {
+		this.runOwner.shift()
+		this.runCount.shift()
+		this.runKind.shift()
+		this.runAt.shift()
+		this.runShared.shift()
 	}
 
 	private clearRuns(): void {
 		this.runOwner.length = 0
 		this.runCount.length = 0
 		this.runKind.length = 0
+		this.runAt.length = 0
+		this.runShared.length = 0
 	}
 }
 
@@ -737,7 +845,7 @@ function laneStep(
 			status === LANE_HOLD &&
 			(anyNonZero(content, 0, n) || (!virtual && lane.length > lane.releasable))
 		) {
-			stats.overflow += lane.push(content, 0, n, false)
+			stats.overflow += lane.push(content, 0, n, false, null, kind)
 			stats.held += n
 		}
 		return p
@@ -1438,12 +1546,16 @@ export class DigitalVoiceService
 				c1.fill(0, 0, n)
 				c2.fill(0, 0, n)
 			} else {
+				// One voice on both channels only when identical and voiced: an
+				// all-zero datagram is silence on both slots, not a shared voice.
 				let identical = true
+				let voiced = false
 				for (let i = 0; i < n && identical; i++) {
-					if (datagram.readInt16LE(i * 4) !== datagram.readInt16LE(i * 4 + 2))
-						identical = false
+					const left = datagram.readInt16LE(i * 4)
+					if (left !== datagram.readInt16LE(i * 4 + 2)) identical = false
+					else if (left !== 0) voiced = true
 				}
-				if (!identical) {
+				if (!identical || !voiced) {
 					for (let i = 0; i < n; i++) {
 						c1[i] = datagram.readInt16LE(i * 4)
 						c2[i] = datagram.readInt16LE(i * 4 + 2)
@@ -1563,7 +1675,7 @@ export class DigitalVoiceService
 			if (lane !== null && lane.callId !== null) {
 				if (call !== null && call.callId === lane.callId && !call.encrypted) {
 					if (call.encryptionKnown !== false) {
-						stats.released += lane.release()
+						stats.released += lane.release(performance.now())
 						lane.callId = null
 					}
 				} else {
@@ -1593,21 +1705,30 @@ export class DigitalVoiceService
 	 * live voice queued behind a backlog that may be its early voice is
 	 * dropped (counted): live voice of its own slot lane, of the whole lane,
 	 * and one voice dsd-fme copied to both channels in the other slot lane;
-	 * every slot lane's live voice when its slot is unknown. Released voice of
-	 * known-clear calls stays. Returns samples dropped.
+	 * every slot lane's live voice when its slot is unknown. Voice released
+	 * less than HOLD_RELEASE_PROOF_MS ago is not proven its call's and goes
+	 * the same way (in the other slot lane only when it holds voice copied to
+	 * both channels). Older released voice of known-clear calls stays.
+	 * Returns voiced samples dropped.
 	 */
 	private dropLive(channel: VoiceChannel, key: SlotKey): number {
 		const hold = channel.hold
 		if (hold === null) return 0
 		let dropped = 0
-		const live = (_owner: string | null, kind: number) => kind !== RUN_RELEASED
-		const shared = (_owner: string | null, kind: number) =>
-			kind === RUN_LIVE_MIX
+		const since = performance.now() - HOLD_RELEASE_PROOF_MS
+		const live = (_owner: string | null, kind: number, recent: boolean) =>
+			kind !== RUN_RELEASED || recent
+		const shared = (
+			_owner: string | null,
+			kind: number,
+			recent: boolean,
+			copied: boolean,
+		) => kind === RUN_LIVE_MIX || (recent && copied)
 		for (let index = 0; index < 3; index++) {
 			const lane = hold.lanes[index]
 			if (lane === null || lane === undefined) continue
 			const all = key === 0 || index === 0 || index === key
-			dropped += lane.dropRuns(all ? live : shared)
+			dropped += lane.dropRuns(all ? live : shared, since)
 		}
 		channel.holdStats.discarded += dropped
 		return dropped
@@ -1619,8 +1740,10 @@ export class DigitalVoiceService
 	 * lane and still in the pacer, becomes the head of its hold, in order, so
 	 * a clear over loses nothing to a late announce. The other slot's queued
 	 * voice stays queued. Behind another call's released backlog only the
-	 * live tail is held (it may be this call's): the pacer, queuing only older
-	 * voice, is not touched.
+	 * unproven tail is held (live voice, or voice released less than
+	 * HOLD_RELEASE_PROOF_MS ago: it may be this call's): the pacer, queuing
+	 * only older proven voice, is not touched. When no proven released voice
+	 * is left, the pacer's queued head of the slot is taken too, as above.
 	 */
 	private takeQueued(
 		channel: VoiceChannel,
@@ -1629,8 +1752,12 @@ export class DigitalVoiceService
 	): void {
 		const stats = channel.holdStats
 		if (!lane.liveOnly()) {
-			stats.held += lane.holdLiveTail()
-			return
+			const held = lane.holdLiveTail(performance.now() - HOLD_RELEASE_PROOF_MS)
+			if (lane.releasable > 0) {
+				stats.held += held
+				return
+			}
+			// The whole lane is held now; counted below with the pacer's head.
 		}
 		const shadow = channel.shadow
 		const queued = shadow === null ? 0 : shadow.queued(channel.paced.stats)
@@ -1643,6 +1770,7 @@ export class DigitalVoiceService
 		let ownFrom = take
 		let restFrom = take
 		let shared = 0
+		let copied = false
 		if (shadow !== null && take > 0) {
 			const otherRestricted =
 				index !== 0 &&
@@ -1673,9 +1801,14 @@ export class DigitalVoiceService
 					// with the other slot restricted too it is ambiguous: dropped.
 					if (index !== 0 && otherRestricted) {
 						if (a !== 0) shared++
-					} else mine = a
-				} else if (index === 0) mine = a
-				else {
+					} else {
+						mine = a
+						if (a !== 0) copied = true
+					}
+				} else if (index === 0) {
+					mine = a
+					if (a !== 0) copied = true
+				} else {
 					ra = a
 					rk = SHADOW_OPAQUE
 				}
@@ -1691,7 +1824,7 @@ export class DigitalVoiceService
 		if (ownFrom === take && shared === 0) {
 			// Nothing of the call is queued in the pacer: the lane alone is held.
 			stats.held += lane.length
-			lane.prependHeld(own, take, take)
+			lane.prependHeld(own, take, take, false)
 			return
 		}
 		// Voice older than the shadow is dropped with the pacer's queue.
@@ -1708,7 +1841,7 @@ export class DigitalVoiceService
 			channel.paced.push(pcm)
 		}
 		const before = lane.length
-		stats.overflow += lane.prependHeld(own, ownFrom, take)
+		stats.overflow += lane.prependHeld(own, ownFrom, take, copied)
 		stats.held += before + (take - ownFrom)
 	}
 
