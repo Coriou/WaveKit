@@ -4,14 +4,13 @@ import "./recordings.css"
 // delete): header "Recordings · count · All / Kept" with the core's counts, typed-chip search run by the core,
 // one notice slot, the virtual list of rows grouped by day (only what is on screen is mounted; older pages
 // load at the end; open in place: waveform, Keep, Download, Tune, Show in Activity or Scanner, Delete with
-// Undo), the player bar and the storage footer. The list follows the catalogue's `recordings` socket notices;
-// arrivals hold while it is scrolled or playing ("N new"). Names, notes, trim, transcripts, IQ captures and
+// Undo) and the storage footer. Playback is the app's one player (services.playback, its dock the only
+// transport): the row disc toggles it, the open row's waveform seeks it, the playing row is marked. The list
+// follows the catalogue's `recordings` socket notices; arrivals hold while it is scrolled or playing from it
+// ("N new"). Names, notes, trim, transcripts, IQ captures and
 // Opus downloads wait for the core (CORE-GAPS "Recordings").
 import { memo, useEffect, useMemo, useRef, useState } from "react"
-import type {
-	KeyboardEvent as ReactKeyboardEvent,
-	PointerEvent as ReactPointerEvent,
-} from "react"
+import type { KeyboardEvent as ReactKeyboardEvent } from "react"
 import type { RecordingInventoryItem } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
@@ -39,18 +38,19 @@ import { useVirtualRows } from "../../ui/virtual-rows.ts"
 import { token as activityToken } from "../activity/search.ts"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import { formatMHz } from "../format.ts"
-import { PlayGlyph, RecIcon } from "./icons.tsx"
+import { playbackIdOf } from "../playback/keep.ts"
+import { PlayDisc, usePlaybackMark, WaveView } from "../playback/PlaybackUi.tsx"
+import type { PlaybackService, QueueRef } from "../playback/service.ts"
+import { RecIcon } from "./icons.tsx"
 import { listKeyAction } from "./keys.ts"
 import {
 	countText,
 	dayEntries,
 	deleteBlocker,
 	formatBytes,
-	formatDuration,
 	headerCount,
 	recordedAt,
 	recordingIcon,
-	recordingCutLabel,
 	recordingMeta,
 	recordingTitle,
 	recordingsQuery,
@@ -58,7 +58,6 @@ import {
 	suggest,
 	timeLabel,
 } from "./model.ts"
-import { RecordingPlayer, WAVE_BARS } from "./player.ts"
 import type { RecFilter } from "./ui-store.ts"
 import {
 	addToken,
@@ -68,7 +67,6 @@ import {
 	removeToken,
 	setCursor,
 	setFilter,
-	requestReveal,
 	revealRequest,
 	setText,
 	visibleRecordings,
@@ -89,23 +87,18 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 	const recordings = services.data.recordings
 	const unavailable = useStore(recordings, recordingsUnavailable)
 	const readOnly = useReadOnly()
-
-	// the list as shown, read by the player's auto-advance
-	const order = useRef<readonly RecordingInventoryItem[]>([])
-	const player = useMemo(
-		() =>
-			new RecordingPlayer({
-				fetchFile: id => recordings.file(id),
-				holdLive: held => services.listen.hold(held),
-				nextOf: id => {
-					const list = order.current
-					const i = list.findIndex(r => r.id === id)
-					return i >= 0 ? (list[i + 1]?.id ?? null) : null
-				},
-			}),
-		[recordings, services.listen],
-	)
-	useEffect(() => () => player.dispose(), [player])
+	const player = services.playback
+	// the open row: the dock goes compact while it is the playing one
+	const openId = useStore(recordingsUi, s => s.openId)
+	const openPid = useStore(recordings, s => {
+		const item =
+			openId === null ? undefined : s.items.find(r => r.id === openId)
+		return item ? playbackIdOf(item) : null
+	})
+	useEffect(() => {
+		player.setExpanded("recordings", openPid)
+	}, [player, openPid])
+	useEffect(() => () => player.setExpanded("recordings", null), [player])
 
 	// open: the list for the current search, following the catalogue's notices (no polling)
 	useEffect(() => {
@@ -145,8 +138,7 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 						</p>
 					)}
 					<SearchBar />
-					<List player={player} order={order} readOnly={readOnly} />
-					<PlayerBar player={player} order={order} />
+					<List player={player} readOnly={readOnly} />
 				</>
 			)}
 			<Footer />
@@ -387,13 +379,24 @@ function noticeText(
 	}
 }
 
+/** The Recordings queue: the playable rows as shown, by playback id, with their titles. */
+export function recordingsQueue(
+	visible: readonly RecordingInventoryItem[],
+): QueueRef {
+	const titles: Record<string, string> = {}
+	for (const r of visible) titles[playbackIdOf(r)] = recordingTitle(r)
+	return {
+		source: "recordings",
+		ids: visible.map(playbackIdOf),
+		titles,
+	}
+}
+
 function List({
 	player,
-	order,
 	readOnly,
 }: {
-	player: RecordingPlayer
-	order: { current: readonly RecordingInventoryItem[] }
+	player: PlaybackService
 	readOnly: boolean
 }) {
 	const recordings = useServices().data.recordings
@@ -416,14 +419,24 @@ function List({
 	const filter = useStore(recordingsUi, s => s.filter)
 	const openId = useStore(recordingsUi, s => s.openId)
 	const cursorId = useStore(recordingsUi, s => s.cursorId)
-	const playing = useStore(player, s => s.id !== null)
+	// playing from this list holds its arrivals: its row does not move under the ear
+	const playing = useStore(
+		player,
+		s => s.id !== null && s.queue?.source === "recordings",
+	)
 	const [kb, setKb] = useState(false)
-	const actions = useActions(player)
 	const visible = useMemo(
 		() => visibleRecordings(items, removing),
 		[items, removing],
 	)
-	order.current = visible
+	// the list as shown is the queue Next and Auto-next follow while it is the one played from
+	const queue = useMemo(() => recordingsQueue(visible), [visible])
+	const queueRef = useRef(queue)
+	queueRef.current = queue
+	useEffect(() => {
+		player.setQueue("recordings", queue.ids, queue.titles)
+	}, [player, queue])
+	const actions = useActions(player, queueRef)
 	// the day labels follow the clock; a minute is fine for "Today"
 	const [now, setNow] = useState(() => new Date())
 	useEffect(() => {
@@ -755,7 +768,6 @@ function List({
 											open={openId === e.item.id}
 											tabStop={tabId === e.item.id}
 											cursor={kb && cursorId === e.item.id}
-											player={player}
 											readOnly={readOnly}
 											actions={actions}
 											list={visible}
@@ -781,7 +793,6 @@ function List({
 											open={openId === e.item.id}
 											tabStop={tabId === e.item.id}
 											cursor={kb && cursorId === e.item.id}
-											player={player}
 											readOnly={readOnly}
 											actions={actions}
 											list={visible}
@@ -826,6 +837,8 @@ function ListFoot() {
 const rowDomId = (id: string) => `wkr-${id.replace(/[^A-Za-z0-9_-]/g, "_")}`
 
 interface Actions {
+	/** The list it plays from, as shown now. */
+	queue(): QueueRef
 	play(r: RecordingInventoryItem): void
 	keep(r: RecordingInventoryItem): void
 	remove(
@@ -837,15 +850,19 @@ interface Actions {
 	inScanner(discoveryId: string): void
 }
 
-function useActions(player: RecordingPlayer): Actions {
+function useActions(
+	player: PlaybackService,
+	queue: { current: QueueRef },
+): Actions {
 	const services = useServices()
 	const recordings = services.data.recordings
 	return useMemo<Actions>(
 		() => ({
+			queue: () => queue.current,
 			play(r) {
-				const p = player.get()
-				if (p.id === r.id) player.toggle()
-				else void player.play(r.id)
+				const id = playbackIdOf(r)
+				if (player.get().id === id) player.toggle()
+				else player.play(id, queue.current, 0, recordingTitle(r))
 			},
 			keep(r) {
 				const kept = r.kept !== true
@@ -864,7 +881,7 @@ function useActions(player: RecordingPlayer): Actions {
 				const ui = recordingsUi.get()
 				if (ui.openId === r.id) openRow(neighbour?.id ?? null)
 				else if (ui.cursorId === r.id) setCursor(neighbour?.id ?? null)
-				player.forget(r.id)
+				player.forget(playbackIdOf(r))
 				const title = recordingTitle(r)
 				const undo = recordings.scheduleRemove(r.id, error =>
 					showAppToast(`Could not delete “${title}”: ${errorMessage(error)}`, {
@@ -898,7 +915,7 @@ function useActions(player: RecordingPlayer): Actions {
 				shellStore.openDrawer("scanner")
 			},
 		}),
-		[player, recordings, services],
+		[player, queue, recordings, services],
 	)
 }
 
@@ -915,7 +932,6 @@ interface RowProps {
 	item: RecordingInventoryItem
 	open: boolean
 	cursor: boolean
-	player: RecordingPlayer
 	readOnly: boolean
 	actions: Actions
 	list: readonly RecordingInventoryItem[]
@@ -930,21 +946,19 @@ const Row = memo(function Row({
 	item: r,
 	open,
 	cursor,
-	player,
 	readOnly,
 	actions,
 	list,
 }: RowProps) {
 	useDisplay() // the time follows Settings › Display
-	const phase = useStore(player, s => (s.id === r.id ? s.phase : null))
+	const pid = playbackIdOf(r)
+	const phase = usePlaybackMark(pid)
 	const recordings = useServices().data.recordings
 	const keeping = useStore(recordings.marks, m => m.keeping.has(r.id))
 	const title = recordingTitle(r)
 	const icon = recordingIcon(r)
 	const at = recordedAt(r)
-	const playing = phase === "playing" || phase === "loading"
 	const kept = r.kept === true
-	const dur = r.durationMs !== null ? formatDuration(r.durationMs / 1000) : "–"
 	const toggleOpen = () => openRow(open ? null : r.id)
 	return (
 		<article
@@ -990,36 +1004,23 @@ const Row = memo(function Row({
 							)}
 						</span>
 						<span className="wkr-meta">{recordingMeta(r)}</span>
-						{phase !== null && !open && <MiniBar player={player} />}
 					</span>
 				</button>
-				<button
-					type="button"
-					className="wkr-play"
-					data-state={
-						phase === "playing"
-							? "playing"
-							: phase !== null
-								? "current"
-								: undefined
-					}
-					aria-label={`${phase === "playing" ? "Pause" : "Play"} ${title}`}
-					title={phase === "playing" ? "Pause" : "Play"}
-					onClick={() => actions.play(r)}
-				>
-					<span className="wkr-play-disc">
-						{phase === "loading" ? (
-							<span className="wk-spinner" aria-hidden="true" />
-						) : (
-							<PlayGlyph playing={playing} />
-						)}
-					</span>
-					<span className="wkr-dur">{dur}</span>
-				</button>
+				<PlayDisc
+					id={pid}
+					title={title}
+					durationMs={r.durationMs}
+					queue={actions.queue}
+				/>
 			</div>
 			{open && (
 				<div className="wkr-detail">
-					<Strip item={r} player={player} />
+					<WaveView
+						id={pid}
+						title={title}
+						durationMs={r.durationMs}
+						queue={actions.queue}
+					/>
 					<div className="wkr-actions">
 						<button
 							type="button"
@@ -1120,228 +1121,6 @@ function DeleteButton({
 			<RecIcon name="trash" size={15} />
 			Delete
 		</button>
-	)
-}
-
-function MiniBar({ player }: { player: RecordingPlayer }) {
-	const pct = useStore(player, s =>
-		s.duration ? Math.min(100, (s.pos / s.duration) * 100) : 0,
-	)
-	return (
-		<span className="wkr-mini" aria-hidden="true">
-			<span style={{ width: `${pct}%` }} />
-		</span>
-	)
-}
-
-/** The waveform: click (or drag) to play from there; the playhead follows playback. */
-function Strip({
-	item,
-	player,
-}: {
-	item: RecordingInventoryItem
-	player: RecordingPlayer
-}) {
-	const peaks = useStore(player.peaks, m => m.get(item.id))
-	const current = useStore(player, s => s.id === item.id)
-	const frac = useStore(player, s =>
-		s.id === item.id && s.duration ? Math.min(1, s.pos / s.duration) : 0,
-	)
-	useEffect(() => {
-		void player.loadPeaks(item.id)
-	}, [player, item.id])
-	const total = item.durationMs !== null ? item.durationMs / 1000 : null
-	const seekAt = (e: ReactPointerEvent<HTMLDivElement>) => {
-		const rect = e.currentTarget.getBoundingClientRect()
-		const f = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
-		const d =
-			player.get().id === item.id ? (player.get().duration ?? total) : total
-		if (d === null) return
-		if (player.get().id === item.id) {
-			player.seek(f * d)
-			if (player.get().phase !== "playing") player.resume()
-		} else void player.play(item.id, f * d)
-	}
-	const bars = Array.isArray(peaks) ? peaks : null
-	const w = 600 / WAVE_BARS
-	return (
-		<div className="wkr-strip-wrap">
-			<div
-				className="wkr-strip"
-				title="Click to play from here"
-				onPointerDown={e => {
-					e.currentTarget.setPointerCapture(e.pointerId)
-					seekAt(e)
-				}}
-				onPointerMove={e => {
-					if (e.buttons === 1 && e.currentTarget.hasPointerCapture(e.pointerId))
-						seekAt(e)
-				}}
-			>
-				<svg
-					width="100%"
-					height="100%"
-					viewBox="0 0 600 100"
-					preserveAspectRatio="none"
-					aria-hidden="true"
-				>
-					{bars ? (
-						bars.map((p, i) => {
-							const h = Math.max(3, p * 84)
-							const played = current && (i + 0.5) / WAVE_BARS <= frac
-							return (
-								<rect
-									key={i}
-									x={(i * w + w * 0.18).toFixed(1)}
-									y={(50 - h / 2).toFixed(1)}
-									width={(w * 0.64).toFixed(1)}
-									height={h.toFixed(1)}
-									className={played ? "wkr-bar is-played" : "wkr-bar"}
-								/>
-							)
-						})
-					) : (
-						<rect x="0" y="49" width="600" height="2" className="wkr-bar" />
-					)}
-				</svg>
-				{current && (
-					<div className="wkr-head" style={{ left: `${frac * 100}%` }} />
-				)}
-				{peaks === undefined && (
-					<span className="wkr-strip-note">Loading waveform…</span>
-				)}
-			</div>
-			<div className="wkr-strip-times">
-				<span>0:00</span>
-				<span>{total !== null ? formatDuration(total) : ""}</span>
-			</div>
-		</div>
-	)
-}
-
-// ---- player bar
-
-function PlayerBar({
-	player,
-	order,
-}: {
-	player: RecordingPlayer
-	order: { current: readonly RecordingInventoryItem[] }
-}) {
-	useDisplay()
-	const id = useStore(player, s => s.id)
-	const phase = useStore(player, s => s.phase)
-	const pos = useStore(player, s => Math.floor(s.pos * 4) / 4)
-	const duration = useStore(player, s => s.duration)
-	const speed = useStore(player, s => s.speed)
-	const error = useStore(player, s => s.error)
-	const services = useServices()
-	const items = useStore(services.data.recordings, s => s.items)
-	const liveWanted = useStore(services.listen, s => s.wanted)
-	if (id === null) return null
-	const item = items.find(r => r.id === id)
-	const list = order.current
-	const i = list.findIndex(r => r.id === id)
-	const prev = i > 0 ? list[i - 1] : undefined
-	const next = i >= 0 ? list[i + 1] : undefined
-	const d = duration ?? (item?.durationMs != null ? item.durationMs / 1000 : 0)
-	const title = item ? recordingTitle(item) : "Recording"
-	const playing = phase === "playing"
-	return (
-		<div className="wkr-player" role="region" aria-label="Player">
-			<div className="wkr-player-row">
-				<button
-					type="button"
-					className="wk-icon-btn"
-					data-size="sm"
-					aria-label="Previous"
-					disabled={!prev && pos < 0.5}
-					onClick={() => {
-						if (player.get().pos > 2 || !prev) player.seek(0)
-						else void player.play(prev.id)
-					}}
-				>
-					<RecIcon name="prev" size={14} />
-				</button>
-				<button
-					type="button"
-					className="wkr-player-play"
-					aria-label={playing ? "Pause" : "Play"}
-					onClick={() => player.toggle()}
-				>
-					{phase === "loading" ? (
-						<span className="wk-spinner" aria-hidden="true" />
-					) : (
-						<PlayGlyph playing={playing} size={13} />
-					)}
-				</button>
-				<button
-					type="button"
-					className="wk-icon-btn"
-					data-size="sm"
-					aria-label="Next"
-					disabled={!next}
-					onClick={() => next && void player.play(next.id)}
-				>
-					<RecIcon name="next" size={14} />
-				</button>
-				<button
-					type="button"
-					className="wkr-player-title"
-					title="Show it in the list"
-					onClick={() => {
-						openRow(id)
-						requestReveal(id)
-					}}
-				>
-					<span className="wkr-player-name">{title}</span>
-					<span
-						className="wkr-player-sub"
-						data-tone={error ? "warn" : undefined}
-					>
-						{error ??
-							[
-								item ? timeLabel(recordedAt(item)) : null,
-								item ? recordingCutLabel(item) : null,
-								liveWanted ? "live audio muted" : null,
-							]
-								.filter(Boolean)
-								.join(" · ")}
-					</span>
-				</button>
-				<span className="wkr-player-time">
-					{formatDuration(pos)} / {formatDuration(d)}
-				</span>
-				<button
-					type="button"
-					className="wk-chip"
-					data-size="sm"
-					title="Playback speed"
-					onClick={() => player.cycleSpeed()}
-				>
-					{speed}×
-				</button>
-				<button
-					type="button"
-					className="wk-icon-btn"
-					data-size="sm"
-					aria-label="Close player and unmute live audio"
-					title="Close player and unmute live audio"
-					onClick={() => player.stop()}
-				>
-					<RecIcon name="close" size={15} />
-				</button>
-			</div>
-			<input
-				type="range"
-				className="wkr-seek"
-				aria-label="Position"
-				min={0}
-				max={Math.max(1, Math.round(d * 10))}
-				value={Math.round(pos * 10)}
-				onChange={e => player.seek(Number(e.target.value) / 10)}
-			/>
-		</div>
 	)
 }
 

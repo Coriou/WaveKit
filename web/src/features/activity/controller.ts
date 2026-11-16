@@ -54,9 +54,11 @@ export interface ActivityViewState {
 	seen: Readonly<Record<string, string>>
 	/** Count per category for the current search without its chip; null until loaded. */
 	counts: Readonly<Record<string, number>> | null
+	/** The core's count for the current search without its chip, every category (the header count); null until loaded. */
+	total: number | null
 	/** The time range every list shows (the drawer's and each column). */
 	range: TimeRange
-	/** "With audio": only transmissions and calls, in every list. */
+	/** "With audio": only rows with a playable recording, in every list. */
 	audio: boolean
 }
 
@@ -224,6 +226,7 @@ export class ActivityController extends Store<ActivityViewState> {
 			view: "all",
 			seen: {},
 			counts: null,
+			total: null,
 			range: ANY_TIME,
 			audio: false,
 		})
@@ -719,7 +722,7 @@ export class ActivityController extends Store<ActivityViewState> {
 		const base = scopedQuery(buildQuery(s.tokens, null), s, scopeNow())
 		this.countsAbort?.abort()
 		if (base === null) {
-			this.update(v => ({ ...v, counts: {} }))
+			this.update(v => ({ ...v, counts: {}, total: 0 }))
 			return
 		}
 		const abort = new AbortController()
@@ -739,7 +742,8 @@ export class ActivityController extends Store<ActivityViewState> {
 					(n, c) => n + (byCategory[c] ?? 0),
 					0,
 				)
-			if (!abort.signal.aborted) this.update(v => ({ ...v, counts }))
+			const total = Object.values(byCategory).reduce((n, c) => n + c, 0)
+			if (!abort.signal.aborted) this.update(v => ({ ...v, counts, total }))
 		} catch {
 			// Counts are a hint: an older core without facets leaves the chips bare.
 			// A failure (busy or timed-out reader) slows the live refresh; an abort is not one.

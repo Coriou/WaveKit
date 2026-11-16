@@ -69,6 +69,7 @@ import { clockText, useDisplay } from "../display.ts"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import { AUTO_IDENTIFY_DELAY_MS, shouldAutoIdentify } from "./auto-identify.ts"
 import { nowView, type NowView } from "./now.ts"
+import { TunedDisc, TunedQueue } from "./playback.tsx"
 import { tunedCardStore } from "./place.ts"
 import { signalBars, signalPresent } from "./signal.ts"
 import { DecoderVerdictsFeed, itemsFor, pendingFor } from "./verdicts.ts"
@@ -970,22 +971,25 @@ export function TunedCard() {
 							<h3 className="wk-label">
 								{voice ? "Earlier on this frequency" : "Earlier"}
 							</h3>
+							<TunedQueue rows={now.earlier} />
 							{now.earlier.map(r => (
-								<button
-									key={r.id}
-									type="button"
-									className="wk-row wkf-earlier-row"
-									data-size="dense"
-									title="Open in Activity"
-									onClick={() => {
-										activity.open(r.item)
-										shellStore.openDrawer("activity")
-									}}
-								>
-									<span className="wkf-earlier-t">{r.time}</span>
-									<span className="wkf-earlier-a">{r.a}</span>
-									{r.b && <span className="wkf-earlier-b">{r.b}</span>}
-								</button>
+								<div key={r.id} className="wkf-earlier-item">
+									<button
+										type="button"
+										className="wk-row wkf-earlier-row"
+										data-size="dense"
+										title="Open in Activity"
+										onClick={() => {
+											activity.open(r.item)
+											shellStore.openDrawer("activity")
+										}}
+									>
+										<span className="wkf-earlier-t">{r.time}</span>
+										<span className="wkf-earlier-a">{r.a}</span>
+										{r.b && <span className="wkf-earlier-b">{r.b}</span>}
+									</button>
+									<TunedDisc row={r} rows={now.earlier} />
+								</div>
 							))}
 						</section>
 					)}

@@ -49,6 +49,9 @@ import {
 } from "./row-aircraft.ts"
 import { formatMHz } from "../format.ts"
 import { Icon } from "../../ui/Icon.tsx"
+import type { QueueRef } from "../playback/service.ts"
+import { ActivityDisc } from "./ActivityPlayback.tsx"
+import { activityQueue } from "./playback.ts"
 
 const HOLD_PX = 8
 const MORE_PX = NEAR_END_PX
@@ -82,7 +85,7 @@ export function ActivityList({
 	column,
 	ref,
 }: ActivityListProps) {
-	const { activity } = useServices()
+	const { activity, playback } = useServices()
 	const items = useStore(feed, s => s.items)
 	const pendingItems = useStore(feed, s => s.pending)
 	const status = useStore(feed, s => s.status)
@@ -110,6 +113,14 @@ export function ActivityList({
 		() => heldStacks(pendingItems, feed),
 		[pendingItems, feed],
 	)
+	// the rows with audio as shown: the queue a disc here plays from, refreshed while it is the one played
+	const queue = useMemo(() => activityQueue(stacks), [stacks])
+	const queueNow = useRef(queue)
+	queueNow.current = queue
+	const readQueue = useCallback(() => queueNow.current, [])
+	useEffect(() => {
+		playback.setQueue("activity", queue.ids, queue.titles)
+	}, [playback, queue])
 	const entries = useMemo(
 		() => stackEntries(stacks, now, expanded),
 		[stacks, now, display, expanded], // group labels follow the time setting
@@ -343,6 +354,7 @@ export function ActivityList({
 				current={openId === e.key}
 				fresh={false}
 				onOpen={open}
+				queue={readQueue}
 			/>
 		) : cards ? (
 			<ActivityCard
@@ -360,6 +372,7 @@ export function ActivityList({
 				fresh={fresh.has(e.key)}
 				readOnly={readOnly}
 				onOpen={open}
+				queue={readQueue}
 			/>
 		) : (
 			<ActivityRow
@@ -376,6 +389,7 @@ export function ActivityList({
 				current={openId === e.stack.latest.eventId}
 				fresh={fresh.has(e.key)}
 				onOpen={open}
+				queue={readQueue}
 			/>
 		)
 
@@ -555,7 +569,11 @@ interface RowProps {
 	foldsId?: string
 	/** The entry's element id (the list's aria-activedescendant names it). */
 	domId?: string
+	/** The list a row with audio plays from (its disc). */
+	queue?: () => QueueRef
 }
+
+const NO_QUEUE = (): QueueRef => ({ source: "activity", ids: [] })
 
 function StackToggle({
 	stack,
@@ -597,11 +615,13 @@ export const ActivityRow = memo(function ActivityRow({
 	onToggle,
 	foldsId,
 	domId,
+	queue = NO_QUEUE,
 }: RowProps) {
 	useDisplay() // the time follows Settings › Display
 	const v = rowView(item, useRowAircraft(item.entityKey))
 	const stacked = stack !== undefined && stack.members.length > 1
 	const channels = channelsText(stack)
+	const audio = item.recording !== undefined
 	return (
 		<div
 			role="listitem"
@@ -610,6 +630,7 @@ export const ActivityRow = memo(function ActivityRow({
 			ref={measure}
 			className="wka-item"
 			data-stacked={stacked || undefined}
+			data-disc={audio || undefined}
 		>
 			<button
 				type="button"
@@ -646,6 +667,7 @@ export const ActivityRow = memo(function ActivityRow({
 					{channels !== null && <span className="wka-read">{channels}</span>}
 				</span>
 			</button>
+			<ActivityDisc item={item} queue={queue} />
 			{stacked && (
 				<StackToggle
 					stack={stack}
@@ -716,9 +738,11 @@ export const ActivityCard = memo(function ActivityCard({
 	onToggle,
 	foldsId,
 	domId,
+	queue = NO_QUEUE,
 }: RowProps & { readOnly: boolean }) {
 	const stacked = stack !== undefined && stack.members.length > 1
 	const channels = channelsText(stack)
+	const audio = item.recording !== undefined
 	return (
 		<div
 			role="listitem"
@@ -735,9 +759,10 @@ export const ActivityCard = memo(function ActivityCard({
 				readOnly={readOnly}
 				onOpen={() => onOpen(stack?.latest.eventId ?? item.eventId)}
 			/>
-			{(stacked || channels !== null) && (
+			{(stacked || channels !== null || audio) && (
 				<div className="wka-cardstack">
 					{channels !== null && <span className="wka-read">{channels}</span>}
+					<ActivityDisc item={item} queue={queue} inline />
 					{stacked && (
 						<StackToggle
 							stack={stack}

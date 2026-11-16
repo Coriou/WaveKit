@@ -1,0 +1,246 @@
+/* Recording playback: the row disc, the waveform seek view and the one player dock. Layout glue over the
+   ui.css recipes (wk-island, wk-icon-btn, wk-chip, wk-switch, wk-btn); colours come from tokens only. The
+   look is the Recordings player bar's (Recordings board), lifted into the shell. */
+@layer wk-app {
+	/* the disc: a toggle for this row's recording, its duration under it */
+	.wkp-disc {
+		flex: none;
+		width: 52px;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: flex-start;
+		gap: 4px;
+		padding: 8px 0 6px;
+		border: 0;
+		border-radius: var(--wk-r-4);
+		background: none;
+		color: var(--wk-accent);
+		font: inherit;
+		cursor: pointer;
+	}
+	.wkp-disc:focus-visible {
+		outline: 1.5px solid var(--wk-focus);
+		outline-offset: -2px;
+	}
+	.wkp-disc-face {
+		width: 32px;
+		height: 32px;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		border: 1px solid rgba(var(--wk-accent-rgb), 0.18);
+		transition:
+			background-color var(--wk-dur-2),
+			color var(--wk-dur-2);
+	}
+	.wkp-disc:hover .wkp-disc-face,
+	.wkp-disc[data-state="current"] .wkp-disc-face {
+		background: var(--wk-sel);
+	}
+	.wkp-disc[data-state="playing"] .wkp-disc-face {
+		background: var(--wk-accent);
+		border-color: var(--wk-accent);
+		color: var(--wk-on-accent);
+	}
+	.wkp-disc .wk-spinner {
+		width: 14px;
+		height: 14px;
+	}
+	.wkp-disc-dur {
+		font-size: var(--wk-fs-2xs);
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+	.wkp-disc[data-inline] {
+		width: auto;
+		flex-direction: row;
+		align-items: center;
+		gap: 6px;
+		padding: 2px 6px 2px 2px;
+	}
+	.wkp-disc[data-inline] .wkp-disc-face {
+		width: 26px;
+		height: 26px;
+	}
+
+	/* the waveform of an open row: a seek view of the dock's player */
+	.wkp-wave-wrap {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.wkp-wave {
+		position: relative;
+		height: 64px;
+		border-radius: var(--wk-r-3);
+		background: var(--wk-well);
+		box-shadow: inset 0 0 0 1px var(--wk-line-08);
+		overflow: hidden;
+		touch-action: none;
+		cursor: pointer;
+	}
+	.wkp-wave > svg {
+		display: block;
+	}
+	.wkp-bar {
+		fill: rgba(var(--wk-accent-rgb), 0.5);
+	}
+	.wkp-bar.is-played {
+		fill: var(--wk-accent);
+	}
+	.wkp-head {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		width: 2px;
+		margin-left: -1px;
+		background: var(--wk-text);
+		box-shadow: 0 0 8px rgba(var(--wk-ink-rgb), 0.5);
+		pointer-events: none;
+	}
+	.wkp-wave-note {
+		position: absolute;
+		inset: 0;
+		display: grid;
+		place-items: center;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+		pointer-events: none;
+	}
+	.wkp-wave-times {
+		display: flex;
+		justify-content: space-between;
+		font-size: var(--wk-fs-2xs);
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+	.wkp-keep[aria-pressed="true"] {
+		color: var(--wk-amber);
+	}
+
+	/* the dock slot: centred on the free plot area, above the nav dock (above Listen on a phone) */
+	.wk-shell-player {
+		position: absolute;
+		left: var(--wk-free-cx, 50%);
+		bottom: 92px;
+		translate: -50% 0;
+		z-index: 7;
+		width: min(560px, calc(2 * var(--wk-free-cx, 50%) - 32px));
+		pointer-events: none;
+	}
+	.wk-shell-player[data-low] {
+		bottom: 96px;
+	}
+	.wk-shell-player > * {
+		pointer-events: auto;
+	}
+	.wkp-dock {
+		box-sizing: border-box;
+		padding: 6px 6px 4px;
+	}
+	.wkp-dock-row {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		min-width: 0;
+	}
+	.wkp-dock-play {
+		flex: none;
+		width: 34px;
+		height: 34px;
+		border-radius: 50%;
+		display: grid;
+		place-items: center;
+		border: 0;
+		background: var(--wk-accent);
+		color: var(--wk-on-accent);
+		cursor: pointer;
+	}
+	.wkp-dock-play:focus-visible {
+		outline: 1.5px solid var(--wk-focus);
+		outline-offset: 2px;
+	}
+	.wkp-dock-play .wk-spinner {
+		width: 14px;
+		height: 14px;
+	}
+	.wkp-dock-title {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		padding: 2px 6px;
+	}
+	.wkp-dock-name {
+		font-weight: 700;
+		font-size: var(--wk-fs-md);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkp-dock-sub {
+		font-size: var(--wk-fs-2xs);
+		color: var(--wk-text-3);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkp-dock-sub[data-tone="warn"] {
+		color: var(--wk-amber);
+	}
+	.wkp-dock-time {
+		flex: none;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-2);
+		font-variant-numeric: tabular-nums;
+	}
+	.wkp-dock-auto {
+		flex: none;
+		display: flex;
+		align-items: center;
+		font-size: var(--wk-fs-2xs);
+		color: var(--wk-text-3);
+		cursor: pointer;
+	}
+	.wkp-dock-seek {
+		display: block;
+		width: 100%;
+		margin: 4px 0 0;
+		accent-color: var(--wk-accent);
+	}
+	/* compact: the playing row is open in the visible panel; only the line and play/pause stay */
+	.wkp-dock[data-compact] {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 4px 12px 4px 4px;
+		width: min(320px, 100%);
+		margin: 0 auto;
+	}
+	.wkp-dock[data-compact] .wkp-dock-play {
+		width: 28px;
+		height: 28px;
+	}
+	.wkp-dock-line {
+		flex: 1;
+		height: 3px;
+		border-radius: 2px;
+		background: var(--wk-line-solid);
+		overflow: hidden;
+	}
+	.wkp-dock-line > span {
+		display: block;
+		height: 100%;
+		background: var(--wk-accent);
+	}
+	@media (max-width: 560px) {
+		.wkp-dock-auto > span,
+		.wkp-dock-time {
+			display: none;
+		}
+		.wkp-dock[data-compact] .wkp-dock-time {
+			display: inline;
+		}
+	}
+}

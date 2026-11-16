@@ -90,6 +90,8 @@ const SHOWN_KINDS = new Set<ActivitySummary["kind"]>([
 	"decoder-reception",
 	"call-lifecycle",
 	"analog-transmission",
+	// a scanner recording kept for good: its row carries the file (the card plays it)
+	"recording-change",
 ])
 const AIRCRAFT_DECODERS = new Set(["readsb", "dump1090"])
 const VESSEL_DECODERS = new Set(["ais-catcher"])

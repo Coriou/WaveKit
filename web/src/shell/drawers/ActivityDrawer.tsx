@@ -12,7 +12,7 @@ import type {
 import { ActivityDetail } from "../../features/activity/ActivityDetail.tsx"
 import { ActivityList } from "../../features/activity/ActivityList.tsx"
 import { MAX_COLUMNS } from "../../features/activity/columns.ts"
-import { foldedOf } from "../../features/activity/fold.ts"
+import { headerCount } from "../../features/activity/count.ts"
 import {
 	activityFeedNeedsReload,
 	lifecycleNotice,
@@ -391,8 +391,7 @@ function SwitcherChip({
 
 function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
 	const { activity } = useServices()
-	// rows (stacks), as the list shows them: the list's own fold of the same array, memoised
-	const rows = useStore(feed, s => foldedOf(s.items, feed).length)
+	// events, as the core counts them for the search (the chips' unit), else those loaded
 	const events = useStore(feed, s => s.items.length)
 	const more = useStore(feed, s => s.nextPageToken !== null)
 	const searching = useStore(
@@ -412,6 +411,17 @@ function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
 	useStore(activity, s => s.chip)
 	useStore(activity, s => s.range)
 	useStore(activity, s => s.audio)
+	const counts = useStore(activity, s => s.counts)
+	const total = useStore(activity, s => s.total)
+	const chip = useStore(activity, s => s.chip)
+	const count = headerCount({
+		counts,
+		total,
+		chip,
+		column: view !== null,
+		events,
+		more,
+	})
 	const title = view
 		? searching
 			? `${view.title} · ${activity.title()}`
@@ -422,24 +432,12 @@ function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
 	return (
 		<div className="wka-listhead">
 			<span className="wka-listtitle">{title}</span>
-			<span className="wka-listcount" title={countTitle(rows, events, more)}>
-				{rows}
-				{more ? "+" : ""}
+			<span className="wka-listcount" title={count.title}>
+				{count.text}
 			</span>
 			<LayoutSwitch />
 		</div>
 	)
-}
-
-/** The header count's title: rows, in the loaded events only ("41 rows in the 312 loaded events"). */
-export function countTitle(
-	rows: number,
-	events: number,
-	more: boolean,
-): string {
-	const r = `${rows} row${rows === 1 ? "" : "s"}`
-	const e = `${events} loaded event${events === 1 ? "" : "s"}`
-	return `${r} in the ${e}${more ? "; older events are not loaded yet" : ""}`
 }
 
 // Rows or message cards, for the drawer and every column alike.

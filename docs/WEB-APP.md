@@ -332,6 +332,12 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   one, says what failed with **Try again**, and the list tries again on its own after 2, 4, 8, 16
   then every 30 s.
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
+  The count beside the list title is the number of events the core counts for the search, the
+  same unit as the category filters (not the folded rows on screen). A pinned column shown in its
+  place, or a core that cannot count, shows the loaded events instead, with `+` while older ones
+  are not loaded. **With audio** keeps only the events that have a recording to play, in every
+  category. A row or card with a recording has a play disc with its length; see
+  [Playing recordings](#playing-recordings).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets. A row the core suspects is a receiver spur says so on its second
   line: `Receiver spur` once confirmed, `Possible spur (unverified)` while the suspicion is not yet
@@ -345,7 +351,7 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   (talkgroup, radio, frequency, kind, text; a new chip replaces the one of its kind), and typed
   text matches the talkgroup, radio, decoder, kind, start time or frequency in MHz, never the file
   size or the recording's internal id. A scanner recording the core cut short says why on its
-  row and in the player: `Cut: scanner moved on` (the tuner moved under the file while the
+  row: `Cut: scanner moved on` (the tuner moved under the file while the
   transmission was still on the air, or its tuning stopped being trusted; a move that cut off only
   the silence after the transmission shows no cut), `Continues in next part` (a long transmission
   split into files, when the next part is listed), `Cut: length limit` (a split file whose other
@@ -353,7 +359,7 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   split by the length limit read `Part 2 of 5` (separate overs of one held carrier get no part
   number). New recordings
   appear on their own (the core announces each change on the socket; nothing polls); while you
-  scroll down or play one, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,
+  scroll down or play one from this list, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,
   then the placeholder, `Still loading. WaveKit is busy.` after 3 s, and after 10 s (or an error)
   what failed, **Try again**, and a retry on its own after 2, 4, 8, 16 then every 30 s, the last
   rows kept and marked with their time. While the core is still indexing its recordings after a
@@ -460,6 +466,28 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
   `Receiver link dropping samples — lower the sample rate`. It shows only for loss on the receiver
   link. Samples dropped inside WaveKit, or a link that has not yet shown it can carry the rate,
   raise no notice.
+
+### Playing recordings
+
+There is one player for the whole app. A play disc on an Activity row or card, a Recordings
+row or an earlier row of the tuned card starts the recording; pressing the same disc again pauses
+it. Rows without a recording (most decodes, and digital calls the core did not record) have no disc.
+The recording playing is marked the same way in every list that shows it.
+
+While something is loaded, the player sits at the bottom of the screen, above the dock, whatever
+panel is open: **Previous**, **Play/Pause**, **Next**, the title and its place in the list (`3 of 12`),
+the time, a position slider, the speed (1×, 1.5×, 2×), **Auto-next**, **Keep** and **Close**. Closing
+a drawer does not stop it. **Next**, **Previous** and **Auto-next** follow the list it was started
+from, in the order shown, and only the rows with a recording; **Previous** after the first 2 s goes
+back to the start. **Auto-next** plays the next recording when one ends (never after a failure);
+it is on by default and remembered per browser. While the open Activity event or Recordings row is
+the one playing, the player shrinks to a thin progress line with play/pause, and that row's waveform
+is where you seek: click or drag on it. **Keep** works when WaveKit can name the file, which for a
+digital-voice call needs it loaded in Recordings; otherwise it says to keep it from there.
+
+Live audio is muted while a recording plays or loads to play, and comes back as soon as it pauses,
+ends, fails or closes. Pressing **Listen** while a recording plays pauses the recording; Listen stays
+on.
 
 ### Scanner observations
 

@@ -51,6 +51,7 @@ import {
 import { ShellIsland, type IslandSlot } from "./ShellIsland.tsx"
 import { Dock } from "./Dock.tsx"
 import { PaneSlot } from "./PaneSlot.tsx"
+import { PlayerDock } from "../features/playback/PlayerDock.tsx"
 import { DRAWER_PANES, paneOf } from "./panes.ts"
 import { appToast, dismissAppToast } from "./toast.ts"
 import {
@@ -571,6 +572,11 @@ export function Shell({
 					<Icon name="search" />
 				</button>
 			)}
+
+			{/* the one recording player, above the nav dock; empty while nothing plays */}
+			<div className="wk-shell-player" data-low={L.dockHidden || undefined}>
+				<PlayerDock />
+			</div>
 
 			<CardPlaceContext.Provider value={cardStore}>
 				<CardAnnouncer />

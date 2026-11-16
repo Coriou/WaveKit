@@ -22,6 +22,7 @@ import { summaryOfRecord } from "../messages/card.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import { ActivityRow, FoldedRow } from "./ActivityList.tsx"
+import { RecordingBlock } from "./ActivityPlayback.tsx"
 import type { ActivityStack, KnownIdentity } from "./fold.ts"
 import {
 	explainStack,
@@ -255,12 +256,15 @@ export function ActivityDetail({
 			</div>
 			<div className="wka-detail-body wk-scroll">
 				{item ? (
-					<MessageCard
-						item={detailItem ?? item}
-						record={detailRecord}
-						flat
-						readOnly={readOnly}
-					/>
+					<>
+						<MessageCard
+							item={detailItem ?? item}
+							record={detailRecord}
+							flat
+							readOnly={readOnly}
+						/>
+						<RecordingBlock item={item} />
+					</>
 				) : (
 					<h3 className="wka-detail-title">Event</h3>
 				)}

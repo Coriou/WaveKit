@@ -61,7 +61,7 @@ export function PaletteKeys() {
 				}
 				case "listen":
 					if (!data.liveAudio.get().status) return
-					void (listen.get().wanted ? listen.stop() : listen.start())
+					void listen.toggle()
 					break
 				case "squelchOpen":
 					if (!data.liveAudio.get().status || isReadOnly(data.access.get()))

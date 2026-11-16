@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 import type {
 	RecordingInventoryItem,
 	StorageArea,
@@ -26,10 +26,8 @@ import {
 	textToken,
 	withToken,
 } from "../../src/features/recordings/model.ts"
-import { RecordingPlayer } from "../../src/features/recordings/player.ts"
-import type { AudioLike } from "../../src/features/recordings/player.ts"
 import { visibleRecordings } from "../../src/features/recordings/ui-store.ts"
-import { parseWav, wavPeaks } from "../../src/features/recordings/wav.ts"
+import { parseWav, wavPeaks } from "../../src/features/playback/wav.ts"
 import { synthWav } from "../../mock/recordings.ts"
 
 const call = (
@@ -436,107 +434,5 @@ describe("WAV peaks", () => {
 		])
 		expect(parseWav(new ArrayBuffer(8))).toBeNull()
 		expect(parseWav(wav(2, 8, [0]))).toBeNull()
-	})
-})
-
-class FakeAudio implements AudioLike {
-	src = ""
-	currentTime = 0
-	duration = Number.NaN
-	playbackRate = 1
-	preservesPitch = false
-	playing = false
-	private readonly handlers = new Map<string, (() => void)[]>()
-	play() {
-		this.playing = true
-		return Promise.resolve()
-	}
-	pause() {
-		this.playing = false
-	}
-	removeAttribute(name: string) {
-		if (name === "src") this.src = ""
-	}
-	load() {}
-	addEventListener(type: string, fn: () => void) {
-		this.handlers.set(type, [...(this.handlers.get(type) ?? []), fn])
-	}
-	emit(type: string) {
-		for (const fn of this.handlers.get(type) ?? []) fn()
-	}
-}
-
-describe("RecordingPlayer", () => {
-	const setup = (next: Record<string, string | null> = {}) => {
-		const audio = new FakeAudio()
-		const held: boolean[] = []
-		const fetchFile = vi.fn((id: string) => {
-			const buf = synthWav(2, id.length)
-			return Promise.resolve(new Blob([new Uint8Array(buf)]))
-		})
-		const player = new RecordingPlayer({
-			fetchFile,
-			holdLive: h => held.push(h),
-			nextOf: id => next[id] ?? null,
-			createAudio: () => audio,
-			createUrl: () => "blob:x",
-			revokeUrl: () => {},
-		})
-		return { audio, held, fetchFile, player }
-	}
-
-	it("mutes live audio, plays the blob and unmutes on close", async () => {
-		const { audio, held, player } = setup()
-		await player.play("a", 1.5)
-		expect(audio.src).toBe("blob:x")
-		expect(audio.currentTime).toBe(1.5)
-		expect(audio.playing).toBe(true)
-		expect(player.get()).toMatchObject({ id: "a", phase: "playing" })
-		player.toggle()
-		expect(player.get().phase).toBe("paused")
-		player.stop()
-		expect(held).toEqual([true, false])
-		expect(player.get().id).toBeNull()
-	})
-
-	it("advances to the next recording and stops at the end of the list", async () => {
-		const { audio, player } = setup({ a: "bb" })
-		await player.play("a")
-		audio.duration = 2
-		audio.emit("loadedmetadata")
-		audio.emit("ended")
-		await vi.waitFor(() =>
-			expect(player.get()).toMatchObject({ id: "bb", phase: "playing" }),
-		)
-		audio.emit("ended")
-		expect(player.get().phase).toBe("ended")
-	})
-
-	it("fetches each file once and computes its peaks", async () => {
-		const { fetchFile, player } = setup()
-		await player.loadPeaks("a")
-		await player.play("a")
-		expect(fetchFile).toHaveBeenCalledTimes(1)
-		const peaks = player.peaks.get().get("a")
-		expect(Array.isArray(peaks) && peaks.length).toBe(96)
-	})
-
-	it("cycles the speed and reports a failed fetch", async () => {
-		const { audio, player } = setup()
-		player.cycleSpeed()
-		expect(player.get().speed).toBe(1.5)
-		await player.play("a")
-		expect(audio.playbackRate).toBe(1.5)
-		const failing = new RecordingPlayer({
-			fetchFile: () => Promise.reject(new Error("Recording not found")),
-			holdLive: () => {},
-			nextOf: () => null,
-			createAudio: () => new FakeAudio(),
-		})
-		await failing.play("gone")
-		expect(failing.get()).toMatchObject({
-			phase: "error",
-			error: "Recording not found",
-		})
 	})
 })

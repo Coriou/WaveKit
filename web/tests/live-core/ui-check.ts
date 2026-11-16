@@ -17,6 +17,10 @@
  *   voice → Play anyway → Listening, Open, Source through all three, `Q` twice, and from the defaults to
  *   hearing noise, counting the audio stream attaches. The report gains `listen`.
  *
+ * - `--flow=play` (fake target only): play anywhere on the same mock core: a row's disc plays its recording in
+ *   the one dock, which outlives the drawer, Recordings marks it, Listen holds and gets live audio back, and
+ *   "With audio" asks for `hasRecording=true`. The report gains `play`.
+ *
  * Every pairing it makes is named "ui-check" and is signed out when the run ends.
  * Exit: 0 healthy, 1 unhealthy, 2 could not run.
  */
@@ -52,6 +56,7 @@ import {
 	type PanelLook,
 } from "./panel-check.ts"
 import { listenFlow, type ListenReport } from "./listen-flow.ts"
+import { playFlow, type PlayReport } from "./play-flow.ts"
 import {
 	FORBIDDEN_PORTS,
 	LOOPBACK,
@@ -113,8 +118,8 @@ export interface Options {
 	allowMeasure: boolean
 	/** Fake target: the production build (vite build, then vite preview) instead of the dev server. */
 	built: boolean
-	/** `--flow=listen`: drive the Listen flow on the mock core (fake target only). */
-	flow: "listen" | null
+	/** `--flow=listen` / `--flow=play`: drive that flow on the mock core (fake target only). */
+	flow: "listen" | "play" | null
 }
 
 /** The run cannot start or finish (exit 2); the message never holds a credential. */
@@ -167,7 +172,8 @@ export function parseOptions(argv: readonly string[]): Options {
 		if (flag === "--screenshot" && rest.length === 0) options.screenshot = true
 		else if (flag === "--measure" && rest.length === 0) options.measure = true
 		else if (flag === "--built" && rest.length === 0) options.built = true
-		else if (flag === "--flow" && value === "listen") options.flow = "listen"
+		else if (flag === "--flow" && (value === "listen" || value === "play"))
+			options.flow = value
 		else if (flag === "--seed-recordings" && /^\d{1,6}$/.test(value)) {
 			const n = Number(value)
 			if (n < 1 || n > SEED_RECORDINGS_MAX)
@@ -215,7 +221,7 @@ export function parseOptions(argv: readonly string[]): Options {
 		(options.target !== "fake" || options.seedRecordings > 0 || options.measure)
 	)
 		throw new CannotRun(
-			"--flow=listen runs on --target=fake alone (it changes the core's shared squelch and Source)",
+			`--flow=${options.flow} runs on --target=fake alone (it changes the core's shared settings and plays its recordings)`,
 		)
 	if (options.target === "live") {
 		if (process.env["WAVEKIT_UI_CHECK_LIVE"] !== "1")
@@ -671,7 +677,7 @@ export async function run(
 	try {
 		let base: string
 		let token: string | null = null
-		if (options.flow === "listen") {
+		if (options.flow !== null) {
 			// the web app's mock core, in this process: it plays live audio without csdr (legacy access)
 			const port = await loopbackPort()
 			const apiPort = await loopbackPort()
@@ -761,7 +767,7 @@ export async function run(
 			// at 0.016 s, so the worklet never rendered and Listen stayed on Connecting… with bytes arriving.
 			args: [
 				...GPU_ARGS[options.gpu],
-				...(options.flow === "listen"
+				...(options.flow !== null
 					? [
 							"--autoplay-policy=no-user-gesture-required",
 							"--disable-audio-output",
@@ -933,6 +939,11 @@ export async function run(
 			listen = await listenFlow(page, mockAudioPort)
 			await shoot("2-listen")
 		}
+		let play: PlayReport | null = null
+		if (options.flow === "play") {
+			play = await playFlow(page)
+			await shoot("2-play")
+		}
 		const last = options.actions.length > 0 ? await look(page, core) : null
 		if (last !== null) await shoot("2-after-actions")
 		const panelAfter =
@@ -958,7 +969,11 @@ export async function run(
 		const final = last ?? first
 		// the Listen flow judges the flow (the mock's spectrum is not the look's fake tone)
 		const healthy =
-			(listen !== null ? listen.ok : lookHealthy(final)) &&
+			(listen !== null
+				? listen.ok
+				: play !== null
+					? play.ok
+					: lookHealthy(final)) &&
 			!errors.some(text => text.startsWith("uncaught:")) &&
 			revoked !== false
 		const report: Record<string, unknown> = {
@@ -966,7 +981,9 @@ export async function run(
 			summary:
 				listen !== null
 					? `listen: ${listen.ok ? "ok" : "FAILED"}, ${listen.title}, ${listen.attaches} attach(es); ${summaryLine(final)}`
-					: summaryLine(final),
+					: play !== null
+						? `play: ${play.ok ? "ok" : "FAILED"}, ${play.steps.filter(s => s.ok).length} of ${play.steps.length} steps; ${summaryLine(final)}`
+						: summaryLine(final),
 			target: {
 				kind: options.target,
 				url: base + options.route,
@@ -987,6 +1004,7 @@ export async function run(
 			...(panelAfter !== null ? { panelAfterActions: panelAfter } : {}),
 			...(bench !== null ? { panelBench: bench } : {}),
 			...(listen !== null ? { listen } : {}),
+			...(play !== null ? { play } : {}),
 			screenshots: shots,
 		}
 		return { report, healthy }
