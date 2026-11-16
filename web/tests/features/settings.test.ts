@@ -302,6 +302,9 @@ describe("Settings rows", () => {
 						modulation: "nfm",
 						bandwidth: 12_500,
 						squelch: 0,
+						squelchMode: "auto",
+						voiceOnly: true,
+						listenMode: "auto",
 						noiseReduction: "off",
 						lowPass: 0,
 						highPass: 0,
@@ -488,6 +491,105 @@ describe("Settings rows", () => {
 	it("disables receiver rows when the access is read-only", () => {
 		const rows = buildRows(snapshot({ readOnly: true }), actions())
 		expect(byId(rows, "rx.ppm").disabled).toBeDefined()
+	})
+
+	describe("Audio › Squelch, the Listen vocabulary", () => {
+		const live = (config: Record<string, unknown>) =>
+			({
+				enabled: true,
+				running: true,
+				sourceId: "rtl-0",
+				thresholdDbfs: -84.6,
+				config: {
+					modulation: "nfm",
+					bandwidth: 12_500,
+					squelch: -60,
+					noiseReduction: "off",
+					...config,
+				},
+			}) as unknown as SettingsSnapshot["live"]
+		const listen = { squelchMode: "auto", voiceOnly: true, listenMode: "auto" }
+
+		it("offers Auto, Manual and Open (no Noise), Voice only under Auto on NFM, Source, the margin under More", () => {
+			const rows = buildRows(snapshot({ live: live(listen) }), actions())
+			const sq = byId(rows, "au.squelch")
+			expect(sq.value).toBe("auto")
+			expect(
+				sq.widget.kind === "seg" ? sq.widget.options.map(o => o.label) : [],
+			).toEqual(["Auto", "Manual", "Open"])
+			expect(sq.help).not.toMatch(/Noise|6 dB/)
+			expect(byId(rows, "au.voiceOnly").value).toBe(true)
+			expect(byId(rows, "au.source").value).toBe("auto")
+			expect(byId(rows, "au.margin").more).toBe(true)
+			expect(rows.some(r => r.id === "au.threshold")).toBe(false)
+		})
+
+		it("sends voiceOnly with Auto, a non-zero level with Manual, open with Open, and never the margin", async () => {
+			const a = actions()
+			const rows = buildRows(
+				snapshot({ live: live({ ...listen, voiceOnly: false }) }),
+				a,
+			)
+			const sq = byId(rows, "au.squelch")
+			await sq.write?.("auto")
+			await sq.write?.("manual")
+			await sq.write?.("open")
+			await byId(rows, "au.voiceOnly").write?.(true)
+			await byId(rows, "au.source").write?.("digital")
+			expect(a.calls).toEqual([
+				["audio", { squelchMode: "auto", voiceOnly: false }],
+				["audio", { squelchMode: "manual", squelch: -60 }],
+				["audio", { squelchMode: "open" }],
+				["audio", { squelchMode: "auto", voiceOnly: true }],
+				["audio", { listenMode: "digital" }],
+			])
+		})
+
+		it("starts Manual from the live threshold when no level is set", async () => {
+			const a = actions()
+			const rows = buildRows(
+				snapshot({
+					live: live({ squelchMode: "open", squelch: 0, listenMode: "auto" }),
+				}),
+				a,
+			)
+			expect(byId(rows, "au.squelch").value).toBe("open")
+			await byId(rows, "au.squelch").write?.("manual")
+			expect(a.calls).toEqual([
+				["audio", { squelchMode: "manual", squelch: -85 }],
+			])
+		})
+
+		it("shows the level in Manual only, bounded at −1 dBFS", () => {
+			const rows = buildRows(
+				snapshot({
+					live: live({ ...listen, squelchMode: "manual", squelch: -72 }),
+				}),
+				actions(),
+			)
+			const level = byId(rows, "au.threshold")
+			expect(level.value).toBe(-72)
+			expect(level.widget).toMatchObject({ min: -120, max: -1 })
+			expect(rows.some(r => r.id === "au.voiceOnly")).toBe(false)
+			expect(rows.some(r => r.id === "au.margin")).toBe(false)
+		})
+
+		it("an old core: no Voice only, no Source, Open sent as manual at 0, deprecated noise reads as Auto", async () => {
+			const a = actions()
+			const rows = buildRows(
+				snapshot({ live: live({ squelchMode: "noise" }) }),
+				a,
+			)
+			expect(byId(rows, "au.squelch").value).toBe("auto")
+			expect(rows.some(r => r.id === "au.voiceOnly")).toBe(false)
+			expect(rows.some(r => r.id === "au.source")).toBe(false)
+			await byId(rows, "au.squelch").write?.("open")
+			await byId(rows, "au.squelch").write?.("auto")
+			expect(a.calls).toEqual([
+				["audio", { squelchMode: "manual", squelch: 0 }],
+				["audio", { squelchMode: "auto" }],
+			])
+		})
 	})
 
 	it("compares the saved-label preference with the core's default", () => {

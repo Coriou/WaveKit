@@ -1,9 +1,10 @@
 // Listen island logic (docs/web/canvas/Listen.dc.html; DESIGN.md "Audio follows tuning", "Squelch UX"). Pure.
 import {
 	LIVE_AUDIO_AUTO_ROUTE_RATE,
-	LIVE_AUDIO_NOISE_QUIETING_DB,
+	LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_TONE_SQUELCH_MODULATIONS,
+	LIVE_AUDIO_VOICE_ONLY_DEFAULT,
 } from "@wavekit/api-types"
 import type { LiveAudioConfig, LiveAudioStatus } from "@wavekit/api-types"
 
@@ -139,39 +140,187 @@ export function audioAttachKey(
 }
 
 /**
- * Squelch the board's way: "Off" (0 opens it), "Auto", a manual threshold, or (WG7 cores, NFM and WFM)
- * "Noise": the FM quieting squelch, which needs no power threshold and opens on a carrier that was
- * already up when tuned (where Auto's floor starts on the carrier).
+ * Squelch the Listen way (docs/web/DESIGN.md "Squelch UX"): `Auto` (carrier squelch at the floor plus
+ * the margin and, on NFM with `voiceOnly`, the voice check), `Manual` (the threshold line) or `Open`
+ * (everything plays). A core before the Listen contract (no `voiceOnly` in its config) has no `open`:
+ * there `manual` at 0 reads as Open, and the deprecated `noise` reads as Auto without the voice check.
  */
 export type SquelchSetting =
-	| { kind: "off" }
-	| { kind: "auto"; marginDb: number }
+	| { kind: "auto"; marginDb: number; voiceOnly: boolean }
 	| { kind: "manual"; thresholdDbfs: number }
-	| { kind: "noise"; quietingDb: number }
+	| { kind: "open" }
+
+export type SquelchKind = SquelchSetting["kind"]
+
+/** The core speaks the Listen contract: `open`, `voiceOnly` and `listenMode` (2026-11-15). */
+export function listenContract(
+	config: LiveAudioConfig | null | undefined,
+): boolean {
+	return (
+		typeof config?.voiceOnly === "boolean" ||
+		config?.listenMode !== undefined ||
+		config?.squelchMode === "open"
+	)
+}
+
+/** A tone squelch is set (a manual squelch at 0 with one is a tone-only squelch, not Open). */
+function toneSet(config: LiveAudioConfig): boolean {
+	return config.toneSquelch !== undefined && config.toneSquelch.kind !== "none"
+}
 
 export function squelchSetting(status: LiveAudioStatus | null): SquelchSetting {
-	const c = status?.config
-	if (!c) return { kind: "off" }
+	return squelchOf(status?.config)
+}
+
+/** squelchSetting() from a config alone; no config reads as Open (nothing is known to gate). */
+export function squelchOf(
+	c: LiveAudioConfig | null | undefined,
+): SquelchSetting {
+	if (!c) return { kind: "open" }
+	if (c.squelchMode === "open") return { kind: "open" }
 	if (c.squelchMode === "noise")
-		return {
-			kind: "noise",
-			quietingDb: c.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
-		}
+		return { kind: "auto", marginDb: c.autoMarginDb ?? 6, voiceOnly: false }
 	if (c.squelchMode === "auto")
-		return { kind: "auto", marginDb: c.autoMarginDb ?? 6 }
-	if (c.squelch === 0) return { kind: "off" }
+		return {
+			kind: "auto",
+			marginDb: c.autoMarginDb ?? 6,
+			voiceOnly: c.voiceOnly ?? LIVE_AUDIO_VOICE_ONLY_DEFAULT,
+		}
+	// manual (or absent, as cores before WG7): 0 or above opens the power squelch
+	if (!(c.squelch < 0))
+		return toneSet(c)
+			? { kind: "manual", thresholdDbfs: LEVEL_MIN_DBFS }
+			: { kind: "open" }
 	return { kind: "manual", thresholdDbfs: c.squelch }
 }
 
-/** The threshold to draw on the bar: the live one from level events, else the configured one. */
+/**
+ * The squelch line the spectrum draws (plot/handles.ts): Manual only, the live threshold while running,
+ * else the configured one. Auto moves by itself and Open has no threshold, so neither shows a line.
+ */
 export function squelchThreshold(
 	setting: SquelchSetting,
 	liveThresholdDbfs: number | null,
 ): number | null {
-	// noise mode gates on FM quieting; the core's thresholdDbfs is then only the stored `squelch`
-	if (setting.kind === "off" || setting.kind === "noise") return null
-	if (liveThresholdDbfs !== null) return liveThresholdDbfs
-	return setting.kind === "manual" ? setting.thresholdDbfs : null
+	if (setting.kind !== "manual") return null
+	return liveThresholdDbfs ?? setting.thresholdDbfs
+}
+
+/** The threshold the Listen bar marks: Manual's, or Auto's live one (dragging it selects Manual); none when Open. */
+export function meterThreshold(
+	setting: SquelchSetting,
+	liveThresholdDbfs: number | null,
+): number | null {
+	if (setting.kind === "open") return null
+	if (setting.kind === "manual")
+		return liveThresholdDbfs ?? setting.thresholdDbfs
+	return liveThresholdDbfs
+}
+
+/** The Voice only switch applies: Auto on NFM (the voice check exists on NFM only), on a Listen core. */
+export function voiceOnlyFits(
+	config: LiveAudioConfig | null | undefined,
+): boolean {
+	return (
+		!!config &&
+		listenContract(config) &&
+		LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS.includes(config.modulation)
+	)
+}
+
+/**
+ * Manual threshold bounds: the bar's −120 dBFS up to −1 dBFS. A manual squelch is always sent below 0:
+ * 0 means Open (the core stores `manual` at 0 as `open`), so −1 is the highest level Manual sends.
+ */
+export const MANUAL_MIN_DBFS = LEVEL_MIN_DBFS
+export const MANUAL_MAX_DBFS = -1
+/** Manual with nothing better to start from (no level set, no live threshold). */
+export const MANUAL_DEFAULT_DBFS = -60
+
+/** A manual level the core takes as a threshold: whole dB in −120…−1; anything else is the default. */
+export function manualLevel(dbfs: number | null | undefined): number {
+	if (dbfs === null || dbfs === undefined || !Number.isFinite(dbfs))
+		return MANUAL_DEFAULT_DBFS
+	return Math.min(MANUAL_MAX_DBFS, Math.max(MANUAL_MIN_DBFS, Math.round(dbfs)))
+}
+
+/** Where Manual starts: the configured level when one is set, else the live threshold, else −60. */
+export function manualStart(
+	config: LiveAudioConfig | null | undefined,
+	liveThresholdDbfs: number | null,
+): number {
+	if (config && config.squelch < 0) return manualLevel(config.squelch)
+	return manualLevel(liveThresholdDbfs)
+}
+
+/**
+ * The PATCH for a squelch choice. Send rules (the Listen contract): Auto always carries `voiceOnly`
+ * (a core turns the voice check back on when it is missing), Manual a non-zero level, Open is
+ * `squelchMode: "open"`. A core before the contract gets neither `voiceOnly` nor `open`: Open is
+ * `manual` at 0 there, as before. Never touches `autoMarginDb` (Settings › More owns it).
+ */
+export function squelchPatch(
+	config: LiveAudioConfig | null | undefined,
+	choice:
+		| { kind: "auto"; voiceOnly?: boolean }
+		| { kind: "manual"; dbfs: number }
+		| { kind: "open" },
+): Partial<LiveAudioConfig> {
+	const listen = listenContract(config)
+	if (choice.kind === "manual")
+		return { squelchMode: "manual", squelch: manualLevel(choice.dbfs) }
+	if (choice.kind === "open")
+		return listen
+			? { squelchMode: "open" }
+			: { squelchMode: "manual", squelch: 0 }
+	if (!listen) return { squelchMode: "auto" }
+	const keep =
+		config?.squelchMode === "auto"
+			? (config.voiceOnly ?? LIVE_AUDIO_VOICE_ONLY_DEFAULT)
+			: LIVE_AUDIO_VOICE_ONLY_DEFAULT
+	return { squelchMode: "auto", voiceOnly: choice.voiceOnly ?? keep }
+}
+
+/** A closed squelch to go back to from Open (`Q`): what was on before it. */
+export type ClosedSquelch =
+	| { kind: "auto"; voiceOnly: boolean }
+	| { kind: "manual"; dbfs: number }
+
+/** The closed squelch now, or null while Open. */
+export function closedSquelch(setting: SquelchSetting): ClosedSquelch | null {
+	if (setting.kind === "auto")
+		return { kind: "auto", voiceOnly: setting.voiceOnly }
+	if (setting.kind === "manual")
+		return { kind: "manual", dbfs: setting.thresholdDbfs }
+	return null
+}
+
+/**
+ * `Q`: Open, or back from Open to `previous` (Auto with the voice check when nothing is known). Returns
+ * the PATCH and the closed squelch to remember for the way back (null when going back).
+ */
+export function toggleOpenPatch(
+	status: LiveAudioStatus | null,
+	previous: ClosedSquelch | null,
+): { patch: Partial<LiveAudioConfig>; remember: ClosedSquelch | null } {
+	const config = status?.config
+	const setting = squelchSetting(status)
+	const closed = closedSquelch(setting)
+	if (closed !== null)
+		return { patch: squelchPatch(config, { kind: "open" }), remember: closed }
+	const back = previous ?? {
+		kind: "auto",
+		voiceOnly: LIVE_AUDIO_VOICE_ONLY_DEFAULT,
+	}
+	return {
+		patch: squelchPatch(
+			config,
+			back.kind === "auto"
+				? { kind: "auto", voiceOnly: back.voiceOnly }
+				: { kind: "manual", dbfs: back.dbfs },
+		),
+		remember: null,
+	}
 }
 
 /** The noise squelch applies to this modulation (NFM and WFM). */

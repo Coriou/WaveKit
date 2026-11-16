@@ -12,6 +12,11 @@
  *   WAVEKIT_UI_CHECK_LIVE=1. The machine token is read from `--token-file` or `--access-dir`, never
  *   from the command line or the environment, and never printed.
  *
+ * - `--flow=listen` (fake target only): the Listen flow against the web app's own mock core (web/mock, in
+ *   this process, loopback ports; the real core needs csdr for live audio). It drives Listen, Waiting for
+ *   voice → Play anyway → Listening, Open, Source through all three, `Q` twice, and from the defaults to
+ *   hearing noise, counting the audio stream attaches. The report gains `listen`.
+ *
  * Every pairing it makes is named "ui-check" and is signed out when the run ends.
  * Exit: 0 healthy, 1 unhealthy, 2 could not run.
  */
@@ -46,6 +51,7 @@ import {
 	type PanelBench,
 	type PanelLook,
 } from "./panel-check.ts"
+import { listenFlow, type ListenReport } from "./listen-flow.ts"
 import {
 	FORBIDDEN_PORTS,
 	LOOPBACK,
@@ -107,6 +113,8 @@ export interface Options {
 	allowMeasure: boolean
 	/** Fake target: the production build (vite build, then vite preview) instead of the dev server. */
 	built: boolean
+	/** `--flow=listen`: drive the Listen flow on the mock core (fake target only). */
+	flow: "listen" | null
 }
 
 /** The run cannot start or finish (exit 2); the message never holds a credential. */
@@ -151,6 +159,7 @@ export function parseOptions(argv: readonly string[]): Options {
 		measure: false,
 		allowMeasure: false,
 		built: false,
+		flow: null,
 	}
 	for (const arg of argv) {
 		const [flag = "", ...rest] = arg.split("=")
@@ -158,6 +167,7 @@ export function parseOptions(argv: readonly string[]): Options {
 		if (flag === "--screenshot" && rest.length === 0) options.screenshot = true
 		else if (flag === "--measure" && rest.length === 0) options.measure = true
 		else if (flag === "--built" && rest.length === 0) options.built = true
+		else if (flag === "--flow" && value === "listen") options.flow = "listen"
 		else if (flag === "--seed-recordings" && /^\d{1,6}$/.test(value)) {
 			const n = Number(value)
 			if (n < 1 || n > SEED_RECORDINGS_MAX)
@@ -199,6 +209,13 @@ export function parseOptions(argv: readonly string[]): Options {
 	if (options.measure && panelOfRoute(options.route) === null)
 		throw new CannotRun(
 			"--measure needs a panel route: --route=#/recordings or --route=#/activity",
+		)
+	if (
+		options.flow !== null &&
+		(options.target !== "fake" || options.seedRecordings > 0 || options.measure)
+	)
+		throw new CannotRun(
+			"--flow=listen runs on --target=fake alone (it changes the core's shared squelch and Source)",
 		)
 	if (options.target === "live") {
 		if (process.env["WAVEKIT_UI_CHECK_LIVE"] !== "1")
@@ -647,12 +664,40 @@ export async function run(
 		await mkdir(shotDir, { recursive: true })
 	}
 	let core: RealCore | null = null
+	let mock: { close(): Promise<void> } | null = null
+	let mockAudioPort = 0
 	let dev: { close(): Promise<void> } | null = null
 	let browser: Browser | null = null
 	try {
 		let base: string
 		let token: string | null = null
-		if (options.target === "fake") {
+		if (options.flow === "listen") {
+			// the web app's mock core, in this process: it plays live audio without csdr (legacy access)
+			const port = await loopbackPort()
+			const apiPort = await loopbackPort()
+			mockAudioPort = await loopbackPort()
+			for (const p of [port, apiPort, mockAudioPort]) assertAllowedPort(p)
+			base = `http://${LOOPBACK}:${port}/`
+			const { buildMockServer } = await import("../../mock/server.ts")
+			const server = await buildMockServer({
+				host: LOOPBACK,
+				port: apiPort,
+				audioPort: mockAudioPort,
+				audioOrigin: `http://${LOOPBACK}:${mockAudioPort}`,
+			})
+			await server.listen()
+			mock = {
+				close: async () => {
+					await server.close()
+					// open audio streams would hold close() for good
+					server.audio.closeAllConnections()
+					await new Promise<void>(resolve =>
+						server.audio.close(() => resolve()),
+					)
+				},
+			}
+			dev = await startDevServer(port, apiPort, join(scratch, "vite"))
+		} else if (options.target === "fake") {
 			const port = await loopbackPort()
 			base = `http://${LOOPBACK}:${port}/`
 			const seed = options.seedRecordings
@@ -710,7 +755,13 @@ export async function run(
 		browser = await chromium.launch({
 			executablePath: exe,
 			headless: true,
-			args: GPU_ARGS[options.gpu],
+			// the flow's first Listen is a real click; this keeps a headless audio context from staying suspended
+			args: [
+				...GPU_ARGS[options.gpu],
+				...(options.flow === "listen"
+					? ["--autoplay-policy=no-user-gesture-required"]
+					: []),
+			],
 		})
 		const context = await browser.newContext({
 			// wide: the tuned card must not lie over the waterfall columns the look reads
@@ -871,6 +922,11 @@ export async function run(
 						: `${action.name}:${action.value}`,
 				result: await act(page, action),
 			})
+		let listen: ListenReport | null = null
+		if (options.flow === "listen") {
+			listen = await listenFlow(page, mockAudioPort)
+			await shoot("2-listen")
+		}
 		const last = options.actions.length > 0 ? await look(page, core) : null
 		if (last !== null) await shoot("2-after-actions")
 		const panelAfter =
@@ -894,13 +950,17 @@ export async function run(
 		// leave no device behind (the finally below does the same when the run ends early)
 		const revoked = await pairing.revoke()
 		const final = last ?? first
+		// the Listen flow judges the flow (the mock's spectrum is not the look's fake tone)
 		const healthy =
-			lookHealthy(final) &&
+			(listen !== null ? listen.ok : lookHealthy(final)) &&
 			!errors.some(text => text.startsWith("uncaught:")) &&
 			revoked !== false
 		const report: Record<string, unknown> = {
 			healthy,
-			summary: summaryLine(final),
+			summary:
+				listen !== null
+					? `listen: ${listen.ok ? "ok" : "FAILED"}, ${listen.title}, ${listen.attaches} attach(es); ${summaryLine(final)}`
+					: summaryLine(final),
 			target: {
 				kind: options.target,
 				url: base + options.route,
@@ -920,6 +980,7 @@ export async function run(
 			...(last !== null ? { actions: done, spectrumAfterActions: last } : {}),
 			...(panelAfter !== null ? { panelAfterActions: panelAfter } : {}),
 			...(bench !== null ? { panelBench: bench } : {}),
+			...(listen !== null ? { listen } : {}),
 			screenshots: shots,
 		}
 		return { report, healthy }
@@ -929,6 +990,7 @@ export async function run(
 		await browser?.close().catch(() => undefined)
 		await dev?.close().catch(() => undefined)
 		await core?.stop().catch(() => undefined)
+		await mock?.close().catch(() => undefined)
 		// the scratch directory goes, unless the screenshots were saved in it
 		const keepShots = options.screenshot && options.out === null
 		await rm(keepShots ? join(scratch, "vite") : scratch, {

@@ -182,29 +182,34 @@ describe("squelchLineDbfs", () => {
 		).toBe(-60)
 	})
 
-	it("shows Auto's effective threshold from level events, rounded to 0.5 dB", () => {
+	it("draws the line in Manual only: Auto moves by itself, rounded to 0.5 dB in Manual", () => {
 		expect(
 			squelchLineDbfs({
 				status: status({ squelchMode: "auto", autoMarginDb: 6 }),
 				level: level(-81.37),
 			}),
-		).toBe(-81.5)
-		// stopped: no effective threshold to show
+		).toBeNull()
 		expect(
 			squelchLineDbfs({
-				status: status({ squelchMode: "auto" }, false),
-				level: level(-81),
+				status: status({ squelchMode: "manual", squelch: -81 }),
+				level: level(-81.37),
 			}),
-		).toBeNull()
+		).toBe(-81.5)
 	})
 
-	it("hides with squelch off (0) or noise squelch", () => {
+	it("hides when Open (open, or manual at 0) or with the deprecated noise squelch", () => {
 		expect(
 			squelchLineDbfs({ status: status({ squelch: 0 }), level: level(0) }),
 		).toBeNull()
 		expect(
 			squelchLineDbfs({
 				status: status({ squelchMode: "noise" }),
+				level: level(-60),
+			}),
+		).toBeNull()
+		expect(
+			squelchLineDbfs({
+				status: status({ squelchMode: "open" }),
 				level: level(-60),
 			}),
 		).toBeNull()

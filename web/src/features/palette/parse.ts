@@ -117,7 +117,8 @@ export function parseFrequencyIntent(
 
 export type CommandIntent =
 	| { kind: "gain"; db: number | "auto" }
-	| { kind: "squelch"; value: number | "auto" | "off" }
+	/** `off` is read as Open (the old word for it). */
+	| { kind: "squelch"; value: number | "auto" | "off" | "open" | "manual" }
 	| { kind: "bandwidth"; hz: number }
 	| { kind: "step"; hz: number }
 	| { kind: "rate"; msps: number }
@@ -140,12 +141,18 @@ export function parseCommand(input: string): CommandIntent | null {
 			kind: "gain",
 			db: m[1] === "auto" ? "auto" : Number.parseFloat(m[1]),
 		}
-	m = /^(?:sq|squelch|sql)\s*(auto|off|-?\d+(?:\.\d+)?)\s*(?:db)?$/.exec(s)
+	m =
+		/^(?:sq|squelch|sql)\s*(auto|off|open|manual|-?\d+(?:\.\d+)?)\s*(?:db)?$/.exec(
+			s,
+		)
 	if (m?.[1])
 		return {
 			kind: "squelch",
 			value:
-				m[1] === "auto" || m[1] === "off"
+				m[1] === "auto" ||
+				m[1] === "off" ||
+				m[1] === "open" ||
+				m[1] === "manual"
 					? m[1]
 					: -Math.abs(Number.parseFloat(m[1])),
 		}

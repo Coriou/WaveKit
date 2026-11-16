@@ -756,7 +756,8 @@ export async function buildMockServer(
 
 	/**
 	 * Evidence squelch (docs/specs/evidence-squelch): NFM auto squelch waits for voice or a tone.
-	 * The mock hears the transmission's tone after 750 ms, else calls it voice after a second.
+	 * The mock hears the transmission's tone after 750 ms, else calls speech (a `voice` signal) voice after a
+	 * second; a bare carrier, data and pagers (every other kind) keep waiting.
 	 */
 	const autoSquelchOf = (
 		open: boolean,
@@ -776,7 +777,9 @@ export async function buildMockServer(
 		const tone = toneHere()
 		if (tone !== null && held >= 750)
 			return { state: "open", evidence: "ctcss" }
-		if (held >= 1000) return { state: "open", evidence: "voice" }
+		// Listen contract: only speech passes the voice check; a bare carrier, data and pagers wait for good
+		const speech = signalAt(tunedHz())?.kind === "voice"
+		if (speech && held >= 1000) return { state: "open", evidence: "voice" }
 		return { state: "waiting" }
 	}
 

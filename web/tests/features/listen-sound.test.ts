@@ -21,22 +21,22 @@ import {
 	agcOf,
 	autoRouteNow,
 	autoSquelchNow,
-	coreRouteHint,
-	coreRoutes,
 	deemphOf,
 	evidenceText,
 	deemphPatch,
-	hearHint,
 	liveTone,
 	offeredTone,
-	playsDigital,
 	routeProtocol,
 	sameTone,
 	toneOfSummary,
 	toneSquelchFits,
 	toneSquelchPatch,
 	toneText,
-	transmissionKind,
+	LEGACY_HEAR_KEY,
+	listenHeadline,
+	listenModeOf,
+	migrateHearKey,
+	sourceHint,
 	voiceRoute,
 } from "../../src/features/listen/sound.ts"
 
@@ -214,64 +214,6 @@ describe("Listen › What you hear", () => {
 		expect(voiceRoute([dsd()], null, 161_150_000, 6250)).toBeNull()
 	})
 
-	it("plays decoded voice only with a route, and says what plays", () => {
-		const route = voiceRoute([dsd()], voice(), 161_150_000, 6250)
-		expect(playsDigital("auto", route)).toBe(true)
-		expect(playsDigital("analog", route)).toBe(false)
-		expect(playsDigital("digital", null)).toBe(false)
-		expect(hearHint("auto", null, "NFM")).toBe(
-			"No digital voice decoder on this channel. Playing NFM audio.",
-		)
-		expect(hearHint("analog", route, "NFM")).toBe(
-			"Playing demodulated NFM audio.",
-		)
-		expect(hearHint("digital", route, "NFM")).toBe(
-			"Digital voice decoder on this channel. Playing decoded voice.",
-		)
-	})
-
-	it("Auto follows the transmission: a call is digital, a live tone is analog, else the last proof", () => {
-		const idle = voiceRoute([dsd()], voice(), 161_150_000, 6250)
-		const now = Date.parse("2026-10-22T10:00:05.000Z")
-		const tone = { ctcssHz: 88.5, dcs: null, at: "2026-10-22T10:00:00.000Z" }
-		const base = { route: idle, open: true, tone, last: null, now }
-		expect(transmissionKind(base)).toBe("analog")
-		expect(transmissionKind({ ...base, open: false })).toBeNull()
-		expect(
-			transmissionKind({ ...base, now: now + 60_000, last: "digital" }),
-		).toBe("digital")
-		expect(transmissionKind({ ...base, tone: undefined, last: "analog" })).toBe(
-			"analog",
-		)
-		expect(
-			transmissionKind({ ...base, tone: { ...tone, ctcssHz: null } }),
-		).toBeNull()
-		const calling = voiceRoute(
-			[dsd()],
-			voice({
-				decoderId: "dsd-fme",
-				callId: "c1",
-				protocol: "dmr",
-				talkgroup: 2081,
-				source: 2081045,
-				slot: 1,
-				encrypted: false,
-				active: true,
-				startedAt: "2026-10-17T17:00:00Z",
-			} as DigitalVoiceStatus["call"]),
-			161_152_000,
-			6250,
-		)
-		expect(transmissionKind({ ...base, route: calling })).toBe("digital")
-
-		expect(playsDigital("auto", idle, "analog")).toBe(false)
-		expect(playsDigital("auto", idle, null)).toBe(true)
-		expect(playsDigital("digital", idle, "analog")).toBe(true)
-		expect(hearHint("auto", idle, "NFM", "analog")).toBe(
-			"This transmission is analog. Playing NFM audio, back to decoded voice when a call comes.",
-		)
-	})
-
 	it("offers the live tone over the Activity rows (WG12), and the rows on older cores", () => {
 		const live = { ctcssHz: 103.5, dcs: null, at: "2026-10-22T10:00:00.000Z" }
 		expect(liveTone(undefined)).toBeUndefined()
@@ -363,15 +305,6 @@ describe("Listen › Auto listen route (/auto)", () => {
 			...over,
 		}) as unknown as LiveAudioStatus
 
-	it("Auto hands the choice to the core only when it serves /auto while running", () => {
-		expect(coreRoutes("auto", running())).toBe(true)
-		expect(coreRoutes("analog", running())).toBe(false)
-		expect(coreRoutes("digital", running())).toBe(false)
-		expect(coreRoutes("auto", running({ autoRoute: undefined }))).toBe(false)
-		expect(coreRoutes("auto", running({ running: false }))).toBe(false)
-		expect(coreRoutes("auto", null)).toBe(false)
-	})
-
 	it("plays /auto at 48 kHz s16le, a loopback host following the page", () => {
 		expect(autoRouteSource(running(), "http://pi.local:3000/", true)).toEqual({
 			route: "auto",
@@ -402,40 +335,170 @@ describe("Listen › Auto listen route (/auto)", () => {
 		)
 	})
 
-	it("words the hint from what the core plays", () => {
+	it("carries the route's reason from the status when no level event has it", () => {
+		expect(
+			autoRouteNow(
+				running({ autoRoute: { ...route, reason: "no-decoder" } }),
+				null,
+			),
+		).toEqual({ active: "analog", reason: "no-decoder" })
+	})
+})
+
+describe("Listen › Source (the core's listenMode)", () => {
+	it("reads the Source, Auto on an old core or a value it does not know", () => {
+		expect(listenModeOf(config({ listenMode: "digital" }))).toBe("digital")
+		expect(listenModeOf(config({ listenMode: "analog" }))).toBe("analog")
+		expect(listenModeOf(config())).toBe("auto")
+		expect(
+			listenModeOf(
+				config({
+					listenMode: "decoded" as unknown as NonNullable<
+						LiveAudioConfig["listenMode"]
+					>,
+				}),
+			),
+		).toBe("auto")
+		expect(listenModeOf(null)).toBe("auto")
+	})
+
+	it("words the hint from what the core plays and why", () => {
 		const r = voiceRoute([dsd()], voice(), 161_150_000, 6250)
+		const hint = (
+			mode: "auto" | "analog" | "digital",
+			now: Parameters<typeof sourceHint>[0]["now"],
+			route = r,
+		) => sourceHint({ mode, now, route, modeLabel: "NFM" })
+		expect(hint("auto", { active: "digital", protocol: "dmr" })).toBe(
+			"DMR call. Playing decoded voice.",
+		)
 		expect(
-			coreRouteHint({
+			hint("digital", { active: "none", reason: "no-decoder" }, null),
+		).toBe("No digital voice decoder on this channel: nothing plays.")
+		expect(hint("auto", { active: "analog", reason: "squelch-open" })).toBe(
+			"Open plays the NFM audio as it is.",
+		)
+		expect(hint("analog", { active: "analog" })).toBe(
+			"Playing demodulated NFM audio only.",
+		)
+		expect(hint("digital", { active: "none" })).toBe(
+			"Decoded digital voice only, silence between calls.",
+		)
+		expect(hint("auto", { active: "none" }, null)).toBe(
+			"Playing NFM audio. Decoded voice when a decoder covers the channel.",
+		)
+	})
+})
+
+describe("Listen › head states", () => {
+	const base = {
+		squelch: "auto" as const,
+		carrier: false,
+		gate: null,
+		toneWaiting: false,
+		now: null,
+	}
+	it("says Quiet, Waiting for voice, Open or Listening", () => {
+		expect(listenHeadline(base).title).toBe("Quiet")
+		expect(
+			listenHeadline({ ...base, carrier: true, gate: { state: "waiting" } })
+				.title,
+		).toBe("Waiting for voice")
+		expect(
+			listenHeadline({ ...base, carrier: true, gate: { state: "open" } }).title,
+		).toBe("Listening")
+		// Voice only off or Manual: the voice check is off and the carrier plays
+		expect(
+			listenHeadline({ ...base, carrier: true, gate: { state: "off" } }).title,
+		).toBe("Listening")
+		expect(
+			listenHeadline({ ...base, squelch: "manual", carrier: true }).title,
+		).toBe("Listening")
+		// Open stays Open, whatever is on the air
+		expect(listenHeadline({ ...base, squelch: "open" }).title).toBe("Open")
+		expect(
+			listenHeadline({
+				...base,
+				squelch: "open",
+				now: { active: "analog", reason: "squelch-open" },
+			}).title,
+		).toBe("Open")
+	})
+
+	it("a decoded call is Listening (the sub says DMR voice · TG …); Digital with no decoder and a tone gate are Quiet", () => {
+		expect(
+			listenHeadline({
+				...base,
+				carrier: true,
+				gate: { state: "waiting" },
 				now: { active: "digital", protocol: "dmr" },
-				digitalAvailable: true,
-				route: r,
-				modeLabel: "NFM",
-			}),
-		).toBe("DMR call. Playing decoded voice.")
+			}).title,
+		).toBe("Listening")
 		expect(
-			coreRouteHint({
-				now: { active: "analog" },
-				digitalAvailable: true,
-				route: { ...r!, protocol: "DMR" },
-				modeLabel: "NFM",
-			}),
-		).toBe("Playing NFM audio, decoded DMR voice when a call comes.")
+			listenHeadline({
+				...base,
+				carrier: true,
+				now: { active: "none", reason: "no-decoder" },
+			}).title,
+		).toBe("Quiet")
 		expect(
-			coreRouteHint({
-				now: { active: "none" },
-				digitalAvailable: false,
-				route: r,
-				modeLabel: "NFM",
-			}),
-		).toBe("This core plays analog audio only on Auto. Playing NFM audio.")
-		expect(
-			coreRouteHint({
-				now: { active: "none" },
-				digitalAvailable: true,
-				route: null,
-				modeLabel: "AM",
-			}),
-		).toBe("No digital voice decoder on this channel. Playing AM audio.")
+			listenHeadline({ ...base, carrier: true, toneWaiting: true }).title,
+		).toBe("Quiet")
+	})
+
+	it("an old core (no voice check reported) keeps today's states", () => {
+		expect(listenHeadline({ ...base, carrier: true }).title).toBe("Listening")
+		expect(listenHeadline(base).title).toBe("Quiet")
+	})
+})
+
+describe("Listen › the old per-browser What you hear", () => {
+	const store = (value: string | null) => {
+		const items = new Map<string, string>()
+		if (value !== null) items.set(LEGACY_HEAR_KEY, value)
+		return {
+			items,
+			getItem: (k: string) => items.get(k) ?? null,
+			removeItem: (k: string) => void items.delete(k),
+		}
+	}
+	const listen = config({ voiceOnly: true, listenMode: "auto" })
+
+	it("keeps Analog or Digital as the core's Source once, and deletes the key", () => {
+		for (const v of ["analog", "digital"] as const) {
+			const s = store(v)
+			expect(migrateHearKey(s, listen, true)).toEqual({ listenMode: v })
+			expect(s.items.has(LEGACY_HEAR_KEY)).toBe(false)
+			// read once: nothing left to migrate
+			expect(migrateHearKey(s, listen, true)).toBeNull()
+		}
+	})
+
+	it("drops it without a write when not sensible: auto, junk, a chosen Source, read-only, an old core", () => {
+		const cases: [string, LiveAudioConfig | null, boolean][] = [
+			["auto", listen, true],
+			["decoded", listen, true],
+			["analog", config({ voiceOnly: true, listenMode: "digital" }), true],
+			["analog", listen, false],
+			["analog", config(), true],
+			["analog", null, true],
+		]
+		for (const [value, cfg, canWrite] of cases) {
+			const s = store(value)
+			expect(migrateHearKey(s, cfg, canWrite)).toBeNull()
+			expect(s.items.has(LEGACY_HEAR_KEY)).toBe(false)
+		}
+	})
+
+	it("blocked storage reads as nothing to migrate", () => {
+		const blocked = {
+			getItem: () => {
+				throw new Error("SecurityError")
+			},
+			removeItem: () => undefined,
+		}
+		expect(migrateHearKey(blocked, listen, true)).toBeNull()
+		expect(migrateHearKey(undefined, listen, true)).toBeNull()
 	})
 })
 
@@ -460,13 +523,13 @@ describe("Listen › Evidence squelch", () => {
 
 	it("names the evidence that opened the gate", () => {
 		expect(evidenceText({ state: "open", evidence: "voice" })).toBe(
-			"Open on voice",
+			"Voice heard",
 		)
 		expect(evidenceText({ state: "open", evidence: "ctcss" })).toBe(
-			"Open on CTCSS",
+			"CTCSS heard",
 		)
-		expect(evidenceText({ state: "open", evidence: "dcs" })).toBe("Open on DCS")
-		expect(evidenceText({ state: "open" })).toBe("Open")
+		expect(evidenceText({ state: "open", evidence: "dcs" })).toBe("DCS heard")
+		expect(evidenceText({ state: "open" })).toBe("Passing")
 		expect(evidenceText({ state: "waiting" })).toBeNull()
 		expect(evidenceText(null)).toBeNull()
 	})

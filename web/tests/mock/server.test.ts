@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import WebSocket from "ws"
 import type {
 	ActivitySearchPage,
@@ -289,6 +289,54 @@ describe("mock server REST", () => {
 			squelchMode: "auto",
 			voiceOnly: true,
 		})
+	})
+
+	it("emits the Listen contract's voice check and route reasons on a bare carrier", async () => {
+		const read = async () =>
+			(await inject("GET", "/api/live-audio/status")).json<LiveAudioStatus>()
+		// the steady carrier at 162.400 MHz (centre 161.500 + 900 kHz): keyed all the time, never speech
+		await inject("PATCH", "/api/live-audio/config", {
+			offsetHz: 900_000,
+			squelchMode: "auto",
+			voiceOnly: true,
+			listenMode: "auto",
+		})
+		await inject("POST", "/api/live-audio/start")
+		const real = Date.now
+		let now = real()
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now)
+		try {
+			expect((await read()).autoSquelch).toEqual({ state: "waiting" })
+			now += 10_000
+			// a carrier is not voice: it waits for good (the old mock called anything voice after 1 s)
+			expect((await read()).autoSquelch).toEqual({ state: "waiting" })
+			await inject("PATCH", "/api/live-audio/config", {
+				squelchMode: "auto",
+				voiceOnly: false,
+			})
+			expect((await read()).autoSquelch).toEqual({ state: "off" })
+			await inject("PATCH", "/api/live-audio/config", { listenMode: "digital" })
+			expect((await read()).autoRoute).toMatchObject({
+				listenMode: "digital",
+				reason: "no-decoder",
+			})
+			await inject("PATCH", "/api/live-audio/config", { squelchMode: "open" })
+			const open = await read()
+			expect(open.autoSquelch).toEqual({ state: "off" })
+			expect(open.autoRoute).toMatchObject({
+				listenMode: "analog",
+				reason: "squelch-open",
+			})
+		} finally {
+			clock.mockRestore()
+			await inject("POST", "/api/live-audio/stop")
+			await inject("PATCH", "/api/live-audio/config", {
+				offsetHz: -350_000,
+				squelchMode: "auto",
+				voiceOnly: true,
+				listenMode: "auto",
+			})
+		}
 	})
 
 	it("serves the resolved band plan", async () => {

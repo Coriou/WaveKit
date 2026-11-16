@@ -9,6 +9,7 @@ import type {
 	LiveAudioAutoSquelch,
 	LiveAudioConfig,
 	LiveAudioLevel,
+	LiveAudioListenMode,
 	LiveAudioStatus,
 	LiveAudioToneSquelch,
 } from "@wavekit/api-types"
@@ -155,9 +156,7 @@ export function toneSquelchPatch(
 	return { toneSquelch: on ? tone : { kind: "none" } }
 }
 
-// ---- What you hear
-
-export type HearChoice = "auto" | "analog" | "digital"
+// ---- Source (the core's listenMode)
 
 /** Where decoded voice for the tuned channel comes from: a dsd-fme decoder on it and its stream. */
 export interface VoiceRoute {
@@ -220,74 +219,7 @@ function callText(
 	return parts.length > 0 ? parts.join(" · ") : null
 }
 
-export type TransmissionKind = "analog" | "digital"
-
-/** A live tone this recent, with the squelch open, belongs to the transmission on the air. */
-export const LIVE_TONE_MS = 10_000
-
-/**
- * Analog or digital, for the transmission on the air (Auto follows it): a decoded call now is digital; a
- * tone heard now is analog; otherwise the last transmission's proof (`last`, from the channel's latest
- * observation), or null when nothing says.
- */
-export function transmissionKind(input: {
-	route: VoiceRoute | null
-	open: boolean
-	tone: LiveAudioStatus["tone"]
-	last: TransmissionKind | null
-	now: number
-}): TransmissionKind | null {
-	if (input.route?.active) return "digital"
-	const tone = input.tone
-	if (input.open && tone && liveTone(tone)) {
-		const at = Date.parse(tone.at)
-		if (Number.isFinite(at) && input.now - at <= LIVE_TONE_MS) return "analog"
-	}
-	return input.last
-}
-
-/**
- * What plays: decoded voice when a voice decoder covers the channel and the choice allows it, else the
- * analog audio. Auto plays the analog audio when the transmission is analog (a shared channel). Decoded
- * voice with no decoder on the channel plays the analog audio rather than silence, and the hint says why.
- */
-export function playsDigital(
-	choice: HearChoice,
-	route: VoiceRoute | null,
-	kind: TransmissionKind | null = null,
-): boolean {
-	if (route === null || choice === "analog") return false
-	return choice === "digital" || kind !== "analog"
-}
-
-/** The line under the choice, as the board words it. */
-export function hearHint(
-	choice: HearChoice,
-	route: VoiceRoute | null,
-	modeLabel: string,
-	kind: TransmissionKind | null = null,
-): string {
-	if (playsDigital(choice, route, kind) && route) {
-		const what = route.protocol ?? "Digital voice"
-		return route.encrypted
-			? `${what} call is encrypted: nothing to play.`
-			: `${what} decoder on this channel. Playing decoded voice.`
-	}
-	if (choice === "analog") return `Playing demodulated ${modeLabel} audio.`
-	if (route)
-		return `This transmission is analog. Playing ${modeLabel} audio, back to ${route.protocol ?? "decoded voice"} when a call comes.`
-	return `No digital voice decoder on this channel. Playing ${modeLabel} audio.`
-}
-
 // ---- Auto listen route (the core's /auto)
-
-/** The core picks the source itself: Auto, on a core that serves `/auto` while live audio runs. */
-export function coreRoutes(
-	choice: HearChoice,
-	status: LiveAudioStatus | null,
-): boolean {
-	return choice === "auto" && status?.running === true && !!status.autoRoute
-}
 
 /** What `/auto` plays now: the level event's selection (live), else the status's (fallback). */
 export function autoRouteNow(
@@ -297,9 +229,11 @@ export function autoRouteNow(
 	const route = status?.running ? status.autoRoute : undefined
 	if (!route) return null
 	if (level?.autoRoute) return level.autoRoute
-	return route.protocol === undefined
-		? { active: route.active }
-		: { active: route.active, protocol: route.protocol }
+	return {
+		active: route.active,
+		...(route.protocol === undefined ? {} : { protocol: route.protocol }),
+		...(route.reason === undefined ? {} : { reason: route.reason }),
+	}
 }
 
 /** "DMR" from the route's protocol ("dmr"), else the decoder's, else null. */
@@ -308,24 +242,6 @@ export function routeProtocol(
 	route: VoiceRoute | null,
 ): string | null {
 	return now?.protocol ? now.protocol.toUpperCase() : (route?.protocol ?? null)
-}
-
-/** The hint under What you hear while the core routes Auto (`/auto`). */
-export function coreRouteHint(input: {
-	now: LiveAudioAutoRouteLevel | null
-	digitalAvailable: boolean
-	route: VoiceRoute | null
-	modeLabel: string
-}): string {
-	const { now, route, modeLabel } = input
-	const what = routeProtocol(now, route)
-	if (now?.active === "digital")
-		return `${what ?? "Digital voice"} call. Playing decoded voice.`
-	if (!input.digitalAvailable)
-		return `This core plays analog audio only on Auto. Playing ${modeLabel} audio.`
-	if (route)
-		return `Playing ${modeLabel} audio, decoded ${what ?? "digital"} voice when a call comes.`
-	return `No digital voice decoder on this channel. Playing ${modeLabel} audio.`
 }
 
 // ---- Evidence squelch (NFM auto squelch waits for voice or a tone)
@@ -341,29 +257,106 @@ export function autoSquelchNow(
 
 const EVIDENCE_TEXT: Readonly<
 	Record<NonNullable<LiveAudioAutoSquelch["evidence"]>, string>
-> = { voice: "voice", ctcss: "CTCSS", dcs: "DCS" }
+> = { voice: "Voice heard", ctcss: "CTCSS heard", dcs: "DCS heard" }
 
-/** "Open on voice", "Open on CTCSS"; null when the gate is off or says nothing. */
+/** "Voice heard", "CTCSS heard": what let the voice check pass; null when it is off or holds the audio. */
 export function evidenceText(gate: LiveAudioAutoSquelch | null): string | null {
 	if (gate?.state !== "open") return null
-	return gate.evidence ? `Open on ${EVIDENCE_TEXT[gate.evidence]}` : "Open"
+	return gate.evidence ? EVIDENCE_TEXT[gate.evidence] : "Passing"
 }
 
-const HEAR_KEY = "wavekit.web.listen.hear"
+// ---- Source: what `/auto` plays (the core's `listenMode`, shared by every client)
 
-export function readHearChoice(): HearChoice {
-	try {
-		const v = globalThis.localStorage?.getItem(HEAR_KEY)
-		return v === "analog" || v === "digital" ? v : "auto"
-	} catch {
-		return "auto"
-	}
+export type ListenSource = LiveAudioListenMode
+
+/** The Source in force on the core; `auto` on a core before the Listen contract or on a value it does not know. */
+export function listenModeOf(
+	config: LiveAudioConfig | null | undefined,
+): ListenSource {
+	const v = config?.listenMode
+	return v === "analog" || v === "digital" ? v : "auto"
 }
 
-export function writeHearChoice(v: HearChoice): void {
+/** The line under Source, from what the core says `/auto` plays now. */
+export function sourceHint(input: {
+	mode: ListenSource
+	now: LiveAudioAutoRouteLevel | null
+	route: VoiceRoute | null
+	modeLabel: string
+}): string {
+	const { mode, now, route, modeLabel } = input
+	const what = routeProtocol(now, route)
+	if (now?.reason === "squelch-open")
+		return `Open plays the ${modeLabel} audio as it is.`
+	if (now?.reason === "no-decoder")
+		return "No digital voice decoder on this channel: nothing plays."
+	if (now?.active === "digital")
+		return `${what ?? "Digital voice"} call. Playing decoded voice.`
+	if (mode === "analog") return `Playing demodulated ${modeLabel} audio only.`
+	if (mode === "digital")
+		return `Decoded ${what ?? "digital"} voice only, silence between calls.`
+	if (route)
+		return `Playing ${modeLabel} audio, decoded ${what ?? "digital"} voice when a call comes.`
+	return `Playing ${modeLabel} audio. Decoded voice when a decoder covers the channel.`
+}
+
+// ---- The Listen head: one line says what is heard
+
+export type ListenHeadline =
+	| { kind: "quiet"; title: "Quiet" }
+	| { kind: "waiting"; title: "Waiting for voice" }
+	| { kind: "open"; title: "Open" }
+	| { kind: "listening"; title: "Listening" }
+
+/**
+ * The head's title while playing. `Open` for an open squelch (it stays on across retunes), `Waiting for
+ * voice` while a carrier is up and the voice check holds it, `Listening` while audio passes (a decoded call
+ * says `DMR voice · TG …` under it), else `Quiet`: nothing on the channel, a tone gate waiting, or Digital
+ * with no decoder.
+ */
+export function listenHeadline(input: {
+	squelch: "auto" | "manual" | "open"
+	carrier: boolean
+	gate: LiveAudioAutoSquelch | null
+	toneWaiting: boolean
+	now: LiveAudioAutoRouteLevel | null
+}): ListenHeadline {
+	if (input.squelch === "open") return { kind: "open", title: "Open" }
+	if (input.now?.active === "digital")
+		return { kind: "listening", title: "Listening" }
+	if (input.now?.reason === "no-decoder")
+		return { kind: "quiet", title: "Quiet" }
+	if (input.toneWaiting) return { kind: "quiet", title: "Quiet" }
+	if (input.carrier && input.gate?.state === "waiting")
+		return { kind: "waiting", title: "Waiting for voice" }
+	if (input.carrier) return { kind: "listening", title: "Listening" }
+	return { kind: "quiet", title: "Quiet" }
+}
+
+// ---- The browser-side choice before the Listen contract
+
+/** The per-browser "What you hear" key this web app used before Source became a core setting. */
+export const LEGACY_HEAR_KEY = "wavekit.web.listen.hear"
+
+/**
+ * The old per-browser choice, read once and deleted: `analog` or `digital` becomes the core's Source when
+ * the core speaks the Listen contract, nobody has chosen one yet (`auto`) and this browser may write;
+ * anything else (auto, a value it does not know, an old core, read-only) is dropped. Returns the PATCH
+ * to send, or null. A blocked storage reads as nothing to migrate.
+ */
+export function migrateHearKey(
+	storage: Pick<Storage, "getItem" | "removeItem"> | undefined,
+	config: LiveAudioConfig | null | undefined,
+	canWrite: boolean,
+): LiveAudioConfigPatch | null {
+	let raw: string | null = null
 	try {
-		globalThis.localStorage?.setItem(HEAR_KEY, v)
+		raw = storage?.getItem(LEGACY_HEAR_KEY) ?? null
+		if (raw !== null) storage?.removeItem(LEGACY_HEAR_KEY)
 	} catch {
-		// storage blocked: the choice stays for this page only
+		return null
 	}
+	if (raw !== "analog" && raw !== "digital") return null
+	if (!canWrite || !config || config.listenMode !== "auto") return null
+	return { listenMode: raw }
 }

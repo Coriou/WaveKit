@@ -28,6 +28,14 @@ import {
 	type Waterfall,
 } from "../../shell/theme.ts"
 import { formatDb, formatMHz, formatRate, formatWidth } from "../format.ts"
+import {
+	listenContract,
+	manualStart,
+	squelchOf,
+	squelchPatch,
+	voiceOnlyFits,
+} from "../listen/audio.ts"
+import { listenModeOf, type ListenSource } from "../listen/sound.ts"
 import type { Preset } from "../scanner/planner/plan.ts"
 import { settingsFor, type SettingEntry } from "../settings/registry.ts"
 import { channelSuggestions } from "../tuner/band.ts"
@@ -131,6 +139,7 @@ export type ScopeId =
 	| "gain"
 	| "rate"
 	| "sq"
+	| "src"
 	| "vol"
 	| "theme"
 	| "ground"
@@ -181,6 +190,7 @@ export const SCOPES: Readonly<Record<ScopeId, ScopeMeta>> = {
 		placeholder: "Choose, or type a level (−90)",
 		prefix: "sq",
 	},
+	src: { title: "Source", placeholder: "Choose what Listen plays" },
 	vol: {
 		title: "Volume",
 		placeholder: "Choose, or type a level (60)",
@@ -205,6 +215,7 @@ export const SCOPES: Readonly<Record<ScopeId, ScopeMeta>> = {
 /** Scopes whose values are found from the root ("amber" → Accent › …, "graphite" → Dark ground › Graphite). */
 const DEEP: readonly ScopeId[] = [
 	"mode",
+	"src",
 	"step",
 	"theme",
 	"ground",
@@ -280,6 +291,8 @@ export type PaletteAction =
 	| { readonly kind: "step"; readonly hz: number | null }
 	| { readonly kind: "volume"; readonly value: number }
 	| { readonly kind: "listen"; readonly on: boolean }
+	/** `Q`: the squelch Open, or back to the one before it (listen/squelch-actions.ts). */
+	| { readonly kind: "squelchOpen" }
 	| IdentifyAction
 	| SaveAction
 	| { readonly kind: "view"; readonly id: ViewId }
@@ -379,10 +392,17 @@ function gainLabel(tenths: number): string {
 }
 
 function squelchLabel(config: LiveAudioConfig | null): string {
-	if (!config) return "Off"
-	if (config.squelchMode === "auto") return "Auto"
-	if (config.squelchMode === "noise") return "Noise"
-	return config.squelch === 0 ? "Off" : `${formatDb(config.squelch, 0)} dB`
+	if (!config) return "Open"
+	const setting = squelchOf(config)
+	if (setting.kind === "auto") return "Auto"
+	if (setting.kind === "open") return "Open"
+	return `${formatDb(setting.thresholdDbfs, 0)} dB`
+}
+
+const SOURCE_TEXT: Readonly<Record<ListenSource, readonly [string, string]>> = {
+	auto: ["Auto", "Analog or decoded voice, per transmission"],
+	analog: ["Analog", "Demodulated audio only"],
+	digital: ["Digital", "Decoded voice only, silence otherwise"],
 }
 
 const THEME_OPTS: readonly (readonly [ThemeName, string, string])[] = [
@@ -754,34 +774,67 @@ export class PaletteModel {
 		}
 	}
 
-	sqItem(v: "auto" | "off" | "noise" | number): PaletteItem {
+	/** A squelch choice: Auto, Manual (where it starts), Open, Voice only on or off, or a manual level. */
+	sqItem(
+		v: "auto" | "manual" | "open" | "voice-on" | "voice-off" | number,
+	): PaletteItem {
 		const c = this.#c
 		const cfg = c.config
+		const setting = squelchOf(cfg)
 		const patch: Partial<LiveAudioConfig> =
 			v === "auto"
-				? { squelchMode: "auto", autoMarginDb: cfg?.autoMarginDb ?? 6 }
-				: v === "off"
-					? { squelchMode: "manual", squelch: 0 }
-					: v === "noise"
-						? { squelchMode: "noise" }
-						: { squelchMode: "manual", squelch: v }
+				? squelchPatch(cfg, { kind: "auto" })
+				: v === "open"
+					? squelchPatch(cfg, { kind: "open" })
+					: v === "manual"
+						? squelchPatch(cfg, {
+								kind: "manual",
+								dbfs: manualStart(cfg, null),
+							})
+						: v === "voice-on" || v === "voice-off"
+							? squelchPatch(cfg, { kind: "auto", voiceOnly: v === "voice-on" })
+							: squelchPatch(cfg, { kind: "manual", dbfs: v })
 		const title =
 			v === "auto"
 				? "Auto"
-				: v === "off"
-					? "Off"
-					: v === "noise"
-						? "Noise"
-						: `${formatDb(v, 0)} dB`
+				: v === "open"
+					? "Open"
+					: v === "manual"
+						? "Manual"
+						: v === "voice-on"
+							? "Voice only"
+							: v === "voice-off"
+								? "Every carrier"
+								: `${formatDb(v, 0)} dB`
 		const sub =
 			v === "auto"
-				? "6 dB over the noise floor, follows conditions"
-				: v === "off"
-					? "Always open, you hear the noise"
-					: v === "noise"
-						? "Opens on FM quieting (NFM and WFM)"
-						: ""
-		const cur = squelchLabel(cfg) === title
+				? "Opens on a carrier, follows conditions"
+				: v === "open"
+					? "Everything plays, noise included"
+					: v === "manual"
+						? "The line you drag: everything above it plays"
+						: v === "voice-on"
+							? "Auto skips carriers, data and pagers"
+							: v === "voice-off"
+								? "Auto plays every carrier, voice or not"
+								: ""
+		const voiceOnly = setting.kind === "auto" && setting.voiceOnly
+		const cur =
+			v === "manual"
+				? setting.kind === "manual"
+				: v === "voice-on"
+					? voiceOnly
+					: v === "voice-off"
+						? setting.kind === "auto" && !voiceOnly
+						: squelchLabel(cfg) === title
+		const to =
+			v === "voice-on"
+				? "Auto · Voice only"
+				: v === "voice-off"
+					? "Auto · every carrier"
+					: v === "manual"
+						? squelchLabel({ ...(cfg as LiveAudioConfig), ...patch })
+						: title
 		return {
 			id: `sq:${v}`,
 			title,
@@ -791,8 +844,31 @@ export class PaletteModel {
 			...(this.#canAudio()
 				? {
 						action: { kind: "audio", patch } as const,
-						effects: [{ label: "Squelch", from: squelchLabel(cfg), to: title }],
-						done: `Squelch ${title}`,
+						effects: [{ label: "Squelch", from: squelchLabel(cfg), to }],
+						done: `Squelch ${to}`,
+					}
+				: { info: true }),
+		}
+	}
+
+	/** A Source choice: what Listen plays (the core's listenMode, shared by every client). */
+	srcItem(v: ListenSource): PaletteItem {
+		const cfg = this.#c.config
+		const now = listenModeOf(cfg)
+		const [title, sub] = SOURCE_TEXT[v]
+		return {
+			id: `src:${v}`,
+			title,
+			sub,
+			glyph: "listen",
+			cur: now === v,
+			...(this.#canAudio()
+				? {
+						action: { kind: "audio", patch: { listenMode: v } } as const,
+						effects: [
+							{ label: "Source", from: SOURCE_TEXT[now][0], to: title },
+						],
+						done: `Source ${title}`,
 					}
 				: { info: true }),
 		}
@@ -1018,15 +1094,19 @@ export class PaletteModel {
 			case "sq":
 				return [
 					this.sqItem("auto"),
-					this.sqItem("off"),
-					...(c.config &&
-					(c.config.modulation === "nfm" || c.config.modulation === "wfm")
-						? [this.sqItem("noise")]
+					this.sqItem("manual"),
+					this.sqItem("open"),
+					...(voiceOnlyFits(c.config)
+						? [this.sqItem("voice-on"), this.sqItem("voice-off")]
 						: []),
 					...[-110, -100, -90, -80, -70, -60, -50, -40].map(x =>
 						this.sqItem(x),
 					),
 				]
+			case "src":
+				return listenContract(c.config)
+					? (["auto", "analog", "digital"] as const).map(v => this.srcItem(v))
+					: []
 			case "vol":
 				return [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0].map(n =>
 					this.volItem(n),
@@ -1529,10 +1609,45 @@ export class PaletteModel {
 				title: "Squelch",
 				glyph: "squelch",
 				value: squelchLabel(c.config),
-				kbd: ["Q"],
-				keys: ["threshold", "sql"],
+				keys: ["threshold", "sql", "voice only", "manual"],
 				scope: "sq",
 			},
+			c.config === null
+				? null
+				: {
+						id: "tog:open",
+						title:
+							squelchLabel(c.config) === "Open"
+								? "Close the squelch"
+								: "Open the squelch",
+						glyph: "squelch",
+						toggle: squelchLabel(c.config) === "Open",
+						kbd: ["Q"],
+						keys: ["open", "noise", "hear everything", "squelch off"],
+						...(this.#canAudio()
+							? {
+									action: { kind: "squelchOpen" } as const,
+									does:
+										squelchLabel(c.config) === "Open"
+											? "Back to the squelch before Open"
+											: "Everything plays, noise included",
+									done:
+										squelchLabel(c.config) === "Open"
+											? "Squelch closed"
+											: "Squelch Open",
+								}
+							: { info: true }),
+					},
+			listenContract(c.config)
+				? {
+						id: "scope:src",
+						title: "Source",
+						glyph: "listen",
+						value: SOURCE_TEXT[listenModeOf(c.config)][0],
+						keys: ["listen mode", "analog", "digital", "decoded voice"],
+						scope: "src",
+					}
+				: null,
 			{
 				id: "scope:vol",
 				title: "Volume",
@@ -1832,7 +1947,7 @@ export class PaletteModel {
 						title: "Squelch goes from −120 dB to −20 dB",
 						glyph: "alert",
 					}
-				const it = this.sqItem(v)
+				const it = this.sqItem(v === "off" ? "open" : v)
 				return { ...it, title: `Squelch › ${it.title}` }
 			}
 			case "bandwidth": {
@@ -2151,6 +2266,7 @@ const SETTING_LINK: Readonly<Record<string, string>> = {
 	"rx.biasT": "tog:biasT",
 	"rx.rtlAgc": "tog:rtlAgc",
 	"au.squelch": "scope:sq",
+	"au.source": "scope:src",
 	"au.volume": "scope:vol",
 	"tn.step": "scope:step",
 	"tn.saved": "scope:saved",
@@ -2169,6 +2285,7 @@ const VALUE_SCOPES: ReadonlySet<ScopeId> = new Set<ScopeId>([
 	"gain",
 	"rate",
 	"sq",
+	"src",
 	"vol",
 	"theme",
 	"ground",

@@ -96,7 +96,21 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 	row("rx.direct", "Receiver", "Direct sampling", "hf shortwave", SETTINGS),
 	row("rx.offset", "Receiver", "Offset tuning", "e4000 dc", SETTINGS),
 	row("rx.rtlAgc", "Receiver", "RTL AGC", "digital gain agc", SETTINGS),
-	row("au.squelch", "Audio", "Squelch", "threshold sql noise", SETTINGS),
+	row("au.squelch", "Audio", "Squelch", "threshold sql open manual", SETTINGS),
+	row(
+		"au.voiceOnly",
+		"Audio",
+		"Voice only",
+		"voice check carrier data pager",
+		SETTINGS,
+	),
+	row(
+		"au.source",
+		"Audio",
+		"Source",
+		"listen analog digital decoded",
+		SETTINGS,
+	),
 	row(
 		"au.margin",
 		"Audio",

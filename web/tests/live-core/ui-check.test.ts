@@ -79,6 +79,25 @@ describe("ui-check options", () => {
 		})
 	})
 
+	it("drives the Listen flow on the fake target alone", () => {
+		expect(parseOptions([]).flow).toBeNull()
+		expect(parseOptions(["--flow=listen"]).flow).toBe("listen")
+		for (const argv of [
+			["--flow=scan"],
+			["--flow"],
+			["--flow=listen", "--seed-recordings=5"],
+		])
+			expect(() => parseOptions(argv)).toThrow(CannotRun)
+		process.env["WAVEKIT_UI_CHECK_LIVE"] = "1"
+		expect(() =>
+			parseOptions([
+				"--target=live",
+				"--url=http://127.0.0.1:1/",
+				"--flow=listen",
+			]),
+		).toThrow(/--target=fake/)
+	})
+
 	it("refuses what it does not know", () => {
 		for (const argv of [
 			["--target=prod"],
