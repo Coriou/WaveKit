@@ -5,6 +5,7 @@ import type { LiveAudioConfig } from "@wavekit/api-types"
 
 import type { AppServices } from "../../app/services.ts"
 import { errorMessage, takeoverImpact } from "../../data/index.ts"
+import { setActivityLayout } from "../activity/layout.ts"
 import { shellStore } from "../../shell/store.ts"
 import { themeStore, type ThemePrefs } from "../../shell/theme.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
@@ -323,6 +324,7 @@ export async function runAction(
 				showOnMap(action.id)
 				return { text: null }
 			case "drawer":
+				if (action.layout) setActivityLayout(action.layout)
 				shellStore.openDrawer(action.id)
 				return { text: null }
 			case "activity":

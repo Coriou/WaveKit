@@ -3,6 +3,7 @@
 import { useEffect } from "react"
 
 import { isReadOnly, useServices } from "../../app/context.ts"
+import { setActivityLayout } from "../activity/layout.ts"
 import { shellStore } from "../../shell/store.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
@@ -46,6 +47,7 @@ export function PaletteKeys() {
 					shellStore.setView(sc.id)
 					break
 				case "drawer":
+					if (sc.layout) setActivityLayout(sc.layout)
 					shellStore.openDrawer(sc.id)
 					break
 				case "scope":

@@ -23,9 +23,13 @@ import {
 	takeActivitySearchFocus,
 } from "../../features/activity/focus.ts"
 import {
+	activityExpanded,
 	activityLayout,
+	isActivityExpanded,
+	setActivityExpanded,
 	setActivityLayout,
 } from "../../features/activity/layout.ts"
+import { CardsBoard } from "../../features/messages/CardsBoard.tsx"
 import {
 	activityPane,
 	setActivityPaneOpen,
@@ -75,11 +79,21 @@ export default function ActivityDrawer({
 	const paused = useStore(activity.feed, s => s.paused)
 	const paneOpen = useStore(activityPane, s => s.open)
 	const list = useRef<HTMLDivElement>(null)
+	const expanded = isActivityExpanded(
+		useStore(activityLayout, s => s.layout),
+		useStore(activityExpanded, s => s.expanded),
+	)
 
 	const back = () => {
 		activity.open(null)
 		requestAnimationFrame(() => list.current?.focus())
 	}
+
+	const listLabel =
+		feed === activity.feed
+			? activity.title()
+			: (activity.get().columns.find(c => c.id === view)?.title ??
+				activity.title())
 
 	return (
 		<Drawer
@@ -128,22 +142,25 @@ export default function ActivityDrawer({
 				{!paneRoom && hasColumns && <Switcher />}
 				<ListHeader feed={feed} room={paneRoom} />
 				<Notices feed={feed} />
-				<ActivityList
-					ref={list}
-					feed={feed}
-					openId={openId}
-					column="drawer"
-					label={
-						feed === activity.feed
-							? activity.title()
-							: (activity.get().columns.find(c => c.id === view)?.title ??
-								activity.title())
-					}
-					onOpen={id => {
-						const item = feed.get().items.find(i => i.eventId === id) ?? null
-						if (item) activity.open(item)
-					}}
-				/>
+				{expanded ? (
+					<CardsBoard
+						feed={feed}
+						label={listLabel}
+						onOpen={item => activity.open(item)}
+					/>
+				) : (
+					<ActivityList
+						ref={list}
+						feed={feed}
+						openId={openId}
+						column="drawer"
+						label={listLabel}
+						onOpen={id => {
+							const item = feed.get().items.find(i => i.eventId === id) ?? null
+							if (item) activity.open(item)
+						}}
+					/>
+				)}
 			</div>
 			{openId !== null && (
 				<ActivityDetail eventId={openId} item={openItem} onBack={back} />
@@ -442,20 +459,42 @@ export function countTitle(
 	return `${r} in the ${e}${more ? "; older events are not loaded yet" : ""}`
 }
 
-// Rows or message cards, for the drawer and every column alike.
+// Rows or message cards, for the drawer and every column alike; Cards can expand the drawer to the full width.
 function LayoutSwitch() {
 	const layout = useStore(activityLayout, s => s.layout)
+	const expanded = isActivityExpanded(
+		layout,
+		useStore(activityExpanded, s => s.expanded),
+	)
 	return (
-		<Seg
-			label="Show events as"
-			className="wka-layout"
-			value={layout}
-			onChange={setActivityLayout}
-			options={[
-				{ value: "list", label: "List" },
-				{ value: "cards", label: "Cards" },
-			]}
-		/>
+		<>
+			{layout === "cards" && (
+				<Button
+					variant="ghost"
+					size="sm"
+					className="wka-expand"
+					aria-pressed={expanded}
+					title={
+						expanded
+							? "Back to the drawer's width"
+							: "Use the full width: cards in columns"
+					}
+					onClick={() => setActivityExpanded(!expanded)}
+				>
+					{expanded ? "Collapse" : "Expand"}
+				</Button>
+			)}
+			<Seg
+				label="Show events as"
+				className="wka-layout"
+				value={layout}
+				onChange={setActivityLayout}
+				options={[
+					{ value: "list", label: "List" },
+					{ value: "cards", label: "Cards" },
+				]}
+			/>
+		</>
 	)
 }
 

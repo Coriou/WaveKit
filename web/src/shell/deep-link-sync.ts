@@ -2,6 +2,10 @@
 // hashchange the hash opens its view, drawer, Activity search or discovery; afterwards every change rewrites it with
 // replaceState, coalesced to one write per task.
 import type { AppServices } from "../app/services.ts"
+import {
+	activityLayout,
+	setActivityLayout,
+} from "../features/activity/layout.ts"
 import { setTab } from "../features/scanner/drawer/state.ts"
 import { openDiscovery, scannerUi } from "../features/scanner/ui-store.ts"
 import {
@@ -28,6 +32,9 @@ export function currentLink(services: AppServices): LinkState {
 			range: a.range,
 			audio: a.audio,
 			openId: a.openId,
+			...(activityLayout.get().layout === "cards"
+				? { layout: "cards" as const }
+				: {}),
 		}
 	} else if (shell.drawer === "scanner")
 		out.discoveryId = scannerUi.get().openDiscoveryId
@@ -37,6 +44,8 @@ export function currentLink(services: AppServices): LinkState {
 /** Opens what a link names. */
 export function applyLink(services: AppServices, link: LinkState): void {
 	if (link.activity) services.activity.restore(link.activity)
+	// a link names Cards only; one without it keeps this browser's layout
+	if (link.activity?.layout === "cards") setActivityLayout("cards")
 	if (link.discoveryId) {
 		setTab("all")
 		openDiscovery(link.discoveryId)
@@ -98,6 +107,7 @@ export function followDeepLinks(services: AppServices): () => void {
 		shellStore.subscribe(schedule),
 		services.activity.subscribe(schedule),
 		scannerUi.subscribe(schedule),
+		activityLayout.subscribe(schedule),
 	]
 	return () => {
 		window.removeEventListener("hashchange", open)

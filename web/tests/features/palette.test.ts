@@ -901,3 +901,38 @@ describe("palette: receiver feed", () => {
 		expect(key("p", true)).toBeNull()
 	})
 })
+
+describe("palette: the Messages alias", async () => {
+	const { runAction } = await import("../../src/features/palette/actions.ts")
+	const { shellStore } = await import("../../src/shell/store.ts")
+	const { activityLayout, setActivityLayout } =
+		await import("../../src/features/activity/layout.ts")
+
+	it("finds Messages and opens Activity in the Cards layout", async () => {
+		setActivityLayout("list")
+		const row = flatten(new PaletteModel(ctx()).build(null, "messages")).find(
+			x => x.id === "view:messages",
+		)
+		expect(row?.title).toBe("Go to Messages")
+		expect(row?.action).toEqual({
+			kind: "drawer",
+			id: "activity",
+			layout: "cards",
+		})
+		await runAction({} as never, row!.action!, row!.title)
+		expect(shellStore.getState().drawer).toBe("activity")
+		expect(shellStore.getState().view).toBe("spectrum")
+		expect(activityLayout.get().layout).toBe("cards")
+		shellStore.closeDrawer()
+		setActivityLayout("list")
+	})
+
+	it("G D opens Activity as cards", () => {
+		expect(
+			shortcutFor(
+				{ key: "d", meta: false, ctrl: false, alt: false, typing: false },
+				true,
+			),
+		).toEqual({ kind: "drawer", id: "activity", layout: "cards" })
+	})
+})

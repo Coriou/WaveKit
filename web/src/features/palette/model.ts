@@ -17,6 +17,7 @@ import {
 	protocolName,
 } from "../../data/scanner-format.ts"
 import type { DrawerId, ShellState, ViewId } from "../../shell/store.ts"
+import type { DrawerTarget } from "./keys.ts"
 import {
 	ACCENTS,
 	GROUNDS,
@@ -300,7 +301,7 @@ export type PaletteAction =
 	| IdentifyAction
 	| SaveAction
 	| { readonly kind: "view"; readonly id: ViewId }
-	| { readonly kind: "drawer"; readonly id: DrawerId }
+	| DrawerTarget
 	| ActivityAction
 	| { readonly kind: "scanPlan"; readonly presetId: string | null }
 	| { readonly kind: "scanJob"; readonly op: "pause" | "resume" | "stop" }
@@ -450,24 +451,26 @@ const VIEWS: readonly {
 	kbd?: readonly string[]
 	/** What the row says it does, when "Shows the <label>" does not read well. */
 	does?: string
+	/** Opens Activity in the Cards layout (the alias for the removed Messages view). */
+	cards?: true
 }[] = [
 	{ id: "spectrum", label: "Spectrum", glyph: "waterfall", key: "S" },
 	{ id: "activity", label: "Activity", glyph: "activity", key: "A" },
 	{ id: "map", label: "Map", glyph: "go", key: "M" },
 	{
-		id: "messages",
+		id: "activity",
 		label: "Messages",
 		glyph: "messages",
 		key: "D",
-		does: "Shows decoded messages as cards, keeps any drawer open",
+		does: "Opens Activity as decoded message cards",
+		cards: true,
 	},
 	{ id: "scanner", label: "Scanner", glyph: "scan", key: "C" },
 	{ id: "recordings", label: "Recordings", glyph: "rec", key: "R" },
 	{ id: "settings", label: "Settings", glyph: "settings", kbd: ["⌘", ","] },
 ]
 
-const isView = (id: string): id is ViewId =>
-	id === "spectrum" || id === "map" || id === "messages"
+const isView = (id: string): id is ViewId => id === "spectrum" || id === "map"
 
 // ---- the builder
 
@@ -1035,20 +1038,27 @@ export class PaletteModel {
 		const s = this.#c.shell
 		const view = isView(v.id)
 		return {
-			id: `view:${v.id}`,
+			id: v.cards ? "view:messages" : `view:${v.id}`,
 			title: `Go to ${v.label}`,
 			glyph: v.glyph,
 			kbd: v.kbd ?? (v.key ? ["G", v.key] : []),
-			cur: view ? s.view === v.id : s.drawer === v.id,
+			cur: v.cards ? false : view ? s.view === v.id : s.drawer === v.id,
 			action: isView(v.id)
 				? { kind: "view", id: v.id }
-				: { kind: "drawer", id: v.id as DrawerId },
+				: v.cards
+					? { kind: "drawer", id: v.id as DrawerId, layout: "cards" }
+					: { kind: "drawer", id: v.id as DrawerId },
 			does:
 				v.does ??
 				(view
 					? `Shows the ${v.label}, keeps any drawer open`
 					: `Opens ${v.label}`),
-			keys: [v.label.toLowerCase(), "open", "show"],
+			keys: [
+				v.label.toLowerCase(),
+				"open",
+				"show",
+				...(v.cards ? ["cards", "activity"] : []),
+			],
 		}
 	}
 
