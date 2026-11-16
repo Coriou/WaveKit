@@ -158,6 +158,11 @@ export const AnalogReceiptSchema = z
 		gaps: z.array(AnalogGapSchema).max(64),
 		omittedGapCount: count,
 		cutReason: AnalogCutSchema.nullable(),
+		/**
+		 * The producer's answer whether a joined track was still on the air at the cut
+		 * (AnalogFinishFacts.cutActive); absent when it gave none and on older receipts.
+		 */
+		cutActive: z.boolean().optional(),
 		closure: z.enum(["closed", "incomplete", "unknown"]),
 		outcome: z.enum(["finalized", "aborted", "failed"]),
 		artifact: z.string().max(512).nullable(),
@@ -271,13 +276,21 @@ export interface AnalogMetadataAdapter {
 	commitPlanCurrent(plan: RecordingCommitPlan): boolean
 	publishCommit(plan: RecordingCommitPlan): void
 }
+/** What the producer knows of a file's end, besides its cut (AnalogHandle.finish). */
+export interface AnalogFinishFacts {
+	/**
+	 * Whether a joined track was still on the air at the cut: false when only the file's silent
+	 * hang after the transmission's end was cut off. Written to the receipt as `cutActive`.
+	 */
+	readonly cutActive?: boolean
+}
 export interface AnalogHandle {
 	readonly operationId: string
 	readonly ready: Promise<void>
 	readonly settled: Promise<AnalogReceipt>
 	push(pcm: Int16Array): Promise<void>
 	addGap(gap: AnalogGap): void
-	finish(cut?: AnalogCut): Promise<AnalogReceipt>
+	finish(cut?: AnalogCut, facts?: AnalogFinishFacts): Promise<AnalogReceipt>
 	cancel(cut?: AnalogCut): void
 }
 export interface AnalogReconciliation {
@@ -477,6 +490,8 @@ interface Operation {
 	descriptors: Set<WavHandle>
 	writer: WavFileWriter | null
 	cancelled: AnalogCut | null
+	/** The first finish's AnalogFinishFacts.cutActive; null: none given. */
+	cutActive: boolean | null
 	/** The check that refused it first (AnalogFailure), for its receipt. */
 	failure: AnalogFailure | null
 	accepting: boolean
@@ -684,6 +699,7 @@ export class AnalogOperations {
 			intent,
 			writer: null,
 			cancelled: null,
+			cutActive: null,
 			failure: null,
 			accepting: true,
 			decision: null,
@@ -741,8 +757,11 @@ export class AnalogOperations {
 				if (op.gaps.length < 64) op.gaps.push(parsed)
 				else op.omitted++
 			},
-			finish: (cut = "completed") =>
-				this.finishOperation(op, AnalogCutSchema.parse(cut)),
+			finish: (cut = "completed", facts) => {
+				if (!op.finish && typeof facts?.cutActive === "boolean")
+					op.cutActive = facts.cutActive
+				return this.finishOperation(op, AnalogCutSchema.parse(cut))
+			},
 			cancel: (cut = "cancelled") => {
 				if (op.decision) return
 				op.cancelled ??= AnalogCutSchema.parse(cut)
@@ -1392,6 +1411,7 @@ export class AnalogOperations {
 				gaps: op.gaps,
 				omittedGapCount: op.omitted,
 				cutReason,
+				...(op.cutActive === null ? {} : { cutActive: op.cutActive }),
 				closure: op.descriptors.size
 					? "unknown"
 					: op.output

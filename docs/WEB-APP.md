@@ -302,10 +302,13 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   (talkgroup, radio, frequency, kind, text; a new chip replaces the one of its kind), and typed
   text matches the talkgroup, radio, decoder, kind, start time or frequency in MHz, never the file
   size or the recording's internal id. A scanner recording the core cut short says why on its
-  row and in the player: `Cut: scanner moved on` (the tuner moved under the file, or its tuning stopped being
-  trusted), `Continues in next part` (a long transmission split into files, when the next part is
-  listed), `Cut: length limit` (a split file whose other parts are not listed), `Cut: source lost` or
-  `Cut: WaveKit stopped`; the parts of a split transmission read `Part 2 of 5`. New recordings
+  row and in the player: `Cut: scanner moved on` (the tuner moved under the file while the
+  transmission was still on the air, or its tuning stopped being trusted; a move that cut off only
+  the silence after the transmission shows no cut), `Continues in next part` (a long transmission
+  split into files, when the next part is listed), `Cut: length limit` (a split file whose other
+  parts are not listed), `Cut: source lost` or `Cut: WaveKit stopped`; the parts of a transmission
+  split by the length limit read `Part 2 of 5` (separate overs of one held carrier get no part
+  number). New recordings
   appear on their own (the core announces each change on the socket; nothing polls); while you
   scroll down or play one, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,
   then the placeholder, `Still loading. WaveKit is busy.` after 3 s, and after 10 s (or an error)

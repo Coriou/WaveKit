@@ -56,6 +56,7 @@ import { CtcssBank } from "../../audio-tones/ctcss.js"
 import { ulid } from "../ids.js"
 import type {
 	AnalogCut,
+	AnalogFinishFacts,
 	AnalogGap,
 	AnalogHandle,
 	AnalogInput,
@@ -511,6 +512,30 @@ export const MAX_WAITING_FILES = 2
  * on a stream or engine change, it is discarded.
  */
 export const WIDEBAND_PARK_MS = 2_000
+/**
+ * How far before a retune cut (an `epoch-changed` file end) a joined track may have been last
+ * reported and still count as on the air at it (the receipt's `cutActive`): 1 050 ms. The engine
+ * publishes an open track about once a second (the tracker's periodic update, every 1 000 ms of
+ * blocks once it is 20 blocks old), each snapshot with the last sample of its last active block
+ * (10 to 50 ms), so a track still on the air at the cut was last reported at most
+ * 1 000 + 50 = 1 050 ms before it. A last report exactly 1 050 ms before the cut is still active;
+ * one sample earlier is not: the transmission had ended and the cut clipped only its hang
+ * (silence), and the label does not say the scanner cut it. A slower report errs toward active
+ * (the old label), never toward a false "completed".
+ */
+export const WIDEBAND_CUT_ACTIVE_MS = 1_050
+
+/**
+ * Whether a file whose joined tracks were last reported at sample `lastHeard` was on the air at
+ * its cut sample `cutAt` (WIDEBAND_CUT_ACTIVE_MS at sample rate `fs`).
+ */
+export function cutWasActive(
+	lastHeard: number,
+	cutAt: number,
+	fs: number,
+): boolean {
+	return lastHeard >= cutAt - Math.round((WIDEBAND_CUT_ACTIVE_MS * fs) / 1000)
+}
 /**
  * Retune-ended sessions waiting for their close per manager; past it the oldest is discarded.
  * Each holds at most WIDEBAND_MAX_BUFFERED_FRAMES (960 KB): 4 · 960 KB = 3.84 MB at most.
@@ -1711,6 +1736,8 @@ export class WidebandAnalogRecorder {
 				session.activity.get(observationId)?.last ?? Number.NEGATIVE_INFINITY,
 			)
 		if (parked) {
+			// The close's last sample: whether its file was on the air at the cut (finishFacts).
+			parked.lastActive = Math.max(parked.lastActive, track.lastSample)
 			this.updateParked(
 				parked,
 				observationId,
@@ -3448,8 +3475,8 @@ export class WidebandAnalogRecorder {
 		// at the retune's start (cut epoch-changed: the tuner moved). At exactly maxBacklog it
 		// still holds; one sample past it ends. Only a session still behind the command
 		// (`next` < `retuneAt`) has unread IQ in the ring at risk; one that has read up to it
-		// holds nothing back, so it is never ended by the cap (the retune's start or the trusted
-		// run's end still ends it).
+		// holds nothing back, so it is never ended by the cap (the retune's start, the trusted
+		// run's end, or a stream or engine change still ends it).
 		const capped =
 			!retuned &&
 			s.retuneAt !== null &&
@@ -4022,6 +4049,11 @@ export class WidebandAnalogRecorder {
 	/**
 	 * A voiced shadow file a retune ended (cut epoch-changed) while some joined observation is
 	 * still open: its close may bring the first analog-fm class, so it is kept, not discarded.
+	 * Since a retune ends a file at its command position (Session.limit), a file whose hang would
+	 * end inside the retune's settle (before the settled start, past the command) ends
+	 * `epoch-changed` here too, not `completed` at the hang's end, so it may park and be promoted
+	 * by an analog-fm close (more voice kept); its receipt then says the cut was not on the air
+	 * (finishFacts: cutActive false) when the voice ended before it.
 	 */
 	private parkable(s: Session, file: FileState): boolean {
 		return (
@@ -4322,8 +4354,25 @@ export class WidebandAnalogRecorder {
 		} else {
 			if (path) this.log.info(keptLog(path, file, s), "Analog file kept")
 			file.finishAsked = true
-			void file.handle.finish(file.cut).catch(() => undefined)
+			void file.handle
+				.finish(file.cut, this.finishFacts(s, file))
+				.catch(() => undefined)
 		}
+	}
+
+	/**
+	 * The receipt facts of a file's end besides its cut: for a retune cut (`epoch-changed`),
+	 * whether a joined track was still on the air at the cut (cutWasActive against the newest
+	 * sample a joined track was reported on, its closes included). A file that ended any other
+	 * way carries none.
+	 */
+	private finishFacts(s: Session, file: FileState): AnalogFinishFacts {
+		if (file.cut !== "epoch-changed" || file.endSample === null) return {}
+		const lastHeard = Math.max(
+			s.lastActive,
+			s.ownerClosedAt ?? Number.NEGATIVE_INFINITY,
+		)
+		return { cutActive: cutWasActive(lastHeard, file.endSample, s.fs) }
 	}
 
 	/**

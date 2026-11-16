@@ -1379,16 +1379,28 @@ export function createRecordingInventory(
 			prev.dev === st.dev &&
 			prev.ino === st.ino &&
 			prev.size === st.size &&
-			prev.mtimeMs === st.mtimeMs &&
+			prev.mtimeMs === st.mtimeMs
+		) {
 			// A young scanner analog file indexed before its receipt was written (the store links
-			// the WAV first) is read again on every pass until RECORDINGS_RECEIPT_WAIT_MS.
-			!(
-				prev.receipt === null &&
-				spec.kind === "scanner-analog" &&
-				receiptMayFollow(st.mtimeMs, at)
+			// the WAV first): only its receipt is read again, on every pass until
+			// RECORDINGS_RECEIPT_WAIT_MS. While it is still missing nothing changed, so nothing is
+			// replaced and no change is announced.
+			const root = spec.dirs[0]
+			if (
+				prev.receipt !== null ||
+				spec.kind !== "scanner-analog" ||
+				root === undefined ||
+				!receiptMayFollow(st.mtimeMs, at)
 			)
-		)
+				return
+			const late = await handleSem.run(() =>
+				readRecordingReceipt(fs, root, name),
+			)
+			if (late === null || !attached(state) || state.files.get(name) !== prev)
+				return
+			setFile(state, name, { ...prev, listed: false, receipt: late })
 			return
+		}
 		if (!prev && beyondBound(st.mtimeMs, id)) return
 		const c: Candidate = {
 			loc: { file, name, real, dirs: spec.dirs },
@@ -1820,7 +1832,12 @@ export function createRecordingInventory(
 				)
 				group = new Map<IndexedEntry, PartOf>()
 				for (const [f, at] of recordingParts(
-					listed.map(f => ({ mtimeMs: f.mtimeMs, id: f.item.id, f })),
+					listed.map(f => ({
+						mtimeMs: f.mtimeMs,
+						id: f.item.id,
+						cut: f.receipt?.cut ?? null,
+						f,
+					})),
 				))
 					group.set(f.f, at)
 				parts.set(observationId, group)

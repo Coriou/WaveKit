@@ -1,8 +1,8 @@
 /**
  * A scanner analog recording's `cut`, `part` and `parts` in the inventory: read from its receipt
  * (`.analog-operations/<id>/receipt.json` beside `recordings/`), mapped without guessing,
- * fail closed on a missing or malformed receipt, and numbered per observation in start order (a
- * name's leading stamp), else finish order.
+ * fail closed on a missing or malformed receipt, and numbered only within a chain of roll-overs
+ * of one observation, in start order (a name's leading stamp), else finish order.
  */
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -129,6 +129,17 @@ describe("recordingCutOf", () => {
 		])
 			expect(recordingCutOf(other)).toBeNull()
 	})
+
+	it("reads an epoch-changed cut whose receipt says cutActive false (only the hang was cut) as null; missing or true keeps scanner-moved", () => {
+		expect(recordingCutOf("epoch-changed", false)).toBeNull()
+		expect(recordingCutOf("epoch-changed", true)).toBe("scanner-moved")
+		// Receipts written before the field: the cut is all that is known.
+		expect(recordingCutOf("epoch-changed", undefined)).toBe("scanner-moved")
+		expect(recordingCutOf("epoch-changed", "no")).toBe("scanner-moved")
+		// Only the retune cut reads it.
+		expect(recordingCutOf("shutdown", false)).toBe("shutdown")
+		expect(recordingCutOf("duration-limit", false)).toBe("duration-rollover")
+	})
 })
 
 describe("receiptFactsOf", () => {
@@ -137,6 +148,12 @@ describe("receiptFactsOf", () => {
 		expect(
 			receiptFactsOf(receipt(id, { cutReason: "epoch-changed" }), id),
 		).toEqual({ cut: "scanner-moved", observationId: "o_1" })
+		expect(
+			receiptFactsOf(
+				receipt(id, { cutReason: "epoch-changed", cutActive: false }),
+				id,
+			),
+		).toEqual({ cut: null, observationId: "o_1" })
 		expect(receiptFactsOf(receipt(id, { observationId: null }), id)).toEqual({
 			cut: null,
 			observationId: null,
@@ -190,10 +207,11 @@ describe("readRecordingReceipt", () => {
 })
 
 describe("recordingParts", () => {
-	it("numbers unstamped files in finish order (time, then id); a single file has none", () => {
-		const a = { mtimeMs: 30, id: "a" }
-		const b = { mtimeMs: 10, id: "b" }
-		const c = { mtimeMs: 10, id: "c" }
+	const R = "duration-rollover" as const
+	it("numbers unstamped files of one roll-over chain in finish order (time, then id); a single file has none", () => {
+		const a = { mtimeMs: 30, id: "a", cut: "scanner-moved" as const }
+		const b = { mtimeMs: 10, id: "b", cut: R }
+		const c = { mtimeMs: 10, id: "c", cut: R }
 		const out = recordingParts([a, b, c])
 		expect(out.get(b)).toEqual({ part: 1, parts: 3 })
 		expect(out.get(c)).toEqual({ part: 2, parts: 3 })
@@ -203,15 +221,15 @@ describe("recordingParts", () => {
 
 	it("numbers files whose names carry a start stamp in start order, whatever their finish times", () => {
 		// A part promoted late (parked for its close) finished after the part that followed it.
-		const early = { mtimeMs: 50, id: "scan:d~20261115_101500_a.wav" }
-		const late = { mtimeMs: 20, id: "scan:d~20261115_101700_b.wav" }
+		const early = { mtimeMs: 50, id: "scan:d~20261115_101500_a.wav", cut: R }
+		const late = { mtimeMs: 20, id: "scan:d~20261115_101700_b.wav", cut: null }
 		const out = recordingParts([late, early])
 		expect(out.get(early)).toEqual({ part: 1, parts: 2 })
 		expect(out.get(late)).toEqual({ part: 2, parts: 2 })
 		// An explicit name wins over the id's file part; equal starts fall back to finish order.
-		const x = { mtimeMs: 9, id: "x", name: "20261115_101500_x.wav" }
-		const y = { mtimeMs: 3, id: "y", name: "20261115_101500_y.wav" }
-		const z = { mtimeMs: 1, id: "z", name: "20261115_101400_z.wav" }
+		const x = { mtimeMs: 9, id: "x", name: "20261115_101500_x.wav", cut: null }
+		const y = { mtimeMs: 3, id: "y", name: "20261115_101500_y.wav", cut: R }
+		const z = { mtimeMs: 1, id: "z", name: "20261115_101400_z.wav", cut: R }
 		const named = recordingParts([x, y, z])
 		expect([
 			named.get(z)!.part,
@@ -222,18 +240,69 @@ describe("recordingParts", () => {
 
 	it("falls back to finish order for the whole group when any name has no parseable stamp", () => {
 		// The store's analog names (analog-<uuid>.wav) carry no start; a bad date is unparseable.
-		const stamped = { mtimeMs: 30, id: "scan:d~20261115_101500_a.wav" }
-		const analog = { mtimeMs: 10, id: `scan:d~analog-${uuid(1)}.wav` }
-		const bad = { mtimeMs: 20, id: "scan:d~20261345_101500_c.wav" }
+		const stamped = {
+			mtimeMs: 30,
+			id: "scan:d~20261115_101500_a.wav",
+			cut: null,
+		}
+		const analog = { mtimeMs: 10, id: `scan:d~analog-${uuid(1)}.wav`, cut: R }
+		const bad = { mtimeMs: 20, id: "scan:d~20261345_101500_c.wav", cut: R }
 		const out = recordingParts([stamped, analog, bad])
 		expect(out.get(analog)).toEqual({ part: 1, parts: 3 })
 		expect(out.get(bad)).toEqual({ part: 2, parts: 3 })
 		expect(out.get(stamped)).toEqual({ part: 3, parts: 3 })
 	})
+
+	it("gives no parts to a relay's separate overs in one observation (each ended without a roll-over)", () => {
+		const overs = [1, 2, 3].map(n => ({
+			mtimeMs: n * 10,
+			id: `o${n}`,
+			cut: null,
+		}))
+		const out = recordingParts(overs)
+		for (const o of overs)
+			expect(out.get(o)).toEqual({ part: null, parts: null })
+	})
+
+	it("numbers one 5 × 120 s roll-over transmission Part 1 to 5 of 5", () => {
+		const files = [1, 2, 3, 4, 5].map(n => ({
+			mtimeMs: n * 120_000,
+			id: `p${n}`,
+			cut: n < 5 ? R : null,
+		}))
+		const out = recordingParts(files)
+		expect(files.map(f => out.get(f))).toEqual(
+			[1, 2, 3, 4, 5].map(part => ({ part, parts: 5 })),
+		)
+	})
+
+	it("numbers only the roll-over chain between two separate overs: an over, a 3-part chain, an over", () => {
+		const before = { mtimeMs: 10, id: "a", cut: null }
+		const one = { mtimeMs: 20, id: "b", cut: R }
+		const two = { mtimeMs: 30, id: "c", cut: R }
+		const three = { mtimeMs: 40, id: "d", cut: "scanner-moved" as const }
+		const after = { mtimeMs: 50, id: "e", cut: "source-lost" as const }
+		const out = recordingParts([after, three, before, two, one])
+		expect(out.get(before)).toEqual({ part: null, parts: null })
+		expect(out.get(one)).toEqual({ part: 1, parts: 3 })
+		expect(out.get(two)).toEqual({ part: 2, parts: 3 })
+		expect(out.get(three)).toEqual({ part: 3, parts: 3 })
+		expect(out.get(after)).toEqual({ part: null, parts: null })
+	})
+
+	it("counts the parts listed so far when the last listed file still rolled (its next part not listed yet)", () => {
+		const one = { mtimeMs: 10, id: "a", cut: R }
+		const two = { mtimeMs: 20, id: "b", cut: R }
+		const out = recordingParts([one, two])
+		expect(out.get(one)).toEqual({ part: 1, parts: 2 })
+		expect(out.get(two)).toEqual({ part: 2, parts: 2 })
+		// A lone rolled file is a chain of one: no part.
+		expect(recordingParts([one]).get(one)).toEqual({ part: null, parts: null })
+	})
 })
 
 describe("inventory cut and parts", () => {
-	it("lists each receipt's cut and the observation's parts in finish order", async () => {
+	it("lists each receipt's cut and a roll-over chain's parts in finish order", async () => {
 		const root = await storage()
 		const first = await put(
 			root,
@@ -281,6 +350,70 @@ describe("inventory cut and parts", () => {
 			cut: "source-lost",
 			part: null,
 			parts: null,
+		})
+	})
+
+	it("numbers no parts of a relay's three normally ended overs in one observation, and only the roll-over chain among overs", async () => {
+		const root = await storage()
+		const overs = [
+			await put(root, 1, 600, receipt(uuid(1))),
+			await put(root, 2, 500, receipt(uuid(2))),
+			await put(root, 3, 400, receipt(uuid(3))),
+		]
+		// Another observation: an over, a 3-part roll-over chain, an over.
+		const o2 = { observationId: "o_2" }
+		const mixed = [
+			await put(root, 11, 350, receipt(uuid(11), o2)),
+			await put(
+				root,
+				12,
+				300,
+				receipt(uuid(12), { ...o2, cutReason: "duration-limit" }),
+			),
+			await put(
+				root,
+				13,
+				250,
+				receipt(uuid(13), { ...o2, cutReason: "duration-limit" }),
+			),
+			await put(root, 14, 200, receipt(uuid(14), o2)),
+			await put(root, 15, 150, receipt(uuid(15), o2)),
+		]
+		const items = await list(root)
+		const by = new Map(items.map(i => [i.id, i]))
+		for (const id of overs)
+			expect(by.get(id)).toMatchObject({ cut: null, part: null, parts: null })
+		expect(mixed.map(id => [by.get(id)?.part, by.get(id)?.parts])).toEqual([
+			[null, null],
+			[1, 3],
+			[2, 3],
+			[3, 3],
+			[null, null],
+		])
+	})
+
+	it("lists a retune cut that clipped only the hang (cutActive false) as no cut", async () => {
+		const root = await storage()
+		const quiet = await put(
+			root,
+			1,
+			100,
+			receipt(uuid(1), { cutReason: "epoch-changed", cutActive: false }),
+		)
+		const active = await put(
+			root,
+			2,
+			90,
+			receipt(uuid(2), {
+				observationId: "o_2",
+				cutReason: "epoch-changed",
+				cutActive: true,
+			}),
+		)
+		const items = await list(root)
+		expect(items.find(i => i.id === quiet)).toMatchObject({ cut: null })
+		expect(items.find(i => i.id === active)).toMatchObject({
+			cut: "scanner-moved",
 		})
 	})
 
@@ -348,5 +481,45 @@ describe("inventory cut and parts", () => {
 			// At the bound it is read again (cut known); one ms past it the null stands.
 			expect(second).toMatchObject({ cut: read ? "scanner-moved" : null })
 		}
+	})
+
+	it("announces no change when a young analog file's receipt is read again and is still missing", async () => {
+		const root = await storage()
+		const id = uuid(1)
+		const file = join(root, "recordings", "analog", D, `analog-${id}.wav`)
+		await writeFile(file, wav())
+		const mtimeMs = Math.floor(Date.now() / 1000) * 1000 - 3_600_000
+		await utimes(file, mtimeMs / 1000, mtimeMs / 1000)
+		let clock = mtimeMs + 60_000
+		const inv = createRecordingInventory({
+			dsdFmeDirs: () => [],
+			scannerRecordingsDir: () => join(root, "recordings"),
+			logger,
+			now: () => clock,
+		})
+		closers.push(() => inv.close?.())
+		const key = `scan:${D}~analog-${id}.wav`
+		const first = await inv.list({})
+		expect(first.items.find(i => i.id === key)).toMatchObject({ cut: null })
+		// Read again on the next pass (still young), still no receipt: the revision stands.
+		clock = mtimeMs + 120_000
+		await inv.touchDiscoveries?.([D])
+		const second = await inv.list({})
+		expect(second.revision).toBe(first.revision)
+		// The receipt appears: the next pass reads it and the change is announced.
+		const dir = join(root, ".analog-operations", id)
+		await mkdir(dir, { recursive: true })
+		await writeFile(
+			join(dir, "receipt.json"),
+			JSON.stringify(receipt(id, { cutReason: "shutdown" })),
+		)
+		clock = mtimeMs + 180_000
+		await inv.touchDiscoveries?.([D])
+		const third = await inv.list({})
+		expect(first.revision).toBeTypeOf("number")
+		expect(third.revision ?? 0).toBeGreaterThan(first.revision ?? 0)
+		expect(third.items.find(i => i.id === key)).toMatchObject({
+			cut: "shutdown",
+		})
 	})
 })

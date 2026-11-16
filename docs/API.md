@@ -6524,12 +6524,18 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   `duration-rollover` (the file reached its length limit; the transmission may
   continue in the next file), `source-lost` (the input stopped) or `shutdown`;
   null when the file was not cut short, or its receipt is missing, unreadable
-  or names another reason. A receipt written after the file is indexed is read
+  or names another reason. A retune cut whose receipt says no joined track was
+  still on the air at it (`cutActive: false`: only the silent hang after the
+  transmission was cut off) is null too; receipts written before that field
+  keep `scanner-moved`. A receipt written after the file is indexed is read
   on a later pass while the file is under 5 minutes old. `part` (1-based) and
-  `parts` number the listed files of one observation (a transmission split by
-  roll-overs) by the start stamp in their names when every name carries one,
-  else in the order they were finished; both null for an observation's only
-  file or an unknown one.
+  `parts` number the files of a transmission split by roll-overs: the listed
+  files of one observation in order (by the start stamp in their names when
+  every name carries one, else in the order they were finished), chained while
+  each file ended `duration-rollover`; a file that ended any other way closes
+  its chain. Both are null for a file no roll-over chained to another (such as
+  each of a relay's separate overs while it holds its carrier in one
+  observation), and for an unknown one.
 - `kept` (optional in `@wavekit/api-types`; older cores omit it): true when
   the recording is kept, a delete of it is in progress, or the keep store is not
   usable (fail closed); read at list time.

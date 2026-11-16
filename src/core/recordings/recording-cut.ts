@@ -37,6 +37,7 @@ const ReceiptFieldsSchema = z.object({
 	observationId: z.string().regex(OBSERVATION_ID).nullable(),
 	outcome: z.literal("finalized"),
 	cutReason: z.unknown(),
+	cutActive: z.unknown(),
 })
 
 /** What the inventory keeps of a recording's receipt. */
@@ -48,12 +49,20 @@ export interface RecordingReceiptFacts {
 /**
  * A receipt's cut reason (the store's AnalogCut) as the inventory's RecordingCut. Only reasons
  * that mean the same thing map; the rest (a natural end, a cancel, a stream or engine restart)
- * and anything unknown are null, never guessed.
+ * and anything unknown are null, never guessed. `cutActive` is the receipt's optional
+ * `cutActive` (the recorder's answer whether a joined track was still on the air at the cut):
+ * an `epoch-changed` cut whose receipt says false clipped only the file's silent hang, so it is
+ * not "the scanner moved on" and reads null (a completed file to the label). Any other value,
+ * the field missing included, keeps `scanner-moved`: receipts written before the field existed
+ * carry none, and for them the cut is all that is known (as before the field).
  */
-export function recordingCutOf(reason: unknown): RecordingCut | null {
+export function recordingCutOf(
+	reason: unknown,
+	cutActive?: unknown,
+): RecordingCut | null {
 	switch (reason) {
 		case "epoch-changed":
-			return "scanner-moved"
+			return cutActive === false ? null : "scanner-moved"
 		case "duration-limit":
 			return "duration-rollover"
 		case "source-lost":
@@ -75,7 +84,7 @@ export function receiptFactsOf(
 	if (parsed.data.operationId.toLowerCase() !== operationId.toLowerCase())
 		return null
 	return {
-		cut: recordingCutOf(parsed.data.cutReason),
+		cut: recordingCutOf(parsed.data.cutReason, parsed.data.cutActive),
 		observationId: parsed.data.observationId,
 	}
 }
@@ -139,15 +148,27 @@ function fileNameOf(id: string): string {
 }
 
 /**
- * Part numbers of an observation's listed files: each entry's 1-based place in start order and
- * the count. The start is the leading `YYYYMMDD_HHMMSS_` stamp of the file's name (`name`, else
- * the file part of its id), ordered then by modification time and id; when any file of the group
- * has no parseable stamp (the store's `analog-<operation uuid>.wav` names carry none) the whole
- * group falls back to finish order (modification time, then id), so stamped and unstamped files
- * are never interleaved by two different clocks. A single file gets none (null, null).
+ * Part numbers of an observation's listed files: only files chained by roll-overs are parts. The
+ * files are ordered by start: the leading `YYYYMMDD_HHMMSS_` stamp of the file's name (`name`,
+ * else the file part of its id), then modification time and id; when any file of the group has
+ * no parseable stamp (the store's `analog-<operation uuid>.wav` names carry none) the whole group
+ * falls back to finish order (modification time, then id), so stamped and unstamped files are
+ * never interleaved by two different clocks. In that order a chain is a run of consecutive files
+ * in which every file but the last ended `duration-rollover` (its transmission went on in the
+ * next file); a file that ended any other way (a natural end, a cut, unknown) closes its chain,
+ * and the next file starts a new one. Each file of a chain of n ≥ 2 files is part i of n
+ * (1-based in that order); a chain of one file (a transmission no roll-over split, such as each
+ * of a relay's separate overs while it holds its carrier in one observation) gets none
+ * (null, null). The last listed file of a group may still be rolling (its next part not listed
+ * yet): its chain counts the parts listed so far.
  */
 export function recordingParts<
-	T extends { mtimeMs: number; id: string; name?: string },
+	T extends {
+		mtimeMs: number
+		id: string
+		name?: string
+		cut: RecordingCut | null
+	},
 >(files: readonly T[]): Map<T, { part: number | null; parts: number | null }> {
 	const out = new Map<T, { part: number | null; parts: number | null }>()
 	const starts = new Map<T, string | null>(
@@ -170,9 +191,16 @@ export function recordingParts<
 				? -1
 				: 1
 	})
-	const parts = sorted.length > 1 ? sorted.length : null
-	sorted.forEach((f, i) =>
-		out.set(f, { part: parts === null ? null : i + 1, parts }),
-	)
+	let from = 0
+	sorted.forEach((f, i) => {
+		if (f.cut === "duration-rollover" && i < sorted.length - 1) return
+		// sorted[from..i] is one chain: closed by a file that did not roll (or the last file).
+		const chain = sorted.slice(from, i + 1)
+		const parts = chain.length > 1 ? chain.length : null
+		chain.forEach((c, k) =>
+			out.set(c, { part: parts === null ? null : k + 1, parts }),
+		)
+		from = i + 1
+	})
 	return out
 }
