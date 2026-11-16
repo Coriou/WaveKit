@@ -3,7 +3,8 @@
  * scenes (scripts/bench/scanner-quality/truth-dv.ts): for DMR scenes of
  * dv-plan.mjs, the dsd-fme lines a decoder would print and when, modelled on
  * what is known of the current chain, not measured. The in-image baseline of
- * tests/integration/dv-capture.test.ts (its recorded lines) replaces them.
+ * tests/integration/dv-capture.test.ts (its recorded lines) replaces them:
+ * the DMR scenes are recorded now, so only the noise-sync seed is written.
  *
  *   node scripts/fixtures/dv-latency-seeds.mjs [OUTDIR]
  *
@@ -33,16 +34,14 @@ import { DV_SCENES, PAD_SYMBOLS, scenePlan } from "./dv-plan.mjs"
 export const LINE_LATENCY_MS = 40
 /** A fictional channel for the scenes (no real frequency). */
 export const DV_SEED_FREQUENCY_HZ = 454_906_250
-/** The DMR scenes the scorecard replays. */
-export const DV_SEED_SCENES = [
-	"dmr-direct-lengths",
-	"dmr-direct-gaps-other",
-	"dmr-direct-no-terminator",
-	"dmr-repeater-gaps-same",
-	"dmr-repeater-hang-no-tlc",
-	"dmr-repeater-two-slots",
-	"dmr-direct-rekey-no-tlc",
-]
+/**
+ * The DMR scenes the scorecard replays from this model. None now: every DMR
+ * scene it modelled has a recorded seed (tests/integration/dv-capture.test.ts,
+ * WAVEKIT_DVCAP_LINES), and a modelled seed beside a recorded one would mix
+ * modelled timings with measured ones. `dmrSeed` stays for a new scene with
+ * no recording yet.
+ */
+export const DV_SEED_SCENES = []
 
 const BURST_MS = 27.5
 const HALF_MS = DMR_FRAME_MS / 2

@@ -541,49 +541,32 @@ interface SyncChain {
 	startMs: number
 	lastMs: number
 	clean: number
-	/** DMR colour code / P25 NAC the chain's syncs printed (a frame printing another starts a new chain). */
+	/**
+	 * P25: the NAC the chain's syncs printed (a frame printing another starts
+	 * a new chain). DMR: the colour code of its latest sync that printed one;
+	 * another one does not break the chain (recorded overs print a garbled
+	 * code on their first syncs: 13, 07, 05, 02, 00) but restarts `run`.
+	 */
 	tag?: string | undefined
+	/**
+	 * DMR: the clean syncs since the colour code last changed ("XX" changes
+	 * nothing) and when the first of them arrived: a call starts on two of
+	 * one code, and an unnamed one is evidenced by three of one code.
+	 */
+	run?: number | undefined
+	runStartMs?: number | undefined
+	/** DMR: the chain began at a header burst (dmrHeaderLine). */
+	header?: boolean | undefined
 	/** YSF: the first checked source callsign its frames printed before the call started. */
 	lead?: string | undefined
 	/**
 	 * The ongoing call's last line with its own identity (markChain), the
 	 * chain's first sync after it and the sync before that one: where the
-	 * next over can have begun when the identity changes on the grid.
+	 * next over can have begun when the identity changes.
 	 */
 	markMs?: number | undefined
 	afterMarkMs?: number | undefined
 	beforeMarkMs?: number | undefined
-}
-
-/**
- * The ongoing DMR call's superframe grid: the superframe start
- * (dmrSuperframeStart) of the voice burst it is measured from (the last one
- * not held as a suspect) and an off-grid sync waiting for the next sync to
- * confirm it began a new over (dmrRekey).
- */
-interface DmrGrid {
-	anchorMs: number
-	suspect?: DmrSuspect | undefined
-}
-
-/** An off-grid DMR voice sync after a short gap, until the next sync confirms or clears it. */
-interface DmrSuspect {
-	/** The off-grid sync: the next over's first, if confirmed. */
-	atMs: number
-	/** Its superframe start (dmrSuperframeStart): the next over's grid. */
-	gridMs: number
-	/** The call's last line before it: where the call ends if confirmed. */
-	endAtMs: number
-	/** 1 when that sync was clean. */
-	clean: number
-}
-
-/** A re-key found by dmrRekey: the call ends at `endAtMs`, the next over began at `startMs`. */
-interface DmrRekey {
-	endAtMs: number
-	startMs: number
-	/** Clean voice syncs of the next over so far (1, or 2 once confirmed). */
-	clean: number
 }
 
 /**
@@ -597,7 +580,6 @@ interface CallLane {
 	recentlyTerminated: CallTrailer | null
 	chain: SyncChain | null
 	lastVoiceSyncMs: number | undefined
-	dmrGrid: DmrGrid | undefined
 }
 
 const emptyLane = (): CallLane => ({
@@ -606,7 +588,6 @@ const emptyLane = (): CallLane => ({
 	recentlyTerminated: null,
 	chain: null,
 	lastVoiceSyncMs: undefined,
-	dmrGrid: undefined,
 })
 
 /**
@@ -742,9 +723,9 @@ export const SYNC_CHAIN_MS: Readonly<
 }
 
 /**
- * A voice frame after at least this long without voice from the ongoing call
- * may be a re-key (a new over): DMR when it is off the call's superframe
- * grid or a voice LC header, P25 when it is a header (HDU).
+ * A voice LC header (or another DMR header burst, DMR_HEADER) at least this
+ * long after the ongoing call's last voice sync is a re-key (a new over);
+ * so is a P25 header (HDU).
  */
 export const REKEY_GAP_MS = 200
 
@@ -755,50 +736,30 @@ export const DMR_BURST_MS = 60
 export const DMR_SUPERFRAME_MS = 6 * DMR_BURST_MS
 
 /**
- * A DMR voice sync within this of the ongoing call's 360 ms superframe grid
- * is the same over: half a 60 ms TDMA frame. Through a repeater an over
- * starts on the repeater's 60 ms frame grid, so a re-key lands a multiple of
- * 60 ms off (60 to 300 ms mod 360), at least 60 - 30 = 30 ms beyond this.
- * In direct mode nothing clocks the next radio to the last one's frames: its
- * over can start anywhere, so a re-key within this of the old grid is not
- * seen here and is left to the voice LC header or a new identity (a missed
- * split, never a split over). Line jitter up to 30 ms keeps a faded over
- * whole.
+ * dsd-fme's lines reach the adapter in clumps about this far apart (stdio
+ * buffering; measured on recorded runs, tests/mocks/fixtures/synthetic/
+ * dv-latency-dmr-*.json: steps of 330 to 350 ms). A line's arrival is up to
+ * one clump after its burst, so arrival times say nothing finer than this:
+ * a direct over's syncs arrive 340 ms apart and, as 340 < 360, one step in
+ * 18 is an empty clump (680 ms); a repeater's six VC1..VC6 bursts of a
+ * superframe arrive within a few ms. No DMR rule measures a superframe grid
+ * on arrival times: a re-key without a terminator is a header burst, a new
+ * identity or the call timeout, never a sync's arrival off a grid.
  */
-export const DMR_GRID_TOLERANCE_MS = 30
+export const DSD_FME_LINE_CLUMP_MS = 340
 
 /**
- * A DMR voice sync more than DMR_REKEY_CONFIRM_MS off the call's grid
- * re-keys at once only after this long without a voice sync of the call:
- * one whole superframe with no sync plus the re-key gap, 360 + 200 = 560 ms.
- * A continuous over prints one sync per 360 ms superframe, so even with each
- * sync's print up to 45 ms early or late its steps stay within 360 + 2 × 45
- * = 450 ms, below this. A gap this long can still be one over that missed a
- * sync (720 ms), its next print up to 2 × 45 = 90 ms off the grid: a sync 31
- * to 90 ms off after it waits for the next one like after a short gap.
+ * How early or late one voice sync's line may print against its frame
+ * within a clump (the evidence span and the trailer hold allow for it).
  */
-export const DMR_REKEY_LONG_GAP_MS = DMR_SUPERFRAME_MS + REKEY_GAP_MS
-
-/**
- * An off-grid DMR voice sync after a shorter gap is a re-key only once the
- * next voice sync confirms the new grid (within DMR_GRID_TOLERANCE_MS of it)
- * and lies more than this off the call's grid: each sync's print may be up
- * to 45 ms off its true time, so two syncs of one over differ from the
- * grid by at most 2 × 45 = 90 ms. A re-key 60 ms off the grid (the least,
- * see DMR_GRID_TOLERANCE_MS) after a short gap is then left to the voice LC
- * header or the long gap: a missed split, never a split over.
- */
-export const DMR_REKEY_CONFIRM_MS = 2 * 45
-
-/** How early or late one voice sync's line may print against its frame (see DMR_REKEY_CONFIRM_MS). */
-export const SYNC_PRINT_JITTER_MS = DMR_REKEY_CONFIRM_MS / 2
+export const SYNC_PRINT_JITTER_MS = 45
 
 /**
  * A DMR terminator of a call with no IDs yet holds the call_end this long
  * for the terminator's own link control: dsd-fme prints its SLOT line
- * right after the TLC sync line, and the burst's errors before the next
- * burst's sync, so one 60 ms burst plus the print jitter, 60 + 45 = 105 ms,
- * closes the burst. The call still ends at the terminator.
+ * right after the TLC sync line (in the same clump), and the burst's errors
+ * before the next burst's sync, so one 60 ms burst plus the print jitter,
+ * 60 + 45 = 105 ms, closes the burst. The call still ends at the terminator.
  */
 export const DMR_TRAILER_HOLD_MS = DMR_BURST_MS + SYNC_PRINT_JITTER_MS
 
@@ -819,10 +780,10 @@ export const DV_SUPERFRAME_MS: Readonly<
 /**
  * A call started on its voice frames with no identity is announced only
  * after a checked item (a link control naming it or saying its encryption,
- * a checked header) or once its chain holds this many clean syncs spanning
- * unnamedEvidenceSpanMs: syncs of two whole superframes. Two noise syncs in
- * one SYNC_CHAIN_MS window (two DMR syncs 700 ms apart, two D-STAR syncs
- * 420 ms apart) are not an over.
+ * a checked header) or once its chain holds this many clean syncs (DMR: of
+ * one colour code) spanning unnamedEvidenceSpanMs: syncs of two whole
+ * superframes. Two noise syncs in one SYNC_CHAIN_MS window (two DMR syncs
+ * 700 ms apart, two D-STAR syncs 420 ms apart) are not an over.
  */
 export const UNNAMED_EVIDENCE_SYNCS = 3
 
@@ -830,7 +791,8 @@ export const UNNAMED_EVIDENCE_SYNCS = 3
  * The span those syncs must cover: two superframes less the print jitter
  * at both ends, 2 × superframe - 2 × 45: DMR and P25 720 - 90 = 630 ms,
  * D-STAR 840 - 90 = 750 ms. undefined: the protocol does not start calls
- * on frames alone.
+ * on frames alone. Clumped arrival keeps a real over above it: three DMR
+ * superframes' syncs arrive in at least two clump steps (2 × 340 = 680).
  */
 export function unnamedEvidenceSpanMs(
 	protocol: NonNullable<DsdFmeProtocol>,
@@ -841,8 +803,22 @@ export function unnamedEvidenceSpanMs(
 		: 2 * superframe - 2 * SYNC_PRINT_JITTER_MS
 }
 
-/** A DMR sync line's burst type (dmr_dburst.c labels after the last "|"). */
-const DMR_BURST = /\|\s*(?<burst>VLC|VC[1-6*]|TLC)(?=\s|$)/
+/**
+ * A DMR sync line's burst type (dmr_dburst.c labels after the last "|"):
+ * VLC, VC1 to VC6 (a repeater's per-burst labels; the first burst after
+ * a sync hunt prints "VC1*"), direct mode's VC*, TLC.
+ */
+const DMR_BURST = /\|\s*(?<burst>VLC|VC[1-6*]|TLC)\*?(?=\s|$)/
+/**
+ * A DMR header burst that is not a clean voice LC header: a PI header
+ * (privacy, sent after the voice LC header) or, in direct mode (MS/DM), a
+ * data burst whose slot type failed ("CACH/Burst FEC ERR": no CACH in
+ * direct mode, so it is the burst itself). In recorded runs every direct
+ * over that keyed up with a header printed one of these (or a VLC) as its
+ * first line; no voice superframe prints one. A repeater's failed CACH
+ * names no slot reliably, so it is not one.
+ */
+const DMR_HEADER = /\|\s*(?:PI\b|CACH\/Burst FEC ERR)/
 /** A P25 phase 1 voice over's frame (header or voice): HDU, LDU1, LDU2. */
 const P25_VOICE_FRAME = /\b(?<duid>HDU|LDU1|LDU2)\b/
 const DSTAR_VOICE_SYNC = /\bSync:\s*[+-]DSTAR (?:VOICE|HEADER)\b/
@@ -858,26 +834,13 @@ function burstError(line: string): boolean {
 	)
 }
 
-/** How far `elapsedMs` (any sign) is from the nearest whole number of DMR superframes (0 to 180 ms). */
-function dmrGridError(elapsedMs: number): number {
-	const r =
-		((elapsedMs % DMR_SUPERFRAME_MS) + DMR_SUPERFRAME_MS) % DMR_SUPERFRAME_MS
-	return Math.min(r, DMR_SUPERFRAME_MS - r)
-}
-
-/**
- * Where the superframe of a DMR voice burst printed at `atMs` began, the
- * time its grid is measured on: a repeater (and dsd-fme in per-burst
- * printing) labels the six voice bursts VC1 to VC6, VCn n - 1 bursts of 60
- * ms after the superframe's start; a direct-mode print labels the sync
- * burst (A, the first) VC*; a voice LC header is the burst before the
- * first superframe. So an over that lost bursts (a gap that is not a whole
- * number of superframes) stays on its grid.
- */
-export function dmrSuperframeStart(burst: string, atMs: number): number {
-	if (burst === "VLC") return atMs + DMR_BURST_MS
-	const n = /^VC(?<n>[1-6])$/.exec(burst)?.groups?.["n"]
-	return n === undefined ? atMs : atMs - (Number(n) - 1) * DMR_BURST_MS
+/** A DMR sync line of a header burst: a voice LC header or DMR_HEADER (a failed data burst only in direct mode). */
+function dmrHeaderLine(line: string, burst: string | undefined): boolean {
+	if (burst === "VLC") return true
+	if (burst !== undefined) return false
+	const header = DMR_HEADER.exec(line)
+	if (header === null) return false
+	return header[0].includes("PI") || /\bMS\/DM\b/.test(line)
 }
 
 /** Algorithm ids that mean "no encryption" (P25 0x80, DMR/none 0x00). */
@@ -1036,7 +999,6 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/** The current lane's voice frame sync chain and last DMR voice sync (ms). */
 	private chain: SyncChain | null = null
 	private lastVoiceSyncMs: number | undefined = undefined
-	private dmrGrid: DmrGrid | undefined = undefined
 
 	/**
 	 * The lane whose call the fields above hold (useLane), and the other
@@ -1453,10 +1415,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const span = unnamedEvidenceSpanMs(call.protocol)
 		const chain = this.liveChain(call.protocol, nowMs)
 		if (span === undefined || chain === null) return
-		if (
-			chain.clean >= UNNAMED_EVIDENCE_SYNCS &&
-			chain.lastMs - chain.startMs >= span
-		)
+		// DMR: syncs of one colour code (SyncChain.run).
+		const dmr = call.protocol === "dmr"
+		const clean = dmr ? (chain.run ?? 0) : chain.clean
+		const firstMs = dmr ? (chain.runStartMs ?? chain.startMs) : chain.startMs
+		if (clean >= UNNAMED_EVIDENCE_SYNCS && chain.lastMs - firstMs >= span)
 			call.evidenced = true
 	}
 
@@ -1591,7 +1554,6 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			recentlyTerminated: this.recentlyTerminated,
 			chain: this.chain,
 			lastVoiceSyncMs: this.lastVoiceSyncMs,
-			dmrGrid: this.dmrGrid,
 		})
 		const next = this.lanes.get(key) ?? emptyLane()
 		this.lanes.delete(key)
@@ -1600,7 +1562,6 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.recentlyTerminated = next.recentlyTerminated
 		this.chain = next.chain
 		this.lastVoiceSyncMs = next.lastVoiceSyncMs
-		this.dmrGrid = next.dmrGrid
 		this.laneKey = key
 	}
 
@@ -2350,12 +2311,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.trackSyncState(line, newProtocol)
 
 		// A protocol switch ends the old protocol's call, announced or still
-		// pending (endCall announces a pending one first), then this line is
-		// parsed as the new protocol's: a "+DSTAR HEADER" line's checked
-		// callsign must not be lost (one arrives only every few seconds).
+		// pending (endCall announces a pending one first), at its last line
+		// (a stray sync of another protocol may come seconds after the
+		// over), then this line is parsed as the new protocol's: a "+DSTAR
+		// HEADER" line's checked callsign must not be lost (one arrives only
+		// every few seconds).
 		if (newProtocol !== this.currentProtocol) {
 			this.forEachLane(() => {
-				const ended = this.endOngoingCall(now)
+				const last = (this.callState ?? this.pendingCall?.state)?.lastUpdate
+				const ended = this.endOngoingCall(now, false, last)
 				if (ended) this.emitOutput(ended)
 			})
 		}
@@ -2497,8 +2461,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * lane's chain (SyncChain): DMR voice bursts (VLC, VC*, VC1 to VC6; a TLC
 	 * only extends a chain), P25 phase 1 HDU / LDU1 / LDU2 whose NID decoded,
 	 * D-STAR header and voice syncs, NXDN voice frames, every YSF and dPMR
-	 * sync. A sync more than SYNC_CHAIN_MS after the chain's last one, or one
-	 * printing another DMR colour code or P25 NAC, starts a new chain.
+	 * sync. A sync more than SYNC_CHAIN_MS after the chain's last one, or a
+	 * P25 one printing another NAC, starts a new chain. A DMR sync printing
+	 * another colour code keeps the chain (its start) and restarts its run;
+	 * a DMR header burst (dmrHeaderLine) with no call on the lane begins a
+	 * new chain there: the over starts at its header.
 	 */
 	private trackChain(line: string, nowMs: number): void {
 		const protocol = this.currentProtocol
@@ -2509,6 +2476,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		let extendOnly = false
 		if (protocol === "dmr") {
 			const burst = DMR_BURST.exec(line)?.groups?.["burst"]
+			if (dmrHeaderLine(line, burst) && this.ongoingCall("dmr") === null) {
+				const live = this.liveChain("dmr", nowMs)
+				if (live?.header !== true) {
+					this.chain = this.dmrChainAt(line, nowMs)
+					return
+				}
+			}
 			if (burst === undefined) return
 			extendOnly = burst === "TLC"
 			const cc = DMR_COLOR_CODE.exec(line)?.groups?.["cc"]
@@ -2532,11 +2506,22 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			chain.protocol === protocol &&
 			nowMs >= chain.lastMs &&
 			nowMs - chain.lastMs <= window &&
-			(tag === undefined || chain.tag === undefined || chain.tag === tag)
+			(protocol === "dmr" ||
+				tag === undefined ||
+				chain.tag === undefined ||
+				chain.tag === tag)
 		if (!fresh) {
 			this.chain = extendOnly
 				? null
-				: { protocol, startMs: nowMs, lastMs: nowMs, clean: clean ? 1 : 0, tag }
+				: protocol === "dmr"
+					? this.dmrChainAt(line, nowMs)
+					: {
+							protocol,
+							startMs: nowMs,
+							lastMs: nowMs,
+							clean: clean ? 1 : 0,
+							tag,
+						}
 			return
 		}
 		if (
@@ -2548,15 +2533,49 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			chain.beforeMarkMs = chain.lastMs
 		}
 		chain.lastMs = nowMs
-		chain.tag ??= tag
+		if (protocol === "dmr") {
+			// Another colour code restarts the run ("XX" prints none).
+			if (tag !== undefined && chain.tag !== undefined && tag !== chain.tag)
+				chain.run = 0
+			chain.tag = tag ?? chain.tag
+			if (clean) {
+				if ((chain.run ?? 0) === 0) chain.runStartMs = nowMs
+				chain.run = (chain.run ?? 0) + 1
+			}
+		} else chain.tag ??= tag
 		if (clean) chain.clean++
-		// A DMR sync counts once handleDmrSync knows it is not a suspect of
+		// A DMR sync counts in handleDmrSync, once it is known not to begin
 		// the next over (dmrRekey).
 		if (protocol !== "dmr")
 			this.noteEvidence(
 				this.callState ?? this.pendingCall?.state ?? null,
 				nowMs,
 			)
+	}
+
+	/**
+	 * A DMR chain beginning with `line`'s sync: a voice burst (one clean
+	 * sync, its colour code) or a header burst (dmrHeaderLine), which counts
+	 * no sync of its own but holds the over's start.
+	 */
+	private dmrChainAt(line: string, nowMs: number): SyncChain {
+		const burst = DMR_BURST.exec(line)?.groups?.["burst"]
+		const header = dmrHeaderLine(line, burst)
+		const clean = burst !== undefined && !LINE_ERR.test(line)
+		const cc = DMR_COLOR_CODE.exec(line)?.groups?.["cc"]
+		return {
+			protocol: "dmr",
+			startMs: nowMs,
+			lastMs: nowMs,
+			clean: clean ? 1 : 0,
+			tag:
+				burst === undefined || cc === undefined
+					? undefined
+					: String(Number(cc)),
+			run: clean ? 1 : 0,
+			...(clean ? { runStartMs: nowMs } : {}),
+			...(header ? { header: true } : {}),
+		}
 	}
 
 	/** The lane's chain of `protocol` when it is still running at `nowMs`, else null. */
@@ -2621,7 +2640,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			chain === null ||
 			chain.protocol !== protocol ||
 			chain.lastMs !== nowMs ||
-			chain.clean < 2 ||
+			// DMR: two of one colour code (SyncChain.run).
+			(protocol === "dmr" ? (chain.run ?? 0) : chain.clean) < 2 ||
 			this.callState !== null ||
 			this.pendingCall !== null
 		)
@@ -2651,50 +2671,43 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * A DMR sync line without IDs. Idle, CSBK and data bursts are not call
 	 * activity. A voice burst or terminator joins the ongoing call of the
 	 * lane, or starts one on the over's second clean frame (startOnFrames). A
-	 * voice burst after REKEY_GAP_MS without voice from the call that is a
-	 * voice LC header or off the call's superframe grid is a re-key: the call
-	 * ends at its last voice (no terminator) and this burst begins the next
-	 * over's chain.
+	 * header burst (a voice LC header, a PI header, a direct-mode data burst
+	 * whose slot type failed: dmrHeaderLine) at least REKEY_GAP_MS after the
+	 * call's last voice sync is a re-key: the call ends at its last line (no
+	 * terminator) and the header begins the next over's chain. Arrival times
+	 * are clumped (DSD_FME_LINE_CLUMP_MS), so no rule here measures a
+	 * superframe grid on them: a continuous over is never split by when its
+	 * lines arrive, and a re-key with no header, no terminator and the same
+	 * IDs stays one call (a missed split, never a split over).
 	 */
 	private handleDmrSync(line: string, now: Date): DecoderOutput | null {
 		const burst = DMR_BURST.exec(line)?.groups?.["burst"]
-		if (burst === undefined) return null
+		const header = dmrHeaderLine(line, burst)
+		if (burst === undefined && !header) return null
 		const nowMs = now.getTime()
-		const voice = burst !== "TLC"
+		const voice = burst !== undefined && burst !== "TLC"
 		const clean = !LINE_ERR.test(line)
 		const ongoing = this.ongoingCall("dmr")
 		if (ongoing === null) {
-			if (voice) {
-				// A voice burst after a terminator is the next over: the trailer is over.
+			if (voice || header) {
+				// A voice or header burst after a terminator is the next over: the trailer is over.
 				this.recentlyTerminated = null
-				this.lastVoiceSyncMs = nowMs
-				this.dmrGrid = { anchorMs: dmrSuperframeStart(burst, nowMs) }
+				if (voice) this.lastVoiceSyncMs = nowMs
 			}
-			this.startOnFrames("dmr", now, clean)
+			if (burst !== undefined) this.startOnFrames("dmr", now, clean)
 			return null
 		}
-		const rekey = voice ? this.dmrRekey(ongoing, burst, nowMs, clean) : null
-		if (rekey !== null) {
-			const chain = this.chain
-			// The call ends at its last line before the next over's first sync.
-			ongoing.lastUpdate = new Date(rekey.endAtMs)
+		if (header && this.dmrRekey(ongoing, nowMs)) {
+			// The call ends at its last line before the next over's header.
 			const ended = this.endOngoingCall(now, true)
-			this.chain = chain
-			this.lastVoiceSyncMs = nowMs
-			this.dmrGrid = { anchorMs: dmrSuperframeStart(burst, nowMs) }
-			if (chain !== null && chain.lastMs === nowMs) {
-				chain.startMs = rekey.startMs
-				chain.clean = rekey.clean
-				// Confirmed by this second sync: the next over starts now.
-				this.startOnFrames("dmr", now, clean)
-			}
+			this.chain = this.dmrChainAt(line, nowMs)
+			this.lastVoiceSyncMs = voice ? nowMs : undefined
 			return ended
 		}
+		if (burst === undefined) return null
 		ongoing.lastUpdate = now
 		if (voice) this.lastVoiceSyncMs = nowMs
-		// An off-grid sync that may begin the next over (a suspect) is not
-		// evidence of this one until the next sync clears it.
-		if (this.dmrGrid?.suspect === undefined) this.noteEvidence(ongoing, nowMs)
+		this.noteEvidence(ongoing, nowMs)
 		const cc = DMR_COLOR_CODE.exec(line)?.groups?.["cc"]
 		if (cc !== undefined && ongoing.dmr?.cc === undefined)
 			ongoing.dmr = { ...ongoing.dmr, cc: parseInt(cc, 10) }
@@ -2712,68 +2725,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}
 
 	/**
-	 * Whether a DMR voice burst at `nowMs` re-keys (see handleDmrSync). The gap
-	 * is measured from the call's last voice sync (an LC or slot print is not
-	 * voice); the grid from each burst's superframe start
-	 * (dmrSuperframeStart), so lost bursts keep an over on its grid. A re-key
-	 * is:
-	 * - a voice LC header at least REKEY_GAP_MS after the last voice sync;
-	 * - a sync more than DMR_REKEY_CONFIRM_MS off the call's grid at least
-	 *   DMR_REKEY_LONG_GAP_MS after the last voice sync: no print jitter of
-	 *   one over gets there;
-	 * - a sync off the grid (DMR_GRID_TOLERANCE_MS) after a gap of at least
-	 *   REKEY_GAP_MS (a long one included) that the next voice sync of
-	 *   another superframe confirms: on its grid and more than
-	 *   DMR_REKEY_CONFIRM_MS off the call's. Otherwise the off-grid sync was a
-	 *   late or early print of the same over (one missed sync and the next
-	 *   printed 31 to 90 ms late is not a re-key) and the grid stays.
+	 * Whether a DMR header burst at `nowMs` re-keys (see handleDmrSync): at
+	 * least REKEY_GAP_MS after the call's last voice sync (an LC or slot print
+	 * is not voice), so the voice LC headers of one key-up (60 ms apart) do
+	 * not re-key one another. The bound is one clump at most: two lines of one
+	 * clump arrive a few ms apart, of two clumps about 340 ms apart.
 	 */
-	private dmrRekey(
-		ongoing: DsdFmeCallState,
-		burst: string,
-		nowMs: number,
-		clean: boolean,
-	): DmrRekey | null {
-		const lastLineMs = ongoing.lastUpdate.getTime()
-		const last = this.lastVoiceSyncMs ?? lastLineMs
-		if (nowMs < last) return null
-		const gap = nowMs - last
-		const frameMs = dmrSuperframeStart(burst, nowMs)
-		const grid = this.dmrGrid ?? { anchorMs: frameMs }
-		this.dmrGrid = grid
-		const off = dmrGridError(frameMs - grid.anchorMs)
-		const here: DmrRekey = {
-			endAtMs: lastLineMs,
-			startMs: nowMs,
-			clean: clean ? 1 : 0,
-		}
-		if (burst === "VLC" && gap >= REKEY_GAP_MS) return here
-		if (off > DMR_REKEY_CONFIRM_MS && gap >= DMR_REKEY_LONG_GAP_MS) return here
-		const suspect = grid.suspect
-		if (suspect !== undefined) {
-			// A burst inside the suspect's own superframe neither confirms nor clears it.
-			if (frameMs - suspect.gridMs < DMR_SUPERFRAME_MS - DMR_GRID_TOLERANCE_MS)
-				return null
-			grid.suspect = undefined
-			if (
-				dmrGridError(frameMs - suspect.gridMs) <= DMR_GRID_TOLERANCE_MS &&
-				off > DMR_REKEY_CONFIRM_MS
-			)
-				return {
-					endAtMs: suspect.endAtMs,
-					startMs: suspect.atMs,
-					clean: suspect.clean + (clean ? 1 : 0),
-				}
-		}
-		if (off > DMR_GRID_TOLERANCE_MS && gap >= REKEY_GAP_MS)
-			grid.suspect = {
-				atMs: nowMs,
-				gridMs: frameMs,
-				endAtMs: lastLineMs,
-				clean: here.clean,
-			}
-		else grid.anchorMs = frameMs
-		return null
+	private dmrRekey(ongoing: DsdFmeCallState, nowMs: number): boolean {
+		const last = this.lastVoiceSyncMs ?? ongoing.lastUpdate.getTime()
+		return nowMs >= last && nowMs - last >= REKEY_GAP_MS
 	}
 
 	/**
@@ -3488,12 +3448,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private endOngoingCall(
 		now: Date,
 		noTerminator = false,
+		endAt?: Date,
 	): DecoderOutput | null {
 		if (!this.callState && this.pendingCall) {
 			this.callState = this.pendingCall.state
 			this.pendingCall = null
 		}
-		return this.endCall(now, noTerminator)
+		return this.endCall(now, noTerminator, endAt)
 	}
 
 	/** Ends (or drops, if not yet announced) the ongoing call of `protocol`. */
@@ -3901,7 +3862,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Case 3: Different call detected - end previous (at its last line: its
 		// terminator was missed), start new pending
 		if (this.callState) {
-			// On the grid (one running chain) the next over began after the
+			// On one running chain of syncs the next over began after the
 			// old call's last own identity line: the old call ends at that line
 			// or the sync before the boundary, the new one is back-dated to the
 			// chain's first sync after it (endCall drops the chain).
@@ -4273,14 +4234,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		endAt?: Date,
 	): DecoderOutput | null {
 		if (!this.callState) return null
-		// An off-grid sync no later sync confirmed as the next over's first
-		// was a late or early print of this one: it is this call's evidence.
-		if (this.dmrGrid?.suspect !== undefined && this.chain !== null)
-			this.noteEvidence(this.callState, this.chain.lastMs)
 		// The lane's next call starts on its own frames.
 		this.chain = null
 		this.lastVoiceSyncMs = undefined
-		this.dmrGrid = undefined
 
 		// A timeout is detected late: the call really ended at its last line.
 		const endTime = endAt ?? (timeout ? this.callState.lastUpdate : now)

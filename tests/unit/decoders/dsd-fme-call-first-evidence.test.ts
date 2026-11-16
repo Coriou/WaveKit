@@ -1,24 +1,21 @@
 /**
- * dsd-fme call-first, final-review fixes: the DMR re-key grid measured on
- * each burst's superframe start (lost bursts and one missed sync keep an over
- * whole), identity-less calls announced only on evidence (no phantom calls
- * from two noise syncs), a terminator's trailer naming a call that had no IDs
- * yet, and "known clear" only once the link control's burst closed clean.
+ * dsd-fme call-first, final-review fixes: lost bursts and missed syncs keep
+ * an over whole (no superframe grid is measured on clumped line arrival,
+ * DSD_FME_LINE_CLUMP_MS), identity-less calls announced only on evidence
+ * (no phantom calls from two noise syncs), a terminator's trailer naming a
+ * call that had no IDs yet, and "known clear" only once the link control's
+ * burst closed clean.
  */
 import fc from "fast-check"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
 	DMR_BURST_MS,
-	DMR_GRID_TOLERANCE_MS,
-	DMR_REKEY_CONFIRM_MS,
-	DMR_REKEY_LONG_GAP_MS,
 	DMR_SUPERFRAME_MS,
 	DMR_TRAILER_HOLD_MS,
 	DV_SUPERFRAME_MS,
 	SYNC_CHAIN_MS,
 	SYNC_PRINT_JITTER_MS,
 	UNNAMED_EVIDENCE_SYNCS,
-	dmrSuperframeStart,
 	unnamedEvidenceSpanMs,
 } from "../../../src/decoders/builtin/dsd-fme.js"
 import {
@@ -74,11 +71,6 @@ describe("dsd-fme call-first: review fixes", () => {
 		expect(unnamedEvidenceSpanMs("p25p1")).toBe(630)
 		expect(unnamedEvidenceSpanMs("dstar")).toBe(750)
 		expect(unnamedEvidenceSpanMs("ysf")).toBeUndefined()
-		// The superframe start: VCn n - 1 bursts back, VC* the sync burst, VLC the burst before.
-		expect(dmrSuperframeStart("VC1", 1000)).toBe(1000)
-		expect(dmrSuperframeStart("VC6", 1300)).toBe(1000)
-		expect(dmrSuperframeStart("VC*", 1000)).toBe(1000)
-		expect(dmrSuperframeStart("VLC", 940)).toBe(1000)
 	})
 
 	describe("R1: one missed sync and a late next print keep an over whole", () => {
@@ -97,10 +89,7 @@ describe("dsd-fme call-first: review fixes", () => {
 			it.each([35, 40, 45, -40])(
 				`sync 7 at %i ms after the gap stays one call (LC every other superframe: ${withLc})`,
 				offset => {
-					// The gap is 720 + offset >= DMR_REKEY_LONG_GAP_MS (560), the offset <= 90.
-					expect(720 + offset).toBeGreaterThanOrEqual(DMR_REKEY_LONG_GAP_MS)
-					expect(Math.abs(offset)).toBeGreaterThan(DMR_GRID_TOLERANCE_MS)
-					expect(Math.abs(offset)).toBeLessThanOrEqual(DMR_REKEY_CONFIRM_MS)
+					// A 720 + offset ms gap with no header burst: the same over.
 					const { starts, ends } = replay(dropped(offset, withLc), 12_000)
 					expect(starts).toHaveLength(1)
 					expect(ends).toHaveLength(1)
@@ -110,7 +99,10 @@ describe("dsd-fme call-first: review fixes", () => {
 				},
 			)
 
-		it("after the long gap: 90 ms off waits for confirmation, 91 ms off splits at once", () => {
+		it("after a two-superframe gap a sync at any offset is the same over: 90, 91 and 180 ms off", () => {
+			// Adapted (was: 91 ms off the grid split at once). Arrival is
+			// clumped (DSD_FME_LINE_CLUMP_MS 340 ms), so no offset of a sync's
+			// arrival says it began another over.
 			const run = (offset: number) => {
 				const lines: Line[] = []
 				for (let i = 0; i < 3; i++)
@@ -121,11 +113,11 @@ describe("dsd-fme call-first: review fixes", () => {
 					lines.push([t + j * DMR_SUPERFRAME_MS, MS("VC*")])
 				return replay(lines, 12_000).ends
 			}
-			expect(run(DMR_REKEY_CONFIRM_MS)).toHaveLength(1)
-			const split = run(DMR_REKEY_CONFIRM_MS + 1)
-			expect(split).toHaveLength(2)
-			expect(at(split[0]!.endedAt!)).toBe(1720)
-			expect(at(split[1]!.startedAt)).toBe(2440 + 91)
+			for (const offset of [90, 91, 180]) {
+				const ends = run(offset)
+				expect(ends).toHaveLength(1)
+				expect(at(ends[0]!.startedAt)).toBe(1000)
+			}
 		})
 	})
 
@@ -146,19 +138,22 @@ describe("dsd-fme call-first: review fixes", () => {
 			expect(ends).toHaveLength(1)
 		})
 
-		it("a real re-key through the repeater still splits: the next over 120 ms off the grid", () => {
-			// Over A: bursts 0-29; over B from burst 38 (2 bursts = 120 ms off the
-			// 360 ms grid), 540 ms after A's last burst (a short gap: confirmed by
-			// B's next VC1).
-			const lines = [
-				...bursts(BS, 1000, 30),
-				...bursts(BS, 1000 + 38 * DMR_BURST_MS, 30),
-			]
-			const { starts, ends } = replay(lines, 12_000)
+		it("a re-key through the repeater splits on its voice LC header, and without header or terminator stays one call", () => {
+			// Adapted (was: over B 120 ms off the 360 ms grid split). Over A:
+			// bursts 0-29; over B from burst 38, 540 ms after A's last burst.
+			const a = bursts(BS, 1000, 30)
+			const b = bursts(BS, 1000 + 38 * DMR_BURST_MS, 30)
+			// No header, no terminator, the same (no) IDs: a missed split, never a split over.
+			const merged = replay([...a, ...b], 12_000)
+			expect(merged.starts).toHaveLength(1)
+			expect(merged.ends).toHaveLength(1)
+			// B's voice LC header one burst before its first voice burst splits.
+			const vlcAt = 1000 + 37 * DMR_BURST_MS
+			const { starts, ends } = replay([...a, [vlcAt, BS("VLC")], ...b], 12_000)
 			expect(starts).toHaveLength(2)
 			expect(ends).toHaveLength(2)
 			expect(at(ends[0]!.endedAt!)).toBe(1000 + 29 * DMR_BURST_MS)
-			expect(at(ends[1]!.startedAt)).toBe(1000 + 38 * DMR_BURST_MS)
+			expect(at(ends[1]!.startedAt)).toBe(vlcAt)
 		})
 
 		it("property: per-burst prints with random lost bursts and ±45 ms jitter never split an over", () => {
@@ -233,8 +228,7 @@ describe("dsd-fme call-first: review fixes", () => {
 		})
 
 		it("three DMR syncs announce at a 630 ms span, not at 629", () => {
-			// The third sync 150 ms after the second (under REKEY_GAP_MS): an
-			// off-grid sync after a longer gap is a re-key suspect, no evidence.
+			// Three clean syncs of one colour code, the first and last `span` apart.
 			const run = (span: number) =>
 				replay(
 					[
@@ -307,9 +301,10 @@ describe("dsd-fme call-first: review fixes", () => {
 			expect(start!.timestamp.getTime() - T0).toBe(1000 + span)
 		})
 
-		it("an off-grid sync that may begin the next over is no evidence of this one", () => {
-			// 1000 and 1360 on the grid; 1820 is 100 ms off after a 460 ms gap
-			// (a suspect), confirmed at 2180: the next over began at 1820.
+		it("syncs arriving off a 360 ms grid are one over's evidence: one call from the first", () => {
+			// Adapted (was: 1820, 100 ms off after a 460 ms gap and confirmed at
+			// 2180, began a second over and was no evidence of the first). With
+			// no header between them these syncs are one over.
 			const { starts, ends } = replay(
 				[
 					[1000, MS("VC*")],
@@ -320,10 +315,9 @@ describe("dsd-fme call-first: review fixes", () => {
 				],
 				8000,
 			)
-			// The first over (two syncs) never had evidence: no phantom call.
 			expect(starts).toHaveLength(1)
 			expect(ends).toHaveLength(1)
-			expect(at(starts[0]!.startedAt)).toBe(1820)
+			expect(at(starts[0]!.startedAt)).toBe(1000)
 		})
 
 		it("a link control naming the call is evidence on two syncs", () => {

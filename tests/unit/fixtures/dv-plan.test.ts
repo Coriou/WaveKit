@@ -25,6 +25,7 @@ import {
 	DV_NOISE_SCENES,
 	DV_SEED_SCENES,
 	LINE_LATENCY_MS,
+	dmrSeed,
 	dvSeeds,
 } from "../../../scripts/fixtures/dv-latency-seeds.mjs"
 import {
@@ -392,8 +393,9 @@ describe("provisional latency seeds", () => {
 	})
 
 	it("model a late start: no line before the first embedded LC", () => {
-		const lengths = dvSeeds().find(s => s.seed.scene === "dmr-direct-lengths")!
-		const { overs, lines } = lengths.seed
+		// The model, not the committed seed: that one is recorded now.
+		const scene = DV_SCENES.find(s => s.name === "dmr-direct-lengths")!
+		const { overs, lines } = dmrSeed(scene)
 		const ten = overs[4]!
 		const slotLines = lines.filter(
 			l => l.atMs > ten.startMs && l.atMs < ten.endMs && /SLOT 1/.test(l.text),

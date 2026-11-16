@@ -12,8 +12,6 @@ import * as path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import pino from "pino"
 import {
-	DMR_GRID_TOLERANCE_MS,
-	DMR_REKEY_CONFIRM_MS,
 	DMR_SUPERFRAME_MS,
 	DsdFmeDecoder,
 	REKEY_GAP_MS,
@@ -114,11 +112,10 @@ describe("dsd-fme call-first lifecycle", () => {
 	})
 
 	it("states its bounds", () => {
-		// 2 x 360 + 40; half a 60 ms TDMA frame; one fast re-key gap.
+		// 2 x 360 + 40; one fast re-key gap.
 		expect(SYNC_CHAIN_MS.dmr).toBe(2 * 360 + 40)
 		expect(SYNC_CHAIN_MS.p25p1).toBe(2 * 180 + 40)
 		expect(SYNC_CHAIN_MS.dstar).toBe(2 * 420 + 40)
-		expect(DMR_GRID_TOLERANCE_MS).toBe(60 / 2)
 		expect(REKEY_GAP_MS).toBe(200)
 	})
 
@@ -359,25 +356,41 @@ describe("dsd-fme call-first lifecycle", () => {
 			expect(far.ends[1]).toMatchObject({ talkgroup: 9, source: 100 })
 		})
 
-		it("an off-grid sync after a short gap is a new over once a second sync confirms its grid", () => {
-			// 600: 240 ms after the last sync, 120 ms off the grid (> 90).
-			const split = replay(rekey(600), 6000)
-			expect(split.ends).toHaveLength(2)
-			expect(at(split.ends[0]!.endedAt!)).toBe(400)
-			expect(split.ends[0]!.flags?.timeout).toBe(true)
-			expect(at(split.ends[1]!.startedAt)).toBe(600)
-			expect(split.ends[1]).toMatchObject({ talkgroup: 9, source: 100 })
-			// Without a second voice sync (only the TLC) nothing confirms it: one call.
-			const lone = replay(
-				rekey(600).filter(([t, text]) => !(t === 960 && text.includes("VC*"))),
+		it("an off-grid voice sync with the same IDs and no header is the same over", () => {
+			// Adapted (was: 600, 240 ms after the last sync and 120 ms off the
+			// grid, confirmed by the next sync, split). Line arrival is clumped
+			// (DSD_FME_LINE_CLUMP_MS), so a sync's arrival off a grid is no sign
+			// of a re-key: one call (a missed split, never a split over).
+			const { ends } = replay(rekey(600), 6000)
+			expect(ends).toHaveLength(1)
+			expect(at(ends[0]!.startedAt)).toBe(0)
+			expect(at(ends[0]!.endedAt!)).toBe(1300)
+			// A direct-mode data burst whose slot type failed is the next
+			// over's header: 240 ms after the last voice sync it splits.
+			const header = replay(
+				rekey(600)
+					.map(
+						([t, text]): Line =>
+							t === 600
+								? [
+										t,
+										"03:04:05 Sync: +DMR MS/DM MODE/MONO | Color Code=13 | CACH/Burst FEC ERR",
+									]
+								: [t, text],
+					)
+					.concat([[640, MS("VC*")]]),
 				6000,
 			)
-			expect(lone.ends).toHaveLength(1)
+			expect(header.ends).toHaveLength(2)
+			expect(at(header.ends[0]!.endedAt!)).toBe(400)
+			expect(header.ends[0]!.flags?.timeout).toBe(true)
+			expect(at(header.ends[1]!.startedAt)).toBe(600)
+			expect(header.ends[1]).toMatchObject({ talkgroup: 9, source: 100 })
 		})
 
-		it("keeps a faded over whole when its voice resumes on its superframe grid", () => {
-			// 2 s hole; the next sync 6 superframes on, at the tolerance.
-			const resumed = 360 + 6 * DMR_SUPERFRAME_MS + DMR_GRID_TOLERANCE_MS
+		it("keeps a faded over whole when its voice resumes, on or off a superframe grid", () => {
+			// 2 s hole; the next sync 6 superframes on, 30 ms late.
+			const resumed = 360 + 6 * DMR_SUPERFRAME_MS + 30
 			const { ends } = replay(
 				[
 					[0, MS("VC*")],
@@ -389,25 +402,22 @@ describe("dsd-fme call-first lifecycle", () => {
 				8000,
 			)
 			expect(ends).toHaveLength(1)
-			// Past the tolerance after the long gap, up to DMR_REKEY_CONFIRM_MS
-			// off, it is a late print of the over (its next sync stays on the
-			// new grid, yet within 90 ms of the call's): one call.
+			// Adapted (was: 91 ms off after the long gap split at once). Any
+			// offset of the resumed syncs is one call: no grid on clumped arrival.
 			const late = (offset: number) =>
 				replay(
 					[
 						[0, MS("VC*")],
 						[360, MS("VC*")],
 						[400, LC(1)],
-						[resumed - DMR_GRID_TOLERANCE_MS + offset, MS("VC*")],
-						[resumed - DMR_GRID_TOLERANCE_MS + offset + 360, MS("VC*")],
-						[resumed - DMR_GRID_TOLERANCE_MS + offset + 700, MS("TLC")],
+						[resumed - 30 + offset, MS("VC*")],
+						[resumed - 30 + offset + 360, MS("VC*")],
+						[resumed - 30 + offset + 700, MS("TLC")],
 					],
 					8000,
 				).ends
-			expect(late(DMR_GRID_TOLERANCE_MS + 1)).toHaveLength(1)
-			expect(late(DMR_REKEY_CONFIRM_MS)).toHaveLength(1)
-			// One millisecond past that it is a re-key at once.
-			expect(late(DMR_REKEY_CONFIRM_MS + 1)).toHaveLength(2)
+			for (const offset of [31, 90, 91, 180])
+				expect(late(offset)).toHaveLength(1)
 		})
 
 		it("a voice LC header after the gap is a new over even on the grid", () => {

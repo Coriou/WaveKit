@@ -1,17 +1,17 @@
 {
 	"version": 1,
-	"provisional": true,
-	"note": "Modelled, not measured (scripts/fixtures/dv-latency-seeds.mjs): replace with the in-image capture baseline.",
+	"provisional": false,
+	"note": "Recorded by tests/integration/dv-capture.test.ts: baseline, 20 dB, 0 Hz, phase 0.",
 	"scene": "dmr-repeater-hang-no-tlc",
 	"protocol": "dmr",
-	"frequencyHz": 454906250,
+	"frequencyHz": 433162500,
 	"overs": [
 		{
 			"index": 0,
 			"protocol": "dmr",
 			"slot": 1,
-			"startMs": 1021.7,
-			"endMs": 2011.7,
+			"startMs": 1212.1,
+			"endMs": 2202.1,
 			"frames": 3,
 			"terminator": false,
 			"clear": true,
@@ -25,8 +25,8 @@
 			"index": 1,
 			"protocol": "dmr",
 			"slot": 1,
-			"startMs": 7021.7,
-			"endMs": 9991.7,
+			"startMs": 7212.1,
+			"endMs": 10182.1,
 			"frames": 9,
 			"terminator": false,
 			"clear": true,
@@ -39,1160 +39,1460 @@
 	],
 	"lines": [
 		{
-			"atMs": 1119.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3.7,
+			"text": "sox WARN wav: Length in output .wav header will be wrong since can't seek to fix it"
 		},
 		{
-			"atMs": 1149.2,
-			"text": "00:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 9.9,
+			"text": " âââââââ  ââââââââââââââ â  âââââââââââââ   ââââââââââââ"
 		},
 		{
-			"atMs": 1179.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9.9,
+			"text": " ââââââââââââââââââââââââââ  âââââââââââââ âââââââââââââ"
 		},
 		{
-			"atMs": 1239.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9.9,
+			"text": " âââ  ââââââââââ âââ  âââââ  ââââââ  âââââââââââââââââ  "
 		},
 		{
-			"atMs": 1299.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9.9,
+			"text": " âââ  âââ ââââââââââ  âââââ  ââââââ  âââââââââââââââââ  "
 		},
 		{
-			"atMs": 1359.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9.9,
+			"text": " ââââââââââââââââââââââââââ  âââ     âââ âââ âââââââââââ"
+		},
+		{
+			"atMs": 9.9,
+			"text": " âââââââ âââââââ âââââââ ââ  âââ     âââ     âââââââââââ"
+		},
+		{
+			"atMs": 9.9,
+			"text": "Build Version: AW -128-NOTFOUND "
+		},
+		{
+			"atMs": 9.9,
+			"text": "MBElib Version: 1.3.0"
+		},
+		{
+			"atMs": 30,
+			"text": "Decoding AUTO P25, YSF, DSTAR, X2-TDMA, and DMR"
+		},
+		{
+			"atMs": 30,
+			"text": "Audio In Device: /dev/stdin"
+		},
+		{
+			"atMs": 1388.6,
+			"text": "10:57:08 Sync: +DMR  [slot1]  slot2  | CACH/Burst FEC ERR"
 		},
 		{
 			"atMs": 1389.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"text": "10:57:08 Sync: +DMR   slot1  [slot2] | CACH/Burst FEC ERR"
 		},
 		{
-			"atMs": 1419.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1394.1,
+			"text": "10:57:08 Sync: +DMR  [SLOT1]  slot2  | Color Code=XX | VC1*"
 		},
 		{
-			"atMs": 1479.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1725.7,
+			"text": "10:57:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 1509.2,
-			"text": "00:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 1729.3,
+			"text": "10:57:08 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 1539.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1733.8,
+			"text": "10:57:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 1599.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1734.4,
+			"text": "10:57:08 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 1659.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1737.2,
+			"text": "10:57:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 1719.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1739.7,
+			"text": "10:57:08 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 1749.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 1742.5,
+			"text": "10:57:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 1779.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1747.7,
+			"text": "10:57:08 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 1839.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1747.7,
+			"text": "10:57:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 1869.2,
-			"text": "00:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 1748.7,
+			"text": "10:57:08 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 1899.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1750.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 1959.2,
-			"text": "00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1751.5,
+			"text": "10:57:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2019.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 1755.1,
+			"text": "10:57:08 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 2079.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2063.4,
+			"text": "10:57:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2109.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2066.4,
+			"text": "10:57:09 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 2139.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2069.7,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2169.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2070.9,
+			"text": "10:57:09 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 2199.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2072.5,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2229.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2075,
+			"text": "10:57:09 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 2259.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2076.6,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2289.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2078.9,
+			"text": "10:57:09 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 2319.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2080.4,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2349.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2081.6,
+			"text": "10:57:09 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 2379.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2082.7,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 2409.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2084.1,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2439.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2405.7,
+			"text": "10:57:09 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 2469.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2407,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2499.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2409.8,
+			"text": "10:57:09 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 2529.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2410.9,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2559.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2414.1,
+			"text": "10:57:09 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 2589.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2415.3,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2619.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2417.9,
+			"text": "10:57:09 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 2649.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2419.4,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2679.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2421,
+			"text": "10:57:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2709.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2422.9,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2739.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2424.4,
+			"text": "10:57:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2769.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2747.3,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2799.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2747.3,
+			"text": "10:57:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2829.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2750.2,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2859.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2753.8,
+			"text": "10:57:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2889.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2758.3,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2919.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2759.1,
+			"text": "10:57:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2949.2,
-			"text": "00:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2760.7,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 2979.2,
-			"text": "00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2762.9,
+			"text": "10:57:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3009.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2765.2,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3039.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2767.3,
+			"text": "10:57:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3069.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 2770.4,
+			"text": "10:57:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3099.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 2773,
+			"text": "10:57:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3129.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3084.4,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3159.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3084.4,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3189.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3085,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3219.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3086.2,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3249.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3088.6,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3279.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3090.6,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3309.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3092.4,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3339.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3096.2,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3369.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3096.2,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3399.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3096.2,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3429.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3097.5,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3459.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3428.9,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3489.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3430.5,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3519.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3433.5,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3549.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3436.1,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3579.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3438.2,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3609.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3440,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3639.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3442.7,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3669.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3445.7,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3699.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3450.5,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3729.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3452.6,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3759.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3458.1,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3789.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3763.5,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3819.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3765.1,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3849.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3767.1,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3879.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3769.1,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3909.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3772.3,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3939.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3776.1,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3969.2,
-			"text": "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3780.2,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 3999.2,
-			"text": "00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3780.2,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4029.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3780.2,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4059.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3780.3,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4089.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 3782,
+			"text": "10:57:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4119.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 3783.6,
+			"text": "10:57:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4149.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4103.1,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4179.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4104.7,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4209.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4106.7,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4239.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4107.8,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4269.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4109.4,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4299.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4111.2,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4329.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4111.5,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4359.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4113.3,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4389.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4113.9,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4419.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4115.2,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4449.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4116.7,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4479.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4445.9,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4509.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4446.5,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4539.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4449.6,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4569.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4450.2,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4599.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4452.2,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4629.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4456.9,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4659.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4457.7,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4689.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4459.2,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4719.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4461.1,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4749.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4463,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4779.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4464,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4809.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4465.7,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4839.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4791.2,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4869.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4791.2,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4899.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4794.9,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4929.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4794.9,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4959.2,
-			"text": "00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4796.5,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 4989.2,
-			"text": "00:00:04 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4801.2,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 5019.2,
-			"text": "00:00:05 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4805,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 5049.2,
-			"text": "00:00:05 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 4808.8,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 5079.2,
-			"text": "00:00:05 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4808.8,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7119.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 4809.8,
+			"text": "10:57:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7149.2,
-			"text": "00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 4813.2,
+			"text": "10:57:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7179.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5123.1,
+			"text": "10:57:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7239.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5124.6,
+			"text": "10:57:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7299.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5127,
+			"text": "10:57:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7359.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5129,
+			"text": "10:57:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7389.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 5132.5,
+			"text": "10:57:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7419.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5132.5,
+			"text": "10:57:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7479.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5132.7,
+			"text": "10:57:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7509.2,
-			"text": "00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 5134.4,
+			"text": "10:57:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7539.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5136.4,
+			"text": "10:57:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7599.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5138.2,
+			"text": "10:57:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7659.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5139.4,
+			"text": "10:57:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7719.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5485.2,
+			"text": "10:57:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7749.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 5490.4,
+			"text": "10:57:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7779.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5491.4,
+			"text": "10:57:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7839.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5491.4,
+			"text": "10:57:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7869.2,
-			"text": "00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 5492.8,
+			"text": "10:57:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7899.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5495,
+			"text": "10:57:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 7959.2,
-			"text": "00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 5831.6,
+			"text": "Sync: no sync"
 		},
 		{
-			"atMs": 8019.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7526,
+			"text": "10:57:14 Sync: +DMR  [slot1]  slot2  | CACH/Burst FEC ERR"
 		},
 		{
-			"atMs": 8079.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7528.4,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8109.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 7530.2,
+			"text": "10:57:14 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1*"
 		},
 		{
-			"atMs": 8139.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7531.8,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8199.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7534,
+			"text": "10:57:14 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 8229.2,
-			"text": "00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 7535.1,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8259.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7537.1,
+			"text": "10:57:14 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 8319.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7538.4,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8379.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7864.8,
+			"text": "10:57:14 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 8439.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7864.8,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8469.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 7869,
+			"text": "10:57:14 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 8499.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7871.1,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8559.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7872.9,
+			"text": "10:57:14 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 8589.2,
-			"text": "00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 7874,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 8619.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7875.6,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8679.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7876.9,
+			"text": "10:57:14 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 8739.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7879.6,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8799.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7880.1,
+			"text": "10:57:14 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 8829.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 7881.4,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8859.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 7885.9,
+			"text": "10:57:14 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 8919.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8205.4,
+			"text": "10:57:14 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 8949.2,
-			"text": "00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 8207.5,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 8979.2,
-			"text": "00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8208.8,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9039.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8212.1,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 9099.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8214.3,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9159.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8216.2,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 9189.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 8216.8,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 9219.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8218.4,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9279.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8221.9,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 9309.2,
-			"text": "00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 8224.5,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9339.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8227.4,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 9399.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8228.7,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9459.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8232.4,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 9519.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8545.7,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9549.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 8549.9,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 9579.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8551.2,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9639.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8556.1,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 9669.2,
-			"text": "00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 8557.9,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9699.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8559,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 9759.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8560.5,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 9819.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8562,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9879.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8564.8,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 9909.2,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 8566.8,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 9939.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8570,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 9999.2,
-			"text": "00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8571.5,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10029.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC* "
+			"atMs": 8884.4,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 10059.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8886,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10089.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 8888.8,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 10119.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8890,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10149.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 8893.8,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 10179.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8895.2,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10209.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 8897,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 10239.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8898.1,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 10269.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 8900.2,
+			"text": "10:57:15 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10299.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8904.1,
+			"text": "10:57:15 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 10329.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 8906.7,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10359.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 8910,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 10389.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9223.3,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10419.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9227.4,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 10449.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9229.4,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10479.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9230.9,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 10509.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9232.4,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10539.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9234.4,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 10569.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9235.6,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10599.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9237.1,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 10629.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9238.2,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 10659.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9239.2,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10689.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9242.6,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 10719.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9243.9,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10749.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9246.7,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 10779.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9563.1,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10809.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9566.9,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 10839.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9568,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10869.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9573.1,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 10899.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9574.4,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10929.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9577.9,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 10959.2,
-			"text": "00:00:10 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9580.4,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 10989.2,
-			"text": "00:00:10 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9583,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 11019.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9585.2,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 11049.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9586.5,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11079.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9589.8,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 11109.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9591.9,
+			"text": "10:57:16 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11139.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9905.5,
+			"text": "10:57:16 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 11169.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9906.8,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11199.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9909.4,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 11229.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9910.6,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11259.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9912.9,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 11289.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9914,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11319.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9916.5,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 11349.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9917.7,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11379.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9919.5,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 11409.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9921.7,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 11439.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9922.7,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11469.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 9925.4,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 11499.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 9926.4,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11529.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10244.9,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 "
 		},
 		{
-			"atMs": 11559.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10246.2,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11589.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10251.2,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 "
 		},
 		{
-			"atMs": 11619.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10256.6,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11649.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10257.7,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 "
 		},
 		{
-			"atMs": 11679.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10257.7,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11709.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10259.8,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 "
 		},
 		{
-			"atMs": 11739.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10261.1,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11769.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10262.4,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 "
 		},
 		{
-			"atMs": 11799.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10264.1,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
 		},
 		{
-			"atMs": 11829.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10265.4,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11859.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10267.8,
+			"text": "10:57:17 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1 "
 		},
 		{
-			"atMs": 11889.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10604.9,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11919.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10607.2,
+			"text": "10:57:17 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11949.2,
-			"text": "00:00:11 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10608.4,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 11979.2,
-			"text": "00:00:11 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10610.4,
+			"text": "10:57:17 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12009.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10611,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12039.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10613,
+			"text": "10:57:17 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12069.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10613.9,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12099.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10615.5,
+			"text": "10:57:17 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12129.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10617.3,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12159.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10619,
+			"text": "10:57:17 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12189.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10619.8,
+			"text": "10:57:17 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12219.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10942.9,
+			"text": "10:57:17 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12249.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10944.7,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12279.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10946.4,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12309.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10948.2,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12339.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10949.6,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12369.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10951.2,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12399.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10952.7,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12429.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10954.5,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12459.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10955.8,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12489.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10957.7,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12519.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 10958.7,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12549.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 10960.1,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12579.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 11284.3,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12609.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 11286.6,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12639.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 11288.4,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12669.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 11289.9,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12699.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 11291.1,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12729.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 11292.5,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12759.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 11293.9,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12789.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 11295.6,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12819.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 11297.1,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12849.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 11298.8,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12879.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 11302.2,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12909.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 11624.4,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12939.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 11625.1,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12969.2,
-			"text": "00:00:12 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 11626.5,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 12999.2,
-			"text": "00:00:12 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 11627.6,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 13029.2,
-			"text": "00:00:13 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+			"atMs": 11631,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
 		},
 		{
-			"atMs": 13059.2,
-			"text": "00:00:13 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+			"atMs": 11634,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11634.7,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11636,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11639,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11639.3,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11640.4,
+			"text": "10:57:18 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11963.2,
+			"text": "10:57:18 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11964.7,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11966.4,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11968.3,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11973.6,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11973.6,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11975,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11976.3,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11977.4,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11978.9,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11980,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 11981.3,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12306.1,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12307.3,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12308.7,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12310.3,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12311.9,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12313.5,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12314.9,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12316.3,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12318.9,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12320.2,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12323.2,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12643.7,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12645.5,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12647.4,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12648.9,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12650.4,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12651.8,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12653.6,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12654.8,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12656.2,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12657.4,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12658.4,
+			"text": "10:57:19 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12659.8,
+			"text": "10:57:19 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12983.7,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12984.8,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12987,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12988.7,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12990.3,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12991.6,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12992.9,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12994,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12995.6,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12996.7,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 12998.2,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13326.4,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13327.7,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13329,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13330.1,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13331.1,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13332.4,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13333.4,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13334.9,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13337.3,
+			"text": "10:57:20 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13341.4,
+			"text": "10:57:20 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE "
+		},
+		{
+			"atMs": 13675.1,
+			"text": "Sync: no sync"
+		},
+		{
+			"atMs": 16748.7,
+			"text": "10:57:23 Sync: -X2-TDMA  NAC: 000;   [slot1]  RATE 1/2 DATA"
+		},
+		{
+			"atMs": 17087.4,
+			"text": "Sync: no sync"
+		},
+		{
+			"atMs": 18236.3,
+			"text": "End of /dev/stdin"
+		},
+		{
+			"atMs": 18237.1,
+			"text": "Total audio errors: 576"
+		},
+		{
+			"atMs": 18237.2,
+			"text": "Total header errors: 0"
+		},
+		{
+			"atMs": 18237.2,
+			"text": "Total irrecoverable header errors: 0"
+		},
+		{
+			"atMs": 18237.2,
+			"text": "Exiting."
 		}
 	]
 }
