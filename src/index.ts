@@ -57,7 +57,7 @@ import { createRatePolicy } from "./core/rate-policy.js"
 import { composeLinkBurst } from "./core/link-burst/compose.js"
 import { createLinkQuality } from "./core/link-burst/link-quality.js"
 import { frameBytesFor } from "./core/link-burst/contract.js"
-import { createLinkAdvisor } from "./core/link-advisory.js"
+import { createLinkAdvisor, linkAdvisorEvidence } from "./core/link-advisory.js"
 import type { DropReader } from "./decoders/enablement/efficiency-gate.js"
 import type {
 	EfficiencyGate,
@@ -2476,6 +2476,11 @@ async function main(): Promise<void> {
 			monoNow: monitor.monoNow,
 			linkDropsSince: monitor.linkDropsSince,
 			burst: id => linkQuality.burst(id),
+			...linkAdvisorEvidence({
+				coreLoad: composed.coreLoad,
+				recorderOf: id => sourceRouting.linkBurst(id)?.recorder,
+				monoNow: composed.factories.monoNow,
+			}),
 		})
 		advisorRef.current = linkAdvisor
 		const ratePolicy = createRatePolicy({

@@ -208,6 +208,19 @@ export interface ResourceSnapshot {
 	linkAdvisories?: ResourceLinkAdvisory[]
 }
 
+/**
+ * THE core main-thread load signal, over a window: the one reading of how busy the core's event
+ * loop was. Loss attribution (`LinkAdvisory.lossReason: "core-busy"`) reads it, and any core load
+ * governor must read the same signal rather than measure load a second way. Null fields mean the
+ * evidence is unavailable for the window.
+ */
+export interface CoreLoadReading {
+	/** Event-loop utilisation (0..1) over the window. */
+	elu: number | null
+	/** Worst event-loop delay (ms) over the window, including the in-progress interval. */
+	loopDelayMaxMs: number | null
+}
+
 /** One network source's link advisory state, as of the snapshot's broadcast tick. */
 export interface ResourceLinkAdvisory {
 	sourceId: string

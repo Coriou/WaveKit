@@ -5,7 +5,14 @@ import {
 	LINK_DROPPING_HOLD_MS,
 	LINK_GAP_MS,
 } from "./link-burst/contract.js"
+import type { IngestRecorder } from "./link-burst/contract.js"
 import type { LinkAdvisor } from "./rate-policy-contract.js"
+import {
+	CORE_BUSY_ELU,
+	CORE_BUSY_LOOP_DELAY_MS,
+	SOURCE_ELU_MAX,
+} from "./core-load.js"
+import type { CoreLoadReading, CoreLoadSignal } from "./core-load.js"
 import {
 	LINK_SHORTFALL_PERCENT,
 	LINK_SUSTAINED_WINDOW_MS,
@@ -28,31 +35,9 @@ export type DroppingCause = Extract<
 	"source" | "core-busy" | "unknown"
 >
 
-/**
- * Event-loop utilisation at or above this over the advisory window means the core itself is
- * saturated: at 90 % busy the loop is idle about 1 s in 10, so socket reads queue behind
- * other work and a shortfall is the core's, whatever the link does.
- */
-export const CORE_BUSY_ELU = 0.9
-/**
- * Below this utilisation (with loop delay under `HOST_LOOP_DELAY_MS`) the core had headroom
- * to read every byte offered: 30 % idle is roughly 3 s free per 10 s window, so a shortfall
- * is the receiver link's. Between this and `CORE_BUSY_ELU` the evidence is ambiguous.
- *
- * The loop-delay thresholds come from the link-burst contract: a `LINK_GAP_MS` (200 ms)
- * stall at 2.4 MS/s U8 IQ is 2.4e6 * 2 B * 0.2 s = 960 kB, more than typical kernel socket
- * receive buffers hold, so a stall that long can lose bytes before the core reads them; a
- * stall under `HOST_LOOP_DELAY_MS` (50 ms, 240 kB at that rate) fits the buffers and cannot.
- */
-export const SOURCE_ELU_MAX = 0.7
-
-/** Core-load evidence over a window, as the advisor reads it (null: unavailable). */
-export interface CoreLoadEvidence {
-	/** Event-loop utilisation (0..1) over the window. */
-	elu: number | null
-	/** Worst event-loop delay (ms) over the window, including the in-progress interval. */
-	loopDelayMaxMs: number | null
-}
+export { CORE_BUSY_ELU, SOURCE_ELU_MAX }
+/** Core-load evidence over a window, as the advisor reads it: THE core load signal's reading. */
+export type CoreLoadEvidence = CoreLoadReading
 
 /**
  * The cause ladder for a `dropping` advisory, evaluated in order; any missing, negative or
@@ -60,7 +45,7 @@ export interface CoreLoadEvidence {
  * 1. utilisation >= `CORE_BUSY_ELU`: `core-busy` (needs only utilisation);
  * 2. arrival gap beyond the loop delay by >= `LINK_GAP_MS` (the gap the loop cannot
  *    explain, as the drop attribution reads it): `source`;
- * 3. loop delay >= `LINK_GAP_MS`: `core-busy`;
+ * 3. loop delay >= `CORE_BUSY_LOOP_DELAY_MS` (`LINK_GAP_MS`): `core-busy`;
  * 4. loop delay < `HOST_LOOP_DELAY_MS` and utilisation < `SOURCE_ELU_MAX`: `source`;
  * 5. otherwise `unknown`.
  */
@@ -74,7 +59,7 @@ export function droppingCause(evidence: {
 	if (valid(elu) && elu <= 1 && elu >= CORE_BUSY_ELU) return "core-busy"
 	if (!valid(elu) || elu > 1 || !valid(loop) || !valid(gap)) return "unknown"
 	if (gap - loop >= LINK_GAP_MS) return "source"
-	if (loop >= LINK_GAP_MS) return "core-busy"
+	if (loop >= CORE_BUSY_LOOP_DELAY_MS) return "core-busy"
 	if (loop < HOST_LOOP_DELAY_MS && elu < SOURCE_ELU_MAX) return "source"
 	return "unknown"
 }
@@ -93,13 +78,38 @@ function valid(value: number | null | undefined): value is number {
 const exceedsShortfall = (received: number, payload: number): boolean =>
 	received < payload * (1 - LINK_SHORTFALL_PERCENT / 100) - payload * 1e-9
 
+/**
+ * The advisor's cause evidence as production wires it: core load from THE core load signal, and
+ * the source's longest arrival gap from its ingest recorder, both on the link-burst clock
+ * `monoNow` that stamps the recorder's chunks and the loop meter's intervals.
+ */
+export function linkAdvisorEvidence(deps: {
+	coreLoad: CoreLoadSignal
+	recorderOf: (
+		sourceId: string,
+	) => Pick<IngestRecorder, "interval"> | null | undefined
+	monoNow: () => number
+}): {
+	coreLoad: (sinceMono: number) => CoreLoadReading
+	arrivalGapMaxMs: (sourceId: string, sinceMono: number) => number | null
+} {
+	return {
+		coreLoad: since => deps.coreLoad.read(since),
+		arrivalGapMaxMs: (id, since) =>
+			deps.recorderOf(id)?.interval(since, deps.monoNow())?.maxGapMs ?? null,
+	}
+}
+
 export function createLinkAdvisor(deps: {
 	now: () => number
 	monoNow?: () => number
 	linkDropsSince?: (sourceId: string, sinceMono: number) => boolean
 	burst?: (sourceId: string) => LinkBurstSummary | null
-	/** Core load over the window starting at `sinceMono`; absent: causes read `unknown`. */
-	coreLoad?: (sinceMono: number) => CoreLoadEvidence
+	/**
+	 * THE core load signal's read over the window starting at `sinceMono` (`CoreLoadSignal.read`);
+	 * absent: causes read `unknown`.
+	 */
+	coreLoad?: (sinceMono: number) => CoreLoadReading
 	/** Longest arrival gap (ms) of the source since `sinceMono`; absent: causes read `unknown`. */
 	arrivalGapMaxMs?: (sourceId: string, sinceMono: number) => number | null
 }): LinkAdvisor & Required<Pick<LinkAdvisor, "shortfall">> {

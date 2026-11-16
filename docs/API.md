@@ -1068,7 +1068,9 @@ Link-burst additions are optional and additive; older cores omit them:
 - `LinkAdvisory.lossReason`: why samples were lost; absent when nothing was lost.
   `level: "dropping"` (fewer bytes read than the rate needs: a received-rate
   shortfall or receiver-side drops) always carries one of three causes, decided over
-  the last 10 s in this order:
+  the last 10 s in this order. The core's load comes from one signal, the core
+  main-thread load reading (`CoreLoadReading`: event-loop utilisation and worst
+  event-loop delay over the window); any load governor reads the same signal:
   1. `core-busy` when the core's event-loop utilisation was at least 0.90;
   2. `source` when an arrival gap exceeded the worst event-loop delay by at least
      200 ms (a gap the core's own stalls cannot explain);
