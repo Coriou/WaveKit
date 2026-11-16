@@ -2,7 +2,7 @@
 // and the Audio options panel (squelch, Voice only, Source, volume, sound). <AudioOutput/> holds the page's
 // one <audio> element. Squelch, Voice only and Source are core settings shared by every client: a change
 // is a config PATCH and never reattaches the stream, which is always the core's `/auto`.
-import { useEffect, useRef, useState, type CSSProperties } from "react"
+import { useEffect, useState, type CSSProperties } from "react"
 import type { LiveAudioStatus } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
@@ -59,7 +59,7 @@ import {
 	liveTone,
 	LOW_CUT_HZ,
 	lowCutSub,
-	migrateHearKey,
+	dropHearKey,
 	noiseReductionSub,
 	offeredTone,
 	routeProtocol,
@@ -102,7 +102,6 @@ function useRouteNow() {
 export function AudioOutput() {
 	const { data, listen } = useServices()
 	const status = useLiveStatus()
-	const readOnly = useReadOnly()
 	const base =
 		typeof location === "undefined" ? "http://localhost/" : location.href
 	const access = useStore(data.access, s => s.access)
@@ -128,19 +127,8 @@ export function AudioOutput() {
 			)
 		})
 	}, [data, wanted, needsVoice, voiceRunning])
-	// the per-browser "What you hear" of earlier versions: read once, kept as the core's Source if sensible
-	const migrated = useRef(false)
-	const config = status?.config
-	useEffect(() => {
-		if (migrated.current || !config) return
-		migrated.current = true
-		const patch = migrateHearKey(
-			globalThis.localStorage,
-			config,
-			!readOnly && listenContract(config),
-		)
-		if (patch) void data.liveAudio.setConfig(patch).catch(() => undefined)
-	}, [data, config, readOnly])
+	// the per-browser "What you hear" of earlier versions: dropped, never sent (Source is shared)
+	useEffect(() => dropHearKey(globalThis.localStorage), [])
 	const key = audioAttachKey(source)
 	// the source object is rebuilt every render; the key says when it really changed
 	useEffect(() => listen.setSource(key, source), [listen, key])
@@ -226,6 +214,7 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 		gate,
 		toneWaiting,
 		now,
+		source: listenModeOf(status?.config),
 	})
 	// Play anyway turns Voice only off: only where the switch exists and this browser may write
 	const canPlayAnyway =

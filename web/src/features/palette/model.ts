@@ -293,6 +293,8 @@ export type PaletteAction =
 	| { readonly kind: "listen"; readonly on: boolean }
 	/** `Q`: the squelch Open, or back to the one before it (listen/squelch-actions.ts). */
 	| { readonly kind: "squelchOpen" }
+	/** Squelch › Open, typed `sq open` / `sq off`: Open, remembered for `Q`, starting Listen here. */
+	| { readonly kind: "squelchSetOpen" }
 	| IdentifyAction
 	| SaveAction
 	| { readonly kind: "view"; readonly id: ViewId }
@@ -843,7 +845,10 @@ export class PaletteModel {
 			cur,
 			...(this.#canAudio()
 				? {
-						action: { kind: "audio", patch } as const,
+						action:
+							v === "open"
+								? ({ kind: "squelchSetOpen" } as const)
+								: ({ kind: "audio", patch } as const),
 						effects: [{ label: "Squelch", from: squelchLabel(cfg), to }],
 						done: `Squelch ${to}`,
 					}

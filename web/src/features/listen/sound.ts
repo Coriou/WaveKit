@@ -311,8 +311,8 @@ export type ListenHeadline =
 /**
  * The head's title while playing. `Open` for an open squelch (it stays on across retunes), `Waiting for
  * voice` while a carrier is up and the voice check holds it, `Listening` while audio passes (a decoded call
- * says `DMR voice · TG …` under it), else `Quiet`: nothing on the channel, a tone gate waiting, or Digital
- * with no decoder.
+ * says `DMR voice · TG …` under it), else `Quiet`: nothing on the channel, a tone gate waiting, or Source
+ * Digital between calls or with no decoder (a carrier plays nothing then).
  */
 export function listenHeadline(input: {
 	squelch: "auto" | "manual" | "open"
@@ -320,11 +320,16 @@ export function listenHeadline(input: {
 	gate: LiveAudioAutoSquelch | null
 	toneWaiting: boolean
 	now: LiveAudioAutoRouteLevel | null
+	/** The core's Source; Digital plays nothing but a decoded call. */
+	source?: ListenSource
 }): ListenHeadline {
 	if (input.squelch === "open") return { kind: "open", title: "Open" }
 	if (input.now?.active === "digital")
 		return { kind: "listening", title: "Listening" }
 	if (input.now?.reason === "no-decoder")
+		return { kind: "quiet", title: "Quiet" }
+	// Digital with no call: `/auto` plays silence whatever the carrier does
+	if (input.source === "digital" && input.now?.active !== "analog")
 		return { kind: "quiet", title: "Quiet" }
 	if (input.toneWaiting) return { kind: "quiet", title: "Quiet" }
 	if (input.carrier && input.gate?.state === "waiting")
@@ -339,24 +344,17 @@ export function listenHeadline(input: {
 export const LEGACY_HEAR_KEY = "wavekit.web.listen.hear"
 
 /**
- * The old per-browser choice, read once and deleted: `analog` or `digital` becomes the core's Source when
- * the core speaks the Listen contract, nobody has chosen one yet (`auto`) and this browser may write;
- * anything else (auto, a value it does not know, an old core, read-only) is dropped. Returns the PATCH
- * to send, or null. A blocked storage reads as nothing to migrate.
+ * Drops the old per-browser choice: the key is read and removed, never sent. Source is shared by every
+ * client now, so one stale browser must not change what everyone hears; the old "Decoded voice" also fell
+ * back to analog, which Digital does not. A blocked storage is left alone.
  */
-export function migrateHearKey(
+export function dropHearKey(
 	storage: Pick<Storage, "getItem" | "removeItem"> | undefined,
-	config: LiveAudioConfig | null | undefined,
-	canWrite: boolean,
-): LiveAudioConfigPatch | null {
-	let raw: string | null = null
+): void {
 	try {
-		raw = storage?.getItem(LEGACY_HEAR_KEY) ?? null
-		if (raw !== null) storage?.removeItem(LEGACY_HEAR_KEY)
+		if (storage?.getItem(LEGACY_HEAR_KEY) !== null)
+			storage?.removeItem(LEGACY_HEAR_KEY)
 	} catch {
-		return null
+		// blocked storage: nothing to drop
 	}
-	if (raw !== "analog" && raw !== "digital") return null
-	if (!canWrite || !config || config.listenMode !== "auto") return null
-	return { listenMode: raw }
 }

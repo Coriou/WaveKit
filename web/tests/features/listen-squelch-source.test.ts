@@ -101,13 +101,29 @@ function fakeStore(initial: LiveAudioConfig) {
 
 function fakeListen(wanted = false) {
 	const start = vi.fn(() => Promise.resolve())
+	const unlock = vi.fn()
+	const suspend = vi.fn()
 	return {
 		listen: {
 			get: () => ({ wanted }),
 			start,
+			unlock,
+			suspend,
 		} as unknown as ListenController,
 		start,
+		unlock,
+		suspend,
 	}
+}
+
+/** A store that refuses every PATCH (a read-only or failing core). */
+function refusingStore(config: LiveAudioConfig) {
+	const setConfig = vi.fn(() => Promise.reject(new Error("403")))
+	const store = {
+		get: () => ({ status: status(config), level: null, error: null }),
+		setConfig,
+	} as unknown as LiveAudioStore
+	return { store, setConfig }
 }
 
 afterEach(() => {
@@ -188,6 +204,47 @@ describe("Q: Open and back", () => {
 		expect(start).toHaveBeenCalledTimes(1)
 		expect(rememberedClosed()).toEqual({ kind: "manual", dbfs: -80 })
 	})
+
+	it("Open and Q start Listen only once the core took the PATCH; a refusal starts nothing", async () => {
+		const { store } = fakeStore(LISTEN_CONFIG)
+		const { listen, start, unlock } = fakeListen(false)
+		const pending = openSquelch(store, listen)
+		// audio is unlocked inside the gesture, Listen waits for the answer
+		expect(unlock).toHaveBeenCalledTimes(1)
+		expect(start).not.toHaveBeenCalled()
+		expect(await pending).toBe(true)
+		expect(start).toHaveBeenCalledTimes(1)
+		for (const action of [openSquelch, toggleOpen]) {
+			const refused = refusingStore(LISTEN_CONFIG)
+			const f = fakeListen(false)
+			expect(await action(refused.store, f.listen)).toBe(false)
+			expect(f.start).not.toHaveBeenCalled()
+			expect(f.suspend).toHaveBeenCalledTimes(1)
+		}
+	})
+
+	it("a tone-only squelch (manual at 0 with a tone) comes back exactly after Q twice", async () => {
+		const tone = { kind: "ctcss", frequencyTenthsHz: 885 } as const
+		const { store, patches, config } = fakeStore({
+			...LISTEN_CONFIG,
+			squelchMode: "manual",
+			squelch: 0,
+			toneSquelch: tone,
+		})
+		const { listen } = fakeListen(true)
+		await toggleOpen(store, listen)
+		expect(rememberedClosed()).toEqual({ kind: "manual", dbfs: 0 })
+		await toggleOpen(store, listen)
+		expect(patches).toEqual([
+			{ squelchMode: "open" },
+			{ squelchMode: "manual", squelch: 0 },
+		])
+		expect(config()).toMatchObject({
+			squelchMode: "manual",
+			squelch: 0,
+			toneSquelch: tone,
+		})
+	})
 })
 
 describe("Play anyway", () => {
@@ -202,6 +259,24 @@ describe("Play anyway", () => {
 			{ squelchMode: "auto", voiceOnly: false },
 			{ squelchMode: "auto", voiceOnly: true },
 		])
+	})
+
+	it("Undo does nothing once the squelch changed again (Manual, Open, or Voice only back on)", async () => {
+		for (const later of [
+			{ squelchMode: "manual", squelch: -70 },
+			{ squelchMode: "open" },
+			{ squelchMode: "auto", voiceOnly: true },
+		] as const) {
+			const { store, patches } = fakeStore(LISTEN_CONFIG)
+			expect(await playAnyway(store)).toBe(true)
+			await store.setConfig(later)
+			appToast.get()?.undo?.()
+			await Promise.resolve()
+			expect(patches).toEqual([
+				{ squelchMode: "auto", voiceOnly: false },
+				later,
+			])
+		}
 	})
 
 	it("a refused PATCH shows no toast and never rejects", async () => {
@@ -256,7 +331,10 @@ describe("palette: squelch and Source", () => {
 		}
 		expect(patch("Auto")).toEqual({ squelchMode: "auto", voiceOnly: true })
 		expect(patch("Manual")).toEqual({ squelchMode: "manual", squelch: -60 })
-		expect(patch("Open")).toEqual({ squelchMode: "open" })
+		// Open goes through openSquelch (remembered for Q, starts Listen), not a plain patch
+		expect(items.find(i => i.title === "Open")?.action).toEqual({
+			kind: "squelchSetOpen",
+		})
 		expect(patch("Every carrier")).toEqual({
 			squelchMode: "auto",
 			voiceOnly: false,
@@ -268,10 +346,8 @@ describe("palette: squelch and Source", () => {
 		// an old core: no Voice only rows, Open is manual at 0
 		const old = flatten(new PaletteModel(ctx(OLD_CONFIG)).build("sq", ""))
 		expect(old.map(i => i.title)).not.toContain("Voice only")
-		const openOld = old.find(i => i.title === "Open")?.action
-		expect(openOld).toEqual({
-			kind: "audio",
-			patch: { squelchMode: "manual", squelch: 0 },
+		expect(old.find(i => i.title === "Open")?.action).toEqual({
+			kind: "squelchSetOpen",
 		})
 	})
 
@@ -282,10 +358,58 @@ describe("palette: squelch and Source", () => {
 			new PaletteModel(ctx(LISTEN_CONFIG)).build(null, "sq off"),
 		)[0]
 		expect(off?.title).toBe("Squelch › Open")
-		expect(off?.action).toEqual({
-			kind: "audio",
-			patch: { squelchMode: "open" },
-		})
+		expect(off?.action).toEqual({ kind: "squelchSetOpen" })
+	})
+
+	it("Squelch › Open and typed `sq off` start Listen, remember the squelch, and Undo goes back", async () => {
+		for (const [config, sent] of [
+			[
+				{ ...LISTEN_CONFIG, voiceOnly: false },
+				[{ squelchMode: "open" }, { squelchMode: "auto", voiceOnly: false }],
+			],
+			[
+				OLD_CONFIG,
+				[{ squelchMode: "manual", squelch: 0 }, { squelchMode: "auto" }],
+			],
+		] as const) {
+			resetOpenMemory()
+			const typed = flatten(
+				new PaletteModel(ctx(config)).build(null, "sq off"),
+			)[0]
+			expect(typed?.action).toEqual({ kind: "squelchSetOpen" })
+			const { store, patches } = fakeStore(config)
+			const { listen, start } = fakeListen(false)
+			const s = { data: { liveAudio: store }, listen } as unknown as Parameters<
+				typeof runAction
+			>[0]
+			const result = await runAction(
+				s,
+				{ kind: "squelchSetOpen" },
+				"Squelch Open",
+			)
+			expect(result.text).toBe("Squelch Open")
+			expect(start).toHaveBeenCalledTimes(1)
+			expect(rememberedClosed()).not.toBeNull()
+			result.undo?.()
+			await Promise.resolve()
+			await Promise.resolve()
+			expect(patches).toEqual(sent)
+		}
+	})
+
+	it("Squelch › Open refused by the core warns and starts nothing", async () => {
+		const { store } = refusingStore(LISTEN_CONFIG)
+		const { listen, start } = fakeListen(false)
+		const s = { data: { liveAudio: store }, listen } as unknown as Parameters<
+			typeof runAction
+		>[0]
+		const result = await runAction(
+			s,
+			{ kind: "squelchSetOpen" },
+			"Squelch Open",
+		)
+		expect(result.tone).toBe("warn")
+		expect(start).not.toHaveBeenCalled()
 	})
 
 	it("the root has Open the squelch on Q, and Source on a Listen core only", () => {

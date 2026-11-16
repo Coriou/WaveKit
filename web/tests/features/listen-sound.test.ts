@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import fc from "fast-check"
 import type {
 	ActivitySummary,
@@ -32,10 +32,10 @@ import {
 	toneSquelchFits,
 	toneSquelchPatch,
 	toneText,
+	dropHearKey,
 	LEGACY_HEAR_KEY,
 	listenHeadline,
 	listenModeOf,
-	migrateHearKey,
 	sourceHint,
 	voiceRoute,
 } from "../../src/features/listen/sound.ts"
@@ -446,6 +446,43 @@ describe("Listen › head states", () => {
 		).toBe("Quiet")
 	})
 
+	it("Source Digital with no call is Quiet even with a carrier up, not Listening", () => {
+		for (const now of [{ active: "none" as const }, null]) {
+			expect(
+				listenHeadline({ ...base, carrier: true, now, source: "digital" })
+					.title,
+			).toBe("Quiet")
+		}
+		expect(
+			listenHeadline({
+				...base,
+				carrier: true,
+				now: { active: "digital", protocol: "dmr" },
+				source: "digital",
+			}).title,
+		).toBe("Listening")
+		// Open still plays the analog audio under Digital
+		expect(
+			listenHeadline({
+				...base,
+				squelch: "open",
+				carrier: true,
+				now: { active: "analog", reason: "squelch-open" },
+				source: "digital",
+			}).title,
+		).toBe("Open")
+		// Auto and Analog play the carrier
+		for (const source of ["auto", "analog"] as const)
+			expect(
+				listenHeadline({
+					...base,
+					carrier: true,
+					now: { active: "analog" },
+					source,
+				}).title,
+			).toBe("Listening")
+	})
+
 	it("an old core (no voice check reported) keeps today's states", () => {
 		expect(listenHeadline({ ...base, carrier: true }).title).toBe("Listening")
 		expect(listenHeadline(base).title).toBe("Quiet")
@@ -459,46 +496,30 @@ describe("Listen › the old per-browser What you hear", () => {
 		return {
 			items,
 			getItem: (k: string) => items.get(k) ?? null,
-			removeItem: (k: string) => void items.delete(k),
+			removeItem: vi.fn((k: string) => void items.delete(k)),
 		}
 	}
-	const listen = config({ voiceOnly: true, listenMode: "auto" })
 
-	it("keeps Analog or Digital as the core's Source once, and deletes the key", () => {
-		for (const v of ["analog", "digital"] as const) {
+	it("drops the key whatever it held, and returns nothing to send (Source is shared)", () => {
+		for (const v of ["analog", "digital", "auto", "decoded"]) {
 			const s = store(v)
-			expect(migrateHearKey(s, listen, true)).toEqual({ listenMode: v })
-			expect(s.items.has(LEGACY_HEAR_KEY)).toBe(false)
-			// read once: nothing left to migrate
-			expect(migrateHearKey(s, listen, true)).toBeNull()
-		}
-	})
-
-	it("drops it without a write when not sensible: auto, junk, a chosen Source, read-only, an old core", () => {
-		const cases: [string, LiveAudioConfig | null, boolean][] = [
-			["auto", listen, true],
-			["decoded", listen, true],
-			["analog", config({ voiceOnly: true, listenMode: "digital" }), true],
-			["analog", listen, false],
-			["analog", config(), true],
-			["analog", null, true],
-		]
-		for (const [value, cfg, canWrite] of cases) {
-			const s = store(value)
-			expect(migrateHearKey(s, cfg, canWrite)).toBeNull()
+			expect(dropHearKey(s)).toBeUndefined()
 			expect(s.items.has(LEGACY_HEAR_KEY)).toBe(false)
 		}
+		const empty = store(null)
+		dropHearKey(empty)
+		expect(empty.removeItem).not.toHaveBeenCalled()
 	})
 
-	it("blocked storage reads as nothing to migrate", () => {
+	it("blocked or missing storage is left alone, never throws", () => {
 		const blocked = {
 			getItem: () => {
 				throw new Error("SecurityError")
 			},
 			removeItem: () => undefined,
 		}
-		expect(migrateHearKey(blocked, listen, true)).toBeNull()
-		expect(migrateHearKey(undefined, listen, true)).toBeNull()
+		expect(() => dropHearKey(blocked)).not.toThrow()
+		expect(() => dropHearKey(undefined)).not.toThrow()
 	})
 })
 

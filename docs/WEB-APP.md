@@ -240,9 +240,10 @@ and tone squelch, and decoded digital voice. **Record** saves a WAV file from th
 The bar's title says what you hear, in one line:
 
 - **Quiet**: nothing passes the squelch (or a tone squelch waits for its tone, or Source is Digital
-  and no decoder covers the channel).
+  and no decoded call is playing, between calls or with no decoder on the channel).
 - **Waiting for voice**, with **Play anyway**: a carrier is up and Voice only holds it until someone
-  talks. **Play anyway** turns Voice only off so every carrier plays; the toast has **Undo**.
+  talks. **Play anyway** turns Voice only off so every carrier plays; the toast has **Undo**, which
+  turns Voice only back on unless the squelch was changed again since.
 - **Listening**: audio is playing. A decoded call says so under it, for example `DMR voice · TG …`.
 - **Open**: the squelch is open, and it stays open across retunes until you change it.
 
@@ -255,8 +256,12 @@ The bar's title says what you hear, in one line:
 - **Manual** is the line on the level bar: everything above it plays. Dragging the line selects Manual
   at once; the spectrum shows the same dashed line, in Manual only.
 - **Open** plays everything, noise, pagers and data included. Transmissions are still detected and
-  logged in Activity at the Auto threshold. `Q` opens the squelch and goes back to the squelch before it;
-  from the defaults, `Q` alone (it also starts Listen), or **Audio options** then **Open**, plays the noise.
+  logged in Activity at the Auto threshold. `Q` opens the squelch and goes back to the squelch before it
+  (a tone-only squelch comes back exactly as it was); from the defaults, `Q` alone, or **Audio options**
+  then **Open**, plays the noise. Opening from `Q`, the panel's **Open**, the palette's **Squelch ›
+  Open** or a typed `sq open` / `sq off` also starts Listen in this browser once the core has taken the
+  change. **Settings › Audio › Squelch › Open** only changes the setting, without starting Listen; `Q`
+  still goes back from it to the squelch before.
 
 **Source**, **Auto | Analog | Digital**, says what Listen plays. **Auto** plays the analog audio or a
 clear decoded call, decided per transmission; **Analog** only the demodulated audio; **Digital** only
@@ -265,8 +270,9 @@ and the panel says so, with **Use Auto**. Open always plays the analog audio.
 
 The squelch, Voice only and Source are settings of the core: every browser and client listening sees
 the same ones, and a change applies at once without restarting the audio stream. Volume stays in this
-browser. A core older than these settings offers Auto, Manual and Open only (Open is sent as a manual
-squelch of 0) and picks the source itself. The `autoSquelch` and `autoRoute` fields of
+browser. The per-browser "What you hear" choice of earlier versions is dropped (removed from this
+browser, never sent to the core), so Source starts at what the core has. A core older than these settings
+offers Auto, Manual and Open only (Open is sent as a manual squelch of 0) and picks the source itself. The `autoSquelch` and `autoRoute` fields of
 [`GET /api/live-audio/status`](API.md#get-apilive-audiostatus) report the voice check and what plays.
 
 **Connecting…** means Listen is starting, no audio has played for about 2 s, or the stream ended and is

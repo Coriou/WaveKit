@@ -22,6 +22,10 @@ import {
 	type SettingRow,
 } from "../../src/features/settings/model.ts"
 import { SETTINGS_REGISTRY } from "../../src/features/settings/registry.ts"
+import {
+	rememberedClosed,
+	resetOpenMemory,
+} from "../../src/features/listen/squelch-actions.ts"
 import { DEFAULT_DEVICE } from "../../src/shell/device-prefs.ts"
 import {
 	buildRows,
@@ -543,6 +547,19 @@ describe("Settings rows", () => {
 				["audio", { squelchMode: "auto", voiceOnly: true }],
 				["audio", { listenMode: "digital" }],
 			])
+		})
+
+		it("Open is a plain setting (Listen not started) but Q goes back to the squelch before it", async () => {
+			resetOpenMemory()
+			const rows = buildRows(
+				snapshot({
+					live: live({ ...listen, squelchMode: "manual", squelch: -72 }),
+				}),
+				actions(),
+			)
+			await byId(rows, "au.squelch").write?.("open")
+			expect(rememberedClosed()).toEqual({ kind: "manual", dbfs: -72 })
+			resetOpenMemory()
 		})
 
 		it("starts Manual from the live threshold when no level is set", async () => {

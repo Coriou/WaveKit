@@ -56,6 +56,7 @@ import {
 	squelchSetting,
 	voiceOnlyFits,
 } from "../listen/audio.ts"
+import { rememberBeforeOpen } from "../listen/squelch-actions.ts"
 import { listenModeOf } from "../listen/sound.ts"
 import {
 	controlAvailability,
@@ -792,19 +793,22 @@ function audioRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			value: sq,
 			text: optionText(sqOpts, sq),
 			...optional("disabled", disabled),
-			write: w(v =>
-				squelchPatch(
+			write: w(v => {
+				// Open here is a plain setting (Listen is not started), but Q still goes back from it
+				if (v === "open") {
+					rememberBeforeOpen(c)
+					return squelchPatch(c, { kind: "open" })
+				}
+				return squelchPatch(
 					c,
-					v === "open"
-						? { kind: "open" }
-						: v === "manual"
-							? {
-									kind: "manual",
-									dbfs: manualStart(c, st.thresholdDbfs ?? null),
-								}
-							: { kind: "auto" },
-				),
-			),
+					v === "manual"
+						? {
+								kind: "manual",
+								dbfs: manualStart(c, st.thresholdDbfs ?? null),
+							}
+						: { kind: "auto" },
+				)
+			}),
 		})
 		if (sq === "auto" && voiceOnlyFits(c)) {
 			const voiceOnly = setting.kind === "auto" && setting.voiceOnly

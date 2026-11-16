@@ -3,12 +3,14 @@
  * app's mock core (web/mock: it emits the voice check and the `/auto` route as the Listen contract says).
  *
  * Steps: tune to the mock's bare carrier (162.400 MHz, never speech) on the defaults (Auto, Voice only,
- * Source Auto); Listen → `Waiting for voice`; Play anyway → `Listening`; the Open segment → `Open`; Source
- * Analog, Digital, Auto; `Q` back (to Auto with Voice only off, as before Open) and `Q` again → `Open`.
- * Every squelch and Source change must keep the one audio stream attached. Then, from the defaults with
- * Listen off, how many keys and clicks reach the noise: `Q` alone, and the panel's Open.
+ * Source Auto); Listen → `Waiting for voice`; Play anyway → `Listening`; Source Digital (squelch closed, no
+ * decoder on the carrier) → `Quiet` with the no-decoder notice and Use Auto, which goes back to Source Auto
+ * → `Listening`; the Open segment → `Open`; Source Analog, Digital, Auto; `Q` back (to Auto with Voice only
+ * off, as before Open) and `Q` again → `Open`. Every squelch and Source change must keep the one audio
+ * stream attached. Then, from the defaults with Listen off, how many keys and clicks reach the noise: `Q`
+ * alone, and the panel's Open (both counted as pressed).
  */
-import type { Page } from "playwright-core"
+import type { Locator, Page } from "playwright-core"
 import { within } from "./harness.ts"
 
 /** How long one step may take to show (ms): the mock's level events come every 250 ms. */
@@ -43,15 +45,24 @@ interface Head {
 	title: string
 	sub: string
 	playAnyway: boolean
+	/** The line under Source in the panel ("" while the panel is closed). */
+	sourceHint: string
+	/** The Source line offers Use Auto. */
+	useAuto: boolean
 }
 
 const readHead = (page: Page): Promise<Head> =>
 	page.evaluate(() => {
 		const t = document.querySelector(".wk-shell-listen-title")
+		const hint = document.querySelector("[data-wk-source-hint]")
 		return {
 			title: t?.querySelector("b")?.textContent ?? "",
 			sub: t?.querySelector(".wk-shell-sub")?.textContent ?? "",
 			playAnyway: t?.querySelector(".wkf-play-anyway") !== null,
+			sourceHint: hint?.textContent ?? "",
+			useAuto: [...(hint?.querySelectorAll("button") ?? [])].some(
+				b => b.textContent?.trim() === "Use Auto",
+			),
 		}
 	})
 
@@ -122,6 +133,12 @@ export async function listenFlow(
 			.getByRole("radio", { name, exact: true })
 	const panelOpen = async () =>
 		(await panelToggle.getAttribute("aria-expanded")) === "true"
+	// every key press goes through here, so the report counts what was really pressed
+	let keys = 0
+	const press = async (key: string, on?: Locator) => {
+		keys++
+		await (on ? on.press(key) : page.keyboard.press(key))
+	}
 
 	await note("tune to the carrier", (await patchConfig(page, DEFAULTS)) === 200)
 	await listenButton.click()
@@ -135,6 +152,25 @@ export async function listenFlow(
 			(await configIs({ squelchMode: "auto", voiceOnly: false })),
 	)
 	if (!(await panelOpen())) await panelToggle.click()
+	// Digital with the squelch closed and no decoder on the carrier: nothing plays, and the panel says so
+	await radio("Source", "Digital").click()
+	await note(
+		"Source Digital, no decoder → Quiet, notice, Use Auto",
+		(await configIs({ listenMode: "digital" })) &&
+			(await titleIs("Quiet")) &&
+			(await within(STEP_MS, async () => {
+				const h = await readHead(page)
+				return h.useAuto && /No digital voice decoder/.test(h.sourceHint)
+			})),
+	)
+	await page
+		.locator("[data-wk-source-hint]")
+		.getByRole("button", { name: "Use Auto", exact: true })
+		.click()
+	await note(
+		"Use Auto → Source Auto, Listening",
+		(await configIs({ listenMode: "auto" })) && (await titleIs("Listening")),
+	)
 	await radio("Squelch", "Open").click()
 	await note(
 		"Open → Open",
@@ -151,13 +187,13 @@ export async function listenFlow(
 			(await configIs({ listenMode: mode })) && attaches === attached,
 		)
 	}
-	await page.keyboard.press("q")
+	await press("q")
 	await note(
 		"Q → back to Auto (Voice only off)",
 		(await configIs({ squelchMode: "auto", voiceOnly: false })) &&
 			(await titleIs("Listening")),
 	)
-	await page.keyboard.press("q")
+	await press("q")
 	await note(
 		"Q → Open",
 		(await configIs({ squelchMode: "open" })) && (await titleIs("Open")),
@@ -179,8 +215,10 @@ export async function listenFlow(
 	}
 	await reset()
 	// the panel stays as it was; keys go to the page, not a text field
-	await page.locator("body").press("q")
+	const keysBefore = keys
+	await press("q", page.locator("body"))
 	const keyOk = await titleIs("Open")
+	const toNoiseKeys = keys - keysBefore
 	await note("defaults, Listen off: Q → Open", keyOk)
 	await reset()
 	let clicks = 0
@@ -191,7 +229,7 @@ export async function listenFlow(
 	const clickOk = await titleIs("Open")
 	await note("defaults, Listen off: the panel's Open → Open", clickOk)
 
-	const ok = steps.every(s => s.ok) && clicks <= 2
+	const ok = steps.every(s => s.ok) && clicks <= 2 && toNoiseKeys <= 1
 	return {
 		ok,
 		title: head.title,
@@ -201,6 +239,6 @@ export async function listenFlow(
 		listenMode: config.listenMode ?? null,
 		attaches: mainAttaches,
 		steps,
-		toNoise: { keys: 1, clicks, keyOk, clickOk },
+		toNoise: { keys: toNoiseKeys, clicks, keyOk, clickOk },
 	}
 }

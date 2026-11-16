@@ -296,6 +296,36 @@ export function closedSquelch(setting: SquelchSetting): ClosedSquelch | null {
 }
 
 /**
+ * The closed squelch to remember from a config, as `closedSquelch()`, except that a tone-only squelch
+ * (manual at 0 or above with a tone gate, which reads as Manual at −120) keeps its stored level so going
+ * back restores it exactly. Null while Open.
+ */
+export function closedSquelchOf(
+	config: LiveAudioConfig | null | undefined,
+): ClosedSquelch | null {
+	const closed = closedSquelch(squelchOf(config))
+	if (closed?.kind === "manual" && config && !(config.squelch < 0))
+		return { kind: "manual", dbfs: config.squelch }
+	return closed
+}
+
+/**
+ * The PATCH back to a remembered closed squelch. A tone-only squelch goes back as it was stored (manual
+ * at its level, 0 or above) while the tone gate is still set; without the gate that level would be Open,
+ * so it goes back as the highest Manual level instead.
+ */
+export function closedPatch(
+	config: LiveAudioConfig | null | undefined,
+	back: ClosedSquelch,
+): Partial<LiveAudioConfig> {
+	if (back.kind === "auto")
+		return squelchPatch(config, { kind: "auto", voiceOnly: back.voiceOnly })
+	if (!(back.dbfs < 0) && config && toneSet(config))
+		return { squelchMode: "manual", squelch: back.dbfs }
+	return squelchPatch(config, { kind: "manual", dbfs: back.dbfs })
+}
+
+/**
  * `Q`: Open, or back from Open to `previous` (Auto with the voice check when nothing is known). Returns
  * the PATCH and the closed squelch to remember for the way back (null when going back).
  */
@@ -304,23 +334,14 @@ export function toggleOpenPatch(
 	previous: ClosedSquelch | null,
 ): { patch: Partial<LiveAudioConfig>; remember: ClosedSquelch | null } {
 	const config = status?.config
-	const setting = squelchSetting(status)
-	const closed = closedSquelch(setting)
+	const closed = closedSquelchOf(config)
 	if (closed !== null)
 		return { patch: squelchPatch(config, { kind: "open" }), remember: closed }
 	const back = previous ?? {
 		kind: "auto",
 		voiceOnly: LIVE_AUDIO_VOICE_ONLY_DEFAULT,
 	}
-	return {
-		patch: squelchPatch(
-			config,
-			back.kind === "auto"
-				? { kind: "auto", voiceOnly: back.voiceOnly }
-				: { kind: "manual", dbfs: back.dbfs },
-		),
-		remember: null,
-	}
+	return { patch: closedPatch(config, back), remember: null }
 }
 
 /** The noise squelch applies to this modulation (NFM and WFM). */
