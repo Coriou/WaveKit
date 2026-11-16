@@ -38,6 +38,8 @@ interface Shot {
 	readonly settleMs?: number
 	/** Shell island opened by its head (its `data-island` name). */
 	readonly island?: string
+	/** Deep link opened instead of the plain app (a `#/…` route). */
+	readonly hash?: string
 	/** The mock's receiver feed is paused for this shot (POST …/pause before, …/resume after). */
 	readonly pauseReceiver?: boolean
 }
@@ -58,7 +60,12 @@ const SHOTS: readonly Shot[] = [
 	{ name: "spectrum-light", theme: "light", press: [], settleMs: 16000 },
 	{ name: "activity", theme: "dark", press: ["Activity"] },
 	{ name: "map", theme: "dark", press: ["Map"] },
-	{ name: "messages", theme: "dark", press: ["Messages"] },
+	{
+		name: "activity-cards",
+		theme: "dark",
+		press: [],
+		hash: "#/activity?layout=cards",
+	},
 	{ name: "scanner", theme: "dark", press: ["Scanner"] },
 	{ name: "phone", theme: "dark", press: [], viewport: PHONE, settleMs: 16000 },
 	{
@@ -231,7 +238,9 @@ async function main(): Promise<void> {
 					if (!res.ok) throw new Error(`mock ${op} answered ${res.status}`)
 				})
 			const page = await context.newPage()
-			await page.goto(url, { waitUntil: "load" })
+			await page.goto(shot.hash ? `${url}${shot.hash}` : url, {
+				waitUntil: "load",
+			})
 			await page.locator("canvas").first().waitFor()
 			// a few seconds of waterfall first, so the paused one is frozen, not empty
 			if (shot.pauseReceiver) {

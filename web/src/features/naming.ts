@@ -122,10 +122,7 @@ export function rasterHz(hz: number, stepHz: number = stepAt(hz)): number {
 export const NO_FREQUENCY = "—"
 
 /** A channel's frequency in MHz, 4 decimals, from the raster ("145.6125"); NO_FREQUENCY when not finite. */
-export function channelMHz(
-	hz: number,
-	stepHz: number = stepAt(hz),
-): string {
+export function channelMHz(hz: number, stepHz: number = stepAt(hz)): string {
 	if (!Number.isFinite(hz)) return NO_FREQUENCY
 	return (rasterHz(hz, stepHz) / 1e6).toFixed(4)
 }
