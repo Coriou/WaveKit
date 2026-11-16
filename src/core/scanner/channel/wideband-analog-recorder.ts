@@ -520,8 +520,11 @@ export const WIDEBAND_PARK_MS = 2_000
  * (10 to 50 ms), so a track still on the air at the cut was last reported at most
  * 1 000 + 50 = 1 050 ms before it. A last report exactly 1 050 ms before the cut is still active;
  * one sample earlier is not: the transmission had ended and the cut clipped only its hang
- * (silence), and the label does not say the scanner cut it. A slower report errs toward active
- * (the old label), never toward a false "completed".
+ * (silence), and the label does not say the scanner cut it. The tracker counts only observed
+ * blocks towards that update, so a weak carrier missing blocks (inside its hang) is reported
+ * less often, and this bound alone would then err toward a false "completed": a joined track
+ * still open at the finish (not closed yet) counts as on the air whatever its last report
+ * (finishFacts), so the bound only judges tracks whose close was reported.
  */
 export const WIDEBAND_CUT_ACTIVE_MS = 1_050
 
@@ -2277,6 +2280,8 @@ export class WidebandAnalogRecorder {
 		if (joinedId !== undefined) {
 			const p = this.parked.get(joinedId)
 			if (p) {
+				// A report on the air past the cut: its file was on the air at it (finishFacts).
+				p.lastActive = Math.max(p.lastActive, track.lastSample)
 				this.updateParked(
 					p,
 					observationId,
@@ -4051,9 +4056,11 @@ export class WidebandAnalogRecorder {
 	 * still open: its close may bring the first analog-fm class, so it is kept, not discarded.
 	 * Since a retune ends a file at its command position (Session.limit), a file whose hang would
 	 * end inside the retune's settle (before the settled start, past the command) ends
-	 * `epoch-changed` here too, not `completed` at the hang's end, so it may park and be promoted
-	 * by an analog-fm close (more voice kept); its receipt then says the cut was not on the air
-	 * (finishFacts: cutActive false) when the voice ended before it.
+	 * `epoch-changed` here too, not `completed` at the hang's end. It parks only while a joined
+	 * track is still open at the command, so a quiet one is promoted by an analog-fm close only
+	 * when the command lands within the track hang of the voice's end (the tracker closes a
+	 * missing track 500 ms after its last active block); its receipt then counts the cut as on
+	 * the air (finishFacts: the close's last sample is within WIDEBAND_CUT_ACTIVE_MS of it).
 	 */
 	private parkable(s: Session, file: FileState): boolean {
 		return (
@@ -4362,17 +4369,23 @@ export class WidebandAnalogRecorder {
 
 	/**
 	 * The receipt facts of a file's end besides its cut: for a retune cut (`epoch-changed`),
-	 * whether a joined track was still on the air at the cut (cutWasActive against the newest
-	 * sample a joined track was reported on, its closes included). A file that ended any other
-	 * way carries none.
+	 * whether a joined track was still on the air at the cut: one still open at the finish (its
+	 * close not reported, so its last report may be old: a weak carrier's reports are sparse),
+	 * or cutWasActive against the newest sample a joined track was reported on, its closes
+	 * included. A file that ended any other way carries none.
 	 */
 	private finishFacts(s: Session, file: FileState): AnalogFinishFacts {
 		if (file.cut !== "epoch-changed" || file.endSample === null) return {}
+		const cutAt = file.endSample
+		const open = [...s.observations].some(id => {
+			const span = s.activity.get(id)
+			return span !== undefined && span.open && span.start <= cutAt
+		})
 		const lastHeard = Math.max(
 			s.lastActive,
 			s.ownerClosedAt ?? Number.NEGATIVE_INFINITY,
 		)
-		return { cutActive: cutWasActive(lastHeard, file.endSample, s.fs) }
+		return { cutActive: open || cutWasActive(lastHeard, cutAt, s.fs) }
 	}
 
 	/**

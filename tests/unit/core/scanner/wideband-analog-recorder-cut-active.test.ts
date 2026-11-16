@@ -4,8 +4,9 @@
  * WIDEBAND_CUT_ACTIVE_MS of its cut was still on the air; one whose transmission had ended
  * earlier lost only its silent hang to the cut. Since a retune ends a file at its command
  * position, a hang that reaches into the retune settle ends `epoch-changed` (no longer
- * `completed` at the settled start), and an unclassed voiced shadow so ended parks for its close
- * and is promoted by an analog-fm close (more voice kept), its receipt saying the cut was quiet.
+ * `completed` at the settled start). A joined track still open at the finish counts as on the
+ * air whatever its last report (a weak carrier's reports are sparse). An unclassed voiced shadow
+ * commanded within its track's hang parks for its close and is promoted by an analog-fm close.
  */
 import { describe, expect, it } from "vitest"
 import {
@@ -88,6 +89,42 @@ describe("WidebandAnalogRecorder retune cut: on the air or only the hang", () =>
 		})
 	}, 120_000)
 
+	it("a weak voice still open at the command, last reported over 1.05 s before it: cutActive true", async () => {
+		// The tracker updates an open track every 1 000 ms of OBSERVED blocks: a carrier missing
+		// a third of its blocks (inside the 500 ms hang) is reported every ~1.3 s.
+		const h = harness()
+		await h.feed(0.5, false)
+		const onset = h.engine.liveEdge()
+		let reported = Number.NEGATIVE_INFINITY
+		await h.feed(3.9, true, () => {
+			const edge = h.engine.liveEdge()
+			if (edge - onset >= 0.1 * FS && edge - reported >= 1.3 * FS) {
+				reported = edge
+				h.rec.track(input("o", snapshot("o", onset, edge)))
+			}
+		})
+		const at = command(h)
+		// The last report is past the 1.05 s bound, the track still open (on the air).
+		expect(at - reported).toBeGreaterThan(
+			Math.round((WIDEBAND_CUT_ACTIVE_MS * FS) / 1000),
+		)
+		await h.feed(0.15, true)
+		const start = started(h, at)
+		await h.feed(3, false)
+		await h.rec.idle()
+		expect(h.ops).toHaveLength(1)
+		expect(h.ops[0]).toMatchObject({
+			cut: "epoch-changed",
+			cutActive: true,
+			outcome: "finalized",
+		})
+		// The epoch's close arrives after the file finished: the receipt stands.
+		h.rec.closed("o", snapshot("o", onset, start), "epoch-changed")
+		await h.rec.idle()
+		expect(h.ops).toHaveLength(1)
+		expect(h.ops[0]).toMatchObject({ cutActive: true })
+	}, 120_000)
+
 	it("a classed file whose hang reaches into the settle ends epoch-changed at the command, cutActive false", async () => {
 		const h = harness()
 		await h.feed(0.5, false)
@@ -120,7 +157,7 @@ describe("WidebandAnalogRecorder retune cut: on the air or only the hang", () =>
 		})
 	}, 120_000)
 
-	it("an unclassed voiced shadow whose voice ended before the command parks, and an analog-fm close promotes it with cutActive false", async () => {
+	it("an unclassed voiced shadow commanded within the track hang of its voice's end parks, and an analog-fm close promotes it on the air", async () => {
 		// No CTCSS tone: only the close's class can class it.
 		const h = harness({ source: { ctcssHz: null } })
 		await h.feed(1, false)
@@ -131,12 +168,12 @@ describe("WidebandAnalogRecorder retune cut: on the air or only the hang", () =>
 			),
 		)
 		const end = h.engine.liveEdge()
-		// The tracker's quiet hang: the track stays open, its last sample still the voice's end.
-		const quiet = (): void =>
-			h.rec.track(input("o", snapshot("o", onset, end), SHADOW))
-		await h.feed(1.5, false, quiet)
+		// The tracker's hang: the track stays open 500 ms past its last active block, with no
+		// report while it is missing. The command lands 0.3 s past the voice's end, the settled
+		// start 0.15 s later, with the track still open: the epoch change closes it.
+		await h.feed(0.3, false)
 		const at = command(h)
-		await h.feed(1.5, false, quiet)
+		await h.feed(0.15, false)
 		started(h, at)
 		await h.feed(0.3, false)
 		// Ended at the command (epoch-changed) before any class: nothing written, kept parked.
@@ -146,13 +183,14 @@ describe("WidebandAnalogRecorder retune cut: on the air or only the hang", () =>
 		await h.feed(0.5, false)
 		await h.rec.idle()
 		expect(h.ops).toHaveLength(1)
+		// The close's last sample (the voice's end) is 0.3 s before the cut, inside the bound.
 		expect(h.ops[0]).toMatchObject({
 			cut: "epoch-changed",
-			cutActive: false,
+			cutActive: true,
 			outcome: "finalized",
 		})
-		// Pre-roll 300 ms + the 3 s voice + 1.5 s to the command: [onset − 0.3 s, command).
-		expect(Math.abs(h.ops[0]!.frames - 8 * 4_800)).toBeLessThanOrEqual(8 * 60)
+		// Pre-roll 300 ms + the 3 s voice + 0.3 s to the command: [onset − 0.3 s, command).
+		expect(Math.abs(h.ops[0]!.frames - 6 * 4_800)).toBeLessThanOrEqual(8 * 60)
 		expect(h.engine.tapCount).toBe(0)
 	}, 120_000)
 })
