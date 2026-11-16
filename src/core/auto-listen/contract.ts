@@ -10,6 +10,7 @@ import {
 	LIVE_AUDIO_AUTO_ROUTE_PREEMPT_MAX_MS,
 	LIVE_AUDIO_AUTO_ROUTE_RATE,
 } from "@wavekit/api-types"
+import { DSD_FME_LINE_CLUMP_MS } from "../../decoders/builtin/dsd-fme.js"
 import type { StreamFormat } from "../audio-stream-server.js"
 
 /** The `/auto` stream format (requirement 2.1), independent of the analog rate. */
@@ -28,47 +29,53 @@ export const AUTO_ROUTE_FIFO_SAMPLES =
 	(LIVE_AUDIO_AUTO_ROUTE_RATE * LIVE_AUDIO_AUTO_ROUTE_FIFO_MS) / 1000
 
 /**
- * First `VC*` voice line to the first `SLOT` line of an over, at most, in the PROVISIONAL
- * dv-latency seeds (tests/mocks/fixtures/synthetic/dv-latency-*.json, 19 overs): 600.0 ms in
- * direct mode (every direct scene but one short over), 240.0 ms behind a repeater.
+ * First voice to its call's admission, at most, on the RECORDED dv-latency seeds
+ * (tests/mocks/fixtures/synthetic/dv-latency-dmr-*.json, 12 scenes, replayed through the
+ * production dsd-fme adapter at every phase of its 500 ms call timer in 20 ms steps): from the
+ * first voice sync line of an over (`VC*`, `VC1*` .. `VC6` on its slot) to the first `voice-call`
+ * event of its call that is active, not encrypted and whose encryption is known (the snapshot
+ * that admits pending voice). Measured worst 1 693.5 ms in direct mode (the call is announced
+ * on the first line after its 100 ms start delay with its encryption not known, about a second
+ * after the first voice, and known clear once a full link control decodes, after errored
+ * `SLOT 1 FLCO FEC ERR` lines), 1 057.1 ms behind a repeater; rounded up to the millisecond.
+ * tests/unit/core/auto-listen/pending-promotion.test.ts measures it and pins this value.
  */
-export const AUTO_ROUTE_SEED_VOICE_TO_SLOT_MS = 600
-/** One DMR voice burst: 60 ms (a 360 ms superframe of six bursts). */
+export const AUTO_ROUTE_RECORDED_VOICE_TO_CLEAR_MS = 1_694
+/**
+ * Decoded voice may reach the router ahead of its sync line: dsd-fme sends voice datagrams as it
+ * decodes them, while its printed lines arrive in clumps up to one clump after their burst
+ * (`DSD_FME_LINE_CLUMP_MS`, 340 ms). So the first voice can precede the first voice line by this
+ * much.
+ */
+export const AUTO_ROUTE_VOICE_AHEAD_OF_LINE_MS = DSD_FME_LINE_CLUMP_MS
+/** One vocoder frame: 20 ms (160 samples at 8 kHz, one dsd-fme datagram). */
+export const AUTO_ROUTE_VOCODER_FRAME_MS = 20
+/** One DMR voice burst: 60 ms (a 360 ms superframe of six bursts); the bound's margin. */
 export const AUTO_ROUTE_DMR_BURST_MS = 60
-/**
- * dsd-fme adapter announce hold: the first `SLOT` line creates a pending call announced no
- * earlier than this after it (`CALL_START_DELAY_MS = 100`, src/decoders/builtin/dsd-fme.ts:578;
- * `emitAfter: nowMs + delayMs`, dsd-fme.ts:2917 and 2941).
- */
-export const AUTO_ROUTE_ADAPTER_ANNOUNCE_HOLD_MS = 100
-/**
- * dsd-fme adapter promotion period: the pending call is promoted (call_start, and the
- * `voice-call` event the router hears, dsd-fme.ts:1021) only by the call timer, every
- * `CALL_TIMEOUT_CHECK_INTERVAL_MS = 500` (dsd-fme.ts:575, the setInterval at 943-945,
- * `checkPendingCallEmission` at 1120 and 1136-1149). The timer's phase is free, so the call
- * event comes 100 to 600 ms after the `SLOT` line.
- */
-export const AUTO_ROUTE_ADAPTER_PROMOTION_PERIOD_MS = 500
-/** The seeds' guessed line latency (decoded voice to its printed line): 40 ms. */
-export const AUTO_ROUTE_SEED_LINE_LATENCY_MS = 40
 
 /**
  * Pending voice: decoded voice a decoder hands over before its call is active and explicitly
  * clear is kept this long (per decoder, by arrival time and by content) and admitted when the
- * call turns active and clear. The router learns of the call only from its `voice-call` event,
- * so the bound runs from the first voice to that event: the seeds' first voice to `SLOT`
- * (600 ms), the voice of the burst that line closes (60 ms), the adapter's announce hold
- * (100 ms) and its promotion period (500 ms, the worst timer phase), plus one burst of margin
- * (60 ms) and the seeds' line latency (40 ms): 600 + 60 + 100 + 500 + 60 + 40 = 1 360 ms
- * (10 880 samples at 8 kHz). Memory per decoder: see `PendingVoice`.
+ * call turns active and clear. The router learns of the call only from its `voice-call` events,
+ * so the bound runs from the first decoded voice to the event that admits it: the recorded
+ * seeds' worst first voice line to that event (1 694 ms), the voice ahead of its line (one line
+ * clump, 340 ms) and one burst of margin (60 ms): 1 694 + 340 + 60 = 2 094 ms, rounded up to a
+ * whole 20 ms vocoder frame: 2 100 ms (105 frames, 16 800 samples at 8 kHz). The digital voice
+ * service hands the taps none of a call's voice while it is announced and its encryption is not
+ * known (nothing on an unknown slot, zeros on a known one), so what waits here is the voice
+ * before the call's first snapshot (up to 1 489 ms on the seeds) plus those zeros; the bound
+ * runs on arrival time, and that voice is up to 1 885 ms old when the call turns known clear.
+ * Memory per decoder: see `PendingVoice`. Assumes the adapter's default `callStartDelayMs`
+ * (100 ms); a longer delay announces later and can let go a call's head (counted in
+ * `autoRoute.pendingOverwrittenMs`).
  */
 export const AUTO_ROUTE_PENDING_VOICE_MS =
-	AUTO_ROUTE_SEED_VOICE_TO_SLOT_MS +
-	AUTO_ROUTE_DMR_BURST_MS +
-	AUTO_ROUTE_ADAPTER_ANNOUNCE_HOLD_MS +
-	AUTO_ROUTE_ADAPTER_PROMOTION_PERIOD_MS +
-	AUTO_ROUTE_DMR_BURST_MS +
-	AUTO_ROUTE_SEED_LINE_LATENCY_MS
+	Math.ceil(
+		(AUTO_ROUTE_RECORDED_VOICE_TO_CLEAR_MS +
+			AUTO_ROUTE_VOICE_AHEAD_OF_LINE_MS +
+			AUTO_ROUTE_DMR_BURST_MS) /
+			AUTO_ROUTE_VOCODER_FRAME_MS,
+	) * AUTO_ROUTE_VOCODER_FRAME_MS
 
 /**
  * End guard of pending voice: after a clear call ends, voice handed over with no call is the

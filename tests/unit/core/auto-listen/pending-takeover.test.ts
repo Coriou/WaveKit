@@ -41,7 +41,7 @@ import { createLogger } from "../../../../src/utils/logger.js"
 import { lcg } from "./helpers.js"
 
 const logger = createLogger({ level: "fatal" })
-/** 8 000 × 1 360 / 1 000 = 10 880 samples: 68 frames of 160 (20 ms at 8 kHz). */
+/** 8 000 × 2 100 / 1 000 = 16 800 samples: 105 frames of 160 (20 ms at 8 kHz). */
 const PENDING_FRAMES = (8_000 * AUTO_ROUTE_PENDING_VOICE_MS) / 1000 / 160
 
 class FakeClock implements AutoRouteClock {
@@ -229,21 +229,21 @@ function playCall(
 	// Every frame came before the call event: it comes after the last one.
 	if (pre >= list.length) sim.voice.tap?.call("dmr", start)
 	sim.voice.tap?.call("dmr", call({ active: false }))
-	// 2 s: drains a backlog up to the 1 360 ms bound (admitted pending voice plays behind).
-	for (let i = 0; i < 100; i++) sim.step()
+	// 2.6 s: drains a backlog up to the 2 100 ms bound (admitted pending voice plays behind).
+	for (let i = 0; i < 130; i++) sim.step()
 	return sim
 }
 
 describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
-	it("the bound is 1 360 ms: 68 frames of 20 ms at 8 kHz, 136 arrival records", () => {
-		// 600 (seed VC* to SLOT) + 60 (that burst) + 100 (announce hold) + 500 (promotion period)
-		// + 60 (one burst of margin) + 40 (line latency).
-		expect(AUTO_ROUTE_PENDING_VOICE_MS).toBe(1_360)
-		expect(PENDING_FRAMES).toBe(68)
+	it("the bound is 2 100 ms: 105 frames of 20 ms at 8 kHz, 210 arrival records", () => {
+		// 1 694 (recorded first voice line to known clear) + 340 (voice ahead of its line: one
+		// line clump) + 60 (one burst of margin) = 2 094, rounded up to a 20 ms frame.
+		expect(AUTO_ROUTE_PENDING_VOICE_MS).toBe(2_100)
+		expect(PENDING_FRAMES).toBe(105)
 		const p = new PendingVoice(8_000)
-		expect(p.capacity).toBe(10_880)
-		// 10 880 / 80 (half a 160-sample datagram).
-		expect(p.recordCapacity).toBe(136)
+		expect(p.capacity).toBe(16_800)
+		// 16 800 / 80 (half a 160-sample datagram).
+		expect(p.recordCapacity).toBe(210)
 	})
 
 	it("voice before the call turns active and clear is admitted in order: the same audio as a call active from its first frame", () => {
@@ -271,7 +271,7 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 		expect(sim.actives.at(-1)).toBe("digital")
 	})
 
-	it("at the bound all 68 frames are kept; past it the oldest go first, counted in pendingOverwrittenMs (frames handed over at once)", () => {
+	it("at the bound all 105 frames are kept; past it the oldest go first, counted in pendingOverwrittenMs (frames handed over at once)", () => {
 		for (const extra of [0, 1, 5]) {
 			const list = frames(PENDING_FRAMES + extra)
 			const sim = new Sim()
@@ -284,7 +284,7 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 			expect(
 				sim.router.status({ httpUrl: "h", wavUrl: "w" }).pendingOverwrittenMs,
 			).toBeCloseTo(extra * 20, 9)
-			// The reference: only the newest 68 frames, admitted as a call.
+			// The reference: only the newest 105 frames, admitted as a call.
 			const ref = new Sim()
 			ref.voice.tap?.call("dmr", call())
 			for (const f of list.slice(extra)) ref.voice.tap?.frame("dmr", f, call())
@@ -296,21 +296,21 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 		}
 	})
 
-	it("voice older than 1 360 ms at the call event is let go: 1.8 s before the call keeps the newest 68 frames", () => {
-		const list = frames(90)
-		const sim = playCall(list, 90)
-		// No frame arrived during the call; the call event admits the frames from 440 ms on.
+	it("voice older than 2 100 ms at the call event is let go: 2.6 s before the call keeps the newest 105 frames", () => {
+		const list = frames(130)
+		const sim = playCall(list, 130)
+		// No frame arrived during the call; the call event admits the frames from 500 ms on.
 		expect(sim.router.pendingOverwrittenMs).toBeCloseTo(
-			(90 - PENDING_FRAMES) * 20,
+			(130 - PENDING_FRAMES) * 20,
 			9,
 		)
 		const ref = new Sim()
-		for (let i = 0; i < 90; i++) ref.step()
+		for (let i = 0; i < 130; i++) ref.step()
 		ref.voice.tap?.call("dmr", call())
-		for (const f of list.slice(90 - PENDING_FRAMES))
+		for (const f of list.slice(130 - PENDING_FRAMES))
 			ref.voice.tap?.frame("dmr", f, call())
 		ref.voice.tap?.call("dmr", call({ active: false }))
-		for (let i = 0; i < 100; i++) ref.step()
+		for (let i = 0; i < 130; i++) ref.step()
 		expect(sim.played.get("dmr")).toEqual(ref.played.get("dmr"))
 		expect(sim.router.droppedSamples).toBe(0)
 	})
@@ -398,7 +398,10 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 			expect(sim.router.droppedSamples).toBe(0)
 		})
 
-		it("encryptionKnown false then resolved clear: the voice of the last 1 360 ms is admitted in order", () => {
+		it("encryptionKnown false then resolved clear: the voice of the last 2 100 ms is admitted in order", () => {
+			// The digital voice service hands taps none of an unresolved call's voice (nothing or
+			// zeros, pending-service-path.test.ts); the router still keeps it fail closed for any
+			// tap source that does.
 			const list = frames(60)
 			const sim = new Sim()
 			const unresolved = callWithKnown(false)
@@ -428,21 +431,21 @@ describe("pending voice (AUTO_ROUTE_PENDING_VOICE_MS)", () => {
 	})
 
 	// Feature: listen-modes, Property 3: Pending voice is admitted in order or not at all
-	// Validates: Router change (a): pending voice up to 1 360 ms, admitted when active and clear, fail-closed
+	// Validates: Router change (a): pending voice up to 2 100 ms, admitted when active and clear, fail-closed
 	it("property: whatever the split before the call event, the played voice is a suffix of the call's audio (no gap, no duplicate)", () => {
-		const list = frames(110, 17)
+		const list = frames(150, 17)
 		const full = playCall(list, 0).played.get("dmr") ?? []
 		fc.assert(
-			fc.property(fc.integer({ min: 0, max: 100 }), pre => {
+			fc.property(fc.integer({ min: 0, max: 140 }), pre => {
 				const sim = playCall(list, pre)
 				const got = sim.played.get("dmr") ?? []
 				expect(got.length).toBeGreaterThan(0)
-				// What the bound let go is counted: the frames past the 68 kept.
+				// What the bound let go is counted: the frames past the 105 kept.
 				expect(sim.router.pendingOverwrittenMs).toBeCloseTo(
 					Math.max(0, pre - PENDING_FRAMES) * 20,
 					9,
 				)
-				// Up to 68 pending frames are kept: with at most 68 before the call, all of it plays.
+				// Up to 105 pending frames are kept: with at most 105 before the call, all of it plays.
 				if (pre <= PENDING_FRAMES) expect(got).toEqual(full)
 				else {
 					// Older frames were let go: what plays is the call's audio from a later frame on,
@@ -754,7 +757,7 @@ describe("pending voice after a call ends (AUTO_ROUTE_PENDING_END_GUARD_MS)", ()
 	it("after an encrypted end, voice with no call is dropped until the next call event, however late", () => {
 		const enc = call({ callId: "e1", encrypted: true })
 		const end = call({ callId: "e1", active: false, encrypted: true })
-		// 1 s after the end: past the guard, still within 1 360 ms of the clear call.
+		// 1 s after the end: past the guard, still within 2 100 ms of the clear call.
 		expect(overThenClear(enc, end, all, 50)).toEqual(
 			overThenClear(enc, end, none, 50),
 		)
@@ -965,8 +968,8 @@ describe("PendingVoice arrival records", () => {
 		const frame = Array.from({ length: 160 }, (_, k) => k + 1)
 		// Three frames at one time, then frames that wrap the ring.
 		for (let k = 0; k < 3; k++) p.write(pcm(frame), 0)
-		for (let t = 1; t <= 67; t++) p.write(pcm(frame), t * 60)
-		// 70 frames × 160 = 11 200 samples in a 10 880 ring: 320 overwritten.
+		for (let t = 1; t <= 104; t++) p.write(pcm(frame), t * 60)
+		// 107 frames × 160 = 17 120 samples in a 16 800 ring: 320 overwritten.
 		expect(p.length).toBe(cap)
 		const runs: Array<{ len: number; at: number }> = []
 		let total = 0
@@ -978,7 +981,7 @@ describe("PendingVoice arrival records", () => {
 		// The merged record lost two of its three frames: 160 samples at time 0.
 		expect(runs[0]).toEqual({ len: 160, at: 0 })
 		// Contiguous by time, never more runs than records plus one wrap.
-		expect(runs.length).toBeLessThanOrEqual(68 + 1)
+		expect(runs.length).toBeLessThanOrEqual(105 + 1)
 		expect(p.length).toBe(0)
 		expect(p.oldestAt).toBeNull()
 	})

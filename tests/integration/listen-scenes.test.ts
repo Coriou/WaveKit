@@ -21,13 +21,14 @@
  * second Voice LC header is decoded (340 ms after the DMR start), then three 20 ms frames at the
  * end of every 60 ms slot-1 burst, the first at 460 ms, and the call end at the DMR end. That
  * call time is the call's start and may leave out the dsd-fme adapter's announce lag (below), so
- * the DV-harness numbers are a best case. The `seed` timing replays the PROVISIONAL dv-latency
+ * the DV-harness numbers are a best case. The `seed` timing replays the RECORDED dv-latency
  * seed instead (tests/mocks/fixtures/synthetic/dv-latency-dmr-repeater-gaps-same.json, first
- * over): voice from the first `VC*` line (127.5 ms after the over start), before the call, and
- * the call event where the router hears it under the adapter's worst timer phase: the first
- * `SLOT` line (367.5 ms) plus the 100 ms announce hold plus the 500 ms promotion period
- * (src/decoders/builtin/dsd-fme.ts:575, 578; tests/unit/core/auto-listen/pending-promotion.test.ts
- * replays the adapter at every phase): 967.5 ms, so 840 ms of voice waits as pending voice.
+ * over) through the production adapter at every phase of its 500 ms call timer
+ * (tests/unit/core/auto-listen/dv-seed-replay.ts): voice from the first voice sync line
+ * (177.9 ms after the over start), before the call, and the call event where the router hears
+ * it at the worst phase, announced known clear at once behind a repeater: 852.7 ms, so 674.8 ms
+ * of voice waits as pending voice (tests/unit/core/auto-listen/pending-promotion.test.ts covers
+ * every recorded scene, direct mode included).
  *
  * Takeover (Voice only off, Auto and Manual): the DMR transmission's own carrier plays raw until
  * the decoded call is ready (its 200 ms start buffer), then decoded. "One source per
@@ -36,12 +37,7 @@
  */
 import type * as http from "node:http"
 import type { ChildProcess } from "node:child_process"
-import { readFileSync } from "node:fs"
 import { afterEach, describe, expect, it } from "vitest"
-import {
-	AUTO_ROUTE_ADAPTER_ANNOUNCE_HOLD_MS,
-	AUTO_ROUTE_ADAPTER_PROMOTION_PERIOD_MS,
-} from "../../src/core/auto-listen/contract.js"
 import type {
 	AnalogTransmissionEventData,
 	LiveAudioAutoRoute,
@@ -78,6 +74,12 @@ import {
 	voiceLike,
 	whiteNoise,
 } from "../unit/core/evidence-squelch/synthetic.js"
+import {
+	ADAPTER_TIMER_MS,
+	loadSeed,
+	overCall,
+	replayCalls,
+} from "../unit/core/auto-listen/dv-seed-replay.js"
 
 const RATE = 25_000
 const BLOCK_MS = 10
@@ -109,40 +111,28 @@ const DV_HARNESS: DvTiming = {
 }
 
 /**
- * The repeater seed's first over: its first `VC*` line, and the call event the adapter emits for
- * its first `SLOT` line at the worst timer phase (hold + one promotion period after it).
+ * The repeater seed's first over: its first voice sync line, and the snapshot that admits its
+ * voice (active and known clear: announced so at once behind a repeater) at the adapter's worst
+ * timer phase, replayed through the production adapter (tests/unit/core/auto-listen/dv-seed-replay.ts).
  */
 function seedTiming(): DvTiming {
-	const seed = JSON.parse(
-		readFileSync(
-			new URL(
-				"../mocks/fixtures/synthetic/dv-latency-dmr-repeater-gaps-same.json",
-				import.meta.url,
-			),
-			"utf8",
-		),
-	) as {
-		overs: Array<{ startMs: number; endMs: number }>
-		lines: Array<{ atMs: number; text: string }>
-	}
+	const seed = loadSeed("dmr-repeater-gaps-same")
 	const over = seed.overs[0]
 	if (over === undefined) throw new Error("no over in the seed")
-	const inOver = seed.lines.filter(
-		l => l.atMs >= over.startMs && l.atMs <= over.endMs,
-	)
-	const vc = inOver.find(
-		l => l.text.includes("[slot1]") && l.text.includes("VC*"),
-	)
-	const slot = inOver.find(l => l.text.includes("SLOT 1 "))
-	if (vc === undefined || slot === undefined) throw new Error("seed lines")
-	return {
-		callStartMs:
-			slot.atMs -
-			over.startMs +
-			AUTO_ROUTE_ADAPTER_ANNOUNCE_HOLD_MS +
-			AUTO_ROUTE_ADAPTER_PROMOTION_PERIOD_MS,
-		firstFrameMs: vc.atMs - over.startMs,
+	let worst: DvTiming | null = null
+	for (let phase = 0; phase < ADAPTER_TIMER_MS; phase += 20) {
+		const c = overCall(seed, over, replayCalls(seed, phase))
+		if (c.kind !== "own" || c.admitMs === null) throw new Error("seed call")
+		// One snapshot announces it known clear: the voice-tap double's single call event.
+		if (c.events[0]?.atMs !== c.admitMs) throw new Error("seed announce")
+		const timing = {
+			callStartMs: c.admitMs - over.startMs,
+			firstFrameMs: c.voiceLineMs - over.startMs,
+		}
+		if (worst === null || timing.callStartMs > worst.callStartMs) worst = timing
 	}
+	if (worst === null) throw new Error("no phase")
+	return worst
 }
 
 const DV_SEED = seedTiming()
@@ -966,8 +956,8 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 				dv: DV_SEED,
 			})
 			const dmr = seg(seed, "dmr")
-			// Decoded voice starts at the call event, 840 ms after the first voice (its pending
-			// head already passes the start buffer): measured 852.5 ms.
+			// Decoded voice starts at the call event, 674.8 ms after the first voice (its pending
+			// head already passes the start buffer): measured 682.1 ms.
 			expect(ttvMs(dmr, DV_SEED.firstFrameMs)).toBeLessThanOrEqual(
 				DV_SEED.callStartMs - DV_SEED.firstFrameMs + 40,
 			)
@@ -975,12 +965,12 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 			expect(dmr.switches).toBe(0)
 			expect(verdict(dmr)).toBe("decoded")
 			expect(seed.droppedMs).toBe(0)
-			// The 840 ms head fits the 1 360 ms bound: nothing of it let go.
+			// The 674.8 ms head fits the 2 100 ms bound: nothing of it let go.
 			expect(seed.pendingOverwrittenMs).toBe(0)
 		}, 60_000)
 
 		it.todo(
-			"time to audio: decoded voice <= first frame + 300 ms under the adapter's announce lag (every column; seed timing): measured 852.5 ms with Voice only on (the call event 840 ms after the first voice: SLOT 240 ms after it, then the 100 ms hold and up to the 500 ms promotion period), 1 210 ms worst in direct mode (pending-promotion.test.ts); the route cannot play before the call is active and clear, so this needs an earlier call announce from the adapter (promotion on the line, not the 500 ms timer)",
+			"time to audio: decoded voice <= first frame + 300 ms under the adapter's announce lag (every column; seed timing): measured 682.1 ms with Voice only on (the call announced known clear 674.8 ms after the first voice line, at the worst timer phase), up to 1 694 ms in direct mode, where the call is announced with its encryption not known and known clear only once a link control decodes (pending-promotion.test.ts); the route cannot play before the call is active and known clear, so this needs an earlier clear verdict from the adapter or the 300 ms analog lookahead (phase 3)",
 		)
 
 		it("time to audio: decoded voice <= first frame + 300 ms with Voice only off (Auto, Manual): the 200 ms takeover", async () => {
@@ -1064,8 +1054,8 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 					dv: DV_SEED,
 				})
 				const dmr = seg(r, "dmr")
-				// The carrier from stage 1's open until the call at 967.5 ms admits the pending
-				// voice and takes over: measured 957 ms, time to audio 852.5 ms.
+				// The carrier from stage 1's open until the call at 852.7 ms admits the pending
+				// voice and takes over: measured 837.5 ms, time to audio 682.1 ms.
 				expect(buzzMs(dmr)).toBeGreaterThan(0)
 				expect(buzzMs(dmr)).toBeLessThanOrEqual(DV_SEED.callStartMs + 40)
 				expect(ttvMs(dmr, DV_SEED.firstFrameMs)).toBeLessThanOrEqual(
@@ -1079,7 +1069,7 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 		}, 120_000)
 
 		it.todo(
-			"buzz with Voice only off <= 400 ms before a clear call (Auto, Manual): measured 957 ms with the seed under the adapter's announce lag (the call event 967.5 ms into the over), 1 300 ms worst in direct mode (pending-promotion.test.ts), and 638 ms with the DV-harness double (first frame 460 ms + the 200 ms start buffer, its call time without the lag); the takeover cannot come before the call is active and clear, so this needs an earlier call announce from the adapter (promotion on the line, not the 500 ms timer) or the 300 ms analog lookahead (phase 3)",
+			"buzz with Voice only off <= 400 ms before a clear call (Auto, Manual): measured 837.5 ms with the seed under the adapter's announce lag (the call event 852.7 ms into the over), up to about 1.9 s in direct mode (pending-promotion.test.ts: the call known clear up to 1 694 ms after its first voice line), and 638 ms with the DV-harness double (first frame 460 ms + the 200 ms start buffer, its call time without the lag); the takeover cannot come before the call is active and known clear, so this needs an earlier clear verdict from the adapter or the 300 ms analog lookahead (phase 3)",
 		)
 
 		it("Open: transmission events and stage-1 edges equal Auto's on the same scene", async () => {

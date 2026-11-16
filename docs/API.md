@@ -2640,7 +2640,7 @@ droppedMs, pendingOverwrittenMs?, analogSupersededMs?, clockRebases, latencyMs, 
   analog a decoded call takes over, nor decoded voice still waiting for its call to turn
   clear: see [GET /auto](#get-httplocalhost8081auto-and-autowav)),
   `pendingOverwrittenMs` (cumulative, a diagnostic outside `droppedMs`; absent from older
-  cores) the decoded voice that waited for its call and was let go by the 1 360 ms pending
+  cores) the decoded voice that waited for its call and was let go by the 2 100 ms pending
   bound, so a non-zero value may mean a call's start was cut (it also grows while decoded
   voice arrives with no call announced, and the bound assumes the decoder's default
   100 ms call-start hold),
@@ -2915,16 +2915,24 @@ is the call's own carrier, so it (buzz) plays from the call's start until the de
 the clear call with 200 ms of its voice queued, then only the decoded call, with no buzz after
 it; the analog let go is not counted in `droppedMs` (its audible part is reported in
 `autoRoute.analogSupersededMs`). Decoded voice that arrives
-before its call is active and explicitly clear (the decoder has not yet reported the call, or
-its encryption is not known yet) waits, up to 1 360 ms per decoder, and plays first, in order,
-when the call turns clear; it is let go (not counted) if the call ends encrypted or still
-unresolved, or if the decoder stops covering the tuned channel. The bound covers the time
-dsd-fme takes to report a call: up to 600 ms from the first voice to the call's first link
-control line, then up to 600 ms more before the adapter announces the call (a 100 ms hold,
-then its 500 ms call timer), plus margin. Voice older than that is let go silently, oldest
-first, and counted in `autoRoute.pendingOverwrittenMs` (not in `droppedMs`). The wait also
-delays the call: decoded voice starts when the call is reported, up to about 1.2 s after its
-first voice, and with `voiceOnly: false` the carrier plays raw until then. A clear call whose
+before its call is active and explicitly clear (the decoder has not yet reported the call)
+waits, up to 2 100 ms per decoder, and plays first, in order, when the call turns clear; it is
+let go (not counted) if the call ends encrypted or still unresolved, or if the decoder stops
+covering the tuned channel. `/auto` starts decoded voice when the call is known clear. dsd-fme
+often reports a call before its encryption is known (in direct mode about a second after its
+first voice, known clear up to about 0.7 s later, once a link control decodes); the digital
+voice service never hands `/auto` the voice of that span (it is muted), so `/auto` plays the
+voice from before the report, then the call live, and loses the span in between, while the
+`/stream` hold releases the whole head late. Behind a repeater the call is usually reported
+known clear at once and its head plays whole. The bound covers the oldest voice `/auto` keeps:
+up to 1 694 ms from a call's first voice line to its known-clear report on recorded dsd-fme
+output, plus one line clump (340 ms: voice can arrive ahead of its printed line) and a 60 ms
+burst of margin, rounded up to a 20 ms frame; it assumes the decoder's default 100 ms
+call-start hold. Voice older than that is let go silently, oldest first, and counted in
+`autoRoute.pendingOverwrittenMs` (not in `droppedMs`). The wait also delays the call: decoded
+voice starts when the call is known clear, up to about 1.7 s after its first voice line in
+direct mode and about 1.1 s behind a repeater, and with `voiceOnly: false` the carrier plays
+raw until then. A clear call whose
 encryption later turns unknown has its queued voice dropped (counted in `droppedMs`). Voice the decoder hands over
 after a call ends never becomes the next call's start: after an encrypted or unresolved end
 none is kept until the decoder reports its next call, and after a clear end none for 120 ms

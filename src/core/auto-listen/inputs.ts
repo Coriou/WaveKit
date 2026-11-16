@@ -413,8 +413,8 @@ const PENDING_SAMPLES_PER_RECORD = DSD_FME_DATAGRAM_FRAMES / 2
  * fail-closed rule, not lost route audio; what the bound overwrites, and what is older than the
  * bound when the call is admitted, is added to the `PendingCounter` (`pendingOverwrittenMs`).
  *
- * Memory at 8 kHz: 10 880 samples × 2 B = 21 760 B, plus 10 880 / 80 = 136 records × (8 B
- * time + 4 B count) = 1 632 B: 23 392 B per decoder, allocated once.
+ * Memory at 8 kHz: 16 800 samples × 2 B = 33 600 B, plus 16 800 / 80 = 210 records × (8 B
+ * time + 4 B count) = 2 520 B: 36 120 B per decoder, allocated once.
  */
 export class PendingVoice {
 	readonly capacity: number
@@ -430,12 +430,12 @@ export class PendingVoice {
 	private recSize = 0
 
 	constructor(voiceRate: number, counter?: PendingCounter) {
-		// 8 000 × 1 360 / 1 000 = 10 880 samples at the tap rate.
+		// 8 000 × 2 100 / 1 000 = 16 800 samples at the tap rate.
 		this.capacity = Math.max(
 			1,
 			Math.ceil((voiceRate * AUTO_ROUTE_PENDING_VOICE_MS) / 1000),
 		)
-		// 10 880 / 80 = 136 records; at least two (the newest and one being overwritten).
+		// 16 800 / 80 = 210 records; at least two (the newest and one being overwritten).
 		this.recordCapacity = Math.max(
 			2,
 			Math.ceil(this.capacity / PENDING_SAMPLES_PER_RECORD),
@@ -576,7 +576,7 @@ export class VoiceInput {
 	/** Decoded voice not admitted yet (before the call is active and explicitly clear). */
 	readonly pending: PendingVoice
 	/**
-	 * The last call snapshot's encryption is unresolved (`encryptionKnown === false`): not clear,
+	 * The last call snapshot's encryption is unresolved (`encryptionKnown` present and not `true`): not clear,
 	 * so its voice waits in `pending`; see the router's `encryptionUnresolved`.
 	 */
 	unresolved = false

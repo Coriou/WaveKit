@@ -93,21 +93,23 @@ function validCoverage(value: unknown): VoiceCoverage {
 }
 
 /**
- * Seam for a call event's optional `encryptionKnown` (not in `VoiceTapCall` yet): true only when
- * the event says outright that its encryption is not known yet. Such a call is not clear (fail
- * closed): its voice waits as pending voice and is let go if the call ends so. A clear call that
- * turns unresolved (this snapshot after an active, clear one) invalidates its queued voice
+ * A call event's optional `encryptionKnown` (`DigitalVoiceCall.encryptionKnown`, set by the
+ * dsd-fme adapter's call-first lifecycle): true when the field is present and is anything but
+ * `true`, that is when the event does not say outright that its encryption is known (fail
+ * closed: `false`, or a malformed value). Absent means known (legacy decoders). Such a call is
+ * not clear: its voice waits as pending voice and is let go if the call ends so. A clear call
+ * that turns unresolved (this snapshot after an active, clear one) invalidates its queued voice
  * (counted, as an encrypted turn does; see `noteCall`).
  *
- * When the field lands, it must also be forwarded by the digital voice service: its
- * `handleVoiceCall` (src/core/digital-voice.ts) rebuilds the `DigitalVoiceCall` it hands to the
- * taps field by field, so a field the decoder sets but that rebuild omits never reaches here and
- * every call reads as resolved.
+ * The digital voice service forwards the field to the taps: its `handleVoiceCall`
+ * (src/core/digital-voice.ts) parses it (anything present but `true` becomes `false`) and copies
+ * it into the call it hands to `VoiceTap.call`; the field is read as `unknown` here so a tap
+ * source that passes it through unparsed still fails closed.
  */
 export function encryptionUnresolved(call: VoiceTapCall): boolean {
 	const known: unknown = (call as Partial<Record<"encryptionKnown", unknown>>)
 		.encryptionKnown
-	return known === false
+	return known !== undefined && known !== true
 }
 
 /** Listen: an unknown listen mode keeps the default `auto` (the route as it always was). */
@@ -850,7 +852,7 @@ export class AutoListenRouter extends EventEmitter {
 
 	/**
 	 * Takes the call snapshot. Returns true when a call that was active and explicitly clear is
-	 * now unresolved (`encryptionKnown === false`): its queued voice must be invalidated (fail
+	 * now unresolved (`encryptionKnown` present and not `true`): its queued voice must be invalidated (fail
 	 * closed, as an encrypted turn).
 	 */
 	private noteCall(v: VoiceInput, call: VoiceTapCall, now: number): boolean {
