@@ -524,6 +524,40 @@ describe("recorder refusal streak", () => {
 		}
 	}
 
+	it("an evicted session is ended, not open: it never holds back a streak of snapshot refusals", () => {
+		const base = { sourceId: "rtl", discoveryId: null }
+		const rec = sessionRecorder([
+			{ ...base, observationId: "obs-a", code: "shadow", at: iso(T0) },
+			{ ...base, observationId: "obs-a", code: "evicted", at: iso(T0 + 5_000) },
+		])
+		const refusals: Array<[ScannerRecorderDecision, number]> = []
+		for (let m = 1; m <= 11; m++)
+			refusals.push(["refused:cpu", T0 + m * 60_000])
+		rec.recentRefusals = recorder([], refusals).recentRefusals
+		const read = new RecorderStreakTracker().read(rec, T0 + 11 * 60_000)
+		expect(read).toMatchObject({
+			since: iso(T0 + 60_000),
+			pending: false,
+			raisesStatus: true,
+		})
+	})
+
+	it("an open start older than the raise bound holds nothing back", () => {
+		const base = { sourceId: "rtl", discoveryId: null }
+		const rec = sessionRecorder([
+			{ ...base, observationId: "obs-a", code: "started", at: iso(T0) },
+		])
+		const refusals: Array<[ScannerRecorderDecision, number]> = []
+		for (let m = 1; m <= 7; m++) refusals.push(["refused:cpu", T0 + m * 60_000])
+		rec.recentRefusals = recorder([], refusals).recentRefusals
+		// The start is exactly the bound old: it still holds the first raise.
+		const atBound = new RecorderStreakTracker().read(rec, T0 + BOUND)
+		expect(atBound).toMatchObject({ pending: true, raisesStatus: false })
+		// 7 min after it with no outcome: it lost its outcome, the streak raises.
+		const past = new RecorderStreakTracker().read(rec, T0 + 7 * 60_000)
+		expect(past).toMatchObject({ pending: true, raisesStatus: true })
+	})
+
 	it("a session that started and then failed is no breaker: 10 min of started then refused:store raises", () => {
 		// One session every 30 s for 10 min: 21 starts, each followed 1 s later by its refusal.
 		for (const outcome of [

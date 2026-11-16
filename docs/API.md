@@ -5539,8 +5539,9 @@ over; the core remembers it across reads until a file is kept, a recording start
 fail with a fixable code, or no fixable refusal comes for over 5 minutes, and a gap that long
 between two of them starts a new streak), `durationMs`, the `newestCode` and `newestAt`,
 `refusals` (how many the rings hold, 0 once other codes pushed them out), `raisesStatus` (over
-5 minutes, the newest at most 5 minutes old, and not `pending`), `pending` (a recording that
-started has no outcome yet while one runs) and `fix`. A recording's start and its outcome are
+5 minutes and the newest at most 5 minutes old, unless a recording that started within
+5 minutes of `since`, and at most 5 minutes ago, has no outcome yet), `pending` (a recording that
+started has no outcome yet; an evicted recording has one) and `fix`. A recording's start and its outcome are
 paired by `observationId` in the session ring, which holds the last 64 session decisions. The joined voice of each decision is not reported yet.
 
 #### GET /api/identify

@@ -97,12 +97,13 @@ const SESSION_STARTS: ReadonlySet<ScannerRecorderDecision> = new Set([
 ])
 
 /**
- * A session decision that ends a session's file (kept, refused or discarded: outcomeOf). The
- * progress codes (`started`, `shadow`, `classed`, `voiced`, `evicted`) are steps the recorder notes
- * while the session runs, never its outcome.
+ * A session decision that ends a session's file (kept, refused or discarded: outcomeOf), or
+ * `evicted`, the only decision a session the recorder evicts ever gets (terminal in the
+ * SCANNER_RECORDER_DECISIONS contract). The other progress codes (`started`, `shadow`, `classed`,
+ * `voiced`) are steps the recorder notes while the session runs, never its outcome.
  */
 function isTerminal(code: ScannerRecorderDecision): boolean {
-	return outcomeOf(code) !== "progress"
+	return code === "evicted" || outcomeOf(code) !== "progress"
 }
 
 /**
@@ -326,7 +327,13 @@ export class RecorderStreakTracker {
 		// the streak would first earn while it runs (started within `raiseAfterMs` of the streak's
 		// start, or before it), never one already earned before it started.
 		const pending = firstOpenMs !== null
-		const held = firstOpenMs !== null && firstOpenMs - sinceMs <= raiseAfterMs
+		// An open start older than `raiseAfterMs` holds nothing: every session end the recorder
+		// notes comes well within it (unvoiced 8 s, digital shadow 12 s, file roll-over 120 s), so
+		// such a start lost its outcome and must not hold a real streak back for good.
+		const held =
+			firstOpenMs !== null &&
+			firstOpenMs - sinceMs <= raiseAfterMs &&
+			nowMs - firstOpenMs <= raiseAfterMs
 		// A stale streak is over: the next blocking refusal starts a new one.
 		this.remembered = fresh ? { ...newest, sinceMs } : null
 		const durationMs = Math.max(0, nowMs - sinceMs)

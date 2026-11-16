@@ -202,16 +202,16 @@ export interface RecorderRefusalStreak {
 	/** Blocking refusals the recorder's rings still hold for the streak (0 once rolled out). */
 	refusals: number
 	/**
-	 * True once it lasted over `raiseAfterMs`, is fresh and is not `pending`: `/api/status` is
-	 * raised.
+	 * True once it lasted over `raiseAfterMs` and is fresh, unless a `pending` start holds it back
+	 * (see `pending`): `/api/status` is raised.
 	 */
 	raisesStatus: boolean
 	/**
 	 * A session the recorder started has no terminal decision yet (`finalized`, `refused:*`,
 	 * `discarded:*`; progress codes such as `classed` or `voiced` are none): it may be recording.
 	 * It neither breaks nor ends the streak, and holds back only a raise the streak would first
-	 * earn while it runs (started within `raiseAfterMs` of `since`, or before it), never one already
-	 * earned. A blocking end continues the streak, any other end breaks it.
+	 * earn while it runs (started within `raiseAfterMs` of `since`, or before it, and itself at most
+	 * `raiseAfterMs` old), never one already earned. A blocking end continues the streak, any other end breaks it.
 	 */
 	pending: boolean
 	fix: string
