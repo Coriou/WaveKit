@@ -474,7 +474,7 @@ export interface HealthRoutesOptions {
 }
 
 const SWEEP_FIX =
-	"GET /api/scanner/jobs?view=compact names the sweep; POST /api/scanner/jobs/:id/pause or /cancel ends the hold"
+	"GET /api/scanner/jobs?view=compact names the sweep; POST /api/scanner/jobs/:id/cancel ends the hold (a paused sweep keeps it)"
 
 /** Job states that may hold a source's decoders (every state but pending and the terminal ones). */
 const HOLDING_JOB_STATES: ReadonlySet<string> = new Set([

@@ -907,7 +907,7 @@ The 2026-11-16 core adds `reasons` and `load` (older cores omit both):
 			"code": "sweep-suspends-decoders",
 			"level": "info",
 			"message": "A scanner sweep suspends 2 decoder(s) on 1 source(s); they resume when it ends and are not counted down",
-			"fix": "GET /api/scanner/jobs?view=compact names the sweep; POST /api/scanner/jobs/:id/pause or /cancel ends the hold",
+			"fix": "GET /api/scanner/jobs?view=compact names the sweep; POST /api/scanner/jobs/:id/cancel ends the hold (a paused sweep keeps it)",
 			"sources": [{ "sourceId": "rtl", "decoders": 2 }]
 		},
 		{
