@@ -553,6 +553,7 @@ describe("palette: running rows", async () => {
 				},
 				scanner: { get: () => ({ bandplans: SCANNER_BANDPLANS, sweep: null }) },
 				scanPresets: { get: () => ({ view: null }) },
+				bandplan: { get: () => ({ view: null }) },
 			},
 			tuning: {
 				displayHz: () => 161_150_000,
@@ -568,6 +569,8 @@ describe("palette: running rows", async () => {
 				setVolume: (v: number) => void (volume = v),
 			},
 			activity: {
+				update: (fn: (s: unknown) => unknown) =>
+					void calls.push(["view", fn({ editing: "x", view: "map" })]),
 				setSearch: (t: unknown, c: unknown) =>
 					void calls.push(["search", t, c]),
 			},
@@ -682,6 +685,34 @@ describe("palette: running rows", async () => {
 		expect(f.calls[0]).toEqual([
 			"search",
 			[{ kind: "talkgroup", value: "2081", label: "TG 2081" }],
+			null,
+		])
+	})
+
+	it("opens Activity on a frequency's channel: raster frequency, half a raster step, never a bandwidth", async () => {
+		const f = fakes()
+		await runAction(
+			f.services,
+			{
+				kind: "activity",
+				tokens: [{ kind: "frequency", hz: 161_150_400, bandwidthHz: 59_000 }],
+				label: "x",
+			},
+			null,
+		)
+		expect(shellStore.getState().drawer).toBe("activity")
+		// the same door as every other (naming.ts showChannel): the full list, no column editing
+		expect(f.calls[0]).toEqual(["view", { editing: null, view: "all" }])
+		expect(f.calls[1]).toEqual([
+			"search",
+			[
+				{
+					kind: "frequency",
+					value: "161150000",
+					spanHz: 6_250,
+					label: "161.1500 ±6.25 kHz",
+				},
+			],
 			null,
 		])
 	})

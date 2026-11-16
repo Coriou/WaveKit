@@ -8,7 +8,9 @@ import { errorMessage, takeoverImpact } from "../../data/index.ts"
 import { shellStore } from "../../shell/store.ts"
 import { themeStore, type ThemePrefs } from "../../shell/theme.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
-import { frequencyToken, token, type SearchToken } from "../activity/search.ts"
+import { token, type SearchToken } from "../activity/search.ts"
+import { channelToken, showChannel } from "../naming.ts"
+import { tuningStep } from "../../plot/maths.ts"
 import {
 	listenContract,
 	squelchForModulation,
@@ -41,14 +43,12 @@ type Services = Pick<
 	"data" | "tuning" | "prefs" | "listen" | "activity"
 >
 
-function activityToken(t: ActivityToken): SearchToken {
-	if (t.kind === "frequency")
-		return frequencyToken(
-			t.hz,
-			t.bandwidthHz !== undefined && t.bandwidthHz > 0
-				? Math.max(1000, Math.round(t.bandwidthHz / 2))
-				: undefined,
-		)
+/** A frequency is its channel (naming.ts showChannel's window: raster frequency, half a raster step, never a bandwidth). */
+function activityToken(
+	t: ActivityToken,
+	stepAt: (hz: number) => number,
+): SearchToken {
+	if (t.kind === "frequency") return channelToken(t.hz, stepAt(t.hz))
 	return token(t.kind, t.value)
 }
 
@@ -326,10 +326,21 @@ export async function runAction(
 				shellStore.openDrawer(action.id)
 				return { text: null }
 			case "activity":
+				const stepAt = (hz: number) =>
+					tuningStep(s.data.bandplan.get().view, hz)
+				const only = action.tokens.length === 1 ? action.tokens[0] : undefined
+				if (only?.kind === "frequency") {
+					// one frequency is its channel's history: the one door every surface uses
+					showChannel(s.activity, only.hz, stepAt(only.hz))
+					return { text: null }
+				}
 				if (action.tokens.length === 0) {
 					requestActivitySearchFocus()
 				} else {
-					s.activity.setSearch(action.tokens.map(activityToken), null)
+					s.activity.setSearch(
+						action.tokens.map(t => activityToken(t, stepAt)),
+						null,
+					)
 				}
 				shellStore.openDrawer("activity")
 				return { text: null }

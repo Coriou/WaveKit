@@ -18,10 +18,14 @@ import {
 	yearOf,
 } from "../display.ts"
 import { formatMHz } from "../format.ts"
+import { channelMHz, savedNameAt, transmissionTitle } from "../naming.ts"
 
 export type RecordingIcon = "voice" | "scan"
 
-/** "TG 2081", "Private call to 2081012", "Digital voice 161.150", "161.150 MHz". */
+/**
+ * "TG 2081", "Private call to 2081012"; a scanner recording is a transmission (naming.ts): its channel's saved
+ * name, else what it was ("FM voice", "Digital voice"), never "Recording <Hz>". The frequency is in the meta line.
+ */
 export function recordingTitle(r: RecordingInventoryItem): string {
 	if (r.kind === "dsd-fme-call") {
 		if (r.callType === "private")
@@ -31,10 +35,12 @@ export function recordingTitle(r: RecordingInventoryItem): string {
 		if (r.talkgroup) return `TG ${r.talkgroup}`
 		return "Voice call"
 	}
-	const mhz = r.frequencyHz !== null ? formatMHz(r.frequencyHz) : null
-	if (r.kind === "scanner-dv")
-		return mhz ? `Digital voice ${mhz}` : "Digital voice"
-	return mhz ? `${mhz} MHz` : "Scanner recording"
+	return savedNameAt(r.frequencyHz) ?? transmissionTitle({ what: whatOf(r) })
+}
+
+/** What a scanner recording holds, in content words. */
+function whatOf(r: RecordingInventoryItem): string {
+	return r.kind === "scanner-dv" ? "Digital voice" : "FM voice"
 }
 
 export const KIND_LABEL: Record<RecordingInventoryKind, string> = {
@@ -47,10 +53,15 @@ export function recordingIcon(r: RecordingInventoryItem): RecordingIcon {
 	return r.kind === "dsd-fme-call" ? "voice" : "scan"
 }
 
-/** The line under the title: what it is, who spoke, which decoder, size. */
+/**
+ * The line under the title: what it is (a call; "FM voice" when a saved name is the title), the channel
+ * frequency, who spoke, which decoder, size, and where it sits in its transmission.
+ */
 export function recordingMeta(r: RecordingInventoryItem): string {
-	// the title already carries the frequency when the core knows it
-	const parts: string[] = [KIND_LABEL[r.kind]]
+	const parts: string[] = []
+	if (r.kind === "dsd-fme-call") parts.push(KIND_LABEL[r.kind])
+	else if (savedNameAt(r.frequencyHz) !== null) parts.push(whatOf(r))
+	if (r.frequencyHz !== null) parts.push(channelMHz(r.frequencyHz))
 	if (r.source && r.callType !== "unit") parts.push(`radio ${r.source}`)
 	if (r.decoderId) parts.push(r.decoderId)
 	parts.push(formatBytes(r.bytes))
@@ -60,25 +71,36 @@ export function recordingMeta(r: RecordingInventoryItem): string {
 }
 
 /**
- * Why a scanner file ended early and where it sits in a split transmission, as the core reports
- * it: "Part 2 of 5 · Continues in next part", "Cut: scanner moved on". Null when the core says
- * nothing (an older core, a file that was not cut short, an unknown reason).
+ * Where a scanner file sits in its transmission and, for the end of the whole transmission only, why it ended,
+ * in words (design: a part never says "Cut"): "Part 1 of 3 · continues", "Part 5 of 5 · continues" (the last
+ * listed part rolled over: the transmission goes on in a file not listed yet), "Scanner moved on at 1:30, may be
+ * incomplete" (the time is the offset in the whole transmission, so only a lone file states it; a later part
+ * reads "Part 3 of 3 · Scanner moved on, may be incomplete"), "Continues…" while the chain of a rolled-over file is
+ * not resolved yet, "Receiver lost", "WaveKit stopped". Null when the core says nothing (an older core, a file
+ * that ended by itself).
  */
 export function recordingCutLabel(r: RecordingInventoryItem): string | null {
-	const out: string[] = []
 	const part = r.part ?? null
 	const parts = r.parts ?? null
-	if (part !== null && parts !== null && parts > 1)
-		out.push(`Part ${part} of ${parts}`)
-	if (r.cut === "scanner-moved") out.push("Cut: scanner moved on")
+	const chained = part !== null && parts !== null && parts > 1
+	const out: string[] = chained ? [`Part ${part} of ${parts}`] : []
+	if (chained && part < parts) {
+		// a part before the last: the transmission goes on in the next file, whatever ended this one
+		out.push("continues")
+		return out.join(" · ")
+	}
+	// a lone file's length is its transmission's; a later part's offset needs the parts before it, never listed here
+	const at =
+		!chained && r.durationMs !== null && r.durationMs > 0
+			? ` at ${formatDuration(r.durationMs / 1000)}`
+			: ""
+	if (r.cut === "scanner-moved")
+		out.push(`Scanner moved on${at}, may be incomplete`)
 	else if (r.cut === "duration-rollover") {
-		// A next part is named only when one is listed (part < parts); the last listed part's
-		// roll-over names none, and a lone file whose part is unknown says only why it ended.
-		if (part !== null && parts !== null) {
-			if (part < parts) out.push("Continues in next part")
-		} else out.push("Cut: length limit")
-	} else if (r.cut === "source-lost") out.push("Cut: source lost")
-	else if (r.cut === "shutdown") out.push("Cut: WaveKit stopped")
+		// the last listed part rolled over: it goes on; a lone file whose chain is unknown continues
+		out.push(chained ? "continues" : "Continues…")
+	} else if (r.cut === "source-lost") out.push("Receiver lost")
+	else if (r.cut === "shutdown") out.push("WaveKit stopped")
 	return out.length > 0 ? out.join(" · ") : null
 }
 
@@ -99,10 +121,10 @@ export function formatBytes(b: number): string {
 	return `${Math.max(1, Math.round(b / 1e3))} kB`
 }
 
-/** Storage areas the footer line names, in order, with their short label. */
+/** Storage areas the footer names, in order, in words. */
 const FOOTER_AREAS: readonly (readonly [StorageAreaId, string])[] = [
-	["digital-voice-wav", "calls"],
-	["scanner-evidence", "scanner"],
+	["digital-voice-wav", "call recordings"],
+	["scanner-evidence", "scanner recordings"],
 	["iq-captures", "IQ captures"],
 ]
 
@@ -112,25 +134,43 @@ export function countText(n: number): string {
 }
 const COUNT = new Intl.NumberFormat("en-US")
 
+const capitalised = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
 /**
- * The drawer's footer line: how many are kept (the core's count; absent from an older core), each
- * recording area that exists (with its cap), then the free space.
+ * The drawer's footer, in words: per recording area that exists, its size and cap. Only scanner recordings are
+ * auto-cleaned ("Auto-clean keeps the newest 537 MB of scanner recordings (214 MB used)."); IQ captures stop at
+ * theirs ("IQ captures: 96.0 MB of 640 MB (new captures are refused at the limit)."); an uncapped area states
+ * its size. Then that kept items are never removed (the core's count; absent from an older core) and the free
+ * disk space.
  */
 export function storageLine(
 	storage: StorageReport | null | undefined,
 	kept: number | null,
 ): string {
-	const parts = kept === null ? [] : [`${countText(kept)} kept`]
-	for (const [id, label] of FOOTER_AREAS) {
+	const out: string[] = []
+	for (const [id, words] of FOOTER_AREAS) {
 		const area = storage?.areas.find(a => a.id === id)
-		if (area?.exists)
-			parts.push(
-				`${label} ${formatBytes(area.bytes)}${area.cap ? ` of ${formatBytes(area.cap.bytes)}` : ""}`,
+		if (!area?.exists) continue
+		const used = formatBytes(area.bytes)
+		if (!area.cap) out.push(`${capitalised(words)}: ${used}.`)
+		else if (id === "scanner-evidence")
+			out.push(
+				`Auto-clean keeps the newest ${formatBytes(area.cap.bytes)} of ${words} (${used} used).`,
+			)
+		else if (id === "iq-captures")
+			out.push(
+				`${capitalised(words)}: ${used} of ${formatBytes(area.cap.bytes)} (new captures are refused at the limit).`,
+			)
+		else
+			out.push(
+				`${capitalised(words)}: ${used} of ${formatBytes(area.cap.bytes)}.`,
 			)
 	}
+	if (kept !== null)
+		out.push(`Kept items are never removed (${countText(kept)}).`)
 	if (storage?.filesystem)
-		parts.push(`${formatBytes(storage.filesystem.availableBytes)} free`)
-	return parts.join(" · ")
+		out.push(`${formatBytes(storage.filesystem.availableBytes)} free on disk.`)
+	return out.join(" ")
 }
 
 /**

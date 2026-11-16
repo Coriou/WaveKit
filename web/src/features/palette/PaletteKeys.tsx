@@ -1,4 +1,5 @@
-// The app's single-key shortcuts (keys.ts), always mounted; the palette itself loads on first use.
+// The app's single-key shortcuts (keys.ts), always mounted; the palette itself loads on first use. It also
+// keeps the saved names every surface uses (naming.ts) in step with the saved frequencies.
 import { useEffect } from "react"
 
 import { isReadOnly, useServices } from "../../app/context.ts"
@@ -7,12 +8,15 @@ import { showAppToast } from "../../shell/toast.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
 import { feedControllerFor, toggleFeed } from "../receiver/feed.ts"
 import { toggleOpen } from "../listen/squelch-actions.ts"
+import { followSavedNames } from "../naming.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
 import { GO_WINDOW_MS, isTypingTarget, shortcutFor } from "./keys.ts"
 import { openPalette } from "./request.ts"
 
 export function PaletteKeys() {
 	const { data, tuning, prefs, listen } = useServices()
+	// saved names rename their channel everywhere (naming.ts): this always-mounted root keeps them current
+	useEffect(() => followSavedNames(data.savedFrequencies), [data])
 	useEffect(() => {
 		let goUntil = 0
 		const onKey = (e: KeyboardEvent) => {

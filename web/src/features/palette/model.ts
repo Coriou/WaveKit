@@ -48,6 +48,8 @@ import {
 	savedMeta,
 } from "../tuner/saved.ts"
 import { DECODE_AS } from "../tuned/identify-view.ts"
+import { historyLabel, savedNameAt } from "../naming.ts"
+import { tuningStep } from "../../plot/maths.ts"
 import type { GlyphName } from "./glyphs.ts"
 import {
 	parseCommand,
@@ -1394,18 +1396,20 @@ export class PaletteModel {
 	frequencyActivityItem(): PaletteItem | null {
 		const c = this.#c
 		if (c.tunedHz === null) return null
-		const bw = c.config?.bandwidth
+		// the tuned channel (naming.ts): its raster frequency and half a raster step, never the audio bandwidth
 		return this.activityItem(
-			[
-				{
-					kind: "frequency",
-					hz: c.tunedHz,
-					...(bw ? { bandwidthHz: bw } : {}),
-				},
-			],
+			[{ kind: "frequency", hz: c.tunedHz }],
 			"find:here",
-			`Everything heard on ${mhz(c.tunedHz)}`,
-			"Calls, messages and decodes on this frequency",
+			historyLabel(
+				c.tunedHz,
+				tuningStep(c.bandplan, c.tunedHz),
+				savedNameAt(
+					c.tunedHz,
+					c.saved ?? [],
+					tuningStep(c.bandplan, c.tunedHz),
+				),
+			),
+			"Calls, messages and decodes on this channel",
 			"activity",
 		)
 	}

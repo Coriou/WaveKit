@@ -63,6 +63,15 @@ const SEEDS: readonly Seed[] = [
 		talkgroup: "9",
 		source: "2081045",
 	},
+	// An unsaved channel heard with its carrier 0.3 kHz off the raster, rolled over before its chain is known:
+	// it reads "FM voice", "145.5625" and "Continues…" (naming.ts, recordingCutLabel).
+	{
+		kind: "scanner-analog",
+		agoMin: 20,
+		durationS: 90,
+		mhz: 145.5628,
+		cut: "duration-rollover",
+	},
 	{ kind: "scanner-analog", agoMin: 26, durationS: 42, mhz: 156.8, kept: true },
 	// One long transmission split by roll-overs, its last part cut when the sweep moved on.
 	{

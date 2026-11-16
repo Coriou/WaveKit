@@ -22,6 +22,7 @@ import { useStore } from "../data/index.ts"
 import type { ScannerStore } from "../data/scanner-store.ts"
 import { whatIsThis } from "../data/scanner-format.ts"
 import { useNow } from "../features/hooks.ts"
+import { historyLabel, showChannel } from "../features/naming.ts"
 import { listenTo } from "../features/scanner/drawer/actions.ts"
 import { openDiscovery } from "../features/scanner/ui-store.ts"
 import { shellStore } from "../shell/store.ts"
@@ -32,7 +33,6 @@ import {
 	discoveryTuneHz,
 	discoveryRowLayout,
 	hasTaggable,
-	lastActivityEventId,
 	tagDetail,
 	tagPopoverRows,
 	tagState,
@@ -42,7 +42,7 @@ import {
 	type OutsideSide,
 	type PlacedDiscoveryTag,
 } from "./discovery-tags.ts"
-import { formatMHz } from "./maths.ts"
+import { formatMHz, tuningStep } from "./maths.ts"
 import type { PlotController } from "./plot-store.ts"
 
 /** Settle time after a pan or zoom before asking the core for the span's discoveries. */
@@ -229,14 +229,18 @@ export const DiscoveryTags = memo(function DiscoveryTags({
 			openDiscovery(id)
 			shellStore.openDrawer("scanner")
 		},
-		activity: d => {
+		history: d => {
 			close(false)
-			// the core's last event for it opens directly; older cores: what was heard on its frequency
-			const id = lastActivityEventId(d)
-			if (id) services.activity.showEvent(id)
-			else services.activity.showFrequency(d.frequencyHz, d.bandwidthHz)
+			// the channel's history: its raster frequency and half a raster step, never the discovery's bandwidth
+			showChannel(services.activity, d.frequencyHz, rasterStep(d.frequencyHz))
 		},
+		lastTransmission: id => {
+			close(false)
+			services.activity.showEvent(id)
+		},
+		rasterStep: hz => rasterStep(hz),
 	}
+	const rasterStep = (hz: number) => tuningStep(data.bandplan.get().view, hz)
 	const shown =
 		open?.kind === "tag" ? placed.find(t => t.id === open.id) : undefined
 	const edge =
@@ -350,13 +354,17 @@ interface DetailActions {
 	tune: (hz: number) => void
 	listen: (d: Discovery) => void
 	scanner: (id: string) => void
-	/** Last call (the core's last Activity event for it), else Search Activity on its frequency. */
-	activity: (d: Discovery) => void
+	/** "History of …": Activity on the discovery's channel. */
+	history: (d: Discovery) => void
+	/** "Open last transmission": the core's last Activity event for it. */
+	lastTransmission: (eventId: string) => void
+	/** The band-plan raster step at a frequency: the history door's label and its action share it. */
+	rasterStep: (hz: number) => number
 }
 
 /**
  * A tag's popover. One discovery: what it is and how we know (proof, evidence, first and last heard, airtime, calls)
- * with Tune, Listen, Open in Scanner and its Activity. A group: every member in frequency order with its state, its
+ * with Tune, Listen, Evidence (Scanner), History of its channel and its last transmission. A group: every member in frequency order with its state, its
  * "what is this" and a Tune action (req 1.1, 1.3). Nothing tunes on the tag's click.
  */
 function TagPopover({
@@ -514,32 +522,33 @@ function TagDetailView({
 					type="button"
 					className="wk-btn"
 					data-size="sm"
+					title="Every discovery the scanner keeps for it"
 					onClick={() => actions.scanner(d.id)}
 				>
-					Open in Scanner
+					Evidence
 				</button>
-				{v.lastEventId !== null ? (
+				<button
+					type="button"
+					className="wk-btn"
+					data-size="sm"
+					title="What was heard on this channel, in Activity"
+					onClick={() => actions.history(d)}
+				>
+					{historyLabel(d.frequencyHz, actions.rasterStep(d.frequencyHz))}
+				</button>
+				{v.lastEventId !== null && (
 					<button
 						type="button"
 						className="wk-btn"
 						data-size="sm"
-						title="The last call heard here, in Activity"
-						onClick={() => actions.activity(d)}
+						title="The last transmission heard here, in Activity"
+						onClick={() => {
+							if (v.lastEventId !== null)
+								actions.lastTransmission(v.lastEventId)
+						}}
 					>
-						Last call
+						Open last transmission
 					</button>
-				) : (
-					(v.calls || (v.noCalls === null && v.state === "proven")) && (
-						<button
-							type="button"
-							className="wk-btn"
-							data-size="sm"
-							title="Search Activity on this frequency"
-							onClick={() => actions.activity(d)}
-						>
-							Search Activity
-						</button>
-					)
 				)}
 			</div>
 		</div>

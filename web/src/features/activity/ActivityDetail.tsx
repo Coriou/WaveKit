@@ -13,6 +13,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { fetchActivityRecord, queryParams } from "../../data/activity-feed.ts"
 import { errorMessage, useStore } from "../../data/index.ts"
+import { useSavedNames } from "../naming.ts"
 import { shellStore } from "../../shell/store.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Label } from "../../ui/Label.tsx"
@@ -225,6 +226,7 @@ export function ActivityDetail({
 	}
 
 	const aircraft = useRowAircraft(item?.entityKey)
+	useSavedNames() // a saved name renames the channel
 	useAircraftFleet(aircraftKey(item?.entityKey))
 	const v = item ? rowView(item, aircraft) : null
 	const hz = item?.frequencyHz ?? null
