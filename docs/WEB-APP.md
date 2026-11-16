@@ -245,6 +245,8 @@ The bar's title says what you hear, in one line:
   talks. **Play anyway** turns Voice only off so every carrier plays; the toast has **Undo**, which
   turns Voice only back on unless the squelch was changed again since.
 - **Listening**: audio is playing. A decoded call says so under it, for example `DMR voice · TG …`.
+  While the core does not know yet whether the call is encrypted, it says `DMR voice · checking…`
+  instead: the call is never shown as clear until its encryption is known.
 - **Open**: the squelch is open, and it stays open across retunes until you change it.
 
 **Audio options** sets the squelch in one row, **Auto | Manual | Open**:

@@ -37,6 +37,7 @@ import {
 	listenHeadline,
 	listenModeOf,
 	sourceHint,
+	voiceCallLine,
 	voiceRoute,
 } from "../../src/features/listen/sound.ts"
 
@@ -212,6 +213,69 @@ describe("Listen › What you hear", () => {
 			voiceRoute([dsd({ running: false })], voice(), 161_150_000, 6250),
 		).toBeNull()
 		expect(voiceRoute([dsd()], null, 161_150_000, 6250)).toBeNull()
+	})
+
+	describe("encryption not known yet (encryptionKnown: false)", () => {
+		const live = (over: Record<string, unknown>) =>
+			({
+				decoderId: "dsd-fme",
+				callId: "c1",
+				protocol: "dmr",
+				talkgroup: 2081,
+				source: 2081045,
+				slot: 1,
+				encrypted: false,
+				active: true,
+				startedAt: "2026-10-17T17:00:00Z",
+				...over,
+			}) as unknown as DigitalVoiceStatus["call"]
+		const line = (over: Record<string, unknown>) => {
+			const route = voiceRoute([dsd()], voice(live(over)), 161_150_000, 6250)
+			return { route, text: voiceCallLine("DMR", route, "161.150 MHz") }
+		}
+
+		it("an absent field keeps today's label and flags", () => {
+			const { route, text } = line({})
+			expect(text).toBe("DMR voice · TG 2081 · radio 2081045")
+			expect(route).toMatchObject({ encrypted: false, encryptionKnown: true })
+		})
+
+		it("encryptionKnown true keeps today's label and flags", () => {
+			expect(line({ encryptionKnown: true }).text).toBe(
+				"DMR voice · TG 2081 · radio 2081045",
+			)
+			expect(
+				line({ encryptionKnown: true, encrypted: true }).route,
+			).toMatchObject({ encrypted: true, encryptionKnown: true })
+		})
+
+		it("encryptionKnown false says checking, never clear", () => {
+			const { route, text } = line({ encryptionKnown: false })
+			expect(text).toBe("DMR voice · checking…")
+			expect(text).not.toContain("TG 2081")
+			expect(route).toMatchObject({ encrypted: false, encryptionKnown: false })
+		})
+
+		it("encrypted true with encryptionKnown false is unknown too", () => {
+			const { route, text } = line({ encrypted: true, encryptionKnown: false })
+			expect(text).toBe("DMR voice · checking…")
+			expect(route).toMatchObject({ encrypted: false, encryptionKnown: false })
+		})
+
+		it("only a literal false means unknown: malformed values keep today's behaviour", () => {
+			for (const v of [0, "false", null, "no"]) {
+				const { route, text } = line({ encryptionKnown: v })
+				expect(text).toBe("DMR voice · TG 2081 · radio 2081045")
+				expect(route?.encryptionKnown).toBe(true)
+			}
+		})
+
+		it("with no route the line falls back as before", () => {
+			expect(voiceCallLine(null, null, "161.150 MHz")).toBe(
+				"Digital voice · 161.150 MHz",
+			)
+			expect(voiceCallLine("P25", null, null)).toBe("P25 voice")
+		})
 	})
 
 	it("offers the live tone over the Activity rows (WG12), and the rows on older cores", () => {

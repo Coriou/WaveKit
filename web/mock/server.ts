@@ -140,6 +140,11 @@ export interface MockServerOptions {
 	/** Seeds the band inspection UX discoveries (./band-fixtures.ts; WAVEKIT_MOCK_BAND_FIXTURES=1). */
 	bandFixtures?: boolean
 	/**
+	 * The mock DMR call says `encryptionKnown: false` (WAVEKIT_MOCK_VOICE_ENCRYPTION_UNKNOWN=1):
+	 * its encryption is not known yet, so the web app shows it as checking, never as clear.
+	 */
+	voiceEncryptionUnknown?: boolean
+	/**
 	 * Retunes through the multi-band sequence of ./retune-sweep.ts, then parks at 431.0125 MHz at
 	 * 1.024 MS/s; frames follow the tuner's sample rate (WAVEKIT_MOCK_RETUNE_SWEEP=1).
 	 */
@@ -849,6 +854,9 @@ export async function buildMockServer(
 						source: 2081045,
 						slot: 1,
 						encrypted: false,
+						...(options.voiceEncryptionUnknown
+							? { encryptionKnown: false }
+							: {}),
 						active: true,
 						startedAt: new Date(
 							Math.floor(Date.now() / 20_000) * 20_000,
@@ -3087,6 +3095,9 @@ async function main(): Promise<void> {
 		...(retuneEnv !== undefined ? { retuneMs: Number(retuneEnv) } : {}),
 		...(env["WAVEKIT_MOCK_BAND_FIXTURES"] === "1"
 			? { bandFixtures: true }
+			: {}),
+		...(env["WAVEKIT_MOCK_VOICE_ENCRYPTION_UNKNOWN"] === "1"
+			? { voiceEncryptionUnknown: true }
 			: {}),
 		...(env["WAVEKIT_MOCK_RETUNE_SWEEP"] === "1" ? { retuneSweep: true } : {}),
 		...(env["WAVEKIT_MOCK_OVERLOAD_HINT"] === "1"

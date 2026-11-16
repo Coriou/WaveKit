@@ -170,7 +170,13 @@ export interface VoiceRoute {
 	active: boolean
 	/** "TG 2081 · radio 2081045" for the current or last call. */
 	call: string | null
+	/** The current call is encrypted; false while its encryption is not known yet. */
 	encrypted: boolean
+	/**
+	 * False while the core has not learned whether the current call is encrypted
+	 * (`encryptionKnown: false` on the call): show it as unknown, never as clear.
+	 */
+	encryptionKnown: boolean
 }
 
 const VOICE_TYPES = new Set(["dsd-fme"])
@@ -195,6 +201,7 @@ export function voiceRoute(
 		const stream = voice.decoders.find(s => s.decoderId === d.id)
 		if (!stream) continue
 		const call = stream.call ?? stream.lastCall ?? null
+		const known = !encryptionUnknown(stream.call)
 		return {
 			decoderId: d.id,
 			protocol: call?.protocol ? call.protocol.toUpperCase() : null,
@@ -203,10 +210,35 @@ export function voiceRoute(
 			rate: voice.sampleRate,
 			active: stream.call?.active === true,
 			call: call ? callText(call) : null,
-			encrypted: stream.call?.encrypted === true,
+			encrypted: known && stream.call?.encrypted === true,
+			encryptionKnown: known,
 		}
 	}
 	return null
+}
+
+/**
+ * Only a literal `encryptionKnown: false` means unknown: an absent, true or malformed field keeps
+ * the call's `encrypted` as it is (cores before the field always knew it). Read locally so this
+ * compiles with or without the field on the DTO.
+ */
+function encryptionUnknown(call: object | null | undefined): boolean {
+	if (!call) return false
+	return (call as { encryptionKnown?: unknown }).encryptionKnown === false
+}
+
+/**
+ * The Listen head's line under a decoded call: "DMR voice · TG 2081 · radio 2081045", or
+ * "DMR voice · checking…" while the call's encryption is not known yet (never shown as clear).
+ */
+export function voiceCallLine(
+	protocol: string | null,
+	route: VoiceRoute | null,
+	fallback: string | null,
+): string {
+	const detail =
+		route && !route.encryptionKnown ? "checking…" : (route?.call ?? fallback)
+	return [`${protocol ?? "Digital"} voice`, detail].filter(Boolean).join(" · ")
 }
 
 function callText(

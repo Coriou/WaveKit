@@ -68,6 +68,7 @@ import {
 	toneSquelchFits,
 	toneSquelchPatch,
 	toneText,
+	voiceCallLine,
 	voiceRoute,
 	type AgcChoice,
 	type DeemphChoice,
@@ -223,12 +224,11 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 		voiceOnlyFits(status?.config) &&
 		setting.kind === "auto"
 	const sub = digital
-		? [
-				`${routeProtocol(now, route) ?? "Digital"} voice`,
-				route?.call ?? (hz === null ? null : formatMHz(hz)),
-			]
-				.filter(Boolean)
-				.join(" · ")
+		? voiceCallLine(
+				routeProtocol(now, route),
+				route,
+				hz === null ? null : formatMHz(hz),
+			)
 		: on && toneWaiting && toneGate
 			? `Waiting for ${toneText(toneGate)}`
 			: [
