@@ -99,6 +99,8 @@ export function toggleOpen(
 	const after = remember !== null ? unlockHere(listen) : () => undefined
 	const sent = send(liveAudio, patch).then(ok => {
 		if (toggling === sent) toggling = null
+		// back from Open: forget it, so an Open chosen elsewhere later goes back to Auto
+		if (ok && remember === null) beforeOpen = null
 		after(ok)
 		return ok
 	})

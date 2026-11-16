@@ -206,6 +206,8 @@ describe("Q: Open and back", () => {
 		await toggleOpen(store, listen)
 		await toggleOpen(store, listen)
 		expect(patches[1]).toEqual({ squelchMode: "manual", squelch: -72 })
+		// once back, an Open chosen elsewhere later goes back to Auto, not to this Manual
+		expect(rememberedClosed()).toBeNull()
 	})
 
 	it("from default to hearing noise is one key: Q starts Listen and opens", async () => {
