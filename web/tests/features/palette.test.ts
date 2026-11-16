@@ -689,13 +689,13 @@ describe("palette: running rows", async () => {
 		])
 	})
 
-	it("opens Activity on a frequency's channel: raster frequency, half a raster step, never a bandwidth", async () => {
+	it("opens Activity on a frequency's channel: raster frequency and half a raster step", async () => {
 		const f = fakes()
 		await runAction(
 			f.services,
 			{
 				kind: "activity",
-				tokens: [{ kind: "frequency", hz: 161_150_400, bandwidthHz: 59_000 }],
+				tokens: [{ kind: "frequency", hz: 161_150_400 }],
 				label: "x",
 			},
 			null,

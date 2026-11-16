@@ -239,7 +239,6 @@ export interface IdentifierToken {
 export interface FrequencyToken {
 	readonly kind: "frequency"
 	readonly hz: number
-	readonly bandwidthHz?: number
 }
 export type ActivityToken = IdentifierToken | FrequencyToken
 

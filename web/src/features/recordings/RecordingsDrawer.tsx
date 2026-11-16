@@ -40,6 +40,7 @@ import { openDiscovery } from "../scanner/ui-store.ts"
 import {
 	channelMHz,
 	historyLabel,
+	rasterHz,
 	showChannel,
 	useSavedNames,
 } from "../naming.ts"
@@ -1160,7 +1161,7 @@ function RowActions({
 								type="button"
 								role="menuitem"
 								className="wk-option"
-								onClick={() => actions.tune(r.frequencyHz ?? 0)}
+								onClick={() => actions.tune(rasterHz(r.frequencyHz ?? 0))}
 							>
 								<RecIcon name="tune" size={16} />
 								<span className="wkf-grow">

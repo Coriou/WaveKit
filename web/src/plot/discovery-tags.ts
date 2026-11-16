@@ -217,11 +217,19 @@ export function approxBandwidth(hz: unknown): string | null {
 export function unidentifiedLabel(
 	d: Pick<Discovery, "class" | "hint" | "bandwidthHz" | "anchor">,
 ): string {
-	if (d.anchor === "decode") return "Unidentified"
+	const what = unidentifiedShape(d)
+	return what ? `Unidentified · ${what}` : "Unidentified"
+}
+
+/** The measured shape of an unidentified signal ("4FSK ~9 kHz"), or null when nothing was measured. */
+export function unidentifiedShape(
+	d: Pick<Discovery, "class" | "hint" | "bandwidthHz" | "anchor">,
+): string | null {
+	if (d.anchor === "decode") return null
 	const shape = shapeOf(d.class) ?? shapeOf(d.hint)
 	const bw = approxBandwidth(d.bandwidthHz)
 	const what = [shape, bw].filter(x => x !== null).join(" ")
-	return what ? `Unidentified · ${what}` : "Unidentified"
+	return what || null
 }
 
 /**
@@ -235,7 +243,7 @@ export function tagName(
 ): string {
 	const label = d.operator?.label ?? null
 	if (tagState(d) === "heard" && d.protocol !== "dmr" && d.anchor !== "decode")
-		return channelName({ saved, label, proven: unidentifiedLabel(d) })
+		return channelName({ saved, label, shape: unidentifiedShape(d) })
 	return channelName({ saved, label, proven: discoveryTitle(d) })
 }
 

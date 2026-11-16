@@ -47,8 +47,8 @@ everything their antenna hears in one place.
 | Activity                                                                                              | Map                                                                                               |
 | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | ![Activity log with category filters and recent decoded events](docs/assets/screenshots/activity.png) | ![Map with aircraft, vessels and the station's coverage](docs/assets/screenshots/map.png)         |
-| **Messages**                                                                                          | **Scanner**                                                                                       |
-| ![Decoded messages as cards](docs/assets/screenshots/messages.png)                                    | ![Scanner drawer listing the signals found in the last hour](docs/assets/screenshots/scanner.png) |
+| **Activity cards**                                                                                    | **Scanner**                                                                                       |
+| ![Decoded events as cards](docs/assets/screenshots/messages.png)                                      | ![Scanner drawer listing the signals found in the last hour](docs/assets/screenshots/scanner.png) |
 
 ## Quick start
 

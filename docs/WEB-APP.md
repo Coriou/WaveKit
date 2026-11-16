@@ -161,14 +161,16 @@ channel only`. **History of …** (`History of Club net`, `History of 145.6125`:
 
 #### One name per channel
 
-A channel reads the same everywhere (tags, the tuned card, Activity rows, Recordings, the
-palette): your saved name first, then the operator's label, the proven protocol (`POCSAG pager`,
-`FM voice`), the likely one (`Likely DMR`), then what was measured (`Unidentified · FM ~25 kHz`).
-A saved frequency names the channel within half a raster step of it, so a carrier measured a
-little off the raster still gets its name, and a neighbouring channel never does. NFM is only the
-demodulator setting: what was heard on an analog channel reads `FM voice`. Every door that opens
-a channel's history (the tag detail, the tuned card, the palette, Recordings) opens the same
-Activity window, and its search chip states the width, for example `Club net · 145.6125 ±6.25 kHz`.
+A channel reads the same on the tags, Activity rows, Recordings and the palette (the tuned
+card's body keeps its own title for now; its history link uses the saved name): your saved name
+first, then the operator's label, the proven protocol (`POCSAG pager`, `FM voice`), the likely
+one (`Likely DMR`), then what was measured (`Unidentified · FM ~25 kHz`). A saved frequency
+names the channel within half a raster step of it (the band plan's step at that frequency, 12.5
+kHz outside any band), so a carrier measured a little off the raster still gets its name, and a
+neighbouring channel never does. NFM is only the demodulator setting: what was heard on an
+analog channel reads `FM voice`. Every door that opens a channel's history (the tag detail, the
+tuned card, the palette, Recordings) opens the same Activity window, and its search chip states
+the width, for example `Club net · 145.6125 ±6.25 kHz`.
 
 ### The tuned card
 
