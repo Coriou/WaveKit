@@ -53,6 +53,17 @@ describe("GET /api/scanner folders", () => {
 		expect(res.json().stateBackup).toEqual(stateBackup)
 	})
 
+	it("passes a pending state backup through (its recordings still being linked in)", async () => {
+		const stateBackup: ScannerStatus["stateBackup"] = {
+			outcome: "pending",
+			fromFormat: "unmarked",
+			toFormat: "f1-h3-r1",
+		}
+		const server = await build({ enabled: true, stateBackup })
+		const res = await server.inject({ url: "/api/scanner" })
+		expect(res.json().stateBackup).toEqual(stateBackup)
+	})
+
 	it("omits the field before the migration ran", async () => {
 		const server = await build({ enabled: true })
 		const res = await server.inject({ url: "/api/scanner" })

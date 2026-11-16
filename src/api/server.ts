@@ -79,9 +79,15 @@ import { enumRoutes } from "./routes/enums.js"
 import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
 import { agentStatusRoutes } from "./routes/agent-status.js"
 import {
+	createDiagnosticsSampler,
 	diagnosticsRoutes,
 	type DiagnosticsRoutesOptions,
 } from "./routes/diagnostics.js"
+import {
+	RecorderStreakTracker,
+	recorderDecisionsRoutes,
+} from "./routes/recorder-decisions.js"
+import { identifyAtRoutes } from "./routes/identify-at.js"
 import {
 	iqSnapshotRoutes,
 	type IqSnapshotOptions,
@@ -1446,6 +1452,26 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		// One diagnostics sample shared by GET /api/diagnostics and the load on GET /api/status.
+		const diagnosticsSampler = createDiagnosticsSampler({
+			...this.diagnostics,
+			containerCpuCores: () => {
+				const percent =
+					this.resourceAggregator?.getContainerResources().cpuUsagePercent
+				return typeof percent === "number" ? percent / 100 : null
+			},
+		})
+		// One refusal streak shared by GET /api/status and the recorder decisions route.
+		const recorderStreak = new RecorderStreakTracker()
+		const scanner = this.scanner
+		const recorderSource = scanner
+			? {
+					recorder: () => scanner.recorderStatus(),
+					frequencyOf: (id: string) =>
+						scanner.getDiscovery(id)?.frequencyHz ?? null,
+				}
+			: undefined
+
 		// Static value lists under root admission, like GET /api
 		await this.app.register(enumRoutes)
 		// PATCH mounts with the service and, while STATION_WRITE_REQUIRES_ACCESS, only with
@@ -1531,6 +1557,10 @@ export class ApiServer {
 			accessAuthorityLost: this.access
 				? () => this.access?.api.policy.credentialAuthorityLost === true
 				: undefined,
+			recorderStreak: recorderSource
+				? () => recorderStreak.read(recorderSource.recorder(), Date.now())
+				: undefined,
+			diagnostics: () => diagnosticsSampler.read(),
 		})
 
 		// Register source routes (Requirement 9.3, 9.4, 9.5)
@@ -1721,6 +1751,18 @@ export class ApiServer {
 				...(this.access === undefined ? { legacyAudioHost: true } : {}),
 			})
 		}
+		if (scanner && recorderSource) {
+			// Why nothing is recorded, and what is at a frequency: compositions of scanner data.
+			await this.app.register(recorderDecisionsRoutes, {
+				source: recorderSource,
+				tracker: recorderStreak,
+			})
+			await this.app.register(identifyAtRoutes, {
+				source: {
+					listDiscoveries: filter => scanner.listDiscoveriesPaced(filter),
+				},
+			})
+		}
 		if (this.spectrum) {
 			await this.app.register(spectrumRoutes, { spectrum: this.spectrum })
 		}
@@ -1773,14 +1815,7 @@ export class ApiServer {
 			},
 		})
 
-		await this.app.register(diagnosticsRoutes, {
-			...this.diagnostics,
-			containerCpuCores: () => {
-				const percent =
-					this.resourceAggregator?.getContainerResources().cpuUsagePercent
-				return typeof percent === "number" ? percent / 100 : null
-			},
-		})
+		await this.app.register(diagnosticsRoutes, { sampler: diagnosticsSampler })
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)
 		this.wsBroadcaster.registerRoute(this.app, this.accessController)

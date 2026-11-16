@@ -1169,7 +1169,7 @@ describe("pre-migration backup: the recordings are linked after the start", () =
 	const partialName = `.pre-unmarked.partial-${NOW}`
 	const finalName = `pre-unmarked.${NOW}`
 
-	it("the first half makes no link and leaves a pending partial the status does not report", async () => {
+	it("the first half makes no link and leaves a pending partial the status reports as pending", async () => {
 		await seedState()
 		let links = 0
 		const first = await ensurePreMigrationBackup({
@@ -1185,7 +1185,11 @@ describe("pre-migration backup: the recordings are linked after the start", () =
 		expect(links).toBe(0)
 		expect(await backups()).toEqual([partialName])
 		expect(await receiptOf(partialName)).toMatchObject({ linksPending: true })
-		expect(backupStatusOf(first)).toBeNull()
+		expect(backupStatusOf(first)).toEqual({
+			outcome: "pending",
+			fromFormat: "unmarked",
+			toFormat: expect.any(String),
+		})
 		// The state files are already copied (the migration may now rewrite the live ones).
 		expect(
 			await readFile(join(dir, BACKUPS_DIR, partialName, "jobs.json"), "utf8"),

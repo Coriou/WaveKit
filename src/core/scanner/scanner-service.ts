@@ -71,6 +71,7 @@ import type {
 	ScannerLeaseRefusal,
 	ScannerPassiveReason,
 	ScannerRecorderDiscovery,
+	ScannerRecorderStatus,
 } from "@wavekit/api-types"
 import {
 	RECORDING_KEEPS_FILE_NAME,
@@ -6766,6 +6767,11 @@ export class ScannerService extends EventEmitter {
 	/** the discovery's remembered replay trial outcomes. */
 	trialMemoryOf(discoveryId: string): readonly TrialMemoryEntry[] {
 		return this.trialMemory.view(discoveryId)
+	}
+
+	/** `ScannerStatus.recorder` alone (read-only), for the recorder decisions route and the status verdict. */
+	recorderStatus(): ScannerRecorderStatus {
+		return this.widebandAnalog.diagnostics()
 	}
 
 	/** `Discovery.recorder` of a detail read: the analog recorder's decisions, or null when none. */

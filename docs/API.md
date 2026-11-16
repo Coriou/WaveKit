@@ -882,6 +882,73 @@ curl http://localhost:9000/api/status
 }
 ```
 
+The 2026-11-16 core adds `reasons` and `load` (older cores omit both):
+
+```json
+{
+	"status": "degraded",
+	"reasons": [
+		{
+			"code": "sweep-suspends-decoders",
+			"level": "info",
+			"message": "A scanner sweep suspends 2 decoder(s) on 1 source(s); they resume when it ends and are not counted down",
+			"fix": "GET /api/scanner/jobs?view=compact names the sweep; POST /api/scanner/jobs/:id/pause or /cancel ends the hold",
+			"sources": [{ "sourceId": "rtl", "decoders": 2 }]
+		},
+		{
+			"code": "recorder-refusal-streak",
+			"level": "warn",
+			"message": "The analog recorder has kept nothing for 7 min, refusing every candidate (newest refused:tuning); GET /api/scanner/recorder/decisions lists them",
+			"fix": "GET /api/sources (sources[].tuningUnproven), then POST /api/tuner/:sourceId/take-back",
+			"streak": {
+				"since": "2026-01-01T10:00:00.000Z",
+				"durationMs": 420000,
+				"newestCode": "refused:tuning",
+				"newestAt": "2026-01-01T10:06:50.000Z",
+				"refusals": 31,
+				"raisesStatus": true,
+				"fix": "GET /api/sources (sources[].tuningUnproven), then POST /api/tuner/:sourceId/take-back"
+			}
+		}
+	],
+	"load": {
+		"at": "2026-01-01T10:07:00.000Z",
+		"processCpuCores": 0.82,
+		"containerCpuCores": 1.1,
+		"eventLoopUtilization": 0.31,
+		"eventLoopDelayMaxMs": 14,
+		"eventLoopDelayP99Ms": 12,
+		"eventLoopDelayMaxMs10m": 48,
+		"details": "/api/diagnostics"
+	}
+}
+```
+
+`status` is the verdict to read: `health.status` (the components' own verdict) raised to
+`degraded` by a `warn` reason; `unhealthy` is never lowered. `reasons` (empty when nothing
+applies) says why, each with a closed `code`, fixed `message` text and the `fix` call:
+
+- `sweep-suspends-decoders` (`info`): a scanner sweep holds a source, so its configured decoders
+  are suspended (`suspension.reasonCode: "tuner-scanning"`). They are not counted down, so a sweep
+  never makes the core `unhealthy` (nor `/health` 503 or `/health/ready` not ready); a decoder that
+  faulted still counts. `sources` lists the held sources and how many decoders each suspends.
+- `recorder-refusal-streak` (`warn`): the wideband analog recorder has kept no file for over
+  5 minutes while refusing candidates with a code an operator can fix (`refused:tuning`,
+  `refused:cpu`, `refused:slots`, `refused:no-iq`, `refused:record-disabled`, `refused:store`,
+  `refused:start-failed`, `discarded:store-backlog`, `discarded:write-failed`,
+  `discarded:buffer-full`), the newest of them at most 5 minutes old. Classification outcomes
+  (`refused:not-analog`, `discarded:unvoiced`, ...) never make a streak. `fix` is the call for the
+  newest code; `streak` is the same object as on
+  [`GET /api/scanner/recorder/decisions`](#get-apiscannerrecorderdecisions). Exactly 5 minutes
+  does not raise it; any longer does.
+
+`load` holds the CPU and event-loop figures of the shared
+[`GET /api/diagnostics`](#get-apidiagnostics) sample (one sample at most every 2 s whoever
+asks, so this adds no sampling): `processCpuCores` (all threads, 1 is one core),
+`containerCpuCores`, `eventLoopUtilization` (0 to 1), `eventLoopDelayMaxMs` and
+`eventLoopDelayP99Ms` (the last 2 s) and `eventLoopDelayMaxMs10m`. A figure reads null until the
+sample has one (the first has no CPU window); `load` is null when the sample failed.
+
 #### GET /api/resources, /api/resources/container and /api/resources/backpressure
 
 `GET /api/resources` is one snapshot of the core's resource use: container CPU and memory,
@@ -4109,11 +4176,12 @@ them: `noAlias`, no merge alias names the folder; `aliasWithoutOwner`, its alias
 no live discovery (either way no observation listing its recordings named a single owner).
 Nothing is moved or deleted. One info line at startup carries the same counts.
 
-`stateBackup` (absent from older cores, before the scanner state loaded, and while a backup
-this start took is still having its recordings linked in, seconds after the start) is this start's
+`stateBackup` (absent from older cores and before the scanner state loaded) is this start's
 pre-migration backup of the scanner state ([SCANNER.md](SCANNER.md), upgrade and rollback):
 `outcome` `taken` with `fromFormat`, `toFormat` and `path` (relative to `scanner.storage.dir`,
-`.backups/pre-<format>.<ms>`); `skipped` with `fromFormat`, `toFormat` and a fixed `reason`
+`.backups/pre-<format>.<ms>`); `pending` with `fromFormat` and `toFormat` while a backup this
+start took is still having its recordings linked in, seconds after the start (then `taken` or
+`skipped`; cores before 2026-11-16 leave `stateBackup` absent meanwhile); `skipped` with `fromFormat`, `toFormat` and a fixed `reason`
 (`unreadable`, `low-disk`, `disk-unknown`, `too-many-files`, `copy-failed`: one file could not
 be read or copied, and no backup was kept); or `none` with `reason` `same-format` or `fresh`.
 
@@ -5343,6 +5411,119 @@ audio if it was idle.
 
 Also 409 `LIVE_AUDIO_UNAVAILABLE` (live audio not configured), 409
 `SCANNER_DISCOVERY_LOCKED_OUT`, 404 `SCANNER_DISCOVERY_NOT_FOUND`.
+
+#### GET /api/scanner/recorder/decisions
+
+Why nothing is recorded, in one read: the wideband analog recorder's recent decisions, newest
+first, from the two rings `GET /api/scanner` shows as `recorder.recent` (64 decisions about
+recordings) and `recorder.recentRefusals` (32 snapshot refusals). Present when the scanner is
+configured; it reads memory only.
+
+```bash
+curl "http://localhost:9000/api/scanner/recorder/decisions?limit=20"
+```
+
+`limit` (optional) is 1 to 96, the two rings together (64 + 32); 20 by default. Any other value,
+or another parameter, answers 400 `VALIDATION_ERROR` naming the field.
+
+```json
+{
+	"at": "2026-01-01T10:07:00.000Z",
+	"limit": 20,
+	"items": [
+		{
+			"at": "2026-01-01T10:06:50.000Z",
+			"code": "refused:tuning",
+			"outcome": "refused",
+			"kind": "snapshot",
+			"sourceId": "rtl",
+			"observationId": "o-9f2",
+			"discoveryId": "d-41c",
+			"frequencyHz": 100000000
+		}
+	],
+	"held": 96,
+	"counts": { "refused:tuning": 31, "finalized": 12 },
+	"streak": {
+		"since": "2026-01-01T10:00:00.000Z",
+		"durationMs": 420000,
+		"newestCode": "refused:tuning",
+		"newestAt": "2026-01-01T10:06:50.000Z",
+		"refusals": 31,
+		"raisesStatus": true,
+		"fix": "GET /api/sources (sources[].tuningUnproven), then POST /api/tuner/:sourceId/take-back"
+	}
+}
+```
+
+Each item: `code` (the closed recorder decision codes, [SCANNER.md](SCANNER.md) Recorder
+decisions), `outcome` (`kept` for `finalized`, `refused`, `discarded`, or `progress` for
+`started`, `shadow`, `classed`, `voiced` and `evicted`), `kind` (`session`: about a recording;
+`snapshot`: a refusal before any recording started), the source, observation and discovery ids
+(`discoveryId` null for a shadow not yet placed), `frequencyHz` (the discovery's frequency now;
+null without a discovery or once it is gone) and, when the decision has them, `unclean` and
+`receipt` as on `GET /api/scanner`. `held` is how many decisions the rings hold now; `counts`
+counts every decision since the core started.
+
+`streak` is null unless refusals with a fixable code (listed under
+[`GET /api/status`](#get-apistatus) `recorder-refusal-streak`) follow the last kept file:
+`since` (the first of them still known, a lower bound once the rings rolled over; the core
+remembers it across reads until a file is kept), `durationMs`, the `newestCode` and `newestAt`,
+`refusals` (how many the rings hold), `raisesStatus` (over 5 minutes and the newest at most
+5 minutes old) and `fix`. The joined voice of each decision is not reported yet.
+
+#### GET /api/identify
+
+What the core already knows is at one frequency, with a proof level, in one read. It reads the
+discoveries the scanner holds (the discovery list's `nearHz` window, nearest first): it never
+retunes, starts no probe and listens to nothing. For a live test at the frequency, call
+[`POST /api/scanner/identify`](#post-apiscanneridentify) (`confirm` names it). Present when the
+scanner is configured.
+
+```bash
+curl "http://localhost:9000/api/identify?frequencyHz=100000000&toleranceHz=6250"
+```
+
+`frequencyHz` (required, above 0 and at most 100 GHz) and `toleranceHz` (optional, 0 to
+1,000,000, default 6,250: half a 12.5 kHz channel, the discovery list's own bounds). Anything
+else answers 400 `VALIDATION_ERROR`.
+
+```json
+{
+	"at": "2026-01-01T10:07:00.000Z",
+	"frequencyHz": 100000000,
+	"toleranceHz": 6250,
+	"level": "decoded",
+	"best": {
+		"discoveryId": "d-41c",
+		"frequencyHz": 100003000,
+		"offsetHz": 3000,
+		"level": "decoded",
+		"protocol": "pocsag",
+		"class": "fsk2-wide",
+		"confidence": "decoded",
+		"evidenceLevel": "proven",
+		"proofKind": "decoded",
+		"identity": { "kind": "pocsag-capcode", "value": "1234" },
+		"lastSeenAt": "2026-01-01T09:58:12.000Z",
+		"possibleSpur": false
+	},
+	"others": [],
+	"truncated": false,
+	"confirm": { "method": "POST", "path": "/api/scanner/identify" }
+}
+```
+
+`level` is the best of the rows: `decoded` (published confidence `decoded`, or a `decoded`
+proof), `classified` (confidence `classified`, or another proof than `carrier-only`, such as
+analog voice or tone), `energy-only` (an `activity` or `candidate` record, a carrier-only proof,
+or any `possibleSpur` record, which never reads higher) or `nothing` (no discovery within the
+tolerance: nothing was recorded there, not proof that nothing transmits). Receiver spurs the
+scanner flagged are left out, as on the discovery list. `best` is the row with the best level,
+then the nearest, then the most recently heard; `others` has up to 8 more in that order.
+Discoveries are read 50 at a time, nearest first; when the window holds more, the decoded ones are
+read too, so a decode is not cut, and `truncated` is true. `lastSeenAt` says how old each answer
+is: an old decode is history, not what is on the air now.
 
 #### POST /api/scanner/identify
 

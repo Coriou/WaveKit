@@ -31,7 +31,8 @@
  * pending, then the marker is written (ensurePreMigrationBackup); after the start, the recordings
  * are linked in, the folders flushed and the backup renamed into place (completeDeferredLinks).
  * A crash in between leaves the pending partial, which the next start completes; until it is in
- * place, it is not reported (`stateBackup` absent) nor counted as a backup by retention.
+ * place, it is reported as `pending` (`stateBackup.outcome`) and not counted as a backup by
+ * retention.
  *
  * Files under `recordings/`, `captures/` and `iq-captures/` are hard links (finished files are
  * renamed into place, removed by unlink, never rewritten; staging `.tmp` paths excepted), everything
@@ -266,12 +267,21 @@ export type StateBackupOutcome =
 	| StateBackupSkipped
 	| StateBackupNone
 
-/** The outcome as scanner status shows it (`ScannerStatus.stateBackup`); null before the check. */
+/**
+ * The outcome as scanner status shows it (`ScannerStatus.stateBackup`), `pending` included; null
+ * before the check.
+ */
 export function backupStatusOf(
 	outcome: StateBackupOutcome | null,
 ): ScannerStateBackupStatus | null {
-	// Not in place yet: reported once its recordings are linked (taken) or it is abandoned.
-	if (outcome === null || outcome.kind === "pending") return null
+	if (outcome === null) return null
+	// Not in place yet: its recordings are still being linked in; it becomes taken or skipped.
+	if (outcome.kind === "pending")
+		return {
+			outcome: "pending",
+			fromFormat: outcome.fromFormat,
+			toFormat: outcome.toFormat,
+		}
 	if (outcome.kind === "none")
 		return {
 			outcome: "none",

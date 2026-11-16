@@ -11,11 +11,18 @@
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import {
+	SYSTEM_STATUS_REASON_CODES,
 	sourceActivitySchema,
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
 	sourceEndpointSchema,
 	sourceFeedSchema,
+} from "@wavekit/api-types"
+import type {
+	Diagnostics,
+	RecorderRefusalStreak,
+	SystemStatusLoad,
+	SystemStatusReason,
 } from "@wavekit/api-types"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -26,6 +33,7 @@ import type { TunerRelay, TunerRelayStatus } from "../../core/tuner-relay.js"
 import {
 	performHealthCheck,
 	checkReadiness,
+	sweepHeldDecoders,
 	unhealthyReason,
 	getUptime,
 	type HealthStatus,
@@ -276,6 +284,77 @@ const sourceStatusSchema = {
 	],
 } as const
 
+const nullableNumber = { type: ["number", "null"] } as const
+
+/** `SystemStatusReason` */
+const statusReasonSchema = {
+	type: "object",
+	properties: {
+		code: { type: "string", enum: SYSTEM_STATUS_REASON_CODES },
+		level: { type: "string", enum: ["info", "warn"] },
+		message: { type: "string" },
+		fix: { type: "string" },
+		sources: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					sourceId: { type: "string" },
+					decoders: { type: "integer" },
+				},
+				required: ["sourceId", "decoders"],
+			},
+		},
+		streak: {
+			type: "object",
+			properties: {
+				since: { type: "string" },
+				durationMs: { type: "number" },
+				newestCode: { type: "string" },
+				newestAt: { type: "string" },
+				refusals: { type: "integer" },
+				raisesStatus: { type: "boolean" },
+				fix: { type: "string" },
+			},
+			required: [
+				"since",
+				"durationMs",
+				"newestCode",
+				"newestAt",
+				"refusals",
+				"raisesStatus",
+				"fix",
+			],
+		},
+	},
+	required: ["code", "level", "message", "fix"],
+} as const
+
+/** `SystemStatusLoad` */
+const statusLoadSchema = {
+	type: ["object", "null"],
+	properties: {
+		at: { type: "string" },
+		processCpuCores: nullableNumber,
+		containerCpuCores: nullableNumber,
+		eventLoopUtilization: nullableNumber,
+		eventLoopDelayMaxMs: nullableNumber,
+		eventLoopDelayP99Ms: nullableNumber,
+		eventLoopDelayMaxMs10m: nullableNumber,
+		details: { type: "string", enum: ["/api/diagnostics"] },
+	},
+	required: [
+		"at",
+		"processCpuCores",
+		"containerCpuCores",
+		"eventLoopUtilization",
+		"eventLoopDelayMaxMs",
+		"eventLoopDelayP99Ms",
+		"eventLoopDelayMaxMs10m",
+		"details",
+	],
+} as const
+
 /**
  * System status response schema (legacy /api/status)
  */
@@ -296,6 +375,8 @@ const systemStatusResponseSchema = {
 		audio: audioStatusSchema,
 		tunerRelay: tunerRelayStatusSchema,
 		health: healthStatusResponseSchema,
+		reasons: { type: "array", items: statusReasonSchema },
+		load: statusLoadSchema,
 	},
 	required: [
 		"status",
@@ -305,6 +386,7 @@ const systemStatusResponseSchema = {
 		"decoders",
 		"audio",
 		"health",
+		"reasons",
 	],
 } as const
 
@@ -351,6 +433,14 @@ export interface SystemStatusResponse {
 	}
 	tunerRelay?: TunerRelayStatus
 	health: HealthStatus
+	/**
+	 * Why `status` reads as it does beyond the components (empty when nothing applies). `status`
+	 * is `health.status` raised to `degraded` by a `warn` reason; `health.status` stays the
+	 * components' own verdict.
+	 */
+	reasons: SystemStatusReason[]
+	/** The shared diagnostics sample's CPU and event-loop figures; absent when not wired. */
+	load?: SystemStatusLoad | null
 }
 
 /**
@@ -374,6 +464,66 @@ export interface HealthRoutesOptions {
 	sdrppEnabled?: boolean | undefined
 	/** Protected mode only: true once only a restart can bring credentials back. */
 	accessAuthorityLost?: (() => boolean) | undefined
+	/** The analog recorder's refusal streak (RecorderStreakTracker); absent without a scanner. */
+	recorderStreak?: (() => RecorderRefusalStreak | null) | undefined
+	/** The shared GET /api/diagnostics sample (DiagnosticsSampler.read); absent: no `load`. */
+	diagnostics?: (() => Promise<Diagnostics>) | undefined
+}
+
+const SWEEP_FIX =
+	"GET /api/scanner/jobs?view=compact names the sweep; POST /api/scanner/jobs/:id/pause or /cancel ends the hold"
+
+/** The reasons beside the component verdict: fixed text, counts and config ids only. */
+export function statusReasons(
+	held: readonly { sourceId: string; decoders: number }[],
+	streak: RecorderRefusalStreak | null,
+): SystemStatusReason[] {
+	const reasons: SystemStatusReason[] = []
+	if (held.length > 0) {
+		const total = held.reduce((sum, h) => sum + h.decoders, 0)
+		reasons.push({
+			code: "sweep-suspends-decoders",
+			level: "info",
+			message: `A scanner sweep suspends ${total} decoder(s) on ${held.length} source(s); they resume when it ends and are not counted down`,
+			fix: SWEEP_FIX,
+			sources: held.map(h => ({ ...h })),
+		})
+	}
+	if (streak?.raisesStatus === true) {
+		const minutes = Math.floor(streak.durationMs / 60_000)
+		reasons.push({
+			code: "recorder-refusal-streak",
+			level: "warn",
+			message: `The analog recorder has kept nothing for ${minutes} min, refusing every candidate (newest ${streak.newestCode}); GET /api/scanner/recorder/decisions lists them`,
+			fix: streak.fix,
+			streak,
+		})
+	}
+	return reasons
+}
+
+/** The verdict a `warn` reason raises: `healthy` becomes `degraded`, worse stays. */
+export function raisedStatus(
+	status: HealthStatusLevel,
+	reasons: readonly SystemStatusReason[],
+): HealthStatusLevel {
+	return status === "healthy" && reasons.some(r => r.level === "warn")
+		? "degraded"
+		: status
+}
+
+/** The figures of one diagnostics sample. */
+export function loadOf(sample: Diagnostics): SystemStatusLoad {
+	return {
+		at: sample.at,
+		processCpuCores: sample.process.cpuCores,
+		containerCpuCores: sample.containerCpuCores,
+		eventLoopUtilization: sample.eventLoopUtilization,
+		eventLoopDelayMaxMs: sample.eventLoopDelay?.last?.maxMs ?? null,
+		eventLoopDelayP99Ms: sample.eventLoopDelay?.last?.p99Ms ?? null,
+		eventLoopDelayMaxMs10m: sample.eventLoopDelay?.maxMs10m ?? null,
+		details: "/api/diagnostics",
+	}
 }
 
 /**
@@ -392,6 +542,8 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 		tunerRelay,
 		sdrppEnabled,
 		accessAuthorityLost,
+		recorderStreak,
+		diagnostics,
 	} = options
 
 	/**
@@ -552,14 +704,28 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 
 			const tunerRelayStatus = tunerRelay ? tunerRelay.getStatus() : undefined
 
+			const reasons = statusReasons(
+				sweepHeldDecoders(decoderManager),
+				recorderStreak?.() ?? null,
+			)
 			const response: SystemStatusResponse = {
-				status: healthStatus.status,
+				status: raisedStatus(healthStatus.status, reasons),
 				uptime: getUptime(),
 				version: APP_VERSION,
 				sources,
 				decoders,
 				audio,
 				health: healthStatus,
+				reasons,
+			}
+
+			if (diagnostics) {
+				try {
+					response.load = loadOf(await diagnostics())
+				} catch {
+					// A failed sample claims nothing about the load.
+					response.load = null
+				}
 			}
 
 			if (tunerRelayStatus) {

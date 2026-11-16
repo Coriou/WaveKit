@@ -1269,9 +1269,14 @@ export interface ScannerFolderMigrationStatus {
 	unresolvedBy?: { noAlias: number; aliasWithoutOwner: number } | undefined
 }
 
-/** `ScannerStatus.stateBackup`: the start's pre-migration backup outcome. */
+/**
+ * `ScannerStatus.stateBackup`: the start's pre-migration backup outcome. `pending`: the state files
+ * are copied and the format marker written, and the recordings are still being linked into the
+ * backup after the start (`.backups/.pre-<from>.partial-<ms>`); it becomes `taken` or `skipped`.
+ * Older cores report nothing while pending.
+ */
 export interface ScannerStateBackupStatus {
-	outcome: "taken" | "skipped" | "none"
+	outcome: "taken" | "pending" | "skipped" | "none"
 	reason?:
 		| "unreadable"
 		| "low-disk"
@@ -1317,9 +1322,10 @@ export interface ScannerStatus {
 	/**
 	 * This start's pre-migration backup of the scanner state (taken when the format on disk
 	 * differs from this build's): `taken` with its `path` (relative to the scanner directory),
+	 * `pending` while its recordings are still being linked in after the start,
 	 * `skipped` with a fixed `reason` (`unreadable`, `low-disk`, `disk-unknown`,
 	 * `too-many-files`, `copy-failed`), or `none` (`same-format`, `fresh`). Absent before the
-	 * scanner state loaded and on older cores.
+	 * scanner state loaded and on older cores (which also leave it absent while `pending`).
 	 */
 	stateBackup?: ScannerStateBackupStatus | undefined
 	/**
