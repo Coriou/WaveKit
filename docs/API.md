@@ -997,7 +997,18 @@ sample is under 2 s old, the answer waits for a new one, which reads the per-thr
 `GET /api/resources` is one snapshot of the core's resource use: container CPU and memory,
 one status per SDR host, and per-source backpressure. `/api/resources/container` and
 `/api/resources/backpressure` return just one of those parts. The `resources` WebSocket
-channel pushes the same data as it changes. Outside a container on cgroup v2, the "container"
+channel pushes the same data as it changes.
+
+The snapshot (and `resources:snapshot`) also carries optional `linkAdvisories`, one entry
+per network source with a link advisory, including `level: "none"` after a recovery, so a
+client can tell when a link condition clears. Each entry has `sourceId`, `level` (`none`,
+`unproven`, `dropping`), `lossReason` (as `LinkAdvisory.lossReason`, always present on
+`dropping`), `since` (ISO time the current `level` and `lossReason` began) and
+`episodeSince` (ISO time of the first `dropping` of the episode; kept while dropping and
+until the advisory has been non-dropping for 60 s, then removed, so a later `dropping`
+starts a new episode). The states are computed once per broadcast tick, before the
+snapshot is sent; `GET /api/resources` returns the last tick's states. Older cores omit
+the field. Outside a container on cgroup v2, the "container"
 figures describe the core's own cgroup, meaning its service or login session; they are
 unavailable if the core sits in the host's root cgroup.
 
@@ -1054,15 +1065,31 @@ Link-burst additions are optional and additive; older cores omit them:
 
 - `LinkAdvisory.burst` (`LinkBurstSummary`): nullable `worstStallMs`,
   `overflowedBytes10m`, `burstSeconds`.
-- `LinkAdvisory.lossReason`: `source` when bytes never reached the core (a
-  received-rate shortfall or receiver-side drops; only this makes `level`
-  `dropping`), `branch-congestion` when every byte arrived and an internal fanout
-  branch dropped them after an arrival gap (the link itself is not at fault).
-  Absent when nothing was lost.
+- `LinkAdvisory.lossReason`: why samples were lost; absent when nothing was lost.
+  `level: "dropping"` (fewer bytes read than the rate needs: a received-rate
+  shortfall or receiver-side drops) always carries one of three causes, decided over
+  the last 10 s in this order:
+  1. `core-busy` when the core's event-loop utilisation was at least 0.90;
+  2. `source` when an arrival gap exceeded the worst event-loop delay by at least
+     200 ms (a gap the core's own stalls cannot explain);
+  3. `core-busy` when the worst event-loop delay (including the interval in
+     progress) was at least 200 ms: at 2.4 MS/s that stall is 960 kB, more than a
+     typical socket buffer holds;
+  4. `source` when the loop delay stayed under 50 ms (which cannot lose bytes) and
+     utilisation under 0.70;
+  5. otherwise `unknown`, as for any missing evidence.
+
+  A decided `source` or `core-busy` is kept for 10 s so it does not flap. Only
+  `source` is the receiver link's fault, so only it is helped by a lower sample rate.
+  `branch-congestion` (never on `dropping`) means every byte arrived and an internal
+  fanout branch dropped them after an arrival gap.
+
 - `ResourceAlert.lossReason` (`resources:alert` of type `link-capacity` only): the
   advisory's `lossReason`, with the same values; absent when the advisory has none.
-  Clients treat only `source` as loss on the receiver link; without the field they
-  fall back to `severity` (`critical` is a `dropping` link).
+  An alert is sent once per change of `level` or `lossReason`, so a cause change
+  re-reports; a recovery to `none` sends no alert (it shows in the snapshot's
+  `linkAdvisories`). Clients treat only `source` as loss on the receiver link; without
+  the field they fall back to `severity` (`critical` is a `dropping` link).
 - `DecoderEfficiencySourceView.attribution` (`DropAttribution`) and `lateDrops`
   (`DecoderLateDropsView`): `condemningWindows`, `windows`, nullable ISO
   `cooldownUntil`, `sheddable`, and `held` (`nothing-sheddable`, `link-or-unknown`, or

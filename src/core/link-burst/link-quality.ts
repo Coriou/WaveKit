@@ -3,9 +3,10 @@ import type {
 	DropAttribution,
 	LinkAdvisory,
 	LinkBurstSummary,
+	ResourceLinkAdvisory,
 	SourceLinkQuality,
 } from "@wavekit/api-types"
-import { LINK_QUALITY_WINDOW_MS } from "./contract.js"
+import { LINK_DROPPING_HOLD_MS, LINK_QUALITY_WINDOW_MS } from "./contract.js"
 import type {
 	LinkBurstHandles,
 	LoopDelayReport,
@@ -28,7 +29,13 @@ export interface LinkQualityDeps {
 	now: () => number
 }
 export interface LinkQuality {
+	/**
+	 * Classifies every network source, records its advisory state, and reports an alert once
+	 * per change of `level` and `lossReason` (never for a recovery to `none`).
+	 */
 	recheckAdvisories(): void
+	/** The state recorded by the last `recheckAdvisories`, one entry per network source. */
+	advisories(): ResourceLinkAdvisory[]
 	all(): SourceLinkQuality[]
 	one(sourceId: string): SourceLinkQuality | null
 	burst(sourceId: string): LinkBurstSummary | null
@@ -81,8 +88,59 @@ function optionalNumber(value: unknown): number | null {
 	return nullable.parse(value)
 }
 
+interface AdvisoryState {
+	key: string
+	level: LinkAdvisory["level"]
+	lossReason: LinkAdvisory["lossReason"]
+	since: string
+	/** ISO start of the dropping episode; null outside one. */
+	episodeSince: string | null
+	/** Monotonic time of the first non-dropping recheck since the episode last dropped. */
+	clearSinceMono: number | null
+}
+
 export function createLinkQuality(deps: LinkQualityDeps): LinkQuality {
-	const levels = new Map<string, LinkAdvisory["level"]>()
+	const states = new Map<string, AdvisoryState>()
+	const isoNow = (): string => {
+		const wall = read(deps.now)
+		const date = new Date(
+			typeof wall === "number" && Number.isFinite(wall) ? wall : 0,
+		)
+		return Number.isNaN(date.getTime())
+			? new Date(0).toISOString()
+			: date.toISOString()
+	}
+	const record = (id: string, advisory: LinkAdvisory): boolean => {
+		const key = `${advisory.level}|${advisory.lossReason ?? ""}`
+		const previous = states.get(id)
+		const changed = previous?.key !== key
+		const iso = isoNow()
+		const mono = read(deps.monoNow)
+		let episodeSince = previous?.episodeSince ?? null
+		let clearSinceMono = previous?.clearSinceMono ?? null
+		if (advisory.level === "dropping") {
+			episodeSince ??= iso
+			clearSinceMono = null
+		} else if (episodeSince !== null) {
+			// The episode ends once the advisory has been non-dropping for the hold.
+			if (typeof mono !== "number" || !Number.isFinite(mono)) {
+				/* Keep the episode until time is readable again. */
+			} else if (clearSinceMono === null) clearSinceMono = mono
+			else if (mono - clearSinceMono >= LINK_DROPPING_HOLD_MS) {
+				episodeSince = null
+				clearSinceMono = null
+			}
+		}
+		states.set(id, {
+			key,
+			level: advisory.level,
+			lossReason: advisory.lossReason,
+			since: changed || !previous ? iso : previous.since,
+			episodeSince,
+			clearSinceMono,
+		})
+		return changed
+	}
 	function one(sourceId: string): SourceLinkQuality | null {
 		const handles = read(() => deps.handles(sourceId))
 		if (!handles) return null
@@ -97,16 +155,10 @@ export function createLinkQuality(deps: LinkQualityDeps): LinkQuality {
 		const hist = histSchema.safeParse(
 			read(() => handles.recorder?.histograms(mono)),
 		)
-		const wall = read(deps.now)
-		const date = new Date(
-			typeof wall === "number" && Number.isFinite(wall) ? wall : 0,
-		)
 		return {
 			sourceId,
 			transport: handles.transport === "network" ? "network" : "loopback",
-			at: Number.isNaN(date.getTime())
-				? new Date(0).toISOString()
-				: date.toISOString(),
+			at: isoNow(),
 			absorber: {
 				enabled: handles.absorber !== null,
 				capacityBytes: numeric(counters?.capacityBytes),
@@ -158,18 +210,35 @@ export function createLinkQuality(deps: LinkQualityDeps): LinkQuality {
 	return {
 		one,
 		recheckAdvisories() {
+			const seen = new Set<string>()
 			for (const id of read(deps.sources) ?? []) {
 				try {
 					if (deps.handles(id)?.transport !== "network") continue
 					const advisory = deps.advisory?.(id)
-					if (!advisory || levels.get(id) === advisory.level) continue
-					levels.set(id, advisory.level)
-					if (advisory.level !== "none") deps.reportAdvisory?.(id, advisory)
+					if (!advisory) continue
+					seen.add(id)
+					// A cause change re-reports once; a recovery is recorded, not alerted.
+					if (record(id, advisory) && advisory.level !== "none")
+						deps.reportAdvisory?.(id, advisory)
 				} catch {
-					/* Skip unavailable evidence for this source. */
+					/* Skip unavailable evidence for this source; keep its last state. */
+					if (states.has(id)) seen.add(id)
 				}
 			}
+			for (const id of states.keys()) if (!seen.has(id)) states.delete(id)
 		},
+		advisories: () =>
+			[...states].map(([sourceId, state]) => ({
+				sourceId,
+				level: state.level,
+				...(state.lossReason === undefined
+					? {}
+					: { lossReason: state.lossReason }),
+				since: state.since,
+				...(state.episodeSince === null
+					? {}
+					: { episodeSince: state.episodeSince }),
+			})),
 		all: () =>
 			(read(deps.sources) ?? []).flatMap(id => {
 				const report = read(() => one(id))

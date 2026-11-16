@@ -527,6 +527,12 @@ export interface TunerRatePolicy {
 	raisedFromHz: number
 	since: string
 }
+/** Why samples were lost: see `LinkAdvisory.lossReason`. */
+export type LinkLossReason =
+	| "source"
+	| "core-busy"
+	| "unknown"
+	| "branch-congestion"
 export interface LinkAdvisory {
 	burst?: LinkBurstSummary
 	level: "none" | "unproven" | "dropping"
@@ -536,14 +542,18 @@ export interface LinkAdvisory {
 	shortfallPercent: number | null
 	upstreamDropBytesPerSecond: number | null
 	/**
-	 * Why samples were lost; absent when none were. `source`: bytes never
-	 * reached the core (a received-rate shortfall, or receiver-side drops);
-	 * only this makes `level` `dropping`. `branch-congestion`: every byte
-	 * arrived and a core fanout branch dropped them after an arrival gap (a
-	 * `link` drop attribution caused by internal congestion); `level` stays
-	 * as the link itself reads.
+	 * Why samples were lost; absent when none were, and always present on
+	 * `level` `dropping`, which means fewer bytes were read than the rate
+	 * needs (a received-rate shortfall, or receiver-side drops). On
+	 * `dropping` it names who failed to move the bytes: `source`, the
+	 * receiver link (only this is fixed by a lower sample rate); `core-busy`,
+	 * the core's own event loop was too busy to read its socket; `unknown`,
+	 * the evidence cannot tell the two apart. `branch-congestion` (never on
+	 * `dropping`): every byte arrived and a core fanout branch dropped them
+	 * after an arrival gap (a `link` drop attribution caused by internal
+	 * congestion); `level` stays as the link itself reads.
 	 */
-	lossReason?: "source" | "branch-congestion"
+	lossReason?: LinkLossReason
 }
 export interface TunerRatePolicyEventData {
 	sourceId: string

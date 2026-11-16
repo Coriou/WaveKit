@@ -9,6 +9,7 @@ describe("burst advisory", () => {
 	// Validates: Requirements 6.4, 6.6
 	// Amended 2026-10-30: a `link` drop attribution is internal branch loss
 	// (every byte arrived), reported as lossReason, never as `dropping`.
+	// Amended 2026-11-16: a `dropping` cause needs core-load evidence.
 	it("keeps loopback none, reports held link drops as branch congestion and leaves absorbed bursts at the existing level", () => {
 		fc.assert(
 			fc.property(fc.nat(100000), fc.nat(100000), (stall, seconds) => {
@@ -40,9 +41,10 @@ describe("burst advisory", () => {
 					level: baseline.classify(input, null).level,
 					lossReason: "branch-congestion",
 				})
+				// Without core-load and arrival-gap evidence the cause is unknown, never source.
 				expect(held.classify(input, 20000)).toMatchObject({
 					level: "dropping",
-					lossReason: "source",
+					lossReason: "unknown",
 				})
 				for (const host of ["localhost", "::1", "127.0.0.5"]) {
 					expect(held.classify({ ...input, host }, 20000)).toMatchObject({

@@ -21,6 +21,12 @@ export const CHUNK_SIZE_BUCKETS = 16 // log2 bytes
 export const CATCHUP_BUCKETS = 16 // log2 from CATCHUP_BUCKET_BASE_BYTES
 export const CATCHUP_BUCKET_BASE_BYTES = 1_024
 export const LOOP_DELAY_RING = 300 // 10 min of 2 s efficiency intervals
+/**
+ * The newest ELU reading at or before a window start may precede it by at most this much: two 2 s
+ * efficiency intervals (4 s) plus one of slack. An older base means the meter is not being taken,
+ * so the utilisation would describe a longer, different window: report it missing instead.
+ */
+export const ELU_BASE_STALE_MS = 6_000
 export type SourceTransport = "loopback" | "network"
 export function frameBytesFor(format: string): 2 | 4 | null {
 	return format === "U8_IQ" ? 2 : format === "S16_IQ" ? 4 : null
@@ -147,6 +153,18 @@ export interface EventLoopMeter {
 	takeInterval(): LoopDelayInterval | null
 	/** Reporting read: never resets; answers from the ring of taken intervals. */
 	report(nowMono: number): LoopDelayReport
+	/**
+	 * Worst loop delay (ms) over the taken intervals stamped at or after `sinceMono`, plus the
+	 * in-progress interval (the live histogram's max, read without a reset); null when neither has a
+	 * sample. Read-only.
+	 */
+	maxSince(sinceMono: number): number | null
+	/**
+	 * Event-loop utilisation (0..1) from the newest ELU reading at or before `sinceMono` to now; null
+	 * when no reading covers `sinceMono` (history too short, or the meter stopped being taken for
+	 * longer than `ELU_BASE_STALE_MS`). Read-only.
+	 */
+	utilizationSince(sinceMono: number): number | null
 	dispose(): void
 }
 export interface SdrHostLinkFacts {
