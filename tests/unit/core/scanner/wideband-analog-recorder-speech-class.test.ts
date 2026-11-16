@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from "vitest"
 import {
+	analogTrialsHeard,
 	trialsVoiceChannel,
 	VOICE_CHANNEL_MIN_HEARD,
 	VOICE_CHANNEL_MIN_HEARD_PERCENT,
@@ -52,7 +53,7 @@ const trials = (decoded: number, attempts: number): VoicePrior => ({
 	labels: [],
 	class: "carrier",
 	analogVoice: () => false,
-	analogTrials: () => ({ attempts, decoded }),
+	ownAnalogTrials: () => ({ attempts, decoded }),
 })
 
 /** Syllabic speech with no CTCSS tone (classByTone never classes it), or `source`. */
@@ -146,18 +147,58 @@ describe("trialsVoiceChannel bounds", () => {
 		expect(trialsVoiceChannel(trials(7, 81))).toBe(false)
 	})
 
+	it("only the channel's own trials count: co-channel partners' heard trials never class it", () => {
+		const own = { attempts: 81, decoded: 7 }
+		const partners = Array.from({ length: 8 }, () => ({
+			attempts: 81,
+			decoded: 7,
+		}))
+		// The no-voice check's reader adds partners: 7 + 8 × 7 = 63 of 81 (77.8 %).
+		const withPartners = analogTrialsHeard(own, partners)
+		expect(withPartners).toEqual({ attempts: 81, decoded: 63 })
+		const twins: VoicePrior = {
+			labels: [],
+			class: "carrier",
+			analogVoice: () => false,
+			analogTrials: () => withPartners,
+			ownAnalogTrials: () => analogTrialsHeard(own),
+		}
+		expect(trialsVoiceChannel(twins)).toBe(false)
+		// A 1-attempt owner beside a 10-heard partner is not one either.
+		const lone = { attempts: 1, decoded: 0 }
+		expect(
+			trialsVoiceChannel({
+				...twins,
+				analogTrials: () =>
+					analogTrialsHeard(lone, [{ attempts: 10, decoded: 10 }]),
+				ownAnalogTrials: () => analogTrialsHeard(lone),
+			}),
+		).toBe(false)
+		// Only the partner-adding reader present: not a voice channel.
+		const { ownAnalogTrials: _own, ...partnersOnly } = twins
+		expect(trialsVoiceChannel(partnersOnly)).toBe(false)
+		// The owner's own 10 of 33 (30.3 %) still classes, its own syllabic runs included.
+		expect(
+			trialsVoiceChannel({
+				...twins,
+				ownAnalogTrials: () =>
+					analogTrialsHeard({ attempts: 33, decoded: 8, syllabic: 2 }),
+			}),
+		).toBe(true)
+	})
+
 	it("unknown or malformed trial memory is not a voice channel", () => {
 		const base = trials(0, 0)
 		expect(trialsVoiceChannel(null)).toBe(false)
-		const { analogTrials: _none, ...noReader } = base
+		const { ownAnalogTrials: _none, ...noReader } = base
 		expect(trialsVoiceChannel(noReader)).toBe(false)
-		expect(trialsVoiceChannel({ ...base, analogTrials: () => null })).toBe(
+		expect(trialsVoiceChannel({ ...base, ownAnalogTrials: () => null })).toBe(
 			false,
 		)
 		expect(
 			trialsVoiceChannel({
 				...base,
-				analogTrials: () => {
+				ownAnalogTrials: () => {
 					throw new Error("unreadable")
 				},
 			}),
@@ -322,7 +363,7 @@ describe("an untoned voice the spectrum reads as a carrier", () => {
 			labels: [],
 			class: "carrier",
 			analogVoice: () => false,
-			analogTrials: () => {
+			ownAnalogTrials: () => {
 				reads.push(at)
 				return favourable
 					? { attempts: 339, decoded: 262 }
