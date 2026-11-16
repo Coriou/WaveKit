@@ -335,18 +335,24 @@ interface HoldStats {
 }
 
 /**
- * The lane's releasable tail written while a call governed it (see
- * HoldLane.tailOwner): a stereo whole lane mixing slot calls.
+ * The owner of releasable lane voice written while several calls governed it
+ * (see HoldLane runs): a stereo whole lane mixing slot calls, a mono lane
+ * under two calls, or older runs merged past HOLD_LANE_MAX_RUNS.
  */
 const MIXED_OWNER = "\u0000mixed"
+/** Ownership runs tracked per lane; beyond it the two oldest merge. */
+const HOLD_LANE_MAX_RUNS = 32
 
 /**
  * One /stream lane: a fixed ring of mono samples. The head `releasable`
  * samples are clear (play them in order before live voice); the rest is held
  * for `callId`, whose encryption is not known yet. Held voice only exists
- * while `callId` is set. The last `tailOwned` releasable samples belong to
- * `tailOwner` (a call released, or live behind its backlog): if that call
- * turns restricted, they are dropped (dropOwned) rather than played.
+ * while `callId` is set. The releasable part is split, oldest first, into
+ * ownership runs (`runOwner[i]` owns `runCount[i]` samples, summing to
+ * `releasable`): a call released, or live voice behind its backlog (null: no
+ * call). Newest runs of a call that turns restricted, or of no call when a
+ * restricted call starts behind the backlog, are dropped (dropTail) rather
+ * than played.
  */
 class HoldLane {
 	private readonly ring = new Int16Array(VOICE_HOLD_SAMPLES)
@@ -354,8 +360,13 @@ class HoldLane {
 	length = 0
 	releasable = 0
 	callId: string | null = null
-	tailOwner: string | null = null
-	tailOwned = 0
+	private readonly runOwner: (string | null)[] = []
+	private readonly runCount: number[] = []
+
+	/** The owner of the newest releasable run (null: none, or no call). */
+	get tailOwner(): string | null {
+		return this.runOwner.at(-1) ?? null
+	}
 
 	/**
 	 * Appends src[from, to), releasable when `clear` (owned by `owner`);
@@ -380,8 +391,9 @@ class HoldLane {
 		if (excess > 0) {
 			this.head = (this.head + excess) % cap
 			this.length -= excess
-			this.releasable = Math.max(0, this.releasable - excess)
-			this.clampTail()
+			const gone = Math.min(excess, this.releasable)
+			this.releasable -= gone
+			this.consumeRuns(gone)
 			dropped += excess
 		}
 		let w = (this.head + this.length) % cap
@@ -392,11 +404,7 @@ class HoldLane {
 		this.length += count
 		if (clear) {
 			this.releasable += count
-			if (owner === this.tailOwner) this.tailOwned += count
-			else {
-				this.tailOwner = owner
-				this.tailOwned = count
-			}
+			this.appendRun(owner, count)
 		}
 		return dropped
 	}
@@ -419,17 +427,18 @@ class HoldLane {
 		}
 		this.length += count
 		this.releasable = 0
-		this.tailOwner = null
-		this.tailOwned = 0
+		this.clearRuns()
 		return excess
 	}
 
 	/** The releasable tail no call owns (live voice before any announce) becomes held. */
 	holdUnownedTail(): number {
-		if (this.tailOwner !== null) return 0
-		const held = this.tailOwned
+		const last = this.runCount.length - 1
+		if (last < 0 || this.runOwner[last] !== null) return 0
+		const held = this.runCount[last]!
 		this.releasable -= held
-		this.tailOwned = 0
+		this.runOwner.pop()
+		this.runCount.pop()
 		return held
 	}
 
@@ -437,7 +446,7 @@ class HoldLane {
 	unowned(): boolean {
 		return (
 			this.releasable === 0 ||
-			(this.tailOwner === null && this.tailOwned === this.releasable)
+			(this.runOwner.length === 1 && this.runOwner[0] === null)
 		)
 	}
 
@@ -453,7 +462,7 @@ class HoldLane {
 		this.head = r
 		this.length -= p
 		this.releasable -= p
-		this.clampTail()
+		this.consumeRuns(p)
 		return p
 	}
 
@@ -461,11 +470,7 @@ class HoldLane {
 	release(): number {
 		const released = this.length - this.releasable
 		this.releasable = this.length
-		if (this.tailOwner === this.callId) this.tailOwned += released
-		else {
-			this.tailOwner = this.callId
-			this.tailOwned = released
-		}
+		this.appendRun(this.callId, released)
 		return released
 	}
 
@@ -477,17 +482,20 @@ class HoldLane {
 	}
 
 	/**
-	 * Drops the releasable tail owned by `tailOwner` (its call turned
-	 * restricted), keeping any held part after it. Returns samples dropped.
+	 * Drops the newest releasable runs while `drop` accepts their owner (a
+	 * call turned restricted, or voice of a call not announced yet queued
+	 * behind a backlog), keeping any held part after them. Returns samples
+	 * dropped.
 	 */
-	dropOwned(): number {
-		const cap = VOICE_HOLD_SAMPLES
-		const k = this.tailOwned
-		if (k === 0) {
-			this.tailOwner = null
-			return 0
+	dropTail(drop: (owner: string | null) => boolean): number {
+		let k = 0
+		while (this.runOwner.length > 0 && drop(this.runOwner.at(-1) ?? null)) {
+			this.runOwner.pop()
+			k += this.runCount.pop()!
 		}
+		if (k === 0) return 0
 		// Shift the held part (if any) back over the dropped span.
+		const cap = VOICE_HOLD_SAMPLES
 		const held = this.length - this.releasable
 		let r = (this.head + this.releasable) % cap
 		let w = (this.head + this.releasable - k) % cap
@@ -498,17 +506,7 @@ class HoldLane {
 		}
 		this.length -= k
 		this.releasable -= k
-		this.tailOwner = null
-		this.tailOwned = 0
 		return k
-	}
-
-	/**
-	 * Drops the releasable tail no call owns (voice of a call not announced
-	 * yet, queued behind a backlog). Returns samples dropped.
-	 */
-	dropUnownedTail(): number {
-		return this.tailOwner === null ? this.dropOwned() : 0
 	}
 
 	/** Drops everything (no listener, detach). Returns the held samples dropped. */
@@ -517,13 +515,48 @@ class HoldLane {
 		this.head = 0
 		this.length = 0
 		this.releasable = 0
-		this.tailOwner = null
-		this.tailOwned = 0
+		this.clearRuns()
 		return dropped
 	}
 
-	private clampTail(): void {
-		if (this.tailOwned > this.releasable) this.tailOwned = this.releasable
+	private appendRun(owner: string | null, count: number): void {
+		if (count === 0) return
+		const last = this.runOwner.length - 1
+		if (last >= 0 && this.runOwner[last] === owner) {
+			this.runCount[last]! += count
+			return
+		}
+		if (this.runOwner.length === HOLD_LANE_MAX_RUNS) {
+			// Oldest runs merge; differing owners fail closed as a mix.
+			const merged =
+				this.runOwner[0] === this.runOwner[1] ? this.runOwner[0]! : MIXED_OWNER
+			this.runCount[1]! += this.runCount[0]!
+			this.runOwner[1] = merged
+			this.runOwner.shift()
+			this.runCount.shift()
+		}
+		this.runOwner.push(owner)
+		this.runCount.push(count)
+	}
+
+	/** The oldest n releasable samples left the lane. */
+	private consumeRuns(n: number): void {
+		let left = n
+		while (left > 0 && this.runCount.length > 0) {
+			const first = this.runCount[0]!
+			if (first > left) {
+				this.runCount[0] = first - left
+				return
+			}
+			left -= first
+			this.runOwner.shift()
+			this.runCount.shift()
+		}
+	}
+
+	private clearRuns(): void {
+		this.runOwner.length = 0
+		this.runCount.length = 0
 	}
 }
 
@@ -1452,13 +1485,10 @@ export class DigitalVoiceService
 		const stereo = channel.channels === 2
 		const stats = channel.holdStats
 		if (channel.hold !== null && isRestricted(event)) {
-			for (const lane of channel.hold.lanes) {
-				if (
-					lane !== null &&
-					(lane.tailOwner === event.callId || lane.tailOwner === MIXED_OWNER)
-				)
-					stats.discarded += lane.dropOwned()
-			}
+			const restricted = (owner: string | null) =>
+				owner === event.callId || owner === MIXED_OWNER
+			for (const lane of channel.hold.lanes)
+				if (lane !== null) stats.discarded += lane.dropTail(restricted)
 		}
 		for (let index = 0; index < (stereo ? 3 : 1); index++) {
 			const call =
@@ -1593,25 +1623,62 @@ export class DigitalVoiceService
 	}
 
 	/**
-	 * A restricted call starts unheld: the voice no call owns, queued in the
-	 * lanes its voice passes (`key`: its slot, 0 unknown) behind a released
-	 * backlog, is its late entry and is dropped (counted). Returns whether a
-	 * clear backlog still lags on that path: then everything newer is in the
-	 * lanes and the pacer queues only older clear voice, so it is kept.
+	 * A restricted call starts unheld: the voice no call owns (or a mix with
+	 * it), queued in any lane behind a released backlog, may be its late entry
+	 * and is dropped (counted), every such run newer than the last run a call
+	 * owns. Both slot lanes, whatever the call's slot: one voice dsd-fme copies
+	 * to both channels before its announce is queued in the lagging slot lane,
+	 * not its own. Returns whether a clear backlog still lags on the call's
+	 * own path (`key`: its slot, 0 unknown: the whole lane, or both slots):
+	 * then everything newer is in the lanes and the pacer queues only older
+	 * clear voice, so it is kept.
 	 */
 	private dropLateEntry(channel: VoiceChannel, key: SlotKey): boolean {
 		const hold = channel.hold
 		if (hold === null) return false
 		const [whole, lane1, lane2] = hold.lanes
 		const stats = channel.holdStats
-		stats.discarded += whole.dropUnownedTail()
+		const late = (owner: string | null) =>
+			owner === null || owner === MIXED_OWNER
+		stats.discarded += whole.dropTail(late)
 		if (lane1 === null || lane2 === null) return whole.releasable > 0
-		const drop1 = key !== 2
-		const drop2 = key !== 1
-		if (drop1) stats.discarded += lane1.dropUnownedTail()
-		if (drop2) stats.discarded += lane2.dropUnownedTail()
+		stats.discarded += lane1.dropTail(late)
+		stats.discarded += lane2.dropTail(late)
 		if (whole.releasable > 0) return true
-		return (!drop1 || lane1.releasable > 0) && (!drop2 || lane2.releasable > 0)
+		if (key === 0) return lane1.releasable > 0 && lane2.releasable > 0
+		const own = key === 1 ? lane1 : lane2
+		const other = key === 1 ? lane2 : lane1
+		if (own.releasable > 0) return true
+		// Its own lane passed voice straight to the pacer: kept only when none
+		// of its slot is queued there, and one voice on both channels went to
+		// the other lane, still lagging (dropped above), or none is queued.
+		return (
+			this.pacerSlotQuiet(channel, key) &&
+			(other.releasable > 0 || this.pacerSlotQuiet(channel, key === 1 ? 2 : 1))
+		)
+	}
+
+	/**
+	 * Whether the pacer queues no voice of `slot` (nor any voice whose slot is
+	 * not known), per the shadow; false when the shadow cannot tell.
+	 */
+	private pacerSlotQuiet(channel: VoiceChannel, slot: 1 | 2): boolean {
+		const shadow = channel.shadow
+		if (shadow === null) return channel.paced.bufferedMs === 0
+		const queued = shadow.queued(channel.paced.stats)
+		if (queued > VOICE_HOLD_SAMPLES) return false
+		let r = (shadow.w - queued + VOICE_HOLD_SAMPLES) % VOICE_HOLD_SAMPLES
+		for (let i = 0; i < queued; i++) {
+			const voice =
+				shadow.kind[r] !== SHADOW_SPLIT
+					? shadow.a[r]
+					: slot === 1
+						? shadow.a[r]
+						: shadow.b[r]
+			if (voice !== 0) return false
+			r = r + 1 === VOICE_HOLD_SAMPLES ? 0 : r + 1
+		}
+		return true
 	}
 
 	/** The channel's lanes, allocated on first use (see VOICE_HOLD_MAX_MS). */
