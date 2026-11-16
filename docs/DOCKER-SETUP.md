@@ -530,7 +530,10 @@ preserves the `Host` header the core expects.
 What the core checks: its own bind address and each request's Host, Origin,
 cookies and credentials. Browsers (including DNS-rebinding pages) send the
 page's own authority as Host, and only the configured loopback authorities are
-accepted. A client without credentials gets only the public exceptions
+accepted. Each listener checks its own allowlist, so a client sends the API's
+authority to the API and `/ws`, and the audio listener's own authority to that
+listener: under `container-loopback` a loopback spelling of another listener's
+authority is refused with 403 `HOST_FORBIDDEN`. A client without credentials gets only the public exceptions
 (health, bootstrap metadata, validated CORS preflights and pairing-code
 redemption); every other route, WebSocket and audio stream needs a paired
 session cookie, the machine bearer credential or a short-lived audio token.
