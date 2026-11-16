@@ -1081,6 +1081,12 @@ Link-burst additions are optional and additive; older cores omit them:
      utilisation under 0.70;
   5. otherwise `unknown`, as for any missing evidence.
 
+  A step whose evidence is missing is skipped: steps 2 and 3 need the loop delay and
+  the arrival gap but not utilisation (which a stall of several seconds leaves
+  unmeasured), steps 1 and 4 need utilisation. A source that is disconnected, or
+  whose feed is paused or resuming, is not classified: it reads `level: "none"` with
+  no `lossReason`, and its 10 s window starts afresh once it is live again.
+
   A decided `source` or `core-busy` is kept for 10 s so it does not flap. Only
   `source` is the receiver link's fault, so only it is helped by a lower sample rate.
   `branch-congestion` (never on `dropping`) means every byte arrived and an internal

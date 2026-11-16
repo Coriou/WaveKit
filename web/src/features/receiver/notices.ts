@@ -80,7 +80,6 @@ export function linkConditionText(
 	if (entry.level !== "dropping") return null
 	switch (entry.lossReason) {
 		case "source":
-		case undefined:
 			return tuner?.ratePolicy
 				? `Receiver link dropping samples at ${formatRate(tuner.sampleRate)} (raised for ADS-B)`
 				: LINK_LOSS_TEXT
@@ -89,7 +88,7 @@ export function linkConditionText(
 		case "branch-congestion":
 			return null
 		default:
-			// "unknown", and any cause a newer core names
+			// "unknown", a missing cause, and any cause a newer core names
 			return UNKNOWN_LOSS_TEXT
 	}
 }

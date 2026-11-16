@@ -7,7 +7,9 @@
  * Samples lost); the episode ends and the link drops again → one new notice; a busy core → a notice that never
  * says "lower the sample rate"; the page reloads while it persists → the chip shows it, no notice. While a notice
  * shows, its box is measured against the Listen island, the dock, the tuned card, the other islands and the
- * frequency readout at 1440×900 and 390×844: none may intersect it.
+ * frequency readout at 1440×900 and 390×844: none may intersect it, and each element that must exist at that
+ * viewport (the Listen island and the frequency readout always; the dock and the tuned card at desktop width)
+ * must be laid out. The report lists every element's rect (null when it is not laid out).
  */
 import type { Page } from "playwright-core"
 import { within } from "./harness.ts"
@@ -27,9 +29,20 @@ export interface Rect {
 export interface NoticeLayout {
 	viewport: string
 	notice: Rect | null
-	others: { name: string; rect: Rect; intersects: boolean }[]
+	/** Every element measured; `rect` is null when it is not laid out. */
+	others: {
+		name: string
+		rect: Rect | null
+		required: boolean
+		intersects: boolean
+	}[]
+	/** Required elements that were not laid out. */
+	missing: string[]
 	ok: boolean
 }
+
+/** Below this width the shell hides the dock (see `settled`); the dock and the tuned card must exist from it up. */
+const DESKTOP_MIN_WIDTH = 761
 
 export interface NoticeStep {
 	step: string
@@ -86,7 +99,11 @@ const intersects = (a: Rect, b: Rect) =>
 	a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 
 /** The notice box and what it must keep clear of, now. */
-async function measure(page: Page, viewport: string): Promise<NoticeLayout> {
+async function measure(
+	page: Page,
+	viewport: string,
+	width: number,
+): Promise<NoticeLayout> {
 	const boxes = await page.evaluate(() => {
 		const rect = (el: Element | null) => {
 			if (!el) return null
@@ -104,21 +121,35 @@ async function measure(page: Page, viewport: string): Promise<NoticeLayout> {
 		]
 		return {
 			notice: rect(document.querySelector("[data-wk-notice-region]")),
-			others: named.flatMap(([name, sel]) => {
-				const r = rect(document.querySelector(sel))
-				return r ? [{ name, rect: r }] : []
-			}),
+			others: named.map(([name, sel]) => ({
+				name,
+				rect: rect(document.querySelector(sel)),
+			})),
 		}
 	})
+	const desktop = width >= DESKTOP_MIN_WIDTH
+	const requiredHere = (name: string) =>
+		name === "listen" ||
+		name === "frequency readout" ||
+		(desktop && (name === "dock" || name === "tuned card"))
 	const others = boxes.others.map(o => ({
 		...o,
-		intersects: boxes.notice !== null && intersects(boxes.notice, o.rect),
+		required: requiredHere(o.name),
+		intersects:
+			boxes.notice !== null &&
+			o.rect !== null &&
+			intersects(boxes.notice, o.rect),
 	}))
+	const missing = others.filter(o => o.required && !o.rect).map(o => o.name)
 	return {
 		viewport,
 		notice: boxes.notice,
 		others,
-		ok: boxes.notice !== null && others.every(o => !o.intersects),
+		missing,
+		ok:
+			boxes.notice !== null &&
+			missing.length === 0 &&
+			others.every(o => !o.intersects),
 	}
 }
 
@@ -132,12 +163,14 @@ async function settled(
 	viewport: string,
 	width: number,
 ): Promise<NoticeLayout> {
-	let last = await measure(page, viewport)
+	let last = await measure(page, viewport, width)
 	const end = Date.now() + 5000
 	while (Date.now() < end) {
 		await new Promise(resolve => setTimeout(resolve, 250))
-		const next = await measure(page, viewport)
-		const inside = next.others.every(o => o.rect.x + o.rect.w <= width)
+		const next = await measure(page, viewport, width)
+		const inside = next.others.every(
+			o => o.rect === null || o.rect.x + o.rect.w <= width,
+		)
 		if (inside && JSON.stringify(next) === JSON.stringify(last)) return next
 		last = next
 	}

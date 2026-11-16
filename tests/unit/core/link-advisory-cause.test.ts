@@ -146,6 +146,33 @@ describe("dropping cause ladder", () => {
 			{ elu: 0.95, loopDelayMaxMs: null, arrivalGapMaxMs: null },
 			"core-busy",
 		],
+		// Missing utilisation (e.g. after a stall longer than the meter's window) blocks only
+		// steps 1 and 4.
+		[
+			"elu missing, gap beyond the loop delay",
+			{ elu: null, loopDelayMaxMs: 0, arrivalGapMaxMs: LINK_GAP_MS },
+			"source",
+		],
+		[
+			"elu missing, loop delay at the core-busy bound",
+			{ elu: null, loopDelayMaxMs: LINK_GAP_MS, arrivalGapMaxMs: 0 },
+			"core-busy",
+		],
+		[
+			"elu above 1, loop delay at the core-busy bound",
+			{ elu: 1.5, loopDelayMaxMs: 6500, arrivalGapMaxMs: 6500 },
+			"core-busy",
+		],
+		[
+			"elu missing, loop delay high, gap missing",
+			{ elu: null, loopDelayMaxMs: LINK_GAP_MS, arrivalGapMaxMs: null },
+			"unknown",
+		],
+		[
+			"elu missing, quiet loop and gap",
+			{ elu: null, loopDelayMaxMs: 0, arrivalGapMaxMs: 0 },
+			"unknown",
+		],
 	])("%s: %s", (_name, evidence, cause) => {
 		expect(droppingCause(evidence)).toBe(cause)
 		const h = harness(evidence)

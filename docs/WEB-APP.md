@@ -64,9 +64,10 @@ When WaveKit loses receiver samples, the notice says why:
 | The link from the receiver cannot carry the rate       | `Receiver link dropping samples — lower the sample rate`        |
 | The same, while the 1090 MHz rate policy holds a raise | `Receiver link dropping samples at 2.4 MS/s (raised for ADS-B)` |
 | WaveKit itself was too busy to read the samples        | `Samples lost: WaveKit is too busy to keep up`                  |
-| WaveKit cannot tell which                              | `Receiver samples lost`                                         |
+| WaveKit cannot tell which, or names no cause           | `Receiver samples lost`                                         |
 
-Only the first asks for a lower sample rate. The notice comes once the loss has lasted 6 seconds,
+Only the first asks for a lower sample rate. A disconnected or paused receiver is not losing
+samples and raises no such notice. The notice comes once the loss has lasted 6 seconds,
 and once per episode: an episode starts with the first loss and lasts until the link has been clean
 for a minute, so a link that recovers and drops again does not repeat it. A different cause in the
 same episode shows once more, except a change to an unknown cause. After ✕ nothing more shows in

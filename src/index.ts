@@ -2476,6 +2476,10 @@ async function main(): Promise<void> {
 			monoNow: monitor.monoNow,
 			linkDropsSince: monitor.linkDropsSince,
 			burst: id => linkQuality.burst(id),
+			// A disconnected or paused source reports 0 B/s; that is no link loss.
+			live: id =>
+				sourceManager.getStatus(id)?.connected === true &&
+				!sourceManager.isPaused(id),
 			...linkAdvisorEvidence({
 				coreLoad: composed.coreLoad,
 				recorderOf: id => sourceRouting.linkBurst(id)?.recorder,

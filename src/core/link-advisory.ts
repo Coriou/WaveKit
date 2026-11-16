@@ -40,14 +40,19 @@ export { CORE_BUSY_ELU, SOURCE_ELU_MAX }
 export type CoreLoadEvidence = CoreLoadReading
 
 /**
- * The cause ladder for a `dropping` advisory, evaluated in order; any missing, negative or
- * non-finite input answers `unknown`, never `source`.
+ * The cause ladder for a `dropping` advisory, evaluated in order; a step whose inputs are
+ * missing, negative or non-finite (utilisation also above 1) is skipped, so missing evidence
+ * answers `unknown`, never `source`.
  * 1. utilisation >= `CORE_BUSY_ELU`: `core-busy` (needs only utilisation);
  * 2. arrival gap beyond the loop delay by >= `LINK_GAP_MS` (the gap the loop cannot
- *    explain, as the drop attribution reads it): `source`;
- * 3. loop delay >= `CORE_BUSY_LOOP_DELAY_MS` (`LINK_GAP_MS`): `core-busy`;
- * 4. loop delay < `HOST_LOOP_DELAY_MS` and utilisation < `SOURCE_ELU_MAX`: `source`;
+ *    explain, as the drop attribution reads it): `source` (needs loop delay and gap);
+ * 3. loop delay >= `CORE_BUSY_LOOP_DELAY_MS` (`LINK_GAP_MS`): `core-busy` (needs loop delay
+ *    and gap, since step 2 takes precedence);
+ * 4. loop delay < `HOST_LOOP_DELAY_MS` and utilisation < `SOURCE_ELU_MAX`: `source` (needs
+ *    all three);
  * 5. otherwise `unknown`.
+ * Utilisation goes missing after a long stall (the meter has no interval over the window), so
+ * steps 2 and 3 must not depend on it.
  */
 export function droppingCause(evidence: {
 	elu: number | null
@@ -55,12 +60,18 @@ export function droppingCause(evidence: {
 	arrivalGapMaxMs: number | null
 }): DroppingCause {
 	const { elu, loopDelayMaxMs: loop, arrivalGapMaxMs: gap } = evidence
-	// A saturated loop is core-busy on its own; every later step needs all three inputs.
-	if (valid(elu) && elu <= 1 && elu >= CORE_BUSY_ELU) return "core-busy"
-	if (!valid(elu) || elu > 1 || !valid(loop) || !valid(gap)) return "unknown"
+	const utilisation = valid(elu) && elu <= 1 ? elu : null
+	// A saturated loop is core-busy on its own.
+	if (utilisation !== null && utilisation >= CORE_BUSY_ELU) return "core-busy"
+	if (!valid(loop) || !valid(gap)) return "unknown"
 	if (gap - loop >= LINK_GAP_MS) return "source"
 	if (loop >= CORE_BUSY_LOOP_DELAY_MS) return "core-busy"
-	if (loop < HOST_LOOP_DELAY_MS && elu < SOURCE_ELU_MAX) return "source"
+	if (
+		utilisation !== null &&
+		loop < HOST_LOOP_DELAY_MS &&
+		utilisation < SOURCE_ELU_MAX
+	)
+		return "source"
 	return "unknown"
 }
 
@@ -112,8 +123,22 @@ export function createLinkAdvisor(deps: {
 	coreLoad?: (sinceMono: number) => CoreLoadReading
 	/** Longest arrival gap (ms) of the source since `sinceMono`; absent: causes read `unknown`. */
 	arrivalGapMaxMs?: (sourceId: string, sinceMono: number) => number | null
+	/**
+	 * Whether the source is connected with a live feed (not disconnected, and not paused or
+	 * resuming by the operator); absent or throwing: live. A source that is not live is never
+	 * classified: its observations are dropped (its window starts afresh once live again), and
+	 * it reads level `none` with no `lossReason`, so a disconnect or a pause never reads as loss.
+	 */
+	live?: (sourceId: string) => boolean
 }): LinkAdvisor & Required<Pick<LinkAdvisor, "shortfall">> {
 	const histories = new Map<string, History>()
+	const isLive = (sourceId: string): boolean => {
+		try {
+			return deps.live?.(sourceId) !== false
+		} catch {
+			return true
+		}
+	}
 	/**
 	 * Latch rule: a known cause (`source` or `core-busy`) decided for a source at a rate is
 	 * kept for `LINK_SUSTAINED_WINDOW_MS` after the decision, so the reason does not flap
@@ -185,7 +210,15 @@ export function createLinkAdvisor(deps: {
 	return {
 		observe(sourceId, bytes, rate, at) {
 			const previous = histories.get(sourceId)
-			if (!valid(bytes) || !valid(rate) || rate === 0 || !Number.isFinite(at)) {
+			const live = isLive(sourceId)
+			if (!live) latches.delete(sourceId)
+			if (
+				!live ||
+				!valid(bytes) ||
+				!valid(rate) ||
+				rate === 0 ||
+				!Number.isFinite(at)
+			) {
 				if (previous) previous.samples = []
 				return
 			}
@@ -212,6 +245,7 @@ export function createLinkAdvisor(deps: {
 			const history = histories.get(sourceId)
 			if (
 				!history ||
+				!isLive(sourceId) ||
 				history.rate !== sampleRateHz ||
 				!valid(sampleRateHz) ||
 				sampleRateHz === 0 ||
@@ -227,6 +261,17 @@ export function createLinkAdvisor(deps: {
 		classify(input, drops): LinkAdvisory {
 			const payload = valid(input.sampleRateHz) ? input.sampleRateHz * 2 : 0
 			const history = histories.get(input.sourceId)
+			if (!isLive(input.sourceId)) {
+				latches.delete(input.sourceId)
+				return {
+					level: "none",
+					transport: isLoopbackHost(input.host) ? "loopback" : "network",
+					payloadBytesPerSecond: payload,
+					sustainedBytesPerSecond: history?.sustained ?? null,
+					shortfallPercent: null,
+					upstreamDropBytesPerSecond: null,
+				}
+			}
 			const received =
 				history?.rate === input.sampleRateHz
 					? average(history, deps.now())

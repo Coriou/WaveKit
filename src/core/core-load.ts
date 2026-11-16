@@ -60,8 +60,10 @@ export function createCoreLoadSignal(deps: {
 /**
  * Whether a reading shows the core saturated on its own evidence: utilisation at or above
  * `CORE_BUSY_ELU`, or a worst loop delay at or above `CORE_BUSY_LOOP_DELAY_MS`. Missing evidence
- * is never busy. The link advisor's cause ladder applies the same thresholds (it checks an
- * arrival gap before the loop-delay rule).
+ * is never busy, and either rule stands without the other's input. The link advisor's cause
+ * ladder applies the same thresholds: its utilisation rule likewise needs only utilisation, and
+ * its loop-delay rule likewise runs without utilisation, but needs the source's arrival gap too
+ * because it first reads a gap beyond the loop delay as the source's loss.
  */
 export function coreBusy(reading: CoreLoadReading): boolean {
 	const elu = usable(reading.elu)

@@ -87,7 +87,8 @@ describe("link condition text", () => {
 		expect(LINK_LOSS_TEXT).toBe(
 			"Receiver link dropping samples — lower the sample rate",
 		)
-		expect(linkConditionText(d(), undefined)).toBe(LINK_LOSS_TEXT)
+		// a dropping entry without a cause is not blamed on the link
+		expect(linkConditionText(d(), undefined)).toBe(UNKNOWN_LOSS_TEXT)
 		expect(linkConditionText(d("core-busy"), undefined)).toBe(CORE_BUSY_TEXT)
 		expect(CORE_BUSY_TEXT).toBe("Samples lost: WaveKit is too busy to keep up")
 		expect(linkConditionText(d("unknown"), undefined)).toBe(UNKNOWN_LOSS_TEXT)

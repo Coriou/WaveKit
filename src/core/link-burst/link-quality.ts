@@ -97,7 +97,12 @@ interface AdvisoryState {
 	episodeSince: string | null
 	/** Monotonic time of the first non-dropping recheck since the episode last dropped. */
 	clearSinceMono: number | null
+	/** Monotonic time of the first of the consecutive rechecks that failed; null otherwise. */
+	failSinceMono: number | null
 }
+
+/** A source with no advisory to classify: non-dropping, so a dropping episode's hold runs. */
+const NOT_CLASSIFIED: Pick<LinkAdvisory, "level"> = { level: "none" }
 
 export function createLinkQuality(deps: LinkQualityDeps): LinkQuality {
 	const states = new Map<string, AdvisoryState>()
@@ -110,7 +115,10 @@ export function createLinkQuality(deps: LinkQualityDeps): LinkQuality {
 			? new Date(0).toISOString()
 			: date.toISOString()
 	}
-	const record = (id: string, advisory: LinkAdvisory): boolean => {
+	const record = (
+		id: string,
+		advisory: Pick<LinkAdvisory, "level" | "lossReason">,
+	): boolean => {
 		const key = `${advisory.level}|${advisory.lossReason ?? ""}`
 		const previous = states.get(id)
 		const changed = previous?.key !== key
@@ -138,8 +146,24 @@ export function createLinkQuality(deps: LinkQualityDeps): LinkQuality {
 			since: changed || !previous ? iso : previous.since,
 			episodeSince,
 			clearSinceMono,
+			failSinceMono: null,
 		})
 		return changed
+	}
+	/**
+	 * A failed recheck keeps the last state; once rechecks have failed for
+	 * `LINK_DROPPING_HOLD_MS` in a row, the source reads non-dropping, so a stale `dropping`
+	 * cannot stick forever.
+	 */
+	const failed = (id: string, state: AdvisoryState): void => {
+		const mono = read(deps.monoNow)
+		if (typeof mono !== "number" || !Number.isFinite(mono)) return
+		const failSinceMono = state.failSinceMono ?? mono
+		// Once aged out, each failed recheck counts as non-dropping, so the episode hold runs.
+		if (mono - failSinceMono >= LINK_DROPPING_HOLD_MS)
+			record(id, NOT_CLASSIFIED)
+		const current = states.get(id)
+		if (current) current.failSinceMono = failSinceMono
 	}
 	function one(sourceId: string): SourceLinkQuality | null {
 		const handles = read(() => deps.handles(sourceId))
@@ -215,14 +239,26 @@ export function createLinkQuality(deps: LinkQualityDeps): LinkQuality {
 				try {
 					if (deps.handles(id)?.transport !== "network") continue
 					const advisory = deps.advisory?.(id)
-					if (!advisory) continue
+					if (!advisory) {
+						// Nothing to classify (no host or rate yet): a recorded source reads
+						// non-dropping, so its episode ends only after the hold.
+						if (states.has(id)) {
+							seen.add(id)
+							record(id, NOT_CLASSIFIED)
+						}
+						continue
+					}
 					seen.add(id)
 					// A cause change re-reports once; a recovery is recorded, not alerted.
 					if (record(id, advisory) && advisory.level !== "none")
 						deps.reportAdvisory?.(id, advisory)
 				} catch {
-					/* Skip unavailable evidence for this source; keep its last state. */
-					if (states.has(id)) seen.add(id)
+					/* Unavailable evidence keeps the last state, for at most the hold. */
+					const state = states.get(id)
+					if (state) {
+						seen.add(id)
+						failed(id, state)
+					}
 				}
 			}
 			for (const id of states.keys()) if (!seen.has(id)) states.delete(id)
