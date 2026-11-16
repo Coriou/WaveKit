@@ -128,7 +128,9 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   ([DECODER-GUIDE.md](DECODER-GUIDE.md), call lifecycle), and carries
   `encryptionKnown: false` until it does (absent means known). Such a call is not
   clear: the auto route (`/auto`) admits none of its voice while the field is
-  present and not `true`, and admits it once the call is known clear.
+  present and not `true`, and admits it once the call is known clear. The
+  digital voice stream mutes such a call exactly like an encrypted one, and a
+  scanner probe records it as encrypted, never as a clear recording.
 - **Encryption**: DMR from the voice link control line, where `dmr_flco.c`
   appends `Encrypted ` after `TGT=… SRC=…` (only on a line with TGT/SRC, so
   `Slot N - Encrypted PDU` data bursts do not count), or from a non-zero

@@ -62,6 +62,7 @@ export interface DigitalVoiceCall {
 	source: number | null
 	slot: number | null
 	encrypted: boolean
+	encryptionKnown?: boolean
 	active: boolean
 	startedAt: string
 	endedAt?: string
@@ -172,6 +173,11 @@ const VoiceCallStateSchema = z.object({
 	source: z.number().nullable(),
 	slot: z.number().nullable(),
 	encrypted: z.boolean(),
+	/** Call-first: present and not true = encryption not known yet, so not clear (fail closed). */
+	encryptionKnown: z
+		.unknown()
+		.optional()
+		.transform(v => (v === undefined ? undefined : v === true)),
 	active: z.boolean(),
 	startedAt: z.string(),
 	endedAt: z.string().optional(),
@@ -628,7 +634,10 @@ export class DigitalVoiceService
 		const own = channel.paced.running
 		if (!this.running || (!own && this.voiceTaps.size === 0)) return
 		const call = channel.call
-		const encrypted = call?.active === true && call.encrypted
+		// A call whose encryption is not known yet is muted like an encrypted one.
+		const encrypted =
+			call?.active === true &&
+			(call.encrypted || call.encryptionKnown === false)
 		const slot = call?.slot
 		if (encrypted && (channel.channels === 1 || (slot !== 1 && slot !== 2))) {
 			// Mono, or the slot is unknown: the whole datagram may be that call.
@@ -708,6 +717,9 @@ export class DigitalVoiceService
 			source: state.source,
 			slot: state.slot,
 			encrypted: state.encrypted,
+			...(state.encryptionKnown !== undefined
+				? { encryptionKnown: state.encryptionKnown }
+				: {}),
 			active: state.active,
 			startedAt: state.startedAt,
 			...(state.endedAt !== undefined ? { endedAt: state.endedAt } : {}),
@@ -726,7 +738,8 @@ export class DigitalVoiceService
 		if (call.active) {
 			channel.call = call
 			// Never play audio of an encrypted call, even if some was queued.
-			if (call.encrypted) channel.paced.clear()
+			if (call.encrypted || call.encryptionKnown === false)
+				channel.paced.clear()
 		} else {
 			channel.call = null
 			channel.lastCall = call
