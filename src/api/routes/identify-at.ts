@@ -49,9 +49,17 @@ const RANK: Record<Exclude<FrequencyProofLevel, "nothing">, number> = {
 	"energy-only": 1,
 }
 
+/** Proof kinds that classify without a decode; any other kind (`carrier-only`, newer) proves energy only. */
+const CLASSIFIED_PROOF_KINDS: ReadonlySet<string> = new Set([
+	"analog-tone",
+	"analog-voice",
+	"digital-undecoded",
+])
+
 /**
  * The level one discovery proves. A possible spur never reads above `energy-only` (clients say
- * "possible spur", never a clean signal); unknown labels read `energy-only`, the safe answer.
+ * "possible spur", never a clean signal); a confidence or proof kind not listed here (a newer
+ * label) reads `energy-only`, the safe answer.
  */
 export function levelOf(d: Discovery): Exclude<FrequencyProofLevel, "nothing"> {
 	if (d.possibleSpur !== undefined) return "energy-only"
@@ -59,7 +67,7 @@ export function levelOf(d: Discovery): Exclude<FrequencyProofLevel, "nothing"> {
 		return "decoded"
 	if (
 		d.confidence === "classified" ||
-		(d.proof !== undefined && d.proof.kind !== "carrier-only")
+		(d.proof !== undefined && CLASSIFIED_PROOF_KINDS.has(d.proof.kind))
 	)
 		return "classified"
 	return "energy-only"
@@ -103,7 +111,9 @@ export async function buildIdentifyAt(
 	const first = await source.listDiscoveries({ ...near, limit: scanMax })
 	const byId = new Map(first.items.map(d => [d.id, d]))
 	const truncated = first.nextCursor !== null
-	// A window with more than scanMax rows: read its decoded ones too, so none is cut.
+	// A window with more than scanMax rows: read the ones whose published confidence is decoded
+	// too, so none of those is cut. A row decoded only by its proof kind under a lower published
+	// confidence can still fall outside both reads; `truncated` stays true then.
 	if (truncated) {
 		const decoded = await source.listDiscoveries({
 			...near,

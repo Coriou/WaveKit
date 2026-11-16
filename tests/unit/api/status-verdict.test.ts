@@ -16,6 +16,7 @@ import {
 } from "@wavekit/api-types"
 import {
 	healthRoutes,
+	liveScannerJobSources,
 	type HealthRoutesOptions,
 } from "../../../src/api/routes/health.js"
 import { RecorderStreakTracker } from "../../../src/api/routes/recorder-decisions.js"
@@ -163,6 +164,43 @@ describe("GET /api/status during a sweep", () => {
 		expect(body.reasons[0]?.fix).toContain("/api/scanner/jobs")
 	})
 
+	it("a live job on the held source keeps it info; a hold no live job names is a warn", async () => {
+		let jobs = new Set(["rtl"])
+		const server = await serve({
+			...options(swept),
+			scannerJobSources: () => jobs,
+		})
+		let body = (await server.inject({ url: "/api/status" })).json<StatusBody>()
+		expect(body.status).toBe("healthy")
+		expect(body.reasons.map(r => r.code)).toEqual(["sweep-suspends-decoders"])
+		jobs = new Set()
+		body = (await server.inject({ url: "/api/status" })).json<StatusBody>()
+		expect(body.status).toBe("degraded")
+		expect(body.health.status).toBe("healthy")
+		expect(body.reasons).toEqual([
+			expect.objectContaining({
+				code: "sweep-hold-without-job",
+				level: "warn",
+				sources: [{ sourceId: "rtl", decoders: 2 }],
+			}),
+		])
+	})
+
+	it("only jobs that may hold decoders name a source", () => {
+		expect([
+			...liveScannerJobSources([
+				{ state: "running", sourceId: "a" },
+				{ state: "paused", sourceId: "b" },
+				{ state: "holding", sourceId: "c" },
+				{ state: "starting", sourceId: "d" },
+				{ state: "pending", sourceId: "e" },
+				{ state: "completed", sourceId: "f" },
+				{ state: "cancelled", sourceId: "g" },
+				{ state: "failed", sourceId: "h" },
+			]),
+		]).toEqual(["a", "b", "c", "d"])
+	})
+
 	it("keeps /health and /health/ready green during the sweep", async () => {
 		const server = await serve(options(swept))
 		expect((await server.inject({ url: "/health" })).statusCode).toBe(200)
@@ -302,6 +340,134 @@ describe("recorder refusal streak", () => {
 			new RecorderStreakTracker().read(rec, T0 + RECORDER_STREAK_LIMITS.freshMs)
 				?.raisesStatus,
 		).toBe(false)
+	})
+
+	it("a gap over the freshness window restarts the streak (stale, then one fresh refusal)", () => {
+		const tracker = new RecorderStreakTracker()
+		const hour = 60 * 60_000
+		// T0: one refusal, then an hour of silence: stale, and the tracker forgets it.
+		expect(
+			tracker.read(recorder([], [["refused:cpu", T0]]), T0 + hour)
+				?.raisesStatus,
+		).toBe(false)
+		// One fresh refusal at T0+60 min: the ring still holds T0, but the gap restarts it.
+		const ring: Array<[ScannerRecorderDecision, number]> = [
+			["refused:cpu", T0],
+			["refused:slots", T0 + hour],
+		]
+		const one = tracker.read(recorder([], ring), T0 + hour + 1_000)
+		expect(one).toMatchObject({
+			since: iso(T0 + hour),
+			refusals: 1,
+			raisesStatus: false,
+		})
+		// Sustained refusals for over 5 min then raise it.
+		for (let m = 1; m <= 5; m++)
+			ring.push(["refused:slots", T0 + hour + m * 60_000])
+		const sustained = tracker.read(recorder([], ring), T0 + hour + BOUND + 1)
+		expect(sustained).toMatchObject({
+			since: iso(T0 + hour),
+			newestCode: "refused:slots",
+			raisesStatus: true,
+		})
+		// A fresh tracker reading the same rings agrees (the ring gap alone restarts it).
+		expect(
+			new RecorderStreakTracker().read(
+				recorder([], ring),
+				T0 + hour + BOUND + 1,
+			)?.since,
+		).toBe(iso(T0 + hour))
+	})
+
+	it("refused:record-disabled is an operator choice and never makes a streak", () => {
+		const rec = recorder(
+			[],
+			[
+				["refused:record-disabled", T0],
+				["refused:record-disabled", T0 + BOUND * 2],
+			],
+		)
+		expect(new RecorderStreakTracker().read(rec, T0 + BOUND * 2)).toBeNull()
+		expect(RECORDER_STREAK_FIXES).not.toHaveProperty("refused:record-disabled")
+	})
+
+	it("a session started inside the window breaks the streak", () => {
+		const refusals: Array<[ScannerRecorderDecision, number]> = [
+			["refused:slots", T0],
+			["refused:slots", T0 + 200_000],
+			["refused:slots", T0 + BOUND],
+		]
+		for (const code of ["started", "shadow"] as const) {
+			const rec = recorder([[code, T0 + 100_000]], refusals, { [code]: 1 })
+			expect(
+				new RecorderStreakTracker().read(rec, T0 + BOUND + 1),
+			).toMatchObject({ since: iso(T0 + 200_000), raisesStatus: false })
+		}
+		// Remembered across reads: a start counted since the last read restarts it too.
+		const tracker = new RecorderStreakTracker()
+		tracker.read(recorder([], [["refused:slots", T0]]), T0 + 1_000)
+		const after = tracker.read(
+			recorder([], [["refused:slots", T0 + 280_000]], { started: 1 }),
+			T0 + BOUND + 1,
+		)
+		expect(after).toMatchObject({
+			since: iso(T0 + 280_000),
+			raisesStatus: false,
+		})
+	})
+
+	it("refused:tuning counts only while its source's tuning is unproven, when that is known", () => {
+		const rec = streakOf("refused:tuning")
+		let unproven = false
+		const tracker = new RecorderStreakTracker({
+			tuningUnproven: sourceId => sourceId === "rtl" && unproven,
+		})
+		expect(tracker.read(rec, T0 + BOUND + 1)).toBeNull()
+		unproven = true
+		expect(tracker.read(rec, T0 + BOUND + 1)?.raisesStatus).toBe(true)
+		// Other codes are not affected by the source's tuning.
+		expect(
+			new RecorderStreakTracker({ tuningUnproven: () => false }).read(
+				streakOf("refused:cpu"),
+				T0 + BOUND + 1,
+			)?.raisesStatus,
+		).toBe(true)
+	})
+
+	it("keeps the start through a read whose rings were flooded by other codes", () => {
+		const tracker = new RecorderStreakTracker()
+		tracker.read(recorder([], [["refused:cpu", T0]]), T0 + 1_000)
+		// 32 non-blocking snapshot refusals pushed it out; nothing was kept or started.
+		const flood = Array.from(
+			{ length: 32 },
+			(_, i): [ScannerRecorderDecision, number] => [
+				"refused:not-analog",
+				T0 + 60_000 + i * 1_000,
+			],
+		)
+		const flooded = tracker.read(recorder([], flood), T0 + 120_000)
+		expect(flooded).toMatchObject({
+			since: iso(T0),
+			newestCode: "refused:cpu",
+			refusals: 0,
+			raisesStatus: false,
+		})
+		// A new blocking refusal within the freshness window continues the same streak.
+		const later = tracker.read(
+			recorder([], [["refused:cpu", T0 + 240_000]]),
+			T0 + BOUND + 1,
+		)
+		expect(later).toMatchObject({ since: iso(T0), raisesStatus: true })
+		// A flood read after the newest went stale forgets it.
+		const forgetting = new RecorderStreakTracker()
+		forgetting.read(recorder([], [["refused:cpu", T0]]), T0 + 1_000)
+		expect(
+			forgetting.read(
+				recorder([], flood),
+				T0 + RECORDER_STREAK_LIMITS.freshMs + 1,
+			)?.raisesStatus,
+		).toBe(false)
+		expect(forgetting.read(recorder([], flood), T0 + BOUND * 3)).toBeNull()
 	})
 
 	it("an unhealthy verdict is not lowered by a streak", async () => {

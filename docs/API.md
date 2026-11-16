@@ -943,22 +943,31 @@ applies) says why, each with a closed `code`, fixed `message` text and the `fix`
   are suspended (`suspension.reasonCode: "tuner-scanning"`). They are not counted down, so a sweep
   never makes the core `unhealthy` (nor `/health` 503 or `/health/ready` not ready); a decoder that
   faulted still counts. `sources` lists the held sources and how many decoders each suspends.
-- `recorder-refusal-streak` (`warn`): the wideband analog recorder has kept no file for over
-  5 minutes while refusing candidates with a code an operator can fix (`refused:tuning`,
-  `refused:cpu`, `refused:slots`, `refused:no-iq`, `refused:record-disabled`, `refused:store`,
+- `sweep-hold-without-job` (`warn`): decoders are suspended `tuner-scanning` on a source that no
+  live scanner job (starting, running, holding or paused) names, so the hold outlived its job.
+  `sources` lists them, and the core reads `degraded`. A job ending and its hold being released
+  are a few milliseconds apart, so a read in between can show it once.
+- `recorder-refusal-streak` (`warn`): the wideband analog recorder has kept no file and started
+  no recording for over 5 minutes while refusing candidates with a code an operator can fix
+  (`refused:tuning`, `refused:cpu`, `refused:slots`, `refused:no-iq`, `refused:store`,
   `refused:start-failed`, `discarded:store-backlog`, `discarded:write-failed`,
-  `discarded:buffer-full`), the newest of them at most 5 minutes old. Classification outcomes
-  (`refused:not-analog`, `discarded:unvoiced`, ...) never make a streak. `fix` is the call for the
-  newest code; `streak` is the same object as on
-  [`GET /api/scanner/recorder/decisions`](#get-apiscannerrecorderdecisions). Exactly 5 minutes
-  does not raise it; any longer does.
+  `discarded:buffer-full`), no two of them in a row more than 5 minutes apart and the newest at
+  most 5 minutes old. `refused:tuning` counts only while its source's tuning is unproven
+  (`tuningUnproven` on [`GET /api/sources`](#get-apisources)): the recorder also refuses a
+  snapshot from before a retune with it. Classification outcomes (`refused:not-analog`,
+  `discarded:unvoiced`, ...) and `refused:record-disabled` (recording turned off on the job, an
+  operator's choice) never make a streak. `fix` is the call for the newest code; `streak` is the
+  same object as on [`GET /api/scanner/recorder/decisions`](#get-apiscannerrecorderdecisions).
+  Exactly 5 minutes does not raise it; any longer does.
 
 `load` holds the CPU and event-loop figures of the shared
 [`GET /api/diagnostics`](#get-apidiagnostics) sample (one sample at most every 2 s whoever
 asks, so this adds no sampling): `processCpuCores` (all threads, 1 is one core),
 `containerCpuCores`, `eventLoopUtilization` (0 to 1), `eventLoopDelayMaxMs` and
 `eventLoopDelayP99Ms` (the last 2 s) and `eventLoopDelayMaxMs10m`. A figure reads null until the
-sample has one (the first has no CPU window); `load` is null when the sample failed.
+sample has one (the first has no CPU window); `load` is null when the sample failed. When no
+sample is under 2 s old, the answer waits for a new one, which reads the per-thread CPU within a
+250 ms budget (`threadReadBudgetMs`), so `/api/status` can take up to about that long.
 
 #### GET /api/resources, /api/resources/container and /api/resources/backpressure
 
@@ -5496,10 +5505,12 @@ null without a discovery or once it is gone) and, when the decision has them, `u
 counts every decision since the core started.
 
 `streak` is null unless refusals with a fixable code (listed under
-[`GET /api/status`](#get-apistatus) `recorder-refusal-streak`) follow the last kept file:
-`since` (the first of them still known, a lower bound once the rings rolled over; the core
-remembers it across reads until a file is kept), `durationMs`, the `newestCode` and `newestAt`,
-`refusals` (how many the rings hold), `raisesStatus` (over 5 minutes and the newest at most
+[`GET /api/status`](#get-apistatus) `recorder-refusal-streak`) follow the last kept file or
+started recording: `since` (the first of them still known, a lower bound once the rings rolled
+over; the core remembers it across reads until a file is kept, a recording starts, or no
+fixable refusal comes for over 5 minutes, and a gap that long between two of them starts a new
+streak), `durationMs`, the `newestCode` and `newestAt`, `refusals` (how many the rings hold, 0
+once other codes pushed them out), `raisesStatus` (over 5 minutes and the newest at most
 5 minutes old) and `fix`. The joined voice of each decision is not reported yet.
 
 #### GET /api/identify
@@ -5545,14 +5556,15 @@ else answers 400 `VALIDATION_ERROR`.
 ```
 
 `level` is the best of the rows: `decoded` (published confidence `decoded`, or a `decoded`
-proof), `classified` (confidence `classified`, or another proof than `carrier-only`, such as
-analog voice or tone), `energy-only` (an `activity` or `candidate` record, a carrier-only proof,
-or any `possibleSpur` record, which never reads higher) or `nothing` (no discovery within the
+proof), `classified` (confidence `classified`, or an `analog-tone`, `analog-voice` or
+`digital-undecoded` proof), `energy-only` (an `activity` or `candidate` record, a carrier-only or
+unknown proof, or any `possibleSpur` record, which never reads higher) or `nothing` (no discovery within the
 tolerance: nothing was recorded there, not proof that nothing transmits). Receiver spurs the
 scanner flagged are left out, as on the discovery list. `best` is the row with the best level,
 then the nearest, then the most recently heard; `others` has up to 8 more in that order.
-Discoveries are read 50 at a time, nearest first; when the window holds more, the decoded ones are
-read too, so a decode is not cut, and `truncated` is true. `lastSeenAt` says how old each answer
+Discoveries are read 50 at a time, nearest first; when the window holds more, the ones whose
+published confidence is `decoded` are read too, so such a decode is not cut, and `truncated` is
+true (a row decoded only by its proof under a lower confidence can still be left out then). `lastSeenAt` says how old each answer
 is: an old decode is history, not what is on the air now.
 
 #### POST /api/scanner/identify

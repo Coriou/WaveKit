@@ -26,12 +26,16 @@ import {
  * - `sweep-suspends-decoders` (info): a scanner sweep holds a source, so the configured decoders
  *   on it are suspended (`tuner-scanning`). They are not counted down; they resume when the sweep
  *   ends. The verdict stays as the other components make it.
+ * - `sweep-hold-without-job` (warn): decoders are suspended `tuner-scanning` on a source no live
+ *   scanner job (starting, running, holding or paused) names: a hold its job did not release. It
+ *   raises a `healthy` verdict to `degraded`. Only read when the core knows its jobs.
  * - `recorder-refusal-streak` (warn): the analog recorder has refused every candidate for over
- *   `RECORDER_STREAK_LIMITS.raiseAfterMs` with a code an operator can fix, and kept none. It
- *   raises a `healthy` verdict to `degraded`; `fix` names the call that fixes it.
+ *   `RECORDER_STREAK_LIMITS.raiseAfterMs` with a code an operator can fix, and kept none and
+ *   started none. It raises a `healthy` verdict to `degraded`; `fix` names the call that fixes it.
  */
 export const SYSTEM_STATUS_REASON_CODES = [
 	"sweep-suspends-decoders",
+	"sweep-hold-without-job",
 	"recorder-refusal-streak",
 ] as const
 export type SystemStatusReasonCode = (typeof SYSTEM_STATUS_REASON_CODES)[number]
@@ -43,7 +47,7 @@ export interface SystemStatusReason {
 	message: string
 	/** The API call that fixes or explains it, in fixed text. */
 	fix: string
-	/** `sweep-suspends-decoders`: the held sources and how many decoders each suspends. */
+	/** `sweep-*`: the held sources and how many decoders each suspends. */
 	sources?: { sourceId: string; decoders: number }[] | undefined
 	/** `recorder-refusal-streak`: the streak, as `GET /api/scanner/recorder/decisions` shows it. */
 	streak?: RecorderRefusalStreak | undefined
@@ -101,7 +105,10 @@ export const RECORDER_STREAK_LIMITS = Object.freeze({
 /**
  * Refusal and discard codes that mean the recorder cannot record what it would keep, each with the
  * call that fixes it. Classification outcomes (`refused:not-analog`, `discarded:unvoiced`, ...) are
- * the recorder working as meant and never make a streak.
+ * the recorder working as meant and never make a streak, nor does `refused:record-disabled` (the
+ * operator turned recording off on the job: a choice, not a fault; the decisions list still shows
+ * it). `refused:tuning` counts only while its source's tuning is unproven (`tuningUnproven` on
+ * GET /api/sources), since the recorder also refuses a snapshot of an older stream or epoch with it.
  */
 export const RECORDER_STREAK_FIXES = Object.freeze({
 	"refused:tuning":
@@ -112,8 +119,6 @@ export const RECORDER_STREAK_FIXES = Object.freeze({
 		"GET /api/scanner (recorder.sessions), then raise cpuBudgetCores with PATCH /api/scanner/settings",
 	"refused:no-iq":
 		"GET /api/sources: the source must deliver U8_IQ for the analog recorder",
-	"refused:record-disabled":
-		"PATCH /api/scanner/jobs/:id with record.analog true on the job covering the band",
 	"refused:store":
 		"GET /api/scanner (recordingsQuota) and GET /api/storage: free space or raise maxRecordingsMb",
 	"refused:start-failed":
@@ -128,13 +133,16 @@ export const RECORDER_STREAK_FIXES = Object.freeze({
 export type RecorderStreakCode = keyof typeof RECORDER_STREAK_FIXES
 
 export interface RecorderRefusalStreak {
-	/** ISO time of the first blocking refusal since the last kept file (a lower bound). */
+	/**
+	 * ISO time of the first blocking refusal since the last kept file or started session, with no gap
+	 * over `freshMs` between two in a row (a lower bound).
+	 */
 	since: string
 	durationMs: number
 	/** The newest blocking refusal: its code names the fix. */
 	newestCode: RecorderStreakCode
 	newestAt: string
-	/** Blocking refusals the recorder's rings still hold for the streak. */
+	/** Blocking refusals the recorder's rings still hold for the streak (0 once rolled out). */
 	refusals: number
 	/** True once it lasted over `raiseAfterMs` and is fresh: `/api/status` is raised. */
 	raisesStatus: boolean
@@ -199,7 +207,8 @@ export type FrequencyProofLevel = (typeof FREQUENCY_PROOF_LEVELS)[number]
  * - `toleranceHz` default 6 250 (half a 12.5 kHz channel) and at most 1 MHz, the discovery list's
  *   own `nearHz` bounds (DISCOVERY_NEAR_*).
  * - `scanMax` 50: discoveries read nearest first; a wider window with more is `truncated`, and a
- *   second read of at most `scanMax` decoded ones keeps a decode from being cut.
+ *   second read of at most `scanMax` whose published confidence is `decoded` keeps such a decode
+ *   from being cut (a row decoded only by its proof kind can still be; `truncated` says so).
  * - `othersMax` 8: rows beside `best`, so the answer stays a few KiB.
  */
 export const FREQUENCY_IDENTIFY_LIMITS = Object.freeze({

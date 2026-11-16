@@ -68,7 +68,11 @@ import {
 import { activityRoutes } from "./routes/activity.js"
 import { createActivitySubscriptions } from "./activity-subscriptions.js"
 import type { ActivitySubscriptionHub } from "./activity-subscriptions.js"
-import { APP_VERSION, healthRoutes } from "./routes/health.js"
+import {
+	APP_VERSION,
+	healthRoutes,
+	liveScannerJobSources,
+} from "./routes/health.js"
 import { configExportRoutes } from "./routes/config-export.js"
 import { decoderOptionDescriptors } from "../decoders/options/index.js"
 import type { Config } from "../config.js"
@@ -1462,7 +1466,15 @@ export class ApiServer {
 			},
 		})
 		// One refusal streak shared by GET /api/status and the recorder decisions route.
-		const recorderStreak = new RecorderStreakTracker()
+		// Optional read: source-manager test doubles predate the tuning tracker.
+		const unproven = (
+			this.sourceManager as Partial<Pick<SourceManager, "tuningUnproven">>
+		).tuningUnproven
+		const recorderStreak = new RecorderStreakTracker({
+			tuningUnproven: unproven
+				? sourceId => unproven.view(sourceId) !== null
+				: undefined,
+		})
 		const scanner = this.scanner
 		const recorderSource = scanner
 			? {
@@ -1561,6 +1573,9 @@ export class ApiServer {
 				? () => recorderStreak.read(recorderSource.recorder(), Date.now())
 				: undefined,
 			diagnostics: () => diagnosticsSampler.read(),
+			scannerJobSources: scanner
+				? () => liveScannerJobSources(scanner.jobRows())
+				: undefined,
 		})
 
 		// Register source routes (Requirement 9.3, 9.4, 9.5)

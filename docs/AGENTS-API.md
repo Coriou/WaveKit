@@ -257,8 +257,9 @@ Each answer below is one read, no logs needed; every closed list is in `GET /api
   [`GET /api/status`](API.md#get-apistatus). Read `status` (`healthy`, `degraded`,
   `unhealthy`), then each reason's `code`, `message` and `fix` (the call to make). A sweep that
   suspends the ambient decoders reads `sweep-suspends-decoders` (`info`) and never makes the core
-  `unhealthy`; `recorder-refusal-streak` (`warn`, `degraded`) means the recorder kept nothing
-  for over 5 minutes, and `fix` names the call for its newest refusal code.
+  `unhealthy`; `sweep-hold-without-job` (`warn`, `degraded`) means decoders stay suspended for a
+  sweep no live job runs; `recorder-refusal-streak` (`warn`, `degraded`) means the recorder kept
+  and started nothing for over 5 minutes, and `fix` names the call for its newest refusal code.
 - **Who moved the tuner, and why:** `lastChange` on `GET /api/tuner` (`actor`, `reason`, `at`,
   `fields`, and `jobId` when a job moved it). A machine token reads `agent`, a browser session
   `web`, a core without access `unknown`.
@@ -483,7 +484,8 @@ each `code` with its `outcome` (`kept`, `refused`, `discarded`, `progress`), the
 then says since when, the newest blocking code and `fix`, the call that clears it (for
 `refused:tuning`, take the tuning back with `POST /api/tuner/:sourceId/take-back`). Refusals such
 as `refused:not-analog` or `discarded:unvoiced` are the recorder judging a signal that is not
-voice, not a fault, and never make a streak. Once a streak lasts over 5 minutes, `GET /api/status`
+voice, not a fault, and never make a streak; nor does `refused:record-disabled`, recording
+turned off on the job. Once a streak lasts over 5 minutes, `GET /api/status`
 reads `degraded` with the same `fix`. See [API.md](API.md#get-apiscannerrecorderdecisions).
 
 ## What is at this frequency?
@@ -502,7 +504,7 @@ Say what `level` says, and how old it is (`best.lastSeenAt`):
 | `decoded`     | It was `best.protocol` (with `best.identity` when set), decoded there                |
 | `classified`  | It looked like `best.class` (or analog voice, by `best.proofKind`); not decoded      |
 | `energy-only` | Something was there, nothing classified it; `possibleSpur: true` may be the receiver |
-| `nothing`     | The core recorded nothing there; that does not mean nothing transmits                |
+| `nothing`     | Nothing recorded there (flagged receiver spurs are left out); not proof of silence   |
 
 It reads the discoveries the scanner holds, so it reports the past, not the air now. To test
 the frequency now, ask [Is that DMR at this frequency?](#is-that-dmr-at-this-frequency) with

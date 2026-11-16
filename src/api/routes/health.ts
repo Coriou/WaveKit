@@ -468,27 +468,71 @@ export interface HealthRoutesOptions {
 	recorderStreak?: (() => RecorderRefusalStreak | null) | undefined
 	/** The shared GET /api/diagnostics sample (DiagnosticsSampler.read); absent: no `load`. */
 	diagnostics?: (() => Promise<Diagnostics>) | undefined
+	/**
+	 * Sources a live scanner job names (starting, running, holding or paused: the states that may
+	 * hold decoders); absent without a scanner, and then a sweep hold is never called leaked.
+	 */
+	scannerJobSources?: (() => ReadonlySet<string>) | undefined
 }
 
 const SWEEP_FIX =
 	"GET /api/scanner/jobs?view=compact names the sweep; POST /api/scanner/jobs/:id/pause or /cancel ends the hold"
 
-/** The reasons beside the component verdict: fixed text, counts and config ids only. */
+/** Job states that may hold a source's decoders (every state but pending and the terminal ones). */
+const HOLDING_JOB_STATES: ReadonlySet<string> = new Set([
+	"starting",
+	"running",
+	"holding",
+	"paused",
+])
+
+/** The sources a live scanner job names, from the compact job rows. */
+export function liveScannerJobSources(
+	rows: readonly { state: string; sourceId: string }[],
+): ReadonlySet<string> {
+	return new Set(
+		rows.filter(r => HOLDING_JOB_STATES.has(r.state)).map(r => r.sourceId),
+	)
+}
+
+const LEAKED_HOLD_FIX =
+	"GET /api/scanner/jobs?view=compact shows no live job on the source; restart the core to release the hold"
+
+/**
+ * The reasons beside the component verdict: fixed text, counts and config ids only. `jobSources`
+ * (sources a live scanner job names) splits a sweep hold into one a job explains and one none
+ * does (leaked); without it every hold reads as a sweep's.
+ */
 export function statusReasons(
 	held: readonly { sourceId: string; decoders: number }[],
 	streak: RecorderRefusalStreak | null,
+	jobSources?: ReadonlySet<string>,
 ): SystemStatusReason[] {
 	const reasons: SystemStatusReason[] = []
-	if (held.length > 0) {
-		const total = held.reduce((sum, h) => sum + h.decoders, 0)
+	const swept = held.filter(
+		h => jobSources === undefined || jobSources.has(h.sourceId),
+	)
+	const leaked = held.filter(
+		h => jobSources !== undefined && !jobSources.has(h.sourceId),
+	)
+	const total = (rows: typeof held): number =>
+		rows.reduce((sum, h) => sum + h.decoders, 0)
+	if (swept.length > 0)
 		reasons.push({
 			code: "sweep-suspends-decoders",
 			level: "info",
-			message: `A scanner sweep suspends ${total} decoder(s) on ${held.length} source(s); they resume when it ends and are not counted down`,
+			message: `A scanner sweep suspends ${total(swept)} decoder(s) on ${swept.length} source(s); they resume when it ends and are not counted down`,
 			fix: SWEEP_FIX,
-			sources: held.map(h => ({ ...h })),
+			sources: swept.map(h => ({ ...h })),
 		})
-	}
+	if (leaked.length > 0)
+		reasons.push({
+			code: "sweep-hold-without-job",
+			level: "warn",
+			message: `${total(leaked)} decoder(s) on ${leaked.length} source(s) stay suspended for a scanner sweep, but no live scanner job names the source`,
+			fix: LEAKED_HOLD_FIX,
+			sources: leaked.map(h => ({ ...h })),
+		})
 	if (streak?.raisesStatus === true) {
 		const minutes = Math.floor(streak.durationMs / 60_000)
 		reasons.push({
@@ -544,6 +588,7 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 		accessAuthorityLost,
 		recorderStreak,
 		diagnostics,
+		scannerJobSources,
 	} = options
 
 	/**
@@ -707,6 +752,7 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 			const reasons = statusReasons(
 				sweepHeldDecoders(decoderManager),
 				recorderStreak?.() ?? null,
+				scannerJobSources?.(),
 			)
 			const response: SystemStatusResponse = {
 				status: raisedStatus(healthStatus.status, reasons),

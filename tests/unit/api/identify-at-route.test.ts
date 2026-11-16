@@ -66,6 +66,16 @@ describe("levelOf", () => {
 			{ confidence: "candidate", proof: { kind: "carrier-only" } },
 			"energy-only",
 		],
+		[{ confidence: "candidate", proof: { kind: "analog-tone" } }, "classified"],
+		[
+			{ confidence: "candidate", proof: { kind: "digital-undecoded" } },
+			"classified",
+		],
+		// A proof kind this core does not know (a newer label) is the safe answer.
+		[
+			{ confidence: "candidate", proof: { kind: "future-kind" } },
+			"energy-only",
+		],
 		[{ confidence: "candidate" }, "energy-only"],
 		[{ confidence: "activity" }, "energy-only"],
 		[{ confidence: "classified", possibleSpur: {} }, "energy-only"],

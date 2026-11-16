@@ -3,11 +3,12 @@
  * bounded rings (RECORDER_RECENT_DECISIONS session decisions + RECORDER_RECENT_REFUSALS snapshot
  * refusals), newest first, each joined to its discovery's frequency. Composition only: the rings
  * and counts are the recorder's, read through the scanner; nothing new is sampled or stored here
- * beyond the refusal streak's two remembered numbers.
+ * beyond the refusal streak's few remembered values.
  *
  * The refusal streak (RecorderStreakTracker) is the run of blocking refusals (RECORDER_STREAK_FIXES:
- * codes an operator can fix, never classification outcomes) since the last kept file. `/api/status`
- * raises its verdict once one lasts over RECORDER_STREAK_LIMITS.raiseAfterMs and is fresh.
+ * codes an operator can fix, never classification outcomes or operator choices) since the last kept
+ * file or started session, with no gap over RECORDER_STREAK_LIMITS.freshMs. `/api/status` raises
+ * its verdict once one lasts over RECORDER_STREAK_LIMITS.raiseAfterMs and is fresh.
  */
 import { z } from "zod"
 import {
@@ -86,76 +87,156 @@ function merged(recorder: ScannerRecorderStatus): Tagged[] {
 	return out.sort((a, b) => a.ms - b.ms)
 }
 
-/** The streak the rings alone show: blocking refusals after the newest kept file. */
-function ringStreak(
-	entries: readonly Tagged[],
-): { startMs: number; newest: Tagged; refusals: number } | null {
-	let startMs: number | null = null
-	let newest: Tagged | null = null
-	let refusals = 0
-	for (const t of entries) {
-		if (t.entry.code === "finalized") {
-			startMs = null
-			newest = null
-			refusals = 0
-			continue
-		}
-		if (!isStreakCode(t.entry.code)) continue
-		startMs ??= t.ms
-		newest = t
-		refusals++
-	}
-	return startMs === null || newest === null
-		? null
-		: { startMs, newest, refusals }
+/**
+ * Codes that end a streak: a kept file, or a session the recorder started (`started`, `shadow`):
+ * a candidate was taken, so "refusing every candidate" no longer holds.
+ */
+const STREAK_BREAKERS: ReadonlySet<ScannerRecorderDecision> = new Set([
+	"finalized",
+	"started",
+	"shadow",
+])
+
+/** How many streak-ending decisions the recorder made since the core started. */
+function breakerCount(recorder: ScannerRecorderStatus): number {
+	let n = 0
+	for (const code of STREAK_BREAKERS) n += recorder.counts[code] ?? 0
+	return n
+}
+
+interface RingStreak {
+	startMs: number
+	newest: Tagged
+	refusals: number
 }
 
 /**
- * Remembers a streak's start across reads, since the rings roll over in minutes on a busy band
- * (32 snapshot refusals) while a streak must be seen for 5. State: the `finalized` count last
- * seen (a change means a file was kept since: the streak restarts) and the earliest start seen.
- * Each read takes the earlier of that start and the rings' own, so an unpolled core still raises
- * once its rings alone span the bound.
+ * The streak the rings alone show: blocking refusals after the newest kept file or started
+ * session, restarted wherever two blocking refusals in a row are over `freshMs` apart (a gap: the
+ * cause cleared in between). `blocking` decides which entries count.
+ */
+function ringStreak(
+	entries: readonly Tagged[],
+	blocking: (entry: ScannerRecorderDecisionEntry) => boolean,
+): RingStreak | null {
+	let streak: RingStreak | null = null
+	for (const t of entries) {
+		if (STREAK_BREAKERS.has(t.entry.code)) {
+			streak = null
+			continue
+		}
+		if (!blocking(t.entry)) continue
+		if (
+			streak === null ||
+			t.ms - streak.newest.ms > RECORDER_STREAK_LIMITS.freshMs
+		)
+			streak = { startMs: t.ms, newest: t, refusals: 1 }
+		else {
+			streak.newest = t
+			streak.refusals++
+		}
+	}
+	return streak
+}
+
+export interface RecorderStreakTrackerOptions {
+	/**
+	 * True while a source's tuning is unproven now (GET /api/sources `tuningUnproven`). Given, a
+	 * `refused:tuning` counts only while its source is unproven: the recorder also refuses a
+	 * snapshot of an older stream or epoch (`refused:tuning` too, a normal step after a sweep hop),
+	 * which the entry cannot tell apart. Absent, every `refused:tuning` counts.
+	 */
+	tuningUnproven?: ((sourceId: string) => boolean) | undefined
+}
+
+/**
+ * Remembers a streak across reads, since the rings roll over in minutes on a busy band
+ * (32 snapshot refusals) while a streak must be seen for 5. State: the count of streak-ending
+ * decisions last seen (a change means a file was kept or a session started since: the streak
+ * restarts), the earliest start and the newest blocking refusal seen. A read whose rings hold no
+ * blocking refusal (flooded by other codes) keeps that memory while it is fresh; a remembered
+ * streak whose newest refusal is over `freshMs` older than the rings' start, or than now, is over.
+ * Each read takes the earlier of the remembered start and the rings' own, so an unpolled core still
+ * raises once its rings alone span the bound.
  */
 export class RecorderStreakTracker {
-	private finalizedSeen: number | null = null
-	private sinceMs: number | null = null
+	private breakersSeen: number | null = null
+	private remembered: {
+		sinceMs: number
+		newestMs: number
+		newestCode: RecorderStreakCode
+		newestAt: string
+	} | null = null
+	private readonly tuningUnproven: ((sourceId: string) => boolean) | undefined
+
+	constructor(options: RecorderStreakTrackerOptions = {}) {
+		this.tuningUnproven = options.tuningUnproven
+	}
+
+	private blocking = (entry: ScannerRecorderDecisionEntry): boolean => {
+		if (!isStreakCode(entry.code)) return false
+		if (entry.code !== "refused:tuning" || this.tuningUnproven === undefined)
+			return true
+		return this.tuningUnproven(entry.sourceId)
+	}
 
 	read(
 		recorder: ScannerRecorderStatus | undefined,
 		nowMs: number,
 	): RecorderRefusalStreak | null {
 		if (recorder === undefined) {
-			this.sinceMs = null
+			this.remembered = null
 			return null
 		}
-		const finalized = recorder.counts["finalized"] ?? 0
-		if (finalized !== this.finalizedSeen) {
-			this.finalizedSeen = finalized
-			this.sinceMs = null
+		const breakers = breakerCount(recorder)
+		if (breakers !== this.breakersSeen) {
+			this.breakersSeen = breakers
+			this.remembered = null
 		}
-		const ring = ringStreak(merged(recorder))
-		if (ring === null) {
-			this.sinceMs = null
+		const { freshMs, raiseAfterMs } = RECORDER_STREAK_LIMITS
+		const ring = ringStreak(merged(recorder), this.blocking)
+		let prior = this.remembered
+		if (
+			prior !== null &&
+			ring !== null &&
+			ring.startMs - prior.newestMs > freshMs
+		)
+			prior = null
+		const fromRing =
+			ring === null
+				? null
+				: {
+						sinceMs: ring.startMs,
+						newestMs: ring.newest.ms,
+						newestCode: ring.newest.entry.code as RecorderStreakCode,
+						newestAt: ring.newest.entry.at,
+					}
+		const newest =
+			fromRing !== null &&
+			(prior === null || fromRing.newestMs >= prior.newestMs)
+				? fromRing
+				: prior
+		if (newest === null) {
+			this.remembered = null
 			return null
 		}
-		const sinceMs =
-			this.sinceMs === null
-				? ring.startMs
-				: Math.min(this.sinceMs, ring.startMs)
-		this.sinceMs = sinceMs
+		const sinceMs = Math.min(
+			prior?.sinceMs ?? Number.POSITIVE_INFINITY,
+			fromRing?.sinceMs ?? Number.POSITIVE_INFINITY,
+		)
+		const fresh = nowMs - newest.newestMs <= freshMs
+		// A stale streak is over: the next blocking refusal starts a new one.
+		this.remembered = fresh ? { ...newest, sinceMs } : null
 		const durationMs = Math.max(0, nowMs - sinceMs)
-		const code = ring.newest.entry.code as RecorderStreakCode
-		const fresh = nowMs - ring.newest.ms <= RECORDER_STREAK_LIMITS.freshMs
 		return {
 			since: new Date(sinceMs).toISOString(),
 			durationMs,
-			newestCode: code,
-			newestAt: ring.newest.entry.at,
-			refusals: ring.refusals,
+			newestCode: newest.newestCode,
+			newestAt: newest.newestAt,
+			refusals: ring?.refusals ?? 0,
 			// Strictly over the bound: exactly 5 min does not raise.
-			raisesStatus: fresh && durationMs > RECORDER_STREAK_LIMITS.raiseAfterMs,
-			fix: RECORDER_STREAK_FIXES[code],
+			raisesStatus: fresh && durationMs > raiseAfterMs,
+			fix: RECORDER_STREAK_FIXES[newest.newestCode],
 		}
 	}
 }
