@@ -755,11 +755,17 @@ export async function run(
 		browser = await chromium.launch({
 			executablePath: exe,
 			headless: true,
-			// the flow's first Listen is a real click; this keeps a headless audio context from staying suspended
+			// The flow's first Listen is a real click; the autoplay policy keeps a headless audio context from
+			// staying suspended. The fake audio output renders on a timer: on the machine's real output device,
+			// headless Chrome left about one run in three with a "running" context whose currentTime stopped
+			// at 0.016 s, so the worklet never rendered and Listen stayed on Connecting… with bytes arriving.
 			args: [
 				...GPU_ARGS[options.gpu],
 				...(options.flow === "listen"
-					? ["--autoplay-policy=no-user-gesture-required"]
+					? [
+							"--autoplay-policy=no-user-gesture-required",
+							"--disable-audio-output",
+						]
 					: []),
 			],
 		})
