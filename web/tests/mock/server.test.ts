@@ -873,3 +873,82 @@ describe("mock server: a DMR call whose encryption is not known (WAVEKIT_MOCK_VO
 		expect(route).not.toHaveProperty("decoderId")
 	})
 })
+
+describe("mock server: digital-voice:call on each talking edge, as the core", () => {
+	/** A clock between overs: the DMR call at 161.150 MHz is keyed for the first 9 s of every 13 s. */
+	const BETWEEN_CALLS_MS = 13_000 * 150_000_000 + 10_000
+
+	async function edges(voiceEncryptionUnknown: boolean) {
+		let now = BETWEEN_CALLS_MS
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now)
+		const server = await buildMockServer({
+			port: 0,
+			audioPort: 0,
+			...(voiceEncryptionUnknown ? { voiceEncryptionUnknown } : {}),
+		})
+		const { apiUrl } = await server.listen()
+		const socket = new WebSocket(`${apiUrl.replace(/^http/, "ws")}/ws`)
+		try {
+			const inbox = new Inbox(socket)
+			await new Promise(resolve => socket.once("open", resolve))
+			const ack = inbox.next(m => m.type === "subscribed")
+			socket.send(
+				JSON.stringify({ type: "subscribe", channels: ["digital-voice"] }),
+			)
+			await ack
+			await server.app.inject({
+				method: "PATCH",
+				url: "/api/live-audio/config",
+				payload: { offsetHz: -350_000 },
+			})
+			const callOf = (m: Envelope) => m.data as DigitalVoiceStatus["call"]
+			const statusOf = (m: Envelope) => m.data as DigitalVoiceStatus
+			const isCall = (m: Envelope) => m.type === "digital-voice:call"
+			const isStatus = (m: Envelope) => m.type === "digital-voice:status"
+
+			const started = inbox.next(isCall)
+			const startStatus = inbox.next(isStatus)
+			now = IN_CALL_MS
+			const start = callOf(await started)
+			const afterStart = statusOf(await startStatus)
+
+			const ended = inbox.next(isCall)
+			const endStatus = inbox.next(isStatus)
+			now = BETWEEN_CALLS_MS
+			const end = callOf(await ended)
+			const afterEnd = statusOf(await endStatus)
+			return { start, afterStart, end, afterEnd }
+		} finally {
+			socket.close()
+			clock.mockRestore()
+			await server.close()
+		}
+	}
+
+	it("broadcasts the call as it starts and again, ended, as it stops, each followed by the status", async () => {
+		const { start, afterStart, end, afterEnd } = await edges(false)
+		expect(start).toMatchObject({
+			decoderId: "dsd-fme",
+			protocol: "dmr",
+			talkgroup: 2081,
+			encrypted: false,
+			active: true,
+		})
+		expect(start).not.toHaveProperty("endedAt")
+		expect(afterStart.call).toEqual(start)
+		expect(end).toMatchObject({
+			callId: start?.callId,
+			active: false,
+			endedAt: new Date(BETWEEN_CALLS_MS).toISOString(),
+		})
+		expect(afterEnd.call).toBeNull()
+	})
+
+	it("ends a call whose encryption is not known, so its checking line does not stick", async () => {
+		const { start, afterStart, end, afterEnd } = await edges(true)
+		expect(start).toMatchObject({ active: true, encryptionKnown: false })
+		expect(afterStart.call).toMatchObject({ encryptionKnown: false })
+		expect(end).toMatchObject({ callId: start?.callId, active: false })
+		expect(afterEnd.call).toBeNull()
+	})
+})

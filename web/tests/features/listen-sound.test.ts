@@ -473,6 +473,29 @@ describe("Listen › Source (the core's listenMode)", () => {
 			).toBe("DMR call is encrypted: nothing to play.")
 		})
 
+		it("says decoded voice is not played while the analog channel plays an encrypted call", () => {
+			expect(
+				heldCallLine("encrypted", "DMR", routeOf({ encrypted: true }), true),
+			).toBe("DMR call is encrypted: decoded voice is not played.")
+			expect(
+				sourceHint({
+					mode: "auto",
+					now: { active: "analog" },
+					route: routeOf({ encrypted: true }),
+					modeLabel: "NFM",
+				}),
+			).toBe("DMR call is encrypted: decoded voice is not played.")
+			// a checking call reads the same whatever plays
+			expect(
+				heldCallLine(
+					"checking",
+					"DMR",
+					routeOf({ encryptionKnown: false }),
+					true,
+				),
+			).toBe("DMR voice · checking…")
+		})
+
 		it("says a call whose encryption is not known is being checked", () => {
 			expect(hint("auto", { encryptionKnown: false })).toBe(
 				"DMR call: checking it is not encrypted before it plays.",

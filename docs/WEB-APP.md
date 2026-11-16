@@ -250,7 +250,8 @@ The bar's title says what you hear, in one line:
 A decoded call the core does not play is named under the title whatever it says (unless Source is
 Analog or the squelch is Open): `DMR voice · checking…` while the core does not know yet whether the
 call is encrypted (it is never played or shown as clear until that is known), and
-`DMR call is encrypted: nothing to play.` for an encrypted one. **Play anyway** is not offered then:
+`DMR call is encrypted: nothing to play.` for an encrypted one (`DMR call is encrypted: decoded voice
+is not played.` while the squelch passes the analog channel and the title says **Listening**). **Play anyway** is not offered then:
 it would only play the call's digital noise. The line under **Source** says the same.
 
 **Audio options** sets the squelch in one row, **Auto | Manual | Open**:

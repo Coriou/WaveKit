@@ -253,7 +253,12 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 				hz === null ? null : formatMHz(hz),
 			)
 		: on && heldVoice !== null
-			? heldCallLine(heldVoice, routeProtocol(now, route), route)
+			? heldCallLine(
+					heldVoice,
+					routeProtocol(now, route),
+					route,
+					headline.kind === "listening",
+				)
 			: on && toneWaiting && toneGate
 				? `Waiting for ${toneText(toneGate)}`
 				: [

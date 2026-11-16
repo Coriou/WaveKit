@@ -137,6 +137,19 @@ export async function listenFlow(
 			.getByRole("radio", { name, exact: true })
 	const panelOpen = async () =>
 		(await panelToggle.getAttribute("aria-expanded")) === "true"
+	// a click that cannot land names its step and the head, instead of a bare locator timeout
+	const click = async (what: string, on: Locator) => {
+		try {
+			await on.click()
+		} catch (error) {
+			const h = await readHead(page).catch(() => null)
+			const why = error instanceof Error ? error.message.split("\n")[0] : ""
+			throw new Error(
+				`listen flow: ${what} (after ${steps.at(-1)?.step ?? "start"}): ${why}; head ${JSON.stringify(h)}`,
+				{ cause: error },
+			)
+		}
+	}
 	// every key press goes through here, so the report counts what was really pressed
 	let keys = 0
 	const press = async (key: string, on?: Locator) => {
@@ -145,19 +158,19 @@ export async function listenFlow(
 	}
 
 	await note("tune to the carrier", (await patchConfig(page, DEFAULTS)) === 200)
-	await listenButton.click()
+	await click("Listen", listenButton)
 	await note("Listen → Waiting for voice", await titleIs("Waiting for voice"))
 	await within(STEP_MS, async () => attaches >= 1)
 	const attached = attaches
-	await page.locator(".wkf-play-anyway").click()
+	await click("Play anyway", page.locator(".wkf-play-anyway"))
 	await note(
 		"Play anyway → Listening",
 		(await titleIs("Listening")) &&
 			(await configIs({ squelchMode: "auto", voiceOnly: false })),
 	)
-	if (!(await panelOpen())) await panelToggle.click()
+	if (!(await panelOpen())) await click("Audio options", panelToggle)
 	// Digital with the squelch closed and no decoder on the carrier: nothing plays, and the panel says so
-	await radio("Source", "Digital").click()
+	await click("Source Digital", radio("Source", "Digital"))
 	await note(
 		"Source Digital, no decoder → Quiet, notice, Use Auto",
 		(await configIs({ listenMode: "digital" })) &&
@@ -167,10 +180,12 @@ export async function listenFlow(
 				return h.useAuto && /No digital voice decoder/.test(h.sourceHint)
 			})),
 	)
-	await page
-		.locator("[data-wk-source-hint]")
-		.getByRole("button", { name: "Use Auto", exact: true })
-		.click()
+	await click(
+		"Use Auto",
+		page
+			.locator("[data-wk-source-hint]")
+			.getByRole("button", { name: "Use Auto", exact: true }),
+	)
 	await note(
 		"Use Auto → Source Auto, Listening",
 		(await configIs({ listenMode: "auto" })) && (await titleIs("Listening")),
@@ -195,7 +210,7 @@ export async function listenFlow(
 			return h.title === "Listening" && h.sub === "NFM · 162.400"
 		}),
 	)
-	await radio("Squelch", "Open").click()
+	await click("Squelch Open", radio("Squelch", "Open"))
 	await note(
 		"Open → Open",
 		(await titleIs("Open")) && (await configIs({ squelchMode: "open" })),
@@ -205,7 +220,7 @@ export async function listenFlow(
 		["Digital", "digital"],
 		["Auto", "auto"],
 	] as const) {
-		await radio("Source", name).click()
+		await click(`Source ${name}`, radio("Source", name))
 		await note(
 			`Source ${name}`,
 			(await configIs({ listenMode: mode })) && attaches === attached,
@@ -230,10 +245,10 @@ export async function listenFlow(
 	// from the defaults with Listen off: one key
 	const reset = async () => {
 		if ((await listenButton.getAttribute("aria-pressed")) === "true")
-			await listenButton.click()
+			await click("Listen off", listenButton)
 		await titleIs("Not listening")
 		// the defaults: the panel closed too
-		if (await panelOpen()) await panelToggle.click()
+		if (await panelOpen()) await click("close Audio options", panelToggle)
 		await patchConfig(page, DEFAULTS)
 		await configIs({ squelchMode: "auto", voiceOnly: true })
 	}
@@ -246,9 +261,9 @@ export async function listenFlow(
 	await note("defaults, Listen off: Q → Open", keyOk)
 	await reset()
 	let clicks = 0
-	await panelToggle.click()
+	await click("Audio options (to noise)", panelToggle)
 	clicks++
-	await radio("Squelch", "Open").click()
+	await click("Squelch Open (to noise)", radio("Squelch", "Open"))
 	clicks++
 	const clickOk = await titleIs("Open")
 	await note("defaults, Listen off: the panel's Open → Open", clickOk)

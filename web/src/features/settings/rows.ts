@@ -9,6 +9,7 @@ import type {
 	DecoderSettingsView,
 	DecoderTypeInfo,
 	ExtendedSourceStatus,
+	LiveAudioLevel,
 	LiveAudioStatus,
 	PreferenceKey,
 	Preferences,
@@ -107,6 +108,11 @@ export interface SettingsSnapshot {
 	>
 	readonly relay: TunerRelayView | null
 	readonly live: LiveAudioStatus | null
+	/**
+	 * The latest `live-audio:level` event: its threshold is the live one Listen's squelch line marks, so
+	 * Manual from Auto starts where Listen would. Absent or null: the status's threshold.
+	 */
+	readonly liveLevel?: LiveAudioLevel | null
 	readonly station: StationIdentity | null
 	readonly preferences: Preferences | null
 	readonly preferenceDefaults: Preferences | null
@@ -763,6 +769,16 @@ const NR = opts([
 	["noaa-apt", "NOAA APT"],
 ])
 
+/** The live squelch threshold, as Listen reads it: the level event's while running, else the status's. */
+function liveThresholdOf(
+	status: LiveAudioStatus,
+	level: LiveAudioLevel | null | undefined,
+): number | null {
+	if (status.running && typeof level?.thresholdDbfs === "number")
+		return level.thresholdDbfs
+	return status.thresholdDbfs ?? null
+}
+
 function audioRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	const rows: SettingRow[] = []
 	const st = s.live
@@ -804,7 +820,7 @@ function audioRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 					v === "manual"
 						? {
 								kind: "manual",
-								dbfs: manualStart(c, st.thresholdDbfs ?? null),
+								dbfs: manualStart(c, liveThresholdOf(st, s.liveLevel)),
 							}
 						: { kind: "auto" },
 				)

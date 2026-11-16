@@ -905,6 +905,27 @@ export async function buildMockServer(
 		}
 	}
 
+	/**
+	 * The call last announced on `digital-voice:call`. As the core, each talking edge (a call
+	 * starts, or ends) is broadcast as `digital-voice:call` (the call; `active: false` and
+	 * `endedAt` once it ended), then `digital-voice:status`, so a client never keeps a stale call.
+	 */
+	let announcedCall: DigitalVoiceStatus["call"] = null
+	const announceVoiceCallEdges = () => {
+		const call = digitalVoiceStatus().call
+		const before = announcedCall
+		if ((before?.callId ?? null) === (call?.callId ?? null)) return
+		announcedCall = call
+		if (before !== null)
+			broadcast("digital-voice", "digital-voice:call", {
+				...before,
+				active: false,
+				endedAt: new Date(Date.now()).toISOString(),
+			})
+		if (call !== null) broadcast("digital-voice", "digital-voice:call", call)
+		broadcast("digital-voice", "digital-voice:status", digitalVoiceStatus())
+	}
+
 	const liveStatus = (): LiveAudioStatus => {
 		const status: LiveAudioStatus = {
 			enabled: live.config.enabled,
@@ -1399,6 +1420,7 @@ export async function buildMockServer(
 	let lastFloodAt = Date.now()
 	const onTick = () => {
 		tick += 1
+		announceVoiceCallEdges()
 		if (live.running) {
 			const l: LiveAudioLevel = level()
 			l.autoSquelch = autoSquelchOf(l.squelchOpen)

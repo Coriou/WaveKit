@@ -261,15 +261,30 @@ export function heldCall(input: {
 	return route.encrypted ? "encrypted" : null
 }
 
-/** The head's line for a held call: "DMR voice · checking…", "DMR call is encrypted: nothing to play." */
+/**
+ * The line for an encrypted call: "DMR call is encrypted: nothing to play.", or, while the analog
+ * channel plays anyway (`analogPlays`: the squelch passes it), "…: decoded voice is not played."
+ */
+export function encryptedCallLine(
+	protocol: string | null,
+	analogPlays: boolean,
+): string {
+	return `${protocol ?? "Digital voice"} call is encrypted: ${analogPlays ? "decoded voice is not played." : "nothing to play."}`
+}
+
+/**
+ * The head's line for a held call: "DMR voice · checking…", "DMR call is encrypted: nothing to play.";
+ * `analogPlays` (the head says Listening) for an encrypted call says decoded voice is not played instead.
+ */
 export function heldCallLine(
 	held: HeldCall,
 	protocol: string | null,
 	route: VoiceRoute | null,
+	analogPlays = false,
 ): string {
 	return held === "checking"
 		? voiceCallLine(protocol, route, null)
-		: `${protocol ?? "Digital voice"} call is encrypted: nothing to play.`
+		: encryptedCallLine(protocol, analogPlays)
 }
 
 function callText(
@@ -357,7 +372,7 @@ export function sourceHint(input: {
 		return `${what ?? "Digital voice"} call. Playing decoded voice.`
 	const held = heldCall({ route, source: mode })
 	if (held === "encrypted")
-		return `${what ?? "Digital voice"} call is encrypted: nothing to play.`
+		return encryptedCallLine(what, now?.active === "analog")
 	if (held === "checking")
 		return `${what ?? "Digital voice"} call: checking it is not encrypted before it plays.`
 	if (mode === "analog") return `Playing demodulated ${modeLabel} audio only.`

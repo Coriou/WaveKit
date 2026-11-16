@@ -310,6 +310,23 @@ describe("the Listen card's head states", () => {
 		expect(html).not.toContain("Play anyway")
 	})
 
+	it("says decoded voice is not played while the analog channel plays an encrypted call", () => {
+		const html = head({
+			status: LISTEN_CORE,
+			level: {
+				squelchOpen: true,
+				autoSquelch: { state: "open" },
+				autoRoute: { active: "analog" },
+			},
+			call: { encrypted: true },
+		})
+		expect(html).toContain("<b>Listening</b>")
+		expect(html).toContain(
+			"DMR call is encrypted: decoded voice is not played.",
+		)
+		expect(html).not.toContain("nothing to play")
+	})
+
 	it("names no held call where it could not play: Source Analog or Open", () => {
 		for (const config of [
 			{ listenMode: "analog" as const },

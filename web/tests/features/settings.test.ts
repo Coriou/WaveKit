@@ -3,6 +3,7 @@ import type {
 	DecoderInfo,
 	DecoderSettingsView,
 	DecoderTypeInfo,
+	LiveAudioLevel,
 	StationIdentity,
 	TunerState,
 } from "@wavekit/api-types"
@@ -550,6 +551,28 @@ describe("Settings rows", () => {
 				["audio", { squelchMode: "open" }],
 				["audio", { squelchMode: "auto", voiceOnly: true }],
 				["audio", { listenMode: "digital" }],
+			])
+		})
+
+		it("starts Manual from Auto at the level event's threshold, as Listen does, when one is known", async () => {
+			const a = actions()
+			const rows = buildRows(
+				snapshot({
+					live: live(listen),
+					liveLevel: {
+						sourceId: "rtl-0",
+						channelPowerDbfs: -90,
+						noiseFloorDbfs: -100,
+						squelchOpen: false,
+						thresholdDbfs: -77.4,
+					} satisfies LiveAudioLevel,
+				}),
+				a,
+			)
+			await byId(rows, "au.squelch").write?.("manual")
+			// the level event's −77.4, not the status's −84.6
+			expect(a.calls).toEqual([
+				["audio", { squelchMode: "manual", squelch: -77 }],
 			])
 		})
 
