@@ -241,6 +241,37 @@ export function voiceCallLine(
 	return [`${protocol ?? "Digital"} voice`, detail].filter(Boolean).join(" · ")
 }
 
+/** Why a decoded call on the air does not play (see `heldCall`). */
+export type HeldCall = "checking" | "encrypted"
+
+/**
+ * A decoded call on the air that the core's `/auto` holds: `checking` while its encryption is not known
+ * yet, `encrypted` once known encrypted. The core never routes either (its `active` is never `digital`
+ * then), so the head and Source read it from the call itself. Only where a call could play: Source not
+ * Analog and the squelch not Open. Null otherwise.
+ */
+export function heldCall(input: {
+	route: VoiceRoute | null
+	source: ListenSource
+	squelch?: "auto" | "manual" | "open"
+}): HeldCall | null {
+	const { route, source, squelch } = input
+	if (!route?.active || source === "analog" || squelch === "open") return null
+	if (!route.encryptionKnown) return "checking"
+	return route.encrypted ? "encrypted" : null
+}
+
+/** The head's line for a held call: "DMR voice · checking…", "DMR call is encrypted: nothing to play." */
+export function heldCallLine(
+	held: HeldCall,
+	protocol: string | null,
+	route: VoiceRoute | null,
+): string {
+	return held === "checking"
+		? voiceCallLine(protocol, route, null)
+		: `${protocol ?? "Digital voice"} call is encrypted: nothing to play.`
+}
+
 function callText(
 	call: NonNullable<DigitalVoiceStatus["call"]>,
 ): string | null {
@@ -324,6 +355,11 @@ export function sourceHint(input: {
 		return "No digital voice decoder on this channel: nothing plays."
 	if (now?.active === "digital")
 		return `${what ?? "Digital voice"} call. Playing decoded voice.`
+	const held = heldCall({ route, source: mode })
+	if (held === "encrypted")
+		return `${what ?? "Digital voice"} call is encrypted: nothing to play.`
+	if (held === "checking")
+		return `${what ?? "Digital voice"} call: checking it is not encrypted before it plays.`
 	if (mode === "analog") return `Playing demodulated ${modeLabel} audio only.`
 	if (mode === "digital")
 		return `Decoded ${what ?? "digital"} voice only, silence between calls.`

@@ -54,6 +54,8 @@ import {
 	deemphOf,
 	evidenceText,
 	deemphPatch,
+	heldCall,
+	heldCallLine,
 	listenHeadline,
 	listenModeOf,
 	liveTone,
@@ -187,19 +189,16 @@ function useLevel() {
 	}
 }
 
-function ListenHead({ ctx }: { ctx: IslandContext }) {
-	const { data, listen } = useServices()
-	const readOnly = useReadOnly()
-	const state = useStore(listen)
+/**
+ * What the head says, shared with the panel's squelch tag so both agree: the headline, and the decoded
+ * call `/auto` holds (encryption still being checked, or encrypted), read from the call itself since the
+ * core never routes it.
+ */
+function useHeadline(level: ReturnType<typeof useLevel>) {
 	const status = useLiveStatus()
-	const hz = useSettledHz()
-	const { power, threshold, open, carrier, gate, setting } = useLevel()
-	const on = state.wanted
-	const mode = status ? modeSpec(status.config.modulation).label : null
 	const route = useVoiceRoute()
 	const now = useRouteNow()
-	const digital = on && now?.active === "digital"
-	const heardTone = on && open ? liveTone(status?.tone) : null
+	const { setting, carrier, gate } = level
 	// a tone gate set on another channel stays on the core: say so while it holds the audio
 	const toneGate =
 		status?.config.toneSquelch && status.config.toneSquelch.kind !== "none"
@@ -209,17 +208,41 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 		setting.kind !== "open" &&
 		toneGate !== null &&
 		status?.toneSquelch?.state === "waiting"
+	const source = listenModeOf(status?.config)
 	const headline = listenHeadline({
 		squelch: setting.kind,
 		carrier,
 		gate,
 		toneWaiting,
 		now,
-		source: listenModeOf(status?.config),
+		source,
 	})
-	// Play anyway turns Voice only off: only where the switch exists and this browser may write
+	const heldVoice =
+		now?.active === "digital"
+			? null
+			: heldCall({ route, source, squelch: setting.kind })
+	return { headline, heldVoice, route, now, toneGate, toneWaiting }
+}
+
+function ListenHead({ ctx }: { ctx: IslandContext }) {
+	const { data, listen } = useServices()
+	const readOnly = useReadOnly()
+	const state = useStore(listen)
+	const status = useLiveStatus()
+	const hz = useSettledHz()
+	const level = useLevel()
+	const { power, threshold, open, setting } = level
+	const on = state.wanted
+	const mode = status ? modeSpec(status.config.modulation).label : null
+	const { headline, heldVoice, route, now, toneGate, toneWaiting } =
+		useHeadline(level)
+	const digital = on && now?.active === "digital"
+	const heardTone = on && open ? liveTone(status?.tone) : null
+	// Play anyway turns Voice only off: only where the switch exists and this browser may write; never
+	// while a held DMR call keys the carrier (it would play its buzz, not the call)
 	const canPlayAnyway =
 		headline.kind === "waiting" &&
+		heldVoice === null &&
 		!readOnly &&
 		voiceOnlyFits(status?.config) &&
 		setting.kind === "auto"
@@ -229,16 +252,18 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 				route,
 				hz === null ? null : formatMHz(hz),
 			)
-		: on && toneWaiting && toneGate
-			? `Waiting for ${toneText(toneGate)}`
-			: [
-					mode,
-					hz === null ? null : formatMHz(hz),
-					// the tone of the transmission on the air (WG12)
-					heardTone ? toneText(heardTone) : null,
-				]
-					.filter(Boolean)
-					.join(" · ")
+		: on && heldVoice !== null
+			? heldCallLine(heldVoice, routeProtocol(now, route), route)
+			: on && toneWaiting && toneGate
+				? `Waiting for ${toneText(toneGate)}`
+				: [
+						mode,
+						hz === null ? null : formatMHz(hz),
+						// the tone of the transmission on the air (WG12)
+						heardTone ? toneText(heardTone) : null,
+					]
+						.filter(Boolean)
+						.join(" · ")
 	const toggle = () => {
 		if (state.phase === "blocked") return listen.resume()
 		void (on ? listen.stop() : listen.start())
@@ -362,6 +387,7 @@ function ListenPanel() {
 	const volume = useStore(listen, s => s.volume)
 	const listenError = useStore(listen, s => s.error)
 	const audioError = useStore(data.liveAudio, s => s.error)
+	const level = useLevel()
 	const {
 		power,
 		threshold,
@@ -371,7 +397,10 @@ function ListenPanel() {
 		setting,
 		floor,
 		liveThreshold,
-	} = useLevel()
+	} = level
+	// the tag agrees with the head: Quiet there (Source Digital between calls, a tone gate waiting) is Quiet here
+	const quiet = useHeadline(level).headline.kind === "quiet"
+	const passing = open && !quiet
 	const [drag, setDrag] = useState<number | null>(null)
 	const running = status?.running === true
 	const config = status?.config
@@ -419,14 +448,14 @@ function ListenPanel() {
 						<span
 							className="wk-tag"
 							data-size="md"
-							data-variant={open ? "accent" : undefined}
+							data-variant={passing ? "accent" : undefined}
 							data-wk-squelch-state=""
 						>
 							{setting.kind === "open"
 								? "Open"
-								: open
+								: passing
 									? (evidenceText(gate) ?? "Passing")
-									: carrier && gate?.state === "waiting"
+									: !quiet && carrier && gate?.state === "waiting"
 										? "Waiting for voice"
 										: "Quiet"}
 						</span>

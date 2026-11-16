@@ -798,20 +798,23 @@ export async function buildMockServer(
 		const configured = live.config.listenMode ?? "auto"
 		if (live.config.squelchMode === "open" && configured !== "analog")
 			return "squelch-open"
-		if (
-			autoListenMode() === "digital" &&
-			(!voice.running || voiceCall().hz === null)
-		)
+		// as the core: only when no decoder covers the channel, not while the voice service is stopped
+		if (autoListenMode() === "digital" && voiceCall().hz === null)
 			return "no-decoder"
 		return null
 	}
 	/**
 	 * What `/auto` plays now: the decoded call while one talks (and voice runs), else the analog
-	 * channel; `analog` never plays the call and `digital` never plays analog.
+	 * channel; `analog` never plays the call and `digital` never plays analog. As the core, a call
+	 * whose encryption is not known yet (WAVEKIT_MOCK_VOICE_ENCRYPTION_UNKNOWN) is never routed.
 	 */
 	const autoRouteLevel = (): NonNullable<LiveAudioLevel["autoRoute"]> => {
 		const mode = autoListenMode()
-		const digital = mode !== "analog" && voice.running && voiceCall().talking
+		const digital =
+			mode !== "analog" &&
+			voice.running &&
+			voiceCall().talking &&
+			options.voiceEncryptionUnknown !== true
 		// Open passes everything; otherwise the squelch decides.
 		const passes = live.config.squelchMode === "open" || level().squelchOpen
 		const analog = mode !== "digital" && passes

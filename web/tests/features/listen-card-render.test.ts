@@ -1,7 +1,13 @@
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it } from "vitest"
-import type { LiveAudioLevel, LiveAudioStatus } from "@wavekit/api-types"
+import type {
+	DecoderInfo,
+	DigitalVoiceStatus,
+	LiveAudioLevel,
+	LiveAudioStatus,
+	TunerState,
+} from "@wavekit/api-types"
 
 import { ServicesContext } from "../../src/app/context.ts"
 import { createServices, type AppServices } from "../../src/app/services.ts"
@@ -68,11 +74,66 @@ function withConfig(
 	return { ...status, config: { ...status.config, ...config } }
 }
 
+/** A DMR call on the dsd-fme decoder the tuned 161.150 MHz is a target of. */
+type CallOver = { encrypted?: boolean; encryptionKnown?: boolean }
+
+function withCall(made: AppServices, call: CallOver): void {
+	made.data.tuner.update(s => ({
+		...s,
+		bySource: {
+			"rtl-0": { frequency: 161_150_000 } as unknown as TunerState,
+		},
+	}))
+	made.decoders.update(s => ({
+		...s,
+		decoders: [
+			{
+				id: "dsd-fme",
+				type: "dsd-fme",
+				running: true,
+				targetFrequenciesHz: [161_150_000],
+			} as unknown as DecoderInfo,
+		],
+	}))
+	const live = {
+		decoderId: "dsd-fme",
+		callId: "c1",
+		protocol: "dmr",
+		talkgroup: 2081,
+		source: 2081045,
+		slot: 1,
+		encrypted: false,
+		active: true,
+		startedAt: "2026-11-16T00:00:00Z",
+		...call,
+	}
+	made.data.digitalVoice.update(s => ({
+		...s,
+		status: {
+			enabled: true,
+			running: true,
+			sampleRate: 8000,
+			httpUrl: "http://localhost:3102/voice",
+			wavUrl: "http://localhost:3102/voice.wav",
+			decoders: [
+				{
+					decoderId: "dsd-fme",
+					httpUrl: "http://localhost:3102/voice/dsd-fme",
+					wavUrl: "http://localhost:3102/voice/dsd-fme.wav",
+					call: live,
+				},
+			],
+			call: live,
+		} as unknown as DigitalVoiceStatus,
+	}))
+}
+
 function setup(over: {
 	phase?: ListenPhase
 	audio?: Partial<AudioHealth>
 	level?: Partial<LiveAudioLevel>
 	status?: LiveAudioStatus
+	call?: CallOver
 }): AppServices {
 	// no core: every read fails, nothing is fetched while rendering
 	const made = createServices({
@@ -104,6 +165,7 @@ function setup(over: {
 		phase: over.phase ?? "playing",
 		audio: { ...NO_AUDIO_HEALTH, ...over.audio },
 	}))
+	if (over.call) withCall(made, over.call)
 	return made
 }
 
@@ -212,6 +274,57 @@ describe("the Listen card's head states", () => {
 		expect(html).not.toContain("Play anyway")
 	})
 
+	// the core never routes a call whose encryption is unknown or that is encrypted: `active` is not digital
+	const HELD = {
+		squelchOpen: true,
+		autoSquelch: { state: "waiting" },
+		autoRoute: { active: "none" },
+	} as const
+
+	it("says DMR voice · checking… while the call's encryption is not known, with no Play anyway", () => {
+		const html = head({
+			status: LISTEN_CORE,
+			level: HELD,
+			call: { encryptionKnown: false },
+		})
+		expect(html).toContain("DMR voice · checking…")
+		expect(html).not.toContain("TG 2081")
+		// turning Voice only off would only play the call's buzz
+		expect(html).not.toContain("Play anyway")
+		const digital = head({
+			status: withConfig(LISTEN_CORE, { listenMode: "digital" }),
+			level: HELD,
+			call: { encryptionKnown: false },
+		})
+		expect(digital).toContain("<b>Quiet</b>")
+		expect(digital).toContain("DMR voice · checking…")
+	})
+
+	it("says the DMR call is encrypted, with no Play anyway", () => {
+		const html = head({
+			status: LISTEN_CORE,
+			level: HELD,
+			call: { encrypted: true },
+		})
+		expect(html).toContain("DMR call is encrypted: nothing to play.")
+		expect(html).not.toContain("Play anyway")
+	})
+
+	it("names no held call where it could not play: Source Analog or Open", () => {
+		for (const config of [
+			{ listenMode: "analog" as const },
+			{ squelchMode: "open" as const },
+		]) {
+			const html = head({
+				status: withConfig(LISTEN_CORE, config),
+				level: { ...HELD, autoSquelch: { state: "open", evidence: "voice" } },
+				call: { encryptionKnown: false },
+			})
+			expect(html).not.toContain("checking…")
+			expect(html).toContain("NFM · 161.150")
+		}
+	})
+
 	it("an old core (no voiceOnly) waits for voice as before, with no Play anyway", () => {
 		const old = withConfig(STATUS, { squelchMode: "auto" })
 		const html = head({
@@ -269,6 +382,47 @@ describe("the Audio options panel", () => {
 			"No digital voice decoder on this channel: nothing plays.",
 		)
 		expect(html).toContain("Use Auto")
+	})
+
+	it("says the call is encrypted or being checked under Source", () => {
+		expect(
+			panel({
+				status: LISTEN_CORE,
+				level: { autoRoute: { active: "none" } },
+				call: { encrypted: true },
+			}),
+		).toContain("DMR call is encrypted: nothing to play.")
+		expect(
+			panel({
+				status: LISTEN_CORE,
+				level: { autoRoute: { active: "none" } },
+				call: { encryptionKnown: false },
+			}),
+		).toContain("DMR call: checking it is not encrypted before it plays.")
+	})
+
+	it("tags the squelch Quiet when the head says Quiet under Source Digital", () => {
+		const level = {
+			squelchOpen: true,
+			autoSquelch: { state: "open", evidence: "voice" },
+			autoRoute: { active: "none" },
+		} as const
+		const html = panel({
+			status: withConfig(LISTEN_CORE, { listenMode: "digital" }),
+			level,
+		})
+		expect(html).toMatch(/data-wk-squelch-state="">Quiet</)
+		expect(html).not.toContain("Voice heard")
+		// under Auto the same carrier passes as before
+		expect(panel({ status: LISTEN_CORE, level })).toMatch(
+			/data-wk-squelch-state="">Voice heard</,
+		)
+		expect(
+			head({
+				status: withConfig(LISTEN_CORE, { listenMode: "digital" }),
+				level,
+			}),
+		).toContain("<b>Quiet</b>")
 	})
 
 	it("an old core gets no Source and no Voice only, and never crashes", () => {

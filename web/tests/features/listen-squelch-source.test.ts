@@ -162,6 +162,40 @@ describe("Q: Open and back", () => {
 		])
 	})
 
+	it("ignores a second Q while the first PATCH has not answered (never Open twice)", async () => {
+		let current = status(LISTEN_CONFIG)
+		const patches: Partial<LiveAudioConfig>[] = []
+		let answer: (() => void) | null = null
+		const store = {
+			get: () => ({ status: current, level: null, error: null }),
+			setConfig: vi.fn((patch: Partial<LiveAudioConfig>) => {
+				patches.push(patch)
+				return new Promise<LiveAudioStatus>(resolve => {
+					answer = () => {
+						current = { ...current, config: { ...current.config, ...patch } }
+						resolve(current)
+					}
+				})
+			}),
+		} as unknown as LiveAudioStore
+		const { listen, start } = fakeListen(true)
+		const first = toggleOpen(store, listen)
+		const second = toggleOpen(store, listen)
+		expect(second).toBe(first)
+		expect(patches).toEqual([{ squelchMode: "open" }])
+		;(answer as (() => void) | null)?.()
+		await expect(first).resolves.toBe(true)
+		// once it answered, Q goes back as usual
+		const back = toggleOpen(store, listen)
+		;(answer as (() => void) | null)?.()
+		await back
+		expect(patches).toEqual([
+			{ squelchMode: "open" },
+			{ squelchMode: "auto", voiceOnly: true },
+		])
+		expect(start).not.toHaveBeenCalled()
+	})
+
 	it("goes back to Manual at its level", async () => {
 		const { store, patches } = fakeStore({
 			...LISTEN_CONFIG,

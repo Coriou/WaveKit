@@ -7,10 +7,7 @@ import type {
 	LiveAudioConfig,
 	LiveAudioStatus,
 } from "@wavekit/api-types"
-import {
-	autoRouteSource,
-	voiceSource,
-} from "../../src/features/listen/audio.ts"
+import { autoRouteSource } from "../../src/features/listen/audio.ts"
 import {
 	recordClock,
 	recordFileName,
@@ -37,6 +34,8 @@ import {
 	listenHeadline,
 	listenModeOf,
 	sourceHint,
+	heldCall,
+	heldCallLine,
 	voiceCallLine,
 	voiceRoute,
 } from "../../src/features/listen/sound.ts"
@@ -295,24 +294,6 @@ describe("Listen › What you hear", () => {
 		).toEqual({ kind: "dcs", code: "023", polarity: "normal" })
 		expect(offeredTone(undefined, [], undefined)).toBeNull()
 	})
-
-	it("makes the voice stream reachable from the page", () => {
-		const src = voiceSource(
-			{
-				httpUrl: "http://localhost:8082/x",
-				wavUrl: "http://localhost:8082/x.wav",
-				rate: 8000,
-			},
-			"http://wavekit.lan:5173/",
-		)
-		expect(src).toEqual({
-			httpUrl: "http://wavekit.lan:8082/x",
-			wavUrl: "http://wavekit.lan:8082/x.wav",
-			format: "s16le",
-			rate: 8000,
-			credentials: false,
-		})
-	})
 })
 
 describe("Listen › Record audio", () => {
@@ -451,6 +432,75 @@ describe("Listen › Source (the core's listenMode)", () => {
 		expect(hint("auto", { active: "none" }, null)).toBe(
 			"Playing NFM audio. Decoded voice when a decoder covers the channel.",
 		)
+	})
+
+	describe("a call the core holds (never routed: encrypted, or encryption not known)", () => {
+		const call = (over: Record<string, unknown>) =>
+			({
+				decoderId: "dsd-fme",
+				callId: "c1",
+				protocol: "dmr",
+				talkgroup: 2081,
+				source: 2081045,
+				slot: 1,
+				encrypted: false,
+				active: true,
+				startedAt: "2026-10-17T17:00:00Z",
+				...over,
+			}) as unknown as DigitalVoiceStatus["call"]
+		const routeOf = (over: Record<string, unknown>) =>
+			voiceRoute([dsd()], voice(call(over)), 161_150_000, 6250)
+		const hint = (
+			mode: "auto" | "analog" | "digital",
+			over: Record<string, unknown>,
+		) =>
+			sourceHint({
+				mode,
+				now: { active: "none" },
+				route: routeOf(over),
+				modeLabel: "NFM",
+			})
+
+		it("says an encrypted call has nothing to play", () => {
+			expect(hint("auto", { encrypted: true })).toBe(
+				"DMR call is encrypted: nothing to play.",
+			)
+			expect(hint("digital", { encrypted: true })).toBe(
+				"DMR call is encrypted: nothing to play.",
+			)
+			expect(
+				heldCallLine("encrypted", "DMR", routeOf({ encrypted: true })),
+			).toBe("DMR call is encrypted: nothing to play.")
+		})
+
+		it("says a call whose encryption is not known is being checked", () => {
+			expect(hint("auto", { encryptionKnown: false })).toBe(
+				"DMR call: checking it is not encrypted before it plays.",
+			)
+			expect(
+				heldCallLine("checking", "DMR", routeOf({ encryptionKnown: false })),
+			).toBe("DMR voice · checking…")
+		})
+
+		it("holds nothing for a clear call, an ended one, Source Analog or Open", () => {
+			const held = (
+				over: Record<string, unknown>,
+				source: "auto" | "analog" | "digital" = "auto",
+				squelch: "auto" | "manual" | "open" = "auto",
+			) => heldCall({ route: routeOf(over), source, squelch })
+			expect(held({ encryptionKnown: false })).toBe("checking")
+			expect(held({ encrypted: true })).toBe("encrypted")
+			// unknown wins over a stale encrypted flag: still checking
+			expect(held({ encrypted: true, encryptionKnown: false })).toBe("checking")
+			expect(held({})).toBeNull()
+			expect(held({ encrypted: true, active: false })).toBeNull()
+			expect(held({ encrypted: true }, "analog")).toBeNull()
+			expect(held({ encryptionKnown: false }, "digital", "open")).toBeNull()
+			expect(heldCall({ route: null, source: "auto" })).toBeNull()
+			expect(hint("analog", { encrypted: true })).toBe(
+				"Playing demodulated NFM audio only.",
+			)
+		})
 	})
 })
 

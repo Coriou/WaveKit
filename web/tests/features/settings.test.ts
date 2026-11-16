@@ -21,7 +21,10 @@ import {
 	yamlLine,
 	type SettingRow,
 } from "../../src/features/settings/model.ts"
-import { SETTINGS_REGISTRY } from "../../src/features/settings/registry.ts"
+import {
+	SETTINGS_REGISTRY,
+	settingsFor,
+} from "../../src/features/settings/registry.ts"
 import {
 	rememberedClosed,
 	resetOpenMemory,
@@ -542,7 +545,8 @@ describe("Settings rows", () => {
 			await byId(rows, "au.source").write?.("digital")
 			expect(a.calls).toEqual([
 				["audio", { squelchMode: "auto", voiceOnly: false }],
-				["audio", { squelchMode: "manual", squelch: -60 }],
+				// Manual from Auto starts at Auto's live threshold (−84.6), not the stored −60
+				["audio", { squelchMode: "manual", squelch: -85 }],
 				["audio", { squelchMode: "open" }],
 				["audio", { squelchMode: "auto", voiceOnly: true }],
 				["audio", { listenMode: "digital" }],
@@ -589,6 +593,32 @@ describe("Settings rows", () => {
 			expect(level.widget).toMatchObject({ min: -120, max: -1 })
 			expect(rows.some(r => r.id === "au.voiceOnly")).toBe(false)
 			expect(rows.some(r => r.id === "au.margin")).toBe(false)
+		})
+
+		it("⌘K lists a conditional audio row only where the drawer shows it (no landing on a hidden row)", () => {
+			for (const config of [
+				listen,
+				{ ...listen, squelchMode: "manual" as const, squelch: -72 },
+				{ ...listen, squelchMode: "open" as const },
+				{ ...listen, modulation: "am" as const },
+				{ squelchMode: "noise" as const },
+				{ squelchMode: "manual" as const, squelch: -72 },
+			]) {
+				const st = live(config)
+				const rows = buildRows(snapshot({ live: st }), actions())
+				const listed = settingsFor("legacy", st?.config)
+				for (const id of ["au.margin", "au.voiceOnly", "au.source"])
+					expect([id, listed.some(e => e.id === id)]).toEqual([
+						id,
+						rows.some(r => r.id === id),
+					])
+			}
+			const manual = live({ ...listen, squelchMode: "manual", squelch: -72 })
+			expect(
+				settingsFor("legacy", manual?.config).some(e => e.id === "au.margin"),
+			).toBe(false)
+			// without a live config nothing is held back
+			expect(settingsFor("legacy").some(e => e.id === "au.margin")).toBe(true)
 		})
 
 		it("an old core: no Voice only, no Source, Open sent as manual at 0, deprecated noise reads as Auto", async () => {

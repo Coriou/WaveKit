@@ -19,9 +19,16 @@ import type { ListenController } from "./controller.ts"
  */
 let beforeOpen: ClosedSquelch | null = null
 
-/** For tests: forget the remembered squelch. */
+/**
+ * The `Q` PATCH still in flight: a second `Q` before it answers is ignored (it answers with the same
+ * promise), since the status it would toggle from is still the old one and would send Open again.
+ */
+let toggling: Promise<boolean> | null = null
+
+/** For tests: forget the remembered squelch and any `Q` in flight. */
 export function resetOpenMemory(): void {
 	beforeOpen = null
+	toggling = null
 }
 
 export function rememberedClosed(): ClosedSquelch | null {
@@ -85,14 +92,18 @@ export function toggleOpen(
 	liveAudio: LiveAudioStore,
 	listen: ListenController | null,
 ): Promise<boolean> {
+	if (toggling !== null) return toggling
 	const status = liveAudio.get().status
 	const { patch, remember } = toggleOpenPatch(status, beforeOpen)
 	if (remember !== null) beforeOpen = remember
 	const after = remember !== null ? unlockHere(listen) : () => undefined
-	return send(liveAudio, patch).then(ok => {
+	const sent = send(liveAudio, patch).then(ok => {
+		if (toggling === sent) toggling = null
 		after(ok)
 		return ok
 	})
+	toggling = sent
+	return sent
 }
 
 /**

@@ -1073,7 +1073,9 @@ export class PaletteModel {
 	}
 
 	settingItems(): PaletteItem[] {
-		return settingsFor(this.#c.accessMode).map(e => this.settingItem(e))
+		return settingsFor(this.#c.accessMode, this.#c.config).map(e =>
+			this.settingItem(e),
+		)
 	}
 
 	scopeItems(scope: ScopeId, q = ""): PaletteItem[] {
@@ -1840,7 +1842,7 @@ export class PaletteModel {
 				id: "scope:set",
 				title: "All settings",
 				glyph: "settings",
-				value: String(settingsFor(c.accessMode).length),
+				value: String(settingsFor(c.accessMode, c.config).length),
 				keys: ["settings", "preferences", "options", "configuration", "config"],
 				scope: "set",
 			},
@@ -1904,7 +1906,9 @@ export class PaletteModel {
 			return d ? this.discoveryItem(d) : null
 		}
 		if (id.startsWith("set:")) {
-			const e = settingsFor(c.accessMode).find(x => `set:${x.id}` === id)
+			const e = settingsFor(c.accessMode, c.config).find(
+				x => `set:${x.id}` === id,
+			)
 			return e ? this.settingItem(e) : null
 		}
 		const root = this.rootCommands().find(x => x.id === id)

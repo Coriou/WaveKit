@@ -3,6 +3,7 @@ import WebSocket from "ws"
 import type {
 	ActivitySearchPage,
 	DecoderInfo,
+	DigitalVoiceStatus,
 	ExtendedSourceStatus,
 	LiveAudioStatus,
 	ResolvedBandPlanView,
@@ -334,6 +335,32 @@ describe("mock server REST", () => {
 				offsetHz: -350_000,
 				squelchMode: "auto",
 				voiceOnly: true,
+				listenMode: "auto",
+			})
+		}
+	})
+
+	it("reports no-decoder only when no voice decoder covers the channel, not while voice is stopped", async () => {
+		const read = async () =>
+			(await inject("GET", "/api/live-audio/status")).json<LiveAudioStatus>()
+		// the dsd-fme target at 161.150 MHz (centre 161.500 − 350 kHz), the voice service stopped
+		await inject("POST", "/api/digital-voice/stop")
+		await inject("PATCH", "/api/live-audio/config", {
+			offsetHz: -350_000,
+			listenMode: "digital",
+		})
+		await inject("POST", "/api/live-audio/start")
+		try {
+			const covered = await read()
+			expect(covered.autoRoute?.listenMode).toBe("digital")
+			expect(covered.autoRoute?.reason).toBeUndefined()
+			// off every target: no decoder covers it
+			await inject("PATCH", "/api/live-audio/config", { offsetHz: 900_000 })
+			expect((await read()).autoRoute?.reason).toBe("no-decoder")
+		} finally {
+			await inject("POST", "/api/live-audio/stop")
+			await inject("PATCH", "/api/live-audio/config", {
+				offsetHz: -350_000,
 				listenMode: "auto",
 			})
 		}
@@ -786,5 +813,63 @@ describe("mock server WebSocket and audio", () => {
 		const other = await fetch(`${audio}/other`, { method: "OPTIONS" })
 		expect(other.status).toBe(404)
 		expect(other.headers.get("access-control-allow-origin")).toBe("*")
+	})
+})
+
+/** The mock DMR call at 161.150 MHz is keyed 9 s in every 13 s: a clock inside a call. */
+const IN_CALL_MS = 13_000 * 150_000_000 + 2_000
+
+describe("mock server: a DMR call whose encryption is not known (WAVEKIT_MOCK_VOICE_ENCRYPTION_UNKNOWN)", () => {
+	async function routeWith(voiceEncryptionUnknown: boolean) {
+		const server = await buildMockServer({
+			port: 0,
+			audioOrigin: "http://localhost:3102",
+			...(voiceEncryptionUnknown ? { voiceEncryptionUnknown } : {}),
+		})
+		await server.app.ready()
+		const inject = (
+			method: "GET" | "POST" | "PATCH",
+			url: string,
+			payload?: unknown,
+		) =>
+			server.app.inject(
+				payload === undefined
+					? { method, url }
+					: { method, url, payload: payload as Record<string, unknown> },
+			)
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => IN_CALL_MS)
+		try {
+			await inject("PATCH", "/api/live-audio/config", {
+				offsetHz: -350_000,
+				listenMode: "auto",
+			})
+			await inject("POST", "/api/live-audio/start")
+			await inject("POST", "/api/digital-voice/start")
+			const status = (
+				await inject("GET", "/api/live-audio/status")
+			).json<LiveAudioStatus>()
+			const voice = (
+				await inject("GET", "/api/digital-voice/status")
+			).json<DigitalVoiceStatus>()
+			return { route: status.autoRoute, call: voice.call }
+		} finally {
+			clock.mockRestore()
+			await server.close()
+		}
+	}
+
+	it("routes the clear call as digital", async () => {
+		const { route, call } = await routeWith(false)
+		expect(call).toMatchObject({ active: true, encrypted: false })
+		expect(call).not.toHaveProperty("encryptionKnown")
+		expect(route).toMatchObject({ active: "digital", protocol: "dmr" })
+	})
+
+	it("never routes the call while its encryption is not known, as the core", async () => {
+		const { route, call } = await routeWith(true)
+		expect(call).toMatchObject({ active: true, encryptionKnown: false })
+		expect(route?.active).not.toBe("digital")
+		expect(route).not.toHaveProperty("protocol")
+		expect(route).not.toHaveProperty("decoderId")
 	})
 })

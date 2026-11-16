@@ -5,8 +5,10 @@
  * Steps: tune to the mock's bare carrier (162.400 MHz, never speech) on the defaults (Auto, Voice only,
  * Source Auto); Listen → `Waiting for voice`; Play anyway → `Listening`; Source Digital (squelch closed, no
  * decoder on the carrier) → `Quiet` with the no-decoder notice and Use Auto, which goes back to Source Auto
- * → `Listening`; the Open segment → `Open`; Source Analog, Digital, Auto; `Q` back (to Auto with Voice only
- * off, as before Open) and `Q` again → `Open`. Every squelch and Source change must keep the one audio
+ * → `Listening`; tune to the mock's DMR channel (161.150 MHz, a dsd-fme target keyed 9 s in every 13 s) →
+ * the decoded call line `DMR voice · TG 2081 · radio 2081045`, then back to the carrier; the Open segment →
+ * `Open`; Source Analog, Digital, Auto; `Q` back (to Auto with Voice only off, as before Open) and `Q`
+ * again → `Open`. Every squelch and Source change must keep the one audio
  * stream attached. Then, from the defaults with Listen off, how many keys and clicks reach the noise: `Q`
  * alone, and the panel's Open (both counted as pressed).
  */
@@ -17,6 +19,8 @@ import { within } from "./harness.ts"
 const STEP_MS = 15_000
 /** The mock's steady carrier: centre 161.500 MHz + 900 kHz (web/mock/data.ts). */
 const CARRIER_OFFSET_HZ = 900_000
+/** The mock's DMR call: centre 161.500 MHz − 350 kHz, the dsd-fme target (web/mock/data.ts). */
+const DMR_OFFSET_HZ = -350_000
 
 export interface ListenStep {
 	step: string
@@ -170,6 +174,26 @@ export async function listenFlow(
 	await note(
 		"Use Auto → Source Auto, Listening",
 		(await configIs({ listenMode: "auto" })) && (await titleIs("Listening")),
+	)
+	// a decoded call: Listen starts the voice service, the core routes the clear call (keyed 9 s in 13 s)
+	await patchConfig(page, { offsetHz: DMR_OFFSET_HZ })
+	await note(
+		"DMR channel → DMR voice · TG 2081 · radio 2081045",
+		await within(STEP_MS, async () => {
+			const h = await readHead(page)
+			return (
+				h.title === "Listening" &&
+				h.sub === "DMR voice · TG 2081 · radio 2081045"
+			)
+		}),
+	)
+	await patchConfig(page, { offsetHz: CARRIER_OFFSET_HZ })
+	await note(
+		"back to the carrier → Listening, NFM · 162.400",
+		await within(STEP_MS, async () => {
+			const h = await readHead(page)
+			return h.title === "Listening" && h.sub === "NFM · 162.400"
+		}),
 	)
 	await radio("Squelch", "Open").click()
 	await note(

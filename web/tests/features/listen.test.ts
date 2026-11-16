@@ -221,6 +221,31 @@ describe("Listen contract send rules", () => {
 		expect(manualStart(cfg({ squelch: 0 }), null)).toBe(-60)
 	})
 
+	it("starts Manual from Auto at Auto's live threshold, not the stale stored level", () => {
+		const auto = cfg({ squelchMode: "auto", squelch: -72 })
+		expect(manualStart(auto, -83.6)).toBe(-84)
+		// clamped as any manual level
+		expect(manualStart(auto, -0.2)).toBe(-1)
+		expect(manualStart(auto, -150)).toBe(-120)
+		// no live threshold known: the stored level, else the default
+		expect(manualStart(auto, null)).toBe(-72)
+		expect(manualStart(auto, Number.NaN)).toBe(-72)
+		expect(manualStart(cfg({ squelchMode: "auto", squelch: 0 }), null)).toBe(
+			-60,
+		)
+		// the old noise squelch reads as Auto too
+		expect(manualStart(cfg({ squelchMode: "noise", squelch: -72 }), -90)).toBe(
+			-90,
+		)
+		// from Manual or Open the stored level stays
+		expect(manualStart(cfg({ squelchMode: "manual", squelch: -72 }), -90)).toBe(
+			-72,
+		)
+		expect(manualStart(cfg({ squelchMode: "open", squelch: -72 }), -90)).toBe(
+			-72,
+		)
+	})
+
 	it("never sends Manual at 0 or above, whatever the level (property)", () => {
 		// Feature: listen squelch, Property 1: Manual is always a non-zero threshold
 		// Validates: Requirements 5

@@ -90,18 +90,6 @@ export function audioSource(
 	}
 }
 
-/** A decoded-voice stream (dsd-fme, s16le mono at the digital voice rate) as this page plays it. */
-export function voiceSource(
-	route: { httpUrl: string; wavUrl: string; rate: number },
-	base: string,
-	credentials = false,
-): AudioStreamSource | null {
-	const httpUrl = reachableAudioUrl(route.httpUrl, base)
-	const wavUrl = reachableAudioUrl(route.wavUrl, base)
-	if (!httpUrl && !wavUrl) return null
-	return { httpUrl, wavUrl, format: "s16le", rate: route.rate, credentials }
-}
-
 /**
  * The core's auto listen route (`/auto`, auto-listen-route): one stream that plays the analog channel
  * or a decoded call, always 48 kHz s16le mono. Null while live audio is stopped or on cores without it.
@@ -244,13 +232,23 @@ export function manualLevel(dbfs: number | null | undefined): number {
 	return Math.min(MANUAL_MAX_DBFS, Math.max(MANUAL_MIN_DBFS, Math.round(dbfs)))
 }
 
-/** Where Manual starts: the configured level when one is set, else the live threshold, else −60. */
+/**
+ * Where Manual starts. From Auto: Auto's live threshold (the one the bar marks) when known, so the
+ * line stays where it was. Otherwise the configured level when one is set, else the live threshold,
+ * else −60. Always rounded and clamped as `manualLevel`.
+ */
 export function manualStart(
 	config: LiveAudioConfig | null | undefined,
 	liveThresholdDbfs: number | null,
 ): number {
+	const live =
+		liveThresholdDbfs !== null && Number.isFinite(liveThresholdDbfs)
+			? liveThresholdDbfs
+			: null
+	if (live !== null && squelchOf(config).kind === "auto")
+		return manualLevel(live)
 	if (config && config.squelch < 0) return manualLevel(config.squelch)
-	return manualLevel(liveThresholdDbfs)
+	return manualLevel(live)
 }
 
 /**
