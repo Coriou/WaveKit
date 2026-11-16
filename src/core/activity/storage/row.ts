@@ -18,13 +18,18 @@ import type {
 	ActivityKind,
 	ActivityRecord,
 	ActivityRecordingLink,
-	ActivityRefType,
+	ActivityStoredRefType,
 	ActivitySummary,
 	AnalogTransmissionPayload,
 	IngestionGapPayload,
 	RecordingChangePayload,
 } from "./contract.js"
-import type { DecodeEnvelope, DecodeField, JsonValue } from "../types.js"
+import type {
+	ActivityChannel,
+	DecodeEnvelope,
+	DecodeField,
+	JsonValue,
+} from "../types.js"
 
 /**
  * Pure projection of an ActivityRecord onto one activity row.
@@ -50,7 +55,7 @@ export interface BuiltActivityRow {
 }
 
 export interface ActivityRef {
-	type: ActivityRefType
+	type: ActivityStoredRefType
 	value: string
 }
 
@@ -259,11 +264,80 @@ export function parseStoredSummary(row: StoredActivityRow): ActivitySummary {
 		? { ...spanned, aircraft }
 		: spanned
 	const recording = body["recording"]
-	const withSpan: ActivitySummary = isRecordingLink(recording)
+	const linked: ActivitySummary = isRecordingLink(recording)
 		? { ...identified, recording: { ...recording } }
 		: identified
+	const channel = body["channel"]
+	const withSpan: ActivitySummary = isActivityChannel(channel)
+		? { ...linked, channel: { ...channel } }
+		: linked
 	if (isPosition(position)) return { ...withSpan, position }
 	return withSpan
+}
+
+// ---------------------------------------------------------------- channels
+
+/** Largest channel frequency: 1 THz (MAX_PROVENANCE_HZ), 13 decimal digits. */
+export const CHANNEL_MAX_HZ = 1e12
+/** Digits of a `channelHz` ref value: String(CHANNEL_MAX_HZ).length. */
+export const CHANNEL_REF_DIGITS = String(CHANNEL_MAX_HZ).length
+
+/** A channel frequency: a whole number of Hz in (0, CHANNEL_MAX_HZ]. */
+export function isChannelHz(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isSafeInteger(value) &&
+		value > 0 &&
+		value <= CHANNEL_MAX_HZ
+	)
+}
+
+/** A well-formed `channel` member: a channel frequency and a 1 to 128 character id or null. */
+export function isActivityChannel(value: unknown): value is ActivityChannel {
+	const body = plain(value)
+	if (!body || !sameKeys(body, ["discoveryId", "frequencyHz"])) return false
+	const id = body["discoveryId"]
+	return (
+		(id === null ||
+			(typeof id === "string" &&
+				id.length > 0 &&
+				id.length <= 128 &&
+				!/[\x00-\x1f\x7f-\x9f]/.test(id))) &&
+		isChannelHz(body["frequencyHz"])
+	)
+}
+
+/**
+ * A channel as stored: the frequency rounded to whole Hz, null when it is not a channel
+ * frequency then or the id is malformed (an unknown answer, never guessed).
+ */
+export function activityChannelOf(value: unknown): ActivityChannel | null {
+	const body = plain(value)
+	if (!body) return null
+	const hz = body["frequencyHz"]
+	if (typeof hz !== "number" || !Number.isFinite(hz)) return null
+	const channel = {
+		discoveryId: body["discoveryId"] ?? null,
+		frequencyHz: Math.round(hz),
+	}
+	return isActivityChannel(channel) ? channel : null
+}
+
+/** The `channelHz` ref value of a channel frequency: CHANNEL_REF_DIGITS zero-padded digits. */
+export function channelRefValue(hz: number): string {
+	return String(hz).padStart(CHANNEL_REF_DIGITS, "0")
+}
+
+/** The channel frequency of a `channelHz` ref value, or null when it is not one. */
+export function channelHzOfRef(value: unknown): number | null {
+	if (
+		typeof value !== "string" ||
+		value.length !== CHANNEL_REF_DIGITS ||
+		!/^\d+$/.test(value)
+	)
+		return null
+	const hz = Number(value)
+	return isChannelHz(hz) ? hz : null
 }
 
 // ---------------------------------------------------------------- recording links
@@ -355,6 +429,7 @@ export function summaryWithRecording(
 	const position = body["position"]
 	const coalesced = body["coalesced"]
 	const aircraft = body["aircraft"]
+	const channel = body["channel"]
 	return fitSummary({
 		eventId,
 		kind,
@@ -375,6 +450,7 @@ export function summaryWithRecording(
 		...(isCoalesced(coalesced) ? { coalesced } : {}),
 		...(isAircraftIdentity(aircraft) ? { aircraft } : {}),
 		...(link === null ? {} : { recording: link }),
+		...(isActivityChannel(channel) ? { channel } : {}),
 	})
 }
 
@@ -399,6 +475,7 @@ export function rowRecordingId(row: BuiltActivityRow): string | null {
 	return row.refs.find(ref => ref.type === "recordingId")?.value ?? null
 }
 
+/** The keys of a `recording-change` payload; `channel` is optional (absent on older records). */
 const RECORDING_CHANGE_KEYS = [
 	"change",
 	"recordingId",
@@ -415,7 +492,17 @@ const RECORDING_CHANGE_KEYS = [
 function isRecordingChange(value: unknown): value is RecordingChangePayload {
 	const body = plain(value)
 	if (!body) return false
-	if (!sameKeys(body, RECORDING_CHANGE_KEYS)) return false
+	const channel = body["channel"]
+	if (
+		!sameKeys(
+			body,
+			channel === undefined
+				? RECORDING_CHANGE_KEYS
+				: [...RECORDING_CHANGE_KEYS, "channel"],
+		)
+	)
+		return false
+	if (channel !== undefined && !isActivityChannel(channel)) return false
 	const short = (v: unknown): boolean =>
 		typeof v === "string" && v.length > 0 && v.length <= 128
 	const frequency = body["frequencyHz"]
@@ -450,12 +537,21 @@ function recordingChangeRow(
 	recordJson: string,
 ): BuiltActivityRow {
 	if (!isRecordingChange(payload)) return corrupt("payload")
+	// Since `channel`: the row is on its channel (the raster frequency) and named by what it
+	// holds; the measured centre stays in the record. Older records keep their old title.
+	const channel = payload.channel ?? null
 	const frequencyHz =
-		payload.frequencyHz === null ? null : roundHz(payload.frequencyHz)
+		channel !== null
+			? channel.frequencyHz
+			: payload.frequencyHz === null
+				? null
+				: roundHz(payload.frequencyHz)
 	const title =
-		frequencyHz === null
-			? "Scanner recording"
-			: `Recording ${formatMHz(frequencyHz)} MHz`
+		channel !== null
+			? SCANNER_RECORDING_TITLE
+			: frequencyHz === null
+				? "Scanner recording"
+				: `Recording ${formatMHz(frequencyHz)} MHz`
 	const link = recordingLinkOf(payload.recordingId, payload.durationMs)
 	if (link === null) return corrupt("payload")
 	const summaryJson = fitSummary({
@@ -479,6 +575,7 @@ function recordingChangeRow(
 			},
 		],
 		recording: link,
+		...(channel === null ? {} : { channel: { ...channel } }),
 	})
 	const ftsParts = ["recording", "analog", title]
 	if (frequencyHz !== null) ftsParts.push(String(frequencyHz))
@@ -498,12 +595,29 @@ function recordingChangeRow(
 		recordJson,
 		recordBytes: Buffer.byteLength(recordJson, "utf8"),
 		ftsText: truncateUtf8(ftsParts.join("\n"), MAX_INDEXED_TEXT_BYTES),
-		refs: [
-			{ type: "recordingId", value: link.id },
-			{ type: "discoveryId", value: payload.discoveryId },
-			{ type: "observationId", value: payload.observationId },
-		],
+		refs: channelRefs(
+			[
+				{ type: "recordingId", value: link.id },
+				{ type: "discoveryId", value: payload.discoveryId },
+				{ type: "observationId", value: payload.observationId },
+			],
+			channel,
+		),
 	}
+}
+
+/** A scanner analog recording row's title since `channel`: what it holds, never a frequency. */
+export const SCANNER_RECORDING_TITLE = "FM voice"
+
+/** `refs` with the channel's `channelHz` ref and its discovery's `discoveryId` ref added. */
+function channelRefs(
+	refs: ActivityRef[],
+	channel: ActivityChannel | null,
+): ActivityRef[] {
+	if (channel === null) return refs
+	pushRef(refs, "channelHz", channelRefValue(channel.frequencyHz))
+	pushRef(refs, "discoveryId", channel.discoveryId ?? undefined)
+	return refs
 }
 
 /** UTF-8 truncation that never splits a code point. Exported for the property test. */
@@ -732,6 +846,9 @@ function receptionRow(
 	pushRef(refs, "jobId", envelope.provenance.jobId)
 	pushRef(refs, "probeId", envelope.provenance.probeId)
 	pushRef(refs, "channelId", envelope.provenance.channelId)
+	const channel =
+		envelope.channel === undefined ? null : activityChannelOf(envelope.channel)
+	channelRefs(refs, channel)
 	const summaryJson = fitSummary({
 		eventId: record.eventId,
 		kind: "decoder-reception",
@@ -752,6 +869,7 @@ function receptionRow(
 		...(envelope.aircraft === undefined
 			? {}
 			: { aircraft: { ...envelope.aircraft } }),
+		...(channel === null ? {} : { channel }),
 	})
 	return {
 		eventId: record.eventId,
@@ -844,6 +962,7 @@ interface SummaryDraft {
 	coalesced?: DecodeEnvelope["coalesced"]
 	aircraft?: DecodeEnvelope["aircraft"]
 	recording?: ActivityRecordingLink
+	channel?: ActivityChannel
 }
 
 /**
@@ -910,6 +1029,13 @@ function fitSummary(draft: SummaryDraft): string {
 			summary["recording"] = {
 				id: draft.recording.id,
 				durationMs: draft.recording.durationMs,
+			}
+		// At most about 190 bytes (a 128-character id, 13 digits), kept whole: fields and title
+		// shrink first.
+		if (draft.channel !== undefined)
+			summary["channel"] = {
+				discoveryId: draft.channel.discoveryId,
+				frequencyHz: draft.channel.frequencyHz,
 			}
 		return JSON.stringify(summary)
 	}
@@ -994,7 +1120,7 @@ function collectStrings(value: JsonValue, out: string[], depth: number): void {
 
 function pushRef(
 	refs: ActivityRef[],
-	type: ActivityRefType,
+	type: ActivityStoredRefType,
 	value: string | undefined,
 ): void {
 	if (value === undefined) return

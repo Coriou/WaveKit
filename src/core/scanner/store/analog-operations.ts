@@ -163,6 +163,21 @@ export const AnalogReceiptSchema = z
 		 * (AnalogFinishFacts.cutActive); absent when it gave none and on older receipts.
 		 */
 		cutActive: z.boolean().optional(),
+		/**
+		 * The recorder's reason for keeping the file (AnalogFinishFacts.keptBy, its finish path's
+		 * code); absent when it gave none and on older receipts.
+		 */
+		keptBy: z
+			.string()
+			.regex(/^[a-z][a-z-]{0,31}$/)
+			.optional(),
+		/**
+		 * The file's own speech reading at its finish (AnalogFinishFacts.speechHeard): true heard,
+		 * false not, null not measured; absent when none was given and on older receipts.
+		 */
+		speechHeard: z.boolean().nullable().optional(),
+		/** Wall time of the file's first sample (ISO); absent when not given and on older receipts. */
+		startedAt: z.string().datetime().optional(),
 		closure: z.enum(["closed", "incomplete", "unknown"]),
 		outcome: z.enum(["finalized", "aborted", "failed"]),
 		artifact: z.string().max(512).nullable(),
@@ -283,6 +298,45 @@ export interface AnalogFinishFacts {
 	 * hang after the transmission's end was cut off. Written to the receipt as `cutActive`.
 	 */
 	readonly cutActive?: boolean
+	/**
+	 * Why the recorder kept the file: its finish path's reason code (recording-verdict.ts
+	 * FinishReason). Written to the receipt as `keptBy`; a read-only pass-through.
+	 */
+	readonly keptBy?: string
+	/** The file's own speech reading at the finish (null: not measured). Receipt `speechHeard`. */
+	readonly speechHeard?: boolean | null
+	/** Wall time of the file's first sample, ISO. Receipt `startedAt`. */
+	readonly startedAt?: string
+}
+/**
+ * The receipt's verdict members of finish facts: each one kept only when the receipt schema takes
+ * it, so a malformed fact is left out (unknown) and never fails the finish.
+ */
+function verdictOf(
+	facts: AnalogFinishFacts,
+): Pick<AnalogReceipt, "keptBy" | "speechHeard" | "startedAt"> {
+	const shape = AnalogReceiptSchema.innerType().shape
+	const out: {
+		keptBy?: string
+		speechHeard?: boolean | null
+		startedAt?: string
+	} = {}
+	if (
+		shape.keptBy.safeParse(facts.keptBy).success &&
+		facts.keptBy !== undefined
+	)
+		out.keptBy = facts.keptBy
+	if (
+		shape.speechHeard.safeParse(facts.speechHeard).success &&
+		facts.speechHeard !== undefined
+	)
+		out.speechHeard = facts.speechHeard
+	if (
+		shape.startedAt.safeParse(facts.startedAt).success &&
+		facts.startedAt !== undefined
+	)
+		out.startedAt = facts.startedAt
+	return out
 }
 export interface AnalogHandle {
 	readonly operationId: string
@@ -492,6 +546,8 @@ interface Operation {
 	cancelled: AnalogCut | null
 	/** The first finish's AnalogFinishFacts.cutActive; null: none given. */
 	cutActive: boolean | null
+	/** The first finish's verdict facts (keptBy, speechHeard, startedAt) as given and valid. */
+	verdict: Pick<AnalogReceipt, "keptBy" | "speechHeard" | "startedAt">
 	/** The check that refused it first (AnalogFailure), for its receipt. */
 	failure: AnalogFailure | null
 	accepting: boolean
@@ -700,6 +756,7 @@ export class AnalogOperations {
 			writer: null,
 			cancelled: null,
 			cutActive: null,
+			verdict: {},
 			failure: null,
 			accepting: true,
 			decision: null,
@@ -760,6 +817,7 @@ export class AnalogOperations {
 			finish: (cut = "completed", facts) => {
 				if (!op.finish && typeof facts?.cutActive === "boolean")
 					op.cutActive = facts.cutActive
+				if (!op.finish && facts !== undefined) op.verdict = verdictOf(facts)
 				return this.finishOperation(op, AnalogCutSchema.parse(cut))
 			},
 			cancel: (cut = "cancelled") => {
@@ -1412,6 +1470,7 @@ export class AnalogOperations {
 				omittedGapCount: op.omitted,
 				cutReason,
 				...(op.cutActive === null ? {} : { cutActive: op.cutActive }),
+				...(outcome === "finalized" ? op.verdict : {}),
 				closure: op.descriptors.size
 					? "unknown"
 					: op.output

@@ -13,13 +13,17 @@
  */
 import type { FastifyInstance, FastifyReply } from "fastify"
 import {
+	DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ,
 	RECORDING_DSD_KEY,
 	RECORDING_INVENTORY_ID,
+	RECORDINGS_CHANNELS_MAX,
+	RECORDINGS_NEAR_MAX_TOLERANCE_HZ,
 	RECORDINGS_PAGE_LIMIT_DEFAULT,
 	RECORDINGS_PAGE_LIMIT_MAX,
 } from "@wavekit/api-types"
 import type {
 	RecordingCut,
+	RecordingSpeech,
 	RecordingInventoryItem,
 	RecordingInventoryKind,
 	RecordingInventoryPage,
@@ -44,6 +48,9 @@ interface Seed {
 	cut?: RecordingCut | null
 	part?: number
 	parts?: number
+	/** Scanner analog recordings: the recorder's verdict at the finish (default heard, final). */
+	speech?: RecordingSpeech
+	keptBy?: string
 }
 
 const SEEDS: readonly Seed[] = [
@@ -105,6 +112,15 @@ const SEEDS: readonly Seed[] = [
 		durationS: 9,
 		mhz: 156.8,
 		cut: "shutdown",
+	},
+	// Kept with no voice prior and no speech heard in it (the "No speech found" case).
+	{
+		kind: "scanner-analog",
+		agoMin: 52,
+		durationS: 30,
+		mhz: 156.8,
+		speech: "not-heard",
+		keptBy: "prior-none",
 	},
 	{
 		kind: "dsd-fme-call",
@@ -215,6 +231,10 @@ function makeRec(s: Seed, at: Date): Rec {
 				source: s.source ?? null,
 				frequencyHz: null,
 				kept: s.kept === true,
+				startedAt: null,
+				observationId: null,
+				speech: "unchecked",
+				keptBy: null,
 			},
 		}
 	}
@@ -248,6 +268,16 @@ function makeRec(s: Seed, at: Date): Rec {
 						parts: s.parts ?? null,
 					}
 				: {}),
+			// The receipt's verdict facts (scanner analog only); roll-over parts share an observation.
+			startedAt: s.kind === "scanner-analog" ? at.toISOString() : null,
+			observationId:
+				s.kind === "scanner-analog"
+					? s.parts === undefined
+						? `o_MOCK${n}`
+						: `o_MOCKROLL${hz}`
+					: null,
+			speech: s.kind === "scanner-analog" ? (s.speech ?? "heard") : "unchecked",
+			keptBy: s.kind === "scanner-analog" ? (s.keptBy ?? "final") : null,
 		},
 	}
 }
@@ -303,6 +333,42 @@ const KINDS: readonly string[] = [
 	"scanner-dv",
 	"scanner-analog",
 ]
+
+/** The channel scope of a recordings query, as the core checks it; null when none. */
+function recordingsChannelScope(q: {
+	channelHz?: string
+	nearHz?: string
+	toleranceHz?: string
+}): { minHz: number; maxHz: number } | null | "invalid" {
+	const hz = (v: string | undefined) =>
+		v === undefined ? undefined : /^\d{1,13}$/.test(v) ? Number(v) : Number.NaN
+	const channel = hz(q.channelHz)
+	const near = hz(q.nearHz)
+	const tolerance = hz(q.toleranceHz)
+	if ([channel, near, tolerance].some(v => Number.isNaN(v))) return "invalid"
+	if (channel !== undefined && near !== undefined) return "invalid"
+	if (tolerance !== undefined && near === undefined) return "invalid"
+	if (tolerance !== undefined && tolerance > RECORDINGS_NEAR_MAX_TOLERANCE_HZ)
+		return "invalid"
+	if (channel !== undefined) return { minHz: channel, maxHz: channel }
+	if (near === undefined) return null
+	const t = tolerance ?? DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ
+	return { minHz: near - t, maxHz: near + t }
+}
+
+/** `matchedByChannel` of a `nearHz` listing, as the core orders and bounds it. */
+function matchedByChannel(
+	list: readonly RecordingInventoryItem[],
+): { frequencyHz: number; count: number }[] {
+	const counts = new Map<number, number>()
+	for (const r of list)
+		if (r.frequencyHz !== null)
+			counts.set(r.frequencyHz, (counts.get(r.frequencyHz) ?? 0) + 1)
+	return [...counts]
+		.map(([frequencyHz, count]) => ({ frequencyHz, count }))
+		.sort((a, b) => b.count - a.count || a.frequencyHz - b.frequencyHz)
+		.slice(0, RECORDINGS_CHANNELS_MAX)
+}
 
 function compare(a: RecordingInventoryItem, b: RecordingInventoryItem): number {
 	if (a.modifiedAt !== b.modifiedAt) return a.modifiedAt < b.modifiedAt ? 1 : -1
@@ -449,6 +515,9 @@ export function registerRecordingsMock(
 			source?: string
 			minHz?: string
 			maxHz?: string
+			channelHz?: string
+			nearHz?: string
+			toleranceHz?: string
 			since?: string
 			until?: string
 			q?: string
@@ -466,6 +535,9 @@ export function registerRecordingsMock(
 			"source",
 			"minHz",
 			"maxHz",
+			"channelHz",
+			"nearHz",
+			"toleranceHz",
 			"since",
 			"until",
 			"q",
@@ -504,6 +576,8 @@ export function registerRecordingsMock(
 		const text = q.q?.trim().toLowerCase()
 		const minHz = q.minHz === undefined ? null : Number(q.minHz)
 		const maxHz = q.maxHz === undefined ? null : Number(q.maxHz)
+		const scope = recordingsChannelScope(q)
+		if (scope === "invalid") return invalid()
 		const all = sorted()
 		let list = all.filter(
 			r =>
@@ -516,6 +590,10 @@ export function registerRecordingsMock(
 				(minHz === null || (r.frequencyHz ?? -1) >= minHz) &&
 				(maxHz === null ||
 					(r.frequencyHz !== null && r.frequencyHz <= maxHz)) &&
+				(scope === null ||
+					(r.frequencyHz !== null &&
+						r.frequencyHz >= scope.minHz &&
+						r.frequencyHz <= scope.maxHz)) &&
 				(q.since === undefined || r.modifiedAt >= q.since) &&
 				(q.until === undefined || r.modifiedAt <= q.until) &&
 				(text === undefined ||
@@ -548,6 +626,9 @@ export function registerRecordingsMock(
 			revision: recs.size,
 			indexing: false,
 			matched,
+			...(q.nearHz === undefined
+				? {}
+				: { matchedByChannel: matchedByChannel(list) }),
 			counts: {
 				total: all.length,
 				kept: all.filter(r => r.kept === true).length,

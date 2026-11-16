@@ -19,6 +19,7 @@ import { scannerKeepKey } from "../recordings/contract.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ActivityRecordingLinks } from "./runtime.js"
 import type { RecordingChangePayload } from "./storage/contract.js"
+import { activityChannelOf } from "./storage/row.js"
 import { RECORDINGS_IN_PROGRESS_MS } from "@wavekit/api-types"
 
 /** Between two sweeps of the linked keys (at most ACTIVITY_LINKS_MAX map reads each). */
@@ -59,6 +60,12 @@ export interface RecordingKeptEvent {
 	observationStartedAt: string
 	durationMs: number
 	at: number
+	/**
+	 * The channel the file was kept on: the discovery owning it at the commit (through merge
+	 * aliases) and that discovery's frequency. Absent or malformed: the row has no channel and
+	 * keeps the older title.
+	 */
+	channel?: { discoveryId: string | null; frequencyHz: number } | null
 }
 
 export interface RecordingLinkWiringOptions {
@@ -105,6 +112,10 @@ export function recordingChangeOf(
 		duration < 0
 	)
 		return null
+	const channel =
+		kept.channel === undefined || kept.channel === null
+			? null
+			: activityChannelOf(kept.channel)
 	return {
 		change: "finalized",
 		recordingId: key,
@@ -123,6 +134,7 @@ export function recordingChangeOf(
 			: null,
 		durationMs: duration,
 		finalizedAt: new Date(kept.at).toISOString(),
+		...(channel === null ? {} : { channel }),
 	}
 }
 

@@ -4361,8 +4361,17 @@ export class WidebandAnalogRecorder {
 		} else {
 			if (path) this.log.info(keptLog(path, file, s), "Analog file kept")
 			file.finishAsked = true
+			// The verdict it was kept on, for its receipt (read-only: nothing decides on it).
+			const startedAt = this.wallAt(s.engine, s.fs, file.startSample)
 			void file.handle
-				.finish(file.cut, this.finishFacts(s, file))
+				.finish(file.cut, {
+					...this.finishFacts(s, file),
+					...(path === null ? {} : { keptBy: path.reason }),
+					speechHeard: speechReadings(speech).speechHeard,
+					...(Number.isFinite(startedAt)
+						? { startedAt: new Date(startedAt).toISOString() }
+						: {}),
+				})
 				.catch(() => undefined)
 		}
 	}

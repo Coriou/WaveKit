@@ -1321,6 +1321,10 @@ describe("recordings inventory WG9 kept and invalidate", () => {
 			frequencyHz: null,
 			key: `dsd~${DSD("120000")}`,
 			ownerDiscoveryId: null,
+			startedAt: null,
+			observationId: null,
+			speech: "unchecked",
+			keptBy: null,
 		},
 		{
 			id: "scan:d_x~call.wav",
@@ -1337,6 +1341,10 @@ describe("recordings inventory WG9 kept and invalidate", () => {
 			frequencyHz: 446_000_000,
 			key: "scan:d_x~call.wav",
 			ownerDiscoveryId: null,
+			startedAt: null,
+			observationId: null,
+			speech: "unchecked",
+			keptBy: null,
 		},
 	]
 

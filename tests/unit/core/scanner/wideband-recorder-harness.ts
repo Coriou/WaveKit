@@ -22,6 +22,7 @@ import {
 import {
 	MAX_ACTIVE_ANALOG_PER_SOURCE,
 	type AnalogCut,
+	type AnalogFinishFacts,
 	type AnalogHandle,
 	type AnalogInput,
 	type AnalogReceipt,
@@ -98,6 +99,8 @@ export interface FakeOp {
 	cut: AnalogCut | null
 	/** The finish's AnalogFinishFacts.cutActive; absent when it gave none. */
 	cutActive?: boolean
+	/** The finish's verdict facts (keptBy, speechHeard, startedAt) as given. */
+	verdict?: Pick<AnalogFinishFacts, "keptBy" | "speechHeard" | "startedAt">
 	cancelled: AnalogCut | null
 	/** Settled outcome; "failed" when the binding was no longer live at the finish. */
 	outcome: "finalized" | "aborted" | "failed" | null
@@ -185,6 +188,16 @@ export function fakeOps(
 			finish: async (cut = "completed", facts) => {
 				op.cut = cut
 				if (facts?.cutActive !== undefined) op.cutActive = facts.cutActive
+				if (facts !== undefined)
+					op.verdict = {
+						...(facts.keptBy === undefined ? {} : { keptBy: facts.keptBy }),
+						...(facts.speechHeard === undefined
+							? {}
+							: { speechHeard: facts.speechHeard }),
+						...(facts.startedAt === undefined
+							? {}
+							: { startedAt: facts.startedAt }),
+					}
 				await opts.hold
 				await microtasks(3)
 				settle(live(input.binding) ? "finalized" : "failed")

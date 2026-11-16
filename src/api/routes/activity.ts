@@ -5,6 +5,7 @@
  * admission used by every other /api read.
  */
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify"
+import { ACTIVITY_CHANNEL_NEAR_MAX_TOLERANCE_HZ } from "@wavekit/api-types"
 import type { ActivityStoreStats } from "../../core/activity/storage/contract.js"
 import type {
 	ActivityCategory,
@@ -81,6 +82,9 @@ const SEARCH_PARAMS = new Set([
 	"text",
 	"refs",
 	"hasRecording",
+	"channelHz",
+	"nearHz",
+	"toleranceHz",
 	"order",
 	"limit",
 	"pageToken",
@@ -372,6 +376,9 @@ const PARAM_EXPECTED: Readonly<Record<string, string>> = Object.freeze({
 	text: "string, a full-text query",
 	refs: "comma-separated type:value references",
 	hasRecording: '"true" (only rows with a playable recording) or "false"',
+	channelHz: "integer, Hz, a channel frequency, not with nearHz",
+	nearHz: "integer, Hz, not with channelHz",
+	toleranceHz: `integer, Hz, 0 to ${ACTIVITY_CHANNEL_NEAR_MAX_TOLERANCE_HZ}, with nearHz`,
 	order: '"asc" or "desc"',
 	limit: "positive integer within the page limit",
 	pageToken: "the pageToken string from the previous page",
@@ -741,6 +748,9 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 			400,
 		)
 	}
+	for (const name of ["channelHz", "nearHz", "toleranceHz"] as const)
+		if (params[name] !== undefined)
+			query[name] = numberParam(params[name], name)
 	if (params["refs"] !== undefined) {
 		const refs: { type: ActivityRefType; value: string }[] = []
 		for (const entry of asStrings(params["refs"])) {

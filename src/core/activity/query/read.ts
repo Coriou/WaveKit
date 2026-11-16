@@ -17,6 +17,8 @@ import {
 	ActivityReaderFailedError,
 } from "./errors.js"
 import { recordWithoutRecordingPath } from "../recording-path.js"
+import { channelHzOfRef, channelRefValue } from "../storage/row.js"
+import { ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ } from "@wavekit/api-types"
 import { bindSeq, formatSeq, MAX_SEQ, parseSeq, seqFromSqlite } from "./seq.js"
 import type { SqlDatabase, SqlValue } from "./sqlite.js"
 import { readTrails, type TrailsReadInput } from "./trails.js"
@@ -36,6 +38,8 @@ interface SearchReadRequest {
 	high: string
 	before: string | null
 	after: string | null
+	/** With a channel scope: also answer channelMatch over (low, high]. */
+	channelMatch?: boolean
 }
 
 interface FacetsReadRequest {
@@ -70,6 +74,8 @@ export interface ObservedStore {
 interface SearchBody {
 	op: "search"
 	rows: SummaryRow[]
+	/** Asked for (channelMatch) with a channel scope only. */
+	channelMatch?: "exact" | "mixed"
 }
 
 interface DetailBody {
@@ -82,6 +88,8 @@ interface FacetsBody {
 	facets: Record<string, { value: string | null; count: number }[]>
 	scanned: number
 	truncated: boolean
+	/** With a channel scope only. */
+	channelMatch?: "exact" | "mixed"
 }
 
 interface TrailsBody {
@@ -115,12 +123,65 @@ export type ReadResult =
 	| (BandMapBody & { observed: ObservedStore })
 	| (TimelineBody & { observed: ObservedStore })
 
+/** A row's stored channel (its `channelHz` ref, zero-padded), or NULL: one probe of the refs key. */
+const CHANNEL_REF_OF_ROW =
+	"(SELECT ref_value FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = 'channelHz')"
+/** No stored channel (rows from before `channel`, and rows that never had one). */
+const NO_CHANNEL_REF =
+	"NOT EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = 'channelHz')"
+
 const FACET_COLUMN: Record<FacetDimension, string> = {
 	category: "category",
 	protocol: "protocol",
 	decoderId: "decoder_id",
 	sourceId: "source_id",
 	kind: "kind",
+	channel: CHANNEL_REF_OF_ROW,
+}
+
+/**
+ * The channel scope as SQL: a stored channel within [minHz, maxHz] (a range of the refs key
+ * (ref_type, ref_value, seq), the values zero-padded so text order is frequency order), or no
+ * stored channel and the row's own frequency within half the fallback step of the scope,
+ * [minHz − ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ, maxHz + ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ):
+ * the upper bound open, so a row on the edge of two channels belongs to one. A row with neither
+ * never matches.
+ */
+function appendChannel(
+	where: string[],
+	params: SqlValue[],
+	channel: { minHz: number; maxHz: number },
+): void {
+	where.push(
+		`(seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'channelHz' AND ref_value BETWEEN ? AND ?) OR (frequency_hz >= ? AND frequency_hz < ? AND ${NO_CHANNEL_REF}))`,
+	)
+	params.push(
+		channelRefValue(channel.minHz),
+		channelRefValue(channel.maxHz),
+		channel.minHz - ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ,
+		channel.maxHz + ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ,
+	)
+}
+
+/**
+ * `mixed` when a row of the scope in (low, high] matched by its own frequency (no stored
+ * channel), else `exact`: one indexed probe of the same filters, stopped at the first such row.
+ */
+function channelMatchOf(
+	db: SqlDatabase,
+	query: NormalisedQuery,
+	low: string,
+	high: string,
+): "exact" | "mixed" {
+	const { where, params } = bounds({ low, high, before: null, after: null })
+	appendFilters(where, params, query)
+	where.push(NO_CHANNEL_REF)
+	const found = db
+		.prepare(
+			`SELECT 1 AS one FROM activity WHERE ${where.join(" AND ")} LIMIT 1`,
+		)
+		.get(...params)
+	return found === undefined ? "exact" : "mixed"
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -186,6 +247,7 @@ function appendFilters(
 				? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')"
 				: "seq NOT IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')",
 		)
+	if (query.channel !== null) appendChannel(where, params, query.channel)
 	if (query.fts.kind === "impossible") where.push("1 = 0")
 	else if (query.fts.kind === "match") {
 		where.push(
@@ -312,6 +374,15 @@ function facetValue(value: unknown): string | null {
 	throw activityRecordCorrupt("Activity facet value is not text")
 }
 
+/** A `channel` facet value: the stored ref as decimal Hz; NULL (no stored channel) stays null. */
+function channelFacetValue(value: unknown): string | null {
+	if (value === null) return null
+	const hz = channelHzOfRef(value)
+	if (hz === null)
+		throw activityRecordCorrupt("Activity channel ref is corrupt")
+	return String(hz)
+}
+
 function facets(
 	db: SqlDatabase,
 	request: Extract<ReadRequest, { op: "facets" }>,
@@ -322,6 +393,9 @@ function facets(
 			facets: emptyFacets(request.dimensions),
 			scanned: 0,
 			truncated: false,
+			...(request.query.channel === null
+				? {}
+				: { channelMatch: "exact" as const }),
 		}
 	}
 	const { where, params } = bounds({
@@ -348,7 +422,10 @@ function facets(
 		for (const dimension of request.dimensions) {
 			const bucket = counts.get(dimension)
 			if (!bucket) continue
-			const value = facetValue(row[dimension] ?? null)
+			const value =
+				dimension === "channel"
+					? channelFacetValue(row[dimension] ?? null)
+					: facetValue(row[dimension] ?? null)
 			const next = (bucket.get(value) ?? 0) + by
 			if (next > 0) bucket.set(value, next)
 			else bucket.delete(value)
@@ -396,6 +473,16 @@ function facets(
 		facets: facetsOut,
 		scanned: truncated ? request.scanCap : matched,
 		truncated,
+		...(request.query.channel === null
+			? {}
+			: {
+					channelMatch: channelMatchOf(
+						db,
+						request.query,
+						request.low,
+						request.high,
+					),
+				}),
 	}
 }
 
@@ -450,7 +537,20 @@ function readObserved(db: SqlDatabase): ObservedStore {
 function readBody(db: SqlDatabase, request: ReadRequest): ReadBody {
 	switch (request.op) {
 		case "search":
-			return { op: "search", rows: search(db, request) }
+			return {
+				op: "search",
+				rows: search(db, request),
+				...(request.channelMatch === true && request.query.channel !== null
+					? {
+							channelMatch: channelMatchOf(
+								db,
+								request.query,
+								request.low,
+								request.high,
+							),
+						}
+					: {}),
+			}
 		case "detail":
 			return { op: "detail", record: detail(db, request) }
 		case "facets":

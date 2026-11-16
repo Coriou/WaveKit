@@ -1,7 +1,9 @@
 import {
+	DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ,
 	RECORDING_INVENTORY_ID,
 	RECORDING_INVENTORY_KINDS,
 	RECORDINGS_CURSOR_MAX_LENGTH,
+	RECORDINGS_NEAR_MAX_TOLERANCE_HZ,
 	RECORDINGS_PAGE_LIMIT_DEFAULT,
 	RECORDINGS_PAGE_LIMIT_MAX,
 	RECORDINGS_QUERY_TEXT_MAX,
@@ -33,6 +35,11 @@ export interface NormalisedQuery {
 	source: string | null
 	minHz: number | null
 	maxHz: number | null
+	/** A channel frequency (integer Hz): recordings whose rounded `frequencyHz` equals it. */
+	channelHz: number | null
+	/** With `nearToleranceHz`: recordings whose `frequencyHz` lies within it of this. */
+	nearHz: number | null
+	nearToleranceHz: number | null
 	sinceMs: number | null
 	untilMs: number | null
 	/** Lower-cased. */
@@ -89,6 +96,9 @@ const QUERY_KEYS = new Set([
 	"source",
 	"minHz",
 	"maxHz",
+	"channelHz",
+	"nearHz",
+	"toleranceHz",
 	"since",
 	"until",
 	"q",
@@ -132,6 +142,9 @@ export function defaultInventoryQuery(): NormalisedQuery {
 		source: null,
 		minHz: null,
 		maxHz: null,
+		channelHz: null,
+		nearHz: null,
+		nearToleranceHz: null,
 		sinceMs: null,
 		untilMs: null,
 		q: null,
@@ -211,6 +224,23 @@ export function parseInventoryQuery(raw: unknown): NormalisedQuery | null {
 	if (minHz === null || maxHz === null) return null
 	if (minHz !== undefined) q.minHz = minHz
 	if (maxHz !== undefined) q.maxHz = maxHz
+	const channelHz = parseHz(get("channelHz"))
+	const nearHz = parseHz(get("nearHz"))
+	const toleranceHz = parseHz(get("toleranceHz"))
+	if (channelHz === null || nearHz === null || toleranceHz === null) return null
+	// One channel scope at a time; a tolerance means nothing without its centre.
+	if (channelHz !== undefined && nearHz !== undefined) return null
+	if (toleranceHz !== undefined && nearHz === undefined) return null
+	if (
+		toleranceHz !== undefined &&
+		toleranceHz > RECORDINGS_NEAR_MAX_TOLERANCE_HZ
+	)
+		return null
+	if (channelHz !== undefined) q.channelHz = channelHz
+	if (nearHz !== undefined) {
+		q.nearHz = nearHz
+		q.nearToleranceHz = toleranceHz ?? DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ
+	}
 	const since = parseTime(get("since"))
 	const until = parseTime(get("until"))
 	if (since === null || until === null) return null

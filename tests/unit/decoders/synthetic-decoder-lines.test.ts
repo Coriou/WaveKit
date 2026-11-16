@@ -534,7 +534,7 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 				flags: { timeout: false },
 			})
 			const row = presentDecoderOutput(end!, "dsd-fme")
-			expect(row?.title).toBe("P25P1 to unit 7 from 9")
+			expect(row?.title).toBe("radio 9 → unit 7")
 			// No talkgroup key: a unit target is not a talkgroup.
 			expect(row?.entityKey ?? null).toBeNull()
 		})

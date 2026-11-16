@@ -157,7 +157,7 @@ export function checkDstar(r: Replay): void {
 		}),
 	)
 	expect(row(callStart(r), "dsd-fme")).toMatchObject({
-		title: "DSTAR from N0CALL to CQCQCQ",
+		title: "N0CALL → CQCQCQ",
 		entityKey: "callsign:N0CALL",
 	})
 }
@@ -192,7 +192,7 @@ export function checkYsf(r: Replay): void {
 			metadata: expect.objectContaining({ callsigns: ["N0CALL"] }),
 		}),
 	)
-	expect(row(end, "dsd-fme")).toMatchObject({ title: "YSF from N0CALL" })
+	expect(row(end, "dsd-fme")).toMatchObject({ title: "N0CALL" })
 }
 
 type CallData = Record<string, unknown> & {
@@ -294,7 +294,7 @@ export function checkP25(r: Replay): void {
 		}),
 	)
 	expect(row(callStart(r), "dsd-fme")).toMatchObject({
-		title: "P25P1 TG 4321 from 1234567",
+		title: "TG 4321 · radio 1234567",
 	})
 }
 
@@ -323,7 +323,7 @@ export function checkDmr(r: Replay): void {
 		}),
 	)
 	expect(row(callStart(r), "dsd-fme")).toMatchObject({
-		title: "DMR TG 4321 from 1234567",
+		title: "TG 4321 · radio 1234567",
 		entityKey: "talkgroup:4321",
 	})
 }
@@ -353,7 +353,7 @@ export function checkNxdn(variant: "nxdn48" | "nxdn96"): (r: Replay) => void {
 			expect.objectContaining({ identity: { kind: "nxdn-ran", value: "5" } }),
 		)
 		expect(row(end, "dsd-fme")).toMatchObject({
-			title: `${variant.toUpperCase()} TG 5678 from 1234`,
+			title: "TG 5678 · radio 1234",
 		})
 	}
 }
@@ -373,7 +373,8 @@ export function checkDpmr(r: Replay): void {
 	for (const link of r.links)
 		expect(link).toMatchObject({ protocol: "dpmr", verified: false })
 	expect(r.evidence.some(e => e.identity !== undefined)).toBe(false)
-	expect(row(callStart(r), "dsd-fme")?.title).toBe("DPMR")
+	// No checked identity: the title says what it was; the protocol is its own field.
+	expect(row(callStart(r), "dsd-fme")?.title).toBe("Voice call")
 }
 
 export function checkFlex(r: Replay): void {

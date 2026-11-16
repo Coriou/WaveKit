@@ -862,6 +862,11 @@ export interface ScannerRecordingKept {
 	durationMs: number
 	/** Epoch ms of the commit. */
 	at: number
+	/**
+	 * The channel the file was kept on: the discovery owning it at the commit and that
+	 * discovery's frequency (the raster channel, as the recordings catalogue reports it).
+	 */
+	channel: { discoveryId: string; frequencyHz: number }
 }
 
 export class ScannerService extends EventEmitter {
@@ -4956,6 +4961,10 @@ export class ScannerService extends EventEmitter {
 			observationStartedAt: plan.observation.startedAt,
 			durationMs: Math.round((out.outputFrames * 1000) / out.sampleRateHz),
 			at: this.now(),
+			channel: {
+				discoveryId: plan.discovery.id,
+				frequencyHz: plan.discovery.frequencyHz,
+			},
 		}
 		try {
 			this.emit("recording-kept", kept)

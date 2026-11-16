@@ -89,6 +89,7 @@ describe("activity ingress", () => {
 			sinkFailures: 0,
 			presentationFailures: 0,
 			provenanceFailures: 0,
+			channelFailures: 0,
 		})
 	})
 
@@ -150,6 +151,7 @@ describe("activity ingress", () => {
 			// only the presentation-free build failure counts.
 			presentationFailures: 0,
 			provenanceFailures: 0,
+			channelFailures: 0,
 		})
 		expect(lines).toHaveLength(1)
 		expect(lines[0]).toMatchObject({
@@ -185,6 +187,7 @@ describe("activity ingress", () => {
 			sinkFailures: 1,
 			presentationFailures: 0,
 			provenanceFailures: 0,
+			channelFailures: 0,
 		})
 		ingress.publish("adsb-1", "readsb", output())
 		expect(ids).toBe(2)
@@ -337,6 +340,7 @@ describe("activity ingress provenance (WG3 req 5)", () => {
 			published: 1,
 			buildFailures: 0,
 			provenanceFailures: 1,
+			channelFailures: 0,
 		})
 	})
 
@@ -353,6 +357,7 @@ describe("activity ingress provenance (WG3 req 5)", () => {
 			published: 0,
 			buildFailures: 1,
 			provenanceFailures: 0,
+			channelFailures: 0,
 		})
 	})
 
@@ -369,6 +374,7 @@ describe("activity ingress provenance (WG3 req 5)", () => {
 			published: 1,
 			buildFailures: 0,
 			provenanceFailures: 1,
+			channelFailures: 0,
 		})
 	})
 
@@ -409,5 +415,102 @@ describe("activity ingress provenance (WG3 req 5)", () => {
 		})
 		expect(counters).toMatchObject({ published: 0, buildFailures: 1 })
 		expect(counters.provenanceFailures).toBe(0)
+	})
+})
+
+describe("activity ingress channels", () => {
+	function voiceCall(): DecoderOutput {
+		return {
+			timestamp: new Date(producedAt),
+			decoder: "scan-abc1234-dstar-1",
+			type: "call_start",
+			data: {
+				protocol: "dstar",
+				talkgroup: 0,
+				source: 0,
+				dstar: { my: "N0CALL", ur: "CQCQCQ", rpt1: "DIRECT", rpt2: "DIRECT" },
+				frequency: 446_006_000,
+			},
+		}
+	}
+
+	function run(
+		channel: Parameters<typeof createActivityIngress>[0]["channel"],
+	) {
+		const asked: [string, number | null][] = []
+		const plain: DecodeEnvelope[] = []
+		const presented: DecodeEnvelope[] = []
+		const ingress = createActivityIngress({
+			sink: (envelope, present) => {
+				plain.push(envelope)
+				presented.push(present())
+			},
+			logger: captureLogger().logger,
+			resolveProvenance: () => ({
+				sourceId: "rtl-0",
+				targetFrequenciesHz: [446_006_000],
+				tuningTrust: "unverified",
+			}),
+			...(channel === undefined
+				? {}
+				: {
+						channel:
+							channel === null
+								? null
+								: (decoderId, hz) => {
+										asked.push([decoderId, hz])
+										return channel(decoderId, hz)
+									},
+					}),
+		})
+		ingress.publish("scan-abc1234-dstar-1", "dsd-fme", voiceCall())
+		return { asked, plain, presented, counters: ingress.counters() }
+	}
+
+	it("asks with the decoder and its resolved frequency, and the presented row carries the channel", () => {
+		const channel = { discoveryId: "d_01JTEST", frequencyHz: 446_006_250 }
+		const { asked, plain, presented, counters } = run(() => channel)
+		expect(asked).toEqual([["scan-abc1234-dstar-1", 446_006_000]])
+		expect(plain[0]?.channel).toEqual(channel)
+		expect(presented[0]?.channel).toEqual(channel)
+		expect(presented[0]?.title).toBe("N0CALL → CQCQCQ")
+		expect(presented[0]?.protocol).toBe("dstar")
+		expect(counters).toMatchObject({ published: 1, channelFailures: 0 })
+	})
+
+	it("no lookup or no channel: no channel, nothing counted", () => {
+		for (const lookup of [undefined, null, () => null]) {
+			const { presented, counters } = run(lookup)
+			expect(presented[0]?.channel).toBeUndefined()
+			expect(counters).toMatchObject({ published: 1, channelFailures: 0 })
+		}
+	})
+
+	it("a throwing lookup or a malformed answer keeps the reception without a channel and counts it", () => {
+		for (const lookup of [
+			() => {
+				throw new Error("boom")
+			},
+			() => ({ discoveryId: null, frequencyHz: -5 }),
+			() => ({ discoveryId: "", frequencyHz: 446_006_250 }),
+			() => ({ frequencyHz: Number.NaN }) as never,
+			() => "446006250" as never,
+		]) {
+			const { presented, counters } = run(lookup)
+			expect(presented).toHaveLength(1)
+			expect(presented[0]?.channel).toBeUndefined()
+			expect(counters).toMatchObject({ published: 1, channelFailures: 1 })
+		}
+	})
+
+	it("a fractional channel frequency is stored in whole Hz", () => {
+		const { presented } = run(() => ({
+			discoveryId: null,
+			frequencyHz: 446_006_250.4,
+		}))
+		expect(presented[0]?.channel).toEqual({
+			discoveryId: null,
+			frequencyHz: 446_006_250,
+		})
 	})
 })

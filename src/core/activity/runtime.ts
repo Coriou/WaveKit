@@ -20,7 +20,11 @@ import type {
 	RecordingChangePayload,
 } from "./storage/contract.js"
 import type { ActivityLimits } from "./storage/limits.js"
-import type { ActivityProvenanceLookup, DecodeEnvelope } from "./types.js"
+import type {
+	ActivityChannelLookup,
+	ActivityProvenanceLookup,
+	DecodeEnvelope,
+} from "./types.js"
 
 export type ActivityFailureCode =
 	| "ACTIVITY_UNAVAILABLE"
@@ -160,6 +164,11 @@ export interface StartActivityRuntimeOptions {
 	 * `callRecordings`). Omitted: no dsd-fme call links to its file.
 	 */
 	callRecordings?: ((decoderId: string) => boolean) | null
+	/**
+	 * The channel of a reception (ingress.ts `channel`): memory only, never a lookup or an
+	 * await. Omitted: no reception row gets a `channel`.
+	 */
+	channel?: ActivityChannelLookup | null
 }
 
 /** Service that routes never call while Activity is disabled or unavailable. */
@@ -441,6 +450,7 @@ export async function startActivityRuntime(
 			resolveProvenance: options.resolveProvenance ?? null,
 			aircraftIdentity: options.aircraftIdentity ?? null,
 			callRecordings: options.callRecordings ?? null,
+			channel: options.channel ?? null,
 			link: op => store.link?.(op),
 		})
 		try {

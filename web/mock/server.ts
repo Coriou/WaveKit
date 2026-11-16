@@ -17,6 +17,12 @@ import {
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 } from "@wavekit/api-types"
+import {
+	channelFacetValue,
+	channelMatchOf,
+	channelParams,
+	matchesChannel,
+} from "./activity-channel.ts"
 import type {
 	ActivityLifecycleStatus,
 	ActivityQuery,
@@ -300,6 +306,9 @@ const ACTIVITY_PARAMS = new Set([
 	"text",
 	"refs",
 	"hasRecording",
+	"channelHz",
+	"nearHz",
+	"toleranceHz",
 	"order",
 	"limit",
 	"pageToken",
@@ -362,6 +371,7 @@ function matchesQuery(item: ActivitySummary, q: ActivityQuery): boolean {
 	for (const ref of q.refs ?? [])
 		if (ref.type !== "recordingId" || item.recording?.id !== ref.value)
 			return false
+	if (!matchesChannel(item, q)) return false
 	if (q.frequencyHz) {
 		if (item.frequencyHz === null) return false
 		if (q.frequencyHz.min !== undefined && item.frequencyHz < q.frequencyHz.min)
@@ -448,6 +458,11 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 	}
 	if (typeof params["entityKey"] === "string") q.entityKey = params["entityKey"]
 	if (typeof params["text"] === "string") q.text = params["text"]
+	try {
+		Object.assign(q, channelParams(num))
+	} catch (error) {
+		throw new QueryError(error instanceof Error ? error.message : "channel")
+	}
 	const has = params["hasRecording"]
 	if (has === "true") q.hasRecording = true
 	else if (has === "false") q.hasRecording = false
@@ -1214,7 +1229,7 @@ export async function buildMockServer(
 				category: "voice",
 				frequencyHz: null,
 				entityKey: `talkgroup:${item.talkgroup ?? "0"}`,
-				title: `DMR TG ${item.talkgroup ?? "0"} from ${item.source ?? "0"}`,
+				title: `TG ${item.talkgroup ?? "0"} · radio ${item.source ?? "0"}`,
 				fields: [
 					{
 						key: "talkgroup",
@@ -1234,7 +1249,11 @@ export async function buildMockServer(
 		}
 		if (item.kind !== "scanner-analog") return null
 		seq += 1
-		const mhz = item.frequencyHz === null ? null : item.frequencyHz / 1e6
+		// As a core with channels writes it: on the discovery's channel, titled by what it holds.
+		const channel =
+			item.frequencyHz === null
+				? null
+				: { discoveryId: item.discoveryId, frequencyHz: item.frequencyHz }
 		return {
 			eventId: `evt_${seq.toString(36)}`,
 			commitSeq: String(seq),
@@ -1247,7 +1266,7 @@ export async function buildMockServer(
 			category: "voice",
 			frequencyHz: item.frequencyHz,
 			entityKey: null,
-			title: mhz === null ? "Scanner recording" : `Recording ${mhz} MHz`,
+			title: channel === null ? "Scanner recording" : "FM voice",
 			fields: [
 				{
 					key: "durationMs",
@@ -1257,6 +1276,7 @@ export async function buildMockServer(
 				},
 			],
 			recording,
+			...(channel === null ? {} : { channel }),
 		}
 	}
 
@@ -2765,6 +2785,7 @@ export async function buildMockServer(
 				expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
 			},
 			searchCoverage: "bounded-projection",
+			...channelMatchOf(matched, query),
 		}
 		return page
 	})
@@ -2785,12 +2806,19 @@ export async function buildMockServer(
 			? body["dimensions"].filter(
 					(
 						d,
-					): d is "category" | "protocol" | "decoderId" | "sourceId" | "kind" =>
+					): d is
+						| "category"
+						| "protocol"
+						| "decoderId"
+						| "sourceId"
+						| "kind"
+						| "channel" =>
 						d === "category" ||
 						d === "protocol" ||
 						d === "decoderId" ||
 						d === "sourceId" ||
-						d === "kind",
+						d === "kind" ||
+						d === "channel",
 				)
 			: []
 		const matched = activity.filter(item => matchesQuery(item, query))
@@ -2798,7 +2826,7 @@ export async function buildMockServer(
 		for (const dim of dims) {
 			const counts = new Map<string | null, number>()
 			for (const item of matched) {
-				const v = item[dim]
+				const v = dim === "channel" ? channelFacetValue(item) : item[dim]
 				counts.set(v, (counts.get(v) ?? 0) + 1)
 			}
 			facets[dim] = [...counts]
@@ -2815,6 +2843,7 @@ export async function buildMockServer(
 			scanned: matched.length,
 			truncated: false,
 			snapshot: { lowBarrier: activityPruned, highWater },
+			...channelMatchOf(matched, query),
 		}
 	})
 

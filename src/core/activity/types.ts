@@ -92,7 +92,28 @@ export interface DecodeEnvelopeContext {
 	/** Event-time input binding supplied by its owner, never inferred from data. */
 	provenance?: DecodeProvenance
 	refs?: DecodeReferences
+	/** The channel the reception was heard on (ActivityChannel), when the ingress knew it. */
+	channel?: ActivityChannel
 }
+
+/**
+ * A row's channel: its raster frequency (the owning scanner discovery's frequency, never a
+ * measured carrier) and that discovery when one owns it.
+ */
+export interface ActivityChannel {
+	discoveryId: string | null
+	frequencyHz: number
+}
+
+/**
+ * The channel of a reception (memory only, never I/O; must not throw, the ingress still guards
+ * it): the decoder instance and the reception's resolved frequency (null when unknown). Null when
+ * no channel is known.
+ */
+export type ActivityChannelLookup = (
+	decoderId: string,
+	frequencyHz: number | null,
+) => ActivityChannel | null
 
 /**
  * Per-entity coalescing (src/core/activity/storage/coalesce.ts): the row is the entity's merged
@@ -161,6 +182,8 @@ export interface DecodeEnvelope {
 	coalesced?: DecodeCoalesced
 	/** Aircraft rows: the identity known when stored (absent when nothing was). */
 	aircraft?: DecodeAircraftIdentity
+	/** The channel the reception was heard on; absent when not known. */
+	channel?: ActivityChannel
 	/** Complete JSON projection of decoded data, not original protocol wire output. */
 	decodedData: JsonValue
 }

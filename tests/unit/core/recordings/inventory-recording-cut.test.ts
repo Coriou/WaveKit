@@ -54,6 +54,9 @@ function wav(): Buffer {
 	return b
 }
 
+/** The verdict facts of a receipt written before they existed (or without them). */
+const UNKNOWN = { speech: "unchecked", keptBy: null, startedAt: null } as const
+
 function receipt(
 	id: string,
 	extra: Record<string, unknown> = {},
@@ -147,16 +150,17 @@ describe("receiptFactsOf", () => {
 		const id = uuid(1)
 		expect(
 			receiptFactsOf(receipt(id, { cutReason: "epoch-changed" }), id),
-		).toEqual({ cut: "scanner-moved", observationId: "o_1" })
+		).toEqual({ cut: "scanner-moved", observationId: "o_1", ...UNKNOWN })
 		expect(
 			receiptFactsOf(
 				receipt(id, { cutReason: "epoch-changed", cutActive: false }),
 				id,
 			),
-		).toEqual({ cut: null, observationId: "o_1" })
+		).toEqual({ cut: null, observationId: "o_1", ...UNKNOWN })
 		expect(receiptFactsOf(receipt(id, { observationId: null }), id)).toEqual({
 			cut: null,
 			observationId: null,
+			...UNKNOWN,
 		})
 		expect(receiptFactsOf(receipt(uuid(2)), id)).toBeNull()
 		expect(receiptFactsOf(receipt(id, { outcome: "aborted" }), id)).toBeNull()
@@ -183,7 +187,7 @@ describe("readRecordingReceipt", () => {
 		const recordings = join(root, "recordings")
 		expect(
 			await readRecordingReceipt(nodeRecordingFs, recordings, name),
-		).toEqual({ cut: "shutdown", observationId: "o_1" })
+		).toEqual({ cut: "shutdown", observationId: "o_1", ...UNKNOWN })
 		await writeFile(join(dir, "receipt.json"), `${at} `)
 		expect(
 			await readRecordingReceipt(nodeRecordingFs, recordings, name),

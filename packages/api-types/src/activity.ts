@@ -6,6 +6,7 @@
  * not an internal `{ type: "activity:frame", frame }` wrapper.
  * tests/unit/core/activity/api-types-compat.test.ts fails typecheck on drift.
  */
+import { DISCOVERY_NEAR_MAX_TOLERANCE_HZ } from "./scanner.js"
 
 export type JsonScalar = string | number | boolean | null
 export type JsonValue =
@@ -67,6 +68,20 @@ export interface DecodeEnvelopeContext {
 	/** Event-time input binding supplied by its owner, never inferred from data. */
 	provenance?: DecodeProvenance
 	refs?: DecodeReferences
+	/** The channel the reception was heard on (ActivityChannel), when the ingress knew it. */
+	channel?: ActivityChannel
+}
+
+/**
+ * The channel a row belongs to: its raster frequency (`frequencyHz`, the owning scanner
+ * discovery's frequency, never a measured carrier) and that discovery when one owns it. Present on
+ * rows stored since the field exists whose frequency resolved to a channel (scanner recordings,
+ * scanner probe receptions, receptions on a discovery's frequency); absent on older rows, which
+ * channel queries match by their own frequency instead (`channelMatch: "mixed"`).
+ */
+export interface ActivityChannel {
+	discoveryId: string | null
+	frequencyHz: number
 }
 
 /**
@@ -136,6 +151,8 @@ export interface DecodeEnvelope {
 	coalesced?: DecodeCoalesced
 	/** Aircraft rows: the identity known when stored (absent when nothing was). */
 	aircraft?: DecodeAircraftIdentity
+	/** The channel the reception was heard on; absent when not known. */
+	channel?: ActivityChannel
 	/** Complete JSON projection of decoded data, not original protocol wire output. */
 	decodedData: JsonValue
 }
@@ -219,8 +236,14 @@ export interface RecordingChangePayload {
 	observationId: string
 	/** The source the recorder heard; null when unknown. */
 	sourceId: string | null
-	/** The recorded channel's centre in Hz; null when unknown. */
+	/** The recorded centre in Hz (the measured or demodulated one); null when unknown. */
 	frequencyHz: number | null
+	/**
+	 * The channel the file was kept on: the owning discovery (through merge aliases, at the
+	 * keep) and its raster frequency, the row's `frequencyHz` and `channel`. Absent on records
+	 * written before it existed.
+	 */
+	channel?: ActivityChannel
 	/**
 	 * When the recorded observation started (ISO). A long transmission rolls over into several
 	 * files: a later file starts after this.
@@ -306,7 +329,24 @@ export interface ActivitySummary {
 	aircraft?: DecodeEnvelope["aircraft"]
 	/** The row's playable recording; absent when it has none (or its file was deleted). */
 	recording?: ActivityRecordingLink
+	/** The row's channel (ActivityChannel); absent on rows without one and on older rows. */
+	channel?: ActivityChannel
 }
+
+/**
+ * How an old row (no `channel`) matches a channel query: by its own `frequencyHz` within this
+ * many Hz below the channel (inclusive) and above it (exclusive), so a row on the edge belongs to
+ * one channel only. Half of the 12.5 kHz default raster (ACTIVITY_BANDMAP_DEFAULT_BUCKET_HZ).
+ */
+export const ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ = 6_250
+/** The largest `toleranceHz` of a `nearHz` channel query: the discovery list's bound. */
+export const ACTIVITY_CHANNEL_NEAR_MAX_TOLERANCE_HZ =
+	DISCOVERY_NEAR_MAX_TOLERANCE_HZ
+/**
+ * `exact`: every row of the answer matched by its stored channel. `mixed`: some matched by their
+ * own frequency (rows stored before `channel` existed, or with none).
+ */
+export type ActivityChannelMatch = "exact" | "mixed"
 
 /**
  * ref_type values; ref_value is the matching provenance/refs string. `recordingId` is the
@@ -337,6 +377,19 @@ export interface ActivityQuery {
 	text?: string
 	/** true: only rows with a playable recording (`recording`); false: only rows without one. */
 	hasRecording?: boolean
+	/**
+	 * Rows of this channel (integer Hz, the raster frequency): `channel.frequencyHz` equal to it;
+	 * a row without `channel` matches by its own frequency within
+	 * ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ. Not with `nearHz`.
+	 */
+	channelHz?: number
+	/** Rows whose channel lies within `toleranceHz` of this (integer Hz), inclusive. */
+	nearHz?: number
+	/**
+	 * With `nearHz` only: integer Hz, 0 to ACTIVITY_CHANNEL_NEAR_MAX_TOLERANCE_HZ; omitted:
+	 * DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ, as the discovery list.
+	 */
+	toleranceHz?: number
 }
 
 export interface ActivitySearchPage {
@@ -346,6 +399,8 @@ export interface ActivitySearchPage {
 	replayCursor: string
 	snapshot: { lowBarrier: string; highWater: string; expiresAt: string }
 	searchCoverage: "bounded-projection"
+	/** With `channelHz` or `nearHz` only: how the rows of the snapshot matched. */
+	channelMatch?: ActivityChannelMatch
 }
 
 export interface ActivityFacetRequest {
@@ -356,6 +411,7 @@ export interface ActivityFacetRequest {
 		| "decoderId"
 		| "sourceId"
 		| "kind"
+		| "channel"
 	)[]
 }
 
@@ -366,6 +422,11 @@ export interface ActivityFacetResult {
 	scanned: number
 	truncated: boolean
 	snapshot: { lowBarrier: string; highWater: string }
+	/**
+	 * With `channelHz` or `nearHz` only. The `channel` dimension's values are channel frequencies
+	 * in decimal Hz; null counts rows without a stored channel (matched by their frequency).
+	 */
+	channelMatch?: ActivityChannelMatch
 }
 
 export type ActivityReplayFrame =

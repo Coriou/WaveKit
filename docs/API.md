@@ -6853,7 +6853,11 @@ characters), and these filters, all combined: `kind` (`dsd-fme-call`,
 `false`), `discoveryId` (its own folder and every folder it owns through
 merges), `talkgroup` and `source` (radio id; decimal digits), `minHz` and
 `maxHz` (integer Hz, inclusive; only recordings with a known frequency match),
-`since` and `until` (ISO-8601 with a zone, inclusive, on `modifiedAt`) and `q`
+`channelHz` (integer Hz: recordings of that channel, their `frequencyHz` in
+whole Hz equal to it) or `nearHz` with `toleranceHz` (integer Hz, 0 to
+1,000,000, default 6,250: recordings whose `frequencyHz` lies within the
+tolerance; `toleranceHz` without `nearHz`, or `channelHz` with `nearHz`, is a
+400), `since` and `until` (ISO-8601 with a zone, inclusive, on `modifiedAt`) and `q`
 (1 to 64 characters, case-insensitive, in the talkgroup, radio, decoder, kind,
 local start time or frequency in MHz; never in the opaque id). The query is
 checked strictly (unknown or repeated keys, `limit=10abc` or a malformed cursor
@@ -6929,6 +6933,24 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   its chain. Both are null for a file no roll-over chained to another (such as
   each of a relay's separate overs while it holds its carrier in one
   observation), and for an unknown one.
+- `startedAt`, `observationId`, `speech`, `keptBy` (since 2026-11-16; older
+  cores omit them): what the recorder knew when it finished a scanner analog
+  file, read from its receipt. `startedAt` is the file's first sample (ISO,
+  UTC); `observationId` the scanner observation it recorded (the roll-over
+  parts of one transmission share it); `speech` the file's own speech reading,
+  `heard`, `not-heard` or `unchecked` (not measured: a file classed by its
+  tone, a receipt written before the field, any other kind); `keptBy` the
+  recorder's reason for keeping it, its finish code as the recorder decisions
+  report it (`prior-none`: no digital prior, kept at once; `own-tone`: its
+  audio carried a CTCSS tone; `joined-decode`; `final`: kept at the end of its
+  provisional hold). Unknown values read `unchecked` and null, never guessed;
+  other kinds read null, `unchecked`, null, null. Nothing here changes what the
+  recorder keeps.
+- `frequencyHz` of a scanner recording is its channel frequency: the owning
+  discovery's, the same value as the `channel.frequencyHz` of its Activity row.
+  With `nearHz`, `matchedByChannel` lists the matches per channel
+  (`{ frequencyHz, count }`, count descending then frequency, at most 32): its
+  counts sum to `matched` while 32 or fewer channels match.
 - `kept` (optional in `@wavekit/api-types`; older cores omit it): true when
   the recording is kept, a delete of it is in progress, or the keep store is not
   usable (fail closed); read at list time.
@@ -7568,7 +7590,8 @@ Search summaries inside one snapshot.
 Query parameters: `kinds`, `sourceIds`, `decoderIds`, `protocols`,
 `categories`, `frequencyMin`, `frequencyMax`, `producedFrom`, `producedTo`,
 `entityKey`, `text`, `refs` (`type:value`, repeated), `hasRecording` (`true`
-or `false`), `order` (`asc` or `desc`), `limit`, `pageToken`. An unknown
+or `false`), `channelHz`, `nearHz`, `toleranceHz` (see "Channels" below),
+`order` (`asc` or `desc`), `limit`, `pageToken`. An unknown
 parameter is 400
 `ACTIVITY_QUERY_INVALID`; its message names the rejected parameter and lists
 all accepted parameters, derived from the same list that validates the query.
@@ -7677,12 +7700,48 @@ served as a file name.
 A `recording-change` record's `payload`: `change` (`"finalized"`),
 `recordingId` (the key, `scan:<discoveryId>~<file>`), `recordingKind`
 (`"scanner-analog"`), `discoveryId` (the folder's discovery), `observationId`,
-`sourceId`, `frequencyHz` (the recorded channel's centre; null when unknown),
-`observationStartedAt` (the observation's start: a long transmission rolls over
-into several files, so a later file starts after it), `durationMs` and
-`finalizedAt` (its `producedAt`). Its summary: category `voice`, protocol
-`analog`, title `Recording <MHz> MHz`, one `durationMs` field, refs
-`recordingId`, `discoveryId` and `observationId`.
+`sourceId`, `frequencyHz` (the recorded centre, as measured or demodulated;
+null when unknown), `observationStartedAt` (the observation's start: a long
+transmission rolls over into several files, so a later file starts after it),
+`durationMs`, `finalizedAt` (its `producedAt`) and, since 2026-11-16,
+`channel` (`{ discoveryId, frequencyHz }`: the discovery owning the file when
+it was kept, through merges, and that discovery's frequency). Its summary:
+category `voice`, protocol `analog`, one `durationMs` field, refs
+`recordingId`, `discoveryId` and `observationId`. With `channel` the summary is
+on the channel: title `FM voice` (never a frequency), `frequencyHz` the
+channel's and `channel` set; the measured centre stays in the record. Records
+written before have no `channel` and keep the title `Recording <MHz> MHz` and
+the recorded centre.
+
+#### Channels
+
+A row's `channel` (`{ discoveryId, frequencyHz }`, since 2026-11-16) is the
+channel it belongs to: `frequencyHz` is the channel's frequency (the owning
+scanner discovery's, in whole Hz, never a measured carrier) and `discoveryId`
+that discovery, or null. Rows get it when they are stored: a kept scanner
+recording (above), and a decoder reception whose channel the core can tell
+(a scanner probe's receptions: its discovery; a reception on a discovery's
+frequency), which also gets a `discoveryId` ref. Other rows, and every row
+stored before, have none. It sits whole in the summary (about 190 bytes at
+most; fields and title shrink first to keep the 4 KiB budget).
+
+Channel queries (`GET /api/activity`, `POST /api/activity/facets` and the
+WebSocket subscription's `query`; integer Hz):
+
+- `channelHz`: the rows of that channel (`channel.frequencyHz` equal to it);
+- `nearHz` with `toleranceHz` (0 to 1,000,000, default 6,250): the rows whose
+  channel lies within the tolerance of `nearHz`, inclusive. `toleranceHz`
+  without `nearHz`, or `channelHz` with `nearHz`, is a 400.
+
+A row without `channel` matches by its own `frequencyHz`, within 6,250 Hz
+(`ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ`, half a 12.5 kHz raster) below the
+channel, inclusive, and above it, exclusive: a row on the edge between two
+channels belongs to the upper one only. A row with neither never matches. The
+answer says how its rows matched: `channelMatch` is `exact` when every row of
+the snapshot in the query matched by its stored channel, `mixed` when some
+matched by their frequency (the count over those rows is labelled, not
+wrong). It is present only with a channel query, on the list page and on the
+facets result.
 
 ### GET /api/activity/trails
 
@@ -7907,9 +7966,14 @@ absent. 400 `ACTIVITY_QUERY_INVALID` when the id is not a valid event id.
 ### POST /api/activity/facets
 
 Body `{ "query": { }, "dimensions": ["kind"] }`. Dimensions are `category`,
-`protocol`, `decoderId`, `sourceId` and `kind` (at most five, unique).
-**Response** (200): `facets`, `scanned`, `truncated`, `snapshot`. The scan
-stops at 50,000 rows and 32 values per dimension.
+`protocol`, `decoderId`, `sourceId`, `kind` and `channel` (at most six,
+unique). `channel` counts rows per channel frequency (decimal Hz); null counts
+the rows without a stored channel. One read with a `nearHz` query gives the
+channel, each neighbour and the nearby total; while at most 32 channels match,
+the `channel` counts sum to the rows the same query lists.
+**Response** (200): `facets`, `scanned`, `truncated`, `snapshot`, and
+`channelMatch` with a channel query. The scan stops at 50,000 rows and 32
+values per dimension.
 
 ### GET /api/activity/status
 
