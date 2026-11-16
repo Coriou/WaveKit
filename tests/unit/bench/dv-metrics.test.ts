@@ -2,16 +2,18 @@
  * Digital voice capture metrics (scripts/bench/scanner-quality/dv-metrics.ts),
  * the adapter replay on a fake clock (dv-replay.ts), and the truth scorecard's
  * DV scenes and totals (truth-dv.ts, truth-score.ts), on in-process doubles:
- * hand-made calls and lines, and the provisional latency seeds.
+ * hand-made calls and lines, and the latency seeds (recorded, one modelled).
  */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
 	DV_FRAME_MS,
+	DV_LONG_OVER_MS,
 	HOLD_MIN_MS,
 	MATCH_LEAD_MS,
 	MATCH_TAIL_MS,
 	dvTable,
+	falseCalls,
 	holdsOf,
 	percentile,
 	scoreOvers,
@@ -31,6 +33,7 @@ import {
 	loadDvCases,
 	parseDvSeed,
 	runDvCase,
+	runDvScene,
 } from "../../../scripts/bench/scanner-quality/truth-dv.js"
 import {
 	parseThresholds,
@@ -278,6 +281,27 @@ describe("scoreOvers", () => {
 	})
 })
 
+describe("summarise missedLong", () => {
+	it("counts a missed over asked for DV_LONG_OVER_MS (1 000 ms) or more, not one asked for less or unknown", () => {
+		expect(DV_LONG_OVER_MS).toBe(1000)
+		// No call at all: every over is missed.
+		const rows = scoreOvers(
+			[
+				over(0, 0, 990, { nominalMs: 999 }),
+				over(1, 2000, 2990, { nominalMs: 1000 }),
+				over(2, 4000, 6000, { nominalMs: 2000 }),
+				over(3, 7000, 9000),
+			],
+			[],
+			[],
+			() => false,
+		)
+		const s = summarise(rows)
+		expect(s.missed).toBe(4)
+		expect(s.missedLong).toBe(2)
+	})
+})
+
 describe("percentile", () => {
 	it("is the nearest rank", () => {
 		expect(percentile([], 90)).toBeNull()
@@ -337,7 +361,7 @@ describe("dvTable", () => {
 		const lines = table.split("\n")
 		expect(lines[0]).toMatch(/^\| Scene \| Variant \| CNR/)
 		expect(lines[2]).toBe(
-			"| s | baseline | 20 dB | 0 Hz | 0 | 4 | 100.0 % | 0 | 0 | 0 | 700 / 700 | 40 / 400 | 720 | 10.0 % |",
+			"| s | baseline | 20 dB | 0 Hz | 0 | 4 | 100.0 % | 0 | 0 | 0 | 700 / 700 | 40 / 400 | 720 | 10.0 % | 0 |",
 		)
 		expect(
 			lines.filter(l => l.startsWith("| s | baseline | 20 dB")),
@@ -392,12 +416,13 @@ const T = (lines: [number, string][]): DvLine[] =>
 	lines.map(([atMs, text]) => ({ atMs, text }))
 
 describe("replayDvLines", () => {
-	it("starts a DMR call at its first TG/SRC line and ends it at the terminator", () => {
+	it("starts a DMR call back-dated to its first voice sync, IDs attached, and ends it at the terminator", () => {
 		const calls = replayDvLines(
 			T([
 				[100, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
 				[420, " SLOT 1 TGT=9 SRC=100 Group Call "],
-				[780, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
+				// One superframe (360 ms) on from the first sync: the same over.
+				[820, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
 				[1500, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC "],
 				[1500, " SLOT 1 TGT=9 SRC=100 Group Call "],
 			]),
@@ -405,7 +430,7 @@ describe("replayDvLines", () => {
 		)
 		expect(calls).toEqual([
 			expect.objectContaining({
-				startedAtMs: 420,
+				startedAtMs: 100,
 				endedAtMs: 1500,
 				talkgroup: 9,
 				source: 100,
@@ -422,15 +447,52 @@ describe("replayDvLines", () => {
 			T([
 				[100, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
 				[420, " SLOT 1 TGT=9 SRC=100 Group Call "],
-				[780, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
+				// One superframe (360 ms) on from the first sync: the same over.
+				[820, "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "],
 				[1140, " SLOT 1 TGT=9 SRC=100 Group Call "],
 			]),
 			"auto",
 		)
 		expect(calls).toHaveLength(1)
 		expect(calls[0]!.timeout).toBe(true)
+		// Back-dated to the first sync, ended at the last voice line.
+		expect(calls[0]).toMatchObject({ startedAtMs: 100, endedAtMs: 1140 })
 		// 4 000 ms timeout + 500 ms timer < DV_IDLE_MS.
 		expect(DV_IDLE_MS).toBeGreaterThan(4000 + 500)
+	})
+})
+
+describe("false calls", () => {
+	const call = (startedAtMs: number, extra: Partial<DvCall> = {}): DvCall => ({
+		startedAtMs,
+		endedAtMs: startedAtMs + 700,
+		slot: 1,
+		talkgroup: null,
+		source: null,
+		wavFile: false,
+		timeout: false,
+		...extra,
+	})
+
+	it("are the identity-less calls that hold no over and are near none", () => {
+		const overs = [over(0, 1000, 3000)]
+		// Inside, within the widened span (MATCH_TAIL_MS after the end), past it, named.
+		const calls = [
+			call(1200),
+			call(3000 + MATCH_TAIL_MS),
+			call(3000 + MATCH_TAIL_MS + 1),
+			call(9000, { talkgroup: 9, source: 100 }),
+			call(9000, { talkgroup: 0, source: 0 }),
+		]
+		expect(falseCalls(overs, calls)).toEqual([calls[2], calls[4]])
+		expect(falseCalls([], [call(0)])).toHaveLength(1)
+	})
+
+	it("the noise-sync scene of stray syncs starts no call", () => {
+		const noise = loadDvCases().find(c => c.name === "dv-noise-sync")!
+		expect(noise.seed.overs).toEqual([])
+		expect(replayDvLines(noise.seed.lines, "auto")).toEqual([])
+		expect(runDvScene(noise)).toEqual({ rows: [], dvFalse: 0 })
 	})
 })
 
@@ -440,11 +502,22 @@ describe("truth DV scenes", () => {
 	it("load the seeds as digital-voice intervals with protocol and slot", () => {
 		expect(cases.map(c => c.name)).toEqual([
 			"dv-dmr-direct-gaps-other",
+			"dv-dmr-direct-gaps-same",
+			"dv-dmr-direct-late-entry",
 			"dv-dmr-direct-lengths",
 			"dv-dmr-direct-no-terminator",
+			"dv-dmr-direct-rekey-no-tlc",
+			"dv-dmr-repeater-gaps-other",
 			"dv-dmr-repeater-gaps-same",
 			"dv-dmr-repeater-hang-no-tlc",
+			"dv-dmr-repeater-late-entry",
+			"dv-dmr-repeater-lengths",
 			"dv-dmr-repeater-two-slots",
+			"dv-noise-sync",
+		])
+		// Recorded, except the noise scene (modelled: no capture has it).
+		expect(cases.filter(c => c.seed.provisional).map(c => c.name)).toEqual([
+			"dv-noise-sync",
 		])
 		for (const c of cases)
 			for (const iv of dvIntervals(c))
@@ -458,37 +531,70 @@ describe("truth DV scenes", () => {
 		expect(() => parseDvSeed("x.json", "{}")).toThrow(/x\.json: version/)
 	})
 
-	it("score today's adapter on the provisional seeds", () => {
+	it("score the call-first adapter on the recorded seeds", () => {
 		const by = Object.fromEntries(
 			cases.map(c => [c.name, summarise(runDvCase(c))]),
 		)
-		// Direct: the first decoded embedded LC starts the call, 727 ms after
-		// key-up: too late for the 0.5 s over (a call holding 200 ms of it, its
-		// half, 250 ms, is more than the 0.5 - 0.727 s left), so it is missed.
+		// No scene splits an over: clumped line arrival (about 340 ms steps)
+		// measures no superframe grid.
+		for (const c of cases) expect(by[c.name]!.splits).toBe(0)
+		// Direct: one call per over; the 0.5 s over's call holds only 186 ms
+		// of it (first line 261 ms after key-up, terminator 99 ms after key-down).
 		expect(by["dv-dmr-direct-lengths"]).toMatchObject({
 			overs: 5,
 			exactlyOne: 4,
 			missed: 1,
+			missedLong: 0,
 		})
-		const missed = cases.flatMap(c =>
-			runDvCase(c)
-				.filter(r => r.missed)
-				.map(r => `${c.name} ${r.index} ${r.terminator}`),
-		)
-		expect(missed).toEqual([
-			"dv-dmr-direct-lengths 0 true",
-			"dv-dmr-direct-no-terminator 0 false",
+		expect(
+			cases.flatMap(c =>
+				runDvCase(c)
+					.filter(r => r.missed)
+					.map(r => [c.name, r.index, r.nominalMs]),
+			),
+		).toEqual([["dv-dmr-direct-lengths", 0, 500]])
+		// Back-dated to each over's first line, which arrives late: the 10 s
+		// over's 467 ms after key-up.
+		expect(by["dv-dmr-direct-lengths"]!.headCutP90Ms).toBeCloseTo(466.7, 0)
+		// Hang-time idles no longer hold a call whose terminator was missed.
+		expect(by["dv-dmr-repeater-hang-no-tlc"]).toMatchObject({
+			merged: 0,
+			exactlyOne: 2,
+		})
+		// Two busy slots: one call per slot, concurrent, no split.
+		expect(by["dv-dmr-repeater-two-slots"]).toMatchObject({
+			splits: 0,
+			exactlyOne: 2,
+		})
+		// Every repeater over has exactly one call (terminators and headers print).
+		for (const name of [
+			"dv-dmr-repeater-gaps-other",
+			"dv-dmr-repeater-gaps-same",
+			"dv-dmr-repeater-lengths",
+			"dv-dmr-repeater-late-entry",
 		])
-		// 60 + 360 + 4 x 60 + 27.5 + 40 ms of line latency (dv-latency-seeds.mjs).
-		expect(by["dv-dmr-direct-lengths"]!.headCutP90Ms).toBeCloseTo(727.5, 0)
-		// Hang-time idles refresh a call whose terminator was missed: one call, two overs.
-		expect(by["dv-dmr-repeater-hang-no-tlc"]).toMatchObject({ merged: 2 })
-		// Two busy slots: slot 1's call is split by slot 2's link control.
-		expect(by["dv-dmr-repeater-two-slots"]).toMatchObject({ splits: 2 })
+			expect(by[name]!.exactlyOne).toBe(by[name]!.overs)
+		// A 0.2 s re-key with the same IDs printed no terminator and no header
+		// and its syncs keep their clump steps: nothing in the lines splits it.
+		expect(by["dv-dmr-direct-rekey-no-tlc"]).toMatchObject({ merged: 2 })
+		expect(by["dv-dmr-direct-gaps-same"]).toMatchObject({ merged: 2 })
+		// Other IDs split the same 0.2 s re-key.
+		expect(by["dv-dmr-direct-gaps-other"]).toMatchObject({
+			merged: 0,
+			exactlyOne: 4,
+		})
+		// Without a terminator the call ends at its last voice line.
+		expect(by["dv-dmr-direct-no-terminator"]!.endErrNoTermP90Ms).toBeCloseTo(
+			203.2,
+			0,
+		)
 	})
 
 	it("total into the scorecard and pass the checked-in limits", () => {
-		const scores = cases.map(c => withTotals(dvCaseScore(c, runDvCase(c))))
+		const scores = cases.map(c => {
+			const run = runDvScene(c)
+			return withTotals(dvCaseScore(c, run.rows, run.dvFalse))
+		})
 		const limits = parseThresholds(
 			"truth-thresholds.json",
 			readFileSync(
@@ -502,27 +608,40 @@ describe("truth DV scenes", () => {
 		// Only the DV scenes: the other synthetic minimums do not apply.
 		const card = scorecard(scores, limits, { subset: true })
 		expect(card.byKind.synthetic).toMatchObject({
-			dvOvers: 19,
-			dvMissed: 2,
-			dvSplit: 2,
-			dvMerged: 2,
-			dvHeadCutP90Ms: 727,
-			dvEndErrP90Ms: 40,
-			dvRecordingMissing: 19,
+			dvOvers: 36,
+			dvMissed: 1,
+			dvMissedLong: 0,
+			dvSplit: 0,
+			dvMerged: 4,
+			dvHeadCutP90Ms: 414,
+			dvEndErrP90Ms: 318,
+			dvRecordingMissing: 36,
+			dvFalse: 0,
 		})
 		expect(card.failures).toEqual([])
 		expect(formatScorecardLine(card)).toContain(
-			"digital voice 19 overs: missed 2, split 2, merged 2, head cut p90 727 ms, end error p90 40 ms, no recording 19",
+			"digital voice 36 overs: missed 1 (long 0), split 0, merged 4, head cut p90 414 ms, end error p90 318 ms, no recording 36, false calls 0",
 		)
+		// The false-call bar: at 0 it passes, one false call fails.
+		expect(limits.limits.synthetic?.["dvFalse"]).toEqual({ max: 0 })
+		const noise = cases.find(c => c.name === "dv-noise-sync")!
+		const phantom = scorecard(
+			[...scores, withTotals(dvCaseScore(noise, [], 1))],
+			limits,
+			{ subset: true },
+		)
+		expect(phantom.byKind.synthetic?.dvFalse).toBe(1)
+		expect(phantom.failures.map(f => f.metric)).toEqual(["dvFalse"])
 		// The miss and end error ratchets: at their limits they pass, past them they fail.
-		expect(limits.limits.synthetic?.["dvMissed"]).toEqual({ max: 2 })
-		expect(limits.limits.synthetic?.["dvEndErrP90Ms"]).toEqual({ max: 40 })
+		expect(limits.limits.synthetic?.["dvMissed"]).toEqual({ max: 1 })
+		expect(limits.limits.synthetic?.["dvMissedLong"]).toEqual({ max: 0 })
+		expect(limits.limits.synthetic?.["dvEndErrP90Ms"]).toEqual({ max: 318 })
 		const late = scorecard(
 			[
 				...scores,
 				withTotals(
 					dvCaseScore(cases[0]!, [
-						// 3 more timed overs 5 s late: 3 of 18 timed end errors (rank 17 is 5 000 ms) move the p90.
+						// 3 more timed overs 5 s late: 30 timed end errors, rank 27 is 351 ms (was 318).
 						...[1, 2, 3].map(() => ({
 							...runDvCase(cases[0]!)[1]!,
 							endErrMs: 5000,
@@ -535,9 +654,11 @@ describe("truth DV scenes", () => {
 			limits,
 			{ subset: true },
 		)
-		expect(late.byKind.synthetic?.dvMissed).toBe(3)
+		// The missed copy was asked for 2 s: it is long too.
+		expect(late.byKind.synthetic?.dvMissed).toBe(2)
+		expect(late.byKind.synthetic?.dvMissedLong).toBe(1)
 		expect(late.failures.map(f => f.metric).sort()).toEqual(
-			["dvEndErrP90Ms", "dvMissed"].sort(),
+			["dvEndErrP90Ms", "dvMissed", "dvMissedLong"].sort(),
 		)
 		// One more split than the ratchet allows fails.
 		const worse = scorecard(
@@ -553,8 +674,8 @@ describe("truth DV scenes", () => {
 			{ subset: true },
 		)
 		expect(worse.failures.map(f => f.metric)).toContain("dvSplit")
-		// The merge ratchet: at its limit (2) it passes, one more merged over fails.
-		expect(limits.limits.synthetic?.["dvMerged"]).toEqual({ max: 2 })
+		// The merge ratchet: at its limit (4) it passes, one more merged over fails.
+		expect(limits.limits.synthetic?.["dvMerged"]).toEqual({ max: 4 })
 		const merged = scorecard(
 			[
 				...scores,
@@ -568,7 +689,7 @@ describe("truth DV scenes", () => {
 			limits,
 			{ subset: true },
 		)
-		expect(merged.byKind.synthetic?.dvMerged).toBe(3)
+		expect(merged.byKind.synthetic?.dvMerged).toBe(5)
 		expect(merged.failures.map(f => f.metric)).toEqual(["dvMerged"])
 	})
 })

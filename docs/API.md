@@ -3964,6 +3964,13 @@ curl http://localhost:9000/api/digital-voice/status
 			"droppedSamples": 0,
 			"underruns": 3,
 			"bufferedMs": 60,
+			"voiceHold": {
+				"heldMs": 1840,
+				"releasedMs": 1620,
+				"discardedMs": 220,
+				"overflowDroppedMs": 0,
+				"bufferedMs": 0
+			},
 			"lastDatagramAt": "2026-10-09T13:38:45.120Z",
 			"call": {
 				"decoderId": "dsd-fme",
@@ -3994,6 +4001,12 @@ curl http://localhost:9000/api/digital-voice/status
 
 `call` is the first active call on any decoder (else `null`); each decoder also
 reports `lastCall` once a call has ended. Counters are cumulative since startup.
+Each decoder's `voiceHold` reports the stream's hold of voice whose call's
+encryption is not known yet ([DIGITAL-VOICE.md](DIGITAL-VOICE.md)): `heldMs`
+put on hold, `releasedMs` played once the call was known clear, `discardedMs`
+never played (encrypted, ended unknown, or no listener), `overflowDroppedMs`
+dropped beyond the 2 s bound, and `bufferedMs`, the current lag of the most
+delayed slot. Held voice is not counted in `encryptedDatagramsDropped`.
 
 The top-level and per-decoder `httpUrl` and `wavUrl` follow the same host rule as
 [`GET /api/live-audio/status`](#get-apilive-audiostatus): with
@@ -8601,6 +8614,11 @@ Optional call metadata, present only when dsd-fme reported it:
 `keyId` (1–8 upper-case hex digits), `ran` (NXDN, 0–63) and `errors`
 (`{ crc, fec }` counts). A malformed optional field is dropped and counted; the
 call is still published.
+
+`encryptionKnown` (optional): `false` while a call that started on its voice
+frames, before its link control said whether it is encrypted, is not known to be
+clear: treat it as encrypted. It turns `true` (with `encrypted` set) in an update
+once known; absent means known from the start.
 
 #### digital-voice:status
 

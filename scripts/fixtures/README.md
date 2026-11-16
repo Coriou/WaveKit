@@ -94,9 +94,19 @@ truth: it returns each over as sent (start, end, slot, identities, checked frame
 `tests/integration/dv-capture.test.ts` feeds the scenes through wavekit-chan, sox and
 dsd-fme at real time and scores the adapter's calls per over (`WAVEKIT_DVCAP=1`, in the
 core image). `dv-latency-seeds.mjs` writes the line timings the truth scorecard's
-digital voice scenes replay (`tests/mocks/fixtures/synthetic/dv-latency-*.json`). They
-are provisional: they model the current adapter's inputs, not a recorded run. A capture
-run with `WAVEKIT_DVCAP_LINES=<dir>` writes recorded ones in the same format.
+digital voice scenes replay (`tests/mocks/fixtures/synthetic/dv-latency-*.json`). Its
+seeds are provisional: they model the current adapter's inputs, not a recorded run. A
+capture run with `WAVEKIT_DVCAP_LINES=<dir>` writes recorded ones in the same format. The
+twelve DMR scenes of the quick subset (direct and repeater, 20 dB, 0 Hz, phase 0) are
+recorded (`provisional: false`); the file and scene name drop the grid point's suffix
+(`-baseline-20db-0hz-p0`), which the seed's note keeps. Only `noise-sync` is still
+modelled. Each over
+carries `nominalMs`, the length the plan asked, so the scorecard's `dvMissedLong` counts
+missed overs asked for 1 s or more (gated at 0). One more seed, `noise-sync`, has no over,
+only stray DMR, D-STAR and P25 syncs (`noiseSeed`): `dvFalse` counts the identity-less
+calls that hold no over (gated at 0). A grid run stops after three
+consecutive points fail with the same error, and its summary rows count the points
+whose decoder was killed by a signal.
 
 When the recorded baseline is committed, delete the provisional
 `dv-latency-*.json` seeds in the same commit (a provisional seed left beside

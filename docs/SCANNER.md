@@ -21,7 +21,7 @@ and receiver provenance rules. See [decoder activity placement](DECODER-GUIDE.md
 
 - Finds energy in the window a source is tuned to (in-window) or across wider ranges by retuning an rtl_tcp source (sweep).
 - Classifies emissions from their spectrum (bandwidth, shape, TDMA envelope) and confirms them with dsd-fme, multimon-ng or direwolf.
-- Never decrypts and never handles keys. Encrypted traffic is reported as `encrypted: true` and no audio is kept.
+- Never decrypts and never handles keys. Encrypted traffic is reported as `encrypted: true` and no audio is kept. A digital voice call that started before its encryption was known (`encryptionKnown: false`, [DIGITAL-VOICE.md](DIGITAL-VOICE.md)) is not clear: the auto route plays none of it until it is known clear.
 - Confidence is honest: `activity` (energy only) → `candidate` (spectral hypothesis) → `classified` (channel features; after the channelizer) → `decoded` (the confirm rule of the protocol was met: for DMR, the same colour code on two content-verified bursts or checked voice link-control lines). `decoded` means the first **accepted** identity, not any identity-bearing evidence.
 - Before the channelizer: one confirm probe at a time (each costs about half a core), analog replay characterisation when IQ capture is enabled, no listen-scan, ISM only through configured rtl_433 decoders (ambient evidence).
 

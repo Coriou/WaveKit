@@ -39,7 +39,7 @@ export interface DvOver {
 	/** Identities sent (talkgroup, source; YSF src; D-STAR my). */
 	ids?: Readonly<Record<string, unknown>>
 	/** The length the plan asked (dv-plan.mjs SentOver nominalMs). */
-	nominalMs?: number
+	nominalMs?: number | undefined
 }
 
 /** A call the adapter reported (its call_end, or its call_start alone). */
@@ -90,6 +90,12 @@ export interface DvOverScore {
  * call's tail running into the next over is not counted as holding it.
  */
 export const HOLD_MIN_MS = 200
+/**
+ * An over asked to last this long or longer must never be missed (the
+ * acceptance bar `dvMissedLong` 0): 1 s is the shortest over of the design's
+ * "exactly one call, 100 %" class (DV-CAPTURE section B).
+ */
+export const DV_LONG_OVER_MS = 1000
 /**
  * A call that overlaps no over (a 0 ms call made at a terminator line, or a
  * call the line latency put after key-down) belongs to the over whose span,
@@ -184,6 +190,24 @@ export function holdsOf(
 	})
 }
 
+/**
+ * The false calls of a run: calls with no identity (talkgroup and source
+ * null or 0) that hold no over and are near none (holdsOf gives them no
+ * over): a call made of noise syncs. The acceptance bar is 0 (`dvFalse`).
+ */
+export function falseCalls(
+	overs: readonly DvOver[],
+	calls: readonly DvCall[],
+): DvCall[] {
+	const holds = holdsOf(overs, calls)
+	return calls.filter(
+		(c, i) =>
+			holds[i]!.length === 0 &&
+			(c.talkgroup ?? 0) === 0 &&
+			(c.source ?? 0) === 0,
+	)
+}
+
 /** Scores every over of a plan against the calls and timed lines of one run. */
 export function scoreOvers(
 	overs: readonly DvOver[],
@@ -254,6 +278,8 @@ export interface DvSummary {
 	exactlyOne: number
 	/** Overs no call really holds (DvOverScore missed). */
 	missed: number
+	/** Missed overs whose nominal length is at least DV_LONG_OVER_MS (unknown nominal: not counted). */
+	missedLong: number
 	splits: number
 	merged: number
 	/** Over the timed overs (timedRow): not merged, not missed. */
@@ -294,6 +320,9 @@ export function summarise(rows: readonly DvOverScore[]): DvSummary {
 		exactlyOne: rows.filter(r => r.calls === 1 && !r.merged && !r.missed)
 			.length,
 		missed: rows.filter(r => r.missed).length,
+		missedLong: rows.filter(
+			r => r.missed && r.nominalMs !== null && r.nominalMs >= DV_LONG_OVER_MS,
+		).length,
 		splits: rows.reduce((n, r) => n + r.splits, 0),
 		merged: rows.filter(r => r.merged).length,
 		headCutP50Ms: percentile(headCuts(rows), 50),
@@ -352,8 +381,8 @@ export function dvTable(points: readonly DvPoint[]): string {
 		groups.set(key, [...(groups.get(key) ?? []), p])
 	}
 	const out = [
-		"| Scene | Variant | CNR | Error | Failed | Overs | One call | Missed | Splits | Merged | headCut p50 / p90 ms (< 0: began on the settle-replay copy) | endErr p90 ms (TLC / none) | tFirst p90 ms | Frames checked |",
-		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+		"| Scene | Variant | CNR | Error | Failed | Overs | One call | Missed | Splits | Merged | headCut p50 / p90 ms (< 0: began on the settle-replay copy) | endErr p90 ms (TLC / none) | tFirst p90 ms | Frames checked | Signal exits |",
+		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
 	]
 	for (const [key, ps] of groups) {
 		const [scene, variant, cnr, err] = key.split("|") as [
@@ -364,8 +393,11 @@ export function dvTable(points: readonly DvPoint[]): string {
 		]
 		const s = summarise(ps.flatMap(p => p.rows))
 		const failed = ps.filter(p => p.error !== undefined).length
+		// A decoder killed by a signal after its input (dsd-fme crashed at EOF):
+		// its lines are kept, but the run is abnormal.
+		const signalled = ps.filter(p => p.exit?.startsWith("SIG") === true).length
 		out.push(
-			`| ${scene} | ${variant} | ${cnr} dB | ${err} Hz | ${failed} | ${s.overs} | ${share(s.exactlyOne, s.overs)} | ${s.missed} | ${s.splits} | ${s.merged} | ${ms(s.headCutP50Ms)} / ${ms(s.headCutP90Ms)} | ${ms(s.endErrP90Ms)} / ${ms(s.endErrNoTermP90Ms)} | ${ms(s.tFirstP90Ms)} | ${share(s.framesChecked, s.framesSent)} |`,
+			`| ${scene} | ${variant} | ${cnr} dB | ${err} Hz | ${failed} | ${s.overs} | ${share(s.exactlyOne, s.overs)} | ${s.missed} | ${s.splits} | ${s.merged} | ${ms(s.headCutP50Ms)} / ${ms(s.headCutP90Ms)} | ${ms(s.endErrP90Ms)} / ${ms(s.endErrNoTermP90Ms)} | ${ms(s.tFirstP90Ms)} | ${share(s.framesChecked, s.framesSent)} | ${signalled} |`,
 		)
 	}
 	out.push(

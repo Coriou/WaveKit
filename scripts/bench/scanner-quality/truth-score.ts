@@ -116,6 +116,8 @@ export interface CaseScore {
 	identify: IdentifyScore[]
 	/** Digital voice overs (a DV scene, truth-dv.ts); absent: none. */
 	dv?: DvOverScore[]
+	/** A DV scene's identity-less calls that hold no over (dv-metrics.ts falseCalls); absent: 0. */
+	dvFalse?: number
 	decodes: TruthRun["decodes"]
 	decisions: Record<string, number>
 	totals: Totals
@@ -148,6 +150,11 @@ export interface Totals {
 	dvOvers: number
 	/** Overs no call holds by min(HOLD_MIN_MS, half the over) of overlap (dv-metrics.ts). */
 	dvMissed: number
+	/**
+	 * Missed overs the plan asked to last at least DV_LONG_OVER_MS (1 000 ms;
+	 * seeds without nominalMs: none count). The acceptance bar is 0.
+	 */
+	dvMissedLong: number
 	/** Extra calls of an over (calls - 1, summed). */
 	dvSplit: number
 	/** Overs whose call also holds another over. */
@@ -158,6 +165,8 @@ export interface Totals {
 	dvEndErrP90Ms: number
 	/** Clear overs no call's recording holds. */
 	dvRecordingMissing: number
+	/** Identity-less calls that hold no over (noise syncs made a call). The acceptance bar is 0. */
+	dvFalse: number
 }
 
 export interface Scorecard {
@@ -333,11 +342,13 @@ const emptyTotals = (): Totals => ({
 	excepted: 0,
 	dvOvers: 0,
 	dvMissed: 0,
+	dvMissedLong: 0,
 	dvSplit: 0,
 	dvMerged: 0,
 	dvHeadCutP90Ms: 0,
 	dvEndErrP90Ms: 0,
 	dvRecordingMissing: 0,
+	dvFalse: 0,
 })
 
 /** The DV totals of some overs (the p90 over all of them, not summed). */
@@ -346,6 +357,7 @@ function dvTotals(rows: readonly DvOverScore[]): Partial<Totals> {
 	return {
 		dvOvers: s.overs,
 		dvMissed: s.missed,
+		dvMissedLong: s.missedLong,
 		dvSplit: s.splits,
 		dvMerged: s.merged,
 		dvHeadCutP90Ms: Math.round(s.headCutP90Ms ?? 0),
@@ -425,7 +437,7 @@ function recount(c: CaseScore): Totals {
 	t.unidentified = c.identify.filter(i => i.verdict === "unidentified").length
 	t.ioOverruns = c.totals.ioOverruns
 	t.unsettled = c.totals.unsettled
-	return { ...t, ...dvTotals(c.dv ?? []) }
+	return { ...t, ...dvTotals(c.dv ?? []), dvFalse: c.dvFalse ?? 0 }
 }
 
 /**
@@ -508,12 +520,14 @@ function addTotals(a: Totals, b: Totals): Totals {
 		excepted: a.excepted + b.excepted,
 		dvOvers: a.dvOvers + b.dvOvers,
 		dvMissed: a.dvMissed + b.dvMissed,
+		dvMissedLong: a.dvMissedLong + b.dvMissedLong,
 		dvSplit: a.dvSplit + b.dvSplit,
 		dvMerged: a.dvMerged + b.dvMerged,
 		// A percentile does not add: scorecard() recomputes it from the rows.
 		dvHeadCutP90Ms: Math.max(a.dvHeadCutP90Ms, b.dvHeadCutP90Ms),
 		dvEndErrP90Ms: Math.max(a.dvEndErrP90Ms, b.dvEndErrP90Ms),
 		dvRecordingMissing: a.dvRecordingMissing + b.dvRecordingMissing,
+		dvFalse: a.dvFalse + b.dvFalse,
 	}
 }
 
@@ -623,7 +637,7 @@ export function formatScorecardLine(s: Scorecard): string {
 		`${t.excepted} excepted, ` +
 		`missed voice ${t.missedVoice}/${t.voiceTransmissions} (split ${t.splitVoice}), ` +
 		`identify ${t.identifyRight}/${t.labelledSignals} right, ${t.identifyWrong} wrong, ` +
-		`digital voice ${t.dvOvers} overs: missed ${t.dvMissed}, split ${t.dvSplit}, merged ${t.dvMerged}, ` +
-		`head cut p90 ${t.dvHeadCutP90Ms} ms, end error p90 ${t.dvEndErrP90Ms} ms, no recording ${t.dvRecordingMissing}: ${verdict}`
+		`digital voice ${t.dvOvers} overs: missed ${t.dvMissed} (long ${t.dvMissedLong}), split ${t.dvSplit}, merged ${t.dvMerged}, ` +
+		`head cut p90 ${t.dvHeadCutP90Ms} ms, end error p90 ${t.dvEndErrP90Ms} ms, no recording ${t.dvRecordingMissing}, false calls ${t.dvFalse}: ${verdict}`
 	)
 }

@@ -593,6 +593,8 @@ const CallEndSchema = z
 		talkgroup: z.number().nullable().optional(),
 		source: z.number().nullable().optional(),
 		encrypted: z.boolean().optional(),
+		/** Call-first: present and not true = encryption not known yet (fail closed). */
+		encryptionKnown: z.unknown().optional(),
 		flags: z
 			.object({
 				encrypted: z.boolean().optional(),
@@ -2519,7 +2521,11 @@ export class ProbePool extends EventEmitter {
 			endedAt: d.endedAt ? Date.parse(d.endedAt) : out.timestamp.getTime(),
 			...(d.talkgroup != null ? { talkgroup: String(d.talkgroup) } : {}),
 			...(d.source != null ? { source: String(d.source) } : {}),
-			encrypted: d.encrypted === true || d.flags?.encrypted === true,
+			// A call that ended before its encryption was known is not clear.
+			encrypted:
+				d.encrypted === true ||
+				d.flags?.encrypted === true ||
+				(d.encryptionKnown !== undefined && d.encryptionKnown !== true),
 		}
 		if (this.isStopping(rec)) return
 		rec.calls.push(call)

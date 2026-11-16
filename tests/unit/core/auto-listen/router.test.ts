@@ -980,3 +980,52 @@ describe("AutoListenRouter", () => {
 		expect(new Set(sim.produced).size).toBe(sim.produced.length)
 	})
 })
+
+/** A call-first call whose `encryptionKnown` is `known` (the tap contract does not name the field yet). */
+const firstCall = (known: unknown): VoiceTapCall =>
+	Object.assign(call(), { encryptionKnown: known })
+
+describe("auto route: a call whose encryption is not known yet", () => {
+	it("never admits its voice; once known clear it is admitted", () => {
+		const sim = new Sim()
+		const rand = lcg(41)
+		sim.connect()
+		for (let i = 0; i < 30; i++) {
+			sim.frame("dmr", noise(160, rand), firstCall(false))
+			sim.step()
+		}
+		expect(sim.of("dmr", "read")).toHaveLength(0)
+		expect(sim.events).toHaveLength(0)
+		for (let i = 0; i < 30; i++) {
+			sim.frame("dmr", noise(160, rand), firstCall(true))
+			sim.step()
+		}
+		expect(sim.of("dmr", "read").length).toBeGreaterThan(0)
+		expect(sim.events.at(-1)?.active).toBe("digital")
+	})
+
+	it("treats a malformed encryptionKnown as not known (fail closed)", () => {
+		const sim = new Sim()
+		const rand = lcg(42)
+		sim.connect()
+		for (const known of ["yes", 1, null]) {
+			for (let i = 0; i < 20; i++) {
+				sim.frame("dmr", noise(160, rand), firstCall(known))
+				sim.step()
+			}
+		}
+		expect(sim.of("dmr", "read")).toHaveLength(0)
+		expect(sim.events).toHaveLength(0)
+	})
+
+	it("an absent field (legacy, known) admits as before", () => {
+		const sim = new Sim()
+		const rand = lcg(43)
+		sim.connect()
+		for (let i = 0; i < 30; i++) {
+			sim.frame("dmr", noise(160, rand), firstCall(undefined))
+			sim.step()
+		}
+		expect(sim.of("dmr", "read").length).toBeGreaterThan(0)
+	})
+})

@@ -704,6 +704,7 @@ export function recordedSeed(r: DvPointResult, frequencyHz: number): unknown {
 			terminator: o.terminator,
 			clear: o.clear ?? true,
 			ids: o.ids ?? {},
+			...(o.nominalMs === undefined ? {} : { nominalMs: o.nominalMs }),
 		})),
 		lines: r.lines.map(l => ({ atMs: round(l.atMs), text: l.text })),
 	}
@@ -721,6 +722,13 @@ export const captureText = (points: readonly DvPoint[]): string =>
 	`${dvTable(points)}\n\n<!--\n${JSON.stringify(points, null, 1)}\n-->\n`
 
 /**
+ * Consecutive points failing with the same error that stop a grid run: one
+ * may be the point, two in a row the scene, three in a row is the setup
+ * (image, docker, disk), and every later point would only repeat it.
+ */
+export const DV_GRID_ABORT_STREAK = 3
+
+/**
  * Runs `grid` point by point with `measure`. After every point (measured or
  * failed) the table and JSON are rewritten to `out` (writeAtomic), so a run
  * stopped part way keeps every point done. A point that throws becomes a
@@ -728,6 +736,8 @@ export const captureText = (points: readonly DvPoint[]): string =>
  * on `failed` at the end. With `linesDir`, each measured point's seed
  * (recordedSeed) is checked against the scorecard's schema (parseDvSeed)
  * before it is written: a seed the scorecard would refuse fails its point.
+ * After DV_GRID_ABORT_STREAK consecutive failures with one error the run
+ * stops (`aborted`: that error); the points not run are not in `points`.
  */
 export async function runDvGrid(
 	grid: readonly DvPointSpec[],
@@ -742,8 +752,11 @@ export async function runDvGrid(
 		linesDir?: string
 		frequencyHz: number
 	},
-): Promise<{ points: DvPoint[]; failed: DvPoint[] }> {
+): Promise<{ points: DvPoint[]; failed: DvPoint[]; aborted?: string }> {
 	const points: DvPoint[] = []
+	let streak = 0
+	let lastError: string | undefined
+	let aborted: string | undefined
 	for (const spec of grid) {
 		const at = {
 			scene: spec.scene.name,
@@ -768,14 +781,22 @@ export async function runDvGrid(
 				rows: r.rows,
 				...(r.exit === undefined ? {} : { exit: r.exit }),
 			})
+			streak = 0
+			lastError = undefined
 		} catch (err: unknown) {
-			points.push({
-				...at,
-				rows: [],
-				error: err instanceof Error ? err.message : String(err),
-			})
+			const error = err instanceof Error ? err.message : String(err)
+			points.push({ ...at, rows: [], error })
+			streak = error === lastError ? streak + 1 : 1
+			lastError = error
 		}
 		writeAtomic(out, captureText(points))
+		if (streak >= DV_GRID_ABORT_STREAK) {
+			aborted = lastError
+			break
+		}
 	}
-	return { points, failed: points.filter(p => p.error !== undefined) }
+	const failed = points.filter(p => p.error !== undefined)
+	return aborted === undefined
+		? { points, failed }
+		: { points, failed, aborted }
 }

@@ -27,22 +27,28 @@
 				"max": 0
 			},
 			"dvMissed": {
-				"max": 2
+				"max": 1
+			},
+			"dvMissedLong": {
+				"max": 0
 			},
 			"dvSplit": {
-				"max": 2
+				"max": 0
 			},
 			"dvMerged": {
-				"max": 2
+				"max": 4
 			},
 			"dvHeadCutP90Ms": {
-				"max": 727
+				"max": 414
 			},
 			"dvEndErrP90Ms": {
-				"max": 40
+				"max": 318
 			},
 			"dvRecordingMissing": {
-				"max": 19
+				"max": 36
+			},
+			"dvFalse": {
+				"max": 0
 			}
 		},
 		"capture": {
@@ -75,9 +81,11 @@
 	"notes": {
 		"ratchet": "Every limit is what the newest honesty round achieves, with no slack. Each file or transmission it still gets wrong is a named exception below. An exception that no longer occurs fails the run: remove it, so the limits only tighten.",
 		"capture": "The capture limits and the capture exception are calibrated on the reference labelled capture set (18 ten-second captures of one land-mobile band, run as one session). Another capture set needs its own file (--thresholds). A capture exception matches by kind and label only: pinning its channel would put a real frequency in this public file.",
-		"digital-voice": "The dv limits score the digital voice scenes (truth-dv.ts) on provisional, modelled line timings (scripts/fixtures/dv-latency-seeds.mjs): 19 DMR overs. Today's adapter starts a call at its first decoded embedded LC (head cut p90 727 ms) and ends it 40 ms after key-down at p90 (the line latency); one busy slot splits the other's call (2), hang-time idles merge the two overs of the repeater scene without a terminator into one call (2), and no call has a recording (19). Ratchet: lower them as the lifecycle improves; rerun when the in-image baseline replaces the seeds.",
-		"digital-voice-missed": "dvMissed 2: in direct mode the first decoded embedded LC comes too late for a call to overlap the 0.5 s over, and the 1 s over without a terminator, by min(200 ms, half the over), so both count as missed even when a short call is attributed to them.",
-		"digital-voice-gaps": "dvRecordingMissing is a phase-1 placeholder: the DV scenes give the adapter no recording directory, so every clear over counts as missing until they do. Encrypted overs are not covered yet: every scene sends clear voice."
+		"digital-voice": "The dv limits score the DV scenes (truth-dv.ts) on line timings recorded from dsd-fme on synthetic IQ in the core image (tests/integration/dv-capture.test.ts): 12 DMR scenes, 36 overs; only noise-sync is modelled. Lines arrive in clumps about 340 ms apart. A call is back-dated to its over's first line (head cut p90 414 ms: that line's arrival, about 412 at p90) and ends at its terminator or last voice line (end error p90 318 ms). Each repeater slot has its own call; hang-time idles hold none. Ratchet: lower them as the lifecycle improves.",
+		"digital-voice-false": "dvFalse 0: identity-less calls that hold no over. The noise-sync scene (stray DMR, D-STAR and P25 syncs in pairs, errored runs) starts no call: a call with no identity is announced only after a checked item or three clean syncs over two superframes.",
+		"digital-voice-missed": "dvMissedLong 0 (missed overs asked to last 1 s or more, the acceptance bar). dvMissed 1: the 0.5 s direct over of dmr-direct-lengths, whose first line arrives 261 ms after key-up and whose terminator 99 ms after key-down: the call (1474 to 1759 ms) holds 186 ms of it, under the 200 ms hold minimum.",
+		"digital-voice-gaps": "dvRecordingMissing is a phase-1 placeholder: the DV scenes give the adapter no recording directory, so every clear over counts as missing until they do (36: every recorded over). Encrypted overs are not covered yet: every scene sends clear voice.",
+		"digital-voice-merged": "dvMerged 4: two direct re-keys 0.2 s after an over with the same IDs (dmr-direct-gaps-same overs 0 and 1, dmr-direct-rekey-no-tlc) printed no terminator and no header, and the syncs keep their 340 ms clump steps across the gap: nothing in the lines splits them (a missed split, never a split over). A header, terminator or other IDs split (dsd-fme-recorded-lines.test.ts, dsd-fme-rekey.test.ts)."
 	},
 	"exceptions": [
 		{

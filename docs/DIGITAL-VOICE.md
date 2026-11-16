@@ -119,9 +119,70 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   played but logged once: it means the mode or output format was overridden.
 - **Call state**: the decoder's `call_start` / `call_end` stay authoritative.
   dsd-fme publishes a `voice-call` event in the same tick as each of them
-  (`emitOutput`), plus one when a running call turns out encrypted. The stream
-  maps these to `digital-voice:call` (`decoderId`, `callId`, `protocol`,
-  `talkgroup`, `source`, `slot`, `encrypted`, `active`, `startedAt`, `endedAt`).
+  (`emitOutput`), plus one when a running call turns out encrypted or learns it
+  is clear. The stream maps these to `digital-voice:call` (`decoderId`, `callId`,
+  `protocol`, `talkgroup`, `source`, `slot`, `encrypted`, `encryptionKnown`,
+  `active`, `startedAt`, `endedAt`).
+- **Encryption not known yet**: a DMR or P25 call starts on its voice frames,
+  before its link control says whether it is encrypted
+  ([DECODER-GUIDE.md](DECODER-GUIDE.md), call lifecycle), and carries
+  `encryptionKnown: false` until it does (absent means known). Such a call is not
+  clear: the auto route (`/auto`) admits none of its voice while the field is
+  present and not `true`, and admits it once the call is known clear. A scanner
+  probe records such a call as encrypted, never as a clear recording. Noise
+  syncs that start a DMR call leave it unknown, so it stays muted.
+- **Hold on the stream**: the digital voice stream (`/stream`,
+  `/decoders/<id>/stream`) does not mute the head of such a call; it holds it.
+  Its voice waits in a per-slot ring (slot 1, slot 2, and a whole-datagram
+  lane for mono modes or a call whose slot is unknown) of at most 2000 ms
+  (`VOICE_HOLD_MAX_MS`: the worst direct-mode first link control, about 1.5 s,
+  rounded up; 2 s x 8000 Hz x 2 bytes = 32 000 bytes per lane). Once the call is
+  known clear the held voice plays first and the rest of the over follows it
+  in order, with no gap, so **the stream then runs late by up to 2 s** (plus
+  `jitterBufferMs`) until the over ends; the lag shrinks in silence after it.
+  If the call turns out encrypted, ends while still unknown, is replaced on its
+  slot, moves from an unknown slot to a known one, or the decoder restarts, the
+  held voice is discarded and never played. A call corrected to encrypted after
+  it was known clear drops what of it is still queued (its released voice and
+  the live voice behind it), counted in `discardedMs`. Voice that arrives live
+  behind a released backlog is not proven to belong to the call it follows
+  (dsd-fme may already carry the next over): when an encrypted or not-yet-known
+  call starts, that unannounced live voice is dropped, counted in
+  `voiceHold.discardedMs` (the new call's own slot holds it instead when the call
+  is not known yet), and only released voice of calls known clear keeps playing.
+  Released voice itself is only proven its call's once one dsd-fme line clump
+  (340 ms) has passed since the release: the hold cannot tell where one call's
+  voice ends and the next begins, and dsd-fme's lines arrive in clumps, so a
+  call that is known clear, ends and is followed by an encrypted or
+  not-yet-known call within one clump may have held the next call's early
+  voice as its own. A restricted call starting within that window drops (or,
+  when not known yet, holds) what of the released voice has not played yet; a
+  clear call starting then loses nothing. The window covers one clump, not a
+  late announcement: an encrypted call announced a clump or more after its
+  first voice (an unnamed or late-entry over) can still play that early voice,
+  as it would without a hold. `discardedMs` counts voiced samples
+  only (silence is not lost voice). Beyond 2 s the oldest held voice is dropped.
+  The hold starts at the call's `call_start`, which for a call started on its
+  voice frames alone comes after the evidence that it is an over (dsd-fme
+  announces it on the line that completes it). The call's voice still queued
+  for playback at that moment (up to `jitterBufferMs`) moves into its hold, in
+  order, so a clear over loses nothing; the other slot's queued voice keeps
+  playing. What already played before the announce, at most the evidence span
+  less the jitter buffer, is not taken back: a late-entry encrypted call can
+  be heard for that window, as without a hold. Held voice is kept only while the stream has a listener. Each
+  decoder's status reports `voiceHold` (cumulative `heldMs`, `releasedMs`,
+  `discardedMs`, `overflowDroppedMs`, and the current lag `bufferedMs`); held
+  voice is not counted in `encryptedDatagramsDropped`. The auto route and other
+  voice taps are unchanged: they never get held voice, only live frames with
+  the unknown slot muted.
+- **Two DMR slots at once**: each slot keeps its own call. On the stream a slot
+  is muted while its own call is encrypted and held while it is not known yet,
+  so a clear call on the other slot keeps playing live; one voice copied to
+  both channels while both slots are not clear is discarded (it cannot be told
+  apart), and the end of one slot never clears the other. The auto route and
+  other voice taps get the most restrictive active call (encrypted first, then
+  not known, else the newest clear one), so they admit voice only while every
+  active slot is clear.
 - **Encryption**: DMR from the voice link control line, where `dmr_flco.c`
   appends `Encrypted ` after `TGT=… SRC=…` (only on a line with TGT/SRC, so
   `Slot N - Encrypted PDU` data bursts do not count), or from a non-zero

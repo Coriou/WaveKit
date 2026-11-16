@@ -3,7 +3,8 @@
  * scenes (scripts/bench/scanner-quality/truth-dv.ts): for DMR scenes of
  * dv-plan.mjs, the dsd-fme lines a decoder would print and when, modelled on
  * what is known of the current chain, not measured. The in-image baseline of
- * tests/integration/dv-capture.test.ts (its recorded lines) replaces them.
+ * tests/integration/dv-capture.test.ts (its recorded lines) replaces them:
+ * the DMR scenes are recorded now, so only the noise-sync seed is written.
  *
  *   node scripts/fixtures/dv-latency-seeds.mjs [OUTDIR]
  *
@@ -21,6 +22,8 @@
  * - a repeater prints an IDLE sync line per idle burst while keyed (the
  *   hang-time idles and the idle slot);
  * - every line arrives LINE_LATENCY_MS after its burst ends.
+ * Plus one scene of noise syncs only, no over (noiseSeed): the false-call
+ * bar (dvFalse 0).
  */
 import { writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -31,15 +34,14 @@ import { DV_SCENES, PAD_SYMBOLS, scenePlan } from "./dv-plan.mjs"
 export const LINE_LATENCY_MS = 40
 /** A fictional channel for the scenes (no real frequency). */
 export const DV_SEED_FREQUENCY_HZ = 454_906_250
-/** The DMR scenes the scorecard replays. */
-export const DV_SEED_SCENES = [
-	"dmr-direct-lengths",
-	"dmr-direct-gaps-other",
-	"dmr-direct-no-terminator",
-	"dmr-repeater-gaps-same",
-	"dmr-repeater-hang-no-tlc",
-	"dmr-repeater-two-slots",
-]
+/**
+ * The DMR scenes the scorecard replays from this model. None now: every DMR
+ * scene it modelled has a recorded seed (tests/integration/dv-capture.test.ts,
+ * WAVEKIT_DVCAP_LINES), and a modelled seed beside a recorded one would mix
+ * modelled timings with measured ones. `dmrSeed` stays for a new scene with
+ * no recording yet.
+ */
+export const DV_SEED_SCENES = []
 
 const BURST_MS = 27.5
 const HALF_MS = DMR_FRAME_MS / 2
@@ -143,6 +145,7 @@ export function dmrSeed(scene) {
 			terminator: o.terminator,
 			clear: true,
 			ids: o.ids,
+			nominalMs: o.nominalMs,
 		})),
 		lines: lines.map(l => ({
 			atMs: Math.round(l.atMs * 10) / 10,
@@ -151,13 +154,64 @@ export function dmrSeed(scene) {
 	}
 }
 
+/** The scenes of noise syncs only (noiseSeed). */
+export const DV_NOISE_SCENES = ["noise-sync"]
+
+/** Noise bursts this far apart: past every chain window (D-STAR's 880 ms is the longest). */
+const NOISE_APART_MS = 1500
+
+/**
+ * Analog FM and noise that dsd-fme hears as stray syncs, never an over, so
+ * no call may start: unchecked direct-mode DMR voice syncs in pairs 700 ms
+ * apart (one SYNC_CHAIN_MS window), D-STAR voice syncs in pairs one 420 ms
+ * superframe apart, a P25 HDU and LDU1 180 ms apart, and runs of errored
+ * DMR syncs with one clean among them. Lines only, no over: scored by its
+ * false calls (dvFalse).
+ */
+export function noiseSeed() {
+	const lines = []
+	let t = 1000
+	const push = (atMs, text) => lines.push({ atMs, text })
+	const dstar = at => `${clock(at)} Sync: +DSTAR VOICE `
+	const p25 = (at, duid) => `${clock(at)} Sync: +P25p1 NAC/CC: 2A5;  ${duid}`
+	for (let round = 0; round < 6; round++) {
+		push(t, syncLine(t, "direct", 1, "VC*"))
+		push(t + 700, syncLine(t + 700, "direct", 1, "VC*"))
+		t += 700 + NOISE_APART_MS
+		push(t, dstar(t))
+		push(t + 420, dstar(t + 420))
+		t += 420 + NOISE_APART_MS
+		push(t, p25(t, "HDU"))
+		push(t + 180, p25(t + 180, "LDU1"))
+		t += 180 + NOISE_APART_MS
+		for (let k = 0; k < 4; k++) {
+			const at = t + k * 360
+			push(at, syncLine(at, "direct", 1, k === 2 ? "VC*" : "VC* (FEC ERR)"))
+		}
+		t += 3 * 360 + NOISE_APART_MS
+	}
+	return {
+		version: 1,
+		provisional: true,
+		note: "Modelled, not measured (scripts/fixtures/dv-latency-seeds.mjs): stray syncs of analog FM and noise, no over; no call may start.",
+		scene: "noise-sync",
+		protocol: "dmr",
+		frequencyHz: DV_SEED_FREQUENCY_HZ,
+		overs: [],
+		lines,
+	}
+}
+
 /** Every seed, by file name. */
 export function dvSeeds() {
-	return DV_SEED_SCENES.map(name => {
-		const scene = DV_SCENES.find(s => s.name === name)
-		if (scene === undefined) throw new Error(`no scene ${name}`)
-		return { file: `dv-latency-${name}.json`, seed: dmrSeed(scene) }
-	})
+	return [
+		...DV_SEED_SCENES.map(name => {
+			const scene = DV_SCENES.find(s => s.name === name)
+			if (scene === undefined) throw new Error(`no scene ${name}`)
+			return { file: `dv-latency-${name}.json`, seed: dmrSeed(scene) }
+		}),
+		{ file: "dv-latency-noise-sync.json", seed: noiseSeed() },
+	]
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

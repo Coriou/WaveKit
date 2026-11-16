@@ -1076,7 +1076,8 @@ printed only when its CRC matches; the radio header before it on a `+DSTAR
 HEADER` line has no FCS check): MY is the callsign, DST the UR call. A `+DSTAR
 HEADER` line ends the ongoing call (a new over, even from the same station or
 with a failed slow-data copy), and a different checked MY starts the next
-station's call. Without a checked header there is no D-STAR call; the older
+station's call. Without a checked header a D-STAR call starts on two voice syncs
+(call-first, below) and carries no callsign until one arrives; the older
 `MY:`/`UR:` prints and free-text (`TEXT:`) slow data are never an identity.
 dsd-fme checks a slow-data header only in a superframe whose slow data starts
 with a header group: with a synthetic spec-shaped stream (data sync in voice
@@ -1093,6 +1094,71 @@ and starts none. Its callsign can follow its start. dPMR TG/Src
 prints are not used: dsd-fme marks an ID OK when its CRC failed but two Hamming
 words looked correctable, so a dPMR call carries the protocol only and starts on
 two identical ID prints at most 240 ms apart (one per FS2 pair, every 160 ms).
+**Call lifecycle (call-first).** dsd-fme loses an over's first frame and prints its
+identities late (DMR embedded LC needs a whole superframe, half of them are lost in
+direct mode), so a call does not wait for them. Voice frame syncs of one protocol
+chain while each follows the previous within two of the protocol's sync periods
+plus 40 ms (DMR 760 ms, P25 phase 1 HDU/LDU 400 ms, D-STAR 880 ms, YSF 240 ms,
+NXDN48 and dPMR 200 ms); a P25 sync printing another NAC starts a new chain. A
+DMR sync printing another colour code keeps the chain (an over's first syncs often
+print a garbled one) but restarts its count. A call starts on the chain's second
+clean frame (a single noise sync starts nothing): two DMR voice syncs of one
+colour code (`XX` prints none), a P25 phase 1 or D-STAR voice sync without an error, a YSF frame whose FICH decoded, an NXDN voice frame whose
+SACCH passed (two in a row attest the RAN), a dPMR frame whose ID print agrees
+with the previous one. Every call is back-dated to its chain's first sync, but at
+most four chain windows before the frame that starts it (DMR 3 040 ms, P25
+1 600, D-STAR 3 520, YSF 960, NXDN and dPMR 800); talkgroup, source and callsign
+attach when the first link control naming them arrives (no second call; a YSF
+callsign printed before the start attaches too). When the IDs change while the
+syncs keep running, the old call ends at its last line with its own
+IDs and the new one is back-dated to the first sync after it. A call that
+started on frames alone and spans less than 250 ms is never announced (the weak
+metadata suppression). One that still has no identity is announced only after a
+checked item (a link control naming it or saying whether it is encrypted, a
+checked header) or once its chain holds three clean syncs (DMR: of one colour
+code) spanning two superframes less twice the 45 ms print jitter (DMR and P25
+630 ms, D-STAR 750 ms), on the line that completes it; it stays back-dated. Two noise syncs (two DMR syncs 700 ms apart, two
+D-STAR syncs 420 ms apart) start nothing. Each DMR repeater slot runs its own call, so two busy
+slots give two concurrent calls; idle, CSBK and data bursts (a repeater's hang
+time) keep no call alive. dsd-fme's lines reach the adapter in clumps about
+340 ms apart (stdio buffering, measured on recorded runs): a direct over's syncs
+arrive 340 ms apart with an empty clump (680 ms) now and then, a repeater's six
+`VC1` to `VC6` bursts of a superframe within a few ms, so no DMR rule measures a
+superframe grid on arrival times and no arrival pattern splits a continuous over.
+A repeater over's first voice burst prints `VC1*`. A DMR re-key without a
+terminator (a new call) is a header burst at least 200 ms after the call's last
+voice sync (an LC or slot print is not voice): a voice LC header (`VLC`), a PI
+header, or in direct mode a data burst whose slot type failed (`CACH/Burst FEC
+ERR`, the first line of a direct over that keyed up with a header; a repeater's
+failed CACH names no slot and is not one). The call ends at its last line and the
+next starts at the header; with no call on the lane a header begins the next
+over's chain, so the call is back-dated to it. Another radio's IDs and the 4 s
+timeout end a call too; a re-key with no header, no terminator and the same IDs
+(the same radio keying again within one clump) stays one call: a missed split,
+never a split over. A P25 HDU after 200 ms is a re-key too. A faded over whose
+voice resumes stays one call. A protocol switch (a stray sync of another protocol
+included) ends the call at its last line. A call that ends without its terminator (re-key, another radio's IDs,
+the 4 s timeout) ends at its last voice line. A DMR terminator (`TLC`) of a call
+that has no IDs yet holds its `call_end` up to 105 ms (one 60 ms burst plus the
+45 ms jitter) for the terminator's own link control: a `SLOT` line names the
+call only if the burst closes clean (no error line before the next sync), a
+terminator printed again in that window changes nothing, and the call still ends
+at the terminator.
+A DMR or P25 call that starts before its link control said whether it is encrypted
+carries `encryptionKnown: false` on its `call_start` and `voice-call` state: it is
+not clear. The first checked link control (DMR TG/SRC with or without `Encrypted`,
+a P25 LCW or ALG ID) makes it known, and an announced call publishes a
+`voice-call` update with `encryptionKnown: true` and its identities. A DMR link
+control counts as clear only once its burst closed clean: the next DMR sync (of
+either slot) with no error line before it; a line with an error, a sync loss or
+4 s without a sync leave the call unknown (an `Encrypted` one mutes it at once).
+A P25 `src: … tg: …` print says it only through a clear ALG ID on an error-free
+line. A call that
+ends still unknown is never linked to a per-call recording. Noise that prints
+three clean DMR syncs of one colour code over two superframes starts such a call;
+it never learns its encryption, so it stays muted and unrecorded. YSF, NXDN and dPMR
+calls carry no `encryptionKnown` field: the adapter does not read their
+encryption.
 Calls of the catalogue's `auto` mode (`-fa`) cover DMR, P25, YSF, D-STAR and
 X2-TDMA; dsd-fme turns NXDN and dPMR off in that mode, so they need a decoder with
 `mode: nxdn`, `nxdn48` or `dpmr`.

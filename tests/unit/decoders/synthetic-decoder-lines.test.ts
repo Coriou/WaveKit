@@ -384,18 +384,14 @@ describe("adapter parsers on the synthetic transmissions' decoder output", () =>
 		})
 
 		it("a call announced at its end keeps its own start time", () => {
-			// The TDU ends the call before the 500 ms timer announced it.
+			// The TDU ends the call inside its 100 ms call_start delay, before
+			// any line or timer tick announced it.
 			const r = run(
 				"p25",
 				[
 					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
 					" Group Voice Channel User - Group 4321 Source 1234567",
 					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
-					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
-					" Group Voice Channel User - Group 4321 Source 1234567",
-					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU2",
-					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  LDU1",
-					" Group Voice Channel User - Group 4321 Source 1234567",
 					"00:00:01 Sync: +P25p1 NAC/CC: 2A5;  TDU",
 				],
 				40,

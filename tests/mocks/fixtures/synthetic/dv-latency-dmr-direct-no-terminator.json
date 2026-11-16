@@ -1,108 +1,218 @@
 {
 	"version": 1,
-	"provisional": true,
-	"note": "Modelled, not measured (scripts/fixtures/dv-latency-seeds.mjs): replace with the in-image capture baseline.",
+	"provisional": false,
+	"note": "Recorded by tests/integration/dv-capture.test.ts: baseline, 20 dB, 0 Hz, phase 0.",
 	"scene": "dmr-direct-no-terminator",
 	"protocol": "dmr",
-	"frequencyHz": 454906250,
+	"frequencyHz": 433162500,
 	"overs": [
 		{
 			"index": 0,
 			"protocol": "dmr",
 			"slot": 1,
-			"startMs": 1022.9,
-			"endMs": 2010.4,
+			"startMs": 1213.3,
+			"endMs": 2200.8,
 			"frames": 3,
 			"terminator": false,
 			"clear": true,
 			"ids": {
 				"talkgroup": 4321,
 				"source": 1234567
-			}
+			},
+			"nominalMs": 1000
 		},
 		{
 			"index": 1,
 			"protocol": "dmr",
 			"slot": 1,
-			"startMs": 7022.9,
-			"endMs": 9990.4,
+			"startMs": 7213.3,
+			"endMs": 10180.8,
 			"frames": 9,
 			"terminator": false,
 			"clear": true,
 			"ids": {
 				"talkgroup": 4321,
 				"source": 1234567
-			}
+			},
+			"nominalMs": 3000
 		}
 	],
 	"lines": [
 		{
-			"atMs": 1150.4,
-			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 8.2,
+			"text": "sox WARN wav: Length in output .wav header will be wrong since can't seek to fix it"
 		},
 		{
-			"atMs": 1510.4,
-			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 26.6,
+			"text": " âââââââ  ââââââââââââââ â  âââââââââââââ   ââââââââââââ"
 		},
 		{
-			"atMs": 1750.4,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 26.6,
+			"text": " ââââââââââââââââââââââââââ  âââââââââââââ âââââââââââââ"
 		},
 		{
-			"atMs": 1870.4,
-			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 26.6,
+			"text": " âââ  ââââââââââ âââ  âââââ  ââââââ  âââââââââââââââââ  "
 		},
 		{
-			"atMs": 7150.4,
-			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 26.6,
+			"text": " âââ  âââ ââââââââââ  âââââ  ââââââ  âââââââââââââââââ  "
 		},
 		{
-			"atMs": 7510.4,
-			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 26.6,
+			"text": " ââââââââââââââââââââââââââ  âââ     âââ âââ âââââââââââ"
 		},
 		{
-			"atMs": 7750.4,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 26.7,
+			"text": " âââââââ âââââââ âââââââ ââ  âââ     âââ     âââââââââââ"
 		},
 		{
-			"atMs": 7870.4,
-			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 26.7,
+			"text": "Build Version: AW -128-NOTFOUND "
 		},
 		{
-			"atMs": 8230.4,
-			"text": "00:00:08 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 26.7,
+			"text": "MBElib Version: 1.3.0"
 		},
 		{
-			"atMs": 8470.4,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 50.3,
+			"text": "Decoding AUTO P25, YSF, DSTAR, X2-TDMA, and DMR"
 		},
 		{
-			"atMs": 8590.4,
-			"text": "00:00:08 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 50.3,
+			"text": "Audio In Device: /dev/stdin"
 		},
 		{
-			"atMs": 8950.4,
-			"text": "00:00:08 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 1387.2,
+			"text": "10:54:11 Sync: +DMR MS/DM MODE/MONO | Color Code=XX | CACH/Burst FEC ERR"
 		},
 		{
-			"atMs": 9190.4,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 1390.2,
+			"text": "10:54:11 Sync: +DMR MS/DM MODE/MONO | Color Code=XX | VC* "
 		},
 		{
-			"atMs": 9310.4,
-			"text": "00:00:09 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 1738.9,
+			"text": " SLOT 1 FLCO FEC ERR  (FEC ERR)"
 		},
 		{
-			"atMs": 9670.4,
-			"text": "00:00:09 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 1740.5,
+			"text": "10:54:11 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
 		},
 		{
-			"atMs": 9910.4,
-			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+			"atMs": 2082.2,
+			"text": " SLOT 1 FLCO FEC ERR  (FEC ERR)"
 		},
 		{
-			"atMs": 10030.4,
-			"text": "00:00:10 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+			"atMs": 2404.4,
+			"text": "10:54:12 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 2426.3,
+			"text": " SLOT 1 FLCO FEC ERR  (FEC ERR)"
+		},
+		{
+			"atMs": 3084.2,
+			"text": "Sync: no sync"
+		},
+		{
+			"atMs": 7531.5,
+			"text": "10:54:17 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | CACH/Burst FEC ERR"
+		},
+		{
+			"atMs": 7537.7,
+			"text": "10:54:17 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 7878.7,
+			"text": " SLOT 1 FLCO FEC ERR  (FEC ERR)"
+		},
+		{
+			"atMs": 7883.4,
+			"text": "10:54:17 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 8217.6,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
+		},
+		{
+			"atMs": 8224.3,
+			"text": "10:54:17 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 8599.1,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
+		},
+		{
+			"atMs": 8602.4,
+			"text": "10:54:18 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 8913.9,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
+		},
+		{
+			"atMs": 8915.5,
+			"text": "10:54:18 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 9242.2,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
+		},
+		{
+			"atMs": 9247,
+			"text": "10:54:18 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 9604.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
+		},
+		{
+			"atMs": 9606.8,
+			"text": "10:54:19 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 9976.1,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
+		},
+		{
+			"atMs": 9980.1,
+			"text": "10:54:19 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 10313.9,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call  "
+		},
+		{
+			"atMs": 10318.4,
+			"text": "10:54:20 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 10621.9,
+			"text": " SLOT 1 FLCO FEC ERR  (FEC ERR)"
+		},
+		{
+			"atMs": 11288.3,
+			"text": "Sync: no sync"
+		},
+		{
+			"atMs": 15235.7,
+			"text": "End of /dev/stdin"
+		},
+		{
+			"atMs": 15235.7,
+			"text": "Total audio errors: 632"
+		},
+		{
+			"atMs": 15235.7,
+			"text": "Total header errors: 0"
+		},
+		{
+			"atMs": 15235.7,
+			"text": "Total irrecoverable header errors: 0"
+		},
+		{
+			"atMs": 15235.7,
+			"text": "Exiting."
 		}
 	]
 }

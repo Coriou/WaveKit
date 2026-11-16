@@ -68,6 +68,13 @@ const status: DigitalVoiceStatus = {
 			droppedSamples: 0,
 			underruns: 1,
 			bufferedMs: 40,
+			voiceHold: {
+				heldMs: 1200,
+				releasedMs: 900,
+				discardedMs: 300,
+				overflowDroppedMs: 0,
+				bufferedMs: 120,
+			},
 			lastDatagramAt: "2026-10-09T13:38:39.000Z",
 			call,
 		},
@@ -104,6 +111,21 @@ describe("Digital voice routes", () => {
 		})
 		expect(response.statusCode).toBe(200)
 		expect(JSON.parse(response.body)).toEqual(status)
+	})
+
+	it("keeps each decoder's voiceHold counters through the response schema", async () => {
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/digital-voice/status",
+		})
+		const body = JSON.parse(response.body) as DigitalVoiceStatus
+		expect(body.decoders[0]?.voiceHold).toEqual({
+			heldMs: 1200,
+			releasedMs: 900,
+			discardedMs: 300,
+			overflowDroppedMs: 0,
+			bufferedMs: 120,
+		})
 	})
 
 	it("serialises an idle status (call null, lastCall present)", async () => {
