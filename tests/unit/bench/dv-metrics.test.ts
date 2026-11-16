@@ -13,6 +13,7 @@ import {
 	MATCH_LEAD_MS,
 	MATCH_TAIL_MS,
 	dvTable,
+	falseCalls,
 	holdsOf,
 	percentile,
 	scoreOvers,
@@ -32,6 +33,7 @@ import {
 	loadDvCases,
 	parseDvSeed,
 	runDvCase,
+	runDvScene,
 } from "../../../scripts/bench/scanner-quality/truth-dv.js"
 import {
 	parseThresholds,
@@ -460,6 +462,40 @@ describe("replayDvLines", () => {
 	})
 })
 
+describe("false calls", () => {
+	const call = (startedAtMs: number, extra: Partial<DvCall> = {}): DvCall => ({
+		startedAtMs,
+		endedAtMs: startedAtMs + 700,
+		slot: 1,
+		talkgroup: null,
+		source: null,
+		wavFile: false,
+		timeout: false,
+		...extra,
+	})
+
+	it("are the identity-less calls that hold no over and are near none", () => {
+		const overs = [over(0, 1000, 3000)]
+		// Inside, within the widened span (MATCH_TAIL_MS after the end), past it, named.
+		const calls = [
+			call(1200),
+			call(3000 + MATCH_TAIL_MS),
+			call(3000 + MATCH_TAIL_MS + 1),
+			call(9000, { talkgroup: 9, source: 100 }),
+			call(9000, { talkgroup: 0, source: 0 }),
+		]
+		expect(falseCalls(overs, calls)).toEqual([calls[2], calls[4]])
+		expect(falseCalls([], [call(0)])).toHaveLength(1)
+	})
+
+	it("the noise-sync scene of stray syncs starts no call", () => {
+		const noise = loadDvCases().find(c => c.name === "dv-noise-sync")!
+		expect(noise.seed.overs).toEqual([])
+		expect(replayDvLines(noise.seed.lines, "auto")).toEqual([])
+		expect(runDvScene(noise)).toEqual({ rows: [], dvFalse: 0 })
+	})
+})
+
 describe("truth DV scenes", () => {
 	const cases = loadDvCases()
 
@@ -472,6 +508,7 @@ describe("truth DV scenes", () => {
 			"dv-dmr-repeater-gaps-same",
 			"dv-dmr-repeater-hang-no-tlc",
 			"dv-dmr-repeater-two-slots",
+			"dv-noise-sync",
 		])
 		for (const c of cases)
 			for (const iv of dvIntervals(c))
@@ -522,7 +559,10 @@ describe("truth DV scenes", () => {
 	})
 
 	it("total into the scorecard and pass the checked-in limits", () => {
-		const scores = cases.map(c => withTotals(dvCaseScore(c, runDvCase(c))))
+		const scores = cases.map(c => {
+			const run = runDvScene(c)
+			return withTotals(dvCaseScore(c, run.rows, run.dvFalse))
+		})
 		const limits = parseThresholds(
 			"truth-thresholds.json",
 			readFileSync(
@@ -544,11 +584,22 @@ describe("truth DV scenes", () => {
 			dvHeadCutP90Ms: 127,
 			dvEndErrP90Ms: 40,
 			dvRecordingMissing: 21,
+			dvFalse: 0,
 		})
 		expect(card.failures).toEqual([])
 		expect(formatScorecardLine(card)).toContain(
-			"digital voice 21 overs: missed 0 (long 0), split 0, merged 2, head cut p90 127 ms, end error p90 40 ms, no recording 21",
+			"digital voice 21 overs: missed 0 (long 0), split 0, merged 2, head cut p90 127 ms, end error p90 40 ms, no recording 21, false calls 0",
 		)
+		// The false-call bar: at 0 it passes, one false call fails.
+		expect(limits.limits.synthetic?.["dvFalse"]).toEqual({ max: 0 })
+		const noise = cases.find(c => c.name === "dv-noise-sync")!
+		const phantom = scorecard(
+			[...scores, withTotals(dvCaseScore(noise, [], 1))],
+			limits,
+			{ subset: true },
+		)
+		expect(phantom.byKind.synthetic?.dvFalse).toBe(1)
+		expect(phantom.failures.map(f => f.metric)).toEqual(["dvFalse"])
 		// The miss and end error ratchets: at their limits they pass, past them they fail.
 		expect(limits.limits.synthetic?.["dvMissed"]).toEqual({ max: 0 })
 		expect(limits.limits.synthetic?.["dvMissedLong"]).toEqual({ max: 0 })

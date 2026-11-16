@@ -22,6 +22,7 @@ import {
 	dpmrFrequency,
 } from "../../../scripts/fixtures/dpmr-4fsk.mjs"
 import {
+	DV_NOISE_SCENES,
 	DV_SEED_SCENES,
 	LINE_LATENCY_MS,
 	dvSeeds,
@@ -374,7 +375,10 @@ describe("the transmitter's symbol clock phase", () => {
 describe("provisional latency seeds", () => {
 	it("are the committed files, and say they are provisional", () => {
 		const seeds = dvSeeds()
-		expect(seeds.map(s => s.seed.scene)).toEqual(DV_SEED_SCENES)
+		expect(seeds.map(s => s.seed.scene)).toEqual([
+			...DV_SEED_SCENES,
+			...DV_NOISE_SCENES,
+		])
 		for (const { file, seed } of seeds) {
 			const committed: unknown = JSON.parse(
 				readFileSync(

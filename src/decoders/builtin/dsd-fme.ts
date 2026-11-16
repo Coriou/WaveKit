@@ -493,6 +493,28 @@ interface DsdFmeCallState {
 	 * it is encrypted; true: learned since. Absent: known from the start.
 	 */
 	encryptionKnown?: boolean | undefined
+	/**
+	 * Started on its voice frames without an identity: its frames ran long
+	 * enough to be an over (UNNAMED_EVIDENCE_SYNCS, unnamedEvidenceSpanMs).
+	 */
+	evidenced?: boolean | undefined
+	/** A DMR terminator ended it before its IDs: its call_end waits for the trailer (DMR_TRAILER_HOLD_MS). */
+	heldEnd?: HeldEnd | undefined
+}
+
+/**
+ * The call_end of an identity-less DMR call held after its terminator, for
+ * the terminator's own link control (handleTermination, resolveHeldEnd).
+ */
+interface HeldEnd {
+	/** The terminator line: where the call ends. */
+	atMs: number
+	/** The last line time that may still be its trailer: atMs + DMR_TRAILER_HOLD_MS. */
+	untilMs: number
+	/** The trailer's IDs line arrived (clean). */
+	lc: boolean
+	/** An error line printed in the terminator's burst: its link control is not checked. */
+	errored: boolean
 }
 
 /** The terminator's own link control, expected right after it (TERMINATOR_TRAILER_MS). */
@@ -528,9 +550,10 @@ interface SyncChain {
 }
 
 /**
- * The ongoing DMR call's superframe grid: the voice sync it is measured from
- * (the last one not held as a suspect) and an off-grid sync waiting for the
- * next sync to confirm it began a new over (dmrRekey).
+ * The ongoing DMR call's superframe grid: the superframe start
+ * (dmrSuperframeStart) of the voice burst it is measured from (the last one
+ * not held as a suspect) and an off-grid sync waiting for the next sync to
+ * confirm it began a new over (dmrRekey).
  */
 interface DmrGrid {
 	anchorMs: number
@@ -541,6 +564,8 @@ interface DmrGrid {
 interface DmrSuspect {
 	/** The off-grid sync: the next over's first, if confirmed. */
 	atMs: number
+	/** Its superframe start (dmrSuperframeStart): the next over's grid. */
+	gridMs: number
 	/** The call's last line before it: where the call ends if confirmed. */
 	endAtMs: number
 	/** 1 when that sync was clean. */
@@ -717,24 +742,34 @@ export const SYNC_CHAIN_MS: Readonly<
  */
 export const REKEY_GAP_MS = 200
 
+/** DMR burst: one 60 ms TDMA frame per slot. */
+export const DMR_BURST_MS = 60
+
 /** DMR voice superframe: 6 bursts of 60 ms per slot. */
-export const DMR_SUPERFRAME_MS = 360
+export const DMR_SUPERFRAME_MS = 6 * DMR_BURST_MS
 
 /**
  * A DMR voice sync within this of the ongoing call's 360 ms superframe grid
- * is the same over: half a 60 ms TDMA frame. An over starts on the 60 ms
- * frame grid, so a re-key lands a multiple of 60 ms off (60 to 300 ms mod
- * 360), at least 60 - 30 = 30 ms beyond this; line jitter up to 30 ms
- * keeps a faded over whole.
+ * is the same over: half a 60 ms TDMA frame. Through a repeater an over
+ * starts on the repeater's 60 ms frame grid, so a re-key lands a multiple of
+ * 60 ms off (60 to 300 ms mod 360), at least 60 - 30 = 30 ms beyond this.
+ * In direct mode nothing clocks the next radio to the last one's frames: its
+ * over can start anywhere, so a re-key within this of the old grid is not
+ * seen here and is left to the voice LC header or a new identity (a missed
+ * split, never a split over). Line jitter up to 30 ms keeps a faded over
+ * whole.
  */
 export const DMR_GRID_TOLERANCE_MS = 30
 
 /**
- * A DMR voice sync off the call's grid re-keys at once only after this long
- * without a voice sync of the call: one whole superframe with no sync plus
- * the re-key gap, 360 + 200 = 560 ms. A continuous over prints one sync per
- * 360 ms superframe, so even with each sync's print up to 45 ms early or
- * late its steps stay within 360 + 2 × 45 = 450 ms, below this.
+ * A DMR voice sync more than DMR_REKEY_CONFIRM_MS off the call's grid
+ * re-keys at once only after this long without a voice sync of the call:
+ * one whole superframe with no sync plus the re-key gap, 360 + 200 = 560 ms.
+ * A continuous over prints one sync per 360 ms superframe, so even with each
+ * sync's print up to 45 ms early or late its steps stay within 360 + 2 × 45
+ * = 450 ms, below this. A gap this long can still be one over that missed a
+ * sync (720 ms), its next print up to 2 × 45 = 90 ms off the grid: a sync 31
+ * to 90 ms off after it waits for the next one like after a short gap.
  */
 export const DMR_REKEY_LONG_GAP_MS = DMR_SUPERFRAME_MS + REKEY_GAP_MS
 
@@ -749,6 +784,57 @@ export const DMR_REKEY_LONG_GAP_MS = DMR_SUPERFRAME_MS + REKEY_GAP_MS
  */
 export const DMR_REKEY_CONFIRM_MS = 2 * 45
 
+/** How early or late one voice sync's line may print against its frame (see DMR_REKEY_CONFIRM_MS). */
+export const SYNC_PRINT_JITTER_MS = DMR_REKEY_CONFIRM_MS / 2
+
+/**
+ * A DMR terminator of a call with no IDs yet holds the call_end this long
+ * for the terminator's own link control: dsd-fme prints its SLOT line
+ * right after the TLC sync line, and the burst's errors before the next
+ * burst's sync, so one 60 ms burst plus the print jitter, 60 + 45 = 105 ms,
+ * closes the burst. The call still ends at the terminator.
+ */
+export const DMR_TRAILER_HOLD_MS = DMR_BURST_MS + SYNC_PRINT_JITTER_MS
+
+/**
+ * The voice superframe of each call-first protocol whose frames carry no
+ * checked identity of their own: DMR 6 bursts of 60 ms = 360; P25 phase 1
+ * an LDU1 and an LDU2 of 180 ms = 360; D-STAR 21 voice frames of 20 ms =
+ * 420.
+ */
+export const DV_SUPERFRAME_MS: Readonly<
+	Partial<Record<NonNullable<DsdFmeProtocol>, number>>
+> = {
+	dmr: DMR_SUPERFRAME_MS,
+	p25p1: 2 * 180,
+	dstar: 21 * 20,
+}
+
+/**
+ * A call started on its voice frames with no identity is announced only
+ * after a checked item (a link control naming it or saying its encryption,
+ * a checked header) or once its chain holds this many clean syncs spanning
+ * unnamedEvidenceSpanMs: syncs of two whole superframes. Two noise syncs in
+ * one SYNC_CHAIN_MS window (two DMR syncs 700 ms apart, two D-STAR syncs
+ * 420 ms apart) are not an over.
+ */
+export const UNNAMED_EVIDENCE_SYNCS = 3
+
+/**
+ * The span those syncs must cover: two superframes less the print jitter
+ * at both ends, 2 × superframe - 2 × 45: DMR and P25 720 - 90 = 630 ms,
+ * D-STAR 840 - 90 = 750 ms. undefined: the protocol does not start calls
+ * on frames alone.
+ */
+export function unnamedEvidenceSpanMs(
+	protocol: NonNullable<DsdFmeProtocol>,
+): number | undefined {
+	const superframe = DV_SUPERFRAME_MS[protocol]
+	return superframe === undefined
+		? undefined
+		: 2 * superframe - 2 * SYNC_PRINT_JITTER_MS
+}
+
 /** A DMR sync line's burst type (dmr_dburst.c labels after the last "|"). */
 const DMR_BURST = /\|\s*(?<burst>VLC|VC[1-6*]|TLC)(?=\s|$)/
 /** A P25 phase 1 voice over's frame (header or voice): HDU, LDU1, LDU2. */
@@ -757,10 +843,35 @@ const DSTAR_VOICE_SYNC = /\bSync:\s*[+-]DSTAR (?:VOICE|HEADER)\b/
 /** An error printed on the line (the frame did not decode clean). */
 const LINE_ERR = /\b(?:CRC|FEC)(?:16|32)?\s+ERR\b/i
 
-/** How far `elapsedMs` (>= 0) is from the nearest whole number (>= 1) of DMR superframes. */
+/** A line that printed an error of its burst (CRC, FEC, RAS, key): its link control is not checked. */
+function burstError(line: string): boolean {
+	return (
+		LINE_ERR.test(line) ||
+		/ -RAS /.test(line) ||
+		/\bKey:.*(?:ERR|error)/i.test(line)
+	)
+}
+
+/** How far `elapsedMs` (any sign) is from the nearest whole number of DMR superframes (0 to 180 ms). */
 function dmrGridError(elapsedMs: number): number {
-	const k = Math.max(1, Math.round(elapsedMs / DMR_SUPERFRAME_MS))
-	return Math.abs(elapsedMs - k * DMR_SUPERFRAME_MS)
+	const r =
+		((elapsedMs % DMR_SUPERFRAME_MS) + DMR_SUPERFRAME_MS) % DMR_SUPERFRAME_MS
+	return Math.min(r, DMR_SUPERFRAME_MS - r)
+}
+
+/**
+ * Where the superframe of a DMR voice burst printed at `atMs` began, the
+ * time its grid is measured on: a repeater (and dsd-fme in per-burst
+ * printing) labels the six voice bursts VC1 to VC6, VCn n - 1 bursts of 60
+ * ms after the superframe's start; a direct-mode print labels the sync
+ * burst (A, the first) VC*; a voice LC header is the burst before the
+ * first superframe. So an over that lost bursts (a gap that is not a whole
+ * number of superframes) stays on its grid.
+ */
+export function dmrSuperframeStart(burst: string, atMs: number): number {
+	if (burst === "VLC") return atMs + DMR_BURST_MS
+	const n = /^VC(?<n>[1-6])$/.exec(burst)?.groups?.["n"]
+	return n === undefined ? atMs : atMs - (Number(n) - 1) * DMR_BURST_MS
 }
 
 /** Algorithm ids that mean "no encryption" (P25 0x80, DMR/none 0x00). */
@@ -881,6 +992,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private linkDmrMs = false
 	private pendingDmrLink: DsdFmeLinkLine | undefined
 	private pendingDmrVoiceLinks: DsdFmeLinkLine[] = []
+	/**
+	 * A clean DMR link control that says a call-first call is clear, until
+	 * its burst closes (resolvePendingKnown): the next DMR sync with no error
+	 * line before it, the same rule as pendingDmrLink.
+	 */
+	private pendingKnown: { call: DsdFmeCallState; at: number } | undefined
 
 	// Active call state (null = no call in progress)
 	private callState: DsdFmeCallState | null = null
@@ -1175,6 +1292,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		})
 
 		this.flushPendingDmrLink(false)
+		this.pendingKnown = undefined
 		await super.stop()
 		this.linkDmrCc.clear()
 		this.linkDmrMs = false
@@ -1248,6 +1366,169 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (call?.encryptionKnown !== false) return
 		call.encryptionKnown = true
 		this.publishCallUpdate(call)
+	}
+
+	/**
+	 * A DMR link control on `line` said the call is clear: it counts once
+	 * its burst closes clean (resolvePendingKnown). A line that printed an
+	 * error says nothing.
+	 */
+	private deferKnown(call: DsdFmeCallState | null, line: string): void {
+		if (call?.encryptionKnown !== false || burstError(line)) return
+		this.pendingKnown = { call, at: Date.now() }
+	}
+
+	/**
+	 * Settles pendingKnown on `line`: an error line, a sync loss or
+	 * CALL_TIMEOUT_MS without a sync drops it; a DMR sync closes the burst
+	 * clean and the call (on whichever lane it runs) learns it is clear;
+	 * another protocol's sync drops it.
+	 */
+	private resolvePendingKnown(line: string, nowMs: number): void {
+		const pending = this.pendingKnown
+		if (pending === undefined) return
+		const sync = SYNC_PATTERN.exec(line)
+		if (
+			nowMs - pending.at > CALL_TIMEOUT_MS ||
+			burstError(line) ||
+			/Frame Sync Err\b|SYNC LOST|no sync/i.test(line)
+		) {
+			this.pendingKnown = undefined
+			return
+		}
+		if (sync === null) return
+		this.pendingKnown = undefined
+		if (sync.groups?.["proto"]?.toUpperCase() === "DMR")
+			this.markKnownOnItsLane(pending.call)
+	}
+
+	/** markKnown for a call of any lane (the closing sync may be the other slot's). */
+	private markKnownOnItsLane(call: DsdFmeCallState): void {
+		if (this.callState === call || this.pendingCall?.state === call) {
+			this.markKnown(call)
+			return
+		}
+		for (const [key, lane] of this.lanes)
+			if (lane.callState === call || lane.pendingCall?.state === call) {
+				const back = this.laneKey
+				this.useLane(key)
+				try {
+					this.markKnown(call)
+				} finally {
+					this.useLane(back)
+				}
+				return
+			}
+	}
+
+	/**
+	 * Whether a call may be announced: one with an identity or that started on
+	 * an identity, or a call-first call a checked link control spoke for
+	 * (encryption learned) or whose frames ran long enough (evidenced).
+	 */
+	private hasEvidence(call: DsdFmeCallState): boolean {
+		return (
+			call.onFrames !== true ||
+			!this.weakMetadata(call) ||
+			call.flags.encrypted ||
+			call.encryptionKnown === true ||
+			call.evidenced === true
+		)
+	}
+
+	/**
+	 * Marks `call` evidenced once the lane's running chain of its protocol
+	 * holds UNNAMED_EVIDENCE_SYNCS clean syncs spanning unnamedEvidenceSpanMs.
+	 */
+	private noteEvidence(call: DsdFmeCallState | null, nowMs: number): void {
+		if (call === null || call.onFrames !== true || call.evidenced === true)
+			return
+		if (call.protocol === null) return
+		const span = unnamedEvidenceSpanMs(call.protocol)
+		const chain = this.liveChain(call.protocol, nowMs)
+		if (span === undefined || chain === null) return
+		if (
+			chain.clean >= UNNAMED_EVIDENCE_SYNCS &&
+			chain.lastMs - chain.startMs >= span
+		)
+			call.evidenced = true
+	}
+
+	/**
+	 * While the lane's call holds its call_end (HeldEnd): a sync line closes
+	 * the terminator's burst (the call ends first, then the line is parsed);
+	 * an error line marks its link control unchecked; the first IDs line of
+	 * the call's slot is the trailer: its IDs attach (when clean) and the line
+	 * is consumed (true), so it starts nothing.
+	 */
+	private resolveHeldEnd(line: string, now: Date): boolean {
+		const call = this.callState ?? this.pendingCall?.state ?? null
+		const held = call?.heldEnd
+		if (call === null || held === undefined) return false
+		if (SYNC_PATTERN.test(line)) {
+			const ended = this.closeHeldEnd(now)
+			if (ended) this.emitOutput(ended)
+			return false
+		}
+		const ids =
+			DMR_VOICE_EVENT.exec(line)?.groups ?? DMR_TGT_SRC.exec(line)?.groups
+		const errored = burstError(line)
+		if (errored) held.errored = true
+		if (ids === undefined || held.lc) return false
+		const slotText =
+			DMR_SLOT_INLINE.exec(line)?.groups?.["slot"] ??
+			DMR_SLOT_WORD.exec(line)?.groups?.["slot"]
+		if (
+			slotText !== undefined &&
+			call.slot !== undefined &&
+			Number(slotText) !== call.slot
+		)
+			return false
+		if (errored) return true
+		held.lc = true
+		const tg = parseInt(ids["tgt"] ?? "0", 10)
+		const src = parseInt(ids["src"] ?? "0", 10)
+		if (tg !== 0 || src !== 0) {
+			call.talkgroup = tg
+			call.source = src
+		}
+		const svc = DMR_TLC_FIELDS.exec(line)?.groups?.["svc"]
+		const alg = ALG_ID.exec(line)?.groups?.["alg"]
+		if (
+			DMR_ENCRYPTED.test(line) ||
+			(svc !== undefined && (parseInt(svc, 16) & DMR_SVC_PRIVACY) !== 0) ||
+			(alg !== undefined && !isClearAlgorithm(alg))
+		)
+			this.markEncrypted(call)
+		return true
+	}
+
+	/**
+	 * Ends the lane's call whose call_end was held (HeldEnd) at its
+	 * terminator: a clean trailer said whether it is encrypted (its burst
+	 * closed with no error line), so a clear one is known clear.
+	 */
+	private closeHeldEnd(now: Date): DecoderOutput | null {
+		const call = this.callState ?? this.pendingCall?.state ?? null
+		const held = call?.heldEnd
+		if (call === null || held === undefined) return null
+		call.heldEnd = undefined
+		if (held.lc && !held.errored && !call.flags.encrypted) this.markKnown(call)
+		const endAt = new Date(held.atMs)
+		call.lastUpdate = endAt
+		if (!this.callState && this.pendingCall) {
+			this.callState = this.pendingCall.state
+			this.pendingCall = null
+		}
+		const ended = this.endCall(now, false, endAt)
+		// The terminator's link control (printed again) is not a new call.
+		this.recentlyTerminated = {
+			protocol: "dmr",
+			talkgroup: call.talkgroup,
+			source: call.source,
+			untilMs: held.atMs + TERMINATOR_TRAILER_MS,
+		}
+		return ended
 	}
 
 	/** The running announced call's state on "voice-call" (encryption or identity learned). */
@@ -1426,7 +1707,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (nowMs < this.pendingCall.emitAfter) return null
 		// A call started on its voice frames alone is announced only once they
 		// span the false-positive minimum (endCall drops it otherwise).
+		// A call-first call with no identity also waits for a checked item or
+		// a run of syncs (hasEvidence); a held call_end waits for its trailer.
 		const pending = this.pendingCall.state
+		if (pending.heldEnd !== undefined || !this.hasEvidence(pending)) return null
 		if (
 			pending.onFrames === true &&
 			this.weakMetadata(pending) &&
@@ -1804,10 +2088,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Parses dsd-fme output lines into DecoderOutput objects.
 	 *
 	 * Implementation follows these principles:
-	 * 1. Sync is a CANDIDATE context, not an event - we track protocol but don't emit call_start
-	 * 2. Calls require minimum metadata (TGT+SRC for DMR/P25/NXDN, callsigns for D-Star)
-	 * 3. Calls end via explicit terminator, protocol switch, or 2-second metadata timeout
-	 * 4. Short calls (< 250ms) with weak metadata are suppressed as likely false positives
+	 * 1. One sync is a CANDIDATE context, not an event: it tracks the protocol
+	 *    and joins the lane's chain of voice frame syncs (trackChain).
+	 * 2. Call-first: a call starts on an identity (TGT+SRC for DMR/P25/NXDN,
+	 *    callsigns for D-Star/YSF) or on the over's second clean voice frame
+	 *    (startOnFrames), back-dated to the chain's first sync; its IDs attach
+	 *    later. One with no identity is announced only after a checked item
+	 *    or UNNAMED_EVIDENCE_SYNCS syncs over two superframes (hasEvidence).
+	 * 3. Calls end via explicit terminator (a DMR one of an unnamed call
+	 *    waits DMR_TRAILER_HOLD_MS for its own link control), a re-key
+	 *    (dmrRekey, a P25 header), a protocol switch, or the CALL_TIMEOUT_MS
+	 *    (4 s) timeout, at their last line.
+	 * 4. Short calls (< 250 ms) with weak metadata, and unnamed calls without
+	 *    evidence, are suppressed as likely false positives.
 	 * 5. Error events (FEC/CRC) are tracked for quality but not emitted unless debug mode is on
 	 */
 	protected override parseOutput(line: string): DecoderOutput | null {
@@ -1842,6 +2135,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	): DecoderOutput | null {
 		// STEP 3: Track errors for quality metrics (rolling window)
 		this.updateErrorWindow(cleanLine, nowMs)
+		// STEP 3a: A clear link control counts once its burst closed clean.
+		this.resolvePendingKnown(cleanLine, nowMs)
 
 		// STEP 3b: Publish link-control lines for the scanner (spec § 6.4)
 		const link = this.parseLinkLine(cleanLine, nowMs)
@@ -1862,6 +2157,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					this.pendingDmrVoiceLinks.shift()
 			} else this.pendingDmrLink = link
 		} else if (link) this.emitLink(link)
+
+		// STEP 3d: A held call_end takes its terminator's trailer (or ends).
+		if (this.resolveHeldEnd(cleanLine, now)) return null
 
 		// STEP 4: Check for sync (protocol detection)
 		const syncResult = this.handleSync(cleanLine, now)
@@ -1949,6 +2247,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Returns a call_end event if timeout occurred, otherwise null.
 	 */
 	private checkCallTimeout(now: Date): DecoderOutput | null {
+		// A held call_end (HeldEnd) ends once its trailer window is past.
+		const held = (this.callState ?? this.pendingCall?.state)?.heldEnd
+		if (held !== undefined)
+			return now.getTime() > held.untilMs ? this.closeHeldEnd(now) : null
 		// Check pending call timeout (promote and end if stale)
 		if (this.pendingCall && !this.callState) {
 			const pendingSilence =
@@ -2223,6 +2525,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		chain.lastMs = nowMs
 		chain.tag ??= tag
 		if (clean) chain.clean++
+		this.noteEvidence(this.callState ?? this.pendingCall?.state ?? null, nowMs)
 	}
 
 	/** The lane's chain of `protocol` when it is still running at `nowMs`, else null. */
@@ -2310,6 +2613,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		)
 		call.onFrames = true
 		if (protocol !== "dstar") call.encryptionKnown = false
+		this.noteEvidence(call, nowMs)
 	}
 
 	/**
@@ -2333,7 +2637,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// A voice burst after a terminator is the next over: the trailer is over.
 				this.recentlyTerminated = null
 				this.lastVoiceSyncMs = nowMs
-				this.dmrGrid = { anchorMs: nowMs }
+				this.dmrGrid = { anchorMs: dmrSuperframeStart(burst, nowMs) }
 			}
 			this.startOnFrames("dmr", now, clean)
 			return null
@@ -2346,7 +2650,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			const ended = this.endOngoingCall(now, true)
 			this.chain = chain
 			this.lastVoiceSyncMs = nowMs
-			this.dmrGrid = { anchorMs: nowMs }
+			this.dmrGrid = { anchorMs: dmrSuperframeStart(burst, nowMs) }
 			if (chain !== null && chain.lastMs === nowMs) {
 				chain.startMs = rekey.startMs
 				chain.clean = rekey.clean
@@ -2376,14 +2680,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/**
 	 * Whether a DMR voice burst at `nowMs` re-keys (see handleDmrSync). The gap
 	 * is measured from the call's last voice sync (an LC or slot print is not
-	 * voice). A re-key is:
+	 * voice); the grid from each burst's superframe start
+	 * (dmrSuperframeStart), so lost bursts keep an over on its grid. A re-key
+	 * is:
 	 * - a voice LC header at least REKEY_GAP_MS after the last voice sync;
-	 * - a sync off the call's grid (DMR_GRID_TOLERANCE_MS) at least
-	 *   DMR_REKEY_LONG_GAP_MS after the last voice sync;
-	 * - a sync off the grid after a shorter gap (at least REKEY_GAP_MS) that
-	 *   the next voice sync confirms: on its grid and more than
+	 * - a sync more than DMR_REKEY_CONFIRM_MS off the call's grid at least
+	 *   DMR_REKEY_LONG_GAP_MS after the last voice sync: no print jitter of
+	 *   one over gets there;
+	 * - a sync off the grid (DMR_GRID_TOLERANCE_MS) after a gap of at least
+	 *   REKEY_GAP_MS (a long one included) that the next voice sync of
+	 *   another superframe confirms: on its grid and more than
 	 *   DMR_REKEY_CONFIRM_MS off the call's. Otherwise the off-grid sync was a
-	 *   late or early print of the same over and the grid stays.
+	 *   late or early print of the same over (one missed sync and the next
+	 *   printed 31 to 90 ms late is not a re-key) and the grid stays.
 	 */
 	private dmrRekey(
 		ongoing: DsdFmeCallState,
@@ -2395,24 +2704,25 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const last = this.lastVoiceSyncMs ?? lastLineMs
 		if (nowMs < last) return null
 		const gap = nowMs - last
-		const grid = this.dmrGrid ?? { anchorMs: last }
+		const frameMs = dmrSuperframeStart(burst, nowMs)
+		const grid = this.dmrGrid ?? { anchorMs: frameMs }
 		this.dmrGrid = grid
-		const off = dmrGridError(nowMs - grid.anchorMs)
+		const off = dmrGridError(frameMs - grid.anchorMs)
 		const here: DmrRekey = {
 			endAtMs: lastLineMs,
 			startMs: nowMs,
 			clean: clean ? 1 : 0,
 		}
 		if (burst === "VLC" && gap >= REKEY_GAP_MS) return here
-		if (off > DMR_GRID_TOLERANCE_MS && gap >= DMR_REKEY_LONG_GAP_MS) return here
+		if (off > DMR_REKEY_CONFIRM_MS && gap >= DMR_REKEY_LONG_GAP_MS) return here
 		const suspect = grid.suspect
 		if (suspect !== undefined) {
 			// A burst inside the suspect's own superframe neither confirms nor clears it.
-			if (nowMs - suspect.atMs < DMR_SUPERFRAME_MS - DMR_GRID_TOLERANCE_MS)
+			if (frameMs - suspect.gridMs < DMR_SUPERFRAME_MS - DMR_GRID_TOLERANCE_MS)
 				return null
 			grid.suspect = undefined
 			if (
-				dmrGridError(nowMs - suspect.atMs) <= DMR_GRID_TOLERANCE_MS &&
+				dmrGridError(frameMs - suspect.gridMs) <= DMR_GRID_TOLERANCE_MS &&
 				off > DMR_REKEY_CONFIRM_MS
 			)
 				return {
@@ -2422,8 +2732,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				}
 		}
 		if (off > DMR_GRID_TOLERANCE_MS && gap >= REKEY_GAP_MS)
-			grid.suspect = { atMs: nowMs, endAtMs: lastLineMs, clean: here.clean }
-		else grid.anchorMs = nowMs
+			grid.suspect = {
+				atMs: nowMs,
+				gridMs: frameMs,
+				endAtMs: lastLineMs,
+				clean: here.clean,
+			}
+		else grid.anchorMs = frameMs
 		return null
 	}
 
@@ -2791,12 +3106,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			)
 			// A checked link control says whether the call is encrypted (its
 			// service options): a call started on its voice frames learns it here.
+			// It counts once its burst closes clean (deferKnown).
 			if (encrypted) this.markDmrEncrypted(slot)
-			else this.markKnown(this.ongoingCall("dmr"))
+			else this.deferKnown(this.ongoingCall("dmr"), line)
 			return event
 		}
 		if (encrypted) this.markDmrEncrypted(slot)
-		else if (alg !== undefined) this.markKnown(this.ongoingCall("dmr"))
+		else if (alg !== undefined) this.deferKnown(this.ongoingCall("dmr"), line)
 
 		// Only the over's own voice bursts keep its call alive or start one
 		// (handleDmrSync): idle and data bursts do not.
@@ -2825,7 +3141,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (alg !== undefined) call.p25 = { ...call.p25, alg }
 		if (keyId !== undefined) call.p25 = { ...call.p25, keyId }
 		if (alg !== undefined && !isClearAlgorithm(alg)) this.markEncrypted(call)
-		else if (alg !== undefined) this.markKnown(call)
+		else if (alg !== undefined && !burstError(line)) this.markKnown(call)
 	}
 
 	/**
@@ -2892,7 +3208,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			// Only process if we have valid identifiers (not all zeros)
 			if (tg > 0 || src > 0) {
 				const p25Meta: P25Metadata | undefined = nac ? { nac } : undefined
-				return this.processCallMetadata(
+				const event = this.processCallMetadata(
 					now,
 					"p25p1",
 					tg,
@@ -2901,6 +3217,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					undefined,
 					p25Meta,
 				)
+				// This print carries no service options: only an ALG it shows (an
+				// error-free line for "clear") says whether the call is encrypted.
+				this.applyP25Crypto(line, "p25p1")
+				return event
 			}
 		}
 
@@ -3367,6 +3687,25 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				break
 		}
 
+		if (
+			isTerminator &&
+			targetCall.protocol === "dmr" &&
+			targetCall.talkgroup === null &&
+			targetCall.source === null &&
+			targetCall.heldEnd === undefined
+		) {
+			// A call-first call the terminator ends before any IDs: its own link
+			// control prints right after it and names the call (resolveHeldEnd).
+			const atMs = now.getTime()
+			targetCall.lastUpdate = now
+			targetCall.heldEnd = {
+				atMs,
+				untilMs: atMs + DMR_TRAILER_HOLD_MS,
+				lc: false,
+				errored: false,
+			}
+			return null
+		}
 		if (isTerminator) {
 			// If we have a pending call, promote it first so we can end it properly
 			if (this.pendingCall && !this.callState) {
@@ -3918,7 +4257,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// A call whose call_start went out always gets its call_end.
 		const announced = callInfo.announced === true
 
-		if (duration < minDuration && hasWeakMetadata && !announced) {
+		if (
+			!announced &&
+			((duration < minDuration && hasWeakMetadata) ||
+				!this.hasEvidence(callInfo))
+		) {
 			callInfo.flags.falsePositiveSuppressed = true
 			this.logger.debug(
 				{ protocol: callInfo.protocol, duration },

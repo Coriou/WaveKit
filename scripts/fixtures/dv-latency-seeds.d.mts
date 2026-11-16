@@ -2,6 +2,8 @@ import type { DvScene, SentOver } from "./dv-plan.mjs"
 export const LINE_LATENCY_MS: number
 export const DV_SEED_FREQUENCY_HZ: number
 export const DV_SEED_SCENES: string[]
+/** The scenes of noise syncs only (noiseSeed). */
+export const DV_NOISE_SCENES: string[]
 export interface DvSeed {
 	version: 1
 	provisional: boolean
@@ -13,4 +15,6 @@ export interface DvSeed {
 	lines: { atMs: number; text: string }[]
 }
 export function dmrSeed(scene: DvScene): DvSeed
+/** Stray syncs of analog FM and noise, no over: the false-call scene. */
+export function noiseSeed(): DvSeed
 export function dvSeeds(): { file: string; seed: DvSeed }[]

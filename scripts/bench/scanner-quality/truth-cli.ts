@@ -32,7 +32,12 @@ import {
 	runTruthCase,
 	type TruthCase,
 } from "./truth-run.js"
-import { dvCaseScore, loadDvCases, runDvCase, type DvCase } from "./truth-dv.js"
+import {
+	dvCaseScore,
+	loadDvCases,
+	runDvScene,
+	type DvCase,
+} from "./truth-dv.js"
 import { loadTruthDir, parseThresholds } from "./truth-labels.js"
 import { syntheticCases } from "./truth-scenes.js"
 import {
@@ -204,11 +209,12 @@ export async function runTruthCli(argv: readonly string[]): Promise<number> {
 		if (stateDir !== null) rmSync(stateDir, { recursive: true, force: true })
 	}
 	for (const c of dv) {
-		const s = withTotals(dvCaseScore(c, runDvCase(c)))
+		const run = runDvScene(c)
+		const s = withTotals(dvCaseScore(c, run.rows, run.dvFalse))
 		scores.push(s)
 		const t = s.totals
 		process.stderr.write(
-			`  ${c.name}${c.seed.provisional ? " (provisional seed)" : ""}: ${t.dvOvers} overs, missed ${t.dvMissed}, split ${t.dvSplit}, merged ${t.dvMerged}, head cut p90 ${t.dvHeadCutP90Ms} ms, end error p90 ${t.dvEndErrP90Ms} ms, no recording ${t.dvRecordingMissing}\n`,
+			`  ${c.name}${c.seed.provisional ? " (provisional seed)" : ""}: ${t.dvOvers} overs, missed ${t.dvMissed}, split ${t.dvSplit}, merged ${t.dvMerged}, head cut p90 ${t.dvHeadCutP90Ms} ms, end error p90 ${t.dvEndErrP90Ms} ms, no recording ${t.dvRecordingMissing}, false calls ${t.dvFalse}\n`,
 		)
 	}
 	const card = scorecard(scores, limits, { subset: o.only !== null })

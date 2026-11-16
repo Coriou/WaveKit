@@ -15,7 +15,7 @@
 import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { z } from "zod"
-import { scoreOvers, type DvOverScore } from "./dv-metrics.js"
+import { falseCalls, scoreOvers, type DvOverScore } from "./dv-metrics.js"
 import { DV_MODES, checkedLine, replayDvLines } from "./dv-replay.js"
 import { DV_LABEL_PROTOCOLS, type TruthInterval } from "./truth-labels.js"
 import type { CaseScore } from "./truth-score.js"
@@ -55,7 +55,7 @@ const SeedSchema = z
 					.strict()
 					.refine(o => o.endMs > o.startMs, "an over ends after it starts"),
 			)
-			.min(1)
+			// None: a scene of noise syncs only, scored by its false calls (dvFalse).
 			.max(1000),
 		lines: z
 			.array(z.object({ atMs: ms, text: z.string().max(400) }).strict())
@@ -125,9 +125,20 @@ export function dvIntervals(c: DvCase): TruthInterval[] {
 
 /** Replays a scene's lines through the adapter and scores its overs. */
 export function runDvCase(c: DvCase): DvOverScore[] {
+	return runDvScene(c).rows
+}
+
+/** runDvCase, with the identity-less calls that hold no over (falseCalls). */
+export function runDvScene(c: DvCase): {
+	rows: DvOverScore[]
+	dvFalse: number
+} {
 	const mode = DV_MODES[c.seed.protocol] ?? "auto"
 	const calls = replayDvLines(c.seed.lines, mode)
-	return scoreOvers(c.seed.overs, calls, c.seed.lines, checkedLine)
+	return {
+		rows: scoreOvers(c.seed.overs, calls, c.seed.lines, checkedLine),
+		dvFalse: falseCalls(c.seed.overs, calls).length,
+	}
 }
 
 /**
@@ -138,6 +149,7 @@ export function runDvCase(c: DvCase): DvOverScore[] {
 export function dvCaseScore(
 	c: DvCase,
 	rows: DvOverScore[],
+	dvFalse = 0,
 ): Omit<CaseScore, "totals"> {
 	return {
 		name: c.name,
@@ -146,6 +158,7 @@ export function dvCaseScore(
 		voice: [],
 		identify: [],
 		dv: rows,
+		dvFalse,
 		// No scanner, so nothing injected.
 		decodes: {
 			ambient: 0,

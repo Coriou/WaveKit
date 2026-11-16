@@ -116,6 +116,8 @@ export interface CaseScore {
 	identify: IdentifyScore[]
 	/** Digital voice overs (a DV scene, truth-dv.ts); absent: none. */
 	dv?: DvOverScore[]
+	/** A DV scene's identity-less calls that hold no over (dv-metrics.ts falseCalls); absent: 0. */
+	dvFalse?: number
 	decodes: TruthRun["decodes"]
 	decisions: Record<string, number>
 	totals: Totals
@@ -163,6 +165,8 @@ export interface Totals {
 	dvEndErrP90Ms: number
 	/** Clear overs no call's recording holds. */
 	dvRecordingMissing: number
+	/** Identity-less calls that hold no over (noise syncs made a call). The acceptance bar is 0. */
+	dvFalse: number
 }
 
 export interface Scorecard {
@@ -344,6 +348,7 @@ const emptyTotals = (): Totals => ({
 	dvHeadCutP90Ms: 0,
 	dvEndErrP90Ms: 0,
 	dvRecordingMissing: 0,
+	dvFalse: 0,
 })
 
 /** The DV totals of some overs (the p90 over all of them, not summed). */
@@ -432,7 +437,7 @@ function recount(c: CaseScore): Totals {
 	t.unidentified = c.identify.filter(i => i.verdict === "unidentified").length
 	t.ioOverruns = c.totals.ioOverruns
 	t.unsettled = c.totals.unsettled
-	return { ...t, ...dvTotals(c.dv ?? []) }
+	return { ...t, ...dvTotals(c.dv ?? []), dvFalse: c.dvFalse ?? 0 }
 }
 
 /**
@@ -522,6 +527,7 @@ function addTotals(a: Totals, b: Totals): Totals {
 		dvHeadCutP90Ms: Math.max(a.dvHeadCutP90Ms, b.dvHeadCutP90Ms),
 		dvEndErrP90Ms: Math.max(a.dvEndErrP90Ms, b.dvEndErrP90Ms),
 		dvRecordingMissing: a.dvRecordingMissing + b.dvRecordingMissing,
+		dvFalse: a.dvFalse + b.dvFalse,
 	}
 }
 
@@ -632,6 +638,6 @@ export function formatScorecardLine(s: Scorecard): string {
 		`missed voice ${t.missedVoice}/${t.voiceTransmissions} (split ${t.splitVoice}), ` +
 		`identify ${t.identifyRight}/${t.labelledSignals} right, ${t.identifyWrong} wrong, ` +
 		`digital voice ${t.dvOvers} overs: missed ${t.dvMissed} (long ${t.dvMissedLong}), split ${t.dvSplit}, merged ${t.dvMerged}, ` +
-		`head cut p90 ${t.dvHeadCutP90Ms} ms, end error p90 ${t.dvEndErrP90Ms} ms, no recording ${t.dvRecordingMissing}: ${verdict}`
+		`head cut p90 ${t.dvHeadCutP90Ms} ms, end error p90 ${t.dvEndErrP90Ms} ms, no recording ${t.dvRecordingMissing}, false calls ${t.dvFalse}: ${verdict}`
 	)
 }

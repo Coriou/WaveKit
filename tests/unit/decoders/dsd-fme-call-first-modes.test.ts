@@ -178,11 +178,16 @@ describe("dsd-fme call-first: DMR back-dating", () => {
 	})
 
 	it("back-dates at most 4 chain windows (3 040 ms for DMR) before the starting line: at the bound and 1 ms past", () => {
-		// An errored chain from 0 (steps of 360 ms), then two clean syncs.
+		// An errored chain from 0 (steps of 360 ms), then two clean syncs (the
+		// call starts on the second) and a third (enough syncs to announce it).
 		const run = (last: number) => {
 			const lines: Line[] = []
 			for (let t = 0; t <= 2520; t += 360) lines.push([t, MS("VC* (FEC ERR)")])
-			lines.push([last - 360, MS("VC*")], [last, MS("VC*")])
+			lines.push(
+				[last - 360, MS("VC*")],
+				[last, MS("VC*")],
+				[last + 360, MS("VC*")],
+			)
 			return replay(lines, 12_000).starts
 		}
 		const atBound = run(3040)

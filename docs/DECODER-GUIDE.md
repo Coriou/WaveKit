@@ -1112,28 +1112,49 @@ callsign printed before the start attaches too). When the IDs change while the
 syncs keep running on the grid, the old call ends at its last line with its own
 IDs and the new one is back-dated to the first sync after it. A call that
 started on frames alone and spans less than 250 ms is never announced (the weak
-metadata suppression). Each DMR repeater slot runs its own call, so two busy
+metadata suppression). One that still has no identity is announced only after a
+checked item (a link control naming it or saying whether it is encrypted, a
+checked header) or once its chain holds three clean syncs spanning two
+superframes less twice the 45 ms print jitter (DMR and P25 630 ms, D-STAR
+750 ms); it stays back-dated. Two noise syncs (two DMR syncs 700 ms apart, two
+D-STAR syncs 420 ms apart) start nothing. Each DMR repeater slot runs its own call, so two busy
 slots give two concurrent calls; idle, CSBK and data bursts (a repeater's hang
 time) keep no call alive. A DMR re-key without a terminator (a new call) is
-measured from the call's last voice sync, not from its LC or slot prints: a voice
-LC header at least 200 ms after it; a sync more than 30 ms (half a 60 ms TDMA
-frame) off the call's 360 ms superframe grid at least 560 ms (one superframe,
-360, plus 200) after it; or, after a shorter gap of at least 200 ms, an off-grid sync that
-the next voice sync confirms (on the new grid, and more than 90 ms, twice a
-45 ms print jitter, off the old one). The new call then starts at the off-grid
-sync. A single late or early sync of a continuous over (a print up to 45 ms off)
-never splits it; a re-key only 60 ms off the grid after a short gap is left to
-its voice LC header. A P25 HDU after 200 ms is a re-key too. A faded over whose
+measured from the call's last voice sync, not from its LC or slot prints, and on
+the superframe grid of each burst's superframe start (a `VCn` burst is n - 1
+bursts of 60 ms after it, a direct-mode `VC*` the superframe's sync burst), so an
+over that lost bursts stays on its grid. A re-key is a voice
+LC header at least 200 ms after the last voice sync; a sync more than 90 ms (twice a
+45 ms print jitter) off the call's 360 ms superframe grid at least 560 ms (one
+superframe, 360, plus 200) after it; or, after a gap of at least 200 ms (a long
+one included), a sync more than 30 ms (half a 60 ms TDMA frame) off the grid that
+the next voice sync of another superframe confirms (on the new grid, and more than 90 ms off the old one). The new call then starts at the off-grid
+sync. A single late or early sync of a continuous over (a print up to 45 ms off),
+also after one missed sync, never splits it. Through a repeater a re-key lands a
+multiple of 60 ms off the grid; in direct mode the next radio's over can start
+anywhere, so a re-key within 30 ms of the old grid, or only 60 ms off it, is left
+to its voice LC header or new IDs (a missed split, never a split over). The
+trade-off goes the other way for a sample drop inside an over (an IQ overrun
+removes air time, not wall time): its later syncs land off the grid, and more
+than 90 ms off after 560 ms or more the over is split in two calls. A P25 HDU after 200 ms is a re-key too. A faded over whose
 voice resumes on its grid stays one call. A call that ends without its terminator (re-key, another radio's IDs,
-the 4 s timeout) ends at its last voice line.
+the 4 s timeout) ends at its last voice line. A DMR terminator (`TLC`) of a call
+that has no IDs yet holds its `call_end` up to 105 ms (one 60 ms burst plus the
+45 ms jitter) for the terminator's own link control: a clean `SLOT` line names the
+call, and the call still ends at the terminator.
 A DMR or P25 call that starts before its link control said whether it is encrypted
 carries `encryptionKnown: false` on its `call_start` and `voice-call` state: it is
 not clear. The first checked link control (DMR TG/SRC with or without `Encrypted`,
 a P25 LCW or ALG ID) makes it known, and an announced call publishes a
-`voice-call` update with `encryptionKnown: true` and its identities. A call that
-ends still unknown is never linked to a per-call recording. Noise that prints two
-clean DMR syncs of one colour code within 760 ms starts such a call; it never
-learns its encryption, so it stays muted and unrecorded. YSF, NXDN and dPMR
+`voice-call` update with `encryptionKnown: true` and its identities. A DMR link
+control counts as clear only once its burst closed clean: the next DMR sync (of
+either slot) with no error line before it; a line with an error, a sync loss or
+4 s without a sync leave the call unknown (an `Encrypted` one mutes it at once).
+A P25 `src: … tg: …` print says it only through a clear ALG ID on an error-free
+line. A call that
+ends still unknown is never linked to a per-call recording. Noise that prints
+three clean DMR syncs of one colour code over two superframes starts such a call;
+it never learns its encryption, so it stays muted and unrecorded. YSF, NXDN and dPMR
 calls carry no `encryptionKnown` field: the adapter does not read their
 encryption.
 Calls of the catalogue's `auto` mode (`-fa`) cover DMR, P25, YSF, D-STAR and

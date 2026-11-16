@@ -1,0 +1,251 @@
+{
+	"version": 1,
+	"provisional": true,
+	"note": "Modelled, not measured (scripts/fixtures/dv-latency-seeds.mjs): stray syncs of analog FM and noise, no over; no call may start.",
+	"scene": "noise-sync",
+	"protocol": "dmr",
+	"frequencyHz": 454906250,
+	"overs": [],
+	"lines": [
+		{
+			"atMs": 1000,
+			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 1700,
+			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 3200,
+			"text": "00:00:03 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 3620,
+			"text": "00:00:03 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 5120,
+			"text": "00:00:05 Sync: +P25p1 NAC/CC: 2A5;  HDU"
+		},
+		{
+			"atMs": 5300,
+			"text": "00:00:05 Sync: +P25p1 NAC/CC: 2A5;  LDU1"
+		},
+		{
+			"atMs": 6800,
+			"text": "00:00:06 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 7160,
+			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 7520,
+			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 7880,
+			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 9380,
+			"text": "00:00:09 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 10080,
+			"text": "00:00:10 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 11580,
+			"text": "00:00:11 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 12000,
+			"text": "00:00:12 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 13500,
+			"text": "00:00:13 Sync: +P25p1 NAC/CC: 2A5;  HDU"
+		},
+		{
+			"atMs": 13680,
+			"text": "00:00:13 Sync: +P25p1 NAC/CC: 2A5;  LDU1"
+		},
+		{
+			"atMs": 15180,
+			"text": "00:00:15 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 15540,
+			"text": "00:00:15 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 15900,
+			"text": "00:00:15 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 16260,
+			"text": "00:00:16 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 17760,
+			"text": "00:00:17 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 18460,
+			"text": "00:00:18 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 19960,
+			"text": "00:00:19 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 20380,
+			"text": "00:00:20 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 21880,
+			"text": "00:00:21 Sync: +P25p1 NAC/CC: 2A5;  HDU"
+		},
+		{
+			"atMs": 22060,
+			"text": "00:00:22 Sync: +P25p1 NAC/CC: 2A5;  LDU1"
+		},
+		{
+			"atMs": 23560,
+			"text": "00:00:23 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 23920,
+			"text": "00:00:23 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 24280,
+			"text": "00:00:24 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 24640,
+			"text": "00:00:24 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 26140,
+			"text": "00:00:26 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 26840,
+			"text": "00:00:26 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 28340,
+			"text": "00:00:28 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 28760,
+			"text": "00:00:28 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 30260,
+			"text": "00:00:30 Sync: +P25p1 NAC/CC: 2A5;  HDU"
+		},
+		{
+			"atMs": 30440,
+			"text": "00:00:30 Sync: +P25p1 NAC/CC: 2A5;  LDU1"
+		},
+		{
+			"atMs": 31940,
+			"text": "00:00:31 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 32300,
+			"text": "00:00:32 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 32660,
+			"text": "00:00:32 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 33020,
+			"text": "00:00:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 34520,
+			"text": "00:00:34 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 35220,
+			"text": "00:00:35 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 36720,
+			"text": "00:00:36 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 37140,
+			"text": "00:00:37 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 38640,
+			"text": "00:00:38 Sync: +P25p1 NAC/CC: 2A5;  HDU"
+		},
+		{
+			"atMs": 38820,
+			"text": "00:00:38 Sync: +P25p1 NAC/CC: 2A5;  LDU1"
+		},
+		{
+			"atMs": 40320,
+			"text": "00:00:40 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 40680,
+			"text": "00:00:40 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 41040,
+			"text": "00:00:41 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 41400,
+			"text": "00:00:41 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 42900,
+			"text": "00:00:42 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 43600,
+			"text": "00:00:43 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 45100,
+			"text": "00:00:45 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 45520,
+			"text": "00:00:45 Sync: +DSTAR VOICE "
+		},
+		{
+			"atMs": 47020,
+			"text": "00:00:47 Sync: +P25p1 NAC/CC: 2A5;  HDU"
+		},
+		{
+			"atMs": 47200,
+			"text": "00:00:47 Sync: +P25p1 NAC/CC: 2A5;  LDU1"
+		},
+		{
+			"atMs": 48700,
+			"text": "00:00:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 49060,
+			"text": "00:00:49 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		},
+		{
+			"atMs": 49420,
+			"text": "00:00:49 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 49780,
+			"text": "00:00:49 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* (FEC ERR) "
+		}
+	]
+}

@@ -190,6 +190,24 @@ export function holdsOf(
 	})
 }
 
+/**
+ * The false calls of a run: calls with no identity (talkgroup and source
+ * null or 0) that hold no over and are near none (holdsOf gives them no
+ * over): a call made of noise syncs. The acceptance bar is 0 (`dvFalse`).
+ */
+export function falseCalls(
+	overs: readonly DvOver[],
+	calls: readonly DvCall[],
+): DvCall[] {
+	const holds = holdsOf(overs, calls)
+	return calls.filter(
+		(c, i) =>
+			holds[i]!.length === 0 &&
+			(c.talkgroup ?? 0) === 0 &&
+			(c.source ?? 0) === 0,
+	)
+}
+
 /** Scores every over of a plan against the calls and timed lines of one run. */
 export function scoreOvers(
 	overs: readonly DvOver[],

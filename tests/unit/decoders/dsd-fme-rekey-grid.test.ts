@@ -84,6 +84,7 @@ describe("dsd-fme DMR re-key grid", () => {
 				...over(3),
 				[1720 + DMR_REKEY_LONG_GAP_MS, MS("VC*")],
 				[1720 + DMR_REKEY_LONG_GAP_MS + 360, MS("VC*")],
+				[1720 + DMR_REKEY_LONG_GAP_MS + 720, MS("VC*")],
 			],
 			12_000,
 		)
@@ -98,6 +99,7 @@ describe("dsd-fme DMR re-key grid", () => {
 			...over(3),
 			[1720 + 360 + offset, MS("VC*")],
 			[1720 + 720 + offset, MS("VC*")],
+			[1720 + 1080 + offset, MS("VC*")],
 		]
 		expect(replay(lines(DMR_REKEY_CONFIRM_MS), 12_000).ends).toHaveLength(1)
 		const split = replay(lines(DMR_REKEY_CONFIRM_MS + 1), 12_000)
@@ -117,7 +119,12 @@ describe("dsd-fme DMR re-key grid", () => {
 
 	it("a split over back-dates the next one to its first sync and starts it on the confirming sync", () => {
 		const { starts, ends } = replay(
-			[...over(3), [1720 + 480, MS("VC*")], [1720 + 840, MS("VC*")]],
+			[
+				...over(3),
+				[1720 + 480, MS("VC*")],
+				[1720 + 840, MS("VC*")],
+				[1720 + 1200, MS("VC*")],
+			],
 			12_000,
 		)
 		expect(starts).toHaveLength(2)

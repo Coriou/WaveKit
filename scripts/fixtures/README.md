@@ -98,7 +98,9 @@ digital voice scenes replay (`tests/mocks/fixtures/synthetic/dv-latency-*.json`)
 are provisional: they model the current adapter's inputs, not a recorded run. A capture
 run with `WAVEKIT_DVCAP_LINES=<dir>` writes recorded ones in the same format. Each over
 carries `nominalMs`, the length the plan asked, so the scorecard's `dvMissedLong` counts
-missed overs asked for 1 s or more (gated at 0). A grid run stops after three
+missed overs asked for 1 s or more (gated at 0). One more seed, `noise-sync`, has no over,
+only stray DMR, D-STAR and P25 syncs (`noiseSeed`): `dvFalse` counts the identity-less
+calls that hold no over (gated at 0). A grid run stops after three
 consecutive points fail with the same error, and its summary rows count the points
 whose decoder was killed by a signal.
 

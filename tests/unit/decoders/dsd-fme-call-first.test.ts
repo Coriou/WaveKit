@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import pino from "pino"
 import {
 	DMR_GRID_TOLERANCE_MS,
+	DMR_REKEY_CONFIRM_MS,
 	DMR_SUPERFRAME_MS,
 	DsdFmeDecoder,
 	REKEY_GAP_MS,
@@ -173,12 +174,14 @@ describe("dsd-fme call-first lifecycle", () => {
 				6000,
 			).starts,
 		).toHaveLength(0)
+		// A third sync one superframe on announces a chain of three (hasEvidence).
 		const window = SYNC_CHAIN_MS.dmr!
 		expect(
 			replay(
 				[
 					[0, MS("VC*")],
 					[window + 1, MS("VC*")],
+					[window + 1 + DMR_SUPERFRAME_MS, MS("VC*")],
 				],
 				6000,
 			).starts,
@@ -189,6 +192,7 @@ describe("dsd-fme call-first lifecycle", () => {
 				[
 					[0, MS("VC*")],
 					[window, MS("VC*")],
+					[window + DMR_SUPERFRAME_MS, MS("VC*")],
 				],
 				6000,
 			).starts,
@@ -209,14 +213,18 @@ describe("dsd-fme call-first lifecycle", () => {
 	})
 
 	it("attaches the IDs of the first link control and learns the call is clear", () => {
+		// Three syncs announce the unnamed call (timer at 1000); the LC at 1100
+		// counts once the sync at 1440 closes its burst clean.
 		const { starts, ends, voice } = replay(
 			[
 				[0, MS("VC*")],
 				[360, MS("VC*")],
-				[600, LC(1)],
 				[720, MS("VC*")],
-				[1000, MS("TLC")],
-				[1000, LC(1)],
+				[1080, MS("VC*")],
+				[1100, LC(1)],
+				[1440, MS("VC*")],
+				[1800, MS("TLC")],
+				[1800, LC(1)],
 			],
 			6000,
 		)
@@ -228,7 +236,7 @@ describe("dsd-fme call-first lifecycle", () => {
 			encryptionKnown: true,
 		})
 		expect(at(ends[0]!.startedAt)).toBe(0)
-		expect(at(ends[0]!.endedAt!)).toBe(1000)
+		expect(at(ends[0]!.endedAt!)).toBe(1800)
 		expect(ends[0]!.flags?.timeout).toBe(false)
 		// call_start (unknown), the update (known clear, with its IDs), call_end.
 		expect(
@@ -381,19 +389,25 @@ describe("dsd-fme call-first lifecycle", () => {
 				8000,
 			)
 			expect(ends).toHaveLength(1)
-			// One millisecond past the tolerance it is a re-key.
-			const past = replay(
-				[
-					[0, MS("VC*")],
-					[360, MS("VC*")],
-					[400, LC(1)],
-					[resumed + 1, MS("VC*")],
-					[resumed + 361, MS("VC*")],
-					[resumed + 700, MS("TLC")],
-				],
-				8000,
-			)
-			expect(past.ends).toHaveLength(2)
+			// Past the tolerance after the long gap, up to DMR_REKEY_CONFIRM_MS
+			// off, it is a late print of the over (its next sync stays on the
+			// new grid, yet within 90 ms of the call's): one call.
+			const late = (offset: number) =>
+				replay(
+					[
+						[0, MS("VC*")],
+						[360, MS("VC*")],
+						[400, LC(1)],
+						[resumed - DMR_GRID_TOLERANCE_MS + offset, MS("VC*")],
+						[resumed - DMR_GRID_TOLERANCE_MS + offset + 360, MS("VC*")],
+						[resumed - DMR_GRID_TOLERANCE_MS + offset + 700, MS("TLC")],
+					],
+					8000,
+				).ends
+			expect(late(DMR_GRID_TOLERANCE_MS + 1)).toHaveLength(1)
+			expect(late(DMR_REKEY_CONFIRM_MS)).toHaveLength(1)
+			// One millisecond past that it is a re-key at once.
+			expect(late(DMR_REKEY_CONFIRM_MS + 1)).toHaveLength(2)
 		})
 
 		it("a voice LC header after the gap is a new over even on the grid", () => {
