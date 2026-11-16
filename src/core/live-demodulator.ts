@@ -32,16 +32,20 @@ import {
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 	LIVE_AUDIO_LISTEN_MODE_DEFAULT,
+	LIVE_AUDIO_LISTEN_MODES,
 	LIVE_AUDIO_SQUELCH_INPUT_MODES,
+	LIVE_AUDIO_VOICE_ONLY_DEFAULT,
 	type AnalogTransmissionDcs,
 	type LiveAudioAutoRoute,
 	type LiveAudioAutoRouteLevel,
 	type LiveAudioAutoSquelch,
+	type LiveAudioListenMode,
 	type LiveAudioSquelchMode,
 	type LiveAudioSquelchSetting,
 } from "@wavekit/api-types"
 import {
 	LiveDemodRuntimeBaseSchema,
+	migrateLiveAudioSquelch,
 	type LiveDemodRuntimeBaseConfig as BaseLiveDemodConfig,
 	type SourceCaps,
 } from "../config.js"
@@ -127,13 +131,17 @@ import type { SourceManager } from "./source-manager.js"
 /**
  * Runtime schema: the startup schema without the config-only `publicOrigin`
  * (with its WG7 refinements: noise squelch only on nfm/wfm, tone squelch only
- * on nfm with a standard tone) plus the runtime defaults of the squelch keys.
+ * on nfm with a standard tone) plus the runtime defaults of the squelch and Listen keys.
  */
 export const LiveDemodRuntimeConfigSchema = LiveDemodRuntimeBaseSchema.and(
 	z.object({
 		squelchMode: z
 			.enum(LIVE_AUDIO_SQUELCH_INPUT_MODES as [LiveAudioSquelchSetting])
 			.default("auto"),
+		voiceOnly: z.boolean().default(LIVE_AUDIO_VOICE_ONLY_DEFAULT),
+		listenMode: z
+			.enum(LIVE_AUDIO_LISTEN_MODES as [LiveAudioListenMode])
+			.default(LIVE_AUDIO_LISTEN_MODE_DEFAULT),
 		autoMarginDb: z.number().finite().min(0).max(40).default(6),
 		noiseQuietingDb: z
 			.number()
@@ -147,6 +155,45 @@ export type LiveDemodConfig = BaseLiveDemodConfig & {
 	squelchMode?: LiveAudioSquelchSetting | undefined
 	autoMarginDb?: number | undefined
 	noiseQuietingDb?: number | undefined
+}
+
+/** The stored live-audio config as REST and the WebSocket report it (`liveDemodConfigForClient`). */
+export type ClientLiveDemodConfig = Omit<
+	LiveDemodConfig,
+	| "chanBinaryPath"
+	| "squelchMode"
+	| "voiceOnly"
+	| "listenMode"
+	| "autoMarginDb"
+	| "noiseQuietingDb"
+> & {
+	squelchMode: LiveAudioSquelchSetting
+	voiceOnly: boolean
+	listenMode: LiveAudioListenMode
+	autoMarginDb: number
+	noiseQuietingDb: number
+}
+
+/**
+ * The one client view of a stored live-audio config, shared by REST and the WebSocket: the
+ * squelch migrated on read (`migrateLiveAudioSquelch`: manual at 0 without a tone is open,
+ * noise is auto without the voice check), the runtime defaults of the squelch and Listen keys
+ * filled in, and the native demod binary path removed (clients never receive it).
+ */
+export function liveDemodConfigForClient(
+	stored: LiveDemodConfig,
+): ClientLiveDemodConfig {
+	const config: LiveDemodConfig = { ...migrateLiveAudioSquelch(stored) }
+	delete config.chanBinaryPath
+	return {
+		...config,
+		squelchMode: config.squelchMode ?? "auto",
+		voiceOnly: config.voiceOnly ?? LIVE_AUDIO_VOICE_ONLY_DEFAULT,
+		listenMode: config.listenMode ?? LIVE_AUDIO_LISTEN_MODE_DEFAULT,
+		autoMarginDb: config.autoMarginDb ?? 6,
+		noiseQuietingDb:
+			config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
+	}
 }
 export interface LiveAudioLevel {
 	sourceId: string

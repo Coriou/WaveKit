@@ -279,6 +279,34 @@ describe("AutoListenRouter listen mode", () => {
 			expect("reason" in sim.status()).toBe(false)
 		})
 
+		it("the cached answer refreshes when a decoder is added or removed at the same generation, and is reused for the same ids", () => {
+			const voice = new ListingVoice()
+			const sim = new Sim(voice)
+			sim.router.setListenPolicy("digital", false)
+			sim.coverage.answer.set("dmr", "no")
+			sim.coverage.answer.set("p25", "yes")
+			sim.coverage.answer.set("ysf", "no")
+			voice.ids = ["dmr"]
+			expect(sim.status().reason).toBe("no-decoder")
+			// Added (count change): the covering decoder clears the reason.
+			voice.ids = ["dmr", "p25"]
+			expect("reason" in sim.status()).toBe(false)
+			// The same ids in a fresh array: the cached answer, no covers() call.
+			const calls = sim.coverage.calls
+			voice.ids = ["dmr", "p25"]
+			sim.router.level()
+			expect("reason" in sim.status()).toBe(false)
+			expect(sim.coverage.calls).toBe(calls)
+			// Removed: back to no-decoder.
+			voice.ids = ["dmr"]
+			expect(sim.status().reason).toBe("no-decoder")
+			// Replaced with the same count: refreshed too.
+			voice.ids = ["p25"]
+			expect("reason" in sim.status()).toBe(false)
+			voice.ids = ["ysf"]
+			expect(sim.status().reason).toBe("no-decoder")
+		})
+
 		it("unknown coverage (an unknown answer or a throwing covers) reports no reason, and still routes silence", () => {
 			const voice = new ListingVoice()
 			const sim = new Sim(voice)
@@ -404,7 +432,7 @@ describe("AutoListenRouter listen mode", () => {
 			expect("pendingListenMode" in sim.status()).toBe(false)
 		})
 
-		// Fable major (2026-11-15): an operator change no longer waits forever on a continuous
+		// An operator change never waits forever on a continuous
 		// carrier; it is in force at the 1.5 s bound (AUTO_ROUTE_OPERATOR_MODE_MAX_MS).
 		it("analog -> digital on a continuous carrier applies at the 1.5 s operator bound; no voice is queued before", () => {
 			const sim = new Sim()

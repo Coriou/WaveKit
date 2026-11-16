@@ -17,7 +17,7 @@ export const LIVE_AUDIO_AGC_MODES: readonly LiveAudioAgcMode[] = [
  * `noiseQuietingDb` below its noise-only reference.
  */
 export type LiveAudioSquelchMode = "manual" | "auto" | "noise"
-/** WG7 squelch modes (frozen list; the detection modes a transmission event reports). */
+/** The original squelch modes (frozen list; the detection modes a transmission event reports). */
 export const LIVE_AUDIO_SQUELCH_MODES: readonly LiveAudioSquelchMode[] =
 	Object.freeze(["manual", "auto", "noise"])
 /**
@@ -172,6 +172,12 @@ export interface LiveAudioAutoRoute {
 	 * call's head was cut (it also grows while voice arrives with no call announced). Absent from older cores.
 	 */
 	pendingOverwrittenMs?: number
+	/**
+	 * Listen: audible unchecked analog (no voice check, no tone squelch) that a covering decoded
+	 * call took over and let go, ms, cumulative: the call's own carrier, queued while the call
+	 * plays. A diagnostic, never part of `droppedMs`. Absent from older cores.
+	 */
+	analogSupersededMs?: number
 	clockRebases: number
 	/** Selected source's backlog plus one block, ms. */
 	latencyMs: number

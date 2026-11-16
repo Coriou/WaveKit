@@ -340,11 +340,16 @@ export class AnalogInput {
 	}
 
 	/**
-	 * Listen: the listen mode in force does not play analog (`digital`): empty the FIFO without
-	 * counting, keeping the resampler and the split sample so the stream stays continuous.
+	 * Listen: the listen mode in force does not play analog (`digital`), or a covering call took
+	 * it over: empty the FIFO without counting it as dropped, keeping the resampler and the split
+	 * sample so the stream stays continuous. Returns the audible samples let go (silence queued
+	 * between transmissions is not returned).
 	 */
-	discardQueued(): void {
-		if (this.out.queued > 0) this.out.clearUncounted()
+	discardQueued(): number {
+		if (this.out.queued === 0) return 0
+		const audible = this.out.queuedQualified
+		this.out.clearUncounted()
+		return audible
 	}
 
 	/** Route stopped: empty everything without counting. */

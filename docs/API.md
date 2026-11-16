@@ -2627,7 +2627,7 @@ Fields:
 - `autoRoute` — the auto listen route (`GET /auto`), present whenever the live
   audio HTTP server listens: `{ active, protocol?, decoderId?, slot?, since,
 httpUrl, wavUrl, clientCount, digitalAvailable, underruns, zeroFilledSamples?,
-droppedMs, pendingOverwrittenMs?, clockRebases, latencyMs, listenMode?, pendingListenMode?, reason? }`. `active` is `analog`, `digital` or `none`;
+droppedMs, pendingOverwrittenMs?, analogSupersededMs?, clockRebases, latencyMs, listenMode?, pendingListenMode?, reason? }`. `active` is `analog`, `digital` or `none`;
   `protocol` (when the call reports one), `decoderId` and `slot` (a number or
   `null`) are present only while `active` is `digital`. `since` is the ISO time of
   the last switch. `httpUrl` and `wavUrl` follow the `/stream` URL rules above
@@ -2644,6 +2644,9 @@ droppedMs, pendingOverwrittenMs?, clockRebases, latencyMs, listenMode?, pendingL
   bound, so a non-zero value may mean a call's start was cut (it also grows while decoded
   voice arrives with no call announced, and the bound assumes the decoder's default
   100 ms call-start hold),
+  `analogSupersededMs` (cumulative, a diagnostic outside `droppedMs`; absent from older
+  cores) the audible unchecked analog (no voice check, no tone squelch) that a decoded call
+  took over and let go: the call's own carrier, queued while the call plays,
   `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
   selected source's backlog plus one 20 ms block. `listenMode` is the listen mode in
   force on the route: `config.listenMode`, except `analog` while the squelch is `open`,
@@ -2672,7 +2675,8 @@ droppedMs, pendingOverwrittenMs?, clockRebases, latencyMs, listenMode?, pendingL
   reference), and `ste: true` after a squelch-tail-elimination tone ended the over.
   Computed per request.
 - `config.squelchMode`, `config.voiceOnly`, `config.listenMode`, `config.autoMarginDb`
-  and `config.noiseQuietingDb` are always present in config and status responses, with
+  and `config.noiseQuietingDb` are always present in config and status responses, and in
+  the WebSocket `live-audio:status` and `live-audio:config` payloads (the same values), with
   their defaults (`auto`, `true`, `auto`, 6 and 6) when not set. `config.squelchMode` is
   `auto`, `manual` or `open`, never `noise` (see below). `config.toneSquelch` is present
   only when it is set.
@@ -2687,7 +2691,14 @@ Configuration notes:
   `none` on it stores `open`; `noise` is deprecated,
   still accepted on input with its old modulation rule, and stored and reported as
   `auto` with `voiceOnly: false`, even when the same request sends `voiceOnly: true`.
-  A loaded config file is migrated the same way at startup. To choose `manual`, send
+  A loaded config file is migrated the same way at startup. What changes for a former
+  "squelch off" user (`manual` at 0, no tone): the channel is now `open`, which also forces
+  the auto route to analog (`autoRoute.reason: "squelch-open"`), so `/auto` on a DMR or
+  other digital voice channel plays the raw carrier instead of the decoded call until the
+  squelch is set back to `auto` or `manual`; and on the csdr engine stage 1 keeps detecting,
+  so they now get `live-audio:transmission` events and Activity rows where "squelch off"
+  gave none, on every modulation, including SSB and CW, where the floor plus margin may
+  open and close often on fading or keying (chatter). To choose `manual`, send
   `squelchMode: "manual"` and a non-zero `squelch` (or a tone) in the same request:
   `manual` at 0 without a tone is stored as `open`, and a `squelch` level sent alone while the mode is `open` keeps
   it `open` (the level is stored for a later `manual`). `open` plays every block raw: no stage-1 replacement of closed IQ, no
@@ -2902,7 +2913,8 @@ source plays at a time; digital wins over analog after the analog over releases
 squelch), a clear call takes it over as soon as its 200 ms start buffer is ready: that analog
 is the call's own carrier, so it (buzz) plays from the call's start until the decoder reports
 the clear call with 200 ms of its voice queued, then only the decoded call, with no buzz after
-it; the analog let go is not counted in `droppedMs`. Decoded voice that arrives
+it; the analog let go is not counted in `droppedMs` (its audible part is reported in
+`autoRoute.analogSupersededMs`). Decoded voice that arrives
 before its call is active and explicitly clear (the decoder has not yet reported the call, or
 its encryption is not known yet) waits, up to 1 360 ms per decoder, and plays first, in order,
 when the call turns clear; it is let go (not counted) if the call ends encrypted or still

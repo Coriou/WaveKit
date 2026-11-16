@@ -504,6 +504,50 @@ describe("takeover of unchecked analog (AUTO_ROUTE_TAKEOVER_MS)", () => {
 		expect(discards.reduce((n, t) => n + t.count, 0)).toBeGreaterThan(90 * 960)
 	})
 
+	it("unchecked: the audible analog the call let go is reported in analogSupersededMs, not in droppedMs", () => {
+		const { sim } = scene(false)
+		const discarded = sim.traces
+			.filter(t => t.source === "analog" && t.kind === "discard")
+			.reduce((n, t) => n + t.count, 0)
+		expect(sim.router.droppedSamples).toBe(0)
+		// Every analog sample is audible here: all the analog let go during the call is superseded.
+		expect(sim.router.analogSupersededMs).toBeCloseTo(discarded / 48, 9)
+		expect(sim.router.analogSupersededMs).toBeGreaterThan(90 * 20)
+		expect(
+			sim.router.status({ httpUrl: "h", wavUrl: "w" }).analogSupersededMs,
+		).toBe(sim.router.analogSupersededMs)
+	})
+
+	it("checked: nothing is superseded (the preemption drop is counted instead)", () => {
+		const { sim } = scene(true)
+		expect(sim.router.analogSupersededMs).toBe(0)
+		expect(
+			sim.router.status({ httpUrl: "h", wavUrl: "w" }).analogSupersededMs,
+		).toBe(0)
+	})
+
+	it("unchecked silent analog let go during a call is not superseded audio", () => {
+		const sim = new Sim()
+		sim.router.setAnalogVoiceChecked(false)
+		const list = frames(60)
+		sim.voice.tap?.call("dmr", call())
+		for (const f of list) sim.step({ analog: false, frames: [f], call: call() })
+		expect(sim.actives).toContain("digital")
+		expect(sim.router.analogSupersededMs).toBe(0)
+		expect(sim.router.droppedSamples).toBe(0)
+	})
+
+	it("analog discarded because digital is in force is policy, not superseded", () => {
+		const sim = new Sim()
+		sim.router.setAnalogVoiceChecked(false)
+		sim.router.setListenPolicy("digital", false)
+		for (let b = 0; b < 20; b++) sim.step({ analog: true })
+		const list = frames(40)
+		sim.voice.tap?.call("dmr", call())
+		for (const f of list) sim.step({ analog: true, frames: [f], call: call() })
+		expect(sim.router.analogSupersededMs).toBe(0)
+	})
+
 	it("checked (Voice only on): the 1.5 s preemption bound and its counted drop, as before", () => {
 		const { sim, firstFrameAt } = scene(true)
 		const firstDigital = sim.actives.indexOf("digital")

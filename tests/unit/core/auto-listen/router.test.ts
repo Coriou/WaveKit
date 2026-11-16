@@ -752,6 +752,8 @@ describe("AutoListenRouter", () => {
 			droppedMs: 0,
 			// Listen (2026-11-16): additive diagnostic, pending voice the bound let go.
 			pendingOverwrittenMs: 0,
+			// Listen: additive diagnostic, unchecked analog a covering call took over.
+			analogSupersededMs: 0,
 			clockRebases: 0,
 			latencyMs: 20,
 			// Listen (2026-11-15): additive, the listen mode in force (default auto).

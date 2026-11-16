@@ -1,5 +1,5 @@
 /**
- * Pending voice under the dsd-fme adapter's real call timing (final review M1, 2026-11-16). The
+ * Pending voice under the dsd-fme adapter's real call timing. The
  * router learns of a call only from the adapter's `voice-call` event, which the adapter emits
  * when its call timer (every 500 ms, free phase) promotes the pending call created by the first
  * `SLOT` line, no earlier than 100 ms after it. So the first voice reaches the router up to

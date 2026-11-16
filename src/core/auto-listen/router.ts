@@ -124,6 +124,11 @@ export class AutoListenRouter extends EventEmitter {
 	private readonly counter: DropCounter = { droppedSamples: 0 }
 	/** `autoRoute.pendingOverwrittenMs`: pending voice the bound let go (diagnostic, uncounted). */
 	private readonly pendingCounter: PendingCounter = { overwrittenMs: 0 }
+	/**
+	 * `autoRoute.analogSupersededMs` (samples here): audible unchecked analog let go while a
+	 * covering call took it over (diagnostic, never part of `droppedMs`).
+	 */
+	private analogSuperseded = 0
 	private readonly analog: AnalogInput
 	private readonly voices = new Map<string, VoiceInput>()
 	/** Same inputs as `voices`, for index loops (no iterator object per block). */
@@ -167,7 +172,8 @@ export class AutoListenRouter extends EventEmitter {
 	private squelchOpen = false
 	/** Cached "does any decoder cover the tuned channel", per coverage generation and id list. */
 	private coveredAt = Number.NaN
-	private coveredIds = ""
+	/** The id list the cached answer was computed for (a copy, replaced only when it changes). */
+	private coveredIds: string[] | null = null
 	private coveredAny: boolean | null = false
 	/** Clock time of the operator's pending listen mode change (NaN: none pending). */
 	private operatorAt = Number.NaN
@@ -238,6 +244,11 @@ export class AutoListenRouter extends EventEmitter {
 	/** Pending voice overwritten by its bound (or older than it at admission), ms, cumulative. */
 	get pendingOverwrittenMs(): number {
 		return this.pendingCounter.overwrittenMs
+	}
+
+	/** Audible unchecked analog superseded by a covering call (takeover), ms, cumulative. */
+	get analogSupersededMs(): number {
+		return this.analogSuperseded / SAMPLES_PER_MS
 	}
 
 	/** Output samples emitted since the pacer started. */
@@ -340,6 +351,7 @@ export class AutoListenRouter extends EventEmitter {
 			zeroFilledSamples: this.zeroFilled,
 			droppedMs: this.counter.droppedSamples / SAMPLES_PER_MS,
 			pendingOverwrittenMs: this.pendingCounter.overwrittenMs,
+			analogSupersededMs: this.analogSuperseded / SAMPLES_PER_MS,
 			clockRebases: this.rebases,
 			latencyMs:
 				(sel === null ? 0 : sel.out.queued) / SAMPLES_PER_MS +
@@ -390,7 +402,9 @@ export class AutoListenRouter extends EventEmitter {
 	 * True when a decoder covers the tuned channel, false when every decoder answers `no` (or
 	 * there is none), null when any answer is unknown and none is `yes`. With the source's
 	 * `voiceDecoderIds` the answer is computed once per coverage generation and id list
-	 * (`covers` is called only then); without it only decoders heard from count.
+	 * (`covers` is called only then, and the list is compared element by element against the
+	 * cached copy, so a steady state allocates nothing here); a decoder added or removed changes
+	 * the list and refreshes the answer. Without it only decoders heard from count.
 	 */
 	private digitalCovered(): boolean | null {
 		const source = this.voiceSource
@@ -409,8 +423,7 @@ export class AutoListenRouter extends EventEmitter {
 		}
 		const g = port.generation
 		if (typeof g !== "number" || !Number.isFinite(g)) return null
-		const key = ids.join("\u0000")
-		if (g !== this.coveredAt || key !== this.coveredIds) {
+		if (g !== this.coveredAt || !this.sameCoveredIds(ids)) {
 			let any: boolean | null = false
 			for (const id of ids) {
 				if (typeof id !== "string") {
@@ -431,10 +444,18 @@ export class AutoListenRouter extends EventEmitter {
 				if (answer === "unknown") any = null
 			}
 			this.coveredAt = g
-			this.coveredIds = key
+			this.coveredIds = ids.slice()
 			this.coveredAny = any
 		}
 		return this.coveredAny
+	}
+
+	/** Whether `ids` is the cached id list, element by element (no allocation). */
+	private sameCoveredIds(ids: readonly string[]): boolean {
+		const cached = this.coveredIds
+		if (cached === null || cached.length !== ids.length) return false
+		for (let i = 0; i < ids.length; i++) if (cached[i] !== ids[i]) return false
+		return true
 	}
 
 	/**
@@ -557,8 +578,9 @@ export class AutoListenRouter extends EventEmitter {
 		if (this.mode === "digital") this.analog.discardQueued()
 		else if (sel instanceof VoiceInput && !this.analogChecked)
 			// Takeover: unchecked analog queued while a covering call plays is that call's own
-			// carrier (raw buzz), let go uncounted so it never plays after the call.
-			this.analog.discardQueued()
+			// carrier (raw buzz), let go so it never plays after the call: not a drop, but its
+			// audible part is reported as `analogSupersededMs`.
+			this.analogSuperseded += this.analog.discardQueued()
 		else if (sel !== this.analog) this.analog.out.discardUntilAudible()
 		for (let i = 0; i < this.voiceList.length; i++) {
 			const v = this.voiceList[i]
@@ -644,10 +666,10 @@ export class AutoListenRouter extends EventEmitter {
 				// discarded first, uncounted (4.3), so a preemption after analog has gone quiet
 				// (including one in the same block as its release) loses and counts nothing.
 				// Takeover of unchecked analog: what is queued is the call's own carrier (raw
-				// buzz), let go uncounted.
+				// buzz), let go as `analogSupersededMs`, not a drop.
 				this.analog.out.discardUntilAudible()
 				if (this.analogChecked) this.analog.out.dropAll()
-				else this.analog.discardQueued()
+				else this.analogSuperseded += this.analog.discardQueued()
 				this.select(pre, now)
 				return
 			}

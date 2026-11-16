@@ -1164,7 +1164,7 @@ describe("listen scenes, tier A: mixed-1-spaced", () => {
 			expect(r.routeStatus?.listenMode).toBe("analog")
 		}, 60_000)
 
-		// Fable major (2026-11-15): an operator change waits for the playing over at most the 1.5 s
+		// An operator change waits for the playing over at most the 1.5 s
 		// bound (AUTO_ROUTE_OPERATOR_MODE_MAX_MS), so a continuous carrier never holds it forever.
 		// Voice A plays about 1 s late (Voice only), so the bound falls inside its audio.
 		it("a runtime change mid-over applies at the 1.5 s operator bound: no restart, the over plays up to it", async () => {

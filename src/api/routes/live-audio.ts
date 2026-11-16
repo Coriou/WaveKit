@@ -10,7 +10,10 @@ import {
 	zodValidationBody,
 	type ValidationErrorBody,
 } from "../validation-errors.js"
-import { LiveDemodRuntimeConfigSchema } from "../../core/live-demodulator.js"
+import {
+	LiveDemodRuntimeConfigSchema,
+	liveDemodConfigForClient,
+} from "../../core/live-demodulator.js"
 import type {
 	LiveDemodulator,
 	LiveDemodReconfigureUpdates as ReconfigureUpdates,
@@ -19,15 +22,10 @@ import { deriveLegacyAudioUrl, requestHostHeader } from "./legacy-audio-host.js"
 import {
 	LIVE_AUDIO_AUTO_ROUTE_REASONS,
 	LIVE_AUDIO_LISTEN_MODES,
-	LIVE_AUDIO_LISTEN_MODE_DEFAULT,
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_SQUELCH_INPUT_MODES,
-	LIVE_AUDIO_VOICE_ONLY_DEFAULT,
 } from "@wavekit/api-types"
-import {
-	migrateLiveAudioSquelch,
-	migrateLiveAudioSquelchUpdate,
-} from "../../config.js"
+import { migrateLiveAudioSquelchUpdate } from "../../config.js"
 import type {
 	LiveAudioToneSquelch,
 	LiveDemodConfig,
@@ -213,6 +211,7 @@ const liveDemodStatusSchema = {
 				zeroFilledSamples: { type: "number" },
 				droppedMs: { type: "number" },
 				pendingOverwrittenMs: { type: "number" },
+				analogSupersededMs: { type: "number" },
 				clockRebases: { type: "number" },
 				latencyMs: { type: "number" },
 				// Listen: the mode in force, a waiting change and why the route plays less.
@@ -355,20 +354,19 @@ export const liveAudioRoutes: FastifyPluginAsync<
 	const toApiLiveDemodConfig = (
 		stored: CoreLiveDemodConfig,
 	): LiveDemodConfig => {
-		// Listen: report the migrated squelch (the API and a loaded config store it so already).
-		const config = migrateLiveAudioSquelch(stored)
+		// Listen: the client view the WebSocket sends too (migrated squelch, runtime defaults).
+		const config = liveDemodConfigForClient(stored)
 		return {
 			enabled: config.enabled,
 			httpPort: config.httpPort,
 			modulation: config.modulation,
 			bandwidth: config.bandwidth,
 			squelch: config.squelch,
-			squelchMode: config.squelchMode ?? "auto",
-			voiceOnly: config.voiceOnly ?? LIVE_AUDIO_VOICE_ONLY_DEFAULT,
-			listenMode: config.listenMode ?? LIVE_AUDIO_LISTEN_MODE_DEFAULT,
-			autoMarginDb: config.autoMarginDb ?? 6,
-			noiseQuietingDb:
-				config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
+			squelchMode: config.squelchMode,
+			voiceOnly: config.voiceOnly,
+			listenMode: config.listenMode,
+			autoMarginDb: config.autoMarginDb,
+			noiseQuietingDb: config.noiseQuietingDb,
 			...(config.toneSquelch !== undefined
 				? { toneSquelch: copyTone(config.toneSquelch) }
 				: {}),
