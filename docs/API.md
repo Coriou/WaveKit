@@ -7721,11 +7721,10 @@ the recorded centre.
 A row's `channel` (`{ discoveryId, frequencyHz }`, since 2026-11-16) is the
 channel it belongs to: `frequencyHz` is the channel's frequency (the owning
 scanner discovery's, in whole Hz, never a measured carrier) and `discoveryId`
-that discovery, or null. Rows get it when they are stored: a kept scanner
-recording (above), and a decoder reception whose channel the core can tell
-(a scanner probe's receptions: its discovery; a reception on a discovery's
-frequency), which also gets a `discoveryId` ref. Other rows, and every row
-stored before, have none. It sits whole in the summary (about 190 bytes at
+that discovery, or null. Today only scanner recording rows get it, when they
+are stored (a kept scanner recording, above). Decoder receptions, a scanner
+probe's included, have none yet: their channel comes with a later core wiring.
+Other rows, and every row stored before, have none. It sits whole in the summary (about 190 bytes at
 most; fields and title shrink first to keep the 4 KiB budget).
 
 Channel queries (`GET /api/activity`, `POST /api/activity/facets` and the
@@ -7736,15 +7735,19 @@ WebSocket subscription's `query`; integer Hz):
   channel lies within the tolerance of `nearHz`, inclusive. `toleranceHz`
   without `nearHz`, or `channelHz` with `nearHz`, is a 400.
 
-A row without `channel` matches by its own `frequencyHz`, within 6,250 Hz
-(`ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ`, half a 12.5 kHz raster) below the
-channel, inclusive, and above it, exclusive: a row on the edge between two
-channels belongs to the upper one only. A row with neither never matches. The
-answer says how its rows matched: `channelMatch` is `exact` when every row of
-the snapshot in the query matched by its stored channel, `mixed` when some
-matched by their frequency (the count over those rows is labelled, not
-wrong). It is present only with a channel query, on the list page and on the
-facets result.
+A row without `channel` matches by its own `frequencyHz`, within ±6,250 Hz
+of the channel (`ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ`, half a 12.5 kHz
+raster): from 6,250 Hz below, inclusive, to 6,250 Hz above, exclusive, so on a
+12.5 kHz raster a row on the edge between two channels belongs to the upper
+one only. On a finer raster (6.25 kHz, say) the windows of adjacent channels
+overlap, and such an old row can match two adjacent `channelHz` queries. A row
+with neither never matches. The answer says how its rows matched:
+`channelMatch` is `exact` when every row of the snapshot in the query matched
+by its stored channel, `mixed` when some matched by their frequency (the count
+over those rows is labelled, not wrong). It is present only with a channel
+query, on the list page and on the facets result. On the facets result it
+covers the whole snapshot, also when the counts are truncated (`truncated`
+true: rows past the scan cap still decide it).
 
 ### GET /api/activity/trails
 

@@ -164,6 +164,19 @@ export const WIDEBAND_HOLDBACK_MS = 1_000
 /** WAV and analog-operation bound: 960 000 frames = 120 s at 8 kHz (MAX_WAV_DURATION_SECONDS). */
 export const WIDEBAND_MAX_FILE_MS = 120_000
 /**
+ * The Date range's bound (ECMAScript time value): 100 000 000 days x 86 400 000 ms = 8.64e15 ms
+ * either side of the epoch; new Date(ms).toISOString() throws a RangeError past it.
+ */
+export const MAX_DATE_MS = 8.64e15
+/**
+ * A wall time (ms) as ISO for a receipt; null when it is not a finite time within MAX_DATE_MS
+ * (a broken clock or engine edge), never a throw.
+ */
+export function wallIso(ms: number): string | null {
+	if (!Number.isFinite(ms) || Math.abs(ms) > MAX_DATE_MS) return null
+	return new Date(ms).toISOString()
+}
+/**
  * Audio one session holds in memory, over all its files not written yet: a shadow waiting for
  * its class, a file waiting for its slot or for the writer. 60 s (the default hold.maxHoldMs)
  * · 8000 frames/s = 480 000 frames · 2 B = 960 KB per session; at most
@@ -4360,17 +4373,19 @@ export class WidebandAnalogRecorder {
 			if (mine.length > room) this.release(mine[0]![0])
 		} else {
 			if (path) this.log.info(keptLog(path, file, s), "Analog file kept")
+			// The verdict it was kept on, for its receipt (read-only: nothing decides on it),
+			// computed before the finish is asked so nothing here can throw past it.
+			const startedAt = wallIso(this.wallAt(s.engine, s.fs, file.startSample))
 			file.finishAsked = true
-			// The verdict it was kept on, for its receipt (read-only: nothing decides on it).
-			const startedAt = this.wallAt(s.engine, s.fs, file.startSample)
 			void file.handle
 				.finish(file.cut, {
 					...this.finishFacts(s, file),
 					...(path === null ? {} : { keptBy: path.reason }),
-					speechHeard: speechReadings(speech).speechHeard,
-					...(Number.isFinite(startedAt)
-						? { startedAt: new Date(startedAt).toISOString() }
-						: {}),
+					// The reading it decided on (finishPath nulls a classed roll-over's); raw without one.
+					speechHeard: path
+						? path.speechHeard
+						: speechReadings(speech).speechHeard,
+					...(startedAt === null ? {} : { startedAt }),
 				})
 				.catch(() => undefined)
 		}

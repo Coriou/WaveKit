@@ -226,7 +226,7 @@ describe("a scanner analog recording to a playable recording and back", () => {
 		expect(["heard", "not-heard", "unchecked"]).toContain(item.speech)
 		expect(item.observationId).toBe(payload?.observationId)
 		expect(Number.isFinite(Date.parse(item.startedAt ?? ""))).toBe(true)
-		expect(item.frequencyHz).toBe(owner?.frequencyHz)
+		expect(item.frequencyHz).toBe(Math.round(owner?.frequencyHz ?? 0))
 		const listed = await inventory.list({ channelHz })
 		expect(listed.items.map(i => i.key)).toEqual([key])
 		const nearby = await inventory.list({
