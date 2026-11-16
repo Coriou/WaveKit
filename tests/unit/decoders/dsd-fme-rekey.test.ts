@@ -130,7 +130,7 @@ describe("dsd-fme DMR re-key", () => {
 
 	it("property: arrival jitter up to a whole clump on each sync never splits a continuous over", () => {
 		// Feature: dv-call-first, Property: DMR jitter never splits a continuous over
-		// Validates: review M1 (a late sync after a missing LC print), DV-M root cause 3
+		// Validates: a late sync after a missing LC print stays in its over; no superframe grid on clumped arrival times
 		fc.assert(
 			fc.property(
 				// Four superframes or more: three of their syncs span at least

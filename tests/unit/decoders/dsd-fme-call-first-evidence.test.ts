@@ -1,5 +1,5 @@
 /**
- * dsd-fme call-first, final-review fixes: lost bursts and missed syncs keep
+ * dsd-fme call-first evidence rules: lost bursts and missed syncs keep
  * an over whole (no superframe grid is measured on clumped line arrival,
  * DSD_FME_LINE_CLUMP_MS), identity-less calls announced only on evidence
  * (no phantom calls from two noise syncs), a terminator's trailer naming a
@@ -50,7 +50,7 @@ function bursts(
 const range = (from: number, to: number) =>
 	new Set(Array.from({ length: to - from + 1 }, (_, i) => from + i))
 
-describe("dsd-fme call-first: review fixes", () => {
+describe("dsd-fme call-first: evidence rules", () => {
 	beforeEach(() => {
 		vi.useFakeTimers({ toFake: ["Date"] })
 		vi.setSystemTime(T0)
@@ -121,7 +121,7 @@ describe("dsd-fme call-first: review fixes", () => {
 		})
 	})
 
-	describe("F-M1: lost bursts keep an over on its grid", () => {
+	describe("lost bursts keep an over whole", () => {
 		it("a repeater over printing VC1..VC6 that lost bursts 21-29 (600 ms) stays one call", () => {
 			const lines = bursts(BS, 1000, 60, range(21, 29))
 			lines.push([1000 + 60 * DMR_BURST_MS, BS("TLC")])
@@ -158,7 +158,7 @@ describe("dsd-fme call-first: review fixes", () => {
 
 		it("property: per-burst prints with random lost bursts and ±45 ms jitter never split an over", () => {
 			// Feature: dv-call-first, Property: lost DMR bursts never split a continuous over
-			// Validates: final review F-M1 (grid measured on each burst's superframe start)
+			// Validates: lost bursts and missed syncs keep one over
 			fc.assert(
 				fc.property(
 					fc.boolean(),
@@ -201,7 +201,7 @@ describe("dsd-fme call-first: review fixes", () => {
 		})
 	})
 
-	describe("F-M2: an identity-less call needs evidence", () => {
+	describe("an identity-less call needs evidence", () => {
 		it("two direct-mode voice syncs 700 ms apart start no call", () => {
 			const { starts, ends, voice } = replay(
 				[
@@ -334,7 +334,7 @@ describe("dsd-fme call-first: review fixes", () => {
 		})
 	})
 
-	describe("F-M3: the terminator's trailer names a call with no IDs yet", () => {
+	describe("the terminator's trailer names a call with no IDs yet", () => {
 		const head: Line[] = [
 			[1000, MS("VC*")],
 			[1360, MS("VC*")],

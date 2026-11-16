@@ -2,7 +2,7 @@
  * dsd-fme DMR call lifecycle on lines recorded from dsd-fme (synthetic IQ in
  * the core image: tests/integration/dv-capture.test.ts, the seeds of
  * tests/mocks/fixtures/synthetic/dv-latency-dmr-*.json). Each case is a short
- * excerpt of one root cause the modelled per-burst timings hid:
+ * excerpt of one line shape the modelled per-burst timings hid:
  *
  * - a repeater over's first voice burst prints "VC1*" (with the star);
  * - an over's first syncs print a garbled colour code (07, 13, 05, 02, 00);
@@ -210,7 +210,7 @@ describe("dsd-fme on recorded DMR lines", () => {
 
 		it("property: a direct over whose syncs arrive in clumps of 300 to 400 ms is one call", () => {
 			// Feature: dv-call-first, Property: clumped DMR line arrival never splits a continuous over
-			// Validates: DV-M root cause 3 (no superframe grid on arrival times)
+			// Validates: no superframe grid on clumped arrival times
 			fc.assert(
 				fc.property(
 					fc.integer({ min: 4, max: 30 }),
