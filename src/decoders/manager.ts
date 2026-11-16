@@ -251,6 +251,14 @@ interface ScanHold {
  */
 type VfoSettleKind = "hop" | "restore" | "user" | "other"
 
+/** Why a source caps change restarts a decoder (handleCapsChange). */
+type CapsRestartCause =
+	| "sample-rate"
+	| "input-format"
+	| "active-pipeline"
+	| "channel-stale"
+	| "reference-moved"
+
 const sameVfo = (a: PlannerVfo | null | undefined, b: PlannerVfo | null) =>
 	a?.sourceId === b?.sourceId && a?.frequencyHz === b?.frequencyHz
 
@@ -2439,10 +2447,16 @@ export class DecoderManager extends EventEmitter {
 					// A moved placement with a crash retry pending waits for that retry,
 					// which starts it with the options set above (backoff honoured).
 					const retryPending = moved && state.restartTimer !== null
+					// A wanted worker whose start was already refused (suspended
+					// before its lifecycle exists) is not started again on every
+					// pass: the source evaluation resumes it once the reason
+					// clears (hold release, caps change, due efficiency refusal).
+					const refused =
+						wasWanted && !state.lifecycle && state.suspension !== null
 					if (
 						!retryPending &&
 						((state.owner === "placement" &&
-							(!wasWanted || !state.lifecycle)) ||
+							(!wasWanted || (!state.lifecycle && !refused))) ||
 							moved)
 					) {
 						// A move is not a new start: crash accounting survives it.
@@ -3536,10 +3550,14 @@ export class DecoderManager extends EventEmitter {
 		if (state.stagedOptions) this.rebuildIfPending(state, keepFailureAccounting)
 
 		if (intent) state.startMode = intent.startMode
-		this.log.info(
-			{ decoderId: id, startMode: state.startMode },
-			"Starting decoder",
-		)
+		// One info line per state change: a start that only repeats the
+		// suspension the decoder already holds is logged at debug.
+		const priorReason = state.suspension?.reasonCode
+		const logStart = (repeat: boolean) =>
+			this.log[repeat ? "debug" : "info"](
+				{ decoderId: id, startMode: state.startMode },
+				"Starting decoder",
+			)
 
 		// Reset restart tracking
 		state.intentionallyStopped = false
@@ -3569,6 +3587,7 @@ export class DecoderManager extends EventEmitter {
 			state.ratePlan = eligibility.rate
 			state.bandPlan = eligibility.band
 			if (eligibility.blockedBy !== null) {
+				logStart(priorReason === eligibility.blockedBy)
 				state.suspension = {
 					reasonCode: eligibility.blockedBy,
 					since: suspensionSince(state.suspension, eligibility.blockedBy),
@@ -3602,6 +3621,7 @@ export class DecoderManager extends EventEmitter {
 				return
 			}
 		}
+		logStart(false)
 		state.suspension = null
 		state.transition = null
 
@@ -5863,7 +5883,13 @@ export class DecoderManager extends EventEmitter {
 			"Source caps changed, updating decoder options",
 		)
 
-		const restartDecoders = new Set<string>()
+		// Each restart keeps the instance it was decided for and why: a
+		// parent's restart re-places its workers, so a worker listed here may
+		// be gone or replaced by the time its turn comes (nothing to restart).
+		const restartDecoders = new Map<
+			string,
+			{ state: DecoderState; cause: CapsRestartCause }
+		>()
 		const referenceRestarts = new Set<string>()
 		// Update each decoder's inputSampleRate option BEFORE restart
 		// This ensures the decoder rebuilds its pipeline with the correct sample rate
@@ -5908,13 +5934,22 @@ export class DecoderManager extends EventEmitter {
 				previous.centerFreq !== caps.centerFreq
 			)
 				this.startMovedListening(state)
-			if (inputChanged || !passive || state.channelStale)
-				restartDecoders.add(decoderId)
+			const cause: CapsRestartCause | null =
+				previous?.sampleRate !== caps.sampleRate
+					? "sample-rate"
+					: inputChanged
+						? "input-format"
+						: !passive
+							? "active-pipeline"
+							: state.channelStale
+								? "channel-stale"
+								: null
+			if (cause !== null) restartDecoders.set(decoderId, { state, cause })
 			else if (referenceMoved) {
 				// A reference move is not a new start: crash accounting survives it,
 				// and a pending crash retry starts the process with the new centre.
 				if (!state.restartTimer) {
-					restartDecoders.add(decoderId)
+					restartDecoders.set(decoderId, { state, cause: "reference-moved" })
 					referenceRestarts.add(decoderId)
 				}
 			}
@@ -5946,18 +5981,31 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		// Restart only pipelines whose input format/rate or tuned arguments changed.
-		for (const decoderId of restartDecoders) {
+		for (const [decoderId, planned] of restartDecoders) {
 			if (!this.capsChangedHandler || this.destroying) break
 			const state = this.decoders.get(decoderId)
-			if (state?.intentionallyStopped) continue
-			if (state?.channelStale || referenceRestarts.has(decoderId))
-				state!.keepFailureAccounting = true
+			// Removed or re-placed meanwhile (its parent's restart re-plans its
+			// workers): the new instance started with the current caps.
+			if (state !== planned.state) {
+				this.log.debug(
+					{ decoderId, cause: planned.cause },
+					"Decoder replaced before its caps restart; skipping",
+				)
+				continue
+			}
+			if (state.intentionallyStopped) continue
+			// Only its channel was stale and something rewired it meanwhile.
+			if (planned.cause === "channel-stale" && !state.channelStale) continue
+			if (state.channelStale || referenceRestarts.has(decoderId))
+				state.keepFailureAccounting = true
 			try {
 				await this.restartDecoder(decoderId)
 			} catch (err) {
 				this.log.error(
-					{ decoderId, err: safeErrorFields(err) },
-					"Failed to restart decoder after sample rate change",
+					{ decoderId, cause: planned.cause, err: safeErrorFields(err) },
+					planned.cause === "sample-rate"
+						? "Failed to restart decoder after sample rate change"
+						: "Failed to restart decoder after source change",
 				)
 			} finally {
 				// Not carried into a later operator start if the restart bailed.

@@ -901,14 +901,12 @@ it.each(
 			f.sources.setRate("rtl", 2_400_000)
 		}
 		await vi.advanceTimersByTimeAsync(2500)
+		// A worker is started once per parent restart: the parent's restart
+		// re-places it, so the caps change does not restart it a second time.
 		expect(gate.admit).toHaveBeenCalledTimes(
 			calls +
-				(worker && path === "caps change"
-					? 12
-					: worker && path === "source reconnect"
-						? 6
-						: (path === "caps change" ? 4 : 2) *
-							(worker && path !== "crash restart" ? 2 : 1)),
+				(path === "caps change" ? 4 : 2) *
+					(worker && path !== "crash restart" ? 2 : 1),
 		)
 		expect(f.instances.get("a")?.running).toBe(true)
 		if (worker) expect(f.instances.get(placement.key)?.running).toBe(true)
