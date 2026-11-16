@@ -113,7 +113,11 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Recordings (`recordings.ts`): `GET /api/recordings` with the core's query parameters (`limit`,
   `cursor`, `kind`, `decoderId`, `kept`, `discoveryId`, `talkgroup`, `source`, `minHz`, `maxHz`,
   `since`, `until`, `q`) and page fields (`revision`, `indexing`, `matched`, `counts`,
-  `truncatedBefore`), the file download, Keep and delete. Not mocked: the `recordings` WebSocket
+  `truncatedBefore`), the file download, Keep and delete. The seeded scanner recordings cover the
+  naming cases: a three-part transmission split by roll-overs (`Part 1 of 3 · continues`), a lone
+  rolled-over file whose chain is not known yet and whose carrier sits 0.3 kHz off the raster on
+  an unsaved channel (`FM voice`, `Continues…`), and files on a saved frequency (its saved name).
+  `node scripts/ui-check.mjs --flow=naming` reads them. Not mocked: the `recordings` WebSocket
   notice.
 - Recording links, as the core: every dsd-fme call recording has its `call_end` Activity row and
   every scanner analog recording a `recording-change` row (seeded ones within the 45 min history,

@@ -1,18 +1,23 @@
-// The app's single-key shortcuts (keys.ts), always mounted; the palette itself loads on first use.
+// The app's single-key shortcuts (keys.ts), always mounted; the palette itself loads on first use. It also
+// keeps the saved names every surface uses (naming.ts) in step with the saved frequencies.
 import { useEffect } from "react"
 
 import { isReadOnly, useServices } from "../../app/context.ts"
+import { setActivityLayout } from "../activity/layout.ts"
 import { shellStore } from "../../shell/store.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
 import { feedControllerFor, toggleFeed } from "../receiver/feed.ts"
 import { toggleOpen } from "../listen/squelch-actions.ts"
+import { followSavedNames } from "../naming.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
 import { GO_WINDOW_MS, isTypingTarget, shortcutFor } from "./keys.ts"
 import { openPalette } from "./request.ts"
 
 export function PaletteKeys() {
 	const { data, tuning, prefs, listen } = useServices()
+	// saved names rename their channel everywhere (naming.ts): this always-mounted root keeps them current
+	useEffect(() => followSavedNames(data.savedFrequencies), [data])
 	useEffect(() => {
 		let goUntil = 0
 		const onKey = (e: KeyboardEvent) => {
@@ -42,6 +47,7 @@ export function PaletteKeys() {
 					shellStore.setView(sc.id)
 					break
 				case "drawer":
+					if (sc.layout) setActivityLayout(sc.layout)
 					shellStore.openDrawer(sc.id)
 					break
 				case "scope":
@@ -61,7 +67,7 @@ export function PaletteKeys() {
 				}
 				case "listen":
 					if (!data.liveAudio.get().status) return
-					void (listen.get().wanted ? listen.stop() : listen.start())
+					void listen.toggle()
 					break
 				case "squelchOpen":
 					if (!data.liveAudio.get().status || isReadOnly(data.access.get()))

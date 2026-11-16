@@ -3,15 +3,14 @@ import "./recordings.css"
 // The Recordings drawer (Recordings board), on the core's recordings catalogue (WG8 inventory, WG9 Keep and
 // delete): header "Recordings · count · All / Kept" with the core's counts, typed-chip search run by the core,
 // one notice slot, the virtual list of rows grouped by day (only what is on screen is mounted; older pages
-// load at the end; open in place: waveform, Keep, Download, Tune, Show in Activity or Scanner, Delete with
-// Undo), the player bar and the storage footer. The list follows the catalogue's `recordings` socket notices;
-// arrivals hold while it is scrolled or playing ("N new"). Names, notes, trim, transcripts, IQ captures and
-// Opus downloads wait for the core (CORE-GAPS "Recordings").
+// load at the end; open in place: waveform, then Play, Keep, ⋯ (Download, Tune, Evidence, Delete with Undo)
+// and one channel link) and the storage footer. Playback is the app's one player (services.playback, its dock
+// the only transport): the row disc toggles it, the open row's waveform seeks it, the playing row is marked.
+// The list follows the catalogue's `recordings` socket notices; arrivals hold while it is scrolled or playing
+// from it ("N new"). Names, notes, trim, transcripts, IQ captures and Opus downloads wait for the core
+// (CORE-GAPS "Recordings").
 import { memo, useEffect, useMemo, useRef, useState } from "react"
-import type {
-	KeyboardEvent as ReactKeyboardEvent,
-	PointerEvent as ReactPointerEvent,
-} from "react"
+import type { ReactNode, KeyboardEvent as ReactKeyboardEvent } from "react"
 import type { RecordingInventoryItem } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
@@ -38,7 +37,16 @@ import { Seg } from "../../ui/Seg.tsx"
 import { useVirtualRows } from "../../ui/virtual-rows.ts"
 import { token as activityToken } from "../activity/search.ts"
 import { openDiscovery } from "../scanner/ui-store.ts"
-import { formatMHz } from "../format.ts"
+import {
+	channelMHz,
+	historyLabel,
+	showChannel,
+	useSavedNames,
+} from "../naming.ts"
+import { tuningStep } from "../../plot/maths.ts"
+import { playbackIdOf } from "../playback/keep.ts"
+import { PlayDisc, usePlaybackMark, WaveView } from "../playback/PlaybackUi.tsx"
+import type { PlaybackService, QueueRef } from "../playback/service.ts"
 import { PlayGlyph, RecIcon } from "./icons.tsx"
 import { listKeyAction } from "./keys.ts"
 import {
@@ -46,11 +54,9 @@ import {
 	dayEntries,
 	deleteBlocker,
 	formatBytes,
-	formatDuration,
 	headerCount,
 	recordedAt,
 	recordingIcon,
-	recordingCutLabel,
 	recordingMeta,
 	recordingTitle,
 	recordingsQuery,
@@ -58,7 +64,6 @@ import {
 	suggest,
 	timeLabel,
 } from "./model.ts"
-import { RecordingPlayer, WAVE_BARS } from "./player.ts"
 import type { RecFilter } from "./ui-store.ts"
 import {
 	addToken,
@@ -68,7 +73,6 @@ import {
 	removeToken,
 	setCursor,
 	setFilter,
-	requestReveal,
 	revealRequest,
 	setText,
 	visibleRecordings,
@@ -89,23 +93,18 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 	const recordings = services.data.recordings
 	const unavailable = useStore(recordings, recordingsUnavailable)
 	const readOnly = useReadOnly()
-
-	// the list as shown, read by the player's auto-advance
-	const order = useRef<readonly RecordingInventoryItem[]>([])
-	const player = useMemo(
-		() =>
-			new RecordingPlayer({
-				fetchFile: id => recordings.file(id),
-				holdLive: held => services.listen.hold(held),
-				nextOf: id => {
-					const list = order.current
-					const i = list.findIndex(r => r.id === id)
-					return i >= 0 ? (list[i + 1]?.id ?? null) : null
-				},
-			}),
-		[recordings, services.listen],
-	)
-	useEffect(() => () => player.dispose(), [player])
+	const player = services.playback
+	// the open row: the dock goes compact while it is the playing one
+	const openId = useStore(recordingsUi, s => s.openId)
+	const openPid = useStore(recordings, s => {
+		const item =
+			openId === null ? undefined : s.items.find(r => r.id === openId)
+		return item ? playbackIdOf(item) : null
+	})
+	useEffect(() => {
+		player.setExpanded("recordings", openPid)
+	}, [player, openPid])
+	useEffect(() => () => player.setExpanded("recordings", null), [player])
 
 	// open: the list for the current search, following the catalogue's notices (no polling)
 	useEffect(() => {
@@ -145,8 +144,7 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 						</p>
 					)}
 					<SearchBar />
-					<List player={player} order={order} readOnly={readOnly} />
-					<PlayerBar player={player} order={order} />
+					<List player={player} readOnly={readOnly} />
 				</>
 			)}
 			<Footer />
@@ -387,13 +385,24 @@ function noticeText(
 	}
 }
 
+/** The Recordings queue: the playable rows as shown, by playback id, with their titles. */
+export function recordingsQueue(
+	visible: readonly RecordingInventoryItem[],
+): QueueRef {
+	const titles: Record<string, string> = {}
+	for (const r of visible) titles[playbackIdOf(r)] = recordingTitle(r)
+	return {
+		source: "recordings",
+		ids: visible.map(playbackIdOf),
+		titles,
+	}
+}
+
 function List({
 	player,
-	order,
 	readOnly,
 }: {
-	player: RecordingPlayer
-	order: { current: readonly RecordingInventoryItem[] }
+	player: PlaybackService
 	readOnly: boolean
 }) {
 	const recordings = useServices().data.recordings
@@ -416,14 +425,24 @@ function List({
 	const filter = useStore(recordingsUi, s => s.filter)
 	const openId = useStore(recordingsUi, s => s.openId)
 	const cursorId = useStore(recordingsUi, s => s.cursorId)
-	const playing = useStore(player, s => s.id !== null)
+	// playing from this list holds its arrivals: its row does not move under the ear
+	const playing = useStore(
+		player,
+		s => s.id !== null && s.queue?.source === "recordings",
+	)
 	const [kb, setKb] = useState(false)
-	const actions = useActions(player)
 	const visible = useMemo(
 		() => visibleRecordings(items, removing),
 		[items, removing],
 	)
-	order.current = visible
+	// the list as shown is the queue Next and Auto-next follow while it is the one played from
+	const queue = useMemo(() => recordingsQueue(visible), [visible])
+	const queueRef = useRef(queue)
+	queueRef.current = queue
+	useEffect(() => {
+		player.setQueue("recordings", queue.ids, queue.titles)
+	}, [player, queue])
+	const actions = useActions(player, queueRef)
 	// the day labels follow the clock; a minute is fine for "Today"
 	const [now, setNow] = useState(() => new Date())
 	useEffect(() => {
@@ -525,6 +544,8 @@ function List({
 
 	const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
 		const target = e.target as HTMLElement
+		// a row's ⋯ menu owns its keys: arrows, Delete, Backspace or S there never act on the list
+		if (target.closest("[role=menu]") !== null) return
 		const i = visible.findIndex(r => r.id === cursorId)
 		const cur = visible[i]
 		const p = player.get()
@@ -755,7 +776,6 @@ function List({
 											open={openId === e.item.id}
 											tabStop={tabId === e.item.id}
 											cursor={kb && cursorId === e.item.id}
-											player={player}
 											readOnly={readOnly}
 											actions={actions}
 											list={visible}
@@ -781,7 +801,6 @@ function List({
 											open={openId === e.item.id}
 											tabStop={tabId === e.item.id}
 											cursor={kb && cursorId === e.item.id}
-											player={player}
 											readOnly={readOnly}
 											actions={actions}
 											list={visible}
@@ -826,6 +845,8 @@ function ListFoot() {
 const rowDomId = (id: string) => `wkr-${id.replace(/[^A-Za-z0-9_-]/g, "_")}`
 
 interface Actions {
+	/** The list it plays from, as shown now. */
+	queue(): QueueRef
 	play(r: RecordingInventoryItem): void
 	keep(r: RecordingInventoryItem): void
 	remove(
@@ -833,19 +854,25 @@ interface Actions {
 		list: readonly RecordingInventoryItem[],
 	): void
 	tune(hz: number): void
-	inActivity(r: RecordingInventoryItem): void
-	inScanner(discoveryId: string): void
+	/** The row's one channel link: Activity on its channel (or talkgroup), its own transmission open when known. */
+	channel(r: RecordingInventoryItem): void
+	/** Scanner on the discovery that owns it. */
+	evidence(discoveryId: string): void
 }
 
-function useActions(player: RecordingPlayer): Actions {
+function useActions(
+	player: PlaybackService,
+	queue: { current: QueueRef },
+): Actions {
 	const services = useServices()
 	const recordings = services.data.recordings
 	return useMemo<Actions>(
 		() => ({
+			queue: () => queue.current,
 			play(r) {
-				const p = player.get()
-				if (p.id === r.id) player.toggle()
-				else void player.play(r.id)
+				const id = playbackIdOf(r)
+				if (player.get().id === id) player.toggle()
+				else player.play(id, queue.current, 0, recordingTitle(r))
 			},
 			keep(r) {
 				const kept = r.kept !== true
@@ -864,7 +891,7 @@ function useActions(player: RecordingPlayer): Actions {
 				const ui = recordingsUi.get()
 				if (ui.openId === r.id) openRow(neighbour?.id ?? null)
 				else if (ui.cursorId === r.id) setCursor(neighbour?.id ?? null)
-				player.forget(r.id)
+				player.forget(playbackIdOf(r))
 				const title = recordingTitle(r)
 				const undo = recordings.scheduleRemove(r.id, error =>
 					showAppToast(`Could not delete “${title}”: ${errorMessage(error)}`, {
@@ -881,24 +908,30 @@ function useActions(player: RecordingPlayer): Actions {
 			tune(hz) {
 				void services.tuning.tune(hz)
 			},
-			inActivity(r) {
-				if (r.talkgroup)
+			channel(r) {
+				const eventId = r.activityEventId ?? null
+				if (r.frequencyHz !== null)
+					showChannel(
+						services.activity,
+						r.frequencyHz,
+						tuningStep(services.data.bandplan.get().view, r.frequencyHz),
+					)
+				else if (r.talkgroup) {
 					services.activity.setSearch(
 						[activityToken("talkgroup", r.talkgroup)],
 						null,
 					)
-				else if (r.frequencyHz !== null) {
-					services.activity.showFrequency(r.frequencyHz)
-					return
-				} else return
-				shellStore.openDrawer("activity")
+					shellStore.openDrawer("activity")
+				} else if (eventId === null) return
+				// its own transmission opens over the channel's list
+				if (eventId !== null) services.activity.showEvent(eventId)
 			},
-			inScanner(discoveryId) {
+			evidence(discoveryId) {
 				openDiscovery(discoveryId)
 				shellStore.openDrawer("scanner")
 			},
 		}),
-		[player, recordings, services],
+		[player, queue, recordings, services],
 	)
 }
 
@@ -915,7 +948,6 @@ interface RowProps {
 	item: RecordingInventoryItem
 	open: boolean
 	cursor: boolean
-	player: RecordingPlayer
 	readOnly: boolean
 	actions: Actions
 	list: readonly RecordingInventoryItem[]
@@ -930,21 +962,20 @@ const Row = memo(function Row({
 	item: r,
 	open,
 	cursor,
-	player,
 	readOnly,
 	actions,
 	list,
 }: RowProps) {
 	useDisplay() // the time follows Settings › Display
-	const phase = useStore(player, s => (s.id === r.id ? s.phase : null))
+	useSavedNames() // a saved name renames the row's title and its channel link
+	const pid = playbackIdOf(r)
+	const phase = usePlaybackMark(pid)
 	const recordings = useServices().data.recordings
 	const keeping = useStore(recordings.marks, m => m.keeping.has(r.id))
 	const title = recordingTitle(r)
 	const icon = recordingIcon(r)
 	const at = recordedAt(r)
-	const playing = phase === "playing" || phase === "loading"
 	const kept = r.kept === true
-	const dur = r.durationMs !== null ? formatDuration(r.durationMs / 1000) : "–"
 	const toggleOpen = () => openRow(open ? null : r.id)
 	return (
 		<article
@@ -990,357 +1021,306 @@ const Row = memo(function Row({
 							)}
 						</span>
 						<span className="wkr-meta">{recordingMeta(r)}</span>
-						{phase !== null && !open && <MiniBar player={player} />}
 					</span>
 				</button>
-				<button
-					type="button"
-					className="wkr-play"
-					data-state={
-						phase === "playing"
-							? "playing"
-							: phase !== null
-								? "current"
-								: undefined
-					}
-					aria-label={`${phase === "playing" ? "Pause" : "Play"} ${title}`}
-					title={phase === "playing" ? "Pause" : "Play"}
-					onClick={() => actions.play(r)}
-				>
-					<span className="wkr-play-disc">
-						{phase === "loading" ? (
-							<span className="wk-spinner" aria-hidden="true" />
-						) : (
-							<PlayGlyph playing={playing} />
-						)}
-					</span>
-					<span className="wkr-dur">{dur}</span>
-				</button>
+				<PlayDisc
+					id={pid}
+					title={title}
+					durationMs={r.durationMs}
+					queue={actions.queue}
+				/>
 			</div>
 			{open && (
 				<div className="wkr-detail">
-					<Strip item={r} player={player} />
-					<div className="wkr-actions">
-						<button
-							type="button"
-							className="wk-btn"
-							data-variant="outline"
-							aria-pressed={kept}
-							disabled={readOnly || keeping}
-							title={
-								kept
-									? "Kept: retention never deletes it. Click to unkeep (S)"
-									: "Keep: protect it from every retention rule (S)"
-							}
-							onClick={() => actions.keep(r)}
-						>
-							<RecIcon name="star" size={15} filled={kept} />
-							{kept ? "Kept" : "Keep"}
-						</button>
-						<a
-							className="wk-btn"
-							data-variant="outline"
-							href={recordings.fileUrl(r.id)}
-							download
-							title="The whole WAV file"
-						>
-							<RecIcon name="download" size={15} />
-							WAV · {formatBytes(r.bytes)}
-						</a>
-						{r.frequencyHz !== null && (
-							<button
-								type="button"
-								className="wk-btn"
-								data-variant="outline"
-								onClick={() => actions.tune(r.frequencyHz ?? 0)}
-							>
-								<RecIcon name="tune" size={15} />
-								Tune to {formatMHz(r.frequencyHz)}
-							</button>
-						)}
-						{(r.talkgroup !== null || r.frequencyHz !== null) && (
-							<button
-								type="button"
-								className="wk-btn"
-								data-variant="outline"
-								title={
-									r.talkgroup
-										? `What was heard on talkgroup ${r.talkgroup}`
-										: "What was heard on this frequency"
-								}
-								onClick={() => actions.inActivity(r)}
-							>
-								<RecIcon name="activity" size={15} />
-								Show in Activity
-							</button>
-						)}
-						{r.discoveryId !== null && (
-							<button
-								type="button"
-								className="wk-btn"
-								data-variant="outline"
-								onClick={() => actions.inScanner(r.discoveryId ?? "")}
-							>
-								<RecIcon name="scan" size={15} />
-								Show in Scanner
-							</button>
-						)}
-						{!readOnly && (
-							<DeleteButton item={r} actions={actions} list={list} />
-						)}
-					</div>
+					<WaveView
+						id={pid}
+						title={title}
+						durationMs={r.durationMs}
+						queue={actions.queue}
+					/>
+					<RowActions
+						item={r}
+						title={title}
+						playing={phase === "playing" || phase === "loading"}
+						kept={kept}
+						keeping={keeping}
+						readOnly={readOnly}
+						fileUrl={recordings.fileUrl(r.id)}
+						actions={actions}
+						list={list}
+					/>
 				</div>
 			)}
 		</article>
 	)
 })
 
-function DeleteButton({
-	item,
+/** The channel link's words: "History of Club net", "History of 145.6125", "History of TG 2081". */
+export function channelLinkLabel(r: RecordingInventoryItem): string | null {
+	if (r.frequencyHz !== null) return historyLabel(r.frequencyHz)
+	if (r.talkgroup) return `History of TG ${r.talkgroup}`
+	return r.activityEventId ? "Open transmission" : null
+}
+
+/**
+ * An open row's actions (Recordings board, design "same order everywhere"): Play, Keep, ⋯ (Download, Tune,
+ * Evidence, Delete) and one channel link.
+ */
+function RowActions({
+	item: r,
+	title,
+	playing,
+	kept,
+	keeping,
+	readOnly,
+	fileUrl,
 	actions,
 	list,
 }: {
 	item: RecordingInventoryItem
+	title: string
+	playing: boolean
+	kept: boolean
+	keeping: boolean
+	readOnly: boolean
+	fileUrl: string
 	actions: Actions
 	list: readonly RecordingInventoryItem[]
 }) {
-	const blocker = deleteBlocker(item)
+	const [menu, setMenu] = useState(false)
+	const moreRef = useRef<HTMLButtonElement>(null)
+	const link = channelLinkLabel(r)
+	const owner = r.ownerDiscoveryId ?? r.discoveryId
+	const blocker = deleteBlocker(r)
 	return (
-		<button
-			type="button"
-			className="wk-btn wkr-delete"
-			data-variant="outline"
-			aria-disabled={blocker !== null || undefined}
-			title={blocker ?? "Delete the file (Undo for a few seconds)"}
-			onClick={() => {
-				if (blocker !== null) showAppToast(blocker)
-				else actions.remove(item, list)
-			}}
-		>
-			<RecIcon name="trash" size={15} />
-			Delete
-		</button>
-	)
-}
-
-function MiniBar({ player }: { player: RecordingPlayer }) {
-	const pct = useStore(player, s =>
-		s.duration ? Math.min(100, (s.pos / s.duration) * 100) : 0,
-	)
-	return (
-		<span className="wkr-mini" aria-hidden="true">
-			<span style={{ width: `${pct}%` }} />
-		</span>
-	)
-}
-
-/** The waveform: click (or drag) to play from there; the playhead follows playback. */
-function Strip({
-	item,
-	player,
-}: {
-	item: RecordingInventoryItem
-	player: RecordingPlayer
-}) {
-	const peaks = useStore(player.peaks, m => m.get(item.id))
-	const current = useStore(player, s => s.id === item.id)
-	const frac = useStore(player, s =>
-		s.id === item.id && s.duration ? Math.min(1, s.pos / s.duration) : 0,
-	)
-	useEffect(() => {
-		void player.loadPeaks(item.id)
-	}, [player, item.id])
-	const total = item.durationMs !== null ? item.durationMs / 1000 : null
-	const seekAt = (e: ReactPointerEvent<HTMLDivElement>) => {
-		const rect = e.currentTarget.getBoundingClientRect()
-		const f = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
-		const d =
-			player.get().id === item.id ? (player.get().duration ?? total) : total
-		if (d === null) return
-		if (player.get().id === item.id) {
-			player.seek(f * d)
-			if (player.get().phase !== "playing") player.resume()
-		} else void player.play(item.id, f * d)
-	}
-	const bars = Array.isArray(peaks) ? peaks : null
-	const w = 600 / WAVE_BARS
-	return (
-		<div className="wkr-strip-wrap">
-			<div
-				className="wkr-strip"
-				title="Click to play from here"
-				onPointerDown={e => {
-					e.currentTarget.setPointerCapture(e.pointerId)
-					seekAt(e)
-				}}
-				onPointerMove={e => {
-					if (e.buttons === 1 && e.currentTarget.hasPointerCapture(e.pointerId))
-						seekAt(e)
-				}}
+		<div className="wkr-actions">
+			<button
+				type="button"
+				className="wk-btn"
+				data-variant="outline"
+				aria-label={`${playing ? "Pause" : "Play"} ${title}`}
+				onClick={() => actions.play(r)}
 			>
-				<svg
-					width="100%"
-					height="100%"
-					viewBox="0 0 600 100"
-					preserveAspectRatio="none"
-					aria-hidden="true"
+				<PlayGlyph playing={playing} />
+				{playing ? "Pause" : "Play"}
+			</button>
+			<button
+				type="button"
+				className="wk-btn"
+				data-variant="outline"
+				aria-pressed={kept}
+				disabled={readOnly || keeping}
+				title={
+					kept
+						? "Kept: retention never deletes it. Click to unkeep (S)"
+						: "Keep: protect it from every retention rule (S)"
+				}
+				onClick={() => actions.keep(r)}
+			>
+				<RecIcon name="star" size={15} filled={kept} />
+				{kept ? "Kept" : "Keep"}
+			</button>
+			<span className="wkr-more">
+				<button
+					ref={moreRef}
+					type="button"
+					className="wk-btn"
+					data-variant="outline"
+					aria-label="More actions"
+					aria-haspopup="menu"
+					aria-expanded={menu}
+					title="Download, tune, evidence, delete"
+					onClick={() => setMenu(m => !m)}
 				>
-					{bars ? (
-						bars.map((p, i) => {
-							const h = Math.max(3, p * 84)
-							const played = current && (i + 0.5) / WAVE_BARS <= frac
-							return (
-								<rect
-									key={i}
-									x={(i * w + w * 0.18).toFixed(1)}
-									y={(50 - h / 2).toFixed(1)}
-									width={(w * 0.64).toFixed(1)}
-									height={h.toFixed(1)}
-									className={played ? "wkr-bar is-played" : "wkr-bar"}
-								/>
-							)
-						})
-					) : (
-						<rect x="0" y="49" width="600" height="2" className="wkr-bar" />
-					)}
-				</svg>
-				{current && (
-					<div className="wkr-head" style={{ left: `${frac * 100}%` }} />
+					<Icon name="dots" size={15} />
+				</button>
+				{menu && (
+					<RowMenu
+						onClose={refocus => {
+							setMenu(false)
+							if (refocus) moreRef.current?.focus()
+						}}
+					>
+						<a
+							role="menuitem"
+							className="wk-option"
+							href={fileUrl}
+							download
+							title="The whole WAV file"
+						>
+							<RecIcon name="download" size={16} />
+							<span className="wkf-grow">Download WAV</span>
+							<span className="wkf-menu-hint">{formatBytes(r.bytes)}</span>
+						</a>
+						{r.frequencyHz !== null && (
+							<button
+								type="button"
+								role="menuitem"
+								className="wk-option"
+								onClick={() => actions.tune(r.frequencyHz ?? 0)}
+							>
+								<RecIcon name="tune" size={16} />
+								<span className="wkf-grow">
+									Tune to {channelMHz(r.frequencyHz)}
+								</span>
+							</button>
+						)}
+						{owner !== null && (
+							<button
+								type="button"
+								role="menuitem"
+								className="wk-option"
+								title="The scanner's discovery for this channel"
+								onClick={() => actions.evidence(owner)}
+							>
+								<RecIcon name="scan" size={16} />
+								<span className="wkf-grow">Evidence</span>
+							</button>
+						)}
+						{!readOnly && (
+							<button
+								type="button"
+								role="menuitem"
+								className="wk-option wkr-delete"
+								aria-disabled={blocker !== null || undefined}
+								title={blocker ?? "Delete the file (Undo for a few seconds)"}
+								onClick={() => {
+									if (blocker !== null) showAppToast(blocker)
+									else actions.remove(r, list)
+								}}
+							>
+								<RecIcon name="trash" size={16} />
+								<span className="wkf-grow">Delete</span>
+							</button>
+						)}
+					</RowMenu>
 				)}
-				{peaks === undefined && (
-					<span className="wkr-strip-note">Loading waveform…</span>
-				)}
-			</div>
-			<div className="wkr-strip-times">
-				<span>0:00</span>
-				<span>{total !== null ? formatDuration(total) : ""}</span>
-			</div>
+			</span>
+			{link !== null && (
+				<button
+					type="button"
+					className="wk-btn wkr-channel"
+					data-variant="ghost"
+					title={
+						r.activityEventId
+							? "This channel in Activity, with this transmission open"
+							: "What was heard on this channel, in Activity"
+					}
+					onClick={() => actions.channel(r)}
+				>
+					<RecIcon name="activity" size={15} />
+					{link}
+				</button>
+			)}
 		</div>
 	)
 }
 
-// ---- player bar
+/** What a key does inside the ⋯ menu: move focus to a row, close it, or nothing the menu owns. */
+export type RowMenuKey =
+	| { type: "focus"; index: number }
+	| { type: "close"; refocus: boolean }
+	| null
 
-function PlayerBar({
-	player,
-	order,
+/** The ⋯ menu's keys: arrows wrap, Home and End jump, Esc closes onto ⋯, Tab closes as focus moves on. */
+export function rowMenuKey(key: string, at: number, count: number): RowMenuKey {
+	if (key === "Escape") return { type: "close", refocus: true }
+	if (key === "Tab") return { type: "close", refocus: false }
+	if (count === 0) return null
+	if (key === "ArrowDown" || key === "ArrowUp") {
+		const by = key === "ArrowDown" ? 1 : -1
+		const from = at < 0 ? (by > 0 ? -1 : 0) : at
+		return { type: "focus", index: (from + by + count) % count }
+	}
+	if (key === "Home") return { type: "focus", index: 0 }
+	if (key === "End") return { type: "focus", index: count - 1 }
+	return null
+}
+
+/**
+ * When a chosen row closes the menu: a link (Download WAV) only after its click has run, since unmounting it
+ * mid-click cancels the download; any other row at once.
+ */
+export function rowMenuCloseTiming(
+	el: Pick<Element, "tagName">,
+): "now" | "after" {
+	return el.tagName === "A" ? "after" : "now"
+}
+
+/**
+ * The ⋯ menu (ui.css `wk-menu`): focus starts on its first row, arrows, Home and End move, Esc, Tab, focus leaving
+ * or a press outside closes. Every key pressed inside stays inside: the list's shortcuts never see it.
+ */
+function RowMenu({
+	onClose,
+	children,
 }: {
-	player: RecordingPlayer
-	order: { current: readonly RecordingInventoryItem[] }
+	onClose: (refocus: boolean) => void
+	children: ReactNode
 }) {
-	useDisplay()
-	const id = useStore(player, s => s.id)
-	const phase = useStore(player, s => s.phase)
-	const pos = useStore(player, s => Math.floor(s.pos * 4) / 4)
-	const duration = useStore(player, s => s.duration)
-	const speed = useStore(player, s => s.speed)
-	const error = useStore(player, s => s.error)
-	const services = useServices()
-	const items = useStore(services.data.recordings, s => s.items)
-	const liveWanted = useStore(services.listen, s => s.wanted)
-	if (id === null) return null
-	const item = items.find(r => r.id === id)
-	const list = order.current
-	const i = list.findIndex(r => r.id === id)
-	const prev = i > 0 ? list[i - 1] : undefined
-	const next = i >= 0 ? list[i + 1] : undefined
-	const d = duration ?? (item?.durationMs != null ? item.durationMs / 1000 : 0)
-	const title = item ? recordingTitle(item) : "Recording"
-	const playing = phase === "playing"
+	const ref = useRef<HTMLDivElement>(null)
+	// a press inside (Safari does not focus a pressed button) is not focus leaving
+	const pressing = useRef(false)
+	useEffect(() => {
+		ref.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus()
+	}, [])
+	useEffect(() => {
+		const away = (e: PointerEvent) => {
+			if (!ref.current?.parentElement?.contains(e.target as Node))
+				onClose(false)
+		}
+		const up = () => {
+			pressing.current = false
+		}
+		document.addEventListener("pointerdown", away)
+		document.addEventListener("pointerup", up)
+		return () => {
+			document.removeEventListener("pointerdown", away)
+			document.removeEventListener("pointerup", up)
+		}
+	}, [onClose])
 	return (
-		<div className="wkr-player" role="region" aria-label="Player">
-			<div className="wkr-player-row">
-				<button
-					type="button"
-					className="wk-icon-btn"
-					data-size="sm"
-					aria-label="Previous"
-					disabled={!prev && pos < 0.5}
-					onClick={() => {
-						if (player.get().pos > 2 || !prev) player.seek(0)
-						else void player.play(prev.id)
-					}}
-				>
-					<RecIcon name="prev" size={14} />
-				</button>
-				<button
-					type="button"
-					className="wkr-player-play"
-					aria-label={playing ? "Pause" : "Play"}
-					onClick={() => player.toggle()}
-				>
-					{phase === "loading" ? (
-						<span className="wk-spinner" aria-hidden="true" />
-					) : (
-						<PlayGlyph playing={playing} size={13} />
-					)}
-				</button>
-				<button
-					type="button"
-					className="wk-icon-btn"
-					data-size="sm"
-					aria-label="Next"
-					disabled={!next}
-					onClick={() => next && void player.play(next.id)}
-				>
-					<RecIcon name="next" size={14} />
-				</button>
-				<button
-					type="button"
-					className="wkr-player-title"
-					title="Show it in the list"
-					onClick={() => {
-						openRow(id)
-						requestReveal(id)
-					}}
-				>
-					<span className="wkr-player-name">{title}</span>
-					<span
-						className="wkr-player-sub"
-						data-tone={error ? "warn" : undefined}
-					>
-						{error ??
-							[
-								item ? timeLabel(recordedAt(item)) : null,
-								item ? recordingCutLabel(item) : null,
-								liveWanted ? "live audio muted" : null,
-							]
-								.filter(Boolean)
-								.join(" · ")}
-					</span>
-				</button>
-				<span className="wkr-player-time">
-					{formatDuration(pos)} / {formatDuration(d)}
-				</span>
-				<button
-					type="button"
-					className="wk-chip"
-					data-size="sm"
-					title="Playback speed"
-					onClick={() => player.cycleSpeed()}
-				>
-					{speed}×
-				</button>
-				<button
-					type="button"
-					className="wk-icon-btn"
-					data-size="sm"
-					aria-label="Close player and unmute live audio"
-					title="Close player and unmute live audio"
-					onClick={() => player.stop()}
-				>
-					<RecIcon name="close" size={15} />
-				</button>
-			</div>
-			<input
-				type="range"
-				className="wkr-seek"
-				aria-label="Position"
-				min={0}
-				max={Math.max(1, Math.round(d * 10))}
-				value={Math.round(pos * 10)}
-				onChange={e => player.seek(Number(e.target.value) / 10)}
-			/>
+		<div
+			ref={ref}
+			role="menu"
+			aria-label="More actions"
+			className="wk-menu wkf-card-menu wkr-more-menu"
+			onPointerDown={() => {
+				pressing.current = true
+			}}
+			onClick={e => {
+				const item = (e.target as Element).closest("[role=menuitem]")
+				if (!item) return
+				if (rowMenuCloseTiming(item) === "after")
+					window.setTimeout(() => onClose(true), 0)
+				else onClose(true)
+			}}
+			onBlur={e => {
+				const next = e.relatedTarget as Node | null
+				if (pressing.current) return
+				if (next !== null && ref.current?.parentElement?.contains(next)) return
+				onClose(false)
+			}}
+			onKeyDown={e => {
+				e.stopPropagation()
+				const items = [
+					...(ref.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ??
+						[]),
+				]
+				const at = items.indexOf(document.activeElement as HTMLElement)
+				const action = rowMenuKey(e.key, at, items.length)
+				if (action === null) return
+				if (action.type === "focus") {
+					e.preventDefault()
+					items[action.index]?.focus()
+				} else if (action.refocus) {
+					e.preventDefault()
+					onClose(true)
+				}
+				// Tab: focus moves on by default and the menu closes as it leaves (onBlur)
+			}}
+		>
+			{children}
 		</div>
 	)
 }

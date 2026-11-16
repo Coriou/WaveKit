@@ -5,6 +5,7 @@ import type { PreferencesState } from "../data/preferences-store.ts"
 import type { ReadableStore } from "../data/store.ts"
 import { ActivityController } from "../features/activity/controller.ts"
 import { ListenController } from "../features/listen/controller.ts"
+import { PlaybackService } from "../features/playback/service.ts"
 import { feedControllerFor, shownSourceFor } from "../features/receiver/feed.ts"
 import { displayStore, type DisplayStore } from "../features/display.ts"
 import { DecodersFeed } from "../features/tuned/decoders.ts"
@@ -17,6 +18,8 @@ export interface AppServices {
 	tuning: TuningController
 	prefs: TuningPrefs
 	listen: ListenController
+	/** Recording playback: one player for every list, outliving the panels. */
+	playback: PlaybackService
 	decoders: DecodersFeed
 	/** The Activity drawer's search, open event, pinned searches and feed. */
 	activity: ActivityController
@@ -44,7 +47,15 @@ export function createServices(options: DataLayerOptions = {}): AppServices {
 	// the plotted source (also the island's, palette's and P key's receiver) follows the rows from the start
 	shownSourceFor(data)
 	const decoders = new DecodersFeed(data)
-	const listen = new ListenController(data.liveAudio)
+	// Listen pauses playback when it starts; playback holds live audio while it plays
+	const listen = new ListenController(data.liveAudio, {
+		// only called from a gesture, after both exist
+		pausePlayback: () => playback.pause(),
+	})
+	const playback = new PlaybackService({
+		fetchFile: id => data.recordings.file(id),
+		holdLive: held => listen.hold(held),
+	})
 	const activity = new ActivityController(data)
 	const tuned = new TunedActivity(data)
 	const offDisplay = followDisplay(data.preferences)
@@ -53,6 +64,7 @@ export function createServices(options: DataLayerOptions = {}): AppServices {
 		tuning: new TuningController(data),
 		prefs: new TuningPrefs(),
 		listen,
+		playback,
 		decoders,
 		activity,
 		tuned,
@@ -61,6 +73,7 @@ export function createServices(options: DataLayerOptions = {}): AppServices {
 		},
 		dispose() {
 			offDisplay()
+			playback.dispose()
 			listen.dispose()
 			activity.dispose()
 			tuned.dispose()

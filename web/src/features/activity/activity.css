@@ -369,14 +369,39 @@
 		text-align: center;
 	}
 	/* a stack: the row, then its count and span; the toggle expands the folded earlier rows in place */
-	.wka-item[data-stacked] {
+	.wka-item[data-stacked],
+	.wka-item[data-disc] {
 		display: flex;
 		align-items: flex-start;
 		gap: 2px;
 	}
-	.wka-item[data-stacked] > .wka-row {
+	.wka-item[data-stacked] > .wka-row,
+	.wka-item[data-disc] > .wka-row {
 		flex: 1;
 		min-width: 0;
+	}
+	/* a row with audio: its play disc (playback.css) beside the row, before the stack count */
+	.wka-disc {
+		align-self: flex-start;
+	}
+	/* the detail's Recording block: disc and waveform (a seek view of the dock's player), then Keep */
+	.wka-rec {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.wka-rec-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+	}
+	.wka-rec-wave {
+		flex: 1;
+		min-width: 0;
+	}
+	.wka-rec-actions {
+		display: flex;
+		gap: 6px;
 	}
 	.wka-stack {
 		flex: none;

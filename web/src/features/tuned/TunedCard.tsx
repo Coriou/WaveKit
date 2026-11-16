@@ -34,6 +34,8 @@ import { Label } from "../../ui/Label.tsx"
 import { Switch } from "../../ui/Switch.tsx"
 import { ActionMenu, type ActionMenuItem } from "../ActionMenu.tsx"
 import { formatDb, formatMHz, formatWidth } from "../format.ts"
+import { showChannel } from "../naming.ts"
+import { tuningStep } from "../../plot/maths.ts"
 import { useLiveStatus, useNow, useSettledHz } from "../hooks.ts"
 import { showOnMap } from "../map/focus.ts"
 import { messageView } from "../messages/card.ts"
@@ -69,6 +71,7 @@ import { clockText, useDisplay } from "../display.ts"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import { AUTO_IDENTIFY_DELAY_MS, shouldAutoIdentify } from "./auto-identify.ts"
 import { nowView, type NowView } from "./now.ts"
+import { TunedDisc, TunedQueue } from "./playback.tsx"
 import { tunedCardStore } from "./place.ts"
 import { signalBars, signalPresent } from "./signal.ts"
 import { DecoderVerdictsFeed, itemsFor, pendingFor } from "./verdicts.ts"
@@ -688,7 +691,8 @@ export function TunedCard() {
 		if (now.mapId) showOnMap(now.mapId)
 		else shellStore.setView("map")
 	}
-	const openActivity = () => activity.showFrequency(hz, bw)
+	// the channel's history (naming.ts): raster frequency and half a raster step, never the audio bandwidth
+	const openActivity = () => showChannel(activity, hz, tuningStep(view, hz))
 	const togglePin = () => tunedCardStore.pin(pinned === null ? hz : null)
 	const copyFreq = () => {
 		try {
@@ -738,7 +742,7 @@ export function TunedCard() {
 		)
 	if (found && now.kind !== "audio")
 		menuItems.push({
-			label: "Activity",
+			label: "History",
 			icon: "activity",
 			pick: openActivity,
 		})
@@ -970,22 +974,25 @@ export function TunedCard() {
 							<h3 className="wk-label">
 								{voice ? "Earlier on this frequency" : "Earlier"}
 							</h3>
+							<TunedQueue rows={now.earlier} />
 							{now.earlier.map(r => (
-								<button
-									key={r.id}
-									type="button"
-									className="wk-row wkf-earlier-row"
-									data-size="dense"
-									title="Open in Activity"
-									onClick={() => {
-										activity.open(r.item)
-										shellStore.openDrawer("activity")
-									}}
-								>
-									<span className="wkf-earlier-t">{r.time}</span>
-									<span className="wkf-earlier-a">{r.a}</span>
-									{r.b && <span className="wkf-earlier-b">{r.b}</span>}
-								</button>
+								<div key={r.id} className="wkf-earlier-item">
+									<button
+										type="button"
+										className="wk-row wkf-earlier-row"
+										data-size="dense"
+										title="Open in Activity"
+										onClick={() => {
+											activity.open(r.item)
+											shellStore.openDrawer("activity")
+										}}
+									>
+										<span className="wkf-earlier-t">{r.time}</span>
+										<span className="wkf-earlier-a">{r.a}</span>
+										{r.b && <span className="wkf-earlier-b">{r.b}</span>}
+									</button>
+									<TunedDisc row={r} rows={now.earlier} />
+								</div>
 							))}
 						</section>
 					)}
@@ -1083,7 +1090,7 @@ export function TunedCard() {
 								onClick={openActivity}
 							>
 								<Icon name="activity" size={15} />
-								Activity
+								History
 							</Button>
 						)}
 						{!found && (

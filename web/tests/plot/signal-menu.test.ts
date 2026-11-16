@@ -119,6 +119,28 @@ describe("spectrum signal menu", () => {
 		expect(signalMenuHead(ctx({ hz: 100_000_000 }))).toBe("100.000 MHz")
 	})
 
+	it("opens the channel's history, named by where it goes, on the raster frequency", () => {
+		// the plan names no step here: the 12.5 kHz raster, the carrier 0.4 kHz off its channel
+		const row = signalMenuRows(ctx({ hz: 446_025_400 })).find(
+			r => r.id === "activity",
+		)
+		expect(row?.label).toBe("History of 446.0250")
+		expect(row?.steps[0]?.action).toEqual({
+			kind: "activity",
+			tokens: [{ kind: "frequency", hz: 446_025_000 }],
+			label: "446.0250 MHz",
+		})
+		const named = signalMenuRows(
+			ctx({
+				hz: 446_025_400,
+				saved: [{ frequencyHz: 446_025_000, name: "Club net" } as never],
+			}),
+		).find(r => r.id === "activity")
+		expect(named?.label).toBe("History of Club net")
+		for (const r of signalMenuRows(ctx()))
+			expect(r.label).not.toMatch(/Show in/)
+	})
+
 	it("Decode as… tries one protocol on the signal", () => {
 		const rows = decodeAsRows(ctx())
 		const dmr = rows.find(r => r.id === "decode:dmr")

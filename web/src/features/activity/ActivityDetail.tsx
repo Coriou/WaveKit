@@ -13,6 +13,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { fetchActivityRecord, queryParams } from "../../data/activity-feed.ts"
 import { errorMessage, useStore } from "../../data/index.ts"
+import { useSavedNames } from "../naming.ts"
 import { shellStore } from "../../shell/store.ts"
 import { Button } from "../../ui/Button.tsx"
 import { Label } from "../../ui/Label.tsx"
@@ -22,6 +23,7 @@ import { summaryOfRecord } from "../messages/card.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import { ActivityRow, FoldedRow } from "./ActivityList.tsx"
+import { RecordingBlock } from "./ActivityPlayback.tsx"
 import type { ActivityStack, KnownIdentity } from "./fold.ts"
 import {
 	explainStack,
@@ -225,6 +227,7 @@ export function ActivityDetail({
 	}
 
 	const aircraft = useRowAircraft(item?.entityKey)
+	useSavedNames() // a saved name renames the channel
 	useAircraftFleet(aircraftKey(item?.entityKey))
 	const v = item ? rowView(item, aircraft) : null
 	const hz = item?.frequencyHz ?? null
@@ -255,12 +258,15 @@ export function ActivityDetail({
 			</div>
 			<div className="wka-detail-body wk-scroll">
 				{item ? (
-					<MessageCard
-						item={detailItem ?? item}
-						record={detailRecord}
-						flat
-						readOnly={readOnly}
-					/>
+					<>
+						<MessageCard
+							item={detailItem ?? item}
+							record={detailRecord}
+							flat
+							readOnly={readOnly}
+						/>
+						<RecordingBlock item={item} />
+					</>
 				) : (
 					<h3 className="wka-detail-title">Event</h3>
 				)}

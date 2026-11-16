@@ -251,6 +251,7 @@ export function queryParams(q: ActivityQuery): Record<string, QueryValue> {
 	if (q.producedAt?.to !== undefined) p["producedTo"] = q.producedAt.to
 	if (q.entityKey !== undefined) p["entityKey"] = q.entityKey
 	if (q.text !== undefined && q.text.length > 0) p["text"] = q.text
+	if (q.hasRecording !== undefined) p["hasRecording"] = String(q.hasRecording)
 	return p
 }
 

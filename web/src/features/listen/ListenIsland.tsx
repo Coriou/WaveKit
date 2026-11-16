@@ -270,10 +270,8 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 					]
 						.filter(Boolean)
 						.join(" · ")
-	const toggle = () => {
-		if (state.phase === "blocked") return listen.resume()
-		void (on ? listen.stop() : listen.start())
-	}
+	// a recording playing here pauses instead of Listen turning off (ListenController.toggle)
+	const toggle = () => void listen.toggle()
 	const disabled = !status || (!on && readOnly && !status.running)
 	const sweep = useSweep()
 	const { heldHz, held } = useHeld(sweep)
