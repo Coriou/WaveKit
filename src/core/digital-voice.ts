@@ -11,11 +11,13 @@
  *   only while a stream has clients; without one, voice is discarded.
  * - Call state comes from the decoder's "voice-call" events, published in
  *   the same tick as its call_start / call_end outputs. Audio of a call
- *   flagged encrypted, or whose encryption is not known yet, is muted
- *   (dsd-fme also mutes encrypted voice). Each DMR slot keeps its own call:
- *   in stereo only a restricted call's slot is silenced; mono, an unknown
- *   slot, or both slots restricted drop the whole datagram. Taps get the most
- *   restrictive active call.
+ *   flagged encrypted is muted (dsd-fme also mutes encrypted voice). On
+ *   /stream, audio of a call whose encryption is not known yet is held in a
+ *   bounded per-lane ring (VOICE_HOLD_MAX_MS) and played, late, once the call
+ *   is known clear; it is discarded if the call turns out encrypted or ends
+ *   unknown. Each DMR slot keeps its own call and lane: in stereo only a
+ *   restricted call's slot is silenced or held. Taps get the most restrictive
+ *   active call and never the held audio (an unknown slot stays muted there).
  *
  * Endpoints on httpPort (default 8082): /stream and /stream.wav serve the
  * first configured dsd-fme decoder; /decoders/<id>/stream[.wav] serve each
@@ -48,6 +50,7 @@ import {
 } from "./audio-stream-server.js"
 import {
 	DSD_FME_VOICE_SAMPLE_RATE,
+	MAX_DSD_FME_DATAGRAM_BYTES,
 	downmixDsdFmeDatagram,
 	dsdFmeDatagramBytes,
 	type VoiceChannels,
@@ -77,6 +80,20 @@ export interface DigitalVoiceCall {
 	errors?: { crc: number; fec: number }
 }
 
+/** /stream hold of voice whose encryption is not known yet (cumulative ms). */
+export interface DigitalVoiceHoldStatus {
+	/** Voice put on hold while its call's encryption was not known. */
+	heldMs: number
+	/** Held voice played once its call was known clear. */
+	releasedMs: number
+	/** Held voice discarded: encrypted, ended unknown, detach, or no listener. */
+	discardedMs: number
+	/** Held voice dropped oldest-first beyond VOICE_HOLD_MAX_MS. */
+	overflowDroppedMs: number
+	/** Current lag of the most delayed lane (held or released, not played yet). */
+	bufferedMs: number
+}
+
 export interface DigitalVoiceDecoderStatus {
 	decoderId: string
 	mode: string
@@ -91,6 +108,8 @@ export interface DigitalVoiceDecoderStatus {
 	droppedSamples: number
 	underruns: number
 	bufferedMs: number
+	/** Always set by the service; optional so status fixtures need not carry it. */
+	voiceHold?: DigitalVoiceHoldStatus
 	lastDatagramAt?: string
 	call: DigitalVoiceCall | null
 	lastCall?: DigitalVoiceCall
@@ -244,6 +263,10 @@ interface VoiceChannel {
 	encryptedDropped: number
 	lastDatagramAt: Date | null
 	detach: (() => void) | null
+	/** /stream hold lanes, allocated once on the first call not known clear. */
+	hold: VoiceHold | null
+	/** Cumulative hold counters, in samples. */
+	holdStats: HoldStats
 }
 
 /** 1 and 2 are TDMA slots; 0 is a call whose slot is unknown (or not 1/2). */
@@ -275,6 +298,227 @@ function restrictiveCall(
 		else clear = call
 	}
 	return encrypted ?? unknown ?? clear
+}
+
+/**
+ * Bound on /stream voice held per lane while its call's encryption is not
+ * known (2000 ms). Worst direct-mode first link control ~1.5 s (design
+ * estimate, to be re-sized from the in-image measurement table), rounded up
+ * to 2 s. Bytes = 2 s x 8000 Hz x 2 bytes/sample x 1 channel (a lane holds one
+ * slot's mono voice) = 32 000 bytes (16 000 samples) per lane. A stereo
+ * decoder has three lanes (slot 1, slot 2, whole datagram) = 96 000 bytes, a
+ * mono one one lane; allocated once, on the decoder's first unknown call.
+ * Beyond the bound the oldest held voice is dropped and counted. The /stream
+ * lag is at most this bound plus the jitter buffer.
+ */
+export const VOICE_HOLD_MAX_MS = 2000
+const VOICE_HOLD_SAMPLES =
+	(VOICE_HOLD_MAX_MS * DSD_FME_VOICE_SAMPLE_RATE) / 1000
+/** Largest datagram in samples per channel: 4096 bytes / 2 bytes (mono). */
+const HOLD_SCRATCH_SAMPLES = MAX_DSD_FME_DATAGRAM_BYTES / 2
+/**
+ * Released voice left when datagrams stop (a call end) is fed to the pacer
+ * from its ticks while it holds less than this many ticks of voice, at most
+ * HOLD_DRAIN_MAX_STEPS ticks of voice per tick: real time, no burst.
+ */
+const HOLD_DRAIN_LOW_WATER_TICKS = 3
+const HOLD_DRAIN_MAX_STEPS = 4
+
+interface HoldStats {
+	held: number
+	released: number
+	discarded: number
+	overflow: number
+}
+
+/**
+ * One /stream lane: a fixed ring of mono samples. The head `releasable`
+ * samples are clear (play them in order before live voice); the rest is held
+ * for `callId`, whose encryption is not known yet. Held voice only exists
+ * while `callId` is set.
+ */
+class HoldLane {
+	private readonly ring = new Int16Array(VOICE_HOLD_SAMPLES)
+	private head = 0
+	length = 0
+	releasable = 0
+	callId: string | null = null
+
+	/** Appends src[from, to); beyond the bound drops the oldest. Returns samples dropped. */
+	push(src: Int16Array, from: number, to: number, clear: boolean): number {
+		const cap = VOICE_HOLD_SAMPLES
+		let dropped = 0
+		let start = from
+		if (to - start > cap) {
+			dropped += to - start - cap
+			start = to - cap
+		}
+		const count = to - start
+		const excess = this.length + count - cap
+		if (excess > 0) {
+			this.head = (this.head + excess) % cap
+			this.length -= excess
+			this.releasable = Math.max(0, this.releasable - excess)
+			dropped += excess
+		}
+		let w = (this.head + this.length) % cap
+		for (let i = start; i < to; i++) {
+			this.ring[w] = src[i]!
+			w = w + 1 === cap ? 0 : w + 1
+		}
+		this.length += count
+		if (clear) this.releasable += count
+		return dropped
+	}
+
+	/** Moves up to n releasable samples to dst[0, p). Returns p. */
+	popReleasable(dst: Int16Array, n: number): number {
+		const cap = VOICE_HOLD_SAMPLES
+		const p = Math.min(n, this.releasable)
+		let r = this.head
+		for (let i = 0; i < p; i++) {
+			dst[i] = this.ring[r]!
+			r = r + 1 === cap ? 0 : r + 1
+		}
+		this.head = r
+		this.length -= p
+		this.releasable -= p
+		return p
+	}
+
+	/** The held part becomes releasable (its call is known clear). Returns samples released. */
+	release(): number {
+		const released = this.length - this.releasable
+		this.releasable = this.length
+		return released
+	}
+
+	/** Drops the held part, keeping the releasable head. Returns samples dropped. */
+	discardHeld(): number {
+		const discarded = this.length - this.releasable
+		this.length = this.releasable
+		return discarded
+	}
+
+	/** Drops everything (no listener, detach). Returns the held samples dropped. */
+	reset(): number {
+		const dropped = this.length - this.releasable
+		this.head = 0
+		this.length = 0
+		this.releasable = 0
+		return dropped
+	}
+}
+
+interface VoiceHold {
+	/** [0] the whole datagram (mono, or a call on an unknown slot); [1], [2] TDMA slots (stereo). */
+	lanes: [HoldLane, HoldLane | null, HoldLane | null]
+	/** Per-datagram scratch, reused: slot contents, slot outputs, mix, output. */
+	c1: Int16Array
+	c2: Int16Array
+	o1: Int16Array
+	o2: Int16Array
+	mix: Int16Array
+	out: Int16Array
+}
+
+/** Lane status for one datagram. */
+const LANE_IDLE = 0
+const LANE_ACTIVE = 1
+const LANE_HOLD = 2
+const LANE_DISCARD = 3
+type LaneStatus =
+	| typeof LANE_IDLE
+	| typeof LANE_ACTIVE
+	| typeof LANE_HOLD
+	| typeof LANE_DISCARD
+
+/** Fails closed: a restricted call not held by this lane is discarded. */
+function laneStatus(lane: HoldLane, call: DigitalVoiceCall | null): LaneStatus {
+	if (call === null) return lane.callId === null ? LANE_IDLE : LANE_DISCARD
+	if (call.encrypted) return LANE_DISCARD
+	if (call.encryptionKnown === false)
+		return lane.callId === call.callId ? LANE_HOLD : LANE_DISCARD
+	return LANE_ACTIVE
+}
+
+function anyNonZero(src: Int16Array, from: number, to: number): boolean {
+	for (let i = from; i < to; i++) if (src[i] !== 0) return true
+	return false
+}
+
+/**
+ * One lane through one datagram of n samples: releasable voice first, then
+ * live `content` (held, discarded, or delayed behind what is still queued).
+ * Writes out[0, n); returns the samples taken from the ring. `virtual` is a
+ * pacer-tick drain with no datagram: nothing silent is queued, so an idle or
+ * paused lane catches up.
+ */
+function laneStep(
+	lane: HoldLane,
+	content: Int16Array,
+	out: Int16Array,
+	n: number,
+	status: LaneStatus,
+	virtual: boolean,
+	stats: HoldStats,
+): number {
+	const p = lane.popReleasable(out, n)
+	if (status === LANE_DISCARD || status === LANE_HOLD) {
+		out.fill(0, p, n)
+		if (status === LANE_HOLD && (!virtual || anyNonZero(content, 0, n))) {
+			stats.overflow += lane.push(content, 0, n, false)
+			stats.held += n
+		}
+		return p
+	}
+	if (p === 0 && lane.length === 0) {
+		for (let i = 0; i < n; i++) out[i] = content[i]!
+		return 0
+	}
+	// Delay line: live voice queues behind released voice (no reordering).
+	const live = n - p
+	for (let i = 0; i < live; i++) out[p + i] = content[i]!
+	if ((status === LANE_ACTIVE && !virtual) || anyNonZero(content, live, n))
+		lane.push(content, live, n, true)
+	return p
+}
+
+function holdEngaged(hold: VoiceHold | null): boolean {
+	if (hold === null) return false
+	for (const lane of hold.lanes)
+		if (lane !== null && (lane.callId !== null || lane.length > 0)) return true
+	return false
+}
+
+function holdReleasable(hold: VoiceHold): boolean {
+	for (const lane of hold.lanes)
+		if (lane !== null && lane.releasable > 0) return true
+	return false
+}
+
+function holdsCall(hold: VoiceHold | null, callId: string): boolean {
+	if (hold === null) return false
+	for (const lane of hold.lanes) if (lane?.callId === callId) return true
+	return false
+}
+
+function samplesToMs(samples: number): number {
+	return Math.round((samples * 1000) / DSD_FME_VOICE_SAMPLE_RATE)
+}
+
+function holdStatus(channel: VoiceChannel): DigitalVoiceHoldStatus {
+	let buffered = 0
+	for (const lane of channel.hold?.lanes ?? [])
+		if (lane !== null && lane.length > buffered) buffered = lane.length
+	const stats = channel.holdStats
+	return {
+		heldMs: samplesToMs(stats.held),
+		releasedMs: samplesToMs(stats.released),
+		discardedMs: samplesToMs(stats.discarded),
+		overflowDroppedMs: samplesToMs(stats.overflow),
+		bufferedMs: samplesToMs(buffered),
+	}
 }
 
 function isDsdFmeMode(value: unknown): value is DsdFmeMode {
@@ -437,6 +681,7 @@ export class DigitalVoiceService
 		this.channels.delete(decoderId)
 		channel.detach?.()
 		channel.paced.stop()
+		this.resetHold(channel, true)
 		channel.registry.closeAll("removed", true)
 		channel.socket.close()
 		this.notifyTaps(tap => tap.detach(decoderId))
@@ -487,6 +732,7 @@ export class DigitalVoiceService
 		channel.calls.clear()
 		channel.call = null
 		channel.paced.setCallActive(false)
+		this.resetHold(channel, true)
 		const listener = (state: unknown) => this.handleVoiceCall(channel, state)
 		source.on("voice-call", listener)
 		channel.detach = () => source.off("voice-call", listener)
@@ -553,6 +799,7 @@ export class DigitalVoiceService
 		this.running = false
 		for (const channel of this.channels.values()) {
 			channel.paced.stop()
+			this.resetHold(channel, false)
 			channel.registry.closeAll("stop", true)
 			this.notifyTaps(tap => tap.detach(channel.decoderId))
 		}
@@ -650,8 +897,13 @@ export class DigitalVoiceService
 			encryptedDropped: 0,
 			lastDatagramAt: null,
 			detach: null,
+			hold: null,
+			holdStats: { held: 0, released: 0, discarded: 0, overflow: 0 },
 		}
-		paced.on("audio", (chunk: Buffer) => registry.write(chunk))
+		paced.on("audio", (chunk: Buffer) => {
+			registry.write(chunk)
+			if (channel.hold !== null) this.drainHold(channel)
+		})
 		// Pace only while someone listens: with no client, voice is discarded
 		// and the stream costs nothing.
 		registry.on("client-connected", () => {
@@ -659,7 +911,11 @@ export class DigitalVoiceService
 			this.emit("clients-changed")
 		})
 		registry.on("client-disconnected", () => {
-			if (registry.size === 0) paced.stop()
+			if (registry.size === 0) {
+				paced.stop()
+				// Held voice is only for a listener; the call's hold state stays.
+				this.resetHold(channel, false)
+			}
 			this.emit("clients-changed")
 		})
 		socket.on("message", (msg: Buffer) => this.ingest(channel, msg))
@@ -692,6 +948,16 @@ export class DigitalVoiceService
 			else mute2 = true
 		}
 		const encrypted = whole || mute1 || mute2
+		if (own && holdEngaged(channel.hold)) {
+			this.ingestHeld(
+				channel,
+				datagram,
+				whole || (mute1 && mute2),
+				mute1,
+				mute2,
+			)
+			return
+		}
 		if (whole || (mute1 && mute2)) {
 			if (own) channel.encryptedDropped++
 			return
@@ -703,37 +969,10 @@ export class DigitalVoiceService
 			// other slot keeps playing (dsd-fme zero-fills the muted slot too).
 			mute1 ? { muteSlot: 1 } : mute2 ? { muteSlot: 2 } : {},
 		)
-		if (
-			own &&
-			mono &&
-			datagram.length % dsdFmeDatagramBytes(channel.channels) !== 0
-		) {
-			if (channel.oddSized === 0) {
-				this.log.warn(
-					{
-						decoderId: channel.decoderId,
-						bytes: datagram.length,
-						expectedMultipleOf: dsdFmeDatagramBytes(channel.channels),
-						channels: channel.channels,
-					},
-					"Unexpected dsd-fme voice datagram size: is the mode or output format overridden?",
-				)
-			}
-			channel.oddSized++
-		}
+		if (own && mono) this.noteOddSize(channel, datagram)
 		if (!mono) {
 			if (!own) return
-			if (channel.rejected === 0) {
-				this.log.warn(
-					{
-						decoderId: channel.decoderId,
-						bytes: datagram.length,
-						channels: channel.channels,
-					},
-					"Rejected a malformed dsd-fme voice datagram",
-				)
-			}
-			channel.rejected++
+			this.noteRejected(channel, datagram)
 			return
 		}
 		// Inline loop: no closure per datagram.
@@ -747,6 +986,258 @@ export class DigitalVoiceService
 		if (!own) return
 		if (encrypted) channel.encryptedDropped++
 		channel.paced.push(mono)
+	}
+
+	private noteOddSize(channel: VoiceChannel, datagram: Buffer): void {
+		if (datagram.length % dsdFmeDatagramBytes(channel.channels) === 0) return
+		if (channel.oddSized === 0) {
+			this.log.warn(
+				{
+					decoderId: channel.decoderId,
+					bytes: datagram.length,
+					expectedMultipleOf: dsdFmeDatagramBytes(channel.channels),
+					channels: channel.channels,
+				},
+				"Unexpected dsd-fme voice datagram size: is the mode or output format overridden?",
+			)
+		}
+		channel.oddSized++
+	}
+
+	private noteRejected(channel: VoiceChannel, datagram: Buffer): void {
+		if (channel.rejected === 0) {
+			this.log.warn(
+				{
+					decoderId: channel.decoderId,
+					bytes: datagram.length,
+					channels: channel.channels,
+				},
+				"Rejected a malformed dsd-fme voice datagram",
+			)
+		}
+		channel.rejected++
+	}
+
+	/**
+	 * A datagram while a /stream lane holds or lags. Taps get exactly what they
+	 * get without a hold (muted restricted slots, nothing when wholly
+	 * restricted); /stream goes through the lanes.
+	 */
+	private ingestHeld(
+		channel: VoiceChannel,
+		datagram: Buffer,
+		tapBlocked: boolean,
+		mute1: boolean,
+		mute2: boolean,
+	): void {
+		const frameBytes = channel.channels * 2
+		if (
+			datagram.length === 0 ||
+			datagram.length > MAX_DSD_FME_DATAGRAM_BYTES ||
+			datagram.length % frameBytes !== 0
+		) {
+			this.noteRejected(channel, datagram)
+			return
+		}
+		this.noteOddSize(channel, datagram)
+		if (!tapBlocked && this.voiceTaps.size > 0) {
+			const mono = downmixDsdFmeDatagram(
+				datagram,
+				channel.channels,
+				mute1 ? { muteSlot: 1 } : mute2 ? { muteSlot: 2 } : {},
+			)
+			if (mono) {
+				for (const tap of this.voiceTaps) {
+					try {
+						tap.frame(channel.decoderId, mono, channel.call)
+					} catch {
+						this.noteTapFailure()
+					}
+				}
+			}
+		}
+		this.streamHeld(channel, datagram, datagram.length / frameBytes)
+	}
+
+	/**
+	 * /stream through the hold lanes: n samples from `datagram` (validated), or
+	 * with `datagram` null a pacer-tick drain of released voice. Stereo: each
+	 * slot lane is held, delayed, discarded or passed, the two are mixed, then
+	 * the whole lane (a call on an unknown slot) applies to the mix. Mono: the
+	 * whole lane alone, ruled by the most restrictive call.
+	 */
+	private streamHeld(
+		channel: VoiceChannel,
+		datagram: Buffer | null,
+		n: number,
+	): number {
+		const hold = channel.hold
+		if (hold === null) return 0
+		const stats = channel.holdStats
+		const virtual = datagram === null
+		const [whole, lane1, lane2] = hold.lanes
+		const mix = hold.mix
+		const gov0 =
+			channel.channels === 2
+				? (channel.calls.get(0) ?? null)
+				: restrictiveCall(channel.calls)
+		const st0 = laneStatus(whole, gov0)
+		let popped = 0
+		let discarded = st0 === LANE_DISCARD
+		let silent = discarded
+		if (lane1 === null || lane2 === null) {
+			if (datagram === null) mix.fill(0, 0, n)
+			else for (let i = 0; i < n; i++) mix[i] = datagram.readInt16LE(i * 2)
+		} else if (st0 === LANE_DISCARD) {
+			// The whole datagram is restricted: slot lanes wait, nothing is mixed.
+			mix.fill(0, 0, n)
+		} else {
+			let st1 = laneStatus(lane1, channel.calls.get(1) ?? null)
+			let st2 = laneStatus(lane2, channel.calls.get(2) ?? null)
+			const { c1, c2, o1, o2 } = hold
+			if (datagram === null) {
+				c1.fill(0, 0, n)
+				c2.fill(0, 0, n)
+			} else {
+				let identical = true
+				for (let i = 0; i < n && identical; i++) {
+					if (datagram.readInt16LE(i * 4) !== datagram.readInt16LE(i * 4 + 2))
+						identical = false
+				}
+				if (!identical) {
+					for (let i = 0; i < n; i++) {
+						c1[i] = datagram.readInt16LE(i * 4)
+						c2[i] = datagram.readInt16LE(i * 4 + 2)
+					}
+				} else {
+					// One voice copied to both channels: whose? A lone restricted
+					// slot owns it (held or muted, never leaked); two restricted
+					// slots are ambiguous and both discard it; else the lagged slot
+					// (to keep its order), else slot 1 (mixed once, as unheld).
+					const r1 = st1 >= LANE_HOLD
+					const r2 = st2 >= LANE_HOLD
+					if (r1 && r2) {
+						st1 = LANE_DISCARD
+						st2 = LANE_DISCARD
+					}
+					const target = r1
+						? 1
+						: r2
+							? 2
+							: lane1.length === 0 && lane2.length > 0
+								? 2
+								: 1
+					const own = target === 1 ? c1 : c2
+					const other = target === 1 ? c2 : c1
+					for (let i = 0; i < n; i++) own[i] = datagram.readInt16LE(i * 4)
+					other.fill(0, 0, n)
+				}
+			}
+			if (st1 === LANE_DISCARD || st2 === LANE_DISCARD) discarded = true
+			silent = st1 === LANE_DISCARD && st2 === LANE_DISCARD
+			popped += laneStep(lane1, c1, o1, n, st1, virtual, stats)
+			popped += laneStep(lane2, c2, o2, n, st2, virtual, stats)
+			for (let i = 0; i < n; i++) {
+				const sum = o1[i]! + o2[i]!
+				mix[i] = sum > 32767 ? 32767 : sum < -32768 ? -32768 : sum
+			}
+		}
+		const out = hold.out
+		popped += laneStep(whole, mix, out, n, st0, virtual, stats)
+		if (!virtual && discarded) channel.encryptedDropped++
+		// Nothing audible and nothing released: like a muted datagram, queue nothing.
+		if (popped === 0 && (virtual || silent)) return 0
+		const pcm = Buffer.alloc(n * 2)
+		for (let i = 0; i < n; i++) pcm.writeInt16LE(out[i]!, i * 2)
+		channel.paced.push(pcm)
+		return popped
+	}
+
+	/** Pacer tick: feeds released voice once datagrams stop (see HOLD_DRAIN_LOW_WATER_TICKS). */
+	private drainHold(channel: VoiceChannel): void {
+		const hold = channel.hold
+		if (hold === null || !this.running || !channel.paced.running) return
+		const lowWaterMs = HOLD_DRAIN_LOW_WATER_TICKS * this.options.tickMs
+		const frames = Math.min(
+			HOLD_SCRATCH_SAMPLES,
+			Math.max(1, Math.round((STREAM.rate * this.options.tickMs) / 1000)),
+		)
+		for (let step = 0; step < HOLD_DRAIN_MAX_STEPS; step++) {
+			if (channel.paced.bufferedMs >= lowWaterMs) return
+			if (!holdReleasable(hold)) return
+			if (this.streamHeld(channel, null, frames) === 0) return
+		}
+	}
+
+	/**
+	 * After a call event: a lane holding a call releases it once known clear,
+	 * keeps holding while it is still unknown, else discards (encrypted, ended,
+	 * replaced, moved to another slot). A lane whose call is not known yet
+	 * starts holding it.
+	 */
+	private updateHold(channel: VoiceChannel): void {
+		const stereo = channel.channels === 2
+		const stats = channel.holdStats
+		for (let index = 0; index < (stereo ? 3 : 1); index++) {
+			const call =
+				index === 0
+					? stereo
+						? (channel.calls.get(0) ?? null)
+						: restrictiveCall(channel.calls)
+					: (channel.calls.get(index as SlotKey) ?? null)
+			let lane = channel.hold?.lanes[index] ?? null
+			if (lane !== null && lane.callId !== null) {
+				if (call !== null && call.callId === lane.callId && !call.encrypted) {
+					if (call.encryptionKnown !== false) {
+						stats.released += lane.release()
+						lane.callId = null
+					}
+				} else {
+					stats.discarded += lane.discardHeld()
+					lane.callId = null
+				}
+			}
+			if (
+				call !== null &&
+				!call.encrypted &&
+				call.encryptionKnown === false &&
+				(lane === null || lane.callId === null)
+			) {
+				lane ??= this.holdFor(channel).lanes[index] ?? null
+				if (lane !== null) lane.callId = call.callId
+			}
+		}
+	}
+
+	/** The channel's lanes, allocated on first use (see VOICE_HOLD_MAX_MS). */
+	private holdFor(channel: VoiceChannel): VoiceHold {
+		if (channel.hold !== null) return channel.hold
+		const stereo = channel.channels === 2
+		const scratch = () => new Int16Array(HOLD_SCRATCH_SAMPLES)
+		channel.hold = {
+			lanes: [
+				new HoldLane(),
+				stereo ? new HoldLane() : null,
+				stereo ? new HoldLane() : null,
+			],
+			c1: scratch(),
+			c2: scratch(),
+			o1: scratch(),
+			o2: scratch(),
+			mix: scratch(),
+			out: scratch(),
+		}
+		return channel.hold
+	}
+
+	/** Drops queued lane voice (counted); `calls` also forgets which calls are held. */
+	private resetHold(channel: VoiceChannel, calls: boolean): void {
+		if (channel.hold === null) return
+		for (const lane of channel.hold.lanes) {
+			if (lane === null) continue
+			channel.holdStats.discarded += lane.reset()
+			if (calls) lane.callId = null
+		}
 	}
 
 	private handleVoiceCall(channel: VoiceChannel, raw: unknown): void {
@@ -787,14 +1278,16 @@ export class DigitalVoiceService
 			...(state.errors !== undefined ? { errors: state.errors } : {}),
 		}
 		const key = slotKey(call.slot)
+		const held = holdsCall(channel.hold, call.callId)
 		if (call.active) {
 			// The same call keyed elsewhere (its slot became known) moves here.
 			for (const [k, c] of channel.calls) {
 				if (k !== key && c.callId === call.callId) channel.calls.delete(k)
 			}
 			channel.calls.set(key, call)
-			// Never play audio of a call that is not clear, even if some was queued.
-			if (isRestricted(call)) channel.paced.clear()
+			// Never play audio of a call that is not clear, even if some was queued
+			// (a call already held has none queued).
+			if (isRestricted(call) && !held) channel.paced.clear()
 		} else {
 			// An end clears only its own slot (and the same call wherever it is
 			// keyed); a newer call on that slot or the other slot stays.
@@ -804,6 +1297,7 @@ export class DigitalVoiceService
 			channel.lastCall = call
 		}
 		channel.call = restrictiveCall(channel.calls)
+		this.updateHold(channel)
 		channel.paced.setCallActive(channel.call !== null)
 		// Taps (the auto-listen router) are whole-datagram consumers: they get
 		// the most restrictive active call, or this event when none is active.
@@ -849,6 +1343,7 @@ export class DigitalVoiceService
 			droppedSamples: channel.paced.stats.droppedSamples,
 			underruns: channel.paced.stats.underruns,
 			bufferedMs: channel.paced.bufferedMs,
+			voiceHold: holdStatus(channel),
 			call: channel.call,
 		}
 		if (channel.lastDatagramAt) {

@@ -1,8 +1,9 @@
 /**
  * Call-first digital voice: a call whose encryption is not known yet
- * (`encryptionKnown` present and not true) is muted on /stream and on the auto
- * listen route like an encrypted one, becomes audible once known clear, stays
- * muted once known encrypted, and malformed values fail closed. An absent field
+ * (`encryptionKnown` present and not true) is held on /stream (played late,
+ * head first, once known clear; see digital-voice-hold.test.ts) and muted on
+ * the auto listen route like an encrypted one, stays muted once known
+ * encrypted, and malformed values fail closed. An absent field
  * is a legacy call whose encryption is known. UDP is mocked; HTTP binds
  * 127.0.0.1 port 0.
  */
@@ -192,7 +193,7 @@ async function routed() {
 
 describe("digital voice: encryption not known yet (call-first)", () => {
 	describe("/stream", () => {
-		it("never plays an unknown call and counts its voice as dropped", async () => {
+		it("never plays an unknown call and counts its voice as held, not dropped", async () => {
 			const { decoder, socket, connect, calls, service } = await started()
 			const client = connect()
 			decoder.emit("voice-call", state({ encryptionKnown: false }))
@@ -202,12 +203,11 @@ describe("digital voice: encryption not known yet (call-first)", () => {
 			expect(client.samples().every(s => s === 0)).toBe(true)
 			expect(calls[0]?.encryptionKnown).toBe(false)
 			expect(service.getStatus().call?.encryptionKnown).toBe(false)
-			expect(service.getStatus().decoders[0]!.encryptedDatagramsDropped).toBe(
-				20,
-			)
+			expect(service.getStatus().decoders[0]!.encryptedDatagramsDropped).toBe(0)
+			expect(service.getStatus().decoders[0]!.voiceHold?.heldMs).toBe(400)
 		})
 
-		it("drops a whole datagram of an unknown call whose slot is unknown", async () => {
+		it("holds a whole datagram of an unknown call whose slot is unknown", async () => {
 			const { decoder, socket, connect, service } = await started()
 			const client = connect()
 			decoder.emit("voice-call", state({ encryptionKnown: false, slot: null }))
@@ -216,12 +216,11 @@ describe("digital voice: encryption not known yet (call-first)", () => {
 			for (let n = 0; n < 10; n++) socket.emit("message", both)
 			vi.advanceTimersByTime(800)
 			expect(client.samples().every(s => s === 0)).toBe(true)
-			expect(service.getStatus().decoders[0]!.encryptedDatagramsDropped).toBe(
-				10,
-			)
+			expect(service.getStatus().decoders[0]!.encryptedDatagramsDropped).toBe(0)
+			expect(service.getStatus().decoders[0]!.voiceHold?.heldMs).toBe(200)
 		})
 
-		it("unknown then known clear: audible from then on, never the unknown part", async () => {
+		it("unknown then known clear: the held head plays first, then the rest in order", async () => {
 			const { decoder, socket, connect, calls } = await started()
 			const client = connect()
 			decoder.emit("voice-call", state({ encryptionKnown: false }))
@@ -230,8 +229,10 @@ describe("digital voice: encryption not known yet (call-first)", () => {
 			for (let n = 0; n < 20; n++) socket.emit("message", slot1(500))
 			vi.advanceTimersByTime(800)
 			const voice = client.samples().filter(s => s !== 0)
-			expect(voice.length).toBeGreaterThan(0)
-			expect(voice.every(s => s === 500)).toBe(true)
+			expect(voice).toEqual([
+				...Array<number>(5 * 160).fill(111),
+				...Array<number>(20 * 160).fill(500),
+			])
 			expect(calls.map(c => c.encryptionKnown)).toEqual([false, true])
 		})
 
