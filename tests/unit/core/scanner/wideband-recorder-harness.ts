@@ -96,6 +96,8 @@ export interface FakeOp {
 	input: AnalogInput
 	frames: number
 	cut: AnalogCut | null
+	/** The finish's AnalogFinishFacts.cutActive; absent when it gave none. */
+	cutActive?: boolean
 	cancelled: AnalogCut | null
 	/** Settled outcome; "failed" when the binding was no longer live at the finish. */
 	outcome: "finalized" | "aborted" | "failed" | null
@@ -180,8 +182,9 @@ export function fakeOps(
 			addGap: () => {
 				op.gaps++
 			},
-			finish: async (cut = "completed") => {
+			finish: async (cut = "completed", facts) => {
 				op.cut = cut
+				if (facts?.cutActive !== undefined) op.cutActive = facts.cutActive
 				await opts.hold
 				await microtasks(3)
 				settle(live(input.binding) ? "finalized" : "failed")

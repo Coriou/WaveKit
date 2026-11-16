@@ -13,8 +13,11 @@ import {
 	SPEECH_NOISE_BURST_DB,
 	SPEECH_NOISE_MAX_BURST_FRAMES,
 	SPEECH_NOISE_MIN_FRAMES,
+	SPEECH_SHORT_MIN_FRAMES,
+	SPEECH_STRONG_MIN_RANGE_DB,
 	SPEECH_WINDOW_FRAMES,
 	SpeechContentMeter,
+	strongSpeech,
 	type SpeechContent,
 } from "../../../../src/core/scanner/channel/speech-content.js"
 import { contentAudio } from "./speech-content-fixtures.js"
@@ -125,6 +128,133 @@ describe("speech-content: the burst veto (clearlyNoise only)", () => {
 						pcm[i] = Math.round(amp * (2 * rng() - 1))
 					}
 					expect(measure(pcm).maxBurstFrames).toBe(burst)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	}, 120_000)
+})
+
+/**
+ * `ms` of 8 kHz audio: low noise (`amp`), or with `pitchHz` a loud pitched tone half-mixed with
+ * the noise (a loud voiced burst). Deterministic from `seed`.
+ */
+function burstAudio(
+	parts: readonly { ms: number; amp: number; pitchHz?: number }[],
+	seed: number,
+): Int16Array {
+	const rnd = mulberry32(seed)
+	const total = parts.reduce((n, p) => n + Math.round(p.ms * 8), 0)
+	const out = new Int16Array(total)
+	let at = 0
+	for (const p of parts) {
+		const n = Math.round(p.ms * 8)
+		for (let i = 0; i < n; i++) {
+			const noise = rnd() * 2 - 1
+			const tone =
+				p.pitchHz === undefined
+					? noise
+					: 0.5 * Math.sin((2 * Math.PI * p.pitchHz * i) / 8000) + 0.5 * noise
+			out[at++] = Math.round(p.amp * tone)
+		}
+	}
+	return out
+}
+
+/** The meter fed `pcm` in `chunk`-sample pushes, result() read after each push (a judge loop). */
+function polled(pcm: Int16Array, chunk: number): SpeechContent {
+	const m = new SpeechContentMeter()
+	for (let at = 0; at < pcm.length; at += chunk) {
+		m.push(pcm.subarray(at, at + chunk))
+		const r = m.result()
+		expect(m.frames).toBe(r.frames)
+	}
+	return m.result()
+}
+
+describe("speech-content: a meter read on every step (the recorder's judged audio)", () => {
+	// Feature: wideband analog recorder, own-audio class by speech.
+	it("a 200 ms loud burst then 3 s of low noise: a partial window reads the burst, the whole file never does", () => {
+		const pcm = burstAudio(
+			[
+				{ ms: 200, amp: 12_000, pitchHz: 150 },
+				{ ms: 3_000, amp: 300 },
+			],
+			1,
+		)
+		// 3 200 ms = 100 frames of 32 ms: one whole window and more.
+		expect(Math.floor(pcm.length / SPEECH_FRAME_SAMPLES)).toBe(100)
+		const once = measure(pcm, pcm.length)
+		expect(once.frames).toBe(100)
+		expect(strongSpeech(once)).toBe(false)
+		expect(once.maxRangeDb).toBeLessThan(SPEECH_STRONG_MIN_RANGE_DB)
+		// Read every 100 ms (each read past 94 frames a whole window ending there): no partial
+		// window counts, still under the bound.
+		const r = polled(pcm, 800)
+		expect(r.maxRangeDb).toBeLessThan(SPEECH_STRONG_MIN_RANGE_DB)
+		expect(strongSpeech(r)).toBe(false)
+		// A short file (16 frames, 0.512 s) still reads its one partial window: the burst.
+		const m = new SpeechContentMeter()
+		m.push(pcm.subarray(0, SPEECH_SHORT_MIN_FRAMES * SPEECH_FRAME_SAMPLES))
+		expect(m.frames).toBe(SPEECH_SHORT_MIN_FRAMES)
+		expect(m.result().maxRangeDb).toBeGreaterThan(SPEECH_STRONG_MIN_RANGE_DB)
+		// At 93 frames still the partial window (the latest, over all 93), at 94 the whole one only.
+		const at93 = new SpeechContentMeter()
+		at93.push(
+			pcm.subarray(0, (SPEECH_WINDOW_FRAMES - 1) * SPEECH_FRAME_SAMPLES),
+		)
+		expect(at93.result().frames).toBe(SPEECH_WINDOW_FRAMES - 1)
+		at93.push(
+			pcm.subarray(
+				(SPEECH_WINDOW_FRAMES - 1) * SPEECH_FRAME_SAMPLES,
+				SPEECH_WINDOW_FRAMES * SPEECH_FRAME_SAMPLES,
+			),
+		)
+		expect(at93.result()).toEqual(
+			measure(
+				pcm.subarray(0, SPEECH_WINDOW_FRAMES * SPEECH_FRAME_SAMPLES),
+				SPEECH_WINDOW_FRAMES * SPEECH_FRAME_SAMPLES,
+			),
+		)
+	})
+
+	it("frames counts whole frames without measuring", () => {
+		const m = new SpeechContentMeter()
+		expect(m.frames).toBe(0)
+		m.push(new Int16Array(SPEECH_FRAME_SAMPLES - 1))
+		expect(m.frames).toBe(0)
+		m.push(new Int16Array(1))
+		expect(m.frames).toBe(1)
+	})
+
+	it("reading after any push reads only whole windows: between one read at the end and a read after every frame (property)", () => {
+		// A read past the first window measures the whole window ending at its last frame (a real
+		// 3 s window), so a polled meter may read more than a single read at the end, but never more
+		// than a read after every frame, and never a partial window.
+		fc.assert(
+			fc.property(
+				fc.integer({ min: 50, max: 900 }),
+				fc.integer({ min: 2_500, max: 4_000 }),
+				fc.integer({ min: 64, max: 4_000 }),
+				fc.integer({ min: 1, max: 1_000 }),
+				(burstMs, restMs, chunk, seed) => {
+					const pcm = burstAudio(
+						[
+							{ ms: burstMs, amp: 12_000, pitchHz: 150 },
+							{ ms: restMs, amp: 300 },
+						],
+						seed,
+					)
+					const once = measure(pcm, pcm.length)
+					const every = polled(pcm, SPEECH_FRAME_SAMPLES)
+					const r = polled(pcm, chunk)
+					expect(r.frames).toBe(once.frames)
+					expect(r.periodicShare).toBe(once.periodicShare)
+					expect(r.maxRangeDb).toBeGreaterThanOrEqual(once.maxRangeDb)
+					expect(r.maxRangeDb).toBeLessThanOrEqual(every.maxRangeDb)
+					expect(r.maxBurstFrames).toBeGreaterThanOrEqual(once.maxBurstFrames)
+					expect(r.maxBurstFrames).toBeLessThanOrEqual(every.maxBurstFrames)
+					expect(strongSpeech(r)).toBe(false)
 				},
 			),
 			{ numRuns: 100 },

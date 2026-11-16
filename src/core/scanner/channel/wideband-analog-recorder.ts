@@ -15,7 +15,8 @@
  * lists for analog FM (or no band plan covers) starts a shadow session as soon as it appears.
  * Its audio stays in memory (no store operation, nothing on disk) until the observation is
  * classed analog-fm (any snapshot, the closing one included, or its own audio: speech over a
- * stable standard CTCSS tone, `classByTone` and tone-class.ts, a class of the recorder only) and
+ * stable standard CTCSS tone, `classByTone` and tone-class.ts, or strong speech on a channel whose
+ * analog trials heard voice, `classBySpeech`; a class of the recorder only) and
  * the file's audio sounds like voice (`VoiceActivityGate`); then the store operation begins and
  * the buffered audio is written. A session closed without that class, or given a definite other
  * class (the caller's `nonAnalog`: decoded or channel-tier, never a spectral class alone) before
@@ -55,6 +56,7 @@ import { CtcssBank } from "../../audio-tones/ctcss.js"
 import { ulid } from "../ids.js"
 import type {
 	AnalogCut,
+	AnalogFinishFacts,
 	AnalogGap,
 	AnalogHandle,
 	AnalogInput,
@@ -126,11 +128,17 @@ import {
 	provisionalRoom,
 	barredSnapshot,
 	ownVetoEnds,
+	trialsVoiceChannel,
 	type OwnVeto,
 	type VoicePrior,
 	type Veto,
 } from "./recording-verdict.js"
-import { SpeechContentMeter, speechReadings } from "./speech-content.js"
+import {
+	SPEECH_WINDOW_FRAMES,
+	SpeechContentMeter,
+	speechReadings,
+	strongSpeech,
+} from "./speech-content.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
 
 export { rememberWaiver, trustedRunEnd } from "./recorder-memory.js"
@@ -174,6 +182,17 @@ export const WIDEBAND_MAX_BUFFERED_FRAMES =
 export const WIDEBAND_QUALIFY_MS = 8_000
 export const WIDEBAND_QUALIFY_FRAMES =
 	(WIDEBAND_QUALIFY_MS / 1000) * ANALOG_AUDIO_RATE_HZ
+/**
+ * classBySpeech's wait after the prior refused the class (a strong prior, a backed digital class,
+ * or trials that did not hear voice often): 1 s = 8 000 judged frames of the file. A refusal at
+ * judged frame J reads the prior again only once the file has judged J + 8 000 frames (at
+ * J + 7 999 not), so a strong-speech file on a refused channel reads the store about once a
+ * second instead of on every 25 ms judging step; a prior that turns favourable classes the file
+ * at most 1 s (plus one step) later, inside the 60 s buffer bound (WIDEBAND_MAX_BUFFERED_MS).
+ */
+export const WIDEBAND_SPEECH_PRIOR_RETRY_MS = 1_000
+export const WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES =
+	(WIDEBAND_SPEECH_PRIOR_RETRY_MS / 1000) * ANALOG_AUDIO_RATE_HZ
 /**
  * A classed session not qualified after this much in-track audio (2 s = 16 000 frames, four
  * gate windows) may be evicted for a candidate classed analog-fm when every slot is held; a
@@ -494,6 +513,33 @@ export const MAX_WAITING_FILES = 2
  */
 export const WIDEBAND_PARK_MS = 2_000
 /**
+ * How far before a retune cut (an `epoch-changed` file end) a joined track may have been last
+ * reported and still count as on the air at it (the receipt's `cutActive`): 1 050 ms. The engine
+ * publishes an open track about once a second (the tracker's periodic update, every 1 000 ms of
+ * blocks once it is 20 blocks old), each snapshot with the last sample of its last active block
+ * (10 to 50 ms), so a track still on the air at the cut was last reported at most
+ * 1 000 + 50 = 1 050 ms before it. A last report exactly 1 050 ms before the cut is still active;
+ * one sample earlier is not: the transmission had ended and the cut clipped only its hang
+ * (silence), and the label does not say the scanner cut it. The tracker counts only observed
+ * blocks towards that update, so a weak carrier missing blocks (inside its hang) is reported
+ * less often, and this bound alone would then err toward a false "completed": a joined track
+ * still open at the finish (not closed yet) counts as on the air whatever its last report
+ * (finishFacts), so the bound only judges tracks whose close was reported.
+ */
+export const WIDEBAND_CUT_ACTIVE_MS = 1_050
+
+/**
+ * Whether a file whose joined tracks were last reported at sample `lastHeard` was on the air at
+ * its cut sample `cutAt` (WIDEBAND_CUT_ACTIVE_MS at sample rate `fs`).
+ */
+export function cutWasActive(
+	lastHeard: number,
+	cutAt: number,
+	fs: number,
+): boolean {
+	return lastHeard >= cutAt - Math.round((WIDEBAND_CUT_ACTIVE_MS * fs) / 1000)
+}
+/**
  * Retune-ended sessions waiting for their close per manager; past it the oldest is discarded.
  * Each holds at most WIDEBAND_MAX_BUFFERED_FRAMES (960 KB): 4 · 960 KB = 3.84 MB at most.
  */
@@ -600,6 +646,40 @@ export function widebandSessionCores(inputRateHz: number): number {
 	)
 }
 
+/** A retune's command position from the engine view, or null when absent or not a sample index. */
+function retuneSample(value: number | null | undefined): number | null {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+		? value
+		: null
+}
+
+/**
+ * The first sample a session may not read yet: the live edge, its epoch limit and a held retune's
+ * command position, whichever comes first. It is the read and segmenter target only: ring
+ * urgency is measured by ringBacklog, since the ring overwrites relative to the live edge.
+ */
+function readableEdge(
+	s: { readonly limit: number; readonly retuneAt: number | null },
+	liveEdge: number,
+): number {
+	return Math.min(liveEdge, s.limit, s.retuneAt ?? Number.POSITIVE_INFINITY)
+}
+
+/**
+ * The session's ring backlog (samples): live edge − next while it has input left to read before
+ * its epoch limit, else 0. The ring overwrites its oldest sample once this passes the ring, so a
+ * held retune does not shorten it: a session 1.5 s behind at the command is 1.5 s + the hold
+ * behind (its readable backlog, to the command position, stays 1.5 s). The catch-up grant, its
+ * eligibility (past maxBacklog) and the reported backlog measure it. Once everything before the
+ * limit is read (next ≥ min(live edge, limit)) nothing it still reads is at risk: 0.
+ */
+function ringBacklog(
+	s: { readonly limit: number; readonly next: number },
+	liveEdge: number,
+): number {
+	return s.next >= Math.min(liveEdge, s.limit) ? 0 : liveEdge - s.next
+}
+
 /** The engine surface the recorder reads (SpectrumEngine satisfies it). */
 export interface WidebandEngineView {
 	readonly format: string
@@ -620,6 +700,20 @@ export interface WidebandEngineView {
 		 * it. Absent or null: none ended (or a view without runs), trustedFromSample alone bounds.
 		 */
 		runEnd?: { from: number; end: number } | null
+		/**
+		 * The first sample a retune posted on this stream but not started yet may have moved (its
+		 * command position: samples received or buffered before the command was sent, so every
+		 * earlier sample is of the current tuning); null or absent: none pending. The pending
+		 * epoch starts only after its settle, so without it the samples in between read as the
+		 * current epoch's.
+		 */
+		pendingRetuneSample?: number | null
+		/**
+		 * The command position of the retune that started the current epoch (as
+		 * `pendingRetuneSample` read while it was pending); null or absent: an opening, an
+		 * untracked epoch, or a view without it (its `startSample` alone bounds the epoch before).
+		 */
+		retunedFromSample?: number | null
 	}
 	liveEdge(): number
 	readRing(
@@ -761,6 +855,20 @@ interface FileState {
 	rollOver: boolean
 	/** What it wrote, measured for speech (speech-content.ts; finishVerdict's `notSpeech`). */
 	readonly speech: SpeechContentMeter
+	/**
+	 * The judged audio so far, measured for speech while its session is unclassed (classBySpeech:
+	 * nothing is written before a class, so `speech` has not heard it yet). Null when it can never
+	 * be read: a file opened classed (a roll-over, a snapshot class) or under a strong prior
+	 * (`toneRequired`: never classed by speech), and dropped at the first judging step after a
+	 * class. A spectrally digital shadow is still fed: `digital` follows the owner's latest
+	 * snapshot and may clear mid-file, and the class then reads the whole file so far.
+	 */
+	judgedSpeech: SpeechContentMeter | null
+	/**
+	 * classBySpeech reads the prior again only once `judged` reaches this
+	 * (WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES after a refusal; 0: never refused).
+	 */
+	speechPriorAt: number
 	/** The start the segmenter planned (onset − preRoll, clamped): the head-cut reference. */
 	readonly planned: number
 	startSample: number
@@ -814,6 +922,12 @@ interface Session {
 	 * definite other class (`nonAnalog`) still discards it, and no tone evidence is published.
 	 */
 	toneOnly: boolean
+	/**
+	 * Of `toneOnly`: classed by strong speech on a channel whose trials heard voice
+	 * (classBySpeech), not by a tone; each file is checked again for strong speech over the whole
+	 * file when it finishes (`discarded:not-speech`), and carries no tone class to a roll-over.
+	 */
+	speechOnly: boolean
 	/**
 	 * Admitted under a strong prior (recording-verdict.ts `tone-required`): only its own audio
 	 * classes it (classByTone), a snapshot's analog-fm class counts only after that, and it is
@@ -975,6 +1089,19 @@ interface Session {
 	readonly margin: number
 	/** No sample at or past this is read (an epoch change). */
 	limit: number
+	/**
+	 * A retune pending on its epoch's stream moves the tuner at this sample
+	 * (`pendingRetuneSample`): nothing at or past it is read until the epoch starts (the file then
+	 * ends here) or the retune is no longer pending; null: none.
+	 */
+	retuneAt: number | null
+	/**
+	 * Where a retune-ended file's park window (WIDEBAND_PARK_MS) counts from: the new epoch's
+	 * start sample (its settled start, not the command position `limit` may end at), the stream
+	 * position a held retune was capped at (the hold cap in drain), or `limit` for a trusted-run
+	 * end. Infinity until the session's input ends.
+	 */
+	parkFrom: number
 	/** Cut reason of the next non-quiet end (retune, stream change); null = completed. */
 	endCut: AnalogCut | null
 	file: FileState | null
@@ -1522,9 +1649,10 @@ export class WidebandAnalogRecorder {
 		const sessions: ScannerRecorderSession[] = []
 		for (const s of this.sessions.values()) {
 			if (s.done) continue
-			let edge = s.next
+			let backlog = 0
 			try {
-				edge = Math.min(s.engine.liveEdge(), s.limit)
+				// The true ring backlog (from the live edge), not to a held retune's command.
+				backlog = ringBacklog(s, s.engine.liveEdge())
 			} catch {
 				// An engine closing under us: no backlog to report.
 			}
@@ -1534,7 +1662,7 @@ export class WidebandAnalogRecorder {
 				discoveryId: s.discoveryId,
 				state: !s.classed ? "shadow" : s.qualified ? "voiced" : "classed",
 				writing: s.ops > 0,
-				backlogMs: Math.max(0, Math.round(((edge - s.next) * 1000) / s.fs)),
+				backlogMs: Math.max(0, Math.round((backlog * 1000) / s.fs)),
 			})
 		}
 		return { sessions, parked: this.parked.size, ...this.decisions.status() }
@@ -1611,6 +1739,8 @@ export class WidebandAnalogRecorder {
 				session.activity.get(observationId)?.last ?? Number.NEGATIVE_INFINITY,
 			)
 		if (parked) {
+			// The close's last sample: whether its file was on the air at the cut (finishFacts).
+			parked.lastActive = Math.max(parked.lastActive, track.lastSample)
 			this.updateParked(
 				parked,
 				observationId,
@@ -1763,6 +1893,7 @@ export class WidebandAnalogRecorder {
 		if (s.toneRequired && !s.classed) return
 		if (s.toneOnly) this.classedBySnapshot(s, observationId)
 		s.toneOnly = false
+		s.speechOnly = false
 		const last = s.activity.get(observationId)?.last
 		noteJoinedVoice(
 			s,
@@ -2149,6 +2280,8 @@ export class WidebandAnalogRecorder {
 		if (joinedId !== undefined) {
 			const p = this.parked.get(joinedId)
 			if (p) {
+				// A report on the air past the cut: its file was on the air at it (finishFacts).
+				p.lastActive = Math.max(p.lastActive, track.lastSample)
 				this.updateParked(
 					p,
 					observationId,
@@ -2581,6 +2714,7 @@ export class WidebandAnalogRecorder {
 			discoveryId: input.discoveryId,
 			classed: input.analogFm && !toneRequired,
 			toneOnly: false,
+			speechOnly: false,
 			toneRequired,
 			// Admitted before its discovery is known: no prior read, so a strong one at finish
 			// treats every file as joined under it (a new capcode twin's first page).
@@ -2642,6 +2776,8 @@ export class WidebandAnalogRecorder {
 			maxBacklog,
 			margin: Math.ceil(ring - maxBacklog),
 			limit: Number.POSITIVE_INFINITY,
+			retuneAt: null,
+			parkFrom: Number.POSITIVE_INFINITY,
 			endCut: null,
 			file: null,
 			waiting: [],
@@ -2716,6 +2852,9 @@ export class WidebandAnalogRecorder {
 			toneHz: null,
 			toneClass: new ToneClassEvidence(),
 			speech: new SpeechContentMeter(),
+			judgedSpeech:
+				s.classed || s.toneRequired ? null : new SpeechContentMeter(),
+			speechPriorAt: 0,
 			classTone: null,
 			toneCarried: false,
 			rollOver: false,
@@ -3282,10 +3421,15 @@ export class WidebandAnalogRecorder {
 		}
 	}
 
-	/** Ring headroom (ring − backlog) in ms; Infinity when the session is within maxBacklog. */
+	/**
+	 * Ring headroom (ring − ringBacklog) in ms; Infinity when the session is within maxBacklog or
+	 * has nothing readable left (held at a retune's command or at its limit: a grant buys nothing).
+	 */
 	private headroomMs(s: Session): number {
 		if (s.done || !s.file) return Number.POSITIVE_INFINITY
-		const backlog = Math.min(s.engine.liveEdge(), s.limit) - s.next
+		const live = s.engine.liveEdge()
+		if (s.next >= readableEdge(s, live)) return Number.POSITIVE_INFINITY
+		const backlog = ringBacklog(s, live)
 		if (backlog <= s.maxBacklog) return Number.POSITIVE_INFINITY
 		return ((s.maxBacklog + s.margin - backlog) * 1000) / s.fs
 	}
@@ -3324,6 +3468,26 @@ export class WidebandAnalogRecorder {
 			return
 		}
 		const retuned = epoch.epoch !== s.epoch
+		// A retune commanded on this epoch but not started: the pending epoch starts only after
+		// its settle (`startSample` is its settled start), and until then the samples from the
+		// command on read as this epoch's, though the tuner may have moved. They are held back
+		// here (never demodulated, so never written), and cut off at the start.
+		if (!retuned) s.retuneAt = retuneSample(epoch.pendingRetuneSample)
+		const liveEdge = engine.liveEdge()
+		// Hold cap: a retune pending past maxBacklog of stream (ring − margin: held longer, the
+		// ring would overwrite what is held back before the file could read it) or that never
+		// starts must not freeze the session with an open file. It ends at the command position as
+		// at the retune's start (cut epoch-changed: the tuner moved). At exactly maxBacklog it
+		// still holds; one sample past it ends. Only a session still behind the command
+		// (`next` < `retuneAt`) has unread IQ in the ring at risk; one that has read up to it
+		// holds nothing back, so it is never ended by the cap (the retune's start, the trusted
+		// run's end, or a stream or engine change still ends it).
+		const capped =
+			!retuned &&
+			s.retuneAt !== null &&
+			s.next < s.retuneAt &&
+			s.limit === Number.POSITIVE_INFINITY &&
+			liveEdge - s.retuneAt > s.maxBacklog
 		// The trusted run it started in ended (a doubt: null) or another began (re-proven): its
 		// samples from here on are not proven by the run the file is labelled with. Ended like at a
 		// retune (cut epoch-changed), at what it demodulated so far; a later snapshot starts a new
@@ -3332,13 +3496,39 @@ export class WidebandAnalogRecorder {
 			!retuned &&
 			s.trustedFrom !== undefined &&
 			epoch.trustedFromSample !== s.trustedFrom
-		if ((retuned || untrusted) && s.limit === Number.POSITIVE_INFINITY) {
+		if (
+			(retuned || untrusted || capped) &&
+			s.limit === Number.POSITIVE_INFINITY
+		) {
 			// A retune: nothing at or past the new epoch's start is this channel. The file ends
 			// at the earlier of its own end target and that start; no later file follows. A
 			// sweep that hops after the hang has a complete file.
-			s.limit = retuned
-				? (epoch.startSample ?? s.next)
-				: Math.min(s.next, trustedRunEnd(epoch, s.trustedFrom))
+			if (retuned) {
+				const start = epoch.startSample ?? s.next
+				s.limit = Math.min(
+					start,
+					s.retuneAt ?? Number.POSITIVE_INFINITY,
+					retuneSample(epoch.retunedFromSample) ?? Number.POSITIVE_INFINITY,
+				)
+				// The park window counts from the settled start, as before the command position
+				// bounded the file: the settle (1-2 s) does not shorten it.
+				s.parkFrom = start
+			} else if (capped) {
+				// A trusted-run end seen in the same drain bounds it too (the earlier wins), as
+				// it would alone.
+				s.limit = untrusted
+					? Math.min(
+							s.retuneAt ?? s.next,
+							s.next,
+							trustedRunEnd(epoch, s.trustedFrom),
+						)
+					: (s.retuneAt ?? s.next)
+				s.parkFrom = untrusted ? s.limit : liveEdge
+			} else {
+				s.limit = Math.min(s.next, trustedRunEnd(epoch, s.trustedFrom))
+				s.parkFrom = s.limit
+			}
+			s.retuneAt = null
 			const target = s.seg.endTarget
 			const end = Math.min(target ?? s.limit, s.limit)
 			const cut: AnalogCut =
@@ -3352,7 +3542,7 @@ export class WidebandAnalogRecorder {
 				s.file.cut = cut
 			}
 		}
-		const edge = Math.min(engine.liveEdge(), s.limit)
+		const edge = readableEdge(s, liveEdge)
 		this.applyEvents(s, s.seg.advance(edge))
 		const file = s.file
 		if (!file) {
@@ -3375,7 +3565,10 @@ export class WidebandAnalogRecorder {
 			if (catching && this.grant !== null)
 				this.grant.left = Math.max(0, this.grant.left - demodulated)
 			if (this.clock() - started < WIDEBAND_TURN_BUDGET_MS) continue
-			if (edge - s.next <= s.maxBacklog || this.catchUp(s) <= 0) break
+			// Eligibility is the ring backlog (from the live edge), not the readable edge: a
+			// session held at a retune's command still falls out of the ring as the edge moves.
+			if (ringBacklog(s, liveEdge) <= s.maxBacklog || this.catchUp(s) <= 0)
+				break
 			catching = true
 		}
 		const more = s.next < target()
@@ -3524,6 +3717,8 @@ export class WidebandAnalogRecorder {
 				}
 			if (head.tone !== null)
 				this.toneFrames(s, file, file.judged, head.tone.subarray(0, n))
+			if (s.classed) file.judgedSpeech = null
+			else file.judgedSpeech?.push(head.pcm.subarray(0, n))
 			this.gateFrames(s, file, file.judged, head.pcm.subarray(0, n))
 			file.judged += n
 		}
@@ -3534,6 +3729,7 @@ export class WidebandAnalogRecorder {
 			}
 			s.qualified = true
 			if (!s.classed) this.classByTone(s, file.toneClass?.result() ?? null)
+			if (!s.classed) this.classBySpeech(s, file)
 			this.admit(s, file)
 		} else if (
 			!s.qualified &&
@@ -3586,8 +3782,47 @@ export class WidebandAnalogRecorder {
 	 */
 	private classByTone(s: Session, toneHz: number | null): void {
 		if (toneHz === null || s.classed || s.done) return
+		this.classByOwnAudio(s)
+	}
+
+	/**
+	 * The second own-audio class, next to the tone (docs/SCANNER.md, "Own-audio class"): a voiced
+	 * shadow with no tone is classed analog-fm (`toneOnly` and `speechOnly`) when, in this order
+	 * (cheapest first, the prior read last): its owner's latest snapshot has no digital spectral
+	 * class (`digital` false: carrier, unknown or analog-fm), it was not admitted under a strong
+	 * prior (`toneRequired` false), the file so far reads strong speech (speech-content.ts
+	 * strongSpeech: 3 s or more, a 15 dB range, a 0.05 periodic share), no strong prior stands now
+	 * and no backed digital class was seen on the owner (admissionVerdict null with
+	 * DigitalClassLedger's reading), and the channel's analog trials heard voice
+	 * (recording-verdict.ts trialsVoiceChannel: 10 or more heard and 30 % or more of the
+	 * attempts). Each file is checked again over the whole file at its finish (finishOrHold).
+	 * The meter is read only from its first whole window (SPEECH_WINDOW_FRAMES): earlier reads
+	 * would measure partial windows strongSpeech must never see. After a refusal by the prior the
+	 * prior is read again only WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES judged frames later.
+	 */
+	private classBySpeech(s: Session, file: FileState): void {
+		if (s.classed || s.done || s.digital || s.toneRequired) return
+		const meter = file.judgedSpeech
+		if (meter === null || meter.frames < SPEECH_WINDOW_FRAMES) return
+		if (file.judged < file.speechPriorAt) return
+		if (!strongSpeech(meter.result())) return
+		const [prior, backedClass, now] = this.priorOf(s.discoveryId)
+		if (
+			backedClass ||
+			admissionVerdict(prior, backedClass, now) !== null ||
+			!trialsVoiceChannel(prior)
+		) {
+			file.speechPriorAt = file.judged + WIDEBAND_SPEECH_PRIOR_RETRY_FRAMES
+			return
+		}
+		this.classByOwnAudio(s, true)
+	}
+
+	/** Classes `s` by its own audio (classByTone, or classBySpeech when `speech`). */
+	private classByOwnAudio(s: Session, speech = false): void {
 		s.classed = true
 		s.toneOnly = true
+		s.speechOnly = speech
 		// Voice evidence of the joined observations on the air (ownVeto never refuses them with
 		// an owner vetoed later).
 		const prior = () => this.priorOf(s.discoveryId)[0]
@@ -3769,7 +4004,12 @@ export class WidebandAnalogRecorder {
 		file.toneHz = file.ctcss?.result() ?? null
 		file.classTone = file.toneClass?.result(true) ?? null
 		file.toneClass = null
-		if (s.toneOnly && file.classTone === null && !file.toneCarried) {
+		if (
+			s.toneOnly &&
+			!s.speechOnly &&
+			file.classTone === null &&
+			!file.toneCarried
+		) {
 			// Classed by its audio only, and the whole file no longer holds the evidence (its
 			// prefix did; a roll-over file carries it): discarded, one being written cancelled.
 			this.endFile(s, file, "discarded:unclassed")
@@ -3783,7 +4023,13 @@ export class WidebandAnalogRecorder {
 			this.openFile(s, next)
 			const cont = s.file as FileState | null
 			if (cont && file.cut === "duration-limit") cont.rollOver = true
-			if (cont && file.cut === "duration-limit" && s.toneOnly && !file.failed)
+			if (
+				cont &&
+				file.cut === "duration-limit" &&
+				s.toneOnly &&
+				!s.speechOnly &&
+				!file.failed
+			)
 				cont.toneCarried = true
 			if (cont && next >= endedAt && next <= s.next) {
 				// The carried frames are samples [endedAt, s.next): keep those from `next` on (not
@@ -3808,6 +4054,13 @@ export class WidebandAnalogRecorder {
 	/**
 	 * A voiced shadow file a retune ended (cut epoch-changed) while some joined observation is
 	 * still open: its close may bring the first analog-fm class, so it is kept, not discarded.
+	 * Since a retune ends a file at its command position (Session.limit), a file whose hang would
+	 * end inside the retune's settle (before the settled start, past the command) ends
+	 * `epoch-changed` here too, not `completed` at the hang's end. It parks only while a joined
+	 * track is still open at the command, so a quiet one is promoted by an analog-fm close only
+	 * when the command lands within the track hang of the voice's end (the tracker closes a
+	 * missing track 500 ms after its last active block); its receipt then counts the cut as on
+	 * the air (finishFacts: the close's last sample is within WIDEBAND_CUT_ACTIVE_MS of it).
 	 */
 	private parkable(s: Session, file: FileState): boolean {
 		return (
@@ -4019,7 +4272,8 @@ export class WidebandAnalogRecorder {
 			if (file.handle === null && !s.waiting.includes(file)) {
 				if (this.parkable(s, file)) {
 					// A retune ended it before its class: kept for the close (finishFile parks).
-					s.parkedUntil = s.limit + Math.round((WIDEBAND_PARK_MS * s.fs) / 1000)
+					s.parkedUntil =
+						s.parkFrom + Math.round((WIDEBAND_PARK_MS * s.fs) / 1000)
 					return
 				}
 				// Not voiced, never classed or no discovery: nothing was written, nothing is kept.
@@ -4050,6 +4304,18 @@ export class WidebandAnalogRecorder {
 	 */
 	private finishOrHold(s: Session, file: FileState, final: boolean): void {
 		if (file.handle === null || file.failed || this.held.has(file)) return
+		if (
+			s.speechOnly &&
+			file.classTone === null &&
+			!strongSpeech(file.speech.result())
+		) {
+			// Classed by strong speech so far (classBySpeech), and the whole file no longer reads it.
+			this.endFile(s, file, "discarded:not-speech")
+			file.failed = true
+			this.fileLost(s)
+			file.handle.cancel("cancelled")
+			return
+		}
 		const [prior, backedClass, now] = this.priorOf(s.discoveryId)
 		const room = provisionalRoom(
 			widebandRecordingCap(s.fs, this.deps.settings().cpuBudgetCores),
@@ -4095,8 +4361,31 @@ export class WidebandAnalogRecorder {
 		} else {
 			if (path) this.log.info(keptLog(path, file, s), "Analog file kept")
 			file.finishAsked = true
-			void file.handle.finish(file.cut).catch(() => undefined)
+			void file.handle
+				.finish(file.cut, this.finishFacts(s, file))
+				.catch(() => undefined)
 		}
+	}
+
+	/**
+	 * The receipt facts of a file's end besides its cut: for a retune cut (`epoch-changed`),
+	 * whether a joined track was still on the air at the cut: one still open at the finish (its
+	 * close not reported, so its last report may be old: a weak carrier's reports are sparse),
+	 * or cutWasActive against the newest sample a joined track was reported on, its closes
+	 * included. A file that ended any other way carries none.
+	 */
+	private finishFacts(s: Session, file: FileState): AnalogFinishFacts {
+		if (file.cut !== "epoch-changed" || file.endSample === null) return {}
+		const cutAt = file.endSample
+		const open = [...s.observations].some(id => {
+			const span = s.activity.get(id)
+			return span !== undefined && span.open && span.start <= cutAt
+		})
+		const lastHeard = Math.max(
+			s.lastActive,
+			s.ownerClosedAt ?? Number.NEGATIVE_INFINITY,
+		)
+		return { cutActive: open || cutWasActive(lastHeard, cutAt, s.fs) }
 	}
 
 	/**

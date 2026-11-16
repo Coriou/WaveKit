@@ -1655,6 +1655,9 @@ export class ScannerService extends EventEmitter {
 									this.trialMemory.analogFmTrials(id),
 								),
 							),
+						// The owner's own trials alone (the class by speech: trialsVoiceChannel).
+						ownAnalogTrials: () =>
+							analogTrialsHeard(this.trialMemory.analogFmTrials(owner)),
 					}
 				},
 				logger: deps.logger,

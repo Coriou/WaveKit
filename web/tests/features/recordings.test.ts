@@ -16,6 +16,7 @@ import {
 	formatDuration,
 	groupByDay,
 	headerCount,
+	recordingCutLabel,
 	recordingMeta,
 	recordingTitle,
 	recordingsQuery,
@@ -94,6 +95,44 @@ describe("recording text", () => {
 		expect(recordingMeta(scan({ bytes: 2_900_000 }))).toBe(
 			"Scanner · analog · 2.9 MB",
 		)
+	})
+
+	it("says why a scanner file ended and which part it is, only from the core's fields", () => {
+		expect(recordingCutLabel(scan())).toBeNull()
+		expect(
+			recordingCutLabel(scan({ cut: null, part: null, parts: null })),
+		).toBeNull()
+		expect(recordingCutLabel(scan({ cut: "scanner-moved" }))).toBe(
+			"Cut: scanner moved on",
+		)
+		expect(
+			recordingCutLabel(scan({ cut: "duration-rollover", part: 2, parts: 5 })),
+		).toBe("Part 2 of 5 · Continues in next part")
+		// The last listed part names no next part.
+		expect(
+			recordingCutLabel(scan({ cut: "duration-rollover", part: 5, parts: 5 })),
+		).toBe("Part 5 of 5")
+		// A lone roll-over file (no part known) names no next part, only why it ended.
+		expect(
+			recordingCutLabel(
+				scan({ cut: "duration-rollover", part: null, parts: null }),
+			),
+		).toBe("Cut: length limit")
+		expect(recordingCutLabel(scan({ cut: "duration-rollover" }))).toBe(
+			"Cut: length limit",
+		)
+		expect(
+			recordingCutLabel(scan({ cut: "scanner-moved", part: 3, parts: 3 })),
+		).toBe("Part 3 of 3 · Cut: scanner moved on")
+		expect(recordingCutLabel(scan({ cut: "source-lost" }))).toBe(
+			"Cut: source lost",
+		)
+		expect(recordingCutLabel(scan({ cut: "shutdown" }))).toBe(
+			"Cut: WaveKit stopped",
+		)
+		expect(
+			recordingMeta(scan({ bytes: 2_900_000, cut: "scanner-moved" })),
+		).toBe("Scanner · analog · 2.9 MB · Cut: scanner moved on")
 	})
 
 	it("formats durations and sizes like the board", () => {

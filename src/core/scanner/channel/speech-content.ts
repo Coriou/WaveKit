@@ -194,12 +194,27 @@ export class SpeechContentMeter {
 	private readonly im = new Float32Array(SPEECH_FRAME_SAMPLES)
 	private readonly ring = new Float64Array(SPEECH_WINDOW_FRAMES)
 	private readonly sorted = new Float64Array(SPEECH_WINDOW_FRAMES)
-	private frames = 0
+	private heard = 0
 	private periodic = 0
+	/** The largest range and burst of the whole windows measured (never a partial one). */
 	private maxRange = 0
 	private maxBurst = 0
+	/**
+	 * A short file's one partial window (under SPEECH_WINDOW_FRAMES frames), measured apart: it is
+	 * reported only while the file is shorter than a window and never folds into `maxRange` or
+	 * `maxBurst`, so a meter read on every step (the recorder's judged audio) never reads a
+	 * partial window once it has a whole one (below SPEECH_WINDOW_FRAMES it reads what a meter
+	 * read once at the end reads; past it, whole windows only, possibly more of them).
+	 */
+	private partialRange = 0
+	private partialBurst = 0
 	/** Frame count at the last window measured (−1: none). */
 	private measuredAt = -1
+
+	/** Whole frames heard so far (result().frames, without measuring a window). */
+	get frames(): number {
+		return this.heard
+	}
 
 	push(pcm: Int16Array): void {
 		for (let i = 0; i < pcm.length; i++) {
@@ -212,25 +227,26 @@ export class SpeechContentMeter {
 	}
 
 	result(): SpeechContent {
-		if (this.measuredAt !== this.frames) {
-			if (this.frames >= SPEECH_WINDOW_FRAMES) this.measureWindow()
-			else if (this.frames >= SPEECH_SHORT_MIN_FRAMES)
-				this.measureWindow(this.frames)
+		const frames = this.heard
+		const whole = frames >= SPEECH_WINDOW_FRAMES
+		if (this.measuredAt !== frames) {
+			if (whole) this.measureWindow()
+			else if (frames >= SPEECH_SHORT_MIN_FRAMES) this.measureWindow(frames)
 		}
 		return {
-			frames: this.frames,
-			maxRangeDb: this.maxRange,
-			periodicShare: this.frames === 0 ? 0 : this.periodic / this.frames,
-			maxBurstFrames: this.maxBurst,
+			frames,
+			maxRangeDb: whole ? this.maxRange : this.partialRange,
+			periodicShare: frames === 0 ? 0 : this.periodic / frames,
+			maxBurstFrames: whole ? this.maxBurst : this.partialBurst,
 		}
 	}
 
 	private measureFrame(): void {
 		if (this.analyse() >= SPEECH_PERIODIC_MIN_CORRELATION) this.periodic++
-		this.frames++
+		this.heard++
 		if (
-			this.frames >= SPEECH_WINDOW_FRAMES &&
-			(this.frames - SPEECH_WINDOW_FRAMES) % SPEECH_WINDOW_HOP === 0
+			this.heard >= SPEECH_WINDOW_FRAMES &&
+			(this.heard - SPEECH_WINDOW_FRAMES) % SPEECH_WINDOW_HOP === 0
 		)
 			this.measureWindow()
 	}
@@ -251,7 +267,7 @@ export class SpeechContentMeter {
 		let band = 0
 		for (let k = SPEECH_HIGH_PASS_BIN; k <= SPEECH_BAND_TOP_BIN; k++)
 			band += re[k]! * re[k]! + im[k]! * im[k]!
-		this.ring[this.frames % SPEECH_WINDOW_FRAMES] =
+		this.ring[this.heard % SPEECH_WINDOW_FRAMES] =
 			10 * Math.log10((4 * band) / (n * n) + 1)
 		for (let k = 0; k < n; k++) {
 			const low = k < SPEECH_HIGH_PASS_BIN || n - k < SPEECH_HIGH_PASS_BIN
@@ -272,7 +288,8 @@ export class SpeechContentMeter {
 	 * The envelope range of the last SPEECH_WINDOW_FRAMES frames, and their longest burst over the
 	 * window's median (walked in time order: the oldest frame sits at `frames % SPEECH_WINDOW_FRAMES`).
 	 * `n` under SPEECH_WINDOW_FRAMES: a short file's one partial window, its frames 0 to n − 1 (the
-	 * ring has not wrapped), with the same percentiles of n.
+	 * ring has not wrapped), with the same percentiles of n, kept apart (`partialRange`,
+	 * `partialBurst`: the latest, not the largest, since each partial window holds every frame so far).
 	 */
 	private measureWindow(n: number = SPEECH_WINDOW_FRAMES): void {
 		const { ring } = this
@@ -283,18 +300,23 @@ export class SpeechContentMeter {
 		const range =
 			sorted[full ? P90 : Math.ceil(0.9 * (n - 1))]! -
 			sorted[full ? P10 : Math.floor(0.1 * (n - 1))]!
-		if (range > this.maxRange) this.maxRange = range
+		if (full) {
+			if (range > this.maxRange) this.maxRange = range
+		} else this.partialRange = range
 		const lo = full ? MEDIAN_LO : Math.floor((n - 1) / 2)
 		const hi = full ? MEDIAN_HI : Math.ceil((n - 1) / 2)
 		const floor = (sorted[lo]! + sorted[hi]!) / 2 + SPEECH_NOISE_BURST_DB
-		const oldest = full ? this.frames % SPEECH_WINDOW_FRAMES : 0
+		const oldest = full ? this.heard % SPEECH_WINDOW_FRAMES : 0
 		let run = 0
+		let longest = 0
 		for (let i = 0; i < n; i++) {
 			if (ring[(oldest + i) % SPEECH_WINDOW_FRAMES]! >= floor) {
-				if (++run > this.maxBurst) this.maxBurst = run
+				if (++run > longest) longest = run
 			} else run = 0
 		}
-		this.measuredAt = this.frames
+		if (!full) this.partialBurst = longest
+		else if (longest > this.maxBurst) this.maxBurst = longest
+		this.measuredAt = this.heard
 	}
 }
 
@@ -372,6 +394,35 @@ export function speechHeard(c: SpeechContent): boolean {
 		(c.maxRangeDb >= minRange ||
 			c.periodicShare >= SPEECH_NOISE_MAX_PERIODIC_SHARE ||
 			c.maxBurstFrames >= SPEECH_NOISE_MAX_BURST_FRAMES)
+	)
+}
+
+/**
+ * The envelope range strongSpeech needs (dB): 15. Measured on kept files: real voice at least
+ * 31.1 dB (p10), every digital voice, flat carrier and noise file at most 10.1 dB (p90); 15 leaves
+ * 4.9 dB over the highest non-voice file and 16.1 dB under the lowest voice one.
+ */
+export const SPEECH_STRONG_MIN_RANGE_DB = 15
+/**
+ * The periodic share strongSpeech needs: 0.05. Measured on kept files: real voice at least 0.05
+ * (p10 of a voice channel with its own tone; others 0.30), digital and noise files 0.01 to 0.05;
+ * the share alone does not separate them, the range does, and this keeps a file with no pitched
+ * frame (a bare carrier with noise bursts) out.
+ */
+export const SPEECH_STRONG_MIN_PERIODIC_SHARE = 0.05
+
+/**
+ * Strong speech (the recorder's class by speech alone, wideband-analog-recorder.ts
+ * classBySpeech): at least SPEECH_WINDOW_FRAMES frames (94 × 32 ms = 3.008 s, the first whole
+ * window: "3 s or more"), an envelope range of SPEECH_STRONG_MIN_RANGE_DB or more and a periodic
+ * share of SPEECH_STRONG_MIN_PERIODIC_SHARE or more. Paging audio passes it too: the class also
+ * needs a channel whose trials heard voice (recording-verdict.ts trialsVoiceChannel).
+ */
+export function strongSpeech(c: SpeechContent): boolean {
+	return (
+		c.frames >= SPEECH_WINDOW_FRAMES &&
+		c.maxRangeDb >= SPEECH_STRONG_MIN_RANGE_DB &&
+		c.periodicShare >= SPEECH_STRONG_MIN_PERIODIC_SHARE
 	)
 }
 

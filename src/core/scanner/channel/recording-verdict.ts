@@ -197,6 +197,12 @@ export function fileDecodedOwn(
  * tone, or a failed trial that held a run of speech-like frames; `decoded` adds those of its linked
  * co-channel discoveries, `partnerIds`, that heard: analogTrialsHeard); asked only for a file that
  * measured no speech (noVoiceChannel).
+ * `ownAnalogTrials` (absent or null: none remembered) reads the owner's own analog FM replay
+ * trials alone: its attempts and its own trials that heard (analogTrialsHeard with no partners),
+ * never a co-channel partner's. The positive class by speech (trialsVoiceChannel) reads only
+ * these: partners' heard counts measured against the owner's attempts alone would lean a data
+ * channel whose twins heard to voice (8 partners of 7 heard each on an owner of 7 of 81 read
+ * 63 of 81).
  * `channelObservation` (absent: none is) says a joined observation is one of the owner's or of
  * a linked co-channel discovery's (`partnerIds`): its analog-fm snapshot class is the channel's
  * own spectral reading, not another transmission's voice (finishVerdict's `joinedVoiceIds`).
@@ -227,6 +233,7 @@ export interface VoicePrior {
 	readonly ownerDecode?: OwnerDecode | null
 	readonly channelDecodes?: readonly OwnerDecode[]
 	analogTrials?(): AnalogTrials | null
+	ownAnalogTrials?(): AnalogTrials | null
 	channelObservation?(observationId: string): boolean
 	knownObservation?(observationId: string): boolean
 }
@@ -302,6 +309,48 @@ export function trialsHeardVoice(t: AnalogTrials): boolean {
 	return (
 		t.decoded >= NO_VOICE_CHANNEL_MIN_HEARD &&
 		t.decoded * 100 > t.attempts * NO_VOICE_CHANNEL_MIN_HEARD_PERCENT
+	)
+}
+
+/**
+ * Heard trials (VoicePrior.ownAnalogTrials `decoded`: the owner's own) a channel needs before
+ * the recorder's own-audio class may class an untoned voiced shadow by its speech alone (trialsVoiceChannel): 10. Ten
+ * heard replays are ten overs the analog trial called speech, a tone or a syllabic run; a stray
+ * syllabic run on a data channel is one or two (measured: no pager, DMR, P25 or D-STAR channel
+ * reached 10 % of its trials heard).
+ */
+export const VOICE_CHANNEL_MIN_HEARD = 10
+/**
+ * The share of the owner's attempts, in percent, its heard trials must reach (at least): 30.
+ * Measured: voice channels 70 to 91 %, the highest non-voice channel 9 % (7 of 81), none
+ * between; 30 leaves 21 points over the highest non-voice share and 40 under the lowest voice
+ * one. Compared in integers: heard × 100 ≥ attempts × 30 (10 of 33 = 30.3 % passes, 10 of 34 =
+ * 29.4 % fails).
+ */
+export const VOICE_CHANNEL_MIN_HEARD_PERCENT = 30
+
+/**
+ * The channel's own analog FM replay trials heard voice often (VoicePrior.ownAnalogTrials: at
+ * least VOICE_CHANNEL_MIN_HEARD of the owner's own trials heard and
+ * VOICE_CHANNEL_MIN_HEARD_PERCENT of its attempts; a co-channel partner's trials never count,
+ * unlike the no-voice check's VoicePrior.analogTrials): the trial-memory half of the recorder's
+ * class by speech alone (wideband-analog-recorder.ts classBySpeech). No prior, no owner-only
+ * trial reader, none remembered or a throwing read: false.
+ */
+export function trialsVoiceChannel(prior: VoicePrior | null): boolean {
+	if (prior?.ownAnalogTrials === undefined) return false
+	let t: AnalogTrials | null
+	try {
+		t = prior.ownAnalogTrials()
+	} catch {
+		return false
+	}
+	return (
+		t !== null &&
+		Number.isFinite(t.decoded) &&
+		Number.isFinite(t.attempts) &&
+		t.decoded >= VOICE_CHANNEL_MIN_HEARD &&
+		t.decoded * 100 >= t.attempts * VOICE_CHANNEL_MIN_HEARD_PERCENT
 	)
 }
 

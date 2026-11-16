@@ -31,6 +31,8 @@ import { ScannerPersistence } from "../../../../src/core/scanner/store/persisten
 import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
 import type { RecordingBinding } from "../../../../src/core/scanner/store/recording-operation.js"
 import { createLogger } from "../../../../src/utils/logger.js"
+import { nodeRecordingFs } from "../../../../src/core/recordings/inventory.js"
+import { readRecordingReceipt } from "../../../../src/core/recordings/recording-cut.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
 
 const dirs: string[] = []
@@ -1521,5 +1523,68 @@ describe("a non-finalized receipt keeps which step refused it", () => {
 		expect(receipt.outcome).toBe("finalized")
 		expect(receipt.failure).toBeUndefined()
 		expect(AnalogReceiptSchema.safeParse(receipt).success).toBe(true)
+	})
+})
+
+describe("analog receipt cutActive", () => {
+	it("writes the finish's cutActive to the receipt, keeps the first finish's, omits it when none is given, and recovery accepts both", async () => {
+		const h = await harness()
+		const quiet = h.begin()
+		await quiet.ready
+		await quiet.push(new Int16Array([1, -2, 3]))
+		const finish = quiet.finish("epoch-changed", { cutActive: false })
+		// A second finish is the same decision: its facts change nothing.
+		expect(quiet.finish("epoch-changed", { cutActive: true })).toBe(finish)
+		const quietReceipt = await finish
+		expect(quietReceipt).toMatchObject({
+			outcome: "finalized",
+			cutReason: "epoch-changed",
+			cutActive: false,
+		})
+		const plain = h.begin()
+		await plain.ready
+		await plain.push(new Int16Array([4, -5]))
+		const plainReceipt = await plain.finish("epoch-changed")
+		expect(plainReceipt.outcome).toBe("finalized")
+		expect("cutActive" in plainReceipt).toBe(false)
+		// On disk, as the inventory reads it (recording-cut.ts): a quiet cut is no "scanner moved".
+		const recordings = join(h.root, "recordings")
+		for (const [receipt, active, cut] of [
+			[quietReceipt, false, null],
+			[plainReceipt, undefined, "scanner-moved"],
+		] as const) {
+			const json = JSON.parse(
+				await readFile(
+					join(privateDir(h.root, receipt.operationId), "receipt.json"),
+					"utf8",
+				),
+			) as Record<string, unknown>
+			expect(json["cutActive"]).toBe(active)
+			expect(AnalogReceiptSchema.safeParse(json).success).toBe(true)
+			const facts = await readRecordingReceipt(
+				nodeRecordingFs,
+				recordings,
+				`analog-${receipt.operationId}.wav`,
+			)
+			expect(facts).toEqual({ cut, observationId: "o1" })
+		}
+		await h.evidence.stopAnalog()
+		const recovered = new EvidenceStore({
+			dir: h.root,
+			caps,
+			logger,
+			now: () => NOW,
+			statfs: async () => ({ freeBytes: 1e9 }),
+			isDiscoveryLive: id => !!h.store.get(id),
+		})
+		recovered.configureAnalog(h.adapter)
+		const reconciled = await recovered.recoverAnalog()
+		for (const receipt of [quietReceipt, plainReceipt])
+			expect(reconciled).toContainEqual(
+				expect.objectContaining({
+					operationId: receipt.operationId,
+					status: "available",
+				}),
+			)
 	})
 })
