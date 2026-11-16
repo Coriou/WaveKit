@@ -19,6 +19,11 @@ export interface AccessAudioBoundary {
 	readonly allowedAuthorities: readonly string[]
 }
 
+export type AccessExposure =
+	| "local-http"
+	| "tls-termination"
+	| "container-loopback"
+
 export interface AccessRuntimeOptions {
 	readonly bootstrap: ProtectedAccessBootstrap
 	/** Explicit audio listener boundary; never inferred from advertised URLs. */
@@ -26,6 +31,14 @@ export interface AccessRuntimeOptions {
 	readonly directory: string
 	readonly ownership: "single-host-pid-namespace"
 	readonly sessionCookieName?: string
+	/**
+	 * Every listener (API and audio) also admits a loopback Host from a loopback peer
+	 * (`AccessPolicyOptions.loopbackHostFromLoopbackPeer`). Only for `exposure: local-http`:
+	 * set without that exposure, opening refuses with `ACCESS_CONFIG_INVALID`.
+	 */
+	readonly loopbackHostFromLoopbackPeer?: boolean
+	/** The deployment's `access.exposure`; required for `loopbackHostFromLoopbackPeer`. */
+	readonly exposure?: AccessExposure
 	/** Shared boot observations; storage rechecks the current heartbeat. */
 	readonly lockWait?: LockWaitOptions
 	/** Parent logger; the session store logs through a "SessionStore" component logger. */
@@ -99,6 +112,10 @@ const optionsSchema = z
 			.max(64)
 			.regex(/^[A-Za-z0-9_-]+$/)
 			.default("wavekit_session"),
+		loopbackHostFromLoopbackPeer: z.boolean().optional(),
+		exposure: z
+			.enum(["local-http", "tls-termination", "container-loopback"])
+			.optional(),
 		/** Parent logger for the session store's component logger. */
 		logger: z.custom<Logger>(isLogger).optional(),
 		lockWait: z.custom<LockWaitOptions>().optional(),
@@ -145,6 +162,15 @@ export function openAccessRuntime(
 export async function openAccessRuntime(
 	options: AccessRuntimeOptions | NamedAccessRuntimeOptions,
 ): Promise<AccessRuntimeContext | NamedAccessRuntimeContext> {
+	// Checked before the try: that block reports every other failure as unavailable.
+	if (
+		options.loopbackHostFromLoopbackPeer === true &&
+		options.exposure !== "local-http"
+	)
+		throw new WaveKitError(
+			"Invalid access configuration: loopbackHostFromLoopbackPeer is only for exposure: local-http",
+			"ACCESS_CONFIG_INVALID",
+		)
 	let storage: PrivateAccessStorage | undefined
 	let leases: ConnectionLeases | undefined
 	try {
@@ -226,6 +252,8 @@ export async function openAccessRuntime(
 		const ownedStorage = storage
 		const common = {
 			allowedOrigins: bootstrap.allowedOrigins,
+			loopbackHostFromLoopbackPeer:
+				config.loopbackHostFromLoopbackPeer === true,
 			sessionCookieName: config.sessionCookieName,
 			machineSecretDigest: storage.machineSecretDigest(),
 			sessions,

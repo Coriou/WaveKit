@@ -32,6 +32,7 @@ import type {
 	DecoderRatePreviewItem,
 	DecoderTypeInfo,
 	DecoderStatus as ApiDecoderStatus,
+	DecoderSettingsUpdateResult,
 } from "@wavekit/api-types"
 import type { DecoderStatus as InternalDecoderStatus } from "../../decoders/types.js"
 import {
@@ -348,6 +349,84 @@ export interface DecoderRoutesOptions {
 /** WG8 req 2.2: `W/"n"`, `"n"` or bare `n` (station rules plus the weak form). */
 const IF_MATCH = /^(?:(?:W\/)?"(\d{1,19})"|(\d{1,19}))$/
 const PATCH_BODY_KEYS = new Set(["enabled", "options", "mode"])
+
+/** What the PATCH answer reads of a decoder's status; every field may be absent. */
+type RestartAnswerStatus = Pick<
+	InternalDecoderStatus,
+	| "running"
+	| "health"
+	| "restartInFlight"
+	| "nextRestartAt"
+	| "suspended"
+	| "efficiency"
+	| "mode"
+>
+
+/**
+ * How a decoder that is not running picks up saved options. `supervised`: an automatic
+ * restart is scheduled or under way. `startable`: stopped, and a start call runs it now.
+ * `later`: something else holds it back (disabled, mode off, suspended, efficiency-gated, or
+ * its status unknown), so no call is named.
+ */
+function stoppedApplies(
+	status: Partial<RestartAnswerStatus> | undefined,
+	enabled: boolean,
+): "supervised" | "startable" | "later" {
+	if (status === undefined) return "later"
+	if (
+		status.health === "restarting" ||
+		status.restartInFlight === true ||
+		status.nextRestartAt !== undefined
+	)
+		return "supervised"
+	if (
+		!enabled ||
+		status.mode === "off" ||
+		status.suspended === true ||
+		status.efficiency !== undefined
+	)
+		return "later"
+	return "startable"
+}
+
+/**
+ * A settings PATCH says what it needs: options wait for the decoder's next start, so a running
+ * decoder needs `restartCall`; a stopped one applies them when it starts. `enabled` is autostart
+ * at boot and `mode` applies at once: neither needs a restart. `id` is a configured decoder id
+ * (the route found it), never request data.
+ */
+function withRestartAnswer(
+	id: string,
+	result: DecoderSettingsUpdateResult,
+	status: Partial<RestartAnswerStatus> | undefined,
+): DecoderSettingsUpdateResult {
+	const running = status?.running === true
+	const restartOptions = result.changed.filter(
+		key => key !== "enabled" && key !== "mode",
+	)
+	const restartRequired = result.pendingRestart && running
+	const restartCall = restartRequired
+		? `POST /api/decoders/${id}/restart`
+		: null
+	const keys = restartOptions.length > 0 ? restartOptions.join(", ") : null
+	const stopped = stoppedApplies(status, result.settings.enabled.value)
+	const message = restartRequired
+		? `Saved; the running decoder still uses its old options${keys !== null ? ` (${keys} changed)` : ""}. ${restartCall} applies them`
+		: !result.pendingRestart
+			? "Saved; nothing waits for a restart"
+			: stopped === "supervised"
+				? "Saved; the decoder is restarting under supervision and applies them at its next restart"
+				: stopped === "startable"
+					? `Saved; the decoder is stopped and applies them when it next starts (POST /api/decoders/${id}/start)`
+					: "Saved; the decoder is not running and applies them at its next start"
+	return {
+		...result,
+		restartRequired,
+		restartOptions,
+		restartCall,
+		message,
+	}
+}
 
 function sendJson(reply: FastifyReply, status: number, body: unknown) {
 	return reply
@@ -1280,7 +1359,11 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 						body,
 						ifMatch === undefined ? undefined : { ifMatch },
 					)
-					return sendJson(reply, 200, result)
+					return sendJson(
+						reply,
+						200,
+						withRestartAnswer(id, result, decoderManager.getStatus(id)),
+					)
 				} catch (error) {
 					if (error instanceof DecoderSettingsError)
 						return sendJson(reply, error.statusCode, settingsErrorBody(error))

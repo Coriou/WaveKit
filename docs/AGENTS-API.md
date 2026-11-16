@@ -165,9 +165,12 @@ not yet written was not sent: read `state.lastChange` before tuning again. Read 
 ### When a scan holds the tuner
 
 A tune never takes the receiver from a running scan unasked. While a job holds the tuner's lease the
-answer is 409 `TUNER_LEASE_HELD` with `jobId` and `jobName`, and nothing is written. A lease that
-arrives while your tune is writing stops it the same way, and `applied` says what stands. Decide with
-whoever runs the scan, then send `"preempt": true`:
+answer is 409 `TUNER_LEASE_HELD` with `jobId` and `jobName`, and nothing is written; `retryWith`
+(`{"preempt": true}`) is the field that goes ahead. A lease that
+arrives while your tune is writing stops it the same way, and `applied` says what stands. **Pausing the
+job does not free the tuner**: a paused job keeps its lease so that resume carries on at the same hop,
+and the 409 says so with `jobPaused: true` and `pauseReason`. Decide with whoever runs the scan, then
+send `"preempt": true` (a paused job stays paused):
 
 ```sh
 curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
@@ -190,6 +193,21 @@ coming back:
 `waiters` lists other jobs that lost this tuner, to a job or to an operator, and can take it once it is
 idle, each with its own `autoAfterIdleMs`, so the job you stopped may not be the one that moves the receiver next. Cancel
 one if you need longer.
+
+To give the tuner back, resume the job. When that would interrupt someone the job had not interrupted
+before, the answer is 409 `SCANNER_TAKEOVER_REQUIRED` with `retryWith: {"takeover": true}`, and its
+`message` names the call to send:
+
+```sh
+curl --fail-with-body --header "$AUTH" --header "Content-Type: application/json" \
+  --data '{"takeover":true}' "$API_ORIGIN/api/scanner/jobs/$JOB/resume"
+```
+
+A 409 `SCANNER_SOURCE_BUSY` has no `retryWith`: another job holds the lease, and takeover does not
+help; stop that job or wait for it.
+
+Tuner status lives at `GET /api/tuner` (every source) and `GET /api/tuner/:sourceId`; there is no
+`/api/tuner/status`, and its 404 names those routes and the configured `sourceIds`.
 
 ### Tune for a while
 
@@ -235,6 +253,14 @@ decoders than fit, so read `GET /api/decoders/summary`.
 
 Each answer below is one read, no logs needed; every closed list is in `GET /api/enums`:
 
+- **Is the core healthy, and why not:** `status` and `reasons` on
+  [`GET /api/status`](API.md#get-apistatus). Read `status` (`healthy`, `degraded`,
+  `unhealthy`), then each reason's `code`, `message` and `fix` (the call to make). A sweep that
+  suspends the ambient decoders reads `sweep-suspends-decoders` (`info`) and never makes the core
+  `unhealthy`; `sweep-hold-without-job` (`warn`, `degraded`) means decoders stay suspended for a
+  sweep no live job runs and none ended within 30 seconds; `recorder-refusal-streak` (`warn`,
+  `degraded`) means the recorder kept nothing and started no recording that went on for over 5
+  minutes, and `fix` names the call for its newest refusal code.
 - **Who moved the tuner, and why:** `lastChange` on `GET /api/tuner` (`actor`, `reason`, `at`,
   `fields`, and `jobId` when a job moved it). A machine token reads `agent`, a browser session
   `web`, a core without access `unknown`.
@@ -246,10 +272,13 @@ Each answer below is one read, no logs needed; every closed list is in `GET /api
   `GET /api/scanner`; `engines[].lastPassiveStartFailure` when its job failed to start.
 - **Why a scan did not get the tuner back on its own:** `engines[].lastLeaseRefusal` on
   `GET /api/scanner` (`kind`, `code`, `at`, `holderJobId` when known).
-- **Why the core is slow:** [`GET /api/diagnostics`](API.md#get-apidiagnostics): event-loop
-  delay, CPU by thread and open channels, one shared sample every 2 s, so poll it freely. Read
-  it twice: the first answer has no CPU window yet.
-- **Why a signal was not recorded:** `recorder` on `GET /api/scanner/discoveries/:id`.
+- **Why the core is slow:** `load` on `GET /api/status` (process and container CPU in cores,
+  event-loop utilization and delay); the full sample is
+  [`GET /api/diagnostics`](API.md#get-apidiagnostics): event-loop delay, CPU by thread and open
+  channels, one shared sample every 2 s, so poll it freely. Read it twice: the first answer has
+  no CPU window yet.
+- **Why a signal was not recorded:** `recorder` on `GET /api/scanner/discoveries/:id`; for the
+  recorder as a whole, see [Why is nothing recorded?](#why-is-nothing-recorded).
 - **Why recordings and identification wait:** `sources[].tuning` here (the cause code, only on
   a row whose `verdict` reads `ok`), `tuningUnproven` on `GET /api/sources` with its message,
   fix, since when, and the refusals it caused (`plain-resume`: take the tuning back in one
@@ -373,6 +402,19 @@ For a failing decoder, `lastError` on `GET /api/decoders/:id` gives the cause, k
 automatic restarts, and [`GET /api/decoders/:id/log?lines=50`](API.md#get-apidecodersidlog) its
 recent output. That output is raw and can contain decoded data, so treat it like Activity rows.
 
+Changing a decoder's options (`PATCH /api/decoders/:id`, [contract](API.md#patch-apidecodersid))
+restarts nothing. Read `restartRequired` in the answer: when it is true the running decoder still
+uses its old options (`restartOptions` names the changed ones) and `restartCall` is the call that
+applies them:
+
+```sh
+curl --fail-with-body --header "$AUTH" --request POST "$API_ORIGIN/api/decoders/$DECODER/restart"
+```
+
+A decoder that is not running applies them when it next starts (one restarting or backing off, at
+its next supervised restart); `message` names the start call only when that call would run it.
+`enabled` and `mode` never need a restart.
+
 ## Read activity
 
 ```sh
@@ -432,6 +474,44 @@ while the request is admitted answers 409 `IQ_CAPTURE_SOURCE_CHANGED` (retry); a
 answers 507 ([IQ captures](API.md#named-iq-captures)). For a one-off window streamed
 straight to you without storing it, use the
 [IQ snapshot](API.md#current-window-iq-snapshot).
+
+## Why is nothing recorded?
+
+```sh
+curl --fail-with-body --header "$AUTH" "$API_ORIGIN/api/scanner/recorder/decisions?limit=20"
+```
+
+`items` lists the analog recorder's last decisions, newest first (`limit` 1 to 96, 20 by default):
+each `code` with its `outcome` (`kept`, `refused`, `discarded`, `progress`), the discovery and its
+`frequencyHz`. All `refused` and `discarded` with no `kept` means it records nothing; `streak`
+then says since when, the newest blocking code and `fix`, the call that clears it (for
+`refused:tuning`, take the tuning back with `POST /api/tuner/:sourceId/take-back`). Refusals such
+as `refused:not-analog` or `discarded:unvoiced` are the recorder judging a signal that is not
+voice, not a fault, and never make a streak; nor does `refused:record-disabled`, recording
+turned off on the job. Once a streak lasts over 5 minutes, `GET /api/status`
+reads `degraded` with the same `fix`. See [API.md](API.md#get-apiscannerrecorderdecisions).
+
+## What is at this frequency?
+
+One read says what the core already knows at a frequency, without moving anything:
+
+```sh
+curl --fail-with-body --header "$AUTH" \
+  "$API_ORIGIN/api/identify?frequencyHz=100000000&toleranceHz=6250"
+```
+
+Say what `level` says, and how old it is (`best.lastSeenAt`):
+
+| `level`       | Say                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------ |
+| `decoded`     | It was `best.protocol` (with `best.identity` when set), decoded there                |
+| `classified`  | It looked like `best.class` (or analog voice, by `best.proofKind`); not decoded      |
+| `energy-only` | Something was there, nothing classified it; `possibleSpur: true` may be the receiver |
+| `nothing`     | Nothing recorded there (flagged receiver spurs are left out); not proof of silence   |
+
+It reads the discoveries the scanner holds, so it reports the past, not the air now. To test
+the frequency now, ask [Is that DMR at this frequency?](#is-that-dmr-at-this-frequency) with
+the call in `confirm`. See [API.md](API.md#get-apiidentify).
 
 ## Is that DMR at this frequency?
 

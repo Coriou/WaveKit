@@ -11,11 +11,19 @@
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import {
+	SYSTEM_STATUS_REASON_CODES,
 	sourceActivitySchema,
 	sourceRateMismatchSchema,
 	sourceSignalFlatSchema,
 	sourceEndpointSchema,
 	sourceFeedSchema,
+} from "@wavekit/api-types"
+import type {
+	Diagnostics,
+	RecorderRefusalStreak,
+	SystemStatusLoad,
+	SystemStatusReason,
+	SystemStatusResponse as SystemStatusDto,
 } from "@wavekit/api-types"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -26,6 +34,7 @@ import type { TunerRelay, TunerRelayStatus } from "../../core/tuner-relay.js"
 import {
 	performHealthCheck,
 	checkReadiness,
+	sweepHeldDecoders,
 	unhealthyReason,
 	getUptime,
 	type HealthStatus,
@@ -276,6 +285,79 @@ const sourceStatusSchema = {
 	],
 } as const
 
+const nullableNumber = { type: ["number", "null"] } as const
+
+/** `SystemStatusReason` */
+const statusReasonSchema = {
+	type: "object",
+	properties: {
+		code: { type: "string", enum: SYSTEM_STATUS_REASON_CODES },
+		level: { type: "string", enum: ["info", "warn"] },
+		message: { type: "string" },
+		fix: { type: "string" },
+		sources: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					sourceId: { type: "string" },
+					decoders: { type: "integer" },
+				},
+				required: ["sourceId", "decoders"],
+			},
+		},
+		streak: {
+			type: "object",
+			properties: {
+				since: { type: "string" },
+				durationMs: { type: "number" },
+				newestCode: { type: "string" },
+				newestAt: { type: "string" },
+				refusals: { type: "integer" },
+				raisesStatus: { type: "boolean" },
+				pending: { type: "boolean" },
+				fix: { type: "string" },
+			},
+			required: [
+				"since",
+				"durationMs",
+				"newestCode",
+				"newestAt",
+				"refusals",
+				"raisesStatus",
+				"pending",
+				"fix",
+			],
+		},
+	},
+	required: ["code", "level", "message", "fix"],
+} as const
+
+/** `SystemStatusLoad` */
+const statusLoadSchema = {
+	type: ["object", "null"],
+	properties: {
+		at: { type: "string" },
+		processCpuCores: nullableNumber,
+		containerCpuCores: nullableNumber,
+		eventLoopUtilization: nullableNumber,
+		eventLoopDelayMaxMs: nullableNumber,
+		eventLoopDelayP99Ms: nullableNumber,
+		eventLoopDelayMaxMs10m: nullableNumber,
+		details: { type: "string", enum: ["/api/diagnostics"] },
+	},
+	required: [
+		"at",
+		"processCpuCores",
+		"containerCpuCores",
+		"eventLoopUtilization",
+		"eventLoopDelayMaxMs",
+		"eventLoopDelayP99Ms",
+		"eventLoopDelayMaxMs10m",
+		"details",
+	],
+} as const
+
 /**
  * System status response schema (legacy /api/status)
  */
@@ -296,6 +378,8 @@ const systemStatusResponseSchema = {
 		audio: audioStatusSchema,
 		tunerRelay: tunerRelayStatusSchema,
 		health: healthStatusResponseSchema,
+		reasons: { type: "array", items: statusReasonSchema },
+		load: statusLoadSchema,
 	},
 	required: [
 		"status",
@@ -305,6 +389,7 @@ const systemStatusResponseSchema = {
 		"decoders",
 		"audio",
 		"health",
+		"reasons",
 	],
 } as const
 
@@ -335,12 +420,14 @@ export interface NotReadyResponse {
 }
 
 /**
- * System status response interface (extended with health)
+ * GET /api/status: the shared DTO (`@wavekit/api-types` SystemStatusResponse), with the core's
+ * own row types for the parts it builds from them (they carry `| undefined` optionals the DTO's
+ * looser rows leave out).
  */
-export interface SystemStatusResponse {
-	status: HealthStatusLevel
-	uptime: number
-	version: string
+export interface SystemStatusResponse extends Omit<
+	SystemStatusDto,
+	"sources" | "decoders" | "audio" | "tunerRelay" | "health"
+> {
 	sources: SourceStatus[]
 	decoders: DecoderStatus[]
 	audio: {
@@ -374,6 +461,148 @@ export interface HealthRoutesOptions {
 	sdrppEnabled?: boolean | undefined
 	/** Protected mode only: true once only a restart can bring credentials back. */
 	accessAuthorityLost?: (() => boolean) | undefined
+	/** The analog recorder's refusal streak (RecorderStreakTracker); absent without a scanner. */
+	recorderStreak?: (() => RecorderRefusalStreak | null) | undefined
+	/** The shared GET /api/diagnostics sample (DiagnosticsSampler.read); absent: no `load`. */
+	diagnostics?: (() => Promise<Diagnostics>) | undefined
+	/**
+	 * Sources a scanner job may still hold (liveScannerJobSources: a live job, or one that ended
+	 * within SWEEP_RELEASE_GRACE_MS); absent without a scanner, and then a sweep hold is never called
+	 * leaked.
+	 */
+	scannerJobSources?: (() => ReadonlySet<string>) | undefined
+}
+
+const SWEEP_FIX =
+	"GET /api/scanner/jobs?view=compact names the sweep; POST /api/scanner/jobs/:id/pause or /cancel ends the hold"
+
+/** Job states that may hold a source's decoders (every state but pending and the terminal ones). */
+const HOLDING_JOB_STATES: ReadonlySet<string> = new Set([
+	"starting",
+	"running",
+	"holding",
+	"paused",
+])
+
+/** The scanner's terminal job states (job-state.ts TERMINAL). */
+const TERMINAL_JOB_STATES: ReadonlySet<string> = new Set([
+	"completed",
+	"cancelled",
+	"failed",
+])
+
+/**
+ * How long a job that just ended still explains a hold on its source. The runner records the
+ * terminal state (and `updatedAt`) first, then awaits its finishing actions: stopping its probes,
+ * releasing the lease (TEST_MODE 0 and up to 5 restored tuner fields, each one rtl_tcp frame, then
+ * at most RESTORE_CAPS_TIMEOUT_MS = 1 s waiting for the caps to show the restored tuning) and only
+ * then the decoder hold. The 1 s caps wait is the only timed step; 30 s leaves 29 s for the probe
+ * stops, frame writes on a slow link and the decoders' re-evaluation, so a normal sweep end never
+ * reads as leaked, while a hold still there 30 s after its job ended is.
+ */
+export const SWEEP_RELEASE_GRACE_MS = 30_000
+
+/**
+ * The sources a scanner job may still hold, from the compact job rows: a live job (starting,
+ * running, holding, paused), or one that ended at most SWEEP_RELEASE_GRACE_MS ago (`updatedAt`,
+ * set when it took its terminal state) and may still be releasing. An unreadable `updatedAt` on a
+ * terminal row counts as still releasing (never guessed leaked). `updatedAt` can be bumped after
+ * the terminal state (a later write to the row), which only extends the grace. A job deleted during
+ * its ~1 s teardown leaves no row, so its hold can read as sweep-hold-without-job until the decoders
+ * are released.
+ */
+export function liveScannerJobSources(
+	rows: readonly { state: string; sourceId: string; updatedAt?: string }[],
+	nowMs: number = Date.now(),
+): ReadonlySet<string> {
+	const out = new Set<string>()
+	for (const r of rows) {
+		if (HOLDING_JOB_STATES.has(r.state)) out.add(r.sourceId)
+		else if (TERMINAL_JOB_STATES.has(r.state)) {
+			const endedMs = r.updatedAt === undefined ? NaN : Date.parse(r.updatedAt)
+			if (
+				!Number.isFinite(endedMs) ||
+				nowMs - endedMs <= SWEEP_RELEASE_GRACE_MS
+			)
+				out.add(r.sourceId)
+		}
+	}
+	return out
+}
+
+const LEAKED_HOLD_FIX =
+	"GET /api/scanner/jobs?view=compact shows no live job on the source and none that ended in the last 30 s; restart the core to release the hold"
+
+/**
+ * The reasons beside the component verdict: fixed text, counts and config ids only. `jobSources`
+ * (sources a live scanner job names) splits a sweep hold into one a job explains and one none
+ * does (leaked); without it every hold reads as a sweep's.
+ */
+export function statusReasons(
+	held: readonly { sourceId: string; decoders: number }[],
+	streak: RecorderRefusalStreak | null,
+	jobSources?: ReadonlySet<string>,
+): SystemStatusReason[] {
+	const reasons: SystemStatusReason[] = []
+	const swept = held.filter(
+		h => jobSources === undefined || jobSources.has(h.sourceId),
+	)
+	const leaked = held.filter(
+		h => jobSources !== undefined && !jobSources.has(h.sourceId),
+	)
+	const total = (rows: typeof held): number =>
+		rows.reduce((sum, h) => sum + h.decoders, 0)
+	if (swept.length > 0)
+		reasons.push({
+			code: "sweep-suspends-decoders",
+			level: "info",
+			message: `A scanner sweep suspends ${total(swept)} decoder(s) on ${swept.length} source(s); they resume when it ends and are not counted down`,
+			fix: SWEEP_FIX,
+			sources: swept.map(h => ({ ...h })),
+		})
+	if (leaked.length > 0)
+		reasons.push({
+			code: "sweep-hold-without-job",
+			level: "warn",
+			message: `${total(leaked)} decoder(s) on ${leaked.length} source(s) stay suspended for a scanner sweep, but no live scanner job names the source and none ended there in the last ${SWEEP_RELEASE_GRACE_MS / 1000} s`,
+			fix: LEAKED_HOLD_FIX,
+			sources: leaked.map(h => ({ ...h })),
+		})
+	if (streak?.raisesStatus === true) {
+		const minutes = Math.floor(streak.durationMs / 60_000)
+		reasons.push({
+			code: "recorder-refusal-streak",
+			level: "warn",
+			message: `The analog recorder has kept nothing for ${minutes} min, refusing every candidate (newest ${streak.newestCode}); GET /api/scanner/recorder/decisions lists them`,
+			fix: streak.fix,
+			streak,
+		})
+	}
+	return reasons
+}
+
+/** The verdict a `warn` reason raises: `healthy` becomes `degraded`, worse stays. */
+export function raisedStatus(
+	status: HealthStatusLevel,
+	reasons: readonly SystemStatusReason[],
+): HealthStatusLevel {
+	return status === "healthy" && reasons.some(r => r.level === "warn")
+		? "degraded"
+		: status
+}
+
+/** The figures of one diagnostics sample. */
+export function loadOf(sample: Diagnostics): SystemStatusLoad {
+	return {
+		at: sample.at,
+		processCpuCores: sample.process.cpuCores,
+		containerCpuCores: sample.containerCpuCores,
+		eventLoopUtilization: sample.eventLoopUtilization,
+		eventLoopDelayMaxMs: sample.eventLoopDelay?.last?.maxMs ?? null,
+		eventLoopDelayP99Ms: sample.eventLoopDelay?.last?.p99Ms ?? null,
+		eventLoopDelayMaxMs10m: sample.eventLoopDelay?.maxMs10m ?? null,
+		details: "/api/diagnostics",
+	}
 }
 
 /**
@@ -392,6 +621,9 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 		tunerRelay,
 		sdrppEnabled,
 		accessAuthorityLost,
+		recorderStreak,
+		diagnostics,
+		scannerJobSources,
 	} = options
 
 	/**
@@ -552,14 +784,29 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 
 			const tunerRelayStatus = tunerRelay ? tunerRelay.getStatus() : undefined
 
+			const reasons = statusReasons(
+				sweepHeldDecoders(decoderManager),
+				recorderStreak?.() ?? null,
+				scannerJobSources?.(),
+			)
 			const response: SystemStatusResponse = {
-				status: healthStatus.status,
+				status: raisedStatus(healthStatus.status, reasons),
 				uptime: getUptime(),
 				version: APP_VERSION,
 				sources,
 				decoders,
 				audio,
 				health: healthStatus,
+				reasons,
+			}
+
+			if (diagnostics) {
+				try {
+					response.load = loadOf(await diagnostics())
+				} catch {
+					// A failed sample claims nothing about the load.
+					response.load = null
+				}
 			}
 
 			if (tunerRelayStatus) {

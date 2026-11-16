@@ -395,6 +395,12 @@ curl http://localhost:9000/health
 # {"status":"ok","timestamp":"..."}
 ```
 
+`/health` and `/health/ready` leave out decoders a scanner sweep holds suspended
+(`tuner-scanning`), so a sweep never fails a probe. A hold that outlived its sweep
+(still there 30 seconds after the job ended) does not fail them either: it shows
+only in the `reasons` of [`GET /api/status`](API.md#get-apistatus), as
+`sweep-hold-without-job`, which reads `degraded`.
+
 A protected core that lost its private access directory answers `/health` with
 503 and `reason` `access_authority_lost` while it closes, then exits with code 1. s6
 starts it again inside the container about 5 seconds later, with no Docker restart: a
@@ -530,7 +536,10 @@ preserves the `Host` header the core expects.
 What the core checks: its own bind address and each request's Host, Origin,
 cookies and credentials. Browsers (including DNS-rebinding pages) send the
 page's own authority as Host, and only the configured loopback authorities are
-accepted. A client without credentials gets only the public exceptions
+accepted. Each listener checks its own allowlist, so a client sends the API's
+authority to the API and `/ws`, and the audio listener's own authority to that
+listener: under `container-loopback` a loopback spelling of another listener's
+authority is refused with 403 `HOST_FORBIDDEN`. A client without credentials gets only the public exceptions
 (health, bootstrap metadata, validated CORS preflights and pairing-code
 redemption); every other route, WebSocket and audio stream needs a paired
 session cookie, the machine bearer credential or a short-lived audio token.

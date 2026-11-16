@@ -270,6 +270,21 @@ as under `local-http`. See
 See [protected deployment constraints](DOCKER-SETUP.md#protected-runtime-deployment)
 for required proxy, private-volume and probe checks.
 
+Each listener admits only the Host values in its own allowlist, so the API (HTTP and
+`/ws`) and the audio ports each want their own exact `host:port`, and a `localhost`
+spelling of an allowed `127.0.0.1` authority is refused with 403 `HOST_FORBIDDEN`. The
+access runtime has one opt-in rule for `local-http` deployments
+(`loopbackHostFromLoopbackPeer`): every listener then also admits a loopback Host
+(`127.0.0.1`, `localhost` or `[::1]`, any port) when the TCP peer itself is a loopback
+address. A remote peer gains nothing from it, a DNS-rebinding name is never a loopback
+Host, and Origin, CSRF and credential checks are unchanged. It is not set under
+`container-loopback`, where the peer address seen in the container cannot tell a local
+client from a remote one, and the core does not yet expose it as a configuration key;
+the runtime refuses it under any exposure but `local-http` (`ACCESS_CONFIG_INVALID`).
+Do not enable it behind a same-host reverse proxy either: the proxy forwards from a
+loopback peer, often with a loopback Host, so every client behind it would look local
+to this rule.
+
 The root policy runs before routes, documentation and CORS plugins. Only the exact
 credential-free `GET /health`, validated preflight and explicitly mounted exact
 `GET`/`HEAD /api/access/bootstrap` are public; status, unknown
@@ -881,6 +896,101 @@ curl http://localhost:9000/api/status
 	}
 }
 ```
+
+The 2026-11-16 core adds `reasons` and `load` (older cores omit both):
+
+```json
+{
+	"status": "degraded",
+	"reasons": [
+		{
+			"code": "sweep-suspends-decoders",
+			"level": "info",
+			"message": "A scanner sweep suspends 2 decoder(s) on 1 source(s); they resume when it ends and are not counted down",
+			"fix": "GET /api/scanner/jobs?view=compact names the sweep; POST /api/scanner/jobs/:id/pause or /cancel ends the hold",
+			"sources": [{ "sourceId": "rtl", "decoders": 2 }]
+		},
+		{
+			"code": "recorder-refusal-streak",
+			"level": "warn",
+			"message": "The analog recorder has kept nothing for 7 min, refusing every candidate (newest refused:tuning); GET /api/scanner/recorder/decisions lists them",
+			"fix": "GET /api/sources (sources[].tuningUnproven), then POST /api/tuner/:sourceId/take-back",
+			"streak": {
+				"since": "2026-01-01T10:00:00.000Z",
+				"durationMs": 420000,
+				"newestCode": "refused:tuning",
+				"newestAt": "2026-01-01T10:06:50.000Z",
+				"refusals": 31,
+				"raisesStatus": true,
+				"pending": false,
+				"fix": "GET /api/sources (sources[].tuningUnproven), then POST /api/tuner/:sourceId/take-back"
+			}
+		}
+	],
+	"load": {
+		"at": "2026-01-01T10:07:00.000Z",
+		"processCpuCores": 0.82,
+		"containerCpuCores": 1.1,
+		"eventLoopUtilization": 0.31,
+		"eventLoopDelayMaxMs": 14,
+		"eventLoopDelayP99Ms": 12,
+		"eventLoopDelayMaxMs10m": 48,
+		"details": "/api/diagnostics"
+	}
+}
+```
+
+`status` is the verdict to read: `health.status` (the components' own verdict) raised to
+`degraded` by a `warn` reason; `unhealthy` is never lowered. `reasons` (empty when nothing
+applies) says why, each with a closed `code`, fixed `message` text and the `fix` call:
+
+- `sweep-suspends-decoders` (`info`): a scanner sweep holds a source, so its configured decoders
+  are suspended (`suspension.reasonCode: "tuner-scanning"`). They are not counted down, so a sweep
+  never makes the core `unhealthy` (nor `/health` 503 or `/health/ready` not ready); a decoder that
+  faulted still counts. `sources` lists the held sources and how many decoders each suspends.
+- `sweep-hold-without-job` (`warn`): decoders are suspended `tuner-scanning` on a source that no
+  live scanner job (starting, running, holding or paused) names and no job ended on in the last
+  30 seconds, so the hold outlived its job. `sources` lists them, and the core reads `degraded`.
+  A job takes its ended state first and then stops its probes, puts the tuner back (waiting up to
+  1 second for the source to show the restored tuning) and only then releases the decoders, which
+  can take a few seconds; a job that ended within 30 seconds still accounts for the hold, which
+  reads as `sweep-suspends-decoders` meanwhile. The 30 seconds run from the job's `updatedAt`,
+  which a later write after its end can bump: that only extends them. A job deleted during that
+  teardown (about a second) has no row left, so its hold can briefly read as
+  `sweep-hold-without-job` until the decoders are released.
+- `recorder-refusal-streak` (`warn`): the wideband analog recorder has kept no file and started
+  no recording that went on (a recording that started and then failed with one of the codes
+  below does not count as started) for over 5 minutes while refusing candidates with a code an
+  operator can fix
+  (`refused:tuning`, `refused:cpu`, `refused:slots`, `refused:no-iq`, `refused:store`,
+  `refused:start-failed`, `discarded:store-backlog`, `discarded:write-failed`,
+  `discarded:buffer-full`), no two of them in a row more than 5 minutes apart and the newest at
+  most 5 minutes old. `refused:tuning` counts only while its source's tuning is unproven
+  (`tuningUnproven` on [`GET /api/sources`](#get-apisources)): the recorder also refuses a
+  snapshot from before a retune with it. `refused:slots` counts only while no recording runs on
+  its source (no `recorder.sessions` entry with that `sourceId` on `GET /api/scanner`): with one
+  running, every slot is busy recording, which is no fault. Classification outcomes (`refused:not-analog`,
+  `discarded:unvoiced`, ...) and `refused:record-disabled` (recording turned off on the job, an
+  operator's choice) never make a streak. `fix` is the call for the newest code; `streak` is the
+  same object as on [`GET /api/scanner/recorder/decisions`](#get-apiscannerrecorderdecisions).
+  Exactly 5 minutes does not raise it; any longer does. A recording's outcome is its terminal
+  decision (`finalized`, `refused:*`, `discarded:*`), never a step such as `classed` or `voiced`.
+  While a recording that started has no outcome yet (still recording, or done and waiting for its
+  store receipt), `streak.pending` is true: it neither breaks the streak nor ends it, and it holds
+  back only a raise the streak would first earn while it runs (it started within 5 minutes of the
+  streak's start, or before it), never one already earned before it started. If that recording
+  then fails with one of the codes, the streak goes on from its first refusal; any other end
+  breaks it, including one whose start already rolled out of `recent`.
+
+`load` holds the CPU and event-loop figures of the shared
+[`GET /api/diagnostics`](#get-apidiagnostics) sample: status reuses the newest sample when it
+is under 2 s old and otherwise takes one, the same sample `/api/diagnostics` then answers with,
+so the core samples at most once every 2 s whoever asks: `processCpuCores` (all threads, 1 is one core),
+`containerCpuCores`, `eventLoopUtilization` (0 to 1), `eventLoopDelayMaxMs` and
+`eventLoopDelayP99Ms` (the last 2 s) and `eventLoopDelayMaxMs10m`. A figure reads null until the
+sample has one (the first has no CPU window); `load` is null when the sample failed. When no
+sample is under 2 s old, the answer waits for a new one, which reads the per-thread CPU within a
+250 ms budget (`threadReadBudgetMs`), so `/api/status` can take up to about that long.
 
 #### GET /api/resources, /api/resources/container and /api/resources/backpressure
 
@@ -2147,6 +2257,12 @@ Get tuner state for a single source.
 curl http://localhost:9000/api/tuner/rtl-pi
 ```
 
+There is no `GET /api/tuner/status`: the path segment is a source id, so a source named
+`status` keeps working. For any id that is not a tuner source the answer is 404
+`TUNER_SOURCE_NOT_FOUND` with `routes` (`GET /api/tuner`, `GET /api/tuner/:sourceId`,
+`GET /api/agent/status`, the routes that carry tuner status) and `sourceIds`, the
+configured tuner source ids.
+
 #### POST /api/tuner/:sourceId/tune
 
 Set the rate, the centre and the gain in one call. The answer comes only when the source can be
@@ -2180,17 +2296,17 @@ IQ on its current connection, after any reconnect restore. As with every tuner r
 **Any failure after the settings were accepted** carries `usable`, `applied`, `notApplied` and
 `state`, so a partial tune is never silent:
 
-| Status | `code`                        | Meaning                                                                                                                                                                                                                                                                        |
-| ------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 503    | `TUNER_NOT_USABLE`            | The source was not usable within 18 s (or its feed is paused, which answers at once). `sourceVerdict` says why. `applied` can be non-empty: those settings were written and return with the source. `inFlight: true`: one was being written at the deadline and may still land |
-| 503    | `TUNER_TUNE_PARTIAL`          | The source is usable but shows other values, as after a `tuner.reconnectPolicy: reset` reconnect discards what was written                                                                                                                                                     |
-| 409    | `TUNER_TUNE_OVERRIDDEN`       | Another write changed the tuner during or after this tune, and it stands. The tune sends no further frame after it, temporary or not; `applied` says what stands. `state.lastChange` says who. No `Retry-After`: tuning again would overwrite that choice, so decide first     |
-| 503    | `SOURCE_DISCONNECTED`         | The source dropped during the writes; `applied` stops where it did                                                                                                                                                                                                             |
-| 409    | `TUNER_CONTROL_EXTERNAL`      | An external client has the tuner                                                                                                                                                                                                                                               |
-| 409    | `TUNER_LEASE_HELD`            | A scanner job holds the tuner's lease and the body has no `preempt: true`. `jobId` and `jobName` name it; nothing more was written, and `applied` says what stands. See [tune and a scanner job](#tune-and-a-scanner-job)                                                      |
-| 409    | `TUNER_TUNE_BUSY`             | One tune per source: another is running, or `restoreAfterS` while a restore is putting tuning back. It is not queued; retry when it answers. A tune without `restoreAfterS` during a restore ends the restore and queues behind it                                             |
-| 409    | `TUNER_RESTORE_PRIOR_UNKNOWN` | `restoreAfterS` with a setting whose prior value the core does not know (see `unknownFields`): nothing is written. Set it first, or tune without a restore                                                                                                                     |
-| 404    | `TUNER_SOURCE_NOT_FOUND`      | No tuner for this source                                                                                                                                                                                                                                                       |
+| Status | `code`                        | Meaning                                                                                                                                                                                                                                                                                                                                                    |
+| ------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 503    | `TUNER_NOT_USABLE`            | The source was not usable within 18 s (or its feed is paused, which answers at once). `sourceVerdict` says why. `applied` can be non-empty: those settings were written and return with the source. `inFlight: true`: one was being written at the deadline and may still land                                                                             |
+| 503    | `TUNER_TUNE_PARTIAL`          | The source is usable but shows other values, as after a `tuner.reconnectPolicy: reset` reconnect discards what was written                                                                                                                                                                                                                                 |
+| 409    | `TUNER_TUNE_OVERRIDDEN`       | Another write changed the tuner during or after this tune, and it stands. The tune sends no further frame after it, temporary or not; `applied` says what stands. `state.lastChange` says who. No `Retry-After`: tuning again would overwrite that choice, so decide first                                                                                 |
+| 503    | `SOURCE_DISCONNECTED`         | The source dropped during the writes; `applied` stops where it did                                                                                                                                                                                                                                                                                         |
+| 409    | `TUNER_CONTROL_EXTERNAL`      | An external client has the tuner                                                                                                                                                                                                                                                                                                                           |
+| 409    | `TUNER_LEASE_HELD`            | A scanner job holds the tuner's lease and the body has no `preempt: true`. `jobId` and `jobName` name it, `jobPaused` and `pauseReason` say whether it is paused, and `retryWith` is the body field that goes ahead (`{"preempt": true}`); nothing more was written, and `applied` says what stands. See [tune and a scanner job](#tune-and-a-scanner-job) |
+| 409    | `TUNER_TUNE_BUSY`             | One tune per source: another is running, or `restoreAfterS` while a restore is putting tuning back. It is not queued; retry when it answers. A tune without `restoreAfterS` during a restore ends the restore and queues behind it                                                                                                                         |
+| 409    | `TUNER_RESTORE_PRIOR_UNKNOWN` | `restoreAfterS` with a setting whose prior value the core does not know (see `unknownFields`): nothing is written. Set it first, or tune without a restore                                                                                                                                                                                                 |
+| 404    | `TUNER_SOURCE_NOT_FOUND`      | No tuner for this source                                                                                                                                                                                                                                                                                                                                   |
 
 503 answers carry `Retry-After: 1`. The 18 s is one command (9 s) plus one sample-rate recovery (9 s,
 [above](#tuner-commands-during-a-sample-rate-restart)). Waiting for a source that was already
@@ -2209,8 +2325,11 @@ lease cannot be read, the tune answers 409 `TUNER_LEASE_HELD` with `jobId` and `
 nothing. This is checked on arrival, when the tune's turn in the command queue comes, and before each
 frame. A lease that arrives between frames stops the tune there: what already went out stands, `applied`
 and `notApplied` say which, and with `restoreAfterS` no restore comes (reason `scanner-lease`). To go
-ahead, send `preempt: true`, wait for the job to end, or cancel it (`POST /api/scanner/jobs/:id/cancel`;
-pausing a job keeps its lease). The separate routes below and the web app do not ask: they preempt as
+ahead, send `preempt: true`, wait for the job to end, or cancel it (`POST /api/scanner/jobs/:id/cancel`).
+Pausing a job does not free the tuner: a paused job keeps its lease so that resume carries on at the
+same hop. The 409 then says so: `jobPaused: true`, `pauseReason` (for example `operator`), and a
+`message` of its own that names the pause and `"preempt": true`, says the job stays paused when
+preempted, and names its resume and cancel calls. The separate routes below and the web app do not ask: they preempt as
 they always have.
 
 With `preempt: true` and a lease held, the next frame takes the lease (`preempted-operator`), and the
@@ -3860,8 +3979,16 @@ curl -X PATCH http://localhost:9000/api/decoders/dsd-main \
 ```
 
 200 `DecoderSettingsUpdateResult`: `{ settings, revision, changed,
-pendingRestart }`, where `changed` lists the keys whose effective value changed
-(`enabled` first, then options in descriptor order).
+pendingRestart, restartRequired, restartOptions, restartCall, message }`, where
+`changed` lists the keys whose effective value changed (`enabled` first, then
+options in descriptor order). `restartRequired` is true when the decoder is running
+and does not yet use the effective options; `restartCall` then names the call that
+applies them (`POST /api/decoders/<id>/restart`), else it is null. A decoder that is not
+running applies them when it next starts: `message` names `POST /api/decoders/<id>/start`
+only for a stopped decoder that call would run; one restarting or backing off applies them
+at its next supervised restart, and one disabled, in mode `off`, suspended or
+efficiency-gated gets no call. `restartOptions` lists the option keys this PATCH
+changed. `enabled` and `mode` never need a restart. `message` says it in a sentence.
 
 Each patched key is validated with its own option schema, and the merged
 effective options with the type's cross-key rules; a problem already present in
@@ -4130,11 +4257,12 @@ them: `noAlias`, no merge alias names the folder; `aliasWithoutOwner`, its alias
 no live discovery (either way no observation listing its recordings named a single owner).
 Nothing is moved or deleted. One info line at startup carries the same counts.
 
-`stateBackup` (absent from older cores, before the scanner state loaded, and while a backup
-this start took is still having its recordings linked in, seconds after the start) is this start's
+`stateBackup` (absent from older cores and before the scanner state loaded) is this start's
 pre-migration backup of the scanner state ([SCANNER.md](SCANNER.md), upgrade and rollback):
 `outcome` `taken` with `fromFormat`, `toFormat` and `path` (relative to `scanner.storage.dir`,
-`.backups/pre-<format>.<ms>`); `skipped` with `fromFormat`, `toFormat` and a fixed `reason`
+`.backups/pre-<format>.<ms>`); `pending` with `fromFormat` and `toFormat` while a backup this
+start took is still having its recordings linked in, seconds after the start (then `taken` or
+`skipped`; cores before 2026-11-16 leave `stateBackup` absent meanwhile); `skipped` with `fromFormat`, `toFormat` and a fixed `reason`
 (`unreadable`, `low-disk`, `disk-unknown`, `too-many-files`, `copy-failed`: one file could not
 be read or copied, and no backup was kept); or `none` with `reason` `same-format` or `fresh`.
 
@@ -4939,6 +5067,12 @@ Each returns the `ScanJob`. `resume` takes an optional body
   `paused(core-restart)` with a pending `resume.onBoot` restarts; any other waits for
   another resume. The `message` says which.
 
+Every 409 `SCANNER_TAKEOVER_REQUIRED` (create or resume) carries
+`retryWith: {"takeover": true}`, the body field that makes the same call go ahead; on
+`resume` its `message` ends by naming the call
+(`POST /api/scanner/jobs/<id>/resume with the body {"takeover": true}`). A
+`SCANNER_SOURCE_BUSY` has no `retryWith`: takeover does not help there.
+
 | Paused reason                                          | Source has no data                                                                                                                                                   | Source has data                                                        |
 | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `source-down`                                          | `SCANNER_SOURCE_DOWN`; waits                                                                                                                                         | carries on (normally by itself already)                                |
@@ -5364,6 +5498,126 @@ audio if it was idle.
 
 Also 409 `LIVE_AUDIO_UNAVAILABLE` (live audio not configured), 409
 `SCANNER_DISCOVERY_LOCKED_OUT`, 404 `SCANNER_DISCOVERY_NOT_FOUND`.
+
+#### GET /api/scanner/recorder/decisions
+
+Why nothing is recorded, in one read: the wideband analog recorder's recent decisions, newest
+first, from the two rings `GET /api/scanner` shows as `recorder.recent` (64 decisions about
+recordings) and `recorder.recentRefusals` (32 snapshot refusals). Present when the scanner is
+configured; it reads memory only.
+
+```bash
+curl "http://localhost:9000/api/scanner/recorder/decisions?limit=20"
+```
+
+`limit` (optional) is 1 to 96, the two rings together (64 + 32); 20 by default. Any other value,
+or another parameter, answers 400 `VALIDATION_ERROR` naming the field.
+
+```json
+{
+	"at": "2026-01-01T10:07:00.000Z",
+	"limit": 20,
+	"items": [
+		{
+			"at": "2026-01-01T10:06:50.000Z",
+			"code": "refused:tuning",
+			"outcome": "refused",
+			"kind": "snapshot",
+			"sourceId": "rtl",
+			"observationId": "o-9f2",
+			"discoveryId": "d-41c",
+			"frequencyHz": 100000000
+		}
+	],
+	"held": 96,
+	"counts": { "refused:tuning": 31, "finalized": 12 },
+	"streak": {
+		"since": "2026-01-01T10:00:00.000Z",
+		"durationMs": 420000,
+		"newestCode": "refused:tuning",
+		"newestAt": "2026-01-01T10:06:50.000Z",
+		"refusals": 31,
+		"raisesStatus": true,
+		"pending": false,
+		"fix": "GET /api/sources (sources[].tuningUnproven), then POST /api/tuner/:sourceId/take-back"
+	}
+}
+```
+
+Each item: `code` (the closed recorder decision codes, [SCANNER.md](SCANNER.md) Recorder
+decisions), `outcome` (`kept` for `finalized`, `refused`, `discarded`, or `progress` for
+`started`, `shadow`, `classed`, `voiced` and `evicted`), `kind` (`session`: about a recording;
+`snapshot`: a refusal before any recording started), the source, observation and discovery ids
+(`discoveryId` null for a shadow not yet placed), `frequencyHz` (the discovery's frequency now;
+null without a discovery or once it is gone) and, when the decision has them, `unclean` and
+`receipt` as on `GET /api/scanner`. `held` is how many decisions the rings hold now; `counts`
+counts every decision since the core started.
+
+`streak` is null unless refusals with a fixable code (listed under
+[`GET /api/status`](#get-apistatus) `recorder-refusal-streak`) follow the last kept file or
+started recording: `since` (the first of them still known, a lower bound once the rings rolled
+over; the core remembers it across reads until a file is kept, a recording starts and does not
+fail with a fixable code, or no fixable refusal comes for over 5 minutes, and a gap that long
+between two of them starts a new streak), `durationMs`, the `newestCode` and `newestAt`,
+`refusals` (how many the rings hold, 0 once other codes pushed them out), `raisesStatus` (over
+5 minutes and the newest at most 5 minutes old, unless a recording that started within
+5 minutes of `since`, and at most 5 minutes ago, has no outcome yet), `pending` (a recording that
+started has no outcome yet; an evicted recording has one) and `fix`. A recording's start and its outcome are
+paired by `observationId` in the session ring, which holds the last 64 session decisions. The joined voice of each decision is not reported yet.
+
+#### GET /api/identify
+
+What the core already knows is at one frequency, with a proof level, in one read. It reads the
+discoveries the scanner holds (the discovery list's `nearHz` window, nearest first): it never
+retunes, starts no probe and listens to nothing. For a live test at the frequency, call
+[`POST /api/scanner/identify`](#post-apiscanneridentify) (`confirm` names it). Present when the
+scanner is configured.
+
+```bash
+curl "http://localhost:9000/api/identify?frequencyHz=100000000&toleranceHz=6250"
+```
+
+`frequencyHz` (required, above 0 and at most 100 GHz) and `toleranceHz` (optional, 0 to
+1,000,000, default 6,250: half a 12.5 kHz channel, the discovery list's own bounds). Anything
+else answers 400 `VALIDATION_ERROR`.
+
+```json
+{
+	"at": "2026-01-01T10:07:00.000Z",
+	"frequencyHz": 100000000,
+	"toleranceHz": 6250,
+	"level": "decoded",
+	"best": {
+		"discoveryId": "d-41c",
+		"frequencyHz": 100003000,
+		"offsetHz": 3000,
+		"level": "decoded",
+		"protocol": "pocsag",
+		"class": "fsk2-wide",
+		"confidence": "decoded",
+		"evidenceLevel": "proven",
+		"proofKind": "decoded",
+		"identity": { "kind": "pocsag-capcode", "value": "1234" },
+		"lastSeenAt": "2026-01-01T09:58:12.000Z",
+		"possibleSpur": false
+	},
+	"others": [],
+	"truncated": false,
+	"confirm": { "method": "POST", "path": "/api/scanner/identify" }
+}
+```
+
+`level` is the best of the rows: `decoded` (published confidence `decoded`, or a `decoded`
+proof), `classified` (confidence `classified`, or an `analog-tone`, `analog-voice` or
+`digital-undecoded` proof), `energy-only` (an `activity` or `candidate` record, a carrier-only or
+unknown proof, or any `possibleSpur` record, which never reads higher) or `nothing` (no discovery within the
+tolerance: nothing was recorded there, not proof that nothing transmits). Receiver spurs the
+scanner flagged are left out, as on the discovery list. `best` is the row with the best level,
+then the nearest, then the most recently heard; `others` has up to 8 more in that order.
+Discoveries are read 50 at a time, nearest first; when the window holds more, the ones whose
+published confidence is `decoded` are read too, so such a decode is not cut, and `truncated` is
+true (a row decoded only by its proof under a lower confidence can still be left out then). `lastSeenAt` says how old each answer
+is: an old decode is history, not what is on the air now.
 
 #### POST /api/scanner/identify
 

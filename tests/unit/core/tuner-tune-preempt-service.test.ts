@@ -16,6 +16,7 @@ import { SourceManager } from "../../../src/core/source-manager.js"
 import { TunerController } from "../../../src/core/tuner-controller.js"
 import type { TunerRelay } from "../../../src/core/tuner-relay.js"
 import { wireTunerControl } from "../../../src/core/tuner-wiring.js"
+import { WaveKitError } from "../../../src/utils/errors.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import { FakeFanout, testSettings } from "../../mocks/scanner/engine-fakes.js"
 import {
@@ -53,7 +54,13 @@ const sweep = (priority: number, autoAfterIdleMs: number | null = 60_000) => ({
 	resume: { autoAfterIdleMs },
 })
 
-async function setup(options: { lostOwnership?: () => boolean } = {}) {
+async function setup(
+	options: {
+		lostOwnership?: () => boolean
+		/** Replaces the scanner's lease view (e.g. one that fails). */
+		leaseHolder?: (sourceId: string) => never
+	} = {},
+) {
 	const frames: Array<{ cmd: number; value: number }> = []
 	const sockets: net.Socket[] = []
 	const server = net.createServer(socket => {
@@ -146,7 +153,8 @@ async function setup(options: { lostOwnership?: () => boolean } = {}) {
 		tunerController: controller,
 		sourceManager: manager,
 		principalKind: () => "machine",
-		scannerLeaseHolder: sourceId => service.tunerLeaseJob(sourceId),
+		scannerLeaseHolder:
+			options.leaseHolder ?? (sourceId => service.tunerLeaseJob(sourceId)),
 	})
 	await app.ready()
 	cleanup.push(() => app.close())
@@ -360,6 +368,90 @@ describe("what the answer says about the job and the jobs behind it", () => {
 			state: "paused",
 			reason: "operator",
 		})
+	})
+
+	it("pausing keeps the lease: a tune without preempt is refused and the answer says what to send", async () => {
+		const h = await setup()
+		const job = await h.service.createJob(sweep(50, 300))
+		await h.running(job.id)
+		await h.service.pauseJob(job.id)
+		await settled(h.service)
+		// The measurement: an operator pause holds the lease (resume carries on at the same hop).
+		expect(h.service.tunerLeaseHolder("rtl")).toBe(job.id)
+		const before = h.frames.length
+		const res = await h.post({ frequencyHz: 120_000_000 })
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toMatchObject({
+			code: "TUNER_LEASE_HELD",
+			jobId: job.id,
+			jobName: "Night sweep",
+			jobPaused: true,
+			pauseReason: "operator",
+			retryWith: { preempt: true },
+		})
+		const message = res.json().message as string
+		expect(message).toContain(
+			`Scanner job ${job.id} "Night sweep" is paused (operator) and still holds this tuner, and nothing was written`,
+		)
+		expect(message).toContain('"preempt": true')
+		expect(message).toContain("the job stays paused")
+		expect(message).toContain(`POST /api/scanner/jobs/${job.id}/resume`)
+		// One message: nothing says a preempted paused job stops.
+		expect(message).not.toContain("the job stops")
+		expect(message).not.toContain("own resume rules apply")
+		expect(res.json().message).toContain(
+			`POST /api/scanner/jobs/${job.id}/cancel`,
+		)
+		expect(h.frames.slice(before)).toEqual([])
+		// What the answer named goes ahead, and the job stays paused.
+		const took = await h.post({ frequencyHz: 120_000_000, preempt: true })
+		expect(took.statusCode).toBe(200)
+		await settled(h.service)
+		expect(h.service.getJob(job.id)).toMatchObject({
+			state: "paused",
+			reason: "operator",
+		})
+	})
+
+	it("an unreadable lease names no job state: no jobPaused or pauseReason", async () => {
+		const h = await setup({
+			leaseHolder: () => {
+				throw new WaveKitError("lease view failed", "TEST_LEASE_VIEW")
+			},
+		})
+		const before = h.frames.length
+		const res = await h.post({ frequencyHz: 120_000_000 })
+		expect(res.statusCode).toBe(409)
+		const body = res.json<{ message: string } & Record<string, unknown>>()
+		expect(body).toMatchObject({
+			code: "TUNER_LEASE_HELD",
+			jobId: "unknown",
+			jobName: null,
+			retryWith: { preempt: true },
+		})
+		expect(body).not.toHaveProperty("jobPaused")
+		expect(body).not.toHaveProperty("pauseReason")
+		expect(body.message).toContain("could not be read")
+		// Nothing was tuned (the connection's own opening frames may still arrive).
+		expect(h.frames.slice(before)).not.toContainEqual({
+			cmd: 1,
+			value: 120_000_000,
+		})
+	})
+
+	it("a running holder's refusal says it is not paused and names preempt", async () => {
+		const h = await setup()
+		const job = await h.service.createJob(sweep(50))
+		await h.running(job.id)
+		const res = await h.post({ frequencyHz: 120_000_000 })
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toMatchObject({
+			jobId: job.id,
+			jobPaused: false,
+			pauseReason: null,
+			retryWith: { preempt: true },
+		})
+		expect(res.json().message).toContain('Send "preempt": true')
 	})
 
 	it("names a waiting job that can take the tuner back, and only such a job", async () => {

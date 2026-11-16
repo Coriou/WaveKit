@@ -197,6 +197,39 @@ function heldByFeedPause(
 	)
 }
 
+/**
+ * Suspended because a scanner sweep holds its source (`tuner-scanning`): intentional and over when
+ * the sweep ends, so neither down nor a reason to be unready. A fault still counts.
+ */
+function heldBySweep(
+	status: ReturnType<DecoderManager["getAllStatus"]>[number],
+	health: DecoderHealth | undefined,
+): boolean {
+	return (
+		status.suspension?.reasonCode === "tuner-scanning" &&
+		!status.running &&
+		health !== "faulted" &&
+		status.health !== "faulted"
+	)
+}
+
+/**
+ * The decoders a scanner sweep suspends now, per source (sources in first-seen order). A decoder
+ * with no source reads `unknown`.
+ */
+export function sweepHeldDecoders(
+	decoderManager: DecoderManager,
+): { sourceId: string; decoders: number }[] {
+	const allHealth = decoderManager.getAllHealth()
+	const bySource = new Map<string, number>()
+	for (const status of decoderManager.getAllStatus()) {
+		if (!heldBySweep(status, allHealth.get(status.id))) continue
+		const sourceId = status.sourceId ?? "unknown"
+		bySource.set(sourceId, (bySource.get(sourceId) ?? 0) + 1)
+	}
+	return [...bySource].map(([sourceId, decoders]) => ({ sourceId, decoders }))
+}
+
 export function checkAllDecodersHealth(
 	decoderManager: DecoderManager,
 ): Record<string, ComponentHealth> {
@@ -205,14 +238,16 @@ export function checkAllDecodersHealth(
 	const allStatus = decoderManager.getAllStatus()
 
 	for (const status of allStatus) {
-		// Derived instances may be intentionally unavailable or outside their listening window.
+		// Derived instances may be intentionally unavailable or outside their listening window;
+		// a paused feed or a scanner sweep holds the others back on purpose.
 		if (
 			intentionallyStoppedCatalogue(
 				status,
 				allHealth.get(status.id),
 				decoderManager,
 			) ||
-			heldByFeedPause(status, allHealth.get(status.id))
+			heldByFeedPause(status, allHealth.get(status.id)) ||
+			heldBySweep(status, allHealth.get(status.id))
 		)
 			continue
 		const health = allHealth.get(status.id) ?? "running"
@@ -478,7 +513,11 @@ export function checkReadiness(
 					decoderManager.getAllHealth().get(status.id),
 					decoderManager,
 				) &&
-				!heldByFeedPause(status, decoderManager.getAllHealth().get(status.id)),
+				!heldByFeedPause(
+					status,
+					decoderManager.getAllHealth().get(status.id),
+				) &&
+				!heldBySweep(status, decoderManager.getAllHealth().get(status.id)),
 		)
 	if (decoderStatuses.length > 0) {
 		const hasRunningDecoder = decoderStatuses.some(d => d.running)

@@ -14,6 +14,14 @@ export interface AccessPolicyOptions {
 	/** Explicit external listener context; never inferred from request headers. */
 	listenerScheme: "http" | "https"
 	allowedAuthorities: readonly string[]
+	/**
+	 * Also admit a loopback Host (`127.0.0.1`, `localhost` or `[::1]`, any port) when the TCP
+	 * peer itself is a loopback address. Only for listeners that bind loopback themselves
+	 * (`exposure: local-http`): behind a container port mapping the peer address cannot tell a
+	 * local client from a remote one. A remote peer never gains anything from it, and a
+	 * rebinding name is not a loopback Host. Default false: the exact allowlist only.
+	 */
+	loopbackHostFromLoopbackPeer?: boolean
 	allowedOrigins: readonly string[]
 	sessionCookieName: string
 	machineSecretDigest: Uint8Array

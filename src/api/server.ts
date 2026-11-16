@@ -68,7 +68,11 @@ import {
 import { activityRoutes } from "./routes/activity.js"
 import { createActivitySubscriptions } from "./activity-subscriptions.js"
 import type { ActivitySubscriptionHub } from "./activity-subscriptions.js"
-import { APP_VERSION, healthRoutes } from "./routes/health.js"
+import {
+	APP_VERSION,
+	healthRoutes,
+	liveScannerJobSources,
+} from "./routes/health.js"
 import { configExportRoutes } from "./routes/config-export.js"
 import { decoderOptionDescriptors } from "../decoders/options/index.js"
 import type { Config } from "../config.js"
@@ -79,9 +83,15 @@ import { enumRoutes } from "./routes/enums.js"
 import { decoderSummaryRoutes } from "./routes/decoder-summary.js"
 import { agentStatusRoutes } from "./routes/agent-status.js"
 import {
+	createDiagnosticsSampler,
 	diagnosticsRoutes,
 	type DiagnosticsRoutesOptions,
 } from "./routes/diagnostics.js"
+import {
+	RecorderStreakTracker,
+	recorderDecisionsRoutes,
+} from "./routes/recorder-decisions.js"
+import { identifyAtRoutes } from "./routes/identify-at.js"
 import {
 	iqSnapshotRoutes,
 	type IqSnapshotOptions,
@@ -1446,6 +1456,34 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		// One diagnostics sample shared by GET /api/diagnostics and the load on GET /api/status.
+		const diagnosticsSampler = createDiagnosticsSampler({
+			...this.diagnostics,
+			containerCpuCores: () => {
+				const percent =
+					this.resourceAggregator?.getContainerResources().cpuUsagePercent
+				return typeof percent === "number" ? percent / 100 : null
+			},
+		})
+		// One refusal streak shared by GET /api/status and the recorder decisions route.
+		// Optional read: source-manager test doubles predate the tuning tracker.
+		const unproven = (
+			this.sourceManager as Partial<Pick<SourceManager, "tuningUnproven">>
+		).tuningUnproven
+		const recorderStreak = new RecorderStreakTracker({
+			tuningUnproven: unproven
+				? sourceId => unproven.view(sourceId) !== null
+				: undefined,
+		})
+		const scanner = this.scanner
+		const recorderSource = scanner
+			? {
+					recorder: () => scanner.recorderStatus(),
+					frequencyOf: (id: string) =>
+						scanner.getDiscovery(id)?.frequencyHz ?? null,
+				}
+			: undefined
+
 		// Static value lists under root admission, like GET /api
 		await this.app.register(enumRoutes)
 		// PATCH mounts with the service and, while STATION_WRITE_REQUIRES_ACCESS, only with
@@ -1530,6 +1568,13 @@ export class ApiServer {
 			tunerRelay: this.tunerRelay,
 			accessAuthorityLost: this.access
 				? () => this.access?.api.policy.credentialAuthorityLost === true
+				: undefined,
+			recorderStreak: recorderSource
+				? () => recorderStreak.read(recorderSource.recorder(), Date.now())
+				: undefined,
+			diagnostics: () => diagnosticsSampler.read(),
+			scannerJobSources: scanner
+				? () => liveScannerJobSources(scanner.jobRows())
 				: undefined,
 		})
 
@@ -1721,6 +1766,18 @@ export class ApiServer {
 				...(this.access === undefined ? { legacyAudioHost: true } : {}),
 			})
 		}
+		if (scanner && recorderSource) {
+			// Why nothing is recorded, and what is at a frequency: compositions of scanner data.
+			await this.app.register(recorderDecisionsRoutes, {
+				source: recorderSource,
+				tracker: recorderStreak,
+			})
+			await this.app.register(identifyAtRoutes, {
+				source: {
+					listDiscoveries: filter => scanner.listDiscoveriesPaced(filter),
+				},
+			})
+		}
 		if (this.spectrum) {
 			await this.app.register(spectrumRoutes, { spectrum: this.spectrum })
 		}
@@ -1773,14 +1830,7 @@ export class ApiServer {
 			},
 		})
 
-		await this.app.register(diagnosticsRoutes, {
-			...this.diagnostics,
-			containerCpuCores: () => {
-				const percent =
-					this.resourceAggregator?.getContainerResources().cpuUsagePercent
-				return typeof percent === "number" ? percent / 100 : null
-			},
-		})
+		await this.app.register(diagnosticsRoutes, { sampler: diagnosticsSampler })
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)
 		this.wsBroadcaster.registerRoute(this.app, this.accessController)

@@ -108,14 +108,20 @@ describe("health with a paused receiver feed", () => {
 		)
 	})
 
-	it("decoders held by the pause are left out; a fault still counts", () => {
+	it("decoders held by the pause or a sweep are left out; a fault still counts", () => {
 		const manager = decoders([
 			{ id: "held", running: false, health: "idle", reason: "source-paused" },
+			{
+				id: "swept",
+				running: false,
+				health: "idle",
+				reason: "tuner-scanning",
+			},
 			{
 				id: "other",
 				running: false,
 				health: "idle",
-				reason: "tuner-scanning",
+				reason: "frequency-out-of-band",
 			},
 			{
 				id: "faulted",

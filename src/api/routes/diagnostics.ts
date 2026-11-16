@@ -302,12 +302,18 @@ export interface DiagnosticsRoutesOptions {
 	containerCpuCores?: (() => number | null) | undefined
 	/** Test seam. */
 	deps?: Partial<DiagnosticsDeps> | undefined
+	/** A sampler shared with other routes (createDiagnosticsSampler); the options above then go unused. */
+	sampler?: DiagnosticsSampler | undefined
 }
 
-export const diagnosticsRoutes: FastifyPluginAsync<
-	DiagnosticsRoutesOptions
-> = async (app, options) => {
-	const sampler = new DiagnosticsSampler({
+/**
+ * The core's one sampler: GET /api/diagnostics and the `load` of GET /api/status read the same
+ * shared sample, so neither multiplies the cost.
+ */
+export function createDiagnosticsSampler(
+	options: Omit<DiagnosticsRoutesOptions, "sampler">,
+): DiagnosticsSampler {
+	return new DiagnosticsSampler({
 		platform: process.platform,
 		listThreads: () => readdir(TASK_DIR),
 		readThreadStat: tid => readFile(`${TASK_DIR}/${tid}/stat`, "latin1"),
@@ -320,6 +326,12 @@ export const diagnosticsRoutes: FastifyPluginAsync<
 		containerCpuCores: options.containerCpuCores,
 		...options.deps,
 	})
+}
+
+export const diagnosticsRoutes: FastifyPluginAsync<
+	DiagnosticsRoutesOptions
+> = async (app, options) => {
+	const sampler = options.sampler ?? createDiagnosticsSampler(options)
 	// Root access admission applies, as for the routes it summarizes.
 	app.get(
 		"/api/diagnostics",
