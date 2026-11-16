@@ -6,7 +6,7 @@
  * the disc plays it (the dock, the one `[data-wk-transport]`, reads `playing` and live audio `muted`); closing
  * the drawer keeps it playing; `#/recordings` marks the same item playing; the Listen button pauses the
  * recording and live audio comes back (Listen stays on); play again, close the dock (live audio still on);
- * "With audio" asks the core for `hasRecording=true`.
+ * "With audio" asks the core for `hasRecording=true`; Cards › Expand shows the disc on the board's cards.
  */
 import type { Page } from "playwright-core"
 import { within } from "./harness.ts"
@@ -165,6 +165,17 @@ export async function playFlow(page: Page): Promise<PlayReport> {
 		)
 		note("With audio sends hasRecording=true", withAudio)
 		await page.getByRole("button", { name: "With audio" }).click()
+
+		// Cards › Expand: the board's cards with audio carry the same disc
+		const bounded = { timeout: STEP_MS }
+		await page.getByRole("radio", { name: "Cards" }).click(bounded)
+		await page.getByRole("button", { name: "Expand" }).click(bounded)
+		const boardDisc = await until(
+			async () => (await page.locator(".wkg .wkp-disc").count()) > 0,
+		)
+		note("Cards › Expand shows the disc", boardDisc)
+		await page.getByRole("button", { name: "Collapse" }).click(bounded)
+		await page.getByRole("radio", { name: "List" }).click(bounded)
 	} catch (error) {
 		note(
 			"flow",

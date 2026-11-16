@@ -10,6 +10,7 @@ import {
 } from "../../src/features/tuned/feed.ts"
 import {
 	agoText,
+	attachRecordings,
 	chipsOf,
 	nowView,
 	type NowInput,
@@ -240,6 +241,126 @@ describe("tuned card now block", () => {
 			expect(v.kind).toBe("tx")
 			expect(v.latestRow?.item.recording?.id).toBe("scan:d~b.wav")
 			expect(v.earlier[0]?.item.recording).toBeUndefined()
+		})
+
+		// times on 2026-10-17 12:00 (seconds, fractions allowed); a transmission's producedAt is its end
+		const T = (sec: number) =>
+			new Date(
+				Date.parse("2026-10-17T12:00:00.000Z") + sec * 1000,
+			).toISOString()
+		const txOf = (
+			startS: number,
+			endS: number,
+			over: Partial<ActivitySummary> = {},
+		) =>
+			tx(T(endS), {
+				fields: [
+					{
+						key: "durationMs",
+						label: "Duration",
+						value: (endS - startS) * 1000,
+					},
+				],
+				...over,
+			})
+		const recOf = (
+			keptS: number,
+			id: string,
+			lenS: number,
+			startS: number | null = null,
+		) =>
+			rec(T(keptS), id, {
+				fields: [
+					{
+						key: "durationMs",
+						label: "Duration",
+						value: lenS * 1000,
+						unit: "ms",
+					},
+					...(startS === null
+						? []
+						: [
+								{
+									key: "observationStartedAt",
+									label: "Started",
+									value: T(startS),
+								},
+							]),
+				],
+				recording: { id, durationMs: lenS * 1000 },
+			})
+		const rows = (items: ActivitySummary[]) =>
+			attachRecordings(
+				[...items].sort(
+					(a, b) => Date.parse(b.producedAt) - Date.parse(a.producedAt),
+				),
+			)
+
+		it("pairs a file with its own transmission, not a later one on the channel still going when it was kept", () => {
+			// A 12:00:00–:09, B :11–:20 without a file; A's file kept at :16
+			for (const start of [null, 0]) {
+				const a = txOf(0, 9)
+				const b = txOf(11, 20)
+				const out = rows([a, b, recOf(16, "scan:d~a.wav", 9, start)])
+				expect(out.map(r => r.eventId)).toEqual([b.eventId, a.eventId])
+				expect(out[1]?.recording?.id).toBe("scan:d~a.wav")
+				expect(out[0]?.recording).toBeUndefined()
+			}
+		})
+
+		it("a file kept before its transmission's row arrives stands alone, then rides on it", () => {
+			const r = recOf(12, "scan:d~a.wav", 9, 0)
+			expect(rows([r]).map(x => x.eventId)).toEqual([r.eventId])
+			const a = txOf(0, 9)
+			const out = rows([r, a])
+			expect(out.map(x => x.eventId)).toEqual([a.eventId])
+			expect(out[0]?.recording?.id).toBe("scan:d~a.wav")
+		})
+
+		it("a rollover's parts all ride on their one transmission, which plays the first part", () => {
+			// one transmission :00–:30, three 10 s files kept as it rolled over and at its end
+			for (const start of [null, 0]) {
+				const a = txOf(0, 30)
+				const out = rows([
+					a,
+					recOf(10, "scan:d~p1.wav", 10, start),
+					recOf(20, "scan:d~p2.wav", 10, start),
+					recOf(30.5, "scan:d~p3.wav", 10, start),
+				])
+				expect(out.map(x => x.eventId)).toEqual([a.eventId])
+				expect(out[0]?.recording?.id).toBe("scan:d~p1.wav")
+			}
+		})
+
+		it("a file without its transmission in the list stays one row beside a later transmission", () => {
+			// its transmission (≈ :07–:16) is not in the list; B :11–:20 was still going when it was kept
+			const b = txOf(11, 20)
+			const r = recOf(16, "scan:d~x.wav", 9)
+			const out = rows([b, r])
+			expect(out.map(x => x.eventId)).toEqual([b.eventId, r.eventId])
+			expect(out[0]?.recording).toBeUndefined()
+			expect(out[1]?.recording?.id).toBe("scan:d~x.wav")
+		})
+
+		it("matches the observation start within 2 s and the keep from 1 s before the end to 120 s after", () => {
+			const one = (r: ActivitySummary) => {
+				const a = txOf(0, 9)
+				const out = rows([a, r])
+				return out.find(x => x.eventId === a.eventId)?.recording?.id ?? null
+			}
+			// start: tx start :00, observation at +2 s attaches, past it does not
+			expect(one(recOf(10, "s~ok.wav", 9, 2))).toBe("s~ok.wav")
+			expect(one(recOf(10, "s~ok.wav", 9, -2))).toBe("s~ok.wav")
+			expect(one(recOf(10, "s~late.wav", 9, 2.001))).toBeNull()
+			// keep: from end − 1 s (:08) to end + 120 s (:129)
+			expect(one(recOf(8, "s~ok.wav", 9, 0))).toBe("s~ok.wav")
+			expect(one(recOf(7.999, "s~early.wav", 9, 0))).toBeNull()
+			expect(one(recOf(129, "s~ok.wav", 9, 0))).toBe("s~ok.wav")
+			expect(one(recOf(129.001, "s~stale.wav", 9, 0))).toBeNull()
+			// without the start: the keep window, and a file no longer than the transmission + 2 s
+			expect(one(recOf(129, "s~ok.wav", 11))).toBe("s~ok.wav")
+			expect(one(recOf(129.001, "s~stale.wav", 9))).toBeNull()
+			expect(one(recOf(10, "s~long.wav", 11.001))).toBeNull()
 		})
 
 		it("gives the latest no disc without a recording", () => {

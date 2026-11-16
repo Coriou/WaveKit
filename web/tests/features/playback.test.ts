@@ -297,6 +297,23 @@ describe("PlaybackService: play() rejections", () => {
 		await flush()
 		expect(s.p.get()).toMatchObject({ id: "b", phase: "playing", error: null })
 	})
+
+	it("a late rejection of an earlier start (paused and resumed since) leaves the current play playing", async () => {
+		const s = setup()
+		let reject: (e: unknown) => void = () => {}
+		s.audio.nextPlay = () =>
+			new Promise<void>((_, r) => {
+				reject = r
+			})
+		s.p.play("a")
+		await flush()
+		s.p.pause()
+		s.p.resume()
+		expect(s.p.get().phase).toBe("playing")
+		reject(new Error("late"))
+		await flush()
+		expect(s.p.get()).toMatchObject({ id: "a", phase: "playing", error: null })
+	})
 })
 
 describe("PlaybackService: pause, resume, seek", () => {

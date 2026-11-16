@@ -4,7 +4,11 @@
 // and a message-rate sparkline. msg: who or what in bold, the message in full (three lines at most), readings as
 // chips. audio: broadcast FM with nothing to decode. plain: nothing heard yet (the card's band and channel block).
 // Pure functions over the Activity heard on the channel.
-import type { ActivitySummary, DecodeField } from "@wavekit/api-types"
+import type {
+	ActivityRecordingLink,
+	ActivitySummary,
+	DecodeField,
+} from "@wavekit/api-types"
 
 import { fieldText, rowView } from "../activity/rows.ts"
 import { clockText } from "../display.ts"
@@ -99,6 +103,10 @@ const SHOWN_KINDS = new Set<ActivitySummary["kind"]>([
 const SAME_CHANNEL_HZ = 6_250
 /** A file is kept at most this long after its transmission closes (the provisional hold, a rollover). */
 const KEEP_SLACK_MS = 120_000
+/** A file is kept at the earliest this long before its transmission's end reads (two writers' clocks). */
+const KEEP_EARLY_MS = 1_000
+/** A recording's start (or length) and its transmission's start (end − duration) agree within this. */
+const START_MATCH_MS = 2_000
 const AIRCRAFT_DECODERS = new Set(["readsb", "dump1090"])
 const VESSEL_DECODERS = new Set(["ais-catcher"])
 const VOICE_DECODERS = new Set(["dsd-fme"])
@@ -270,50 +278,160 @@ function sameChannel(a: number | null, b: number | null): boolean {
 	return Math.abs(a - b) <= SAME_CHANNEL_HZ
 }
 
+/** A recording's file, as its `recording-change` row tells it. */
+interface Part {
+	row: ActivitySummary
+	link: ActivityRecordingLink
+	/** When the file was kept (the row's producedAt). */
+	kept: number
+	/** The file's audio length. */
+	len: number
+	/** When the recorded observation started; null when the row does not say. */
+	start: number | null
+}
+
+/** A transmission without a file, as its row tells it (producedAt is its end, src/core/activity/runtime.ts). */
+interface Span {
+	start: number
+	end: number
+	dur: number
+}
+
+function partOf(row: ActivitySummary, link: ActivityRecordingLink): Part {
+	const started = fieldOf(row, ["observationStartedAt"])?.value
+	const start = typeof started === "string" ? Date.parse(started) : Number.NaN
+	return {
+		row,
+		link,
+		kept: Date.parse(row.producedAt),
+		len: link.durationMs ?? durationMs(row) ?? 0,
+		start: Number.isFinite(start) ? start : null,
+	}
+}
+
+function spanOf(tx: ActivitySummary): Span {
+	const end = Date.parse(tx.producedAt)
+	const dur = durationMs(tx) ?? 0
+	return { start: end - dur, end, dur }
+}
+
+/** Kept in time to be its file: from KEEP_EARLY_MS before the transmission's end to KEEP_SLACK_MS after. */
+function keptAfter(kept: number, tx: Span): boolean {
+	return kept >= tx.end - KEEP_EARLY_MS && kept <= tx.end + KEEP_SLACK_MS
+}
+
+/** Parts below this score are a transmission's final file; above it, a rollover part kept mid-transmission. */
+const PART_SCORE = 1e12
+
+/**
+ * The transmission a recording's parts (one file, or a rollover's files) belong to, and whether they close
+ * it (a final file) or were kept while it went on (rollover parts); null when none of them is it.
+ *
+ * With the observation's start known, the parts match the transmission that started then: its start is its
+ * end (producedAt) less its duration, and the two agree within START_MATCH_MS (two clocks rounded apart); the
+ * last part is kept from KEEP_EARLY_MS before the transmission's end to KEEP_SLACK_MS after it.
+ *
+ * Without it (the row's summary does not carry the start), one file is the transmission's final file when it
+ * is kept in that same window and is no longer than the transmission (within START_MATCH_MS), the closest end
+ * first; a file kept while a transmission went on is its rollover part only when its audio fits between that
+ * transmission's start and the keep (len ≤ kept − start + START_MATCH_MS). A final file is preferred.
+ */
+function matchOf(
+	parts: readonly Part[],
+	hz: number | null,
+	txs: readonly (Span | null)[],
+	out: readonly ActivitySummary[],
+	closed: ReadonlySet<number>,
+): { i: number; closes: boolean } | null {
+	const first = parts[0]
+	const last = parts[parts.length - 1]
+	if (!first || !last) return null
+	let best: { i: number; closes: boolean } | null = null
+	let bestScore = Number.POSITIVE_INFINITY
+	txs.forEach((tx, i) => {
+		const row = out[i]
+		if (!tx || !row || !sameChannel(row.frequencyHz, hz)) return
+		let score: number
+		let closes = true
+		if (first.start !== null) {
+			if (closed.has(i) || !keptAfter(last.kept, tx)) return
+			score = Math.abs(first.start - tx.start)
+			if (score > START_MATCH_MS) return
+		} else if (
+			!closed.has(i) &&
+			keptAfter(last.kept, tx) &&
+			last.len <= tx.dur + START_MATCH_MS
+		) {
+			score = Math.abs(last.kept - tx.end)
+		} else if (
+			last.kept >= tx.start &&
+			last.kept < tx.end - KEEP_EARLY_MS &&
+			last.len <= last.kept - tx.start + START_MATCH_MS
+		) {
+			score = PART_SCORE + (tx.end - last.kept)
+			closes = false
+		} else return
+		if (score < bestScore) {
+			best = { i, closes }
+			bestScore = score
+		}
+	})
+	return best
+}
+
 /**
  * A scanner recording's `recording-change` row is written when the file is kept, after its
  * transmission: it never stands as a row of its own. Its file rides on the transmission it recorded
- * (same channel, kept from the transmission's start to KEEP_SLACK_MS after its end, the nearest one
- * not already carrying a file), so the transmission row keeps its tone and transcript and carries the
- * disc. A recording whose transmission is not in the list reads as a transmission itself.
+ * (same channel, matched by start and keep time: matchOf), so the transmission row keeps its tone and
+ * transcript and carries the disc. A long transmission's rollover files (one observation start) all ride
+ * on that one transmission, which plays the first part (Recordings lists every part). A recording whose
+ * transmission is not in the list reads as a transmission itself: one row, its rollover parts folded in.
  */
 export function attachRecordings(
 	items: readonly ActivitySummary[],
 ): ActivitySummary[] {
 	const out: ActivitySummary[] = []
-	const recs: ActivitySummary[] = []
+	const parts: Part[] = []
 	for (const s of items) {
-		if (s.kind === "recording-change") recs.push(s)
-		else out.push(s)
+		if (s.kind !== "recording-change") out.push(s)
+		else if (s.recording) parts.push(partOf(s, s.recording))
 	}
-	if (recs.length === 0) return out
-	const taken = new Set<number>()
+	if (parts.length === 0) return out
+	// one group per recorded observation (rollover parts share its start), one per file when it is unknown
+	const groups = new Map<string, Part[]>()
+	parts.forEach((p, n) => {
+		const key =
+			p.start === null
+				? `file:${n}`
+				: `obs:${p.start}:${Math.round((p.row.frequencyHz ?? -1) / SAME_CHANNEL_HZ)}`
+		const g = groups.get(key)
+		if (g) g.push(p)
+		else groups.set(key, [p])
+	})
+	const ordered = [...groups.values()]
+		.map(g => g.sort((a, b) => a.kept - b.kept))
+		.sort((a, b) => (a.at(-1)?.kept ?? 0) - (b.at(-1)?.kept ?? 0))
+	const txs = out.map(tx =>
+		tx.kind === "analog-transmission" && !tx.recording ? spanOf(tx) : null,
+	)
+	const closed = new Set<number>()
+	const riding = new Map<number, Part[]>()
 	const orphans: ActivitySummary[] = []
-	for (const rec of recs) {
-		const link = rec.recording
-		if (!link) continue
-		const kept = Date.parse(rec.producedAt)
-		let best = -1
-		let bestGap = Number.POSITIVE_INFINITY
-		out.forEach((tx, i) => {
-			if (tx.kind !== "analog-transmission" || tx.recording || taken.has(i))
-				return
-			if (!sameChannel(tx.frequencyHz, rec.frequencyHz)) return
-			const at = Date.parse(tx.producedAt)
-			const ms = durationMs(tx) ?? 0
-			// producedAt is the transmission's close or start: accept a keep from its start to the slack after its end
-			if (!(kept >= at - ms - 1000 && kept <= at + ms + KEEP_SLACK_MS)) return
-			const gap = Math.abs(kept - at)
-			if (gap < bestGap) {
-				best = i
-				bestGap = gap
-			}
-		})
-		const tx = best >= 0 ? out[best] : undefined
-		if (tx) {
-			taken.add(best)
-			out[best] = { ...tx, recording: link }
-		} else orphans.push(rec)
+	for (const g of ordered) {
+		const m = matchOf(g, g[0]?.row.frequencyHz ?? null, txs, out, closed)
+		if (m === null) {
+			// its transmission is not in the list: one row, the first part's
+			const first = g[0]
+			if (first) orphans.push(first.row)
+			continue
+		}
+		if (m.closes) closed.add(m.i)
+		riding.set(m.i, [...(riding.get(m.i) ?? []), ...g])
+	}
+	for (const [i, ps] of riding) {
+		const tx = out[i]
+		const first = [...ps].sort((a, b) => a.kept - b.kept)[0]
+		if (tx && first) out[i] = { ...tx, recording: first.link }
 	}
 	if (orphans.length === 0) return out
 	// newest first, as the input

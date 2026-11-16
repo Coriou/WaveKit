@@ -339,8 +339,10 @@ export class ActivityController extends Store<ActivityViewState> {
 	}
 
 	setSearch(tokens: readonly SearchToken[], chip: CategoryChipId | null): void {
+		// the same tokens again (a chip alone, or nothing) keep the counts: they are read without the chip
+		const same = sameTokens(this.get().tokens, tokens)
 		this.update(s => ({ ...s, tokens, chip, openId: null, openItem: null }))
-		this.refresh()
+		this.refresh(!same)
 	}
 
 	/** Clears the search (and leaves a column's edit). */
@@ -747,10 +749,33 @@ export class ActivityController extends Store<ActivityViewState> {
 	}
 
 	private dropCounts(): void {
+		// the read in flight is for the old search: its late answer must not write the old counts back
+		this.countsAbort?.abort()
+		this.countsAbort = null
 		this.update(v =>
 			v.counts === null && v.total === null
 				? v
 				: { ...v, counts: null, total: null },
 		)
 	}
+}
+
+/** Two searches with the same tokens, in order (a token's chip label included). */
+export function sameTokens(
+	a: readonly SearchToken[],
+	b: readonly SearchToken[],
+): boolean {
+	return (
+		a.length === b.length &&
+		a.every((t, i) => {
+			const u = b[i]
+			return (
+				u !== undefined &&
+				t.kind === u.kind &&
+				t.value === u.value &&
+				t.label === u.label &&
+				t.spanHz === u.spanHz
+			)
+		})
+	)
 }

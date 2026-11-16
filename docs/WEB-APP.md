@@ -502,12 +502,13 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
 
 ### Playing recordings
 
-There is one player for the whole app. A play disc on an Activity row or card, a Recordings
+There is one player for the whole app. A play disc on an Activity row or card (expanded Cards too), a Recordings
 row, or the tuned card's last transmission or one of its earlier rows starts the recording; pressing the same disc again pauses
 it. Rows without a recording (most decodes, and digital calls the core did not record) have no disc.
 The recording playing is marked the same way in every list that shows it. On the tuned card a scanner
 recording is never a row of its own: its disc sits on the transmission it recorded, which keeps its
-tone and transcript.
+tone and transcript. A long transmission recorded as several files sits on that one transmission and
+plays its first file (Recordings lists every file).
 
 While something is loaded, the player sits at the bottom of the screen, above the dock, whatever
 panel is open: **Previous**, **Play/Pause**, **Next**, the title and its place in the list (`3 of 12`),

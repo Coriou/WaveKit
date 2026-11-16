@@ -40,18 +40,23 @@ const page = (items: ActivitySummary[]): ActivitySearchPage => ({
 function setup() {
 	const facets = { mode: "ok" as "ok" | "fail" | "hold", reads: 0 }
 	let release: (() => void) | null = null
+	const held: (() => void)[] = []
 	const api = new ApiClient({
-		fetch: async url => {
+		fetch: async (url, init) => {
 			if (String(url).includes("facets")) {
 				facets.reads += 1
 				if (facets.mode === "fail") return new Response("{}", { status: 503 })
 				if (facets.mode === "hold")
 					await new Promise<void>(r => {
 						release = r
+						held.push(r)
 					})
+				// a search for "fire" counts 5, any other 812
+				const sent = typeof init?.body === "string" ? init.body : ""
+				const count = sent.includes("fire") ? 5 : 812
 				return new Response(
 					JSON.stringify({
-						facets: { category: [{ value: "voice", count: 812 }] },
+						facets: { category: [{ value: "voice", count }] },
 					}),
 					{ status: 200 },
 				)
@@ -77,7 +82,7 @@ function setup() {
 			more: true,
 		})
 	}
-	return { c, facets, header, release: () => release?.() }
+	return { c, facets, header, held, release: () => release?.() }
 }
 
 describe("activity header count", () => {
@@ -108,6 +113,8 @@ describe("activity header count", () => {
 		await vi.waitFor(() => expect(facets.reads).toBe(2))
 		facets.mode = "ok"
 		release()
+		await vi.waitFor(() => expect(c.get().total).toBe(5))
+		c.clear()
 		await vi.waitFor(() => expect(c.get().total).toBe(812))
 
 		c.setAudio(true)
@@ -121,6 +128,39 @@ describe("activity header count", () => {
 		// a chip alone keeps the counts (they are read without it): its own count shows at once
 		c.setChip("voice")
 		expect(header()).toMatchObject({ text: "812", core: true })
+		off()
+		c.dispose()
+	})
+
+	it("never writes an old search's counts back when its read answers late", async () => {
+		const { c, facets, held } = setup()
+		const off = c.attach()
+		await vi.waitFor(() => expect(c.get().total).toBe(812))
+		facets.mode = "hold"
+		c.addToken(token("text", "fire"))
+		await vi.waitFor(() => expect(held).toHaveLength(1))
+		// the search moves on before the "fire" read answers; it answers before the new read starts
+		c.clear()
+		held[0]?.()
+		await new Promise(r => setTimeout(r, 0))
+		await vi.waitFor(() => expect(held).toHaveLength(2))
+		expect(c.get().total).toBeNull()
+		facets.mode = "ok"
+		held[1]?.()
+		await vi.waitFor(() => expect(c.get().total).toBe(812))
+		off()
+		c.dispose()
+	})
+
+	it("keeps the total when the search is set to the same tokens", async () => {
+		const { c } = setup()
+		const off = c.attach()
+		c.addToken(token("text", "fire"))
+		await vi.waitFor(() => expect(c.get().total).toBe(5))
+		c.setSearch([token("text", "fire")], null)
+		expect(c.get().total).toBe(5)
+		c.setSearch([token("text", "fire")], "voice")
+		expect(c.get().total).toBe(5)
 		off()
 		c.dispose()
 	})

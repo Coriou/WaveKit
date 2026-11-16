@@ -184,6 +184,8 @@ export class PlaybackService extends Store<PlaybackState> {
 	private epoch = 0
 	/** The epoch the element's current src was set in (events count only while it is the current one). */
 	private srcEpoch = -1
+	/** Bumped at every start (el.play()); only the latest start's rejection pauses. */
+	private starts = 0
 	private readonly offHold: () => void
 	private readonly peakStore = new Store<
 		ReadonlyMap<string, number[] | "none">
@@ -488,8 +490,16 @@ export class PlaybackService extends Store<PlaybackState> {
 	private start(el: AudioLike): void {
 		this.update(s => ({ ...s, phase: "playing", error: null, wantPlay: true }))
 		const token = this.epoch
+		// each start its own: an earlier play() rejecting late (after a pause and a resume of the same src) is not this one's
+		this.starts += 1
+		const started = this.starts
 		el.play().catch((error: unknown) => {
-			if (token !== this.epoch || this.get().phase !== "playing") return
+			if (
+				token !== this.epoch ||
+				started !== this.starts ||
+				this.get().phase !== "playing"
+			)
+				return
 			if (error instanceof DOMException && error.name === "AbortError") return
 			this.update(s => ({
 				...s,
