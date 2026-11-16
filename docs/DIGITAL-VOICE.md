@@ -144,8 +144,13 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   slot, moves from an unknown slot to a known one, or the decoder restarts, the
   held voice is discarded and never played. A call corrected to encrypted after
   it was known clear drops what of it is still queued (its released voice and
-  the live voice behind it), counted in `discardedMs`. Beyond 2 s the oldest
-  held voice is dropped.
+  the live voice behind it), counted in `discardedMs`. Voice that arrives live
+  behind a released backlog is not proven to belong to the call it follows
+  (dsd-fme may already carry the next over): when an encrypted or not-yet-known
+  call starts, that unannounced live voice is dropped, counted in
+  `voiceHold.discardedMs` (the new call's own slot holds it instead when the call
+  is not known yet), and only released voice of calls known clear keeps playing.
+  Beyond 2 s the oldest held voice is dropped.
   The hold starts at the call's `call_start`, which for a call started on its
   voice frames alone comes after the evidence that it is an over (dsd-fme
   announces it on the line that completes it). The call's voice still queued

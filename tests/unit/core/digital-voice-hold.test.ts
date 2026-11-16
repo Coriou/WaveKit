@@ -815,7 +815,7 @@ describe("digital voice /stream hold of voice not known clear", () => {
 		])
 	})
 
-	it("late-entry voice behind a released call's backlog is dropped when an encrypted call starts; the backlog plays whole", async () => {
+	it("late-entry voice behind a released call's backlog is dropped when an encrypted call starts; the released backlog plays whole", async () => {
 		const voice = await started("auto", {
 			jitterBufferMs: 400,
 			maxBufferMs: 1000,
@@ -854,8 +854,9 @@ describe("digital voice /stream hold of voice not known clear", () => {
 		vi.advanceTimersByTime(5000)
 		const out = client.samples()
 		expect(out.includes(999)).toBe(false)
-		expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 60)))
-		expect(hold(voice).discardedMs).toBe(400)
+		// A's live voice behind its backlog (51-60) is not proven A's: dropped.
+		expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 50)))
+		expect(hold(voice).discardedMs).toBe(600)
 	})
 
 	it("mono: late-entry voice behind a released call's backlog is dropped when an encrypted call starts", async () => {
@@ -892,8 +893,8 @@ describe("digital voice /stream hold of voice not known clear", () => {
 		vi.advanceTimersByTime(5000)
 		const out = client.samples()
 		expect(out.includes(999)).toBe(false)
-		expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 60)))
-		expect(hold(voice).discardedMs).toBe(400)
+		expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 50)))
+		expect(hold(voice).discardedMs).toBe(600)
 	})
 
 	describe("late entry behind a released backlog (jitter 400 ms, max 1000 ms)", () => {
@@ -912,20 +913,26 @@ describe("digital voice /stream hold of voice not known clear", () => {
 				encrypted: true,
 				...o,
 			})
-		/** Call A: 50 frames not known yet, 10 known clear, then its end. */
+		/**
+		 * Call A: 50 frames not known yet, 10 known clear, then its end. Its
+		 * 50 held frames are released voice; the 10 after them are live
+		 * behind the backlog, dropped (fail closed) when a restricted call starts.
+		 */
 		const callA = (
 			voice: Started,
 			call: (o: Record<string, unknown>) => Record<string, unknown>,
 			datagram: (v: number) => Buffer,
+			end = true,
 		) => {
 			voice.decoder.emit("voice-call", call({ encryptionKnown: false }))
 			send(voice, range(1, 50).map(datagram))
 			voice.decoder.emit("voice-call", call({ encryptionKnown: true }))
 			send(voice, range(51, 60).map(datagram))
-			voice.decoder.emit(
-				"voice-call",
-				call({ encryptionKnown: true, active: false }),
-			)
+			if (end)
+				voice.decoder.emit(
+					"voice-call",
+					call({ encryptionKnown: true, active: false }),
+				)
 		}
 		const repeat = (count: number, datagram: Buffer) =>
 			Array<Buffer>(count).fill(datagram)
@@ -936,7 +943,7 @@ describe("digital voice /stream hold of voice not known clear", () => {
 			["T1b: A on slot 2, encrypted on slot 1", 2, 1],
 			["T1c: A on slot 1, encrypted on slot 2", 1, 2],
 		] as const) {
-			it(`${name}: one voice on both channels, the unannounced voice is dropped and A plays whole`, async () => {
+			it(`${name}: one voice on both channels, the unannounced voice is dropped and A's released voice plays whole`, async () => {
 				const { voice, client } = await backlogged()
 				const a = (o: Record<string, unknown>) =>
 					state({ callId: "dsd-fme-a", slot: slotA, ...o })
@@ -948,8 +955,8 @@ describe("digital voice /stream hold of voice not known clear", () => {
 				vi.advanceTimersByTime(5000)
 				const out = client.samples()
 				expect(out.includes(999)).toBe(false)
-				expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 60)))
-				expect(hold(voice).discardedMs).toBe(400)
+				expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 50)))
+				expect(hold(voice).discardedMs).toBe(600)
 			})
 		}
 
@@ -965,8 +972,8 @@ describe("digital voice /stream hold of voice not known clear", () => {
 			vi.advanceTimersByTime(5000)
 			const out = client.samples()
 			expect(out.includes(999)).toBe(false)
-			expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 60)))
-			expect(hold(voice).discardedMs).toBe(400)
+			expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 50)))
+			expect(hold(voice).discardedMs).toBe(600)
 		})
 
 		it("unannounced voice of the encrypted call's own slot already in the pacer clears it (fail closed)", async () => {
@@ -1008,10 +1015,225 @@ describe("digital voice /stream hold of voice not known clear", () => {
 			vi.advanceTimersByTime(5000)
 			const out = client.samples()
 			expect(out.some(s => s === 999 || s === 1004)).toBe(false)
-			expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 60)))
-			// 10 frames unowned and 10 mixed with them when the encrypted call
-			// starts; B's 10 frames mixed behind the backlog during it at its end.
+			expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 50)))
+			// A's 10 live frames, 10 unowned and 10 mixed with them when the
+			// encrypted call starts; B's 10 frames mixed behind the backlog during
+			// it at its end.
+			expect(hold(voice).discardedMs).toBe(800)
+		})
+
+		const a1 = (o: Record<string, unknown>) =>
+			state({ callId: "dsd-fme-a", slot: 1, ...o })
+		const endA = (voice: Started) =>
+			voice.decoder.emit(
+				"voice-call",
+				a1({ encryptionKnown: true, active: false }),
+			)
+
+		/** A on slot 1 lags; 999 arrives while A is still active (not yet over). */
+		const r1 = async (finish: (voice: Started) => void) => {
+			const { voice, client } = await backlogged()
+			callA(voice, a1, v => stereo(v, 0), false)
+			send(voice, repeat(20, stereo(999, 0)))
+			finish(voice)
+			send(voice, repeat(20, stereo(999, 0)))
+			voice.decoder.emit("voice-call", enc({ slot: 1, active: false }))
+			endA(voice)
+			vi.advanceTimersByTime(5000)
+			return { voice, out: client.samples() }
+		}
+
+		it("R1: A's end and an encrypted start back to back behind A's backlog: no voice queued live behind it is heard", async () => {
+			const { voice, out } = await r1(v => {
+				endA(v)
+				v.decoder.emit("voice-call", enc({ slot: 1 }))
+			})
+			expect(out.includes(999)).toBe(false)
+			// A's released voice in order; its 10 live frames and the 20 of 999
+			// queued behind its backlog are dropped.
+			expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 50)))
 			expect(hold(voice).discardedMs).toBe(600)
+		})
+
+		it("R1r: an encrypted call replacing A on its slot (no end) drops the live voice behind A's backlog", async () => {
+			const { voice, out } = await r1(v => {
+				v.decoder.emit("voice-call", enc({ slot: 1 }))
+			})
+			expect(out.includes(999)).toBe(false)
+			expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 50)))
+			expect(hold(voice).discardedMs).toBe(600)
+		})
+
+		it("R1 reference without a backlog: no hold, the pacer is cleared at the encrypted start", async () => {
+			const { voice, client } = await backlogged()
+			voice.decoder.emit("voice-call", a1({ encryptionKnown: true }))
+			send(
+				voice,
+				range(1, 10).map(v => stereo(v, 0)),
+			)
+			send(voice, repeat(20, stereo(999, 0)))
+			endA(voice)
+			voice.decoder.emit("voice-call", enc({ slot: 1 }))
+			send(voice, repeat(20, stereo(999, 0)))
+			voice.decoder.emit("voice-call", enc({ slot: 1, active: false }))
+			vi.advanceTimersByTime(5000)
+			// No hold engaged: the pacer queue is cleared at the encrypted start;
+			// only what played before it (one frame past the jitter buffer) is heard.
+			expect(hold(voice).discardedMs).toBe(0)
+			expect(client.samples().filter(s => s === 999).length).toBe(FRAME)
+		})
+
+		it("R2: mono P25, A's end and an encrypted start back to back behind A's backlog", async () => {
+			const { voice, client } = await backlogged("p25")
+			const p25 = (o: Record<string, unknown>) =>
+				state({ callId: "dsd-fme-a", protocol: "P25", slot: null, ...o })
+			callA(voice, p25, mono, false)
+			send(voice, repeat(20, mono(999)))
+			voice.decoder.emit(
+				"voice-call",
+				p25({ encryptionKnown: true, active: false }),
+			)
+			voice.decoder.emit("voice-call", enc({ protocol: "P25", slot: null }))
+			send(voice, repeat(20, mono(999)))
+			voice.decoder.emit(
+				"voice-call",
+				enc({ protocol: "P25", slot: null, active: false }),
+			)
+			vi.advanceTimersByTime(5000)
+			const out = client.samples()
+			expect(out.includes(999)).toBe(false)
+			expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 50)))
+			expect(hold(voice).discardedMs).toBe(600)
+		})
+
+		it("R3: A still active on slot 1, encrypted on slot 2, one voice on both channels lagging in A's lane is dropped", async () => {
+			const { voice, client } = await backlogged()
+			callA(voice, a1, v => stereo(v, 0), false)
+			send(voice, repeat(20, dup(999)))
+			voice.decoder.emit("voice-call", enc({ slot: 2 }))
+			send(voice, repeat(20, dup(999)))
+			voice.decoder.emit("voice-call", enc({ slot: 2, active: false }))
+			endA(voice)
+			vi.advanceTimersByTime(5000)
+			const out = client.samples()
+			expect(out.includes(999)).toBe(false)
+			// A's own slot-1 channel voice behind its backlog is A's slot, not
+			// slot 2's: it plays whole, in order.
+			expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 60)))
+			expect(hold(voice).discardedMs).toBe(400)
+		})
+
+		it("a not-yet-known call starting behind A's backlog holds the live voice behind it: discarded if encrypted, played late if clear", async () => {
+			for (const encrypted of [true, false]) {
+				const { voice: v2, client } = await backlogged()
+				callA(v2, a1, v => stereo(v, 0), false)
+				send(v2, repeat(20, stereo(999, 0)))
+				endA(v2)
+				const u = { slot: 1, encrypted: false, encryptionKnown: false }
+				v2.decoder.emit("voice-call", enc(u))
+				send(v2, repeat(20, stereo(999, 0)))
+				v2.decoder.emit(
+					"voice-call",
+					enc({ ...u, encrypted, encryptionKnown: true }),
+				)
+				v2.decoder.emit(
+					"voice-call",
+					enc({ ...u, encrypted, encryptionKnown: true, active: false }),
+				)
+				vi.advanceTimersByTime(5000)
+				const heard = client.samples().filter(s => s !== 0)
+				if (encrypted) {
+					expect(heard).toEqual(frames(range(1, 50)))
+					// A's 10 live frames, 20 of 999 behind them, 20 held after the start.
+					expect(hold(v2).discardedMs).toBe(1000)
+				} else {
+					expect(heard).toEqual([
+						...frames(range(1, 60)),
+						...frames(Array<number>(40).fill(999)),
+					])
+					expect(hold(v2).discardedMs).toBe(0)
+				}
+			}
+		})
+
+		it("past 32 runs the oldest two merge into a mix, dropped at the next restricted start; later released runs play", async () => {
+			const { voice, client } = await backlogged()
+			const c = (i: number, o: Record<string, unknown>) =>
+				state({ callId: `dsd-fme-c${i}`, slot: 1, ...o })
+			voice.decoder.emit("voice-call", c(0, { encryptionKnown: false }))
+			send(
+				voice,
+				range(1, 50).map(v => stereo(v, 0)),
+			)
+			voice.decoder.emit("voice-call", c(0, { encryptionKnown: true }))
+			voice.decoder.emit(
+				"voice-call",
+				c(0, { encryptionKnown: true, active: false }),
+			)
+			// 34 calls, each released with one frame: at call 32's release the
+			// lane has 33 runs, so c0's rest (33-50) and call 1 merge into a mix,
+			// which call 33's start (not known yet: restricted) drops.
+			for (let i = 1; i <= 34; i++) {
+				voice.decoder.emit("voice-call", c(i, { encryptionKnown: false }))
+				send(voice, [stereo(100 + i, 0)])
+				voice.decoder.emit("voice-call", c(i, { encryptionKnown: true }))
+				voice.decoder.emit(
+					"voice-call",
+					c(i, { encryptionKnown: true, active: false }),
+				)
+			}
+			voice.decoder.emit("voice-call", enc({ slot: 1 }))
+			voice.decoder.emit("voice-call", enc({ slot: 1, active: false }))
+			vi.advanceTimersByTime(5000)
+			expect(client.samples().filter(s => s !== 0)).toEqual(
+				frames([...range(1, 32), ...range(102, 134)]),
+			)
+			expect(hold(voice).discardedMs).toBe(380)
+		})
+
+		it("an encrypted start on an unknown slot with only one slot lane lagging clears the pacer (fail closed)", async () => {
+			const { voice, client } = await backlogged()
+			callA(voice, a1, v => stereo(v, 0))
+			// Slot 2's lane is empty: its voice is mixed straight into the pacer.
+			send(voice, repeat(20, stereo(0, 999)))
+			const before = client.samples().length
+			voice.decoder.emit("voice-call", enc({ slot: null }))
+			send(voice, repeat(20, stereo(0, 999)))
+			voice.decoder.emit("voice-call", enc({ slot: null, active: false }))
+			vi.advanceTimersByTime(5000)
+			const after = client.samples().slice(before)
+			// Nothing of slot 2 after the start; only the rest of A's released voice.
+			expect(after.every(s => s >= 0 && s <= 50)).toBe(true)
+			const heard = after.filter(s => s !== 0)
+			expect(heard.length).toBeGreaterThan(0)
+			expect(heard).toEqual(frames(range(heard[0]!, 50)))
+			// A's 10 live frames; the cleared pacer is not hold voice.
+			expect(hold(voice).discardedMs).toBe(200)
+		})
+
+		it("duplicate datagrams behind the backlog are dropped too; A's released voice plays whole", async () => {
+			const { voice, client } = await backlogged()
+			callA(voice, a1, v => stereo(v, 0), false)
+			const twice = (count: number) => {
+				const datagram = stereo(999, 0)
+				for (let i = 0; i < count; i++) {
+					voice.socket.emit("message", datagram)
+					voice.socket.emit("message", datagram)
+					vi.advanceTimersByTime(20)
+				}
+			}
+			twice(10)
+			endA(voice)
+			voice.decoder.emit("voice-call", enc({ slot: 1 }))
+			twice(10)
+			voice.decoder.emit("voice-call", enc({ slot: 1, active: false }))
+			vi.advanceTimersByTime(5000)
+			const out = client.samples()
+			expect(out.includes(999)).toBe(false)
+			expect(out.filter(s => s !== 0)).toEqual(frames(range(1, 50)))
+			// A's 10 live frames and 20 copies of 999.
+			expect(hold(voice).discardedMs).toBe(600)
+			expect(voice.service.getStatus().decoders[0]!.droppedSamples).toBe(0)
 		})
 	})
 
