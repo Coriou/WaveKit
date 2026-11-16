@@ -1,13 +1,14 @@
 // The Listen island (docs/web/canvas/Listen.dc.html): listen button, level meter with the squelch line,
-// and the Audio options panel (squelch, volume). <AudioOutput/> holds the page's one <audio> element.
+// and the Audio options panel (squelch, Voice only, Source, volume, sound). <AudioOutput/> holds the page's
+// one <audio> element. Squelch, Voice only and Source are core settings shared by every client: a change
+// is a config PATCH and never reattaches the stream, which is always the core's `/auto`.
 import { useEffect, useState, type CSSProperties } from "react"
 import type { LiveAudioStatus } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
-import { proofKind, useStore } from "../../data/index.ts"
+import { useStore } from "../../data/index.ts"
 import type { IslandContext, IslandSlot } from "../../shell/ShellIsland.tsx"
 import { Button } from "../../ui/Button.tsx"
-import { Chip } from "../../ui/Chip.tsx"
 import { Icon } from "../../ui/Icon.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
 import { IslandHead } from "../../ui/Island.tsx"
@@ -29,10 +30,13 @@ import {
 	LEVEL_MAX_DBFS,
 	LEVEL_MIN_DBFS,
 	levelFraction,
-	noiseSquelchFits,
+	listenContract,
+	manualStart,
+	meterThreshold,
+	squelchPatch,
 	squelchSetting,
-	squelchThreshold,
-	voiceSource,
+	voiceOnlyFits,
+	type SquelchKind,
 } from "./audio.ts"
 import {
 	audioHealthText,
@@ -42,33 +46,35 @@ import {
 import type { ListenPhase } from "./controller.ts"
 import "./listen.css"
 import { recordClock, recordFileName } from "./recorder.ts"
+import { openSquelch, playAnyway } from "./squelch-actions.ts"
 import {
 	agcOf,
 	autoRouteNow,
 	autoSquelchNow,
-	coreRouteHint,
-	coreRoutes,
 	deemphOf,
 	evidenceText,
 	deemphPatch,
-	hearHint,
+	heldCall,
+	heldCallLine,
+	listenHeadline,
+	listenModeOf,
 	liveTone,
 	LOW_CUT_HZ,
 	lowCutSub,
+	dropHearKey,
 	noiseReductionSub,
 	offeredTone,
-	playsDigital,
 	routeProtocol,
+	sourceHint,
 	toneGateOn,
 	toneSquelchFits,
 	toneSquelchPatch,
 	toneText,
-	transmissionKind,
+	voiceCallLine,
 	voiceRoute,
-	type TransmissionKind,
 	type AgcChoice,
 	type DeemphChoice,
-	type HearChoice,
+	type ListenSource,
 	type VoiceRoute,
 } from "./sound.ts"
 
@@ -83,46 +89,19 @@ export function useVoiceRoute(): VoiceRoute | null {
 	return voiceRoute(list, voice, hz, tolerance)
 }
 
-/**
- * Analog or digital for the transmission on the air (What you hear: Auto): a decoded call or a live tone
- * now, else the channel's last proven transmission (WG12). Null on older cores until a call or tone says.
- */
-export function useTransmissionKind(
-	route: VoiceRoute | null,
-): TransmissionKind | null {
+/** What the core's `/auto` plays now (level events, status as fallback); null on cores without it. */
+function useRouteNow() {
 	const { data } = useServices()
 	const status = useLiveStatus()
-	const hz = useSettledHz()
-	const { open } = useLevel()
-	const last = useStore(data.nearDiscovery, s =>
-		hz !== null && s.hz === hz ? proofKind(s.lastProof) : null,
-	)
-	return transmissionKind({
-		route,
-		open,
-		tone: status?.tone,
-		last,
-		now: Date.now(),
-	})
+	const level = useStore(data.liveAudio, s => s.level)
+	return autoRouteNow(status, level)
 }
 
 /**
- * Auto on a core that serves `/auto`: the core picks analog or decoded voice, and `now` says which
- * plays (level events, status as fallback). Null when this browser picks the stream itself.
+ * The page's audio output, bound to the listen controller. It always plays the core's `/auto` (a core
+ * without it: `/stream`), so a Source or squelch change keeps the stream: it reattaches only when the
+ * stream itself changes (URL, format, rate).
  */
-export function useCoreRoute() {
-	const { data, listen } = useServices()
-	const status = useLiveStatus()
-	const hear = useStore(listen, s => s.hear)
-	const level = useStore(data.liveAudio, s => s.level)
-	if (!coreRoutes(hear, status)) return null
-	return {
-		now: autoRouteNow(status, level),
-		digitalAvailable: status?.autoRoute?.digitalAvailable === true,
-	}
-}
-
-/** The page's audio output, bound to the listen controller; reattaches when the stream itself changes. */
 export function AudioOutput() {
 	const { data, listen } = useServices()
 	const status = useLiveStatus()
@@ -130,24 +109,18 @@ export function AudioOutput() {
 		typeof location === "undefined" ? "http://localhost/" : location.href
 	const access = useStore(data.access, s => s.access)
 	const credentials = access?.mode === "protected"
-	const hear = useStore(listen, s => s.hear)
 	const wanted = useStore(listen, s => s.wanted)
 	const route = useVoiceRoute()
-	const kind = useTransmissionKind(route)
-	// Auto on a core with /auto: the core switches between analog and decoded voice in one stream
-	const core = coreRoutes(hear, status)
-	const digital = !core && playsDigital(hear, route, kind)
+	const source =
+		autoRouteSource(status, base, credentials) ??
+		audioSource(status, base, credentials)
 	const voiceRunning = useStore(data.digitalVoice, s => s.status?.running)
-	// analog plays until the decoded voice stream is up; both need live audio running (Listen drives the
-	// squelch meter, and a null source would end listening)
-	const source = core
-		? autoRouteSource(status, base, credentials)
-		: digital && route && voiceRunning && status?.running
-			? voiceSource(route, base, credentials)
-			: audioSource(status, base, credentials)
-	// the decoded voice stream starts on demand, like live audio does on Listen; /auto needs the
-	// digital voice service running to route a call, and plays analog meanwhile
-	const needsVoice = digital || (core && route !== null)
+	// `/auto` routes a decoded call only while the digital voice service runs: start it on demand, like
+	// live audio on Listen, unless Source is Analog or the squelch is Open (both play analog only)
+	const analogOnly =
+		listenModeOf(status?.config) === "analog" ||
+		squelchSetting(status).kind === "open"
+	const needsVoice = route !== null && !analogOnly
 	useEffect(() => {
 		if (!wanted || !needsVoice || voiceRunning) return
 		data.digitalVoice.ensureRunning().catch((error: unknown) => {
@@ -155,9 +128,10 @@ export function AudioOutput() {
 				`Decoded voice could not start: ${error instanceof Error ? error.message : "the core refused"}`,
 				{ tone: "warn" },
 			)
-			listen.setHear("analog")
 		})
-	}, [data, listen, wanted, needsVoice, voiceRunning])
+	}, [data, wanted, needsVoice, voiceRunning])
+	// the per-browser "What you hear" of earlier versions: dropped, never sent (Source is shared)
+	useEffect(() => dropHearKey(globalThis.localStorage), [])
 	const key = audioAttachKey(source)
 	// the source object is rebuilt every render; the key says when it really changed
 	useEffect(() => listen.setSource(key, source), [listen, key])
@@ -188,62 +162,105 @@ function useLevel() {
 	const power = running
 		? (level?.channelPowerDbfs ?? status.channelPowerDbfs ?? null)
 		: null
-	const threshold = squelchThreshold(
+	const threshold = meterThreshold(
 		setting,
 		running ? (level?.thresholdDbfs ?? null) : null,
 	)
-	// stage 1: the carrier opened the squelch; on NFM auto the evidence gate may still hold the audio
+	// stage 1: the carrier opened the squelch; on NFM auto the voice check may still hold the audio
 	const carrier = running
 		? (level?.squelchOpen ?? status.squelchOpen ?? true)
 		: false
 	const gate = autoSquelchNow(status, level)
-	const open = carrier && gate?.state !== "waiting"
+	// Open plays everything; otherwise the carrier is up and no voice check holds it
+	const open =
+		running &&
+		(setting.kind === "open" || (carrier && gate?.state !== "waiting"))
 	return {
 		power,
 		threshold,
-		/** Audio passes: the carrier is up and no evidence gate holds it. */
+		/** Audio passes: Open, or the carrier is up and no voice check holds it. */
 		open,
 		carrier,
-		/** The evidence squelch (NFM auto), null when the core does not report it. */
+		/** The voice check (NFM auto), null when the core does not report it. */
 		gate,
 		setting,
+		liveThreshold: running ? (level?.thresholdDbfs ?? null) : null,
 		floor: level?.noiseFloorDbfs ?? null,
 	}
 }
 
+/**
+ * What the head says, shared with the panel's squelch tag so both agree: the headline, and the decoded
+ * call `/auto` holds (encryption still being checked, or encrypted), read from the call itself since the
+ * core never routes it.
+ */
+function useHeadline(level: ReturnType<typeof useLevel>) {
+	const status = useLiveStatus()
+	const route = useVoiceRoute()
+	const now = useRouteNow()
+	const { setting, carrier, gate } = level
+	// a tone gate set on another channel stays on the core: say so while it holds the audio
+	const toneGate =
+		status?.config.toneSquelch && status.config.toneSquelch.kind !== "none"
+			? status.config.toneSquelch
+			: null
+	const toneWaiting =
+		setting.kind !== "open" &&
+		toneGate !== null &&
+		status?.toneSquelch?.state === "waiting"
+	const source = listenModeOf(status?.config)
+	const headline = listenHeadline({
+		squelch: setting.kind,
+		carrier,
+		gate,
+		toneWaiting,
+		now,
+		source,
+	})
+	const heldVoice =
+		now?.active === "digital"
+			? null
+			: heldCall({ route, source, squelch: setting.kind })
+	return { headline, heldVoice, route, now, toneGate, toneWaiting }
+}
+
 function ListenHead({ ctx }: { ctx: IslandContext }) {
-	const { listen } = useServices()
+	const { data, listen } = useServices()
 	const readOnly = useReadOnly()
 	const state = useStore(listen)
 	const status = useLiveStatus()
 	const hz = useSettledHz()
-	const { power, threshold, open, carrier, gate: evidence } = useLevel()
+	const level = useLevel()
+	const { power, threshold, open, setting } = level
 	const on = state.wanted
 	const mode = status ? modeSpec(status.config.modulation).label : null
-	const route = useVoiceRoute()
-	const kind = useTransmissionKind(route)
-	const core = useCoreRoute()
-	const digital = core
-		? on && core.now?.active === "digital"
-		: on && playsDigital(state.hear, route, kind) && route !== null
+	const { headline, heldVoice, route, now, toneGate, toneWaiting } =
+		useHeadline(level)
+	const digital = on && now?.active === "digital"
 	const heardTone = on && open ? liveTone(status?.tone) : null
-	// a tone gate set on another channel stays on the core: say so while it holds the audio
-	const gate =
-		status?.config.toneSquelch && status.config.toneSquelch.kind !== "none"
-			? status.config.toneSquelch
-			: null
+	// Play anyway turns Voice only off: only where the switch exists and this browser may write; never
+	// while a held DMR call keys the carrier (it would play its buzz, not the call)
+	const canPlayAnyway =
+		headline.kind === "waiting" &&
+		heldVoice === null &&
+		!readOnly &&
+		voiceOnlyFits(status?.config) &&
+		setting.kind === "auto"
 	const sub = digital
-		? [
-				`${routeProtocol(core?.now ?? null, route) ?? "Digital"} voice`,
-				route?.call ?? (hz === null ? null : formatMHz(hz)),
-			]
-				.filter(Boolean)
-				.join(" · ")
-		: on && gate && status?.toneSquelch?.state === "waiting"
-			? `Waiting for ${toneText(gate)}`
-			: on && carrier && evidence?.state === "waiting"
-				? // NFM auto squelch: a carrier is up, its audio waits for voice or a tone
-					"Waiting for voice or a tone"
+		? voiceCallLine(
+				routeProtocol(now, route),
+				route,
+				hz === null ? null : formatMHz(hz),
+			)
+		: on && heldVoice !== null
+			? heldCallLine(
+					heldVoice,
+					routeProtocol(now, route),
+					route,
+					headline.kind === "listening",
+				)
+			: on && toneWaiting && toneGate
+				? `Waiting for ${toneText(toneGate)}`
 				: [
 						mode,
 						hz === null ? null : formatMHz(hz),
@@ -267,8 +284,10 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 	const audible =
 		state.phase === "playing" &&
 		open &&
-		status?.toneSquelch?.state !== "waiting"
+		!toneWaiting &&
+		headline.kind !== "quiet"
 	const breaking = audible ? breakingUpText(state.audio) : null
+	const title = state.phase === "playing" ? headline.title : TITLE[state.phase]
 	return (
 		<IslandHead className="wk-shell-listen-head">
 			<button
@@ -289,13 +308,22 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 				<Icon name="headphones" size={22} />
 			</button>
 			<div className="wk-shell-listen-text">
-				<div className="wk-shell-listen-title">
-					<b>
-						{state.phase === "playing" && !audible
-							? "Squelched"
-							: TITLE[state.phase]}
-					</b>
-					{breaking ? (
+				<div
+					className="wk-shell-listen-title"
+					data-wk-listen-head={headline.kind}
+				>
+					<b>{title}</b>
+					{state.phase === "playing" && canPlayAnyway ? (
+						<Button
+							variant="tonal"
+							size="sm"
+							className="wkf-play-anyway"
+							title="Turns Voice only off: every carrier plays"
+							onClick={() => void playAnyway(data.liveAudio)}
+						>
+							Play anyway
+						</Button>
+					) : breaking ? (
 						<span
 							className="wk-shell-sub"
 							data-breaking=""
@@ -341,6 +369,22 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 	)
 }
 
+const SQUELCH_OPTIONS: ReadonlyArray<SegOption<SquelchKind>> = [
+	{ value: "auto", label: "Auto" },
+	{ value: "manual", label: "Manual" },
+	{ value: "open", label: "Open" },
+]
+
+/** The Voice only switch's line, as the design words it. */
+export const VOICE_ONLY_SUB =
+	"Skips carriers, data and pagers. Voice starts about 1 s late, nothing is cut."
+
+const SQUELCH_HELP: Readonly<Record<SquelchKind, string>> = {
+	auto: "Opens on a carrier above the noise floor and follows conditions. Drag the line to set it by hand.",
+	manual: "Everything above the line plays. Drag it just above the noise.",
+	open: "Everything plays, noise included. Transmissions are still logged. Q goes back.",
+}
+
 function ListenPanel() {
 	const { data, listen } = useServices()
 	const readOnly = useReadOnly()
@@ -348,27 +392,58 @@ function ListenPanel() {
 	const volume = useStore(listen, s => s.volume)
 	const listenError = useStore(listen, s => s.error)
 	const audioError = useStore(data.liveAudio, s => s.error)
-	const { power, threshold, open, carrier, gate, setting, floor } = useLevel()
+	const level = useLevel()
+	const {
+		power,
+		threshold,
+		open,
+		carrier,
+		gate,
+		setting,
+		floor,
+		liveThreshold,
+	} = level
+	// the tag agrees with the head: Quiet there (Source Digital between calls, a tone gate waiting) is Quiet here
+	const quiet = useHeadline(level).headline.kind === "quiet"
+	const passing = open && !quiet
 	const [drag, setDrag] = useState<number | null>(null)
 	const running = status?.running === true
+	const config = status?.config
+	// dragging the line selects Manual at once, before the core answers
+	const shown: SquelchKind = drag !== null ? "manual" : setting.kind
 	const sq =
 		drag ??
 		threshold ??
 		(setting.kind === "manual" ? setting.thresholdDbfs : LEVEL_MIN_DBFS)
-	// off and noise squelch draw no power threshold
-	const noLine =
-		(setting.kind === "off" || setting.kind === "noise") && drag === null
+	const noLine = shown === "open"
 	const sqPct = noLine ? 0 : levelFraction(sq) * 100
 	const sqText =
-		setting.kind === "noise" && drag === null
-			? `Noise squelch · opens ${formatDb(setting.quietingDb, 0)} dB below the noise`
-			: setting.kind === "off" && drag === null
-				? "Squelch off"
-				: `${setting.kind === "auto" && drag === null ? "Auto · " : ""}Threshold ${formatDb(sq, 0)} dBFS`
-	const noiseFits = status ? noiseSquelchFits(status.config.modulation) : false
+		shown === "open"
+			? "Open · everything plays"
+			: shown === "auto"
+				? threshold === null
+					? "Auto"
+					: `Auto · Threshold ${formatDb(sq, 0)} dBFS`
+				: `Threshold ${formatDb(sq, 0)} dBFS`
 	const apply = (patch: Parameters<typeof data.liveAudio.setConfig>[0]) =>
 		void data.liveAudio.setConfig(patch).catch(() => undefined)
 	const canEdit = !readOnly && status !== null
+	const choose = (kind: SquelchKind) => {
+		if (kind === "open") return void openSquelch(data.liveAudio, listen)
+		if (kind === "auto") return apply(squelchPatch(config, { kind: "auto" }))
+		apply(
+			squelchPatch(config, {
+				kind: "manual",
+				dbfs: manualStart(config, liveThreshold),
+			}),
+		)
+	}
+	const commit = () => {
+		if (drag !== null)
+			apply(squelchPatch(config, { kind: "manual", dbfs: drag }))
+		setDrag(null)
+	}
+	const voiceOnly = setting.kind === "auto" && setting.voiceOnly
 	return (
 		<>
 			<div className="wkf-field">
@@ -378,48 +453,26 @@ function ListenPanel() {
 						<span
 							className="wk-tag"
 							data-size="md"
-							data-variant={open ? "accent" : undefined}
+							data-variant={passing ? "accent" : undefined}
+							data-wk-squelch-state=""
 						>
-							{setting.kind === "off"
-								? "Off"
-								: open
-									? (evidenceText(gate) ?? "Open")
-									: carrier && gate?.state === "waiting"
+							{setting.kind === "open"
+								? "Open"
+								: passing
+									? (evidenceText(gate) ?? "Passing")
+									: !quiet && carrier && gate?.state === "waiting"
 										? "Waiting for voice"
-										: "Closed"}
+										: "Quiet"}
 						</span>
 					)}
-					<span className="wkf-gap" />
-					<Chip
-						size="sm"
-						pressed={setting.kind === "auto"}
-						disabled={!canEdit}
-						onClick={() => apply({ squelchMode: "auto", autoMarginDb: 6 })}
-					>
-						Auto
-					</Chip>
-					<Chip
-						size="sm"
-						pressed={setting.kind === "noise"}
-						disabled={!canEdit || !noiseFits}
-						title={
-							noiseFits
-								? "Opens on FM quieting: works on a carrier already up when tuned"
-								: "FM only (NFM, WFM)"
-						}
-						onClick={() => apply({ squelchMode: "noise" })}
-					>
-						Noise
-					</Chip>
-					<Button
-						variant="outline"
-						size="sm"
-						disabled={!canEdit}
-						onClick={() => apply({ squelchMode: "manual", squelch: 0 })}
-					>
-						Off
-					</Button>
 				</div>
+				<Seg
+					label="Squelch"
+					wide
+					options={SQUELCH_OPTIONS.map(o => ({ ...o, disabled: !canEdit }))}
+					value={shown}
+					onChange={choose}
+				/>
 				<div className="wkf-sq-bar">
 					<div
 						className="wk-meter-fill"
@@ -441,14 +494,8 @@ function ListenPanel() {
 						aria-label="Squelch threshold"
 						aria-valuetext={sqText}
 						onChange={e => setDrag(Number(e.target.value))}
-						onPointerUp={() => {
-							if (drag !== null) apply({ squelchMode: "manual", squelch: drag })
-							setDrag(null)
-						}}
-						onKeyUp={() => {
-							if (drag !== null) apply({ squelchMode: "manual", squelch: drag })
-							setDrag(null)
-						}}
+						onPointerUp={commit}
+						onKeyUp={commit}
 						onBlur={() => setDrag(null)}
 					/>
 				</div>
@@ -459,11 +506,18 @@ function ListenPanel() {
 						{floor !== null && running ? ` · floor ${formatDb(floor, 0)}` : ""}
 					</span>
 				</div>
-				<span className="wkf-quiet wkf-small">
-					Drag the line just above the noise to silence it. Auto keeps it 6 dB
-					over the noise floor as conditions change. Noise (FM) opens when a
-					carrier quiets the receiver noise.
-				</span>
+				<span className="wkf-quiet wkf-small">{SQUELCH_HELP[shown]}</span>
+				{shown === "auto" && voiceOnlyFits(config) && (
+					<SoundSwitch
+						label="Voice only"
+						sub={VOICE_ONLY_SUB}
+						checked={voiceOnly}
+						disabled={!canEdit}
+						onChange={v =>
+							apply(squelchPatch(config, { kind: "auto", voiceOnly: v }))
+						}
+					/>
+				)}
 				{status && <ToneSquelch status={status} canEdit={canEdit} />}
 			</div>
 
@@ -493,7 +547,9 @@ function ListenPanel() {
 				<span className="wkf-quiet wkf-small">This browser only.</span>
 			</div>
 
-			{status && <WhatYouHear status={status} />}
+			{status && listenContract(status.config) && (
+				<ListenSourceField status={status} canEdit={canEdit} />
+			)}
 			{status && <Sound status={status} canEdit={canEdit} />}
 
 			{status && (
@@ -582,46 +638,49 @@ function ToneSquelch({
 	)
 }
 
-const HEAR_OPTIONS: ReadonlyArray<SegOption<HearChoice>> = [
+const SOURCE_OPTIONS: ReadonlyArray<SegOption<ListenSource>> = [
 	{ value: "auto", label: "Auto" },
 	{ value: "analog", label: "Analog" },
-	{
-		value: "digital",
-		// "Decoded" alone where the island is narrow (phone)
-		label: (
-			<>
-				Decoded<span className="wkf-hear-long"> voice</span>
-			</>
-		),
-		ariaLabel: "Decoded voice",
-	},
+	{ value: "digital", label: "Digital" },
 ]
 
-/** What you hear: the analog audio or the decoded voice of a dsd-fme decoder on the channel. */
-function WhatYouHear({ status }: { status: LiveAudioStatus }) {
-	const { listen } = useServices()
-	const hear = useStore(listen, s => s.hear)
+/** Source: what the core's `/auto` plays, shared by every client (the core's `listenMode`). */
+function ListenSourceField({
+	status,
+	canEdit,
+}: {
+	status: LiveAudioStatus
+	canEdit: boolean
+}) {
+	const { data } = useServices()
 	const route = useVoiceRoute()
-	const kind = useTransmissionKind(route)
-	const core = useCoreRoute()
-	const mode = modeSpec(status.config.modulation).label
+	const now = useRouteNow()
+	const mode = listenModeOf(status.config)
+	const label = modeSpec(status.config.modulation).label
+	const apply = (listenMode: ListenSource) =>
+		void data.liveAudio.setConfig({ listenMode }).catch(() => undefined)
+	const noDecoder = now?.reason === "no-decoder"
 	return (
 		<div className="wkf-field">
-			<Label>What you hear</Label>
+			<Label>Source</Label>
 			<Seg
-				label="Audio source"
+				label="Source"
 				wide
-				options={HEAR_OPTIONS}
-				value={hear}
-				onChange={v => listen.setHear(v)}
+				options={SOURCE_OPTIONS.map(o => ({ ...o, disabled: !canEdit }))}
+				value={mode}
+				onChange={apply}
 			/>
-			<div className="wkf-hear-hint">
+			<div className="wkf-hear-hint" data-wk-source-hint="">
 				<span className="wkf-hear-dot" aria-hidden="true" />
-				<span>
-					{core
-						? coreRouteHint({ ...core, route, modeLabel: mode })
-						: hearHint(hear, route, mode, kind)}
-				</span>
+				<span>{sourceHint({ mode, now, route, modeLabel: label })}</span>
+				{noDecoder && canEdit && (
+					<>
+						<span className="wkf-gap" />
+						<Button variant="outline" size="sm" onClick={() => apply("auto")}>
+							Use Auto
+						</Button>
+					</>
+				)}
 			</div>
 		</div>
 	)

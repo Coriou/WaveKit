@@ -107,13 +107,17 @@ export function dpmrCchBits({ fn, idPart }) {
 	return scramble(interleaved)
 }
 
-/** Dibits of `superframes` voice superframes (4 frames each), after a pre-roll. */
+/**
+ * Dibits of `superframes` voice superframes (4 frames each), after a pre-roll.
+ * `coldKeyUp` drops the pre-roll (a true key-up, dv-plan.mjs).
+ */
 export function dpmrCallDibits({
 	calledId,
 	callingId,
 	colourCode,
 	superframes = 3,
 	seed = 13,
+	coldKeyUp = false,
 }) {
 	const random = rng(seed)
 	const tch = () => [...Array(144)].map(() => Math.floor(random() * 4))
@@ -123,7 +127,9 @@ export function dpmrCallDibits({
 	const cc = CHANNEL_CODES[colourCode]
 	if (cc === undefined)
 		throw new Error(`no channel code table entry for ${colourCode}`)
-	const out = [...Array(480)].map(() => Math.floor(random() * 4))
+	const out = coldKeyUp
+		? []
+		: [...Array(480)].map(() => Math.floor(random() * 4))
 	for (let s = 0; s < superframes; s++)
 		for (let fn = 0; fn < 4; fn++) {
 			out.push(...bitsToDibits(bitsOf(fn % 2 ? cc : FS2, 24)))

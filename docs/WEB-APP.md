@@ -237,10 +237,53 @@ without `coversHz` is read from the decoders' own bands instead.
 The bar under the tuned card plays the demodulated audio in the browser: analog modes with squelch
 and tone squelch, and decoded digital voice. **Record** saves a WAV file from the browser.
 
-On NFM with auto squelch, a carrier alone does not open the audio: the core waits for evidence
-that someone is talking (voice, or a CTCSS or DCS tone) and the bar says what opened it, for example
-**Open on CTCSS**. The `autoSquelch` field of
-[`GET /api/live-audio/status`](API.md#get-apilive-audiostatus) reports the gate.
+The bar's title says what you hear, in one line:
+
+- **Quiet**: nothing passes the squelch (or a tone squelch waits for its tone, or Source is Digital
+  and no decoded call is playing, between calls or with no decoder on the channel).
+- **Waiting for voice**, with **Play anyway**: a carrier is up and Voice only holds it until someone
+  talks. **Play anyway** turns Voice only off so every carrier plays; the toast has **Undo**, which
+  turns Voice only back on unless the squelch was changed again since.
+- **Listening**: audio is playing. A decoded call says so under it, for example `DMR voice · TG …`.
+- **Open**: the squelch is open, and it stays open across retunes until you change it.
+
+A decoded call the core does not play is named under the title whatever it says (unless Source is
+Analog or the squelch is Open): `DMR voice · checking…` while the core does not know yet whether the
+call is encrypted (it is never played or shown as clear until that is known), and
+`DMR call is encrypted: nothing to play.` for an encrypted one (`DMR call is encrypted: decoded voice
+is not played.` while the squelch passes the analog channel and the title says **Listening**). **Play anyway** is not offered then:
+it would only play the call's digital noise. The line under **Source** says the same.
+
+**Audio options** sets the squelch in one row, **Auto | Manual | Open**:
+
+- **Auto** opens on a carrier above the noise floor and follows conditions. On NFM, the **Voice only**
+  switch under it (on by default) waits for evidence that someone is talking, voice or a CTCSS or DCS
+  tone: "Skips carriers, data and pagers. Voice starts about 1 s late, nothing is cut." The squelch tag
+  says what let the audio through, for example **CTCSS heard**, and reads **Quiet** whenever the title
+  does (Source Digital between calls, for example).
+- **Manual** is the line on the level bar: everything above it plays. Dragging the line selects Manual
+  at once; the spectrum shows the same dashed line, in Manual only. Choosing Manual from Auto starts the
+  line where Auto had it.
+- **Open** plays everything, noise, pagers and data included. Transmissions are still detected and
+  logged in Activity at the Auto threshold. `Q` opens the squelch and goes back to the squelch before it
+  (a tone-only squelch comes back exactly as it was); from the defaults, `Q` alone, or **Audio options**
+  then **Open**, plays the noise. Opening from `Q`, the panel's **Open**, the palette's **Squelch ›
+  Open** or a typed `sq open` / `sq off` also starts Listen in this browser once the core has taken the
+  change. **Settings › Audio › Squelch › Open** only changes the setting, without starting Listen; `Q`
+  still goes back from it to the squelch before.
+
+**Source**, **Auto | Analog | Digital**, says what Listen plays. **Auto** plays the analog audio or a
+clear decoded call, decided per transmission; **Analog** only the demodulated audio; **Digital** only
+decoded voice, silence otherwise. With no digital voice decoder on the channel, Digital plays nothing
+and the panel says so, with **Use Auto**. Open always plays the analog audio.
+
+The squelch, Voice only and Source are settings of the core: every browser and client listening sees
+the same ones, and a change applies at once without restarting the audio stream. Volume stays in this
+browser. The per-browser "What you hear" choice of earlier versions is dropped (removed from this
+browser, never sent to the core), so Source starts at what the core has. A core older than these
+settings offers Auto, Manual and Open only (Open is sent as a manual squelch of 0) and picks the source
+itself. The `autoSquelch` and `autoRoute` fields of
+[`GET /api/live-audio/status`](API.md#get-apilive-audiostatus) report the voice check and what plays.
 
 **Connecting…** means Listen is starting, no audio has played for about 2 s, or the stream ended and is
 being reattached. If no data at all arrives for 5 s, Listen reattaches by itself; after about 28 s of
@@ -320,7 +363,9 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   the recording areas use: digital-voice calls, scanner evidence and named IQ captures (each with
   its limit), then the free space.
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band
-  plans, spectrum and waterfall, map, units and time, theme, density and motion. A paused decoder
+  plans, spectrum and waterfall, map, units and time, theme, density and motion. **Audio** uses the
+  Listen words: **Squelch** (Auto, Manual, Open), **Voice only** under Auto on NFM, **Squelch level**
+  in Manual, **Source** (Auto, Analog, Digital), and the Auto squelch margin under **More**. A paused decoder
   says why, for example `Paused · the capture is too narrow here` or `Paused · no channel selected yet`.
   Each decoder lists where it listens and why, for example `162.025 MHz (tuned)`, or
   `(activity)` for a paging or digital-voice channel chosen because it was active.
@@ -604,7 +649,7 @@ already shown.
 | ⌘, / Ctrl ,          | Settings                          |
 | `T`                  | Tune to a frequency               |
 | `M`                  | Mode                              |
-| `Q`                  | Squelch                           |
+| `Q`                  | Squelch Open, and back            |
 | `[` `]`              | Step down / up                    |
 | `L`                  | Listen                            |
 | `P`                  | Pause / resume the receiver       |

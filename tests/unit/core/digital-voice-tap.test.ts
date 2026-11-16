@@ -369,6 +369,29 @@ describe("digital voice taps", () => {
 		expect(tapLines[0]).not.toHaveProperty("err")
 	})
 
+	it("voiceDecoderIds lists configured and probe channels; a removed one is dropped; none when disabled", async () => {
+		const { service } = await started()
+		expect(service.voiceDecoderIds()).toEqual(["dsd-fme"])
+		await service.addChannel(dsd("probe-1"))
+		expect([...service.voiceDecoderIds()].sort()).toEqual([
+			"dsd-fme",
+			"probe-1",
+		])
+		await service.removeChannel("probe-1")
+		expect(service.voiceDecoderIds()).toEqual(["dsd-fme"])
+		await service.removeChannel("dsd-fme")
+		expect(service.voiceDecoderIds()).toEqual([])
+		// Digital voice disabled: no channel is ever bound, so the route reports no-decoder.
+		const disabled = new DigitalVoiceService(
+			logger,
+			DigitalVoiceConfigSchema.parse({ enabled: false }),
+		)
+		services.push(disabled)
+		await disabled.prepareDecoderConfigs([dsd("dsd-fme")])
+		await disabled.addChannel(dsd("probe-2"))
+		expect(disabled.voiceDecoderIds()).toEqual([])
+	})
+
 	it("detaches on channel removal and on stop", async () => {
 		const first = await started()
 		const a = recordingTap()

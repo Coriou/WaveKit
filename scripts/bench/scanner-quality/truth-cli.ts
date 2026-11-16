@@ -1,7 +1,8 @@
 /**
  * `scanner-quality --truth <dir|synthetic>`: the truth scorecard. Runs the synthetic truth
  * scenes (truth-scenes.ts) and every labelled capture of `<dir>` (truth-labels.ts) through the
- * scanner with the analog recorder in the loop (truth-run.ts), scores them (truth-score.ts),
+ * scanner with the analog recorder in the loop (truth-run.ts), with the synthetic scenes the
+ * digital voice scenes through the dsd-fme adapter (truth-dv.ts), scores them (truth-score.ts),
  * prints the scorecard as one JSON line and then one human line (the last two lines of stdout;
  * the scanner may log before them), and exits 1 when a total misses the checked-in limits
  * (truth-thresholds.json), 2 on bad arguments, labels or limits.
@@ -10,7 +11,8 @@
  *   --synthetic on|off    run the synthetic scenes too (default on)
  *   --thresholds <file>   limits (default scripts/bench/scanner-quality/truth-thresholds.json)
  *   --out <file>          also write the scorecard JSON there
- *   --only <a,b>          only the named cases (the limits' minimums are not checked then)
+ *   --only <a,b>          only the named cases, `dv-<scene>` for a digital voice scene (the
+ *                         limits' minimums are not checked then)
  *   --unconfirmed         score unconfirmed labels too (proposals nobody checked yet)
  *   --separate            run each capture with a fresh scanner state (default: the captures run
  *                         in name order as one session: each starts at its real offset from the
@@ -30,6 +32,7 @@ import {
 	runTruthCase,
 	type TruthCase,
 } from "./truth-run.js"
+import { dvCaseScore, loadDvCases, runDvCase, type DvCase } from "./truth-dv.js"
 import { loadTruthDir, parseThresholds } from "./truth-labels.js"
 import { syntheticCases } from "./truth-scenes.js"
 import {
@@ -37,6 +40,7 @@ import {
 	scoreCase,
 	scorecard,
 	unknownMetrics,
+	withTotals,
 	type CaseScore,
 } from "./truth-score.js"
 
@@ -81,6 +85,16 @@ export function parseTruthArgs(argv: readonly string[]): TruthOptions {
 	}
 }
 
+/**
+ * The digital voice scenes (truth-dv.ts), with the synthetic scenes: every
+ * seed, or those `--only` names.
+ */
+export function dvCases(o: TruthOptions): DvCase[] {
+	if (!o.synthetic) return []
+	const all = loadDvCases()
+	return o.only === null ? all : all.filter(c => o.only!.includes(c.name))
+}
+
 /** The cases to run: the synthetic scenes, then the labelled captures in name order. */
 export function truthCases(o: TruthOptions): TruthCase[] {
 	const cases: TruthCase[] = o.synthetic ? syntheticCases() : []
@@ -105,7 +119,10 @@ export function truthCases(o: TruthOptions): TruthCase[] {
 				}),
 			)
 	if (o.only === null) return cases
-	const unknown = o.only.filter(n => !cases.some(c => c.name === n))
+	const dvNames = new Set(o.synthetic ? loadDvCases().map(c => c.name) : [])
+	const unknown = o.only.filter(
+		n => !cases.some(c => c.name === n) && !dvNames.has(n),
+	)
 	if (unknown.length > 0)
 		throw new TruthArgsError(`--only names no case: ${unknown.join(", ")}`)
 	return cases.filter(c => o.only!.includes(c.name))
@@ -115,6 +132,7 @@ export function truthCases(o: TruthOptions): TruthCase[] {
 export async function runTruthCli(argv: readonly string[]): Promise<number> {
 	let o: TruthOptions
 	let cases: TruthCase[]
+	let dv: DvCase[]
 	let limits: ReturnType<typeof parseThresholds>
 	try {
 		o = parseTruthArgs(argv)
@@ -138,6 +156,7 @@ export async function runTruthCli(argv: readonly string[]): Promise<number> {
 				`${o.thresholds}: unknown metrics ${unknown.join(", ")}`,
 			)
 		cases = truthCases(o)
+		dv = dvCases(o)
 	} catch (err: unknown) {
 		process.stderr.write(
 			`${err instanceof Error ? err.message : String(err)}\n`,
@@ -183,6 +202,14 @@ export async function runTruthCli(argv: readonly string[]): Promise<number> {
 		}
 	} finally {
 		if (stateDir !== null) rmSync(stateDir, { recursive: true, force: true })
+	}
+	for (const c of dv) {
+		const s = withTotals(dvCaseScore(c, runDvCase(c)))
+		scores.push(s)
+		const t = s.totals
+		process.stderr.write(
+			`  ${c.name}${c.seed.provisional ? " (provisional seed)" : ""}: ${t.dvOvers} overs, missed ${t.dvMissed}, split ${t.dvSplit}, merged ${t.dvMerged}, head cut p90 ${t.dvHeadCutP90Ms} ms, end error p90 ${t.dvEndErrP90Ms} ms, no recording ${t.dvRecordingMissing}\n`,
+		)
 	}
 	const card = scorecard(scores, limits, { subset: o.only !== null })
 	const json = JSON.stringify(card)

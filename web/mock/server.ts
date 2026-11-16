@@ -140,6 +140,11 @@ export interface MockServerOptions {
 	/** Seeds the band inspection UX discoveries (./band-fixtures.ts; WAVEKIT_MOCK_BAND_FIXTURES=1). */
 	bandFixtures?: boolean
 	/**
+	 * The mock DMR call says `encryptionKnown: false` (WAVEKIT_MOCK_VOICE_ENCRYPTION_UNKNOWN=1):
+	 * its encryption is not known yet, so the web app shows it as checking, never as clear.
+	 */
+	voiceEncryptionUnknown?: boolean
+	/**
 	 * Retunes through the multi-band sequence of ./retune-sweep.ts, then parks at 431.0125 MHz at
 	 * 1.024 MS/s; frames follow the tuner's sample rate (WAVEKIT_MOCK_RETUNE_SWEEP=1).
 	 */
@@ -649,6 +654,8 @@ export async function buildMockServer(
 			bandwidth: 12500,
 			squelch: -60,
 			squelchMode: "auto",
+			voiceOnly: true,
+			listenMode: "auto",
 			autoMarginDb: 6,
 			noiseQuietingDb: LIVE_AUDIO_NOISE_QUIETING_DB.default,
 			noiseReduction: "off",
@@ -720,8 +727,9 @@ export async function buildMockServer(
 			keyed && signal
 				? signal.powerDbfs + (Math.random() - 0.5) * 2
 				: floor + (Math.random() - 0.5) * 3
+		// Listen: open detects at the auto threshold (and plays everything).
 		const threshold =
-			live.config.squelchMode === "auto"
+			live.config.squelchMode === "auto" || live.config.squelchMode === "open"
 				? floor + (live.config.autoMarginDb ?? 6)
 				: live.config.squelch
 		// WG7 noise mode: FM quieting opens on any carrier; thresholdDbfs reports the stored squelch
@@ -753,12 +761,17 @@ export async function buildMockServer(
 
 	/**
 	 * Evidence squelch (docs/specs/evidence-squelch): NFM auto squelch waits for voice or a tone.
-	 * The mock hears the transmission's tone after 750 ms, else calls it voice after a second.
+	 * The mock hears the transmission's tone after 750 ms, else calls speech (a `voice` signal) voice after a
+	 * second; a bare carrier, data and pagers (every other kind) keep waiting.
 	 */
 	const autoSquelchOf = (
 		open: boolean,
 	): NonNullable<LiveAudioStatus["autoSquelch"]> => {
-		if (live.config.modulation !== "nfm" || live.config.squelchMode !== "auto")
+		if (
+			live.config.modulation !== "nfm" ||
+			live.config.squelchMode !== "auto" ||
+			live.config.voiceOnly === false
+		)
 			return { state: "off" }
 		if (!open) {
 			live.carrierSince = null
@@ -769,19 +782,53 @@ export async function buildMockServer(
 		const tone = toneHere()
 		if (tone !== null && held >= 750)
 			return { state: "open", evidence: "ctcss" }
-		if (held >= 1000) return { state: "open", evidence: "voice" }
+		// Listen contract: only speech passes the voice check; a bare carrier, data and pagers wait for good
+		const speech = signalAt(tunedHz())?.kind === "voice"
+		if (speech && held >= 1000) return { state: "open", evidence: "voice" }
 		return { state: "waiting" }
 	}
 
-	/** What `/auto` plays now: the decoded call while one talks (and voice runs), else the analog channel. */
+	/** Listen: the listen mode in force (open squelch forces analog; the mock applies changes at once). */
+	const autoListenMode = (): "auto" | "analog" | "digital" =>
+		live.config.squelchMode === "open"
+			? "analog"
+			: (live.config.listenMode ?? "auto")
+	/** Listen: why `/auto` plays less than `listenMode` asks, as the core reports it. */
+	const autoRouteReason = (): "squelch-open" | "no-decoder" | null => {
+		const configured = live.config.listenMode ?? "auto"
+		if (live.config.squelchMode === "open" && configured !== "analog")
+			return "squelch-open"
+		// as the core: only when no decoder covers the channel, not while the voice service is stopped
+		if (autoListenMode() === "digital" && voiceCall().hz === null)
+			return "no-decoder"
+		return null
+	}
+	/**
+	 * What `/auto` plays now: the decoded call while one talks (and voice runs), else the analog
+	 * channel; `analog` never plays the call and `digital` never plays analog. As the core, a call
+	 * whose encryption is not known yet (WAVEKIT_MOCK_VOICE_ENCRYPTION_UNKNOWN) is never routed.
+	 */
 	const autoRouteLevel = (): NonNullable<LiveAudioLevel["autoRoute"]> => {
-		const digital = voice.running && voiceCall().talking
-		const active = digital ? "digital" : level().squelchOpen ? "analog" : "none"
+		const mode = autoListenMode()
+		const digital =
+			mode !== "analog" &&
+			voice.running &&
+			voiceCall().talking &&
+			options.voiceEncryptionUnknown !== true
+		// Open passes everything; otherwise the squelch decides.
+		const passes = live.config.squelchMode === "open" || level().squelchOpen
+		const analog = mode !== "digital" && passes
+		const active = digital ? "digital" : analog ? "analog" : "none"
 		if (active !== live.autoActive) {
 			live.autoActive = active
 			live.autoSince = Date.now()
 		}
-		return digital ? { active, protocol: "dmr" } : { active }
+		const reason = autoRouteReason()
+		return {
+			active,
+			...(digital ? { protocol: "dmr" } : {}),
+			...(reason !== null ? { reason } : {}),
+		}
 	}
 
 	// --- Digital voice (dsd-fme): the decoded voice stream on the audio port's /voice. ---
@@ -810,6 +857,9 @@ export async function buildMockServer(
 						source: 2081045,
 						slot: 1,
 						encrypted: false,
+						...(options.voiceEncryptionUnknown
+							? { encryptionKnown: false }
+							: {}),
 						active: true,
 						startedAt: new Date(
 							Math.floor(Date.now() / 20_000) * 20_000,
@@ -853,6 +903,27 @@ export async function buildMockServer(
 			],
 			call,
 		}
+	}
+
+	/**
+	 * The call last announced on `digital-voice:call`. As the core, each talking edge (a call
+	 * starts, or ends) is broadcast as `digital-voice:call` (the call; `active: false` and
+	 * `endedAt` once it ended), then `digital-voice:status`, so a client never keeps a stale call.
+	 */
+	let announcedCall: DigitalVoiceStatus["call"] = null
+	const announceVoiceCallEdges = () => {
+		const call = digitalVoiceStatus().call
+		const before = announcedCall
+		if ((before?.callId ?? null) === (call?.callId ?? null)) return
+		announcedCall = call
+		if (before !== null)
+			broadcast("digital-voice", "digital-voice:call", {
+				...before,
+				active: false,
+				endedAt: new Date(Date.now()).toISOString(),
+			})
+		if (call !== null) broadcast("digital-voice", "digital-voice:call", call)
+		broadcast("digital-voice", "digital-voice:status", digitalVoiceStatus())
 	}
 
 	const liveStatus = (): LiveAudioStatus => {
@@ -904,8 +975,11 @@ export async function buildMockServer(
 				underruns: 0,
 				zeroFilledSamples: 0,
 				droppedMs: 0,
+				pendingOverwrittenMs: 0,
+				analogSupersededMs: 0,
 				clockRebases: 0,
 				latencyMs: 80,
+				listenMode: autoListenMode(),
 			}
 		}
 		return status
@@ -1346,6 +1420,7 @@ export async function buildMockServer(
 	let lastFloodAt = Date.now()
 	const onTick = () => {
 		tick += 1
+		announceVoiceCallEdges()
 		if (live.running) {
 			const l: LiveAudioLevel = level()
 			l.autoSquelch = autoSquelchOf(l.squelchOpen)
@@ -2284,10 +2359,27 @@ export async function buildMockServer(
 				if (
 					squelchMode !== "manual" &&
 					squelchMode !== "auto" &&
+					squelchMode !== "open" &&
 					squelchMode !== "noise"
 				)
 					return bad("squelchMode: invalid value")
 				next.squelchMode = squelchMode
+			}
+			const voiceOnly = body["voiceOnly"]
+			if (voiceOnly !== undefined) {
+				if (typeof voiceOnly !== "boolean")
+					return bad("voiceOnly: must be a boolean")
+				next.voiceOnly = voiceOnly
+			}
+			const listenMode = body["listenMode"]
+			if (listenMode !== undefined) {
+				if (
+					listenMode !== "auto" &&
+					listenMode !== "analog" &&
+					listenMode !== "digital"
+				)
+					return bad("listenMode: invalid value")
+				next.listenMode = listenMode
 			}
 			// WG7 req 2.3: noise squelch is FM-only (also when a PATCH moves a noise config off FM)
 			if (
@@ -2364,6 +2456,20 @@ export async function buildMockServer(
 					message:
 						"Configuration validation failed:\n  - toneSquelch: tone squelch requires nfm modulation",
 				})
+			// Listen migration, as the core: Auto chosen without voiceOnly turns the voice check back
+			// on, noise is auto without the voice check, and manual at 0 is open unless a tone squelch
+			// is set (manual at 0 with a tone is a tone-only squelch).
+			if (squelchMode === "auto" && voiceOnly === undefined)
+				next.voiceOnly = true
+			if (next.squelchMode === "noise") {
+				next.squelchMode = "auto"
+				next.voiceOnly = false
+			} else if (
+				next.squelchMode === "manual" &&
+				next.squelch === 0 &&
+				(next.toneSquelch === undefined || next.toneSquelch.kind === "none")
+			)
+				next.squelchMode = "open"
 			const format = body["audioFormat"]
 			if (format !== undefined) {
 				if (format !== "s16le" && format !== "f32le")
@@ -3014,6 +3120,9 @@ async function main(): Promise<void> {
 		...(retuneEnv !== undefined ? { retuneMs: Number(retuneEnv) } : {}),
 		...(env["WAVEKIT_MOCK_BAND_FIXTURES"] === "1"
 			? { bandFixtures: true }
+			: {}),
+		...(env["WAVEKIT_MOCK_VOICE_ENCRYPTION_UNKNOWN"] === "1"
+			? { voiceEncryptionUnknown: true }
 			: {}),
 		...(env["WAVEKIT_MOCK_RETUNE_SWEEP"] === "1" ? { retuneSweep: true } : {}),
 		...(env["WAVEKIT_MOCK_OVERLOAD_HINT"] === "1"

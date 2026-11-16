@@ -1,7 +1,8 @@
 /**
  * Grab handles on the plot (docs/web/canvas/Spectrum.dc.html; DESIGN.md "Spectrum interaction", "Squelch UX"):
  * the VFO passband (drag to tune), its two edges (drag to change the channel bandwidth, once zoomed in
- * enough to grab them) and the dashed squelch line (drag to set a manual threshold). Pure geometry: where
+ * enough to grab them) and the dashed squelch line (drag to set the threshold), drawn in Manual only: Auto
+ * moves by itself and Open has no threshold (listen/audio.ts squelchThreshold). Pure geometry: where
  * each handle sits in CSS px, what a pointer at (x, y) grabs, and the value a drag to there means.
  */
 
@@ -40,7 +41,7 @@ export interface HandleInput {
 	edgesAllowed: boolean
 	/** The VFO can be dragged (not read-only). */
 	vfoAllowed: boolean
-	/** The threshold to draw, dBFS; null hides the line (squelch off, noise squelch, unknown). */
+	/** The threshold to draw, dBFS; null hides the line (every squelch but Manual, or unknown). */
 	squelchDbfs: number | null
 }
 

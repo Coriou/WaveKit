@@ -56,6 +56,7 @@ import { ToneDetector } from "./audio-tones/tone-detector.js"
 import type { TrustVerdict } from "./tuning-ledger.js"
 import type { TonePcmFormat } from "./audio-tones/tone-detector.js"
 import {
+	liveDemodDetectionMode,
 	liveDemodSquelchGates,
 	liveDemodTransmissionConfigChanged,
 } from "./live-demod-activity.js"
@@ -891,7 +892,9 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 	private canOpen(): boolean {
 		try {
 			const status = this.source.getStatus()
-			return status.running && liveDemodSquelchGates(status.config)
+			return (
+				status.running && liveDemodSquelchGates(status.config, status.engine)
+			)
 		} catch {
 			return false
 		}
@@ -929,7 +932,8 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		const offsetHz = status.config.offsetHz ?? 0
 		const frequency = this.sampleFrequency(status.sourceId, offsetHz)
 		const threshold = status.thresholdDbfs
-		const squelchMode = status.config.squelchMode ?? "manual"
+		// Listen: an open squelch detects as auto; the event reports the detection mode.
+		const squelchMode = liveDemodDetectionMode(status.config.squelchMode)
 		this.toneBroken = false
 		const detector = this.makeDetector()
 		this.transmission = {
@@ -2027,15 +2031,20 @@ export class AnalogTransmissionTracker extends EventEmitter<AnalogTransmissionTr
 		open: OpenTransmission,
 		config: LiveDemodConfig,
 	): boolean {
+		let engine: "csdr" | "rust" | undefined
 		try {
-			if (this.source.getStatus().sourceId !== open.sourceId) return true
+			const status = this.source.getStatus()
+			if (status.sourceId !== open.sourceId) return true
+			engine = status.engine
 		} catch {
 			// A status failure still honours the config identity below.
 		}
+		// Listen: on Rust, auto <-> open changes the detection (open runs ungated there).
 		return liveDemodTransmissionConfigChanged(
 			open.config,
 			config,
 			open.sourceId,
+			engine,
 		)
 	}
 

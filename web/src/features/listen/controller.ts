@@ -14,8 +14,6 @@ import type { AudioHealth } from "./audio-health.ts"
 import { PcmPlayer, pcmPlayerSupported } from "./pcm-player.ts"
 import type { RingStats } from "./pcm.ts"
 import { WavRecorder } from "./recorder.ts"
-import type { HearChoice } from "./sound.ts"
-import { readHearChoice, writeHearChoice } from "./sound.ts"
 
 export type ListenPhase = "off" | "connecting" | "playing" | "blocked" | "error"
 
@@ -26,8 +24,6 @@ export interface ListenState {
 	/** 0–1, this browser only. */
 	volume: number
 	error: string | null
-	/** Listen › What you hear, this browser only. */
-	hear: HearChoice
 	/** Listen › Record audio: seconds recorded, null when not recording. */
 	recording: { seconds: number; startedAt: number } | null
 	/** Output latency while playing (core backlog on `/auto`, jitter buffer and the device), ms; null otherwise. */
@@ -113,6 +109,7 @@ export class ListenController extends Store<ListenState> {
 	private source: AudioStreamSource | null = null
 	private key: string | null = null
 	private attachedKey: string | null = null
+	private attaches = 0
 	private timer: ReturnType<typeof setTimeout> | null = null
 	private retries = 0
 	private stallTimer: ReturnType<typeof setTimeout> | null = null
@@ -142,7 +139,6 @@ export class ListenController extends Store<ListenState> {
 			phase: "off",
 			volume: readVolume(),
 			error: null,
-			hear: readHearChoice(),
 			recording: null,
 			latencyMs: null,
 			audio: NO_AUDIO_HEALTH,
@@ -164,6 +160,15 @@ export class ListenController extends Store<ListenState> {
 				: options.createPlayer
 		this.player = create ? create(events) : null
 		this.player?.setVolume(this.get().volume)
+	}
+
+	/**
+	 * Stream attaches since this controller was made (the first play and every reattach). A Source or squelch
+	 * change is a core setting (PATCH, then the `live-audio:config` event): it never changes the stream and so
+	 * never adds one.
+	 */
+	get attachCount(): number {
+		return this.attaches
 	}
 
 	/** Which path plays: "worklet" (low latency) or "element" (<audio> WAV fallback). */
@@ -326,11 +331,6 @@ export class ListenController extends Store<ListenState> {
 		writeVolume(v)
 		this.update(s => ({ ...s, volume: v }))
 		this.applyVolume()
-	}
-
-	setHear(hear: HearChoice): void {
-		writeHearChoice(hear)
-		this.update(s => ({ ...s, hear }))
 	}
 
 	/** Recording needs the low-latency path (the <audio> fallback gives no samples). */
@@ -542,6 +542,7 @@ export class ListenController extends Store<ListenState> {
 		this.clearTimer()
 		if (this.player) {
 			if (!source.httpUrl) return
+			this.attaches++
 			this.attachedKey = this.key
 			this.watchStream()
 			this.rebaseRoute()
@@ -556,6 +557,7 @@ export class ListenController extends Store<ListenState> {
 		}
 		const el = this.el
 		if (!el || !source.wavUrl) return
+		this.attaches++
 		this.attachedKey = this.key
 		this.watchStream()
 		// set before src: the element fetches with the session cookie on a protected core

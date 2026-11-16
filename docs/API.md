@@ -2549,6 +2549,8 @@ curl http://localhost:9000/api/live-audio/status
 		"bandwidth": 12500,
 		"squelch": -40,
 		"squelchMode": "auto",
+		"voiceOnly": true,
+		"listenMode": "auto",
 		"autoMarginDb": 6,
 		"noiseQuietingDb": 6,
 		"noiseReduction": "off",
@@ -2604,9 +2606,9 @@ Fields:
 - `channelPowerDbfs` — smoothed channel power before demodulation, relative to a
   full-scale IQ sample (present while the pipeline runs). This is the level the
   `squelch` threshold compares against.
-- `squelchOpen` — squelch gate state while the pipeline runs (`true` with squelch
-  off). In `auto` mode this is still stage 1 (the carrier gate), not whether audio
-  passes; see `autoSquelch`.
+- `squelchOpen` — squelch gate state while the pipeline runs. In `auto` mode this is
+  still stage 1 (the carrier gate), not whether audio passes; see `autoSquelch`. In
+  `open` mode it is the same stage-1 detection as in `auto`, while all audio passes.
 - `noiseFloorDbfs`, `thresholdDbfs` — the auto-squelch floor estimate and the
   threshold in effect (the manual `squelch`, or floor + `autoMarginDb` in auto mode).
 - `agc` — the effective AGC mode of the chain after the modulation
@@ -2618,14 +2620,14 @@ Fields:
   and from older cores.
 - `autoSquelch` — the evidence (stage 2) gate of `auto` squelch while the pipeline
   runs: `{ state, evidence? }` with `state` `off` (not evidence-gated: `manual` or
-  `noise` mode, a configured `toneSquelch`, a modulation other than `nfm`,
+  `open` mode, `voiceOnly: false`, a configured `toneSquelch`, a modulation other than `nfm`,
   including `am`, or a Rust run without framed audio), `waiting` (no evidence yet: audio is held and the stream carries silence)
   or `open` (latched: audio passes); `evidence` is `voice`, `ctcss` or `dcs` while
   `open`. Optional in `@wavekit/api-types`; absent while stopped and from older cores.
 - `autoRoute` — the auto listen route (`GET /auto`), present whenever the live
   audio HTTP server listens: `{ active, protocol?, decoderId?, slot?, since,
 httpUrl, wavUrl, clientCount, digitalAvailable, underruns, zeroFilledSamples?,
-droppedMs, clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`;
+droppedMs, pendingOverwrittenMs?, analogSupersededMs?, clockRebases, latencyMs, listenMode?, pendingListenMode?, reason? }`. `active` is `analog`, `digital` or `none`;
   `protocol` (when the call reports one), `decoderId` and `slot` (a number or
   `null`) are present only while `active` is `digital`. `since` is the ISO time of
   the last switch. `httpUrl` and `wavUrl` follow the `/stream` URL rules above
@@ -2634,10 +2636,32 @@ droppedMs, clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`
   any amount; `zeroFilledSamples` (cumulative, absent from older cores) counts the
   samples those blocks filled with zeros, so the time lost is that divided by 48 000,
   except the wait after a digital call's last frame, which counts only if the call goes on;
-  `droppedMs` the audio dropped on overflow, preemption or invalidation,
+  `droppedMs` the audio dropped on overflow, preemption or invalidation (not the
+  analog a decoded call takes over, nor decoded voice still waiting for its call to turn
+  clear: see [GET /auto](#get-httplocalhost8081auto-and-autowav)),
+  `pendingOverwrittenMs` (cumulative, a diagnostic outside `droppedMs`; absent from older
+  cores) the decoded voice that waited for its call and was let go by the 1 360 ms pending
+  bound, so a non-zero value may mean a call's start was cut (it also grows while decoded
+  voice arrives with no call announced, and the bound assumes the decoder's default
+  100 ms call-start hold),
+  `analogSupersededMs` (cumulative, a diagnostic outside `droppedMs`; absent from older
+  cores) the audible unchecked analog (no voice check, no tone squelch) that a decoded call
+  took over and let go: the call's own carrier, queued while the call plays,
   `clockRebases` the pacer resets after an event-loop stall, and `latencyMs` the
-  selected source's backlog plus one 20 ms block. Optional in `@wavekit/api-types`;
-  absent from older cores.
+  selected source's backlog plus one 20 ms block. `listenMode` is the listen mode in
+  force on the route: `config.listenMode`, except `analog` while the squelch is `open`,
+  and the previous mode while a change waits for the playing transmission to end;
+  `pendingListenMode` is present only while such a change waits (at most 1.5 s). `reason` is present only
+  when something limits the route: `squelch-open` (the open squelch forces `analog` over a
+  configured `auto` or `digital`) or `no-decoder` (`digital` is in force and no digital
+  voice decoder covers the tuned channel, so the route plays silence). `no-decoder` is
+  reported when every digital voice decoder (configured or a scanner probe) answers that it
+  does not cover the channel, or there is none (digital voice disabled included); when
+  coverage is not known (the tuner has not settled on the live frequency yet), `reason` is
+  absent and the route still plays silence until a decoder that covers the channel delivers
+  a call. Optional in
+  `@wavekit/api-types`; absent from older cores (`listenMode`, `pendingListenMode` and
+  `reason` from cores before Listen).
 - `autoSquelch.diagnostics` — DIAGNOSTIC AND UNSTABLE (2026-10-24): only on
   `GET /api/live-audio/status?diagnostics=true` while the evidence gate runs, never on
   level events; it may change or disappear without notice. The gate's current voice
@@ -2650,15 +2674,49 @@ droppedMs, clockRebases, latencyMs }`. `active` is `analog`, `digital` or `none`
   (carrier-onset resets this episode), `audioMs` and `deviationHz` (the voice meter's
   reference), and `ste: true` after a squelch-tail-elimination tone ended the over.
   Computed per request.
-- `config.squelchMode`, `config.autoMarginDb` and `config.noiseQuietingDb`
-  are always present in config and status responses, with their defaults (`auto`,
-  6 and 6) when not set. `config.toneSquelch` is present only when it is set.
+- `config.squelchMode`, `config.voiceOnly`, `config.listenMode`, `config.autoMarginDb`
+  and `config.noiseQuietingDb` are always present in config and status responses, and in
+  the WebSocket `live-audio:status` and `live-audio:config` payloads (the same values), with
+  their defaults (`auto`, `true`, `auto`, 6 and 6) when not set. `config.squelchMode` is
+  `auto`, `manual` or `open`, never `noise` (see below). `config.toneSquelch` is present
+  only when it is set.
 
 Configuration notes:
 
-- `squelchMode` — `auto` (default) or `manual` (`squelch` is the threshold). `auto`
+- `squelchMode` — `auto` (default), `manual` (`squelch` is the threshold) or `open`
+  (everything plays). Migration (2026-11-15): `manual` with `squelch: 0` (the former
+  "squelch off") is accepted and stored and reported as `open`, unless a `toneSquelch`
+  (`ctcss` or `dcs`) is set: `manual` at 0 with a tone is a tone-only squelch (the tone
+  alone decides) and stays `manual`, and a later request that sets `toneSquelch` to
+  `none` on it stores `open`; `noise` is deprecated,
+  still accepted on input with its old modulation rule, and stored and reported as
+  `auto` with `voiceOnly: false`, even when the same request sends `voiceOnly: true`.
+  A loaded config file is migrated the same way at startup. What changes for a former
+  "squelch off" user (`manual` at 0, no tone): the channel is now `open`, which also forces
+  the auto route to analog (`autoRoute.reason: "squelch-open"`), so `/auto` on a DMR or
+  other digital voice channel plays the raw carrier instead of the decoded call until the
+  squelch is set back to `auto` or `manual`; and on the csdr engine stage 1 keeps detecting,
+  so they now get `live-audio:transmission` events and Activity rows where "squelch off"
+  gave none, on every modulation, including SSB and CW, where the floor plus margin may
+  open and close often on fading or keying (chatter). To choose `manual`, send
+  `squelchMode: "manual"` and a non-zero `squelch` (or a tone) in the same request:
+  `manual` at 0 without a tone is stored as `open`, and a `squelch` level sent alone while the mode is `open` keeps
+  it `open` (the level is stored for a later `manual`). `open` plays every block raw: no stage-1 replacement of closed IQ, no
+  stage 2 and no tone squelch gate (a configured `toneSquelch` is kept for the return
+  to `auto` or `manual`), so noise, pagers and data are heard. Stage 1 still detects at
+  the `auto` threshold (the same floor, margin and FM quieting assist), so
+  `squelchOpen`, `thresholdDbfs`, `live-audio:transmission` events and Activity rows
+  continue as in `auto`; on csdr a switch between `auto` and `open` keeps the floor
+  estimate and does not end an open transmission. On the Rust engine (`engine: "rust"`) `open`
+  plays ungated until the engine gets a detect-only stage: it maps to the engine's `off`
+  squelch, as `manual` at 0 did, so everything plays, `squelchOpen` stays `true` for the
+  whole run (a switch to `open` opens a closed gate at once), and no
+  `live-audio:transmission` events, Activity rows or scanner operator activity come from
+  it; a switch between `auto` and `open` there ends an open transmission with
+  `closeReason: "config"`, since detection stops or starts. `auto`
   stage 1 is an estimate of the channel-power floor plus `autoMarginDb`, 0–40 dB,
-  default 6, and delimits transmissions. On `nfm` on the csdr engine
+  default 6, and delimits transmissions. On `nfm` on the csdr engine, with
+  `voiceOnly` on (the default),
   `auto` adds stage 2, an evidence gate: audio passes only once the over carries voice, or on `nfm` a CTCSS
   or DCS tone heard for at least 750 ms; until then it is held in a pre-roll of up
   to 1.5 s and played when the gate latches. During an over the stream can run up
@@ -2697,7 +2755,40 @@ Configuration notes:
   present at start or after a retune opens stage 1 at once instead of becoming the
   floor (on `nfm` on csdr listeners still need stage 2 evidence to hear it).
   `am`, `usb`, `lsb`, `dsb`, `cw`, `raw` and the manual and noise modes are unchanged.
-- `squelchMode: "noise"` (NFM and WFM only) — an FM quieting squelch. Per
+- `voiceOnly` — the voice check (stage 2 above) under `auto` on `nfm`; default `true`.
+  `false` keeps stage 1 alone, as on AM: every carrier the floor gate passes plays at
+  once, including carriers, data and digital buzz. Only `false` turns it off. It governs
+  live audio only (`/stream` and the analog side of `/auto`); the scanner's recordings
+  run their own speech check and ignore it. Applies without a restart. A request that
+  sets `squelchMode: "auto"` without a `voiceOnly` key turns the voice check back on
+  (`voiceOnly: true`), so a client that once sent the deprecated `noise` gets it back by
+  choosing Auto; a request that sends `voiceOnly` keeps the value sent, and a request
+  without `squelchMode` keeps the stored `voiceOnly`. Clients that want Auto with Voice
+  only off send `voiceOnly: false` together with `squelchMode: "auto"`.
+- `listenMode` — what `/auto` plays, a core setting shared by every client: `auto`
+  (default: analog while the squelch passes it, decoded voice while a clear call is on the
+  tuned channel), `analog` (demodulated audio only, decoded voice never plays) or `digital`
+  (decoded voice only, silence otherwise, never analog; with no digital voice decoder on
+  the tuned channel `/auto` is silent and `autoRoute.reason` is `no-decoder`). The `open`
+  squelch forces `analog` whatever `listenMode` says (`autoRoute.reason: "squelch-open"`).
+  Applies without a restart and without reconnecting `/auto`. A change that keeps the
+  playing transmission's source applies at once (`auto` always; `analog`, including the
+  `open` squelch, during an analog over; `digital` during a decoded call). A change that
+  would switch away from it waits for that transmission to end
+  (`autoRoute.pendingListenMode`), so one transmission is heard from one source, but never
+  longer than 1.5 s: a continuous carrier (an open squelch, a stuck manual line) cannot hold
+  it, and at 1.5 s it applies mid-over. `digital` set during an analog over waits until the
+  analog audio stops (at most 1.5 s); coming from `auto`, a clear call meanwhile is still queued and played
+  as `auto` would (it preempts the analog after the bound, or takes it over, see
+  [GET /auto](#get-httplocalhost8081auto-and-autowav)); coming from `analog` (or an open
+  squelch closed under `digital`), decoded calls are not played or buffered meanwhile.
+  `analog` set during a decoded call lets the call finish, up to the same 1.5 s. Made while
+  nothing plays, a change applies at once (an analog over already in progress is then heard
+  from that point).
+- `squelchMode: "noise"` (NFM and WFM only, deprecated) — no longer stored: input is
+  stored as `auto` with `voiceOnly: false` (above), whatever `voiceOnly` the request
+  sends with it. The FM quieting squelch it used to
+  select is described here for older cores. Per
   10 ms block it measures the high-frequency noise of the FM discriminator output
   (above voice: a high-pass at 0.6 of the channel's audio Nyquist) and compares it
   with the noise-only reference of the same chain. The gate opens on a block at
@@ -2742,7 +2833,8 @@ Configuration notes:
   (budget 5 ms). The saved-frequency store does not apply its tones itself
   (operator data `capabilities.toneSquelch` stays `false`): a client sets
   `toneSquelch` here.
-- `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it. The gate opens
+- `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it (with `manual`
+  it is stored as `squelchMode: "open"`; the value is kept in `open`). The gate opens
   at the threshold, stays open within 2 dB below it and closes 250 ms after the
   level drops further. While closed the stream carries silence at the nominal rate.
   Noise tail: with a threshold just above the channel noise, the 2 dB band
@@ -2816,7 +2908,33 @@ squelch that governs `/stream` lets it through (exactly the `/stream` samples,
 resampled), decoded digital voice while a digital voice decoder covering the tuned
 channel produces voice (never an encrypted call), and exact silence otherwise. One
 source plays at a time; digital wins over analog after the analog over releases
-(300 ms), or after at most 1.5 s.
+(300 ms), or after at most 1.5 s. When the analog playing passed no check of its content
+(`voiceOnly: false`, a `manual` squelch, a modulation without the voice check, and no tone
+squelch), a clear call takes it over as soon as its 200 ms start buffer is ready: that analog
+is the call's own carrier, so it (buzz) plays from the call's start until the decoder reports
+the clear call with 200 ms of its voice queued, then only the decoded call, with no buzz after
+it; the analog let go is not counted in `droppedMs` (its audible part is reported in
+`autoRoute.analogSupersededMs`). Decoded voice that arrives
+before its call is active and explicitly clear (the decoder has not yet reported the call, or
+its encryption is not known yet) waits, up to 1 360 ms per decoder, and plays first, in order,
+when the call turns clear; it is let go (not counted) if the call ends encrypted or still
+unresolved, or if the decoder stops covering the tuned channel. The bound covers the time
+dsd-fme takes to report a call: up to 600 ms from the first voice to the call's first link
+control line, then up to 600 ms more before the adapter announces the call (a 100 ms hold,
+then its 500 ms call timer), plus margin. Voice older than that is let go silently, oldest
+first, and counted in `autoRoute.pendingOverwrittenMs` (not in `droppedMs`). The wait also
+delays the call: decoded voice starts when the call is reported, up to about 1.2 s after its
+first voice, and with `voiceOnly: false` the carrier plays raw until then. A clear call whose
+encryption later turns unknown has its queued voice dropped (counted in `droppedMs`). Voice the decoder hands over
+after a call ends never becomes the next call's start: after an encrypted or unresolved end
+none is kept until the decoder reports its next call, and after a clear end none for 120 ms
+(two 60 ms bursts: that over's late voice). Known limit: with `voiceOnly: false`, once a call
+has taken analog over, the analog queued while the call plays is treated as the call's carrier
+and let go, so an analog over that starts during or just after a DMR call on the same channel
+can lose up to the rest of that call's length (not counted in `droppedMs`). That is `listenMode: auto`; `analog` plays the
+analog audio only and `digital` the decoded voice only (silence otherwise), and the
+`open` squelch always plays analog (see `listenMode` under
+[GET /api/live-audio/status](#get-apilive-audiostatus)).
 
 - Always 48 000 Hz, `s16le`, mono (`X-Audio-Format: s16le`, `X-Sample-Rate: 48000`,
   `X-Channels: 1`); `/auto.wav` adds the streaming WAV header.
@@ -2899,7 +3017,7 @@ curl -X POST http://localhost:9000/api/live-audio/stop
 #### PATCH /api/live-audio/config
 
 Update live demodulator configuration. DSP changes restart the pipeline; `squelch`,
-`squelchMode`, `autoMarginDb`, `noiseQuietingDb` and `toneSquelch` changes apply immediately without a restart; an `httpPort` change moves the stream
+`squelchMode`, `voiceOnly`, `listenMode`, `autoMarginDb`, `noiseQuietingDb` and `toneSquelch` changes apply immediately without a restart; an `httpPort` change moves the stream
 server (connected clients are disconnected). Invalid values (for example an
 `offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
 The 400 body is `{ "error": "Bad Request", "code", "message" }`: `code` is
@@ -8304,8 +8422,9 @@ On the `live-audio` channel while the live demodulator runs, published at
 first complete IQ block; `thresholdDbfs` is the threshold in effect. `squelchOpen`
 is stage 1; the optional `autoSquelch` is the evidence gate at the measured block,
 as in [GET /api/live-audio/status](#get-apilive-audiostatus). While `/auto` has a
-client, the optional `autoRoute` is `{ active, protocol? }` (`protocol` only while
-`active` is `digital` and the call reports one).
+client, the optional `autoRoute` is `{ active, protocol?, reason? }` (`protocol` only while
+`active` is `digital` and the call reports one; `reason`, `squelch-open` or `no-decoder`,
+only when set, as on the status).
 
 ```json
 {
@@ -8326,10 +8445,13 @@ client, the optional `autoRoute` is `{ active, protocol? }` (`protocol` only whi
 
 On the `live-audio` channel: one squelch-delimited analog transmission of the
 live demodulator, sent once with `state: "open"` and once with
-`state: "closed"` (same `transmissionId`, a UUID). Produced only while the
-squelch gates (auto mode, noise mode, or manual with a non-zero threshold); with
-manual squelch 0 nothing is sent. A tone squelch gate (`toneSquelch`) does not
-change these events. Sent whether Activity is enabled or not; when it is
+`state: "closed"` (same `transmissionId`, a UUID). Produced while the squelch
+detects: auto mode, open mode on csdr (which detects at the auto threshold while all
+audio plays; open on the Rust engine does not detect yet and sends none) or manual with
+a non-zero threshold. `squelchMode` is the detection mode:
+`auto` or `manual` (`noise` from older cores); an `open` squelch reports `auto`, and a
+switch between `auto` and `open` does not end the transmission. A tone squelch gate
+(`toneSquelch`) and `voiceOnly` do not change these events. Sent whether Activity is enabled or not; when it is
 ready, each closed transmission is also stored as an `analog-transmission`
 [Activity](#activity) record.
 

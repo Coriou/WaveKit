@@ -28,13 +28,14 @@ import {
 } from "./client.mjs"
 
 const usage = `Usage: node scripts/rf-window/squelch-tail.mjs --host HOST [--run | --apply]
-       [--modes manual,auto,noise] [--seconds 120] [--back-chain-ms 0] [--save-dir DIR]
+       [--modes manual,auto,open,noise] [--seconds 120] [--back-chain-ms 0] [--save-dir DIR]
        [--min-noise-rms 0.02] [--min-hf-ratio 0.9]
 
 Without --run or --apply: prints the plan and touches nothing (dry run).
 --run    read-only: records the current squelch mode only (GET status, /ws, audio stream).
 --apply  also switches live audio to each --modes entry (PATCH /api/live-audio/config
-         squelchMode) and restores the previous squelchMode at the end or on Ctrl-C.
+         squelchMode) and restores the previous squelchMode and voiceOnly at the end or on
+         Ctrl-C (noise is stored as auto with voiceOnly false).
 Key and release a handheld on the live audio channel several times per mode.`
 
 const spec = {
@@ -76,7 +77,7 @@ async function main(args) {
 					)
 				: [],
 			restore: args.modeList
-				? "previous squelchMode (absent = manual)"
+				? "previous squelchMode and voiceOnly (absent = manual, true)"
 				: "nothing changed",
 			secondsPerMode: args.seconds,
 			note: "dry run: nothing was sent; add --run (read-only) or --apply",
@@ -155,8 +156,12 @@ async function main(args) {
 			const samples = decodePcm(audio.data, audio.format)
 			const tails = findNoiseTails(samples, audio.sampleRate, classifier)
 			const releases = tails.filter(t => t.after === "audio")
-			// WG7 req 4.1 bounds manual and auto mode; noise mode is reported without one.
-			const bound = mode === "noise" ? null : tailBoundMs(args["back-chain-ms"])
+			// The squelch-tail requirement bounds manual and auto mode; noise and open (everything plays) are
+			// reported without one.
+			const bound =
+				mode === "noise" || mode === "open"
+					? null
+					: tailBoundMs(args["back-chain-ms"])
 			const result = {
 				mode,
 				audioSeconds: samples.length / audio.sampleRate,
@@ -178,7 +183,11 @@ async function main(args) {
 		}
 	} finally {
 		if (changed) {
-			const { body } = restorePatch(previous, { squelchMode: true })
+			// noise is stored as auto with voiceOnly false: voiceOnly is put back too.
+			const { body } = restorePatch(previous, {
+				squelchMode: true,
+				voiceOnly: true,
+			})
 			await api(args.base, "PATCH", "/api/live-audio/config", body)
 			emit("restored", { body })
 		}

@@ -10,13 +10,22 @@ import {
 	zodValidationBody,
 	type ValidationErrorBody,
 } from "../validation-errors.js"
-import { LiveDemodRuntimeConfigSchema } from "../../core/live-demodulator.js"
+import {
+	LiveDemodRuntimeConfigSchema,
+	liveDemodConfigForClient,
+} from "../../core/live-demodulator.js"
 import type {
 	LiveDemodulator,
 	LiveDemodReconfigureUpdates as ReconfigureUpdates,
 } from "../../core/live-demodulator.js"
 import { deriveLegacyAudioUrl, requestHostHeader } from "./legacy-audio-host.js"
-import { LIVE_AUDIO_NOISE_QUIETING_DB } from "@wavekit/api-types"
+import {
+	LIVE_AUDIO_AUTO_ROUTE_REASONS,
+	LIVE_AUDIO_LISTEN_MODES,
+	LIVE_AUDIO_NOISE_QUIETING_DB,
+	LIVE_AUDIO_SQUELCH_INPUT_MODES,
+} from "@wavekit/api-types"
+import { migrateLiveAudioSquelchUpdate } from "../../config.js"
 import type {
 	LiveAudioToneSquelch,
 	LiveDemodConfig,
@@ -56,7 +65,10 @@ const liveDemodConfigSchema = {
 		},
 		bandwidth: { type: "number" },
 		squelch: { type: "number" },
-		squelchMode: { type: "string", enum: ["manual", "auto", "noise"] },
+		// Listen: `noise` is deprecated (stored as auto + voiceOnly false); never reported.
+		squelchMode: { type: "string", enum: [...LIVE_AUDIO_SQUELCH_INPUT_MODES] },
+		voiceOnly: { type: "boolean" },
+		listenMode: { type: "string", enum: [...LIVE_AUDIO_LISTEN_MODES] },
 		autoMarginDb: { type: "number", minimum: 0, maximum: 40 },
 		noiseQuietingDb: {
 			type: "number",
@@ -198,8 +210,17 @@ const liveDemodStatusSchema = {
 				underruns: { type: "number" },
 				zeroFilledSamples: { type: "number" },
 				droppedMs: { type: "number" },
+				pendingOverwrittenMs: { type: "number" },
+				analogSupersededMs: { type: "number" },
 				clockRebases: { type: "number" },
 				latencyMs: { type: "number" },
+				// Listen: the mode in force, a waiting change and why the route plays less.
+				listenMode: { type: "string", enum: [...LIVE_AUDIO_LISTEN_MODES] },
+				pendingListenMode: {
+					type: "string",
+					enum: [...LIVE_AUDIO_LISTEN_MODES],
+				},
+				reason: { type: "string", enum: [...LIVE_AUDIO_AUTO_ROUTE_REASONS] },
 			},
 			required: [
 				"active",
@@ -321,19 +342,31 @@ export const liveAudioRoutes: FastifyPluginAsync<
 > = async (fastify: FastifyInstance, options: LiveAudioRoutesOptions) => {
 	const { liveDemod } = options
 
+	const currentLiveDemodConfig = (): CoreLiveDemodConfig | undefined => {
+		try {
+			const status = liveDemod.getStatus() as CoreLiveDemodStatus | undefined
+			return status?.config
+		} catch {
+			return undefined
+		}
+	}
+
 	const toApiLiveDemodConfig = (
-		config: CoreLiveDemodConfig,
+		stored: CoreLiveDemodConfig,
 	): LiveDemodConfig => {
+		// Listen: the client view the WebSocket sends too (migrated squelch, runtime defaults).
+		const config = liveDemodConfigForClient(stored)
 		return {
 			enabled: config.enabled,
 			httpPort: config.httpPort,
 			modulation: config.modulation,
 			bandwidth: config.bandwidth,
 			squelch: config.squelch,
-			squelchMode: config.squelchMode ?? "auto",
-			autoMarginDb: config.autoMarginDb ?? 6,
-			noiseQuietingDb:
-				config.noiseQuietingDb ?? LIVE_AUDIO_NOISE_QUIETING_DB.default,
+			squelchMode: config.squelchMode,
+			voiceOnly: config.voiceOnly,
+			listenMode: config.listenMode,
+			autoMarginDb: config.autoMarginDb,
+			noiseQuietingDb: config.noiseQuietingDb,
 			...(config.toneSquelch !== undefined
 				? { toneSquelch: copyTone(config.toneSquelch) }
 				: {}),
@@ -538,7 +571,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 		async (request, reply) => {
 			const body = request.body
 
-			const updates: ReconfigureUpdates = {
+			const requested: ReconfigureUpdates = {
 				...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
 				...(body.httpPort !== undefined ? { httpPort: body.httpPort } : {}),
 				...(body.modulation !== undefined
@@ -548,6 +581,10 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				...(body.squelch !== undefined ? { squelch: body.squelch } : {}),
 				...(body.squelchMode !== undefined
 					? { squelchMode: body.squelchMode }
+					: {}),
+				...(body.voiceOnly !== undefined ? { voiceOnly: body.voiceOnly } : {}),
+				...(body.listenMode !== undefined
+					? { listenMode: body.listenMode }
 					: {}),
 				...(body.autoMarginDb !== undefined
 					? { autoMarginDb: body.autoMarginDb }
@@ -579,6 +616,13 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				...(body.agc !== undefined ? { agc: body.agc } : {}),
 				...(body.engine !== undefined ? { engine: body.engine } : {}),
 			}
+			// Listen: store deprecated `noise` and manual at 0 migrated (open). Without a current
+			// config the request goes through as sent and the core's validation decides.
+			const current = currentLiveDemodConfig()
+			const updates =
+				current === undefined
+					? requested
+					: migrateLiveAudioSquelchUpdate(current, requested)
 
 			try {
 				await liveDemod.reconfigure(updates)

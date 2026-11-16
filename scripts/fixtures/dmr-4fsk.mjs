@@ -446,3 +446,156 @@ export function dmrDirectEnvelope(
 	}
 	return out
 }
+
+/** One 60 ms TDMA frame: two 30 ms halves of 144 symbols (CACH or guard, then a burst). */
+export const DMR_FRAME_MS = 60
+const HALF_SYMBOLS = 144
+
+/**
+ * A DMR timeline of overs with true key-up and key-down (dv-plan.mjs), as
+ * dibits from time 0 (DMR_KEYED_OFF where the carrier is off). Each over:
+ * `startMs` (rounded to a 60 ms frame), `durationMs` (rounded to whole
+ * bursts, at least a header, one voice burst and a terminator), `slot` 1 or
+ * 2, `talkgroup`, `source`, `headers` Voice LC headers (default 1: a cold
+ * key-up, no settle), `terminator` (default true: one Terminator with LC),
+ * `lateEntry` the voice burst it starts at (0 = A; 2 = C: a receiver joining
+ * mid-superframe, no header then).
+ *
+ * `mode` "direct": each over's radio keys one 27.5 ms burst per 60 ms in its
+ * slot's half, MS syncs, carrier off between bursts and between overs.
+ * "repeater": the downlink with CACH and BS syncs, keyed from an over's first
+ * burst until `hangMs` (rounded to frames) after its last; a slot with no
+ * over burst sends Idle while keyed (the hang-time idles), carrier off after.
+ *
+ * Returns the dibits and the overs as sent: start and end (ms from time 0:
+ * the repeater's first and last half-frame of the over, a direct radio's
+ * first burst's first and last burst's last symbol), and `frames`: the link
+ * control frames it carries (headers, terminator, and one embedded LC per
+ * superframe whose bursts B to E were all sent).
+ */
+export function dmrPlanDibits(
+	overs,
+	{ mode = "direct", hangMs = 0, colourCode = 1, seed = 29 } = {},
+) {
+	const random = rng(seed)
+	const repeater = mode === "repeater"
+	const voiceSync = repeater ? BS_VOICE_SYNC : MS_VOICE_SYNC
+	const dataSync = repeater ? BS_DATA_SYNC : MS_DATA_SYNC
+	/** Per slot (0, 1): frame index -> burst bits. */
+	const slots = [new Map(), new Map()]
+	const sent = []
+	let lastFrame = 0
+	for (const over of overs) {
+		const slot = (over.slot ?? 1) - 1
+		if (slot !== 0 && slot !== 1) throw new Error("a DMR slot is 1 or 2")
+		const headers = over.lateEntry ? 0 : (over.headers ?? 1)
+		const terminator = over.terminator ?? true
+		const term = terminator ? 1 : 0
+		const n = Math.max(
+			headers + term + 1,
+			Math.round(over.durationMs / DMR_FRAME_MS),
+		)
+		const first = Math.round(over.startMs / DMR_FRAME_MS)
+		const lc = dmrGroupVoiceLc(over)
+		const fragments = embeddedLcFragments(lc)
+		const bursts = []
+		for (let i = 0; i < headers; i++)
+			bursts.push(
+				dataBurstBits({
+					colourCode,
+					dataType: DMR_DATA_TYPE.voiceLcHeader,
+					info96: lcInfoBits(lc, 0x969696),
+					sync: dataSync,
+				}),
+			)
+		// Embedded LC: a superframe counts when its bursts B to E were all sent.
+		let index = over.lateEntry ?? 0
+		let seen = new Set()
+		let embedded = 0
+		for (let v = 0; v < n - headers - term; v++) {
+			bursts.push(
+				voiceBurstBits({
+					index,
+					colourCode,
+					fragments,
+					random,
+					sync: voiceSync,
+				}),
+			)
+			seen.add(index)
+			if (index === 4 && [1, 2, 3, 4].every(i => seen.has(i))) embedded++
+			index = (index + 1) % 6
+			if (index === 0) seen = new Set()
+		}
+		if (terminator)
+			bursts.push(
+				dataBurstBits({
+					colourCode,
+					dataType: DMR_DATA_TYPE.terminatorLc,
+					info96: lcInfoBits(lc, 0x999999),
+					sync: dataSync,
+				}),
+			)
+		bursts.forEach((b, k) => {
+			if (slots[slot].has(first + k))
+				throw new Error(`two overs share slot ${slot + 1} at ${first + k}`)
+			slots[slot].set(first + k, b)
+		})
+		const last = first + bursts.length - 1
+		lastFrame = Math.max(lastFrame, last)
+		const halfMs = DMR_FRAME_MS / 2
+		// Direct: the carrier is on for the burst only, after a 6-symbol guard.
+		const guardMs = repeater ? 0 : (6 / 4800) * 1000
+		const onMs = repeater ? halfMs : (132 / 4800) * 1000
+		sent.push({
+			slot: slot + 1,
+			talkgroup: over.talkgroup,
+			source: over.source,
+			startMs: first * DMR_FRAME_MS + slot * halfMs + guardMs,
+			endMs: last * DMR_FRAME_MS + slot * halfMs + guardMs + onMs,
+			frames: headers + term + embedded,
+			terminator,
+			bursts: bursts.length,
+		})
+	}
+	const hang = Math.round(hangMs / DMR_FRAME_MS)
+	const keyed = f =>
+		sent.some(
+			o =>
+				f >= Math.floor(o.startMs / DMR_FRAME_MS) &&
+				f <= Math.floor((o.endMs - 1) / DMR_FRAME_MS) + hang,
+		)
+	const idleBurst = () =>
+		dataBurstBits({
+			colourCode,
+			dataType: DMR_DATA_TYPE.idle,
+			info96: [...Array(96)].map(() => (random() < 0.5 ? 0 : 1)),
+			sync: dataSync,
+		})
+	const off = n => new Array(n).fill(DMR_KEYED_OFF)
+	const out = []
+	for (let f = 0; f <= lastFrame + hang; f++) {
+		if (repeater) {
+			if (!keyed(f)) {
+				out.push(...off(2 * HALF_SYMBOLS))
+				continue
+			}
+			for (const s of [0, 1])
+				out.push(
+					...bitsToDibits([
+						...cachBits(s),
+						...(slots[s].get(f) ?? idleBurst()),
+					]),
+				)
+			continue
+		}
+		// Direct: a radio's burst in its slot's half, 6 guard symbols of the
+		// 12 a CACH would take before it, off otherwise.
+		for (const s of [0, 1]) {
+			const burst = slots[s].get(f)
+			if (burst === undefined) out.push(...off(HALF_SYMBOLS))
+			else out.push(...off(6), ...bitsToDibits(burst), ...off(6))
+		}
+	}
+	return { dibits: out, symbolRate: 4800, overs: sent }
+}

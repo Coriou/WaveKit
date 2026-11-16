@@ -9,7 +9,12 @@ import { shellStore } from "../../shell/store.ts"
 import { themeStore, type ThemePrefs } from "../../shell/theme.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
 import { frequencyToken, token, type SearchToken } from "../activity/search.ts"
-import { squelchForModulation } from "../listen/audio.ts"
+import {
+	listenContract,
+	squelchForModulation,
+	squelchOf,
+} from "../listen/audio.ts"
+import { openSquelch, toggleOpen } from "../listen/squelch-actions.ts"
 import { discoveryMode } from "../scanner/drawer/actions.ts"
 import { presetOn, presetsFrom, togglePreset } from "../scanner/planner/plan.ts"
 import { updateDraft } from "../scanner/planner/draft-store.ts"
@@ -55,6 +60,11 @@ function previousOf(
 	const prev: Record<string, unknown> = {}
 	for (const k of Object.keys(patch) as (keyof LiveAudioConfig)[])
 		prev[k] = config[k]
+	// the squelch send rules hold for Undo too: Auto with its voiceOnly, Manual with its non-zero level
+	if (prev["squelchMode"] === "auto" && listenContract(config))
+		prev["voiceOnly"] = config.voiceOnly
+	if (prev["squelchMode"] === "manual" && config.squelch < 0)
+		prev["squelch"] = config.squelch
 	return prev as Partial<LiveAudioConfig>
 }
 
@@ -244,6 +254,29 @@ export async function runAction(
 				const prev = s.listen.get().volume
 				s.listen.setVolume(action.value)
 				return ok({ text: null, undo: () => s.listen.setVolume(prev) })
+			}
+			case "squelchOpen": {
+				const sent = await toggleOpen(s.data.liveAudio, s.listen)
+				if (!sent) return { text: "The core refused the squelch", tone: "warn" }
+				return ok({
+					text: null,
+					undo: () => void toggleOpen(s.data.liveAudio, s.listen),
+				})
+			}
+			case "squelchSetOpen": {
+				const config = s.data.liveAudio.get().status?.config
+				if (!config)
+					return { text: "Live audio is not available", tone: "warn" }
+				const wasOpen = squelchOf(config).kind === "open"
+				const sent = await openSquelch(s.data.liveAudio, s.listen)
+				if (!sent) return { text: "The core refused the squelch", tone: "warn" }
+				return ok({
+					text: null,
+					// back to the squelch before Open, as Q does; nothing to undo when it was Open already
+					...(wasOpen
+						? {}
+						: { undo: () => void toggleOpen(s.data.liveAudio, s.listen) }),
+				})
 			}
 			case "listen": {
 				if (action.on) await s.listen.start()

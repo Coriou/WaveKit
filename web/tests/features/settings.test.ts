@@ -3,6 +3,7 @@ import type {
 	DecoderInfo,
 	DecoderSettingsView,
 	DecoderTypeInfo,
+	LiveAudioLevel,
 	StationIdentity,
 	TunerState,
 } from "@wavekit/api-types"
@@ -21,7 +22,14 @@ import {
 	yamlLine,
 	type SettingRow,
 } from "../../src/features/settings/model.ts"
-import { SETTINGS_REGISTRY } from "../../src/features/settings/registry.ts"
+import {
+	SETTINGS_REGISTRY,
+	settingsFor,
+} from "../../src/features/settings/registry.ts"
+import {
+	rememberedClosed,
+	resetOpenMemory,
+} from "../../src/features/listen/squelch-actions.ts"
 import { DEFAULT_DEVICE } from "../../src/shell/device-prefs.ts"
 import {
 	buildRows,
@@ -302,6 +310,9 @@ describe("Settings rows", () => {
 						modulation: "nfm",
 						bandwidth: 12_500,
 						squelch: 0,
+						squelchMode: "auto",
+						voiceOnly: true,
+						listenMode: "auto",
 						noiseReduction: "off",
 						lowPass: 0,
 						highPass: 0,
@@ -488,6 +499,167 @@ describe("Settings rows", () => {
 	it("disables receiver rows when the access is read-only", () => {
 		const rows = buildRows(snapshot({ readOnly: true }), actions())
 		expect(byId(rows, "rx.ppm").disabled).toBeDefined()
+	})
+
+	describe("Audio › Squelch, the Listen vocabulary", () => {
+		const live = (config: Record<string, unknown>) =>
+			({
+				enabled: true,
+				running: true,
+				sourceId: "rtl-0",
+				thresholdDbfs: -84.6,
+				config: {
+					modulation: "nfm",
+					bandwidth: 12_500,
+					squelch: -60,
+					noiseReduction: "off",
+					...config,
+				},
+			}) as unknown as SettingsSnapshot["live"]
+		const listen = { squelchMode: "auto", voiceOnly: true, listenMode: "auto" }
+
+		it("offers Auto, Manual and Open (no Noise), Voice only under Auto on NFM, Source, the margin under More", () => {
+			const rows = buildRows(snapshot({ live: live(listen) }), actions())
+			const sq = byId(rows, "au.squelch")
+			expect(sq.value).toBe("auto")
+			expect(
+				sq.widget.kind === "seg" ? sq.widget.options.map(o => o.label) : [],
+			).toEqual(["Auto", "Manual", "Open"])
+			expect(sq.help).not.toMatch(/Noise|6 dB/)
+			expect(byId(rows, "au.voiceOnly").value).toBe(true)
+			expect(byId(rows, "au.source").value).toBe("auto")
+			expect(byId(rows, "au.margin").more).toBe(true)
+			expect(rows.some(r => r.id === "au.threshold")).toBe(false)
+		})
+
+		it("sends voiceOnly with Auto, a non-zero level with Manual, open with Open, and never the margin", async () => {
+			const a = actions()
+			const rows = buildRows(
+				snapshot({ live: live({ ...listen, voiceOnly: false }) }),
+				a,
+			)
+			const sq = byId(rows, "au.squelch")
+			await sq.write?.("auto")
+			await sq.write?.("manual")
+			await sq.write?.("open")
+			await byId(rows, "au.voiceOnly").write?.(true)
+			await byId(rows, "au.source").write?.("digital")
+			expect(a.calls).toEqual([
+				["audio", { squelchMode: "auto", voiceOnly: false }],
+				// Manual from Auto starts at Auto's live threshold (−84.6), not the stored −60
+				["audio", { squelchMode: "manual", squelch: -85 }],
+				["audio", { squelchMode: "open" }],
+				["audio", { squelchMode: "auto", voiceOnly: true }],
+				["audio", { listenMode: "digital" }],
+			])
+		})
+
+		it("starts Manual from Auto at the level event's threshold, as Listen does, when one is known", async () => {
+			const a = actions()
+			const rows = buildRows(
+				snapshot({
+					live: live(listen),
+					liveLevel: {
+						sourceId: "rtl-0",
+						channelPowerDbfs: -90,
+						noiseFloorDbfs: -100,
+						squelchOpen: false,
+						thresholdDbfs: -77.4,
+					} satisfies LiveAudioLevel,
+				}),
+				a,
+			)
+			await byId(rows, "au.squelch").write?.("manual")
+			// the level event's −77.4, not the status's −84.6
+			expect(a.calls).toEqual([
+				["audio", { squelchMode: "manual", squelch: -77 }],
+			])
+		})
+
+		it("Open is a plain setting (Listen not started) but Q goes back to the squelch before it", async () => {
+			resetOpenMemory()
+			const rows = buildRows(
+				snapshot({
+					live: live({ ...listen, squelchMode: "manual", squelch: -72 }),
+				}),
+				actions(),
+			)
+			await byId(rows, "au.squelch").write?.("open")
+			expect(rememberedClosed()).toEqual({ kind: "manual", dbfs: -72 })
+			resetOpenMemory()
+		})
+
+		it("starts Manual from the live threshold when no level is set", async () => {
+			const a = actions()
+			const rows = buildRows(
+				snapshot({
+					live: live({ squelchMode: "open", squelch: 0, listenMode: "auto" }),
+				}),
+				a,
+			)
+			expect(byId(rows, "au.squelch").value).toBe("open")
+			await byId(rows, "au.squelch").write?.("manual")
+			expect(a.calls).toEqual([
+				["audio", { squelchMode: "manual", squelch: -85 }],
+			])
+		})
+
+		it("shows the level in Manual only, bounded at −1 dBFS", () => {
+			const rows = buildRows(
+				snapshot({
+					live: live({ ...listen, squelchMode: "manual", squelch: -72 }),
+				}),
+				actions(),
+			)
+			const level = byId(rows, "au.threshold")
+			expect(level.value).toBe(-72)
+			expect(level.widget).toMatchObject({ min: -120, max: -1 })
+			expect(rows.some(r => r.id === "au.voiceOnly")).toBe(false)
+			expect(rows.some(r => r.id === "au.margin")).toBe(false)
+		})
+
+		it("⌘K lists a conditional audio row only where the drawer shows it (no landing on a hidden row)", () => {
+			for (const config of [
+				listen,
+				{ ...listen, squelchMode: "manual" as const, squelch: -72 },
+				{ ...listen, squelchMode: "open" as const },
+				{ ...listen, modulation: "am" as const },
+				{ squelchMode: "noise" as const },
+				{ squelchMode: "manual" as const, squelch: -72 },
+			]) {
+				const st = live(config)
+				const rows = buildRows(snapshot({ live: st }), actions())
+				const listed = settingsFor("legacy", st?.config)
+				for (const id of ["au.margin", "au.voiceOnly", "au.source"])
+					expect([id, listed.some(e => e.id === id)]).toEqual([
+						id,
+						rows.some(r => r.id === id),
+					])
+			}
+			const manual = live({ ...listen, squelchMode: "manual", squelch: -72 })
+			expect(
+				settingsFor("legacy", manual?.config).some(e => e.id === "au.margin"),
+			).toBe(false)
+			// without a live config nothing is held back
+			expect(settingsFor("legacy").some(e => e.id === "au.margin")).toBe(true)
+		})
+
+		it("an old core: no Voice only, no Source, Open sent as manual at 0, deprecated noise reads as Auto", async () => {
+			const a = actions()
+			const rows = buildRows(
+				snapshot({ live: live({ squelchMode: "noise" }) }),
+				a,
+			)
+			expect(byId(rows, "au.squelch").value).toBe("auto")
+			expect(rows.some(r => r.id === "au.voiceOnly")).toBe(false)
+			expect(rows.some(r => r.id === "au.source")).toBe(false)
+			await byId(rows, "au.squelch").write?.("open")
+			await byId(rows, "au.squelch").write?.("auto")
+			expect(a.calls).toEqual([
+				["audio", { squelchMode: "manual", squelch: 0 }],
+				["audio", { squelchMode: "auto" }],
+			])
+		})
 	})
 
 	it("compares the saved-label preference with the core's default", () => {

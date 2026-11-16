@@ -9,6 +9,7 @@ import type {
 	DecoderSettingsView,
 	DecoderTypeInfo,
 	ExtendedSourceStatus,
+	LiveAudioLevel,
 	LiveAudioStatus,
 	PreferenceKey,
 	Preferences,
@@ -47,6 +48,17 @@ import { DEFAULT_DISPLAY } from "../display.ts"
 import type { ThemePrefs } from "../../shell/theme.ts"
 import { formatDb, formatRate, formatStep } from "../format.ts"
 import type { LiveAudioConfigPatch } from "../../data/live-audio-store.ts"
+import {
+	listenContract,
+	MANUAL_MAX_DBFS,
+	MANUAL_MIN_DBFS,
+	manualStart,
+	squelchPatch,
+	squelchSetting,
+	voiceOnlyFits,
+} from "../listen/audio.ts"
+import { rememberBeforeOpen } from "../listen/squelch-actions.ts"
+import { listenModeOf } from "../listen/sound.ts"
 import {
 	controlAvailability,
 	controlErrorText,
@@ -96,6 +108,11 @@ export interface SettingsSnapshot {
 	>
 	readonly relay: TunerRelayView | null
 	readonly live: LiveAudioStatus | null
+	/**
+	 * The latest `live-audio:level` event: its threshold is the live one Listen's squelch line marks, so
+	 * Manual from Auto starts where Listen would. Absent or null: the status's threshold.
+	 */
+	readonly liveLevel?: LiveAudioLevel | null
 	readonly station: StationIdentity | null
 	readonly preferences: Preferences | null
 	readonly preferenceDefaults: Preferences | null
@@ -752,6 +769,16 @@ const NR = opts([
 	["noaa-apt", "NOAA APT"],
 ])
 
+/** The live squelch threshold, as Listen reads it: the level event's while running, else the status's. */
+function liveThresholdOf(
+	status: LiveAudioStatus,
+	level: LiveAudioLevel | null | undefined,
+): number | null {
+	if (status.running && typeof level?.thresholdDbfs === "number")
+		return level.thresholdDbfs
+	return status.thresholdDbfs ?? null
+}
+
 function audioRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 	const rows: SettingRow[] = []
 	const st = s.live
@@ -760,23 +787,14 @@ function audioRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 		: undefined
 	if (st) {
 		const c = st.config
-		const mode = c.squelchMode ?? "manual"
-		const sq =
-			mode === "manual" && c.squelch >= 0
-				? "off"
-				: mode === "manual"
-					? "level"
-					: mode
-		const noiseFits = c.modulation === "nfm" || c.modulation === "wfm"
+		// the Listen vocabulary (Auto, Manual, Open), shared with the Listen island and the palette
+		const setting = squelchSetting(st)
+		const sq = setting.kind
+		const listen = listenContract(c)
 		const sqOpts: SettingOption[] = [
 			{ value: "auto", label: "Auto" },
-			{
-				value: "noise",
-				label: "Noise",
-				...(noiseFits ? {} : { disabled: "FM only (NFM, WFM)" }),
-			},
-			{ value: "level", label: "Level" },
-			{ value: "off", label: "Off" },
+			{ value: "manual", label: "Manual" },
+			{ value: "open", label: "Open" },
 		]
 		const w =
 			(patch: (v: SettingValue) => LiveAudioConfigPatch) => (v: SettingValue) =>
@@ -785,26 +803,46 @@ function audioRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 			id: "au.squelch",
 			group: "audio",
 			label: "Squelch",
-			help: "Auto keeps it above the noise floor; Noise (FM) opens when a carrier quiets the noise",
-			keys: words("threshold sql noise squelch gate"),
+			help: "Auto opens on a carrier and follows conditions; Manual is the line in Listen; Open plays everything",
+			keys: words("threshold sql squelch gate open manual"),
 			widget: { kind: "seg", options: sqOpts },
 			value: sq,
 			text: optionText(sqOpts, sq),
 			...optional("disabled", disabled),
-			write: w(v =>
-				v === "auto"
-					? { squelchMode: "auto" }
-					: v === "noise"
-						? { squelchMode: "noise" }
-						: v === "off"
-							? { squelchMode: "manual", squelch: 0 }
-							: {
-									squelchMode: "manual",
-									squelch: c.squelch < 0 ? c.squelch : -60,
-								},
-			),
+			write: w(v => {
+				// Open here is a plain setting (Listen is not started), but Q still goes back from it
+				if (v === "open") {
+					rememberBeforeOpen(c)
+					return squelchPatch(c, { kind: "open" })
+				}
+				return squelchPatch(
+					c,
+					v === "manual"
+						? {
+								kind: "manual",
+								dbfs: manualStart(c, liveThresholdOf(st, s.liveLevel)),
+							}
+						: { kind: "auto" },
+				)
+			}),
 		})
-		if (sq === "level")
+		if (sq === "auto" && voiceOnlyFits(c)) {
+			const voiceOnly = setting.kind === "auto" && setting.voiceOnly
+			rows.push({
+				id: "au.voiceOnly",
+				group: "audio",
+				label: "Voice only",
+				help: "Skips carriers, data and pagers. Voice starts about 1 s late, nothing is cut.",
+				keys: words("voice check evidence squelch carrier data pager"),
+				widget: { kind: "switch" },
+				value: voiceOnly,
+				text: voiceOnly ? "On" : "Off",
+				def: { value: true, text: "On" },
+				...optional("disabled", disabled),
+				write: w(v => squelchPatch(c, { kind: "auto", voiceOnly: v === true })),
+			})
+		}
+		if (sq === "manual" && setting.kind === "manual")
 			rows.push({
 				id: "au.threshold",
 				group: "audio",
@@ -813,30 +851,57 @@ function audioRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 				keys: words("squelch threshold level dbfs"),
 				widget: {
 					kind: "stepper",
-					min: -120,
-					max: -1,
+					min: MANUAL_MIN_DBFS,
+					max: MANUAL_MAX_DBFS,
 					step: 1,
 					unit: " dBFS",
 				},
-				value: c.squelch,
-				text: `${formatDb(c.squelch, 0)} dBFS`,
+				value: setting.thresholdDbfs,
+				text: `${formatDb(setting.thresholdDbfs, 0)} dBFS`,
 				...optional("disabled", disabled),
-				write: w(v => ({ squelchMode: "manual", squelch: Number(v) })),
+				write: w(v => squelchPatch(c, { kind: "manual", dbfs: Number(v) })),
 			})
-		const margin = c.autoMarginDb ?? 6
-		rows.push({
-			id: "au.margin",
-			group: "audio",
-			label: "Auto squelch margin",
-			help: "How far above the noise floor Auto opens",
-			keys: words("squelch sql threshold auto margin"),
-			widget: { kind: "stepper", min: 0, max: 40, step: 1, unit: " dB" },
-			value: margin,
-			text: `${margin} dB`,
-			def: { value: 6, text: "6 dB" },
-			...optional("disabled", disabled),
-			write: w(v => ({ autoMarginDb: Number(v) })),
-		})
+		if (listen) {
+			const source = listenModeOf(c)
+			const srcOpts = opts([
+				["auto", "Auto"],
+				["analog", "Analog"],
+				["digital", "Digital"],
+			])
+			rows.push({
+				id: "au.source",
+				group: "audio",
+				label: "Source",
+				help: "What Listen plays: Auto picks analog or decoded voice per transmission",
+				keys: words("listen mode analog digital decoded voice dmr p25 hear"),
+				widget: { kind: "seg", options: srcOpts },
+				value: source,
+				text: optionText(srcOpts, source),
+				def: { value: "auto", text: "Auto" },
+				...optional("disabled", disabled),
+				write: w(v => ({
+					listenMode: v === "analog" || v === "digital" ? v : "auto",
+				})),
+			})
+		}
+		// Auto's margin (Open detects transmissions at the same threshold): rarely changed, under More
+		if (sq !== "manual") {
+			const margin = c.autoMarginDb ?? 6
+			rows.push({
+				id: "au.margin",
+				group: "audio",
+				label: "Auto squelch margin",
+				help: "How far above the noise floor Auto opens",
+				keys: words("squelch sql threshold auto margin"),
+				more: true,
+				widget: { kind: "stepper", min: 0, max: 40, step: 1, unit: " dB" },
+				value: margin,
+				text: `${margin} dB`,
+				def: { value: 6, text: "6 dB" },
+				...optional("disabled", disabled),
+				write: w(v => ({ autoMarginDb: Number(v) })),
+			})
+		}
 		const agcDefault = ["am", "cw", "dsb", "usb", "lsb"].includes(c.modulation)
 			? "fast"
 			: "off"

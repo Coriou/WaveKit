@@ -1,0 +1,108 @@
+{
+	"version": 1,
+	"provisional": true,
+	"note": "Modelled, not measured (scripts/fixtures/dv-latency-seeds.mjs): replace with the in-image capture baseline.",
+	"scene": "dmr-direct-no-terminator",
+	"protocol": "dmr",
+	"frequencyHz": 454906250,
+	"overs": [
+		{
+			"index": 0,
+			"protocol": "dmr",
+			"slot": 1,
+			"startMs": 1022.9,
+			"endMs": 2010.4,
+			"frames": 3,
+			"terminator": false,
+			"clear": true,
+			"ids": {
+				"talkgroup": 4321,
+				"source": 1234567
+			}
+		},
+		{
+			"index": 1,
+			"protocol": "dmr",
+			"slot": 1,
+			"startMs": 7022.9,
+			"endMs": 9990.4,
+			"frames": 9,
+			"terminator": false,
+			"clear": true,
+			"ids": {
+				"talkgroup": 4321,
+				"source": 1234567
+			}
+		}
+	],
+	"lines": [
+		{
+			"atMs": 1150.4,
+			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 1510.4,
+			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 1750.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 1870.4,
+			"text": "00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 7150.4,
+			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 7510.4,
+			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 7750.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 7870.4,
+			"text": "00:00:07 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 8230.4,
+			"text": "00:00:08 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 8470.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 8590.4,
+			"text": "00:00:08 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 8950.4,
+			"text": "00:00:08 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 9190.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 9310.4,
+			"text": "00:00:09 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 9670.4,
+			"text": "00:00:09 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		},
+		{
+			"atMs": 9910.4,
+			"text": " SLOT 1 TGT=4321 SRC=1234567 Group Call "
+		},
+		{
+			"atMs": 10030.4,
+			"text": "00:00:10 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* "
+		}
+	]
+}

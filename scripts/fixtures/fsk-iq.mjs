@@ -152,9 +152,10 @@ function tabulatedPulse(shape, span) {
  * standards define it), "gauss" (rectangular NRZ through a Gaussian of
  * bandwidth-time `bt`, GMSK) or "rect". `padSymbols` of zero deviation (an
  * unmodulated carrier) frame the burst so the pulse tails are not cut.
- * `delaySymbols` (0 to 1, "rc"/"rrc"/"c4fm") delays every symbol by that
- * fraction of a symbol: a transmitter's symbol clock has no fixed phase to
- * the receiver's samples, and dsd-fme's decisions depend on that phase.
+ * `delaySymbols` (0 to 1, "rc"/"rrc"/"c4fm"/"gauss") delays every symbol by
+ * that fraction of a symbol: a transmitter's symbol clock has no fixed phase
+ * to the receiver's samples, and dsd-fme's decisions depend on that phase.
+ * At 0 every shaping is the output it had before the option existed.
  */
 export function shapeFrequency(
 	symbols,
@@ -199,9 +200,13 @@ export function shapeFrequency(
 	}
 	// Gaussian: NRZ convolved with a unit-area Gaussian, sigma in symbols
 	// sqrt(ln 2) / (2 pi BT).
+	// The NRZ edges move by delaySymbols; at 0 the index is the one it always was.
 	const nrz = new Float64Array(n)
+	const delay = delaySymbols * sps
 	for (let i = 0; i < n; i++) {
-		const k = Math.floor(i / sps) - padSymbols
+		const k =
+			(delay === 0 ? Math.floor(i / sps) : Math.floor((i - delay) / sps)) -
+			padSymbols
 		nrz[i] = k >= 0 && k < values.length ? values[k] : 0
 	}
 	const sigma = (Math.sqrt(Math.log(2)) / (2 * Math.PI * bt)) * sps

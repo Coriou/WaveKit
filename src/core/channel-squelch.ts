@@ -74,6 +74,12 @@
  * in noise mode, and otherwise (manual) a passive `NoiseSquelch` meter at
  * `LIVE_AUDIO_NOISE_QUIETING_DB.default`. The meter never drives the gate, the floor or
  * `blockQuieted()`: audio gating is identical with and without it.
+ *
+ * Detect only (Listen 2026-11-15, `detectOnly: true` or `setDetectOnly`, the open squelch): the
+ * gate decides exactly as without it (`open`, the floor freeze, the observer and the carrier
+ * evidence are unchanged), but every block leaves as if the gate were open: the IQ passes with the
+ * same phase-continuous rotation, nothing is replaced and no closed span is logged for
+ * `muteClosedPcm`. Without it the output is byte-identical to before.
  */
 
 import { Transform, type TransformCallback } from "node:stream"
@@ -124,6 +130,8 @@ export interface ChannelSquelchOptions {
 	 * sample `p` is muted when channel sample `p + lead` was closed. Default 0.
 	 */
 	pcmLeadSamples?: number
+	/** Listen: the gate decides but never closes the output (the open squelch). Default false. */
+	detectOnly?: boolean
 }
 
 /**
@@ -198,6 +206,8 @@ export class ChannelSquelch {
 	private spanCount = 0
 	/** A19 revision: PCM content lead in channel samples (see `pcmLeadSamples`). */
 	private readonly pcmLead: number
+	/** Listen: decide without gating the output. */
+	private detectOnlyEnabled: boolean
 
 	constructor(options: ChannelSquelchOptions) {
 		const blockSamples = Math.max(
@@ -230,6 +240,9 @@ export class ChannelSquelch {
 		this.spanEnds = new Float64Array(this.muteZeros ? CLOSED_SPANS_MAX : 0)
 		const lead = options.pcmLeadSamples ?? 0
 		this.pcmLead = Number.isFinite(lead) && lead > 0 ? Math.round(lead) : 0
+		this.detectOnlyEnabled = options.detectOnly === true
+		// A detect-only output never closed: no rotation, the IQ passes byte-identical.
+		if (this.detectOnlyEnabled) this.outputOpen = true
 		if (options.mode === "noise") this.setMode("noise")
 	}
 
@@ -264,6 +277,19 @@ export class ChannelSquelch {
 		this.evidenceEnabled = enabled
 		this.evidenceMeter = null
 		this.lastBlockCarrier = false
+	}
+
+	/**
+	 * Listen: turns detect-only on or off at runtime. The gate state is untouched; the next block
+	 * leaves gated (off) or raw (on). Phase continuity across the switch follows the gate rules.
+	 */
+	setDetectOnly(enabled: boolean): void {
+		this.detectOnlyEnabled = enabled
+	}
+
+	/** Listen: whether the output passes every block whatever the gate decides. */
+	get detectOnly(): boolean {
+		return this.detectOnlyEnabled
 	}
 
 	/** Whether `blockCarrier()` measures anything (WG10 activity hygiene). */
@@ -562,17 +588,19 @@ export class ChannelSquelch {
 	/** Passes (rotated) IQ or the muted vector, keeping the phase continuous. */
 	private emitBlock(block: Buffer): Buffer {
 		const samples = Math.floor(block.length / BYTES_PER_COMPLEX_SAMPLE)
+		// Listen: detect-only output passes as if open; the decision stays in `gateOpen`.
+		const passing = this.gateOpen || this.detectOnlyEnabled
 		if (this.muteZeros) {
-			this.noteSpan(!this.gateOpen, samples)
+			this.noteSpan(!passing, samples)
 			// A19: exact zeros freeze the envelope chain's AGC; no phase to continue.
-			if (!this.gateOpen) {
+			if (!passing) {
 				this.outputOpen = false
 				return Buffer.alloc(block.length)
 			}
 			this.outputOpen = true
 			return block
 		}
-		if (!this.gateOpen) {
+		if (!passing) {
 			if (this.outputOpen) {
 				const magnitude = Math.hypot(this.lastI, this.lastQ)
 				if (magnitude > 0) {

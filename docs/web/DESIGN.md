@@ -103,10 +103,17 @@ Condensed + Noto Sans, Tabler-based icons).
 - **All operator settings live in core** and sync across clients, including the
   planned mobile app: Activity columns, pinned searches, recording preferences, saved
   frequencies.
-- **Squelch UX.** Signal level and threshold on one bar; drag the line above the
-  noise; Auto keeps it 6 dB over the floor. Also drawn as a dashed line on the spectrum.
-- **Analog and digital audio.** "What you hear: Auto / Analog / Decoded voice";
-  Auto plays decoded voice when present, demodulated audio otherwise.
+- **Squelch UX.** One row, `Auto | Manual | Open`, the same words in Listen, Settings
+  and ⌘K; Voice only is a switch under Auto (NFM). Signal level and threshold on one
+  bar; dragging the line selects Manual at once; the spectrum's dashed line shows in
+  Manual only. `Q` opens and goes back. A core setting, shared by every client.
+- **One line says what you hear.** The Listen title is one state (`Quiet`, `Waiting
+  for voice`, `Listening`, `Open`), and a state that holds audio back carries its one
+  way out beside it (`Play anyway`, with Undo in the toast). *Why:* a carrier waiting
+  for voice used to look like a broken receiver, with no exit but jargon.
+- **Analog and digital audio.** Source `Auto | Analog | Digital`, a core setting,
+  always played from the core's `/auto`: a change never restarts the stream. Digital
+  with no decoder on the channel plays silence and offers Auto, never analog.
 - **Decoded messages.** One card anatomy (protocol, time, title, optional text,
   fields, map, audio, transcript, JSON). Unknown JSON is humanised automatically
   (`temperature_C` → "18.4 °C"). *Why:* rtl_433 alone has hundreds of models.

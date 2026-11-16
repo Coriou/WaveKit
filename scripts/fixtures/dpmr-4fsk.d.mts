@@ -5,6 +5,8 @@ export interface DpmrCall {
 	colourCode: number
 	superframes?: number
 	seed?: number
+	/** A true key-up: no pre-roll (dv-plan.mjs). */
+	coldKeyUp?: boolean
 }
 export function dpmrAirId(digits: string): number
 export function dpmrCrc7(bits: number[]): number[]

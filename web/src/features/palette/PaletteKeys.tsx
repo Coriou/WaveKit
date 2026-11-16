@@ -6,6 +6,7 @@ import { shellStore } from "../../shell/store.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
 import { feedControllerFor, toggleFeed } from "../receiver/feed.ts"
+import { toggleOpen } from "../listen/squelch-actions.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
 import { GO_WINDOW_MS, isTypingTarget, shortcutFor } from "./keys.ts"
 import { openPalette } from "./request.ts"
@@ -61,6 +62,11 @@ export function PaletteKeys() {
 				case "listen":
 					if (!data.liveAudio.get().status) return
 					void (listen.get().wanted ? listen.stop() : listen.start())
+					break
+				case "squelchOpen":
+					if (!data.liveAudio.get().status || isReadOnly(data.access.get()))
+						return
+					void toggleOpen(data.liveAudio, listen)
 					break
 				case "feed": {
 					if (isReadOnly(data.access.get())) return

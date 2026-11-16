@@ -6,6 +6,8 @@ export interface NxdnCall {
 	superframes?: number
 	release?: boolean
 	seed?: number
+	/** A true key-up: no pre-roll, one VCALL frame (dv-plan.mjs). */
+	coldKeyUp?: boolean
 }
 export function nxdnCrc6(bits: number[]): number[]
 export function nxdnCrc12(bits: number[]): number[]

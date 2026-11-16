@@ -284,6 +284,8 @@ export function squelchFor(
 	config: LiveDemodConfig,
 	thresholdDbfs: number,
 ): DemodSquelch {
+	// Open: the engine has no detect-only stage yet, so it plays ungated.
+	if (config.squelchMode === "open") return { mode: "off" }
 	if (config.squelchMode === "noise") {
 		return {
 			mode: "noise",

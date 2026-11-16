@@ -26,6 +26,7 @@ import type {
 	LiveDemodConfig,
 	LiveDemodStatus,
 } from "../../core/live-demodulator.js"
+import { liveDemodConfigForClient } from "../../core/live-demodulator.js"
 import type {
 	ResourceSnapshot,
 	SourceLinkQuality,
@@ -281,13 +282,6 @@ function isActivityClientMessage(data: unknown): boolean {
 	if (typeof data !== "object" || data === null) return false
 	const type = (data as { type?: unknown }).type
 	return type === "activity:subscribe" || type === "activity:unsubscribe"
-}
-
-/** Live-audio clients never receive the native demod binary path. */
-function liveAudioConfigForClient(config: LiveDemodConfig): LiveDemodConfig {
-	const client = { ...config }
-	delete client.chanBinaryPath
-	return client
 }
 
 /**
@@ -1048,7 +1042,7 @@ export class WebSocketEventBroadcaster {
 			type: "live-audio:status",
 			data: {
 				...status,
-				config: liveAudioConfigForClient(status.config),
+				config: liveDemodConfigForClient(status.config),
 			},
 		})
 	}
@@ -1102,7 +1096,7 @@ export class WebSocketEventBroadcaster {
 	broadcastLiveAudioConfig(config: LiveDemodConfig): void {
 		this.broadcast("live-audio", {
 			type: "live-audio:config",
-			data: liveAudioConfigForClient(config),
+			data: liveDemodConfigForClient(config),
 		})
 	}
 

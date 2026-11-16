@@ -1,8 +1,9 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import WebSocket from "ws"
 import type {
 	ActivitySearchPage,
 	DecoderInfo,
+	DigitalVoiceStatus,
 	ExtendedSourceStatus,
 	LiveAudioStatus,
 	ResolvedBandPlanView,
@@ -192,18 +193,21 @@ describe("mock server REST", () => {
 		})
 	})
 
-	it("takes the WG7 noise squelch on FM only, as the core", async () => {
+	// Listen (2026-11-15): noise is deprecated and stored as auto without the voice check.
+	it("takes the deprecated noise squelch on FM only and stores it migrated, as the core", async () => {
 		const ok = await inject("PATCH", "/api/live-audio/config", {
 			squelchMode: "noise",
 			noiseQuietingDb: 9,
 		})
 		expect(ok.statusCode).toBe(200)
 		expect(ok.json<LiveAudioStatus>().config).toMatchObject({
-			squelchMode: "noise",
+			squelchMode: "auto",
+			voiceOnly: false,
 			noiseQuietingDb: 9,
 		})
 		const am = await inject("PATCH", "/api/live-audio/config", {
 			modulation: "am",
+			squelchMode: "noise",
 		})
 		expect(am.statusCode).toBe(400)
 		expect(am.json()).toMatchObject({ error: "Bad Request" })
@@ -212,12 +216,154 @@ describe("mock server REST", () => {
 		})
 		expect(out.statusCode).toBe(400)
 		const back = await inject("PATCH", "/api/live-audio/config", {
-			modulation: "am",
 			squelchMode: "auto",
+			voiceOnly: true,
 			noiseQuietingDb: 6,
 		})
 		expect(back.statusCode).toBe(200)
-		await inject("PATCH", "/api/live-audio/config", { modulation: "nfm" })
+	})
+
+	it("takes open, voiceOnly and listenMode; manual at 0 is open, as the core", async () => {
+		const status = (
+			await inject("GET", "/api/live-audio/status")
+		).json<LiveAudioStatus>()
+		expect(status.config).toMatchObject({ voiceOnly: true, listenMode: "auto" })
+		const open = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "open",
+			listenMode: "digital",
+		})
+		expect(open.statusCode).toBe(200)
+		expect(open.json<LiveAudioStatus>().config).toMatchObject({
+			squelchMode: "open",
+			listenMode: "digital",
+		})
+		const off = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "manual",
+			squelch: 0,
+		})
+		expect(off.json<LiveAudioStatus>().config.squelchMode).toBe("open")
+		for (const bad of [{ voiceOnly: "no" }, { listenMode: "decoded" }])
+			expect(
+				(await inject("PATCH", "/api/live-audio/config", bad)).statusCode,
+			).toBe(400)
+		const restore = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "auto",
+			squelch: -60,
+			listenMode: "auto",
+		})
+		expect(restore.statusCode).toBe(200)
+	})
+
+	it("keeps manual at 0 with a tone and restores the voice check on Auto, as the core", async () => {
+		const ctcss = { kind: "ctcss", frequencyTenthsHz: 885 }
+		const toned = await inject("PATCH", "/api/live-audio/config", {
+			modulation: "nfm",
+			squelchMode: "manual",
+			squelch: 0,
+			toneSquelch: ctcss,
+		})
+		expect(toned.statusCode).toBe(200)
+		expect(toned.json<LiveAudioStatus>().config).toMatchObject({
+			squelchMode: "manual",
+			squelch: 0,
+			toneSquelch: ctcss,
+		})
+		const cleared = await inject("PATCH", "/api/live-audio/config", {
+			toneSquelch: { kind: "none" },
+		})
+		expect(cleared.json<LiveAudioStatus>().config.squelchMode).toBe("open")
+		const quiet = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "auto",
+			voiceOnly: false,
+			squelch: -60,
+		})
+		expect(quiet.json<LiveAudioStatus>().config.voiceOnly).toBe(false)
+		const kept = await inject("PATCH", "/api/live-audio/config", {
+			autoMarginDb: 7,
+		})
+		expect(kept.json<LiveAudioStatus>().config.voiceOnly).toBe(false)
+		const auto = await inject("PATCH", "/api/live-audio/config", {
+			squelchMode: "auto",
+			autoMarginDb: 6,
+		})
+		expect(auto.json<LiveAudioStatus>().config).toMatchObject({
+			squelchMode: "auto",
+			voiceOnly: true,
+		})
+	})
+
+	it("emits the Listen contract's voice check and route reasons on a bare carrier", async () => {
+		const read = async () =>
+			(await inject("GET", "/api/live-audio/status")).json<LiveAudioStatus>()
+		// the steady carrier at 162.400 MHz (centre 161.500 + 900 kHz): keyed all the time, never speech
+		await inject("PATCH", "/api/live-audio/config", {
+			offsetHz: 900_000,
+			squelchMode: "auto",
+			voiceOnly: true,
+			listenMode: "auto",
+		})
+		await inject("POST", "/api/live-audio/start")
+		const real = Date.now
+		let now = real()
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now)
+		try {
+			expect((await read()).autoSquelch).toEqual({ state: "waiting" })
+			now += 10_000
+			// a carrier is not voice: it waits for good (the old mock called anything voice after 1 s)
+			expect((await read()).autoSquelch).toEqual({ state: "waiting" })
+			await inject("PATCH", "/api/live-audio/config", {
+				squelchMode: "auto",
+				voiceOnly: false,
+			})
+			expect((await read()).autoSquelch).toEqual({ state: "off" })
+			await inject("PATCH", "/api/live-audio/config", { listenMode: "digital" })
+			expect((await read()).autoRoute).toMatchObject({
+				listenMode: "digital",
+				reason: "no-decoder",
+			})
+			await inject("PATCH", "/api/live-audio/config", { squelchMode: "open" })
+			const open = await read()
+			expect(open.autoSquelch).toEqual({ state: "off" })
+			expect(open.autoRoute).toMatchObject({
+				listenMode: "analog",
+				reason: "squelch-open",
+			})
+		} finally {
+			clock.mockRestore()
+			await inject("POST", "/api/live-audio/stop")
+			await inject("PATCH", "/api/live-audio/config", {
+				offsetHz: -350_000,
+				squelchMode: "auto",
+				voiceOnly: true,
+				listenMode: "auto",
+			})
+		}
+	})
+
+	it("reports no-decoder only when no voice decoder covers the channel, not while voice is stopped", async () => {
+		const read = async () =>
+			(await inject("GET", "/api/live-audio/status")).json<LiveAudioStatus>()
+		// the dsd-fme target at 161.150 MHz (centre 161.500 − 350 kHz), the voice service stopped
+		await inject("POST", "/api/digital-voice/stop")
+		await inject("PATCH", "/api/live-audio/config", {
+			offsetHz: -350_000,
+			listenMode: "digital",
+		})
+		await inject("POST", "/api/live-audio/start")
+		try {
+			const covered = await read()
+			expect(covered.autoRoute?.listenMode).toBe("digital")
+			expect(covered.autoRoute?.reason).toBeUndefined()
+			// off every target: no decoder covers it
+			await inject("PATCH", "/api/live-audio/config", { offsetHz: 900_000 })
+			expect((await read()).autoRoute?.reason).toBe("no-decoder")
+		} finally {
+			await inject("POST", "/api/live-audio/stop")
+			await inject("PATCH", "/api/live-audio/config", {
+				offsetHz: -350_000,
+				listenMode: "auto",
+			})
+		}
 	})
 
 	it("serves the resolved band plan", async () => {
@@ -667,5 +813,142 @@ describe("mock server WebSocket and audio", () => {
 		const other = await fetch(`${audio}/other`, { method: "OPTIONS" })
 		expect(other.status).toBe(404)
 		expect(other.headers.get("access-control-allow-origin")).toBe("*")
+	})
+})
+
+/** The mock DMR call at 161.150 MHz is keyed 9 s in every 13 s: a clock inside a call. */
+const IN_CALL_MS = 13_000 * 150_000_000 + 2_000
+
+describe("mock server: a DMR call whose encryption is not known (WAVEKIT_MOCK_VOICE_ENCRYPTION_UNKNOWN)", () => {
+	async function routeWith(voiceEncryptionUnknown: boolean) {
+		const server = await buildMockServer({
+			port: 0,
+			audioOrigin: "http://localhost:3102",
+			...(voiceEncryptionUnknown ? { voiceEncryptionUnknown } : {}),
+		})
+		await server.app.ready()
+		const inject = (
+			method: "GET" | "POST" | "PATCH",
+			url: string,
+			payload?: unknown,
+		) =>
+			server.app.inject(
+				payload === undefined
+					? { method, url }
+					: { method, url, payload: payload as Record<string, unknown> },
+			)
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => IN_CALL_MS)
+		try {
+			await inject("PATCH", "/api/live-audio/config", {
+				offsetHz: -350_000,
+				listenMode: "auto",
+			})
+			await inject("POST", "/api/live-audio/start")
+			await inject("POST", "/api/digital-voice/start")
+			const status = (
+				await inject("GET", "/api/live-audio/status")
+			).json<LiveAudioStatus>()
+			const voice = (
+				await inject("GET", "/api/digital-voice/status")
+			).json<DigitalVoiceStatus>()
+			return { route: status.autoRoute, call: voice.call }
+		} finally {
+			clock.mockRestore()
+			await server.close()
+		}
+	}
+
+	it("routes the clear call as digital", async () => {
+		const { route, call } = await routeWith(false)
+		expect(call).toMatchObject({ active: true, encrypted: false })
+		expect(call).not.toHaveProperty("encryptionKnown")
+		expect(route).toMatchObject({ active: "digital", protocol: "dmr" })
+	})
+
+	it("never routes the call while its encryption is not known, as the core", async () => {
+		const { route, call } = await routeWith(true)
+		expect(call).toMatchObject({ active: true, encryptionKnown: false })
+		expect(route?.active).not.toBe("digital")
+		expect(route).not.toHaveProperty("protocol")
+		expect(route).not.toHaveProperty("decoderId")
+	})
+})
+
+describe("mock server: digital-voice:call on each talking edge, as the core", () => {
+	/** A clock between overs: the DMR call at 161.150 MHz is keyed for the first 9 s of every 13 s. */
+	const BETWEEN_CALLS_MS = 13_000 * 150_000_000 + 10_000
+
+	async function edges(voiceEncryptionUnknown: boolean) {
+		let now = BETWEEN_CALLS_MS
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now)
+		const server = await buildMockServer({
+			port: 0,
+			audioPort: 0,
+			...(voiceEncryptionUnknown ? { voiceEncryptionUnknown } : {}),
+		})
+		const { apiUrl } = await server.listen()
+		const socket = new WebSocket(`${apiUrl.replace(/^http/, "ws")}/ws`)
+		try {
+			const inbox = new Inbox(socket)
+			await new Promise(resolve => socket.once("open", resolve))
+			const ack = inbox.next(m => m.type === "subscribed")
+			socket.send(
+				JSON.stringify({ type: "subscribe", channels: ["digital-voice"] }),
+			)
+			await ack
+			await server.app.inject({
+				method: "PATCH",
+				url: "/api/live-audio/config",
+				payload: { offsetHz: -350_000 },
+			})
+			const callOf = (m: Envelope) => m.data as DigitalVoiceStatus["call"]
+			const statusOf = (m: Envelope) => m.data as DigitalVoiceStatus
+			const isCall = (m: Envelope) => m.type === "digital-voice:call"
+			const isStatus = (m: Envelope) => m.type === "digital-voice:status"
+
+			const started = inbox.next(isCall)
+			const startStatus = inbox.next(isStatus)
+			now = IN_CALL_MS
+			const start = callOf(await started)
+			const afterStart = statusOf(await startStatus)
+
+			const ended = inbox.next(isCall)
+			const endStatus = inbox.next(isStatus)
+			now = BETWEEN_CALLS_MS
+			const end = callOf(await ended)
+			const afterEnd = statusOf(await endStatus)
+			return { start, afterStart, end, afterEnd }
+		} finally {
+			socket.close()
+			clock.mockRestore()
+			await server.close()
+		}
+	}
+
+	it("broadcasts the call as it starts and again, ended, as it stops, each followed by the status", async () => {
+		const { start, afterStart, end, afterEnd } = await edges(false)
+		expect(start).toMatchObject({
+			decoderId: "dsd-fme",
+			protocol: "dmr",
+			talkgroup: 2081,
+			encrypted: false,
+			active: true,
+		})
+		expect(start).not.toHaveProperty("endedAt")
+		expect(afterStart.call).toEqual(start)
+		expect(end).toMatchObject({
+			callId: start?.callId,
+			active: false,
+			endedAt: new Date(BETWEEN_CALLS_MS).toISOString(),
+		})
+		expect(afterEnd.call).toBeNull()
+	})
+
+	it("ends a call whose encryption is not known, so its checking line does not stick", async () => {
+		const { start, afterStart, end, afterEnd } = await edges(true)
+		expect(start).toMatchObject({ active: true, encryptionKnown: false })
+		expect(afterStart.call).toMatchObject({ encryptionKnown: false })
+		expect(end).toMatchObject({ callId: start?.callId, active: false })
+		expect(afterEnd.call).toBeNull()
 	})
 })

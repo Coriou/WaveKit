@@ -10,7 +10,7 @@ import type {
 	LiveAudioAutoSquelchDiagnostics,
 	LiveAudioAutoSquelchEvidence,
 	LiveAudioConfig,
-	LiveAudioSquelchMode,
+	LiveAudioSquelchSetting,
 	LiveAudioToneSquelch,
 } from "@wavekit/api-types"
 
@@ -159,14 +159,22 @@ export function preRollBytes(rate: number, format: EvidencePcmFormat): number {
 	return (preRollCapacitySamples(rate) + 1) * pcmSampleBytes(format)
 }
 
-/** True when the evidence gate governs client audio for this config. */
+/**
+ * True when the evidence gate governs client audio for this config: `auto` on an evidence
+ * modulation (nfm), no tone squelch, and the Listen voice check on (`voiceOnly`, absent = on, the
+ * default). Only an explicit `false` turns it off, so a missing or unknown value keeps the voice
+ * check, the safe answer. With it off the run is the stage-1 path. Live audio only: the scanner's
+ * recorder speech check does not read it.
+ */
 export function evidenceGateApplies(config: {
-	squelchMode?: LiveAudioSquelchMode | undefined
+	squelchMode?: LiveAudioSquelchSetting | undefined
 	modulation: LiveAudioConfig["modulation"]
 	toneSquelch?: LiveAudioToneSquelch | undefined
+	voiceOnly?: boolean | undefined
 }): boolean {
 	return (
 		config.squelchMode === "auto" &&
+		config.voiceOnly !== false &&
 		LIVE_AUDIO_AUTO_SQUELCH_MODULATIONS.includes(config.modulation) &&
 		(config.toneSquelch === undefined || config.toneSquelch.kind === "none")
 	)

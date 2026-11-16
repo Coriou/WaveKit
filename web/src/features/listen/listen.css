@@ -4,4 +4,9 @@
 	.wk-shell-sub[data-breaking] {
 		color: var(--wk-amber);
 	}
+	/* Play anyway sits on the title's line, in place of the subtitle; centred, not on the text baseline */
+	.wk-shell-listen-title > .wkf-play-anyway {
+		flex: none;
+		align-self: center;
+	}
 }

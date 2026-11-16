@@ -85,6 +85,17 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   legacy core since WG7, `Access-Control-Allow-Origin: *` on every answer and a 204 preflight on the
   stream paths: the page fetches it cross-origin directly. While live audio is stopped the connection
   is dropped, as the core's audio server is then not listening.
+- Listen squelch and Source as the core's Listen contract: `squelchMode` `auto | manual | open`
+  (`noise` stored as Auto without the voice check, manual at 0 as `open` unless a tone squelch is set),
+  `voiceOnly` and `listenMode`. The voice check (`autoSquelch`) opens on speech only: a `voice` signal
+  after 1 s, or its CTCSS tone after 750 ms; a bare carrier (the steady signal at 162.400 MHz),
+  data and pagers keep `waiting`. `autoRoute` reports the mode in force (`analog` while Open) and the
+  reason (`squelch-open`, `no-decoder` when Digital has no voice decoder covering the channel, even
+  while the voice service is stopped). The DMR call at 161.150 MHz plays as `digital` once
+  `POST /api/digital-voice/start` runs the voice service. With `WAVEKIT_MOCK_VOICE_ENCRYPTION_UNKNOWN=1`
+  (`voiceEncryptionUnknown`) the call says `encryptionKnown: false` and, as on the core, is never
+  routed: `autoRoute.active` stays off `digital` and Listen reads `DMR voice · checking…`.
+  `node scripts/ui-check.mjs --flow=listen` drives the Listen flow against this mock.
 - Matched against a real core (lot C7): frames cover only the usable 80 % of the capture (`binCount`
   below the bins asked for, track edges on the summary bin grid), error bodies are the core's
   (`{ error, code, message, correlationId }`, `VALIDATION_ERROR` with `details`, route 404

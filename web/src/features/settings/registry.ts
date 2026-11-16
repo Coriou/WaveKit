@@ -1,8 +1,11 @@
 // The settings registry (DESIGN.md "⌘K fix": one registry of settings, shown by Settings and by ⌘K). Each entry is
 // a setting the app has today, with where it lives: the Settings drawer (saved frequencies stay in the Tuner). The
 // palette lists every entry as a row; opening one shows that place and highlights the row.
+import type { LiveAudioConfig } from "@wavekit/api-types"
+
 import { Store } from "../../data/store.ts"
 import type { IslandId } from "../../shell/store.ts"
+import { listenContract, squelchOf, voiceOnlyFits } from "../listen/audio.ts"
 
 export type SettingPlace =
 	| { readonly kind: "settings" }
@@ -96,7 +99,21 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 	row("rx.direct", "Receiver", "Direct sampling", "hf shortwave", SETTINGS),
 	row("rx.offset", "Receiver", "Offset tuning", "e4000 dc", SETTINGS),
 	row("rx.rtlAgc", "Receiver", "RTL AGC", "digital gain agc", SETTINGS),
-	row("au.squelch", "Audio", "Squelch", "threshold sql noise", SETTINGS),
+	row("au.squelch", "Audio", "Squelch", "threshold sql open manual", SETTINGS),
+	row(
+		"au.voiceOnly",
+		"Audio",
+		"Voice only",
+		"voice check carrier data pager",
+		SETTINGS,
+	),
+	row(
+		"au.source",
+		"Audio",
+		"Source",
+		"listen analog digital decoded",
+		SETTINGS,
+	),
 	row(
 		"au.margin",
 		"Audio",
@@ -258,13 +275,32 @@ export const SETTINGS_REGISTRY: readonly SettingEntry[] = [
 	),
 ]
 
-/** The entries this core has: protected-only ones need a protected core (`accessMode` "protected"). */
+/**
+ * Whether the drawer shows this row for the live audio config (rows.ts `audioRows`): the margin only
+ * outside Manual, Voice only under Auto on NFM, Source on a Listen core. Every other row: always.
+ */
+function shownFor(id: string, config: LiveAudioConfig): boolean {
+	const sq = squelchOf(config).kind
+	if (id === "au.margin") return sq !== "manual"
+	if (id === "au.voiceOnly") return sq === "auto" && voiceOnlyFits(config)
+	if (id === "au.source") return listenContract(config)
+	return true
+}
+
+/**
+ * The entries this core has: protected-only ones need a protected core (`accessMode` "protected").
+ * With the live audio `config`, a row the drawer hides for it (the margin in Manual) is left out, so
+ * ⌘K never lands on a row that is not there.
+ */
 export function settingsFor(
 	accessMode: "legacy" | "protected" | null,
+	config?: LiveAudioConfig | null,
 ): readonly SettingEntry[] {
-	return accessMode === "protected"
-		? SETTINGS_REGISTRY
-		: SETTINGS_REGISTRY.filter(e => !e.protectedOnly)
+	return SETTINGS_REGISTRY.filter(
+		e =>
+			(accessMode === "protected" || !e.protectedOnly) &&
+			(!config || shownFor(e.id, config)),
+	)
 }
 
 /** The setting a place should highlight (the palette's "Open in Settings ›"); consumed by that place. */
