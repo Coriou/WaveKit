@@ -170,6 +170,84 @@ describe("tuned card now block", () => {
 		)
 	})
 
+	describe("a scanner recording rides on its transmission", () => {
+		const tx = (at: string, over: Partial<ActivitySummary> = {}) =>
+			summary({
+				kind: "analog-transmission",
+				protocol: "analog",
+				category: "voice",
+				title: null,
+				producedAt: at,
+				receivedAt: at,
+				fields: [
+					{ key: "durationMs", label: "Duration", value: 9000 },
+					{ key: "ctcssHz", label: "CTCSS", value: 88.5, unit: "Hz" },
+					{ key: "transcript", label: "Transcript", value: "on my way" },
+				],
+				...over,
+			})
+		const rec = (at: string, id: string, over: Partial<ActivitySummary> = {}) =>
+			summary({
+				kind: "recording-change",
+				protocol: "analog",
+				category: "voice",
+				decoderId: null,
+				title: "Recording 160.45 MHz",
+				producedAt: at,
+				receivedAt: at,
+				fields: [
+					{ key: "durationMs", label: "Duration", value: 9000, unit: "ms" },
+				],
+				recording: { id, durationMs: 9000 },
+				...over,
+			})
+
+		it("keeps the latest a transmission, with its tone, transcript and the disc", () => {
+			const older = tx("2026-10-17T12:00:00.000Z")
+			const latest = tx("2026-10-17T12:02:39.000Z")
+			const v = nowView(
+				input({
+					items: [
+						rec("2026-10-17T12:02:45.000Z", "scan:d~b.wav"),
+						latest,
+						rec("2026-10-17T12:00:05.000Z", "scan:d~a.wav"),
+						older,
+					],
+					channelName: "Ch 16",
+				}),
+			)
+			expect(v.kind).toBe("tx")
+			expect(v.latest?.eventId).toBe(latest.eventId)
+			expect(v.latest?.recording?.id).toBe("scan:d~b.wav")
+			expect(v.body).toBe("“on my way”")
+			expect(v.chips).toEqual([{ k: "CTCSS", v: "88.5 Hz" }])
+			expect(v.latestRow?.item.recording?.id).toBe("scan:d~b.wav")
+			// the earlier row is the older transmission carrying its own file, never a recording row of its own
+			expect(v.earlier.map(r => r.id)).toEqual([older.eventId])
+			expect(v.earlier[0]?.a).toBe("Transmission")
+			expect(v.earlier[0]?.item.recording?.id).toBe("scan:d~a.wav")
+		})
+
+		it("never pairs a file with another channel's transmission", () => {
+			const other = tx("2026-10-17T12:02:39.000Z", { frequencyHz: 161_000_000 })
+			const v = nowView(
+				input({
+					items: [rec("2026-10-17T12:02:45.000Z", "scan:d~b.wav"), other],
+				}),
+			)
+			expect(v.latest?.kind).toBe("recording-change")
+			// a recording without its transmission reads as one, not as a call
+			expect(v.kind).toBe("tx")
+			expect(v.latestRow?.item.recording?.id).toBe("scan:d~b.wav")
+			expect(v.earlier[0]?.item.recording).toBeUndefined()
+		})
+
+		it("gives the latest no disc without a recording", () => {
+			const v = nowView(input({ items: [tx("2026-10-17T12:02:39.000Z")] }))
+			expect(v.latestRow).toBeNull()
+		})
+	})
+
 	it("counts vessels in range with the latest report and a message rate", () => {
 		const reports = [0, 1, 2, 30].map(s =>
 			summary({

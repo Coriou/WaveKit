@@ -2,13 +2,16 @@ import { describe, expect, it, vi } from "vitest"
 import type { LiveAudioStatus } from "@wavekit/api-types"
 
 import type { LiveAudioStore } from "../../src/data/index.ts"
+import { listenAfterTune } from "../../src/features/listen/after-tune.ts"
 import {
 	ListenController,
 	type ListenPlayer,
 } from "../../src/features/listen/controller.ts"
 import {
 	AUTO_NEXT_KEY,
+	PREV_RESTART_S,
 	PlaybackService,
+	canPrev,
 	compactOf,
 	heldOf,
 	markOf,
@@ -490,6 +493,48 @@ describe("PlaybackService: stop, forget, dispose", () => {
 		expect(s.fetchFile).toHaveBeenCalledTimes(2)
 	})
 
+	it("Delete then Undo while the shared fetch is in flight: a new play fetches anew and plays", async () => {
+		const s = setup({ hold: true })
+		s.p.play("x", Q("x"))
+		s.p.forget("x")
+		expect(s.p.get().phase).toBe("idle")
+		// Undo: the row is back and played again before the old fetch lands
+		s.p.play("x", Q("x"))
+		expect(s.fetchFile).toHaveBeenCalledTimes(2)
+		await s.land("x")
+		expect(s.p.get()).toMatchObject({ id: "x", phase: "playing", error: null })
+		expect(s.p.peaks.get().has("x")).toBe(true)
+	})
+
+	it("a fetch landing after dispose creates and caches no object URL", async () => {
+		let urls = 0
+		const pending: (() => void)[] = []
+		const p = new PlaybackService({
+			fetchFile: () =>
+				new Promise<Blob>(r => {
+					pending.push(() => r(new Blob([new Uint8Array(synthWav(1, 1))])))
+				}),
+			holdLive: () => undefined,
+			createAudio: () => new FakeAudio(),
+			createUrl: () => `blob:${++urls}`,
+			revokeUrl: () => undefined,
+			storage: null,
+		})
+		p.play("a")
+		void p.loadPeaks("b")
+		p.dispose()
+		for (const land of pending) land()
+		await flush()
+		expect(urls).toBe(0)
+		expect(p.peaks.get().size).toBe(0)
+	})
+
+	it("a failed waveform read reads as none, never loading for good", async () => {
+		const s = setup({ fail: { bad: "503" } })
+		await s.p.loadPeaks("bad")
+		expect(s.p.peaks.get().get("bad")).toBe("none")
+	})
+
 	it("dispose → idle, every file revoked, live audio released", async () => {
 		const s = setup()
 		await playing(s)
@@ -519,6 +564,24 @@ describe("PlaybackService: queue, next, prev", () => {
 		expect(s.p.get().id).toBe("a")
 	})
 
+	it("Prev is enabled exactly when it does something (the same 2 s rule)", async () => {
+		const s = setup()
+		await playing(s, "a", Q("a"))
+		s.audio.meta(10)
+		s.p.seek(1)
+		// at 1 s, first of its queue: prev() would do nothing, so the button is off
+		expect(canPrev(s.p.get())).toBe(false)
+		s.p.prev()
+		expect(s.p.get()).toMatchObject({ id: "a", pos: 1 })
+		s.p.seek(PREV_RESTART_S + 0.5)
+		expect(canPrev(s.p.get())).toBe(true)
+		s.p.prev()
+		expect(s.p.get().pos).toBe(0)
+		const t = setup()
+		await playing(t, "b", Q("a", "b"))
+		expect(canPrev(t.p.get())).toBe(true)
+	})
+
 	it("prev past 2 s goes back to the start of the same recording", async () => {
 		const s = setup()
 		await playing(s, "b", Q("a", "b"))
@@ -526,6 +589,28 @@ describe("PlaybackService: queue, next, prev", () => {
 		s.p.seek(5)
 		s.p.prev()
 		expect(s.p.get()).toMatchObject({ id: "b", pos: 0 })
+	})
+
+	it("several lists of one source: only the list played from refreshes its queue", async () => {
+		const s = setup()
+		const drawer: QueueRef = {
+			source: "activity",
+			list: "drawer",
+			ids: ["a", "b"],
+		}
+		await playing(s, "a", drawer)
+		// a pinned column showing the same recording never takes the queue over
+		s.p.setQueue("activity", ["a", "z"], undefined, "column-1")
+		expect(s.p.get().queue).toEqual(drawer)
+		// nor does a list without a key
+		s.p.setQueue("activity", ["a", "y"])
+		expect(s.p.get().queue).toEqual(drawer)
+		s.p.setQueue("activity", ["a", "b", "c"], undefined, "drawer")
+		expect(s.p.get().queue).toEqual({
+			source: "activity",
+			list: "drawer",
+			ids: ["a", "b", "c"],
+		})
 	})
 
 	it("setQueue replaces the snapshot only from the same source while it holds the recording", async () => {
@@ -741,6 +826,20 @@ describe("Listen and playback", () => {
 		// not held: the button turns Listen off as before
 		await listen.toggle()
 		expect(listen.get().wanted).toBe(false)
+	})
+
+	it("a scanner Listen with audio already on pauses playback once the tune lands", async () => {
+		const { listen, playback } = liveSetup()
+		await listen.start()
+		playback.play("a")
+		await flush()
+		expect(playback.get().phase).toBe("playing")
+		expect(
+			await listenAfterTune(161_000_000, () => Promise.resolve(true), listen),
+		).toBe(true)
+		expect(playback.get().phase).toBe("paused")
+		expect(listen.isHeld).toBe(false)
+		expect(listen.get().wanted).toBe(true)
 	})
 
 	it("Listen resume (a blocked autoplay) pauses playback too", async () => {

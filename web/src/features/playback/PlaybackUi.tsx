@@ -10,7 +10,7 @@ import { errorMessage, useStore } from "../../data/index.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { PlayGlyph, RecIcon } from "../recordings/icons.tsx"
 import { formatDuration } from "../recordings/model.ts"
-import { keepTarget, keptHere, setKept } from "./keep.ts"
+import { keepLabel, keepTarget, keptHere, setKept } from "./keep.ts"
 import type { PlaybackPhase, QueueRef } from "./service.ts"
 import { markOf, WAVE_BARS } from "./service.ts"
 
@@ -172,10 +172,13 @@ export function KeepButton({
 	id,
 	title,
 	compact = false,
+	kept: rowKept = null,
 }: {
 	id: string
 	title: string
 	compact?: boolean
+	/** The row's own kept state when it carries one; null: not known from the row. */
+	kept?: boolean | null
 }) {
 	const { data } = useServices()
 	const readOnly = useReadOnly()
@@ -185,36 +188,33 @@ export function KeepButton({
 	const keeping = useStore(data.recordings.marks, m =>
 		target.inventoryId === null ? false : m.keeping.has(target.inventoryId),
 	)
-	const kept = target.kept === true
-	const unknown = target.inventoryId === null
+	const label = keepLabel(target, rowKept)
+	const kept = label.state === "kept"
+	const next = label.next
 	return (
 		<button
 			type="button"
 			className={compact ? "wk-icon-btn wkp-keep" : "wk-btn wkp-keep"}
 			data-variant={compact ? undefined : "outline"}
 			data-size={compact ? "sm" : undefined}
-			aria-pressed={kept}
-			aria-label={compact ? (kept ? "Kept" : "Keep") : undefined}
-			disabled={readOnly || keeping || unknown}
-			title={
-				unknown
-					? "Open it in Recordings to keep it"
-					: kept
-						? "Kept: retention never deletes it. Click to unkeep"
-						: "Keep: protect it from every retention rule"
-			}
-			onClick={() =>
-				void setKept(data.api, data.recordings, id, !kept).catch(
+			data-kept={label.state}
+			aria-pressed={label.pressed}
+			aria-label={compact ? label.text : undefined}
+			disabled={readOnly || keeping || next === null}
+			title={label.title}
+			onClick={() => {
+				if (next === null) return
+				void setKept(data.api, data.recordings, id, next).catch(
 					(error: unknown) =>
 						showAppToast(
-							`Could not ${kept ? "unkeep" : "keep"} “${title}”: ${errorMessage(error)}`,
+							`Could not ${next ? "keep" : "unkeep"} “${title}”: ${errorMessage(error)}`,
 							{ tone: "warn" },
 						),
 				)
-			}
+			}}
 		>
 			<RecIcon name="star" size={15} filled={kept} />
-			{!compact && (kept ? "Kept" : "Keep")}
+			{!compact && label.text}
 		</button>
 	)
 }

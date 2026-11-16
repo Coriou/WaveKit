@@ -52,7 +52,7 @@ import { formatMHz } from "../format.ts"
 import { Icon } from "../../ui/Icon.tsx"
 import type { QueueRef } from "../playback/service.ts"
 import { ActivityDisc } from "./ActivityPlayback.tsx"
-import { activityQueue } from "./playback.ts"
+import { activityListKey, activityQueue } from "./playback.ts"
 
 const HOLD_PX = 8
 const MORE_PX = NEAR_END_PX
@@ -115,13 +115,18 @@ export function ActivityList({
 		[pendingItems, feed],
 	)
 	// the rows with audio as shown: the queue a disc here plays from, refreshed while it is the one played
-	const queue = useMemo(() => activityQueue(stacks), [stacks])
+	// each list (the drawer's, every pinned column) is its own queue: only the one played from refreshes it
+	const queueList = activityListKey(feed)
+	const queue = useMemo(
+		() => activityQueue(stacks, queueList),
+		[stacks, queueList],
+	)
 	const queueNow = useRef(queue)
 	queueNow.current = queue
 	const readQueue = useCallback(() => queueNow.current, [])
 	useEffect(() => {
-		playback.setQueue("activity", queue.ids, queue.titles)
-	}, [playback, queue])
+		playback.setQueue("activity", queue.ids, queue.titles, queueList)
+	}, [playback, queue, queueList])
 	const entries = useMemo(
 		() => stackEntries(stacks, now, expanded),
 		[stacks, now, display, expanded], // group labels follow the time setting

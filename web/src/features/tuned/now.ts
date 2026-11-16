@@ -58,6 +58,8 @@ export interface NowView {
 	map: boolean
 	latest: ActivitySummary | null
 	earlier: EarlierRow[]
+	/** The latest as a playable row (its recording, if any, titled as the block reads); null without one. */
+	latestRow: EarlierRow | null
 }
 
 export interface FleetCount {
@@ -90,9 +92,13 @@ const SHOWN_KINDS = new Set<ActivitySummary["kind"]>([
 	"decoder-reception",
 	"call-lifecycle",
 	"analog-transmission",
-	// a scanner recording kept for good: its row carries the file (the card plays it)
+	// a scanner recording kept for good: never a row of its own, its file rides on its transmission (attachRecordings)
 	"recording-change",
 ])
+/** A recording and its transmission share a channel: within half a 12.5 kHz step. */
+const SAME_CHANNEL_HZ = 6_250
+/** A file is kept at most this long after its transmission closes (the provisional hold, a rollover). */
+const KEEP_SLACK_MS = 120_000
 const AIRCRAFT_DECODERS = new Set(["readsb", "dump1090"])
 const VESSEL_DECODERS = new Set(["ais-catcher"])
 const VOICE_DECODERS = new Set(["dsd-fme"])
@@ -191,12 +197,12 @@ function earlierRow(s: ActivitySummary): EarlierRow {
 	const row = rowView(s)
 	const ms = durationMs(s)
 	const b =
-		s.kind === "analog-transmission" || s.kind === "call-lifecycle"
+		isTransmission(s) || s.kind === "call-lifecycle"
 			? ms !== null
 				? clock(ms)
 				: ""
 			: (row.readings ?? row.message ?? "")
-	const a = s.kind === "analog-transmission" ? "Transmission" : row.title
+	const a = isTransmission(s) ? "Transmission" : row.title
 	const first = b.split(" · ")[0] ?? ""
 	return {
 		id: s.eventId,
@@ -237,7 +243,10 @@ function fleetOf(
 	return null
 }
 
-const EMPTY: Omit<NowView, "kind" | "shortId" | "latest" | "earlier"> = {
+const EMPTY: Omit<
+	NowView,
+	"kind" | "shortId" | "latest" | "earlier" | "latestRow"
+> = {
 	protocol: null,
 	eyebrow: null,
 	title: null,
@@ -256,12 +265,79 @@ const EMPTY: Omit<NowView, "kind" | "shortId" | "latest" | "earlier"> = {
 	map: false,
 }
 
+function sameChannel(a: number | null, b: number | null): boolean {
+	if (a === null || b === null) return a === b
+	return Math.abs(a - b) <= SAME_CHANNEL_HZ
+}
+
+/**
+ * A scanner recording's `recording-change` row is written when the file is kept, after its
+ * transmission: it never stands as a row of its own. Its file rides on the transmission it recorded
+ * (same channel, kept from the transmission's start to KEEP_SLACK_MS after its end, the nearest one
+ * not already carrying a file), so the transmission row keeps its tone and transcript and carries the
+ * disc. A recording whose transmission is not in the list reads as a transmission itself.
+ */
+export function attachRecordings(
+	items: readonly ActivitySummary[],
+): ActivitySummary[] {
+	const out: ActivitySummary[] = []
+	const recs: ActivitySummary[] = []
+	for (const s of items) {
+		if (s.kind === "recording-change") recs.push(s)
+		else out.push(s)
+	}
+	if (recs.length === 0) return out
+	const taken = new Set<number>()
+	const orphans: ActivitySummary[] = []
+	for (const rec of recs) {
+		const link = rec.recording
+		if (!link) continue
+		const kept = Date.parse(rec.producedAt)
+		let best = -1
+		let bestGap = Number.POSITIVE_INFINITY
+		out.forEach((tx, i) => {
+			if (tx.kind !== "analog-transmission" || tx.recording || taken.has(i))
+				return
+			if (!sameChannel(tx.frequencyHz, rec.frequencyHz)) return
+			const at = Date.parse(tx.producedAt)
+			const ms = durationMs(tx) ?? 0
+			// producedAt is the transmission's close or start: accept a keep from its start to the slack after its end
+			if (!(kept >= at - ms - 1000 && kept <= at + ms + KEEP_SLACK_MS)) return
+			const gap = Math.abs(kept - at)
+			if (gap < bestGap) {
+				best = i
+				bestGap = gap
+			}
+		})
+		const tx = best >= 0 ? out[best] : undefined
+		if (tx) {
+			taken.add(best)
+			out[best] = { ...tx, recording: link }
+		} else orphans.push(rec)
+	}
+	if (orphans.length === 0) return out
+	// newest first, as the input
+	return [...out, ...orphans].sort(
+		(a, b) => Date.parse(b.producedAt) - Date.parse(a.producedAt),
+	)
+}
+
+function isTransmission(s: ActivitySummary): boolean {
+	return s.kind === "analog-transmission" || s.kind === "recording-change"
+}
+
 export function nowView(input: NowInput): NowView {
-	const items = input.items.filter(s => SHOWN_KINDS.has(s.kind))
+	const items = attachRecordings(
+		input.items.filter(s => SHOWN_KINDS.has(s.kind)),
+	)
 	const latest = items[0] ?? null
 	const earlier = items.slice(1, 1 + (input.earlierMax ?? 2)).map(earlierRow)
 	const fleet = fleetOf(input, latest)
-	const base = { latest, earlier }
+	const base = {
+		latest,
+		earlier,
+		latestRow: latest?.recording ? earlierRow(latest) : null,
+	}
 
 	if (fleet) {
 		const n = input.count?.n ?? null
@@ -325,7 +401,7 @@ export function nowView(input: NowInput): NowView {
 	const at = Date.parse(latest.producedAt)
 	const ago = agoText(latest.producedAt, input.now)
 
-	if (latest.kind === "analog-transmission") {
+	if (isTransmission(latest)) {
 		const ms = durationMs(latest)
 		const transcript = transcriptOf(latest)
 		const tone = toneChip(latest)

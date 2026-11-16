@@ -6,11 +6,19 @@ import type {
 
 import { headerCount } from "../../src/features/activity/count.ts"
 import { foldActivity } from "../../src/features/activity/fold.ts"
+import { readFileSync } from "node:fs"
+
 import {
+	activityListKey,
 	activityQueue,
 	recordingOf,
 } from "../../src/features/activity/playback.ts"
-import { keepTarget, playbackIdOf } from "../../src/features/playback/keep.ts"
+import { drawerVisible } from "../../src/features/playback/visible.ts"
+import {
+	keepLabel,
+	keepTarget,
+	playbackIdOf,
+} from "../../src/features/playback/keep.ts"
 import { tunedQueue } from "../../src/features/tuned/playback.tsx"
 import type { EarlierRow } from "../../src/features/tuned/now.ts"
 
@@ -133,5 +141,89 @@ describe("Keep from anywhere", () => {
 				new Map([["dsd~20260101_120000_00002_DMR.wav", false]]),
 			),
 		).toEqual({ inventoryId: null, kept: false })
+	})
+
+	it("never says not kept when the kept state is unknown", () => {
+		const scan = "scan:d_01ABC~analog-1.wav"
+		const unknown = keepLabel(keepTarget(scan, [], new Map()))
+		expect(unknown).toMatchObject({
+			state: "unknown",
+			pressed: undefined,
+			next: true,
+		})
+		expect(unknown.title).toMatch(/Not known here whether it is kept/)
+		// the row's own data decides when the catalogue and earlier answers do not
+		expect(keepLabel(keepTarget(scan, [], new Map()), true)).toMatchObject({
+			state: "kept",
+			text: "Kept",
+			pressed: true,
+			next: false,
+		})
+		expect(
+			keepLabel(keepTarget(scan, [], new Map([[scan, false]]))),
+		).toMatchObject({ state: "not-kept", pressed: false, next: true })
+		// the catalogue wins over the row
+		const loaded = item({})
+		expect(
+			keepLabel(keepTarget(loaded.key ?? "", [loaded], new Map()), false),
+		).toMatchObject({ state: "kept" })
+		// no Keep route here: disabled with its reason
+		expect(
+			keepLabel(keepTarget("dsd~20260101_120000_00002_DMR.wav", [], new Map())),
+		).toMatchObject({
+			state: "unavailable",
+			next: null,
+			title: "Open it in Recordings to keep it",
+		})
+	})
+})
+
+describe("one queue per Activity list, compact only in a visible panel", () => {
+	const src = (path: string) =>
+		readFileSync(new URL(`../../src/${path}`, import.meta.url), "utf8")
+
+	it("keys each list by its feed: stable for one, distinct across lists", () => {
+		const drawer = {}
+		const column = {}
+		expect(activityListKey(drawer)).toBe(activityListKey(drawer))
+		expect(activityListKey(drawer)).not.toBe(activityListKey(column))
+		expect(activityQueue([], activityListKey(column)).list).toBe(
+			activityListKey(column),
+		)
+	})
+
+	it("the list and the detail's Recording block play from the list they show", () => {
+		const list = src("features/activity/ActivityList.tsx")
+		expect(list).toContain("activityListKey(feed)")
+		expect(list).toContain(
+			'playback.setQueue("activity", queue.ids, queue.titles, queueList)',
+		)
+		const block = src("features/activity/ActivityPlayback.tsx")
+		expect(block).toContain("activityListKey(feed)")
+		expect(block).toContain("activityQueue(foldedOf(items, feed), list)")
+	})
+
+	it("a drawer is visible only while it is the open one and the Receiver panel leaves it room", () => {
+		expect(drawerVisible({ drawer: "activity", panel: null }, "activity")).toBe(
+			true,
+		)
+		expect(
+			drawerVisible({ drawer: "recordings", panel: null }, "activity"),
+		).toBe(false)
+		expect(drawerVisible({ drawer: null, panel: null }, "recordings")).toBe(
+			false,
+		)
+		expect(
+			drawerVisible({ drawer: "recordings", panel: "receiver" }, "recordings"),
+		).toBe(false)
+	})
+
+	it("both surfaces pass their real visibility to setExpanded", () => {
+		expect(src("features/activity/ActivityPlayback.tsx")).toContain(
+			'playback.setExpanded("activity", id, visible)',
+		)
+		expect(src("features/recordings/RecordingsDrawer.tsx")).toContain(
+			'player.setExpanded("recordings", openPid, visible)',
+		)
 	})
 })

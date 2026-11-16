@@ -1,11 +1,16 @@
-// The tuned card's side of the one player: a disc on the earlier rows that carry a recording, playing from
-// the card's own list (source "tuned": those rows with audio, in the order shown).
+// The tuned card's side of the one player: a disc on the now block and the earlier rows that carry a recording,
+// playing from the card's own list (source "tuned": those rows with audio, in the order shown).
 import { useEffect, useMemo, useRef } from "react"
 
 import { useServices } from "../../app/context.ts"
 import { PlayDisc } from "../playback/PlaybackUi.tsx"
 import type { QueueRef } from "../playback/service.ts"
-import type { EarlierRow } from "./now.ts"
+import type { EarlierRow, NowView } from "./now.ts"
+
+/** The card's playable rows as shown: the latest (the now block), then the earlier rows. */
+export function playRows(now: NowView): EarlierRow[] {
+	return now.latestRow ? [now.latestRow, ...now.earlier] : now.earlier
+}
 
 /** The rows' recordings as shown, by recording id, titled as the row reads. */
 export function tunedQueue(rows: readonly EarlierRow[]): QueueRef {

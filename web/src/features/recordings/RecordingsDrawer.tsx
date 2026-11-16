@@ -47,6 +47,7 @@ import { tuningStep } from "../../plot/maths.ts"
 import { playbackIdOf } from "../playback/keep.ts"
 import { PlayDisc, usePlaybackMark, WaveView } from "../playback/PlaybackUi.tsx"
 import type { PlaybackService, QueueRef } from "../playback/service.ts"
+import { useDrawerVisible } from "../playback/visible.ts"
 import { PlayGlyph, RecIcon } from "./icons.tsx"
 import { listKeyAction } from "./keys.ts"
 import {
@@ -101,9 +102,11 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 			openId === null ? undefined : s.items.find(r => r.id === openId)
 		return item ? playbackIdOf(item) : null
 	})
+	// compact only while this drawer is the visible panel
+	const visible = useDrawerVisible("recordings")
 	useEffect(() => {
-		player.setExpanded("recordings", openPid)
-	}, [player, openPid])
+		player.setExpanded("recordings", openPid, visible)
+	}, [player, openPid, visible])
 	useEffect(() => () => player.setExpanded("recordings", null), [player])
 
 	// open: the list for the current search, following the catalogue's notices (no polling)

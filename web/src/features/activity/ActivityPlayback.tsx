@@ -9,7 +9,13 @@ import { Label } from "../../ui/Label.tsx"
 import { KeepButton, PlayDisc, WaveView } from "../playback/PlaybackUi.tsx"
 import type { QueueRef } from "../playback/service.ts"
 import { foldedOf } from "./fold.ts"
-import { activityQueue, recordingOf, recordingTitleOf } from "./playback.ts"
+import { useDrawerVisible } from "../playback/visible.ts"
+import {
+	activityListKey,
+	activityQueue,
+	recordingOf,
+	recordingTitleOf,
+} from "./playback.ts"
 
 /** The play disc of a row with audio; nothing for a row without. */
 export function ActivityDisc({
@@ -40,16 +46,19 @@ export function RecordingBlock({ item }: { item: ActivitySummary }) {
 	const { playback, activity } = useServices()
 	const rec = recordingOf(item)
 	const id = rec?.id ?? null
+	// compact only while the Activity drawer showing it is the visible panel
+	const visible = useDrawerVisible("activity")
 	useEffect(() => {
-		playback.setExpanded("activity", id)
-		return () => playback.setExpanded("activity", null)
-	}, [playback, id])
-	// the list it was opened from, as shown
+		playback.setExpanded("activity", id, visible)
+	}, [playback, id, visible])
+	useEffect(() => () => playback.setExpanded("activity", null), [playback])
+	// the list it was opened from, as shown (its own queue key)
 	const feed = activity.stackFeed()
+	const list = activityListKey(feed)
 	const items = useStore(feed, s => s.items)
 	const queue = useMemo(
-		() => activityQueue(foldedOf(items, feed)),
-		[items, feed],
+		() => activityQueue(foldedOf(items, feed), list),
+		[items, feed, list],
 	)
 	const queueRef = useRef(queue)
 	queueRef.current = queue
@@ -61,6 +70,7 @@ export function RecordingBlock({ item }: { item: ActivitySummary }) {
 			? q
 			: {
 					source: "activity" as const,
+					list,
 					ids: [rec.id],
 					titles: { [rec.id]: title },
 				}

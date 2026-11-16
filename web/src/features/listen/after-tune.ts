@@ -8,6 +8,8 @@ export interface ListenAfterTuneTarget {
 	suspend(): void
 	get(): { wanted: boolean }
 	start(): Promise<void>
+	/** Pauses a recording playing here: Listen wins (ListenController.claim; start() does it itself). */
+	claim?(): void
 }
 
 /**
@@ -29,7 +31,9 @@ export async function listenAfterTune(
 		if (!landed && unlocked) listen.suspend()
 	}
 	if (!landed) return false
-	if (!listen.get().wanted) await listen.start()
+	// audio already on follows the tune; a recording playing here still yields to the Listen asked for
+	if (listen.get().wanted) listen.claim?.()
+	else await listen.start()
 	return true
 }
 

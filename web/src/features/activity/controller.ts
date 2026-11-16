@@ -677,6 +677,9 @@ export class ActivityController extends Store<ActivityViewState> {
 	}
 
 	private refresh(counts = true): void {
+		// the search, range or audio filter moved: the counts read for the old one are stale (the header falls
+		// back to the loaded events until the new read answers). A chip alone keeps them: they are read without it.
+		if (counts) this.dropCounts()
 		if (this.attached === 0) return
 		if (this.opening) {
 			this.queuedRefresh = {
@@ -734,8 +737,20 @@ export class ActivityController extends Store<ActivityViewState> {
 			if (!abort.signal.aborted) this.update(v => ({ ...v, counts, total }))
 		} catch {
 			// Counts are a hint: an older core without facets leaves the chips bare.
-			// A failure (busy or timed-out reader) slows the live refresh; an abort is not one.
-			if (!abort.signal.aborted) this.countsFailures += 1
+			// A failure (busy or timed-out reader) slows the live refresh; an abort is not one. Counts that
+			// may no longer hold are dropped: the header falls back to the loaded events.
+			if (!abort.signal.aborted) {
+				this.countsFailures += 1
+				this.dropCounts()
+			}
 		}
+	}
+
+	private dropCounts(): void {
+		this.update(v =>
+			v.counts === null && v.total === null
+				? v
+				: { ...v, counts: null, total: null },
+		)
 	}
 }

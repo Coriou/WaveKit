@@ -12,7 +12,13 @@ import { PlayGlyph, RecIcon } from "../recordings/icons.tsx"
 import { formatDuration } from "../recordings/model.ts"
 import { KeepButton } from "./PlaybackUi.tsx"
 import type { PlaybackState } from "./service.ts"
-import { compactOf, heldOf, queuePosition, queueStep } from "./service.ts"
+import {
+	canPrev,
+	compactOf,
+	heldOf,
+	queuePosition,
+	queueStep,
+} from "./service.ts"
 
 /** The dock's title for the recording in the player. */
 export function dockTitle(s: PlaybackState): string {
@@ -52,10 +58,8 @@ export function PlayerDock() {
 	)
 	const sub = useStore(playback, s => dockSub(s, liveWanted))
 	const hasError = useStore(playback, s => s.error !== null)
-	const hasPrev = useStore(
-		playback,
-		s => queueStep(s.queue, s.id, -1) !== null || s.pos > 0.5,
-	)
+	// the same rule as prev(): enabled exactly when it restarts or steps back
+	const hasPrev = useStore(playback, canPrev)
 	const hasNext = useStore(playback, s => queueStep(s.queue, s.id, 1) !== null)
 	if (id === null) return null
 	const d = duration ?? 0
