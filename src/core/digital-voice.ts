@@ -109,8 +109,8 @@ export interface DigitalVoiceDecoderStatus {
 	droppedSamples: number
 	underruns: number
 	bufferedMs: number
-	/** Always set by the service; optional so status fixtures need not carry it. */
-	voiceHold?: DigitalVoiceHoldStatus
+	/** The /stream hold of voice whose encryption is not known yet. */
+	voiceHold: DigitalVoiceHoldStatus
 	lastDatagramAt?: string
 	call: DigitalVoiceCall | null
 	lastCall?: DigitalVoiceCall
@@ -1202,7 +1202,8 @@ export class DigitalVoiceService
 		const shadow = this.shadowOf(channel)
 		const n = mono.length / 2
 		if (channel.channels === 1) {
-			for (let i = 0; i < n; i++) shadow.put(mono.readInt16LE(i * 2), 0, SHADOW_SPLIT)
+			for (let i = 0; i < n; i++)
+				shadow.put(mono.readInt16LE(i * 2), 0, SHADOW_SPLIT)
 			return
 		}
 		let identical = true

@@ -679,7 +679,10 @@ describe("digital voice /stream hold of voice not known clear", () => {
 	})
 
 	it("mono: a late unknown call_start takes the queued head too; encrypted discards it", async () => {
-		const clear = await started("p25", { jitterBufferMs: 400, maxBufferMs: 1000 })
+		const clear = await started("p25", {
+			jitterBufferMs: 400,
+			maxBufferMs: 1000,
+		})
 		const client = clear.connect()
 		const p25 = (o: Record<string, unknown>) =>
 			state({ protocol: "P25", slot: null, ...o })
@@ -688,7 +691,10 @@ describe("digital voice /stream hold of voice not known clear", () => {
 		send(clear, range(51, 75).map(mono))
 		clear.decoder.emit("voice-call", p25({ encryptionKnown: true }))
 		send(clear, range(76, 100).map(mono))
-		clear.decoder.emit("voice-call", p25({ encryptionKnown: true, active: false }))
+		clear.decoder.emit(
+			"voice-call",
+			p25({ encryptionKnown: true, active: false }),
+		)
 		vi.advanceTimersByTime(5000)
 		expect(client.samples().filter(s => s !== 0)).toEqual(frames(range(1, 100)))
 
@@ -729,7 +735,10 @@ describe("digital voice /stream hold of voice not known clear", () => {
 			voice,
 			range(1, 10).map(() => stereo(111, 222)),
 		)
-		voice.decoder.emit("voice-call", s2({ encryptionKnown: true, active: false }))
+		voice.decoder.emit(
+			"voice-call",
+			s2({ encryptionKnown: true, active: false }),
+		)
 		voice.decoder.emit(
 			"voice-call",
 			s1({ encryptionKnown: true, encrypted: true, active: false }),
@@ -759,7 +768,10 @@ describe("digital voice /stream hold of voice not known clear", () => {
 			"voice-call",
 			s1({ encryptionKnown: true, encrypted: true }),
 		)
-		voice.decoder.emit("voice-call", s2({ encryptionKnown: true, active: false }))
+		voice.decoder.emit(
+			"voice-call",
+			s2({ encryptionKnown: true, active: false }),
+		)
 		voice.decoder.emit(
 			"voice-call",
 			s1({ encryptionKnown: true, encrypted: true, active: false }),
@@ -788,8 +800,14 @@ describe("digital voice /stream hold of voice not known clear", () => {
 			voice,
 			range(1, 10).map(() => stereo(5, 222)),
 		)
-		voice.decoder.emit("voice-call", s2({ encryptionKnown: true, active: false }))
-		voice.decoder.emit("voice-call", s1({ encryptionKnown: true, active: false }))
+		voice.decoder.emit(
+			"voice-call",
+			s2({ encryptionKnown: true, active: false }),
+		)
+		voice.decoder.emit(
+			"voice-call",
+			s1({ encryptionKnown: true, active: false }),
+		)
 		vi.advanceTimersByTime(2000)
 		expect(client.samples().filter(s => s !== 0)).toEqual([
 			...frames(Array<number>(10).fill(222)),

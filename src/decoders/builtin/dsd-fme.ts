@@ -2553,7 +2553,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// A DMR sync counts once handleDmrSync knows it is not a suspect of
 		// the next over (dmrRekey).
 		if (protocol !== "dmr")
-			this.noteEvidence(this.callState ?? this.pendingCall?.state ?? null, nowMs)
+			this.noteEvidence(
+				this.callState ?? this.pendingCall?.state ?? null,
+				nowMs,
+			)
 	}
 
 	/** The lane's chain of `protocol` when it is still running at `nowMs`, else null. */
