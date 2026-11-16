@@ -11,8 +11,11 @@
  *   only while a stream has clients; without one, voice is discarded.
  * - Call state comes from the decoder's "voice-call" events, published in
  *   the same tick as its call_start / call_end outputs. Audio of a call
- *   flagged encrypted is muted (dsd-fme also mutes it): silence plus
- *   `encrypted: true`. In stereo only that call's slot is silenced.
+ *   flagged encrypted, or whose encryption is not known yet, is muted
+ *   (dsd-fme also mutes encrypted voice). Each DMR slot keeps its own call:
+ *   in stereo only a restricted call's slot is silenced; mono, an unknown
+ *   slot, or both slots restricted drop the whole datagram. Taps get the most
+ *   restrictive active call.
  *
  * Endpoints on httpPort (default 8082): /stream and /stream.wav serve the
  * first configured dsd-fme decoder; /decoders/<id>/stream[.wav] serve each
@@ -226,7 +229,13 @@ interface VoiceChannel {
 	port: number
 	paced: PacedPcmStream
 	registry: AudioClientRegistry
+	/** The most restrictive active call (see restrictiveCall), for status and taps. */
 	call: DigitalVoiceCall | null
+	/**
+	 * Active calls by slot key (1, 2, or 0 for an unknown slot): two DMR slots
+	 * run at once, so each slot keeps its own call. At most 3 entries.
+	 */
+	calls: Map<SlotKey, DigitalVoiceCall>
 	lastCall: DigitalVoiceCall | null
 	datagrams: number
 	rejected: number
@@ -235,6 +244,37 @@ interface VoiceChannel {
 	encryptedDropped: number
 	lastDatagramAt: Date | null
 	detach: (() => void) | null
+}
+
+/** 1 and 2 are TDMA slots; 0 is a call whose slot is unknown (or not 1/2). */
+type SlotKey = 0 | 1 | 2
+
+function slotKey(slot: number | null): SlotKey {
+	return slot === 1 || slot === 2 ? slot : 0
+}
+
+/** Not clear: encrypted, or its encryption is not known yet (call-first). */
+function isRestricted(call: DigitalVoiceCall): boolean {
+	return call.encrypted || call.encryptionKnown === false
+}
+
+/**
+ * The call a whole-datagram consumer (mono mute, the auto-listen tap) must
+ * obey: any restricted active call wins (encrypted before unknown), else the
+ * newest clear one; null when no call is active.
+ */
+function restrictiveCall(
+	calls: ReadonlyMap<SlotKey, DigitalVoiceCall>,
+): DigitalVoiceCall | null {
+	let encrypted: DigitalVoiceCall | null = null
+	let unknown: DigitalVoiceCall | null = null
+	let clear: DigitalVoiceCall | null = null
+	for (const call of calls.values()) {
+		if (call.encrypted) encrypted = call
+		else if (call.encryptionKnown === false) unknown = call
+		else clear = call
+	}
+	return encrypted ?? unknown ?? clear
 }
 
 function isDsdFmeMode(value: unknown): value is DsdFmeMode {
@@ -443,6 +483,10 @@ export class DigitalVoiceService
 		const channel = this.channels.get(decoderId)
 		if (!channel) return
 		channel.detach?.()
+		// A new source (a restarted decoder) never sends the old calls' ends.
+		channel.calls.clear()
+		channel.call = null
+		channel.paced.setCallActive(false)
 		const listener = (state: unknown) => this.handleVoiceCall(channel, state)
 		source.on("voice-call", listener)
 		channel.detach = () => source.off("voice-call", listener)
@@ -598,6 +642,7 @@ export class DigitalVoiceService
 			paced,
 			registry,
 			call: null,
+			calls: new Map(),
 			lastCall: null,
 			datagrams: 0,
 			rejected: 0,
@@ -633,23 +678,30 @@ export class DigitalVoiceService
 		// `own`: this service's stream is paced. Taps alone never move its counters (7.2).
 		const own = channel.paced.running
 		if (!this.running || (!own && this.voiceTaps.size === 0)) return
-		const call = channel.call
-		// A call whose encryption is not known yet is muted like an encrypted one.
-		const encrypted =
-			call?.active === true &&
-			(call.encrypted || call.encryptionKnown === false)
-		const slot = call?.slot
-		if (encrypted && (channel.channels === 1 || (slot !== 1 && slot !== 2))) {
-			// Mono, or the slot is unknown: the whole datagram may be that call.
+		// Each active call mutes its own slot when it is not clear (encrypted, or
+		// its encryption is not known yet); a call on an unknown slot, any
+		// restricted call on a mono channel, or both slots restricted drop the
+		// whole datagram.
+		let mute1 = false
+		let mute2 = false
+		let whole = false
+		for (const [key, call] of channel.calls) {
+			if (!isRestricted(call)) continue
+			if (key === 0 || channel.channels === 1) whole = true
+			else if (key === 1) mute1 = true
+			else mute2 = true
+		}
+		const encrypted = whole || mute1 || mute2
+		if (whole || (mute1 && mute2)) {
 			if (own) channel.encryptedDropped++
 			return
 		}
 		const mono = downmixDsdFmeDatagram(
 			datagram,
 			channel.channels,
-			// Stereo: mute only the encrypted call's slot; a clear call on the
+			// Stereo: mute only the restricted call's slot; a clear call on the
 			// other slot keeps playing (dsd-fme zero-fills the muted slot too).
-			encrypted && (slot === 1 || slot === 2) ? { muteSlot: slot } : {},
+			mute1 ? { muteSlot: 1 } : mute2 ? { muteSlot: 2 } : {},
 		)
 		if (
 			own &&
@@ -734,18 +786,30 @@ export class DigitalVoiceService
 			...(state.ran !== undefined ? { ran: state.ran } : {}),
 			...(state.errors !== undefined ? { errors: state.errors } : {}),
 		}
-		channel.paced.setCallActive(call.active)
+		const key = slotKey(call.slot)
 		if (call.active) {
-			channel.call = call
-			// Never play audio of an encrypted call, even if some was queued.
-			if (call.encrypted || call.encryptionKnown === false)
-				channel.paced.clear()
+			// The same call keyed elsewhere (its slot became known) moves here.
+			for (const [k, c] of channel.calls) {
+				if (k !== key && c.callId === call.callId) channel.calls.delete(k)
+			}
+			channel.calls.set(key, call)
+			// Never play audio of a call that is not clear, even if some was queued.
+			if (isRestricted(call)) channel.paced.clear()
 		} else {
-			channel.call = null
+			// An end clears only its own slot (and the same call wherever it is
+			// keyed); a newer call on that slot or the other slot stays.
+			for (const [k, c] of channel.calls) {
+				if (c.callId === call.callId) channel.calls.delete(k)
+			}
 			channel.lastCall = call
 		}
+		channel.call = restrictiveCall(channel.calls)
+		channel.paced.setCallActive(channel.call !== null)
+		// Taps (the auto-listen router) are whole-datagram consumers: they get
+		// the most restrictive active call, or this event when none is active.
+		const tapCall = channel.call ?? call
 		if (this.voiceTaps.size > 0)
-			this.notifyTaps(tap => tap.call(channel.decoderId, call))
+			this.notifyTaps(tap => tap.call(channel.decoderId, tapCall))
 		this.emit("call", call)
 	}
 

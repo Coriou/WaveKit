@@ -130,7 +130,15 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   clear: the auto route (`/auto`) admits none of its voice while the field is
   present and not `true`, and admits it once the call is known clear. The
   digital voice stream mutes such a call exactly like an encrypted one, and a
-  scanner probe records it as encrypted, never as a clear recording.
+  scanner probe records it as encrypted, never as a clear recording. Noise
+  syncs that start a DMR call leave it unknown, so it stays muted.
+- **Two DMR slots at once**: each slot keeps its own call. On the stream a slot
+  is muted while its own call is encrypted or not known yet, so a clear call on
+  the other slot keeps playing; a call whose slot is unknown, or both slots not
+  clear, mute the whole datagram, and the end of one slot never clears the
+  other. The auto route and other voice taps get the most restrictive active
+  call (encrypted first, then not known, else the newest clear one), so they
+  admit voice only while every active slot is clear.
 - **Encryption**: DMR from the voice link control line, where `dmr_flco.c`
   appends `Encrypted ` after `TGT=… SRC=…` (only on a line with TGT/SRC, so
   `Slot N - Encrypted PDU` data bursts do not count), or from a non-zero

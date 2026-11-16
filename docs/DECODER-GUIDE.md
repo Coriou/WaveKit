@@ -1100,25 +1100,42 @@ direct mode), so a call does not wait for them. Voice frame syncs of one protoco
 chain while each follows the previous within two of the protocol's sync periods
 plus 40 ms (DMR 760 ms, P25 phase 1 HDU/LDU 400 ms, D-STAR 880 ms, YSF 240 ms,
 NXDN48 and dPMR 200 ms); a DMR sync printing another colour code, or a P25 one
-another NAC, starts a new chain. A DMR, P25 phase 1 or D-STAR call starts on the
-chain's second clean frame (a single noise sync starts nothing), every call is
-back-dated to its chain's first sync, and talkgroup, source and callsign attach
-when the first link control naming them arrives (no second call). A call that
+another NAC, starts a new chain. A call starts on the chain's second clean frame
+(a single noise sync starts nothing): a DMR, P25 phase 1 or D-STAR voice sync
+without an error, a YSF frame whose FICH decoded, an NXDN voice frame whose
+SACCH passed (two in a row attest the RAN), a dPMR frame whose ID print agrees
+with the previous one. Every call is back-dated to its chain's first sync, but at
+most four chain windows before the frame that starts it (DMR 3 040 ms, P25
+1 600, D-STAR 3 520, YSF 960, NXDN and dPMR 800); talkgroup, source and callsign
+attach when the first link control naming them arrives (no second call; a YSF
+callsign printed before the start attaches too). When the IDs change while the
+syncs keep running on the grid, the old call ends at its last line with its own
+IDs and the new one is back-dated to the first sync after it. A call that
 started on frames alone and spans less than 250 ms is never announced (the weak
 metadata suppression). Each DMR repeater slot runs its own call, so two busy
 slots give two concurrent calls; idle, CSBK and data bursts (a repeater's hang
-time) keep no call alive. A DMR voice burst after at least 200 ms without voice
-from the call is a re-key, a new call, when it is a voice LC header or lies more
-than 30 ms (half a 60 ms TDMA frame) off the call's 360 ms superframe grid; a P25
-HDU after 200 ms is one too. A faded over whose voice resumes on its grid stays
-one call. A call that ends without its terminator (re-key, another radio's IDs,
+time) keep no call alive. A DMR re-key without a terminator (a new call) is
+measured from the call's last voice sync, not from its LC or slot prints: a voice
+LC header at least 200 ms after it; a sync more than 30 ms (half a 60 ms TDMA
+frame) off the call's 360 ms superframe grid at least 560 ms (one superframe,
+360, plus 200) after it; or, after a shorter gap of at least 200 ms, an off-grid sync that
+the next voice sync confirms (on the new grid, and more than 90 ms, twice a
+45 ms print jitter, off the old one). The new call then starts at the off-grid
+sync. A single late or early sync of a continuous over (a print up to 45 ms off)
+never splits it; a re-key only 60 ms off the grid after a short gap is left to
+its voice LC header. A P25 HDU after 200 ms is a re-key too. A faded over whose
+voice resumes on its grid stays one call. A call that ends without its terminator (re-key, another radio's IDs,
 the 4 s timeout) ends at its last voice line.
 A DMR or P25 call that starts before its link control said whether it is encrypted
 carries `encryptionKnown: false` on its `call_start` and `voice-call` state: it is
 not clear. The first checked link control (DMR TG/SRC with or without `Encrypted`,
 a P25 LCW or ALG ID) makes it known, and an announced call publishes a
 `voice-call` update with `encryptionKnown: true` and its identities. A call that
-ends still unknown is never linked to a per-call recording.
+ends still unknown is never linked to a per-call recording. Noise that prints two
+clean DMR syncs of one colour code within 760 ms starts such a call; it never
+learns its encryption, so it stays muted and unrecorded. YSF, NXDN and dPMR
+calls carry no `encryptionKnown` field: the adapter does not read their
+encryption.
 Calls of the catalogue's `auto` mode (`-fa`) cover DMR, P25, YSF, D-STAR and
 X2-TDMA; dsd-fme turns NXDN and dPMR off in that mode, so they need a decoder with
 `mode: nxdn`, `nxdn48` or `dpmr`.

@@ -323,28 +323,48 @@ describe("dsd-fme call-first lifecycle", () => {
 	})
 
 	describe("a re-key without a terminator", () => {
-		/** An over with IDs, its last voice line at 400 ms, then a voice sync at `rekeyAt` off the superframe grid. */
-		const rekey = (rekeyAt: number): Line[] => [
+		/**
+		 * An over with IDs: voice syncs at 0 and 360, its last line (LC) at 400,
+		 * then the next over's first sync at `rekeyAt` and a second on its grid.
+		 */
+		const rekey = (rekeyAt: number, burst = "VC*"): Line[] => [
 			[0, MS("VC*")],
 			[360, MS("VC*")],
 			[400, LC(1)],
-			[rekeyAt, MS("VC*")],
-			[rekeyAt + 360, LC(1)],
+			[rekeyAt, MS(burst)],
+			[rekeyAt + 360, MS("VC*")],
+			[rekeyAt + 400, LC(1)],
 			[rekeyAt + 700, MS("TLC")],
 			[rekeyAt + 700, LC(1)],
 		]
 
-		it("is the same call 199 ms after the last voice, a new one at 200 ms", () => {
-			// Off the grid: 239 / 240 ms after the last sync (one superframe is 360).
-			const near = replay(rekey(400 + REKEY_GAP_MS - 1), 6000)
+		it("a voice LC header is the same call 199 ms after the last voice sync, a new one at 200 ms (an LC print is not voice)", () => {
+			// 159 / 160 ms after the LC print at 400: only voice syncs count.
+			const near = replay(rekey(360 + REKEY_GAP_MS - 1, "VLC"), 6000)
 			expect(near.ends).toHaveLength(1)
-			const far = replay(rekey(400 + REKEY_GAP_MS), 6000)
+			const far = replay(rekey(360 + REKEY_GAP_MS, "VLC"), 6000)
 			expect(far.ends).toHaveLength(2)
-			// The first ends at its last voice line, the second starts at its first sync.
+			// The first ends at its last line, the second starts at its first sync.
 			expect(at(far.ends[0]!.endedAt!)).toBe(400)
 			expect(far.ends[0]!.flags?.timeout).toBe(true)
-			expect(at(far.ends[1]!.startedAt)).toBe(600)
+			expect(at(far.ends[1]!.startedAt)).toBe(560)
 			expect(far.ends[1]).toMatchObject({ talkgroup: 9, source: 100 })
+		})
+
+		it("an off-grid sync after a short gap is a new over once a second sync confirms its grid", () => {
+			// 600: 240 ms after the last sync, 120 ms off the grid (> 90).
+			const split = replay(rekey(600), 6000)
+			expect(split.ends).toHaveLength(2)
+			expect(at(split.ends[0]!.endedAt!)).toBe(400)
+			expect(split.ends[0]!.flags?.timeout).toBe(true)
+			expect(at(split.ends[1]!.startedAt)).toBe(600)
+			expect(split.ends[1]).toMatchObject({ talkgroup: 9, source: 100 })
+			// Without a second voice sync (only the TLC) nothing confirms it: one call.
+			const lone = replay(
+				rekey(600).filter(([t, text]) => !(t === 960 && text.includes("VC*"))),
+				6000,
+			)
+			expect(lone.ends).toHaveLength(1)
 		})
 
 		it("keeps a faded over whole when its voice resumes on its superframe grid", () => {

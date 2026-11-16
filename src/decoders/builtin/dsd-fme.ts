@@ -515,6 +515,44 @@ interface SyncChain {
 	clean: number
 	/** DMR colour code / P25 NAC the chain's syncs printed (a frame printing another starts a new chain). */
 	tag?: string | undefined
+	/** YSF: the first checked source callsign its frames printed before the call started. */
+	lead?: string | undefined
+	/**
+	 * The ongoing call's last line with its own identity (markChain), the
+	 * chain's first sync after it and the sync before that one: where the
+	 * next over can have begun when the identity changes on the grid.
+	 */
+	markMs?: number | undefined
+	afterMarkMs?: number | undefined
+	beforeMarkMs?: number | undefined
+}
+
+/**
+ * The ongoing DMR call's superframe grid: the voice sync it is measured from
+ * (the last one not held as a suspect) and an off-grid sync waiting for the
+ * next sync to confirm it began a new over (dmrRekey).
+ */
+interface DmrGrid {
+	anchorMs: number
+	suspect?: DmrSuspect | undefined
+}
+
+/** An off-grid DMR voice sync after a short gap, until the next sync confirms or clears it. */
+interface DmrSuspect {
+	/** The off-grid sync: the next over's first, if confirmed. */
+	atMs: number
+	/** The call's last line before it: where the call ends if confirmed. */
+	endAtMs: number
+	/** 1 when that sync was clean. */
+	clean: number
+}
+
+/** A re-key found by dmrRekey: the call ends at `endAtMs`, the next over began at `startMs`. */
+interface DmrRekey {
+	endAtMs: number
+	startMs: number
+	/** Clean voice syncs of the next over so far (1, or 2 once confirmed). */
+	clean: number
 }
 
 /**
@@ -528,6 +566,7 @@ interface CallLane {
 	recentlyTerminated: CallTrailer | null
 	chain: SyncChain | null
 	lastVoiceSyncMs: number | undefined
+	dmrGrid: DmrGrid | undefined
 }
 
 const emptyLane = (): CallLane => ({
@@ -536,6 +575,7 @@ const emptyLane = (): CallLane => ({
 	recentlyTerminated: null,
 	chain: null,
 	lastVoiceSyncMs: undefined,
+	dmrGrid: undefined,
 })
 
 /**
@@ -648,6 +688,16 @@ const RECORDING_PRUNE_DELAY_MS = 2000
  * 40 = 240; NXDN48 and dPMR 80 ms frames: 2 × 80 + 40 = 200 (NXDN96's 40 ms
  * frames fit too).
  */
+/**
+ * A call's start is back-dated to its chain's first sync, but at most this
+ * many of the protocol's SYNC_CHAIN_MS windows before the line that starts
+ * it: DMR 4 × 760 = 3 040 ms, P25 4 × 400 = 1 600, D-STAR 4 × 880 = 3 520,
+ * YSF 4 × 240 = 960, NXDN and dPMR 4 × 200 = 800. Call-first starts on the
+ * second clean frame, so a chain longer than that is a weak signal's run of
+ * errored frames: its first sync is too uncertain to be the over's start.
+ */
+export const BACKDATE_MAX_CHAIN_WINDOWS = 4
+
 export const SYNC_CHAIN_MS: Readonly<
 	Partial<Record<NonNullable<DsdFmeProtocol>, number>>
 > = {
@@ -679,6 +729,26 @@ export const DMR_SUPERFRAME_MS = 360
  */
 export const DMR_GRID_TOLERANCE_MS = 30
 
+/**
+ * A DMR voice sync off the call's grid re-keys at once only after this long
+ * without a voice sync of the call: one whole superframe with no sync plus
+ * the re-key gap, 360 + 200 = 560 ms. A continuous over prints one sync per
+ * 360 ms superframe, so even with each sync's print up to 45 ms early or
+ * late its steps stay within 360 + 2 × 45 = 450 ms, below this.
+ */
+export const DMR_REKEY_LONG_GAP_MS = DMR_SUPERFRAME_MS + REKEY_GAP_MS
+
+/**
+ * An off-grid DMR voice sync after a shorter gap is a re-key only once the
+ * next voice sync confirms the new grid (within DMR_GRID_TOLERANCE_MS of it)
+ * and lies more than this off the call's grid: each sync's print may be up
+ * to 45 ms off its true time, so two syncs of one over differ from the
+ * grid by at most 2 × 45 = 90 ms. A re-key 60 ms off the grid (the least,
+ * see DMR_GRID_TOLERANCE_MS) after a short gap is then left to the voice LC
+ * header or the long gap: a missed split, never a split over.
+ */
+export const DMR_REKEY_CONFIRM_MS = 2 * 45
+
 /** A DMR sync line's burst type (dmr_dburst.c labels after the last "|"). */
 const DMR_BURST = /\|\s*(?<burst>VLC|VC[1-6*]|TLC)(?=\s|$)/
 /** A P25 phase 1 voice over's frame (header or voice): HDU, LDU1, LDU2. */
@@ -686,6 +756,12 @@ const P25_VOICE_FRAME = /\b(?<duid>HDU|LDU1|LDU2)\b/
 const DSTAR_VOICE_SYNC = /\bSync:\s*[+-]DSTAR (?:VOICE|HEADER)\b/
 /** An error printed on the line (the frame did not decode clean). */
 const LINE_ERR = /\b(?:CRC|FEC)(?:16|32)?\s+ERR\b/i
+
+/** How far `elapsedMs` (>= 0) is from the nearest whole number (>= 1) of DMR superframes. */
+function dmrGridError(elapsedMs: number): number {
+	const k = Math.max(1, Math.round(elapsedMs / DMR_SUPERFRAME_MS))
+	return Math.abs(elapsedMs - k * DMR_SUPERFRAME_MS)
+}
 
 /** Algorithm ids that mean "no encryption" (P25 0x80, DMR/none 0x00). */
 function isClearAlgorithm(alg: string): boolean {
@@ -837,6 +913,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/** The current lane's voice frame sync chain and last DMR voice sync (ms). */
 	private chain: SyncChain | null = null
 	private lastVoiceSyncMs: number | undefined = undefined
+	private dmrGrid: DmrGrid | undefined = undefined
 
 	/**
 	 * The lane whose call the fields above hold (useLane), and the other
@@ -1217,6 +1294,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			recentlyTerminated: this.recentlyTerminated,
 			chain: this.chain,
 			lastVoiceSyncMs: this.lastVoiceSyncMs,
+			dmrGrid: this.dmrGrid,
 		})
 		const next = this.lanes.get(key) ?? emptyLane()
 		this.lanes.delete(key)
@@ -1225,6 +1303,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.recentlyTerminated = next.recentlyTerminated
 		this.chain = next.chain
 		this.lastVoiceSyncMs = next.lastVoiceSyncMs
+		this.dmrGrid = next.dmrGrid
 		this.laneKey = key
 	}
 
@@ -2115,7 +2194,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		} else if (protocol === "nxdn48" || protocol === "nxdn96") {
 			if (!/\bVOICE\b/i.test(line)) return
 		}
-		const clean = !LINE_ERR.test(line)
+		// A YSF frame is clean when its FICH decoded (a failed DCH is still the over's frame).
+		const clean =
+			protocol === "ysf"
+				? YSF_FICH_OK.test(line) || YSF_CRC_OK.test(line)
+				: !LINE_ERR.test(line)
 		const chain = this.chain
 		const fresh =
 			chain !== null &&
@@ -2129,16 +2212,24 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				: { protocol, startMs: nowMs, lastMs: nowMs, clean: clean ? 1 : 0, tag }
 			return
 		}
+		if (
+			chain.markMs !== undefined &&
+			chain.afterMarkMs === undefined &&
+			nowMs >= chain.markMs
+		) {
+			chain.afterMarkMs = nowMs
+			chain.beforeMarkMs = chain.lastMs
+		}
 		chain.lastMs = nowMs
 		chain.tag ??= tag
 		if (clean) chain.clean++
 	}
 
-	/** When the lane's chain of `protocol` (still running at `nowMs`) began, else undefined. */
-	private chainStart(
+	/** The lane's chain of `protocol` when it is still running at `nowMs`, else null. */
+	private liveChain(
 		protocol: NonNullable<DsdFmeProtocol>,
 		nowMs: number,
-	): Date | undefined {
+	): SyncChain | null {
 		const chain = this.chain
 		const window = SYNC_CHAIN_MS[protocol]
 		if (
@@ -2148,8 +2239,33 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			nowMs < chain.lastMs ||
 			nowMs - chain.lastMs > window
 		)
-			return undefined
-		return new Date(chain.startMs)
+			return null
+		return chain
+	}
+
+	/** The ongoing call's own identity was seen at `nowMs` (see SyncChain.markMs). */
+	private markChain(
+		protocol: NonNullable<DsdFmeProtocol>,
+		nowMs: number,
+	): void {
+		const chain = this.liveChain(protocol, nowMs)
+		if (chain === null) return
+		chain.markMs = nowMs
+		chain.afterMarkMs = undefined
+		chain.beforeMarkMs = undefined
+	}
+
+	/** When the lane's chain of `protocol` (still running at `nowMs`) began, else undefined. */
+	private chainStart(
+		protocol: NonNullable<DsdFmeProtocol>,
+		nowMs: number,
+	): Date | undefined {
+		const chain = this.liveChain(protocol, nowMs)
+		const window = SYNC_CHAIN_MS[protocol]
+		if (chain === null || window === undefined) return undefined
+		return new Date(
+			Math.max(chain.startMs, nowMs - window * BACKDATE_MAX_CHAIN_WINDOWS),
+		)
 	}
 
 	/**
@@ -2217,18 +2333,25 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// A voice burst after a terminator is the next over: the trailer is over.
 				this.recentlyTerminated = null
 				this.lastVoiceSyncMs = nowMs
+				this.dmrGrid = { anchorMs: nowMs }
 			}
 			this.startOnFrames("dmr", now, clean)
 			return null
 		}
-		if (voice && this.dmrRekey(ongoing, burst, nowMs)) {
+		const rekey = voice ? this.dmrRekey(ongoing, burst, nowMs, clean) : null
+		if (rekey !== null) {
 			const chain = this.chain
+			// The call ends at its last line before the next over's first sync.
+			ongoing.lastUpdate = new Date(rekey.endAtMs)
 			const ended = this.endOngoingCall(now, true)
 			this.chain = chain
 			this.lastVoiceSyncMs = nowMs
+			this.dmrGrid = { anchorMs: nowMs }
 			if (chain !== null && chain.lastMs === nowMs) {
-				chain.startMs = nowMs
-				chain.clean = clean ? 1 : 0
+				chain.startMs = rekey.startMs
+				chain.clean = rekey.clean
+				// Confirmed by this second sync: the next over starts now.
+				this.startOnFrames("dmr", now, clean)
 			}
 			return ended
 		}
@@ -2250,19 +2373,58 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		)
 	}
 
-	/** Whether a DMR voice burst at `nowMs` re-keys (see handleDmrSync). */
+	/**
+	 * Whether a DMR voice burst at `nowMs` re-keys (see handleDmrSync). The gap
+	 * is measured from the call's last voice sync (an LC or slot print is not
+	 * voice). A re-key is:
+	 * - a voice LC header at least REKEY_GAP_MS after the last voice sync;
+	 * - a sync off the call's grid (DMR_GRID_TOLERANCE_MS) at least
+	 *   DMR_REKEY_LONG_GAP_MS after the last voice sync;
+	 * - a sync off the grid after a shorter gap (at least REKEY_GAP_MS) that
+	 *   the next voice sync confirms: on its grid and more than
+	 *   DMR_REKEY_CONFIRM_MS off the call's. Otherwise the off-grid sync was a
+	 *   late or early print of the same over and the grid stays.
+	 */
 	private dmrRekey(
 		ongoing: DsdFmeCallState,
 		burst: string,
 		nowMs: number,
-	): boolean {
-		if (nowMs - ongoing.lastUpdate.getTime() < REKEY_GAP_MS) return false
-		if (burst === "VLC") return true
-		const last = this.lastVoiceSyncMs
-		if (last === undefined || nowMs < last) return false
-		const elapsed = nowMs - last
-		const k = Math.max(1, Math.round(elapsed / DMR_SUPERFRAME_MS))
-		return Math.abs(elapsed - k * DMR_SUPERFRAME_MS) > DMR_GRID_TOLERANCE_MS
+		clean: boolean,
+	): DmrRekey | null {
+		const lastLineMs = ongoing.lastUpdate.getTime()
+		const last = this.lastVoiceSyncMs ?? lastLineMs
+		if (nowMs < last) return null
+		const gap = nowMs - last
+		const grid = this.dmrGrid ?? { anchorMs: last }
+		this.dmrGrid = grid
+		const off = dmrGridError(nowMs - grid.anchorMs)
+		const here: DmrRekey = {
+			endAtMs: lastLineMs,
+			startMs: nowMs,
+			clean: clean ? 1 : 0,
+		}
+		if (burst === "VLC" && gap >= REKEY_GAP_MS) return here
+		if (off > DMR_GRID_TOLERANCE_MS && gap >= DMR_REKEY_LONG_GAP_MS) return here
+		const suspect = grid.suspect
+		if (suspect !== undefined) {
+			// A burst inside the suspect's own superframe neither confirms nor clears it.
+			if (nowMs - suspect.atMs < DMR_SUPERFRAME_MS - DMR_GRID_TOLERANCE_MS)
+				return null
+			grid.suspect = undefined
+			if (
+				dmrGridError(nowMs - suspect.atMs) <= DMR_GRID_TOLERANCE_MS &&
+				off > DMR_REKEY_CONFIRM_MS
+			)
+				return {
+					endAtMs: suspect.endAtMs,
+					startMs: suspect.atMs,
+					clean: suspect.clean + (clean ? 1 : 0),
+				}
+		}
+		if (off > DMR_GRID_TOLERANCE_MS && gap >= REKEY_GAP_MS)
+			grid.suspect = { atMs: nowMs, endAtMs: lastLineMs, clean: here.clean }
+		else grid.anchorMs = nowMs
+		return null
 	}
 
 	/**
@@ -2922,12 +3084,34 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			return null
 		}
 		// A header frame whose FICH decoded is a new over, even from the same
-		// station or with a failed CSD1.
+		// station or with a failed CSD1. Its frame begins the next over's chain.
+		const chain = this.chain
+		const nowMs = now.getTime()
 		const split = YSF_HEADER_FRAME.test(line)
 			? this.endOngoing("ysf", now)
 			: callsign !== undefined
 				? this.endOnNewStation("ysf", callsign, now)
 				: null
+		if (split !== null || this.chain === null) {
+			if (chain !== null && chain.protocol === "ysf" && chain.lastMs === nowMs)
+				this.chain = {
+					protocol: "ysf",
+					startMs: nowMs,
+					lastMs: nowMs,
+					clean: 1,
+				}
+		}
+		// Call-first: the over's second clean frame starts the call (back-dated
+		// to its chain's first sync); a callsign printed before then attaches.
+		let lead = callsign
+		if (this.ongoingCall("ysf") === null) {
+			const live = this.liveChain("ysf", nowMs)
+			if (live === null || live.lastMs !== nowMs || live.clean < 2) {
+				if (live !== null && callsign !== undefined) live.lead ??= callsign
+				return split
+			}
+			lead ??= live.lead
+		}
 		const event = this.processCallMetadata(
 			now,
 			"ysf",
@@ -2938,7 +3122,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			undefined,
 			undefined,
 			undefined,
-			callsign !== undefined ? { callsign } : undefined,
+			lead !== undefined ? { callsign: lead } : undefined,
 		)
 		return split ?? event
 	}
@@ -3260,6 +3444,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Case 1: Active call with matching key - update metadata
 		if (activeKeyMatches && this.callState) {
 			this.callState.lastUpdate = now
+			this.markChain(protocol, nowMs)
 			if (slot !== undefined && this.callState.slot === undefined) {
 				this.callState.slot = slot
 			}
@@ -3284,6 +3469,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Case 2: Pending call with matching key - update metadata, extend delay
 		if (pendingKeyMatches && this.pendingCall) {
 			this.pendingCall.state.lastUpdate = now
+			this.markChain(protocol, nowMs)
 			if (slot !== undefined && this.pendingCall.state.slot === undefined) {
 				this.pendingCall.state.slot = slot
 			}
@@ -3339,7 +3525,34 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Case 3: Different call detected - end previous (at its last line: its
 		// terminator was missed), start new pending
 		if (this.callState) {
-			const endEvent = this.endCall(now, false, this.callState.lastUpdate)
+			// On the grid (one running chain) the next over began after the
+			// old call's last own identity line: the old call ends at that line
+			// or the sync before the boundary, the new one is back-dated to the
+			// chain's first sync after it (endCall drops the chain).
+			const chain = this.liveChain(protocol, nowMs)
+			const boundary =
+				chain?.markMs !== undefined && chain.afterMarkMs !== undefined
+					? chain
+					: null
+			const lastLine = this.callState.lastUpdate
+			const endAt =
+				boundary !== null
+					? new Date(
+							Math.min(
+								lastLine.getTime(),
+								Math.max(boundary.markMs ?? 0, boundary.beforeMarkMs ?? 0),
+							),
+						)
+					: lastLine
+			const endEvent = this.endCall(now, false, endAt)
+			if (boundary !== null && boundary.afterMarkMs !== undefined)
+				this.chain = {
+					protocol: boundary.protocol,
+					startMs: boundary.afterMarkMs,
+					lastMs: boundary.lastMs,
+					clean: boundary.clean,
+					tag: boundary.tag,
+				}
 			this.logger.debug(
 				{
 					oldProtocol: this.callState?.protocol,
@@ -3687,6 +3900,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// The lane's next call starts on its own frames.
 		this.chain = null
 		this.lastVoiceSyncMs = undefined
+		this.dmrGrid = undefined
 
 		// A timeout is detected late: the call really ended at its last line.
 		const endTime = endAt ?? (timeout ? this.callState.lastUpdate : now)
