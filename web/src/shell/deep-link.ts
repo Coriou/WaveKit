@@ -2,7 +2,7 @@
 // `#/activity?t=talkgroup:1201&cat=voice&range=today&audio=1&layout=cards`, `#/activity/<eventId>`,
 // `#/scanner/<discoveryId>`, `#/recordings`, `#/settings/<settingId>` (the setting is highlighted, as from ⌘K). With a
 // drawer over the map, `view=` keeps the view. The removed Messages view's links (`#/messages`, `view=messages`) open
-// Activity as cards, so an old bookmark still lands on the same cards. A hash never reaches the core, so a link works from any path the app is served
+// Activity as cards (a non-Activity drawer over it opens as linked over the spectrum), so an old bookmark still lands on the same cards. A hash never reaches the core, so a link works from any path the app is served
 // at and the service worker's shell answers it offline. The bar is rewritten in place (no history entry per click).
 import type { ActivityLayout } from "../features/activity/layout.ts"
 import type { DrawerId, ViewId } from "./store.ts"
@@ -202,8 +202,9 @@ export function parseLink(hash: string): LinkState | null {
 	if (isView(head) && !isDrawer(head)) return { view: head, drawer: null }
 	if (!isDrawer(head)) return null
 	const viewParam = q.get("view")
-	// a drawer over the old Messages view: the cards now live in the Activity drawer, which takes the drawer's place
-	if (viewParam === MESSAGES) return messagesLink("spectrum")
+	// a drawer over the old Messages view: the drawer opens as linked over the spectrum; the Activity drawer opens as
+	// cards (the cards now live there), keeping its open event and tokens
+	const oldMessages = viewParam === MESSAGES
 	const view: ViewId =
 		viewParam !== null && isView(viewParam) ? viewParam : "spectrum"
 	const out: LinkState = { view, drawer: head }
@@ -224,7 +225,9 @@ export function parseLink(hash: string): LinkState | null {
 			range: parseRange(q.get("range")),
 			audio: q.get("audio") === "1",
 			openId: item,
-			...(q.get("layout") === "cards" ? { layout: "cards" as const } : {}),
+			...(oldMessages || q.get("layout") === "cards"
+				? { layout: "cards" as const }
+				: {}),
 		}
 	} else if (head === "scanner") out.discoveryId = item
 	else if (head === "settings") out.settingId = item

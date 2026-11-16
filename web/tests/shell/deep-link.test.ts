@@ -234,9 +234,28 @@ describe("deep links: the removed Messages view", () => {
 		expect(parseLink("#/messages?x=1")).toEqual(cards)
 	})
 
-	it("view=messages under any drawer opens Activity as cards", () => {
-		expect(parseLink("#/recordings?view=messages")).toEqual(cards)
+	it("view=messages under Activity opens it as cards, keeping the open event and tokens", () => {
 		expect(parseLink("#/activity?view=messages")).toEqual(cards)
+		const open = parseLink("#/activity/ev-1?view=messages&t=talkgroup:1201")
+		expect(open?.view).toBe("spectrum")
+		expect(open?.drawer).toBe("activity")
+		expect(open?.activity?.openId).toBe("ev-1")
+		expect(open?.activity?.layout).toBe("cards")
+		expect(open?.activity?.tokens.map(t => [t.kind, t.value])).toEqual([
+			["talkgroup", "1201"],
+		])
+	})
+
+	it("view=messages under another drawer keeps that drawer over the spectrum", () => {
+		expect(parseLink("#/scanner/disc-1?view=messages")).toEqual({
+			view: "spectrum",
+			drawer: "scanner",
+			discoveryId: "disc-1",
+		})
+		expect(parseLink("#/recordings?view=messages")).toEqual({
+			view: "spectrum",
+			drawer: "recordings",
+		})
 	})
 
 	it("carries the Cards layout in the Activity link, and leaves List out", () => {

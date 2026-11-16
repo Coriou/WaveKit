@@ -9,7 +9,7 @@ import { showAppToast } from "../../shell/toast.ts"
 import { requestActivitySearchFocus } from "../activity/focus.ts"
 import { feedControllerFor, toggleFeed } from "../receiver/feed.ts"
 import { toggleOpen } from "../listen/squelch-actions.ts"
-import { followSavedNames } from "../naming.ts"
+import { followBandPlan, followSavedNames } from "../naming.ts"
 import { effectiveStep } from "../tuner/prefs.ts"
 import { GO_WINDOW_MS, isTypingTarget, shortcutFor } from "./keys.ts"
 import { openPalette } from "./request.ts"
@@ -18,6 +18,8 @@ export function PaletteKeys() {
 	const { data, tuning, prefs, listen } = useServices()
 	// saved names rename their channel everywhere (naming.ts): this always-mounted root keeps them current
 	useEffect(() => followSavedNames(data.savedFrequencies), [data])
+	// and the band plan, so every surface names, matches and tunes on the same raster step
+	useEffect(() => followBandPlan(data.bandplan), [data])
 	useEffect(() => {
 		let goUntil = 0
 		const onKey = (e: KeyboardEvent) => {
