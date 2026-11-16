@@ -365,7 +365,7 @@ const RUN_LIVE_MIX = 2
  * release and the next call's start less than one clump apart can come out
  * of one clump, with the next call's early voice already held (and released)
  * as the first call's. So a released run is only final for a restricted call
- * starting on its path at least 340 ms after the release (`runAt`); one
+ * starting on its path more than 340 ms after the release (`runAt`); one
  * starting sooner treats the run's samples still in the lane like live voice:
  * dropped (counted) when it is encrypted, held for it when it is not known
  * yet (played if it turns out clear). The window starts at the release, not

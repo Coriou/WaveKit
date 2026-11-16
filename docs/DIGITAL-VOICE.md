@@ -157,7 +157,10 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   not-yet-known call within one clump may have held the next call's early
   voice as its own. A restricted call starting within that window drops (or,
   when not known yet, holds) what of the released voice has not played yet; a
-  clear call starting then loses nothing. `discardedMs` counts voiced samples
+  clear call starting then loses nothing. The window covers one clump, not a
+  late announcement: an encrypted call announced a clump or more after its
+  first voice (an unnamed or late-entry over) can still play that early voice,
+  as it would without a hold. `discardedMs` counts voiced samples
   only (silence is not lost voice). Beyond 2 s the oldest held voice is dropped.
   The hold starts at the call's `call_start`, which for a call started on its
   voice frames alone comes after the evidence that it is an over (dsd-fme
