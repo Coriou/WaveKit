@@ -258,8 +258,9 @@ Each answer below is one read, no logs needed; every closed list is in `GET /api
   `unhealthy`), then each reason's `code`, `message` and `fix` (the call to make). A sweep that
   suspends the ambient decoders reads `sweep-suspends-decoders` (`info`) and never makes the core
   `unhealthy`; `sweep-hold-without-job` (`warn`, `degraded`) means decoders stay suspended for a
-  sweep no live job runs; `recorder-refusal-streak` (`warn`, `degraded`) means the recorder kept
-  and started nothing for over 5 minutes, and `fix` names the call for its newest refusal code.
+  sweep no live job runs and none ended within 30 seconds; `recorder-refusal-streak` (`warn`,
+  `degraded`) means the recorder kept nothing and started no recording that went on for over 5
+  minutes, and `fix` names the call for its newest refusal code.
 - **Who moved the tuner, and why:** `lastChange` on `GET /api/tuner` (`actor`, `reason`, `at`,
   `fields`, and `jobId` when a job moved it). A machine token reads `agent`, a browser session
   `web`, a core without access `unknown`.
@@ -496,7 +497,7 @@ One read says what the core already knows at a frequency, without moving anythin
 
 ```sh
 curl --fail-with-body --header "$AUTH" \
-  "$API_ORIGIN/api/identify?frequencyHz=446100000&toleranceHz=6250"
+  "$API_ORIGIN/api/identify?frequencyHz=100000000&toleranceHz=6250"
 ```
 
 Say what `level` says, and how old it is (`best.lastSeenAt`):

@@ -17,6 +17,7 @@ import {
 import {
 	healthRoutes,
 	liveScannerJobSources,
+	SWEEP_RELEASE_GRACE_MS,
 	type HealthRoutesOptions,
 } from "../../../src/api/routes/health.js"
 import { RecorderStreakTracker } from "../../../src/api/routes/recorder-decisions.js"
@@ -187,18 +188,62 @@ describe("GET /api/status during a sweep", () => {
 	})
 
 	it("only jobs that may hold decoders name a source", () => {
+		const longAgo = iso(T0 - SWEEP_RELEASE_GRACE_MS - 1)
 		expect([
-			...liveScannerJobSources([
-				{ state: "running", sourceId: "a" },
-				{ state: "paused", sourceId: "b" },
-				{ state: "holding", sourceId: "c" },
-				{ state: "starting", sourceId: "d" },
-				{ state: "pending", sourceId: "e" },
-				{ state: "completed", sourceId: "f" },
-				{ state: "cancelled", sourceId: "g" },
-				{ state: "failed", sourceId: "h" },
-			]),
+			...liveScannerJobSources(
+				[
+					{ state: "running", sourceId: "a" },
+					{ state: "paused", sourceId: "b" },
+					{ state: "holding", sourceId: "c" },
+					{ state: "starting", sourceId: "d" },
+					{ state: "pending", sourceId: "e" },
+					{ state: "completed", sourceId: "f", updatedAt: longAgo },
+					{ state: "cancelled", sourceId: "g", updatedAt: longAgo },
+					{ state: "failed", sourceId: "h", updatedAt: longAgo },
+				],
+				T0,
+			),
 		]).toEqual(["a", "b", "c", "d"])
+	})
+
+	it("a job that just ended explains the hold for 30 s while it releases; past that it is leaked", () => {
+		expect(SWEEP_RELEASE_GRACE_MS).toBe(30_000)
+		const ended = (state: string, endedMs: number, nowMs: number) =>
+			liveScannerJobSources(
+				[{ state, sourceId: "rtl", updatedAt: iso(endedMs) }],
+				nowMs,
+			).has("rtl")
+		for (const state of ["completed", "cancelled", "failed"]) {
+			expect(ended(state, T0, T0)).toBe(true)
+			expect(ended(state, T0, T0 + SWEEP_RELEASE_GRACE_MS)).toBe(true)
+			expect(ended(state, T0, T0 + SWEEP_RELEASE_GRACE_MS + 1)).toBe(false)
+		}
+		// An unreadable end time is never guessed leaked.
+		expect(
+			liveScannerJobSources([{ state: "completed", sourceId: "rtl" }], T0).has(
+				"rtl",
+			),
+		).toBe(true)
+	})
+
+	it("/api/status reads a sweep that just ended as info, and the same hold 30 s later as leaked", async () => {
+		let now = T0 + SWEEP_RELEASE_GRACE_MS
+		const server = await serve({
+			...options(swept),
+			scannerJobSources: () =>
+				liveScannerJobSources(
+					[{ state: "completed", sourceId: "rtl", updatedAt: iso(T0) }],
+					now,
+				),
+		})
+		let body = (await server.inject({ url: "/api/status" })).json<StatusBody>()
+		expect(body.status).toBe("healthy")
+		expect(body.reasons.map(r => r.code)).toEqual(["sweep-suspends-decoders"])
+		now = T0 + SWEEP_RELEASE_GRACE_MS + 1
+		body = (await server.inject({ url: "/api/status" })).json<StatusBody>()
+		expect(body.status).toBe("degraded")
+		expect(body.reasons.map(r => r.code)).toEqual(["sweep-hold-without-job"])
+		expect(body.reasons[0]?.message).toContain("in the last 30 s")
 	})
 
 	it("keeps /health and /health/ready green during the sweep", async () => {
@@ -403,17 +448,166 @@ describe("recorder refusal streak", () => {
 				new RecorderStreakTracker().read(rec, T0 + BOUND + 1),
 			).toMatchObject({ since: iso(T0 + 200_000), raisesStatus: false })
 		}
-		// Remembered across reads: a start counted since the last read restarts it too.
+		// Remembered across reads: a start in the rings since the remembered one restarts it too.
 		const tracker = new RecorderStreakTracker()
 		tracker.read(recorder([], [["refused:slots", T0]]), T0 + 1_000)
 		const after = tracker.read(
-			recorder([], [["refused:slots", T0 + 280_000]], { started: 1 }),
+			recorder([["started", T0 + 200_000]], [["refused:slots", T0 + 280_000]], {
+				started: 1,
+			}),
 			T0 + BOUND + 1,
 		)
 		expect(after).toMatchObject({
 			since: iso(T0 + 280_000),
 			raisesStatus: false,
 		})
+	})
+
+	/** Session decisions as the recorder notes them: a start, then that session's outcome. */
+	function sessions(
+		outcome: ScannerRecorderDecision | null,
+		count: number,
+		everyMs: number,
+	): ScannerRecorderStatus["recent"] {
+		const out: ScannerRecorderStatus["recent"] = []
+		for (let i = 0; i < count; i++) {
+			const at = T0 + i * everyMs
+			const base = {
+				sourceId: "rtl",
+				observationId: `obs-${i}`,
+				discoveryId: null,
+			}
+			out.push({ ...base, code: "started", at: iso(at) })
+			if (outcome !== null)
+				out.push({ ...base, code: outcome, at: iso(at + 1_000) })
+		}
+		return out
+	}
+
+	function sessionRecorder(
+		recent: ScannerRecorderStatus["recent"],
+		counts: Partial<Record<ScannerRecorderDecision, number>> = {},
+	): ScannerRecorderStatus {
+		return {
+			sessions: [],
+			parked: 0,
+			recent,
+			recentRefusals: [],
+			counts,
+			logsSuppressed: 0,
+		}
+	}
+
+	it("a session that started and then failed is no breaker: 10 min of started then refused:store raises", () => {
+		// One session every 30 s for 10 min: 21 starts, each followed 1 s later by its refusal.
+		for (const outcome of [
+			"refused:store",
+			"discarded:store-backlog",
+			"discarded:write-failed",
+			"discarded:buffer-full",
+			"refused:start-failed",
+		] as const) {
+			const recent = sessions(outcome, 21, 30_000)
+			const now = T0 + 10 * 60_000 + 2_000
+			const streak = new RecorderStreakTracker().read(
+				sessionRecorder(recent, { started: 21, [outcome]: 21 }),
+				now,
+			)
+			expect(streak).toMatchObject({
+				since: iso(T0 + 1_000),
+				newestCode: outcome,
+				refusals: 21,
+				raisesStatus: true,
+			})
+		}
+	})
+
+	it("the same across reads while the session ring rolls over (64 entries)", () => {
+		const tracker = new RecorderStreakTracker()
+		const all = sessions("refused:store", 41, 15_000)
+		let last = null as ReturnType<RecorderStreakTracker["read"]>
+		// Read every minute, 2 s after a session start (its refusal 1 s after it is noted), then once
+		// between a start and its refusal; the ring holds only the newest 64 entries noted so far.
+		const at = (now: number, recording: boolean) => {
+			const noted = all.filter(e => Date.parse(e.at) <= now).slice(-64)
+			const rec = sessionRecorder(noted, { started: 1 })
+			if (recording)
+				rec.sessions = [{} as ScannerRecorderStatus["sessions"][number]]
+			return tracker.read(rec, now)
+		}
+		for (let m = 1; m <= 9; m++) last = at(T0 + m * 60_000 + 2_000, false)
+		// 41 sessions over 10 min hold 82 entries: the first ones rolled out of the ring.
+		expect(last?.raisesStatus).toBe(true)
+		// The newest session is open and the recorder holds it: pending, no raise, memory kept.
+		const open = at(T0 + 10 * 60_000 + 500, true)
+		expect(open).toMatchObject({
+			since: iso(T0 + 1_000),
+			pending: true,
+			raisesStatus: false,
+		})
+		// It then ended refused:store: the streak continues from the remembered start.
+		last = at(T0 + 10 * 60_000 + 2_000, false)
+		expect(last).toMatchObject({
+			since: iso(T0 + 1_000),
+			pending: false,
+			raisesStatus: true,
+		})
+	})
+
+	it("a session that started and kept a file, or is still recording, breaks the streak", () => {
+		const refusals: Array<[ScannerRecorderDecision, number]> = [
+			["refused:cpu", T0],
+			["refused:cpu", T0 + BOUND + 60_000],
+		]
+		const mid = T0 + 60_000
+		const ended = (code: ScannerRecorderDecision | null, recording = false) => {
+			const rec = recorder([], refusals, { started: 1 })
+			if (recording)
+				rec.sessions = [{} as ScannerRecorderStatus["sessions"][number]]
+			const base = { sourceId: "rtl", observationId: "s", discoveryId: null }
+			rec.recent = [{ ...base, code: "started", at: iso(mid) }]
+			if (code !== null)
+				rec.recent.push({ ...base, code, at: iso(mid + 1_000) })
+			return new RecorderStreakTracker().read(rec, T0 + BOUND + 60_001)
+		}
+		for (const code of ["finalized", "discarded:unvoiced", null] as const)
+			expect(ended(code)).toMatchObject({
+				since: iso(T0 + BOUND + 60_000),
+				raisesStatus: false,
+			})
+		// Still open while the recorder holds a session: it may be recording, so the streak is
+		// pending and does not raise (its two refusals are 6 min apart: it starts at the second).
+		expect(ended(null, true)).toMatchObject({
+			since: iso(T0 + BOUND + 60_000),
+			pending: true,
+			raisesStatus: false,
+		})
+		// The same session ending refused:store is no breaker: the streak runs from T0.
+		expect(ended("refused:store")).toMatchObject({
+			since: iso(T0),
+			raisesStatus: true,
+		})
+	})
+
+	it("refused:slots while a session records is recording at capacity, not a streak", () => {
+		const rec = streakOf("refused:slots")
+		expect(
+			new RecorderStreakTracker().read(rec, T0 + BOUND + 1)?.raisesStatus,
+		).toBe(true)
+		const recording = {
+			...rec,
+			sessions: [{} as ScannerRecorderStatus["sessions"][number]],
+		}
+		expect(
+			new RecorderStreakTracker().read(recording, T0 + BOUND + 1),
+		).toBeNull()
+		// Other codes still count while a session records.
+		expect(
+			new RecorderStreakTracker().read(
+				{ ...streakOf("refused:cpu"), sessions: recording.sessions },
+				T0 + BOUND + 1,
+			)?.raisesStatus,
+		).toBe(true)
 	})
 
 	it("refused:tuning counts only while its source's tuning is unproven, when that is known", () => {

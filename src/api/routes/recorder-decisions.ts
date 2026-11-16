@@ -7,8 +7,10 @@
  *
  * The refusal streak (RecorderStreakTracker) is the run of blocking refusals (RECORDER_STREAK_FIXES:
  * codes an operator can fix, never classification outcomes or operator choices) since the last kept
- * file or started session, with no gap over RECORDER_STREAK_LIMITS.freshMs. `/api/status` raises
- * its verdict once one lasts over RECORDER_STREAK_LIMITS.raiseAfterMs and is fresh.
+ * file or started session that did not itself end in a blocking code, with no gap over
+ * RECORDER_STREAK_LIMITS.freshMs. A `refused:slots` while a session records is recording at
+ * capacity and does not count. `/api/status` raises its verdict once one lasts over
+ * RECORDER_STREAK_LIMITS.raiseAfterMs and is fresh.
  */
 import { z } from "zod"
 import {
@@ -87,21 +89,61 @@ function merged(recorder: ScannerRecorderStatus): Tagged[] {
 	return out.sort((a, b) => a.ms - b.ms)
 }
 
-/**
- * Codes that end a streak: a kept file, or a session the recorder started (`started`, `shadow`):
- * a candidate was taken, so "refusing every candidate" no longer holds.
- */
-const STREAK_BREAKERS: ReadonlySet<ScannerRecorderDecision> = new Set([
-	"finalized",
+/** A session the recorder started: a candidate was taken, unless that session then failed. */
+const SESSION_STARTS: ReadonlySet<ScannerRecorderDecision> = new Set([
 	"started",
 	"shadow",
 ])
 
-/** How many streak-ending decisions the recorder made since the core started. */
-function breakerCount(recorder: ScannerRecorderStatus): number {
-	let n = 0
-	for (const code of STREAK_BREAKERS) n += recorder.counts[code] ?? 0
-	return n
+/**
+ * Session starts (`started`, `shadow`) by how their session went. The recorder notes a session's
+ * start before its outcome (wideband-analog-recorder: `started` or `shadow`, then `refused:store`,
+ * `discarded:store-backlog`, `refused:start-failed`, ...), all about the session's owner
+ * observation in the session ring (`recent`), so a start is paired with the session decisions for
+ * the same `observationId` after it, up to that observation's next start:
+ * - `failed`: one of them is blocking. No breaker: the candidate was not recorded after all.
+ * - `ended`: one of them is any other code (a file kept, a classification end). A breaker.
+ * - `open`: none yet. While the recorder holds a session it may still record or fail: the streak
+ *   is `pending` and does not raise. Without a session held it ended with no blocking code noted:
+ *   a breaker, like `ended`.
+ */
+function sessionStarts(
+	entries: readonly Tagged[],
+	blocking: (entry: ScannerRecorderDecisionEntry) => boolean,
+	recording: boolean,
+): { ended: ReadonlySet<Tagged>; open: ReadonlySet<Tagged> } {
+	const latest = new Map<string, Tagged>()
+	const failed = new Set<Tagged>()
+	const ended = new Set<Tagged>()
+	for (const t of entries) {
+		if (t.kind !== "session") continue
+		const id = t.entry.observationId
+		if (SESSION_STARTS.has(t.entry.code)) {
+			latest.set(id, t)
+			continue
+		}
+		const start = latest.get(id)
+		if (start === undefined) continue
+		if (blocking(t.entry)) failed.add(start)
+		else ended.add(start)
+	}
+	const open = new Set<Tagged>()
+	for (const t of entries)
+		if (SESSION_STARTS.has(t.entry.code) && !failed.has(t) && !ended.has(t))
+			(recording ? open : ended).add(t)
+	for (const t of failed) ended.delete(t)
+	return { ended, open }
+}
+
+/**
+ * How many files the recorder kept since the core started: a change means a file was kept since
+ * the last read, even one rolled out of the rings since. Session starts are not counted here (a
+ * start whose session failed is no breaker, and the counts cannot tell); they are read from the
+ * session ring, which holds the last RECORDER_RECENT_DECISIONS = 64 session decisions: at least 32
+ * sessions (a start and an end each) between two reads.
+ */
+function keptCount(recorder: ScannerRecorderStatus): number {
+	return recorder.counts.finalized ?? 0
 }
 
 interface RingStreak {
@@ -111,18 +153,33 @@ interface RingStreak {
 }
 
 /**
- * The streak the rings alone show: blocking refusals after the newest kept file or started
- * session, restarted wherever two blocking refusals in a row are over `freshMs` apart (a gap: the
- * cause cleared in between). `blocking` decides which entries count.
+ * The streak the rings alone show: blocking refusals after the newest breaker (a kept file, or a
+ * session start that ended without a blocking code: sessionStarts), restarted wherever two
+ * blocking refusals in a row are over `freshMs` apart (a gap: the cause cleared in between).
+ * `blocking` decides which entries count. `lastBreakerMs` is the newest breaker's time and
+ * `lastOpenMs` the newest open session start's, each null without one.
  */
 function ringStreak(
 	entries: readonly Tagged[],
 	blocking: (entry: ScannerRecorderDecisionEntry) => boolean,
-): RingStreak | null {
+	recording: boolean,
+): {
+	streak: RingStreak | null
+	lastBreakerMs: number | null
+	lastOpenMs: number | null
+} {
+	const { ended, open } = sessionStarts(entries, blocking, recording)
 	let streak: RingStreak | null = null
+	let lastBreakerMs: number | null = null
+	let lastOpenMs: number | null = null
 	for (const t of entries) {
-		if (STREAK_BREAKERS.has(t.entry.code)) {
+		if (t.entry.code === "finalized" || ended.has(t)) {
 			streak = null
+			lastBreakerMs = t.ms
+			continue
+		}
+		if (open.has(t)) {
+			lastOpenMs = t.ms
 			continue
 		}
 		if (!blocking(t.entry)) continue
@@ -136,7 +193,7 @@ function ringStreak(
 			streak.refusals++
 		}
 	}
-	return streak
+	return { streak, lastBreakerMs, lastOpenMs }
 }
 
 export interface RecorderStreakTrackerOptions {
@@ -151,16 +208,18 @@ export interface RecorderStreakTrackerOptions {
 
 /**
  * Remembers a streak across reads, since the rings roll over in minutes on a busy band
- * (32 snapshot refusals) while a streak must be seen for 5. State: the count of streak-ending
- * decisions last seen (a change means a file was kept or a session started since: the streak
- * restarts), the earliest start and the newest blocking refusal seen. A read whose rings hold no
+ * (32 snapshot refusals) while a streak must be seen for 5. State: the count of kept files last
+ * seen (a change means a file was kept since: the streak restarts), the earliest start and the
+ * newest blocking refusal seen. A breaker in the rings (ringStreak) at or after the remembered
+ * start also restarts it; a session start with no outcome yet keeps the memory and holds the raise
+ * back (`pending`) until its session ends. A read whose rings hold no
  * blocking refusal (flooded by other codes) keeps that memory while it is fresh; a remembered
  * streak whose newest refusal is over `freshMs` older than the rings' start, or than now, is over.
  * Each read takes the earlier of the remembered start and the rings' own, so an unpolled core still
  * raises once its rings alone span the bound.
  */
 export class RecorderStreakTracker {
-	private breakersSeen: number | null = null
+	private keptSeen: number | null = null
 	private remembered: {
 		sinceMs: number
 		newestMs: number
@@ -173,8 +232,17 @@ export class RecorderStreakTracker {
 		this.tuningUnproven = options.tuningUnproven
 	}
 
-	private blocking = (entry: ScannerRecorderDecisionEntry): boolean => {
+	/**
+	 * Whether an entry counts toward a streak. `recording`: the recorder holds a session now, so a
+	 * `refused:slots` is recording at capacity (every slot busy recording), not a refusal of every
+	 * candidate, and does not count.
+	 */
+	private blocking(
+		entry: ScannerRecorderDecisionEntry,
+		recording: boolean,
+	): boolean {
 		if (!isStreakCode(entry.code)) return false
+		if (entry.code === "refused:slots") return !recording
 		if (entry.code !== "refused:tuning" || this.tuningUnproven === undefined)
 			return true
 		return this.tuningUnproven(entry.sourceId)
@@ -188,18 +256,27 @@ export class RecorderStreakTracker {
 			this.remembered = null
 			return null
 		}
-		const breakers = breakerCount(recorder)
-		if (breakers !== this.breakersSeen) {
-			this.breakersSeen = breakers
+		const kept = keptCount(recorder)
+		if (kept !== this.keptSeen) {
+			this.keptSeen = kept
 			this.remembered = null
 		}
 		const { freshMs, raiseAfterMs } = RECORDER_STREAK_LIMITS
-		const ring = ringStreak(merged(recorder), this.blocking)
+		const recording = recorder.sessions.length > 0
+		const {
+			streak: ring,
+			lastBreakerMs,
+			lastOpenMs,
+		} = ringStreak(
+			merged(recorder),
+			entry => this.blocking(entry, recording),
+			recording,
+		)
 		let prior = this.remembered
 		if (
 			prior !== null &&
-			ring !== null &&
-			ring.startMs - prior.newestMs > freshMs
+			((ring !== null && ring.startMs - prior.newestMs > freshMs) ||
+				(lastBreakerMs !== null && lastBreakerMs >= prior.sinceMs))
 		)
 			prior = null
 		const fromRing =
@@ -225,6 +302,10 @@ export class RecorderStreakTracker {
 			fromRing?.sinceMs ?? Number.POSITIVE_INFINITY,
 		)
 		const fresh = nowMs - newest.newestMs <= freshMs
+		// A session start with no outcome yet while the recorder holds a session: it may be
+		// recording, so no raise until it ends (a blocking end continues the streak, any other end
+		// breaks it).
+		const pending = lastOpenMs !== null
 		// A stale streak is over: the next blocking refusal starts a new one.
 		this.remembered = fresh ? { ...newest, sinceMs } : null
 		const durationMs = Math.max(0, nowMs - sinceMs)
@@ -235,7 +316,8 @@ export class RecorderStreakTracker {
 			newestAt: newest.newestAt,
 			refusals: ring?.refusals ?? 0,
 			// Strictly over the bound: exactly 5 min does not raise.
-			raisesStatus: fresh && durationMs > raiseAfterMs,
+			raisesStatus: fresh && !pending && durationMs > raiseAfterMs,
+			pending,
 			fix: RECORDER_STREAK_FIXES[newest.newestCode],
 		}
 	}

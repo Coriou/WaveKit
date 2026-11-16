@@ -23,6 +23,7 @@ import type {
 	RecorderRefusalStreak,
 	SystemStatusLoad,
 	SystemStatusReason,
+	SystemStatusResponse as SystemStatusDto,
 } from "@wavekit/api-types"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -314,6 +315,7 @@ const statusReasonSchema = {
 				newestAt: { type: "string" },
 				refusals: { type: "integer" },
 				raisesStatus: { type: "boolean" },
+				pending: { type: "boolean" },
 				fix: { type: "string" },
 			},
 			required: [
@@ -323,6 +325,7 @@ const statusReasonSchema = {
 				"newestAt",
 				"refusals",
 				"raisesStatus",
+				"pending",
 				"fix",
 			],
 		},
@@ -417,12 +420,14 @@ export interface NotReadyResponse {
 }
 
 /**
- * System status response interface (extended with health)
+ * GET /api/status: the shared DTO (`@wavekit/api-types` SystemStatusResponse), with the core's
+ * own row types for the parts it builds from them (they carry `| undefined` optionals the DTO's
+ * looser rows leave out).
  */
-export interface SystemStatusResponse {
-	status: HealthStatusLevel
-	uptime: number
-	version: string
+export interface SystemStatusResponse extends Omit<
+	SystemStatusDto,
+	"sources" | "decoders" | "audio" | "tunerRelay" | "health"
+> {
 	sources: SourceStatus[]
 	decoders: DecoderStatus[]
 	audio: {
@@ -433,14 +438,6 @@ export interface SystemStatusResponse {
 	}
 	tunerRelay?: TunerRelayStatus
 	health: HealthStatus
-	/**
-	 * Why `status` reads as it does beyond the components (empty when nothing applies). `status`
-	 * is `health.status` raised to `degraded` by a `warn` reason; `health.status` stays the
-	 * components' own verdict.
-	 */
-	reasons: SystemStatusReason[]
-	/** The shared diagnostics sample's CPU and event-loop figures; absent when not wired. */
-	load?: SystemStatusLoad | null
 }
 
 /**
@@ -469,8 +466,9 @@ export interface HealthRoutesOptions {
 	/** The shared GET /api/diagnostics sample (DiagnosticsSampler.read); absent: no `load`. */
 	diagnostics?: (() => Promise<Diagnostics>) | undefined
 	/**
-	 * Sources a live scanner job names (starting, running, holding or paused: the states that may
-	 * hold decoders); absent without a scanner, and then a sweep hold is never called leaked.
+	 * Sources a scanner job may still hold (liveScannerJobSources: a live job, or one that ended
+	 * within SWEEP_RELEASE_GRACE_MS); absent without a scanner, and then a sweep hold is never called
+	 * leaked.
 	 */
 	scannerJobSources?: (() => ReadonlySet<string>) | undefined
 }
@@ -486,17 +484,51 @@ const HOLDING_JOB_STATES: ReadonlySet<string> = new Set([
 	"paused",
 ])
 
-/** The sources a live scanner job names, from the compact job rows. */
+/** The scanner's terminal job states (job-state.ts TERMINAL). */
+const TERMINAL_JOB_STATES: ReadonlySet<string> = new Set([
+	"completed",
+	"cancelled",
+	"failed",
+])
+
+/**
+ * How long a job that just ended still explains a hold on its source. The runner records the
+ * terminal state (and `updatedAt`) first, then awaits its finishing actions: stopping its probes,
+ * releasing the lease (TEST_MODE 0 and up to 5 restored tuner fields, each one rtl_tcp frame, then
+ * at most RESTORE_CAPS_TIMEOUT_MS = 1 s waiting for the caps to show the restored tuning) and only
+ * then the decoder hold. The 1 s caps wait is the only timed step; 30 s leaves 29 s for the probe
+ * stops, frame writes on a slow link and the decoders' re-evaluation, so a normal sweep end never
+ * reads as leaked, while a hold still there 30 s after its job ended is.
+ */
+export const SWEEP_RELEASE_GRACE_MS = 30_000
+
+/**
+ * The sources a scanner job may still hold, from the compact job rows: a live job (starting,
+ * running, holding, paused), or one that ended at most SWEEP_RELEASE_GRACE_MS ago (`updatedAt`,
+ * set when it took its terminal state) and may still be releasing. An unreadable `updatedAt` on a
+ * terminal row counts as still releasing (never guessed leaked).
+ */
 export function liveScannerJobSources(
-	rows: readonly { state: string; sourceId: string }[],
+	rows: readonly { state: string; sourceId: string; updatedAt?: string }[],
+	nowMs: number = Date.now(),
 ): ReadonlySet<string> {
-	return new Set(
-		rows.filter(r => HOLDING_JOB_STATES.has(r.state)).map(r => r.sourceId),
-	)
+	const out = new Set<string>()
+	for (const r of rows) {
+		if (HOLDING_JOB_STATES.has(r.state)) out.add(r.sourceId)
+		else if (TERMINAL_JOB_STATES.has(r.state)) {
+			const endedMs = r.updatedAt === undefined ? NaN : Date.parse(r.updatedAt)
+			if (
+				!Number.isFinite(endedMs) ||
+				nowMs - endedMs <= SWEEP_RELEASE_GRACE_MS
+			)
+				out.add(r.sourceId)
+		}
+	}
+	return out
 }
 
 const LEAKED_HOLD_FIX =
-	"GET /api/scanner/jobs?view=compact shows no live job on the source; restart the core to release the hold"
+	"GET /api/scanner/jobs?view=compact shows no live job on the source and none that ended in the last 30 s; restart the core to release the hold"
 
 /**
  * The reasons beside the component verdict: fixed text, counts and config ids only. `jobSources`
@@ -529,7 +561,7 @@ export function statusReasons(
 		reasons.push({
 			code: "sweep-hold-without-job",
 			level: "warn",
-			message: `${total(leaked)} decoder(s) on ${leaked.length} source(s) stay suspended for a scanner sweep, but no live scanner job names the source`,
+			message: `${total(leaked)} decoder(s) on ${leaked.length} source(s) stay suspended for a scanner sweep, but no live scanner job names the source and none ended there in the last ${SWEEP_RELEASE_GRACE_MS / 1000} s`,
 			fix: LEAKED_HOLD_FIX,
 			sources: leaked.map(h => ({ ...h })),
 		})

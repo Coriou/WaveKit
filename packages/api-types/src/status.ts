@@ -2,8 +2,12 @@
  * Agent-facing verdict helpers: the reasons and load figures on `GET /api/status`, the analog
  * recorder's recent decisions (`GET /api/scanner/recorder/decisions`) and the passive
  * "what is at this frequency" answer (`GET /api/identify`). Every field composes data the core
- * already holds; none of these adds a sampling loop.
+ * already holds and none adds a sampling loop of its own: `load` reads the shared diagnostics
+ * sample, taking one when none is under 2 s old.
  */
+import type { DecoderStatus } from "./decoders.js"
+import type { SourceStatus } from "./sources.js"
+import type { TunerRelayStatus } from "./tuner.js"
 import {
 	RECORDER_RECENT_DECISIONS,
 	RECORDER_RECENT_REFUSALS,
@@ -54,9 +58,11 @@ export interface SystemStatusReason {
 }
 
 /**
- * `SystemStatus.load`: the figures of the shared `GET /api/diagnostics` sample (one sample at most
- * every 2 s whoever asks, so reading them here costs no extra sampling). Null figures mean the
- * sample has none yet: the first sample has no CPU or utilization window.
+ * `SystemStatusResponse.load`: the figures of the shared `GET /api/diagnostics` sample. Status
+ * reuses the newest sample when it is under 2 s old and otherwise takes one (the same sample
+ * `/api/diagnostics` answers with), so the core samples at most once every 2 s whoever asks; with
+ * nobody asking, nothing is sampled. Null figures mean the sample has none yet: the first sample
+ * has no CPU or utilization window.
  */
 export interface SystemStatusLoad {
 	/** ISO time of the sample. */
@@ -74,6 +80,56 @@ export interface SystemStatusLoad {
 	eventLoopDelayMaxMs10m: number | null
 	/** The full sample: threads, channels and the delay histogram. */
 	details: "/api/diagnostics"
+}
+
+/** The verdict levels of `GET /api/status` (and `health.status`). */
+export type SystemHealthLevel = "healthy" | "degraded" | "unhealthy"
+
+/** One component's health in `SystemStatusResponse.health.components`. */
+export interface SystemComponentHealth {
+	status: "up" | "down" | "degraded"
+	message?: string
+	lastCheck: string
+	metrics?: Record<string, number>
+}
+
+/** `SystemStatusResponse.health`: the components' own verdict, before any reason raises it. */
+export interface SystemHealth {
+	status: SystemHealthLevel
+	timestamp: string
+	uptime: number
+	components: {
+		api: SystemComponentHealth
+		sdrpp?: SystemComponentHealth
+		decoders: Record<string, SystemComponentHealth>
+		source: SystemComponentHealth
+	}
+}
+
+/** `GET /api/status`. */
+export interface SystemStatusResponse {
+	/**
+	 * `health.status` raised to `degraded` by a `warn` reason; `health.status` stays the
+	 * components' own verdict.
+	 */
+	status: SystemHealthLevel
+	/** Seconds since the core started. */
+	uptime: number
+	version: string
+	sources: SourceStatus[]
+	decoders: DecoderStatus[]
+	audio: {
+		outputPort: number
+		clientsConnected: number
+		format?: string
+		sampleRate?: number
+	}
+	tunerRelay?: TunerRelayStatus
+	health: SystemHealth
+	/** Why `status` reads as it does beyond the components (empty when nothing applies). */
+	reasons: SystemStatusReason[]
+	/** The shared diagnostics sample's CPU and event-loop figures; null when the sample failed, absent when not wired. */
+	load?: SystemStatusLoad | null
 }
 
 // ============================================================================
@@ -134,8 +190,9 @@ export type RecorderStreakCode = keyof typeof RECORDER_STREAK_FIXES
 
 export interface RecorderRefusalStreak {
 	/**
-	 * ISO time of the first blocking refusal since the last kept file or started session, with no gap
-	 * over `freshMs` between two in a row (a lower bound).
+	 * ISO time of the first blocking refusal since the last kept file or started session (one whose
+	 * session then ended in a blocking code does not count), with no gap over `freshMs` between two
+	 * in a row (a lower bound).
 	 */
 	since: string
 	durationMs: number
@@ -144,8 +201,17 @@ export interface RecorderRefusalStreak {
 	newestAt: string
 	/** Blocking refusals the recorder's rings still hold for the streak (0 once rolled out). */
 	refusals: number
-	/** True once it lasted over `raiseAfterMs` and is fresh: `/api/status` is raised. */
+	/**
+	 * True once it lasted over `raiseAfterMs`, is fresh and is not `pending`: `/api/status` is
+	 * raised.
+	 */
 	raisesStatus: boolean
+	/**
+	 * A session the recorder started has no outcome yet while it holds a session: it may be
+	 * recording, so the streak does not raise until that session ends (a blocking end continues it,
+	 * any other end breaks it).
+	 */
+	pending: boolean
 	fix: string
 }
 

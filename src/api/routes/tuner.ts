@@ -414,6 +414,9 @@ const tuneFailureSchema = {
  * design (an operator pause resumes at the same hop), so pausing never frees the tuner: the
  * message says so, and names the field and the calls that do.
  */
+/** The job id a TUNER_LEASE_HELD refusal carries when the lease could not be read. */
+const UNREADABLE_LEASE_JOB_ID = "unknown"
+
 /**
  * `midTune`: the refusal came between frames, so `applied` in the same answer says what was
  * written; otherwise nothing was. Paused is read from the lease view's `reason` (non-null
@@ -424,6 +427,10 @@ function leaseHeldFacts(
 	midTune = false,
 ): Record<string, unknown> {
 	const { job } = err
+	// The lease could not be read (tuner-tune.ts UNNAMED_JOB): no job is known, so nothing is
+	// claimed about whether one is paused.
+	if (job.jobId === UNREADABLE_LEASE_JOB_ID)
+		return { jobId: job.jobId, jobName: job.name, retryWith: { preempt: true } }
 	const facts: Record<string, unknown> = {
 		jobId: job.jobId,
 		jobName: job.name,

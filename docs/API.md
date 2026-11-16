@@ -922,6 +922,7 @@ The 2026-11-16 core adds `reasons` and `load` (older cores omit both):
 				"newestAt": "2026-01-01T10:06:50.000Z",
 				"refusals": 31,
 				"raisesStatus": true,
+				"pending": false,
 				"fix": "GET /api/sources (sources[].tuningUnproven), then POST /api/tuner/:sourceId/take-back"
 			}
 		}
@@ -948,25 +949,35 @@ applies) says why, each with a closed `code`, fixed `message` text and the `fix`
   never makes the core `unhealthy` (nor `/health` 503 or `/health/ready` not ready); a decoder that
   faulted still counts. `sources` lists the held sources and how many decoders each suspends.
 - `sweep-hold-without-job` (`warn`): decoders are suspended `tuner-scanning` on a source that no
-  live scanner job (starting, running, holding or paused) names, so the hold outlived its job.
-  `sources` lists them, and the core reads `degraded`. A job ending and its hold being released
-  are a few milliseconds apart, so a read in between can show it once.
+  live scanner job (starting, running, holding or paused) names and no job ended on in the last
+  30 seconds, so the hold outlived its job. `sources` lists them, and the core reads `degraded`.
+  A job takes its ended state first and then stops its probes, puts the tuner back (waiting up to
+  1 second for the source to show the restored tuning) and only then releases the decoders, which
+  can take a few seconds; a job that ended within 30 seconds still accounts for the hold, which
+  reads as `sweep-suspends-decoders` meanwhile.
 - `recorder-refusal-streak` (`warn`): the wideband analog recorder has kept no file and started
-  no recording for over 5 minutes while refusing candidates with a code an operator can fix
+  no recording that went on (a recording that started and then failed with one of the codes
+  below does not count as started) for over 5 minutes while refusing candidates with a code an
+  operator can fix
   (`refused:tuning`, `refused:cpu`, `refused:slots`, `refused:no-iq`, `refused:store`,
   `refused:start-failed`, `discarded:store-backlog`, `discarded:write-failed`,
   `discarded:buffer-full`), no two of them in a row more than 5 minutes apart and the newest at
   most 5 minutes old. `refused:tuning` counts only while its source's tuning is unproven
   (`tuningUnproven` on [`GET /api/sources`](#get-apisources)): the recorder also refuses a
-  snapshot from before a retune with it. Classification outcomes (`refused:not-analog`,
+  snapshot from before a retune with it. `refused:slots` counts only while no recording runs
+  (`recorder.sessions` empty on `GET /api/scanner`): with one running, every slot is busy
+  recording, which is no fault. Classification outcomes (`refused:not-analog`,
   `discarded:unvoiced`, ...) and `refused:record-disabled` (recording turned off on the job, an
   operator's choice) never make a streak. `fix` is the call for the newest code; `streak` is the
   same object as on [`GET /api/scanner/recorder/decisions`](#get-apiscannerrecorderdecisions).
-  Exactly 5 minutes does not raise it; any longer does.
+  Exactly 5 minutes does not raise it; any longer does. While a recording that started since has
+  no outcome yet, `streak.pending` is true and it does not raise: if that recording then fails
+  with one of the codes, the streak goes on from its first refusal; any other end breaks it.
 
 `load` holds the CPU and event-loop figures of the shared
-[`GET /api/diagnostics`](#get-apidiagnostics) sample (one sample at most every 2 s whoever
-asks, so this adds no sampling): `processCpuCores` (all threads, 1 is one core),
+[`GET /api/diagnostics`](#get-apidiagnostics) sample: status reuses the newest sample when it
+is under 2 s old and otherwise takes one, the same sample `/api/diagnostics` then answers with,
+so the core samples at most once every 2 s whoever asks: `processCpuCores` (all threads, 1 is one core),
 `containerCpuCores`, `eventLoopUtilization` (0 to 1), `eventLoopDelayMaxMs` and
 `eventLoopDelayP99Ms` (the last 2 s) and `eventLoopDelayMaxMs10m`. A figure reads null until the
 sample has one (the first has no CPU window); `load` is null when the sample failed. When no
@@ -5498,6 +5509,7 @@ or another parameter, answers 400 `VALIDATION_ERROR` naming the field.
 		"newestAt": "2026-01-01T10:06:50.000Z",
 		"refusals": 31,
 		"raisesStatus": true,
+		"pending": false,
 		"fix": "GET /api/sources (sources[].tuningUnproven), then POST /api/tuner/:sourceId/take-back"
 	}
 }
@@ -5515,11 +5527,13 @@ counts every decision since the core started.
 `streak` is null unless refusals with a fixable code (listed under
 [`GET /api/status`](#get-apistatus) `recorder-refusal-streak`) follow the last kept file or
 started recording: `since` (the first of them still known, a lower bound once the rings rolled
-over; the core remembers it across reads until a file is kept, a recording starts, or no
-fixable refusal comes for over 5 minutes, and a gap that long between two of them starts a new
-streak), `durationMs`, the `newestCode` and `newestAt`, `refusals` (how many the rings hold, 0
-once other codes pushed them out), `raisesStatus` (over 5 minutes and the newest at most
-5 minutes old) and `fix`. The joined voice of each decision is not reported yet.
+over; the core remembers it across reads until a file is kept, a recording starts and does not
+fail with a fixable code, or no fixable refusal comes for over 5 minutes, and a gap that long
+between two of them starts a new streak), `durationMs`, the `newestCode` and `newestAt`,
+`refusals` (how many the rings hold, 0 once other codes pushed them out), `raisesStatus` (over
+5 minutes, the newest at most 5 minutes old, and not `pending`), `pending` (a recording that
+started has no outcome yet while one runs) and `fix`. A recording's start and its outcome are
+paired by `observationId` in the session ring, which holds the last 64 session decisions. The joined voice of each decision is not reported yet.
 
 #### GET /api/identify
 

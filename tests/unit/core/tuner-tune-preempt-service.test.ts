@@ -16,6 +16,7 @@ import { SourceManager } from "../../../src/core/source-manager.js"
 import { TunerController } from "../../../src/core/tuner-controller.js"
 import type { TunerRelay } from "../../../src/core/tuner-relay.js"
 import { wireTunerControl } from "../../../src/core/tuner-wiring.js"
+import { WaveKitError } from "../../../src/utils/errors.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import { FakeFanout, testSettings } from "../../mocks/scanner/engine-fakes.js"
 import {
@@ -53,7 +54,13 @@ const sweep = (priority: number, autoAfterIdleMs: number | null = 60_000) => ({
 	resume: { autoAfterIdleMs },
 })
 
-async function setup(options: { lostOwnership?: () => boolean } = {}) {
+async function setup(
+	options: {
+		lostOwnership?: () => boolean
+		/** Replaces the scanner's lease view (e.g. one that fails). */
+		leaseHolder?: (sourceId: string) => never
+	} = {},
+) {
 	const frames: Array<{ cmd: number; value: number }> = []
 	const sockets: net.Socket[] = []
 	const server = net.createServer(socket => {
@@ -146,7 +153,8 @@ async function setup(options: { lostOwnership?: () => boolean } = {}) {
 		tunerController: controller,
 		sourceManager: manager,
 		principalKind: () => "machine",
-		scannerLeaseHolder: sourceId => service.tunerLeaseJob(sourceId),
+		scannerLeaseHolder:
+			options.leaseHolder ?? (sourceId => service.tunerLeaseJob(sourceId)),
 	})
 	await app.ready()
 	cleanup.push(() => app.close())
@@ -402,6 +410,32 @@ describe("what the answer says about the job and the jobs behind it", () => {
 		expect(h.service.getJob(job.id)).toMatchObject({
 			state: "paused",
 			reason: "operator",
+		})
+	})
+
+	it("an unreadable lease names no job state: no jobPaused or pauseReason", async () => {
+		const h = await setup({
+			leaseHolder: () => {
+				throw new WaveKitError("lease view failed", "TEST_LEASE_VIEW")
+			},
+		})
+		const before = h.frames.length
+		const res = await h.post({ frequencyHz: 120_000_000 })
+		expect(res.statusCode).toBe(409)
+		const body = res.json<{ message: string } & Record<string, unknown>>()
+		expect(body).toMatchObject({
+			code: "TUNER_LEASE_HELD",
+			jobId: "unknown",
+			jobName: null,
+			retryWith: { preempt: true },
+		})
+		expect(body).not.toHaveProperty("jobPaused")
+		expect(body).not.toHaveProperty("pauseReason")
+		expect(body.message).toContain("could not be read")
+		// Nothing was tuned (the connection's own opening frames may still arrive).
+		expect(h.frames.slice(before)).not.toContainEqual({
+			cmd: 1,
+			value: 120_000_000,
 		})
 	})
 

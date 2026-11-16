@@ -395,6 +395,12 @@ curl http://localhost:9000/health
 # {"status":"ok","timestamp":"..."}
 ```
 
+`/health` and `/health/ready` leave out decoders a scanner sweep holds suspended
+(`tuner-scanning`), so a sweep never fails a probe. A hold that outlived its sweep
+(still there 30 seconds after the job ended) does not fail them either: it shows
+only in the `reasons` of [`GET /api/status`](API.md#get-apistatus), as
+`sweep-hold-without-job`, which reads `degraded`.
+
 A protected core that lost its private access directory answers `/health` with
 503 and `reason` `access_authority_lost` while it closes, then exits with code 1. s6
 starts it again inside the container about 5 seconds later, with no Docker restart: a
