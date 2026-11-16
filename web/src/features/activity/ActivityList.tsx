@@ -25,6 +25,7 @@ import type { ActivityFeed } from "../../data/activity-feed.ts"
 import { compareSeq } from "../../data/activity-feed.ts"
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
+import { useSavedNames } from "../naming.ts"
 import { clockText, useDisplay } from "../display.ts"
 import { useNow } from "../hooks.ts"
 import { MessageCard } from "../messages/MessageCard.tsx"
@@ -618,6 +619,7 @@ export const ActivityRow = memo(function ActivityRow({
 	queue = NO_QUEUE,
 }: RowProps) {
 	useDisplay() // the time follows Settings › Display
+	useSavedNames() // a saved name renames the row's channel
 	const v = rowView(item, useRowAircraft(item.entityKey))
 	const stacked = stack !== undefined && stack.members.length > 1
 	const channels = channelsText(stack)

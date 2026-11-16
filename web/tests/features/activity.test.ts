@@ -126,7 +126,7 @@ describe("activity rows", () => {
 		})
 		const v = rowView(row, { name: "ZZ0131", about: "WaveKit Air · A320 214" })
 		expect(v.title).toBe("ZZ0131")
-		expect(v.subtitle).toBe("ADSB · WaveKit Air · A320 214")
+		expect(v.subtitle).toBe("ADS-B · WaveKit Air · A320 214")
 		// a row already titled by its callsign keeps it; no fleet entry: as before
 		expect(
 			rowView({ ...row, title: "ZZ0132" }, { name: "N0WK01", about: "" }).title,

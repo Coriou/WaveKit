@@ -20,6 +20,11 @@ import {
 } from "react"
 
 import { useStore } from "../data/store.ts"
+import {
+	activityExpanded,
+	activityLayout,
+	isActivityExpanded,
+} from "../features/activity/layout.ts"
 import { CardAnnouncer, CardPlaceContext } from "./CardHandle.tsx"
 import {
 	cardPlace as defaultCardPlace,
@@ -46,7 +51,6 @@ import {
 	type CardAnchor,
 	type Point,
 	type ShellGeometry,
-	type ShellLayout,
 } from "./layout.ts"
 import { ShellIsland, type IslandSlot } from "./ShellIsland.tsx"
 import { Dock } from "./Dock.tsx"
@@ -68,7 +72,7 @@ import {
 	type ShellStore,
 } from "./store.ts"
 
-// Drawers, the Map and Messages views and the palette are code-split: the first paint is the plot and the islands.
+// Drawers, the Map view and the palette are code-split: the first paint is the plot and the islands.
 const DRAWER_CONTENT: Readonly<
 	Record<DrawerId, ComponentType<DrawerContentProps>>
 > = {
@@ -84,9 +88,6 @@ const DRAWER_TITLE: Readonly<Record<DrawerId, string>> = {
 	settings: "Settings",
 }
 const MapView = lazy(() => import("./drawers/MapView.tsx"))
-const MessagesGallery = lazy(
-	() => import("../features/messages/MessagesGallery.tsx"),
-)
 const Palette = lazy(() => import("./drawers/Palette.tsx"))
 
 export interface ShellProps {
@@ -226,10 +227,16 @@ export function Shell({
 		paneDecl.wanted,
 	)
 	const pane = paneDecl.pane
+	// Activity in Cards layout, expanded: the drawer spans the window between the island rows, with no pane beside it
+	const cardsLayout = useStore(activityLayout, s => s.layout)
+	const cardsExpanded = useStore(activityExpanded, s => s.expanded)
+	const expanded =
+		state.drawer === "activity" &&
+		isActivityExpanded(cardsLayout, cardsExpanded)
 	const L = shellLayout(
 		geo,
 		state.drawer,
-		pane ? { want: paneWanted, pushIn: pane.pushIn } : null,
+		pane && !expanded ? { want: paneWanted, pushIn: pane.pushIn } : null,
 		{
 			at: cardAt,
 			rxOpen: state.panel === "receiver",
@@ -436,11 +443,6 @@ export function Shell({
 					/>
 				</Suspense>
 			)}
-			{state.view === "messages" && (
-				<Suspense fallback={null}>
-					<MessagesGallery insets={galleryInsets(L, !!card, geo.W)} />
-				</Suspense>
-			)}
 
 			{island("tuner", tuner, refs.tunerHead, refs.tunerBox, {
 				top: 16,
@@ -495,12 +497,17 @@ export function Shell({
 					className="wk-shell-drawer"
 					data-full={d.full || undefined}
 					data-pane={paneOn || pushedOn || undefined}
-					style={{
-						top: d.top,
-						bottom: d.bottom,
-						right: d.right,
-						...(d.width === null ? { left: 16 } : { width: d.width }),
-					}}
+					data-expanded={expanded || undefined}
+					style={
+						expanded
+							? { top: L.topRow, bottom: L.bottomRow, right: G, left: G }
+							: {
+									top: d.top,
+									bottom: d.bottom,
+									right: d.right,
+									...(d.width === null ? { left: 16 } : { width: d.width }),
+								}
+					}
 				>
 					<Suspense
 						fallback={
@@ -544,19 +551,24 @@ export function Shell({
 				</PaneSlot>
 			)}
 
-			{drawerShown && d && d.resizable && d.width !== null && !pushedOn && (
-				<DrawerGrip
-					id={state.drawer}
-					name={DRAWER_TITLE[state.drawer]}
-					store={drawerWidthStore}
-					width={d.width}
-					maxW={d.maxW}
-					x={geo.W - d.right - d.width}
-					top={d.top}
-					bottom={d.bottom}
-					onResizing={setResizing}
-				/>
-			)}
+			{drawerShown &&
+				d &&
+				d.resizable &&
+				d.width !== null &&
+				!pushedOn &&
+				!expanded && (
+					<DrawerGrip
+						id={state.drawer}
+						name={DRAWER_TITLE[state.drawer]}
+						store={drawerWidthStore}
+						width={d.width}
+						maxW={d.maxW}
+						x={geo.W - d.right - d.width}
+						top={d.top}
+						bottom={d.bottom}
+						onResizing={setResizing}
+					/>
+				)}
 
 			{L.dockHidden && (
 				<button
@@ -698,13 +710,4 @@ function ShellToast({ lifted }: { lifted: boolean }) {
 			)}
 		</div>
 	)
-}
-
-// The Messages view keeps clear of the tuned card: a lane down the side the card sits on, so no message hides under it.
-function galleryInsets(L: ShellLayout, card: boolean, W: number) {
-	const base = { top: L.topRow, right: L.rxRight, bottom: L.bottomRow, left: 0 }
-	if (!card || !L.card) return base
-	if (L.card.x + CARD_W / 2 < W / 2)
-		return { ...base, left: L.card.x + CARD_W + G }
-	return { ...base, right: Math.max(base.right, W - L.card.x + G) }
 }

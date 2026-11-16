@@ -63,3 +63,17 @@ describe("Activity layout", () => {
 		)
 	})
 })
+
+describe("Activity Cards, expanded", async () => {
+	const { activityExpanded, isActivityExpanded, setActivityExpanded } =
+		await import("../../src/features/activity/layout.ts")
+	afterEach(() => setActivityExpanded(false))
+
+	it("expands only in the Cards layout", () => {
+		setActivityExpanded(true)
+		expect(activityExpanded.get().expanded).toBe(true)
+		expect(isActivityExpanded("cards", true)).toBe(true)
+		expect(isActivityExpanded("list", true)).toBe(false)
+		expect(isActivityExpanded("cards", false)).toBe(false)
+	})
+})

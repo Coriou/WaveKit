@@ -1,8 +1,8 @@
 // The Activity drawer's state outside React: the search (tokens + category chip), the open event, the
 // columns (pinned searches, per browser until the core keeps them: CORE-GAPS "Activity columns and
 // pinned searches"), and the feeds they drive: the drawer's list and one per column, each column's
-// search narrowed by the drawer's. The tuned card opens it on a frequency through showFrequency() and on
-// one decoder through showDecoder().
+// search narrowed by the drawer's. A frequency opens it through naming.ts showChannel() and one decoder
+// through showDecoder().
 import type { ActivityQuery, ActivitySummary } from "@wavekit/api-types"
 
 import type { DataLayer } from "../../data/index.ts"
@@ -32,7 +32,6 @@ import {
 	CATEGORY_CHIPS,
 	buildQuery,
 	decoderToken,
-	frequencyToken,
 	searchTitle,
 	token,
 } from "./search.ts"
@@ -389,17 +388,6 @@ export class ActivityController extends Store<ActivityViewState> {
 	showDecoder(decoderId: string, name?: string): void {
 		this.update(s => ({ ...s, editing: null, view: "all" }))
 		this.setSearch([decoderToken(decoderId, name)], null)
-		shellStore.openDrawer("activity")
-	}
-
-	/** The tuned card's Activity button: what was heard on this channel. */
-	showFrequency(hz: number, bandwidthHz?: number): void {
-		const span =
-			bandwidthHz !== undefined && bandwidthHz > 0
-				? Math.max(1000, Math.round(bandwidthHz / 2))
-				: undefined
-		this.update(s => ({ ...s, editing: null, view: "all" }))
-		this.setSearch([frequencyToken(hz, span)], null)
 		shellStore.openDrawer("activity")
 	}
 

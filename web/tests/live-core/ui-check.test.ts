@@ -79,6 +79,21 @@ describe("ui-check options", () => {
 		})
 	})
 
+	it("drives the naming flow on the fake target, on the Messages link", () => {
+		const o = parseOptions(["--flow=naming"])
+		expect(o.flow).toBe("naming")
+		expect(o.route).toBe("#/messages")
+		expect(parseOptions(["--flow=naming", "--route=#/messages"]).route).toBe(
+			"#/messages",
+		)
+		for (const argv of [
+			["--flow=naming", "--route=#/scanner"],
+			["--flow=naming", "--seed-recordings=5"],
+			["--flow=naming", "--measure", "--route=#/recordings"],
+		])
+			expect(() => parseOptions(argv)).toThrow(CannotRun)
+	})
+
 	it("drives the Listen and play flows on the fake target alone", () => {
 		expect(parseOptions([]).flow).toBeNull()
 		expect(parseOptions(["--flow=listen"]).flow).toBe("listen")

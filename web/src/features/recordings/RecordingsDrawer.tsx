@@ -3,14 +3,14 @@ import "./recordings.css"
 // The Recordings drawer (Recordings board), on the core's recordings catalogue (WG8 inventory, WG9 Keep and
 // delete): header "Recordings · count · All / Kept" with the core's counts, typed-chip search run by the core,
 // one notice slot, the virtual list of rows grouped by day (only what is on screen is mounted; older pages
-// load at the end; open in place: waveform, Keep, Download, Tune, Show in Activity or Scanner, Delete with
-// Undo) and the storage footer. Playback is the app's one player (services.playback, its dock the only
-// transport): the row disc toggles it, the open row's waveform seeks it, the playing row is marked. The list
-// follows the catalogue's `recordings` socket notices; arrivals hold while it is scrolled or playing from it
-// ("N new"). Names, notes, trim, transcripts, IQ captures and
-// Opus downloads wait for the core (CORE-GAPS "Recordings").
+// load at the end; open in place: waveform, then Play, Keep, ⋯ (Download, Tune, Evidence, Delete with Undo)
+// and one channel link) and the storage footer. Playback is the app's one player (services.playback, its dock
+// the only transport): the row disc toggles it, the open row's waveform seeks it, the playing row is marked.
+// The list follows the catalogue's `recordings` socket notices; arrivals hold while it is scrolled or playing
+// from it ("N new"). Names, notes, trim, transcripts, IQ captures and Opus downloads wait for the core
+// (CORE-GAPS "Recordings").
 import { memo, useEffect, useMemo, useRef, useState } from "react"
-import type { KeyboardEvent as ReactKeyboardEvent } from "react"
+import type { ReactNode, KeyboardEvent as ReactKeyboardEvent } from "react"
 import type { RecordingInventoryItem } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
@@ -37,11 +37,17 @@ import { Seg } from "../../ui/Seg.tsx"
 import { useVirtualRows } from "../../ui/virtual-rows.ts"
 import { token as activityToken } from "../activity/search.ts"
 import { openDiscovery } from "../scanner/ui-store.ts"
-import { formatMHz } from "../format.ts"
+import {
+	channelMHz,
+	historyLabel,
+	showChannel,
+	useSavedNames,
+} from "../naming.ts"
+import { tuningStep } from "../../plot/maths.ts"
 import { playbackIdOf } from "../playback/keep.ts"
 import { PlayDisc, usePlaybackMark, WaveView } from "../playback/PlaybackUi.tsx"
 import type { PlaybackService, QueueRef } from "../playback/service.ts"
-import { RecIcon } from "./icons.tsx"
+import { PlayGlyph, RecIcon } from "./icons.tsx"
 import { listKeyAction } from "./keys.ts"
 import {
 	countText,
@@ -538,6 +544,8 @@ function List({
 
 	const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
 		const target = e.target as HTMLElement
+		// a row's ⋯ menu owns its keys: arrows, Delete, Backspace or S there never act on the list
+		if (target.closest("[role=menu]") !== null) return
 		const i = visible.findIndex(r => r.id === cursorId)
 		const cur = visible[i]
 		const p = player.get()
@@ -846,8 +854,10 @@ interface Actions {
 		list: readonly RecordingInventoryItem[],
 	): void
 	tune(hz: number): void
-	inActivity(r: RecordingInventoryItem): void
-	inScanner(discoveryId: string): void
+	/** The row's one channel link: Activity on its channel (or talkgroup), its own transmission open when known. */
+	channel(r: RecordingInventoryItem): void
+	/** Scanner on the discovery that owns it. */
+	evidence(discoveryId: string): void
 }
 
 function useActions(
@@ -898,19 +908,25 @@ function useActions(
 			tune(hz) {
 				void services.tuning.tune(hz)
 			},
-			inActivity(r) {
-				if (r.talkgroup)
+			channel(r) {
+				const eventId = r.activityEventId ?? null
+				if (r.frequencyHz !== null)
+					showChannel(
+						services.activity,
+						r.frequencyHz,
+						tuningStep(services.data.bandplan.get().view, r.frequencyHz),
+					)
+				else if (r.talkgroup) {
 					services.activity.setSearch(
 						[activityToken("talkgroup", r.talkgroup)],
 						null,
 					)
-				else if (r.frequencyHz !== null) {
-					services.activity.showFrequency(r.frequencyHz)
-					return
-				} else return
-				shellStore.openDrawer("activity")
+					shellStore.openDrawer("activity")
+				} else if (eventId === null) return
+				// its own transmission opens over the channel's list
+				if (eventId !== null) services.activity.showEvent(eventId)
 			},
-			inScanner(discoveryId) {
+			evidence(discoveryId) {
 				openDiscovery(discoveryId)
 				shellStore.openDrawer("scanner")
 			},
@@ -951,6 +967,7 @@ const Row = memo(function Row({
 	list,
 }: RowProps) {
 	useDisplay() // the time follows Settings › Display
+	useSavedNames() // a saved name renames the row's title and its channel link
 	const pid = playbackIdOf(r)
 	const phase = usePlaybackMark(pid)
 	const recordings = useServices().data.recordings
@@ -1021,106 +1038,290 @@ const Row = memo(function Row({
 						durationMs={r.durationMs}
 						queue={actions.queue}
 					/>
-					<div className="wkr-actions">
-						<button
-							type="button"
-							className="wk-btn"
-							data-variant="outline"
-							aria-pressed={kept}
-							disabled={readOnly || keeping}
-							title={
-								kept
-									? "Kept: retention never deletes it. Click to unkeep (S)"
-									: "Keep: protect it from every retention rule (S)"
-							}
-							onClick={() => actions.keep(r)}
-						>
-							<RecIcon name="star" size={15} filled={kept} />
-							{kept ? "Kept" : "Keep"}
-						</button>
-						<a
-							className="wk-btn"
-							data-variant="outline"
-							href={recordings.fileUrl(r.id)}
-							download
-							title="The whole WAV file"
-						>
-							<RecIcon name="download" size={15} />
-							WAV · {formatBytes(r.bytes)}
-						</a>
-						{r.frequencyHz !== null && (
-							<button
-								type="button"
-								className="wk-btn"
-								data-variant="outline"
-								onClick={() => actions.tune(r.frequencyHz ?? 0)}
-							>
-								<RecIcon name="tune" size={15} />
-								Tune to {formatMHz(r.frequencyHz)}
-							</button>
-						)}
-						{(r.talkgroup !== null || r.frequencyHz !== null) && (
-							<button
-								type="button"
-								className="wk-btn"
-								data-variant="outline"
-								title={
-									r.talkgroup
-										? `What was heard on talkgroup ${r.talkgroup}`
-										: "What was heard on this frequency"
-								}
-								onClick={() => actions.inActivity(r)}
-							>
-								<RecIcon name="activity" size={15} />
-								Show in Activity
-							</button>
-						)}
-						{r.discoveryId !== null && (
-							<button
-								type="button"
-								className="wk-btn"
-								data-variant="outline"
-								onClick={() => actions.inScanner(r.discoveryId ?? "")}
-							>
-								<RecIcon name="scan" size={15} />
-								Show in Scanner
-							</button>
-						)}
-						{!readOnly && (
-							<DeleteButton item={r} actions={actions} list={list} />
-						)}
-					</div>
+					<RowActions
+						item={r}
+						title={title}
+						playing={phase === "playing" || phase === "loading"}
+						kept={kept}
+						keeping={keeping}
+						readOnly={readOnly}
+						fileUrl={recordings.fileUrl(r.id)}
+						actions={actions}
+						list={list}
+					/>
 				</div>
 			)}
 		</article>
 	)
 })
 
-function DeleteButton({
-	item,
+/** The channel link's words: "History of Club net", "History of 145.6125", "History of TG 2081". */
+export function channelLinkLabel(r: RecordingInventoryItem): string | null {
+	if (r.frequencyHz !== null) return historyLabel(r.frequencyHz)
+	if (r.talkgroup) return `History of TG ${r.talkgroup}`
+	return r.activityEventId ? "Open transmission" : null
+}
+
+/**
+ * An open row's actions (Recordings board, design "same order everywhere"): Play, Keep, ⋯ (Download, Tune,
+ * Evidence, Delete) and one channel link.
+ */
+function RowActions({
+	item: r,
+	title,
+	playing,
+	kept,
+	keeping,
+	readOnly,
+	fileUrl,
 	actions,
 	list,
 }: {
 	item: RecordingInventoryItem
+	title: string
+	playing: boolean
+	kept: boolean
+	keeping: boolean
+	readOnly: boolean
+	fileUrl: string
 	actions: Actions
 	list: readonly RecordingInventoryItem[]
 }) {
-	const blocker = deleteBlocker(item)
+	const [menu, setMenu] = useState(false)
+	const moreRef = useRef<HTMLButtonElement>(null)
+	const link = channelLinkLabel(r)
+	const owner = r.ownerDiscoveryId ?? r.discoveryId
+	const blocker = deleteBlocker(r)
 	return (
-		<button
-			type="button"
-			className="wk-btn wkr-delete"
-			data-variant="outline"
-			aria-disabled={blocker !== null || undefined}
-			title={blocker ?? "Delete the file (Undo for a few seconds)"}
-			onClick={() => {
-				if (blocker !== null) showAppToast(blocker)
-				else actions.remove(item, list)
+		<div className="wkr-actions">
+			<button
+				type="button"
+				className="wk-btn"
+				data-variant="outline"
+				aria-label={`${playing ? "Pause" : "Play"} ${title}`}
+				onClick={() => actions.play(r)}
+			>
+				<PlayGlyph playing={playing} />
+				{playing ? "Pause" : "Play"}
+			</button>
+			<button
+				type="button"
+				className="wk-btn"
+				data-variant="outline"
+				aria-pressed={kept}
+				disabled={readOnly || keeping}
+				title={
+					kept
+						? "Kept: retention never deletes it. Click to unkeep (S)"
+						: "Keep: protect it from every retention rule (S)"
+				}
+				onClick={() => actions.keep(r)}
+			>
+				<RecIcon name="star" size={15} filled={kept} />
+				{kept ? "Kept" : "Keep"}
+			</button>
+			<span className="wkr-more">
+				<button
+					ref={moreRef}
+					type="button"
+					className="wk-btn"
+					data-variant="outline"
+					aria-label="More actions"
+					aria-haspopup="menu"
+					aria-expanded={menu}
+					title="Download, tune, evidence, delete"
+					onClick={() => setMenu(m => !m)}
+				>
+					<Icon name="dots" size={15} />
+				</button>
+				{menu && (
+					<RowMenu
+						onClose={refocus => {
+							setMenu(false)
+							if (refocus) moreRef.current?.focus()
+						}}
+					>
+						<a
+							role="menuitem"
+							className="wk-option"
+							href={fileUrl}
+							download
+							title="The whole WAV file"
+						>
+							<RecIcon name="download" size={16} />
+							<span className="wkf-grow">Download WAV</span>
+							<span className="wkf-menu-hint">{formatBytes(r.bytes)}</span>
+						</a>
+						{r.frequencyHz !== null && (
+							<button
+								type="button"
+								role="menuitem"
+								className="wk-option"
+								onClick={() => actions.tune(r.frequencyHz ?? 0)}
+							>
+								<RecIcon name="tune" size={16} />
+								<span className="wkf-grow">
+									Tune to {channelMHz(r.frequencyHz)}
+								</span>
+							</button>
+						)}
+						{owner !== null && (
+							<button
+								type="button"
+								role="menuitem"
+								className="wk-option"
+								title="The scanner's discovery for this channel"
+								onClick={() => actions.evidence(owner)}
+							>
+								<RecIcon name="scan" size={16} />
+								<span className="wkf-grow">Evidence</span>
+							</button>
+						)}
+						{!readOnly && (
+							<button
+								type="button"
+								role="menuitem"
+								className="wk-option wkr-delete"
+								aria-disabled={blocker !== null || undefined}
+								title={blocker ?? "Delete the file (Undo for a few seconds)"}
+								onClick={() => {
+									if (blocker !== null) showAppToast(blocker)
+									else actions.remove(r, list)
+								}}
+							>
+								<RecIcon name="trash" size={16} />
+								<span className="wkf-grow">Delete</span>
+							</button>
+						)}
+					</RowMenu>
+				)}
+			</span>
+			{link !== null && (
+				<button
+					type="button"
+					className="wk-btn wkr-channel"
+					data-variant="ghost"
+					title={
+						r.activityEventId
+							? "This channel in Activity, with this transmission open"
+							: "What was heard on this channel, in Activity"
+					}
+					onClick={() => actions.channel(r)}
+				>
+					<RecIcon name="activity" size={15} />
+					{link}
+				</button>
+			)}
+		</div>
+	)
+}
+
+/** What a key does inside the ⋯ menu: move focus to a row, close it, or nothing the menu owns. */
+export type RowMenuKey =
+	| { type: "focus"; index: number }
+	| { type: "close"; refocus: boolean }
+	| null
+
+/** The ⋯ menu's keys: arrows wrap, Home and End jump, Esc closes onto ⋯, Tab closes as focus moves on. */
+export function rowMenuKey(key: string, at: number, count: number): RowMenuKey {
+	if (key === "Escape") return { type: "close", refocus: true }
+	if (key === "Tab") return { type: "close", refocus: false }
+	if (count === 0) return null
+	if (key === "ArrowDown" || key === "ArrowUp") {
+		const by = key === "ArrowDown" ? 1 : -1
+		const from = at < 0 ? (by > 0 ? -1 : 0) : at
+		return { type: "focus", index: (from + by + count) % count }
+	}
+	if (key === "Home") return { type: "focus", index: 0 }
+	if (key === "End") return { type: "focus", index: count - 1 }
+	return null
+}
+
+/**
+ * When a chosen row closes the menu: a link (Download WAV) only after its click has run, since unmounting it
+ * mid-click cancels the download; any other row at once.
+ */
+export function rowMenuCloseTiming(
+	el: Pick<Element, "tagName">,
+): "now" | "after" {
+	return el.tagName === "A" ? "after" : "now"
+}
+
+/**
+ * The ⋯ menu (ui.css `wk-menu`): focus starts on its first row, arrows, Home and End move, Esc, Tab, focus leaving
+ * or a press outside closes. Every key pressed inside stays inside: the list's shortcuts never see it.
+ */
+function RowMenu({
+	onClose,
+	children,
+}: {
+	onClose: (refocus: boolean) => void
+	children: ReactNode
+}) {
+	const ref = useRef<HTMLDivElement>(null)
+	// a press inside (Safari does not focus a pressed button) is not focus leaving
+	const pressing = useRef(false)
+	useEffect(() => {
+		ref.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus()
+	}, [])
+	useEffect(() => {
+		const away = (e: PointerEvent) => {
+			if (!ref.current?.parentElement?.contains(e.target as Node))
+				onClose(false)
+		}
+		const up = () => {
+			pressing.current = false
+		}
+		document.addEventListener("pointerdown", away)
+		document.addEventListener("pointerup", up)
+		return () => {
+			document.removeEventListener("pointerdown", away)
+			document.removeEventListener("pointerup", up)
+		}
+	}, [onClose])
+	return (
+		<div
+			ref={ref}
+			role="menu"
+			aria-label="More actions"
+			className="wk-menu wkf-card-menu wkr-more-menu"
+			onPointerDown={() => {
+				pressing.current = true
+			}}
+			onClick={e => {
+				const item = (e.target as Element).closest("[role=menuitem]")
+				if (!item) return
+				if (rowMenuCloseTiming(item) === "after")
+					window.setTimeout(() => onClose(true), 0)
+				else onClose(true)
+			}}
+			onBlur={e => {
+				const next = e.relatedTarget as Node | null
+				if (pressing.current) return
+				if (next !== null && ref.current?.parentElement?.contains(next)) return
+				onClose(false)
+			}}
+			onKeyDown={e => {
+				e.stopPropagation()
+				const items = [
+					...(ref.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ??
+						[]),
+				]
+				const at = items.indexOf(document.activeElement as HTMLElement)
+				const action = rowMenuKey(e.key, at, items.length)
+				if (action === null) return
+				if (action.type === "focus") {
+					e.preventDefault()
+					items[action.index]?.focus()
+				} else if (action.refocus) {
+					e.preventDefault()
+					onClose(true)
+				}
+				// Tab: focus moves on by default and the menu closes as it leaves (onBlur)
 			}}
 		>
-			<RecIcon name="trash" size={15} />
-			Delete
-		</button>
+			{children}
+		</div>
 	)
 }
 

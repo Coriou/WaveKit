@@ -351,4 +351,15 @@
 		background: var(--wk-chip);
 		color: var(--wk-text);
 	}
+	/* the open row's ⋯: its menu opens above the button (features.css wkf-card-menu) */
+	.wkr-more {
+		position: relative;
+		display: inline-flex;
+	}
+	.wkr-more-menu .wk-option {
+		text-decoration: none;
+	}
+	.wkr-channel {
+		margin-left: auto;
+	}
 }

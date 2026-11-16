@@ -10,10 +10,17 @@ import type {
 import { bandAt, channelAt } from "../data/bandplan-store.ts"
 import { isVerified, likelyText, nextStepText } from "../data/scanner-format.ts"
 import { formatMHz } from "../features/format.ts"
+import {
+	channelMHz,
+	historyLabel,
+	rasterHz,
+	savedNameAt,
+} from "../features/naming.ts"
 import type { PaletteAction } from "../features/palette/model.ts"
 import { DECODE_AS } from "../features/tuned/identify-view.ts"
 import { defaultGroup, defaultSaveName } from "../features/tuner/saved.ts"
 import type { IconName } from "../ui/Icon.tsx"
+import { tuningStep } from "./maths.ts"
 
 export interface SignalMenuContext {
 	/** The frequency the menu acts on (snapped to the signal under the cursor). */
@@ -46,10 +53,12 @@ const mhz = (hz: number) => `${formatMHz(hz)} MHz`
 
 /** The menu's first line: the frequency, then the plan's channel or band, or the saved name. */
 export function signalMenuHead(c: SignalMenuContext): string {
-	const saved = savedAt(c)
 	const band = bandAt(c.plan, c.hz)
 	const name =
-		saved?.name ?? channelAt(band, c.hz)?.name ?? band?.band.name ?? null
+		savedNameAt(c.hz, c.saved, tuningStep(c.plan, c.hz)) ??
+		channelAt(band, c.hz)?.name ??
+		band?.band.name ??
+		null
 	const freq = `${formatMHz(c.hz)} MHz`
 	return name ? `${freq} · ${name}` : freq
 }
@@ -134,16 +143,18 @@ export function signalMenuRows(c: SignalMenuContext): SignalMenuRow[] {
 			],
 		})
 	}
+	// the channel's history (naming.ts showChannel): raster frequency, half a raster step, no retune
+	const step = tuningStep(c.plan, c.hz)
 	rows.push({
 		id: "activity",
-		label: "Show in Activity",
+		label: historyLabel(c.hz, step, savedNameAt(c.hz, c.saved, step)),
 		icon: "activity",
 		steps: [
 			{
 				action: {
 					kind: "activity",
-					tokens: [{ kind: "frequency", hz: c.hz }],
-					label: mhz(c.hz),
+					tokens: [{ kind: "frequency", hz: rasterHz(c.hz, step) }],
+					label: `${channelMHz(c.hz, step)} MHz`,
 				},
 				done: null,
 			},

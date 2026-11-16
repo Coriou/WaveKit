@@ -29,3 +29,20 @@ export function setActivityLayout(layout: ActivityLayout): void {
 	}
 	activityLayout.set({ layout })
 }
+
+// Cards layout, expanded: the drawer takes the width between the islands and deals the cards into as many columns
+// as fit (messages/gallery.ts), for wide reading of pages and packets. For this page only; List never expands.
+export const activityExpanded = new Store<{ expanded: boolean }>({
+	expanded: false,
+})
+
+export function setActivityExpanded(expanded: boolean): void {
+	if (activityExpanded.get().expanded === expanded) return
+	activityExpanded.set({ expanded })
+}
+
+/** The drawer is drawn expanded: the Cards layout with Expand on. */
+export const isActivityExpanded = (
+	layout: ActivityLayout,
+	expanded: boolean,
+): boolean => layout === "cards" && expanded
