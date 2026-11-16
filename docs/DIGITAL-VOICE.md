@@ -142,8 +142,18 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   `jitterBufferMs`) until the over ends; the lag shrinks in silence after it.
   If the call turns out encrypted, ends while still unknown, is replaced on its
   slot, moves from an unknown slot to a known one, or the decoder restarts, the
-  held voice is discarded and never played. Beyond 2 s the oldest held voice is
-  dropped. Held voice is kept only while the stream has a listener. Each
+  held voice is discarded and never played. A call corrected to encrypted after
+  it was known clear drops what of it is still queued (its released voice and
+  the live voice behind it), counted in `discardedMs`. Beyond 2 s the oldest
+  held voice is dropped.
+  The hold starts at the call's `call_start`, which for a call started on its
+  voice frames alone comes after the evidence that it is an over (dsd-fme
+  announces it on the line that completes it). The call's voice still queued
+  for playback at that moment (up to `jitterBufferMs`) moves into its hold, in
+  order, so a clear over loses nothing; the other slot's queued voice keeps
+  playing. What already played before the announce, at most the evidence span
+  less the jitter buffer, is not taken back: a late-entry encrypted call can
+  be heard for that window, as without a hold. Held voice is kept only while the stream has a listener. Each
   decoder's status reports `voiceHold` (cumulative `heldMs`, `releasedMs`,
   `discardedMs`, `overflowDroppedMs`, and the current lag `bufferedMs`); held
   voice is not counted in `encryptedDatagramsDropped`. The auto route and other

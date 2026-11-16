@@ -102,11 +102,15 @@ afterEach(async () => {
 	for (const service of services.splice(0)) await service.destroy()
 })
 
-async function started(mode = "auto") {
+async function started(
+	mode = "auto",
+	buffers: { jitterBufferMs?: number; maxBufferMs?: number } = {},
+) {
 	const config = DigitalVoiceConfigSchema.parse({
 		httpPort: 41_239,
 		jitterBufferMs: 100,
 		maxBufferMs: 500,
+		...buffers,
 	})
 	const service = new DigitalVoiceService(logger, config, {
 		httpHost: "127.0.0.1",
@@ -603,5 +607,206 @@ describe("digital voice /stream hold of voice not known clear", () => {
 		client.destroy()
 		await new Promise(resolve => setImmediate(resolve))
 		expect(hold(voice)).toMatchObject({ discardedMs: 200, bufferedMs: 0 })
+	})
+
+	it("a call corrected to encrypted after it was known clear plays nothing more of it", async () => {
+		const voice = await started()
+		const client = voice.connect()
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: false }))
+		send(
+			voice,
+			range(1, 75).map(v => stereo(v, 0)),
+		)
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: true }))
+		send(
+			voice,
+			range(76, 80).map(v => stereo(v, 0)),
+		)
+		const played = client.samples().length
+		voice.decoder.emit(
+			"voice-call",
+			s1({ encryptionKnown: true, encrypted: true }),
+		)
+		send(
+			voice,
+			range(81, 100).map(v => stereo(v, 0)),
+		)
+		voice.decoder.emit(
+			"voice-call",
+			s1({ encryptionKnown: true, encrypted: true, active: false }),
+		)
+		vi.advanceTimersByTime(3000)
+		const after = client.samples().slice(played)
+		expect(after.length).toBeGreaterThan(0)
+		expect(after.every(s => s === 0)).toBe(true)
+		// Its released backlog and the live voice behind it were dropped.
+		expect(hold(voice).discardedMs).toBeGreaterThan(1000)
+		expect(hold(voice).bufferedMs).toBe(0)
+	})
+
+	it("a call announced late as not known takes its queued head into its hold: a clear over loses nothing", async () => {
+		const voice = await started("auto", {
+			jitterBufferMs: 400,
+			maxBufferMs: 1000,
+		})
+		const client = voice.connect()
+		// The over's frames before its call_start play (or queue) as clear.
+		send(
+			voice,
+			range(1, 50).map(v => stereo(v, 0)),
+		)
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: false }))
+		// Up to the jitter buffer was still queued: now held, never played yet.
+		expect(hold(voice).heldMs).toBeGreaterThanOrEqual(380)
+		expect(hold(voice).heldMs).toBeLessThanOrEqual(400)
+		send(
+			voice,
+			range(51, 75).map(v => stereo(v, 0)),
+		)
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: true }))
+		send(
+			voice,
+			range(76, 100).map(v => stereo(v, 0)),
+		)
+		voice.decoder.emit(
+			"voice-call",
+			s1({ encryptionKnown: true, active: false }),
+		)
+		vi.advanceTimersByTime(5000)
+		expect(client.samples().filter(s => s !== 0)).toEqual(frames(range(1, 100)))
+		expect(hold(voice)).toMatchObject({ discardedMs: 0, overflowDroppedMs: 0 })
+		expect(voice.service.getStatus().decoders[0]!.droppedSamples).toBe(0)
+	})
+
+	it("mono: a late unknown call_start takes the queued head too; encrypted discards it", async () => {
+		const clear = await started("p25", { jitterBufferMs: 400, maxBufferMs: 1000 })
+		const client = clear.connect()
+		const p25 = (o: Record<string, unknown>) =>
+			state({ protocol: "P25", slot: null, ...o })
+		send(clear, range(1, 50).map(mono))
+		clear.decoder.emit("voice-call", p25({ encryptionKnown: false }))
+		send(clear, range(51, 75).map(mono))
+		clear.decoder.emit("voice-call", p25({ encryptionKnown: true }))
+		send(clear, range(76, 100).map(mono))
+		clear.decoder.emit("voice-call", p25({ encryptionKnown: true, active: false }))
+		vi.advanceTimersByTime(5000)
+		expect(client.samples().filter(s => s !== 0)).toEqual(frames(range(1, 100)))
+
+		const enc = await started("p25", { jitterBufferMs: 400, maxBufferMs: 1000 })
+		const encClient = enc.connect()
+		send(enc, range(1, 50).map(mono))
+		const played = encClient.samples().filter(s => s !== 0).length
+		enc.decoder.emit("voice-call", p25({ encryptionKnown: false }))
+		send(enc, range(51, 60).map(mono))
+		enc.decoder.emit(
+			"voice-call",
+			p25({ encryptionKnown: true, encrypted: true }),
+		)
+		vi.advanceTimersByTime(3000)
+		// Only what had already played before the call_start was heard.
+		expect(encClient.samples().filter(s => s !== 0).length).toBe(played)
+		expect(hold(enc).discardedMs).toBeGreaterThanOrEqual(580)
+	})
+
+	it("an unknown start on slot 1 never cuts slot 2's queued clear voice", async () => {
+		const voice = await started()
+		const client = voice.connect()
+		voice.decoder.emit("voice-call", s2({ encryptionKnown: true }))
+		send(
+			voice,
+			range(1, 30).map(() => stereo(0, 222)),
+		)
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: false }))
+		send(
+			voice,
+			range(1, 10).map(() => stereo(111, 222)),
+		)
+		voice.decoder.emit(
+			"voice-call",
+			s1({ encryptionKnown: true, encrypted: true }),
+		)
+		send(
+			voice,
+			range(1, 10).map(() => stereo(111, 222)),
+		)
+		voice.decoder.emit("voice-call", s2({ encryptionKnown: true, active: false }))
+		voice.decoder.emit(
+			"voice-call",
+			s1({ encryptionKnown: true, encrypted: true, active: false }),
+		)
+		vi.advanceTimersByTime(2000)
+		const out = client.samples()
+		expect(out.filter(s => s === 222).length).toBe(50 * FRAME)
+		expect(out.every(s => s === 0 || s === 222)).toBe(true)
+	})
+
+	it("slot 1's queued head moves into its hold and slot 2's queued voice stays queued", async () => {
+		const voice = await started()
+		const client = voice.connect()
+		voice.decoder.emit("voice-call", s2({ encryptionKnown: true }))
+		send(
+			voice,
+			range(1, 30).map(() => stereo(111, 222)),
+		)
+		const mixed = client.samples().filter(s => s === 333).length
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: false }))
+		expect(hold(voice).heldMs).toBeGreaterThan(0)
+		send(
+			voice,
+			range(1, 10).map(() => stereo(111, 222)),
+		)
+		voice.decoder.emit(
+			"voice-call",
+			s1({ encryptionKnown: true, encrypted: true }),
+		)
+		voice.decoder.emit("voice-call", s2({ encryptionKnown: true, active: false }))
+		voice.decoder.emit(
+			"voice-call",
+			s1({ encryptionKnown: true, encrypted: true, active: false }),
+		)
+		vi.advanceTimersByTime(2000)
+		const out = client.samples()
+		// Nothing of slot 1 after its call_start; every slot 2 sample once.
+		expect(out.filter(s => s === 333).length).toBe(mixed)
+		expect(out.filter(s => s === 333 || s === 222).length).toBe(40 * FRAME)
+		expect(out.every(s => s === 0 || s === 222 || s === 333)).toBe(true)
+		expect(hold(voice).discardedMs).toBeGreaterThan(200)
+	})
+
+	it("a silent held slot holds nothing, so it does not lag once released", async () => {
+		const voice = await started()
+		const client = voice.connect()
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: false }))
+		voice.decoder.emit("voice-call", s2({ encryptionKnown: true }))
+		send(
+			voice,
+			range(1, 10).map(() => stereo(0, 222)),
+		)
+		expect(hold(voice).heldMs).toBe(0)
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: true }))
+		send(
+			voice,
+			range(1, 10).map(() => stereo(5, 222)),
+		)
+		voice.decoder.emit("voice-call", s2({ encryptionKnown: true, active: false }))
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: true, active: false }))
+		vi.advanceTimersByTime(2000)
+		expect(client.samples().filter(s => s !== 0)).toEqual([
+			...frames(Array<number>(10).fill(222)),
+			...frames(Array<number>(10).fill(227)),
+		])
+	})
+
+	it("a malformed datagram is rejected the same held or not", async () => {
+		const voice = await started()
+		voice.connect()
+		const status = () => voice.service.getStatus().decoders[0]!
+		const bad = [Buffer.alloc(641), Buffer.alloc(0), Buffer.alloc(4100)]
+		send(voice, bad)
+		expect(status().datagramsRejected).toBe(3)
+		voice.decoder.emit("voice-call", s1({ encryptionKnown: false }))
+		send(voice, [...bad, stereo(1, 0)])
+		expect(status().datagramsRejected).toBe(6)
+		expect(hold(voice).heldMs).toBe(20)
 	})
 })

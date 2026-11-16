@@ -233,11 +233,13 @@ describe("dsd-fme call-first: review fixes", () => {
 		})
 
 		it("three DMR syncs announce at a 630 ms span, not at 629", () => {
+			// The third sync 150 ms after the second (under REKEY_GAP_MS): an
+			// off-grid sync after a longer gap is a re-key suspect, no evidence.
 			const run = (span: number) =>
 				replay(
 					[
 						[1000, MS("VC*")],
-						[1000 + Math.floor(span / 2), MS("VC*")],
+						[1000 + span - 150, MS("VC*")],
 						[1000 + span, MS("VC*")],
 					],
 					8000,
@@ -290,6 +292,40 @@ describe("dsd-fme call-first: review fixes", () => {
 			expect(at(starts[0]!.startedAt)).toBe(1000)
 		})
 
+		it("is announced on the line that completes its evidence, not on the next timer tick", () => {
+			const span = unnamedEvidenceSpanMs("dmr")!
+			const { outputs } = replay(
+				[
+					[1000, MS("VC*")],
+					[1000 + span - 150, MS("VC*")],
+					[1000 + span, MS("VC*")],
+				],
+				8000,
+			)
+			const start = outputs.find(o => o.type === "call_start")
+			expect(start).toBeDefined()
+			expect(start!.timestamp.getTime() - T0).toBe(1000 + span)
+		})
+
+		it("an off-grid sync that may begin the next over is no evidence of this one", () => {
+			// 1000 and 1360 on the grid; 1820 is 100 ms off after a 460 ms gap
+			// (a suspect), confirmed at 2180: the next over began at 1820.
+			const { starts, ends } = replay(
+				[
+					[1000, MS("VC*")],
+					[1360, MS("VC*")],
+					[1820, MS("VC*")],
+					[2180, MS("VC*")],
+					[2540, MS("VC*")],
+				],
+				8000,
+			)
+			// The first over (two syncs) never had evidence: no phantom call.
+			expect(starts).toHaveLength(1)
+			expect(ends).toHaveLength(1)
+			expect(at(starts[0]!.startedAt)).toBe(1820)
+		})
+
 		it("a link control naming the call is evidence on two syncs", () => {
 			const { starts, ends } = replay(
 				[
@@ -312,16 +348,20 @@ describe("dsd-fme call-first: review fixes", () => {
 		]
 
 		it("VC* at 1000/1360/1720 and TLC + SLOT line at 1900: one call, tg 9 src 100, known clear", () => {
-			const { starts, ends, voice } = replay(
+			const { outputs, starts, ends, voice } = replay(
 				[...head, [1900, MS("TLC")], [1900, LC(1)]],
 				8000,
 			)
 			expect(starts).toHaveLength(1)
 			expect(ends).toHaveLength(1)
+			// Announced on the line that completes its evidence (1720), before
+			// the trailer names it: unnamed, encryption not known yet.
+			const start = outputs.find(o => o.type === "call_start")
+			expect(start!.timestamp.getTime() - T0).toBe(1720)
 			expect(starts[0]).toMatchObject({
-				talkgroup: 9,
-				source: 100,
-				encryptionKnown: true,
+				talkgroup: null,
+				source: null,
+				encryptionKnown: false,
 			})
 			expect(ends[0]).toMatchObject({
 				talkgroup: 9,
@@ -361,17 +401,48 @@ describe("dsd-fme call-first: review fixes", () => {
 			expect(replay(short, 8000).starts).toHaveLength(0)
 		})
 
-		it("a trailer whose burst printed an error names the call but leaves its encryption unknown", () => {
-			const { ends } = replay(
+		it("a trailer whose burst printed an error after it names nothing and leaves the encryption unknown", () => {
+			const { starts, ends } = replay(
 				[...head, [1900, MS("TLC")], [1900, LC(1)], [1910, " (CRC ERR) "]],
 				8000,
 			)
+			expect(starts).toHaveLength(1)
+			expect(ends).toHaveLength(1)
+			expect(ends[0]).toMatchObject({
+				talkgroup: null,
+				source: null,
+				encryptionKnown: false,
+			})
+			expect(at(ends[0]!.endedAt!)).toBe(1900)
+		})
+
+		it("a short over whose only trailer printed an error is no call", () => {
+			const { starts } = replay(
+				[
+					[1000, MS("VC*")],
+					[1360, MS("VC*")],
+					[1540, MS("TLC")],
+					[1540, LC(1)],
+					[1550, " (CRC ERR) "],
+				],
+				8000,
+			)
+			expect(starts).toHaveLength(0)
+		})
+
+		it("the terminator printed again inside the hold keeps the call_end held for its trailer", () => {
+			const { starts, ends } = replay(
+				[...head, [1900, MS("TLC")], [1930, MS("TLC")], [1950, LC(1)]],
+				8000,
+			)
+			expect(starts).toHaveLength(1)
 			expect(ends).toHaveLength(1)
 			expect(ends[0]).toMatchObject({
 				talkgroup: 9,
 				source: 100,
-				encryptionKnown: false,
+				encryptionKnown: true,
 			})
+			expect(at(ends[0]!.endedAt!)).toBe(1900)
 		})
 
 		it("an encrypted trailer makes the call known encrypted", () => {

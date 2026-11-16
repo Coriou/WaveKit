@@ -92,6 +92,16 @@ const digitalVoiceDecoderSchema = {
 		droppedSamples: { type: "number" },
 		underruns: { type: "number" },
 		bufferedMs: { type: "number" },
+		voiceHold: {
+			type: "object",
+			properties: {
+				heldMs: { type: "number" },
+				releasedMs: { type: "number" },
+				discardedMs: { type: "number" },
+				overflowDroppedMs: { type: "number" },
+				bufferedMs: { type: "number" },
+			},
+		},
 		lastDatagramAt: { type: "string" },
 		call: nullableCallSchema,
 		lastCall: digitalVoiceCallSchema,

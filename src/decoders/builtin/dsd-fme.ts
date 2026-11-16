@@ -515,6 +515,12 @@ interface HeldEnd {
 	lc: boolean
 	/** An error line printed in the terminator's burst: its link control is not checked. */
 	errored: boolean
+	/**
+	 * The trailer's IDs: they attach at closeHeldEnd only if the burst closed
+	 * clean (an error line after the IDs line leaves the call unnamed).
+	 */
+	talkgroup?: number | undefined
+	source?: number | undefined
 }
 
 /** The terminator's own link control, expected right after it (TERMINATOR_TRAILER_MS). */
@@ -1466,6 +1472,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const held = call?.heldEnd
 		if (call === null || held === undefined) return false
 		if (SYNC_PATTERN.test(line)) {
+			// The terminator printed again (its lane's) does not close its own
+			// burst: the call_end stays held for the trailer (handleTermination).
+			if (DMR_BURST.exec(line)?.groups?.["burst"] === "TLC") return false
 			const ended = this.closeHeldEnd(now)
 			if (ended) this.emitOutput(ended)
 			return false
@@ -1489,8 +1498,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const tg = parseInt(ids["tgt"] ?? "0", 10)
 		const src = parseInt(ids["src"] ?? "0", 10)
 		if (tg !== 0 || src !== 0) {
-			call.talkgroup = tg
-			call.source = src
+			held.talkgroup = tg
+			held.source = src
 		}
 		const svc = DMR_TLC_FIELDS.exec(line)?.groups?.["svc"]
 		const alg = ALG_ID.exec(line)?.groups?.["alg"]
@@ -1513,7 +1522,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const held = call?.heldEnd
 		if (call === null || held === undefined) return null
 		call.heldEnd = undefined
-		if (held.lc && !held.errored && !call.flags.encrypted) this.markKnown(call)
+		if (held.lc && !held.errored) {
+			// Only a burst that closed clean names the call.
+			if (held.talkgroup !== undefined && held.source !== undefined) {
+				call.talkgroup = held.talkgroup
+				call.source = held.source
+			}
+			if (!call.flags.encrypted) this.markKnown(call)
+		}
 		const endAt = new Date(held.atMs)
 		call.lastUpdate = endAt
 		if (!this.callState && this.pendingCall) {
@@ -2120,11 +2136,20 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		})
 		// The line's call is its lane's (a DMR repeater slot, else lane 0).
 		this.useLane(this.lineLane(cleanLine))
+		let result: DecoderOutput | null
+		let announced: DecoderOutput | null
 		try {
-			return this.parseLaneLine(cleanLine, now, nowMs)
+			result = this.parseLaneLine(cleanLine, now, nowMs)
+			// A pending call this line gave its evidence (or whose delay is past)
+			// is announced on this line, not on the next timer tick: the stream
+			// holds an unnamed call only from its call_start.
+			announced = this.checkPendingCallEmission(now, nowMs)
 		} finally {
 			this.useLane(0)
 		}
+		if (announced === null) return result
+		if (result !== null) this.emitOutput(result)
+		return announced
 	}
 
 	/** parseOutput's steps 3 to 7, on the line's lane. */
@@ -2525,7 +2550,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		chain.lastMs = nowMs
 		chain.tag ??= tag
 		if (clean) chain.clean++
-		this.noteEvidence(this.callState ?? this.pendingCall?.state ?? null, nowMs)
+		// A DMR sync counts once handleDmrSync knows it is not a suspect of
+		// the next over (dmrRekey).
+		if (protocol !== "dmr")
+			this.noteEvidence(this.callState ?? this.pendingCall?.state ?? null, nowMs)
 	}
 
 	/** The lane's chain of `protocol` when it is still running at `nowMs`, else null. */
@@ -2661,6 +2689,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 		ongoing.lastUpdate = now
 		if (voice) this.lastVoiceSyncMs = nowMs
+		// An off-grid sync that may begin the next over (a suspect) is not
+		// evidence of this one until the next sync clears it.
+		if (this.dmrGrid?.suspect === undefined) this.noteEvidence(ongoing, nowMs)
 		const cc = DMR_COLOR_CODE.exec(line)?.groups?.["cc"]
 		if (cc !== undefined && ongoing.dmr?.cc === undefined)
 			ongoing.dmr = { ...ongoing.dmr, cc: parseInt(cc, 10) }
@@ -3687,6 +3718,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				break
 		}
 
+		// The terminator printed again while its call_end waits for the
+		// trailer: the held end stays (closeHeldEnd ends the call).
+		if (isTerminator && targetCall.heldEnd !== undefined) return null
 		if (
 			isTerminator &&
 			targetCall.protocol === "dmr" &&
@@ -4236,6 +4270,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		endAt?: Date,
 	): DecoderOutput | null {
 		if (!this.callState) return null
+		// An off-grid sync no later sync confirmed as the next over's first
+		// was a late or early print of this one: it is this call's evidence.
+		if (this.dmrGrid?.suspect !== undefined && this.chain !== null)
+			this.noteEvidence(this.callState, this.chain.lastMs)
 		// The lane's next call starts on its own frames.
 		this.chain = null
 		this.lastVoiceSyncMs = undefined

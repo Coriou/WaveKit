@@ -133,6 +133,22 @@ describe("dsd-fme DMR re-key grid", () => {
 		expect(at(starts[1]!.startedAt)).toBe(2200)
 	})
 
+	it("an over whose last sync is off the grid and never confirmed is still one call", () => {
+		// 1725 is 31 ms off the grid of 1334: a suspect no later sync confirms,
+		// so it was a late print of this over and counts as its evidence.
+		const { starts, ends } = replay(
+			[
+				[1000, MS("VC*")],
+				[1334, MS("VC*")],
+				[1725, MS("VC*")],
+			],
+			8000,
+		)
+		expect(starts).toHaveLength(1)
+		expect(ends).toHaveLength(1)
+		expect(at(starts[0]!.startedAt)).toBe(1000)
+	})
+
 	it("property: jitter within ±45 ms on each sync of a continuous over never splits it", () => {
 		// Feature: dv-call-first, Property: DMR jitter never splits a continuous over
 		// Validates: review M1 (a late sync after a missing LC print)

@@ -457,8 +457,9 @@ describe("dsd-fme voice-call metadata", () => {
 					text: "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VLC ",
 				},
 				{ atMs: 0, text: " SLOT 1 TGT=9 SRC=100 Group Call Color Code=7" },
-				{ atMs: 200, text: "CRC ERR" },
-				{ atMs: 200, text: "FEC ERR" },
+				// Inside the call-start delay: a line after it announces the call.
+				{ atMs: 50, text: "CRC ERR" },
+				{ atMs: 50, text: "FEC ERR" },
 			],
 			500,
 		)

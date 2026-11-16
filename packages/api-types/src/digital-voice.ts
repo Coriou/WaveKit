@@ -60,6 +60,23 @@ export interface DigitalVoiceCall {
 
 export type DigitalVoiceCallEventData = DigitalVoiceCall
 
+/**
+ * The /stream hold of voice whose call's encryption is not known yet:
+ * cumulative milliseconds since the service started, plus the current lag.
+ */
+export interface DigitalVoiceHoldStatus {
+	/** Voice put on hold while its call's encryption was not known. */
+	heldMs: number
+	/** Held voice played once its call was known clear. */
+	releasedMs: number
+	/** Held voice discarded: encrypted, ended unknown, detach, or no listener. */
+	discardedMs: number
+	/** Held voice dropped oldest-first beyond the 2 s hold bound. */
+	overflowDroppedMs: number
+	/** Current lag of the most delayed lane (held or released, not played yet). */
+	bufferedMs: number
+}
+
 export interface DigitalVoiceDecoderStatus {
 	decoderId: string
 	/** dsd-fme mode option (auto, dmr, p25, ...). */
@@ -75,7 +92,8 @@ export interface DigitalVoiceDecoderStatus {
 	datagramsRejected: number
 	/**
 	 * Datagrams muted because the call is encrypted: discarded (mono, or slot
-	 * unknown) or with that call's slot silenced (stereo).
+	 * unknown) or with that call's slot silenced (stereo). Voice held while its
+	 * call's encryption is not known yet is not counted here (voiceHold).
 	 */
 	encryptedDatagramsDropped: number
 	/** Queued voice dropped by the bounded jitter buffer. */
@@ -87,6 +105,8 @@ export interface DigitalVoiceDecoderStatus {
 	underruns: number
 	/** Voice waiting in the jitter buffer. */
 	bufferedMs: number
+	/** /stream hold of voice whose call's encryption is not known yet. */
+	voiceHold?: DigitalVoiceHoldStatus
 	/** ISO 8601 */
 	lastDatagramAt?: string
 	call: DigitalVoiceCall | null

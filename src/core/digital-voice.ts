@@ -56,6 +56,7 @@ import {
 	type VoiceChannels,
 } from "./dsd-fme-voice-format.js"
 import { PacedPcmStream } from "./paced-pcm-stream.js"
+import type { PacedPcmStats } from "./paced-pcm-stream.js"
 import type { VoiceTap, VoiceTapSource } from "./auto-listen/contract.js"
 
 export type { DigitalVoiceConfig } from "../config.js"
@@ -267,6 +268,8 @@ interface VoiceChannel {
 	hold: VoiceHold | null
 	/** Cumulative hold counters, in samples. */
 	holdStats: HoldStats
+	/** The pacer's queued voice by slot (PacedShadow), allocated on first use. */
+	shadow: PacedShadow | null
 }
 
 /** 1 and 2 are TDMA slots; 0 is a call whose slot is unknown (or not 1/2). */
@@ -332,10 +335,18 @@ interface HoldStats {
 }
 
 /**
+ * The lane's releasable tail written while a call governed it (see
+ * HoldLane.tailOwner): a stereo whole lane mixing slot calls.
+ */
+const MIXED_OWNER = "\u0000mixed"
+
+/**
  * One /stream lane: a fixed ring of mono samples. The head `releasable`
  * samples are clear (play them in order before live voice); the rest is held
  * for `callId`, whose encryption is not known yet. Held voice only exists
- * while `callId` is set.
+ * while `callId` is set. The last `tailOwned` releasable samples belong to
+ * `tailOwner` (a call released, or live behind its backlog): if that call
+ * turns restricted, they are dropped (dropOwned) rather than played.
  */
 class HoldLane {
 	private readonly ring = new Int16Array(VOICE_HOLD_SAMPLES)
@@ -343,9 +354,20 @@ class HoldLane {
 	length = 0
 	releasable = 0
 	callId: string | null = null
+	tailOwner: string | null = null
+	tailOwned = 0
 
-	/** Appends src[from, to); beyond the bound drops the oldest. Returns samples dropped. */
-	push(src: Int16Array, from: number, to: number, clear: boolean): number {
+	/**
+	 * Appends src[from, to), releasable when `clear` (owned by `owner`);
+	 * beyond the bound drops the oldest. Returns samples dropped.
+	 */
+	push(
+		src: Int16Array,
+		from: number,
+		to: number,
+		clear: boolean,
+		owner: string | null = null,
+	): number {
 		const cap = VOICE_HOLD_SAMPLES
 		let dropped = 0
 		let start = from
@@ -359,6 +381,7 @@ class HoldLane {
 			this.head = (this.head + excess) % cap
 			this.length -= excess
 			this.releasable = Math.max(0, this.releasable - excess)
+			this.clampTail()
 			dropped += excess
 		}
 		let w = (this.head + this.length) % cap
@@ -367,8 +390,55 @@ class HoldLane {
 			w = w + 1 === cap ? 0 : w + 1
 		}
 		this.length += count
-		if (clear) this.releasable += count
+		if (clear) {
+			this.releasable += count
+			if (owner === this.tailOwner) this.tailOwned += count
+			else {
+				this.tailOwner = owner
+				this.tailOwned = count
+			}
+		}
 		return dropped
+	}
+
+	/**
+	 * Puts src[from, to) ahead of everything and makes the whole lane held
+	 * (the head of a call not known yet, still queued in the pacer). Beyond
+	 * the bound drops the oldest. Returns samples dropped.
+	 */
+	prependHeld(src: Int16Array, from: number, to: number): number {
+		const cap = VOICE_HOLD_SAMPLES
+		const excess = Math.max(0, this.length + (to - from) - cap)
+		const start = from + Math.min(excess, to - from)
+		const count = to - start
+		this.head = (this.head - count + cap) % cap
+		let w = this.head
+		for (let i = start; i < to; i++) {
+			this.ring[w] = src[i]!
+			w = w + 1 === cap ? 0 : w + 1
+		}
+		this.length += count
+		this.releasable = 0
+		this.tailOwner = null
+		this.tailOwned = 0
+		return excess
+	}
+
+	/** The releasable tail no call owns (live voice before any announce) becomes held. */
+	holdUnownedTail(): number {
+		if (this.tailOwner !== null) return 0
+		const held = this.tailOwned
+		this.releasable -= held
+		this.tailOwned = 0
+		return held
+	}
+
+	/** Whether every releasable sample is unowned (or none is queued). */
+	unowned(): boolean {
+		return (
+			this.releasable === 0 ||
+			(this.tailOwner === null && this.tailOwned === this.releasable)
+		)
 	}
 
 	/** Moves up to n releasable samples to dst[0, p). Returns p. */
@@ -383,13 +453,19 @@ class HoldLane {
 		this.head = r
 		this.length -= p
 		this.releasable -= p
+		this.clampTail()
 		return p
 	}
 
-	/** The held part becomes releasable (its call is known clear). Returns samples released. */
+	/** The held part becomes releasable, owned by its call. Returns samples released. */
 	release(): number {
 		const released = this.length - this.releasable
 		this.releasable = this.length
+		if (this.tailOwner === this.callId) this.tailOwned += released
+		else {
+			this.tailOwner = this.callId
+			this.tailOwned = released
+		}
 		return released
 	}
 
@@ -400,13 +476,101 @@ class HoldLane {
 		return discarded
 	}
 
+	/**
+	 * Drops the releasable tail owned by `tailOwner` (its call turned
+	 * restricted), keeping any held part after it. Returns samples dropped.
+	 */
+	dropOwned(): number {
+		const cap = VOICE_HOLD_SAMPLES
+		const k = this.tailOwned
+		if (k === 0) {
+			this.tailOwner = null
+			return 0
+		}
+		// Shift the held part (if any) back over the dropped span.
+		const held = this.length - this.releasable
+		let r = (this.head + this.releasable) % cap
+		let w = (this.head + this.releasable - k) % cap
+		for (let i = 0; i < held; i++) {
+			this.ring[w] = this.ring[r]!
+			r = r + 1 === cap ? 0 : r + 1
+			w = w + 1 === cap ? 0 : w + 1
+		}
+		this.length -= k
+		this.releasable -= k
+		this.tailOwner = null
+		this.tailOwned = 0
+		return k
+	}
+
 	/** Drops everything (no listener, detach). Returns the held samples dropped. */
 	reset(): number {
 		const dropped = this.length - this.releasable
 		this.head = 0
 		this.length = 0
 		this.releasable = 0
+		this.tailOwner = null
+		this.tailOwned = 0
 		return dropped
+	}
+
+	private clampTail(): void {
+		if (this.tailOwned > this.releasable) this.tailOwned = this.releasable
+	}
+}
+
+/** Shadow sample kinds (PacedShadow). */
+/** a = slot 1 (or mono) part, b = slot 2 part; the sample played is a + b, clamped. */
+const SHADOW_SPLIT = 0
+/** One voice dsd-fme copied to both channels: a; its slot is not known. */
+const SHADOW_SHARED = 1
+/** A mix whose slots are no longer known (a lagging whole lane): a. */
+const SHADOW_OPAQUE = 2
+
+/**
+ * What the pacer still queues, per slot: the last VOICE_HOLD_SAMPLES samples
+ * pushed to it, split by slot, so a call announced late as not known clear
+ * can take its own queued head back into its hold lane (takeQueued) and
+ * leave the other slot's voice queued. The pacer's queued count is exact:
+ * samples pushed since the last clear less those played or dropped (both
+ * oldest first). Fixed rings: 16 000 x (2 + 2 + 1) bytes = 80 000 bytes per
+ * listened decoder, allocated on its first queued voice.
+ */
+class PacedShadow {
+	readonly a = new Int16Array(VOICE_HOLD_SAMPLES)
+	readonly b = new Int16Array(VOICE_HOLD_SAMPLES)
+	readonly kind = new Uint8Array(VOICE_HOLD_SAMPLES)
+	/** Next write index. */
+	w = 0
+	private pushed = 0
+	private played0 = 0
+	private dropped0 = 0
+
+	constructor(stats: PacedPcmStats) {
+		this.rebase(stats)
+	}
+
+	put(a: number, b: number, kind: number): void {
+		const w = this.w
+		this.a[w] = a
+		this.b[w] = b
+		this.kind[w] = kind
+		this.w = w + 1 === VOICE_HOLD_SAMPLES ? 0 : w + 1
+		this.pushed++
+	}
+
+	/** Samples still queued in the pacer (may exceed the shadow). */
+	queued(stats: PacedPcmStats): number {
+		const gone =
+			stats.voiceSamples - this.played0 + (stats.droppedSamples - this.dropped0)
+		return Math.max(0, this.pushed - gone)
+	}
+
+	/** The pacer was cleared or stopped: nothing is queued. */
+	rebase(stats: PacedPcmStats): void {
+		this.pushed = 0
+		this.played0 = stats.voiceSamples
+		this.dropped0 = stats.droppedSamples
 	}
 }
 
@@ -442,6 +606,10 @@ function laneStatus(lane: HoldLane, call: DigitalVoiceCall | null): LaneStatus {
 	return LANE_ACTIVE
 }
 
+function clampSample(value: number): number {
+	return value > 32767 ? 32767 : value < -32768 ? -32768 : value
+}
+
 function anyNonZero(src: Int16Array, from: number, to: number): boolean {
 	for (let i = from; i < to; i++) if (src[i] !== 0) return true
 	return false
@@ -462,11 +630,17 @@ function laneStep(
 	status: LaneStatus,
 	virtual: boolean,
 	stats: HoldStats,
+	owner: string | null,
 ): number {
 	const p = lane.popReleasable(out, n)
 	if (status === LANE_DISCARD || status === LANE_HOLD) {
 		out.fill(0, p, n)
-		if (status === LANE_HOLD && (!virtual || anyNonZero(content, 0, n))) {
+		// Held voice starts on the call's first voiced samples: a silent slot
+		// (the other slot talking) is not held, so it never lags once released.
+		if (
+			status === LANE_HOLD &&
+			(anyNonZero(content, 0, n) || (!virtual && lane.length > lane.releasable))
+		) {
 			stats.overflow += lane.push(content, 0, n, false)
 			stats.held += n
 		}
@@ -480,7 +654,7 @@ function laneStep(
 	const live = n - p
 	for (let i = 0; i < live; i++) out[p + i] = content[i]!
 	if ((status === LANE_ACTIVE && !virtual) || anyNonZero(content, live, n))
-		lane.push(content, live, n, true)
+		lane.push(content, live, n, true, owner)
 	return p
 }
 
@@ -501,6 +675,16 @@ function holdsCall(hold: VoiceHold | null, callId: string): boolean {
 	if (hold === null) return false
 	for (const lane of hold.lanes) if (lane?.callId === callId) return true
 	return false
+}
+
+/** Who owns the whole lane's live voice: its call, a mix of slot calls, or none. */
+function wholeOwner(
+	channel: VoiceChannel,
+	gov0: DigitalVoiceCall | null,
+): string | null {
+	if (channel.channels === 1 && channel.calls.size > 1) return MIXED_OWNER
+	if (gov0 !== null) return gov0.callId
+	return channel.calls.size > 0 ? MIXED_OWNER : null
 }
 
 function samplesToMs(samples: number): number {
@@ -680,7 +864,7 @@ export class DigitalVoiceService
 		if (!channel) return
 		this.channels.delete(decoderId)
 		channel.detach?.()
-		channel.paced.stop()
+		this.stopPaced(channel)
 		this.resetHold(channel, true)
 		channel.registry.closeAll("removed", true)
 		channel.socket.close()
@@ -798,7 +982,7 @@ export class DigitalVoiceService
 		if (!this.running) return
 		this.running = false
 		for (const channel of this.channels.values()) {
-			channel.paced.stop()
+			this.stopPaced(channel)
 			this.resetHold(channel, false)
 			channel.registry.closeAll("stop", true)
 			this.notifyTaps(tap => tap.detach(channel.decoderId))
@@ -899,6 +1083,7 @@ export class DigitalVoiceService
 			detach: null,
 			hold: null,
 			holdStats: { held: 0, released: 0, discarded: 0, overflow: 0 },
+			shadow: null,
 		}
 		paced.on("audio", (chunk: Buffer) => {
 			registry.write(chunk)
@@ -912,7 +1097,7 @@ export class DigitalVoiceService
 		})
 		registry.on("client-disconnected", () => {
 			if (registry.size === 0) {
-				paced.stop()
+				this.stopPaced(channel)
 				// Held voice is only for a listener; the call's hold state stays.
 				this.resetHold(channel, false)
 			}
@@ -986,6 +1171,61 @@ export class DigitalVoiceService
 		if (!own) return
 		if (encrypted) channel.encryptedDropped++
 		channel.paced.push(mono)
+		this.shadowUnheld(channel, datagram, mono, mute1, mute2)
+	}
+
+	/** The pacer was stopped (its queue dropped). */
+	private stopPaced(channel: VoiceChannel): void {
+		channel.paced.stop()
+		channel.shadow?.rebase(channel.paced.stats)
+	}
+
+	/** The pacer's queue was discarded. */
+	private clearPaced(channel: VoiceChannel): void {
+		channel.paced.clear()
+		channel.shadow?.rebase(channel.paced.stats)
+	}
+
+	private shadowOf(channel: VoiceChannel): PacedShadow {
+		channel.shadow ??= new PacedShadow(channel.paced.stats)
+		return channel.shadow
+	}
+
+	/** Records an unheld datagram's queued voice (`mono`, as pushed) by slot. */
+	private shadowUnheld(
+		channel: VoiceChannel,
+		datagram: Buffer,
+		mono: Buffer,
+		mute1: boolean,
+		mute2: boolean,
+	): void {
+		const shadow = this.shadowOf(channel)
+		const n = mono.length / 2
+		if (channel.channels === 1) {
+			for (let i = 0; i < n; i++) shadow.put(mono.readInt16LE(i * 2), 0, SHADOW_SPLIT)
+			return
+		}
+		let identical = true
+		for (let i = 0; i < n && identical; i++) {
+			if (datagram.readInt16LE(i * 4) !== datagram.readInt16LE(i * 4 + 2))
+				identical = false
+		}
+		if (identical) {
+			// downmix: one voice passes once, or nothing when a slot is muted.
+			const muted = mute1 || mute2
+			for (let i = 0; i < n; i++) {
+				if (muted) shadow.put(0, 0, SHADOW_SPLIT)
+				else shadow.put(datagram.readInt16LE(i * 4), 0, SHADOW_SHARED)
+			}
+			return
+		}
+		for (let i = 0; i < n; i++) {
+			shadow.put(
+				mute1 ? 0 : datagram.readInt16LE(i * 4),
+				mute2 ? 0 : datagram.readInt16LE(i * 4 + 2),
+				SHADOW_SPLIT,
+			)
+		}
 	}
 
 	private noteOddSize(channel: VoiceChannel, datagram: Buffer): void {
@@ -1135,21 +1375,43 @@ export class DigitalVoiceService
 			}
 			if (st1 === LANE_DISCARD || st2 === LANE_DISCARD) discarded = true
 			silent = st1 === LANE_DISCARD && st2 === LANE_DISCARD
-			popped += laneStep(lane1, c1, o1, n, st1, virtual, stats)
-			popped += laneStep(lane2, c2, o2, n, st2, virtual, stats)
+			const owner1 = channel.calls.get(1)?.callId ?? null
+			const owner2 = channel.calls.get(2)?.callId ?? null
+			popped += laneStep(lane1, c1, o1, n, st1, virtual, stats, owner1)
+			popped += laneStep(lane2, c2, o2, n, st2, virtual, stats, owner2)
 			for (let i = 0; i < n; i++) {
 				const sum = o1[i]! + o2[i]!
 				mix[i] = sum > 32767 ? 32767 : sum < -32768 ? -32768 : sum
 			}
 		}
 		const out = hold.out
-		popped += laneStep(whole, mix, out, n, st0, virtual, stats)
+		const p0 = laneStep(
+			whole,
+			mix,
+			out,
+			n,
+			st0,
+			virtual,
+			stats,
+			wholeOwner(channel, gov0),
+		)
+		popped += p0
 		if (!virtual && discarded) channel.encryptedDropped++
 		// Nothing audible and nothing released: like a muted datagram, queue nothing.
 		if (popped === 0 && (virtual || silent)) return 0
 		const pcm = Buffer.alloc(n * 2)
 		for (let i = 0; i < n; i++) pcm.writeInt16LE(out[i]!, i * 2)
 		channel.paced.push(pcm)
+		// By slot: out[p0, n) is the mix of o1 and o2 (from 0); out[0, p0)
+		// an older mix of the whole lane; a held or muted whole lane is silent.
+		const shadow = this.shadowOf(channel)
+		const stereo = lane1 !== null && lane2 !== null
+		for (let i = 0; i < n; i++) {
+			if (!stereo) shadow.put(out[i]!, 0, SHADOW_SPLIT)
+			else if (i < p0) shadow.put(out[i]!, 0, SHADOW_OPAQUE)
+			else if (st0 >= LANE_HOLD) shadow.put(0, 0, SHADOW_SPLIT)
+			else shadow.put(hold.o1[i - p0]!, hold.o2[i - p0]!, SHADOW_SPLIT)
+		}
 		return popped
 	}
 
@@ -1173,11 +1435,22 @@ export class DigitalVoiceService
 	 * After a call event: a lane holding a call releases it once known clear,
 	 * keeps holding while it is still unknown, else discards (encrypted, ended,
 	 * replaced, moved to another slot). A lane whose call is not known yet
-	 * starts holding it.
+	 * starts holding it, with its head still queued in the pacer (takeQueued).
+	 * A call restricted after its release drops its voice still queued in any
+	 * lane (released, or live behind it), as does a mix of slot calls.
 	 */
-	private updateHold(channel: VoiceChannel): void {
+	private updateHold(channel: VoiceChannel, event: DigitalVoiceCall): void {
 		const stereo = channel.channels === 2
 		const stats = channel.holdStats
+		if (channel.hold !== null && isRestricted(event)) {
+			for (const lane of channel.hold.lanes) {
+				if (
+					lane !== null &&
+					(lane.tailOwner === event.callId || lane.tailOwner === MIXED_OWNER)
+				)
+					stats.discarded += lane.dropOwned()
+			}
+		}
 		for (let index = 0; index < (stereo ? 3 : 1); index++) {
 			const call =
 				index === 0
@@ -1204,9 +1477,110 @@ export class DigitalVoiceService
 				(lane === null || lane.callId === null)
 			) {
 				lane ??= this.holdFor(channel).lanes[index] ?? null
-				if (lane !== null) lane.callId = call.callId
+				if (lane !== null) {
+					lane.callId = call.callId
+					this.takeQueued(channel, index as SlotKey, lane)
+				}
 			}
 		}
+	}
+
+	/**
+	 * A lane starts holding a call not known yet (`index`: 0 the whole
+	 * datagram, else its slot): the call's voice already queued, live in the
+	 * lane (no call owns it) and still in the pacer, becomes the head of its
+	 * hold, in order, so a clear over loses nothing to a late announce. The
+	 * other slot's queued voice stays queued. Voice behind another call's
+	 * backlog is not the call's head: the pacer is not touched.
+	 */
+	private takeQueued(
+		channel: VoiceChannel,
+		index: SlotKey,
+		lane: HoldLane,
+	): void {
+		const stats = channel.holdStats
+		if (!lane.unowned()) {
+			stats.held += lane.holdUnownedTail()
+			return
+		}
+		const shadow = channel.shadow
+		const queued = shadow === null ? 0 : shadow.queued(channel.paced.stats)
+		const take = Math.min(queued, VOICE_HOLD_SAMPLES)
+		const own = new Int16Array(take)
+		const rest = new Int16Array(take)
+		const restA = new Int16Array(take)
+		const restB = new Int16Array(take)
+		const restKind = new Uint8Array(take)
+		let ownFrom = take
+		let restFrom = take
+		let shared = 0
+		if (shadow !== null && take > 0) {
+			const otherRestricted =
+				index !== 0 &&
+				[...channel.calls].some(
+					([key, call]) => key !== 0 && key !== index && isRestricted(call),
+				)
+			let r = (shadow.w - take + VOICE_HOLD_SAMPLES) % VOICE_HOLD_SAMPLES
+			for (let i = 0; i < take; i++) {
+				const a = shadow.a[r]!
+				const b = shadow.b[r]!
+				const kind = shadow.kind[r]!
+				r = r + 1 === VOICE_HOLD_SAMPLES ? 0 : r + 1
+				let mine = 0
+				let ra = 0
+				let rb = 0
+				let rk = SHADOW_SPLIT
+				if (kind === SHADOW_SPLIT) {
+					if (index === 0) mine = clampSample(a + b)
+					else if (index === 1) {
+						mine = a
+						rb = b
+					} else {
+						mine = b
+						ra = a
+					}
+				} else if (kind === SHADOW_SHARED) {
+					// One voice on both channels: a lone restricted slot owns it;
+					// with the other slot restricted too it is ambiguous: dropped.
+					if (index !== 0 && otherRestricted) {
+						if (a !== 0) shared++
+					} else mine = a
+				} else if (index === 0) mine = a
+				else {
+					ra = a
+					rk = SHADOW_OPAQUE
+				}
+				own[i] = mine
+				restA[i] = ra
+				restB[i] = rb
+				restKind[i] = rk
+				rest[i] = clampSample(ra + rb)
+				if (mine !== 0 && ownFrom === take) ownFrom = i
+				if (rest[i] !== 0 && restFrom === take) restFrom = i
+			}
+		}
+		if (ownFrom === take && shared === 0) {
+			// Nothing of the call is queued in the pacer: the lane alone is held.
+			stats.held += lane.length
+			lane.prependHeld(own, take, take)
+			return
+		}
+		// Voice older than the shadow is dropped with the pacer's queue.
+		stats.overflow += queued - take
+		stats.discarded += shared
+		this.clearPaced(channel)
+		if (restFrom < take) {
+			const pcm = Buffer.alloc((take - restFrom) * 2)
+			const kept = this.shadowOf(channel)
+			for (let i = restFrom; i < take; i++) {
+				pcm.writeInt16LE(rest[i]!, (i - restFrom) * 2)
+				kept.put(restA[i]!, restB[i]!, restKind[i]!)
+			}
+			channel.paced.push(pcm)
+		}
+		const before = lane.length
+		stats.overflow += lane.prependHeld(own, ownFrom, take)
+		stats.held += before + (take - ownFrom)
 	}
 
 	/** The channel's lanes, allocated on first use (see VOICE_HOLD_MAX_MS). */
@@ -1285,9 +1659,6 @@ export class DigitalVoiceService
 				if (k !== key && c.callId === call.callId) channel.calls.delete(k)
 			}
 			channel.calls.set(key, call)
-			// Never play audio of a call that is not clear, even if some was queued
-			// (a call already held has none queued).
-			if (isRestricted(call) && !held) channel.paced.clear()
 		} else {
 			// An end clears only its own slot (and the same call wherever it is
 			// keyed); a newer call on that slot or the other slot stays.
@@ -1297,7 +1668,17 @@ export class DigitalVoiceService
 			channel.lastCall = call
 		}
 		channel.call = restrictiveCall(channel.calls)
-		this.updateHold(channel)
+		this.updateHold(channel, call)
+		// Never play audio of a call that is not clear, even if some was queued:
+		// a call already held has none queued, and one that starts holding took
+		// its own queued voice into its hold (takeQueued).
+		if (
+			call.active &&
+			isRestricted(call) &&
+			!held &&
+			!holdsCall(channel.hold, call.callId)
+		)
+			this.clearPaced(channel)
 		channel.paced.setCallActive(channel.call !== null)
 		// Taps (the auto-listen router) are whole-datagram consumers: they get
 		// the most restrictive active call, or this event when none is active.

@@ -1116,7 +1116,9 @@ metadata suppression). One that still has no identity is announced only after a
 checked item (a link control naming it or saying whether it is encrypted, a
 checked header) or once its chain holds three clean syncs spanning two
 superframes less twice the 45 ms print jitter (DMR and P25 630 ms, D-STAR
-750 ms); it stays back-dated. Two noise syncs (two DMR syncs 700 ms apart, two
+750 ms), on the line that completes it; it stays back-dated. A DMR sync off the
+grid that may begin the next over counts only once the next sync shows it was
+the same over. Two noise syncs (two DMR syncs 700 ms apart, two
 D-STAR syncs 420 ms apart) start nothing. Each DMR repeater slot runs its own call, so two busy
 slots give two concurrent calls; idle, CSBK and data bursts (a repeater's hang
 time) keep no call alive. A DMR re-key without a terminator (a new call) is
@@ -1140,8 +1142,10 @@ than 90 ms off after 560 ms or more the over is split in two calls. A P25 HDU af
 voice resumes on its grid stays one call. A call that ends without its terminator (re-key, another radio's IDs,
 the 4 s timeout) ends at its last voice line. A DMR terminator (`TLC`) of a call
 that has no IDs yet holds its `call_end` up to 105 ms (one 60 ms burst plus the
-45 ms jitter) for the terminator's own link control: a clean `SLOT` line names the
-call, and the call still ends at the terminator.
+45 ms jitter) for the terminator's own link control: a `SLOT` line names the
+call only if the burst closes clean (no error line before the next sync), a
+terminator printed again in that window changes nothing, and the call still ends
+at the terminator.
 A DMR or P25 call that starts before its link control said whether it is encrypted
 carries `encryptionKnown: false` on its `call_start` and `voice-call` state: it is
 not clear. The first checked link control (DMR TG/SRC with or without `Encrypted`,
