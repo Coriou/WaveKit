@@ -58,7 +58,7 @@ jobs:
       - name: Real binary under the real manager
         env:
           WAVEKIT_CHAN_BIN: ${{ github.workspace }}/native/wavekit-chan/target/release/wavekit-chan
-        run: pnpm exec vitest run tests/integration/wavekit-chan-binary.test.ts tests/integration/channelizer-recenter-real-binary.test.ts
+        run: pnpm exec vitest run tests/integration/wavekit-chan-binary.test.ts tests/integration/channelizer-recenter-real-binary.test.ts tests/integration/direct-channel-real-binary.test.ts
       - name: Wasm kernels
         run: |
           rustup target add wasm32-unknown-unknown --toolchain 1.98.1
