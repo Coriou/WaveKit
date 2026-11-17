@@ -63,7 +63,7 @@ import {
 import { csdrChildEnv } from "../decoders/csdr-buffers.js"
 import { signalDecoder } from "../decoders/process-tools.js"
 import { safeErrorFields } from "../decoders/safe-error-fields.js"
-import { ChannelSquelch } from "./channel-squelch.js"
+import { ChannelSquelch, SquelchBlockChunker } from "./channel-squelch.js"
 import { ComplexSampleAligner, FrontSwapFeed } from "./live-audio-aligner.js"
 import {
 	SilenceFill,
@@ -1352,15 +1352,14 @@ export class LiveDemodulator extends EventEmitter {
 		frontMeasured: () => void,
 	): Transform {
 		const blockBytes = Math.max(1, Math.round(sampleRate * 0.01)) * 8
-		let remainder = Buffer.alloc(0)
+		// One partial block carried in a buffer allocated once; no copy of the stream per chunk.
+		const chunker = new SquelchBlockChunker(blockBytes)
 		let awaitingFront = false
 		return new Transform({
 			transform(chunk: Buffer, _encoding, callback) {
 				if (chunk === SQUELCH_ALIGNMENT_RESET) {
 					// WG10 req 2.3: drop the old front's partial complex sample.
-					const whole = remainder.length - (remainder.length % 8)
-					if (whole !== remainder.length)
-						remainder = Buffer.from(remainder.subarray(0, whole))
+					chunker.dropPartial(8)
 					// WG10 R1 m1: in stream order (after the old front's last bytes), the gate,
 					// hang and carrier observer start afresh for the new channel.
 					squelch.resetGate()
@@ -1368,29 +1367,23 @@ export class LiveDemodulator extends EventEmitter {
 					callback()
 					return
 				}
-				const data = remainder.length
-					? Buffer.concat([remainder, chunk])
-					: chunk
-				let offset = 0
-				while (data.length - offset >= blockBytes) {
-					const output = squelch.process(
-						data.subarray(offset, offset + blockBytes),
-					)
-					offset += blockBytes
+				chunker.push(chunk, block => {
+					const output = squelch.process(block)
 					measured()
 					if (awaitingFront) {
 						awaitingFront = false
 						frontMeasured()
 					}
-					for (const block of output) this.push(block)
-				}
-				remainder = Buffer.from(data.subarray(offset))
+					// A block assembled across two chunks lives in the reused carry buffer: a
+					// pass-through of it leaves as a copy (muted and rotated output is fresh).
+					for (const out of output)
+						this.push(chunker.ownsMemoryOf(out) ? Buffer.from(out) : out)
+				})
 				callback()
 			},
 			flush(callback) {
-				for (const block of squelch.process(remainder)) this.push(block)
+				for (const block of squelch.process(chunker.take())) this.push(block)
 				for (const block of squelch.flush()) this.push(block)
-				remainder = Buffer.alloc(0)
 				callback()
 			},
 		})
