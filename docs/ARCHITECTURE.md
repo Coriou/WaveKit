@@ -680,6 +680,16 @@ position, rtl_433 sensor) are merged at admission into one row per entity per
 (`src/core/activity/storage/coalesce.ts`; rules in
 [API.md](API.md#activity)), so the admission rate limit bites only on new
 entities and events.
+A row may carry its `channel` (`{ discoveryId, frequencyHz }`, the owning
+scanner discovery's raster frequency): a scanner recording row gets it at the
+keep, and a scanner probe's reception through the ingress `channel` lookup
+(`activityProbeChannel` in `src/index.ts` over `ScannerService.probeChannel`,
+memory only). The row (`src/core/activity/storage/row.ts`) stores it in the
+summary and as two refs, `channelHz` (13-digit zero-padded Hz, so a frequency
+range is a text range on the refs key) and `discoveryId`; the `channelHz` and
+`nearHz` queries (`src/core/activity/query/read.ts`) read those refs, and an
+older row without a channel matches by its own frequency (`channelMatch:
+"mixed"`, [API.md](API.md#channels)).
 Search, facets and cursor replay are served on `/api/activity` and
 the WebSocket `activity` channel. The store is off by default. A failed open
 keeps the process running and those routes answer 503 `ACTIVITY_UNAVAILABLE`.

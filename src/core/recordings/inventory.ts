@@ -21,6 +21,7 @@ import {
 	RECORDINGS_HEADER_READ_BYTES,
 	RECORDINGS_CATALOGUE_MAX,
 	RECORDINGS_CATALOGUE_MAX_FOLDERS,
+	RECORDINGS_CHANNELS_MAX,
 	RECORDINGS_IN_PROGRESS_MS,
 	RECORDINGS_SCAN_CONCURRENCY,
 } from "@wavekit/api-types"
@@ -368,6 +369,20 @@ interface IndexedEntry extends InventoryEntry {
 	size: number
 	/** A scanner analog file's receipt facts (read when indexed); null: unknown or not analog. */
 	receipt: RecordingReceiptFacts | null
+}
+
+/**
+ * matchedByChannel of a `nearHz` listing: count descending, then frequency ascending, the first
+ * RECORDINGS_CHANNELS_MAX. A tolerance of ±1 MHz over a 6.25 kHz raster can hold 321 channels;
+ * the cap is the Activity facets' (the web shows the largest few).
+ */
+export function channelCounts(
+	byChannel: ReadonlyMap<number, number>,
+): { frequencyHz: number; count: number }[] {
+	return [...byChannel]
+		.map(([frequencyHz, count]) => ({ frequencyHz, count }))
+		.sort((a, b) => b.count - a.count || a.frequencyHz - b.frequencyHz)
+		.slice(0, RECORDINGS_CHANNELS_MAX)
 }
 
 /** A listed analog file's roll-over place (RecordingInventoryItem.part, parts). */
@@ -1748,6 +1763,18 @@ export function createRecordingInventory(
 				if (q.minHz !== null && hz < q.minHz) return false
 				if (q.maxHz !== null && hz > q.maxHz) return false
 			}
+			// The channel scopes match on the channel frequency: the owner's, in whole Hz.
+			if (q.channelHz !== null || q.nearHz !== null) {
+				const hz = hzOf(e)
+				if (hz === null) return false
+				const channel = Math.round(hz)
+				if (q.channelHz !== null && channel !== q.channelHz) return false
+				if (
+					q.nearHz !== null &&
+					Math.abs(channel - q.nearHz) > (q.nearToleranceHz ?? 0)
+				)
+					return false
+			}
 			if (q.q !== null) {
 				const hz = hzOf(e)
 				if (e.hay === undefined || e.hayHz !== hz) {
@@ -1759,6 +1786,8 @@ export function createRecordingInventory(
 			return true
 		}
 		const selected: { e: IndexedEntry; kept: boolean | undefined }[] = []
+		/** With `nearHz`: matches per channel frequency (matchedByChannel). */
+		const byChannel = q.nearHz === null ? null : new Map<number, number>()
 		let matched = 0
 		let keptTotal = 0
 		let more = false
@@ -1773,6 +1802,8 @@ export function createRecordingInventory(
 			wanted !== null ||
 			q.minHz !== null ||
 			q.maxHz !== null ||
+			q.channelHz !== null ||
+			q.nearHz !== null ||
 			q.q !== null
 		// One protection answer per entry per listing, reused by the page.
 		const n = v.entries.length
@@ -1814,6 +1845,11 @@ export function createRecordingInventory(
 				if (kept === true) keptTotal++
 				if (!keep(e, kept)) continue
 				matched++
+				if (byChannel !== null) {
+					// keep() matched it on its channel: hzOf is known (owners are cached).
+					const channel = Math.round(hzOf(e) ?? 0)
+					byChannel.set(channel, (byChannel.get(channel) ?? 0) + 1)
+				}
 				if (!afterCursor(e, q.cursor)) continue
 				if (selected.length < q.limit) selected.push({ e, kept })
 				else more = true
@@ -1848,7 +1884,9 @@ export function createRecordingInventory(
 			const owner = e.discoveryId === null ? null : ownerOf(e.discoveryId)
 			const item: RecordingInventoryItem = {
 				...e.item,
-				frequencyHz: owner?.frequencyHz ?? null,
+				// In whole Hz, rounded as the Activity row's channel is (activityChannelOf).
+				frequencyHz:
+					owner?.frequencyHz == null ? null : Math.round(owner.frequencyHz),
 				key: e.key ?? e.item.id,
 				ownerDiscoveryId: owner?.id ?? null,
 			}
@@ -1858,6 +1896,12 @@ export function createRecordingInventory(
 				item.part = at?.part ?? null
 				item.parts = at?.parts ?? null
 			}
+			// What the recorder knew at the finish (the receipt), unknown for every other kind.
+			const receipt = e.item.kind === "scanner-analog" ? e.receipt : null
+			item.startedAt = receipt?.startedAt ?? null
+			item.observationId = receipt?.observationId ?? null
+			item.speech = receipt?.speech ?? "unchecked"
+			item.keptBy = receipt?.keptBy ?? null
 			if (kept !== undefined) item.kept = kept
 			if (eventIdOf !== undefined) {
 				let eventId: string | null = null
@@ -1884,6 +1928,9 @@ export function createRecordingInventory(
 			revision,
 			indexing: !built,
 			matched,
+			...(byChannel === null
+				? {}
+				: { matchedByChannel: channelCounts(byChannel) }),
 			counts: {
 				total: v.entries.length,
 				kept: keptTotal,

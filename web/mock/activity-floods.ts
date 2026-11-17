@@ -122,7 +122,7 @@ export function callRow(k: number): FloodEvent["summary"] {
 		category: "voice",
 		frequencyHz: DMR_HZ,
 		entityKey: "talkgroup:99",
-		title: radio ? "DMR TG 99 from 4242" : "DMR TG 99",
+		title: radio ? "TG 99 · radio 4242" : "TG 99",
 		fields: [
 			{ key: "talkgroup", label: "Talkgroup", value: 99 },
 			...(radio ? [{ key: "source", label: "Radio", value: 4242 }] : []),

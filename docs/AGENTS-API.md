@@ -427,7 +427,8 @@ curl --fail --get --header "$AUTH" \
 
 Filters: `kinds`, `sourceIds`, `decoderIds`, `protocols`, `categories` (comma lists or
 repeated), `frequencyMin`/`frequencyMax` (Hz), `producedFrom`/`producedTo` (ISO times),
-`entityKey`, `text`, `refs`, `hasRecording` (`true` or `false`), `order` (`asc` or `desc`),
+`entityKey`, `text`, `refs`, `hasRecording` (`true` or `false`), `channelHz`, `nearHz` and
+`toleranceHz` (Hz, [Channels](API.md#channels)), `order` (`asc` or `desc`),
 `limit` (default 100, at most 200), `pageToken`. Pass `nextPageToken` from the answer as
 `pageToken` for the next page; a token expires with its snapshot after 5 minutes. A 429
 `ACTIVITY_QUERY_BUSY` carries `Retry-After` ([GET /api/activity](API.md#get-apiactivity)).
@@ -451,6 +452,35 @@ curl --fail --get --header "$AUTH" --data-urlencode "refs=recordingId:$KEY" \
 
 The recordings routes exist in protected mode only. A deleted file's link usually goes within
 two to three minutes; the row stays.
+
+### What was heard on F, with audio
+
+`F` is the channel frequency in Hz (the discovery's `frequencyHz`, as `GET /api/scanner/discoveries`
+lists it), never a measured carrier. One call each:
+
+```sh
+F=446006250
+# Every row of the channel, newest first; channelMatch says whether rows without a channel matched by frequency
+curl --fail --get --header "$AUTH" --data-urlencode "channelHz=$F"   "$API_ORIGIN/api/activity"
+# Only the rows with audio: play each with its recording.id as above
+curl --fail --get --header "$AUTH" --data-urlencode "channelHz=$F"   --data-urlencode "hasRecording=true" "$API_ORIGIN/api/activity"
+# The scanner's recordings of the channel, with the recorder's verdict (speech: heard, not-heard, unchecked);
+# configured decoders' call files have no frequency here, so only the hasRecording=true line above finds them
+curl --fail --get --header "$AUTH" --data-urlencode "channelHz=$F" "$API_ORIGIN/api/recordings"
+```
+
+Next to it: `nearHz=$F` with `toleranceHz=50000` instead of `channelHz`. The counts per channel,
+for the same rows the list holds, come from one facets read:
+
+```sh
+curl --fail --header "$AUTH" --header "Content-Type: application/json"   --data "{\"query\":{\"nearHz\":$F,\"toleranceHz\":50000},\"dimensions\":[\"channel\"]}"   "$API_ORIGIN/api/activity/facets"
+```
+
+Each `channel` value is a channel frequency in Hz; `null` counts the rows with no channel, matched
+by their own frequency (`channelMatch: "mixed"`): every row stored before channels existed, and
+receptions from configured decoders and `analog-transmission` rows, which have none, so on a channel
+where one of those sits `channelMatch` stays `mixed`. `GET /api/recordings` takes
+the same `nearHz`/`toleranceHz` and answers `matchedByChannel`.
 
 ## Capture IQ
 

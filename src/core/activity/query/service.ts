@@ -54,6 +54,7 @@ import {
 	snapshotLowerBoundPassed,
 } from "./seq.js"
 import {
+	FACET_DIMENSION_COUNT,
 	hashQuery,
 	normaliseQuery,
 	normaliseBandMapQuery,
@@ -134,7 +135,8 @@ export const DEFAULT_ACTIVITY_QUERY_LIMITS: ActivityQueryLimits = {
 	pageDefault: 100,
 	pageMax: 200,
 	pageBytes: 512 * 1024,
-	facetDimensions: 5,
+	// Every dimension in one read (category, protocol, decoderId, sourceId, kind, channel).
+	facetDimensions: FACET_DIMENSION_COUNT,
 	facetValues: 32,
 	facetScan: 50_000,
 	deadlineMs: 250,
@@ -351,6 +353,7 @@ export function createActivityQueryService(
 				high: formatSeq(high),
 				before,
 				after,
+				...(query.channel === null ? {} : { channelMatch: true }),
 			})
 			guardSnapshot(
 				identity,
@@ -400,6 +403,9 @@ export function createActivityQueryService(
 					expiresAt,
 				},
 				searchCoverage: "bounded-projection",
+				...(result.channelMatch === undefined
+					? {}
+					: { channelMatch: result.channelMatch }),
 			}
 		},
 
@@ -442,6 +448,9 @@ export function createActivityQueryService(
 					lowBarrier: formatSeq(low),
 					highWater: formatSeq(high),
 				},
+				...(result.channelMatch === undefined
+					? {}
+					: { channelMatch: result.channelMatch }),
 			}
 		},
 

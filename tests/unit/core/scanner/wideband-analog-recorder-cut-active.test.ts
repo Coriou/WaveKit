@@ -87,6 +87,13 @@ describe("WidebandAnalogRecorder retune cut: on the air or only the hang", () =>
 			cutActive: true,
 			outcome: "finalized",
 		})
+		// The finish passes what it knew to the receipt (read-only): the file's own speech
+		// reading and its first sample's wall time; no voice prior here, so no keptBy.
+		const verdict = h.ops[0]?.verdict
+		expect(verdict).toBeDefined()
+		expect(verdict?.keptBy).toBeUndefined()
+		expect([true, false, null]).toContain(verdict?.speechHeard)
+		expect(Number.isFinite(Date.parse(verdict?.startedAt ?? ""))).toBe(true)
 	}, 120_000)
 
 	it("a weak voice still open at the command, last reported over 1.05 s before it: cutActive true", async () => {

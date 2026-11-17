@@ -7,7 +7,7 @@
 import { constants as fsConstants } from "node:fs"
 import * as path from "node:path"
 import { z } from "zod"
-import type { RecordingCut } from "@wavekit/api-types"
+import type { RecordingCut, RecordingSpeech } from "@wavekit/api-types"
 import type { RecordingFsPort } from "./inventory.js"
 import { startedAtLocalFromName } from "./names.js"
 
@@ -38,12 +38,45 @@ const ReceiptFieldsSchema = z.object({
 	outcome: z.literal("finalized"),
 	cutReason: z.unknown(),
 	cutActive: z.unknown(),
+	keptBy: z.unknown(),
+	speechHeard: z.unknown(),
+	startedAt: z.unknown(),
 })
+
+/** A finish reason code as the store writes it (analog-operations.ts `keptBy`). */
+const KEPT_BY = /^[a-z][a-z-]{0,31}$/
 
 /** What the inventory keeps of a recording's receipt. */
 export interface RecordingReceiptFacts {
 	cut: RecordingCut | null
 	observationId: string | null
+	/** The receipt's `speechHeard` as a word; `unchecked` when it is absent, null or malformed. */
+	speech?: RecordingSpeech
+	/** The receipt's `keptBy` code; null when absent or malformed. */
+	keptBy?: string | null
+	/** The receipt's `startedAt` (ISO, UTC, milliseconds); null when absent or malformed. */
+	startedAt?: string | null
+}
+
+/** A receipt's `speechHeard` as a RecordingSpeech: anything but a boolean is `unchecked`. */
+export function recordingSpeechOf(speechHeard: unknown): RecordingSpeech {
+	return speechHeard === true
+		? "heard"
+		: speechHeard === false
+			? "not-heard"
+			: "unchecked"
+}
+
+/** An ISO time as its canonical UTC form, or null when it is not one. */
+function isoOf(value: unknown): string | null {
+	if (typeof value !== "string" || value.length > 40) return null
+	const ms = Date.parse(value)
+	if (
+		!Number.isFinite(ms) ||
+		!/^\d{4}-\d{2}-\d{2}T.*(Z|[+-]\d{2}:\d{2})$/.test(value)
+	)
+		return null
+	return new Date(ms).toISOString()
 }
 
 /**
@@ -83,9 +116,13 @@ export function receiptFactsOf(
 	if (!parsed.success) return null
 	if (parsed.data.operationId.toLowerCase() !== operationId.toLowerCase())
 		return null
+	const keptBy = parsed.data.keptBy
 	return {
 		cut: recordingCutOf(parsed.data.cutReason, parsed.data.cutActive),
 		observationId: parsed.data.observationId,
+		speech: recordingSpeechOf(parsed.data.speechHeard),
+		keptBy: typeof keptBy === "string" && KEPT_BY.test(keptBy) ? keptBy : null,
+		startedAt: isoOf(parsed.data.startedAt),
 	}
 }
 

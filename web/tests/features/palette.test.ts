@@ -1,6 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import type {
+	Discovery,
 	LiveAudioConfig,
 	SavedFrequency,
 	ScanJob,
@@ -553,6 +554,7 @@ describe("palette: running rows", async () => {
 				},
 				scanner: { get: () => ({ bandplans: SCANNER_BANDPLANS, sweep: null }) },
 				scanPresets: { get: () => ({ view: null }) },
+				bandplan: { get: () => ({ view: null }) },
 			},
 			tuning: {
 				displayHz: () => 161_150_000,
@@ -568,6 +570,8 @@ describe("palette: running rows", async () => {
 				setVolume: (v: number) => void (volume = v),
 			},
 			activity: {
+				update: (fn: (s: unknown) => unknown) =>
+					void calls.push(["view", fn({ editing: "x", view: "map" })]),
 				setSearch: (t: unknown, c: unknown) =>
 					void calls.push(["search", t, c]),
 			},
@@ -682,6 +686,34 @@ describe("palette: running rows", async () => {
 		expect(f.calls[0]).toEqual([
 			"search",
 			[{ kind: "talkgroup", value: "2081", label: "TG 2081" }],
+			null,
+		])
+	})
+
+	it("opens Activity on a frequency's channel: raster frequency and half a raster step", async () => {
+		const f = fakes()
+		await runAction(
+			f.services,
+			{
+				kind: "activity",
+				tokens: [{ kind: "frequency", hz: 161_150_400 }],
+				label: "x",
+			},
+			null,
+		)
+		expect(shellStore.getState().drawer).toBe("activity")
+		// the same door as every other (naming.ts showChannel): the full list, no column editing
+		expect(f.calls[0]).toEqual(["view", { editing: null, view: "all" }])
+		expect(f.calls[1]).toEqual([
+			"search",
+			[
+				{
+					kind: "frequency",
+					value: "161150000",
+					spanHz: 6_250,
+					label: "161.1500 ±6.25 kHz",
+				},
+			],
 			null,
 		])
 	})
@@ -868,5 +900,69 @@ describe("palette: receiver feed", () => {
 		expect(key("p")).toEqual({ kind: "feed" })
 		expect(key("P")).toEqual({ kind: "feed" })
 		expect(key("p", true)).toBeNull()
+	})
+})
+
+describe("palette: the Messages alias", async () => {
+	const { runAction } = await import("../../src/features/palette/actions.ts")
+	const { shellStore } = await import("../../src/shell/store.ts")
+	const { activityLayout, setActivityLayout } =
+		await import("../../src/features/activity/layout.ts")
+
+	it("finds Messages and opens Activity in the Cards layout", async () => {
+		setActivityLayout("list")
+		const row = flatten(new PaletteModel(ctx()).build(null, "messages")).find(
+			x => x.id === "view:messages",
+		)
+		expect(row?.title).toBe("Go to Messages")
+		expect(row?.action).toEqual({
+			kind: "drawer",
+			id: "activity",
+			layout: "cards",
+		})
+		await runAction({} as never, row!.action!, row!.title)
+		expect(shellStore.getState().drawer).toBe("activity")
+		expect(shellStore.getState().view).toBe("spectrum")
+		expect(activityLayout.get().layout).toBe("cards")
+		shellStore.closeDrawer()
+		setActivityLayout("list")
+	})
+
+	it("G D opens Activity as cards", () => {
+		expect(
+			shortcutFor(
+				{ key: "d", meta: false, ctrl: false, alt: false, typing: false },
+				true,
+			),
+		).toEqual({ kind: "drawer", id: "activity", layout: "cards" })
+	})
+})
+
+describe("palette: discoveries on a saved channel", () => {
+	const disc = (id: string, hz: number, label?: string): Discovery =>
+		({
+			id,
+			frequencyHz: hz,
+			protocol: "dmr",
+			confidence: "classified",
+			...(label ? { operator: { label } } : {}),
+		}) as unknown as Discovery
+
+	it("drops a discovery a few hundred Hz off a saved frequency, by the raster rule", () => {
+		const m = new PaletteModel(
+			ctx({ discoveries: [disc("d1", 161_150_300), disc("d2", 161_400_000)] }),
+		)
+		const ids = m.tuneTargets().map(x => x.id)
+		expect(ids).toContain("saved:s2")
+		expect(ids).not.toContain("disc:d1")
+		expect(ids).toContain("disc:d2")
+	})
+
+	it("titles a discovery through the channel name rule", () => {
+		const m = new PaletteModel(
+			ctx({ discoveries: [disc("d3", 161_400_000, "Site beacon")] }),
+		)
+		const item = m.tuneTargets().find(x => x.id === "disc:d3")
+		expect(item?.title).toBe("Site beacon")
 	})
 })

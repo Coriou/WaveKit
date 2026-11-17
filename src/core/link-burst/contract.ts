@@ -21,6 +21,18 @@ export const CHUNK_SIZE_BUCKETS = 16 // log2 bytes
 export const CATCHUP_BUCKETS = 16 // log2 from CATCHUP_BUCKET_BASE_BYTES
 export const CATCHUP_BUCKET_BASE_BYTES = 1_024
 export const LOOP_DELAY_RING = 300 // 10 min of 2 s efficiency intervals
+/**
+ * The newest ELU reading at or before a window start may precede it by at most this much: two 2 s
+ * efficiency intervals (4 s) plus one of slack. An older base means the meter is not being taken,
+ * so the utilisation would describe a longer, different window: report it missing instead.
+ */
+export const ELU_BASE_STALE_MS = 6_000
+/** The shortest in-progress interval whose utilisation is read (`TakeUtilization.live`). */
+export const ELU_LIVE_MIN_MS = 500
+/** The ingest recorder's arrival-gap cell: a gap is stamped with the cell of the chunk ending it. */
+export const INGEST_CELL_MS = 250
+/** How often the source manager reports a source's received byte rate (its `metrics` event). */
+export const SOURCE_METRICS_INTERVAL_MS = 5_000
 export type SourceTransport = "loopback" | "network"
 export function frameBytesFor(format: string): 2 | 4 | null {
 	return format === "U8_IQ" ? 2 : format === "S16_IQ" ? 4 : null
@@ -142,11 +154,53 @@ export interface LoopDelayReport {
 	p99MaxMs10m: number | null
 	intervals10m: number
 }
+/**
+ * Event-loop utilisation per take: a take is the interval between two consecutive ELU readings
+ * (one per `takeInterval`, the efficiency monitor's 2 s takes); the first reading has no base and
+ * yields no take.
+ */
+export interface TakeUtilization {
+	/**
+	 * Worst take's utilisation (0..1) over the takes ending at or after the window start plus the
+	 * guard take, the newest one ending before it (a take straddling the start reads diluted by
+	 * the time outside the stress, so the take before it is read too). Null when no take ends in
+	 * the window: a stopped monitor never keeps an old take in evidence.
+	 */
+	max: number | null
+	/**
+	 * Every take over the window and the guard take was read: the guard take has a base, no two
+	 * consecutive readings lie more than `ELU_BASE_STALE_MS` apart, and the newest is at most that
+	 * old.
+	 */
+	complete: boolean
+	/**
+	 * Utilisation from the newest reading to now, only when that is at least `ELU_LIVE_MIN_MS`
+	 * long (shorter spans the reader's own work); else null.
+	 */
+	live: number | null
+}
 export interface EventLoopMeter {
 	/** The monitor's read: returns and resets the native histogram (the only reset). */
 	takeInterval(): LoopDelayInterval | null
 	/** Reporting read: never resets; answers from the ring of taken intervals. */
 	report(nowMono: number): LoopDelayReport
+	/**
+	 * Worst loop delay (ms) over the taken intervals stamped at or after `sinceMono`, plus the
+	 * in-progress interval (the live histogram's max, read without a reset); null when neither has a
+	 * sample, or when no interval was taken for longer than `ELU_BASE_STALE_MS` (the monitor
+	 * stopped: the live histogram then spans an unknown, ever longer stretch). Read-only.
+	 */
+	maxSince(sinceMono: number): number | null
+	/**
+	 * Event-loop utilisation (0..1) from the newest ELU reading at or before `sinceMono` to now; null
+	 * when no reading covers `sinceMono` (history too short, or the meter stopped being taken for
+	 * longer than `ELU_BASE_STALE_MS`). Read-only.
+	 */
+	utilizationSince(sinceMono: number): number | null
+	/**
+	 * Per-take event-loop utilisation over a window (see `TakeUtilization`). Read-only.
+	 */
+	utilizationMaxSince(sinceMono: number): TakeUtilization
 	dispose(): void
 }
 export interface SdrHostLinkFacts {

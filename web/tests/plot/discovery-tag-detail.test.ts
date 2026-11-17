@@ -553,7 +553,7 @@ describe("tag detail", () => {
 		const v = tagDetail(carrier(), none, NOW)
 		expect(v).toMatchObject({
 			state: "heard",
-			stateText: "Heard",
+			stateText: "Unidentified",
 			name: "Unidentified · 4FSK ~9 kHz",
 			howWeKnow: "Not proven: heard on the air, not identified",
 			coreSummary: null,
@@ -660,6 +660,9 @@ describe("tag popover Listen", () => {
 				listen.wanted = true
 				return Promise.resolve()
 			},
+			claim: () => {
+				calls.push("claim")
+			},
 		}
 		return { listen, calls }
 	}
@@ -719,12 +722,13 @@ describe("tag popover Listen", () => {
 		)
 	})
 
-	it("leaves audio already on alone: it follows the tune", async () => {
+	it("leaves audio already on: it follows the tune, and a recording playing yields", async () => {
 		const { listen, calls } = fakeListen(true)
 		expect(
 			await listenAfterTune(1e8, () => Promise.resolve(true), listen),
 		).toBe(true)
-		expect(calls).toEqual([])
+		// no unlock, no second start; Listen wins at every door: the recording pauses (claim)
+		expect(calls).toEqual(["claim"])
 	})
 
 	it("is what the popover's Listen runs", () => {
@@ -776,17 +780,22 @@ describe("tag popover Last call", () => {
 		expect(lastActivityEventId({ lastActivity: "x" as never })).toBeNull()
 	})
 
-	it("opens that event, else Activity on the discovery's frequency", () => {
+	it("splits the door: History of the channel always, Open last transmission only with an event", () => {
 		const src = readFileSync(
 			new URL("../../src/plot/DiscoveryTags.tsx", import.meta.url),
 			"utf8",
 		)
+		// the history door is the one seam: raster frequency and half a raster step, never the bandwidth
 		expect(src).toMatch(
-			/const id = lastActivityEventId\(d\)\s*if \(id\) services\.activity\.showEvent\(id\)\s*else services\.activity\.showFrequency\(d\.frequencyHz, d\.bandwidthHz\)/,
+			/showChannel\(services\.activity, d\.frequencyHz, rasterStep\(d\.frequencyHz\)\)/,
 		)
-		expect(src).toContain("Last call")
-		// no lastActivity: the button searches, it never promises calls
-		expect(src).toContain("Search Activity")
-		expect(src).not.toContain("Last calls")
+		expect(src).not.toContain("showFrequency(d.frequencyHz, d.bandwidthHz)")
+		expect(src).toContain("historyLabel(d.frequencyHz")
+		expect(src).toMatch(
+			/v\.lastEventId !== null && \([\s\S]*?Open last transmission/,
+		)
+		expect(src).toContain("services.activity.showEvent(id)")
+		expect(src).not.toContain("Show in")
+		expect(src).not.toContain("Search Activity")
 	})
 })

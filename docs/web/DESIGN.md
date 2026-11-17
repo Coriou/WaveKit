@@ -914,6 +914,82 @@ Condensed + Noto Sans, Tabler-based icons).
 - **Immersive is the interface the web app implements (owner, 2026-10-16).** Sub-project C builds
   C · Immersive, the chosen shell, with the boards it embeds; their states and interactions are
   the acceptance criteria (see "Handoff to the dev team").
+- **Notices: receipts and conditions in one top-centre region (2026-11-16).** The app toast moved
+  from bottom centre to a notice region at the top centre of the free plot area
+  (`--wk-free-cx`), 8 px under the top island row and under anything already at the top centre
+  (the connection chip when it drops under the top row, and any overlay marked
+  `data-wk-top-centre`); below 1100 px it takes the top row from the shell layout. One service
+  (`web/src/shell/notices/`) holds two classes. A *receipt* says what a user action did (Saved,
+  Copied, with Undo): 6 s, a newer receipt replaces it. A *condition* is keyed state
+  (`link:<source>`, `pwa-update`, `voice-start`, `rate-policy-skip:<source>`): its toast shows
+  8 s and folds into its status place (the Receiver chip's amber triangle and "Samples lost",
+  the Receiver panel's full line, both grey while the facts are stale). The region shows at most
+  one condition toast and one receipt; neither removes the other. A condition toast is never
+  displaced: another condition waits, in order, and shows when it goes if still active (the same
+  key takes the new text in place). The update toast stays until Reload or ✕. Timers pause while ⌘K is open and while a toast is hovered
+  or holds focus; a toast never takes focus; ✕ is a labelled button; warnings carry a triangle
+  and words, not colour alone; the rise is 150 ms (`--wk-dur-2`), none under reduced motion.
+  While the region shows something the tuned card keeps off its top-centre anchor, and no
+  floating link toast shows while the Receiver panel (which lists it) is open. The scan plan's
+  in-drawer toasts are receipts in the same region now. *Why:* a link warning repeated on every
+  cause flip and buried the Undo of the last action at the bottom, next to Listen and the dock;
+  a condition is state, so it belongs in a status place, with one announcement per episode
+  (rules in [WEB-APP.md](../WEB-APP.md#notices)).
+- **Notices beside expanded Activity: the widest empty room (2026-11-17).** Expanded Activity
+  (Cards, Expand) spans the window between the island rows, so there is no free plot for the
+  notice region; centred on the normal drawer's free area it landed on the cards. Measured at
+  1440×900 the drawer starts at y 88 with its header controls at the ends (title and Live at the
+  left, Columns and ✕ at the right), and the Receiver stays where a full-height drawer leaves it
+  (688..988), so the top row has 200 px between the Tuner and the Receiver and 420 px right of it.
+  Rule (`regionPlacement`, `web/src/shell/notices/top-centre.ts`): the widest top-row gap, a
+  16 px gutter from each island and the window edge, when it is at least 360 px wide, top aligned
+  with the row (then under the connection chip if it sits there); else the widest empty stretch
+  of the drawer header, a gutter clear of each control, centred on its height; else the normal
+  place. *Why:* both keep every card and drawer control clear; the top row is free room outside
+  the drawer, the header middle is the fallback for windows below 1188 px where the drawer is not
+  full height. Below 1100 px Expand changes nothing and no room exists (open gap, closed by the
+  next entry: on a phone with any drawer open the region still overlaps the drawer header).
+- **Notices in a covering drawer: a slot under its header (2026-11-17).** At 390×844 every drawer
+  spans the window between the island rows (header at y 152..211), so the region at 16,144 sat
+  on the title, Live and ✕. Two places were weighed: (a) a banner docked inside the drawer under
+  its header, in the drawer's flow, pushing the body down; (b) a slot above the bottom row. (b)
+  was rejected: on a phone the bottom row is Listen and the player, the reach zone the region
+  left on 2026-11-16 because it buried Undo beside Listen, and reserving it would shrink every
+  drawer's list for a notice that is usually absent. (a) won: it is where the eye already is in
+  a drawer, the layout reserves the room only while a notice shows, so nothing can be covered,
+  and it needs no measuring of controls. Rule (`regionPlacement`): when the normal place would
+  land on the open drawer and that drawer has a notice slot, the region docks there
+  (`data-where="drawer-slot"`); the expanded-Activity rules above still come first. One generic
+  mechanism: the kit `Drawer` (and Settings' own header) renders an empty
+  `.wk-drawer-notices` slot right after its header, registered in `web/src/ui/notice-slot.ts`;
+  the shell's region portals its toasts into it, as a full-width flat banner on the drawer's
+  surface (no shadow, text start-aligned). Empty, the slot is `display: none`. The push is not
+  animated (only the toast's 150 ms rise, none under reduced motion), so no layout transition can
+  loop with the region's measuring; condition and receipt stack in it, ✕ and Undo stay
+  reachable, `role="status"` and no focus moves. Wide windows are unchanged: beside a
+  full-height drawer the region already keeps to the free plot. *Why:* a notice must never cover
+  a control, at any width; a reserved place in the drawer's own column makes that true by layout,
+  not by measuring. Gated by `ui-check --flow=notices` at 390×844 for each drawer.
+- **Notices beside expanded Activity: room as tall as the stack (2026-11-17).** The top-row and
+  header placements above checked width only, so a condition with a receipt under it (44 + 8 +
+  44 = 96 px) ran from the top row (y 16) onto the drawer's header (y 88) and, in the header, onto
+  the cards. Rule (`regionPlacement`): the top-row gap is taken only when the whole measured
+  stack ends 8 px above the drawer (under the connection chip too), the header only when the
+  stack is no taller than the header; else the expanded drawer's notice slot, which every kit
+  drawer has, so the stack pushes the cards down instead. The height used is the tallest the
+  region measured for what it shows now (it wraps taller in a narrow gap than in the slot), so it
+  cannot swing between places. A move remounts the toasts (a portal into the slot is a new
+  parent): a toast button that had the keyboard focus gets it back on its new element (same toast,
+  same control), and the moved toasts are announced again by their `role="status"`. *Why:* a
+  second announcement of a toast the user is already reading is a smaller cost than suppressing
+  live-region content, and moves happen only when the stack's height or the drawer changes.
+  Gated by `ui-check --flow=notices`: the stacked region at 1440×900 expanded and at 390×844
+  (expanded Activity, Recordings), ✕ and Undo inside the window, focus kept.
+- **No Messages view (owner, 2026-11-16).** Decoded messages fold into Activity › Cards, with
+  Expand to widen the drawer over the plot; the dock loses its Messages button, and old Messages
+  links and the palette alias open Activity › Cards. The canvas still draws Messages in the dock
+  until it is next redrawn. *Why:* one place for linked activity data, not a second board that
+  shows the same decodes.
 
 ## Open questions and next topics
 

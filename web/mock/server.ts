@@ -17,6 +17,12 @@ import {
 	LIVE_AUDIO_NOISE_QUIETING_DB,
 	LIVE_AUDIO_NOISE_SQUELCH_MODULATIONS,
 } from "@wavekit/api-types"
+import {
+	channelFacetValue,
+	channelMatchOf,
+	channelParams,
+	matchesChannel,
+} from "./activity-channel.ts"
 import type {
 	ActivityLifecycleStatus,
 	ActivityQuery,
@@ -104,6 +110,7 @@ import {
 	registerRecordingsMock,
 } from "./recordings.ts"
 import { registerOperatorData } from "./operator-data.ts"
+import { createLinkAdvisoryMock, linkControlSchema } from "./link-advisories.ts"
 import { registerBandPlansMock } from "./bandplans.ts"
 import {
 	normaliseSpectrumOptions,
@@ -149,6 +156,11 @@ export interface MockServerOptions {
 	 * 1.024 MS/s; frames follow the tuner's sample rate (WAVEKIT_MOCK_RETUNE_SWEEP=1).
 	 */
 	retuneSweep?: boolean
+	/**
+	 * Interval between `resources:snapshot` broadcasts, ms (WAVEKIT_MOCK_RESOURCES_MS). Default 2000, the core's
+	 * tick. Each carries the link advisory of ./link-advisories.ts.
+	 */
+	resourcesIntervalMs?: number
 	/**
 	 * Every other Activity read (GET /api/activity…, POST /api/activity/facets) answers 429 with this
 	 * Retry-After: "1", "30", an HTTP date 2 s ahead ("date") or a malformed value (WAVEKIT_MOCK_ACTIVITY_429).
@@ -300,6 +312,9 @@ const ACTIVITY_PARAMS = new Set([
 	"text",
 	"refs",
 	"hasRecording",
+	"channelHz",
+	"nearHz",
+	"toleranceHz",
 	"order",
 	"limit",
 	"pageToken",
@@ -362,6 +377,7 @@ function matchesQuery(item: ActivitySummary, q: ActivityQuery): boolean {
 	for (const ref of q.refs ?? [])
 		if (ref.type !== "recordingId" || item.recording?.id !== ref.value)
 			return false
+	if (!matchesChannel(item, q)) return false
 	if (q.frequencyHz) {
 		if (item.frequencyHz === null) return false
 		if (q.frequencyHz.min !== undefined && item.frequencyHz < q.frequencyHz.min)
@@ -448,6 +464,11 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 	}
 	if (typeof params["entityKey"] === "string") q.entityKey = params["entityKey"]
 	if (typeof params["text"] === "string") q.text = params["text"]
+	try {
+		Object.assign(q, channelParams(num))
+	} catch (error) {
+		throw new QueryError(error instanceof Error ? error.message : "channel")
+	}
 	const has = params["hasRecording"]
 	if (has === "true") q.hasRecording = true
 	else if (has === "false") q.hasRecording = false
@@ -1214,7 +1235,7 @@ export async function buildMockServer(
 				category: "voice",
 				frequencyHz: null,
 				entityKey: `talkgroup:${item.talkgroup ?? "0"}`,
-				title: `DMR TG ${item.talkgroup ?? "0"} from ${item.source ?? "0"}`,
+				title: `TG ${item.talkgroup ?? "0"} · radio ${item.source ?? "0"}`,
 				fields: [
 					{
 						key: "talkgroup",
@@ -1234,7 +1255,11 @@ export async function buildMockServer(
 		}
 		if (item.kind !== "scanner-analog") return null
 		seq += 1
-		const mhz = item.frequencyHz === null ? null : item.frequencyHz / 1e6
+		// As a core with channels writes it: on the discovery's channel, titled by what it holds.
+		const channel =
+			item.frequencyHz === null
+				? null
+				: { discoveryId: item.discoveryId, frequencyHz: item.frequencyHz }
 		return {
 			eventId: `evt_${seq.toString(36)}`,
 			commitSeq: String(seq),
@@ -1247,7 +1272,7 @@ export async function buildMockServer(
 			category: "voice",
 			frequencyHz: item.frequencyHz,
 			entityKey: null,
-			title: mhz === null ? "Scanner recording" : `Recording ${mhz} MHz`,
+			title: channel === null ? "Scanner recording" : "FM voice",
 			fields: [
 				{
 					key: "durationMs",
@@ -1257,6 +1282,7 @@ export async function buildMockServer(
 				},
 			],
 			recording,
+			...(channel === null ? {} : { channel }),
 		}
 	}
 
@@ -2228,6 +2254,27 @@ export async function buildMockServer(
 	})
 	// --- Receiver controls. End. ---
 
+	// --- Link advisories (./link-advisories.ts): GET /api/resources, resources:snapshot, a scenario control. ---
+	const linkAdvisory = createLinkAdvisoryMock(MOCK_SOURCE_ID)
+	app.get("/api/resources", async () => linkAdvisory.snapshot())
+	app.post("/__mock/link-advisory", async (request, reply) => {
+		const parsed = linkControlSchema.safeParse(request.body ?? {})
+		if (!parsed.success)
+			return reply.code(400).send({ error: parsed.error.issues[0]?.message })
+		const result = linkAdvisory.control(parsed.data)
+		if (typeof result === "string")
+			return reply.code(409).send({ error: result })
+		// the change shows at once, as the core's next tick would
+		broadcast("resources", "resources:snapshot", linkAdvisory.snapshot())
+		return result
+	})
+	const resourcesTimer = setInterval(
+		() => broadcast("resources", "resources:snapshot", linkAdvisory.snapshot()),
+		Math.max(100, options.resourcesIntervalMs ?? 2000),
+	)
+	app.addHook("onClose", async () => clearInterval(resourcesTimer))
+	// --- Link advisories. End. ---
+
 	// --- Retune sweep scenario (./retune-sweep.ts): through the bands, then park. ---
 	let sweepTimer: ReturnType<typeof setTimeout> | null = null
 	// the sweep starts with the first spectrum subscription, so a page loaded late still sees it
@@ -2765,6 +2812,7 @@ export async function buildMockServer(
 				expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
 			},
 			searchCoverage: "bounded-projection",
+			...channelMatchOf(matched, query),
 		}
 		return page
 	})
@@ -2785,12 +2833,19 @@ export async function buildMockServer(
 			? body["dimensions"].filter(
 					(
 						d,
-					): d is "category" | "protocol" | "decoderId" | "sourceId" | "kind" =>
+					): d is
+						| "category"
+						| "protocol"
+						| "decoderId"
+						| "sourceId"
+						| "kind"
+						| "channel" =>
 						d === "category" ||
 						d === "protocol" ||
 						d === "decoderId" ||
 						d === "sourceId" ||
-						d === "kind",
+						d === "kind" ||
+						d === "channel",
 				)
 			: []
 		const matched = activity.filter(item => matchesQuery(item, query))
@@ -2798,7 +2853,7 @@ export async function buildMockServer(
 		for (const dim of dims) {
 			const counts = new Map<string | null, number>()
 			for (const item of matched) {
-				const v = item[dim]
+				const v = dim === "channel" ? channelFacetValue(item) : item[dim]
 				counts.set(v, (counts.get(v) ?? 0) + 1)
 			}
 			facets[dim] = [...counts]
@@ -2815,6 +2870,7 @@ export async function buildMockServer(
 			scanned: matched.length,
 			truncated: false,
 			snapshot: { lowBarrier: activityPruned, highWater },
+			...channelMatchOf(matched, query),
 		}
 	})
 
@@ -3125,6 +3181,9 @@ async function main(): Promise<void> {
 			? { voiceEncryptionUnknown: true }
 			: {}),
 		...(env["WAVEKIT_MOCK_RETUNE_SWEEP"] === "1" ? { retuneSweep: true } : {}),
+		...(Number(env["WAVEKIT_MOCK_RESOURCES_MS"]) > 0
+			? { resourcesIntervalMs: Number(env["WAVEKIT_MOCK_RESOURCES_MS"]) }
+			: {}),
 		...(env["WAVEKIT_MOCK_OVERLOAD_HINT"] === "1"
 			? { overloadHint: true }
 			: {}),

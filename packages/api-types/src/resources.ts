@@ -5,6 +5,8 @@
  * and source backpressure tracking.
  */
 
+import type { LinkLossReason } from "./tuner.js"
+
 // ============================================================================
 // Container Resources (from cgroups v2/v1)
 // ============================================================================
@@ -198,6 +200,40 @@ export interface ResourceSnapshot {
 
 	/** Source backpressure metrics (one per source) */
 	sourceBackpressure: SourceBackpressure[]
+
+	/**
+	 * Current link advisory per network source, including `none` after a recovery, so a client can tell
+	 * when a link condition clears. Absent on cores older than this field or without link reporting.
+	 */
+	linkAdvisories?: ResourceLinkAdvisory[]
+}
+
+/**
+ * THE core main-thread load signal, over a window: the one reading of how busy the core's event
+ * loop was. Loss attribution (`LinkAdvisory.lossReason: "core-busy"`) reads it, and any core load
+ * governor must read the same signal rather than measure load a second way. Null fields mean the
+ * evidence is unavailable for the window.
+ */
+export interface CoreLoadReading {
+	/** Event-loop utilisation (0..1) over the window. */
+	elu: number | null
+	/** Worst event-loop delay (ms) over the window, including the in-progress interval. */
+	loopDelayMaxMs: number | null
+}
+
+/** One network source's link advisory state, as of the snapshot's broadcast tick. */
+export interface ResourceLinkAdvisory {
+	sourceId: string
+	level: "none" | "unproven" | "dropping"
+	/** As `LinkAdvisory.lossReason`: always present on `dropping`. */
+	lossReason?: LinkLossReason
+	/** ISO time the current `level` and `lossReason` pair began. */
+	since: string
+	/**
+	 * ISO time of the first `dropping` of this episode. Kept while dropping and until the advisory has
+	 * been non-dropping for 60 s, then removed; a later `dropping` starts a new episode.
+	 */
+	episodeSince?: string
 }
 
 // ============================================================================
@@ -231,10 +267,12 @@ export interface ResourceAlert {
 	timestamp: string
 	/**
 	 * `link-capacity` only: the advisory's `LinkAdvisory.lossReason` (why samples were lost); absent when
-	 * none were, and on cores older than this field. `source`: bytes never reached the core (the receiver
-	 * link's fault). `branch-congestion`: every byte arrived and a core fanout branch dropped them.
+	 * none were, and on cores older than this field. Always present on a `dropping` advisory (`critical`):
+	 * `source`, the receiver link lost the bytes (a lower sample rate helps); `core-busy`, the core's own
+	 * event loop was too busy to read them; `unknown`, the evidence cannot tell. `branch-congestion`
+	 * (never `dropping`): every byte arrived and a core fanout branch dropped them.
 	 */
-	lossReason?: "source" | "branch-congestion"
+	lossReason?: LinkLossReason
 }
 
 export type DropAttribution = "none" | "link" | "host" | "consumer" | "unknown"

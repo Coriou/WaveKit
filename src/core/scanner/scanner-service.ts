@@ -862,6 +862,11 @@ export interface ScannerRecordingKept {
 	durationMs: number
 	/** Epoch ms of the commit. */
 	at: number
+	/**
+	 * The channel the file was kept on: the discovery owning it at the commit and that
+	 * discovery's frequency (the raster channel, as the recordings catalogue reports it).
+	 */
+	channel: { discoveryId: string; frequencyHz: number }
 }
 
 export class ScannerService extends EventEmitter {
@@ -1148,6 +1153,14 @@ export class ScannerService extends EventEmitter {
 	}>()
 	private readonly leaseRefusals = new LastReasons<ScannerLeaseRefusal>()
 	private readonly probeOutcomes = new Map<string, ProbeTrialBook>()
+	/**
+	 * probeChannel's index: probe decoder id → its request's discovery. Built from the pool's
+	 * status on the first lookup after a probe starts or stops (at most maxProbes.offset +
+	 * maxProbes.channel = 16 + 64 = 80 records), so a lookup between is one Map read plus the
+	 * store reads that resolve the discovery (one `get`, a copy of the record; two and a
+	 * `survivorOf` after a merge).
+	 */
+	private probeDiscoveries: Map<string, string | null> | null = null
 	/** WG11 req 6.3: observations a detection capture was tried for (once each) and their capture ids. */
 	private readonly iqTried = new Set<string>()
 	private readonly iqCaptureLifecycle = new Map<
@@ -3026,6 +3039,33 @@ export class ScannerService extends EventEmitter {
 	recordingFolderDiscovery(folderId: string): Discovery | undefined {
 		const d = recordingFolderDiscovery(this.store, folderId)
 		return d ? { ...d, ...this.storeMeta() } : undefined
+	}
+
+	/**
+	 * The Activity channel of a reception from scanner probe `decoderId` (the activity ingress
+	 * `channel` lookup): the discovery the probe was started for, followed to the survivor a merge
+	 * absorbed it into (recording aliases first, then the absorbed-id index, as resolveDiscovery),
+	 * with that discovery's raster frequency. Memory only: one Map read and one or two store `get` calls (each copies the small discovery
+	 * record), plus an index rebuild of
+	 * at most 80 records after a probe started or stopped. Null for a decoder that is not a
+	 * running probe, a probe with no discovery, or a discovery no longer live.
+	 */
+	probeChannel(
+		decoderId: string,
+	): { discoveryId: string; frequencyHz: number } | null {
+		let index = this.probeDiscoveries
+		if (index === null) {
+			index = new Map()
+			for (const p of this.probes?.status() ?? [])
+				index.set(p.decoderId, p.discoveryId)
+			this.probeDiscoveries = index
+		}
+		const id = index.get(decoderId)
+		if (id === undefined || id === null) return null
+		const ownerId = this.store.get(id) ? id : this.store.survivorOf(id)
+		const owner = ownerId === undefined ? undefined : this.store.get(ownerId)
+		if (owner === undefined || !Number.isFinite(owner.frequencyHz)) return null
+		return { discoveryId: owner.id, frequencyHz: owner.frequencyHz }
 	}
 
 	/**
@@ -4956,6 +4996,10 @@ export class ScannerService extends EventEmitter {
 			observationStartedAt: plan.observation.startedAt,
 			durationMs: Math.round((out.outputFrames * 1000) / out.sampleRateHz),
 			at: this.now(),
+			channel: {
+				discoveryId: plan.discovery.id,
+				frequencyHz: plan.discovery.frequencyHz,
+			},
 		}
 		try {
 			this.emit("recording-kept", kept)
@@ -5763,8 +5807,10 @@ export class ScannerService extends EventEmitter {
 		terminal?: ProbeUnavailableStop,
 	): void => {
 		// "starting" occurs synchronously before launch's first allocation/effect.
-		if (state === "starting" || state === "stopped")
+		if (state === "starting" || state === "stopped") {
 			this.invalidateChannelAdmission()
+			this.probeDiscoveries = null
+		}
 		if (req.replay && this.replayOrders.has(req.replay.captureId)) {
 			this.emitProgressFor(null)
 			return

@@ -181,6 +181,11 @@ describe("a dsd-fme call to a playable recording and back", () => {
 			query: { decoderIds: ["dsd-fme"] },
 		})
 		expect(all.items).toHaveLength(4)
+		// Titled by who and to whom, never the protocol word: the protocol is its own field.
+		for (const item of all.items) {
+			expect(item.protocol).toBe("dmr")
+			expect(item.title).toMatch(/^TG 9 · radio 200[12]$/)
+		}
 		const page = await runtime.service.search({ query: { hasRecording: true } })
 		expect(page.items.map(i => i.recording?.id).sort()).toEqual(
 			[keyA, keyB].sort(),
@@ -230,5 +235,127 @@ describe("a dsd-fme call to a playable recording and back", () => {
 		})
 		expect(again.items).toHaveLength(4)
 		await decoder.stop().catch(() => undefined)
+	}, 30_000)
+
+	it("a scanner probe's call rows carry their channel; a configured decoder's rows match it by frequency (mixed); facets agree with the list", async () => {
+		const stateDir = await mkdtemp(join(tmpdir(), "wk-p2-channel-"))
+		cleanups.push(() => rm(stateDir, { recursive: true, force: true }))
+		const CHANNEL_HZ = 446_006_250
+		const DISCOVERY = "d_01JTESTPROBEDISCOVERY"
+		const PROBE = "scan-abc1234-dmr-1"
+		const CONFIGURED = "dsd-fme"
+		// What the probe pool knows of its probes (ProbeStatus: decoderId, discoveryId) and the
+		// discovery's frequency, as the channel lookup src/index.ts composes reads them (memory).
+		const probes = new Map([[PROBE, DISCOVERY]])
+		const discoveries = new Map([[DISCOVERY, CHANNEL_HZ]])
+		const asked: [string, number | null][] = []
+		let publish: ActivityPublisher | null = null
+		const runtime: ActivityRuntime = await startActivityRuntime({
+			enabled: true,
+			stateDir,
+			logger,
+			execution: "inline",
+			queryExecution: "inline",
+			limits: { batchWindowMs: 0 },
+			setPublisher: p => {
+				publish = p
+			},
+			// Both decoders hear the measured carrier, 300 Hz above the channel.
+			resolveProvenance: () => ({
+				sourceId: "rtl",
+				targetFrequenciesHz: [CHANNEL_HZ + 300],
+				tuningTrust: "unverified",
+			}),
+			channel: (decoderId, hz) => {
+				asked.push([decoderId, hz])
+				const discoveryId = probes.get(decoderId)
+				const frequencyHz =
+					discoveryId === undefined ? undefined : discoveries.get(discoveryId)
+				return discoveryId === undefined || frequencyHz === undefined
+					? null
+					: { discoveryId, frequencyHz }
+			},
+		})
+		cleanups.push(() => runtime.close())
+		const drive = async (id: string, source: number): Promise<void> => {
+			const config: DecoderConfig = {
+				id,
+				type: "dsd-fme",
+				enabled: true,
+				options: { mode: "auto" },
+			}
+			const decoder = new DsdFmeDecoder(config, logger)
+			decoder.on("output", (output: DecoderOutput) => {
+				publish?.(config.id, config.type, output)
+			})
+			const internals = decoder as unknown as Internals
+			for (const line of callLines(source)) {
+				internals.handleOutputLine(line)
+				await new Promise(resolve => setTimeout(resolve, 20))
+			}
+			internals.checkCallTimeoutAsync()
+			await decoder.stop().catch(() => undefined)
+		}
+		await drive(PROBE, 2001)
+		await drive(CONFIGURED, 2002)
+		const probeRows = await runtime.service.search({
+			query: { decoderIds: [PROBE] },
+		})
+		const configuredRows = await runtime.service.search({
+			query: { decoderIds: [CONFIGURED] },
+		})
+		expect(probeRows.items.length).toBeGreaterThanOrEqual(2)
+		expect(configuredRows.items.length).toBeGreaterThanOrEqual(2)
+		expect(asked).toContainEqual([PROBE, CHANNEL_HZ + 300])
+		for (const item of probeRows.items) {
+			expect(item.channel).toEqual({
+				discoveryId: DISCOVERY,
+				frequencyHz: CHANNEL_HZ,
+			})
+			// The row keeps the measured frequency; the channel is the raster one.
+			expect(item.frequencyHz).toBe(CHANNEL_HZ + 300)
+			expect(Buffer.byteLength(JSON.stringify(item))).toBeLessThanOrEqual(
+				4 * 1024,
+			)
+		}
+		for (const item of configuredRows.items)
+			expect(item.channel).toBeUndefined()
+		// The probe's rows are found by their discovery.
+		const byDiscovery = await runtime.service.search({
+			query: { refs: [{ type: "discoveryId", value: DISCOVERY }] },
+		})
+		expect(byDiscovery.items.map(i => i.eventId).sort()).toEqual(
+			probeRows.items.map(i => i.eventId).sort(),
+		)
+		const total = probeRows.items.length + configuredRows.items.length
+		for (const query of [
+			{ channelHz: CHANNEL_HZ },
+			{ nearHz: CHANNEL_HZ + 5_000, toleranceHz: 5_000 },
+		]) {
+			const page = await runtime.service.search({ query })
+			expect(page.items).toHaveLength(total)
+			expect(page.channelMatch).toBe("mixed")
+			const facets = await runtime.service.facets({
+				query,
+				dimensions: ["channel", "decoderId"],
+			})
+			expect(facets.channelMatch).toBe("mixed")
+			expect(facets.facets["channel"]).toEqual(
+				[
+					{ value: String(CHANNEL_HZ), count: probeRows.items.length },
+					{ value: null, count: configuredRows.items.length },
+				].sort((a, b) => b.count - a.count || (a.value === null ? -1 : 1)),
+			)
+			const sum = (facets.facets["channel"] ?? []).reduce(
+				(n, f) => n + f.count,
+				0,
+			)
+			expect(sum).toBe(page.items.length)
+		}
+		// Only the probe's channel is stored: the next channel holds nothing, exactly.
+		const next = await runtime.service.search({
+			query: { channelHz: CHANNEL_HZ + 12_500 },
+		})
+		expect(next.items).toEqual([])
 	}, 30_000)
 })

@@ -1,6 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 
+import { queryParams } from "../../src/data/activity-feed.ts"
 import { buildQuery, token } from "../../src/features/activity/search.ts"
 import {
 	ANY_TIME,
@@ -39,20 +40,21 @@ describe("Activity scope (time range, With audio)", () => {
 		expect(q?.producedAt?.to).toBeUndefined()
 	})
 
-	it("With audio keeps voice, and cannot match a non-voice search", () => {
+	it("With audio asks the core for rows with a recording, in any category", () => {
 		const all = scopedQuery(
 			buildQuery([], null),
 			{ range: ANY_TIME, audio: true },
 			NOW,
 		)
-		expect(all).toEqual({ categories: ["voice"] })
+		expect(all).toEqual({ hasRecording: true })
+		expect(queryParams(all ?? {})).toEqual({ hasRecording: "true" })
 		expect(
 			scopedQuery(
 				buildQuery([], "paging"),
 				{ range: ANY_TIME, audio: true },
 				NOW,
 			),
-		).toBeNull()
+		).toMatchObject({ hasRecording: true })
 		expect(scopedQuery(null, { range: ANY_TIME, audio: false }, NOW)).toBeNull()
 	})
 
@@ -69,7 +71,7 @@ describe("Activity scope (time range, With audio)", () => {
 	})
 
 	// Feature: web-app activity scope, Property 1: a scoped query never widens the search
-	it("never drops a filter of the search and stays within its categories", () => {
+	it("never drops a filter of the search and keeps its categories", () => {
 		const kinds = fc.constantFrom(
 			"talkgroup",
 			"capcode",
@@ -95,16 +97,16 @@ describe("Activity scope (time range, With audio)", () => {
 					const base = buildQuery(tokens, chip)
 					const q = scopedQuery(base, { range: { kind: range }, audio }, NOW)
 					if (base === null) return q === null
-					if (q === null) return audio
+					if (q === null) return false
+					if ((q.hasRecording === true) !== audio) return false
 					if (base.text !== q.text) return false
 					if (
 						JSON.stringify(base.frequencyHz) !== JSON.stringify(q.frequencyHz)
 					)
 						return false
-					const cats = q.categories ?? null
-					if (base.categories && cats)
-						return cats.every(c => base.categories?.includes(c))
-					return !audio || cats !== null
+					return (
+						JSON.stringify(base.categories) === JSON.stringify(q.categories)
+					)
 				},
 			),
 			{ numRuns: 200 },

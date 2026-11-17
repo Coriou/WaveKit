@@ -15,7 +15,11 @@ and talks to the core over its REST API and WebSocket. The code lives in [`web/`
   (`WAVEKIT_LIVE_DEMOD__PUBLIC_ORIGIN`) so live audio reaches your browser
   ([core reference](CORE-REFERENCE.md)).
 - **Protected core:** the first visit shows a **Pair this browser** chip. Pair once, and the
-  browser stays signed in. Signed-in devices are listed in the ⌘K palette.
+  browser stays signed in. Signed-in devices are listed in the ⌘K palette. A session lasts 30 days
+  from its last refresh: the app refreshes it when it opens and when its window comes back to the
+  front, once less than 29 days are left (at most once an hour), so a browser used at least once
+  every 30 days never has to pair again. A browser whose session ran out (or was signed out from another
+  device) shows **Session expired, pair again** instead of the bare pairing prompt.
 - **One address:** a protected core accepts the address named in its access settings and no
   other. `localhost` and `127.0.0.1` reach the same server, but to the browser and to the core they
   are two sites, each with its own sign-in. Opened under the one the core refuses, the app shows
@@ -31,11 +35,64 @@ and talks to the core over its REST API and WebSocket. The code lives in [`web/`
 
 ## The screen
 
-The app has three views, picked from the dock at the bottom: **Spectrum**, **Map** and
-**Messages**. Drawers open on the right on top of the view: **Activity**, **Scanner**,
-**Recordings** and **Settings**. On a phone, the ⌘K palette (the search button) is the way around.
-Beside a full-height drawer, toasts and the spectrum's status notes (`No source connected` and
+The app has two views, picked from the dock at the bottom: **Spectrum** and **Map**. Drawers open
+on the right on top of the view: **Activity**, **Scanner**, **Recordings** and **Settings**.
+Decoded messages as cards live in Activity's **Cards** layout (the Messages view is gone; see
+[Drawers](#drawers)). On a phone, the ⌘K palette (the search button) is the way around.
+Beside a full-height drawer, notices and the spectrum's status notes (`No source connected` and
 the like) centre on the free area left of it, never under the drawer.
+
+### Notices
+
+Notices appear at the top centre of the spectrum, just under the Tuner and Receiver (and under the
+connection chip when it sits there). While Activity is expanded (**Cards**, then
+**Expand**), the drawer covers the spectrum, so notices move to the widest empty gap of the top row
+(beside the Receiver, or between the Tuner and the Receiver), or, when that gap is too narrow, to
+the empty middle of the Activity header; when neither has room for every notice showing (a
+warning with an Undo under it, say), they sit in the drawer under its header as below. They never
+cover a card or a drawer control. On a phone,
+and in any window narrower than 1100 px, an open drawer (Activity, Scanner, Recordings or
+Settings) spans the window, so notices sit inside it as a banner directly under its header: the
+drawer's list moves down to make room and comes back when the notice goes, and the title, Live,
+✕ and every other header control stay clear and usable. There are two kinds, and at most one of
+each shows at once:
+
+- **What you just did**, such as `Saved`, `Copied` or `Removed`, often with **Undo**. It stays
+  6 seconds; the next one replaces it.
+- **Something that is going on**, such as lost samples or an update waiting. It shows for
+  8 seconds, then stays visible in its usual place: lost samples on the Receiver island
+  (`Samples lost` with a warning triangle, and the full sentence in the Receiver panel). A second
+  one waits until the first has had its time, then shows if it is still going on. Neither
+  kind removes the other, so an Undo is never pushed away by a warning.
+
+**WaveKit was updated · Reload** stays until you reload or close it. Notices wait while the ⌘K
+palette is open and while the pointer or keyboard focus is on them. ✕ closes one.
+
+When WaveKit loses receiver samples, the notice says why:
+
+| Cause                                                  | Notice                                                          |
+| ------------------------------------------------------ | --------------------------------------------------------------- |
+| The link from the receiver cannot carry the rate       | `Receiver link dropping samples — lower the sample rate`        |
+| The same, while the 1090 MHz rate policy holds a raise | `Receiver link dropping samples at 2.4 MS/s (raised for ADS-B)` |
+| WaveKit itself was too busy to read the samples        | `Samples lost: WaveKit is too busy to keep up`                  |
+| WaveKit cannot tell which, or names no cause           | `Receiver samples lost`                                         |
+
+Only the first asks for a lower sample rate. While another program controls the tuner,
+WaveKit names no cause. A disconnected or paused receiver is not losing
+samples and raises no such notice. The notice comes once the loss has lasted 6 seconds,
+and once per episode: an episode starts with the first loss and lasts until the link has been clean
+for a minute, so a link that recovers and drops again does not repeat it. A different cause in the
+same episode shows once more, except a change to an unknown cause. After ✕ nothing more shows in
+that episode; the Receiver island still says `Samples lost` while samples are being lost. A page
+reloaded during an episode shows it on the Receiver island only, and a WaveKit restart in the middle
+of a loss does not bring the notice back (nor undo a ✕). If the app stops hearing from
+WaveKit for 10 seconds, the notice goes and the Receiver island's marker turns grey until fresh
+news arrives. Samples dropped inside WaveKit after they all arrived, or a link that has not yet
+shown it can carry the rate, raise nothing. While the Receiver panel is open, it lists these instead
+of a notice, and a notice held back that way counts as shown: closing the panel does not bring it
+up. A notice waiting behind another one counts only once it shows. A sample-rate raise or restore by the rate policy is a short notice of its own; a raise
+it had to skip (another client has the tuner, or the receiver refused the rate) stays listed in the
+Receiver panel for 5 minutes.
 
 ### Spectrum and waterfall
 
@@ -142,15 +199,30 @@ Click a single tag for its detail:
   three of each, then `+n more`). Calls the scanner's check decoded are not Activity rows: Activity
   lists what the decoders heard, so it may have nothing on that frequency yet, and the detail says
   so. A proven digital voice channel with no call in it says `No calls heard yet — control
-channel only`. **Last call** shows only when the core names the discovery's last Activity event,
-  and opens it. Otherwise **Search Activity** opens Activity on that frequency.
+channel only`. **History of …** (`History of Club net`, `History of 145.6125`: the channel's
+  name, else its frequency) opens Activity on the channel: its raster frequency, half a raster
+  step either side, never the signal's measured width. **Open last transmission** shows only when
+  the core names the discovery's last Activity event, and opens it.
 - **Tune** and **Listen** go to the discovery's measured frequency, as the Scanner drawer does.
   **Listen** is the drawer's Listen: it tunes there, then starts live audio once the tune has
   landed. If the tune fails, nothing plays and a `Could not tune: …` warning says why. If the
   receiver is tuned elsewhere meanwhile, nothing plays here. The core's live audio is left
   running, because other browsers may be listening to it. Turning Listen off stops the core's
   live audio only when a fresh status shows no other listener on either stream.
-  **Open in Scanner** opens the discovery in the Scanner drawer.
+  **Evidence** opens the discovery in the Scanner drawer.
+
+#### One name per channel
+
+A channel reads the same on the tags, Activity rows, Recordings and the palette (the tuned
+card's body keeps its own title for now; its history link uses the saved name): your saved name
+first, then the operator's label, the proven protocol (`POCSAG pager`, `FM voice`), the likely
+one (`Likely DMR`), then what was measured (`Unidentified · FM ~25 kHz`). A saved frequency
+names the channel within half a raster step of it (the band plan's step at that frequency, 12.5
+kHz outside any band), so a carrier measured a little off the raster still gets its name, and a
+neighbouring channel never does. NFM is only the demodulator setting: what was heard on an
+analog channel reads `FM voice`. Every door that opens a channel's history (the tag detail, the
+tuned card, the palette, Recordings) opens the same Activity window, and its search chip states
+the width, for example `Club net · 145.6125 ±6.25 kHz`.
 
 ### The tuned card
 
@@ -313,6 +385,13 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
 
 - **Activity:** everything WaveKit heard, newest first. Search by talkgroup, capcode, MMSI, ICAO,
   callsign or frequency, filter by category and time range, show a list or cards, choose columns.
+  **Cards** shows each event as its decoded message card; **Expand** beside it widens the drawer
+  across the window between the islands and lays the cards out in as many columns as fit (340 px
+  each, up to three), for reading pages and packets side by side; **Collapse** brings it back.
+  This replaces the old Messages view: `#/messages`, a link with `view=messages` and the ⌘K
+  **Messages** row (`G` `D`) open Activity in Cards. A scanner recording's row is a transmission:
+  it reads `FM voice` (or the channel's saved name, with `FM voice` under it), never
+  `Recording 145.5625 MHz`.
   **Last decode** on the tuned card opens it on one decoder: a **Decoder ADS-B** chip in the
   search lists only that decoder's events; remove the chip with its `×` like any other filter.
   If the core rate-limits a request, Activity retries by itself up to 3 times, unless the core asks
@@ -332,6 +411,14 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   one, says what failed with **Try again**, and the list tries again on its own after 2, 4, 8, 16
   then every 30 s.
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
+  The count beside the list title (`2,350`) is the number of events the core counts for the
+  search, the same unit and digit grouping as the category filters (not the folded rows on screen); past the core's counting cap
+  (50,000 events) it reads `50,000+`, at least that many. A pinned column shown in its
+  place, or a core that cannot count, shows the loaded events instead, with `+` while older ones
+  are not loaded; so does a new search, time range or **With audio** until the core has counted
+  it, and a count the core failed to answer. **With audio** keeps only the events that have a recording to play, in every
+  category. A row or card with a recording has a play disc with its length; see
+  [Playing recordings](#playing-recordings).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
   not care about, save presets. A row the core suspects is a receiver spur says so on its second
   line: `Receiver spur` once confirmed, `Possible spur (unverified)` while the suspicion is not yet
@@ -344,24 +431,31 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   core left the oldest out), and so does Kept. The search runs on the core: one chip per kind
   (talkgroup, radio, frequency, kind, text; a new chip replaces the one of its kind), and typed
   text matches the talkgroup, radio, decoder, kind, start time or frequency in MHz, never the file
-  size or the recording's internal id. A scanner recording the core cut short says why on its
-  row and in the player: `Cut: scanner moved on` (the tuner moved under the file while the
-  transmission was still on the air, or its tuning stopped being trusted; a move that cut off only
-  the silence after the transmission shows no cut), `Continues in next part` (a long transmission
-  split into files, when the next part is listed), `Cut: length limit` (a split file whose other
-  parts are not listed), `Cut: source lost` or `Cut: WaveKit stopped`; the parts of a transmission
-  split by the length limit read `Part 2 of 5` (separate overs of one held carrier get no part
-  number). New recordings
+  size or the recording's internal id. A scanner recording is named like its channel (the saved
+  name, else `FM voice`), with the frequency in the line under it. Where a file sits in its
+  transmission, and why the transmission ended, is said in words, never `Cut`: the parts of a long
+  transmission split into files read `Part 1 of 3 · continues` up to the last one, which says how
+  it ended (`Part 3 of 3 · Scanner moved on, may be incomplete`, or `Part 5 of 5 · continues` when
+  the next file is not listed yet); a single file reads `Scanner moved on at 1:30, may be
+  incomplete` (the tuner moved under it while the transmission was on the air, or its tuning stopped
+  being trusted; a move that cut off only the silence after it says nothing), `Continues…` while the
+  core has not yet linked a rolled-over file to its next part, `Receiver lost` or `WaveKit stopped`
+  (separate overs of one held carrier get no part number). An open row has the same actions in the
+  same order everywhere: **Play**, **Keep** (**Kept**, click again to unkeep; `S`), **⋯** (Download,
+  Tune, Evidence, Delete with Undo) and one channel link, **History of …**, which opens the channel
+  in Activity with this transmission open when the core linked it. New recordings
   appear on their own (the core announces each change on the socket; nothing polls); while you
-  scroll down or play one, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,
+  scroll down or play one from this list, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,
   then the placeholder, `Still loading. WaveKit is busy.` after 3 s, and after 10 s (or an error)
   what failed, **Try again**, and a retry on its own after 2, 4, 8, 16 then every 30 s, the last
   rows kept and marked with their time. While the core is still indexing its recordings after a
   start, the list says so and fills in. Closing and opening the drawer again on the same search
   keeps the scroll position. The list is one Tab stop: the row under the cursor; the arrows move
-  it and focus follows; Space and Enter on a button inside a row press that button. The footer line says how many are kept and sums the disk
-  the recording areas use: digital-voice calls, scanner evidence and named IQ captures (each with
-  its limit), then the free space.
+  it and focus follows; Space and Enter on a button inside a row press that button. The footer
+  says in words what each recording area holds and what happens at its limit, for example
+  `Scanner folder: 214 MB. Auto-clean keeps scanner recordings under 537 MB. IQ captures: 96.0 MB of
+640 MB (new captures are refused at the limit). Kept items are never removed (12). 41.2 GB free
+on disk.`
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band
   plans, spectrum and waterfall, map, units and time, theme, density and motion. **Audio** uses the
   Listen words: **Squelch** (Auto, Manual, Open), **Voice only** under Auto on NFM, **Squelch level**
@@ -456,10 +550,47 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
   frequency; turning the switch on shows nothing until your next retune. When the scanner sees broadband
   blanking rise at a manual gain, the line `Front end may be overloaded at this gain (49.6 dB,
 7.5 % of frames blanked)` suggests a lower gain; it is a hint, not a measurement.
-- When samples are lost on the way from the receiver to WaveKit, a notice at the bottom says
-  `Receiver link dropping samples — lower the sample rate`. It shows only for loss on the receiver
-  link. Samples dropped inside WaveKit, or a link that has not yet shown it can carry the rate,
-  raise no notice.
+- When samples are lost on the way from the receiver to WaveKit, the Receiver island says
+  `Samples lost` and a notice says why (see [Notices](#notices)).
+
+### Playing recordings
+
+There is one player for the whole app. A play disc on an Activity row or card (expanded Cards too),
+a Recordings row, or the tuned card's last transmission or one of its earlier rows starts the
+recording; pressing the same disc again pauses it, and while it loads the disc already says Pause
+(pressing it then cancels the start). Rows without a recording (most decodes, and digital calls the
+core did not record) have no disc. The recording playing is marked the same way in every list that
+shows it. On the tuned card a scanner recording's disc sits on the transmission it recorded, which
+keeps its tone and transcript. A long transmission recorded as several files sits on that one
+transmission and plays its first file (Recordings lists every file). A recording is a row of its own
+when its transmission is not in the list, or when WaveKit cannot tell which of two transmissions on
+the channel it recorded.
+
+While something is loaded, the player sits at the bottom of the screen, above the dock, whatever
+panel is open: **Previous**, **Play/Pause**, **Next**, the title and its place in the list
+(`3 of 12`), the time, a position slider, the speed (1×, 1.5×, 2×), **Auto-next**, **Keep** and
+**Close**. Closing a drawer does not stop it. **Next**, **Previous** and **Auto-next** follow the
+list it was started from, in the order shown, and only the rows with a recording: the Activity
+drawer and each pinned column are separate lists. **Previous** after the first 2 s goes back to the
+start; before that it plays the previous recording, and it is greyed out when there is none.
+**Auto-next** plays the next recording when one ends (never after a failure); it is on by default
+and remembered per browser. While the open Activity event or Recordings row is the one playing and
+its drawer is the one on screen, the player shrinks to a thin progress line with play/pause, and
+that row's waveform is where you seek: click or drag on it (a paused one plays on from there). A
+recording that fails keeps the full player, which says why:
+`This recording is no longer on the receiver`,
+`Too many recordings are being read; try again in a moment`,
+`The receiver is busy; try again`, or `Session expired, pair again`.
+**Keep** works when WaveKit can name the file, which for a digital-voice call needs it loaded in
+Recordings; otherwise it says to keep it from there. When WaveKit does not know yet whether a file
+is kept, **Keep** never shows it as not kept: pressing it keeps the file and shows the answer.
+
+Live audio in this tab is muted while a recording plays or loads to play, and comes back as soon as
+the recording pauses, by any means (its disc, the player, a media key or the system), or ends,
+fails or closes; a media key's play mutes it again, also after the recording ended (it plays again
+from its start). Live audio in another tab keeps playing.
+Pressing **Listen** while a recording plays pauses the recording; Listen stays on. The same holds for every Listen, including a scanner hit's Listen while live audio is
+already on.
 
 ### Scanner observations
 
@@ -578,7 +709,7 @@ A schedule needs at least 3 rows with every interval within 35 % of the median. 
 shows how often it was seen, the strength when the decoder sends it, **Open in Scanner** when a
 discovery sits within 12.5 kHz, and up to 50 folded rows.
 
-## Map and Messages
+## Map
 
 ![Map: aircraft, vessels and APRS stations around the station, with their trails and the receiver's coverage](assets/screenshots/map.png)
 
@@ -606,8 +737,9 @@ aircraft's ADS-B trail: trails ask `GET /api/activity/trails` for every category
 **Datalink** section: its last five ACARS and VDL2 messages, newest first, how many link frames
 were folded, and how its registration was tied to its address (`Registration N0WK01 heard with this
 address on VDL2`). The aircraft is found by its ICAO address and the registrations
-`GET /api/aircraft-identity` links to it, never by callsign or flight number. **Messages** shows decoded messages as cards; open one to see its
-full content or its position on the map.
+`GET /api/aircraft-identity` links to it, never by callsign or flight number. For decoded
+messages as cards, use Activity's **Cards** layout; open one to see its full content or its
+position on the map.
 
 Select an aircraft to see its live flight data and what the core knows about it (see
 [ADS-B, Aircraft Enrichment](ADSB.md#aircraft-enrichment)). From the top: a photo of the airframe,
@@ -655,7 +787,7 @@ already shown.
 | `P`                  | Pause / resume the receiver       |
 | `B` / `S`            | Saved frequencies / save this one |
 | `/`                  | Search Activity                   |
-| `G` then `S` `M` `D` | Spectrum, Map, Messages           |
+| `G` then `S` `M` `D` | Spectrum, Map, Activity as cards  |
 | `G` then `A` `C` `R` | Activity, Scanner, Recordings     |
 | `?`                  | All shortcuts                     |
 | `Esc`                | Close the top drawer or sheet     |
@@ -663,7 +795,8 @@ already shown.
 ## Links
 
 The address bar names what is on screen, so a link reopens it: `#/map`, `#/activity/<eventId>`,
-`#/scanner/<discoveryId>`, `#/settings/<settingId>`.
+`#/activity?layout=cards`, `#/scanner/<discoveryId>`, `#/settings/<settingId>`. An old
+`#/messages` link (or one with `view=messages`) opens Activity in Cards.
 
 ## Install it
 

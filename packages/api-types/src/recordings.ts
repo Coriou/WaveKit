@@ -1,3 +1,5 @@
+import { DISCOVERY_NEAR_MAX_TOLERANCE_HZ } from "./scanner.js"
+
 /**
  * WG8 recordings inventory (docs/specs/web-gaps-8, requirement 4): a protected, read-only list
  * of the WAV recordings WaveKit already writes (dsd-fme per-call recordings and scanner
@@ -37,6 +39,10 @@ export const RECORDINGS_CATALOGUE_MAX_FOLDERS = 20_000
 export const RECORDINGS_QUERY_TEXT_MAX = 64
 /** WG8 req 4.6: bytes read from a file to find the RIFF `fmt ` and `data` chunks. */
 export const RECORDINGS_HEADER_READ_BYTES = 4096
+/** The largest `toleranceHz` of a `nearHz` listing: the discovery list's bound. */
+export const RECORDINGS_NEAR_MAX_TOLERANCE_HZ = DISCOVERY_NEAR_MAX_TOLERANCE_HZ
+/** Entries of `matchedByChannel`: the Activity facets' value cap. */
+export const RECORDINGS_CHANNELS_MAX = 32
 /** WG8 req 4.6: concurrent filesystem operations of one scan. */
 export const RECORDINGS_SCAN_CONCURRENCY = 8
 /** WG8 req 4.2: a file modified this recently may still be written (= RECORDING_IN_PROGRESS_MS). */
@@ -83,6 +89,18 @@ export const RECORDING_CUTS: readonly RecordingCut[] = Object.freeze([
 	"duration-rollover",
 	"source-lost",
 	"shutdown",
+])
+
+/**
+ * Whether speech was heard in a recording, by the recorder's own measure at its finish: `heard`,
+ * `not-heard`, or `unchecked` (not measured: a file classed by its tone, a recording of another
+ * kind, a file finished before the field existed, or anything unknown).
+ */
+export type RecordingSpeech = "heard" | "not-heard" | "unchecked"
+export const RECORDING_SPEECH: readonly RecordingSpeech[] = Object.freeze([
+	"heard",
+	"not-heard",
+	"unchecked",
 ])
 
 /** WG8 req 4.3: one recording. Every field is derived; nothing is guessed. */
@@ -143,6 +161,24 @@ export interface RecordingInventoryItem {
 	part?: number | null
 	/** The number of listed files of that observation (null with `part`). */
 	parts?: number | null
+	/**
+	 * When the file's audio starts (ISO-8601 UTC): a scanner analog file's first sample, from its
+	 * receipt. Null when unknown (other kinds, older files). Absent from older cores.
+	 */
+	startedAt?: string | null
+	/**
+	 * The scanner observation the file recorded (one transmission; its roll-over parts share it),
+	 * from its receipt. Null when unknown and for other kinds. Absent from older cores.
+	 */
+	observationId?: string | null
+	/** RecordingSpeech, from the file's receipt; `unchecked` when unknown. Absent from older cores. */
+	speech?: RecordingSpeech
+	/**
+	 * Why the recorder kept the file: its finish reason code (`prior-none`, `own-tone`, `final`,
+	 * `joined-decode`, …), as the recorder decisions report it. Null when unknown and for other
+	 * kinds. Absent from older cores.
+	 */
+	keptBy?: string | null
 }
 
 /**
@@ -165,6 +201,18 @@ export interface RecordingInventoryQuery {
 	/** Inclusive frequency range in Hz (integers); only recordings with a known frequency match. */
 	minHz?: number | string
 	maxHz?: number | string
+	/**
+	 * Recordings of this channel: `frequencyHz` (the owning discovery's, the channel frequency)
+	 * equal to it, integer Hz. Not with `nearHz`.
+	 */
+	channelHz?: number | string
+	/** Recordings whose `frequencyHz` lies within `toleranceHz` of this (integer Hz), inclusive. */
+	nearHz?: number | string
+	/**
+	 * With `nearHz` only: integer Hz, 0 to RECORDINGS_NEAR_MAX_TOLERANCE_HZ; omitted:
+	 * DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ, as the discovery list.
+	 */
+	toleranceHz?: number | string
 	/** Inclusive modification time range, ISO-8601 with a zone. */
 	since?: string
 	until?: string
@@ -202,6 +250,11 @@ export interface RecordingInventoryPage {
 	indexing?: boolean
 	/** Recordings matching the filters (cursor aside). */
 	matched?: number
+	/**
+	 * With `nearHz` only: the matching recordings per channel frequency (decimal Hz), count
+	 * descending then frequency ascending, at most RECORDINGS_CHANNELS_MAX entries.
+	 */
+	matchedByChannel?: { frequencyHz: number; count: number }[]
 	counts?: RecordingInventoryCounts
 	/** Past the bound: the newest modification time left out (ISO-8601); null otherwise. */
 	truncatedBefore?: string | null

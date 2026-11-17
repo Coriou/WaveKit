@@ -71,6 +71,30 @@ function nestedString(
 	return stringField(child, field)
 }
 
+/** A voice call's title when nothing names who or to whom. */
+export const VOICE_CALL_TITLE = "Voice call"
+
+/**
+ * A voice call's title: who, then to whom when known, never the protocol (the row's `protocol`
+ * names it): `TG 2081 · radio 3120001` (a talkgroup call), `radio 1 → unit 2` (unit to unit),
+ * `N0CALL → CQCQCQ` (D-STAR MY and UR), `N0CALL` (YSF), else VOICE_CALL_TITLE.
+ */
+export function voiceCallTitle(call: {
+	talkgroup?: number | undefined
+	unitTarget?: number | undefined
+	from?: string | undefined
+	to?: string | undefined
+}): string {
+	if (call.talkgroup !== undefined)
+		return call.from === undefined
+			? `TG ${call.talkgroup}`
+			: `TG ${call.talkgroup} · ${call.from}`
+	const to = call.unitTarget !== undefined ? `unit ${call.unitTarget}` : call.to
+	if (call.from !== undefined)
+		return to === undefined ? call.from : `${call.from} → ${to}`
+	return to === undefined ? VOICE_CALL_TITLE : `${VOICE_CALL_TITLE} → ${to}`
+}
+
 /**
  * Digital voice call. The key is the talkgroup, or the calling station's
  * callsign for D-STAR (MY) and YSF (source), which have no talkgroup; colour
@@ -102,13 +126,19 @@ export function presentVoice(data: unknown): DecodePresentation | undefined {
 	const talkgroup =
 		placeholders || unitTarget !== undefined ? undefined : talkgroupRaw
 	const source = placeholders ? undefined : sourceRaw
-	let titleText = label === "" ? "Voice" : label
-	if (talkgroup !== undefined) titleText += ` TG ${talkgroup}`
-	if (unitTarget !== undefined) titleText += ` to unit ${unitTarget}`
-	if (source !== undefined) titleText += ` from ${source}`
-	else if (callsign !== undefined) titleText += ` from ${callsign}`
-	if (urCall !== undefined && urCall !== "") titleText += ` to ${urCall}`
-	const title = clampTitle(titleText)
+	const title = clampTitle(
+		voiceCallTitle({
+			talkgroup,
+			unitTarget,
+			from:
+				source !== undefined
+					? `radio ${source}`
+					: callsign !== undefined && callsign !== ""
+						? callsign
+						: undefined,
+			to: urCall !== undefined && urCall !== "" ? urCall : undefined,
+		}),
+	)
 	const colour =
 		numberField(payload, "colourCode") ?? nestedNumber(payload, "dmr", "cc")
 	const nac = stringField(payload, "nac") ?? nestedString(payload, "p25", "nac")

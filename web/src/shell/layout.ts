@@ -8,7 +8,10 @@ export const DOCK_H = 64
 export const CARD_W = 340
 /** From this width a drawer floats over the plot's right side at full height. */
 export const FULL_MIN_VW = 1100
-/** Dock width with the active label showing, and without it, for the collision checks. */
+/**
+ * Fallback dock widths with the active label showing, and without it, for the collision checks (the dock is measured
+ * at runtime; these were taken before the Messages button left it, so they err wide).
+ */
 export const DOCK_WIDE = 496
 export const DOCK_COMPACT = 424
 export const DR_MIN = 360
@@ -302,6 +305,8 @@ export interface CardOptions {
 	readonly rxOpen?: boolean
 	/** The open drawer's wanted width (src/shell/drawer-width.ts); its default when omitted. */
 	readonly drawerW?: number
+	/** The notice region shows something at the top centre: the top-centre anchor is not free. */
+	readonly noticeTop?: boolean
 }
 
 export function shellLayout(
@@ -410,7 +415,9 @@ export function shellLayout(
 			})
 		}
 		const r = cardAnchors(islands, freeW, H, g.cardH, listenLiveH)
-		anchors = r.anchors
+		anchors = cardOpts.noticeTop
+			? r.anchors.filter(a => a.id !== "tc")
+			: r.anchors
 		const at = toCardAnchorId(cardOpts.at) ?? DEFAULT_CARD_ANCHOR
 		const want = r.spots[at]
 		home =

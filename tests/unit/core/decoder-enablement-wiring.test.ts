@@ -348,6 +348,25 @@ describe("decoder enablement composition", () => {
 		expect(sources.listenerCount("metrics")).toBe(0)
 		expect(sources.listenerCount("connected")).toBe(0)
 	})
+	it("the core taking the tuner back resets the link advisor", () => {
+		const sources = new EventEmitter()
+		const tuner = Object.assign(new EventEmitter(), {
+			getState: () => ({ sampleRate: 2_400_000 }),
+		})
+		const link = { observe: vi.fn(), reset: vi.fn() } as unknown as LinkAdvisor
+		const close = wireDecoderLinkFeed(
+			sources as unknown as Pick<SourceManager, "on" | "off">,
+			tuner as unknown as Pick<TunerController, "getState" | "on" | "off">,
+			link,
+			{ reset: vi.fn() },
+		)
+		tuner.emit("control-mode-changed", "s1", "external")
+		expect(link.reset).not.toHaveBeenCalled()
+		tuner.emit("control-mode-changed", "s1", "internal")
+		expect(link.reset).toHaveBeenCalledExactlyOnceWith("s1")
+		close()
+		expect(tuner.listenerCount("control-mode-changed")).toBe(0)
+	})
 	it("relay retunes and operator writes reach the policy; shutdown disposes and detaches", async () => {
 		const policy: RatePolicy = {
 			beforeOperatorRetune: vi.fn(async () => {}),

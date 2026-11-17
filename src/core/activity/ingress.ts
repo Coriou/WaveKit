@@ -17,9 +17,11 @@ import type {
 	ActivityLinkOp,
 	ActivityRecordingLink,
 } from "./storage/contract.js"
-import { recordingLinkOf } from "./storage/row.js"
+import { activityChannelOf, recordingLinkOf } from "./storage/row.js"
 import { dsdFmeKeepKey } from "../recordings/contract.js"
 import type {
+	ActivityChannel,
+	ActivityChannelLookup,
 	ActivityProvenanceLookup,
 	DecodeAircraftIdentity,
 	DecodeEnvelope,
@@ -43,6 +45,11 @@ export interface ActivityIngressCounters {
 	 * was rejected because of provenance; each was kept with null provenance.
 	 */
 	provenanceFailures: number
+	/**
+	 * Receptions whose channel lookup threw or answered something that is not a channel, or
+	 * whose envelope could not carry it; each was kept without a channel.
+	 */
+	channelFailures: number
 }
 
 export interface ActivityIngress {
@@ -116,6 +123,13 @@ export interface ActivityIngressOptions {
 	 * throwing lookup or a malformed value is left out, never a failure.
 	 */
 	aircraftIdentity?: ActivityAircraftIdentityLookup | null
+	/**
+	 * The channel of a reception (ActivityChannelLookup: a scanner probe's discovery, or the
+	 * discovery on the reception's frequency): stored rows carry it as `channel` and a
+	 * `discoveryId` ref. Null or omitted: no row gets one. A throwing lookup or a malformed answer
+	 * is counted (channelFailures) and the row kept without it.
+	 */
+	channel?: ActivityChannelLookup | null
 }
 
 const ICAO_ENTITY = /^icao:([0-9A-F]{6})$/
@@ -264,6 +278,7 @@ export function createActivityIngress(
 	const identityLookup = options.aircraftIdentity ?? null
 	const callRecordings = options.callRecordings ?? null
 	const linkSink = options.link ?? null
+	const channelLookup = options.channel ?? null
 	const log = createComponentLogger(options.logger, "ActivityIngress")
 	const counts: ActivityIngressCounters = {
 		published: 0,
@@ -271,12 +286,13 @@ export function createActivityIngress(
 		sinkFailures: 0,
 		presentationFailures: 0,
 		provenanceFailures: 0,
+		channelFailures: 0,
 	}
 	const lastLoggedAt = new Map<string, number>()
 
 	function logFailure(
 		decoderId: string,
-		kind: "build" | "sink" | "presentation" | "provenance",
+		kind: "build" | "sink" | "presentation" | "provenance" | "channel",
 		err: unknown,
 		at: number,
 	): void {
@@ -307,6 +323,39 @@ export function createActivityIngress(
 	function noteProvenance(decoderId: string, err: unknown, at: number): void {
 		counts.provenanceFailures++
 		logFailure(decoderId, "provenance", err, at)
+	}
+
+	/**
+	 * The envelope with the reception's channel, or as it was (no lookup, no channel, or a
+	 * failure: counted). Never throws.
+	 */
+	const withChannel = (
+		decoderId: string,
+		envelope: DecodeEnvelope,
+		at: number,
+	): DecodeEnvelope => {
+		if (channelLookup === null) return envelope
+		let channel: ActivityChannel | null
+		try {
+			const answer: unknown = channelLookup(
+				decoderId,
+				envelope.provenance.frequency?.hz ?? null,
+			)
+			if (answer === null || answer === undefined) return envelope
+			channel = activityChannelOf(answer)
+			if (channel === null) throw new TypeError("not a channel")
+		} catch (err) {
+			counts.channelFailures++
+			logFailure(decoderId, "channel", err, at)
+			return envelope
+		}
+		try {
+			return withEnvelopeMetadata(envelope, { channel })
+		} catch (err) {
+			counts.channelFailures++
+			logFailure(decoderId, "channel", err, at)
+			return envelope
+		}
 	}
 
 	/** The call's recording when the catalogue lists this decoder's files; never throws. */
@@ -411,6 +460,7 @@ export function createActivityIngress(
 			}
 			if (provenanceError !== null)
 				noteProvenance(decoderId, provenanceError.err, receivedAt.getTime())
+			envelope = withChannel(decoderId, envelope, receivedAt.getTime())
 			const plain = envelope
 			const failed = (err: unknown): DecodeEnvelope => {
 				counts.presentationFailures++

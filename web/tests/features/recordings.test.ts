@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 import type {
 	RecordingInventoryItem,
 	StorageArea,
@@ -26,10 +26,9 @@ import {
 	textToken,
 	withToken,
 } from "../../src/features/recordings/model.ts"
-import { RecordingPlayer } from "../../src/features/recordings/player.ts"
-import type { AudioLike } from "../../src/features/recordings/player.ts"
+import { savedNames } from "../../src/features/naming.ts"
 import { visibleRecordings } from "../../src/features/recordings/ui-store.ts"
-import { parseWav, wavPeaks } from "../../src/features/recordings/wav.ts"
+import { parseWav, wavPeaks } from "../../src/features/playback/wav.ts"
 import { synthWav } from "../../mock/recordings.ts"
 
 const call = (
@@ -79,60 +78,96 @@ describe("recording text", () => {
 		expect(recordingTitle(call({ talkgroup: null, callType: null }))).toBe(
 			"Voice call",
 		)
-		expect(recordingTitle(scan())).toBe("156.800 MHz")
+		// a scanner recording is a transmission, never "Recording <Hz>"; the frequency moves to the meta line
+		expect(recordingTitle(scan())).toBe("FM voice")
 		expect(
 			recordingTitle(scan({ kind: "scanner-dv", frequencyHz: 161_150_000 })),
-		).toBe("Digital voice 161.150")
-		expect(recordingTitle(scan({ frequencyHz: null }))).toBe(
-			"Scanner recording",
-		)
+		).toBe("Digital voice")
+		expect(recordingTitle(scan({ frequencyHz: null }))).toBe("FM voice")
+	})
+
+	it("names a scanner recording by its channel's saved name, matched by raster frequency", () => {
+		savedNames.set([{ frequencyHz: 156_800_000, name: "Harbour ops" }])
+		try {
+			// the measured carrier sits 0.4 kHz off the saved channel
+			const r = scan({ frequencyHz: 156_800_400, bytes: 2_900_000 })
+			expect(recordingTitle(r)).toBe("Harbour ops")
+			expect(recordingMeta(r)).toBe("FM voice · 156.8000 · 2.9 MB")
+			// a neighbouring channel 12.5 kHz away keeps its own name
+			expect(recordingTitle(scan({ frequencyHz: 156_812_500 }))).toBe(
+				"FM voice",
+			)
+		} finally {
+			savedNames.set([])
+		}
 	})
 
 	it("builds the meta line from the derived fields", () => {
 		expect(recordingMeta(call())).toBe(
 			"Call · radio 2081012 · dsd-fme · 340 kB",
 		)
-		expect(recordingMeta(scan({ bytes: 2_900_000 }))).toBe(
-			"Scanner · analog · 2.9 MB",
-		)
+		expect(recordingMeta(scan({ bytes: 2_900_000 }))).toBe("156.8000 · 2.9 MB")
 	})
 
-	it("says why a scanner file ended and which part it is, only from the core's fields", () => {
-		expect(recordingCutLabel(scan())).toBeNull()
-		expect(
-			recordingCutLabel(scan({ cut: null, part: null, parts: null })),
-		).toBeNull()
-		expect(recordingCutLabel(scan({ cut: "scanner-moved" }))).toBe(
-			"Cut: scanner moved on",
+	it.each([
+		// [case, patch, label]
+		["no cut reported", {}, null],
+		["nothing at all", { cut: null, part: null, parts: null }, null],
+		[
+			"a part before the last never says Cut",
+			{ cut: "duration-rollover", part: 1, parts: 3 },
+			"Part 1 of 3 · continues",
+		],
+		[
+			"a middle part",
+			{ cut: "duration-rollover", part: 2, parts: 5 },
+			"Part 2 of 5 · continues",
+		],
+		[
+			"the last listed part that rolled over continues",
+			{ cut: "duration-rollover", part: 5, parts: 5 },
+			"Part 5 of 5 · continues",
+		],
+		[
+			"an unresolved chain continues",
+			{ cut: "duration-rollover", part: null, parts: null },
+			"Continues…",
+		],
+		[
+			"an unresolved chain, fields absent",
+			{ cut: "duration-rollover" },
+			"Continues…",
+		],
+		[
+			"the end of the transmission explains itself",
+			{ cut: "scanner-moved", part: 3, parts: 3 },
+			// the file's length is not the offset in the whole transmission: no time
+			"Part 3 of 3 · Scanner moved on, may be incomplete",
+		],
+		[
+			"a lone file the scanner left",
+			{ cut: "scanner-moved" },
+			"Scanner moved on at 0:42, may be incomplete",
+		],
+		[
+			"no length, no time",
+			{ cut: "scanner-moved", durationMs: null },
+			"Scanner moved on, may be incomplete",
+		],
+		["receiver lost", { cut: "source-lost" }, "Receiver lost"],
+		["shutdown", { cut: "shutdown" }, "WaveKit stopped"],
+	] as const)("cut label: %s", (_case, patch, label) => {
+		const got = recordingCutLabel(
+			scan(patch as Partial<RecordingInventoryItem>),
 		)
-		expect(
-			recordingCutLabel(scan({ cut: "duration-rollover", part: 2, parts: 5 })),
-		).toBe("Part 2 of 5 · Continues in next part")
-		// The last listed part names no next part.
-		expect(
-			recordingCutLabel(scan({ cut: "duration-rollover", part: 5, parts: 5 })),
-		).toBe("Part 5 of 5")
-		// A lone roll-over file (no part known) names no next part, only why it ended.
-		expect(
-			recordingCutLabel(
-				scan({ cut: "duration-rollover", part: null, parts: null }),
-			),
-		).toBe("Cut: length limit")
-		expect(recordingCutLabel(scan({ cut: "duration-rollover" }))).toBe(
-			"Cut: length limit",
-		)
-		expect(
-			recordingCutLabel(scan({ cut: "scanner-moved", part: 3, parts: 3 })),
-		).toBe("Part 3 of 3 · Cut: scanner moved on")
-		expect(recordingCutLabel(scan({ cut: "source-lost" }))).toBe(
-			"Cut: source lost",
-		)
-		expect(recordingCutLabel(scan({ cut: "shutdown" }))).toBe(
-			"Cut: WaveKit stopped",
-		)
+		expect(got).toBe(label)
+		expect(got ?? "").not.toMatch(/\bCut\b/)
+	})
+
+	it("puts the cut label at the end of the meta line", () => {
 		expect(
 			recordingMeta(scan({ bytes: 2_900_000, cut: "scanner-moved" })),
-		).toBe("Scanner · analog · 2.9 MB · Cut: scanner moved on")
+		).toBe("156.8000 · 2.9 MB · Scanner moved on at 0:42, may be incomplete")
 	})
 
 	it("formats durations and sizes like the board", () => {
@@ -361,7 +396,7 @@ describe("storage line", () => {
 			lowSpace: { state: "ok" },
 		}) as unknown as StorageReport
 
-	it("names each recording area that exists, IQ captures with their quota", () => {
+	it("says in words what auto-clean keeps, what kept means, and the free space", () => {
 		expect(
 			storageLine(
 				report([
@@ -372,15 +407,17 @@ describe("storage line", () => {
 				3,
 			),
 		).toBe(
-			"3 kept · calls 1.6 GB · scanner 412 MB of 2.0 GB · IQ captures 96.0 MB of 640 MB · 4.0 GB free",
+			"Call recordings: 1.6 GB. Scanner folder: 412 MB. Auto-clean keeps scanner recordings under 2.0 GB. IQ captures: 96.0 MB of 640 MB (new captures are refused at the limit). Kept items are never removed (3). 4.0 GB free on disk.",
 		)
 	})
 
 	it("leaves out an area that does not exist and a missing report", () => {
 		expect(storageLine(report([area("iq-captures", 0, 640e6, false)]), 0)).toBe(
-			"0 kept · 4.0 GB free",
+			"Kept items are never removed (0). 4.0 GB free on disk.",
 		)
-		expect(storageLine(null, 1200)).toBe("1,200 kept")
+		expect(storageLine(null, 1200)).toBe(
+			"Kept items are never removed (1,200).",
+		)
 		// a core without counts: nothing about kept
 		expect(storageLine(null, null)).toBe("")
 	})
@@ -436,107 +473,5 @@ describe("WAV peaks", () => {
 		])
 		expect(parseWav(new ArrayBuffer(8))).toBeNull()
 		expect(parseWav(wav(2, 8, [0]))).toBeNull()
-	})
-})
-
-class FakeAudio implements AudioLike {
-	src = ""
-	currentTime = 0
-	duration = Number.NaN
-	playbackRate = 1
-	preservesPitch = false
-	playing = false
-	private readonly handlers = new Map<string, (() => void)[]>()
-	play() {
-		this.playing = true
-		return Promise.resolve()
-	}
-	pause() {
-		this.playing = false
-	}
-	removeAttribute(name: string) {
-		if (name === "src") this.src = ""
-	}
-	load() {}
-	addEventListener(type: string, fn: () => void) {
-		this.handlers.set(type, [...(this.handlers.get(type) ?? []), fn])
-	}
-	emit(type: string) {
-		for (const fn of this.handlers.get(type) ?? []) fn()
-	}
-}
-
-describe("RecordingPlayer", () => {
-	const setup = (next: Record<string, string | null> = {}) => {
-		const audio = new FakeAudio()
-		const held: boolean[] = []
-		const fetchFile = vi.fn((id: string) => {
-			const buf = synthWav(2, id.length)
-			return Promise.resolve(new Blob([new Uint8Array(buf)]))
-		})
-		const player = new RecordingPlayer({
-			fetchFile,
-			holdLive: h => held.push(h),
-			nextOf: id => next[id] ?? null,
-			createAudio: () => audio,
-			createUrl: () => "blob:x",
-			revokeUrl: () => {},
-		})
-		return { audio, held, fetchFile, player }
-	}
-
-	it("mutes live audio, plays the blob and unmutes on close", async () => {
-		const { audio, held, player } = setup()
-		await player.play("a", 1.5)
-		expect(audio.src).toBe("blob:x")
-		expect(audio.currentTime).toBe(1.5)
-		expect(audio.playing).toBe(true)
-		expect(player.get()).toMatchObject({ id: "a", phase: "playing" })
-		player.toggle()
-		expect(player.get().phase).toBe("paused")
-		player.stop()
-		expect(held).toEqual([true, false])
-		expect(player.get().id).toBeNull()
-	})
-
-	it("advances to the next recording and stops at the end of the list", async () => {
-		const { audio, player } = setup({ a: "bb" })
-		await player.play("a")
-		audio.duration = 2
-		audio.emit("loadedmetadata")
-		audio.emit("ended")
-		await vi.waitFor(() =>
-			expect(player.get()).toMatchObject({ id: "bb", phase: "playing" }),
-		)
-		audio.emit("ended")
-		expect(player.get().phase).toBe("ended")
-	})
-
-	it("fetches each file once and computes its peaks", async () => {
-		const { fetchFile, player } = setup()
-		await player.loadPeaks("a")
-		await player.play("a")
-		expect(fetchFile).toHaveBeenCalledTimes(1)
-		const peaks = player.peaks.get().get("a")
-		expect(Array.isArray(peaks) && peaks.length).toBe(96)
-	})
-
-	it("cycles the speed and reports a failed fetch", async () => {
-		const { audio, player } = setup()
-		player.cycleSpeed()
-		expect(player.get().speed).toBe(1.5)
-		await player.play("a")
-		expect(audio.playbackRate).toBe(1.5)
-		const failing = new RecordingPlayer({
-			fetchFile: () => Promise.reject(new Error("Recording not found")),
-			holdLive: () => {},
-			nextOf: () => null,
-			createAudio: () => new FakeAudio(),
-		})
-		await failing.play("gone")
-		expect(failing.get()).toMatchObject({
-			phase: "error",
-			error: "Recording not found",
-		})
 	})
 })

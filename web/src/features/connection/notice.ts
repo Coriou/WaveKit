@@ -70,7 +70,9 @@ export function connectionNotice(
 			access.access?.mode === "protected" &&
 			access.access.bootstrap.access.pairingAvailable
 		return {
-			title: "Pair this browser",
+			title: access.sessionExpired
+				? "Session expired, pair again"
+				: "Pair this browser",
 			detail: pair
 				? "Read-only until paired · Enter a code"
 				: "Read-only · This receiver is not pairing browsers",

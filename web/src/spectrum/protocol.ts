@@ -108,7 +108,7 @@ export type MainToWorker =
 	| { type: "probe"; id: number; startHz: number; endHz: number }
 	/** Can this worker get a WebGL2 context right now? (a plot in basic mode asks before it remounts) */
 	| { type: "probeWebgl"; id: number }
-	/** Covered by an opaque view (Map, Messages): rows still land in the history, nothing is drawn. */
+	/** Covered by an opaque view (Map): rows still land in the history, nothing is drawn. */
 	| { type: "paused"; paused: boolean }
 	/** The receiver of the subscribed source is paused: no stall resubscribes or reconnects until it resumes. */
 	| { type: "sourcePaused"; paused: boolean }

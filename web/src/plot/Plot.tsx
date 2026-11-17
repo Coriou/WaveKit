@@ -137,7 +137,7 @@ export interface PlotProps {
 	className?: string
 	/** The user's chosen tuning step (wheel, keys, click snap); null or absent: the band plan's step. */
 	stepHz?: number | null
-	/** Covered by an opaque view (Map, Messages): the spectrum stops drawing, its history keeps filling. */
+	/** Covered by an opaque view (Map): the spectrum stops drawing, its history keeps filling. */
 	paused?: boolean
 }
 

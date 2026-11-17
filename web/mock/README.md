@@ -22,6 +22,13 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Retune latency: `WAVEKIT_MOCK_RETUNE_MS=<ms>` delays each `POST /api/tuner/:sourceId/frequency`
   before it takes effect and answers (`retuneMs`), to try dragging the spectrum past the capture
   as on a real receiver (about 300 ms to the first frame at the new centre, ROADMAP §8).
+- Link advisories (`link-advisories.ts`): `GET /api/resources` and a `resources:snapshot` every 2 s
+  (`WAVEKIT_MOCK_RESOURCES_MS`, `resourcesIntervalMs`) carry `linkAdvisories` for `rtl-0`, kept by the
+  core's episode rule (`episodeSince` from the first `dropping` until 60 s without one). It starts with no
+  entry. `POST /__mock/link-advisory` drives it: `{ "level": "dropping", "lossReason": "core-busy" }`
+  (`lossReason` defaults to `source` on `dropping`), `{ "level": "none" }`, `{ "level": "absent" }` (no
+  entry), `{ "endEpisode": true }` (as if 60 s had passed without dropping; 409 while dropping). Each
+  change is broadcast at once. `node scripts/ui-check.mjs --flow=notices` uses it.
 - Retune sweep: `WAVEKIT_MOCK_RETUNE_SWEEP=1` (`retuneSweep` in `buildMockServer()`, `retune-sweep.ts`)
   retunes, from the first spectrum subscription, through 1090, 131, 136, 119.7, 144.6, 98, 438.9,
   446.1, 431.1, 868.9, 162 and 155 MHz every 1.5 s, then parks at 431.0125 MHz at 1.024 MS/s. Each window
@@ -106,7 +113,11 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
 - Recordings (`recordings.ts`): `GET /api/recordings` with the core's query parameters (`limit`,
   `cursor`, `kind`, `decoderId`, `kept`, `discoveryId`, `talkgroup`, `source`, `minHz`, `maxHz`,
   `since`, `until`, `q`) and page fields (`revision`, `indexing`, `matched`, `counts`,
-  `truncatedBefore`), the file download, Keep and delete. Not mocked: the `recordings` WebSocket
+  `truncatedBefore`), the file download, Keep and delete. The seeded scanner recordings cover the
+  naming cases: a three-part transmission split by roll-overs (`Part 1 of 3 · continues`), a lone
+  rolled-over file whose chain is not known yet and whose carrier sits 0.3 kHz off the raster on
+  an unsaved channel (`FM voice`, `Continues…`), and files on a saved frequency (its saved name).
+  `node scripts/ui-check.mjs --flow=naming` reads them. Not mocked: the `recordings` WebSocket
   notice.
 - Recording links, as the core: every dsd-fme call recording has its `call_end` Activity row and
   every scanner analog recording a `recording-change` row (seeded ones within the 45 min history,
@@ -114,6 +125,13 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `key`) and the item's `activityEventId`. `GET /api/activity` takes `hasRecording` and
   `refs=recordingId:<key>` (other ref types match nothing: mock rows carry no refs), and the file
   route plays a `dsd~<name>` key. Scanner DV files have no row, as on the core.
+- Channels (`activity-channel.ts`), as the core: each scanner analog recording row carries
+  `channel: { discoveryId, frequencyHz }` and is titled `FM voice`; `GET /api/activity` and
+  `POST /api/activity/facets` take `channelHz` or `nearHz` with `toleranceHz` (a row without
+  `channel` matches by its own frequency within ±6,250 Hz, and the answer says `channelMatch`),
+  and facets count the `channel` dimension. Scanner analog catalogue items carry `speech` and
+  `keptBy` (`unchecked` and null on other kinds), and `GET /api/recordings` takes the same channel
+  parameters.
 - Scanner (`scanner.ts`, registered from `server.ts`): the core's `/api/scanner` routes with their
   schemas and error codes: status, settings (GET / PATCH with provenance and bounds), the EU
   bandplans (plus a `pager-431` plan), plan previews from a port of the core's planner (hops,

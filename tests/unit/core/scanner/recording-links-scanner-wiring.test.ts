@@ -190,6 +190,52 @@ describe("a scanner analog recording to a playable recording and back", () => {
 			query: { refs: [{ type: "recordingId", value: key }] },
 		})
 		expect(byRef.items.map(i => i.eventId)).toEqual([row.eventId])
+
+		// The row is on its channel: the owning discovery's frequency, titled by what it holds.
+		const folder = key.slice("scan:".length, key.indexOf("~"))
+		const owner = w.service.recordingFolderDiscovery(folder)
+		expect(owner).toBeDefined()
+		const channelHz = Math.round(owner?.frequencyHz ?? 0)
+		expect(row.title).toBe("FM voice")
+		expect(row.channel).toEqual({
+			discoveryId: owner?.id,
+			frequencyHz: channelHz,
+		})
+		expect(row.frequencyHz).toBe(channelHz)
+		expect(Buffer.byteLength(JSON.stringify(row))).toBeLessThanOrEqual(4 * 1024)
+		const detail = await runtime.service.detail(row.eventId)
+		const payload =
+			detail?.kind === "recording-change" ? detail.payload : undefined
+		// The measured centre stays in the record.
+		expect(payload?.frequencyHz).toBeTypeOf("number")
+		expect(payload?.channel).toEqual(row.channel)
+		const onChannel = await runtime.service.search({ query: { channelHz } })
+		expect(onChannel.items.map(i => i.eventId)).toEqual([row.eventId])
+		expect(onChannel.channelMatch).toBe("exact")
+		const facets = await runtime.service.facets({
+			query: { channelHz },
+			dimensions: ["channel"],
+		})
+		expect(facets.facets["channel"]).toEqual([
+			{ value: String(channelHz), count: 1 },
+		])
+		expect(facets.channelMatch).toBe("exact")
+		// The catalogue item: what the recorder knew at the finish (held, then kept at the end of
+		// its grace: `final`), its observation and its start.
+		expect(item.keptBy).toBe("final")
+		expect(["heard", "not-heard", "unchecked"]).toContain(item.speech)
+		expect(item.observationId).toBe(payload?.observationId)
+		expect(Number.isFinite(Date.parse(item.startedAt ?? ""))).toBe(true)
+		expect(item.frequencyHz).toBe(Math.round(owner?.frequencyHz ?? 0))
+		const listed = await inventory.list({ channelHz })
+		expect(listed.items.map(i => i.key)).toEqual([key])
+		const nearby = await inventory.list({
+			nearHz: channelHz,
+			toleranceHz: 50_000,
+		})
+		expect(nearby.matchedByChannel).toEqual([
+			{ frequencyHz: channelHz, count: 1 },
+		])
 	}, 240_000)
 
 	it("a held file discarded when its hold ends never gets a row or a link", async () => {
