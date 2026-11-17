@@ -114,6 +114,13 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `key`) and the item's `activityEventId`. `GET /api/activity` takes `hasRecording` and
   `refs=recordingId:<key>` (other ref types match nothing: mock rows carry no refs), and the file
   route plays a `dsd~<name>` key. Scanner DV files have no row, as on the core.
+- Channels (`activity-channel.ts`), as the core: each scanner analog recording row carries
+  `channel: { discoveryId, frequencyHz }` and is titled `FM voice`; `GET /api/activity` and
+  `POST /api/activity/facets` take `channelHz` or `nearHz` with `toleranceHz` (a row without
+  `channel` matches by its own frequency within ±6,250 Hz, and the answer says `channelMatch`),
+  and facets count the `channel` dimension. Scanner analog catalogue items carry `speech` and
+  `keptBy` (`unchecked` and null on other kinds), and `GET /api/recordings` takes the same channel
+  parameters.
 - Scanner (`scanner.ts`, registered from `server.ts`): the core's `/api/scanner` routes with their
   schemas and error codes: status, settings (GET / PATCH with provenance and bounds), the EU
   bandplans (plus a `pager-431` plan), plan previews from a port of the core's planner (hops,

@@ -7721,10 +7721,14 @@ the recorded centre.
 A row's `channel` (`{ discoveryId, frequencyHz }`, since 2026-11-16) is the
 channel it belongs to: `frequencyHz` is the channel's frequency (the owning
 scanner discovery's, in whole Hz, never a measured carrier) and `discoveryId`
-that discovery, or null. Today only scanner recording rows get it, when they
-are stored (a kept scanner recording, above). Decoder receptions, a scanner
-probe's included, have none yet: their channel comes with a later core wiring.
-Other rows, and every row stored before, have none. It sits whole in the summary (about 190 bytes at
+that discovery, or null. Scanner recording rows get it when they are stored (a
+kept scanner recording, above). A scanner probe's receptions get the channel of
+the discovery the probe was started for, followed to the discovery a merge
+absorbed it into, with that discovery's frequency at the time of the reception;
+a reception while no live discovery owns the probe has none. Receptions from
+configured decoders have none yet. Other rows, and every row stored before,
+have none. A row with a channel also carries the `channelHz` ref and, with a
+discovery, the `discoveryId` ref (so `refs=discoveryId:<id>` finds it). It sits whole in the summary (about 190 bytes at
 most; fields and title shrink first to keep the 4 KiB budget).
 
 Channel queries (`GET /api/activity`, `POST /api/activity/facets` and the
