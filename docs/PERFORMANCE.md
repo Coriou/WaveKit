@@ -1032,3 +1032,152 @@ takes under 80 ms. A slower count stretches the interval to 50 times its duratio
 counting uses at most 2 % of the reader. Each failed count doubles the 4 s floor, and
 the interval never exceeds 60 s. A server-side cache was not added: the page recounts
 only after new rows commit, so a cache keyed by the snapshot would almost never hit.
+
+## Main-thread budget harness
+
+The core's main thread runs at its limit in production. This harness is the measurement later
+main-thread work is judged by. Its primary figure is CPU time, which stays meaningful on a
+loaded host. It also counts work exactly, and it says when its timing figures (ELU, event-loop
+delay, long tasks) can be trusted. It is never a CI gate.
+
+Tier A runs a scratch core on the host:
+
+```bash
+pnpm run build && node scripts/bench/budget-build.mjs
+nice -n 10 node output/bench/main-thread-budget.mjs --label base
+nice -n 10 node output/bench/main-thread-budget.mjs --label after --core /path/to/other/dist/index.js
+node output/bench/budget-compare.mjs BASE_OUT/manifest.json AFTER_OUT/manifest.json
+```
+
+Options: `--rate 1024000|2400000` (default 1024000), `--seconds` (measured window, default 60),
+`--warmup` (default 20), `--clients 0|1|2` (default 1), `--passive on|off`, `--profile`,
+`--counts`, `--label`, `--out DIR` (default a new tmp dir, printed), `--keep` (keep the work
+dir with the config, state and scene IQ) and `--core PATH`. With `--core`, a bundle built from
+another commit runs under the same harness, with the `access-command.js` next to it. The
+window is a whole number of 20 s scene periods, so every run covers the same scene phases: any
+other `--seconds` is rounded up to the next multiple, said on stderr, and the manifest keeps the
+requested value as `windowSecondsRequested`. `--reassemble DIR` rebuilds a manifest from the
+files of an earlier run.
+
+The scene is seeded synthetic CU8 built from the scanner-quality generators
+(`scripts/bench/scanner-quality/scene.ts`). It holds two NFM voice transmissions with CTCSS in
+overs, a 4FSK-like burst train and an unmodulated carrier over a noise floor. It loops every
+20 s. `budget-fake-rtltcp.mjs` serves it on an ephemeral 127.0.0.1 port, paced on a monotonic
+schedule. The scratch core runs with spectrum, the passive scanner with its recorder, live demod
+through the csdr rate stub, the activity store and catalogue decoders. The decoders run through
+stand-in executables on a tmp PATH, which read and discard stdin. The real `wavekit-chan` runs
+only when `WAVEKIT_CHAN_BIN` names a file. Without it, catalogue decoders are placed but stay
+suspended (`channelizer-unavailable`), so no decoder process runs. The passive guard's limit is
+raised to 1 so a loaded host cannot turn passive off mid-run. Web-like clients are
+`budget-ws-client.mjs` processes: the events socket plus a spectrum socket at 25 Hz.
+
+**Loopback only.** In legacy access mode the live-demod and digital-voice HTTP audio listeners
+bind every interface, so the tier A core runs in protected access mode (`local-http`, bind hosts
+127.0.0.1) with throwaway access state in its work dir, as `scripts/dev-protected.mjs` does.
+The clients and the API reads use the scratch machine credential. In protected mode the raw
+audio TCP port and the tuner relay do not run (`audio.host` is 127.0.0.1 anyway). After
+start-up, on macOS and Linux with `lsof`, the harness lists the core's TCP listeners by its PID
+and aborts the run if any is not on 127.0.0.1 or `[::1]`. `composition.listenersChecked` says
+whether that check ran. The harness tools refuse any other target: the fake binds only
+127.0.0.1 and refuses the shared ports, and `budget-ws-client.mjs` and the profile collector
+connect only to 127.0.0.1, `[::1]` or localhost and refuse ports 1234, 4713, 5555, 5556, 8080,
+8081, 8082, 9000, 15555, 15556 and 18080. They allow 5173, because the production config binds
+its API there inside the isolated tier B container. Tier A, on the host, never binds or connects
+to 5173.
+
+Tier B, `scripts/bench/main-thread-budget-image.sh`, measures an image with recorded IQ. It runs
+in a scratch container (`--network none`, `--cpus=1.5`, a name matching
+`^wk-scratch-[A-Za-z0-9_.-]+$`), and the fake source and clients run inside the container. The
+script header lists its environment variables. The container is made with `docker create`, its
+ID is kept in `container.id`, and cleanup removes it by that ID. The script exits non-zero if a
+container of its name is still present afterwards, and INT or TERM run the cleanup at once.
+Values reach commands inside the container only as `docker exec -e` variables. The core's
+inspector is not opened at start: a SIGUSR1 opens it just before a profile or counts collector
+starts. No signal goes to a core whose preload did not activate (no `preload/preload.json`).
+The script ends with `--finish-image`, which writes the same manifest with `tier: "B"`. A tier A
+manifest is never compared with a tier B one.
+
+**Overlay.** `BUDGET_DIST_OVERLAY` names a directory. Every regular file directly inside it is
+bind-mounted read-only over `/app/dist/<name>` (names must match `^[A-Za-z0-9._-]+$`), so a
+JavaScript-only change runs in the base image without an image build. `overlay.json` lists each
+file with its sha256, and the manifest keeps the list as `core.overlay`. When the overlay holds
+`index.js`, that file, copied from the overlay directory on the host, is the bundle the manifest
+hashes (`core.sha256`) and maps profile frames against.
+
+**What is measured.** `scripts/bench/budget-preload.mjs` is loaded into the core with
+`--import`. It stays inert in any other node process. A SIGUSR2 opens a window and a second
+SIGUSR2 closes it. The fake and the clients write marks at the same edges; in tier B one
+`docker exec` sends all the marks of an edge, the core first. Per window:
+
+- `mainCpuMsPerIqSecond`, the primary figure: main-thread CPU (`process.threadCpuUsage()`) in
+  ms, divided by the seconds of IQ the core received in the window. Those are the bytes the
+  preload counted on the source socket over 2 bytes per sample times the rate. The fake's own
+  count between its marks is kept as `iqSecondsFake`, with the relative difference as
+  `iqSecondsDisagreement`. `processCpuMsPerIqSecond` is the same for the whole process.
+- Workers: on Node 24 an `--import` preload also runs in every worker started from a file, so
+  each worker reports its own `threadCpuUsage` with its name (`results.workers`). On Linux,
+  every thread's utime and stime also come from `/proc/self/task` (`results.threads`, null on
+  other platforms). Children (csdr stand-ins, decoders, the channelizer) are found by PID,
+  walking down from the core's PID: in tier A with `ps`, the start snapshot taken just before
+  the window opens, and in tier B from `/proc/<pid>/stat` inside the container (10 ms ticks,
+  `budget-preload.mjs procstat`).
+- Counts: socket write calls and bytes by handle kind (`pipe` is child stdio and Unix sockets),
+  `structuredClone` calls, IQ source chunks, GC count and ms by kind, and context switches (whole
+  process). Those are per second of window. Each client reports its messages and bytes per
+  second. `results.sourceSkippedSeconds` is the signal time the fake skipped between its marks
+  because the core fell more than 2 s behind.
+- ELU, event-loop delay (p50, p99, max from one 1 ms resolution histogram over the window), and
+  on Linux the main thread's run-queue wait from `/proc/thread-self/schedstat`. One line every
+  10 s, `ticks-0.jsonl`, shows a starved stretch; its delay figures come from a second histogram
+  at 10 ms resolution. The delay figures include the monitor's own resolution (an idle loop
+  reads about 1 ms in the window and about 10 ms in a tick), and each monitor is a timer on the
+  measured thread: together they add about 1,100 timer wake-ups per second while a window is
+  open.
+- `--profile`: a 1 ms V8 CPU profile of the main thread over the inspector for the same window.
+  Every sample's self time goes to one bucket: the first rule, in a fixed order, that matches
+  any frame on its stack (ids A1 to K, then Z, in `budget-profile.ts`). The share of native
+  socket writes inside each bucket is reported too, along with long tasks: runs of non-idle
+  samples of at least 50 ms. The sampler adds a little main-thread CPU, so the manifest records
+  `profiledTimingWindow`. Frames in the bundle are matched to the profile's URL by the real path
+  of `--core`. A profile without any `(idle)` time gives no buckets and no long tasks (null,
+  with a warning) rather than reading as fully busy. The zod (H) and ws (B3) rules match only
+  modules loaded from `node_modules` at run time: the production bundle keeps packages external,
+  so their frames carry a `node_modules/` URL rather than a bundle marker.
+- `--counts`: a second window after the first, with V8 precise coverage call counts for a fixed
+  list of functions, each matched by name and owning module (the bundle's `// src/...` markers).
+  Coverage perturbs timing, so this window gives only calls per second (`perturbed: true`). A
+  listed function missing from the coverage is `null`, not 0, because V8 leaves out a function
+  not called since the reset. The collector writes its profile or coverage file under a
+  temporary name and renames it when complete.
+
+`coverage` in the manifest says whether each work class happened in the window: source chunks,
+spectrum blocks, track events, recorder sessions started, placement passes, running decoders and
+messages per client. Each class names where its count comes from: an exact count, or a proxy
+such as spectrum frames to the clients when `--counts` is off. A class at zero is listed in
+`coverage.missing`, and one that could not be counted in `coverage.unknown`. The run is still
+written.
+
+**Warnings.** `warnings` lists what to read before trusting the figures, without changing
+timing validity: IQ seconds that disagree with the fake's by more than 1 %, a non-zero
+`sourceSkippedSeconds`, a profile without idle time, a missing profile, or IQ seconds taken
+from the fake because the core had no byte count.
+
+**When timing is valid.** `timingValid` is true only when the p95 of the 1-min load average,
+sampled every 10 s, is below 30. On top of that, either the main thread's run-queue wait share
+must have a p95 below 0.05, or, without a run-queue figure (macOS), the load p95 must be below 8,
+the logical CPU count of the reference host. In tier B the outer host's load, sampled with
+`uptime` every 10 s while the container runs, must also have a p95 below 30, and a missing or
+malformed outer sample set makes the run invalid. Each failed condition is listed in
+`timingInvalidReasons`, and missing or malformed inputs make the run invalid. `budget-compare`
+always compares the CPU and count figures, with GC count and ms per window second. It compares
+ELU, loop delay and long tasks (count and total ms per window second) only when both manifests
+are timing-valid, and otherwise prints which one is not, and why. It refuses (exit 2) manifests
+whose scene, rate, tier or composition differ, whose windows differ in length by more than 2 %,
+or whose `coverage.missing` or `coverage.unknown` differ. With `--allow-coverage-diff` it
+compares those anyway and prints a note naming the classes.
+
+On the development Mac at a load average of 57 to 79 (timing not valid), 1.024 Msps, one client
+and no channelizer, two short smoke runs read 242 and 269 ms of main-thread CPU per IQ second.
+The spectrum worker read 165 to 168 ms. The wasm NFM chain of the recorder (A1) was 42 % of the
+main thread's profiled busy time. Those two runs only show that the harness works. They are not
+a baseline.
