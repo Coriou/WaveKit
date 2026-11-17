@@ -8,6 +8,7 @@
 import "./plot.css"
 
 import {
+	useContext,
 	memo,
 	useEffect,
 	useMemo,
@@ -76,6 +77,8 @@ import { isReadOnly } from "../app/context.ts"
 import { confidenceText } from "../data/scanner-format.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
 import { ReceiverPausedBadge } from "../features/receiver/ReceiverIsland.tsx"
+import { StatusGuest } from "../shell/layout/StatusGuest.tsx"
+import { PlotLayoutContext } from "../shell/layout/stores.ts"
 import { feedControllerFor, shownSourceFor } from "../features/receiver/feed.ts"
 import { scanHasReceiver as scanHasReceiverOf } from "../features/tuning.ts"
 import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
@@ -357,10 +360,17 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 		[controller, capStart, capEnd, tunerCentre],
 	)
 
+	// the shell layout's plot contract: where the scale rows must end, and the chrome the chips keep off
+	const shellPlot = useContext(PlotLayoutContext)
 	const layout = plotLayout(
 		size.h,
 		(discRow ? DISCOVERY_ROW_CSS : 0) + RULER_CSS,
+		shellPlot?.rowsMaxCss,
 	)
+	const exclusions = shellPlot?.exclusions
+	const takenKey = exclusions
+		? exclusions.map(r => `${r.x},${r.y},${r.w},${r.h}`).join(";")
+		: ""
 	const unverified = shownMeta?.tuningTrust === "unverified"
 
 	const gateCtx = useRef({
@@ -536,7 +546,10 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					resync={stream.resync}
 					probeRef={probeRef}
 				/>
-				<ReceiverPausedBadge data={data} sourceId={sourceId} />
+				{/* a guest in the shell's status slot, off the plot's labels */}
+				<StatusGuest id="paused" kind="paused">
+					<ReceiverPausedBadge data={data} sourceId={sourceId} />
+				</StatusGuest>
 				{size.w > 0 && view && (
 					<>
 						<div
@@ -561,6 +574,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 								traceCss={layout.traceCss}
 								levels={levels}
 								tunedHz={vfoHz}
+								takenKey={takenKey}
 								onPick={hz => void controller.tuneTo(hz)}
 							/>
 						</div>
@@ -960,6 +974,7 @@ function SignalLabels({
 	traceCss,
 	levels,
 	tunedHz: tuned,
+	takenKey,
 	onPick,
 }: {
 	signals: readonly GatedSignal[]
@@ -972,6 +987,8 @@ function SignalLabels({
 	traceCss: number
 	levels: SpectrumLevels
 	tunedHz: number | null
+	/** The shell's chrome over the plot body ("x,y,w,h;…", body px): chips keep off it. */
+	takenKey: string
 	onPick: (hz: number) => void
 }) {
 	const shown = useMemo(() => gated.filter(g => !g.leaving), [gated])
@@ -1034,8 +1051,18 @@ function SignalLabels({
 				traceCss,
 				levels,
 				tunedHz: tuned,
+				taken: takenRects(takenKey),
 			}),
-		[signals, view.startHz, view.endHz, widthPx, traceCss, levels, tuned],
+		[
+			signals,
+			view.startHz,
+			view.endHz,
+			widthPx,
+			traceCss,
+			levels,
+			tuned,
+			takenKey,
+		],
 	)
 	// Each chip keyed by its followed signal; a leaving one fades where it last stood.
 	const lastAt = useRef(
@@ -1382,4 +1409,13 @@ function useInteraction(
 			el.removeEventListener("keydown", onKey)
 		}
 	}, [ref, controller, hover, range, viewRef, sig.menu, sig.traceCss])
+}
+
+/** "x,y,w,h;…" (body px) as placeLabels' taken rectangles. */
+function takenRects(key: string): [number, number, number, number][] {
+	if (key === "") return []
+	return key.split(";").map(part => {
+		const [x = 0, y = 0, w = 0, h = 0] = part.split(",").map(Number)
+		return [x, y, x + w, y + h]
+	})
 }

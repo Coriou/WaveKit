@@ -3,29 +3,51 @@ import { describe, expect, it } from "vitest"
 import {
 	anchorInDirection,
 	CARD_W,
-	DEFAULT_GEOMETRY,
 	DOCK_H,
 	G,
 	nearestAnchor,
-	shellLayout,
 	toCardAnchorId,
 	type CardAnchor,
-	type ShellGeometry,
 } from "../../src/shell/layout.ts"
+import {
+	computeLayout,
+	DEFAULT_SIZES,
+	type LayoutInput,
+} from "../../src/shell/layout/compute.ts"
 
 const at = (
 	W: number,
 	H = 900,
-	extra: Partial<ShellGeometry> = {},
-): ShellGeometry => ({ ...DEFAULT_GEOMETRY, W, H, dockW: 460, ...extra })
+	extra: Partial<LayoutInput> & { anchor?: string; cardH?: number } = {},
+): LayoutInput => {
+	const { anchor, cardH, ...rest } = extra
+	return {
+		viewport: { w: W, h: H },
+		tuner: DEFAULT_SIZES.tuner,
+		receiver: DEFAULT_SIZES.receiver,
+		listen: DEFAULT_SIZES.listen,
+		dock: DEFAULT_SIZES.dock,
+		player: null,
+		card: {
+			expanded: { w: CARD_W, h: cardH ?? 300 },
+			line: DEFAULT_SIZES.cardLine,
+			minimised: false,
+			anchor: anchor ?? "al",
+		},
+		status: [],
+		drawer: null,
+		panels: [],
+		...rest,
+	}
+}
 
 const ids = (a: readonly CardAnchor[]) => a.map(x => x.id)
 const byId = (a: readonly CardAnchor[], id: string) => a.find(x => x.id === id)
 
 describe("tuned card anchors", () => {
-	it("1440 x 900, nothing open: all eight anchors, pushed off the islands", () => {
-		const L = shellLayout(at(1440), null)
-		expect(ids(L.anchors)).toEqual([
+	it("1440 x 900, nothing open: all eight anchors, pushed off the rails", () => {
+		const L = computeLayout(at(1440))
+		expect(ids(L.cardAnchors)).toEqual([
 			"al",
 			"tl",
 			"tc",
@@ -35,93 +57,104 @@ describe("tuned card anchors", () => {
 			"bc",
 			"br",
 		])
-		// top anchors sit one gutter under the top row
-		expect(byId(L.anchors, "tl")).toEqual({
+		// top anchors sit one gutter under the top rail (the status slot between the Tuner and the Receiver too)
+		expect(byId(L.cardAnchors, "tl")).toEqual({
 			id: "tl",
 			name: "top left",
 			x: G,
 			y: G + 56 + G,
 		})
-		expect(byId(L.anchors, "tr")?.x).toBe(1440 - G - CARD_W)
+		expect(byId(L.cardAnchors, "tc")?.y).toBe(G + 56 + G)
+		expect(byId(L.cardAnchors, "tr")?.x).toBe(1440 - G - CARD_W)
 		// bottom centre is pushed above the dock; bottom right sits on the baseline
-		expect(byId(L.anchors, "bc")?.y).toBe(900 - G - DOCK_H - G - 300)
-		expect(byId(L.anchors, "br")?.y).toBe(900 - G - 300)
-		expect(L.cardAnchor).toBe("al")
+		expect(byId(L.cardAnchors, "bc")?.y).toBe(900 - G - DOCK_H - G - 300)
+		expect(byId(L.cardAnchors, "br")?.y).toBe(900 - G - 300)
+		expect(L.card?.anchor).toBe("al")
 	})
 
 	it("takes the wanted anchor, and 'bl' is above Listen", () => {
-		const L = shellLayout(at(1440), null, null, { at: "tr" })
-		expect(L.cardAnchor).toBe("tr")
-		expect(L.card).toEqual({ x: 1440 - G - CARD_W, y: G + 56 + G })
-		expect(shellLayout(at(1440), null, null, { at: "bl" }).cardAnchor).toBe(
+		const L = computeLayout(at(1440, 900, { anchor: "tr" }))
+		expect(L.card).toMatchObject({
+			anchor: "tr",
+			x: 1440 - G - CARD_W,
+			y: G + 56 + G,
+		})
+		expect(computeLayout(at(1440, 900, { anchor: "bl" })).card?.anchor).toBe(
 			"al",
 		)
-		expect(shellLayout(at(1440), null, null, { at: "nope" }).cardAnchor).toBe(
+		expect(computeLayout(at(1440, 900, { anchor: "nope" })).card?.anchor).toBe(
 			"al",
 		)
 	})
 
-	it("an open Listen panel too tall for above Listen: the card takes the nearest free anchor", () => {
-		const L = shellLayout(
-			at(1440, 900, { listenLiveH: 520, listenLiveW: 360 }),
-			null,
+	it("an open island panel is a popover: the card stays where it is", () => {
+		const closed = computeLayout(at(1440))
+		const open = computeLayout(
+			at(1440, 900, {
+				panels: [{ island: "listen", size: { w: 420, h: 520 } }],
+			}),
 		)
-		expect(byId(L.anchors, "al")).toBeUndefined()
-		expect(L.cardAnchor).not.toBeNull()
-		expect(L.cardAnchor).not.toBe("al")
-		// and it never overlaps the open Listen panel
-		const c = L.card
-		expect(c).not.toBeNull()
-		if (c)
-			expect(c.x >= G + 360 + G - 1 || c.y + 300 <= 900 - G - 520 - G + 1).toBe(
-				true,
-			)
+		expect(open.card).toEqual(closed.card)
+		expect(open.cardAnchors).toEqual(closed.cardAnchors)
 	})
 
-	it("an open Receiver panel pushes the top right anchor below it, or drops it", () => {
-		const L = shellLayout(at(1440, 900, { rxLive: { w: 300, h: 400 } }), null)
-		const tr = byId(L.anchors, "tr")
-		if (tr) expect(tr.y).toBeGreaterThanOrEqual(G + 400 + G)
-		expect(byId(L.anchors, "mr")).toBeUndefined()
+	it("above Listen rides on the player storey when a recording plays", () => {
+		const L = computeLayout(at(1440, 900, { player: { w: 560, h: 70 } }))
+		expect(L.card).toMatchObject({
+			anchor: "al",
+			y: 900 - G - 64 - G - 70 - G - 300,
+		})
+		// bottom centre clears the player as well as the dock
+		const bc = byId(L.cardAnchors, "bc")
+		if (bc) expect(bc.y + 300).toBeLessThanOrEqual(900 - G - 64 - G - 70 - G)
 	})
 
-	it("anchors stay in the free area left of a full-height drawer", () => {
-		const L = shellLayout(at(1440), "activity")
-		const freeW = 1440 - 420 - G
-		expect(L.freeW).toBe(freeW)
-		for (const a of L.anchors)
+	it("anchors stay in the free area left of a drawer column", () => {
+		const L = computeLayout(
+			at(1440, 900, {
+				drawer: {
+					id: "activity",
+					wantedW: 420,
+					expanded: false,
+					pane: null,
+					hasNoticeSlot: true,
+				},
+			}),
+		)
+		const freeW = 1440 - G - 420
+		expect(L.cardFreeW).toBe(freeW)
+		for (const a of L.cardAnchors)
 			expect(a.x + CARD_W).toBeLessThanOrEqual(freeW - G)
-		expect(byId(L.anchors, "tr")?.x).toBe(freeW - G - CARD_W)
+		expect(byId(L.cardAnchors, "tr")?.x).toBe(freeW - G - CARD_W)
 	})
 
 	it("drops anchors within 48 px of an earlier one", () => {
 		// a short window: middle and top/bottom anchors coincide
-		const L = shellLayout(at(1440, 760, { cardH: 560 }), null)
-		for (const a of L.anchors)
-			for (const b of L.anchors)
+		const L = computeLayout(at(1440, 760, { cardH: 560 }))
+		for (const a of L.cardAnchors)
+			for (const b of L.cardAnchors)
 				if (a !== b)
 					expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeGreaterThanOrEqual(48)
 	})
 
 	it("hides on narrow windows and while a pane covers the plot", () => {
-		const narrow = shellLayout(at(1100), null)
+		const narrow = computeLayout(at(1100))
 		expect(narrow.card).toBeNull()
-		expect(narrow.anchors).toEqual([])
-		const pane = shellLayout(at(1440), "scanner", { want: true, pushIn: true })
+		expect(narrow.cardAnchors).toEqual([])
+		const pane = computeLayout(
+			at(1440, 900, {
+				drawer: {
+					id: "scanner",
+					wantedW: 420,
+					expanded: false,
+					pane: { want: true, pushIn: true },
+					hasNoticeSlot: true,
+				},
+			}),
+		)
+		expect(pane.pane).not.toBeNull()
 		expect(pane.card).toBeNull()
-		expect(pane.anchors).toEqual([])
-	})
-
-	it("a between-rows drawer is kept clear, unless the Receiver panel is open", () => {
-		// 1120 px: the drawer cannot take 360 px beside the islands, so it overlays between the rows
-		const g = at(1120)
-		const L = shellLayout(g, "settings")
-		expect(L.full).toBe(false)
-		const left = 1120 - G - Math.min(560, 1120 - 2 * G)
-		for (const a of L.anchors)
-			expect(a.x + CARD_W).toBeLessThanOrEqual(left - G + 1)
-		const open = shellLayout(g, "settings", null, { rxOpen: true })
-		expect(open.anchors.length).toBeGreaterThanOrEqual(L.anchors.length)
+		expect(pane.cardAnchors).toEqual([])
 	})
 })
 

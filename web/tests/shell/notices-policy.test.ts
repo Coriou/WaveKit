@@ -21,8 +21,6 @@ import {
 	NoticeService,
 	RECEIPT_MS,
 } from "../../src/shell/notices/service.ts"
-import { regionTop } from "../../src/shell/notices/top-centre.ts"
-import { shellLayout, DEFAULT_GEOMETRY } from "../../src/shell/layout.ts"
 
 const T0 = Date.parse("2026-11-16T10:00:00.000Z")
 const iso = (ms: number) => new Date(T0 + ms).toISOString()
@@ -902,41 +900,5 @@ describe("watchReceiverNotices", () => {
 		await vi.advanceTimersByTimeAsync(0)
 		expect(get).toHaveBeenCalledTimes(2)
 		off()
-	})
-})
-
-describe("notice region place", () => {
-	it("sits 8 px under the top row and stacks under a top-centre box in its column", () => {
-		expect(regionTop(72, [], 720, 560)).toBe(80)
-		// the connection chip under the top row
-		const chip = { top: 88, bottom: 132, left: 600, right: 840 }
-		expect(regionTop(72, [chip], 720, 560)).toBe(140)
-		// in the top-row gap (above the region's top) or beside its column: no effect
-		expect(
-			regionTop(72, [{ top: 16, bottom: 60, left: 600, right: 840 }], 720, 560),
-		).toBe(80)
-		expect(
-			regionTop(72, [{ ...chip, left: 1100, right: 1300 }], 720, 560),
-		).toBe(80)
-		// two stacked participants
-		expect(
-			regionTop(
-				72,
-				[chip, { top: 140, bottom: 170, left: 680, right: 760 }],
-				720,
-				560,
-			),
-		).toBe(178)
-	})
-
-	it("keeps the tuned card off its top-centre anchor while the region shows something", () => {
-		const free = shellLayout(DEFAULT_GEOMETRY, null, null, { at: "tc" })
-		expect(free.cardAnchor).toBe("tc")
-		const taken = shellLayout(DEFAULT_GEOMETRY, null, null, {
-			at: "tc",
-			noticeTop: true,
-		})
-		expect(taken.cardAnchor).not.toBe("tc")
-		expect(taken.anchors.some(a => a.id === "tc")).toBe(false)
 	})
 })

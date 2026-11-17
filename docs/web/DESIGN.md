@@ -914,7 +914,8 @@ Condensed + Noto Sans, Tabler-based icons).
 - **Immersive is the interface the web app implements (owner, 2026-10-16).** Sub-project C builds
   C · Immersive, the chosen shell, with the boards it embeds; their states and interactions are
   the acceptance criteria (see "Handoff to the dev team").
-- **Notices: receipts and conditions in one top-centre region (2026-11-16).** The app toast moved
+- **Notices: receipts and conditions in one top-centre region (2026-11-16; the placement is
+  superseded by "Layout: rails and stage", 2026-11-17).** The app toast moved
   from bottom centre to a notice region at the top centre of the free plot area
   (`--wk-free-cx`), 8 px under the top island row and under anything already at the top centre
   (the connection chip when it drops under the top row, and any overlay marked
@@ -935,7 +936,8 @@ Condensed + Noto Sans, Tabler-based icons).
   cause flip and buried the Undo of the last action at the bottom, next to Listen and the dock;
   a condition is state, so it belongs in a status place, with one announcement per episode
   (rules in [WEB-APP.md](../WEB-APP.md#notices)).
-- **Notices beside expanded Activity: the widest empty room (2026-11-17).** Expanded Activity
+- **Notices beside expanded Activity: the widest empty room (2026-11-17; superseded by "Layout:
+  rails and stage").** Expanded Activity
   (Cards, Expand) spans the window between the island rows, so there is no free plot for the
   notice region; centred on the normal drawer's free area it landed on the cards. Measured at
   1440×900 the drawer starts at y 88 with its header controls at the ends (title and Live at the
@@ -970,7 +972,8 @@ Condensed + Noto Sans, Tabler-based icons).
   full-height drawer the region already keeps to the free plot. *Why:* a notice must never cover
   a control, at any width; a reserved place in the drawer's own column makes that true by layout,
   not by measuring. Gated by `ui-check --flow=notices` at 390×844 for each drawer.
-- **Notices beside expanded Activity: room as tall as the stack (2026-11-17).** The top-row and
+- **Notices beside expanded Activity: room as tall as the stack (2026-11-17; superseded by
+  "Layout: rails and stage").** The top-row and
   header placements above checked width only, so a condition with a receipt under it (44 + 8 +
   44 = 96 px) ran from the top row (y 16) onto the drawer's header (y 88) and, in the header, onto
   the cards. Rule (`regionPlacement`): the top-row gap is taken only when the whole measured
@@ -990,6 +993,56 @@ Condensed + Noto Sans, Tabler-based icons).
   links and the palette alias open Activity › Cards. The canvas still draws Messages in the dock
   until it is next redrawn. *Why:* one place for linked activity data, not a second board that
   shows the same decodes.
+- **Layout: rails and stage (owner, 2026-11-17).** Every floating element used to place itself
+  (CSS centred on `--wk-free-cx`, the notice region measuring the DOM every 500 ms, the connection
+  chip reading a store the shell wrote, the plot inset in a CSS `:has()`), so a right drawer moved
+  the Receiver, the dock, the player and the notices, and nothing checked the result: the player
+  landed on the card line and notices sat on the first row of signal chips. Now one pure function,
+  `computeLayout` (`web/src/shell/layout/compute.ts`), takes the window, the drawer state and each
+  element's intrinsic size and returns every rectangle; components only report sizes, and each
+  slot carries `data-wk-slot` and `data-wk-rect`. The model:
+  - Two *rails* hold the chrome and never read the drawer. Top rail: the Tuner at 16,16, the
+    Receiver at the right corner (under the Tuner, 8 px down, when the row cannot hold both), and
+    the *status slot* between them (y 16..72). Bottom rail: Listen at the left corner, the dock
+    centred on the window and never left of Listen (compact below 1180 px; hidden below 761 px or
+    when Listen and the compact dock cannot share the row, where the search button takes over).
+  - A *stack* above Listen: the player storey (x 16, up to 560 wide, 16 px above Listen), then the
+    tuned card's home ("above Listen", 16 px over the stack). The card home moves by the player's
+    height and a gutter when a recording starts or stops; that is the one stated move. With no
+    room for the expanded card on its anchor it shows its minimised line there, instead of
+    jumping to another anchor; it still hides at 1100 px and below and under covering surfaces.
+  - The *stage* between the rails takes the drawers. From 1100 px a drawer is a column under the
+    Receiver (top 88 on the default rail), as wide as wanted up to 640 px and never into the player
+    storey; its foot reaches the window edge when it clears the dock by a gutter, else it stands on
+    the bottom rail. Expanded Activity, an attached pane, any drawer below 1100 px and the phone
+    sheet are covering surfaces: from 16 px under the top rail to 16 px above the stack (182 px
+    off the bottom with the player, 96 without). The pane attaches left of the column when it has
+    the player storey's width (560 px), else a push-in pane becomes a screen in the drawer.
+  - The *status slot* holds the notices, the connection chip and the "Receiver paused" label, in
+    two groups that never push each other: the state group packed against the Receiver
+    (condition, connection, then paused), the receipt against the Tuner. When the row is too
+    narrow: the condition goes compact (168 px, one line), the connection chip title only, the
+    condition an icon, the receipt wraps to two lines, then the lowest-ranked item waits. A lone
+    item wraps to two lines before it changes form. Below a 200 px slot or with the Receiver
+    stacked (phones) the items stack in a strip 8 px under the top rail, at the strip's width;
+    with a covering drawer open they dock in its notice slot (the 2026-11-17 slot entry stands).
+  - The *plot* gets its inset (top rail + 12: 84, 132 with the scan hold row, 148 on a phone), a
+    cap so the scale rows end 16 px above the stack, and every chrome rectangle over its body as
+    *exclusions*: `placeLabels` treats them as taken, so signal chips flow around the card, the
+    strip and the drawer. Its status notes centre on the plot left of a drawer column.
+
+  Expected numbers: 1440×900 Receiver 1124,16; dock 474,820 492×64; player 16,734 560×70; card
+  16,278 (expanded 440) or 16,666 (line); Activity column 1004,88 420×796; expanded Cards 16,88
+  1408×630. 390×844: Receiver 16,80; player 16,678 358×70; sheet 16,152 358×510. Deviations from
+  the design sketch: a two-line status item is 52 px tall in the strip too (the sketch said 54);
+  the drawer column caps its width by the player storey whether or not a recording plays, so
+  playback never resizes a drawer; the pane starts under the top rail like the other covering
+  surfaces (under the Tuner's hold row too). Frame elements carry no position transition. *Why:*
+  "what moves when I open a drawer?" is now "nothing": the dock that opened it stays under the
+  pointer, and a notice never covers data on a wide window. Cost accepted: drawers are 72 px
+  shorter at the top, and 80 px more where they stand on the rail. Gated by unit tests of the
+  expected rectangles, a fast-check property (no two islands intersect, all inside the window,
+  frame identical with and without a drawer, no chip under chrome) and `ui-check --flow=layout`.
 
 ## Open questions and next topics
 

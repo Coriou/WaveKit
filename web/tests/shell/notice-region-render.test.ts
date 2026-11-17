@@ -13,7 +13,35 @@ import { Drawer } from "../../src/ui/Drawer.tsx"
 const region = (svc: NoticeService, palette = false) =>
 	renderToStaticMarkup(
 		createElement(NoticeRegion, {
-			topRowBottom: 72,
+			status: {
+				where: "rail",
+				slot: { x: 472, y: 16, w: 636, h: 56 },
+				strip: null,
+				items: [
+					{
+						id: "condition",
+						kind: "condition",
+						form: "full",
+						lines: 1,
+						x: 677,
+						y: 22,
+						w: 431,
+						h: 44,
+					},
+					{
+						id: "receipt",
+						kind: "receipt",
+						form: "full",
+						lines: 1,
+						x: 472,
+						y: 22,
+						w: 220,
+						h: 44,
+					},
+				],
+				docked: [],
+				waiting: [],
+			},
 			palette,
 			receiverOpen: false,
 			service: svc,
@@ -41,7 +69,14 @@ describe("notice region markup", () => {
 		expect(html).toContain("Receiver samples lost")
 		expect(html).toContain('aria-label="Dismiss"')
 		expect(html).toContain(">Undo<")
-		expect(html).toContain("top:80px")
+		// each toast at its own rectangle in the status slot: nothing slides between them
+		expect(html).toContain(
+			'data-wk-slot="status:condition" data-wk-rect="677,22,431,44"',
+		)
+		expect(html).toContain(
+			'data-wk-slot="status:receipt" data-wk-rect="472,22,220,44"',
+		)
+		expect(html).toContain("left:677px;top:22px")
 		expect(html).not.toMatch(/autofocus/i)
 	})
 

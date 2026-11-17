@@ -1,0 +1,110 @@
+/* Slots of the shell layout (src/shell/layout/compute.ts): elements placed at a computed rectangle carry no position
+   rule of their own beyond `position`. Status items sit in the top rail's slot or the strip under it (z 3, under the
+   stage surfaces), each at its own rectangle and form; nothing slides between the two groups. */
+@layer wk-app {
+	/* frame elements never ease their position (a layout bug cannot hide behind easing) */
+	.wk-shell .wk-shell-island[data-island] {
+		transition: none;
+	}
+	/* a drawer's foot eases (on and off the bottom rail); its width and shape follow the layout at once */
+	.wk-shell .wk-shell-drawer {
+		transition: height var(--wk-dur-4) var(--wk-ease-inout);
+	}
+	.wk-shell[data-resizing] .wk-shell-drawer {
+		transition: none;
+	}
+
+	.wk-status-layer {
+		position: absolute;
+		left: 0;
+		top: 0;
+		width: 0;
+		height: 0;
+		z-index: 3;
+		pointer-events: none;
+	}
+	.wk-status-layer > .wk-notice {
+		position: absolute;
+		box-sizing: border-box;
+		max-width: none;
+		min-height: 0;
+		margin: 0;
+		pointer-events: auto;
+	}
+	.wk-status-layer > .wk-notice[data-pending] {
+		visibility: hidden;
+		pointer-events: none;
+	}
+	/* one or two lines, then an ellipsis (the full text in the title) */
+	.wk-status-layer > .wk-notice .wk-notice-text {
+		flex: 1;
+		padding: 0;
+		display: -webkit-box;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 2;
+		line-clamp: 2;
+		overflow: hidden;
+	}
+	.wk-status-layer > .wk-notice[data-lines="1"] .wk-notice-text {
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		display: block;
+	}
+	/* compact: the words on one line, the action in the full form only */
+	.wk-status-layer > .wk-notice[data-form="compact"] .wk-notice-text {
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		display: block;
+		text-align: start;
+	}
+	.wk-status-layer > .wk-notice[data-form="compact"] [data-control="action"] {
+		display: none;
+	}
+	/* icon: the glyph alone (the Receiver chip beside it says the same) */
+	.wk-status-layer > .wk-notice[data-form="icon"] {
+		padding: 0;
+		justify-content: center;
+	}
+	.wk-status-layer > .wk-notice[data-form="icon"] > :not(.wk-notice-glyph) {
+		display: none;
+	}
+
+	/* a guest placed by the layout from outside the shell's tree (the connection chip, the paused label) */
+	.wk-status-guest {
+		position: fixed;
+		z-index: 3;
+		box-sizing: border-box;
+		pointer-events: none;
+	}
+	.wk-status-guest[data-pending] {
+		visibility: hidden;
+	}
+	.wk-status-guest > * {
+		pointer-events: auto;
+	}
+	.wk-status-guest > .wkf-rx-frozen {
+		position: static;
+		transform: none;
+		width: max-content;
+	}
+	.wk-drawer-notices .wk-status-guest {
+		position: static;
+	}
+
+	/* the player storey: placed by its bottom-left corner above Listen */
+	.wk-shell-player {
+		position: absolute;
+		z-index: 3;
+		pointer-events: none;
+	}
+	.wk-shell-player > * {
+		pointer-events: auto;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.wk-shell .wk-shell-cardslot,
+		.wk-shell .wk-shell-drawer {
+			transition: none;
+		}
+	}
+}

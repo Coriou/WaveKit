@@ -73,6 +73,7 @@ import { AUTO_IDENTIFY_DELAY_MS, shouldAutoIdentify } from "./auto-identify.ts"
 import { nowView, type NowView } from "./now.ts"
 import { playRows, TunedDisc, TunedQueue } from "./playback.tsx"
 import { tunedCardStore } from "./place.ts"
+import { cardLineForced, cardMinimised } from "../../shell/layout/stores.ts"
 import { signalBars, signalPresent } from "./signal.ts"
 import { DecoderVerdictsFeed, itemsFor, pendingFor } from "./verdicts.ts"
 
@@ -320,6 +321,10 @@ export function TunedCard() {
 			? (heldHz ?? held?.frequencyHz ?? settledHz)
 			: settledHz
 	const card = useStore(tunedCardStore)
+	// the shell layout has no room for the expanded card on its anchor: it shows its line meanwhile
+	const lineForced = useStore(cardLineForced)
+	// the shell lays the card out for the form the reader chose
+	useEffect(() => cardMinimised.set(card.minimised), [card.minimised])
 	const pinned = card.pinnedHz
 	// a pinned card keeps its frequency when you tune away
 	const hz = pinned ?? tunedNow
@@ -776,7 +781,7 @@ export function TunedCard() {
 		})
 	menuItems.push({ label: "Copy frequency", icon: "copy", pick: copyFreq })
 
-	const minimised = card.minimised
+	const minimised = card.minimised || lineForced
 	const toggleMin = () => {
 		focusAfterMin.current = !minimised
 		setMenu(false)

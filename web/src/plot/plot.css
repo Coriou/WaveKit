@@ -13,7 +13,7 @@
 	}
 	.wk-plot-body {
 		position: absolute;
-		/* Room for the shell's island heads above the trace (Immersive board: 84 px). */
+		/* Room for the shell's top rail above the trace (the shell layout's inset: 84 px on the default rail). */
 		top: var(--wk-plot-inset-top, 84px);
 		left: 0;
 		right: 0;
@@ -393,11 +393,11 @@
 		background: rgba(var(--wk-ink-rgb), 0.28);
 		pointer-events: none;
 	}
-	/* status notes centre on the free area beside a full-height drawer (--wk-free-cx, set by the shell) */
+	/* status notes centre on the plot left of a drawer column (--wk-plot-note-cx, from the shell layout) */
 	.wk-plot-note {
 		position: absolute;
-		left: var(--wk-free-cx, 50%);
-		max-width: calc(2 * var(--wk-free-cx, 50%) - 32px);
+		left: var(--wk-plot-note-cx, 50%);
+		max-width: calc(2 * var(--wk-plot-note-cx, 50%) - 32px);
 		top: 40%;
 		transform: translate(-50%, -50%);
 		font-size: 13px;

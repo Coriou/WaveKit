@@ -1,81 +1,93 @@
-// The notice region (./service.ts): top centre of the free plot area (`--wk-free-cx`), 8 px under the top island
-// row and under anything already at the top centre; while Activity is expanded (no free plot), the widest empty
-// gap of the top row, else of the drawer's header (./top-centre.ts `regionPlacement`); while a drawer covers that place
-// (a phone, below 1100 px, or an expanded Activity with no room as tall as the region's stack), portalled into the
-// drawer's notice slot under its header (ui/notice-slot.ts), which pushes the drawer body down. At most one
-// condition toast, then one receipt. It never takes focus, except to give a moved toast's button back the focus it
-// had; hovering it or focusing inside a toast pauses both timers (until that toast goes).
+// The notice region (./service.ts): at most one condition toast, then one receipt, each a status item of the shell
+// layout (../layout/compute.ts, "Status slot"). Each toast reports its forms (its natural one-line width, then a
+// compact line and an icon for a condition) and takes the rectangle and form the layout gives it: in the top rail's
+// slot (the condition against the Receiver, the receipt against the Tuner, nothing slides), in the strip under the
+// top rail on a phone, or docked in a covering drawer's notice slot under its header (ui/notice-slot.ts), which
+// pushes the drawer body down. It never takes focus, except to give a moved toast's button back the focus it had;
+// hovering a toast or focusing inside one pauses both timers (until that toast goes).
 import {
 	useEffect,
 	useLayoutEffect,
 	useRef,
-	useState,
-	useSyncExternalStore,
+	type HTMLAttributes,
 	type ReactNode,
 } from "react"
 import { createPortal } from "react-dom"
 
-import { useStore } from "../../data/store.ts"
+import { useStore, type Store } from "../../data/store.ts"
 import { Icon } from "../../ui/Icon.tsx"
-import { noticeSlots } from "../../ui/notice-slot.ts"
+import type {
+	Layout,
+	StatusForm,
+	StatusItem,
+	StatusPlaced,
+} from "../layout/compute.ts"
+import { naturalRowWidth, slotAttrs, topLeft } from "../layout/slot.ts"
+import {
+	dockedSlot as defaultDockedSlot,
+	statusReports as defaultReports,
+	type StatusReports,
+} from "../layout/stores.ts"
 import {
 	notices,
 	type NoticeService,
 	type Receipt,
 	type ShownCondition,
 } from "./service.ts"
-import {
-	TOP_CENTRE_SELECTOR,
-	regionPlacement,
-	type Box,
-	type ExpandedDrawer,
-	type Placement,
-} from "./top-centre.ts"
 
-/** How often the region re-reads what sits at the top centre while it shows something (ms). */
-const MEASURE_MS = 500
+/** A toast's height: one touch row (ui.css `.wk-toast`). */
+export const TOAST_H = 44
+/** The condition's compact line ("Samples lost…" beside its ✕) and its glyph alone. */
+export const CONDITION_COMPACT_W = 168
+export const CONDITION_ICON_W = 44
 
 export interface NoticeRegionProps {
-	/** Bottom of the top island row (the shell layout's top row, its gutter excluded). */
-	readonly topRowBottom: number
+	/** Where the shell layout put the status items. */
+	readonly status: Layout["status"]
 	/** The ⌘K palette is open: the region hides and its timers wait. */
 	readonly palette: boolean
 	/** The Receiver panel is open: it lists the link conditions, so no floating link toast. */
 	readonly receiverOpen: boolean
 	readonly service?: NoticeService
+	readonly reports?: StatusReports
+	readonly docked?: Store<HTMLElement | null>
+}
+
+/** The status item a toast reports, from its natural width. */
+export function toastItem(
+	id: "condition" | "receipt",
+	naturalW: number,
+): StatusItem {
+	const full = { w: naturalW, h: TOAST_H }
+	return id === "condition"
+		? {
+				id,
+				kind: "condition",
+				forms: {
+					full,
+					compact: { w: Math.min(naturalW, CONDITION_COMPACT_W), h: TOAST_H },
+					icon: { w: CONDITION_ICON_W, h: TOAST_H },
+				},
+			}
+		: { id, kind: "receipt", forms: { full } }
 }
 
 export function NoticeRegion({
-	topRowBottom,
+	status,
 	palette,
 	receiverOpen,
 	service = notices,
+	reports = defaultReports,
+	docked: dockedStore = defaultDockedSlot,
 }: NoticeRegionProps) {
 	const shown = useStore(service.shown)
 	const receipt = useStore(service.receipt)
+	const slot = useStore(dockedStore)
 	const box = useRef<HTMLDivElement | null>(null)
-	// the shell root: the region's own parent while it floats, found again while it sits in a drawer's slot
-	const home = useRef<HTMLElement | null>(null)
-	const slotVersion = useSyncExternalStore(
-		noticeSlots.subscribe,
-		noticeSlots.version,
-		noticeSlots.version,
-	)
-	const [slot, setSlot] = useState<HTMLElement | null>(null)
-	// the tallest the region has measured for what it shows now: a stack wraps taller in a narrow room than in a
-	// drawer's slot, so the measured height alone could move it back and forth
-	const content = `${shown?.id ?? ""}|${receipt?.id ?? ""}`
-	const contentRef = useRef(content)
-	contentRef.current = content
-	const tallest = useRef({ content, h: 0 })
 	// the toast control last focused inside the region (until the focus leaves it): restored when a move remounts it
 	const lastFocus = useRef<{ id: string; control: string } | null>(null)
-	const [place, setPlace] = useState<Placement>({
-		where: "free-plot",
-		cx: 0,
-		maxW: 0,
-		top: topRowBottom + 8,
-	})
+	// each toast's natural one-line width, measured while it shows in its full form
+	const natural = useRef(new Map<string, { content: string; w: number }>())
 
 	useEffect(() => {
 		service.setPaused("palette", palette)
@@ -87,6 +99,7 @@ export function NoticeRegion({
 		[service, receiverOpen],
 	)
 	const occupied = shown !== null || receipt !== null
+	const visible = occupied && !palette
 	// the region going away (palette, or its last toast closed under the pointer: no pointerleave or blur then)
 	// never leaves a hover or focus pause behind
 	useEffect(() => {
@@ -95,70 +108,49 @@ export function NoticeRegion({
 			service.setFocusedToast(null)
 		}
 	}, [service, palette, occupied])
+
+	// report each toast's forms; withdraw what no longer shows
+	const conditionKey = shown
+		? `${shown.id}|${shown.text}|${shown.action?.label ?? ""}`
+		: null
+	const receiptKey = receipt
+		? `${receipt.id}|${receipt.text}|${receipt.action?.label ?? (receipt.undo ? "undo" : "")}`
+		: null
 	useLayoutEffect(() => {
-		const stackHeight = () => {
-			const h = box.current?.offsetHeight ?? 0
-			const t = tallest.current
-			if (t.content !== contentRef.current)
-				tallest.current = { content: contentRef.current, h }
-			else if (h > t.h) t.h = h
-			return tallest.current.h
-		}
-		const measure = () => {
-			// shell coordinates: the region is placed in the shell root
-			const el = box.current
-			if (el && !el.parentElement?.classList.contains("wk-drawer-notices"))
-				home.current = el.parentElement
-			const root = home.current?.isConnected ? home.current : null
-			const r = root?.getBoundingClientRect() ?? { left: 0, top: 0 }
-			const cx = root ? freeCentre(root) : window.innerWidth / 2
-			const inShell = (el: Element): Box => {
-				const b = el.getBoundingClientRect()
-				return {
-					top: b.top - r.top,
-					bottom: b.bottom - r.top,
-					left: b.left - r.left,
-					right: b.right - r.left,
-				}
+		const report = (id: "condition" | "receipt", key: string | null) => {
+			if (key === null || !visible) {
+				reports.withdraw(id)
+				natural.current.delete(id)
+				return
 			}
-			const boxes: Box[] = [...document.querySelectorAll(TOP_CENTRE_SELECTOR)]
-				.filter(el => !box.current?.contains(el))
-				.map(inShell)
-			const drawer = root?.querySelector(".wk-shell-drawer") ?? null
-			// the open drawer's slot: the newest connected one inside it (a loading skeleton's slot is replaced)
-			const drawerSlot =
-				(drawer &&
-					noticeSlots
-						.all()
-						.filter(s => s.isConnected && drawer.contains(s))
-						.at(-1)) ??
-				null
-			const next = regionPlacement({
-				W: root?.clientWidth ?? window.innerWidth,
-				topRowBottom,
-				freeCx: cx,
-				boxes,
-				expanded: root ? expandedDrawer(root, inShell) : null,
-				drawer: drawer ? inShell(drawer) : null,
-				slot: drawerSlot !== null,
-				height: stackHeight(),
-			})
-			setPlace(p => (samePlace(p, next) ? p : next))
-			setSlot(drawerSlot)
+			const el = box.current?.querySelector<HTMLElement>(
+				`[data-wk-slot="status:${id}"]`,
+			)
+			const had = natural.current.get(id)
+			// measured in its full form only (a compact or icon form hides some of its parts)
+			if (el && (el.dataset["form"] ?? "full") === "full") {
+				const w = naturalRowWidth(el)
+				if (!had || had.content !== key || Math.abs(had.w - w) > 1)
+					natural.current.set(id, { content: key, w })
+			}
+			const n = natural.current.get(id)
+			if (n && n.content === key) reports.report(toastItem(id, n.w))
 		}
-		measure()
-		if (!occupied) return
-		const id = setInterval(measure, MEASURE_MS)
-		window.addEventListener("resize", measure)
-		return () => {
-			clearInterval(id)
-			window.removeEventListener("resize", measure)
-		}
-	}, [topRowBottom, occupied, slotVersion])
-	// moving between the plot and a drawer's slot remounts the toasts: no pointerleave or blur comes then, so the
+		report("condition", conditionKey)
+		report("receipt", receiptKey)
+	})
+	useEffect(
+		() => () => {
+			reports.withdraw("condition")
+			reports.withdraw("receipt")
+		},
+		[reports],
+	)
+
+	const docked = status.where === "drawer-slot" && slot !== null
+	// moving between the rail and a drawer's slot remounts the toasts: no pointerleave or blur comes then, so the
 	// hover pause never stays behind; a toast button that had the focus gets it back on its new element (same
 	// toast, same control), so the focus pause stays only then
-	const docked = place.where === "drawer-slot" && slot !== null
 	useLayoutEffect(() => {
 		service.setPaused("hover", false)
 		const f = lastFocus.current
@@ -176,24 +168,15 @@ export function NoticeRegion({
 		} else service.setFocusedToast(null)
 	}, [service, docked])
 
-	if (palette || !occupied) return null
+	if (!visible) return null
+	const placed = new Map<string, StatusPlaced>(status.items.map(i => [i.id, i]))
+	const at = (id: string) => (docked ? null : (placed.get(id) ?? null))
 	const region: ReactNode = (
 		<div
 			ref={box}
-			className="wk-notices"
+			className={docked ? "wk-notices" : "wk-status-layer"}
 			data-wk-notice-region=""
-			data-where={place.where}
-			// the free plot's top centre comes from shell.css (`--wk-free-cx`); elsewhere the measured room
-			// in a drawer's slot the drawer lays it out (shell.css)
-			style={
-				docked
-					? undefined
-					: place.where === "free-plot" || place.where === "drawer-slot"
-						? { top: place.top }
-						: { top: place.top, left: place.cx, maxWidth: place.maxW }
-			}
-			onPointerEnter={() => service.setPaused("hover", true)}
-			onPointerLeave={() => service.setPaused("hover", false)}
+			data-where={docked ? "drawer-slot" : status.where}
 			onFocus={e => {
 				const control = e.target.closest("[data-control]")
 				const toast = e.target.closest("[data-toast-id]")
@@ -210,47 +193,53 @@ export function NoticeRegion({
 		>
 			{/* a new element per toast, so a fresh one is announced and animates in */}
 			{shown && (
-				<ConditionToast key={shown.id} shown={shown} service={service} />
+				<ConditionToast
+					key={shown.id}
+					shown={shown}
+					service={service}
+					place={at("condition")}
+					docked={docked}
+				/>
 			)}
 			{receipt && (
-				<ReceiptToast key={receipt.id} receipt={receipt} service={service} />
+				<ReceiptToast
+					key={receipt.id}
+					receipt={receipt}
+					service={service}
+					place={at("receipt")}
+					docked={docked}
+				/>
 			)}
 		</div>
 	)
 	return docked ? createPortal(region, slot) : region
 }
 
-const samePlace = (a: Placement, b: Placement) =>
-	a.where === b.where && a.cx === b.cx && a.maxW === b.maxW && a.top === b.top
-
-/** The expanded Activity drawer's row and header (shell px), or null while Activity is not expanded. */
-function expandedDrawer(
-	root: HTMLElement,
-	inShell: (el: Element) => Box,
-): ExpandedDrawer | null {
-	const drawer = root.querySelector(".wk-shell-drawer[data-expanded]")
-	if (!drawer) return null
-	const header = drawer.querySelector(".wk-drawer-head")
-	return {
-		drawer: inShell(drawer),
-		topRow: [
-			...root.querySelectorAll(
-				'.wk-shell-island[data-island="tuner"], .wk-shell-island[data-island="receiver"]',
-			),
-		].map(inShell),
-		header: header ? inShell(header) : null,
-		headerControls: header
-			? [...header.children]
-					.filter(el => !el.classList.contains("wk-drawer-gap"))
-					.map(inShell)
-			: [],
+/** A toast's slot: its rectangle and form from the layout, or measured out of sight until it has one. */
+function placement(
+	id: "condition" | "receipt",
+	place: StatusPlaced | null,
+	docked: boolean,
+	service: NoticeService,
+): HTMLAttributes<HTMLDivElement> & {
+	readonly [data: `data-${string}`]: string | number | undefined
+} {
+	const hover = {
+		onPointerEnter: () => service.setPaused("hover", true),
+		onPointerLeave: () => service.setPaused("hover", false),
 	}
-}
-
-/** The free plot's centre in shell px: `--wk-free-cx` on the shell root, else its middle. */
-function freeCentre(root: HTMLElement): number {
-	const v = parseFloat(getComputedStyle(root).getPropertyValue("--wk-free-cx"))
-	return Number.isFinite(v) ? v : root.clientWidth / 2
+	if (docked) return { ...slotAttrs(`status:${id}`, null), ...hover }
+	const form: StatusForm = place?.form ?? "full"
+	return {
+		...slotAttrs(`status:${id}`, place),
+		"data-form": form,
+		"data-lines": place?.lines ?? 1,
+		"data-pending": place ? undefined : "",
+		style: place
+			? topLeft(place, true)
+			: { left: 0, top: 0, width: "max-content", height: TOAST_H },
+		...hover,
+	}
 }
 
 // Each toast owns the focus pause it starts: it ends when that toast goes, even with no blur (a focused ✕ or
@@ -258,9 +247,13 @@ function freeCentre(root: HTMLElement): number {
 function ConditionToast({
 	shown,
 	service,
+	place,
+	docked,
 }: {
 	shown: ShownCondition
 	service: NoticeService
+	place: StatusPlaced | null
+	docked: boolean
 }) {
 	return (
 		<div
@@ -270,10 +263,14 @@ function ConditionToast({
 			data-toast-id={shown.id}
 			data-key={shown.key}
 			data-tone={shown.tone}
+			title={place && place.form !== "full" ? shown.text : undefined}
+			{...placement("condition", place, docked, service)}
 			onFocus={() => service.setFocusedToast(shown.id)}
 		>
 			{shown.tone === "warn" && <WarnGlyph />}
-			<span className="wk-notice-text">{shown.text}</span>
+			<span className="wk-notice-text" data-measure-text="">
+				{shown.text}
+			</span>
 			{shown.action && (
 				<button
 					type="button"
@@ -303,9 +300,13 @@ function ConditionToast({
 function ReceiptToast({
 	receipt,
 	service,
+	place,
+	docked,
 }: {
 	receipt: Receipt
 	service: NoticeService
+	place: StatusPlaced | null
+	docked: boolean
 }) {
 	const button = receipt.action !== undefined || receipt.undo !== undefined
 	return (
@@ -315,10 +316,14 @@ function ReceiptToast({
 			data-class="receipt"
 			data-toast-id={receipt.id}
 			data-tone={receipt.tone}
+			title={place && place.lines === 2 ? receipt.text : undefined}
+			{...placement("receipt", place, docked, service)}
 			onFocus={() => service.setFocusedToast(receipt.id)}
 		>
 			{receipt.tone === "warn" && <WarnGlyph />}
-			<span className="wk-notice-text">{receipt.text}</span>
+			<span className="wk-notice-text" data-measure-text="">
+				{receipt.text}
+			</span>
 			{button ? (
 				<button
 					type="button"

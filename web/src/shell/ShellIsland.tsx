@@ -1,6 +1,8 @@
 import { useId, type CSSProperties, type ReactNode, type Ref } from "react"
 
 import { Island } from "../ui/Island.tsx"
+import type { Rect } from "./layout/geometry.ts"
+import { slotAttrs } from "./layout/slot.ts"
 
 /** Props for the element that opens and closes the island's panel (spread on a button). */
 export interface IslandTriggerProps {
@@ -34,6 +36,8 @@ export interface ShellIslandProps {
 	triggerRef: Ref<HTMLButtonElement>
 	headRef: Ref<HTMLDivElement>
 	boxRef?: Ref<HTMLDivElement> | undefined
+	/** The head's rectangle from the shell layout (the island's position comes in `style`). */
+	rect?: Rect
 	style: CSSProperties
 }
 
@@ -47,6 +51,7 @@ export function ShellIsland({
 	triggerRef,
 	headRef,
 	boxRef,
+	rect,
 	style,
 }: ShellIslandProps) {
 	const panelId = useId()
@@ -69,7 +74,11 @@ export function ShellIsland({
 			data-open={open || undefined}
 			style={style}
 		>
-			<div ref={headRef} className="wk-shell-island-head">
+			<div
+				ref={headRef}
+				className="wk-shell-island-head"
+				{...(rect ? slotAttrs(name, rect) : {})}
+			>
 				{slot.head(ctx)}
 			</div>
 			{open && slot.panel && (

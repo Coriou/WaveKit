@@ -129,7 +129,7 @@ export class NoticeService {
 	)
 	/** The condition toast on screen. */
 	readonly shown = new Store<ShownCondition | null>(null)
-	/** The region holds a toast (the tuned card then keeps off the top-centre anchor). */
+	/** The region holds a toast. */
 	readonly occupied = new Store<boolean>(false)
 
 	private seq = 0

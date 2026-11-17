@@ -39,23 +39,29 @@ The app has two views, picked from the dock at the bottom: **Spectrum** and **Ma
 on the right on top of the view: **Activity**, **Scanner**, **Recordings** and **Settings**.
 Decoded messages as cards live in Activity's **Cards** layout (the Messages view is gone; see
 [Drawers](#drawers)). On a phone, the ⌘K palette (the search button) is the way around.
-Beside a full-height drawer, notices and the spectrum's status notes (`No source connected` and
-the like) centre on the free area left of it, never under the drawer.
+
+Nothing moves when a drawer opens. The Tuner (top left), the Receiver (top right), Listen (bottom
+left) and the dock (bottom centre) keep their places at every width; the drawer opens on the right
+under the Receiver, down to the bottom of the window when it clears the dock and above the dock
+row otherwise. Below 1100 px wide, and on a phone, a drawer spans the window between the top
+islands and Listen. While a recording is loaded, the player sits just above Listen at full width
+and the tuned card above it; the drawer never reaches that column. The dock hides on windows too
+narrow to hold it beside Listen; the search button takes its place. The spectrum keeps its signal
+labels clear of the card, the drawer and any notice, and its status notes (`No source connected`
+and the like) centre on the spectrum left of the drawer.
 
 ### Notices
 
-Notices appear at the top centre of the spectrum, just under the Tuner and Receiver (and under the
-connection chip when it sits there). While Activity is expanded (**Cards**, then
-**Expand**), the drawer covers the spectrum, so notices move to the widest empty gap of the top row
-(beside the Receiver, or between the Tuner and the Receiver), or, when that gap is too narrow, to
-the empty middle of the Activity header; when neither has room for every notice showing (a
-warning with an Undo under it, say), they sit in the drawer under its header as below. They never
-cover a card or a drawer control. On a phone,
-and in any window narrower than 1100 px, an open drawer (Activity, Scanner, Recordings or
-Settings) spans the window, so notices sit inside it as a banner directly under its header: the
-drawer's list moves down to make room and comes back when the notice goes, and the title, Live,
-✕ and every other header control stay clear and usable. There are two kinds, and at most one of
-each shows at once:
+Notices appear on the top row, between the Tuner and the Receiver, never over the spectrum's
+labels: a warning sits next to the Receiver (beside the connection chip and **Receiver paused**,
+when they show), what you just did sits next to the Tuner, and neither pushes the other. When the
+row is tight a warning shortens to one line (the full text in its tooltip), then to its triangle
+alone (the Receiver island says the same); a lone warning may take two lines first. On a phone and
+other narrow windows, where the top row has no room, notices stack just under the Receiver; with a
+drawer open there (Activity, Scanner, Recordings or Settings span the window), they sit inside it as
+a banner directly under its header: the drawer's list moves down to make room and comes back when
+the notice goes, and the title, Live, ✕ and every other header control stay clear and usable.
+There are two kinds, and at most one of each shows at once:
 
 - **What you just did**, such as `Saved`, `Copied` or `Removed`, often with **Undo**. It stays
   6 seconds; the next one replaces it.
@@ -485,7 +491,8 @@ on disk.`
   (off by default) saves at once: on, your own retunes also set the band's gain and give yours
   back outside the bands. See [Per-band gain](API.md#per-band-gain-get-and-put-apituner-band-gain).
 - **Receiver › Pause** stops pulling IQ from the receiver without removing it: the core closes the
-  receiver connection, the waterfall stops on its last rows under a `Receiver paused` label,
+  receiver connection, the waterfall stops on its last rows with a `Receiver paused` label on the
+  top row (beside the Receiver),
   decoders wait (their status reads paused because the receiver is paused) and the tuner
   controls are locked until you resume. The island shows `Receiver paused · since 14:02 ·
 waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads `Paused`. The
@@ -566,8 +573,8 @@ transmission and plays its first file (Recordings lists every file). A recording
 when its transmission is not in the list, or when WaveKit cannot tell which of two transmissions on
 the channel it recorded.
 
-While something is loaded, the player sits at the bottom of the screen, above the dock, whatever
-panel is open: **Previous**, **Play/Pause**, **Next**, the title and its place in the list
+While something is loaded, the player sits just above Listen, at the left, whatever panel is
+open (an open drawer never covers it): **Previous**, **Play/Pause**, **Next**, the title and its place in the list
 (`3 of 12`), the time, a position slider, the speed (1×, 1.5×, 2×), **Auto-next**, **Keep** and
 **Close**. Closing a drawer does not stop it. **Next**, **Previous** and **Auto-next** follow the
 list it was started from, in the order shown, and only the rows with a recording: the Activity

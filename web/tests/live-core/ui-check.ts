@@ -27,6 +27,13 @@
  * - `--flow=play` (fake target only): play anywhere on the same mock core: a row's disc plays its recording in
  *   the one dock, which outlives the drawer, Recordings marks it, Listen holds and gets live audio back, and
  *   "With audio" asks for `hasRecording=true`. The report gains `play`.
+ * - `--flow=layout` (fake target only): the shell layout on the same mock core (layout-flow.ts): with Listen on, a
+ *   recording playing, a link condition and a receipt held on screen, at 1440×900, 1280×800, 1100×800 and 390×844
+ *   and in each drawer state (none, Activity, Recordings, Scanner, expanded Cards; sheets on a phone; the card
+ *   minimised to its line where it shows), every `[data-wk-slot]` box: none may intersect or crowd another or
+ *   leave the window's margin, each must equal its `data-wk-rect`, no chip may lie under one, no status item or the
+ *   player on the plot's chips or rows, and the frame, the player and the card's home may not move between a
+ *   viewport's cells. The report gains `layout`.
  * - `--flow=naming` (fake target only): names and the removed Messages view on the same mock core: `#/messages`
  *   lands on Activity in Cards, a scanner row reads "FM voice", a roll-over part "Part 1 of 3 · continues", a tag
  *   at a saved frequency its saved name, and no visible "Show in" (naming-flow.ts). The report gains `naming`.
@@ -68,6 +75,7 @@ import {
 import { listenFlow, type ListenReport } from "./listen-flow.ts"
 import { noticesFlow, type NoticesReport } from "./notices-flow.ts"
 import { playFlow, type PlayReport } from "./play-flow.ts"
+import { layoutFlow, type LayoutReport } from "./layout-flow.ts"
 import { NAMING_ROUTE, namingFlow, type NamingReport } from "./naming-flow.ts"
 import {
 	FORBIDDEN_PORTS,
@@ -130,8 +138,8 @@ export interface Options {
 	allowMeasure: boolean
 	/** Fake target: the production build (vite build, then vite preview) instead of the dev server. */
 	built: boolean
-	/** `--flow=listen`, `--flow=play`, `--flow=naming` or `--flow=notices`: drive that flow on the mock core (fake target only). */
-	flow: "listen" | "play" | "naming" | "notices" | null
+	/** `--flow=listen`, `--flow=play`, `--flow=naming`, `--flow=notices` or `--flow=layout`: drive that flow on the mock core (fake target only). */
+	flow: "listen" | "play" | "naming" | "notices" | "layout" | null
 }
 
 /** The run cannot start or finish (exit 2); the message never holds a credential. */
@@ -189,7 +197,8 @@ export function parseOptions(argv: readonly string[]): Options {
 			(value === "listen" ||
 				value === "play" ||
 				value === "naming" ||
-				value === "notices")
+				value === "notices" ||
+				value === "layout")
 		)
 			options.flow = value
 		else if (flag === "--seed-recordings" && /^\d{1,6}$/.test(value)) {
@@ -714,8 +723,10 @@ export async function run(
 				port: apiPort,
 				audioPort: mockAudioPort,
 				audioOrigin: `http://${LOOPBACK}:${mockAudioPort}`,
-				// the notices flow counts the core's onset in snapshot ticks: a quicker tick, same rule
-				...(options.flow === "notices" ? { resourcesIntervalMs: 1000 } : {}),
+				// the notices and layout flows count the core's onset in snapshot ticks: a quicker tick, same rule
+				...(options.flow === "notices" || options.flow === "layout"
+					? { resourcesIntervalMs: 1000 }
+					: {}),
 			})
 			mockApi = `http://${LOOPBACK}:${apiPort}`
 			await server.listen()
@@ -987,6 +998,11 @@ export async function run(
 			})
 			await shoot("2-notices")
 		}
+		let layout: LayoutReport | null = null
+		if (options.flow === "layout") {
+			layout = await layoutFlow(page, mockApi)
+			await shoot("2-layout")
+		}
 		const last = options.actions.length > 0 ? await look(page, core) : null
 		if (last !== null) await shoot("2-after-actions")
 		const panelAfter =
@@ -1020,7 +1036,9 @@ export async function run(
 						? naming.ok
 						: notices !== null
 							? notices.ok
-							: lookHealthy(final)) &&
+							: layout !== null
+								? layout.ok
+								: lookHealthy(final)) &&
 			!errors.some(text => text.startsWith("uncaught:")) &&
 			revoked !== false
 		const report: Record<string, unknown> = {
@@ -1034,7 +1052,9 @@ export async function run(
 							? `naming: ${naming.ok ? "ok" : "FAILED"}, ${naming.steps.filter(s => s.ok).length}/${naming.steps.length} steps; ${summaryLine(final)}`
 							: notices !== null
 								? `notices: ${notices.ok ? "ok" : "FAILED"}, ${notices.steps.filter(s => s.ok).length}/${notices.steps.length} steps, layouts ${notices.layouts.map(l => `${l.viewport} ${l.ok ? "clear" : "OVERLAP"}`).join(", ")}`
-								: summaryLine(final),
+								: layout !== null
+									? `layout: ${layout.ok ? "ok" : "FAILED"}, ${layout.cells.filter(c => c.violations.length === 0).length}/${layout.cells.length} cells clear, ${layout.moved.length} moved, ${layout.frames.length} frame overlaps`
+									: summaryLine(final),
 			target: {
 				kind: options.target,
 				url: base + options.route,
@@ -1058,6 +1078,7 @@ export async function run(
 			...(play !== null ? { play } : {}),
 			...(naming !== null ? { naming } : {}),
 			...(notices !== null ? { notices } : {}),
+			...(layout !== null ? { layout } : {}),
 			screenshots: shots,
 		}
 		return { report, healthy }
@@ -1081,6 +1102,9 @@ export async function run(
 const DEADLINE_MS = 6 * 60_000
 /** With --measure: the opens, reloads and a scroll through up to 50 000 rows take longer. */
 const MEASURE_DEADLINE_MS = 15 * 60_000
+/** With --flow=layout: 4 viewports, each waiting up to 15 s for a link notice's onset and opening 5 drawer states
+ * (about 5 minutes on a loaded host, the dev server's start included). */
+const LAYOUT_DEADLINE_MS = 12 * 60_000
 
 async function main(): Promise<void> {
 	const pairing = new Pairing()
@@ -1104,7 +1128,9 @@ async function main(): Promise<void> {
 	process.once("SIGTERM", () => giveUp("Terminated"))
 	const limit = process.argv.includes("--measure")
 		? MEASURE_DEADLINE_MS
-		: DEADLINE_MS
+		: process.argv.includes("--flow=layout")
+			? LAYOUT_DEADLINE_MS
+			: DEADLINE_MS
 	const deadline = setTimeout(
 		() => giveUp(`Not finished after ${limit / 1000} s`),
 		limit,

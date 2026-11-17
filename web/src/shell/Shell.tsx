@@ -1,6 +1,9 @@
 // The Immersive shell (docs/web/DESIGN.md, "Shell: direction C"): a full-bleed plot with floating glass islands.
-// Tuner top-left, Receiver top-right, Listen bottom-left, the nav dock bottom-centre, the tuned card above Listen and
-// the right drawer. One island panel open at a time; Escape closes the topmost layer and returns focus to its trigger.
+// Tuner top-left, Receiver top-right, Listen bottom-left, the nav dock bottom-centre, the player and the tuned card
+// above Listen, notices in the status slot between the Tuner and the Receiver, and the right drawer under the
+// Receiver. Every rectangle comes from one pure layout (./layout/compute.ts, "rails and stage"): the shell measures
+// intrinsic sizes, computes the layout and applies each rectangle; nothing places itself. One island panel open at a
+// time; Escape closes the topmost layer and returns focus to its trigger.
 // Glass budget: the three island heads, the dock, the card and one open panel (6); drawers and the palette are solid.
 import "../styles/shell.css"
 
@@ -43,28 +46,37 @@ import type { DrawerContentProps } from "./drawers/types.ts"
 import { useShell } from "./hooks.ts"
 import {
 	CARD_W,
-	DEFAULT_GEOMETRY,
 	FULL_MIN_VW,
-	G,
 	nearestAnchor,
-	shellLayout,
 	type CardAnchor,
 	type Point,
-	type ShellGeometry,
 } from "./layout.ts"
+import {
+	computeLayout,
+	DEFAULT_SIZES,
+	PLAYER_STOREY_W,
+	type Layout,
+	type LayoutInput,
+	type Rect,
+	type Size,
+} from "./layout/compute.ts"
+import { bottomLeft, slotAttrs, topLeft } from "./layout/slot.ts"
+import {
+	cardLineForced,
+	cardMinimised,
+	dockedSlot,
+	PlotLayoutContext,
+	publishedLayout,
+	statusReports,
+} from "./layout/stores.ts"
+import "./layout/slots.css"
 import { ShellIsland, type IslandSlot } from "./ShellIsland.tsx"
 import { Dock } from "./Dock.tsx"
 import { PaneSlot } from "./PaneSlot.tsx"
 import { PlayerDock } from "../features/playback/PlayerDock.tsx"
 import { DRAWER_PANES, paneOf } from "./panes.ts"
 import { NoticeRegion } from "./notices/NoticeRegion.tsx"
-import { notices } from "./notices/service.ts"
-import {
-	freeAreaStyle,
-	overlaySlot,
-	sameSlot,
-	type OverlaySlot,
-} from "./overlay-slot.ts"
+import { noticeSlots } from "../ui/notice-slot.ts"
 import {
 	shellStore,
 	type Closed,
@@ -110,24 +122,74 @@ export interface ShellProps {
 const keyOf = (c: Closed): string =>
 	c.kind === "palette" ? "palette" : `${c.kind}:${c.id}`
 
-function sameGeometry(a: ShellGeometry, b: ShellGeometry): boolean {
+/** What the shell measures for the layout: the window and each island's intrinsic size. */
+interface Measured {
+	readonly W: number
+	readonly H: number
+	readonly tuner: Size
+	readonly receiver: Size
+	readonly listen: Size
+	readonly dock: { readonly wide: Size; readonly compact: Size }
+	readonly player: Size | null
+	readonly cardExpanded: Size
+	readonly cardLine: Size
+	/** Open island panels' sizes (the plot keeps its labels off them). */
+	readonly panels: LayoutInput["panels"]
+	/** The open drawer has a notice slot under its header. */
+	readonly drawerSlot: boolean
+}
+
+const INITIAL: Measured = {
+	W: 1440,
+	H: 900,
+	tuner: DEFAULT_SIZES.tuner,
+	receiver: DEFAULT_SIZES.receiver,
+	listen: DEFAULT_SIZES.listen,
+	dock: DEFAULT_SIZES.dock,
+	player: null,
+	cardExpanded: DEFAULT_SIZES.cardExpanded,
+	cardLine: DEFAULT_SIZES.cardLine,
+	panels: [],
+	drawerSlot: false,
+}
+
+const sameSize = (a: Size | null, b: Size | null) =>
+	a === b || (a !== null && b !== null && a.w === b.w && a.h === b.h)
+
+function sameMeasured(a: Measured, b: Measured): boolean {
 	return (
 		a.W === b.W &&
 		a.H === b.H &&
-		a.tuner.w === b.tuner.w &&
-		a.tuner.h === b.tuner.h &&
-		a.rx.w === b.rx.w &&
-		a.rx.h === b.rx.h &&
-		a.listen.w === b.listen.w &&
-		a.listen.h === b.listen.h &&
-		a.listenLiveH === b.listenLiveH &&
-		a.listenLiveW === b.listenLiveW &&
-		a.tunerLive.w === b.tunerLive.w &&
-		a.tunerLive.h === b.tunerLive.h &&
-		a.rxLive.w === b.rxLive.w &&
-		a.rxLive.h === b.rxLive.h &&
-		a.dockW === b.dockW &&
-		a.cardH === b.cardH
+		sameSize(a.tuner, b.tuner) &&
+		sameSize(a.receiver, b.receiver) &&
+		sameSize(a.listen, b.listen) &&
+		sameSize(a.dock.wide, b.dock.wide) &&
+		sameSize(a.dock.compact, b.dock.compact) &&
+		sameSize(a.player, b.player) &&
+		sameSize(a.cardExpanded, b.cardExpanded) &&
+		sameSize(a.cardLine, b.cardLine) &&
+		a.drawerSlot === b.drawerSlot &&
+		a.panels.length === b.panels.length &&
+		a.panels.every(
+			(p, i) =>
+				p.island === b.panels[i]?.island && sameSize(p.size, b.panels[i].size),
+		)
+	)
+}
+
+const sizeOf = (el: HTMLElement | null | undefined): Size | null =>
+	el && el.offsetWidth && el.offsetHeight
+		? { w: el.offsetWidth, h: el.offsetHeight }
+		: null
+
+/** The open drawer's notice slot: the newest connected one inside it (a loading skeleton's slot is replaced). */
+function drawerNoticeSlot(drawer: HTMLElement | null): HTMLElement | null {
+	if (!drawer) return null
+	return (
+		noticeSlots
+			.all()
+			.filter(s => s.isConnected && drawer.contains(s))
+			.at(-1) ?? null
 	)
 }
 
@@ -147,8 +209,13 @@ export function Shell({
 	// the shell re-renders when the wanted anchor changes or a drag starts or ends, never on pointer moves
 	const cardAt = useStore(cardStore, s => s.at)
 	const dragging = useStore(cardStore, s => s.drag !== null)
-	// while the notice region shows something, the tuned card keeps off its top-centre anchor
-	const noticeTop = useStore(notices.occupied)
+	const reports = useStore(statusReports)
+	const cardMin = useStore(cardMinimised)
+	const slotVersion = useSyncExternalStore(
+		noticeSlots.subscribe,
+		noticeSlots.version,
+		noticeSlots.version,
+	)
 
 	// ---- focus return: each panel, drawer and the palette remembers the control that opens it
 	const triggers = useRef(new Map<string, HTMLElement>())
@@ -169,8 +236,9 @@ export function Shell({
 		[],
 	)
 
-	// ---- geometry: measured island sizes feed the board's grid
+	// ---- intrinsic sizes: the one place the shell measures (ResizeObserver on each slot's content)
 	const root = useRef<HTMLDivElement>(null)
+	const drawerBox = useRef<HTMLDivElement>(null)
 	const els = useRef<Record<string, HTMLElement | null>>({})
 	const elRef = useCallback(
 		(k: string) => (el: HTMLElement | null) => void (els.current[k] = el),
@@ -185,43 +253,60 @@ export function Shell({
 		listenBox: elRef("listenBox"),
 		dock: elRef("dock"),
 		card: elRef("card"),
+		player: elRef("player"),
 	}).current
-	const [geo, setGeo] = useState<ShellGeometry>(DEFAULT_GEOMETRY)
+	const [geo, setGeo] = useState<Measured>(INITIAL)
+	const panelRef = useRef(state.panel)
+	panelRef.current = state.panel
 	const measure = useCallback(() => {
 		const e = els.current
 		const r = root.current
 		if (!r) return
-		const sz = (
-			el: HTMLElement | null | undefined,
-			d: { w: number; h: number },
-		) =>
-			el && el.offsetWidth && el.offsetHeight
-				? { w: el.offsetWidth, h: el.offsetHeight }
-				: d
 		setGeo(prev => {
-			const tunerHead = sz(e["tunerHead"], DEFAULT_GEOMETRY.tuner)
-			const rxHead = sz(e["rxHead"], DEFAULT_GEOMETRY.rx)
-			const listenHead = sz(e["listenHead"], DEFAULT_GEOMETRY.listen)
-			const next: ShellGeometry = {
+			const open = panelRef.current
+			const head = (k: string, d: Size) => sizeOf(e[k]) ?? d
+			// Listen widens while its options are open (a popover): the frame keeps its closed size
+			const listenHead =
+				open === "listen" ? prev.listen : head("listenHead", prev.listen)
+			const dockEl = e["dock"]
+			const dockSize = sizeOf(dockEl)
+			const dockCompact = dockEl?.hasAttribute("data-compact") ?? false
+			const cardEl = e["card"]?.firstElementChild ?? null
+			const cardSize = sizeOf(cardEl instanceof HTMLElement ? cardEl : null)
+			const cardShownLine = cardEl?.hasAttribute("data-min") ?? false
+			const playerEl = e["player"]?.firstElementChild ?? null
+			const playerH =
+				playerEl instanceof HTMLElement ? playerEl.offsetHeight : 0
+			const panels: { island: IslandId; size: Size }[] = []
+			if (open) {
+				const box = sizeOf(e[`${open === "receiver" ? "rx" : open}Box`])
+				const h = sizeOf(e[`${open === "receiver" ? "rx" : open}Head`])
+				if (box && h && box.h > h.h + 8)
+					panels.push({ island: open, size: { w: box.w, h: box.h - h.h - 8 } })
+			}
+			const next: Measured = {
 				W: r.clientWidth,
 				H: r.clientHeight,
-				tuner: tunerHead,
-				rx: rxHead,
+				tuner: head("tunerHead", prev.tuner),
+				receiver: head("rxHead", prev.receiver),
 				listen: listenHead,
-				listenLiveH:
-					e["listenBox"]?.offsetHeight || DEFAULT_GEOMETRY.listenLiveH,
-				listenLiveW: e["listenBox"]?.offsetWidth || listenHead.w,
-				// live sizes, open panel included: the card keeps clear of these
-				tunerLive: sz(e["tunerBox"], tunerHead),
-				rxLive: sz(e["rxBox"], rxHead),
-				dockW: e["dock"]?.offsetWidth ?? 0,
-				// a hidden card keeps its last height: falling back to the default would show it again when it is
+				dock: dockSize
+					? dockCompact
+						? { ...prev.dock, compact: dockSize }
+						: { ...prev.dock, wide: dockSize }
+					: prev.dock,
+				player: playerH > 0 ? { w: PLAYER_STOREY_W, h: playerH } : null,
+				// a hidden card keeps its last sizes: falling back to the default would show it again when it is
 				// taller than the default, and the card would flip between shown and hidden
-				cardH: e["card"]?.offsetHeight || prev.cardH,
+				cardExpanded: cardSize && !cardShownLine ? cardSize : prev.cardExpanded,
+				cardLine: cardSize && cardShownLine ? cardSize : prev.cardLine,
+				panels,
+				drawerSlot: drawerNoticeSlot(drawerBox.current) !== null,
 			}
-			return sameGeometry(prev, next) ? prev : next
+			return sameMeasured(prev, next) ? prev : next
 		})
 	}, [])
+
 	// the open drawer's attached pane (src/shell/panes.ts): wanted now, attached when the layout has room for it
 	const paneDecl = paneOf(state.drawer)
 	const paneWanted = useSyncExternalStore(
@@ -230,34 +315,78 @@ export function Shell({
 		paneDecl.wanted,
 	)
 	const pane = paneDecl.pane
-	// Activity in Cards layout, expanded: the drawer spans the window between the island rows, with no pane beside it
+	// Activity in Cards layout, expanded: the drawer covers the stage between the rails, with no pane beside it
 	const cardsLayout = useStore(activityLayout, s => s.layout)
 	const cardsExpanded = useStore(activityExpanded, s => s.expanded)
 	const expanded =
 		state.drawer === "activity" &&
 		isActivityExpanded(cardsLayout, cardsExpanded)
-	const L = shellLayout(
-		geo,
-		state.drawer,
-		pane && !expanded ? { want: paneWanted, pushIn: pane.pushIn } : null,
-		{
-			at: cardAt,
-			rxOpen: state.panel === "receiver",
-			noticeTop,
-			...(state.drawer ? { drawerW: wantedDrawerW(widths, state.drawer) } : {}),
-		},
-	)
-	// the card's handle reads this frame on pointer and key events
+	// a sheet between the rails shares the top of the stage with the Receiver panel: the open panel wins (board)
+	const drawerShown =
+		state.drawer !== null &&
+		((geo.W >= FULL_MIN_VW && !expanded) || state.panel !== "receiver")
+
+	const input: LayoutInput = {
+		viewport: { w: geo.W, h: geo.H },
+		tuner: geo.tuner,
+		receiver: geo.receiver,
+		listen: geo.listen,
+		dock: geo.dock,
+		player: geo.player,
+		card: card
+			? {
+					expanded: geo.cardExpanded,
+					line: geo.cardLine,
+					minimised: cardMin,
+					anchor: cardAt,
+				}
+			: null,
+		status: [...reports.values()],
+		drawer:
+			drawerShown && state.drawer
+				? {
+						id: state.drawer,
+						wantedW: wantedDrawerW(widths, state.drawer),
+						expanded,
+						pane:
+							pane && !expanded
+								? { want: paneWanted, pushIn: pane.pushIn }
+								: null,
+						hasNoticeSlot: geo.drawerSlot,
+					}
+				: null,
+		panels: geo.panels,
+	}
+	const L: Layout = computeLayout(input)
+	const lineForced = L.card !== null && L.card.form === "line" && !cardMin
+
+	// publish what elements outside the shell's tree read (the connection chip, status guests, the card)
 	useLayoutEffect(() => {
+		publishedLayout.set(L)
+		if (cardLineForced.get() !== lineForced) cardLineForced.set(lineForced)
+		const slot =
+			L.status.where === "drawer-slot"
+				? drawerNoticeSlot(drawerBox.current)
+				: null
+		if (dockedSlot.get() !== slot) dockedSlot.set(slot)
+		// the card's handle reads this frame on pointer and key events
 		cardStore.frame = {
-			anchors: L.anchors,
-			card: L.card,
-			freeW: L.freeW,
+			anchors: L.cardAnchors,
+			card: L.card ? { x: L.card.x, y: L.card.y } : null,
+			freeW: L.cardFreeW,
 			H: geo.H,
-			cardH: geo.cardH,
+			cardH: L.card?.h ?? 0,
 		}
 		if (!L.card && cardStore.dragging) cardStore.cancelDrag()
 	})
+	useEffect(
+		() => () => {
+			publishedLayout.set(null)
+			dockedSlot.set(null)
+			cardLineForced.set(false)
+		},
+		[],
+	)
 	useLayoutEffect(() => {
 		measure()
 		if (typeof ResizeObserver === "undefined") {
@@ -266,42 +395,25 @@ export function Shell({
 		}
 		const ro = new ResizeObserver(measure)
 		if (root.current) ro.observe(root.current)
-		for (const el of Object.values(els.current)) if (el) ro.observe(el)
+		for (const el of Object.values(els.current)) {
+			if (!el) continue
+			ro.observe(el)
+			if (el.firstElementChild) ro.observe(el.firstElementChild)
+		}
 		return () => ro.disconnect()
-		// re-observe when slots mount or unmount (card, dock)
+		// re-observe when slots mount or unmount (card, dock, player) and when a notice slot comes or goes
 	}, [
 		measure,
 		state.panel,
 		state.drawer,
 		state.view,
 		L.card !== null,
-		L.dockHidden,
+		L.card?.form,
+		L.dock === null,
 		L.pane !== null,
+		geo.player === null,
+		slotVersion,
 	])
-
-	// a between-rows drawer shares the right side with the Receiver panel: the open panel wins (board)
-	const drawerShown =
-		state.drawer !== null && (L.full || state.panel !== "receiver")
-
-	// the connection chip's room (src/shell/overlay-slot.ts): the top-row gap, else the free plot under the top row
-	const freeW = drawerShown && L.full ? L.freeW : null
-	useLayoutEffect(() => {
-		const tunerR = G + geo.tunerLive.w
-		const rxL = (freeW ?? geo.W) - G - geo.rxLive.w
-		const next: OverlaySlot | null =
-			geo.W < FULL_MIN_VW
-				? null
-				: {
-						gap:
-							L.rxTop === G && rxL > tunerR
-								? { x: tunerR, w: rxL - tunerR }
-								: null,
-						freeW: freeW ?? geo.W,
-						topRow: L.topRow,
-					}
-		if (!sameSlot(overlaySlot.get(), next)) overlaySlot.set(next)
-	})
-	useEffect(() => () => overlaySlot.set(null), [])
 
 	// ---- panes: a task pane opened from elsewhere (⌘K, Shift-drag, the Tuner's scan row) opens its drawer; another
 	// drawer, or none, drops it (the drawer's × closes both)
@@ -330,10 +442,12 @@ export function Shell({
 		}
 	}, [store])
 
+	const d = L.drawer
+	const pushed = d?.pushed ?? false
 	// ---- keyboard: Escape closes the topmost layer; ⌘K / Ctrl+K the palette; ⌘, / Ctrl+, Settings
 	const paneShownRef = useRef<(() => void) | null>(null)
 	paneShownRef.current =
-		pane && paneWanted && (L.pane !== null || L.pushed) ? pane.hide : null
+		pane && paneWanted && (L.pane !== null || pushed) ? pane.hide : null
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			if (e.defaultPrevented) return
@@ -369,7 +483,6 @@ export function Shell({
 	}, [store, refocus])
 
 	// move focus into a drawer when it opens, so the keyboard lands where the content is
-	const drawerBox = useRef<HTMLDivElement>(null)
 	const lastDrawer = useRef<DrawerId | null>(null)
 	useEffect(() => {
 		if (state.drawer && state.drawer !== lastDrawer.current)
@@ -383,7 +496,7 @@ export function Shell({
 	useEffect(() => {
 		if (paneOn) paneBox.current?.focus({ preventScroll: true })
 	}, [paneOn])
-	const pushedOn = drawerShown && L.pushed && pane !== null
+	const pushedOn = drawerShown && pushed && pane !== null
 	useEffect(() => {
 		if (pushedOn) drawerBox.current?.focus({ preventScroll: true })
 	}, [pushedOn])
@@ -406,6 +519,7 @@ export function Shell({
 	const island = (
 		id: IslandId,
 		slot: IslandSlot,
+		rect: Rect,
 		headRef: Ref<HTMLDivElement>,
 		boxRef: Ref<HTMLDivElement> | undefined,
 		style: CSSProperties,
@@ -420,48 +534,67 @@ export function Shell({
 			triggerRef={triggerRef(`panel:${id}`)}
 			headRef={headRef}
 			boxRef={boxRef}
+			rect={rect}
 			style={{ ...style, zIndex: state.panel === id ? 6 : 3 }}
 		/>
 	)
 
 	const DrawerContent = state.drawer ? DRAWER_CONTENT[state.drawer] : null
 	const PaneContent = pane?.Content ?? null
-	const d = L.drawer
+	const P = L.plot
 	return (
 		<div
 			ref={root}
 			className="wk-shell"
 			data-view={state.view}
 			data-resizing={resizing || undefined}
-			// the centre of the free plot area beside a full-height drawer: toasts and the plot's status notes
-			// centre there (shell.css, plot.css), never under the drawer
-			style={freeAreaStyle(freeW) as CSSProperties | undefined}
+			// the plot body's top and its status notes' centre come from the layout (plot.css, band-ruler.css)
+			style={
+				{
+					"--wk-plot-inset-top": `${P.insetTop}px`,
+					"--wk-plot-note-cx": `${P.noteCx}px`,
+				} as CSSProperties
+			}
 		>
-			<div className="wk-shell-plot">
-				{plot ?? <div className="wk-plot-placeholder" aria-hidden="true" />}
-			</div>
+			<PlotLayoutContext value={P}>
+				<div className="wk-shell-plot">
+					{plot ?? <div className="wk-plot-placeholder" aria-hidden="true" />}
+				</div>
+			</PlotLayoutContext>
 			{state.view === "map" && (
 				<Suspense fallback={null}>
 					<MapView
-						insets={{ top: L.topRow, right: L.rxRight, phone: L.dockHidden }}
+						insets={{
+							top: L.map.top,
+							right: L.map.right,
+							phone: L.dock === null,
+						}}
 					/>
 				</Suspense>
 			)}
 
-			{island("tuner", tuner, refs.tunerHead, refs.tunerBox, {
-				top: 16,
-				left: 16,
-			})}
-			{island("receiver", receiver, refs.rxHead, refs.rxBox, {
-				top: L.rxTop,
-				right: L.rxRight,
-			})}
+			{island(
+				"tuner",
+				tuner,
+				L.tuner,
+				refs.tunerHead,
+				refs.tunerBox,
+				topLeft(L.tuner),
+			)}
+			{island(
+				"receiver",
+				receiver,
+				L.receiver,
+				refs.rxHead,
+				refs.rxBox,
+				topLeft(L.receiver),
+			)}
 			{card && L.card && dragging && (
 				<CardTargets
 					store={cardStore}
-					anchors={L.anchors}
+					anchors={L.cardAnchors}
 					home={L.card}
-					cardH={geo.cardH}
+					cardH={L.card.h}
 				/>
 			)}
 			{card && L.card && (
@@ -474,18 +607,19 @@ export function Shell({
 			{island(
 				"listen",
 				listen,
+				L.listen,
 				refs.listenHead,
 				refs.listenBox,
-				{ left: 16, bottom: 16 },
+				bottomLeft(L.listen, geo.H),
 				"up",
 			)}
 
-			{!L.dockHidden && (
+			{L.dock && (
 				<Dock
 					ref={refs.dock}
 					state={state}
-					compact={L.compact}
-					x={L.dockX}
+					compact={L.dock.compact}
+					rect={L.dock}
 					onView={v => store.setView(v)}
 					onDrawer={id => store.toggleDrawer(id)}
 					onPalette={() => store.openPalette()}
@@ -499,19 +633,12 @@ export function Shell({
 					tabIndex={-1}
 					data-wk-region=""
 					className="wk-shell-drawer"
-					data-full={d.full || undefined}
+					data-shape={d.shape}
+					data-full={d.shape === "column" || undefined}
 					data-pane={paneOn || pushedOn || undefined}
 					data-expanded={expanded || undefined}
-					style={
-						expanded
-							? { top: L.topRow, bottom: L.bottomRow, right: G, left: G }
-							: {
-									top: d.top,
-									bottom: d.bottom,
-									right: d.right,
-									...(d.width === null ? { left: 16 } : { width: d.width }),
-								}
-					}
+					{...slotAttrs("drawer", d)}
+					style={topLeft(d, true)}
 				>
 					<Suspense
 						fallback={
@@ -534,7 +661,7 @@ export function Shell({
 						) : (
 							<DrawerContent
 								onClose={closeDrawer}
-								paneRoom={L.drawer?.full === true}
+								paneRoom={d.shape === "column"}
 							/>
 						)}
 					</Suspense>
@@ -555,26 +682,19 @@ export function Shell({
 				</PaneSlot>
 			)}
 
-			{drawerShown &&
-				d &&
-				d.resizable &&
-				d.width !== null &&
-				!pushedOn &&
-				!expanded && (
-					<DrawerGrip
-						id={state.drawer}
-						name={DRAWER_TITLE[state.drawer]}
-						store={drawerWidthStore}
-						width={d.width}
-						maxW={d.maxW}
-						x={geo.W - d.right - d.width}
-						top={d.top}
-						bottom={d.bottom}
-						onResizing={setResizing}
-					/>
-				)}
+			{drawerShown && d && L.grip && !pushedOn && state.drawer && (
+				<DrawerGrip
+					id={state.drawer}
+					name={DRAWER_TITLE[state.drawer]}
+					store={drawerWidthStore}
+					width={d.w}
+					maxW={d.maxW}
+					rect={L.grip}
+					onResizing={setResizing}
+				/>
+			)}
 
-			{L.dockHidden && (
+			{L.find && (
 				<button
 					ref={triggerRef("palette")}
 					type="button"
@@ -583,14 +703,32 @@ export function Shell({
 					aria-label="Search and go to"
 					aria-haspopup="dialog"
 					aria-expanded={state.palette}
+					{...slotAttrs("find", L.find)}
+					style={topLeft(L.find)}
 					onClick={() => store.openPalette()}
 				>
 					<Icon name="search" />
 				</button>
 			)}
 
-			{/* the one recording player, above the nav dock; empty while nothing plays */}
-			<div className="wk-shell-player" data-low={L.dockHidden || undefined}>
+			{/* the one recording player, the storey above Listen; empty while nothing plays */}
+			<div
+				ref={refs.player}
+				className="wk-shell-player"
+				{...slotAttrs("player", L.player)}
+				style={{
+					...bottomLeft(
+						L.player ?? {
+							x: L.listen.x,
+							y: L.listen.y - 16,
+							w: 0,
+							h: 0,
+						},
+						geo.H,
+					),
+					width: L.player?.w ?? Math.min(PLAYER_STOREY_W, geo.W - 32),
+				}}
+			>
 				<PlayerDock />
 			</div>
 
@@ -599,7 +737,7 @@ export function Shell({
 			</CardPlaceContext.Provider>
 
 			<NoticeRegion
-				topRowBottom={L.topRow - G}
+				status={L.status}
 				palette={state.palette}
 				receiverOpen={state.panel === "receiver"}
 			/>
@@ -622,7 +760,7 @@ function CardSlot({
 	children,
 }: {
 	store: CardPlaceStore
-	at: Point
+	at: Rect
 	slotRef: Ref<HTMLDivElement>
 	children: ReactNode
 }) {
@@ -633,6 +771,7 @@ function CardSlot({
 			ref={slotRef}
 			className="wk-shell-cardslot"
 			data-dragging={drag ? "" : undefined}
+			{...slotAttrs("card", at)}
 			style={{
 				transform: `translate(${p.x}px, ${p.y}px)${drag ? " scale(1.02)" : ""}`,
 			}}
