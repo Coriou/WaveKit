@@ -8,8 +8,9 @@
  * pins it (a learn card when it has one); Escape closes the hint and leaves focus on the mark and the panel
  * open. At 390×844 a tap (a touch pointer, then the click) pins it, and a tap elsewhere closes it. At 1440×900
  * a mouse opens the first hint after the delay, keeps it over the bubble and closes it once it leaves the
- * bubble; a hint keyboard focus showed stays while the mouse comes and goes, and Escape closes it. It runs with
- * reduced motion, so each hint must appear whole at once.
+ * bubble; a hint keyboard focus showed stays while the mouse comes and goes, and Escape closes it; and with a
+ * hint open, another island moved over its room makes the bubble move off it within a frame or two. It runs
+ * with reduced motion, so each hint must appear whole at once.
  */
 import type { Page } from "playwright-core"
 import { within } from "./harness.ts"
@@ -129,6 +130,18 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 		}
 	}, id)
 
+/** Waits for `n` animation frames in the page: layout and the hints' per-frame re-placing have run. */
+const frames = (page: Page, n = 2): Promise<void> =>
+	page.evaluate(
+		count =>
+			new Promise<void>(done => {
+				const tick = (left: number) =>
+					left <= 0 ? done() : requestAnimationFrame(() => tick(left - 1))
+				tick(count)
+			}),
+		n,
+	)
+
 /** Waits (2 s at most) until the hint of `id` is open and its fade is done, then measures it. */
 async function settled(page: Page, id: string): Promise<Measure> {
 	await within(2_000, async () => {
@@ -206,6 +219,123 @@ async function mouseAndFocus(
 	)
 }
 
+/**
+ * An open hint follows the layout: with a hint shown by keyboard focus, another island is moved (by transform,
+ * which ResizeObserver cannot see) over the bubble, on its side of the row; a frame or two later the bubble
+ * must have moved off it to the other side, still inside its host and off its row. The hint is the first one
+ * whose row has room for the bubble on both sides (else the move would leave it nowhere to go).
+ */
+async function islandMoves(
+	page: Page,
+	ids: readonly string[],
+	step: (name: string, ok: boolean, detail?: string) => void,
+	vp: string,
+): Promise<void> {
+	const name = `${vp}: an open hint moves off another island that moves over it`
+	const panel = page.getByRole("region", { name: "Audio options" })
+	for (const id of ids) {
+		if ((await measure(page, id)).open) await page.keyboard.press("Escape")
+		const mark = panel.locator(`[data-wk-hint-mark="${id}"]`)
+		// no actionability wait: a loaded page draws too few frames for it
+		await mark.evaluate(el => el.scrollIntoView({ block: "nearest" }))
+		await frames(page, 2)
+		await mark.focus()
+		await page.keyboard.press("Shift+Tab")
+		await page.keyboard.press("Tab")
+		const shown = await settled(page, id)
+		if (!shown.open) continue
+		const moved = await page.evaluate(markId => {
+			const HOST = "[data-wk-hint-host], .wk-island[data-expanded], .wk-drawer"
+			const INSET = 12
+			const GAP = 6
+			const m = document.querySelector(`[data-wk-hint-mark="${markId}"]`)
+			const bubble = document.querySelector(`[data-wk-hint-bubble="${markId}"]`)
+			const host = m?.closest(HOST)
+			if (!m || !bubble || !host) return null
+			const keep = (
+				m.closest("[data-wk-hint-row]") ??
+				m.parentElement ??
+				m
+			).getBoundingClientRect()
+			const b = bubble.getBoundingClientRect()
+			const h = host.getBoundingClientRect()
+			const top = Math.max(h.top, 0) + INSET
+			const bottom = Math.min(h.bottom, innerHeight) - INSET
+			const below = b.top >= keep.bottom
+			// room on the other side: else covering this side leaves the bubble nowhere to go
+			const otherFits = below
+				? keep.top - GAP - b.height >= top
+				: keep.bottom + GAP + b.height <= bottom
+			if (!otherFits) return null
+			const other = [
+				...document.querySelectorAll<HTMLElement>(".wk-island"),
+			].find(o => {
+				if (o === host || host.contains(o) || o.contains(m)) return false
+				const r = o.getBoundingClientRect()
+				return r.width > 0 && r.height > 0
+			})
+			if (!other) return { island: null, covers: false, at: "" }
+			const r = other.getBoundingClientRect()
+			const was = getComputedStyle(other).transform
+			other.dataset["wkHintFlowMoved"] = JSON.stringify({
+				transform: other.style.transform,
+				transition: other.style.transition,
+			})
+			// on the bubble's side of the row, its left at the bubble's: it lies over the bubble
+			const dx = b.left - r.left
+			const dy = below ? keep.bottom + 2 - r.top : keep.top - 2 - r.bottom
+			other.style.transition = "none"
+			other.style.transform = `translate(${dx}px, ${dy}px)${was === "none" ? "" : ` ${was}`}`
+			const n = other.getBoundingClientRect()
+			const covers =
+				Math.min(b.right, n.right) - Math.max(b.left, n.left) > 0.5 &&
+				Math.min(b.bottom, n.bottom) - Math.max(b.top, n.top) > 0.5
+			return {
+				island:
+					other.closest("[data-island]")?.getAttribute("data-island") ??
+					other.className,
+				covers,
+				at: [n, b, keep]
+					.map(x =>
+						[x.left, x.top, x.right, x.bottom].map(Math.round).join(","),
+					)
+					.join(" | "),
+			}
+		}, id)
+		if (moved === null) continue
+		await frames(page, 2)
+		const after = await measure(page, id)
+		await page.evaluate(() => {
+			for (const el of document.querySelectorAll<HTMLElement>(
+				"[data-wk-hint-flow-moved]",
+			)) {
+				const was = JSON.parse(el.dataset["wkHintFlowMoved"] ?? "{}") as {
+					transform?: string
+					transition?: string
+				}
+				el.style.transform = was.transform ?? ""
+				el.style.transition = was.transition ?? ""
+				delete el.dataset["wkHintFlowMoved"]
+			}
+		})
+		if (after.open) await page.keyboard.press("Escape")
+		await frames(page, 2)
+		step(
+			name,
+			moved.island !== null &&
+				moved.covers &&
+				after.open &&
+				after.problems.length === 0 &&
+				after.side !== shown.side,
+			`${id}: moved ${moved.island ?? "no other island"} over the bubble ${moved.covers} (island | bubble | row: ${moved.at}), side ${shown.side} then ${after.side}, open after ${after.open}, problems: ${after.problems.join(", ") || "none"}`,
+		)
+		return
+	}
+	if ((await measure(page, ids[ids.length - 1] ?? "")).open)
+		await page.keyboard.press("Escape")
+	step(name, false, "no hint with room on both sides of its row")
+}
+
 export async function hintsFlow(
 	page: Page,
 	/** Saves a screenshot under that name (with `--screenshot`). */
@@ -235,8 +365,11 @@ export async function hintsFlow(
 		if (
 			(await fold.count()) > 0 &&
 			(await fold.getAttribute("aria-expanded")) !== "true"
-		)
+		) {
 			await fold.click()
+			// let the unfolded panel lay out before the marks are read and measured
+			await frames(page, 2)
+		}
 		const ids = await panel
 			.locator("[data-wk-hint-mark]")
 			.evaluateAll(els =>
@@ -325,6 +458,16 @@ export async function hintsFlow(
 			} catch (e) {
 				step(
 					`${vp.name}: mouse and focus on the first hint`,
+					false,
+					e instanceof Error ? (e.message.split("\n")[0] ?? "") : String(e),
+				)
+			}
+		if (!vp.tap && first !== undefined)
+			try {
+				await islandMoves(page, ids, step, vp.name)
+			} catch (e) {
+				step(
+					`${vp.name}: an open hint follows another island`,
 					false,
 					e instanceof Error ? (e.message.split("\n")[0] ?? "") : String(e),
 				)

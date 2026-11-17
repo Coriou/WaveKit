@@ -17,6 +17,7 @@ import {
 	HINT_GAP,
 	HINT_INSET,
 	hintBox,
+	hintLayoutChanged,
 	hintRectsMeet,
 	hintRoom,
 	placeHint,
@@ -141,6 +142,34 @@ describe("hint controller: keyboard", () => {
 		expect(open()).toBeNull()
 	})
 
+	it("after Escape, the mouse path is back to normal while the mark keeps focus", () => {
+		const { c, advance, open } = setup()
+		const ev = hintMarkEvents(c, "a")
+		ev.onFocus(true)
+		expect(ev.onKeyDown("Escape")).toBe(true)
+		expect(open()).toBeNull()
+		ev.onPointerEnter("mouse")
+		advance(HINT_OPEN_DELAY_MS)
+		expect(open()).toBe("a")
+		ev.onPointerLeave("mouse")
+		advance(HINT_CLOSE_GRACE_MS)
+		expect(open()).toBeNull()
+	})
+
+	it("after a dismiss, the mouse path is back to normal too", () => {
+		const { c, advance, open } = setup()
+		const ev = hintMarkEvents(c, "a")
+		ev.onFocus(true)
+		c.dismiss()
+		expect(open()).toBeNull()
+		ev.onPointerEnter("mouse")
+		advance(HINT_OPEN_DELAY_MS)
+		expect(open()).toBe("a")
+		ev.onPointerLeave("mouse")
+		advance(HINT_CLOSE_GRACE_MS)
+		expect(open()).toBeNull()
+	})
+
 	it("Tab to the next mark moves the hint: one open at a time", () => {
 		const { c, open } = setup()
 		const a = hintMarkEvents(c, "a")
@@ -214,10 +243,15 @@ describe("hint controller: touch and pointer", () => {
 		advance(HINT_OPEN_DELAY_MS)
 		ev.onPointerLeave("mouse")
 		bubble.onPointerEnter("mouse")
-		bubble.onPointerLeave("mouse")
-		ev.onPointerEnter("mouse")
+		// straight back onto the mark: React treats the portalled bubble as the anchor's child, so the anchor
+		// gets no pointerenter; only the bubble's leave fires, with the mark as its related target
+		bubble.onPointerLeave("mouse", true)
 		advance(HINT_CLOSE_GRACE_MS * 2)
 		expect(open()).toBe("a")
+		// then leaving the mark closes it after the grace
+		ev.onPointerLeave("mouse")
+		advance(HINT_CLOSE_GRACE_MS)
+		expect(open()).toBeNull()
 	})
 
 	it("leaving before the delay opens nothing", () => {
@@ -341,6 +375,68 @@ describe("hint placement", () => {
 			size,
 		})
 		expect(hintRectsMeet(rect(at.x, at.y, 280, 60), receiver)).toBe(false)
+	})
+
+	it("sees another island move or grow, come or go, and ignores sub-pixel jitter", () => {
+		const keep = rect(36, 300, 380, 40)
+		const host = rect(16, 60, 420, 740)
+		const card = rect(16, 80, 300, 56)
+		const before = [keep, host, card]
+		expect(hintLayoutChanged(before, [keep, host, card])).toBe(false)
+		expect(
+			hintLayoutChanged(before, [keep, host, rect(16.3, 80.2, 300, 56)]),
+		).toBe(false)
+		// moved by a transform transition (no size change)
+		expect(
+			hintLayoutChanged(before, [keep, host, rect(16, 140, 300, 56)]),
+		).toBe(true)
+		// grown with feed items
+		expect(
+			hintLayoutChanged(before, [keep, host, rect(16, 80, 300, 120)]),
+		).toBe(true)
+		// mounted or unmounted
+		expect(hintLayoutChanged(before, [keep, host])).toBe(true)
+		expect(hintLayoutChanged(before, [...before, rect(900, 0, 100, 100)])).toBe(
+			true,
+		)
+		// the kept row or the host moved
+		expect(
+			hintLayoutChanged(before, [rect(36, 310, 380, 40), host, card]),
+		).toBe(true)
+		expect(hintLayoutChanged([], [])).toBe(false)
+	})
+
+	// Feature: hints, Property 2: a re-place happens exactly when some rectangle moved past the slack
+	it("reports a change exactly when some edge moved past the slack", () => {
+		const r = fc
+			.tuple(
+				fc.integer({ min: -500, max: 1500 }),
+				fc.integer({ min: -500, max: 1500 }),
+				fc.integer({ min: 0, max: 800 }),
+				fc.integer({ min: 0, max: 800 }),
+			)
+			.map(([l, t, w, h]) => rect(l, t, w, h))
+		fc.assert(
+			fc.property(
+				fc.array(r, { maxLength: 6 }),
+				fc.array(fc.integer({ min: -3, max: 3 }), {
+					minLength: 24,
+					maxLength: 24,
+				}),
+				(rects, deltas) => {
+					const moved = rects.map((a, i) => ({
+						left: a.left + (deltas[i * 4] ?? 0),
+						top: a.top + (deltas[i * 4 + 1] ?? 0),
+						right: a.right + (deltas[i * 4 + 2] ?? 0),
+						bottom: a.bottom + (deltas[i * 4 + 3] ?? 0),
+					}))
+					const any = deltas.slice(0, rects.length * 4).some(d => d !== 0)
+					expect(hintLayoutChanged(rects, moved)).toBe(any)
+					expect(hintLayoutChanged(rects, rects)).toBe(false)
+				},
+			),
+			{ numRuns: 200 },
+		)
 	})
 
 	it("clips the host to the window", () => {

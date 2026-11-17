@@ -106,12 +106,15 @@ export class HintController {
 	/** Escape: closes the open hint only. True when it did (the caller stops the key there). */
 	escape(): boolean {
 		if (this.state.get().open === null) return false
+		// the hint is closed, so the mark's focus no longer holds it: the mouse path is back to normal
+		this.focused = null
 		this.hide()
 		return true
 	}
 
 	/** A click or tap outside the mark and the bubble, a scroll, a resize: the open hint closes. */
 	dismiss(): void {
+		this.focused = null
 		if (this.state.get().open !== null) this.hide()
 		else this.cancelShow()
 	}
@@ -167,7 +170,8 @@ export const hints = new HintController()
 /** What the bubble's pointer events mean: a mouse over it keeps the hint, leaving it closes it after the grace. */
 export interface HintBubbleEvents {
 	onPointerEnter(pointerType: string): void
-	onPointerLeave(pointerType: string): void
+	/** `intoAnchor`: the pointer went back onto the mark or its label (the hint stays, like hovering it). */
+	onPointerLeave(pointerType: string, intoAnchor?: boolean): void
 }
 
 /** The bubble's handlers (mouse only, like the mark's hover: touch and pen pin and dismiss instead). */
@@ -176,8 +180,8 @@ export function hintBubbleEvents(controller: HintController): HintBubbleEvents {
 		onPointerEnter: type => {
 			if (type === "mouse") controller.bubbleIn()
 		},
-		onPointerLeave: type => {
-			if (type === "mouse") controller.bubbleOut()
+		onPointerLeave: (type, intoAnchor = false) => {
+			if (type === "mouse" && !intoAnchor) controller.bubbleOut()
 		},
 	}
 }

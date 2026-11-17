@@ -103,3 +103,26 @@ export function hintRectsMeet(a: HintRect, b: HintRect, slack = 0): boolean {
 		Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > slack
 	)
 }
+
+/**
+ * True when the layout an open hint was placed against has changed: another island moved or resized (a
+ * transform transition ResizeObserver cannot see), one came or went, or the kept row or host moved. Two lists
+ * of the same rectangles in the same order; a move under `slack` px (sub-pixel jitter) is no change.
+ */
+export function hintLayoutChanged(
+	before: readonly HintRect[],
+	after: readonly HintRect[],
+	slack = 0.5,
+): boolean {
+	if (before.length !== after.length) return true
+	return before.some((a, i) => {
+		const b = after[i]
+		return (
+			b === undefined ||
+			Math.abs(a.left - b.left) > slack ||
+			Math.abs(a.top - b.top) > slack ||
+			Math.abs(a.right - b.right) > slack ||
+			Math.abs(a.bottom - b.bottom) > slack
+		)
+	})
+}

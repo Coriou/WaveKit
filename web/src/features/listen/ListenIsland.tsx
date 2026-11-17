@@ -327,19 +327,26 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 					data-wk-listen-head={headline.kind}
 				>
 					<b>{title}</b>
-					{state.phase === "playing" && canPlayAnyway ? (
-						<Button
-							variant="tonal"
-							size="sm"
-							className="wkf-play-anyway"
-							aria-describedby={playId}
-							onClick={() => void playAnyway(data.liveAudio)}
-						>
-							Play anyway
+					{/* the disabled button's reason comes first: its aria-describedby points at this line */}
+					{why ? (
+						<span className="wk-shell-sub" id={subId}>
+							{why}
+						</span>
+					) : state.phase === "playing" && canPlayAnyway ? (
+						<>
+							<Button
+								variant="tonal"
+								size="sm"
+								className="wkf-play-anyway"
+								aria-describedby={playId}
+								onClick={() => void playAnyway(data.liveAudio)}
+							>
+								Play anyway
+							</Button>
 							<span id={playId} hidden>
 								{PLAY_ANYWAY_TEXT}
 							</span>
-						</Button>
+						</>
 					) : breaking ? (
 						<span className="wk-shell-sub" data-breaking="">
 							{breaking}
@@ -351,7 +358,7 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 						</span>
 					) : (
 						<span className="wk-shell-sub" id={subId}>
-							{why ?? sub}
+							{sub}
 						</span>
 					)}
 				</div>

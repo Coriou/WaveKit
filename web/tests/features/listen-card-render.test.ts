@@ -245,9 +245,70 @@ describe("the Listen card's head states", () => {
 		const button = /<button[^>]*wkf-play-anyway[^>]*>/.exec(html)?.[0] ?? ""
 		const id = /aria-describedby="([^"]+)"/.exec(button)?.[1]
 		expect(id).toBeTruthy()
+		// beside the button, not inside it: the button's name stays "Play anyway"
+		expect(html).toMatch(
+			new RegExp(
+				`wkf-play-anyway[^>]*>Play anyway</button><span id="${id}" hidden="">`,
+			),
+		)
 		expect(html).toContain(
 			`<span id="${id}" hidden="">${PLAY_ANYWAY_TEXT}</span>`,
 		)
+	})
+
+	it("says Live audio is off on a read-only browser while the core's live audio is stopped", () => {
+		const made = setup({ status: { ...STATUS, running: false } })
+		made.data.access.update(s => ({
+			...s,
+			access: { mode: "protected" } as unknown as typeof s.access,
+			session: null,
+		}))
+		made.listen.update(s => ({ ...s, wanted: false, phase: "off" }))
+		const ctx = { open: false, trigger: {} } as unknown as IslandContext
+		const html = renderToStaticMarkup(
+			createElement(
+				ServicesContext.Provider,
+				{ value: made },
+				listenSlot.head(ctx),
+			),
+		)
+		const id = /<button[^>]*disabled=""[^>]*aria-describedby="([^"]+)"/.exec(
+			html,
+		)?.[1]
+		expect(id).toBeTruthy()
+		expect(html).toContain(
+			`<span class="wk-shell-sub" id="${id}">Live audio is off.</span>`,
+		)
+	})
+
+	it("the disabled reason wins over the sweep line, so the description always points at a shown line", () => {
+		// Listen on, a sweep running (the head would say "Following the scan"), and the core's status gone
+		const made = setup({})
+		made.data.scanner.update(s => ({
+			...s,
+			sweep: {
+				id: "j1",
+				state: "running",
+				progress: { hopCount: 4 },
+			} as unknown as typeof s.sweep,
+		}))
+		made.data.liveAudio.update(s => ({ ...s, status: null }))
+		const ctx = { open: false, trigger: {} } as unknown as IslandContext
+		const html = renderToStaticMarkup(
+			createElement(
+				ServicesContext.Provider,
+				{ value: made },
+				listenSlot.head(ctx),
+			),
+		)
+		const id = /<button[^>]*disabled=""[^>]*aria-describedby="([^"]+)"/.exec(
+			html,
+		)?.[1]
+		expect(id).toBeTruthy()
+		expect(html).toContain(
+			`<span class="wk-shell-sub" id="${id}">This WaveKit has no live audio.</span>`,
+		)
+		expect(html).not.toContain("Following the scan")
 	})
 
 	it("says why Listen is disabled, beside the button it describes", () => {

@@ -23,7 +23,12 @@ import {
 	hints,
 	type HintController,
 } from "./hint-controller.ts"
-import { hintRoom, placeHint, type HintRect } from "./hint-place.ts"
+import {
+	hintLayoutChanged,
+	hintRoom,
+	placeHint,
+	type HintRect,
+} from "./hint-place.ts"
 
 /** One hint: the sentence, and optionally the learn card shown when it is pinned. */
 export interface HintContent {
@@ -154,6 +159,13 @@ const rectOf = (el: Element): HintRect => {
 	return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
 }
 
+const NO_RECT: HintRect = Object.freeze({
+	left: 0,
+	top: 0,
+	right: 0,
+	bottom: 0,
+})
+
 /** A scroll this soon after opening is the browser bringing the focused mark into view: re-place, keep open. */
 const SETTLE_MS = 250
 
@@ -180,24 +192,41 @@ function HintBubble({
 	const learn = pinned && content.learn !== undefined
 	const pointer = hintBubbleEvents(controller)
 
-	// place before paint: inside the host, above the kept row, else below it
+	// place before paint: inside the host, above the kept row, else below it; while open, again whenever the
+	// layout under it changes (another island moves or grows, the row or host resizes)
 	useLayoutEffect(() => {
-		const place = () => {
-			const el = bubble.current
+		const layout = () => {
 			const m = mark.current
-			if (!el || !m) return
+			if (!m) return null
 			const keepEl = m.closest("[data-wk-hint-row]") ?? anchor.current ?? m
 			const hostEl = m.closest(HINT_HOST)
-			const viewport = { width: innerWidth, height: innerHeight }
-			const keep = rectOf(keepEl)
 			// other islands a layout lays over the host are not the host's room
-			const others = [...document.querySelectorAll(".wk-island")]
-				.filter(o => o !== hostEl && !hostEl?.contains(o) && !o.contains(m))
-				.map(rectOf)
-				.filter(o => o.right > o.left && o.bottom > o.top)
+			const otherEls = [...document.querySelectorAll(".wk-island")].filter(
+				o => o !== hostEl && !hostEl?.contains(o) && !o.contains(m),
+			)
+			return { keepEl, hostEl, otherEls }
+		}
+		/** The rectangles the placement depends on, in a fixed order: kept row, host, other islands. */
+		const rectsOf = (l: NonNullable<ReturnType<typeof layout>>) => [
+			rectOf(l.keepEl),
+			l.hostEl ? rectOf(l.hostEl) : NO_RECT,
+			...l.otherEls.map(rectOf),
+		]
+		let placedOn: HintRect[] = []
+		const place = () => {
+			const el = bubble.current
+			const l = layout()
+			if (!el || !l) return
+			const viewport = { width: innerWidth, height: innerHeight }
+			const rects = rectsOf(l)
+			placedOn = rects
+			const [keep = NO_RECT, hostRect = NO_RECT, ...otherRects] = rects
+			const others = otherRects.filter(
+				o => o.right > o.left && o.bottom > o.top,
+			)
 			const host = hintRoom(
-				hostEl
-					? rectOf(hostEl)
+				l.hostEl
+					? hostRect
 					: { left: 0, top: 0, right: viewport.width, bottom: viewport.height },
 				keep,
 				others,
@@ -232,9 +261,39 @@ function HintBubble({
 		const onResize = () => controller.dismiss()
 		document.addEventListener("scroll", onScroll, true)
 		addEventListener("resize", onResize)
+		// a size change (the host, the kept row, the bubble, another island) marks the layout stale; a move by
+		// transform is invisible to ResizeObserver, so each frame also compares the rectangles placed against
+		let stale = false
+		const observer =
+			typeof ResizeObserver === "undefined"
+				? null
+				: new ResizeObserver(() => {
+						stale = true
+					})
+		const l = layout()
+		if (observer && l) {
+			observer.observe(l.keepEl)
+			if (l.hostEl) observer.observe(l.hostEl)
+			if (el) observer.observe(el)
+			for (const o of l.otherEls) observer.observe(o)
+		}
+		let frame: number | null = null
+		const watch = () => {
+			frame = null
+			const now = layout()
+			if (stale || (now && hintLayoutChanged(placedOn, rectsOf(now)))) {
+				stale = false
+				place()
+			}
+			frame = requestAnimationFrame(watch)
+		}
+		if (typeof requestAnimationFrame !== "undefined")
+			frame = requestAnimationFrame(watch)
 		return () => {
 			document.removeEventListener("scroll", onScroll, true)
 			removeEventListener("resize", onResize)
+			observer?.disconnect()
+			if (frame !== null) cancelAnimationFrame(frame)
 		}
 	}, [anchor, mark, controller, learn])
 
@@ -270,7 +329,15 @@ function HintBubble({
 			data-learn={learn || undefined}
 			data-wk-hint-bubble={hintId}
 			onPointerEnter={e => pointer.onPointerEnter(e.pointerType)}
-			onPointerLeave={e => pointer.onPointerLeave(e.pointerType)}
+			onPointerLeave={e =>
+				pointer.onPointerLeave(
+					e.pointerType,
+					// back onto the mark or its label: React treats the portalled bubble as the anchor's child, so
+					// the anchor sees no enter, and leaving here must not start the close
+					e.relatedTarget instanceof Node &&
+						anchor.current?.contains(e.relatedTarget) === true,
+				)
+			}
 		>
 			{learn && content.learn ? (
 				<>
