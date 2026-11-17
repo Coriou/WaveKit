@@ -74,6 +74,8 @@ export interface DmrLcEvent {
 	privacy: boolean
 	/** The slot the line printed (attributes an "x" line's privacy). */
 	slot: "1" | "2" | undefined
+	/** A repeater line printing another slot than its burst's: no proof anywhere. */
+	otherSlot: boolean
 }
 
 /** Any other line. */
@@ -85,6 +87,8 @@ export interface DmrOtherEvent {
 	/** The line, read for the neutral and clear-algorithm tests only when needed. */
 	text: string
 	slot: "1" | "2" | undefined
+	/** A repeater line printing another slot than its burst's: no proof anywhere. */
+	otherSlot: boolean
 }
 
 /** One classified dsd-fme line, routed to its lane. */
@@ -152,6 +156,18 @@ interface CallRecord {
 	evidence: DmrEvidence | undefined
 	/** A link control of the lane came after the call's first voice burst. */
 	lcAfterVoice: boolean
+	/**
+	 * A checked link control of the lane named the call's key since it was
+	 * recorded here (and since the last BS/MS change): a terminator proof
+	 * needs it.
+	 */
+	namedHere: boolean
+	/**
+	 * The lane's mode generation when the call was recorded: a call that
+	 * lived through a BS/MS change (or another generation bump) is never
+	 * cleared again (fail closed).
+	 */
+	modeGeneration: number
 }
 
 interface LaneState {
@@ -175,8 +191,7 @@ const BURST = /\|\s*(?<burst>VLC|VC[1-6*]|TLC)\*?(?=\s|$)/
 const SLOT_WORD = /\bSLOT\s+(?<slot>[12])\b/i
 const SLOT_INLINE = /\bslot(?<slot>[12])\b/i
 const TGT_SRC = /\bTGT[:=]\s*(?<tgt>\d+)\b.*\bSRC[:=]\s*(?<src>\d+)\b/i
-const VOICE_EVENT =
-	/\bDMR\s+Voice\b.*\bTGT:\s*(?<tgt>\d+);\s*SRC:\s*(?<src>\d+);/i
+const VOICE_EVENT = /\bDMR\s+Voice\b.*\bTGT:\s*\d+;\s*SRC:\s*\d+;/i
 const SYNC_LOSS = /Frame Sync Err\b|SYNC LOST/i
 /** The CACH short LC's own failure: CACH, not the burst. */
 const CACH_SLCO_ERR = /^\s*SLCO CRC ERR\s*$/
@@ -271,9 +286,17 @@ const slotOf = (text: string | undefined): "1" | "2" | undefined =>
 
 /**
  * Classifies one line (ANSI codes stripped) and routes it to its lane,
- * updating `route`. Errors and privacy are read before anything else.
+ * updating `route`. Errors and privacy are read before anything else. A
+ * repeater line belongs to the lane of the latest bracketed sync (the
+ * adapter's call lifecycle uses the same rule and may pass its slot as
+ * `burstSlot`); one printing another slot proves nothing. A "DMR Voice"
+ * print is metadata only: never a link control, never a proof.
  */
-export function classifyDmrLine(line: string, route: DmrRoute): DmrLineEvent {
+export function classifyDmrLine(
+	line: string,
+	route: DmrRoute,
+	burstSlot?: "1" | "2",
+): DmrLineEvent {
 	const errored = dmrLineErrored(line)
 	const privacy = dmrLinePrivacy(line)
 	const sync = SYNC.exec(line)
@@ -309,11 +332,12 @@ export function classifyDmrLine(line: string, route: DmrRoute): DmrLineEvent {
 	)
 	const lane: DmrLane =
 		route.format === "bs"
-			? (slot ?? route.slot)
+			? (burstSlot ?? route.slot)
 			: route.format === "ms"
 				? "ms"
 				: "x"
-	const ids = VOICE_EVENT.exec(line)?.groups ?? TGT_SRC.exec(line)?.groups
+	const otherSlot = route.format === "bs" && slot !== undefined && slot !== lane
+	const ids = VOICE_EVENT.test(line) ? undefined : TGT_SRC.exec(line)?.groups
 	if (ids !== undefined) {
 		const tg = parseInt(ids["tgt"] ?? "0", 10)
 		const src = parseInt(ids["src"] ?? "0", 10)
@@ -325,9 +349,10 @@ export function classifyDmrLine(line: string, route: DmrRoute): DmrLineEvent {
 			plausible: dmrIdsPlausible(line, tg, src),
 			privacy,
 			slot,
+			otherSlot,
 		}
 	}
-	return { type: "line", lane, errored, privacy, text: line, slot }
+	return { type: "line", lane, errored, privacy, text: line, slot, otherSlot }
 }
 
 // --- The state machine ---
@@ -448,6 +473,7 @@ export class DmrClearance {
 				for (const key of LANES) {
 					this.bumpMode(key)
 					const call = this.lane(key).call
+					if (call !== undefined) call.namedHere = false
 					if (call?.trust !== "clear") continue
 					call.trust = "unknown"
 					out.push({ callId: call.callId, trust: "unknown" })
@@ -475,6 +501,14 @@ export class DmrClearance {
 			call.key !== event.key
 		if (rivalPrivacy) lane.privacySeq = seq
 		else if (event.privacy) this.privacy(lane, seq, out)
+		// Another slot's print: its privacy also mutes the slot it names (fail
+		// closed), and it proves nothing on either.
+		if (event.otherSlot) {
+			if (event.privacy && event.slot !== undefined)
+				this.privacy(this.lane(event.slot), seq, out)
+			this.drop(call)
+			return out
+		}
 		if (event.type === "line") {
 			// An errored line drops nothing more than dirty() did; the
 			// neutral and clear-algorithm tests run only for a call that may
@@ -574,6 +608,8 @@ export class DmrClearance {
 				trust: encrypted ? "encrypted" : "unknown",
 				evidence: undefined,
 				lcAfterVoice: false,
+				namedHere: this.namesHere(lane, seq, view.key),
+				modeGeneration: lane.modeGeneration,
 			}
 			lane.call = record
 			if (encrypted) {
@@ -596,11 +632,14 @@ export class DmrClearance {
 			record.evidence = undefined
 		}
 		record.key = view.key
+		// This line's own link control names the call for later proofs only.
+		const names = this.namesHere(lane, seq, record.key)
 		if (key === "x" || record.key === null) return out
 		// The link control that names a call started on its voice frames is
 		// its proof when it is the first one after its first voice burst;
 		// any other naming proves nothing.
 		this.arm(lane, record, seq, atMs, keyBefore === null ? "named" : "known")
+		if (names) record.namedHere = true
 		return out
 	}
 
@@ -645,7 +684,7 @@ export class DmrClearance {
 			burst.seq >= record.firstVoiceSeq
 		)
 			kind = "link-after-voice"
-		else if (burst.kind === "tlc") kind = "terminator"
+		else if (burst.kind === "tlc" && record.namedHere) kind = "terminator"
 		else return
 		record.trust = "pending"
 		record.evidence = {
@@ -706,6 +745,12 @@ export class DmrClearance {
 		}
 	}
 
+	/** Line `seq` printed a checked link control of `key` on the lane. */
+	private namesHere(lane: LaneState, seq: number, key: string | null): boolean {
+		const lc = lane.lc
+		return key !== null && lc?.seq === seq && lc.ok && lc.key === key
+	}
+
 	private keyOf(lane: LaneState): DmrLane {
 		for (const [key, value] of this.lanes) if (value === lane) return key
 		return "x"
@@ -762,19 +807,16 @@ export class DmrClearance {
 		const errored = event.type === "sync" ? !event.clean : event.errored
 		if (errored) for (const key of PROOF_LANES) this.dirty(this.lane(key))
 		if (!event.privacy) return
+		// It cannot be attributed to one lane: every call it could belong to
+		// (any proof lane's) is encrypted, whatever slot it prints (fail
+		// closed); a printed slot with no call yet mutes the call that line
+		// opens there.
 		const slot = event.type === "sync" ? undefined : event.slot
-		if (slot !== undefined) {
-			const lane = this.lane(slot)
-			this.privacy(lane, seq, out)
-			return
-		}
+		if (slot !== undefined && this.lane(slot).call === undefined)
+			this.lane(slot).privacySeq = seq
 		for (const key of PROOF_LANES) {
-			const call = this.lane(key).call
-			if (call === undefined || call.trust === "encrypted") continue
-			if (call.trust === "clear")
-				out.push({ callId: call.callId, trust: "unknown" })
-			call.trust = "unknown"
-			call.evidence = undefined
+			const lane = this.lane(key)
+			if (lane.call !== undefined) this.privacy(lane, seq, out)
 		}
 	}
 
@@ -817,6 +859,7 @@ export class DmrClearance {
 			evidence.lcKey !== (call.key ?? "") ||
 			evidence.decoderGeneration !== this.decoderGeneration ||
 			evidence.modeGeneration !== lane.modeGeneration ||
+			call.modeGeneration !== lane.modeGeneration ||
 			evidence.lane !== settling.lane ||
 			evidence.format !== settling.format ||
 			!evidence.burstClean ||

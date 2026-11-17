@@ -1885,11 +1885,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.dmrBsSlot = Number(bracket)
 			return this.dmrBsSlot
 		}
+		// A repeater line belongs to the lane of the latest bracketed sync
+		// (the clearance machine uses the same rule): one printing another
+		// slot is rejected there (handleDmrIds), never routed to that slot.
 		if (this.currentProtocol !== "dmr" || !this.dmrBs) return 0
-		const slot =
-			DMR_SLOT_WORD.exec(line)?.groups?.["slot"] ??
-			DMR_SLOT_INLINE.exec(line)?.groups?.["slot"]
-		return slot !== undefined ? Number(slot) : this.dmrBsSlot
+		return this.dmrBsSlot
 	}
 
 	/** Runs per-call recording retention after `delayMs` (debounced). */
@@ -2391,20 +2391,29 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// STEP 2b: DMR clearance sees the line first (errors, privacy, the
 		// settling sync), before the call lifecycle below runs on it.
 		const seq = ++this.lineSeq
-		const event = classifyDmrLine(cleanLine, this.dmrRoute)
+		// The line's call is its lane's (a DMR repeater slot, else lane 0);
+		// the clearance machine attributes the line to the same burst.
+		const laneKey = this.lineLane(cleanLine)
+		const event = classifyDmrLine(
+			cleanLine,
+			this.dmrRoute,
+			laneKey === 1 ? "1" : laneKey === 2 ? "2" : undefined,
+		)
 		this.dmrLineLane = event.type === "foreign" ? "x" : event.lane
 		this.applyDmrTrust(this.dmrClearance.line(event, seq, nowMs))
-		// The line's call is its lane's (a DMR repeater slot, else lane 0).
-		this.useLane(this.lineLane(cleanLine))
+		this.useLane(laneKey)
 		let result: DecoderOutput | null
 		let announced: DecoderOutput | null
 		try {
 			result = this.parseLaneLine(cleanLine, now, nowMs)
+			// The clearance machine settles this line's privacy and proof
+			// before any announcement is built: no clear snapshot may follow
+			// an encrypted one of the same call.
+			this.reportDmrCall(seq, nowMs)
 			// A pending call this line gave its evidence (or whose delay is past)
 			// is announced on this line, not on the next timer tick: the stream
 			// holds an unnamed call only from its call_start.
 			announced = this.checkPendingCallEmission(now, nowMs)
-			this.reportDmrCall(seq, nowMs)
 		} finally {
 			this.useLane(0)
 		}

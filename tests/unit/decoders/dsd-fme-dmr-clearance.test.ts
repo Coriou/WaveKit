@@ -130,8 +130,21 @@ describe("DMR clearance: classification", () => {
 		const route = newDmrRoute()
 		expect(classifyDmrLine(LC(), route)).toMatchObject({ lane: "x" })
 		expect(classifyDmrLine(BS(2, "VC1"), route)).toMatchObject({ lane: "2" })
-		expect(classifyDmrLine(LC(1), route)).toMatchObject({ lane: "1" })
+		// A repeater line belongs to the latest bracketed sync's lane; one
+		// printing another slot is marked (it proves nothing).
+		expect(classifyDmrLine(LC(1), route)).toMatchObject({
+			lane: "2",
+			otherSlot: true,
+		})
+		expect(classifyDmrLine(LC(2), route)).toMatchObject({
+			lane: "2",
+			otherSlot: false,
+		})
 		expect(classifyDmrLine(" SLCO NULL", route)).toMatchObject({ lane: "2" })
+		// A "DMR Voice" print is metadata, not a link control.
+		expect(
+			classifyDmrLine(" DMR Voice TGT: 9001; SRC: 91; ", route),
+		).toMatchObject({ type: "line" })
 		expect(classifyDmrLine(BRACKETLESS("TLC"), route)).toMatchObject({
 			lane: "x",
 		})
