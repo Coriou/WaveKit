@@ -577,15 +577,18 @@ start; before that it plays the previous recording, and it is greyed out when th
 and remembered per browser. While the open Activity event or Recordings row is the one playing and
 its drawer is the one on screen, the player shrinks to a thin progress line with play/pause, and
 that row's waveform is where you seek: click or drag on it (a paused one plays on from there). A
-recording that fails keeps the full player, which says why: `This recording is no longer on the
-receiver`, `The receiver is busy; try again`, or `Session expired, pair again`.
+recording that fails keeps the full player, which says why:
+`This recording is no longer on the receiver`,
+`Too many recordings are being read; try again in a moment`,
+`The receiver is busy; try again`, or `Session expired, pair again`.
 **Keep** works when WaveKit can name the file, which for a digital-voice call needs it loaded in
 Recordings; otherwise it says to keep it from there. When WaveKit does not know yet whether a file
 is kept, **Keep** never shows it as not kept: pressing it keeps the file and shows the answer.
 
 Live audio in this tab is muted while a recording plays or loads to play, and comes back as soon as
 the recording pauses, by any means (its disc, the player, a media key or the system), or ends,
-fails or closes; a media key's play mutes it again. Live audio in another tab keeps playing.
+fails or closes; a media key's play mutes it again, also after the recording ended (it plays again
+from its start). Live audio in another tab keeps playing.
 Pressing **Listen** while a recording plays pauses the recording; Listen stays on. The same holds for every Listen, including a scanner hit's Listen while live audio is
 already on.
 

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
+import { readFileSync } from "node:fs"
 import type { LiveAudioStatus } from "@wavekit/api-types"
 
 import type { LiveAudioStore } from "../../src/data/index.ts"
@@ -953,6 +954,15 @@ describe("PlaybackService: why a file could not be fetched", () => {
 			"GET /api/recordings/a/file failed with 500",
 		)
 		expect(fileErrorText(new Error("offline"))).toBe("offline")
+	})
+
+	it("the user guide names every refusal the player says", () => {
+		const guide = readFileSync(
+			new URL("../../../docs/WEB-APP.md", import.meta.url),
+			"utf8",
+		)
+		for (const status of [401, 404, 429, 503])
+			expect(guide).toContain(`\`${fileErrorText(refused(status))}\``)
 	})
 
 	it("the dock shows the words, and a 401 ends the session as other requests do", async () => {
