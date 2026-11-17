@@ -126,9 +126,6 @@ export type ReadResult =
 /** A row's stored channel (its `channelHz` ref, zero-padded), or NULL: one probe of the refs key. */
 const CHANNEL_REF_OF_ROW =
 	"(SELECT ref_value FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = 'channelHz')"
-/** No stored channel (rows from before `channel`, and rows that never had one). */
-const NO_CHANNEL_REF =
-	"NOT EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = 'channelHz')"
 
 const FACET_COLUMN: Record<FacetDimension, string> = {
 	category: "category",
@@ -140,12 +137,16 @@ const FACET_COLUMN: Record<FacetDimension, string> = {
 }
 
 /**
- * The channel scope as SQL: a stored channel within [minHz, maxHz] (a range of the refs key
- * (ref_type, ref_value, seq), the values zero-padded so text order is frequency order), or no
- * stored channel and the row's own frequency within half the fallback step of the scope,
- * [minHz − ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ, maxHz + ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ):
- * the upper bound open, so a row on the edge of two channels belongs to one. A row with neither
- * never matches.
+ * The channel scope as SQL, an index-driven candidate set: rows whose stored channel is within
+ * [minHz, maxHz] (a range of the refs key (ref_type, ref_value, seq), the values zero-padded so
+ * text order is frequency order), UNION ALL rows with no stored channel whose own frequency is
+ * within half the fallback step of the scope,
+ * [minHz − ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ, maxHz + ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ)
+ * (a range of activity_frequency): the upper bound open, so a row on the edge of two channels
+ * belongs to one. A row with neither never matches; the two halves are disjoint (one has a
+ * channel ref, the other none). Written as one `seq IN (…)` so SQLite drives the read from the
+ * two index ranges, not from the (low, high] rowid range: an OR of the two halves walked every
+ * row of the snapshot (about 1 s on 250 000 rows, past the 250 ms deadline).
  */
 function appendChannel(
 	where: string[],
@@ -153,7 +154,7 @@ function appendChannel(
 	channel: { minHz: number; maxHz: number },
 ): void {
 	where.push(
-		`(seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'channelHz' AND ref_value BETWEEN ? AND ?) OR (${CHANNEL_FALLBACK}))`,
+		`seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'channelHz' AND ref_value BETWEEN ? AND ? UNION ALL SELECT fallback.seq FROM activity AS fallback WHERE ${channelFallbackOf("fallback")})`,
 	)
 	params.push(
 		channelRefValue(channel.minHz),
@@ -162,8 +163,10 @@ function appendChannel(
 	)
 }
 
-/** The fallback half of the channel scope: no stored channel, the row's own frequency in range. */
-const CHANNEL_FALLBACK = `frequency_hz >= ? AND frequency_hz < ? AND ${NO_CHANNEL_REF}`
+/** The fallback half of the channel scope over `table`: no stored channel, its own frequency in range. */
+function channelFallbackOf(table: string): string {
+	return `${table}.frequency_hz >= ? AND ${table}.frequency_hz < ? AND NOT EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = ${table}.seq AND activity_refs.ref_type = 'channelHz')`
+}
 
 function channelFallbackParams(channel: {
 	minHz: number
@@ -173,6 +176,32 @@ function channelFallbackParams(channel: {
 		channel.minHz - ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ,
 		channel.maxHz + ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ,
 	]
+}
+
+/**
+ * The frequency filter as SQL, an index-driven candidate set from the activity_frequency range:
+ * as bare `frequency_hz` terms SQLite drove the read from the (low, high] rowid range instead and
+ * read every row of the snapshot.
+ */
+function appendFrequency(
+	where: string[],
+	params: SqlValue[],
+	min: number | null,
+	max: number | null,
+): void {
+	const terms: string[] = []
+	if (min !== null) {
+		terms.push("ranged.frequency_hz >= ?")
+		params.push(min)
+	}
+	if (max !== null) {
+		terms.push("ranged.frequency_hz <= ?")
+		params.push(max)
+	}
+	if (terms.length === 0) return
+	where.push(
+		`seq IN (SELECT ranged.seq FROM activity AS ranged WHERE ${terms.join(" AND ")})`,
+	)
 }
 
 /**
@@ -187,18 +216,31 @@ function channelMatchOf(
 	low: string,
 	high: string,
 ): "exact" | "mixed" {
+	const { sql, params } = channelMatchStatement(query, low, high)
+	const found = db.prepare(sql).get(...params)
+	return found === undefined ? "exact" : "mixed"
+}
+
+/** The channelMatch probe and its parameters (exported for the query-plan tests). */
+export function channelMatchStatement(
+	query: NormalisedQuery,
+	low: string,
+	high: string,
+): { sql: string; params: SqlValue[] } {
 	const { where, params } = bounds({ low, high, before: null, after: null })
-	appendFilters(where, params, { ...query, channel: null })
+	// The fallback half as a candidate set ahead of the other filters' sets, so it drives the
+	// probe (activity_frequency) even beside hasRecording's or a frequency range's set.
 	if (query.channel !== null) {
-		where.push(CHANNEL_FALLBACK)
+		where.push(
+			`seq IN (SELECT fallback.seq FROM activity AS fallback WHERE ${channelFallbackOf("fallback")})`,
+		)
 		params.push(...channelFallbackParams(query.channel))
 	}
-	const found = db
-		.prepare(
-			`SELECT 1 AS one FROM activity WHERE ${where.join(" AND ")} LIMIT 1`,
-		)
-		.get(...params)
-	return found === undefined ? "exact" : "mixed"
+	appendFilters(where, params, { ...query, channel: null })
+	return {
+		sql: `SELECT 1 AS one FROM activity WHERE ${where.join(" AND ")} LIMIT 1`,
+		params,
+	}
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -226,14 +268,22 @@ function appendFilters(
 	appendIn(where, params, "decoder_id", query.decoderIds)
 	appendIn(where, params, "protocol", query.protocols)
 	appendIn(where, params, "category", query.categories)
-	if (query.frequencyMin !== null) {
-		where.push("frequency_hz >= ?")
-		params.push(query.frequencyMin)
+	for (const ref of query.refs) {
+		// A recording key names one or two rows: read them from the refs key (ref_type, ref_value,
+		// seq) instead of probing every newer row (280 ms for no match on 250 000 rows). Other
+		// refs (a job's id) can match most rows, where the per-row probe stops sooner.
+		where.push(
+			ref.type === "recordingId"
+				? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = ? AND ref_value = ?)"
+				: "EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = ? AND activity_refs.ref_value = ?)",
+		)
+		params.push(ref.type, ref.value)
 	}
-	if (query.frequencyMax !== null) {
-		where.push("frequency_hz <= ?")
-		params.push(query.frequencyMax)
-	}
+	// SQLite drives the read from the first `seq IN (…)` candidate set it is given: the
+	// narrowest first (a recording key's one or two rows, then a channel, then a frequency
+	// range), each before the recordings set, which can hold most rows.
+	if (query.channel !== null) appendChannel(where, params, query.channel)
+	appendFrequency(where, params, query.frequencyMin, query.frequencyMax)
 	if (query.producedFromMs !== null) {
 		where.push("produced_at_ms >= ?")
 		params.push(query.producedFromMs)
@@ -246,17 +296,6 @@ function appendFilters(
 		where.push("entity_key = ?")
 		params.push(query.entityKey)
 	}
-	for (const ref of query.refs) {
-		// A recording key names one or two rows: read them from the refs key (ref_type, ref_value,
-		// seq) instead of probing every newer row (280 ms for no match on 250 000 rows). Other
-		// refs (a job's id) can match most rows, where the per-row probe stops sooner.
-		where.push(
-			ref.type === "recordingId"
-				? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = ? AND ref_value = ?)"
-				: "EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = ? AND activity_refs.ref_value = ?)",
-		)
-		params.push(ref.type, ref.value)
-	}
 	// The (ref_type, ref_value, seq) key lists every linked row: one ref per link.
 	if (query.hasRecording !== null)
 		where.push(
@@ -264,7 +303,6 @@ function appendFilters(
 				? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')"
 				: "seq NOT IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')",
 		)
-	if (query.channel !== null) appendChannel(where, params, query.channel)
 	if (query.fts.kind === "impossible") where.push("1 = 0")
 	else if (query.fts.kind === "match") {
 		where.push(
@@ -341,6 +379,19 @@ function readRecord(seq: bigint, json: unknown): ActivityRecord {
 	}) as unknown as ActivityRecord
 }
 
+/** The search statement and its parameters (exported for the query-plan tests). */
+export function searchStatement(
+	request: Extract<ReadRequest, { op: "search" }>,
+): { sql: string; params: SqlValue[] } {
+	const { where, params } = bounds(request)
+	appendFilters(where, params, request.query)
+	const direction = request.order === "asc" ? "ASC" : "DESC"
+	params.push(request.limit)
+	// Keyset page inside (low, high]. No COUNT(*): the extra row is the continuation signal.
+	const sql = `SELECT seq, event_id, summary_json FROM activity WHERE ${where.join(" AND ")} ORDER BY seq ${direction} LIMIT ?`
+	return { sql, params }
+}
+
 function search(
 	db: SqlDatabase,
 	request: Extract<ReadRequest, { op: "search" }>,
@@ -348,12 +399,7 @@ function search(
 	if (!Number.isSafeInteger(request.limit) || request.limit < 1) {
 		throw new ActivityQueryInvalidError("limit is invalid")
 	}
-	const { where, params } = bounds(request)
-	appendFilters(where, params, request.query)
-	const direction = request.order === "asc" ? "ASC" : "DESC"
-	params.push(request.limit)
-	// Keyset page inside (low, high]. No COUNT(*): the extra row is the continuation signal.
-	const sql = `SELECT seq, event_id, summary_json FROM activity WHERE ${where.join(" AND ")} ORDER BY seq ${direction} LIMIT ?`
+	const { sql, params } = searchStatement(request)
 	const found = db.prepare(sql).all(...params)
 	const rows: SummaryRow[] = []
 	for (const row of found) {
@@ -400,21 +446,10 @@ function channelFacetValue(value: unknown): string | null {
 	return String(hz)
 }
 
-function facets(
-	db: SqlDatabase,
+/** The facets statement and its parameters (exported for the query-plan tests). */
+export function facetsStatement(
 	request: Extract<ReadRequest, { op: "facets" }>,
-): FacetsBody {
-	if (parseSeq(request.high) <= parseSeq(request.low)) {
-		return {
-			op: "facets",
-			facets: emptyFacets(request.dimensions),
-			scanned: 0,
-			truncated: false,
-			...(request.query.channel === null
-				? {}
-				: { channelMatch: "exact" as const }),
-		}
-	}
+): { sql: string; params: SqlValue[]; columns: string[] } {
 	const { where, params } = bounds({
 		low: request.low,
 		high: request.high,
@@ -432,6 +467,25 @@ function facets(
 	// into JS. With the activity_facets covering index the scan reads index entries only;
 	// without it the same statement walks rowids (correct, slower).
 	const sql = `WITH scan AS (SELECT seq, ${columns.join(", ")} FROM activity WHERE ${where.join(" AND ")} ORDER BY seq DESC LIMIT ?) SELECT ${names}, COUNT(*) AS n, MIN(seq) AS low FROM scan GROUP BY ${names}`
+	return { sql, params, columns }
+}
+
+function facets(
+	db: SqlDatabase,
+	request: Extract<ReadRequest, { op: "facets" }>,
+): FacetsBody {
+	if (parseSeq(request.high) <= parseSeq(request.low)) {
+		return {
+			op: "facets",
+			facets: emptyFacets(request.dimensions),
+			scanned: 0,
+			truncated: false,
+			...(request.query.channel === null
+				? {}
+				: { channelMatch: "exact" as const }),
+		}
+	}
+	const { sql, params, columns } = facetsStatement(request)
 	const groups = db.prepare(sql).all(...params)
 	const counts = new Map<FacetDimension, Map<string | null, number>>()
 	for (const dimension of request.dimensions) counts.set(dimension, new Map())

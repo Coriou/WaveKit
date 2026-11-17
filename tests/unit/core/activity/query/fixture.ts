@@ -8,7 +8,7 @@ import type {
 	ActivityCategory,
 	ActivityKind,
 	ActivityQueryService,
-	ActivityRefType,
+	ActivityStoredRefType,
 	ActivityReplayFrame,
 	ActivityReplayHandle,
 	ActivityReplayRequest,
@@ -39,7 +39,7 @@ export interface FixtureInsert {
 	producedAt?: string
 	receivedAt?: string
 	text?: string
-	refs?: readonly { type: ActivityRefType; value: string }[]
+	refs?: readonly { type: ActivityStoredRefType; value: string }[]
 }
 
 export interface ActivityFixture {

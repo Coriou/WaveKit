@@ -460,11 +460,12 @@ lists it), never a measured carrier. One call each:
 
 ```sh
 F=446006250
-# Every row of the channel, newest first; channelMatch says whether older rows matched by frequency
+# Every row of the channel, newest first; channelMatch says whether rows without a channel matched by frequency
 curl --fail --get --header "$AUTH" --data-urlencode "channelHz=$F"   "$API_ORIGIN/api/activity"
 # Only the rows with audio: play each with its recording.id as above
 curl --fail --get --header "$AUTH" --data-urlencode "channelHz=$F"   --data-urlencode "hasRecording=true" "$API_ORIGIN/api/activity"
-# The recordings of the channel, with the recorder's verdict (speech: heard, not-heard, unchecked)
+# The scanner's recordings of the channel, with the recorder's verdict (speech: heard, not-heard, unchecked);
+# configured decoders' call files have no frequency here, so only the hasRecording=true line above finds them
 curl --fail --get --header "$AUTH" --data-urlencode "channelHz=$F" "$API_ORIGIN/api/recordings"
 ```
 
@@ -475,8 +476,10 @@ for the same rows the list holds, come from one facets read:
 curl --fail --header "$AUTH" --header "Content-Type: application/json"   --data "{\"query\":{\"nearHz\":$F,\"toleranceHz\":50000},\"dimensions\":[\"channel\"]}"   "$API_ORIGIN/api/activity/facets"
 ```
 
-Each `channel` value is a channel frequency in Hz; `null` counts the rows stored before channels
-existed, matched by their own frequency (`channelMatch: "mixed"`). `GET /api/recordings` takes
+Each `channel` value is a channel frequency in Hz; `null` counts the rows with no channel, matched
+by their own frequency (`channelMatch: "mixed"`): every row stored before channels existed, and
+receptions from configured decoders and `analog-transmission` rows, which have none, so on a channel
+where one of those sits `channelMatch` stays `mixed`. `GET /api/recordings` takes
 the same `nearHz`/`toleranceHz` and answers `matchedByChannel`.
 
 ## Capture IQ
