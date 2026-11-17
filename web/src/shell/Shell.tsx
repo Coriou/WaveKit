@@ -242,9 +242,9 @@ export function Shell({
 	const state = useShell(store)
 	const widths = useStore(drawerWidthStore)
 	const [resizing, setResizing] = useState(false)
-	// the shell re-renders when the wanted anchor changes or a drag starts or ends, never on pointer moves
+	// The shell follows the anchor and every drag move so the plot exclusions, panel yielding and
+	// glide on release all use the current card rectangle.
 	const cardAt = useStore(cardStore, s => s.at)
-	// the live drag position: the layout gives the plot and ui-check the card's rectangle under the pointer
 	const drag = useStore(cardStore, s => s.drag)
 	const dragging = drag !== null
 	const reports = useStore(statusReports)
@@ -460,6 +460,17 @@ export function Shell({
 	const lineForced = L.card !== null && L.card.form === "line" && !cardMin
 	const playerForced = L.player?.form === "compact"
 	const heldSet = new Set(L.held)
+	const cardYielded = L.yielded.includes("card")
+	const playerYielded = L.yielded.includes("player")
+	useLayoutEffect(() => {
+		if (!state.panel) return
+		const active = document.activeElement
+		if (
+			(cardYielded && els.current["card"]?.contains(active)) ||
+			(playerYielded && els.current["player"]?.contains(active))
+		)
+			refocus(`panel:${state.panel}`)
+	}, [cardYielded, playerYielded, state.panel, refocus])
 
 	const glideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 	useLayoutEffect(() => {
@@ -737,7 +748,7 @@ export function Shell({
 				<CardPlaceContext.Provider value={cardStore}>
 					<CardSlot
 						now={L.cardNow ?? L.card}
-						yielded={L.yielded.includes("card")}
+						yielded={cardYielded}
 						dragging={dragging}
 						glide={glideNow?.kind ?? null}
 						slotRef={refs.card}
@@ -867,7 +878,7 @@ export function Shell({
 				ref={refs.player}
 				className="wk-shell-player"
 				data-pending={L.playerWaiting || undefined}
-				data-yielded={L.yielded.includes("player") || undefined}
+				data-yielded={playerYielded || undefined}
 				data-held={heldSet.has("player") || undefined}
 				{...slotAttrs("player", L.player)}
 				style={{

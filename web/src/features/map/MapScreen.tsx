@@ -596,19 +596,36 @@ function MapChrome(props: ChromeProps) {
 	const pal = engine.palette
 	// report the chrome's sizes after every render and on every resize (the scale follows the zoom); the shell
 	// lays them out and hands the rectangles back
-	useLayoutEffect(() => {
+	const report = useCallback(() => {
 		const el = root.current
 		if (!el) return
-		const report = () => {
-			const m = measureChrome(el)
-			if (m && !sameMapInput(mapReports.get(), m)) mapReports.set(m)
-		}
-		report()
-		if (typeof ResizeObserver === "undefined") return
+		const m = measureChrome(el)
+		if (m && !sameMapInput(mapReports.get(), m)) mapReports.set(m)
+	}, [root])
+	useLayoutEffect(report)
+	useLayoutEffect(() => {
+		const el = root.current
+		if (!el || typeof ResizeObserver === "undefined") return
 		const ro = new ResizeObserver(report)
-		for (const n of el.querySelectorAll("[data-wkm-slot]")) ro.observe(n)
-		return () => ro.disconnect()
-	})
+		const selector = "[data-wkm-slot]"
+		for (const slot of el.querySelectorAll(selector)) ro.observe(slot)
+		// Chrome slots are direct children. Follow the optional station and side panels as they mount or leave.
+		const mounts = new MutationObserver(records => {
+			for (const record of records) {
+				for (const slot of record.removedNodes)
+					if (slot instanceof Element && slot.matches(selector))
+						ro.unobserve(slot)
+				for (const slot of record.addedNodes)
+					if (slot instanceof Element && slot.matches(selector))
+						ro.observe(slot)
+			}
+		})
+		mounts.observe(el, { childList: true })
+		return () => {
+			mounts.disconnect()
+			ro.disconnect()
+		}
+	}, [root, report])
 	useEffect(() => () => mapReports.set(null), [])
 	const sideMaxH = P?.sideMaxH ?? 0
 	return (

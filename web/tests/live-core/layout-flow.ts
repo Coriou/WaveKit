@@ -61,6 +61,7 @@ interface Chip extends Box {
 
 interface Snapshot {
 	slots: SlotBox[]
+	listenOpen: boolean
 	/** Slots out of sight: pending, held, hidden (by name). */
 	hidden: string[]
 	/** What the shell lists as waiting for room now (`data-wk-waiting`). */
@@ -163,6 +164,10 @@ async function snapshot(page: Page): Promise<Snapshot> {
 		const region = document.querySelector("[data-wk-notice-region]")
 		return {
 			slots,
+			listenOpen:
+				document.querySelector(
+					'.wk-shell-island[data-island="listen"][data-open]',
+				) !== null,
 			hidden,
 			waiting: (
 				document.querySelector(".wk-shell")?.getAttribute("data-wk-waiting") ??
@@ -282,7 +287,8 @@ function check(
 			w &&
 			(Math.abs(w.x - sl.x) > 1 ||
 				Math.abs(w.y - sl.y) > 1 ||
-				Math.abs(w.w - sl.w) > 1 ||
+				(Math.abs(w.w - sl.w) > 1 &&
+					!(s.listenOpen && sl.name === "listen" && sl.w > w.w)) ||
 				Math.abs(w.h - sl.h) > 1)
 		)
 			out.push(`I7 ${sl.name}: DOM ${fmt(sl)}, layout ${fmt(w)}`)
@@ -558,15 +564,49 @@ export async function layoutFlow(
 						'.wk-shell-island[data-island="listen"] [aria-controls][aria-expanded]',
 					)
 					.first()
-				await toggle.click()
+				const focusViolations: string[] = []
+				if (wide) {
+					// Programmatic opening preserves focus inside the yielding slot until the shell transfers it.
+					for (const slot of ["player", "card"]) {
+						const control = page
+							.locator(`[data-wk-slot="${slot}"] button:enabled:visible`)
+							.first()
+						if (slot === "player") {
+							// Check the held state without racing the glide timer.
+							const tookFocus = await control.evaluate(button => {
+								const player = button.closest("[data-wk-slot]")
+								if (!player) throw new Error("missing player slot")
+								player.setAttribute("data-held", "")
+								try {
+									button.focus()
+									return document.activeElement === button
+								} finally {
+									player.removeAttribute("data-held")
+								}
+							})
+							if (tookFocus) focusViolations.push("held player accepted focus")
+						}
+						await control.focus()
+						if (!(await control.evaluate(el => el === document.activeElement)))
+							focusViolations.push(`could not focus ${slot} before yield`)
+						await toggle.evaluate(el => (el as HTMLButtonElement).click())
+						await page
+							.locator(`[data-wk-slot="${slot}"][data-yielded]`)
+							.waitFor({ state: "attached", timeout: STEP_MS })
+						if (!(await toggle.evaluate(el => el === document.activeElement)))
+							focusViolations.push(
+								`focus did not reach Listen from the yielded ${slot}`,
+							)
+						if (slot === "player") await toggle.click()
+					}
+				} else await toggle.click()
 				const panel = page.locator(
 					'.wk-shell-island[data-island="listen"] .wk-shell-panel',
 				)
 				await panel.waitFor({ timeout: STEP_MS })
 				const s = await settled(page)
 				const p = await panel.boundingBox()
-				// Listen's head widens while its options are open (the layout keeps its closed size): not an I7 break
-				const violations = check(s).filter(v => !v.startsWith("I7 listen:"))
+				const violations = [...check(s), ...focusViolations]
 				const frameNames = [
 					"tuner",
 					"receiver",

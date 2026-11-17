@@ -1183,7 +1183,7 @@ Condensed + Noto Sans, Tabler-based icons).
     layer rail stands under the Receiver (under the strip when one shows), its side panel (the
     selection, the overlays menu) 10 px left of it and the station chip centred left of both, all
     clamped above the corner and the stack. A drawer opening never moves any of it: the stage
-    chrome a drawer, a pane or a sheet covers is out of sight meanwhile, and the corner keeps its
+    chrome within a gutter of a drawer, pane or sheet waits out of sight, and the corner keeps its
     rectangle (1280×800 with Activity open: the Live chip at 1200,740, clear of the dock). The
     tuned card's anchors and the map's own label placement keep off all of it. The pointer's
     hover tip and the cluster chooser are popovers at the pointer, like island panels.

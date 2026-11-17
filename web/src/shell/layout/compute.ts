@@ -745,15 +745,11 @@ export function computeLayout(input: LayoutInput): Layout {
 	// side panel and the station chip left of it; stage chrome a drawer covers (hidden, never moved)
 	let map: MapPlaced | null = null
 	if (mi && corner) {
-		const covers = [
-			...(drawer ? [drawer] : []),
-			...(pane ? [pane] : []),
-			...(grip ? [grip] : []),
-		]
-		// covered: under a drawer, a pane or the grip, or within a gutter of a status item in the strip (the strip
-		// narrows beside a column and may wrap taller there)
+		const covers = [...(drawer ? [drawer] : []), ...(pane ? [pane] : [])]
+		// Keep a gutter from surfaces and strip items. The grip straddles the column edge and needs only clearance.
 		const isCovered = (r: Rect) =>
-			covers.some(c => intersects(r, c)) ||
+			covers.some(c => separation(r, c) < G) ||
+			(grip !== null && intersects(r, grip)) ||
 			(strip !== null && items.some(i => separation(i, r) < G))
 		const wide = W >= MAP_RAIL_WIDE_MIN
 		const railW = mapRailW(W)

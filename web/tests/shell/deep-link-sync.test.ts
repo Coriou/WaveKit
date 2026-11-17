@@ -147,6 +147,22 @@ describe("followDeepLinks", () => {
 		}
 	})
 
+	it.each([false, true])(
+		"stops pending hash adoption (timer queued: %s)",
+		async queued => {
+			const win = fakeWindow("#/recordings")
+			g.window = win
+			const { services } = fakeServices()
+			const stop = followDeepLinks(services)
+			win.silentHash("#/scanner")
+			if (queued) await Promise.resolve()
+			stop()
+			await tick()
+			expect(shellStore.getState().drawer).toBe("recordings")
+			expect(win.location.hash).toBe("#/scanner")
+		},
+	)
+
 	it("adopts an outside hash when no hashchange comes for it by the next task", async () => {
 		const win = fakeWindow("#/recordings")
 		g.window = win

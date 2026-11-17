@@ -618,6 +618,46 @@ describe("computeLayout: a strip beside a drawer column", () => {
 	})
 })
 
+describe("computeLayout: the map station beside a settings column", () => {
+	it.each([
+		{ width: 488, x: 596, covered: false },
+		{ width: 489, x: 595, covered: true },
+	])(
+		"keeps the 16 px gutter with a $width px drawer",
+		({ width, x, covered }) => {
+			const scene: LayoutInput = {
+				...input(1100, 400, { player: false }),
+				card: null,
+				map: {
+					railH: 120,
+					side: null,
+					station: { w: 225, h: 36 },
+					live: { w: 60, h: 44 },
+					scale: { w: 40, h: 18 },
+					footer: { w: 120, h: 14 },
+				},
+				panels: [{ island: "tuner", size: { w: 240, h: 80 } }],
+			}
+			const station = computeLayout(scene).map?.station
+			expect(station).toMatchObject({ x: 355, w: 225 })
+			const L = computeLayout({
+				...scene,
+				drawer: {
+					id: "settings",
+					wantedW: width,
+					expanded: false,
+					pane: null,
+					hasNoticeSlot: true,
+				},
+			})
+			expect(L.drawer?.x).toBe(x)
+			expect(L.map?.station).toEqual(covered ? null : station)
+			expect(L.map?.covered.includes("station")).toBe(covered)
+			expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+		},
+	)
+})
+
 describe("computeLayout: the card and the player yield to an open panel", () => {
 	const listenOpen = (h: number, o: Parameters<typeof input>[2] = {}) => ({
 		...input(1440, 900, o),

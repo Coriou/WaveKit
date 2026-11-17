@@ -75,17 +75,18 @@ export function followDeepLinks(services: AppServices): () => void {
 	// link, the address bar, a script) and its hashchange is still on its way (a task later): the app's state does
 	// not overwrite it meanwhile, or the change would be lost (open() would then read the old hash back).
 	let known = window.location.hash
-	let adoptQueued = false
+	let adoptTimer: ReturnType<typeof setTimeout> | undefined
+	let stopped = false
 
 	const write = () => {
 		queued = false
+		if (stopped) return
 		const loc = window.location
 		if (loc.hash !== known) {
 			// its hashchange is a task away; if none comes by the next task, open the hash anyway
-			if (!adoptQueued) {
-				adoptQueued = true
-				setTimeout(() => {
-					adoptQueued = false
+			if (adoptTimer === undefined) {
+				adoptTimer = setTimeout(() => {
+					adoptTimer = undefined
 					if (window.location.hash !== known) open()
 				}, 0)
 			}
@@ -120,7 +121,7 @@ export function followDeepLinks(services: AppServices): () => void {
 	// installed app: a manifest shortcut or a link launched into the open window (launch_handler focus-existing)
 	const queue = (window as { launchQueue?: LaunchQueue }).launchQueue
 	queue?.setConsumer(params => {
-		if (!params.targetURL) return
+		if (stopped || !params.targetURL) return
 		const hash = new URL(params.targetURL).hash
 		if (hash !== window.location.hash) window.location.hash = hash
 	})
@@ -131,6 +132,8 @@ export function followDeepLinks(services: AppServices): () => void {
 		activityLayout.subscribe(schedule),
 	]
 	return () => {
+		stopped = true
+		clearTimeout(adoptTimer)
 		window.removeEventListener("hashchange", open)
 		window.removeEventListener("popstate", open)
 		for (const off of offs) off()

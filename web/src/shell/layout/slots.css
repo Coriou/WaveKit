@@ -128,6 +128,7 @@
 		transition-timing-function: var(--wk-ease-out);
 	}
 	.wk-shell [data-held] {
+		visibility: hidden;
 		opacity: 0;
 		pointer-events: none;
 		transition: none;
