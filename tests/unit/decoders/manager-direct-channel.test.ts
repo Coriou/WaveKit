@@ -14,7 +14,12 @@ import {
 } from "../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
-import { FakeSources, RateDecoder, iqCaps } from "../../mocks/rate-fakes.js"
+import {
+	FakeSources,
+	RateDecoder,
+	deferred,
+	iqCaps,
+} from "../../mocks/rate-fakes.js"
 import {
 	CENTER,
 	DirectDecoder,
@@ -97,6 +102,21 @@ function failures(id = "dec") {
 			decoders: Map<string, { consecutiveFailures: number }>
 		}
 	).decoders.get(id)!.consecutiveFailures
+}
+
+/** The manager's state of a decoder: its rate generation is what exit-pending's guard compares. */
+function internalState(id = "dec") {
+	return (
+		manager as unknown as {
+			decoders: Map<
+				string,
+				{
+					rateGeneration: number
+					suspension: { reasonCode: string } | null
+				}
+			>
+		}
+	).decoders.get(id)!
 }
 
 beforeEach(() => setup())
@@ -211,6 +231,24 @@ describe("a channel that goes away (D2)", () => {
 		).toHaveLength(1)
 		await settle(5000)
 		expect(decoder.starts).toBe(2)
+	})
+
+	it("the adapter's stop() runs once on the exited decoder before its restart; a throw is logged and the start goes on", async () => {
+		const decoder = create()
+		await manager.startDecoder("dec")
+		provider.endGeneration("rtl", ["dec-g1"])
+		decoder.exit(0)
+		decoder.failStop = true
+		await settle()
+		decoder.failStop = false
+		expect(decoder.stops).toBe(1)
+		expect(decoder.starts).toBe(2)
+		expect(status()).toMatchObject({ running: true, restartCount: 0 })
+		expect(status().lastError ?? null).toBeNull()
+		expect(
+			warnings("Decoder cleanup after its channel ended failed; continuing"),
+		).toHaveLength(1)
+		expect(restarting).toEqual([])
 	})
 
 	it("the caps worker reaches it while it still runs: the same single restart", async () => {
@@ -436,6 +474,45 @@ describe("an exit with no terminal event (exit-pending)", () => {
 		expect(restarting).toEqual([])
 	})
 
+	it("the guard fails, then client-gone: dropped, no restart, the probable crash recorded", async () => {
+		const decoder = create()
+		await manager.startDecoder("dec")
+		decoder.exit(1)
+		internalState().rateGeneration++
+		provider.clientGone("rtl", "dec-g1")
+		expect(status().lastError).toMatchObject({ kind: "exit" })
+		expect(failures()).toBe(1)
+		await settle(CHANNEL_FATE_MS * 2)
+		expect(restarting).toEqual([])
+		expect(decoder.starts).toBe(1)
+	})
+
+	it("the guard fails, then the fate timer: dropped the same way, the probable crash recorded", async () => {
+		const decoder = create()
+		await manager.startDecoder("dec")
+		decoder.exit(1)
+		internalState().rateGeneration++
+		await settle(CHANNEL_FATE_MS)
+		expect(status().lastError).toMatchObject({ kind: "exit" })
+		expect(failures()).toBe(1)
+		expect(provider.released).toEqual(["dec-g1"])
+		await settle(CHANNEL_FATE_MS * 2)
+		expect(restarting).toEqual([])
+		expect(decoder.starts).toBe(1)
+	})
+
+	it("the guard fails, then the channel's own end: dropped, nothing recorded (the exit was its EOF)", async () => {
+		const decoder = create()
+		await manager.startDecoder("dec")
+		decoder.exit(0)
+		internalState().rateGeneration++
+		provider.endGeneration("rtl", ["dec-g1"])
+		expect(status().lastError ?? null).toBeNull()
+		expect(failures()).toBe(0)
+		await settle(CHANNEL_FATE_MS * 2)
+		expect(restarting).toEqual([])
+	})
+
 	it("a stop after the channel ended (the exit was its EOF) records nothing", async () => {
 		const decoder = create()
 		await manager.startDecoder("dec")
@@ -533,6 +610,74 @@ describe("start failures", () => {
 		expect(decoder.starts).toBe(1)
 	})
 
+	it("the channel ends while the adapter awaits before its spawn: no spawn, the channel-loss hold, nothing counted", async () => {
+		const decoder = create()
+		const gate = deferred()
+		decoder.beforeSpawn = gate
+		const starting = manager.startDecoder("dec")
+		await vi.waitFor(() => expect(provider.sockets.size).toBe(1))
+		await settle(0)
+		provider.endGeneration("rtl", ["dec-g1"])
+		gate.resolve()
+		await starting
+		expect(decoder.refused).toBe(1)
+		expect(decoder.starts).toBe(0)
+		expect(decoder.spawnedWith).toEqual([])
+		expect(status()).toMatchObject({ running: false, suspended: true })
+		expect(internalState().suspension?.reasonCode).toBe(
+			"channelizer-unavailable",
+		)
+		expect(status().lastError ?? null).toBeNull()
+		expect(failures()).toBe(0)
+		expect(status().restartCount).toBe(0)
+		expect(restarting).toEqual([])
+		expect(provider.sockets.get("dec-g1")?.destroyed).toBe(true)
+		// The evaluation the channel's end queued starts it again on a fresh channel, fed from its first byte.
+		await settle()
+		expect(decoder.starts).toBe(1)
+		expect(decoder.spawnedWith).toEqual([provider.sockets.get("dec-g2")])
+		expect(status()).toMatchObject({ running: true, suspended: false })
+		expect(failures()).toBe(0)
+	})
+
+	it("the socket closes while the adapter awaits before its spawn: no spawn, the hold, the channel released once", async () => {
+		const decoder = create()
+		const gate = deferred()
+		decoder.beforeSpawn = gate
+		const starting = manager.startDecoder("dec")
+		await vi.waitFor(() => expect(provider.sockets.size).toBe(1))
+		await settle(0)
+		provider.sockets.get("dec-g1")!.destroy()
+		gate.resolve()
+		await starting
+		expect(decoder.refused).toBe(1)
+		expect(decoder.starts).toBe(0)
+		expect(status()).toMatchObject({ running: false, suspended: true })
+		expect(internalState().suspension?.reasonCode).toBe(
+			"channelizer-unavailable",
+		)
+		expect(status().lastError ?? null).toBeNull()
+		expect(failures()).toBe(0)
+		expect(restarting).toEqual([])
+		expect(provider.released).toEqual(["dec-g1"])
+	})
+
+	it("relay mode spawns after the same await as before: the grant check is direct input only", async () => {
+		await manager.destroy()
+		setup({ channelInput: "relay" })
+		const decoder = create()
+		const gate = deferred()
+		decoder.beforeSpawn = gate
+		const starting = manager.startDecoder("dec")
+		await vi.waitFor(() => expect(provider.streams.size).toBe(1))
+		await settle(0)
+		gate.resolve()
+		await starting
+		expect(decoder.refused).toBe(0)
+		expect(decoder.starts).toBe(1)
+		expect(status()).toMatchObject({ running: true })
+	})
+
 	it("a socket closed between wiring and the spawn is a channel lost before start: no spawn", async () => {
 		const decoder = create()
 		provider.closeBeforeGrant = true
@@ -587,6 +732,48 @@ describe("bytesIn from channel-stats", () => {
 		internal.decoders.set("moved", state)
 		provider.stats({ channelId: "dec-g1", outputSamples: 10 })
 		expect(decoder.bytes).toBe(80)
+	})
+
+	it("credits what was queued for the decoder: an overflow of 480 produced and 470 dropped credits 10 samples", async () => {
+		const decoder = create()
+		await manager.startDecoder("dec")
+		provider.stats({
+			channelId: "dec-g1",
+			outputSamples: 480,
+			droppedSamples: 470,
+			bytesPerSample: 8,
+		})
+		expect(decoder.bytes).toBe(80)
+		expect(status().stats.bytesIn).toBe(80)
+		// Only drops grew: nothing more. Then 40 more queued.
+		provider.stats({
+			channelId: "dec-g1",
+			outputSamples: 960,
+			droppedSamples: 950,
+		})
+		expect(decoder.bytes).toBe(80)
+		provider.stats({
+			channelId: "dec-g1",
+			outputSamples: 1000,
+			droppedSamples: 950,
+		})
+		expect(decoder.bytes).toBe(400)
+	})
+
+	it("every grant counts from zero, also one that reuses the id in the same generation", async () => {
+		const decoder = create()
+		await manager.startDecoder("dec")
+		provider.stats({ channelId: "dec-g1", outputSamples: 1000 })
+		expect(decoder.bytes).toBe(8000)
+		// The decoder dies by itself: client-gone keeps the generation, and the restart is granted dec-g1 again.
+		decoder.exit(1)
+		provider.clientGone("rtl", "dec-g1")
+		await settle(20)
+		expect(decoder.starts).toBe(2)
+		expect(provider.calls).toHaveLength(2)
+		// The new channel's counter starts at zero in the process; a smaller count than the old mark still counts.
+		provider.stats({ channelId: "dec-g1", outputSamples: 10 })
+		expect(decoder.bytes).toBe(8000 + 80)
 	})
 
 	it("a run shorter than one stats period reports 0", async () => {

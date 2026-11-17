@@ -29,6 +29,7 @@ import type {
 	WantedPlacement,
 } from "../../../src/decoders/enablement/contract.js"
 import { placementKey } from "../../../src/decoders/enablement/contract.js"
+import { createEfficiencyGate } from "../../../src/decoders/enablement/efficiency-gate.js"
 import { DecoderManager } from "../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
 import { FakeSources, deferred, iqCaps } from "../../mocks/rate-fakes.js"
@@ -158,7 +159,12 @@ function composed(sources: FakeSources, fanout: FanoutManager) {
 }
 
 function setup(
-	opts: { composed?: boolean; channelInput?: ChannelInputMode } = {},
+	opts: {
+		composed?: boolean
+		channelInput?: ChannelInputMode
+		/** An efficiency gate with room for everything, so a start passes admission and displaceSecondaries. */
+		gate?: boolean
+	} = {},
 ) {
 	vi.useFakeTimers()
 	const lines: Array<Record<string, unknown>> = []
@@ -193,6 +199,22 @@ function setup(
 		channelInput: opts.channelInput ?? "direct",
 		enablement: {
 			planner,
+			...(opts.gate
+				? {
+						gate: createEfficiencyGate(
+							{ budgetCores: 64, cpuGuardPercent: 90 },
+							{
+								drops: {
+									dropState: () => ({ state: "ok", dropBytesPerSecond: 0 }),
+									monoNow: () => performance.now(),
+									sources: () => ["rtl"],
+									droppedSinceMono: () => false,
+									droppedWithinMs: () => false,
+								},
+							},
+						),
+					}
+				: {}),
 			resolveMode: () => ({ mode: "auto", source: "default" }),
 			isCatalogue: () => true,
 			unavailable: () => false,
@@ -235,7 +257,14 @@ function setup(
 		sampleRateHz: 2_400_000,
 	})
 	const internal = manager as unknown as {
-		decoders: Map<string, { consecutiveFailures: number }>
+		decoders: Map<
+			string,
+			{
+				consecutiveFailures: number
+				currentDelay: number
+				suspension: { reasonCode: string } | null
+			}
+		>
 	}
 	return {
 		manager,
@@ -277,6 +306,20 @@ function setup(
 			fake.released.filter(id => id === channelId).length,
 		logged: (msg: string) => lines.filter(line => line["msg"] === msg).length,
 		failures: (id: string) => internal.decoders.get(id)!.consecutiveFailures,
+		/** What a restart must leave as it found it: the error record, the failure count and the back-off. */
+		record: (id: string) => {
+			const state = internal.decoders.get(id)!
+			const status = manager.getStatus(id)
+			return {
+				lastError: status?.lastError ?? null,
+				failures: state.consecutiveFailures,
+				delay: state.currentDelay,
+				restartCount: status?.restartCount,
+				nextRestartAt: status?.nextRestartAt ?? null,
+			}
+		},
+		suspensionOf: (id: string) =>
+			internal.decoders.get(id)?.suspension?.reasonCode ?? null,
 		/** Destroys the manager, then checks D1 and D3 on every socket handed out. */
 		closeAll: async () => {
 			await manager.destroy()
@@ -372,19 +415,23 @@ describe("a capture-centre move under placements (D2)", () => {
 		for (const id of fresh) expect(r.releases(id)).toBe(1)
 	})
 
-	it("the caps worker reaching them first (still running): one restart of each placement, no crash, as relayed", async () => {
-		// The relay's outcome first: the parent's restart stop is a SIGTERM exit that the relay path already records
-		// as its lastError (no count, no restart); direct input must give exactly the same.
+	it("the caps worker reaching them first (still running): one restart of each placement, no crash, the record of the EOF-first order", async () => {
+		// Relay mode is unchanged: the parent's restart stop is a SIGTERM exit it records as its lastError (no count,
+		// no restart). With direct input the channel had ended under that run, so its stop's exit records nothing,
+		// exactly as when the child exits on EOF first; everything else is as relayed.
 		const relay = await capsFirst("relay")
 		await relay.r.manager.destroy()
+		expect(relay.outcome[0]?.lastError).toContain("SIGTERM")
 		const { r, workerKey, old, outcome, restarting } = await capsFirst("direct")
-		expect(outcome).toEqual(relay.outcome)
+		expect(outcome).toEqual(
+			relay.outcome.map(item => ({ ...item, lastError: null })),
+		)
 		expect(restarting).toEqual(relay.restarting)
 		expect(r.spawns("dec")).toBe(2)
 		expect(r.spawns(workerKey)).toBe(2)
 		expect(r.granted).toHaveLength(4)
 		expect(r.logged(ENDED)).toBe(0)
-		noCrash(r, ["dec", workerKey], ["dec"])
+		noCrash(r, ["dec", workerKey])
 		for (const id of old) expect(r.releases(id)).toBe(0)
 		const fresh = [r.channelOf("dec"), r.channelOf(workerKey)]
 		await r.closeAll()
@@ -413,9 +460,108 @@ describe("a capture-centre move under placements (D2)", () => {
 		expect(r.spawns("a")).toBe(2)
 		expect(r.spawns("b")).toBe(2)
 		expect(r.granted).toHaveLength(4)
-		// a was restarted running (its SIGTERM is recorded as in relay mode); b had already ended on EOF.
-		noCrash(r, ["a", "b"], ["a"])
-		expect(r.manager.getStatus("a")?.lastError?.message).toContain("SIGTERM")
+		// a was restarted running, b had already ended on EOF: neither records anything.
+		noCrash(r, ["a", "b"])
+		await r.closeAll()
+	})
+
+	it.each(["exits on EOF first", "the caps worker first"] as const)(
+		"a primary with an earlier crash on record, %s: lastError, failure count and back-off unchanged by the move",
+		async order => {
+			const r = setup()
+			r.create("dec")
+			r.plan([r.place("dec", PARENT_HZ)])
+			await r.manager.startAll()
+			// An earlier crash of its own: client-gone, then the crash path's restart.
+			r.instance("dec").exit(1)
+			r.fake.clientGone("rtl", r.channelOf("dec"))
+			await r.advance(100)
+			expect(r.spawns("dec")).toBe(2)
+			const before = r.record("dec")
+			expect(before.lastError).toMatchObject({ kind: "exit" })
+			expect(before.failures).toBe(1)
+			// The capture centre moves.
+			r.sources.setCenter("rtl", CENTER + 5_000)
+			r.fake.endGeneration("rtl", [r.channelOf("dec")], "recentered")
+			if (order === "exits on EOF first") r.instance("dec").exit(0)
+			await r.advance(DEBOUNCE)
+			await r.advance(5_000)
+			expect(r.spawns("dec")).toBe(3)
+			expect(r.manager.getStatus("dec")).toMatchObject({ running: true })
+			expect(r.restarting).toEqual(["dec"])
+			expect(r.record("dec")).toEqual(before)
+			await r.closeAll()
+		},
+	)
+})
+
+describe("a channel lost during startup", () => {
+	it("invalidated while the start waits in displaceSecondaries: no spawn, the channel-loss hold, nothing counted", async () => {
+		const r = setup({ gate: true })
+		r.create("dec")
+		r.plan([r.place("dec", PARENT_HZ)])
+		const held = deferred()
+		const displace = vi.spyOn(
+			r.manager as unknown as {
+				displaceSecondaries: () => Promise<{
+					displaced: unknown[]
+					released: boolean
+				}>
+			},
+			"displaceSecondaries",
+		)
+		displace.mockImplementationOnce(async () => {
+			await held.promise
+			return { displaced: [], released: true }
+		})
+		const starting = r.manager.startAll()
+		await vi.waitFor(() => expect(displace).toHaveBeenCalledTimes(1))
+		const channel = r.channelOf("dec")
+		r.fake.endGeneration("rtl", [channel], "recentered")
+		held.resolve()
+		await starting
+		const decoder = r.instance("dec")
+		expect(decoder.refused).toBe(1)
+		expect(decoder.starts).toBe(0)
+		expect(decoder.spawnedWith).toEqual([])
+		expect(r.manager.getStatus("dec")).toMatchObject({
+			running: false,
+			suspended: true,
+		})
+		expect(r.suspensionOf("dec")).toBe("channelizer-unavailable")
+		expect(r.manager.getStatus("dec")?.lastError ?? null).toBeNull()
+		expect(r.failures("dec")).toBe(0)
+		expect(r.restarting).toEqual([])
+		expect(r.fake.sockets.get(channel)?.destroyed).toBe(true)
+		// The channelizer ended that channel itself: the manager releases nothing.
+		expect(r.releases(channel)).toBe(0)
+		await r.closeAll()
+	})
+
+	it("closed while the adapter awaits before its spawn, under placements: no spawn, the hold, the channel released once", async () => {
+		const r = setup()
+		r.create("dec")
+		const gate = deferred()
+		r.instance("dec").beforeSpawn = gate
+		r.plan([r.place("dec", PARENT_HZ)])
+		const starting = r.manager.startAll()
+		await vi.waitFor(() => expect(r.granted).toHaveLength(1))
+		await r.advance(0)
+		const channel = r.channelOf("dec")
+		r.fake.sockets.get(channel)!.destroy()
+		gate.resolve()
+		await starting
+		expect(r.instance("dec").refused).toBe(1)
+		expect(r.spawns("dec")).toBe(0)
+		expect(r.manager.getStatus("dec")).toMatchObject({
+			running: false,
+			suspended: true,
+		})
+		expect(r.suspensionOf("dec")).toBe("channelizer-unavailable")
+		expect(r.manager.getStatus("dec")?.lastError ?? null).toBeNull()
+		expect(r.failures("dec")).toBe(0)
+		expect(r.restarting).toEqual([])
+		expect(r.releases(channel)).toBe(1)
 		await r.closeAll()
 	})
 })

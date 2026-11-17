@@ -182,6 +182,7 @@ import {
 	channelStatsDelta,
 	directInputOf,
 	directStep,
+	isDirectInputLost,
 	type DirectInputDecoder,
 	type DirectPhase,
 } from "./direct-channel-input.js"
@@ -347,6 +348,17 @@ interface DecoderState {
 	/** Direct channel input: its channel socket is the decoder's stdin; absent on the relay and raw paths. */
 	direct?: DirectInputState
 	/**
+	 * Direct input: the decoder exited at its channel's end, so no stop() reached its adapter; the exit starts that
+	 * adapter instance's own stop() (startDirectCleanup), and every later stop, start and replacement joins it. Kept
+	 * until that instance starts again or is replaced.
+	 */
+	directCleanup?: DirectCleanup
+	/**
+	 * Direct input: a requested stop released a channel that had already ended; that run's exit is the channel's
+	 * restart (no lastError, no accounting). Kept from the release until that exit is handled or the next start.
+	 */
+	directChannelStop?: true
+	/**
 	 * Set by the worker for a restart caused by a channel invalidation: the
 	 * next start keeps restartCount, the backoff and lastError (Review Focus 3).
 	 */
@@ -476,6 +488,21 @@ type ChannelInvalidatedListener = (
 	channelIds: string[],
 	cause?: string,
 ) => void
+
+/**
+ * The adapter's own stop() for a direct run that exited at its channel's end, bound to the instance that exited: a
+ * rebuild that replaces the adapter meanwhile never redirects it to the new instance.
+ */
+interface DirectCleanup {
+	readonly decoder: Decoder
+	readonly run: Promise<void>
+	settled: boolean
+	/**
+	 * Its stop() outlived PLACEMENT_STOP_TIMEOUT_MS: the instance never starts again; the next start replaces it
+	 * (replaceFencedDecoder), so a stop() that resumes late acts on the retired instance only.
+	 */
+	fenced: boolean
+}
 
 /** A decoder whose stdin is its channel's socket (direct-channel-input.ts). */
 interface DirectInputState {
@@ -3031,7 +3058,10 @@ export class DecoderManager extends EventEmitter {
 				attempt.invalidated.add(key)
 			}
 		}
-		// Direct decoders learn why their input ended in this same turn, before the claim below takes the channel.
+		// Direct decoders learn why their input ended in this same turn, before the claim below takes the channel. The
+		// match is by (generation, id), which a centre move with the process kept reuses; ChannelizerManager reports a
+		// late `client-gone` or socket error only for an id still in its open table (and its own socket), and grants
+		// the id again only after the old `closed`, so an old channel's terminal event never reaches the new grant.
 		const directEnded: Array<{ state: DecoderState; hold: boolean }> = []
 		for (const state of [...this.decoders.values()]) {
 			const ref = state.direct?.ref
@@ -4587,11 +4617,16 @@ export class DecoderManager extends EventEmitter {
 		const retired = state.decoder
 		retired.removeAllListeners()
 		state.decoder = decoder
+		// Direct input: the retired instance's own stop() already ran or runs (started at its exit); one still running
+		// is joined by the next start, a finished or fenced one ends here with its instance. Never a second stop() on it.
+		const cleanup = state.directCleanup
+		if (cleanup?.decoder === retired && (cleanup.settled || cleanup.fenced))
+			delete state.directCleanup
 		// Run the retired adapter's cleanup (timers, watchers) with its listeners
 		// already detached; stop() is a no-op on an exited process. Not awaited:
 		// the swap commits synchronously so no stop, remove, start or staging can
 		// interleave with it.
-		if (!state.lifecycle)
+		if (!state.lifecycle && cleanup?.decoder !== retired)
 			void retired.stop().catch((err: unknown) => {
 				this.log.warn(
 					{ decoderId: id, err: safeErrorFields(err) },
@@ -5387,15 +5422,24 @@ export class DecoderManager extends EventEmitter {
 			stopRevision: state.stopRevision,
 			timer: null,
 		}
-		if (state.direct && this.directExit(state, deferred)) return
+		if (
+			(state.direct || state.directChannelStop) &&
+			this.directExit(state, deferred)
+		)
+			return
 		this.finishDecoderExit(state, deferred)
 	}
 
 	/**
 	 * What follows from an exit: the classification, error text, crash accounting and restart. A direct decoder's
-	 * may run later, once its channel's fate is known (directExit); every other exit runs it at once.
+	 * may run later, once its channel's fate is known (directExit); every other exit runs it at once. `channelStop`
+	 * (direct input only): the exit of a stop that followed the channel's end, recorded as no failure at all.
 	 */
-	private finishDecoderExit(state: DecoderState, exit: DeferredExit): void {
+	private finishDecoderExit(
+		state: DecoderState,
+		exit: DeferredExit,
+		channelStop = false,
+	): void {
 		const { decoder } = state
 		const { code, signal, now, currentCrash, actor, parent, parentGeneration } =
 			exit
@@ -5418,7 +5462,12 @@ export class DecoderManager extends EventEmitter {
 			(state.lastStartedAt === null ||
 				state.lastError.at.getTime() >= state.lastStartedAt.getTime())
 		const realExit = code !== null || signal !== null
-		if (!state.intentionallyStopped && realExit && !errorThisRun)
+		if (
+			!state.intentionallyStopped &&
+			!channelStop &&
+			realExit &&
+			!errorThisRun
+		)
 			state.lastError = createDecoderExitError(code, signal)
 		// Probes are never restarted: their input is single-use and the probe
 		// pool owns their lifecycle (spec § 6.5).
@@ -5432,7 +5481,7 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		// Don't restart if intentionally stopped
-		if (state.intentionallyStopped || !currentCrash) {
+		if (state.intentionallyStopped || !currentCrash || channelStop) {
 			this.log.debug(
 				{ decoderId: decoder.id },
 				"Decoder stopped intentionally, not restarting",
@@ -5917,6 +5966,7 @@ export class DecoderManager extends EventEmitter {
 				decoder: direct,
 				phase: granted.next,
 				inputEnded: null,
+				// Every grant counts from zero, also one that reuses an earlier grant's id.
 				countedSamples: 0,
 			}
 			this.subscribeChannelStats(provider)
@@ -6133,11 +6183,11 @@ export class DecoderManager extends EventEmitter {
 				this.clearDeferredExit(d)
 				return result.action === "expected-hold" ? "hold" : "restart"
 			case "drop": {
-				// The claim that follows takes the ended channel; nothing is left to release. A client-gone confirms
-				// the crash the exit most likely was; any other end was the channel's, and nothing is recorded.
+				// The claim that follows takes the ended channel; nothing is left to release. The table's `record`:
+				// a client-gone confirms the crash the exit most likely was; any other end was the channel's.
 				const exit = d.pending
 				this.clearDeferredExit(d)
-				if (exit && cause === "client-gone")
+				if (exit && result.record === true)
 					this.recordAbandonedExit(state, exit)
 				this.forgetDirect(state)
 				return null
@@ -6156,6 +6206,9 @@ export class DecoderManager extends EventEmitter {
 	private directExpectedExit(state: DecoderState, hold: boolean): void {
 		if (state.direct?.inputEnded !== "channel") return
 		if (state.decoder.getStatus().running) return // the exit is still to come
+		// No stop() reached the adapter (the relay path keeps the child alive until the worker's stop): its per-run
+		// state ends now, on this instance (startDirectCleanup).
+		this.startDirectCleanup(state)
 		this.log.info(
 			{ decoderId: state.config.id, reasonCode: "channel-ended" },
 			"Decoder input ended with its channel; restarting it",
@@ -6175,7 +6228,28 @@ export class DecoderManager extends EventEmitter {
 	/** handleDecoderExit's direct branch: true when it took the exit (handled now, or deferred). */
 	private directExit(state: DecoderState, exit: DeferredExit): boolean {
 		const d = state.direct
-		if (!d) return false
+		const channelStop = state.directChannelStop === true
+		delete state.directChannelStop
+		if (!d) {
+			if (!channelStop) return false
+			// The stop released the channel (and the direct state with it); this is that run's exit.
+			const stopped = directStep(
+				{ phase: "stopping" },
+				{
+					type: "exited",
+					realExit: exit.code !== null || exit.signal !== null,
+					intentional: state.intentionallyStopped || !exit.currentCrash,
+					suspended: state.suspension !== null,
+					holdsChannel: false,
+					capsKnown: this.capsKnown(state),
+					nowMs: exit.exitAtMs,
+					channelEnded: true,
+				},
+			)
+			if (stopped.action !== "expected-stop") return false
+			this.finishDecoderExit(state, exit, true)
+			return true
+		}
 		const result = directStep(d, {
 			type: "exited",
 			realExit: exit.code !== null || exit.signal !== null,
@@ -6230,7 +6304,8 @@ export class DecoderManager extends EventEmitter {
 					Math.max(1, Math.ceil(exit.exitAtMs + CHANNEL_FATE_MS - now)),
 				)
 			else if (result.action === "crash") this.resolveDeferredCrash(state, d)
-			else if (result.action === "drop") this.dropDeferredExit(state, d, true)
+			else if (result.action === "drop")
+				this.dropDeferredExit(state, d, result.record === true)
 		}, delayMs)
 	}
 
@@ -6294,7 +6369,8 @@ export class DecoderManager extends EventEmitter {
 		if (!d) return
 		const result = directStep(d, { type: "stop-requested" })
 		d.phase = result.next
-		if (result.action === "cancel") this.dropDeferredExit(state, d, true)
+		if (result.action === "cancel")
+			this.dropDeferredExit(state, d, result.record === true)
 	}
 
 	/**
@@ -6306,12 +6382,16 @@ export class DecoderManager extends EventEmitter {
 		if (!d) return
 		const result = directStep(d, { type: "stop-requested" })
 		d.phase = result.next
-		if (result.action === "cancel") this.dropDeferredExit(state, d, true)
+		if (result.action === "cancel")
+			this.dropDeferredExit(state, d, result.record === true)
 		else if (
 			result.action === "release-then-signal" ||
 			result.action === "release"
 		) {
 			const wired = result.action === "release"
+			// The channel already ended under this run: the exit this stop causes is that end's restart, whichever
+			// came first, so it outlives the release below (directExit, expected-stop).
+			if (!wired && d.inputEnded === "channel") state.directChannelStop = true
 			this.releaseChannelOf(state)
 			if (wired) state.decoder.detachInput()
 		}
@@ -6326,17 +6406,42 @@ export class DecoderManager extends EventEmitter {
 		state.decoder.detachInput()
 	}
 
-	/** Just before the spawn: a socket that closed meanwhile is a channel lost before start (no spawn). */
+	/**
+	 * Just before the decoder's start: a socket that closed meanwhile is a channel lost before start (no spawn). The
+	 * decoder checks the same row again at its real spawn (directLostAtSpawn), for a channel that ends after this.
+	 */
 	private directBeforeStart(state: DecoderState): WireOutcome | null {
 		const d = state.direct
 		if (!d) return null
 		const result = directStep(d, {
 			type: "start",
+			acquired: true,
 			socketDestroyed: d.ref.stream.destroyed,
 		})
 		d.phase = result.next
 		if (result.action !== "lost-before-start") return null
-		if (state.channel === d.ref) this.dropChannel(state, true)
+		return this.directLostBeforeStart(state)
+	}
+
+	/**
+	 * The decoder refused to spawn: the direct channel it was granted closed while its start awaited (the channel
+	 * ended, or its socket closed). The same hold as a socket found closed before the start; no spawn error.
+	 */
+	private directLostAtSpawn(state: DecoderState): WireOutcome {
+		const d = state.direct
+		if (d)
+			d.phase = directStep(d, {
+				type: "start",
+				acquired: true,
+				socketDestroyed: true,
+			}).next
+		return this.directLostBeforeStart(state)
+	}
+
+	/** lost-before-start: the channel is dropped if still held and the start ends as the channel-loss hold. */
+	private directLostBeforeStart(state: DecoderState): WireOutcome {
+		const d = state.direct
+		if (d && state.channel === d.ref) this.dropChannel(state, true)
 		this.forgetDirect(state)
 		return {
 			wired: false,
@@ -6345,6 +6450,102 @@ export class DecoderManager extends EventEmitter {
 			detail: "channel closed before the decoder started",
 			race: true,
 		}
+	}
+
+	/**
+	 * The adapter's own stop() on a direct decoder that exited at its channel's end, once, on the instance that exited:
+	 * a requested stop would have run it, and an adapter with per-run state (timers, open calls) must not start a new
+	 * run on top of the old one. It runs after the exit handler's turn (BaseDecoder has dropped its process by then, so
+	 * nothing is signalled); a throw is logged. Stops, starts and replacements join it (joinDirectCleanup).
+	 */
+	private startDirectCleanup(state: DecoderState): void {
+		const decoder = state.decoder
+		if (state.directCleanup?.decoder === decoder) return
+		const run = Promise.resolve()
+			.then(() => decoder.stop())
+			.catch((err: unknown) => {
+				this.log.warn(
+					{ err: safeErrorFields(err), decoderId: state.config.id },
+					"Decoder cleanup after its channel ended failed; continuing",
+				)
+			})
+			.finally(() => {
+				// Kept until that instance starts again or is replaced: a later stop of the exited run is this one.
+				cleanup.settled = true
+			})
+		const cleanup: DirectCleanup = {
+			decoder,
+			run,
+			settled: false,
+			fenced: false,
+		}
+		state.directCleanup = cleanup
+	}
+
+	/**
+	 * Waits for a cleanup's stop(), at most PLACEMENT_STOP_TIMEOUT_MS (the placement stop's deadline) from this call.
+	 * Joining counts as having stopped that exited run. At the bound the instance is fenced, with one warning, and the
+	 * caller goes on; a fenced cleanup is not waited for again.
+	 */
+	private async joinDirectCleanup(
+		state: DecoderState,
+		cleanup: DirectCleanup,
+	): Promise<void> {
+		if (cleanup.settled || cleanup.fenced) return
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const ended = await Promise.race([
+			cleanup.run.then(() => true),
+			new Promise<false>(resolve => {
+				timer = setTimeout(() => resolve(false), PLACEMENT_STOP_TIMEOUT_MS)
+			}),
+		])
+		clearTimeout(timer)
+		if (ended || cleanup.settled || cleanup.fenced) return
+		cleanup.fenced = true
+		this.log.warn(
+			{ decoderId: state.config.id, reasonCode: "cleanup-timeout" },
+			"Decoder cleanup after its channel ended did not finish in time; its next start uses a new instance",
+		)
+	}
+
+	/**
+	 * A fenced adapter never starts again: a new instance from the registry with the same config takes its place, as a
+	 * staged-options rebuild does (failure accounting kept). The retired one keeps no listener, so a stop() that
+	 * resumes late reaches nothing the manager owns.
+	 */
+	private replaceFencedDecoder(state: DecoderState): void {
+		const { config } = state
+		const decoder = this.registry.create(
+			this.config.enablement
+				? { ...config, options: { ...config.options } }
+				: config,
+			this.log,
+		)
+		const declared = decoder.getRateRequirements?.()
+		if (declared !== undefined) {
+			try {
+				validateDeclaredRateRequirements(
+					declared,
+					`decoders.${config.id}.rateRequirements`,
+				)
+			} catch (err) {
+				decoder.removeAllListeners()
+				throw err
+			}
+		}
+		this.log.info(
+			{ decoderId: config.id, type: config.type },
+			"Replacing a decoder instance whose cleanup did not finish",
+		)
+		if (state.branchId !== null || state.channel !== null)
+			this.detachBranch(state)
+		state.decoder.removeAllListeners()
+		state.decoder = decoder
+		delete state.directCleanup
+		this.setupDecoderEventHandlers(state)
+		this.installParentLog(state)
+		this.refreshRatePlan(state)
+		if (state.owner !== "placement") this.emit("decoder:created", config.id)
 	}
 
 	/** The spawn failed after the hand-over: Node releases the channel, so a later `client-gone` finds none. */
@@ -6424,6 +6625,11 @@ export class DecoderManager extends EventEmitter {
 			typeof stats.generation !== "number"
 		)
 			return
+		// A centre move that keeps the process reopens the same id in the same generation, so this match alone cannot
+		// tell the old channel from the new one. ChannelizerManager's order does: it lists a stats entry only for an id
+		// in its open table (the move empties it), and it grants the id again only after the old `closed` lifted the
+		// close fence, on one FIFO event stream; so every stats entry and terminal event of the old channel is consumed
+		// before the new grant, which starts counting from zero (countedSamples).
 		for (const state of this.decoders.values()) {
 			const d = state.direct
 			if (
@@ -6437,6 +6643,7 @@ export class DecoderManager extends EventEmitter {
 			const delta = channelStatsDelta(
 				d.countedSamples,
 				stats.outputSamples,
+				stats.droppedSamples,
 				stats.bytesPerSample,
 			)
 			d.countedSamples = delta.countedSamples
@@ -7864,6 +8071,19 @@ export class DecoderManager extends EventEmitter {
 	): Promise<void> {
 		// Every requested stop, suspend, restart and removal passes here before any signal.
 		this.releaseDirectBeforeSignal(state)
+		const cleanup = state.directCleanup
+		if (cleanup !== undefined) {
+			// An exited run's own stop() is in flight: this stop joins it (bounded) and never calls it again.
+			await this.joinDirectCleanup(state, cleanup)
+			// Without the actor, that stop() is this whole stop: nothing is left to signal. The actor signals nothing
+			// either while the decoder is not running.
+			if (
+				cleanup.decoder === state.decoder &&
+				!state.decoder.getStatus().running &&
+				(!this.config.enablement || !state.placement)
+			)
+				return
+		}
 		if (!this.config.enablement || !state.placement) return state.decoder.stop()
 		const actor = this.placementLifecycle(state)
 		const stopping = actor.request(restart ? "running" : "stopped", restart)
@@ -8002,7 +8222,15 @@ export class DecoderManager extends EventEmitter {
 		state: DecoderState,
 		canStart: () => boolean = () => true,
 	): Promise<WireOutcome> {
+		// Direct input: an adapter whose child exited at its channel's end is cleaned up before any instance runs again;
+		// one whose cleanup outlived the bound is replaced by a new instance.
+		if (state.directCleanup !== undefined)
+			await this.joinDirectCleanup(state, state.directCleanup)
 		if (state.stopping || !canStart()) return { wired: false, superseded: true }
+		const cleanup = state.directCleanup
+		if (cleanup?.fenced && cleanup.decoder === state.decoder)
+			this.replaceFencedDecoder(state)
+		else if (cleanup?.settled || cleanup?.fenced) delete state.directCleanup
 		const gate = this.config.enablement?.gate
 		const generation = state.rateGeneration
 		// YAML placements keep today's behaviour: admitted without a verdict.
@@ -8100,6 +8328,8 @@ export class DecoderManager extends EventEmitter {
 				this.restoreDisplaced(displaced)
 				return lost
 			}
+			// A marker of an earlier run's stop never classifies this run's exit.
+			delete state.directChannelStop
 			state.processStartPending = true
 			try {
 				await state.decoder.start()
@@ -8119,6 +8349,8 @@ export class DecoderManager extends EventEmitter {
 			if (state.admission?.admit) delete state.admission
 			delete state.admittedAtMs
 			this.restoreDisplaced(displaced)
+			// The decoder found its direct channel closed at the spawn and did not spawn: a hold, never a spawn error.
+			if (isDirectInputLost(error)) return this.directLostAtSpawn(state)
 			this.directSpawnFailed(state)
 			throw error
 		}

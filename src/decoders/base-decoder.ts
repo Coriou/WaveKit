@@ -37,6 +37,7 @@ import { DecoderSpawnError } from "../utils/errors.js"
 import { createComponentLogger, LogRateLimiter } from "../utils/logger.js"
 import { safeErrorFields } from "./safe-error-fields.js"
 import type { DirectChannelSocket } from "../core/channelizer/types.js"
+import { directInputLost, directStep } from "./direct-channel-input.js"
 
 /** Timeout in ms to wait for graceful shutdown before SIGKILL */
 const GRACEFUL_STOP_TIMEOUT = 5000
@@ -92,7 +93,9 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	protected inputStream: Readable | null = null
 	/**
 	 * A channel socket the next spawn takes as stdin (direct channel input). Node never reads it: no `data`
-	 * listener, pipe, read() or resume(); it destroys its own copy as soon as `spawn` has returned.
+	 * listener, pipe, read() or resume(); it destroys its own copy as soon as `spawn` has returned. It is also the
+	 * grant's identity: a detach destroys the socket but keeps it here, so the start it was granted for refuses to
+	 * spawn without it (lost-before-start) instead of spawning with an unfed pipe. Only a new input or a start clears it.
 	 */
 	private directInput: DirectChannelSocket | null = null
 	private readonly trackInputBytes = (chunk: Buffer): void => {
@@ -395,14 +398,23 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	}
 
 	/**
-	 * Takes the held socket for this spawn. A socket that closed meanwhile is dropped (the child starts with no input,
-	 * as after a channel lost before start); one that has read a byte, or is not paused, is refused: those bytes
-	 * would never reach the child, and only a programming error gets there.
+	 * Takes the held socket for this spawn. A socket that closed since the grant (the channel ended or was released
+	 * while startup awaited) is the table's lost-before-start: no spawn, and a WaveKitError with DIRECT_INPUT_LOST
+	 * that the manager turns into the channel-loss hold. One that has read a byte, or is not paused, is refused: those
+	 * bytes would never reach the child, and only a programming error gets there.
 	 */
 	private takeDirectInput(command: string): DirectChannelSocket | null {
 		const direct = this.directInput
 		this.directInput = null
-		if (!direct || direct.destroyed) return null
+		if (!direct) return null
+		const verdict = directStep(
+			{ phase: "wired" },
+			{ type: "start", acquired: true, socketDestroyed: direct.destroyed },
+		)
+		if (verdict.action === "lost-before-start") {
+			this.logger.debug("Direct channel input closed before the spawn")
+			throw directInputLost(this.id)
+		}
 		if (
 			direct.bytesRead !== 0 ||
 			!direct.isPaused() ||
@@ -426,6 +438,8 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 */
 	attachInput(stream: Readable): void {
 		this.detachInput()
+		// Another input replaces a direct grant this decoder no longer starts with.
+		this.directInput = null
 		this.inputStream = stream
 
 		// Track bytes received
@@ -444,11 +458,9 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 * Detaches the current input stream.
 	 */
 	detachInput(): void {
-		// A held socket no spawn took is abandoned: Node's copy is the only one, so it closes here.
-		if (this.directInput) {
-			this.directInput.destroy()
-			this.directInput = null
-		}
+		// A held socket no spawn took is abandoned: Node's copy is the only one, so it closes here. The closed socket
+		// stays held as the grant's identity (takeDirectInput).
+		this.directInput?.destroy()
 		if (this.inputStream) {
 			// Unpipe from process stdin if connected
 			if (this.process?.stdin) {

@@ -1236,8 +1236,9 @@ scanner reads a tap's samples in Node, and its probe pool fences a probe's chann
 and are not affected.
 
 `bytesIn` of a direct decoder comes from `wavekit-chan`'s `stats` line, one every 5 s, which lists
-open channels only: a run shorter than one period reports 0 and the last 0 to 5 s of a run are
-not counted. Nothing decides on this field; the status API only shows it. In `relay` mode nothing
+open channels only: it counts the samples queued for the decoder (produced, less those a full queue
+dropped), including samples still in the queue at the line; a run shorter than one period reports 0
+and the last 0 to 5 s of a run are not counted. Nothing decides on this field; the status API only shows it. In `relay` mode nothing
 listens for these counters, so the channelizer builds none.
 
 Since Node holds no copy, a decoder exit no longer says why its input ended, and the channel's

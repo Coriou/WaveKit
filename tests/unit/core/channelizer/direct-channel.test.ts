@@ -294,11 +294,11 @@ describe("channel-stats", () => {
 		await manager.requestChannel("s", "b", request("cu8"), caps)
 		const stats: ChannelStats[] = []
 		manager.on("channel-stats", (entry: ChannelStats) => stats.push(entry))
-		const entry = (id: string, outputSamples: number) => ({
+		const entry = (id: string, outputSamples: number, droppedSamples = 0) => ({
 			id,
 			outputSamples,
 			queueHighWaterBytes: 0,
-			droppedSamples: 0,
+			droppedSamples,
 			saturatedSamples: 0,
 		})
 		proc.emit("event", {
@@ -306,14 +306,20 @@ describe("channel-stats", () => {
 			type: "stats",
 			generation: 1,
 			inputSamples: 1000,
-			channels: [entry("a-g1", 480), entry("b-g1", 96), entry("gone-g1", 7)],
+			channels: [
+				entry("a-g1", 480, 470),
+				entry("b-g1", 96),
+				entry("gone-g1", 7),
+			],
 		})
+		// Both counters travel: the consumer credits what was queued (produced less dropped).
 		expect(stats).toEqual([
 			{
 				sourceId: "s",
 				generation: 1,
 				channelId: "a-g1",
 				outputSamples: 480,
+				droppedSamples: 470,
 				bytesPerSample: 8,
 			},
 			{
@@ -321,9 +327,20 @@ describe("channel-stats", () => {
 				generation: 1,
 				channelId: "b-g1",
 				outputSamples: 96,
+				droppedSamples: 0,
 				bytesPerSample: 2,
 			},
 		])
+		// More dropped than produced is not a counter: that entry is skipped, the others still go.
+		stats.length = 0
+		proc.emit("event", {
+			v: 1,
+			type: "stats",
+			generation: 1,
+			inputSamples: 2000,
+			channels: [entry("a-g1", 500, 501), entry("b-g1", 100)],
+		})
+		expect(stats.map(item => item.channelId)).toEqual(["b-g1"])
 	})
 
 	it("emits nothing with no listener and survives a throwing one", async () => {
@@ -421,6 +438,7 @@ describe("settlement adapter", () => {
 			generation: 1,
 			channelId: "d-g1",
 			outputSamples: 5,
+			droppedSamples: 0,
 			bytesPerSample: 8,
 		}
 		underlying.emit("channel-stats", entry)
@@ -496,6 +514,7 @@ describe("settlement adapter", () => {
 				generation: 1,
 				channelId: "a-g1",
 				outputSamples: 1,
+				droppedSamples: 0,
 				bytesPerSample: 8,
 			},
 		])

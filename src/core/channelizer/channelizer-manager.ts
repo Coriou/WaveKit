@@ -1892,7 +1892,8 @@ export class ChannelizerManager
 
 	/**
 	 * `channel-stats` per open channel of a `stats` line. The line was validated with the event schema; this only
-	 * checks the counter and that the id is one of this generation's open channels, whose format sets the units.
+	 * checks the counters and that the id is one of this generation's open channels, whose format sets the units. An
+	 * entry for an id no longer open (a centre move closed it, the same id may be granted again) is never forwarded.
 	 */
 	private emitChannelStats(
 		s: SourceChannelizer,
@@ -1904,7 +1905,10 @@ export class ChannelizerManager
 			if (
 				!ch ||
 				!Number.isSafeInteger(entry.outputSamples) ||
-				entry.outputSamples < 0
+				entry.outputSamples < 0 ||
+				!Number.isSafeInteger(entry.droppedSamples) ||
+				entry.droppedSamples < 0 ||
+				entry.droppedSamples > entry.outputSamples
 			)
 				continue
 			const stats: ChannelStats = {
@@ -1912,6 +1916,7 @@ export class ChannelizerManager
 				generation: s.generation,
 				channelId: entry.id,
 				outputSamples: entry.outputSamples,
+				droppedSamples: entry.droppedSamples,
 				bytesPerSample: SAMPLE_BYTES[ch.format],
 			}
 			try {

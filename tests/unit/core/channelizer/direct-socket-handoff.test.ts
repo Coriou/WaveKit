@@ -11,7 +11,7 @@
  */
 import { spawn } from "node:child_process"
 import { EventEmitter, once } from "node:events"
-import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import {
 	createConnection,
 	createServer,
@@ -21,7 +21,7 @@ import {
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
 import pino from "pino"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	ChannelizerConfigSchema,
 	type SourceCaps,
@@ -37,6 +37,7 @@ import type {
 } from "../../../../src/core/channelizer/types.js"
 import { FanoutManager } from "../../../../src/core/fanout-manager.js"
 import { BaseDecoder } from "../../../../src/decoders/base-decoder.js"
+import { isDirectInputLost } from "../../../../src/decoders/direct-channel-input.js"
 import type {
 	DecoderCaps,
 	DecoderOutput,
@@ -241,6 +242,66 @@ describe.each([
 			written.equals(Buffer.concat([pattern(0, MIB), pattern(MIB, MIB)])),
 		).toBe(true)
 		expect(decoder.getStatus().stats.bytesIn).toBe(0)
+	}, 20_000)
+})
+
+describe("a grant whose socket closed before the spawn", () => {
+	async function grantedSocket() {
+		const server = await channelServer()
+		const { manager } = scriptedManager(server.path, server.dir)
+		const grant = await directGrant(manager)
+		if (!grant.ok || !("socket" in grant))
+			throw new Error("expected a direct grant")
+		await server.accepted()
+		return { server, socket: grant.socket }
+	}
+
+	it.each([
+		["detached (the channel ended and the manager took it)", "detach"],
+		["closed by itself", "destroy"],
+	] as const)(
+		"%s: the start does not spawn, with the lost-input error and no spawn error",
+		async (_name, how) => {
+			const { server, socket } = await grantedSocket()
+			const file = join(server.dir, "never.bin")
+			const decoder = new ShellDecoder('cat > "$0"', file)
+			cleanup.push(() => decoder.stop())
+			decoder.attachDirectInput(socket)
+			if (how === "detach") decoder.detachInput()
+			else socket.destroy()
+			expect(socket.destroyed).toBe(true)
+			const started = vi.fn()
+			decoder.on("started", started)
+			const outcome = await decoder.start().then(
+				() => null,
+				(err: unknown) => err,
+			)
+			expect(isDirectInputLost(outcome)).toBe(true)
+			expect(outcome).not.toBeInstanceOf(DecoderSpawnError)
+			expect(started).not.toHaveBeenCalled()
+			expect(decoder.getStatus()).toMatchObject({ running: false })
+			expect(decoder.getStatus().stats.errors).toBe(0)
+			// The child's shell creates the file at once: there was no child.
+			await turns(5)
+			expect(existsSync(file)).toBe(false)
+		},
+		20_000,
+	)
+
+	it("a new input after a lost grant clears it: the next start spawns with that input", async () => {
+		const { server, socket } = await grantedSocket()
+		const file = join(server.dir, "relay.bin")
+		const decoder = new ShellDecoder('cat > "$0"', file)
+		cleanup.push(() => decoder.stop())
+		decoder.attachDirectInput(socket)
+		decoder.detachInput()
+		const relay = new PassThrough()
+		decoder.attachInput(relay)
+		const exited = once(decoder, "exit")
+		await decoder.start()
+		relay.end(pattern(0, 4096))
+		await exited
+		expect(readFileSync(file).equals(pattern(0, 4096))).toBe(true)
 	}, 20_000)
 })
 

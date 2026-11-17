@@ -66,14 +66,43 @@ describe("direct channel input lifecycle table", () => {
 
 	it("wired, decoder start with the socket open: running, spawn with the socket as fd 0", () => {
 		expect(
-			directStep(at("wired"), { type: "start", socketDestroyed: false }),
+			directStep(at("wired"), {
+				type: "start",
+				acquired: true,
+				socketDestroyed: false,
+			}),
+		).toEqual({ next: "running", action: "spawn" })
+		// At the real spawn the manager has already moved it to running.
+		expect(
+			directStep(at("running"), {
+				type: "start",
+				acquired: true,
+				socketDestroyed: false,
+			}),
 		).toEqual({ next: "running", action: "spawn" })
 	})
 
-	it("wired, decoder start with the socket destroyed: unwired, channel lost before start, no spawn", () => {
-		expect(
-			directStep(at("wired"), { type: "start", socketDestroyed: true }),
-		).toEqual({ next: "unwired", action: "lost-before-start" })
+	it("a start granted a direct channel whose socket is missing or closed, before the start or at the spawn: unwired, channel lost before start, no spawn", () => {
+		// The grant outlives whatever ended the channel since: a terminal event (unwired or ending) or a close.
+		for (const phase of ["wired", "running", "ending", "unwired"] as const)
+			expect(
+				directStep(at(phase), {
+					type: "start",
+					acquired: true,
+					socketDestroyed: true,
+				}),
+			).toEqual({ next: "unwired", action: "lost-before-start" })
+	})
+
+	it("a start with no direct grant is today's", () => {
+		for (const socketDestroyed of [false, true])
+			expect(
+				directStep(at("unwired"), {
+					type: "start",
+					acquired: false,
+					socketDestroyed,
+				}),
+			).toEqual({ next: "unwired", action: "today" })
 	})
 
 	it("wired, terminal event: unwired, today's handling of a channel lost before start", () => {
@@ -181,11 +210,34 @@ describe("direct channel input lifecycle table", () => {
 		])
 			expect(directStep(at("running"), exited(over)).action).toBe("today")
 		expect(directStep(at("stopping"), exited()).action).toBe("today")
+		expect(
+			directStep(at("stopping"), exited({ channelEnded: false })).action,
+		).toBe("today")
 		// A terminal event already took the channel (client-gone): the decoder ended by itself.
 		expect(directStep(at("running"), exited({ holdsChannel: false }))).toEqual({
 			next: "unwired",
 			action: "today",
 		})
+	})
+
+	it("stopping, the exit of a stop that followed the channel's end: no lastError, no accounting, no restart of its own", () => {
+		// Both orders leave the same record: the caps worker's stop came first, the channel had ended under the run.
+		for (const over of [
+			{},
+			{ intentional: true },
+			{ holdsChannel: false },
+			{ capsKnown: false },
+		])
+			expect(
+				directStep(at("stopping"), exited({ channelEnded: true, ...over })),
+			).toEqual({ next: "unwired", action: "expected-stop" })
+		// A failed restart reports no code or signal: today's.
+		expect(
+			directStep(
+				at("stopping"),
+				exited({ channelEnded: true, realExit: false }),
+			).action,
+		).toBe("today")
 	})
 
 	it("exit-pending, closed client-gone with the guard holding: the crash path", () => {
@@ -222,29 +274,31 @@ describe("direct channel input lifecycle table", () => {
 		).toEqual({ next: "unwired", action: "crash" })
 	})
 
-	it("exit-pending, stop, remove, suspend or destroy: cancel the timer, no restart, release", () => {
+	it("exit-pending, stop, remove, suspend or destroy: cancel the timer, no restart, release, record the probable crash", () => {
 		expect(
 			directStep(at("exit-pending", 0), { type: "stop-requested" }),
-		).toEqual({ next: "unwired", action: "cancel" })
+		).toEqual({ next: "unwired", action: "cancel", record: true })
 	})
 
-	it("exit-pending, the guard fails (replaced or re-evaluated meanwhile): drop the deferred tail", () => {
+	it("exit-pending, the guard fails (replaced or re-evaluated meanwhile): drop the deferred tail, recorded unless the channel's end was seen", () => {
+		// Both triggers decide the same way: the crash is recorded unless a terminal event other than client-gone
+		// shows the exit was the channel's EOF.
 		expect(
 			directStep(
 				at("exit-pending", 0),
 				terminal("client-gone", { current: false }),
 			),
-		).toEqual({ next: "unwired", action: "drop" })
+		).toEqual({ next: "unwired", action: "drop", record: true })
 		expect(
 			directStep(at("exit-pending", 0), terminal("other", { current: false })),
-		).toEqual({ next: "unwired", action: "drop" })
+		).toEqual({ next: "unwired", action: "drop", record: false })
 		expect(
 			directStep(at("exit-pending", 0), {
 				type: "fate-due",
 				nowMs: 5000,
 				current: false,
 			}),
-		).toEqual({ next: "unwired", action: "drop" })
+		).toEqual({ next: "unwired", action: "drop", record: true })
 	})
 
 	it("after the fallback fired, a terminal event is ignored", () => {
@@ -279,49 +333,88 @@ describe("direct channel input lifecycle table", () => {
 
 describe("bytesIn from channel-stats", () => {
 	it("adds the positive delta in bytes of the channel's format", () => {
-		expect(channelStatsDelta(0, 48_000, 8)).toEqual({
+		expect(channelStatsDelta(0, 48_000, 0, 8)).toEqual({
 			bytes: 384_000,
 			countedSamples: 48_000,
 		})
-		expect(channelStatsDelta(48_000, 96_000, 2)).toEqual({
+		expect(channelStatsDelta(48_000, 96_000, 0, 2)).toEqual({
 			bytes: 96_000,
 			countedSamples: 96_000,
 		})
 	})
 
+	it("counts what was queued for the decoder: produced less dropped (an overflow of 480 produced, 470 dropped credits 10)", () => {
+		expect(channelStatsDelta(0, 480, 470, 8)).toEqual({
+			bytes: 80,
+			countedSamples: 10,
+		})
+		// Later lines: both counters cumulative; a line where only drops grew adds nothing.
+		expect(channelStatsDelta(10, 960, 950, 8).bytes).toBe(0)
+		expect(channelStatsDelta(10, 1000, 950, 8)).toEqual({
+			bytes: 320,
+			countedSamples: 50,
+		})
+	})
+
 	it("never goes backwards and refuses counters that are not whole samples", () => {
-		expect(channelStatsDelta(100, 40, 8)).toEqual({
+		expect(channelStatsDelta(100, 40, 0, 8)).toEqual({
 			bytes: 0,
 			countedSamples: 100,
 		})
-		expect(channelStatsDelta(100, 100, 8).bytes).toBe(0)
-		for (const bad of [Number.NaN, 1.5, -1, Number.POSITIVE_INFINITY])
-			expect(channelStatsDelta(0, bad, 8).bytes).toBe(0)
-		expect(channelStatsDelta(0, 10, 0).bytes).toBe(0)
+		expect(channelStatsDelta(100, 100, 0, 8).bytes).toBe(0)
+		for (const bad of [Number.NaN, 1.5, -1, Number.POSITIVE_INFINITY]) {
+			expect(channelStatsDelta(0, bad, 0, 8).bytes).toBe(0)
+			expect(channelStatsDelta(0, 10, bad, 8).bytes).toBe(0)
+		}
+		expect(channelStatsDelta(0, 10, 0, 0).bytes).toBe(0)
+		// More dropped than produced is no count at all.
+		expect(channelStatsDelta(0, 10, 11, 8).bytes).toBe(0)
 	})
 
 	it("a run shorter than one stats period reports 0", () => {
 		// No `stats` line listed the channel before it closed: nothing was counted.
-		expect(channelStatsDelta(0, 0, 8)).toEqual({ bytes: 0, countedSamples: 0 })
+		expect(channelStatsDelta(0, 0, 0, 8)).toEqual({
+			bytes: 0,
+			countedSamples: 0,
+		})
 	})
 
-	// Feature: direct channel input, Property 1: bytesIn is monotone and equals the largest count seen
-	it("the counted total is the largest count seen times the sample size, whatever the order", () => {
+	// Feature: direct channel input, Property 1: bytesIn is monotone and equals the largest queued count seen
+	it("the counted total is the largest queued count seen times the sample size, whatever the order", () => {
 		fc.assert(
 			fc.property(
-				fc.array(fc.nat({ max: 1_000_000_000 }), { maxLength: 50 }),
+				fc.array(
+					fc
+						.tuple(
+							fc.nat({ max: 1_000_000_000 }),
+							fc.nat({ max: 1_000_000_000 }),
+						)
+						.map(([queued, dropped]) => ({
+							output: queued + dropped,
+							dropped,
+						})),
+					{ maxLength: 50 },
+				),
 				fc.constantFrom(2, 8),
-				(counts, size) => {
+				(lines, size) => {
 					let counted = 0
 					let total = 0
-					for (const count of counts) {
-						const step = channelStatsDelta(counted, count, size)
+					for (const line of lines) {
+						const step = channelStatsDelta(
+							counted,
+							line.output,
+							line.dropped,
+							size,
+						)
 						expect(step.bytes).toBeGreaterThanOrEqual(0)
 						expect(step.countedSamples).toBeGreaterThanOrEqual(counted)
 						counted = step.countedSamples
 						total += step.bytes
 					}
-					expect(total).toBe(Math.max(0, ...counts) * size)
+					expect(total).toBe(
+						Math.max(0, ...lines.map(line => line.output - line.dropped)) *
+							size,
+					)
 				},
 			),
 			{ numRuns: 200 },

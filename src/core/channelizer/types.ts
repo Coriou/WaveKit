@@ -96,14 +96,16 @@ export type DirectChannelRequestResult =
 	| DirectChannelGranted
 
 /**
- * One open channel of one `stats` line (every 5 s, open channels only): what the channel has written so far.
- * `bytesPerSample` is the size of one output sample of its format (cu8 2, cf32 8).
+ * One open channel of one `stats` line (every 5 s, open channels only), both counters cumulative: `outputSamples` the
+ * DSP produced for the channel, `droppedSamples` of those its full queue refused, so the difference is what was queued
+ * for the reader. `bytesPerSample` is the size of one output sample of its format (cu8 2, cf32 8).
  */
 export interface ChannelStats {
 	sourceId: string
 	generation: number
 	channelId: string
 	outputSamples: number
+	droppedSamples: number
 	bytesPerSample: number
 }
 

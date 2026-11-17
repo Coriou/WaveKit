@@ -15,11 +15,12 @@ import type {
 	DirectChannelRequestResult,
 	DirectChannelSocket,
 } from "../../../src/core/channelizer/types.js"
+import { directInputLost } from "../../../src/decoders/direct-channel-input.js"
 import type {
 	DecoderChannelRequestResult,
 	DecoderStatus,
 } from "../../../src/decoders/types.js"
-import { RateDecoder } from "../../mocks/rate-fakes.js"
+import { RateDecoder, type deferred } from "../../mocks/rate-fakes.js"
 
 export const CENTER = 162e6
 
@@ -145,6 +146,7 @@ export class DirectProvider extends EventEmitter implements ChannelProvider {
 			sourceId: "rtl",
 			generation: this.generation,
 			outputSamples: 0,
+			droppedSamples: 0,
 			bytesPerSample: 8,
 			...entry,
 		}
@@ -153,8 +155,10 @@ export class DirectProvider extends EventEmitter implements ChannelProvider {
 }
 
 /**
- * Mirrors BaseDecoder's direct input: holds the socket, takes it at the spawn, destroys Node's copy after it. Its
- * channel is centred on its `channelHz` option (a placement's), else on CENTER.
+ * Mirrors BaseDecoder's direct input: holds the socket, takes it at the spawn, destroys Node's copy after it. A detach
+ * destroys the socket but keeps it held, so a start granted a socket that closed since refuses to spawn (the start
+ * throws directInputLost and counts no spawn), as BaseDecoder does. Its channel is centred on its `channelHz` option
+ * (a placement's), else on CENTER.
  */
 export class DirectDecoder extends RateDecoder {
 	options: Record<string, unknown>
@@ -163,6 +167,10 @@ export class DirectDecoder extends RateDecoder {
 	readonly spawnedWith: FakeSocket[] = []
 	readonly relayed: unknown[] = []
 	bytes = 0
+	/** An adapter's await between the manager's start and the real spawn (direwolf writes its config file first). */
+	beforeSpawn: ReturnType<typeof deferred> | null = null
+	/** Starts refused at the spawn because the direct socket had closed. */
+	refused = 0
 	constructor(
 		id: string,
 		private readonly order: string[],
@@ -196,17 +204,25 @@ export class DirectDecoder extends RateDecoder {
 		this.bytes += bytes
 	}
 	override attachInput(input: never) {
+		this.held?.destroy()
+		this.held = null
 		this.relayed.push(input)
 		super.attachInput(input)
 	}
 	override detachInput() {
 		this.held?.destroy()
-		this.held = null
 		super.detachInput()
 	}
 	override async start() {
+		const gate = this.beforeSpawn
+		this.beforeSpawn = null
+		if (gate) await gate.promise
 		const socket = this.held
 		this.held = null
+		if (socket?.destroyed) {
+			this.refused++
+			throw directInputLost(this.id)
+		}
 		try {
 			await super.start()
 		} finally {
