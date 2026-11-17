@@ -20,6 +20,7 @@ import type {
 	DecoderStatus,
 } from "../../../src/decoders/types.js"
 import {
+	abandonDecoderOutput,
 	BaseDecoder,
 	decoderOutputDrained,
 } from "../../../src/decoders/base-decoder.js"
@@ -412,5 +413,41 @@ describe("output drain", () => {
 		expect(nextSettled).toBe(false)
 		next.stderr.destroy()
 		await nextDrained
+	})
+
+	it("abandoned: an output that never ends is closed, its drain settles and no later line is parsed", async () => {
+		const decoder = new LineDecoder(
+			{ id: "abandon", type: "test", enabled: true, options: {} },
+			testLogger,
+		)
+		// Nothing spawned, or not a BaseDecoder: nothing to do.
+		decoder.abandonOutput()
+		abandonDecoderOutput(
+			new TestDecoder({ id: "x", type: "x", enabled: true, options: {} }),
+		)
+		const child = fakeChild()
+		vi.mocked(spawn).mockImplementationOnce(() => {
+			queueMicrotask(() => child.emit("spawn"))
+			return child as unknown as ChildProcess
+		})
+		await decoder.start()
+		const drained = decoder.outputDrained()
+		let settled = false
+		void drained.then(() => {
+			settled = true
+		})
+		child.emit("exit", 0, null)
+		child.stdout.write("before\n")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(settled).toBe(false)
+		abandonDecoderOutput(decoder)
+		await drained
+		expect(child.stdout.destroyed).toBe(true)
+		expect(child.stderr.destroyed).toBe(true)
+		child.stderr.write("after\n")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(decoder.lines).toEqual(["before"])
+		// Idempotent.
+		decoder.abandonOutput()
 	})
 })

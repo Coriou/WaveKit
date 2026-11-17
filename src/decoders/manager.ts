@@ -177,7 +177,7 @@ import {
 } from "../utils/version.js"
 import { safeErrorFields } from "./safe-error-fields.js"
 import { processChannelInputMode } from "./channel-input-mode.js"
-import { decoderOutputDrained } from "./base-decoder.js"
+import { abandonDecoderOutput, decoderOutputDrained } from "./base-decoder.js"
 import {
 	CHANNEL_FATE_MS,
 	channelStatsDelta,
@@ -6466,13 +6466,19 @@ export class DecoderManager extends EventEmitter {
 	 * buffered are parsed after it (they can open a call), so stop() waits until that run's output has been read to
 	 * its end. BaseDecoder has dropped its process by then, so nothing is signalled; a throw is logged. The whole run
 	 * has one deadline, PLACEMENT_STOP_TIMEOUT_MS from here (the placement stop's): at it the instance is fenced, with
-	 * one warning. Stops, starts and replacements join it (joinDirectCleanup).
+	 * one warning, and an output still open is closed so stop() runs then, once. Stops, starts and replacements join
+	 * it (joinDirectCleanup).
 	 */
 	private startDirectCleanup(state: DecoderState): void {
 		const decoder = state.decoder
 		if (state.directCleanup?.decoder === decoder) return
 		let timer: ReturnType<typeof setTimeout> | undefined
-		const run = decoderOutputDrained(decoder)
+		let giveUp = (): void => {}
+		const abandoned = new Promise<void>(resolve => {
+			giveUp = resolve
+		})
+		// Whichever comes first, the drain or the deadline giving up on it, leads to the one stop().
+		const run = Promise.race([decoderOutputDrained(decoder), abandoned])
 			.then(() => decoder.stop())
 			.catch((err: unknown) => {
 				this.log.warn(
@@ -6487,7 +6493,13 @@ export class DecoderManager extends EventEmitter {
 			})
 		const deadline = new Promise<void>(resolve => {
 			timer = setTimeout(() => {
-				if (!cleanup.settled) this.fenceDirectCleanup(state, cleanup)
+				if (!cleanup.settled) {
+					this.fenceDirectCleanup(state, cleanup)
+					// An output that never ended is closed and the adapter's stop() runs now (its timers, open calls),
+					// with its listeners already gone; a stop() already running is not called again.
+					abandonDecoderOutput(decoder)
+					giveUp()
+				}
 				resolve()
 			}, PLACEMENT_STOP_TIMEOUT_MS)
 		})

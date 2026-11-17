@@ -104,6 +104,8 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 * (outputDrained); it never rejects.
 	 */
 	private outputDrain: Promise<void> = Promise.resolve()
+	/** The last spawned child's stdout and stderr, kept so a caller that gives up on their drain can close them. */
+	private outputStreams: Readable[] = []
 	private readonly trackInputBytes = (chunk: Buffer): void => {
 		this.stats.bytesIn += chunk.length
 	}
@@ -316,6 +318,9 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 		// Registered after the readers: on `end`, a reader parses its last line before these listeners run.
 		this.outputDrain = streamsEnded(this.process.stdout, this.process.stderr)
+		this.outputStreams = [this.process.stdout, this.process.stderr].filter(
+			(stream): stream is Readable => stream !== null,
+		)
 
 		// Pipe input stream to process stdin if attached
 		if (this.inputStream && this.process.stdin) {
@@ -388,6 +393,16 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 */
 	outputDrained(): Promise<void> {
 		return this.outputDrain
+	}
+
+	/**
+	 * Gives up on the last spawned child's output: its stdout and stderr are destroyed, so no further line of that run
+	 * is parsed and its drain (outputDrained) settles. Only for a run whose process has already exited; idempotent.
+	 */
+	abandonOutput(): void {
+		for (const stream of this.outputStreams)
+			if (!stream.destroyed) stream.destroy()
+		this.outputStreams = []
 	}
 
 	/**
@@ -674,4 +689,9 @@ export function decoderOutputDrained(decoder: object): Promise<void> {
 	return decoder instanceof BaseDecoder
 		? decoder.outputDrained()
 		: Promise.resolve()
+}
+
+/** BaseDecoder.abandonOutput on a BaseDecoder; nothing for another decoder, whose output the manager cannot see. */
+export function abandonDecoderOutput(decoder: object): void {
+	if (decoder instanceof BaseDecoder) decoder.abandonOutput()
 }

@@ -620,10 +620,12 @@ describe.each([
 		expect(outputs.length).toBe(before)
 	})
 
-	it("an exit whose output never ends: the stop completes at the cleanup's deadline, the instance is fenced, a later start uses a new instance", async () => {
+	it("an exit whose output never ends: at the cleanup's deadline the stop completes, the output is closed and the adapter's stop() runs once; a later start uses a new instance", async () => {
 		setup("direct", placements)
 		await start(placements)
 		const first = voice[0]!
+		await hearCall(first)
+		expect(timersOf(first).callTimeoutTimer).not.toBeNull()
 		const child = loseSourceExitFirst()
 		const stopping = track(manager.stopDecoder("voice"))
 		await vi.advanceTimersByTimeAsync(PLACEMENT_STOP_TIMEOUT_MS - 1)
@@ -633,6 +635,15 @@ describe.each([
 		await vi.advanceTimersByTimeAsync(1)
 		expect(stopping.done).toBe(true)
 		expect(cleanupTimeouts()).toHaveLength(1)
+		// The output that never ended is closed and the adapter's own stop() ran: none of its timers is left.
+		expect(child.stdout.destroyed).toBe(true)
+		expect(child.stderr.destroyed).toBe(true)
+		expect(stopsOf(first)).toBe(1)
+		expect(timersOf(first)).toEqual({
+			callTimeoutTimer: null,
+			pruneTimer: null,
+		})
+		expect(live.size).toBe(0)
 
 		sources.caps.set("rtl", { ...iqCaps(2_048_000), centerFreq: CENTER })
 		await start(placements)
@@ -640,11 +651,13 @@ describe.each([
 		expect(children).toHaveLength(2)
 		expect(manager.getDecoder("voice")).toBe(voice[1])
 		expect(manager.getStatus("voice")).toMatchObject({ running: true })
-		expect(stopsOf(first)).toBe(0)
+		expect(stopsOf(first)).toBe(1)
+		expect(live.size).toBe(1)
 
-		// The old output ends late: its stop() runs on the retired instance only and reaches nothing of the manager.
+		// A late line or end of the old output reaches nothing: no second stop(), nothing of the manager.
 		const events = vi.spyOn(manager, "emit")
 		const status = manager.getStatus("voice")
+		child.print(CALL_LINES[0]![1])
 		child.endStreams()
 		await vi.advanceTimersByTimeAsync(0)
 		expect(stopsOf(first)).toBe(1)
@@ -655,6 +668,41 @@ describe.each([
 		expect(live.size).toBe(1)
 		expect(cleanupTimeouts()).toHaveLength(1)
 		await manager.destroy()
+		expect(live.size).toBe(0)
+		expect(stopsOf(first)).toBe(1)
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(timersOf(first)).toEqual({
+			callTimeoutTimer: null,
+			pruneTimer: null,
+		})
+	})
+
+	it("an exit whose output never ends, then destroy: destroy completes at the cleanup's deadline and the adapter's stop() runs once, leaving no timer", async () => {
+		setup("direct", placements)
+		await start(placements)
+		const first = voice[0]!
+		await hearCall(first)
+		const child = loseSourceExitFirst()
+		await vi.advanceTimersByTimeAsync(1_000)
+		const destroying = track(manager.destroy())
+		await vi.advanceTimersByTimeAsync(PLACEMENT_STOP_TIMEOUT_MS - 1_000 - 1)
+		expect(destroying.done).toBe(false)
+		expect(stopsOf(first)).toBe(0)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(destroying.done).toBe(true)
+		expect(manager.getStatus("voice")).toBeUndefined()
+		expect(cleanupTimeouts()).toHaveLength(1)
+		expect(child.stdout.destroyed).toBe(true)
+		expect(stopsOf(first)).toBe(1)
+		expect(live.size).toBe(0)
+		expect(timersOf(first)).toEqual({
+			callTimeoutTimer: null,
+			pruneTimer: null,
+		})
+		// Nothing later calls it again.
+		child.endStreams()
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(stopsOf(first)).toBe(1)
 		expect(live.size).toBe(0)
 	})
 
