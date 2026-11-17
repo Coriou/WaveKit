@@ -8,7 +8,7 @@ import { ApiClient } from "../../src/data/api-client.ts"
 import { EventsClient } from "../../src/data/events-client.ts"
 import type { DataLayer } from "../../src/data/index.ts"
 import { ActivityController } from "../../src/features/activity/controller.ts"
-import { headerCount } from "../../src/features/activity/count.ts"
+import { countText, headerCount } from "../../src/features/activity/count.ts"
 import { setActivityPaneOpen } from "../../src/features/activity/pane.ts"
 import { token } from "../../src/features/activity/search.ts"
 import { fakeSockets } from "../data/fake-socket.ts"
@@ -220,5 +220,28 @@ describe("activity header count", () => {
 		expect(header().text).toBe("812")
 		off()
 		c.dispose()
+	})
+
+	it("groups the digits of an exact count, the loaded events and the chips alike", () => {
+		const input = {
+			counts: { voice: 1_234 },
+			total: 2_350,
+			chip: null,
+			column: false,
+			events: 1_500,
+			more: true,
+		}
+		expect(headerCount(input)).toEqual({
+			text: "2,350",
+			title: "2,350 events for this search, counted by WaveKit",
+			core: true,
+		})
+		expect(headerCount({ ...input, chip: "voice" }).text).toBe(countText(1_234))
+		expect(headerCount({ ...input, column: true })).toEqual({
+			text: "1,500+",
+			title: "1,500 loaded events; older events are not loaded yet",
+			core: false,
+		})
+		expect(countText(1_234)).toBe("1,234")
 	})
 })

@@ -12,7 +12,7 @@ import type {
 import { ActivityDetail } from "../../features/activity/ActivityDetail.tsx"
 import { ActivityList } from "../../features/activity/ActivityList.tsx"
 import { MAX_COLUMNS } from "../../features/activity/columns.ts"
-import { headerCount } from "../../features/activity/count.ts"
+import { countText, headerCount } from "../../features/activity/count.ts"
 import {
 	activityFeedNeedsReload,
 	lifecycleNotice,
@@ -340,7 +340,7 @@ function Categories() {
 						key={c.id}
 						size="sm"
 						pressed={chip === c.id}
-						count={n !== undefined && n > 0 ? n : undefined}
+						count={n !== undefined && n > 0 ? countText(n) : undefined}
 						onClick={() => pick(c.id)}
 					>
 						{c.label}

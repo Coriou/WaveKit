@@ -26,7 +26,11 @@ export interface HeaderCount {
 	core: boolean
 }
 
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
+/** A count as the header and the category chips show it: "2,350". */
+export const countText = (n: number): string => n.toLocaleString("en-US")
+
+const plural = (n: number, word: string) =>
+	`${countText(n)} ${word}${n === 1 ? "" : "s"}`
 
 export function headerCount(i: HeaderCountInput): HeaderCount {
 	const core =
@@ -38,17 +42,17 @@ export function headerCount(i: HeaderCountInput): HeaderCount {
 	if (core !== null)
 		return i.truncated === true
 			? {
-					text: `${core.toLocaleString("en-US")}+`,
-					title: `at least ${core.toLocaleString("en-US")} events for this search; WaveKit stops counting there`,
+					text: `${countText(core)}+`,
+					title: `at least ${countText(core)} events for this search; WaveKit stops counting there`,
 					core: true,
 				}
 			: {
-					text: String(core),
+					text: countText(core),
 					title: `${plural(core, "event")} for this search, counted by WaveKit`,
 					core: true,
 				}
 	return {
-		text: `${i.events}${i.more ? "+" : ""}`,
+		text: `${countText(i.events)}${i.more ? "+" : ""}`,
 		title: `${plural(i.events, "loaded event")}${i.more ? "; older events are not loaded yet" : ""}`,
 		core: false,
 	}

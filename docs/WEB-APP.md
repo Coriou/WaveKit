@@ -411,8 +411,8 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   one, says what failed with **Try again**, and the list tries again on its own after 2, 4, 8, 16
   then every 30 s.
   Repeats fold into one row per thing going on (see [Activity folding](#activity-folding)).
-  The count beside the list title is the number of events the core counts for the search, the
-  same unit as the category filters (not the folded rows on screen); past the core's counting cap
+  The count beside the list title (`2,350`) is the number of events the core counts for the
+  search, the same unit and digit grouping as the category filters (not the folded rows on screen); past the core's counting cap
   (50,000 events) it reads `50,000+`, at least that many. A pinned column shown in its
   place, or a core that cannot count, shows the loaded events instead, with `+` while older ones
   are not loaded; so does a new search, time range or **With audio** until the core has counted
