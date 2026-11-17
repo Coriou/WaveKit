@@ -47,21 +47,53 @@ export function deemphPatch(v: DeemphChoice): LiveAudioConfigPatch {
 /** "Cut low rumble" switches the high-pass between off and 300 Hz (other cut-offs live in Settings). */
 export const LOW_CUT_HZ = 300
 
-export function lowCutSub(config: LiveAudioConfig): string {
-	return config.highPass > 0
-		? `High-pass at ${config.highPass} Hz`
-		: `High-pass at ${LOW_CUT_HZ} Hz`
+/** The row's value when the cut-off is not the switch's own 300 Hz (another set in Settings): "150 Hz". */
+export function lowCutValue(config: LiveAudioConfig): string | null {
+	return config.highPass > 0 && config.highPass !== LOW_CUT_HZ
+		? `${config.highPass} Hz`
+		: null
 }
 
-const NR_TEXT: Readonly<Record<LiveAudioConfig["noiseReduction"], string>> = {
-	off: "Softens hiss between words",
-	voice: "Softens hiss between words",
-	"narrow-band": "Narrow band filter on",
-	"noaa-apt": "NOAA APT filter on",
+const NR_VALUE: Readonly<
+	Record<LiveAudioConfig["noiseReduction"], string | null>
+> = {
+	off: null,
+	voice: null,
+	"narrow-band": "Narrow band",
+	"noaa-apt": "NOAA APT",
 }
 
-export function noiseReductionSub(config: LiveAudioConfig): string {
-	return NR_TEXT[config.noiseReduction]
+/** The row's value for a noise reduction other than voice (set in Settings): "Narrow band", "NOAA APT". */
+export function noiseReductionValue(config: LiveAudioConfig): string | null {
+	return NR_VALUE[config.noiseReduction]
+}
+
+const AGC_LABEL: Readonly<Record<AgcChoice, string>> = {
+	off: "Off",
+	slow: "Slow",
+	fast: "Fast",
+}
+
+/**
+ * What the folded Sound row says: what is behind it, or, when something in it is not at its default, what is
+ * set ("Level control Fast · Rumble cut"). `changed` says which of the two it is.
+ */
+export function soundSummary(status: LiveAudioStatus): {
+	text: string
+	changed: boolean
+} {
+	const c = status.config
+	const agc = agcOf(status)
+	const deemph = deemphOf(c)
+	const set = [
+		agc !== agcDefault(c.modulation) ? `Level control ${AGC_LABEL[agc]}` : null,
+		deemph !== "off" ? `De-emphasis ${deemph} µs` : null,
+		c.highPass > 0 ? "Rumble cut" : null,
+		c.noiseReduction !== "off" ? "Noise reduction" : null,
+	].filter((x): x is string => x !== null)
+	return set.length > 0
+		? { text: set.join(" · "), changed: true }
+		: { text: "Level, de-emphasis, filters", changed: false }
 }
 
 // ---- Tone squelch
@@ -262,19 +294,20 @@ export function heldCall(input: {
 }
 
 /**
- * The line for an encrypted call: "DMR call is encrypted: nothing to play.", or, while the analog
- * channel plays anyway (`analogPlays`: the squelch passes it), "…: decoded voice is not played."
+ * The head's detail for an encrypted call: "Encrypted DMR call", or, while the analog channel plays anyway
+ * (`analogPlays`: the squelch passes it), "Encrypted DMR call · analog only".
  */
 export function encryptedCallLine(
 	protocol: string | null,
 	analogPlays: boolean,
 ): string {
-	return `${protocol ?? "Digital voice"} call is encrypted: ${analogPlays ? "decoded voice is not played." : "nothing to play."}`
+	const call = `Encrypted ${protocol ?? "digital voice"} call`
+	return analogPlays ? `${call} · analog only` : call
 }
 
 /**
- * The head's line for a held call: "DMR voice · checking…", "DMR call is encrypted: nothing to play.";
- * `analogPlays` (the head says Listening) for an encrypted call says decoded voice is not played instead.
+ * The head's line for a held call: "DMR voice · checking…", "Encrypted DMR call"; `analogPlays` (the head
+ * says Listening) for an encrypted call adds "· analog only".
  */
 export function heldCallLine(
 	held: HeldCall,
@@ -335,12 +368,12 @@ export function autoSquelchNow(
 
 const EVIDENCE_TEXT: Readonly<
 	Record<NonNullable<LiveAudioAutoSquelch["evidence"]>, string>
-> = { voice: "Voice heard", ctcss: "CTCSS heard", dcs: "DCS heard" }
+> = { voice: "Voice heard", ctcss: "Tone heard", dcs: "Tone heard" }
 
-/** "Voice heard", "CTCSS heard": what let the voice check pass; null when it is off or holds the audio. */
+/** "Voice heard", "Tone heard": what let the voice check pass; null when it is off or holds the audio. */
 export function evidenceText(gate: LiveAudioAutoSquelch | null): string | null {
 	if (gate?.state !== "open") return null
-	return gate.evidence ? EVIDENCE_TEXT[gate.evidence] : "Passing"
+	return gate.evidence ? EVIDENCE_TEXT[gate.evidence] : "Playing"
 }
 
 // ---- Source: what `/auto` plays (the core's `listenMode`, shared by every client)
@@ -356,31 +389,57 @@ export function listenModeOf(
 }
 
 /** The line under Source, from what the core says `/auto` plays now. */
-export function sourceHint(input: {
+interface SourceInput {
 	mode: ListenSource
 	now: LiveAudioAutoRouteLevel | null
 	route: VoiceRoute | null
 	modeLabel: string
-}): string {
+}
+
+/**
+ * What Source plays now, for its label line: "Playing NFM", "Playing DMR voice", "Checking DMR call…",
+ * "Waiting for a call"; null when nothing plays and the note says why.
+ */
+export function sourceNow(input: SourceInput): string | null {
 	const { mode, now, route, modeLabel } = input
 	const what = routeProtocol(now, route)
-	if (now?.reason === "squelch-open")
-		return `Open plays the ${modeLabel} audio as it is.`
-	if (now?.reason === "no-decoder")
-		return "No digital voice decoder on this channel: nothing plays."
-	if (now?.active === "digital")
-		return `${what ?? "Digital voice"} call. Playing decoded voice.`
+	const analog = `Playing ${modeLabel}`
+	if (now?.reason === "squelch-open") return analog
+	if (now?.reason === "no-decoder") return null
+	if (now?.active === "digital") return `Playing ${what ?? "digital"} voice`
 	const held = heldCall({ route, source: mode })
-	if (held === "encrypted")
-		return encryptedCallLine(what, now?.active === "analog")
-	if (held === "checking")
-		return `${what ?? "Digital voice"} call: checking it is not encrypted before it plays.`
-	if (mode === "analog") return `Playing demodulated ${modeLabel} audio only.`
-	if (mode === "digital")
-		return `Decoded ${what ?? "digital"} voice only, silence between calls.`
-	if (route)
-		return `Playing ${modeLabel} audio, decoded ${what ?? "digital"} voice when a call comes.`
-	return `Playing ${modeLabel} audio. Decoded voice when a decoder covers the channel.`
+	if (held === "encrypted") return now?.active === "analog" ? analog : null
+	if (held === "checking") return `Checking ${what ?? "digital voice"} call…`
+	if (mode === "digital") return "Waiting for a call"
+	return analog
+}
+
+export interface SourceNote {
+	text: string
+	/** `warn`: nothing can play until something changes (Use Auto is offered). */
+	tone: "quiet" | "warn"
+}
+
+/** The note under Source, only while there is something to say: an open squelch, no decoder, an encrypted call. */
+export function sourceNote(input: SourceInput): SourceNote | null {
+	const { mode, now, route } = input
+	if (now?.reason === "squelch-open")
+		return { text: "An open squelch plays analog only.", tone: "quiet" }
+	if (now?.reason === "no-decoder")
+		return {
+			text: "No digital voice decoder here, so nothing plays.",
+			tone: "warn",
+		}
+	if (now?.active === "digital") return null
+	if (heldCall({ route, source: mode }) !== "encrypted") return null
+	const call = `Encrypted ${routeProtocol(now, route) ?? "digital voice"} call`
+	return {
+		text:
+			now?.active === "analog"
+				? `${call}: decoded voice is not played.`
+				: `${call}: nothing to play.`,
+		tone: "quiet",
+	}
 }
 
 // ---- The Listen head: one line says what is heard

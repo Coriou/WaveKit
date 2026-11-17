@@ -28,6 +28,8 @@ export interface SegProps<T extends string> {
 	columns?: number
 	className?: string
 	id?: string
+	/** Id of the text that explains the group (a hint's hidden sentence). */
+	describedBy?: string | undefined
 }
 
 /** `.wk-seg`: a single-choice radio group. Arrow keys move and select; one tab stop. */
@@ -41,6 +43,7 @@ export function Seg<T extends string>({
 	columns,
 	className,
 	id,
+	describedBy,
 }: SegProps<T>) {
 	const group = useRef<HTMLDivElement>(null)
 	const enabled = options.filter(o => !o.disabled)
@@ -78,6 +81,7 @@ export function Seg<T extends string>({
 			id={id}
 			role="radiogroup"
 			aria-label={label}
+			aria-describedby={describedBy}
 			className={cx(
 				"wk-seg",
 				wide && "is-wide",

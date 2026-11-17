@@ -1,3 +1,5 @@
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 import type {
 	DecoderInfo,
@@ -30,6 +32,8 @@ import {
 	rememberedClosed,
 	resetOpenMemory,
 } from "../../src/features/listen/squelch-actions.ts"
+import { VOICE_ONLY_HINT } from "../../src/features/listen/hints.ts"
+import { SettingRowView } from "../../src/features/settings/SettingRowView.tsx"
 import { DEFAULT_DEVICE } from "../../src/shell/device-prefs.ts"
 import {
 	buildRows,
@@ -530,6 +534,22 @@ describe("Settings rows", () => {
 			expect(byId(rows, "au.source").value).toBe("auto")
 			expect(byId(rows, "au.margin").more).toBe(true)
 			expect(rows.some(r => r.id === "au.threshold")).toBe(false)
+		})
+
+		it("shows Listen's Voice only sentence on the Settings row", () => {
+			const rows = buildRows(snapshot({ live: live(listen) }), actions())
+			const html = renderToStaticMarkup(
+				createElement(SettingRowView, {
+					row: byId(rows, "au.voiceOnly"),
+					onChange: () => undefined,
+					onUndo: () => undefined,
+					onReset: () => undefined,
+					onCopy: () => undefined,
+				}),
+			)
+			expect(html).toContain(
+				`<div class="wkf-set-help">${VOICE_ONLY_HINT.text}</div>`,
+			)
 		})
 
 		it("sends voiceOnly with Auto, a non-zero level with Manual, open with Open, and never the margin", async () => {

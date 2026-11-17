@@ -2,13 +2,14 @@
 // and the Audio options panel (squelch, Voice only, Source, volume, sound). <AudioOutput/> holds the page's
 // one <audio> element. Squelch, Voice only and Source are core settings shared by every client: a change
 // is a config PATCH and never reattaches the stream, which is always the core's `/auto`.
-import { useEffect, useState, type CSSProperties } from "react"
+import { useEffect, useId, useState, type CSSProperties } from "react"
 import type { LiveAudioStatus } from "@wavekit/api-types"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
 import type { IslandContext, IslandSlot } from "../../shell/ShellIsland.tsx"
 import { Button } from "../../ui/Button.tsx"
+import { HintMark, hintRow, useHint } from "../../ui/Hint.tsx"
 import { Icon } from "../../ui/Icon.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
 import { IslandHead } from "../../ui/Island.tsx"
@@ -18,7 +19,7 @@ import { Switch } from "../../ui/Switch.tsx"
 import { shellStore } from "../../shell/store.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { focusSetting } from "../settings/registry.ts"
-import { formatDb, formatMHz, formatRate } from "../format.ts"
+import { formatDb, formatMHz } from "../format.ts"
 import { useLiveStatus, useSettledHz } from "../hooks.ts"
 import { modeSpec } from "../tuner/modes.ts"
 import { useHeld, useSweep } from "../tuner/ScanHoldRow.tsx"
@@ -38,11 +39,17 @@ import {
 	voiceOnlyFits,
 	type SquelchKind,
 } from "./audio.ts"
+import { audioHealthText, breakingUpText } from "./audio-health.ts"
 import {
-	audioHealthText,
-	audioHealthTitle,
-	breakingUpText,
-} from "./audio-health.ts"
+	DEEMPHASIS_HINT,
+	HEARD_HINT,
+	LEVEL_CONTROL_HINT,
+	SOURCE_HINT,
+	SQUELCH_HINT,
+	TONE_SQUELCH_HINT,
+	PLAY_ANYWAY_TEXT,
+	VOICE_ONLY_HINT,
+} from "./hints.ts"
 import type { ListenPhase } from "./controller.ts"
 import "./listen.css"
 import { recordClock, recordFileName } from "./recorder.ts"
@@ -60,12 +67,14 @@ import {
 	listenModeOf,
 	liveTone,
 	LOW_CUT_HZ,
-	lowCutSub,
+	lowCutValue,
 	dropHearKey,
-	noiseReductionSub,
+	noiseReductionValue,
 	offeredTone,
 	routeProtocol,
-	sourceHint,
+	soundSummary,
+	sourceNote,
+	sourceNow,
 	toneGateOn,
 	toneSquelchFits,
 	toneSquelchPatch,
@@ -186,7 +195,6 @@ function useLevel() {
 		gate,
 		setting,
 		liveThreshold: running ? (level?.thresholdDbfs ?? null) : null,
-		floor: level?.noiseFloorDbfs ?? null,
 	}
 }
 
@@ -224,6 +232,9 @@ function useHeadline(level: ReturnType<typeof useLevel>) {
 			: heldCall({ route, source, squelch: setting.kind })
 	return { headline, heldVoice, route, now, toneGate, toneWaiting }
 }
+
+/** The head's and the panel's line when this core has no live audio. */
+const NO_LIVE_AUDIO = "This WaveKit has no live audio."
 
 function ListenHead({ ctx }: { ctx: IslandContext }) {
 	const { data, listen } = useServices()
@@ -273,6 +284,10 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 	// a recording playing here pauses instead of Listen turning off (ListenController.toggle)
 	const toggle = () => void listen.toggle()
 	const disabled = !status || (!on && readOnly && !status.running)
+	// a disabled button takes no focus: its reason is the visible line beside it, which it points at
+	const why = !status ? NO_LIVE_AUDIO : disabled ? "Live audio is off." : null
+	const subId = useId()
+	const playId = useId()
 	const sweep = useSweep()
 	const { heldHz, held } = useHeld(sweep)
 	// live audio follows a running sweep: say so instead of the mode and frequency
@@ -301,7 +316,7 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 						: "Listen"
 				}
 				disabled={disabled}
-				title={!status ? "Live audio is not available on this core" : undefined}
+				aria-describedby={why ? subId : undefined}
 				onClick={toggle}
 			>
 				<Icon name="headphones" size={22} />
@@ -312,22 +327,28 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 					data-wk-listen-head={headline.kind}
 				>
 					<b>{title}</b>
-					{state.phase === "playing" && canPlayAnyway ? (
-						<Button
-							variant="tonal"
-							size="sm"
-							className="wkf-play-anyway"
-							title="Turns Voice only off: every carrier plays"
-							onClick={() => void playAnyway(data.liveAudio)}
-						>
-							Play anyway
-						</Button>
+					{/* the disabled button's reason comes first: its aria-describedby points at this line */}
+					{why ? (
+						<span className="wk-shell-sub" id={subId}>
+							{why}
+						</span>
+					) : state.phase === "playing" && canPlayAnyway ? (
+						<>
+							<Button
+								variant="tonal"
+								size="sm"
+								className="wkf-play-anyway"
+								aria-describedby={playId}
+								onClick={() => void playAnyway(data.liveAudio)}
+							>
+								Play anyway
+							</Button>
+							<span id={playId} hidden>
+								{PLAY_ANYWAY_TEXT}
+							</span>
+						</>
 					) : breaking ? (
-						<span
-							className="wk-shell-sub"
-							data-breaking=""
-							title="Part of the audio is not arriving, usually because the core is busy. Audio options has the detail."
-						>
+						<span className="wk-shell-sub" data-breaking="">
 							{breaking}
 						</span>
 					) : follow ? (
@@ -336,7 +357,9 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 							<span>{follow.text}</span>
 						</span>
 					) : (
-						<span className="wk-shell-sub">{sub}</span>
+						<span className="wk-shell-sub" id={subId}>
+							{sub}
+						</span>
 					)}
 				</div>
 				<div className="wk-meter wkf-meter" aria-hidden="true">
@@ -374,56 +397,140 @@ const SQUELCH_OPTIONS: ReadonlyArray<SegOption<SquelchKind>> = [
 	{ value: "open", label: "Open" },
 ]
 
-/** The Voice only switch's line, as the design words it. */
-export const VOICE_ONLY_SUB =
-	"Skips carriers, data and pagers. Voice starts about 1 s late, nothing is cut."
+/** The per-browser key of the Sound fold (open or closed); it never opens by itself. */
+export const SOUND_OPEN_KEY = "wavekit.web.listen.soundOpen"
 
-const SQUELCH_HELP: Readonly<Record<SquelchKind, string>> = {
-	auto: "Opens on a carrier above the noise floor and follows conditions. Drag the line to set it by hand.",
-	manual: "Everything above the line plays. Drag it just above the noise.",
-	open: "Everything plays, noise included. Transmissions are still logged. Q goes back.",
+function readSoundOpen(): boolean {
+	try {
+		return globalThis.localStorage?.getItem(SOUND_OPEN_KEY) === "1"
+	} catch {
+		return false
+	}
+}
+
+function writeSoundOpen(open: boolean): void {
+	try {
+		if (open) globalThis.localStorage?.setItem(SOUND_OPEN_KEY, "1")
+		else globalThis.localStorage?.removeItem(SOUND_OPEN_KEY)
+	} catch {
+		// private window or blocked storage: the fold still works for this visit
+	}
+}
+
+/** The squelch state on its label line, agreeing with the head. */
+function squelchState(input: {
+	setting: SquelchKind
+	passing: boolean
+	quiet: boolean
+	carrier: boolean
+	gate: ReturnType<typeof useLevel>["gate"]
+}): string {
+	const { setting, passing, quiet, carrier, gate } = input
+	if (setting === "open") return "Open"
+	if (passing) return evidenceText(gate) ?? "Playing"
+	if (!quiet && carrier && gate?.state === "waiting") return "Waiting for voice"
+	return "Quiet"
 }
 
 function ListenPanel() {
 	const { data, listen } = useServices()
 	const readOnly = useReadOnly()
 	const status = useLiveStatus()
-	const volume = useStore(listen, s => s.volume)
 	const listenError = useStore(listen, s => s.error)
 	const audioError = useStore(data.liveAudio, s => s.error)
+	const running = status?.running === true
+	const canEdit = !readOnly && status !== null
+	const error = listenError ?? audioError ?? status?.lastError
+	return (
+		<div className="wkf-ls">
+			<VolumeRow />
+			<SquelchField />
+			{status && listenContract(status.config) && (
+				<ListenSourceField status={status} canEdit={canEdit} />
+			)}
+			{status && <Sound status={status} canEdit={canEdit} />}
+			{!status && <p className="wkf-ls-note">{NO_LIVE_AUDIO}</p>}
+			{status && !running && (
+				<p className="wkf-ls-note">Live audio is off. Listen starts it.</p>
+			)}
+			{running && status.pipelineHealth === "starting" && (
+				<p className="wkf-ls-note">Live audio is starting…</p>
+			)}
+			{running && status.clientCount > 1 && (
+				<p className="wkf-ls-note">{status.clientCount} devices listening</p>
+			)}
+			{error && (
+				<p className="wkf-ls-note" data-tone="warn" role="status">
+					{error}
+				</p>
+			)}
+			<HealthNote />
+			<ListenFoot />
+		</div>
+	)
+}
+
+function VolumeRow() {
+	const { listen } = useServices()
+	const volume = useStore(listen, s => s.volume)
+	const pct = Math.round(volume * 100)
+	return (
+		<div className="wkf-ls-row wkf-ls-vol">
+			<Label>Volume</Label>
+			<div
+				className="wk-slider wkf-slider wkf-ls-grow"
+				style={{ "--wk-value": String(volume) } as CSSProperties}
+			>
+				<div className="wk-slider-track">
+					<div className="wk-slider-fill" />
+				</div>
+				<div className="wk-slider-knob" />
+				<input
+					type="range"
+					min={0}
+					max={100}
+					step={1}
+					value={pct}
+					aria-label="Volume"
+					onChange={e => listen.setVolume(Number(e.target.value) / 100)}
+				/>
+			</div>
+			<b className="wkf-num wkf-ls-val">{pct}%</b>
+		</div>
+	)
+}
+
+/** Squelch: the mode, the level bar with its handle, Voice only, and Tone squelch when a tone is heard or set. */
+function SquelchField() {
+	const { data, listen } = useServices()
+	const readOnly = useReadOnly()
+	const status = useLiveStatus()
 	const level = useLevel()
-	const {
-		power,
-		threshold,
-		open,
-		carrier,
-		gate,
-		setting,
-		floor,
-		liveThreshold,
-	} = level
-	// the tag agrees with the head: Quiet there (Source Digital between calls, a tone gate waiting) is Quiet here
+	const { power, threshold, open, carrier, gate, setting, liveThreshold } =
+		level
+	// the state agrees with the head: Quiet there (Source Digital between calls, a tone gate waiting) is Quiet here
 	const quiet = useHeadline(level).headline.kind === "quiet"
 	const passing = open && !quiet
 	const [drag, setDrag] = useState<number | null>(null)
 	const running = status?.running === true
 	const config = status?.config
-	// dragging the line selects Manual at once, before the core answers
+	const sqHint = useHint("Squelch", SQUELCH_HINT)
+	const voHint = useHint("Voice only", VOICE_ONLY_HINT)
+	const voId = useId()
+	// dragging the handle selects Manual at once, before the core answers
 	const shown: SquelchKind = drag !== null ? "manual" : setting.kind
 	const sq =
 		drag ??
 		threshold ??
 		(setting.kind === "manual" ? setting.thresholdDbfs : LEVEL_MIN_DBFS)
-	const noLine = shown === "open"
-	const sqPct = noLine ? 0 : levelFraction(sq) * 100
-	const sqText =
+	const sqPct = shown === "open" ? 0 : levelFraction(sq) * 100
+	const opens =
 		shown === "open"
-			? "Open · everything plays"
-			: shown === "auto"
-				? threshold === null
-					? "Auto"
-					: `Auto · Threshold ${formatDb(sq, 0)} dBFS`
-				: `Threshold ${formatDb(sq, 0)} dBFS`
+			? "Everything plays"
+			: shown === "auto" && threshold === null
+				? "Opens above the noise"
+				: `Opens above ${formatDb(sq, 0)} dB`
+	const signal = power === null ? null : `${formatDb(power, 0)} dB`
 	const apply = (patch: Parameters<typeof data.liveAudio.setConfig>[0]) =>
 		void data.liveAudio.setConfig(patch).catch(() => undefined)
 	const canEdit = !readOnly && status !== null
@@ -444,45 +551,52 @@ function ListenPanel() {
 	}
 	const voiceOnly = setting.kind === "auto" && setting.voiceOnly
 	return (
-		<>
-			<div className="wkf-field">
-				<div className="wkf-sq-head">
-					<Label>Squelch</Label>
+		<div className="wkf-ls-field">
+			<div className="wkf-ls-keep" {...hintRow}>
+				<div className="wkf-ls-head">
+					<HintMark {...sqHint.mark}>
+						<Label>Squelch</Label>
+					</HintMark>
 					{running && (
 						<span
-							className="wk-tag"
+							className="wk-tag wkf-ls-now"
 							data-size="md"
 							data-variant={passing ? "accent" : undefined}
 							data-wk-squelch-state=""
 						>
-							{setting.kind === "open"
-								? "Open"
-								: passing
-									? (evidenceText(gate) ?? "Passing")
-									: !quiet && carrier && gate?.state === "waiting"
-										? "Waiting for voice"
-										: "Quiet"}
+							{squelchState({
+								setting: setting.kind,
+								passing,
+								quiet,
+								carrier,
+								gate,
+							})}
 						</span>
 					)}
 				</div>
 				<Seg
 					label="Squelch"
 					wide
+					describedBy={sqHint.describedBy}
 					options={SQUELCH_OPTIONS.map(o => ({ ...o, disabled: !canEdit }))}
 					value={shown}
 					onChange={choose}
 				/>
-				<div className="wkf-sq-bar">
-					<div
-						className="wk-meter-fill"
-						data-open={open || undefined}
-						style={
-							{ "--wk-level": String(levelFraction(power)) } as CSSProperties
-						}
-					/>
-					<div className="wkf-sq-hatch" style={{ width: `${sqPct}%` }} />
-					<div className="wkf-sq-mark" style={{ left: `${sqPct}%` }} />
-					<div className="wkf-sq-knob" style={{ left: `${sqPct}%` }} />
+			</div>
+			<div className="wkf-ls-level">
+				<div className="wkf-ls-bar" data-mode={shown}>
+					<div className="wkf-ls-track">
+						<div
+							className="wk-meter-fill"
+							data-open={open || undefined}
+							style={
+								{ "--wk-level": String(levelFraction(power)) } as CSSProperties
+							}
+						/>
+					</div>
+					{shown !== "open" && (
+						<div className="wkf-ls-knob" style={{ left: `${sqPct}%` }} />
+					)}
 					<input
 						type="range"
 						min={LEVEL_MIN_DBFS}
@@ -490,97 +604,44 @@ function ListenPanel() {
 						step={1}
 						value={Math.round(sq)}
 						disabled={!canEdit}
+						// in Open there is no handle to show focus on: out of the tab order (Manual is one press
+						// away on the mode buttons above), the track still takes a drag, which selects Manual
+						tabIndex={shown === "open" ? -1 : undefined}
 						aria-label="Squelch threshold"
-						aria-valuetext={sqText}
+						aria-valuetext={signal ? `${opens}, signal ${signal}` : opens}
 						onChange={e => setDrag(Number(e.target.value))}
 						onPointerUp={commit}
 						onKeyUp={commit}
 						onBlur={() => setDrag(null)}
 					/>
 				</div>
-				<div className="wkf-sq-foot">
-					<span>{sqText}</span>
-					<span>
-						Signal {power === null ? "—" : `${formatDb(power, 0)} dBFS`}
-						{floor !== null && running ? ` · floor ${formatDb(floor, 0)}` : ""}
-					</span>
+				<div className="wkf-ls-cap">
+					<span>{opens}</span>
+					<span>Signal {signal ?? "—"}</span>
 				</div>
-				<span className="wkf-quiet wkf-small">{SQUELCH_HELP[shown]}</span>
-				{shown === "auto" && voiceOnlyFits(config) && (
-					<SoundSwitch
-						label="Voice only"
-						sub={VOICE_ONLY_SUB}
+			</div>
+			{shown === "auto" && voiceOnlyFits(config) && (
+				<div className="wkf-ls-row" {...hintRow}>
+					<HintMark {...voHint.mark}>
+						<label className="wkf-ls-name" htmlFor={voId}>
+							Voice only
+						</label>
+					</HintMark>
+					<Switch
+						id={voId}
+						size="row"
+						className="wkf-ls-end"
 						checked={voiceOnly}
 						disabled={!canEdit}
+						aria-describedby={voHint.describedBy}
 						onChange={v =>
 							apply(squelchPatch(config, { kind: "auto", voiceOnly: v }))
 						}
 					/>
-				)}
-				{status && <ToneSquelch status={status} canEdit={canEdit} />}
-			</div>
-
-			<div className="wkf-field">
-				<div className="wkf-field-head">
-					<Label>Volume</Label>
-					<b className="wkf-num">{Math.round(volume * 100)}%</b>
 				</div>
-				<div
-					className="wk-slider wkf-slider"
-					style={{ "--wk-value": String(volume) } as CSSProperties}
-				>
-					<div className="wk-slider-track">
-						<div className="wk-slider-fill" />
-					</div>
-					<div className="wk-slider-knob" />
-					<input
-						type="range"
-						min={0}
-						max={100}
-						step={1}
-						value={Math.round(volume * 100)}
-						aria-label="Volume"
-						onChange={e => listen.setVolume(Number(e.target.value) / 100)}
-					/>
-				</div>
-				<span className="wkf-quiet wkf-small">This browser only.</span>
-			</div>
-
-			{status && listenContract(status.config) && (
-				<ListenSourceField status={status} canEdit={canEdit} />
 			)}
-			{status && <Sound status={status} canEdit={canEdit} />}
-
-			{status && (
-				<span className="wkf-quiet wkf-small">
-					{running
-						? `${formatRate(status.effectiveSampleRate)} audio · ${status.clientCount} listening · ${status.pipelineHealth}`
-						: "Live audio is stopped on the core. Listen starts it."}
-				</span>
-			)}
-			{!status && (
-				<span className="wkf-quiet wkf-small">
-					Live audio is not available on this core.
-				</span>
-			)}
-			{(listenError ?? audioError ?? status?.lastError) && (
-				<span className="wkf-warn" role="status">
-					{listenError ?? audioError ?? status?.lastError}
-				</span>
-			)}
-			<RecordRow />
-			<Button
-				variant="ghost"
-				className="wkf-listen-more"
-				onClick={() => {
-					focusSetting("au.squelch")
-					shellStore.openDrawer("settings")
-				}}
-			>
-				All audio settings
-				<Icon name="chevron-right" size={16} />
-			</Button>
-		</>
+			{status && <ToneSquelch status={status} canEdit={canEdit} />}
+		</div>
 	)
 }
 
@@ -596,6 +657,8 @@ function ToneSquelch({
 	const hz = useSettledHz()
 	const span = useStore(tuned.span)
 	const items = useStore(tuned.feed, s => s.items)
+	const hint = useHint("Tone squelch", TONE_SQUELCH_HINT)
+	const id = useId()
 	const fresh = span !== null && span.hz === hz
 	const config = status.config
 	const tone = offeredTone(config.toneSquelch, fresh ? items : [], status.tone)
@@ -605,35 +668,30 @@ function ToneSquelch({
 	const state = status.toneSquelch?.state
 	const heard = config.toneSquelch === undefined || !on
 	return (
-		<button
-			type="button"
-			className="wkf-tone-row"
-			aria-pressed={on}
-			disabled={!canEdit}
-			onClick={() =>
-				void data.liveAudio
-					.setConfig(toneSquelchPatch(!on, tone))
-					.catch(() => undefined)
-			}
-		>
-			<span className="wkf-tone-text">
-				<b>
-					Tone squelch{" "}
-					<span className="wkf-tone-tone">
-						· {text}
-						{heard ? " detected" : state === "open" ? " heard" : ""}
-					</span>
-				</b>
-				<span className="wkf-quiet wkf-small">
-					{on
-						? state === "waiting"
-							? `Waiting for ${text}. Other users on this channel stay silent.`
-							: `Opens only for ${text}. Other users on this channel stay silent.`
-						: "Open only for this tone, ignore other users sharing the channel."}
-				</span>
+		<div className="wkf-ls-row" {...hintRow}>
+			<HintMark {...hint.mark}>
+				<label className="wkf-ls-name" htmlFor={id}>
+					Tone squelch
+				</label>
+			</HintMark>
+			<span className="wkf-ls-now wkf-ls-tone">
+				{on && state === "waiting"
+					? `Waiting for ${text}`
+					: `${text}${heard ? " detected" : state === "open" ? " heard" : ""}`}
 			</span>
-			<span className="wk-switch" aria-checked={on} aria-hidden="true" />
-		</button>
+			<Switch
+				id={id}
+				size="row"
+				checked={on}
+				disabled={!canEdit}
+				aria-describedby={hint.describedBy}
+				onChange={v =>
+					void data.liveAudio
+						.setConfig(toneSquelchPatch(v, tone))
+						.catch(() => undefined)
+				}
+			/>
+		</div>
 	)
 }
 
@@ -654,33 +712,55 @@ function ListenSourceField({
 	const { data } = useServices()
 	const route = useVoiceRoute()
 	const now = useRouteNow()
+	const hint = useHint("Source", SOURCE_HINT)
 	const mode = listenModeOf(status.config)
-	const label = modeSpec(status.config.modulation).label
+	const input = {
+		mode,
+		now,
+		route,
+		modeLabel: modeSpec(status.config.modulation).label,
+	}
+	const playing = sourceNow(input)
+	const note = sourceNote(input)
 	const apply = (listenMode: ListenSource) =>
 		void data.liveAudio.setConfig({ listenMode }).catch(() => undefined)
 	const noDecoder = now?.reason === "no-decoder"
 	return (
-		<div className="wkf-field">
-			<Label>Source</Label>
-			<Seg
-				label="Source"
-				wide
-				options={SOURCE_OPTIONS.map(o => ({ ...o, disabled: !canEdit }))}
-				value={mode}
-				onChange={apply}
-			/>
-			<div className="wkf-hear-hint" data-wk-source-hint="">
-				<span className="wkf-hear-dot" aria-hidden="true" />
-				<span>{sourceHint({ mode, now, route, modeLabel: label })}</span>
-				{noDecoder && canEdit && (
-					<>
-						<span className="wkf-gap" />
+		<div className="wkf-ls-field">
+			<div className="wkf-ls-keep" {...hintRow}>
+				<div className="wkf-ls-head">
+					<HintMark {...hint.mark}>
+						<Label>Source</Label>
+					</HintMark>
+					{playing && (
+						<span className="wkf-ls-now" data-wk-source-now="">
+							{playing}
+						</span>
+					)}
+				</div>
+				<Seg
+					label="Source"
+					wide
+					describedBy={hint.describedBy}
+					options={SOURCE_OPTIONS.map(o => ({ ...o, disabled: !canEdit }))}
+					value={mode}
+					onChange={apply}
+				/>
+			</div>
+			{note && (
+				<div
+					className="wkf-ls-note"
+					data-tone={note.tone}
+					data-wk-source-hint=""
+				>
+					<span className="wkf-ls-grow">{note.text}</span>
+					{noDecoder && canEdit && (
 						<Button variant="outline" size="sm" onClick={() => apply("auto")}>
 							Use Auto
 						</Button>
-					</>
-				)}
-			</div>
+					)}
+				</div>
+			)}
 		</div>
 	)
 }
@@ -696,7 +776,10 @@ const DEEMPH_OPTIONS: ReadonlyArray<{ value: DeemphChoice; label: string }> = [
 	{ value: "75", label: "75 µs" },
 ]
 
-/** Sound: the core's level control, de-emphasis, low-cut and noise reduction (Settings › Audio has the rest). */
+/**
+ * Sound, folded: the core's level control, de-emphasis, low-cut and noise reduction (Settings › Audio has the
+ * rest). The fold says what is behind it, or what is set there; it is remembered per browser.
+ */
 function Sound({
 	status,
 	canEdit,
@@ -705,78 +788,120 @@ function Sound({
 	canEdit: boolean
 }) {
 	const { data } = useServices()
+	const [unfolded, setUnfolded] = useState(readSoundOpen)
+	const bodyId = useId()
+	const agcHint = useHint("Level control", LEVEL_CONTROL_HINT)
+	const deHint = useHint("De-emphasis", DEEMPHASIS_HINT)
+	const lowId = useId()
+	const nrId = useId()
 	const c = status.config
+	const summary = soundSummary(status)
 	const apply = (patch: Parameters<typeof data.liveAudio.setConfig>[0]) =>
 		void data.liveAudio.setConfig(patch).catch(() => undefined)
 	const lock = <T extends string>(
 		o: ReadonlyArray<{ value: T; label: string }>,
 	) => o.map(x => ({ ...x, disabled: !canEdit }))
+	const toggle = () => {
+		writeSoundOpen(!unfolded)
+		setUnfolded(!unfolded)
+	}
+	const lowCut = lowCutValue(c)
+	const nr = noiseReductionValue(c)
 	return (
-		<div className="wkf-field">
-			<Label>Sound</Label>
-			<div className="wkf-sound-row">
-				<b>Level control</b>
-				<Seg
-					label="Level control"
-					options={lock(AGC_OPTIONS)}
-					value={agcOf(status)}
-					onChange={v => apply({ agc: v })}
-				/>
+		<div className="wkf-ls-sound">
+			<button
+				type="button"
+				className="wkf-ls-fold"
+				aria-expanded={unfolded}
+				aria-controls={bodyId}
+				onClick={toggle}
+			>
+				<Label>Sound</Label>
+				<span
+					className="wkf-ls-fold-sum"
+					data-changed={summary.changed || undefined}
+				>
+					{summary.text}
+				</span>
+				<Icon name="chevron-down" size={16} />
+			</button>
+			<div id={bodyId} className="wkf-ls-fold-body" hidden={!unfolded}>
+				{unfolded && (
+					<>
+						<div className="wkf-ls-row" {...hintRow}>
+							<HintMark {...agcHint.mark}>
+								<span className="wkf-ls-name">Level control</span>
+							</HintMark>
+							<Seg
+								label="Level control"
+								className="wkf-ls-end"
+								describedBy={agcHint.describedBy}
+								options={lock(AGC_OPTIONS)}
+								value={agcOf(status)}
+								onChange={v => apply({ agc: v })}
+							/>
+						</div>
+						<div className="wkf-ls-row" {...hintRow}>
+							<HintMark {...deHint.mark}>
+								<span className="wkf-ls-name">De-emphasis</span>
+							</HintMark>
+							<Seg
+								label="De-emphasis"
+								className="wkf-ls-end"
+								describedBy={deHint.describedBy}
+								options={lock(DEEMPH_OPTIONS)}
+								value={deemphOf(c)}
+								onChange={v => apply(deemphPatch(v))}
+							/>
+						</div>
+						<div className="wkf-ls-row">
+							<label className="wkf-ls-name" htmlFor={lowId}>
+								Cut low rumble
+							</label>
+							{lowCut && <span className="wkf-ls-now">{lowCut}</span>}
+							<Switch
+								id={lowId}
+								size="row"
+								className={lowCut ? undefined : "wkf-ls-end"}
+								checked={c.highPass > 0}
+								disabled={!canEdit}
+								onChange={on => apply({ highPass: on ? LOW_CUT_HZ : 0 })}
+							/>
+						</div>
+						<div className="wkf-ls-row">
+							<label className="wkf-ls-name" htmlFor={nrId}>
+								Noise reduction
+							</label>
+							{nr && <span className="wkf-ls-now">{nr}</span>}
+							<Switch
+								id={nrId}
+								size="row"
+								className={nr ? undefined : "wkf-ls-end"}
+								checked={c.noiseReduction !== "off"}
+								disabled={!canEdit}
+								onChange={on => apply({ noiseReduction: on ? "voice" : "off" })}
+							/>
+						</div>
+					</>
+				)}
 			</div>
-			<div className="wkf-sound-row">
-				<b>De-emphasis</b>
-				<Seg
-					label="De-emphasis"
-					options={lock(DEEMPH_OPTIONS)}
-					value={deemphOf(c)}
-					onChange={v => apply(deemphPatch(v))}
-				/>
-			</div>
-			<SoundSwitch
-				label="Cut low rumble"
-				sub={lowCutSub(c)}
-				checked={c.highPass > 0}
-				disabled={!canEdit}
-				onChange={on => apply({ highPass: on ? LOW_CUT_HZ : 0 })}
-			/>
-			<SoundSwitch
-				label="Noise reduction"
-				sub={noiseReductionSub(c)}
-				checked={c.noiseReduction !== "off"}
-				disabled={!canEdit}
-				onChange={on => apply({ noiseReduction: on ? "voice" : "off" })}
-			/>
 		</div>
 	)
 }
 
-function SoundSwitch({
-	label,
-	sub,
-	checked,
-	disabled,
-	onChange,
-}: {
-	label: string
-	sub: string
-	checked: boolean
-	disabled: boolean
-	onChange: (on: boolean) => void
-}) {
+/** The breaking-up note: "71% heard · 17.4 s missing", only while something went missing. */
+function HealthNote() {
+	const { listen } = useServices()
+	const wanted = useStore(listen, s => s.wanted)
+	const audio = useStore(listen, s => s.audio)
+	const hint = useHint("the heard figure", HEARD_HINT)
+	const text = audioHealthText(audio)
+	if (!wanted || text === null) return null
 	return (
-		<label className="wkf-sound-switch" data-disabled={disabled || undefined}>
-			<span className="wkf-tone-text">
-				<b>{label}</b>
-				<span className="wkf-quiet wkf-small">{sub}</span>
-			</span>
-			<Switch
-				size="row"
-				checked={checked}
-				disabled={disabled}
-				aria-label={label}
-				onChange={onChange}
-			/>
-		</label>
+		<div className="wkf-ls-note wkf-num" data-tone="warn" {...hintRow}>
+			<span>{text}</span>
+			<HintMark {...hint.mark} />
+		</div>
 	)
 }
 
@@ -792,14 +917,12 @@ function download(blob: Blob, name: string): void {
 	setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
-/** Record audio: keeps what plays here and saves it as a WAV in the browser's downloads. */
-function RecordRow() {
+/** The footer: Record (keeps what plays here, saved as a WAV), the delay, and All audio settings. */
+function ListenFoot() {
 	const { listen } = useServices()
 	const recording = useStore(listen, s => s.recording)
 	const wanted = useStore(listen, s => s.wanted)
 	const latency = useStore(listen, s => s.latencyMs)
-	const audio = useStore(listen, s => s.audio)
-	const audioText = audioHealthText(audio)
 	const hz = useSettledHz()
 	const save = (wav: Blob, startedAt: number) => {
 		const name = recordFileName(hz, startedAt)
@@ -815,45 +938,50 @@ function RecordRow() {
 		listen.startRecording(save)
 	}
 	const can = listen.canRecord && wanted
+	// the reason a disabled Record cannot be used is inline (a disabled button takes no focus)
+	const why =
+		recording !== null
+			? null
+			: !listen.canRecord
+				? "Not in this browser"
+				: !wanted
+					? "Listen first"
+					: null
 	return (
-		<div className="wkf-rec-row">
+		<div className="wkf-ls-foot">
 			<Button
 				variant="outline"
 				size="lg"
 				className="wkf-rec-btn"
 				aria-pressed={recording !== null}
 				disabled={!can && recording === null}
-				title={
-					!listen.canRecord
-						? "This browser cannot record live audio"
-						: !wanted
-							? "Listen first: recording keeps what plays here"
-							: "Saved as a WAV file in this browser's downloads"
-				}
 				onClick={toggle}
 			>
 				<span className="wkf-rec-dot" aria-hidden="true" />
-				{recording
-					? `Recording · ${recordClock(recording.seconds)}`
-					: "Record audio"}
+				{recording ? `Recording · ${recordClock(recording.seconds)}` : "Record"}
 			</Button>
-			<span className="wkf-gap" />
-			{wanted && audioText !== null && (
-				<span
-					className="wkf-quiet wkf-small wkf-num"
-					title={audioHealthTitle(audio)}
-				>
-					{audioText}
-				</span>
+			{why ? (
+				<span className="wkf-ls-quiet">{why}</span>
+			) : (
+				latency !== null && (
+					<span className="wkf-ls-quiet wkf-num wkf-ls-delay">
+						{latency} ms delay
+					</span>
+				)
 			)}
-			{latency !== null && (
-				<span
-					className="wkf-quiet wkf-small wkf-num"
-					title="Waiting in the core, buffered in this browser, and the audio device"
-				>
-					Latency ≈ {latency} ms
-				</span>
-			)}
+			<Button
+				variant="ghost"
+				className="wkf-listen-more"
+				aria-label="All audio settings"
+				onClick={() => {
+					focusSetting("au.squelch")
+					shellStore.openDrawer("settings")
+				}}
+			>
+				<span className="wkf-ls-long">All audio settings</span>
+				<span className="wkf-ls-short">Settings</span>
+				<Icon name="chevron-right" size={16} />
+			</Button>
 		</div>
 	)
 }
