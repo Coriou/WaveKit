@@ -63,6 +63,9 @@ const recoverySchema = z.object({
 	shortfall: z.boolean().nullable(),
 })
 const loopSchema = z.object({ maxMs: nonNegative, p99Ms: nonNegative })
+/** Built once, not per sample. */
+const SourceIdsSchema = z.array(z.string().min(1))
+const ShortfallSchema = z.boolean()
 type DeferredLoss = {
 	at: number
 	/** The fanout branches that dropped in this interval. */
@@ -329,7 +332,7 @@ export function createEfficiencyMonitor(deps: {
 		let ids: readonly string[] = []
 		let readable = true
 		try {
-			const parsed = z.array(z.string().min(1)).safeParse(deps.sources())
+			const parsed = SourceIdsSchema.safeParse(deps.sources())
 			if (parsed.success) ids = parsed.data
 			else readable = false
 		} catch {
@@ -583,7 +586,7 @@ export function createEfficiencyMonitor(deps: {
 				if (recovery !== null && recovery.retired !== true) {
 					shortfall = recovery.shortfall
 				} else if (deps.shortfall !== undefined) {
-					const parsed = z.boolean().safeParse(deps.shortfall(id))
+					const parsed = ShortfallSchema.safeParse(deps.shortfall(id))
 					if (parsed.success) shortfall = parsed.data
 					else evidenceValid = false
 				}

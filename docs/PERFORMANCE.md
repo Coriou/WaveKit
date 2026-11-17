@@ -877,7 +877,37 @@ on the old path.
 
 A placement pass is not skipped when its inputs look unchanged. They include the activity clock,
 probation, every decoder's lifecycle, suspension and mode, source caps, the VFO and tuned holds, and
-the pass also has its own effects. What is left costs 4.5 % of busy, 1.6 % of a core here.
+the pass also has its own effects. What is left costs 4.5 % of busy, 1.6 % of a core here. A pass
+reuses only work whose inputs cannot have changed:
+
+- One planner grouping per pass: `activityPlanQueries` returns the activity queries with the
+  grouping they came from, and the manager passes that grouping in the same pass's planner input
+  (`grouping`). The planner plans from it only when that input is the one it was grouped for with
+  nothing but the activity snapshots and confirmed challengers replaced (every other member the same
+  value), and groups afresh otherwise; nothing is kept between calls. The band-plan range lookup
+  reaches the planner through the enablement options, so both calls see it. Property tests hold the
+  queries and the plan, with and without a supplied grouping, to a frozen copy of the planner from
+  before the grouping split.
+- One band resolution per decoder per synchronous section, dropped at every `await`.
+- Placement options are passed to a decoder only when they differ, member by member, from a copy of
+  the last ones a pass passed it, with no other options update in between; every `onOptionsUpdated`
+  only re-parses.
+- Well-formed observed centres skip the schema behind a structural guard, as above.
+- Placement-key indexes per section instead of a scan over every decoder per placement.
+- Source evaluation requests other than caps changes join a pending drain instead of re-arming the
+  300 ms caps debounce, so a stream of them no longer postpones it. A burst of them spanning
+  N x 300 ms now gives about N evaluations, each reading the state when it runs, where it gave one
+  after the burst.
+- While placement passes run, a source whose due efficiency set is unchanged is queued again
+  1,700 ms after its last evaluation began, so it costs at most one evaluation per
+  `EFFICIENCY_SAMPLE_MS` and a due refusal is asked again within one sample. Without passes only the
+  sampling timer asks, at the next sample and behind the debounce: within one sample plus 300 ms, as
+  before. Both bounds are to the point where the evaluation is queued for the serial caps worker:
+  evaluations of other sources queued ahead of it run first. Caps changes under 300 ms apart (a
+  sweep's hops) still re-arm the one debounce the manager has, so they hold every source's
+  evaluation, a due refusal's included, until they stop, as before.
+
+Counted and pinned in `manager-pass-cost.test.ts` and `manager-efficiency-revive.test.ts`.
 
 **The passive guard judges CPU time.** `eluSample()` now reports the worker's event-loop counters
 with `active` reduced to the thread's CPU time (`WorkerCostMeter`), because ELU counts a thread

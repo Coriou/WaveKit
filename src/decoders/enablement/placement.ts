@@ -13,6 +13,7 @@ import {
 	placementKey,
 } from "./contract.js"
 import type {
+	PlacementGrouping,
 	PlannerDecoder,
 	PlannerSource,
 	PlacementPlanner,
@@ -439,24 +440,57 @@ type ActivityGroup = {
 	snapshot: ActivitySnapshot | null
 }
 
-export const planPlacements: PlacementPlanner = input => {
+type PlannerInput = Parameters<PlacementPlanner>[0]
+
+/** One ranked set of an activity decoder before its snapshot is read. */
+type GroupBasis = {
+	source: PlannerSource
+	candidatesHz: number[]
+	/** Null when the source has no spectrum epoch (unranked). */
+	query: ActivityQuery | null
+}
+
+/**
+ * One decoder's candidates in planner order: either emitted as they are
+ * (`sorted`), or mandatory ones (`firm`) plus ranked sets per source.
+ */
+type PlainGrouping = { d: PlannerDecoder; sorted: Candidate[] }
+type RankedGrouping = {
+	d: PlannerDecoder
+	firm: Candidate[]
+	ranked: Candidate[]
+	groups: GroupBasis[]
+}
+type DecoderGrouping = PlainGrouping | RankedGrouping
+
+/**
+ * The planner's grouping step: every decoder's candidates, its unplaced
+ * reason and the activity queries, in plan order. It reads neither the
+ * snapshots nor the challengers, so the queries a pass sends and the plan
+ * that reads their answers come from one grouping.
+ */
+interface PlannerGrouping {
+	decoders: PlannerDecoder[]
+	records: DecoderGrouping[]
+	queries: ActivityQuery[]
+	unplaced: Map<string, PlannerUnplacedReason>
+}
+
+type PlannerUnplacedReason =
+	| "decoder-unavailable"
+	| "channelizer-unavailable"
+	| "frequency-out-of-band"
+	| "capture-too-narrow"
+	| "no-channel-selected"
+
+function groupPlacements(input: PlannerInput): PlannerGrouping {
 	const act = input.activity
 	// Stage 1: with activity input the whole eligible set is ranked, then the
 	// slot allocator slices it; without it today's caps apply.
 	const unsliced = act !== undefined
-	const groups: ActivityGroup[] = []
+	const records: DecoderGrouping[] = []
 	const queries: ActivityQuery[] = []
-	const wanted: WantedPlacement[] = []
-	// 3.18/3.20: gated secondary placements, admitted after every decoder.
-	const deferred: WantedPlacement[] = []
-	const unplaced = new Map<
-		string,
-		| "decoder-unavailable"
-		| "channelizer-unavailable"
-		| "frequency-out-of-band"
-		| "capture-too-narrow"
-		| "no-channel-selected"
-	>()
+	const unplaced = new Map<string, PlannerUnplacedReason>()
 	const decoders = input.decoders
 		.filter(validDecoder)
 		.sort((a, b) => decoderClass(a) - decoderClass(b) || a.order - b.order)
@@ -1009,32 +1043,6 @@ export const planPlacements: PlacementPlanner = input => {
 						: a.index - b.index) ||
 					a.source.order - b.source.order,
 			)
-		const emit = (
-			c: Candidate,
-			i: number,
-			activity?: PlacementActivity,
-		): void => {
-			;(c.gatedSecondary && i > 0 ? deferred : wanted).push({
-				key: placementKey(d.id, c.source.id, c.reach, c.hz),
-				decoderId: d.id,
-				sourceId: c.source.id,
-				channelHz: c.hz,
-				reach: c.reach,
-				origin: c.origin,
-				primary: i === 0,
-				costCores: placementCostCores(
-					d.type,
-					c.reach,
-					typeof c.options?.["targetSampleRate"] === "number"
-						? c.options["targetSampleRate"]
-						: d.channelTargetRateHz,
-				),
-				sampleRateHz: c.source.sampleRateHz!,
-				...(c.options ? { options: c.options } : {}),
-				...(c.gatedSecondary && i > 0 ? { gated: true as const } : {}),
-				...(activity ? { activity } : {}),
-			})
-		}
 		// Stage 1: an activity decoder's paging raster and band-plan channels
 		// are one ranked set per source; the configured, band and VFO channels
 		// stay mandatory (3.18 VFO rules are applied above, before this).
@@ -1042,18 +1050,18 @@ export const planPlacements: PlacementPlanner = input => {
 			act && isActivityDecoder(d.type) ? sorted.filter(rankable) : []
 		if (act && ranked.length) {
 			const firm = sorted.filter(c => !rankable(c))
-			const local: ActivityGroup[] = []
+			const bases: GroupBasis[] = []
 			for (const c of ranked) {
-				if (local.some(g => g.source === c.source)) continue
+				if (bases.some(g => g.source === c.source)) continue
 				const centre = c.source.centreHz!
 				// Today's order (3.7, 3.18): the fallback equals it exactly.
 				const candidatesHz = ranked
 					.filter(r => r.source === c.source)
 					.map(r => r.hz!)
 				const epoch = act.epochs.find(e => e?.sourceId === c.source.id)
-				let snapshot: ActivitySnapshot | null = null
+				let query: ActivityQuery | null = null
 				if (epoch) {
-					const query: ActivityQuery = {
+					query = {
 						epoch,
 						decoderId: d.id,
 						decoderType: d.type as ActivityQuery["decoderType"],
@@ -1063,67 +1071,13 @@ export const planPlacements: PlacementPlanner = input => {
 						channelWidthHz: d.channelBandwidthHz,
 					}
 					queries.push(query)
-					snapshot = readySnapshot(query, act.snapshots)
-					if (snapshot && d.type === "dsd-fme") {
-						const protectedHz = new Set(
-							act.incumbents
-								.filter(
-									inc =>
-										inc.decoderId === d.id &&
-										inc.sourceId === c.source.id &&
-										inc.syncSeen === true &&
-										inc.syncUntilMonoMs !== undefined &&
-										act.nowMonoMs < inc.syncUntilMonoMs,
-								)
-								.map(inc => inc.hz),
-						)
-						snapshot = {
-							...snapshot,
-							channels: snapshot.channels.map(ch =>
-								protectedHz.has(ch.hz) ? { ...ch, excluded: false } : ch,
-							),
-						}
-					}
 				}
-				local.push({
-					d,
-					source: c.source,
-					candidatesHz,
-					order: activityOrder(candidatesHz, snapshot),
-					snapshot,
-				})
+				bases.push({ source: c.source, candidatesHz, query })
 			}
-			const info = (g: ActivityGroup, hz: number) =>
-				placementActivity(g.snapshot?.channels.find(ch => ch.hz === hz))
-			firm.forEach((c, i) => emit(c, i))
-			if (!firm.length) {
-				// The primary is not moved by ranking (that restarts the decoder's
-				// own process): the incumbent primary channel while it is eligible,
-				// otherwise the best-ranked channel of the preferred source.
-				const incumbent = act.incumbents.find(
-					i => i.decoderId === d.id && i.primary,
-				)
-				const primary =
-					(incumbent &&
-						ranked.find(
-							c =>
-								c.hz === incumbent.hz &&
-								c.source.id === incumbent.sourceId &&
-								local.find(g => g.source === c.source)?.order.includes(c.hz!),
-						)) ??
-					ranked.find(
-						c => c.source === ranked[0]!.source && c.hz === local[0]!.order[0],
-					)!
-				if (primary) {
-					const g = local.find(x => x.source === primary.source)!
-					emit(primary, 0, info(g, primary.hz!))
-					g.order = g.order.filter(hz => hz !== primary.hz)
-				}
-			}
-			groups.push(...local)
+			records.push({ d, firm, ranked, groups: bases })
 			continue
 		}
-		sorted.forEach((c, i) => emit(c, i))
+		records.push({ d, sorted })
 		if (!sorted.length) {
 			if (channelizerMissing) unplaced.set(d.id, "channelizer-unavailable")
 			// 3.14: a fit failure is physical, so it holds when `always`, an operator start or an
@@ -1136,6 +1090,194 @@ export const planPlacements: PlacementPlanner = input => {
 				else if (bandKnown(d)) unplaced.set(d.id, "frequency-out-of-band")
 			}
 		}
+	}
+	return { decoders, records, queries, unplaced }
+}
+
+/**
+ * A grouping and the input it was computed for: what `activityPlanQueries`
+ * returns as an opaque `PlacementGrouping`. Frozen, and recognised by class,
+ * so a value not made here is never read as a grouping.
+ */
+class GroupingHandle {
+	constructor(
+		readonly input: PlannerInput,
+		readonly grouping: PlannerGrouping,
+	) {
+		Object.freeze(this)
+	}
+}
+
+/** Members of `activity` the grouping does not read. */
+const PLAN_ONLY_ACTIVITY_KEYS: ReadonlySet<string> = new Set([
+	"snapshots",
+	"confirmedChallengers",
+])
+/** The member that carries the grouping itself. */
+const GROUPING_KEYS: ReadonlySet<string> = new Set(["grouping"])
+
+/**
+ * The same own enumerable keys outside `ignored` (any order), each the same
+ * value by `===`; `nested` alone may instead be two objects that compare so
+ * with PLAN_ONLY_ACTIVITY_KEYS ignored.
+ */
+function sameMembers(
+	a: object,
+	b: object,
+	ignored: ReadonlySet<string>,
+	nested?: string,
+): boolean {
+	const keysA = Object.keys(a).filter(key => !ignored.has(key))
+	const keysB = Object.keys(b).filter(key => !ignored.has(key))
+	if (keysA.length !== keysB.length) return false
+	const ra = a as Record<string, unknown>
+	const rb = b as Record<string, unknown>
+	for (const key of keysA) {
+		if (!Object.hasOwn(b, key)) return false
+		if (ra[key] === rb[key]) continue
+		if (key !== nested) return false
+		const va = ra[key]
+		const vb = rb[key]
+		if (
+			typeof va !== "object" ||
+			va === null ||
+			typeof vb !== "object" ||
+			vb === null ||
+			!sameMembers(va, vb, PLAN_ONLY_ACTIVITY_KEYS)
+		)
+			return false
+	}
+	return true
+}
+
+/**
+ * The grouping `input.grouping` carries when it was computed for this input,
+ * otherwise a fresh one. "For this input": both have activity, and every
+ * member other than `grouping`, `activity.snapshots` and
+ * `activity.confirmedChallengers` (the only members the grouping does not
+ * read) is the same value, `activity` compared member by member. A
+ * different input (one key more or less, another `sources` array, another
+ * `bandplanRangeContains`) is grouped afresh. An in-place change of a
+ * member cannot be seen by this rule: see `activityPlanQueries`.
+ */
+function groupingFor(input: PlannerInput): PlannerGrouping {
+	const supplied: unknown = input.grouping
+	if (
+		supplied instanceof GroupingHandle &&
+		input.activity !== undefined &&
+		supplied.input.activity !== undefined &&
+		sameMembers(supplied.input, input, GROUPING_KEYS, "activity")
+	)
+		return supplied.grouping
+	return groupPlacements(input)
+}
+
+export const planPlacements: PlacementPlanner = input => {
+	const act = input.activity
+	const { decoders, records, queries, unplaced: grouped } = groupingFor(input)
+	// A grouping may serve more than one plan: each plan owns its map.
+	const unplaced = new Map(grouped)
+	const groups: ActivityGroup[] = []
+	const wanted: WantedPlacement[] = []
+	// 3.18/3.20: gated secondary placements, admitted after every decoder.
+	const deferred: WantedPlacement[] = []
+	const emit = (
+		d: PlannerDecoder,
+		c: Candidate,
+		i: number,
+		activity?: PlacementActivity,
+	): void => {
+		;(c.gatedSecondary && i > 0 ? deferred : wanted).push({
+			key: placementKey(d.id, c.source.id, c.reach, c.hz),
+			decoderId: d.id,
+			sourceId: c.source.id,
+			channelHz: c.hz,
+			reach: c.reach,
+			origin: c.origin,
+			primary: i === 0,
+			costCores: placementCostCores(
+				d.type,
+				c.reach,
+				typeof c.options?.["targetSampleRate"] === "number"
+					? c.options["targetSampleRate"]
+					: d.channelTargetRateHz,
+			),
+			sampleRateHz: c.source.sampleRateHz!,
+			...(c.options ? { options: c.options } : {}),
+			...(c.gatedSecondary && i > 0 ? { gated: true as const } : {}),
+			...(activity ? { activity } : {}),
+		})
+	}
+	for (const record of records) {
+		const d = record.d
+		if ("sorted" in record) {
+			record.sorted.forEach((c, i) => emit(d, c, i))
+			continue
+		}
+		// A ranked record exists only with activity input.
+		if (!act) continue
+		const { firm, ranked } = record
+		const local: ActivityGroup[] = record.groups.map(basis => {
+			let snapshot: ActivitySnapshot | null = null
+			if (basis.query) {
+				snapshot = readySnapshot(basis.query, act.snapshots)
+				if (snapshot && d.type === "dsd-fme") {
+					const protectedHz = new Set(
+						act.incumbents
+							.filter(
+								inc =>
+									inc.decoderId === d.id &&
+									inc.sourceId === basis.source.id &&
+									inc.syncSeen === true &&
+									inc.syncUntilMonoMs !== undefined &&
+									act.nowMonoMs < inc.syncUntilMonoMs,
+							)
+							.map(inc => inc.hz),
+					)
+					snapshot = {
+						...snapshot,
+						channels: snapshot.channels.map(ch =>
+							protectedHz.has(ch.hz) ? { ...ch, excluded: false } : ch,
+						),
+					}
+				}
+			}
+			return {
+				d,
+				source: basis.source,
+				candidatesHz: basis.candidatesHz,
+				order: activityOrder(basis.candidatesHz, snapshot),
+				snapshot,
+			}
+		})
+		const info = (g: ActivityGroup, hz: number) =>
+			placementActivity(g.snapshot?.channels.find(ch => ch.hz === hz))
+		firm.forEach((c, i) => emit(d, c, i))
+		if (!firm.length) {
+			// The primary is not moved by ranking (that restarts the decoder's
+			// own process): the incumbent primary channel while it is eligible,
+			// otherwise the best-ranked channel of the preferred source.
+			const incumbent = act.incumbents.find(
+				i => i.decoderId === d.id && i.primary,
+			)
+			const primary =
+				(incumbent &&
+					ranked.find(
+						c =>
+							c.hz === incumbent.hz &&
+							c.source.id === incumbent.sourceId &&
+							local.find(g => g.source === c.source)?.order.includes(c.hz!),
+					)) ??
+				ranked.find(
+					c => c.source === ranked[0]!.source && c.hz === local[0]!.order[0],
+				)!
+			if (primary) {
+				const g = local.find(x => x.source === primary.source)!
+				emit(d, primary, 0, info(g, primary.hz!))
+				g.order = g.order.filter(hz => hz !== primary.hz)
+			}
+		}
+		groups.push(...local)
 	}
 	if (!act) return { wanted: [...wanted, ...deferred], unplaced }
 	// Global allocator (activity-plan.ts): every placement planned so far is
@@ -1377,17 +1519,48 @@ export const planPlacements: PlacementPlanner = input => {
 	return {
 		wanted: [...wanted, ...deferred],
 		unplaced,
-		activity: { queries, moves, groups: views, nextEvaluationMonoMs: next },
+		activity: {
+			queries: [...queries],
+			moves,
+			groups: views,
+			nextEvaluationMonoMs: next,
+		},
+	}
+}
+
+/**
+ * The activity queries of one pass and the grouping they came from: the
+ * planner's groups, before any snapshot. The queries are the same values,
+ * in the same order, as the queries of `planPlacements` with no snapshots.
+ * Pass `grouping` as the `grouping` member of the same pass's planner input
+ * and `planPlacements` plans from it instead of grouping again, when that
+ * input is this one with only the activity snapshots and confirmed
+ * challengers replaced; any other input is grouped afresh. Null without
+ * activity input.
+ *
+ * Precondition: nothing reachable from `input` is changed in place between
+ * this call and that plan (no array or object of `decoders`, `sources`,
+ * `vfo` or `activity`, nor of the returned queries, is mutated, and the
+ * lookups give the same answers; true within one synchronous section). The identity rule compares members
+ * by reference, so it cannot see an in-place change: a plan given this
+ * grouping after one is planned from the input as it was here.
+ */
+export function activityPlanQueries(input: PlannerInput): {
+	queries: readonly ActivityQuery[]
+	grouping: PlacementGrouping | null
+} {
+	if (!input.activity) return { queries: [], grouping: null }
+	const grouping = groupPlacements(input)
+	return {
+		queries: [...grouping.queries],
+		grouping: new GroupingHandle(
+			input,
+			grouping,
+		) as unknown as PlacementGrouping,
 	}
 }
 
 /** The activity queries of one pass: the planner's groups, before any snapshot. */
-export function activityQueries(
-	input: Parameters<PlacementPlanner>[0],
-): readonly ActivityQuery[] {
-	if (!input.activity) return []
-	return (
-		planPlacements({ ...input, activity: { ...input.activity, snapshots: [] } })
-			.activity?.queries ?? []
-	)
+export function activityQueries(input: PlannerInput): readonly ActivityQuery[] {
+	return activityPlanQueries(input).queries
 }

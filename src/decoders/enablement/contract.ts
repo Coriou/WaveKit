@@ -306,6 +306,15 @@ export type BandplanRangeLookup = (
 	hz: number,
 	protocols: readonly string[],
 ) => boolean
+declare const placementGroupingBrand: unique symbol
+/**
+ * The planner's grouping of one input (every decoder's candidates, unplaced
+ * reasons and activity queries), as `activityPlanQueries` returns it. Opaque:
+ * only the planner reads it.
+ */
+export interface PlacementGrouping {
+	readonly [placementGroupingBrand]: true
+}
 export interface PlannerInput {
 	decoders: readonly PlannerDecoder[]
 	sources: readonly PlannerSource[]
@@ -320,6 +329,13 @@ export interface PlannerInput {
 	 * and dsd-fme are ranked whole and sliced by the global slot allocator.
 	 */
 	activity?: PlannerActivity
+	/**
+	 * The grouping `activityPlanQueries` computed for this pass. The planner
+	 * plans from it only when it was computed for this input with nothing but
+	 * the activity snapshots and confirmed challengers replaced, and groups
+	 * afresh otherwise. Absent: grouped afresh.
+	 */
+	grouping?: PlacementGrouping
 }
 export interface WantedPlacement {
 	key: string
