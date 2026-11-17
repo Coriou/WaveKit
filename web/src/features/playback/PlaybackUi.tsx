@@ -155,7 +155,7 @@ export function WaveView({ id, title, durationMs, queue }: WaveViewProps) {
 					)}
 				</svg>
 				{current && (
-					<div className="wkp-head" style={{ left: `${frac * 100}%` }} />
+					<div className="wkp-playhead" style={{ left: `${frac * 100}%` }} />
 				)}
 				{peaks === undefined && (
 					<span className="wkp-wave-note">Loading waveform…</span>

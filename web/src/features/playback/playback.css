@@ -89,7 +89,7 @@
 	.wkp-bar.is-played {
 		fill: var(--wk-accent);
 	}
-	.wkp-head {
+	.wkp-playhead {
 		position: absolute;
 		top: 0;
 		bottom: 0;
