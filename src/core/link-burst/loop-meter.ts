@@ -1,6 +1,7 @@
 import { monitorEventLoopDelay, performance } from "node:perf_hooks"
 import {
 	ELU_BASE_STALE_MS,
+	ELU_LIVE_MIN_MS,
 	LINK_QUALITY_WINDOW_MS,
 	LOOP_DELAY_RING,
 	LOOP_METER_RESOLUTION_MS,
@@ -58,10 +59,14 @@ export function createEventLoopMeter(
 	}
 	let last: LoopDelayInterval | null = null
 	let disposed = false
+	// When the monitor last took an interval (creation counts): past ELU_BASE_STALE_MS the live
+	// histogram has not been reset by a take and describes no recent window.
+	let lastTakeAt = monoNow()
 	histogram.enable()
 	return {
 		takeInterval() {
 			if (disposed) return null
+			lastTakeAt = monoNow()
 			recordElu()
 			if (histogram.count === 0) {
 				histogram.reset()
@@ -98,6 +103,7 @@ export function createEventLoopMeter(
 			}
 		},
 		maxSince(since) {
+			if (monoNow() - lastTakeAt > ELU_BASE_STALE_MS) return null
 			let max: number | null =
 				!disposed && histogram.count > 0 ? histogram.max / 1e6 : null
 			for (let i = 0; i < LOOP_DELAY_RING; i++)
@@ -123,6 +129,56 @@ export function createEventLoopMeter(
 			const total = active + now.idle - (eluIdle[base] ?? 0)
 			if (!Number.isFinite(total) || total <= 0 || active < 0) return null
 			return Math.min(1, active / total)
+		},
+		utilizationMaxSince(since) {
+			if (disposed) return { max: null, complete: false, live: null }
+			// Readings in age order: each closes the take that began at the reading before it.
+			const order: number[] = []
+			for (let k = 0; k < LOOP_DELAY_RING; k++) {
+				const i = (eluCursor + k) % LOOP_DELAY_RING
+				if (Number.isFinite(eluStamps[i] ?? -Infinity)) order.push(i)
+			}
+			const now = monoNow()
+			const stampOf = (k: number) => eluStamps[order[k] ?? -1] ?? -Infinity
+			const takeElu = (k: number): number | null => {
+				const i = order[k]
+				const p = order[k - 1]
+				if (i === undefined || p === undefined) return null
+				const active = (eluActive[i] ?? 0) - (eluActive[p] ?? 0)
+				const total = active + (eluIdle[i] ?? 0) - (eluIdle[p] ?? 0)
+				if (!Number.isFinite(total) || total <= 0 || active < 0) return null
+				return Math.min(1, active / total)
+			}
+			const newest = order.length - 1
+			let live: number | null = null
+			const newestAt = stampOf(newest)
+			if (newest >= 0 && now - newestAt >= ELU_LIVE_MIN_MS) {
+				try {
+					const reading = elu()
+					const i = order[newest] ?? -1
+					const active = reading.active - (eluActive[i] ?? 0)
+					const total = active + reading.idle - (eluIdle[i] ?? 0)
+					if (Number.isFinite(total) && total > 0 && active >= 0)
+						live = Math.min(1, active / total)
+				} catch {
+					/* No live utilisation. */
+				}
+			}
+			let first = order.findIndex((_, k) => stampOf(k) >= since)
+			if (first < 0) return { max: null, complete: false, live }
+			// The guard take, the newest one ending before the window, when it has a base.
+			const guard = first - 1
+			let complete = guard >= 1 && now - newestAt <= ELU_BASE_STALE_MS
+			if (guard >= 0) first = guard
+			let max: number | null = null
+			for (let k = first; k <= newest; k++) {
+				const value = takeElu(k)
+				if (k >= 1 && stampOf(k) - stampOf(k - 1) > ELU_BASE_STALE_MS)
+					complete = false
+				if (value === null) complete = false
+				else max = Math.max(max ?? 0, value)
+			}
+			return { max, complete, live }
 		},
 		dispose() {
 			if (!disposed) {

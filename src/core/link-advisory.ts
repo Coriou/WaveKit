@@ -14,7 +14,7 @@ import {
 	CORE_BUSY_LOOP_DELAY_MS,
 	SOURCE_ELU_MAX,
 } from "./core-load.js"
-import type { CoreLoadReading, CoreLoadSignal } from "./core-load.js"
+import type { CoreLoadEvidence, CoreLoadSignal } from "./core-load.js"
 import {
 	LINK_SHORTFALL_PERCENT,
 	LINK_SUSTAINED_WINDOW_MS,
@@ -38,40 +38,63 @@ export type DroppingCause = Extract<
 >
 
 export { CORE_BUSY_ELU, SOURCE_ELU_MAX }
-/** Core-load evidence over a window, as the advisor reads it: THE core load signal's reading. */
-export type CoreLoadEvidence = CoreLoadReading
+export type { CoreLoadEvidence }
 
 /**
- * The cause ladder for a `dropping` advisory, evaluated in order; a step whose inputs are
- * missing, negative or non-finite (utilisation also above 1) is skipped, so missing evidence
- * answers `unknown`, never `source`.
- * 1. utilisation >= `CORE_BUSY_ELU`: `core-busy` (needs only utilisation);
- * 2. arrival gap beyond the loop delay by >= `LINK_GAP_MS` (the gap the loop cannot
- *    explain, as the drop attribution reads it): `source` (needs loop delay and gap);
- * 3. loop delay >= `CORE_BUSY_LOOP_DELAY_MS` (`LINK_GAP_MS`): `core-busy` (needs loop delay
- *    and gap, since step 2 takes precedence);
- * 4. loop delay < `HOST_LOOP_DELAY_MS` and utilisation < `SOURCE_ELU_MAX`: `source` (needs
- *    all three);
- * 5. otherwise `unknown`.
- * Utilisation goes missing after a long stall (the meter has no interval over the window), so
- * steps 2 and 3 must not depend on it.
+ * The cause ladder for a `dropping` advisory (rule v3, stateless) over the cause window W (see
+ * `LINK_CAUSE_LOOKBACK_MAX_MS`): `eluMax` the worst 2 s take's event-loop utilisation over W and
+ * its guard take, `eluComplete` whether every such take was read, `eluLive` the in-progress
+ * take's utilisation (at least 500 ms long), `loopDelayMaxMs` the worst loop delay over W from
+ * one recorder cell earlier (with the in-progress interval; missing once the monitor stopped
+ * taking), and `arrivalGapMaxMs` the source's longest arrival gap over W. Evaluated in order;
+ * an input that is missing, negative or non-finite (utilisation also above 1) fails its step,
+ * so missing evidence answers `unknown`, never `source`.
+ * 1. `eluMax` >= `CORE_BUSY_ELU` (any take read) or loop delay >= `CORE_BUSY_LOOP_DELAY_MS`:
+ *    `core-busy`, meaning the link was not assessed: a stressed core in W explains loss in the
+ *    average. Precedence over an arrival gap is deliberate: under stress the gap excess is not
+ *    trustworthy (the stall's own gap, reads queued behind work).
+ * 2. loop delay and gap read, gap beyond the loop delay by >= `LINK_GAP_MS` (the gap the loop
+ *    cannot explain, as the drop attribution reads it): `source`.
+ * 3. every take read (`eluComplete`), `eluMax` < `SOURCE_ELU_MAX`, the in-progress take absent
+ *    or under `SOURCE_ELU_MAX` (a veto only: it never asserts `core-busy`), loop delay <
+ *    `HOST_LOOP_DELAY_MS` and a gap read: the core had headroom throughout W, `source`.
+ * 4. otherwise `unknown`: a take between `SOURCE_ELU_MAX` and `CORE_BUSY_ELU`, a loop delay
+ *    between `HOST_LOOP_DELAY_MS` and `CORE_BUSY_LOOP_DELAY_MS`, or missing evidence.
+ * Why it holds without state: W spans the whole averaged window, so loss the core caused leaves
+ * the average no later than the stressed takes that caused it leave W, and the guard take keeps
+ * the wholly stressed take before one that straddles the end of a starvation; the tail of a
+ * starvation cannot read `source`. At onset one stressed take in W reads `core-busy`; a worst
+ * take, unlike the window mean, is not diluted by the healthy time before it. A steady link
+ * shortfall after the core recovered reads `source` once W holds only healthy takes. Evidence at
+ * a threshold (a take at 0.69 then 0.71) may flip the reason between `source` and `unknown`
+ * from one recheck to the next; that is accepted.
  */
 export function droppingCause(evidence: {
-	elu: number | null
+	eluMax: number | null
+	eluComplete: boolean
+	eluLive: number | null
 	loopDelayMaxMs: number | null
 	arrivalGapMaxMs: number | null
 }): DroppingCause {
-	const { elu, loopDelayMaxMs: loop, arrivalGapMaxMs: gap } = evidence
-	const utilisation = valid(elu) && elu <= 1 ? elu : null
-	// A saturated loop is core-busy on its own.
-	if (utilisation !== null && utilisation >= CORE_BUSY_ELU) return "core-busy"
-	if (!valid(loop) || !valid(gap)) return "unknown"
-	if (gap - loop >= LINK_GAP_MS) return "source"
-	if (loop >= CORE_BUSY_LOOP_DELAY_MS) return "core-busy"
+	const fraction = (value: number | null) =>
+		valid(value) && value <= 1 ? value : null
+	const eluMax = fraction(evidence.eluMax)
+	const live = fraction(evidence.eluLive)
+	const loop = valid(evidence.loopDelayMaxMs) ? evidence.loopDelayMaxMs : null
+	const gap = valid(evidence.arrivalGapMaxMs) ? evidence.arrivalGapMaxMs : null
 	if (
-		utilisation !== null &&
-		loop < HOST_LOOP_DELAY_MS &&
-		utilisation < SOURCE_ELU_MAX
+		(eluMax !== null && eluMax >= CORE_BUSY_ELU) ||
+		(loop !== null && loop >= CORE_BUSY_LOOP_DELAY_MS)
+	)
+		return "core-busy"
+	if (loop === null || gap === null) return "unknown"
+	if (gap - loop >= LINK_GAP_MS) return "source"
+	if (
+		evidence.eluComplete &&
+		eluMax !== null &&
+		eluMax < SOURCE_ELU_MAX &&
+		(live === null || live < SOURCE_ELU_MAX) &&
+		loop < HOST_LOOP_DELAY_MS
 	)
 		return "source"
 	return "unknown"
@@ -103,7 +126,7 @@ export function linkAdvisorEvidence(deps: {
 	) => Pick<IngestRecorder, "interval"> | null | undefined
 	monoNow: () => number
 }): {
-	coreLoad: (sinceMono: number) => CoreLoadReading
+	coreLoad: (sinceMono: number) => CoreLoadEvidence
 	arrivalGapMaxMs: (sourceId: string, sinceMono: number) => number | null
 } {
 	return {
@@ -114,28 +137,19 @@ export function linkAdvisorEvidence(deps: {
 }
 
 /**
- * How far back a `dropping` cause looks for evidence. `dropping` is the received average over
+ * How far back the cause window W reaches. `dropping` is the received average over
  * `LINK_SUSTAINED_WINDOW_MS` ending at the LAST metrics observation, and each observation
- * describes the `SOURCE_METRICS_INTERVAL_MS` before it; so the loss behind it can lie in the
- * interval starting at the observation that bounds the window, up to
- * `LINK_SUSTAINED_WINDOW_MS + SOURCE_METRICS_INTERVAL_MS` (15 s) before now. The evidence
- * window spans back to that observation, at least the sustained window and at most this bound
- * (the ingest recorder answers 15.75 s of arrival cells; the loop meter's ring and ELU base
- * cover it with room).
+ * describes the `SOURCE_METRICS_INTERVAL_MS` before it; so the loss behind it lies after the
+ * retained observation that bounds the window. W = [max(that observation, now - this), now],
+ * the observation mapped from the wall clock to the monotonic clock by its age; with no average
+ * (a `dropping` from upstream drops alone) W is the last `LINK_SUSTAINED_WINDOW_MS`. The cap
+ * holds when timer jitter leaves the bounding observation ~20 s back: the ingest recorder
+ * answers only 15.75 s of arrival cells. The arrival gap and the takes are read over W, the
+ * loop delay from one recorder cell (`INGEST_CELL_MS`) earlier, so a stall whose arrival gap is
+ * stamped in W's first cell has its loop delay in W too.
  */
 export const LINK_CAUSE_LOOKBACK_MAX_MS =
 	LINK_SUSTAINED_WINDOW_MS + SOURCE_METRICS_INTERVAL_MS
-
-/**
- * How long the stretch rule holds a `core-busy` decision against a fresh `source`. Loss a
- * core-busy decision at `T` explains lies at or before `T`. The dropping average at `now` ends
- * at the last metrics observation, at most `SOURCE_METRICS_INTERVAL_MS` (5 s) before `now`, and
- * reaches back at most `LINK_CAUSE_LOOKBACK_MAX_MS` (15 s) before that observation; so once
- * `now - T > LINK_CAUSE_LOOKBACK_MAX_MS + SOURCE_METRICS_INTERVAL_MS` (20 s), none of that loss
- * is in the average and the decision no longer bears on the cause.
- */
-export const CORE_BUSY_STRETCH_MS =
-	LINK_CAUSE_LOOKBACK_MAX_MS + SOURCE_METRICS_INTERVAL_MS
 
 /** The source manager facts the advisor's `live` gate reads. */
 export interface LiveSourceFacts {
@@ -155,7 +169,9 @@ export function sourceIsLive(sources: LiveSourceFacts, id: string): boolean {
  * Production's `sourceCauseExcluded` facts: while the tuner is under external control, a
  * shortfall is no proof that the link fails to carry the rate the core set, so `source` reads
  * `unknown`. A rate-truth mismatch is not a reason: rate truth measures the same received bytes,
- * so a sustained link failure would also read as a slower dongle.
+ * so a sustained link failure would also read as a slower dongle. When the core takes control
+ * back, `wireDecoderLinkFeed` resets the advisor, so a shortfall accrued under external control
+ * never reads `source` afterwards.
  */
 export function sourceCauseExcluded(
 	deps: { controlModeOf: (id: string) => string | null | undefined },
@@ -173,7 +189,7 @@ export function createLinkAdvisor(deps: {
 	 * THE core load signal's read over the window starting at `sinceMono` (`CoreLoadSignal.read`);
 	 * absent: causes read `unknown`.
 	 */
-	coreLoad?: (sinceMono: number) => CoreLoadReading
+	coreLoad?: (sinceMono: number) => CoreLoadEvidence
 	/** Longest arrival gap (ms) of the source since `sinceMono`; absent: causes read `unknown`. */
 	arrivalGapMaxMs?: (sourceId: string, sinceMono: number) => number | null
 	/**
@@ -197,41 +213,6 @@ export function createLinkAdvisor(deps: {
 			return true
 		}
 	}
-	/**
-	 * Latch rule: a known cause (`source` or `core-busy`) decided for a source at a rate is
-	 * kept for `LINK_SUSTAINED_WINDOW_MS` after the decision, so the reason does not flap
-	 * tick to tick on evidence at a threshold; it is then decided afresh. `unknown` is never
-	 * latched, so the first known cause replaces it. The latch is dropped when the source
-	 * stops dropping at that rate, or on `reset`; a classification at another rate (a
-	 * hypothetical raise) neither reads nor changes it.
-	 */
-	const latches = new Map<
-		string,
-		{ rate: number; cause: DroppingCause; until: number }
-	>()
-	/**
-	 * Stretch rule: within one dropping stretch at a rate (ended like the latch), once the core
-	 * was found busy, a fresh `source` decision stands only on arrival-gap evidence (ladder step
-	 * 2) newer than that core-busy decision; otherwise `core-busy` is kept, because the loss
-	 * still in the average may be the core's (and missing evidence for that gap reads
-	 * `unknown`). The rule expires `CORE_BUSY_STRETCH_MS` after the core-busy decision, when no
-	 * loss it explained can still be in the average, and a kept `core-busy` is latched no longer.
-	 */
-	const coreBusyAt = new Map<string, { rate: number; at: number }>()
-	const dropStretch = (sourceId: string, rate: number) => {
-		if (latches.get(sourceId)?.rate === rate) latches.delete(sourceId)
-		if (coreBusyAt.get(sourceId)?.rate === rate) coreBusyAt.delete(sourceId)
-	}
-	// Loop delay is read from one recorder cell earlier than the gap, so a stall whose arrival
-	// gap is stamped in the window's first cell has its loop delay in the window too.
-	const evidence = (sourceId: string, since: number) => {
-		const load = deps.coreLoad?.(since - INGEST_CELL_MS)
-		return {
-			elu: load?.elu ?? null,
-			loopDelayMaxMs: load?.loopDelayMaxMs ?? null,
-			arrivalGapMaxMs: deps.arrivalGapMaxMs?.(sourceId, since) ?? null,
-		}
-	}
 	const excluded = (sourceId: string): boolean => {
 		try {
 			return deps.sourceCauseExcluded?.(sourceId) === true
@@ -239,54 +220,28 @@ export function createLinkAdvisor(deps: {
 			return false
 		}
 	}
-	const decideAfresh = (
+	const decideCause = (
 		sourceId: string,
-		rate: number,
 		mono: number,
 		lookbackMs: number,
 	): DroppingCause => {
-		const latch = latches.get(sourceId)
 		const since = mono - lookbackMs
 		let cause: DroppingCause = "unknown"
-		let until = mono + LINK_SUSTAINED_WINDOW_MS
 		try {
-			cause = droppingCause(evidence(sourceId, since))
-			let busy = coreBusyAt.get(sourceId)
-			if (busy?.rate === rate && mono - busy.at > CORE_BUSY_STRETCH_MS) {
-				coreBusyAt.delete(sourceId)
-				busy = undefined
-			}
-			if (cause === "source" && busy?.rate === rate) {
-				// Only a gap the loop cannot explain since the core-busy decision may replace it.
-				const fresh = evidence(sourceId, Math.max(since, busy.at))
-				const { loopDelayMaxMs: loop, arrivalGapMaxMs: gap } = fresh
-				if (!valid(loop) || !valid(gap)) cause = "unknown"
-				else if (gap - loop < LINK_GAP_MS) {
-					cause = "core-busy"
-					until = Math.min(until, busy.at + CORE_BUSY_STRETCH_MS)
-				} else coreBusyAt.delete(sourceId)
-			} else if (cause === "core-busy")
-				coreBusyAt.set(sourceId, { rate, at: mono })
+			// Two reads of the one signal: the takes over W, the loop delay from a cell earlier.
+			const takes = deps.coreLoad?.(since)
+			const loop = deps.coreLoad?.(since - INGEST_CELL_MS)
+			cause = droppingCause({
+				eluMax: takes?.eluMax ?? null,
+				eluComplete: takes?.eluComplete === true,
+				eluLive: takes?.eluLive ?? null,
+				loopDelayMaxMs: loop?.loopDelayMaxMs ?? null,
+				arrivalGapMaxMs: deps.arrivalGapMaxMs?.(sourceId, since) ?? null,
+			})
 		} catch {
 			/* Missing evidence reads unknown. */
 		}
-		if (cause === "unknown") {
-			if (latch?.rate === rate) latches.delete(sourceId)
-		} else latches.set(sourceId, { rate, cause, until })
-		return cause
-	}
-	const decideCause = (
-		sourceId: string,
-		rate: number,
-		mono: number,
-		lookbackMs: number,
-	): DroppingCause => {
-		const latch = latches.get(sourceId)
-		const known =
-			latch && latch.rate === rate && mono < latch.until
-				? latch.cause
-				: decideAfresh(sourceId, rate, mono, lookbackMs)
-		return known === "source" && excluded(sourceId) ? "unknown" : known
+		return cause === "source" && excluded(sourceId) ? "unknown" : cause
 	}
 	/** The evidence lookback for a dropping decision now (see `LINK_CAUSE_LOOKBACK_MAX_MS`). */
 	const lookbackOf = (history: History | undefined, at: number): number => {
@@ -329,10 +284,6 @@ export function createLinkAdvisor(deps: {
 		observe(sourceId, bytes, rate, at) {
 			const previous = histories.get(sourceId)
 			const live = isLive(sourceId)
-			if (!live) {
-				latches.delete(sourceId)
-				coreBusyAt.delete(sourceId)
-			}
 			if (
 				!live ||
 				!valid(bytes) ||
@@ -383,8 +334,6 @@ export function createLinkAdvisor(deps: {
 			const payload = valid(input.sampleRateHz) ? input.sampleRateHz * 2 : 0
 			const history = histories.get(input.sourceId)
 			if (!isLive(input.sourceId)) {
-				latches.delete(input.sourceId)
-				coreBusyAt.delete(input.sourceId)
 				return {
 					level: "none",
 					transport: isLoopbackHost(input.host) ? "loopback" : "network",
@@ -436,19 +385,15 @@ export function createLinkAdvisor(deps: {
 			const dropping =
 				(received !== null && exceedsShortfall(received, payload)) ||
 				(upstream !== null && upstream > LINK_UPSTREAM_DROPS_BYTES_PER_SECOND)
-			if (!dropping) dropStretch(input.sourceId, input.sampleRateHz)
 			const lossReason: LinkLossReason | null = loopback
 				? null
 				: dropping
 					? Number.isFinite(mono)
 						? decideCause(
 								input.sourceId,
-								input.sampleRateHz,
 								mono,
-								lookbackOf(
-									history?.rate === input.sampleRateHz ? history : undefined,
-									wallNow,
-								),
+								// With no average (upstream drops alone) W is the sustained window.
+								lookbackOf(received === null ? undefined : history, wallNow),
 							)
 						: "unknown"
 					: linkDropping
@@ -473,8 +418,6 @@ export function createLinkAdvisor(deps: {
 		},
 		reset(sourceId) {
 			histories.delete(sourceId)
-			latches.delete(sourceId)
-			coreBusyAt.delete(sourceId)
 		},
 	}
 }

@@ -1067,35 +1067,41 @@ Link-burst additions are optional and additive; older cores omit them:
   `overflowedBytes10m`, `burstSeconds`.
 - `LinkAdvisory.lossReason`: why samples were lost; absent when nothing was lost.
   `level: "dropping"` (fewer bytes read than the rate needs: a received-rate
-  shortfall or receiver-side drops) always carries one of three causes, decided in
-  this order over the window the loss can lie in: the received rate is a 10 s average
-  ending at the last 5 s metrics report, so the evidence reaches back to the start of
-  that report's interval, 10 to 15 s. The core's load comes from one signal, the core
-  main-thread load reading (`CoreLoadReading`: event-loop utilisation and worst
-  event-loop delay over the window); any load governor reads the same signal:
-  1. `core-busy` when the core's event-loop utilisation was at least 0.90;
+  shortfall or receiver-side drops) always carries one of three causes, decided
+  afresh at every check over the window W the loss can lie in: the received rate is
+  a 10 s average ending at the last 5 s metrics report, so W reaches back to the
+  report that bounds that average, 10 to 15 s (at most 15 s); a `dropping` from
+  receiver-side drops alone, with no average, uses the last 10 s. The core's load
+  comes from one signal, the core main-thread load reading (event-loop utilisation
+  per 2 s take and worst event-loop delay); any load governor reads the same signal.
+  Over W the advisor reads the busiest single take (plus the take just before W, so
+  a take that straddles the end of a busy spell, and reads diluted, does not hide
+  it), the worst event-loop delay (including the interval in progress) and the
+  source's longest arrival gap:
+  1. `core-busy` when a take was at least 0.90 busy or the worst event-loop delay
+     was at least 200 ms (at 2.4 MS/s that stall is 960 kB, more than a typical
+     socket buffer holds). It means the link was not assessed: the core's own load
+     explains the loss, and it takes precedence over an arrival gap on purpose, since
+     under stress a gap is not trustworthy evidence about the link;
   2. `source` when an arrival gap exceeded the worst event-loop delay by at least
      200 ms (a gap the core's own stalls cannot explain);
-  3. `core-busy` when the worst event-loop delay (including the interval in
-     progress) was at least 200 ms: at 2.4 MS/s that stall is 960 kB, more than a
-     typical socket buffer holds;
-  4. `source` when the loop delay stayed under 50 ms (which cannot lose bytes) and
-     utilisation under 0.70;
-  5. otherwise `unknown`, as for any missing evidence.
+  3. `source` when every take over W was read and under 0.70 busy, the take in
+     progress (once at least 0.5 s long) is under 0.70 too, and the loop delay
+     stayed under 50 ms (which cannot lose bytes);
+  4. otherwise `unknown`: a take between 0.70 and 0.90, a loop delay between 50 and
+     200 ms, or missing evidence (for example when the core stopped sampling its
+     event loop for over 6 s).
 
-  A step whose evidence is missing is skipped: steps 2 and 3 need the loop delay and
-  the arrival gap but not utilisation (which a stall of several seconds leaves
-  unmeasured), steps 1 and 4 need utilisation. A source that is disconnected, or
-  whose feed is paused or resuming, is not classified: it reads `level: "none"` with
-  no `lossReason`, and its 10 s window starts afresh once it is live again.
-
-  A decided `source` or `core-busy` is kept for 10 s so it does not flap. Once a
-  dropping stretch read `core-busy`, it reads `source` again only on an arrival gap
-  (step 2) newer than that decision: a core that has just recovered does not turn the
-  loss it caused into the link's. That hold ends 20 s after the last `core-busy`
-  decision, when none of the loss it explained is left in the average, so a link that
-  keeps falling short then reads `source`. While the tuner is under external control,
-  `source` reads `unknown`. Only
+  Because W spans the whole average, loss the core caused leaves the average no
+  later than the busy takes that caused it leave W: the end of a busy spell never
+  reads `source`, and a link that keeps falling short after the core recovered reads
+  `source` once W holds only healthy takes (within about 15 s). Evidence right at a
+  threshold may switch the cause between `source` and `unknown` from one check to the
+  next. A source that is disconnected, or whose feed is paused or resuming, is not
+  classified: it reads `level: "none"` with no `lossReason`, and its 10 s window
+  starts afresh once it is live again. While the tuner is under external control,
+  `source` reads `unknown`, and when the core takes the tuner back the received
+  average starts afresh, so a shortfall from that time never reads `source`. Only
   `source` is the receiver link's fault, so only it is helped by a lower sample rate.
   `branch-congestion` (never on `dropping`) means every byte arrived and an internal
   fanout branch dropped them after an arrival gap.

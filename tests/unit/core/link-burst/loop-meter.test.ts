@@ -147,6 +147,68 @@ describe("window reads", () => {
 		expect(w.meter.utilizationSince(2000 + ELU_BASE_STALE_MS)).not.toBeNull()
 		expect(w.meter.utilizationSince(2001 + ELU_BASE_STALE_MS)).toBeNull()
 	})
+	it("utilizationMaxSince reads the worst take in the window and the guard take before it", () => {
+		const w = windowed()
+		w.take(2000, 0, 0) // first reading: no base, so no take
+		w.take(2000, 1960, 0) // 0.98, ends at 4000: the guard take of a window from 4001
+		w.take(2000, 600, 0) // 0.30, straddles the window start
+		w.take(2000, 800, 0) // 0.40
+		expect(w.meter.utilizationMaxSince(4001)).toEqual({
+			max: expect.closeTo(0.98, 9) as number,
+			complete: true,
+			live: null,
+		})
+		// From 6001 the guard take is the 0.30 one.
+		expect(w.meter.utilizationMaxSince(6001).max).toBeCloseTo(0.4, 9)
+		// The in-progress take is read only once at least 500 ms long.
+		w.live(499, 499, 0)
+		expect(w.meter.utilizationMaxSince(6001).live).toBeNull()
+		w.live(1, 1, 0)
+		expect(w.meter.utilizationMaxSince(6001).live).toBe(1)
+		// It never raises the worst take.
+		expect(w.meter.utilizationMaxSince(6001).max).toBeCloseTo(0.4, 9)
+	})
+	it("utilizationMaxSince has no take for the first reading, and no guard without a base", () => {
+		const w = windowed()
+		w.take(2000, 2000, 0)
+		expect(w.meter.utilizationMaxSince(0)).toEqual({
+			max: null,
+			complete: false,
+			live: null,
+		})
+		w.take(2000, 1000, 0)
+		// The guard take (the first reading) has no base: read, but incomplete.
+		expect(w.meter.utilizationMaxSince(2001)).toEqual({
+			max: 0.5,
+			complete: false,
+			live: null,
+		})
+		w.take(2000, 1000, 0)
+		expect(w.meter.utilizationMaxSince(4001).complete).toBe(true)
+	})
+	it("utilizationMaxSince is incomplete across a reading gap or a stopped monitor, and drops old takes", () => {
+		const w = windowed()
+		for (let i = 0; i < 4; i++) w.take(2000, 1000, 0)
+		w.take(ELU_BASE_STALE_MS + 1, 0, 0)
+		w.take(2000, 0, 0)
+		expect(w.meter.utilizationMaxSince(w.now - 2000).complete).toBe(false)
+		const s = windowed()
+		for (let i = 0; i < 4; i++) s.take(2000, 1960, 0)
+		s.live(ELU_BASE_STALE_MS, 0, 0)
+		expect(s.meter.utilizationMaxSince(s.now - 7000).complete).toBe(true)
+		s.live(1, 0, 0)
+		expect(s.meter.utilizationMaxSince(s.now - 7000).complete).toBe(false)
+		// With no take ending in the window, no take (not even the guard) is evidence.
+		expect(s.meter.utilizationMaxSince(s.now - 5000).max).toBeNull()
+	})
+	it("maxSince reads null once no interval was taken for longer than the stale bound", () => {
+		const w = windowed()
+		w.take(2000, 0, 300)
+		w.live(ELU_BASE_STALE_MS, 0, 40)
+		expect(w.meter.maxSince(0)).toBe(300)
+		w.live(1, 0, 40)
+		expect(w.meter.maxSince(0)).toBeNull()
+	})
 	it("a throwing ELU source records nothing and reads null", () => {
 		const meter = createEventLoopMeter({
 			histogram: {

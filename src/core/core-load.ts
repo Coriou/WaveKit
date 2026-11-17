@@ -1,8 +1,23 @@
 import type { CoreLoadReading } from "@wavekit/api-types"
 import { LINK_GAP_MS } from "./link-burst/contract.js"
-import type { EventLoopMeter } from "./link-burst/contract.js"
+import type { EventLoopMeter, TakeUtilization } from "./link-burst/contract.js"
 
 export type { CoreLoadReading }
+
+/**
+ * THE core load signal's reading as the core reads it: the shared reading plus the per-take
+ * utilisation of the same meter (`EventLoopMeter.utilizationMaxSince`, see `TakeUtilization`).
+ * The window mean `elu` dilutes a stressed 2 s take with the healthy time around it; the worst
+ * take does not, so one saturated take in the window shows. Not on the wire.
+ */
+export interface CoreLoadEvidence extends CoreLoadReading {
+	/** Worst take's utilisation (0..1) over the window and its guard take; null without a take. */
+	eluMax: number | null
+	/** Every take over the window and its guard take was read (`TakeUtilization.complete`). */
+	eluComplete: boolean
+	/** Utilisation of the in-progress take, when at least 500 ms long; else null. */
+	eluLive: number | null
+}
 
 /**
  * Event-loop utilisation at or above this over a window means the core itself is saturated:
@@ -27,7 +42,7 @@ export const SOURCE_ELU_MAX = 0.7
 /** THE core main-thread load signal (see `CoreLoadReading`); one per process. */
 export interface CoreLoadSignal {
 	/** Load over the window from `sinceMono` (the link-burst monotonic clock) to now. */
-	read(sinceMono: number): CoreLoadReading
+	read(sinceMono: number): CoreLoadEvidence
 }
 
 function usable(value: number | null): number | null {
@@ -36,7 +51,10 @@ function usable(value: number | null): number | null {
 
 /** The signal over the process's one event-loop meter; an unreadable meter reads nulls. */
 export function createCoreLoadSignal(deps: {
-	loopMeter: Pick<EventLoopMeter, "utilizationSince" | "maxSince">
+	loopMeter: Pick<
+		EventLoopMeter,
+		"utilizationSince" | "utilizationMaxSince" | "maxSince"
+	>
 }): CoreLoadSignal {
 	const { loopMeter } = deps
 	const safe = (read: () => number | null): number | null => {
@@ -46,11 +64,24 @@ export function createCoreLoadSignal(deps: {
 			return null
 		}
 	}
+	const fraction = (read: () => number | null): number | null => {
+		const value = safe(read)
+		return value !== null && value <= 1 ? value : null
+	}
 	return {
 		read(sinceMono) {
-			const elu = safe(() => loopMeter.utilizationSince(sinceMono))
+			let takes: TakeUtilization | null = null
+			try {
+				takes = loopMeter.utilizationMaxSince(sinceMono)
+			} catch {
+				/* Per-take utilisation is unavailable. */
+			}
+			const eluMax = fraction(() => takes?.max ?? null)
 			return {
-				elu: elu !== null && elu <= 1 ? elu : null,
+				elu: fraction(() => loopMeter.utilizationSince(sinceMono)),
+				eluMax,
+				eluComplete: takes?.complete === true && eluMax !== null,
+				eluLive: fraction(() => takes?.live ?? null),
 				loopDelayMaxMs: safe(() => loopMeter.maxSince(sinceMono)),
 			}
 		},
@@ -61,9 +92,8 @@ export function createCoreLoadSignal(deps: {
  * Whether a reading shows the core saturated on its own evidence: utilisation at or above
  * `CORE_BUSY_ELU`, or a worst loop delay at or above `CORE_BUSY_LOOP_DELAY_MS`. Missing evidence
  * is never busy, and either rule stands without the other's input. The link advisor's cause
- * ladder applies the same thresholds: its utilisation rule likewise needs only utilisation, and
- * its loop-delay rule likewise runs without utilisation, but needs the source's arrival gap too
- * because it first reads a gap beyond the loop delay as the source's loss.
+ * ladder applies the same thresholds to the worst take's utilisation (`eluMax`) and the worst
+ * loop delay, each rule likewise standing without the other's input.
  */
 export function coreBusy(reading: CoreLoadReading): boolean {
 	const elu = usable(reading.elu)

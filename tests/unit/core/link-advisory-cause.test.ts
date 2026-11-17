@@ -22,7 +22,9 @@ const SHORT = PAYLOAD * 0.98
 const input = { sourceId: "s", host: "source.invalid", sampleRateHz: RATE }
 
 interface Evidence {
-	elu: number | null
+	eluMax: number | null
+	eluComplete: boolean
+	eluLive: number | null
 	loopDelayMaxMs: number | null
 	arrivalGapMaxMs: number | null
 }
@@ -34,7 +36,10 @@ function harness(
 	let now = 0
 	const coreLoad = vi.fn(
 		(_since: number): CoreLoadEvidence => ({
-			elu: evidence.elu,
+			elu: null,
+			eluMax: evidence.eluMax,
+			eluComplete: evidence.eluComplete,
+			eluLive: evidence.eluLive,
 			loopDelayMaxMs: evidence.loopDelayMaxMs,
 		}),
 	)
@@ -70,109 +75,140 @@ function harness(
 	}
 }
 
+const load = (eluMax: number | null, loopDelayMaxMs: number | null) => ({
+	elu: null,
+	eluMax,
+	eluComplete: eluMax !== null,
+	eluLive: null,
+	loopDelayMaxMs,
+})
+
+const quiet: Evidence = {
+	eluMax: 0.3,
+	eluComplete: true,
+	eluLive: null,
+	loopDelayMaxMs: 0,
+	arrivalGapMaxMs: 0,
+}
+
 describe("dropping cause ladder", () => {
-	const quiet = { elu: 0.3, loopDelayMaxMs: 0, arrivalGapMaxMs: 0 }
 	it.each<[string, Evidence, string]>([
-		// Step 1: utilisation at and below the busy bound.
-		["elu at 0.90", { ...quiet, elu: CORE_BUSY_ELU }, "core-busy"],
+		// Step 1: the worst take or the loop delay at the busy bounds.
+		["worst take at 0.90", { ...quiet, eluMax: CORE_BUSY_ELU }, "core-busy"],
 		[
-			"elu 0.98 beats a link-like gap",
-			{ elu: 0.98, loopDelayMaxMs: 0, arrivalGapMaxMs: 1000 },
+			"worst take 0.98 beats a link-like gap: the link was not assessed",
+			{ ...quiet, eluMax: 0.98, arrivalGapMaxMs: 1000 },
 			"core-busy",
 		],
 		[
-			"elu just under 0.90, no other evidence",
-			{ ...quiet, elu: 0.8999 },
+			"an incomplete read still asserts a busy take",
+			{ ...quiet, eluMax: 0.95, eluComplete: false },
+			"core-busy",
+		],
+		[
+			"loop delay at 200 ms beats a gap beyond it",
+			{
+				...quiet,
+				loopDelayMaxMs: LINK_GAP_MS,
+				arrivalGapMaxMs: 3 * LINK_GAP_MS,
+			},
+			"core-busy",
+		],
+		[
+			"saturated take, other evidence missing",
+			{
+				eluMax: 0.95,
+				eluComplete: false,
+				eluLive: null,
+				loopDelayMaxMs: null,
+				arrivalGapMaxMs: null,
+			},
+			"core-busy",
+		],
+		[
+			"loop delay at the bound, utilisation missing",
+			{
+				...quiet,
+				eluMax: null,
+				eluComplete: false,
+				loopDelayMaxMs: LINK_GAP_MS,
+			},
+			"core-busy",
+		],
+		[
+			"worst take just under 0.90, no other evidence",
+			{ ...quiet, eluMax: 0.8999 },
 			"unknown",
 		],
-		// Step 2: gap the loop cannot explain, at and below 200 ms.
+		// Step 2: a gap the loop cannot explain, at and below 200 ms.
 		[
 			"gap excess at 200 ms",
+			{ ...quiet, eluMax: 0.8, loopDelayMaxMs: 100, arrivalGapMaxMs: 300 },
+			"source",
+		],
+		[
+			"gap excess at 200 ms with utilisation missing",
 			{
-				elu: 0.5,
-				loopDelayMaxMs: LINK_GAP_MS,
-				arrivalGapMaxMs: 2 * LINK_GAP_MS,
+				...quiet,
+				eluMax: null,
+				eluComplete: false,
+				arrivalGapMaxMs: LINK_GAP_MS,
 			},
 			"source",
 		],
 		[
-			"gap excess 199 ms with a 200 ms stall",
-			{
-				elu: 0.5,
-				loopDelayMaxMs: LINK_GAP_MS,
-				arrivalGapMaxMs: 2 * LINK_GAP_MS - 1,
-			},
-			"core-busy",
-		],
-		// Step 3: loop delay at and below 200 ms.
-		[
-			"loop delay at 200 ms",
-			{ elu: 0.5, loopDelayMaxMs: LINK_GAP_MS, arrivalGapMaxMs: 0 },
-			"core-busy",
+			"gap excess 199 ms with a 100 ms loop delay",
+			{ ...quiet, eluMax: 0.5, loopDelayMaxMs: 100, arrivalGapMaxMs: 299 },
+			"unknown",
 		],
 		[
 			"loop delay just under 200 ms",
-			{ elu: 0.5, loopDelayMaxMs: LINK_GAP_MS - 0.1, arrivalGapMaxMs: 0 },
+			{ ...quiet, loopDelayMaxMs: LINK_GAP_MS - 0.1 },
 			"unknown",
 		],
-		// Step 4: an idle, responsive core, at and past 50 ms and 0.70.
+		// Step 3: every take with headroom, at and past 50 ms and 0.70.
 		[
-			"loop 49.9 ms, elu 0.69",
-			{
-				elu: 0.69,
-				loopDelayMaxMs: HOST_LOOP_DELAY_MS - 0.1,
-				arrivalGapMaxMs: 0,
-			},
+			"loop 49.9 ms, worst take 0.69",
+			{ ...quiet, eluMax: 0.69, loopDelayMaxMs: HOST_LOOP_DELAY_MS - 0.1 },
 			"source",
 		],
 		[
 			"loop at 50 ms",
-			{ elu: 0.3, loopDelayMaxMs: HOST_LOOP_DELAY_MS, arrivalGapMaxMs: 0 },
+			{ ...quiet, loopDelayMaxMs: HOST_LOOP_DELAY_MS },
+			"unknown",
+		],
+		["worst take at 0.70", { ...quiet, eluMax: SOURCE_ELU_MAX }, "unknown"],
+		[
+			"an incomplete read never proves headroom",
+			{ ...quiet, eluComplete: false },
 			"unknown",
 		],
 		[
-			"elu at 0.70",
-			{ elu: SOURCE_ELU_MAX, loopDelayMaxMs: 0, arrivalGapMaxMs: 0 },
+			"a busy in-progress take vetoes source",
+			{ ...quiet, eluLive: SOURCE_ELU_MAX },
 			"unknown",
 		],
-		// Step 5: missing or malformed evidence.
-		["elu missing", { ...quiet, elu: null }, "unknown"],
-		["loop delay missing", { ...quiet, loopDelayMaxMs: null }, "unknown"],
-		["gap missing", { ...quiet, arrivalGapMaxMs: null }, "unknown"],
-		["elu NaN", { ...quiet, elu: Number.NaN }, "unknown"],
-		["elu above 1", { ...quiet, elu: 1.5 }, "unknown"],
-		["loop delay infinite", { ...quiet, loopDelayMaxMs: Infinity }, "unknown"],
-		["gap negative", { ...quiet, arrivalGapMaxMs: -1 }, "unknown"],
 		[
-			"saturated loop, other evidence missing",
-			{ elu: 0.95, loopDelayMaxMs: null, arrivalGapMaxMs: null },
-			"core-busy",
-		],
-		// Missing utilisation (e.g. after a stall longer than the meter's window) blocks only
-		// steps 1 and 4.
-		[
-			"elu missing, gap beyond the loop delay",
-			{ elu: null, loopDelayMaxMs: 0, arrivalGapMaxMs: LINK_GAP_MS },
+			"a quiet in-progress take does not",
+			{ ...quiet, eluLive: 0.69 },
 			"source",
 		],
 		[
-			"elu missing, loop delay at the core-busy bound",
-			{ elu: null, loopDelayMaxMs: LINK_GAP_MS, arrivalGapMaxMs: 0 },
-			"core-busy",
-		],
-		[
-			"elu above 1, loop delay at the core-busy bound",
-			{ elu: 1.5, loopDelayMaxMs: 6500, arrivalGapMaxMs: 6500 },
-			"core-busy",
-		],
-		[
-			"elu missing, loop delay high, gap missing",
-			{ elu: null, loopDelayMaxMs: LINK_GAP_MS, arrivalGapMaxMs: null },
+			"a saturated in-progress take never asserts core-busy",
+			{ ...quiet, eluLive: 1 },
 			"unknown",
 		],
+		// Step 4: missing or malformed evidence.
+		["worst take missing", { ...quiet, eluMax: null }, "unknown"],
+		["loop delay missing", { ...quiet, loopDelayMaxMs: null }, "unknown"],
+		["gap missing", { ...quiet, arrivalGapMaxMs: null }, "unknown"],
+		["worst take NaN", { ...quiet, eluMax: Number.NaN }, "unknown"],
+		["worst take above 1", { ...quiet, eluMax: 1.5 }, "unknown"],
+		["loop delay infinite", { ...quiet, loopDelayMaxMs: Infinity }, "unknown"],
+		["gap negative", { ...quiet, arrivalGapMaxMs: -1 }, "unknown"],
 		[
-			"elu missing, quiet loop and gap",
-			{ elu: null, loopDelayMaxMs: 0, arrivalGapMaxMs: 0 },
+			"loop delay missing, gap large",
+			{ ...quiet, loopDelayMaxMs: null, arrivalGapMaxMs: 1000 },
 			"unknown",
 		],
 	])("%s: %s", (_name, evidence, cause) => {
@@ -185,7 +221,8 @@ describe("dropping cause ladder", () => {
 		const h = harness(quiet)
 		h.window(SHORT)
 		h.classify()
-		// Loop evidence starts one recorder cell before the gap evidence.
+		// Takes over W; loop evidence from one recorder cell before it.
+		expect(h.coreLoad).toHaveBeenCalledWith(h.now - LINK_SUSTAINED_WINDOW_MS)
 		expect(h.coreLoad).toHaveBeenCalledWith(
 			h.now - LINK_SUSTAINED_WINDOW_MS - INGEST_CELL_MS,
 		)
@@ -232,7 +269,7 @@ describe("dropping cause ladder", () => {
 		})
 		h.window(SHORT)
 		expect(h.classify().lossReason).toBe("unknown")
-		h.coreLoad.mockImplementation(() => ({ elu: 0.3, loopDelayMaxMs: 0 }))
+		h.coreLoad.mockImplementation(() => load(0.3, 0))
 		h.arrivalGapMaxMs.mockImplementation(() => {
 			throw new Error("unavailable")
 		})
@@ -248,7 +285,7 @@ describe("dropping cause ladder", () => {
 			const advisor = createLinkAdvisor({
 				now: () => 10000,
 				monoNow,
-				coreLoad: () => ({ elu: 0.2, loopDelayMaxMs: 0 }),
+				coreLoad: () => load(0.2, 0),
 				arrivalGapMaxMs: () => 1000,
 			})
 			for (const at of [0, 5000, 10000]) advisor.observe("s", SHORT, RATE, at)
@@ -259,9 +296,10 @@ describe("dropping cause ladder", () => {
 		}
 	})
 	it("a stalled loop with a received shortfall is core-busy, never source", () => {
-		for (const elu of [0.98, 0.5]) {
+		for (const eluMax of [0.98, 0.5]) {
 			const h = harness({
-				elu,
+				...quiet,
+				eluMax,
 				loopDelayMaxMs: 2400,
 				arrivalGapMaxMs: 2400,
 			})
@@ -273,7 +311,7 @@ describe("dropping cause ladder", () => {
 		}
 	})
 	it("a real link loss (no loop delay, 1 s arrival gap) is source", () => {
-		const h = harness({ elu: 0.2, loopDelayMaxMs: 0, arrivalGapMaxMs: 1000 })
+		const h = harness({ ...quiet, eluMax: 0.2, arrivalGapMaxMs: 1000 })
 		h.window(SHORT)
 		expect(h.classify()).toMatchObject({
 			level: "dropping",
@@ -281,15 +319,24 @@ describe("dropping cause ladder", () => {
 		})
 	})
 	it("upstream drops alone are dropping with a cause", () => {
-		const h = harness({ elu: 0.2, loopDelayMaxMs: 0, arrivalGapMaxMs: 0 })
+		const h = harness({ ...quiet, eluMax: 0.2 })
 		h.window(PAYLOAD)
 		expect(h.advisor.classify(input, 10001)).toMatchObject({
 			level: "dropping",
 			lossReason: "source",
 		})
 	})
+	it("without an average W is the sustained window", () => {
+		const h = harness({ ...quiet, eluMax: 0.2 })
+		h.setNow(30_000)
+		h.advisor.classify(input, 10001)
+		expect(h.arrivalGapMaxMs).toHaveBeenLastCalledWith(
+			"s",
+			h.now - LINK_SUSTAINED_WINDOW_MS,
+		)
+	})
 	it("loopback never carries a cause", () => {
-		const h = harness({ elu: 0.98, loopDelayMaxMs: 2400, arrivalGapMaxMs: 0 })
+		const h = harness({ ...quiet, eluMax: 0.98, loopDelayMaxMs: 2400 })
 		h.window(SHORT)
 		const advisory = h.advisor.classify({ ...input, host: "localhost" }, 20000)
 		expect(advisory.level).toBe("none")
@@ -297,89 +344,28 @@ describe("dropping cause ladder", () => {
 	})
 })
 
-describe("cause latch", () => {
-	it("keeps a known cause for the window, then decides afresh", () => {
-		const h = harness({ elu: 0.2, loopDelayMaxMs: 0, arrivalGapMaxMs: 1000 })
+describe("a stateless cause", () => {
+	it("follows the evidence at every recheck: no latch, no hold", () => {
+		const h = harness({ ...quiet, eluMax: 0.2, arrivalGapMaxMs: 1000 })
 		h.window(SHORT)
-		const decided = h.now
 		expect(h.classify().lossReason).toBe("source")
-		Object.assign(h.evidence, { elu: 0.98, loopDelayMaxMs: 2400 })
-		h.setNow(decided + 2000)
-		expect(h.classify().lossReason).toBe("source")
-		h.setNow(decided + LINK_SUSTAINED_WINDOW_MS - 1)
-		expect(h.classify().lossReason).toBe("source")
-		h.setNow(decided + LINK_SUSTAINED_WINDOW_MS)
+		Object.assign(h.evidence, { eluMax: 0.98, loopDelayMaxMs: 2400 })
 		expect(h.classify().lossReason).toBe("core-busy")
-	})
-	it("never latches unknown", () => {
-		const h = harness({ elu: null, loopDelayMaxMs: 0, arrivalGapMaxMs: 0 })
-		h.window(SHORT)
+		Object.assign(h.evidence, { eluMax: 0.8, loopDelayMaxMs: 5 })
+		h.arrivalGapMaxMs.mockImplementation(() => 0)
 		expect(h.classify().lossReason).toBe("unknown")
-		h.evidence.elu = 0.98
-		expect(h.classify().lossReason).toBe("core-busy")
-	})
-	it("leaving dropping drops the latch", () => {
-		const h = harness({ elu: 0.2, loopDelayMaxMs: 0, arrivalGapMaxMs: 1000 })
-		h.window(PAYLOAD)
-		// Upstream drops make it dropping without moving the clock.
-		expect(h.advisor.classify(input, 10001).lossReason).toBe("source")
-		Object.assign(h.evidence, { elu: 0.98, loopDelayMaxMs: 2400 })
-		expect(h.advisor.classify(input, 10001).lossReason).toBe("source")
-		expect(h.advisor.classify(input, 0).level).not.toBe("dropping")
-		expect(h.advisor.classify(input, 10001).lossReason).toBe("core-busy")
-	})
-	it("a classification at another rate neither reads nor clears the latch", () => {
-		const h = harness({ elu: 0.2, loopDelayMaxMs: 0, arrivalGapMaxMs: 1000 })
-		h.window(SHORT)
+		Object.assign(h.evidence, { eluMax: 0.3 })
 		expect(h.classify().lossReason).toBe("source")
-		Object.assign(h.evidence, { elu: 0.98, loopDelayMaxMs: 2400 })
+	})
+	it("leaving dropping, a rate change or a reset carries nothing over", () => {
+		const h = harness({ ...quiet, eluMax: 0.98 })
+		h.window(PAYLOAD)
+		expect(h.advisor.classify(input, 10001).lossReason).toBe("core-busy")
+		expect(h.advisor.classify(input, 0).level).not.toBe("dropping")
 		// A hypothetical raise has no received history, so it is not dropping.
 		expect(h.classify(RATE * 2).level).not.toBe("dropping")
-		expect(h.classify().lossReason).toBe("source")
-	})
-	it("reset clears the latch", () => {
-		const h = harness({ elu: 0.2, loopDelayMaxMs: 0, arrivalGapMaxMs: 1000 })
-		h.window(PAYLOAD)
-		expect(h.advisor.classify(input, 10001).lossReason).toBe("source")
 		h.advisor.reset("s")
-		h.evidence.elu = 0.98
-		expect(h.advisor.classify(input, 10001).lossReason).toBe("core-busy")
-	})
-})
-
-describe("dropping stretch after core-busy", () => {
-	it("a healthy loop alone never turns core-busy into source within the stretch", () => {
-		const h = harness({
-			elu: 0.98,
-			loopDelayMaxMs: 2000,
-			arrivalGapMaxMs: 2000,
-		})
-		h.window(SHORT)
-		const busyAt = h.now
-		expect(h.classify().lossReason).toBe("core-busy")
-		// The core recovered; the loss still in the average is the core's.
-		Object.assign(h.evidence, {
-			elu: 0.3,
-			loopDelayMaxMs: 5,
-			arrivalGapMaxMs: 5,
-		})
-		h.advisor.observe("s", SHORT, RATE, h.now + 5000)
-		h.setNow(busyAt + LINK_SUSTAINED_WINDOW_MS)
-		expect(h.classify().lossReason).toBe("core-busy")
-		// A gap the loop cannot explain since the core-busy decision may replace it.
-		h.arrivalGapMaxMs.mockImplementation((_id, since) =>
-			since >= busyAt ? 1000 : 2000,
-		)
-		h.advisor.observe("s", SHORT, RATE, h.now + 5000)
-		h.setNow(busyAt + 2 * LINK_SUSTAINED_WINDOW_MS)
-		expect(h.classify().lossReason).toBe("source")
-	})
-	it("leaving dropping ends the stretch", () => {
-		const h = harness({ elu: 0.98, loopDelayMaxMs: 0, arrivalGapMaxMs: 0 })
-		h.window(PAYLOAD)
-		expect(h.advisor.classify(input, 10001).lossReason).toBe("core-busy")
-		expect(h.advisor.classify(input, 0).level).not.toBe("dropping")
-		Object.assign(h.evidence, { elu: 0.3, loopDelayMaxMs: 5 })
+		h.evidence.eluMax = 0.3
 		expect(h.advisor.classify(input, 10001).lossReason).toBe("source")
 	})
 })
@@ -391,7 +377,7 @@ describe("excluded source cause", () => {
 		const advisor = createLinkAdvisor({
 			now: () => now,
 			monoNow: () => now,
-			coreLoad: () => ({ elu: 0.2, loopDelayMaxMs: 0 }),
+			coreLoad: () => load(0.2, 0),
 			arrivalGapMaxMs: () => 1000,
 			sourceCauseExcluded: () => {
 				if (excluded instanceof Error) throw excluded
@@ -410,7 +396,7 @@ describe("excluded source cause", () => {
 		const busy = createLinkAdvisor({
 			now: () => now,
 			monoNow: () => now,
-			coreLoad: () => ({ elu: 0.98, loopDelayMaxMs: 0 }),
+			coreLoad: () => load(0.98, 0),
 			arrivalGapMaxMs: () => 0,
 			sourceCauseExcluded: () => true,
 		})
@@ -421,7 +407,7 @@ describe("excluded source cause", () => {
 
 describe("remediation", () => {
 	it("a source loss at rate R leaves dropping once the link sustains R/2", () => {
-		const h = harness({ elu: 0.2, loopDelayMaxMs: 0, arrivalGapMaxMs: 1000 })
+		const h = harness({ ...quiet, eluMax: 0.2, arrivalGapMaxMs: 1000 })
 		h.window(SHORT)
 		expect(h.classify()).toMatchObject({
 			level: "dropping",

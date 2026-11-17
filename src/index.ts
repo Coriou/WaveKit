@@ -491,7 +491,8 @@ export async function prepareDecoderCatalogue(
 export function wireDecoderLinkFeed(
 	sources: Pick<SourceManager, "on" | "off"> &
 		Partial<Pick<SourceManager, "isCommandedRecovery">>,
-	tuner: Pick<TunerController, "getState">,
+	tuner: Pick<TunerController, "getState"> &
+		Partial<Pick<TunerController, "on" | "off">>,
 	link: LinkAdvisor,
 	policy: Pick<RatePolicy, "reset">,
 	now: () => number = Date.now,
@@ -511,6 +512,12 @@ export function wireDecoderLinkFeed(
 		resetPolicy(id)
 	}
 	const removed = (id: string) => policy.reset(id)
+	// A shortfall accrued under external control is no evidence about the link once the core
+	// controls the tuner again: the received average starts afresh.
+	const controlMode = (id: string, mode: string) => {
+		if (mode === "internal") link.reset(id)
+	}
+	tuner.on?.("control-mode-changed", controlMode)
 	sources.on("metrics", metrics)
 	sources.on("connected", connected)
 	sources.on("disconnected", resetPolicy)
@@ -522,6 +529,7 @@ export function wireDecoderLinkFeed(
 		sources.off("disconnected", resetPolicy)
 		sources.off("source-removed", removed)
 		sources.off("commanded-recovery-failed", removed)
+		tuner.off?.("control-mode-changed", controlMode)
 	}
 }
 

@@ -138,6 +138,17 @@ describe("core load signal through the production link-burst composition", () =>
 			expect(reading.elu).toBeCloseTo(0.5)
 			expect(reading.loopDelayMaxMs).toBe(30)
 			expect(coreBusy(reading)).toBe(false)
+			// The one take (0..4 s) has no guard take before the window, so it is incomplete.
+			expect(reading.eluMax).toBeCloseTo(0.5)
+			expect(reading.eluComplete).toBe(false)
+			expect(reading.eluLive).toBeNull()
+			loop.clock = 8000
+			composed.loopMeter.takeInterval()
+			loop.clock = 9000
+			const later = composed.coreLoad.read(4001)
+			expect(later).toMatchObject({ eluComplete: true, loopDelayMaxMs: 30 })
+			expect(later.eluMax).toBeCloseTo(0.5)
+			expect(later.eluLive).toBeCloseTo(0.5)
 		} finally {
 			composed.dispose()
 		}
@@ -156,18 +167,33 @@ describe("coreBusy and an unreadable meter", () => {
 	})
 
 	it("reads nulls when the meter throws or answers out of range", () => {
+		const missing = {
+			elu: null,
+			eluMax: null,
+			eluComplete: false,
+			eluLive: null,
+			loopDelayMaxMs: null,
+		}
 		const throwing = createCoreLoadSignal({
 			loopMeter: {
 				utilizationSince: () => {
 					throw new Error("gone")
 				},
+				utilizationMaxSince: () => {
+					throw new Error("gone")
+				},
 				maxSince: () => Number.POSITIVE_INFINITY,
 			},
 		})
-		expect(throwing.read(0)).toEqual({ elu: null, loopDelayMaxMs: null })
+		expect(throwing.read(0)).toEqual(missing)
 		const outOfRange = createCoreLoadSignal({
-			loopMeter: { utilizationSince: () => 1.5, maxSince: () => -3 },
+			loopMeter: {
+				utilizationSince: () => 1.5,
+				// Complete but out of range: no worst take, so not complete either.
+				utilizationMaxSince: () => ({ max: 1.5, complete: true, live: -1 }),
+				maxSince: () => -3,
+			},
 		})
-		expect(outOfRange.read(0)).toEqual({ elu: null, loopDelayMaxMs: null })
+		expect(outOfRange.read(0)).toEqual(missing)
 	})
 })
