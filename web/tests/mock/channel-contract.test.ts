@@ -30,7 +30,10 @@ describe("mock channel contract", () => {
 		const rows = await get<ActivitySearchPage>(
 			"/api/activity?kinds=recording-change&limit=500",
 		)
-		const row = rows.body.items[0]
+		// The mock channel whose recordings sit beside analog transmissions stored without a channel.
+		const row = rows.body.items.find(
+			i => i.channel?.frequencyHz === 156_800_000,
+		)
 		expect(row).toBeDefined()
 		expect(row?.title).toBe("FM voice")
 		expect(row?.channel?.frequencyHz).toBe(row?.frequencyHz)
