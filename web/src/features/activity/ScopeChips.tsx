@@ -26,7 +26,7 @@ export function ScopeChips() {
 			<Chip
 				size="sm"
 				pressed={audio}
-				title="Only transmissions and calls (voice). Playback comes once recordings are linked to events."
+				title="Only events with a recording to play"
 				onClick={() => activity.setAudio(!audio)}
 			>
 				<Icon name="headphones" />

@@ -54,6 +54,11 @@ export interface ListenControllerOptions {
 	createPlayer?:
 		| ((events: ConstructorParameters<typeof PcmPlayer>[0]) => ListenPlayer)
 		| null
+	/**
+	 * Pauses a recording playing (or loading to play) in this tab: Listen wins over playback. Injected by
+	 * the app (services.playback.pause) so the two never import each other.
+	 */
+	pausePlayback?: () => void
 }
 
 const VOLUME_KEY = "wavekit.web.volume"
@@ -129,6 +134,7 @@ export class ListenController extends Store<ListenState> {
 	private held = false
 	private recorder: WavRecorder | null = null
 	private recordEnd: ((wav: Blob, startedAt: number) => void) | null = null
+	private readonly pausePlayback: () => void
 
 	constructor(
 		liveAudio: LiveAudioStore,
@@ -144,6 +150,7 @@ export class ListenController extends Store<ListenState> {
 			audio: NO_AUDIO_HEALTH,
 		})
 		this.liveAudio = liveAudio
+		this.pausePlayback = options.pausePlayback ?? (() => {})
 		const events = {
 			onStats: (stats: RingStats) => this.onStats(stats),
 			onData: () => this.noteData(),
@@ -222,6 +229,8 @@ export class ListenController extends Store<ListenState> {
 
 	/** User gesture: start the core's live audio if needed and play here. */
 	async start(): Promise<void> {
+		// a recording playing here pauses: its hold ends and live audio is heard again
+		this.pausePlayback()
 		this.set({
 			...this.get(),
 			wanted: true,
@@ -317,13 +326,36 @@ export class ListenController extends Store<ListenState> {
 		}
 	}
 
+	/** A Listen asked for while live audio is already on: a recording playing here pauses (Listen wins). */
+	claim(): void {
+		this.pausePlayback()
+	}
+
 	/** A blocked autoplay resumes on the next gesture. */
 	resume(): void {
 		if (!this.get().wanted) return
+		this.pausePlayback()
 		if (this.player) {
 			this.player.unlock(this.source?.rate ?? null)
 			this.setPhase("connecting")
 		} else this.attach()
+	}
+
+	/**
+	 * The Listen button: on and off, except while a recording holds live audio here: then it pauses the
+	 * recording and live audio stays on (it never turns off in that case).
+	 */
+	toggle(): Promise<void> {
+		const s = this.get()
+		if (s.phase === "blocked") {
+			this.resume()
+			return Promise.resolve()
+		}
+		if (s.wanted && this.held) {
+			this.pausePlayback()
+			return Promise.resolve()
+		}
+		return s.wanted ? this.stop() : this.start()
 	}
 
 	setVolume(volume: number): void {

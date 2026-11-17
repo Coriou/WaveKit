@@ -58,6 +58,7 @@ import {
 	type TuningWriterTag,
 } from "./tuning-ledger.js"
 import { TuningUnprovenTracker } from "./tuning-ledger-unproven.js"
+import { SOURCE_METRICS_INTERVAL_MS } from "./link-burst/contract.js"
 import { convertFloat32ToS16LE } from "../utils/converters.js"
 import {
 	RateTruthTracker,
@@ -326,7 +327,7 @@ export interface SourceManagerEvents {
 // Exponential backoff constants
 const BASE_DELAY_MS = 2000
 const MAX_DELAY_MS = 30000
-const METRICS_INTERVAL_MS = 5000
+const METRICS_INTERVAL_MS = SOURCE_METRICS_INTERVAL_MS
 const RTL_TCP_HEADER_SIZE = 12
 const SAMPLE_TIMEOUT_MS = 10000
 

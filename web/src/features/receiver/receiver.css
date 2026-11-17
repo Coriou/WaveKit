@@ -179,6 +179,41 @@
 	.wkf-rx-lock {
 		color: var(--wk-amber);
 	}
+	/* link conditions (LinkStatus.tsx): the chip's short marker, the panel's full lines; grey while stale */
+	.wkf-rx-loss {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		flex: none;
+		color: var(--wk-amber);
+		font-size: var(--wk-fs-xs);
+		font-weight: 700;
+		white-space: nowrap;
+	}
+	.wkf-rx-loss[data-stale],
+	.wkf-rx-condition[data-stale] {
+		color: var(--wk-text-3);
+	}
+	.wkf-rx-conditions {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.wkf-rx-condition {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 10px 14px;
+		border-radius: 8px;
+		background: var(--wk-fill);
+		font-size: var(--wk-fs-md);
+		line-height: 1.4;
+		color: var(--wk-amber);
+	}
+	.wkf-rx-condition > svg {
+		flex: none;
+		margin-top: 2px;
+	}
 	.wkf-rx-error {
 		display: flex;
 		align-items: flex-start;

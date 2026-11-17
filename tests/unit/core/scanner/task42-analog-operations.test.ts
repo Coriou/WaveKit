@@ -1526,6 +1526,104 @@ describe("a non-finalized receipt keeps which step refused it", () => {
 	})
 })
 
+describe("analog receipt verdict facts", () => {
+	it("writes the first finish's keptBy, speechHeard and startedAt to a finalized receipt, leaves out malformed ones, and the inventory reads them", async () => {
+		const h = await harness()
+		const kept = h.begin()
+		await kept.ready
+		await kept.push(new Int16Array([1, -2, 3]))
+		const finish = kept.finish("completed", {
+			keptBy: "prior-none",
+			speechHeard: false,
+			startedAt: "2026-11-16T10:00:00.000Z",
+		})
+		expect(
+			kept.finish("completed", { keptBy: "final", speechHeard: true }),
+		).toBe(finish)
+		const receipt = await finish
+		expect(receipt).toMatchObject({
+			outcome: "finalized",
+			keptBy: "prior-none",
+			speechHeard: false,
+			startedAt: "2026-11-16T10:00:00.000Z",
+		})
+		const bad = h.begin()
+		await bad.ready
+		await bad.push(new Int16Array([4, -5]))
+		const badReceipt = await bad.finish("completed", {
+			keptBy: "Not a code",
+			speechHeard: null,
+			startedAt: "later",
+		})
+		expect(badReceipt.outcome).toBe("finalized")
+		expect("keptBy" in badReceipt).toBe(false)
+		expect("startedAt" in badReceipt).toBe(false)
+		expect(badReceipt.speechHeard).toBeNull()
+		const facts = await readRecordingReceipt(
+			nodeRecordingFs,
+			join(h.root, "recordings"),
+			`analog-${receipt.operationId}.wav`,
+		)
+		expect(facts).toEqual({
+			cut: null,
+			observationId: "o1",
+			speech: "not-heard",
+			keptBy: "prior-none",
+			startedAt: "2026-11-16T10:00:00.000Z",
+		})
+		// An older core's receipt has none of the three: rewrite one so, as such a core left it.
+		const oldPath = join(
+			privateDir(h.root, badReceipt.operationId),
+			"receipt.json",
+		)
+		const old = JSON.parse(await readFile(oldPath, "utf8")) as Record<
+			string,
+			unknown
+		>
+		delete old["keptBy"]
+		delete old["speechHeard"]
+		delete old["startedAt"]
+		await writeFile(oldPath, JSON.stringify(old))
+		expect(AnalogReceiptSchema.safeParse(old).success).toBe(true)
+		// The schema is strict: a member it does not know is refused (why a core older than these
+		// fields cannot read a receipt that carries them).
+		expect(
+			AnalogReceiptSchema.safeParse({ ...old, notYetKnown: true }).success,
+		).toBe(false)
+		expect(
+			await readRecordingReceipt(
+				nodeRecordingFs,
+				join(h.root, "recordings"),
+				`analog-${badReceipt.operationId}.wav`,
+			),
+		).toEqual({
+			cut: null,
+			observationId: "o1",
+			speech: "unchecked",
+			keptBy: null,
+			startedAt: null,
+		})
+		await h.evidence.stopAnalog()
+		const recovered = new EvidenceStore({
+			dir: h.root,
+			caps,
+			logger,
+			now: () => NOW,
+			statfs: async () => ({ freeBytes: 1e9 }),
+			isDiscoveryLive: id => !!h.store.get(id),
+		})
+		recovered.configureAnalog(h.adapter)
+		const reconciled = await recovered.recoverAnalog()
+		for (const r of [receipt, badReceipt])
+			expect(reconciled).toContainEqual(
+				expect.objectContaining({
+					operationId: r.operationId,
+					status: "available",
+				}),
+			)
+	})
+})
+
 describe("analog receipt cutActive", () => {
 	it("writes the finish's cutActive to the receipt, keeps the first finish's, omits it when none is given, and recovery accepts both", async () => {
 		const h = await harness()
@@ -1566,7 +1664,13 @@ describe("analog receipt cutActive", () => {
 				recordings,
 				`analog-${receipt.operationId}.wav`,
 			)
-			expect(facts).toEqual({ cut, observationId: "o1" })
+			expect(facts).toEqual({
+				cut,
+				observationId: "o1",
+				speech: "unchecked",
+				keptBy: null,
+				startedAt: null,
+			})
 		}
 		await h.evidence.stopAnalog()
 		const recovered = new EvidenceStore({

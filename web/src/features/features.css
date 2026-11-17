@@ -611,6 +611,16 @@
 		margin: 0 -8px;
 		font-size: var(--wk-fs-md);
 	}
+	/* an earlier row and, when it carries a recording, its play disc (playback.css) */
+	.wkf-earlier-item {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.wkf-earlier-item > .wkf-earlier-row {
+		flex: 1;
+		min-width: 0;
+	}
 	.wkf-earlier-t {
 		/* 40 px fits 14:05; 12 h and UTC times grow it */
 		min-width: 40px;

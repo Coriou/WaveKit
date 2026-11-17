@@ -8,16 +8,16 @@ the top.
 
 ## Use WaveKit
 
-| Page                                                                                    | What it covers                                                             |
-| --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| [Using the web app](WEB-APP.md)                                                         | Spectrum, listening, Activity, Scanner, Map, Messages, Settings, shortcuts |
-| [Docker runtime](DOCKER-RUNTIME.md)                                                     | Run the core with Docker, with a Raspberry Pi or a USB dongle              |
-| [SDR host setup](SDR-HOST-SETUP.md) and [fresh-card Pi](../packages/sdr-host/README.md) | Prepare a Raspberry Pi as the receiver                                     |
-| [Native development](LOCAL-SETUP.md)                                                    | Run the core without Docker                                                |
-| [CLI dashboard](CLI.md)                                                                 | The terminal dashboard                                                     |
-| [ADS-B](ADSB.md), [digital voice](DIGITAL-VOICE.md), [scanner](SCANNER.md)              | Feature guides                                                             |
-| [Aircraft data link](AIRCRAFT-DATALINK.md)                                              | ACARS and VDL2: who sent a message, labels, linking aircraft               |
-| [Security](SECURITY.md)                                                                 | Access, pairing, version pinning                                           |
+| Page                                                                                    | What it covers                                                   |
+| --------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| [Using the web app](WEB-APP.md)                                                         | Spectrum, listening, Activity, Scanner, Map, Settings, shortcuts |
+| [Docker runtime](DOCKER-RUNTIME.md)                                                     | Run the core with Docker, with a Raspberry Pi or a USB dongle    |
+| [SDR host setup](SDR-HOST-SETUP.md) and [fresh-card Pi](../packages/sdr-host/README.md) | Prepare a Raspberry Pi as the receiver                           |
+| [Native development](LOCAL-SETUP.md)                                                    | Run the core without Docker                                      |
+| [CLI dashboard](CLI.md)                                                                 | The terminal dashboard                                           |
+| [ADS-B](ADSB.md), [digital voice](DIGITAL-VOICE.md), [scanner](SCANNER.md)              | Feature guides                                                   |
+| [Aircraft data link](AIRCRAFT-DATALINK.md)                                              | ACARS and VDL2: who sent a message, labels, linking aircraft     |
+| [Security](SECURITY.md)                                                                 | Access, pairing, version pinning                                 |
 
 ## Reference
 

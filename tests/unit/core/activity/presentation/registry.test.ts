@@ -418,7 +418,7 @@ describe("activity presentation registry", () => {
 			category: "voice",
 			protocol: "dmr",
 			entityKey: "talkgroup:2081",
-			title: "DMR TG 2081 from 3120001",
+			title: "TG 2081 · radio 3120001",
 		})
 		expect(view?.fields?.find(field => field.key === "colourCode")?.value).toBe(
 			3,
@@ -436,7 +436,7 @@ describe("activity presentation registry", () => {
 			p25: { nac: "FFF" },
 		})
 		expect(ended?.entityKey).toBe("talkgroup:0")
-		expect(ended?.title).toBe("P25P1 TG 0")
+		expect(ended?.title).toBe("TG 0")
 		expect(
 			ended?.fields?.find(field => field.key === "colourCode")?.value,
 		).toBe(1)

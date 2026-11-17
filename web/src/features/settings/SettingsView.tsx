@@ -25,6 +25,7 @@ import { autoLevelsNow } from "../../plot/plot-store.ts"
 import { displayStore } from "../display.ts"
 import { themeStore } from "../../shell/theme.ts"
 import { showAppToast } from "../../shell/toast.ts"
+import { NOTICE_SLOT_CLASS, noticeSlotRef } from "../../ui/notice-slot.ts"
 import { useTunerState } from "../hooks.ts"
 import { openPalette } from "../palette/request.ts"
 import { decoderLabel } from "../tuned/signal.ts"
@@ -881,6 +882,8 @@ export function SettingsView({ onClose }: { onClose: () => void }) {
 					</svg>
 				</button>
 			</header>
+			{/* the shell's notices dock here while the drawer covers the plot (ui/notice-slot.ts) */}
+			<div ref={noticeSlotRef} className={NOTICE_SLOT_CLASS} />
 
 			{page === null && (
 				<div className="wkf-set-search">

@@ -1,8 +1,8 @@
 // What narrows every Activity list at once, beside the search: the time range ("Today ▾" chip, Activity board)
 // and "With audio". Ranges are relative to when the query is built (Last hour = the hour before now) or a fixed
-// custom span; a range whose end has passed shows no live arrivals. "With audio" keeps transmissions and calls
-// (the voice category) until the core puts a recording id on the event (CORE-GAPS "The recording id on the event").
-import type { ActivityCategory, ActivityQuery } from "@wavekit/api-types"
+// custom span; a range whose end has passed shows no live arrivals. "With audio" keeps the rows that have a
+// playable recording (the core's `hasRecording`), whatever their category.
+import type { ActivityQuery } from "@wavekit/api-types"
 
 export type PresetRangeId = "any" | "1h" | "today" | "24h" | "7d"
 
@@ -24,8 +24,6 @@ export const TIME_RANGES: readonly { id: PresetRangeId; label: string }[] = [
 	{ id: "24h", label: "Last 24 h" },
 	{ id: "7d", label: "Last 7 days" },
 ]
-
-export const AUDIO_CATEGORIES: readonly ActivityCategory[] = ["voice"]
 
 const HOUR = 3_600_000
 
@@ -109,7 +107,7 @@ export interface ActivityScope {
 	audio: boolean
 }
 
-/** `q` narrowed by the scope at `now`; null when it cannot match anything (With audio over a non-voice search). */
+/** `q` narrowed by the scope at `now` (With audio: only rows with a recording); null when `q` is. */
 export function scopedQuery(
 	q: ActivityQuery | null,
 	scope: ActivityScope,
@@ -117,13 +115,7 @@ export function scopedQuery(
 ): ActivityQuery | null {
 	if (q === null) return null
 	const out: ActivityQuery = { ...q }
-	if (scope.audio) {
-		const categories = q.categories
-			? q.categories.filter(c => AUDIO_CATEGORIES.includes(c))
-			: [...AUDIO_CATEGORIES]
-		if (categories.length === 0) return null
-		out.categories = categories
-	}
+	if (scope.audio) out.hasRecording = true
 	const { from, to } = rangeBounds(scope.range, now)
 	if (from !== null || to !== null) {
 		const producedAt: { from?: string; to?: string } = {}

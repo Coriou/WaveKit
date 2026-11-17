@@ -1,19 +1,18 @@
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, it } from "vitest"
 import type {
 	DecoderInfo,
-	ResourceAlert,
 	ScannerIqCaptureStatus,
 	TunerRatePolicyEventData,
 	TunerState,
 } from "@wavekit/api-types"
-import type { EventsClient } from "../../src/data/events-client.ts"
 import {
+	CORE_BUSY_TEXT,
 	LINK_LOSS_TEXT,
-	linkAlertToast,
-	linkText,
+	UNKNOWN_LOSS_TEXT,
+	linkConditionText,
+	parseLinkSnapshot,
 	ratePolicyNote,
-	ratePolicyToast,
-	watchReceiverNotices,
+	ratePolicyNotice,
 } from "../../src/features/receiver/notices.ts"
 import {
 	decoderStatusText,
@@ -44,25 +43,25 @@ describe("1090 MHz rate policy", () => {
 		expect(ratePolicyNote(tuner)).toContain("1090 MHz rate policy")
 	})
 
-	it("words raises, restores and skips", () => {
-		expect(ratePolicyToast(policy({}))).toEqual({
+	it("words raises and restores as receipts, skips as conditions", () => {
+		expect(ratePolicyNotice(policy({}))).toEqual({
+			kind: "receipt",
 			text: "Sample rate raised to 2.4 MS/s for ADS-B (1090 MHz)",
-			warn: false,
 		})
 		expect(
-			ratePolicyToast(policy({ action: "restored", toHz: 2_048_000 }))?.text,
-		).toBe("Sample rate back to 2.048 MS/s")
+			ratePolicyNotice(policy({ action: "restored", toHz: 2_048_000 })),
+		).toEqual({ kind: "receipt", text: "Sample rate back to 2.048 MS/s" })
 		expect(
-			ratePolicyToast(
+			ratePolicyNotice(
 				policy({ action: "skipped", skipped: "external-control" }),
 			),
-		).toMatchObject({ warn: true })
+		).toMatchObject({ kind: "condition" })
 		expect(
-			ratePolicyToast(policy({ action: "skipped", skipped: "rate-above" })),
+			ratePolicyNotice(policy({ action: "skipped", skipped: "rate-above" })),
 		).toBeNull()
 	})
 
-	it("adds the link advisory to a raise only for loss on the receiver link", () => {
+	it("never carries link text on a raise, whatever the link said", () => {
 		const link = {
 			level: "dropping" as const,
 			transport: "network" as const,
@@ -72,114 +71,65 @@ describe("1090 MHz rate policy", () => {
 			upstreamDropBytesPerSecond: 1000,
 			lossReason: "source" as const,
 		}
-		expect(linkText(link)).toBe(
-			"Receiver link dropping samples — lower the sample rate",
+		expect(ratePolicyNotice(policy({ link }))?.text).toBe(
+			"Sample rate raised to 2.4 MS/s for ADS-B (1090 MHz)",
 		)
-		expect(linkText(link)).toBe(LINK_LOSS_TEXT)
-		// a core before lossReason: `dropping` is source loss by the core's rule
-		const { lossReason: _, ...legacy } = link
-		expect(linkText(legacy)).toBe(LINK_LOSS_TEXT)
-		expect(linkText({ ...link, level: "none" })).toBeNull()
-		// unproven: nothing was lost
-		expect(
-			linkText({ ...legacy, level: "unproven", shortfallPercent: null }),
-		).toBeNull()
-		// a core branch dropped them after an arrival gap: not the link's fault, no notice
-		expect(
-			linkText({ ...link, level: "unproven", lossReason: "branch-congestion" }),
-		).toBeNull()
-		expect(linkText({ ...link, lossReason: "branch-congestion" })).toBeNull()
-		// an unknown reason from a newer core is not shown as source loss
-		expect(
-			linkText({ ...link, lossReason: "elsewhere" as unknown as "source" }),
-		).toBeNull()
-		expect(ratePolicyToast(policy({ link }))).toEqual({
-			text: `Sample rate raised to 2.4 MS/s for ADS-B (1090 MHz). ${LINK_LOSS_TEXT}`,
-			warn: true,
-		})
-		expect(
-			ratePolicyToast(
-				policy({ link: { ...link, lossReason: "branch-congestion" } }),
-			),
-		).toMatchObject({ warn: false })
-	})
-
-	it("keeps the loss notice short enough for one toast line", () => {
-		// the 560 px toast cap at about 7.5 px a character (14 px text): under 75 characters is one line
-		expect(LINK_LOSS_TEXT.length).toBeLessThan(75)
 	})
 })
 
-describe("link-capacity alert", () => {
-	const alert = (severity: ResourceAlert["severity"]): ResourceAlert => ({
-		type: "link-capacity",
-		severity,
-		message: "Link capacity: …",
-		timestamp: "2026-10-22T10:00:00Z",
-	})
-	it("speaks only of loss: critical (dropping) only, link-capacity only", () => {
-		expect(linkAlertToast(alert("critical"))).toBe(LINK_LOSS_TEXT)
-		expect(linkAlertToast(alert("warning"))).toBeNull()
-		expect(
-			linkAlertToast({ ...alert("critical"), type: "upstream-drops" }),
-		).toBeNull()
-	})
-
-	it("follows lossReason when the core sends it: source loss only", () => {
-		for (const sev of ["critical", "warning"] as const) {
-			expect(linkAlertToast({ ...alert(sev), lossReason: "source" })).toBe(
-				LINK_LOSS_TEXT,
-			)
-			expect(
-				linkAlertToast({ ...alert(sev), lossReason: "branch-congestion" }),
-			).toBeNull()
-		}
-		expect(
-			linkAlertToast({
-				...alert("critical"),
-				type: "upstream-drops",
-				lossReason: "source",
-			}),
-		).toBeNull()
-	})
-
-	it("stays quiet right after a raise that already spoke of the link", () => {
-		const handlers = new Map<string, (d: unknown) => void>()
-		const events = {
-			subscribe: () => () => {},
-			on: (type: string, h: (d: unknown) => void) => {
-				handlers.set(type, h)
-				return () => handlers.delete(type)
-			},
-		} as unknown as EventsClient
-		const toast = vi.fn()
-		let t = 0
-		const off = watchReceiverNotices(events, toast, () => t)
-		handlers.get("tuner:rate-policy")?.(
-			policy({
-				link: {
-					level: "dropping",
-					transport: "network",
-					payloadBytesPerSecond: 1,
-					sustainedBytesPerSecond: null,
-					shortfallPercent: null,
-					upstreamDropBytesPerSecond: 1000,
-					lossReason: "source",
-				},
-			}),
+describe("link condition text", () => {
+	it("speaks of the link only for loss on it, and of lowering the rate only then", () => {
+		const d = (lossReason?: string) => ({
+			level: "dropping",
+			...(lossReason !== undefined ? { lossReason } : {}),
+		})
+		expect(linkConditionText(d("source"), undefined)).toBe(LINK_LOSS_TEXT)
+		expect(LINK_LOSS_TEXT).toBe(
+			"Receiver link dropping samples — lower the sample rate",
 		)
-		handlers.get("resources:alert")?.(alert("critical"))
-		expect(toast).toHaveBeenCalledTimes(1)
-		// an unproven link (warning) never toasts
-		t = 10_000
-		handlers.get("resources:alert")?.(alert("warning"))
-		expect(toast).toHaveBeenCalledTimes(1)
-		t = 10_000
-		handlers.get("resources:alert")?.(alert("critical"))
-		expect(toast).toHaveBeenCalledTimes(2)
-		expect(toast.mock.calls[1]?.[1]).toEqual({ tone: "warn" })
-		off()
-		expect(handlers.size).toBe(0)
+		// a dropping entry without a cause is not blamed on the link
+		expect(linkConditionText(d(), undefined)).toBe(UNKNOWN_LOSS_TEXT)
+		expect(linkConditionText(d("core-busy"), undefined)).toBe(CORE_BUSY_TEXT)
+		expect(CORE_BUSY_TEXT).toBe("Samples lost: WaveKit is too busy to keep up")
+		expect(linkConditionText(d("unknown"), undefined)).toBe(UNKNOWN_LOSS_TEXT)
+		expect(UNKNOWN_LOSS_TEXT).toBe("Receiver samples lost")
+		// a cause a newer core names reads as unknown, never as link loss
+		expect(linkConditionText(d("elsewhere"), undefined)).toBe(UNKNOWN_LOSS_TEXT)
+		expect(linkConditionText(d("branch-congestion"), undefined)).toBeNull()
+		expect(linkConditionText({ level: "unproven" }, undefined)).toBeNull()
+		expect(linkConditionText({ level: "none" }, undefined)).toBeNull()
+		const held = {
+			sampleRate: 2_400_000,
+			ratePolicy: { raisedFromHz: 2_048_000, since: "2026-10-22T10:00:00Z" },
+		} as TunerState
+		expect(linkConditionText(d("source"), held)).toBe(
+			"Receiver link dropping samples at 2.4 MS/s (raised for ADS-B)",
+		)
+		expect(linkConditionText(d("core-busy"), held)).toBe(CORE_BUSY_TEXT)
+	})
+
+	it("keeps every text short enough for one toast line", () => {
+		// the 560 px toast cap at about 7.5 px a character (14 px text): under 75 characters is one line
+		for (const t of [LINK_LOSS_TEXT, CORE_BUSY_TEXT, UNKNOWN_LOSS_TEXT])
+			expect(t.length).toBeLessThan(75)
+	})
+
+	it("reads snapshots at the boundary: bad entries dropped, absent field as none", () => {
+		expect(parseLinkSnapshot(null)).toBeNull()
+		expect(parseLinkSnapshot({ timestamp: "never" })).toBeNull()
+		expect(
+			parseLinkSnapshot({ timestamp: "2026-10-22T10:00:00Z" })?.entries,
+		).toEqual([])
+		const parsed = parseLinkSnapshot({
+			timestamp: "2026-10-22T10:00:00Z",
+			linkAdvisories: [
+				{ sourceId: "rx", level: "dropping", since: "2026-10-22T09:59:00Z" },
+				{ sourceId: "", level: "dropping", since: "2026-10-22T09:59:00Z" },
+				{ sourceId: "ry", level: "dropping", since: "later" },
+				"junk",
+			],
+		})
+		expect(parsed?.entries.map(e => e.sourceId)).toEqual(["rx"])
 	})
 })
 

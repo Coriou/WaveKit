@@ -9,6 +9,7 @@ import {
 	projectJson,
 } from "./projection.js"
 import type {
+	ActivityChannel,
 	DecodeAircraftIdentity,
 	DecodeCoalesced,
 	DecodeEnvelope,
@@ -150,6 +151,13 @@ const aircraftSchema = z
 	})
 	.strict()
 	.refine(identity => Object.keys(identity).length > 0)
+/** ActivityChannel: a whole-Hz raster frequency in (0, 1 THz] and its discovery or null. */
+const channelSchema = z
+	.object({
+		discoveryId: id.nullable(),
+		frequencyHz: z.number().int().positive().max(1e12),
+	})
+	.strict()
 const metadataSchema = z
 	.object({
 		version: z.literal(1),
@@ -179,6 +187,7 @@ const metadataSchema = z
 		refs: refsSchema.optional(),
 		coalesced: coalescedSchema.optional(),
 		aircraft: aircraftSchema.optional(),
+		channel: channelSchema.optional(),
 	})
 	.strict()
 
@@ -289,6 +298,7 @@ interface EnvelopeBase {
 	refs: unknown
 	coalesced?: unknown
 	aircraft?: unknown
+	channel?: unknown
 }
 
 /** Member order is the metadata schema's, so the stored JSON does not depend on the path taken. */
@@ -316,6 +326,7 @@ function metadataFrom(
 		...(base.refs === undefined ? {} : { refs: base.refs }),
 		...(base.coalesced === undefined ? {} : { coalesced: base.coalesced }),
 		...(base.aircraft === undefined ? {} : { aircraft: base.aircraft }),
+		...(base.channel === undefined ? {} : { channel: base.channel }),
 	}
 }
 
@@ -800,6 +811,9 @@ export function withPresentation(
 				...(envelope.aircraft === undefined
 					? {}
 					: { aircraft: envelope.aircraft }),
+				...(envelope.channel === undefined
+					? {}
+					: { channel: envelope.channel }),
 				decodedData: envelope.decodedData,
 			} as DecodeEnvelope
 			validatedBytes.set(grown, bytes)
@@ -817,6 +831,7 @@ export function withPresentation(
 				refs: envelope.refs,
 				coalesced: envelope.coalesced,
 				aircraft: envelope.aircraft,
+				channel: envelope.channel,
 			},
 			display,
 			envelope.decodedData,
@@ -850,6 +865,7 @@ export function withMergedData(
 				refs: envelope.refs,
 				coalesced,
 				aircraft: envelope.aircraft,
+				channel: envelope.channel,
 			},
 			{
 				protocol: envelope.protocol,
@@ -869,9 +885,9 @@ export function withMergedData(
 }
 
 /**
- * The envelope with new clocks (a flushed entity row, stamped when stored)
- * or aircraft identity; everything else, decodedData included, as it
- * was. Validates the metadata and the size like create; throws when rejected.
+ * The envelope with new clocks (a flushed entity row, stamped when stored),
+ * aircraft identity or its channel; everything else, decodedData included, as
+ * it was. Validates the metadata and the size like create; throws when rejected.
  */
 export function withEnvelopeMetadata(
 	envelope: DecodeEnvelope,
@@ -879,6 +895,7 @@ export function withEnvelopeMetadata(
 		producedAt?: string
 		receivedAt?: string
 		aircraft?: DecodeAircraftIdentity
+		channel?: ActivityChannel
 	},
 ): DecodeEnvelope {
 	try {
@@ -892,6 +909,7 @@ export function withEnvelopeMetadata(
 					? {}
 					: { receivedAt: patch.receivedAt }),
 				...(patch.aircraft === undefined ? {} : { aircraft: patch.aircraft }),
+				...(patch.channel === undefined ? {} : { channel: patch.channel }),
 			},
 			envelope.decodedData,
 		)

@@ -1,8 +1,8 @@
 // The Activity drawer's state outside React: the search (tokens + category chip), the open event, the
 // columns (pinned searches, per browser until the core keeps them: CORE-GAPS "Activity columns and
 // pinned searches"), and the feeds they drive: the drawer's list and one per column, each column's
-// search narrowed by the drawer's. The tuned card opens it on a frequency through showFrequency() and on
-// one decoder through showDecoder().
+// search narrowed by the drawer's. A frequency opens it through naming.ts showChannel() and one decoder
+// through showDecoder().
 import type { ActivityQuery, ActivitySummary } from "@wavekit/api-types"
 
 import type { DataLayer } from "../../data/index.ts"
@@ -32,7 +32,6 @@ import {
 	CATEGORY_CHIPS,
 	buildQuery,
 	decoderToken,
-	frequencyToken,
 	searchTitle,
 	token,
 } from "./search.ts"
@@ -54,9 +53,13 @@ export interface ActivityViewState {
 	seen: Readonly<Record<string, string>>
 	/** Count per category for the current search without its chip; null until loaded. */
 	counts: Readonly<Record<string, number>> | null
+	/** The core's count for the current search without its chip, every category (the header count); null until loaded. */
+	total: number | null
+	/** The core stopped counting (its scan cap): `counts` and `total` are lower bounds. */
+	countsTruncated: boolean
 	/** The time range every list shows (the drawer's and each column). */
 	range: TimeRange
-	/** "With audio": only transmissions and calls, in every list. */
+	/** "With audio": only rows with a playable recording, in every list. */
 	audio: boolean
 }
 
@@ -224,6 +227,8 @@ export class ActivityController extends Store<ActivityViewState> {
 			view: "all",
 			seen: {},
 			counts: null,
+			total: null,
+			countsTruncated: false,
 			range: ANY_TIME,
 			audio: false,
 		})
@@ -337,8 +342,10 @@ export class ActivityController extends Store<ActivityViewState> {
 	}
 
 	setSearch(tokens: readonly SearchToken[], chip: CategoryChipId | null): void {
+		// the same tokens again (a chip alone, or nothing) keep the counts: they are read without the chip
+		const same = sameTokens(this.get().tokens, tokens)
 		this.update(s => ({ ...s, tokens, chip, openId: null, openItem: null }))
-		this.refresh()
+		this.refresh(!same)
 	}
 
 	/** Clears the search (and leaves a column's edit). */
@@ -386,17 +393,6 @@ export class ActivityController extends Store<ActivityViewState> {
 	showDecoder(decoderId: string, name?: string): void {
 		this.update(s => ({ ...s, editing: null, view: "all" }))
 		this.setSearch([decoderToken(decoderId, name)], null)
-		shellStore.openDrawer("activity")
-	}
-
-	/** The tuned card's Activity button: what was heard on this channel. */
-	showFrequency(hz: number, bandwidthHz?: number): void {
-		const span =
-			bandwidthHz !== undefined && bandwidthHz > 0
-				? Math.max(1000, Math.round(bandwidthHz / 2))
-				: undefined
-		this.update(s => ({ ...s, editing: null, view: "all" }))
-		this.setSearch([frequencyToken(hz, span)], null)
 		shellStore.openDrawer("activity")
 	}
 
@@ -686,6 +682,9 @@ export class ActivityController extends Store<ActivityViewState> {
 	}
 
 	private refresh(counts = true): void {
+		// the search, range or audio filter moved: the counts read for the old one are stale (the header falls
+		// back to the loaded events until the new read answers). A chip alone keeps them: they are read without it.
+		if (counts) this.dropCounts()
 		if (this.attached === 0) return
 		if (this.opening) {
 			this.queuedRefresh = {
@@ -719,14 +718,14 @@ export class ActivityController extends Store<ActivityViewState> {
 		const base = scopedQuery(buildQuery(s.tokens, null), s, scopeNow())
 		this.countsAbort?.abort()
 		if (base === null) {
-			this.update(v => ({ ...v, counts: {} }))
+			this.update(v => ({ ...v, counts: {}, total: 0, countsTruncated: false }))
 			return
 		}
 		const abort = new AbortController()
 		this.countsAbort = abort
 		const started = performance.now()
 		try {
-			const byCategory = await fetchCategoryCounts(
+			const { counts: byCategory, truncated } = await fetchCategoryCounts(
 				this.data.api,
 				base,
 				abort.signal,
@@ -739,11 +738,53 @@ export class ActivityController extends Store<ActivityViewState> {
 					(n, c) => n + (byCategory[c] ?? 0),
 					0,
 				)
-			if (!abort.signal.aborted) this.update(v => ({ ...v, counts }))
+			const total = Object.values(byCategory).reduce((n, c) => n + c, 0)
+			if (!abort.signal.aborted)
+				this.update(v => ({
+					...v,
+					counts,
+					total,
+					countsTruncated: truncated,
+				}))
 		} catch {
 			// Counts are a hint: an older core without facets leaves the chips bare.
-			// A failure (busy or timed-out reader) slows the live refresh; an abort is not one.
-			if (!abort.signal.aborted) this.countsFailures += 1
+			// A failure (busy or timed-out reader) slows the live refresh; an abort is not one. Counts that
+			// may no longer hold are dropped: the header falls back to the loaded events.
+			if (!abort.signal.aborted) {
+				this.countsFailures += 1
+				this.dropCounts()
+			}
 		}
 	}
+
+	private dropCounts(): void {
+		// the read in flight is for the old search: its late answer must not write the old counts back
+		this.countsAbort?.abort()
+		this.countsAbort = null
+		this.update(v =>
+			v.counts === null && v.total === null
+				? v
+				: { ...v, counts: null, total: null, countsTruncated: false },
+		)
+	}
+}
+
+/** Two searches with the same tokens, in order (a token's chip label included). */
+export function sameTokens(
+	a: readonly SearchToken[],
+	b: readonly SearchToken[],
+): boolean {
+	return (
+		a.length === b.length &&
+		a.every((t, i) => {
+			const u = b[i]
+			return (
+				u !== undefined &&
+				t.kind === u.kind &&
+				t.value === u.value &&
+				t.label === u.label &&
+				t.spanHz === u.spanHz
+			)
+		})
+	)
 }

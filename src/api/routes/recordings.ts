@@ -21,6 +21,7 @@ import {
 	RECORDINGS_CURSOR_MAX_LENGTH,
 	RECORDINGS_PAGE_LIMIT_DEFAULT,
 	RECORDINGS_PAGE_LIMIT_MAX,
+	RECORDINGS_NEAR_MAX_TOLERANCE_HZ,
 	RECORDINGS_QUERY_TEXT_MAX,
 	RECORDINGS_ROUTE,
 } from "@wavekit/api-types"
@@ -137,6 +138,9 @@ const QUERY_EXPECTED: Readonly<Record<string, string>> = Object.freeze({
 	source: "decimal digits (1 to 12), one value",
 	minHz: "integer Hz (0 to 1e12), one value",
 	maxHz: "integer Hz (0 to 1e12), one value",
+	channelHz: "integer Hz (0 to 1e12), one value, not with nearHz",
+	nearHz: "integer Hz (0 to 1e12), one value, not with channelHz",
+	toleranceHz: `integer Hz (0 to ${RECORDINGS_NEAR_MAX_TOLERANCE_HZ}), one value, with nearHz`,
 	since: "ISO-8601 date and time with a zone, one value",
 	until: "ISO-8601 date and time with a zone, one value",
 	q: `text, 1 to ${RECORDINGS_QUERY_TEXT_MAX} characters, one value`,
@@ -189,6 +193,13 @@ const LIST_SCHEMA: FastifySchema = {
 			source: { type: "string", pattern: "^[0-9]{1,12}$" },
 			minHz: { type: "integer", minimum: 0 },
 			maxHz: { type: "integer", minimum: 0 },
+			channelHz: { type: "integer", minimum: 0 },
+			nearHz: { type: "integer", minimum: 0 },
+			toleranceHz: {
+				type: "integer",
+				minimum: 0,
+				maximum: RECORDINGS_NEAR_MAX_TOLERANCE_HZ,
+			},
 			since: { type: "string", format: "date-time" },
 			until: { type: "string", format: "date-time" },
 			q: {

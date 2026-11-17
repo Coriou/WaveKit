@@ -12,6 +12,8 @@ import type {
 	ActivityTimelineQuery,
 } from "../storage/contract.js"
 import {
+	ACTIVITY_CHANNEL_NEAR_MAX_TOLERANCE_HZ,
+	DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ,
 	ACTIVITY_BANDMAP_DEFAULT_BUCKET_HZ,
 	ACTIVITY_BANDMAP_DEFAULT_MAX_HZ,
 	ACTIVITY_BANDMAP_DEFAULT_MIN_HZ,
@@ -32,6 +34,9 @@ import {
 	ACTIVITY_TRAILS_MAX_ENTITY_KEYS,
 	ACTIVITY_TRAILS_MAX_WINDOW_MS,
 } from "@wavekit/api-types"
+
+/** The largest channel frequency a query names: 1 THz, the stored channels' bound (row.ts). */
+const CHANNEL_QUERY_MAX_HZ = 1e12
 
 export const ACTIVITY_QUERY_KINDS = [
 	"decoder-reception",
@@ -70,7 +75,11 @@ const FACET_DIMENSIONS = [
 	"decoderId",
 	"sourceId",
 	"kind",
+	"channel",
 ] as const
+
+/** Every facet dimension at once (DEFAULT_ACTIVITY_QUERY_LIMITS.facetDimensions). */
+export const FACET_DIMENSION_COUNT = FACET_DIMENSIONS.length
 
 export type FacetDimension = (typeof FACET_DIMENSIONS)[number]
 
@@ -94,6 +103,11 @@ export interface NormalisedQuery {
 	entityKey: string | null
 	/** null: no filter; true / false: only rows with / without a recording link. */
 	hasRecording: boolean | null
+	/**
+	 * A channel scope (ActivityQuery channelHz, nearHz and toleranceHz): channel frequencies
+	 * from `minHz` to `maxHz` inclusive (one channel: equal bounds). null: no channel filter.
+	 */
+	channel: { minHz: number; maxHz: number } | null
 	fts: FtsConstraint
 }
 
@@ -140,8 +154,51 @@ const querySchema = z
 		entityKey: idSchema.optional(),
 		text: z.string().optional(),
 		hasRecording: z.boolean().optional(),
+		channelHz: z
+			.number()
+			.finite()
+			.positive()
+			.max(CHANNEL_QUERY_MAX_HZ)
+			.optional(),
+		nearHz: z
+			.number()
+			.finite()
+			.nonnegative()
+			.max(CHANNEL_QUERY_MAX_HZ)
+			.optional(),
+		toleranceHz: z
+			.number()
+			.finite()
+			.nonnegative()
+			.max(ACTIVITY_CHANNEL_NEAR_MAX_TOLERANCE_HZ)
+			.optional(),
 	})
 	.strict()
+
+/** The channel scope of a parsed query, or null; throws on a contradictory one. */
+function channelScope(raw: {
+	channelHz?: number | undefined
+	nearHz?: number | undefined
+	toleranceHz?: number | undefined
+}): { minHz: number; maxHz: number } | null {
+	if (raw.toleranceHz !== undefined && raw.nearHz === undefined)
+		throw new ActivityQueryInvalidError("toleranceHz requires nearHz")
+	if (raw.channelHz !== undefined && raw.nearHz !== undefined)
+		throw new ActivityQueryInvalidError(
+			"channelHz must not be combined with nearHz",
+		)
+	if (raw.channelHz !== undefined) {
+		const hz = integerHz(raw.channelHz, "channelHz")
+		return { minHz: hz, maxHz: hz }
+	}
+	if (raw.nearHz === undefined) return null
+	const near = integerHz(raw.nearHz, "nearHz")
+	const tolerance = integerHz(
+		raw.toleranceHz ?? DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ,
+		"toleranceHz",
+	)
+	return { minHz: Math.max(0, near - tolerance), maxHz: near + tolerance }
+}
 
 function uniqueSorted(values: readonly string[]): string[] {
 	return [...new Set(values)].sort((left, right) =>
@@ -236,6 +293,7 @@ export function normaliseQuery(
 			}),
 		entityKey: raw.entityKey ?? null,
 		hasRecording: raw.hasRecording ?? null,
+		channel: channelScope(raw),
 		fts,
 	}
 	const terms = countTerms(query)
@@ -261,6 +319,7 @@ export function countTerms(query: NormalisedQuery): number {
 	if (query.producedToMs !== null) terms += 1
 	if (query.entityKey !== null) terms += 1
 	if (query.hasRecording !== null) terms += 1
+	if (query.channel !== null) terms += 1
 	if (query.fts.kind !== "none") terms += 1
 	return terms
 }
@@ -290,6 +349,7 @@ export function hashQuery(query: NormalisedQuery): string {
 	if (query.refs.length > 0) body["refs"] = query.refs
 	if (query.entityKey !== null) body["entityKey"] = query.entityKey
 	if (query.hasRecording !== null) body["hasRecording"] = query.hasRecording
+	if (query.channel !== null) body["channel"] = query.channel
 	if (query.fts.kind === "match") body["text"] = query.fts.match
 	else if (query.fts.kind === "impossible") body["text"] = ""
 	return sha256Hex(canonicalJson(body))
@@ -304,7 +364,7 @@ export function parseDimensions(
 	const parsed = z.array(dimensionSchema).safeParse(input)
 	if (!parsed.success) {
 		throw new ActivityQueryInvalidError(
-			"dimensions must list category, protocol, decoderId, sourceId, or kind",
+			"dimensions must list category, protocol, decoderId, sourceId, kind, or channel",
 		)
 	}
 	if (parsed.data.length === 0) {

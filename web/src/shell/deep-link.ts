@@ -1,8 +1,10 @@
-// Deep links: the address bar's hash names what is on screen, and a link opens it again. `#/map`, `#/messages`,
-// `#/activity?t=talkgroup:1201&cat=voice&range=today&audio=1`, `#/activity/<eventId>`, `#/scanner/<discoveryId>`,
-// `#/recordings`, `#/settings/<settingId>` (the setting is highlighted, as from ⌘K). With a drawer over the map or
-// Messages, `view=` keeps the view. A hash never reaches the core, so a link works from any path the app is served
+// Deep links: the address bar's hash names what is on screen, and a link opens it again. `#/map`,
+// `#/activity?t=talkgroup:1201&cat=voice&range=today&audio=1&layout=cards`, `#/activity/<eventId>`,
+// `#/scanner/<discoveryId>`, `#/recordings`, `#/settings/<settingId>` (the setting is highlighted, as from ⌘K). With a
+// drawer over the map, `view=` keeps the view. The removed Messages view's links (`#/messages`, `view=messages`) open
+// Activity as cards (a non-Activity drawer over it opens as linked over the spectrum), so an old bookmark still lands on the same cards. A hash never reaches the core, so a link works from any path the app is served
 // at and the service worker's shell answers it offline. The bar is rewritten in place (no history entry per click).
+import type { ActivityLayout } from "../features/activity/layout.ts"
 import type { DrawerId, ViewId } from "./store.ts"
 import { DRAWERS, VIEWS } from "./store.ts"
 import type {
@@ -24,6 +26,8 @@ export interface ActivityLink {
 	range: TimeRange
 	audio: boolean
 	openId: string | null
+	/** Cards; left out for the List layout (the per-browser choice stays). */
+	layout?: ActivityLayout
 }
 
 export interface LinkState {
@@ -150,12 +154,32 @@ export function formatLink(s: LinkState): string {
 			const range = formatRange(a.range)
 			if (range !== null) q.set("range", range)
 			if (a.audio) q.set("audio", "1")
+			if (a.layout === "cards") q.set("layout", "cards")
 		} else if (s.drawer === "scanner" && s.discoveryId) path.push(s.discoveryId)
 		else if (s.drawer === "settings" && s.settingId) path.push(s.settingId)
 	} else if (s.view !== "spectrum") path.push(s.view)
 	if (path.length === 0) return ""
 	const query = q.toString()
 	return `#/${path.map(encodeURIComponent).join("/")}${query ? `?${query}` : ""}`
+}
+
+/** The removed Messages view's path and `view=` value. */
+const MESSAGES = "messages"
+
+/** Where an old Messages link lands: Activity, all events, as cards. */
+function messagesLink(view: ViewId): LinkState {
+	return {
+		view,
+		drawer: "activity",
+		activity: {
+			tokens: [],
+			chip: null,
+			range: ANY_TIME,
+			audio: false,
+			openId: null,
+			layout: "cards",
+		},
+	}
 }
 
 /** A hash back to a state; null when it names nothing this app knows (the hash is left alone). */
@@ -174,9 +198,13 @@ export function parseLink(hash: string): LinkState | null {
 	}
 	const head = path[0] ?? ""
 	const item = path[1] ?? null
+	if (head === MESSAGES) return messagesLink("spectrum")
 	if (isView(head) && !isDrawer(head)) return { view: head, drawer: null }
 	if (!isDrawer(head)) return null
 	const viewParam = q.get("view")
+	// a drawer over the old Messages view: the drawer opens as linked over the spectrum; the Activity drawer opens as
+	// cards (the cards now live there), keeping its open event and tokens
+	const oldMessages = viewParam === MESSAGES
 	const view: ViewId =
 		viewParam !== null && isView(viewParam) ? viewParam : "spectrum"
 	const out: LinkState = { view, drawer: head }
@@ -197,6 +225,9 @@ export function parseLink(hash: string): LinkState | null {
 			range: parseRange(q.get("range")),
 			audio: q.get("audio") === "1",
 			openId: item,
+			...(oldMessages || q.get("layout") === "cards"
+				? { layout: "cards" as const }
+				: {}),
 		}
 	} else if (head === "scanner") out.discoveryId = item
 	else if (head === "settings") out.settingId = item

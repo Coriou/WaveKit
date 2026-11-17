@@ -469,6 +469,10 @@ export class ApiClient {
 			})
 		}
 		if (response.ok) return response.blob()
+		if (response.status === 401 && this.csrfToken !== null) {
+			this.csrfToken = null
+			for (const handler of this.sessionLostHandlers) handler()
+		}
 		const text = await response.text()
 		let parsed: unknown = text
 		try {

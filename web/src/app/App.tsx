@@ -23,8 +23,8 @@ import { createServices, type AppServices } from "./services.ts"
 const coveredNow = () => shellStore.getState().view !== "spectrum"
 
 /**
- * The plot with the app's one tuning step: the Tuner's chosen step, else the band plan's (Plot's default). The Map and
- * Messages views cover it with an opaque surface, so it stops drawing under them.
+ * The plot with the app's one tuning step: the Tuner's chosen step, else the band plan's (Plot's default). The Map view
+ * covers it with an opaque surface, so it stops drawing under them.
  */
 function AppPlot({ services }: { services: AppServices }) {
 	const stepHz = useStore(services.prefs, s => s.stepHz)
@@ -47,7 +47,10 @@ export function App() {
 		let disposed = false
 		setServices(s)
 		const offLinks = followDeepLinks(s)
-		const offNotices = watchReceiverNotices(s.data.events)
+		const offNotices = watchReceiverNotices(s.data.events, {
+			api: s.data.api,
+			tunerOf: id => s.data.tuner.get().bySource[id],
+		})
 		queueMicrotask(() => {
 			if (!disposed) void s.start()
 		})

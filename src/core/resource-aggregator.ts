@@ -21,6 +21,7 @@ import type {
 	SourceBackpressure,
 	ResourceAlert,
 	LinkAdvisory,
+	ResourceLinkAdvisory,
 	SourceLinkQuality,
 } from "@wavekit/api-types"
 import type { LinkQuality } from "./link-burst/link-quality.js"
@@ -69,7 +70,7 @@ export class ResourceAggregator extends EventEmitter {
 
 	private readonly linkQuality:
 		| (Pick<LinkQuality, "all" | "one"> &
-				Partial<Pick<LinkQuality, "recheckAdvisories">>)
+				Partial<Pick<LinkQuality, "recheckAdvisories" | "advisories">>)
 		| null
 	private readonly containerMonitor: ContainerMonitor | null
 	private readonly sdrHostPoller: SdrHostPoller | null
@@ -77,6 +78,8 @@ export class ResourceAggregator extends EventEmitter {
 
 	// Track previous values for delta alerts
 	private lastSnapshot: ResourceSnapshot | null = null
+	/** Link advisory states as of the last broadcast tick; null until one ran. */
+	private linkAdvisories: ResourceLinkAdvisory[] | null = null
 
 	constructor(
 		logger: Logger,
@@ -84,7 +87,7 @@ export class ResourceAggregator extends EventEmitter {
 		components: {
 			linkQuality?:
 				| (Pick<LinkQuality, "all" | "one"> &
-						Partial<Pick<LinkQuality, "recheckAdvisories">>)
+						Partial<Pick<LinkQuality, "recheckAdvisories" | "advisories">>)
 				| null
 			containerMonitor?: ContainerMonitor | null
 			sdrHostPoller?: SdrHostPoller | null
@@ -163,6 +166,9 @@ export class ResourceAggregator extends EventEmitter {
 			container,
 			sdrHosts,
 			sourceBackpressure,
+			...(this.linkAdvisories === null
+				? {}
+				: { linkAdvisories: this.linkAdvisories.map(entry => ({ ...entry })) }),
 		}
 
 		// Check for alerts
@@ -179,7 +185,7 @@ export class ResourceAggregator extends EventEmitter {
 			type: "link-capacity",
 			severity: advisory.level === "dropping" ? "critical" : "warning",
 			sourceId,
-			message: `Link capacity: payload ${advisory.payloadBytesPerSecond} B/s, sustained ${advisory.sustainedBytesPerSecond ?? "unknown"} B/s, shortfall ${advisory.shortfallPercent ?? "unknown"}%, upstream drops ${advisory.upstreamDropBytesPerSecond ?? "unknown"} B/s`,
+			message: `Link capacity${advisory.lossReason === undefined ? "" : ` (${advisory.lossReason})`}: payload ${advisory.payloadBytesPerSecond} B/s, sustained ${advisory.sustainedBytesPerSecond ?? "unknown"} B/s, shortfall ${advisory.shortfallPercent ?? "unknown"}%, upstream drops ${advisory.upstreamDropBytesPerSecond ?? "unknown"} B/s`,
 			timestamp: new Date().toISOString(),
 			...(advisory.lossReason === undefined
 				? {}
@@ -245,12 +251,11 @@ export class ResourceAggregator extends EventEmitter {
 
 		this.broadcastTimer = setInterval(() => {
 			try {
+				// Recheck first so the snapshot carries this tick's advisory states.
+				this.refreshLinkAdvisories()
 				const snapshot = this.getSnapshot()
 				this.emit("snapshot", snapshot)
-				if (this.linkQuality) {
-					this.linkQuality.recheckAdvisories?.()
-					this.emit("link-quality", this.getLinkQuality())
-				}
+				if (this.linkQuality) this.emit("link-quality", this.getLinkQuality())
 			} catch (error) {
 				this.log.error({ error }, "Failed to broadcast resource snapshot")
 			}
@@ -260,6 +265,18 @@ export class ResourceAggregator extends EventEmitter {
 			{ intervalMs: this.broadcastIntervalMs },
 			"Started resource broadcasting",
 		)
+	}
+
+	/** Rechecks link advisories and caches their states for snapshots (once per tick). */
+	private refreshLinkAdvisories(): void {
+		if (!this.linkQuality) return
+		try {
+			this.linkQuality.recheckAdvisories?.()
+			const states = this.linkQuality.advisories?.()
+			this.linkAdvisories = states ? states.map(entry => ({ ...entry })) : null
+		} catch (error) {
+			this.log.warn({ error }, "Link advisory recheck failed")
+		}
 	}
 
 	/**

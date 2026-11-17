@@ -4,7 +4,7 @@
  * replay). See docs/specs/activity-recording-catalog/event-foundation-batch1.md.
  * Changing anything here is a Main-only contract change.
  */
-import type { DecodeEnvelope } from "../types.js"
+import type { ActivityChannel, DecodeEnvelope } from "../types.js"
 import type { CoalescePresenter } from "./coalesce.js"
 
 export const ACTIVITY_SCHEMA_VERSION = 1
@@ -87,8 +87,14 @@ export interface RecordingChangePayload {
 	observationId: string
 	/** The source the recorder heard; null when unknown. */
 	sourceId: string | null
-	/** The recorded channel's centre in Hz; null when unknown. */
+	/** The recorded centre in Hz (the measured or demodulated one); null when unknown. */
 	frequencyHz: number | null
+	/**
+	 * The channel the file was kept on: the owning discovery (through merge aliases, at the
+	 * keep) and its raster frequency, the row's `frequencyHz` and `channel`. Absent on records
+	 * written before it existed.
+	 */
+	channel?: ActivityChannel
 	/**
 	 * When the recorded observation started (ISO). A long transmission rolls over into several
 	 * files: a later file starts after this.
@@ -174,6 +180,8 @@ export interface ActivitySummary {
 	aircraft?: DecodeEnvelope["aircraft"]
 	/** The row's playable recording; absent when it has none (or its file was deleted). */
 	recording?: ActivityRecordingLink
+	/** The row's channel (ActivityChannel); absent on rows without one and on older rows. */
+	channel?: ActivityChannel
 }
 
 export const MAX_RECORD_BYTES = 144 * 1024
@@ -280,6 +288,14 @@ export type ActivityRefType =
 	| "probeId"
 	| "channelId"
 	| "recordingId"
+
+/**
+ * A stored ref's type: an ActivityRefType, or `channelHz`, internal and never a query ref: the
+ * row's channel frequency (ActivitySummary.channel) as a 13-digit zero-padded decimal Hz
+ * (channelRefValue), so a text range on the refs key (ref_type, ref_value, seq) is a frequency
+ * range.
+ */
+export type ActivityStoredRefType = ActivityRefType | "channelHz"
 
 export interface StoreIdentity {
 	storeUuid: string
@@ -545,6 +561,19 @@ export interface ActivityQuery {
 	text?: string
 	/** true: only rows with a playable recording (`recording`); false: only rows without one. */
 	hasRecording?: boolean
+	/**
+	 * Rows of this channel (integer Hz, the raster frequency): `channel.frequencyHz` equal to it;
+	 * a row without `channel` matches by its own frequency within
+	 * ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ. Not with `nearHz`.
+	 */
+	channelHz?: number
+	/** Rows whose channel lies within `toleranceHz` of this (integer Hz), inclusive. */
+	nearHz?: number
+	/**
+	 * With `nearHz` only: integer Hz, 0 to ACTIVITY_CHANNEL_NEAR_MAX_TOLERANCE_HZ; omitted:
+	 * DISCOVERY_NEAR_DEFAULT_TOLERANCE_HZ, as the discovery list.
+	 */
+	toleranceHz?: number
 }
 
 /** Provided by the query lane; Main mounts it. */
@@ -709,6 +738,8 @@ export interface ActivitySearchPage {
 	replayCursor: string
 	snapshot: { lowBarrier: string; highWater: string; expiresAt: string }
 	searchCoverage: "bounded-projection"
+	/** With `channelHz` or `nearHz` only: how the rows of the snapshot matched. */
+	channelMatch?: "exact" | "mixed"
 }
 
 export interface ActivityFacetRequest {
@@ -719,6 +750,7 @@ export interface ActivityFacetRequest {
 		| "decoderId"
 		| "sourceId"
 		| "kind"
+		| "channel"
 	)[]
 }
 
@@ -729,6 +761,11 @@ export interface ActivityFacetResult {
 	scanned: number
 	truncated: boolean
 	snapshot: { lowBarrier: string; highWater: string }
+	/**
+	 * With `channelHz` or `nearHz` only. The `channel` dimension's values are channel frequencies
+	 * in decimal Hz; null counts rows without a stored channel (matched by their frequency).
+	 */
+	channelMatch?: "exact" | "mixed"
 }
 
 export interface ActivityReplayRequest {

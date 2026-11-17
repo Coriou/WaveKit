@@ -16,6 +16,7 @@ import {
 	protocolName,
 	whatIsThis,
 } from "../data/scanner-format.ts"
+import { channelName, confidenceWord, savedNameAt } from "../features/naming.ts"
 import type { SpectrumViewSpan } from "../spectrum/index.ts"
 import type { SignalLabelsMode } from "./label-gate.ts"
 
@@ -216,23 +217,34 @@ export function approxBandwidth(hz: unknown): string | null {
 export function unidentifiedLabel(
 	d: Pick<Discovery, "class" | "hint" | "bandwidthHz" | "anchor">,
 ): string {
-	if (d.anchor === "decode") return "Unidentified"
-	const shape = shapeOf(d.class) ?? shapeOf(d.hint)
-	const bw = approxBandwidth(d.bandwidthHz)
-	const what = [shape, bw].filter(x => x !== null).join(" ")
+	const what = unidentifiedShape(d)
 	return what ? `Unidentified · ${what}` : "Unidentified"
 }
 
+/** The measured shape of an unidentified signal ("4FSK ~9 kHz"), or null when nothing was measured. */
+export function unidentifiedShape(
+	d: Pick<Discovery, "class" | "hint" | "bandwidthHz" | "anchor">,
+): string | null {
+	if (d.anchor === "decode") return null
+	const shape = shapeOf(d.class) ?? shapeOf(d.hint)
+	const bw = approxBandwidth(d.bandwidthHz)
+	const what = [shape, bw].filter(x => x !== null).join(" ")
+	return what || null
+}
+
 /**
- * A tag's name: the operator's label, else an unidentified signal's shape ("Unidentified · 4FSK ~9 kHz"), else the
- * drawer's title ("DMR · CC 1", "Maybe FM voice", "DMR?" for DMR sync only).
+ * A tag's name (naming.ts channelName): the saved name of its channel, the operator's label, else an
+ * unidentified signal's shape ("Unidentified · 4FSK ~9 kHz"), else the drawer's title ("DMR · CC 1",
+ * "Maybe FM voice", "DMR?" for DMR sync only).
  */
-export function tagName(d: Discovery): string {
-	const label = d.operator?.label?.trim()
-	if (label) return label
+export function tagName(
+	d: Discovery,
+	saved: string | null = savedNameAt(d.frequencyHz),
+): string {
+	const label = d.operator?.label ?? null
 	if (tagState(d) === "heard" && d.protocol !== "dmr" && d.anchor !== "decode")
-		return unidentifiedLabel(d)
-	return discoveryTitle(d)
+		return channelName({ saved, label, shape: unidentifiedShape(d) })
+	return channelName({ saved, label, proven: discoveryTitle(d) })
 }
 
 /** Whether the spectrum tags this discovery at all (Ignore is the core's lockout: never). */
@@ -515,7 +527,7 @@ export function tagPopoverRows(
 ): TagPopoverRow[] {
 	return tag.members.map(d => {
 		const what = whatIsThis(d)
-		const label = d.operator?.label?.trim() ?? ""
+		const label = savedNameAt(d.frequencyHz) ?? d.operator?.label?.trim() ?? ""
 		return {
 			id: d.id,
 			freq: mhz(d.frequencyHz),
@@ -526,12 +538,6 @@ export function tagPopoverRows(
 			tuneHz: discoveryTuneHz(d),
 		}
 	})
-}
-
-const STATE_WORDS: Readonly<Record<DiscoveryTagState, string>> = {
-	proven: "Proven",
-	likely: "Likely",
-	heard: "Heard",
 }
 
 /** Identities in words for "how we know": "colour code 7", "NAC 293", "capcode 1234567"; else identityText. */
@@ -723,8 +729,6 @@ export function tagDetail(
 	now: number,
 ): TagDetail {
 	const state = tagState(d)
-	const decoded =
-		state === "proven" && (d.proof === undefined || d.proof.kind === "decoded")
 	const how = howWeKnow(d)
 	const summary =
 		typeof d.proof?.summary === "string" ? d.proof.summary.trim() : ""
@@ -735,7 +739,7 @@ export function tagDetail(
 	const air = d.airtimeMs
 	return {
 		state,
-		stateText: decoded ? "Decoded" : STATE_WORDS[state],
+		stateText: confidenceWord(d),
 		name: tagName(d),
 		freq: mhz(d.frequencyHz),
 		howWeKnow: how,
@@ -1026,8 +1030,15 @@ export function identifiedAt(
 	)
 }
 
-/** What a signal chip says for an identified signal: the decoder's words ("DMR · CC 1"), not a name someone gave it. */
-export function identifiedLabel(d: Discovery): string {
+/**
+ * What a signal chip says for an identified signal: the saved name of its channel when it has one (it renames the
+ * channel everywhere), else the decoder's words ("DMR · CC 1"), not an operator label.
+ */
+export function identifiedLabel(
+	d: Discovery,
+	saved: string | null = savedNameAt(d.frequencyHz),
+): string {
+	if (saved !== null) return saved
 	const what = confidenceText(d)
 	if (d.anchor === "decode") return what
 	const id = identityText(d.identity)

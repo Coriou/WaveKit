@@ -9,6 +9,13 @@ import type { CategoryName } from "@wavekit/brand/react"
 
 import { clockText, convertMeasure, dateText, sameDay } from "../display.ts"
 import { formatMHz } from "../format.ts"
+import {
+	channelMHz,
+	protocolSpelling,
+	savedNameAt,
+	transmissionSubtitle,
+	transmissionTitle,
+} from "../naming.ts"
 import { formatDuration } from "../recordings/model.ts"
 import type { ActivityStack } from "./fold.ts"
 import { MESSAGE_KEYS } from "./fold.ts"
@@ -50,7 +57,7 @@ const KIND_TEXT: Partial<Record<ActivitySummary["kind"], string>> = {
 	"analog-transmission": "Analog voice",
 	"call-lifecycle": "Call",
 	"scanner-result": "Scanner",
-	"recording-change": "Recording",
+	"recording-change": "FM voice",
 }
 
 const CATEGORY_ICON: Record<ActivityCategory, CategoryName | null> = {
@@ -120,7 +127,10 @@ function readingText(f: DecodeField): string | null {
 
 export function protocolText(s: ActivitySummary): string | null {
 	if (s.protocol && s.protocol !== "analog")
-		return s.protocol.toUpperCase().replace(/_/g, " ")
+		return (
+			protocolSpelling(s.protocol) ??
+			s.protocol.toUpperCase().replace(/_/g, " ")
+		)
 	return KIND_TEXT[s.kind] ?? null
 }
 
@@ -214,6 +224,7 @@ export function rowView(
 		}
 	}
 	if (s.kind === "analog-transmission") return analogView(s)
+	if (s.kind === "recording-change") return recordingChangeView(s)
 	if (s.category === "aviation-data") return aviationView(s, aircraft)
 	const message = s.fields.find(
 		f =>
@@ -348,6 +359,31 @@ function aviationView(
 	}
 }
 
+/**
+ * A scanner analog recording's row (naming.ts): a transmission, never "Recording <Hz>". Title: the channel's
+ * saved name, else "FM voice"; subtitle: "FM voice" under a saved name, the channel frequency, the duration.
+ */
+function recordingChangeView(s: ActivitySummary): RowView {
+	const saved = savedNameAt(s.frequencyHz)
+	const ms =
+		s.recording?.durationMs ?? s.fields.find(f => f.key === "durationMs")?.value
+	const what = transmissionTitle({ what: "FM voice" })
+	const title = saved ?? what
+	return {
+		icon: "voice",
+		title,
+		subtitle: transmissionSubtitle({
+			title,
+			channel: saved === null ? null : what,
+			frequency: s.frequencyHz !== null ? channelMHz(s.frequencyHz) : null,
+			duration: typeof ms === "number" ? formatDuration(ms / 1000) : null,
+		}),
+		message: null,
+		readings: null,
+		notice: false,
+	}
+}
+
 /** "9 s", "1 min 12 s". */
 export function durationText(ms: number): string {
 	const s = Math.max(0, Math.round(ms / 1000))
@@ -371,6 +407,7 @@ function analogView(s: ActivitySummary): RowView {
 	return {
 		icon: "voice",
 		title:
+			savedNameAt(s.frequencyHz) ??
 			s.title ??
 			(s.frequencyHz !== null
 				? `${formatMHz(s.frequencyHz)} MHz`

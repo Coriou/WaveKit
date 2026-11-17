@@ -516,7 +516,7 @@ interface RecorderSettling {
 interface AnalogHandleLike {
 	ready: Promise<void>
 	push(pcm: Int16Array): Promise<void>
-	finish(cut?: unknown): Promise<unknown>
+	finish(cut?: unknown, facts?: unknown): Promise<unknown>
 	cancel(cut?: unknown): void
 	settled: Promise<unknown>
 }
@@ -570,7 +570,8 @@ function settledChunks(
 		const finish = h.finish.bind(h)
 		const cancel = h.cancel.bind(h)
 		h.push = pcm => track(push(pcm))
-		h.finish = cut => track(finish(cut))
+		// The finish facts (cutActive, the verdict) reach the receipt as in production.
+		h.finish = (cut, facts) => track(finish(cut, facts))
 		h.cancel = cut => {
 			cancel(cut)
 			void track(h.settled)

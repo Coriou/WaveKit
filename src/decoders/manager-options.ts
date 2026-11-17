@@ -13,6 +13,7 @@ import type {
 	ResolvedMode,
 	PlannerVfo,
 	BandplanChannelLookup,
+	BandplanRangeLookup,
 	EfficiencyGate,
 } from "./enablement/contract.js"
 import type {
@@ -42,6 +43,8 @@ export interface DecoderEnablementOptions {
 	recheckAvailable: (id: string) => Promise<boolean>
 	vfo: () => PlannerVfo | null
 	bandplanChannels: BandplanChannelLookup
+	/** Passed to the planner as `bandplanRangeContains` in every pass's input. */
+	bandplanRangeContains?: BandplanRangeLookup
 	maxBandplanChannels: number
 	gate?: EfficiencyGate
 	activity?: DecoderActivityOptions

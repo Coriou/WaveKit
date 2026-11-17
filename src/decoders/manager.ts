@@ -19,6 +19,7 @@
 
 import type { EfficiencyBudgetService } from "./enablement/budget-settings.js"
 import { EventEmitter } from "node:events"
+import { types } from "node:util"
 import { z } from "zod"
 import {
 	PlacementLifecycle,
@@ -118,7 +119,10 @@ import {
 	resolveDecoderTargetFrequencies,
 } from "./status-fields.js"
 import type { DecoderRegistry } from "./registry.js"
-import { VFO_CHANNEL_TYPES, activityQueries } from "./enablement/placement.js"
+import {
+	VFO_CHANNEL_TYPES,
+	activityPlanQueries,
+} from "./enablement/placement.js"
 import {
 	ACTIVITY_MOVE_WINDOW_MS,
 	isActivityDecoder,
@@ -137,7 +141,10 @@ import {
 	isDsdActivitySync,
 } from "./enablement/dsd-activity.js"
 import { ACTIVITY_MAX_OBSERVED } from "./enablement/activity-contract.js"
-import type { ActivitySnapshot } from "./enablement/activity-contract.js"
+import type {
+	ActivitySnapshot,
+	ObservedActivityCentre,
+} from "./enablement/activity-contract.js"
 import { SourceFanoutRouter } from "../core/source-fanout-router.js"
 import type {
 	ChannelAdmissionReason,
@@ -687,6 +694,267 @@ const ObservedCentresSchema = z
 	)
 	.max(ACTIVITY_MAX_OBSERVED)
 
+/** Test seam: the schemas the observed-activity guards are tested against. */
+export const observedActivitySchemas = {
+	channels: ObservedChannelsSchema,
+	centres: ObservedCentresSchema,
+} as const
+
+/** A finite positive integer, as `z.number().finite().int().positive()` reads it. */
+const observedHz = (value: unknown): value is number =>
+	typeof value === "number" && Number.isInteger(value) && value > 0
+
+/**
+ * The elements of a plain array of at most `max` data properties, read
+ * without running any accessor, or undefined: a Proxy, another prototype,
+ * a hole, an accessor, an extra own member or more than `max` elements.
+ * At most `max` descriptor lookups.
+ */
+function plainElements(value: unknown, max: number): unknown[] | undefined {
+	if (
+		!Array.isArray(value) ||
+		types.isProxy(value) ||
+		Object.getPrototypeOf(value) !== Array.prototype ||
+		value.length > max ||
+		Reflect.ownKeys(value).length !== value.length + 1
+	)
+		return undefined
+	const out = new Array<unknown>(value.length)
+	for (let i = 0; i < value.length; i++) {
+		const element = Object.getOwnPropertyDescriptor(value, i)
+		if (element === undefined || !element.enumerable || !("value" in element))
+			return undefined
+		out[i] = element.value
+	}
+	return out
+}
+
+const CENTRE_KEYS: ReadonlySet<PropertyKey> = new Set([
+	"actualHz",
+	"candidateHz",
+])
+
+/**
+ * Structural guards in front of the observed-activity schemas, as for
+ * `createDecodeEnvelope`: a guard returns exactly what the schema returns
+ * for a plain, well-formed list (a new array; centres as new objects with
+ * the schema's members in its order) and undefined for anything else, which
+ * then takes the schema path. So acceptance, all-or-nothing rejection and
+ * the ACTIVITY_MAX_OBSERVED bound are the schema's.
+ */
+function guardObservedChannels(value: unknown): number[] | undefined {
+	const elements = plainElements(value, ACTIVITY_MAX_OBSERVED)
+	if (elements === undefined) return undefined
+	for (const hz of elements) if (!observedHz(hz)) return undefined
+	return elements as number[]
+}
+
+function guardObservedCentres(
+	value: unknown,
+): ObservedActivityCentre[] | undefined {
+	const elements = plainElements(value, ACTIVITY_MAX_OBSERVED)
+	if (elements === undefined) return undefined
+	const out: ObservedActivityCentre[] = []
+	for (const element of elements) {
+		if (element === null || typeof element !== "object") return undefined
+		if (types.isProxy(element)) return undefined
+		const prototype: unknown = Object.getPrototypeOf(element)
+		if (prototype !== Object.prototype && prototype !== null) return undefined
+		const keys = Reflect.ownKeys(element)
+		if (keys.length !== 2) return undefined
+		for (const key of keys) {
+			if (!CENTRE_KEYS.has(key)) return undefined
+			const descriptor = Object.getOwnPropertyDescriptor(element, key)
+			if (
+				descriptor === undefined ||
+				!descriptor.enumerable ||
+				!("value" in descriptor) ||
+				!observedHz(descriptor.value)
+			)
+				return undefined
+		}
+		const centre = element as ObservedActivityCentre
+		out.push({ actualHz: centre.actualHz, candidateHz: centre.candidateHz })
+	}
+	return out
+}
+
+/** The serial caps worker's debounce of a source's caps changes. */
+const CAPS_CHANGE_DEBOUNCE_MS = 300
+
+/**
+ * An unchanged set of due efficiency decoders is queued again this long
+ * after its source's last evaluation began: 2,000 - 300 = 1,700 ms, so
+ * behind the caps debounce the next evaluation begins by EFFICIENCY_SAMPLE_MS.
+ */
+export const EFFICIENCY_REVIVE_MS =
+	EFFICIENCY_SAMPLE_MS - CAPS_CHANGE_DEBOUNCE_MS
+
+/**
+ * How long a revive of a source waits before queueing an evaluation: 0 (now)
+ * unless its due set `due` is the one its last evaluation began with and
+ * that began less than EFFICIENCY_REVIVE_MS ago. A non-finite start or clock
+ * waits for nothing (the safe answer: evaluate).
+ */
+export function efficiencyReviveWaitMs(
+	last: { due: string; atMs: number } | undefined,
+	due: string,
+	now: number,
+): number {
+	if (
+		last === undefined ||
+		last.due !== due ||
+		!Number.isFinite(last.atMs) ||
+		!Number.isFinite(now)
+	)
+		return 0
+	return Math.max(0, last.atMs + EFFICIENCY_REVIVE_MS - now)
+}
+
+/** A plain object or array the options comparison can vouch for, or false. */
+function plainContainer(value: object): "array" | "object" | false {
+	if (types.isProxy(value)) return false
+	const prototype: unknown = Object.getPrototypeOf(value)
+	if (Array.isArray(value))
+		return prototype === Array.prototype ? "array" : false
+	return prototype === Object.prototype || prototype === null ? "object" : false
+}
+
+/**
+ * A copy of a decoder's options for `samePlacementOptions`, or null when the
+ * comparison cannot vouch for them (an accessor, a non-enumerable or symbol
+ * member, a Proxy, a non-plain object, a function, a symbol or a cycle): such
+ * options are always passed again. The copy keeps every own member in its
+ * order, `undefined` members and array holes; it is never handed out.
+ */
+function copyPlacementOptions(
+	options: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> | null {
+	const ancestors = new Set<object>()
+	const fail = Symbol("fail")
+	const copy = (value: unknown): unknown => {
+		switch (typeof value) {
+			case "undefined":
+			case "boolean":
+			case "number":
+			case "bigint":
+			case "string":
+				return value
+			case "object":
+				break
+			default:
+				return fail
+		}
+		if (value === null) return null
+		const kind = plainContainer(value)
+		if (kind === false || ancestors.has(value)) return fail
+		ancestors.add(value)
+		const out: object =
+			kind === "array"
+				? new Array<unknown>((value as unknown[]).length)
+				: Object.create(null)
+		for (const key of Reflect.ownKeys(value)) {
+			if (kind === "array" && key === "length") continue
+			if (typeof key !== "string") return fail
+			const descriptor = Object.getOwnPropertyDescriptor(value, key)
+			if (
+				descriptor === undefined ||
+				!descriptor.enumerable ||
+				!("value" in descriptor)
+			)
+				return fail
+			const member = copy(descriptor.value)
+			if (member === fail) return fail
+			Object.defineProperty(out, key, {
+				value: member,
+				enumerable: true,
+				writable: false,
+				configurable: false,
+			})
+		}
+		ancestors.delete(value)
+		return out
+	}
+	const result = copy(options)
+	return result === fail ? null : (result as Readonly<Record<string, unknown>>)
+}
+
+/**
+ * True when `options` are what `copy` recorded, as a merge tells options
+ * apart: the same own members in the same order, each the same value
+ * (`Object.is`: `undefined` and absent, `NaN`, `-0` and `0` as a merge sees
+ * them), arrays of the same length with the same holes, objects of either
+ * plain prototype. Anything `copyPlacementOptions` refuses compares false.
+ * It builds no string or copy: it walks the copy and stops at the first
+ * difference (a cycle in `options` meets a leaf of the finite copy, so it
+ * ends and compares false).
+ */
+function samePlacementOptions(
+	copy: Readonly<Record<string, unknown>>,
+	options: Readonly<Record<string, unknown>>,
+): boolean {
+	const same = (a: unknown, b: unknown): boolean => {
+		if (typeof a !== "object" || a === null || typeof b !== "object")
+			return Object.is(a, b)
+		if (b === null) return false
+		const kind = plainContainer(b)
+		if (kind === false || (kind === "array") !== Array.isArray(a)) return false
+		if (kind === "array" && (a as unknown[]).length !== (b as unknown[]).length)
+			return false
+		const keysA = Reflect.ownKeys(a)
+		const keysB = Reflect.ownKeys(b)
+		if (keysA.length !== keysB.length) return false
+		for (let i = 0; i < keysB.length; i++) {
+			const key = keysB[i]!
+			if (key !== keysA[i]) return false
+			if (kind === "array" && key === "length") continue
+			const descriptor = Object.getOwnPropertyDescriptor(b, key)
+			if (
+				descriptor === undefined ||
+				!descriptor.enumerable ||
+				!("value" in descriptor) ||
+				!same((a as Record<PropertyKey, unknown>)[key], descriptor.value)
+			)
+				return false
+		}
+		return true
+	}
+	return same(copy, options)
+}
+
+/**
+ * The placement options comparison the manager calls through, so a test
+ * can count its steps: `copy` runs only when options are passed, `same` on
+ * every pass.
+ */
+export const placementOptionsMemo = {
+	copy: copyPlacementOptions,
+	same: samePlacementOptions,
+} as const
+
+/**
+ * A port's observed channels, or null when the list is refused (not an
+ * array, more than ACTIVITY_MAX_OBSERVED, or any malformed entry).
+ */
+export function parseObservedChannels(value: unknown): number[] | null {
+	if (!Array.isArray(value) || value.length > ACTIVITY_MAX_OBSERVED) return null
+	const guarded = guardObservedChannels(value)
+	if (guarded !== undefined) return guarded
+	const parsed = ObservedChannelsSchema.safeParse(value)
+	return parsed.success ? parsed.data : null
+}
+
+/** A port's observed centres, or null when refused, as `parseObservedChannels`. */
+export function parseObservedCentres(
+	value: unknown,
+): ObservedActivityCentre[] | null {
+	if (!Array.isArray(value) || value.length > ACTIVITY_MAX_OBSERVED) return null
+	const guarded = guardObservedCentres(value)
+	if (guarded !== undefined) return guarded
+	const parsed = ObservedCentresSchema.safeParse(value)
+	return parsed.success ? parsed.data : null
+}
+
 /**
  * Whose loss a loss refusal (drops, cpu, late-drops) reports: the shed's own
  * attribution, kept while later admission checks refuse it again.
@@ -776,6 +1044,29 @@ export class DecoderManager extends EventEmitter {
 	 */
 	private readonly scanTainted = new Set<string>()
 	private reconcilingPlacements = false
+	/** One band resolution per decoder state, only inside `withBandMemo`. */
+	private bandMemo: Map<DecoderState, ResolvedBand> | null = null
+	/**
+	 * Per decoder instance, a copy (`placementOptionsMemo.copy`) of the
+	 * options a placement pass last passed to `updateOptions`; any other
+	 * options update drops it, so the next pass passes them again.
+	 */
+	private readonly placementOptionsApplied = new WeakMap<
+		Decoder,
+		Readonly<Record<string, unknown>>
+	>()
+	/** Bumped whenever a decoder state is added to or removed from `decoders`. */
+	private decoderSetVersion = 0
+	/**
+	 * Per source: the due or stale efficiency decoders when its last
+	 * evaluation began, and when (see `reviveDueEfficiency`).
+	 */
+	private readonly efficiencyEvaluations = new Map<
+		string,
+		{ due: string; atMs: number }
+	>()
+	private reviveTimer: ReturnType<typeof setTimeout> | null = null
+	private reviveTimerAt: number | null = null
 	/** A reconciliation was asked for while one ran: run another after it. */
 	private reconcileDirty = false
 	/** Stage 1 activity ranking: the change subscription, deadline timer and move history. */
@@ -835,7 +1126,7 @@ export class DecoderManager extends EventEmitter {
 	 * configured decoders there stay suspended while any holder remains.
 	 */
 	private readonly heldSources = new Map<string, Set<string>>()
-	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
+	private static readonly CAPS_CHANGE_DEBOUNCE_MS = CAPS_CHANGE_DEBOUNCE_MS
 	/** Optional core channelizer (addendum §4); null keeps the raw fanout path. */
 	private channelizer: ChannelProvider | null = null
 	/** Optional activity publication; null leaves output handling unchanged. */
@@ -1089,12 +1380,6 @@ export class DecoderManager extends EventEmitter {
 		)
 	}
 
-	private gateExemptKey(key: string): boolean {
-		for (const state of this.decoders.values())
-			if (state.placement?.key === key) return this.gateExempt(state)
-		return false
-	}
-
 	/** Whether a planned placement's decoder band holds its source's tuned frequency. */
 	private placementTuned(
 		placement: WantedPlacement,
@@ -1140,6 +1425,8 @@ export class DecoderManager extends EventEmitter {
 		const now = performance.now()
 		const episodes = new Map<string, TunedEpisode>()
 		let waitMs = Infinity
+		// Nothing below adds, removes or re-keys a state.
+		const byKey = this.statesByPlacementKey()
 		for (const placement of wanted) {
 			if (
 				placement.tunedBand !== true ||
@@ -1156,9 +1443,7 @@ export class DecoderManager extends EventEmitter {
 			}
 			episodes.set(placement.key, episode)
 			if (episode.released) continue
-			const state = [...this.decoders.values()].find(
-				item => item.placement?.key === placement.key,
-			)
+			const state = byKey.get(placement.key)
 			// Without a hold to release now there is nothing to wait for: a
 			// refusal later in the same stay is not released.
 			if (
@@ -1175,6 +1460,8 @@ export class DecoderManager extends EventEmitter {
 				continue
 			}
 			episode.released = true
+			// Acted on now: the source's next revive does not wait out a sample.
+			this.efficiencyEvaluations.delete(placement.sourceId)
 			gate?.forget(placement.key)
 			delete state.efficiencyBackoffMs
 			delete state.efficiencyLateShed
@@ -1303,6 +1590,10 @@ export class DecoderManager extends EventEmitter {
 	 * tuned at the last reconciliation, even inside the caps debounce.
 	 */
 	private retuneFlags(input: TunedView): void {
+		this.withBandMemo(() => this.retuneFlagsNow(input))
+	}
+
+	private retuneFlagsNow(input: TunedView): void {
 		for (const state of this.decoders.values()) {
 			const placement = state.placement
 			if (!placement) continue
@@ -1599,8 +1890,14 @@ export class DecoderManager extends EventEmitter {
 		// admission through runningPlacements().
 		// The only running decoder is protected like the tuned one: host
 		// starvation never sheds it, only its own sustained loss.
+		// No state is added, removed or re-keyed until the first await below.
+		const byKey = this.statesByPlacementKey()
+		const exemptKey = (key: string): boolean => {
+			const state = byKey.get(key)
+			return state !== undefined && this.gateExempt(state)
+		}
 		const verdicts = gate.probation(
-			this.protectLone(running).filter(item => !this.gateExemptKey(item.key)),
+			this.protectLone(running).filter(item => !exemptKey(item.key)),
 			now,
 		)
 		const condemned = new Set(verdicts.map(verdict => verdict.key))
@@ -1630,11 +1927,10 @@ export class DecoderManager extends EventEmitter {
 		// Each verdict belongs to the run the gate judged; a suspension awaited
 		// below may let another placement stop or restart, so its verdict is
 		// applied only while that same run is still live.
+		const runningKeys = new Set(running.map(item => item.key))
 		const judged = verdicts.flatMap(verdict => {
-			if (!running.some(item => item.key === verdict.key)) return []
-			const state = [...this.decoders.values()].find(
-				item => item.placement?.key === verdict.key,
-			)
+			if (!runningKeys.has(verdict.key)) return []
+			const state = byKey.get(verdict.key)
 			return state
 				? [
 						{
@@ -1892,7 +2188,7 @@ export class DecoderManager extends EventEmitter {
 				options[key] = original.options[key]
 			else delete options[key]
 		state.config = { ...state.config, options }
-		state.decoder.updateOptions(restored)
+		this.updateDecoderOptions(state.decoder, restored)
 	}
 
 	private logPlacement(
@@ -2047,8 +2343,71 @@ export class DecoderManager extends EventEmitter {
 			),
 			vfo: this.settledVfo === undefined ? enablement.vfo() : this.settledVfo,
 			bandplanChannels: enablement.bandplanChannels,
+			...(enablement.bandplanRangeContains
+				? { bandplanRangeContains: enablement.bandplanRangeContains }
+				: {}),
 			maxBandplanChannels: enablement.maxBandplanChannels,
 		}
+	}
+
+	/** Workers (states with a parent) by placement key, in insertion order. */
+	private workersByPlacementKey(): {
+		version: number
+		byKey: Map<string, DecoderState[]>
+	} {
+		const byKey = new Map<string, DecoderState[]>()
+		for (const state of this.decoders.values()) {
+			const key = state.placement?.key
+			if (key === undefined || state.parentId === undefined) continue
+			const list = byKey.get(key)
+			if (list) list.push(state)
+			else byKey.set(key, [state])
+		}
+		return { version: this.decoderSetVersion, byKey }
+	}
+
+	/**
+	 * The first state holding each placement key, in insertion order: what
+	 * `[...decoders.values()].find(s => s.placement?.key === key)` returns,
+	 * for a synchronous section that adds, removes and re-keys nothing.
+	 */
+	private statesByPlacementKey(): Map<string, DecoderState> {
+		const byKey = new Map<string, DecoderState>()
+		for (const state of this.decoders.values()) {
+			const key = state.placement?.key
+			if (key !== undefined && !byKey.has(key)) byKey.set(key, state)
+		}
+		return byKey
+	}
+
+	/**
+	 * Passes a placed state's options to its decoder unless they are the
+	 * options the last pass passed to this decoder instance, unchanged
+	 * (`placementOptionsMemo.same`) and with no other options update in
+	 * between: a repeated merge of the same options is a no-op, and every
+	 * `onOptionsUpdated` only re-parses the merged options. Each pass builds
+	 * a fresh options object, so object identity proves nothing: the
+	 * unchanged case is one walk over the options against the recorded copy,
+	 * and only a pass that passes them copies them.
+	 */
+	private applyPlacementOptions(state: DecoderState): void {
+		const options = state.config.options
+		const last = this.placementOptionsApplied.get(state.decoder)
+		if (last !== undefined && placementOptionsMemo.same(last, options)) return
+		this.placementOptionsApplied.delete(state.decoder)
+		// Copied before the decoder sees them, as they are passed.
+		const copy = placementOptionsMemo.copy(options)
+		state.decoder.updateOptions(options)
+		if (copy !== null) this.placementOptionsApplied.set(state.decoder, copy)
+	}
+
+	/** Every options update but the placement pass's own: the next pass passes them again. */
+	private updateDecoderOptions(
+		decoder: Decoder,
+		updates: Record<string, unknown>,
+	): void {
+		this.placementOptionsApplied.delete(decoder)
+		decoder.updateOptions(updates)
 	}
 
 	/**
@@ -2099,15 +2458,11 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
-	 * Queues a source evaluation (re-admission or a fresh refusal) for every
-	 * suspended decoder whose refusal is due, or that holds none, except on
-	 * the source the caller evaluates itself next: a pass that released a
-	 * tuned-band hold is acted on now, not at the next sample.
+	 * The suspended decoders of each source whose efficiency refusal is due,
+	 * or that hold none (stale), by id in insertion order.
 	 */
-	private reviveDueEfficiency(evaluatedSourceId?: string): void {
-		if (this.destroying) return
-		const now = performance.now()
-		const sourceIds = new Set<string>()
+	private dueEfficiencyBySource(now: number): Map<string, string[]> {
+		const bySource = new Map<string, string[]>()
 		for (const state of this.decoders.values()) {
 			if (
 				!this.staleEfficiencySuspension(state) &&
@@ -2120,13 +2475,87 @@ export class DecoderManager extends EventEmitter {
 			)
 				continue
 			const sourceId = this.selectedSourceId(state)
-			if (sourceId !== undefined && sourceId !== evaluatedSourceId)
-				sourceIds.add(sourceId)
+			if (sourceId === undefined) continue
+			const ids = bySource.get(sourceId)
+			if (ids) ids.push(state.config.id)
+			else bySource.set(sourceId, [state.config.id])
 		}
-		for (const sourceId of sourceIds) {
+		return bySource
+	}
+
+	/**
+	 * Queues a source evaluation (re-admission or a fresh refusal) for every
+	 * suspended decoder whose refusal is due, or that holds none, except on
+	 * the source the caller evaluates itself next: a pass that released a
+	 * tuned-band hold is acted on now, not at the next sample.
+	 *
+	 * A request joins an evaluation already queued for the source (it starts
+	 * after this request) and never postpones its debounce. A source whose
+	 * due set is the one its last evaluation began with is queued again only
+	 * EFFICIENCY_REVIVE_MS after that evaluation began (a timer asks then), so
+	 * passes every 250 ms cost at most one evaluation per source per sample,
+	 * and while they run a due refusal is asked again within
+	 * EFFICIENCY_SAMPLE_MS (without passes the sampling timer asks: within a
+	 * sample plus the caps debounce). Both bounds end where the evaluation is
+	 * queued for the serial caps worker: other sources' evaluations queued
+	 * ahead run first. A changed set (a decoder newly due) is queued at once.
+	 * Caps changes keep re-arming the manager's one debounce, so a stream of
+	 * them under it holds every source's evaluation until it stops.
+	 */
+	private reviveDueEfficiency(evaluatedSourceId?: string): void {
+		if (this.destroying) return
+		const now = performance.now()
+		let wakeAt = Infinity
+		for (const [sourceId, ids] of this.dueEfficiencyBySource(now)) {
+			if (sourceId === evaluatedSourceId) continue
 			const caps = this.sourceManager?.getCaps(sourceId)
-			if (caps) this.enqueueSourceEvaluation(sourceId, { caps, adapt: false })
+			if (!caps) continue
+			// Queued already: join it (it starts after this request).
+			const waitMs = this.pendingCapsChanges.has(sourceId)
+				? 0
+				: efficiencyReviveWaitMs(
+						this.efficiencyEvaluations.get(sourceId),
+						JSON.stringify(ids),
+						now,
+					)
+			if (waitMs > 0) {
+				wakeAt = Math.min(wakeAt, now + waitMs)
+				continue
+			}
+			this.enqueueSourceEvaluation(sourceId, { caps, adapt: false })
 		}
+		this.scheduleRevive(wakeAt)
+	}
+
+	/** One timer for the earliest deferred revive; it asks again when it fires. */
+	private scheduleRevive(at: number): void {
+		if (!Number.isFinite(at) || this.destroying) return
+		if (
+			this.reviveTimer &&
+			this.reviveTimerAt !== null &&
+			this.reviveTimerAt <= at
+		)
+			return
+		if (this.reviveTimer) clearTimeout(this.reviveTimer)
+		this.reviveTimerAt = at
+		this.reviveTimer = setTimeout(
+			() => {
+				this.reviveTimer = null
+				this.reviveTimerAt = null
+				this.reviveDueEfficiency()
+			},
+			Math.max(0, Math.ceil(at - performance.now())),
+		)
+		this.reviveTimer.unref?.()
+	}
+
+	/** An evaluation of `sourceId` begins now with its current due set. */
+	private noteEfficiencyEvaluation(sourceId: string): void {
+		const now = performance.now()
+		this.efficiencyEvaluations.set(sourceId, {
+			due: JSON.stringify(this.dueEfficiencyBySource(now).get(sourceId) ?? []),
+			atMs: now,
+		})
 	}
 
 	private async reconcilePlacementsPass(): Promise<void> {
@@ -2135,21 +2564,43 @@ export class DecoderManager extends EventEmitter {
 		this.reconcilingPlacements = true
 		try {
 			await this.applyProbation()
-			const input = this.withActivity(this.plannerInput())
-			const plan = enablement.planner(input)
-			// Tuned band: placements whose decoder's band holds the tuned
-			// frequency are admitted first and shed last.
-			const wanted = prioritiseTuned(
-				plan.wanted.filter(placement => {
-					const parent = this.decoders.get(placement.decoderId)
-					return (
-						parent?.owner === "config" && this.modeFor(parent).mode !== "off"
-					)
-				}),
-				placement => this.placementTuned(placement, input),
-			)
-			this.releaseTunedHolds(wanted)
-			this.refreshTunedFlags(wanted)
+			// One synchronous section: one band resolution per decoder for the
+			// planner input, the tuned order and the hold release.
+			const { plan, wanted } = this.withBandMemo(() => {
+				const input = this.withActivity(this.plannerInput())
+				const plan = enablement.planner(input)
+				// Tuned band: placements whose decoder's band holds the tuned
+				// frequency are admitted first and shed last.
+				const wanted = prioritiseTuned(
+					plan.wanted.filter(placement => {
+						const parent = this.decoders.get(placement.decoderId)
+						return (
+							parent?.owner === "config" && this.modeFor(parent).mode !== "off"
+						)
+					}),
+					placement => this.placementTuned(placement, input),
+				)
+				this.releaseTunedHolds(wanted)
+				this.refreshTunedFlags(wanted)
+				return { plan, wanted }
+			})
+			// Read-only lookups over the plan (it does not change below), each
+			// keeping the first match in plan order, as the scans did.
+			const secondaryKeys = new Set<string>()
+			const vfoSecondaries = new Map<string, WantedPlacement[]>()
+			const primaries = new Map<string, WantedPlacement>()
+			for (const placement of wanted) {
+				if (placement.primary) {
+					if (!primaries.has(placement.decoderId))
+						primaries.set(placement.decoderId, placement)
+					continue
+				}
+				secondaryKeys.add(placement.key)
+				if (placement.origin !== "vfo") continue
+				const list = vfoSecondaries.get(placement.decoderId)
+				if (list) list.push(placement)
+				else vfoSecondaries.set(placement.decoderId, [placement])
+			}
 			if (plan.activity) {
 				for (const move of plan.activity.moves)
 					this.activityMoves.push({
@@ -2179,23 +2630,23 @@ export class DecoderManager extends EventEmitter {
 					worker.owner !== "placement" ||
 					// A worker holds only a secondary: when its channel becomes the
 					// primary (the parent's), it goes, so no channel is decoded twice.
-					wanted.some(
-						placement =>
-							!placement.primary && placement.key === worker.placement?.key,
-					) ||
+					(worker.placement !== undefined &&
+						secondaryKeys.has(worker.placement.key)) ||
 					(worker.placement !== undefined &&
 						this.isSourceHeld(worker.placement.sourceId))
 				)
 					continue
-				const moved = wanted.find(
-					placement =>
-						!placement.primary &&
-						placement.origin === "vfo" &&
-						worker.placement?.origin === "vfo" &&
-						placement.decoderId === worker.parentId &&
-						placement.sourceId === worker.placement.sourceId &&
-						placement.channelHz !== worker.placement.channelHz,
-				)
+				const moved =
+					worker.parentId === undefined
+						? undefined
+						: vfoSecondaries
+								.get(worker.parentId)
+								?.find(
+									placement =>
+										worker.placement?.origin === "vfo" &&
+										placement.sourceId === worker.placement.sourceId &&
+										placement.channelHz !== worker.placement.channelHz,
+								)
 				if (moved && worker.channel && worker.decoder.getStatus().running) {
 					const provider = worker.channel.provider as ChannelProvider & {
 						retuneChannel?: (
@@ -2221,9 +2672,11 @@ export class DecoderManager extends EventEmitter {
 						if (this.decoders.get(worker.config.id) !== worker) continue
 						if (verdict === "retuned") {
 							this.decoders.delete(worker.config.id)
+							this.decoderSetVersion++
 							this.sourceManager?.unassignDecoder(worker.config.id)
 							worker.config = { ...worker.config, id: moved.key }
 							this.decoders.set(moved.key, worker)
+							this.decoderSetVersion++
 							this.logPlacement(moved, "moved")
 							worker.placement = moved
 							this.reserveSource(worker)
@@ -2231,7 +2684,9 @@ export class DecoderManager extends EventEmitter {
 								...worker.config.options,
 								channelHz: moved.channelHz,
 							}
-							worker.decoder.updateOptions({ channelHz: moved.channelHz })
+							this.updateDecoderOptions(worker.decoder, {
+								channelHz: moved.channelHz,
+							})
 							this.startMovedListening(worker)
 							continue
 						}
@@ -2243,10 +2698,7 @@ export class DecoderManager extends EventEmitter {
 			for (const parent of [...this.decoders.values()]) {
 				if (parent.owner !== "config") continue
 				const parentIntent = parent.parentIntent
-				const primary = wanted.find(
-					placement =>
-						placement.decoderId === parent.config.id && placement.primary,
-				)
+				const primary = primaries.get(parent.config.id)
 				const reason = plan.unplaced.get(parent.config.id)
 				if (reason !== undefined) parent.unplaced = reason
 				else delete parent.unplaced
@@ -2279,17 +2731,26 @@ export class DecoderManager extends EventEmitter {
 					}
 				}
 			}
+			// Workers by placement key, in insertion order: rebuilt whenever a
+			// decoder state was added or removed (a registration here, or any
+			// await below), and re-checked on use, so a lookup picks what the
+			// scan over every decoder picked (the first match in insertion order).
+			let workers = this.workersByPlacementKey()
 			for (const placement of wanted) {
 				const parent = this.decoders.get(placement.decoderId)
 				if (!parent || this.modeFor(parent).mode === "off") continue
 				const parentIntent = parent.parentIntent
+				if (workers.version !== this.decoderSetVersion)
+					workers = this.workersByPlacementKey()
 				let state = placement.primary
 					? parent
-					: [...this.decoders.values()].find(
-							worker =>
-								worker.parentId === placement.decoderId &&
-								worker.placement?.key === placement.key,
-						)
+					: workers.byKey
+							.get(placement.key)
+							?.find(
+								worker =>
+									worker.parentId === placement.decoderId &&
+									worker.placement?.key === placement.key,
+							)
 				if (!state) {
 					if (!parent.desiredRunning) continue
 					const config =
@@ -2431,9 +2892,11 @@ export class DecoderManager extends EventEmitter {
 							: {}),
 					},
 				}
-				state.decoder.updateOptions(state.config.options)
+				this.applyPlacementOptions(state)
 				if (!state.placement || moved)
 					this.logPlacement(placement, moved ? "moved" : "started")
+				// A worker found above keeps its key; a new one was registered,
+				// which bumped the version, so the next lookup rebuilds the index.
 				state.placement = placement
 				delete state.unplaced
 				if (
@@ -2693,31 +3156,23 @@ export class DecoderManager extends EventEmitter {
 			observed: epochs.flatMap(epoch => {
 				try {
 					if (activity.port.observedCentres) {
-						const centres = activity.port.observedCentres(epoch, now)
-						if (
-							!Array.isArray(centres) ||
-							centres.length > ACTIVITY_MAX_OBSERVED
+						const centres = parseObservedCentres(
+							activity.port.observedCentres(epoch, now),
 						)
-							return []
-						const parsed = ObservedCentresSchema.safeParse(centres)
-						return parsed.success
+						return centres
 							? [
 									{
 										epoch,
-										channelsHz: parsed.data.map(c => c.candidateHz),
-										centres: parsed.data,
+										channelsHz: centres.map(c => c.candidateHz),
+										centres,
 									},
 								]
 							: []
 					}
-					const channelsHz = activity.port.observedChannels?.(epoch, now)
-					if (
-						!Array.isArray(channelsHz) ||
-						channelsHz.length > ACTIVITY_MAX_OBSERVED
+					const channelsHz = parseObservedChannels(
+						activity.port.observedChannels?.(epoch, now),
 					)
-						return []
-					const parsed = ObservedChannelsSchema.safeParse(channelsHz)
-					return parsed.success ? [{ epoch, channelsHz: parsed.data }] : []
+					return channelsHz ? [{ epoch, channelsHz }] : []
 				} catch {
 					return []
 				}
@@ -2729,7 +3184,10 @@ export class DecoderManager extends EventEmitter {
 		}
 		const withActivity = { ...input, activity: plannerActivity }
 		let snapshots: readonly ActivitySnapshot[] = []
-		const queries = activityQueries(withActivity)
+		// The grouping goes to this pass's planner call below, whose input is
+		// this one with the snapshots and challengers replaced: nothing in it
+		// is changed in place in between (activityPlanQueries' precondition).
+		const { queries, grouping } = activityPlanQueries(withActivity)
 		if (queries.length)
 			try {
 				const batch = activity.port.snapshot(queries, now)
@@ -2759,6 +3217,7 @@ export class DecoderManager extends EventEmitter {
 				snapshots,
 				confirmedChallengers: this.dsdChallengeEvidence.snapshot(now),
 			},
+			...(grouping ? { grouping } : {}),
 		}
 	}
 
@@ -3037,6 +3496,7 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		this.decoders.set(config.id, state)
+		this.decoderSetVersion++
 		this.setupDecoderEventHandlers(state)
 		this.installParentLog(state)
 		this.refreshRatePlan(state)
@@ -4456,6 +4916,7 @@ export class DecoderManager extends EventEmitter {
 		// Remove from map
 		if (this.decoders.get(id) === state) {
 			this.decoders.delete(id)
+			this.decoderSetVersion++
 			if (state.owner !== "placement") {
 				this.counterStore.forget(id)
 				this.emit("decoder:removed", id)
@@ -4472,6 +4933,9 @@ export class DecoderManager extends EventEmitter {
 		this.efficiencyTimer = null
 		if (this.tunedSettleTimer) clearTimeout(this.tunedSettleTimer)
 		this.tunedSettleTimer = null
+		if (this.reviveTimer) clearTimeout(this.reviveTimer)
+		this.reviveTimer = null
+		this.reviveTimerAt = null
 		if (this.activityTimer) clearTimeout(this.activityTimer)
 		this.activityTimer = null
 		if (this.activityPassTimer) clearTimeout(this.activityPassTimer)
@@ -5102,7 +5566,7 @@ export class DecoderManager extends EventEmitter {
 							config.type === "lora-meshtastic")
 					)
 				)
-					decoder.updateOptions({
+					this.updateDecoderOptions(decoder, {
 						inputSampleRate: caps.sampleRate,
 						...(caps.centerFreq !== undefined
 							? { inputCenterFreq: caps.centerFreq }
@@ -5127,7 +5591,7 @@ export class DecoderManager extends EventEmitter {
 			return this.wireDecoderToChannel(state, provider, sourceId, request)
 		// Raw path again (no channel request now): the decoder reads CU8.
 		if (config.useChannelizer === true || state.placement?.reach === "raw")
-			decoder.updateOptions({ inputIqFormat: "cu8" })
+			this.updateDecoderOptions(decoder, { inputIqFormat: "cu8" })
 		const branchId = `decoder-${config.id}`
 		const fanout = this.sourceRouting?.getFanout(sourceId) ?? this.fanout
 		// Track resources before attaching so failed attachment is cleaned up too.
@@ -5263,7 +5727,7 @@ export class DecoderManager extends EventEmitter {
 			const caps = this.sourceManager?.getCaps(sourceId)
 			if (caps) {
 				state.inputCaps = { ...caps }
-				state.decoder.updateOptions({
+				this.updateDecoderOptions(state.decoder, {
 					inputSampleRate: caps.sampleRate,
 					...(caps.centerFreq !== undefined
 						? { inputCenterFreq: caps.centerFreq }
@@ -5321,7 +5785,7 @@ export class DecoderManager extends EventEmitter {
 		this.channelizerUnavailableLogged = false
 		// The channel is what stdin carries: its realised rate, its centre and
 		// its sample format (cf32 tails skip the raw convert/shift/decimate).
-		state.decoder.updateOptions({
+		this.updateDecoderOptions(state.decoder, {
 			inputSampleRate: ref.realised.outputRateHz,
 			inputCenterFreq: request.centerHz,
 			inputIqFormat: ref.realised.format,
@@ -5756,6 +6220,7 @@ export class DecoderManager extends EventEmitter {
 		// "source-removed" means the source is gone for good.
 		this.sourceGoneHandler = sourceId => {
 			this.scanTainted.delete(sourceId)
+			this.efficiencyEvaluations.delete(sourceId)
 		}
 		sourceManager.on("source-removed", this.sourceGoneHandler)
 		this.sourceFeedHandler = sourceId => {
@@ -5802,8 +6267,12 @@ export class DecoderManager extends EventEmitter {
 				(evaluation.adapt || (previous?.adapt ?? false)),
 		})
 
-		// Debounce rapid changes - SDR++ may send multiple rate changes quickly
+		// Debounce rapid changes - SDR++ may send multiple rate changes quickly.
+		// Only a caps change re-arms it: any other request joins the pending
+		// drain, which starts after it, so a stream of requests (a pass every
+		// 250 ms) can no longer postpone it.
 		if (this.capsChangeDebounceTimer) {
+			if (!evaluation.adapt) return
 			clearTimeout(this.capsChangeDebounceTimer)
 		}
 
@@ -5851,7 +6320,10 @@ export class DecoderManager extends EventEmitter {
 		adapt = true,
 	): Promise<void> {
 		// Every decoder on this source is evaluated below.
-		if (this.config.enablement) await this.reconcilePlacements(sourceId)
+		if (this.config.enablement) {
+			await this.reconcilePlacements(sourceId)
+			this.noteEfficiencyEvaluation(sourceId)
+		}
 		const affectedDecoders: string[] = []
 
 		// Every decoder selecting this source gets a fresh plan and, if the
@@ -5961,7 +6433,7 @@ export class DecoderManager extends EventEmitter {
 
 			try {
 				// Propagate the new sample rate to the decoder's options
-				state.decoder.updateOptions({
+				this.updateDecoderOptions(state.decoder, {
 					inputSampleRate: caps.sampleRate,
 					...(caps.centerFreq !== undefined
 						? { inputCenterFreq: caps.centerFreq }
@@ -7064,6 +7536,13 @@ export class DecoderManager extends EventEmitter {
 		state: DecoderState,
 		caps?: SourceCaps | null,
 	): Eligibility {
+		return this.withBandMemo(() => this.assessEligibilityNow(state, caps))
+	}
+
+	private assessEligibilityNow(
+		state: DecoderState,
+		caps?: SourceCaps | null,
+	): Eligibility {
 		const rate = this.assessState(state, caps)
 		const band = this.assessBand(state, caps)
 		// An operator start (pin) and the per-decoder opt-out override only
@@ -7156,6 +7635,33 @@ export class DecoderManager extends EventEmitter {
 	 * overrides, the region and the built-in table (with the pager band).
 	 */
 	private resolveBand(state: DecoderState): ResolvedBand {
+		const memo = this.bandMemo
+		const known = memo?.get(state)
+		if (known) return known
+		const band = this.resolveBandNow(state)
+		memo?.set(state, band)
+		return band
+	}
+
+	/**
+	 * Runs `section` with one band resolution per decoder state: every
+	 * `resolveBand` inside it reuses the first answer for that state. A
+	 * section is synchronous (no await inside), so no decoder config, band
+	 * override, region or caps can change during it; the memo is dropped when
+	 * it ends and is never shared between sections or passes. Nested
+	 * sections share the outer one. Band override writes clear it.
+	 */
+	private withBandMemo<T>(section: () => T): T {
+		if (this.bandMemo) return section()
+		this.bandMemo = new Map()
+		try {
+			return section()
+		} finally {
+			this.bandMemo = null
+		}
+	}
+
+	private resolveBandNow(state: DecoderState): ResolvedBand {
 		const slots = this.catalogueLoraSlotsOf(state)
 		return resolveDecoderBand({
 			type: state.config.type,
@@ -7246,7 +7752,9 @@ export class DecoderManager extends EventEmitter {
 		override: DecoderBandOverride,
 	): Promise<DecoderBandSettings | undefined> {
 		if (!this.decoders.has(id)) return undefined
-		const { persisted } = await this.bandOverrides.set(id, override)
+		const written = this.bandOverrides.set(id, override)
+		this.bandMemo?.clear()
+		const { persisted } = await written
 		const state = this.decoders.get(id)
 		if (!state) return undefined
 		this.log.info({ decoderId: id, override, persisted }, "Band override set")
@@ -7259,7 +7767,9 @@ export class DecoderManager extends EventEmitter {
 		id: string,
 	): Promise<DecoderBandSettings | undefined> {
 		if (!this.decoders.has(id)) return undefined
-		const { persisted } = await this.bandOverrides.delete(id)
+		const written = this.bandOverrides.delete(id)
+		this.bandMemo?.clear()
+		const { persisted } = await written
 		const state = this.decoders.get(id)
 		if (!state) return undefined
 		this.log.info({ decoderId: id, persisted }, "Band override removed")

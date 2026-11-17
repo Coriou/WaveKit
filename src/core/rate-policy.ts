@@ -45,7 +45,8 @@ export interface RatePolicyDeps {
 export function createRatePolicy(deps: RatePolicyDeps): RatePolicy {
 	const records = new Map<string, TunerRatePolicy>()
 	const timers = new Map<string, { cancel(): void }>()
-	const reported = new Map<string, LinkAdvisory["level"]>()
+	/** Last reported `level|lossReason` per source. */
+	const reported = new Map<string, string>()
 	const cancel = (sourceId: string) => {
 		timers.get(sourceId)?.cancel()
 		timers.delete(sourceId)
@@ -80,10 +81,12 @@ export function createRatePolicy(deps: RatePolicyDeps): RatePolicy {
 		}
 	}
 	const report = (sourceId: string, link: LinkAdvisory) => {
-		if (reported.get(sourceId) === link.level) return
+		// A cause change at the same level re-reports once.
+		const key = `${link.level}|${link.lossReason ?? ""}`
+		if (reported.get(sourceId) === key) return
 		try {
 			deps.reportLink(sourceId, link)
-			reported.set(sourceId, link.level)
+			reported.set(sourceId, key)
 		} catch (err) {
 			log.warn(
 				{ sourceId, err: safeErrorFields(err) },
