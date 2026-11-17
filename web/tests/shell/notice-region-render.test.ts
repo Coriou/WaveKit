@@ -8,6 +8,7 @@ import {
 } from "../../src/features/receiver/LinkStatus.tsx"
 import { NoticeRegion } from "../../src/shell/notices/NoticeRegion.tsx"
 import { NoticeService } from "../../src/shell/notices/service.ts"
+import { Drawer } from "../../src/ui/Drawer.tsx"
 
 const region = (svc: NoticeService, palette = false) =>
 	renderToStaticMarkup(
@@ -78,5 +79,18 @@ describe("notice region markup", () => {
 				createElement(LinkLossMarker, { sourceId: "ry", service: svc }),
 			),
 		).toBe("")
+	})
+
+	it("gives every kit drawer an empty notice slot directly under its header", () => {
+		const html = renderToStaticMarkup(
+			createElement(
+				Drawer,
+				{ title: "Scanner", onClose: () => undefined },
+				"rows",
+			),
+		)
+		expect(html).toMatch(
+			/<\/header><div class="wk-drawer-notices"><\/div><div class="wk-drawer-body/,
+		)
 	})
 })

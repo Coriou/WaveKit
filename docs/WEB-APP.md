@@ -48,9 +48,12 @@ Notices appear at the top centre of the spectrum, just under the Tuner and Recei
 connection chip when it sits there). While Activity is expanded (**Cards**, then
 **Expand**), the drawer covers the spectrum, so notices move to the widest empty gap of the top row
 (beside the Receiver, or between the Tuner and the Receiver), or, when that gap is too narrow, to
-the empty middle of the Activity header; they never cover a card or a drawer control. On a phone
-Expand changes nothing and notices stay at the top centre. There are two kinds, and at most one
-of each shows at once:
+the empty middle of the Activity header; they never cover a card or a drawer control. On a phone,
+and in any window narrower than 1100 px, an open drawer (Activity, Scanner, Recordings or
+Settings) spans the window, so notices sit inside it as a banner directly under its header: the
+drawer's list moves down to make room and comes back when the notice goes, and the title, Live,
+✕ and every other header control stay clear and usable. There are two kinds, and at most one of
+each shows at once:
 
 - **What you just did**, such as `Saved`, `Copied` or `Removed`, often with **Undo**. It stays
   6 seconds; the next one replaces it.

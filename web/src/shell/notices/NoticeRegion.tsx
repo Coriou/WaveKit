@@ -1,11 +1,21 @@
 // The notice region (./service.ts): top centre of the free plot area (`--wk-free-cx`), 8 px under the top island
 // row and under anything already at the top centre; while Activity is expanded (no free plot), the widest empty
-// gap of the top row, else of the drawer's header (./top-centre.ts `regionPlacement`). At most one condition toast, then one
-// receipt. It never takes focus; hovering it or focusing inside a toast pauses both timers (until that toast goes).
-import { useEffect, useLayoutEffect, useRef, useState } from "react"
+// gap of the top row, else of the drawer's header (./top-centre.ts `regionPlacement`); while a drawer covers that place
+// (a phone, or below 1100 px), portalled into the drawer's notice slot under its header (ui/notice-slot.ts), which
+// pushes the drawer body down. At most one condition toast, then one receipt. It never takes focus; hovering it or focusing inside a toast pauses both timers (until that toast goes).
+import {
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+	useSyncExternalStore,
+	type ReactNode,
+} from "react"
+import { createPortal } from "react-dom"
 
 import { useStore } from "../../data/store.ts"
 import { Icon } from "../../ui/Icon.tsx"
+import { noticeSlots } from "../../ui/notice-slot.ts"
 import {
 	notices,
 	type NoticeService,
@@ -42,6 +52,14 @@ export function NoticeRegion({
 	const shown = useStore(service.shown)
 	const receipt = useStore(service.receipt)
 	const box = useRef<HTMLDivElement | null>(null)
+	// the shell root: the region's own parent while it floats, found again while it sits in a drawer's slot
+	const home = useRef<HTMLElement | null>(null)
+	const slotVersion = useSyncExternalStore(
+		noticeSlots.subscribe,
+		noticeSlots.version,
+		noticeSlots.version,
+	)
+	const [slot, setSlot] = useState<HTMLElement | null>(null)
 	const [place, setPlace] = useState<Placement>({
 		where: "free-plot",
 		cx: 0,
@@ -70,7 +88,10 @@ export function NoticeRegion({
 	useLayoutEffect(() => {
 		const measure = () => {
 			// shell coordinates: the region is placed in the shell root
-			const root = box.current?.parentElement
+			const el = box.current
+			if (el && !el.parentElement?.classList.contains("wk-drawer-notices"))
+				home.current = el.parentElement
+			const root = home.current?.isConnected ? home.current : null
 			const r = root?.getBoundingClientRect() ?? { left: 0, top: 0 }
 			const cx = root ? freeCentre(root) : window.innerWidth / 2
 			const inShell = (el: Element): Box => {
@@ -85,34 +106,60 @@ export function NoticeRegion({
 			const boxes: Box[] = [...document.querySelectorAll(TOP_CENTRE_SELECTOR)]
 				.filter(el => !box.current?.contains(el))
 				.map(inShell)
+			const drawer = root?.querySelector(".wk-shell-drawer") ?? null
+			// the open drawer's slot: the newest connected one inside it (a loading skeleton's slot is replaced)
+			const drawerSlot =
+				(drawer &&
+					noticeSlots
+						.all()
+						.filter(s => s.isConnected && drawer.contains(s))
+						.at(-1)) ??
+				null
 			const next = regionPlacement({
 				W: root?.clientWidth ?? window.innerWidth,
 				topRowBottom,
 				freeCx: cx,
 				boxes,
 				expanded: root ? expandedDrawer(root, inShell) : null,
+				drawer: drawer ? inShell(drawer) : null,
+				slot: drawerSlot !== null,
 				height: box.current?.offsetHeight ?? 0,
 			})
 			setPlace(p => (samePlace(p, next) ? p : next))
+			setSlot(drawerSlot)
 		}
 		measure()
 		if (!occupied) return
 		const id = setInterval(measure, MEASURE_MS)
-		return () => clearInterval(id)
-	}, [topRowBottom, occupied])
+		window.addEventListener("resize", measure)
+		return () => {
+			clearInterval(id)
+			window.removeEventListener("resize", measure)
+		}
+	}, [topRowBottom, occupied, slotVersion])
+	// moving between the plot and a drawer's slot remounts the toasts: no pointerleave or blur comes then, so the
+	// hover and focus pauses never stay behind
+	const docked = place.where === "drawer-slot" && slot !== null
+	useEffect(() => {
+		service.setPaused("hover", false)
+		service.setFocusedToast(null)
+	}, [service, docked])
 
 	if (palette || !occupied) return null
-	return (
+	const region: ReactNode = (
 		<div
 			ref={box}
 			className="wk-notices"
 			data-wk-notice-region=""
 			data-where={place.where}
 			// the free plot's top centre comes from shell.css (`--wk-free-cx`); elsewhere the measured room
+			// in a drawer's slot the drawer lays it out (shell.css)
 			style={
-				place.where === "free-plot"
-					? { top: place.top }
-					: { top: place.top, left: place.cx, maxWidth: place.maxW }
+				docked
+					? undefined
+					: place.where === "free-plot" || place.where === "drawer-slot"
+						? { top: place.top }
+						: { top: place.top, left: place.cx, maxWidth: place.maxW }
 			}
 			onPointerEnter={() => service.setPaused("hover", true)}
 			onPointerLeave={() => service.setPaused("hover", false)}
@@ -130,6 +177,7 @@ export function NoticeRegion({
 			)}
 		</div>
 	)
+	return docked ? createPortal(region, slot) : region
 }
 
 const samePlace = (a: Placement, b: Placement) =>

@@ -551,6 +551,23 @@
 		text-align: center;
 		text-wrap: balance;
 	}
+	/* docked in a covering drawer's notice slot (a phone, or below 1100 px): a full-width banner under the header,
+	   in the drawer's flow, so it pushes the body down instead of covering its controls; flat, as it sits on the
+	   drawer's surface. The push is not animated: only the toast's own 150 ms rise */
+	.wk-drawer-notices > .wk-notices {
+		position: static;
+		translate: none;
+		width: auto;
+		max-width: none;
+		align-items: stretch;
+	}
+	.wk-drawer-notices .wk-notice {
+		box-shadow: none;
+	}
+	.wk-drawer-notices .wk-notice-text {
+		flex: 1;
+		text-align: start;
+	}
 	@media (prefers-reduced-motion: reduce) {
 		.wk-notice {
 			animation: none;

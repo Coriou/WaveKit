@@ -946,8 +946,29 @@ Condensed + Noto Sans, Tabler-based icons).
   of the drawer header, a gutter clear of each control, centred on its height; else the normal
   place. *Why:* both keep every card and drawer control clear; the top row is free room outside
   the drawer, the header middle is the fallback for windows below 1188 px where the drawer is not
-  full height. Below 1100 px Expand changes nothing and no room exists (open gap: on a phone
-  with any drawer open the region still overlaps the drawer header).
+  full height. Below 1100 px Expand changes nothing and no room exists (open gap, closed by the
+  next entry: on a phone with any drawer open the region still overlaps the drawer header).
+- **Notices in a covering drawer: a slot under its header (2026-11-17).** At 390×844 every drawer
+  spans the window between the island rows (header at y 152..211), so the region at 16,144 sat
+  on the title, Live and ✕. Two places were weighed: (a) a banner docked inside the drawer under
+  its header, in the drawer's flow, pushing the body down; (b) a slot above the bottom row. (b)
+  was rejected: on a phone the bottom row is Listen and the player, the reach zone the region
+  left on 2026-11-16 because it buried Undo beside Listen, and reserving it would shrink every
+  drawer's list for a notice that is usually absent. (a) won: it is where the eye already is in
+  a drawer, the layout reserves the room only while a notice shows, so nothing can be covered,
+  and it needs no measuring of controls. Rule (`regionPlacement`): when the normal place would
+  land on the open drawer and that drawer has a notice slot, the region docks there
+  (`data-where="drawer-slot"`); the expanded-Activity rules above still come first. One generic
+  mechanism: the kit `Drawer` (and Settings' own header) renders an empty
+  `.wk-drawer-notices` slot right after its header, registered in `web/src/ui/notice-slot.ts`;
+  the shell's region portals its toasts into it, as a full-width flat banner on the drawer's
+  surface (no shadow, text start-aligned). Empty, the slot is `display: none`. The push is not
+  animated (only the toast's 150 ms rise, none under reduced motion), so no layout transition can
+  loop with the region's measuring; condition and receipt stack in it, ✕ and Undo stay
+  reachable, `role="status"` and no focus moves. Wide windows are unchanged: beside a
+  full-height drawer the region already keeps to the free plot. *Why:* a notice must never cover
+  a control, at any width; a reserved place in the drawer's own column makes that true by layout,
+  not by measuring. Gated by `ui-check --flow=notices` at 390×844 for each drawer.
 
 ## Open questions and next topics
 

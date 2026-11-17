@@ -13,9 +13,13 @@
  *
  * Expanded Activity (Cards, full width): with the drawer covering the plot between the island rows, a new notice
  * is measured at 1440×900 against the same elements plus the drawer's card list, its first card, its header
- * controls (title, Live, ✕) and its Expand button; all must exist and none may intersect it. At 390×844 Expand
- * changes nothing (the drawer already spans the window) and there is no free room, so that layout is measured and
- * reported but not gated (`gated: false`).
+ * controls (title, Live, ✕) and its Expand button; all must exist and none may intersect it.
+ *
+ * Phone (390×844), each drawer open in turn (Activity expanded, Activity, Scanner, Recordings, Settings): every
+ * drawer spans the window there, so the region docks in the drawer's notice slot under its header (`data-where`
+ * drawer-slot). A new notice is raised per drawer and measured against that drawer's header (every child and
+ * every control in it), its first content row (what follows the slot), the Listen island and the frequency
+ * readout; all must exist, none may intersect it, and the notice must lie inside the window. Gated.
  */
 import type { Page } from "playwright-core"
 import { within } from "./harness.ts"
@@ -34,8 +38,6 @@ export interface Rect {
 
 export interface NoticeLayout {
 	viewport: string
-	/** False: measured and reported, but it does not fail the flow. */
-	gated?: false
 	/** Where the region placed itself (`data-where`: free-plot, top-row, drawer-head). */
 	where?: string
 	notice: Rect | null
@@ -112,6 +114,8 @@ const intersects = (a: Rect, b: Rect) =>
 interface Extra {
 	name: string
 	sel: string
+	/** Measured when laid out, never missing (a header's empty spacer or count). */
+	optional?: true
 }
 
 /** The expanded Activity drawer's parts (all required while it is expanded). */
@@ -126,6 +130,32 @@ const EXPANDED_PARTS: Extra[] = [
 		sel: ".wk-shell-drawer[data-expanded] .wk-drawer-head > :not(.wk-drawer-gap)",
 	},
 	{ name: "drawer Expand", sel: ".wk-shell-drawer[data-expanded] .wka-expand" },
+]
+
+/** An open drawer's parts on a phone (any drawer, all required): its header's children and controls (the kit
+ * drawer's `.wk-drawer-head`, Settings' `.wkf-set-top`) and its first content row, the box after the notice slot. */
+const PHONE_DRAWER_PARTS: Extra[] = [
+	{
+		name: "drawer header part",
+		sel: ".wk-shell-drawer :is(.wk-drawer-head, .wkf-set-top) > :not(.wk-drawer-gap, .wkf-gap)",
+		optional: true,
+	},
+	{
+		name: "drawer header control",
+		sel: ".wk-shell-drawer :is(.wk-drawer-head, .wkf-set-top) :is(button, a, input, select, [role='radio'], [role='button'])",
+	},
+	{
+		name: "drawer first content row",
+		sel: ".wk-shell-drawer .wk-drawer-notices + *",
+	},
+]
+
+/** The drawers a phone opens in turn: the hash that opens each, and the drawer's own root once loaded. */
+const PHONE_DRAWERS: { name: string; hash: string; ready: string }[] = [
+	{ name: "activity", hash: "#/activity", ready: ".wka-drawer" },
+	{ name: "scanner", hash: "#/scanner", ready: ".wks-drawer" },
+	{ name: "recordings", hash: "#/recordings", ready: ".wkr-drawer" },
+	{ name: "settings", hash: "#/settings", ready: ".wkf-set" },
 ]
 
 /** The notice box and what it must keep clear of, now. */
@@ -152,6 +182,8 @@ async function measure(
 		]
 		const region = document.querySelector("[data-wk-notice-region]")
 		return {
+			vw: window.innerWidth,
+			vh: window.innerHeight,
 			notice: rect(region),
 			where: region?.getAttribute("data-where") ?? "",
 			others: [
@@ -160,12 +192,12 @@ async function measure(
 					rect: rect(document.querySelector(sel)),
 					extra: false,
 				})),
-				...extra.flatMap(({ name, sel }) => {
+				...extra.flatMap(({ name, sel, optional }) => {
 					const all = [...document.querySelectorAll(sel)]
 					return (all.length > 0 ? all : [null]).map((el, i) => ({
 						name: i === 0 ? name : `${name} ${i + 1}`,
 						rect: rect(el),
-						extra: true,
+						extra: optional !== true,
 					}))
 				}),
 			],
@@ -179,6 +211,12 @@ async function measure(
 		name === "frequency readout" ||
 		(desktop &&
 			(name === "dock" || (name === "tuned card" && extra.length === 0)))
+	const inWindow =
+		boxes.notice !== null &&
+		boxes.notice.x >= 0 &&
+		boxes.notice.y >= 0 &&
+		boxes.notice.x + boxes.notice.w <= boxes.vw &&
+		boxes.notice.y + boxes.notice.h <= boxes.vh
 	const others = boxes.others.map(({ extra: isExtra, ...o }) => ({
 		...o,
 		required: requiredHere(o.name, isExtra),
@@ -196,6 +234,7 @@ async function measure(
 		missing,
 		ok:
 			boxes.notice !== null &&
+			inWindow &&
 			missing.length === 0 &&
 			others.every(o => !o.intersects),
 	}
@@ -332,21 +371,48 @@ export async function noticesFlow(
 	n = await waitCount(4, NOTICE_MS)
 	const wide = await settled(page, "1440x900 expanded", 1440, EXPANDED_PARTS)
 	layouts.push(wide)
-	await page.setViewportSize({ width: 390, height: 844 })
-	layouts.push({
-		...(await settled(page, "390x844 expanded", 390, EXPANDED_PARTS)),
-		gated: false,
-	})
-	await page.setViewportSize({ width: 1440, height: 900 })
 	await step(
 		"expanded Activity: one new notice, off the cards and the drawer's controls",
 		n === 4 && wide.ok,
 		`placed ${wide.where}`,
 	)
-	// back to the plain drawer and the List layout, then closed, for the reload step
+
+	// 5c: phone, each drawer open in turn (expanded Activity first) → a new notice docks under its header
+	await page.setViewportSize({ width: 390, height: 844 })
+	const fresh = async () => {
+		const had = await count()
+		await control({ level: "none", endEpisode: true })
+		await hold(2500)
+		await control({ level: "dropping", lossReason: "source" })
+		return (await waitCount(had + 1, NOTICE_MS)) === had + 1
+	}
+	const phoneStep = async (name: string, extra: readonly Extra[]) => {
+		const one = await fresh()
+		const l = await settled(page, `390x844 ${name}`, 390, extra)
+		layouts.push(l)
+		await step(
+			`phone, ${name} open: a new notice docked under its header, clear of every control`,
+			one && l.ok && l.where === "drawer-slot",
+			`placed ${l.where}`,
+		)
+	}
+	await phoneStep("activity expanded", [
+		...EXPANDED_PARTS,
+		...PHONE_DRAWER_PARTS,
+	])
+	// back to the plain drawer and the List layout
 	await page.locator(".wk-shell-drawer .wka-expand").click()
 	await page.getByRole("radio", { name: "List" }).click()
-	await page.getByRole("button", { name: "Close activity" }).click()
+	for (const d of PHONE_DRAWERS) {
+		await page.evaluate(hash => {
+			location.hash = hash
+		}, d.hash)
+		await page.locator(`.wk-shell-drawer ${d.ready}`).waitFor()
+		await phoneStep(d.name, PHONE_DRAWER_PARTS)
+	}
+	// closed, at desktop width, for the reload step
+	await page.getByRole("button", { name: "Close settings" }).click()
+	await page.setViewportSize({ width: 1440, height: 900 })
 
 	const before = await noticesSeen(page)
 
@@ -367,7 +433,7 @@ export async function noticesFlow(
 	const texts = [...before, ...(await noticesSeen(page))]
 	await control({ level: "none", endEpisode: true })
 	return {
-		ok: steps.every(s => s.ok) && layouts.every(l => l.gated === false || l.ok),
+		ok: steps.every(s => s.ok) && layouts.every(l => l.ok),
 		steps,
 		layouts,
 		texts,

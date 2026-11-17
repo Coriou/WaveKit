@@ -1,8 +1,9 @@
 // Where the notice region sits: top centre of the free plot area, 8 px under the top island row, and below
 // anything already at the top centre (the connection chip when it drops under the top row, and any overlay that
 // marks itself with `data-wk-top-centre`). While Activity is expanded there is no free plot: `regionPlacement`
-// finds empty room on the top row or in the drawer's header instead. Pure, so it tests in node; the region feeds it
-// measured boxes.
+// finds empty room on the top row or in the drawer's header instead; while any drawer covers that place (a phone, or
+// a window below 1100 px) the region docks in the drawer's notice slot under its header. Pure, so it tests in node;
+// the region feeds it measured boxes.
 
 /** Room between the top row (or what sits under it) and the region. */
 export const REGION_GAP = 8
@@ -73,13 +74,18 @@ export interface PlacementInput {
 	readonly boxes: readonly Box[]
 	/** Activity is expanded (Cards, full width): it covers the free plot, so there is none. */
 	readonly expanded: ExpandedDrawer | null
+	/** The open drawer's box (any drawer), or null while none is shown. */
+	readonly drawer?: Box | null
+	/** The open drawer has a notice slot under its header (ui/notice-slot.ts) to dock in. */
+	readonly slot?: boolean
 	/** The region's measured height (px); one touch-height toast when omitted. */
 	readonly height?: number
 }
 
 export interface Placement {
-	/** Where it went: the free plot's top centre, the top row's widest gap, or the expanded drawer's header. */
-	readonly where: "free-plot" | "top-row" | "drawer-head"
+	/** Where it went: the free plot's top centre, the top row's widest gap, the expanded drawer's header, or the
+	 * open drawer's notice slot under its header (laid out by the drawer, so `cx`, `maxW` and `top` are 0). */
+	readonly where: "free-plot" | "top-row" | "drawer-head" | "drawer-slot"
 	/** The region's centre (shell px). */
 	readonly cx: number
 	/** Its widest box (px). */
@@ -122,6 +128,10 @@ export function freeSpans(
  * 2. else the widest empty stretch of the drawer's header (a gutter clear of the title, Live, Columns and ✕),
  *    when it is that wide: the region centred on the header's height;
  * 3. else the normal place (no room anywhere: a narrow window, where Expand changes nothing).
+ * The normal place (any drawer, expanded or not) is taken only when its box keeps clear of the open drawer; when
+ * the drawer covers it (a phone, or a window below 1100 px, where drawers span the window between the island
+ * rows), the region docks in the drawer's notice slot under its header: the drawer lays it out and pushes its body
+ * down, so no header control or row is ever covered. With no slot (a drawer still loading) the normal place.
  */
 export function regionPlacement(p: PlacementInput): Placement {
 	const normal: Placement = {
@@ -131,7 +141,7 @@ export function regionPlacement(p: PlacementInput): Placement {
 		top: regionTop(p.topRowBottom, p.boxes, p.freeCx, REGION_MAX_W),
 	}
 	const x = p.expanded
-	if (!x) return normal
+	if (!x) return clearOfDrawer(p, normal)
 	const row = x.topRow.filter(b => b.top < x.drawer.top)
 	const gap = freeSpans(GUTTER, p.W - GUTTER, row, GUTTER)[0]
 	if (gap && gap.right - gap.left >= REGION_MIN_W) {
@@ -162,5 +172,20 @@ export function regionPlacement(p: PlacementInput): Placement {
 				),
 			}
 	}
-	return normal
+	return clearOfDrawer(p, normal)
+}
+
+const IN_SLOT: Placement = { where: "drawer-slot", cx: 0, maxW: 0, top: 0 }
+
+/** `normal`, unless its box lands on the open drawer and that drawer has a notice slot: then the slot. */
+function clearOfDrawer(p: PlacementInput, normal: Placement): Placement {
+	const d = p.drawer
+	if (!d || !p.slot) return normal
+	const left = normal.cx - normal.maxW / 2
+	const right = normal.cx + normal.maxW / 2
+	const top = normal.top
+	const bottom = top + (p.height || TOAST_H)
+	const hits =
+		d.left < right && left < d.right && d.top < bottom && top < d.bottom
+	return hits ? IN_SLOT : normal
 }

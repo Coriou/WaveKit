@@ -18,6 +18,10 @@ const box = (left: number, top: number, w: number, h: number): Box => ({
 // default islands (layout.ts DEFAULT_GEOMETRY): Tuner 440×56, Receiver 300×56, gutter 16, top row bottom 72
 const tuner = box(16, 16, 440, 56)
 
+/** A phone's drawer (390×844): between the stacked top row (bottom 136) and the bottom row. */
+const phoneDrawer = box(16, 152, 358, 600)
+const SLOT = { where: "drawer-slot", cx: 0, maxW: 0, top: 0 }
+
 /** An expanded Activity drawer between the rows, with its header controls (title, Live, ✕) at the ends. */
 const expanded = (
 	W: number,
@@ -148,6 +152,104 @@ const cases: {
 		},
 		want: { where: "free-plot", cx: 195, maxW: 358, top: 144 },
 	},
+	{
+		// phone: every drawer spans the window between the island rows, so the normal place lands on its header
+		name: "narrow, a drawer open: docked in the drawer's notice slot",
+		input: {
+			W: 390,
+			topRowBottom: 136,
+			freeCx: 195,
+			boxes: [],
+			expanded: null,
+			drawer: phoneDrawer,
+			slot: true,
+		},
+		want: SLOT,
+	},
+	{
+		name: "narrow, expanded Activity: docked in its notice slot",
+		input: {
+			W: 390,
+			topRowBottom: 136,
+			freeCx: 195,
+			boxes: [],
+			expanded: expanded(
+				390,
+				[box(16, 16, 358, 56), box(16, 80, 358, 56)],
+				152,
+			),
+			drawer: phoneDrawer,
+			slot: true,
+		},
+		want: SLOT,
+	},
+	{
+		name: "narrow, a drawer still loading with no slot: the normal place",
+		input: {
+			W: 390,
+			topRowBottom: 136,
+			freeCx: 195,
+			boxes: [],
+			expanded: null,
+			drawer: phoneDrawer,
+			slot: false,
+		},
+		want: { where: "free-plot", cx: 195, maxW: 358, top: 144 },
+	},
+	{
+		name: "900 px, a between-rows drawer full width: docked in its slot",
+		input: {
+			W: 900,
+			topRowBottom: 72,
+			freeCx: 450,
+			boxes: [],
+			expanded: null,
+			drawer: box(16, 88, 868, 732),
+			slot: true,
+		},
+		want: SLOT,
+	},
+	{
+		name: "a tall measured toast on a phone with a drawer: still the slot",
+		input: {
+			W: 390,
+			topRowBottom: 136,
+			freeCx: 195,
+			boxes: [],
+			expanded: null,
+			drawer: phoneDrawer,
+			slot: true,
+			height: 96,
+		},
+		want: SLOT,
+	},
+	{
+		// the region keeps to the free plot (16 px from its edges), clear of the drawer: no docking
+		name: "full-height drawer open, 1440, with its box: the free plot, not the slot",
+		input: {
+			W: 1440,
+			topRowBottom: 72,
+			freeCx: 502,
+			boxes: [],
+			expanded: null,
+			drawer: box(1004, 16, 420, 868),
+			slot: true,
+		},
+		want: { where: "free-plot", cx: 502, maxW: 560, top: 80 },
+	},
+	{
+		name: "expanded Activity, 1440, with its box: the top row still wins over the slot",
+		input: {
+			W: 1440,
+			topRowBottom: 72,
+			freeCx: 502,
+			boxes: [],
+			expanded: expanded(1440, [tuner, box(688, 16, 300, 56)], 88),
+			drawer: box(16, 88, 1408, 724),
+			slot: true,
+		},
+		want: { where: "top-row", cx: 1214, maxW: 420, top: 16 },
+	},
 ]
 
 describe("the notice region's placement", () => {
@@ -161,7 +263,7 @@ describe("the notice region's placement", () => {
 			const x = c.input.expanded
 			if (!x) continue
 			const p = regionPlacement(c.input)
-			if (p.where === "free-plot") continue
+			if (p.where === "free-plot" || p.where === "drawer-slot") continue
 			const left = p.cx - p.maxW / 2
 			const right = p.cx + p.maxW / 2
 			const top = p.top
@@ -169,6 +271,27 @@ describe("the notice region's placement", () => {
 			const hits = (b: Box) =>
 				b.left < right && left < b.right && b.top < bottom && top < b.bottom
 			expect([...x.topRow, ...x.headerControls].some(hits), c.name).toBe(false)
+		}
+	})
+})
+
+describe("the notice region beside an open drawer", () => {
+	it("never floats over a drawer that has a slot: on it, it docks", () => {
+		for (const c of cases) {
+			const d = c.input.drawer
+			if (!d || !c.input.slot) continue
+			const p = regionPlacement(c.input)
+			if (p.where === "drawer-slot") continue
+			const left = p.cx - p.maxW / 2
+			const right = p.cx + p.maxW / 2
+			const bottom = p.top + (c.input.height || 44)
+			const floatsOnDrawer =
+				p.where === "free-plot" &&
+				d.left < right &&
+				left < d.right &&
+				d.top < bottom &&
+				p.top < d.bottom
+			expect(floatsOnDrawer, c.name).toBe(false)
 		}
 	})
 })

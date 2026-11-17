@@ -5,6 +5,7 @@ import type { HTMLAttributes, ReactNode, Ref } from "react"
 import { cx } from "./cx.ts"
 import { Icon } from "./Icon.tsx"
 import { IconButton } from "./IconButton.tsx"
+import { NOTICE_SLOT_CLASS, noticeSlotRef } from "./notice-slot.ts"
 
 export interface DrawerProps extends Omit<
 	HTMLAttributes<HTMLElement>,
@@ -55,6 +56,8 @@ export function Drawer({
 					</IconButton>
 				)}
 			</header>
+			{/* the shell's notices dock here while the drawer covers the plot (ui/notice-slot.ts) */}
+			<div ref={noticeSlotRef} className={NOTICE_SLOT_CLASS} />
 			<div className="wk-drawer-body wk-scroll">{children}</div>
 		</section>
 	)

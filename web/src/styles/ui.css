@@ -14,6 +14,15 @@
 	.wk-drawer-close {
 		color: var(--wk-text-3);
 	}
+	/* the notice slot under the header (ui/notice-slot.ts): empty and out of the layout until the shell's notice
+	   region docks in it, then it pushes the body down */
+	.wk-drawer-notices {
+		flex: none;
+		padding: 0 10px 10px 18px;
+	}
+	.wk-drawer-notices:empty {
+		display: none;
+	}
 	.wk-drawer-body {
 		flex: 1;
 		min-height: 0;
