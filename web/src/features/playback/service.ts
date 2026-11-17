@@ -5,7 +5,7 @@
 // path restores it). A finished recording plays the next one of the list it was started from (a snapshot the
 // surface refreshes while it is shown) when Auto-next is on (per browser). Waveform peaks come from the same
 // blob.
-import { errorMessage, Store } from "../../data/index.ts"
+import { errorMessage, isApiError, Store } from "../../data/index.ts"
 import { wavPeaks } from "./wav.ts"
 
 export type PlaybackPhase =
@@ -67,6 +67,10 @@ export interface AudioLike {
 	readonly duration: number
 	playbackRate: number
 	preservesPitch?: boolean
+	/** True after the end (a "pause" event then is the end's, not a pause). */
+	readonly ended?: boolean
+	/** The element's own state when an event is handled (a queued pause event after a play is old news). */
+	readonly paused?: boolean
 	play(): Promise<void>
 	pause(): void
 	removeAttribute(name: string): void
@@ -104,14 +108,35 @@ class StaleFetchError extends Error {}
 /** Files kept for replay and waveforms (call WAVs are a few hundred kB). */
 const CACHE_MAX = 16
 
+/** What the dock says when the file could not be fetched (the core's refusals carry a code, not a sentence). */
+export function fileErrorText(error: unknown): string {
+	if (isApiError(error))
+		switch (error.status) {
+			case 401:
+				return "Session expired, pair again"
+			case 404:
+			case 410:
+				return "This recording is no longer on the receiver"
+			case 429:
+				return "Too many recordings are being read; try again in a moment"
+			case 503:
+				return "The receiver is busy; try again"
+		}
+	return errorMessage(error)
+}
+
 /** Live audio is muted while this holds (invariant I2). */
 export function heldOf(s: PlaybackState): boolean {
 	return s.phase === "playing" || (s.phase === "loading" && s.wantPlay)
 }
 
-/** The dock shows only its thin line: the playing recording's row is open in the visible panel. */
+/**
+ * The dock shows only its thin line: the playing recording's row is open in the visible panel. A failed one
+ * keeps the full dock, whose error line is the only place the failure shows.
+ */
 export function compactOf(s: PlaybackState): boolean {
 	if (s.id === null) return false
+	if (s.error !== null || s.phase === "error") return false
 	return Object.values(s.expanded).some(e => e?.visible && e.id === s.id)
 }
 
@@ -292,7 +317,11 @@ export class PlaybackService extends Store<PlaybackState> {
 			file => this.loaded(id, token, file),
 			(error: unknown) => {
 				if (abort.signal.aborted || token !== this.epoch) return
-				this.update(x => ({ ...x, phase: "error", error: errorMessage(error) }))
+				this.update(x => ({
+					...x,
+					phase: "error",
+					error: fileErrorText(error),
+				}))
 			},
 		)
 	}
@@ -581,6 +610,19 @@ export class PlaybackService extends Store<PlaybackState> {
 			if (Number.isFinite(d)) this.update(s => ({ ...s, duration: d }))
 		})
 		el.addEventListener("ended", () => this.onEnded())
+		// a pause or play the service did not make (a media key, a headset taken out): its own calls set the
+		// phase first, so their events find it already matching
+		el.addEventListener("pause", () => {
+			if (!this.live() || el.ended === true || el.paused === false) return
+			const s = this.get()
+			if (s.phase === "playing") this.set({ ...s, phase: "paused" })
+		})
+		el.addEventListener("play", () => {
+			if (!this.live() || el.paused === true) return
+			const s = this.get()
+			if (s.phase === "paused")
+				this.set({ ...s, phase: "playing", error: null, wantPlay: true })
+		})
 		el.addEventListener("error", () => {
 			const s = this.get()
 			if (!this.live() || (s.phase !== "playing" && s.phase !== "paused"))

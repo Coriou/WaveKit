@@ -683,14 +683,18 @@ export async function fetchActivityRecord(
 	}
 }
 
-/** POST /api/activity/facets for one dimension; counts by value (null values dropped). */
+/**
+ * POST /api/activity/facets for one dimension; counts by value (null values dropped). `truncated`: the core
+ * stopped its scan, so the counts are lower bounds.
+ */
 export async function fetchCategoryCounts(
 	api: ApiClient,
 	query: ActivityQuery,
 	signal?: AbortSignal,
-): Promise<Record<string, number>> {
+): Promise<{ counts: Record<string, number>; truncated: boolean }> {
 	const body = await api.request<{
 		facets?: Record<string, readonly { value: string | null; count: number }[]>
+		truncated?: boolean
 	}>(
 		"POST",
 		"/api/activity/facets",
@@ -700,5 +704,5 @@ export async function fetchCategoryCounts(
 	const out: Record<string, number> = {}
 	for (const row of body.facets?.["category"] ?? [])
 		if (row.value !== null) out[row.value] = row.count
-	return out
+	return { counts: out, truncated: body.truncated === true }
 }

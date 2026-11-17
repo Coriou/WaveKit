@@ -6,7 +6,9 @@
  * the disc plays it (the dock, the one `[data-wk-transport]`, reads `playing` and live audio `muted`); closing
  * the drawer keeps it playing; `#/recordings` marks the same item playing; the Listen button pauses the
  * recording and live audio comes back (Listen stays on); play again, close the dock (live audio still on);
- * "With audio" asks the core for `hasRecording=true`; Cards › Expand shows the disc on the board's cards.
+ * "With audio" asks the core for `hasRecording=true`; Cards › Expand shows the disc on the board's cards; an
+ * open event whose file is gone (after a reload, the page answers its file fetch 404): its Recording block's
+ * disc shows the full dock with "This recording is no longer on the receiver" (not the compact line).
  */
 import type { Page } from "playwright-core"
 import { within } from "./harness.ts"
@@ -176,6 +178,54 @@ export async function playFlow(page: Page): Promise<PlayReport> {
 		note("Cards › Expand shows the disc", boardDisc)
 		await page.getByRole("button", { name: "Collapse" }).click(bounded)
 		await page.getByRole("radio", { name: "List" }).click(bounded)
+
+		// an open event whose file is gone; a reload empties the player's file cache (the played one is in it)
+		await page.reload()
+		await page.evaluate(() => {
+			location.hash = "#/activity"
+		})
+		const audioRow = page.locator(".wka-list .wka-item[data-disc]").first()
+		await audioRow.waitFor(bounded)
+		const key = await audioRow
+			.locator(".wkp-disc")
+			.first()
+			.getAttribute("data-playback-id")
+		const gone = key === null ? null : { key }
+		if (gone === null) note("an open event's missing file shows why", false)
+		else {
+			const missing = (url: URL) =>
+				url.pathname.endsWith("/file") &&
+				decodeURIComponent(url.pathname).includes(gone.key)
+			await page.route(missing, r =>
+				r.fulfill({
+					status: 404,
+					contentType: "application/json",
+					body: JSON.stringify({ code: "RECORDING_NOT_FOUND" }),
+				}),
+			)
+			await audioRow.locator(".wka-row").click(bounded)
+			await page.locator(".wka-rec .wkp-disc").click(bounded)
+			const said = await until(async () =>
+				page.evaluate(() => {
+					const dock = document.querySelector<HTMLElement>(
+						"[data-wk-transport]",
+					)
+					return (
+						dock !== null &&
+						dock.dataset["phase"] === "error" &&
+						!dock.hasAttribute("data-compact") &&
+						(dock.querySelector(".wkp-dock-sub")?.textContent ?? "").includes(
+							"This recording is no longer on the receiver",
+						)
+					)
+				}),
+			)
+			note("an open event's missing file shows why", said, gone.key)
+			await page.unroute(missing)
+			await page
+				.getByRole("button", { name: "Close player and unmute live audio" })
+				.click(bounded)
+		}
 	} catch (error) {
 		note(
 			"flow",

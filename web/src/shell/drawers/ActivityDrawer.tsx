@@ -430,10 +430,12 @@ function ListHeader({ feed, room }: { feed: ActivityFeed; room: boolean }) {
 	useStore(activity, s => s.audio)
 	const counts = useStore(activity, s => s.counts)
 	const total = useStore(activity, s => s.total)
+	const truncated = useStore(activity, s => s.countsTruncated)
 	const chip = useStore(activity, s => s.chip)
 	const count = headerCount({
 		counts,
 		total,
+		truncated,
 		chip,
 		column: view !== null,
 		events,

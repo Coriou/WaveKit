@@ -14,6 +14,7 @@ import {
 	canPrev,
 	compactOf,
 	discPauses,
+	fileErrorText,
 	heldOf,
 	markOf,
 	queuePosition,
@@ -25,6 +26,7 @@ import type {
 	QueueRef,
 } from "../../src/features/playback/service.ts"
 import { synthWav } from "../../mock/recordings.ts"
+import { ApiClient, ApiError } from "../../src/data/api-client.ts"
 
 class FakeAudio implements AudioLike {
 	src = ""
@@ -33,6 +35,8 @@ class FakeAudio implements AudioLike {
 	playbackRate = 1
 	preservesPitch = false
 	playing = false
+	paused = true
+	ended = false
 	calls: string[] = []
 	/** The next play() result; resolves by default. */
 	nextPlay: (() => Promise<void>) | null = null
@@ -40,6 +44,7 @@ class FakeAudio implements AudioLike {
 	play() {
 		this.calls.push("play")
 		this.playing = true
+		this.paused = false
 		const next = this.nextPlay
 		this.nextPlay = null
 		return next ? next() : Promise.resolve()
@@ -47,6 +52,7 @@ class FakeAudio implements AudioLike {
 	pause() {
 		this.calls.push("pause")
 		this.playing = false
+		this.paused = true
 	}
 	removeAttribute(name: string) {
 		this.calls.push(`remove ${name}`)
@@ -790,6 +796,185 @@ describe("PlaybackService: marks and the compact dock", () => {
 		expect(compactOf(s.p.get())).toBe(true)
 		s.p.setExpanded("activity", null)
 		expect(compactOf(s.p.get())).toBe(false)
+	})
+})
+
+describe("PlaybackService: a failed play keeps the full dock", () => {
+	it("an element error under the open row is not compact, so its error line shows", async () => {
+		const s = setup()
+		await playing(s, "a")
+		s.p.setExpanded("activity", "a", true)
+		expect(compactOf(s.p.get())).toBe(true)
+		s.audio.emit("error")
+		expect(s.p.get().phase).toBe("error")
+		expect(compactOf(s.p.get())).toBe(false)
+	})
+
+	it("a fetch that fails while its row is open shows the full dock with the reason", async () => {
+		const s = setup({ fail: { a: "Recording not found" } })
+		s.p.setExpanded("recordings", "a", true)
+		s.p.play("a")
+		expect(compactOf(s.p.get())).toBe(true)
+		await flush()
+		expect(s.p.get()).toMatchObject({
+			phase: "error",
+			error: "Recording not found",
+		})
+		expect(compactOf(s.p.get())).toBe(false)
+	})
+
+	it("an error left on a paused one (a refused start) keeps the full dock too", () => {
+		const base = setup().p.get()
+		expect(
+			compactOf({
+				...base,
+				id: "a",
+				phase: "paused",
+				error: "boom",
+				expanded: { activity: { id: "a", visible: true } },
+			}),
+		).toBe(false)
+	})
+})
+
+describe("PlaybackService: a pause or play from outside the service", () => {
+	it("an outside pause (a media key) pauses and gives live audio back; an outside play holds it again", async () => {
+		const s = setup()
+		await playing(s)
+		expect(s.held).toEqual([true])
+		s.audio.paused = true
+		s.audio.emit("pause")
+		expect(s.p.get().phase).toBe("paused")
+		expect(s.held).toEqual([true, false])
+		s.audio.paused = false
+		s.audio.emit("play")
+		expect(s.p.get()).toMatchObject({ phase: "playing", wantPlay: true })
+		expect(s.held).toEqual([true, false, true])
+	})
+
+	it("the service's own pause and start are not seen twice", async () => {
+		const s = setup()
+		await playing(s)
+		s.p.pause()
+		s.audio.emit("pause")
+		expect(s.p.get().phase).toBe("paused")
+		s.p.resume()
+		s.audio.emit("play")
+		expect(s.p.get().phase).toBe("playing")
+		expect(s.held).toEqual([true, false, true])
+		// a pause and a resume in one go: the pause event, queued before the play, finds the element playing
+		s.p.pause()
+		s.p.resume()
+		s.audio.emit("pause")
+		s.audio.emit("play")
+		expect(s.p.get().phase).toBe("playing")
+		expect(s.held).toEqual([true, false, true, false, true])
+	})
+
+	it("the pause that comes with the end is the end's", async () => {
+		const s = setup()
+		await playing(s)
+		s.audio.paused = true
+		s.audio.ended = true
+		s.audio.emit("pause")
+		expect(s.p.get().phase).toBe("playing")
+		s.audio.emit("ended")
+		expect(s.p.get().phase).toBe("ended")
+		// an outside play after the end does not resume it (only a paused one)
+		s.audio.paused = false
+		s.audio.emit("play")
+		expect(s.p.get().phase).toBe("ended")
+	})
+
+	it("loading, idle and an old src ignore pause and play", async () => {
+		const s = setup({ hold: true })
+		s.p.play("a")
+		await s.land("a")
+		s.p.pause()
+		s.p.play("b")
+		s.audio.paused = false
+		s.audio.emit("play")
+		s.audio.paused = true
+		s.audio.emit("pause")
+		expect(s.p.get()).toMatchObject({
+			id: "b",
+			phase: "loading",
+			wantPlay: true,
+		})
+		s.p.stop()
+		s.audio.paused = false
+		s.audio.emit("play")
+		expect(s.p.get()).toMatchObject({ id: null, phase: "idle" })
+	})
+})
+
+describe("PlaybackService: why a file could not be fetched", () => {
+	const refused = (status: number) =>
+		new ApiError({
+			status,
+			code: null,
+			message: `GET /api/recordings/a/file failed with ${status}`,
+			body: "",
+			method: "GET",
+			path: "/api/recordings/a/file",
+		})
+
+	it("says each refusal in words", () => {
+		expect(fileErrorText(refused(404))).toBe(
+			"This recording is no longer on the receiver",
+		)
+		expect(fileErrorText(refused(410))).toBe(
+			"This recording is no longer on the receiver",
+		)
+		expect(fileErrorText(refused(429))).toBe(
+			"Too many recordings are being read; try again in a moment",
+		)
+		expect(fileErrorText(refused(503))).toBe("The receiver is busy; try again")
+		expect(fileErrorText(refused(401))).toBe("Session expired, pair again")
+		expect(fileErrorText(refused(500))).toBe(
+			"GET /api/recordings/a/file failed with 500",
+		)
+		expect(fileErrorText(new Error("offline"))).toBe("offline")
+	})
+
+	it("the dock shows the words, and a 401 ends the session as other requests do", async () => {
+		const api = new ApiClient({
+			fetch: () =>
+				Promise.resolve(
+					new Response(JSON.stringify({ code: "SESSION_REQUIRED" }), {
+						status: 401,
+					}),
+				),
+		})
+		api.setCsrfToken("t")
+		const lost = vi.fn()
+		api.onSessionLost(lost)
+		const p = new PlaybackService({
+			fetchFile: id => api.blob(`/api/recordings/${id}/file`),
+			holdLive: () => undefined,
+			createAudio: () => new FakeAudio(),
+			createUrl: () => "blob:1",
+			revokeUrl: () => undefined,
+			storage: null,
+		})
+		p.play("a")
+		await vi.waitFor(() => expect(p.get().phase).toBe("error"))
+		expect(p.get().error).toBe("Session expired, pair again")
+		expect(lost).toHaveBeenCalledTimes(1)
+		p.dispose()
+	})
+
+	it("a 404 file reads as gone", async () => {
+		const p = new PlaybackService({
+			fetchFile: () => Promise.reject(refused(404)),
+			holdLive: () => undefined,
+			createAudio: () => new FakeAudio(),
+			storage: null,
+		})
+		p.play("a")
+		await vi.waitFor(() => expect(p.get().phase).toBe("error"))
+		expect(p.get().error).toBe("This recording is no longer on the receiver")
+		p.dispose()
 	})
 })
 
