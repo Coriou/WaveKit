@@ -1095,7 +1095,7 @@ Link-burst additions are optional and additive; older cores omit them:
   Because W spans the whole average, loss the core caused leaves the average no
   later than the busy takes that caused it leave W: the end of a busy spell never
   reads `source`, and a link that keeps falling short after the core recovered reads
-  `source` once W holds only healthy takes (within about 15 s). Evidence right at a
+  `source` once W holds only healthy takes (within about 20 s). Evidence right at a
   threshold may switch the cause between `source` and `unknown` from one check to the
   next. A source that is disconnected, or whose feed is paused or resuming, is not
   classified: it reads `level: "none"` with no `lossReason`, and its 10 s window
