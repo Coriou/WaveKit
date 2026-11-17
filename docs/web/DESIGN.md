@@ -990,6 +990,77 @@ Condensed + Noto Sans, Tabler-based icons).
   links and the palette alias open Activity › Cards. The canvas still draws Messages in the dock
   until it is next redrawn. *Why:* one place for linked activity data, not a second board that
   shows the same decodes.
+- **Hints: a quiet mark, one sentence, a learn card (2026-11-17).** Permanent help text under
+  every control made panels dense and made nothing primary. A labelled control that needs
+  explaining now carries a small info mark (Tabler `info-circle`, 14 px in a 20 px round button,
+  `--wk-text-4`, 4 px after the label, never at the row's far end); everything else about the
+  control lives behind it. Two depths, one element: the **hint** (one sentence, up to 280 px) and,
+  for the few deep concepts whose options each need a line, the **learn card** (the same bubble
+  pinned: the sentence as lead, up to four term rows, one foot line, up to 340 px). Icon-only
+  buttons keep their name tips (`.wk-tip`); hints never replace them.
+  - *What earns a hint:* a term of art (Squelch, De-emphasis), a cost the listener would blame on
+    a fault (a delay, a restart, a change every device hears), options that cannot be told apart
+    by name (Off / Slow / Fast), or a figure whose meaning depends on how it is counted. Not a
+    control whose label and visible state already say what it does, and not a hint that restates
+    the label (the removal test: delete it; if nothing is lost, delete the mark). Order of fixes:
+    a better label, grouping, visible state, then a hint, then a learn card, then the docs.
+  - *Never in a hint:* live state or values (the label line says what is true now), warnings and
+    errors (notes and notices), anything needed to finish a task, a safety consequence at the
+    moment of acting. Budget: one mark per row; none in island heads, the dock, toasts, status
+    items or on the plot; at most one learn card per section.
+  - *Behaviour:* the pointer opens it after 400 ms and it closes 120 ms after the pointer leaves
+    both the anchor and the bubble (the bubble can be hovered and its text selected); keyboard
+    focus opens it at once; a click, Enter, Space or a tap pins it (the learn card when there is
+    one), and the same again, Escape or a click elsewhere closes it. Escape closes the hint only:
+    the panel under it stays open and focus stays on the mark. One hint is open at a time; for
+    500 ms after one closes the next opens without the delay. It closes when its host scrolls,
+    closes or the window resizes, and it never opens by itself.
+  - *Accessibility:* the mark is a real button (`About <label>`, `aria-expanded`,
+    `aria-controls` while open); the explained control points `aria-describedby` at an
+    always-mounted `.wk-sr` copy of the sentence, so a screen reader hears it on the control
+    without finding the mark. No `title` attributes for explanations. The open hint is
+    `role="tooltip"`, the learn card a named `role="group"` that takes no focus. On a coarse
+    pointer the mark has a 44 px hit area.
+  - *Placement:* inside the surface that holds the mark (island panel, drawer, sheet), 12 px in
+    from its edges and clipped to the window; above the row it explains, else below, else the
+    roomier side clamped in; never over its own row (the label line and its control). An island a
+    layout lays over the host's edge is cut out of that room. So a hint cannot touch another
+    island or plot data and needs no slot in the layout. Solid, unblurred, `--wk-e2`; opens with
+    a 120 ms fade and 4 px slide, and simply appears under reduced motion.
+  - *Writing rules:* the voice of someone who knows radio sitting next to you: plain, calm,
+    present tense, active verbs; no "please", "simply", "just", "allows you to", exclamation marks
+    or marketing. One sentence of at most 15 words saying what the control does for the listener,
+    starting with the verb; a second of at most 8 words only for a cost or a choice; sentence
+    case, ending with a full stop. Never restate the label; a term of art only as the label being
+    explained or with its plain meaning beside it; units only when they help choose, rounded
+    ("about 1 s"); never dBFS, samples, sample rates, route names, buffers or filter types; no
+    gestures the control already affords ("drag", "click"); no state ("currently") and no
+    cross-references. Use the app's own names. Learn rows: the term, then at most 14 words; a
+    shortcut is a key cap, last. Before a hint ships, the flip test (someone who never used a
+    radio can say what changes when the control is flipped) and the removal test.
+  - *Code:* `web/src/ui/Hint.tsx` (`useHint`, `HintMark`, `hintRow`), the placement in
+    `hint-place.ts` and the one-at-a-time controller in `hint-controller.ts`. The recipe is
+    web-local (`web/src/ui/hint.css`, marked `wk-explore: hint`) until it is approved into
+    `ui.css`. Listen's strings live in `web/src/features/listen/hints.ts`, with the rules as a test.
+    Gated by `ui-check --flow=hints`: at 1440×900 and 390×844 every mark is reached by Tab, its hint
+    lies inside its host and the window and meets no other island and not its own row, Enter pins,
+    Escape closes the hint only, a tap pins.
+- **Listen panel: essentials first (2026-11-17).** The Audio options panel stacked five sections,
+  each with permanent prose, a 44 px hatched level block and two sets of figures. Now: Volume as
+  one row; Squelch (mode, a slim 8 px level bar with the squelch as an amber handle, hollow in
+  Auto and solid in Manual, absent in Open, one caption "Opens above −46 dB · Signal −40 dB",
+  Voice only, Tone squelch when a tone is heard or set); Source; Sound folded into one row that
+  says what is behind it ("Level, de-emphasis, filters") or, when something there is not at its
+  default, what is set; then a footer with **Record**, the delay ("180 ms delay") and All audio
+  settings. Each field reads name and mark on the left, what is true now on the right (the squelch
+  state **Voice heard**, **Tone heard**, **Playing**, **Waiting for voice**, **Quiet**, **Open**;
+  Source **Playing NFM**). Notes exist only while their problem holds (no decoder, an encrypted
+  call, audio breaking up, several devices listening). Figures read dB, not dBFS. The stream line
+  (rate, client count, health) and the core-filled and rebase sentences of the audio-health detail
+  left the panel; they stay in the API. Three marks at rest (Squelch and Source with learn cards,
+  Voice only), two more in Sound. The fold is remembered per browser and never opens by itself.
+  *Why:* most sessions touch volume and squelch and nothing else; this puts them first and keeps
+  the answer to "why is it quiet?" in one block, and the fold absorbs later sound controls.
 
 ## Open questions and next topics
 

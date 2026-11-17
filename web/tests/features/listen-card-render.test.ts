@@ -12,6 +12,11 @@ import type {
 import { ServicesContext } from "../../src/app/context.ts"
 import { createServices, type AppServices } from "../../src/app/services.ts"
 import { listenSlot } from "../../src/features/listen/ListenIsland.tsx"
+import {
+	SOURCE_HINT,
+	SQUELCH_HINT,
+	VOICE_ONLY_HINT,
+} from "../../src/features/listen/hints.ts"
 import type { AudioHealth } from "../../src/features/listen/audio-health.ts"
 import { NO_AUDIO_HEALTH } from "../../src/features/listen/audio-health.ts"
 import type { ListenPhase } from "../../src/features/listen/controller.ts"
@@ -306,7 +311,7 @@ describe("the Listen card's head states", () => {
 			level: HELD,
 			call: { encrypted: true },
 		})
-		expect(html).toContain("DMR call is encrypted: nothing to play.")
+		expect(html).toContain(">Encrypted DMR call<")
 		expect(html).not.toContain("Play anyway")
 	})
 
@@ -321,9 +326,7 @@ describe("the Listen card's head states", () => {
 			call: { encrypted: true },
 		})
 		expect(html).toContain("<b>Listening</b>")
-		expect(html).toContain(
-			"DMR call is encrypted: decoded voice is not played.",
-		)
+		expect(html).toContain("Encrypted DMR call · analog only")
 		expect(html).not.toContain("nothing to play")
 	})
 
@@ -369,9 +372,7 @@ describe("the Audio options panel", () => {
 		for (const label of ["Auto", "Manual", "Open", "Analog", "Digital"])
 			expect(html).toContain(`>${label}<`)
 		expect(html).toContain("Voice only")
-		expect(html).toContain(
-			"Skips carriers, data and pagers. Voice starts about 1 s late, nothing is cut.",
-		)
+		expect(html).toContain(VOICE_ONLY_HINT.text)
 		expect(html).toContain(">Source<")
 		// Noise left the UI (Noise reduction under Sound is another thing)
 		expect(html).not.toContain(">Noise<")
@@ -395,10 +396,9 @@ describe("the Audio options panel", () => {
 			status: withConfig(LISTEN_CORE, { listenMode: "digital" }),
 			level: { autoRoute: { active: "none", reason: "no-decoder" } },
 		})
-		expect(html).toContain(
-			"No digital voice decoder on this channel: nothing plays.",
+		expect(html).toMatch(
+			/data-wk-source-hint="">.*No digital voice decoder here, so nothing plays\..*Use Auto/,
 		)
-		expect(html).toContain("Use Auto")
 	})
 
 	it("says the call is encrypted or being checked under Source", () => {
@@ -408,14 +408,14 @@ describe("the Audio options panel", () => {
 				level: { autoRoute: { active: "none" } },
 				call: { encrypted: true },
 			}),
-		).toContain("DMR call is encrypted: nothing to play.")
+		).toContain("Encrypted DMR call: nothing to play.")
 		expect(
 			panel({
 				status: LISTEN_CORE,
 				level: { autoRoute: { active: "none" } },
 				call: { encryptionKnown: false },
 			}),
-		).toContain("DMR call: checking it is not encrypted before it plays.")
+		).toContain("Checking DMR call…")
 	})
 
 	it("tags the squelch Quiet when the head says Quiet under Source Digital", () => {
@@ -450,7 +450,106 @@ describe("the Audio options panel", () => {
 		expect(html).not.toContain("Voice only")
 		// a manual squelch at 0 on an old core reads as Open
 		expect(panel({ status: withConfig(STATUS, { squelch: 0 }) })).toContain(
-			"Open · everything plays",
+			"Everything plays",
 		)
+	})
+
+	it("wires every hint to its control: aria-describedby names the hidden sentence", () => {
+		const html = panel({ status: LISTEN_CORE })
+		const describedText = (id: string) =>
+			new RegExp(`<span class="wk-sr" id="${id}">([^<]*)</span>`).exec(
+				html,
+			)?.[1]
+		const groups = [
+			["Squelch", SQUELCH_HINT.text],
+			["Source", SOURCE_HINT.text],
+		] as const
+		for (const [name, text] of groups) {
+			const id = new RegExp(
+				`role="radiogroup" aria-label="${name}" aria-describedby="([^"]+)"`,
+			).exec(html)?.[1]
+			expect(id, name).toBeTruthy()
+			expect(describedText(id ?? "")).toBe(text)
+			expect(html).toContain(`aria-label="About ${name}"`)
+		}
+		const voice = /aria-describedby="([^"]+)"[^>]*role="switch"/.exec(html)
+		expect(describedText(voice?.[1] ?? "")).toBe(VOICE_ONLY_HINT.text)
+		// closed hints: the mark says so, and no bubble is in the page
+		expect(html).toContain('aria-expanded="false"')
+		expect(html).not.toContain('role="tooltip"')
+	})
+
+	it("leaves no title attributes in the Listen card", () => {
+		const level = {
+			squelchOpen: true,
+			autoSquelch: { state: "waiting" },
+		} as const
+		for (const html of [
+			panel({ status: LISTEN_CORE, audio: { missingMs: 4000, heardPct: 71 } }),
+			head({ status: LISTEN_CORE, level }),
+			head({ audio: { breaking: true, heardPct: 71 } }),
+		])
+			expect(html).not.toMatch(/\stitle="/)
+	})
+
+	it("says dB, Record and the delay, and drops the stream line", () => {
+		const made = setup({ status: LISTEN_CORE })
+		made.listen.update(s => ({ ...s, latencyMs: 180 }))
+		// a browser that can record: the footer shows the delay, not why Record is off
+		Object.defineProperty(made.listen, "canRecord", { get: () => true })
+		const render = listenSlot.panel
+		if (!render) throw new Error("the Listen island has a panel")
+		const html = renderToStaticMarkup(
+			createElement(
+				ServicesContext.Provider,
+				{ value: made },
+				render({ open: true, trigger: {} } as unknown as IslandContext),
+			),
+		)
+		expect(html).not.toContain("dBFS")
+		expect(html).toMatch(/Opens above (the noise|−?\d+ dB)/)
+		expect(html).toContain("Record<")
+		expect(html).not.toContain("Record audio")
+		expect(html).toContain("180 ms delay")
+		expect(html).not.toContain("Not in this browser")
+		expect(html).not.toContain("Latency")
+		expect(html).not.toContain("audio · 1 listening")
+		expect(html).not.toContain("This browser only")
+		// Sound is folded and says what is behind it
+		expect(html).toContain("Level, de-emphasis, filters")
+		expect(html).not.toContain(">Level control<")
+	})
+
+	it("names the evidence in two words: Tone heard, Playing", () => {
+		expect(
+			panel({
+				status: LISTEN_CORE,
+				level: {
+					squelchOpen: true,
+					autoSquelch: { state: "open", evidence: "ctcss" },
+					autoRoute: { active: "analog" },
+				},
+			}),
+		).toMatch(/data-wk-squelch-state="">Tone heard</)
+		expect(
+			panel({
+				status: LISTEN_CORE,
+				level: {
+					squelchOpen: true,
+					autoSquelch: { state: "open" },
+					autoRoute: { active: "analog" },
+				},
+			}),
+		).toMatch(/data-wk-squelch-state="">Playing</)
+	})
+
+	it("shows the heard note with its hint only while audio went missing", () => {
+		expect(panel({ status: LISTEN_CORE })).not.toContain("missing")
+		const html = panel({
+			status: LISTEN_CORE,
+			audio: { missingMs: 17_400, heardPct: 71 },
+		})
+		expect(html).toContain("71% heard · 17.4 s missing")
+		expect(html).toContain('aria-label="About the heard figure"')
 	})
 })

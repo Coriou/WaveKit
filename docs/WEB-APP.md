@@ -322,18 +322,30 @@ The bar's title says what you hear, in one line:
 A decoded call the core does not play is named under the title whatever it says (unless Source is
 Analog or the squelch is Open): `DMR voice · checking…` while the core does not know yet whether the
 call is encrypted (it is never played or shown as clear until that is known), and
-`DMR call is encrypted: nothing to play.` for an encrypted one (`DMR call is encrypted: decoded voice
-is not played.` while the squelch passes the analog channel and the title says **Listening**). **Play anyway** is not offered then:
-it would only play the call's digital noise. The line under **Source** says the same.
+`Encrypted DMR call` for an encrypted one (`Encrypted DMR call · analog only` while the squelch passes
+the analog channel and the title says **Listening**). **Play anyway** is not offered then: it would only
+play the call's digital noise. **Source** says the same: `Checking DMR call…` on its label line, or a
+note under it for an encrypted call.
 
-**Audio options** sets the squelch in one row, **Auto | Manual | Open**:
+**Audio options** puts the everyday controls first: **Volume**, **Squelch**, **Source**, then **Sound**
+folded into one row, and a footer with **Record**, the delay (for example `180 ms delay`) and **All
+audio settings**. Each control reads its name on the left and what is true now on the right. A small
+info mark after a name explains it: hover or focus it for one sentence, click or tap it to pin it
+(Squelch and Source then show what each option does); Escape closes it and leaves the panel open. A
+screen reader hears the same sentence on the control itself.
 
-- **Auto** opens on a carrier above the noise floor and follows conditions. On NFM, the **Voice only**
-  switch under it (on by default) waits for evidence that someone is talking, voice or a CTCSS or DCS
-  tone: "Skips carriers, data and pagers. Voice starts about 1 s late, nothing is cut." The squelch tag
-  says what let the audio through, for example **CTCSS heard**, and reads **Quiet** whenever the title
-  does (Source Digital between calls, for example).
-- **Manual** is the line on the level bar: everything above it plays. Dragging the line selects Manual
+The squelch is one row, **Auto | Manual | Open**, over a level bar: the signal fills the bar (grey
+while the squelch holds it, coloured while it plays) and the squelch is the amber handle, hollow in
+Auto, solid in Manual, absent in Open. The caption under it reads, for example, `Opens above −46 dB`
+and `Signal −40 dB`.
+
+- **Auto** opens when a signal rises above the noise and adapts as the noise changes. On NFM, the
+  **Voice only** switch under it (on by default) waits for evidence that someone is talking, voice or a
+  CTCSS or DCS tone: "Plays only when someone talks; carriers, data and pagers stay silent. Voice
+  arrives about 1 s late, uncut." The squelch state says what let the audio through (**Voice heard**,
+  **Tone heard**, or **Playing**), and reads **Quiet** whenever the title does (Source Digital between
+  calls, for example).
+- **Manual** is the handle on the level bar: everything above it plays. Dragging the handle selects Manual
   at once; the spectrum shows the same dashed line, in Manual only. Choosing Manual from Auto starts the
   line where Auto had it.
 - **Open** plays everything, noise, pagers and data included. Transmissions are still detected and
@@ -344,10 +356,23 @@ it would only play the call's digital noise. The line under **Source** says the 
   change. **Settings › Audio › Squelch › Open** only changes the setting, without starting Listen; `Q`
   still goes back from it to the squelch before.
 
-**Source**, **Auto | Analog | Digital**, says what Listen plays. **Auto** plays the analog audio or a
-clear decoded call, decided per transmission; **Analog** only the demodulated audio; **Digital** only
-decoded voice, silence otherwise. With no digital voice decoder on the channel, Digital plays nothing
-and the panel says so, with **Use Auto**. Open always plays the analog audio.
+**Source**, **Auto | Analog | Digital**, says what Listen plays, and its label line what plays now
+(`Playing NFM`, `Playing DMR voice`, `Waiting for a call`). **Auto** plays the analog audio or a
+clear decoded call, decided per transmission; **Analog** only the demodulated audio (a digital call
+sounds like a buzz); **Digital** only decoded voice, silence otherwise. With no digital voice decoder
+on the channel, Digital plays nothing and a note says so, with **Use Auto**. Open always plays the
+analog audio.
+
+**Sound** holds the level control, de-emphasis, **Cut low rumble** and **Noise reduction**. Folded, its
+row says what is behind it, or what is set there when something is not at its default (for example
+`Level control Fast · Rumble cut`); it stays open or closed in this browser. A cut-off or a noise
+reduction mode chosen in **Settings › Audio** shows as the row's value. **Record** keeps what plays in
+this browser and saves it as a WAV file; it needs Listen on ("Listen first").
+
+Notes appear in the panel only while there is something to say: live audio off on the core ("Live
+audio is off. Listen starts it."), more than one device listening, an error, or audio breaking up.
+The stream's format and health are in
+[`GET /api/live-audio/status`](API.md#get-apilive-audiostatus).
 
 The squelch, Voice only and Source are settings of the core: every browser and client listening sees
 the same ones, and a change applies at once without restarting the audio stream. Volume stays in this
@@ -366,14 +391,14 @@ A short gap on an open stream keeps **Listening**. When over 10% of the audio yo
 did not play in the last 10 s, the card says so next to it, for example
 **Listening** `Breaking up · 71% heard`, until the figure is back within 5%. It needs at least 5 s of open
 signal to judge, and silence from a closed squelch never counts. **Audio options** gives the figure and
-the total missing since Listen started, next to the latency, for example `71% heard · 17.4 s missing`;
-hover it for what the core reported. The web app reads the core's figure every 2 s, so it can lag a little;
+the total missing since Listen started as a note, for example `71% heard · 17.4 s missing`; its info
+mark explains the figure. The web app reads the core's figure every 2 s, so it can lag a little;
 a reading that fails is made up by the next one. After 10 s of playback with no reading it only knows what
 this browser played: it gives a percentage only if that alone is breaking up, and a card already breaking up
 stays that way, without a percentage if it has none, until a reading arrives.
 Time this browser was not playing the stream (a suspended tab's audio, a reattach, another stream) never
 counts as missing.
-The latency includes audio waiting in the core.
+The delay includes audio waiting in the core.
 
 Breaking up usually means the core is too busy. It catches up a late stream by up to 500 ms at once, which
 hides short stalls, but it cannot recover audio it never received: when the receiver's data backs up inside

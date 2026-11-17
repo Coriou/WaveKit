@@ -99,7 +99,9 @@ describe("ui-check options", () => {
 		expect(parseOptions(["--flow=listen"]).flow).toBe("listen")
 		expect(parseOptions(["--flow=notices"]).flow).toBe("notices")
 		expect(parseOptions(["--flow=play"]).flow).toBe("play")
+		expect(parseOptions(["--flow=hints"]).flow).toBe("hints")
 		for (const argv of [
+			["--flow=hints", "--seed-recordings=5"],
 			["--flow=scan"],
 			["--flow"],
 			["--flow=listen", "--seed-recordings=5"],

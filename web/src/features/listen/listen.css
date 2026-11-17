@@ -1,4 +1,6 @@
-/* The Listen card's own state; the rest of the island lives in shell.css and features.css. */
+/* The Listen card's own state and the Audio options panel (docs/web/DESIGN.md, Listen): essentials first, Sound
+   folded. A field is name and mark on the left, what is true now on the right, the control under or beside it.
+   The rest of the island lives in shell.css and features.css. */
 @layer wk-app {
 	/* Same colour as the panel's warnings (.wkf-warn), which loses to .wk-shell-sub on source order. */
 	.wk-shell-sub[data-breaking] {
@@ -8,5 +10,297 @@
 	.wk-shell-listen-title > .wkf-play-anyway {
 		flex: none;
 		align-self: center;
+	}
+
+	/* ---- the panel */
+	.wkf-ls {
+		display: flex;
+		flex-direction: column;
+		gap: 22px;
+	}
+	.wkf-ls-grow {
+		flex: 1;
+		min-width: 0;
+	}
+	.wkf-ls-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		min-height: 36px;
+	}
+	.wkf-ls-name {
+		font-weight: 700;
+		white-space: nowrap;
+	}
+	/* the name and its mark keep their width; the control beside them does not push them onto two lines */
+	.wkf-ls-row > .wk-hint-anchor {
+		flex: none;
+	}
+	.wkf-ls-end,
+	.wkf-ls-row > .wkf-ls-now {
+		margin-left: auto;
+	}
+	.wkf-ls-row > .wkf-ls-end,
+	.wkf-ls-row > .wkf-ls-now {
+		flex: none;
+	}
+	.wkf-ls-row > .wk-switch {
+		margin-right: -6px;
+	}
+	.wkf-ls-vol {
+		gap: 14px;
+		min-height: 28px;
+	}
+	.wkf-ls-vol > .wk-label {
+		width: 62px;
+		flex: none;
+	}
+	.wkf-ls-val {
+		min-width: 38px;
+		text-align: right;
+	}
+	.wkf-ls-field,
+	.wkf-ls-keep {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+	.wkf-ls-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 22px;
+	}
+	/* what is true now: the label line's right-hand value */
+	.wkf-ls-now {
+		margin-left: auto;
+		color: var(--wk-text-3);
+		font-size: var(--wk-fs-sm);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		min-width: 0;
+	}
+	.wkf-ls-head > .wk-tag.wkf-ls-now {
+		font-size: inherit;
+	}
+	.wkf-ls-head > .wk-tag.wkf-ls-now:not([data-variant]) {
+		color: var(--wk-text-3);
+	}
+	.wkf-ls-tone {
+		color: var(--wk-accent);
+	}
+
+	/* the level bar: a slim track, the signal as fill, the squelch as an amber handle (hollow in Auto) */
+	.wkf-ls-level {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.wkf-ls-bar {
+		position: relative;
+		height: 28px;
+		display: flex;
+		align-items: center;
+	}
+	.wkf-ls-track {
+		position: relative;
+		flex: 1;
+		height: 8px;
+		border-radius: 3px;
+		background: var(--wk-line-solid);
+		overflow: hidden;
+	}
+	.wkf-ls-track > .wk-meter-fill {
+		background: var(--wk-text-4);
+	}
+	.wkf-ls-track > .wk-meter-fill[data-open] {
+		background: var(--wk-accent);
+	}
+	.wkf-ls-knob {
+		position: absolute;
+		top: 50%;
+		width: 10px;
+		height: 22px;
+		margin: -11px 0 0 -5px;
+		box-sizing: border-box;
+		border-radius: 4px;
+		background: var(--wk-amber);
+		pointer-events: none;
+	}
+	.wkf-ls-bar[data-mode="auto"] > .wkf-ls-knob {
+		background: var(--wk-surface);
+		border: 2px solid var(--wk-amber);
+	}
+	.wkf-ls-bar > input[type="range"] {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		margin: 0;
+		opacity: 0;
+		cursor: ew-resize;
+	}
+	.wkf-ls-bar > input[type="range"]:disabled {
+		cursor: default;
+	}
+	.wkf-ls-bar:has(> input:focus-visible) > .wkf-ls-knob {
+		box-shadow:
+			0 0 0 2px var(--wk-surface),
+			0 0 0 3.5px var(--wk-focus);
+	}
+	.wkf-ls-cap {
+		display: flex;
+		justify-content: space-between;
+		gap: 12px;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+		font-variant-numeric: tabular-nums;
+	}
+
+	/* Sound: a row that says what is behind it, or what is set there */
+	.wkf-ls-sound {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.wkf-ls-fold {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		width: 100%;
+		min-height: 28px;
+		padding: 0;
+		border: 0;
+		background: none;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		border-radius: var(--wk-r-3);
+		cursor: pointer;
+	}
+	.wkf-ls-fold-sum {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--wk-text-4);
+		font-size: var(--wk-fs-sm);
+	}
+	.wkf-ls-fold-sum[data-changed] {
+		color: var(--wk-text-2);
+	}
+	.wkf-ls-fold > svg {
+		flex: none;
+		color: var(--wk-text-3);
+		transition: transform var(--wk-dur-3) var(--wk-ease-out);
+	}
+	.wkf-ls-fold[aria-expanded="true"] > svg {
+		transform: rotate(180deg);
+	}
+	.wkf-ls-fold[aria-expanded="true"] > .wkf-ls-fold-sum {
+		visibility: hidden;
+	}
+	.wkf-ls-fold-body {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.wkf-ls-fold-body[hidden] {
+		display: none;
+	}
+
+	/* a note exists only while its problem holds: quiet, or amber for a problem */
+	.wkf-ls-note {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 0;
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-text-3);
+	}
+	.wkf-ls-note[data-tone="warn"] {
+		color: var(--wk-amber);
+	}
+	.wkf-ls-field > .wkf-ls-note {
+		margin-top: -2px;
+	}
+
+	/* the footer: Record, the delay, All audio settings */
+	.wkf-ls-foot {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding-top: 14px;
+		border-top: 1px solid var(--wk-line-08);
+	}
+	.wkf-ls-quiet {
+		min-width: 0;
+		color: var(--wk-text-3);
+		font-size: var(--wk-fs-sm);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.wkf-rec-btn {
+		flex: none;
+		gap: 8px;
+		padding: 0 14px 0 12px;
+	}
+	.wkf-rec-btn[aria-pressed="true"] {
+		border-color: rgba(var(--wk-danger-rgb), 0.55);
+		background: rgba(var(--wk-danger-rgb), 0.12);
+	}
+	.wkf-rec-dot {
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+		background: var(--wk-danger);
+	}
+	.wkf-listen-more {
+		flex: none;
+		gap: 2px;
+		margin: 0 -8px 0 auto;
+		padding: 0 6px 0 8px;
+		color: var(--wk-accent);
+	}
+	.wkf-ls-short {
+		display: none;
+	}
+	@media (max-width: 760px) {
+		.wkf-ls-row {
+			min-height: 44px;
+		}
+		.wkf-ls-vol {
+			min-height: 36px;
+		}
+		.wkf-ls-fold {
+			min-height: 44px;
+			margin: -8px 0;
+		}
+		.wkf-ls-long,
+		.wkf-ls-delay {
+			display: none;
+		}
+	}
+	/* a phone: a segmented control in a Sound row drops under its name and fills the row */
+	@media (max-width: 480px) {
+		.wkf-ls-row:has(> .wk-seg) {
+			flex-wrap: wrap;
+			gap: 4px 12px;
+			padding: 4px 0;
+		}
+		.wkf-ls-row > .wk-seg {
+			display: grid;
+			grid-auto-flow: column;
+			grid-auto-columns: minmax(0, 1fr);
+			width: 100%;
+			margin-left: 0;
+		}
+		.wkf-ls-short {
+			display: inline;
+		}
 	}
 }

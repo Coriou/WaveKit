@@ -27,6 +27,10 @@
  * - `--flow=play` (fake target only): play anywhere on the same mock core: a row's disc plays its recording in
  *   the one dock, which outlives the drawer, Recordings marks it, Listen holds and gets live audio back, and
  *   "With audio" asks for `hasRecording=true`. The report gains `play`.
+ * - `--flow=hints` (fake target only): every hint in Listen's Audio options on the same mock core, at 1440×900
+ *   and 390×844: each mark reached by Tab, its hint shown on focus inside its host and the window, clear of
+ *   other islands and its own row; Enter pins, Escape closes the hint only, a tap pins (hints-flow.ts). The
+ *   report gains `hints`.
  * - `--flow=naming` (fake target only): names and the removed Messages view on the same mock core: `#/messages`
  *   lands on Activity in Cards, a scanner row reads "FM voice", a roll-over part "Part 1 of 3 · continues", a tag
  *   at a saved frequency its saved name, and no visible "Show in" (naming-flow.ts). The report gains `naming`.
@@ -65,6 +69,7 @@ import {
 	type PanelBench,
 	type PanelLook,
 } from "./panel-check.ts"
+import { hintsFlow, type HintsReport } from "./hints-flow.ts"
 import { listenFlow, type ListenReport } from "./listen-flow.ts"
 import { noticesFlow, type NoticesReport } from "./notices-flow.ts"
 import { playFlow, type PlayReport } from "./play-flow.ts"
@@ -130,8 +135,8 @@ export interface Options {
 	allowMeasure: boolean
 	/** Fake target: the production build (vite build, then vite preview) instead of the dev server. */
 	built: boolean
-	/** `--flow=listen`, `--flow=play`, `--flow=naming` or `--flow=notices`: drive that flow on the mock core (fake target only). */
-	flow: "listen" | "play" | "naming" | "notices" | null
+	/** `--flow=listen`, `--flow=play`, `--flow=naming`, `--flow=notices` or `--flow=hints`: drive that flow on the mock core (fake target only). */
+	flow: "listen" | "play" | "naming" | "notices" | "hints" | null
 }
 
 /** The run cannot start or finish (exit 2); the message never holds a credential. */
@@ -189,7 +194,8 @@ export function parseOptions(argv: readonly string[]): Options {
 			(value === "listen" ||
 				value === "play" ||
 				value === "naming" ||
-				value === "notices")
+				value === "notices" ||
+				value === "hints")
 		)
 			options.flow = value
 		else if (flag === "--seed-recordings" && /^\d{1,6}$/.test(value)) {
@@ -971,6 +977,11 @@ export async function run(
 			play = await playFlow(page)
 			await shoot("2-play")
 		}
+		let hints: HintsReport | null = null
+		if (options.flow === "hints") {
+			hints = await hintsFlow(page, shoot)
+			await shoot("2-hints")
+		}
 		let naming: NamingReport | null = null
 		if (options.flow === "naming") {
 			naming = await namingFlow(page)
@@ -1016,11 +1027,13 @@ export async function run(
 				? listen.ok
 				: play !== null
 					? play.ok
-					: naming !== null
-						? naming.ok
-						: notices !== null
-							? notices.ok
-							: lookHealthy(final)) &&
+					: hints !== null
+						? hints.ok
+						: naming !== null
+							? naming.ok
+							: notices !== null
+								? notices.ok
+								: lookHealthy(final)) &&
 			!errors.some(text => text.startsWith("uncaught:")) &&
 			revoked !== false
 		const report: Record<string, unknown> = {
@@ -1030,11 +1043,17 @@ export async function run(
 					? `listen: ${listen.ok ? "ok" : "FAILED"}, ${listen.title}, ${listen.attaches} attach(es); ${summaryLine(final)}`
 					: play !== null
 						? `play: ${play.ok ? "ok" : "FAILED"}, ${play.steps.filter(s => s.ok).length} of ${play.steps.length} steps; ${summaryLine(final)}`
-						: naming !== null
-							? `naming: ${naming.ok ? "ok" : "FAILED"}, ${naming.steps.filter(s => s.ok).length}/${naming.steps.length} steps; ${summaryLine(final)}`
-							: notices !== null
-								? `notices: ${notices.ok ? "ok" : "FAILED"}, ${notices.steps.filter(s => s.ok).length}/${notices.steps.length} steps, layouts ${notices.layouts.map(l => `${l.viewport} ${l.ok ? "clear" : "OVERLAP"}`).join(", ")}`
-								: summaryLine(final),
+						: hints !== null
+							? `hints: ${hints.ok ? "ok" : "FAILED"}, ${hints.cases.filter(c => c.ok).length}/${hints.cases.length} cases, marks ${Object.entries(
+									hints.reached,
+								)
+									.map(([v, n]) => `${v} ${n}/${hints?.marks[v] ?? 0}`)
+									.join(", ")}; ${summaryLine(final)}`
+							: naming !== null
+								? `naming: ${naming.ok ? "ok" : "FAILED"}, ${naming.steps.filter(s => s.ok).length}/${naming.steps.length} steps; ${summaryLine(final)}`
+								: notices !== null
+									? `notices: ${notices.ok ? "ok" : "FAILED"}, ${notices.steps.filter(s => s.ok).length}/${notices.steps.length} steps, layouts ${notices.layouts.map(l => `${l.viewport} ${l.ok ? "clear" : "OVERLAP"}`).join(", ")}`
+									: summaryLine(final),
 			target: {
 				kind: options.target,
 				url: base + options.route,
@@ -1056,6 +1075,7 @@ export async function run(
 			...(bench !== null ? { panelBench: bench } : {}),
 			...(listen !== null ? { listen } : {}),
 			...(play !== null ? { play } : {}),
+			...(hints !== null ? { hints } : {}),
 			...(naming !== null ? { naming } : {}),
 			...(notices !== null ? { notices } : {}),
 			screenshots: shots,

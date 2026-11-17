@@ -10,6 +10,28 @@ export { Chip, type ChipProps } from "./Chip.tsx"
 export { cx, flag } from "./cx.ts"
 export { Drawer, type DrawerProps } from "./Drawer.tsx"
 export { Field, Input, type FieldProps, type InputProps } from "./Field.tsx"
+export {
+	HINT_HOST,
+	HintMark,
+	hintRow,
+	useHint,
+	type HintContent,
+	type HintMarkProps,
+} from "./Hint.tsx"
+export {
+	HintController,
+	hintMarkEvents,
+	hints,
+	type HintMarkEvents,
+	type HintState,
+} from "./hint-controller.ts"
+export {
+	hintRectsMeet,
+	hintRoom,
+	placeHint,
+	type HintPlacement,
+	type HintRect,
+} from "./hint-place.ts"
 export { Icon, Mark, type IconName, type IconProps } from "./Icon.tsx"
 export {
 	IconButton,
