@@ -1156,7 +1156,9 @@ export class ScannerService extends EventEmitter {
 	/**
 	 * probeChannel's index: probe decoder id → its request's discovery. Built from the pool's
 	 * status on the first lookup after a probe starts or stops (at most maxProbes.offset +
-	 * maxProbes.channel = 16 + 64 = 80 records), so a lookup between is one Map read.
+	 * maxProbes.channel = 16 + 64 = 80 records), so a lookup between is one Map read plus the
+	 * store reads that resolve the discovery (one `get`, a copy of the record; two and a
+	 * `survivorOf` after a merge).
 	 */
 	private probeDiscoveries: Map<string, string | null> | null = null
 	/** WG11 req 6.3: observations a detection capture was tried for (once each) and their capture ids. */
@@ -3043,7 +3045,8 @@ export class ScannerService extends EventEmitter {
 	 * The Activity channel of a reception from scanner probe `decoderId` (the activity ingress
 	 * `channel` lookup): the discovery the probe was started for, followed to the survivor a merge
 	 * absorbed it into (recording aliases first, then the absorbed-id index, as resolveDiscovery),
-	 * with that discovery's raster frequency. Memory only: one Map read, plus an index rebuild of
+	 * with that discovery's raster frequency. Memory only: one Map read and one or two store `get` calls (each copies the small discovery
+	 * record), plus an index rebuild of
 	 * at most 80 records after a probe started or stopped. Null for a decoder that is not a
 	 * running probe, a probe with no discovery, or a discovery no longer live.
 	 */
