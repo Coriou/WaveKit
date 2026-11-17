@@ -32,6 +32,11 @@ export interface HintPlacement {
 	readonly x: number
 	readonly y: number
 	readonly side: "above" | "below"
+	/**
+	 * Set only when neither side of the kept row has room for the whole bubble: the height it may take on the
+	 * roomier side (px). The bubble's body scrolls within it; it never grows back over its row.
+	 */
+	readonly maxHeight?: number
 }
 
 export const HINT_INSET = 12
@@ -53,29 +58,36 @@ export function hintBox(
 
 /**
  * Above the kept row first (a finger covers what is below), start-aligned with it and shifted sideways to stay
- * in the host; below when above has no room; when neither fits, the roomier side clamped into the host.
+ * in the host; below when above has no room. When neither fits, the roomier side with the bubble's height
+ * capped to that side's room (`maxHeight`, its body scrolls): never over its own row.
  */
 export function placeHint(input: HintPlaceInput): HintPlacement {
 	const { keep, size } = input
 	const gap = input.gap ?? HINT_GAP
 	const box = hintBox(input.host, input.viewport, input.inset ?? HINT_INSET)
-	const x = Math.max(
-		box.left,
-		Math.min(Math.max(keep.left, box.left), box.right - size.width),
+	const x = Math.round(
+		Math.max(
+			box.left,
+			Math.min(Math.max(keep.left, box.left), box.right - size.width),
+		),
 	)
 	const above = keep.top - gap - size.height
 	const below = keep.bottom + gap
-	const fitsAbove = above >= box.top
-	const fitsBelow = below + size.height <= box.bottom
-	const side =
-		fitsAbove || (!fitsBelow && keep.top - box.top >= box.bottom - keep.bottom)
-			? "above"
-			: "below"
-	const y =
-		side === "above"
-			? Math.max(above, box.top)
-			: Math.max(box.top, Math.min(below, box.bottom - size.height))
-	return { x: Math.round(x), y: Math.round(y), side }
+	if (above >= box.top) return { x, y: Math.round(above), side: "above" }
+	if (below + size.height <= box.bottom)
+		return { x, y: Math.round(below), side: "below" }
+	// neither fits: the roomier side, the bubble cut to its room (whole px, so rounding never reaches the row)
+	const roomAbove = keep.top - gap - box.top
+	const roomBelow = box.bottom - below
+	const side = roomAbove >= roomBelow ? "above" : "below"
+	const start = Math.ceil(side === "above" ? box.top : below)
+	const end = Math.floor(side === "above" ? keep.top - gap : box.bottom)
+	// a row that fills the host leaves no room: an empty bubble at the box edge, still off the row
+	const y = Math.min(
+		Math.max(start, Math.ceil(box.top)),
+		Math.floor(box.bottom),
+	)
+	return { x, y, side, maxHeight: Math.max(0, end - y) }
 }
 
 /**

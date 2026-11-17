@@ -369,13 +369,73 @@ describe("hint placement", () => {
 		expect(at).toEqual({ x: 36, y: 260 + HINT_GAP, side: "below" })
 	})
 
-	it("takes the roomier side, clamped into the host, when neither fits", () => {
+	it("takes the roomier side, its height cut to that room, when neither fits: never over its row", () => {
+		// box 212..338; room above 250 - 6 - 212 = 32, below 338 - 296 = 42
 		const small = rect(16, 200, 420, 150)
 		const keep = rect(36, 250, 380, 40)
 		const at = placeHint({ keep, host: small, viewport: VIEW, size })
-		expect(at.side).toBe("below")
-		expect(at.y).toBeGreaterThanOrEqual(200 + HINT_INSET)
-		expect(at.y + 60).toBeLessThanOrEqual(350 - HINT_INSET)
+		expect(at).toEqual({
+			x: 36,
+			y: 290 + HINT_GAP,
+			side: "below",
+			maxHeight: 42,
+		})
+		const bubble = rect(at.x, at.y, 280, at.maxHeight ?? 60)
+		expect(hintRectsMeet(bubble, keep)).toBe(false)
+		expect(bubble.bottom).toBe(350 - HINT_INSET)
+		// more room above: above, from the box top to the gap over the row
+		const high = rect(36, 260, 380, 50) // above 260 - 6 - 212 = 42, below 338 - 316 = 22
+		expect(
+			placeHint({ keep: high, host: small, viewport: VIEW, size }),
+		).toEqual({ x: 36, y: 212, side: "above", maxHeight: 260 - HINT_GAP - 212 })
+	})
+
+	it("the phone Listen panel: a tall learn card over a row with room on neither side is cut, not laid over", () => {
+		const phone = { width: 390, height: 844 }
+		const panel = rect(16, 300, 302, 400)
+		const keep = rect(28, 470, 278, 70)
+		const card = { width: 278, height: 281 }
+		const at = placeHint({ keep, host: panel, viewport: phone, size: card })
+		// box 312..688: 152 above, 142 below
+		expect(at).toEqual({ x: 28, y: 312, side: "above", maxHeight: 152 })
+		expect(
+			hintRectsMeet(rect(at.x, at.y, card.width, at.maxHeight ?? 0), keep),
+		).toBe(false)
+	})
+
+	it("at the bound: a bubble that exactly fits a side is whole; one px more on both sides is cut", () => {
+		const host = rect(16, 200, 420, 200) // box 212..388
+		const keep = rect(36, 300, 380, 20)
+		// above room 300 - 6 - 212 = 82, below room 388 - 326 = 62
+		const exact = placeHint({
+			keep,
+			host,
+			viewport: VIEW,
+			size: { width: 280, height: 82 },
+		})
+		expect(exact).toEqual({ x: 36, y: 212, side: "above" })
+		const below = placeHint({
+			keep: rect(36, 240, 380, 20), // above room 22, below room 388 - 266 = 122
+			host,
+			viewport: VIEW,
+			size: { width: 280, height: 122 },
+		})
+		expect(below).toEqual({ x: 36, y: 266, side: "below" })
+		const past = placeHint({
+			keep,
+			host,
+			viewport: VIEW,
+			size: { width: 280, height: 83 },
+		})
+		expect(past).toEqual({ x: 36, y: 212, side: "above", maxHeight: 82 })
+	})
+
+	it("a row that fills its host leaves an empty bubble, still off the row", () => {
+		const host = rect(16, 200, 420, 100)
+		const keep = rect(36, 212, 380, 76)
+		const at = placeHint({ keep, host, viewport: VIEW, size })
+		expect(at.maxHeight).toBe(0)
+		expect(hintRectsMeet(rect(at.x, at.y, 280, 0), keep)).toBe(false)
 	})
 
 	it("shifts sideways to stay inside a narrow host (a phone)", () => {
@@ -478,8 +538,8 @@ describe("hint placement", () => {
 		})
 	})
 
-	// Feature: hints, Property 1: inside the host, never over its own row when a side fits
-	it("stays inside its host and off its row whenever either side fits", () => {
+	// Feature: hints, Property 1: inside the host, never over its own row
+	it("stays inside its host and never meets its own row, cut to the roomier side when neither fits", () => {
 		fc.assert(
 			fc.property(
 				fc.integer({ min: 0, max: 600 }),
@@ -489,12 +549,17 @@ describe("hint placement", () => {
 				fc.integer({ min: 0, max: 1000 }),
 				fc.integer({ min: 10, max: 120 }),
 				fc.integer({ min: 120, max: 280 }),
-				fc.integer({ min: 30, max: 160 }),
-				(hx, hy, hw, hh, ky, kh, bw, bh) => {
+				fc.integer({ min: 30, max: 400 }),
+				fc.boolean(),
+				(hx, hy, hw, hh, ky, kh, bw, bh0, half) => {
 					const host = rect(hx, hy, hw, Math.min(hh, 900 - hy))
 					const box = hintBox(host, VIEW)
 					const width = Math.min(bw, box.right - box.left)
-					fc.pre(width > 0 && bh <= box.bottom - box.top)
+					fc.pre(width > 0)
+					// half the bubbles sized against the box, so the neither-side case is common
+					const bh = half
+						? Math.max(1, Math.round((bh0 / 400) * (box.bottom - box.top)))
+						: bh0
 					const keepTop = box.top + (ky % Math.max(1, box.bottom - box.top))
 					const keep = rect(
 						box.left,
@@ -504,18 +569,26 @@ describe("hint placement", () => {
 					)
 					const size = { width, height: bh }
 					const at = placeHint({ keep, host, viewport: VIEW, size })
-					const bubble = rect(at.x, at.y, width, bh)
+					const height = Math.min(bh, at.maxHeight ?? bh)
+					const bubble = rect(at.x, at.y, width, height)
 					expect(bubble.left).toBeGreaterThanOrEqual(box.left)
 					expect(bubble.right).toBeLessThanOrEqual(box.right + 0.5)
 					expect(bubble.top).toBeGreaterThanOrEqual(box.top)
 					expect(bubble.bottom).toBeLessThanOrEqual(box.bottom + 0.5)
-					const fits =
-						keep.top - HINT_GAP - bh >= box.top ||
-						keep.bottom + HINT_GAP + bh <= box.bottom
-					if (fits) expect(hintRectsMeet(bubble, keep)).toBe(false)
+					// never over its own row, whatever the room
+					expect(hintRectsMeet(bubble, keep)).toBe(false)
+					const roomAbove = keep.top - HINT_GAP - box.top
+					const roomBelow = box.bottom - keep.bottom - HINT_GAP
+					const fits = roomAbove >= bh || roomBelow >= bh
+					// cut exactly when neither side fits, to the whole of the roomier side
+					expect(at.maxHeight === undefined).toBe(fits)
+					if (!fits)
+						expect(at.maxHeight).toBe(
+							Math.max(0, Math.max(roomAbove, roomBelow)),
+						)
 				},
 			),
-			{ numRuns: 200 },
+			{ numRuns: 500 },
 		)
 	})
 })

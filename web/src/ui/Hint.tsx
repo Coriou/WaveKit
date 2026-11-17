@@ -242,6 +242,10 @@ function HintBubble({
 			const room =
 				Math.min(host.right, viewport.width) - Math.max(host.left, 0) - 24
 			el.style.width = `${Math.max(120, Math.min(max, room))}px`
+			// measure the whole bubble (a cap from the last placing would hide its height), keeping the reader's
+			// place in a scrolled card
+			const scrolled = el.scrollTop
+			el.style.maxHeight = ""
 			const r = el.getBoundingClientRect()
 			const at = placeHint({
 				keep,
@@ -252,6 +256,17 @@ function HintBubble({
 			el.style.left = `${at.x}px`
 			el.style.top = `${at.y}px`
 			el.dataset["side"] = at.side
+			// no room for all of it on either side: cut to the roomier side, and its body scrolls (a scroll
+			// region the keyboard reaches: Tab from the mark goes into it)
+			if (at.maxHeight === undefined) {
+				delete el.dataset["scroll"]
+				el.removeAttribute("tabindex")
+			} else {
+				el.style.maxHeight = `${at.maxHeight}px`
+				el.dataset["scroll"] = ""
+				el.tabIndex = 0
+				el.scrollTop = scrolled
+			}
 		}
 		place()
 		const el = bubble.current
@@ -313,9 +328,34 @@ function HintBubble({
 		}
 		const events = hintMarkEvents(controller, hintId)
 		const onKey = (e: KeyboardEvent) => {
+			if (e.key === "Tab") return tabThrough(e)
+			// Escape in a scrolling bubble: focus goes back to the mark first (focus there after the close would
+			// show the hint again), then the hint closes
+			if (
+				e.key === "Escape" &&
+				document.activeElement instanceof Node &&
+				bubble.current?.contains(document.activeElement) === true
+			)
+				mark.current?.focus({ preventScroll: true })
 			if (!events.onKeyDown(e.key)) return
 			e.preventDefault()
 			e.stopPropagation()
+		}
+		// a scrolling bubble sits in the tab order right after its mark (it is portalled to the end of the page):
+		// Tab from the mark goes into it, Shift+Tab back to the mark, Tab on from the mark's place
+		const tabThrough = (e: KeyboardEvent) => {
+			const el = bubble.current
+			const m = mark.current
+			if (!el || !m || el.dataset["scroll"] === undefined) return
+			const at = document.activeElement
+			if (at === m && !e.shiftKey) {
+				e.preventDefault()
+				el.focus({ preventScroll: true })
+			} else if (at instanceof Node && el.contains(at)) {
+				// back on the mark: Shift+Tab stops there, Tab's own move then goes on from it
+				if (e.shiftKey) e.preventDefault()
+				m.focus({ preventScroll: true })
+			}
 		}
 		document.addEventListener("pointerdown", onDown, true)
 		addEventListener("keydown", onKey, true)
@@ -323,7 +363,7 @@ function HintBubble({
 			document.removeEventListener("pointerdown", onDown, true)
 			removeEventListener("keydown", onKey, true)
 		}
-	}, [anchor, controller, hintId])
+	}, [anchor, mark, controller, hintId])
 
 	const body = (
 		<div

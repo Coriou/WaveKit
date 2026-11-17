@@ -4,9 +4,10 @@
  *
  * At 1440×900 and 390×844, with Listen's Audio options open and Sound unfolded: Tab walks the panel from its
  * first control, and every hint mark must be reached; keyboard focus shows its hint at once; the bubble lies
- * inside its host surface and the window (not clipped), and meets no other island and not its own row; Enter
- * pins it (a learn card when it has one); Escape closes the hint and leaves focus on the mark and the panel
- * open. At 390×844 a tap (a touch pointer, then the click) pins it, and a tap elsewhere closes it. At 1440×900
+ * inside its host surface and the window (not clipped), and meets no other island and never its own row; Enter
+ * pins it (a learn card when it has one); a bubble cut to the room beside its row (none fits whole) scrolls, and
+ * the keyboard reaches it: Tab from the mark goes into it, End scrolls it, Shift+Tab goes back to the
+ * mark; Escape closes the hint and leaves focus on the mark and the panel open. At 390×844 a tap (a touch pointer, then the click) pins it, and a tap elsewhere closes it. At 1440×900
  * a mouse opens the first hint after the delay, keeps it over the bubble and closes it once it leaves the
  * bubble; a hint keyboard focus showed stays while the mouse comes and goes, and Escape closes it; and with a
  * hint open, another island moved over its room makes the bubble move off it within a frame or two. It runs
@@ -54,8 +55,8 @@ export interface HintCase {
 	side: string | null
 	role: string | null
 	bubble: { x: number; y: number; width: number; height: number } | null
-	/** Neither side of its row had room, so the bubble took the roomier side clamped into the host (design rule). */
-	clamped: boolean
+	/** Neither side of its row had room for all of it: cut to the roomier side, its body scrolls. */
+	cut: boolean
 }
 
 export interface HintsReport {
@@ -77,8 +78,8 @@ interface Measure {
 	panelOpen: boolean
 	bubble: { x: number; y: number; width: number; height: number } | null
 	problems: string[]
-	/** No room above or below its row inside the host: lying over the row is then the placement's rule. */
-	clamped: boolean
+	/** Cut to the room beside its row (no side had room for all of it): its body scrolls. */
+	cut: boolean
 }
 
 /** Measures the open hint of `id` in the page: inside its host and the window, off its row and other islands. */
@@ -102,7 +103,7 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 			panelOpen: toggle?.getAttribute("aria-expanded") === "true",
 		}
 		if (!mark || !bubble)
-			return { ...base, bubble: null, problems: [], clamped: false }
+			return { ...base, bubble: null, problems: [], cut: false }
 		const b = bubble.getBoundingClientRect()
 		const problems: string[] = []
 		const meets = (r: DOMRect) =>
@@ -127,29 +128,14 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 				problems.push("outside its host")
 		} else problems.push("no host surface")
 		const row = mark.closest("[data-wk-hint-row]") ?? mark.parentElement
-		// the room the placement has (hint-place.ts): the host clipped to the window, 12 px in, less the other
-		// islands above or below the row; with no room on either side it clamps into the host, over the row
-		let clamped = false
-		if (row && host) {
-			const k = row.getBoundingClientRect()
-			const h = host.getBoundingClientRect()
-			let top = Math.max(h.top, 0)
-			let bottom = Math.min(h.bottom, innerHeight)
-			for (const o of document.querySelectorAll(".wk-island")) {
-				if (o === host || host.contains(o) || o.contains(mark)) continue
-				const r = o.getBoundingClientRect()
-				if (r.width === 0 || r.height === 0) continue
-				if (r.right <= h.left || r.left >= h.right) continue
-				if (r.bottom <= h.top || r.top >= h.bottom) continue
-				if (r.bottom <= k.top) top = Math.max(top, r.bottom)
-				else if (r.top >= k.bottom) bottom = Math.min(bottom, r.top)
-			}
-			const fitsAbove = k.top - 6 - b.height >= top + 12 - SLACK
-			const fitsBelow = k.bottom + 6 + b.height <= bottom - 12 + SLACK
-			clamped = !fitsAbove && !fitsBelow
-		}
-		if (row && !clamped && meets(row.getBoundingClientRect()))
+		// never over its own row: with no room for all of it on either side, the bubble is cut, not laid over
+		if (row && meets(row.getBoundingClientRect()))
 			problems.push("over its own row")
+		const cut = bubble.dataset["scroll"] !== undefined
+		if (cut && bubble.scrollHeight <= bubble.clientHeight + 1)
+			problems.push("cut, but nothing to scroll")
+		if (cut && bubble.tabIndex !== 0)
+			problems.push("cut, but the keyboard cannot reach it")
 		for (const island of document.querySelectorAll(".wk-island")) {
 			if (island === host || host?.contains(island) || island.contains(mark))
 				continue
@@ -172,9 +158,50 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 				height: Math.round(b.height),
 			},
 			problems,
-			clamped,
+			cut,
 		}
 	}, id)
+
+/**
+ * The keyboard in a cut (scrolling) bubble whose mark has focus: Tab moves into it, End scrolls it,
+ * Shift+Tab returns to the mark, and Tab goes back in. The problems found; the hint is left open with focus in
+ * the bubble, so the caller's Escape checks that closing from inside it puts focus back on the mark.
+ */
+async function cutByKeyboard(page: Page, id: string): Promise<string[]> {
+	const problems: string[] = []
+	const where = () =>
+		page.evaluate(markId => {
+			const bubble = document.querySelector<HTMLElement>(
+				`[data-wk-hint-bubble="${markId}"]`,
+			)
+			const at = document.activeElement
+			return {
+				inBubble: bubble !== null && at !== null && bubble.contains(at),
+				onMark: at?.getAttribute("data-wk-hint-mark") === markId,
+				scrollTop: bubble?.scrollTop ?? 0,
+				range: bubble ? bubble.scrollHeight - bubble.clientHeight : 0,
+				active: at?.className || at?.tagName || "none",
+			}
+		}, id)
+	await page.keyboard.press("Tab")
+	if (!(await where()).inBubble)
+		problems.push("Tab did not go into the cut card")
+	// End: the whole range in one key (an arrow's step can be lost to a frame-starved page's scroll animation)
+	await page.keyboard.press("End")
+	if (!(await within(2_000, async () => (await where()).scrollTop > 0))) {
+		const w = await where()
+		problems.push(
+			`the keyboard did not scroll the cut card (range ${w.range}, focus ${w.active})`,
+		)
+	}
+	await page.keyboard.press("Shift+Tab")
+	if (!(await where()).onMark)
+		problems.push("Shift+Tab did not go back to the mark")
+	await page.keyboard.press("Tab")
+	if (!(await where()).inBubble)
+		problems.push("Tab did not go back into the card")
+	return problems
+}
 
 /** Waits for `n` animation frames in the page: layout and the hints' per-frame re-placing have run. */
 const frames = (page: Page, n = 2): Promise<void> =>
@@ -641,7 +668,7 @@ export async function hintsFlow(
 				side: shown.side,
 				role: shown.role,
 				bubble: shown.bubble,
-				clamped: shown.clamped,
+				cut: shown.cut,
 			})
 			// Enter pins it (the learn card when it has one)
 			await page.keyboard.press("Enter")
@@ -651,6 +678,9 @@ export async function hintsFlow(
 			const pinProblems = [...pinned.problems]
 			if (!pinned.open) pinProblems.push("Enter closed it")
 			if (pinned.expanded !== "true") pinProblems.push("mark not expanded")
+			// a cut card: Tab goes into it, End scrolls it, Shift+Tab goes back to the mark, and Escape
+			// from inside it closes it with focus back on the mark
+			if (pinned.cut) pinProblems.push(...(await cutByKeyboard(page, at.mark)))
 			// Escape closes the hint only: focus stays on the mark, the panel stays open
 			await page.keyboard.press("Escape")
 			await within(
@@ -671,7 +701,7 @@ export async function hintsFlow(
 				side: pinned.side,
 				role: pinned.role,
 				bubble: pinned.bubble,
-				clamped: pinned.clamped,
+				cut: pinned.cut,
 			})
 		}
 		reached[vp.name] = seen.length
@@ -743,7 +773,7 @@ export async function hintsFlow(
 					side: tapped.side,
 					role: tapped.role,
 					bubble: tapped.bubble,
-					clamped: tapped.clamped,
+					cut: tapped.cut,
 				})
 			}
 		}
@@ -781,13 +811,6 @@ export async function hintsFlow(
 			await reload(page)
 		}
 	}
-	// where the design lets a bubble lie over its row (no room on either side), say which, without failing
-	const clamped = cases.filter(c => c.clamped)
-	step(
-		"bubbles clamped over their row (no room on either side, allowed)",
-		true,
-		clamped.map(c => `${c.viewport} ${c.label} ${c.how}`).join(", ") || "none",
-	)
 	await page.setViewportSize({ width: 2000, height: 900 })
 	await page.emulateMedia({ reducedMotion: null })
 	const ok =

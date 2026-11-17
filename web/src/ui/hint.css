@@ -76,6 +76,11 @@
 	.wk-hint[data-side="below"] {
 		transform: translateY(-4px);
 	}
+	/* no room for all of it beside its row: cut to the room (placed inline), the body scrolls, the page does not */
+	.wk-hint[data-scroll] {
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
 	.wk-hint[data-open] {
 		opacity: 1;
 		transform: none;

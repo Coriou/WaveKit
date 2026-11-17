@@ -1021,11 +1021,14 @@ Condensed + Noto Sans, Tabler-based icons).
     an always-mounted `hidden` copy of the sentence (out of the reading flow), so a screen reader
     hears it on the control without finding the mark; a pinned learn card adds its rows and foot
     to the mark's description. No `title` attributes for explanations. The open hint is
-    `role="tooltip"`, the learn card a named `role="group"` that takes no focus. On a coarse
+    `role="tooltip"`, the learn card a named `role="group"` that takes no focus, except a bubble
+    cut to its room (below), which scrolls: Tab from the mark goes into it, the arrows scroll it,
+    Shift+Tab goes back to the mark, and Escape there closes it with focus on the mark. On a coarse
     pointer the mark has a 44 px hit area.
   - *Placement:* inside the surface that holds the mark (island panel, drawer, sheet), 12 px in
-    from its edges and clipped to the window; above the row it explains, else below, else the
-    roomier side clamped in; never over its own row (the label line and its control). An island a
+    from its edges and clipped to the window; above the row it explains, else below; when neither
+    side has room for all of it, the roomier side with the bubble cut to that room and its body
+    scrolling. Never over its own row (the label line and its control). An island a
     layout lays over the host's edge is cut out of that room. So a hint cannot touch another
     island or plot data and needs no slot in the layout. Solid, unblurred, `--wk-e2`; opens with
     a 120 ms fade and 4 px slide, and simply appears under reduced motion.
@@ -1045,8 +1048,8 @@ Condensed + Noto Sans, Tabler-based icons).
     web-local (`web/src/ui/hint.css`, marked `wk-explore: hint`) until it is approved into
     `ui.css`. Listen's strings live in `web/src/features/listen/hints.ts`, with the rules as a test.
     Gated by `ui-check --flow=hints`: at 1440×900 and 390×844 every mark is reached by Tab, its hint
-    lies inside its host and the window and meets no other island and not its own row, Enter pins,
-    Escape closes the hint only, a tap pins.
+    lies inside its host and the window and meets no other island and never its own row, a cut
+    card scrolls by keyboard, Enter pins, Escape closes the hint only, a tap pins.
 - **Listen panel: essentials first (2026-11-17).** The Audio options panel stacked five sections,
   each with permanent prose, a 44 px hatched level block and two sets of figures. Now: Volume as
   one row; Squelch (mode, a slim 8 px level bar with the squelch as an amber handle, hollow in
