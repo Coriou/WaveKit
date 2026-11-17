@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs"
+
 import fc from "fast-check"
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
@@ -16,8 +18,10 @@ import {
 import {
 	HINT_GAP,
 	HINT_INSET,
+	HINT_MIN_LINES,
 	hintBox,
 	hintLayoutChanged,
+	hintMinCut,
 	hintRectsMeet,
 	hintRoom,
 	placeHint,
@@ -353,6 +357,40 @@ const rect = (left: number, top: number, w: number, h: number): HintRect => ({
 })
 const VIEW = { width: 1440, height: 900 }
 
+/** The bubble's vertical padding and border, read from hint.css: what a border-box bubble draws at any height. */
+const HINT_CSS = readFileSync(
+	new URL("../../src/ui/hint.css", import.meta.url),
+	"utf8",
+)
+function chromeOf(selector: string): number {
+	const at = HINT_CSS.indexOf(`${selector} {`)
+	const body = HINT_CSS.slice(at, HINT_CSS.indexOf("}", at))
+	const pad = /padding:\s*(\d+)px/.exec(body)?.[1]
+	const base = HINT_CSS.slice(
+		HINT_CSS.indexOf(".wk-hint {"),
+		HINT_CSS.indexOf("}", HINT_CSS.indexOf(".wk-hint {")),
+	)
+	const border = /border:\s*(\d+)px/.exec(base)?.[1]
+	if (at < 0 || pad === undefined || border === undefined)
+		throw new Error(`no padding or border for ${selector} in hint.css`)
+	return 2 * Number(pad) + 2 * Number(border)
+}
+/** The bubble's own chrome (8 + 8 padding, 1 + 1 border) and the learn card's (14 + 14, 1 + 1). */
+const CHROME = chromeOf(".wk-hint")
+const LEARN_CHROME = chromeOf(".wk-hint[data-learn]")
+/** A computed style as a browser resolves it for the bubble (13 px text at line-height 1.5). */
+const style = (pad: number) => ({
+	paddingTop: `${pad}px`,
+	paddingBottom: `${pad}px`,
+	borderTopWidth: "1px",
+	borderBottomWidth: "1px",
+	lineHeight: "19.5px",
+	fontSize: "13px",
+})
+/** The shortest cut for the bubble and the learn card, as Hint.tsx reads it from the computed style. */
+const MIN = hintMinCut(style((CHROME - 2) / 2))
+const LEARN_MIN = hintMinCut(style((LEARN_CHROME - 2) / 2))
+
 describe("hint placement", () => {
 	const host = rect(16, 200, 420, 600)
 	const size = { width: 280, height: 60 }
@@ -430,12 +468,60 @@ describe("hint placement", () => {
 		expect(past).toEqual({ x: 36, y: 212, side: "above", maxHeight: 82 })
 	})
 
-	it("a row that fills its host leaves an empty bubble, still off the row", () => {
+	it("reads the shortest cut from the computed style: padding, border and two lines", () => {
+		expect(CHROME).toBe(18)
+		expect(LEARN_CHROME).toBe(30)
+		expect(MIN).toBe(Math.ceil(CHROME + HINT_MIN_LINES * 19.5))
+		expect(LEARN_MIN).toBe(Math.ceil(LEARN_CHROME + HINT_MIN_LINES * 19.5))
+		// a bare or "normal" line-height is relative to the font
+		expect(hintMinCut({ ...style(8), lineHeight: "1.5" })).toBe(57)
+		expect(hintMinCut({ ...style(8), lineHeight: "normal" })).toBe(
+			Math.ceil(18 + 2 * 13 * 1.2),
+		)
+	})
+
+	it("a row that fills its host shows no bubble: no sliver over the row", () => {
 		const host = rect(16, 200, 420, 100)
 		const keep = rect(36, 212, 380, 76)
-		const at = placeHint({ keep, host, viewport: VIEW, size })
-		expect(at.maxHeight).toBe(0)
-		expect(hintRectsMeet(rect(at.x, at.y, 280, 0), keep)).toBe(false)
+		const at = placeHint({ keep, host, viewport: VIEW, size, minHeight: MIN })
+		expect(at.side).toBe("none")
+		expect(at.maxHeight).toBeUndefined()
+		// the old 0 px cut at the box top: a border-box bubble draws at least its chrome, over the row
+		const sliver = rect(36, host.top + HINT_INSET, 280, CHROME)
+		expect(hintRectsMeet(sliver, keep)).toBe(true)
+	})
+
+	it("at the shortest cut: room of exactly the minimum is cut and drawn off the row, one px less shows none", () => {
+		for (const [min, chrome] of [
+			[MIN, CHROME],
+			[LEARN_MIN, LEARN_CHROME],
+		] as const) {
+			const tall = { width: 280, height: 400 }
+			// box 212..; the row starts so that the room above is exactly `min` and below is less
+			const keepAt = (room: number) => rect(36, 212 + room + HINT_GAP, 380, 40)
+			const hostFor = (room: number) =>
+				rect(16, 200, 420, HINT_INSET + room + HINT_GAP + 40 + HINT_GAP + 10)
+			const keep = keepAt(min)
+			const at = placeHint({
+				keep,
+				host: hostFor(min),
+				viewport: VIEW,
+				size: tall,
+				minHeight: min,
+			})
+			expect(at).toEqual({ x: 36, y: 212, side: "above", maxHeight: min })
+			const drawn = rect(at.x, at.y, 280, Math.max(at.maxHeight ?? 0, chrome))
+			expect(hintRectsMeet(drawn, keep)).toBe(false)
+			const past = placeHint({
+				keep: keepAt(min - 1),
+				host: hostFor(min - 1),
+				viewport: VIEW,
+				size: tall,
+				minHeight: min,
+			})
+			expect(past.side).toBe("none")
+			expect(past.maxHeight).toBeUndefined()
+		}
 	})
 
 	it("shifts sideways to stay inside a narrow host (a phone)", () => {
@@ -551,15 +637,20 @@ describe("hint placement", () => {
 				fc.integer({ min: 120, max: 280 }),
 				fc.integer({ min: 30, max: 400 }),
 				fc.boolean(),
-				(hx, hy, hw, hh, ky, kh, bw, bh0, half) => {
+				fc.boolean(),
+				(hx, hy, hw, hh, ky, kh, bw, bh0, half, learn) => {
+					const chrome = learn ? LEARN_CHROME : CHROME
+					const min = learn ? LEARN_MIN : MIN
 					const host = rect(hx, hy, hw, Math.min(hh, 900 - hy))
 					const box = hintBox(host, VIEW)
 					const width = Math.min(bw, box.right - box.left)
 					fc.pre(width > 0)
-					// half the bubbles sized against the box, so the neither-side case is common
-					const bh = half
-						? Math.max(1, Math.round((bh0 / 400) * (box.bottom - box.top)))
-						: bh0
+					// half the bubbles sized against the box, so the neither-side case is common; a measured
+					// bubble is never shorter than its own chrome
+					const bh = Math.max(
+						chrome,
+						half ? Math.round((bh0 / 400) * (box.bottom - box.top)) : bh0,
+					)
 					const keepTop = box.top + (ky % Math.max(1, box.bottom - box.top))
 					const keep = rect(
 						box.left,
@@ -568,24 +659,96 @@ describe("hint placement", () => {
 						Math.min(kh, box.bottom - keepTop),
 					)
 					const size = { width, height: bh }
-					const at = placeHint({ keep, host, viewport: VIEW, size })
-					const height = Math.min(bh, at.maxHeight ?? bh)
+					const at = placeHint({
+						keep,
+						host,
+						viewport: VIEW,
+						size,
+						minHeight: min,
+					})
+					const roomAbove = keep.top - HINT_GAP - box.top
+					const roomBelow = box.bottom - keep.bottom - HINT_GAP
+					const fits = roomAbove >= bh || roomBelow >= bh
+					const room = Math.max(roomAbove, roomBelow)
+					if (!fits && room < min) {
+						// no room for even the shortest cut: nothing drawn
+						expect(at.side).toBe("none")
+						expect(at.maxHeight).toBeUndefined()
+						return
+					}
+					expect(at.side).not.toBe("none")
+					// what a border-box bubble draws: its content cut to the room, never less than its chrome
+					const height = Math.max(Math.min(bh, at.maxHeight ?? bh), chrome)
 					const bubble = rect(at.x, at.y, width, height)
 					expect(bubble.left).toBeGreaterThanOrEqual(box.left)
 					expect(bubble.right).toBeLessThanOrEqual(box.right + 0.5)
 					expect(bubble.top).toBeGreaterThanOrEqual(box.top)
-					expect(bubble.bottom).toBeLessThanOrEqual(box.bottom + 0.5)
+					expect(bubble.bottom).toBeLessThanOrEqual(box.bottom)
 					// never over its own row, whatever the room
 					expect(hintRectsMeet(bubble, keep)).toBe(false)
-					const roomAbove = keep.top - HINT_GAP - box.top
-					const roomBelow = box.bottom - keep.bottom - HINT_GAP
-					const fits = roomAbove >= bh || roomBelow >= bh
 					// cut exactly when neither side fits, to the whole of the roomier side
 					expect(at.maxHeight === undefined).toBe(fits)
-					if (!fits)
-						expect(at.maxHeight).toBe(
-							Math.max(0, Math.max(roomAbove, roomBelow)),
-						)
+					if (!fits) expect(at.maxHeight).toBe(room)
+				},
+			),
+			{ numRuns: 500 },
+		)
+	})
+
+	// Feature: hints, Property 1: inside the host, never over its own row
+	it("holds for fractional rectangles: inside its box, off its row, never a cut under the minimum", () => {
+		const coord = (min: number, max: number) =>
+			fc.double({ min, max, noNaN: true, noDefaultInfinity: true })
+		fc.assert(
+			fc.property(
+				coord(0, 600),
+				coord(0, 300),
+				coord(300, 800),
+				coord(200, 880),
+				coord(0, 1),
+				coord(10, 120),
+				coord(120, 280),
+				coord(0, 1),
+				fc.boolean(),
+				(hx, hy, hw, hh, kf, kh, bw, bf, learn) => {
+					const chrome = learn ? LEARN_CHROME : CHROME
+					const min = learn ? LEARN_MIN : MIN
+					const host = rect(hx, hy, hw, Math.min(hh, 900 - hy))
+					const box = hintBox(host, VIEW)
+					const width = Math.min(bw, box.right - box.left)
+					fc.pre(width > 0 && box.bottom > box.top)
+					const bh = chrome + bf * (box.bottom - box.top)
+					const keepTop = box.top + kf * (box.bottom - box.top)
+					const keep = rect(
+						box.left,
+						keepTop,
+						box.right - box.left,
+						Math.min(kh, box.bottom - keepTop),
+					)
+					const at = placeHint({
+						keep,
+						host,
+						viewport: VIEW,
+						size: { width, height: bh },
+						minHeight: min,
+					})
+					const roomAbove = keep.top - HINT_GAP - box.top
+					const roomBelow = box.bottom - keep.bottom - HINT_GAP
+					if (at.side === "none") {
+						// only when neither side has the shortest cut (whole px lose under 2 px of it)
+						expect(Math.max(roomAbove, roomBelow)).toBeLessThan(min + 2)
+						expect(roomAbove < bh && roomBelow < bh).toBe(true)
+						return
+					}
+					if (at.maxHeight !== undefined)
+						expect(at.maxHeight).toBeGreaterThanOrEqual(min)
+					const height = Math.max(Math.min(bh, at.maxHeight ?? bh), chrome)
+					const bubble = rect(at.x, at.y, width, height)
+					expect(bubble.left).toBeGreaterThanOrEqual(box.left - 0.5)
+					expect(bubble.right).toBeLessThanOrEqual(box.right + 0.5)
+					expect(bubble.top).toBeGreaterThanOrEqual(box.top)
+					expect(bubble.bottom).toBeLessThanOrEqual(box.bottom)
+					expect(hintRectsMeet(bubble, keep)).toBe(false)
 				},
 			),
 			{ numRuns: 500 },

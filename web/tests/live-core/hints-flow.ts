@@ -6,8 +6,10 @@
  * first control, and every hint mark must be reached; keyboard focus shows its hint at once; the bubble lies
  * inside its host surface and the window (not clipped), and meets no other island and never its own row; Enter
  * pins it (a learn card when it has one); a bubble cut to the room beside its row (none fits whole) scrolls, and
- * the keyboard reaches it: Tab from the mark goes into it, End scrolls it, Shift+Tab goes back to the
- * mark; Escape closes the hint and leaves focus on the mark and the panel open. At 390×844 a tap (a touch pointer, then the click) pins it, and a tap elsewhere closes it. At 1440×900
+ * the keyboard reaches it: Tab from the mark goes into it, ArrowDown and End scroll it, Shift+Tab goes back to
+ * the mark; focus in it goes back to the mark, never to the page, when it becomes whole (the hint stays open),
+ * when a scroll elsewhere closes it and when a click on nothing focusable closes it; no bubble is drawn with less
+ * room than its padding, border and two lines; Escape closes the hint and leaves focus on the mark and the panel open. At 390×844 a tap (a touch pointer, then the click) pins it, and a tap elsewhere closes it. At 1440×900
  * a mouse opens the first hint after the delay, keeps it over the bubble and closes it once it leaves the
  * bubble; a hint keyboard focus showed stays while the mouse comes and goes, and Escape closes it; and with a
  * hint open, another island moved over its room makes the bubble move off it within a frame or two. It runs
@@ -87,6 +89,8 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 	page.evaluate(markId => {
 		const HOST = "[data-wk-hint-host], .wk-island[data-expanded], .wk-drawer"
 		const SLACK = 0.5
+		/** The placement's inset from its host's edges (hint-place.ts, HINT_INSET). */
+		const INSET = 12
 		const mark = document.querySelector<HTMLElement>(
 			`[data-wk-hint-mark="${markId}"]`,
 		)
@@ -104,6 +108,14 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 		}
 		if (!mark || !bubble)
 			return { ...base, bubble: null, problems: [], cut: false }
+		// open but not drawn: no room beside its row for even a short cut (never in the Listen panel)
+		if (bubble.hidden)
+			return {
+				...base,
+				bubble: null,
+				problems: ["no room to show it"],
+				cut: false,
+			}
 		const b = bubble.getBoundingClientRect()
 		const problems: string[] = []
 		const meets = (r: DOMRect) =>
@@ -119,11 +131,12 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 		const host = mark.closest(HOST)
 		if (host) {
 			const h = host.getBoundingClientRect()
+			// the box the placement uses: the host clipped to the window, INSET in from every edge
 			if (
-				b.left < h.left - SLACK ||
-				b.top < h.top - SLACK ||
-				b.right > h.right + SLACK ||
-				b.bottom > h.bottom + SLACK
+				b.left < Math.max(h.left, 0) + INSET - SLACK ||
+				b.top < Math.max(h.top, 0) + INSET - SLACK ||
+				b.right > Math.min(h.right, innerWidth) - INSET + SLACK ||
+				b.bottom > Math.min(h.bottom, innerHeight) - INSET + SLACK
 			)
 				problems.push("outside its host")
 		} else problems.push("no host surface")
@@ -163,7 +176,7 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 	}, id)
 
 /**
- * The keyboard in a cut (scrolling) bubble whose mark has focus: Tab moves into it, End scrolls it,
+ * The keyboard in a cut (scrolling) bubble whose mark has focus: Tab moves into it, ArrowDown and End scroll it,
  * Shift+Tab returns to the mark, and Tab goes back in. The problems found; the hint is left open with focus in
  * the bubble, so the caller's Escape checks that closing from inside it puts focus back on the mark.
  */
@@ -186,7 +199,15 @@ async function cutByKeyboard(page: Page, id: string): Promise<string[]> {
 	await page.keyboard.press("Tab")
 	if (!(await where()).inBubble)
 		problems.push("Tab did not go into the cut card")
-	// End: the whole range in one key (an arrow's step can be lost to a frame-starved page's scroll animation)
+	// ArrowDown: a step down (the scroll may animate, so wait for it)
+	await page.keyboard.press("ArrowDown")
+	if (!(await within(2_000, async () => (await where()).scrollTop > 0))) {
+		const w = await where()
+		problems.push(
+			`ArrowDown did not scroll the cut card (range ${w.range}, focus ${w.active})`,
+		)
+	}
+	// End: the whole range in one key
 	await page.keyboard.press("End")
 	if (!(await within(2_000, async () => (await where()).scrollTop > 0))) {
 		const w = await where()
@@ -200,6 +221,81 @@ async function cutByKeyboard(page: Page, id: string): Promise<string[]> {
 	await page.keyboard.press("Tab")
 	if (!(await where()).inBubble)
 		problems.push("Tab did not go back into the card")
+	return problems
+}
+
+/** Where focus is, and the hint's state, for the focus-return checks of a cut bubble. */
+const focusState = (page: Page, id: string) =>
+	page.evaluate(markId => {
+		const bubble = document.querySelector<HTMLElement>(
+			`[data-wk-hint-bubble="${markId}"]`,
+		)
+		const at = document.activeElement
+		return {
+			open: bubble !== null,
+			cut: bubble?.dataset["scroll"] !== undefined,
+			inBubble: bubble !== null && at !== null && bubble.contains(at),
+			onMark: at?.getAttribute("data-wk-hint-mark") === markId,
+			active: at?.className || at?.tagName || "none",
+		}
+	}, id)
+
+/**
+ * Focus in a cut bubble is never dropped to the page: when the bubble becomes whole (its content shrinks) focus
+ * goes to the mark and the hint stays open; when a scroll elsewhere or a click on nothing focusable closes it,
+ * focus goes to the mark. Starts and ends with the hint pinned, cut, and focus in it.
+ */
+async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
+	const problems: string[] = []
+	const backIn = async (what: string) => {
+		if (!(await within(2_000, async () => (await focusState(page, id)).cut)))
+			problems.push(`${what}: the card is not cut again`)
+		await page.keyboard.press("Tab")
+		if (!(await focusState(page, id)).inBubble)
+			problems.push(`${what}: Tab did not go back into the card`)
+	}
+	// whole again: the learn rows hidden, the lead alone fits beside the row
+	await page.evaluate(markId => {
+		const style = document.createElement("style")
+		style.id = "wk-flow-shrink"
+		style.textContent = `[data-wk-hint-bubble="${markId}"] > :not(:first-child) { display: none }`
+		document.head.append(style)
+	}, id)
+	const whole = await within(
+		2_000,
+		async () => !(await focusState(page, id)).cut,
+	)
+	const w = await focusState(page, id)
+	if (!whole) problems.push("shrunk, the card stayed cut")
+	else {
+		if (!w.open) problems.push("whole again, the hint closed")
+		if (!w.onMark) problems.push(`whole again, focus went to ${w.active}`)
+	}
+	await page.evaluate(() => document.getElementById("wk-flow-shrink")?.remove())
+	await backIn("after whole")
+	// a scroll elsewhere (past the settle time after opening) closes it: focus to the mark
+	await page.waitForTimeout(300)
+	await page.evaluate(() => document.dispatchEvent(new Event("scroll")))
+	await within(2_000, async () => !(await focusState(page, id)).open)
+	const scrolled = await focusState(page, id)
+	if (scrolled.open) problems.push("a scroll elsewhere left it open")
+	if (!scrolled.onMark)
+		problems.push(`a scroll elsewhere dropped focus to ${scrolled.active}`)
+	await page.keyboard.press("Enter")
+	await backIn("after the scroll")
+	// a press on nothing focusable (the page) closes it: focus to the mark
+	await page.evaluate(() =>
+		document.body.dispatchEvent(
+			new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse" }),
+		),
+	)
+	await within(2_000, async () => !(await focusState(page, id)).open)
+	const pressed = await focusState(page, id)
+	if (pressed.open) problems.push("a press elsewhere left it open")
+	if (!pressed.onMark)
+		problems.push(`a press elsewhere dropped focus to ${pressed.active}`)
+	await page.keyboard.press("Enter")
+	await backIn("after the press")
 	return problems
 }
 
@@ -680,7 +776,10 @@ export async function hintsFlow(
 			if (pinned.expanded !== "true") pinProblems.push("mark not expanded")
 			// a cut card: Tab goes into it, End scrolls it, Shift+Tab goes back to the mark, and Escape
 			// from inside it closes it with focus back on the mark
-			if (pinned.cut) pinProblems.push(...(await cutByKeyboard(page, at.mark)))
+			if (pinned.cut) {
+				pinProblems.push(...(await cutByKeyboard(page, at.mark)))
+				pinProblems.push(...(await cutKeepsFocus(page, at.mark)))
+			}
 			// Escape closes the hint only: focus stays on the mark, the panel stays open
 			await page.keyboard.press("Escape")
 			await within(

@@ -26,12 +26,19 @@ export interface HintPlaceInput {
 	readonly inset?: number
 	/** The gap between the kept row and the bubble (px). */
 	readonly gap?: number
+	/**
+	 * The shortest cut worth drawing (px): the bubble's padding and border plus two lines of text
+	 * (`hintMinCut`). A border-box bubble never draws shorter than its padding and border, so a smaller cut
+	 * would spill over its row or out of its host; with less room than this on both sides it is not shown.
+	 */
+	readonly minHeight?: number
 }
 
 export interface HintPlacement {
 	readonly x: number
 	readonly y: number
-	readonly side: "above" | "below"
+	/** `none`: no side of the kept row has room for even the shortest cut; the bubble is not shown. */
+	readonly side: "above" | "below" | "none"
 	/**
 	 * Set only when neither side of the kept row has room for the whole bubble: the height it may take on the
 	 * roomier side (px). The bubble's body scrolls within it; it never grows back over its row.
@@ -41,6 +48,49 @@ export interface HintPlacement {
 
 export const HINT_INSET = 12
 export const HINT_GAP = 6
+/** Lines of text the shortest cut bubble still shows (with its padding and border). */
+export const HINT_MIN_LINES = 2
+
+/** The computed style a bubble's shortest cut is read from (the `CSSStyleDeclaration` strings). */
+export interface HintChromeStyle {
+	readonly paddingTop: string
+	readonly paddingBottom: string
+	readonly borderTopWidth: string
+	readonly borderBottomWidth: string
+	readonly lineHeight: string
+	readonly fontSize: string
+}
+
+/**
+ * The shortest cut worth drawing (px) for a bubble with this computed style: its vertical padding and border
+ * (what a border-box element draws at any height) and `lines` lines of its text.
+ */
+export function hintMinCut(
+	style: HintChromeStyle,
+	lines = HINT_MIN_LINES,
+): number {
+	const px = (v: string) => {
+		const n = parseFloat(v)
+		return Number.isFinite(n) ? n : 0
+	}
+	const font = px(style.fontSize) || 16
+	const lh = style.lineHeight.trim()
+	// a resolved line-height is px; "normal" and a bare number are relative to the font
+	const line =
+		lh === "normal"
+			? font * 1.2
+			: lh.endsWith("px")
+				? px(lh)
+				: Number.isFinite(parseFloat(lh))
+					? parseFloat(lh) * font
+					: font * 1.2
+	const chrome =
+		px(style.paddingTop) +
+		px(style.paddingBottom) +
+		px(style.borderTopWidth) +
+		px(style.borderBottomWidth)
+	return Math.ceil(chrome + lines * line)
+}
 
 /** The host's box the bubble may use: the host clipped to the window, `inset` in from every edge. */
 export function hintBox(
@@ -59,7 +109,8 @@ export function hintBox(
 /**
  * Above the kept row first (a finger covers what is below), start-aligned with it and shifted sideways to stay
  * in the host; below when above has no room. When neither fits, the roomier side with the bubble's height
- * capped to that side's room (`maxHeight`, its body scrolls): never over its own row.
+ * capped to that side's room (`maxHeight`, its body scrolls): never over its own row. When even the roomier
+ * side is shorter than `minHeight` (a row that fills its host), `side: "none"`: no sliver is drawn.
  */
 export function placeHint(input: HintPlaceInput): HintPlacement {
 	const { keep, size } = input
@@ -73,21 +124,22 @@ export function placeHint(input: HintPlaceInput): HintPlacement {
 	)
 	const above = keep.top - gap - size.height
 	const below = keep.bottom + gap
-	if (above >= box.top) return { x, y: Math.round(above), side: "above" }
+	// whole px rounded toward the room (never out of the box; the gap absorbs the step toward the row)
+	if (above >= box.top) return { x, y: Math.ceil(above), side: "above" }
 	if (below + size.height <= box.bottom)
-		return { x, y: Math.round(below), side: "below" }
+		return { x, y: Math.floor(below), side: "below" }
 	// neither fits: the roomier side, the bubble cut to its room (whole px, so rounding never reaches the row)
-	const roomAbove = keep.top - gap - box.top
-	const roomBelow = box.bottom - below
-	const side = roomAbove >= roomBelow ? "above" : "below"
-	const start = Math.ceil(side === "above" ? box.top : below)
-	const end = Math.floor(side === "above" ? keep.top - gap : box.bottom)
-	// a row that fills the host leaves no room: an empty bubble at the box edge, still off the row
-	const y = Math.min(
-		Math.max(start, Math.ceil(box.top)),
-		Math.floor(box.bottom),
-	)
-	return { x, y, side, maxHeight: Math.max(0, end - y) }
+	const aboveStart = Math.ceil(box.top)
+	const aboveRoom = Math.floor(keep.top - gap) - aboveStart
+	const belowStart = Math.ceil(below)
+	const belowRoom = Math.floor(box.bottom) - belowStart
+	const side = aboveRoom >= belowRoom ? "above" : "below"
+	const y = side === "above" ? aboveStart : belowStart
+	const maxHeight = side === "above" ? aboveRoom : belowRoom
+	// less room than the bubble's own padding, border and two lines: a sliver would spill, so none is drawn
+	if (maxHeight < Math.max(1, Math.ceil(input.minHeight ?? 0)))
+		return { x, y, side: "none" }
+	return { x, y, side, maxHeight }
 }
 
 /**

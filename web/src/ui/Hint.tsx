@@ -25,6 +25,7 @@ import {
 } from "./hint-controller.ts"
 import {
 	hintLayoutChanged,
+	hintMinCut,
 	hintRoom,
 	placeHint,
 	type HintRect,
@@ -172,6 +173,24 @@ const NO_RECT: HintRect = Object.freeze({
 	bottom: 0,
 })
 
+/** What a click can focus: a dismissing click on one of these keeps the focus it gives. */
+const FOCUSABLE =
+	'a[href], button, input, select, textarea, summary, label, [tabindex], [contenteditable]:not([contenteditable="false"])'
+
+/**
+ * Focus inside the bubble goes back to the mark, before the bubble stops holding it (it closes, is no longer
+ * cut, or is not shown): the browser would drop it to the page. The mark already has the hint open, so the
+ * focus keeps it open rather than opening it again.
+ */
+function focusBackToMark(
+	bubble: { readonly current: HTMLElement | null },
+	mark: { readonly current: HTMLElement | null },
+): void {
+	const at = document.activeElement
+	if (at instanceof Node && bubble.current?.contains(at) === true)
+		mark.current?.focus({ preventScroll: true })
+}
+
 /** A scroll this soon after opening is the browser bringing the focused mark into view: re-place, keep open. */
 const SETTLE_MS = 250
 
@@ -246,19 +265,35 @@ function HintBubble({
 			// place in a scrolled card
 			const scrolled = el.scrollTop
 			el.style.maxHeight = ""
+			el.hidden = false
 			const r = el.getBoundingClientRect()
 			const at = placeHint({
 				keep,
 				host,
 				viewport,
 				size: { width: r.width, height: r.height },
+				// the shortest cut it can draw: its own padding and border and two lines (read, not assumed)
+				minHeight: hintMinCut(getComputedStyle(el)),
 			})
 			el.style.left = `${at.x}px`
 			el.style.top = `${at.y}px`
 			el.dataset["side"] = at.side
+			const wasCut = el.dataset["scroll"] !== undefined
+			// no room beside its row for even a short cut: not shown (no sliver over the row or out of the
+			// host); the sentence still reaches a screen reader through the control's description
+			if (at.side === "none") {
+				focusBackToMark(bubble, mark)
+				delete el.dataset["scroll"]
+				el.removeAttribute("tabindex")
+				el.hidden = true
+				return
+			}
 			// no room for all of it on either side: cut to the roomier side, and its body scrolls (a scroll
 			// region the keyboard reaches: Tab from the mark goes into it)
 			if (at.maxHeight === undefined) {
+				// whole again: focus in it goes back to the mark first (the hint stays open), as the bubble
+				// leaves the tab order
+				if (wasCut) focusBackToMark(bubble, mark)
 				delete el.dataset["scroll"]
 				el.removeAttribute("tabindex")
 			} else {
@@ -277,9 +312,15 @@ function HintBubble({
 			// a scroll inside the bubble (a long card) is reading, not leaving
 			if (e.target instanceof Node && el?.contains(e.target)) return
 			if (performance.now() - opened < SETTLE_MS) place()
-			else controller.dismiss()
+			else {
+				focusBackToMark(bubble, mark)
+				controller.dismiss()
+			}
 		}
-		const onResize = () => controller.dismiss()
+		const onResize = () => {
+			focusBackToMark(bubble, mark)
+			controller.dismiss()
+		}
 		document.addEventListener("scroll", onScroll, true)
 		addEventListener("resize", onResize)
 		// a size change (the host, the kept row, the bubble, another island) marks the layout stale; a move by
@@ -324,6 +365,10 @@ function HintBubble({
 			const t = e.target
 			if (!(t instanceof Node)) return
 			if (anchor.current?.contains(t) || bubble.current?.contains(t)) return
+			// a click on something focusable keeps the focus it gives; any other click takes focus in the
+			// bubble back to the mark rather than to the page
+			if (!(t instanceof Element && t.closest(FOCUSABLE)))
+				focusBackToMark(bubble, mark)
 			controller.dismiss()
 		}
 		const events = hintMarkEvents(controller, hintId)
