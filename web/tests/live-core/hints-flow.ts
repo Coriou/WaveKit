@@ -6,7 +6,8 @@
  * first control, and every hint mark must be reached; keyboard focus shows its hint at once; the bubble lies
  * inside its host surface and the window (not clipped), and meets no other island and never its own row; Enter
  * pins it (a learn card when it has one); a bubble cut to the room beside its row (none fits whole) scrolls, and
- * the keyboard reaches it: Tab from the mark goes into it, ArrowDown and End scroll it, Shift+Tab goes back to
+ * the keyboard reaches it (the flow makes a learn card longer than the window, so a cut card is met at both
+ * sizes, never by chance of what stands beside the panel): Tab from the mark goes into it, ArrowDown and End scroll it, Shift+Tab goes back to
  * the mark; focus in it goes back to the mark, never to the page, when it becomes whole (the hint stays open),
  * when a scroll elsewhere closes it and when a real click on nothing focusable closes it (a click on something
  * focusable keeps the focus it gives); no bubble is drawn with less
@@ -214,6 +215,19 @@ async function cutByKeyboard(page: Page, id: string): Promise<string[]> {
 	if (!(await where()).inBubble)
 		problems.push("Tab did not go into the cut card")
 	// ArrowDown: a step down (the scroll may animate, so wait for it)
+	await page.evaluate(markId => {
+		const w = window as unknown as { wkFlowScrollEnded?: boolean }
+		w.wkFlowScrollEnded = false
+		document
+			.querySelector(`[data-wk-hint-bubble="${markId}"]`)
+			?.addEventListener(
+				"scrollend",
+				() => {
+					w.wkFlowScrollEnded = true
+				},
+				{ once: true },
+			)
+	}, id)
 	await page.keyboard.press("ArrowDown")
 	if (
 		!(await withinFrames(
@@ -227,6 +241,26 @@ async function cutByKeyboard(page: Page, id: string): Promise<string[]> {
 			`ArrowDown did not scroll the cut card (range ${w.range}, focus ${w.active})`,
 		)
 	}
+	// the step's scroll over (its scrollend, or its offset held a few frames), as a person's next key comes
+	// after the step lands: a key pressed while the browser still animates the last one can be lost
+	let last = -1
+	let since = 0
+	await withinFrames(page, 2_000, async () => {
+		const ended = await page.evaluate(
+			() =>
+				(window as unknown as { wkFlowScrollEnded?: boolean })
+					.wkFlowScrollEnded === true,
+		)
+		if (ended) return true
+		const now = await frameCount(page)
+		const top = (await where()).scrollTop
+		if (top !== last) {
+			last = top
+			since = now
+			return false
+		}
+		return top > 0 && now - since >= STABLE_FRAMES
+	})
 	// End: the whole range in one key
 	await page.keyboard.press("End")
 	const atEnd = async () => {
@@ -345,19 +379,23 @@ async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
 		const panel = document.querySelector(
 			'[role="region"][aria-label="Audio options"]',
 		)
-		const m = [
-			...(panel?.querySelectorAll<HTMLElement>("[data-wk-hint-mark]") ?? []),
-		].find(e => e.dataset["wkHintMark"] !== markId)
-		if (!m) return null
-		m.scrollIntoView({ block: "nearest" })
-		const r = m.getBoundingClientRect()
-		return {
-			id: m.dataset["wkHintMark"] ?? "",
-			x: Math.round(r.left + r.width / 2),
-			y: Math.round(r.top + r.height / 2),
+		// one a click lands on as it stands: in the window and not under the card (no scroll to it, which
+		// would close the hint before the click)
+		for (const m of panel?.querySelectorAll<HTMLElement>(
+			"[data-wk-hint-mark]",
+		) ?? []) {
+			if (m.dataset["wkHintMark"] === markId) continue
+			const r = m.getBoundingClientRect()
+			const x = Math.round(r.left + r.width / 2)
+			const y = Math.round(r.top + r.height / 2)
+			if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue
+			const hit = document.elementFromPoint(x, y)
+			if (hit && m.contains(hit))
+				return { id: m.dataset["wkHintMark"] ?? "", x, y }
 		}
+		return null
 	}, id)
-	if (!other) problems.push("no other mark to click")
+	if (!other) problems.push("no other mark to click beside the card")
 	else {
 		await page.mouse.click(other.x, other.y)
 		await withinFrames(
@@ -489,6 +527,62 @@ async function noRoomNotExpanded(page: Page, id: string): Promise<string[]> {
 	return problems
 }
 
+/** The style `pinnedTall` adds: the last line of a learn card below its lead made taller. */
+const TALL_STYLE = "wk-flow-tall"
+/** How much taller than the roomier side of its row `pinnedTall` makes a learn card (px): a short scroll. */
+const TALL_OVER = 80
+
+/**
+ * A learn card made longer than its host can hold beside its row, as a long card would be: its last line below
+ * the lead grows until the whole card is `TALL_OVER` px taller than the room on either side of the row, so
+ * neither side has room for all of it and it is cut to the roomier side, with a short scroll as a real long
+ * card has (the lead alone still fits, so hiding those lines, as `cutKeepsFocus` does, makes it whole). The cut
+ * is the flow's own, at every size: never left to an island that happens to stand beside the panel. From the
+ * pinned (whole) hint with focus on the mark: the card's size is read, then Escape, the taller line, and Enter
+ * places it afresh. The measure of the pinned card, left pinned with focus on the mark; `dropTall` takes the
+ * line back.
+ */
+async function pinnedTall(page: Page, id: string): Promise<Measure> {
+	const grown = await page.evaluate(
+		([markId, styleId, over]) => {
+			const HOST = "[data-wk-hint-host], .wk-island[data-expanded], .wk-drawer"
+			const INSET = 12
+			const mark = document.querySelector(`[data-wk-hint-mark="${markId}"]`)
+			const bubble = document.querySelector(`[data-wk-hint-bubble="${markId}"]`)
+			const host = mark?.closest(HOST)
+			const row = mark?.closest("[data-wk-hint-row]") ?? mark?.parentElement
+			if (!bubble || !host || !row) return null
+			const b = bubble.getBoundingClientRect()
+			const h = host.getBoundingClientRect()
+			const k = row.getBoundingClientRect()
+			// the host's box the placement uses (clipped to the window, INSET in): each side's room is at most
+			// the box beside the row, gap not taken off
+			const top = Math.max(h.top, 0) + INSET
+			const bottom = Math.min(h.bottom, innerHeight) - INSET
+			const room = Math.max(k.top - top, bottom - k.bottom)
+			const grow = Math.ceil(room + over - b.height)
+			const style = document.createElement("style")
+			style.id = styleId
+			style.textContent = `[data-wk-hint-bubble="${markId}"] > :not(:first-child):last-child { padding-bottom: ${Math.max(0, grow)}px }`
+			document.head.append(style)
+			return grow
+		},
+		[id, TALL_STYLE, TALL_OVER] as const,
+	)
+	await page.keyboard.press("Escape")
+	await page.keyboard.press("Enter")
+	if (grown !== null)
+		await withinFrames(page, 2_000, async () => (await measure(page, id)).cut)
+	return settled(page, id)
+}
+
+/** Takes back the taller lines `pinnedTall` added. */
+const dropTall = (page: Page): Promise<void> =>
+	page.evaluate(
+		styleId => document.getElementById(styleId)?.remove(),
+		TALL_STYLE,
+	)
+
 /** Waits for `n` animation frames in the page: layout and the hints' per-frame re-placing have run. */
 const frames = (page: Page, n = 2): Promise<void> =>
 	page.evaluate(
@@ -586,11 +680,31 @@ async function intoView(page: Page, mark: Locator): Promise<boolean> {
 	)
 }
 
-/** Waits (2 s at most) until the hint of `id` is open and its fade is done, then measures it. */
+/** Frames a hint's place must hold for before it is measured as settled. */
+const STABLE_FRAMES = 3
+
+/**
+ * Waits until the hint of `id` is open, its fade is done and its place (box, cut, side, role) has held for
+ * `STABLE_FRAMES` drawn frames, then measures it: the hints re-place in their frames as the layout under them
+ * converges, so a loaded page's first open frame is not yet where the hint stands.
+ */
 async function settled(page: Page, id: string): Promise<Measure> {
-	await within(2_000, async () => {
+	let key = ""
+	let since = 0
+	await withinFrames(page, 2_000, async () => {
 		const m = await measure(page, id)
-		return m.open && !m.problems.includes("not fully shown")
+		if (!m.open || m.problems.includes("not fully shown")) {
+			key = ""
+			return false
+		}
+		const now = await frameCount(page)
+		const k = JSON.stringify([m.bubble, m.cut, m.side, m.role, m.expanded])
+		if (k !== key) {
+			key = k
+			since = now
+			return false
+		}
+		return now - since >= STABLE_FRAMES
 	})
 	return measure(page, id)
 }
@@ -1007,6 +1121,8 @@ export async function hintsFlow(
 		step(`${vp.name}: marks in the panel`, ids.length > 0, `${ids.length}`)
 
 		// Tab from the panel's first control until focus leaves it
+		let cutRuns = 0
+		let tallDone = false
 		await panel.locator("input, button").first().focus()
 		const seen: string[] = []
 		for (let i = 0; i < MAX_TABS; i++) {
@@ -1054,7 +1170,32 @@ export async function hintsFlow(
 			if (pinned.cut) {
 				pinProblems.push(...(await cutByKeyboard(page, at.mark)))
 				pinProblems.push(...(await cutKeepsFocus(page, at.mark)))
+				cutRuns++
 			}
+			// the first learn card after the first hint (marks stand on both sides of its row), longer than the
+			// window: cut at every size, then the same keyboard and focus checks
+			if (
+				!tallDone &&
+				seen.length > 1 &&
+				pinned.role === "group" &&
+				!pinned.cut
+			) {
+				tallDone = true
+				const tall = await pinnedTall(page, at.mark)
+				pinProblems.push(...tall.problems.map(p => `longer card: ${p}`))
+				if (!tall.open) pinProblems.push("longer card: Enter did not pin it")
+				if (tall.role !== "group")
+					pinProblems.push(`longer card: role ${tall.role}, not a learn card`)
+				if (!tall.cut)
+					pinProblems.push("longer card: taller than the window, but not cut")
+				else {
+					pinProblems.push(...(await cutByKeyboard(page, at.mark)))
+					pinProblems.push(...(await cutKeepsFocus(page, at.mark)))
+					cutRuns++
+				}
+				await dropTall(page)
+			}
+			// a pinned hint with no room at all is not drawn
 			if (seen.length === 1)
 				pinProblems.push(...(await noRoomNotExpanded(page, at.mark)))
 			// Escape closes the hint only: focus stays on the mark, the panel stays open
@@ -1081,6 +1222,11 @@ export async function hintsFlow(
 			})
 		}
 		reached[vp.name] = seen.length
+		step(
+			`${vp.name}: a cut card's keyboard and focus checks ran`,
+			cutRuns > 0,
+			`${cutRuns} cut card${cutRuns === 1 ? "" : "s"}`,
+		)
 		const missed = ids.filter(id => !seen.includes(id))
 		step(
 			`${vp.name}: every mark reached by Tab`,

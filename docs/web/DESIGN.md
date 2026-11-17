@@ -1068,7 +1068,8 @@ Condensed + Noto Sans, Tabler-based icons).
     `ui.css`. Listen's strings live in `web/src/features/listen/hints.ts`, with the rules as a test.
     Gated by `ui-check --flow=hints`: at 1440×900 and 390×844 every mark is reached by Tab, its hint
     lies inside its host and the window and meets no other island and never its own row, a cut
-    card scrolls by keyboard (End to its end) and gives focus back to the mark when it closes or
+    card (the flow makes a learn card longer than the window, so one is met at both sizes)
+    scrolls by keyboard (End to its end) and gives focus back to the mark when it closes or
     becomes whole, including after a real click on plain text, a real click on another mark keeps
     focus there, a hint with no room anywhere is not drawn and not expanded, Enter pins, Escape
     closes the hint only, a tap pins.
