@@ -31,6 +31,7 @@ import {
 } from "../../../data/scanner-format.ts"
 import { planIssues } from "../../../data/scanner-store.ts"
 import { useStore } from "../../../data/store.ts"
+import { showAppToast } from "../../../shell/toast.ts"
 import { Button } from "../../../ui/Button.tsx"
 import { ResumeScan } from "../ResumeScan.tsx"
 import { Switch } from "../../../ui/Switch.tsx"
@@ -111,17 +112,11 @@ export function RunningPlan({
 	const [pop, setPop] = useState<Pop | null>(null)
 	const [applying, setApplying] = useState(false)
 	const [applyError, setApplyError] = useState<string | null>(null)
-	const [toast, setToast] = useState<string | null>(null)
 
 	// a draft made for other ranges (the job was re-planned under it) is dropped
 	useEffect(() => {
 		if (draft && !draftFits(job, draft)) setDraft(null)
 	}, [job, draft])
-	useEffect(() => {
-		if (!toast) return
-		const t = setTimeout(() => setToast(null), 4000)
-		return () => clearTimeout(t)
-	}, [toast])
 
 	const current = draft ?? draftOf(job)
 	const changes = draft ? runChanges(job, draft) : []
@@ -137,7 +132,7 @@ export function RunningPlan({
 			() => {
 				setApplying(false)
 				setDraft(null)
-				setToast("Applied · at the next hop")
+				showAppToast("Applied · at the next hop")
 			},
 			(error: unknown) => {
 				setApplying(false)
@@ -407,12 +402,6 @@ export function RunningPlan({
 					)
 				})}
 			</div>
-
-			{toast && (
-				<div role="status" className="wk-toast wk-pl-toast">
-					<span className="wk-pl-toasttext">{toast}</span>
-				</div>
-			)}
 
 			{changes.length > 0 ? (
 				<div

@@ -168,12 +168,10 @@ describe("deep links", () => {
 				})),
 		)
 		const state: fc.Arbitrary<LinkState> = fc.oneof(
-			fc
-				.constantFrom("spectrum", "map", "messages")
-				.map(view => ({ view, drawer: null })),
+			fc.constantFrom("spectrum", "map").map(view => ({ view, drawer: null })),
 			fc
 				.tuple(
-					fc.constantFrom("spectrum", "map", "messages"),
+					fc.constantFrom("spectrum", "map"),
 					fc.uniqueArray(tok, {
 						maxLength: 4,
 						selector: t => `${t.kind}:${t.value}`,
@@ -214,5 +212,57 @@ describe("deep links", () => {
 			}),
 			{ numRuns: 300 },
 		)
+	})
+})
+
+describe("deep links: the removed Messages view", () => {
+	const cards: LinkState = {
+		view: "spectrum",
+		drawer: "activity",
+		activity: {
+			tokens: [],
+			chip: null,
+			range: { kind: "any" },
+			audio: false,
+			openId: null,
+			layout: "cards",
+		},
+	}
+
+	it("#/messages opens Activity as cards", () => {
+		expect(parseLink("#/messages")).toEqual(cards)
+		expect(parseLink("#/messages?x=1")).toEqual(cards)
+	})
+
+	it("view=messages under Activity opens it as cards, keeping the open event and tokens", () => {
+		expect(parseLink("#/activity?view=messages")).toEqual(cards)
+		const open = parseLink("#/activity/ev-1?view=messages&t=talkgroup:1201")
+		expect(open?.view).toBe("spectrum")
+		expect(open?.drawer).toBe("activity")
+		expect(open?.activity?.openId).toBe("ev-1")
+		expect(open?.activity?.layout).toBe("cards")
+		expect(open?.activity?.tokens.map(t => [t.kind, t.value])).toEqual([
+			["talkgroup", "1201"],
+		])
+	})
+
+	it("view=messages under another drawer keeps that drawer over the spectrum", () => {
+		expect(parseLink("#/scanner/disc-1?view=messages")).toEqual({
+			view: "spectrum",
+			drawer: "scanner",
+			discoveryId: "disc-1",
+		})
+		expect(parseLink("#/recordings?view=messages")).toEqual({
+			view: "spectrum",
+			drawer: "recordings",
+		})
+	})
+
+	it("carries the Cards layout in the Activity link, and leaves List out", () => {
+		expect(formatLink(cards)).toBe("#/activity?layout=cards")
+		expect(parseLink("#/activity?layout=cards")).toEqual(cards)
+		expect(
+			parseLink("#/activity?layout=list")?.activity?.layout,
+		).toBeUndefined()
 	})
 })

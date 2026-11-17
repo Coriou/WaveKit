@@ -57,7 +57,12 @@ import { createRatePolicy } from "./core/rate-policy.js"
 import { composeLinkBurst } from "./core/link-burst/compose.js"
 import { createLinkQuality } from "./core/link-burst/link-quality.js"
 import { frameBytesFor } from "./core/link-burst/contract.js"
-import { createLinkAdvisor } from "./core/link-advisory.js"
+import {
+	createLinkAdvisor,
+	linkAdvisorEvidence,
+	sourceCauseExcluded,
+	sourceIsLive,
+} from "./core/link-advisory.js"
 import type { DropReader } from "./decoders/enablement/efficiency-gate.js"
 import type {
 	EfficiencyGate,
@@ -489,7 +494,8 @@ export async function prepareDecoderCatalogue(
 export function wireDecoderLinkFeed(
 	sources: Pick<SourceManager, "on" | "off"> &
 		Partial<Pick<SourceManager, "isCommandedRecovery">>,
-	tuner: Pick<TunerController, "getState">,
+	tuner: Pick<TunerController, "getState"> &
+		Partial<Pick<TunerController, "on" | "off">>,
 	link: LinkAdvisor,
 	policy: Pick<RatePolicy, "reset">,
 	now: () => number = Date.now,
@@ -509,6 +515,12 @@ export function wireDecoderLinkFeed(
 		resetPolicy(id)
 	}
 	const removed = (id: string) => policy.reset(id)
+	// A shortfall accrued under external control is no evidence about the link once the core
+	// controls the tuner again: the received average starts afresh.
+	const controlMode = (id: string, mode: string) => {
+		if (mode === "internal") link.reset(id)
+	}
+	tuner.on?.("control-mode-changed", controlMode)
 	sources.on("metrics", metrics)
 	sources.on("connected", connected)
 	sources.on("disconnected", resetPolicy)
@@ -520,6 +532,7 @@ export function wireDecoderLinkFeed(
 		sources.off("disconnected", resetPolicy)
 		sources.off("source-removed", removed)
 		sources.off("commanded-recovery-failed", removed)
+		tuner.off?.("control-mode-changed", controlMode)
 	}
 }
 
@@ -2500,6 +2513,20 @@ async function main(): Promise<void> {
 			monoNow: monitor.monoNow,
 			linkDropsSince: monitor.linkDropsSince,
 			burst: id => linkQuality.burst(id),
+			// A disconnected or paused source reports 0 B/s; that is no link loss.
+			live: id => sourceIsLive(sourceManager, id),
+			sourceCauseExcluded: id =>
+				sourceCauseExcluded(
+					{
+						controlModeOf: sid => tunerController.getState(sid)?.controlMode,
+					},
+					id,
+				),
+			...linkAdvisorEvidence({
+				coreLoad: composed.coreLoad,
+				recorderOf: id => sourceRouting.linkBurst(id)?.recorder,
+				monoNow: composed.factories.monoNow,
+			}),
 		})
 		advisorRef.current = linkAdvisor
 		const ratePolicy = createRatePolicy({

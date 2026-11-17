@@ -1,9 +1,17 @@
 // Single-key shortcuts (DESIGN.md "Shortcuts shown on rows"), only when no text field has the focus: `[` `]` step,
 // T tune, M mode, Q squelch Open and back, B saved, S save, L listen, P pause / resume the receiver, / search Activity, ? the shortcut
 // list, and G then a letter
-// for the views (S Spectrum, A Activity, M Map, D Messages, C Scanner, R Recordings). I (Identify) belongs to the tuned card.
+// for the views (S Spectrum, A Activity, M Map, D Activity as cards, C Scanner, R Recordings). I (Identify) belongs to the tuned card.
 import type { DrawerId, ViewId } from "../../shell/store.ts"
 import type { ScopeId } from "./model.ts"
+
+/** Opens a drawer; Activity may name its layout (the Messages alias opens it as cards). */
+export interface DrawerTarget {
+	readonly kind: "drawer"
+	readonly id: DrawerId
+	/** Activity only: open it in this layout. */
+	readonly layout?: "cards"
+}
 
 export type Shortcut =
 	| { readonly kind: "scope"; readonly scope: ScopeId }
@@ -15,7 +23,7 @@ export type Shortcut =
 	| { readonly kind: "feed" }
 	| { readonly kind: "searchActivity" }
 	| { readonly kind: "view"; readonly id: ViewId }
-	| { readonly kind: "drawer"; readonly id: DrawerId }
+	| DrawerTarget
 	/** G was pressed: the next key picks a view. */
 	| { readonly kind: "goPrefix" }
 
@@ -25,7 +33,7 @@ export const GO_WINDOW_MS = 1500
 const GO: Readonly<Record<string, Shortcut>> = {
 	s: { kind: "view", id: "spectrum" },
 	m: { kind: "view", id: "map" },
-	d: { kind: "view", id: "messages" },
+	d: { kind: "drawer", id: "activity", layout: "cards" },
 	a: { kind: "drawer", id: "activity" },
 	c: { kind: "drawer", id: "scanner" },
 	r: { kind: "drawer", id: "recordings" },

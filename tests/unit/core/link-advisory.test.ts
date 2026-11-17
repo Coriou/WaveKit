@@ -112,3 +112,64 @@ it.each([1, 1.01])(
 		else expect(advisory.sustainedBytesPerSecond).toBeNull()
 	},
 )
+function liveHarness() {
+	let now = 0
+	let live = true
+	const advisor = createLinkAdvisor({ now: () => now, live: () => live })
+	return {
+		advisor,
+		setLive(value: boolean) {
+			live = value
+		},
+		/** One metrics tick per second from `from` to `to` (inclusive) at `bytes` per second. */
+		ticks(bytes: number, from: number, to: number) {
+			for (let at = from; at <= to; at += 1000) {
+				advisor.observe("s", bytes, input.sampleRateHz, at)
+				now = at
+			}
+		},
+		classify: () => advisor.classify(input, null),
+	}
+}
+it("zero-byte metrics from a disconnected source never read dropping", () => {
+	const h = liveHarness()
+	h.ticks(4_800_000, 0, 10000)
+	expect(h.classify().level).toBe("none")
+	h.setLive(false)
+	h.ticks(0, 11000, 30000)
+	const advisory = h.classify()
+	expect(advisory.level).toBe("none")
+	expect(advisory).not.toHaveProperty("lossReason")
+	expect(advisory.shortfallPercent).toBeNull()
+	expect(h.advisor.shortfall("s", input.sampleRateHz, 2)).toBeNull()
+})
+it("a paused feed (zero bytes, not live) never reads dropping", () => {
+	const h = liveHarness()
+	h.setLive(false)
+	h.ticks(0, 0, 20000)
+	expect(h.classify()).toMatchObject({ level: "none" })
+	expect(h.classify()).not.toHaveProperty("lossReason")
+})
+it("after a reconnect a real shortfall reads dropping again", () => {
+	const h = liveHarness()
+	h.setLive(false)
+	h.ticks(0, 0, 15000)
+	h.setLive(true)
+	// The window restarts at the reconnect: no verdict until a full window is live.
+	h.ticks(4_800_000 * 0.9, 16000, 20000)
+	expect(h.classify().level).not.toBe("dropping")
+	h.ticks(4_800_000 * 0.9, 21000, 26000)
+	expect(h.classify().level).toBe("dropping")
+	expect(h.advisor.shortfall("s", input.sampleRateHz, 2)).toBe(true)
+})
+it("a throwing liveness check reads live", () => {
+	const advisor = createLinkAdvisor({
+		now: () => 10000,
+		live: () => {
+			throw new Error("unavailable")
+		},
+	})
+	for (const at of [0, 5000, 10000])
+		advisor.observe("s", 4_800_000 * 0.9, input.sampleRateHz, at)
+	expect(advisor.classify(input, null).level).toBe("dropping")
+})

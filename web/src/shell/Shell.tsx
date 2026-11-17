@@ -20,6 +20,11 @@ import {
 } from "react"
 
 import { useStore } from "../data/store.ts"
+import {
+	activityExpanded,
+	activityLayout,
+	isActivityExpanded,
+} from "../features/activity/layout.ts"
 import { CardAnnouncer, CardPlaceContext } from "./CardHandle.tsx"
 import {
 	cardPlace as defaultCardPlace,
@@ -46,13 +51,14 @@ import {
 	type CardAnchor,
 	type Point,
 	type ShellGeometry,
-	type ShellLayout,
 } from "./layout.ts"
 import { ShellIsland, type IslandSlot } from "./ShellIsland.tsx"
 import { Dock } from "./Dock.tsx"
 import { PaneSlot } from "./PaneSlot.tsx"
+import { PlayerDock } from "../features/playback/PlayerDock.tsx"
 import { DRAWER_PANES, paneOf } from "./panes.ts"
-import { appToast, dismissAppToast } from "./toast.ts"
+import { NoticeRegion } from "./notices/NoticeRegion.tsx"
+import { notices } from "./notices/service.ts"
 import {
 	freeAreaStyle,
 	overlaySlot,
@@ -67,7 +73,7 @@ import {
 	type ShellStore,
 } from "./store.ts"
 
-// Drawers, the Map and Messages views and the palette are code-split: the first paint is the plot and the islands.
+// Drawers, the Map view and the palette are code-split: the first paint is the plot and the islands.
 const DRAWER_CONTENT: Readonly<
 	Record<DrawerId, ComponentType<DrawerContentProps>>
 > = {
@@ -83,9 +89,6 @@ const DRAWER_TITLE: Readonly<Record<DrawerId, string>> = {
 	settings: "Settings",
 }
 const MapView = lazy(() => import("./drawers/MapView.tsx"))
-const MessagesGallery = lazy(
-	() => import("../features/messages/MessagesGallery.tsx"),
-)
 const Palette = lazy(() => import("./drawers/Palette.tsx"))
 
 export interface ShellProps {
@@ -144,6 +147,8 @@ export function Shell({
 	// the shell re-renders when the wanted anchor changes or a drag starts or ends, never on pointer moves
 	const cardAt = useStore(cardStore, s => s.at)
 	const dragging = useStore(cardStore, s => s.drag !== null)
+	// while the notice region shows something, the tuned card keeps off its top-centre anchor
+	const noticeTop = useStore(notices.occupied)
 
 	// ---- focus return: each panel, drawer and the palette remembers the control that opens it
 	const triggers = useRef(new Map<string, HTMLElement>())
@@ -225,13 +230,20 @@ export function Shell({
 		paneDecl.wanted,
 	)
 	const pane = paneDecl.pane
+	// Activity in Cards layout, expanded: the drawer spans the window between the island rows, with no pane beside it
+	const cardsLayout = useStore(activityLayout, s => s.layout)
+	const cardsExpanded = useStore(activityExpanded, s => s.expanded)
+	const expanded =
+		state.drawer === "activity" &&
+		isActivityExpanded(cardsLayout, cardsExpanded)
 	const L = shellLayout(
 		geo,
 		state.drawer,
-		pane ? { want: paneWanted, pushIn: pane.pushIn } : null,
+		pane && !expanded ? { want: paneWanted, pushIn: pane.pushIn } : null,
 		{
 			at: cardAt,
 			rxOpen: state.panel === "receiver",
+			noticeTop,
 			...(state.drawer ? { drawerW: wantedDrawerW(widths, state.drawer) } : {}),
 		},
 	)
@@ -435,11 +447,6 @@ export function Shell({
 					/>
 				</Suspense>
 			)}
-			{state.view === "messages" && (
-				<Suspense fallback={null}>
-					<MessagesGallery insets={galleryInsets(L, !!card, geo.W)} />
-				</Suspense>
-			)}
 
 			{island("tuner", tuner, refs.tunerHead, refs.tunerBox, {
 				top: 16,
@@ -494,12 +501,17 @@ export function Shell({
 					className="wk-shell-drawer"
 					data-full={d.full || undefined}
 					data-pane={paneOn || pushedOn || undefined}
-					style={{
-						top: d.top,
-						bottom: d.bottom,
-						right: d.right,
-						...(d.width === null ? { left: 16 } : { width: d.width }),
-					}}
+					data-expanded={expanded || undefined}
+					style={
+						expanded
+							? { top: L.topRow, bottom: L.bottomRow, right: G, left: G }
+							: {
+									top: d.top,
+									bottom: d.bottom,
+									right: d.right,
+									...(d.width === null ? { left: 16 } : { width: d.width }),
+								}
+					}
 				>
 					<Suspense
 						fallback={
@@ -543,19 +555,24 @@ export function Shell({
 				</PaneSlot>
 			)}
 
-			{drawerShown && d && d.resizable && d.width !== null && !pushedOn && (
-				<DrawerGrip
-					id={state.drawer}
-					name={DRAWER_TITLE[state.drawer]}
-					store={drawerWidthStore}
-					width={d.width}
-					maxW={d.maxW}
-					x={geo.W - d.right - d.width}
-					top={d.top}
-					bottom={d.bottom}
-					onResizing={setResizing}
-				/>
-			)}
+			{drawerShown &&
+				d &&
+				d.resizable &&
+				d.width !== null &&
+				!pushedOn &&
+				!expanded && (
+					<DrawerGrip
+						id={state.drawer}
+						name={DRAWER_TITLE[state.drawer]}
+						store={drawerWidthStore}
+						width={d.width}
+						maxW={d.maxW}
+						x={geo.W - d.right - d.width}
+						top={d.top}
+						bottom={d.bottom}
+						onResizing={setResizing}
+					/>
+				)}
 
 			{L.dockHidden && (
 				<button
@@ -572,11 +589,20 @@ export function Shell({
 				</button>
 			)}
 
+			{/* the one recording player, above the nav dock; empty while nothing plays */}
+			<div className="wk-shell-player" data-low={L.dockHidden || undefined}>
+				<PlayerDock />
+			</div>
+
 			<CardPlaceContext.Provider value={cardStore}>
 				<CardAnnouncer />
 			</CardPlaceContext.Provider>
 
-			{!state.palette && <ShellToast lifted={!L.dockHidden} />}
+			<NoticeRegion
+				topRowBottom={L.topRow - G}
+				palette={state.palette}
+				receiverOpen={state.panel === "receiver"}
+			/>
 
 			{state.palette && (
 				<Suspense fallback={null}>
@@ -651,54 +677,4 @@ function CardTargets({
 			/>
 		</div>
 	)
-}
-
-/** The app toast (src/shell/toast.ts): bottom centre of the free area (`--wk-free-cx`), above the dock. */
-function ShellToast({ lifted }: { lifted: boolean }) {
-	const toast = useStore(appToast)
-	if (!toast) return null
-	return (
-		<div
-			role="status"
-			className="wk-toast wk-shell-toast"
-			data-tone={toast.tone}
-			data-lifted={lifted || undefined}
-		>
-			<span className="wk-shell-toast-text">{toast.text}</span>
-			{toast.action || toast.undo ? (
-				<button
-					type="button"
-					className="wk-btn"
-					data-variant="tonal"
-					data-size="sm"
-					onClick={() => {
-						if (toast.action) toast.action.run()
-						else toast.undo?.()
-						dismissAppToast()
-					}}
-				>
-					{toast.action?.label ?? "Undo"}
-				</button>
-			) : (
-				<button
-					type="button"
-					className="wk-icon-btn"
-					data-size="sm"
-					aria-label="Dismiss"
-					onClick={dismissAppToast}
-				>
-					<Icon name="close" size={14} />
-				</button>
-			)}
-		</div>
-	)
-}
-
-// The Messages view keeps clear of the tuned card: a lane down the side the card sits on, so no message hides under it.
-function galleryInsets(L: ShellLayout, card: boolean, W: number) {
-	const base = { top: L.topRow, right: L.rxRight, bottom: L.bottomRow, left: 0 }
-	if (!card || !L.card) return base
-	if (L.card.x + CARD_W / 2 < W / 2)
-		return { ...base, left: L.card.x + CARD_W + G }
-	return { ...base, right: Math.max(base.right, W - L.card.x + G) }
 }

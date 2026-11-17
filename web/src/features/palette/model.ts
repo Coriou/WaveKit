@@ -17,6 +17,7 @@ import {
 	protocolName,
 } from "../../data/scanner-format.ts"
 import type { DrawerId, ShellState, ViewId } from "../../shell/store.ts"
+import type { DrawerTarget } from "./keys.ts"
 import {
 	ACCENTS,
 	GROUNDS,
@@ -48,6 +49,8 @@ import {
 	savedMeta,
 } from "../tuner/saved.ts"
 import { DECODE_AS } from "../tuned/identify-view.ts"
+import { channelName, historyLabel, savedNameAt } from "../naming.ts"
+import { tuningStep } from "../../plot/maths.ts"
 import type { GlyphName } from "./glyphs.ts"
 import {
 	parseCommand,
@@ -236,7 +239,6 @@ export interface IdentifierToken {
 export interface FrequencyToken {
 	readonly kind: "frequency"
 	readonly hz: number
-	readonly bandwidthHz?: number
 }
 export type ActivityToken = IdentifierToken | FrequencyToken
 
@@ -298,7 +300,7 @@ export type PaletteAction =
 	| IdentifyAction
 	| SaveAction
 	| { readonly kind: "view"; readonly id: ViewId }
-	| { readonly kind: "drawer"; readonly id: DrawerId }
+	| DrawerTarget
 	| ActivityAction
 	| { readonly kind: "scanPlan"; readonly presetId: string | null }
 	| { readonly kind: "scanJob"; readonly op: "pause" | "resume" | "stop" }
@@ -448,24 +450,26 @@ const VIEWS: readonly {
 	kbd?: readonly string[]
 	/** What the row says it does, when "Shows the <label>" does not read well. */
 	does?: string
+	/** Opens Activity in the Cards layout (the alias for the removed Messages view). */
+	cards?: true
 }[] = [
 	{ id: "spectrum", label: "Spectrum", glyph: "waterfall", key: "S" },
 	{ id: "activity", label: "Activity", glyph: "activity", key: "A" },
 	{ id: "map", label: "Map", glyph: "go", key: "M" },
 	{
-		id: "messages",
+		id: "activity",
 		label: "Messages",
 		glyph: "messages",
 		key: "D",
-		does: "Shows decoded messages as cards, keeps any drawer open",
+		does: "Opens Activity as decoded message cards",
+		cards: true,
 	},
 	{ id: "scanner", label: "Scanner", glyph: "scan", key: "C" },
 	{ id: "recordings", label: "Recordings", glyph: "rec", key: "R" },
 	{ id: "settings", label: "Settings", glyph: "settings", kbd: ["⌘", ","] },
 ]
 
-const isView = (id: string): id is ViewId =>
-	id === "spectrum" || id === "map" || id === "messages"
+const isView = (id: string): id is ViewId => id === "spectrum" || id === "map"
 
 // ---- the builder
 
@@ -568,10 +572,15 @@ export class PaletteModel {
 	}
 
 	discoveryItem(d: Discovery): PaletteItem {
+		const title = channelName({
+			saved: this.#savedAt(d.frequencyHz),
+			label: d.operator?.label ?? null,
+			proven: discoveryTitle(d),
+		})
 		return {
 			...this.tuneItem(d.frequencyHz, {
 				id: `disc:${d.id}`,
-				title: discoveryTitle(d),
+				title,
 				sub: [
 					mhz(d.frequencyHz),
 					"Found by the scanner",
@@ -581,18 +590,29 @@ export class PaletteModel {
 			}),
 			keys: [formatMHz(d.frequencyHz), protocolName(d.protocol), "discovery"],
 			action: { kind: "discovery", id: d.id },
-			done: `Tuned to ${discoveryTitle(d)} · ${mhz(d.frequencyHz)}`,
+			done: `Tuned to ${title} · ${mhz(d.frequencyHz)}`,
 		}
 	}
 
-	/** Everything a name can tune to: saved frequencies, then discoveries not at a saved frequency. */
+	/** The saved name of the channel at `hz` (naming.ts): on the band plan's raster, not exact Hz. */
+	#savedAt(hz: number): string | null {
+		const c = this.#c
+		return savedNameAt(hz, c.saved ?? [], tuningStep(c.bandplan, hz))
+	}
+
+	/**
+	 * Everything a name can tune to: saved frequencies, then discoveries not on a saved channel (matched on the
+	 * band plan's raster like every other saved name, so a carrier measured a few hundred Hz off is not listed twice).
+	 */
 	tuneTargets(): PaletteItem[] {
 		const saved = this.#c.saved ?? []
 		const at = new Set(saved.map(f => f.frequencyHz))
 		return [
 			...saved.map(f => this.savedItem(f)),
 			...this.#c.discoveries
-				.filter(d => !at.has(d.frequencyHz))
+				.filter(
+					d => !at.has(d.frequencyHz) && this.#savedAt(d.frequencyHz) === null,
+				)
 				.map(d => this.discoveryItem(d)),
 		]
 	}
@@ -1033,20 +1053,27 @@ export class PaletteModel {
 		const s = this.#c.shell
 		const view = isView(v.id)
 		return {
-			id: `view:${v.id}`,
+			id: v.cards ? "view:messages" : `view:${v.id}`,
 			title: `Go to ${v.label}`,
 			glyph: v.glyph,
 			kbd: v.kbd ?? (v.key ? ["G", v.key] : []),
-			cur: view ? s.view === v.id : s.drawer === v.id,
+			cur: v.cards ? false : view ? s.view === v.id : s.drawer === v.id,
 			action: isView(v.id)
 				? { kind: "view", id: v.id }
-				: { kind: "drawer", id: v.id as DrawerId },
+				: v.cards
+					? { kind: "drawer", id: v.id as DrawerId, layout: "cards" }
+					: { kind: "drawer", id: v.id as DrawerId },
 			does:
 				v.does ??
 				(view
 					? `Shows the ${v.label}, keeps any drawer open`
 					: `Opens ${v.label}`),
-			keys: [v.label.toLowerCase(), "open", "show"],
+			keys: [
+				v.label.toLowerCase(),
+				"open",
+				"show",
+				...(v.cards ? ["cards", "activity"] : []),
+			],
 		}
 	}
 
@@ -1394,18 +1421,20 @@ export class PaletteModel {
 	frequencyActivityItem(): PaletteItem | null {
 		const c = this.#c
 		if (c.tunedHz === null) return null
-		const bw = c.config?.bandwidth
+		// the tuned channel (naming.ts): its raster frequency and half a raster step, never the audio bandwidth
 		return this.activityItem(
-			[
-				{
-					kind: "frequency",
-					hz: c.tunedHz,
-					...(bw ? { bandwidthHz: bw } : {}),
-				},
-			],
+			[{ kind: "frequency", hz: c.tunedHz }],
 			"find:here",
-			`Everything heard on ${mhz(c.tunedHz)}`,
-			"Calls, messages and decodes on this frequency",
+			historyLabel(
+				c.tunedHz,
+				tuningStep(c.bandplan, c.tunedHz),
+				savedNameAt(
+					c.tunedHz,
+					c.saved ?? [],
+					tuningStep(c.bandplan, c.tunedHz),
+				),
+			),
+			"Calls, messages and decodes on this channel",
 			"activity",
 		)
 	}

@@ -45,12 +45,50 @@ export interface AccessStoreState {
 	code?: string | null
 	/** This browser's session on a protected core (null: not paired, or a legacy core). */
 	session: AccessSessionDto | null
+	/**
+	 * This browser was paired and its session ended without a sign-out here: it expired, or was
+	 * signed out from another device. The pairing prompt then says "Session expired, pair again".
+	 */
+	sessionExpired?: boolean
 }
 
 /** Half the time left, at least a minute, within what setTimeout can hold. */
 export function refreshDelayMs(expiresAt: number, now: number): number {
 	return Math.min(Math.max((expiresAt - now) / 2, 60_000), 2 ** 31 - 1)
 }
+
+/** A browser session's lifetime: the core's default and largest `ttlMs` (src/access/schema.ts, 30 days). */
+export const SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000
+/**
+ * Launch and focus refresh the session once less than this is left: the lifetime less one day, so 29 days.
+ * A refresh gives a full 30 days again, so a browser used daily refreshes at most once a day of use and its
+ * session never runs out (the timer below only fires while the page stays open for half the time left).
+ */
+export const SESSION_REFRESH_BELOW_MS =
+	SESSION_LIFETIME_MS - 24 * 60 * 60 * 1000
+/**
+ * At most one launch or focus refresh per hour: with a core configured for a shorter lifetime (every
+ * session then has less than 29 days left) or a refresh that fails, focus would otherwise ask on every
+ * window switch. 24 asks a day at worst, one a day in the usual case.
+ */
+export const SESSION_REFRESH_MIN_GAP_MS = 60 * 60 * 1000
+
+/**
+ * Whether launch or focus should refresh a session expiring at `expiresAt`: less than 29 days left, not yet
+ * expired (the core refuses an expired one), and no such refresh asked in the last hour (`lastAt`).
+ */
+export function shouldRefreshSession(
+	expiresAt: number,
+	now: number,
+	lastAt: number | null,
+): boolean {
+	const left = expiresAt - now
+	if (left <= 0 || left >= SESSION_REFRESH_BELOW_MS) return false
+	return lastAt === null || now - lastAt >= SESSION_REFRESH_MIN_GAP_MS
+}
+
+/** Where this browser remembers it was paired (the session's expiry only; never the CSRF token). */
+export const PAIRED_KEY = "wavekit.access.paired"
 
 /** The first wait before start() asks an unanswering core again (ms); it doubles up to START_RETRY_MAX_MS. */
 export const START_RETRY_BASE_MS = 1000
@@ -126,7 +164,24 @@ export interface DataLayerOptions {
 	wsUrl?: string
 	fetch?: FetchLike
 	createSocket?: SocketFactory
+	/** The clock for session refresh decisions (tests); Date.now by default. */
+	now?: () => number
+	/** Where "this browser was paired" is remembered; localStorage by default, null for none. */
+	storage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null
+	/** Fires `focus` when the app comes back to the front; the window by default. */
+	focusTarget?: Pick<
+		EventTarget,
+		"addEventListener" | "removeEventListener"
+	> | null
+	/** Fires `visibilitychange` when the tab is shown or hidden; the document by default. */
+	visibilityTarget?: VisibilityTarget | null
 }
+
+/** What `visibilitychange` comes from: the document, or a fake in tests. */
+type VisibilityTarget = Pick<
+	EventTarget,
+	"addEventListener" | "removeEventListener"
+> & { readonly visibilityState: string }
 
 /** The browser's localStorage, or null (no window, or storage blocked). */
 function localStorageOrNull(): Storage | null {
@@ -162,31 +217,104 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		session: null,
 	})
 	const devices = new AccessDevicesStore(api)
+	const now = options.now ?? Date.now
+	const storage =
+		options.storage === undefined ? localStorageOrNull() : options.storage
+	const focusTarget =
+		options.focusTarget === undefined
+			? typeof window === "undefined"
+				? null
+				: window
+			: options.focusTarget
+	const visibilityTarget =
+		options.visibilityTarget === undefined
+			? typeof document === "undefined"
+				? null
+				: document
+			: options.visibilityTarget
 	let refreshTimer: ReturnType<typeof setTimeout> | null = null
+	// bumped on every session change: a refresh answer for an older session (signed out, replaced) is dropped
+	let generation = 0
 	let startTimer: ReturnType<typeof setTimeout> | null = null
+	let lastRefreshAt: number | null = null
+	let refreshing = false
 	let disposed = false
-	const setSession = (session: AccessSessionDto | null) => {
+	const remember = (session: AccessSessionDto | null) => {
+		try {
+			if (session) storage?.setItem(PAIRED_KEY, String(session.expiresAt))
+			else storage?.removeItem(PAIRED_KEY)
+		} catch {
+			// blocked site data: an expired session then reads as not paired
+		}
+	}
+	const wasPaired = (): boolean => {
+		try {
+			return (storage?.getItem(PAIRED_KEY) ?? null) !== null
+		} catch {
+			return false
+		}
+	}
+	/** `ended`: the session ended by itself (expired, or signed out elsewhere), not by a sign-out here. */
+	const setSession = (session: AccessSessionDto | null, ended = false) => {
 		if (refreshTimer) clearTimeout(refreshTimer)
 		refreshTimer = null
+		generation += 1
 		// an answer that arrives after dispose() must not arm a refresh on a layer nobody holds
 		if (disposed) return
-		access.set({ ...access.get(), session })
+		access.set({
+			...access.get(),
+			session,
+			sessionExpired: session === null && ended,
+		})
 		if (session === null) {
 			devices.clear()
+			if (!ended) remember(null)
 			return
 		}
+		remember(session)
+		const armed = generation
 		refreshTimer = setTimeout(
 			() => {
-				api.refreshSession().then(setSession, (error: unknown) => {
-					// 401 already cleared the session (onSessionLost); a network error retries later
-					if (isApiError(error) && error.status === 401) return
-					setSession(access.get().session)
-				})
+				api.refreshSession().then(
+					next => {
+						if (generation === armed) setSession(next)
+					},
+					(error: unknown) => {
+						// 401 already cleared the session (onSessionLost); a network error retries later
+						if (isApiError(error) && error.status === 401) return
+						if (generation === armed) setSession(access.get().session)
+					},
+				)
 			},
-			refreshDelayMs(session.expiresAt, Date.now()),
+			refreshDelayMs(session.expiresAt, now()),
 		)
 	}
-	const offSessionLost = api.onSessionLost(() => setSession(null))
+	/** Launch, focus and the tab shown again: refresh a session with less than 29 days left, at most once an hour. */
+	const refreshIfDue = () => {
+		const session = access.get().session
+		if (disposed || refreshing || session === null) return
+		if (!shouldRefreshSession(session.expiresAt, now(), lastRefreshAt)) return
+		lastRefreshAt = now()
+		refreshing = true
+		const asked = generation
+		api.refreshSession().then(
+			next => {
+				refreshing = false
+				if (generation === asked) setSession(next)
+			},
+			() => {
+				// 401 already cleared the session (onSessionLost); otherwise the old one stands, asked again in an hour
+				refreshing = false
+			},
+		)
+	}
+	const onFocus = () => refreshIfDue()
+	const onVisibility = () => {
+		if (visibilityTarget?.visibilityState === "visible") refreshIfDue()
+	}
+	focusTarget?.addEventListener("focus", onFocus)
+	visibilityTarget?.addEventListener("visibilitychange", onVisibility)
+	const offSessionLost = api.onSessionLost(() => setSession(null, true))
 	const connection = new Store<ConnectionState>(events.state)
 	const offState = events.onState(state => connection.set(state))
 	const tuner = new TunerStore(api, events)
@@ -260,6 +388,8 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			disposed = true
 			offState()
 			offSessionLost()
+			focusTarget?.removeEventListener("focus", onFocus)
+			visibilityTarget?.removeEventListener("visibilitychange", onVisibility)
 			if (refreshTimer) clearTimeout(refreshTimer)
 			if (startTimer) clearTimeout(startTimer)
 			layer.sources.dispose()
@@ -285,8 +415,15 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		try {
 			const state = await api.bootstrap()
 			access.set({ access: state, error: null, code: null, session: null })
-			if (state.mode === "protected" && state.bootstrap.access.sessionAvailable)
-				setSession(await api.getSession())
+			if (
+				state.mode === "protected" &&
+				state.bootstrap.access.sessionAvailable
+			) {
+				const session = await api.getSession()
+				// no session, yet this browser was paired: it expired (or was signed out from another device)
+				setSession(session, session === null && wasPaired())
+				refreshIfDue()
+			}
 			return true
 		} catch (error) {
 			access.set({

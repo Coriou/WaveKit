@@ -4,6 +4,7 @@ import {
 	CATCHUP_WINDOW_MS,
 	CHUNK_SIZE_BUCKETS,
 	GAP_BUCKETS,
+	INGEST_CELL_MS,
 	LINK_GAP_MS,
 	LINK_RECOVERY_WAIT_MS,
 	LINK_QUALITY_SLOT_MS,
@@ -16,7 +17,7 @@ import type {
 } from "./contract.js"
 
 const SLOTS = LINK_QUALITY_WINDOW_MS / LINK_QUALITY_SLOT_MS
-const CELL_MS = 250
+const CELL_MS = INGEST_CELL_MS
 const CELLS = 64
 const LOG_RATIO = Math.log(1.25)
 

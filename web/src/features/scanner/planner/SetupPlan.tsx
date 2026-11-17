@@ -14,6 +14,7 @@ import { errorMessage } from "../../../data/api-client.ts"
 import { presetWriteError } from "../../../data/scan-presets-store.ts"
 import { planIssues, takeoverImpact } from "../../../data/scanner-store.ts"
 import { useStore } from "../../../data/store.ts"
+import { showAppToast } from "../../../shell/toast.ts"
 import { Button } from "../../../ui/Button.tsx"
 import { Chip } from "../../../ui/Chip.tsx"
 import { Seg } from "../../../ui/Seg.tsx"
@@ -94,11 +95,6 @@ interface RowPop {
 }
 
 type Pop = RowPop | { kind: "options" | "save"; anchor: PopAnchor }
-
-interface Toast {
-	text: string
-	undo?: () => void
-}
 
 interface PreviewState {
 	preview: PlanPreview | null
@@ -222,7 +218,6 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 	const [tool, setTool] = useState<DrawKind>("add")
 	const [pop, setPop] = useState<Pop | null>(null)
 	const [renaming, setRenaming] = useState<string | null>(null)
-	const [toast, setToast] = useState<Toast | null>(null)
 
 	// ---- the view opens fitted on the plan's ranges, else on the region's VHF bands
 	useEffect(() => {
@@ -253,13 +248,6 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 		const fit = fitView([range])
 		if (fit) setView(fit)
 	}, [prefill, data.scanner])
-
-	// ---- toast (Undo after Remove)
-	useEffect(() => {
-		if (!toast) return
-		const t = setTimeout(() => setToast(null), 5000)
-		return () => clearTimeout(t)
-	}, [toast])
 
 	// ---- preview: debounced, a newer one aborts the older
 	const valid = draftValid(draft)
@@ -415,8 +403,7 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 		const before = setupStore.get().draft
 		set(d => removeRange(d, r.key))
 		setPop(null)
-		setToast({
-			text: `Removed ${r.name}`,
+		showAppToast(`Removed ${r.name}`, {
 			undo: () => updateDraft(() => before),
 		})
 	}
@@ -427,11 +414,11 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 		if (replaceId) {
 			await data.scanPresets.replace(replaceId, preset)
 			set(x => tagRanges(x, replaceId))
-			setToast({ text: `Updated “${name}”` })
+			showAppToast(`Updated “${name}”`)
 		} else {
 			const id = await data.scanPresets.create(preset)
 			if (id) set(x => tagRanges(x, id))
-			setToast({ text: `Saved “${name}” · first in the presets` })
+			showAppToast(`Saved “${name}” · first in the presets`)
 			presetRow.current?.scrollTo({ left: 0, behavior: "smooth" })
 		}
 		setPop(null)
@@ -440,8 +427,7 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 		const job = p.job
 		await data.scanPresets.remove(p.id)
 		setPop(null)
-		setToast({
-			text: `Deleted “${p.name}”`,
+		showAppToast(`Deleted “${p.name}”`, {
 			...(job
 				? {
 						undo: () => {
@@ -457,7 +443,7 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 										}))
 								})
 								.catch((error: unknown) =>
-									setToast({ text: presetWriteError(error) }),
+									showAppToast(presetWriteError(error), { tone: "warn" }),
 								)
 						},
 					}
@@ -766,24 +752,6 @@ export function SetupPlan({ mode, size, root, onHide }: SetupPlanProps) {
 					/>
 				))}
 			</div>
-
-			{toast && (
-				<div role="status" className="wk-toast wk-pl-toast">
-					<span className="wk-pl-toasttext">{toast.text}</span>
-					{toast.undo && (
-						<Button
-							variant="tonal"
-							size="sm"
-							onClick={() => {
-								toast.undo?.()
-								setToast(null)
-							}}
-						>
-							Undo
-						</Button>
-					)}
-				</div>
-			)}
 
 			{/* the first error is the footer's summary; more errors list here (warnings stay in its tooltip) */}
 			{errors.length > 1 && valid && (

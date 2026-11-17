@@ -217,6 +217,23 @@ const resourceSnapshotSchema = {
 		container: containerResourcesSchema,
 		sdrHosts: { type: "array", items: sdrHostStatusSchema },
 		sourceBackpressure: { type: "array", items: sourceBackpressureSchema },
+		linkAdvisories: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					sourceId: { type: "string" },
+					level: { type: "string", enum: ["none", "unproven", "dropping"] },
+					lossReason: {
+						type: "string",
+						enum: ["source", "core-busy", "unknown", "branch-congestion"],
+					},
+					since: { type: "string" },
+					episodeSince: { type: "string" },
+				},
+				required: ["sourceId", "level", "since"],
+			},
+		},
 	},
 	required: ["timestamp", "container", "sdrHosts", "sourceBackpressure"],
 } as const

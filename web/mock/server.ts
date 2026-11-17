@@ -110,6 +110,7 @@ import {
 	registerRecordingsMock,
 } from "./recordings.ts"
 import { registerOperatorData } from "./operator-data.ts"
+import { createLinkAdvisoryMock, linkControlSchema } from "./link-advisories.ts"
 import { registerBandPlansMock } from "./bandplans.ts"
 import {
 	normaliseSpectrumOptions,
@@ -155,6 +156,11 @@ export interface MockServerOptions {
 	 * 1.024 MS/s; frames follow the tuner's sample rate (WAVEKIT_MOCK_RETUNE_SWEEP=1).
 	 */
 	retuneSweep?: boolean
+	/**
+	 * Interval between `resources:snapshot` broadcasts, ms (WAVEKIT_MOCK_RESOURCES_MS). Default 2000, the core's
+	 * tick. Each carries the link advisory of ./link-advisories.ts.
+	 */
+	resourcesIntervalMs?: number
 	/**
 	 * Every other Activity read (GET /api/activity…, POST /api/activity/facets) answers 429 with this
 	 * Retry-After: "1", "30", an HTTP date 2 s ahead ("date") or a malformed value (WAVEKIT_MOCK_ACTIVITY_429).
@@ -2248,6 +2254,27 @@ export async function buildMockServer(
 	})
 	// --- Receiver controls. End. ---
 
+	// --- Link advisories (./link-advisories.ts): GET /api/resources, resources:snapshot, a scenario control. ---
+	const linkAdvisory = createLinkAdvisoryMock(MOCK_SOURCE_ID)
+	app.get("/api/resources", async () => linkAdvisory.snapshot())
+	app.post("/__mock/link-advisory", async (request, reply) => {
+		const parsed = linkControlSchema.safeParse(request.body ?? {})
+		if (!parsed.success)
+			return reply.code(400).send({ error: parsed.error.issues[0]?.message })
+		const result = linkAdvisory.control(parsed.data)
+		if (typeof result === "string")
+			return reply.code(409).send({ error: result })
+		// the change shows at once, as the core's next tick would
+		broadcast("resources", "resources:snapshot", linkAdvisory.snapshot())
+		return result
+	})
+	const resourcesTimer = setInterval(
+		() => broadcast("resources", "resources:snapshot", linkAdvisory.snapshot()),
+		Math.max(100, options.resourcesIntervalMs ?? 2000),
+	)
+	app.addHook("onClose", async () => clearInterval(resourcesTimer))
+	// --- Link advisories. End. ---
+
 	// --- Retune sweep scenario (./retune-sweep.ts): through the bands, then park. ---
 	let sweepTimer: ReturnType<typeof setTimeout> | null = null
 	// the sweep starts with the first spectrum subscription, so a page loaded late still sees it
@@ -3154,6 +3181,9 @@ async function main(): Promise<void> {
 			? { voiceEncryptionUnknown: true }
 			: {}),
 		...(env["WAVEKIT_MOCK_RETUNE_SWEEP"] === "1" ? { retuneSweep: true } : {}),
+		...(Number(env["WAVEKIT_MOCK_RESOURCES_MS"]) > 0
+			? { resourcesIntervalMs: Number(env["WAVEKIT_MOCK_RESOURCES_MS"]) }
+			: {}),
 		...(env["WAVEKIT_MOCK_OVERLOAD_HINT"] === "1"
 			? { overloadHint: true }
 			: {}),

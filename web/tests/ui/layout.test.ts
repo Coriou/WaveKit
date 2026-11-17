@@ -13,7 +13,7 @@ const at = (
 	H = 900,
 	extra: Partial<ShellGeometry> = {},
 ): ShellGeometry => ({ ...DEFAULT_GEOMETRY, W, H, dockW: 460, ...extra })
-// with the default islands the bottom row binds: Listen and a compact dock (Spectrum, Map, Messages, the drawers)
+// with the default islands the bottom row binds: Listen and a compact dock (Spectrum, Map, the drawers)
 const BOTTOM = G + 340 + G + DOCK_COMPACT + G
 
 describe("shellLayout", () => {

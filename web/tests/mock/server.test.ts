@@ -48,6 +48,33 @@ describe("mock server REST", () => {
 		expect((await inject("GET", "/api/access/bootstrap")).statusCode).toBe(404)
 	})
 
+	it("serves the link advisory in GET /api/resources and drives it from the scenario control", async () => {
+		const read = async () =>
+			(await inject("GET", "/api/resources")).json<{
+				timestamp: string
+				linkAdvisories: { sourceId: string; level: string }[]
+			}>()
+		expect((await read()).linkAdvisories).toEqual([])
+		const set = await inject("POST", "/__mock/link-advisory", {
+			level: "dropping",
+			lossReason: "core-busy",
+		})
+		expect(set.statusCode).toBe(200)
+		expect((await read()).linkAdvisories).toMatchObject([
+			{ sourceId: "rtl-0", level: "dropping", lossReason: "core-busy" },
+		])
+		expect(
+			(await inject("POST", "/__mock/link-advisory", { level: "lost" }))
+				.statusCode,
+		).toBe(400)
+		expect(
+			(await inject("POST", "/__mock/link-advisory", { endEpisode: true }))
+				.statusCode,
+		).toBe(409)
+		await inject("POST", "/__mock/link-advisory", { level: "absent" })
+		expect((await read()).linkAdvisories).toEqual([])
+	})
+
 	it("serves spectrum limits like the shipped config, and wider rows with a bigger summary budget", async () => {
 		const status = (await inject("GET", "/api/spectrum")).json<{
 			limits: { bins: { max: number } }

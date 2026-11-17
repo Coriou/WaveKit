@@ -79,13 +79,32 @@ describe("ui-check options", () => {
 		})
 	})
 
-	it("drives the Listen flow on the fake target alone", () => {
+	it("drives the naming flow on the fake target, on the Messages link", () => {
+		const o = parseOptions(["--flow=naming"])
+		expect(o.flow).toBe("naming")
+		expect(o.route).toBe("#/messages")
+		expect(parseOptions(["--flow=naming", "--route=#/messages"]).route).toBe(
+			"#/messages",
+		)
+		for (const argv of [
+			["--flow=naming", "--route=#/scanner"],
+			["--flow=naming", "--seed-recordings=5"],
+			["--flow=naming", "--measure", "--route=#/recordings"],
+		])
+			expect(() => parseOptions(argv)).toThrow(CannotRun)
+	})
+
+	it("drives the Listen and play flows on the fake target alone", () => {
 		expect(parseOptions([]).flow).toBeNull()
 		expect(parseOptions(["--flow=listen"]).flow).toBe("listen")
+		expect(parseOptions(["--flow=notices"]).flow).toBe("notices")
+		expect(parseOptions(["--flow=play"]).flow).toBe("play")
 		for (const argv of [
 			["--flow=scan"],
 			["--flow"],
 			["--flow=listen", "--seed-recordings=5"],
+			["--flow=notices", "--measure", "--route=#/recordings"],
+			["--flow=play", "--measure", "--route=#/recordings"],
 		])
 			expect(() => parseOptions(argv)).toThrow(CannotRun)
 		process.env["WAVEKIT_UI_CHECK_LIVE"] = "1"
@@ -94,6 +113,13 @@ describe("ui-check options", () => {
 				"--target=live",
 				"--url=http://127.0.0.1:1/",
 				"--flow=listen",
+			]),
+		).toThrow(/--target=fake/)
+		expect(() =>
+			parseOptions([
+				"--target=live",
+				"--url=http://127.0.0.1:1/",
+				"--flow=play",
 			]),
 		).toThrow(/--target=fake/)
 	})

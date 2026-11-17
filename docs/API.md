@@ -997,7 +997,18 @@ sample is under 2 s old, the answer waits for a new one, which reads the per-thr
 `GET /api/resources` is one snapshot of the core's resource use: container CPU and memory,
 one status per SDR host, and per-source backpressure. `/api/resources/container` and
 `/api/resources/backpressure` return just one of those parts. The `resources` WebSocket
-channel pushes the same data as it changes. Outside a container on cgroup v2, the "container"
+channel pushes the same data as it changes.
+
+The snapshot (and `resources:snapshot`) also carries optional `linkAdvisories`, one entry
+per network source with a link advisory, including `level: "none"` after a recovery, so a
+client can tell when a link condition clears. Each entry has `sourceId`, `level` (`none`,
+`unproven`, `dropping`), `lossReason` (as `LinkAdvisory.lossReason`, always present on
+`dropping`), `since` (ISO time the current `level` and `lossReason` began) and
+`episodeSince` (ISO time of the first `dropping` of the episode; kept while dropping and
+until the advisory has been non-dropping for 60 s, then removed, so a later `dropping`
+starts a new episode). The states are computed once per broadcast tick, before the
+snapshot is sent; `GET /api/resources` returns the last tick's states. Older cores omit
+the field. Outside a container on cgroup v2, the "container"
 figures describe the core's own cgroup, meaning its service or login session; they are
 unavailable if the core sits in the host's root cgroup.
 
@@ -1054,15 +1065,55 @@ Link-burst additions are optional and additive; older cores omit them:
 
 - `LinkAdvisory.burst` (`LinkBurstSummary`): nullable `worstStallMs`,
   `overflowedBytes10m`, `burstSeconds`.
-- `LinkAdvisory.lossReason`: `source` when bytes never reached the core (a
-  received-rate shortfall or receiver-side drops; only this makes `level`
-  `dropping`), `branch-congestion` when every byte arrived and an internal fanout
-  branch dropped them after an arrival gap (the link itself is not at fault).
-  Absent when nothing was lost.
+- `LinkAdvisory.lossReason`: why samples were lost; absent when nothing was lost.
+  `level: "dropping"` (fewer bytes read than the rate needs: a received-rate
+  shortfall or receiver-side drops) always carries one of three causes, decided
+  afresh at every check over the window W the loss can lie in: the received rate is
+  a 10 s average ending at the last 5 s metrics report, so W reaches back to the
+  report that bounds that average, 10 to 15 s (at most 15 s); a `dropping` from
+  receiver-side drops alone, with no average, uses the last 10 s. The core's load
+  comes from one signal, the core main-thread load reading (event-loop utilisation
+  per 2 s take and worst event-loop delay); any load governor reads the same signal.
+  Over W the advisor reads the busiest single take (plus the take just before W, so
+  a take that straddles the end of a busy spell, and reads diluted, does not hide
+  it), the worst event-loop delay (including the interval in progress) and the
+  source's longest arrival gap:
+  1. `core-busy` when a take was at least 0.90 busy or the worst event-loop delay
+     was at least 200 ms (at 2.4 MS/s that stall is 960 kB, more than a typical
+     socket buffer holds). It means the link was not assessed: the core's own load
+     explains the loss, and it takes precedence over an arrival gap on purpose, since
+     under stress a gap is not trustworthy evidence about the link;
+  2. `source` when an arrival gap exceeded the worst event-loop delay by at least
+     200 ms (a gap the core's own stalls cannot explain);
+  3. `source` when every take over W was read and under 0.70 busy, the take in
+     progress (once at least 0.5 s long) is under 0.70 too, and the loop delay
+     stayed under 50 ms (which cannot lose bytes);
+  4. otherwise `unknown`: a take between 0.70 and 0.90, a loop delay between 50 and
+     200 ms, or missing evidence (for example when the core stopped sampling its
+     event loop for over 6 s).
+
+  Because W spans the whole average, loss the core caused leaves the average no
+  later than the busy takes that caused it leave W: the end of a busy spell never
+  reads `source`, and a link that keeps falling short after the core recovered reads
+  `source` once W holds only healthy takes (within about 20 s). Evidence right at a
+  threshold may switch the cause between `source` and `unknown` from one check to the
+  next. A source that is disconnected, or whose feed is paused or resuming, is not
+  classified: it reads `level: "none"` with no `lossReason`, and its 10 s window
+  starts afresh once it is live again. While the tuner is under external control,
+  `source` reads `unknown`, and when the core takes the tuner back the received
+  average starts afresh, so a shortfall from that time never reads `source`. Only
+  `source` is the receiver link's fault, so only it is helped by a lower sample rate.
+  `branch-congestion` (never on `dropping`) means every byte arrived and an internal
+  fanout branch dropped them after an arrival gap.
+
 - `ResourceAlert.lossReason` (`resources:alert` of type `link-capacity` only): the
   advisory's `lossReason`, with the same values; absent when the advisory has none.
-  Clients treat only `source` as loss on the receiver link; without the field they
-  fall back to `severity` (`critical` is a `dropping` link).
+  An alert is sent once per change of `level` or `lossReason`, so a cause change
+  re-reports; a recovery to `none` sends no alert (it shows in the snapshot's
+  `linkAdvisories`). Clients treat only `source` as loss on the receiver link. The web
+  app reads the cause from the snapshot's `linkAdvisories` only: a core that sends no
+  `linkAdvisories` gives no link notice and no Receiver marker, so it claims nothing
+  rather than guessing from `severity`.
 - `DecoderEfficiencySourceView.attribution` (`DropAttribution`) and `lateDrops`
   (`DecoderLateDropsView`): `condemningWindows`, `windows`, nullable ISO
   `cooldownUntil`, `sheddable`, and `held` (`nothing-sheddable`, `link-or-unknown`, or
