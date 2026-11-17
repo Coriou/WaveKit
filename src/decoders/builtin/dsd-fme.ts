@@ -4536,6 +4536,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				},
 				"New call before pending emitted, discarding previous",
 			)
+			this.dmrClearance.ended(this.pendingCall.state.callId)
 			this.pendingCall = null
 		}
 

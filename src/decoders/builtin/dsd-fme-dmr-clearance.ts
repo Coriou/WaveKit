@@ -378,8 +378,10 @@ export class DmrClearance {
 	/** Calls marked encrypted: sticky per call id, whatever lane they move to. */
 	private readonly encryptedIds = new Set<string>()
 	/**
-	 * Calls ever recorded with no slot lane ("x": opened after a bare or
-	 * bracketless sync): never clearable, whatever lane they move to.
+	 * Calls ever seen on no slot lane ("x": a line after a bare or bracketless
+	 * sync while the call was live): never clearable, whatever lane they move
+	 * to. Fail closed: one bare sync inside a direct-mode call costs its
+	 * clearance for the rest of the call.
 	 */
 	private readonly unplacedIds = new Set<string>()
 
@@ -421,6 +423,9 @@ export class DmrClearance {
 	 */
 	restart(): void {
 		this.decoderGeneration++
+		// Every live call was ended before a restart, so no id is still owed its trust.
+		this.encryptedIds.clear()
+		this.unplacedIds.clear()
 		this.mode = undefined
 		for (const key of LANES) {
 			const generation = this.lane(key).modeGeneration + 1
