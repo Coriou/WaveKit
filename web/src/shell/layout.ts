@@ -134,12 +134,12 @@ export function anchorInDirection(
 	return best
 }
 
-// two rects closer than one gutter (the -1 lets edges exactly one gutter apart pass)
+// two rects closer than one gutter (the half pixel lets edges exactly one gutter apart pass; 15 px apart is a hit)
 const hits = (a: Rect, b: Rect): boolean =>
-	a.x < b.x + b.w + G - 1 &&
-	b.x < a.x + a.w + G - 1 &&
-	a.y < b.y + b.h + G - 1 &&
-	b.y < a.y + a.h + G - 1
+	a.x < b.x + b.w + G - 0.5 &&
+	b.x < a.x + a.w + G - 0.5 &&
+	a.y < b.y + b.h + G - 0.5 &&
+	b.y < a.y + a.h + G - 0.5
 
 /** The card's free anchors (canvas shellLayout): each is pushed off the islands along its own axis, dropped if it
  * still collides or leaves the free area, and dropped within 48 px of an earlier one. "Above Listen" sits at

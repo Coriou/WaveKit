@@ -52,6 +52,7 @@ import {
 	type Point,
 } from "./layout.ts"
 import {
+	cardObstacles,
 	computeLayout,
 	DEFAULT_SIZES,
 	PLAYER_STOREY_W,
@@ -61,12 +62,15 @@ import {
 	type Rect,
 	type Size,
 } from "./layout/compute.ts"
+import { union } from "./layout/geometry.ts"
 import { bottomLeft, slotAttrs, topLeft } from "./layout/slot.ts"
 import {
 	cardLineForced,
 	cardMinimised,
 	dockedSlot,
 	guestLayer,
+	mapReports,
+	playerCompactForced,
 	PlotLayoutContext,
 	publishedLayout,
 	statusReports,
@@ -121,6 +125,19 @@ export interface ShellProps {
 	drawerWidthStore?: DrawerWidthStore
 }
 
+/** How long the tuned card glides to a new home (shell.css `.wk-shell-cardslot`: --wk-dur-4, 260 ms), and the margin
+ * after it before a slot held for the glide shows (a frame or two of the transition's end). */
+export const CARD_GLIDE_MS = 260
+export const CARD_GLIDE_MARGIN_MS = 60
+
+const reducedMotion = () =>
+	typeof window !== "undefined" &&
+	typeof window.matchMedia === "function" &&
+	window.matchMedia("(prefers-reduced-motion: reduce)").matches
+
+const sameRect = (a: Rect, b: Rect) =>
+	a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h
+
 const keyOf = (c: Closed): string =>
 	c.kind === "palette" ? "palette" : `${c.kind}:${c.id}`
 
@@ -132,7 +149,13 @@ interface Measured {
 	readonly receiver: Size
 	readonly listen: Size
 	readonly dock: { readonly wide: Size; readonly compact: Size }
+	/** The player in the form it chose itself (its full transport while only the layout compacts it), or null. */
 	readonly player: Size | null
+	/** The player chose its compact line itself (its row is open in the visible panel). */
+	readonly playerOwnCompact: boolean
+	/** The player's last measured full transport and compact line. */
+	readonly playerFull: Size
+	readonly playerCompact: Size
 	readonly cardExpanded: Size
 	readonly cardLine: Size
 	/** Open island panels' sizes (the plot keeps its labels off them). */
@@ -149,6 +172,9 @@ const INITIAL: Measured = {
 	listen: DEFAULT_SIZES.listen,
 	dock: DEFAULT_SIZES.dock,
 	player: null,
+	playerOwnCompact: false,
+	playerFull: DEFAULT_SIZES.player,
+	playerCompact: DEFAULT_SIZES.playerCompact,
 	cardExpanded: DEFAULT_SIZES.cardExpanded,
 	cardLine: DEFAULT_SIZES.cardLine,
 	panels: [],
@@ -168,6 +194,9 @@ function sameMeasured(a: Measured, b: Measured): boolean {
 		sameSize(a.dock.wide, b.dock.wide) &&
 		sameSize(a.dock.compact, b.dock.compact) &&
 		sameSize(a.player, b.player) &&
+		a.playerOwnCompact === b.playerOwnCompact &&
+		sameSize(a.playerFull, b.playerFull) &&
+		sameSize(a.playerCompact, b.playerCompact) &&
 		sameSize(a.cardExpanded, b.cardExpanded) &&
 		sameSize(a.cardLine, b.cardLine) &&
 		a.drawerSlot === b.drawerSlot &&
@@ -215,9 +244,17 @@ export function Shell({
 	const [resizing, setResizing] = useState(false)
 	// the shell re-renders when the wanted anchor changes or a drag starts or ends, never on pointer moves
 	const cardAt = useStore(cardStore, s => s.at)
-	const dragging = useStore(cardStore, s => s.drag !== null)
+	// the live drag position: the layout gives the plot and ui-check the card's rectangle under the pointer
+	const drag = useStore(cardStore, s => s.drag)
+	const dragging = drag !== null
 	const reports = useStore(statusReports)
 	const cardMin = useStore(cardMinimised)
+	const mapReport = useStore(mapReports)
+	// the card's glide to a new home: the box it sweeps (from where it was), while it lasts
+	const [glide, setGlide] = useState<{
+		from: Rect
+		kind: "yield" | "move"
+	} | null>(null)
 	const slotVersion = useSyncExternalStore(
 		noticeSlots.subscribe,
 		noticeSlots.version,
@@ -281,9 +318,18 @@ export function Shell({
 			const cardEl = e["card"]?.firstElementChild ?? null
 			const cardSize = sizeOf(cardEl instanceof HTMLElement ? cardEl : null)
 			const cardShownLine = cardEl?.hasAttribute("data-min") ?? false
+			// the player: its full transport and compact line measured whenever shown; while the layout compacts it
+			// (data-forced) it still asks for its full transport, so the layout can give it back
 			const playerEl = e["player"]?.firstElementChild ?? null
 			const playerH =
 				playerEl instanceof HTMLElement ? playerEl.offsetHeight : 0
+			const playerCompactShown = playerEl?.hasAttribute("data-compact") ?? false
+			const playerForced = playerEl?.hasAttribute("data-forced") ?? false
+			const pSize = { w: PLAYER_STOREY_W, h: playerH }
+			const playerFull =
+				playerH > 0 && !playerCompactShown ? pSize : prev.playerFull
+			const playerCompact =
+				playerH > 0 && playerCompactShown ? pSize : prev.playerCompact
 			const panels: { island: IslandId; size: Size }[] = []
 			if (open) {
 				const box = sizeOf(e[`${open === "receiver" ? "rx" : open}Box`])
@@ -302,7 +348,15 @@ export function Shell({
 						? { ...prev.dock, compact: dockSize }
 						: { ...prev.dock, wide: dockSize }
 					: prev.dock,
-				player: playerH > 0 ? { w: PLAYER_STOREY_W, h: playerH } : null,
+				player:
+					playerH > 0
+						? playerCompactShown && playerForced
+							? playerFull
+							: pSize
+						: null,
+				playerOwnCompact: playerCompactShown && !playerForced,
+				playerFull,
+				playerCompact,
 				// a hidden card keeps its last sizes: falling back to the default would show it again when it is
 				// taller than the default, and the card would flip between shown and hidden
 				cardExpanded: cardSize && !cardShownLine ? cardSize : prev.cardExpanded,
@@ -340,6 +394,11 @@ export function Shell({
 		listen: geo.listen,
 		dock: geo.dock,
 		player: geo.player,
+		...(geo.player && !geo.playerOwnCompact
+			? { playerCompact: geo.playerCompact }
+			: {}),
+		map: state.view === "map" ? mapReport : null,
+		motion: { cardDrag: drag, cardFrom: glide?.from ?? null },
 		card: card
 			? {
 					expanded: geo.cardExpanded,
@@ -364,13 +423,67 @@ export function Shell({
 				: null,
 		panels: geo.panels,
 	}
-	const L: Layout = computeLayout(input)
+	// the card's glide (DESIGN.md, "Motion"): when its home moves, the box from where it stood to its new home is
+	// swept until the glide ends; slots entering that box are held out of sight meanwhile (computeLayout's `held`). A
+	// move the layout forces (the anchor unchanged) eases out without overshoot, so it never leaves the box. The
+	// render that moves the card already holds them (no frame shows them over the card's old place).
+	const lastCard = useRef<{ r: Rect | null; at: string; dragging: boolean }>({
+		r: null,
+		at: cardAt,
+		dragging: false,
+	})
+	const L0: Layout = computeLayout(input)
+	const was = lastCard.current
+	const startsGlide =
+		!dragging &&
+		L0.cardNow !== null &&
+		was.r !== null &&
+		!sameRect(was.r, L0.cardNow) &&
+		!reducedMotion()
+	const glideNow = startsGlide
+		? {
+				from: glide ? union(glide.from, was.r as Rect) : (was.r as Rect),
+				kind:
+					was.at === cardAt && !was.dragging
+						? ("yield" as const)
+						: ("move" as const),
+			}
+		: glide
+	const L: Layout =
+		startsGlide && glideNow
+			? computeLayout({
+					...input,
+					motion: { cardDrag: drag, cardFrom: glideNow.from },
+				})
+			: L0
 	const lineForced = L.card !== null && L.card.form === "line" && !cardMin
+	const playerForced = L.player?.form === "compact"
+	const heldSet = new Set(L.held)
+
+	const glideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+	useLayoutEffect(() => {
+		lastCard.current = { r: L.cardNow, at: cardAt, dragging }
+		if (!startsGlide || !glideNow) return
+		setGlide(glideNow)
+		if (glideTimer.current !== null) clearTimeout(glideTimer.current)
+		glideTimer.current = setTimeout(() => {
+			glideTimer.current = null
+			setGlide(null)
+		}, CARD_GLIDE_MS + CARD_GLIDE_MARGIN_MS)
+	})
+	useEffect(
+		() => () => {
+			if (glideTimer.current !== null) clearTimeout(glideTimer.current)
+		},
+		[],
+	)
 
 	// publish what elements outside the shell's tree read (the connection chip, status guests, the card)
 	useLayoutEffect(() => {
 		publishedLayout.set(L)
 		if (cardLineForced.get() !== lineForced) cardLineForced.set(lineForced)
+		if (playerCompactForced.get() !== playerForced)
+			playerCompactForced.set(playerForced)
 		const slot =
 			L.status.where === "drawer-slot"
 				? drawerNoticeSlot(drawerBox.current)
@@ -383,6 +496,7 @@ export function Shell({
 			freeW: L.cardFreeW,
 			H: geo.H,
 			cardH: L.card?.h ?? 0,
+			obstacles: cardObstacles(L),
 		}
 		if (!L.card && cardStore.dragging) cardStore.cancelDrag()
 	})
@@ -391,6 +505,7 @@ export function Shell({
 			publishedLayout.set(null)
 			dockedSlot.set(null)
 			cardLineForced.set(false)
+			playerCompactForced.set(false)
 		},
 		[],
 	)
@@ -419,6 +534,7 @@ export function Shell({
 		L.dock === null,
 		L.pane !== null,
 		geo.player === null,
+		L.player?.form,
 		slotVersion,
 	])
 
@@ -542,6 +658,9 @@ export function Shell({
 			headRef={headRef}
 			boxRef={boxRef}
 			rect={rect}
+			panelMaxH={L.panelMaxH[id]}
+			panelDrop={L.panelDrop[id]}
+			yielded={L.yielded.includes(id)}
 			style={{ ...style, zIndex: state.panel === id ? 6 : 3 }}
 		/>
 	)
@@ -559,6 +678,17 @@ export function Shell({
 			className="wk-shell"
 			data-view={state.view}
 			data-resizing={resizing || undefined}
+			// what the layout lets wait now and holds for a glide (read by ui-check: an island missing from the screen
+			// must be listed here)
+			data-wk-waiting={
+				[
+					...L.status.waiting.map(id => `status:${id}`),
+					...(L.playerWaiting ? ["player"] : []),
+					...L.yielded,
+					...(L.map?.covered.map(c => `map:${c}`) ?? []),
+				].join(" ") || undefined
+			}
+			data-wk-held={L.held.join(" ") || undefined}
 			// the plot body's top and its status notes' centre come from the layout (plot.css, band-ruler.css)
 			style={
 				{
@@ -574,13 +704,7 @@ export function Shell({
 			</PlotLayoutContext>
 			{state.view === "map" && (
 				<Suspense fallback={null}>
-					<MapView
-						insets={{
-							top: L.map.top,
-							right: L.map.right,
-							phone: L.dock === null,
-						}}
-					/>
+					<MapView placement={L.map} phone={L.dock === null} />
 				</Suspense>
 			)}
 
@@ -610,7 +734,12 @@ export function Shell({
 			)}
 			{card && L.card && (
 				<CardPlaceContext.Provider value={cardStore}>
-					<CardSlot store={cardStore} at={L.card} slotRef={refs.card}>
+					<CardSlot
+						now={L.cardNow ?? L.card}
+						dragging={dragging}
+						glide={glideNow?.kind ?? null}
+						slotRef={refs.card}
+					>
 						{card}
 					</CardSlot>
 				</CardPlaceContext.Provider>
@@ -648,6 +777,7 @@ export function Shell({
 					data-full={d.shape === "column" || undefined}
 					data-pane={paneOn || pushedOn || undefined}
 					data-expanded={expanded || undefined}
+					data-held={heldSet.has("drawer") || undefined}
 					{...slotAttrs("drawer", d)}
 					style={topLeft(d, true)}
 				>
@@ -680,7 +810,12 @@ export function Shell({
 			)}
 
 			{paneOn && L.pane && pane && PaneContent && (
-				<PaneSlot ref={paneBox} rect={L.pane} label={pane.label}>
+				<PaneSlot
+					ref={paneBox}
+					rect={L.pane}
+					label={pane.label}
+					held={heldSet.has("pane")}
+				>
 					<Suspense
 						fallback={
 							<div className="wk-shell-pane-wait">
@@ -702,6 +837,7 @@ export function Shell({
 					maxW={d.maxW}
 					rect={L.grip}
 					onResizing={setResizing}
+					held={heldSet.has("grip")}
 				/>
 			)}
 
@@ -722,10 +858,13 @@ export function Shell({
 				</button>
 			)}
 
-			{/* the one recording player, the storey above Listen; empty while nothing plays */}
+			{/* the one recording player, the storey above Listen; empty while nothing plays. Out of sight (still
+			    playing, still measured) while the window has no height for it or the card glides through it */}
 			<div
 				ref={refs.player}
 				className="wk-shell-player"
+				data-pending={L.playerWaiting || undefined}
+				data-held={heldSet.has("player") || undefined}
 				{...slotAttrs("player", L.player)}
 				style={{
 					...bottomLeft(
@@ -749,6 +888,7 @@ export function Shell({
 
 			<NoticeRegion
 				status={L.status}
+				held={L.held}
 				palette={state.palette}
 				receiverOpen={state.panel === "receiver"}
 			/>
@@ -771,29 +911,31 @@ export function Shell({
 	)
 }
 
-/** The tuned card's slot: on its anchor (gliding there), or under the pointer while dragged. Only this re-renders
- * on pointer moves; the card element itself is the same and React skips it. */
+/** The tuned card's slot: on its anchor (gliding there), or under the pointer while dragged (the layout's `cardNow`,
+ * clamped clear of the islands). The card element itself is the same and React skips it. */
 function CardSlot({
-	store,
-	at,
+	now,
+	dragging,
+	glide,
 	slotRef,
 	children,
 }: {
-	store: CardPlaceStore
-	at: Rect
+	now: Rect
+	dragging: boolean
+	/** A glide in progress: "yield" (the layout moved its home) eases out with no overshoot. */
+	glide: "yield" | "move" | null
 	slotRef: Ref<HTMLDivElement>
 	children: ReactNode
 }) {
-	const drag = useStore(store, s => s.drag)
-	const p = drag ?? at
 	return (
 		<div
 			ref={slotRef}
 			className="wk-shell-cardslot"
-			data-dragging={drag ? "" : undefined}
-			{...slotAttrs("card", at)}
+			data-dragging={dragging ? "" : undefined}
+			data-glide={glide ?? undefined}
+			{...slotAttrs("card", now)}
 			style={{
-				transform: `translate(${p.x}px, ${p.y}px)${drag ? " scale(1.02)" : ""}`,
+				transform: `translate(${now.x}px, ${now.y}px)`,
 			}}
 		>
 			{children}

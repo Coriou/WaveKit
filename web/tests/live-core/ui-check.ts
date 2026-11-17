@@ -33,7 +33,10 @@
  *   minimised to its line where it shows), every `[data-wk-slot]` box: none may intersect or crowd another or
  *   leave the window's margin, each must equal its `data-wk-rect`, no chip may lie under one, no status item or the
  *   player on the plot's chips or rows, and the frame, the player and the card's home may not move between a
- *   viewport's cells. The report gains `layout`.
+ *   viewport's cells; every expected island must be on screen or listed as waiting; playback starting and one
+ *   drawer opening per viewport are sampled frame by frame with the transitions on; the Map view's chrome is
+ *   checked at every viewport with and without Activity open, and the phone's Listen panel against the Receiver.
+ *   The report gains `layout`.
  * - `--flow=naming` (fake target only): names and the removed Messages view on the same mock core: `#/messages`
  *   lands on Activity in Cards, a scanner row reads "FM voice", a roll-over part "Part 1 of 3 · continues", a tag
  *   at a saved frequency its saved name, and no visible "Show in" (naming-flow.ts). The report gains `naming`.

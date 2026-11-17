@@ -179,7 +179,8 @@ describe("computeLayout: frame and stack (expected rectangles)", () => {
 				expect(L.listen, d).toEqual(t.listen)
 				expect(box(L.dock), d).toEqual(t.dock)
 				expect(L.find, d).toEqual(t.find)
-				expect(L.player, d).toEqual(t.player)
+				expect(box(L.player), d).toEqual(t.player)
+				expect(L.player?.form, d).toBe("full")
 				expect(L.plot.insetTop, d).toBe(t.inset)
 				// the card hides under covering surfaces only; elsewhere its home stays
 				if (d !== "expanded") expect(box(L.card), d).toEqual(t.card)
@@ -434,7 +435,7 @@ describe("computeLayout: status slot", () => {
 		).toBe("compact")
 	})
 
-	it("the lowest-ranked state item waits when nothing else fits", () => {
+	it("an item the slot cannot hold degrades to the strip under the top rail before it waits", () => {
 		const chip: StatusItem = {
 			id: "connection",
 			kind: "connection",
@@ -443,6 +444,38 @@ describe("computeLayout: status slot", () => {
 		const L = computeLayout(
 			input(1100, 800, { status: [CONDITION, chip, RECEIPT] }),
 		)
+		expect(L.status.where).toBe("strip")
+		expect(L.status.waiting).toEqual([])
+		expect(L.status.items.map(i => i.id)).toEqual([
+			"condition",
+			"connection",
+			"receipt",
+		])
+		// the strip: 16 px in, 8 under the top rail, as wide as the window less both gutters
+		expect(L.status.strip).toMatchObject({ x: 16, y: 80, w: 1068 })
+		expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+	})
+
+	it("the lowest-ranked state item waits in the slot when the strip would show no more", () => {
+		const chip: StatusItem = {
+			id: "connection",
+			kind: "connection",
+			forms: { full: { w: 300, h: 36 }, compact: { w: 200, h: 36 } },
+		}
+		// an attached pane covers the strip and the drawer has no notice slot: every strip item would wait
+		const base = input(1100, 800, { status: [CONDITION, chip, RECEIPT] })
+		const L = computeLayout({
+			...base,
+			drawer: {
+				id: "activity",
+				wantedW: 420,
+				expanded: false,
+				pane: { want: true, pushIn: false },
+				hasNoticeSlot: false,
+			},
+		})
+		expect(L.pane).not.toBeNull()
+		expect(L.status.where).toBe("rail")
 		expect(L.status.waiting).toEqual(["connection"])
 		expect(L.status.items.map(i => i.id)).toEqual(["receipt", "condition"])
 	})

@@ -73,6 +73,7 @@ import {
 	plotLayout,
 } from "./layout.ts"
 import { BandRuler } from "./BandRuler.tsx"
+import { PlotNote } from "./PlotNote.tsx"
 import { isReadOnly } from "../app/context.ts"
 import { confidenceText } from "../data/scanner-format.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
@@ -362,11 +363,19 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 
 	// the shell layout's plot contract: where the scale rows must end, and the chrome the chips keep off
 	const shellPlot = useContext(PlotLayoutContext)
-	const layout = plotLayout(
-		size.h,
-		(discRow ? DISCOVERY_ROW_CSS : 0) + RULER_CSS,
-		shellPlot?.rowsMaxCss,
-	)
+	// a short window collapses the rows in the layout's stated order: lean drops the discovery row and the ruler,
+	// none leaves the waterfall alone (DESIGN.md, "Insufficient height")
+	const rowsMode = shellPlot?.rows ?? "full"
+	const showDisc = discRow && rowsMode === "full"
+	const showRuler = rowsMode === "full"
+	const layout =
+		rowsMode === "none"
+			? { traceCss: 0, gapCss: 0, splitRatio: 0 }
+			: plotLayout(
+					size.h,
+					(showDisc ? DISCOVERY_ROW_CSS : 0) + (showRuler ? RULER_CSS : 0),
+					shellPlot?.rowsMaxCss,
+				)
 	const exclusions = shellPlot?.exclusions
 	const takenKey = exclusions
 		? exclusions.map(r => `${r.x},${r.y},${r.w},${r.h}`).join(";")
@@ -550,7 +559,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 				<StatusGuest id="paused" kind="paused">
 					<ReceiverPausedBadge data={data} sourceId={sourceId} />
 				</StatusGuest>
-				{size.w > 0 && view && (
+				{size.w > 0 && view && rowsMode !== "none" && (
 					<>
 						<div
 							className="wk-plot-band"
@@ -634,7 +643,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 								tunedHz={vfoHz}
 							/>
 						</div>
-						{discRow && (
+						{showDisc && (
 							<div
 								className="wk-plot-band wk-plot-discs"
 								data-unverified={unverified ? "" : undefined}
@@ -697,42 +706,34 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					</>
 				)}
 				{sourceId === null && (
-					<div className="wk-plot-note">No source connected</div>
+					<PlotNote id="no-source" status={false}>
+						No source connected
+					</PlotNote>
 				)}
 				{linkNote !== null &&
 					engineError === null &&
 					sourceId !== null &&
-					!stream.paused && (
-						<div className="wk-plot-note" role="status">
-							{linkNote}
-						</div>
-					)}
+					!stream.paused && <PlotNote id="link">{linkNote}</PlotNote>}
 				{engineError !== null && sourceId !== null && !stream.paused && (
-					<div className="wk-plot-note" role="status">
-						{engineError}
-					</div>
+					<PlotNote id="engine">{engineError}</PlotNote>
 				)}
 				{graphics?.kind === "none" &&
 					graphics.reason !== null &&
 					engineError === null &&
 					sourceId !== null && (
-						<div className="wk-plot-note" role="status">
-							{graphics.reason}
-						</div>
+						<PlotNote id="graphics">{graphics.reason}</PlotNote>
 					)}
 				{starting &&
 					linkNote === null &&
 					engineError === null &&
 					!stream.paused && (
-						<div className="wk-plot-note" role="status">
-							Starting the spectrum…
-						</div>
+						<PlotNote id="starting">Starting the spectrum…</PlotNote>
 					)}
 				{offScale !== null &&
 					linkNote === null &&
 					engineError === null &&
 					!stream.paused && (
-						<div className="wk-plot-note wk-plot-note-action" role="status">
+						<PlotNote id="off-scale" action>
 							{offScale === "below"
 								? "The noise floor is below the fixed scale"
 								: "The noise floor is above the fixed scale"}
@@ -743,10 +744,10 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 							>
 								Use Auto range
 							</Button>
-						</div>
+						</PlotNote>
 					)}
 			</div>
-			{size.w > 0 && view && capture && (
+			{size.w > 0 && view && capture && showRuler && (
 				<BandRuler
 					data={data}
 					controller={controller}
@@ -758,7 +759,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 						layout.traceCss +
 						AXIS_CSS +
 						LANES_CSS +
-						(discRow ? DISCOVERY_ROW_CSS : 0)
+						(showDisc ? DISCOVERY_ROW_CSS : 0)
 					}
 					discoveries={discOnly}
 					tunedHz={vfoHz}

@@ -22,6 +22,8 @@ export interface DrawerGripProps {
 	/** Its rectangle from the shell layout (on the drawer's left edge). */
 	rect: Rect
 	onResizing: (on: boolean) => void
+	/** Held out of sight while the tuned card glides through its rectangle (layout motion rule). */
+	held?: boolean
 }
 
 const KEY_STEP: Readonly<Record<string, (w: number, step: number) => number>> =
@@ -40,6 +42,7 @@ export function DrawerGrip({
 	maxW,
 	rect,
 	onResizing,
+	held = false,
 }: DrawerGripProps) {
 	const from = useRef<{ px: number; w: number; pointer: number } | null>(null)
 	const [on, setOn] = useState(false)
@@ -89,6 +92,7 @@ export function DrawerGrip({
 				title="Drag to resize · double-click resets"
 				className="wk-shell-grip"
 				data-on={on || undefined}
+				data-held={held || undefined}
 				{...slotAttrs("grip", rect)}
 				style={topLeft(rect, true)}
 				onPointerDown={onPointerDown}

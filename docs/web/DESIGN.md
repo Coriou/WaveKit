@@ -1026,8 +1026,11 @@ Condensed + Noto Sans, Tabler-based icons).
     two groups that never push each other: the state group packed against the Receiver
     (condition, connection, then paused), the receipt against the Tuner. When the row is too
     narrow: the condition goes compact (168 px, one line), the connection chip title only, the
-    condition an icon, the receipt wraps to two lines, then the lowest-ranked item waits. A lone
-    item wraps to two lines before it changes form. Below a 200 px slot or with the Receiver
+    condition an icon, the receipt wraps to two lines; then every item moves to the strip under the
+    top rail (below) when the strip shows more of them than the slot can, and only then does the
+    lowest-ranked item wait. A lone item wraps to two lines before it changes form. A waiting item's
+    timer waits with it (a toast's 6 s or 8 s run only while it is on screen, so a receipt with Undo
+    is never lost unseen); it shows, with its whole time, when there is room. Below a 200 px slot or with the Receiver
     stacked (phones) the items stack in a strip 8 px under the top rail, at the strip's width;
     with a covering drawer open they dock in its notice slot (the 2026-11-17 slot entry stands).
     Beside a drawer column (a narrow slot on a wide window) the strip stops 16 px left of the
@@ -1038,7 +1041,51 @@ Condensed + Noto Sans, Tabler-based icons).
   - The *plot* gets its inset (top rail + 12: 84, 132 with the scan hold row, 148 on a phone), a
     cap so the scale rows end 16 px above the stack, and every chrome rectangle over its body as
     *exclusions*: `placeLabels` treats them as taken, so signal chips flow around the card, the
-    strip and the drawer. Its status notes centre on the plot left of a drawer column.
+    strip and the drawer. Its status notes ("No source connected", "Use Auto range") stand on the
+    note row (40 % down, centred on the plot left of a drawer column), else at the nearest free
+    spot along that row and the rows around it, 8 px clear of every exclusion; with no free spot
+    (a sheet over the plot) a note is a status item in the status slot, never under chrome.
+  - *Open island panels* are part of the layout. A panel going down starts 8 px under the whole
+    top rail (under the Tuner's hold row too, when that is the taller island) and keeps 8 px above
+    the bottom rail; Listen's going up starts 8 px under the top rail (on a
+    phone: under the stacked Receiver, 390×844 caps it at 612 px), and it scrolls past that. On a
+    stacked top rail the Receiver yields (out of sight) while the Tuner's panel is open over it.
+    No frame island ever covers an open panel.
+  - *Motion.* Frame elements never ease. When a layout change moves the tuned card (the player
+    starting, a drawer opening over a right anchor), the card glides (260 ms) to its new home and
+    sweeps the box of its two homes: a slot entering that box (the player, a drawer, a pane, a
+    status item, the map's side panel) is held out of sight until the card lands, and the plot's
+    exclusions cover the whole box meanwhile. A move the layout forces eases out with no
+    overshoot, so the card never leaves that box; a move the reader asks for keeps the spring.
+    With reduced motion there is no glide and nothing is held.
+  - *Dragging the card.* The dragged card's live rectangle is the card's rectangle for the plot's
+    exclusions and `data-wk-rect`. It stays 16 px inside the window and left of a drawer column,
+    and a gutter clear of every island (the rails, the status slot or strip, the player, the dock
+    or search button, the drawer, the map's chrome): a pointer over an island holds the card at the
+    nearest legal spot one or two push-outs away (out of one island along one axis, then out of the
+    next), else where it last was. The drop snaps to the nearest free anchor as before.
+  - *Insufficient height* (a short or zoomed window) collapses in this order, each step only when
+    the one before leaves too little; nothing overlaps at any step:
+
+    | Step | When the scale rows' room above the stack is | What gives |
+    | --- | --- | --- |
+    | 1 | under 148 px (100 px of rows + the 48 px trace floor) with the full player | the player shows its compact line (play/pause, progress, time) |
+    | 2 | under 148 px with the compact line | the trace floor yields: the trace shrinks toward 0 |
+    | 3 | under 100 px | the discovery row and the band ruler hide (54 px of rows left: axis and lanes) |
+    | 4 | under 54 px with the player | the player waits out of sight, still playing |
+    | 5 | under 54 px over Listen | every scale row hides; the waterfall alone |
+
+  - *The map's chrome* is laid out with the rest, by the same rails and stage. The corner (the
+    Live chip at the window's right gutter, the scale left of it, the attribution line above them)
+    stands on the bottom rail right of the dock when the rail has room for the chip and the scale,
+    else above the stack; a drawer column over it stands a gutter above the attribution line. The
+    layer rail stands under the Receiver (under the strip when one shows), its side panel (the
+    selection, the overlays menu) 10 px left of it and the station chip centred left of both, all
+    clamped above the corner and the stack. A drawer opening never moves any of it: the stage
+    chrome a drawer, a pane or a sheet covers is out of sight meanwhile, and the corner keeps its
+    rectangle (1280×800 with Activity open: the Live chip at 1200,740, clear of the dock). The
+    tuned card's anchors and the map's own label placement keep off all of it. The pointer's
+    hover tip and the cluster chooser are popovers at the pointer, like island panels.
 
   Expected numbers: 1440×900 Receiver 1124,16; dock 474,820 492×64; player 16,734 560×70; card
   16,278 (expanded 440) or 16,666 (line); Activity column 1004,88 420×796; expanded Cards 16,88
@@ -1046,12 +1093,19 @@ Condensed + Noto Sans, Tabler-based icons).
   the design sketch: a two-line status item is 52 px tall in the strip too (the sketch said 54);
   the drawer column caps its width by the player storey whether or not a recording plays, so
   playback never resizes a drawer; the pane starts under the top rail like the other covering
-  surfaces (under the Tuner's hold row too). Frame elements carry no position transition. *Why:*
+  surfaces (under the Tuner's hold row too). Frame elements carry no position transition. What
+  does move, exactly: the card's home by the player's height and a gutter (stated above), a card on
+  a centre or right anchor stepping left of a drawer column, the map's stage chrome under the strip
+  when status items stack there, and the collapse steps of a short window. *Why:*
   "what moves when I open a drawer?" is now "nothing": the dock that opened it stays under the
   pointer, and a notice never covers data on a wide window. Cost accepted: drawers are 72 px
   shorter at the top, and 80 px more where they stand on the rail. Gated by unit tests of the
-  expected rectangles, a fast-check property (no two islands intersect, all inside the window,
-  frame identical with and without a drawer, no chip under chrome) and `ui-check --flow=layout`.
+  expected rectangles, fast-check properties down to 320×400 (no two islands intersect, all inside
+  the window, frame and map chrome identical with and without a drawer, no chip under chrome, no
+  shown slot inside a glide's box, a dragged card a gutter clear of every island, no frame island
+  over an open panel) and `ui-check --flow=layout` (settled cells that require every expected
+  island on screen or listed as waiting, motion samples with the transitions on, the Map view at
+  every viewport, and the phone's Listen panel).
 
 ## Open questions and next topics
 

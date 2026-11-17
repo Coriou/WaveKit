@@ -5,7 +5,7 @@
 import { createContext } from "react"
 
 import { Store } from "../../data/store.ts"
-import type { Layout, Size, StatusItem } from "./compute.ts"
+import type { Layout, MapInput, Size, StatusItem } from "./compute.ts"
 
 const sameSize = (a: Size | undefined, b: Size | undefined) =>
 	a === b || (a !== undefined && b !== undefined && a.w === b.w && a.h === b.h)
@@ -71,3 +71,9 @@ export const cardLineForced = new Store<boolean>(false)
 
 /** The plot's part of the layout, for the plot inside the shell (null outside a shell). */
 export const PlotLayoutContext = createContext<Layout["plot"] | null>(null)
+
+/** The player shows its compact line because the window has no height for the full transport (not its own choice). */
+export const playerCompactForced = new Store<boolean>(false)
+
+/** The map view's chrome sizes while it shows (MapScreen reports them; the shell layout places them), else null. */
+export const mapReports = new Store<MapInput | null>(null)

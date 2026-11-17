@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 
+import { guestPlacement } from "../../src/shell/layout/StatusGuest.tsx"
 import { guestTarget } from "../../src/shell/layout/stores.ts"
 
 const src = (path: string) =>
@@ -19,8 +20,58 @@ describe("status guests render inside the shell, under its panels and the palett
 		expect(guestTarget(false, null, layer)).toBe(layer)
 		expect(guestTarget(false, slot, layer)).toBe(layer)
 		expect(guestTarget(true, slot, layer)).toBe(slot)
-		// docked with no slot yet: the layer, where it waits out of sight
+		// docked with no slot yet: the layer, where guestPlacement marks it pending (out of sight, not at 0,0)
 		expect(guestTarget(true, null, layer)).toBe(layer)
+	})
+
+	it("a guest is pending (out of sight) unless it is placed or in the drawer's slot", () => {
+		const at = { x: 600, y: 22, w: 200, h: 44 }
+		// docked before the slot mounts: pending, no rectangle
+		const early = guestPlacement("connection", true, null, null, false)
+		expect(early["data-pending"]).toBe("")
+		expect(early["data-wk-rect"]).toBeUndefined()
+		// docked in the slot: laid out by the slot, shown
+		const inSlot = guestPlacement("connection", true, slot, null, false)
+		expect(inSlot["data-pending"]).toBeUndefined()
+		expect(inSlot.style).toBeUndefined()
+		// placed: at its rectangle; held while the card glides through it
+		const placed = guestPlacement("connection", false, null, at, false)
+		expect(placed["data-wk-rect"]).toBe("600,22,200,44")
+		expect(placed["data-pending"]).toBeUndefined()
+		expect(placed.style).toMatchObject({ left: 600, top: 22 })
+		expect(
+			guestPlacement("connection", false, null, at, true)["data-held"],
+		).toBe("")
+		// waiting (not placed, not docked): pending
+		expect(
+			guestPlacement("connection", false, slot, null, false)["data-pending"],
+		).toBe("")
+	})
+
+	it("stacks the guest layer under an open island panel and the palette's scrim", () => {
+		const z = (css: string, sel: string) =>
+			Number(
+				/z-index:\s*(\d+)/.exec(
+					new RegExp(
+						`${sel.replace(/[.[\]]/g, m => `\\${m}`)} \\{([^}]*)\\}`,
+					).exec(css)?.[1] ?? "",
+				)?.[1] ?? NaN,
+			)
+		const slots = src("shell/layout/slots.css")
+		const shellCss = src("styles/shell.css")
+		const layerZ = z(slots, ".wk-status-layer")
+		const scrimZ = z(shellCss, ".wk-shell-scrim")
+		const shell = src("shell/Shell.tsx")
+		const panelZ = Number(
+			/zIndex: state\.panel === id \? (\d+) : \d+/.exec(shell)?.[1] ?? NaN,
+		)
+		expect(layerZ).toBe(3)
+		expect(layerZ).toBeLessThan(panelZ)
+		expect(layerZ).toBeLessThan(scrimZ)
+		// the palette renders after the guest layer in the same stacking context
+		expect(shell.indexOf("setGuestLayer}")).toBeLessThan(
+			shell.indexOf("<Palette onClose"),
+		)
 	})
 
 	it("shows nowhere while the layer is gone (no shell, or the palette open), even when docked", () => {

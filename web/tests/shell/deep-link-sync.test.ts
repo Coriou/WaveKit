@@ -11,6 +11,7 @@ import { shellStore } from "../../src/shell/store.ts"
 /** A window whose hash setter dispatches hashchange on a later task, as a browser does. */
 function fakeWindow(initial: string) {
 	const listeners = new Set<() => void>()
+	const popListeners = new Set<() => void>()
 	let hash = initial
 	const location = {
 		pathname: "/",
@@ -36,11 +37,20 @@ function fakeWindow(initial: string) {
 	return {
 		location,
 		history,
+		/** A history change that moves the hash with no hashchange (pushState, or a lost event). */
+		silentHash: (next: string) => {
+			hash = next
+		},
+		popstate: () => {
+			for (const l of popListeners) l()
+		},
 		addEventListener: (type: string, l: () => void) => {
 			if (type === "hashchange") listeners.add(l)
+			if (type === "popstate") popListeners.add(l)
 		},
 		removeEventListener: (type: string, l: () => void) => {
 			if (type === "hashchange") listeners.delete(l)
+			if (type === "popstate") popListeners.delete(l)
 		},
 	}
 }
@@ -115,6 +125,41 @@ describe("followDeepLinks", () => {
 			shellStore.openDrawer("recordings")
 			await tick()
 			expect(win.location.hash).toBe("#/recordings")
+		} finally {
+			stop()
+		}
+	})
+
+	it("opens the hash on popstate (a history step that fires no hashchange)", async () => {
+		const win = fakeWindow("#/recordings")
+		g.window = win
+		const { services } = fakeServices()
+		const stop = followDeepLinks(services)
+		try {
+			await tick()
+			win.silentHash("#/settings")
+			win.popstate()
+			await tick()
+			expect(shellStore.getState().drawer).toBe("settings")
+			expect(win.location.hash).toBe("#/settings")
+		} finally {
+			stop()
+		}
+	})
+
+	it("adopts an outside hash when no hashchange comes for it by the next task", async () => {
+		const win = fakeWindow("#/recordings")
+		g.window = win
+		const { services, notify } = fakeServices()
+		const stop = followDeepLinks(services)
+		try {
+			await tick()
+			win.silentHash("#/scanner")
+			// a state change finds the outside hash pending: it is not overwritten, and is opened a task later
+			notify()
+			await tick()
+			expect(shellStore.getState().drawer).toBe("scanner")
+			expect(win.location.hash).toBe("#/scanner")
 		} finally {
 			stop()
 		}

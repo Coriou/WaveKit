@@ -1,6 +1,8 @@
-// Keeps the address bar's hash and the app in step (deep-link.ts says what the hash holds). On load and on
-// hashchange the hash opens its view, drawer, Activity search or discovery; afterwards every change rewrites it with
-// replaceState, coalesced to one write per task.
+// Keeps the address bar's hash and the app in step (deep-link.ts says what the hash holds). On load, on hashchange
+// and on popstate the hash opens its view, drawer, Activity search or discovery; afterwards every change rewrites it
+// with replaceState, coalesced to one write per task. A hash set from outside is never overwritten: the write waits
+// for its hashchange, and adopts the hash itself when none has come by the next task (a history change that fires
+// no hashchange).
 import type { AppServices } from "../app/services.ts"
 import {
 	activityLayout,
@@ -73,11 +75,22 @@ export function followDeepLinks(services: AppServices): () => void {
 	// link, the address bar, a script) and its hashchange is still on its way (a task later): the app's state does
 	// not overwrite it meanwhile, or the change would be lost (open() would then read the old hash back).
 	let known = window.location.hash
+	let adoptQueued = false
 
 	const write = () => {
 		queued = false
 		const loc = window.location
-		if (loc.hash !== known) return
+		if (loc.hash !== known) {
+			// its hashchange is a task away; if none comes by the next task, open the hash anyway
+			if (!adoptQueued) {
+				adoptQueued = true
+				setTimeout(() => {
+					adoptQueued = false
+					if (window.location.hash !== known) open()
+				}, 0)
+			}
+			return
+		}
 		const hash = formatLink(currentLink(services))
 		if (hash === loc.hash || (hash === "" && loc.hash === "")) return
 		const url = hash === "" ? `${loc.pathname}${loc.search}` : hash
@@ -103,6 +116,7 @@ export function followDeepLinks(services: AppServices): () => void {
 
 	open()
 	window.addEventListener("hashchange", open)
+	window.addEventListener("popstate", open)
 	// installed app: a manifest shortcut or a link launched into the open window (launch_handler focus-existing)
 	const queue = (window as { launchQueue?: LaunchQueue }).launchQueue
 	queue?.setConsumer(params => {
@@ -118,6 +132,7 @@ export function followDeepLinks(services: AppServices): () => void {
 	]
 	return () => {
 		window.removeEventListener("hashchange", open)
+		window.removeEventListener("popstate", open)
 		for (const off of offs) off()
 	}
 }

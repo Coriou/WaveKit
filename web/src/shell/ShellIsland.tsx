@@ -39,6 +39,12 @@ export interface ShellIslandProps {
 	/** The head's rectangle from the shell layout (the island's position comes in `style`). */
 	rect?: Rect
 	style: CSSProperties
+	/** The tallest its panel may grow (the shell layout: no frame island covers an open panel). */
+	panelMaxH?: number
+	/** How far past its 8 px gap the panel opens (under a taller neighbour on the top rail). */
+	panelDrop?: number
+	/** Out of sight while an open panel takes its place (the stacked Receiver under the Tuner's panel). */
+	yielded?: boolean
 }
 
 /** One floating island: head plus an optional panel island (a sibling, never nested glass). */
@@ -53,6 +59,9 @@ export function ShellIsland({
 	boxRef,
 	rect,
 	style,
+	panelMaxH,
+	panelDrop = 0,
+	yielded = false,
 }: ShellIslandProps) {
 	const panelId = useId()
 	const ctx: IslandContext = {
@@ -72,7 +81,16 @@ export function ShellIsland({
 			data-island={name}
 			data-direction={direction}
 			data-open={open || undefined}
-			style={style}
+			data-yielded={yielded || undefined}
+			style={
+				panelMaxH === undefined
+					? style
+					: ({
+							...style,
+							"--wk-panel-max": `${panelMaxH}px`,
+							"--wk-panel-drop": `${panelDrop}px`,
+						} as CSSProperties)
+			}
 		>
 			<div
 				ref={headRef}

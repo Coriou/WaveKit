@@ -4,7 +4,9 @@
 // slot (the condition against the Receiver, the receipt against the Tuner, nothing slides), in the strip under the
 // top rail on a phone, or docked in a covering drawer's notice slot under its header (ui/notice-slot.ts), which
 // pushes the drawer body down. It never takes focus, except to give a moved toast's button back the focus it had;
-// hovering a toast or focusing inside one pauses both timers (until that toast goes).
+// hovering a toast or focusing inside one pauses both timers (until that toast goes). A toast the layout places
+// nowhere (waiting for room, not placed yet, or held while the tuned card glides past) is unseen: its own timer
+// waits until it shows (service `setUnseen`).
 import {
 	useEffect,
 	useLayoutEffect,
@@ -44,6 +46,8 @@ export const CONDITION_ICON_W = 44
 export interface NoticeRegionProps {
 	/** Where the shell layout put the status items. */
 	readonly status: Layout["status"]
+	/** Slots the layout holds out of sight while the tuned card glides through them ("status:<id>"). */
+	readonly held?: readonly string[]
 	/** The ⌘K palette is open: the region hides and its timers wait. */
 	readonly palette: boolean
 	/** The Receiver panel is open: it lists the link conditions, so no floating link toast. */
@@ -74,6 +78,7 @@ export function toastItem(
 
 export function NoticeRegion({
 	status,
+	held = [],
 	palette,
 	receiverOpen,
 	service = notices,
@@ -148,6 +153,24 @@ export function NoticeRegion({
 	)
 
 	const docked = status.where === "drawer-slot" && slot !== null
+	// a toast's timer runs only while the reader can see it: placed (or docked), and not held
+	const seen = (id: "condition" | "receipt") =>
+		visible &&
+		!held.includes(`status:${id}`) &&
+		(docked || status.items.some(i => i.id === id))
+	const receiptSeen = seen("receipt")
+	const conditionSeen = seen("condition")
+	useLayoutEffect(() => {
+		service.setUnseen("receipt", !receiptSeen)
+		service.setUnseen("condition", !conditionSeen)
+	}, [service, receiptSeen, conditionSeen])
+	useEffect(
+		() => () => {
+			service.setUnseen("receipt", false)
+			service.setUnseen("condition", false)
+		},
+		[service],
+	)
 	// moving between the rail and a drawer's slot remounts the toasts: no pointerleave or blur comes then, so the
 	// hover pause never stays behind; a toast button that had the focus gets it back on its new element (same
 	// toast, same control), so the focus pause stays only then
@@ -199,6 +222,7 @@ export function NoticeRegion({
 					service={service}
 					place={at("condition")}
 					docked={docked}
+					held={held.includes("status:condition")}
 				/>
 			)}
 			{receipt && (
@@ -208,6 +232,7 @@ export function NoticeRegion({
 					service={service}
 					place={at("receipt")}
 					docked={docked}
+					held={held.includes("status:receipt")}
 				/>
 			)}
 		</div>
@@ -221,6 +246,7 @@ function placement(
 	place: StatusPlaced | null,
 	docked: boolean,
 	service: NoticeService,
+	held = false,
 ): HTMLAttributes<HTMLDivElement> & {
 	readonly [data: `data-${string}`]: string | number | undefined
 } {
@@ -235,6 +261,7 @@ function placement(
 		"data-form": form,
 		"data-lines": place?.lines ?? 1,
 		"data-pending": place ? undefined : "",
+		"data-held": held ? "" : undefined,
 		style: place
 			? topLeft(place, true)
 			: { left: 0, top: 0, width: "max-content", height: TOAST_H },
@@ -249,11 +276,13 @@ function ConditionToast({
 	service,
 	place,
 	docked,
+	held,
 }: {
 	shown: ShownCondition
 	service: NoticeService
 	place: StatusPlaced | null
 	docked: boolean
+	held: boolean
 }) {
 	return (
 		<div
@@ -264,7 +293,7 @@ function ConditionToast({
 			data-key={shown.key}
 			data-tone={shown.tone}
 			title={place && place.form !== "full" ? shown.text : undefined}
-			{...placement("condition", place, docked, service)}
+			{...placement("condition", place, docked, service, held)}
 			onFocus={() => service.setFocusedToast(shown.id)}
 		>
 			{shown.tone === "warn" && <WarnGlyph />}
@@ -302,11 +331,13 @@ function ReceiptToast({
 	service,
 	place,
 	docked,
+	held,
 }: {
 	receipt: Receipt
 	service: NoticeService
 	place: StatusPlaced | null
 	docked: boolean
+	held: boolean
 }) {
 	const button = receipt.action !== undefined || receipt.undo !== undefined
 	return (
@@ -317,7 +348,7 @@ function ReceiptToast({
 			data-toast-id={receipt.id}
 			data-tone={receipt.tone}
 			title={place && place.lines === 2 ? receipt.text : undefined}
-			{...placement("receipt", place, docked, service)}
+			{...placement("receipt", place, docked, service, held)}
 			onFocus={() => service.setFocusedToast(receipt.id)}
 		>
 			{receipt.tone === "warn" && <WarnGlyph />}

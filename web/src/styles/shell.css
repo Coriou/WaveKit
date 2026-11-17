@@ -58,10 +58,19 @@
 		flex-direction: column;
 		gap: 14px;
 		overscroll-behavior: contain;
-		max-height: calc(100dvh - 110px);
+		/* the shell layout's cap (--wk-panel-max: below the top rail, above the bottom rail) */
+		max-height: min(calc(100dvh - 110px), var(--wk-panel-max, 100dvh));
 	}
 	.wk-shell-island[data-island="listen"] .wk-shell-panel {
-		max-height: calc(100dvh - 176px);
+		max-height: min(calc(100dvh - 176px), var(--wk-panel-max, 100dvh));
+	}
+	/* a panel going down starts under the whole top rail (under a taller neighbour: the layout's panelDrop) */
+	.wk-shell-island[data-direction="down"] > .wk-shell-panel {
+		margin-top: var(--wk-panel-drop, 0px);
+	}
+	/* a frame island an open panel takes the place of (the stacked Receiver under the Tuner's panel) */
+	.wk-shell-island[data-yielded] {
+		visibility: hidden;
 	}
 
 	/* Tuner head (Tuner board) */

@@ -31,6 +31,10 @@
 		min-height: 0;
 		margin: 0;
 		pointer-events: auto;
+		/* an item taller than the 56 px row is clamped to it: its content stays inside its box (a focus ring keeps
+		   4 px) */
+		overflow: clip;
+		overflow-clip-margin: 4px;
 	}
 	.wk-status-layer > .wk-notice[data-pending] {
 		visibility: hidden;
@@ -85,6 +89,13 @@
 	.wk-status-guest > * {
 		pointer-events: auto;
 	}
+	/* placed at a rectangle the row clamped: the guest's content stays inside it (its own shadow is not clipped) */
+	.wk-status-guest[data-wk-rect] > * {
+		box-sizing: border-box;
+		max-height: 100%;
+		overflow: clip;
+		overflow-clip-margin: 4px;
+	}
 	.wk-status-guest > .wkf-rx-frozen {
 		position: static;
 		transform: none;
@@ -102,6 +113,21 @@
 	}
 	.wk-shell-player > * {
 		pointer-events: auto;
+	}
+
+	/* a player with no height to stand in (insufficient height): out of sight, still playing and still measured */
+	.wk-shell-player[data-pending] {
+		visibility: hidden;
+	}
+	/* the tuned card's glide (DESIGN.md, "Motion"): a move the layout forces eases out with no overshoot, so the card
+	   never leaves the box of its two homes; a slot entering that box is held out of sight until the card lands */
+	.wk-shell .wk-shell-cardslot[data-glide="yield"] {
+		transition-timing-function: var(--wk-ease-out);
+	}
+	.wk-shell [data-held] {
+		opacity: 0;
+		pointer-events: none;
+		transition: none;
 	}
 
 	@media (prefers-reduced-motion: reduce) {

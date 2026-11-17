@@ -5,6 +5,7 @@ import { Store } from "../data/store.ts"
 import {
 	CARD_W,
 	DEFAULT_CARD_ANCHOR,
+	G,
 	nearestAnchor,
 	toCardAnchorId,
 	type CardAnchor,
@@ -32,6 +33,13 @@ export interface CardFrame {
 	readonly freeW: number
 	readonly H: number
 	readonly cardH: number
+	/** Every island the dragged card keeps a gutter from (the rails, the status slot, the player, the drawer). */
+	readonly obstacles: readonly Obstacle[]
+}
+
+export interface Obstacle extends Point {
+	readonly w: number
+	readonly h: number
 }
 
 const EMPTY_FRAME: CardFrame = {
@@ -40,6 +48,65 @@ const EMPTY_FRAME: CardFrame = {
 	freeW: 0,
 	H: 0,
 	cardH: 0,
+	obstacles: [],
+}
+
+// closer than one gutter (the half pixel lets edges exactly one gutter apart pass; 15 px apart is a hit, as the anchors do)
+const near = (a: Obstacle, b: Obstacle): boolean =>
+	a.x < b.x + b.w + G - 0.5 &&
+	b.x < a.x + a.w + G - 0.5 &&
+	a.y < b.y + b.h + G - 0.5 &&
+	b.y < a.y + a.h + G - 0.5
+
+/**
+ * Where the dragged card stands for a pointer that wants `want` (its top-left): inside the free area (one gutter
+ * in from the window and left of a drawer column), and a gutter clear of every island. A wanted spot over an island
+ * becomes the nearest legal spot one or two push-outs away (out of an island along one axis, then out of a second
+ * one it lands near); with none, the card stays at `last` (its previous legal spot), or at the nearest window spot.
+ */
+export function clampDrag(
+	want: Point,
+	frame: CardFrame,
+	last: Point | null,
+): Point {
+	const cw = CARD_W
+	const ch = frame.cardH
+	const xHi = Math.max(G, frame.freeW - G - cw)
+	const yHi = Math.max(G, frame.H - G - ch)
+	const inWin = (p: Point): Point => ({
+		x: Math.max(G, Math.min(xHi, p.x)),
+		y: Math.max(G, Math.min(yHi, p.y)),
+	})
+	const box = (p: Point): Obstacle => ({ x: p.x, y: p.y, w: cw, h: ch })
+	const legal = (p: Point) =>
+		p.x >= G &&
+		p.x <= xHi &&
+		p.y >= G &&
+		p.y <= yHi &&
+		!frame.obstacles.some(o => near(box(p), o))
+	const start = inWin(want)
+	if (legal(start)) return start
+	const pushes = (p: Point): Point[] =>
+		frame.obstacles
+			.filter(o => near(box(p), o))
+			.flatMap(o => [
+				{ x: o.x - G - cw, y: p.y },
+				{ x: o.x + o.w + G, y: p.y },
+				{ x: p.x, y: o.y - G - ch },
+				{ x: p.x, y: o.y + o.h + G },
+			])
+	const one = pushes(start)
+	const cands = [...one, ...one.flatMap(pushes)].filter(legal)
+	let best: Point | null = null
+	let bd = Infinity
+	for (const c of cands) {
+		const d = Math.hypot(c.x - want.x, c.y - want.y)
+		if (d < bd) {
+			bd = d
+			best = c
+		}
+	}
+	return best ?? last ?? start
 }
 
 export function loadCardAnchor(storage: KeyValueStorage | null): CardAnchorId {
@@ -100,15 +167,16 @@ export class CardPlaceStore extends Store<CardPlace> {
 		return true
 	}
 
-	/** Follow the pointer, clamped into the free area. */
+	/** Follow the pointer, clamped into the free area and clear of every island (clampDrag). */
 	moveDrag(px: number, py: number): void {
 		const d = this.#from
 		if (!d) return
-		const f = this.frame
-		const clamp = (v: number, hi: number) => Math.max(0, Math.min(hi, v))
-		const x = clamp(d.x + px - d.px, Math.max(0, f.freeW - CARD_W))
-		const y = clamp(d.y + py - d.py, Math.max(0, f.H - f.cardH))
 		const cur = this.get().drag
+		const { x, y } = clampDrag(
+			{ x: d.x + px - d.px, y: d.y + py - d.py },
+			this.frame,
+			cur,
+		)
 		if (cur && cur.x === x && cur.y === y) return
 		this.set({ ...this.get(), drag: { x, y } })
 	}

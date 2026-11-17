@@ -1,12 +1,10 @@
 /* The Tuner's scan hold row (docs/web/canvas/Tuner.dc.html `hold`): 40 px under the head, an island outline on a solid
    ground (no backdrop blur), accent while live, amber when paused; a 2 px pass-progress line moved by transform. */
 @layer wk-app {
-	/* the Tuner widens to the board's 472 px while a scan holds the receiver, and the plot starts under the row */
+	/* the Tuner widens to the board's 472 px while a scan holds the receiver (its measured size: the shell layout
+	   moves the plot under the row) */
 	.wk-shell-island[data-island="tuner"]:has(.wkf-hold) {
 		width: 472px;
-	}
-	.wk-shell:has(.wkf-hold) {
-		--wk-plot-inset-top: 132px;
 	}
 	.wk-shell-island-head:has(.wkf-hold) {
 		display: flex;

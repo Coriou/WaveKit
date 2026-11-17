@@ -47,8 +47,20 @@ row otherwise. Below 1100 px wide, and on a phone, a drawer spans the window bet
 islands and Listen. While a recording is loaded, the player sits just above Listen at full width
 and the tuned card above it; the drawer never reaches that column. The dock hides on windows too
 narrow to hold it beside Listen; the search button takes its place. The spectrum keeps its signal
-labels clear of the card, the drawer and any notice, and its status notes (`No source connected`
-and the like) centre on the spectrum left of the drawer.
+labels clear of the card, the drawer and any notice, and its status notes (`No source connected`,
+`Use Auto range` and the like) stand clear of them too, on the spectrum left of the drawer; with
+no room anywhere a note shows on the top row with the notices.
+
+The few things that do move are deliberate. The tuned card moves up by the player's height when a
+recording starts (and back when it stops), and a card parked on the right steps left of an open
+drawer; while it glides there, anything appearing in its way (the player, the drawer) waits until
+it lands, so nothing is ever drawn over it. A card you drag stops at the edges of the islands
+instead of sliding over them. An open panel (Audio options, the Receiver's, the Tuner's) is never
+covered by another island: on a phone, Audio options starts under the Receiver and scrolls, and the
+Receiver steps out of sight while the Tuner's panel is open over it. On a short or zoomed window
+the bottom of the screen gives way in order: the player shrinks to a progress line, the spectrum's
+trace gets shorter, the discovery row and the band ruler hide, then the player hides (it keeps
+playing), and last the spectrum's scale rows hide, leaving the waterfall.
 
 ### Notices
 
@@ -56,7 +68,8 @@ Notices appear on the top row, between the Tuner and the Receiver, never over th
 labels: a warning sits next to the Receiver (beside the connection chip and **Receiver paused**,
 when they show), what you just did sits next to the Tuner, and neither pushes the other. When the
 row is tight a warning shortens to one line (the full text in its tooltip), then to its triangle
-alone (the Receiver island says the same); a lone warning may take two lines first. On a phone and
+alone (the Receiver island says the same); a lone warning may take two lines first. When the top
+row still cannot hold them all, the notices stack just under the top row instead. On a phone and
 other narrow windows, where the top row has no room, notices stack just under the Receiver; with a
 drawer open there (Activity, Scanner, Recordings or Settings span the window), they sit inside it as
 a banner directly under its header: the drawer's list moves down to make room and comes back when
@@ -74,7 +87,9 @@ There are two kinds, and at most one of each shows at once:
   kind removes the other, so an Undo is never pushed away by a warning.
 
 **WaveKit was updated · Reload** stays until you reload or close it. Notices wait while the ⌘K
-palette is open and while the pointer or keyboard focus is on them. ✕ closes one.
+palette is open and while the pointer or keyboard focus is on them, and a notice with no room on
+screen yet waits too: its time only runs once you can see it, so an **Undo** is never lost unseen.
+✕ closes one.
 
 When WaveKit loses receiver samples, the notice says why:
 
@@ -726,6 +741,11 @@ discovery sits within 12.5 kHz, and up to 50 folded rows.
 
 The **Map** shows aircraft, vessels, APRS stations and mesh nodes around your station, with their
 trails and the station's coverage.
+
+The map's controls follow the same layout as the rest of the app and never move when a drawer
+opens. **Live**, the scale and the map's credits sit at the bottom right, beside the dock (above
+Listen on a phone); the layers rail, its zoom buttons and the selected item's card sit under the
+Receiver. An open drawer covers the rail and the card, which come back when it closes.
 
 Between reports, an aircraft keeps moving along its track at its speed. When a new position
 arrives, the plane glides onto it over about two seconds instead of jumping, and its glyph turns

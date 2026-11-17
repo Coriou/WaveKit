@@ -11,7 +11,16 @@
 // name (this session's answer, else what any browser identified there: WG12 nearHz); a transmission on a frequency nothing decodes is identified on its own (auto-identify.ts).
 import { WaveKitIcon } from "@wavekit/brand/react"
 import type { ScannerProtocol } from "@wavekit/api-types"
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
+import {
+	lazy,
+	Suspense,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+	type ReactNode,
+	type Ref,
+} from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import {
@@ -317,6 +326,52 @@ export function lineExpandProps(
 	return forced
 		? { "aria-disabled": true, title: `${title} · ${LINE_FORCED_REASON}` }
 		: { title: `${title} · click to expand` }
+}
+
+/** The minimised line: one button that expands the card, or (forced by the layout) says why it cannot. */
+export function CardLineButton({
+	forced,
+	title,
+	onExpand,
+	lineRef,
+	children,
+}: {
+	forced: boolean
+	title: string
+	onExpand: () => void
+	lineRef?: Ref<HTMLButtonElement>
+	/** The line's text (the frequency, the short name, the state). */
+	children: ReactNode
+}) {
+	return (
+		<button
+			ref={lineRef}
+			type="button"
+			className="wkf-card-line"
+			aria-expanded="false"
+			aria-label="Expand card"
+			aria-describedby={
+				forced
+					? "wkf-card-line-text wkf-card-line-forced"
+					: "wkf-card-line-text"
+			}
+			{...lineExpandProps(forced, title)}
+			onClick={() => {
+				if (!forced) onExpand()
+			}}
+		>
+			<span id="wkf-card-line-text" className="wkf-card-line-text">
+				{children}
+			</span>
+			{forced ? (
+				<span id="wkf-card-line-forced" className="wk-sr">
+					{LINE_FORCED_REASON}
+				</span>
+			) : (
+				<Icon name="chevron-up" size={16} className="wkf-quiet" />
+			)}
+		</button>
+	)
 }
 
 export function TunedCard() {
@@ -825,42 +880,22 @@ export function TunedCard() {
 			<div className="wkf-card-head">
 				<CardHandle>{tile}</CardHandle>
 				{minimised ? (
-					<button
-						ref={lineRef}
-						type="button"
-						className="wkf-card-line"
-						aria-expanded="false"
-						aria-label="Expand card"
-						aria-describedby={
-							forcedLine
-								? "wkf-card-line-text wkf-card-line-forced"
-								: "wkf-card-line-text"
-						}
-						{...lineExpandProps(
-							forcedLine,
-							`${formatMHz(hz)} MHz · ${shortId} · ${stateText}`,
-						)}
-						onClick={toggleMin}
+					<CardLineButton
+						lineRef={lineRef}
+						forced={forcedLine}
+						title={`${formatMHz(hz)} MHz · ${shortId} · ${stateText}`}
+						onExpand={toggleMin}
 					>
-						<span id="wkf-card-line-text" className="wkf-card-line-text">
-							<span className="wkf-num wkf-strong">{formatMHz(hz)}</span>
-							<span className="wkf-card-line-id">{shortId}</span>
-							{lineState && (
-								<span className="wkf-state" data-tone="accent">
-									<span className="wkf-dot" aria-hidden="true" />
-									<span aria-hidden="true">{lineState}</span>
-									<span className="wk-sr">{stateText}</span>
-								</span>
-							)}
-						</span>
-						{forcedLine ? (
-							<span id="wkf-card-line-forced" className="wk-sr">
-								{LINE_FORCED_REASON}
+						<span className="wkf-num wkf-strong">{formatMHz(hz)}</span>
+						<span className="wkf-card-line-id">{shortId}</span>
+						{lineState && (
+							<span className="wkf-state" data-tone="accent">
+								<span className="wkf-dot" aria-hidden="true" />
+								<span aria-hidden="true">{lineState}</span>
+								<span className="wk-sr">{stateText}</span>
 							</span>
-						) : (
-							<Icon name="chevron-up" size={16} className="wkf-quiet" />
 						)}
-					</button>
+					</CardLineButton>
 				) : (
 					<>
 						<div className="wkf-card-title">

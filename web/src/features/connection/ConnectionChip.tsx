@@ -2,7 +2,8 @@
 // condition notice against the Receiver on a wide window (title only when the slot is tight), in the strip under the
 // top rail on a phone, or in a covering drawer's notice slot. It reports its natural widths (whole, title only) and
 // takes the rectangle the layout gives it, in the shell's guest layer (under the island panels and the palette, and
-// hidden while the palette is open). It shows while the event socket is down or reconnecting, the core cannot be
+// hidden while the palette is open). An always-mounted visually hidden live region speaks its changes, so a change
+// while the palette hides the chip is still announced. It shows while the event socket is down or reconnecting, the core cannot be
 // reached, the core refuses the page's address (the chip links to the other loopback name), or a protected core has
 // no session for this browser (read-only; the chip opens the pairing sheet when the core pairs browsers).
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
@@ -10,7 +11,7 @@ import { createPortal } from "react-dom"
 
 import { isReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
-import { slotAttrs, topLeft } from "../../shell/layout/slot.ts"
+import { guestPlacement } from "../../shell/layout/StatusGuest.tsx"
 import {
 	dockedSlot,
 	guestLayer,
@@ -34,6 +35,10 @@ export function ConnectionChip() {
 	const docked = useStore(
 		publishedLayout,
 		l => l?.status.docked.includes(ID) ?? false,
+	)
+	const held = useStore(
+		publishedLayout,
+		l => l?.held.includes(`status:${ID}`) ?? false,
 	)
 	const shell = useStore(publishedLayout, l => l !== null)
 	const slot = useStore(dockedSlot)
@@ -66,7 +71,16 @@ export function ConnectionChip() {
 	const sheet = pairing && notice?.pair && (
 		<PairSheet onClose={() => setPairing(false)} />
 	)
-	if (!notice) return null
+	// in a shell the chip itself may be out of the tree (the palette open): this region stays and speaks
+	const said = notice
+		? [notice.title, notice.detail].filter(Boolean).join(" · ")
+		: ""
+	const announcer = shell && (
+		<div className="wk-sr" role="status" aria-live="polite">
+			{said}
+		</div>
+	)
+	if (!notice) return announcer || null
 	const body = (
 		<>
 			{notice.busy ? (
@@ -130,17 +144,7 @@ export function ConnectionChip() {
 	const guest = (
 		<div
 			className="wk-status-guest"
-			role="status"
-			aria-live="polite"
-			{...slotAttrs(`status:${ID}`, docked ? null : placed)}
-			data-pending={!docked && !placed ? "" : undefined}
-			style={
-				docked
-					? undefined
-					: placed
-						? topLeft(placed, true)
-						: { left: 0, top: 0, width: "max-content" }
-			}
+			{...guestPlacement(ID, docked, slot, placed, held)}
 		>
 			{content}
 		</div>
@@ -148,6 +152,7 @@ export function ConnectionChip() {
 	const target = guestTarget(docked, slot, layer)
 	return (
 		<>
+			{announcer}
 			{target && createPortal(guest, target)}
 			{sheet}
 		</>

@@ -12,9 +12,17 @@ export interface PaneSlotProps {
 	label: string
 	children: ReactNode
 	ref?: Ref<HTMLDivElement>
+	/** Held out of sight while the tuned card glides through its rectangle (layout motion rule). */
+	held?: boolean
 }
 
-export function PaneSlot({ rect, label, children, ref }: PaneSlotProps) {
+export function PaneSlot({
+	rect,
+	label,
+	children,
+	ref,
+	held = false,
+}: PaneSlotProps) {
 	return (
 		<div
 			ref={ref}
@@ -23,6 +31,7 @@ export function PaneSlot({ rect, label, children, ref }: PaneSlotProps) {
 			aria-label={label}
 			data-wk-region=""
 			className="wk-shell-paneslot"
+			data-held={held || undefined}
 			{...slotAttrs("pane", rect)}
 			style={topLeft(rect, true)}
 		>

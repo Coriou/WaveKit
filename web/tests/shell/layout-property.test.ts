@@ -7,13 +7,16 @@ import {
 	plotLayout,
 	RULER_CSS,
 } from "../../src/plot/layout.ts"
-import { CARD_ANCHOR_IDS } from "../../src/shell/layout.ts"
+import { clampDrag } from "../../src/shell/card-place.ts"
+import { CARD_ANCHOR_IDS, CARD_W } from "../../src/shell/layout.ts"
 import {
+	cardObstacles,
 	computeLayout,
 	layoutViolations,
 	namedRects,
 	type DrawerInput,
 	type LayoutInput,
+	type MapInput,
 	type StatusItem,
 } from "../../src/shell/layout/compute.ts"
 import { intersects, type Rect } from "../../src/shell/layout/geometry.ts"
@@ -117,9 +120,23 @@ const drawer: fc.Arbitrary<DrawerInput | null> = fc
 				},
 	)
 
-// Listen and the dock take their heights independently (48..72), so the bottom rail's top is either one's
+// the map view's chrome (absent in the spectrum view)
+const mapInput: fc.Arbitrary<MapInput | null> = fc.option(
+	fc.record({
+		railH: fc.integer({ min: 120, max: 700 }),
+		side: fc.option(size([280, 320], [80, 1200]), { nil: null }),
+		station: fc.option(size([200, 340], [36, 60]), { nil: null }),
+		live: size([60, 70], [44, 44]),
+		scale: size([40, 120], [18, 22]),
+		footer: size([120, 520], [14, 16]),
+	}),
+	{ nil: null },
+)
+
+// Listen and the dock take their heights independently (48..72), so the bottom rail's top is either one's; the
+// window goes down to 320 x 400 (a zoomed or short window: the collapse order of "Insufficient height")
 const layoutInput: fc.Arbitrary<LayoutInput> = fc.record({
-	viewport: size([320, 2560], [560, 1600]),
+	viewport: size([320, 2560], [400, 1600]),
 	tuner: fc.constantFrom({ w: 440, h: 56 }, { w: 472, h: 104 }),
 	receiver: size([160, 600], [56, 56]),
 	listen: size([300, 420], [48, 72]),
@@ -128,6 +145,7 @@ const layoutInput: fc.Arbitrary<LayoutInput> = fc.record({
 		compact: size([420, 460], [48, 72]),
 	}),
 	player: fc.option(size([560, 560], [60, 80]), { nil: null }),
+	playerCompact: size([560, 560], [34, 44]),
 	card: fc.option(
 		fc.record({
 			expanded: size([340, 340], [200, 500]),
@@ -140,6 +158,7 @@ const layoutInput: fc.Arbitrary<LayoutInput> = fc.record({
 	status: statusItems,
 	drawer,
 	panels,
+	map: mapInput,
 })
 
 const signals: fc.Arbitrary<SignalInfo[]> = fc.array(
@@ -187,6 +206,20 @@ describe("computeLayout properties", () => {
 				expect(b.find).toEqual(a.find)
 				expect(b.player).toEqual(a.player)
 				expect(b.plot.insetTop).toBe(a.plot.insetTop)
+				// the map's chrome never moves for a drawer: a drawer covers what it covers (hidden), the rest stays
+				if (a.map && b.map)
+					for (const k of [
+						"rail",
+						"side",
+						"station",
+						"live",
+						"scale",
+						"footer",
+					] as const) {
+						const was = a.map[k]
+						const now = b.map[k]
+						if (was && now) expect(now, k).toEqual(was)
+					}
 				// the card's home on every anchor: kept where the reader parked it (same anchor, same form), a left
 				// anchor exactly; a centre or right anchor on the same anchor of the free width left of a column
 				// (the stated step left); a drawer that takes the anchor parks it on the nearest (stated move)
@@ -229,11 +262,15 @@ describe("computeLayout properties", () => {
 				const L = computeLayout(input)
 				const p = L.plot
 				const H = L.viewport.h
-				const trace = plotLayout(
-					H - p.insetTop,
-					DISCOVERY_ROW_CSS + RULER_CSS,
-					p.rowsMaxCss,
-				)
+				// the rows the layout lets the plot draw (lean: no discovery row and ruler; none: none at all)
+				const trace =
+					p.rows === "none"
+						? { traceCss: 0, gapCss: 0 }
+						: plotLayout(
+								H - p.insetTop,
+								p.rows === "full" ? DISCOVERY_ROW_CSS + RULER_CSS : 0,
+								p.rowsMaxCss,
+							)
 				// I6: the scale rows end above the stack, the body starts under the top rail
 				expect(p.insetTop + trace.traceCss + trace.gapCss).toBeLessThanOrEqual(
 					p.rowsBottomMax,
@@ -264,7 +301,10 @@ describe("computeLayout properties", () => {
 						taken: p.exclusions.map(r => [r.x, r.y, r.x + r.w, r.y + r.h]),
 					},
 				)
-				const chrome: Rect[] = namedRects(L)
+				// the map's chrome stands over the map, not the plot (the Map view covers the plot)
+				const chrome: Rect[] = namedRects(L).filter(
+					n => !n.name.startsWith("map:"),
+				)
 				if (L.status.strip) chrome.push(L.status.strip)
 				// the open panel too (it reaches the plot as an exclusion only), back in shell px
 				for (const e of p.exclusions)
@@ -277,6 +317,103 @@ describe("computeLayout properties", () => {
 				}
 			}),
 			{ numRuns: 200 },
+		)
+	})
+
+	it("a gliding card's path crosses no shown slot, and a dragged card keeps a gutter from every island", () => {
+		// Feature: web-layout, Property 1: collision-safe motion (no shown slot inside the glide's box; drag clamped)
+		// Validates: I1, M1, M2
+		fc.assert(
+			fc.property(
+				layoutInput,
+				fc.record({
+					x: fc.integer({ min: -400, max: 2600 }),
+					y: fc.integer({ min: -400, max: 1700 }),
+				}),
+				(input, p) => {
+					const settled = computeLayout(input)
+					if (!settled.card) return
+					const from = {
+						x: p.x,
+						y: p.y,
+						w: settled.card.w,
+						h: settled.card.h,
+					}
+					const L = computeLayout({ ...input, motion: { cardFrom: from } })
+					const path = {
+						x: Math.min(from.x, settled.card.x),
+						y: Math.min(from.y, settled.card.y),
+						w: 0,
+						h: 0,
+					}
+					const box = {
+						...path,
+						w:
+							Math.max(from.x + from.w, settled.card.x + settled.card.w) -
+							path.x,
+						h:
+							Math.max(from.y + from.h, settled.card.y + settled.card.h) -
+							path.y,
+					}
+					const stage = namedRects(L).filter(
+						n =>
+							n.name === "player" ||
+							n.name === "drawer" ||
+							n.name === "pane" ||
+							n.name === "grip" ||
+							n.name.startsWith("status:") ||
+							n.name === "map:side" ||
+							n.name === "map:station",
+					)
+					for (const n of stage)
+						if (intersects(n, box)) expect(L.held, n.name).toContain(n.name)
+					// the drag: anywhere the pointer wants, the card stands a gutter clear of every island
+					const frame = {
+						anchors: settled.cardAnchors,
+						card: settled.card,
+						freeW: settled.cardFreeW,
+						H: settled.viewport.h,
+						cardH: settled.card.h,
+						obstacles: cardObstacles(settled),
+					}
+					const at = clampDrag(p, frame, settled.card)
+					const c = { x: at.x, y: at.y, w: CARD_W, h: settled.card.h }
+					for (const o of frame.obstacles)
+						expect(
+							intersects(c, {
+								x: o.x - 15,
+								y: o.y - 15,
+								w: o.w + 30,
+								h: o.h + 30,
+							}),
+						).toBe(false)
+				},
+			),
+			{ numRuns: 300 },
+		)
+	})
+
+	it("no frame island covers an open island panel", () => {
+		// Feature: web-layout, Property 1: open panels are part of the layout (no frame island over one)
+		// Validates: I1
+		fc.assert(
+			fc.property(layoutInput, input => {
+				const L = computeLayout(input)
+				const frame = namedRects(L).filter(n =>
+					["tuner", "receiver", "listen", "dock", "find"].includes(n.name),
+				)
+				for (const p of L.panels) {
+					expect(p.rect.h).toBeLessThanOrEqual(L.panelMaxH[p.island])
+					for (const n of frame) {
+						if (n.name === p.island) continue
+						if ((L.yielded as readonly string[]).includes(n.name)) continue
+						expect(intersects(n, p.rect), `${p.island} panel × ${n.name}`).toBe(
+							false,
+						)
+					}
+				}
+			}),
+			{ numRuns: 300 },
 		)
 	})
 })

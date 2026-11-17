@@ -404,6 +404,29 @@
 		color: var(--wk-text-3);
 		pointer-events: none;
 	}
+	/* in a shell, a note is placed by the exclusion-aware placer (PlotNote.tsx): measured out of sight, then at its
+	   spot (top-left, no centring transform); both forms share one width rule so the measure holds */
+	.wk-plot-note[data-pending],
+	.wk-plot-note[data-placed] {
+		transform: none;
+		width: max-content;
+		max-width: min(560px, calc(100% - 32px));
+	}
+	.wk-plot-note[data-pending] {
+		left: 0;
+		top: 0;
+		visibility: hidden;
+	}
+	/* no free spot on the plot: the note is a guest in the status slot, a toast's row */
+	.wk-plot-note-guest {
+		gap: 12px;
+		padding: 0 12px;
+		color: var(--wk-text-2);
+		white-space: nowrap;
+		overflow: hidden;
+		max-width: 100%;
+		box-sizing: border-box;
+	}
 	/* a note with a way out (the fixed scale misses the signal: Use Auto range) */
 	.wk-plot-note-action {
 		display: flex;

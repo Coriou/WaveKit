@@ -46,3 +46,15 @@ export function insideOf(inner: Rect, outer: Rect, margin = 0): boolean {
 /** `data-wk-rect`: "x,y,w,h", whole px. */
 export const rectAttr = (r: Rect): string =>
 	`${Math.round(r.x)},${Math.round(r.y)},${Math.round(r.w)},${Math.round(r.h)}`
+
+/** The smallest rectangle holding both (a card's path from one home to the next). */
+export function union(a: Rect, b: Rect): Rect {
+	const x = Math.min(a.x, b.x)
+	const y = Math.min(a.y, b.y)
+	return rect(
+		x,
+		y,
+		Math.max(right(a), right(b)) - x,
+		Math.max(bottom(a), bottom(b)) - y,
+	)
+}
