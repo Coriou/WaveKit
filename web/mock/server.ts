@@ -1210,7 +1210,8 @@ export async function buildMockServer(
 	// Recordings (./recordings.ts) are seeded before the history so their Activity rows are in it.
 	const recordingsState = createRecordingsState()
 	/**
-	 * A recording's Activity row, as the core writes it: a dsd-fme call's `call_end` row, or a
+	 * A recording's Activity row, as the core writes it: a dsd-fme or call recorder call's
+	 * `call_end` row (D-STAR titled MY → UR), or a
 	 * scanner analog recording's `recording-change` row, linked by `recording`. Scanner DV files
 	 * (probe calls) have no row.
 	 */
@@ -1221,7 +1222,40 @@ export async function buildMockServer(
 		const id = item.key ?? item.id
 		const recording = { id, durationMs: item.durationMs }
 		const iso = new Date(t).toISOString()
-		if (item.kind === "dsd-fme-call") {
+		// The recorder's D-STAR files name UR / MY where a talkgroup / radio would be.
+		const dstar =
+			item.kind === "dv-call" && !/^\d+$/.test(item.talkgroup ?? "0")
+		if (dstar) {
+			seq += 1
+			const my = item.source ?? "N0CALL"
+			const ur = item.talkgroup ?? "CQCQCQ"
+			return {
+				eventId: `evt_${seq.toString(36)}`,
+				commitSeq: String(seq),
+				kind: "decoder-reception",
+				producedAt: iso,
+				receivedAt: iso,
+				decoderId: item.decoderId,
+				sourceId: "rtl-sdr",
+				protocol: "dstar",
+				category: "voice",
+				frequencyHz: null,
+				entityKey: `callsign:${my}`,
+				title: `${my} → ${ur}`,
+				fields: [
+					{ key: "callsign", label: "Callsign", value: my },
+					{ key: "destination", label: "To", value: ur },
+					{
+						key: "duration",
+						label: "Duration",
+						unit: "ms",
+						value: item.durationMs ?? 0,
+					},
+				],
+				recording,
+			}
+		}
+		if (item.kind === "dsd-fme-call" || item.kind === "dv-call") {
 			seq += 1
 			return {
 				eventId: `evt_${seq.toString(36)}`,
@@ -1291,7 +1325,10 @@ export async function buildMockServer(
 		const items: { at: number; build: (at: number) => ActivitySummary }[] = []
 		for (const rec of recordingSeeds(recordingsState)) {
 			const at = Date.parse(rec.modifiedAt)
-			const rowed = rec.kind === "dsd-fme-call" || rec.kind === "scanner-analog"
+			const rowed =
+				rec.kind === "dsd-fme-call" ||
+				rec.kind === "dv-call" ||
+				rec.kind === "scanner-analog"
 			if (at < now - 45 * 60_000 || !rowed) continue
 			items.push({
 				at,

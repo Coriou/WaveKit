@@ -304,6 +304,12 @@ export interface RecToken {
 
 const KIND_WORDS: readonly [RegExp, RecordingInventoryKind, string][] = [
 	[/^(c|ca|cal|call|calls)$/i, "dsd-fme-call", "Calls"],
+	// The core filters one kind at a time: the call recorder's files are their own chip.
+	[
+		/^(c|ca|cal|call|calls|rec|reco|recor|record|recorde|recorder)$/i,
+		"dv-call",
+		"Calls · call recorder",
+	],
 	[
 		/^(s|sc|sca|scan|scann|scanne|scanner)$/i,
 		"scanner-dv",

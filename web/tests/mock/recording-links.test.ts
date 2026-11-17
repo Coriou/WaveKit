@@ -53,6 +53,19 @@ describe("mock recording links", () => {
 			expect(file.statusCode).toBe(200)
 			expect(file.headers["content-type"]).toContain("audio/wav")
 		}
+		// The call recorder's files (kind dv-call) link to their D-STAR and DMR call rows.
+		const dv = recordings.items.filter(r => r.kind === "dv-call")
+		const dvRows = rows.items.filter(row =>
+			dv.some(r => r.key === row.recording?.id),
+		)
+		expect(dvRows.map(r => r.protocol).sort()).toEqual(["dmr", "dstar"])
+		expect(dvRows.find(r => r.protocol === "dstar")?.title).toBe(
+			"N0CALL → CQCQCQ",
+		)
+		const byKind = (
+			await get("/api/recordings?kind=dv-call")
+		).json<RecordingInventoryPage>()
+		expect(byKind.items.map(r => r.id).sort()).toEqual(dv.map(r => r.id).sort())
 		const without = (
 			await get("/api/activity?hasRecording=false&limit=100")
 		).json<ActivitySearchPage>()

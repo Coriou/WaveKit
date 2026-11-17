@@ -6900,7 +6900,7 @@ Re-authorized like the other protected operator routes; `Cache-Control:
 no-store`; `Server-Timing: catalogue;dur=<ms>` gives the core time of the
 listing. Query: `limit` (1–200, default 50), `cursor` (opaque, at most 512
 characters), and these filters, all combined: `kind` (`dsd-fme-call`,
-`scanner-dv`, `scanner-analog`), `decoderId` (exact match), `kept` (`true` or
+`dv-call`, `scanner-dv`, `scanner-analog`), `decoderId` (exact match), `kept` (`true` or
 `false`), `discoveryId` (its own folder and every folder it owns through
 merges), `talkgroup` and `source` (radio id; decimal digits), `minHz` and
 `maxHz` (integer Hz, inclusive; only recordings with a known frequency match),
@@ -6945,7 +6945,12 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
 		"total": 1,
 		"kept": 0,
 		"bytes": 288044,
-		"byKind": { "dsd-fme-call": 1, "scanner-dv": 0, "scanner-analog": 0 }
+		"byKind": {
+			"dsd-fme-call": 1,
+			"dv-call": 0,
+			"scanner-dv": 0,
+			"scanner-analog": 0
+		}
 	},
 	"truncatedBefore": null
 }
@@ -6959,8 +6964,13 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   unlike `id` it survives a renumbering of the dsd-fme directories.
   `ownerDiscoveryId` is the live discovery owning the folder (through merges),
   null when none does and for dsd-fme calls.
-- `activityEventId` is the Activity row linked to the recording (a dsd-fme
-  call's `call_end` row, a scanner analog recording's `recording-change` row;
+- `kind` `dv-call`: a digital voice call recording
+  ([DIGITAL-VOICE](DIGITAL-VOICE.md#call-recordings)). Its `id` is
+  `dsd:<n>~<name>` and its `key` `dsd~<name>`, as a dsd-fme call's;
+  `decoderId` is the decoder named in the file name, null when it is not a
+  current decoder. It is deleted like a dsd-fme call.
+- `activityEventId` is the Activity row linked to the recording (a dsd-fme or
+  `dv-call` call's `call_end` row, a scanner analog recording's `recording-change` row;
   `GET /api/activity/:eventId`), read at list time from memory; null when no
   row is known (no such row, the row was pruned, or Activity is off). Older
   cores omit it. See "Recording links" under Activity.
