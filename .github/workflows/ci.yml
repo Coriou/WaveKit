@@ -51,7 +51,7 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install 1.98.1 --profile minimal && rustup default 1.98.1
       - name: Crate tests
-        run: make chan-test
+        run: make chan-test && make hub-test
       - name: Build the binary
         run: make chan-build
       # The manager and the binary agree on recentring only when both are real.

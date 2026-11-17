@@ -154,7 +154,7 @@ jobs:
       - name: Channelizer
         env:
           WAVEKIT_CHAN_BIN: ${{ github.workspace }}/native/wavekit-chan/target/release/wavekit-chan
-        run: '"$RUNNER_TEMP/step.sh" channelizer bash -c "make chan-test && make chan-build && pnpm exec vitest run tests/integration/wavekit-chan-binary.test.ts tests/integration/channelizer-recenter-real-binary.test.ts"'
+        run: '"$RUNNER_TEMP/step.sh" channelizer bash -c "make chan-test && make hub-test && make chan-build && pnpm exec vitest run tests/integration/wavekit-chan-binary.test.ts tests/integration/channelizer-recenter-real-binary.test.ts"'
       - name: Wasm kernels
         run: >-
           "$RUNNER_TEMP/step.sh" kernels bash -c "cargo test --locked --manifest-path native/wavekit-frame/Cargo.toml

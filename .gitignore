@@ -96,3 +96,4 @@ __pycache__/
 
 # wavekit-chan cargo build output
 native/wavekit-chan/target/
+native/wavekit-iqhub/target/
