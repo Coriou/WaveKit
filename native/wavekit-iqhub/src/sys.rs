@@ -7,7 +7,7 @@
 //! - `MSG_NOSIGNAL` on Linux, `SO_NOSIGPIPE` on macOS ([`SEND_FLAGS`], [`no_sigpipe`]);
 //! - the keepalive idle option: `TCP_KEEPIDLE` on Linux, `TCP_KEEPALIVE` on macOS.
 
-use crate::hub::{CloseReason, Received, Sent};
+use crate::hub::{CloseReason, Failure, Received, Sent};
 use std::ffi::{c_int, c_void};
 use std::net::SocketAddr;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -35,6 +35,21 @@ pub fn reason(e: c_int) -> CloseReason {
         libc::ETIMEDOUT => CloseReason::Timeout,
         libc::ECONNRESET | libc::EPIPE | libc::ECONNABORTED | libc::ENOTCONN => CloseReason::Reset,
         _ => CloseReason::Error,
+    }
+}
+
+/// The failure for an error number: the portable reason and the platform's own number.
+pub fn failure(e: c_int) -> Failure {
+    Failure {
+        reason: reason(e),
+        errno: Some(e),
+    }
+}
+
+fn io_failure(e: &std::io::Error) -> Failure {
+    match e.raw_os_error() {
+        Some(n) => failure(n),
+        None => CloseReason::Error.into(),
     }
 }
 
@@ -197,7 +212,7 @@ fn connect_raw(fd: RawFd, addr: &SocketAddr) -> c_int {
 pub fn tcp_connect(
     addr: &SocketAddr,
     keep_alive_ms: Option<u64>,
-) -> Result<(OwnedFd, bool), CloseReason> {
+) -> Result<(OwnedFd, bool), Failure> {
     let domain = if addr.is_ipv4() {
         libc::AF_INET
     } else {
@@ -206,12 +221,12 @@ pub fn tcp_connect(
     // SAFETY: socket() with integer arguments.
     let raw = unsafe { libc::socket(domain, libc::SOCK_STREAM, 0) };
     if raw < 0 {
-        return Err(reason(errno()));
+        return Err(failure(errno()));
     }
     // SAFETY: `raw` is a new fd that nothing else owns.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
     set_cloexec(raw);
-    set_nonblocking(raw).map_err(|_| CloseReason::Error)?;
+    set_nonblocking(raw).map_err(|e| io_failure(&e))?;
     no_sigpipe(raw);
     // A 5-byte tuner command leaves at once instead of waiting for Nagle's acknowledgement.
     set_int(raw, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
@@ -223,16 +238,43 @@ pub fn tcp_connect(
     }
     match errno() {
         libc::EINPROGRESS | libc::EINTR => Ok((fd, false)),
-        e => Err(reason(e)),
+        e => Err(failure(e)),
     }
 }
 
 /// The outcome of a connect that reported writable.
-pub fn connect_result(fd: RawFd) -> Result<(), CloseReason> {
+pub fn connect_result(fd: RawFd) -> Result<(), Failure> {
     match get_int(fd, libc::SOL_SOCKET, libc::SO_ERROR) {
         Some(0) => Ok(()),
-        Some(e) => Err(reason(e)),
-        None => Err(reason(errno())),
+        Some(e) => Err(failure(e)),
+        None => Err(failure(errno())),
+    }
+}
+
+/// The local port of a connected socket (`getsockname`).
+pub fn local_port(fd: RawFd) -> Result<u16, Failure> {
+    // SAFETY: sockaddr_storage is plain data; all zeroes is a valid value.
+    let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: a valid sockaddr_storage and its length, for the call's duration; the kernel
+    // writes at most `len` bytes.
+    let r = unsafe { libc::getsockname(fd, (&raw mut ss).cast::<libc::sockaddr>(), &raw mut len) };
+    if r != 0 {
+        return Err(failure(errno()));
+    }
+    match ss.ss_family as c_int {
+        libc::AF_INET => {
+            // SAFETY: the family says the storage holds a sockaddr_in, which it is large and
+            // aligned enough for.
+            let sin = unsafe { &*(&raw const ss).cast::<libc::sockaddr_in>() };
+            Ok(u16::from_be(sin.sin_port))
+        }
+        libc::AF_INET6 => {
+            // SAFETY: as above, a sockaddr_in6.
+            let sin6 = unsafe { &*(&raw const ss).cast::<libc::sockaddr_in6>() };
+            Ok(u16::from_be(sin6.sin6_port))
+        }
+        _ => Err(CloseReason::Error.into()),
     }
 }
 
@@ -242,7 +284,7 @@ fn received(r: isize) -> Received {
         n if n > 0 => Received::Data(n as usize),
         _ => match errno() {
             e if would_block(e) => Received::WouldBlock,
-            e => Received::Failed(reason(e)),
+            e => Received::Failed(failure(e)),
         },
     }
 }
@@ -252,7 +294,7 @@ fn sent(r: isize) -> Sent {
         n if n >= 0 => Sent::Took(n as usize),
         _ => match errno() {
             e if would_block(e) => Sent::WouldBlock,
-            e => Sent::Failed(reason(e)),
+            e => Sent::Failed(failure(e)),
         },
     }
 }
@@ -339,6 +381,14 @@ pub fn shutdown_read(fd: RawFd) {
     // SAFETY: shutdown on a caller-owned socket.
     unsafe {
         libc::shutdown(fd, libc::SHUT_RD);
+    }
+}
+
+/// Shuts the write side (a FIN after the bytes already queued); reading goes on.
+pub fn shutdown_write(fd: RawFd) {
+    // SAFETY: shutdown on a caller-owned socket.
+    unsafe {
+        libc::shutdown(fd, libc::SHUT_WR);
     }
 }
 

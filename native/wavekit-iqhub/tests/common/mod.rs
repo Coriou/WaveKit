@@ -8,8 +8,11 @@
 use serde_json::Value;
 use std::collections::VecDeque;
 use wavekit_iqhub::hub::{
-    Action, CloseReason, Hub, Kernel, Received, Sent, MAX_ATTEMPTS, MAX_SINKS, MAX_UNBOUND,
+    Action, CloseReason, Failure, Hub, Kernel, Received, Sent, MAX_ATTEMPTS, MAX_SINKS, MAX_UNBOUND,
 };
+
+/// The local port the simulated connect reports.
+pub const LOCAL_PORT: u16 = 49_152;
 
 pub struct SimSink {
     pub open: bool,
@@ -44,6 +47,12 @@ pub struct SimSource {
     pub queue: VecDeque<u8>,
     pub eof: bool,
     pub fail: Option<CloseReason>,
+    /// The error number `fail` and `command_fail` report (none: no number).
+    pub errno: Option<i32>,
+    /// The write side was shut (`Action::ShutdownWrite`).
+    pub shut_write: bool,
+    /// Bytes handed to reads after the write side was shut (a graceful drain).
+    pub drained: u64,
     /// At most this many bytes per read.
     pub per_read: usize,
     /// Bytes handed to the hub by reads (not peeks), this connection.
@@ -65,6 +74,9 @@ impl SimSource {
             queue: VecDeque::new(),
             eof: false,
             fail: None,
+            errno: None,
+            shut_write: false,
+            drained: 0,
             per_read: usize::MAX,
             consumed: 0,
             empty_reads: 0,
@@ -136,7 +148,7 @@ impl Kernel for Sim {
         assert!(bufs.len() <= 3, "at most three slices per send");
         s.sends += 1;
         if !s.open || s.fail {
-            return Sent::Failed(CloseReason::Reset);
+            return Sent::Failed(CloseReason::Reset.into());
         }
         let total: usize = bufs.iter().map(|b| b.len()).sum();
         let mut n = total.min(s.space).min(s.per_call);
@@ -160,8 +172,11 @@ impl Kernel for Sim {
         let s = &mut self.sources[attempt];
         assert!(s.open, "read on a closed source");
         if s.queue.is_empty() {
-            return if let Some(r) = s.fail {
-                Received::Failed(r)
+            return if let Some(reason) = s.fail {
+                Received::Failed(Failure {
+                    reason,
+                    errno: s.errno,
+                })
             } else if s.eof {
                 Received::Eof
             } else {
@@ -178,6 +193,9 @@ impl Kernel for Sim {
             *d = b;
         }
         s.consumed += n as u64;
+        if s.shut_write {
+            s.drained += n as u64;
+        }
         Received::Data(n)
     }
 
@@ -185,8 +203,11 @@ impl Kernel for Sim {
         let s = &self.sources[attempt];
         if !s.queue.is_empty() {
             Received::Data(1)
-        } else if let Some(r) = s.fail {
-            Received::Failed(r)
+        } else if let Some(reason) = s.fail {
+            Received::Failed(Failure {
+                reason,
+                errno: s.errno,
+            })
         } else if s.eof {
             Received::Eof
         } else {
@@ -201,8 +222,11 @@ impl Kernel for Sim {
     fn command_send(&mut self, attempt: usize, bytes: &[u8]) -> Sent {
         let world = self.world_head();
         let s = &mut self.sources[attempt];
-        if let Some(r) = s.command_fail {
-            return Sent::Failed(r);
+        if let Some(reason) = s.command_fail {
+            return Sent::Failed(Failure {
+                reason,
+                errno: s.errno,
+            });
         }
         let n = bytes.len().min(s.command_space);
         if n == 0 {
@@ -273,6 +297,11 @@ impl Rig {
                 }
                 Action::CloseAttempt { attempt } => {
                     self.k.sources[*attempt].open = false;
+                }
+                Action::ShutdownWrite { attempt } => {
+                    let s = &mut self.k.sources[*attempt];
+                    assert!(s.open, "shutdown of a closed source");
+                    s.shut_write = true;
                 }
                 Action::BindSink { conn, sink } => {
                     self.k.conns[*conn].open = false;
@@ -363,7 +392,7 @@ impl Rig {
             Some(Action::Connect { attempt, .. }) => *attempt,
             a => panic!("no connect action: {a:?}"),
         };
-        self.hub.connect_done(slot, Ok(()), self.now);
+        self.hub.connect_done(slot, Ok(LOCAL_PORT), self.now);
         self.after();
         if !header.is_empty() {
             self.k.sources[slot].queue.extend(header.iter());

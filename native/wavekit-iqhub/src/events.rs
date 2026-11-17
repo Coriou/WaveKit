@@ -74,6 +74,11 @@ impl EventQueue {
         let _ = write!(self.line, "{v}");
     }
 
+    pub fn i64(&mut self, k: &str, v: i64) {
+        self.key(k);
+        let _ = write!(self.line, "{v}");
+    }
+
     pub fn opt_u64(&mut self, k: &str, v: Option<u64>) {
         match v {
             Some(v) => self.u64(k, v),

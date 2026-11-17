@@ -9,15 +9,23 @@
 
 use crate::events::{EventQueue, Pos};
 use crate::protocol::{
-    parse_hello, parse_request, truncate_utf8, Configure, Connect, Parsed, Refusal, Request,
-    SinkKind, MAX_DETAIL_BYTES, MAX_HEADER_BYTES,
+    parse_hello, parse_request, truncate_utf8, CloseMode, Configure, Connect, Parsed, Refusal,
+    Request, SinkKind, MAX_DETAIL_BYTES, MAX_HEADER_BYTES,
 };
 use crate::ring::{align_down, align_up, Coalesce, Level, NoMemory, Ring};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 
 pub const PROTOCOL: u64 = 1;
-pub const FEATURES: [&str; 3] = ["mark", "sink-update", "link-gap"];
+pub const FEATURES: [&str; 7] = [
+    "mark",
+    "sink-update",
+    "link-gap",
+    "tcp-connected",
+    "header-timeout",
+    "errno",
+    "close-modes",
+];
 pub const MAX_SINKS: usize = 32;
 pub const MAX_ATTEMPTS: usize = 4;
 pub const MAX_UNBOUND: usize = 8;
@@ -29,7 +37,8 @@ pub const MAX_RECORD_PAYLOAD: usize = 65_536;
 pub const SPILL_BYTES: usize = MAX_RECORD_PAYLOAD + RECORD_HEADER;
 pub const MAX_PENDING_COMMAND_BYTES: usize = 4_096;
 /// Commands pending on one attempt. A closing attempt answers each with `write-failed`, so this
-/// bounds what one control line can queue: 64 x about 170 bytes is under 11 KiB of events.
+/// bounds what one control line can queue: 64 lines of at most 214 bytes (every number at its
+/// widest, `errno` included) is under 14 KiB of events.
 pub const MAX_PENDING_COMMANDS: usize = 64;
 /// Marks one framed sink may owe (marks it has not been sent and will be). A skip drops the
 /// marks inside the skipped range, so a stalled sink owes only the marks of its live window. A
@@ -49,6 +58,13 @@ pub const RECORD_STREAM: u8 = 3;
 pub const RECORD_MARK: u8 = 4;
 /// A sink socket's send buffer request: about 50 ms of signal.
 pub const SEND_BUFFER_MS: u64 = 50;
+/// A graceful close discards its input through one buffer of this size, kept for the hub's
+/// life (allocated once, in [`Hub::new`]).
+pub const DISCARD_READ_BYTES: usize = 16 * 1024;
+/// Discarding reads per readiness: at most 16 x 16 KiB = 256 KiB thrown away per wake-up, so a
+/// peer that keeps sending during a graceful close cannot hold the loop; `poll` is level
+/// triggered, so the rest is read at the next wake-up (and the grace bounds it all).
+pub const DISCARD_READS_PER_WAKE: usize = 16;
 
 /// Why an attempt closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,12 +94,29 @@ impl CloseReason {
     }
 }
 
+/// A failed system call: the portable reason, and the platform's error number when the
+/// operating system gave one (`errno` values differ between Linux and macOS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Failure {
+    pub reason: CloseReason,
+    pub errno: Option<i32>,
+}
+
+impl From<CloseReason> for Failure {
+    fn from(reason: CloseReason) -> Failure {
+        Failure {
+            reason,
+            errno: None,
+        }
+    }
+}
+
 /// The outcome of one non-blocking send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sent {
     Took(usize),
     WouldBlock,
-    Failed(CloseReason),
+    Failed(Failure),
 }
 
 /// The outcome of one non-blocking receive (or peek).
@@ -92,7 +125,7 @@ pub enum Received {
     Data(usize),
     WouldBlock,
     Eof,
-    Failed(CloseReason),
+    Failed(Failure),
 }
 
 /// One system call per method, on the socket the slot names. Never blocks.
@@ -119,6 +152,10 @@ pub enum Action {
         keep_alive_ms: Option<u64>,
     },
     CloseAttempt {
+        attempt: usize,
+    },
+    /// A graceful close: shut the write side (`shutdown(SHUT_WR)`); reading goes on.
+    ShutdownWrite {
         attempt: usize,
     },
     /// The connection becomes the sink's: shut its read side and poll it for writes only.
@@ -165,10 +202,64 @@ struct Command {
     seq: Option<u64>,
 }
 
+/// An attempt an `abort` in `after-writes` or `graceful` mode is closing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Closing {
+    pub mode: CloseMode,
+    /// The end of the grace: whatever is still pending fails and the socket closes.
+    pub deadline_us: u64,
+    /// The `abort`'s `seq`, echoed on the `closed` that answers it.
+    pub seq: Option<u64>,
+    /// Graceful only: the pending writes are done and the write side is shut; input is read and
+    /// discarded until the peer closes.
+    pub draining: bool,
+}
+
+/// How an attempt's `closed` reads.
+#[derive(Debug, Clone, Copy)]
+struct Close {
+    reason: CloseReason,
+    errno: Option<i32>,
+    /// The `abort`'s.
+    seq: Option<u64>,
+    /// An `abort`'s mode.
+    mode: Option<CloseMode>,
+}
+
+impl Close {
+    fn by(reason: CloseReason) -> Close {
+        Close {
+            reason,
+            errno: None,
+            seq: None,
+            mode: None,
+        }
+    }
+
+    fn failed(f: Failure) -> Close {
+        Close {
+            errno: f.errno,
+            ..Close::by(f.reason)
+        }
+    }
+
+    fn aborted(mode: CloseMode, seq: Option<u64>, errno: Option<i32>) -> Close {
+        Close {
+            reason: CloseReason::Aborted,
+            errno,
+            seq,
+            mode: Some(mode),
+        }
+    }
+}
+
 struct Attempt {
     id: u64,
     phase: Phase,
-    deadline_us: u64,
+    /// The connect phase's deadline, then the header phase's (`None`: no `headerTimeoutMs`).
+    deadline_us: Option<u64>,
+    header_timeout_us: Option<u64>,
+    closing: Option<Closing>,
     header: [u8; MAX_HEADER_BYTES],
     header_bytes: usize,
     header_got: usize,
@@ -428,6 +519,8 @@ pub struct Hub {
     next_progress_us: Option<u64>,
     progress_emitted: u64,
     total_reads: u64,
+    /// Where a graceful close's input goes (never the ring).
+    discard: Box<[u8]>,
     exit: Option<i32>,
 }
 
@@ -487,6 +580,7 @@ impl Hub {
             next_progress_us: None,
             progress_emitted: 0,
             total_reads: 0,
+            discard: vec![0u8; DISCARD_READ_BYTES].into_boxed_slice(),
             exit: None,
         }
     }
@@ -566,8 +660,14 @@ impl Hub {
         self.stream_start
     }
 
+    /// The attempt's phase; a closing attempt keeps the phase it was aborted in.
     pub fn attempt_phase(&self, attempt: usize) -> Option<Phase> {
         self.attempts.get(attempt)?.as_ref().map(|a| a.phase)
+    }
+
+    /// Whether an `abort` in `after-writes` or `graceful` mode is closing the attempt.
+    pub fn attempt_closing(&self, attempt: usize) -> Option<Closing> {
+        self.attempts.get(attempt)?.as_ref()?.closing
     }
 
     /// (poll for readable, poll for writable), or `None` for a free slot. A held attempt whose
@@ -575,6 +675,15 @@ impl Hub {
     /// adoption, and a hang-up on it must not wake the loop.
     pub fn attempt_interest(&self, attempt: usize) -> Option<(bool, bool)> {
         let a = self.attempts.get(attempt)?.as_ref()?;
+        if let Some(c) = a.closing {
+            // Draining: read (and discard) until the peer closes. Before that: not read at all,
+            // polled for writable while commands are pending.
+            return Some(if c.draining {
+                (true, false)
+            } else {
+                (false, a.pending() > 0)
+            });
+        }
         Some(match a.phase {
             Phase::Connecting => (false, true),
             Phase::Header => (true, false),
@@ -592,8 +701,13 @@ impl Hub {
         let mut t: Option<u64> = None;
         let mut at = |x: u64| t = Some(t.map_or(x, |t: u64| t.min(x)));
         for a in self.attempts.iter().flatten() {
-            if matches!(a.phase, Phase::Connecting | Phase::Header) {
-                at(a.deadline_us);
+            match a.closing {
+                Some(c) => at(c.deadline_us),
+                None => {
+                    if let (Phase::Connecting | Phase::Header, Some(d)) = (a.phase, a.deadline_us) {
+                        at(d);
+                    }
+                }
             }
         }
         for u in self.unbound.iter().flatten() {
@@ -696,8 +810,12 @@ impl Hub {
             Request::Configure(c) => self.configure(c, seq, now),
             Request::Connect(c) => self.connect(c, seq, now),
             Request::Adopt { attempt } => self.adopt(attempt, seq, now),
-            Request::Abort { attempt } => match self.attempt_slot(attempt) {
-                Some(slot) => self.close_attempt(slot, CloseReason::Aborted, seq, now),
+            Request::Abort {
+                attempt,
+                mode,
+                grace_ms,
+            } => match self.attempt_slot(attempt) {
+                Some(slot) => self.abort(slot, mode, grace_ms, seq, now),
                 None => self.reject(now, seq, Some("abort"), "unknown-attempt", ""),
             },
             Request::Write { id, attempt, bytes } => self.write(id, attempt, &bytes, seq, now, k),
@@ -828,7 +946,10 @@ impl Hub {
         self.attempts[slot] = Some(Attempt {
             id: c.attempt,
             phase: Phase::Connecting,
-            deadline_us: now + c.timeout_ms * 1000,
+            // timeoutMs bounds the connect only; headerTimeoutMs (from tcp-connected) the header.
+            deadline_us: Some(now + c.timeout_ms * 1000),
+            header_timeout_us: c.header_timeout_ms.map(|ms| ms * 1000),
+            closing: None,
             header: [0; MAX_HEADER_BYTES],
             header_bytes: c.header_bytes,
             header_got: 0,
@@ -846,18 +967,33 @@ impl Hub {
         });
     }
 
-    /// The outcome of the non-blocking connect started by [`Action::Connect`].
-    pub fn connect_done(&mut self, slot: usize, result: Result<(), CloseReason>, now: u64) {
+    /// The outcome of the non-blocking connect started by [`Action::Connect`]: the local port
+    /// of the connected socket, or the failure.
+    pub fn connect_done(&mut self, slot: usize, result: Result<u16, Failure>, now: u64) {
+        let pos = self.pos();
         let Some(a) = self.attempts.get_mut(slot).and_then(Option::as_mut) else {
             return;
         };
-        if a.phase != Phase::Connecting {
+        if a.phase != Phase::Connecting || a.closing.is_some() {
             return;
         }
-        match result {
-            Err(r) => self.close_attempt(slot, r, None, now),
-            Ok(()) if a.header_bytes == 0 => self.header_complete(slot, now),
-            Ok(()) => a.phase = Phase::Header,
+        let port = match result {
+            Err(f) => return self.close_attempt(slot, Close::failed(f), now),
+            Ok(port) => port,
+        };
+        // The connect's answer: the TCP connection is up, before any byte of it was read.
+        let seq = a.connect_seq.take();
+        let o = &mut self.out;
+        o.begin("tcp-connected", now);
+        o.seq(seq);
+        o.u64("attempt", a.id);
+        o.u64("localPort", u64::from(port));
+        o.end(pos);
+        if a.header_bytes == 0 {
+            self.header_complete(slot, now);
+        } else {
+            a.phase = Phase::Header;
+            a.deadline_us = a.header_timeout_us.map(|t| now + t);
         }
     }
 
@@ -867,16 +1003,24 @@ impl Hub {
             return;
         };
         a.phase = Phase::Held;
-        let seq = a.connect_seq.take();
+        a.deadline_us = None;
         let o = &mut self.out;
         o.begin("connected", now);
-        o.seq(seq);
         o.u64("attempt", a.id);
         o.hex("headerHex", &a.header[..a.header_got]);
         o.end(pos);
     }
 
-    fn close_attempt(&mut self, slot: usize, reason: CloseReason, seq: Option<u64>, now: u64) {
+    /// The adopted stream ends: its trailing partial frame is discarded, the sinks keep what the
+    /// ring holds, and there is no stream until the next `adopt`.
+    fn end_stream(&mut self) {
+        self.adopted = None;
+        self.ring.discard_carry();
+        self.hold_until = None;
+        self.last_read_us = None;
+    }
+
+    fn close_attempt(&mut self, slot: usize, close: Close, now: u64) {
         let Some(a) = self.attempts[slot].take() else {
             return;
         };
@@ -888,28 +1032,128 @@ impl Hub {
             o.u64("id", c.id);
             o.u64("attempt", a.id);
             o.str("reason", "closed");
+            if let Some(e) = close.errno {
+                o.i64("errno", i64::from(e));
+            }
             o.end(pos);
         }
         // `seq` answers an `abort`; `connectSeq` answers a `connect` never answered by
-        // `connected` (`header_complete` takes it).
+        // `tcp-connected` (`connect_done` takes it).
         let o = &mut self.out;
         o.begin("closed", now);
-        o.seq(seq);
+        o.seq(close.seq);
         if let Some(cs) = a.connect_seq {
             o.u64("connectSeq", cs);
         }
         o.u64("attempt", a.id);
         o.str("phase", a.phase.as_str());
-        o.str("reason", reason.as_str());
+        o.str("reason", close.reason.as_str());
+        if let Some(m) = close.mode {
+            o.str("mode", m.as_str());
+        }
+        if let Some(e) = close.errno {
+            o.i64("errno", i64::from(e));
+        }
         o.end(pos);
         if self.adopted == Some(slot) {
-            self.adopted = None;
-            self.ring.discard_carry();
-            self.hold_until = None;
-            self.last_read_us = None;
+            self.end_stream();
         }
         self.actions
             .push_back(Action::CloseAttempt { attempt: slot });
+    }
+
+    /// A failure of the attempt's socket: a closing attempt's `closed` still answers its
+    /// `abort` (with the error number); any other closes with the failure's reason.
+    fn attempt_failed(&mut self, slot: usize, f: Failure, now: u64) {
+        match self.attempts[slot].as_ref().and_then(|a| a.closing) {
+            Some(c) => self.close_attempt(slot, Close::aborted(c.mode, c.seq, f.errno), now),
+            None => self.close_attempt(slot, Close::failed(f), now),
+        }
+    }
+
+    /// The peer closed (EOF) on a read.
+    fn attempt_eof(&mut self, slot: usize, now: u64) {
+        match self.attempts[slot].as_ref().and_then(|a| a.closing) {
+            Some(c) => self.close_attempt(slot, Close::aborted(c.mode, c.seq, None), now),
+            None => self.close_attempt(slot, Close::by(CloseReason::Eof), now),
+        }
+    }
+
+    fn abort(&mut self, slot: usize, mode: CloseMode, grace_ms: u64, seq: Option<u64>, now: u64) {
+        let Some(a) = self.attempts[slot].as_ref() else {
+            return;
+        };
+        if a.closing.is_some() {
+            // During the grace only `now` is accepted: it closes at once.
+            if mode == CloseMode::Now {
+                self.close_attempt(slot, Close::aborted(mode, seq, None), now);
+            } else {
+                self.reject(
+                    now,
+                    seq,
+                    Some("abort"),
+                    "closing",
+                    "the attempt is closing already",
+                );
+            }
+            return;
+        }
+        // A connecting attempt has written nothing and has no peer to half-close.
+        if mode == CloseMode::Now || a.phase == Phase::Connecting {
+            self.close_attempt(slot, Close::aborted(mode, seq, None), now);
+            return;
+        }
+        // Stop reading at once: an adopted stream ends for the sinks as on a peer close.
+        if self.adopted == Some(slot) {
+            self.end_stream();
+        }
+        if let Some(a) = self.attempts[slot].as_mut() {
+            a.closing = Some(Closing {
+                mode,
+                deadline_us: now + grace_ms * 1000,
+                seq,
+                draining: false,
+            });
+        }
+        self.closing_progress(slot, now);
+    }
+
+    /// A closing attempt whose pending writes are done: `after-writes` closes, `graceful` shuts
+    /// its write side and drains.
+    fn closing_progress(&mut self, slot: usize, now: u64) {
+        let Some(a) = self.attempts[slot].as_mut() else {
+            return;
+        };
+        let pending = a.pending();
+        let Some(c) = a.closing.as_mut() else {
+            return;
+        };
+        if c.draining || pending > 0 {
+            return;
+        }
+        match c.mode {
+            CloseMode::Graceful => {
+                c.draining = true;
+                self.actions
+                    .push_back(Action::ShutdownWrite { attempt: slot });
+            }
+            CloseMode::AfterWrites | CloseMode::Now => {
+                let close = Close::aborted(c.mode, c.seq, None);
+                self.close_attempt(slot, close, now);
+            }
+        }
+    }
+
+    /// Reads and discards a draining attempt's input (never into the ring, never counted).
+    fn discard_input(&mut self, slot: usize, k: &mut impl Kernel, now: u64) {
+        for _ in 0..DISCARD_READS_PER_WAKE {
+            match k.source_recv(slot, &mut self.discard, &mut []) {
+                Received::Data(n) if n == self.discard.len() => continue,
+                Received::Data(_) | Received::WouldBlock => return,
+                Received::Eof => return self.attempt_eof(slot, now),
+                Received::Failed(f) => return self.attempt_failed(slot, f, now),
+            }
+        }
     }
 
     fn adopt(&mut self, id: u64, seq: Option<u64>, now: u64) {
@@ -917,6 +1161,13 @@ impl Hub {
             self.reject(now, seq, Some("adopt"), "unknown-attempt", "");
             return;
         };
+        if self.attempts[slot]
+            .as_ref()
+            .is_some_and(|a| a.closing.is_some())
+        {
+            self.reject(now, seq, Some("adopt"), "closing", "");
+            return;
+        }
         match self.attempts[slot].as_ref().map(|a| a.phase) {
             Some(Phase::Held) => {}
             Some(Phase::Adopted) => {
@@ -933,7 +1184,7 @@ impl Hub {
             return;
         }
         if let Some(old) = self.adopted {
-            self.close_attempt(old, CloseReason::Replaced, None, now);
+            self.close_attempt(old, Close::by(CloseReason::Replaced), now);
         }
         self.ring.discard_carry();
         self.stream += 1;
@@ -976,6 +1227,14 @@ impl Hub {
         k: &mut impl Kernel,
     ) {
         let slot = self.attempt_slot(attempt);
+        if slot
+            .and_then(|s| self.attempts[s].as_ref())
+            .is_some_and(|a| a.closing.is_some())
+        {
+            // An abort that lets the pending writes complete accepts no new one.
+            self.write_failed(id, attempt, "closing", seq, now);
+            return;
+        }
         let ready = slot
             .and_then(|s| self.attempts[s].as_ref())
             .is_some_and(|a| matches!(a.phase, Phase::Held | Phase::Adopted));
@@ -1024,8 +1283,8 @@ impl Hub {
             let (front, _) = a.bytes.as_slices();
             match k.command_send(slot, front) {
                 Sent::Took(0) | Sent::WouldBlock => return,
-                Sent::Failed(r) => {
-                    self.close_attempt(slot, r, None, now);
+                Sent::Failed(f) => {
+                    self.attempt_failed(slot, f, now);
                     return;
                 }
                 Sent::Took(n) => {
@@ -1062,6 +1321,18 @@ impl Hub {
         let Some(phase) = self.attempt_phase(slot) else {
             return;
         };
+        if let Some(c) = self.attempt_closing(slot) {
+            if c.draining {
+                if readable {
+                    self.discard_input(slot, k, now);
+                }
+            } else if writable {
+                // Not reading: a payload that became readable is ignored.
+                self.flush_commands(slot, k, now);
+                self.closing_progress(slot, now);
+            }
+            return;
+        }
         match phase {
             Phase::Connecting => {}
             Phase::Header => {
@@ -1106,8 +1377,8 @@ impl Hub {
                 }
             }
             Received::WouldBlock => {}
-            Received::Eof => self.close_attempt(slot, CloseReason::Eof, None, now),
-            Received::Failed(r) => self.close_attempt(slot, r, None, now),
+            Received::Eof => self.attempt_eof(slot, now),
+            Received::Failed(f) => self.attempt_failed(slot, f, now),
         }
     }
 
@@ -1124,8 +1395,8 @@ impl Hub {
                 }
             }
             Received::Data(_) | Received::WouldBlock => {}
-            Received::Eof => self.close_attempt(slot, CloseReason::Eof, None, now),
-            Received::Failed(r) => self.close_attempt(slot, r, None, now),
+            Received::Eof => self.attempt_eof(slot, now),
+            Received::Failed(f) => self.attempt_failed(slot, f, now),
         }
     }
 
@@ -1198,21 +1469,32 @@ impl Hub {
                     self.head_advanced(k, now);
                 }
             }
-            Received::Eof => self.close_attempt(slot, CloseReason::Eof, None, now),
-            Received::Failed(r) => self.close_attempt(slot, r, None, now),
+            Received::Eof => self.attempt_eof(slot, now),
+            Received::Failed(f) => self.attempt_failed(slot, f, now),
         }
     }
 
     // ---- timers -----------------------------------------------------------------------------
 
-    /// Timeouts, the post-wait read and `progress`.
+    /// Timeouts, the end of a close's grace, the post-wait read and `progress`.
     pub fn tick(&mut self, now: u64, k: &mut impl Kernel) {
         for slot in 0..MAX_ATTEMPTS {
-            let due = self.attempts[slot].as_ref().is_some_and(|a| {
-                matches!(a.phase, Phase::Connecting | Phase::Header) && now >= a.deadline_us
-            });
-            if due {
-                self.close_attempt(slot, CloseReason::Timeout, None, now);
+            let Some(a) = self.attempts[slot].as_ref() else {
+                continue;
+            };
+            match a.closing {
+                // The grace is over: what is still pending fails, the socket closes.
+                Some(c) if now >= c.deadline_us => {
+                    self.close_attempt(slot, Close::aborted(c.mode, c.seq, None), now)
+                }
+                Some(_) => {}
+                None => {
+                    let due = matches!(a.phase, Phase::Connecting | Phase::Header)
+                        && a.deadline_us.is_some_and(|d| now >= d);
+                    if due {
+                        self.close_attempt(slot, Close::by(CloseReason::Timeout), now);
+                    }
+                }
             }
         }
         for conn in 0..MAX_UNBOUND {

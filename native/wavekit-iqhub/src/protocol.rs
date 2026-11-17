@@ -34,6 +34,13 @@ pub const MAX_PROGRESS_MS: u64 = 1_000;
 pub const DEFAULT_PROGRESS_MS: u64 = 100;
 pub const MIN_TIMEOUT_MS: u64 = 1;
 pub const MAX_TIMEOUT_MS: u64 = 600_000;
+/// `headerTimeoutMs`: counted from `tcp-connected`; absent, the header is awaited without limit.
+pub const MIN_HEADER_TIMEOUT_MS: u64 = 1;
+pub const MAX_HEADER_TIMEOUT_MS: u64 = 600_000;
+/// `graceMs` of an `abort` in `after-writes` or `graceful` mode.
+pub const MIN_GRACE_MS: u64 = 1;
+pub const MAX_GRACE_MS: u64 = 60_000;
+pub const DEFAULT_GRACE_MS: u64 = 2_000;
 pub const MIN_KEEPALIVE_MS: u64 = 1_000;
 pub const MAX_KEEPALIVE_MS: u64 = 7_200_000;
 pub const DEFAULT_MAX_LAG_MS: u64 = 2_000;
@@ -71,9 +78,33 @@ pub struct Configure {
 pub struct Connect {
     pub attempt: u64,
     pub addr: SocketAddr,
+    /// Bounds the connect phase only.
     pub timeout_ms: u64,
     pub header_bytes: usize,
+    /// Bounds the header phase, from `tcp-connected`; `None`: no limit.
+    pub header_timeout_ms: Option<u64>,
     pub keep_alive_ms: Option<u64>,
+}
+
+/// How an `abort` closes its attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseMode {
+    /// At once; pending command writes fail.
+    Now,
+    /// Stop reading at once, let the pending command writes complete, then close.
+    AfterWrites,
+    /// As `AfterWrites`, then shut the write side and discard input until the peer closes.
+    Graceful,
+}
+
+impl CloseMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CloseMode::Now => "now",
+            CloseMode::AfterWrites => "after-writes",
+            CloseMode::Graceful => "graceful",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +131,9 @@ pub enum Request {
     },
     Abort {
         attempt: u64,
+        mode: CloseMode,
+        /// The grace of `AfterWrites` and `Graceful` (`DEFAULT_GRACE_MS` when not given).
+        grace_ms: u64,
     },
     Write {
         id: u64,
@@ -452,6 +486,7 @@ pub fn parse_request(line: &[u8]) -> Result<Parsed, Refusal> {
                 "port",
                 "timeoutMs",
                 "headerBytes",
+                "headerTimeoutMs",
                 "keepAliveMs",
             ])?;
             let attempt = m.uint("attempt")?;
@@ -465,6 +500,11 @@ pub fn parse_request(line: &[u8]) -> Result<Parsed, Refusal> {
                 addr: SocketAddr::new(ip, port),
                 timeout_ms: m.uint_in("timeoutMs", MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)?,
                 header_bytes: m.uint_in("headerBytes", 0, MAX_HEADER_BYTES as u64)? as usize,
+                header_timeout_ms: m.opt_uint_in(
+                    "headerTimeoutMs",
+                    MIN_HEADER_TIMEOUT_MS,
+                    MAX_HEADER_TIMEOUT_MS,
+                )?,
                 keep_alive_ms: m.opt_uint_in("keepAliveMs", MIN_KEEPALIVE_MS, MAX_KEEPALIVE_MS)?,
             })
         }
@@ -475,9 +515,28 @@ pub fn parse_request(line: &[u8]) -> Result<Parsed, Refusal> {
             }
         }
         "abort" => {
-            m.only(&["attempt"])?;
+            m.only(&["attempt", "mode", "graceMs"])?;
+            let attempt = m.uint("attempt")?;
+            let mode = match obj.get("mode") {
+                None => CloseMode::Now,
+                Some(Value::String(s)) if s == "now" => CloseMode::Now,
+                Some(Value::String(s)) if s == "after-writes" => CloseMode::AfterWrites,
+                Some(Value::String(s)) if s == "graceful" => CloseMode::Graceful,
+                Some(_) => {
+                    return Err(m.malformed(
+                        "mode must be \"now\", \"after-writes\" or \"graceful\"".into(),
+                    ))
+                }
+            };
+            let grace_ms = m.opt_uint_in("graceMs", MIN_GRACE_MS, MAX_GRACE_MS)?;
+            if mode == CloseMode::Now && grace_ms.is_some() {
+                // A grace only means something to a mode that waits.
+                return Err(m.malformed("graceMs needs mode after-writes or graceful".into()));
+            }
             Request::Abort {
-                attempt: m.uint("attempt")?,
+                attempt,
+                mode,
+                grace_ms: grace_ms.unwrap_or(DEFAULT_GRACE_MS),
             }
         }
         "write" => {

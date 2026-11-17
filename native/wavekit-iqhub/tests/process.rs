@@ -373,17 +373,23 @@ fn a_whole_session_keeps_every_event_in_order_and_every_position_exact() {
     let src = listener();
     let port = src.local_addr().unwrap().port();
     hub.send(&format!(r#"{{"v":1,"type":"connect","attempt":1,"host":"127.0.0.1","port":{port},"timeoutMs":5000,"headerBytes":12,"keepAliveMs":5000,"seq":2}}"#));
-    let (mut s1, _) = src.accept().unwrap();
+    let (mut s1, peer) = src.accept().unwrap();
+    let t = hub.expect("tcp-connected");
+    assert_eq!(
+        (
+            t["attempt"].as_u64(),
+            t["localPort"].as_u64(),
+            t["seq"].as_u64()
+        ),
+        (Some(1), Some(u64::from(peer.port())), Some(2))
+    );
     s1.write_all(RTL_HEADER).unwrap();
     let c = hub.expect("connected");
     assert_eq!(
-        (
-            c["attempt"].as_u64(),
-            c["headerHex"].as_str(),
-            c["seq"].as_u64()
-        ),
-        (Some(1), Some("52544c30000000050000001d"), Some(2))
+        (c["attempt"].as_u64(), c["headerHex"].as_str()),
+        (Some(1), Some("52544c30000000050000001d"))
     );
+    assert!(c.get("seq").is_none(), "the seq is on tcp-connected");
     let mut truth = stream_bytes(1, 0, 4_000);
     s1.write_all(&truth).unwrap();
     assert_eq!(hub.expect("payload-ready")["attempt"], 1);
@@ -499,7 +505,7 @@ fn a_whole_session_keeps_every_event_in_order_and_every_position_exact() {
             break;
         }
     }
-    assert_eq!(seen, ["connected", "payload-ready"]);
+    assert_eq!(seen, ["tcp-connected", "connected", "payload-ready"]);
     hub.send(r#"{"v":1,"type":"adopt","attempt":2}"#);
     let closed = loop {
         let e = hub.next();
@@ -660,6 +666,7 @@ fn a_closed_sink_is_closed_alone_and_sigpipe_does_not_kill_the_hub() {
     let port = src.local_addr().unwrap().port();
     hub.send(&format!(r#"{{"v":1,"type":"connect","attempt":1,"host":"127.0.0.1","port":{port},"timeoutMs":5000,"headerBytes":0}}"#));
     let (mut s1, _) = src.accept().unwrap();
+    hub.expect("tcp-connected");
     hub.expect("connected");
     for id in ["gone", "kept"] {
         hub.send(&format!(
@@ -1093,4 +1100,306 @@ fn the_socket_directory_must_exist_be_private_and_keep_the_path_within_103_bytes
     hub.close_control();
     assert_eq!(hub.wait_exit().code(), Some(0));
     let _ = std::fs::remove_dir_all(&long);
+}
+
+/// The connect deadline of every `connect` below except the one a test is about: long enough
+/// that a loaded host stalling the hub between a connect and its completion never fails a test
+/// about something else with `timeout`.
+///
+/// The tightest deadline in these tests is the connect `timeoutMs` of 100 ms in
+/// `tcp_connected_comes_before_any_header_byte_and_a_header_waits_without_header_timeout_ms`
+/// (attempt 1: it shows that the connect's bound does not reach the header phase); its waits
+/// are on the hub's own clock (`mono`), never a sleep of the test's. The same test's
+/// `headerTimeoutMs` of 100 ms (attempt 2) cannot be failed by a stall: a stalled hub only
+/// closes it later, and the test asserts no sooner than the bound.
+const CONNECT_TIMEOUT_MS: u64 = 5_000;
+
+/// A listener's port, connected to by attempt `attempt` with `extra` members.
+fn connect_line(attempt: u64, port: u16, header: usize, extra: &str) -> String {
+    connect_line_within(attempt, port, header, CONNECT_TIMEOUT_MS, extra)
+}
+
+/// As [`connect_line`], with the connect deadline `timeout_ms`.
+fn connect_line_within(
+    attempt: u64,
+    port: u16,
+    header: usize,
+    timeout_ms: u64,
+    extra: &str,
+) -> String {
+    format!(
+        r#"{{"v":1,"type":"connect","attempt":{attempt},"host":"127.0.0.1","port":{port},"timeoutMs":{timeout_ms},"headerBytes":{header}{extra},"seq":{attempt}}}"#
+    )
+}
+
+#[test]
+fn tcp_connected_comes_before_any_header_byte_and_a_header_waits_without_header_timeout_ms() {
+    let mut hub = spawn();
+    hub.expect("ready");
+    hub.send(r#"{"v":1,"type":"configure","byteRate":2048000,"frameBytes":2,"levelFormat":null,"progressMs":50}"#);
+    hub.expect("configured");
+    let src = listener();
+    let port = src.local_addr().unwrap().port();
+    // timeoutMs 100 bounds the connect only.
+    hub.send(&connect_line_within(1, port, 12, 100, ""));
+    let (s1, peer) = src.accept().unwrap();
+    // The endpoint has sent nothing: the connection is up, the header not begun.
+    let t = hub.expect("tcp-connected");
+    assert_eq!(
+        (
+            t["attempt"].as_u64(),
+            t["seq"].as_u64(),
+            t["localPort"].as_u64()
+        ),
+        (Some(1), Some(1), Some(u64::from(peer.port()))),
+        "localPort is the port the listener sees"
+    );
+    // Five times timeoutMs on the hub's own clock, and the attempt is still reading its header.
+    let since = t["mono"].as_f64().unwrap();
+    hub.progress_until(|p| p["mono"].as_f64().unwrap() >= since + 500.0);
+    assert!(
+        !hub.log.iter().any(|e| e["type"] == "closed"),
+        "closed without a header timeout"
+    );
+    hub.send(r#"{"v":1,"type":"abort","attempt":1,"seq":5}"#);
+    let c = hub.expect("closed");
+    assert_eq!(
+        (c["phase"].as_str(), c["reason"].as_str(), c["seq"].as_u64()),
+        (Some("header"), Some("aborted"), Some(5)),
+        "it was still in its header phase"
+    );
+    drop(s1);
+    // With headerTimeoutMs: closed, phase header, reason timeout, no sooner than the bound.
+    hub.send(&connect_line(2, port, 12, r#","headerTimeoutMs":100"#));
+    let (mut s2, _) = src.accept().unwrap();
+    s2.write_all(&RTL_HEADER[..5]).unwrap();
+    let t = hub.expect("tcp-connected");
+    let c = hub.expect("closed");
+    assert_eq!(
+        (
+            c["attempt"].as_u64(),
+            c["phase"].as_str(),
+            c["reason"].as_str()
+        ),
+        (Some(2), Some("header"), Some("timeout"))
+    );
+    assert!(c["mono"].as_f64().unwrap() - t["mono"].as_f64().unwrap() >= 100.0);
+    assert!(c.get("connectSeq").is_none() && c.get("errno").is_none());
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
+}
+
+#[test]
+fn a_refused_connect_carries_the_platforms_errno() {
+    let mut hub = spawn();
+    hub.expect("ready");
+    // A port bound and closed by the test: nothing listens there.
+    let port = {
+        let l = listener();
+        l.local_addr().unwrap().port()
+    };
+    hub.send(&connect_line(1, port, 0, r#","keepAliveMs":1000"#));
+    let c = hub.expect("closed");
+    assert_eq!(
+        (
+            c["phase"].as_str(),
+            c["reason"].as_str(),
+            c["errno"].as_i64(),
+            c["connectSeq"].as_u64()
+        ),
+        (
+            Some("connect"),
+            Some("refused"),
+            Some(i64::from(libc::ECONNREFUSED)),
+            Some(1)
+        ),
+        "{c}"
+    );
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
+}
+
+#[test]
+fn a_graceful_abort_lets_the_peer_read_the_last_command_and_see_the_half_close_before_closed() {
+    let mut hub = spawn();
+    hub.expect("ready");
+    let src = listener();
+    let port = src.local_addr().unwrap().port();
+    hub.send(&connect_line(1, port, 0, ""));
+    let (peer, _) = src.accept().unwrap();
+    hub.expect("tcp-connected");
+    hub.expect("connected");
+    // The endpoint reads the command, then up to EOF (the hub's FIN), then answers with input
+    // the hub must discard, reports, and closes.
+    let (tx, rx) = mpsc::channel();
+    let endpoint = thread::spawn(move || {
+        let mut peer = peer;
+        peer.set_read_timeout(Some(WAIT)).unwrap();
+        let mut got = Vec::new();
+        let mut b = [0u8; 64];
+        let eof = loop {
+            match peer.read(&mut b) {
+                Ok(0) => break true,
+                Ok(n) => got.extend_from_slice(&b[..n]),
+                Err(_) => break false,
+            }
+        };
+        let late = peer.write_all(&[0x55; 4096]).is_ok();
+        tx.send((got, eof, late)).unwrap();
+        drop(peer);
+    });
+    hub.send(r#"{"v":1,"type":"write","id":1,"attempt":1,"hex":"0102030405"}"#);
+    hub.send(r#"{"v":1,"type":"abort","attempt":1,"mode":"graceful","graceMs":20000,"seq":6}"#);
+    assert_eq!(hub.expect("written")["id"], 1);
+    let c = hub.expect("closed");
+    assert_eq!(
+        (
+            c["attempt"].as_u64(),
+            c["phase"].as_str(),
+            c["reason"].as_str(),
+            c["mode"].as_str(),
+            c["seq"].as_u64()
+        ),
+        (
+            Some(1),
+            Some("held"),
+            Some("aborted"),
+            Some("graceful"),
+            Some(6)
+        )
+    );
+    assert!(c.get("errno").is_none(), "{c}");
+    // The endpoint reported before it closed, and the hub closed only after that close.
+    let (got, eof, late) = rx
+        .try_recv()
+        .expect("the endpoint saw EOF before the hub's closed");
+    assert_eq!(got, [1, 2, 3, 4, 5], "the last command arrived");
+    assert!(eof, "the endpoint saw the half-close");
+    assert!(late, "the hub still read after its FIN");
+    endpoint.join().unwrap();
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
+}
+
+/// A 64-byte command carrying `id`.
+fn command(id: u64) -> String {
+    hex(&id.to_le_bytes()).repeat(8)
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+#[test]
+fn an_after_writes_abort_delivers_the_pending_commands() {
+    let mut hub = spawn();
+    hub.expect("ready");
+    // A ring, for the `mark` that shows where the abort was read.
+    hub.send(r#"{"v":1,"type":"configure","byteRate":2048000,"frameBytes":2,"levelFormat":null,"progressMs":1000}"#);
+    hub.expect("configured");
+    let src = listener();
+    let port = src.local_addr().unwrap().port();
+    hub.send(&connect_line(1, port, 0, ""));
+    let (peer, _) = src.accept().unwrap();
+    hub.expect("tcp-connected");
+    hub.expect("connected");
+    // The endpoint does not read: commands fill the kernel's buffers until 64 are pending in
+    // the hub and the next is refused.
+    let events = hub.events.take().unwrap();
+    let mut written = Vec::new();
+    let mut refused = 0u64;
+    let mut id = 0u64;
+    let deadline = Instant::now() + WAIT;
+    'fill: loop {
+        assert!(Instant::now() < deadline, "no command ever became pending");
+        for _ in 0..256 {
+            id += 1;
+            hub.send(&format!(
+                r#"{{"v":1,"type":"write","id":{id},"attempt":1,"hex":"{}"}}"#,
+                command(id)
+            ));
+        }
+        while let Ok(e) = events.recv_timeout(Duration::from_millis(50)) {
+            match e["type"].as_str().unwrap() {
+                "written" => written.push(e["id"].as_u64().unwrap()),
+                "write-failed" => {
+                    assert_eq!(e["reason"], "pending-limit", "{e}");
+                    refused += 1;
+                    break 'fill;
+                }
+                "progress" => {}
+                t => panic!("{t}: {e}"),
+            }
+        }
+    }
+    // Answer the rest of the sent writes (all refused or written) before the abort.
+    let sent = id;
+    hub.send(r#"{"v":1,"type":"abort","attempt":1,"mode":"after-writes","graceMs":20000,"seq":9}"#);
+    hub.send(r#"{"v":1,"type":"mark","id":1}"#);
+    // Every write sent before the abort is answered; the ones written after `marked` were
+    // pending when the abort was read.
+    let mut after_abort = Vec::new();
+    let mut marked = false;
+    let reader = thread::spawn(move || {
+        let mut peer = peer;
+        peer.set_read_timeout(Some(WAIT)).unwrap();
+        let mut v = Vec::new();
+        let _ = peer.read_to_end(&mut v);
+        v
+    });
+    let closed = loop {
+        let e = events
+            .recv_timeout(WAIT)
+            .expect("an event within the deadline");
+        match e["type"].as_str().unwrap() {
+            "written" => {
+                written.push(e["id"].as_u64().unwrap());
+                if marked {
+                    after_abort.push(e["id"].as_u64().unwrap());
+                }
+            }
+            "write-failed" => {
+                assert_eq!(
+                    e["reason"], "pending-limit",
+                    "nothing fails at the close: {e}"
+                );
+                assert!(!marked, "{e}");
+                refused += 1;
+            }
+            "marked" => marked = true,
+            "closed" => break e,
+            "progress" => {}
+            t => panic!("{t}: {e}"),
+        }
+    };
+    assert!(
+        !after_abort.is_empty(),
+        "commands were pending at the abort"
+    );
+    assert_eq!(
+        written.len() as u64 + refused,
+        sent,
+        "every write answered once"
+    );
+    assert!(written.windows(2).all(|w| w[0] < w[1]), "in order");
+    assert_eq!(
+        (
+            closed["reason"].as_str(),
+            closed["mode"].as_str(),
+            closed["seq"].as_u64(),
+            closed["phase"].as_str()
+        ),
+        (Some("aborted"), Some("after-writes"), Some(9), Some("held"))
+    );
+    // The endpoint got every written command, in order, the last pending one last; then EOF.
+    let got = reader.join().unwrap();
+    assert_eq!(got.len(), 64 * written.len());
+    let last = *after_abort.last().unwrap();
+    assert_eq!(written.last(), Some(&last));
+    assert_eq!(hex(&got[got.len() - 64..]), command(last));
+    for (chunk, id) in got.chunks(64).zip(&written) {
+        assert_eq!(hex(chunk), command(*id));
+    }
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
 }

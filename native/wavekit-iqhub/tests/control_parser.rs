@@ -4,7 +4,9 @@
 mod common;
 
 use serde_json::{json, Map, Value};
-use wavekit_iqhub::protocol::{parse_request, Request, MAX_CONTROL_LINE_BYTES, MAX_DETAIL_BYTES};
+use wavekit_iqhub::protocol::{
+    parse_request, CloseMode, Request, DEFAULT_GRACE_MS, MAX_CONTROL_LINE_BYTES, MAX_DETAIL_BYTES,
+};
 
 /// (request, every member, which are required)
 fn templates() -> Vec<(&'static str, Value, Vec<&'static str>)> {
@@ -16,11 +18,16 @@ fn templates() -> Vec<(&'static str, Value, Vec<&'static str>)> {
         ),
         (
             "connect",
-            json!({"attempt": 1, "host": "127.0.0.1", "port": 1234, "timeoutMs": 1000, "headerBytes": 12, "keepAliveMs": 5000}),
+            json!({"attempt": 1, "host": "127.0.0.1", "port": 1, "timeoutMs": 1000, "headerBytes": 12, "headerTimeoutMs": 3000, "keepAliveMs": 5000}),
             vec!["attempt", "host", "port", "timeoutMs", "headerBytes"],
         ),
         ("adopt", json!({"attempt": 1}), vec!["attempt"]),
-        ("abort", json!({"attempt": 1}), vec!["attempt"]),
+        // graceMs needs a mode that waits, so it is not in this template (see below).
+        (
+            "abort",
+            json!({"attempt": 1, "mode": "graceful"}),
+            vec!["attempt"],
+        ),
         (
             "write",
             json!({"id": 1, "attempt": 1, "hex": "0102"}),
@@ -291,4 +298,87 @@ fn rejected_detail_never_echoes_more_than_128_bytes_of_the_input() {
     // A detail that fits is kept whole.
     r.send(r#"{"v":1,"type":"adopt"}"#);
     assert_eq!(r.one("rejected")["detail"], "missing attempt");
+}
+
+#[test]
+fn connect_header_timeout_ms_is_optional_from_1_to_600000() {
+    let c = |extra: &str| {
+        format!(
+            r#"{{"v":1,"type":"connect","attempt":1,"host":"127.0.0.1","port":1,"timeoutMs":1,"headerBytes":12{extra}}}"#
+        )
+    };
+    let timeout = |l: &str| match parse_request(l.as_bytes()).unwrap().request {
+        Request::Connect(c) => (c.timeout_ms, c.header_timeout_ms),
+        r => panic!("{r:?}"),
+    };
+    assert_eq!(timeout(&c("")), (1, None), "absent: no limit");
+    assert_eq!(timeout(&c(r#","headerTimeoutMs":1"#)), (1, Some(1)));
+    assert_eq!(
+        timeout(&c(r#","headerTimeoutMs":600000"#)),
+        (1, Some(600_000))
+    );
+    for (extra, reason) in [
+        (r#","headerTimeoutMs":0"#, "bounds"),
+        (r#","headerTimeoutMs":600001"#, "bounds"),
+        (r#","headerTimeoutMs":-1"#, "malformed"),
+        (r#","headerTimeoutMs":"5""#, "malformed"),
+        (r#","headerTimeoutMs":1,"headerTimeoutMs":2"#, "malformed"),
+    ] {
+        let e = parse_request(c(extra).as_bytes()).expect_err(extra);
+        assert_eq!(e.reason, reason, "{extra}: {}", e.detail);
+    }
+}
+
+#[test]
+fn abort_mode_and_grace_ms_are_parsed_strictly() {
+    let a = |extra: &str| format!(r#"{{"v":1,"type":"abort","attempt":3{extra},"seq":4}}"#);
+    let parsed = |l: &str| match parse_request(l.as_bytes()).unwrap().request {
+        Request::Abort {
+            attempt,
+            mode,
+            grace_ms,
+        } => (attempt, mode, grace_ms),
+        r => panic!("{r:?}"),
+    };
+    assert_eq!(parsed(&a("")), (3, CloseMode::Now, DEFAULT_GRACE_MS));
+    assert_eq!(DEFAULT_GRACE_MS, 2_000);
+    assert_eq!(parsed(&a(r#","mode":"now""#)).1, CloseMode::Now);
+    for (mode, want) in [
+        ("after-writes", CloseMode::AfterWrites),
+        ("graceful", CloseMode::Graceful),
+    ] {
+        assert_eq!(
+            parsed(&a(&format!(r#","mode":"{mode}""#))),
+            (3, want, 2_000)
+        );
+        // graceMs at both bounds.
+        for g in [1u64, 60_000] {
+            assert_eq!(
+                parsed(&a(&format!(r#","mode":"{mode}","graceMs":{g}"#))),
+                (3, want, g)
+            );
+        }
+        for (g, reason) in [("0", "bounds"), ("60001", "bounds"), ("1.5", "malformed")] {
+            let e = parse_request(a(&format!(r#","mode":"{mode}","graceMs":{g}"#)).as_bytes())
+                .expect_err(g);
+            assert_eq!((e.reason, e.seq), (reason, Some(4)), "{g}: {}", e.detail);
+        }
+    }
+    for (extra, detail) in [
+        (r#","mode":"later""#, "mode must be"),
+        (r#","mode":"NOW""#, "mode must be"),
+        (r#","mode":1"#, "mode must be"),
+        (r#","mode":null"#, "mode must be"),
+        // A grace means nothing to a close that does not wait.
+        (r#","graceMs":100"#, "graceMs needs"),
+        (r#","mode":"now","graceMs":100"#, "graceMs needs"),
+    ] {
+        let e = parse_request(a(extra).as_bytes()).expect_err(extra);
+        assert_eq!(
+            (e.reason, e.request, e.seq),
+            ("malformed", Some("abort"), Some(4)),
+            "{extra}"
+        );
+        assert!(e.detail.contains(detail), "{extra}: {}", e.detail);
+    }
 }

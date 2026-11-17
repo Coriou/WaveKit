@@ -34,7 +34,7 @@ const CONTROL_PROBE_US: u64 = 1_000_000;
 /// once a second: a bound sink's hang-up is seen within a second even before any `configure`.
 const SINK_PROBE_US: u64 = 1_000_000;
 /// Control lines are not read while the event queue holds more than this. One line queues at
-/// most about 20 KiB of events (its answer, 64 failed commands of an attempt it closes, a
+/// most about 23 KiB of events (its answer, 64 failed commands of an attempt it closes, a
 /// `sink-gap` for each of 32 sinks), so the queue stays below its 256 KiB bound however fast
 /// the parent writes, as long as it reads stdout.
 pub const CONTROL_PAUSE_BYTES: usize = EVENT_QUEUE_BYTES / 2;
@@ -248,19 +248,19 @@ impl Kernel for Fds<'_> {
     fn sink_send(&mut self, sink: usize, bufs: &[&[u8]]) -> Sent {
         match raw(&self.sinks[sink]) {
             Some(fd) => sys::sendv(fd, bufs),
-            None => Sent::Failed(CloseReason::Error),
+            None => Sent::Failed(CloseReason::Error.into()),
         }
     }
     fn source_recv(&mut self, attempt: usize, buf: &mut [u8], more: &mut [u8]) -> Received {
         match raw(&self.attempts[attempt]) {
             Some(fd) => sys::recv2(fd, buf, more),
-            None => Received::Failed(CloseReason::Error),
+            None => Received::Failed(CloseReason::Error.into()),
         }
     }
     fn source_peek(&mut self, attempt: usize) -> Received {
         match raw(&self.attempts[attempt]) {
             Some(fd) => sys::peek(fd),
-            None => Received::Failed(CloseReason::Error),
+            None => Received::Failed(CloseReason::Error.into()),
         }
     }
     fn source_queued(&mut self, attempt: usize) -> u64 {
@@ -269,13 +269,13 @@ impl Kernel for Fds<'_> {
     fn command_send(&mut self, attempt: usize, bytes: &[u8]) -> Sent {
         match raw(&self.attempts[attempt]) {
             Some(fd) => sys::send(fd, bytes),
-            None => Sent::Failed(CloseReason::Error),
+            None => Sent::Failed(CloseReason::Error.into()),
         }
     }
     fn unbound_recv(&mut self, conn: usize, buf: &mut [u8]) -> Received {
         match raw(&self.unbound[conn]) {
             Some(fd) => sys::recv(fd, buf),
-            None => Received::Failed(CloseReason::Error),
+            None => Received::Failed(CloseReason::Error.into()),
         }
     }
 }
@@ -549,7 +549,7 @@ impl Io {
                     let Some(fd) = raw(&self.attempts[slot]) else {
                         return;
                     };
-                    let result = sys::connect_result(fd);
+                    let result = sys::connect_result(fd).and_then(|()| sys::local_port(fd));
                     self.hub.connect_done(slot, result, now);
                 } else {
                     let (r, w) = self.hub.attempt_interest(slot).unwrap_or((false, false));
@@ -753,10 +753,11 @@ impl Io {
                     keep_alive_ms,
                 } => match sys::tcp_connect(&addr, keep_alive_ms) {
                     Ok((fd, connected)) => {
+                        let port = connected.then(|| sys::local_port(fd.as_raw_fd()));
                         self.attempts[attempt] = Some(fd);
                         self.attempt_gen[attempt] += 1;
-                        if connected {
-                            self.hub.connect_done(attempt, Ok(()), now);
+                        if let Some(port) = port {
+                            self.hub.connect_done(attempt, port, now);
                         }
                     }
                     Err(r) => self.hub.connect_done(attempt, Err(r), now),
@@ -764,6 +765,11 @@ impl Io {
                 Action::CloseAttempt { attempt } => {
                     self.attempts[attempt] = None;
                     self.attempt_gen[attempt] += 1;
+                }
+                Action::ShutdownWrite { attempt } => {
+                    if let Some(fd) = raw(&self.attempts[attempt]) {
+                        sys::shutdown_write(fd);
+                    }
                 }
                 Action::BindSink { conn, sink } => {
                     if let Some(fd) = self.unbound[conn].take() {

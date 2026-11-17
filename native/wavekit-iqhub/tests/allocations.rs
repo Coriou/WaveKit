@@ -89,7 +89,7 @@ impl Kernel for Lean {
         self.waiting as u64
     }
     fn command_send(&mut self, _: usize, _: &[u8]) -> Sent {
-        Sent::Failed(CloseReason::Error)
+        Sent::Failed(CloseReason::Error.into())
     }
     fn unbound_recv(&mut self, _: usize, buf: &mut [u8]) -> Received {
         let n = self.hello_len;
@@ -152,7 +152,7 @@ fn a_warm_hub_does_not_allocate_per_block() {
         Some(Action::Connect { attempt, .. }) => attempt,
         a => panic!("{a:?}"),
     };
-    hub.connect_done(slot, Ok(()), now);
+    hub.connect_done(slot, Ok(1), now);
     hub.control_line(br#"{"v":1,"type":"adopt","attempt":1}"#, now, &mut k);
     let kinds = ["raw", "raw", "raw", "raw", "framed", "framed"];
     for (i, kind) in kinds.iter().enumerate() {

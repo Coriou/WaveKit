@@ -2,8 +2,10 @@
 //! (splits inside a frame too), any pattern of sink readiness and partial writes, and any
 //! interleaving of `adopt`, stream ends (inside a frame too), `mark` (with framed sinks stalled
 //! too), `write`, `sink-update`, `configure` in mid-stream (other values, a new `frameBytes`
-//! too, with sinks reopened afterwards) and `sink-activate` at any `atSourcePos`, from before
-//! the stream's start to past the head.
+//! too, with sinks reopened afterwards), `sink-activate` at any `atSourcePos`, from before
+//! the stream's start to past the head, and `abort` of the stream in each mode (`now`,
+//! `after-writes`, `graceful`) with partial command writes pending, input offered to the
+//! closing attempt, its peer closing and its grace running out.
 //!
 //! (a) a raw sink's bytes, with its reported gaps re-inserted at `atSinkByte`, are the
 //!     whole-frame source payload from its start;
@@ -15,7 +17,13 @@
 //!     accepted;
 //! (e) every gap's `atSinkByte` is a multiple of `frameBytes`;
 //! (f) `marked` maps its position to the byte each sink carries there;
-//! (g) events are in action order and `sourcePos` never decreases between `configure`s.
+//! (g) events are in action order and `sourcePos` never decreases between `configure`s;
+//! (h) the whole-frame bytes appended stop exactly when an `abort` is requested, whatever its
+//!     mode: nothing read from a closing attempt (a graceful drain included) reaches a sink or
+//!     moves `sourcePos`;
+//! (i) every `write` accepted is answered exactly once (`written` or `write-failed`), in order,
+//!     before its attempt's `closed`; one accepted before an `after-writes` or `graceful` abort
+//!     and answered after it is `written` with a null `sourcePos` (the stream has ended).
 //!
 //! The model is built from the requests and the simulated kernel only: the source bytes the
 //! hub has read, the frame grid of each `configure`, the start position each `sink-activate`
@@ -78,7 +86,20 @@ enum Op {
         pick: u8,
         frac: u16,
     },
+    /// `abort` of the adopted stream: mode 0 `now`, 1 `after-writes`, 2 `graceful`.
+    Abort {
+        mode: u8,
+        grace_ms: u64,
+    },
+    /// Input arrives on every closing attempt, which is offered readable and writable.
+    Junk {
+        len: usize,
+    },
+    /// The peer of every closing attempt closes.
+    PeerClose,
 }
+
+const MODES: [&str; 3] = ["now", "after-writes", "graceful"];
 
 #[derive(Debug, Clone)]
 struct Scenario {
@@ -128,6 +149,9 @@ fn op(ring_ms: u64) -> impl Strategy<Value = Op> {
             .prop_map(|(frame, mult)| Op::Configure { frame, mult }),
         2 => (sink_spec(ring_ms), 0u8..8, 0u16..=1_000)
             .prop_map(|(spec, pick, frac)| Op::Join { spec, pick, frac }),
+        2 => (0u8..3, 1u64..=100).prop_map(|(mode, grace_ms)| Op::Abort { mode, grace_ms }),
+        1 => (1usize..=3_000).prop_map(|len| Op::Junk { len }),
+        1 => Just(Op::PeerClose),
     ]
 }
 
@@ -378,11 +402,18 @@ fn run(sc: &Scenario, hog: bool) -> Outcome {
     let mut attempt = 0u64;
     let mut fed = 0u64;
     let mut write_id = 0u64;
-    // write id -> (attempt slot, the attempt's queued byte count once it was queued)
-    let mut writes: HashMap<u64, (usize, u64)> = HashMap::new();
+    // write id -> (attempt slot, the attempt's queued byte count once it was queued, attempt)
+    let mut writes: HashMap<u64, (usize, u64, u64)> = HashMap::new();
+    // Every accepted write, in order: (id, attempt).
+    let mut accepted: Vec<(u64, u64)> = Vec::new();
+    // attempt -> the log length when its after-writes or graceful abort was sent.
+    let mut aborted: HashMap<u64, usize> = HashMap::new();
+    // The attempts an abort is closing: (slot, attempt).
+    let mut closing: Vec<(usize, u64)> = Vec::new();
     let mut queued: u64 = 0;
     let mut checked = 0;
     for op in &sc.ops {
+        closing.retain(|&(slot, _)| r.hub.attempt_closing(slot).is_some());
         let live: Vec<usize> = (0..lives.len())
             .filter(|&i| lives[i].closed.is_none() && !lives[i].hog)
             .collect();
@@ -406,6 +437,14 @@ fn run(sc: &Scenario, hog: bool) -> Outcome {
                 }
             }
             Op::Adopt => {
+                let live = (0..4).filter(|&s| r.hub.attempt_phase(s).is_some()).count();
+                if live == 4 {
+                    // The adopted one and three closing: no place for a connect.
+                    continue;
+                }
+                if !closing.is_empty() {
+                    reach("adopt while an attempt is closing");
+                }
                 attempt += 1;
                 let slot = r.held(attempt, &[]);
                 w.finish(&mut r);
@@ -450,18 +489,112 @@ fn run(sc: &Scenario, hog: bool) -> Outcome {
                     });
                     if !refused {
                         queued += *len as u64;
-                        writes.insert(write_id, (slot, queued));
+                        writes.insert(write_id, (slot, queued, attempt));
+                        accepted.push((write_id, attempt));
                     }
-                    checked = check_written(&r, &writes, checked);
+                    checked = check_written(&r, &writes, &aborted, checked);
                 }
             }
             Op::CommandRoom { n } => {
-                if let Some(slot) = r.k.current {
+                let slots: Vec<usize> =
+                    r.k.current
+                        .into_iter()
+                        .chain(closing.iter().map(|&(s, _)| s))
+                        .collect();
+                for slot in slots {
                     let s = &mut r.k.sources[slot];
                     s.command_space = s.command_space.saturating_add(*n);
                     if r.hub.attempt_interest(slot).is_some_and(|(_, w)| w) {
                         r.hub.service_attempt(slot, false, true, &mut r.k, r.now);
                         r.actions();
+                    }
+                }
+                let evs = r.events();
+                if evs.iter().any(|e| {
+                    e["type"] == "written"
+                        && e["attempt"]
+                            .as_u64()
+                            .is_some_and(|a| closing.iter().any(|&(_, c)| c == a))
+                }) {
+                    reach("written during the grace");
+                }
+            }
+            Op::Abort { mode, grace_ms } => {
+                if let Some(slot) = r.k.current {
+                    let m = MODES[*mode as usize];
+                    let pending = r.hub.attempt_interest(slot).is_some_and(|(_, w)| w);
+                    r.events();
+                    if *mode > 0 {
+                        aborted.insert(attempt, r.log.len());
+                    }
+                    // (h): the stream ends for the model here, whatever the mode.
+                    w.finish(&mut r);
+                    let head = r.hub.head();
+                    let grace = if *mode > 0 {
+                        format!(r#","graceMs":{grace_ms}"#)
+                    } else {
+                        String::new()
+                    };
+                    r.send(&format!(
+                        r#"{{"v":1,"type":"abort","attempt":{attempt},"mode":"{m}"{grace}}}"#
+                    ));
+                    assert_eq!(r.hub.head(), head, "an abort appends nothing");
+                    reach(["abort now", "abort after-writes", "abort graceful"][*mode as usize]);
+                    if pending && *mode > 0 {
+                        reach(
+                            [
+                                "",
+                                "abort after-writes with writes pending",
+                                "abort graceful with writes pending",
+                            ][*mode as usize],
+                        );
+                    }
+                    if r.hub.attempt_closing(slot).is_some() {
+                        closing.retain(|&(s, _)| s != slot);
+                        closing.push((slot, attempt));
+                        // No new write is accepted while it closes.
+                        write_id += 1;
+                        r.send(&format!(
+                            r#"{{"v":1,"type":"write","id":{write_id},"attempt":{attempt},"hex":"01"}}"#
+                        ));
+                        let evs = r.events();
+                        assert!(
+                            evs.iter().any(|e| e["type"] == "write-failed"
+                                && e["id"] == write_id
+                                && e["reason"] == "closing"),
+                            "{evs:?}"
+                        );
+                    } else {
+                        assert!(!r.k.sources[slot].open, "{m}: closed at once");
+                    }
+                }
+            }
+            Op::Junk { len } => {
+                for &(slot, _) in &closing {
+                    let head = r.hub.head();
+                    let drained = r.k.sources[slot].drained;
+                    r.k.sources[slot]
+                        .queue
+                        .extend(std::iter::repeat_n(0xA5u8, *len));
+                    let wr = r.hub.attempt_interest(slot).is_some_and(|(_, w)| w);
+                    r.hub.service_attempt(slot, true, wr, &mut r.k, r.now);
+                    r.actions();
+                    // (h): nothing read from a closing attempt moves the head.
+                    assert_eq!(r.hub.head(), head, "input of a closing attempt");
+                    if r.k.sources[slot].drained > drained {
+                        reach("bytes discarded in a graceful drain");
+                    }
+                }
+            }
+            Op::PeerClose => {
+                for &(slot, _) in &closing {
+                    r.k.sources[slot].eof = true;
+                    if r.hub.attempt_interest(slot).is_some_and(|(rd, _)| rd) {
+                        r.hub.service_attempt(slot, true, false, &mut r.k, r.now);
+                        r.actions();
+                        if r.hub.attempt_closing(slot).is_none() {
+                            reach("peer close ends a graceful drain");
+                        }
                     }
                 }
             }
@@ -484,6 +617,12 @@ fn run(sc: &Scenario, hog: bool) -> Outcome {
             Op::Tick { us } => {
                 let t = r.now + us;
                 r.tick_to(t);
+                if closing
+                    .iter()
+                    .any(|&(slot, _)| r.hub.attempt_closing(slot).is_none())
+                {
+                    reach("grace deadline");
+                }
             }
             Op::Configure { frame, mult } => {
                 let (fb, mult) = (*frame as u64, *mult);
@@ -556,17 +695,29 @@ fn run(sc: &Scenario, hog: bool) -> Outcome {
             }
         }
         r.events();
-        checked = check_written(&r, &writes, checked);
+        checked = check_written(&r, &writes, &aborted, checked);
     }
     r.drain_all();
+    let current = r.k.current.map(|slot| (slot, attempt));
     w.finish(&mut r);
     r.events();
-    check_written(&r, &writes, checked);
+    checked = check_written(&r, &writes, &aborted, checked);
     assert_eq!(
         w.truth.len() as u64,
         r.hub.head(),
         "the head is the whole-frame payload read"
     );
+    // Every attempt still open is closed at once, so every accepted write has its answer.
+    closing.retain(|&(slot, _)| r.hub.attempt_closing(slot).is_some());
+    for (slot, a) in current.into_iter().chain(closing.iter().copied()) {
+        if r.hub.attempt_phase(slot).is_some() {
+            r.send(&format!(r#"{{"v":1,"type":"abort","attempt":{a}}}"#));
+        }
+    }
+    r.events();
+    check_written(&r, &writes, &aborted, checked);
+    assert_eq!(r.hub.head(), w.truth.len() as u64, "aborts append nothing");
+    check_answers(&r.log, &accepted);
     w.epochs.push((std::mem::take(&mut w.truth), w.fb as usize));
     assert_eq!(r.hub.events().overflowed(), None);
     let _ = w.ring_ms;
@@ -578,16 +729,29 @@ fn run(sc: &Scenario, hog: bool) -> Outcome {
     }
 }
 
-/// (d): every `written` names the world's head when its last byte was accepted.
-fn check_written(r: &Rig, writes: &HashMap<u64, (usize, u64)>, from: usize) -> usize {
-    for e in &r.log[from..] {
+/// (d): every `written` names the world's head when its last byte was accepted; (i) one
+/// answered after its attempt's `after-writes` or `graceful` abort has a null `sourcePos`.
+fn check_written(
+    r: &Rig,
+    writes: &HashMap<u64, (usize, u64, u64)>,
+    aborted: &HashMap<u64, usize>,
+    from: usize,
+) -> usize {
+    for (i, e) in r.log.iter().enumerate().skip(from) {
         if e["type"] != "written" {
             continue;
         }
         let id = e["id"].as_u64().unwrap();
-        let Some(&(slot, end)) = writes.get(&id) else {
+        let Some(&(slot, end, attempt)) = writes.get(&id) else {
             continue;
         };
+        if aborted.get(&attempt).is_some_and(|&at| i >= at) {
+            assert!(
+                e["sourcePos"].is_null(),
+                "written {id} after its abort: {e}"
+            );
+            continue;
+        }
         let at = r.k.sources[slot]
             .accepted_at
             .iter()
@@ -596,6 +760,43 @@ fn check_written(r: &Rig, writes: &HashMap<u64, (usize, u64)>, from: usize) -> u
         assert_eq!(e["sourcePos"].as_u64(), Some(at.1), "written {id}");
     }
     r.log.len()
+}
+
+/// (i): every accepted write answered exactly once, in its attempt's order, before its
+/// attempt's `closed`.
+fn check_answers(log: &[Value], accepted: &[(u64, u64)]) {
+    let mut last: HashMap<u64, usize> = HashMap::new();
+    for &(id, attempt) in accepted {
+        let answers: Vec<usize> = log
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                (e["type"] == "written" || e["type"] == "write-failed")
+                    && e["id"] == id
+                    && e["attempt"] == attempt
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            answers.len(),
+            1,
+            "write {id} answered {} times",
+            answers.len()
+        );
+        let at = answers[0];
+        if let Some(&prev) = last.get(&attempt) {
+            assert!(prev < at, "write {id} answered out of order");
+        }
+        last.insert(attempt, at);
+        let closed = log
+            .iter()
+            .position(|e| e["type"] == "closed" && e["attempt"] == attempt)
+            .expect("every attempt is closed at the end");
+        assert!(
+            at < closed,
+            "write {id} answered after its attempt's closed"
+        );
+    }
 }
 
 struct Gap {
@@ -993,6 +1194,16 @@ fn the_generated_scenarios_reach_every_behaviour_the_properties_cover() {
         "join past the head",
         "join inside its window",
         "mark while a framed sink stalls",
+        "abort now",
+        "abort after-writes",
+        "abort graceful",
+        "abort after-writes with writes pending",
+        "abort graceful with writes pending",
+        "written during the grace",
+        "bytes discarded in a graceful drain",
+        "peer close ends a graceful drain",
+        "grace deadline",
+        "adopt while an attempt is closing",
     ] {
         assert!(
             seen.get(k).copied().unwrap_or(0) > 0,

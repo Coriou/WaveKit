@@ -572,7 +572,14 @@ fn active_adopt_of_a_new_stream_drops_the_unsent_rest_and_marks_the_stream() {
         .collect();
     assert_eq!(
         types,
-        ["connected", "closed", "adopted", "sink-gap", "sink-gap"]
+        [
+            "tcp-connected",
+            "connected",
+            "closed",
+            "adopted",
+            "sink-gap",
+            "sink-gap"
+        ]
     );
     assert_eq!(
         evs.iter().find(|e| e["type"] == "closed").unwrap()["reason"],
