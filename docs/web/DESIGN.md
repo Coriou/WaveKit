@@ -934,6 +934,20 @@ Condensed + Noto Sans, Tabler-based icons).
   cause flip and buried the Undo of the last action at the bottom, next to Listen and the dock;
   a condition is state, so it belongs in a status place, with one announcement per episode
   (rules in [WEB-APP.md](../WEB-APP.md#notices)).
+- **Notices beside expanded Activity: the widest empty room (2026-11-17).** Expanded Activity
+  (Cards, Expand) spans the window between the island rows, so there is no free plot for the
+  notice region; centred on the normal drawer's free area it landed on the cards. Measured at
+  1440×900 the drawer starts at y 88 with its header controls at the ends (title and Live at the
+  left, Columns and ✕ at the right), and the Receiver stays where a full-height drawer leaves it
+  (688..988), so the top row has 200 px between the Tuner and the Receiver and 420 px right of it.
+  Rule (`regionPlacement`, `web/src/shell/notices/top-centre.ts`): the widest top-row gap, a
+  16 px gutter from each island and the window edge, when it is at least 360 px wide, top aligned
+  with the row (then under the connection chip if it sits there); else the widest empty stretch
+  of the drawer header, a gutter clear of each control, centred on its height; else the normal
+  place. *Why:* both keep every card and drawer control clear; the top row is free room outside
+  the drawer, the header middle is the fallback for windows below 1188 px where the drawer is not
+  full height. Below 1100 px Expand changes nothing and no room exists (open gap: on a phone
+  with any drawer open the region still overlaps the drawer header).
 
 ## Open questions and next topics
 

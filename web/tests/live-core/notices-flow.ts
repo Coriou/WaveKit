@@ -10,6 +10,12 @@
  * frequency readout at 1440×900 and 390×844: none may intersect it, and each element that must exist at that
  * viewport (the Listen island and the frequency readout always; the dock and the tuned card at desktop width)
  * must be laid out. The report lists every element's rect (null when it is not laid out).
+ *
+ * Expanded Activity (Cards, full width): with the drawer covering the plot between the island rows, a new notice
+ * is measured at 1440×900 against the same elements plus the drawer's card list, its first card, its header
+ * controls (title, Live, ✕) and its Expand button; all must exist and none may intersect it. At 390×844 Expand
+ * changes nothing (the drawer already spans the window) and there is no free room, so that layout is measured and
+ * reported but not gated (`gated: false`).
  */
 import type { Page } from "playwright-core"
 import { within } from "./harness.ts"
@@ -28,6 +34,10 @@ export interface Rect {
 
 export interface NoticeLayout {
 	viewport: string
+	/** False: measured and reported, but it does not fail the flow. */
+	gated?: false
+	/** Where the region placed itself (`data-where`: free-plot, top-row, drawer-head). */
+	where?: string
 	notice: Rect | null
 	/** Every element measured; `rect` is null when it is not laid out. */
 	others: {
@@ -98,13 +108,34 @@ const chipLabel = (page: Page): Promise<string> =>
 const intersects = (a: Rect, b: Rect) =>
 	a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 
+/** Extra elements a layout must keep clear of: every match of `sel`, named `name`, `name 2`, ... */
+interface Extra {
+	name: string
+	sel: string
+}
+
+/** The expanded Activity drawer's parts (all required while it is expanded). */
+const EXPANDED_PARTS: Extra[] = [
+	{ name: "drawer card list", sel: ".wk-shell-drawer[data-expanded] .wkg" },
+	{
+		name: "drawer first card",
+		sel: ".wk-shell-drawer[data-expanded] .wkg-col:first-child > :first-child",
+	},
+	{
+		name: "drawer header control",
+		sel: ".wk-shell-drawer[data-expanded] .wk-drawer-head > :not(.wk-drawer-gap)",
+	},
+	{ name: "drawer Expand", sel: ".wk-shell-drawer[data-expanded] .wka-expand" },
+]
+
 /** The notice box and what it must keep clear of, now. */
 async function measure(
 	page: Page,
 	viewport: string,
 	width: number,
+	extra: readonly Extra[] = [],
 ): Promise<NoticeLayout> {
-	const boxes = await page.evaluate(() => {
+	const boxes = await page.evaluate(extra => {
 		const rect = (el: Element | null) => {
 			if (!el) return null
 			const r = el.getBoundingClientRect()
@@ -119,22 +150,38 @@ async function measure(
 			["tuned card", ".wk-shell-cardslot"],
 			["frequency readout", ".wkf-digits"],
 		]
+		const region = document.querySelector("[data-wk-notice-region]")
 		return {
-			notice: rect(document.querySelector("[data-wk-notice-region]")),
-			others: named.map(([name, sel]) => ({
-				name,
-				rect: rect(document.querySelector(sel)),
-			})),
+			notice: rect(region),
+			where: region?.getAttribute("data-where") ?? "",
+			others: [
+				...named.map(([name, sel]) => ({
+					name,
+					rect: rect(document.querySelector(sel)),
+					extra: false,
+				})),
+				...extra.flatMap(({ name, sel }) => {
+					const all = [...document.querySelectorAll(sel)]
+					return (all.length > 0 ? all : [null]).map((el, i) => ({
+						name: i === 0 ? name : `${name} ${i + 1}`,
+						rect: rect(el),
+						extra: true,
+					}))
+				}),
+			],
 		}
-	})
+	}, extra)
 	const desktop = width >= DESKTOP_MIN_WIDTH
-	const requiredHere = (name: string) =>
+	// the expanded drawer may cover the tuned card: it need not be laid out then
+	const requiredHere = (name: string, isExtra: boolean) =>
+		isExtra ||
 		name === "listen" ||
 		name === "frequency readout" ||
-		(desktop && (name === "dock" || name === "tuned card"))
-	const others = boxes.others.map(o => ({
+		(desktop &&
+			(name === "dock" || (name === "tuned card" && extra.length === 0)))
+	const others = boxes.others.map(({ extra: isExtra, ...o }) => ({
 		...o,
-		required: requiredHere(o.name),
+		required: requiredHere(o.name, isExtra),
 		intersects:
 			boxes.notice !== null &&
 			o.rect !== null &&
@@ -143,6 +190,7 @@ async function measure(
 	const missing = others.filter(o => o.required && !o.rect).map(o => o.name)
 	return {
 		viewport,
+		where: boxes.where,
 		notice: boxes.notice,
 		others,
 		missing,
@@ -162,12 +210,13 @@ async function settled(
 	page: Page,
 	viewport: string,
 	width: number,
+	extra: readonly Extra[] = [],
 ): Promise<NoticeLayout> {
-	let last = await measure(page, viewport, width)
+	let last = await measure(page, viewport, width, extra)
 	const end = Date.now() + 5000
 	while (Date.now() < end) {
 		await new Promise(resolve => setTimeout(resolve, 250))
-		const next = await measure(page, viewport, width)
+		const next = await measure(page, viewport, width, extra)
 		const inside = next.others.every(
 			o => o.rect === null || o.rect.x + o.rect.w <= width,
 		)
@@ -265,6 +314,40 @@ export async function noticesFlow(
 		busy,
 	)
 
+	// 5b: Activity expanded (Cards, full width) over the plot → a new notice keeps off its cards and controls
+	await page.evaluate(() => {
+		location.hash = "#/activity"
+	})
+	await page.locator(".wk-shell-drawer .wka-drawer").waitFor()
+	await page.getByRole("radio", { name: "Cards" }).click()
+	await page.locator(".wk-shell-drawer .wka-expand").click()
+	await page.locator(".wk-shell-drawer[data-expanded]").waitFor()
+	await page
+		.locator(".wk-shell-drawer .wkg-col > *")
+		.first()
+		.waitFor({ timeout: 10_000 })
+	await control({ level: "none", endEpisode: true })
+	await hold(2500)
+	await control({ level: "dropping", lossReason: "source" })
+	n = await waitCount(4, NOTICE_MS)
+	const wide = await settled(page, "1440x900 expanded", 1440, EXPANDED_PARTS)
+	layouts.push(wide)
+	await page.setViewportSize({ width: 390, height: 844 })
+	layouts.push({
+		...(await settled(page, "390x844 expanded", 390, EXPANDED_PARTS)),
+		gated: false,
+	})
+	await page.setViewportSize({ width: 1440, height: 900 })
+	await step(
+		"expanded Activity: one new notice, off the cards and the drawer's controls",
+		n === 4 && wide.ok,
+		`placed ${wide.where}`,
+	)
+	// back to the plain drawer and the List layout, then closed, for the reload step
+	await page.locator(".wk-shell-drawer .wka-expand").click()
+	await page.getByRole("radio", { name: "List" }).click()
+	await page.getByRole("button", { name: "Close activity" }).click()
+
 	const before = await noticesSeen(page)
 
 	// 6: reload while it persists → the chip shows it, no notice
@@ -284,7 +367,7 @@ export async function noticesFlow(
 	const texts = [...before, ...(await noticesSeen(page))]
 	await control({ level: "none", endEpisode: true })
 	return {
-		ok: steps.every(s => s.ok) && layouts.every(l => l.ok),
+		ok: steps.every(s => s.ok) && layouts.every(l => l.gated === false || l.ok),
 		steps,
 		layouts,
 		texts,

@@ -45,7 +45,12 @@ the like) centre on the free area left of it, never under the drawer.
 ### Notices
 
 Notices appear at the top centre of the spectrum, just under the Tuner and Receiver (and under the
-connection chip when it sits there). There are two kinds, and at most one of each shows at once:
+connection chip when it sits there). While Activity is expanded (**Cards**, then
+**Expand**), the drawer covers the spectrum, so notices move to the widest empty gap of the top row
+(beside the Receiver, or between the Tuner and the Receiver), or, when that gap is too narrow, to
+the empty middle of the Activity header; they never cover a card or a drawer control. On a phone
+Expand changes nothing and notices stay at the top centre. There are two kinds, and at most one
+of each shows at once:
 
 - **What you just did**, such as `Saved`, `Copied` or `Removed`, often with **Undo**. It stays
   6 seconds; the next one replaces it.

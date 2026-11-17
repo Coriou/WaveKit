@@ -1,5 +1,6 @@
 // The notice region (./service.ts): top centre of the free plot area (`--wk-free-cx`), 8 px under the top island
-// row and under anything already at the top centre (./top-centre.ts). At most one condition toast, then one
+// row and under anything already at the top centre; while Activity is expanded (no free plot), the widest empty
+// gap of the top row, else of the drawer's header (./top-centre.ts `regionPlacement`). At most one condition toast, then one
 // receipt. It never takes focus; hovering it or focusing inside a toast pauses both timers (until that toast goes).
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
 
@@ -12,10 +13,11 @@ import {
 	type ShownCondition,
 } from "./service.ts"
 import {
-	REGION_MAX_W,
 	TOP_CENTRE_SELECTOR,
-	regionTop,
+	regionPlacement,
 	type Box,
+	type ExpandedDrawer,
+	type Placement,
 } from "./top-centre.ts"
 
 /** How often the region re-reads what sits at the top centre while it shows something (ms). */
@@ -40,7 +42,12 @@ export function NoticeRegion({
 	const shown = useStore(service.shown)
 	const receipt = useStore(service.receipt)
 	const box = useRef<HTMLDivElement | null>(null)
-	const [top, setTop] = useState(topRowBottom + 8)
+	const [place, setPlace] = useState<Placement>({
+		where: "free-plot",
+		cx: 0,
+		maxW: 0,
+		top: topRowBottom + 8,
+	})
 
 	useEffect(() => {
 		service.setPaused("palette", palette)
@@ -66,19 +73,27 @@ export function NoticeRegion({
 			const root = box.current?.parentElement
 			const r = root?.getBoundingClientRect() ?? { left: 0, top: 0 }
 			const cx = root ? freeCentre(root) : window.innerWidth / 2
+			const inShell = (el: Element): Box => {
+				const b = el.getBoundingClientRect()
+				return {
+					top: b.top - r.top,
+					bottom: b.bottom - r.top,
+					left: b.left - r.left,
+					right: b.right - r.left,
+				}
+			}
 			const boxes: Box[] = [...document.querySelectorAll(TOP_CENTRE_SELECTOR)]
 				.filter(el => !box.current?.contains(el))
-				.map(el => {
-					const b = el.getBoundingClientRect()
-					return {
-						top: b.top - r.top,
-						bottom: b.bottom - r.top,
-						left: b.left - r.left,
-						right: b.right - r.left,
-					}
-				})
-			const next = regionTop(topRowBottom, boxes, cx, REGION_MAX_W)
-			setTop(t => (t === next ? t : next))
+				.map(inShell)
+			const next = regionPlacement({
+				W: root?.clientWidth ?? window.innerWidth,
+				topRowBottom,
+				freeCx: cx,
+				boxes,
+				expanded: root ? expandedDrawer(root, inShell) : null,
+				height: box.current?.offsetHeight ?? 0,
+			})
+			setPlace(p => (samePlace(p, next) ? p : next))
 		}
 		measure()
 		if (!occupied) return
@@ -92,7 +107,13 @@ export function NoticeRegion({
 			ref={box}
 			className="wk-notices"
 			data-wk-notice-region=""
-			style={{ top }}
+			data-where={place.where}
+			// the free plot's top centre comes from shell.css (`--wk-free-cx`); elsewhere the measured room
+			style={
+				place.where === "free-plot"
+					? { top: place.top }
+					: { top: place.top, left: place.cx, maxWidth: place.maxW }
+			}
 			onPointerEnter={() => service.setPaused("hover", true)}
 			onPointerLeave={() => service.setPaused("hover", false)}
 			onBlur={e => {
@@ -109,6 +130,33 @@ export function NoticeRegion({
 			)}
 		</div>
 	)
+}
+
+const samePlace = (a: Placement, b: Placement) =>
+	a.where === b.where && a.cx === b.cx && a.maxW === b.maxW && a.top === b.top
+
+/** The expanded Activity drawer's row and header (shell px), or null while Activity is not expanded. */
+function expandedDrawer(
+	root: HTMLElement,
+	inShell: (el: Element) => Box,
+): ExpandedDrawer | null {
+	const drawer = root.querySelector(".wk-shell-drawer[data-expanded]")
+	if (!drawer) return null
+	const header = drawer.querySelector(".wk-drawer-head")
+	return {
+		drawer: inShell(drawer),
+		topRow: [
+			...root.querySelectorAll(
+				'.wk-shell-island[data-island="tuner"], .wk-shell-island[data-island="receiver"]',
+			),
+		].map(inShell),
+		header: header ? inShell(header) : null,
+		headerControls: header
+			? [...header.children]
+					.filter(el => !el.classList.contains("wk-drawer-gap"))
+					.map(inShell)
+			: [],
+	}
 }
 
 /** The free plot's centre in shell px: `--wk-free-cx` on the shell root, else its middle. */
