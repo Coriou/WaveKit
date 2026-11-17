@@ -16,10 +16,15 @@
  *    call out.
  * 2. Clear audio only. No sample of a call is delivered while the call's state is `unknown` or
  *    `encrypted`. Voice received while `unknown`, and voice received on the call's slot up to
- *    `DV_TAP_PRE_CALL_MS` before its `start`, is held by the service and delivered with
- *    `held: true`, in order and before any later audio, once the call is known clear. A call that
- *    turns out encrypted, or ends while still `unknown`, has its held voice discarded: the
- *    `state` or `end` event says how many samples.
+ *    `DV_TAP_PRE_CALL_MS` before its `start` (a decoder can announce a call after its audio has
+ *    begun), is held by the service and delivered with `held: true`, in order and before any
+ *    later audio, once the call is known clear. A call that turns out encrypted, or ends while
+ *    still `unknown`, has its held voice discarded: the `state` or `end` event says how many
+ *    samples. Voice before a call is kept fail closed: any restricted (unknown or encrypted) call
+ *    event on that decoder discards it, and nothing received within `DV_TAP_PRE_CALL_MS` after a
+ *    restricted call's end is ever attributed to a later call. Every change of state fires a
+ *    `state` event, including clear to encrypted in the middle of a call; after it no further
+ *    sample of that call is delivered.
  * 3. Per call, per slot. `pcm` holds the call's own slot and never the other slot's audio, as
  *    8 kHz signed 16-bit mono exactly as decoded. Every block names its `callId` and `slot`.
  * 4. Batched and owned. A block holds `DV_TAP_BLOCK_MIN_MS` to `DV_TAP_BLOCK_MAX_MS` of audio
@@ -40,8 +45,8 @@ export const DV_TAP_SAMPLE_RATE_HZ = 8000
 export const DV_TAP_BLOCK_MIN_MS = 100
 /** Longest block: 200 ms = 1 600 samples. */
 export const DV_TAP_BLOCK_MAX_MS = 200
-/** Voice on a slot before its call's `start` that is still attributed to the call: 2 000 ms. */
-export const DV_TAP_PRE_CALL_MS = 2000
+/** Voice on a slot before its call's `start` that is still attributed to the call: 1 500 ms. */
+export const DV_TAP_PRE_CALL_MS = 1500
 /** Blocks waiting for the main thread, per process: 5 minutes = 2 400 000 samples (4.8 MB). */
 export const DV_TAP_QUEUE_MAX_MS = 300_000
 
