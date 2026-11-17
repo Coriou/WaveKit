@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs"
+
 import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it } from "vitest"
@@ -13,6 +15,8 @@ import { ServicesContext } from "../../src/app/context.ts"
 import { createServices, type AppServices } from "../../src/app/services.ts"
 import { listenSlot } from "../../src/features/listen/ListenIsland.tsx"
 import {
+	HEARD_HINT,
+	PLAY_ANYWAY_TEXT,
 	SOURCE_HINT,
 	SQUELCH_HINT,
 	VOICE_ONLY_HINT,
@@ -237,6 +241,34 @@ describe("the Listen card's head states", () => {
 		})
 		expect(html).toContain("<b>Waiting for voice</b>")
 		expect(html).toContain("Play anyway")
+		// what Play anyway does is its description, out of the reading flow
+		const button = /<button[^>]*wkf-play-anyway[^>]*>/.exec(html)?.[0] ?? ""
+		const id = /aria-describedby="([^"]+)"/.exec(button)?.[1]
+		expect(id).toBeTruthy()
+		expect(html).toContain(
+			`<span id="${id}" hidden="">${PLAY_ANYWAY_TEXT}</span>`,
+		)
+	})
+
+	it("says why Listen is disabled, beside the button it describes", () => {
+		const made = setup({})
+		made.data.liveAudio.update(s => ({ ...s, status: null }))
+		made.listen.update(s => ({ ...s, wanted: false, phase: "off" }))
+		const ctx = { open: false, trigger: {} } as unknown as IslandContext
+		const html = renderToStaticMarkup(
+			createElement(
+				ServicesContext.Provider,
+				{ value: made },
+				listenSlot.head(ctx),
+			),
+		)
+		const id = /<button[^>]*disabled=""[^>]*aria-describedby="([^"]+)"/.exec(
+			html,
+		)?.[1]
+		expect(id).toBeTruthy()
+		expect(html).toContain(
+			`<span class="wk-shell-sub" id="${id}">This WaveKit has no live audio.</span>`,
+		)
 	})
 
 	it("says Listening once voice is heard, Quiet with nothing on the air", () => {
@@ -457,9 +489,7 @@ describe("the Audio options panel", () => {
 	it("wires every hint to its control: aria-describedby names the hidden sentence", () => {
 		const html = panel({ status: LISTEN_CORE })
 		const describedText = (id: string) =>
-			new RegExp(`<span class="wk-sr" id="${id}">([^<]*)</span>`).exec(
-				html,
-			)?.[1]
+			new RegExp(`<span id="${id}" hidden="">([^<]*)</span>`).exec(html)?.[1]
 		const groups = [
 			["Squelch", SQUELCH_HINT.text],
 			["Source", SOURCE_HINT.text],
@@ -551,5 +581,53 @@ describe("the Audio options panel", () => {
 		})
 		expect(html).toContain("71% heard · 17.4 s missing")
 		expect(html).toContain('aria-label="About the heard figure"')
+		// the note itself is plain text: the mark carries the sentence
+		expect(html).toContain("<span>71% heard · 17.4 s missing</span>")
+		expect(html).toMatch(
+			new RegExp(
+				`aria-label="About the heard figure"[^>]*aria-describedby="[^"]+"[^>]*>[\\s\\S]*?hidden="">${HEARD_HINT.text}<`,
+			),
+		)
+	})
+
+	it("shows the settings link's short label wherever the long one hides", () => {
+		const css = readFileSync(
+			new URL("../../src/features/listen/listen.css", import.meta.url),
+			"utf8",
+		)
+		// each media block's rules: whatever hides the long label shows the short one
+		const blocks = css.split(/@media\s*/).slice(1)
+		const hides = (b: string) =>
+			/\.wkf-ls-long[^{]*\{\s*display:\s*none/.test(b)
+		const shows = (b: string) =>
+			/\.wkf-ls-short\s*\{\s*display:\s*inline/.test(b)
+		const hiding = blocks.filter(hides)
+		expect(hiding.length).toBeGreaterThan(0)
+		for (const b of blocks) expect(shows(b), b.slice(0, 40)).toBe(hides(b))
+	})
+
+	it("names the settings link the same at every width", () => {
+		const html = panel({ status: LISTEN_CORE })
+		expect(html).toMatch(
+			/<button[^>]*class="[^"]*wkf-listen-more[^"]*"[^>]*aria-label="All audio settings"|<button[^>]*aria-label="All audio settings"[^>]*class="[^"]*wkf-listen-more/,
+		)
+	})
+
+	it("says Tone squelch is waiting for its tone while the gate holds the audio", () => {
+		const tone = { kind: "ctcss", frequencyTenthsHz: 885 } as const
+		const gated = {
+			...withConfig(LISTEN_CORE, { toneSquelch: tone }),
+			toneSquelch: { state: "waiting" },
+		} as unknown as LiveAudioStatus
+		expect(panel({ status: gated })).toMatch(
+			/class="wkf-ls-now wkf-ls-tone">Waiting for 88\.5 Hz</,
+		)
+		const heard = {
+			...gated,
+			toneSquelch: { state: "open" },
+		} as unknown as LiveAudioStatus
+		expect(panel({ status: heard })).toMatch(
+			/class="wkf-ls-now wkf-ls-tone">88\.5 Hz heard</,
+		)
 	})
 })

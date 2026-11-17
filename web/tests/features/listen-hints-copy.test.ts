@@ -2,8 +2,10 @@
 import { isValidElement, type ReactNode } from "react"
 import { describe, expect, it } from "vitest"
 
-import { LISTEN_HINTS } from "../../src/features/listen/hints.ts"
-import { VOICE_ONLY_SUB } from "../../src/features/listen/ListenIsland.tsx"
+import {
+	LISTEN_HINTS,
+	PLAY_ANYWAY_TEXT,
+} from "../../src/features/listen/hints.ts"
 
 const words = (s: string) => s.trim().split(/\s+/).filter(Boolean).length
 const sentences = (s: string) =>
@@ -19,6 +21,16 @@ function plain(node: ReactNode): string {
 	if (isValidElement<{ children?: ReactNode }>(node))
 		return plain(node.props.children)
 	return ""
+}
+
+/** A banned word or punctuation mark found in `text` (a word on word boundaries, a mark anywhere). */
+function bannedIn(text: string, banned: readonly string[]): string[] {
+	const lower = text.toLowerCase()
+	return banned.filter(b =>
+		/^\w/.test(b)
+			? new RegExp(`(^|\\W)${b}(\\W|$)`, "i").test(lower)
+			: lower.includes(b.toLowerCase()),
+	)
 }
 
 const BANNED = [
@@ -53,16 +65,24 @@ describe("Listen hint copy", () => {
 				...(hint.learn?.rows.map(r => plain(r.text)) ?? []),
 				hint.learn?.foot ?? "",
 			].join(" ")
-			for (const word of BANNED)
-				expect(all.toLowerCase(), word).not.toMatch(
-					new RegExp(`(^|\\W)${word.replace("!", "\\!")}(\\W|$)`, "i"),
-				)
+			expect(bannedIn(all, BANNED)).toEqual([])
 			for (const row of hint.learn?.rows ?? [])
 				expect(words(plain(row.text)), row.term).toBeLessThanOrEqual(14)
 			expect(hint.learn?.rows.length ?? 0).toBeLessThanOrEqual(4)
 		})
 
-	it("Settings and Listen share the Voice only sentence", () => {
-		expect(VOICE_ONLY_SUB).toBe(LISTEN_HINTS["Voice only"]?.text)
+	it("the ban catches a word and a mark wherever it sits", () => {
+		expect(bannedIn("Done!", BANNED)).toEqual(["!"])
+		expect(bannedIn("It is just here.", BANNED)).toEqual(["just"])
+		// a banned word inside another word is not that word
+		expect(bannedIn("Adjusts the level.", BANNED)).toEqual([])
+		expect(bannedIn("Clicks less.", BANNED)).toEqual([])
+	})
+
+	it("Play anyway's description keeps the rules: one sentence, 15 words at most", () => {
+		expect(sentences(PLAY_ANYWAY_TEXT)).toHaveLength(1)
+		expect(words(PLAY_ANYWAY_TEXT)).toBeLessThanOrEqual(15)
+		expect(PLAY_ANYWAY_TEXT.endsWith(".")).toBe(true)
+		expect(bannedIn(PLAY_ANYWAY_TEXT, BANNED)).toEqual([])
 	})
 })

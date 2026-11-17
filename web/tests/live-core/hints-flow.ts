@@ -6,7 +6,9 @@
  * first control, and every hint mark must be reached; keyboard focus shows its hint at once; the bubble lies
  * inside its host surface and the window (not clipped), and meets no other island and not its own row; Enter
  * pins it (a learn card when it has one); Escape closes the hint and leaves focus on the mark and the panel
- * open. At 390×844 a tap (a touch pointer, then the click) pins it, and a tap elsewhere closes it. It runs with
+ * open. At 390×844 a tap (a touch pointer, then the click) pins it, and a tap elsewhere closes it. At 1440×900
+ * a mouse opens the first hint after the delay, keeps it over the bubble and closes it once it leaves the
+ * bubble; a hint keyboard focus showed stays while the mouse comes and goes, and Escape closes it. It runs with
  * reduced motion, so each hint must appear whole at once.
  */
 import type { Page } from "playwright-core"
@@ -136,6 +138,74 @@ async function settled(page: Page, id: string): Promise<Measure> {
 	return measure(page, id)
 }
 
+/**
+ * A mouse opens the hint of `id` after the delay, the bubble keeps it, leaving the bubble closes it; a hint
+ * keyboard focus showed outlasts the mouse coming and going, and Escape closes it.
+ */
+async function mouseAndFocus(
+	page: Page,
+	id: string,
+	height: number,
+	step: (name: string, ok: boolean, detail?: string) => void,
+	vp: string,
+): Promise<void> {
+	const panel = page.getByRole("region", { name: "Audio options" })
+	// close an open hint only: an Escape with none open would close the panel
+	if ((await measure(page, id)).open) await page.keyboard.press("Escape")
+	const mark = panel.locator(`[data-wk-hint-mark="${id}"]`)
+	const away = { x: 4, y: Math.round(height / 2) }
+	await mark.scrollIntoViewIfNeeded({ timeout: 5_000 })
+	// a real mouse move onto the mark (no actionability wait: a loaded page draws too few frames for it)
+	const overMark = async () => {
+		const at = await mark.boundingBox({ timeout: 5_000 })
+		if (!at) throw new Error("the first mark has no box")
+		await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2)
+	}
+	await page.mouse.move(away.x, away.y)
+	await page.waitForTimeout(150)
+	await overMark()
+	const hovered = await settled(page, id)
+	const box = await page
+		.locator(`[data-wk-hint-bubble="${id}"]`)
+		.boundingBox({ timeout: 2_000 })
+		.catch(() => null)
+	let kept = false
+	if (box) {
+		await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+		await page.waitForTimeout(400)
+		kept = (await measure(page, id)).open
+	}
+	await page.mouse.move(away.x, away.y)
+	const closed = await within(
+		2_000,
+		async () => !(await measure(page, id)).open,
+	)
+	step(
+		`${vp}: a mouse opens the hint, the bubble keeps it, leaving the bubble closes it`,
+		hovered.open && kept && closed,
+		`opened ${hovered.open}, kept over the bubble ${kept}, closed after ${closed}`,
+	)
+	// keyboard focus (Tab onto the mark): the mouse coming and going leaves it open; Escape closes it
+	await mark.focus()
+	await page.keyboard.press("Shift+Tab")
+	await page.keyboard.press("Tab")
+	const focused = await settled(page, id)
+	await overMark()
+	await page.mouse.move(away.x, away.y)
+	await page.waitForTimeout(500)
+	const stays = await measure(page, id)
+	await page.keyboard.press("Escape")
+	const escaped = await within(
+		2_000,
+		async () => !(await measure(page, id)).open,
+	)
+	step(
+		`${vp}: a hint keyboard focus showed outlasts the mouse, Escape closes it`,
+		focused.open && stays.open && stays.focusOnMark && escaped,
+		`shown ${focused.open}, open after the mouse left ${stays.open}, focus kept ${stays.focusOnMark}, Escape closed it ${escaped}`,
+	)
+}
+
 export async function hintsFlow(
 	page: Page,
 	/** Saves a screenshot under that name (with `--screenshot`). */
@@ -247,6 +317,18 @@ export async function hintsFlow(
 			missed.length === 0 && seen.length > 0,
 			missed.join(", "),
 		)
+
+		const first = ids[0]
+		if (!vp.tap && first !== undefined)
+			try {
+				await mouseAndFocus(page, first, vp.height, step, vp.name)
+			} catch (e) {
+				step(
+					`${vp.name}: mouse and focus on the first hint`,
+					false,
+					e instanceof Error ? (e.message.split("\n")[0] ?? "") : String(e),
+				)
+			}
 
 		if (vp.tap) {
 			for (const id of ids) {

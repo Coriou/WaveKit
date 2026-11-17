@@ -1010,15 +1010,17 @@ Condensed + Noto Sans, Tabler-based icons).
     items or on the plot; at most one learn card per section.
   - *Behaviour:* the pointer opens it after 400 ms and it closes 120 ms after the pointer leaves
     both the anchor and the bubble (the bubble can be hovered and its text selected); keyboard
-    focus opens it at once; a click, Enter, Space or a tap pins it (the learn card when there is
+    focus opens it at once, and it then stays while the mark has focus, whatever the mouse does,
+    until blur or Escape; a click, Enter, Space or a tap pins it (the learn card when there is
     one), and the same again, Escape or a click elsewhere closes it. Escape closes the hint only:
     the panel under it stays open and focus stays on the mark. One hint is open at a time; for
     500 ms after one closes the next opens without the delay. It closes when its host scrolls,
     closes or the window resizes, and it never opens by itself.
   - *Accessibility:* the mark is a real button (`About <label>`, `aria-expanded`,
-    `aria-controls` while open); the explained control points `aria-describedby` at an
-    always-mounted `.wk-sr` copy of the sentence, so a screen reader hears it on the control
-    without finding the mark. No `title` attributes for explanations. The open hint is
+    `aria-controls` while open); the explained control and the mark point `aria-describedby` at
+    an always-mounted `hidden` copy of the sentence (out of the reading flow), so a screen reader
+    hears it on the control without finding the mark; a pinned learn card adds its rows and foot
+    to the mark's description. No `title` attributes for explanations. The open hint is
     `role="tooltip"`, the learn card a named `role="group"` that takes no focus. On a coarse
     pointer the mark has a 44 px hit area.
   - *Placement:* inside the surface that holds the mark (island panel, drawer, sheet), 12 px in

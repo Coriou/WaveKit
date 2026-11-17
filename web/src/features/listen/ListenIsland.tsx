@@ -47,6 +47,7 @@ import {
 	SOURCE_HINT,
 	SQUELCH_HINT,
 	TONE_SQUELCH_HINT,
+	PLAY_ANYWAY_TEXT,
 	VOICE_ONLY_HINT,
 } from "./hints.ts"
 import type { ListenPhase } from "./controller.ts"
@@ -232,6 +233,9 @@ function useHeadline(level: ReturnType<typeof useLevel>) {
 	return { headline, heldVoice, route, now, toneGate, toneWaiting }
 }
 
+/** The head's and the panel's line when this core has no live audio. */
+const NO_LIVE_AUDIO = "This WaveKit has no live audio."
+
 function ListenHead({ ctx }: { ctx: IslandContext }) {
 	const { data, listen } = useServices()
 	const readOnly = useReadOnly()
@@ -280,6 +284,10 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 	// a recording playing here pauses instead of Listen turning off (ListenController.toggle)
 	const toggle = () => void listen.toggle()
 	const disabled = !status || (!on && readOnly && !status.running)
+	// a disabled button takes no focus: its reason is the visible line beside it, which it points at
+	const why = !status ? NO_LIVE_AUDIO : disabled ? "Live audio is off." : null
+	const subId = useId()
+	const playId = useId()
 	const sweep = useSweep()
 	const { heldHz, held } = useHeld(sweep)
 	// live audio follows a running sweep: say so instead of the mode and frequency
@@ -308,6 +316,7 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 						: "Listen"
 				}
 				disabled={disabled}
+				aria-describedby={why ? subId : undefined}
 				onClick={toggle}
 			>
 				<Icon name="headphones" size={22} />
@@ -323,9 +332,13 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 							variant="tonal"
 							size="sm"
 							className="wkf-play-anyway"
+							aria-describedby={playId}
 							onClick={() => void playAnyway(data.liveAudio)}
 						>
 							Play anyway
+							<span id={playId} hidden>
+								{PLAY_ANYWAY_TEXT}
+							</span>
 						</Button>
 					) : breaking ? (
 						<span className="wk-shell-sub" data-breaking="">
@@ -337,7 +350,9 @@ function ListenHead({ ctx }: { ctx: IslandContext }) {
 							<span>{follow.text}</span>
 						</span>
 					) : (
-						<span className="wk-shell-sub">{sub}</span>
+						<span className="wk-shell-sub" id={subId}>
+							{why ?? sub}
+						</span>
 					)}
 				</div>
 				<div className="wk-meter wkf-meter" aria-hidden="true">
@@ -374,9 +389,6 @@ const SQUELCH_OPTIONS: ReadonlyArray<SegOption<SquelchKind>> = [
 	{ value: "manual", label: "Manual" },
 	{ value: "open", label: "Open" },
 ]
-
-/** The Voice only hint, which Settings repeats. */
-export const VOICE_ONLY_SUB = VOICE_ONLY_HINT.text
 
 /** The per-browser key of the Sound fold (open or closed); it never opens by itself. */
 export const SOUND_OPEN_KEY = "wavekit.web.listen.soundOpen"
@@ -430,9 +442,7 @@ function ListenPanel() {
 				<ListenSourceField status={status} canEdit={canEdit} />
 			)}
 			{status && <Sound status={status} canEdit={canEdit} />}
-			{!status && (
-				<p className="wkf-ls-note">This WaveKit has no live audio.</p>
-			)}
+			{!status && <p className="wkf-ls-note">{NO_LIVE_AUDIO}</p>}
 			{status && !running && (
 				<p className="wkf-ls-note">Live audio is off. Listen starts it.</p>
 			)}
@@ -655,8 +665,9 @@ function ToneSquelch({
 				</label>
 			</HintMark>
 			<span className="wkf-ls-now wkf-ls-tone">
-				{text}
-				{heard ? " detected" : state === "open" ? " heard" : ""}
+				{on && state === "waiting"
+					? `Waiting for ${text}`
+					: `${text}${heard ? " detected" : state === "open" ? " heard" : ""}`}
 			</span>
 			<Switch
 				id={id}
@@ -878,7 +889,7 @@ function HealthNote() {
 	if (!wanted || text === null) return null
 	return (
 		<div className="wkf-ls-note wkf-num" data-tone="warn" {...hintRow}>
-			<span aria-describedby={hint.describedBy}>{text}</span>
+			<span>{text}</span>
 			<HintMark {...hint.mark} />
 		</div>
 	)
@@ -951,6 +962,7 @@ function ListenFoot() {
 			<Button
 				variant="ghost"
 				className="wkf-listen-more"
+				aria-label="All audio settings"
 				onClick={() => {
 					focusSetting("au.squelch")
 					shellStore.openDrawer("settings")

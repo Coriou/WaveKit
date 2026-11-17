@@ -1,8 +1,9 @@
 // Hints (docs/web/DESIGN.md, Hints): a small info mark after a label, one sentence behind it, and for the few
 // deep concepts a learn card (the same bubble, pinned). Hover or keyboard focus shows the sentence; a click,
-// Enter, Space or a tap pins it. The explained control always carries the sentence for screen readers
-// (`aria-describedby` on an always-mounted `.wk-sr` copy), open or not. The bubble opens inside the surface
-// that holds the mark, never over the row it explains.
+// Enter, Space or a tap pins it. The explained control and the mark always carry the sentence for screen
+// readers (`aria-describedby` on an always-mounted `hidden` copy, out of the reading flow), open or not; a
+// pinned learn card adds its rows to the mark's description. The bubble opens inside the surface that holds
+// the mark, never over the row it explains.
 import "./hint.css"
 
 import {
@@ -17,6 +18,7 @@ import { createPortal } from "react-dom"
 import { useStore } from "../data/store.ts"
 import { Icon } from "./Icon.tsx"
 import {
+	hintBubbleEvents,
 	hintMarkEvents,
 	hints,
 	type HintController,
@@ -42,7 +44,7 @@ export interface HintMarkProps {
 	/** The explained control's name: the mark is "About <label>". */
 	readonly label: string
 	readonly content: HintContent
-	/** Id of the hidden copy of the sentence; the explained control points `aria-describedby` at it. */
+	/** Id of the hidden copy of the sentence; the explained control and the mark point `aria-describedby` at it. */
 	readonly describedBy: string
 	/** The label text, rendered before the mark: label and mark are one hover anchor. */
 	readonly children?: ReactNode
@@ -87,6 +89,7 @@ export function HintMark({
 	const open = state.open === id
 	const events = hintMarkEvents(controller, id)
 	const bubbleId = `${id}-bubble`
+	const learnShown = open && state.pinned && content.learn !== undefined
 	useEffect(() => () => controller.forget(id), [controller, id])
 	return (
 		<span
@@ -103,6 +106,11 @@ export function HintMark({
 				aria-label={`About ${label}`}
 				aria-expanded={open}
 				aria-controls={open ? bubbleId : undefined}
+				aria-describedby={
+					learnShown
+						? `${describedBy} ${learnIds(bubbleId, Boolean(content.learn?.foot))}`
+						: describedBy
+				}
 				data-wk-hint-mark={id}
 				onFocus={e => events.onFocus(focusVisible(e.currentTarget))}
 				onBlur={() => events.onBlur()}
@@ -110,7 +118,7 @@ export function HintMark({
 			>
 				<Icon name="info" size={14} />
 			</button>
-			<span className="wk-sr" id={describedBy}>
+			<span id={describedBy} hidden>
 				{content.text}
 			</span>
 			{open && (
@@ -128,6 +136,10 @@ export function HintMark({
 		</span>
 	)
 }
+
+/** The ids of a learn card's rows and foot, which the mark's description adds while it is pinned. */
+const learnIds = (bubbleId: string, foot: boolean) =>
+	foot ? `${bubbleId}-terms ${bubbleId}-foot` : `${bubbleId}-terms`
 
 function focusVisible(el: Element): boolean {
 	try {
@@ -166,6 +178,7 @@ function HintBubble({
 }) {
 	const bubble = useRef<HTMLDivElement>(null)
 	const learn = pinned && content.learn !== undefined
+	const pointer = hintBubbleEvents(controller)
 
 	// place before paint: inside the host, above the kept row, else below it
 	useLayoutEffect(() => {
@@ -256,12 +269,13 @@ function HintBubble({
 			aria-label={learn ? `About ${label}` : undefined}
 			data-learn={learn || undefined}
 			data-wk-hint-bubble={hintId}
-			onPointerEnter={() => controller.bubbleIn()}
+			onPointerEnter={e => pointer.onPointerEnter(e.pointerType)}
+			onPointerLeave={e => pointer.onPointerLeave(e.pointerType)}
 		>
 			{learn && content.learn ? (
 				<>
 					<p className="wk-hint-lead">{content.text}</p>
-					<dl className="wk-hint-terms">
+					<dl className="wk-hint-terms" id={`${id}-terms`}>
 						{content.learn.rows.map(row => (
 							<div key={row.term}>
 								<dt>{row.term}</dt>
@@ -270,7 +284,9 @@ function HintBubble({
 						))}
 					</dl>
 					{content.learn.foot && (
-						<p className="wk-hint-foot">{content.learn.foot}</p>
+						<p className="wk-hint-foot" id={`${id}-foot`}>
+							{content.learn.foot}
+						</p>
 					)}
 				</>
 			) : (

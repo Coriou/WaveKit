@@ -9,6 +9,7 @@ import {
 	HINT_OPEN_DELAY_MS,
 	HINT_WARM_MS,
 	HintController,
+	hintBubbleEvents,
 	hintMarkEvents,
 	type HintClock,
 } from "../../src/ui/hint-controller.ts"
@@ -107,6 +108,39 @@ describe("hint controller: keyboard", () => {
 		expect(ev.onKeyDown("Escape")).toBe(false)
 	})
 
+	it("a hint keyboard focus showed stays while the mark has focus, whatever the mouse does", () => {
+		const { c, advance, open } = setup()
+		const ev = hintMarkEvents(c, "a")
+		const bubble = hintBubbleEvents(c)
+		ev.onFocus(true)
+		ev.onPointerEnter("mouse")
+		ev.onPointerLeave("mouse")
+		advance(HINT_CLOSE_GRACE_MS * 3)
+		expect(open()).toBe("a")
+		bubble.onPointerEnter("mouse")
+		bubble.onPointerLeave("mouse")
+		advance(HINT_CLOSE_GRACE_MS * 3)
+		expect(open()).toBe("a")
+		// blur closes it, and after that the mouse path is back to normal
+		ev.onBlur()
+		expect(open()).toBeNull()
+		ev.onPointerEnter("mouse")
+		advance(HINT_OPEN_DELAY_MS)
+		expect(open()).toBe("a")
+		ev.onPointerLeave("mouse")
+		advance(HINT_CLOSE_GRACE_MS)
+		expect(open()).toBeNull()
+	})
+
+	it("Escape closes a focus-shown hint the mouse could not", () => {
+		const { c, open } = setup()
+		const ev = hintMarkEvents(c, "a")
+		ev.onFocus(true)
+		ev.onPointerLeave("mouse")
+		expect(ev.onKeyDown("Escape")).toBe(true)
+		expect(open()).toBeNull()
+	})
+
 	it("Tab to the next mark moves the hint: one open at a time", () => {
 		const { c, open } = setup()
 		const a = hintMarkEvents(c, "a")
@@ -150,6 +184,40 @@ describe("hint controller: touch and pointer", () => {
 		c.bubbleOut()
 		advance(HINT_CLOSE_GRACE_MS)
 		expect(open()).toBeNull()
+	})
+
+	it("a hovered hint closes after the grace once the pointer leaves its bubble; touch on the bubble does nothing", () => {
+		const { c, advance, open } = setup()
+		const ev = hintMarkEvents(c, "a")
+		const bubble = hintBubbleEvents(c)
+		ev.onPointerEnter("mouse")
+		advance(HINT_OPEN_DELAY_MS)
+		ev.onPointerLeave("mouse")
+		bubble.onPointerEnter("mouse")
+		advance(HINT_CLOSE_GRACE_MS * 2)
+		expect(open()).toBe("a")
+		bubble.onPointerLeave("touch")
+		advance(HINT_CLOSE_GRACE_MS * 2)
+		expect(open()).toBe("a")
+		bubble.onPointerLeave("mouse")
+		advance(HINT_CLOSE_GRACE_MS - 1)
+		expect(open()).toBe("a")
+		advance(1)
+		expect(open()).toBeNull()
+	})
+
+	it("back from the bubble to the mark keeps it open", () => {
+		const { c, advance, open } = setup()
+		const ev = hintMarkEvents(c, "a")
+		const bubble = hintBubbleEvents(c)
+		ev.onPointerEnter("mouse")
+		advance(HINT_OPEN_DELAY_MS)
+		ev.onPointerLeave("mouse")
+		bubble.onPointerEnter("mouse")
+		bubble.onPointerLeave("mouse")
+		ev.onPointerEnter("mouse")
+		advance(HINT_CLOSE_GRACE_MS * 2)
+		expect(open()).toBe("a")
 	})
 
 	it("leaving before the delay opens nothing", () => {
@@ -196,6 +264,20 @@ describe("hint controller: touch and pointer", () => {
 		expect(open()).toBe("a")
 		c.forget("a")
 		expect(open()).toBeNull()
+	})
+
+	it("a mark that goes away before its delay never opens", () => {
+		const { c, advance, open } = setup()
+		hintMarkEvents(c, "a").onPointerEnter("mouse")
+		c.forget("b")
+		c.forget("a")
+		advance(HINT_OPEN_DELAY_MS * 2)
+		expect(open()).toBeNull()
+		// another mark's pending open is not dropped
+		hintMarkEvents(c, "b").onPointerEnter("mouse")
+		c.forget("a")
+		advance(HINT_OPEN_DELAY_MS)
+		expect(open()).toBe("b")
 	})
 })
 
@@ -315,14 +397,17 @@ describe("hint placement", () => {
 describe("<HintMark>", () => {
 	const content: HintContent = {
 		text: "Keeps the speaker quiet until there is something to hear.",
-		learn: { rows: [{ term: "Auto", text: "Opens on a signal." }] },
+		learn: {
+			rows: [{ term: "Auto", text: "Opens on a signal." }],
+			foot: "Shared with every device listening",
+		},
 	}
-	const render = (controller: HintController) =>
+	const render = (controller: HintController, with_: HintContent = content) =>
 		renderToStaticMarkup(
 			createElement(HintMark, {
 				id: "wk-hint-t",
 				label: "Squelch",
-				content,
+				content: with_,
 				describedBy: "wk-hint-t-d",
 				controller,
 				children: createElement("span", { className: "wk-label" }, "Squelch"),
@@ -335,9 +420,15 @@ describe("<HintMark>", () => {
 		expect(html).toContain('aria-label="About Squelch"')
 		expect(html).toContain('aria-expanded="false"')
 		expect(html).not.toContain("aria-controls")
-		// the sentence the control's aria-describedby points at is always in the page
+		// the sentence the control's aria-describedby points at is always in the page, hidden: out of the
+		// virtual cursor's reading flow (a description reads hidden content), not a stray line after the label
 		expect(html).toContain(
-			`<span class="wk-sr" id="wk-hint-t-d">${content.text}</span>`,
+			`<span id="wk-hint-t-d" hidden="">${content.text}</span>`,
+		)
+		expect(html).not.toContain("wk-sr")
+		// the mark is described by the sentence too
+		expect(html).toMatch(
+			/class="wk-hint-mark"[^>]*aria-describedby="wk-hint-t-d"/,
 		)
 		expect(html).not.toMatch(/\stitle="/)
 		expect(html).not.toContain('role="tooltip"')
@@ -353,9 +444,35 @@ describe("<HintMark>", () => {
 		expect(brief).toContain('aria-controls="wk-hint-t-bubble"')
 		expect(brief).toContain('role="tooltip"')
 		expect(brief).toContain(">More<")
+		// the brief hint: the mark is described by the sentence only
+		expect(brief).toMatch(
+			/class="wk-hint-mark"[^>]*aria-describedby="wk-hint-t-d"/,
+		)
 		hintMarkEvents(c, "wk-hint-t").onClick()
 		const card = render(c)
 		expect(card).toContain('role="group"')
 		expect(card).toContain("<dt>Auto</dt>")
+		// pinned: the mark's description reaches the learn rows and foot, which carry those ids
+		expect(card).toMatch(
+			/class="wk-hint-mark"[^>]*aria-describedby="wk-hint-t-d wk-hint-t-bubble-terms wk-hint-t-bubble-foot"/,
+		)
+		expect(card).toContain(
+			'<dl class="wk-hint-terms" id="wk-hint-t-bubble-terms">',
+		)
+		expect(card).toContain(
+			'<p class="wk-hint-foot" id="wk-hint-t-bubble-foot">',
+		)
+		// no foot, no dangling id
+		expect(
+			render(c, { ...content, learn: { rows: content.learn?.rows ?? [] } }),
+		).toMatch(/aria-describedby="wk-hint-t-d wk-hint-t-bubble-terms"/)
+	})
+
+	it("a pinned hint without a learn card adds nothing to the description", () => {
+		const c = new HintController()
+		hintMarkEvents(c, "wk-hint-t").onClick()
+		expect(render(c, { text: content.text })).toMatch(
+			/class="wk-hint-mark"[^>]*aria-describedby="wk-hint-t-d"/,
+		)
 	})
 })

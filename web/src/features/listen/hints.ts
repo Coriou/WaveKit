@@ -68,6 +68,12 @@ export const HEARD_HINT: HintContent = {
 	text: "Share of the last 10 s of audio that reached this browser. Drops usually mean WaveKit is busy.",
 }
 
+/**
+ * The head's Play anyway button: its description (the head takes no marks), and the receipt toast with Undo
+ * says what happened.
+ */
+export const PLAY_ANYWAY_TEXT = "Turns Voice only off, so every carrier plays."
+
 /** Every Listen hint, for the copy test and the report. */
 export const LISTEN_HINTS: Readonly<Record<string, HintContent>> = {
 	Squelch: SQUELCH_HINT,

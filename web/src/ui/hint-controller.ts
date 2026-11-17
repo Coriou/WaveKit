@@ -33,7 +33,11 @@ const CLOSED: HintState = Object.freeze({ open: null, pinned: false })
 export class HintController {
 	readonly state = new Store<HintState>(CLOSED)
 	private showTimer: unknown = null
+	/** The hint the pending open timer is for. */
+	private showFor: string | null = null
 	private hideTimer: unknown = null
+	/** The mark that has keyboard focus and showed its hint: the pointer leaving does not close it. */
+	private focused: string | null = null
 	private warmUntil = Number.NEGATIVE_INFINITY
 
 	constructor(private readonly clock: HintClock = realClock) {}
@@ -46,17 +50,22 @@ export class HintController {
 		this.cancelShow()
 		const warm = this.clock.now() < this.warmUntil || s.open !== null
 		if (warm) return this.show(id, false)
+		this.showFor = id
 		this.showTimer = this.clock.set(() => {
 			this.showTimer = null
+			this.showFor = null
 			this.show(id, false)
 		}, HINT_OPEN_DELAY_MS)
 	}
 
-	/** The pointer left the mark and its label (not into the bubble): close after the grace, unless pinned. */
+	/**
+	 * The pointer left the mark and its label (not into the bubble): close after the grace, unless pinned or
+	 * the mark holds keyboard focus (that hint closes on blur or Escape).
+	 */
 	hoverOut(id: string): void {
 		this.cancelShow()
 		const s = this.state.get()
-		if (s.open === id && !s.pinned) this.scheduleHide()
+		if (s.open === id && !s.pinned && this.focused !== id) this.scheduleHide()
 	}
 
 	/** The pointer is over the bubble: it stays (its text can be read and selected). */
@@ -64,21 +73,25 @@ export class HintController {
 		this.cancelHide()
 	}
 
+	/** The pointer left the bubble (not back to its mark): close after the grace, like leaving the mark. */
 	bubbleOut(): void {
 		const s = this.state.get()
-		if (s.open !== null && !s.pinned) this.scheduleHide()
+		if (s.open !== null && !s.pinned && this.focused !== s.open)
+			this.scheduleHide()
 	}
 
 	/** Keyboard focus on a mark shows its hint at once; a pointer focus does nothing (the click pins). */
 	focus(id: string, visible: boolean): void {
 		if (!visible) return
+		this.focused = id
 		const s = this.state.get()
-		if (s.open === id) return
+		if (s.open === id) return this.cancelHide()
 		this.show(id, false)
 	}
 
 	/** The mark lost focus: an unpinned hint closes. */
 	blur(id: string): void {
+		if (this.focused === id) this.focused = null
 		const s = this.state.get()
 		if (s.open === id && !s.pinned) this.hide()
 	}
@@ -103,8 +116,10 @@ export class HintController {
 		else this.cancelShow()
 	}
 
-	/** A mark went away (its row unmounted): its hint closes with it. */
+	/** A mark went away (its row unmounted): its hint closes with it, and a pending open for it is dropped. */
 	forget(id: string): void {
+		if (this.focused === id) this.focused = null
+		if (this.showFor === id) this.cancelShow()
 		if (this.state.get().open === id) this.hide()
 	}
 
@@ -133,6 +148,7 @@ export class HintController {
 	}
 
 	private cancelShow(): void {
+		this.showFor = null
 		if (this.showTimer === null) return
 		this.clock.clear(this.showTimer)
 		this.showTimer = null
@@ -147,6 +163,24 @@ export class HintController {
 
 /** The app's one controller: one hint open at a time, app-wide. */
 export const hints = new HintController()
+
+/** What the bubble's pointer events mean: a mouse over it keeps the hint, leaving it closes it after the grace. */
+export interface HintBubbleEvents {
+	onPointerEnter(pointerType: string): void
+	onPointerLeave(pointerType: string): void
+}
+
+/** The bubble's handlers (mouse only, like the mark's hover: touch and pen pin and dismiss instead). */
+export function hintBubbleEvents(controller: HintController): HintBubbleEvents {
+	return {
+		onPointerEnter: type => {
+			if (type === "mouse") controller.bubbleIn()
+		},
+		onPointerLeave: type => {
+			if (type === "mouse") controller.bubbleOut()
+		},
+	}
+}
 
 /** What a mark's DOM events mean, as plain inputs (so the wiring is testable without a DOM). */
 export interface HintMarkEvents {

@@ -280,9 +280,13 @@
 			min-height: 44px;
 			margin: -8px 0;
 		}
+		/* the footer link's short label takes over wherever the long one hides */
 		.wkf-ls-long,
 		.wkf-ls-delay {
 			display: none;
+		}
+		.wkf-ls-short {
+			display: inline;
 		}
 	}
 	/* a phone: a segmented control in a Sound row drops under its name and fills the row */
@@ -298,9 +302,6 @@
 			grid-auto-columns: minmax(0, 1fr);
 			width: 100%;
 			margin-left: 0;
-		}
-		.wkf-ls-short {
-			display: inline;
 		}
 	}
 }
