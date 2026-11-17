@@ -1630,7 +1630,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				: this.dmrLineLane === "ms"
 					? "ms"
 					: "x"
-		if (lane === "x" || this.dmrLineLane !== lane) return
+		// Every live DMR call is reported, an unplaced one ("x": opened with
+		// no slot lane) included: no live DMR call is outside the records.
 		const call = this.callState ?? this.pendingCall?.state ?? null
 		const view =
 			call?.protocol === "dmr"
@@ -1643,6 +1644,35 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					}
 				: null
 		this.applyDmrTrust(this.dmrClearance.call(lane, view, seq, nowMs))
+		if (this.logger.isLevelEnabled("debug")) {
+			const missing = this.unrecordedDmrCalls()
+			if (missing.length > 0)
+				this.logger.debug(
+					{ calls: missing.length },
+					"Live DMR calls outside the clearance records",
+				)
+		}
+	}
+
+	/**
+	 * Live DMR calls (any lane, running or pending) the clearance machine has
+	 * no record of: always empty (debug check, tests).
+	 */
+	private unrecordedDmrCalls(): string[] {
+		const calls = [
+			this.callState,
+			this.pendingCall?.state ?? null,
+			...[...this.lanes.values()].flatMap(lane => [
+				lane.callState,
+				lane.pendingCall?.state ?? null,
+			]),
+		]
+		return calls
+			.filter(
+				(call): call is DsdFmeCallState =>
+					call?.protocol === "dmr" && !this.dmrClearance.has(call.callId),
+			)
+			.map(call => call.callId)
 	}
 
 	/**

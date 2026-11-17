@@ -12,7 +12,7 @@
  * (MS/DM) channel "ms", and "x" for a BS sync that brackets no slot (or a
  * bare "Sync: +DMR", or any line before a DMR sync): "x" never opens,
  * names, proves or settles anything; its error marks every open burst
- * errored.
+ * errored. A call ever recorded there is never cleared.
  *
  * Proof kinds, each settled only by `clear` on the lane's next clean sync
  * of the same format, with no error anywhere in the burst from its opening
@@ -377,6 +377,11 @@ export class DmrClearance {
 	private readonly lanes = new Map<DmrLane, LaneState>()
 	/** Calls marked encrypted: sticky per call id, whatever lane they move to. */
 	private readonly encryptedIds = new Set<string>()
+	/**
+	 * Calls ever recorded with no slot lane ("x": opened after a bare or
+	 * bracketless sync): never clearable, whatever lane they move to.
+	 */
+	private readonly unplacedIds = new Set<string>()
 
 	constructor(private readonly callTimeoutMs: number) {
 		for (const lane of LANES) this.lanes.set(lane, emptyLane(0))
@@ -394,6 +399,13 @@ export class DmrClearance {
 		for (const lane of this.lanes.values())
 			if (lane.call?.callId === callId) return lane.call.trust
 		return "unknown"
+	}
+
+	/** Whether `callId` has a record on some lane (the adapter reports every live call). */
+	has(callId: string): boolean {
+		for (const lane of this.lanes.values())
+			if (lane.call?.callId === callId) return true
+		return false
 	}
 
 	/** The pending proof of `callId`, if any (tests and diagnostics). */
@@ -424,6 +436,7 @@ export class DmrClearance {
 	/** The adapter ended `callId` (any cause): its record and proof go. */
 	ended(callId: string): void {
 		this.encryptedIds.delete(callId)
+		this.unplacedIds.delete(callId)
 		for (const lane of this.lanes.values())
 			if (lane.call?.callId === callId) lane.call = undefined
 	}
@@ -586,6 +599,7 @@ export class DmrClearance {
 			lane.call = undefined
 			return out
 		}
+		if (key === "x") this.unplacedIds.add(view.callId)
 		let record = lane.call
 		// Another talker's privacy print that split nothing is this call's.
 		if (record?.callId === view.callId && lane.privacySeq === seq) {
@@ -812,9 +826,10 @@ export class DmrClearance {
 		const errored = event.type === "sync" ? !event.clean : event.errored
 		if (errored) for (const key of PROOF_LANES) this.dirty(this.lane(key))
 		if (!event.privacy) return
-		// It cannot be attributed to one lane: every call it could belong to
-		// (any proof lane's) is encrypted (fail closed).
-		for (const key of PROOF_LANES) {
+		// It cannot be attributed to one lane: every live call it could belong
+		// to (any lane's record, unplaced ones included) is encrypted (fail
+		// closed).
+		for (const key of LANES) {
 			const lane = this.lane(key)
 			if (lane.call !== undefined) this.privacy(lane, seq, out)
 		}
@@ -854,6 +869,7 @@ export class DmrClearance {
 		if (
 			call.trust !== "pending" ||
 			this.encryptedIds.has(call.callId) ||
+			this.unplacedIds.has(call.callId) ||
 			evidence.callId !== call.callId ||
 			evidence.callKey !== (call.key ?? "") ||
 			evidence.lcKey !== (call.key ?? "") ||

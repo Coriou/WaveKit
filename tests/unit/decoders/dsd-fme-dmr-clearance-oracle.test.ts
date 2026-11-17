@@ -54,7 +54,12 @@ interface Publication {
 	hasField: boolean
 	/** A call's end: its call_end or the voice-call snapshot that mirrors it. */
 	ending?: boolean
+	/** The call's published start (ms from T0): its first line is at or after it. */
+	startedAtMs?: number
 }
+
+/** Live DMR calls the clearance machine had no record of, after any line of the last run. */
+let unrecorded: string[] = []
 
 /** Replays items (10 ms steps, the 500 ms timer), recording each publication's line seq. */
 function run(items: Item[]): Publication[] {
@@ -63,8 +68,10 @@ function run(items: Item[]): Publication[] {
 		handleOutputLine(line: string): void
 		checkCallTimeoutAsync(): void
 		endOpenCallsForRestart(now: Date): void
+		unrecordedDmrCalls(): string[]
 	}
 	const pubs: Publication[] = []
+	unrecorded = []
 	let seq = 0
 	decoder.on("output", (o: DecoderOutput) => {
 		if (o.type !== "call_start" && o.type !== "call_end") return
@@ -85,6 +92,7 @@ function run(items: Item[]): Publication[] {
 			encryptionKnown: d.encryptionKnown,
 			hasField: "encryptionKnown" in d,
 			ending: o.type === "call_end",
+			startedAtMs: Date.parse(d.startedAt) - T0,
 		})
 	})
 	decoder.on("voice-call", (v: DsdFmeVoiceCallState) => {
@@ -100,6 +108,7 @@ function run(items: Item[]): Publication[] {
 			encryptionKnown: v.encryptionKnown,
 			hasField: "encryptionKnown" in v,
 			ending: !v.active,
+			startedAtMs: Date.parse(v.startedAt) - T0,
 		})
 	})
 	const sorted = items
@@ -117,6 +126,7 @@ function run(items: Item[]): Publication[] {
 			if (text === RESTART)
 				internals.endOpenCallsForRestart(new Date(T0 + atMs))
 			else internals.handleOutputLine(text)
+			unrecorded.push(...internals.unrecordedDmrCalls())
 			index++
 		}
 		vi.setSystemTime(T0 + now)
@@ -371,6 +381,17 @@ function ledger(items: Item[]): Omit<Shadow, "epochs">[] {
 interface Binding {
 	lane: string
 	epoch: number
+	/** The chain's link control (or clear algorithm) line: owned by one callId. */
+	lcSeq: number
+}
+
+/** What the ledger knows of the publication's call. */
+interface CallContext {
+	firstSeq: number
+	startedAtMs: number | undefined
+	bound: Binding | undefined
+	/** Chains already owned: lc line seq to callId. */
+	owner: ReadonlyMap<number, string>
 }
 
 /**
@@ -382,9 +403,11 @@ interface Binding {
 function backed(
 	lines: Shadow[],
 	p: Publication,
-	firstSeq = p.seq,
-	bound?: Binding,
+	context: Partial<CallContext> = {},
 ): Binding | null {
+	const firstSeq = context.firstSeq ?? p.seq
+	const bound = context.bound
+	const startedAtMs = context.startedAtMs ?? p.startedAtMs
 	const key =
 		p.talkgroup === null || p.source === null
 			? undefined
@@ -400,6 +423,9 @@ function backed(
 		p.slot === 1 || p.slot === 2 ? [String(p.slot), "ms"] : ["ms", "1", "2"]
 	for (const l of lines) {
 		if (l.seq >= p.seq) break
+		// Exclusive ownership: a chain that backed one call backs no other.
+		const owned = context.owner?.get(l.seq)
+		if (owned !== undefined && owned !== p.callId) continue
 		if (
 			l.sync ||
 			l.errored ||
@@ -435,13 +461,20 @@ function backed(
 		)
 			continue
 		// The call's own life: its lane's lines from the first of its epoch.
-		const callStart =
+		const laneStart =
 			lines.find(
 				x =>
 					x.lane === l.lane &&
 					x.generation === genAt &&
 					x.epochs[l.lane] === epoch,
 			)?.seq ?? s.seq
+		// The call's first line on any lane (an unplaced one included): its
+		// published start is at or before it.
+		const openedAt =
+			startedAtMs === undefined
+				? undefined
+				: lines.find(x => x.atMs >= startedAtMs)?.seq
+		const callStart = Math.min(laneStart, openedAt ?? laneStart)
 		if (
 			s.errored ||
 			!(l.alg ? ["vlc", "voice", "pi"] : ["vlc", "voice", "tlc"]).includes(
@@ -504,7 +537,7 @@ function backed(
 				rival = true
 		}
 		if (rival) continue
-		return { lane: l.lane, epoch }
+		return { lane: l.lane, epoch, lcSeq: l.seq }
 	}
 	return null
 }
@@ -516,11 +549,16 @@ function oracle(items: Item[], pubs: Publication[]): string[] {
 	// The ledger per published callId: its first publication, its binding,
 	// and whether it was published encrypted (sticky for its life).
 	const first = new Map<string, number>()
+	const started = new Map<string, number | undefined>()
+	const owner = new Map<number, string>()
 	const binding = new Map<string, Binding>()
 	const encrypted = new Set<string>()
 	for (const p of pubs) {
 		if (p.protocol !== "dmr") continue
-		if (!first.has(p.callId)) first.set(p.callId, p.seq)
+		if (!first.has(p.callId)) {
+			first.set(p.callId, p.seq)
+			started.set(p.callId, p.startedAtMs)
+		}
 		if (!p.hasField || typeof p.encryptionKnown !== "boolean")
 			failures.push(`(a) ${p.kind} at ${p.seq} omits encryptionKnown`)
 		if (p.encrypted) encrypted.add(p.callId)
@@ -532,10 +570,19 @@ function oracle(items: Item[], pubs: Publication[]): string[] {
 			failures.push(`(c) ${p.kind} at ${p.seq} clear after encrypted`)
 			continue
 		}
-		const chain = backed(lines, p, first.get(p.callId), binding.get(p.callId))
+		const bound = binding.get(p.callId)
+		const chain = backed(lines, p, {
+			firstSeq: first.get(p.callId) ?? p.seq,
+			startedAtMs: started.get(p.callId),
+			...(bound !== undefined ? { bound } : {}),
+			owner,
+		})
 		if (chain === null)
 			failures.push(`(b-d) ${p.kind} at ${p.seq} clear without a settled chain`)
-		else binding.set(p.callId, chain)
+		else {
+			binding.set(p.callId, chain)
+			owner.set(chain.lcSeq, p.callId)
+		}
 	}
 	return failures
 }
@@ -548,6 +595,7 @@ function expectNotClearFrom(items: Item[], fromSeq: number): void {
 		false,
 	)
 	expect(oracle(items, pubs)).toEqual([])
+	expect(unrecorded).toEqual([])
 }
 
 /** No publication is clear (or omits the field), and the oracle holds. */
@@ -557,6 +605,7 @@ function expectNeverClear(items: Item[]): Publication[] {
 	expect(dmr.every(p => p.hasField)).toBe(true)
 	expect(dmr.some(p => !p.encrypted && p.encryptionKnown !== false)).toBe(false)
 	expect(oracle(items, pubs)).toEqual([])
+	expect(unrecorded).toEqual([])
 	return pubs
 }
 
@@ -901,6 +950,7 @@ describe("dsd-fme DMR clearance oracle", () => {
 				const pubs = run(items)
 				expect(everClear(pubs)).toBe(true)
 				expect(oracle(items, pubs)).toEqual([])
+				expect(unrecorded).toEqual([])
 			}
 		})
 
@@ -960,6 +1010,143 @@ describe("dsd-fme DMR clearance oracle", () => {
 				[362, BRACKETLESS("VC3  (FEC ERR)")],
 				[480, MS("VC*")],
 			])
+		})
+	})
+
+	describe("unplaced calls (opened with no slot lane)", () => {
+		const X = (burst: string) =>
+			`00:00:01 Sync: +DMR   slot1   slot2  | Color Code=01 | ${burst} `
+		const unplaced = (print: string): Item[] => [
+			[0, "Sync: +DMR"],
+			[1, LC()],
+			[110, " SLCO NULL "],
+			[120, X("IDLE")],
+			[121, print],
+			[180, MS("VC*")],
+			[181, LC()],
+			[240, MS("VC*")],
+		]
+		const PRINTS = [
+			" SLOT 1 TGT=9001 SRC=91 SVC=0x40 Group Call ",
+			" SLOT 1 TGT=9001 SRC=91 Group Call Encrypted (CRC ERR) ",
+		]
+
+		it("a call opened after a bare sync is recorded, never clear, and a bracketless privacy print mutes it", () => {
+			for (const print of PRINTS) {
+				const pubs = expectNeverClear(unplaced(print))
+				expect(unrecorded).toEqual([])
+				expect(pubs.some(p => p.encrypted)).toBe(true)
+			}
+		})
+
+		it("even with no privacy print, a call that was ever unplaced never clears", () => {
+			expectNeverClear(unplaced(" SLCO NULL "))
+		})
+
+		it("the oracle rejects a clear injected into the unplaced call after the privacy print", () => {
+			for (const print of PRINTS) {
+				const items = unplaced(print)
+				const pubs = run(items)
+				const real = pubs.find(p => p.protocol === "dmr")
+				expect(real).toBeDefined()
+				const injected: Publication = {
+					...real!,
+					seq: 8.3,
+					kind: "voice-call",
+					encrypted: false,
+					encryptionKnown: true,
+					talkgroup: 9001,
+					source: 91,
+				}
+				expect(oracle(items, [...pubs, injected]).length).toBeGreaterThan(0)
+			}
+		})
+
+		it("the oracle rejects a clear under another callId that borrows a call's chain", () => {
+			const items: Item[] = [
+				[0, MS("VLC")],
+				[1, LC()],
+				[60, MS("VC*")],
+				[420, MS("VC*")],
+			]
+			const pubs = run(items)
+			expect(oracle(items, pubs)).toEqual([])
+			const real = pubs.find(p => !p.encrypted && p.encryptionKnown === true)
+			expect(real).toBeDefined()
+			const borrowed: Publication = { ...real!, seq: 4.3, callId: "other" }
+			expect(oracle(items, [...pubs, borrowed]).length).toBeGreaterThan(0)
+		})
+
+		it("every bypass trace rejects a forged clear injected after its last line", () => {
+			const traces: Item[][] = [
+				...SHAPES,
+				...PRINTS.map(unplaced),
+				[
+					[0, BS(1, "VLC")],
+					[1, LC()],
+					[60, BS(1, "VC1")],
+					[110, " SLOT 1 TGT=9002 SRC=92 Group Call Encrypted "],
+					[120, BS(1, "VC2")],
+				],
+				[
+					[0, BS(1, "VC1")],
+					[60, BS(1, "VC2")],
+					[61, " DMR Voice TGT: 9001; SRC: 91; "],
+					[120, BS(1, "VC3")],
+					[240, BS(1, "VC4")],
+				],
+				[
+					[0, BS(1, "VLC")],
+					[1, LC()],
+					[2, " (FEC ERR) "],
+					[60, BS(1, "VC1")],
+					[80, BS(2, "VC1")],
+					[81, LC()],
+					[120, BS(1, "VC2")],
+					[240, BS(1, "VC3")],
+				],
+				[
+					[0, MS("VLC")],
+					[1, LC()],
+					[60, MS("VC*")],
+					[180, MS("VC*")],
+					[200, X("IDLE")],
+					[201, " SLOT 1 TGT=9001 SRC=91 SVC=0x40 Group Call "],
+					[240, MS("VC*")],
+				],
+				[
+					[0, BS(1, "VC1")],
+					[60, BS(1, "VC2")],
+					[61, LC(1, 9001, 91, "Encrypted")],
+					[120, BS(1, "VC3")],
+					[121, LC()],
+					[180, BS(1, "VC4")],
+				],
+			]
+			for (const trace of traces) {
+				const items = [...trace]
+				const pubs = run(items)
+				const last = items.length
+				for (const slot of [1, null]) {
+					const forged: Publication = {
+						seq: last + 0.3,
+						kind: "voice-call",
+						callId: `forged-${slot}`,
+						protocol: "dmr",
+						talkgroup: 9001,
+						source: 91,
+						slot,
+						encrypted: false,
+						encryptionKnown: true,
+						hasField: true,
+						startedAtMs: 0,
+					}
+					expect({
+						trace: items.map(([, t]) => t.trim()).join(" | "),
+						rejected: oracle(items, [...pubs, forged]).length > 0,
+					}).toMatchObject({ rejected: true })
+				}
+			}
 		})
 	})
 
@@ -1413,6 +1600,9 @@ describe("dsd-fme DMR clearance oracle", () => {
 					}
 					const pubs = run(items)
 					expect(oracle(items, pubs)).toEqual([])
+					// Every live DMR call the adapter holds has a clearance record.
+					expect(unrecorded).toEqual([])
+					expect(unrecorded).toEqual([])
 				},
 			),
 			{ numRuns: 200, seed: 20261117 },
