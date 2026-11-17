@@ -337,13 +337,14 @@ describe("open island panels are part of the layout", () => {
 		expect(L.yielded).toEqual(["receiver"])
 		for (const n of frame(L, "tuner"))
 			expect(intersects(n, L.panels[0]!.rect), n.name).toBe(false)
-		// side by side on a wide window: nothing yields
+		// side by side on a wide window: no frame island yields (the card above Listen does: the 400 px panel
+		// reaches its home at 278)
 		const W = computeLayout(
 			input(1440, 900, {
 				panels: [{ island: "tuner", size: { w: 440, h: 400 } }],
 			}),
 		)
-		expect(W.yielded).toEqual([])
+		expect(W.yielded).toEqual(["card"])
 	})
 
 	it("a panel going down keeps 8 px above the bottom rail", () => {

@@ -422,6 +422,7 @@ export function Shell({
 					}
 				: null,
 		panels: geo.panels,
+		openPanel: state.panel,
 	}
 	// the card's glide (DESIGN.md, "Motion"): when its home moves, the box from where it stood to its new home is
 	// swept until the glide ends; slots entering that box are held out of sight meanwhile (computeLayout's `held`). A
@@ -736,6 +737,7 @@ export function Shell({
 				<CardPlaceContext.Provider value={cardStore}>
 					<CardSlot
 						now={L.cardNow ?? L.card}
+						yielded={L.yielded.includes("card")}
 						dragging={dragging}
 						glide={glideNow?.kind ?? null}
 						slotRef={refs.card}
@@ -859,11 +861,13 @@ export function Shell({
 			)}
 
 			{/* the one recording player, the storey above Listen; empty while nothing plays. Out of sight (still
-			    playing, still measured) while the window has no height for it or the card glides through it */}
+			    playing, still measured) while the window has no height for it, the card glides through it or the
+			    Listen panel is open over it */}
 			<div
 				ref={refs.player}
 				className="wk-shell-player"
 				data-pending={L.playerWaiting || undefined}
+				data-yielded={L.yielded.includes("player") || undefined}
 				data-held={heldSet.has("player") || undefined}
 				{...slotAttrs("player", L.player)}
 				style={{
@@ -915,12 +919,15 @@ export function Shell({
  * clamped clear of the islands). The card element itself is the same and React skips it. */
 function CardSlot({
 	now,
+	yielded,
 	dragging,
 	glide,
 	slotRef,
 	children,
 }: {
 	now: Rect
+	/** Out of sight in place while an open panel stands over it (the layout's `yielded`). */
+	yielded: boolean
 	dragging: boolean
 	/** A glide in progress: "yield" (the layout moved its home) eases out with no overshoot. */
 	glide: "yield" | "move" | null
@@ -933,6 +940,7 @@ function CardSlot({
 			className="wk-shell-cardslot"
 			data-dragging={dragging ? "" : undefined}
 			data-glide={glide ?? undefined}
+			data-yielded={yielded || undefined}
 			{...slotAttrs("card", now)}
 			style={{
 				transform: `translate(${now.x}px, ${now.y}px)`,

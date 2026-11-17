@@ -57,10 +57,12 @@ drawer; while it glides there, anything appearing in its way (the player, the dr
 it lands, so nothing is ever drawn over it. A card you drag stops at the edges of the islands
 instead of sliding over them. An open panel (Audio options, the Receiver's, the Tuner's) is never
 covered by another island: on a phone, Audio options starts under the Receiver and scrolls, and the
-Receiver steps out of sight while the Tuner's panel is open over it. On a short or zoomed window
-the bottom of the screen gives way in order: the player shrinks to a progress line, the spectrum's
-trace gets shorter, the discovery row and the band ruler hide, then the player hides (it keeps
-playing), and last the spectrum's scale rows hide, leaving the waterfall.
+Receiver steps out of sight while the Tuner's panel is open over it. The tuned card and the player
+do the same where an open panel reaches them (Audio options over the card above Listen): they step
+out of sight in place, the player still playing, and are back where they were when it closes. On
+a short or zoomed window the bottom of the screen gives way in order: the player shrinks to a
+progress line, the spectrum's trace gets shorter, the discovery row and the band ruler hide, then
+the player hides (it keeps playing), and last the spectrum's scale rows hide, leaving the waterfall.
 
 ### Notices
 

@@ -115,8 +115,11 @@
 		pointer-events: auto;
 	}
 
-	/* a player with no height to stand in (insufficient height): out of sight, still playing and still measured */
-	.wk-shell-player[data-pending] {
+	/* a player with no height to stand in (insufficient height): out of sight, still playing and still measured; the
+	   same for the card or the player while an open panel stands over it (the layout's `yielded`) */
+	.wk-shell-player[data-pending],
+	.wk-shell-player[data-yielded],
+	.wk-shell .wk-shell-cardslot[data-yielded] {
 		visibility: hidden;
 	}
 	/* the tuned card's glide (DESIGN.md, "Motion"): a move the layout forces eases out with no overshoot, so the card

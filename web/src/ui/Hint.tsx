@@ -225,9 +225,14 @@ function HintBubble({
 			if (!m) return null
 			const keepEl = m.closest("[data-wk-hint-row]") ?? anchor.current ?? m
 			const hostEl = m.closest(HINT_HOST)
-			// other islands a layout lays over the host are not the host's room
+			// other islands a layout lays over the host are not the host's room; one out of sight (an island yielded
+			// to the open panel) takes none of it
 			const otherEls = [...document.querySelectorAll(".wk-island")].filter(
-				o => o !== hostEl && !hostEl?.contains(o) && !o.contains(m),
+				o =>
+					o !== hostEl &&
+					!hostEl?.contains(o) &&
+					!o.contains(m) &&
+					getComputedStyle(o).visibility !== "hidden",
 			)
 			return { keepEl, hostEl, otherEls }
 		}

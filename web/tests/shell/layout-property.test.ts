@@ -416,4 +416,32 @@ describe("computeLayout properties", () => {
 			{ numRuns: 300 },
 		)
 	})
+
+	it("no card or player stands over an open island panel: they yield in place", () => {
+		// Feature: web-layout, Property 2: an open panel over the card or the player makes it yield (out of sight, in place)
+		// Validates: I1
+		fc.assert(
+			fc.property(layoutInput, input => {
+				const L = computeLayout(input)
+				const closed = computeLayout({ ...input, panels: [] })
+				const shown = namedRects(L)
+				for (const p of L.panels)
+					for (const n of shown)
+						if (n.name === "card" || n.name === "player")
+							expect(
+								intersects(n, p.rect),
+								`${p.island} panel × ${n.name}`,
+							).toBe(false)
+				// yielding never moves them: the card and the player keep the rectangles they have with no panel
+				expect(L.card).toEqual(closed.card)
+				expect(L.player).toEqual(closed.player)
+				for (const id of ["card", "player"] as const)
+					if (L.yielded.includes(id)) expect(L.panels.length).toBeGreaterThan(0)
+				expect(
+					closed.yielded.filter(y => y === "card" || y === "player"),
+				).toEqual([])
+			}),
+			{ numRuns: 300 },
+		)
+	})
 })

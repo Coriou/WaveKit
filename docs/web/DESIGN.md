@@ -1133,7 +1133,15 @@ Condensed + Noto Sans, Tabler-based icons).
     the bottom rail; Listen's going up starts 8 px under the top rail (on a
     phone: under the stacked Receiver, 390×844 caps it at 612 px), and it scrolls past that. On a
     stacked top rail the Receiver yields (out of sight) while the Tuner's panel is open over it.
-    No frame island ever covers an open panel.
+    No frame island ever covers an open panel. The tuned card and the player yield the same way:
+    while an open panel stands over them or within 8 px of them (Listen's over the card's home
+    above Listen and over the player storey, a tall Tuner panel over a card on the left), they are
+    out of sight in place, still mounted, measured and playing, and the shell lists them as
+    waiting; they are back on the same rectangles when the panel closes. A panel opened this
+    frame and not measured yet counts as all the room it may take (its island's column, as tall
+    as its cap), so the card is never drawn over it, not even for the first frames. Nothing moves
+    for a popover, and no island lies over an open panel, so a hint inside it never meets one. A
+    hint's room ignores an island out of sight.
   - *Motion.* Frame elements never ease. When a layout change moves the tuned card (the player
     starting, a drawer opening over a right anchor), the card glides (260 ms) to its new home and
     sweeps the box of its two homes: a slot entering that box (the player, a drawer, a pane, a
@@ -1186,9 +1194,10 @@ Condensed + Noto Sans, Tabler-based icons).
   expected rectangles, fast-check properties down to 320×400 (no two islands intersect, all inside
   the window, frame and map chrome identical with and without a drawer, no chip under chrome, no
   shown slot inside a glide's box, a dragged card a gutter clear of every island, no frame island
-  over an open panel) and `ui-check --flow=layout` (settled cells that require every expected
-  island on screen or listed as waiting, motion samples with the transitions on, the Map view at
-  every viewport, and the phone's Listen panel).
+  over an open panel, no card or player shown over one) and `ui-check --flow=layout` (settled
+  cells that require every expected island on screen or listed as waiting, motion samples with
+  the transitions on, the Map view at every viewport, and Listen's panel open on the phone and at
+  1440×900).
 
 ## Open questions and next topics
 

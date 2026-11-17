@@ -23,7 +23,8 @@
  * - motion (M): when playback starts with the expanded card above Listen (the card glides up), and during one drawer
  *   opening per viewport, every animation frame for 400 ms (1200 ms for playback) WITH the CSS transitions on: no
  *   two shown slots intersect (a slot held for the card's glide is out of sight); a sample that sees no frame fails;
- * - open panels (P, 390×844): with Listen's panel open no frame island (the stacked Receiver) covers it;
+ * - open panels (P, 390×844 and 1440×900): with Listen's panel open no island (the stacked Receiver, the tuned card,
+ *   the player) covers it: the card is in the tree and either shown clear of the panel or listed as yielded;
  * - the map (1280×800, the Map view, Activity open, then each other viewport): the map's chrome is laid out with
  *   the rest (I1, I2, I7 and V), the Live chip stays off the dock and keeps its rectangle when the drawer opens.
  * The settled cells run with CSS transitions and animations switched off, so every box is a settled one.
@@ -536,8 +537,10 @@ export async function layoutFlow(
 				})
 			}
 			await record("none")
-			// the phone: Listen's panel open is part of the layout (no frame island over it: the stacked Receiver)
-			if (W < 761) {
+			// Listen's panel open is part of the layout: no island over it (on the phone the stacked Receiver; at
+			// 1440x900 the tuned card at its home above Listen and the player, which yield in place, out of sight)
+			const wide = W === 1440 && H === 900
+			if (W < 761 || wide) {
 				phase = `${vp}: open the Listen panel`
 				const toggle = page
 					.locator(
@@ -551,8 +554,30 @@ export async function layoutFlow(
 				await panel.waitFor({ timeout: STEP_MS })
 				const s = await settled(page)
 				const p = await panel.boundingBox()
-				const violations = check(s)
-				const frameNames = ["tuner", "receiver", "dock", "find"]
+				// Listen's head widens while its options are open (the layout keeps its closed size): not an I7 break
+				const violations = check(s).filter(v => !v.startsWith("I7 listen:"))
+				const frameNames = [
+					"tuner",
+					"receiver",
+					"dock",
+					"find",
+					"card",
+					"player",
+				]
+				// the card is there (in the tree) while the panel is open: on screen clear of it, or listed as yielded
+				if (wide) {
+					const card = await page.evaluate(
+						() => document.querySelector('[data-wk-slot="card"]') !== null,
+					)
+					if (!card) violations.push("P no tuned card in the tree")
+					else if (
+						!s.slots.some(sl => sl.name === "card") &&
+						!s.waiting.includes("card")
+					)
+						violations.push(
+							"P the card is out of sight and not listed as yielded",
+						)
+				}
 				if (!p) violations.push("P the Listen panel has no box")
 				else
 					for (const sl of s.slots)

@@ -142,8 +142,10 @@ export interface LayoutInput {
 	} | null
 	readonly status: readonly StatusItem[]
 	readonly drawer: DrawerInput | null
-	/** Open island panels (popovers): exclusion zones for the plot only. */
+	/** Open island panels (popovers), measured: exclusion zones for the plot, obstacles the card and player yield to. */
 	readonly panels: readonly { readonly island: IslandId; readonly size: Size }[]
+	/** The island whose panel is open now, measured or not (a panel opened this frame has no size yet). */
+	readonly openPanel?: IslandId | null
 	/** The map's chrome, measured, while the Map view shows (null or absent: the spectrum view). */
 	readonly map?: MapInput | null
 	/** Motion in progress (the shell's, between two settled layouts). */
@@ -189,6 +191,9 @@ export interface MapPlaced {
 	/** Map chrome a drawer, pane or sheet covers now (hidden, never moved). */
 	readonly covered: readonly ("rail" | "side" | "station" | "corner")[]
 }
+
+/** What may yield to an open panel: a frame island, the tuned card, the player. */
+export type YieldedId = IslandId | "card" | "player"
 
 export type DrawerShape = "column" | "between-rails" | "sheet" | "expanded"
 
@@ -240,8 +245,9 @@ export interface Layout {
 	readonly panelDrop: Readonly<Record<IslandId, number>>
 	/** Open panels where they stand (their height capped to panelMaxH): frame islands never cover them. */
 	readonly panels: readonly { readonly island: IslandId; readonly rect: Rect }[]
-	/** Frame islands out of sight while an open panel takes their place (the stacked Receiver under the Tuner's). */
-	readonly yielded: readonly IslandId[]
+	/** Islands out of sight while an open panel takes their place: the stacked Receiver under the Tuner's, and the
+	 * card or the player under Listen's (or any panel within 8 px of them). */
+	readonly yielded: readonly YieldedId[]
 	readonly cardAnchors: readonly CardAnchor[]
 	/** The free width the card is dragged in (left of a drawer column). */
 	readonly cardFreeW: number
@@ -825,6 +831,41 @@ export function computeLayout(input: LayoutInput): Layout {
 			)
 		: []
 
+	// ---- island panels (popovers): a panel going down starts 8 px under the whole top rail (under a taller Tuner's
+	// hold row too: `panelDrop` past its own island's 8 px) and keeps 8 px above the bottom rail; Listen's going up
+	// starts 8 px under the top rail; so no frame island ever covers an open panel. On a stacked rail the Tuner's
+	// panel opens under the Tuner and the Receiver yields while it is open over it
+	const panelTop: Record<"tuner" | "receiver", number> = {
+		tuner: stacked ? bottom(tuner) + PANEL_GAP : topRail + PANEL_GAP,
+		receiver: topRail + PANEL_GAP,
+	}
+	const panelDrop: Record<IslandId, number> = {
+		tuner: panelTop.tuner - (bottom(tuner) + PANEL_GAP),
+		receiver: panelTop.receiver - (bottom(receiver) + PANEL_GAP),
+		listen: 0,
+	}
+	const panelMaxH: Record<IslandId, number> = {
+		tuner: Math.max(0, railTop - PANEL_GAP - panelTop.tuner),
+		receiver: Math.max(0, railTop - PANEL_GAP - panelTop.receiver),
+		// its foot on the bottom rail's top (a dock taller than Listen beside it)
+		listen: Math.max(0, railTop - PANEL_GAP - (topRail + PANEL_GAP)),
+	}
+	const panels = input.panels.map(p => {
+		const h = Math.min(p.size.h, panelMaxH[p.island])
+		const r =
+			p.island === "tuner"
+				? rect(tuner.x, panelTop.tuner, p.size.w, h)
+				: p.island === "receiver"
+					? rect(right(receiver) - p.size.w, panelTop.receiver, p.size.w, h)
+					: rect(listen.x, railTop - PANEL_GAP - h, p.size.w, h)
+		return { island: p.island, rect: r }
+	})
+	const yielded: YieldedId[] = panels.some(
+		p => p.island === "tuner" && stacked && intersects(p.rect, receiver),
+	)
+		? ["receiver"]
+		: []
+
 	// ---- the tuned card (R4, R5)
 	let card: Layout["card"] = null
 	let anchors: CardAnchor[] = []
@@ -903,40 +944,37 @@ export function computeLayout(input: LayoutInput): Layout {
 	}
 	const cardSwept = path ?? cardNow
 
-	// ---- island panels (popovers): a panel going down starts 8 px under the whole top rail (under a taller Tuner's
-	// hold row too: `panelDrop` past its own island's 8 px) and keeps 8 px above the bottom rail; Listen's going up
-	// starts 8 px under the top rail; so no frame island ever covers an open panel. On a stacked rail the Tuner's
-	// panel opens under the Tuner and the Receiver yields while it is open over it
-	const panelTop: Record<"tuner" | "receiver", number> = {
-		tuner: stacked ? bottom(tuner) + PANEL_GAP : topRail + PANEL_GAP,
-		receiver: topRail + PANEL_GAP,
+	// ---- an open panel over the card or the player (Listen's going up over the card's home and the player storey):
+	// they yield, out of sight in place (still mounted and measured), and are back where they were when it closes;
+	// so no island stands over an open panel and nothing moves for a popover
+	// a panel opened this frame and not measured yet takes, for this, all the room it may grow to (its island's
+	// column, as tall as panelMaxH): the card is out of sight from the panel's first frame, never drawn over it
+	const pending = input.openPanel ?? null
+	const panelRoom: Rect[] = panels.map(p => p.rect)
+	if (pending && !panels.some(p => p.island === pending)) {
+		const h = panelMaxH[pending]
+		panelRoom.push(
+			pending === "tuner"
+				? rect(tuner.x, panelTop.tuner, Math.max(tuner.w, CARD_W), h)
+				: pending === "receiver"
+					? rect(
+							right(receiver) - Math.max(receiver.w, CARD_W),
+							panelTop.receiver,
+							Math.max(receiver.w, CARD_W),
+							h,
+						)
+					: rect(
+							listen.x,
+							railTop - PANEL_GAP - h,
+							Math.max(listen.w, CARD_W),
+							h,
+						),
+		)
 	}
-	const panelDrop: Record<IslandId, number> = {
-		tuner: panelTop.tuner - (bottom(tuner) + PANEL_GAP),
-		receiver: panelTop.receiver - (bottom(receiver) + PANEL_GAP),
-		listen: 0,
-	}
-	const panelMaxH: Record<IslandId, number> = {
-		tuner: Math.max(0, railTop - PANEL_GAP - panelTop.tuner),
-		receiver: Math.max(0, railTop - PANEL_GAP - panelTop.receiver),
-		// its foot on the bottom rail's top (a dock taller than Listen beside it)
-		listen: Math.max(0, railTop - PANEL_GAP - (topRail + PANEL_GAP)),
-	}
-	const panels = input.panels.map(p => {
-		const h = Math.min(p.size.h, panelMaxH[p.island])
-		const r =
-			p.island === "tuner"
-				? rect(tuner.x, panelTop.tuner, p.size.w, h)
-				: p.island === "receiver"
-					? rect(right(receiver) - p.size.w, panelTop.receiver, p.size.w, h)
-					: rect(listen.x, railTop - PANEL_GAP - h, p.size.w, h)
-		return { island: p.island, rect: r }
-	})
-	const yielded: IslandId[] = panels.some(
-		p => p.island === "tuner" && stacked && intersects(p.rect, receiver),
-	)
-		? ["receiver"]
-		: []
+	const underPanel = (r: Rect | null) =>
+		r !== null && panelRoom.some(p => separation(p, r) < PANEL_GAP)
+	if (underPanel(cardNow)) yielded.push("card")
+	if (underPanel(player)) yielded.push("player")
 
 	// ---- plot contract (R6)
 	const body = rect(0, insetTop, W, H - insetTop)
@@ -1007,6 +1045,9 @@ export function cardObstacles(layout: Layout): Rect[] {
 		.map(r => rect(r.x, r.y, r.w, r.h))
 	if (layout.status.slot) out.push(layout.status.slot)
 	if (layout.status.strip) out.push(layout.status.strip)
+	// a player yielded to an open panel comes back where it was: the card keeps off its storey all the same
+	const p = layout.player
+	if (p && layout.yielded.includes("player")) out.push(rect(p.x, p.y, p.w, p.h))
 	return out
 }
 
@@ -1064,8 +1105,10 @@ export function namedRects(layout: Layout): Named[] {
 	add("listen", layout.listen)
 	add("dock", layout.dock)
 	add("find", layout.find)
-	add("player", layout.player)
-	add("card", layout.cardNow ?? layout.card)
+	// a yielded card or player is out of sight (under an open panel): not on screen, so not in the checks
+	const shown = (id: YieldedId) => !layout.yielded.includes(id)
+	if (shown("player")) add("player", layout.player)
+	if (shown("card")) add("card", layout.cardNow ?? layout.card)
 	for (const i of layout.status.items) add(`status:${i.id}`, i)
 	add("drawer", layout.drawer)
 	add("pane", layout.pane)

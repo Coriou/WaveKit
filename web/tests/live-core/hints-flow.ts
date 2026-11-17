@@ -154,6 +154,8 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 				continue
 			const r = island.getBoundingClientRect()
 			if (r.width === 0 || r.height === 0) continue
+			// an island out of sight (yielded to the open panel) is not met
+			if (getComputedStyle(island).visibility === "hidden") continue
 			if (meets(r))
 				problems.push(
 					`meets another island (${island.closest("[data-island]")?.getAttribute("data-island") ?? island.className})`,

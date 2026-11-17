@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 
 import { plotLayout } from "../../src/plot/layout.ts"
 import {
+	cardObstacles,
 	computeLayout,
 	DEFAULT_SIZES,
 	layoutViolations,
@@ -614,5 +615,79 @@ describe("computeLayout: a strip beside a drawer column", () => {
 		expect(L.status.where).toBe("drawer-slot")
 		expect(L.status.docked).toEqual(["receipt"])
 		expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+	})
+})
+
+describe("computeLayout: the card and the player yield to an open panel", () => {
+	const listenOpen = (h: number, o: Parameters<typeof input>[2] = {}) => ({
+		...input(1440, 900, o),
+		panels: [{ island: "listen" as const, size: { w: 340, h } }],
+	})
+
+	it("the Listen panel over the card's home and the player: both yield in place", () => {
+		const closed = computeLayout(input(1440, 900))
+		const L = computeLayout(listenOpen(520))
+		const panel = L.panels[0]?.rect
+		expect(panel).toEqual(r(16, 292, 340, 520))
+		expect(L.yielded).toEqual(["card", "player"])
+		// in place: the same rectangles, out of sight, back when the panel closes
+		expect(L.card).toEqual(closed.card)
+		expect(L.player).toEqual(closed.player)
+		expect(namedRects(L).map(n => n.name)).not.toContain("card")
+		expect(namedRects(L).map(n => n.name)).not.toContain("player")
+		expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+	})
+
+	it("without a player the card yields alone; a short panel clear of a card up top leaves it", () => {
+		expect(computeLayout(listenOpen(520, { player: false })).yielded).toEqual([
+			"card",
+		])
+		// the line on the top-left anchor (under the top rail) and a 120 px Listen panel: far apart, the card stays
+		const L = computeLayout(
+			listenOpen(120, { player: false, minimised: true, anchor: "tl" }),
+		)
+		const card = L.card
+		const panel = L.panels[0]?.rect
+		if (!card || !panel) throw new Error("card and panel expected")
+		expect(card.anchor).toBe("tl")
+		expect(panel.y - (card.y + card.h)).toBeGreaterThanOrEqual(8)
+		expect(L.yielded).toEqual([])
+	})
+
+	it("a panel open but not measured yet: the card and the player yield from its first frame", () => {
+		const L = computeLayout({ ...input(1440, 900), openPanel: "listen" })
+		expect(L.panels).toEqual([])
+		expect(L.yielded).toEqual(["card", "player"])
+		// measured, the panel decides: a short Tuner panel leaves the card above Listen alone
+		const short = computeLayout({
+			...input(1440, 900),
+			openPanel: "tuner",
+			panels: [{ island: "tuner", size: { w: 300, h: 100 } }],
+		})
+		expect(short.yielded).toEqual([])
+		expect(
+			computeLayout({ ...input(1440, 900), openPanel: null }).yielded,
+		).toEqual([])
+	})
+
+	it("a yielded player still keeps the dragged card off its storey", () => {
+		const L = computeLayout(listenOpen(520))
+		const player = L.player
+		if (!player) throw new Error("player expected")
+		expect(cardObstacles(L)).toContainEqual(
+			r(player.x, player.y, player.w, player.h),
+		)
+	})
+
+	it("a Tuner panel reaching the expanded card makes it yield; a short one or the Receiver's leaves it", () => {
+		const open = (island: "tuner" | "receiver", h: number) =>
+			computeLayout({
+				...input(1440, 900),
+				panels: [{ island, size: { w: 300, h } }],
+			}).yielded
+		// the Tuner's panel from 88: 200 px tall reaches the card at 278, 100 px stops 90 px above it
+		expect(open("tuner", 200)).toEqual(["card"])
+		expect(open("tuner", 100)).toEqual([])
+		expect(open("receiver", 600)).toEqual([])
 	})
 })
