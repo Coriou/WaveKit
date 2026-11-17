@@ -3,8 +3,10 @@
  * index-driven candidate sets: the query plan drives the search, the facets scan and the
  * channelMatch probe from the refs key and activity_frequency, never from the (low, high] rowid
  * range or a full scan of activity (that walk took about 1 s on a 250 000-row store, past the
- * 250 ms deadline). A scope dense enough to reach SCOPE_DENSITY_CAP reads as the walk instead,
- * which stops at LIMIT. Both plans answer as a direct model of the scope. Synthetic rows only.
+ * 250 ms deadline). A scoped search walks one WALK_SLICE of rows from its cursor and reads the
+ * rest of its window as candidates; a scoped facets scan reads candidates while a term holds
+ * fewer than the scan cap, else walks a bounded number of slices first. Every plan answers as a
+ * direct model of the scope, and the rows a read visits are counted, not timed. Synthetic rows only.
  *
  * The plan strings (EXPLAIN QUERY PLAN detail text) depend on the SQLite bundled with Node
  * (node:sqlite): a Node upgrade that changes the planner or its wording fails these tests first.
@@ -16,12 +18,15 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
 import { ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ } from "@wavekit/api-types"
 import {
 	channelMatchStatement,
-	facetsDensityCap,
+	FACETS_WALK_SLICES,
+	facetsPlanOf,
 	facetsStatement,
 	runRead,
-	SCOPE_DENSITY_CAP,
-	scopePlanOf,
 	searchStatement,
+	type ReadOptions,
+	splitWindow,
+	WALK_SLICE,
+	windowOf,
 	type ScopePlan,
 } from "../../../../../src/core/activity/query/read.js"
 import {
@@ -133,7 +138,18 @@ describe("channel and frequency scopes use the indexes", () => {
 		try {
 			for (const [name, raw] of Object.entries(SCOPES)) {
 				const query = normaliseQuery(raw, DEFAULT_ACTIVITY_QUERY_LIMITS)
-				expect(scopePlanOf(reader, query), name).toEqual(UNION)
+				expect(
+					facetsPlanOf(
+						reader,
+						query,
+						{ low: 0n, high: 250_000n },
+						DEFAULT_ACTIVITY_QUERY_LIMITS.facetScan,
+					),
+					name,
+				).toEqual({
+					channel: query.channel === null ? "walk" : "union",
+					frequency: query.frequencyMin === null ? "walk" : "union",
+				})
 				const search = searchStatement({
 					op: "search",
 					query,
@@ -386,9 +402,39 @@ const DENSE_SCOPES: Record<string, ActivityQuery> = {
 	"channelHz + category": { channelHz: DENSE_HZ, categories: ["aircraft"] },
 }
 
-describe("the scope plan follows the density of its index ranges", () => {
+/** Inserts `count` rows of one shape into `store`, numbering event ids from `counter`. */
+function insertRows(
+	store: ActivityFixture,
+	counter: { next: number },
+	count: number,
+	row: {
+		frequencyHz: number | null
+		channelHz?: number
+		entityKey?: string
+		producedAt?: string
+	},
+): void {
+	for (let index = 0; index < count; index++)
+		store.insert({
+			eventId: `d${String(counter.next++)}`,
+			category: "aircraft",
+			frequencyHz: row.frequencyHz,
+			...(row.entityKey === undefined ? {} : { entityKey: row.entityKey }),
+			...(row.producedAt === undefined ? {} : { producedAt: row.producedAt }),
+			...(row.channelHz === undefined
+				? {}
+				: {
+						refs: [
+							{ type: "channelHz", value: channelRefValue(row.channelHz) },
+						],
+					}),
+		})
+}
+
+describe("the walk slice and the facets plan", () => {
 	let store: ActivityFixture
 	let reader: SqlDatabase
+	const counter = { next: 0 }
 
 	beforeAll(async () => {
 		store = await createFixture({ memory: true })
@@ -404,104 +450,116 @@ describe("the scope plan follows the density of its index ranges", () => {
 		await store.close()
 	})
 
-	let inserted = 0
+	it("the window has one bound per side: max(low, after), min(high, before - 1)", () => {
+		expect(
+			windowOf({ low: "5", high: "90", before: null, after: null }),
+		).toEqual({ low: 5n, high: 90n })
+		expect(
+			windowOf({ low: "5", high: "90", before: "40", after: null }),
+		).toEqual({ low: 5n, high: 39n })
+		expect(
+			windowOf({ low: "5", high: "90", before: "91", after: null }),
+		).toEqual({ low: 5n, high: 90n })
+		expect(
+			windowOf({ low: "5", high: "90", before: null, after: "70" }),
+		).toEqual({ low: 70n, high: 90n })
+		expect(
+			windowOf({ low: "5", high: "90", before: null, after: "2" }),
+		).toEqual({ low: 5n, high: 90n })
+		// Past MAX_SAFE_INTEGER the bound stays exact.
+		const big = "9007199254740993"
+		expect(windowOf({ low: "0", high: big, before: big, after: null })).toEqual(
+			{
+				low: 0n,
+				high: 9007199254740992n,
+			},
+		)
+		const search = searchStatement({
+			op: "search",
+			query: normaliseQuery({}, DEFAULT_ACTIVITY_QUERY_LIMITS),
+			order: "asc",
+			limit: 5,
+			low: "0",
+			high: "100",
+			before: "60",
+			after: "50",
+		})
+		expect(search.sql.match(/\bseq [<>]=? \?/g)).toEqual([
+			"seq > ?",
+			"seq <= ?",
+		])
+		expect(search.params.slice(0, 2)).toEqual([50, 59])
+	})
 
-	function insertMany(
-		count: number,
-		row: { frequencyHz: number | null; channelHz?: number },
-	): void {
-		for (let index = 0; index < count; index++)
-			store.insert({
-				eventId: `d${String(inserted++)}`,
-				category: "aircraft",
-				frequencyHz: row.frequencyHz,
-				...(row.channelHz === undefined
-					? {}
-					: {
-							refs: [
-								{ type: "channelHz", value: channelRefValue(row.channelHz) },
-							],
-						}),
-			})
-	}
+	it("the walk slice is WALK_SLICE rows from the cursor, at and past its size", () => {
+		const window = { low: 10n, high: 10n + BigInt(WALK_SLICE) }
+		expect(splitWindow(window, "desc", WALK_SLICE)).toEqual({
+			first: window,
+			rest: null,
+		})
+		const longer = { low: 9n, high: 10n + BigInt(WALK_SLICE) }
+		expect(splitWindow(longer, "desc", WALK_SLICE)).toEqual({
+			first: { low: 10n, high: longer.high },
+			rest: { low: 9n, high: 10n },
+		})
+		expect(splitWindow(longer, "asc", WALK_SLICE)).toEqual({
+			first: { low: 9n, high: 9n + BigInt(WALK_SLICE) },
+			rest: { low: 9n + BigInt(WALK_SLICE), high: longer.high },
+		})
+		expect(FACETS_WALK_SLICES * WALK_SLICE).toBeGreaterThan(
+			DEFAULT_ACTIVITY_QUERY_LIMITS.facetScan,
+		)
+	})
 
-	const plan = (raw: ActivityQuery): ScopePlan =>
-		scopePlanOf(reader, normaliseQuery(raw, DEFAULT_ACTIVITY_QUERY_LIMITS))
+	const facetsPlan = (raw: ActivityQuery, cap: number, high = 1_000_000n) =>
+		facetsPlanOf(
+			reader,
+			normaliseQuery(raw, DEFAULT_ACTIVITY_QUERY_LIMITS),
+			{ low: 0n, high },
+			cap,
+		)
 
-	it("a frequency range and a channel's fallback half walk at the cap, not below it", () => {
-		insertMany(SCOPE_DENSITY_CAP - 1, { frequencyHz: DENSE_HZ })
-		expect(plan(DENSE_SCOPES["frequency range"] ?? {})).toEqual(UNION)
-		expect(plan(DENSE_SCOPES["channelHz"] ?? {})).toEqual(UNION)
-		insertMany(1, { frequencyHz: DENSE_HZ + 1 })
-		expect(plan(DENSE_SCOPES["frequency range"] ?? {})).toEqual({
+	it("a facets term reads its candidates under the scan cap and walks at it", () => {
+		const cap = 40
+		const marker = BigInt(
+			store.insert({ eventId: `m${String(counter.next++)}`, frequencyHz: 1 }),
+		)
+		insertRows(store, counter, cap - 1, { frequencyHz: DENSE_HZ })
+		expect(facetsPlan(DENSE_SCOPES["frequency range"] ?? {}, cap)).toEqual({
+			channel: "walk",
+			frequency: "union",
+		})
+		expect(facetsPlan({ channelHz: DENSE_HZ }, cap)).toEqual({
 			channel: "union",
 			frequency: "walk",
 		})
-		expect(plan(DENSE_SCOPES["channelHz"] ?? {})).toEqual({
-			channel: "walk",
-			frequency: "union",
-		})
-		// Another channel's rows stay sparse.
-		expect(plan({ channelHz: CHANNEL_HZ })).toEqual(UNION)
-	})
-
-	it("a channel's stored-channel half walks at the cap, not below it", () => {
-		insertMany(SCOPE_DENSITY_CAP - 1, {
-			frequencyHz: null,
-			channelHz: DENSE_HZ,
-		})
-		expect(plan({ channelHz: DENSE_HZ })).toEqual(UNION)
-		insertMany(1, { frequencyHz: null, channelHz: DENSE_HZ })
-		expect(plan({ channelHz: DENSE_HZ })).toEqual({
-			channel: "walk",
-			frequency: "union",
-		})
-		expect(plan({ channelHz: DENSE_HZ + STEP })).toEqual(UNION)
-	})
-
-	it("a channel's two halves count together", () => {
-		insertMany(SCOPE_DENSITY_CAP / 2, {
-			frequencyHz: null,
-			channelHz: DENSE_HZ,
-		})
-		insertMany(SCOPE_DENSITY_CAP / 2 - 1, { frequencyHz: DENSE_HZ })
-		expect(plan({ channelHz: DENSE_HZ })).toEqual(UNION)
-		insertMany(1, { frequencyHz: DENSE_HZ })
-		expect(plan({ channelHz: DENSE_HZ })).toEqual({
-			channel: "walk",
-			frequency: "union",
-		})
-	})
-
-	it("facets keep the union until the scope holds more matches than the scan reads", () => {
-		const scanCap = DEFAULT_ACTIVITY_QUERY_LIMITS.facetScan
-		expect(facetsDensityCap(scanCap)).toBe(scanCap)
-		expect(facetsDensityCap(SCOPE_DENSITY_CAP - 1)).toBe(SCOPE_DENSITY_CAP)
-		expect(facetsDensityCap(SCOPE_DENSITY_CAP + 1)).toBe(SCOPE_DENSITY_CAP + 1)
-		// A small cap stands in for the scan cap: at it the facets walk, under it the union.
-		insertMany(SCOPE_DENSITY_CAP + 1, { frequencyHz: DENSE_HZ })
-		const query = normaliseQuery(
-			DENSE_SCOPES["frequency range"] ?? {},
-			DEFAULT_ACTIVITY_QUERY_LIMITS,
+		insertRows(store, counter, 1, { frequencyHz: DENSE_HZ + 1 })
+		expect(facetsPlan(DENSE_SCOPES["frequency range"] ?? {}, cap)).toEqual(WALK)
+		expect(facetsPlan({ channelHz: DENSE_HZ }, cap)).toEqual(WALK)
+		// Another channel stays sparse; the count reads the window only (one dense row).
+		expect(facetsPlan({ channelHz: CHANNEL_HZ }, cap).channel).toBe("union")
+		expect(facetsPlan({ channelHz: DENSE_HZ }, cap, marker + 1n).channel).toBe(
+			"union",
 		)
-		expect(scopePlanOf(reader, query, facetsDensityCap(scanCap))).toEqual(UNION)
-		expect(
-			scopePlanOf(reader, query, facetsDensityCap(SCOPE_DENSITY_CAP + 1)),
-		).toEqual({ channel: "union", frequency: "walk" })
-		expect(
-			scopePlanOf(reader, query, facetsDensityCap(SCOPE_DENSITY_CAP + 2)),
-		).toEqual(UNION)
 	})
 
-	it("a dense scope walks (low, high] to LIMIT and the probe never builds a candidate list", () => {
-		insertMany(SCOPE_DENSITY_CAP, { frequencyHz: DENSE_HZ })
+	it("a facets channel count adds its halves once: a stored channel never counts as a fallback too", () => {
+		const cap = 40
+		// Stored channel DENSE_HZ and own frequency DENSE_HZ: one candidate each, not two.
+		insertRows(store, counter, cap / 2, {
+			frequencyHz: DENSE_HZ,
+			channelHz: DENSE_HZ,
+		})
+		insertRows(store, counter, cap / 2 - 1, { frequencyHz: DENSE_HZ })
+		expect(facetsPlan({ channelHz: DENSE_HZ }, cap).channel).toBe("union")
+		insertRows(store, counter, 1, { frequencyHz: null, channelHz: DENSE_HZ })
+		expect(facetsPlan({ channelHz: DENSE_HZ }, cap).channel).toBe("walk")
+	})
+
+	it("the walk form drives from the window's seq range and stops at LIMIT; the probe never builds a candidate list", () => {
+		insertRows(store, counter, 64, { frequencyHz: DENSE_HZ })
 		for (const [name, raw] of Object.entries(DENSE_SCOPES)) {
 			const query = normaliseQuery(raw, DEFAULT_ACTIVITY_QUERY_LIMITS)
-			const chosen = scopePlanOf(reader, query)
-			expect(
-				query.channel === null ? chosen.frequency : chosen.channel,
-				name,
-			).toBe("walk")
 			const search = searchStatement(
 				{
 					op: "search",
@@ -513,7 +571,7 @@ describe("the scope plan follows the density of its index ranges", () => {
 					before: null,
 					after: null,
 				},
-				chosen,
+				WALK,
 			)
 			const facets = facetsStatement(
 				{
@@ -525,14 +583,14 @@ describe("the scope plan follows the density of its index ranges", () => {
 					scanCap: DEFAULT_ACTIVITY_QUERY_LIMITS.facetScan,
 					valueCap: DEFAULT_ACTIVITY_QUERY_LIMITS.facetValues,
 				},
-				scopePlanOf(reader, query, facetsDensityCap(SCOPE_DENSITY_CAP)),
+				WALK,
 			)
 			for (const text of [
 				planOf(reader, search.sql, search.params),
 				planOf(reader, facets.sql, facets.params),
 			]) {
 				const detail = `${name}:\n${text}`
-				// Driven by a seq-ordered walk of (low, high]: the rowid range, or the
+				// Driven by a seq-ordered walk of the window: the rowid range, or the
 				// (category, seq) key of an equality filter.
 				expect(text, detail).toMatch(
 					/^SEARCH activity USING (INTEGER PRIMARY KEY \(rowid>\? AND rowid<\?\)|INDEX activity_category \(category=\? AND seq>\? AND seq<\?\))$/m,
@@ -541,6 +599,9 @@ describe("the scope plan follows the density of its index ranges", () => {
 				expect(text, detail).not.toContain("activity_frequency")
 				expect(text, detail).not.toContain("USE TEMP B-TREE FOR ORDER BY")
 			}
+			// One refs probe per walked row for the channel scope.
+			if (query.channel !== null)
+				expect(search.sql.match(/FROM activity_refs/g)).toHaveLength(1)
 			if (query.channel !== null) {
 				const probe = channelMatchStatement(query, "0", "250000")
 				const text = planOf(reader, probe.sql, probe.params)
@@ -569,6 +630,220 @@ describe("the scope plan follows the density of its index ranges", () => {
 	})
 })
 
+/**
+ * A reader that counts the activity rows each statement visits: every outer `FROM activity
+ * WHERE` gets a leading `visit(activity.seq)` term (a non-deterministic user function, so SQLite
+ * evaluates it on every row its loop reaches). Candidate subqueries read their indexes only
+ * (`activity AS …`), so they are not counted; their cost is the candidate count.
+ */
+function countingReader(path: string): {
+	db: SqlDatabase
+	visits(): number
+	reset(): void
+	close(): void
+} {
+	const raw = new DatabaseSync(path, { readOnly: true })
+	let visited = 0
+	raw.function("visit", { deterministic: false, varargs: true }, () => {
+		visited += 1
+		return 1
+	})
+	const db: SqlDatabase = {
+		prepare(sql) {
+			const statement = raw.prepare(
+				sql.replaceAll(
+					"FROM activity WHERE ",
+					"FROM activity WHERE visit(activity.seq) AND ",
+				),
+			)
+			return {
+				all: (...params) => statement.all(...params),
+				get: (...params) =>
+					statement.get(...params) as Record<string, unknown> | undefined,
+			}
+		},
+		exec: sql => raw.exec(sql),
+		close: () => raw.close(),
+	}
+	return {
+		db,
+		visits: () => visited,
+		reset: () => {
+			visited = 0
+		},
+		close: () => raw.close(),
+	}
+}
+
+describe("reads visit O(page + slice + candidates) rows", () => {
+	let store: ActivityFixture
+	let counting: ReturnType<typeof countingReader>
+	const counter = { next: 0 }
+	const OLD = 5_000
+	const NEWER = 20_000
+	let high = "0"
+
+	beforeAll(async () => {
+		store = await createFixture({ memory: true })
+		// Clustered old: OLD rows of the channel (half stored, half by own frequency), then
+		// NEWER rows at another frequency that match nothing.
+		insertRows(store, counter, OLD / 2, {
+			frequencyHz: CHANNEL_HZ,
+			channelHz: CHANNEL_HZ,
+		})
+		insertRows(store, counter, OLD / 2, { frequencyHz: CHANNEL_HZ + 300 })
+		insertRows(store, counter, NEWER, { frequencyHz: DENSE_HZ })
+		high = store.insert({ eventId: "last", frequencyHz: DENSE_HZ })
+		counting = countingReader(store.dbPath)
+	}, 120_000)
+
+	afterAll(async () => {
+		counting.close()
+		await store.close()
+	})
+
+	function search(
+		raw: ActivityQuery,
+		order: "asc" | "desc",
+		limit: number,
+		cursor: string | null = null,
+		walkSlice?: number,
+	): string[] {
+		counting.reset()
+		const result = runRead(
+			counting.db,
+			{
+				op: "search",
+				query: normaliseQuery(raw, DEFAULT_ACTIVITY_QUERY_LIMITS),
+				order,
+				limit,
+				low: "0",
+				high,
+				before: order === "desc" ? cursor : null,
+				after: order === "asc" ? cursor : null,
+			},
+			walkSlice === undefined ? {} : { walkSlice },
+		)
+		if (result.op !== "search") throw new Error("not a search")
+		return result.rows.map(row => row.seq)
+	}
+
+	it("the counter sees every row a walk reaches: an empty channel walks one slice exactly", () => {
+		expect(search({ channelHz: CHANNEL_HZ + 5 * STEP }, "desc", 10)).toEqual([])
+		expect(counting.visits()).toBe(WALK_SLICE)
+		expect(
+			search({ channelHz: CHANNEL_HZ + 5 * STEP }, "asc", 10, null, 300),
+		).toEqual([])
+		expect(counting.visits()).toBe(300)
+	})
+
+	it("a channel clustered behind newer rows: one slice, then its candidates only", () => {
+		const total = OLD + NEWER + 1
+		for (const order of ["desc", "asc"] as const) {
+			const seqs = search({ channelHz: CHANNEL_HZ }, order, 51)
+			expect(seqs).toHaveLength(51)
+			const visited = counting.visits()
+			expect(visited, order).toBeLessThanOrEqual(WALK_SLICE + OLD + 51)
+			expect(visited, order).toBeLessThan(total)
+		}
+		// The newest 51 scope rows are the last of the old cluster.
+		expect(search({ channelHz: CHANNEL_HZ }, "desc", 51)[0]).toBe(
+			String(BigInt(high) - BigInt(NEWER) - 1n),
+		)
+		for (const raw of [
+			{ channelHz: CHANNEL_HZ },
+			{ frequencyHz: { min: CHANNEL_HZ - 1, max: CHANNEL_HZ + 400 } },
+		]) {
+			search(raw, "desc", 51, null, 1_024)
+			expect(counting.visits(), JSON.stringify(raw)).toBeLessThanOrEqual(
+				1_024 + 51,
+			)
+		}
+	})
+
+	it("a dense scope another filter mostly rejects: one slice, then its candidates", () => {
+		// The newer rows are the dense scope; entityKey and producedFrom reject all of them.
+		for (const raw of [
+			{ channelHz: DENSE_HZ, entityKey: "nobody" },
+			{
+				frequencyHz: { min: DENSE_HZ - 1, max: DENSE_HZ + 1 },
+				entityKey: "nobody",
+			},
+			{
+				channelHz: DENSE_HZ,
+				producedAt: { from: "2030-01-01T00:00:00Z" },
+			},
+		]) {
+			expect(search(raw, "desc", 51, null, 1_024)).toEqual([])
+			expect(counting.visits(), JSON.stringify(raw)).toBeLessThanOrEqual(
+				1_024 + NEWER + 1,
+			)
+		}
+	})
+
+	it("an ASC page after a cursor near the end and a deep DESC page visit O(page) rows", () => {
+		const end = BigInt(high)
+		const near = String(end - 10n)
+		expect(search({}, "asc", 5, near)).toHaveLength(5)
+		expect(counting.visits()).toBeLessThanOrEqual(5)
+		expect(search({}, "desc", 5, "11")).toHaveLength(5)
+		expect(counting.visits()).toBeLessThanOrEqual(5)
+		// A scoped page walks from the cursor too.
+		expect(search({ channelHz: DENSE_HZ }, "asc", 5, near)).toHaveLength(5)
+		expect(counting.visits()).toBeLessThanOrEqual(5)
+		expect(search({ channelHz: CHANNEL_HZ }, "desc", 5, "11")).toHaveLength(5)
+		expect(counting.visits()).toBeLessThanOrEqual(10)
+	})
+
+	function facets(raw: ActivityQuery, scanCap: number, walkSlice?: number) {
+		counting.reset()
+		const result = runRead(
+			counting.db,
+			{
+				op: "facets",
+				query: normaliseQuery(raw, DEFAULT_ACTIVITY_QUERY_LIMITS),
+				dimensions: ["channel", "category"],
+				low: "0",
+				high,
+				scanCap,
+				valueCap: 100,
+			},
+			walkSlice === undefined ? {} : { walkSlice },
+		)
+		if (result.op !== "facets") throw new Error("not facets")
+		return result
+	}
+
+	it("facets of a clustered channel read its candidates; past the scan cap a bounded walk, then the union", () => {
+		const scanCap = DEFAULT_ACTIVITY_QUERY_LIMITS.facetScan
+		const sparse = facets({ channelHz: CHANNEL_HZ }, scanCap)
+		expect(sparse.scanned).toBe(OLD)
+		expect(sparse.truncated).toBe(false)
+		expect(counting.visits()).toBeLessThanOrEqual(OLD)
+		// A small scan cap: the channel holds more candidates than it, so the walk reads
+		// FACETS_WALK_SLICES slices of newer rows (none match), then the union the rest.
+		const walkSlice = 256
+		const walked = facets({ channelHz: CHANNEL_HZ }, 100, walkSlice)
+		expect(walked.scanned).toBe(100)
+		expect(walked.truncated).toBe(true)
+		expect(
+			new Map(
+				(walked.facets["channel"] ?? []).map(entry => [
+					entry.value,
+					entry.count,
+				]),
+			),
+		).toEqual(new Map([[null, 100]]))
+		expect(counting.visits()).toBeLessThanOrEqual(
+			walkSlice * FACETS_WALK_SLICES + 101 + 1,
+		)
+		// A dense scope reaches the scan cap inside the walk.
+		const dense = facets({ channelHz: DENSE_HZ }, 100, walkSlice)
+		expect(dense.scanned).toBe(100)
+		expect(counting.visits()).toBeLessThanOrEqual(101 + 1)
+	})
+})
+
 describe("both scope plans read the same pages", () => {
 	let store: ActivityFixture
 	let reader: SqlDatabase
@@ -585,7 +860,7 @@ describe("both scope plans read the same pages", () => {
 
 	function pages(
 		query: NormalisedQuery,
-		plan: ScopePlan,
+		options: ReadOptions,
 		order: "asc" | "desc",
 		limit: number,
 		low: string,
@@ -595,18 +870,21 @@ describe("both scope plans read the same pages", () => {
 		const channelMatch: (string | undefined)[] = []
 		let cursor: string | null = null
 		for (;;) {
-			const result = runRead(reader, {
-				op: "search",
-				query,
-				order,
-				limit,
-				low,
-				high,
-				before: order === "desc" ? cursor : null,
-				after: order === "asc" ? cursor : null,
-				channelMatch: true,
-				plan,
-			})
+			const result = runRead(
+				reader,
+				{
+					op: "search",
+					query,
+					order,
+					limit,
+					low,
+					high,
+					before: order === "desc" ? cursor : null,
+					after: order === "asc" ? cursor : null,
+					channelMatch: true,
+				},
+				options,
+			)
 			if (result.op !== "search") throw new Error("not a search")
 			channelMatch.push(result.channelMatch)
 			ids.push(result.rows.map(row => row.summary.eventId))
@@ -617,9 +895,9 @@ describe("both scope plans read the same pages", () => {
 		}
 	}
 
-	// Feature: wg24-c2 channels, Property 2: the union and the walk read the same scope
-	// Validates: Requirements C2 M1 (dense-scope regression: same matches, order, pages, facet counts and channelMatch in both plans)
-	it("every plan pages, facets and answers channelMatch as the model", () => {
+	// Feature: wg24-c2 channels, Property 2: the union, the walk and the slice switch read the same scope
+	// Validates: Requirements C2 M1 (dense-scope regression and bounded walk: same matches, order, pages, facet counts and channelMatch in every plan, at and past the walk slice)
+	it("every plan and the slice switch page, facet and answer channelMatch as the model", () => {
 		fc.assert(
 			fc.property(
 				fc.array(rowArb, { maxLength: 60 }),
@@ -628,7 +906,16 @@ describe("both scope plans read the same pages", () => {
 				fc.integer({ min: 1, max: 7 }),
 				fc.integer({ min: 1, max: 25 }),
 				fc.tuple(fc.nat(), fc.nat()),
-				(generated, { scope: drawn, near }, order, limit, scanCap, edges) => {
+				fc.integer({ min: 1, max: 12 }),
+				(
+					generated,
+					{ scope: drawn, near },
+					order,
+					limit,
+					scanCap,
+					edges,
+					walkSlice,
+				) => {
 					const scope: ModelScope =
 						drawn.channel === null || near
 							? drawn
@@ -698,24 +985,32 @@ describe("both scope plans read the same pages", () => {
 						const key = row.channelHz === null ? null : String(row.channelHz)
 						counts.set(key, (counts.get(key) ?? 0) + 1)
 					}
-					for (const plan of PLANS) {
-						const read = pages(query, plan, order, limit, low, high)
+					const runs: ReadOptions[] = [
+						...PLANS.map(plan => ({ plan })),
+						{ walkSlice },
+					]
+					for (const options of runs) {
+						const label = JSON.stringify(options)
+						const read = pages(query, options, order, limit, low, high)
 						const want: string[][] = []
 						for (let at = 0; at <= expected.length; at += limit)
 							want.push(expected.slice(at, at + limit).map(row => row.eventId))
-						expect(read.ids, JSON.stringify(plan)).toEqual(want)
+						expect(read.ids, label).toEqual(want)
 						for (const answer of read.channelMatch)
 							expect(answer).toBe(channelMatch)
-						const facets = runRead(reader, {
-							op: "facets",
-							query,
-							dimensions: ["channel", "category"],
-							low,
-							high,
-							scanCap,
-							valueCap: 100,
-							plan,
-						})
+						const facets = runRead(
+							reader,
+							{
+								op: "facets",
+								query,
+								dimensions: ["channel", "category"],
+								low,
+								high,
+								scanCap,
+								valueCap: 100,
+							},
+							options,
+						)
 						if (facets.op !== "facets") throw new Error("not facets")
 						expect(
 							new Map(
