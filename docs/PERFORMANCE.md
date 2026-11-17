@@ -1134,6 +1134,11 @@ file with its sha256, and the manifest keeps the list as `core.overlay`. When th
 `index.js`, that file, copied from the overlay directory on the host, is the bundle the manifest
 hashes (`core.sha256`) and maps profile frames against.
 
+**Core switches.** `BUDGET_CORE_ENV` passes space-separated `NAME=value` settings to the core,
+so two runs of one bundle can differ by a single switch (`WAVEKIT_CHANNEL_INPUT=direct`). Each
+entry must match `^WAVEKIT_[A-Z0-9_]+=[A-Za-z0-9_.-]*$`; the config, access, source, API and
+relay settings are refused. The run keeps the list in `core-env.txt`.
+
 **What is measured.** `scripts/bench/budget-preload.mjs` is loaded into the core with
 `--import`. It stays inert in any other node process. A SIGUSR2 opens a window and a second
 SIGUSR2 closes it. The fake and the clients write marks at the same edges; in tier B one
