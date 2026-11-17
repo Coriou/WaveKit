@@ -21,7 +21,7 @@
  * mock's start state), a tone squelch set and waiting for its tone (a long label, DCS 023N: the walk above
  * runs in this state), and no live audio at all (the status route answers 404 in this page only).
  */
-import type { Page } from "playwright-core"
+import type { Locator, Page } from "playwright-core"
 import { within } from "./harness.ts"
 
 const STEP_MS = 10_000
@@ -448,12 +448,15 @@ async function noRoomNotExpanded(page: Page, id: string): Promise<string[]> {
 				described: (document.getElementById(d)?.textContent ?? "").length > 0,
 			}
 		}, id)
+	// the lines grow before the hint opens: a cut bubble's box would not change, so nothing would re-place it
+	await page.keyboard.press("Escape")
 	await page.evaluate(markId => {
 		const style = document.createElement("style")
 		style.id = "wk-flow-no-room"
 		style.textContent = `[data-wk-hint-bubble="${markId}"] { line-height: 2000px !important }`
 		document.head.append(style)
 	}, id)
+	await page.keyboard.press("Enter")
 	const gone = await withinFrames(page, 2_000, async () => {
 		const s = await state()
 		return s.mounted && s.hidden && s.expanded === "false"
@@ -528,16 +531,57 @@ async function withinFrames(
 	ms: number,
 	check: () => boolean | Promise<boolean>,
 ): Promise<boolean> {
-	const from = await frameCount(page)
 	const start = Date.now()
+	const left = () => SETTLE_CAP_MS - (Date.now() - start)
+	// every browser call races the cap: a stalled page cannot hold the wait past it
+	const capped = async <T>(work: Promise<T>): Promise<T | typeof LATE> => {
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const late = new Promise<typeof LATE>(done => {
+			timer = setTimeout(() => done(LATE), Math.max(0, left()))
+		})
+		try {
+			return await Promise.race([work, late])
+		} finally {
+			clearTimeout(timer)
+		}
+	}
+	const from = await capped(frameCount(page))
+	if (from === LATE) return false
 	for (;;) {
-		if (await check()) return true
+		const ok = await capped(Promise.resolve(check()))
+		// a success seen after the cap is not a success
+		if (ok === LATE || left() < 0) return false
+		if (ok) return true
 		const spent = Date.now() - start
-		if (spent > SETTLE_CAP_MS) return false
-		if (spent > ms && (await frameCount(page)) - from >= SETTLE_FRAMES)
-			return false
+		if (spent > ms) {
+			const now = await capped(frameCount(page))
+			if (now === LATE || now - from >= SETTLE_FRAMES) return false
+		}
 		await page.waitForTimeout(50)
 	}
+}
+
+/** What a capped browser call gives when the cap passed first. */
+const LATE = Symbol("late")
+
+/**
+ * Brings `mark` into view in its scroller without Playwright's stability wait (it needs steady frames a
+ * loaded page does not draw), then waits on frames until it is in the window.
+ */
+async function intoView(page: Page, mark: Locator): Promise<boolean> {
+	await mark.evaluate(el => el.scrollIntoView({ block: "nearest" }))
+	return withinFrames(page, 2_000, () =>
+		mark.evaluate(el => {
+			const r = el.getBoundingClientRect()
+			return (
+				r.width > 0 &&
+				r.top >= 0 &&
+				r.left >= 0 &&
+				r.bottom <= window.innerHeight &&
+				r.right <= window.innerWidth
+			)
+		}),
+	)
 }
 
 /** Waits (2 s at most) until the hint of `id` is open and its fade is done, then measures it. */
@@ -565,7 +609,7 @@ async function mouseAndFocus(
 	if ((await measure(page, id)).open) await page.keyboard.press("Escape")
 	const mark = panel.locator(`[data-wk-hint-mark="${id}"]`)
 	const away = { x: 4, y: Math.round(height / 2) }
-	await mark.scrollIntoViewIfNeeded({ timeout: 5_000 })
+	await intoView(page, mark)
 	// a real mouse move onto the mark (no actionability wait: a loaded page draws too few frames for it)
 	const overMark = async () => {
 		const at = await mark.boundingBox({ timeout: 5_000 })
@@ -1067,7 +1111,8 @@ export async function hintsFlow(
 		if (vp.tap) {
 			for (const id of ids) {
 				const mark = panel.locator(`[data-wk-hint-mark="${id}"]`)
-				await mark.scrollIntoViewIfNeeded()
+				if (!(await intoView(page, mark)))
+					step(`${vp.name}: ${id} tap`, false, "not brought into view")
 				await page.waitForTimeout(150)
 				// a tap: a touch pointer, then the click it makes
 				await mark.evaluate(el => {
