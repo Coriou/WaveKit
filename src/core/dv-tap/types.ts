@@ -68,6 +68,8 @@ export interface DvTapCallStart extends DvTapCallRef {
 	channelKind: DvTapChannelKind
 	/** The scanner probe's id when `channelKind` is `probe`. */
 	probeId: string | null
+	/** The channel frequency the decoder listens on, in Hz, or null when it is not known. */
+	channelHz: number | null
 	protocol: string | null
 	state: DvTapCallState
 	/** Wall clock of the call's first event, ms since the epoch. */
