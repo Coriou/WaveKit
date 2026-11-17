@@ -1211,3 +1211,44 @@ and no channelizer, two short smoke runs read 242 and 269 ms of main-thread CPU 
 The spectrum worker read 165 to 168 ms. The wasm NFM chain of the recorder (A1) was 42 % of the
 main thread's profiled busy time. Those two runs only show that the harness works. They are not
 a baseline.
+
+## Direct channel input (2026-11-17)
+
+A channelised decoder used to get its channel through the main thread: the `wavekit-chan` channel
+socket was piped into a Node stream, and that stream into the decoder's stdin, so every channel
+byte was read and written again by Node in small pipe writes. In `direct` mode the connected
+channel socket itself becomes the decoder's stdin: the connector pauses the socket right after it
+is created, before its `connect` event is emitted (a socket not paused by then starts reading as
+soon as it connects), the decoder is spawned with that socket as fd 0, and Node destroys its own
+copy as soon as the spawn has returned. Node never reads a byte of it; a hand-over of a socket that
+has read anything is refused.
+
+The mode is selected once per process by `WAVEKIT_CHANNEL_INPUT=relay|direct`. Unset, empty or
+any other value means `relay`, today's path; there is no config key, and one info line names the
+mode. Scanner channel taps and scanner probe decoders stay on the relay in both modes: the
+scanner reads a tap's samples in Node, and its probe pool fences a probe's channel input in Node.
+`NetworkProducerDecoder`, `ExternalSdrDecoder` and raw fanout branches read no channel on stdin
+and are not affected.
+
+`bytesIn` of a direct decoder comes from `wavekit-chan`'s `stats` line, one every 5 s, which lists
+open channels only: a run shorter than one period reports 0 and the last 0 to 5 s of a run are
+not counted. Nothing decides on this field; the status API only shows it. In `relay` mode nothing
+listens for these counters, so the channelizer builds none.
+
+Since Node holds no copy, a decoder exit no longer says why its input ended, and the channel's
+terminal event decides: `closed {client-gone}` means the decoder went away on its own (today's
+crash path), any other end of the channel (a centre move, the end of its generation, a release)
+means the decoder only saw EOF, and it is restarted once with no crash accounting, whichever of
+its exit and the caps worker comes first. That restart comes from the source-evaluation (caps)
+worker in both orders, so it follows the worker's 300 ms debounce; with no caps for the source
+(the source is gone) the decoder is held until they return. An exit with no terminal event waits
+for one at most 2 000 ms, then takes the crash path; a stop, suspension or removal in that wait
+records the exit as the crash it most likely was (its error and failure count, as the relay path
+records them at the exit) but restarts nothing, and a placement move in that wait waits for the
+crash's own restart. A requested stop releases the channel before the child is signalled, so a
+stop never looks like a vanished reader.
+
+Two races keep today's handling. A channel socket found closed when the decoder is about to start
+holds the decoder as a channelizer race (it is retried) instead of spawning it without input. A
+channel that reports its client gone while the decoder still runs is handled as today's channel
+claim; when the decoder then exits, the exit takes the crash path.

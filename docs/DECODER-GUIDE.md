@@ -15,6 +15,18 @@ required hooks before you start.
 | `ExternalSdrDecoder` (`external-sdr-decoder.ts`)         | Opens its own SDR hardware                               | none built in                                   |
 | `BaseDecoder` (`base-decoder.ts`)                        | Raw stdin; the common lifecycle the others build on      | (base of all of the above)                      |
 
+A decoder with `useChannelizer` and a channel request (`getChannelRequest`, which
+`AudioDemodDecoder` and `IqDecimateDecoder` provide) reads a `wavekit-chan` channel on stdin
+instead of the raw source stream. By default Node relays it: the channel socket is piped into the
+decoder's stdin. With `WAVEKIT_CHANNEL_INPUT=direct` the channel socket itself is the decoder's
+stdin, handed over at the spawn, so the channel's bytes no longer pass through Node and `bytesIn`
+is updated from the channelizer's 5-second `stats` lines. Either way the decoder sees the same
+byte stream, so an adapter needs no change. When the channel closes (a capture-centre move, for
+example) a direct decoder sees EOF; whether it exits then or keeps running, the core restarts it
+once, with no crash counted, or holds it until its source returns when the source has gone.
+[PERFORMANCE.md, "Direct channel input"](PERFORMANCE.md#direct-channel-input-2026-11-17) has the
+details.
+
 The three walkthroughs below show the older, simpler patterns (pure consumer, network producer,
 external SDR). New decoders that share the receiver should normally use `AudioDemodDecoder` or
 `IqDecimateDecoder`; model them on the built-ins in `src/decoders/builtin/`.

@@ -1,0 +1,387 @@
+/**
+ * Direct channel input: the lifecycle table (src/decoders/direct-channel-input.ts), one named test per row, and the
+ * byte count taken from the channelizer's `stats` lines. Pure: the clock is a number passed in.
+ */
+import fc from "fast-check"
+import { describe, expect, it, vi } from "vitest"
+import {
+	CHANNEL_FATE_MS,
+	channelStatsDelta,
+	directInputOf,
+	directStep,
+	type DirectEvent,
+	type DirectExitedEvent,
+	type DirectPhase,
+	type DirectTerminalEvent,
+} from "../../../src/decoders/direct-channel-input.js"
+import {
+	channelInputModeFrom,
+	processChannelInputMode,
+	resetProcessChannelInputModeForTests,
+} from "../../../src/decoders/channel-input-mode.js"
+import type { Logger } from "../../../src/utils/logger.js"
+
+const terminal = (
+	cause: DirectTerminalEvent["cause"],
+	over: Partial<DirectTerminalEvent> = {},
+): DirectEvent => ({
+	type: "terminal",
+	cause,
+	capsKnown: true,
+	current: true,
+	...over,
+})
+const exited = (over: Partial<DirectExitedEvent> = {}): DirectEvent => ({
+	type: "exited",
+	realExit: true,
+	intentional: false,
+	suspended: false,
+	holdsChannel: true,
+	capsKnown: true,
+	nowMs: 1000,
+	...over,
+})
+const at = (phase: DirectPhase, exitAtMs?: number) =>
+	exitAtMs === undefined ? { phase } : { phase, exitAtMs }
+
+describe("direct channel input lifecycle table", () => {
+	it("unwired, channel granted in direct mode to an eligible decoder: wired, keep the socket", () => {
+		expect(
+			directStep(at("unwired"), { type: "granted", direct: true }),
+		).toEqual({ next: "wired", action: "keep-socket" })
+	})
+
+	it("unwired, channel granted otherwise: today's relay path", () => {
+		expect(
+			directStep(at("unwired"), { type: "granted", direct: false }),
+		).toEqual({ next: "unwired", action: "relay" })
+	})
+
+	it("wired, in-place retune: unchanged", () => {
+		expect(directStep(at("wired"), { type: "retune", live: true })).toEqual({
+			next: "wired",
+			action: "retune",
+		})
+	})
+
+	it("wired, decoder start with the socket open: running, spawn with the socket as fd 0", () => {
+		expect(
+			directStep(at("wired"), { type: "start", socketDestroyed: false }),
+		).toEqual({ next: "running", action: "spawn" })
+	})
+
+	it("wired, decoder start with the socket destroyed: unwired, channel lost before start, no spawn", () => {
+		expect(
+			directStep(at("wired"), { type: "start", socketDestroyed: true }),
+		).toEqual({ next: "unwired", action: "lost-before-start" })
+	})
+
+	it("wired, terminal event: unwired, today's handling of a channel lost before start", () => {
+		for (const cause of ["client-gone", "other"] as const)
+			expect(directStep(at("wired"), terminal(cause))).toEqual({
+				next: "unwired",
+				action: "today",
+			})
+	})
+
+	it("wired, start abandoned (stop, removal, placement change): unwired, destroy the socket and release", () => {
+		expect(directStep(at("wired"), { type: "abandoned" })).toEqual({
+			next: "unwired",
+			action: "release",
+		})
+		expect(directStep(at("wired"), { type: "stop-requested" })).toEqual({
+			next: "unwired",
+			action: "release",
+		})
+	})
+
+	it("wired or running, spawn failed: unwired, release the channel (today's spawn-error path follows)", () => {
+		for (const phase of ["wired", "running"] as const)
+			expect(directStep(at(phase), { type: "spawn-failed" })).toEqual({
+				next: "unwired",
+				action: "release",
+			})
+		expect(directStep(at("unwired"), { type: "spawn-failed" }).action).toBe(
+			"today",
+		)
+	})
+
+	it("running, in-place retune of a live channel: running, send retune as today", () => {
+		expect(directStep(at("running"), { type: "retune", live: true })).toEqual({
+			next: "running",
+			action: "retune",
+		})
+		expect(
+			directStep(at("running"), { type: "retune", live: false }).action,
+		).toBe("today")
+	})
+
+	it("running, terminal event other than client-gone: ending, inputEnded and channelStale in that turn", () => {
+		expect(directStep(at("running"), terminal("other"))).toEqual({
+			next: "ending",
+			action: "end-input",
+		})
+	})
+
+	it("running, client-gone: no expected exit (the decoder's own end), today's claim", () => {
+		expect(directStep(at("running"), terminal("client-gone"))).toEqual({
+			next: "running",
+			action: "today",
+		})
+	})
+
+	it("ending, caps worker reaches it while it runs: today's channel-stale restart", () => {
+		expect(directStep(at("ending"), { type: "caps-worker" })).toEqual({
+			next: "unwired",
+			action: "channel-restart",
+		})
+	})
+
+	it("ending, the process exits first with caps known: expected exit, restarted once by the caps worker", () => {
+		expect(directStep(at("ending"), exited({ holdsChannel: false }))).toEqual({
+			next: "restart-due",
+			action: "expected-restart",
+		})
+		expect(directStep(at("restart-due"), { type: "caps-worker" })).toEqual({
+			next: "unwired",
+			action: "channel-restart",
+		})
+	})
+
+	it("ending, the process exits first with no caps (source lost): held as a channel suspension, never the crash path", () => {
+		expect(
+			directStep(
+				at("ending"),
+				exited({ holdsChannel: false, capsKnown: false }),
+			),
+		).toEqual({ next: "suspended", action: "expected-hold" })
+	})
+
+	it("running or ending, stop, suspend, restart or removal requested: release the channel, then signal", () => {
+		for (const phase of ["running", "ending"] as const)
+			expect(directStep(at(phase), { type: "stop-requested" })).toEqual({
+				next: "stopping",
+				action: "release-then-signal",
+			})
+	})
+
+	it("running, exit with no terminal event, not stopped, not suspended: exit-pending, defer the classification", () => {
+		expect(directStep(at("running"), exited({ nowMs: 4321 }))).toEqual({
+			next: "exit-pending",
+			action: "defer",
+			exitAtMs: 4321,
+		})
+	})
+
+	it("running, an intentional, suspended or not real exit is today's", () => {
+		for (const over of [
+			{ intentional: true },
+			{ suspended: true },
+			{ realExit: false },
+		])
+			expect(directStep(at("running"), exited(over)).action).toBe("today")
+		expect(directStep(at("stopping"), exited()).action).toBe("today")
+		// A terminal event already took the channel (client-gone): the decoder ended by itself.
+		expect(directStep(at("running"), exited({ holdsChannel: false }))).toEqual({
+			next: "unwired",
+			action: "today",
+		})
+	})
+
+	it("exit-pending, closed client-gone with the guard holding: the crash path", () => {
+		expect(directStep(at("exit-pending", 0), terminal("client-gone"))).toEqual({
+			next: "unwired",
+			action: "crash",
+		})
+	})
+
+	it("exit-pending, any other terminal event with the guard holding: as ending, exits first", () => {
+		expect(directStep(at("exit-pending", 0), terminal("other"))).toEqual({
+			next: "restart-due",
+			action: "expected-restart",
+		})
+		expect(
+			directStep(
+				at("exit-pending", 0),
+				terminal("other", { capsKnown: false }),
+			),
+		).toEqual({ next: "suspended", action: "expected-hold" })
+	})
+
+	it("exit-pending, the fate is not due at 1 999 ms and is the crash path at 2 000 ms", () => {
+		expect(CHANNEL_FATE_MS).toBe(2000)
+		const facts = at("exit-pending", 10_000)
+		expect(
+			directStep(facts, { type: "fate-due", nowMs: 11_999, current: true }),
+		).toEqual({ next: "exit-pending", action: "wait", exitAtMs: 10_000 })
+		expect(
+			directStep(facts, { type: "fate-due", nowMs: 12_000, current: true }),
+		).toEqual({ next: "unwired", action: "crash" })
+		expect(
+			directStep(facts, { type: "fate-due", nowMs: 12_001, current: true }),
+		).toEqual({ next: "unwired", action: "crash" })
+	})
+
+	it("exit-pending, stop, remove, suspend or destroy: cancel the timer, no restart, release", () => {
+		expect(
+			directStep(at("exit-pending", 0), { type: "stop-requested" }),
+		).toEqual({ next: "unwired", action: "cancel" })
+	})
+
+	it("exit-pending, the guard fails (replaced or re-evaluated meanwhile): drop the deferred tail", () => {
+		expect(
+			directStep(
+				at("exit-pending", 0),
+				terminal("client-gone", { current: false }),
+			),
+		).toEqual({ next: "unwired", action: "drop" })
+		expect(
+			directStep(at("exit-pending", 0), terminal("other", { current: false })),
+		).toEqual({ next: "unwired", action: "drop" })
+		expect(
+			directStep(at("exit-pending", 0), {
+				type: "fate-due",
+				nowMs: 5000,
+				current: false,
+			}),
+		).toEqual({ next: "unwired", action: "drop" })
+	})
+
+	it("after the fallback fired, a terminal event is ignored", () => {
+		for (const cause of ["client-gone", "other"] as const)
+			expect(directStep(at("unwired"), terminal(cause))).toEqual({
+				next: "unwired",
+				action: "ignore",
+			})
+		expect(
+			directStep(at("unwired"), {
+				type: "fate-due",
+				nowMs: 9999,
+				current: true,
+			}).action,
+		).toBe("ignore")
+	})
+
+	it("the caps worker leaves every other phase to today's rules", () => {
+		for (const phase of [
+			"unwired",
+			"wired",
+			"running",
+			"exit-pending",
+			"stopping",
+			"suspended",
+		] as const)
+			expect(directStep(at(phase), { type: "caps-worker" }).action).toBe(
+				"today",
+			)
+	})
+})
+
+describe("bytesIn from channel-stats", () => {
+	it("adds the positive delta in bytes of the channel's format", () => {
+		expect(channelStatsDelta(0, 48_000, 8)).toEqual({
+			bytes: 384_000,
+			countedSamples: 48_000,
+		})
+		expect(channelStatsDelta(48_000, 96_000, 2)).toEqual({
+			bytes: 96_000,
+			countedSamples: 96_000,
+		})
+	})
+
+	it("never goes backwards and refuses counters that are not whole samples", () => {
+		expect(channelStatsDelta(100, 40, 8)).toEqual({
+			bytes: 0,
+			countedSamples: 100,
+		})
+		expect(channelStatsDelta(100, 100, 8).bytes).toBe(0)
+		for (const bad of [Number.NaN, 1.5, -1, Number.POSITIVE_INFINITY])
+			expect(channelStatsDelta(0, bad, 8).bytes).toBe(0)
+		expect(channelStatsDelta(0, 10, 0).bytes).toBe(0)
+	})
+
+	it("a run shorter than one stats period reports 0", () => {
+		// No `stats` line listed the channel before it closed: nothing was counted.
+		expect(channelStatsDelta(0, 0, 8)).toEqual({ bytes: 0, countedSamples: 0 })
+	})
+
+	// Feature: direct channel input, Property 1: bytesIn is monotone and equals the largest count seen
+	it("the counted total is the largest count seen times the sample size, whatever the order", () => {
+		fc.assert(
+			fc.property(
+				fc.array(fc.nat({ max: 1_000_000_000 }), { maxLength: 50 }),
+				fc.constantFrom(2, 8),
+				(counts, size) => {
+					let counted = 0
+					let total = 0
+					for (const count of counts) {
+						const step = channelStatsDelta(counted, count, size)
+						expect(step.bytes).toBeGreaterThanOrEqual(0)
+						expect(step.countedSamples).toBeGreaterThanOrEqual(counted)
+						counted = step.countedSamples
+						total += step.bytes
+					}
+					expect(total).toBe(Math.max(0, ...counts) * size)
+				},
+			),
+			{ numRuns: 200 },
+		)
+	})
+})
+
+describe("direct input port and mode selection", () => {
+	it("finds the port structurally", () => {
+		expect(directInputOf({})).toBeNull()
+		const port = { attachDirectInput: () => {}, addInputBytes: () => {} }
+		expect(directInputOf(port)).toBe(port)
+	})
+
+	it("reads relay unless the value is exactly direct", () => {
+		expect(channelInputModeFrom(undefined)).toEqual({
+			mode: "relay",
+			known: true,
+		})
+		expect(channelInputModeFrom("")).toEqual({ mode: "relay", known: true })
+		expect(channelInputModeFrom("relay")).toEqual({
+			mode: "relay",
+			known: true,
+		})
+		expect(channelInputModeFrom("direct")).toEqual({
+			mode: "direct",
+			known: true,
+		})
+		for (const other of ["DIRECT", "direct ", "yes", "1"])
+			expect(channelInputModeFrom(other)).toEqual({
+				mode: "relay",
+				known: false,
+			})
+	})
+
+	it("reads the environment once per process, logs the mode once and never echoes an unknown value", () => {
+		const info = vi.fn()
+		const warn = vi.fn()
+		const log = { info, warn } as unknown as Logger
+		resetProcessChannelInputModeForTests()
+		try {
+			const env = { WAVEKIT_CHANNEL_INPUT: "sideways-value" }
+			expect(processChannelInputMode(log, env)).toBe("relay")
+			expect(
+				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "direct" }),
+			).toBe("relay")
+			expect(info).toHaveBeenCalledTimes(1)
+			expect(info.mock.calls[0]?.[0]).toEqual({ channelInput: "relay" })
+			expect(warn).toHaveBeenCalledTimes(1)
+			expect(JSON.stringify(warn.mock.calls)).not.toContain("sideways-value")
+			expect(warn.mock.calls[0]?.[0]).toMatchObject({
+				accepted: ["relay", "direct"],
+			})
+			resetProcessChannelInputModeForTests()
+			expect(
+				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "direct" }),
+			).toBe("direct")
+			expect(warn).toHaveBeenCalledTimes(1)
+		} finally {
+			resetProcessChannelInputModeForTests()
+		}
+	})
+})

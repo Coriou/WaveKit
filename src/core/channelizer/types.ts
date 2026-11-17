@@ -67,6 +67,52 @@ interface ChannelRefused {
 }
 export type ChannelRequestResult = ChannelGranted | ChannelRefused
 
+/**
+ * How a granted channel reaches its consumer. `relay` (the default): the socket is piped into a Node stream the
+ * consumer reads. `direct`: the connected socket itself, paused before it could read a byte, for a decoder child to
+ * take as its stdin; Node never reads from it.
+ */
+export type ChannelInputMode = "relay" | "direct"
+export interface ChannelRequestOptions {
+	input?: ChannelInputMode
+}
+/**
+ * A connected, paused channel socket. `bytesRead` stays 0 until something reads it: the hand-over to a child
+ * refuses a socket that has read anything, since those bytes would be lost to the child.
+ */
+export type DirectChannelSocket = Readable & { readonly bytesRead: number }
+/** A `direct` grant: the socket and no stream. */
+export interface DirectChannelGranted {
+	ok: true
+	input: "direct"
+	socket: DirectChannelSocket
+	channelId: string
+	generation: number
+	realised: RealisedChannel
+}
+/** A direct request may still be answered with a relay grant, by a provider that has no direct mode. */
+export type DirectChannelRequestResult =
+	| ChannelRequestResult
+	| DirectChannelGranted
+
+/**
+ * One open channel of one `stats` line (every 5 s, open channels only): what the channel has written so far.
+ * `bytesPerSample` is the size of one output sample of its format (cu8 2, cf32 8).
+ */
+export interface ChannelStats {
+	sourceId: string
+	generation: number
+	channelId: string
+	outputSamples: number
+	bytesPerSample: number
+}
+
+/** The counters of a provider that serves `direct` input; optional, found structurally. */
+export interface DirectChannelPort {
+	on(event: "channel-stats", listener: (stats: ChannelStats) => void): unknown
+	off(event: "channel-stats", listener: (stats: ChannelStats) => void): unknown
+}
+
 export interface ChannelProvider {
 	requestChannel(
 		sourceId: string,
@@ -76,6 +122,19 @@ export interface ChannelProvider {
 		/** Acquisition only: abort prevents a late grant; after grant, release its opaque ID. */
 		signal?: AbortSignal,
 	): Promise<ChannelRequestResult>
+	/**
+	 * With `options.input === "direct"` a provider with a direct mode grants the paused socket and no stream
+	 * (DirectChannelGranted); one without answers as it does a relay request. A relay-only implementation of the
+	 * call above satisfies this signature too.
+	 */
+	requestChannel(
+		sourceId: string,
+		decoderId: string,
+		req: DecoderChannelRequest,
+		inputCaps: SourceCaps | undefined,
+		signal: AbortSignal | undefined,
+		options: ChannelRequestOptions,
+	): Promise<DirectChannelRequestResult>
 	/**
 	 * Stops delivery synchronously; resolves after terminal closure, disruptive generation retirement, or the
 	 * close budget while a live process still owes the reply (the id stays fenced until it arrives).

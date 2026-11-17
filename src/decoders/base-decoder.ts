@@ -36,6 +36,7 @@ import type { Logger } from "../utils/logger.js"
 import { DecoderSpawnError } from "../utils/errors.js"
 import { createComponentLogger, LogRateLimiter } from "../utils/logger.js"
 import { safeErrorFields } from "./safe-error-fields.js"
+import type { DirectChannelSocket } from "../core/channelizer/types.js"
 
 /** Timeout in ms to wait for graceful shutdown before SIGKILL */
 const GRACEFUL_STOP_TIMEOUT = 5000
@@ -89,6 +90,11 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 	protected process: ChildProcess | null = null
 	protected inputStream: Readable | null = null
+	/**
+	 * A channel socket the next spawn takes as stdin (direct channel input). Node never reads it: no `data`
+	 * listener, pipe, read() or resume(); it destroys its own copy as soon as `spawn` has returned.
+	 */
+	private directInput: DirectChannelSocket | null = null
 	private readonly trackInputBytes = (chunk: Buffer): void => {
 		this.stats.bytesIn += chunk.length
 	}
@@ -186,18 +192,24 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			"Starting decoder process",
 		)
 
+		const direct = this.takeDirectInput(command)
+
 		// The new child's counters start at 0; lines of the old one count nothing.
 		const counterGeneration = this.counters.restart()
 		try {
 			this.process = spawn(command, args, {
 				env: csdrChildEnv(),
-				stdio: ["pipe", "pipe", "pipe"],
+				stdio: [direct ?? "pipe", "pipe", "pipe"],
 				detached: process.platform !== "win32",
 			})
 		} catch (err) {
+			direct?.destroy()
 			const error = err instanceof Error ? err : new Error(String(err))
 			throw new DecoderSpawnError(this.id, command, error)
 		}
+		// The child has its own descriptor now (or none: a failed spawn reports `error` next). Node's copy closes
+		// here, so the child is the socket's only reader and its exit gives the channelizer a failed write.
+		direct?.destroy()
 
 		// Keep the spawned process reference stable across exit/error callbacks.
 		const proc = this.process
@@ -368,6 +380,45 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	}
 
 	/**
+	 * Holds a paused channel socket for the next start, which spawns the child with it as stdin. Replaces any
+	 * attached input. Bytes are counted from the channelizer's reports instead (addInputBytes).
+	 */
+	attachDirectInput(socket: DirectChannelSocket): void {
+		this.detachInput()
+		this.directInput = socket
+		this.logger.debug("Direct channel input attached")
+	}
+
+	/** Bytes the channelizer reports it wrote to this decoder's channel socket. */
+	addInputBytes(bytes: number): void {
+		if (Number.isSafeInteger(bytes) && bytes > 0) this.stats.bytesIn += bytes
+	}
+
+	/**
+	 * Takes the held socket for this spawn. A socket that closed meanwhile is dropped (the child starts with no input,
+	 * as after a channel lost before start); one that has read a byte, or is not paused, is refused: those bytes
+	 * would never reach the child, and only a programming error gets there.
+	 */
+	private takeDirectInput(command: string): DirectChannelSocket | null {
+		const direct = this.directInput
+		this.directInput = null
+		if (!direct || direct.destroyed) return null
+		if (
+			direct.bytesRead !== 0 ||
+			!direct.isPaused() ||
+			direct.listenerCount("data") > 0
+		) {
+			direct.destroy()
+			throw new DecoderSpawnError(
+				this.id,
+				command,
+				new Error("direct channel input was read before the hand-over"),
+			)
+		}
+		return direct
+	}
+
+	/**
 	 * Attaches an input stream to feed audio data to the decoder.
 	 * If the decoder is already running, pipes the stream to stdin.
 	 *
@@ -393,6 +444,11 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 * Detaches the current input stream.
 	 */
 	detachInput(): void {
+		// A held socket no spawn took is abandoned: Node's copy is the only one, so it closes here.
+		if (this.directInput) {
+			this.directInput.destroy()
+			this.directInput = null
+		}
 		if (this.inputStream) {
 			// Unpipe from process stdin if connected
 			if (this.process?.stdin) {
