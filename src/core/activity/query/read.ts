@@ -40,6 +40,8 @@ interface SearchReadRequest {
 	after: string | null
 	/** With a channel scope: also answer channelMatch over (low, high]. */
 	channelMatch?: boolean
+	/** Forced by the plan tests; absent: chosen by {@link scopePlanOf} in the read's snapshot. */
+	plan?: ScopePlan
 }
 
 interface FacetsReadRequest {
@@ -50,6 +52,8 @@ interface FacetsReadRequest {
 	high: string
 	scanCap: number
 	valueCap: number
+	/** Forced by the plan tests; absent: chosen by {@link scopePlanOf} in the read's snapshot. */
+	plan?: ScopePlan
 }
 
 export type ReadRequest =
@@ -137,24 +141,141 @@ const FACET_COLUMN: Record<FacetDimension, string> = {
 }
 
 /**
- * The channel scope as SQL, an index-driven candidate set: rows whose stored channel is within
- * [minHz, maxHz] (a range of the refs key (ref_type, ref_value, seq), the values zero-padded so
- * text order is frequency order), UNION ALL rows with no stored channel whose own frequency is
- * within half the fallback step of the scope,
- * [minHz − ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ, maxHz + ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ)
+ * How a scope term (the channel scope, the frequency range) reads. `union`: a `seq IN (…)`
+ * candidate set from the index range(s), which SQLite materialises in full before LIMIT (a LIST
+ * SUBQUERY), so it is quick only while the range is short. `walk`: plain per-row terms over the
+ * seq-ordered walk of (low, high], which stops at LIMIT, so it is quick when matches are dense.
+ */
+export type ScopeRead = "union" | "walk"
+
+export interface ScopePlan {
+	channel: ScopeRead
+	frequency: ScopeRead
+}
+
+const UNION_PLAN: ScopePlan = { channel: "union", frequency: "union" }
+
+/**
+ * Index entries a search's scope term (both halves of the channel scope together) may hold and
+ * still read as a candidate set. Arithmetic: counting to the cap steps at most 4 096 entries of
+ * one or two indexes (about 1 ms); a union under the cap materialises at most 4 096 seqs for the
+ * channel scope plus 4 096 for a frequency range and looks up at most those 8 192 rows (about
+ * 5 µs each with the summary read: about 40 ms), a sixth of the 250 ms deadline. At the cap the
+ * scope holds at least 4 096 of the snapshot's N rows, so the walk reaches a page of L rows after
+ * about L × N / 4 096 rows (L = 1 001, N = 250 000: about 61 000 rows, about 75 ms at 1.2 µs a
+ * row; a 51-row page about 3 100 rows), while the union of a dense scope materialises every
+ * match first (150 000 rows at one frequency: about 170 ms for 51 rows).
+ */
+export const SCOPE_DENSITY_CAP = 4_096
+
+/**
+ * The density cap of a facets scan of at most `scanCap` rows: the scan reads every match up to
+ * the cap, so the walk stops early only once the scope holds more matches than that, and reads
+ * every row of the snapshot below it (about 300 ms on 250 000 rows), where the union reads the
+ * matches only (17 500 matches: about 130 ms). Past the scan cap the union materialises more
+ * candidates than the scan uses and the walk reads scanCap × N / matches rows, fewer as the scope
+ * grows denser (150 000 matches of 250 000 rows: walk about 175 ms, union about 310 ms). Counting
+ * to the default 50 000 steps at most 50 000 index entries (about 10 ms). Never below the search
+ * cap, so a small scan cap keeps the union for scopes a search would read as a union too.
+ */
+export function facetsDensityCap(scanCap: number): number {
+	return Math.max(SCOPE_DENSITY_CAP, scanCap)
+}
+
+/** Index entries in `sql`'s range, counted up to `cap` (one capped index range read). */
+function countedTo(
+	db: SqlDatabase,
+	sql: string,
+	params: SqlValue[],
+	cap: number,
+): number {
+	const row = db
+		.prepare(`SELECT COUNT(*) AS n FROM (${sql} LIMIT ?)`)
+		.get(...params, cap)
+	const n = row?.["n"]
+	if (typeof n !== "number" && typeof n !== "bigint")
+		throw new ActivityReaderFailedError("Activity scope count is unreadable")
+	return Number(n)
+}
+
+/**
+ * The plan for `query`'s scope terms, read by density in the read's snapshot: the channel scope
+ * (its refs key range plus the activity_frequency range of its fallback) and the frequency range
+ * each counted to `cap`; a term reads as a candidate set while its count is under the cap, else
+ * as the walk. The counts span the whole store, not (low, high]: an upper
+ * bound, so a dense store never takes the union. activity_frequency is part of the only schema
+ * a reader opens (ACTIVITY_SCHEMA_V1), so INDEXED BY never fails to prepare.
+ */
+export function scopePlanOf(
+	db: SqlDatabase,
+	query: NormalisedQuery,
+	cap: number = SCOPE_DENSITY_CAP,
+): ScopePlan {
+	let channel: ScopeRead = "union"
+	if (query.channel !== null) {
+		const refs = countedTo(
+			db,
+			"SELECT 1 FROM activity_refs WHERE ref_type = 'channelHz' AND ref_value BETWEEN ? AND ?",
+			[
+				channelRefValue(query.channel.minHz),
+				channelRefValue(query.channel.maxHz),
+			],
+			cap,
+		)
+		const fallback =
+			refs < cap
+				? countedTo(
+						db,
+						"SELECT 1 FROM activity INDEXED BY activity_frequency WHERE frequency_hz >= ? AND frequency_hz < ?",
+						channelFallbackParams(query.channel),
+						cap - refs,
+					)
+				: 0
+		if (refs + fallback >= cap) channel = "walk"
+	}
+	let frequency: ScopeRead = "union"
+	const range = frequencyTerms(
+		"frequency_hz",
+		query.frequencyMin,
+		query.frequencyMax,
+	)
+	if (
+		range !== null &&
+		countedTo(
+			db,
+			`SELECT 1 FROM activity INDEXED BY activity_frequency WHERE ${range.sql}`,
+			range.params,
+			cap,
+		) >= cap
+	)
+		frequency = "walk"
+	return { channel, frequency }
+}
+
+/**
+ * The channel scope as SQL: rows whose stored channel is within [minHz, maxHz] (a range of the
+ * refs key (ref_type, ref_value, seq), the values zero-padded so text order is frequency order),
+ * and rows with no stored channel whose own frequency is within half the fallback step of the
+ * scope, [minHz − ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ, maxHz + ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ)
  * (a range of activity_frequency): the upper bound open, so a row on the edge of two channels
  * belongs to one. A row with neither never matches; the two halves are disjoint (one has a
- * channel ref, the other none). Written as one `seq IN (…)` so SQLite drives the read from the
- * two index ranges, not from the (low, high] rowid range: an OR of the two halves walked every
- * row of the snapshot (about 1 s on 250 000 rows, past the 250 ms deadline).
+ * channel ref, the other none).
+ *
+ * `union`: one `seq IN (… UNION ALL …)` of the two index ranges, so a sparse scope never walks
+ * the snapshot (an OR of the halves walked every row: about 1 s on 250 000 rows, past the
+ * 250 ms deadline). `walk`: the same halves as per-row probes (the refs key by seq, the row's own
+ * frequency with `+` so no index takes it), so a dense scope stops at LIMIT.
  */
 function appendChannel(
 	where: string[],
 	params: SqlValue[],
 	channel: { minHz: number; maxHz: number },
+	read: ScopeRead,
 ): void {
 	where.push(
-		`seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'channelHz' AND ref_value BETWEEN ? AND ? UNION ALL SELECT fallback.seq FROM activity AS fallback WHERE ${channelFallbackOf("fallback")})`,
+		read === "union"
+			? `seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'channelHz' AND ref_value BETWEEN ? AND ? UNION ALL SELECT fallback.seq FROM activity AS fallback WHERE ${channelFallbackOf("fallback.frequency_hz", "fallback")})`
+			: `(EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = 'channelHz' AND activity_refs.ref_value BETWEEN ? AND ?) OR (${channelFallbackOf("+frequency_hz", "activity")}))`,
 	)
 	params.push(
 		channelRefValue(channel.minHz),
@@ -163,9 +284,9 @@ function appendChannel(
 	)
 }
 
-/** The fallback half of the channel scope over `table`: no stored channel, its own frequency in range. */
-function channelFallbackOf(table: string): string {
-	return `${table}.frequency_hz >= ? AND ${table}.frequency_hz < ? AND NOT EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = ${table}.seq AND activity_refs.ref_type = 'channelHz')`
+/** The fallback half of the channel scope: no stored channel on `table`, `column` in range. */
+function channelFallbackOf(column: string, table: string): string {
+	return `${column} >= ? AND ${column} < ? AND NOT EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = ${table}.seq AND activity_refs.ref_type = 'channelHz')`
 }
 
 function channelFallbackParams(channel: {
@@ -178,37 +299,57 @@ function channelFallbackParams(channel: {
 	]
 }
 
+/** The frequency range over `column`, or null when neither bound is set. */
+function frequencyTerms(
+	column: string,
+	min: number | null,
+	max: number | null,
+): { sql: string; params: SqlValue[] } | null {
+	const terms: string[] = []
+	const params: SqlValue[] = []
+	if (min !== null) {
+		terms.push(`${column} >= ?`)
+		params.push(min)
+	}
+	if (max !== null) {
+		terms.push(`${column} <= ?`)
+		params.push(max)
+	}
+	return terms.length === 0 ? null : { sql: terms.join(" AND "), params }
+}
+
 /**
- * The frequency filter as SQL, an index-driven candidate set from the activity_frequency range:
- * as bare `frequency_hz` terms SQLite drove the read from the (low, high] rowid range instead and
- * read every row of the snapshot.
+ * The frequency filter as SQL. `union`: a candidate set from the activity_frequency range (as
+ * bare `frequency_hz` terms SQLite drove a sparse range from the (low, high] rowid range and read
+ * every row of the snapshot). `walk`: `+frequency_hz` terms no index takes, so a dense range
+ * stops at LIMIT.
  */
 function appendFrequency(
 	where: string[],
 	params: SqlValue[],
 	min: number | null,
 	max: number | null,
+	read: ScopeRead,
 ): void {
-	const terms: string[] = []
-	if (min !== null) {
-		terms.push("ranged.frequency_hz >= ?")
-		params.push(min)
-	}
-	if (max !== null) {
-		terms.push("ranged.frequency_hz <= ?")
-		params.push(max)
-	}
-	if (terms.length === 0) return
-	where.push(
-		`seq IN (SELECT ranged.seq FROM activity AS ranged WHERE ${terms.join(" AND ")})`,
+	const range = frequencyTerms(
+		read === "union" ? "ranged.frequency_hz" : "+frequency_hz",
+		min,
+		max,
 	)
+	if (range === null) return
+	where.push(
+		read === "union"
+			? `seq IN (SELECT ranged.seq FROM activity AS ranged WHERE ${range.sql})`
+			: range.sql,
+	)
+	params.push(...range.params)
 }
 
 /**
  * `mixed` when a row of the scope in (low, high] matched by its own frequency (no stored
  * channel), else `exact`: one probe per request of the other filters and only the fallback half
  * of the scope (a row matching the stored-channel half has a channel ref, so it never counts),
- * a frequency range the activity_frequency index serves, stopped at the first such row.
+ * stopped at the first such row.
  */
 function channelMatchOf(
 	db: SqlDatabase,
@@ -221,24 +362,35 @@ function channelMatchOf(
 	return found === undefined ? "exact" : "mixed"
 }
 
-/** The channelMatch probe and its parameters (exported for the query-plan tests). */
+/**
+ * The channelMatch probe and its parameters (exported for the query-plan tests): plain terms
+ * driven from the fallback's activity_frequency range (INDEXED BY: the index is in the only
+ * schema a reader opens), the other filters as per-row terms, LIMIT 1 with no ORDER BY, so it
+ * stops at the first fallback row and never materialises a candidate set of the scope.
+ */
 export function channelMatchStatement(
 	query: NormalisedQuery,
 	low: string,
 	high: string,
 ): { sql: string; params: SqlValue[] } {
 	const { where, params } = bounds({ low, high, before: null, after: null })
-	// The fallback half as a candidate set ahead of the other filters' sets, so it drives the
-	// probe (activity_frequency) even beside hasRecording's or a frequency range's set.
 	if (query.channel !== null) {
-		where.push(
-			`seq IN (SELECT fallback.seq FROM activity AS fallback WHERE ${channelFallbackOf("fallback")})`,
-		)
+		where.push(channelFallbackOf("frequency_hz", "activity"))
 		params.push(...channelFallbackParams(query.channel))
 	}
-	appendFilters(where, params, { ...query, channel: null })
+	appendFilters(
+		where,
+		params,
+		{ ...query, channel: null },
+		{ channel: "walk", frequency: "walk" },
+		{ perRowRecordings: true },
+	)
+	const from =
+		query.channel === null
+			? "activity"
+			: "activity INDEXED BY activity_frequency"
 	return {
-		sql: `SELECT 1 AS one FROM activity WHERE ${where.join(" AND ")} LIMIT 1`,
+		sql: `SELECT 1 AS one FROM ${from} WHERE ${where.join(" AND ")} LIMIT 1`,
 		params,
 	}
 }
@@ -262,6 +414,8 @@ function appendFilters(
 	where: string[],
 	params: SqlValue[],
 	query: NormalisedQuery,
+	plan: ScopePlan,
+	options: { perRowRecordings?: boolean } = {},
 ): void {
 	appendIn(where, params, "kind", query.kinds)
 	appendIn(where, params, "source_id", query.sourceIds)
@@ -279,11 +433,19 @@ function appendFilters(
 		)
 		params.push(ref.type, ref.value)
 	}
-	// SQLite drives the read from the first `seq IN (…)` candidate set it is given: the
-	// narrowest first (a recording key's one or two rows, then a channel, then a frequency
-	// range), each before the recordings set, which can hold most rows.
-	if (query.channel !== null) appendChannel(where, params, query.channel)
-	appendFrequency(where, params, query.frequencyMin, query.frequencyMax)
+	// Which candidate set drives the read is the SQLite planner's choice, not a documented rule:
+	// the terms go narrowest first (a recording key's one or two rows, then a channel, then a
+	// frequency range, then the recordings set, which can hold most rows), and
+	// tests/unit/core/activity/query/channel-plan.test.ts holds the plans the bundled SQLite picks.
+	if (query.channel !== null)
+		appendChannel(where, params, query.channel, plan.channel)
+	appendFrequency(
+		where,
+		params,
+		query.frequencyMin,
+		query.frequencyMax,
+		plan.frequency,
+	)
 	if (query.producedFromMs !== null) {
 		where.push("produced_at_ms >= ?")
 		params.push(query.producedFromMs)
@@ -296,12 +458,15 @@ function appendFilters(
 		where.push("entity_key = ?")
 		params.push(query.entityKey)
 	}
-	// The (ref_type, ref_value, seq) key lists every linked row: one ref per link.
+	// The (ref_type, ref_value, seq) key lists every linked row: one ref per link. Per row (the
+	// refs_seq key) where another range drives the read and must stop at its first match.
 	if (query.hasRecording !== null)
 		where.push(
-			query.hasRecording
-				? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')"
-				: "seq NOT IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')",
+			options.perRowRecordings === true
+				? `${query.hasRecording ? "" : "NOT "}EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = 'recordingId')`
+				: query.hasRecording
+					? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')"
+					: "seq NOT IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')",
 		)
 	if (query.fts.kind === "impossible") where.push("1 = 0")
 	else if (query.fts.kind === "match") {
@@ -382,9 +547,10 @@ function readRecord(seq: bigint, json: unknown): ActivityRecord {
 /** The search statement and its parameters (exported for the query-plan tests). */
 export function searchStatement(
 	request: Extract<ReadRequest, { op: "search" }>,
+	plan: ScopePlan = request.plan ?? UNION_PLAN,
 ): { sql: string; params: SqlValue[] } {
 	const { where, params } = bounds(request)
-	appendFilters(where, params, request.query)
+	appendFilters(where, params, request.query, plan)
 	const direction = request.order === "asc" ? "ASC" : "DESC"
 	params.push(request.limit)
 	// Keyset page inside (low, high]. No COUNT(*): the extra row is the continuation signal.
@@ -399,7 +565,10 @@ function search(
 	if (!Number.isSafeInteger(request.limit) || request.limit < 1) {
 		throw new ActivityQueryInvalidError("limit is invalid")
 	}
-	const { sql, params } = searchStatement(request)
+	const { sql, params } = searchStatement(
+		request,
+		request.plan ?? scopePlanOf(db, request.query),
+	)
 	const found = db.prepare(sql).all(...params)
 	const rows: SummaryRow[] = []
 	for (const row of found) {
@@ -449,6 +618,7 @@ function channelFacetValue(value: unknown): string | null {
 /** The facets statement and its parameters (exported for the query-plan tests). */
 export function facetsStatement(
 	request: Extract<ReadRequest, { op: "facets" }>,
+	plan: ScopePlan = request.plan ?? UNION_PLAN,
 ): { sql: string; params: SqlValue[]; columns: string[] } {
 	const { where, params } = bounds({
 		low: request.low,
@@ -456,7 +626,7 @@ export function facetsStatement(
 		before: null,
 		after: null,
 	})
-	appendFilters(where, params, request.query)
+	appendFilters(where, params, request.query, plan)
 	const columns = request.dimensions.map(
 		dimension => `${FACET_COLUMN[dimension]} AS ${dimension}`,
 	)
@@ -485,7 +655,11 @@ function facets(
 				: { channelMatch: "exact" as const }),
 		}
 	}
-	const { sql, params, columns } = facetsStatement(request)
+	const { sql, params, columns } = facetsStatement(
+		request,
+		request.plan ??
+			scopePlanOf(db, request.query, facetsDensityCap(request.scanCap)),
+	)
 	const groups = db.prepare(sql).all(...params)
 	const counts = new Map<FacetDimension, Map<string | null, number>>()
 	for (const dimension of request.dimensions) counts.set(dimension, new Map())
