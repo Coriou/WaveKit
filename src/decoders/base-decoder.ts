@@ -98,6 +98,12 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 * spawn without it (lost-before-start) instead of spawning with an unfed pipe. Only a new input or a start clears it.
 	 */
 	private directInput: DirectChannelSocket | null = null
+	/**
+	 * Settles when the last spawned child's stdout and stderr have both ended or closed: every line they carried has
+	 * been parsed by then. Recorded for every run and awaited only by a caller that must act after a run's last line
+	 * (outputDrained); it never rejects.
+	 */
+	private outputDrain: Promise<void> = Promise.resolve()
 	private readonly trackInputBytes = (chunk: Buffer): void => {
 		this.stats.bytesIn += chunk.length
 	}
@@ -308,6 +314,9 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			}
 		}
 
+		// Registered after the readers: on `end`, a reader parses its last line before these listeners run.
+		this.outputDrain = streamsEnded(this.process.stdout, this.process.stderr)
+
 		// Pipe input stream to process stdin if attached
 		if (this.inputStream && this.process.stdin) {
 			this.inputStream.pipe(this.process.stdin)
@@ -370,6 +379,15 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			// Send SIGTERM for graceful shutdown
 			if (!proc.killed) signalDecoder(proc, "SIGTERM")
 		})
+	}
+
+	/**
+	 * Settles when the output of the last spawned child has been read to its end (stdout and stderr ended or closed),
+	 * at once if none was spawned. The process `exit` can come before that, while lines are still being parsed; a
+	 * caller that must act after the run's last line waits for this. Never rejects.
+	 */
+	outputDrained(): Promise<void> {
+		return this.outputDrain
 	}
 
 	/**
@@ -632,4 +650,28 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			this.stats.errors++
 		}
 	}
+}
+
+/** Settles when every given stream has ended or closed (a destroyed stream closes without ending). */
+function streamsEnded(...streams: Array<Readable | null>): Promise<void> {
+	return Promise.all(
+		streams.map(stream =>
+			stream === null
+				? Promise.resolve()
+				: new Promise<void>(resolve => {
+						stream.once("end", resolve)
+						stream.once("close", resolve)
+					}),
+		),
+	).then(() => undefined)
+}
+
+/**
+ * The drain of a decoder's last run (BaseDecoder.outputDrained); settled at once for a decoder that is not a
+ * BaseDecoder, whose output the manager cannot see the end of.
+ */
+export function decoderOutputDrained(decoder: object): Promise<void> {
+	return decoder instanceof BaseDecoder
+		? decoder.outputDrained()
+		: Promise.resolve()
 }

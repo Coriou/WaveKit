@@ -27,7 +27,10 @@ import {
 	placementKey,
 	type WantedPlacement,
 } from "../../../src/decoders/enablement/contract.js"
-import { DecoderManager } from "../../../src/decoders/manager.js"
+import {
+	CAPS_CHANGE_DEBOUNCE_MS,
+	DecoderManager,
+} from "../../../src/decoders/manager.js"
 import { PLACEMENT_STOP_TIMEOUT_MS } from "../../../src/decoders/placement-lifecycle.js"
 import { signalDecoder } from "../../../src/decoders/process-tools.js"
 import type * as ProcessToolsModule from "../../../src/decoders/process-tools.js"
@@ -39,7 +42,11 @@ import type {
 import { FakeSources, iqCaps } from "../../mocks/rate-fakes.js"
 import { CENTER, DirectProvider } from "./direct-channel-fakes.js"
 
-/** A child that never runs: it reports `spawn` on the next microtask and exits when told to (or when signalled). */
+/**
+ * A child that never runs: it reports `spawn` on the next microtask and exits when told to (or when signalled). `end`
+ * ends its streams before its `exit`; `exitFirst` emits only the `exit`, as a real child can while its last output
+ * is still in the pipe, and `endStreams` ends them later.
+ */
 class FakeChild extends EventEmitter {
 	readonly pid = 1
 	readonly stdin = null
@@ -58,6 +65,20 @@ class FakeChild extends EventEmitter {
 		this.stderr.end()
 		this.emit("exit", code, signal)
 		this.emit("close", code, signal)
+	}
+	exitFirst(code: number) {
+		this.ended = true
+		this.exitCode = code
+		this.emit("exit", code, null)
+	}
+	/** Writes one line of output on stderr, as dsd-fme prints it. */
+	print(line: string) {
+		this.stderr.write(`${line}\n`)
+	}
+	endStreams() {
+		this.stdout.end()
+		this.stderr.end()
+		this.emit("close", this.exitCode, this.signalCode)
 	}
 	kill(signal?: NodeJS.Signals) {
 		this.signal(signal ?? "SIGTERM")
@@ -95,9 +116,10 @@ vi.mock("../../../src/decoders/process-tools.js", async importOriginal => {
 	}
 })
 
-const DEBOUNCE = 350
-/** The caps worker's own debounce (CAPS_CHANGE_DEBOUNCE_MS in manager.ts); DEBOUNCE above is that with a margin. */
-const CAPS_WORKER_DEBOUNCE_MS = 300
+/** The caps worker's debounce with a margin. */
+const DEBOUNCE = CAPS_CHANGE_DEBOUNCE_MS + 50
+/** When a start joins a cleanup that a stop joined as it began; inside the cleanup's deadline. */
+const LATE_JOIN_MS = 4_000
 const CALL_CHECK_MS = 500
 /** The opening of a DMR voice call as dsd-fme prints it, each line after the given milliseconds; no terminator. */
 const CALL_LINES: Array<[number, string]> = [
@@ -255,6 +277,27 @@ function loseSource() {
 	sources.caps.delete("rtl")
 	provider.endGeneration("rtl", ["voice-g1"], "source-lost")
 	children.at(-1)!.end(0)
+}
+
+/** As loseSource, but the child's `exit` comes before its streams end (they end when the test says). */
+function loseSourceExitFirst() {
+	sources.caps.delete("rtl")
+	provider.endGeneration("rtl", ["voice-g1"], "source-lost")
+	const child = children.at(-1)!
+	child.exitFirst(0)
+	return child
+}
+
+/** The adapter's call-timeout interval and prune timer, null when not armed. */
+function timersOf(decoder: DsdFmeDecoder) {
+	const internals = decoder as unknown as {
+		callTimeoutTimer: unknown
+		pruneTimer: unknown
+	}
+	return {
+		callTimeoutTimer: internals.callTimeoutTimer,
+		pruneTimer: internals.pruneTimer,
+	}
 }
 
 function restoreSource() {
@@ -446,7 +489,7 @@ describe.each([
 		expect(live.size).toBe(0)
 	})
 
-	it("a cleanup stop() that never settles: a start that meets it waits the bound, then runs on a new instance", async () => {
+	it("a cleanup stop() that never settles: the caps worker's restart stop meets it and waits for the cleanup's deadline, then the restart runs on a new instance", async () => {
 		setup("direct", placements)
 		await start(placements)
 		const first = voice[0]!
@@ -455,9 +498,12 @@ describe.each([
 		provider.endGeneration("rtl", ["voice-g1"])
 		children[0]!.end(0)
 		// The worker's pass runs at the end of its debounce and meets the cleanup still running.
-		await vi.advanceTimersByTimeAsync(CAPS_WORKER_DEBOUNCE_MS)
+		await vi.advanceTimersByTimeAsync(CAPS_CHANGE_DEBOUNCE_MS)
 		expect(children).toHaveLength(1)
-		await vi.advanceTimersByTimeAsync(PLACEMENT_STOP_TIMEOUT_MS - 1)
+		// The deadline runs from the exit, when the cleanup started, not from the worker's join.
+		await vi.advanceTimersByTimeAsync(
+			PLACEMENT_STOP_TIMEOUT_MS - CAPS_CHANGE_DEBOUNCE_MS - 1,
+		)
 		expect(children).toHaveLength(1)
 		expect(voice).toHaveLength(1)
 		await vi.advanceTimersByTimeAsync(1)
@@ -532,6 +578,190 @@ describe.each([
 		await manager.destroy()
 		expect(hung.calls).toBe(1)
 	})
+
+	it("an exit before its last lines: the cleanup's stop() runs after they are read; every call ends, during the hold and after destroy", async () => {
+		setup("direct", placements)
+		await start(placements)
+		const decoder = voice[0]!
+		await hearCall(decoder)
+		expect(ofType("call_start")).toHaveLength(1)
+		const child = loseSourceExitFirst()
+		// The child's last lines are still being read after its exit: the adapter parses them.
+		for (const [afterMs, line] of CALL_LINES) {
+			await vi.advanceTimersByTimeAsync(afterMs)
+			child.print(line)
+		}
+		await vi.advanceTimersByTimeAsync(100)
+		expect(stopsOf(decoder)).toBe(0)
+		child.endStreams()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(manager.getStatus("voice")).toMatchObject({
+			running: false,
+			suspended: true,
+		})
+		expect(stopsOf(decoder)).toBe(1)
+		expect(ofType("call_end")).toHaveLength(ofType("call_start").length)
+		expect(live.size).toBe(0)
+		expect(timersOf(decoder)).toEqual({
+			callTimeoutTimer: null,
+			pruneTimer: null,
+		})
+		expect(cleanupTimeouts()).toHaveLength(0)
+
+		await manager.destroy()
+		expect(ofType("call_end")).toHaveLength(ofType("call_start").length)
+		expect(live.size).toBe(0)
+		expect(timersOf(decoder)).toEqual({
+			callTimeoutTimer: null,
+			pruneTimer: null,
+		})
+		const before = outputs.length
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(outputs.length).toBe(before)
+	})
+
+	it("an exit whose output never ends: the stop completes at the cleanup's deadline, the instance is fenced, a later start uses a new instance", async () => {
+		setup("direct", placements)
+		await start(placements)
+		const first = voice[0]!
+		const child = loseSourceExitFirst()
+		const stopping = track(manager.stopDecoder("voice"))
+		await vi.advanceTimersByTimeAsync(PLACEMENT_STOP_TIMEOUT_MS - 1)
+		expect(stopping.done).toBe(false)
+		expect(stopsOf(first)).toBe(0)
+		expect(cleanupTimeouts()).toHaveLength(0)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(stopping.done).toBe(true)
+		expect(cleanupTimeouts()).toHaveLength(1)
+
+		sources.caps.set("rtl", { ...iqCaps(2_048_000), centerFreq: CENTER })
+		await start(placements)
+		expect(voice).toHaveLength(2)
+		expect(children).toHaveLength(2)
+		expect(manager.getDecoder("voice")).toBe(voice[1])
+		expect(manager.getStatus("voice")).toMatchObject({ running: true })
+		expect(stopsOf(first)).toBe(0)
+
+		// The old output ends late: its stop() runs on the retired instance only and reaches nothing of the manager.
+		const events = vi.spyOn(manager, "emit")
+		const status = manager.getStatus("voice")
+		child.endStreams()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(stopsOf(first)).toBe(1)
+		expect(timersOf(first).callTimeoutTimer).toBeNull()
+		expect(events).not.toHaveBeenCalled()
+		expect(children[1]).toMatchObject({ exitCode: null, signalCode: null })
+		expect(manager.getStatus("voice")).toEqual(status)
+		expect(live.size).toBe(1)
+		expect(cleanupTimeouts()).toHaveLength(1)
+		await manager.destroy()
+		expect(live.size).toBe(0)
+	})
+
+	it("fenced by a plain stop with no restart: the retired instance's late stop() and events reach nothing", async () => {
+		setup("direct", placements)
+		await start(placements)
+		const first = voice[0]!
+		const hung = hangCleanup(first)
+		loseSource()
+		const stopping = track(manager.stopDecoder("voice"))
+		await vi.advanceTimersByTimeAsync(PLACEMENT_STOP_TIMEOUT_MS)
+		expect(stopping.done).toBe(true)
+		expect(cleanupTimeouts()).toHaveLength(1)
+		expect(manager.getDecoder("voice")).toBe(first)
+
+		const events = vi.spyOn(manager, "emit")
+		const status = manager.getStatus("voice")
+		hung.release()
+		await vi.advanceTimersByTimeAsync(0)
+		const output: DecoderOutput = {
+			timestamp: new Date(),
+			decoder: "voice",
+			type: "call_start",
+			data: {},
+		}
+		first.emit("output", output)
+		first.emit("stopped")
+		first.emit("health", "faulted")
+		await vi.advanceTimersByTimeAsync(0)
+		expect(events).not.toHaveBeenCalled()
+		expect(manager.getStatus("voice")).toEqual(status)
+		expect(hung.calls).toBe(1)
+		await manager.destroy()
+	})
+
+	it("one deadline: a stop that joins as the cleanup starts and a start that joins later are both released at the cleanup's deadline, with one warning", async () => {
+		expect(LATE_JOIN_MS).toBeLessThan(PLACEMENT_STOP_TIMEOUT_MS)
+		setup("direct", placements)
+		await start(placements)
+		const hung = hangCleanup(voice[0]!)
+		loseSource()
+		const stopping = track(manager.stopDecoder("voice"))
+		await vi.advanceTimersByTimeAsync(LATE_JOIN_MS)
+		expect(stopping.done).toBe(false)
+		restoreSource()
+		const starting = track(manager.startDecoder("voice"))
+		await vi.advanceTimersByTimeAsync(
+			PLACEMENT_STOP_TIMEOUT_MS - LATE_JOIN_MS - 1,
+		)
+		// With placements the start's request supersedes the stop's, whose promise settles then; its stop still
+		// joins the cleanup underneath.
+		if (!placements) expect(stopping.done).toBe(false)
+		expect(starting.done).toBe(false)
+		expect(children).toHaveLength(1)
+		expect(cleanupTimeouts()).toHaveLength(0)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(stopping.done).toBe(true)
+		expect(starting.done).toBe(true)
+		expect(cleanupTimeouts()).toHaveLength(1)
+		expect(hung.calls).toBe(1)
+		if (!placements) {
+			// The start then runs on a new instance.
+			expect(children).toHaveLength(2)
+			expect(manager.getDecoder("voice")).toBe(voice[1])
+			expect(manager.getStatus("voice")).toMatchObject({ running: true })
+		}
+		await manager.destroy()
+		expect(cleanupTimeouts()).toHaveLength(1)
+	})
+
+	it.each([
+		["", false],
+		[", with options staged during the hold", true],
+	] as const)(
+		"a cleanup still running when the source returns: the resume waits for its deadline, then runs on a new instance%s",
+		async (_label, staged) => {
+			setup("direct", placements)
+			await start(placements)
+			const first = voice[0]!
+			const hung = hangCleanup(first)
+			loseSource()
+			expect(manager.getStatus("voice")).toMatchObject({ suspended: true })
+			if (staged)
+				expect(
+					manager.stageDecoderOptions("voice", { callTimeoutMs: 6000 }),
+				).toBe(true)
+			restoreSource()
+			await vi.advanceTimersByTimeAsync(DEBOUNCE)
+			expect(children).toHaveLength(1)
+			await vi.advanceTimersByTimeAsync(
+				PLACEMENT_STOP_TIMEOUT_MS - DEBOUNCE - 1,
+			)
+			expect(children).toHaveLength(1)
+			expect(cleanupTimeouts()).toHaveLength(0)
+			await vi.advanceTimersByTimeAsync(1)
+			expect(children).toHaveLength(2)
+			expect(voice).toHaveLength(2)
+			expect(manager.getDecoder("voice")).toBe(voice[1])
+			expect(manager.getStatus("voice")).toMatchObject({ running: true })
+			expect(hung.calls).toBe(1)
+			expect(stopsOf(voice[1]!)).toBe(0)
+			expect(cleanupTimeouts()).toHaveLength(1)
+			expect(live.size).toBe(1)
+			await manager.destroy()
+			expect(live.size).toBe(0)
+		},
+	)
 
 	it("relay mode: the restart's stop() reaches the running adapter, as before", async () => {
 		setup("relay", placements)

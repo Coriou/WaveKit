@@ -177,6 +177,7 @@ import {
 } from "../utils/version.js"
 import { safeErrorFields } from "./safe-error-fields.js"
 import { processChannelInputMode } from "./channel-input-mode.js"
+import { decoderOutputDrained } from "./base-decoder.js"
 import {
 	CHANNEL_FATE_MS,
 	channelStatsDelta,
@@ -495,11 +496,17 @@ type ChannelInvalidatedListener = (
  */
 interface DirectCleanup {
 	readonly decoder: Decoder
+	/** The exited child's output read to its end, then the adapter's stop(). */
 	readonly run: Promise<void>
+	/**
+	 * Settles PLACEMENT_STOP_TIMEOUT_MS after the cleanup started, fencing it first if the run is still going; every
+	 * joiner races this one deadline. Never settles when the run ends first.
+	 */
+	readonly deadline: Promise<void>
 	settled: boolean
 	/**
-	 * Its stop() outlived PLACEMENT_STOP_TIMEOUT_MS: the instance never starts again; the next start replaces it
-	 * (replaceFencedDecoder), so a stop() that resumes late acts on the retired instance only.
+	 * The run outlived its deadline: the instance never starts again and keeps no listener; the next start replaces
+	 * it (replaceFencedDecoder), so a stop() that resumes late acts on the retired instance only.
 	 */
 	fenced: boolean
 }
@@ -861,7 +868,7 @@ function guardObservedCentres(
 }
 
 /** The serial caps worker's debounce of a source's caps changes. */
-const CAPS_CHANGE_DEBOUNCE_MS = 300
+export const CAPS_CHANGE_DEBOUNCE_MS = 300
 
 /**
  * An unchanged set of due efficiency decoders is queued again this long
@@ -6455,13 +6462,17 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * The adapter's own stop() on a direct decoder that exited at its channel's end, once, on the instance that exited:
 	 * a requested stop would have run it, and an adapter with per-run state (timers, open calls) must not start a new
-	 * run on top of the old one. It runs after the exit handler's turn (BaseDecoder has dropped its process by then, so
-	 * nothing is signalled); a throw is logged. Stops, starts and replacements join it (joinDirectCleanup).
+	 * run on top of the old one. The process `exit` can come before its stdout and stderr end, and the lines still
+	 * buffered are parsed after it (they can open a call), so stop() waits until that run's output has been read to
+	 * its end. BaseDecoder has dropped its process by then, so nothing is signalled; a throw is logged. The whole run
+	 * has one deadline, PLACEMENT_STOP_TIMEOUT_MS from here (the placement stop's): at it the instance is fenced, with
+	 * one warning. Stops, starts and replacements join it (joinDirectCleanup).
 	 */
 	private startDirectCleanup(state: DecoderState): void {
 		const decoder = state.decoder
 		if (state.directCleanup?.decoder === decoder) return
-		const run = Promise.resolve()
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const run = decoderOutputDrained(decoder)
 			.then(() => decoder.stop())
 			.catch((err: unknown) => {
 				this.log.warn(
@@ -6472,10 +6483,18 @@ export class DecoderManager extends EventEmitter {
 			.finally(() => {
 				// Kept until that instance starts again or is replaced: a later stop of the exited run is this one.
 				cleanup.settled = true
+				clearTimeout(timer)
 			})
+		const deadline = new Promise<void>(resolve => {
+			timer = setTimeout(() => {
+				if (!cleanup.settled) this.fenceDirectCleanup(state, cleanup)
+				resolve()
+			}, PLACEMENT_STOP_TIMEOUT_MS)
+		})
 		const cleanup: DirectCleanup = {
 			decoder,
 			run,
+			deadline,
 			settled: false,
 			fenced: false,
 		}
@@ -6483,29 +6502,29 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
-	 * Waits for a cleanup's stop(), at most PLACEMENT_STOP_TIMEOUT_MS (the placement stop's deadline) from this call.
-	 * Joining counts as having stopped that exited run. At the bound the instance is fenced, with one warning, and the
-	 * caller goes on; a fenced cleanup is not waited for again.
+	 * A cleanup that outlived its deadline: its instance never starts again. Still the decoder's instance, it loses
+	 * its listeners now, so a stop() or a drain that resumes late reaches nothing the manager owns even if no start
+	 * follows to replace it (replaceFencedDecoder).
 	 */
-	private async joinDirectCleanup(
+	private fenceDirectCleanup(
 		state: DecoderState,
 		cleanup: DirectCleanup,
-	): Promise<void> {
-		if (cleanup.settled || cleanup.fenced) return
-		let timer: ReturnType<typeof setTimeout> | undefined
-		const ended = await Promise.race([
-			cleanup.run.then(() => true),
-			new Promise<false>(resolve => {
-				timer = setTimeout(() => resolve(false), PLACEMENT_STOP_TIMEOUT_MS)
-			}),
-		])
-		clearTimeout(timer)
-		if (ended || cleanup.settled || cleanup.fenced) return
+	): void {
 		cleanup.fenced = true
 		this.log.warn(
 			{ decoderId: state.config.id, reasonCode: "cleanup-timeout" },
 			"Decoder cleanup after its channel ended did not finish in time; its next start uses a new instance",
 		)
+		if (state.decoder === cleanup.decoder) cleanup.decoder.removeAllListeners()
+	}
+
+	/**
+	 * Waits for a cleanup's run, at most until its one deadline (set when it started), so every joiner is released
+	 * together. Joining counts as having stopped that exited run; a fenced cleanup is not waited for again.
+	 */
+	private async joinDirectCleanup(cleanup: DirectCleanup): Promise<void> {
+		if (cleanup.settled || cleanup.fenced) return
+		await Promise.race([cleanup.run, cleanup.deadline])
 	}
 
 	/**
@@ -8074,7 +8093,7 @@ export class DecoderManager extends EventEmitter {
 		const cleanup = state.directCleanup
 		if (cleanup !== undefined) {
 			// An exited run's own stop() is in flight: this stop joins it (bounded) and never calls it again.
-			await this.joinDirectCleanup(state, cleanup)
+			await this.joinDirectCleanup(cleanup)
 			// Without the actor, that stop() is this whole stop: nothing is left to signal. The actor signals nothing
 			// either while the decoder is not running.
 			if (
@@ -8225,7 +8244,7 @@ export class DecoderManager extends EventEmitter {
 		// Direct input: an adapter whose child exited at its channel's end is cleaned up before any instance runs again;
 		// one whose cleanup outlived the bound is replaced by a new instance.
 		if (state.directCleanup !== undefined)
-			await this.joinDirectCleanup(state, state.directCleanup)
+			await this.joinDirectCleanup(state.directCleanup)
 		if (state.stopping || !canStart()) return { wired: false, superseded: true }
 		const cleanup = state.directCleanup
 		if (cleanup?.fenced && cleanup.decoder === state.decoder)
