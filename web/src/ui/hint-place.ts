@@ -1,5 +1,5 @@
 // Where a hint bubble goes (docs/web/DESIGN.md, Hints): inside the surface that holds its mark, never over the
-// row it explains. Pure: rectangles in, a position out, no DOM.
+// row it explains; out of it, in the window, only when the surface has no room beside the row. Pure: rectangles in, a position out, no DOM.
 
 export interface HintRect {
 	readonly left: number
@@ -32,16 +32,33 @@ export interface HintPlaceInput {
 	 * would spill over its row or out of its host; with less room than this on both sides it is not shown.
 	 */
 	readonly minHeight?: number
+	/**
+	 * Where it may go when its host has no room for even the shortest cut beside the row: out of the host, in
+	 * the window (`host`: the host's whole surface, kept clear; `obstacles`: other islands, kept clear too).
+	 * Without it, no room in the host means not shown.
+	 */
+	readonly around?: {
+		readonly host: HintRect
+		readonly obstacles: readonly HintRect[]
+	}
 }
+
+/** A side of the kept row (inside the host) or of the host (outside it). */
+export type HintSide = "above" | "below" | "left" | "right"
 
 export interface HintPlacement {
 	readonly x: number
 	readonly y: number
-	/** `none`: no side of the kept row has room for even the shortest cut; the bubble is not shown. */
-	readonly side: "above" | "below" | "none"
 	/**
-	 * Set only when neither side of the kept row has room for the whole bubble: the height it may take on the
-	 * roomier side (px). The bubble's body scrolls within it; it never grows back over its row.
+	 * Inside the host: `above` or `below` the kept row. Out of it (`outside`): the side of the host it lies on.
+	 * `none`: no room for even the shortest cut, in the host or around it; the bubble is not shown.
+	 */
+	readonly side: HintSide | "none"
+	/** Set when the host had no room beside its row and the bubble lies out of the host, in the window. */
+	readonly outside?: true
+	/**
+	 * Set only when the bubble does not fit whole where it goes: the height it may take there (px). The bubble's
+	 * body scrolls within it; it never grows back over its row.
 	 */
 	readonly maxHeight?: number
 }
@@ -110,7 +127,8 @@ export function hintBox(
  * Above the kept row first (a finger covers what is below), start-aligned with it and shifted sideways to stay
  * in the host; below when above has no room. When neither fits, the roomier side with the bubble's height
  * capped to that side's room (`maxHeight`, its body scrolls): never over its own row. When even the roomier
- * side is shorter than `minHeight` (a row that fills its host), `side: "none"`: no sliver is drawn.
+ * side is shorter than `minHeight` (a row that fills its host), out of the host in the window
+ * (`placeHintOutside`, given `around`); with no room there either, `side: "none"`: no sliver is drawn.
  */
 export function placeHint(input: HintPlaceInput): HintPlacement {
 	const { keep, size } = input
@@ -137,9 +155,173 @@ export function placeHint(input: HintPlaceInput): HintPlacement {
 	const y = side === "above" ? aboveStart : belowStart
 	const maxHeight = side === "above" ? aboveRoom : belowRoom
 	// less room than the bubble's own padding, border and two lines: a sliver would spill, so none is drawn
-	if (maxHeight < Math.max(1, Math.ceil(input.minHeight ?? 0)))
-		return { x, y, side: "none" }
+	// in the host; out of it, around the host in the window, if there is room there
+	if (maxHeight < Math.max(1, Math.ceil(input.minHeight ?? 0))) {
+		const out = input.around
+			? placeHintOutside({
+					keep,
+					host: input.around.host,
+					obstacles: input.around.obstacles,
+					viewport: input.viewport,
+					size,
+					inset: input.inset ?? HINT_INSET,
+					gap,
+					minHeight: input.minHeight ?? 0,
+				})
+			: null
+		return out ?? { x, y, side: "none" }
+	}
 	return { x, y, side, maxHeight }
+}
+
+export interface HintOutsideInput {
+	/** The row the hint explains: kept clear. */
+	readonly keep: HintRect
+	/** The host's whole surface: kept clear (the bubble lies beside it, not on it). */
+	readonly host: HintRect
+	/** Other islands: kept clear. */
+	readonly obstacles: readonly HintRect[]
+	readonly viewport: HintSize
+	readonly size: HintSize
+	/** How far the bubble keeps inside the window (px). */
+	readonly inset?: number
+	/** The gap kept to the host, the row and every obstacle (px). */
+	readonly gap?: number
+	/** The shortest cut worth drawing (px), as `HintPlaceInput.minHeight`. */
+	readonly minHeight?: number
+}
+
+/** The order the sides of the host are tried in: above first (a finger covers what is below), then below, beside. */
+const OUTSIDE_SIDES: readonly HintSide[] = ["above", "below", "right", "left"]
+
+/**
+ * The fallback for a host with no room beside its row: the bubble out of the host, in the window `inset` in from
+ * its edges, on a side of the host (above, below, right, left, in that order), clear by `gap` of the host, its
+ * row and every obstacle. Whole where it fits on some side (nearest the host and the row); else cut (`maxHeight`,
+ * its body scrolls) to the tallest free room any side has, when that is at least `minHeight`; else null.
+ * Whole px: the bubble's box (its width and its height, rounded up) never leaves the room it was given.
+ */
+export function placeHintOutside(
+	input: HintOutsideInput,
+): HintPlacement | null {
+	const { keep, host, viewport } = input
+	const inset = input.inset ?? HINT_INSET
+	const gap = input.gap ?? HINT_GAP
+	const w = Math.ceil(input.size.width)
+	const h = Math.ceil(input.size.height)
+	const min = Math.max(1, Math.ceil(input.minHeight ?? 0))
+	// the window, inset; every region and free stretch in whole px, rounded inward
+	const win = {
+		left: Math.ceil(inset),
+		top: Math.ceil(inset),
+		right: Math.floor(viewport.width - inset),
+		bottom: Math.floor(viewport.height - inset),
+	}
+	// what the bubble keeps clear: the host, its row and the obstacles, each grown by the gap
+	const grow = (r: HintRect): HintRect => ({
+		left: Math.floor(r.left - gap),
+		top: Math.floor(r.top - gap),
+		right: Math.ceil(r.right + gap),
+		bottom: Math.ceil(r.bottom + gap),
+	})
+	const clear = [host, keep, ...input.obstacles]
+		.filter(r => r.right > r.left && r.bottom > r.top)
+		.map(grow)
+	const g = grow(host)
+	const region = (side: HintSide): HintRect => {
+		switch (side) {
+			case "above":
+				return { ...win, bottom: Math.min(win.bottom, g.top) }
+			case "below":
+				return { ...win, top: Math.max(win.top, g.bottom) }
+			case "left":
+				return { ...win, right: Math.min(win.right, g.left) }
+			case "right":
+				return { ...win, left: Math.max(win.left, g.right) }
+		}
+	}
+	interface Spot {
+		readonly side: HintSide
+		readonly x: number
+		/** A free vertical stretch at `x`, `w` wide. */
+		readonly top: number
+		readonly bottom: number
+	}
+	const spots: Spot[] = []
+	for (const side of OUTSIDE_SIDES) {
+		const r = region(side)
+		if (r.right - r.left < w || r.bottom - r.top < min) continue
+		const fit = (x: number) => Math.max(r.left, Math.min(x, r.right - w))
+		// the start-aligned spot first (beside the host for left and right), then beside each obstacle
+		const first =
+			side === "left"
+				? r.right - w
+				: side === "right"
+					? r.left
+					: fit(Math.round(keep.left))
+		const xs = [first]
+		for (const o of clear) xs.push(fit(o.right), fit(o.left - w))
+		xs.push(r.left, r.right - w)
+		const seen = new Set<number>()
+		for (const x of xs
+			.map(fit)
+			.sort((a, b) => Math.abs(a - first) - Math.abs(b - first))) {
+			if (seen.has(x)) continue
+			seen.add(x)
+			// the stretches of the region's height that no obstacle in this column takes
+			const blocks = clear
+				.filter(o => o.left < x + w && o.right > x)
+				.map(
+					o => [Math.max(o.top, r.top), Math.min(o.bottom, r.bottom)] as const,
+				)
+				.filter(([a, b]) => b > a)
+				.sort((a, b) => a[0] - b[0])
+			let from = r.top
+			for (const [a, b] of blocks) {
+				if (a - from >= min) spots.push({ side, x, top: from, bottom: a })
+				from = Math.max(from, b)
+			}
+			if (r.bottom - from >= min)
+				spots.push({ side, x, top: from, bottom: r.bottom })
+		}
+	}
+	// how far a spot is from the host's side and the row (nearer first)
+	const away = (s: Spot, y: number): number =>
+		s.side === "above"
+			? host.top - (y + h)
+			: s.side === "below"
+				? y - host.bottom
+				: Math.abs(y - keep.top) +
+					(s.side === "left" ? host.left - (s.x + w) : s.x - host.right)
+	const yWhole = (s: Spot): number =>
+		s.side === "above"
+			? s.bottom - h
+			: s.side === "below"
+				? s.top
+				: Math.max(s.top, Math.min(Math.round(keep.top), s.bottom - h))
+	// whole: the first side with a spot it fits in, the nearest spot on that side
+	for (const side of OUTSIDE_SIDES) {
+		let best: { x: number; y: number; d: number } | null = null
+		for (const s of spots) {
+			if (s.side !== side || s.bottom - s.top < h) continue
+			const y = yWhole(s)
+			const d = away(s, y)
+			if (!best || d < best.d) best = { x: s.x, y, d }
+		}
+		if (best) return { x: best.x, y: best.y, side, outside: true }
+	}
+	// cut: the tallest free stretch (the earlier side and the nearer spot on a tie)
+	let cut: Spot | null = null
+	for (const s of spots)
+		if (!cut || s.bottom - s.top > cut.bottom - cut.top) cut = s
+	if (!cut) return null
+	return {
+		x: cut.x,
+		y: cut.top,
+		side: cut.side,
+		outside: true,
+		maxHeight: cut.bottom - cut.top,
+	}
 }
 
 /**

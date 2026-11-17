@@ -8,7 +8,8 @@
  * pins it (a learn card when it has one); a bubble cut to the room beside its row (none fits whole) scrolls, and
  * the keyboard reaches it: Tab from the mark goes into it, ArrowDown and End scroll it, Shift+Tab goes back to
  * the mark; focus in it goes back to the mark, never to the page, when it becomes whole (the hint stays open),
- * when a scroll elsewhere closes it and when a click on nothing focusable closes it; no bubble is drawn with less
+ * when a scroll elsewhere closes it and when a real click on nothing focusable closes it (a click on something
+ * focusable keeps the focus it gives); no bubble is drawn with less
  * room than its padding, border and two lines; Escape closes the hint and leaves focus on the mark and the panel open. At 390×844 a tap (a touch pointer, then the click) pins it, and a tap elsewhere closes it. At 1440×900
  * a mouse opens the first hint after the delay, keeps it over the bubble and closes it once it leaves the
  * bubble; a hint keyboard focus showed stays while the mouse comes and goes, and Escape closes it; and with a
@@ -129,7 +130,18 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 		)
 			problems.push("clipped by the window")
 		const host = mark.closest(HOST)
-		if (host) {
+		if (host && bubble.dataset["outside"] !== undefined) {
+			// no room beside its row in the host: out of it, in the window INSET in, never over the host
+			if (
+				b.left < INSET - SLACK ||
+				b.top < INSET - SLACK ||
+				b.right > innerWidth - INSET + SLACK ||
+				b.bottom > innerHeight - INSET + SLACK
+			)
+				problems.push("out of its host, but not inside the window")
+			if (meets(host.getBoundingClientRect()))
+				problems.push("out of its host, but over it")
+		} else if (host) {
 			const h = host.getBoundingClientRect()
 			// the box the placement uses: the host clipped to the window, INSET in from every edge
 			if (
@@ -209,10 +221,14 @@ async function cutByKeyboard(page: Page, id: string): Promise<string[]> {
 	}
 	// End: the whole range in one key
 	await page.keyboard.press("End")
-	if (!(await within(2_000, async () => (await where()).scrollTop > 0))) {
+	const atEnd = async () => {
+		const w = await where()
+		return Math.abs(w.scrollTop - w.range) <= 1
+	}
+	if (!(await within(2_000, atEnd))) {
 		const w = await where()
 		problems.push(
-			`the keyboard did not scroll the cut card (range ${w.range}, focus ${w.active})`,
+			`End did not scroll the cut card to its end (at ${w.scrollTop} of ${w.range}, focus ${w.active})`,
 		)
 	}
 	await page.keyboard.press("Shift+Tab")
@@ -242,8 +258,9 @@ const focusState = (page: Page, id: string) =>
 
 /**
  * Focus in a cut bubble is never dropped to the page: when the bubble becomes whole (its content shrinks) focus
- * goes to the mark and the hint stays open; when a scroll elsewhere or a click on nothing focusable closes it,
- * focus goes to the mark. Starts and ends with the hint pinned, cut, and focus in it.
+ * goes to the mark and the hint stays open; when a scroll elsewhere or a real click on nothing focusable closes
+ * it, focus goes to the mark and stays there through the whole click; a real click on something focusable (another
+ * mark) closes it and keeps the focus it gives. Starts and ends with the hint pinned, cut, and focus in it.
  */
 async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
 	const problems: string[] = []
@@ -283,19 +300,162 @@ async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
 		problems.push(`a scroll elsewhere dropped focus to ${scrolled.active}`)
 	await page.keyboard.press("Enter")
 	await backIn("after the scroll")
-	// a press on nothing focusable (the page) closes it: focus to the mark
-	await page.evaluate(() =>
-		document.body.dispatchEvent(
-			new PointerEvent("pointerdown", { bubbles: true, pointerType: "mouse" }),
-		),
+	// a real click on nothing focusable closes it: focus to the mark, and still there once the whole click
+	// (down, up, click) is over
+	const plain = await plainPoint(page, id)
+	if (!plain) problems.push("no plain text in the panel to click")
+	else {
+		await page.mouse.click(plain.x, plain.y)
+		await within(2_000, async () => !(await focusState(page, id)).open)
+		await frames(page, 2)
+		const clicked = await focusState(page, id)
+		if (clicked.open) problems.push(`a click on ${plain.what} left it open`)
+		if (!clicked.onMark)
+			problems.push(
+				`a click on ${plain.what} dropped focus to ${clicked.active}`,
+			)
+		await page.keyboard.press("Enter")
+		await backIn("after the click")
+	}
+	// a real click on something focusable (another hint's mark) closes it and keeps the focus it gives
+	const other = await page.evaluate(markId => {
+		const panel = document.querySelector(
+			'[role="region"][aria-label="Audio options"]',
+		)
+		const m = [
+			...(panel?.querySelectorAll<HTMLElement>("[data-wk-hint-mark]") ?? []),
+		].find(e => e.dataset["wkHintMark"] !== markId)
+		if (!m) return null
+		m.scrollIntoView({ block: "nearest" })
+		const r = m.getBoundingClientRect()
+		return {
+			id: m.dataset["wkHintMark"] ?? "",
+			x: Math.round(r.left + r.width / 2),
+			y: Math.round(r.top + r.height / 2),
+		}
+	}, id)
+	if (!other) problems.push("no other mark to click")
+	else {
+		await page.mouse.click(other.x, other.y)
+		await within(2_000, async () => !(await focusState(page, id)).open)
+		const onOther = await page.evaluate(
+			otherId =>
+				document.activeElement?.getAttribute("data-wk-hint-mark") === otherId,
+			other.id,
+		)
+		if ((await focusState(page, id)).open)
+			problems.push("a click on another mark left it open")
+		if (!onOther)
+			problems.push(
+				`a click on another mark put focus on ${(await focusState(page, id)).active}`,
+			)
+		// close the other mark's hint, move the mouse off every mark, and come back to this one
+		if ((await measure(page, other.id)).open)
+			await page.keyboard.press("Escape")
+		if (plain) await page.mouse.move(plain.x, plain.y)
+		await page.locator(`[data-wk-hint-mark="${id}"]`).focus()
+		await page.keyboard.press("Enter")
+		await within(2_000, async () => (await measure(page, id)).open)
+		await backIn("after the click on another mark")
+	}
+	return problems
+}
+
+/**
+ * A point in the Audio options panel on plain text: nothing focusable, no hint mark, label or bubble under it.
+ * Null when the panel shows none.
+ */
+const plainPoint = (page: Page, id: string) =>
+	page.evaluate(markId => {
+		const FOCUSABLE =
+			'a[href], button, input, select, textarea, summary, label, [tabindex], [contenteditable]:not([contenteditable="false"]), [role]:not([role="region"]):not([role="group"]):not([role="presentation"])'
+		const panel = document.querySelector(
+			'[role="region"][aria-label="Audio options"]',
+		)
+		const bubble = document.querySelector(`[data-wk-hint-bubble="${markId}"]`)
+		if (!panel) return null
+		const p = panel.getBoundingClientRect()
+		for (
+			let y = Math.max(p.top, 0) + 4;
+			y < Math.min(p.bottom, innerHeight) - 4;
+			y += 6
+		)
+			for (let x = p.left + 4; x < p.right - 4; x += 6) {
+				const el = document.elementFromPoint(x, y)
+				if (!el || !panel.contains(el) || bubble?.contains(el)) continue
+				if (el.closest(FOCUSABLE) || el.closest(".wk-hint-anchor")) continue
+				if (!(el.textContent ?? "").trim()) continue
+				// on the text itself, not the gap beside it
+				const range = document.createRange()
+				range.selectNodeContents(el)
+				const onText = [...range.getClientRects()].some(
+					r => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom,
+				)
+				if (!onText) continue
+				return {
+					x,
+					y,
+					what: `${el.tagName.toLowerCase()} "${(el.textContent ?? "").trim().slice(0, 24)}"`,
+				}
+			}
+		return null
+	}, id)
+
+/**
+ * A pinned hint with no room anywhere for even its shortest cut (its lines made taller than the window) is
+ * not drawn, and the mark says so: not expanded, controlling nothing, still described by the sentence; focus is
+ * on the mark. With its lines back, Escape and Enter pin it again, drawn and expanded. Left pinned.
+ */
+async function noRoomNotExpanded(page: Page, id: string): Promise<string[]> {
+	const problems: string[] = []
+	const state = () =>
+		page.evaluate(markId => {
+			const mark = document.querySelector(`[data-wk-hint-mark="${markId}"]`)
+			const bubble = document.querySelector<HTMLElement>(
+				`[data-wk-hint-bubble="${markId}"]`,
+			)
+			const d = mark?.getAttribute("aria-describedby")?.split(" ")[0] ?? ""
+			return {
+				mounted: bubble !== null,
+				hidden: bubble?.hidden ?? true,
+				expanded: mark?.getAttribute("aria-expanded") ?? null,
+				controls: mark?.getAttribute("aria-controls") ?? null,
+				described: (document.getElementById(d)?.textContent ?? "").length > 0,
+			}
+		}, id)
+	await page.evaluate(markId => {
+		const style = document.createElement("style")
+		style.id = "wk-flow-no-room"
+		style.textContent = `[data-wk-hint-bubble="${markId}"] { line-height: 2000px !important }`
+		document.head.append(style)
+	}, id)
+	const gone = await within(2_000, async () => {
+		const s = await state()
+		return s.mounted && s.hidden && s.expanded === "false"
+	})
+	const s = await state()
+	if (!gone)
+		problems.push(
+			`no room: hidden ${s.hidden}, aria-expanded ${s.expanded}, controls ${s.controls}`,
+		)
+	if (s.controls !== null) problems.push("no room: still controls the bubble")
+	if (!s.described) problems.push("no room: the mark lost its sentence")
+	const onMark = await page.evaluate(
+		markId =>
+			document.activeElement?.getAttribute("data-wk-hint-mark") === markId,
+		id,
 	)
-	await within(2_000, async () => !(await focusState(page, id)).open)
-	const pressed = await focusState(page, id)
-	if (pressed.open) problems.push("a press elsewhere left it open")
-	if (!pressed.onMark)
-		problems.push(`a press elsewhere dropped focus to ${pressed.active}`)
+	if (!onMark) problems.push("no room: focus is not on the mark")
+	await page.evaluate(() =>
+		document.getElementById("wk-flow-no-room")?.remove(),
+	)
+	await page.keyboard.press("Escape")
 	await page.keyboard.press("Enter")
-	await backIn("after the press")
+	const back = await within(2_000, async () => {
+		const t = await state()
+		return !t.hidden && t.expanded === "true" && t.controls !== null
+	})
+	if (!back) problems.push("room again: not drawn or not expanded")
 	return problems
 }
 
@@ -780,6 +940,8 @@ export async function hintsFlow(
 				pinProblems.push(...(await cutByKeyboard(page, at.mark)))
 				pinProblems.push(...(await cutKeepsFocus(page, at.mark)))
 			}
+			if (seen.length === 1)
+				pinProblems.push(...(await noRoomNotExpanded(page, at.mark)))
 			// Escape closes the hint only: focus stays on the mark, the panel stays open
 			await page.keyboard.press("Escape")
 			await within(
