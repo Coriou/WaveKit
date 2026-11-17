@@ -880,10 +880,28 @@ describe("PlaybackService: a pause or play from outside the service", () => {
 		expect(s.p.get().phase).toBe("playing")
 		s.audio.emit("ended")
 		expect(s.p.get().phase).toBe("ended")
-		// an outside play after the end does not resume it (only a paused one)
-		s.audio.paused = false
-		s.audio.emit("play")
+		expect(s.held).toEqual([true, false])
+	})
+
+	it("an outside play after the end plays it again from its start and holds live audio again", async () => {
+		const s = setup()
+		await playing(s)
+		s.audio.paused = true
+		s.audio.ended = true
+		s.audio.emit("ended")
 		expect(s.p.get().phase).toBe("ended")
+		expect(s.held).toEqual([true, false])
+		// a media key: the element starts over from 0
+		s.audio.ended = false
+		s.audio.paused = false
+		s.audio.currentTime = 0
+		s.audio.emit("play")
+		expect(s.p.get()).toMatchObject({
+			phase: "playing",
+			wantPlay: true,
+			pos: 0,
+		})
+		expect(s.held).toEqual([true, false, true])
 	})
 
 	it("loading, idle and an old src ignore pause and play", async () => {

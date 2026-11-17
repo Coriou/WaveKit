@@ -620,8 +620,15 @@ export class PlaybackService extends Store<PlaybackState> {
 		el.addEventListener("play", () => {
 			if (!this.live() || el.paused === true) return
 			const s = this.get()
-			if (s.phase === "paused")
-				this.set({ ...s, phase: "playing", error: null, wantPlay: true })
+			// after the end the element plays from its start: the recording plays again, so live audio is held again
+			if (s.phase === "paused" || s.phase === "ended")
+				this.set({
+					...s,
+					phase: "playing",
+					error: null,
+					wantPlay: true,
+					pos: s.phase === "ended" ? el.currentTime : s.pos,
+				})
 		})
 		el.addEventListener("error", () => {
 			const s = this.get()
