@@ -1,4 +1,4 @@
-# recorded wavekit:wg24-m1-core dsd-fme -fs -V 3 (ids replaced)
+# recorded wavekit core image dsd-fme -fs -V 3 (ids replaced)
 # a repeater over whose VC6 link control is followed by a same-slot sync loss, a slot 2 burst run, then the terminator train
 # arrival ms<TAB>line, relative; TGT/SRC replaced by synthetic values of the same digit count
 1000	00:00:01 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m

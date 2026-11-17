@@ -1,4 +1,4 @@
-# recorded wavekit:wg24-m1-core dsd-fme -fs -V 3 (ids replaced)
+# recorded wavekit core image dsd-fme -fs -V 3 (ids replaced)
 # a repeater over started on its voice frames: VC6 link control, CACH and other-slot errors, then a terminator train of TLC + LC pairs
 # arrival ms<TAB>line, relative; TGT/SRC replaced by synthetic values of the same digit count
 1000	00:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=00 | PI  [31m (FEC ERR)[0m

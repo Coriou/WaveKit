@@ -1,4 +1,4 @@
-# recorded wavekit:wg24-m1-core dsd-fme -fs -V 3 (ids replaced)
+# recorded wavekit core image dsd-fme -fs -V 3 (ids replaced)
 # a direct key-up whose first voice LC header printed a garbled colour code, a second header 209 ms later
 # arrival ms<TAB>line, relative; TGT/SRC replaced by synthetic values of the same digit count
 1000	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | TLC [31m 

@@ -1,4 +1,4 @@
-# recorded wavekit:wg24-m1-core dsd-fme -fa -V 3 -Z (ids replaced)
+# recorded wavekit core image dsd-fme -fa -V 3 -Z (ids replaced)
 # a false link control after a bracketless terminator printing FLCO=0x28 SVC=0x10
 # arrival ms<TAB>line, relative; TGT/SRC replaced by synthetic values of the same digit count
 1000	00:00:01 Sync: +DMR   slot1   slot2  [31m| CACH/Burst FEC ERR[0m

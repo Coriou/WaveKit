@@ -260,7 +260,7 @@ describe("dsd-fme call-first lifecycle", () => {
 		expect(ends[0]!.flags?.encrypted).toBe(true)
 	})
 
-	it("a call started on its IDs is back-dated to its first sync and known from the start", () => {
+	it("a call joined late on its IDs is back-dated to its first sync and settles clear on the next clean sync", () => {
 		const { starts, voice } = replay(
 			[
 				[0, MS("VC*")],
@@ -270,8 +270,11 @@ describe("dsd-fme call-first lifecycle", () => {
 			6000,
 		)
 		expect(at(starts[0]!.startedAt)).toBe(0)
-		expect(starts[0]!.encryptionKnown).toBeUndefined()
-		expect(voice.every(v => v.encryptionKnown === undefined)).toBe(true)
+		// An LC after a voice burst with no call running is a late join: it
+		// did not hear the header, so it is not known at start; its next clean
+		// sync settled it before the call_start went out.
+		expect(starts[0]!.encryptionKnown).toBe(true)
+		expect(voice.every(v => v.encryptionKnown === true)).toBe(true)
 	})
 
 	it("does not start a phantom call from the terminator LC of a call ended before its IDs", () => {

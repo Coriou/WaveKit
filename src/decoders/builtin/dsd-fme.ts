@@ -112,6 +112,9 @@ const DMR_VOICE_EVENT =
 /** DMR TLC fields: "FLCO=0x00 FID=0x00 SVC=0x00" */
 const DMR_TLC_FIELDS =
 	/\bFLCO=0x(?<flco>[0-9A-F]+)\b.*\bFID=0x(?<fid>[0-9A-F]+)\b.*\bSVC=0x(?<svc>[0-9A-F]+)\b/i
+/** One -Z link control field on its own (dmrIdsPlausible): "FLCO=0x00", "FID=0x10". */
+const DMR_FLCO_FIELD = /\bFLCO=0x(?<flco>[0-9A-F]+)\b/i
+const DMR_FID_FIELD = /\bFID=0x(?<fid>[0-9A-F]+)\b/i
 /**
  * DMR call termination. dsd-fme labels each data burst in a "| <type>" column
  * (dmr_dburst.c); "| TLC" is the Terminator with Link Control that ends every
@@ -377,6 +380,8 @@ export interface DsdFmeVoiceCallState {
 	active: boolean
 	startedAt: string
 	endedAt?: string
+	/** An end the decoder's restart forced (the call tap's "restart"). */
+	endReason?: "restart"
 	/** WG2 (lane X fills these): DMR colour code. */
 	colourCode?: number
 	/** P25 NAC, upper-case hex. */
@@ -458,6 +463,8 @@ interface CallFlags {
 	timeout: boolean // Ended via timeout vs explicit terminator
 	badSignal: boolean // High error rate
 	falsePositiveSuppressed: boolean
+	/** Ended because the decoder restarted (a crash restart): the tap's "restart". */
+	restart?: true
 }
 
 /**
@@ -515,7 +522,7 @@ interface DsdFmeCallState {
 	 * the call's (rival): the call is no longer known clear, and a second
 	 * agreeing copy is the next talker (handleDmrIds).
 	 */
-	rival?: { talkgroup: number; source: number } | undefined
+	rival?: { talkgroup: number; source: number; voiceSeq: number } | undefined
 }
 
 /**
@@ -596,6 +603,8 @@ interface CallLane {
 	recentlyTerminated: CallTrailer | null
 	chain: SyncChain | null
 	lastVoiceSyncMs: number | undefined
+	/** The lane's voice burst syncs seen so far (a rival's copy order). */
+	voiceSeq: number
 	pendingKnown: PendingKnown | undefined
 	laneSync: LaneSync | undefined
 	candidate: VlcCandidate | undefined
@@ -607,6 +616,7 @@ const emptyLane = (): CallLane => ({
 	recentlyTerminated: null,
 	chain: null,
 	lastVoiceSyncMs: undefined,
+	voiceSeq: 0,
 	pendingKnown: undefined,
 	laneSync: undefined,
 	candidate: undefined,
@@ -642,6 +652,8 @@ interface VlcCandidate {
 	slot: number | undefined
 	encrypted: boolean
 	atMs: number
+	/** A sync line of the lane followed it: a later error line is not its burst's. */
+	sealed: boolean
 }
 
 /**
@@ -844,6 +856,9 @@ export const DMR_SOURCE_MAX = DMR_TALKGROUP_MAX - 800
  * anchored: a line that merely contains one of them still drops it.
  */
 const BURST_NEUTRAL_LINES: readonly RegExp[] = [
+	// Not in the design's allowlist: a blank line prints no burst content
+	// (dsd-fme pads its output with empty lines), so it neither settles nor
+	// drops, like the listed prints. Everything else stays anchored below.
 	/^\s*$/,
 	/^\s*SLCO CRC ERR\s*$/,
 	/^\s*SLCO NULL\b/,
@@ -872,11 +887,14 @@ function dmrBracketlessBs(line: string): boolean {
 function dmrIdsPlausible(line: string, tg: number, src: number): boolean {
 	if (tg < 1 || tg > DMR_TALKGROUP_MAX || src < 1 || src > DMR_SOURCE_MAX)
 		return false
-	const fields = DMR_TLC_FIELDS.exec(line)?.groups
-	if (fields === undefined) return true
-	const flco = parseInt(fields["flco"] ?? "", 16)
-	const fid = parseInt(fields["fid"] ?? "", 16)
-	return (flco === 0x00 || flco === 0x03) && fid === 0x00
+	// Each field on its own: a print with FLCO or FID but no SVC is checked too.
+	const flcoText = DMR_FLCO_FIELD.exec(line)?.groups?.["flco"]
+	const fidText = DMR_FID_FIELD.exec(line)?.groups?.["fid"]
+	if (flcoText !== undefined) {
+		const flco = parseInt(flcoText, 16)
+		if (flco !== 0x00 && flco !== 0x03) return false
+	}
+	return fidText === undefined || parseInt(fidText, 16) === 0x00
 }
 
 /**
@@ -1017,7 +1035,7 @@ interface CallEventData {
 	talkgroup?: number | null
 	source?: number | null
 	slot?: number | undefined
-	flags?: { encrypted?: boolean; wavFileUpdate?: boolean }
+	flags?: { encrypted?: boolean; wavFileUpdate?: boolean; restart?: true }
 	dmr?: DmrMetadata
 	p25?: P25Metadata
 	nxdn?: NxdnMetadata
@@ -1087,6 +1105,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private laneSync: LaneSync | undefined
 	/** The current lane's voice LC header candidate (VlcCandidate). */
 	private candidate: VlcCandidate | undefined
+	/** The current lane's voice sync sequence number (CallLane.voiceSeq). */
+	private voiceSeq = 0
 	/**
 	 * DMR link controls whose IDs were not taken (a terminator's train, an
 	 * implausible ID, a -Z print of no voice call, another talker's single
@@ -1341,6 +1361,20 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * even when no new output is being received from dsd-fme.
 	 */
 	override async start(): Promise<void> {
+		// A start while the child runs is ignored (super.start): nothing ends.
+		if (this.process) {
+			await super.start()
+			return
+		}
+		// A crash restart calls start() again without stop(): the old timer is
+		// cleared (never orphaned) and every call still open ends now, through
+		// call_end, flagged restart.
+		if (this.callTimeoutTimer) {
+			clearInterval(this.callTimeoutTimer)
+			this.callTimeoutTimer = null
+		}
+		this.endOpenCallsForRestart(new Date())
+
 		await super.start()
 
 		// Start periodic call timeout check timer
@@ -1350,6 +1384,44 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		this.logger.debug("Call timeout timer started")
 		this.schedulePrune(0)
+	}
+
+	/**
+	 * Ends every lane's open call (pending, running or holding its call_end
+	 * for the trailer) with the restart flag, and clears what the old child's
+	 * lines left per lane (proofs, candidates, chains, the last sync).
+	 */
+	private endOpenCallsForRestart(now: Date): void {
+		this.forEachLane(() => {
+			const call = this.callState ?? this.pendingCall?.state ?? null
+			if (call !== null) {
+				call.flags.restart = true
+				let ended: DecoderOutput | null
+				if (call.heldEnd !== undefined) ended = this.closeHeldEnd(now)
+				else {
+					if (this.pendingCall) {
+						this.callState = this.pendingCall.state
+						this.pendingCall = null
+					}
+					ended = this.endCall(now, true)
+				}
+				if (ended) this.emitOutput(ended)
+			}
+			this.callState = null
+			this.pendingCall = null
+			this.recentlyTerminated = null
+			this.chain = null
+			this.lastVoiceSyncMs = undefined
+			this.pendingKnown = undefined
+			this.laneSync = undefined
+			this.candidate = undefined
+		})
+		this.flushPendingDmrLink(false)
+		// The old child's DMR mode and slot state, as stop() clears it.
+		this.linkDmrCc.clear()
+		this.linkDmrMs = false
+		this.dmrBs = false
+		this.dmrBsSlot = 1
 	}
 
 	/**
@@ -1420,6 +1492,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			active,
 			startedAt: data.startedAt ?? output.timestamp.toISOString(),
 			...(data.endedAt !== undefined ? { endedAt: data.endedAt } : {}),
+			...(!active && data.flags?.restart === true
+				? { endReason: "restart" as const }
+				: {}),
 		}
 		applyVoiceMetadata(state, {
 			dmr: data.dmr ?? live?.dmr,
@@ -1580,6 +1655,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const held = call?.heldEnd
 		if (call === null || held === undefined) return false
 		if (SYNC_PATTERN.test(line)) {
+			// A sync that printed an error or lost sync does not close the
+			// trailer's burst clean.
+			if (burstError(line) || /Frame Sync Err\b|SYNC LOST|no sync/i.test(line))
+				held.errored = true
 			// The terminator printed again (its lane's) before its trailer does
 			// not close its own burst: the call_end stays held for the trailer
 			// (handleTermination). After the trailer it is the next burst of
@@ -1597,7 +1676,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			DMR_VOICE_EVENT.exec(line)?.groups ?? DMR_TGT_SRC.exec(line)?.groups
 		const errored = burstError(line)
 		if (errored) held.errored = true
-		if (ids === undefined || held.lc) return false
+		// A non-clear algorithm print drops the held clear, as it drops
+		// pendingKnown (the line still marks the call encrypted below).
+		const heldAlg =
+			ids === undefined ? ALG_ID.exec(line)?.groups?.["alg"] : undefined
+		if (heldAlg !== undefined && !isClearAlgorithm(heldAlg)) held.errored = true
+		// Any other line of the lane that is not the trailer (a CSBK print,
+		// a second LC, another talker's) means the burst did not close clean.
+		if (ids === undefined || held.lc) {
+			held.errored = true
+			return false
+		}
 		const slotText =
 			DMR_SLOT_INLINE.exec(line)?.groups?.["slot"] ??
 			DMR_SLOT_WORD.exec(line)?.groups?.["slot"]
@@ -1618,8 +1707,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (
 			!dmrIdsPlausible(line, tg, src) ||
 			(named && (call.talkgroup !== tg || call.source !== src))
-		)
+		) {
+			held.errored = true
 			return false
+		}
 		held.lc = true
 		if (!named) {
 			held.talkgroup = tg
@@ -1715,6 +1806,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			recentlyTerminated: this.recentlyTerminated,
 			chain: this.chain,
 			lastVoiceSyncMs: this.lastVoiceSyncMs,
+			voiceSeq: this.voiceSeq,
 			pendingKnown: this.pendingKnown,
 			laneSync: this.laneSync,
 			candidate: this.candidate,
@@ -1726,6 +1818,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.recentlyTerminated = next.recentlyTerminated
 		this.chain = next.chain
 		this.lastVoiceSyncMs = next.lastVoiceSyncMs
+		this.voiceSeq = next.voiceSeq
 		this.pendingKnown = next.pendingKnown
 		this.laneSync = next.laneSync
 		this.candidate = next.candidate
@@ -2290,6 +2383,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.updateErrorWindow(cleanLine, nowMs)
 		// STEP 3a: A clear link control counts once its burst closed clean.
 		this.resolvePendingKnown(cleanLine, nowMs)
+		this.dropErroredCandidate(cleanLine)
 		this.noteLaneSync(cleanLine, nowMs)
 
 		// STEP 3b: Publish link-control lines for the scanner (spec § 6.4)
@@ -2363,21 +2457,42 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 */
 	private noteLaneSync(line: string, nowMs: number): void {
 		const sync = SYNC_PATTERN.exec(line)
-		if (sync?.groups?.["proto"]?.toUpperCase() !== "DMR" || !line.includes("|"))
-			return
+		if (sync?.groups?.["proto"]?.toUpperCase() !== "DMR") return
+		// Any sync of the lane closes the candidate's burst (dropErroredCandidate).
+		if (this.candidate !== undefined) this.candidate.sealed = true
+		if (!line.includes("|")) return
 		const burst = DMR_BURST.exec(line)?.groups?.["burst"]
-		this.laneSync = {
-			kind:
-				burst === undefined
-					? "other"
-					: burst === "VLC"
-						? "vlc"
-						: burst === "TLC"
-							? "tlc"
-							: "voice",
-			clean: !LINE_ERR.test(line),
-			atMs: nowMs,
+		const kind: LaneSync["kind"] =
+			burst === undefined
+				? "other"
+				: burst === "VLC"
+					? "vlc"
+					: burst === "TLC"
+						? "tlc"
+						: "voice"
+		const clean = !LINE_ERR.test(line)
+		if (kind === "voice") this.voiceSeq++
+		// One LaneSync per lane, updated in place: no allocation per burst.
+		const lane = this.laneSync
+		if (lane === undefined) {
+			this.laneSync = { kind, clean, atMs: nowMs }
+			return
 		}
+		lane.kind = kind
+		lane.clean = clean
+		lane.atMs = nowMs
+	}
+
+	/**
+	 * A voice LC header candidate (VlcCandidate) whose burst printed a late
+	 * error line (an error line before the lane's next sync) was not checked:
+	 * it is dropped.
+	 */
+	private dropErroredCandidate(line: string): void {
+		const candidate = this.candidate
+		if (candidate === undefined || candidate.sealed) return
+		if (SYNC_PATTERN.test(line) || !burstError(line)) return
+		this.candidate = undefined
 	}
 
 	/**
@@ -3307,8 +3422,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// If we have TGT+SRC, process call state
 		if (tgt !== null && src !== null)
 			return this.handleDmrIds(line, now, tgt, src, slot, dmrMeta, encrypted)
+		// A clear algorithm print names no key: it never proves a call clear
+		// (only a link control equal to the call's IDs does), so it only
+		// drops a pending proof, as any unlisted line does (resolvePendingKnown).
 		if (encrypted) this.markDmrEncrypted(matchSlot)
-		else if (alg !== undefined) this.deferKnown(this.ongoingCall("dmr"), line)
 
 		// Only the over's own voice bursts keep its call alive or start one
 		// (handleDmrSync): idle and data bursts do not.
@@ -3360,6 +3477,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.rejectDmrIds("other slot")
 			return null
 		}
+		// An unchecked link control (its line printed an error: CRC, FEC, RAS,
+		// a key error) is never a candidate, a start or a rival. It may still
+		// say encrypted: muting is the safe side.
+		if (burstError(line)) {
+			if (encrypted) this.markDmrEncrypted(matchSlot)
+			this.rejectDmrIds("burst error")
+			return null
+		}
 		if (!dmrIdsPlausible(line, tgt, src)) {
 			this.rejectDmrIds("implausible")
 			return null
@@ -3371,8 +3496,22 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (named && !other) ongoing.rival = undefined
 		if (other && sync?.kind === "voice") {
 			const rival = ongoing.rival
+			// The second copy must follow a newer voice burst of the lane than
+			// the first (voiceSeq): a burst that prints its IDs twice is one copy.
+			if (
+				rival?.talkgroup === tgt &&
+				rival.source === src &&
+				this.voiceSeq <= rival.voiceSeq
+			) {
+				this.rejectDmrIds("same burst")
+				return null
+			}
 			if (rival?.talkgroup !== tgt || rival.source !== src) {
-				ongoing.rival = { talkgroup: tgt, source: src }
+				ongoing.rival = {
+					talkgroup: tgt,
+					source: src,
+					voiceSeq: this.voiceSeq,
+				}
 				ongoing.lastUpdate = now
 				this.revokeKnown(ongoing)
 				this.rejectDmrIds("single copy")
@@ -3404,13 +3543,25 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				slot: this.laneKey > 0 ? this.laneKey : slot,
 				encrypted,
 				atMs: now.getTime(),
+				sealed: false,
 			}
 			return null
 		}
 		const event = this.processCallMetadata(now, "dmr", tgt, src, slot, dmrMeta)
 		const call = this.ongoingCall("dmr")
-		if (call !== null && call !== ongoing && sync !== undefined)
-			call.voiceAtMs = sync.kind === "voice" ? sync.atMs : undefined
+		if (call !== null && call !== ongoing) {
+			call.voiceAtMs = sync?.kind === "voice" ? sync.atMs : undefined
+			// Only a clean voice LC header and its LC start a call known at once.
+			// Fail closed otherwise:
+			// - a late join (an LC after a voice burst) did not hear the header;
+			// - a header whose sync printed an error is unchecked;
+			// - no burst column seen on the lane (a bare sync, a "DMR Voice"
+			//   print, the first line after a restart) says nothing.
+			// Each is unknown until its LC settles on the lane's next clean sync
+			// (deferKnown), and its burst's late error line drops it.
+			if (sync === undefined || sync.kind === "voice" || !sync.clean)
+				call.encryptionKnown = false
+		}
 		// A checked link control says whether the call is encrypted (its
 		// service options): a call started on its voice frames learns it here.
 		// It counts once its burst closes clean (deferKnown).
@@ -3957,11 +4108,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// counts; a BS terminator that brackets no slot ends no call (its
 				// slot is unknown). A direct (MS/DM) terminator ends the call.
 				const burstSlot = DMR_CURRENT_SLOT.exec(line)?.groups?.["slot"]
-				const dmrSync =
-					SYNC_PATTERN.exec(line)?.groups?.["proto"]?.toUpperCase() === "DMR"
 				isTerminator =
 					DMR_END_HINT.test(line) &&
-					!(dmrSync && line.includes("|") && dmrBracketlessBs(line)) &&
+					!(
+						line.includes("|") &&
+						SYNC_PATTERN.exec(line)?.groups?.["proto"]?.toUpperCase() ===
+							"DMR" &&
+						dmrBracketlessBs(line)
+					) &&
 					(burstSlot === undefined ||
 						targetCall.slot === undefined ||
 						Number(burstSlot) === targetCall.slot)

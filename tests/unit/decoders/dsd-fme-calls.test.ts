@@ -543,9 +543,12 @@ describe("dsd-fme voice-call metadata", () => {
 					text: "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC",
 				},
 			],
-			1000,
+			// A bare sync says nothing of encryption: the call is unknown, so its
+			// call_end waits for the terminator's trailer window.
+			2000,
 		)
 		expect(ended.voice.map(state => state.active)).toEqual([true, false])
+		expect(ended.voice[1]).toMatchObject({ encryptionKnown: false })
 		expect(ended.voice[0]?.errors).toEqual({ crc: 0, fec: 0 })
 		expect(ended.voice[1]).toMatchObject({
 			active: false,
