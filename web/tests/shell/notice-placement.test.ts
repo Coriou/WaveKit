@@ -90,7 +90,9 @@ const cases: {
 		want: { where: "top-row", cx: 812, maxW: 560, top: 16 },
 	},
 	{
-		name: "expanded Activity, 1920, connection chip in the gap: under the chip",
+		// under the chip the region would start at 60 and end at 104, past the drawer's top (88) less the gap: the
+		// header's empty middle instead (clear of the chip, which ends at 52)
+		name: "expanded Activity, 1920, connection chip in the gap: no room under it, the header",
 		input: {
 			W: 1920,
 			topRowBottom: 72,
@@ -98,7 +100,75 @@ const cases: {
 			boxes: [box(700, 16, 200, 36)],
 			expanded: expanded(1920, [tuner, box(1168, 16, 300, 56)], 88),
 		},
-		want: { where: "top-row", cx: 812, maxW: 560, top: 60 },
+		want: { where: "drawer-head", cx: 1036, maxW: 560, top: 95 },
+	},
+	{
+		name: "expanded Activity, 1920, a short chip in the gap: under it when the toast still ends above the drawer",
+		input: {
+			W: 1920,
+			topRowBottom: 72,
+			freeCx: 742,
+			boxes: [box(700, 16, 200, 12)],
+			expanded: expanded(1920, [tuner, box(1168, 16, 300, 56)], 88),
+		},
+		want: { where: "top-row", cx: 812, maxW: 560, top: 36 },
+	},
+	{
+		// two lines in the 420 px gap: 16 + 64 = 80, the drawer's top less the gap, so it still fits
+		name: "expanded Activity, 1440, a 64 px toast: still the top row",
+		input: {
+			W: 1440,
+			topRowBottom: 72,
+			freeCx: 502,
+			boxes: [],
+			expanded: expanded(1440, [tuner, box(688, 16, 300, 56)], 88),
+			height: 64,
+		},
+		want: { where: "top-row", cx: 1214, maxW: 420, top: 16 },
+	},
+	{
+		// condition + receipt stacked (44 + 8 + 44): 16 + 96 > 80 on the top row, taller than the 58 px header,
+		// so the drawer's notice slot under its header
+		name: "expanded Activity, 1440, a 96 px stack: too tall for the top row and the header, the slot",
+		input: {
+			W: 1440,
+			topRowBottom: 72,
+			freeCx: 502,
+			boxes: [],
+			expanded: expanded(1440, [tuner, box(688, 16, 300, 56)], 88),
+			drawer: box(16, 88, 1408, 724),
+			slot: true,
+			height: 96,
+		},
+		want: SLOT,
+	},
+	{
+		name: "expanded Activity, 1920, a 96 px stack: the slot",
+		input: {
+			W: 1920,
+			topRowBottom: 72,
+			freeCx: 742,
+			boxes: [box(700, 16, 200, 36)],
+			expanded: expanded(1920, [tuner, box(1168, 16, 300, 56)], 88),
+			drawer: box(16, 88, 1888, 724),
+			slot: true,
+			height: 96,
+		},
+		want: SLOT,
+	},
+	{
+		name: "expanded Activity, 1100, a 96 px stack: taller than the header, the slot",
+		input: {
+			W: 1100,
+			topRowBottom: 72,
+			freeCx: 550,
+			boxes: [],
+			expanded: expanded(1100, [tuner, box(784, 16, 300, 56)], 88),
+			drawer: box(16, 88, 1068, 724),
+			slot: true,
+			height: 96,
+		},
+		want: SLOT,
 	},
 	{
 		// a between-rows drawer (no full height below 1188 px): the Tuner–Receiver gap is 296 px, so the header's
@@ -267,10 +337,17 @@ describe("the notice region's placement", () => {
 			const left = p.cx - p.maxW / 2
 			const right = p.cx + p.maxW / 2
 			const top = p.top
-			const bottom = p.top + 44
+			const bottom = p.top + (c.input.height || 44)
 			const hits = (b: Box) =>
 				b.left < right && left < b.right && b.top < bottom && top < b.bottom
 			expect([...x.topRow, ...x.headerControls].some(hits), c.name).toBe(false)
+			// on the top row the whole stack ends above the drawer; in the header it stays inside it
+			if (p.where === "top-row")
+				expect(bottom, c.name).toBeLessThanOrEqual(x.drawer.top - 8)
+			if (p.where === "drawer-head" && x.header) {
+				expect(top, c.name).toBeGreaterThanOrEqual(x.header.top)
+				expect(bottom, c.name).toBeLessThanOrEqual(x.header.bottom)
+			}
 		}
 	})
 })

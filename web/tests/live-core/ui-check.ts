@@ -21,7 +21,8 @@
  *   more; a busy core never says "lower the sample rate"; a reload while it persists shows the Receiver chip and
  *   no notice; the notice box is measured against the islands, dock, tuned card and frequency readout at
  *   1440×900 and 390×844, and with Activity expanded (Cards, full width) against its cards and header controls
- *   too (gated at 1440×900, reported at 390×844). The report gains `notices`.
+ *   too, alone and stacked with a receipt with Undo; at 390×844 each drawer docks it in its notice slot, clear of
+ *   the drawer's header and first row (all gated). The report gains `notices`.
  *
  * - `--flow=play` (fake target only): play anywhere on the same mock core: a row's disc plays its recording in
  *   the one dock, which outlives the drawer, Recordings marks it, Listen holds and gets live audio back, and

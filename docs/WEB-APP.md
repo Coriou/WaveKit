@@ -48,7 +48,9 @@ Notices appear at the top centre of the spectrum, just under the Tuner and Recei
 connection chip when it sits there). While Activity is expanded (**Cards**, then
 **Expand**), the drawer covers the spectrum, so notices move to the widest empty gap of the top row
 (beside the Receiver, or between the Tuner and the Receiver), or, when that gap is too narrow, to
-the empty middle of the Activity header; they never cover a card or a drawer control. On a phone,
+the empty middle of the Activity header; when neither has room for every notice showing (a
+warning with an Undo under it, say), they sit in the drawer under its header as below. They never
+cover a card or a drawer control. On a phone,
 and in any window narrower than 1100 px, an open drawer (Activity, Scanner, Recordings or
 Settings) spans the window, so notices sit inside it as a banner directly under its header: the
 drawer's list moves down to make room and comes back when the notice goes, and the title, Live,

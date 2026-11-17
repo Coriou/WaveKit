@@ -13,13 +13,20 @@
  *
  * Expanded Activity (Cards, full width): with the drawer covering the plot between the island rows, a new notice
  * is measured at 1440×900 against the same elements plus the drawer's card list, its first card, its header
- * controls (title, Live, ✕) and its Expand button; all must exist and none may intersect it.
+ * controls (title, Live, ✕) and its Expand button; all must exist and none may intersect it. Then a receipt with
+ * Undo stacks under it (⌘K `vol <n>`, a real action) and the whole stacked region (44 + 8 + 44 px, too tall for the
+ * top row's gap) is measured the same way.
  *
  * Phone (390×844), each drawer open in turn (Activity expanded, Activity, Scanner, Recordings, Settings): every
  * drawer spans the window there, so the region docks in the drawer's notice slot under its header (`data-where`
  * drawer-slot). A new notice is raised per drawer and measured against that drawer's header (every child and
  * every control in it), its first content row (what follows the slot), the Listen island and the frequency
- * readout; all must exist, none may intersect it, and the notice must lie inside the window. Gated.
+ * readout; all must exist, none may intersect it, and the notice must lie inside the window. With Activity
+ * expanded, and with Recordings open, the same with a receipt with Undo stacked under the notice. Gated.
+ *
+ * A stacked measurement focuses the condition's ✕ first (that pauses both timers while it is measured) and needs
+ * the condition's ✕ and the receipt's Undo laid out inside the window, and the focus still in the region after any
+ * move (a move remounts the toasts; the region gives the focus back).
  */
 import type { Page } from "playwright-core"
 import { within } from "./harness.ts"
@@ -38,8 +45,15 @@ export interface Rect {
 
 export interface NoticeLayout {
 	viewport: string
-	/** Where the region placed itself (`data-where`: free-plot, top-row, drawer-head). */
+	/** Where the region placed itself (`data-where`: free-plot, top-row, drawer-head, drawer-slot). */
 	where?: string
+	/** A condition and a receipt were both expected (stacked); its ✕ and Undo, and whether the focus stayed. */
+	stacked?: {
+		dismiss: Rect | null
+		undo: Rect | null
+		inWindow: boolean
+		focusInRegion: boolean
+	}
 	notice: Rect | null
 	/** Every element measured; `rect` is null when it is not laid out. */
 	others: {
@@ -164,6 +178,7 @@ async function measure(
 	viewport: string,
 	width: number,
 	extra: readonly Extra[] = [],
+	stack = false,
 ): Promise<NoticeLayout> {
 	const boxes = await page.evaluate(extra => {
 		const rect = (el: Element | null) => {
@@ -182,6 +197,17 @@ async function measure(
 		]
 		const region = document.querySelector("[data-wk-notice-region]")
 		return {
+			dismiss: rect(
+				region?.querySelector(
+					'.wk-notice[data-class="condition"] [data-control="dismiss"]',
+				) ?? null,
+			),
+			undo: rect(
+				region?.querySelector(
+					'.wk-notice[data-class="receipt"] [data-control="undo"]',
+				) ?? null,
+			),
+			focusInRegion: region !== null && region.contains(document.activeElement),
 			vw: window.innerWidth,
 			vh: window.innerHeight,
 			notice: rect(region),
@@ -226,17 +252,33 @@ async function measure(
 			intersects(boxes.notice, o.rect),
 	}))
 	const missing = others.filter(o => o.required && !o.rect).map(o => o.name)
+	const inside = (r: Rect | null) =>
+		r !== null &&
+		r.x >= 0 &&
+		r.y >= 0 &&
+		r.x + r.w <= boxes.vw &&
+		r.y + r.h <= boxes.vh
+	const stacked = stack
+		? {
+				dismiss: boxes.dismiss,
+				undo: boxes.undo,
+				inWindow: inside(boxes.dismiss) && inside(boxes.undo),
+				focusInRegion: boxes.focusInRegion,
+			}
+		: undefined
 	return {
 		viewport,
 		where: boxes.where,
 		notice: boxes.notice,
+		...(stacked ? { stacked } : {}),
 		others,
 		missing,
 		ok:
 			boxes.notice !== null &&
 			inWindow &&
 			missing.length === 0 &&
-			others.every(o => !o.intersects),
+			others.every(o => !o.intersects) &&
+			(!stacked || (stacked.inWindow && stacked.focusInRegion)),
 	}
 }
 
@@ -250,12 +292,13 @@ async function settled(
 	viewport: string,
 	width: number,
 	extra: readonly Extra[] = [],
+	stack = false,
 ): Promise<NoticeLayout> {
-	let last = await measure(page, viewport, width, extra)
+	let last = await measure(page, viewport, width, extra, stack)
 	const end = Date.now() + 5000
 	while (Date.now() < end) {
 		await new Promise(resolve => setTimeout(resolve, 250))
-		const next = await measure(page, viewport, width, extra)
+		const next = await measure(page, viewport, width, extra, stack)
 		const inside = next.others.every(
 			o => o.rect === null || o.rect.x + o.rect.w <= width,
 		)
@@ -264,6 +307,65 @@ async function settled(
 	}
 	return last
 }
+
+/**
+ * A receipt with Undo stacked under the shown condition: ⌘K `vol <percent>` (a real action: Undo returns the
+ * volume), then the condition's ✕ focused, which pauses both timers while the stack is measured. True once both
+ * toasts show and the focus is in the region.
+ */
+async function stackReceipt(page: Page, percent: number): Promise<string> {
+	let phase = "open the palette"
+	try {
+		await page.keyboard.press("Control+k")
+		const input = page.locator(".wkp-input")
+		await input.waitFor({ timeout: 8000 })
+		phase = "type the volume"
+		await input.fill(`vol ${percent}`)
+		await page
+			.locator(".wkp-row", { hasText: "Volume" })
+			.first()
+			.waitFor({ timeout: 8000 })
+		phase = "run it"
+		await input.press("Enter")
+		phase = "wait for the receipt's Undo"
+		await page
+			.locator(
+				'[data-wk-notice-region] .wk-notice[data-class="receipt"] [data-control="undo"]',
+			)
+			.waitFor({ timeout: 8000 })
+		phase = "focus the condition's ✕"
+		const dismiss = page.locator(
+			'[data-wk-notice-region] .wk-notice[data-class="condition"] [data-control="dismiss"]',
+		)
+		if ((await dismiss.count()) === 0) return "no condition under the receipt"
+		await dismiss.focus()
+		const focused = await page.evaluate(
+			() =>
+				document
+					.querySelector("[data-wk-notice-region]")
+					?.contains(document.activeElement) ?? false,
+		)
+		return focused ? "" : "the focus is not in the region"
+	} catch (error) {
+		const rows = await page.evaluate(() =>
+			[...document.querySelectorAll(".wkp-row")]
+				.slice(0, 5)
+				.map(r => r.textContent ?? ""),
+		)
+		const message = error instanceof Error ? error.message.split("\n")[0] : ""
+		// Escape closes the palette; with none open it would close the drawer
+		if ((await page.locator(".wkp-input").count()) > 0)
+			await page.keyboard.press("Escape")
+		return `${phase}: ${message ?? ""}; palette rows: ${JSON.stringify(rows)}`
+	}
+}
+
+/** Blurs whatever has the focus, so the stacked toasts' timers run out again. */
+const blurAll = (page: Page) =>
+	page.evaluate(() => {
+		const a = document.activeElement
+		if (a instanceof HTMLElement) a.blur()
+	})
 
 export async function noticesFlow(
 	page: Page,
@@ -376,6 +478,24 @@ export async function noticesFlow(
 		n === 4 && wide.ok,
 		`placed ${wide.where}`,
 	)
+	const wideWhy = await stackReceipt(page, 40)
+	const wideStack =
+		wideWhy === ""
+			? await settled(
+					page,
+					"1440x900 expanded, stacked",
+					1440,
+					EXPANDED_PARTS,
+					true,
+				)
+			: null
+	if (wideStack) layouts.push(wideStack)
+	await blurAll(page)
+	await step(
+		"expanded Activity, condition + receipt with Undo: the stack off the cards and the drawer's controls",
+		wideStack?.ok === true,
+		wideStack ? `placed ${wideStack.where}` : wideWhy,
+	)
 
 	// 5c: phone, each drawer open in turn (expanded Activity first) → a new notice docks under its header
 	await page.setViewportSize({ width: 390, height: 844 })
@@ -386,7 +506,12 @@ export async function noticesFlow(
 		await control({ level: "dropping", lossReason: "source" })
 		return (await waitCount(had + 1, NOTICE_MS)) === had + 1
 	}
-	const phoneStep = async (name: string, extra: readonly Extra[]) => {
+	let volume = 50
+	const phoneStep = async (
+		name: string,
+		extra: readonly Extra[],
+		stack = false,
+	) => {
 		const one = await fresh()
 		const l = await settled(page, `390x844 ${name}`, 390, extra)
 		layouts.push(l)
@@ -395,11 +520,26 @@ export async function noticesFlow(
 			one && l.ok && l.where === "drawer-slot",
 			`placed ${l.where}`,
 		)
+		if (!stack) return
+		volume += 5
+		const why = await stackReceipt(page, volume)
+		const s =
+			why === ""
+				? await settled(page, `390x844 ${name}, stacked`, 390, extra, true)
+				: null
+		if (s) layouts.push(s)
+		await blurAll(page)
+		await step(
+			`phone, ${name} open, condition + receipt with Undo: the stack docked under its header, ✕ and Undo inside the window`,
+			s?.ok === true && s.where === "drawer-slot",
+			s ? `placed ${s.where}` : why,
+		)
 	}
-	await phoneStep("activity expanded", [
-		...EXPANDED_PARTS,
-		...PHONE_DRAWER_PARTS,
-	])
+	await phoneStep(
+		"activity expanded",
+		[...EXPANDED_PARTS, ...PHONE_DRAWER_PARTS],
+		true,
+	)
 	// back to the plain drawer and the List layout
 	await page.locator(".wk-shell-drawer .wka-expand").click()
 	await page.getByRole("radio", { name: "List" }).click()
@@ -408,7 +548,7 @@ export async function noticesFlow(
 			location.hash = hash
 		}, d.hash)
 		await page.locator(`.wk-shell-drawer ${d.ready}`).waitFor()
-		await phoneStep(d.name, PHONE_DRAWER_PARTS)
+		await phoneStep(d.name, PHONE_DRAWER_PARTS, d.name === "recordings")
 	}
 	// closed, at desktop width, for the reload step
 	await page.getByRole("button", { name: "Close settings" }).click()

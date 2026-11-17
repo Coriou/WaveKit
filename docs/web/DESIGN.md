@@ -969,6 +969,21 @@ Condensed + Noto Sans, Tabler-based icons).
   full-height drawer the region already keeps to the free plot. *Why:* a notice must never cover
   a control, at any width; a reserved place in the drawer's own column makes that true by layout,
   not by measuring. Gated by `ui-check --flow=notices` at 390×844 for each drawer.
+- **Notices beside expanded Activity: room as tall as the stack (2026-11-17).** The top-row and
+  header placements above checked width only, so a condition with a receipt under it (44 + 8 +
+  44 = 96 px) ran from the top row (y 16) onto the drawer's header (y 88) and, in the header, onto
+  the cards. Rule (`regionPlacement`): the top-row gap is taken only when the whole measured
+  stack ends 8 px above the drawer (under the connection chip too), the header only when the
+  stack is no taller than the header; else the expanded drawer's notice slot, which every kit
+  drawer has, so the stack pushes the cards down instead. The height used is the tallest the
+  region measured for what it shows now (it wraps taller in a narrow gap than in the slot), so it
+  cannot swing between places. A move remounts the toasts (a portal into the slot is a new
+  parent): a toast button that had the keyboard focus gets it back on its new element (same toast,
+  same control), and the moved toasts are announced again by their `role="status"`. *Why:* a
+  second announcement of a toast the user is already reading is a smaller cost than suppressing
+  live-region content, and moves happen only when the stack's height or the drawer changes.
+  Gated by `ui-check --flow=notices`: the stacked region at 1440×900 expanded and at 390×844
+  (expanded Activity, Recordings), ✕ and Undo inside the window, focus kept.
 
 ## Open questions and next topics
 

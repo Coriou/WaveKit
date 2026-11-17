@@ -1,9 +1,10 @@
 // Where the notice region sits: top centre of the free plot area, 8 px under the top island row, and below
 // anything already at the top centre (the connection chip when it drops under the top row, and any overlay that
 // marks itself with `data-wk-top-centre`). While Activity is expanded there is no free plot: `regionPlacement`
-// finds empty room on the top row or in the drawer's header instead; while any drawer covers that place (a phone, or
-// a window below 1100 px) the region docks in the drawer's notice slot under its header. Pure, so it tests in node;
-// the region feeds it measured boxes.
+// finds empty room on the top row or in the drawer's header instead, as tall as the region's measured stack; while
+// any drawer covers the place it would take (a phone, a window below 1100 px, or an expanded Activity with no room
+// tall enough) the region docks in the drawer's notice slot under its header. Pure, so it tests in node; the
+// region feeds it measured boxes.
 
 /** Room between the top row (or what sits under it) and the region. */
 export const REGION_GAP = 8
@@ -24,13 +25,14 @@ export interface Box {
 
 /**
  * The region's top: `topRowBottom` + 8 px, pushed under each box that overlaps the region's column
- * ([cx − w/2, cx + w/2]) and starts above where the region would end.
+ * ([cx − w/2, cx + w/2]) and starts above where the region would end (`h` tall, one toast by default).
  */
 export function regionTop(
 	topRowBottom: number,
 	boxes: readonly Box[],
 	cx: number,
 	w: number,
+	h: number = REGION_MIN_H,
 ): number {
 	const left = cx - w / 2
 	const right = cx + w / 2
@@ -38,7 +40,7 @@ export function regionTop(
 	for (const b of [...boxes].sort((a, c) => a.top - c.top)) {
 		if (b.bottom <= b.top || b.right <= left || b.left >= right) continue
 		if (b.bottom + REGION_GAP <= top) continue
-		if (b.top >= top + REGION_MIN_H) continue
+		if (b.top >= top + Math.max(REGION_MIN_H, h)) continue
 		top = b.bottom + REGION_GAP
 	}
 	return Math.round(top)
@@ -78,7 +80,8 @@ export interface PlacementInput {
 	readonly drawer?: Box | null
 	/** The open drawer has a notice slot under its header (ui/notice-slot.ts) to dock in. */
 	readonly slot?: boolean
-	/** The region's measured height (px); one touch-height toast when omitted. */
+	/** The region's measured height (px): its whole stack (condition and receipt); one touch-height toast when
+	 * omitted or 0. */
 	readonly height?: number
 }
 
@@ -123,22 +126,23 @@ export function freeSpans(
  * instead, in this order:
  * 1. the widest gap of the top island row (between the Tuner and the Receiver, or right of the Receiver, which
  *    stays where a full-height drawer would leave it), a gutter from each island and the window edge, when it is
- *    at least REGION_MIN_W wide: the region's top is the row's top, then under the connection chip if it sits
- *    there;
+ *    at least REGION_MIN_W wide and the region's whole measured stack ends 8 px above the drawer: the region's
+ *    top is the row's top, then under the connection chip if it sits there;
  * 2. else the widest empty stretch of the drawer's header (a gutter clear of the title, Live, Columns and ✕),
- *    when it is that wide: the region centred on the header's height;
- * 3. else the normal place (no room anywhere: a narrow window, where Expand changes nothing).
+ *    when it is that wide and the stack is no taller than the header: the region centred on the header's height;
+ * 3. else the normal place, which lands on the expanded drawer, so its notice slot (below).
  * The normal place (any drawer, expanded or not) is taken only when its box keeps clear of the open drawer; when
  * the drawer covers it (a phone, or a window below 1100 px, where drawers span the window between the island
  * rows), the region docks in the drawer's notice slot under its header: the drawer lays it out and pushes its body
  * down, so no header control or row is ever covered. With no slot (a drawer still loading) the normal place.
  */
 export function regionPlacement(p: PlacementInput): Placement {
+	const height = p.height || TOAST_H
 	const normal: Placement = {
 		where: "free-plot",
 		cx: p.freeCx,
 		maxW: Math.max(0, Math.min(REGION_MAX_W, 2 * p.freeCx - 2 * GUTTER)),
-		top: regionTop(p.topRowBottom, p.boxes, p.freeCx, REGION_MAX_W),
+		top: regionTop(p.topRowBottom, p.boxes, p.freeCx, REGION_MAX_W, height),
 	}
 	const x = p.expanded
 	if (!x) return clearOfDrawer(p, normal)
@@ -147,12 +151,9 @@ export function regionPlacement(p: PlacementInput): Placement {
 	if (gap && gap.right - gap.left >= REGION_MIN_W) {
 		const w = Math.min(REGION_MAX_W, gap.right - gap.left)
 		const cx = Math.round((gap.left + gap.right) / 2)
-		return {
-			where: "top-row",
-			cx,
-			maxW: Math.floor(w),
-			top: regionTop(GUTTER - REGION_GAP, p.boxes, cx, w),
-		}
+		const top = regionTop(GUTTER - REGION_GAP, p.boxes, cx, w, height)
+		if (top + height <= x.drawer.top - REGION_GAP)
+			return { where: "top-row", cx, maxW: Math.floor(w), top }
 	}
 	const h = x.header
 	if (h) {
@@ -162,14 +163,16 @@ export function regionPlacement(p: PlacementInput): Placement {
 			x.headerControls,
 			GUTTER,
 		)[0]
-		if (span && span.right - span.left >= REGION_MIN_W)
+		if (
+			span &&
+			span.right - span.left >= REGION_MIN_W &&
+			height <= h.bottom - h.top
+		)
 			return {
 				where: "drawer-head",
 				cx: Math.round((span.left + span.right) / 2),
 				maxW: Math.floor(Math.min(REGION_MAX_W, span.right - span.left)),
-				top: Math.round(
-					h.top + Math.max(0, (h.bottom - h.top - (p.height || TOAST_H)) / 2),
-				),
+				top: Math.round(h.top + Math.max(0, (h.bottom - h.top - height) / 2)),
 			}
 	}
 	return clearOfDrawer(p, normal)

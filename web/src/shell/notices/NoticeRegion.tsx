@@ -1,8 +1,10 @@
 // The notice region (./service.ts): top centre of the free plot area (`--wk-free-cx`), 8 px under the top island
 // row and under anything already at the top centre; while Activity is expanded (no free plot), the widest empty
 // gap of the top row, else of the drawer's header (./top-centre.ts `regionPlacement`); while a drawer covers that place
-// (a phone, or below 1100 px), portalled into the drawer's notice slot under its header (ui/notice-slot.ts), which
-// pushes the drawer body down. At most one condition toast, then one receipt. It never takes focus; hovering it or focusing inside a toast pauses both timers (until that toast goes).
+// (a phone, below 1100 px, or an expanded Activity with no room as tall as the region's stack), portalled into the
+// drawer's notice slot under its header (ui/notice-slot.ts), which pushes the drawer body down. At most one
+// condition toast, then one receipt. It never takes focus, except to give a moved toast's button back the focus it
+// had; hovering it or focusing inside a toast pauses both timers (until that toast goes).
 import {
 	useEffect,
 	useLayoutEffect,
@@ -60,6 +62,14 @@ export function NoticeRegion({
 		noticeSlots.version,
 	)
 	const [slot, setSlot] = useState<HTMLElement | null>(null)
+	// the tallest the region has measured for what it shows now: a stack wraps taller in a narrow room than in a
+	// drawer's slot, so the measured height alone could move it back and forth
+	const content = `${shown?.id ?? ""}|${receipt?.id ?? ""}`
+	const contentRef = useRef(content)
+	contentRef.current = content
+	const tallest = useRef({ content, h: 0 })
+	// the toast control last focused inside the region (until the focus leaves it): restored when a move remounts it
+	const lastFocus = useRef<{ id: string; control: string } | null>(null)
 	const [place, setPlace] = useState<Placement>({
 		where: "free-plot",
 		cx: 0,
@@ -86,6 +96,14 @@ export function NoticeRegion({
 		}
 	}, [service, palette, occupied])
 	useLayoutEffect(() => {
+		const stackHeight = () => {
+			const h = box.current?.offsetHeight ?? 0
+			const t = tallest.current
+			if (t.content !== contentRef.current)
+				tallest.current = { content: contentRef.current, h }
+			else if (h > t.h) t.h = h
+			return tallest.current.h
+		}
 		const measure = () => {
 			// shell coordinates: the region is placed in the shell root
 			const el = box.current
@@ -123,7 +141,7 @@ export function NoticeRegion({
 				expanded: root ? expandedDrawer(root, inShell) : null,
 				drawer: drawer ? inShell(drawer) : null,
 				slot: drawerSlot !== null,
-				height: box.current?.offsetHeight ?? 0,
+				height: stackHeight(),
 			})
 			setPlace(p => (samePlace(p, next) ? p : next))
 			setSlot(drawerSlot)
@@ -138,11 +156,24 @@ export function NoticeRegion({
 		}
 	}, [topRowBottom, occupied, slotVersion])
 	// moving between the plot and a drawer's slot remounts the toasts: no pointerleave or blur comes then, so the
-	// hover and focus pauses never stay behind
+	// hover pause never stays behind; a toast button that had the focus gets it back on its new element (same
+	// toast, same control), so the focus pause stays only then
 	const docked = place.where === "drawer-slot" && slot !== null
-	useEffect(() => {
+	useLayoutEffect(() => {
 		service.setPaused("hover", false)
-		service.setFocusedToast(null)
+		const f = lastFocus.current
+		const active = document.activeElement
+		const lost = active === null || active === document.body
+		const el =
+			f && lost
+				? box.current?.querySelector(
+						`[data-toast-id="${f.id}"] [data-control="${f.control}"]`,
+					)
+				: null
+		if (el instanceof HTMLElement) {
+			el.focus({ preventScroll: true })
+			service.setFocusedToast(Number(f?.id))
+		} else service.setFocusedToast(null)
 	}, [service, docked])
 
 	if (palette || !occupied) return null
@@ -163,9 +194,18 @@ export function NoticeRegion({
 			}
 			onPointerEnter={() => service.setPaused("hover", true)}
 			onPointerLeave={() => service.setPaused("hover", false)}
+			onFocus={e => {
+				const control = e.target.closest("[data-control]")
+				const toast = e.target.closest("[data-toast-id]")
+				const id = toast?.getAttribute("data-toast-id")
+				const name = control?.getAttribute("data-control")
+				lastFocus.current = id && name ? { id, control: name } : null
+			}}
 			onBlur={e => {
-				if (!e.currentTarget.contains(e.relatedTarget as Node | null))
+				if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+					lastFocus.current = null
 					service.setFocusedToast(null)
+				}
 			}}
 		>
 			{/* a new element per toast, so a fresh one is announced and animates in */}
@@ -227,6 +267,7 @@ function ConditionToast({
 			role="status"
 			className="wk-toast wk-notice"
 			data-class="condition"
+			data-toast-id={shown.id}
 			data-key={shown.key}
 			data-tone={shown.tone}
 			onFocus={() => service.setFocusedToast(shown.id)}
@@ -239,6 +280,7 @@ function ConditionToast({
 					className="wk-btn"
 					data-variant="tonal"
 					data-size="sm"
+					data-control="action"
 					onClick={() => service.runShownAction()}
 				>
 					{shown.action.label}
@@ -249,6 +291,7 @@ function ConditionToast({
 				className="wk-icon-btn"
 				data-size="sm"
 				aria-label="Dismiss"
+				data-control="dismiss"
 				onClick={() => service.dismissShown()}
 			>
 				<Icon name="close" size={14} />
@@ -270,6 +313,7 @@ function ReceiptToast({
 			role="status"
 			className="wk-toast wk-notice"
 			data-class="receipt"
+			data-toast-id={receipt.id}
 			data-tone={receipt.tone}
 			onFocus={() => service.setFocusedToast(receipt.id)}
 		>
@@ -281,6 +325,7 @@ function ReceiptToast({
 					className="wk-btn"
 					data-variant="tonal"
 					data-size="sm"
+					data-control={receipt.action ? "action" : "undo"}
 					onClick={() => {
 						if (receipt.action) receipt.action.run()
 						else receipt.undo?.()
@@ -295,6 +340,7 @@ function ReceiptToast({
 					className="wk-icon-btn"
 					data-size="sm"
 					aria-label="Dismiss"
+					data-control="dismiss"
 					onClick={() => service.dismissReceipt()}
 				>
 					<Icon name="close" size={14} />

@@ -45,6 +45,18 @@ describe("notice region markup", () => {
 		expect(html).not.toMatch(/autofocus/i)
 	})
 
+	it("names each toast and its controls, so a moved toast's button gets its focus back", () => {
+		const svc = new NoticeService()
+		svc.raise("link:rx", { text: "Receiver samples lost", tone: "warn" }, true)
+		svc.showReceipt("Removed band", { undo: () => undefined })
+		const html = region(svc)
+		const ids = [...html.matchAll(/data-toast-id="(\d+)"/g)].map(m => m[1])
+		expect(ids).toHaveLength(2)
+		expect(new Set(ids).size).toBe(2)
+		expect(html).toContain('data-control="dismiss"')
+		expect(html).toContain('data-control="undo"')
+	})
+
 	it("puts the link condition on the Receiver chip and in the panel, grey while stale", () => {
 		const svc = new NoticeService()
 		const chip = () =>
