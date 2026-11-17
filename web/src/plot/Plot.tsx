@@ -1044,6 +1044,7 @@ function SignalLabels({
 		})
 		return { signals: list, evidence: how }
 	}, [shown, plan, saved, discoveries, discIndex])
+	const taken = useMemo(() => takenRects(takenKey), [takenKey])
 	const placed: PlacedLabel[] = useMemo(
 		() =>
 			placeLabels(clusterSignals(signals, view, widthPx), view, {
@@ -1051,7 +1052,7 @@ function SignalLabels({
 				traceCss,
 				levels,
 				tunedHz: tuned,
-				taken: takenRects(takenKey),
+				taken,
 			}),
 		[
 			signals,
@@ -1061,7 +1062,7 @@ function SignalLabels({
 			traceCss,
 			levels,
 			tuned,
-			takenKey,
+			taken,
 		],
 	)
 	// Each chip keyed by its followed signal; a leaving one fades where it last stood.
@@ -1100,8 +1101,8 @@ function SignalLabels({
 		view,
 		widthPx,
 	).map(l => ({ ...l, leaving: true }))
-	// one layout across live and leaving chips: capped, and a fading chip never lands on another
-	const laid = layoutChips(current, fading)
+	// one layout across live and leaving chips: capped, and a fading chip never lands on another or on the chrome
+	const laid = layoutChips(current, fading, undefined, taken)
 	chips.push(...laid.placed, ...laid.leaving)
 	for (const id of lastAt.current.keys())
 		if (!live.has(id)) lastAt.current.delete(id)

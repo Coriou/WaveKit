@@ -69,11 +69,16 @@ export function applyLink(services: AppServices, link: LinkState): void {
 export function followDeepLinks(services: AppServices): () => void {
 	if (typeof window === "undefined") return () => undefined
 	let queued = false
+	// The hash as this module last read or wrote it. A different one in the address bar was set from outside (a
+	// link, the address bar, a script) and its hashchange is still on its way (a task later): the app's state does
+	// not overwrite it meanwhile, or the change would be lost (open() would then read the old hash back).
+	let known = window.location.hash
 
 	const write = () => {
 		queued = false
-		const hash = formatLink(currentLink(services))
 		const loc = window.location
+		if (loc.hash !== known) return
+		const hash = formatLink(currentLink(services))
 		if (hash === loc.hash || (hash === "" && loc.hash === "")) return
 		const url = hash === "" ? `${loc.pathname}${loc.search}` : hash
 		try {
@@ -81,6 +86,7 @@ export function followDeepLinks(services: AppServices): () => void {
 		} catch {
 			// Sandboxed frames refuse it: the app works the same without the link.
 		}
+		known = loc.hash
 	}
 	const schedule = () => {
 		if (queued) return
@@ -89,7 +95,8 @@ export function followDeepLinks(services: AppServices): () => void {
 	}
 
 	const open = () => {
-		const link = parseLink(window.location.hash)
+		known = window.location.hash
+		const link = parseLink(known)
 		if (link) applyLink(services, link)
 		schedule()
 	}

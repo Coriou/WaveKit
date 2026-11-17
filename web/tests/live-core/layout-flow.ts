@@ -47,9 +47,14 @@ interface SlotBox extends Box {
 	want: Box | null
 }
 
+interface Chip extends Box {
+	/** Fading out where an older layout put it (still drawn, so still checked). */
+	leaving: boolean
+}
+
 interface Snapshot {
 	slots: SlotBox[]
-	chips: Box[]
+	chips: Chip[]
 	rows: Box[]
 	body: Box | null
 	vw: number
@@ -133,8 +138,14 @@ async function snapshot(page: Page): Promise<Snapshot> {
 		const body = document.querySelector(".wk-plot-body")
 		return {
 			slots,
-			// the chip itself (its lead line runs down to the peak, under whatever is there)
-			chips: all(".wk-plot-sig > button"),
+			// the chip itself (its lead line runs down to the peak, under whatever is there); a leaving chip counts
+			// too: the button's own opacity stays 1 while its chip fades
+			chips: [...document.querySelectorAll(".wk-plot-sig > button")]
+				.filter(shown)
+				.map(el => ({
+					...box(el),
+					leaving: el.parentElement?.hasAttribute("data-leaving") ?? false,
+				})),
 			rows: all(
 				".wk-plot-axis, .wk-plot-lane, .wk-plot-saved, .wk-plot-disc-root, .wk-ruler",
 			),
@@ -206,7 +217,10 @@ function check(s: Snapshot): string[] {
 	}
 	for (const c of s.chips)
 		for (const sl of placed)
-			if (hits(c, sl)) out.push(`I5 chip ${fmt(c)} under ${sl.name}`)
+			if (hits(c, sl))
+				out.push(
+					`I5 ${c.leaving ? "leaving chip" : "chip"} ${fmt(c)} under ${sl.name}`,
+				)
 	const guests = placed.filter(
 		sl => sl.name.startsWith("status:") || sl.name === "player",
 	)
@@ -411,10 +425,23 @@ export async function layoutFlow(
 			for (const d of DRAWERS) {
 				const open = async () => {
 					await go(d.hash)
-					await page
-						.locator(`.wk-shell-drawer ${d.ready}`)
-						.first()
-						.waitFor({ timeout: STEP_MS })
+					try {
+						await page
+							.locator(`.wk-shell-drawer ${d.ready}`)
+							.first()
+							.waitFor({ timeout: STEP_MS })
+					} catch (error) {
+						// what is on screen instead: the address, the drawer shown and its shape, a loading skeleton
+						const seen = await page.evaluate(() => {
+							const box = document.querySelector(".wk-shell-drawer")
+							const title =
+								box?.querySelector("h2, [role=heading]")?.textContent
+							return `hash ${JSON.stringify(location.hash)}, drawer ${box ? `${JSON.stringify(title ?? "")} ${box.getAttribute("data-shape") ?? ""}${box.querySelector("[aria-busy=true]") ? " loading" : ""}` : "none"}`
+						})
+						const first =
+							error instanceof Error ? (error.message.split("\n")[0] ?? "") : ""
+						throw new Error(`${first} (${seen})`)
+					}
 				}
 				if (!sampled) {
 					const seen = await framesDuring(page, open)
