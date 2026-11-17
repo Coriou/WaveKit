@@ -1,0 +1,93 @@
+# recorded wavekit:wg24-m1-core dsd-fme -fs -V 3 (ids replaced)
+# direct (MS/DM) overs: key-ups TLC, CSBK, VLC + LC, voice, terminator
+# arrival ms<TAB>line, relative; TGT/SRC replaced by synthetic values of the same digit count
+1000	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=XX [31m| CACH/Burst FEC ERR[0m
+1020	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=XX [31m| CACH/Burst FEC ERR[0m
+1052	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=XX | VLC [32m 
+1052	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+1053	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+1402	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+1458	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+1805	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+1846	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+2084	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+2095	00:00:02 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | TLC [31m 
+2096	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+2350	00:00:02 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | CSBK[33m
+2351	 Channel Timing CSBK (CT_CSBK) [0m
+2708	00:00:02 Sync: +DMR MS/DM MODE/MONO | Color Code=15 | VLC [33m 
+2709	 SLOT 1 Unknown LC  FLCO=0x00 FID=0x01 [0m[31m (CRC ERR) [0m
+2713	00:00:02 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VLC [32m 
+2713	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+2751	00:00:02 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VLC [32m 
+2751	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+2763	00:00:02 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+3079	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+3083	00:00:03 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+3556	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+3560	00:00:03 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+3979	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+4061	00:00:04 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+4314	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+4349	00:00:04 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+4755	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+4797	00:00:04 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+5148	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+5167	00:00:05 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | TLC [31m 
+5172	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+5195	00:00:05 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | CSBK[33m
+5244	 Channel Timing CSBK (CT_CSBK) [0m
+5264	00:00:05 Sync: +DMR MS/DM MODE/MONO | Color Code=15 | VLC [32m 
+5265	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+5473	00:00:05 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VLC [32m 
+5548	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+5549	00:00:05 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VLC [32m 
+5561	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+5568	00:00:05 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | TLC [31m 
+5573	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+5580	00:00:05 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | CSBK[33m
+5658	 Channel Timing CSBK (CT_CSBK) [0m
+6052	Sync: no sync
+9519	00:00:09 Sync: +DMR MS/DM MODE/MONO | Color Code=15 [31m| CACH/Burst FEC ERR[0m
+9526	00:00:09 Sync: +DMR MS/DM MODE/MONO | Color Code=15 [31m| CACH/Burst FEC ERR[0m
+9877	00:00:09 Sync: +DMR MS/DM MODE/MONO | Color Code=15 | VC* 
+9975	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+10229	00:00:10 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+10465	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+10586	00:00:10 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+10920	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+10977	00:00:10 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | TLC [31m 
+10994	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+10995	00:00:10 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | CSBK[33m
+11046	 Channel Timing CSBK (CT_CSBK) [0m
+11062	00:00:11 Sync: +DMR MS/DM MODE/MONO | Color Code=15 | VLC [32m 
+11062	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+11103	00:00:11 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VLC [32m 
+11107	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+11257	00:00:11 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VLC [32m 
+11258	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+11282	00:00:11 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+11642	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+11649	00:00:11 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+11971	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+11979	00:00:11 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+12693	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+12754	00:00:12 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+13169	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+13360	00:00:13 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+13488	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+13545	00:00:13 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+13655	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+13770	00:00:13 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+13953	[31m SLOT 1 FLCO FEC ERR [0m[31m (FEC ERR)[0m
+13958	00:00:13 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+14157	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+14298	00:00:14 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+14623	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+14682	00:00:14 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VC* 
+15348	[32m SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+15357	00:00:15 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | TLC [31m 
+15358	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+15526	00:00:15 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | CSBK[33m
+15526	 Channel Timing CSBK (CT_CSBK) [0m
+15567	Sync: no sync

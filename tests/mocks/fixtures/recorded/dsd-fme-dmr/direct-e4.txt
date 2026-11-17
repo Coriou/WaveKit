@@ -1,0 +1,17 @@
+# recorded wavekit:wg24-m1-core dsd-fme -fs -V 3 (ids replaced)
+# a direct key-up whose first voice LC header printed a garbled colour code, a second header 209 ms later
+# arrival ms<TAB>line, relative; TGT/SRC replaced by synthetic values of the same digit count
+1000	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | TLC [31m 
+1005	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+1028	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | CSBK[33m
+1077	 Channel Timing CSBK (CT_CSBK) [0m
+1097	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=15 | VLC [32m 
+1098	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+1306	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VLC [32m 
+1381	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+1382	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | VLC [32m 
+1394	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+1401	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | TLC [31m 
+1406	 SLOT 1 TGT=90001 SRC=901 Group Call [0m 
+1413	00:00:01 Sync: +DMR MS/DM MODE/MONO | Color Code=11 | CSBK[33m
+1491	 Channel Timing CSBK (CT_CSBK) [0m

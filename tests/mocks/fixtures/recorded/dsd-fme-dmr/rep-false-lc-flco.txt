@@ -1,0 +1,26 @@
+# recorded wavekit:wg24-m1-core dsd-fme -fa -V 3 -Z (ids replaced)
+# a false link control after a bracketless terminator printing FLCO=0x28 SVC=0x10
+# arrival ms<TAB>line, relative; TGT/SRC replaced by synthetic values of the same digit count
+1000	00:00:01 Sync: +DMR   slot1   slot2  [31m| CACH/Burst FEC ERR[0m
+1370	00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+1654	Sync: no sync
+1661	00:00:01 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+1997	00:00:01 Sync: +DMR   slot1   slot2  [31m| CACH/Burst FEC ERR[0m
+2002	00:00:02 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+2005	00:00:02 Sync: +DMR   slot1   slot2  | Color Code=01 | TLC 
+2005	[31m SLOT 1 FLCO FEC ERR [0m[31m (FEC ERR)[0m
+2005	[36m DMR PDU Payload [00][00][00][00][00][00][00][00][00][00][00][00][0m
+2005	[31m SLCO CRC ERR[0m
+2020	00:00:02 Sync: +DMR   slot1   slot2  | Color Code=01 | TLC [31m 
+2021	 SLOT 1 TGT=90000001 SRC=9000001 FLCO=0x28 FID=0x00 SVC=0x10 Group Call [0m 
+2022	[36m DMR PDU Payload [00][00][00][00][00][00][00][00][00][00][00][00][0m
+2341	00:00:02 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+2369	00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | TLC [31m 
+2369	 SLOT 2 TGT=90000002 SRC=900001 FLCO=0x06 FID=0x0A SVC=0x21 Group Priority 1 Kirisun Call [0m [31m (CRC ERR) [0m
+2369	[36m DMR PDU Payload [00][00][00][00][00][00][00][00][00][00][00][00][0m
+2372	00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+2377	00:00:02 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+3066	Sync: no sync
+3101	00:00:03 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+3111	00:00:03 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+3115	00:00:03 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m

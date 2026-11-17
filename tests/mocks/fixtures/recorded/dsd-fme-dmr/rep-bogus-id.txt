@@ -1,0 +1,29 @@
+# recorded wavekit:wg24-m1-core dsd-fme -fs -V 3 (ids replaced)
+# the end of a terminator train: unflagged false IDs after a terminator that brackets no slot
+# arrival ms<TAB>line, relative; TGT/SRC replaced by synthetic values of the same digit count
+1000	00:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+1331	Sync: no sync
+1690	00:00:01 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+1959	00:00:01 Sync: +DMR   slot1   slot2  [31m| CACH/Burst FEC ERR[0m
+2302	00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+2618	Sync: no sync
+2631	00:00:02 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+3076	00:00:03 Sync: +DMR   slot1   slot2  [31m| CACH/Burst FEC ERR[0m
+3124	00:00:03 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+3125	00:00:03 Sync: +DMR   slot1   slot2  | Color Code=01 | TLC 
+3125	[31m SLOT 1 FLCO FEC ERR [0m[31m (FEC ERR)[0m
+3125	[31m SLCO CRC ERR[0m
+3190	00:00:03 Sync: +DMR   slot1   slot2  | Color Code=01 | TLC [31m 
+3190	 SLOT 1 TGT=90000001 SRC=9000001 Group Call [0m 
+3302	00:00:03 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+3362	00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | TLC [31m 
+3390	 SLOT 2 TGT=90000002 SRC=900001 Group Priority 1 Kirisun Call [0m [31m (CRC ERR) [0m
+3397	00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+3407	00:00:03 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+4046	Sync: no sync
+4060	00:00:04 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+4196	00:00:04 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+4202	00:00:04 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+4396	00:00:04 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+4407	00:00:04 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+4697	Sync: no sync
