@@ -1092,9 +1092,10 @@ Link-burst additions are optional and additive; older cores omit them:
   A decided `source` or `core-busy` is kept for 10 s so it does not flap. Once a
   dropping stretch read `core-busy`, it reads `source` again only on an arrival gap
   (step 2) newer than that decision: a core that has just recovered does not turn the
-  loss it caused into the link's. While the receiver runs slower than the core's rate
-  (a rate mismatch, as when another client left the dongle slower) or the tuner is
-  under external control, `source` reads `unknown`. Only
+  loss it caused into the link's. That hold ends 20 s after the last `core-busy`
+  decision, when none of the loss it explained is left in the average, so a link that
+  keeps falling short then reads `source`. While the tuner is under external control,
+  `source` reads `unknown`. Only
   `source` is the receiver link's fault, so only it is helped by a lower sample rate.
   `branch-congestion` (never on `dropping`) means every byte arrived and an internal
   fanout branch dropped them after an arrival gap.

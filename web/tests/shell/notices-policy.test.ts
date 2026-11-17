@@ -397,6 +397,32 @@ const RULES: { rule: string; run: () => void }[] = [
 		},
 	},
 	{
+		rule: "a core restart mid-condition before the onset: the carried episode still toasts at its onset",
+		run: () => {
+			const h = loaded()
+			dropping(h, 2000, 4000, 2000)
+			expect(h.toasts).toEqual([])
+			h.link.socketDown()
+			h.link.reconnected()
+			// the first snapshot after the gap only sets the reference: 2 s + 2 s + 2 s
+			dropping(h, 30_000, 32_000, 29_000, "source", 29_000)
+			expect(h.toasts).toEqual([])
+			h.feed(34_000, [drop(29_000, 29_000)])
+			expect(h.toasts).toEqual([LINK_LOSS_TEXT])
+		},
+	},
+	{
+		rule: "a core restart mid-condition with a new cause, not dismissed: the new text toasts",
+		run: () => {
+			const h = loaded()
+			dropping(h, 2000, 8000, 2000)
+			h.link.socketDown()
+			h.link.reconnected()
+			dropping(h, 40_000, 50_000, 39_000, "core-busy", 39_000)
+			expect(h.toasts).toEqual([LINK_LOSS_TEXT, CORE_BUSY_TEXT])
+		},
+	},
+	{
 		rule: "reconnect keeps a pending episode the page knows: it still toasts at its onset",
 		run: () => {
 			const h = loaded()

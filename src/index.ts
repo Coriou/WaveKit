@@ -2486,7 +2486,6 @@ async function main(): Promise<void> {
 			sourceCauseExcluded: id =>
 				sourceCauseExcluded(
 					{
-						rateMismatchOf: sid => sourceManager.getStatus(sid)?.rateMismatch,
 						controlModeOf: sid => tunerController.getState(sid)?.controlMode,
 					},
 					id,

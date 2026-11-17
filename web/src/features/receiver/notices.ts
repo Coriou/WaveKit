@@ -257,8 +257,10 @@ export class LinkNotices {
 			if (!ep || ep.id !== epId) {
 				// A core restart mid-condition starts a new episode id for the same condition:
 				// on the first snapshot after a reconnect, while the condition is still raised,
-				// it carries on the episode the page knew (told texts, the ✕, the onset time),
-				// and its current text counts as already shown.
+				// it carries on the episode the page knew (told texts, the ✕, the onset time)
+				// unchanged, so a text it had not told yet still toasts.
+				// Trade-off: a plain socket reconnect looks the same, so an episode that began
+				// during the disconnect inherits the old ✕; there is no core instance id to tell.
 				const carried =
 					reconnect &&
 					ep !== undefined &&
@@ -274,7 +276,6 @@ export class LinkNotices {
 					lastTs: null,
 					lastDropping: false,
 				}
-				if (carried && text !== null) ep.told.add(text)
 				this.episodes.set(e.sourceId, ep)
 			}
 		}

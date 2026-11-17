@@ -77,8 +77,8 @@ When WaveKit loses receiver samples, the notice says why:
 | WaveKit itself was too busy to read the samples        | `Samples lost: WaveKit is too busy to keep up`                  |
 | WaveKit cannot tell which, or names no cause           | `Receiver samples lost`                                         |
 
-Only the first asks for a lower sample rate. While the receiver runs slower than WaveKit's rate
-(another client left it slower) or another program controls the tuner, WaveKit names no cause. A disconnected or paused receiver is not losing
+Only the first asks for a lower sample rate. While another program controls the tuner,
+WaveKit names no cause. A disconnected or paused receiver is not losing
 samples and raises no such notice. The notice comes once the loss has lasted 6 seconds,
 and once per episode: an episode starts with the first loss and lasts until the link has been clean
 for a minute, so a link that recovers and drops again does not repeat it. A different cause in the

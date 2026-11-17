@@ -126,6 +126,17 @@ export function linkAdvisorEvidence(deps: {
 export const LINK_CAUSE_LOOKBACK_MAX_MS =
 	LINK_SUSTAINED_WINDOW_MS + SOURCE_METRICS_INTERVAL_MS
 
+/**
+ * How long the stretch rule holds a `core-busy` decision against a fresh `source`. Loss a
+ * core-busy decision at `T` explains lies at or before `T`. The dropping average at `now` ends
+ * at the last metrics observation, at most `SOURCE_METRICS_INTERVAL_MS` (5 s) before `now`, and
+ * reaches back at most `LINK_CAUSE_LOOKBACK_MAX_MS` (15 s) before that observation; so once
+ * `now - T > LINK_CAUSE_LOOKBACK_MAX_MS + SOURCE_METRICS_INTERVAL_MS` (20 s), none of that loss
+ * is in the average and the decision no longer bears on the cause.
+ */
+export const CORE_BUSY_STRETCH_MS =
+	LINK_CAUSE_LOOKBACK_MAX_MS + SOURCE_METRICS_INTERVAL_MS
+
 /** The source manager facts the advisor's `live` gate reads. */
 export interface LiveSourceFacts {
 	getStatus(id: string): { connected: boolean } | undefined
@@ -141,23 +152,16 @@ export function sourceIsLive(sources: LiveSourceFacts, id: string): boolean {
 }
 
 /**
- * Production's `sourceCauseExcluded` facts: while the dongle runs slower than the core's rate
- * (a rate-truth mismatch with a negative deviation, as another client leaving it slower), or
- * while the tuner is under external control, a shortfall is no proof that the link fails to
- * carry the rate, so `source` reads `unknown`.
+ * Production's `sourceCauseExcluded` facts: while the tuner is under external control, a
+ * shortfall is no proof that the link fails to carry the rate the core set, so `source` reads
+ * `unknown`. A rate-truth mismatch is not a reason: rate truth measures the same received bytes,
+ * so a sustained link failure would also read as a slower dongle.
  */
 export function sourceCauseExcluded(
-	deps: {
-		rateMismatchOf: (id: string) => { deviation: number } | null | undefined
-		controlModeOf: (id: string) => string | null | undefined
-	},
+	deps: { controlModeOf: (id: string) => string | null | undefined },
 	id: string,
 ): boolean {
-	const deviation = deps.rateMismatchOf(id)?.deviation
-	return (
-		(typeof deviation === "number" && deviation < 0) ||
-		deps.controlModeOf(id) === "external"
-	)
+	return deps.controlModeOf(id) === "external"
 }
 
 export function createLinkAdvisor(deps: {
@@ -209,7 +213,9 @@ export function createLinkAdvisor(deps: {
 	 * Stretch rule: within one dropping stretch at a rate (ended like the latch), once the core
 	 * was found busy, a fresh `source` decision stands only on arrival-gap evidence (ladder step
 	 * 2) newer than that core-busy decision; otherwise `core-busy` is kept, because the loss
-	 * still in the average may be the core's.
+	 * still in the average may be the core's (and missing evidence for that gap reads
+	 * `unknown`). The rule expires `CORE_BUSY_STRETCH_MS` after the core-busy decision, when no
+	 * loss it explained can still be in the average, and a kept `core-busy` is latched no longer.
 	 */
 	const coreBusyAt = new Map<string, { rate: number; at: number }>()
 	const dropStretch = (sourceId: string, rate: number) => {
@@ -242,16 +248,23 @@ export function createLinkAdvisor(deps: {
 		const latch = latches.get(sourceId)
 		const since = mono - lookbackMs
 		let cause: DroppingCause = "unknown"
+		let until = mono + LINK_SUSTAINED_WINDOW_MS
 		try {
 			cause = droppingCause(evidence(sourceId, since))
-			const busy = coreBusyAt.get(sourceId)
+			let busy = coreBusyAt.get(sourceId)
+			if (busy?.rate === rate && mono - busy.at > CORE_BUSY_STRETCH_MS) {
+				coreBusyAt.delete(sourceId)
+				busy = undefined
+			}
 			if (cause === "source" && busy?.rate === rate) {
 				// Only a gap the loop cannot explain since the core-busy decision may replace it.
 				const fresh = evidence(sourceId, Math.max(since, busy.at))
 				const { loopDelayMaxMs: loop, arrivalGapMaxMs: gap } = fresh
-				if (!valid(loop) || !valid(gap) || gap - loop < LINK_GAP_MS)
+				if (!valid(loop) || !valid(gap)) cause = "unknown"
+				else if (gap - loop < LINK_GAP_MS) {
 					cause = "core-busy"
-				else coreBusyAt.delete(sourceId)
+					until = Math.min(until, busy.at + CORE_BUSY_STRETCH_MS)
+				} else coreBusyAt.delete(sourceId)
 			} else if (cause === "core-busy")
 				coreBusyAt.set(sourceId, { rate, at: mono })
 		} catch {
@@ -259,12 +272,7 @@ export function createLinkAdvisor(deps: {
 		}
 		if (cause === "unknown") {
 			if (latch?.rate === rate) latches.delete(sourceId)
-		} else
-			latches.set(sourceId, {
-				rate,
-				cause,
-				until: mono + LINK_SUSTAINED_WINDOW_MS,
-			})
+		} else latches.set(sourceId, { rate, cause, until })
 		return cause
 	}
 	const decideCause = (

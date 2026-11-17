@@ -190,6 +190,43 @@ describe("a starvation episode's tail through the production composition", () =>
 		expect(offenders).toEqual([])
 	})
 
+	it("a steady link shortfall after the core recovered reads source within 20 s of the last core-busy decision, at 20 recheck phases", () => {
+		const table: string[] = []
+		for (let phase = 0; phase < 20; phase++) {
+			const readings = simulate({
+				...starvation,
+				endMs: 150_000,
+				// The link loses 5 % from the starvation on, with no arrival gaps.
+				metricsRate: (from, to) =>
+					to > STARVED_FROM && from < 150_000 ? PAYLOAD * 0.95 : PAYLOAD,
+				recheckOffsetMs: phase * 100,
+			})
+			const reasons = readings.filter(r => r.at >= STARVED_FROM)
+			const row = `phase ${phase * 100} ms: ${reasons
+				.map(r => `${r.at}:${r.advisory.lossReason ?? r.advisory.level}`)
+				.join(" ")}`
+			table.push(row)
+			const lastCoreBusy = reasons.findLast(
+				r => r.advisory.lossReason === "core-busy",
+			)
+			const firstSource = reasons.find(r => r.advisory.lossReason === "source")
+			expect(lastCoreBusy, row).toBeDefined()
+			expect(firstSource, row).toBeDefined()
+			if (!lastCoreBusy || !firstSource) continue
+			// The core's evidence leaves the 15 s lookback by 52 s; the stretch rule then holds
+			// core-busy for at most 20 s more, and source follows at the next recheck.
+			expect(firstSource.at, row).toBeGreaterThan(lastCoreBusy.at)
+			expect(firstSource.at - lastCoreBusy.at, row).toBeLessThanOrEqual(2_000)
+			expect(firstSource.at, row).toBeLessThanOrEqual(
+				STARVED_TO + 15_000 + 20_000 + 2_000,
+			)
+			// From then on the link is named until the end.
+			for (const reading of reasons.filter(r => r.at >= firstSource.at))
+				expect(reading.advisory.lossReason, row).toBe("source")
+		}
+		expect(table).toHaveLength(20)
+	})
+
 	it("a slow link with a healthy loop still reads source", () => {
 		for (const phase of [0, 700, 1300]) {
 			const readings = simulate({
@@ -250,17 +287,35 @@ describe("a starvation episode's tail through the production composition", () =>
 
 describe("sourceCauseExcluded", () => {
 	const of = (
-		deviation: number | null,
 		mode: string | null,
 	): Parameters<typeof sourceCauseExcluded>[0] => ({
-		rateMismatchOf: () => (deviation === null ? undefined : { deviation }),
 		controlModeOf: () => mode,
 	})
-	it("excludes a slower dongle and external tuner control only", () => {
-		expect(sourceCauseExcluded(of(-0.5, "internal"), "s")).toBe(true)
-		expect(sourceCauseExcluded(of(null, "external"), "s")).toBe(true)
-		expect(sourceCauseExcluded(of(0.2, "internal"), "s")).toBe(false)
-		expect(sourceCauseExcluded(of(null, null), "s")).toBe(false)
+	it("excludes external tuner control only", () => {
+		expect(sourceCauseExcluded(of("external"), "s")).toBe(true)
+		expect(sourceCauseExcluded(of("internal"), "s")).toBe(false)
+		expect(sourceCauseExcluded(of(null), "s")).toBe(false)
+	})
+
+	it("a sustained link shortfall with a healthy core reads source throughout", () => {
+		// Rate truth measures the same received bytes, so it would report this link failure as
+		// a slower dongle at about 30 s; that must not turn the cause unknown.
+		for (const phase of [0, 900, 1700]) {
+			const readings = simulate({
+				endMs: 90_000,
+				phaseAt: () => ({ utilisation: 0.3, loopDelayMs: 5 }),
+				stalls: [],
+				metricsRate: (from, to) =>
+					to > 20_000 && from < 80_000 ? PAYLOAD * 0.97 : PAYLOAD,
+				recheckOffsetMs: phase,
+				sourceCauseExcluded: () =>
+					sourceCauseExcluded({ controlModeOf: () => "internal" }, "s"),
+			})
+			const dropping = readings.filter(r => r.advisory.level === "dropping")
+			expect(dropping.length).toBeGreaterThan(20)
+			for (const reading of dropping)
+				expect(reading.advisory.lossReason, `${reading.at}`).toBe("source")
+		}
 	})
 })
 
