@@ -29,6 +29,7 @@ import type {
 	DecoderConfig,
 	DecoderOutput,
 } from "../../../src/decoders/types.js"
+import { DATE_CLOCK } from "./dsd-fme-call-first-helpers.js"
 
 const logger = pino({ level: "silent" })
 const T0 = Date.parse("2026-10-09T12:13:33.000Z")
@@ -47,7 +48,7 @@ function createDecoder(options: Record<string, unknown> = {}): DsdFmeDecoder {
 		enabled: true,
 		options: { mode: "auto", ...options },
 	}
-	return new DsdFmeDecoder(config, logger)
+	return new DsdFmeDecoder(config, logger, DATE_CLOCK)
 }
 
 function args(options: Record<string, unknown>): string[] {

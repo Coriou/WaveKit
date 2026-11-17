@@ -87,6 +87,8 @@ export function replayCalls(seed: Seed, phaseMs: number): CallEvent[] {
 	const decoder = new DsdFmeDecoder(
 		{ id: "dmr", type: "dsd-fme", enabled: true, options: { mode: "auto" } },
 		logger,
+		// Elapsed time follows the faked Date (withFakeDate).
+		{ mono: () => Date.now(), wall: () => Date.now() },
 	)
 	const internals = decoder as unknown as {
 		handleOutputLine(line: string): void

@@ -7,6 +7,7 @@ import pino from "pino"
 import fc from "fast-check"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
+import { DATE_CLOCK } from "./dsd-fme-call-first-helpers.js"
 import type { DsdFmeLinkLine } from "../../../src/decoders/builtin/dsd-fme-link.js"
 import {
 	type DsdFmeDecodeEvidence,
@@ -31,6 +32,7 @@ function rig() {
 	const decoder = new DsdFmeDecoder(
 		{ id: "fake", type: "dsd-fme", enabled: true, options: {} },
 		pino({ level: "silent" }),
+		DATE_CLOCK,
 	)
 	const state = createInterpreterState({ epoch: 3, origin: "probe" })
 	const links: DsdFmeLinkLine[] = []

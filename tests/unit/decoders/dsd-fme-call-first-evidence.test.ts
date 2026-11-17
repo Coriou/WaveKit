@@ -341,9 +341,9 @@ describe("dsd-fme call-first: evidence rules", () => {
 			[1720, MS("VC*")],
 		]
 
-		it("VC* at 1000/1360/1720 and TLC + SLOT line at 1900: one call, tg 9 src 100, known clear", () => {
+		it("VC* at 1000/1360/1720 and TLC + SLOT line at 1900, closed by a clean sync: one call, tg 9 src 100, known clear", () => {
 			const { outputs, starts, ends, voice } = replay(
-				[...head, [1900, MS("TLC")], [1900, LC(1)]],
+				[...head, [1900, MS("TLC")], [1900, LC(1)], [1960, MS("CSBK")]],
 				8000,
 			)
 			expect(starts).toHaveLength(1)
@@ -366,6 +366,14 @@ describe("dsd-fme call-first: evidence rules", () => {
 			expect(at(ends[0]!.endedAt!)).toBe(1900)
 			expect(ends[0]!.flags?.timeout).toBe(false)
 			expect(voice.at(-1)).toMatchObject({ active: false, talkgroup: 9 })
+			// With no closing sync, the trailer window runs out: it still names
+			// the call but proves nothing (fail closed).
+			const unclosed = replay([...head, [1900, MS("TLC")], [1900, LC(1)]], 8000)
+			expect(unclosed.ends[0]).toMatchObject({
+				talkgroup: 9,
+				source: 100,
+				encryptionKnown: false,
+			})
 		})
 
 		it("the trailer counts at 105 ms after the terminator, not at 106", () => {
@@ -426,7 +434,13 @@ describe("dsd-fme call-first: evidence rules", () => {
 
 		it("the terminator printed again inside the hold keeps the call_end held for its trailer", () => {
 			const { starts, ends } = replay(
-				[...head, [1900, MS("TLC")], [1930, MS("TLC")], [1950, LC(1)]],
+				[
+					...head,
+					[1900, MS("TLC")],
+					[1930, MS("TLC")],
+					[1950, LC(1)],
+					[1990, MS("CSBK")],
+				],
 				8000,
 			)
 			expect(starts).toHaveLength(1)

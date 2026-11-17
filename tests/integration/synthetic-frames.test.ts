@@ -169,6 +169,8 @@ const dsd = (path: Path, capture: (typeof CAPTURES)[number], mode: string) =>
 						},
 		},
 		silent,
+		// Elapsed time follows the fake Date (vi.setSystemTime).
+		{ mono: () => Date.now(), wall: () => Date.now() },
 	)
 const DSD_HEAD = {
 	stages: [

@@ -19,6 +19,7 @@ import type {
 	DecoderOutput,
 } from "../../../src/decoders/types.js"
 import { receiveFilterEffect } from "../../../src/decoders/builtin/dsd-fme-filter.js"
+import { DATE_CLOCK } from "./dsd-fme-call-first-helpers.js"
 
 /** The sox receive-filter effect of the 4800 symbols/s modes (auto, dmr, p25, ysf, dstar). */
 const rx = (rateHz: number) => receiveFilterEffect("auto", rateHz)!
@@ -52,7 +53,7 @@ function createDecoder(options: Record<string, unknown> = {}): DsdFmeDecoder {
 		enabled: true,
 		options: { mode: "auto", ...options },
 	}
-	return new DsdFmeDecoder(config, logger)
+	return new DsdFmeDecoder(config, logger, DATE_CLOCK)
 }
 
 /** Replays timed lines, running the 500 ms timeout checker as time passes. */

@@ -19,6 +19,7 @@ import {
 	type DsdFmeVoiceCallState,
 } from "../../../src/decoders/builtin/dsd-fme.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
+import { DATE_CLOCK } from "./dsd-fme-call-first-helpers.js"
 
 const logger = pino({ level: "silent" })
 const T0 = Date.parse("2026-01-02T03:04:05.000Z")
@@ -52,6 +53,7 @@ function createDecoder(options: Record<string, unknown> = {}): DsdFmeDecoder {
 			options: { mode: "auto", ...options },
 		},
 		logger,
+		DATE_CLOCK,
 	)
 }
 
@@ -529,6 +531,7 @@ describe("dsd-fme: a call whose encryption was never known", () => {
 					talkgroup: 100,
 					source: 200,
 					startTime: start,
+					startWallMs: start.getTime(),
 					lastUpdate: start,
 					dmr: { cc: 1 },
 					quality: { crcErrs: 0, fecErrs: 0 },

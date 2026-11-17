@@ -10,7 +10,9 @@
  * embedded one, followed by a CACH short LC error ("SLCO CRC ERR") and the
  * other slot's sync loss: neither drops it; the slot's next clean sync
  * settles it. A call with IDs that still does not know its encryption at
- * its terminator settles on a clean trailer naming its IDs. One copy
+ * its terminator settles on a clean trailer naming its IDs once the
+ * lane's next clean sync closes it (the window running out proves nothing).
+ * One copy
  * of another talker's IDs after a voice burst revokes known clear on the
  * same callId; two agreeing copies split the call.
  */
@@ -364,7 +366,10 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				[1662, LC(1)],
 				[1663, SYNC_ERR(1)],
 			]
-			const settled = replay([...head, [1800, TLC(1)], [1800, LC(1)]], 8000)
+			const settled = replay(
+				[...head, [1800, TLC(1)], [1800, LC(1)], [1850, BS(1, "IDLE")]],
+				8000,
+			)
 			expect(settled.ends).toHaveLength(1)
 			expect(settled.ends[0]).toMatchObject({
 				talkgroup: 9001,
@@ -405,6 +410,8 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				[2400, LC(1)],
 				[2430, TLC(2)],
 				[2430, LC(2, 9003, 93, "(CRC ERR)")],
+				// Slot 1's clean trailer closes on its next clean sync.
+				[2460, BS(1, "IDLE")],
 			]
 			const { ends } = replay(lines, 9000)
 			expect(ends).toHaveLength(2)
@@ -872,7 +879,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 
 	describe("dirty voice LC headers", () => {
 		it("a new call on a header whose sync printed an error is never known at once, even with a call running", () => {
-			const { starts } = replay(
+			const { starts, voice } = replay(
 				[
 					[1000, BS(1, "VLC")],
 					[1000, LC(1)],
@@ -884,7 +891,84 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			)
 			const b = starts.find(s => s.talkgroup === 9002)
 			expect(b).toBeDefined()
-			expect(b!.encryptionKnown).toBeDefined()
+			// Unknown at start, and never clear: no LC of its own settles it.
+			expect(b!.encryptionKnown).toBe(false)
+			expect(everClear(voice, b!.callId)).toBe(false)
+		})
+	})
+
+	describe("a clean header whose burst prints a late error", () => {
+		const lateErrors = [
+			" (CRC ERR) ",
+			" SLOT 1 SB/RC (FEC ERR) E:4; I:00000000 D:000;  ",
+		]
+		const head = (sync: string, late: string): Line[] => [
+			[1000, sync],
+			[1000, " SLOT 1 TGT=9001 SRC=91 Group Call "],
+			[1001, late],
+		]
+
+		it("repeater: the call is unknown until its own later link control settles it", () => {
+			for (const late of lateErrors) {
+				const never = replay(
+					[...head(BS(1, "VLC"), late), ...over(1, 1060, 2, null)],
+					8000,
+				)
+				expect(never.starts).toHaveLength(1)
+				expect(never.starts[0]!.encryptionKnown).toBe(false)
+				expect(everClear(never.voice)).toBe(false)
+				const settled = replay(
+					[
+						...head(BS(1, "VLC"), late),
+						...over(1, 1060, 2, null),
+						[1722, LC(1)],
+						...over(1, 1780, 1, null),
+					],
+					8000,
+				)
+				expect(everClear(settled.voice)).toBe(true)
+				const clear = settled.voice.findIndex(
+					v => v.encryptionKnown === true && !v.encrypted,
+				)
+				// Clear only after the later LC (1722), never on the header.
+				expect(
+					settled.voice.slice(0, clear).every(v => v.encryptionKnown !== true),
+				).toBe(true)
+			}
+		})
+
+		it("direct: the same", () => {
+			for (const late of lateErrors) {
+				const lines: Line[] = [...head(MS("VLC"), late)]
+				for (let t = 1060; t < 1800; t += 360) lines.push([t, MS("VC*")])
+				const never = replay([...lines, [2000, MS("TLC")]], 8000)
+				expect(never.starts).toHaveLength(1)
+				expect(never.starts[0]!.encryptionKnown).toBe(false)
+				expect(everClear(never.voice)).toBe(false)
+				const settled = replay(
+					[...lines, [1500, LC(1)], [1780, MS("VC*")], [2000, MS("TLC")]],
+					8000,
+				)
+				expect(everClear(settled.voice)).toBe(true)
+			}
+		})
+	})
+
+	describe("held trailer without a closing sync", () => {
+		it("the trailer window running out names the call but never proves it clear", () => {
+			const { ends, voice } = replay(
+				[
+					...over(1, 1000, 2, null),
+					[1662, LC(1)],
+					[1663, SYNC_ERR(1)],
+					[1800, TLC(1)],
+					[1800, LC(1)],
+				],
+				8000,
+			)
+			expect(ends).toHaveLength(1)
+			expect(ends[0]).toMatchObject({ talkgroup: 9001, encryptionKnown: false })
+			expect(everClear(voice)).toBe(false)
 		})
 	})
 

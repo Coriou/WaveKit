@@ -113,4 +113,41 @@ describe("dsd-fme crash restart", () => {
 		await decoder.stop()
 		expect(internals.callTimeoutTimer).toBeNull()
 	})
+
+	it("a call holding its call_end for a clean trailer is not proven clear by a crash restart", async () => {
+		const decoder = createDecoder()
+		const internals = decoder as unknown as Internals
+		const outputs: DecoderOutput[] = []
+		decoder.on("output", (o: DecoderOutput) => outputs.push(o))
+		decoder.on("error", () => undefined)
+		await decoder.start()
+		const line = (atMs: number, text: string) => {
+			vi.setSystemTime(T0 + atMs)
+			internals.handleOutputLine(text)
+		}
+		// A call started on its frames, its LC dropped by a sync loss, then
+		// its terminator and a clean trailer, and the child dies before the
+		// lane's next sync closes that burst.
+		let t = 0
+		for (let s = 0; s < 2; s++)
+			for (let n = 1; n <= 6; n++, t += 60) line(t, BS(`VC${n}`))
+		line(t, LC(1, 9001, 91))
+		line(t + 1, "00:00:01 Sync:  DMR  [SLOT1]  slot2  | Frame Sync Err: 7")
+		line(
+			t + 100,
+			"00:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC  ",
+		)
+		line(t + 100, LC(1, 9001, 91))
+		internals.process = null
+		await decoder.start()
+		const ends = outputs.filter(o => o.type === "call_end")
+		expect(ends).toHaveLength(1)
+		expect(ends[0]!.data).toMatchObject({
+			talkgroup: 9001,
+			encryptionKnown: false,
+			flags: { restart: true },
+		})
+		internals.process = null
+		await decoder.stop()
+	})
 })

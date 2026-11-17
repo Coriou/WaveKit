@@ -479,6 +479,18 @@ interface DsdFmeCallState {
 	source: number | null
 	slot?: number | undefined
 	startTime: Date
+	/**
+	 * The start as wall time, fixed when the call was created: every
+	 * reported startedAt, endedAt (start + the monotonic duration) and the
+	 * recording filename match use it, so a wall step mid-call moves none.
+	 */
+	startWallMs: number
+	/**
+	 * DMR: started on a clean voice LC header whose burst has not closed yet
+	 * (the lane's next sync): a late error line of that burst makes it
+	 * unknown again (dropErroredHeader).
+	 */
+	headerOpen?: boolean | undefined
 	lastUpdate: Date
 	wavFile?: string | undefined
 	// Protocol-specific metadata
@@ -654,6 +666,26 @@ interface VlcCandidate {
 	atMs: number
 	/** A sync line of the lane followed it: a later error line is not its burst's. */
 	sealed: boolean
+}
+
+/**
+ * The adapter's clocks. Every elapsed-time decision (call timeout, pending
+ * emission, evidence spans, candidate and trailer windows, re-key gaps)
+ * runs on `mono`, which never steps; `wall` is read only for what is
+ * reported (output timestamps, startedAt / endedAt, link times) and for the
+ * recording filename search, whose names carry wall time. The
+ * `HH:MM:SS` prefix dsd-fme prints on its lines is never used for timing.
+ */
+export interface DsdFmeClock {
+	/** Monotonic ms (any origin). */
+	mono(): number
+	/** Wall-clock ms since the epoch. */
+	wall(): number
+}
+
+const SYSTEM_CLOCK: DsdFmeClock = {
+	mono: () => performance.now(),
+	wall: () => Date.now(),
 }
 
 /**
@@ -1157,8 +1189,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private dmrBs = false
 	private dmrBsSlot = 1
 
-	constructor(config: DecoderConfig, logger: Logger) {
+	/** The adapter's clocks (DsdFmeClock). */
+	private readonly clock: DsdFmeClock
+	/** mono() 0 on the epoch scale: the wall time at construction minus mono(). */
+	private readonly monoEpochMs: number
+
+	constructor(
+		config: DecoderConfig,
+		logger: Logger,
+		clock: DsdFmeClock = SYSTEM_CLOCK,
+	) {
 		super(config, logger)
+		this.clock = clock
+		this.monoEpochMs = clock.wall() - clock.mono()
 		this.options = this.parseOptions(config.options)
 		// DSD-FME outputs data to stderr, and we route audio to stdout (which we drain)
 		this.parseStdout = false
@@ -1373,7 +1416,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			clearInterval(this.callTimeoutTimer)
 			this.callTimeoutTimer = null
 		}
-		this.endOpenCallsForRestart(new Date())
+		this.endOpenCallsForRestart(this.monoDate())
 
 		await super.start()
 
@@ -1396,6 +1439,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			const call = this.callState ?? this.pendingCall?.state ?? null
 			if (call !== null) {
 				call.flags.restart = true
+				// No closing clean sync: a held trailer proves nothing.
+				if (call.heldEnd !== undefined) call.heldEnd.errored = true
 				let ended: DecoderOutput | null
 				if (call.heldEnd !== undefined) ended = this.closeHeldEnd(now)
 				else {
@@ -1442,7 +1487,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		// End every lane's active or pending call before stopping
-		const now = new Date()
+		const now = this.monoDate()
 		this.forEachLane(() => {
 			if (this.pendingCall) {
 				// Promote pending call to active and end it
@@ -1469,7 +1514,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * "voice-call" state in the same tick (the digital voice stream's call
 	 * metadata is derived from exactly these events).
 	 */
-	protected override emitOutput(output: DecoderOutput): void {
+	protected override emitOutput(raw: DecoderOutput): void {
+		const output = this.outputAtWall(raw)
 		super.emitOutput(output)
 		if (output.type !== "call_start" && output.type !== "call_end") return
 		const data = output.data as CallEventData
@@ -1568,7 +1614,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				sync.atMs < call.voiceAtMs)
 		)
 			return
-		this.pendingKnown = { call, at: Date.now() }
+		this.pendingKnown = { call, at: this.monoMs() }
 	}
 
 	/**
@@ -1732,7 +1778,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * terminator: a clean trailer said whether it is encrypted (its burst
 	 * closed with no error line), so a clear one is known clear.
 	 */
-	private closeHeldEnd(now: Date): DecoderOutput | null {
+	private closeHeldEnd(now: Date, closed = true): DecoderOutput | null {
 		const call = this.callState ?? this.pendingCall?.state ?? null
 		const held = call?.heldEnd
 		if (call === null || held === undefined) return null
@@ -1743,7 +1789,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				call.talkgroup = held.talkgroup
 				call.source = held.source
 			}
-			if (!call.flags.encrypted) this.markKnown(call)
+			if (closed && !call.flags.encrypted) this.markKnown(call)
 		}
 		const endAt = new Date(held.atMs)
 		call.lastUpdate = endAt
@@ -1777,7 +1823,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				? { encryptionKnown: call.encryptionKnown }
 				: {}),
 			active: true,
-			startedAt: call.startTime.toISOString(),
+			startedAt: this.startedAtIso(call),
 		}
 		applyVoiceMetadata(state, {
 			dmr: call.dmr,
@@ -1880,7 +1926,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					maxTotalMb: this.options.perCallRecordingMaxTotalMb,
 					maxAgeHours: this.options.perCallRecordingMaxAgeHours,
 				},
-				Date.now(),
+				this.clock.wall(),
 				dir,
 			)
 			if (result.deleted.length > 0) {
@@ -1909,7 +1955,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Emits call_end event if a stale call is detected.
 	 */
 	private checkCallTimeoutAsync(): void {
-		const now = new Date()
+		const now = this.monoDate()
 		const nowMs = now.getTime()
 		const pending = this.pendingDmrLink ?? this.pendingDmrVoiceLinks[0]
 		if (pending && nowMs - pending.at > CALL_TIMEOUT_MS)
@@ -1989,7 +2035,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			type: "call_start",
 			data: {
 				callId: call.callId,
-				startedAt: call.startTime.toISOString(),
+				startedAt: this.startedAtIso(call),
 				encrypted: call.flags.encrypted,
 				...(call.encryptionKnown !== undefined
 					? { encryptionKnown: call.encryptionKnown }
@@ -2211,7 +2257,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Generates a timestamped filename for debug recordings.
 	 */
 	private getDebugFilename(stage: string, ext: string): string {
-		const now = new Date()
+		const now = new Date(this.clock.wall())
 		const ts = now
 			.toISOString()
 			.replace(/[:.]/g, "-")
@@ -2341,7 +2387,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * 5. Error events (FEC/CRC) are tracked for quality but not emitted unless debug mode is on
 	 */
 	protected override parseOutput(line: string): DecoderOutput | null {
-		const now = new Date()
+		const now = this.monoDate()
 		const nowMs = now.getTime()
 
 		// STEP 1: Strip ANSI escape codes from colored output
@@ -2384,6 +2430,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// STEP 3a: A clear link control counts once its burst closed clean.
 		this.resolvePendingKnown(cleanLine, nowMs)
 		this.dropErroredCandidate(cleanLine)
+		this.dropErroredHeader(cleanLine)
 		this.noteLaneSync(cleanLine, nowMs)
 
 		// STEP 3b: Publish link-control lines for the scanner (spec § 6.4)
@@ -2458,8 +2505,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private noteLaneSync(line: string, nowMs: number): void {
 		const sync = SYNC_PATTERN.exec(line)
 		if (sync?.groups?.["proto"]?.toUpperCase() !== "DMR") return
-		// Any sync of the lane closes the candidate's burst (dropErroredCandidate).
+		// Any sync of the lane closes the candidate's burst (dropErroredCandidate)
+		// and the header burst of a call started on it (dropErroredHeader).
 		if (this.candidate !== undefined) this.candidate.sealed = true
+		const headerCall = this.ongoingCall("dmr")
+		if (headerCall?.headerOpen === true) headerCall.headerOpen = false
 		if (!line.includes("|")) return
 		const burst = DMR_BURST.exec(line)?.groups?.["burst"]
 		const kind: LaneSync["kind"] =
@@ -2487,6 +2537,20 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * A voice LC header candidate (VlcCandidate) whose burst printed a late
 	 * error line (an error line before the lane's next sync) was not checked:
 	 * it is dropped.
+	 */
+	private dropErroredHeader(line: string): void {
+		const call = this.ongoingCall("dmr")
+		if (call?.headerOpen !== true) return
+		if (SYNC_PATTERN.test(line) || !burstError(line)) return
+		call.headerOpen = false
+		// Unknown again, on the same callId (published if announced); its own
+		// later link control settles it (deferKnown).
+		this.revokeKnown(call)
+	}
+
+	/**
+	 * A voice LC header candidate (see dropErroredCandidate below) is dropped
+	 * on the same late error; this one is the started call's counterpart.
 	 */
 	private dropErroredCandidate(line: string): void {
 		const candidate = this.candidate
@@ -2531,7 +2595,46 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.primeCounters()
 			this.counters.count("framesOk")
 		}
-		this.emit("link", link)
+		this.emit("link", { ...link, at: this.toWallMs(link.at) })
+	}
+
+	/** Now on the monotonic clock, on the epoch scale (DsdFmeClock). */
+	private monoMs(): number {
+		return this.monoEpochMs + this.clock.mono()
+	}
+
+	private monoDate(): Date {
+		return new Date(this.monoMs())
+	}
+
+	/** A monotonic instant as wall time now (what is reported). */
+	private toWallMs(monoMs: number): number {
+		return monoMs + this.clock.wall() - this.monoMs()
+	}
+
+	/**
+	 * An output's timestamp in wall time. Its startedAt / endedAt are wall
+	 * time already (startWallMs).
+	 */
+	private outputAtWall(output: DecoderOutput): DecoderOutput {
+		const offset = this.clock.wall() - this.monoMs()
+		if (offset === 0) return output
+		return {
+			...output,
+			timestamp: new Date(output.timestamp.getTime() + offset),
+		}
+	}
+
+	/** A call's reported start (startWallMs). */
+	private startedAtIso(call: DsdFmeCallState): string {
+		return new Date(call.startWallMs).toISOString()
+	}
+
+	/** A monotonic instant of a call as wall time: its start plus the mono span. */
+	private wallIso(call: DsdFmeCallState, at: Date): string {
+		return new Date(
+			call.startWallMs + (at.getTime() - call.startTime.getTime()),
+		).toISOString()
 	}
 
 	/**
@@ -2542,8 +2645,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private checkCallTimeout(now: Date): DecoderOutput | null {
 		// A held call_end (HeldEnd) ends once its trailer window is past.
 		const held = (this.callState ?? this.pendingCall?.state)?.heldEnd
-		if (held !== undefined)
-			return now.getTime() > held.untilMs ? this.closeHeldEnd(now) : null
+		if (held !== undefined) {
+			if (now.getTime() <= held.untilMs) return null
+			// The window ran out with no closing clean sync: a clean trailer
+			// still names the call, but proves it clear only once its burst
+			// closed (fail closed).
+			return this.closeHeldEnd(now, false)
+		}
 		// Check pending call timeout (promote and end if stale)
 		if (this.pendingCall && !this.callState) {
 			const pendingSilence =
@@ -3561,6 +3669,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			// (deferKnown), and its burst's late error line drops it.
 			if (sync === undefined || sync.kind === "voice" || !sync.clean)
 				call.encryptionKnown = false
+			// A clean header's call: its burst's late error line, before the
+			// lane's next sync, still makes it unknown (dropErroredHeader).
+			else if (sync.kind === "vlc") call.headerOpen = true
 		}
 		// A checked link control says whether the call is encrypted (its
 		// service options): a call started on its voice frames learns it here.
@@ -4451,6 +4562,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				slot,
 				// Call-first: the over began at the first sync of its chain.
 				startTime: this.chainStart(protocol, nowMs) ?? now,
+				startWallMs: this.toWallMs(
+					(this.chainStart(protocol, nowMs) ?? now).getTime(),
+				),
 				lastUpdate: now,
 				dmr,
 				p25,
@@ -4539,13 +4653,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				if (wavFile) {
 					// Found it! Emit an event so the UI can update
 					this.emitOutput({
-						timestamp: new Date(),
+						timestamp: this.monoDate(),
 						decoder: this.id,
 						type: "call_end",
 						data: {
 							callId: call.callId,
-							startedAt: call.startTime.toISOString(),
-							endedAt: callEndTime.toISOString(),
+							startedAt: this.startedAtIso(call),
+							endedAt: this.wallIso(call, callEndTime),
 							protocol: call.protocol,
 							talkgroup: call.talkgroup,
 							source: call.source,
@@ -4614,9 +4728,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			"i",
 		)
 
-		// Time window for matching (call start - 5s to call end + 5s)
-		const windowStartMs = call.startTime.getTime() - 5000
-		const windowEndMs = callEndTime.getTime() + 5000
+		// Time window for matching (call start - 5s to call end + 5s), in wall
+		// time: the filenames carry wall time.
+		const startWallMs = call.startWallMs
+		const windowStartMs = startWallMs - 5000
+		const windowEndMs =
+			startWallMs + (callEndTime.getTime() - call.startTime.getTime()) + 5000
 
 		try {
 			const files = fs.readdirSync(dir)
@@ -4639,7 +4756,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// Check if file timestamp falls within call window
 				if (fileMs >= windowStartMs && fileMs <= windowEndMs) {
 					// Calculate how close this file's timestamp is to call start
-					const diff = Math.abs(fileMs - call.startTime.getTime())
+					const diff = Math.abs(fileMs - startWallMs)
 					candidates.push({ file, timestamp: fileTimestamp, diff })
 				}
 			}
@@ -4790,8 +4907,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			type: "call_end",
 			data: {
 				callId: callInfo.callId,
-				startedAt: callInfo.startTime.toISOString(),
-				endedAt: endTime.toISOString(),
+				startedAt: this.startedAtIso(callInfo),
+				endedAt: this.wallIso(callInfo, endTime),
 				...(callInfo.encryptionKnown !== undefined
 					? { encryptionKnown: callInfo.encryptionKnown }
 					: {}),

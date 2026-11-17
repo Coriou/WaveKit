@@ -14,6 +14,13 @@
  * real service). The over's own carrier is unchecked analog (Voice only off). It checks that
  * the voice the router got before the admission (the head) plays whole, what the listener
  * waits and hears raw, and that a call whose encryption never resolves is never heard.
+ *
+ * Revoked overs: one copy of another talker's IDs after a voice burst makes the adapter publish
+ * the same callId not known clear again (clear -> unknown), and the router then drops the
+ * voice it queued for it (fail closed). For an over whose snapshots hold such a revoke after its
+ * admission, the run is capped just before the revoke (dropped 0 and the whole-head checks hold
+ * up to there), and the uncapped run is checked to drop voice and play none of it after the
+ * revoke. Revoked overs are counted like merged ones.
  */
 import { EventEmitter } from "node:events"
 import type * as http from "node:http"
@@ -137,6 +144,8 @@ interface Played {
 	voice: number[]
 	/** Output time of the first decoded sample (ms of seed time), null: none. */
 	firstVoiceOutMs: number | null
+	/** Output time of the last decoded sample (ms of seed time), null: none. */
+	lastVoiceOutMs: number | null
 	/** Loud analog (the over's carrier) played from the over start, ms. */
 	buzzMs: number
 	pendingOverwrittenMs: number
@@ -182,6 +191,7 @@ function routeOver(t: OverRun, seed = 7): Played {
 	const played: Played = {
 		voice: [],
 		firstVoiceOutMs: null,
+		lastVoiceOutMs: null,
 		buzzMs: 0,
 		pendingOverwrittenMs: 0,
 		droppedSamples: 0,
@@ -197,6 +207,7 @@ function routeOver(t: OverRun, seed = 7): Played {
 					if (v !== 0) played.buzzMs += 1 / 48
 				} else {
 					played.firstVoiceOutMs ??= clock.t
+					if (v !== 0) played.lastVoiceOutMs = clock.t
 					played.voice.push(v)
 				}
 			}
@@ -307,12 +318,23 @@ interface Measured {
 	/** First voice sync line of the over. */
 	voiceLineMs: number
 	admitMs: number | null
+	/**
+	 * The over's call published not known clear again after its admission
+	 * (one copy of another talker's IDs): the snapshot's time, and the
+	 * uncapped run (t is capped just before it).
+	 */
+	revoked: { atMs: number; t: OverRun } | null
 }
 
 /** Every own-call over of every scene at every phase; merged overs are counted apart. */
-async function measureAll(): Promise<{ runs: Measured[]; merged: number }> {
+async function measureAll(): Promise<{
+	runs: Measured[]
+	merged: number
+	revoked: number
+}> {
 	const runs: Measured[] = []
 	let merged = 0
+	let revoked = 0
 	for (const scene of DMR_SCENES) {
 		const seed: Seed = loadSeed(scene)
 		for (const phase of PHASES) {
@@ -328,27 +350,45 @@ async function measureAll(): Promise<{ runs: Measured[]; merged: number }> {
 					over.startMs,
 					c.voiceLineMs - AUTO_ROUTE_VOICE_AHEAD_OF_LINE_MS,
 				)
+				const t: OverRun = {
+					startMs: over.startMs,
+					endMs: over.endMs,
+					voiceMs,
+					events: c.events,
+					stopMs:
+						c.admitMs !== null
+							? 2 * c.admitMs - voiceMs + PAST_ADMIT_MS
+							: Math.max(over.endMs, c.endMs ?? 0) + PAST_ADMIT_MS,
+				}
+				// A clear -> unknown snapshot of the same call after the admission.
+				const admitted = c.admitMs
+				const callId = c.events[0]?.call.callId
+				const revoke =
+					admitted === null
+						? undefined
+						: c.events.find(
+								e =>
+									e.atMs > admitted &&
+									e.atMs <= t.stopMs &&
+									e.call.callId === callId &&
+									e.call.active &&
+									!e.call.encrypted &&
+									e.call.encryptionKnown === false,
+							)
+				if (revoke !== undefined) revoked++
 				runs.push({
 					scene,
 					phase,
 					over: over.index,
-					t: {
-						startMs: over.startMs,
-						endMs: over.endMs,
-						voiceMs,
-						events: c.events,
-						stopMs:
-							c.admitMs !== null
-								? 2 * c.admitMs - voiceMs + PAST_ADMIT_MS
-								: Math.max(over.endMs, c.endMs ?? 0) + PAST_ADMIT_MS,
-					},
+					t: revoke === undefined ? t : { ...t, stopMs: revoke.atMs - 1 },
 					voiceLineMs: c.voiceLineMs,
 					admitMs: c.admitMs,
+					revoked: revoke === undefined ? null : { atMs: revoke.atMs, t },
 				})
 			}
 		}
 	}
-	return { runs, merged }
+	return { runs, merged, revoked }
 }
 
 describe("pending voice under the adapter's call timing (recorded dv-latency seeds)", () => {
@@ -356,7 +396,7 @@ describe("pending voice under the adapter's call timing (recorded dv-latency see
 	const all = (): ReturnType<typeof measureAll> => (measured ??= measureAll())
 
 	it("first voice line to the admitting snapshot is at most AUTO_ROUTE_RECORDED_VOICE_TO_CLEAR_MS (1 694 ms, direct), and the first voice at most the bound before it", async () => {
-		const { runs, merged } = await all()
+		const { runs, merged, revoked } = await all()
 		let worstDirect = 0
 		let worstRepeater = 0
 		let worstAge = 0
@@ -393,6 +433,8 @@ describe("pending voice under the adapter's call timing (recorded dv-latency see
 		// and calls that never resolve are both present in the recordings.
 		expect(new Set(runs.map(m => m.scene)).size).toBe(DMR_SCENES.length)
 		expect(merged).toBeGreaterThan(0)
+		// Overs revoked after their admission (another talker's single LC copy) are present too.
+		expect(revoked).toBeGreaterThan(0)
 		expect(runs.some(m => m.admitMs === null)).toBe(true)
 	}, 120_000)
 
@@ -422,6 +464,19 @@ describe("pending voice under the adapter's call timing (recorded dv-latency see
 					...label,
 					dropped: 0,
 				})
+				if (m.revoked !== null) {
+					// Fail closed: past the revoke the router drops the queued voice, and none of
+					// this over's voice plays after it.
+					const uncapped = run(m.revoked.t, m.over)
+					expect({ ...label, dropped: uncapped.droppedSamples > 0 }).toEqual({
+						...label,
+						dropped: true,
+					})
+					expect({
+						...label,
+						afterRevoke: (uncapped.lastVoiceOutMs ?? 0) > m.revoked.atMs + 20,
+					}).toEqual({ ...label, afterRevoke: false })
+				}
 				if (m.admitMs === null) {
 					// Encryption never known: nothing of it heard (fail closed).
 					expect({ ...label, heard: got.voice.length }).toEqual({
@@ -460,9 +515,18 @@ describe("pending voice under the adapter's call timing (recorded dv-latency see
 				const head = got.handed
 					.filter(h => h.atMs < (m.admitMs ?? 0))
 					.reduce((n, h) => n + h.samples, 0)
-				const headOut = head * (OUT_PER_MS / 8) - RESAMPLER_EDGE
 				const gotVoice = got.voice.filter(v => v !== 0)
 				const refVoice = ref.voice.filter(v => v !== 0)
+				// A revoked over's run is capped before the revoke: the head plays whole up to the
+				// cap (all the output time from its first sample to the cap, less one 40 ms block).
+				const capOut =
+					m.revoked === null || got.firstVoiceOutMs === null
+						? Number.POSITIVE_INFINITY
+						: (m.t.stopMs - got.firstVoiceOutMs - 40) * OUT_PER_MS
+				const headOut = Math.min(
+					head * (OUT_PER_MS / 8) - RESAMPLER_EDGE,
+					Math.max(0, capOut),
+				)
 				expect({ ...label, played: gotVoice.length >= headOut }).toEqual({
 					...label,
 					played: true,
