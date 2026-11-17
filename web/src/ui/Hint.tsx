@@ -11,6 +11,7 @@ import {
 	useId,
 	useLayoutEffect,
 	useRef,
+	useState,
 	type ReactNode,
 } from "react"
 import { createPortal } from "react-dom"
@@ -96,6 +97,10 @@ export function HintMark({
 	const events = hintMarkEvents(controller, id)
 	const bubbleId = `${id}-bubble`
 	const learnShown = open && state.pinned && content.learn !== undefined
+	// open but with no room anywhere to draw it: not expanded, controls nothing (the sentence stays the mark's
+	// and the control's description)
+	const [drawn, setDrawn] = useState(true)
+	const shown = open && drawn
 	useEffect(() => () => controller.forget(id), [controller, id])
 	return (
 		<span
@@ -110,15 +115,19 @@ export function HintMark({
 				type="button"
 				className="wk-hint-mark"
 				aria-label={`About ${label}`}
-				aria-expanded={open}
-				aria-controls={open ? bubbleId : undefined}
+				aria-expanded={shown}
+				aria-controls={shown ? bubbleId : undefined}
 				aria-describedby={
 					learnShown
 						? `${describedBy} ${learnIds(bubbleId, Boolean(content.learn?.foot))}`
 						: describedBy
 				}
 				data-wk-hint-mark={id}
-				onFocus={e => events.onFocus(focusVisible(e.currentTarget))}
+				onFocus={e => {
+					// focus a dismissing press gave back (holdFocusThroughClick) keeps the hint closed
+					if (e.currentTarget.dataset["wkHintQuiet"] === undefined)
+						events.onFocus(focusVisible(e.currentTarget))
+				}}
 				onBlur={e =>
 					events.onBlur(
 						e.relatedTarget instanceof Node &&
@@ -143,6 +152,7 @@ export function HintMark({
 					anchor={anchor}
 					mark={mark}
 					controller={controller}
+					onDrawn={setDrawn}
 				/>
 			)}
 		</span>
@@ -191,6 +201,46 @@ function focusBackToMark(
 		mark.current?.focus({ preventScroll: true })
 }
 
+/** How long a press's hold on the mark's focus lasts at most (a touch's mousedown comes after the finger lifts). */
+const HOLD_MS = 1_500
+
+/**
+ * A press on nothing focusable took focus from the bubble back to the mark; the rest of that click must not
+ * drop it to the page. A mouse's mousedown (after the pointerdown, and on touch after the finger lifts) blurs
+ * the focused element when it lands on nothing focusable: the mark takes focus back as soon as that happens.
+ * Until the click ends (or the press is cancelled, or `HOLD_MS` pass); focus the press gives somewhere real is
+ * left there. Outlives the bubble, which the press closes.
+ */
+function holdFocusThroughClick(mark: HTMLElement): void {
+	const onBlur = (e: FocusEvent) => {
+		if (e.relatedTarget !== null) return done()
+		// after the mousedown's own focus step is over, unless something took focus meanwhile
+		setTimeout(() => {
+			const at = document.activeElement
+			if (
+				mark.isConnected &&
+				document.hasFocus() &&
+				(at === null || at === document.body)
+			) {
+				mark.dataset["wkHintQuiet"] = ""
+				mark.focus({ preventScroll: true })
+				delete mark.dataset["wkHintQuiet"]
+			}
+		}, 0)
+	}
+	const end = () => setTimeout(done, 0)
+	const timer = setTimeout(() => done(), HOLD_MS)
+	function done() {
+		clearTimeout(timer)
+		mark.removeEventListener("blur", onBlur)
+		removeEventListener("click", end, true)
+		removeEventListener("pointercancel", end, true)
+	}
+	mark.addEventListener("blur", onBlur)
+	addEventListener("click", end, true)
+	addEventListener("pointercancel", end, true)
+}
+
 /** A scroll this soon after opening is the browser bringing the focused mark into view: re-place, keep open. */
 const SETTLE_MS = 250
 
@@ -203,6 +253,7 @@ function HintBubble({
 	anchor,
 	mark,
 	controller,
+	onDrawn,
 }: {
 	id: string
 	hintId: string
@@ -212,6 +263,8 @@ function HintBubble({
 	anchor: { readonly current: HTMLSpanElement | null }
 	mark: { readonly current: HTMLButtonElement | null }
 	controller: HintController
+	/** Told on every placing whether the bubble is drawn (false: no room for it anywhere). */
+	onDrawn: (drawn: boolean) => void
 }) {
 	const bubble = useRef<HTMLDivElement>(null)
 	const learn = pinned && content.learn !== undefined
@@ -279,13 +332,20 @@ function HintBubble({
 				size: { width: r.width, height: r.height },
 				// the shortest cut it can draw: its own padding and border and two lines (read, not assumed)
 				minHeight: hintMinCut(getComputedStyle(el)),
+				// no room beside its row in the host: out of the host, in the window, clear of it and the
+				// other islands
+				...(l.hostEl ? { around: { host: hostRect, obstacles: others } } : {}),
 			})
 			el.style.left = `${at.x}px`
 			el.style.top = `${at.y}px`
 			el.dataset["side"] = at.side
+			if (at.outside) el.dataset["outside"] = ""
+			else delete el.dataset["outside"]
 			const wasCut = el.dataset["scroll"] !== undefined
-			// no room beside its row for even a short cut: not shown (no sliver over the row or out of the
-			// host); the sentence still reaches a screen reader through the control's description
+			onDrawn(at.side !== "none")
+			// no room for even a short cut, in the host or around it: not shown (no sliver over the row), and
+			// the mark says so (not expanded); the sentence still reaches a screen reader through the control's
+			// description
 			if (at.side === "none") {
 				focusBackToMark(bubble, mark)
 				delete el.dataset["scroll"]
@@ -362,7 +422,7 @@ function HintBubble({
 			observer?.disconnect()
 			if (frame !== null) cancelAnimationFrame(frame)
 		}
-	}, [anchor, mark, controller, learn])
+	}, [anchor, mark, controller, learn, onDrawn])
 
 	// a click or tap elsewhere closes it (and still does its own job); Escape closes the hint only
 	useEffect(() => {
@@ -372,8 +432,13 @@ function HintBubble({
 			if (anchor.current?.contains(t) || bubble.current?.contains(t)) return
 			// a click on something focusable keeps the focus it gives; any other click takes focus in the
 			// bubble back to the mark rather than to the page
-			if (!(t instanceof Element && t.closest(FOCUSABLE)))
+			if (!(t instanceof Element && t.closest(FOCUSABLE))) {
+				const inside =
+					document.activeElement instanceof Node &&
+					bubble.current?.contains(document.activeElement) === true
 				focusBackToMark(bubble, mark)
+				if (inside && mark.current) holdFocusThroughClick(mark.current)
+			}
 			controller.dismiss()
 		}
 		const events = hintMarkEvents(controller, hintId)

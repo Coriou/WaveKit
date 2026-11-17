@@ -25,6 +25,7 @@ import {
 	hintRectsMeet,
 	hintRoom,
 	placeHint,
+	placeHintOutside,
 	type HintRect,
 } from "../../src/ui/hint-place.ts"
 
@@ -491,6 +492,136 @@ describe("hint placement", () => {
 		expect(hintRectsMeet(sliver, keep)).toBe(true)
 	})
 
+	it("a row that fills its host goes out of the host, above it in the window, clear of the host and other islands", () => {
+		const host = rect(16, 300, 420, 100)
+		const keep = rect(36, 312, 380, 76)
+		const receiver = rect(16, 80, 300, 56)
+		const at = placeHint({
+			keep,
+			host,
+			viewport: VIEW,
+			size,
+			minHeight: MIN,
+			around: { host, obstacles: [receiver] },
+		})
+		// above the host, right against its gap, start-aligned with the row
+		expect(at).toEqual({
+			x: 36,
+			y: 300 - HINT_GAP - 60,
+			side: "above",
+			outside: true,
+		})
+		const bubble = rect(at.x, at.y, 280, 60)
+		for (const r of [host, keep, receiver])
+			expect(hintRectsMeet(bubble, r)).toBe(false)
+		// a host with room beside the row never goes out of it
+		expect(
+			placeHint({
+				keep: rect(36, 400, 380, 70),
+				host: rect(16, 200, 420, 600),
+				viewport: VIEW,
+				size,
+				around: { host: rect(16, 200, 420, 600), obstacles: [] },
+			}).outside,
+		).toBeUndefined()
+	})
+
+	it("out of the host: an island over the room above moves it beside the island, then below, then beside the host", () => {
+		const host = rect(16, 300, 420, 100)
+		const keep = rect(36, 312, 380, 76)
+		// an island over the spot start-aligned with the row: the bubble moves right of it, still above the host
+		const card = rect(16, 120, 300, 160)
+		const beside = placeHintOutside({
+			keep,
+			host,
+			obstacles: [card],
+			viewport: VIEW,
+			size,
+		})
+		expect(beside).toEqual({
+			x: 316 + HINT_GAP,
+			y: 300 - HINT_GAP - 60,
+			side: "above",
+			outside: true,
+		})
+		// the whole band above taken: below the host
+		const band = rect(0, 0, 1440, 300 - HINT_GAP)
+		expect(
+			placeHintOutside({ keep, host, obstacles: [band], viewport: VIEW, size }),
+		).toEqual({ x: 36, y: 400 + HINT_GAP, side: "below", outside: true })
+		// above and below taken: to the right of the host, level with the row
+		const under = rect(0, 400 + HINT_GAP, 1440, 500)
+		expect(
+			placeHintOutside({
+				keep,
+				host,
+				obstacles: [band, under],
+				viewport: VIEW,
+				size,
+			}),
+		).toEqual({ x: 436 + HINT_GAP, y: 312, side: "right", outside: true })
+	})
+
+	it("out of the host at the bound: a band exactly the bubble's height is whole, one px less is cut, under the minimum none", () => {
+		// a phone: the host fills the width and the rest of the window, its row fills the host: the band above it
+		// is all there is
+		const phone = { width: 390, height: 844 }
+		const keepAt = (top: number) => rect(28, top + 12, 330, 844 - top - 24)
+		const hostAt = (top: number) => rect(0, top, 390, 844 - top)
+		// band above: from the window inset (12) to the host's gap
+		const band = (top: number) => top - HINT_GAP - HINT_INSET
+		const tall = { width: 300, height: 80 }
+		const exact = 80 + HINT_GAP + HINT_INSET
+		const whole = placeHint({
+			keep: keepAt(exact),
+			host: hostAt(exact),
+			viewport: phone,
+			size: tall,
+			minHeight: MIN,
+			around: { host: hostAt(exact), obstacles: [] },
+		})
+		expect(band(exact)).toBe(80)
+		expect(whole).toEqual({ x: 28, y: 12, side: "above", outside: true })
+		const short = placeHint({
+			keep: keepAt(exact - 1),
+			host: hostAt(exact - 1),
+			viewport: phone,
+			size: tall,
+			minHeight: MIN,
+			around: { host: hostAt(exact - 1), obstacles: [] },
+		})
+		expect(short).toEqual({
+			x: 28,
+			y: 12,
+			side: "above",
+			outside: true,
+			maxHeight: 79,
+		})
+		// the band exactly the shortest cut: cut to it; one px less: not shown
+		const atMin = MIN + HINT_GAP + HINT_INSET
+		expect(
+			placeHint({
+				keep: keepAt(atMin),
+				host: hostAt(atMin),
+				viewport: phone,
+				size: tall,
+				minHeight: MIN,
+				around: { host: hostAt(atMin), obstacles: [] },
+			}),
+		).toEqual({ x: 28, y: 12, side: "above", outside: true, maxHeight: MIN })
+		const past = placeHint({
+			keep: keepAt(atMin - 1),
+			host: hostAt(atMin - 1),
+			viewport: phone,
+			size: tall,
+			minHeight: MIN,
+			around: { host: hostAt(atMin - 1), obstacles: [] },
+		})
+		expect(past.side).toBe("none")
+		expect(past.outside).toBeUndefined()
+		expect(past.maxHeight).toBeUndefined()
+	})
+
 	it("at the shortest cut: room of exactly the minimum is cut and drawn off the row, one px less shows none", () => {
 		for (const [min, chrome] of [
 			[MIN, CHROME],
@@ -752,6 +883,98 @@ describe("hint placement", () => {
 				},
 			),
 			{ numRuns: 500 },
+		)
+	})
+})
+
+describe("hint placement out of the host", () => {
+	// Feature: hints, Property 3: out of the host, in the window, never over the host, its row or another island
+	// Validates: hints are never drawn over their own row or another surface, and are shown wherever there is room
+	it("lies in the window clear of the host, its row and every island, whole or cut to at least the minimum", () => {
+		const box = (w: number, h: number) =>
+			fc
+				.tuple(
+					fc.integer({ min: -100, max: w }),
+					fc.integer({ min: -100, max: h }),
+					fc.integer({ min: 0, max: 900 }),
+					fc.integer({ min: 0, max: 700 }),
+				)
+				.map(([l, t, bw, bh]) => rect(l, t, bw, bh))
+		fc.assert(
+			fc.property(
+				fc.constantFrom(VIEW, { width: 390, height: 844 }),
+				fc.integer({ min: 0, max: 1000 }),
+				fc.integer({ min: 0, max: 800 }),
+				fc.integer({ min: 40, max: 900 }),
+				fc.integer({ min: 20, max: 800 }),
+				fc.array(box(1440, 900), { maxLength: 4 }),
+				fc.integer({ min: 120, max: 280 }),
+				fc.integer({ min: CHROME, max: 500 }),
+				fc.boolean(),
+				(view, hx, hy, hw, hh, obstacles, bw, bh, learn) => {
+					const min = learn ? LEARN_MIN : MIN
+					const host = rect(hx, hy, hw, hh)
+					const keep = rect(
+						hx + 12,
+						hy + 4,
+						Math.max(1, hw - 24),
+						Math.max(1, hh - 8),
+					)
+					const at = placeHintOutside({
+						keep,
+						host,
+						obstacles,
+						viewport: view,
+						size: { width: bw, height: bh },
+						minHeight: min,
+					})
+					// the window band above the host, clear of everything: there is room, so it is shown
+					const above = rect(
+						HINT_INSET,
+						HINT_INSET,
+						view.width - 2 * HINT_INSET,
+						Math.floor(host.top - HINT_GAP) - HINT_INSET,
+					)
+					const bandFree =
+						above.bottom - above.top >= min &&
+						above.right - above.left >= bw &&
+						obstacles.every(
+							o =>
+								o.right <= o.left ||
+								o.bottom <= o.top ||
+								!hintRectsMeet(
+									o,
+									rect(
+										above.left - HINT_GAP,
+										above.top - HINT_GAP,
+										above.right - above.left + 2 * HINT_GAP,
+										above.bottom - above.top + 2 * HINT_GAP,
+									),
+								),
+						)
+					if (bandFree) expect(at).not.toBeNull()
+					if (!at) return
+					expect(at.outside).toBe(true)
+					if (at.maxHeight !== undefined) {
+						expect(at.maxHeight).toBeGreaterThanOrEqual(min)
+						expect(at.maxHeight).toBeLessThan(Math.ceil(bh))
+					}
+					const drawn = rect(
+						at.x,
+						at.y,
+						Math.ceil(bw),
+						Math.min(Math.ceil(bh), at.maxHeight ?? Math.ceil(bh)),
+					)
+					expect(drawn.left).toBeGreaterThanOrEqual(HINT_INSET)
+					expect(drawn.top).toBeGreaterThanOrEqual(HINT_INSET)
+					expect(drawn.right).toBeLessThanOrEqual(view.width - HINT_INSET)
+					expect(drawn.bottom).toBeLessThanOrEqual(view.height - HINT_INSET)
+					for (const r of [host, keep, ...obstacles])
+						if (r.right > r.left && r.bottom > r.top)
+							expect(hintRectsMeet(drawn, r)).toBe(false)
+				},
+			),
+			{ numRuns: 300 },
 		)
 	})
 })

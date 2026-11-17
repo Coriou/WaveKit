@@ -1022,8 +1022,9 @@ Condensed + Noto Sans, Tabler-based icons).
     the panel under it stays open and focus stays on the mark. One hint is open at a time; for
     500 ms after one closes the next opens without the delay. It closes when its host scrolls,
     closes or the window resizes, and it never opens by itself.
-  - *Accessibility:* the mark is a real button (`About <label>`, `aria-expanded`,
-    `aria-controls` while open); the explained control and the mark point `aria-describedby` at
+  - *Accessibility:* the mark is a real button (`About <label>`, `aria-expanded` and
+    `aria-controls` while its bubble is drawn: a hint with no room anywhere is not expanded and
+    controls nothing); the explained control and the mark point `aria-describedby` at
     an always-mounted `hidden` copy of the sentence (out of the reading flow), so a screen reader
     hears it on the control without finding the mark; a pinned learn card adds its rows and foot
     to the mark's description. No `title` attributes for explanations. The open hint is
@@ -1031,17 +1032,22 @@ Condensed + Noto Sans, Tabler-based icons).
     cut to its room (below), which scrolls: Tab from the mark goes into it, the arrows scroll it,
     Shift+Tab goes back to the mark, and Escape there closes it with focus on the mark. Focus in a
     cut bubble never drops to the page: when it becomes whole (the hint stays open), is not shown,
-    or a scroll, resize or click on nothing focusable closes it, focus goes back to the mark first;
-    a click on something focusable keeps the focus it gives. On a coarse pointer the mark has a
+    or a scroll, resize or click on nothing focusable closes it, focus goes back to the mark first
+    and stays there through the whole click (the mousedown that follows, on touch after the finger
+    lifts, would drop it to the page); a click on something focusable keeps the focus it gives. On a coarse pointer the mark has a
     44 px hit area.
   - *Placement:* inside the surface that holds the mark (island panel, drawer, sheet), 12 px in
     from its edges and clipped to the window; above the row it explains, else below; when neither
     side has room for all of it, the roomier side with the bubble cut to that room and its body
     scrolling. Never over its own row (the label line and its control). A cut is never shorter
     than the bubble's own padding and border plus two lines of text (read from its computed style;
-    a shorter box would still draw its padding and border over the row or out of the host): with
-    less room than that on both sides, as when the row fills its host, no bubble is drawn, and the
-    sentence still reaches a screen reader through the control's `aria-describedby`. An island a
+    a shorter box would still draw its padding and border over the row or out of the host). With
+    less room than that on both sides, as when the row fills its host, the bubble goes out of the
+    host into the window (12 px in from its edges): above the host, else below, right, left, clear
+    by the gap of the host, its row and every other island, whole on the first side it fits, else
+    cut to the tallest free room around the host if that holds the same two-line minimum. Only
+    when nothing does is no bubble drawn; the mark is then not expanded, and the sentence still
+    reaches a screen reader through the control's `aria-describedby`. An island a
     layout lays over the host's edge is cut out of that room. So a hint cannot touch another
     island or plot data and needs no slot in the layout. Solid, unblurred, `--wk-e2`; opens with
     a 120 ms fade and 4 px slide, and simply appears under reduced motion.
@@ -1062,7 +1068,10 @@ Condensed + Noto Sans, Tabler-based icons).
     `ui.css`. Listen's strings live in `web/src/features/listen/hints.ts`, with the rules as a test.
     Gated by `ui-check --flow=hints`: at 1440×900 and 390×844 every mark is reached by Tab, its hint
     lies inside its host and the window and meets no other island and never its own row, a cut
-    card scrolls by keyboard and gives focus back to the mark when it closes or becomes whole, Enter pins, Escape closes the hint only, a tap pins.
+    card scrolls by keyboard (End to its end) and gives focus back to the mark when it closes or
+    becomes whole, including after a real click on plain text, a real click on another mark keeps
+    focus there, a hint with no room anywhere is not drawn and not expanded, Enter pins, Escape
+    closes the hint only, a tap pins.
 - **Listen panel: essentials first (2026-11-17).** The Audio options panel stacked five sections,
   each with permanent prose, a 44 px hatched level block and two sets of figures. Now: Volume as
   one row; Squelch (mode, a slim 8 px level bar with the squelch as an amber handle, hollow in
