@@ -516,37 +516,36 @@ describe("dsd-fme: a call whose encryption was never known", () => {
 				),
 				"",
 			)
-			const end = (known: boolean | undefined) => {
+			vi.useFakeTimers({ toFake: ["Date"] })
+			const end = (settle: boolean) => {
 				const d = createDecoder({
 					enablePerCallRecording: true,
 					perCallRecordingDir: root,
-				}) as unknown as {
-					callState: unknown
-					endCall(
-						now: Date,
-						timeout: boolean,
-					): { data: { wavFile?: string; encryptionKnown?: boolean } } | null
-				}
-				d.callState = {
-					callId: "c",
-					protocol: "dmr",
-					talkgroup: 100,
-					source: 200,
-					startTime: start,
-					startWallMs: start.getTime(),
-					lastUpdate: start,
-					dmr: { cc: 1 },
-					quality: { crcErrs: 0, fecErrs: 0 },
-					flags: {},
-					...(known === undefined ? {} : { encryptionKnown: known }),
-				}
-				return d.endCall(new Date(start.getTime() + 5000), false)?.data
+					perCallRecordingPrune: false,
+				})
+				const ends: CallData[] = []
+				d.on("output", (o: DecoderOutput) => {
+					if (o.type === "call_end") ends.push(o.data as CallData)
+				})
+				const adapter = d as unknown as Internals
+				vi.setSystemTime(start)
+				adapter.handleOutputLine(MS("VLC"))
+				adapter.handleOutputLine(LC(1, 100, 200))
+				if (settle) adapter.handleOutputLine(MS("VC*"))
+				vi.setSystemTime(start.getTime() + 5000)
+				adapter.checkCallTimeoutAsync()
+				return ends[0]
 			}
-			expect(end(false)?.wavFile).toBeUndefined()
-			expect(end(false)?.encryptionKnown).toBe(false)
-			expect(end(true)?.wavFile).toContain(root)
-			expect(end(undefined)?.wavFile).toContain(root)
+			expect(end(false)).toMatchObject({
+				encryptionKnown: false,
+				wavFile: undefined,
+			})
+			expect(end(true)).toMatchObject({
+				encryptionKnown: true,
+				wavFile: expect.stringContaining(root),
+			})
 		} finally {
+			vi.useRealTimers()
 			fs.rmSync(root, { recursive: true })
 		}
 	})

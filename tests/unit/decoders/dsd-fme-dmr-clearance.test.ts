@@ -37,7 +37,8 @@ class Harness {
 	private seq = 0
 	readonly decisions: DmrDecision[] = []
 	/** The adapter's call per lane, reported after each line of its lane. */
-	readonly calls = new Map<DmrLane, DmrCallView | null>()
+	readonly calls = new Map<DmrLane, DmrCallView>()
+	private readonly changed = new Set<DmrLane>()
 
 	line(text: string, atMs = this.seq * 10): DmrLane | "foreign" {
 		const seq = ++this.seq
@@ -45,20 +46,21 @@ class Harness {
 		this.decisions.push(...this.m.line(event, seq, atMs))
 		if (event.type === "foreign") return "foreign"
 		const view = this.calls.get(event.lane)
-		if (event.lane !== "x" && view !== undefined)
+		if (view && this.changed.delete(event.lane))
 			this.decisions.push(...this.m.call(event.lane, view, seq, atMs))
 		return event.lane
 	}
 
 	/** The adapter opens (or names) the lane's call; reported with the next line. */
 	open(lane: DmrLane, callId = "c1", key: string | null = K): void {
+		this.changed.add(lane)
 		this.calls.set(lane, { callId, key })
 	}
 
 	end(lane: DmrLane): void {
 		const view = this.calls.get(lane)
 		if (view) this.m.ended(view.callId)
-		this.calls.set(lane, null)
+		this.calls.delete(lane)
 	}
 
 	trust(callId = "c1") {
@@ -264,7 +266,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(pi.trust()).toBe("clear")
 	})
 
-	it("another talker's encrypted link control goes to the next call when it splits, else to this call", () => {
+	it("a privacy line mutes the live call and a replacement opened on the same line", () => {
 		const split = new Harness()
 		headerCall(split)
 		split.line(MS("VC*"))
@@ -274,13 +276,33 @@ describe("DMR clearance: state x event rows", () => {
 		expect(split.trust("c2")).toBe("encrypted")
 		expect(
 			split.decisions.some(d => d.callId === "c1" && d.trust === "encrypted"),
-		).toBe(false)
+		).toBe(true)
 		const single = new Harness()
 		headerCall(single)
 		single.line(MS("VC*"))
 		single.line(LC(1, 9002, 92, "Encrypted"))
 		expect(single.trust()).toBe("encrypted")
 	})
+
+	it.each([false, true])(
+		"keeps the ended verdict until all publications finish (WAV lookup: %s)",
+		wav => {
+			const h = new Harness()
+			headerCall(h)
+			h.line(MS("VC*"))
+			h.m.ending("c1", wav)
+			h.m.restart()
+			expect(h.trust()).toBe("clear")
+			h.m.ended("c1")
+			expect(h.m.has("c1")).toBe(wav)
+			if (wav) {
+				expect(h.trust()).toBe("clear")
+				h.m.ended("c1")
+			}
+			expect(h.m.has("c1")).toBe(false)
+			expect(h.trust()).toBe("unknown")
+		},
+	)
 
 	it("an ended call's encryption is forgotten with it", () => {
 		const h = new Harness()

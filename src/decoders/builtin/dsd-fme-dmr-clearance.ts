@@ -3,8 +3,8 @@
  *
  * A pure per-lane state machine (no I/O, no timers). The adapter
  * (dsd-fme.ts) classifies every dsd-fme line (classify), feeds it here with
- * its line sequence number and monotonic time (line), then reports the
- * lane's call after its own call lifecycle ran on that line (call). The
+ * its line sequence number and monotonic time (line), then binds a newly opened or named
+ * call to the evidence from that line (call). The
  * machine answers with trust decisions for call ids; `clear` below is the
  * only place a call becomes CLEAR.
  *
@@ -154,6 +154,8 @@ interface LcSeen {
 }
 
 interface CallRecord {
+	/** An unattributed burst bars proof for the rest of this lifetime. */
+	unplaced: boolean
 	callId: string
 	key: string | null
 	firstVoiceSeq: number | undefined
@@ -371,19 +373,15 @@ const emptyLane = (modeGeneration: number): LaneState => ({
 })
 
 export class DmrClearance {
+	/** End publications can overlap the next call or a delayed recording lookup. */
+	private readonly closing = new Map<
+		string,
+		{ trust: DmrLaneTrust; remaining: number }
+	>()
 	private decoderGeneration = 0
 	private burstSeq = 0
 	private mode: "bs" | "ms" | undefined
 	private readonly lanes = new Map<DmrLane, LaneState>()
-	/** Calls marked encrypted: sticky per call id, whatever lane they move to. */
-	private readonly encryptedIds = new Set<string>()
-	/**
-	 * Calls ever seen on no slot lane ("x": a line after a bare or bracketless
-	 * sync while the call was live): never clearable, whatever lane they move
-	 * to. Fail closed: one bare sync inside a direct-mode call costs its
-	 * clearance for the rest of the call.
-	 */
-	private readonly unplacedIds = new Set<string>()
 
 	constructor(private readonly callTimeoutMs: number) {
 		for (const lane of LANES) this.lanes.set(lane, emptyLane(0))
@@ -397,7 +395,8 @@ export class DmrClearance {
 
 	/** The trust of `callId` (unknown when it has no record). */
 	trust(callId: string): DmrLaneTrust {
-		if (this.encryptedIds.has(callId)) return "encrypted"
+		const closing = this.closing.get(callId)
+		if (closing) return closing.trust
 		for (const lane of this.lanes.values())
 			if (lane.call?.callId === callId) return lane.call.trust
 		return "unknown"
@@ -405,6 +404,7 @@ export class DmrClearance {
 
 	/** Whether `callId` has a record on some lane (the adapter reports every live call). */
 	has(callId: string): boolean {
+		if (this.closing.has(callId)) return true
 		for (const lane of this.lanes.values())
 			if (lane.call?.callId === callId) return true
 		return false
@@ -423,14 +423,8 @@ export class DmrClearance {
 	 */
 	restart(): void {
 		this.decoderGeneration++
-		// Every live call was ended before a restart, so no id is still owed its trust.
-		this.encryptedIds.clear()
-		this.unplacedIds.clear()
 		this.mode = undefined
-		for (const key of LANES) {
-			const generation = this.lane(key).modeGeneration + 1
-			this.lanes.set(key, emptyLane(generation))
-		}
+		this.resetMode()
 	}
 
 	/** The adapter ended a lane's call on its call timeout. */
@@ -438,23 +432,49 @@ export class DmrClearance {
 		for (const key of lanes) this.bumpMode(key)
 	}
 
-	/** The adapter ended `callId` (any cause): its record and proof go. */
+	/** Detach the terminal verdict from the lane until the end and any WAV lookup finish. */
+	ending(callId: string, awaitingWav: boolean): void {
+		this.closing.set(callId, {
+			trust: this.trust(callId),
+			remaining: awaitingWav ? 2 : 1,
+		})
+		for (const lane of this.lanes.values())
+			if (lane.call?.callId === callId) lane.call = undefined
+	}
+
+	/** Release a suppressed call, an emitted end, or a finished recording lookup. */
 	ended(callId: string): void {
-		this.encryptedIds.delete(callId)
-		this.unplacedIds.delete(callId)
+		const closing = this.closing.get(callId)
+		if (closing && --closing.remaining > 0) return
+		this.closing.delete(callId)
 		for (const lane of this.lanes.values())
 			if (lane.call?.callId === callId) lane.call = undefined
 	}
 
 	/** The adapter marked `callId` encrypted (its own parse): sticky here too. */
 	encrypted(callId: string): void {
-		this.encryptedIds.add(callId)
 		for (const lane of this.lanes.values()) {
 			const call = lane.call
 			if (call?.callId !== callId) continue
 			call.trust = "encrypted"
 			call.evidence = undefined
 		}
+	}
+
+	/** Invalidate the generation before any closing snapshots are published. */
+	private resetMode(): DmrDecision[] {
+		const out: DmrDecision[] = []
+		for (const key of LANES) {
+			this.bumpMode(key)
+			const call = this.lane(key).call
+			if (!call) continue
+			call.namedHere = false
+			if (call.trust === "clear") {
+				call.trust = "unknown"
+				out.push({ callId: call.callId, trust: "unknown" })
+			}
+		}
+		return out
 	}
 
 	private bumpMode(key: DmrLane): void {
@@ -475,8 +495,23 @@ export class DmrClearance {
 		const out: DmrDecision[] = []
 		if (event.type === "foreign") {
 			this.mode = undefined
-			for (const key of LANES) this.bumpMode(key)
-			return out
+			return this.resetMode()
+		}
+		// Direct and unattributed bursts share adapter lane zero. Move its live
+		// record before processing even a sync that immediately ends the call.
+		if (event.lane === "ms" || event.lane === "x") {
+			const previous = this.lane(event.lane === "ms" ? "x" : "ms")
+			const call = previous.call
+			if (call !== undefined) {
+				previous.call = undefined
+				this.lane(event.lane).call = call
+				if (event.lane === "x") call.unplaced = true
+				if (call.trust === "clear")
+					out.push({ callId: call.callId, trust: "unknown" })
+				if (call.trust !== "encrypted") call.trust = "unknown"
+				call.evidence = undefined
+				call.namedHere = false
+			}
 		}
 		if (event.lane === "x") {
 			this.onUnplaced(event, seq, out)
@@ -491,16 +526,7 @@ export class DmrClearance {
 		if (event.type === "sync") {
 			const mode = event.format === "bs" ? "bs" : "ms"
 			if (this.mode !== undefined && this.mode !== mode)
-				// A BS/MS change: no evidence of the old mode survives, and a
-				// call known clear under it is not any more (fail closed).
-				for (const key of LANES) {
-					this.bumpMode(key)
-					const call = this.lane(key).call
-					if (call !== undefined) call.namedHere = false
-					if (call?.trust !== "clear") continue
-					call.trust = "unknown"
-					out.push({ callId: call.callId, trust: "unknown" })
-				}
+				out.push(...this.resetMode())
 			this.mode = mode
 			this.settle(event, lane, seq, atMs, out)
 			lane.burst = this.newBurst(event)
@@ -513,17 +539,7 @@ export class DmrClearance {
 		}
 		if (event.errored) this.dirty(lane)
 		const call = lane.call
-		// A privacy field on another talker's link control waits for the
-		// lifecycle (call): it is the next call's if this line splits the
-		// call, else this call's.
-		const rivalPrivacy =
-			event.type === "lc" &&
-			event.privacy &&
-			call !== undefined &&
-			call.key !== null &&
-			call.key !== event.key
-		if (rivalPrivacy) lane.privacySeq = seq
-		else if (event.privacy) this.privacy(lane, seq, out)
+		if (event.privacy) this.privacy(lane, seq, out)
 		// Another slot's print: its privacy also mutes the slot it names (fail
 		// closed), and it proves nothing on either.
 		if (event.otherSlot) {
@@ -584,47 +600,30 @@ export class DmrClearance {
 			call.evidence = undefined
 			out.push({ callId: call.callId, trust: "unknown" })
 		}
+		if (call !== undefined && call.key !== null) {
+			this.arm(lane, call, seq, atMs, "known")
+			if (this.namesHere(lane, seq, call.key)) call.namedHere = true
+		}
 		return out
 	}
 
 	/**
-	 * The lane's call after the adapter's lifecycle ran on line `seq` (null:
-	 * no call): a new call is recorded (unknown, or pending on its voice
-	 * header), and a link control on this line may arm a proof.
+	 * Bind an opened or newly named call to the evidence classified on this line.
 	 */
 	call(
 		key: DmrLane,
-		view: DmrCallView | null,
+		view: DmrCallView,
 		seq: number,
 		atMs: number,
 	): DmrDecision[] {
 		const out: DmrDecision[] = []
 		const lane = this.lane(key)
-		if (view === null) {
-			lane.call = undefined
-			return out
-		}
-		if (key === "x") this.unplacedIds.add(view.callId)
 		let record = lane.call
-		// Another talker's privacy print that split nothing is this call's.
-		if (record?.callId === view.callId && lane.privacySeq === seq) {
-			lane.privacySeq = undefined
-			this.privacy(lane, seq, out)
-		}
 		if (record?.callId !== view.callId) {
-			// A new call here, or one the adapter moved from another lane:
-			// it inherits nothing but its encryption.
-			let wasClear = false
-			for (const other of this.lanes.values())
-				if (other !== lane && other.call?.callId === view.callId) {
-					wasClear = other.call.trust === "clear"
-					other.call = undefined
-				}
-			// A privacy field on the line that opened the call is its own.
-			const encrypted =
-				this.encryptedIds.has(view.callId) || lane.privacySeq === seq
+			const encrypted = lane.privacySeq === seq
 			lane.privacySeq = undefined
 			record = {
+				unplaced: key === "x",
 				callId: view.callId,
 				key: view.key,
 				firstVoiceSeq:
@@ -637,11 +636,9 @@ export class DmrClearance {
 			}
 			lane.call = record
 			if (encrypted) {
-				this.encryptedIds.add(view.callId)
 				out.push({ callId: view.callId, trust: "encrypted" })
 				return out
 			}
-			if (wasClear) out.push({ callId: view.callId, trust: "unknown" })
 			// The call opened on a checked LC of a clean voice header burst.
 			if (key !== "x" && view.key !== null)
 				this.arm(lane, record, seq, atMs, "opened")
@@ -805,15 +802,12 @@ export class DmrClearance {
 
 	/** A privacy field makes the lane's call encrypted, for good. */
 	private privacy(lane: LaneState, seq: number, out: DmrDecision[]): void {
+		lane.privacySeq = seq // Applies also to a call opened on this line.
 		const call = lane.call
-		if (call === undefined) {
-			lane.privacySeq = seq
-			return
-		}
+		if (call === undefined) return
 		if (call.trust === "encrypted") return
 		call.trust = "encrypted"
 		call.evidence = undefined
-		this.encryptedIds.add(call.callId)
 		out.push({ callId: call.callId, trust: "encrypted" })
 	}
 
@@ -836,7 +830,7 @@ export class DmrClearance {
 		// closed).
 		for (const key of LANES) {
 			const lane = this.lane(key)
-			if (lane.call !== undefined) this.privacy(lane, seq, out)
+			this.privacy(lane, seq, out)
 		}
 	}
 
@@ -873,8 +867,7 @@ export class DmrClearance {
 		const burst = lane.burst
 		if (
 			call.trust !== "pending" ||
-			this.encryptedIds.has(call.callId) ||
-			this.unplacedIds.has(call.callId) ||
+			call.unplaced ||
 			evidence.callId !== call.callId ||
 			evidence.callKey !== (call.key ?? "") ||
 			evidence.lcKey !== (call.key ?? "") ||
