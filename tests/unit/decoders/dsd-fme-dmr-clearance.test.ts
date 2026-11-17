@@ -7,7 +7,9 @@ import { describe, expect, it } from "vitest"
 import {
 	classifyDmrLine,
 	DmrClearance,
+	dmrLineClearAlg,
 	dmrLineErrored,
+	dmrLineNeutral,
 	dmrLinePrivacy,
 	newDmrRoute,
 	type DmrCallView,
@@ -68,7 +70,7 @@ class Harness {
 	}
 }
 
-/** A call opened on a clean header and its LC (P2 pending). */
+/** A call opened on a clean header and its LC (voice-header pending). */
 function headerCall(h: Harness, lane: DmrLane = "ms"): void {
 	h.line(lane === "ms" ? MS("VLC") : BS(1, "VLC"))
 	h.open(lane)
@@ -77,7 +79,7 @@ function headerCall(h: Harness, lane: DmrLane = "ms"): void {
 
 /**
  * A named call-first call, not known clear: two voice bursts, a naming LC
- * (its P1n proof), then a late error line that kills that proof.
+ * (its naming-link proof), then a late error line that kills that proof.
  */
 function namedCall(h: Harness): void {
 	h.line(MS("VC*"))
@@ -85,7 +87,7 @@ function namedCall(h: Harness): void {
 	h.line(MS("VC*"))
 	h.open("ms", "c1", K)
 	h.line(LC())
-	expect(h.m.evidence("c1")).toMatchObject({ kind: "P1n" })
+	expect(h.m.evidence("c1")).toMatchObject({ kind: "naming-link" })
 	h.line(" (FEC ERR) ")
 	h.line(MS("VC*"))
 	expect(h.trust()).toBe("unknown")
@@ -109,11 +111,19 @@ describe("DMR clearance: classification", () => {
 			format: "ms",
 			slot: "1",
 		})
-		expect(neutral).toMatchObject({
-			type: "line",
-			errored: true,
-			neutral: false,
-		})
+		// An allowlisted prefix carrying an error is an error first.
+		expect(neutral).toMatchObject({ type: "line", errored: true })
+		expect(dmrLineNeutral(" AMBE 01 err = [0] [0] ")).toBe(true)
+		expect(dmrLineClearAlg(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")).toBe(
+			true,
+		)
+		// A PI header is its own burst kind (a clear-algorithm proof may open there).
+		expect(
+			classifyDmrLine(
+				"00:00:01 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | PI ",
+				newDmrRoute(),
+			),
+		).toMatchObject({ type: "sync", burst: "pi" })
 	})
 
 	it("routes bracketed slots, MS/DM and unplaced lines to their own lanes", () => {
@@ -140,25 +150,25 @@ describe("DMR clearance: classification", () => {
 })
 
 describe("DMR clearance: state x event rows", () => {
-	it("row 1: a clean VLC sync with no call opens a burst and proves nothing", () => {
+	it("a clean VLC sync with no call opens a burst and proves nothing", () => {
 		const h = new Harness()
 		h.line(MS("VLC"))
 		expect(h.decisions).toEqual([])
 	})
 
-	it("row 2: a clean LC after a clean VLC opens the call pending (P2), not clear", () => {
+	it("a clean LC after a clean VLC opens the call pending (voice-header), not clear", () => {
 		const h = new Harness()
 		headerCall(h)
 		expect(h.trust()).toBe("pending")
 		expect(h.m.evidence("c1")).toMatchObject({
-			kind: "P2",
+			kind: "voice-header",
 			openingBurstKind: "vlc",
 			burstClean: true,
 		})
 		expect(h.cleared()).toBe(false)
 	})
 
-	it("row 3: an LC after a dirty VLC opens nothing pending (candidate ids only)", () => {
+	it("an LC after a dirty VLC opens nothing pending (candidate ids only)", () => {
 		const h = new Harness()
 		h.line(MS("VLC  (FEC ERR)"))
 		h.open("ms")
@@ -168,7 +178,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.cleared()).toBe(false)
 	})
 
-	it("row 4: a call opened on voice frames is unknown and its first voice burst is set", () => {
+	it("a call opened on voice frames is unknown and its first voice burst is set", () => {
 		const h = new Harness()
 		h.line(MS("VC*"))
 		h.open("ms", "c1", null)
@@ -176,7 +186,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.trust()).toBe("unknown")
 	})
 
-	it("row 5: an LC after a TLC, a bare sync or an unplaced line proves nothing", () => {
+	it("an LC after a TLC, a bare sync or an unplaced line proves nothing", () => {
 		for (const sync of [MS("TLC"), MS("CSBK"), "Sync: +DMR"]) {
 			const h = new Harness()
 			h.line(sync)
@@ -187,7 +197,7 @@ describe("DMR clearance: state x event rows", () => {
 		}
 	})
 
-	it("row 6: a voice sync of the call sets its first voice burst once; a dirty one spoils a pending proof", () => {
+	it("a voice sync of the call sets its first voice burst once; a dirty one spoils a pending proof", () => {
 		const h = new Harness()
 		headerCall(h)
 		h.line(MS("VC*  (FEC ERR)"))
@@ -195,14 +205,14 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.cleared()).toBe(false)
 	})
 
-	it("row 7 (P1n): the first clean LC after a frames call's first voice burst names and proves it; a later naming LC does not", () => {
+	it("the first clean LC after a frames call's first voice burst names and proves it; a later naming LC does not", () => {
 		const h = new Harness()
 		h.line(MS("VC*"))
 		h.open("ms", "c1", null)
 		h.line(MS("VC*"))
 		h.open("ms", "c1", K)
 		h.line(LC())
-		expect(h.m.evidence("c1")).toMatchObject({ kind: "P1n" })
+		expect(h.m.evidence("c1")).toMatchObject({ kind: "naming-link" })
 		h.line(MS("VC*"))
 		expect(h.trust()).toBe("clear")
 		// Not the first LC after its first voice burst (an errored one came first).
@@ -218,7 +228,57 @@ describe("DMR clearance: state x event rows", () => {
 		expect(late.cleared()).toBe(false)
 	})
 
-	it("P1n by algorithm: a clean clear ALG print in a clean burst is settled like an LC; a late error kills it", () => {
+	it("a clear algorithm print opens no proof in an idle, CSBK or terminator burst", () => {
+		for (const burst of ["IDLE", "CSBK", "TLC"]) {
+			const h = new Harness()
+			h.line(MS("VC*"))
+			h.open("ms", "c1", null)
+			h.line(MS("VC*"))
+			h.line(MS(burst))
+			h.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
+			expect(h.m.evidence("c1")).toBeUndefined()
+			h.line(MS("VC*"))
+			expect(h.cleared()).toBe(false)
+		}
+		// A PI header burst is one.
+		const pi = new Harness()
+		pi.line(MS("VC*"))
+		pi.open("ms", "c1", null)
+		pi.line(MS("VC*"))
+		pi.line(MS("PI "))
+		pi.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
+		pi.line(MS("VC*"))
+		expect(pi.trust()).toBe("clear")
+	})
+
+	it("another talker's encrypted link control goes to the next call when it splits, else to this call", () => {
+		const split = new Harness()
+		headerCall(split)
+		split.line(MS("VC*"))
+		// The adapter splits on this line: the lane's call is c2 after it.
+		split.open("ms", "c2", "9002/92")
+		split.line(LC(1, 9002, 92, "Encrypted"))
+		expect(split.trust("c2")).toBe("encrypted")
+		expect(
+			split.decisions.some(d => d.callId === "c1" && d.trust === "encrypted"),
+		).toBe(false)
+		const single = new Harness()
+		headerCall(single)
+		single.line(MS("VC*"))
+		single.line(LC(1, 9002, 92, "Encrypted"))
+		expect(single.trust()).toBe("encrypted")
+	})
+
+	it("an ended call's encryption is forgotten with it", () => {
+		const h = new Harness()
+		headerCall(h)
+		h.line(LC(1, 9001, 91, "Encrypted"))
+		expect(h.trust()).toBe("encrypted")
+		h.end("ms")
+		expect(h.trust()).toBe("unknown")
+	})
+
+	it("clear algorithm: a clean clear ALG print in a clean burst is settled like an LC; a late error kills it", () => {
 		const run = (tail: string[]) => {
 			const h = new Harness()
 			h.line(MS("VC*"))
@@ -234,18 +294,18 @@ describe("DMR clearance: state x event rows", () => {
 		expect(run([MS("VC*  (FEC ERR)")]).cleared()).toBe(false)
 	})
 
-	it("row 8: a named call's own LC after its voice is P1, settled by the next clean sync", () => {
+	it("a named call's own LC after its voice is link-after-voice, settled by the next clean sync", () => {
 		const h = new Harness()
 		namedCall(h)
 		h.line(MS("VC*"))
 		h.line(LC())
-		expect(h.m.evidence("c1")).toMatchObject({ kind: "P1" })
+		expect(h.m.evidence("c1")).toMatchObject({ kind: "link-after-voice" })
 		h.line(MS("VC*"))
 		expect(h.trust()).toBe("clear")
 		expect(h.cleared()).toBe(true)
 	})
 
-	it("row 9: an error line or dirty print in the burst drops the proof at settlement", () => {
+	it("an error line or dirty print in the burst drops the proof at settlement", () => {
 		for (const line of [" (FEC ERR)", " AMBE 0123 err = [0] [0] (FEC ERR)"]) {
 			const h = new Harness()
 			namedCall(h)
@@ -257,7 +317,7 @@ describe("DMR clearance: state x event rows", () => {
 		}
 	})
 
-	it("row 10: allowlisted prints with no error leave the proof pending", () => {
+	it("allowlisted prints with no error leave the proof pending", () => {
 		const h = new Harness()
 		namedCall(h)
 		h.line(MS("VC*"))
@@ -276,7 +336,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.trust()).toBe("clear")
 	})
 
-	it("row 11: any other non-sync line (CSBK text, a second LC, a sync-loss print) drops the proof", () => {
+	it("any other non-sync line (CSBK text, a second LC, a sync-loss print) drops the proof", () => {
 		for (const line of [
 			" Channel Timing CSBK (CT_CSBK) ",
 			LC(),
@@ -292,14 +352,14 @@ describe("DMR clearance: state x event rows", () => {
 		}
 	})
 
-	it("row 12: the next clean same-lane same-mode sync clears a P2 header call", () => {
+	it("the next clean same-lane same-mode sync clears a call opened on its voice header", () => {
 		const h = new Harness()
 		headerCall(h)
 		h.line(MS("VC*"))
 		expect(h.trust()).toBe("clear")
 	})
 
-	it("row 13: a dirty sync drops; another lane's line has no effect", () => {
+	it("a dirty sync drops; another lane's line has no effect", () => {
 		const dirty = new Harness()
 		headerCall(dirty, "1")
 		dirty.line(BS(1, "VC1  (FEC ERR)"))
@@ -313,7 +373,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(other.trust()).toBe("clear")
 	})
 
-	it("row 14: a bracketless line never settles, and its error spoils every open burst", () => {
+	it("a bracketless line never settles, and its error spoils every open burst", () => {
 		const clean = new Harness()
 		headerCall(clean, "1")
 		clean.line(BRACKETLESS("IDLE"))
@@ -327,7 +387,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(dirty.cleared()).toBe(false)
 	})
 
-	it("row 15: a privacy field on any line of the lane makes the call encrypted, for good", () => {
+	it("a privacy field on any line of the lane makes the call encrypted, for good", () => {
 		for (const line of [
 			LC(1, 9001, 91, "Encrypted (CRC ERR)"),
 			LC(1, 9001, 91, "SVC=0x40"),
@@ -347,7 +407,7 @@ describe("DMR clearance: state x event rows", () => {
 		}
 	})
 
-	it("row 16: the first checked rival copy after voice revokes a clear call at once", () => {
+	it("the first checked rival copy after voice revokes a clear call at once", () => {
 		const h = new Harness()
 		headerCall(h)
 		h.line(MS("VC*"))
@@ -357,7 +417,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.decisions.at(-1)).toEqual({ callId: "c1", trust: "unknown" })
 	})
 
-	it("row 17: a split call (the rival's second copy) inherits nothing", () => {
+	it("a split call (the rival's second copy) inherits nothing", () => {
 		const h = new Harness()
 		headerCall(h)
 		h.line(MS("VC*"))
@@ -371,7 +431,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.cleared("c2")).toBe(false)
 	})
 
-	it("row 18: the call's own key again in a later burst may prove it again (P1)", () => {
+	it("the call's own key again in a later burst may prove it again (link-after-voice)", () => {
 		const h = new Harness()
 		headerCall(h)
 		h.line(MS("VC*"))
@@ -382,17 +442,17 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.trust()).toBe("clear")
 	})
 
-	it("row 19-21: a named call's clean TLC and its trailer are P3, settled by the next clean same-format sync", () => {
+	it("a named call's clean TLC and its trailer are terminator, settled by the next clean same-format sync", () => {
 		const h = new Harness()
 		namedCall(h)
 		h.line(MS("TLC"))
 		h.line(LC())
-		expect(h.m.evidence("c1")).toMatchObject({ kind: "P3" })
+		expect(h.m.evidence("c1")).toMatchObject({ kind: "terminator" })
 		h.line(MS("CSBK"))
 		expect(h.trust()).toBe("clear")
 	})
 
-	it("row 22: an ending call settles on nothing else: another protocol, a bracketless line, an error, an unlisted line", () => {
+	it("an ending call settles on nothing else: another protocol, a bracketless line, an error, an unlisted line", () => {
 		const tails: string[][] = [
 			["Sync: +DSTAR VOICE"],
 			[BRACKETLESS("IDLE")],
@@ -409,7 +469,7 @@ describe("DMR clearance: state x event rows", () => {
 		}
 	})
 
-	it("row 23: an unnamed call's trailer gives ids as metadata only", () => {
+	it("an unnamed call's trailer gives ids as metadata only", () => {
 		const h = new Harness()
 		h.line(MS("VC*"))
 		h.open("ms", "c1", null)
@@ -421,7 +481,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.cleared()).toBe(false)
 	})
 
-	it("row 24: a dirty TLC gives no P3", () => {
+	it("a dirty TLC gives no terminator", () => {
 		const h = new Harness()
 		namedCall(h)
 		h.line(MS("TLC  (FEC ERR)"))
@@ -430,7 +490,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.cleared()).toBe(false)
 	})
 
-	it("row 25: a call timeout kills the lane's burst context and proof", () => {
+	it("a call timeout kills the lane's burst context and proof", () => {
 		const h = new Harness()
 		headerCall(h)
 		h.m.timeout(["ms", "x"])
@@ -438,7 +498,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.cleared()).toBe(false)
 	})
 
-	it("row 26: another protocol's sync drops every lane's proof and burst", () => {
+	it("another protocol's sync drops every lane's proof and burst", () => {
 		const h = new Harness()
 		headerCall(h)
 		h.line("Sync: +DSTAR VOICE")
@@ -446,7 +506,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.cleared()).toBe(false)
 	})
 
-	it("row 26: a BS/MS change bumps the mode generation", () => {
+	it("a BS/MS change bumps the mode generation", () => {
 		const h = new Harness()
 		headerCall(h, "1")
 		h.line(MS("VC*"))
@@ -454,7 +514,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.cleared()).toBe(false)
 	})
 
-	it("row 27: a restart kills every proof (decoder generation)", () => {
+	it("a restart kills every proof (decoder generation)", () => {
 		const h = new Harness()
 		headerCall(h)
 		h.m.restart()
@@ -462,7 +522,7 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.cleared()).toBe(false)
 	})
 
-	it("row 28: a TLC + LC train with no call proves nothing", () => {
+	it("a TLC + LC train with no call proves nothing", () => {
 		const h = new Harness()
 		for (let i = 0; i < 5; i++) {
 			h.line(BS(1, "TLC"))

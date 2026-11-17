@@ -211,10 +211,10 @@ describe("dsd-fme call-first lifecycle", () => {
 		expect(voice).toHaveLength(0)
 	})
 
-	it("attaches the IDs of the first link control and learns the call is clear from its trailer", () => {
-		// Three syncs announce the unnamed call (timer at 1000); the LC at 1100
-		// names it (naming proves nothing); the trailer naming the same IDs is
-		// its P3 proof, settled by the clean sync at 1860.
+	it("attaches the IDs of the first link control and learns the call is clear", () => {
+		// Three syncs announce the unnamed call (timer at 1000); the LC at 1100,
+		// its first after its voice, names it and is its proof once the sync at
+		// 1440 closes its burst clean.
 		const { starts, ends, voice } = replay(
 			[
 				[0, MS("VC*")],
@@ -225,7 +225,6 @@ describe("dsd-fme call-first lifecycle", () => {
 				[1440, MS("VC*")],
 				[1800, MS("TLC")],
 				[1800, LC(1)],
-				[1860, MS("CSBK")],
 			],
 			6000,
 		)
@@ -275,8 +274,9 @@ describe("dsd-fme call-first lifecycle", () => {
 		)
 		expect(at(starts[0]!.startedAt)).toBe(0)
 		// An LC after a voice burst with no call running is a late join: it
-		// opens and names the call, which proves nothing (only a later LC of
-		// the same IDs, P1, does).
+		// opens and names the call, which proves nothing: the call did not
+		// start on its frames, so only a later link control of the same IDs
+		// after its voice does.
 		expect(starts[0]!.encryptionKnown).toBe(false)
 		expect(voice.every(v => v.encryptionKnown === false)).toBe(true)
 	})

@@ -1766,7 +1766,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/**
 	 * Ends the lane's call whose call_end was held (HeldEnd) at its
 	 * terminator. A clean trailer names an unnamed call (metadata only); a
-	 * named call's trailer is its P3 proof, settled by the clearance machine
+	 * named call's trailer is its terminator proof, settled by the clearance machine
 	 * on the closing sync before this runs.
 	 */
 	private closeHeldEnd(now: Date): DecoderOutput | null {
@@ -4643,6 +4643,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 							callId: call.callId,
 							startedAt: this.startedAtIso(call),
 							endedAt: this.wallIso(call, callEndTime),
+							// The update carries the call's trust like its first end.
+							...this.encryptionKnownField(call),
 							protocol: call.protocol,
 							talkgroup: call.talkgroup,
 							source: call.source,

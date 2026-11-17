@@ -17,12 +17,16 @@
  * Proof kinds, each settled only by `clear` on the lane's next clean sync
  * of the same format, with no error anywhere in the burst from its opening
  * sync to that settling sync, inside callTimeoutMs of the link control:
- * - P1: a checked link control equal to the named call's key, in a clean
- *   voice burst at or after the call's first voice burst;
- * - P2: a checked link control in a clean voice LC header burst, naming the
- *   call it opens (or its own key); settled by the next voice burst or
- *   header;
- * - P3: a named call's own key in its clean terminator's trailer.
+ * - link-after-voice: a checked link control equal to the named call's
+ *   key, in a clean voice burst at or after the call's first voice burst;
+ * - naming-link: the first checked link control after the first voice
+ *   burst of a call started on its voice frames, which names it;
+ * - voice-header: a checked link control in a clean voice LC header burst,
+ *   naming the call it opens (or its own key); settled by the next voice
+ *   burst or header;
+ * - terminator: a named call's own key in its clean terminator's trailer;
+ * - clear-algorithm: a clean clear ALG print in a clean voice, header or PI
+ *   burst of the lane's call.
  *
  * Any privacy field (Encrypted, an SVC privacy bit, a non-clear ALG, a
  * non-zero KEY ID) on any line of the lane makes the lane's call encrypted,
@@ -35,8 +39,13 @@ export const DMR_SOURCE_MAX = DMR_TALKGROUP_MAX - 800
 
 export type DmrLane = "1" | "2" | "ms" | "x"
 export type DmrFormat = "bs" | "ms" | "x"
-export type DmrBurstKind = "vlc" | "voice" | "tlc" | "other" | "bare"
-export type DmrProofKind = "P1" | "P1n" | "P2" | "P3" | "ALG"
+export type DmrBurstKind = "vlc" | "voice" | "tlc" | "pi" | "other" | "bare"
+export type DmrProofKind =
+	| "link-after-voice"
+	| "naming-link"
+	| "voice-header"
+	| "terminator"
+	| "clear-algorithm"
 export type DmrLaneTrust = "unknown" | "pending" | "clear" | "encrypted"
 
 /** A DMR sync line of a lane. */
@@ -73,10 +82,8 @@ export interface DmrOtherEvent {
 	lane: DmrLane
 	errored: boolean
 	privacy: boolean
-	/** An allowlisted line that neither settles nor drops a proof. */
-	neutral: boolean
-	/** A clean PI / late-entry print of a clear algorithm (ALG 00 or 80). */
-	clearAlg: boolean
+	/** The line, read for the neutral and clear-algorithm tests only when needed. */
+	text: string
 	slot: "1" | "2" | undefined
 }
 
@@ -97,7 +104,7 @@ export interface DmrEvidence {
 	callKey: string
 	firstVoiceSeq: number | undefined
 	openingBurstSeq: number
-	openingBurstKind: "vlc" | "voice" | "tlc"
+	openingBurstKind: DmrBurstKind
 	lcLineSeq: number
 	lcKey: string
 	expiresAt: number
@@ -131,9 +138,9 @@ interface LcSeen {
 	/** No error, plausible, no privacy field. */
 	ok: boolean
 	burstSeq: number | undefined
-	/** The burst's first link control (a second one is no proof: row 11). */
+	/** The burst's first link control (a second one is no proof). */
 	first: boolean
-	/** The call's first link control after its first voice burst (P1n). */
+	/** The call's first link control after its first voice burst (naming-link). */
 	firstAfterVoice: boolean
 }
 
@@ -170,7 +177,6 @@ const SLOT_INLINE = /\bslot(?<slot>[12])\b/i
 const TGT_SRC = /\bTGT[:=]\s*(?<tgt>\d+)\b.*\bSRC[:=]\s*(?<src>\d+)\b/i
 const VOICE_EVENT =
 	/\bDMR\s+Voice\b.*\bTGT:\s*(?<tgt>\d+);\s*SRC:\s*(?<src>\d+);/i
-const LINE_ERR = /\b(?:CRC|FEC)(?:16|32)?\s+ERR\b/i
 const SYNC_LOSS = /Frame Sync Err\b|SYNC LOST/i
 /** The CACH short LC's own failure: CACH, not the burst. */
 const CACH_SLCO_ERR = /^\s*SLCO CRC ERR\s*$/
@@ -181,6 +187,7 @@ const KEY_ID = /\bKEY\s+ID:\s*(?:0x)?(?<key>[0-9A-F]{2,4})\b/i
 const FLCO = /\bFLCO=0x(?<flco>[0-9A-F]+)\b/i
 const FID = /\bFID=0x(?<fid>[0-9A-F]+)\b/i
 const SVC_PRIVACY = 0x40
+const PI_BURST = /\|\s*PI\b/
 
 /** Lines that neither settle nor drop a pending proof (each anchored). */
 const NEUTRAL: readonly RegExp[] = [
@@ -194,12 +201,21 @@ const NEUTRAL: readonly RegExp[] = [
 	/^\s*AMBE /,
 ]
 
+/** A line that neither settles nor drops a pending proof (ask only of a clean line without privacy). */
+export function dmrLineNeutral(line: string): boolean {
+	return NEUTRAL.some(pattern => pattern.test(line))
+}
+
+/** A clear-algorithm print, ALG 00 or 80 (ask only of a clean line without privacy). */
+export function dmrLineClearAlg(line: string): boolean {
+	return ALG.test(line)
+}
+
 /** A line printed an error of its burst (the CACH short LC's own failure excepted). */
 export function dmrLineErrored(line: string): boolean {
 	if (CACH_SLCO_ERR.test(line)) return false
 	return (
-		LINE_ERR.test(line) ||
-		// Any other upper-case error print (VOICE CACH/EMB ERR, FLCO FEC ERR).
+		// Any upper-case error print (CRC ERR, FEC ERR, VOICE CACH/EMB ERR).
 		/\bERR\b/.test(line) ||
 		SYNC_LOSS.test(line) ||
 		/ -RAS /.test(line) ||
@@ -275,7 +291,9 @@ export function classifyDmrLine(line: string, route: DmrRoute): DmrLineEvent {
 		const burst: DmrBurstKind = !line.includes("|")
 			? "bare"
 			: burstText === undefined
-				? "other"
+				? PI_BURST.test(line)
+					? "pi"
+					: "other"
 				: burstText === "VLC"
 					? "vlc"
 					: burstText === "TLC"
@@ -309,10 +327,7 @@ export function classifyDmrLine(line: string, route: DmrRoute): DmrLineEvent {
 			slot,
 		}
 	}
-	const neutral =
-		!errored && !privacy && NEUTRAL.some(pattern => pattern.test(line))
-	const clearAlg = !errored && !privacy && ALG.test(line)
-	return { type: "line", lane, errored, privacy, neutral, clearAlg, slot }
+	return { type: "line", lane, errored, privacy, text: line, slot }
 }
 
 // --- The state machine ---
@@ -378,6 +393,7 @@ export class DmrClearance {
 
 	/** The adapter ended `callId` (any cause): its record and proof go. */
 	ended(callId: string): void {
+		this.encryptedIds.delete(callId)
 		for (const lane of this.lanes.values())
 			if (lane.call?.callId === callId) lane.call = undefined
 	}
@@ -447,18 +463,39 @@ export class DmrClearance {
 			return out
 		}
 		if (event.errored) this.dirty(lane)
-		if (event.privacy) this.privacy(lane, seq, out)
 		const call = lane.call
+		// A privacy field on another talker's link control waits for the
+		// lifecycle (call): it is the next call's if this line splits the
+		// call, else this call's.
+		const rivalPrivacy =
+			event.type === "lc" &&
+			event.privacy &&
+			call !== undefined &&
+			call.key !== null &&
+			call.key !== event.key
+		if (rivalPrivacy) lane.privacySeq = seq
+		else if (event.privacy) this.privacy(lane, seq, out)
 		if (event.type === "line") {
-			// P1n: a clean clear-algorithm print of a clean burst is the
-			// call's proof, settled like an LC.
-			if (event.clearAlg && call !== undefined) {
+			// An errored line drops nothing more than dirty() did; the
+			// neutral and clear-algorithm tests run only for a call that may
+			// still gain or lose a proof, on a clean line without privacy.
+			if (
+				call === undefined ||
+				event.errored ||
+				event.privacy ||
+				(call.trust !== "pending" && call.trust !== "unknown")
+			)
+				return out
+			// A clean clear-algorithm print of a clean burst is the call's
+			// proof, settled like a link control.
+			if (dmrLineClearAlg(event.text)) {
 				this.drop(call)
 				this.armAlg(lane, call, seq, atMs)
 				return out
 			}
-			// Row 11: any non-neutral line drops a pending proof.
-			if (!event.neutral) this.drop(call)
+			// Any other line but a neutral one drops a pending proof.
+			if (call.trust === "pending" && !dmrLineNeutral(event.text))
+				this.drop(call)
 			return out
 		}
 		// A link control. A second one in the burst drops a pending proof.
@@ -477,7 +514,7 @@ export class DmrClearance {
 				!call.lcAfterVoice,
 		}
 		if (call?.firstVoiceSeq !== undefined) call.lcAfterVoice = true
-		// Row 16: the first checked rival copy after voice revokes at once.
+		// The first checked copy of another talker's IDs after voice revokes at once.
 		if (
 			ok &&
 			call !== undefined &&
@@ -495,8 +532,8 @@ export class DmrClearance {
 
 	/**
 	 * The lane's call after the adapter's lifecycle ran on line `seq` (null:
-	 * no call): a new call is recorded (unknown, or pending under P2), a
-	 * named call's link control on this line may arm P1 or P3.
+	 * no call): a new call is recorded (unknown, or pending on its voice
+	 * header), and a link control on this line may arm a proof.
 	 */
 	call(
 		key: DmrLane,
@@ -511,6 +548,11 @@ export class DmrClearance {
 			return out
 		}
 		let record = lane.call
+		// Another talker's privacy print that split nothing is this call's.
+		if (record?.callId === view.callId && lane.privacySeq === seq) {
+			lane.privacySeq = undefined
+			this.privacy(lane, seq, out)
+		}
 		if (record?.callId !== view.callId) {
 			// A new call here, or one the adapter moved from another lane:
 			// it inherits nothing but its encryption.
@@ -540,7 +582,7 @@ export class DmrClearance {
 				return out
 			}
 			if (wasClear) out.push({ callId: view.callId, trust: "unknown" })
-			// P2: the call opened on a checked LC of a clean header burst.
+			// The call opened on a checked LC of a clean voice header burst.
 			if (key !== "x" && view.key !== null)
 				this.arm(lane, record, seq, atMs, "opened")
 			return out
@@ -555,14 +597,14 @@ export class DmrClearance {
 		}
 		record.key = view.key
 		if (key === "x" || record.key === null) return out
-		// P1n: the link control that names a call started on its voice
-		// frames is its proof when it is the first one after its first voice
-		// burst; any other naming proves nothing (row 7).
+		// The link control that names a call started on its voice frames is
+		// its proof when it is the first one after its first voice burst;
+		// any other naming proves nothing.
 		this.arm(lane, record, seq, atMs, keyBefore === null ? "named" : "known")
 		return out
 	}
 
-	/** Arms P1, P2 or P3 from the link control printed on line `seq`, if any. */
+	/** Arms a link-control proof from the link control printed on line `seq`, if any. */
 	private arm(
 		lane: LaneState,
 		record: CallRecord,
@@ -594,16 +636,16 @@ export class DmrClearance {
 				burst.seq < record.firstVoiceSeq
 			)
 				return
-			kind = "P1n"
-		} else if (burst.kind === "vlc") kind = "P2"
+			kind = "naming-link"
+		} else if (burst.kind === "vlc") kind = "voice-header"
 		else if (how === "opened") return
 		else if (
 			burst.kind === "voice" &&
 			record.firstVoiceSeq !== undefined &&
 			burst.seq >= record.firstVoiceSeq
 		)
-			kind = "P1"
-		else if (burst.kind === "tlc") kind = "P3"
+			kind = "link-after-voice"
+		else if (burst.kind === "tlc") kind = "terminator"
 		else return
 		record.trust = "pending"
 		record.evidence = {
@@ -616,8 +658,7 @@ export class DmrClearance {
 			callKey: record.key ?? "",
 			firstVoiceSeq: record.firstVoiceSeq,
 			openingBurstSeq: burst.seq,
-			openingBurstKind:
-				burst.kind === "vlc" ? "vlc" : burst.kind === "tlc" ? "tlc" : "voice",
+			openingBurstKind: burst.kind,
 			lcLineSeq: seq,
 			lcKey: lc.key,
 			expiresAt: atMs + this.callTimeoutMs,
@@ -626,8 +667,9 @@ export class DmrClearance {
 	}
 
 	/**
-	 * P1n by algorithm: a clean clear ALG print (PI header, late entry) in a
-	 * clean burst of the lane's call, settled on the lane's next clean sync.
+	 * A clean clear ALG print (PI header, late entry) in a clean voice,
+	 * header or PI burst of the lane's call, settled on the lane's next
+	 * clean sync.
 	 */
 	private armAlg(
 		lane: LaneState,
@@ -640,15 +682,14 @@ export class DmrClearance {
 			burst === undefined ||
 			!burst.syncClean ||
 			burst.errored ||
-			burst.kind === "tlc" ||
-			burst.kind === "bare" ||
+			(burst.kind !== "vlc" && burst.kind !== "voice" && burst.kind !== "pi") ||
 			record.trust === "encrypted" ||
 			record.trust === "clear"
 		)
 			return
 		record.trust = "pending"
 		record.evidence = {
-			kind: "ALG",
+			kind: "clear-algorithm",
 			decoderGeneration: this.decoderGeneration,
 			modeGeneration: lane.modeGeneration,
 			lane: this.keyOf(lane),
@@ -657,7 +698,7 @@ export class DmrClearance {
 			callKey: record.key ?? "",
 			firstVoiceSeq: record.firstVoiceSeq,
 			openingBurstSeq: burst.seq,
-			openingBurstKind: burst.kind === "vlc" ? "vlc" : "voice",
+			openingBurstKind: burst.kind,
 			lcLineSeq: seq,
 			lcKey: record.key ?? "",
 			expiresAt: atMs + this.callTimeoutMs,
@@ -693,7 +734,7 @@ export class DmrClearance {
 		call.evidence = undefined
 	}
 
-	/** Row 15: a privacy field makes the lane's call encrypted, for good. */
+	/** A privacy field makes the lane's call encrypted, for good. */
 	private privacy(lane: LaneState, seq: number, out: DmrDecision[]): void {
 		const call = lane.call
 		if (call === undefined) {
@@ -708,7 +749,7 @@ export class DmrClearance {
 	}
 
 	/**
-	 * Row 14: a line of no lane (a BS sync bracketing no slot, or what
+	 * A line of no lane (a BS sync bracketing no slot, or what
 	 * follows it). It never opens, names, proves or settles; its error
 	 * spoils every open burst, and its privacy field mutes the slot it
 	 * prints, or holds every call's voice when it prints none.
@@ -737,7 +778,7 @@ export class DmrClearance {
 		}
 	}
 
-	/** Rows 12, 13, 21: the lane's next sync settles or drops a pending proof. */
+	/** The lane's next sync settles or drops a pending proof. */
 	private settle(
 		event: DmrSyncEvent,
 		lane: LaneState,
@@ -755,8 +796,8 @@ export class DmrClearance {
 
 	/**
 	 * The only writer of CLEAR. `settling` is the lane's next sync after the
-	 * proof's burst: it must be clean, of the proof's format (P2: a voice
-	 * burst or header), of the current generations, inside the expiry, and
+	 * proof's burst: it must be clean, of the proof's format (a voice header
+	 * proof: a voice burst or header), of the current generations, inside the expiry, and
 	 * the burst from the opening sync to it must have printed no error.
 	 */
 	private clear(
@@ -785,7 +826,7 @@ export class DmrClearance {
 			!settling.clean ||
 			settling.privacy ||
 			settling.burst === "bare" ||
-			(evidence.kind === "P2" &&
+			(evidence.kind === "voice-header" &&
 				settling.burst !== "voice" &&
 				settling.burst !== "vlc") ||
 			seq <= evidence.lcLineSeq ||

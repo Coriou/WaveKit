@@ -302,7 +302,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 					[1668, TLC(1)],
 					[1668, LC(1)],
 					// The VC6 LC named the call (no proof); its trailer is its
-					// P3 proof, settled by the slot's next clean sync.
+					// terminator proof, settled by the slot's next clean sync.
 					[1773, TLC(1)],
 				],
 				8000,
@@ -333,7 +333,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				[
 					...over(1, 1000, 1, null),
 					[1241, LC(1)],
-					// Kills the naming LC's own P1n proof.
+					// Kills the naming LC's own naming-link proof.
 					[1242, " (FEC ERR) "],
 					[1302, LC(1)],
 					[1303, " SLOT 1 SB/RC (FEC ERR) E:4; I:00000000 D:000;  "],
@@ -346,7 +346,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				[
 					...over(1, 1000, 1, null),
 					[1241, LC(1)],
-					// Kills the naming LC's own P1n proof.
+					// Kills the naming LC's own naming-link proof.
 					[1242, " (FEC ERR) "],
 					[1302, LC(1)],
 					[1303, ""],
@@ -361,7 +361,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 					[
 						...over(1, 1000, 1, null),
 						[1241, LC(1)],
-						// Kills the naming LC's own P1n proof.
+						// Kills the naming LC's own naming-link proof.
 						[1242, " (FEC ERR) "],
 						[1302, LC(1)],
 						// A blank line neither settles nor drops (BURST_NEUTRAL_LINES).
@@ -375,7 +375,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				"00:00:01 Sync: +DMR   slot1   slot2  | Color Code=01 | IDLE ",
 			)
 			expect(everClear(kept.voice)).toBe(true)
-			// A bracketless line's error spoils every open burst (row 14).
+			// A bracketless line's error spoils every open burst.
 			for (const dirty of [
 				"00:00:01 Sync:  DMR                  | VOICE CACH/EMB ERR",
 				"00:00:01 Sync: +DMR   slot1   slot2  | CACH/Burst FEC ERR",
@@ -447,7 +447,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			expect(slot2).toMatchObject({ talkgroup: 9003, encryptionKnown: true })
 			// Slot 2's own sync loss right after its proof drops it; its
 			// trailer printed an error: it stays unknown.
-			// (1700 kills the naming LC's P1n proof, 2053 the later P1 one.)
+			// (1700 kills the naming LC's naming-link proof, 2053 the later link-after-voice one.)
 			const unsettled = replay(
 				[...lines, [1700, SYNC_ERR(2)], [2053, SYNC_ERR(2)]],
 				9000,
@@ -529,7 +529,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				).toBeGreaterThanOrEqual(2)
 			}
 			// The same print with group voice fields names the call, and its
-			// next copy (P1) clears it.
+			// next copy (link-after-voice) clears it.
 			const groupVoice =
 				" SLOT 1 TGT=9001 SRC=91 FLCO=0x00 FID=0x00 SVC=0x00 Group Call  "
 			const clear = replay(
@@ -606,15 +606,15 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 		const recorded = fixture("direct-keyup")
 		const tlcs = timesOf(recorded, /\| TLC/)
 
-		it("each recorded key-up is a new call known clear once its header settles (P2), ended at its terminator; the late join is not", () => {
+		it("each recorded key-up is a new call known clear once its header settles (voice-header), ended at its terminator; the late join is not", () => {
 			const { starts, ends } = replay(recorded, recorded.at(-1)![0] + 6000)
 			expect(starts).toHaveLength(5)
 			expect(ends).toHaveLength(5)
 			// A header call is announced not known clear (explicit false) and
-			// settles on its next clean voice burst (P2), here before the
+			// settles on its next clean voice burst (voice-header), here before the
 			// call_start went out. The fourth over was joined late (voice, then
 			// its LC, no header): its opening LC proves nothing, its next LC
-			// (P1) settles it before its end.
+			// (link-after-voice) settles it before its end.
 			expect(starts.map(s => s.encryptionKnown)).toEqual([
 				true,
 				true,
@@ -745,7 +745,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				encryptionKnown: false,
 			})
 			expect(everClear(opened.voice)).toBe(false)
-			// The next copy, in a later voice burst, is P1: settled on the next clean sync.
+			// The next copy, in a later voice burst, is link-after-voice: settled on the next clean sync.
 			const settled = replay(
 				[...join, ...over(1, 1100, 2, null), [1402, LC(1)]],
 				8000,
@@ -871,7 +871,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			})
 		})
 
-		it("a clean clear algorithm print in a clean burst proves a frames call clear (P1n); a non-clear one drops a held clear trailer", () => {
+		it("a clean clear algorithm print in a clean burst proves a frames call clear (naming-link); a non-clear one drops a held clear trailer", () => {
 			const head: Line[] = [
 				...over(1, 1000, 2, null),
 				[1662, LC(1)],

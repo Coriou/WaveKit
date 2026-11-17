@@ -324,7 +324,7 @@ describe("dsd-fme call ids and voice-call events", () => {
 			{ atMs: 500, text: " Slot 1 - Encrypted PDU;" },
 		]
 		const { voice } = replay(createDecoder(), lines, 1500)
-		// Every privacy field of the lane mutes its call (DMR clearance rule 6).
+		// Every privacy field of the lane mutes its call.
 		expect(voice.at(-1)?.encrypted).toBe(true)
 	})
 

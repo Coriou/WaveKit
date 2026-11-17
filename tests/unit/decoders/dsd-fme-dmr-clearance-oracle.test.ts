@@ -7,12 +7,14 @@
  * voice-call publication is collected with the line sequence number it
  * followed. An independent shadow ledger, built from the raw lines only
  * (it never calls the clearance module), checks each DMR publication:
- * (a) encryptionKnown is present; (b) when it says clear, a P1/P2/P3 chain
+ * (a) encryptionKnown is present; (b) when it says clear, a proof chain (link control after voice, naming link, voice header, terminator or clear algorithm)
  * of the current generation backs it, settled before the publication; (c)
  * no privacy print of the lane came before it in that chain's window; (d)
  * the settling line is a sync of the chain's own lane.
  */
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import fc from "fast-check"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { DsdFmeVoiceCallState } from "../../../src/decoders/builtin/dsd-fme.js"
@@ -64,8 +66,8 @@ function run(items: Item[]): Publication[] {
 	let seq = 0
 	decoder.on("output", (o: DecoderOutput) => {
 		if (o.type !== "call_start" && o.type !== "call_end") return
+		// A late recording update (wavFileUpdate) is a publication too.
 		const d = o.data as CallData & { encrypted?: boolean }
-		if (d.flags?.wavFileUpdate) return
 		pubs.push({
 			seq,
 			kind: o.type,
@@ -136,20 +138,91 @@ interface Shadow {
 	key: string | undefined
 	plausible: boolean
 	neutral: boolean
-	/** A clean clear-algorithm print (P1n by ALG). */
+	/** A clean clear-algorithm print (a proof of the lane's call). */
 	alg: boolean
 	generation: number
 	/** Bumped only by a restart or another protocol (a BS/MS change keeps the call's name). */
 	hard: number
+	/**
+	 * Each proof lane's call epoch after this line: a new call begins on a
+	 * gap over the call timeout, the first voice burst after a terminator, a
+	 * rival's second checked copy, a restart, another protocol or a BS/MS
+	 * change.
+	 */
+	epochs: Record<string, number>
+}
+
+const PROOF_LANES: readonly string[] = ["1", "2", "ms"]
+
+/** Adds each line's per-lane call epochs (call boundaries) to the ledger. */
+function withEpochs(lines: Omit<Shadow, "epochs">[]): Shadow[] {
+	const epoch: Record<string, number> = { "1": 0, "2": 0, ms: 0 }
+	const lastAt: Record<string, number | undefined> = {}
+	const afterTlc: Record<string, boolean> = {}
+	const lastVoice: Record<string, number | undefined> = {}
+	const lastKey: Record<string, string | undefined> = {}
+	const rival: Record<string, { key: string; burst: number } | undefined> = {}
+	const bump = (lane: string) => {
+		epoch[lane] = (epoch[lane] ?? 0) + 1
+		afterTlc[lane] = false
+		lastKey[lane] = undefined
+		rival[lane] = undefined
+	}
+	let generation = 0
+	let burst = 0
+	const out: Shadow[] = []
+	for (const line of lines) {
+		if (line.lane === "-" || line.generation !== generation) {
+			for (const lane of PROOF_LANES) bump(lane)
+			generation = line.generation
+		}
+		const lane = line.lane
+		if (PROOF_LANES.includes(lane)) {
+			const last = lastAt[lane]
+			if (last !== undefined && line.atMs - last > TIMEOUT_MS) bump(lane)
+			lastAt[lane] = line.atMs
+			if (line.sync) {
+				burst++
+				if ((line.kind === "voice" || line.kind === "vlc") && afterTlc[lane])
+					bump(lane)
+				if (line.kind === "tlc") afterTlc[lane] = true
+				lastVoice[lane] = line.kind === "voice" ? burst : undefined
+			} else if (
+				line.key !== undefined &&
+				!line.errored &&
+				line.plausible &&
+				lastVoice[lane] !== undefined
+			) {
+				const known = lastKey[lane]
+				const voice = lastVoice[lane] ?? 0
+				if (known === undefined || known === line.key) {
+					lastKey[lane] = line.key
+					rival[lane] = undefined
+				} else {
+					const first = rival[lane]
+					if (first?.key === line.key && first.burst !== voice) {
+						bump(lane)
+						lastKey[lane] = line.key
+					} else rival[lane] = { key: line.key, burst: voice }
+				}
+			}
+		}
+		out.push({ ...line, epochs: { ...epoch } })
+	}
+	return out
 }
 
 function shadow(items: Item[]): Shadow[] {
+	return withEpochs(ledger(items))
+}
+
+function ledger(items: Item[]): Omit<Shadow, "epochs">[] {
 	let format: string | undefined
 	let slot = "1"
 	let mode: string | undefined
 	let generation = 0
 	let hard = 0
-	return items.map(([atMs, text], i): Shadow => {
+	return items.map(([atMs, text], i): Omit<Shadow, "epochs"> => {
 		const seq = i + 1
 		const base = {
 			seq,
@@ -219,7 +292,9 @@ function shadow(items: Item[]): Shadow[] {
 			const kind = !text.includes("|")
 				? "bare"
 				: b === undefined
-					? "other"
+					? /\|\s*PI\b/.test(text)
+						? "pi"
+						: "other"
 					: b === "VLC"
 						? "vlc"
 						: b === "TLC"
@@ -285,7 +360,8 @@ function backed(lines: Shadow[], p: Publication): boolean {
 			: `${p.talkgroup}/${p.source}`
 	// A call ended by a protocol switch or a restart publishes its end on
 	// that line: it belongs to the generation before it.
-	const atLine = lines[Math.min(Math.floor(p.seq), lines.length) - 1]
+	const pIndex = Math.min(Math.floor(p.seq), lines.length) - 1
+	const atLine = lines[pIndex]
 	const boundary = atLine !== undefined && atLine.lane === "-"
 	const genAt =
 		(boundary ? lines[atLine.seq - 2]?.generation : atLine?.generation) ?? 0
@@ -306,9 +382,18 @@ function backed(lines: Shadow[], p: Publication): boolean {
 		const s = [...lane].reverse().find(x => x.sync && x.seq < l.seq)
 		const t = lane.find(x => x.sync && x.seq > l.seq)
 		if (s === undefined || t === undefined || t.seq >= p.seq) continue
+		// The chain belongs to the publication's own call: one call epoch from
+		// the opening sync to the settling one, the epoch of the publication's
+		// line (or of the line before it, for an end published on a boundary).
+		const epoch = l.epochs[l.lane]
+		const own = [lines[pIndex], lines[pIndex - 1]].some(
+			x => x !== undefined && x.epochs[l.lane] === epoch,
+		)
+		if (s.epochs[l.lane] !== epoch || t.epochs[l.lane] !== epoch || !own)
+			continue
 		if (
 			s.errored ||
-			!(l.alg ? ["vlc", "voice", "other"] : ["vlc", "voice", "tlc"]).includes(
+			!(l.alg ? ["vlc", "voice", "pi"] : ["vlc", "voice", "tlc"]).includes(
 				s.kind,
 			)
 		)
@@ -319,7 +404,7 @@ function backed(lines: Shadow[], p: Publication): boolean {
 		if (t.errored || t.privacy || t.format !== s.format) continue
 		if (t.atMs - l.atMs > TIMEOUT_MS) continue
 		if (s.kind === "vlc" && t.kind !== "voice" && t.kind !== "vlc") continue
-		// P3 needs the call named by an earlier link control of its key (P1n
+		// terminator needs the call named by an earlier link control of its key (naming-link
 		// lets the first LC after voice name and prove a frames call).
 		if (
 			s.kind === "tlc" &&
@@ -379,7 +464,7 @@ function oracle(items: Item[], pubs: Publication[]): string[] {
 		if (p.protocol !== "dmr") continue
 		if (!p.hasField || typeof p.encryptionKnown !== "boolean")
 			failures.push(`(a) ${p.kind} at ${p.seq} omits encryptionKnown`)
-		// I1: clear (encrypted === false && encryptionKnown !== false) requires
+		// Clear (encrypted === false && encryptionKnown !== false) requires
 		// evidence; encrypted with encryptionKnown true is known encrypted.
 		const clear = !p.encrypted && p.encryptionKnown !== false
 		if (clear && !backed(lines, p))
@@ -417,7 +502,7 @@ const everClear = (pubs: Publication[]) =>
 const NAMED_BS: Item[] = [
 	[0, BS(1, "VC1")],
 	[60, BS(1, "VC2")],
-	// The naming LC would be the call's P1n proof; its burst's late error kills it.
+	// The naming LC would be the call's naming-link proof; its burst's late error kills it.
 	[61, LC()],
 	[62, " (FEC ERR) "],
 	[120, BS(1, "VC3")],
@@ -569,7 +654,7 @@ describe("dsd-fme DMR clearance oracle", () => {
 				[540, MS("VC*")],
 			]
 			expectNeverClear(shape)
-			// Without the late error the header call settles on its voice (P2).
+			// Without the late error the header call settles on its voice (voice-header).
 			expect(everClear(run(shape.filter(([, t]) => !t.includes("FEC"))))).toBe(
 				true,
 			)
@@ -693,7 +778,7 @@ describe("dsd-fme DMR clearance oracle", () => {
 			expect(after.every(p => p.encrypted || p.encryptionKnown === false)).toBe(
 				true,
 			)
-			// The exact short shape: its naming LC is its P1n proof (clear at
+			// The exact short shape: its naming LC is its naming-link proof (clear at
 			// VC3), and the encrypted print ends that for good (line 5 on).
 			expectNotClearFrom(
 				[
@@ -735,7 +820,7 @@ describe("dsd-fme DMR clearance oracle", () => {
 				])
 		})
 
-		it("a frames call is clear from its first clean voice LC (P1n) or a clear ALG print", () => {
+		it("a frames call is clear from its first clean voice LC (naming-link) or a clear ALG print", () => {
 			for (const proof of [LC(), " Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;"]) {
 				const items: Item[] = [
 					[0, BS(1, "VC1")],
@@ -792,7 +877,7 @@ describe("dsd-fme DMR clearance oracle", () => {
 				[0, MS("VC*")],
 				[360, MS("VC*")],
 				[361, LC()],
-				// Kills the naming LC's own P1n proof: the LC at 721 is the proof.
+				// Kills the naming LC's own naming-link proof: the LC at 721 is the proof.
 				[362, " (FEC ERR) "],
 				[720, MS("VC*")],
 				[721, LC()],
@@ -808,6 +893,104 @@ describe("dsd-fme DMR clearance oracle", () => {
 				[362, BRACKETLESS("VC3  (FEC ERR)")],
 				[480, MS("VC*")],
 			])
+		})
+	})
+
+	describe("one call's proof never backs another", () => {
+		const twoCalls = (named: boolean): Item[] => [
+			[0, MS("VC*")],
+			[360, MS("VC*")],
+			[361, LC()],
+			[720, MS("VC*")],
+			// A gap over the call timeout: the next frames are another call.
+			[5220, MS("VC*")],
+			[5580, MS("VC*")],
+			...(named
+				? ([
+						[5581, LC()],
+						[5582, " (FEC ERR) "],
+					] as Item[])
+				: []),
+			[5940, MS("VC*")],
+			[6300, MS("VC*")],
+		]
+
+		it("a call cleared by its own link control, a gap over the call timeout, then a frames call: the second is never clear", () => {
+			for (const named of [false, true]) {
+				const items = twoCalls(named)
+				const pubs = run(items)
+				// The first call clears on its own (its naming link control).
+				expect(everClear(pubs.filter(p => p.seq < 5))).toBe(true)
+				expectNotClearFrom(twoCalls(named), 5)
+			}
+		})
+
+		it("the ledger does not back the second call's clear with the first call's chain", () => {
+			const lines = shadow(twoCalls(true))
+			const claim = (seq: number): Publication => ({
+				seq,
+				kind: "voice-call",
+				callId: "second",
+				protocol: "dmr",
+				talkgroup: 9001,
+				source: 91,
+				slot: 1,
+				encrypted: false,
+				encryptionKnown: true,
+				hasField: true,
+			})
+			// The first call's own clear (after its settling sync, line 4) is backed.
+			expect(backed(lines, claim(4.25))).toBe(true)
+			expect(backed(lines, claim(9.5))).toBe(false)
+		})
+	})
+
+	describe("late recording update", () => {
+		it("the call_end that links a recording found late carries encryptionKnown", async () => {
+			const dir = mkdtempSync(join(tmpdir(), "wk-dmr-clearance-"))
+			try {
+				const decoder = createDecoder({
+					mode: "dmr",
+					enablePerCallRecording: true,
+					perCallRecordingDir: dir,
+					perCallRecordingPrune: false,
+				})
+				const ends: CallData[] = []
+				decoder.on("output", (o: DecoderOutput) => {
+					if (o.type === "call_end") ends.push(o.data as CallData)
+				})
+				const internals = decoder as unknown as {
+					handleOutputLine(line: string): void
+				}
+				const lines: Item[] = [
+					[0, MS("VLC")],
+					[1, LC()],
+					[60, MS("VC*")],
+					[420, MS("VC*")],
+					[780, MS("TLC")],
+				]
+				for (const [atMs, text] of lines) {
+					vi.setSystemTime(T0 + atMs)
+					internals.handleOutputLine(text)
+				}
+				expect(ends).toHaveLength(1)
+				expect(ends[0]!.encryptionKnown).toBe(true)
+				// dsd-fme closes the recording after the call_end: the async
+				// search (200 ms retries, 5 tries) finds it and publishes again.
+				const start = new Date(Date.parse(ends[0]!.startedAt))
+				const two = (n: number) => String(n).padStart(2, "0")
+				const stamp = `${start.getFullYear()}${two(start.getMonth() + 1)}${two(start.getDate())}_${two(start.getHours())}${two(start.getMinutes())}${two(start.getSeconds())}`
+				writeFileSync(
+					join(dir, `${stamp}_123_DMR_CC_1_GROUP_TGT_9001_SRC_91.wav`),
+					"",
+				)
+				await new Promise(resolve => setTimeout(resolve, 700))
+				const update = ends.find(e => e.flags?.wavFileUpdate === true)
+				expect(update).toBeDefined()
+				expect(update).toMatchObject({ encryptionKnown: true })
+			} finally {
+				rmSync(dir, { recursive: true, force: true })
+			}
 		})
 	})
 
@@ -827,8 +1010,8 @@ describe("dsd-fme DMR clearance oracle", () => {
 	})
 
 	it("property: every DMR publication carries encryptionKnown and every clear one has a settled chain", () => {
-		// Feature: dmr-clearance, Property 1: known clear only on a settled proof of its own generation
-		// Validates: spec invariants I1-I7 (bypass shapes, protocol switches, restarts, timeouts, clumps, BS/MS mixes)
+		// Feature: dmr-clearance, Property 1: known clear only on a settled proof of the call's own
+		// Validates: a call is known clear only from settled evidence of its own (bypass shapes, protocol switches, restarts, timeouts, clumps, BS/MS mixes)
 		const ids = fc.constantFrom<[number, number]>(
 			[9001, 91],
 			[9002, 92],

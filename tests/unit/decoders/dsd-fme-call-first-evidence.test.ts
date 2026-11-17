@@ -73,7 +73,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 		expect(unnamedEvidenceSpanMs("ysf")).toBeUndefined()
 	})
 
-	describe("R1: one missed sync and a late next print keep an over whole", () => {
+	describe("one missed sync and a late next print keep an over whole", () => {
 		/** over(14) from 1000 with sync 6 dropped and sync 7 `offset` ms off its grid. */
 		const dropped = (offset: number, withLc: boolean): Line[] => {
 			const lines: Line[] = []
@@ -358,7 +358,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 				encryptionKnown: false,
 			})
 			// A trailer of a call named by nothing before it is metadata only
-			// (DMR clearance P3 needs a named call): never known clear.
+			// (DMR clearance terminator needs a named call): never known clear.
 			expect(ends[0]).toMatchObject({
 				talkgroup: 9,
 				source: 100,
@@ -447,7 +447,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 			)
 			expect(starts).toHaveLength(1)
 			expect(ends).toHaveLength(1)
-			// Named by its trailer only: metadata, not a proof (P3 needs a named call).
+			// Named by its trailer only: metadata, not a proof (terminator needs a named call).
 			expect(ends[0]).toMatchObject({
 				talkgroup: 9,
 				source: 100,
@@ -486,7 +486,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 		})
 	})
 
-	describe("m2: known clear only once the link control's burst closes clean", () => {
+	describe("known clear only once the link control's burst closes clean", () => {
 		const head: Line[] = [
 			[1000, MS("VC*")],
 			[1360, MS("VC*")],
@@ -513,7 +513,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 					[
 						...head,
 						// The first clean LC after voice names the call and is its
-						// P1n proof, settled by the next clean sync.
+						// naming-link proof, settled by the next clean sync.
 						[1800, LC(1)],
 						...tail,
 						[2080, MS("VC*")],
@@ -543,11 +543,9 @@ describe("dsd-fme call-first: evidence rules", () => {
 					[1720, BS("VC*")],
 					[1800, LC(1)],
 					[1830, slot2],
+					// The LC at 1800 names the call and is its proof: slot 1's next
+					// sync settles it, slot 2's sync in between does not drop it.
 					[2080, BS("VC*")],
-					// Named at 1800; this LC is the proof, slot 1's next sync settles it.
-					[2082, LC(1)],
-					[2085, slot2],
-					[2440, BS("VC*")],
 				],
 				10_000,
 			)
@@ -556,7 +554,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 		})
 	})
 
-	describe("m4: P25 src/tg prints", () => {
+	describe("P25 src/tg prints", () => {
 		const frames: Line[] = [
 			[1000, P25("HDU")],
 			[1180, P25("LDU1")],
