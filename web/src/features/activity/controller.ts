@@ -55,6 +55,8 @@ export interface ActivityViewState {
 	counts: Readonly<Record<string, number>> | null
 	/** The core's count for the current search without its chip, every category (the header count); null until loaded. */
 	total: number | null
+	/** The core stopped counting (its scan cap): `counts` and `total` are lower bounds. */
+	countsTruncated: boolean
 	/** The time range every list shows (the drawer's and each column). */
 	range: TimeRange
 	/** "With audio": only rows with a playable recording, in every list. */
@@ -226,6 +228,7 @@ export class ActivityController extends Store<ActivityViewState> {
 			seen: {},
 			counts: null,
 			total: null,
+			countsTruncated: false,
 			range: ANY_TIME,
 			audio: false,
 		})
@@ -715,14 +718,14 @@ export class ActivityController extends Store<ActivityViewState> {
 		const base = scopedQuery(buildQuery(s.tokens, null), s, scopeNow())
 		this.countsAbort?.abort()
 		if (base === null) {
-			this.update(v => ({ ...v, counts: {}, total: 0 }))
+			this.update(v => ({ ...v, counts: {}, total: 0, countsTruncated: false }))
 			return
 		}
 		const abort = new AbortController()
 		this.countsAbort = abort
 		const started = performance.now()
 		try {
-			const byCategory = await fetchCategoryCounts(
+			const { counts: byCategory, truncated } = await fetchCategoryCounts(
 				this.data.api,
 				base,
 				abort.signal,
@@ -736,7 +739,13 @@ export class ActivityController extends Store<ActivityViewState> {
 					0,
 				)
 			const total = Object.values(byCategory).reduce((n, c) => n + c, 0)
-			if (!abort.signal.aborted) this.update(v => ({ ...v, counts, total }))
+			if (!abort.signal.aborted)
+				this.update(v => ({
+					...v,
+					counts,
+					total,
+					countsTruncated: truncated,
+				}))
 		} catch {
 			// Counts are a hint: an older core without facets leaves the chips bare.
 			// A failure (busy or timed-out reader) slows the live refresh; an abort is not one. Counts that
@@ -755,7 +764,7 @@ export class ActivityController extends Store<ActivityViewState> {
 		this.update(v =>
 			v.counts === null && v.total === null
 				? v
-				: { ...v, counts: null, total: null },
+				: { ...v, counts: null, total: null, countsTruncated: false },
 		)
 	}
 }

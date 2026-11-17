@@ -9,6 +9,8 @@ export interface HeaderCountInput {
 	total: number | null
 	/** The category chip of the search, if any. */
 	chip: string | null
+	/** The core stopped counting at its scan cap: the counts are lower bounds ("50,000+"). */
+	truncated?: boolean
 	/** The list shows a column's search (no facets read for it). */
 	column: boolean
 	/** Events loaded in the list. */
@@ -34,11 +36,17 @@ export function headerCount(i: HeaderCountInput): HeaderCount {
 				? i.total
 				: (i.counts?.[i.chip] ?? null)
 	if (core !== null)
-		return {
-			text: String(core),
-			title: `${plural(core, "event")} for this search, counted by WaveKit`,
-			core: true,
-		}
+		return i.truncated === true
+			? {
+					text: `${core.toLocaleString("en-US")}+`,
+					title: `at least ${core.toLocaleString("en-US")} events for this search; WaveKit stops counting there`,
+					core: true,
+				}
+			: {
+					text: String(core),
+					title: `${plural(core, "event")} for this search, counted by WaveKit`,
+					core: true,
+				}
 	return {
 		text: `${i.events}${i.more ? "+" : ""}`,
 		title: `${plural(i.events, "loaded event")}${i.more ? "; older events are not loaded yet" : ""}`,

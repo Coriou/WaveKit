@@ -38,7 +38,12 @@ const page = (items: ActivitySummary[]): ActivitySearchPage => ({
 })
 
 function setup() {
-	const facets = { mode: "ok" as "ok" | "fail" | "hold", reads: 0 }
+	const facets = {
+		mode: "ok" as "ok" | "fail" | "hold",
+		reads: 0,
+		/** The next answers stop at the core's scan cap (50 000 events). */
+		truncated: false,
+	}
 	let release: (() => void) | null = null
 	const held: (() => void)[] = []
 	const api = new ApiClient({
@@ -53,10 +58,15 @@ function setup() {
 					})
 				// a search for "fire" counts 5, any other 812
 				const sent = typeof init?.body === "string" ? init.body : ""
-				const count = sent.includes("fire") ? 5 : 812
+				const count = facets.truncated
+					? 50_000
+					: sent.includes("fire")
+						? 5
+						: 812
 				return new Response(
 					JSON.stringify({
 						facets: { category: [{ value: "voice", count }] },
+						truncated: facets.truncated,
 					}),
 					{ status: 200 },
 				)
@@ -76,6 +86,7 @@ function setup() {
 		return headerCount({
 			counts: s.counts,
 			total: s.total,
+			truncated: s.countsTruncated,
 			chip: s.chip,
 			column: false,
 			events: 2,
@@ -174,6 +185,39 @@ describe("activity header count", () => {
 		await vi.waitFor(() => expect(facets.reads).toBe(2))
 		await vi.waitFor(() => expect(header()).toMatchObject({ text: "2+" }))
 		expect(c.get().counts).toBeNull()
+		off()
+		c.dispose()
+	})
+
+	it("says a count the core stopped at its scan cap is a lower bound, and an exact one plainly", async () => {
+		const { c, facets, header } = setup()
+		const off = c.attach()
+		await vi.waitFor(() => expect(c.get().total).toBe(812))
+		expect(c.get().countsTruncated).toBe(false)
+		expect(header()).toEqual({
+			text: "812",
+			title: "812 events for this search, counted by WaveKit",
+			core: true,
+		})
+		facets.truncated = true
+		c.addToken(token("text", "fire"))
+		await vi.waitFor(() => expect(c.get().total).toBe(50_000))
+		expect(c.get().countsTruncated).toBe(true)
+		expect(header()).toEqual({
+			text: "50,000+",
+			title:
+				"at least 50,000 events for this search; WaveKit stops counting there",
+			core: true,
+		})
+		// a chip's own count is a lower bound too
+		c.setChip("voice")
+		expect(header().text).toBe("50,000+")
+		// a new search drops the flag with the counts until its read answers
+		facets.truncated = false
+		c.clear()
+		expect(c.get().countsTruncated).toBe(false)
+		await vi.waitFor(() => expect(c.get().total).toBe(812))
+		expect(header().text).toBe("812")
 		off()
 		c.dispose()
 	})
