@@ -258,7 +258,10 @@ describe.skipIf(!bin || !existsSync(bin))(
 			)
 			expect(ended).toHaveLength(1)
 			expect(ended[0]?.cause).not.toBe("client-gone")
-			expect(r.channelId()).not.toBe(firstChannel)
+			// The process is kept across the move, so the new channel has the old one's id; its centre is the new request's.
+			expect(r.chan.openChannelRows()).toMatchObject([
+				{ decoderId: "dec", centerHz: CENTER + 100_000 - 200_000 },
+			])
 			// Which path ran: 1 when the child saw EOF and exited before the caps worker, 0 when the worker came first.
 			expect([0, 1]).toContain(r.channelEnds())
 			expect(r.restarting).toEqual([])
