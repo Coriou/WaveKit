@@ -56,13 +56,13 @@ export class ReferenceChannelSquelch {
 	private quietingDb: number
 	/** Created on the first switch to noise mode, then kept. */
 	private noise: NoiseSquelch | null = null
-	/** WG10 req 2.6: FM quieting observer (null unless `carrierObserver`). */
+	/** FM quieting observer (null unless `carrierObserver`). */
 	private observer: NoiseSquelch | null
 	/** Last measured block's quieting ≥ the observer threshold. */
 	private lastBlockQuieted = false
 	/** The owner's last floor estimate was finite (a floor exists). */
 	private ownerFloorKnown = false
-	/** WG10 activity hygiene: carrier evidence wanted (nfm/wfm). */
+	/** carrier evidence wanted (nfm/wfm). */
 	private evidenceEnabled: boolean
 	/** Passive quieting meter (built lazily, only without observer in power mode). */
 	private evidenceMeter: NoiseSquelch | null = null
@@ -120,7 +120,7 @@ export class ReferenceChannelSquelch {
 	}
 
 	/**
-	 * WG10 req 2.6: builds (fresh state) or drops the carrier observer at runtime, so
+	 * builds (fresh state) or drops the carrier observer at runtime, so
 	 * the owner keeps it only in auto nfm/wfm. Dropping clears the last quieting
 	 * (`blockQuieted()` false) and returns the gate to the frozen power path. No-op
 	 * when unchanged.
@@ -142,7 +142,7 @@ export class ReferenceChannelSquelch {
 	}
 
 	/**
-	 * WG10 activity hygiene: turns carrier evidence on or off at runtime (the owner keeps it
+	 * turns carrier evidence on or off at runtime (the owner keeps it
 	 * on for nfm/wfm). Off clears `blockCarrier()`. Never touches the gate.
 	 */
 	setCarrierEvidence(enabled: boolean): void {
@@ -165,13 +165,13 @@ export class ReferenceChannelSquelch {
 		return this.detectOnlyEnabled
 	}
 
-	/** Whether `blockCarrier()` measures anything (WG10 activity hygiene). */
+	/** Whether `blockCarrier()` measures anything. */
 	get hasCarrierEvidence(): boolean {
 		return this.evidenceEnabled
 	}
 
 	/**
-	 * WG10 activity hygiene: the last measured block carried a carrier (observer quieting at
+	 * the last measured block carried a carrier (observer quieting at
 	 * the default, the noise gate's quieting at its own threshold, or the passive meter).
 	 * False without `carrierEvidence`, before the first block and for an unusable block.
 	 */
@@ -179,13 +179,13 @@ export class ReferenceChannelSquelch {
 		return this.lastBlockCarrier
 	}
 
-	/** Whether the carrier observer exists (WG10 req 2.6). */
+	/** Whether the carrier observer exists. */
 	get hasCarrierObserver(): boolean {
 		return this.observer !== null
 	}
 
 	/**
-	 * WG10 req 2.6: true when the last measured block's FM quieting is at
+	 * true when the last measured block's FM quieting is at
 	 * least `LIVE_AUDIO_NOISE_QUIETING_DB.default` (a carrier is present).
 	 * Always false without the observer, before the first block, and for a
 	 * block without a usable quieting (NaN, silent IQ): fail closed, so an
@@ -285,7 +285,7 @@ export class ReferenceChannelSquelch {
 	}
 
 	/**
-	 * WG10 R1 m1: a front swap (new channel offset). The gate returns to its rest state
+	 * a front swap (new channel offset). The gate returns to its rest state
 	 * (closed unless disabled), the hang and the noise and carrier-observer state start
 	 * afresh, so nothing measured on the old channel opens the gate on the new one. The
 	 * owner's floor estimate is its own (reset on retune); the output phase stays continuous.
@@ -357,7 +357,7 @@ export class ReferenceChannelSquelch {
 		if (threshold === null) return this.emitBlock(block)
 
 		if (observer !== null && !this.ownerFloorKnown) {
-			// WG10 req 2.6: no floor yet; the quieting decision drives the gate.
+			// no floor yet; the quieting decision drives the gate.
 			// An open observer refreshes the power hang so the handover to the
 			// power path (first floor) does not chop a carrier at once.
 			this.gateOpen = observerOpen
@@ -386,7 +386,7 @@ export class ReferenceChannelSquelch {
 		return this.emitBlock(block)
 	}
 
-	/** WG10 activity hygiene: evidence in power mode (observer, else the passive meter). */
+	/** evidence in power mode (observer, else the passive meter). */
 	private measureCarrierEvidence(block: Buffer): void {
 		if (this.observer !== null) {
 			this.lastBlockCarrier = this.lastBlockQuieted
