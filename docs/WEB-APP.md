@@ -17,8 +17,8 @@ and talks to the core over its REST API and WebSocket. The code lives in [`web/`
 - **Protected core:** the first visit shows a **Pair this browser** chip. Pair once, and the
   browser stays signed in. Signed-in devices are listed in the ⌘K palette. A session lasts 30 days
   from its last refresh: the app refreshes it when it opens and when its window comes back to the
-  front, once less than 29 days are left (at most once an hour), so a browser used at least once a
-  month never has to pair again. A browser whose session ran out (or was signed out from another
+  front, once less than 29 days are left (at most once an hour), so a browser used at least once
+  every 30 days never has to pair again. A browser whose session ran out (or was signed out from another
   device) shows **Session expired, pair again** instead of the bare pairing prompt.
 - **One address:** a protected core accepts the address named in its access settings and no
   other. `localhost` and `127.0.0.1` reach the same server, but to the browser and to the core they
@@ -400,7 +400,7 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   keeps the scroll position. The list is one Tab stop: the row under the cursor; the arrows move
   it and focus follows; Space and Enter on a button inside a row press that button. The footer
   says in words what each recording area holds and what happens at its limit, for example
-  `Auto-clean keeps the newest 537 MB of scanner recordings (214 MB used). IQ captures: 96.0 MB of
+  `Scanner folder: 214 MB. Auto-clean keeps scanner recordings under 537 MB. IQ captures: 96.0 MB of
 640 MB (new captures are refused at the limit). Kept items are never removed (12). 41.2 GB free
 on disk.`
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band

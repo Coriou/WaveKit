@@ -8,7 +8,10 @@ export const DOCK_H = 64
 export const CARD_W = 340
 /** From this width a drawer floats over the plot's right side at full height. */
 export const FULL_MIN_VW = 1100
-/** Dock width with the active label showing, and without it, for the collision checks. */
+/**
+ * Fallback dock widths with the active label showing, and without it, for the collision checks (the dock is measured
+ * at runtime; these were taken before the Messages button left it, so they err wide).
+ */
 export const DOCK_WIDE = 496
 export const DOCK_COMPACT = 424
 export const DR_MIN = 360

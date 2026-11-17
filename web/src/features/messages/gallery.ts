@@ -1,4 +1,4 @@
-// The Messages view (Messages board, gallery variant): decoded messages as cards in up to three columns of at least
+// Activity › Cards (the gallery layout): decoded messages as cards in up to three columns of at least
 // 340 px. Pure, so it tests in node: how many columns fit, and which card goes in which column.
 
 export const GALLERY_COL_MIN = 340

@@ -914,6 +914,11 @@ Condensed + Noto Sans, Tabler-based icons).
 - **Immersive is the interface the web app implements (owner, 2026-10-16).** Sub-project C builds
   C · Immersive, the chosen shell, with the boards it embeds; their states and interactions are
   the acceptance criteria (see "Handoff to the dev team").
+- **No Messages view (owner, 2026-11-16).** Decoded messages fold into Activity › Cards, with
+  Expand to widen the drawer over the plot; the dock loses its Messages button, and old Messages
+  links and the palette alias open Activity › Cards. The canvas still draws Messages in the dock
+  until it is next redrawn. *Why:* one place for linked activity data, not a second board that
+  shows the same decodes.
 
 ## Open questions and next topics
 
