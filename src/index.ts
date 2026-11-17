@@ -1776,7 +1776,7 @@ async function main(): Promise<void> {
 			{
 				...createDecoderManagerOptions(config.health, bandRegion),
 				enablement: {
-					planner: input => planPlacements({ ...input, bandplanRangeContains }),
+					planner: planPlacements,
 					resolveMode: id =>
 						resolvedModes.get(id) ?? { mode: "off", source: "default" },
 					isCatalogue: value => catalogueIds.has(value.id),
@@ -1784,6 +1784,7 @@ async function main(): Promise<void> {
 					recheckAvailable,
 					vfo: () => vfo.current(),
 					bandplanChannels,
+					bandplanRangeContains,
 					maxBandplanChannels:
 						config.decoderPolicy?.efficiency?.maxBandplanChannels ??
 						DECODER_MAX_BANDPLAN_CHANNELS,
