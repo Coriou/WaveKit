@@ -91,6 +91,12 @@
 	.wkf-ls-tone {
 		color: var(--wk-accent);
 	}
+	/* the tone's state is the one part of its row that gives way: at phone width a long tone ("Waiting for
+	   DCS 023N") ends in an ellipsis rather than pushing the switch out of the panel (the head says it too) */
+	.wkf-ls-row > .wkf-ls-now.wkf-ls-tone {
+		flex: 0 1 auto;
+		min-width: 0;
+	}
 
 	/* the level bar: a slim track, the signal as fill, the squelch as an amber handle (hollow in Auto) */
 	.wkf-ls-level {

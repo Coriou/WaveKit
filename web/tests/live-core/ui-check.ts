@@ -979,7 +979,7 @@ export async function run(
 		}
 		let hints: HintsReport | null = null
 		if (options.flow === "hints") {
-			hints = await hintsFlow(page, shoot)
+			hints = await hintsFlow(page, shoot, mockApi)
 			await shoot("2-hints")
 		}
 		let naming: NamingReport | null = null

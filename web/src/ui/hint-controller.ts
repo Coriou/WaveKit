@@ -89,8 +89,12 @@ export class HintController {
 		this.show(id, false)
 	}
 
-	/** The mark lost focus: an unpinned hint closes. */
-	blur(id: string): void {
+	/**
+	 * Focus left the mark or its bubble. `stillInside`: it went to the other one (a click on More focuses it),
+	 * so the hint stays; it closes, unless pinned, once focus has left both.
+	 */
+	blur(id: string, stillInside = false): void {
+		if (stillInside) return
 		if (this.focused === id) this.focused = null
 		const s = this.state.get()
 		if (s.open === id && !s.pinned) this.hide()
@@ -172,10 +176,15 @@ export interface HintBubbleEvents {
 	onPointerEnter(pointerType: string): void
 	/** `intoAnchor`: the pointer went back onto the mark or its label (the hint stays, like hovering it). */
 	onPointerLeave(pointerType: string, intoAnchor?: boolean): void
+	/** Focus left something in the bubble; `stillInside`: it went to the mark or elsewhere in the bubble. */
+	onBlur(stillInside: boolean): void
 }
 
 /** The bubble's handlers (mouse only, like the mark's hover: touch and pen pin and dismiss instead). */
-export function hintBubbleEvents(controller: HintController): HintBubbleEvents {
+export function hintBubbleEvents(
+	controller: HintController,
+	id: string,
+): HintBubbleEvents {
 	return {
 		onPointerEnter: type => {
 			if (type === "mouse") controller.bubbleIn()
@@ -183,13 +192,15 @@ export function hintBubbleEvents(controller: HintController): HintBubbleEvents {
 		onPointerLeave: (type, intoAnchor = false) => {
 			if (type === "mouse" && !intoAnchor) controller.bubbleOut()
 		},
+		onBlur: stillInside => controller.blur(id, stillInside),
 	}
 }
 
 /** What a mark's DOM events mean, as plain inputs (so the wiring is testable without a DOM). */
 export interface HintMarkEvents {
 	onFocus(visible: boolean): void
-	onBlur(): void
+	/** `intoBubble`: focus went into the hint's own bubble (its More button), which keeps the hint. */
+	onBlur(intoBubble?: boolean): void
 	onClick(): void
 	/** True when the key was handled (the caller prevents its default and stops it). */
 	onKeyDown(key: string): boolean
@@ -208,7 +219,7 @@ export function hintMarkEvents(
 ): HintMarkEvents {
 	return {
 		onFocus: visible => controller.focus(id, visible),
-		onBlur: () => controller.blur(id),
+		onBlur: (intoBubble = false) => controller.blur(id, intoBubble),
 		onClick: () => controller.press(id),
 		onKeyDown: key =>
 			key === "Escape" && controller.state.get().open === id

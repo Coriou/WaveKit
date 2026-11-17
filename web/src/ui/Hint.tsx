@@ -118,7 +118,13 @@ export function HintMark({
 				}
 				data-wk-hint-mark={id}
 				onFocus={e => events.onFocus(focusVisible(e.currentTarget))}
-				onBlur={() => events.onBlur()}
+				onBlur={e =>
+					events.onBlur(
+						e.relatedTarget instanceof Node &&
+							document.getElementById(bubbleId)?.contains(e.relatedTarget) ===
+								true,
+					)
+				}
 				onClick={() => events.onClick()}
 			>
 				<Icon name="info" size={14} />
@@ -190,7 +196,7 @@ function HintBubble({
 }) {
 	const bubble = useRef<HTMLDivElement>(null)
 	const learn = pinned && content.learn !== undefined
-	const pointer = hintBubbleEvents(controller)
+	const pointer = hintBubbleEvents(controller, hintId)
 
 	// place before paint: inside the host, above the kept row, else below it; while open, again whenever the
 	// layout under it changes (another island moves or grows, the row or host resizes)
@@ -329,6 +335,15 @@ function HintBubble({
 			data-learn={learn || undefined}
 			data-wk-hint-bubble={hintId}
 			onPointerEnter={e => pointer.onPointerEnter(e.pointerType)}
+			// focus that went from the mark to More and leaves again: the hint closes once it is out of both
+			onBlur={e => {
+				const to = e.relatedTarget
+				pointer.onBlur(
+					to instanceof Node &&
+						(bubble.current?.contains(to) === true ||
+							mark.current?.contains(to) === true),
+				)
+			}}
 			onPointerLeave={e =>
 				pointer.onPointerLeave(
 					e.pointerType,
@@ -364,6 +379,9 @@ function HintBubble({
 							type="button"
 							className="wk-hint-more"
 							tabIndex={-1}
+							// keep focus where it is (a mark keyboard focus opened): a browser that does not focus
+							// buttons on a click would otherwise blur the mark, and the hint, before the click
+							onMouseDown={e => e.preventDefault()}
 							onClick={() => controller.press(hintId)}
 						>
 							More

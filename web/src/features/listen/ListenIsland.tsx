@@ -604,6 +604,9 @@ function SquelchField() {
 						step={1}
 						value={Math.round(sq)}
 						disabled={!canEdit}
+						// in Open there is no handle to show focus on: out of the tab order (Manual is one press
+						// away on the mode buttons above), the track still takes a drag, which selects Manual
+						tabIndex={shown === "open" ? -1 : undefined}
 						aria-label="Squelch threshold"
 						aria-valuetext={signal ? `${opens}, signal ${signal}` : opens}
 						onChange={e => setDrag(Number(e.target.value))}

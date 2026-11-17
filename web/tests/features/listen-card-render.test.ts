@@ -484,6 +484,27 @@ describe("the Audio options panel", () => {
 			)
 	})
 
+	it("keeps the threshold out of the tab order in Open, where no handle shows its focus", () => {
+		const range = (html: string) =>
+			/<input type="range"[^>]*aria-label="Squelch threshold"[^>]*>/.exec(
+				html,
+			)?.[0] ?? ""
+		const open = range(
+			panel({ status: withConfig(LISTEN_CORE, { squelchMode: "open" }) }),
+		)
+		expect(open).toContain('tabindex="-1"')
+		for (const config of [
+			{ squelchMode: "manual" as const, squelch: -70 },
+			{ squelchMode: "auto" as const },
+		]) {
+			const html = panel({ status: withConfig(LISTEN_CORE, config) })
+			expect(html).toContain("wkf-ls-knob")
+			const input = range(html)
+			expect(input).not.toBe("")
+			expect(input).not.toContain("tabindex")
+		}
+	})
+
 	it("offers Auto when Digital has no decoder on the channel", () => {
 		const html = panel({
 			status: withConfig(LISTEN_CORE, { listenMode: "digital" }),

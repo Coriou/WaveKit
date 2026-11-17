@@ -112,7 +112,7 @@ describe("hint controller: keyboard", () => {
 	it("a hint keyboard focus showed stays while the mark has focus, whatever the mouse does", () => {
 		const { c, advance, open } = setup()
 		const ev = hintMarkEvents(c, "a")
-		const bubble = hintBubbleEvents(c)
+		const bubble = hintBubbleEvents(c, "a")
 		ev.onFocus(true)
 		ev.onPointerEnter("mouse")
 		ev.onPointerLeave("mouse")
@@ -130,6 +130,36 @@ describe("hint controller: keyboard", () => {
 		expect(open()).toBe("a")
 		ev.onPointerLeave("mouse")
 		advance(HINT_CLOSE_GRACE_MS)
+		expect(open()).toBeNull()
+	})
+
+	it("a click on More moves focus into the bubble: the hint stays and pins; it closes once focus leaves both", () => {
+		const { c, open, pinned } = setup()
+		const ev = hintMarkEvents(c, "a")
+		const bubble = hintBubbleEvents(c, "a")
+		ev.onFocus(true)
+		// mousedown on More takes focus from the mark into the bubble, before the click
+		ev.onBlur(true)
+		expect(open()).toBe("a")
+		ev.onClick()
+		expect(open()).toBe("a")
+		expect(pinned()).toBe(true)
+		// pinned, focus leaving the bubble keeps it (a click elsewhere or Escape closes it)
+		bubble.onBlur(false)
+		expect(open()).toBe("a")
+	})
+
+	it("an unpinned hint whose focus went into the bubble closes when focus leaves the bubble too", () => {
+		const { c, open } = setup()
+		const ev = hintMarkEvents(c, "a")
+		const bubble = hintBubbleEvents(c, "a")
+		ev.onFocus(true)
+		ev.onBlur(true)
+		expect(open()).toBe("a")
+		// back to the mark: still open
+		bubble.onBlur(true)
+		expect(open()).toBe("a")
+		bubble.onBlur(false)
 		expect(open()).toBeNull()
 	})
 
@@ -218,7 +248,7 @@ describe("hint controller: touch and pointer", () => {
 	it("a hovered hint closes after the grace once the pointer leaves its bubble; touch on the bubble does nothing", () => {
 		const { c, advance, open } = setup()
 		const ev = hintMarkEvents(c, "a")
-		const bubble = hintBubbleEvents(c)
+		const bubble = hintBubbleEvents(c, "a")
 		ev.onPointerEnter("mouse")
 		advance(HINT_OPEN_DELAY_MS)
 		ev.onPointerLeave("mouse")
@@ -238,7 +268,7 @@ describe("hint controller: touch and pointer", () => {
 	it("back from the bubble to the mark keeps it open", () => {
 		const { c, advance, open } = setup()
 		const ev = hintMarkEvents(c, "a")
-		const bubble = hintBubbleEvents(c)
+		const bubble = hintBubbleEvents(c, "a")
 		ev.onPointerEnter("mouse")
 		advance(HINT_OPEN_DELAY_MS)
 		ev.onPointerLeave("mouse")

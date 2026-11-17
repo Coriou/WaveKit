@@ -11,6 +11,11 @@
  * bubble; a hint keyboard focus showed stays while the mouse comes and goes, and Escape closes it; and with a
  * hint open, another island moved over its room makes the bubble move off it within a frame or two. It runs
  * with reduced motion, so each hint must appear whole at once.
+ *
+ * The mock core is seeded through its own API into three states, each a step with the exact set of marks it
+ * must show, at both sizes, and at 390×844 no part of the panel wider than the panel: live audio off (the
+ * mock's start state), a tone squelch set and waiting for its tone (a long label, DCS 023N: the walk above
+ * runs in this state), and no live audio at all (the status route answers 404 in this page only).
  */
 import type { Page } from "playwright-core"
 import { within } from "./harness.ts"
@@ -18,6 +23,20 @@ import { within } from "./harness.ts"
 const STEP_MS = 10_000
 /** Tab presses before giving up on reaching the end of the panel. */
 const MAX_TABS = 60
+
+/** The marks each seeded state shows in the panel, Sound unfolded, by the explained control's name. */
+const MARKS_OFF = [
+	"Squelch",
+	"Voice only",
+	"Source",
+	"Level control",
+	"De-emphasis",
+] as const
+const MARKS_TONE = [...MARKS_OFF, "Tone squelch"] as const
+const MARKS_MISSING = ["Squelch"] as const
+/** A synthetic tone with the longest label the row shows ("Waiting for DCS 023N"). */
+const SEED_TONE = { kind: "dcs", code: "023", polarity: "normal" } as const
+const SEED_TONE_WAITING = "Waiting for DCS 023N"
 
 const VIEWPORTS = [
 	{ name: "1440x900", width: 1440, height: 900, tap: false },
@@ -35,6 +54,8 @@ export interface HintCase {
 	side: string | null
 	role: string | null
 	bubble: { x: number; y: number; width: number; height: number } | null
+	/** Neither side of its row had room, so the bubble took the roomier side clamped into the host (design rule). */
+	clamped: boolean
 }
 
 export interface HintsReport {
@@ -56,6 +77,8 @@ interface Measure {
 	panelOpen: boolean
 	bubble: { x: number; y: number; width: number; height: number } | null
 	problems: string[]
+	/** No room above or below its row inside the host: lying over the row is then the placement's rule. */
+	clamped: boolean
 }
 
 /** Measures the open hint of `id` in the page: inside its host and the window, off its row and other islands. */
@@ -78,7 +101,8 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 			focusOnMark: document.activeElement === mark,
 			panelOpen: toggle?.getAttribute("aria-expanded") === "true",
 		}
-		if (!mark || !bubble) return { ...base, bubble: null, problems: [] }
+		if (!mark || !bubble)
+			return { ...base, bubble: null, problems: [], clamped: false }
 		const b = bubble.getBoundingClientRect()
 		const problems: string[] = []
 		const meets = (r: DOMRect) =>
@@ -103,7 +127,28 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 				problems.push("outside its host")
 		} else problems.push("no host surface")
 		const row = mark.closest("[data-wk-hint-row]") ?? mark.parentElement
-		if (row && meets(row.getBoundingClientRect()))
+		// the room the placement has (hint-place.ts): the host clipped to the window, 12 px in, less the other
+		// islands above or below the row; with no room on either side it clamps into the host, over the row
+		let clamped = false
+		if (row && host) {
+			const k = row.getBoundingClientRect()
+			const h = host.getBoundingClientRect()
+			let top = Math.max(h.top, 0)
+			let bottom = Math.min(h.bottom, innerHeight)
+			for (const o of document.querySelectorAll(".wk-island")) {
+				if (o === host || host.contains(o) || o.contains(mark)) continue
+				const r = o.getBoundingClientRect()
+				if (r.width === 0 || r.height === 0) continue
+				if (r.right <= h.left || r.left >= h.right) continue
+				if (r.bottom <= h.top || r.top >= h.bottom) continue
+				if (r.bottom <= k.top) top = Math.max(top, r.bottom)
+				else if (r.top >= k.bottom) bottom = Math.min(bottom, r.top)
+			}
+			const fitsAbove = k.top - 6 - b.height >= top + 12 - SLACK
+			const fitsBelow = k.bottom + 6 + b.height <= bottom - 12 + SLACK
+			clamped = !fitsAbove && !fitsBelow
+		}
+		if (row && !clamped && meets(row.getBoundingClientRect()))
 			problems.push("over its own row")
 		for (const island of document.querySelectorAll(".wk-island")) {
 			if (island === host || host?.contains(island) || island.contains(mark))
@@ -127,6 +172,7 @@ const measure = (page: Page, id: string): Promise<Measure> =>
 				height: Math.round(b.height),
 			},
 			problems,
+			clamped,
 		}
 	}, id)
 
@@ -336,10 +382,165 @@ async function islandMoves(
 	step(name, false, "no hint with room on both sides of its row")
 }
 
+/** One call to the mock core's API (loopback, the run's own mock): throws unless it answers 2xx. */
+async function coreCall(
+	api: string,
+	method: "POST" | "PATCH",
+	path: string,
+	body?: unknown,
+): Promise<void> {
+	const answer = await fetch(`${api}${path}`, {
+		method,
+		...(body === undefined
+			? {}
+			: {
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(body),
+				}),
+	})
+	if (!answer.ok)
+		throw new Error(
+			`${method} ${path}: HTTP ${answer.status} ${await answer.text()}`,
+		)
+}
+
+/**
+ * Reloads the page, so it reads the core's state afresh (a broadcast sent while its socket reconnects after an
+ * earlier reload would be missed).
+ */
+async function reload(page: Page): Promise<void> {
+	await page.reload({ waitUntil: "load" })
+	await page.locator("#root > *").first().waitFor({ timeout: STEP_MS })
+}
+
+/** Every island's box, rounded: the layout a hint is placed against. */
+const islandBoxes = (page: Page): Promise<string> =>
+	page.evaluate(() =>
+		[...document.querySelectorAll(".wk-island")]
+			.map(el => {
+				const r = el.getBoundingClientRect()
+				return [r.left, r.top, r.right, r.bottom].map(Math.round).join(",")
+			})
+			.join("|"),
+	)
+
+/** Waits (5 s at most) until the islands stop moving: after a reload the cards arrive and settle. */
+async function layoutSettled(page: Page): Promise<boolean> {
+	let last = await islandBoxes(page)
+	return within(5_000, async () => {
+		await page.waitForTimeout(300)
+		const now = await islandBoxes(page)
+		const same = now === last
+		last = now
+		return same
+	})
+}
+
+/** Opens Listen's Audio options and unfolds Sound; true once the panel is there. */
+async function openPanel(page: Page): Promise<boolean> {
+	const toggle = page.getByRole("button", { name: "Audio options" })
+	const panel = page.getByRole("region", { name: "Audio options" })
+	if ((await toggle.getAttribute("aria-expanded")) !== "true")
+		await toggle.click()
+	const opened = await within(STEP_MS, async () => (await panel.count()) > 0)
+	if (!opened) return false
+	const fold = panel.locator(".wkf-ls-fold")
+	if (
+		(await fold.count()) > 0 &&
+		(await fold.getAttribute("aria-expanded")) !== "true"
+	) {
+		await fold.click()
+		// let the unfolded panel lay out before the marks are read and measured
+		await frames(page, 2)
+	}
+	return true
+}
+
+/** The marks in the panel, by the name of what they explain ("About Squelch" → "Squelch"), sorted. */
+const markNames = (page: Page): Promise<string[]> =>
+	page
+		.getByRole("region", { name: "Audio options" })
+		.locator("[data-wk-hint-mark]")
+		.evaluateAll(els =>
+			els
+				.map(e => (e.getAttribute("aria-label") ?? "").replace(/^About /, ""))
+				.sort(),
+		)
+
+/** What sticks out of the Audio options panel sideways (or makes the page scroll sideways): empty when none. */
+const overflowOf = (page: Page): Promise<string[]> =>
+	page.evaluate(() => {
+		const SLACK = 0.5
+		const panel = document.querySelector<HTMLElement>(
+			'[role="region"][aria-label="Audio options"]',
+		)
+		if (!panel) return ["no panel"]
+		const out: string[] = []
+		if (panel.scrollWidth > panel.clientWidth + 1)
+			out.push(
+				`panel scrolls sideways (${panel.scrollWidth} > ${panel.clientWidth})`,
+			)
+		if (document.documentElement.scrollWidth > innerWidth + 1)
+			out.push(
+				`page scrolls sideways (${document.documentElement.scrollWidth} > ${innerWidth})`,
+			)
+		const p = panel.getBoundingClientRect()
+		for (const el of panel.querySelectorAll<HTMLElement>("*")) {
+			const r = el.getBoundingClientRect()
+			if (r.width === 0 || r.height === 0) continue
+			// a range input's box is its track: clipped content inside an ellipsis does not count either
+			if (r.right > p.right + SLACK || r.left < p.left - SLACK)
+				out.push(
+					`${el.tagName.toLowerCase()}.${el.className || "-"} "${(el.textContent ?? "").trim().slice(0, 40)}" ${Math.round(r.left)}..${Math.round(r.right)} outside ${Math.round(p.left)}..${Math.round(p.right)}`,
+				)
+		}
+		return out.slice(0, 6)
+	})
+
+/** Checks one seeded state: its note or text is shown, the marks are exactly `want`, and at 390 nothing sticks out. */
+async function seededState(
+	page: Page,
+	vp: (typeof VIEWPORTS)[number],
+	state: string,
+	shows: string,
+	want: readonly string[],
+	step: (name: string, ok: boolean, detail?: string) => void,
+	shoot: (name: string) => Promise<void>,
+): Promise<void> {
+	const opened = await openPanel(page)
+	const panel = page.getByRole("region", { name: "Audio options" })
+	const shown =
+		opened &&
+		(await within(
+			STEP_MS,
+			async () => (await panel.getByText(shows, { exact: true }).count()) > 0,
+		))
+	await layoutSettled(page)
+	const names = opened ? await markNames(page) : []
+	const expected = [...want].sort()
+	const same = names.join("|") === expected.join("|")
+	step(
+		`${vp.name}: ${state}: says "${shows}" with the marks ${expected.join(", ")}`,
+		shown && same,
+		`shown ${shown}, marks ${names.join(", ") || "none"}`,
+	)
+	if (vp.tap) {
+		const out = opened ? await overflowOf(page) : ["no panel"]
+		step(
+			`${vp.name}: ${state}: nothing in the panel sticks out sideways`,
+			out.length === 0,
+			out.join("; "),
+		)
+	}
+	await shoot(`2-hints-${vp.name}-${state.replace(/\W+/g, "-")}`)
+}
+
 export async function hintsFlow(
 	page: Page,
 	/** Saves a screenshot under that name (with `--screenshot`). */
 	shoot: (name: string) => Promise<void> = async () => undefined,
+	/** The mock core's API origin, for seeding its states (live audio off, a tone squelch waiting). */
+	mockApi: string | null = null,
 ): Promise<HintsReport> {
 	const cases: HintCase[] = []
 	const steps: HintsReport["steps"] = []
@@ -350,26 +551,54 @@ export async function hintsFlow(
 	// reduced motion: a hint must then appear whole at once (no slide, no fade), and the measures are final
 	// rather than mid-fade (a loaded headless page can draw too few frames for a transition to finish)
 	await page.emulateMedia({ reducedMotion: "reduce" })
-	const toggle = page.getByRole("button", { name: "Audio options" })
 	const panel = page.getByRole("region", { name: "Audio options" })
 
 	for (const vp of VIEWPORTS) {
 		await page.setViewportSize({ width: vp.width, height: vp.height })
 		await page.keyboard.press("Escape")
-		if ((await toggle.getAttribute("aria-expanded")) !== "true")
-			await toggle.click()
-		const opened = await within(STEP_MS, async () => (await panel.count()) > 0)
+		if (mockApi !== null)
+			try {
+				// live audio off, no tone squelch: the mock's start state
+				await coreCall(mockApi, "POST", "/api/live-audio/stop")
+				await coreCall(mockApi, "PATCH", "/api/live-audio/config", {
+					toneSquelch: { kind: "none" },
+				})
+				await reload(page)
+				await seededState(
+					page,
+					vp,
+					"live audio off",
+					"Live audio is off. Listen starts it.",
+					MARKS_OFF,
+					step,
+					shoot,
+				)
+				// a tone squelch set and waiting for its tone: the walk below runs in this state
+				await coreCall(mockApi, "POST", "/api/live-audio/start")
+				await coreCall(mockApi, "PATCH", "/api/live-audio/config", {
+					toneSquelch: SEED_TONE,
+				})
+				await reload(page)
+				await seededState(
+					page,
+					vp,
+					"tone squelch waiting",
+					SEED_TONE_WAITING,
+					MARKS_TONE,
+					step,
+					shoot,
+				)
+			} catch (e) {
+				step(
+					`${vp.name}: seeding the mock core`,
+					false,
+					e instanceof Error ? (e.message.split("\n")[0] ?? "") : String(e),
+				)
+			}
+		else step(`${vp.name}: seeding the mock core`, false, "no mock core API")
+		const opened = await openPanel(page)
 		step(`${vp.name}: Audio options open`, opened)
 		if (!opened) continue
-		const fold = panel.locator(".wkf-ls-fold")
-		if (
-			(await fold.count()) > 0 &&
-			(await fold.getAttribute("aria-expanded")) !== "true"
-		) {
-			await fold.click()
-			// let the unfolded panel lay out before the marks are read and measured
-			await frames(page, 2)
-		}
 		const ids = await panel
 			.locator("[data-wk-hint-mark]")
 			.evaluateAll(els =>
@@ -412,6 +641,7 @@ export async function hintsFlow(
 				side: shown.side,
 				role: shown.role,
 				bubble: shown.bubble,
+				clamped: shown.clamped,
 			})
 			// Enter pins it (the learn card when it has one)
 			await page.keyboard.press("Enter")
@@ -441,6 +671,7 @@ export async function hintsFlow(
 				side: pinned.side,
 				role: pinned.role,
 				bubble: pinned.bubble,
+				clamped: pinned.clamped,
 			})
 		}
 		reached[vp.name] = seen.length
@@ -512,11 +743,51 @@ export async function hintsFlow(
 					side: tapped.side,
 					role: tapped.role,
 					bubble: tapped.bubble,
+					clamped: tapped.clamped,
 				})
 			}
 		}
 		await page.keyboard.press("Escape")
+
+		// no live audio at all: this page's status reads answer 404 (the core broadcasts status only on a
+		// change, and nothing changes it here), so the panel says so with the Squelch mark alone
+		const STATUS = "**/api/live-audio/status*"
+		try {
+			await page.route(STATUS, route =>
+				route.fulfill({
+					status: 404,
+					contentType: "application/json",
+					body: JSON.stringify({ error: "Not Found", message: "Not Found" }),
+				}),
+			)
+			await reload(page)
+			await seededState(
+				page,
+				vp,
+				"no live audio",
+				"This WaveKit has no live audio.",
+				MARKS_MISSING,
+				step,
+				shoot,
+			)
+		} catch (e) {
+			step(
+				`${vp.name}: no live audio`,
+				false,
+				e instanceof Error ? (e.message.split("\n")[0] ?? "") : String(e),
+			)
+		} finally {
+			await page.unroute(STATUS)
+			await reload(page)
+		}
 	}
+	// where the design lets a bubble lie over its row (no room on either side), say which, without failing
+	const clamped = cases.filter(c => c.clamped)
+	step(
+		"bubbles clamped over their row (no room on either side, allowed)",
+		true,
+		clamped.map(c => `${c.viewport} ${c.label} ${c.how}`).join(", ") || "none",
+	)
 	await page.setViewportSize({ width: 2000, height: 900 })
 	await page.emulateMedia({ reducedMotion: null })
 	const ok =
