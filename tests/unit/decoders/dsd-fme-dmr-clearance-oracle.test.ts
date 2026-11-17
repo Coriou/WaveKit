@@ -52,6 +52,8 @@ interface Publication {
 	encrypted: boolean
 	encryptionKnown: boolean | undefined
 	hasField: boolean
+	/** A call's end: its call_end or the voice-call snapshot that mirrors it. */
+	ending?: boolean
 }
 
 /** Replays items (10 ms steps, the 500 ms timer), recording each publication's line seq. */
@@ -82,6 +84,7 @@ function run(items: Item[]): Publication[] {
 					: d.flags?.encrypted === true,
 			encryptionKnown: d.encryptionKnown,
 			hasField: "encryptionKnown" in d,
+			ending: o.type === "call_end",
 		})
 	})
 	decoder.on("voice-call", (v: DsdFmeVoiceCallState) => {
@@ -96,6 +99,7 @@ function run(items: Item[]): Publication[] {
 			encrypted: v.encrypted,
 			encryptionKnown: v.encryptionKnown,
 			hasField: "encryptionKnown" in v,
+			ending: !v.active,
 		})
 	})
 	const sorted = items
@@ -411,19 +415,22 @@ function backed(
 		if (s === undefined || t === undefined || t.seq >= p.seq) continue
 		// The chain belongs to the publication's own call: one call epoch from
 		// the opening sync to the settling one, the epoch of the publication's
-		// line (or of the line before it, for an end published on a boundary).
+		// line. Only a call's end (its call_end and the voice-call mirroring
+		// it) published on a protocol-switch or restart line belongs to the
+		// line before it; a call's first publication never does.
 		const epoch = l.epochs[l.lane]
 		if (epoch === undefined) continue
-		const inEpoch = (index: number) =>
-			[lines[index], lines[index - 1]].some(
+		const inEpoch = (index: number, lenient: boolean) =>
+			(lenient ? [lines[index], lines[index - 1]] : [lines[index]]).some(
 				x => x !== undefined && x.epochs[l.lane] === epoch,
 			)
 		const firstIndex = Math.min(Math.floor(firstSeq), lines.length) - 1
+		const endOnBoundary = p.ending === true && boundary
 		if (
 			s.epochs[l.lane] !== epoch ||
 			t.epochs[l.lane] !== epoch ||
-			!inEpoch(pIndex) ||
-			!inEpoch(firstIndex) ||
+			!inEpoch(pIndex, endOnBoundary) ||
+			!inEpoch(firstIndex, false) ||
 			(bound !== undefined && (bound.lane !== l.lane || bound.epoch !== epoch))
 		)
 			continue
@@ -956,7 +963,7 @@ describe("dsd-fme DMR clearance oracle", () => {
 		})
 	})
 
-	describe("second-round bypass shapes: the adapter never publishes clear and the oracle rejects a forged clear", () => {
+	describe("further bypass shapes: the adapter never publishes clear and the oracle rejects a forged clear", () => {
 		const X = (burst: string) =>
 			`00:00:01 Sync: +DMR   slot1   slot2  | Color Code=01 | ${burst} `
 		/** A forged clear publication of call `callId` (9001/91) after line `seq`. */
@@ -1158,6 +1165,13 @@ describe("dsd-fme DMR clearance oracle", () => {
 			// The first call's own clear (after its settling sync, line 4) is backed.
 			expect(backed(lines, claim(4.25))).not.toBeNull()
 			expect(backed(lines, claim(9.5))).toBeNull()
+			// A forged clear first published on the new call's first line.
+			for (const named of [false, true]) {
+				const items = twoCalls(named)
+				run(items)
+				const forgedNew: Publication = { ...claim(5.25), callId: "new" }
+				expect(oracle(items, [forgedNew]).length).toBeGreaterThan(0)
+			}
 		})
 	})
 

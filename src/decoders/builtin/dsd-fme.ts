@@ -1871,9 +1871,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}
 
 	/**
-	 * The lane of a line: a DMR repeater (BS mode) line's slot (a sync line's
-	 * bracketed slot, an LC print's SLOT, else the last bracketed slot); 0 for
-	 * every other line (direct mode is one channel: its prints say SLOT 1).
+	 * The lane of a line: a DMR repeater (BS mode) line's slot, which is a
+	 * sync line's bracketed slot or, for any other line, the latest
+	 * bracketed sync's (a printed SLOT is never routed on); 0 for every other
+	 * line (direct mode is one channel: its prints say SLOT 1).
 	 */
 	private lineLane(line: string): number {
 		const sync = SYNC_PATTERN.exec(line)

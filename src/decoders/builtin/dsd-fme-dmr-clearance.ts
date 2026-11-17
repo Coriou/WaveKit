@@ -30,7 +30,12 @@
  *
  * Any privacy field (Encrypted, an SVC privacy bit, a non-clear ALG, a
  * non-zero KEY ID) on any line of the lane makes the lane's call encrypted,
- * for good. Ordering uses sequence numbers only; elapsed time only expires.
+ * for good.
+ *
+ * Over-muting, accepted: a privacy print after a repeater sync with no slot
+ * bracket mutes both slots' calls (fail closed), because the SLOT it prints
+ * may be stale after a CACH error. On the recorded repeater logs about 4 to
+ * 5 % of syncs carry no bracket, and about 1 link control in 65 follows one. Ordering uses sequence numbers only; elapsed time only expires.
  */
 
 /** The plausible DMR IDs (24-bit; the top 800 source addresses are reserved). */
@@ -794,10 +799,10 @@ export class DmrClearance {
 	}
 
 	/**
-	 * A line of no lane (a BS sync bracketing no slot, or what
-	 * follows it). It never opens, names, proves or settles; its error
-	 * spoils every open burst, and its privacy field mutes the slot it
-	 * prints, or holds every call's voice when it prints none.
+	 * A line of no lane (a BS sync bracketing no slot, or what follows it).
+	 * It never opens, names, proves or settles; its error spoils every open
+	 * burst, and its privacy field makes every live call encrypted, whatever
+	 * slot it prints.
 	 */
 	private onUnplaced(
 		event: DmrSyncEvent | DmrLcEvent | DmrOtherEvent,
@@ -808,12 +813,7 @@ export class DmrClearance {
 		if (errored) for (const key of PROOF_LANES) this.dirty(this.lane(key))
 		if (!event.privacy) return
 		// It cannot be attributed to one lane: every call it could belong to
-		// (any proof lane's) is encrypted, whatever slot it prints (fail
-		// closed); a printed slot with no call yet mutes the call that line
-		// opens there.
-		const slot = event.type === "sync" ? undefined : event.slot
-		if (slot !== undefined && this.lane(slot).call === undefined)
-			this.lane(slot).privacySeq = seq
+		// (any proof lane's) is encrypted (fail closed).
 		for (const key of PROOF_LANES) {
 			const lane = this.lane(key)
 			if (lane.call !== undefined) this.privacy(lane, seq, out)
