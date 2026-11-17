@@ -484,6 +484,17 @@ export async function layoutFlow(
 		await page
 			.locator(".wkp-input")
 			.waitFor({ state: "detached", timeout: STEP_MS })
+		// each drawer's code loads on first use too (slow on a loaded host): open each once now, with the palette's
+		// budget, so the cells' STEP_MS waits measure the layout and not a first chunk load
+		for (const d of DRAWERS) {
+			phase = `warm the ${d.name} drawer`
+			await go(d.hash)
+			await page
+				.locator(`.wk-shell-drawer ${d.ready}`)
+				.first()
+				.waitFor({ timeout: 60_000 })
+		}
+		await go("")
 		// with the transitions on: the expanded card above Listen glides up while the player enters under it
 		const card = await page.evaluate(
 			() =>
