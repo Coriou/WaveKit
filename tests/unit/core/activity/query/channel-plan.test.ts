@@ -1476,7 +1476,9 @@ describe("both scope plans read the same pages", () => {
 							eventId: row.eventId,
 							frequencyHz: row.frequencyHz,
 							category: row.category,
-							entityKey: row.entityKey,
+							...(row.entityKey === undefined
+								? {}
+								: { entityKey: row.entityKey }),
 							...(row.text === null ? {} : { text: row.text }),
 							refs: [
 								...(row.channelHz === null
