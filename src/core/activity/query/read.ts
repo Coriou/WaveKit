@@ -138,8 +138,9 @@ const FACET_COLUMN: Record<FacetDimension, string> = {
 
 /**
  * How a scope term (the channel scope, the frequency range) reads. `union`: a `seq IN (…)`
- * candidate set from the index range(s) inside the statement's seq window, which SQLite
- * materialises in full before LIMIT (a LIST SUBQUERY), so it costs the candidates of that window.
+ * candidate set from the scope's index range(s), seq a filter (`+seq`, no seek: the halves scan
+ * the scope's whole index range and keep the entries inside the statement's window), which SQLite
+ * materialises in full before LIMIT (a LIST SUBQUERY), so it costs the scope's index entries.
  * `walk`: plain per-row terms over the seq-ordered walk of the window, which stops at LIMIT, so
  * it costs the rows walked.
  */
@@ -150,8 +151,34 @@ export interface ScopePlan {
 	frequency: ScopeRead
 }
 
+/**
+ * A statement's form: a scope plan, or `literal`, the statement of 3b991342d (the plain filters
+ * in its order, the channel scope as `seq IN (its whole refs range) OR (its fallback)`, the
+ * frequency range as `+frequency_hz` terms no index takes) over the window with one seq bound per
+ * side. SQLite drives it as it drove that commit: from a driver filter's index or list, else the
+ * seq walk of the window.
+ */
+export type StatementForm = ScopePlan | "literal"
+
 const UNION_PLAN: ScopePlan = { channel: "union", frequency: "union" }
 const WALK_PLAN: ScopePlan = { channel: "walk", frequency: "walk" }
+
+/**
+ * True when `query` holds a driver filter (DRV): an entityKey (activity_entity), a recordingId
+ * ref, text (fts) or hasRecording=true (the last three a `seq IN` list SQLite reads as
+ * `rowid=?`). Measured on the real schema (SQLite 3.50.4, no sqlite_stat1): these are the only
+ * filters that drive a scoped read; activity_frequency and activity_produced never do, other refs
+ * and hasRecording=false are per-row terms. A scoped read with a driver reads the literal
+ * statement: its rows are the driver's.
+ */
+export function hasDriver(query: NormalisedQuery): boolean {
+	return (
+		query.entityKey !== null ||
+		query.refs.some(ref => ref.type === "recordingId") ||
+		query.fts.kind === "match" ||
+		query.hasRecording === true
+	)
+}
 
 /**
  * Rows (seq values) a scoped search walks before it reads the rest of its window as candidates.
@@ -159,10 +186,21 @@ const WALK_PLAN: ScopePlan = { channel: "walk", frequency: "walk" }
  * so a slice that finds nothing costs 23 to 37 ms, under a sixth of the 250 ms deadline (at the
  * 4 µs a row of the old two-probe walk, 1 s per 250 000 rows, it would be about 65 ms). A dense
  * scope fills its page inside the slice (51 rows at 60 % density: about 85 rows); a sparse or
- * clustered-old one pays the slice once, then the union over the rest of the window costs its
- * candidates only (about 5 µs each).
+ * clustered-old one pays the slice once, then the rest of the window by SEARCH_COUNT_CAP.
  */
 export const WALK_SLICE = 16_384
+
+/**
+ * Scope candidates (index entries inside the rest of the window) a scoped search with no driver
+ * counts, after a walk slice that left its page short, before it picks the rest's form: under
+ * the cap, the union (its entries); at it, the literal statement (the cost of 3b991342d).
+ * Arithmetic: a capped count reads the scope's index range until 4 096 entries inside the rest
+ * match (about 5 µs each with the fallback's refs probe: about 20 ms), and a union under the cap
+ * reads as many again, so slice + count + union stay near 23 to 37 + 20 + 20 ms. The count reads
+ * entries outside the rest too (seq is a filter, not a seek), so a scope clustered outside the
+ * rest can read its whole range: no more than the union of 8327797a4 read.
+ */
+export const SEARCH_COUNT_CAP = 4_096
 
 /**
  * Slices of WALK_SLICE rows a scoped facets walk reads before it reads the rest of its window as
@@ -177,12 +215,14 @@ export const WALK_SLICE = 16_384
  */
 export const FACETS_WALK_SLICES = 6
 
-/** Internal read options (the plan and slice tests); production reads pass none. */
+/** Internal read options (the plan, slice and count tests); production reads pass none. */
 export interface ReadOptions {
 	/** Rows of a walk slice; default WALK_SLICE. */
 	walkSlice?: number
-	/** Forces one statement over the whole window with this plan. */
-	plan?: ScopePlan
+	/** A scoped search's remainder count cap; default SEARCH_COUNT_CAP. */
+	searchCountCap?: number
+	/** Forces one statement over the whole window in this form. */
+	plan?: StatementForm
 }
 
 /** A statement's seq window (low, high]: one bound per side, so SQLite seeks to the near end. */
@@ -261,12 +301,18 @@ function countedTo(
 	return Number(n)
 }
 
-/** The stored-channel half's candidates in `window`: a range of the refs key, seq as a filter. */
+/**
+ * The stored-channel half's candidates in `window`: a range of the refs key, seq as a filter
+ * (`+seq`: the half scans the whole ref_value range, no seq seek).
+ */
 function channelRefCandidates(): string {
 	return "SELECT activity_refs.seq FROM activity_refs WHERE activity_refs.ref_type = 'channelHz' AND activity_refs.ref_value BETWEEN ? AND ? AND +activity_refs.seq > ? AND +activity_refs.seq <= ?"
 }
 
-/** The fallback half's candidates in `window`: a range of activity_frequency, rows with no stored channel. */
+/**
+ * The fallback half's candidates in `window`: a range of activity_frequency (the whole range, seq
+ * a filter), rows with no stored channel.
+ */
 function channelFallbackCandidates(): string {
 	return `SELECT fallback.seq FROM activity AS fallback INDEXED BY activity_frequency WHERE fallback.frequency_hz >= ? AND fallback.frequency_hz < ? AND +fallback.seq > ? AND +fallback.seq <= ? AND ${noChannelRef("fallback")}`
 }
@@ -283,16 +329,16 @@ function channelRefParams(channel: {
 }
 
 /**
- * The plan of a scoped facets scan of at most `cap` matches in `window`: each scope term counted
- * to `cap` (the channel scope: its refs range, plus its fallback range with no stored channel, so
- * no row counts twice; the frequency range: its activity_frequency range), all inside the window.
- * A term under the cap reads as the union (its candidates, fewer than the scan reads); at the cap,
- * as the walk. Arithmetic: counting to the default 50 000 steps at most 50 000 index entries per
- * term (about 10 ms), plus one refs probe per fallback entry. Measured on a busy channel (17 500
- * candidates, every one also in the fallback's frequency range), the count added 25 to 40 ms to
- * the facets read.
+ * The plan of a scoped read of `window` by its candidates counted to `cap`: each scope term
+ * counted (the channel scope: its refs range, plus its fallback range with no stored channel, so
+ * no row counts twice; the frequency range: its activity_frequency range), entries inside the
+ * window only. A term under the cap reads as the union (its candidates); at the cap, as the walk.
+ * Arithmetic: a count stops at `cap` entries inside the window (the default facets 50 000: about
+ * 10 ms per term), plus one refs probe per fallback entry; seq is a filter, so entries outside
+ * the window are read and skipped too. Measured on a busy channel (17 500 candidates, every one
+ * also in the fallback's frequency range), the count added 25 to 40 ms to the facets read.
  */
-export function facetsPlanOf(
+export function countedPlanOf(
 	db: SqlDatabase,
 	query: NormalisedQuery,
 	window: SeqWindow,
@@ -333,6 +379,25 @@ export function facetsPlanOf(
 	return { channel, frequency }
 }
 
+/** The plan of a count: union when any term read as one. */
+function hasUnion(plan: ScopePlan): boolean {
+	return plan.channel === "union" || plan.frequency === "union"
+}
+
+/**
+ * The form of the rest of a scoped read with no driver: the counted plan when a term holds fewer
+ * than `cap` candidates in `rest` (the union of that term), else the literal statement.
+ */
+function remainderFormOf(
+	db: SqlDatabase,
+	query: NormalisedQuery,
+	rest: SeqWindow,
+	cap: number,
+): StatementForm {
+	const plan = countedPlanOf(db, query, rest, cap)
+	return hasUnion(plan) ? plan : "literal"
+}
+
 /**
  * The channel scope as SQL: rows whose stored channel is within [minHz, maxHz] (a range of the
  * refs key (ref_type, ref_value, seq), the values zero-padded so text order is frequency order),
@@ -342,8 +407,8 @@ export function facetsPlanOf(
  * belongs to one. A row with neither never matches; the two halves are disjoint (one has a
  * channel ref, the other none).
  *
- * `union`: one `seq IN (… UNION ALL …)` of the two index ranges inside `window`, so a sparse
- * scope never walks the snapshot. `walk`: one refs probe per row: the row's stored channel, or
+ * `union`: one `seq IN (… UNION ALL …)` of the two index ranges (each read whole, its entries
+ * kept inside `window`), so a sparse scope never walks the snapshot. `walk`: one refs probe per row: the row's stored channel, or
  * (none stored) the low end of the scope when its own frequency (`+`, so no index takes it) is in
  * the fallback range, compared with the scope; IFNULL evaluates its second argument only when
  * the probe found no channel.
@@ -470,10 +535,12 @@ function channelMatchOf(
 }
 
 /**
- * The channelMatch probe and its parameters (exported for the query-plan tests): plain terms
- * driven from the fallback's activity_frequency range (INDEXED BY: the index is in the only
- * schema a reader opens), the other filters as per-row terms, LIMIT 1 with no ORDER BY, so it
- * stops at the first fallback row and never materialises a candidate set of the scope.
+ * The channelMatch probe and its parameters (exported for the query-plan tests), LIMIT 1 with no
+ * ORDER BY, so it stops at the first fallback row. With a driver: the probe of 3b991342d (the
+ * literal filters and the fallback half as plain terms, no INDEXED BY), driven by the driver.
+ * Otherwise: plain terms driven from the fallback's activity_frequency range (INDEXED BY: the
+ * index is in the only schema a reader opens), the other filters as per-row terms, never a
+ * candidate set of the scope.
  */
 export function channelMatchStatement(
 	query: NormalisedQuery,
@@ -482,6 +549,22 @@ export function channelMatchStatement(
 ): { sql: string; params: SqlValue[] } {
 	const window = windowOf({ low, high, before: null, after: null })
 	const { where, params } = bounds(window)
+	if (hasDriver(query)) {
+		appendLiteralFilters(
+			where,
+			params,
+			{ ...query, channel: null },
+			"frequency_hz",
+		)
+		if (query.channel !== null) {
+			where.push(CHANNEL_FALLBACK_LITERAL)
+			params.push(...channelFallbackParams(query.channel))
+		}
+		return {
+			sql: `SELECT 1 AS one FROM activity WHERE ${where.join(" AND ")} LIMIT 1`,
+			params,
+		}
+	}
 	if (query.channel !== null) {
 		where.push(channelFallbackOfRow())
 		params.push(...channelFallbackParams(query.channel))
@@ -583,6 +666,94 @@ function appendFilters(
 	}
 }
 
+/** No stored channel on `activity`'s row. */
+const NO_CHANNEL_REF = noChannelRef("activity")
+
+/** The fallback half of 3b991342d's channel term. */
+const CHANNEL_FALLBACK_LITERAL = `frequency_hz >= ? AND frequency_hz < ? AND ${NO_CHANNEL_REF}`
+
+/**
+ * The filters of 3b991342d in its order. `frequencyColumn`: `+frequency_hz` in the search and
+ * facets statements (activity_frequency never drives them there either: the same driver),
+ * `frequency_hz` in its channelMatch probe.
+ */
+function appendLiteralFilters(
+	where: string[],
+	params: SqlValue[],
+	query: NormalisedQuery,
+	frequencyColumn: "frequency_hz" | "+frequency_hz",
+): void {
+	appendIn(where, params, "kind", query.kinds)
+	appendIn(where, params, "source_id", query.sourceIds)
+	appendIn(where, params, "decoder_id", query.decoderIds)
+	appendIn(where, params, "protocol", query.protocols)
+	appendIn(where, params, "category", query.categories)
+	const range = frequencyTerms(
+		frequencyColumn,
+		query.frequencyMin,
+		query.frequencyMax,
+	)
+	if (range !== null) {
+		where.push(range.sql)
+		params.push(...range.params)
+	}
+	if (query.producedFromMs !== null) {
+		where.push("produced_at_ms >= ?")
+		params.push(query.producedFromMs)
+	}
+	if (query.producedToMs !== null) {
+		where.push("produced_at_ms <= ?")
+		params.push(query.producedToMs)
+	}
+	if (query.entityKey !== null) {
+		where.push("entity_key = ?")
+		params.push(query.entityKey)
+	}
+	for (const ref of query.refs) {
+		where.push(
+			ref.type === "recordingId"
+				? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = ? AND ref_value = ?)"
+				: "EXISTS (SELECT 1 FROM activity_refs WHERE activity_refs.seq = activity.seq AND activity_refs.ref_type = ? AND activity_refs.ref_value = ?)",
+		)
+		params.push(ref.type, ref.value)
+	}
+	if (query.hasRecording !== null)
+		where.push(
+			query.hasRecording
+				? "seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')"
+				: "seq NOT IN (SELECT seq FROM activity_refs WHERE ref_type = 'recordingId')",
+		)
+	if (query.channel !== null) {
+		where.push(
+			`(seq IN (SELECT seq FROM activity_refs WHERE ref_type = 'channelHz' AND ref_value BETWEEN ? AND ?) OR (${CHANNEL_FALLBACK_LITERAL}))`,
+		)
+		params.push(
+			...channelRefParams(query.channel),
+			...channelFallbackParams(query.channel),
+		)
+	}
+	if (query.fts.kind === "impossible") where.push("1 = 0")
+	else if (query.fts.kind === "match") {
+		where.push(
+			"seq IN (SELECT rowid FROM activity_fts WHERE activity_fts MATCH ?)",
+		)
+		params.push(query.fts.match)
+	}
+}
+
+/** The statement's filters in `form` over `window`. */
+function appendForm(
+	where: string[],
+	params: SqlValue[],
+	query: NormalisedQuery,
+	form: StatementForm,
+	window: SeqWindow,
+): void {
+	if (form === "literal")
+		appendLiteralFilters(where, params, query, "+frequency_hz")
+	else appendFilters(where, params, query, form, window)
+}
+
 /** The window as SQL: one bound per side. */
 function bounds(window: SeqWindow): { where: string[]; params: SqlValue[] } {
 	return { where: ["seq > ?", "seq <= ?"], params: [...windowParams(window)] }
@@ -636,12 +807,12 @@ function readRecord(seq: bigint, json: unknown): ActivityRecord {
 /** The search statement and its parameters (exported for the query-plan tests). */
 export function searchStatement(
 	request: SearchReadRequest,
-	plan: ScopePlan = UNION_PLAN,
+	form: StatementForm = UNION_PLAN,
 	window: SeqWindow = windowOf(request),
 	limit: number = request.limit,
 ): { sql: string; params: SqlValue[] } {
 	const { where, params } = bounds(window)
-	appendFilters(where, params, request.query, plan, window)
+	appendForm(where, params, request.query, form, window)
 	const direction = request.order === "asc" ? "ASC" : "DESC"
 	params.push(limit)
 	// Keyset page inside the window. No COUNT(*): the extra row is the continuation signal.
@@ -665,10 +836,13 @@ function summaryRows(
 }
 
 /**
- * A search page. With a channel or frequency scope: the walk form over the first walk slice of
- * the window from the cursor (at most WALK_SLICE rows); a page not full there reads the rest of
- * the window as the union and appends it (the windows are disjoint and in order, so the page is
- * the same as one statement's).
+ * A search page, by the plan-selection rules. R0 (no channel or frequency scope): one statement.
+ * R1 (a scope and a driver, see hasDriver): the literal statement over the window. R3′ (a scope,
+ * only coarse or per-row filters): the walk form over the first walk slice of the window from the
+ * cursor (at most WALK_SLICE rows); a page not full there counts the scope's candidates in the rest
+ * of the window to SEARCH_COUNT_CAP and reads the rest as the union under it, else as the literal
+ * statement, and appends it (the windows are disjoint and in order, so the page is the same as one
+ * statement's).
  */
 function search(
 	db: SqlDatabase,
@@ -685,6 +859,8 @@ function search(
 			db,
 			searchStatement(request, options.plan ?? UNION_PLAN, window),
 		)
+	if (hasDriver(request.query))
+		return summaryRows(db, searchStatement(request, "literal", window))
 	const { first, rest } = splitWindow(
 		window,
 		request.order,
@@ -692,9 +868,15 @@ function search(
 	)
 	const rows = summaryRows(db, searchStatement(request, WALK_PLAN, first))
 	if (rows.length >= request.limit || rest === null) return rows
+	const form = remainderFormOf(
+		db,
+		request.query,
+		rest,
+		options.searchCountCap ?? SEARCH_COUNT_CAP,
+	)
 	for (const row of summaryRows(
 		db,
-		searchStatement(request, UNION_PLAN, rest, request.limit - rows.length),
+		searchStatement(request, form, rest, request.limit - rows.length),
 	))
 		rows.push(row)
 	return rows
@@ -737,13 +919,13 @@ function channelFacetValue(value: unknown): string | null {
 /** The facets statement and its parameters (exported for the query-plan tests). */
 export function facetsStatement(
 	request: FacetsReadRequest,
-	plan: ScopePlan = UNION_PLAN,
+	form: StatementForm = UNION_PLAN,
 	window: SeqWindow = windowOf({ ...request, before: null, after: null }),
 	// One extra row distinguishes "exactly scanCap matches" from a truncated scan.
 	limit: number = request.scanCap + 1,
 ): { sql: string; params: SqlValue[]; columns: string[] } {
 	const { where, params } = bounds(window)
-	appendFilters(where, params, request.query, plan, window)
+	appendForm(where, params, request.query, form, window)
 	const columns = request.dimensions.map(
 		dimension => `${FACET_COLUMN[dimension]} AS ${dimension}`,
 	)
@@ -764,11 +946,14 @@ function groupCount(group: Record<string, unknown>): number {
 }
 
 /**
- * The facets scan's groups: newest first, at most scanCap + 1 matches. With a scope: a term with
- * fewer than scanCap candidates in the window drives one union statement; when every term holds
- * at least that many, the walk form reads at most FACETS_WALK_SLICES walk slices from the top of
- * the window and stops at scanCap + 1 matches; short of them, the union reads the rest of the
- * window for the matches still missing (the windows are disjoint, so the totals are one scan's).
+ * The facets scan's groups: newest first, at most scanCap + 1 matches, by the rules of search
+ * with scanCap as the count cap. R0: one statement. R1 (a driver): the literal statement over the
+ * window. R3′: a term with fewer than scanCap candidates in the window drives one union
+ * statement; when every term holds at least that many, the walk form reads at most
+ * FACETS_WALK_SLICES walk slices from the top of the window and stops at scanCap + 1 matches;
+ * short of them, the rest of the window, counted to scanCap again, reads as the union under it,
+ * else as the literal statement, for the matches still missing (the windows are disjoint, so the
+ * totals are one scan's).
  */
 function facetGroups(
 	db: SqlDatabase,
@@ -780,9 +965,10 @@ function facetGroups(
 		db.prepare(statement.sql).all(...statement.params)
 	if (options.plan !== undefined || !hasScope(request.query))
 		return all(facetsStatement(request, options.plan ?? UNION_PLAN, window))
-	const plan = facetsPlanOf(db, request.query, window, request.scanCap)
-	if (plan.channel === "union" || plan.frequency === "union")
-		return all(facetsStatement(request, plan, window))
+	if (hasDriver(request.query))
+		return all(facetsStatement(request, "literal", window))
+	const plan = countedPlanOf(db, request.query, window, request.scanCap)
+	if (hasUnion(plan)) return all(facetsStatement(request, plan, window))
 	const { first, rest } = splitWindow(
 		window,
 		"desc",
@@ -793,7 +979,8 @@ function facetGroups(
 	for (const group of groups) matched += groupCount(group)
 	const wanted = request.scanCap + 1 - matched
 	if (wanted <= 0 || rest === null) return groups
-	for (const group of all(facetsStatement(request, UNION_PLAN, rest, wanted)))
+	const form = remainderFormOf(db, request.query, rest, request.scanCap)
+	for (const group of all(facetsStatement(request, form, rest, wanted)))
 		groups.push(group)
 	return groups
 }
