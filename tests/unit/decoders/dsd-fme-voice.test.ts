@@ -314,7 +314,7 @@ describe("dsd-fme call ids and voice-call events", () => {
 		expect(voice.map(v => v.encrypted)).toEqual([false, true])
 	})
 
-	it("does not take an encrypted data PDU for an encrypted voice call", () => {
+	it("takes an encrypted data PDU on the call's lane as encrypted (fail closed)", () => {
 		const lines = [
 			{
 				atMs: 0,
@@ -324,7 +324,8 @@ describe("dsd-fme call ids and voice-call events", () => {
 			{ atMs: 500, text: " Slot 1 - Encrypted PDU;" },
 		]
 		const { voice } = replay(createDecoder(), lines, 1500)
-		expect(voice.map(v => v.encrypted)).toEqual([false])
+		// Every privacy field of the lane mutes its call (DMR clearance rule 6).
+		expect(voice.at(-1)?.encrypted).toBe(true)
 	})
 
 	it("treats P25 ALG ID 0x80 as clear and other algorithms as encrypted", () => {

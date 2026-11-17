@@ -341,7 +341,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 			[1720, MS("VC*")],
 		]
 
-		it("VC* at 1000/1360/1720 and TLC + SLOT line at 1900, closed by a clean sync: one call, tg 9 src 100, known clear", () => {
+		it("VC* at 1000/1360/1720 and TLC + SLOT line at 1900, closed by a clean sync: one call, tg 9 src 100, named but not known clear", () => {
 			const { outputs, starts, ends, voice } = replay(
 				[...head, [1900, MS("TLC")], [1900, LC(1)], [1960, MS("CSBK")]],
 				8000,
@@ -357,10 +357,12 @@ describe("dsd-fme call-first: evidence rules", () => {
 				source: null,
 				encryptionKnown: false,
 			})
+			// A trailer of a call named by nothing before it is metadata only
+			// (DMR clearance P3 needs a named call): never known clear.
 			expect(ends[0]).toMatchObject({
 				talkgroup: 9,
 				source: 100,
-				encryptionKnown: true,
+				encryptionKnown: false,
 			})
 			expect(at(ends[0]!.startedAt)).toBe(1000)
 			expect(at(ends[0]!.endedAt!)).toBe(1900)
@@ -445,10 +447,11 @@ describe("dsd-fme call-first: evidence rules", () => {
 			)
 			expect(starts).toHaveLength(1)
 			expect(ends).toHaveLength(1)
+			// Named by its trailer only: metadata, not a proof (P3 needs a named call).
 			expect(ends[0]).toMatchObject({
 				talkgroup: 9,
 				source: 100,
-				encryptionKnown: true,
+				encryptionKnown: false,
 			})
 			expect(at(ends[0]!.endedAt!)).toBe(1900)
 		})
@@ -509,6 +512,8 @@ describe("dsd-fme call-first: evidence rules", () => {
 				replay(
 					[
 						...head,
+						// The first clean LC after voice names the call and is its
+						// P1n proof, settled by the next clean sync.
 						[1800, LC(1)],
 						...tail,
 						[2080, MS("VC*")],
@@ -539,6 +544,10 @@ describe("dsd-fme call-first: evidence rules", () => {
 					[1800, LC(1)],
 					[1830, slot2],
 					[2080, BS("VC*")],
+					// Named at 1800; this LC is the proof, slot 1's next sync settles it.
+					[2082, LC(1)],
+					[2085, slot2],
+					[2440, BS("VC*")],
 				],
 				10_000,
 			)

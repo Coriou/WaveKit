@@ -124,7 +124,8 @@ const everClear = (voice: DsdFmeVoiceCallState[], callId?: string) =>
 	voice.some(
 		v =>
 			(callId === undefined || v.callId === callId) &&
-			v.encryptionKnown === true &&
+			// Consumer rule: omitted encryptionKnown counts as clear.
+			v.encryptionKnown !== false &&
 			!v.encrypted,
 	)
 
@@ -300,6 +301,9 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 					[1665, SYNC_ERR(2)],
 					[1668, TLC(1)],
 					[1668, LC(1)],
+					// The VC6 LC named the call (no proof); its trailer is its
+					// P3 proof, settled by the slot's next clean sync.
+					[1773, TLC(1)],
 				],
 				8000,
 			)
@@ -323,10 +327,14 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			expect(everClear(voice)).toBe(false)
 		})
 
-		it("an unlisted line between the LC and its closing sync drops it; a bracketless sync leaves it", () => {
+		it("an unlisted line between the LC and its closing sync drops it; a clean bracketless sync leaves it, a dirty one spoils it", () => {
+			// Each over is named by its VC5 LC at 1241; the VC6 LC at 1302 is the proof.
 			const dropped = replay(
 				[
 					...over(1, 1000, 1, null),
+					[1241, LC(1)],
+					// Kills the naming LC's own P1n proof.
+					[1242, " (FEC ERR) "],
 					[1302, LC(1)],
 					[1303, " SLOT 1 SB/RC (FEC ERR) E:4; I:00000000 D:000;  "],
 					...over(1, 1360, 2, null),
@@ -337,6 +345,9 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			const unlisted = replay(
 				[
 					...over(1, 1000, 1, null),
+					[1241, LC(1)],
+					// Kills the naming LC's own P1n proof.
+					[1242, " (FEC ERR) "],
 					[1302, LC(1)],
 					[1303, ""],
 					[1303, " Channel Timing CSBK (CT_CSBK) "],
@@ -345,19 +356,31 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				8000,
 			)
 			expect(everClear(unlisted.voice)).toBe(false)
-			const kept = replay(
-				[
-					...over(1, 1000, 1, null),
-					[1302, LC(1)],
-					// A blank line neither settles nor drops (BURST_NEUTRAL_LINES).
-					[1303, ""],
-					[1303, "00:00:01 Sync:  DMR                  | VOICE CACH/EMB ERR"],
-					[1304, "00:00:01 Sync: +DMR   slot1   slot2  | CACH/Burst FEC ERR"],
-					...over(1, 1360, 2, null),
-				],
-				8000,
+			const withBracketless = (bracketless: string) =>
+				replay(
+					[
+						...over(1, 1000, 1, null),
+						[1241, LC(1)],
+						// Kills the naming LC's own P1n proof.
+						[1242, " (FEC ERR) "],
+						[1302, LC(1)],
+						// A blank line neither settles nor drops (BURST_NEUTRAL_LINES).
+						[1303, ""],
+						[1303, bracketless],
+						...over(1, 1360, 2, null),
+					],
+					8000,
+				)
+			const kept = withBracketless(
+				"00:00:01 Sync: +DMR   slot1   slot2  | Color Code=01 | IDLE ",
 			)
 			expect(everClear(kept.voice)).toBe(true)
+			// A bracketless line's error spoils every open burst (row 14).
+			for (const dirty of [
+				"00:00:01 Sync:  DMR                  | VOICE CACH/EMB ERR",
+				"00:00:01 Sync: +DMR   slot1   slot2  | CACH/Burst FEC ERR",
+			])
+				expect(everClear(withBracketless(dirty).voice)).toBe(false)
 		})
 
 		it("a call with IDs still unknown at its terminator settles on a clean trailer naming its IDs", () => {
@@ -406,6 +429,9 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				[1693, SYNC_ERR(1)],
 				...over(1, 1720, 1, null),
 				...over(2, 1750, 1, null),
+				// Slot 2 was named at 1692; this LC is its proof, settled by
+				// its terminator (its next clean sync).
+				[2052, LC(2, 9003, 93)],
 				[2400, TLC(1)],
 				[2400, LC(1)],
 				[2430, TLC(2)],
@@ -419,9 +445,13 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			const slot2 = ends.find(e => e.slot === 2)!
 			expect(slot1).toMatchObject({ talkgroup: 9001, encryptionKnown: true })
 			expect(slot2).toMatchObject({ talkgroup: 9003, encryptionKnown: true })
-			// Without slot 2's own closing sync it stays unknown.
-			// Slot 2's own sync loss drops its LC; its trailer printed an error.
-			const unsettled = replay([...lines, [1700, SYNC_ERR(2)]], 9000)
+			// Slot 2's own sync loss right after its proof drops it; its
+			// trailer printed an error: it stays unknown.
+			// (1700 kills the naming LC's P1n proof, 2053 the later P1 one.)
+			const unsettled = replay(
+				[...lines, [1700, SYNC_ERR(2)], [2053, SYNC_ERR(2)]],
+				9000,
+			)
 			expect(unsettled.ends.find(e => e.slot === 2)).toMatchObject({
 				encryptionKnown: false,
 			})
@@ -498,15 +528,12 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 					(decoder as unknown as Internals).dmrIdRejected,
 				).toBeGreaterThanOrEqual(2)
 			}
-			// The same print with group voice fields names and clears the call.
+			// The same print with group voice fields names the call, and its
+			// next copy (P1) clears it.
+			const groupVoice =
+				" SLOT 1 TGT=9001 SRC=91 FLCO=0x00 FID=0x00 SVC=0x00 Group Call  "
 			const clear = replay(
-				[
-					...over(1, 1000, 3, null),
-					[
-						1662,
-						" SLOT 1 TGT=9001 SRC=91 FLCO=0x00 FID=0x00 SVC=0x00 Group Call  ",
-					],
-				],
+				[...over(1, 1000, 3, null), [1602, groupVoice], [1662, groupVoice]],
 				8000,
 			)
 			expect(clear.ends[0]).toMatchObject({
@@ -517,7 +544,11 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 	})
 
 	describe("another talker's IDs", () => {
-		const known: Line[] = [...over(1, 1000, 2, null), [1662, LC(1)]]
+		const known: Line[] = [
+			...over(1, 1000, 2, null),
+			[1602, LC(1)],
+			[1662, LC(1)],
+		]
 
 		it("one copy revokes known clear on the same callId, until the call's own link control settles it again", () => {
 			const lines: Line[] = [
@@ -575,21 +606,23 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 		const recorded = fixture("direct-keyup")
 		const tlcs = timesOf(recorded, /\| TLC/)
 
-		it("each recorded key-up is a new call known at start, ended at its terminator; the late join settles clear", () => {
+		it("each recorded key-up is a new call known clear once its header settles (P2), ended at its terminator; the late join is not", () => {
 			const { starts, ends } = replay(recorded, recorded.at(-1)![0] + 6000)
 			expect(starts).toHaveLength(5)
 			expect(ends).toHaveLength(5)
-			// The fourth over was joined late (voice, then its LC, no header): it
-			// is not known at start (encryptionKnown set) and settled clear on its
-			// next clean sync, before its call_start went out.
+			// A header call is announced not known clear (explicit false) and
+			// settles on its next clean voice burst (P2), here before the
+			// call_start went out. The fourth over was joined late (voice, then
+			// its LC, no header): its opening LC proves nothing, its next LC
+			// (P1) settles it before its end.
 			expect(starts.map(s => s.encryptionKnown)).toEqual([
-				undefined,
-				undefined,
-				undefined,
 				true,
-				undefined,
+				true,
+				true,
+				false,
+				true,
 			])
-			expect(ends[3]).toMatchObject({ encryptionKnown: true })
+			expect(ends.every(e => e.encryptionKnown === true)).toBe(true)
 			expect(ends.every(e => e.talkgroup === 90001 && e.source === 901)).toBe(
 				true,
 			)
@@ -699,24 +732,34 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 	})
 
 	describe("unchecked link controls and late joins", () => {
-		it("a late join (an LC after a voice burst, no call) is unknown until settled; its late error line keeps it never clear", () => {
+		it("a late join (an LC after a voice burst, no call) is unknown until its next LC settles; that LC's late error line keeps it never clear", () => {
 			const join: Line[] = [
 				[1000, BS(1, "VC2")],
 				[1050, LC(1)],
 			]
-			const settled = replay([...join, ...over(1, 1100, 2, null)], 8000)
-			expect(settled.starts).toHaveLength(1)
-			// Settled on the next clean sync (not known at start: the field is set).
-			expect(settled.starts[0]).toMatchObject({
+			// The opening LC proves nothing.
+			const opened = replay([...join, ...over(1, 1100, 2, null)], 8000)
+			expect(opened.starts).toHaveLength(1)
+			expect(opened.starts[0]).toMatchObject({
 				talkgroup: 9001,
-				encryptionKnown: true,
+				encryptionKnown: false,
 			})
-			expect(everClear(settled.voice)).toBe(true)
-			const late = replay(
-				[...join, [1051, " (CRC ERR) "], ...over(1, 1100, 2, null)],
+			expect(everClear(opened.voice)).toBe(false)
+			// The next copy, in a later voice burst, is P1: settled on the next clean sync.
+			const settled = replay(
+				[...join, ...over(1, 1100, 2, null), [1402, LC(1)]],
 				8000,
 			)
-			expect(late.starts[0]).toMatchObject({ encryptionKnown: false })
+			expect(everClear(settled.voice)).toBe(true)
+			const late = replay(
+				[
+					...join,
+					...over(1, 1100, 2, null),
+					[1402, LC(1)],
+					[1403, " (CRC ERR) "],
+				],
+				8000,
+			)
 			expect(everClear(late.voice)).toBe(false)
 		})
 
@@ -735,6 +778,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				const rival = replay(
 					[
 						...over(1, 1000, 2, null),
+						[1602, LC(1)],
 						[1662, LC(1)],
 						...over(1, 1720, 1, null),
 						[2022, errored(extra)],
@@ -774,7 +818,11 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 		})
 
 		it("a burst that prints another talker's IDs twice is one copy: no split until a newer voice burst repeats them", () => {
-			const known: Line[] = [...over(1, 1000, 2, null), [1662, LC(1)]]
+			const known: Line[] = [
+				...over(1, 1000, 2, null),
+				[1602, LC(1)],
+				[1662, LC(1)],
+			]
 			const twice = replay(
 				[
 					...known,
@@ -823,7 +871,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			})
 		})
 
-		it("an algorithm print never proves clear; a non-clear one drops a held clear trailer", () => {
+		it("a clean clear algorithm print in a clean burst proves a frames call clear (P1n); a non-clear one drops a held clear trailer", () => {
 			const head: Line[] = [
 				...over(1, 1000, 2, null),
 				[1662, LC(1)],
@@ -837,7 +885,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				],
 				9000,
 			)
-			expect(everClear(clearAlg.voice)).toBe(false)
+			expect(everClear(clearAlg.voice)).toBe(true)
 			const held = replay(
 				[...head, [1800, TLC(1)], [1800, LC(1)], [1801, "ALG ID: 21"]],
 				8000,
@@ -986,7 +1034,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 					(gaps, fromFrames) => {
 						vi.setSystemTime(T0)
 						const lines: Line[] = fromFrames
-							? [...over(1, 1000, 2, null), [1662, LC(1)]]
+							? [...over(1, 1000, 2, null), [1602, LC(1)], [1662, LC(1)]]
 							: [[940, BS(1, "VLC")], [940, LC(1)], ...over(1, 1000, 2, null)]
 						let t = 1800
 						for (const gap of gaps) {
@@ -1003,134 +1051,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			)
 		})
 
-		it("property: no call learns it is clear without its own clean clear link control after its first voice burst, settled by its lane's next clean sync", () => {
-			// Feature: dmr-over, Property 2: known clear only on its own settled link control
-			// A call is clear only after a clean clear link control of its own IDs, printed after a voice burst and closed by the lane's next clean sync.
-			const TOKENS = {
-				vc: (n: number) => BS(1, `VC${(n % 6) + 1}`),
-				vcErr: () => BS(1, "VC3  (FEC ERR)"),
-				vlc: () => BS(1, "VLC"),
-				vlcDirty: () => BS(1, "VLC  (FEC ERR)"),
-				tlc: () => TLC(1),
-				syncErr: () => SYNC_ERR(1),
-				lcK: () => LC(1),
-				lcOther: () => LC(1, 9002, 92),
-				lcErr: () => LC(1, 9001, 91, "(CRC ERR)"),
-				lcEnc: () => LC(1, 9001, 91, "Encrypted"),
-				lcZ: () =>
-					" SLOT 1 TGT=9001 SRC=91 FLCO=0x28 FID=0x00 SVC=0x10 Group Call  ",
-				lateErr: () => " (CRC ERR) ",
-				neutral: () => " SLCO CRC ERR",
-				unlisted: () => " Channel Timing CSBK (CT_CSBK) ",
-				otherSlot: () => BS(2, "IDLE"),
-				otherSlotErr: () => SYNC_ERR(2),
-				bracketless: () => BRACKETLESS_TLC,
-			} as const
-			type Token = keyof typeof TOKENS
-			const token = fc.constantFrom(...(Object.keys(TOKENS) as Token[]))
-			fc.assert(
-				fc.property(
-					fc.array(
-						fc.record({
-							token,
-							gap: fc.integer({ min: 0, max: 400 }),
-						}),
-						{ minLength: 1, maxLength: 80 },
-					),
-					steps => {
-						vi.setSystemTime(T0)
-						// Every run starts on voice frames (a call-first call, unknown).
-						const lines: Line[] = over(1, 1000, 1, null)
-						let t = 1360
-						steps.forEach(({ token: name, gap }, i) => {
-							t += gap
-							lines.push([t, TOKENS[name](i)])
-						})
-						const { voice, starts } = replay(lines, t + 6000)
-						// Oracle: a line index proves key (tg, src) when it is a clean
-						// clear LC of that key whose lane-1 preceding sync is a voice
-						// burst or a terminator, and the next lane-1 line after it
-						// that is not neutral is a clean lane-1 sync (or none).
-						const proofs = new Set<string>()
-						let dmrBs = true
-						let slot = 1
-						const laneOf = (text: string) => {
-							if (/Sync:/.test(text)) {
-								const b = /\[slot([12])\]/i.exec(text)?.[1]
-								dmrBs = b !== undefined
-								if (b !== undefined) slot = Number(b)
-								return b === undefined ? 0 : Number(b)
-							}
-							if (!dmrBs) return 0
-							const s = /\bSLOT\s+([12])\b/.exec(text)?.[1]
-							return s !== undefined ? Number(s) : slot
-						}
-						const lanes = lines.map(([, text]) => laneOf(text))
-						// Known at start needs a clean voice LC header and a clean LC
-						// of the call's IDs printed in its burst (before the lane's
-						// next sync).
-						const headers = new Set<string>()
-						lines.forEach(([, text], i) => {
-							if (lanes[i] !== 1 || !/\| VLC/.test(text) || /ERR/.test(text))
-								return
-							for (let j = i + 1; j < lines.length; j++) {
-								if (lanes[j] !== 1) continue
-								const next = lines[j]![1]
-								if (/Sync:/.test(next)) return
-								const ids = /TGT=(\d+) SRC=(\d+)/.exec(next)
-								if (ids && !/ERR|Encrypted|FLCO=0x28/.test(next))
-									headers.add(`${ids[1]}/${ids[2]}`)
-							}
-						})
-						for (const start of starts) {
-							// Known encrypted at start is the safe side: only clear counts.
-							if (
-								start.encryptionKnown !== undefined ||
-								start.encrypted === true
-							)
-								continue
-							expect(headers.has(`${start.talkgroup}/${start.source}`)).toBe(
-								true,
-							)
-						}
-						let prevSync: string | undefined
-						lines.forEach(([, text], i) => {
-							if (lanes[i] !== 1) return
-							if (/Sync:/.test(text)) {
-								prevSync = text
-								return
-							}
-							const ids = /TGT=(\d+) SRC=(\d+)/.exec(text)
-							if (
-								ids === null ||
-								/ERR|Encrypted|FLCO=0x28/.test(text) ||
-								prevSync === undefined ||
-								!/\| (VC[1-6*]|TLC)/.test(prevSync)
-							)
-								return
-							for (let j = i + 1; j < lines.length; j++) {
-								if (lanes[j] !== 1) continue
-								const next = lines[j]![1]
-								if (next === " SLCO CRC ERR") continue
-								if (/Sync:/.test(next) && !/ERR/.test(next)) break
-								// Any other line of the lane drops it.
-								return
-							}
-							proofs.add(`${ids[1]}/${ids[2]}`)
-						})
-						for (const state of voice) {
-							if (state.encryptionKnown !== true || state.encrypted) continue
-							const started = voice.find(v => v.callId === state.callId)
-							// Only a call that started unknown learns it.
-							if (started?.encryptionKnown !== false) continue
-							expect(proofs.has(`${state.talkgroup}/${state.source}`)).toBe(
-								true,
-							)
-						}
-					},
-				),
-				{ numRuns: 100 },
-			)
-		})
+		// Known clear is checked by the temporal oracle in
+		// dsd-fme-dmr-clearance-oracle.test.ts (it replaced the property here).
 	})
 })

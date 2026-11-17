@@ -149,7 +149,7 @@ describe("CRC-ERR lines never set call identity or encryption", () => {
 		expect(s[0]?.encrypted ?? false).toBe(false)
 	})
 
-	it("a corrupted encrypted line inside a clear call neither marks it encrypted nor splits it", () => {
+	it("a corrupted encrypted line inside a clear call does not split it but marks it encrypted (privacy before the CRC guard)", () => {
 		const lines = keyUp(130)
 		lines.push(
 			{
@@ -166,7 +166,7 @@ describe("CRC-ERR lines never set call identity or encryption", () => {
 		expect(starts(outputs)).toHaveLength(1)
 		const e = ends(outputs)
 		expect(e).toHaveLength(1)
-		expect(e[0]?.flags?.encrypted ?? false).toBe(false)
+		expect(e[0]?.flags?.encrypted ?? false).toBe(true)
 	})
 
 	it("a clean encrypted line still marks the call encrypted", () => {

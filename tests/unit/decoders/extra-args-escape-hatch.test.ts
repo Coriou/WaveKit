@@ -327,6 +327,8 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 				talkgroup: 100,
 				source: 200,
 				startTime: start,
+				// The call's wall start (set by startPendingCall in production).
+				startWallMs: start.getTime(),
 				lastUpdate: start,
 				dmr: { cc: 1 },
 				quality: { crcErrs: 0, fecErrs: 0 },
