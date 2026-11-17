@@ -1067,8 +1067,10 @@ Link-burst additions are optional and additive; older cores omit them:
   `overflowedBytes10m`, `burstSeconds`.
 - `LinkAdvisory.lossReason`: why samples were lost; absent when nothing was lost.
   `level: "dropping"` (fewer bytes read than the rate needs: a received-rate
-  shortfall or receiver-side drops) always carries one of three causes, decided over
-  the last 10 s in this order. The core's load comes from one signal, the core
+  shortfall or receiver-side drops) always carries one of three causes, decided in
+  this order over the window the loss can lie in: the received rate is a 10 s average
+  ending at the last 5 s metrics report, so the evidence reaches back to the start of
+  that report's interval, 10 to 15 s. The core's load comes from one signal, the core
   main-thread load reading (`CoreLoadReading`: event-loop utilisation and worst
   event-loop delay over the window); any load governor reads the same signal:
   1. `core-busy` when the core's event-loop utilisation was at least 0.90;
@@ -1087,7 +1089,12 @@ Link-burst additions are optional and additive; older cores omit them:
   whose feed is paused or resuming, is not classified: it reads `level: "none"` with
   no `lossReason`, and its 10 s window starts afresh once it is live again.
 
-  A decided `source` or `core-busy` is kept for 10 s so it does not flap. Only
+  A decided `source` or `core-busy` is kept for 10 s so it does not flap. Once a
+  dropping stretch read `core-busy`, it reads `source` again only on an arrival gap
+  (step 2) newer than that decision: a core that has just recovered does not turn the
+  loss it caused into the link's. While the receiver runs slower than the core's rate
+  (a rate mismatch, as when another client left the dongle slower) or the tuner is
+  under external control, `source` reads `unknown`. Only
   `source` is the receiver link's fault, so only it is helped by a lower sample rate.
   `branch-congestion` (never on `dropping`) means every byte arrived and an internal
   fanout branch dropped them after an arrival gap.
@@ -1096,8 +1103,10 @@ Link-burst additions are optional and additive; older cores omit them:
   advisory's `lossReason`, with the same values; absent when the advisory has none.
   An alert is sent once per change of `level` or `lossReason`, so a cause change
   re-reports; a recovery to `none` sends no alert (it shows in the snapshot's
-  `linkAdvisories`). Clients treat only `source` as loss on the receiver link; without
-  the field they fall back to `severity` (`critical` is a `dropping` link).
+  `linkAdvisories`). Clients treat only `source` as loss on the receiver link. The web
+  app reads the cause from the snapshot's `linkAdvisories` only: a core that sends no
+  `linkAdvisories` gives no link notice and no Receiver marker, so it claims nothing
+  rather than guessing from `severity`.
 - `DecoderEfficiencySourceView.attribution` (`DropAttribution`) and `lateDrops`
   (`DecoderLateDropsView`): `condemningWindows`, `windows`, nullable ISO
   `cooldownUntil`, `sheddable`, and `held` (`nothing-sheddable`, `link-or-unknown`, or

@@ -2,8 +2,10 @@ import { isIP } from "node:net"
 import type { LinkAdvisory, LinkBurstSummary } from "@wavekit/api-types"
 import {
 	HOST_LOOP_DELAY_MS,
+	INGEST_CELL_MS,
 	LINK_DROPPING_HOLD_MS,
 	LINK_GAP_MS,
+	SOURCE_METRICS_INTERVAL_MS,
 } from "./link-burst/contract.js"
 import type { IngestRecorder } from "./link-burst/contract.js"
 import type { LinkAdvisor } from "./rate-policy-contract.js"
@@ -111,6 +113,53 @@ export function linkAdvisorEvidence(deps: {
 	}
 }
 
+/**
+ * How far back a `dropping` cause looks for evidence. `dropping` is the received average over
+ * `LINK_SUSTAINED_WINDOW_MS` ending at the LAST metrics observation, and each observation
+ * describes the `SOURCE_METRICS_INTERVAL_MS` before it; so the loss behind it can lie in the
+ * interval starting at the observation that bounds the window, up to
+ * `LINK_SUSTAINED_WINDOW_MS + SOURCE_METRICS_INTERVAL_MS` (15 s) before now. The evidence
+ * window spans back to that observation, at least the sustained window and at most this bound
+ * (the ingest recorder answers 15.75 s of arrival cells; the loop meter's ring and ELU base
+ * cover it with room).
+ */
+export const LINK_CAUSE_LOOKBACK_MAX_MS =
+	LINK_SUSTAINED_WINDOW_MS + SOURCE_METRICS_INTERVAL_MS
+
+/** The source manager facts the advisor's `live` gate reads. */
+export interface LiveSourceFacts {
+	getStatus(id: string): { connected: boolean } | undefined
+	isPaused(id: string): boolean
+}
+
+/**
+ * Production's `live` gate: the source is connected and its feed is live (not paused, resuming or
+ * failed to resume by the operator). A missing source is not live.
+ */
+export function sourceIsLive(sources: LiveSourceFacts, id: string): boolean {
+	return sources.getStatus(id)?.connected === true && !sources.isPaused(id)
+}
+
+/**
+ * Production's `sourceCauseExcluded` facts: while the dongle runs slower than the core's rate
+ * (a rate-truth mismatch with a negative deviation, as another client leaving it slower), or
+ * while the tuner is under external control, a shortfall is no proof that the link fails to
+ * carry the rate, so `source` reads `unknown`.
+ */
+export function sourceCauseExcluded(
+	deps: {
+		rateMismatchOf: (id: string) => { deviation: number } | null | undefined
+		controlModeOf: (id: string) => string | null | undefined
+	},
+	id: string,
+): boolean {
+	const deviation = deps.rateMismatchOf(id)?.deviation
+	return (
+		(typeof deviation === "number" && deviation < 0) ||
+		deps.controlModeOf(id) === "external"
+	)
+}
+
 export function createLinkAdvisor(deps: {
 	now: () => number
 	monoNow?: () => number
@@ -130,6 +179,11 @@ export function createLinkAdvisor(deps: {
 	 * it reads level `none` with no `lossReason`, so a disconnect or a pause never reads as loss.
 	 */
 	live?: (sourceId: string) => boolean
+	/**
+	 * Whether a `source` cause is ruled out for now (see `sourceCauseExcluded`); true: a decided
+	 * `source` reads `unknown`. Absent or throwing: not excluded.
+	 */
+	sourceCauseExcluded?: (sourceId: string) => boolean
 }): LinkAdvisor & Required<Pick<LinkAdvisor, "shortfall">> {
 	const histories = new Map<string, History>()
 	const isLive = (sourceId: string): boolean => {
@@ -151,23 +205,55 @@ export function createLinkAdvisor(deps: {
 		string,
 		{ rate: number; cause: DroppingCause; until: number }
 	>()
-	const decideCause = (
+	/**
+	 * Stretch rule: within one dropping stretch at a rate (ended like the latch), once the core
+	 * was found busy, a fresh `source` decision stands only on arrival-gap evidence (ladder step
+	 * 2) newer than that core-busy decision; otherwise `core-busy` is kept, because the loss
+	 * still in the average may be the core's.
+	 */
+	const coreBusyAt = new Map<string, { rate: number; at: number }>()
+	const dropStretch = (sourceId: string, rate: number) => {
+		if (latches.get(sourceId)?.rate === rate) latches.delete(sourceId)
+		if (coreBusyAt.get(sourceId)?.rate === rate) coreBusyAt.delete(sourceId)
+	}
+	// Loop delay is read from one recorder cell earlier than the gap, so a stall whose arrival
+	// gap is stamped in the window's first cell has its loop delay in the window too.
+	const evidence = (sourceId: string, since: number) => {
+		const load = deps.coreLoad?.(since - INGEST_CELL_MS)
+		return {
+			elu: load?.elu ?? null,
+			loopDelayMaxMs: load?.loopDelayMaxMs ?? null,
+			arrivalGapMaxMs: deps.arrivalGapMaxMs?.(sourceId, since) ?? null,
+		}
+	}
+	const excluded = (sourceId: string): boolean => {
+		try {
+			return deps.sourceCauseExcluded?.(sourceId) === true
+		} catch {
+			return false
+		}
+	}
+	const decideAfresh = (
 		sourceId: string,
 		rate: number,
 		mono: number,
+		lookbackMs: number,
 	): DroppingCause => {
 		const latch = latches.get(sourceId)
-		if (latch && latch.rate === rate && mono < latch.until) return latch.cause
-		const since = mono - LINK_SUSTAINED_WINDOW_MS
+		const since = mono - lookbackMs
 		let cause: DroppingCause = "unknown"
 		try {
-			const load = deps.coreLoad?.(since)
-			const gap = deps.arrivalGapMaxMs?.(sourceId, since)
-			cause = droppingCause({
-				elu: load?.elu ?? null,
-				loopDelayMaxMs: load?.loopDelayMaxMs ?? null,
-				arrivalGapMaxMs: gap ?? null,
-			})
+			cause = droppingCause(evidence(sourceId, since))
+			const busy = coreBusyAt.get(sourceId)
+			if (cause === "source" && busy?.rate === rate) {
+				// Only a gap the loop cannot explain since the core-busy decision may replace it.
+				const fresh = evidence(sourceId, Math.max(since, busy.at))
+				const { loopDelayMaxMs: loop, arrivalGapMaxMs: gap } = fresh
+				if (!valid(loop) || !valid(gap) || gap - loop < LINK_GAP_MS)
+					cause = "core-busy"
+				else coreBusyAt.delete(sourceId)
+			} else if (cause === "core-busy")
+				coreBusyAt.set(sourceId, { rate, at: mono })
 		} catch {
 			/* Missing evidence reads unknown. */
 		}
@@ -180,6 +266,30 @@ export function createLinkAdvisor(deps: {
 				until: mono + LINK_SUSTAINED_WINDOW_MS,
 			})
 		return cause
+	}
+	const decideCause = (
+		sourceId: string,
+		rate: number,
+		mono: number,
+		lookbackMs: number,
+	): DroppingCause => {
+		const latch = latches.get(sourceId)
+		const known =
+			latch && latch.rate === rate && mono < latch.until
+				? latch.cause
+				: decideAfresh(sourceId, rate, mono, lookbackMs)
+		return known === "source" && excluded(sourceId) ? "unknown" : known
+	}
+	/** The evidence lookback for a dropping decision now (see `LINK_CAUSE_LOOKBACK_MAX_MS`). */
+	const lookbackOf = (history: History | undefined, at: number): number => {
+		const first = history?.samples[0]?.at
+		const span = first === undefined ? Number.NaN : at - first
+		return Number.isFinite(span)
+			? Math.min(
+					LINK_CAUSE_LOOKBACK_MAX_MS,
+					Math.max(LINK_SUSTAINED_WINDOW_MS, span),
+				)
+			: LINK_SUSTAINED_WINDOW_MS
 	}
 	const average = (history: History, at: number): number | null => {
 		const samples = history.samples
@@ -211,7 +321,10 @@ export function createLinkAdvisor(deps: {
 		observe(sourceId, bytes, rate, at) {
 			const previous = histories.get(sourceId)
 			const live = isLive(sourceId)
-			if (!live) latches.delete(sourceId)
+			if (!live) {
+				latches.delete(sourceId)
+				coreBusyAt.delete(sourceId)
+			}
 			if (
 				!live ||
 				!valid(bytes) ||
@@ -263,6 +376,7 @@ export function createLinkAdvisor(deps: {
 			const history = histories.get(input.sourceId)
 			if (!isLive(input.sourceId)) {
 				latches.delete(input.sourceId)
+				coreBusyAt.delete(input.sourceId)
 				return {
 					level: "none",
 					transport: isLoopbackHost(input.host) ? "loopback" : "network",
@@ -272,10 +386,9 @@ export function createLinkAdvisor(deps: {
 					upstreamDropBytesPerSecond: null,
 				}
 			}
+			const wallNow = deps.now()
 			const received =
-				history?.rate === input.sampleRateHz
-					? average(history, deps.now())
-					: null
+				history?.rate === input.sampleRateHz ? average(history, wallNow) : null
 			const shortfall =
 				received !== null && payload > 0
 					? Math.max(0, ((payload - received) / payload) * 100)
@@ -315,15 +428,20 @@ export function createLinkAdvisor(deps: {
 			const dropping =
 				(received !== null && exceedsShortfall(received, payload)) ||
 				(upstream !== null && upstream > LINK_UPSTREAM_DROPS_BYTES_PER_SECOND)
-			if (!dropping) {
-				const latch = latches.get(input.sourceId)
-				if (latch?.rate === input.sampleRateHz) latches.delete(input.sourceId)
-			}
+			if (!dropping) dropStretch(input.sourceId, input.sampleRateHz)
 			const lossReason: LinkLossReason | null = loopback
 				? null
 				: dropping
 					? Number.isFinite(mono)
-						? decideCause(input.sourceId, input.sampleRateHz, mono)
+						? decideCause(
+								input.sourceId,
+								input.sampleRateHz,
+								mono,
+								lookbackOf(
+									history?.rate === input.sampleRateHz ? history : undefined,
+									wallNow,
+								),
+							)
 						: "unknown"
 					: linkDropping
 						? "branch-congestion"
@@ -348,6 +466,7 @@ export function createLinkAdvisor(deps: {
 		reset(sourceId) {
 			histories.delete(sourceId)
 			latches.delete(sourceId)
+			coreBusyAt.delete(sourceId)
 		},
 	}
 }

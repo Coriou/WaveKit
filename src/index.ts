@@ -57,7 +57,12 @@ import { createRatePolicy } from "./core/rate-policy.js"
 import { composeLinkBurst } from "./core/link-burst/compose.js"
 import { createLinkQuality } from "./core/link-burst/link-quality.js"
 import { frameBytesFor } from "./core/link-burst/contract.js"
-import { createLinkAdvisor, linkAdvisorEvidence } from "./core/link-advisory.js"
+import {
+	createLinkAdvisor,
+	linkAdvisorEvidence,
+	sourceCauseExcluded,
+	sourceIsLive,
+} from "./core/link-advisory.js"
 import type { DropReader } from "./decoders/enablement/efficiency-gate.js"
 import type {
 	EfficiencyGate,
@@ -2477,9 +2482,15 @@ async function main(): Promise<void> {
 			linkDropsSince: monitor.linkDropsSince,
 			burst: id => linkQuality.burst(id),
 			// A disconnected or paused source reports 0 B/s; that is no link loss.
-			live: id =>
-				sourceManager.getStatus(id)?.connected === true &&
-				!sourceManager.isPaused(id),
+			live: id => sourceIsLive(sourceManager, id),
+			sourceCauseExcluded: id =>
+				sourceCauseExcluded(
+					{
+						rateMismatchOf: sid => sourceManager.getStatus(sid)?.rateMismatch,
+						controlModeOf: sid => tunerController.getState(sid)?.controlMode,
+					},
+					id,
+				),
 			...linkAdvisorEvidence({
 				coreLoad: composed.coreLoad,
 				recorderOf: id => sourceRouting.linkBurst(id)?.recorder,

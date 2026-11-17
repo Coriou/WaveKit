@@ -213,7 +213,7 @@ export class LinkNotices {
 			listed.add(e.sourceId)
 			// a page load seeds every episode; a reconnect only sources with no episode in memory
 			const seed = first || (reseed && !this.episodes.has(e.sourceId))
-			this.entry(e, snap.ts, seed, afterStale)
+			this.entry(e, snap.ts, seed, afterStale, reseed)
 		}
 		// absent from a fresh snapshot: the condition and its episode end
 		for (const key of this.service.conditions.get().keys()) {
@@ -244,27 +244,40 @@ export class LinkNotices {
 		ts: number,
 		seed: boolean,
 		afterStale: boolean,
+		reconnect: boolean,
 	): void {
 		const key = linkKey(e.sourceId)
 		const epId =
 			e.episodeSince ?? (e.level === "dropping" ? e.since : undefined)
+		const text = linkConditionText(e, this.tunerOf(e.sourceId))
 		let ep: Episode | undefined
 		if (epId === undefined) this.episodes.delete(e.sourceId)
 		else {
 			ep = this.episodes.get(e.sourceId)
 			if (!ep || ep.id !== epId) {
+				// A core restart mid-condition starts a new episode id for the same condition:
+				// on the first snapshot after a reconnect, while the condition is still raised,
+				// it carries on the episode the page knew (told texts, the ✕, the onset time),
+				// and its current text counts as already shown.
+				const carried =
+					reconnect &&
+					ep !== undefined &&
+					text !== null &&
+					this.service.conditions.get().has(key)
+						? ep
+						: undefined
 				ep = {
 					id: epId,
-					told: new Set(),
-					quiet: seed,
-					droppingMs: 0,
+					told: new Set(carried?.told),
+					quiet: seed || (carried?.quiet ?? false),
+					droppingMs: carried?.droppingMs ?? 0,
 					lastTs: null,
 					lastDropping: false,
 				}
+				if (carried && text !== null) ep.told.add(text)
 				this.episodes.set(e.sourceId, ep)
 			}
 		}
-		const text = linkConditionText(e, this.tunerOf(e.sourceId))
 		if (text === null) {
 			this.service.clear(key)
 			if (ep) {

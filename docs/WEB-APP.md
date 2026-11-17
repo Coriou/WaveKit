@@ -61,7 +61,8 @@ each shows at once:
   6 seconds; the next one replaces it.
 - **Something that is going on**, such as lost samples or an update waiting. It shows for
   8 seconds, then stays visible in its usual place: lost samples on the Receiver island
-  (`Samples lost` with a warning triangle, and the full sentence in the Receiver panel). Neither
+  (`Samples lost` with a warning triangle, and the full sentence in the Receiver panel). A second
+  one waits until the first has had its time, then shows if it is still going on. Neither
   kind removes the other, so an Undo is never pushed away by a warning.
 
 **WaveKit was updated · Reload** stays until you reload or close it. Notices wait while the ⌘K
@@ -76,18 +77,20 @@ When WaveKit loses receiver samples, the notice says why:
 | WaveKit itself was too busy to read the samples        | `Samples lost: WaveKit is too busy to keep up`                  |
 | WaveKit cannot tell which, or names no cause           | `Receiver samples lost`                                         |
 
-Only the first asks for a lower sample rate. A disconnected or paused receiver is not losing
+Only the first asks for a lower sample rate. While the receiver runs slower than WaveKit's rate
+(another client left it slower) or another program controls the tuner, WaveKit names no cause. A disconnected or paused receiver is not losing
 samples and raises no such notice. The notice comes once the loss has lasted 6 seconds,
 and once per episode: an episode starts with the first loss and lasts until the link has been clean
 for a minute, so a link that recovers and drops again does not repeat it. A different cause in the
 same episode shows once more, except a change to an unknown cause. After ✕ nothing more shows in
 that episode; the Receiver island still says `Samples lost` while samples are being lost. A page
-reloaded during an episode shows it on the Receiver island only. If the app stops hearing from
+reloaded during an episode shows it on the Receiver island only, and a WaveKit restart in the middle
+of a loss does not bring the notice back (nor undo a ✕). If the app stops hearing from
 WaveKit for 10 seconds, the notice goes and the Receiver island's marker turns grey until fresh
 news arrives. Samples dropped inside WaveKit after they all arrived, or a link that has not yet
 shown it can carry the rate, raise nothing. While the Receiver panel is open, it lists these instead
 of a notice, and a notice held back that way counts as shown: closing the panel does not bring it
-up. A notice waiting behind **WaveKit was updated** counts only once it shows. A sample-rate raise or restore by the rate policy is a short notice of its own; a raise
+up. A notice waiting behind another one counts only once it shows. A sample-rate raise or restore by the rate policy is a short notice of its own; a raise
 it had to skip (another client has the tuner, or the receiver refused the rate) stays listed in the
 Receiver panel for 5 minutes.
 

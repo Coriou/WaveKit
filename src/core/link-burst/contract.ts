@@ -27,6 +27,10 @@ export const LOOP_DELAY_RING = 300 // 10 min of 2 s efficiency intervals
  * so the utilisation would describe a longer, different window: report it missing instead.
  */
 export const ELU_BASE_STALE_MS = 6_000
+/** The ingest recorder's arrival-gap cell: a gap is stamped with the cell of the chunk ending it. */
+export const INGEST_CELL_MS = 250
+/** How often the source manager reports a source's received byte rate (its `metrics` event). */
+export const SOURCE_METRICS_INTERVAL_MS = 5_000
 export type SourceTransport = "loopback" | "network"
 export function frameBytesFor(format: string): 2 | 4 | null {
 	return format === "U8_IQ" ? 2 : format === "S16_IQ" ? 4 : null

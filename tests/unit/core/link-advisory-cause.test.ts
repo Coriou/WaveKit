@@ -9,7 +9,9 @@ import {
 import type { CoreLoadEvidence } from "../../../src/core/link-advisory.js"
 import {
 	HOST_LOOP_DELAY_MS,
+	INGEST_CELL_MS,
 	LINK_GAP_MS,
+	SOURCE_METRICS_INTERVAL_MS,
 } from "../../../src/core/link-burst/contract.js"
 import { LINK_SUSTAINED_WINDOW_MS } from "../../../src/core/rate-policy-contract.js"
 
@@ -183,10 +185,32 @@ describe("dropping cause ladder", () => {
 		const h = harness(quiet)
 		h.window(SHORT)
 		h.classify()
-		expect(h.coreLoad).toHaveBeenCalledWith(h.now - LINK_SUSTAINED_WINDOW_MS)
+		// Loop evidence starts one recorder cell before the gap evidence.
+		expect(h.coreLoad).toHaveBeenCalledWith(
+			h.now - LINK_SUSTAINED_WINDOW_MS - INGEST_CELL_MS,
+		)
 		expect(h.arrivalGapMaxMs).toHaveBeenCalledWith(
 			"s",
 			h.now - LINK_SUSTAINED_WINDOW_MS,
+		)
+	})
+	it("looks back to the observation bounding the averaged window, at most 15 s", () => {
+		const h = harness(quiet)
+		h.window(SHORT)
+		// The average still ends at the last observation 4 s ago: its first interval
+		// starts 14 s ago.
+		h.setNow(h.now + 4000)
+		h.classify()
+		expect(h.arrivalGapMaxMs).toHaveBeenLastCalledWith("s", h.now - 14_000)
+		// Irregular metrics never stretch the lookback past the bound.
+		const g = harness(quiet)
+		for (const at of [0, 11_000, 16_000])
+			g.advisor.observe("s", SHORT, RATE, at)
+		g.setNow(16_000)
+		g.classify()
+		expect(g.arrivalGapMaxMs).toHaveBeenLastCalledWith(
+			"s",
+			16_000 - LINK_SUSTAINED_WINDOW_MS - SOURCE_METRICS_INTERVAL_MS,
 		)
 	})
 	it.each([
@@ -320,6 +344,78 @@ describe("cause latch", () => {
 		h.advisor.reset("s")
 		h.evidence.elu = 0.98
 		expect(h.advisor.classify(input, 10001).lossReason).toBe("core-busy")
+	})
+})
+
+describe("dropping stretch after core-busy", () => {
+	it("a healthy loop alone never turns core-busy into source within the stretch", () => {
+		const h = harness({
+			elu: 0.98,
+			loopDelayMaxMs: 2000,
+			arrivalGapMaxMs: 2000,
+		})
+		h.window(SHORT)
+		const busyAt = h.now
+		expect(h.classify().lossReason).toBe("core-busy")
+		// The core recovered; the loss still in the average is the core's.
+		Object.assign(h.evidence, {
+			elu: 0.3,
+			loopDelayMaxMs: 5,
+			arrivalGapMaxMs: 5,
+		})
+		h.advisor.observe("s", SHORT, RATE, h.now + 5000)
+		h.setNow(busyAt + LINK_SUSTAINED_WINDOW_MS)
+		expect(h.classify().lossReason).toBe("core-busy")
+		// A gap the loop cannot explain since the core-busy decision may replace it.
+		h.arrivalGapMaxMs.mockImplementation((_id, since) =>
+			since >= busyAt ? 1000 : 2000,
+		)
+		h.advisor.observe("s", SHORT, RATE, h.now + 5000)
+		h.setNow(busyAt + 2 * LINK_SUSTAINED_WINDOW_MS)
+		expect(h.classify().lossReason).toBe("source")
+	})
+	it("leaving dropping ends the stretch", () => {
+		const h = harness({ elu: 0.98, loopDelayMaxMs: 0, arrivalGapMaxMs: 0 })
+		h.window(PAYLOAD)
+		expect(h.advisor.classify(input, 10001).lossReason).toBe("core-busy")
+		expect(h.advisor.classify(input, 0).level).not.toBe("dropping")
+		Object.assign(h.evidence, { elu: 0.3, loopDelayMaxMs: 5 })
+		expect(h.advisor.classify(input, 10001).lossReason).toBe("source")
+	})
+})
+
+describe("excluded source cause", () => {
+	it("reads unknown while excluded, and source again once it is not or it throws", () => {
+		let excluded: boolean | Error = true
+		let now = 0
+		const advisor = createLinkAdvisor({
+			now: () => now,
+			monoNow: () => now,
+			coreLoad: () => ({ elu: 0.2, loopDelayMaxMs: 0 }),
+			arrivalGapMaxMs: () => 1000,
+			sourceCauseExcluded: () => {
+				if (excluded instanceof Error) throw excluded
+				return excluded
+			},
+		})
+		for (const at of [0, 5000, 10000]) advisor.observe("s", SHORT, RATE, at)
+		now = 10000
+		expect(advisor.classify(input, null).lossReason).toBe("unknown")
+		excluded = false
+		expect(advisor.classify(input, null).lossReason).toBe("source")
+		excluded = new Error("unreadable")
+		expect(advisor.classify(input, null).lossReason).toBe("source")
+		// Never a core-busy cause.
+		excluded = true
+		const busy = createLinkAdvisor({
+			now: () => now,
+			monoNow: () => now,
+			coreLoad: () => ({ elu: 0.98, loopDelayMaxMs: 0 }),
+			arrivalGapMaxMs: () => 0,
+			sourceCauseExcluded: () => true,
+		})
+		for (const at of [0, 5000, 10000]) busy.observe("s", SHORT, RATE, at)
+		expect(busy.classify(input, null).lossReason).toBe("core-busy")
 	})
 })
 

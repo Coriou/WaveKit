@@ -924,8 +924,9 @@ Condensed + Noto Sans, Tabler-based icons).
   (`link:<source>`, `pwa-update`, `voice-start`, `rate-policy-skip:<source>`): its toast shows
   8 s and folds into its status place (the Receiver chip's amber triangle and "Samples lost",
   the Receiver panel's full line, both grey while the facts are stale). The region shows at most
-  one condition toast and one receipt; neither removes the other. The update toast stays until
-  Reload or ✕ and is never displaced. Timers pause while ⌘K is open and while a toast is hovered
+  one condition toast and one receipt; neither removes the other. A condition toast is never
+  displaced: another condition waits, in order, and shows when it goes if still active (the same
+  key takes the new text in place). The update toast stays until Reload or ✕. Timers pause while ⌘K is open and while a toast is hovered
   or holds focus; a toast never takes focus; ✕ is a labelled button; warnings carry a triangle
   and words, not colour alone; the rise is 150 ms (`--wk-dur-2`), none under reduced motion.
   While the region shows something the tuned card keeps off its top-centre anchor, and no

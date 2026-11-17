@@ -348,10 +348,52 @@ const RULES: { rule: string; run: () => void }[] = [
 		run: () => {
 			const h = loaded()
 			dropping(h, 2000, 8000, 2000)
+			// the condition ended before the socket went down
+			h.feed(10_000, [calm(10_000, 2000)])
 			h.link.socketDown()
 			h.link.reconnected()
 			dropping(h, 100_000, 106_000, 99_000)
 			expect(h.toasts).toEqual([LINK_LOSS_TEXT, LINK_LOSS_TEXT])
+		},
+	},
+	{
+		rule: "a core restart mid-condition (new episode id on the first snapshot after a reconnect) never re-toasts",
+		run: () => {
+			const h = loaded()
+			dropping(h, 2000, 8000, 2000)
+			expect(h.toasts).toEqual([LINK_LOSS_TEXT])
+			h.link.socketDown()
+			h.link.reconnected()
+			// the new process starts its own episode for the same, still-active condition
+			dropping(h, 40_000, 60_000, 39_000, "source", 39_000)
+			expect(h.toasts).toEqual([LINK_LOSS_TEXT])
+			expect(h.condition()?.text).toBe(LINK_LOSS_TEXT)
+		},
+	},
+	{
+		rule: "a core restart mid-condition keeps the ✕: no toast, a new text included",
+		run: () => {
+			const h = loaded()
+			dropping(h, 2000, 8000, 2000)
+			h.svc.dismissShown()
+			h.link.socketDown()
+			h.link.reconnected()
+			dropping(h, 40_000, 60_000, 39_000, "source", 39_000)
+			dropping(h, 62_000, 80_000, 39_000, "core-busy", 39_000)
+			expect(h.toasts).toEqual([LINK_LOSS_TEXT])
+			expect(h.condition()?.text).toBe(CORE_BUSY_TEXT)
+		},
+	},
+	{
+		rule: "a core restart mid-condition, not dismissed: a new text still toasts once",
+		run: () => {
+			const h = loaded()
+			dropping(h, 2000, 8000, 2000)
+			h.link.socketDown()
+			h.link.reconnected()
+			dropping(h, 40_000, 50_000, 39_000, "source", 39_000)
+			dropping(h, 52_000, 70_000, 39_000, "core-busy", 39_000)
+			expect(h.toasts).toEqual([LINK_LOSS_TEXT, CORE_BUSY_TEXT])
 		},
 	},
 	{
@@ -520,15 +562,46 @@ const RULES: { rule: string; run: () => void }[] = [
 			expect(run).toHaveBeenCalledOnce()
 			expect(h.svc.conditions.get().has("pwa-update")).toBe(false)
 			expect(h.svc.shown.get()?.key).toBe("voice-start")
-			// ✕ on an update ends it too
+			// ✕ on an update ends it too; a new update waits for the toast on screen
 			h.svc.raise(
 				"pwa-update",
 				{ text: "WaveKit was updated", persist: true, dismissEnds: true },
 				true,
 			)
+			expect(h.svc.shown.get()?.key).toBe("voice-start")
+			h.wait(600_000 + CONDITION_TOAST_MS)
 			expect(h.svc.shown.get()?.key).toBe("pwa-update")
 			h.svc.dismissShown()
 			expect(h.svc.conditions.get().has("pwa-update")).toBe(false)
+		},
+	},
+	{
+		rule: "a condition toast is never displaced: another condition waits and shows next if still active",
+		run: () => {
+			const h = loaded()
+			dropping(h, 2000, 8000, 2000)
+			expect(h.svc.shown.get()?.key).toBe("link:rx")
+			h.svc.raise("voice-start", { text: "Voice failed", tone: "warn" }, true)
+			h.svc.raise(
+				"rate-policy-skip:rx",
+				{ text: "Raise skipped", tone: "warn" },
+				true,
+			)
+			// the link toast keeps its full time
+			h.wait(8000 + CONDITION_TOAST_MS - 1)
+			expect(h.svc.shown.get()?.key).toBe("link:rx")
+			// voice-start cleared while it waited: it is skipped, the next one shows
+			h.svc.clear("voice-start")
+			h.wait(8000 + CONDITION_TOAST_MS)
+			expect(h.svc.shown.get()?.key).toBe("rate-policy-skip:rx")
+			expect(h.toasts).toEqual([LINK_LOSS_TEXT, "Raise skipped"])
+			// a toast of the same key takes the new text in place
+			h.svc.raise(
+				"rate-policy-skip:rx",
+				{ text: "Raise skipped again", tone: "warn" },
+				true,
+			)
+			expect(h.svc.shown.get()?.text).toBe("Raise skipped again")
 		},
 	},
 	{

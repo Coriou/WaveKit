@@ -5,9 +5,11 @@
 // - A condition is keyed state the app is in ("link:<sourceId>", "pwa-update", "voice-start",
 //   "rate-policy-skip:<sourceId>"). It lives until its owner clears it; when its owner asks, it also shows
 //   as a toast for 8 s and then folds into its status place (the Receiver chip, the Receiver panel). The
-//   PWA update toast stays until Reload or ✕ and is never displaced.
+//   PWA update toast stays until Reload or ✕.
 //
-// The region shows at most one condition toast and one receipt; neither class removes the other. Both
+// The region shows at most one condition toast and one receipt; neither class removes the other. A condition
+// toast is never displaced by another condition's: the other waits, and shows when the one on screen goes if
+// its condition is still active (a toast of the same key takes the new text and time). Both
 // timers pause while the ⌘K palette is open, while a toast is hovered and while focus is inside one; a
 // condition toast resuming from a pause is dropped if its condition cleared meanwhile.
 import { Store } from "../../data/store.ts"
@@ -48,7 +50,7 @@ export interface ConditionSpec {
 	readonly text: string
 	readonly tone?: "warn"
 	readonly action?: NoticeAction
-	/** Its toast stays until its action or ✕, and no other condition displaces it (the PWA update). */
+	/** Its toast stays until its action or ✕ (the PWA update); conditions raised meanwhile wait for it. */
 	readonly persist?: boolean
 	/** ✕ on its toast also ends the condition (the PWA update); otherwise ✕ only folds the toast. */
 	readonly dismissEnds?: boolean
@@ -57,7 +59,7 @@ export interface ConditionSpec {
 	/** Called when the reader dismisses its toast with ✕. */
 	readonly onDismiss?: () => void
 	/**
-	 * Called with the text its toast shows, when it shows (not while it waits behind a persistent toast), or
+	 * Called with the text its toast shows, when it shows (not while it waits behind another toast), or
 	 * with the text it would have shown when the Receiver panel hides link toasts.
 	 */
 	readonly onToast?: (text: string) => void
@@ -133,7 +135,7 @@ export class NoticeService {
 	private seq = 0
 	private receiptTimer: PausableTimer | null = null
 	private shownTimer: PausableTimer | null = null
-	/** Conditions waiting for the toast slot while a persistent one holds it. */
+	/** Conditions waiting, in order, for the toast slot while another condition's toast holds it. */
 	private waiting: ConditionKey[] = []
 	private readonly pauses = new Set<PauseReason>()
 	private linkHidden = false
@@ -176,8 +178,9 @@ export class NoticeService {
 	// ---- conditions
 
 	/**
-	 * Sets condition `key` to `spec`. With `toast`, it also shows as the condition toast (unless a persistent
-	 * toast holds the slot: then it waits for it). Without, a toast of the same key on screen takes the new text.
+	 * Sets condition `key` to `spec`. With `toast`, it also shows as the condition toast (unless another
+	 * condition's toast holds the slot: then it waits for it). Without, a toast of the same key on screen takes
+	 * the new text.
 	 */
 	raise(key: ConditionKey, spec: ConditionSpec, toast = false): void {
 		const next = new Map(this.conditions.get())
@@ -193,7 +196,7 @@ export class NoticeService {
 			spec.onToast?.(spec.text)
 			return
 		}
-		if (shown && shown.persist && shown.key !== key) {
+		if (shown && shown.key !== key) {
 			if (!this.waiting.includes(key)) this.waiting.push(key)
 			return
 		}
