@@ -368,7 +368,7 @@ describe("channel and frequency candidate sets answer as the scope reads", () =>
 		await store.close()
 	})
 
-	// Feature: wg24-c2 channels, Property 1: index-driven channel and frequency scopes are exact
+	// Feature: activity channels, Property 1: index-driven channel and frequency scopes are exact
 	// Validates: Requirements C2 M1 (same matches, order, facet counts and channelMatch)
 	it("search order, channel facet counts and channelMatch equal the model", async () => {
 		await fc.assert(
@@ -1437,7 +1437,7 @@ describe("both scope plans read the same pages", () => {
 		}
 	}
 
-	// Feature: wg24-c2 channels, Property 2: every form and the R0/R1/R3′ picks read the same scope
+	// Feature: activity channels, Property 2: every form and the R0/R1/R3′ picks read the same scope
 	// Validates: Requirements C2 M1 (dense-scope regression and bounded walk: same matches, order, pages, facet counts and channelMatch in every plan, the literal statement and the picks, at and past the walk slice and the count cap)
 	it("every form and the R0/R1/R3′ picks page, facet and answer channelMatch as the model", () => {
 		fc.assert(
