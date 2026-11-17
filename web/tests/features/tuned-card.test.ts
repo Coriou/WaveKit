@@ -308,6 +308,53 @@ describe("tuned card now block", () => {
 			}
 		})
 
+		it("without the start, a file kept after two open transmissions rides only on the one its length matches", () => {
+			// A :00–:09 (9 s), B :11–:23 (12 s); A's 9 s file kept at :25, after both ended
+			const a = txOf(0, 9)
+			const b = txOf(11, 23)
+			const alone = rows([a, b, recOf(25, "scan:d~a.wav", 9)])
+			expect(alone.map(r => r.eventId)).toEqual([b.eventId, a.eventId])
+			expect(alone[1]?.recording?.id).toBe("scan:d~a.wav")
+			expect(alone[0]?.recording).toBeUndefined()
+			// B recorded too (its 12 s file kept at :26): each keeps its own, no swap
+			const both = rows([
+				a,
+				b,
+				recOf(25, "scan:d~a.wav", 9),
+				recOf(26, "scan:d~b.wav", 12),
+			])
+			expect(both.map(r => r.eventId)).toEqual([b.eventId, a.eventId])
+			expect(both[0]?.recording?.id).toBe("scan:d~b.wav")
+			expect(both[1]?.recording?.id).toBe("scan:d~a.wav")
+		})
+
+		it("without the start, a file two equal-length transmissions could close stays its own row", () => {
+			// A :00–:09 and B :11–:20 (both 9 s); A's 9 s file kept at :25
+			const a = txOf(0, 9)
+			const b = txOf(11, 20)
+			const ra = recOf(25, "scan:d~a.wav", 9)
+			const out = rows([a, b, ra])
+			expect(out.map(r => r.eventId)).toEqual([
+				ra.eventId,
+				b.eventId,
+				a.eventId,
+			])
+			expect(out[0]?.recording?.id).toBe("scan:d~a.wav")
+			expect(out[1]?.recording).toBeUndefined()
+			expect(out[2]?.recording).toBeUndefined()
+			// B recorded too (kept at :26): neither file is laid on the other's transmission
+			const rb = recOf(26, "scan:d~b.wav", 9)
+			const both = rows([a, b, ra, rb])
+			expect(both.map(r => r.eventId)).toEqual([
+				rb.eventId,
+				ra.eventId,
+				b.eventId,
+				a.eventId,
+			])
+			expect(both[2]?.recording).toBeUndefined()
+			expect(both[3]?.recording).toBeUndefined()
+		})
+
 		it("a file kept before its transmission's row arrives stands alone, then rides on it", () => {
 			const r = recOf(12, "scan:d~a.wav", 9, 0)
 			expect(rows([r]).map(x => x.eventId)).toEqual([r.eventId])

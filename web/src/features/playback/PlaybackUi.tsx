@@ -12,7 +12,7 @@ import { PlayGlyph, RecIcon } from "../recordings/icons.tsx"
 import { formatDuration } from "../recordings/model.ts"
 import { keepLabel, keepTarget, keptHere, setKept } from "./keep.ts"
 import type { PlaybackPhase, QueueRef } from "./service.ts"
-import { markOf, WAVE_BARS } from "./service.ts"
+import { discPauses, markOf, WAVE_BARS } from "./service.ts"
 
 /** The phase of `id` when it is the recording in the player, else null (identical in every surface). */
 export function usePlaybackMark(id: string): PlaybackPhase | null {
@@ -51,6 +51,9 @@ export function PlayDisc({
 	const { playback } = useServices()
 	const phase = usePlaybackMark(id)
 	const playing = phase === "playing"
+	const pauses = useStore(playback, s =>
+		s.id === id ? discPauses(s.phase, s.wantPlay) : false,
+	)
 	const state = markState(phase)
 	return (
 		<button
@@ -60,8 +63,8 @@ export function PlayDisc({
 			data-inline={inline || undefined}
 			data-playback={phase ?? undefined}
 			data-playback-id={id}
-			aria-label={`${playing ? "Pause" : "Play"} ${title}`}
-			title={playing ? "Pause" : "Play"}
+			aria-label={`${pauses ? "Pause" : "Play"} ${title}`}
+			title={pauses ? "Pause" : "Play"}
 			onClick={e => {
 				e.stopPropagation()
 				if (phase !== null) playback.toggle()
@@ -107,8 +110,7 @@ export function WaveView({ id, title, durationMs, queue }: WaveViewProps) {
 		const s = playback.get()
 		const d = s.id === id ? (s.duration ?? total) : total
 		if (d === null) return
-		if (s.id === id) playback.seek(f * d)
-		else playback.play(id, queue(), f * d, title)
+		playback.seekOrPlay(id, f * d, queue(), title)
 	}
 	const bars = Array.isArray(peaks) ? peaks : null
 	const w = 600 / WAVE_BARS

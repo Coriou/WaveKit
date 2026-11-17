@@ -332,9 +332,12 @@ const PART_SCORE = 1e12
  * last part is kept from KEEP_EARLY_MS before the transmission's end to KEEP_SLACK_MS after it.
  *
  * Without it (the row's summary does not carry the start), one file is the transmission's final file when it
- * is kept in that same window and is no longer than the transmission (within START_MATCH_MS), the closest end
- * first; a file kept while a transmission went on is its rollover part only when its audio fits between that
- * transmission's start and the keep (len ≤ kept − start + START_MATCH_MS). A final file is preferred.
+ * is kept in that same window and is no longer than the transmission (within START_MATCH_MS). When more than
+ * one open transmission on the channel passes, the file attaches only to the one whose length agrees with
+ * the file's within START_MATCH_MS, and to none (its own row) when that is not exactly one: the closest end
+ * is no evidence, since a file can be kept up to KEEP_SLACK_MS after its transmission. A file kept while a
+ * transmission went on is its rollover part only when its audio fits between that transmission's start and
+ * the keep (len ≤ kept − start + START_MATCH_MS). A final file is preferred.
  */
 function matchOf(
 	parts: readonly Part[],
@@ -348,6 +351,8 @@ function matchOf(
 	if (!first || !last) return null
 	let best: { i: number; closes: boolean } | null = null
 	let bestScore = Number.POSITIVE_INFINITY
+	// without the start: every open transmission the file could close, with its length
+	const finals: { i: number; dur: number }[] = []
 	txs.forEach((tx, i) => {
 		const row = out[i]
 		if (!tx || !row || !sameChannel(row.frequencyHz, hz)) return
@@ -362,7 +367,8 @@ function matchOf(
 			keptAfter(last.kept, tx) &&
 			last.len <= tx.dur + START_MATCH_MS
 		) {
-			score = Math.abs(last.kept - tx.end)
+			finals.push({ i, dur: tx.dur })
+			return
 		} else if (
 			last.kept >= tx.start &&
 			last.kept < tx.end - KEEP_EARLY_MS &&
@@ -376,16 +382,22 @@ function matchOf(
 			bestScore = score
 		}
 	})
-	return best
+	if (finals.length === 0) return best
+	const [only] = finals
+	if (finals.length === 1 && only) return { i: only.i, closes: true }
+	// several could be its transmission: only a lone length match says which
+	const fits = finals.filter(f => Math.abs(f.dur - last.len) <= START_MATCH_MS)
+	const [fit] = fits
+	return fits.length === 1 && fit ? { i: fit.i, closes: true } : null
 }
 
 /**
  * A scanner recording's `recording-change` row is written when the file is kept, after its
- * transmission: it never stands as a row of its own. Its file rides on the transmission it recorded
- * (same channel, matched by start and keep time: matchOf), so the transmission row keeps its tone and
- * transcript and carries the disc. A long transmission's rollover files (one observation start) all ride
+ * transmission. Its file rides on the transmission it recorded (same channel, matched by start and keep
+ * time: matchOf), so the transmission row keeps its tone and transcript and carries the disc. A long transmission's rollover files (one observation start) all ride
  * on that one transmission, which plays the first part (Recordings lists every part). A recording whose
- * transmission is not in the list reads as a transmission itself: one row, its rollover parts folded in.
+ * transmission is not in the list, or cannot be told apart (matchOf), reads as a transmission itself: one
+ * row, its rollover parts folded in.
  */
 export function attachRecordings(
 	items: readonly ActivitySummary[],

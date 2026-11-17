@@ -504,31 +504,36 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
 
 ### Playing recordings
 
-There is one player for the whole app. A play disc on an Activity row or card (expanded Cards too), a Recordings
-row, or the tuned card's last transmission or one of its earlier rows starts the recording; pressing the same disc again pauses
-it. Rows without a recording (most decodes, and digital calls the core did not record) have no disc.
-The recording playing is marked the same way in every list that shows it. On the tuned card a scanner
-recording is never a row of its own: its disc sits on the transmission it recorded, which keeps its
-tone and transcript. A long transmission recorded as several files sits on that one transmission and
-plays its first file (Recordings lists every file).
+There is one player for the whole app. A play disc on an Activity row or card (expanded Cards too),
+a Recordings row, or the tuned card's last transmission or one of its earlier rows starts the
+recording; pressing the same disc again pauses it, and while it loads the disc already says Pause
+(pressing it then cancels the start). Rows without a recording (most decodes, and digital calls the
+core did not record) have no disc. The recording playing is marked the same way in every list that
+shows it. On the tuned card a scanner recording's disc sits on the transmission it recorded, which
+keeps its tone and transcript. A long transmission recorded as several files sits on that one
+transmission and plays its first file (Recordings lists every file). A recording is a row of its own
+when its transmission is not in the list, or when WaveKit cannot tell which of two transmissions on
+the channel it recorded.
 
 While something is loaded, the player sits at the bottom of the screen, above the dock, whatever
-panel is open: **Previous**, **Play/Pause**, **Next**, the title and its place in the list (`3 of 12`),
-the time, a position slider, the speed (1×, 1.5×, 2×), **Auto-next**, **Keep** and **Close**. Closing
-a drawer does not stop it. **Next**, **Previous** and **Auto-next** follow the list it was started
-from, in the order shown, and only the rows with a recording: the Activity drawer and each pinned
-column are separate lists. **Previous** after the first 2 s goes back to the start; before that it
-plays the previous recording, and it is greyed out when there is none. **Auto-next** plays the next recording when one ends (never after a failure);
-it is on by default and remembered per browser. While the open Activity event or Recordings row is
-the one playing and its drawer is the one on screen, the player shrinks to a thin progress line with play/pause, and that row's waveform
-is where you seek: click or drag on it. **Keep** works when WaveKit can name the file, which for a
-digital-voice call needs it loaded in Recordings; otherwise it says to keep it from there. When
-WaveKit does not know yet whether a file is kept, **Keep** never shows it as not kept: pressing it keeps
-the file and shows the answer.
+panel is open: **Previous**, **Play/Pause**, **Next**, the title and its place in the list
+(`3 of 12`), the time, a position slider, the speed (1×, 1.5×, 2×), **Auto-next**, **Keep** and
+**Close**. Closing a drawer does not stop it. **Next**, **Previous** and **Auto-next** follow the
+list it was started from, in the order shown, and only the rows with a recording: the Activity
+drawer and each pinned column are separate lists. **Previous** after the first 2 s goes back to the
+start; before that it plays the previous recording, and it is greyed out when there is none.
+**Auto-next** plays the next recording when one ends (never after a failure); it is on by default
+and remembered per browser. While the open Activity event or Recordings row is the one playing and
+its drawer is the one on screen, the player shrinks to a thin progress line with play/pause, and
+that row's waveform is where you seek: click or drag on it (a paused one plays on from there).
+**Keep** works when WaveKit can name the file, which for a digital-voice call needs it loaded in
+Recordings; otherwise it says to keep it from there. When WaveKit does not know yet whether a file
+is kept, **Keep** never shows it as not kept: pressing it keeps the file and shows the answer.
 
 Live audio is muted while a recording plays or loads to play, and comes back as soon as it pauses,
-ends, fails or closes. Pressing **Listen** while a recording plays pauses the recording; Listen stays
-on. The same holds for every Listen, including a scanner hit's Listen while live audio is already on.
+ends, fails or closes. Pressing **Listen** while a recording plays pauses the recording; Listen
+stays on. The same holds for every Listen, including a scanner hit's Listen while live audio is
+already on.
 
 ### Scanner observations
 

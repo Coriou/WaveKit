@@ -13,6 +13,7 @@ import {
 	PlaybackService,
 	canPrev,
 	compactOf,
+	discPauses,
 	heldOf,
 	markOf,
 	queuePosition,
@@ -350,6 +351,35 @@ describe("PlaybackService: pause, resume, seek", () => {
 		expect(s.audio.currentTime).toBe(1)
 	})
 
+	it("a waveform click on the paused current recording goes there and plays on; another starts there", async () => {
+		const s = setup()
+		await playing(s, "a", Q("a", "b"))
+		s.audio.meta(2)
+		s.p.pause()
+		s.p.seekOrPlay("a", 1.5, Q("a", "b"))
+		expect(s.p.get()).toMatchObject({ id: "a", phase: "playing", pos: 1.5 })
+		expect(s.audio.currentTime).toBe(1.5)
+		// while it plays, only the position moves
+		s.p.seekOrPlay("a", 0.5, Q("a", "b"))
+		expect(s.p.get()).toMatchObject({ id: "a", phase: "playing", pos: 0.5 })
+		// an ended one plays on from the click too
+		s.p.setAutoNext(false)
+		s.audio.emit("ended")
+		s.p.seekOrPlay("a", 1, Q("a", "b"))
+		expect(s.p.get()).toMatchObject({ phase: "playing", pos: 1 })
+		s.p.seekOrPlay("b", 0.25, Q("a", "b"))
+		expect(s.p.get()).toMatchObject({ id: "b", pos: 0.25 })
+	})
+
+	it("the disc says Pause while it plays and while it loads to play", () => {
+		expect(discPauses("playing", true)).toBe(true)
+		expect(discPauses("loading", true)).toBe(true)
+		expect(discPauses("loading", false)).toBe(false)
+		expect(discPauses("paused", false)).toBe(false)
+		expect(discPauses("ended", false)).toBe(false)
+		expect(discPauses(null, false)).toBe(false)
+	})
+
 	it("idle: toggle, pause, resume and seek do nothing", () => {
 		const s = setup()
 		const before = s.p.get()
@@ -644,6 +674,22 @@ describe("PlaybackService: queue, next, prev", () => {
 			titles: { b: "B", c: "C" },
 		})
 		expect(queuePosition(s.p.get())).toBe("1 of 2")
+	})
+
+	it("setQueue leaves an equal queue as it is, even with its titles rebuilt", async () => {
+		const s = setup()
+		await playing(s, "b", {
+			source: "tuned",
+			ids: ["a", "b"],
+			titles: { a: "A", b: "B" },
+		})
+		const before = s.p.get()
+		s.p.setQueue("tuned", ["a", "b"], { a: "A", b: "B" })
+		expect(s.p.get()).toBe(before)
+		s.p.setQueue("tuned", ["a", "b"], { a: "A", b: "B2" })
+		expect(s.p.get().queue?.titles).toEqual({ a: "A", b: "B2" })
+		s.p.setQueue("tuned", ["a", "b"], { a: "A" })
+		expect(s.p.get().queue?.titles).toEqual({ a: "A" })
 	})
 
 	it("queueStep reads the neighbour; null off the list or past its ends", () => {

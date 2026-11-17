@@ -151,6 +151,31 @@ export const markOf =
 	(s: PlaybackState): PlaybackPhase | null =>
 		s.id === id ? s.phase : null
 
+/**
+ * A disc's click pauses (it says Pause, pressed) while the recording plays, and while it loads to play: a
+ * click then cancels the start.
+ */
+export function discPauses(
+	phase: PlaybackPhase | null,
+	wantPlay: boolean,
+): boolean {
+	return phase === "playing" || (phase === "loading" && wantPlay)
+}
+
+/** Same keys with the same values (titles are rebuilt on every render, so identity says nothing). */
+function sameTitles(
+	a: Readonly<Record<string, string>> | undefined,
+	b: Readonly<Record<string, string>> | undefined,
+): boolean {
+	if (a === b) return true
+	if (a === undefined || b === undefined) return false
+	const keys = Object.keys(a)
+	return (
+		keys.length === Object.keys(b).length &&
+		keys.every(k => Object.hasOwn(b, k) && a[k] === b[k])
+	)
+}
+
 function defaultStorage(): KeyValueStore | null {
 	try {
 		return globalThis.localStorage ?? null
@@ -332,6 +357,29 @@ export class PlaybackService extends Store<PlaybackState> {
 		this.set({ ...s, pos, phase: s.phase === "ended" ? "paused" : s.phase })
 	}
 
+	/**
+	 * A click on a recording's waveform: the current one goes there and plays on from there (a paused or
+	 * ended one resumes); another one starts there.
+	 */
+	seekOrPlay(
+		id: string,
+		seconds: number,
+		queue: QueueRef,
+		title?: string,
+	): void {
+		const s = this.get()
+		if (s.id !== id) {
+			this.play(id, queue, seconds, title)
+			return
+		}
+		if (s.phase === "error") {
+			this.play(id, s.queue ?? queue, seconds, title)
+			return
+		}
+		this.seek(seconds)
+		if (s.phase !== "playing") this.resume()
+	}
+
 	/** The next recording of the queue; nothing at its end. */
 	next(): void {
 		const s = this.get()
@@ -368,7 +416,8 @@ export class PlaybackService extends Store<PlaybackState> {
 		const same =
 			ids.length === s.queue.ids.length &&
 			ids.every((x, i) => s.queue?.ids[i] === x)
-		if (same && (titles === undefined || titles === s.queue.titles)) return
+		if (same && (titles === undefined || sameTitles(titles, s.queue.titles)))
+			return
 		const queue: QueueRef = { source, ids }
 		if (titles !== undefined) queue.titles = titles
 		if (list !== undefined) queue.list = list
