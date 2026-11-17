@@ -646,6 +646,7 @@ export function registerRecordingsMock(
 					"dsd-fme-call": all.filter(r => r.kind === "dsd-fme-call").length,
 					"scanner-dv": all.filter(r => r.kind === "scanner-dv").length,
 					"scanner-analog": all.filter(r => r.kind === "scanner-analog").length,
+					"dv-call": all.filter(r => r.kind === "dv-call").length,
 				},
 			},
 			truncatedBefore: null,

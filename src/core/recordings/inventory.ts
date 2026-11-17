@@ -54,6 +54,8 @@ import {
 	SCANNER_RECORDING_ID,
 	SCANNER_RECORDING_KINDS,
 	callNameFields,
+	dvCallDecoderField,
+	dvCallDecoderOf,
 	startedAtLocalFromName,
 } from "./names.js"
 import { parseRiffDurationMs } from "./riff.js"
@@ -183,9 +185,28 @@ export const nodeRecordingFs: RecordingFsPort = {
 	open: (p, flags) => nodeFs.open(p, flags),
 }
 
+/** One dsd source: a dsd-fme `-7` directory, or (`kind: "dv-call"`) the dv call recorder's. */
+export interface RecordingDsdSourceConfig {
+	/** The owning decoder; for a dv-call source only a label (items carry their own decoder). */
+	decoderId: string
+	dir: string
+	kind?: "dv-call"
+}
+
 export interface RecordingInventoryOptions {
-	/** dsd-fme recording directories, sorted by decoder id. Re-read on every scan. */
-	dsdFmeDirs: () => readonly { decoderId: string; dir: string }[]
+	/**
+	 * dsd-fme recording directories, sorted by decoder id. Re-read on every scan. `kind: "dv-call"`
+	 * marks the digital-voice call recorder's directory: one more dsd source (same `dsd~` keys)
+	 * whose items carry the decoder named in each file name (see dvCallDecoderIds).
+	 */
+	dsdFmeDirs: () => readonly RecordingDsdSourceConfig[]
+	/**
+	 * The decoder ids a dv-call file's name field may stand for (the configured and active
+	 * decoders, probes included), read when a file is indexed. A field maps to a decoder only by
+	 * an exact match (dvCallDecoderOf); unknown or ambiguous is null, never a guess. Absent (or
+	 * null, or throwing): every dv-call item has decoderId null.
+	 */
+	dvCallDecoderIds?: (() => readonly string[]) | null
 	/** `<scanner storage>/recordings`, or null when there is no scanner. Re-read on every scan. */
 	scannerRecordingsDir: () => string | null
 	/**
@@ -298,6 +319,7 @@ export class RecordingInventoryError extends WaveKitError {
 
 interface DsdSource {
 	decoderId: string
+	kind: "dsd-fme-call" | "dv-call"
 	dir: string
 	/** realpath of `dir` at derivation. */
 	real: string
@@ -468,6 +490,11 @@ function note(
 	if (counts.firstError === undefined) counts.firstError = err
 }
 
+/** A dsd source's kinds: dsd-fme's own directories and the dv call recorder's. */
+function isCallKind(kind: RecordingInventoryKind): boolean {
+	return kind === "dsd-fme-call" || kind === "dv-call"
+}
+
 /** A dsd-fme call name the inventory lists (never TEMP), as `dsd:<n>~<name>`. */
 function dsdId(n: number, name: string): string | null {
 	if (!DSD_FME_CALL_WAV.test(name) || DSD_FME_TEMP_WAV.test(name)) return null
@@ -609,9 +636,21 @@ export function createRecordingInventory(
 		return null
 	}
 
+	/** The decoder a dv-call file name stands for, by exact match only (else null). */
+	function dvCallDecoder(name: string): string | null {
+		const field = dvCallDecoderField(name)
+		const ids = options.dvCallDecoderIds
+		if (field === null || ids === undefined || ids === null) return null
+		try {
+			return dvCallDecoderOf(field, ids())
+		} catch {
+			return null
+		}
+	}
+
 	/** Current dsd-fme sources: configured order, real directories, first realpath owner wins. */
 	async function dsdSources(counts: Counts): Promise<DsdSource[]> {
-		let configured: readonly { decoderId: string; dir: string }[]
+		let configured: readonly RecordingDsdSourceConfig[]
 		try {
 			configured = options.dsdFmeDirs()
 		} catch (err) {
@@ -638,7 +677,12 @@ export function createRecordingInventory(
 				const real = await sem.run(() => fs.realpath(dir))
 				if (seen.has(real)) continue
 				seen.add(real)
-				out.push({ decoderId: entry.decoderId, dir, real })
+				out.push({
+					decoderId: entry.decoderId,
+					kind: entry.kind === "dv-call" ? "dv-call" : "dsd-fme-call",
+					dir,
+					real,
+				})
 			} catch (err) {
 				note(counts, "sourceErrors", err)
 			}
@@ -831,7 +875,12 @@ export function createRecordingInventory(
 	const view: View = {
 		entries: [],
 		bytes: 0,
-		byKind: { "dsd-fme-call": 0, "scanner-dv": 0, "scanner-analog": 0 },
+		byKind: {
+			"dsd-fme-call": 0,
+			"scanner-dv": 0,
+			"scanner-analog": 0,
+			"dv-call": 0,
+		},
 	}
 	const byId = new Map<string, IndexedEntry[]>()
 	/** Indexed copies per keep key (hasKey). */
@@ -1173,7 +1222,7 @@ export function createRecordingInventory(
 				dir: source.dir,
 				real: source.real,
 				dirs: [source.dir],
-				kind: "dsd-fme-call",
+				kind: source.kind,
 				rank: 0,
 				dsdIndex: n,
 				decoderId: source.decoderId,
@@ -1422,7 +1471,7 @@ export function createRecordingInventory(
 			name,
 			id,
 			kind: spec.kind,
-			decoderId: spec.decoderId,
+			decoderId: spec.kind === "dv-call" ? dvCallDecoder(name) : spec.decoderId,
 			discoveryId: spec.discoveryId,
 			frequencyHz: null,
 		}
@@ -1999,22 +2048,26 @@ export function createRecordingInventory(
 		decoderIds: ReadonlySet<string> | null,
 	): Promise<void> {
 		const counts = newCounts()
-		const states = [...folders.values()].filter(
-			st =>
-				st.spec.kind === "dsd-fme-call" &&
+		// The dv call recorder's directory holds every decoder's calls: any touch re-reads it.
+		const wanted = (spec: FolderSpec): boolean =>
+			spec.kind === "dv-call" ||
+			(spec.kind === "dsd-fme-call" &&
 				(decoderIds === null ||
-					(st.spec.decoderId !== null && decoderIds.has(st.spec.decoderId))),
+					(spec.decoderId !== null && decoderIds.has(spec.decoderId))))
+		const states = [...folders.values()].filter(st => wanted(st.spec))
+		const known = new Set(
+			states
+				.filter(st => st.spec.kind === "dsd-fme-call")
+				.map(st => st.spec.decoderId),
 		)
-		const known = new Set(states.map(st => st.spec.decoderId))
+		// A decoder with no dsd-fme directory of its own is covered by an indexed dv-call one.
+		const dvIndexed = states.some(st => st.spec.kind === "dv-call")
 		const missing =
-			decoderIds === null ? [] : [...decoderIds].filter(d => !known.has(d))
+			decoderIds === null || dvIndexed
+				? []
+				: [...decoderIds].filter(d => !known.has(d))
 		if (missing.length > 0 || states.length === 0) {
-			const specs = (await deriveFolders(counts)).filter(
-				sp =>
-					sp.kind === "dsd-fme-call" &&
-					(decoderIds === null ||
-						(sp.decoderId !== null && decoderIds.has(sp.decoderId))),
-			)
+			const specs = (await deriveFolders(counts)).filter(wanted)
 			await Promise.all(
 				specs
 					.filter(sp => !folders.has(sp.key))
@@ -2402,10 +2455,9 @@ function toItem(
 		kind: c.kind,
 		decoderId: c.decoderId,
 		discoveryId: c.discoveryId,
-		startedAtLocal:
-			c.kind === "dsd-fme-call"
-				? (fields.startedAtLocal ?? startedAtLocalFromName(c.name))
-				: fields.startedAtLocal,
+		startedAtLocal: isCallKind(c.kind)
+			? (fields.startedAtLocal ?? startedAtLocalFromName(c.name))
+			: fields.startedAtLocal,
 		modifiedAt: new Date(st.mtimeMs).toISOString(),
 		bytes: st.size,
 		durationMs,

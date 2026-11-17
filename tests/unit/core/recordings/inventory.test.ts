@@ -1526,7 +1526,12 @@ describe("recordings catalogue", () => {
 			total: 4,
 			kept: 1,
 			bytes: 4 * WAV_1S.length,
-			byKind: { "dsd-fme-call": 2, "scanner-dv": 1, "scanner-analog": 1 },
+			byKind: {
+				"dsd-fme-call": 2,
+				"scanner-dv": 1,
+				"scanner-analog": 1,
+				"dv-call": 0,
+			},
 		})
 		expect(all.items.find(i => i.kind === "scanner-analog")).toMatchObject({
 			discoveryId: "d_01K446ZZ",
