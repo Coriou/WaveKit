@@ -1,6 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import type {
+	Discovery,
 	LiveAudioConfig,
 	SavedFrequency,
 	ScanJob,
@@ -689,13 +690,13 @@ describe("palette: running rows", async () => {
 		])
 	})
 
-	it("opens Activity on a frequency's channel: raster frequency, half a raster step, never a bandwidth", async () => {
+	it("opens Activity on a frequency's channel: raster frequency and half a raster step", async () => {
 		const f = fakes()
 		await runAction(
 			f.services,
 			{
 				kind: "activity",
-				tokens: [{ kind: "frequency", hz: 161_150_400, bandwidthHz: 59_000 }],
+				tokens: [{ kind: "frequency", hz: 161_150_400 }],
 				label: "x",
 			},
 			null,
@@ -934,5 +935,34 @@ describe("palette: the Messages alias", async () => {
 				true,
 			),
 		).toEqual({ kind: "drawer", id: "activity", layout: "cards" })
+	})
+})
+
+describe("palette: discoveries on a saved channel", () => {
+	const disc = (id: string, hz: number, label?: string): Discovery =>
+		({
+			id,
+			frequencyHz: hz,
+			protocol: "dmr",
+			confidence: "classified",
+			...(label ? { operator: { label } } : {}),
+		}) as unknown as Discovery
+
+	it("drops a discovery a few hundred Hz off a saved frequency, by the raster rule", () => {
+		const m = new PaletteModel(
+			ctx({ discoveries: [disc("d1", 161_150_300), disc("d2", 161_400_000)] }),
+		)
+		const ids = m.tuneTargets().map(x => x.id)
+		expect(ids).toContain("saved:s2")
+		expect(ids).not.toContain("disc:d1")
+		expect(ids).toContain("disc:d2")
+	})
+
+	it("titles a discovery through the channel name rule", () => {
+		const m = new PaletteModel(
+			ctx({ discoveries: [disc("d3", 161_400_000, "Site beacon")] }),
+		)
+		const item = m.tuneTargets().find(x => x.id === "disc:d3")
+		expect(item?.title).toBe("Site beacon")
 	})
 })

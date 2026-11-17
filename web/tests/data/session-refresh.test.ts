@@ -52,6 +52,14 @@ class FocusTarget extends EventTarget {
 	}
 }
 
+class VisibilityTarget extends EventTarget {
+	visibilityState = "visible"
+	show(state: "visible" | "hidden") {
+		this.visibilityState = state
+		this.dispatchEvent(new Event("visibilitychange"))
+	}
+}
+
 function core(opts: { session: () => Response; refresh?: () => Response }): {
 	fetch: FetchLike
 	refreshes: () => number
@@ -185,6 +193,123 @@ describe("session refresh on launch and focus", () => {
 		focus.focus()
 		await flush()
 		expect(refreshes()).toBe(1)
+	})
+})
+
+describe("session refresh when the tab is shown, and stale answers", () => {
+	beforeEach(() => {
+		vi.useFakeTimers()
+	})
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it("refreshes when the tab becomes visible, not when hidden, with the same hourly limit", async () => {
+		let clock = T0
+		const tab = new VisibilityTarget()
+		const { fetch, refreshes } = core({
+			session: () => json(200, session(T0 + 28 * DAY)),
+			refresh: () => json(500, { code: "BUSY" }),
+		})
+		const data = createDataLayer({
+			fetch,
+			createSocket: fakeSockets().factory,
+			now: () => clock,
+			storage: memoryStorage(),
+			focusTarget: null,
+			visibilityTarget: tab,
+		})
+		await data.start()
+		await flush()
+		expect(refreshes()).toBe(1)
+		clock = T0 + SESSION_REFRESH_MIN_GAP_MS
+		tab.show("hidden")
+		await flush()
+		expect(refreshes()).toBe(1)
+		tab.show("visible")
+		await flush()
+		expect(refreshes()).toBe(2)
+		tab.show("visible")
+		await flush()
+		expect(refreshes()).toBe(2)
+		data.dispose()
+		clock = T0 + 3 * SESSION_REFRESH_MIN_GAP_MS
+		tab.show("visible")
+		await flush()
+		expect(refreshes()).toBe(2)
+	})
+
+	it("drops a refresh answer that arrives after a sign-out", async () => {
+		const clock = T0
+		const focus = new FocusTarget()
+		let answer: (r: Response) => void = () => {}
+		const { fetch: base, refreshes } = core({
+			session: () => json(200, session(T0 + 10 * DAY)),
+		})
+		const fetch: FetchLike = async (url, init) => {
+			if (url === "/api/access/session/logout")
+				return json(200, { revoked: true })
+			if (url.startsWith("/api/access/session/refresh")) {
+				void base(url, init)
+				return new Promise<Response>(resolve => {
+					answer = resolve
+				})
+			}
+			return base(url, init)
+		}
+		const data = createDataLayer({
+			fetch,
+			createSocket: fakeSockets().factory,
+			now: () => clock,
+			storage: memoryStorage(),
+			focusTarget: focus,
+		})
+		await data.start()
+		await flush()
+		expect(refreshes()).toBe(1)
+		await data.logout()
+		expect(data.access.get().session).toBeNull()
+		answer(json(200, session(T0 + SESSION_LIFETIME_MS)))
+		await flush()
+		expect(data.access.get().session).toBeNull()
+		data.dispose()
+	})
+
+	it("drops a timer refresh answer that arrives after a sign-out", async () => {
+		let clock = T0
+		let answer: (r: Response) => void = () => {}
+		const { fetch: base, refreshes } = core({
+			session: () => json(200, session(T0 + 29 * DAY)),
+		})
+		const fetch: FetchLike = async (url, init) => {
+			if (url === "/api/access/session/logout")
+				return json(200, { revoked: true })
+			if (url.startsWith("/api/access/session/refresh")) {
+				void base(url, init)
+				return new Promise<Response>(resolve => {
+					answer = resolve
+				})
+			}
+			return base(url, init)
+		}
+		const data = createDataLayer({
+			fetch,
+			createSocket: fakeSockets().factory,
+			now: () => clock,
+			storage: memoryStorage(),
+			focusTarget: null,
+		})
+		await data.start()
+		await flush()
+		expect(refreshes()).toBe(0)
+		clock = T0 + 29 * DAY
+		await vi.advanceTimersByTimeAsync(29 * DAY)
+		expect(refreshes()).toBe(1)
+		await data.logout()
+		answer(json(200, session(clock + SESSION_LIFETIME_MS)))
+		await flush()
+		expect(data.access.get().session).toBeNull()
+		data.dispose()
 	})
 })
 

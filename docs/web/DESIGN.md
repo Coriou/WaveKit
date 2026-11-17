@@ -984,6 +984,11 @@ Condensed + Noto Sans, Tabler-based icons).
   live-region content, and moves happen only when the stack's height or the drawer changes.
   Gated by `ui-check --flow=notices`: the stacked region at 1440×900 expanded and at 390×844
   (expanded Activity, Recordings), ✕ and Undo inside the window, focus kept.
+- **No Messages view (owner, 2026-11-16).** Decoded messages fold into Activity › Cards, with
+  Expand to widen the drawer over the plot; the dock loses its Messages button, and old Messages
+  links and the palette alias open Activity › Cards. The canvas still draws Messages in the dock
+  until it is next redrawn. *Why:* one place for linked activity data, not a second board that
+  shows the same decodes.
 
 ## Open questions and next topics
 

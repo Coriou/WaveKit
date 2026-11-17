@@ -1,16 +1,27 @@
 import { readFileSync } from "node:fs"
 import fc from "fast-check"
 import { afterEach, describe, expect, it } from "vitest"
-import type { ActivitySummary, Discovery } from "@wavekit/api-types"
+import type {
+	ActivitySummary,
+	Discovery,
+	RecordingInventoryItem,
+	ResolvedBandPlanView,
+} from "@wavekit/api-types"
 
 import { rowView } from "../../src/features/activity/rows.ts"
 import type { SearchToken } from "../../src/features/activity/search.ts"
 import {
+	recordingMeta,
+	recordingTitle,
+} from "../../src/features/recordings/model.ts"
+import {
+	bandPlanView,
 	channelMHz,
 	channelName,
 	channelToken,
 	channelWindow,
 	confidenceWord,
+	followBandPlan,
 	followSavedNames,
 	halfWidthText,
 	historyLabel,
@@ -20,6 +31,7 @@ import {
 	savedNameAt,
 	savedNames,
 	showChannel,
+	stepAt,
 	transmissionSubtitle,
 	transmissionTitle,
 	type ChannelHistory,
@@ -28,7 +40,10 @@ import {
 import { Store } from "../../src/data/store.ts"
 import { shellStore } from "../../src/shell/store.ts"
 
-afterEach(() => savedNames.set([]))
+afterEach(() => {
+	savedNames.set([])
+	bandPlanView.set(null)
+})
 
 describe("channel name", () => {
 	it.each<[string, ChannelNameParts, string]>([
@@ -169,8 +184,8 @@ describe("channel frequency", () => {
 
 describe("transmission title", () => {
 	it.each<[Parameters<typeof transmissionTitle>[0], string]>([
-		[{ from: "F5ZZZ", to: "CQ" }, "F5ZZZ → CQ"],
-		[{ from: "F5ZZZ" }, "F5ZZZ"],
+		[{ from: "N0CALL", to: "CQ" }, "N0CALL → CQ"],
+		[{ from: "N0CALL" }, "N0CALL"],
 		[{ to: "TG 9" }, "TG 9"],
 		[{ what: "FM voice" }, "FM voice"],
 		[{ from: " ", what: "Page" }, "Page"],
@@ -341,7 +356,7 @@ describe("a scanner recording's Activity row", () => {
 
 describe("naming properties", () => {
 	// Feature: app-coherence, Property 3: a frequency never reads NaN
-	// Validates: Requirements C3.1
+	// Validates: app-coherence naming rule
 	it("a frequency that is not finite reads as the placeholder, never NaN or Infinity", () => {
 		fc.assert(
 			fc.property(
@@ -363,7 +378,7 @@ describe("naming properties", () => {
 	})
 
 	// Feature: app-coherence, Property 1: every channel name is non-empty
-	// Validates: Requirements C3.1
+	// Validates: app-coherence naming rule
 	it("every channel name is non-empty, whatever is known", () => {
 		const part = fc.option(fc.string({ maxLength: 12 }), { nil: null })
 		fc.assert(
@@ -382,7 +397,7 @@ describe("naming properties", () => {
 	})
 
 	// Feature: app-coherence, Property 2: the channel frequency format is stable
-	// Validates: Requirements C3.1
+	// Validates: app-coherence naming rule
 	it("the channel frequency is 4 decimals and idempotent on its own raster", () => {
 		fc.assert(
 			fc.property(
@@ -418,5 +433,89 @@ describe("the channel door in components", () => {
 		expect(src).toContain("showChannel(")
 		expect(src).not.toMatch(/showFrequency\(/)
 		expect(src).not.toContain("Show in")
+	})
+})
+
+// A synthetic plan: a 5 kHz band and a 6.25 kHz band (made-up edges).
+const rasterPlan = {
+	bands: [
+		{ startHz: 150_000_000, endHz: 151_000_000, stepHz: 5_000 },
+		{ startHz: 152_000_000, endHz: 153_000_000, stepHz: 6_250 },
+	].map((b, i) => ({
+		key: `band-${i}`,
+		layer: 0,
+		band: { ...b },
+		segments: [{ startHz: b.startHz, endHz: b.endHz }],
+	})),
+} as unknown as ResolvedBandPlanView
+
+describe("the band plan's raster, followed", () => {
+	const rec = (frequencyHz: number): RecordingInventoryItem => ({
+		id: "scan:d1~a.wav",
+		kind: "scanner-analog",
+		decoderId: null,
+		discoveryId: "d1",
+		startedAtLocal: null,
+		modifiedAt: "2026-11-16T10:00:00.000Z",
+		bytes: 1000,
+		durationMs: 4000,
+		callType: null,
+		talkgroup: null,
+		source: null,
+		frequencyHz,
+	})
+
+	it("follows the band-plan store and reads its step at a frequency", () => {
+		const store = new Store<{ view: ResolvedBandPlanView | null }>({
+			view: null,
+		})
+		const off = followBandPlan(store)
+		expect(stepAt(150_005_000)).toBe(12_500)
+		store.set({ view: rasterPlan })
+		expect(stepAt(150_005_000)).toBe(5_000)
+		expect(stepAt(152_006_250)).toBe(6_250)
+		expect(stepAt(160_000_000)).toBe(12_500)
+		off()
+	})
+
+	it.each<[string, number, string]>([
+		["a 5 kHz channel stays on its raster", 150_005_000, "150.0050"],
+		["a 5 kHz carrier a little off snaps to it", 150_005_900, "150.0050"],
+		["a 6.25 kHz channel stays on its raster", 152_018_750, "152.0188"],
+		["off any band: the default raster", 160_011_000, "160.0125"],
+	])("frequency text: %s", (_case, hz, text) => {
+		bandPlanView.set(rasterPlan)
+		expect(channelMHz(hz)).toBe(text)
+	})
+
+	it("matches a saved name within half the band's step, never a neighbour", () => {
+		bandPlanView.set(rasterPlan)
+		savedNames.set([
+			{ frequencyHz: 152_006_250, name: "Net six" },
+			{ frequencyHz: 150_005_000, name: "Net five" },
+		])
+		expect(savedNameAt(152_006_250)).toBe("Net six")
+		expect(savedNameAt(152_008_000)).toBe("Net six")
+		// 4 kHz away on a 6.25 kHz raster is the next channel over (the default 12.5 kHz would have matched)
+		expect(savedNameAt(152_010_250)).toBeNull()
+		expect(savedNameAt(150_008_000)).toBeNull()
+		expect(historyLabel(152_006_250)).toBe("History of Net six")
+		expect(historyLabel(152_011_000)).toBe("History of 152.0125")
+	})
+
+	it("Recordings name and place a row on the band's raster", () => {
+		bandPlanView.set(rasterPlan)
+		savedNames.set([{ frequencyHz: 150_005_000, name: "Net five" }])
+		expect(recordingTitle(rec(150_005_000))).toBe("Net five")
+		expect(recordingMeta(rec(150_005_000))).toContain("150.0050")
+		expect(recordingTitle(rec(150_010_000))).toBe("FM voice")
+		expect(recordingMeta(rec(150_010_000))).toContain("150.0100")
+	})
+
+	it("the channel door opens the band's raster and half its step", () => {
+		bandPlanView.set(rasterPlan)
+		const t = channelToken(150_005_000)
+		expect(t.value).toBe("150005000")
+		expect(t.spanHz).toBe(2_500)
 	})
 })

@@ -21,6 +21,8 @@ export type QueueSource = "activity" | "recordings" | "tuned"
 
 export interface QueueRef {
 	source: QueueSource
+	/** Which list of the source (Activity: the drawer's or a pinned column's); only that list refreshes it. */
+	list?: string
 	/** Recording ids of the rows that have audio, in the order shown. */
 	ids: readonly string[]
 	/** What the dock calls each one (the row's title). */
@@ -96,6 +98,9 @@ interface Cached {
 	peaks: number[] | null
 }
 
+/** A fetch that landed after forget() or dispose(): it keeps nothing, and its waveform is not "none". */
+class StaleFetchError extends Error {}
+
 /** Files kept for replay and waveforms (call WAVs are a few hundred kB). */
 const CACHE_MAX = 16
 
@@ -122,6 +127,17 @@ export function queueStep(
 	return queue.ids[i + by] ?? null
 }
 
+/** Prev restarts the recording (past PREV_RESTART_S) or steps back in the queue; false when it would do nothing. */
+export function canPrev(s: PlaybackState): boolean {
+	if (s.id === null) return false
+	if (restartsOnPrev(s)) return true
+	return queueStep(s.queue, s.id, -1) !== null
+}
+
+function restartsOnPrev(s: PlaybackState): boolean {
+	return s.pos > PREV_RESTART_S && s.phase !== "loading"
+}
+
 /** "2 of 7"; null when the recording is not in its queue. */
 export function queuePosition(s: PlaybackState): string | null {
 	if (s.queue === null || s.id === null) return null
@@ -134,6 +150,31 @@ export const markOf =
 	(id: string) =>
 	(s: PlaybackState): PlaybackPhase | null =>
 		s.id === id ? s.phase : null
+
+/**
+ * A disc's click pauses (it says Pause, pressed) while the recording plays, and while it loads to play: a
+ * click then cancels the start.
+ */
+export function discPauses(
+	phase: PlaybackPhase | null,
+	wantPlay: boolean,
+): boolean {
+	return phase === "playing" || (phase === "loading" && wantPlay)
+}
+
+/** Same keys with the same values (titles are rebuilt on every render, so identity says nothing). */
+function sameTitles(
+	a: Readonly<Record<string, string>> | undefined,
+	b: Readonly<Record<string, string>> | undefined,
+): boolean {
+	if (a === b) return true
+	if (a === undefined || b === undefined) return false
+	const keys = Object.keys(a)
+	return (
+		keys.length === Object.keys(b).length &&
+		keys.every(k => Object.hasOwn(b, k) && a[k] === b[k])
+	)
+}
 
 function defaultStorage(): KeyValueStore | null {
 	try {
@@ -157,14 +198,19 @@ export class PlaybackService extends Store<PlaybackState> {
 	private readonly storage: KeyValueStore | null
 	private el: AudioLike | null = null
 	private readonly cache = new Map<string, Cached>()
+	/**
+	 * Fetches in flight, one per file. forget() and dispose() drop the entry: a fetch no longer listed
+	 * here when it lands keeps nothing (no object URL, no cache, no peaks), and a new play fetches anew.
+	 */
 	private readonly loading = new Map<string, Promise<Cached>>()
-	/** Forgotten while their fetch was in flight: the file is dropped when it lands. */
-	private readonly tombstones = new Set<string>()
+	private disposed = false
 	private abort: AbortController | null = null
 	/** Bumped at every play, src set and stop; element events and play() results of an older one are stale. */
 	private epoch = 0
 	/** The epoch the element's current src was set in (events count only while it is the current one). */
 	private srcEpoch = -1
+	/** Bumped at every start (el.play()); only the latest start's rejection pauses. */
+	private starts = 0
 	private readonly offHold: () => void
 	private readonly peakStore = new Store<
 		ReadonlyMap<string, number[] | "none">
@@ -311,6 +357,29 @@ export class PlaybackService extends Store<PlaybackState> {
 		this.set({ ...s, pos, phase: s.phase === "ended" ? "paused" : s.phase })
 	}
 
+	/**
+	 * A click on a recording's waveform: the current one goes there and plays on from there (a paused or
+	 * ended one resumes); another one starts there.
+	 */
+	seekOrPlay(
+		id: string,
+		seconds: number,
+		queue: QueueRef,
+		title?: string,
+	): void {
+		const s = this.get()
+		if (s.id !== id) {
+			this.play(id, queue, seconds, title)
+			return
+		}
+		if (s.phase === "error") {
+			this.play(id, s.queue ?? queue, seconds, title)
+			return
+		}
+		this.seek(seconds)
+		if (s.phase !== "playing") this.resume()
+	}
+
 	/** The next recording of the queue; nothing at its end. */
 	next(): void {
 		const s = this.get()
@@ -322,7 +391,7 @@ export class PlaybackService extends Store<PlaybackState> {
 	prev(): void {
 		const s = this.get()
 		if (s.id === null) return
-		if (s.pos > PREV_RESTART_S && s.phase !== "loading") {
+		if (restartsOnPrev(s)) {
 			this.seek(0)
 			return
 		}
@@ -330,27 +399,33 @@ export class PlaybackService extends Store<PlaybackState> {
 		if (target !== null) this.play(target, s.queue ?? undefined)
 	}
 
-	/** A surface's list changed while shown: its snapshot is replaced when the recording is still in it. */
+	/**
+	 * A surface's list changed while shown: its snapshot is replaced when the recording is still in it. A
+	 * source with several lists (`list`) refreshes only the queue played from that same list.
+	 */
 	setQueue(
 		source: QueueSource,
 		ids: readonly string[],
 		titles?: Readonly<Record<string, string>>,
+		list?: string,
 	): void {
 		const s = this.get()
 		if (s.queue?.source !== source || s.id === null || !ids.includes(s.id))
 			return
+		if ((s.queue.list ?? null) !== (list ?? null)) return
 		const same =
 			ids.length === s.queue.ids.length &&
 			ids.every((x, i) => s.queue?.ids[i] === x)
-		if (same && (titles === undefined || titles === s.queue.titles)) return
-		this.set({
-			...s,
-			queue: titles === undefined ? { source, ids } : { source, ids, titles },
-		})
+		if (same && (titles === undefined || sameTitles(titles, s.queue.titles)))
+			return
+		const queue: QueueRef = { source, ids }
+		if (titles !== undefined) queue.titles = titles
+		if (list !== undefined) queue.list = list
+		this.set({ ...s, queue })
 	}
 
-	/** The row `source` shows open (null: none) and whether its panel is the visible one. */
-	setExpanded(source: QueueSource, id: string | null, visible = true): void {
+	/** The row `source` shows open (null: none) and whether its panel is the visible one (compact only then). */
+	setExpanded(source: QueueSource, id: string | null, visible = false): void {
 		const s = this.get()
 		const was = s.expanded[source]
 		if (id === null) {
@@ -413,8 +488,10 @@ export class PlaybackService extends Store<PlaybackState> {
 		try {
 			const file = await this.load(id)
 			this.setPeaks(id, file.peaks ?? "none")
-		} catch {
-			// the strip stays flat; playing it reports the error
+		} catch (error: unknown) {
+			// the strip stays flat (never "Loading waveform…" for good); playing it reports the error
+			if (error instanceof StaleFetchError || this.disposed) return
+			if (!this.peakStore.get().has(id)) this.setPeaks(id, "none")
 		}
 	}
 
@@ -427,7 +504,8 @@ export class PlaybackService extends Store<PlaybackState> {
 				...s,
 				queue: { ...s.queue, ids: s.queue.ids.filter(x => x !== id) },
 			})
-		if (this.loading.has(id)) this.tombstones.add(id)
+		// an in-flight fetch keeps nothing when it lands; a play after an Undo fetches anew
+		this.loading.delete(id)
 		this.dropFile(id)
 		if (this.peakStore.get().has(id)) {
 			const next = new Map(this.peakStore.get())
@@ -437,6 +515,8 @@ export class PlaybackService extends Store<PlaybackState> {
 	}
 
 	dispose(): void {
+		this.disposed = true
+		this.loading.clear()
 		this.stop()
 		this.offHold()
 		for (const c of this.cache.values()) this.revoke(c.url)
@@ -459,8 +539,16 @@ export class PlaybackService extends Store<PlaybackState> {
 	private start(el: AudioLike): void {
 		this.update(s => ({ ...s, phase: "playing", error: null, wantPlay: true }))
 		const token = this.epoch
+		// each start its own: an earlier play() rejecting late (after a pause and a resume of the same src) is not this one's
+		this.starts += 1
+		const started = this.starts
 		el.play().catch((error: unknown) => {
-			if (token !== this.epoch || this.get().phase !== "playing") return
+			if (
+				token !== this.epoch ||
+				started !== this.starts ||
+				this.get().phase !== "playing"
+			)
+				return
 			if (error instanceof DOMException && error.name === "AbortError") return
 			this.update(s => ({
 				...s,
@@ -548,19 +636,26 @@ export class PlaybackService extends Store<PlaybackState> {
 		let p = this.loading.get(id)
 		if (!p) {
 			// one fetch per file, shared; it is not cancelled when one caller stops waiting
+			// still the listed fetch of the file: forget() or dispose() since means it keeps nothing
+			const stale = (): Error | null =>
+				this.disposed
+					? new StaleFetchError("Playback closed")
+					: this.loading.get(id) !== p
+						? new StaleFetchError("This recording was deleted")
+						: null
 			p = this.deps
 				.fetchFile(id)
 				.then(async blob => {
-					if (this.tombstones.delete(id))
-						throw new Error("This recording was deleted")
+					const before = stale()
+					if (before) throw before
 					let peaks: number[] | null = null
 					try {
 						peaks = wavPeaks(await blob.arrayBuffer(), WAVE_BARS)?.peaks ?? null
 					} catch {
 						peaks = null
 					}
-					if (this.tombstones.delete(id))
-						throw new Error("This recording was deleted")
+					const after = stale()
+					if (after) throw after
 					const file: Cached = {
 						blob,
 						url: (this.deps.createUrl ?? URL.createObjectURL)(blob),
@@ -572,8 +667,7 @@ export class PlaybackService extends Store<PlaybackState> {
 					return file
 				})
 				.finally(() => {
-					this.loading.delete(id)
-					this.tombstones.delete(id)
+					if (this.loading.get(id) === p) this.loading.delete(id)
 				})
 			this.loading.set(id, p)
 		}

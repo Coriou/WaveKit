@@ -17,8 +17,8 @@ and talks to the core over its REST API and WebSocket. The code lives in [`web/`
 - **Protected core:** the first visit shows a **Pair this browser** chip. Pair once, and the
   browser stays signed in. Signed-in devices are listed in the ⌘K palette. A session lasts 30 days
   from its last refresh: the app refreshes it when it opens and when its window comes back to the
-  front, once less than 29 days are left (at most once an hour), so a browser used at least once a
-  month never has to pair again. A browser whose session ran out (or was signed out from another
+  front, once less than 29 days are left (at most once an hour), so a browser used at least once
+  every 30 days never has to pair again. A browser whose session ran out (or was signed out from another
   device) shows **Session expired, pair again** instead of the bare pairing prompt.
 - **One address:** a protected core accepts the address named in its access settings and no
   other. `localhost` and `127.0.0.1` reach the same server, but to the browser and to the core they
@@ -210,14 +210,16 @@ channel only`. **History of …** (`History of Club net`, `History of 145.6125`:
 
 #### One name per channel
 
-A channel reads the same everywhere (tags, the tuned card, Activity rows, Recordings, the
-palette): your saved name first, then the operator's label, the proven protocol (`POCSAG pager`,
-`FM voice`), the likely one (`Likely DMR`), then what was measured (`Unidentified · FM ~25 kHz`).
-A saved frequency names the channel within half a raster step of it, so a carrier measured a
-little off the raster still gets its name, and a neighbouring channel never does. NFM is only the
-demodulator setting: what was heard on an analog channel reads `FM voice`. Every door that opens
-a channel's history (the tag detail, the tuned card, the palette, Recordings) opens the same
-Activity window, and its search chip states the width, for example `Club net · 145.6125 ±6.25 kHz`.
+A channel reads the same on the tags, Activity rows, Recordings and the palette (the tuned
+card's body keeps its own title for now; its history link uses the saved name): your saved name
+first, then the operator's label, the proven protocol (`POCSAG pager`, `FM voice`), the likely
+one (`Likely DMR`), then what was measured (`Unidentified · FM ~25 kHz`). A saved frequency
+names the channel within half a raster step of it (the band plan's step at that frequency, 12.5
+kHz outside any band), so a carrier measured a little off the raster still gets its name, and a
+neighbouring channel never does. NFM is only the demodulator setting: what was heard on an
+analog channel reads `FM voice`. Every door that opens a channel's history (the tag detail, the
+tuned card, the palette, Recordings) opens the same Activity window, and its search chip states
+the width, for example `Club net · 145.6125 ±6.25 kHz`.
 
 ### The tuned card
 
@@ -409,7 +411,8 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   The count beside the list title is the number of events the core counts for the search, the
   same unit as the category filters (not the folded rows on screen). A pinned column shown in its
   place, or a core that cannot count, shows the loaded events instead, with `+` while older ones
-  are not loaded. **With audio** keeps only the events that have a recording to play, in every
+  are not loaded; so does a new search, time range or **With audio** until the core has counted
+  it, and a count the core failed to answer. **With audio** keeps only the events that have a recording to play, in every
   category. A row or card with a recording has a play disc with its length; see
   [Playing recordings](#playing-recordings).
 - **Scanner:** watch the band in view or plan a scan, see the signals found, skip the ones you do
@@ -446,7 +449,7 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   keeps the scroll position. The list is one Tab stop: the row under the cursor; the arrows move
   it and focus follows; Space and Enter on a button inside a row press that button. The footer
   says in words what each recording area holds and what happens at its limit, for example
-  `Auto-clean keeps the newest 537 MB of scanner recordings (214 MB used). IQ captures: 96.0 MB of
+  `Scanner folder: 214 MB. Auto-clean keeps scanner recordings under 537 MB. IQ captures: 96.0 MB of
 640 MB (new captures are refused at the limit). Kept items are never removed (12). 41.2 GB free
 on disk.`
 - **Settings:** station, receiver, decoders (each one starts **auto**, **always** or **off**), band
@@ -548,25 +551,36 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
 
 ### Playing recordings
 
-There is one player for the whole app. A play disc on an Activity row or card, a Recordings
-row or an earlier row of the tuned card starts the recording; pressing the same disc again pauses
-it. Rows without a recording (most decodes, and digital calls the core did not record) have no disc.
-The recording playing is marked the same way in every list that shows it.
+There is one player for the whole app. A play disc on an Activity row or card (expanded Cards too),
+a Recordings row, or the tuned card's last transmission or one of its earlier rows starts the
+recording; pressing the same disc again pauses it, and while it loads the disc already says Pause
+(pressing it then cancels the start). Rows without a recording (most decodes, and digital calls the
+core did not record) have no disc. The recording playing is marked the same way in every list that
+shows it. On the tuned card a scanner recording's disc sits on the transmission it recorded, which
+keeps its tone and transcript. A long transmission recorded as several files sits on that one
+transmission and plays its first file (Recordings lists every file). A recording is a row of its own
+when its transmission is not in the list, or when WaveKit cannot tell which of two transmissions on
+the channel it recorded.
 
 While something is loaded, the player sits at the bottom of the screen, above the dock, whatever
-panel is open: **Previous**, **Play/Pause**, **Next**, the title and its place in the list (`3 of 12`),
-the time, a position slider, the speed (1×, 1.5×, 2×), **Auto-next**, **Keep** and **Close**. Closing
-a drawer does not stop it. **Next**, **Previous** and **Auto-next** follow the list it was started
-from, in the order shown, and only the rows with a recording; **Previous** after the first 2 s goes
-back to the start. **Auto-next** plays the next recording when one ends (never after a failure);
-it is on by default and remembered per browser. While the open Activity event or Recordings row is
-the one playing, the player shrinks to a thin progress line with play/pause, and that row's waveform
-is where you seek: click or drag on it. **Keep** works when WaveKit can name the file, which for a
-digital-voice call needs it loaded in Recordings; otherwise it says to keep it from there.
+panel is open: **Previous**, **Play/Pause**, **Next**, the title and its place in the list
+(`3 of 12`), the time, a position slider, the speed (1×, 1.5×, 2×), **Auto-next**, **Keep** and
+**Close**. Closing a drawer does not stop it. **Next**, **Previous** and **Auto-next** follow the
+list it was started from, in the order shown, and only the rows with a recording: the Activity
+drawer and each pinned column are separate lists. **Previous** after the first 2 s goes back to the
+start; before that it plays the previous recording, and it is greyed out when there is none.
+**Auto-next** plays the next recording when one ends (never after a failure); it is on by default
+and remembered per browser. While the open Activity event or Recordings row is the one playing and
+its drawer is the one on screen, the player shrinks to a thin progress line with play/pause, and
+that row's waveform is where you seek: click or drag on it (a paused one plays on from there).
+**Keep** works when WaveKit can name the file, which for a digital-voice call needs it loaded in
+Recordings; otherwise it says to keep it from there. When WaveKit does not know yet whether a file
+is kept, **Keep** never shows it as not kept: pressing it keeps the file and shows the answer.
 
 Live audio is muted while a recording plays or loads to play, and comes back as soon as it pauses,
-ends, fails or closes. Pressing **Listen** while a recording plays pauses the recording; Listen stays
-on.
+ends, fails or closes. Pressing **Listen** while a recording plays pauses the recording; Listen
+stays on. The same holds for every Listen, including a scanner hit's Listen while live audio is
+already on.
 
 ### Scanner observations
 

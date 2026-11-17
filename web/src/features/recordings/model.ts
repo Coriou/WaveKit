@@ -138,7 +138,8 @@ const capitalised = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 
 /**
  * The drawer's footer, in words: per recording area that exists, its size and cap. Only scanner recordings are
- * auto-cleaned ("Auto-clean keeps the newest 537 MB of scanner recordings (214 MB used)."); IQ captures stop at
+ * auto-cleaned; the used figure is the whole scanner folder while the cap covers recordings only ("Scanner folder:
+ * 214 MB. Auto-clean keeps scanner recordings under 537 MB."); IQ captures stop at
  * theirs ("IQ captures: 96.0 MB of 640 MB (new captures are refused at the limit)."); an uncapped area states
  * its size. Then that kept items are never removed (the core's count; absent from an older core) and the free
  * disk space.
@@ -155,7 +156,7 @@ export function storageLine(
 		if (!area.cap) out.push(`${capitalised(words)}: ${used}.`)
 		else if (id === "scanner-evidence")
 			out.push(
-				`Auto-clean keeps the newest ${formatBytes(area.cap.bytes)} of ${words} (${used} used).`,
+				`Scanner folder: ${used}. Auto-clean keeps ${words} under ${formatBytes(area.cap.bytes)}.`,
 			)
 		else if (id === "iq-captures")
 			out.push(

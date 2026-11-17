@@ -10,9 +10,9 @@ import { errorMessage, useStore } from "../../data/index.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { PlayGlyph, RecIcon } from "../recordings/icons.tsx"
 import { formatDuration } from "../recordings/model.ts"
-import { keepTarget, keptHere, setKept } from "./keep.ts"
+import { keepLabel, keepTarget, keptHere, setKept } from "./keep.ts"
 import type { PlaybackPhase, QueueRef } from "./service.ts"
-import { markOf, WAVE_BARS } from "./service.ts"
+import { discPauses, markOf, WAVE_BARS } from "./service.ts"
 
 /** The phase of `id` when it is the recording in the player, else null (identical in every surface). */
 export function usePlaybackMark(id: string): PlaybackPhase | null {
@@ -51,6 +51,9 @@ export function PlayDisc({
 	const { playback } = useServices()
 	const phase = usePlaybackMark(id)
 	const playing = phase === "playing"
+	const pauses = useStore(playback, s =>
+		s.id === id ? discPauses(s.phase, s.wantPlay) : false,
+	)
 	const state = markState(phase)
 	return (
 		<button
@@ -60,8 +63,8 @@ export function PlayDisc({
 			data-inline={inline || undefined}
 			data-playback={phase ?? undefined}
 			data-playback-id={id}
-			aria-label={`${playing ? "Pause" : "Play"} ${title}`}
-			title={playing ? "Pause" : "Play"}
+			aria-label={`${pauses ? "Pause" : "Play"} ${title}`}
+			title={pauses ? "Pause" : "Play"}
 			onClick={e => {
 				e.stopPropagation()
 				if (phase !== null) playback.toggle()
@@ -107,8 +110,7 @@ export function WaveView({ id, title, durationMs, queue }: WaveViewProps) {
 		const s = playback.get()
 		const d = s.id === id ? (s.duration ?? total) : total
 		if (d === null) return
-		if (s.id === id) playback.seek(f * d)
-		else playback.play(id, queue(), f * d, title)
+		playback.seekOrPlay(id, f * d, queue(), title)
 	}
 	const bars = Array.isArray(peaks) ? peaks : null
 	const w = 600 / WAVE_BARS
@@ -172,10 +174,13 @@ export function KeepButton({
 	id,
 	title,
 	compact = false,
+	kept: rowKept = null,
 }: {
 	id: string
 	title: string
 	compact?: boolean
+	/** The row's own kept state when it carries one; null: not known from the row. */
+	kept?: boolean | null
 }) {
 	const { data } = useServices()
 	const readOnly = useReadOnly()
@@ -185,36 +190,33 @@ export function KeepButton({
 	const keeping = useStore(data.recordings.marks, m =>
 		target.inventoryId === null ? false : m.keeping.has(target.inventoryId),
 	)
-	const kept = target.kept === true
-	const unknown = target.inventoryId === null
+	const label = keepLabel(target, rowKept)
+	const kept = label.state === "kept"
+	const next = label.next
 	return (
 		<button
 			type="button"
 			className={compact ? "wk-icon-btn wkp-keep" : "wk-btn wkp-keep"}
 			data-variant={compact ? undefined : "outline"}
 			data-size={compact ? "sm" : undefined}
-			aria-pressed={kept}
-			aria-label={compact ? (kept ? "Kept" : "Keep") : undefined}
-			disabled={readOnly || keeping || unknown}
-			title={
-				unknown
-					? "Open it in Recordings to keep it"
-					: kept
-						? "Kept: retention never deletes it. Click to unkeep"
-						: "Keep: protect it from every retention rule"
-			}
-			onClick={() =>
-				void setKept(data.api, data.recordings, id, !kept).catch(
+			data-kept={label.state}
+			aria-pressed={label.pressed}
+			aria-label={compact ? label.text : undefined}
+			disabled={readOnly || keeping || next === null}
+			title={label.title}
+			onClick={() => {
+				if (next === null) return
+				void setKept(data.api, data.recordings, id, next).catch(
 					(error: unknown) =>
 						showAppToast(
-							`Could not ${kept ? "unkeep" : "keep"} “${title}”: ${errorMessage(error)}`,
+							`Could not ${next ? "keep" : "unkeep"} “${title}”: ${errorMessage(error)}`,
 							{ tone: "warn" },
 						),
 				)
-			}
+			}}
 		>
 			<RecIcon name="star" size={15} filled={kept} />
-			{!compact && (kept ? "Kept" : "Keep")}
+			{!compact && label.text}
 		</button>
 	)
 }

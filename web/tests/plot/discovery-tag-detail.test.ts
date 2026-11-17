@@ -660,6 +660,9 @@ describe("tag popover Listen", () => {
 				listen.wanted = true
 				return Promise.resolve()
 			},
+			claim: () => {
+				calls.push("claim")
+			},
 		}
 		return { listen, calls }
 	}
@@ -719,12 +722,13 @@ describe("tag popover Listen", () => {
 		)
 	})
 
-	it("leaves audio already on alone: it follows the tune", async () => {
+	it("leaves audio already on: it follows the tune, and a recording playing yields", async () => {
 		const { listen, calls } = fakeListen(true)
 		expect(
 			await listenAfterTune(1e8, () => Promise.resolve(true), listen),
 		).toBe(true)
-		expect(calls).toEqual([])
+		// no unlock, no second start; Listen wins at every door: the recording pauses (claim)
+		expect(calls).toEqual(["claim"])
 	})
 
 	it("is what the popover's Listen runs", () => {

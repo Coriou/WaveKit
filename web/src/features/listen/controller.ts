@@ -326,6 +326,11 @@ export class ListenController extends Store<ListenState> {
 		}
 	}
 
+	/** A Listen asked for while live audio is already on: a recording playing here pauses (Listen wins). */
+	claim(): void {
+		this.pausePlayback()
+	}
+
 	/** A blocked autoplay resumes on the next gesture. */
 	resume(): void {
 		if (!this.get().wanted) return

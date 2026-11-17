@@ -4,10 +4,14 @@
 // (`savedNameAt`), so a row whose measured carrier sits off the raster still finds it. `showChannel` is the one
 // door from a frequency to its history: the raster frequency and half a raster step, never a signal's
 // bandwidth, under a chip that states its width.
-import type { Discovery, SavedFrequency } from "@wavekit/api-types"
+import type {
+	Discovery,
+	ResolvedBandPlanView,
+	SavedFrequency,
+} from "@wavekit/api-types"
 
 import { Store, useStore } from "../data/store.ts"
-import { DEFAULT_STEP_HZ } from "../plot/maths.ts"
+import { DEFAULT_STEP_HZ, tuningStep } from "../plot/maths.ts"
 import { shellStore } from "../shell/store.ts"
 import type { ActivityController } from "./activity/controller.ts"
 import type { SearchToken } from "./activity/search.ts"
@@ -72,13 +76,42 @@ const ROLE: Readonly<Record<string, string>> = {
 	FLEX: "pager",
 }
 
+// ---- band plan raster
+
+/** The resolved band plan the app knows now (fed by followBandPlan); null before it loads. */
+export const bandPlanView = new Store<ResolvedBandPlanView | null>(null)
+
+/** Keeps `bandPlanView` in step with the band-plan store; returns the unsubscribe. */
+export function followBandPlan(store: {
+	get(): { view: ResolvedBandPlanView | null }
+	subscribe(fn: (s: { view: ResolvedBandPlanView | null }) => void): () => void
+}): () => void {
+	bandPlanView.set(store.get().view)
+	return store.subscribe(s => bandPlanView.set(s.view))
+}
+
+/** Subscribes a component to the band plan, so a row re-renders on the raster it names. */
+export function useBandPlanView(): ResolvedBandPlanView | null {
+	return useStore(bandPlanView)
+}
+
+/** The band-plan raster step at `hz` (the one every surface names and tunes on), else the default. */
+export function stepAt(
+	hz: number | null | undefined,
+	view: ResolvedBandPlanView | null = bandPlanView.get(),
+): number {
+	return typeof hz === "number" && Number.isFinite(hz)
+		? tuningStep(view, hz)
+		: DEFAULT_STEP_HZ
+}
+
 // ---- frequency
 
 /**
  * The channel a frequency sits on: the nearest raster value when it is less than a quarter step from it, else the
  * frequency itself in whole Hz (off channel). Idempotent: a raster value maps to itself.
  */
-export function rasterHz(hz: number, stepHz: number = DEFAULT_STEP_HZ): number {
+export function rasterHz(hz: number, stepHz: number = stepAt(hz)): number {
 	const step = Number.isFinite(stepHz) && stepHz > 0 ? stepHz : DEFAULT_STEP_HZ
 	const whole = Math.round(hz)
 	const snapped = Math.round(Math.round(whole / step) * step)
@@ -89,10 +122,7 @@ export function rasterHz(hz: number, stepHz: number = DEFAULT_STEP_HZ): number {
 export const NO_FREQUENCY = "—"
 
 /** A channel's frequency in MHz, 4 decimals, from the raster ("145.6125"); NO_FREQUENCY when not finite. */
-export function channelMHz(
-	hz: number,
-	stepHz: number = DEFAULT_STEP_HZ,
-): string {
+export function channelMHz(hz: number, stepHz: number = stepAt(hz)): string {
 	if (!Number.isFinite(hz)) return NO_FREQUENCY
 	return (rasterHz(hz, stepHz) / 1e6).toFixed(4)
 }
@@ -114,9 +144,11 @@ export const savedNames = new Store<readonly SavedName[]>([])
 
 /**
  * Subscribes a component to the saved names, so a memoised row re-renders when a name is saved, renamed or
- * removed (the names are read through `savedNameAt`'s default). Returns the current list.
+ * removed or the band plan changes its raster (both are read through `savedNameAt`'s defaults). Returns the
+ * current list.
  */
 export function useSavedNames(): readonly SavedName[] {
+	useStore(bandPlanView) // the raster a name is matched on follows the band plan
 	return useStore(savedNames)
 }
 
@@ -137,7 +169,7 @@ export function followSavedNames(store: {
 export function savedNameAt(
 	hz: number | null | undefined,
 	saved: readonly SavedName[] = savedNames.get(),
-	stepHz: number = DEFAULT_STEP_HZ,
+	stepHz: number = stepAt(hz),
 ): string | null {
 	if (typeof hz !== "number" || !Number.isFinite(hz)) return null
 	const step = Number.isFinite(stepHz) && stepHz > 0 ? stepHz : DEFAULT_STEP_HZ
@@ -248,7 +280,7 @@ export interface TransmissionParts {
 	what?: string | null
 }
 
-/** "F5… → CQ", "TG 2081", "F5…"; else what it was ("FM voice"); never empty ("Transmission"). */
+/** "N0CALL → CQ", "TG 2081", "N0CALL"; else what it was ("FM voice"); never empty ("Transmission"). */
 export function transmissionTitle(p: TransmissionParts): string {
 	const from = filled(p.from)
 	const to = filled(p.to)
@@ -288,7 +320,7 @@ export interface ChannelWindow {
 /** The window a channel filter matches: the raster frequency and half a raster step (never a bandwidth). */
 export function channelWindow(
 	hz: number,
-	stepHz: number = DEFAULT_STEP_HZ,
+	stepHz: number = stepAt(hz),
 ): ChannelWindow {
 	const step = Number.isFinite(stepHz) && stepHz > 0 ? stepHz : DEFAULT_STEP_HZ
 	return { channelHz: rasterHz(hz, step), spanHz: Math.round(step / 2) }
@@ -297,7 +329,7 @@ export function channelWindow(
 /** The Activity token of a channel: its chip names the channel and states the width ("Club net · 145.6125 ±6.25 kHz"). */
 export function channelToken(
 	hz: number,
-	stepHz: number = DEFAULT_STEP_HZ,
+	stepHz: number = stepAt(hz),
 	name: string | null = savedNameAt(hz, undefined, stepHz),
 ): SearchToken {
 	const w = channelWindow(hz, stepHz)
@@ -311,7 +343,7 @@ export function channelToken(
 /** "History of Club net", "History of 145.6125": the door's words. */
 export function historyLabel(
 	hz: number,
-	stepHz: number = DEFAULT_STEP_HZ,
+	stepHz: number = stepAt(hz),
 	name: string | null = savedNameAt(hz, undefined, stepHz),
 ): string {
 	return `History of ${name ?? channelMHz(hz, stepHz)}`
@@ -327,7 +359,7 @@ export type ChannelHistory = Pick<ActivityController, "update" | "setSearch">
 export function showChannel(
 	activity: ChannelHistory,
 	hz: number,
-	stepHz: number = DEFAULT_STEP_HZ,
+	stepHz: number = stepAt(hz),
 ): void {
 	activity.update(s => ({ ...s, editing: null, view: "all" }))
 	activity.setSearch([channelToken(hz, stepHz)], null)

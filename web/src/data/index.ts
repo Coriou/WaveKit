@@ -173,7 +173,15 @@ export interface DataLayerOptions {
 		EventTarget,
 		"addEventListener" | "removeEventListener"
 	> | null
+	/** Fires `visibilitychange` when the tab is shown or hidden; the document by default. */
+	visibilityTarget?: VisibilityTarget | null
 }
+
+/** What `visibilitychange` comes from: the document, or a fake in tests. */
+type VisibilityTarget = Pick<
+	EventTarget,
+	"addEventListener" | "removeEventListener"
+> & { readonly visibilityState: string }
 
 /** The browser's localStorage, or null (no window, or storage blocked). */
 function localStorageOrNull(): Storage | null {
@@ -218,7 +226,15 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 				? null
 				: window
 			: options.focusTarget
+	const visibilityTarget =
+		options.visibilityTarget === undefined
+			? typeof document === "undefined"
+				? null
+				: document
+			: options.visibilityTarget
 	let refreshTimer: ReturnType<typeof setTimeout> | null = null
+	// bumped on every session change: a refresh answer for an older session (signed out, replaced) is dropped
+	let generation = 0
 	let startTimer: ReturnType<typeof setTimeout> | null = null
 	let lastRefreshAt: number | null = null
 	let refreshing = false
@@ -242,6 +258,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 	const setSession = (session: AccessSessionDto | null, ended = false) => {
 		if (refreshTimer) clearTimeout(refreshTimer)
 		refreshTimer = null
+		generation += 1
 		// an answer that arrives after dispose() must not arm a refresh on a layer nobody holds
 		if (disposed) return
 		access.set({
@@ -255,28 +272,35 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			return
 		}
 		remember(session)
+		const armed = generation
 		refreshTimer = setTimeout(
 			() => {
-				api.refreshSession().then(setSession, (error: unknown) => {
-					// 401 already cleared the session (onSessionLost); a network error retries later
-					if (isApiError(error) && error.status === 401) return
-					setSession(access.get().session)
-				})
+				api.refreshSession().then(
+					next => {
+						if (generation === armed) setSession(next)
+					},
+					(error: unknown) => {
+						// 401 already cleared the session (onSessionLost); a network error retries later
+						if (isApiError(error) && error.status === 401) return
+						if (generation === armed) setSession(access.get().session)
+					},
+				)
 			},
 			refreshDelayMs(session.expiresAt, now()),
 		)
 	}
-	/** Launch and focus: refresh a session with less than 29 days left, at most once an hour. */
+	/** Launch, focus and the tab shown again: refresh a session with less than 29 days left, at most once an hour. */
 	const refreshIfDue = () => {
 		const session = access.get().session
 		if (disposed || refreshing || session === null) return
 		if (!shouldRefreshSession(session.expiresAt, now(), lastRefreshAt)) return
 		lastRefreshAt = now()
 		refreshing = true
+		const asked = generation
 		api.refreshSession().then(
 			next => {
 				refreshing = false
-				setSession(next)
+				if (generation === asked) setSession(next)
 			},
 			() => {
 				// 401 already cleared the session (onSessionLost); otherwise the old one stands, asked again in an hour
@@ -285,7 +309,11 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 		)
 	}
 	const onFocus = () => refreshIfDue()
+	const onVisibility = () => {
+		if (visibilityTarget?.visibilityState === "visible") refreshIfDue()
+	}
 	focusTarget?.addEventListener("focus", onFocus)
+	visibilityTarget?.addEventListener("visibilitychange", onVisibility)
 	const offSessionLost = api.onSessionLost(() => setSession(null, true))
 	const connection = new Store<ConnectionState>(events.state)
 	const offState = events.onState(state => connection.set(state))
@@ -361,6 +389,7 @@ export function createDataLayer(options: DataLayerOptions = {}): DataLayer {
 			offState()
 			offSessionLost()
 			focusTarget?.removeEventListener("focus", onFocus)
+			visibilityTarget?.removeEventListener("visibilitychange", onVisibility)
 			if (refreshTimer) clearTimeout(refreshTimer)
 			if (startTimer) clearTimeout(startTimer)
 			layer.sources.dispose()

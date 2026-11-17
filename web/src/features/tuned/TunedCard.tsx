@@ -71,7 +71,7 @@ import { clockText, useDisplay } from "../display.ts"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import { AUTO_IDENTIFY_DELAY_MS, shouldAutoIdentify } from "./auto-identify.ts"
 import { nowView, type NowView } from "./now.ts"
-import { TunedDisc, TunedQueue } from "./playback.tsx"
+import { playRows, TunedDisc, TunedQueue } from "./playback.tsx"
 import { tunedCardStore } from "./place.ts"
 import { signalBars, signalPresent } from "./signal.ts"
 import { DecoderVerdictsFeed, itemsFor, pendingFor } from "./verdicts.ts"
@@ -232,6 +232,7 @@ function IdentifiedBlock({
 
 function NowBlock({ now }: { now: NowView }) {
 	const msg = now.kind === "msg"
+	const latestRow = now.latestRow
 	return (
 		<>
 			{now.eyebrow && <Label>{now.eyebrow}</Label>}
@@ -255,6 +256,7 @@ function NowBlock({ now }: { now: NowView }) {
 						{now.big}
 					</span>
 					{now.bigUnit && <span className="wkf-big-unit">{now.bigUnit}</span>}
+					{latestRow && <TunedDisc row={latestRow} rows={playRows(now)} />}
 				</div>
 			)}
 			{now.line && <span className="wkf-line">{now.line}</span>}
@@ -974,7 +976,7 @@ export function TunedCard() {
 							<h3 className="wk-label">
 								{voice ? "Earlier on this frequency" : "Earlier"}
 							</h3>
-							<TunedQueue rows={now.earlier} />
+							<TunedQueue rows={playRows(now)} />
 							{now.earlier.map(r => (
 								<div key={r.id} className="wkf-earlier-item">
 									<button
@@ -991,7 +993,7 @@ export function TunedCard() {
 										<span className="wkf-earlier-a">{r.a}</span>
 										{r.b && <span className="wkf-earlier-b">{r.b}</span>}
 									</button>
-									<TunedDisc row={r} rows={now.earlier} />
+									<TunedDisc row={r} rows={playRows(now)} />
 								</div>
 							))}
 						</section>

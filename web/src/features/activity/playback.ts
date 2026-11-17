@@ -17,8 +17,29 @@ export function recordingTitleOf(s: ActivitySummary): string {
 	return rowView(s).title
 }
 
-/** The Activity queue: the stacks as shown (their row), those with audio, by recording id. */
-export function activityQueue(stacks: readonly ActivityStack[]): QueueRef {
+const listKeys = new WeakMap<object, string>()
+let listSeq = 0
+
+/**
+ * The queue key of one Activity list (the drawer's, each pinned column's), from its feed: a play keeps the
+ * list it came from, and only that list refreshes it (the detail's Recording block uses the feed it was
+ * opened from).
+ */
+export function activityListKey(feed: object): string {
+	let key = listKeys.get(feed)
+	if (key === undefined) {
+		listSeq += 1
+		key = `list-${listSeq}`
+		listKeys.set(feed, key)
+	}
+	return key
+}
+
+/** The Activity queue: the stacks as shown (their row), those with audio, by recording id, of list `list`. */
+export function activityQueue(
+	stacks: readonly ActivityStack[],
+	list?: string,
+): QueueRef {
 	const ids: string[] = []
 	const titles: Record<string, string> = {}
 	for (const st of stacks) {
@@ -27,5 +48,7 @@ export function activityQueue(stacks: readonly ActivityStack[]): QueueRef {
 		ids.push(rec.id)
 		titles[rec.id] = recordingTitleOf(st.view)
 	}
-	return { source: "activity", ids, titles }
+	return list === undefined
+		? { source: "activity", ids, titles }
+		: { source: "activity", list, ids, titles }
 }

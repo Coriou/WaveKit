@@ -339,8 +339,10 @@ export class ActivityController extends Store<ActivityViewState> {
 	}
 
 	setSearch(tokens: readonly SearchToken[], chip: CategoryChipId | null): void {
+		// the same tokens again (a chip alone, or nothing) keep the counts: they are read without the chip
+		const same = sameTokens(this.get().tokens, tokens)
 		this.update(s => ({ ...s, tokens, chip, openId: null, openItem: null }))
-		this.refresh()
+		this.refresh(!same)
 	}
 
 	/** Clears the search (and leaves a column's edit). */
@@ -677,6 +679,9 @@ export class ActivityController extends Store<ActivityViewState> {
 	}
 
 	private refresh(counts = true): void {
+		// the search, range or audio filter moved: the counts read for the old one are stale (the header falls
+		// back to the loaded events until the new read answers). A chip alone keeps them: they are read without it.
+		if (counts) this.dropCounts()
 		if (this.attached === 0) return
 		if (this.opening) {
 			this.queuedRefresh = {
@@ -734,8 +739,43 @@ export class ActivityController extends Store<ActivityViewState> {
 			if (!abort.signal.aborted) this.update(v => ({ ...v, counts, total }))
 		} catch {
 			// Counts are a hint: an older core without facets leaves the chips bare.
-			// A failure (busy or timed-out reader) slows the live refresh; an abort is not one.
-			if (!abort.signal.aborted) this.countsFailures += 1
+			// A failure (busy or timed-out reader) slows the live refresh; an abort is not one. Counts that
+			// may no longer hold are dropped: the header falls back to the loaded events.
+			if (!abort.signal.aborted) {
+				this.countsFailures += 1
+				this.dropCounts()
+			}
 		}
 	}
+
+	private dropCounts(): void {
+		// the read in flight is for the old search: its late answer must not write the old counts back
+		this.countsAbort?.abort()
+		this.countsAbort = null
+		this.update(v =>
+			v.counts === null && v.total === null
+				? v
+				: { ...v, counts: null, total: null },
+		)
+	}
+}
+
+/** Two searches with the same tokens, in order (a token's chip label included). */
+export function sameTokens(
+	a: readonly SearchToken[],
+	b: readonly SearchToken[],
+): boolean {
+	return (
+		a.length === b.length &&
+		a.every((t, i) => {
+			const u = b[i]
+			return (
+				u !== undefined &&
+				t.kind === u.kind &&
+				t.value === u.value &&
+				t.label === u.label &&
+				t.spanHz === u.spanHz
+			)
+		})
+	)
 }

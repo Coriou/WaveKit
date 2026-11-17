@@ -1,12 +1,21 @@
 import "./messages.css"
 
 import type { ActivitySummary } from "@wavekit/api-types"
-import { memo, useEffect, useMemo, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react"
 
-import { useReadOnly } from "../../app/context.ts"
+import { useReadOnly, useServices } from "../../app/context.ts"
 import type { ActivityFeed } from "../../data/activity-feed.ts"
 import { useStore } from "../../data/index.ts"
+import { ActivityDisc } from "../activity/ActivityPlayback.tsx"
+import { foldedOf } from "../activity/fold.ts"
+import {
+	activityListKey,
+	activityQueue,
+	recordingOf,
+	recordingTitleOf,
+} from "../activity/playback.ts"
 import { estimateCardHeight } from "../activity/rows.ts"
+import type { QueueRef } from "../playback/service.ts"
 import { MessageCard } from "./MessageCard.tsx"
 import { GALLERY_STEP, dealStable, galleryColumns } from "./gallery.ts"
 
@@ -37,6 +46,21 @@ export function CardsBoard({ feed, label, onOpen }: CardsBoardProps) {
 	const loadingMore = useStore(feed, s => s.loadingMore)
 	const query = useStore(feed, s => s.query)
 	const readOnly = useReadOnly()
+	const { playback } = useServices()
+
+	// the cards with audio, as the drawer's list folds them: the queue a disc here plays from (the drawer's
+	// own list key, so a play started here or in the list keeps refreshing from the same feed)
+	const queueList = activityListKey(feed)
+	const queue = useMemo(
+		() => activityQueue(foldedOf(items, feed), queueList),
+		[items, feed, queueList],
+	)
+	const queueNow = useRef(queue)
+	queueNow.current = queue
+	const readQueue = useCallback(() => queueNow.current, [])
+	useEffect(() => {
+		playback.setQueue("activity", queue.ids, queue.titles, queueList)
+	}, [playback, queue, queueList])
 
 	const scroller = useRef<HTMLDivElement>(null)
 	const end = useRef<HTMLDivElement>(null)
@@ -127,6 +151,7 @@ export function CardsBoard({ feed, label, onOpen }: CardsBoardProps) {
 								item={item}
 								readOnly={readOnly}
 								onOpen={onOpen}
+								queue={readQueue}
 							/>
 						))}
 					</div>
@@ -138,16 +163,21 @@ export function CardsBoard({ feed, label, onOpen }: CardsBoardProps) {
 	)
 }
 
-// Memoised: a live batch re-renders the board, not the cards already shown.
-const BoardCard = memo(function BoardCard({
+// Memoised: a live batch re-renders the board, not the cards already shown. A card with audio carries the
+// play disc under it (as the drawer's cards do), marked while its recording is the one playing.
+export const BoardCard = memo(function BoardCard({
 	item,
 	readOnly,
 	onOpen,
+	queue,
 }: {
 	item: ActivitySummary
 	readOnly: boolean
 	onOpen: (item: ActivitySummary) => void
+	queue: () => QueueRef
 }) {
+	// a card folded into a stack in the list is not in the list's queue: it plays on its own
+	const own = useCallback(() => boardQueue(queue(), item), [queue, item])
 	return (
 		<div role="listitem">
 			<MessageCard
@@ -155,6 +185,24 @@ const BoardCard = memo(function BoardCard({
 				readOnly={readOnly}
 				onOpen={() => onOpen(item)}
 			/>
+			{item.recording !== undefined && (
+				<div className="wka-cardstack">
+					<ActivityDisc item={item} queue={own} inline />
+				</div>
+			)}
 		</div>
 	)
 })
+
+/** The queue a board card's disc plays from: the list's, or the card's recording alone when the list folds it away. */
+export function boardQueue(q: QueueRef, item: ActivitySummary): QueueRef {
+	const rec = recordingOf(item)
+	if (rec === null || q.ids.includes(rec.id)) return q
+	const own: QueueRef = {
+		source: q.source,
+		ids: [rec.id],
+		titles: { [rec.id]: recordingTitleOf(item) },
+	}
+	if (q.list !== undefined) own.list = q.list
+	return own
+}
