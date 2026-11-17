@@ -951,7 +951,10 @@ Condensed + Noto Sans, Tabler-based icons).
   the drawer, the header middle is the fallback for windows below 1188 px where the drawer is not
   full height. Below 1100 px Expand changes nothing and no room exists (open gap, closed by the
   next entry: on a phone with any drawer open the region still overlaps the drawer header).
-- **Notices in a covering drawer: a slot under its header (2026-11-17).** At 390×844 every drawer
+- **Notices in a covering drawer: a slot under its header (2026-11-17; the rule is superseded by
+  "Layout: rails and stage": `regionPlacement` is gone, and `computeLayout` docks the status items
+  in the drawer's notice slot when the strip would land on a covering drawer; the slot mechanism
+  below is unchanged).** At 390×844 every drawer
   spans the window between the island rows (header at y 152..211), so the region at 16,144 sat
   on the title, Live and ✕. Two places were weighed: (a) a banner docked inside the drawer under
   its header, in the drawer's flow, pushing the body down; (b) a slot above the bottom row. (b)
@@ -1006,7 +1009,8 @@ Condensed + Noto Sans, Tabler-based icons).
     the *status slot* between them (y 16..72). Bottom rail: Listen at the left corner, the dock
     centred on the window and never left of Listen (compact below 1180 px; hidden below 761 px or
     when Listen and the compact dock cannot share the row, where the search button takes over).
-  - A *stack* above Listen: the player storey (x 16, up to 560 wide, 16 px above Listen), then the
+  - A *stack* above Listen: the player storey (x 16, up to 560 wide, 16 px above the bottom rail's
+    top, the taller of Listen and the dock, so it clears both), then the
     tuned card's home ("above Listen", 16 px over the stack). The card home moves by the player's
     height and a gutter when a recording starts or stops; that is the one stated move. With no
     room for the expanded card on its anchor it shows its minimised line there, instead of
@@ -1026,6 +1030,11 @@ Condensed + Noto Sans, Tabler-based icons).
     item wraps to two lines before it changes form. Below a 200 px slot or with the Receiver
     stacked (phones) the items stack in a strip 8 px under the top rail, at the strip's width;
     with a covering drawer open they dock in its notice slot (the 2026-11-17 slot entry stands).
+    Beside a drawer column (a narrow slot on a wide window) the strip stops 16 px left of the
+    column, and with the column's pane attached the items dock in the column's notice slot.
+    An item taller than the 56 px row is clamped to it. Every status item renders inside the shell
+    (the connection chip and the paused label in the shell's guest layer, beside the notices),
+    under the open island panel and the ⌘K palette, and hides while the palette is open.
   - The *plot* gets its inset (top rail + 12: 84, 132 with the scan hold row, 148 on a phone), a
     cap so the scale rows end 16 px above the stack, and every chrome rectangle over its body as
     *exclusions*: `placeLabels` treats them as taken, so signal chips flow around the card, the

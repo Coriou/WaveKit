@@ -61,6 +61,8 @@ other narrow windows, where the top row has no room, notices stack just under th
 drawer open there (Activity, Scanner, Recordings or Settings span the window), they sit inside it as
 a banner directly under its header: the drawer's list moves down to make room and comes back when
 the notice goes, and the title, Live, ✕ and every other header control stay clear and usable.
+An open island panel and the ⌘K palette sit above the notices, the connection chip and
+**Receiver paused**, and these hide while the palette is open.
 There are two kinds, and at most one of each shows at once:
 
 - **What you just did**, such as `Saved`, `Copied` or `Removed`, often with **Undo**. It stays
@@ -234,7 +236,9 @@ the width, for example `Club net · 145.6125 ±6.25 kHz`.
 
 The card on the left follows the frequency you are tuned to. From the top it says what the signal
 is, then the frequency once, the mode and channel width, the decoders on its band, and the actions
-(Activity, save, Identify, Open message).
+(Activity, save, Identify, Open message). Where the window has no room for the whole card on its
+place it shows as one line there; its expand control is then disabled and says why, and the card
+expands by itself when there is room.
 
 The header names the signal from the most specific thing known: the protocol last heard, what
 Identify or a proven discovery named, the decoder whose band holds the frequency, then the band

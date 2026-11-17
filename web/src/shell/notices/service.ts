@@ -129,8 +129,6 @@ export class NoticeService {
 	)
 	/** The condition toast on screen. */
 	readonly shown = new Store<ShownCondition | null>(null)
-	/** The region holds a toast. */
-	readonly occupied = new Store<boolean>(false)
 
 	private seq = 0
 	private receiptTimer: PausableTimer | null = null
@@ -353,7 +351,6 @@ export class NoticeService {
 	private syncToasts(): void {
 		const receipt = this.receipt.get()
 		const shown = this.shown.get()
-		this.occupied.set(receipt !== null || shown !== null)
 		if (
 			this.focusedId !== null &&
 			receipt?.id !== this.focusedId &&

@@ -283,16 +283,20 @@ function fitRail(
 }
 
 function place(r: Pick | null, s: readonly Pick[], slot: Rect): StatusPlaced[] {
-	const at = (p: Pick, x: number): StatusPlaced => ({
-		id: p.item.id,
-		kind: p.item.kind,
-		form: p.form,
-		lines: p.lines,
-		x,
-		y: slot.y + Math.round((STATUS_ROW_H - p.size.h) / 2),
-		w: p.size.w,
-		h: p.size.h,
-	})
+	// an item taller than the row is clamped to it (centred, never above the window's margin)
+	const at = (p: Pick, x: number): StatusPlaced => {
+		const h = Math.min(p.size.h, STATUS_ROW_H)
+		return {
+			id: p.item.id,
+			kind: p.item.kind,
+			form: p.form,
+			lines: p.lines,
+			x,
+			y: slot.y + Math.round((STATUS_ROW_H - h) / 2),
+			w: p.size.w,
+			h,
+		}
+	}
 	const out: StatusPlaced[] = []
 	if (r) out.push(at(r, slot.x))
 	let x = right(slot)
@@ -378,17 +382,18 @@ export function computeLayout(input: LayoutInput): Layout {
 	}
 	const railTop = Math.min(listen.y, dock?.y ?? Infinity, find?.y ?? Infinity)
 
-	// ---- stack (R4): Listen, the player storey, the card home
+	// ---- stack (R4): the bottom rail, the player storey, the card home; the storey stands on the rail's top (the
+	// taller of Listen and the dock), so it keeps a gutter from both
 	const storeyW = Math.min(PLAYER_STOREY_W, W - 2 * G)
 	const player = input.player
 		? rect(
 				G,
-				listen.y - G - input.player.h,
+				railTop - G - input.player.h,
 				Math.min(input.player.w, storeyW),
 				input.player.h,
 			)
 		: null
-	const stackTop = player ? player.y : listen.y
+	const stackTop = player ? player.y : railTop
 	const coverTop = topRail + G
 	const coverFoot = stackTop - G
 
@@ -465,7 +470,8 @@ export function computeLayout(input: LayoutInput): Layout {
 	} else if (input.status.length > 0) {
 		const y = topRail + RAIL_NEIGHBOUR_GAP
 		const x = G
-		const w = W - 2 * G
+		// left of a drawer column (a narrow slot on a wide window), else the window's width
+		const w = (drawer?.shape === "column" ? drawer.x - G : W - G) - x
 		const r = fitStrip(
 			input.status,
 			x,
@@ -477,7 +483,10 @@ export function computeLayout(input: LayoutInput): Layout {
 			r.placed.length > 0
 				? rect(x, y, w, Math.max(...r.placed.map(bottom)) - y)
 				: null
-		if (box && drawer && covering && intersects(box, drawer)) {
+		// a covering surface under the strip (a covering drawer, or an attached pane beside a column): the items dock
+		// in the drawer's notice slot
+		const cover = covering ? drawer : pane
+		if (box && cover && intersects(box, cover)) {
 			if (di?.hasNoticeSlot) {
 				where = "drawer-slot"
 				docked = input.status.map(i => i.id)
@@ -602,6 +611,34 @@ export function computeLayout(input: LayoutInput): Layout {
 			right: drawer?.shape === "column" ? W - drawer.x + G : G,
 		},
 	}
+}
+
+const sameRect = (a: Rect, b: Rect) =>
+	a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h
+
+/** The plot's part of two layouts holds the same numbers and rectangles. */
+export function samePlot(a: Layout["plot"], b: Layout["plot"]): boolean {
+	return (
+		a === b ||
+		(a.insetTop === b.insetTop &&
+			a.rowsBottomMax === b.rowsBottomMax &&
+			a.rowsMaxCss === b.rowsMaxCss &&
+			a.noteCx === b.noteCx &&
+			sameRect(a.visible, b.visible) &&
+			a.exclusions.length === b.exclusions.length &&
+			a.exclusions.every((r, i) => {
+				const o = b.exclusions[i]
+				return o !== undefined && sameRect(r, o)
+			}))
+	)
+}
+
+/** The previous plot part while the new one holds the same contents (the plot re-renders only on a change). */
+export function stablePlot(
+	prev: Layout["plot"] | null,
+	next: Layout["plot"],
+): Layout["plot"] {
+	return prev !== null && samePlot(prev, next) ? prev : next
 }
 
 /** One rectangle named for the checks. */

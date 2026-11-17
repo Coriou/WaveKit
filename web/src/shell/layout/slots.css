@@ -1,6 +1,7 @@
 /* Slots of the shell layout (src/shell/layout/compute.ts): elements placed at a computed rectangle carry no position
-   rule of their own beyond `position`. Status items sit in the top rail's slot or the strip under it (z 3, under the
-   stage surfaces), each at its own rectangle and form; nothing slides between the two groups. */
+   rule of their own beyond `position`. Status items sit in the top rail's slot or the strip under it (z 3 inside the
+   shell, under the island panels and the palette), each at its own rectangle and form; nothing slides between the
+   two groups. */
 @layer wk-app {
 	/* frame elements never ease their position (a layout bug cannot hide behind easing) */
 	.wk-shell .wk-shell-island[data-island] {
@@ -69,11 +70,13 @@
 		display: none;
 	}
 
-	/* a guest placed by the layout from outside the shell's tree (the connection chip, the paused label) */
+	/* a guest placed by the layout from outside the shell's tree (the connection chip, the paused label): in the
+	   shell's guest layer (a .wk-status-layer at the shell's origin), under the island panels and the palette */
 	.wk-status-guest {
-		position: fixed;
-		z-index: 3;
+		position: absolute;
 		box-sizing: border-box;
+		/* the chip's own size, not the shell's larger body text (a link or button chip inherits its font) */
+		font-size: var(--wk-fs-md);
 		pointer-events: none;
 	}
 	.wk-status-guest[data-pending] {

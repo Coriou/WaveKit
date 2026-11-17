@@ -305,6 +305,20 @@ function fleetHere(types: readonly string[]): "aircraft" | "vessels" | null {
 	return null
 }
 
+/** Why the card's line cannot expand while the layout forces it (its expanded form has no room on its anchor). */
+export const LINE_FORCED_REASON =
+	"No room to expand the card here: it expands when there is room"
+
+/** The minimised line's expand control: disabled, with its reason, while the layout forces the line form. */
+export function lineExpandProps(
+	forced: boolean,
+	title: string,
+): { "aria-disabled"?: true; title: string } {
+	return forced
+		? { "aria-disabled": true, title: `${title} · ${LINE_FORCED_REASON}` }
+		: { title: `${title} · click to expand` }
+}
+
 export function TunedCard() {
 	useDisplay() // times and units follow Settings › Display
 	const services = useServices()
@@ -782,7 +796,10 @@ export function TunedCard() {
 	menuItems.push({ label: "Copy frequency", icon: "copy", pick: copyFreq })
 
 	const minimised = card.minimised || lineForced
+	// the line the layout forces (not the reader's choice) has nothing to expand into
+	const forcedLine = lineForced && !card.minimised
 	const toggleMin = () => {
+		if (forcedLine) return
 		focusAfterMin.current = !minimised
 		setMenu(false)
 		tunedCardStore.setMinimised(!minimised)
@@ -814,8 +831,15 @@ export function TunedCard() {
 						className="wkf-card-line"
 						aria-expanded="false"
 						aria-label="Expand card"
-						aria-describedby="wkf-card-line-text"
-						title={`${formatMHz(hz)} MHz · ${shortId} · ${stateText} · click to expand`}
+						aria-describedby={
+							forcedLine
+								? "wkf-card-line-text wkf-card-line-forced"
+								: "wkf-card-line-text"
+						}
+						{...lineExpandProps(
+							forcedLine,
+							`${formatMHz(hz)} MHz · ${shortId} · ${stateText}`,
+						)}
 						onClick={toggleMin}
 					>
 						<span id="wkf-card-line-text" className="wkf-card-line-text">
@@ -829,7 +853,13 @@ export function TunedCard() {
 								</span>
 							)}
 						</span>
-						<Icon name="chevron-up" size={16} className="wkf-quiet" />
+						{forcedLine ? (
+							<span id="wkf-card-line-forced" className="wk-sr">
+								{LINE_FORCED_REASON}
+							</span>
+						) : (
+							<Icon name="chevron-up" size={16} className="wkf-quiet" />
+						)}
 					</button>
 				) : (
 					<>

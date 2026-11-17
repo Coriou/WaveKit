@@ -7,7 +7,9 @@ import {
 	layoutViolations,
 	namedRects,
 	PANE_MIN_W,
+	stablePlot,
 	STATUS_MIN_W,
+	STATUS_ROW_H,
 	TWO_LINE_H,
 	TWO_LINE_PAD,
 	type DrawerInput,
@@ -470,5 +472,114 @@ describe("computeLayout: plot contract", () => {
 		expect(wide.plot.noteCx).toBe(502)
 		expect(wide.plot.visible).toEqual(r(0, 84, 1004, 816))
 		expect(computeLayout(input(1440, 900)).plot.noteCx).toBe(720)
+	})
+})
+
+describe("computeLayout: the stack stands on the bottom rail", () => {
+	it("a Listen shorter than the dock: the player and covering surfaces keep a gutter from the dock", () => {
+		for (const d of ["none", "expanded"] as const) {
+			const base = input(1440, 900, { drawer: d })
+			const L = computeLayout({ ...base, listen: { w: 340, h: 52 } })
+			const dock = L.dock
+			expect(dock).not.toBeNull()
+			if (!dock || !L.player) throw new Error("dock and player expected")
+			// the rail's top is the dock's (64 px tall), not Listen's (52)
+			expect(L.player.y + L.player.h).toBe(dock.y - 16)
+			if (L.drawer) expect(L.drawer.y + L.drawer.h).toBe(L.player.y - 16)
+			expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+		}
+	})
+
+	it("without the player a covering surface stands 16 px above the rail's top", () => {
+		const base = input(1000, 800, { drawer: "activity", player: false })
+		const L = computeLayout({ ...base, listen: { w: 340, h: 52 } })
+		const dock = L.dock
+		if (!dock || !L.drawer) throw new Error("dock and drawer expected")
+		expect(L.drawer.y + L.drawer.h).toBe(dock.y - 16)
+		expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+	})
+})
+
+describe("computeLayout: status items taller than the row", () => {
+	const tall = (h: number): StatusItem => ({
+		id: "paused",
+		kind: "paused",
+		forms: { full: { w: 240, h } },
+	})
+	for (const h of [STATUS_ROW_H, STATUS_ROW_H + 1, 72]) {
+		it(`a ${h} px item stays in the row and inside the window's margin`, () => {
+			const L = computeLayout(input(1440, 900, { status: [tall(h), RECEIPT] }))
+			expect(L.status.where).toBe("rail")
+			const item = L.status.items.find(i => i.id === "paused")
+			if (!item) throw new Error("paused item expected")
+			expect(item.y).toBeGreaterThanOrEqual(16)
+			expect(item.h).toBe(Math.min(h, STATUS_ROW_H))
+			expect(item.y + item.h).toBeLessThanOrEqual(16 + STATUS_ROW_H)
+			expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+		})
+	}
+})
+
+describe("stablePlot", () => {
+	it("keeps the previous plot part while its contents hold, and takes a changed one", () => {
+		const a = computeLayout(input(1440, 900, { drawer: "activity" })).plot
+		const same = computeLayout(input(1440, 900, { drawer: "activity" })).plot
+		expect(same).not.toBe(a)
+		expect(stablePlot(a, same)).toBe(a)
+		expect(stablePlot(null, same)).toBe(same)
+		// a grip move that changes the column's width changes the exclusions
+		const wider = computeLayout({
+			...input(1440, 900, { drawer: "activity" }),
+			drawer: {
+				id: "activity",
+				wantedW: 500,
+				expanded: false,
+				pane: null,
+				hasNoticeSlot: true,
+			},
+		}).plot
+		expect(stablePlot(a, wider)).toBe(wider)
+		// a rail notice sits above the plot body: the plot's part is unchanged by it
+		const withItem = computeLayout(
+			input(1440, 900, { drawer: "activity", status: [CONDITION] }),
+		).plot
+		expect(stablePlot(a, withItem)).toBe(a)
+	})
+})
+
+describe("computeLayout: a strip beside a drawer column", () => {
+	// a wide Receiver leaves a slot under 200 px on a 1100 px window: the strip, with a column open
+	const narrowSlot = (d: DrawerState, pane = false): LayoutInput => {
+		const base = input(1100, 800, { drawer: d, status: [RECEIPT] })
+		return {
+			...base,
+			receiver: { w: 400, h: 56 },
+			drawer: base.drawer
+				? { ...base.drawer, pane: pane ? { want: true, pushIn: false } : null }
+				: null,
+		}
+	}
+
+	it("stops a gutter left of the column", () => {
+		const L = computeLayout(narrowSlot("recordings"))
+		expect(L.status.where).toBe("strip")
+		const strip = L.status.strip
+		if (!strip || !L.drawer) throw new Error("strip and drawer expected")
+		expect(L.drawer.shape).toBe("column")
+		expect(strip.x + strip.w).toBe(L.drawer.x - 16)
+		expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+	})
+
+	it("docks in the drawer's notice slot when an attached pane covers the strip", () => {
+		const wide: LayoutInput = {
+			...narrowSlot("activity", true),
+			viewport: { w: 1440, h: 900 },
+			receiver: { w: 740, h: 56 },
+		}
+		const L = computeLayout(wide)
+		expect(L.pane).not.toBeNull()
+		expect(L.status.where).toBe("drawer-slot")
+		expect(L.status.docked).toEqual(["receipt"])
+		expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
 	})
 })

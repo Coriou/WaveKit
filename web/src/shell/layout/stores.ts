@@ -46,6 +46,23 @@ export const publishedLayout = new Store<Layout | null>(null)
 /** The open drawer's notice slot element while status items dock in it, else null. */
 export const dockedSlot = new Store<HTMLElement | null>(null)
 
+/** The shell's layer for status guests (inside the shell root, under the island panels and the palette), or null
+ * while no shell is mounted or the palette is open (guests hide then, like the notice region). */
+export const guestLayer = new Store<HTMLElement | null>(null)
+
+/**
+ * Where a status guest renders: the drawer's notice slot while docked, else the shell's guest layer; null (not
+ * shown) while the layer is gone (no shell, or the palette open), even when docked.
+ */
+export function guestTarget(
+	docked: boolean,
+	slot: HTMLElement | null,
+	layer: HTMLElement | null,
+): HTMLElement | null {
+	if (!layer) return null
+	return docked && slot ? slot : layer
+}
+
 /** The reader minimised the tuned card to its line (reported by the card; the layout sizes its slot for it). */
 export const cardMinimised = new Store<boolean>(false)
 

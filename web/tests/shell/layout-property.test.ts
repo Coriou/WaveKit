@@ -25,12 +25,17 @@ const size = (w: [number, number], h: [number, number]) =>
 		h: fc.integer({ min: h[0], max: h[1] }),
 	})
 
+// status heights up to 72 px: taller than the 56 px row, which the layout clamps them to
 const statusItems: fc.Arbitrary<StatusItem[]> = fc
 	.record({
 		condition: fc.option(fc.integer({ min: 120, max: 560 }), { nil: null }),
+		conditionH: fc.integer({ min: 36, max: 72 }),
 		connection: fc.option(fc.integer({ min: 160, max: 360 }), { nil: null }),
+		connectionH: fc.integer({ min: 28, max: 72 }),
 		paused: fc.option(fc.integer({ min: 200, max: 300 }), { nil: null }),
+		pausedH: fc.integer({ min: 36, max: 72 }),
 		receipt: fc.option(fc.integer({ min: 100, max: 400 }), { nil: null }),
+		receiptH: fc.integer({ min: 36, max: 72 }),
 	})
 	.map(o => {
 		const out: StatusItem[] = []
@@ -39,9 +44,9 @@ const statusItems: fc.Arbitrary<StatusItem[]> = fc
 				id: "condition",
 				kind: "condition",
 				forms: {
-					full: { w: o.condition, h: 44 },
-					compact: { w: 168, h: 44 },
-					icon: { w: 44, h: 44 },
+					full: { w: o.condition, h: o.conditionH },
+					compact: { w: 168, h: o.conditionH },
+					icon: { w: 44, h: o.conditionH },
 				},
 			})
 		if (o.connection !== null)
@@ -49,24 +54,39 @@ const statusItems: fc.Arbitrary<StatusItem[]> = fc
 				id: "connection",
 				kind: "connection",
 				forms: {
-					full: { w: o.connection, h: 36 },
-					compact: { w: Math.round(o.connection * 0.6), h: 36 },
+					full: { w: o.connection, h: o.connectionH },
+					compact: { w: Math.round(o.connection * 0.6), h: o.connectionH },
 				},
 			})
 		if (o.paused !== null)
 			out.push({
 				id: "paused",
 				kind: "paused",
-				forms: { full: { w: o.paused, h: 52 } },
+				forms: { full: { w: o.paused, h: o.pausedH } },
 			})
 		if (o.receipt !== null)
 			out.push({
 				id: "receipt",
 				kind: "receipt",
-				forms: { full: { w: o.receipt, h: 44 } },
+				forms: { full: { w: o.receipt, h: o.receiptH } },
 			})
 		return out
 	})
+
+// an open island panel (a popover): an exclusion zone for the plot only
+const panels: fc.Arbitrary<LayoutInput["panels"]> = fc.oneof(
+	fc.constant([]),
+	fc
+		.record({
+			island: fc.constantFrom(
+				"tuner" as const,
+				"receiver" as const,
+				"listen" as const,
+			),
+			size: size([240, 480], [80, 520]),
+		})
+		.map(p => [p]),
+)
 
 const DRAWERS = [
 	"none",
@@ -97,14 +117,15 @@ const drawer: fc.Arbitrary<DrawerInput | null> = fc
 				},
 	)
 
+// Listen and the dock take their heights independently (48..72), so the bottom rail's top is either one's
 const layoutInput: fc.Arbitrary<LayoutInput> = fc.record({
 	viewport: size([320, 2560], [560, 1600]),
 	tuner: fc.constantFrom({ w: 440, h: 56 }, { w: 472, h: 104 }),
-	receiver: size([260, 320], [56, 56]),
-	listen: size([300, 420], [64, 64]),
+	receiver: size([160, 600], [56, 56]),
+	listen: size([300, 420], [48, 72]),
 	dock: fc.record({
-		wide: size([460, 520], [64, 64]),
-		compact: size([420, 460], [64, 64]),
+		wide: size([460, 520], [48, 72]),
+		compact: size([420, 460], [48, 72]),
 	}),
 	player: fc.option(size([560, 560], [60, 80]), { nil: null }),
 	card: fc.option(
@@ -118,7 +139,7 @@ const layoutInput: fc.Arbitrary<LayoutInput> = fc.record({
 	),
 	status: statusItems,
 	drawer,
-	panels: fc.constant([]),
+	panels,
 })
 
 const signals: fc.Arbitrary<SignalInfo[]> = fc.array(
@@ -166,12 +187,35 @@ describe("computeLayout properties", () => {
 				expect(b.find).toEqual(a.find)
 				expect(b.player).toEqual(a.player)
 				expect(b.plot.insetTop).toBe(a.plot.insetTop)
+				// the card's home on every anchor: kept where the reader parked it (same anchor, same form), a left
+				// anchor exactly; a centre or right anchor on the same anchor of the free width left of a column
+				// (the stated step left); a drawer that takes the anchor parks it on the nearest (stated move)
+				const want = input.card?.anchor
 				if (
-					a.card?.anchor === "al" &&
-					b.card !== null &&
-					input.card?.anchor === "al"
-				)
-					expect(b.card).toEqual(a.card)
+					a.card &&
+					b.card &&
+					a.card.anchor === want &&
+					b.card.anchor === want &&
+					a.card.form === b.card.form
+				) {
+					const spot = b.cardAnchors.find(x => x.id === want)
+					expect(spot).toBeDefined()
+					expect({ x: b.card.x, y: b.card.y }).toEqual({
+						x: spot?.x,
+						y: spot?.y,
+					})
+					if (want === "al" || want === "tl" || want === "ml")
+						expect(b.card).toEqual(a.card)
+					else if (b.drawer === null) expect(b.card).toEqual(a.card)
+					else {
+						const free = b.cardFreeW
+						const x =
+							want === "tc" || want === "bc"
+								? Math.round((free - 340) / 2)
+								: free - 16 - 340
+						expect(b.card.x).toBe(x)
+					}
+				}
 			}),
 			{ numRuns: 200 },
 		)
@@ -222,6 +266,9 @@ describe("computeLayout properties", () => {
 				)
 				const chrome: Rect[] = namedRects(L)
 				if (L.status.strip) chrome.push(L.status.strip)
+				// the open panel too (it reaches the plot as an exclusion only), back in shell px
+				for (const e of p.exclusions)
+					chrome.push({ x: e.x, y: e.y + p.insetTop, w: e.w, h: e.h })
 				for (const c of placed) {
 					const w =
 						40 + c.label.length * 7.4 + (c.sub ? 6 + c.sub.length * 6.6 : 0)

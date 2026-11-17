@@ -55,6 +55,7 @@ import {
 	computeLayout,
 	DEFAULT_SIZES,
 	PLAYER_STOREY_W,
+	stablePlot,
 	type Layout,
 	type LayoutInput,
 	type Rect,
@@ -65,6 +66,7 @@ import {
 	cardLineForced,
 	cardMinimised,
 	dockedSlot,
+	guestLayer,
 	PlotLayoutContext,
 	publishedLayout,
 	statusReports,
@@ -181,6 +183,11 @@ const sizeOf = (el: HTMLElement | null | undefined): Size | null =>
 	el && el.offsetWidth && el.offsetHeight
 		? { w: el.offsetWidth, h: el.offsetHeight }
 		: null
+
+/** The shell's status guest layer element, shared with the guests through `guestLayer`. */
+const setGuestLayer = (el: HTMLDivElement | null) => {
+	if (guestLayer.get() !== el) guestLayer.set(el)
+}
 
 /** The open drawer's notice slot: the newest connected one inside it (a loading skeleton's slot is replaced). */
 function drawerNoticeSlot(drawer: HTMLElement | null): HTMLElement | null {
@@ -541,7 +548,11 @@ export function Shell({
 
 	const DrawerContent = state.drawer ? DRAWER_CONTENT[state.drawer] : null
 	const PaneContent = pane?.Content ?? null
-	const P = L.plot
+	// the plot's part keeps its identity while its contents hold (a grip move or a resize tick that leaves the plot's
+	// numbers alone does not re-render the plot)
+	const plotPart = useRef<Layout["plot"] | null>(null)
+	plotPart.current = stablePlot(plotPart.current, L.plot)
+	const P = plotPart.current
 	return (
 		<div
 			ref={root}
@@ -741,6 +752,15 @@ export function Shell({
 				palette={state.palette}
 				receiverOpen={state.panel === "receiver"}
 			/>
+			{/* status guests (the connection chip, the paused label) render here, under the island panels and the
+			    palette; gone while the palette is open, like the notice region */}
+			{!state.palette && (
+				<div
+					ref={setGuestLayer}
+					className="wk-status-layer"
+					data-wk-status-guests=""
+				/>
+			)}
 
 			{state.palette && (
 				<Suspense fallback={null}>

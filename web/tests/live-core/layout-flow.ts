@@ -4,9 +4,10 @@
  *
  * Setup: Listen on, a recording playing (the player), a link condition raised through POST /__mock/link-advisory
  * and a receipt with Undo (⌘K `vol <n>`), both held on screen by keeping the focus in a toast. Per viewport
- * (1440×900, 1280×800, 1100×800, 390×844) and drawer state (none, Activity, Recordings, Scanner, expanded Cards; a
- * phone opens each as a sheet), plus the tuned card minimised to its line where the card shows, it reads every
- * `[data-wk-slot]` box and the plot's labels and rows, and checks:
+ * (1440×900, 1280×800, 1100×800, 390×844) and drawer state (none, Activity, Recordings, Scanner, Settings at its
+ * 560 px, expanded Cards; a phone opens each as a sheet), plus the tuned card minimised to its line where the card
+ * shows and, from 1280 px, the Scanner with its plan pane attached, it reads every `[data-wk-slot]` box and the plot's
+ * labels and rows, and checks:
  * - I1, I2: no two slots intersect or come closer than the layout's gaps; all inside the window's 16 px margin
  *   (src/shell/layout/compute.ts `layoutViolations`, the same rule the unit tests use);
  * - I7: each slot's box equals the rectangle it carries (`data-wk-rect`) within 1 px;
@@ -15,9 +16,12 @@
  *   12 px under the top rail;
  * - I3, I8: across a viewport's cells the Tuner, the Receiver, Listen, the dock, the search button, the player and
  *   the card's home never move;
- * - during one drawer opening per viewport, sampled on every animation frame for 400 ms: no two slots intersect.
- * It runs with CSS transitions and animations switched off, so every box is the settled one; `ticks` says how
- * many animation frames the sampler saw (none means the headless page produced no frames to sample).
+ * - during one drawer opening per viewport, and when playback starts, every rendered frame for 400 ms (1200 ms for
+ *   playback): no two slots intersect.
+ * It runs with CSS transitions and animations switched off, so every box is a settled one: the frame sampler sees
+ * each render the layout commits on the way (a drawer's loading skeleton, a first unmeasured pass), not motion
+ * between two of them; no per-frame motion is checked. `ticks` says how many animation frames the sampler saw
+ * (none means the headless page produced no frames to sample).
  * The report gains `layout`; exit 1 on any violation.
  */
 import type { Page } from "playwright-core"
@@ -81,6 +85,7 @@ const DRAWERS: { name: string; hash: string; ready: string }[] = [
 	{ name: "activity", hash: "#/activity", ready: ".wka-drawer" },
 	{ name: "recordings", hash: "#/recordings", ready: ".wkr-drawer" },
 	{ name: "scanner", hash: "#/scanner", ready: ".wks-drawer" },
+	{ name: "settings", hash: "#/settings", ready: ".wkf-set-head" },
 ]
 /** Onset (6 s of core time) plus the snapshot cadence and a margin (ms). */
 const NOTICE_MS = 15_000
@@ -408,6 +413,7 @@ export async function layoutFlow(
 					await go(d.hash)
 					await page
 						.locator(`.wk-shell-drawer ${d.ready}`)
+						.first()
 						.waitFor({ timeout: STEP_MS })
 				}
 				if (!sampled) {
@@ -416,6 +422,19 @@ export async function layoutFlow(
 					sampled = true
 				} else await open()
 				await record(W < 1100 ? `${d.name} (sheet)` : d.name)
+			}
+			// the Scanner with its plan pane attached left of the column (from 1280 px; narrower it is pushed in)
+			if (W >= 1280) {
+				phase = `${vp}: attach the plan pane`
+				await go("#/scanner")
+				const plan = page.locator(".wk-shell-drawer .wks-plan-btn")
+				await plan.waitFor({ timeout: STEP_MS })
+				await plan.click()
+				const paneSlot = page.locator(".wk-shell-paneslot")
+				await paneSlot.waitFor({ timeout: STEP_MS })
+				await record("scanner, plan pane attached")
+				await page.keyboard.press("Escape")
+				await paneSlot.waitFor({ state: "detached", timeout: STEP_MS })
 			}
 			// Activity › Cards › Expand, then back to the list
 			phase = `${vp}: expand the cards`

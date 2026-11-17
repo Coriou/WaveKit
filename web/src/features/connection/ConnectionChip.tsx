@@ -1,7 +1,8 @@
 // A quiet status chip, a guest in the shell's status slot (src/shell/layout/compute.ts, "Status slot"): beside the
 // condition notice against the Receiver on a wide window (title only when the slot is tight), in the strip under the
 // top rail on a phone, or in a covering drawer's notice slot. It reports its natural widths (whole, title only) and
-// takes the rectangle the layout gives it. It shows while the event socket is down or reconnecting, the core cannot be
+// takes the rectangle the layout gives it, in the shell's guest layer (under the island panels and the palette, and
+// hidden while the palette is open). It shows while the event socket is down or reconnecting, the core cannot be
 // reached, the core refuses the page's address (the chip links to the other loopback name), or a protected core has
 // no session for this browser (read-only; the chip opens the pairing sheet when the core pairs browsers).
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
@@ -12,6 +13,8 @@ import { useStore } from "../../data/index.ts"
 import { slotAttrs, topLeft } from "../../shell/layout/slot.ts"
 import {
 	dockedSlot,
+	guestLayer,
+	guestTarget,
 	publishedLayout,
 	statusReports,
 } from "../../shell/layout/stores.ts"
@@ -34,6 +37,7 @@ export function ConnectionChip() {
 	)
 	const shell = useStore(publishedLayout, l => l !== null)
 	const slot = useStore(dockedSlot)
+	const layer = useStore(guestLayer)
 	const [pairing, setPairing] = useState(false)
 	const chip = useRef<HTMLElement | null>(null)
 	const notice = connectionNotice(
@@ -141,9 +145,10 @@ export function ConnectionChip() {
 			{content}
 		</div>
 	)
+	const target = guestTarget(docked, slot, layer)
 	return (
 		<>
-			{docked && slot ? createPortal(guest, slot) : guest}
+			{target && createPortal(guest, target)}
 			{sheet}
 		</>
 	)
