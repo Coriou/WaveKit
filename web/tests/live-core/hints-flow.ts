@@ -213,7 +213,13 @@ async function cutByKeyboard(page: Page, id: string): Promise<string[]> {
 		problems.push("Tab did not go into the cut card")
 	// ArrowDown: a step down (the scroll may animate, so wait for it)
 	await page.keyboard.press("ArrowDown")
-	if (!(await within(2_000, async () => (await where()).scrollTop > 0))) {
+	if (
+		!(await withinFrames(
+			page,
+			2_000,
+			async () => (await where()).scrollTop > 0,
+		))
+	) {
 		const w = await where()
 		problems.push(
 			`ArrowDown did not scroll the cut card (range ${w.range}, focus ${w.active})`,
@@ -225,7 +231,7 @@ async function cutByKeyboard(page: Page, id: string): Promise<string[]> {
 		const w = await where()
 		return Math.abs(w.scrollTop - w.range) <= 1
 	}
-	if (!(await within(2_000, atEnd))) {
+	if (!(await withinFrames(page, 2_000, atEnd))) {
 		const w = await where()
 		problems.push(
 			`End did not scroll the cut card to its end (at ${w.scrollTop} of ${w.range}, focus ${w.active})`,
@@ -265,7 +271,13 @@ const focusState = (page: Page, id: string) =>
 async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
 	const problems: string[] = []
 	const backIn = async (what: string) => {
-		if (!(await within(2_000, async () => (await focusState(page, id)).cut)))
+		if (
+			!(await withinFrames(
+				page,
+				2_000,
+				async () => (await focusState(page, id)).cut,
+			))
+		)
 			problems.push(`${what}: the card is not cut again`)
 		await page.keyboard.press("Tab")
 		if (!(await focusState(page, id)).inBubble)
@@ -278,7 +290,8 @@ async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
 		style.textContent = `[data-wk-hint-bubble="${markId}"] > :not(:first-child) { display: none }`
 		document.head.append(style)
 	}, id)
-	const whole = await within(
+	const whole = await withinFrames(
+		page,
 		2_000,
 		async () => !(await focusState(page, id)).cut,
 	)
@@ -293,7 +306,11 @@ async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
 	// a scroll elsewhere (past the settle time after opening) closes it: focus to the mark
 	await page.waitForTimeout(300)
 	await page.evaluate(() => document.dispatchEvent(new Event("scroll")))
-	await within(2_000, async () => !(await focusState(page, id)).open)
+	await withinFrames(
+		page,
+		2_000,
+		async () => !(await focusState(page, id)).open,
+	)
 	const scrolled = await focusState(page, id)
 	if (scrolled.open) problems.push("a scroll elsewhere left it open")
 	if (!scrolled.onMark)
@@ -306,7 +323,11 @@ async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
 	if (!plain) problems.push("no plain text in the panel to click")
 	else {
 		await page.mouse.click(plain.x, plain.y)
-		await within(2_000, async () => !(await focusState(page, id)).open)
+		await withinFrames(
+			page,
+			2_000,
+			async () => !(await focusState(page, id)).open,
+		)
 		await frames(page, 2)
 		const clicked = await focusState(page, id)
 		if (clicked.open) problems.push(`a click on ${plain.what} left it open`)
@@ -337,7 +358,11 @@ async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
 	if (!other) problems.push("no other mark to click")
 	else {
 		await page.mouse.click(other.x, other.y)
-		await within(2_000, async () => !(await focusState(page, id)).open)
+		await withinFrames(
+			page,
+			2_000,
+			async () => !(await focusState(page, id)).open,
+		)
 		const onOther = await page.evaluate(
 			otherId =>
 				document.activeElement?.getAttribute("data-wk-hint-mark") === otherId,
@@ -355,7 +380,7 @@ async function cutKeepsFocus(page: Page, id: string): Promise<string[]> {
 		if (plain) await page.mouse.move(plain.x, plain.y)
 		await page.locator(`[data-wk-hint-mark="${id}"]`).focus()
 		await page.keyboard.press("Enter")
-		await within(2_000, async () => (await measure(page, id)).open)
+		await withinFrames(page, 2_000, async () => (await measure(page, id)).open)
 		await backIn("after the click on another mark")
 	}
 	return problems
@@ -429,7 +454,7 @@ async function noRoomNotExpanded(page: Page, id: string): Promise<string[]> {
 		style.textContent = `[data-wk-hint-bubble="${markId}"] { line-height: 2000px !important }`
 		document.head.append(style)
 	}, id)
-	const gone = await within(2_000, async () => {
+	const gone = await withinFrames(page, 2_000, async () => {
 		const s = await state()
 		return s.mounted && s.hidden && s.expanded === "false"
 	})
@@ -451,7 +476,7 @@ async function noRoomNotExpanded(page: Page, id: string): Promise<string[]> {
 	)
 	await page.keyboard.press("Escape")
 	await page.keyboard.press("Enter")
-	const back = await within(2_000, async () => {
+	const back = await withinFrames(page, 2_000, async () => {
 		const t = await state()
 		return !t.hidden && t.expanded === "true" && t.controls !== null
 	})
@@ -470,6 +495,50 @@ const frames = (page: Page, n = 2): Promise<void> =>
 			}),
 		n,
 	)
+
+/** Animation frames the page has drawn since the flow first asked (a counter it keeps from then on). */
+const frameCount = (page: Page): Promise<number> =>
+	page.evaluate(() => {
+		const w = window as unknown as { wkFlowFrames?: number }
+		if (w.wkFlowFrames === undefined) {
+			w.wkFlowFrames = 0
+			const tick = () => {
+				w.wkFlowFrames = (w.wkFlowFrames ?? 0) + 1
+				requestAnimationFrame(tick)
+			}
+			requestAnimationFrame(tick)
+		}
+		return w.wkFlowFrames
+	})
+
+/** Frames a frame-driven change is given at least: a ResizeObserver's re-place, a smooth keyboard scroll. */
+const SETTLE_FRAMES = 12
+/** The longest a frame-driven wait lasts, however few frames the page draws. */
+const SETTLE_CAP_MS = 20_000
+
+/**
+ * `within` for what the page does in its animation frames (a ResizeObserver, the hints' per-frame re-placing,
+ * a smooth keyboard scroll): gives up only once `ms` have passed and the page has drawn `SETTLE_FRAMES`
+ * frames since the wait began (`SETTLE_CAP_MS` at most). A page short of frames (a loaded host, a software
+ * GPU drew one or two a second) gets the frames the change needs, not only the wall time; one that never
+ * makes the change still fails.
+ */
+async function withinFrames(
+	page: Page,
+	ms: number,
+	check: () => boolean | Promise<boolean>,
+): Promise<boolean> {
+	const from = await frameCount(page)
+	const start = Date.now()
+	for (;;) {
+		if (await check()) return true
+		const spent = Date.now() - start
+		if (spent > SETTLE_CAP_MS) return false
+		if (spent > ms && (await frameCount(page)) - from >= SETTLE_FRAMES)
+			return false
+		await page.waitForTimeout(50)
+	}
+}
 
 /** Waits (2 s at most) until the hint of `id` is open and its fade is done, then measures it. */
 async function settled(page: Page, id: string): Promise<Measure> {
