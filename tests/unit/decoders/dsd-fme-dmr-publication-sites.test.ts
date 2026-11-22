@@ -69,6 +69,7 @@ const OUTPUT_SITES = [
 	"parseOutput",
 	"handleSync",
 	"handleDmrTrainIds",
+	"handleDmrTrainIds",
 	"handleP25P1Line",
 	"findWavFileAsync",
 	"endCall",

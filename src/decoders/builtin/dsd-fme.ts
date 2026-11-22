@@ -539,17 +539,22 @@ interface DsdFmeCallState {
 	/**
 	 * DMR: one checked link control after a voice burst named other IDs than
 	 * the call's (rival): the call is no longer known clear, and a second
-	 * agreeing copy is the next talker (handleDmrIds).
+	 * agreeing copy is the next talker (handleDmrIds). `atMs`: when it
+	 * printed (a train's second copy agrees only within DMR_TRAIN_STEP_MS).
 	 */
-	rival?: { talkgroup: number; source: number; voiceSeq: number } | undefined
+	rival?:
+		| { talkgroup: number; source: number; voiceSeq: number; atMs: number }
+		| undefined
 	/**
 	 * DMR: the call started on a terminator's link control (TLC + LC) with
 	 * no call of those IDs just ended on the lane: an over whose voice
 	 * dsd-fme did not decode, known only from its terminator train
-	 * (handleDmrTrainIds). The train's own terminators do not end it; it
-	 * ends CALL_TIMEOUT_MS after its last burst, on the next talker, or at
-	 * its last line when a voice or header burst of the lane follows (the
-	 * next over, handleDmrSync).
+	 * (handleDmrTrainIds). Only link controls of its own IDs keep it
+	 * running (its own terminators, other lines and other IDs do not); it
+	 * ends at its last own link control: CALL_TIMEOUT_MS after it, on the
+	 * next talker, when a direct train breaks (DMR_TRAIN_STEP_MS), or when a
+	 * voice or header burst of the lane follows (the next over,
+	 * handleDmrSync).
 	 */
 	train?: boolean | undefined
 }
@@ -573,6 +578,13 @@ interface HeldEnd {
 	 * the call unnamed).
 	 */
 	ids?: { talkgroup: number; source: number } | undefined
+}
+
+/** One terminator link control's IDs, and when it printed (handleDmrTrainIds). */
+interface DmrTrainCopy {
+	talkgroup: number
+	source: number
+	atMs: number
 }
 
 /** The terminator's own link control, expected right after it (TERMINATOR_TRAILER_MS). */
@@ -868,6 +880,20 @@ export const SYNC_PRINT_JITTER_MS = 45
 export const DMR_TRAILER_HOLD_MS = DMR_BURST_MS + SYNC_PRINT_JITTER_MS
 
 /**
+ * The longest step between two terminator link controls (TLC + LC) of one
+ * continuous train: a terminator burst repeats every 60 ms burst of its
+ * slot (a direct radio's terminators back to back, a repeater's train), so
+ * the next decoded copy is on air within one superframe of the previous
+ * (up to five copies lost in a row, 6 x 60 = 360 ms), and its line arrives
+ * up to one line clump later: 360 + 340 = 700 ms. A direct (MS/DM) radio
+ * has no repeater hang: past this step its train is over, and the same IDs
+ * again are its next over. Two copies of another talker agree only within
+ * it (one train), and a held call_end waits this long for a repeated
+ * terminator's checked link control (resolveHeldEnd).
+ */
+export const DMR_TRAIN_STEP_MS = DMR_SUPERFRAME_MS + DSD_FME_LINE_CLUMP_MS
+
+/**
  * A voice LC header whose sync printed an error keeps its checked IDs as
  * the over's candidate this long: one superframe of voice, 6 x 60 = 360 ms,
  * plus one line clump, 340 ms: 360 + 340 = 700 ms. A voice burst of the
@@ -960,6 +986,16 @@ export function unnamedEvidenceSpanMs(
  * a sync hunt prints "VC1*"), direct mode's VC*, TLC.
  */
 const DMR_BURST = /\|\s*(?<burst>VLC|VC[1-6*]|TLC)\*?(?=\s|$)/
+/** A DMR idle burst (a repeater slot with no call on it). */
+const DMR_IDLE = /\|\s*IDLE(?=\s|$)/
+/**
+ * Checked idle bursts of a repeater slot in a row (no voice, header or
+ * terminator burst of the slot between them) that end its terminator
+ * train: two, 2 x 60 ms of the slot carrying no call. One is not enough: a
+ * recorded continuous train printed a single idle burst between two of its
+ * copies 120 ms apart (a misread slot type).
+ */
+const DMR_IDLE_TRAIN_END = 2
 /**
  * A DMR header burst that is not a clean voice LC header: a PI header
  * (privacy, sent after the voice LC header) or, in direct mode (MS/DM), a
@@ -1135,12 +1171,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 */
 	private dmrIdRejected = 0
 	/**
-	 * Per lane, the IDs of its last named DMR call that ended and when the
-	 * lane last printed them: a terminator train naming them within
-	 * CALL_TIMEOUT_MS is that call's hang train, not a new call; other IDs
-	 * inside it are the next talker only on a second agreeing copy (`rival`,
-	 * which a rival copy on the call's own voice starts)
-	 * (handleDmrTrainIds).
+	 * Per lane, the IDs of its last named DMR call that published and ended,
+	 * and when the lane last printed them: a terminator train naming them is
+	 * that call's train, not a new call, while it lasts (dmrTrainWindowMs: a
+	 * repeater's hang, CALL_TIMEOUT_MS from its last copy; a direct radio's
+	 * continuous train, DMR_TRAIN_STEP_MS from its last copy). Other IDs
+	 * inside it are the next talker on a clean direct copy, else only on a
+	 * second agreeing copy within DMR_TRAIN_STEP_MS (`rival`, which a rival
+	 * copy on the call's own voice starts) (handleDmrTrainIds).
 	 */
 	private dmrTrainOf = new Map<
 		number,
@@ -1148,9 +1186,18 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			talkgroup: number
 			source: number
 			atMs: number
-			rival: { talkgroup: number; source: number } | undefined
+			rival: DmrTrainCopy | undefined
 		}
 	>()
+	/**
+	 * Per lane, a terminator link control whose sync printed an error, with
+	 * no call or train around it: a candidate only. A second agreeing copy
+	 * within DMR_TRAIN_STEP_MS starts its train call, back-dated to it
+	 * (handleDmrTrainIds).
+	 */
+	private dmrTrainSeed = new Map<number, DmrTrainCopy>()
+	/** Per repeater lane, its checked idle bursts since its last call burst (DMR_IDLE_TRAIN_END). */
+	private dmrIdleRun = new Map<number, number>()
 
 	// Active call state (null = no call in progress)
 	private callState: DsdFmeCallState | null = null
@@ -1468,6 +1515,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.candidate = undefined
 		})
 		this.dmrTrainOf.clear()
+		this.dmrTrainSeed.clear()
+		this.dmrIdleRun.clear()
 		this.dmrRoute = newDmrRoute()
 		this.flushPendingDmrLink(false)
 		// The old child's DMR mode and slot state, as stop() clears it.
@@ -1719,15 +1768,16 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/**
 	 * Whether a call may be announced: one with an identity or that started on
-	 * an identity, or a call-first call a checked link control spoke for
-	 * (encryption learned) or whose frames ran long enough (evidenced).
+	 * an identity, or a call-first call the clearance machine proved clear (a
+	 * checked link control spoke for it) or whose frames ran long enough
+	 * (evidenced). A privacy print (encrypted, PI, ALG / KEY ID) is never
+	 * evidence: it decides trust, never whether a call publishes.
 	 */
 	private hasEvidence(call: DsdFmeCallState): boolean {
 		return (
 			call.onFrames !== true ||
 			!this.weakMetadata(call) ||
-			call.flags.encrypted ||
-			call.encryptionKnown === true ||
+			(call.encryptionKnown === true && !call.flags.encrypted) ||
 			call.evidenced === true
 		)
 	}
@@ -1765,15 +1815,24 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (SYNC_PATTERN.test(line)) {
 			// A sync that printed an error or lost sync does not close the
 			// trailer's burst clean.
-			if (burstError(line) || /Frame Sync Err\b|SYNC LOST|no sync/i.test(line))
-				held.errored = true
-			// The terminator printed again (its lane's) before its trailer does
-			// not close its own burst: the call_end stays held for the trailer
-			// (handleTermination). After the trailer it is the next burst of
-			// the repeater's train: the trailer's burst closed, and that
-			// burst's own lines are not the trailer's.
-			if (DMR_BURST.exec(line)?.groups?.["burst"] === "TLC" && !held.lc)
+			const syncErrored =
+				burstError(line) || /Frame Sync Err\b|SYNC LOST|no sync/i.test(line)
+			// The terminator printed again (its lane's) before a checked
+			// trailer does not close the call: the call_end stays held
+			// (handleTermination), and this copy is a burst of its own whose
+			// link control may still name it (an errored trailer before it
+			// spoke for its own burst only). After the trailer it is the next
+			// burst of the train: the trailer's burst closed, and that burst's
+			// own lines are not the trailer's.
+			if (DMR_BURST.exec(line)?.groups?.["burst"] === "TLC" && !held.lc) {
+				held.errored = syncErrored
+				held.untilMs = Math.max(
+					held.untilMs,
+					now.getTime() + DMR_TRAILER_HOLD_MS,
+				)
 				return false
+			}
+			if (syncErrored) held.errored = true
 			const ended = this.closeHeldEnd(now)
 			if (ended) this.emitOutput(ended)
 			return false
@@ -1783,7 +1842,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const ids =
 			DMR_VOICE_EVENT.exec(line)?.groups ?? DMR_TGT_SRC.exec(line)?.groups
 		const errored = burstError(line)
-		if (errored) held.errored = true
+		if (errored) {
+			held.errored = true
+			// An unchecked trailer: the terminator's next copy (one train)
+			// may still carry it checked.
+			if (!held.lc)
+				held.untilMs = Math.max(held.untilMs, now.getTime() + DMR_TRAIN_STEP_MS)
+		}
 		// A non-clear algorithm print: the burst did not close clean (the
 		// clearance machine marks the call encrypted).
 		const heldAlg =
@@ -1859,13 +1924,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.pendingCall = null
 		}
 		const ended = this.endCall(now, false, endAt)
-		// The terminator's link control (printed again) is not a new call.
-		this.recentlyTerminated = {
-			protocol: "dmr",
-			talkgroup: call.talkgroup,
-			source: call.source,
-			untilMs: held.atMs + TERMINATOR_TRAILER_MS,
-		}
+		// The terminator's link control (printed again) is not a new call:
+		// the train of a call that published. One suppressed (unnamed, no
+		// evidence) left nothing for its train to belong to: its next checked
+		// copy starts the over's call (handleDmrTrainIds).
+		this.recentlyTerminated =
+			ended === null
+				? null
+				: {
+						protocol: "dmr",
+						talkgroup: call.talkgroup,
+						source: call.source,
+						untilMs: held.atMs + TERMINATOR_TRAILER_MS,
+					}
 		return ended
 	}
 
@@ -2917,8 +2988,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (ongoing === null) return
 		if (
 			ongoing.protocol === "dmr" &&
-			!DMR_BURST.test(line) &&
-			!DMR_SLOT_WORD.test(line)
+			// A train call runs on its own link controls only (handleDmrTrainIds).
+			(ongoing.train === true ||
+				(!DMR_BURST.test(line) && !DMR_SLOT_WORD.test(line)))
 		)
 			return
 		ongoing.lastUpdate = now
@@ -3168,9 +3240,23 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * IDs stays one call (a missed split, never a split over).
 	 */
 	private handleDmrSync(line: string, now: Date): DecoderOutput | null {
+		// A repeater slot's checked idle bursts (DMR_IDLE_TRAIN_END in a row):
+		// the slot carries no call, so the terminator train of its last call
+		// is over (handleDmrTrainIds).
+		if (
+			!this.linkDmrMs &&
+			this.dmrBs &&
+			DMR_IDLE.test(line) &&
+			!LINE_ERR.test(line)
+		) {
+			const run = (this.dmrIdleRun.get(this.laneKey) ?? 0) + 1
+			this.dmrIdleRun.set(this.laneKey, run)
+			return run === DMR_IDLE_TRAIN_END ? this.endDmrTrain(now) : null
+		}
 		const burst = DMR_BURST.exec(line)?.groups?.["burst"]
 		const header = dmrHeaderLine(line, burst)
 		if (burst === undefined && !header) return null
+		this.dmrIdleRun.delete(this.laneKey)
 		const nowMs = now.getTime()
 		const voice = burst !== undefined && burst !== "TLC"
 		const clean = !LINE_ERR.test(line)
@@ -3197,6 +3283,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			return ended
 		}
 		if (burst === undefined) return null
+		// A train call runs on its own link controls only (handleDmrTrainIds).
+		if (ongoing.train === true) return null
 		ongoing.lastUpdate = now
 		if (voice) this.lastVoiceSyncMs = nowMs
 		// A voice LC header is not a voice burst (dmrRekey).
@@ -3694,6 +3782,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					talkgroup: tgt,
 					source: src,
 					voiceSeq: this.voiceSeq,
+					atMs: now.getTime(),
 				}
 				// The clearance machine revokes known clear on this copy.
 				ongoing.lastUpdate = now
@@ -3740,18 +3829,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/**
 	 * A DMR link control after a terminator (TLC + LC, a repeater's hang
 	 * train or a direct radio's end of transmission). Its IDs never name or
-	 * clear a running call. A checked, plausible one of this burst's slot:
+	 * clear a running voice call. A checked, plausible one of this burst's
+	 * slot:
 	 *
-	 * - names the call that just ended on the lane (same IDs within
-	 *   CALL_TIMEOUT_MS, dmrTrainOf): its hang train, no new call; other IDs
-	 *   inside that train start the next talker's call only on a second
-	 *   agreeing copy (a false link control of a train is one copy);
-	 * - refreshes a running train call of the same IDs;
-	 * - against a running train call of other IDs, is the next talker on a
-	 *   second agreeing copy (the first is a rival only);
-	 * - with no call on the lane, starts one (a train call): an over whose
-	 *   voice was not decoded is still a call (its metadata always
-	 *   publishes; the clearance machine never clears it, voiceless).
+	 * - names the call that just ended on the lane while its train lasts
+	 *   (dmrTrainOf, dmrTrainWindowMs): no new call;
+	 * - refreshes a running train call of the same IDs (a direct one only
+	 *   while its train is continuous, DMR_TRAIN_STEP_MS; past it the call
+	 *   ends at its last copy and this copy is the next over);
+	 * - against such a train or train call of other IDs, is the next talker:
+	 *   at once on a direct radio's clean sync (no repeater train is on the
+	 *   channel to garble it), else on a second agreeing copy within
+	 *   DMR_TRAIN_STEP_MS (a false link control of a train is one copy), the
+	 *   call back-dated to its first copy;
+	 * - with no call or train on the lane, starts one (a train call) when
+	 *   its terminator sync is clean, else on a second agreeing copy
+	 *   (dmrTrainSeed): an over whose voice was not decoded is still a call
+	 *   (its metadata always publishes; the clearance machine never clears
+	 *   it, voiceless).
+	 *
+	 * A train call ends at its own last link control (processCallMetadata,
+	 * endCall): the next talker's copies never extend it.
 	 */
 	private handleDmrTrainIds(
 		line: string,
@@ -3777,6 +3875,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			return null
 		}
 		const matchSlot = this.linkDmrMs ? undefined : slot
+		const direct = this.linkDmrMs
+		const cleanSync = this.laneSync?.clean === true
+		const same = (copy: { talkgroup: number | null; source: number | null }) =>
+			copy.talkgroup === tgt && copy.source === src
+		// Another talker's copy: whether it starts that talker's call now,
+		// else whether it agrees with the rival copy before it (one train).
+		const agrees = (rival: DmrTrainCopy | undefined) =>
+			rival !== undefined &&
+			same(rival) &&
+			nowMs >= rival.atMs &&
+			nowMs - rival.atMs <= DMR_TRAIN_STEP_MS
 		let ongoing = this.ongoingCall("dmr")
 		// A named call whose end waits for its terminator's trailer, and this
 		// trailer names another talker (resolveHeldEnd marked the burst not
@@ -3784,35 +3893,53 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (
 			ongoing?.heldEnd !== undefined &&
 			ongoing.talkgroup !== null &&
-			(ongoing.talkgroup !== tgt || ongoing.source !== src)
+			!same(ongoing)
 		) {
 			const ended = this.closeHeldEnd(now)
 			if (ended) this.emitOutput(ended)
 			ongoing = this.ongoingCall("dmr")
 		}
+		/** When the call this copy starts began: its first agreeing copy. */
+		let fromMs = nowMs
+		/** Another talker's copy against a train call: it starts that talker's call. */
+		let next = false
 		if (ongoing !== null) {
 			if (ongoing.train !== true || ongoing.talkgroup === null) {
 				this.rejectDmrIds("not after voice")
 				return null
 			}
-			if (ongoing.talkgroup === tgt && ongoing.source === src) {
+			const last = ongoing.lastUpdate.getTime()
+			if (same(ongoing) && !(direct && nowMs - last > DMR_TRAIN_STEP_MS)) {
 				ongoing.rival = undefined
 				ongoing.lastUpdate = now
 				if (encrypted) this.markDmrEncrypted(matchSlot)
 				return null
 			}
-			// Another talker splits a train call on a second agreeing copy,
-			// announced or not (its announcement time depends on its trust).
-			const rival = ongoing.rival
-			if (rival?.talkgroup !== tgt || rival.source !== src) {
-				ongoing.rival = { talkgroup: tgt, source: src, voiceSeq: this.voiceSeq }
-				this.rejectDmrIds("single copy")
-				return null
+			if (!same(ongoing) && !(direct && cleanSync)) {
+				const rival = ongoing.rival
+				if (!agrees(rival)) {
+					ongoing.rival = {
+						talkgroup: tgt,
+						source: src,
+						voiceSeq: this.voiceSeq,
+						atMs: nowMs,
+					}
+					this.rejectDmrIds("single copy")
+					return null
+				}
+				fromMs = rival?.atMs ?? nowMs
 			}
-			ongoing.rival = undefined
-		} else {
+			next = !same(ongoing)
+			// The train call ends at its own last link control; this copy is
+			// the next talker, or (a direct train that broke) a copy with no
+			// call on the lane.
+			const ended = this.endOngoingCall(now, false, ongoing.lastUpdate)
+			if (ended) this.emitOutput(ended)
+		}
+		if (!next) {
 			// The terminator's own link control right after it (the trailer
-			// window, processCallMetadata's rule): its call's train, no new call.
+			// window, processCallMetadata's rule) of a call that published:
+			// its call's train, no new call.
 			const trailer = this.recentlyTerminated
 			if (
 				trailer?.protocol === "dmr" &&
@@ -3831,35 +3958,84 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				return null
 			}
 			const last = this.dmrTrainOf.get(this.laneKey)
+			const seed = this.dmrTrainSeed.get(this.laneKey)
 			if (
 				last !== undefined &&
 				nowMs >= last.atMs &&
-				nowMs - last.atMs <= CALL_TIMEOUT_MS
+				nowMs - last.atMs <= this.dmrTrainWindowMs()
 			) {
-				if (last.talkgroup === tgt && last.source === src) {
+				if (same(last)) {
 					last.atMs = nowMs
 					last.rival = undefined
 					this.rejectDmrIds("train")
 					return null
 				}
-				if (last.rival?.talkgroup !== tgt || last.rival.source !== src) {
-					last.rival = { talkgroup: tgt, source: src }
-					this.rejectDmrIds("single copy")
-					return null
+				if (!(direct && cleanSync)) {
+					if (!agrees(last.rival)) {
+						last.rival = { talkgroup: tgt, source: src, atMs: nowMs }
+						this.rejectDmrIds("single copy")
+						return null
+					}
+					fromMs = last.rival?.atMs ?? nowMs
 				}
+			} else if (agrees(seed)) fromMs = seed?.atMs ?? nowMs
+			else if (!cleanSync) {
+				// No call or train here: a copy on an errored sync is a
+				// candidate only, a second agreeing copy confirms it.
+				this.dmrTrainSeed.set(this.laneKey, {
+					talkgroup: tgt,
+					source: src,
+					atMs: nowMs,
+				})
+				this.rejectDmrIds("unclean sync")
+				return null
 			}
-			this.dmrTrainOf.delete(this.laneKey)
 		}
+		this.dmrTrainOf.delete(this.laneKey)
+		this.dmrTrainSeed.delete(this.laneKey)
 		this.recentlyTerminated = null
+		const before = this.ongoingCall("dmr")
 		const event = this.processCallMetadata(now, "dmr", tgt, src, slot, dmrMeta)
 		const call = this.ongoingCall("dmr")
-		if (call !== null && call !== ongoing) {
+		if (call !== null && call !== before) {
 			call.train = true
 			call.voiceAtMs = undefined
+			// Back-dated to its first agreeing copy.
+			if (fromMs < call.startTime.getTime()) {
+				call.startTime = new Date(fromMs)
+				call.startWallMs = this.toWallMs(fromMs)
+			}
 			this.dmrClearance.voiceless(call.callId)
 		}
 		if (encrypted) this.markDmrEncrypted(matchSlot)
 		return event
+	}
+
+	/**
+	 * The lane's terminator train is over (a repeater slot went idle): the
+	 * same IDs again are the next over. A running train call ends at its
+	 * last own link control; a voice call is left to its own end.
+	 */
+	private endDmrTrain(now: Date): DecoderOutput | null {
+		const ongoing = this.ongoingCall("dmr")
+		const ended =
+			ongoing?.train === true && ongoing.heldEnd === undefined
+				? this.endOngoingCall(now, false, ongoing.lastUpdate)
+				: null
+		// After the call's end (endCall notes its train).
+		this.dmrTrainOf.delete(this.laneKey)
+		this.dmrTrainSeed.delete(this.laneKey)
+		return ended
+	}
+
+	/**
+	 * How long after a just-ended call's last copy its terminator train may
+	 * still name it (dmrTrainOf): a repeater's hang train, CALL_TIMEOUT_MS
+	 * (its call timeout); a direct radio has no hang, its train is
+	 * continuous: DMR_TRAIN_STEP_MS.
+	 */
+	private dmrTrainWindowMs(): number {
+		return this.linkDmrMs ? DMR_TRAIN_STEP_MS : this.callTimeoutMs()
 	}
 
 	/** A DMR link control whose IDs were not taken (dmrIdRejected). */
@@ -5123,6 +5299,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 						: {
 								talkgroup: callInfo.rival.talkgroup,
 								source: callInfo.rival.source,
+								atMs: callInfo.rival.atMs,
 							},
 			})
 

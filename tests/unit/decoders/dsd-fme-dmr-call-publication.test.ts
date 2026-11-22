@@ -259,6 +259,236 @@ describe("dsd-fme DMR calls publish whatever their trust", () => {
 	})
 })
 
+/**
+ * A direct transmission's end: voice bursts, a terminator whose link
+ * control failed its CRC, then the same terminator repeated clean (TLC + LC
+ * copies 60 ms apart). Modelled (ids and times synthetic).
+ */
+function directErroredTrailer(voice: number, step = 360): Line[] {
+	const lines: Line[] = []
+	for (let i = 0; i < voice; i++)
+		lines.push([i * step, MS("VC*")], [i * step + 1, FLCO_FEC])
+	const tlc = voice * step
+	lines.push(
+		[tlc, MS("TLC")],
+		[tlc + 1, `${LC(9001, 91)}\x1b[31m (CRC ERR)\x1b[0m`],
+	)
+	for (let i = 1; i <= 5; i++)
+		lines.push([tlc + i * 60, MS("TLC")], [tlc + i * 60 + 1, LC(9001, 91)])
+	lines.push([tlc + 400, NO_SYNC])
+	return lines
+}
+
+describe("dsd-fme DMR terminator trains: one over is one call", () => {
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["Date"] })
+		vi.setSystemTime(T0)
+	})
+	afterEach(() => vi.useRealTimers())
+
+	it("repro A: an unnamed over whose trailer failed its CRC is named by the clean terminator copies after it", () => {
+		const { starts, ends } = replay(
+			directErroredTrailer(2),
+			8000,
+			createDecoder({ mode: "auto" }),
+		)
+		expect(starts).toHaveLength(1)
+		expect(ends.map(e => [e.talkgroup, e.source])).toEqual([[9001, 91]])
+		expect(at(ends[0]!.startedAt)).toBe(0)
+		// It ends at its first terminator.
+		expect(at(ends[0]!.endedAt!)).toBe(720)
+	})
+
+	it("repro A: two voice bursts 60 ms apart, an errored trailer, then clean copies: one named call", () => {
+		const { starts, ends } = replay(
+			directErroredTrailer(2, 60),
+			8000,
+			createDecoder({ mode: "auto" }),
+		)
+		expect(starts).toHaveLength(1)
+		expect(ends.map(e => [e.talkgroup, e.source])).toEqual([[9001, 91]])
+		expect(at(ends[0]!.startedAt)).toBe(0)
+		expect(at(ends[0]!.endedAt!)).toBe(120)
+	})
+
+	it("repro A: an announced unnamed over gets its IDs from its clean terminator copies", () => {
+		const { starts, ends } = replay(
+			directErroredTrailer(10),
+			10_000,
+			createDecoder({ mode: "auto" }),
+		)
+		expect(starts).toHaveLength(1)
+		expect(ends.map(e => [e.talkgroup, e.source])).toEqual([[9001, 91]])
+		expect(at(ends[0]!.endedAt!)).toBe(3600)
+	})
+
+	it("repro B: one link control after a terminator sync that printed an error starts no call", () => {
+		const lines: Line[] = [
+			[0, MS("TLC \x1b[31m (CRC ERR) \x1b[0m")],
+			[1, LC(9001, 91)],
+			[100, NO_SYNC],
+		]
+		const { starts, ends } = replay(
+			lines,
+			8000,
+			createDecoder({ mode: "auto" }),
+		)
+		expect(starts).toHaveLength(0)
+		expect(ends).toHaveLength(0)
+		// A clean copy of the same terminator confirms it: one call, from the first copy.
+		const confirmed = replay(
+			[
+				...lines.slice(0, 2),
+				[60, MS("TLC")],
+				[61, LC(9001, 91)],
+				[100, NO_SYNC],
+			],
+			8000,
+			createDecoder({ mode: "auto" }),
+		)
+		expect(confirmed.ends.map(e => [e.talkgroup, e.source])).toEqual([
+			[9001, 91],
+		])
+		expect(at(confirmed.ends[0]!.startedAt)).toBe(1)
+	})
+
+	it("repro C: a direct talker's second over, only its terminators decoded, 2.2 s after the first, is its own call", () => {
+		const lines: Line[] = [
+			[0, MS("VLC")],
+			[1, LC(9001, 91)],
+			[60, MS("VC*")],
+			[61, LC(9001, 91)],
+			[420, MS("VC*")],
+			[421, LC(9001, 91)],
+			[780, MS("TLC")],
+			[781, LC(9001, 91)],
+			[840, NO_SYNC],
+			[3000, MS("TLC")],
+			[3001, LC(9001, 91)],
+			[3060, MS("TLC")],
+			[3061, LC(9001, 91)],
+			[3100, NO_SYNC],
+		]
+		const { ends } = replay(lines, 10_000, createDecoder({ mode: "auto" }))
+		expect(ends.map(e => [e.talkgroup, e.source, at(e.startedAt)])).toEqual([
+			[9001, 91, 0],
+			[9001, 91, 3001],
+		])
+		expect(at(ends[0]!.endedAt!)).toBe(780)
+		expect(at(ends[1]!.endedAt!)).toBe(3061)
+	})
+
+	it("repro C: another direct talker's one clean terminator copy right after a call is that talker's call", () => {
+		const lines: Line[] = [
+			[0, MS("VLC")],
+			[1, LC(9001, 91)],
+			[60, MS("VC*")],
+			[420, MS("VC*")],
+			[421, LC(9001, 91)],
+			[780, MS("TLC")],
+			[781, LC(9001, 91)],
+			[840, MS("TLC")],
+			[841, LC(9002, 92)],
+			[900, NO_SYNC],
+		]
+		const { ends } = replay(lines, 10_000, createDecoder({ mode: "auto" }))
+		expect(ends.map(e => [e.talkgroup, e.source])).toEqual([
+			[9001, 91],
+			[9002, 92],
+		])
+		// On an unclean sync one copy of another talker is not enough.
+		const unclean = lines.map(
+			([t, text]): Line =>
+				t === 840 ? [t, MS("TLC \x1b[31m (CRC ERR) \x1b[0m")] : [t, text],
+		)
+		expect(
+			replay(unclean, 10_000, createDecoder({ mode: "auto" })).ends.map(e => [
+				e.talkgroup,
+				e.source,
+			]),
+		).toEqual([[9001, 91]])
+	})
+
+	it("repro D: a repeater train call ends at its own last link control; the next talker starts at its first copy", () => {
+		const lines: Line[] = []
+		for (let i = 0; i < 4; i++)
+			lines.push([i * 120, BS(1, "TLC")], [i * 120 + 1, LC(9001, 91)])
+		lines.push(
+			[2000, BS(1, "TLC")],
+			[2001, LC(9002, 92)],
+			[2120, BS(1, "TLC")],
+			[2121, LC(9002, 92)],
+		)
+		const { ends } = replay(lines, 14_000, createDecoder({ mode: "auto" }))
+		expect(
+			ends.map(e => [e.talkgroup, e.source, at(e.startedAt), at(e.endedAt!)]),
+		).toEqual([
+			[9001, 91, 1, 361],
+			[9002, 92, 2001, 2121],
+		])
+	})
+
+	it("a repeater slot that goes idle between two trains of one talker: two overs, two calls", () => {
+		// Modelled on 100041 (private repeater capture): two terminator
+		// trains of one talker, the slot idle between them (two RF overs).
+		const train = (from: number): Line[] => {
+			const out: Line[] = []
+			for (let i = 0; i < 4; i++)
+				out.push(
+					[from + i * 120, BS(1, "TLC")],
+					[from + i * 120 + 1, LC(9001, 91)],
+				)
+			return out
+		}
+		const idle: Line[] = [
+			[600, BS(1, "IDLE")],
+			[660, BS(2, "IDLE")],
+			[720, BS(1, "IDLE")],
+		]
+		const two = replay(
+			[...train(0), ...idle, ...train(900)],
+			10_000,
+			createDecoder({ mode: "auto" }),
+		)
+		expect(
+			two.ends.map(e => [
+				e.talkgroup,
+				e.source,
+				at(e.startedAt),
+				at(e.endedAt!),
+			]),
+		).toEqual([
+			[9001, 91, 1, 361],
+			[9001, 91, 901, 1261],
+		])
+		// One idle burst inside a continuous train (a misread slot type): one call.
+		const one = replay(
+			[...train(0), [400, BS(1, "IDLE")], ...train(480)],
+			10_000,
+			createDecoder({ mode: "auto" }),
+		)
+		expect(one.ends.map(e => [at(e.startedAt), at(e.endedAt!)])).toEqual([
+			[1, 841],
+		])
+	})
+
+	it("repro D: one copy of another talker in a repeater train neither refreshes nor ends the train call", () => {
+		const lines: Line[] = []
+		for (let i = 0; i < 4; i++)
+			lines.push([i * 120, BS(1, "TLC")], [i * 120 + 1, LC(9001, 91)])
+		lines.push([2000, BS(1, "TLC")], [2001, LC(9002, 92)])
+		lines.push([5800, BS(1, "TLC")], [5801, LC(9002, 92)])
+		const { ends } = replay(lines, 14_000, createDecoder({ mode: "auto" }))
+		// The two copies of the other talker are 3.8 s apart: not one train.
+		expect(
+			ends.map(e => [e.talkgroup, e.source, at(e.startedAt), at(e.endedAt!)]),
+		).toEqual([
+			[9001, 91, 1, 361],
+			[9002, 92, 5801, 5801],
+		])
+	})
+})
+
 /** Every DMR line script of the repository: recorded excerpts and synthetic captures. */
 function corpus(): { name: string; mode: string; lines: Line[] }[] {
 	const out: { name: string; mode: string; lines: Line[] }[] = []
@@ -311,6 +541,11 @@ function corpus(): { name: string; mode: string; lines: Line[] }[] {
 			name: "modelled direct next talker",
 			mode: "auto",
 			lines: directNextTalker(),
+		},
+		{
+			name: "modelled direct errored trailer",
+			mode: "auto",
+			lines: directErroredTrailer(2, 60),
 		},
 	)
 	return out

@@ -116,7 +116,10 @@ probes). It records whether or not anyone is listening.
   `mode: dmr` is not asked for per-call files at all. An Activity row linked to
   one earlier shows no play control, and its link is removed by the next
   link sweeps (about 2 min), even while another recordings folder is missing.
-  Files dsd-fme already wrote stay on disk under the usual retention.
+  That removal is permanent: once DMR recordings are listed again, rows
+  unlinked this way (DMR files, and files whose name says no known protocol)
+  do not get their link back. Files dsd-fme already wrote stay on disk under
+  the usual retention.
 - **About 2 s behind the air.** Each sample is held for 2 s before it is
   written, so a late encryption notice can still withhold it. The call's end
   also reaches the recorder up to 10 s after the decoder reported it.
@@ -201,7 +204,30 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   over whose voice dsd-fme did not decode but whose terminator link control it
   did (a weak repeater, or a capture that opens on a transmission's end) is
   still a call, with `encryptionKnown: false`; a repeater's hang train after a
-  call is that call, not new ones.
+  call is that call, not new ones. One over is one call, and each separate
+  over is its own:
+  - A call known only from its terminator train runs from the train's first
+    checked link control to its last one of the same talkgroup and source;
+    another talker's link controls never extend it.
+  - A direct (MS/DM) radio has no hang: its train lasts while copies follow
+    each other within 700 ms (one 360 ms superframe plus one 340 ms line
+    clump). The same talker's terminators after a longer pause are its next
+    over, and another talker's single checked copy on a clean sync is that
+    talker's call.
+  - On a repeater, another talker inside a train needs two agreeing copies
+    within 700 ms; the call starts at the first one. A slot that prints two
+    checked idle bursts in a row has ended its train: the same talker's
+    terminators after that are a new over.
+  - A train link control after a terminator sync that printed an error starts
+    nothing on its own; a second agreeing copy within 700 ms starts the call
+    from the first.
+  - A call that started on its voice frames alone and whose terminator's own
+    link control failed its check still takes its talkgroup and source from the
+    terminator's next checked copy.
+  - A privacy print (an encrypted link control, a PI burst, an ALG or KEY ID
+    print) is never the evidence that announces an unnamed call: such a call
+    is announced on its frames' own evidence (a run of syncs) or a link
+    control naming it, so removing every privacy print changes no call.
 - **Hold on the stream**: the digital voice stream (`/stream`,
   `/decoders/<id>/stream`) does not mute the head of such a call; it holds it.
   Its voice waits in a per-slot ring (slot 1, slot 2, and a whole-datagram
