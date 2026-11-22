@@ -10,4 +10,5 @@ pub mod hub;
 pub mod io;
 pub mod protocol;
 pub mod ring;
+pub mod stats;
 pub mod sys;

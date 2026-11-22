@@ -1,5 +1,5 @@
-//! Command line: `wavekit-iqhub --control-fd 3 --socket-dir DIR [--ring-ms 4000] [--log-level info|debug]`,
-//! or `--version`.
+//! Command line: `wavekit-iqhub --control-fd 3 --socket-dir DIR [--ring-ms 4000]
+//! [--log-level info|debug] [--stats-file PATH]`, or `--version`.
 
 use std::path::PathBuf;
 
@@ -14,6 +14,8 @@ pub struct Args {
     pub socket_dir: PathBuf,
     pub ring_ms: u64,
     pub debug: bool,
+    /// `--stats-file`: one JSON line a second (and one at exit) appended here.
+    pub stats_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +32,7 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
     let mut socket_dir = None;
     let mut ring_ms = None;
     let mut debug = None;
+    let mut stats_file = None;
     let mut it = argv.iter();
     while let Some(k) = it.next() {
         let v = it.next().ok_or_else(|| format!("{k} needs a value"))?;
@@ -75,6 +78,13 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
                     _ => return Err("--log-level must be info or debug".into()),
                 });
             }
+            "--stats-file" => {
+                slot_taken(stats_file.is_some())?;
+                if v.is_empty() {
+                    return Err("--stats-file needs a path".into());
+                }
+                stats_file = Some(PathBuf::from(v));
+            }
             _ => return Err(format!("unknown option {k}")),
         }
     }
@@ -83,6 +93,7 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
         socket_dir: socket_dir.ok_or("missing --socket-dir")?,
         ring_ms: ring_ms.unwrap_or(DEFAULT_RING_MS),
         debug: debug.unwrap_or(false),
+        stats_file,
     }))
 }
 
@@ -104,9 +115,41 @@ mod tests {
                 control_fd: 3,
                 socket_dir: "/d".into(),
                 ring_ms: 4_000,
-                debug: false
+                debug: false,
+                stats_file: None,
             })
         );
+        match p(&[
+            "--control-fd",
+            "3",
+            "--socket-dir",
+            "/d",
+            "--stats-file",
+            "/s.jsonl",
+        ]) {
+            Ok(Command::Run(a)) => assert_eq!(a.stats_file, Some("/s.jsonl".into())),
+            r => panic!("{r:?}"),
+        }
+        assert!(p(&[
+            "--control-fd",
+            "3",
+            "--socket-dir",
+            "/d",
+            "--stats-file",
+            ""
+        ])
+        .is_err());
+        assert!(p(&[
+            "--control-fd",
+            "3",
+            "--socket-dir",
+            "/d",
+            "--stats-file",
+            "/a",
+            "--stats-file",
+            "/b"
+        ])
+        .is_err());
         for (ms, ok) in [
             ("500", true),
             ("499", false),

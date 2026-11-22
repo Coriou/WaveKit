@@ -1,10 +1,12 @@
 //! No allocation per block once warm: the read into the ring, the sinks' writes (partial ones,
 //! spills, lag skips and their events), the framed records, `progress`, the paced read and
-//! the event queue. Its own binary, because it installs a counting allocator.
+//! the event queue; and a front sink with command traffic (its reads, the tail fill, the
+//! upstream sends, the placements and their `front-placed` events). Its own binary, because it
+//! installs a counting allocator.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use wavekit_iqhub::hub::{Action, CloseReason, Hub, Kernel, Received, Sent, MAX_SINKS};
+use wavekit_iqhub::hub::{Action, Hub, Kernel, Received, Sent, MAX_SINKS};
 
 struct Counting;
 
@@ -55,8 +57,31 @@ struct Lean {
     space: [usize; MAX_SINKS],
     per_call: [usize; MAX_SINKS],
     taken: [u64; MAX_SINKS],
-    hello: [u8; 64],
+    hello: [u8; 300],
     hello_len: usize,
+    /// Command bytes a front's peer has written and the hub has not read.
+    cmd_waiting: usize,
+    /// Command bytes the upstream socket takes per call (0: blocked).
+    cmd_space: usize,
+    cmd_taken: u64,
+}
+
+impl Lean {
+    fn new() -> Lean {
+        Lean {
+            pattern: std::array::from_fn(|i| (i * 7) as u8),
+            offset: 0,
+            waiting: 0,
+            space: [usize::MAX; MAX_SINKS],
+            per_call: [usize::MAX; MAX_SINKS],
+            taken: [0; MAX_SINKS],
+            hello: [0; 300],
+            hello_len: 0,
+            cmd_waiting: 0,
+            cmd_space: usize::MAX,
+            cmd_taken: 0,
+        }
+    }
 }
 
 impl Kernel for Lean {
@@ -88,12 +113,28 @@ impl Kernel for Lean {
     fn source_queued(&mut self, _: usize) -> u64 {
         self.waiting as u64
     }
-    fn command_send(&mut self, _: usize, _: &[u8]) -> Sent {
-        Sent::Failed(CloseReason::Error.into())
+    fn command_send(&mut self, _: usize, bytes: &[u8]) -> Sent {
+        let n = bytes.len().min(self.cmd_space);
+        if n == 0 {
+            return Sent::WouldBlock;
+        }
+        self.cmd_taken += n as u64;
+        Sent::Took(n)
     }
     fn unbound_recv(&mut self, _: usize, buf: &mut [u8]) -> Received {
-        let n = self.hello_len;
+        let n = self.hello_len.min(buf.len());
         buf[..n].copy_from_slice(&self.hello[..n]);
+        Received::Data(n)
+    }
+    fn front_recv(&mut self, _: usize, buf: &mut [u8]) -> Received {
+        let n = buf.len().min(self.cmd_waiting);
+        if n == 0 {
+            return Received::WouldBlock;
+        }
+        for (i, b) in buf[..n].iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        self.cmd_waiting -= n;
         Received::Data(n)
     }
 }
@@ -101,6 +142,7 @@ impl Kernel for Lean {
 thread_local! {
     static GAPS: Cell<u64> = const { Cell::new(0) };
     static PROGRESS: Cell<u64> = const { Cell::new(0) };
+    static PLACED: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Empties the event queue without parsing (nothing allocated), counting two event types.
@@ -113,8 +155,10 @@ fn drain_events(hub: &mut Hub, steady: bool) {
         let n = front.len();
         let g = count(front, b"\"type\":\"sink-gap\"");
         let p = count(front, b"\"type\":\"progress\"");
+        let f = count(front, b"\"type\":\"front-placed\"");
         GAPS.with(|c| c.set(c.get() + g));
         PROGRESS.with(|c| c.set(c.get() + p));
+        PLACED.with(|c| c.set(c.get() + f));
         hub.events().consume(n);
     }
     while let Some(a) = hub.take_action() {
@@ -124,16 +168,7 @@ fn drain_events(hub: &mut Hub, steady: bool) {
 
 #[test]
 fn a_warm_hub_does_not_allocate_per_block() {
-    let mut k = Lean {
-        pattern: std::array::from_fn(|i| (i * 7) as u8),
-        offset: 0,
-        waiting: 0,
-        space: [usize::MAX; MAX_SINKS],
-        per_call: [usize::MAX; MAX_SINKS],
-        taken: [0; MAX_SINKS],
-        hello: [0; 64],
-        hello_len: 0,
-    };
+    let mut k = Lean::new();
     let mut hub = Hub::new(4_000, "/run/hub.sock".into());
     let mut now = 0u64;
     hub.start(now);
@@ -242,4 +277,124 @@ fn a_warm_hub_does_not_allocate_per_block() {
         "progress was built while measured"
     );
     assert_eq!(allocated, 0, "{reads} blocks through {SINKS} sinks");
+}
+
+#[test]
+fn a_warm_front_with_command_traffic_does_not_allocate_per_block() {
+    let mut k = Lean::new();
+    let mut hub = Hub::new(12_000, "/run/hub.sock".into());
+    let mut now = 0u64;
+    hub.start(now);
+    hub.control_line(
+        br#"{"v":1,"type":"configure","byteRate":4800000,"frameBytes":2,"levelFormat":null,"progressMs":50,"linkGapMs":20}"#,
+        now,
+        &mut k,
+    );
+    hub.control_line(
+        br#"{"v":1,"type":"connect","attempt":1,"host":"127.0.0.1","port":1,"timeoutMs":1000,"headerBytes":12}"#,
+        now,
+        &mut k,
+    );
+    let slot = match hub.take_action() {
+        Some(Action::Connect { attempt, .. }) => attempt,
+        a => panic!("{a:?}"),
+    };
+    hub.connect_done(slot, Ok(1), now);
+    // A front and a raw sink beside it, 200 ms of lag each (the core gives a front 6 s; the lag
+    // bound changes no allocation, only how far the cursor may trail).
+    hub.control_line(
+        br#"{"v":1,"type":"sink-open","sink":"f","kind":"front","attempt":1,"maxLagMs":200,"resumeMs":50}"#,
+        now,
+        &mut k,
+    );
+    // The hello and 9 command bytes in one write.
+    let hello = b"{\"v\":1,\"sink\":\"f\"}\n123456789";
+    k.hello[..hello.len()].copy_from_slice(hello);
+    k.hello_len = hello.len();
+    let conn = hub.accept_unbound(now).unwrap();
+    hub.service_unbound(conn, &mut k, now);
+    hub.control_line(
+        br#"{"v":1,"type":"sink-open","sink":"r","kind":"raw","maxLagMs":200,"resumeMs":50}"#,
+        now,
+        &mut k,
+    );
+    let hello = b"{\"v\":1,\"sink\":\"r\"}\n";
+    k.hello[..hello.len()].copy_from_slice(hello);
+    k.hello_len = hello.len();
+    let conn = hub.accept_unbound(now).unwrap();
+    hub.service_unbound(conn, &mut k, now);
+    hub.control_line(br#"{"v":1,"type":"sink-activate","sink":"r"}"#, now, &mut k);
+    // The header: the fronted attempt adopts itself and the front starts.
+    k.waiting = 12;
+    hub.service_attempt(slot, true, false, &mut k, now);
+    assert!(hub.is_front(0));
+    drain_events(&mut hub, false);
+    let sizes = [32_768usize, 1_449, 65_536, 7, 20_001, 32_769, 4_095];
+    let block = |hub: &mut Hub, k: &mut Lean, now: &mut u64, i: usize| {
+        let n = sizes[i % sizes.len()];
+        k.waiting += n;
+        *now += (n as u64 * 1_000_000).div_ceil(4_800_000);
+        hub.tick(*now, k);
+        if hub.attempt_interest(slot).is_some_and(|(r, _)| r) {
+            hub.service_attempt(slot, true, false, k, *now);
+        }
+        if let Some(t) = hub.next_deadline() {
+            if t <= *now + 20_000 {
+                *now = (*now).max(t);
+                hub.tick(*now, k);
+            }
+        }
+        // Commands: a 5-byte tuner command every 3rd block, a burst of 300 bytes every 50th;
+        // the upstream takes 3 bytes a call on odd blocks (partial command writes, tail fill).
+        if i.is_multiple_of(3) {
+            k.cmd_waiting += 5;
+        }
+        if i.is_multiple_of(50) {
+            k.cmd_waiting += 300;
+        }
+        k.cmd_space = if i % 2 == 1 { 3 } else { usize::MAX };
+        if hub.sink_interest(0).is_some_and(|(r, _)| r) {
+            hub.front_readable(0, k, *now);
+        }
+        if hub.attempt_interest(slot).is_some_and(|(_, w)| w) {
+            hub.service_attempt(slot, false, true, k, *now);
+        }
+        // The front reads all but every 7th block, when it stalls long enough to skip.
+        k.space[0] = if i.is_multiple_of(7) { 0 } else { usize::MAX };
+        k.per_call[0] = if i.is_multiple_of(5) {
+            1_001
+        } else {
+            usize::MAX
+        };
+        k.space[1] = usize::MAX;
+        for s in 0..2 {
+            if hub.sink_wants_write(s) == Some(true) {
+                hub.sink_writable(s, k, *now);
+            }
+        }
+        drain_events(hub, true);
+        k.waiting = 0;
+    };
+    for i in 0..600 {
+        block(&mut hub, &mut k, &mut now, i);
+    }
+    let placed_before = PLACED.with(Cell::get);
+    let before = ALLOCATIONS.with(Cell::get);
+    let reads_before = hub.total_reads();
+    let cmd_before = k.cmd_taken;
+    for i in 600..6_000 {
+        block(&mut hub, &mut k, &mut now, i);
+    }
+    let allocated = ALLOCATIONS.with(Cell::get) - before;
+    let reads = hub.total_reads() - reads_before;
+    assert!(reads >= 5_000, "{reads} blocks read");
+    assert!(
+        k.cmd_taken - cmd_before > 10_000,
+        "command bytes went upstream"
+    );
+    assert!(
+        PLACED.with(Cell::get) - placed_before > 1_000,
+        "front-placed was built while measured"
+    );
+    assert_eq!(allocated, 0, "{reads} blocks through a front with commands");
 }

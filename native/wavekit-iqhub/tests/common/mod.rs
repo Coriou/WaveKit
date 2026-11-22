@@ -25,6 +25,18 @@ pub struct SimSink {
     pub count: u64,
     pub sends: u64,
     pub fail: bool,
+    /// A front's command bytes waiting to be read by the hub.
+    pub cmd: VecDeque<u8>,
+    /// At most this many command bytes per read.
+    pub cmd_per_read: usize,
+    /// The front's peer closed its write side (EOF after `cmd`).
+    pub cmd_eof: bool,
+    /// Reads of the front's connection.
+    pub cmd_reads: u64,
+    /// The hub shut the front's write side.
+    pub shut_write: bool,
+    /// The connection was bound as a front.
+    pub front: bool,
 }
 
 impl SimSink {
@@ -38,6 +50,12 @@ impl SimSink {
             count: 0,
             sends: 0,
             fail: false,
+            cmd: VecDeque::new(),
+            cmd_per_read: usize::MAX,
+            cmd_eof: false,
+            cmd_reads: 0,
+            shut_write: false,
+            front: false,
         }
     }
 }
@@ -239,6 +257,27 @@ impl Kernel for Sim {
         Sent::Took(n)
     }
 
+    fn front_recv(&mut self, sink: usize, buf: &mut [u8]) -> Received {
+        let s = &mut self.sinks[sink];
+        assert!(
+            s.open && s.front,
+            "a front read on a sink that is not an open front"
+        );
+        s.cmd_reads += 1;
+        if s.cmd.is_empty() {
+            return if s.cmd_eof {
+                Received::Eof
+            } else {
+                Received::WouldBlock
+            };
+        }
+        let n = buf.len().min(s.cmd.len()).min(s.cmd_per_read);
+        for (d, b) in buf[..n].iter_mut().zip(s.cmd.drain(..n)) {
+            *d = b;
+        }
+        Received::Data(n)
+    }
+
     fn unbound_recv(&mut self, conn: usize, buf: &mut [u8]) -> Received {
         let c = &mut self.conns[conn];
         if c.queue.is_empty() {
@@ -310,6 +349,21 @@ impl Rig {
                     *s = SimSink::new();
                     s.record = record;
                     s.open = true;
+                }
+                Action::BindFront { conn, sink } => {
+                    self.k.conns[*conn].open = false;
+                    let s = &mut self.k.sinks[*sink];
+                    let record = s.record;
+                    *s = SimSink::new();
+                    s.record = record;
+                    s.open = true;
+                    s.front = true;
+                }
+                Action::ShutdownSinkWrite { sink } => {
+                    let s = &mut self.k.sinks[*sink];
+                    assert!(s.open, "shutdown of a closed sink");
+                    assert!(!s.shut_write, "shut twice");
+                    s.shut_write = true;
                 }
                 Action::SetSendBuffer { .. } => {}
                 Action::CloseSink { sink } => self.k.sinks[*sink].open = false,
@@ -447,11 +501,78 @@ impl Rig {
             .actions
             .iter()
             .rev()
-            .find(|a| matches!(a, Action::BindSink { .. }))
+            .find(|a| matches!(a, Action::BindSink { .. } | Action::BindFront { .. }))
         {
-            Some(Action::BindSink { sink, .. }) => *sink,
+            Some(Action::BindSink { sink, .. } | Action::BindFront { sink, .. }) => *sink,
             _ => panic!("not bound"),
         }
+    }
+
+    /// Declares a front for `attempt` (`extra` adds members), then connects it with a hello
+    /// followed by `trailing` command bytes. Returns the sink slot.
+    pub fn front(&mut self, id: &str, attempt: u64, extra: &str, trailing: &[u8]) -> usize {
+        self.send(&format!(
+            r#"{{"v":1,"type":"sink-open","sink":"{id}","kind":"front","attempt":{attempt}{extra}}}"#
+        ));
+        self.hello_front(id, trailing)
+    }
+
+    /// Connects a declared front with its hello and `trailing` bytes after the newline.
+    pub fn hello_front(&mut self, id: &str, trailing: &[u8]) -> usize {
+        let conn = self
+            .hub
+            .accept_unbound(self.now)
+            .expect("a free unbound place");
+        self.k.conns[conn].open = true;
+        self.k.conns[conn]
+            .queue
+            .extend(format!("{{\"v\":1,\"sink\":\"{id}\"}}\n").bytes());
+        self.k.conns[conn].queue.extend(trailing.iter());
+        self.hub.service_unbound(conn, &mut self.k, self.now);
+        self.after();
+        match self
+            .actions
+            .iter()
+            .rev()
+            .find(|a| matches!(a, Action::BindFront { .. }))
+        {
+            Some(Action::BindFront { sink, .. }) => *sink,
+            _ => panic!("not bound as a front"),
+        }
+    }
+
+    /// The front's peer writes `bytes`; the hub reads them while its gate is open.
+    pub fn front_write(&mut self, sink: usize, bytes: &[u8]) {
+        self.k.sinks[sink].cmd.extend(bytes.iter());
+        self.front_poll(sink);
+    }
+
+    /// One readiness of the front for reading, as the I/O loop gives it (only while the hub
+    /// polls it for reading).
+    pub fn front_poll(&mut self, sink: usize) {
+        for _ in 0..1_000 {
+            if !self.k.sinks[sink].open || !matches!(self.hub.sink_interest(sink), Some((true, _)))
+            {
+                return;
+            }
+            let s = &self.k.sinks[sink];
+            if s.cmd.is_empty() && !s.cmd_eof {
+                return;
+            }
+            let before = s.cmd.len();
+            self.hub.front_readable(sink, &mut self.k, self.now);
+            self.after();
+            let s = &self.k.sinks[sink];
+            if s.cmd.len() == before && !s.cmd_eof {
+                return;
+            }
+        }
+    }
+
+    /// The front's peer half-closes (`end()`): EOF after the bytes already written.
+    pub fn front_end(&mut self, sink: usize) {
+        self.k.sinks[sink].cmd_eof = true;
+        self.front_poll(sink);
     }
 
     pub fn activate(&mut self, id: &str, at: Option<u64>) {

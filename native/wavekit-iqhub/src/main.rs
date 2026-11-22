@@ -1,5 +1,6 @@
 use std::io::Write as _;
 use wavekit_iqhub::args::{parse, Command, VERSION_LINE};
+use wavekit_iqhub::stats::StatsWriter;
 use wavekit_iqhub::{io, sys};
 
 fn main() {
@@ -33,7 +34,23 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let hub = match io::Io::new(control, listener, path.clone(), args.ring_ms, args.debug) {
+    let stats = match args.stats_file.as_deref().map(StatsWriter::open) {
+        None => None,
+        Some(Ok(w)) => Some(w),
+        Some(Err(e)) => {
+            sys::log(format_args!("{e}"));
+            let _ = std::fs::remove_file(&path);
+            std::process::exit(2);
+        }
+    };
+    let hub = match io::Io::new(
+        control,
+        listener,
+        path.clone(),
+        args.ring_ms,
+        args.debug,
+        stats,
+    ) {
         Ok(h) => h,
         Err(e) => {
             sys::log(format_args!("stdout: {e}"));

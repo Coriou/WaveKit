@@ -7,10 +7,10 @@
 //! - `MSG_NOSIGNAL` on Linux, `SO_NOSIGPIPE` on macOS ([`SEND_FLAGS`], [`no_sigpipe`]);
 //! - the keepalive idle option: `TCP_KEEPIDLE` on Linux, `TCP_KEEPALIVE` on macOS.
 
-use crate::hub::{CloseReason, Failure, Received, Sent};
+use crate::hub::{CloseReason, Failure, RcvBuf, Received, Sent};
 use std::ffi::{c_int, c_void};
 use std::net::SocketAddr;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 #[cfg(not(target_os = "macos"))]
 pub const SEND_FLAGS: c_int = libc::MSG_NOSIGNAL;
@@ -208,16 +208,73 @@ fn connect_raw(fd: RawFd, addr: &SocketAddr) -> c_int {
     }
 }
 
-/// Starts a non-blocking TCP connect. `Ok((fd, true))`: already connected.
-pub fn tcp_connect(
-    addr: &SocketAddr,
-    keep_alive_ms: Option<u64>,
-) -> Result<(OwnedFd, bool), Failure> {
-    let domain = if addr.is_ipv4() {
-        libc::AF_INET
-    } else {
-        libc::AF_INET6
-    };
+/// The platform whose `SO_RCVBUF` rule applies (a parameter so both rules are testable on
+/// either host).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Linux,
+    MacOs,
+    Other,
+}
+
+#[cfg(target_os = "linux")]
+pub const PLATFORM: Platform = Platform::Linux;
+#[cfg(target_os = "macos")]
+pub const PLATFORM: Platform = Platform::MacOs;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub const PLATFORM: Platform = Platform::Other;
+
+/// Whether to set `SO_RCVBUF` to `requested` given the platform's limit. An explicit
+/// `SO_RCVBUF` turns the kernel's receive autotuning off for the socket (Linux
+/// `SOCK_RCVBUF_LOCK`, XNU `SB_USRSIZE`), so the hub sets it only when the whole request fits:
+///
+/// - Linux: `net.core.rmem_max` must be at least the request (a larger request is silently
+///   clamped to `rmem_max` and would still lock the size); an unknown limit is not tried.
+/// - macOS: `kern.ipc.maxsockbuf` must be at least the request when it is known; the kernel
+///   itself refuses a request over its adjusted limit (`ENOBUFS`), which [`tcp_connect`]
+///   checks by reading the size back, recreating the socket without the option.
+/// - elsewhere: never.
+pub fn rcv_buf_plan(platform: Platform, requested: u64, limit: Option<u64>) -> bool {
+    match platform {
+        Platform::Linux => limit.is_some_and(|l| l >= requested),
+        Platform::MacOs => limit.is_none_or(|l| l >= requested),
+        Platform::Other => false,
+    }
+}
+
+/// The platform's limit for a `SO_RCVBUF` request: Linux `/proc/sys/net/core/rmem_max`, macOS
+/// `kern.ipc.maxsockbuf`. Read once per connect, never on the data path.
+pub fn rcv_buf_limit() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/net/core/rmem_max")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut v: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        // SAFETY: a NUL-terminated name, a valid pointer to a u64 and its length; the kernel
+        // writes at most `len` bytes (maxsockbuf is a u_quad_t, 8 bytes, or an int, 4: zeroed).
+        let r = unsafe {
+            libc::sysctlbyname(
+                c"kern.ipc.maxsockbuf".as_ptr(),
+                (&raw mut v).cast::<c_void>(),
+                &raw mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (r == 0 && (len == 8 || len == 4)).then_some(if len == 4 { v & 0xFFFF_FFFF } else { v })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+fn tcp_socket(domain: c_int, keep_alive_ms: Option<u64>) -> Result<OwnedFd, Failure> {
     // SAFETY: socket() with integer arguments.
     let raw = unsafe { libc::socket(domain, libc::SOCK_STREAM, 0) };
     if raw < 0 {
@@ -233,11 +290,56 @@ pub fn tcp_connect(
     if let Some(ms) = keep_alive_ms {
         keepalive(raw, ms);
     }
+    Ok(fd)
+}
+
+fn rcv_buf(fd: RawFd) -> Option<u64> {
+    get_int(fd, libc::SOL_SOCKET, libc::SO_RCVBUF).map(|g| g.max(0) as u64)
+}
+
+/// Starts a non-blocking TCP connect. `Ok((fd, true, _))`: already connected. With
+/// `rcv_buf_bytes`, `SO_RCVBUF` is set between `socket()` and `connect()` (so the SYN's window
+/// scale covers it) when [`rcv_buf_plan`] allows it and the kernel grants the whole request;
+/// otherwise the socket is made again without it, its autotuning untouched.
+pub fn tcp_connect(
+    addr: &SocketAddr,
+    keep_alive_ms: Option<u64>,
+    rcv_buf_bytes: Option<u64>,
+) -> Result<(OwnedFd, bool, Option<RcvBuf>), Failure> {
+    let domain = if addr.is_ipv4() {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
+    let mut fd = tcp_socket(domain, keep_alive_ms)?;
+    let rcv = match rcv_buf_bytes {
+        None => None,
+        Some(requested) => {
+            let limit = rcv_buf_limit();
+            let mut applied = false;
+            if rcv_buf_plan(PLATFORM, requested, limit) {
+                let want = requested.min(c_int::MAX as u64) as c_int;
+                let set = set_int(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_RCVBUF, want);
+                applied = set && rcv_buf(fd.as_raw_fd()).is_some_and(|g| g >= requested);
+                if !applied {
+                    // A partial or failed set may still have locked the size: start over.
+                    fd = tcp_socket(domain, keep_alive_ms)?;
+                }
+            }
+            Some(RcvBuf {
+                requested,
+                granted: rcv_buf(fd.as_raw_fd()),
+                applied,
+                limit,
+            })
+        }
+    };
+    let raw = fd.as_raw_fd();
     if connect_raw(raw, addr) == 0 {
-        return Ok((fd, true));
+        return Ok((fd, true, rcv));
     }
     match errno() {
-        libc::EINPROGRESS | libc::EINTR => Ok((fd, false)),
+        libc::EINPROGRESS | libc::EINTR => Ok((fd, false, rcv)),
         e => Err(failure(e)),
     }
 }
@@ -481,6 +583,8 @@ pub struct Usage {
     pub system_us: u64,
     pub voluntary: u64,
     pub involuntary: u64,
+    /// The peak resident set (`ru_maxrss`: KiB on Linux, bytes on macOS), in bytes.
+    pub max_rss_bytes: u64,
 }
 
 pub fn usage_self() -> Usage {
@@ -496,5 +600,62 @@ pub fn usage_self() -> Usage {
         system_us: us(ru.ru_stime),
         voluntary: ru.ru_nvcsw as u64,
         involuntary: ru.ru_nivcsw as u64,
+        max_rss_bytes: if cfg!(target_os = "macos") {
+            ru.ru_maxrss as u64
+        } else {
+            ru.ru_maxrss as u64 * 1024
+        },
+    }
+}
+
+/// Opens (creating, mode 0600) a file for appending lines: `O_APPEND`, close-on-exec.
+pub fn open_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rcv_buf_is_set_only_when_the_platform_limit_allows_the_whole_request() {
+        let v = 11_534_336;
+        // Linux: rmem_max V - 1 is not applied; V is; an unknown limit is not tried.
+        assert!(!rcv_buf_plan(Platform::Linux, v, Some(v - 1)));
+        assert!(rcv_buf_plan(Platform::Linux, v, Some(v)));
+        assert!(!rcv_buf_plan(Platform::Linux, v, None));
+        // The Linux default rmem_max (212 992) never allows a request of at least 64 KiB x 4.
+        assert!(!rcv_buf_plan(Platform::Linux, 5_242_880, Some(212_992)));
+        // macOS: a known limit below the request is not tried; else the kernel decides.
+        assert!(!rcv_buf_plan(Platform::MacOs, v, Some(8_388_608)));
+        assert!(rcv_buf_plan(Platform::MacOs, 5_242_880, Some(8_388_608)));
+        assert!(rcv_buf_plan(Platform::MacOs, v, None));
+        assert!(!rcv_buf_plan(Platform::Other, 65_536, Some(u64::MAX)));
+    }
+
+    #[test]
+    fn a_loopback_connect_reports_its_rcv_buf_and_applies_only_a_whole_grant() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        for requested in [65_536u64, 67_108_864] {
+            let (_fd, _, rcv) = tcp_connect(&addr, None, Some(requested)).unwrap();
+            let r = rcv.unwrap();
+            assert_eq!(r.requested, requested);
+            assert_eq!(r.limit, rcv_buf_limit());
+            if r.applied {
+                assert!(r.granted.unwrap() >= requested, "{r:?}");
+            }
+            if !rcv_buf_plan(PLATFORM, requested, r.limit) {
+                assert!(!r.applied, "{r:?}");
+            }
+            let _ = l.accept();
+        }
+        let (_fd, _, rcv) = tcp_connect(&addr, None, None).unwrap();
+        assert!(rcv.is_none());
     }
 }

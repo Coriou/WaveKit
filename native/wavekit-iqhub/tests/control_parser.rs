@@ -5,7 +5,8 @@ mod common;
 
 use serde_json::{json, Map, Value};
 use wavekit_iqhub::protocol::{
-    parse_request, CloseMode, Request, DEFAULT_GRACE_MS, MAX_CONTROL_LINE_BYTES, MAX_DETAIL_BYTES,
+    parse_request, CloseMode, Request, SinkKind, DEFAULT_GRACE_MS, MAX_CONTROL_LINE_BYTES,
+    MAX_DETAIL_BYTES,
 };
 
 /// (request, every member, which are required)
@@ -18,7 +19,7 @@ fn templates() -> Vec<(&'static str, Value, Vec<&'static str>)> {
         ),
         (
             "connect",
-            json!({"attempt": 1, "host": "127.0.0.1", "port": 1, "timeoutMs": 1000, "headerBytes": 12, "headerTimeoutMs": 3000, "keepAliveMs": 5000}),
+            json!({"attempt": 1, "host": "127.0.0.1", "port": 1, "timeoutMs": 1000, "headerBytes": 12, "headerTimeoutMs": 3000, "keepAliveMs": 5000, "rcvBufBytes": 12582912}),
             vec!["attempt", "host", "port", "timeoutMs", "headerBytes"],
         ),
         ("adopt", json!({"attempt": 1}), vec!["attempt"]),
@@ -38,6 +39,11 @@ fn templates() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             "sink-open",
             json!({"sink": "a", "kind": "raw", "maxLagMs": 2000, "resumeMs": 250}),
             vec!["sink", "kind"],
+        ),
+        (
+            "sink-open",
+            json!({"sink": "f", "kind": "front", "attempt": 2, "maxLagMs": 6000, "resumeMs": 250}),
+            vec!["sink", "kind", "attempt"],
         ),
         (
             "sink-activate",
@@ -380,5 +386,70 @@ fn abort_mode_and_grace_ms_are_parsed_strictly() {
             "{extra}"
         );
         assert!(e.detail.contains(detail), "{extra}: {}", e.detail);
+    }
+}
+
+#[test]
+fn connect_rcv_buf_bytes_is_optional_from_65536_to_67108864() {
+    let c = |extra: &str| {
+        format!(
+            r#"{{"v":1,"type":"connect","attempt":1,"host":"127.0.0.1","port":1,"timeoutMs":1,"headerBytes":12{extra}}}"#
+        )
+    };
+    let rcv = |l: &str| match parse_request(l.as_bytes()).unwrap().request {
+        Request::Connect(c) => c.rcv_buf_bytes,
+        r => panic!("{r:?}"),
+    };
+    assert_eq!(rcv(&c("")), None);
+    assert_eq!(rcv(&c(r#","rcvBufBytes":65536"#)), Some(65_536));
+    assert_eq!(rcv(&c(r#","rcvBufBytes":67108864"#)), Some(67_108_864));
+    for (extra, reason) in [
+        (r#","rcvBufBytes":65535"#, "bounds"),
+        (r#","rcvBufBytes":67108865"#, "bounds"),
+        (r#","rcvBufBytes":-1"#, "malformed"),
+        (r#","rcvBufBytes":"1""#, "malformed"),
+    ] {
+        let e = parse_request(c(extra).as_bytes()).expect_err(extra);
+        assert_eq!(e.reason, reason, "{extra}: {}", e.detail);
+    }
+}
+
+#[test]
+fn sink_open_takes_an_attempt_exactly_for_kind_front() {
+    let parsed = |l: &str| match parse_request(l.as_bytes()).unwrap().request {
+        Request::SinkOpen {
+            kind,
+            attempt,
+            max_lag_ms,
+            resume_ms,
+            ..
+        } => (kind, attempt, max_lag_ms, resume_ms),
+        r => panic!("{r:?}"),
+    };
+    assert_eq!(
+        parsed(r#"{"v":1,"type":"sink-open","sink":"f","kind":"front","attempt":7}"#),
+        (SinkKind::Front, Some(7), 2_000, 250)
+    );
+    for (l, detail) in [
+        (
+            r#"{"v":1,"type":"sink-open","sink":"f","kind":"front"}"#,
+            "missing attempt",
+        ),
+        (
+            r#"{"v":1,"type":"sink-open","sink":"f","kind":"raw","attempt":1}"#,
+            "attempt needs kind front",
+        ),
+        (
+            r#"{"v":1,"type":"sink-open","sink":"f","kind":"framed","attempt":1}"#,
+            "attempt needs kind front",
+        ),
+        (
+            r#"{"v":1,"type":"sink-open","sink":"f","kind":"front","attempt":-1}"#,
+            "attempt must be",
+        ),
+    ] {
+        let e = parse_request(l.as_bytes()).expect_err(l);
+        assert_eq!(e.reason, "malformed", "{l}");
+        assert!(e.detail.contains(detail), "{l}: {}", e.detail);
     }
 }

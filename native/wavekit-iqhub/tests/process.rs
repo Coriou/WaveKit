@@ -88,6 +88,8 @@ struct Hub {
     stdout: Option<std::process::ChildStdout>,
     stderr: Option<thread::JoinHandle<String>>,
     log: Vec<Value>,
+    /// The event types `until` returned, in order.
+    taken: Vec<String>,
     socket: PathBuf,
     _dir: TempDir,
     _ctl_dir: TempDir,
@@ -101,6 +103,10 @@ enum Ctl {
 }
 
 fn spawn_in(dir: TempDir, read_stdout: bool, ctl: Ctl) -> Hub {
+    spawn_with(dir, read_stdout, ctl, &[])
+}
+
+fn spawn_with(dir: TempDir, read_stdout: bool, ctl: Ctl, extra: &[&std::ffi::OsStr]) -> Hub {
     let ctl_dir = TempDir::new();
     let fifo = ctl_dir.0.join("ctl");
     let mut cmd = Command::new("sh");
@@ -114,6 +120,7 @@ fn spawn_in(dir: TempDir, read_stdout: bool, ctl: Ctl) -> Hub {
         .args(["--control-fd", "3", "--log-level", "debug"])
         .arg("--socket-dir")
         .arg(&dir.0)
+        .args(extra)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let (mut child, control) = match ctl {
@@ -163,6 +170,7 @@ fn spawn_in(dir: TempDir, read_stdout: bool, ctl: Ctl) -> Hub {
         stdout,
         stderr: Some(stderr),
         log: Vec::new(),
+        taken: Vec::new(),
         socket,
         _dir: dir,
         _ctl_dir: ctl_dir,
@@ -1400,6 +1408,429 @@ fn an_after_writes_abort_delivers_the_pending_commands() {
     for (chunk, id) in got.chunks(64).zip(&written) {
         assert_eq!(hex(chunk), command(*id));
     }
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
+}
+
+// ---- Front sinks ------------------------------------------------------------------------------
+
+/// An rtl_tcp stand-in whose IQ carries a stamp: every byte of a frame it sends is the number
+/// of command bytes it had read when it produced the frame. It sends `RTL_HEADER`, then 4 KiB
+/// every 2 ms (about 2 MB/s), reading commands between writes, until it reads EOF (the hub's
+/// half-close) or `stop`; then it closes. Returns the command bytes it read.
+fn stamped(
+    peer: std::net::TcpStream,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut peer = peer;
+        peer.set_read_timeout(Some(Duration::from_millis(1)))
+            .unwrap();
+        peer.write_all(RTL_HEADER).unwrap();
+        let mut cmds = Vec::new();
+        let mut b = [0u8; 512];
+        let deadline = Instant::now() + WAIT;
+        loop {
+            match peer.read(&mut b) {
+                Ok(0) => break,
+                Ok(n) => cmds.extend_from_slice(&b[..n]),
+                Err(_) => {}
+            }
+            if stop.load(Ordering::Relaxed) || Instant::now() > deadline {
+                break;
+            }
+            let stamp = cmds.len().min(255) as u8;
+            if peer.write_all(&[stamp; 4096]).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        cmds
+    })
+}
+
+fn sndbuf(s: &std::net::TcpStream) -> u64 {
+    use std::os::fd::AsRawFd;
+    let mut v: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: valid pointers to a c_int and its length for the call's duration.
+    let r = unsafe {
+        libc::getsockopt(
+            s.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            (&raw mut v).cast(),
+            &raw mut len,
+        )
+    };
+    assert_eq!(r, 0);
+    v.max(0) as u64
+}
+
+impl Hub {
+    /// The first event of type `ty` not yet returned by `until` (events of other types before
+    /// it are kept in the log), within the deadline.
+    fn until(&mut self, ty: &str) -> Value {
+        let taken = self.taken.iter().filter(|t| t.as_str() == ty).count();
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Some(e) = self.log.iter().filter(|e| e["type"] == ty).nth(taken) {
+                let e = e.clone();
+                self.taken.push(ty.to_string());
+                return e;
+            }
+            assert!(Instant::now() < deadline, "no {ty} within the deadline");
+            self.any();
+        }
+    }
+
+    fn seen(&self, ty: &str) -> Vec<Value> {
+        self.log
+            .iter()
+            .filter(|e| e["type"] == ty)
+            .cloned()
+            .collect()
+    }
+}
+
+#[test]
+fn a_front_carries_the_header_payload_and_commands_with_stamped_exact_placements() {
+    let stats_dir = TempDir::new();
+    let stats_path = stats_dir.0.join("hub.jsonl");
+    let mut hub = spawn_with(
+        TempDir::new(),
+        true,
+        Ctl::Socket,
+        &["--stats-file".as_ref(), stats_path.as_os_str()],
+    );
+    hub.expect("ready");
+    hub.send(r#"{"v":1,"type":"configure","byteRate":2048000,"frameBytes":2,"levelFormat":null,"progressMs":50}"#);
+    hub.expect("configured");
+    let src = listener();
+    let port = src.local_addr().unwrap().port();
+    hub.send(&connect_line(1, port, 12, r#","rcvBufBytes":65536"#));
+    hub.send(r#"{"v":1,"type":"sink-open","sink":"f1","kind":"front","attempt":1,"maxLagMs":2000,"resumeMs":250}"#);
+    let (peer, _) = src.accept().unwrap();
+    let upstream_sndbuf = sndbuf(&peer);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let endpoint = stamped(peer, stop.clone());
+    let t = hub.until("tcp-connected");
+    let rcv = &t["rcvBuf"];
+    assert_eq!(rcv["requested"], 65_536, "{t}");
+    if rcv["applied"] == true {
+        assert!(rcv["granted"].as_u64().unwrap() >= 65_536, "{t}");
+    }
+    // The fronted attempt adopts itself when its header is complete (no `adopt` is sent).
+    hub.until("adopted");
+    // The hello and the first command bytes in one write.
+    let mut front = UnixStream::connect(&hub.socket).unwrap();
+    let mut written: Vec<u8> = vec![1, 2, 3];
+    let mut hello = br#"{"v":1,"sink":"f1"}"#.to_vec();
+    hello.push(b'\n');
+    hello.extend_from_slice(&written);
+    front.write_all(&hello).unwrap();
+    let reader = read_all(front.try_clone().unwrap());
+    hub.until("sink-started");
+    // 30 commands of 1 to 5 bytes, about 15 ms apart (stamps stay under 255).
+    for i in 0..30u8 {
+        thread::sleep(Duration::from_millis(15));
+        let cmd: Vec<u8> = (0..(1 + i % 5)).map(|j| 0x10 + i + j).collect();
+        front.write_all(&cmd).unwrap();
+        written.extend_from_slice(&cmd);
+    }
+    thread::sleep(Duration::from_millis(100));
+    // The core's `end()`: the hub sends what is pending, half-closes upstream, the endpoint
+    // closes, the front ends.
+    front.shutdown(std::net::Shutdown::Write).unwrap();
+    let fe = hub.until("front-ended");
+    assert_eq!(fe["reason"], "front-closed", "{fe}");
+    let got = reader.join().unwrap();
+    let cmds = endpoint.join().unwrap();
+    stop.store(true, Ordering::Relaxed);
+    let c = hub.until("closed");
+    assert_eq!(
+        (
+            c["reason"].as_str(),
+            c["mode"].as_str(),
+            c["by"].as_str(),
+            c["front"].as_str()
+        ),
+        (Some("aborted"), Some("graceful"), Some("front"), Some("f1")),
+        "{c}"
+    );
+    // The header unit, then the payload; no gap (the reader kept up).
+    assert_eq!(&got[..12], RTL_HEADER);
+    let payload = &got[12..];
+    assert_eq!(fe["sinkBytes"].as_u64(), Some(payload.len() as u64));
+    assert_eq!(fe["headerSent"], 12);
+    assert!(
+        hub.seen("sink-gap").iter().all(|g| g["sink"] != "f1"),
+        "no gap for a front that kept up"
+    );
+    // I-C: every command byte the front got reached the endpoint, in order.
+    assert_eq!(cmds, written, "the upstream's commands are the front's");
+    // I-P with stamps: before each placement's sinkByte every byte was produced before the
+    // endpoint read the placed command bytes; the first byte after them comes within the bytes
+    // that were in flight (queued at the hub, in the endpoint's send buffer, one write).
+    let placed = hub.seen("front-placed");
+    assert!(placed.len() >= 10, "{} placements", placed.len());
+    let mut last = 0;
+    for p in &placed {
+        let fb = p["frontBytes"].as_u64().unwrap();
+        let sb = p["sinkByte"].as_u64().unwrap() as usize;
+        let queued = p["queuedBytes"].as_u64().unwrap();
+        assert!(fb > last);
+        last = fb;
+        assert!(sb <= payload.len());
+        assert!(
+            payload[..sb].iter().all(|&s| u64::from(s) < fb),
+            "a byte before sinkByte {sb} carries a stamp of {fb} or more: placed too late"
+        );
+        if let Some(first) = payload[sb..].iter().position(|&s| u64::from(s) >= fb) {
+            let bound = queued + upstream_sndbuf + 2 * 4096;
+            assert!(
+                first as u64 <= bound,
+                "the first stamp {fb} comes {first} bytes after sinkByte, bound {bound}"
+            );
+        }
+    }
+    assert_eq!(last, written.len() as u64, "every command was placed");
+    hub.until("sink-closed");
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
+    // The stats file: a line a second and one at exit, with the hub's pid; the closed front's
+    // final counts are in the last.
+    let text = std::fs::read_to_string(&stats_path).unwrap();
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("each stats line is JSON"))
+        .collect();
+    assert!(lines.len() >= 2, "{} lines", lines.len());
+    let pid = u64::from(hub.child.id());
+    assert!(lines.iter().all(|l| l["pid"].as_u64() == Some(pid)));
+    // The session is shorter than a stats period: the front shows as live or closed.
+    assert!(lines.iter().any(|l| l["sinks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(l["closedFronts"].as_array().unwrap())
+        .any(|s| s["sink"] == "f1" && s["kind"] == "front")));
+    assert_eq!(
+        lines[0]["closedFronts"],
+        serde_json::json!([]),
+        "the first line at start-up"
+    );
+    let last_line = lines.last().unwrap();
+    let cf = &last_line["closedFronts"][0];
+    assert_eq!(
+        (
+            cf["sink"].as_str(),
+            cf["sinkBytes"].as_u64(),
+            cf["droppedBytes"].as_u64(),
+            cf["commandBytesSent"].as_u64()
+        ),
+        (
+            Some("f1"),
+            Some(payload.len() as u64),
+            Some(0),
+            Some(written.len() as u64)
+        ),
+        "{last_line}"
+    );
+    assert!(last_line["memory"]["ringBytes"].as_u64() > Some(0));
+    assert!(last_line["rusage"]["userUs"].is_u64());
+}
+
+#[test]
+fn a_stream_that_ends_is_delivered_whole_then_the_front_ends_with_its_reason() {
+    let mut hub = spawn();
+    hub.expect("ready");
+    hub.send(r#"{"v":1,"type":"configure","byteRate":2048000,"frameBytes":2,"levelFormat":null}"#);
+    hub.expect("configured");
+    let src = listener();
+    let port = src.local_addr().unwrap().port();
+    // A request the platform cannot grant whole is left to autotuning.
+    hub.send(&connect_line(1, port, 12, r#","rcvBufBytes":67108864"#));
+    hub.send(r#"{"v":1,"type":"sink-open","sink":"f1","kind":"front","attempt":1}"#);
+    let (mut peer, _) = src.accept().unwrap();
+    let t = hub.until("tcp-connected");
+    let rcv = &t["rcvBuf"];
+    if rcv["applied"] == true {
+        assert!(rcv["granted"].as_u64().unwrap() >= 67_108_864, "{t}");
+    } else if let Some(limit) = rcv["limit"].as_u64() {
+        assert!(limit < 67_108_864 || cfg!(target_os = "macos"), "{t}");
+    }
+    let front = hub.connect_sink("f1");
+    hub.until("sink-bound");
+    let reader = read_all(front.try_clone().unwrap());
+    // The header, an odd number of payload bytes (the trailing half frame is discarded), and
+    // the endpoint's close.
+    let truth = stream_bytes(1, 0, 100_001);
+    peer.write_all(RTL_HEADER).unwrap();
+    peer.write_all(&truth).unwrap();
+    drop(peer);
+    let fe = hub.until("front-ended");
+    assert_eq!(
+        (
+            fe["reason"].as_str(),
+            fe["sinkBytes"].as_u64(),
+            fe["droppedBytes"].as_u64()
+        ),
+        (Some("eof"), Some(100_000), Some(0)),
+        "{fe}"
+    );
+    // The hub's half-close reached the front: the reader saw EOF after exactly the stream.
+    let got = reader.join().unwrap();
+    assert_eq!(&got[..12], RTL_HEADER);
+    assert_eq!(&got[12..], &truth[..100_000]);
+    let c = hub.seen("closed");
+    assert_eq!(c[0]["reason"], "eof");
+    // F14: the front's peer closes.
+    drop(front);
+    let sc = hub.until("sink-closed");
+    assert_eq!(
+        (sc["reason"].as_str(), sc["sinkBytes"].as_u64()),
+        (Some("peer"), Some(100_000))
+    );
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
+}
+
+#[test]
+fn a_write_to_a_fronted_attempt_is_refused_and_a_missing_stats_dir_fails_start_up() {
+    let mut hub = spawn();
+    hub.expect("ready");
+    let src = listener();
+    let port = src.local_addr().unwrap().port();
+    hub.send(&connect_line(1, port, 0, ""));
+    hub.send(r#"{"v":1,"type":"sink-open","sink":"f1","kind":"front","attempt":1}"#);
+    hub.send(r#"{"v":1,"type":"write","id":1,"attempt":1,"hex":"01"}"#);
+    let w = hub.until("write-failed");
+    assert_eq!(w["reason"], "fronted");
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
+    drop(src);
+    // --stats-file in a directory that does not exist: exit 2 before anything runs.
+    let dir = TempDir::new();
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(r#"exec "$0" "$@" 3</dev/null"#)
+        .arg(env!("CARGO_BIN_EXE_wavekit-iqhub"))
+        .args(["--control-fd", "3", "--socket-dir"])
+        .arg(&dir.0)
+        .args(["--stats-file", "/nonexistent-wkh-dir/x.jsonl"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("--stats-file"), "{err}");
+    assert!(!dir.0.join("hub.sock").exists(), "the socket is removed");
+}
+
+#[test]
+fn a_lagging_front_skips_whole_frames_and_its_stamped_placements_stay_exact() {
+    let mut hub = spawn();
+    hub.expect("ready");
+    hub.send(r#"{"v":1,"type":"configure","byteRate":2048000,"frameBytes":2,"levelFormat":null,"progressMs":50}"#);
+    hub.expect("configured");
+    let src = listener();
+    let port = src.local_addr().unwrap().port();
+    hub.send(&connect_line(1, port, 12, ""));
+    hub.send(r#"{"v":1,"type":"sink-open","sink":"f1","kind":"front","attempt":1,"maxLagMs":300,"resumeMs":50}"#);
+    let (peer, _) = src.accept().unwrap();
+    let upstream_sndbuf = sndbuf(&peer);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let endpoint = stamped(peer, stop.clone());
+    let mut front = hub.connect_sink("f1");
+    hub.until("sink-started");
+    // The reader stops for 800 ms (past maxLagMs 300) after its first 64 KiB.
+    let mut rd = front.try_clone().unwrap();
+    let reader = thread::spawn(move || {
+        let mut v = Vec::new();
+        let mut b = [0u8; 16_384];
+        let mut paused = false;
+        loop {
+            match rd.read(&mut b) {
+                Ok(0) | Err(_) => return v,
+                Ok(n) => v.extend_from_slice(&b[..n]),
+            }
+            if !paused && v.len() > 65_536 {
+                paused = true;
+                thread::sleep(Duration::from_millis(800));
+            }
+        }
+    });
+    let mut written = Vec::new();
+    for i in 0..60u8 {
+        thread::sleep(Duration::from_millis(20));
+        let cmd = [0x20 + i, i];
+        front.write_all(&cmd).unwrap();
+        written.extend_from_slice(&cmd);
+    }
+    thread::sleep(Duration::from_millis(200));
+    front.shutdown(std::net::Shutdown::Write).unwrap();
+    let fe = hub.until("front-ended");
+    let got = reader.join().unwrap();
+    let cmds = endpoint.join().unwrap();
+    stop.store(true, Ordering::Relaxed);
+    hub.until("closed");
+    assert_eq!(cmds, written, "I-C");
+    assert_eq!(&got[..12], RTL_HEADER);
+    let payload = &got[12..];
+    let gaps: Vec<Value> = hub
+        .seen("sink-gap")
+        .into_iter()
+        .filter(|g| g["sink"] == "f1")
+        .collect();
+    assert!(!gaps.is_empty(), "the stalled front skipped");
+    let dropped: u64 = gaps
+        .iter()
+        .map(|g| g["droppedBytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(fe["droppedBytes"].as_u64(), Some(dropped));
+    for g in &gaps {
+        assert_eq!(g["cause"], "lag");
+        assert_eq!(g["atSinkByte"].as_u64().unwrap() % 2, 0, "whole frames");
+        assert_eq!(g["droppedBytes"].as_u64().unwrap() % 2, 0);
+    }
+    // The stamps never go back across a gap: the front's bytes stay in source order.
+    assert!(payload.windows(2).all(|w| w[0] <= w[1]));
+    let placed = hub.seen("front-placed");
+    assert_eq!(
+        placed.last().unwrap()["frontBytes"].as_u64(),
+        Some(written.len() as u64)
+    );
+    let mut in_gap = 0;
+    for p in &placed {
+        let fb = p["frontBytes"].as_u64().unwrap();
+        let sb = p["sinkByte"].as_u64().unwrap() as usize;
+        let pos = p["atSourcePos"].as_u64().unwrap();
+        assert!(
+            payload[..sb].iter().all(|&s| u64::from(s) < fb),
+            "placed too late: {p}"
+        );
+        if gaps.iter().any(|g| {
+            let at = g["atSourcePos"].as_u64().unwrap();
+            at < pos && pos <= at + g["droppedBytes"].as_u64().unwrap()
+        }) {
+            in_gap += 1;
+            assert!(gaps
+                .iter()
+                .any(|g| g["atSinkByte"].as_u64() == Some(sb as u64)));
+        } else if let Some(first) = payload[sb..].iter().position(|&s| u64::from(s) >= fb) {
+            let bound = p["queuedBytes"].as_u64().unwrap() + upstream_sndbuf + 2 * 4096;
+            assert!(
+                first as u64 <= bound,
+                "{p}: first new stamp {first} bytes after"
+            );
+        }
+    }
+    eprintln!(
+        "{} placements, {in_gap} inside a gap, {} gaps",
+        placed.len(),
+        gaps.len()
+    );
     hub.close_control();
     assert_eq!(hub.wait_exit().code(), Some(0));
 }

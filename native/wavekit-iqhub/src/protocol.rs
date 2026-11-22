@@ -43,6 +43,9 @@ pub const MAX_GRACE_MS: u64 = 60_000;
 pub const DEFAULT_GRACE_MS: u64 = 2_000;
 pub const MIN_KEEPALIVE_MS: u64 = 1_000;
 pub const MAX_KEEPALIVE_MS: u64 = 7_200_000;
+/// `connect`'s `rcvBufBytes`: the upstream socket's `SO_RCVBUF` request (64 KiB to 64 MiB).
+pub const MIN_RCV_BUF_BYTES: u64 = 65_536;
+pub const MAX_RCV_BUF_BYTES: u64 = 67_108_864;
 pub const DEFAULT_MAX_LAG_MS: u64 = 2_000;
 pub const DEFAULT_RESUME_MS: u64 = 250;
 pub const MIN_RESUME_MS: u64 = 20;
@@ -84,6 +87,9 @@ pub struct Connect {
     /// Bounds the header phase, from `tcp-connected`; `None`: no limit.
     pub header_timeout_ms: Option<u64>,
     pub keep_alive_ms: Option<u64>,
+    /// `SO_RCVBUF` to request before `connect()` (applied only when the platform allows all of
+    /// it; see `sys::rcv_buf_plan`).
+    pub rcv_buf_bytes: Option<u64>,
 }
 
 /// How an `abort` closes its attempt.
@@ -111,6 +117,8 @@ impl CloseMode {
 pub enum SinkKind {
     Raw,
     Framed,
+    /// A raw sink bound to one attempt that also carries its commands (README, "Front sinks").
+    Front,
 }
 
 impl SinkKind {
@@ -118,6 +126,7 @@ impl SinkKind {
         match self {
             SinkKind::Raw => "raw",
             SinkKind::Framed => "framed",
+            SinkKind::Front => "front",
         }
     }
 }
@@ -148,6 +157,8 @@ pub enum Request {
         kind: SinkKind,
         max_lag_ms: u64,
         resume_ms: u64,
+        /// The attempt a front sink is bound to (`Some` exactly for `kind: "front"`).
+        attempt: Option<u64>,
     },
     SinkActivate {
         sink: String,
@@ -488,6 +499,7 @@ pub fn parse_request(line: &[u8]) -> Result<Parsed, Refusal> {
                 "headerBytes",
                 "headerTimeoutMs",
                 "keepAliveMs",
+                "rcvBufBytes",
             ])?;
             let attempt = m.uint("attempt")?;
             let ip: IpAddr = m
@@ -506,6 +518,11 @@ pub fn parse_request(line: &[u8]) -> Result<Parsed, Refusal> {
                     MAX_HEADER_TIMEOUT_MS,
                 )?,
                 keep_alive_ms: m.opt_uint_in("keepAliveMs", MIN_KEEPALIVE_MS, MAX_KEEPALIVE_MS)?,
+                rcv_buf_bytes: m.opt_uint_in(
+                    "rcvBufBytes",
+                    MIN_RCV_BUF_BYTES,
+                    MAX_RCV_BUF_BYTES,
+                )?,
             })
         }
         "adopt" => {
@@ -555,12 +572,23 @@ pub fn parse_request(line: &[u8]) -> Result<Parsed, Refusal> {
             Request::Mark { id: m.uint("id")? }
         }
         "sink-open" => {
-            m.only(&["sink", "kind", "maxLagMs", "resumeMs"])?;
+            m.only(&["sink", "kind", "maxLagMs", "resumeMs", "attempt"])?;
             let sink = m.sink()?;
             let kind = match m.string("kind")? {
                 "raw" => SinkKind::Raw,
                 "framed" => SinkKind::Framed,
-                _ => return Err(m.malformed("kind must be \"raw\" or \"framed\"".into())),
+                "front" => SinkKind::Front,
+                _ => {
+                    return Err(m.malformed("kind must be \"raw\", \"framed\" or \"front\"".into()))
+                }
+            };
+            // A front is bound to one attempt; the other kinds take no attempt.
+            let attempt = match kind {
+                SinkKind::Front => Some(m.uint("attempt")?),
+                _ if obj.contains_key("attempt") => {
+                    return Err(m.malformed("attempt needs kind front".into()))
+                }
+                _ => None,
             };
             let (max_lag_ms, resume_ms) = m.marks(false)?;
             Request::SinkOpen {
@@ -568,6 +596,7 @@ pub fn parse_request(line: &[u8]) -> Result<Parsed, Refusal> {
                 kind,
                 max_lag_ms,
                 resume_ms,
+                attempt,
             }
         }
         "sink-activate" => {

@@ -7,9 +7,11 @@
 
 use crate::events::EVENT_QUEUE_BYTES;
 use crate::hub::{
-    Action, CloseReason, Hub, Kernel, Phase, Received, Sent, MAX_ATTEMPTS, MAX_SINKS, MAX_UNBOUND,
+    Action, CloseReason, Hub, Kernel, Phase, Received, Sent, StatsInput, MAX_ATTEMPTS, MAX_SINKS,
+    MAX_UNBOUND,
 };
 use crate::protocol::MAX_CONTROL_LINE_BYTES;
+use crate::stats::{StatsWriter, STATS_PERIOD_US};
 use crate::sys::{self, FdRead, FdWrite, PollFd, POLLERR, POLLHUP, POLLIN, POLLNVAL, POLLOUT};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -278,6 +280,12 @@ impl Kernel for Fds<'_> {
             None => Received::Failed(CloseReason::Error.into()),
         }
     }
+    fn front_recv(&mut self, sink: usize, buf: &mut [u8]) -> Received {
+        match raw(&self.sinks[sink]) {
+            Some(fd) => sys::recv(fd, buf),
+            None => Received::Failed(CloseReason::Error.into()),
+        }
+    }
 }
 
 pub struct Io {
@@ -305,6 +313,8 @@ pub struct Io {
     /// Complete control lines wait in `lines`: control reading paused mid-buffer.
     lines_pending: bool,
     listener_gate: ListenerGate,
+    stats: Option<StatsWriter>,
+    stats_due_us: u64,
 }
 
 const POLL_CAPACITY: usize = 3 + MAX_ATTEMPTS + MAX_SINKS + MAX_UNBOUND;
@@ -319,6 +329,7 @@ impl Io {
         socket_path: PathBuf,
         ring_ms: u64,
         debug: bool,
+        stats: Option<StatsWriter>,
     ) -> std::io::Result<Io> {
         sys::set_nonblocking(1)?;
         let sink_socket = socket_path.to_string_lossy().into_owned();
@@ -346,7 +357,36 @@ impl Io {
             sinks_probed_us: 0,
             lines_pending: false,
             listener_gate: ListenerGate::default(),
+            stats,
+            stats_due_us: 0,
         })
+    }
+
+    /// The stats line, built into the writer's own buffer and handed over without blocking.
+    fn stats_tick(&mut self, now: u64) {
+        let Some(w) = self.stats.as_mut() else {
+            return;
+        };
+        if !w.alive() {
+            self.stats = None;
+            return;
+        }
+        let u = sys::usage_self();
+        let utc_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        let inp = StatsInput {
+            utc_ms,
+            pid: std::process::id(),
+            user_us: u.user_us,
+            sys_us: u.system_us,
+            nvcsw: u.voluntary,
+            nivcsw: u.involuntary,
+            max_rss_bytes: u.max_rss_bytes,
+            skipped: w.skipped(),
+        };
+        self.hub.stats_line(&mut w.line, now, &inp);
+        let _ = w.submit();
     }
 
     fn control_paused(&mut self) -> bool {
@@ -386,6 +426,10 @@ impl Io {
                 self.hub.tick(now, &mut k);
             }
             self.actions(now);
+            if self.stats.is_some() && now >= self.stats_due_us {
+                self.stats_tick(now);
+                self.stats_due_us = now + STATS_PERIOD_US;
+            }
             if self.hub.progress_emitted() != self.seen_progress {
                 self.seen_progress = self.hub.progress_emitted();
                 self.probe_idle_sinks(now);
@@ -420,6 +464,9 @@ impl Io {
             }
             if self.idle_sinks() {
                 at(self.sinks_probed_us + SINK_PROBE_US);
+            }
+            if self.stats.is_some() {
+                at(self.stats_due_us);
             }
             let timeout = match deadline {
                 None => -1,
@@ -468,6 +515,13 @@ impl Io {
             let left = deadline.saturating_duration_since(Instant::now());
             let _ = sys::poll(&mut p, left.as_millis().min(500) as i32);
         }
+        if self.stats.is_some() {
+            let now = self.now();
+            self.stats_tick(now);
+            if let Some(w) = self.stats.as_mut() {
+                w.finish();
+            }
+        }
         let u = sys::usage_self();
         self.debug(format_args!(
             "exit code={code} wakeups={} reads={} user_us={} system_us={} voluntary={} involuntary={}",
@@ -515,15 +569,15 @@ impl Io {
             self.tags.push(Tag::Attempt(slot, self.attempt_gen[slot]));
         }
         for slot in 0..MAX_SINKS {
-            let (Some(fd), Some(w)) = (raw(&self.sinks[slot]), self.hub.sink_wants_write(slot))
+            let (Some(fd), Some((r, w))) = (raw(&self.sinks[slot]), self.hub.sink_interest(slot))
             else {
                 continue;
             };
             // With no events, Linux still reports a hang-up; macOS reports nothing, so idle
             // sinks are also probed after each progress event and at least once a second
-            // (`probe_idle_sinks`).
-            self.pollfds
-                .push(sys::pollfd(fd, if w { POLLOUT } else { 0 }));
+            // (`probe_idle_sinks`). Only a front is ever polled for reading.
+            let ev = if r { POLLIN } else { 0 } | if w { POLLOUT } else { 0 };
+            self.pollfds.push(sys::pollfd(fd, ev));
             self.tags.push(Tag::Sink(slot, self.sink_gen[slot]));
         }
         for conn in 0..MAX_UNBOUND {
@@ -570,14 +624,22 @@ impl Io {
                     return;
                 }
                 let now = self.now();
-                if hup {
-                    self.hub.sink_hangup(slot, now);
+                let (r, w) = self.hub.sink_interest(slot).unwrap_or((false, false));
+                let mut k = Fds {
+                    attempts: &self.attempts,
+                    sinks: &self.sinks,
+                    unbound: &self.unbound,
+                };
+                if r && (rev & POLLIN != 0 || hup) {
+                    // A front polled for reading: a hang-up there may be a half-close (macOS
+                    // reports POLLHUP with it); the bytes before the EOF are read first.
+                    self.hub.front_readable(slot, &mut k, now);
+                    if w && rev & POLLOUT != 0 {
+                        self.hub.sink_writable(slot, &mut k, now);
+                    }
+                } else if hup {
+                    self.hub.sink_hangup(slot, &mut k, now);
                 } else if rev & POLLOUT != 0 {
-                    let mut k = Fds {
-                        attempts: &self.attempts,
-                        sinks: &self.sinks,
-                        unbound: &self.unbound,
-                    };
                     self.hub.sink_writable(slot, &mut k, now);
                 }
                 self.actions(now);
@@ -717,7 +779,12 @@ impl Io {
         }
         for i in 0..self.probe.len() {
             if self.probe[i].revents & (POLLHUP | POLLERR | POLLNVAL) != 0 {
-                self.hub.sink_hangup(self.probe_slots[i], now);
+                let mut k = Fds {
+                    attempts: &self.attempts,
+                    sinks: &self.sinks,
+                    unbound: &self.unbound,
+                };
+                self.hub.sink_hangup(self.probe_slots[i], &mut k, now);
             }
         }
         self.actions(now);
@@ -751,8 +818,12 @@ impl Io {
                     attempt,
                     addr,
                     keep_alive_ms,
-                } => match sys::tcp_connect(&addr, keep_alive_ms) {
-                    Ok((fd, connected)) => {
+                    rcv_buf_bytes,
+                } => match sys::tcp_connect(&addr, keep_alive_ms, rcv_buf_bytes) {
+                    Ok((fd, connected, rcv)) => {
+                        if let Some(r) = rcv {
+                            self.hub.set_rcv_buf(attempt, r);
+                        }
                         let port = connected.then(|| sys::local_port(fd.as_raw_fd()));
                         self.attempts[attempt] = Some(fd);
                         self.attempt_gen[attempt] += 1;
@@ -777,6 +848,19 @@ impl Io {
                         sys::shutdown_read(fd.as_raw_fd());
                         self.sinks[sink] = Some(fd);
                         self.sink_gen[sink] += 1;
+                    }
+                }
+                Action::BindFront { conn, sink } => {
+                    // The read side stays open: the front's commands come in there.
+                    if let Some(fd) = self.unbound[conn].take() {
+                        self.unbound_gen[conn] += 1;
+                        self.sinks[sink] = Some(fd);
+                        self.sink_gen[sink] += 1;
+                    }
+                }
+                Action::ShutdownSinkWrite { sink } => {
+                    if let Some(fd) = raw(&self.sinks[sink]) {
+                        sys::shutdown_write(fd);
                     }
                 }
                 Action::SetSendBuffer { sink, bytes } => {
