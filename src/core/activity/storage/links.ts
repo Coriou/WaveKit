@@ -15,6 +15,7 @@ import type {
 } from "./contract.js"
 import { dsdFmeKeepKey } from "../../recordings/contract.js"
 import {
+	callTrustAdmits,
 	dsdFmeCallRecordable,
 	protocolRecordable,
 } from "../../../decoders/builtin/dmr-recording-gate.js"
@@ -51,7 +52,10 @@ const BACKFILL_PENDING_CALLS = 4_096
 
 const META_KEY = "recordingLinkBackfill"
 
-/** A call the backfill waits on for its late file, with whether its protocol may be recorded. */
+/**
+ * A call the backfill waits on for its late file, with whether it may be recorded: its protocol
+ * is recordable and its row says it clear (callTrustAdmits).
+ */
 type PendingCall = LinkedRow & { durationMs: unknown; recordable: boolean }
 
 /**
@@ -279,7 +283,10 @@ export function backfillRecordingLinks(
 				json_extract(record_json, '$.payload.decodedData.callId') AS call_id,
 				json_extract(record_json, '$.payload.decodedData.flags.wavFileUpdate') AS late,
 				json_extract(record_json, '$.payload.decodedData.duration') AS duration,
-				json_extract(record_json, '$.payload.decodedData.protocol') AS protocol
+				json_extract(record_json, '$.payload.decodedData.protocol') AS protocol,
+				json_extract(record_json, '$.payload.decodedData.encrypted') AS encrypted,
+				json_extract(record_json, '$.payload.decodedData.encryptionKnown') AS known,
+				json_extract(record_json, '$.payload.decodedData.flags.encrypted') AS flagged
 			 FROM activity
 			 WHERE category = 'voice' AND kind = 'decoder-reception' AND seq > ? AND seq <= ?
 			 ORDER BY seq LIMIT ?`,
@@ -316,6 +323,15 @@ export function backfillRecordingLinks(
 			const name = typeof wav === "string" ? recordingBaseName(wav) : null
 			const key = name === null ? null : dsdFmeKeepKey(name)
 			const protocol = cell(row, "protocol")
+			// This row's own trust fields (callTrustAdmits); JSON booleans read back as 1 / 0.
+			const bool = (v: unknown): unknown =>
+				v === 1 || v === 1n ? true : v === 0 || v === 0n ? false : v
+			const flagged = bool(cell(row, "flagged"))
+			const clear = callTrustAdmits(protocol, {
+				encrypted: bool(cell(row, "encrypted")),
+				encryptionKnown: bool(cell(row, "known")),
+				...(flagged !== null ? { flags: { encrypted: flagged } } : {}),
+			})
 			let target: PendingCall | undefined
 			if (late) {
 				target = callKey === null ? undefined : pending.get(callKey)
@@ -329,7 +345,9 @@ export function backfillRecordingLinks(
 						summaryJson,
 						durationMs: cell(row, "duration"),
 						recordable:
-							typeof protocol === "string" && protocolRecordable(protocol),
+							typeof protocol === "string" &&
+							protocolRecordable(protocol) &&
+							clear,
 					})
 					while (pending.size > BACKFILL_PENDING_CALLS) {
 						const oldest = pending.keys().next()
@@ -350,7 +368,8 @@ export function backfillRecordingLinks(
 			if (target === undefined || key === null || name === null) continue
 			// A DMR call (or one of unknown protocol) never links while DMR recordings are off:
 			// the file's row, its call's row and the file name must all say a recordable protocol.
-			if (!target.recordable || !backfillLinkable(protocol, name)) continue
+			if (!target.recordable || !clear || !backfillLinkable(protocol, name))
+				continue
 			const link = recordingLinkOf(key, target.durationMs)
 			if (link === null) continue
 			// One row that cannot be linked is skipped; it never stops the backfill.

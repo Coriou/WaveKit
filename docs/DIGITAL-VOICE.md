@@ -108,6 +108,13 @@ probes). It records whether or not anyone is listening.
   loses its whole file, and so does a call that ends before it is known to be
   clear. Audio that arrives too late to be checked against the call's events
   may still slip through (a known limit).
+- **Clear means proven clear, per call.** A P25 phase 1 call is clear only
+  once its own LDU2 printed `ALG ID: 0x80 KEY ID: 0x0000`, an NXDN call once
+  its own checked VCALL came with no cipher print. P25 phase 2, dPMR and
+  ProVoice print nothing that proves a call clear, so their calls are never
+  recorded, linked or played live. D-STAR and YSF have no privacy field and
+  are recorded as clear. The per-protocol table is in
+  [DECODER-GUIDE.md](DECODER-GUIDE.md) (call lifecycle).
 - **No DMR yet.** DMR per-call recordings are not listed, served, linked or
   recorded yet. The recorder writes no DMR call (nor one whose protocol is not
   known). A dsd-fme per-call file whose name says DMR (its system field starts
@@ -190,10 +197,12 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   is clear. The stream maps these to `digital-voice:call` (`decoderId`, `callId`,
   `protocol`, `talkgroup`, `source`, `slot`, `encrypted`, `encryptionKnown`,
   `active`, `startedAt`, `endedAt`).
-- **Encryption not known yet**: a DMR or P25 call starts on its voice frames,
-  before its link control says whether it is encrypted
-  ([DECODER-GUIDE.md](DECODER-GUIDE.md), call lifecycle), and carries
-  `encryptionKnown: false` until it does (absent means known). Such a call is not
+- **Encryption not known yet**: a DMR call starts on its voice frames,
+  before its link control says whether it is encrypted, and a P25, NXDN, dPMR
+  or ProVoice call starts before its own positive clear print
+  ([DECODER-GUIDE.md](DECODER-GUIDE.md), call lifecycle); either carries
+  `encryptionKnown: false` until it is known (absent means known: D-STAR and
+  YSF). Such a call is not
   clear: the auto route (`/auto`) admits none of its voice while the field is
   present and not `true`, and admits it once the call is known clear. A scanner
   probe records such a call as encrypted, never as a clear recording. Noise

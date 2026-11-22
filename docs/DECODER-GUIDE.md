@@ -1144,17 +1144,37 @@ that has no IDs yet holds its `call_end` up to 105 ms (one 60 ms burst plus the
 call only if the burst closes clean (no error line before the next sync), a
 terminator printed again in that window changes nothing, and the call still ends
 at the terminator.
-A DMR or P25 call that starts before its link control said whether it is encrypted
+A DMR call that starts before its link control said whether it is encrypted
 carries `encryptionKnown: false` on its `call_start` and `voice-call` state: it is
-not clear. The first checked link control (DMR TG/SRC with or without `Encrypted`,
-a P25 LCW or ALG ID) makes it known, and an announced call publishes a
-`voice-call` update with `encryptionKnown: true` and its identities. A DMR link
+not clear. The first checked link control (DMR TG/SRC with or without `Encrypted`)
+makes it known, and an announced call publishes a `voice-call` update with
+`encryptionKnown: true` and its identities. A DMR link
 control counts as clear only once its burst closed clean: the next DMR sync (of
 either slot) with no error line before it; a line with an error, a sync loss or
 4 s without a sync leave the call unknown (an `Encrypted` one mutes it at once).
-A P25 `src: … tg: …` print says it only through a clear ALG ID on an error-free
-line. A call that
-ends still unknown is never linked to a per-call recording. DMR per-call
+
+P25, NXDN, dPMR and ProVoice calls are clear only on a positive clear print of the
+call itself; every one starts with `encryptionKnown: false`:
+
+| Protocol    | Positive clear print (sets `encryptionKnown: true`)                                                                                                                                                         | Privacy prints (encrypted for good)                                                                |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| P25 phase 1 | An error-free `LDU2 ALG ID: 0x80 KEY ID: 0x0000` line while the call runs (dsd-fme prints the ALG of every LDU2 that decoded)                                                                               | An ALG ID other than `0x80` or `0x00`, ` ENC`, ` Encrypted` (LCW service options), `LCW Protected` |
+| P25 phase 2 | None: dsd-fme prints an ALG only when it is neither `0x80` nor `0x00`, so a phase 2 call is never known clear                                                                                               | Any ALG ID line other than `0x80` / `0x00`, ` Encrypted`                                           |
+| NXDN48 / 96 | A CRC-checked VCALL whose `Src=… - Dst/TG=…` are the call's own, followed by a line that is not a cipher print (dsd-fme prints the cipher type and key right after whenever the 2-bit cipher type is not 0) | `Scrambler/DES/AES - Key ID`, `ENC;`, `Encrypted`                                                  |
+| dPMR        | None: dsd-fme prints ` Scrambler` for encryption mode 3 only and nothing for modes 1 and 2                                                                                                                  | ` Scrambler`                                                                                       |
+| ProVoice    | None: no privacy field is printed                                                                                                                                                                           | None                                                                                               |
+| D-STAR, YSF | No privacy field exists (no cipher bit in the D-STAR header flags or the YSF FICH; their scramblers are data whitening): no `encryptionKnown` field, clear                                                  | None                                                                                               |
+
+A privacy print also counts on an errored line, and one printed while no call of
+that protocol runs marks the next call that starts within 4 s encrypted, unless a
+terminator (P25 `TDU`/`TDULC`, NXDN `TX_REL`/`DISC`), a switch to another protocol
+or a decoder restart comes first. A clear print never carries over: an earlier
+call's, or one printed for other IDs, proves nothing for the next call. The LCW's
+service options without `Encrypted`, or a clear ALG on a `src: … tg: …` print,
+prove nothing either. A call that ends not known clear is never linked to a
+per-call recording, and the Activity ingress and its backfill link a call file
+only when the row's own `call_end` says `encryptionKnown: true` (for P25, NXDN,
+dPMR, ProVoice and DMR) and not encrypted. DMR per-call
 recordings are off for now (`DMR_RECORDING_LINK_ENABLED` in
 `src/decoders/builtin/dmr-recording-gate.ts`): until DMR clearance is trusted, no
 DMR call file is written by the call recorder, listed, served or linked, clear or
@@ -1162,9 +1182,8 @@ not. The recordable protocols are an allow-list (P25, NXDN, YSF, D-STAR, dPMR,
 ProVoice, EDACS, M17); a dsd-fme file name without a known protocol is refused
 too and stays on disk. Noise that prints
 three clean DMR syncs of one colour code over two superframes starts such a call;
-it never learns its encryption, so it stays muted and unrecorded. YSF, NXDN and dPMR
-calls carry no `encryptionKnown` field: the adapter does not read their
-encryption.
+it never learns its encryption, so it stays muted and unrecorded. YSF and D-STAR
+calls carry no `encryptionKnown` field (no privacy field to read).
 Calls of the catalogue's `auto` mode (`-fa`) cover DMR, P25, YSF, D-STAR and
 X2-TDMA; dsd-fme turns NXDN and dPMR off in that mode, so they need a decoder with
 `mode: nxdn`, `nxdn48` or `dpmr`.

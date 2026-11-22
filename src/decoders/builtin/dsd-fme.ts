@@ -189,6 +189,37 @@ const P25P2_VCH =
  */
 const P25_CRYPTO =
 	/\bALG\s+ID:\s*(?:0x)?(?<alg>[0-9A-F]+)\b|\bKEY\s+ID:\s*(?:0x)?(?<key>[0-9A-F]+)\b|\bMI\b/i
+/**
+ * P25 privacy prints (phase 1 and 2): a service option privacy bit
+ * (p25_lcw.c, p25p2_vpdu.c " Encrypted"), an encrypted header or LDU2
+ * (p25p1_hdu.c, p25p1_ldu2.c " ENC"), an encrypted link control (p25_lcw.c
+ * " LCW Protected"), the P-bit print ("ENC;"). An ALG ID that is neither
+ * 0x80 nor 0x00 counts too (nonDmrPrivacyPrint).
+ */
+const P25_PRIVACY = /\bEncrypted\b|\bENC\b|\bLCW Protected\b/
+/**
+ * The one P25 positive clear print: p25p1_ldu2.c prints the ALG and KEY of
+ * every LDU2 that decoded (irrecoverable_errors == 0), clear or not; 0x80 is
+ * "unencrypted" (TIA-102.AAAD) and a clear call keys 0. Phase 2 prints an
+ * ALG only when it is neither 0x80 nor 0x00 (p25p2_xcch.c, p25p2_frame.c):
+ * nothing there proves a call clear.
+ */
+const P25P1_LDU2_CLEAR = /^\s*LDU2 ALG ID: 0x80 KEY ID: 0x0000\b/
+/**
+ * NXDN privacy prints: the cipher type and key printed on the line after a
+ * VCALL's IDs whenever the 2-bit cipher type is not 0 (nxdn_element.c
+ * NXDN_decode_VCALL / _ARIB: "  Scrambler - Key ID 3 - "), the SCCH form
+ * ("- DES - Key ID: 5; "), data call headers ("ENC; Cipher: 2;") and
+ * "Encrypted Data".
+ */
+const NXDN_PRIVACY =
+	/\b(?:Scrambler|DES|AES)\s+-\s+Key\s+ID\b|\bENC;|\bEncrypted\b/
+/**
+ * dPMR privacy: " Scrambler" after the IDs for encryption mode 3
+ * (dpmr_voice.c). Modes 1 and 2 print nothing, so no dPMR print proves a
+ * call clear.
+ */
+const DPMR_PRIVACY = /\bScrambler\b|\bEncrypted\b/
 
 // --- YSF Patterns ---
 /** YSF sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -515,10 +546,19 @@ interface DsdFmeCallState {
 	 * false: not known yet; true: known (clear, or encrypted with
 	 * flags.encrypted). DMR calls always carry it; known with encrypted
 	 * false only once the clearance machine settled a proof
-	 * (dsd-fme-dmr-clearance.ts). Absent (other protocols): known from the
-	 * start.
+	 * (dsd-fme-dmr-clearance.ts). P25, NXDN, dPMR and ProVoice calls
+	 * (positiveClearProtocol) start false and become known clear only on
+	 * their own positive clear print (clearEvidence). Absent (D-STAR, YSF:
+	 * no privacy field): known from the start.
 	 */
 	encryptionKnown?: boolean | undefined
+	/**
+	 * P25, NXDN, dPMR, ProVoice: a print proved this call itself clear (an
+	 * error-free P25 phase 1 LDU2 "ALG ID: 0x80 KEY ID: 0x0000" while it ran,
+	 * or a checked NXDN VCALL naming its own IDs with no cipher print after
+	 * it). Its recording may be linked only then (recordingLinkable).
+	 */
+	clearEvidence?: boolean | undefined
 	/**
 	 * Started on its voice frames without an identity: its frames ran long
 	 * enough to be an over (UNNAMED_EVIDENCE_SYNCS, unnamedEvidenceSpanMs).
@@ -1031,6 +1071,38 @@ function dmrHeaderLine(line: string, burst: string | undefined): boolean {
 }
 
 /** Algorithm ids that mean "no encryption" (P25 0x80, DMR/none 0x00). */
+/**
+ * Protocols whose calls may have a recording only on a positive clear print
+ * of the call itself (clearEvidence): P25 phase 1 and 2, NXDN, dPMR and
+ * ProVoice can all carry privacy. Phase 2, dPMR and ProVoice print nothing
+ * that proves a call clear, so their calls never have one. D-STAR and YSF
+ * carry no privacy field (no cipher bit in the D-STAR header flags or the
+ * YSF FICH; their scramblers are data whitening), so they are not here.
+ */
+export function positiveClearProtocol(protocol: DsdFmeProtocol): boolean {
+	return (
+		protocol === "p25p1" ||
+		protocol === "p25p2" ||
+		protocol === "nxdn48" ||
+		protocol === "nxdn96" ||
+		protocol === "dpmr" ||
+		protocol === "provoice"
+	)
+}
+
+/** A privacy print of a non-DMR protocol (P25_PRIVACY, NXDN_PRIVACY, DPMR_PRIVACY). */
+function nonDmrPrivacyPrint(protocol: DsdFmeProtocol, line: string): boolean {
+	if (protocol === "p25p1" || protocol === "p25p2") {
+		const alg = ALG_ID.exec(line)?.groups?.["alg"]
+		if (alg !== undefined && !isClearAlgorithm(alg)) return true
+		return P25_PRIVACY.test(line)
+	}
+	if (protocol === "nxdn48" || protocol === "nxdn96")
+		return NXDN_PRIVACY.test(line)
+	if (protocol === "dpmr") return DPMR_PRIVACY.test(line)
+	return false
+}
+
 function isClearAlgorithm(alg: string): boolean {
 	const value = parseInt(alg, 16)
 	return value === 0x80 || value === 0
@@ -1128,6 +1200,29 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	// Current protocol detected from sync (candidate context, not event)
 	private currentProtocol: DsdFmeProtocol = null
+	/**
+	 * The last privacy print of a non-DMR protocol (nonDmrPrivacyPrint): a
+	 * call of that protocol that starts within the call timeout of it, before
+	 * a terminator, a protocol switch or a restart, starts encrypted.
+	 */
+	private privacyTaint: { protocol: DsdFmeProtocol; atMs: number } | undefined
+	/** NXDN: the call a checked VCALL just named; the next line settles it (nonDmrPrivacy). */
+	private nxdnVcallClear:
+		| { callId: string; talkgroup: number; source: number }
+		| undefined
+	/**
+	 * P25 phase 1 clear credit, per superframe: an LDU1 sync whose NID
+	 * decoded waits for its LCW (p25LcwDue); a clean LCW naming a call makes
+	 * it the superframe's named call (p25Ldu1Named); the next LDU2 sync hands
+	 * that name to its ALG print (p25Ldu2Credit), the only call an LDU2 "ALG
+	 * ID: 0x80 KEY ID: 0x0000" may prove clear. Any other P25 phase 1 sync (an
+	 * HDU opens the next over, a failed LDU1, a terminator), another
+	 * protocol's sync and a restart drop all three, so an over's clear print
+	 * never credits a call its own LDU1 did not name.
+	 */
+	private p25LcwDue = false
+	private p25Ldu1Named: string | undefined = undefined
+	private p25Ldu2Credit: string | undefined = undefined
 	/** NAC of the last P25 phase 1 sync line whose NID decoded. */
 	private lastP25Nac: string | undefined = undefined
 	/**
@@ -1517,6 +1612,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.dmrTrainOf.clear()
 		this.dmrTrainSeed.clear()
 		this.dmrIdleRun.clear()
+		this.privacyTaint = undefined
+		this.nxdnVcallClear = undefined
+		this.dropP25Credit()
 		this.dmrRoute = newDmrRoute()
 		this.flushPendingDmrLink(false)
 		// The old child's DMR mode and slot state, as stop() clears it.
@@ -1682,15 +1780,91 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}
 
 	/**
-	 * A P25 call that started before its encryption was known (call-first)
-	 * learned it is clear: an announced one publishes the change (with the
-	 * identities that came with it) on "voice-call", so its voice may play
-	 * from now on. DMR calls learn it only from applyDmrTrust.
+	 * A P25, NXDN, dPMR or ProVoice call's own positive clear print
+	 * (clearEvidence): it becomes known clear, and an announced one publishes
+	 * the change on "voice-call", so its voice may play from now on. An
+	 * encrypted call stays encrypted. DMR calls learn it only from
+	 * applyDmrTrust.
 	 */
-	private markKnown(call: DsdFmeCallState | null): void {
-		if (call?.encryptionKnown !== false || call.protocol === "dmr") return
+	private markClear(call: DsdFmeCallState): void {
+		if (!positiveClearProtocol(call.protocol) || call.flags.encrypted) return
+		if (call.clearEvidence === true) return
+		call.clearEvidence = true
+		if (call.encryptionKnown !== false) return
 		call.encryptionKnown = true
 		this.publishCallUpdate(call)
+	}
+
+	/**
+	 * Non-DMR privacy, before the line is parsed: a privacy print of the
+	 * current protocol marks its ongoing call encrypted for good and taints
+	 * the protocol's context (privacyTaint); an error-free P25 phase 1 LDU2
+	 * "ALG ID: 0x80 KEY ID: 0x0000" proves the ongoing P25 phase 1 call
+	 * clear; a non-blank line after a checked NXDN VCALL's IDs proves the
+	 * call that VCALL named clear unless it is the cipher print. A privacy
+	 * print counts even on an errored line (it can only keep a call from
+	 * being linked); a clear print never does.
+	 */
+	private nonDmrPrivacy(line: string, now: Date): void {
+		const protocol = this.currentProtocol
+		const nowMs = now.getTime()
+		const taint = this.privacyTaint
+		if (
+			taint !== undefined &&
+			(taint.protocol !== protocol ||
+				nowMs < taint.atMs ||
+				nowMs - taint.atMs > this.callTimeoutMs())
+		)
+			this.privacyTaint = undefined
+		if (protocol === null || protocol === "dmr") {
+			this.nxdnVcallClear = undefined
+			return
+		}
+		const privacy = nonDmrPrivacyPrint(protocol, line)
+		const vcall = this.nxdnVcallClear
+		if (vcall !== undefined && line.trim() !== "") {
+			this.nxdnVcallClear = undefined
+			const call = this.ongoingCall(protocol)
+			if (
+				!privacy &&
+				!LINE_ERR.test(line) &&
+				call !== null &&
+				call.callId === vcall.callId &&
+				call.talkgroup === vcall.talkgroup &&
+				call.source === vcall.source
+			)
+				this.markClear(call)
+		}
+		if (privacy) {
+			const call = this.ongoingCall(protocol)
+			if (call !== null) {
+				// The update that mutes the call carries the line's ALG / KEY ID.
+				if (protocol === "p25p1" || protocol === "p25p2")
+					this.noteP25Crypto(call, line)
+				this.markEncrypted(call)
+			}
+			this.privacyTaint = { protocol, atMs: nowMs }
+			return
+		}
+		if (
+			protocol === "p25p1" &&
+			P25P1_LDU2_CLEAR.test(line) &&
+			!burstError(line)
+		) {
+			// Only the call this superframe's own LDU1 named (p25Ldu2Credit).
+			const credit = this.p25Ldu2Credit
+			this.p25Ldu2Credit = undefined
+			const call = this.ongoingCall("p25p1")
+			if (call !== null && credit !== undefined && call.callId === credit)
+				this.markClear(call)
+		}
+	}
+
+	/** Drops the P25 phase 1 superframe naming (see p25Ldu1Named). */
+	private dropP25Credit(): void {
+		this.p25LcwDue = false
+		this.p25Ldu1Named = undefined
+		this.p25Ldu2Credit = undefined
 	}
 
 	/**
@@ -2571,6 +2745,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	): DecoderOutput | null {
 		// STEP 3: Track errors for quality metrics (rolling window)
 		this.updateErrorWindow(cleanLine, nowMs)
+		// STEP 3-: Non-DMR privacy and positive clear prints of the ongoing call.
+		this.nonDmrPrivacy(cleanLine, now)
 		// STEP 3a: The lane's voice LC header candidate and last sync.
 		this.dropErroredCandidate(cleanLine)
 		this.noteLaneSync(cleanLine, nowMs)
@@ -2904,7 +3080,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				this.lastP25Nac = /\bduid:EE\b/.test(line)
 					? undefined
 					: printed.toUpperCase()
-		} else this.lastP25Nac = undefined
+			const duid = /\bduid:EE\b/.test(line)
+				? undefined
+				: P25_VOICE_FRAME.exec(line)?.groups?.["duid"]
+			const named = this.p25Ldu1Named
+			this.dropP25Credit()
+			if (duid === "LDU2") this.p25Ldu2Credit = named
+			else if (duid === "LDU1" && !burstError(line)) this.p25LcwDue = true
+		} else {
+			this.lastP25Nac = undefined
+			this.dropP25Credit()
+		}
 		if (protocol !== "nxdn48" && protocol !== "nxdn96") {
 			this.nxdnCleanAt = undefined
 			this.nxdnRan = undefined
@@ -3218,8 +3404,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			p25,
 		)
 		call.onFrames = true
-		// A DMR call starts not known clear (startPendingCall).
-		if (protocol === "p25p1") call.encryptionKnown = false
+		// A DMR or P25 call starts not known clear (startPendingCall).
 		if (protocol === "dmr" && this.laneSync?.kind === "voice")
 			call.voiceAtMs = nowMs
 		if (alive?.encrypted === true) this.markEncrypted(call)
@@ -4056,16 +4241,25 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/** Applies a P25 crypto line (ALG/KEY ID) to the ongoing call of `protocol`. */
 	private applyP25Crypto(line: string, protocol: "p25p1" | "p25p2"): void {
-		const cryptoMatch = P25_CRYPTO.exec(line)
-		if (!cryptoMatch) return
 		const call = this.callState ?? this.pendingCall?.state ?? null
 		if (!call || call.protocol !== protocol) return
+		const alg = this.noteP25Crypto(call, line)
+		// A clear ALG is no proof here (nonDmrPrivacy: an LDU2 0x80 KEY 0 is).
+		if (alg !== undefined && !isClearAlgorithm(alg)) this.markEncrypted(call)
+	}
+
+	/** Keeps a P25 crypto line's ALG and KEY ID on `call`; returns the ALG. */
+	private noteP25Crypto(
+		call: DsdFmeCallState,
+		line: string,
+	): string | undefined {
+		const cryptoMatch = P25_CRYPTO.exec(line)
+		if (!cryptoMatch) return undefined
 		const alg = ALG_ID.exec(line)?.groups?.["alg"]
 		const keyId = cryptoMatch.groups?.["key"]
 		if (alg !== undefined) call.p25 = { ...call.p25, alg }
 		if (keyId !== undefined) call.p25 = { ...call.p25, keyId }
-		if (alg !== undefined && !isClearAlgorithm(alg)) this.markEncrypted(call)
-		else if (alg !== undefined && !burstError(line)) this.markKnown(call)
+		return alg
 	}
 
 	/**
@@ -4109,11 +4303,18 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					undefined,
 					p25.nac !== undefined || target !== undefined ? p25 : undefined,
 				)
-				// LCW service option bit 0x40 prints " Encrypted"; without it the
-				// call is known clear.
+				// LCW service option bit 0x40 prints " Encrypted" (nonDmrPrivacy
+				// marked the old call; this marks the call the line named). Its
+				// absence proves nothing: only an LDU2 ALG 0x80 does (markClear).
 				const call = this.ongoingCall("p25p1")
 				if (DMR_ENCRYPTED.test(line) && call !== null) this.markEncrypted(call)
-				else this.markKnown(call)
+				// A clean LCW of an LDU1 names the superframe's call: its LDU2's
+				// clear print may credit that call, and no other (p25Ldu1Named).
+				if (this.p25LcwDue) {
+					this.p25LcwDue = false
+					if (call !== null && !burstError(line))
+						this.p25Ldu1Named = call.callId
+				}
 				if (split && event) this.emitOutput(split)
 				return event ?? split
 			}
@@ -4219,7 +4420,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					talkgroup: tgt,
 					source: src,
 				})
-			return this.processCallMetadata(
+			const event = this.processCallMetadata(
 				now,
 				protocol,
 				tgt,
@@ -4229,6 +4430,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				undefined,
 				nxdnMeta,
 			)
+			// The call this checked VCALL names: proven clear by the next line
+			// unless that is its cipher print (nonDmrPrivacy).
+			const named = this.ongoingCall(protocol)
+			this.nxdnVcallClear =
+				named !== null && named.talkgroup === tgt && named.source === src
+					? { callId: named.callId, talkgroup: tgt, source: src }
+					: undefined
+			return event
 		}
 
 		// Voice frames carry the RAN only: keep the ongoing call, or start one.
@@ -4655,6 +4864,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			return null
 		}
 		if (isTerminator) {
+			// The over is over: its privacy prints taint no later call.
+			if (targetCall.protocol !== "dmr") this.privacyTaint = undefined
 			// If we have a pending call, promote it first so we can end it properly
 			if (this.pendingCall && !this.callState) {
 				this.callState = this.pendingCall.state
@@ -4936,8 +5147,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				nxdn,
 				dstar,
 				ysf,
-				// A DMR call is not known clear until the clearance machine says.
-				...(protocol === "dmr" ? { encryptionKnown: false } : {}),
+				// A DMR call is not known clear until the clearance machine says;
+				// a P25, NXDN, dPMR or ProVoice call until its own clear print.
+				...(protocol === "dmr" || positiveClearProtocol(protocol)
+					? { encryptionKnown: false }
+					: {}),
 				quality: { crcErrs: 0, fecErrs: 0 },
 				flags: {
 					encrypted: false,
@@ -4950,6 +5164,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		this.bindDmrCall(this.pendingCall.state, nowMs)
+		// A privacy print of this protocol shortly before, in the same context
+		// (privacyTaint), may be this call's own: it starts encrypted.
+		const taint = this.privacyTaint
+		if (
+			positiveClearProtocol(protocol) &&
+			taint !== undefined &&
+			taint.protocol === protocol &&
+			nowMs >= taint.atMs &&
+			nowMs - taint.atMs <= this.callTimeoutMs()
+		)
+			this.markEncrypted(this.pendingCall.state)
 
 		this.logger.debug(
 			{ protocol, tgt, src, slot, delayMs },
@@ -5196,8 +5421,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/**
 	 * Recording admission: whether a call's recording may be linked to it
 	 * (and so become playable). Only a call known clear: a DMR call whose
-	 * clearance is clear, any other protocol's call that is not encrypted
-	 * and whose encryption is not unknown. A future admission check (squelch,
+	 * clearance is clear; a P25, NXDN, dPMR or ProVoice call only on its own
+	 * positive clear print (clearEvidence) and no privacy print (P25 phase
+	 * 2, dPMR and ProVoice print none, so never); a D-STAR or YSF call (no
+	 * privacy field) unless a privacy print. A future admission check (squelch,
 	 * SNR, voice activity) belongs here too, after this privacy rule.
 	 * DMR recordings stay unlinked while DMR_RECORDING_LINK_ENABLED is off
 	 * (until the DMR clearance gate passes its final review).
@@ -5208,6 +5435,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				DMR_RECORDING_LINK_ENABLED &&
 				this.dmrClearance.trust(call.callId) === "clear"
 			)
+		if (positiveClearProtocol(call.protocol))
+			return call.clearEvidence === true && !call.flags.encrypted
 		return !call.flags.encrypted && call.encryptionKnown !== false
 	}
 

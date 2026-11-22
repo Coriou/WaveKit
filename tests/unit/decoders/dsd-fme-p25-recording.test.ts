@@ -1,6 +1,7 @@
 /**
  * dsd-fme P25: an encrypted call's per-call recording is never linked to
- * its call_end; a clear call's recording is (the control that proves the
+ * its call_end, nor is one whose clear ALG is not its own LDU2 0x80 KEY 0
+ * print; a call that printed it is linked (the control that proves the
  * recording would match). Ids are synthetic.
  */
 import * as fs from "node:fs"
@@ -40,7 +41,7 @@ describe("dsd-fme P25 recording link", () => {
 				"",
 			)
 			vi.useFakeTimers({ toFake: ["Date"] })
-			const end = (alg: string) => {
+			const end = (algLine: string) => {
 				const d = createDecoder({
 					mode: "p25",
 					enablePerCallRecording: true,
@@ -53,21 +54,32 @@ describe("dsd-fme P25 recording link", () => {
 				})
 				const adapter = d as unknown as Internals
 				vi.setSystemTime(start)
-				adapter.handleOutputLine("Sync: +P25p1")
+				adapter.handleOutputLine("Sync: +P25p1 LDU1")
 				adapter.handleOutputLine("nac: [ 1b] src: [ 1234] tg: [ 56]")
+				// The LDU1's link control names the call its LDU2 may prove clear.
+				adapter.handleOutputLine(
+					" Group Voice Channel User - Group 56 Source 1234",
+				)
 				vi.setSystemTime(start.getTime() + 50)
-				adapter.handleOutputLine(`ALG ID: ${alg}`)
+				adapter.handleOutputLine("Sync: +P25p1 LDU2")
+				adapter.handleOutputLine(algLine)
 				vi.setSystemTime(start.getTime() + 5000)
 				adapter.checkCallTimeoutAsync()
 				return ends
 			}
-			const encrypted = end("0x84")
+			const encrypted = end(
+				" LDU2 ALG ID: 0x84 KEY ID: 0x1234 MI: 0x1122334455667788 ENC",
+			)
 			expect(encrypted.length).toBeGreaterThan(0)
 			for (const e of encrypted) {
 				expect(e.flags?.encrypted).toBe(true)
 				expect(e.wavFile).toBeUndefined()
 			}
-			const clear = end("0x80")
+			// A clear ALG that is not the call's LDU2 0x80 KEY 0 proves nothing.
+			for (const e of end("ALG ID: 0x80")) expect(e.wavFile).toBeUndefined()
+			const clear = end(
+				" LDU2 ALG ID: 0x80 KEY ID: 0x0000 MI: 0x0000000000000000",
+			)
 			expect(clear[0]).toMatchObject({
 				protocol: "p25p1",
 				wavFile: expect.stringContaining(root),

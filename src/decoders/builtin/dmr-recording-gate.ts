@@ -72,3 +72,62 @@ export function dsdFmeCallProtocol(name: string): string | null {
 export function dsdFmeCallRecordable(name: string): boolean {
 	return protocolRecordable(dsdFmeCallProtocol(name))
 }
+
+/**
+ * Protocol labels (as protocolRecordable normalizes them) whose calls are clear only on a
+ * positive clear print of their own: P25, NXDN, dPMR and ProVoice (dsd-fme.ts
+ * positiveClearProtocol), and DMR (its publication gate always says). D-STAR and YSF carry no
+ * privacy field.
+ */
+const POSITIVE_CLEAR_PROTOCOLS: ReadonlySet<string> = new Set([
+	"dmr",
+	"p25",
+	"p25p1",
+	"p25p2",
+	"nxdn",
+	"nxdn48",
+	"nxdn96",
+	"dpmr",
+	"provoice",
+])
+
+/** A call_end's trust fields, as the decoder reported them (dsd-fme's call data). */
+export interface CallTrustFields {
+	encrypted?: unknown
+	encryptionKnown?: unknown
+	flags?: unknown
+}
+
+/**
+ * Whether a call_end's own trust fields admit its recording (written by dsd-fme before this
+ * build, or by any decoder): never when it says encrypted; for a positive-clear protocol
+ * (POSITIVE_CLEAR_PROTOCOLS, or no or an unknown label) only with `encryptionKnown: true`; for
+ * D-STAR, YSF and the other recordable labels unless `encryptionKnown` is false. Fail closed: a
+ * call_end that does not say it is clear is not.
+ */
+export function callTrustAdmits(
+	protocol: unknown,
+	data: CallTrustFields,
+): boolean {
+	const flags = data.flags
+	const flagged =
+		typeof flags === "object" &&
+		flags !== null &&
+		(flags as Record<string, unknown>)["encrypted"] !== false &&
+		(flags as Record<string, unknown>)["encrypted"] !== undefined
+	if (data.encrypted === true || flagged) return false
+	const label =
+		typeof protocol === "string"
+			? protocol
+					.trim()
+					.toLowerCase()
+					.replace(/[-_\s]/g, "")
+			: null
+	if (
+		label === null ||
+		POSITIVE_CLEAR_PROTOCOLS.has(label) ||
+		!protocolRecordable(label)
+	)
+		return data.encryptionKnown === true
+	return data.encryptionKnown !== false
+}
