@@ -1115,6 +1115,37 @@ connect only to 127.0.0.1, `[::1]` or localhost and refuse ports 1234, 4713, 555
 its API there inside the isolated tier B container. Tier A, on the host, never binds or connects
 to 5173.
 
+**Starvation runs.** These measure the core while other work takes the host's CPU:
+
+```bash
+node output/bench/main-thread-budget.mjs --label hog --rate 2400000 --hog auto --core-nice 0
+node output/bench/main-thread-budget.mjs --label late-bg --rate 2400000 --core-qos-late background
+```
+
+`--hog N|auto` starts N busy-loop children (`auto` is the number of host CPUs) after the warm-up
+and `--hog-settle` seconds (default 10) before the window, and stops them by their recorded PIDs
+at the window's end and on every exit path. Each hog also ends itself when its parent changes or
+its lifetime cap (settle + window + 30 s) runs out, so a harness killed by SIGKILL leaves none
+behind. With `--hog` the window is at most 120 s. `--hog-log FILE` appends one line per hog
+window with its UTC start and stop. `--core-nice K` sets the core's nice relative to the harness
+(default 10). `--core-qos utility|background` starts the core under macOS `taskpolicy`;
+`--core-qos-late background|utility` starts it at the default QoS and lowers it only for the
+window, which is closer to a core that starts normally and later loses the CPU (for instance a
+VM whose vCPUs lose to host load). `--auto 0|1` adds a `/auto` listener client (default 1).
+
+The manifest's `starvation` section holds the hog PIDs (started, stopped, exited early), the
+effective nice and QoS with their `ps` priority readback, load averages at both window edges,
+ELU, event-loop delay p50/p99/p99.9/max, the 10 longest stalls with UTC times, and per-stage
+sample accounting in pipeline order: fake schedule (signal the fake had to skip because the
+core stopped reading, with its backlog at each edge reported apart), source socket, source
+manager, fanout branches, channel outputs, decoder stdin (the stand-ins count it), the `/auto`
+route and its client. A stage whose counter is missing at either edge, reset (it went down) or
+closed in the window reads as unknown, never as no loss, and the summary names the first stage
+that lost samples and the unknown stages before it. `STAGE_GAPS` in `budget-manifest.ts` lists
+the stages the core has no counter for. `budget-compare.mjs` prints the starvation table even
+when a run is not timing-valid. A run on a loaded host is never timing-valid, so read its loss
+and stall figures together with its load averages.
+
 Tier B, `scripts/bench/main-thread-budget-image.sh`, measures an image with recorded IQ. It runs
 in a scratch container (`--network none`, `--cpus=1.5`, a name matching
 `^wk-scratch-[A-Za-z0-9_.-]+$`), and the fake source and clients run inside the container. The

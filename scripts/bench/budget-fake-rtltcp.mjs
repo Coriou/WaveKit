@@ -17,6 +17,8 @@
 //
 // LOG gets one JSON line per listen, client, file start, mark and close, and a final summary
 // (bytes sent, seconds of IQ). SIGUSR2 appends a `mark` line with the cumulative counters.
+// A mark also carries the newest client's lag: behindMs = now - its next due write (0 when on
+// schedule) and blocked = its socket is waiting for a drain (the core is not reading).
 // SIGTERM or SIGINT write the summary and exit. The first stdout line is {"port":N}.
 import { appendFileSync, readFileSync } from "node:fs"
 import net from "node:net"
@@ -156,6 +158,8 @@ function cursor() {
 }
 
 const sockets = new Set()
+/** The newest client's pacing state, for the marks. */
+let active = null
 const server = net.createServer(socket => {
 	sockets.add(socket)
 	totals.clients++
@@ -177,6 +181,11 @@ const server = net.createServer(socket => {
 	let nextDue = performance.now()
 	let timer = null
 	let waiting = false
+	const state = {
+		behindMs: () => Math.max(0, performance.now() - nextDue),
+		blocked: () => waiting || socket.writableNeedDrain,
+	}
+	active = state
 	const pump = () => {
 		timer = null
 		if (socket.destroyed) return
@@ -214,6 +223,7 @@ const server = net.createServer(socket => {
 	socket.on("close", () => {
 		if (timer) clearTimeout(timer)
 		sockets.delete(socket)
+		if (active === state) active = null
 		log({ ev: "client-close", ...totals })
 	})
 	pump()
@@ -235,7 +245,13 @@ server.listen(wantPort, "127.0.0.1", () => {
 })
 
 process.on("SIGUSR2", () => {
-	log({ ev: "mark", monoMs: performance.now(), ...totals })
+	log({
+		ev: "mark",
+		monoMs: performance.now(),
+		...totals,
+		behindMs: active === null ? null : active.behindMs(),
+		blocked: active === null ? null : active.blocked(),
+	})
 })
 for (const sig of ["SIGTERM", "SIGINT"])
 	process.on(sig, () => {
