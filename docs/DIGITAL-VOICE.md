@@ -112,9 +112,26 @@ probes). It records whether or not anyone is listening.
   once its own LDU2 printed `ALG ID: 0x80 KEY ID: 0x0000`, an NXDN call once
   its own checked VCALL came with no cipher print. P25 phase 2, dPMR and
   ProVoice print nothing that proves a call clear, so their calls are never
-  recorded, linked or played live. D-STAR and YSF have no privacy field and
-  are recorded as clear. The per-protocol table is in
-  [DECODER-GUIDE.md](DECODER-GUIDE.md) (call lifecycle).
+  recorded, linked or played live: they stay silent. A P25 phase 1 or NXDN call
+  plays and records only from its own clear print, about 0.3 to 0.5 s into the
+  call, and stays silent and unrecorded if that print never decodes. D-STAR and
+  YSF have no privacy field and are recorded as clear. The per-protocol table is
+  in [DECODER-GUIDE.md](DECODER-GUIDE.md) (call lifecycle).
+- **Calls always publish.** Encryption or missing evidence never hides a call:
+  every P25, NXDN, dPMR and ProVoice call still publishes its `call_start` and
+  `call_end` (talkgroup, source, times) and its Activity row. Only its audio,
+  its recording and its `encrypted` / `encryptionKnown` fields follow the
+  evidence. In scanner evidence such a call reads as encrypted.
+- **dsd-fme's own files of these protocols are not served.** A dsd-fme per-call
+  file (`enablePerCallRecording`, or a scanner probe's `dv` folder) of P25,
+  NXDN, dPMR or ProVoice (`EDACS_`) is never listed in Recordings, served or
+  linked, whatever the call was: its name does not carry the call's clear
+  print. Those calls' recordings come from this recorder, which keeps only known
+  clear audio. D-STAR and YSF dsd-fme files are unchanged.
+- **Old links re-checked.** An Activity row shows a recording only while its
+  own `call_end` admits it (known clear, not encrypted), checked again on every
+  read: a link stored earlier for a call that was not known clear has no play
+  control.
 - **No DMR yet.** DMR per-call recordings are not listed, served, linked or
   recorded yet. The recorder writes no DMR call (nor one whose protocol is not
   known). A dsd-fme per-call file whose name says DMR (its system field starts

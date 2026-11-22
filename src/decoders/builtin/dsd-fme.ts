@@ -352,8 +352,8 @@ const DPMR_CONSECUTIVE_MS = 240
 // --- ProVoice Patterns ---
 /** ProVoice sync (reserved - protocol detection uses SYNC_PATTERN) */
 const _PROVOICE_HEAD = /\bSync:\s*[-+]ProVoice\b/i
-/** Input level indicator */
-const INLVL = /\binlvl:\s*(?<inlvl>\d+)%\b/i
+/** Input level indicator, "inlvl: 40%" (no word boundary after the "%"). */
+const INLVL = /\binlvl:\s*(?<inlvl>\d+)%/i
 
 // =============================================================================
 // TYPES

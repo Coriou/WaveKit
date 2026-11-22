@@ -49,7 +49,7 @@ function localStamp(ms: number): string {
 	return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
 }
 const callWav = (ms: number, tg: string, src: string): string =>
-	`${localStamp(ms)}_00042_P25_1A3_GROUP_TGT_${tg}_SRC_${src}.wav`
+	`${localStamp(ms)}_00042_YSF_1A3_GROUP_TGT_${tg}_SRC_${src}.wav`
 const tempWav = (ms: number): string => `TEMP_${localStamp(ms)}_1A2B.wav`
 
 // 2026-10-09 12:00:00 local, whole second so file stamps are exact

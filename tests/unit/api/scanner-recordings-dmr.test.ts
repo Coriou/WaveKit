@@ -1,8 +1,9 @@
 /**
  * Scanner probes run dsd-fme in auto mode, so a probe may write DMR per-call files into a
  * discovery's dv folder. While DMR recordings are off, such a file (and one whose name carries
- * no protocol) is never served, linked or listed by the scanner; it stays on disk. P25 call
- * files and analog recordings are unchanged.
+ * no protocol) is never served, linked or listed by the scanner; it stays on disk. So is a P25,
+ * NXDN, dPMR or ProVoice call file: such a call is clear only on its own clear print, which the
+ * file does not carry. YSF and D-STAR call files and analog recordings are unchanged.
  */
 import { existsSync } from "node:fs"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
@@ -63,20 +64,22 @@ function evidence(root: string): EvidenceStore {
 	})
 }
 
-/** A probe folder holding DMR, protocol-less and P25 call files of one discovery's calls. */
+/** A probe folder holding DMR, protocol-less, P25 and YSF call files of one discovery's calls. */
 async function linkedProbe(root: string, store: EvidenceStore) {
 	const dmr = call(T0 + 1_000, "DMR_CC_1", "1234")
 	const unnamed = call(T0 + 2_000, "", "1235")
-	const p25 = call(T0 + 3_000, "P25_1A3", "1236")
+	const ysf = call(T0 + 3_000, "YSF", "1236")
+	const p25 = call(T0 + 4_000, "P25_1A3", "1237")
 	const probe = join(root, "recordings", "dv", "probe-scn-abc-auto-1")
 	await mkdir(probe, { recursive: true })
-	for (const f of [dmr, p25])
+	for (const f of [dmr, ysf, p25])
 		await writeFile(join(probe, f), Buffer.alloc(1_000, 1))
 	const result = await store.linkProbeRecordings(
 		probe,
 		[
 			{ id: "o-dmr", src: "1234", at: T0 + 500 },
-			{ id: "o-p25", src: "1236", at: T0 + 2_500 },
+			{ id: "o-ysf", src: "1236", at: T0 + 2_500 },
+			{ id: "o-p25", src: "1237", at: T0 + 3_500 },
 		].map(o => ({
 			observationId: o.id,
 			discoveryId: "d_1",
@@ -93,31 +96,32 @@ async function linkedProbe(root: string, store: EvidenceStore) {
 		join(root, "recordings", "dv", "d_1", unnamed),
 		Buffer.alloc(1_000, 1),
 	)
-	return { dmr, unnamed, p25, result }
+	return { dmr, unnamed, p25, ysf, result }
 }
 
 describe("scanner DMR probe call files", () => {
-	it("are never resolved by the evidence store, though moved and kept on disk; P25 resolves", async () => {
+	it("are never resolved by the evidence store, though moved and kept on disk; a P25 call file neither, YSF resolves", async () => {
 		const root = await tempRoot()
 		const store = evidence(root)
-		const { dmr, unnamed, p25, result } = await linkedProbe(root, store)
-		// The store moves both calls; the service links only an id recordingPath resolves.
+		const { dmr, unnamed, p25, ysf, result } = await linkedProbe(root, store)
+		// The store moves every call; the service links only an id recordingPath resolves.
 		expect(result.linked.map(l => l.observationId).sort()).toEqual([
 			"o-dmr",
 			"o-p25",
+			"o-ysf",
 		])
 		const folder = join(root, "recordings", "dv", "d_1")
-		for (const name of [dmr, unnamed]) {
+		for (const name of [dmr, unnamed, p25]) {
 			expect(store.recordingPath(`d_1~${name}`)).toBeNull()
 			expect(existsSync(join(folder, name))).toBe(true)
 		}
-		expect(store.recordingPath(`d_1~${p25}`)).toBe(join(folder, p25))
+		expect(store.recordingPath(`d_1~${ysf}`)).toBe(join(folder, ysf))
 	})
 
-	it("GET /api/scanner/recordings/:recordingId answers 404 for a DMR or protocol-less call, 200 for P25", async () => {
+	it("GET /api/scanner/recordings/:recordingId answers 404 for a DMR, P25 or protocol-less call, 200 for YSF", async () => {
 		const root = await tempRoot()
 		const store = evidence(root)
-		const { dmr, unnamed, p25 } = await linkedProbe(root, store)
+		const { dmr, unnamed, p25, ysf } = await linkedProbe(root, store)
 		const app = Fastify({ logger: false })
 		try {
 			await app.register(scannerRoutes, {
@@ -131,7 +135,8 @@ describe("scanner DMR probe call files", () => {
 				})
 			expect((await get(dmr)).statusCode).toBe(404)
 			expect((await get(unnamed)).statusCode).toBe(404)
-			const ok = await get(p25)
+			expect((await get(p25)).statusCode).toBe(404)
+			const ok = await get(ysf)
 			expect(ok.statusCode).toBe(200)
 			expect(ok.headers["content-type"]).toContain("audio/wav")
 			expect(ok.rawPayload.length).toBe(1_000)
@@ -140,7 +145,7 @@ describe("scanner DMR probe call files", () => {
 		}
 	})
 
-	it("a discovery's observations list no DMR or protocol-less call recording id", () => {
+	it("a discovery's observations list no DMR, P25 or protocol-less call recording id", () => {
 		const store = new DiscoveryStore({
 			maxDiscoveries: 1_000,
 			now: () => T0,
@@ -165,12 +170,19 @@ describe("scanner DMR probe call files", () => {
 		const dmr = call(T0, "DMR_CC_1", "1234")
 		const unnamed = call(T0, "", "1235")
 		const p25 = call(T0, "P25_1A3", "1236")
+		const ysf = call(T0, "YSF", "1237")
 		const analog = "analog-00000000-0000-4000-8000-000000000001.wav"
 		// Recording ids a store written before this rule may already hold.
 		expect(
 			store.attachRecordings(
 				"o1",
-				[`${a}~${dmr}`, `${a}~${p25}`, `${a}~${unnamed}`, `${a}~${analog}`],
+				[
+					`${a}~${dmr}`,
+					`${a}~${p25}`,
+					`${a}~${ysf}`,
+					`${a}~${unnamed}`,
+					`${a}~${analog}`,
+				],
 				"linked",
 			),
 		).toBe(true)
@@ -182,7 +194,7 @@ describe("scanner DMR probe call files", () => {
 			),
 		).toBe(true)
 		const [first] = store.observations(a, null, 100).items
-		expect(first?.recordingIds).toEqual([`${a}~${p25}`, `${a}~${analog}`])
+		expect(first?.recordingIds).toEqual([`${a}~${ysf}`, `${a}~${analog}`])
 		expect(first?.recording).toBe("linked")
 		const [second] = store.observations(b, null, 100).items
 		expect(second?.recordingIds).toEqual([])

@@ -13,7 +13,7 @@ import type {
 import type { DecodeEnvelope } from "../../../../src/core/activity/types.js"
 import type { DecoderOutput } from "../../../../src/decoders/types.js"
 
-const NAME = "20261012_100000_12345_P25_1A3_GROUP_TGT_9_SRC_2001.wav"
+const NAME = "20261012_100000_12345_YSF_1A3_GROUP_TGT_9_SRC_2001.wav"
 const DMR_NAME = "20261012_100000_12346_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
 
 function callEnd(

@@ -1,9 +1,13 @@
 /**
  * A stored dsd-fme recording link is presented only while its file may be served
- * (dsdFmeNameServable): a DMR call link stored before the DMR recording gate closed and a call
- * name with a label off the allow-list are not presented on the REST list or the WebSocket
- * records, a P25 link and dv call recorder links are (decided by the row's decoder, so a
- * recorder name of a decoder whose id starts with `dmr` is presented). Synthetic rows only.
+ * (dsdFmeNameServable): a DMR call link stored before the DMR recording gate closed, a dsd-fme
+ * P25, NXDN, dPMR or ProVoice call name and a call name with a label off the allow-list are not
+ * presented on the REST list or the WebSocket records; a YSF link and dv call recorder links are
+ * (decided by the row's decoder, so a recorder name of a decoder whose id starts with `dmr` is
+ * presented). A link is presented only
+ * while its row's own call trust admits it (callTrustAdmits): a P25, NXDN, dPMR or ProVoice
+ * link stored before that rule (no encryptionKnown) loses its play control, the row stays; a
+ * D-STAR or YSF link is unchanged. Synthetic rows only.
  */
 import { rm } from "node:fs/promises"
 import Fastify from "fastify"
@@ -26,11 +30,14 @@ import {
 
 const DMR_KEY = "dsd~20261012_100000_12345_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
 const P25_KEY = "dsd~20261012_100100_12346_P25_1A3_GROUP_TGT_9_SRC_2002.wav"
+const YSF_KEY = "dsd~20261012_100500_12350_YSF_GROUP_TGT_9_SRC_2006.wav"
 /** The dv call recorder's name: its first field is the decoder id, not a protocol. */
 const DV_KEY = "dsd~20261012_100200_12347_dsd-fme_GROUP_TGT_9_SRC_2003.wav"
 /** The dv call recorder's name of decoder `dmr-main`: its field reads `dmr` as a protocol. */
 const DV_DMR_ID_KEY =
 	"dsd~20261012_100300_12348_dmr-main_GROUP_TGT_9_SRC_2004.wav"
+/** A P25 call_end's data with its own clear print (callTrustAdmits admits it). */
+const CLEAR_P25 = { protocol: "p25p1", encryptionKnown: true }
 /** A dsd-fme call name whose label is not on the recordable allow-list. */
 const FOO_KEY = "dsd~20261012_100400_12349_FOO_1_GROUP_TGT_9_SRC_2005.wav"
 
@@ -62,6 +69,7 @@ function admitCalls(store: Store): void {
 			outputType: "call_end",
 			protocol: "p25",
 			entityKey: null,
+			decodedData: CLEAR_P25,
 		}),
 		undefined,
 		{ id: P25_KEY, durationMs: 3100 },
@@ -74,6 +82,7 @@ function admitCalls(store: Store): void {
 			outputType: "call_end",
 			protocol: "p25",
 			entityKey: null,
+			decodedData: CLEAR_P25,
 		}),
 		undefined,
 		{ id: DV_KEY, durationMs: 2000 },
@@ -86,9 +95,22 @@ function admitCalls(store: Store): void {
 			outputType: "call_end",
 			protocol: "p25",
 			entityKey: null,
+			decodedData: CLEAR_P25,
 		}),
 		undefined,
 		{ id: DV_DMR_ID_KEY, durationMs: 1500 },
+	)
+	store.admit(
+		envelope({
+			eventId: "ysf-call",
+			category: "voice",
+			outputType: "call_end",
+			protocol: "ysf",
+			entityKey: null,
+			decodedData: { protocol: "ysf" },
+		}),
+		undefined,
+		{ id: YSF_KEY, durationMs: 900 },
 	)
 	store.admit(
 		envelope({
@@ -97,6 +119,7 @@ function admitCalls(store: Store): void {
 			outputType: "call_end",
 			protocol: "p25",
 			entityKey: null,
+			decodedData: CLEAR_P25,
 		}),
 		undefined,
 		{ id: FOO_KEY, durationMs: 1200 },
@@ -112,10 +135,12 @@ function expectPresented(items: readonly ActivitySummary[]): void {
 		id: DV_DMR_ID_KEY,
 		durationMs: 1500,
 	})
-	expect(recordingOf(items, "p25-call")).toEqual({
-		id: P25_KEY,
-		durationMs: 3100,
+	expect(recordingOf(items, "ysf-call")).toEqual({
+		id: YSF_KEY,
+		durationMs: 900,
 	})
+	// A dsd-fme P25 call file is never served, so its link is not presented, clear or not.
+	expect(recordingOf(items, "p25-call")).toBeUndefined()
 	expect(recordingOf(items, "dmr-call")).toBeUndefined()
 	expect(recordingOf(items, "foo-call")).toBeUndefined()
 }
@@ -137,7 +162,7 @@ class Transport implements ActivityClientTransport {
  * The seeded shape of an image acceptance (modelled: shape from a private state, ids
  * synthetic): six dsd-fme DMR call_end rows linked by the baseline image, five to dsd-fme DMR
  * names (a two-digit colour code included) and one to a name whose system field dsd-fme left
- * empty, one of them through its late file update (wavFileUpdate). A P25 row stays presented.
+ * empty, one of them through its late file update (wavFileUpdate). A YSF row stays presented.
  */
 const SEEDED_DMR_KEYS = [
 	"dsd~20261012_110000_10001_DMR_CC_11_GROUP_TGT_90001_SRC_901.wav",
@@ -169,15 +194,16 @@ function admitSeeded(store: Store): void {
 	)
 	store.admit(
 		envelope({
-			eventId: "seeded-p25",
+			eventId: "seeded-ysf",
 			decoderId: "dsd-fme",
 			category: "voice",
 			outputType: "call_end",
-			protocol: "p25",
+			protocol: "ysf",
 			entityKey: null,
+			decodedData: { protocol: "ysf" },
 		}),
 		undefined,
-		{ id: P25_KEY, durationMs: 3100 },
+		{ id: YSF_KEY, durationMs: 900 },
 	)
 }
 
@@ -186,9 +212,9 @@ function expectSeededHidden(items: readonly ActivitySummary[], body: string) {
 		expect(recordingOf(items, `seeded-dmr-${i}`)).toBeUndefined()
 	for (const key of SEEDED_DMR_KEYS)
 		expect(body).not.toContain(key.slice("dsd~".length))
-	expect(recordingOf(items, "seeded-p25")).toEqual({
-		id: P25_KEY,
-		durationMs: 3100,
+	expect(recordingOf(items, "seeded-ysf")).toEqual({
+		id: YSF_KEY,
+		durationMs: 900,
 	})
 }
 
@@ -267,7 +293,7 @@ describe("activity: rows a baseline image linked to DMR call files (seeded store
 })
 
 describe("activity: dsd-fme recording links at read time", () => {
-	it("the REST list presents P25 and dv recorder links, never a stored DMR or unlisted-label link", async () => {
+	it("the REST list presents YSF and dv recorder links, never a stored DMR, dsd-fme P25 or unlisted-label link", async () => {
 		const store = await openStore()
 		admitCalls(store)
 		const service = createActivityQueryService({
@@ -287,9 +313,11 @@ describe("activity: dsd-fme recording links at read time", () => {
 				"dv-dmr-id-call",
 				"foo-call",
 				"p25-call",
+				"ysf-call",
 			])
 			expectPresented(items)
 			expect(res.body).not.toContain(DMR_KEY)
+			expect(res.body).not.toContain(P25_KEY)
 			expect(res.body).not.toContain(FOO_KEY)
 		} finally {
 			await app.close()
@@ -297,7 +325,7 @@ describe("activity: dsd-fme recording links at read time", () => {
 		}
 	})
 
-	it("the WebSocket records present P25 and dv recorder links, never a stored DMR or unlisted-label link", async () => {
+	it("the WebSocket records present YSF and dv recorder links, never a stored DMR, dsd-fme P25 or unlisted-label link", async () => {
 		const store = await openStore()
 		const service = createActivityQueryService({
 			store,
@@ -325,10 +353,212 @@ describe("activity: dsd-fme recording links at read time", () => {
 						? [...(message.data?.items ?? [])]
 						: []
 				})
-			await expect.poll(() => items().length, { timeout: 5_000 }).toBe(5)
+			await expect.poll(() => items().length, { timeout: 5_000 }).toBe(6)
 			expectPresented(items())
 			expect(JSON.stringify(transport.delivered)).not.toContain(DMR_KEY)
 			expect(JSON.stringify(transport.delivered)).not.toContain(FOO_KEY)
+		} finally {
+			hub.close()
+			await service.close()
+		}
+	})
+})
+
+/**
+ * dv call recorder links (served whatever their protocol) stored before the per-call trust rule
+ * (fail open: a call_end without encryptionKnown), next to rows whose own data admits them, and
+ * one dsd-fme P25 call file of a known clear row (never served: not presented either). Modelled
+ * shapes, synthetic ids.
+ */
+const TRUST_ROWS: Array<{
+	eventId: string
+	protocol: string
+	key: string
+	data: Record<string, unknown>
+	presented: boolean
+}> = [
+	{
+		eventId: "p25-open",
+		protocol: "p25",
+		key: "dsd~20261012_120000_20001_dsd-fme_GROUP_TGT_56_SRC_1234.wav",
+		data: { callId: "t1", protocol: "p25p1" },
+		presented: false,
+	},
+	{
+		eventId: "p25-unknown",
+		protocol: "p25",
+		key: "dsd~20261012_120010_20002_dsd-fme_GROUP_TGT_56_SRC_1235.wav",
+		data: { callId: "t2", protocol: "p25p1", encryptionKnown: false },
+		presented: false,
+	},
+	{
+		eventId: "p25-encrypted",
+		protocol: "p25",
+		key: "dsd~20261012_120020_20003_dsd-fme_GROUP_TGT_56_SRC_1236.wav",
+		data: {
+			callId: "t3",
+			protocol: "p25p1",
+			encryptionKnown: true,
+			flags: { encrypted: true },
+		},
+		presented: false,
+	},
+	{
+		eventId: "p25p2-open",
+		protocol: "p25",
+		key: "dsd~20261012_120030_20004_dsd-fme_GROUP_TGT_7070_SRC_40820.wav",
+		data: { callId: "t4", protocol: "p25p2" },
+		presented: false,
+	},
+	{
+		eventId: "nxdn-open",
+		protocol: "nxdn",
+		key: "dsd~20261012_120040_20005_dsd-fme_GROUP_TGT_5678_SRC_1234.wav",
+		data: { callId: "t5", protocol: "nxdn48" },
+		presented: false,
+	},
+	{
+		eventId: "dpmr-open",
+		protocol: "dpmr",
+		key: "dsd~20261012_120050_20006_dsd-fme_GROUP_TGT_0_SRC_0.wav",
+		data: { callId: "t6", protocol: "dpmr" },
+		presented: false,
+	},
+	{
+		eventId: "provoice-open",
+		protocol: "provoice",
+		key: "dsd~20261012_120100_20007_dsd-fme_GROUP_TGT_0_SRC_0.wav",
+		data: { callId: "t7", protocol: "provoice" },
+		presented: false,
+	},
+	{
+		eventId: "p25-clear",
+		protocol: "p25",
+		key: "dsd~20261012_120110_20008_dsd-fme_GROUP_TGT_56_SRC_1237.wav",
+		data: { callId: "t8", protocol: "p25p1", encryptionKnown: true },
+		presented: true,
+	},
+	{
+		eventId: "nxdn-clear",
+		protocol: "nxdn",
+		key: "dsd~20261012_120120_20009_dsd-fme_GROUP_TGT_5678_SRC_1238.wav",
+		data: { callId: "t9", protocol: "nxdn48", encryptionKnown: true },
+		presented: true,
+	},
+	{
+		eventId: "p25-clear-dsd-file",
+		protocol: "p25",
+		key: "dsd~20261012_120150_20012_P25_1A3_GROUP_TGT_56_SRC_1239.wav",
+		data: { callId: "t12", protocol: "p25p1", encryptionKnown: true },
+		presented: false,
+	},
+	{
+		eventId: "dstar-open",
+		protocol: "dstar",
+		key: "dsd~20261012_120130_20010_dsd-fme_GROUP_TGT_0_SRC_0.wav",
+		data: { callId: "t10", protocol: "dstar" },
+		presented: true,
+	},
+	{
+		eventId: "ysf-open",
+		protocol: "ysf",
+		key: "dsd~20261012_120140_20011_dsd-fme_GROUP_TGT_0_SRC_0.wav",
+		data: { callId: "t11", protocol: "ysf" },
+		presented: true,
+	},
+]
+
+function admitTrustRows(store: Store): void {
+	for (const row of TRUST_ROWS)
+		store.admit(
+			envelope({
+				eventId: row.eventId,
+				decoderId: "dsd-fme",
+				category: "voice",
+				outputType: "call_end",
+				protocol: row.protocol,
+				entityKey: null,
+				decodedData: row.data,
+			}),
+			undefined,
+			{ id: row.key, durationMs: 2500 },
+		)
+}
+
+function expectTrusted(items: readonly ActivitySummary[], body: string): void {
+	// Every call row is kept: only the play control follows the trust.
+	expect(items.map(i => i.eventId).sort()).toEqual(
+		TRUST_ROWS.map(r => r.eventId).sort(),
+	)
+	for (const row of TRUST_ROWS) {
+		if (row.presented)
+			expect(recordingOf(items, row.eventId)).toEqual({
+				id: row.key,
+				durationMs: 2500,
+			})
+		else {
+			expect(recordingOf(items, row.eventId)).toBeUndefined()
+			expect(body).not.toContain(row.key)
+		}
+	}
+}
+
+describe("activity: a stored dsd-fme link is presented only while its row's call trust admits it", () => {
+	it("the REST list keeps every call row and drops the play control of fail-open P25, P25 phase 2, NXDN, dPMR and ProVoice links", async () => {
+		const store = await openStore()
+		admitTrustRows(store)
+		const service = createActivityQueryService({
+			store,
+			logger,
+			execution: "inline",
+		})
+		const app = Fastify({ logger: false })
+		await app.register(activityRoutes, { service, enabled: true })
+		try {
+			const res = await app.inject({ method: "GET", url: "/api/activity" })
+			expect(res.statusCode).toBe(200)
+			expectTrusted(
+				(res.json() as { items: ActivitySummary[] }).items,
+				res.body,
+			)
+		} finally {
+			await app.close()
+			await service.close()
+		}
+	})
+
+	it("the WebSocket records keep every call row and drop the same play controls", async () => {
+		const store = await openStore()
+		const service = createActivityQueryService({
+			store,
+			logger,
+			execution: "inline",
+		})
+		const start = await service.search({ query: {} })
+		admitTrustRows(store)
+		const hub = createActivitySubscriptions({ service, enabled: true })
+		const transport = new Transport("client-trust")
+		try {
+			hub.handleMessage(transport, {
+				type: "activity:subscribe",
+				id: "trust",
+				query: {},
+				cursor: start.replayCursor,
+			})
+			const items = (): ActivitySummary[] =>
+				transport.delivered.flatMap(m => {
+					const message = m as {
+						type?: string
+						data?: { items?: ActivitySummary[] }
+					}
+					return message.type === "activity:records"
+						? [...(message.data?.items ?? [])]
+						: []
+				})
+			await expect
+				.poll(() => items().length, { timeout: 5_000 })
+				.toBe(TRUST_ROWS.length)
+			expectTrusted(items(), JSON.stringify(transport.delivered))
 		} finally {
 			hub.close()
 			await service.close()

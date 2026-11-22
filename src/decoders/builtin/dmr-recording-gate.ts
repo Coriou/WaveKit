@@ -65,12 +65,39 @@ export function dsdFmeCallProtocol(name: string): string | null {
 }
 
 /**
+ * dsd-fme per-call file labels (as protocolRecordable normalizes them) that are never listed,
+ * served or linked: P25, NXDN, dPMR and ProVoice (dsd-fme names a ProVoice call `EDACS_`). Such
+ * a call is clear only on its own positive clear print, which its file name does not carry, and
+ * no stored link proves it to the recordings catalogue; the digital-voice call recorder keeps
+ * their known clear calls instead (its own names, gated per call at write and read time).
+ */
+const DSD_FME_FILE_REFUSED: ReadonlySet<string> = new Set([
+	"p25",
+	"p25p1",
+	"p25p2",
+	"nxdn",
+	"nxdn48",
+	"nxdn96",
+	"dpmr",
+	"provoice",
+	"edacs",
+])
+
+/**
  * True when a dsd-fme per-call file may be listed or served: its protocol is recordable
- * (protocolRecordable). A DMR name while DMR_RECORDING_LINK_ENABLED is off, a name without a
- * protocol and a name of an unknown protocol are refused (fail closed).
+ * (protocolRecordable) and not one whose calls need a positive clear print
+ * (DSD_FME_FILE_REFUSED). A DMR name while DMR_RECORDING_LINK_ENABLED is off, a P25, NXDN,
+ * dPMR or ProVoice name, a name without a protocol and a name of an unknown protocol are
+ * refused (fail closed). D-STAR, YSF and M17 names are served.
  */
 export function dsdFmeCallRecordable(name: string): boolean {
-	return protocolRecordable(dsdFmeCallProtocol(name))
+	const protocol = dsdFmeCallProtocol(name)
+	if (
+		protocol !== null &&
+		DSD_FME_FILE_REFUSED.has(protocol.toLowerCase().replace(/[-_\s]/g, ""))
+	)
+		return false
+	return protocolRecordable(protocol)
 }
 
 /**

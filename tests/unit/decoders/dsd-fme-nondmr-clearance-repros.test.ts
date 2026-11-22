@@ -116,6 +116,17 @@ function dpmrCall(t0: number, scrambler: boolean): Item[] {
 	return items
 }
 
+// --- ProVoice (modelled; it prints no privacy field) ---
+const PV_SYNC = "03:04:05 Sync: +ProVoice "
+const PV_VOICE = " VOICE inlvl: 40%"
+
+function provoiceCall(t0: number): Item[] {
+	const items: Item[] = []
+	for (let t = t0; t <= t0 + 800; t += 80)
+		items.push([t, PV_SYNC], [t, PV_VOICE])
+	return items
+}
+
 // --- D-STAR, YSF ---
 const DSTAR = "03:04:05 Sync: +DSTAR VOICE "
 const YSF = (frame: string) =>
@@ -155,6 +166,8 @@ interface Trace {
 	/** Call ends that linked a recording, as `tg/src`. */
 	linked: string[]
 	ends: number
+	/** Every call_start and call_end (not a recording follow-up), in order. */
+	calls: string[]
 }
 
 const pad = (n: number, w = 2) => String(n).padStart(w, "0")
@@ -192,6 +205,7 @@ function replay(
 	const violations: string[] = []
 	const linked: string[] = []
 	let ends = 0
+	const calls: string[] = []
 	const judge = (pub: Omit<Pub, "verdict">) => {
 		const verdict = oracle.judge({ ...pub, atMs: nowMs })
 		pubs.push({ ...pub, verdict })
@@ -208,6 +222,8 @@ function replay(
 				: d.flags?.encrypted === true
 		const isLinked = o.type === "call_end" && d.wavFile !== undefined
 		if (o.type === "call_end" && !d.flags?.wavFileUpdate) ends++
+		if (o.type === "call_start" || !d.flags?.wavFileUpdate)
+			calls.push(`${o.type} ${d.protocol} ${d.talkgroup}/${d.source}`)
 		if (isLinked) linked.push(`${d.talkgroup}/${d.source}`)
 		judge({
 			kind: o.type,
@@ -253,7 +269,7 @@ function replay(
 		vi.setSystemTime(T0 + now)
 		if (now % 500 === 0) internals.checkCallTimeoutAsync()
 	}
-	return { pubs, violations, linked, ends }
+	return { pubs, violations, linked, ends, calls }
 }
 
 /** Every publication is authorized and no recording is linked. */
@@ -285,6 +301,7 @@ const NX_FILE = (
 	atMs = 0,
 ): [string, number, number, number] => ["NXDN_CC_5", tg, src, atMs]
 const DP_FILE: [string, number, number] = ["DPMR_CC_5", 0, 0]
+const PV_FILE: [string, number, number] = ["PROVOICE_CC_0", 0, 0]
 
 describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 	beforeEach(() => {
@@ -480,6 +497,12 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 		})
 	})
 
+	describe("ProVoice", () => {
+		it("(a) a ProVoice call is never linked (no clear print exists)", () => {
+			expectNeverLinked(replay("provoice", provoiceCall(0), [PV_FILE]))
+		})
+	})
+
 	describe("D-STAR and YSF (no privacy field)", () => {
 		it("(e) a D-STAR call is linked", () => {
 			expectLinked(replay("dstar", dstarCall(0), [["DSTAR_CC_0", 0, 0]]), [
@@ -502,5 +525,70 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 			]
 			expectLinked(replay("p25", items, [P1_FILE()]), ["56/1234"])
 		})
+	})
+	describe("call publication never depends on privacy", () => {
+		/** The corpus with every privacy and clear-evidence print removed. */
+		const strip = (items: Item[]): Item[] =>
+			items
+				.filter(
+					([, text]) =>
+						!/\bALG ID:/.test(text) && !/^\s*Scrambler - Key ID\b/.test(text),
+				)
+				.map(
+					([t, text]): Item => [
+						t,
+						text
+							.replace(/ Scrambler$/, "")
+							.replace(/^ LCW Encrypted /, " LCW "),
+					],
+				)
+
+		const cases: Array<[name: string, mode: string, items: Item[]]> = [
+			["P25 phase 1 clear", "p25", p25Over(0, { alg: () => LDU2_CLEAR })],
+			["P25 phase 1 encrypted", "p25", p25Over(0, { alg: () => LDU2_ENC })],
+			[
+				"P25 phase 1 encrypted LCW",
+				"p25",
+				p25Over(0, { alg: () => LDU2_CLEAR }).map(
+					([t, text]): Item => [
+						t,
+						text.startsWith(" LCW") ? LCW(56, 1234, " Encrypted") : text,
+					],
+				),
+			],
+			[
+				"P25 phase 1 two overs",
+				"p25",
+				[
+					...p25Over(0, { superframes: 2, end: false, alg: () => LDU2_ENC }),
+					...p25Over(900, { tg: 58, src: 99, alg: () => LDU2_CLEAR }),
+				],
+			],
+			["P25 phase 2 encrypted", "p25", p2Call(0, "in")],
+			["P25 phase 2 encrypted before", "p25", p2Call(0, "before")],
+			[
+				"NXDN clear then ciphered",
+				"nxdn48",
+				[
+					...nxdnOver(0, { vcall: {} }),
+					...nxdnOver(6000, { vcall: { src: 77, tg: 66, cipher: true } }),
+				],
+			],
+			["dPMR scrambled", "dpmr", dpmrCall(0, true)],
+			["ProVoice", "provoice", provoiceCall(0)],
+		]
+
+		for (const [name, mode, items] of cases)
+			it(`${name}: the same call_start and call_end events, with the same talkgroup and source, with the privacy prints stripped`, () => {
+				const full = replay(mode, items, []).calls
+				const stripped = strip(items)
+				expect(stripped.length).toBeLessThanOrEqual(items.length)
+				const bare = replay(mode, stripped, []).calls
+				expect(full.length).toBeGreaterThan(0)
+				expect(full.filter(c => c.startsWith("call_start"))).toHaveLength(
+					full.filter(c => c.startsWith("call_end")).length,
+				)
+				expect(full).toEqual(bare)
+			})
 	})
 })

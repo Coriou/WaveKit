@@ -1158,7 +1158,7 @@ call itself; every one starts with `encryptionKnown: false`:
 
 | Protocol    | Positive clear print (sets `encryptionKnown: true`)                                                                                                                                                         | Privacy prints (encrypted for good)                                                                |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| P25 phase 1 | An error-free `LDU2 ALG ID: 0x80 KEY ID: 0x0000` line while the call runs (dsd-fme prints the ALG of every LDU2 that decoded)                                                                               | An ALG ID other than `0x80` or `0x00`, ` ENC`, ` Encrypted` (LCW service options), `LCW Protected` |
+| P25 phase 1 | An error-free `LDU2 ALG ID: 0x80 KEY ID: 0x0000` line whose superframe's own LDU1 link control (checked) named the call (dsd-fme prints the ALG of every LDU2 that decoded; the LDU2 carries no IDs)        | An ALG ID other than `0x80` or `0x00`, ` ENC`, ` Encrypted` (LCW service options), `LCW Protected` |
 | P25 phase 2 | None: dsd-fme prints an ALG only when it is neither `0x80` nor `0x00`, so a phase 2 call is never known clear                                                                                               | Any ALG ID line other than `0x80` / `0x00`, ` Encrypted`                                           |
 | NXDN48 / 96 | A CRC-checked VCALL whose `Src=… - Dst/TG=…` are the call's own, followed by a line that is not a cipher print (dsd-fme prints the cipher type and key right after whenever the 2-bit cipher type is not 0) | `Scrambler/DES/AES - Key ID`, `ENC;`, `Encrypted`                                                  |
 | dPMR        | None: dsd-fme prints ` Scrambler` for encryption mode 3 only and nothing for modes 1 and 2                                                                                                                  | ` Scrambler`                                                                                       |
@@ -1171,32 +1171,59 @@ terminator (P25 `TDU`/`TDULC`, NXDN `TX_REL`/`DISC`), a switch to another protoc
 or a decoder restart comes first. A clear print never carries over: an earlier
 call's, or one printed for other IDs, proves nothing for the next call. The LCW's
 service options without `Encrypted`, or a clear ALG on a `src: … tg: …` print,
-prove nothing either. A call that ends not known clear is never linked to a
-per-call recording, and the Activity ingress and its backfill link a call file
-only when the row's own `call_end` says `encryptionKnown: true` (for P25, NXDN,
-dPMR, ProVoice and DMR) and not encrypted. DMR per-call
-recordings are off for now (`DMR_RECORDING_LINK_ENABLED` in
-`src/decoders/builtin/dmr-recording-gate.ts`): until DMR clearance is trusted, no
-DMR call file is written by the call recorder, listed, served or linked, clear or
-not. The recordable protocols are an allow-list (P25, NXDN, YSF, D-STAR, dPMR,
-ProVoice, EDACS, M17); a dsd-fme file name without a known protocol is refused
-too and stays on disk. Noise that prints
-three clean DMR syncs of one colour code over two superframes starts such a call;
-it never learns its encryption, so it stays muted and unrecorded. YSF and D-STAR
-calls carry no `encryptionKnown` field (no privacy field to read).
-Calls of the catalogue's `auto` mode (`-fa`) cover DMR, P25, YSF, D-STAR and
-X2-TDMA; dsd-fme turns NXDN and dPMR off in that mode, so they need a decoder with
-`mode: nxdn`, `nxdn48` or `dpmr`.
-Other protocols also require a known checked print format;
-unknown formats default to unverified. Activity placement protection follows the
-same clean check: only `verified: true`, `crcErr: false`, absent/zero `fecErrs`
-renew it. Each clean line protects the exact running placement strictly before
-`lastCleanSyncMonoMs + max(60,000, dwellMs × max(1, maxMovesPerMinute))`
-(default 120 seconds). Weak hints and failed checks never extend the initial dwell
-(default 20 seconds); at/past expiry, normal no-sync demotion and the shared move
-budget apply. Recent checked voice decodes override non-voice exclusion; exclusion
-associates only within one quarter of the channel width (3,125 Hz at 12,500 Hz),
-so adjacent paging does not remove confirmed DMR. See [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
+prove nothing either. After a P25 header (`HDU`, the next over) or an LDU1 whose
+link control failed, an LDU2 clear print proves nothing until a checked LDU1 link
+control names a call, and then only for that call.
+
+Whatever the evidence says, every call of every protocol is published:
+`call_start` and `call_end` with its talkgroup, source and times exist for a
+P25 phase 2, dPMR or ProVoice call exactly as for a clear one. Privacy and
+evidence set only `encrypted`, `encryptionKnown`, live playback and the
+recording.
+
+What this means in use:
+
+- **Live audio.** dPMR, P25 phase 2 and ProVoice calls are never known clear, so
+  they stay silent live and are never recorded. A P25 phase 1 or NXDN call is
+  muted until its own clear print: its audio starts about 0.3 to 0.5 s late (one
+  superframe, or the VCALL frame), and the whole call stays silent if that print
+  never decodes.
+- **Scanner.** A scanner probe records such a call as encrypted in its evidence
+  (no clear recording), so these calls read as encrypted in scanner evidence.
+- **Recordings.** dsd-fme's own per-call files (`-7 <dir> -P`) of P25, NXDN,
+  dPMR and ProVoice (named `EDACS_`) are never listed in Recordings, served,
+  downloaded or linked to their Activity row, in a dsd-fme directory or a scanner
+  `dv` folder: the file name does not carry the call's clear print. The files stay
+  on disk under the usual retention. Their known clear calls are kept by the
+  digital-voice call recorder instead ([DIGITAL-VOICE.md](DIGITAL-VOICE.md)).
+  D-STAR, YSF and M17 dsd-fme files are listed and served as before.
+- **Activity.** A call file is linked only when the row's own `call_end` says
+  `encryptionKnown: true` (for P25, NXDN, dPMR, ProVoice and DMR) and not
+  encrypted, and the same check runs again when a row is read (REST and
+  WebSocket): a link stored before this rule, for a call that was not known
+  clear, loses its play control; the row stays. DMR per-call
+  recordings are off for now (`DMR_RECORDING_LINK_ENABLED` in
+  `src/decoders/builtin/dmr-recording-gate.ts`): until DMR clearance is trusted, no
+  DMR call file is written by the call recorder, listed, served or linked, clear or
+  not. The recordable protocols are an allow-list (P25, NXDN, YSF, D-STAR, dPMR,
+  ProVoice, EDACS, M17); a dsd-fme file name without a known protocol is refused
+  too and stays on disk. Noise that prints
+  three clean DMR syncs of one colour code over two superframes starts such a call;
+  it never learns its encryption, so it stays muted and unrecorded. YSF and D-STAR
+  calls carry no `encryptionKnown` field (no privacy field to read).
+  Calls of the catalogue's `auto` mode (`-fa`) cover DMR, P25, YSF, D-STAR and
+  X2-TDMA; dsd-fme turns NXDN and dPMR off in that mode, so they need a decoder with
+  `mode: nxdn`, `nxdn48` or `dpmr`.
+  Other protocols also require a known checked print format;
+  unknown formats default to unverified. Activity placement protection follows the
+  same clean check: only `verified: true`, `crcErr: false`, absent/zero `fecErrs`
+  renew it. Each clean line protects the exact running placement strictly before
+  `lastCleanSyncMonoMs + max(60,000, dwellMs × max(1, maxMovesPerMinute))`
+  (default 120 seconds). Weak hints and failed checks never extend the initial dwell
+  (default 20 seconds); at/past expiry, normal no-sync demotion and the shared move
+  budget apply. Recent checked voice decodes override non-voice exclusion; exclusion
+  associates only within one quarter of the channel width (3,125 Hz at 12,500 Hz),
+  so adjacent paging does not remove confirmed DMR. See [Digital voice identity checks](SCANNER.md#digital-voice-identity-checks).
 
 ### dsd-fme receive filter
 

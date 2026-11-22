@@ -18,7 +18,7 @@ import { wireRecordingLinks } from "../../../../src/core/activity/recording-link
 import type { ActivityLinkOp } from "../../../../src/core/activity/storage/contract.js"
 
 const logger = pino({ level: "silent" })
-const NAME = "20261012_100000_12345_P25_1A3_GROUP_TGT_9_SRC_1.wav"
+const NAME = "20261012_100000_12345_YSF_1A3_GROUP_TGT_9_SRC_1.wav"
 const roots: string[] = []
 const closers: (() => void)[] = []
 afterEach(async () => {

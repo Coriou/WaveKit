@@ -68,7 +68,7 @@ function spyLogger(): {
 }
 
 const KEY_DSD = (i: number): string =>
-	`dsd~20261016_120000_${String(i % 100_000).padStart(5, "0")}_P25_${i}_GROUP_TGT_1_SRC_2.wav`
+	`dsd~20261016_120000_${String(i % 100_000).padStart(5, "0")}_YSF_${i}_GROUP_TGT_1_SRC_2.wav`
 
 function fileOf(keys: readonly string[], bytesEach = 1): RecordingKeepsFile {
 	return {
@@ -82,8 +82,8 @@ function fileOf(keys: readonly string[], bytesEach = 1): RecordingKeepsFile {
 	}
 }
 
-const NAME = "20261016_120000_01234_P25_1_GROUP_TGT_100_SRC_2001.wav"
-const NAME2 = "20261016_120001_01234_P25_1_GROUP_TGT_100_SRC_2001.wav"
+const NAME = "20261016_120000_01234_YSF_1_GROUP_TGT_100_SRC_2001.wav"
+const NAME2 = "20261016_120001_01234_YSF_1_GROUP_TGT_100_SRC_2001.wav"
 const DSD_ID = `dsd:0~${NAME}`
 const DSD_ID2 = `dsd:0~${NAME2}`
 const SCAN_ID = "scan:d_x~call.wav"
@@ -242,7 +242,7 @@ describe("recording keep service", () => {
 		const f = await fixture()
 		const svc = await f.open()
 		for (const id of [
-			"dsd:0~20261016_120009_01234_P25_1_GROUP_TGT_1_SRC_2.wav",
+			"dsd:0~20261016_120009_01234_YSF_1_GROUP_TGT_1_SRC_2.wav",
 			"dsd:5~" + NAME,
 			"scan:d_y~call.wav",
 			"/etc/passwd",

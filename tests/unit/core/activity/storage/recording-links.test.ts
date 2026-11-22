@@ -30,8 +30,8 @@ import {
 	tempDir,
 } from "./helpers.js"
 
-const NAME_A = "20261012_100000_12345_P25_1A3_GROUP_TGT_9_SRC_2001.wav"
-const NAME_B = "20261012_100100_54321_P25_1A3_GROUP_TGT_9_SRC_2002.wav"
+const NAME_A = "20261012_100000_12345_YSF_1A3_GROUP_TGT_9_SRC_2001.wav"
+const NAME_B = "20261012_100100_54321_YSF_1A3_GROUP_TGT_9_SRC_2002.wav"
 const KEY_A = `dsd~${NAME_A}`
 const KEY_B = `dsd~${NAME_B}`
 const SCAN_KEY =

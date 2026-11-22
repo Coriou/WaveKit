@@ -76,7 +76,7 @@ describe("DMR recording gate", () => {
 		expect(dsdFmeCallProtocol("TEMP_20261016_120000_0A1B.wav")).toBeNull()
 	})
 
-	it("admits a dsd-fme call file only when its name says a recordable protocol", () => {
+	it("admits a dsd-fme call file only when its name says a recordable protocol without a positive clear rule", () => {
 		const at = "20261016_120000_01234"
 		expect(dsdFmeCallRecordable(`${at}_DMR_CC_1_GROUP_TGT_9_SRC_2.wav`)).toBe(
 			false,
@@ -85,15 +85,23 @@ describe("DMR recording gate", () => {
 		expect(dsdFmeCallRecordable(`${at}__GROUP_TGT_9_SRC_2.wav`)).toBe(false)
 		expect(dsdFmeCallRecordable(`${at}_1_GROUP_TGT_9_SRC_2.wav`)).toBe(false)
 		expect(dsdFmeCallRecordable(`${at}_TRBO_GROUP_TGT_9_SRC_2.wav`)).toBe(false)
-		expect(dsdFmeCallRecordable(`${at}_P25_1A3_GROUP_TGT_9_SRC_2.wav`)).toBe(
-			true,
-		)
-		expect(dsdFmeCallRecordable(`${at}_NXDN_RAN_1_GROUP_TGT_9_SRC_2.wav`)).toBe(
-			true,
-		)
+		// A P25, NXDN, dPMR or ProVoice (EDACS) call is clear only on its own print, which its
+		// file does not carry: never listed, served or linked.
+		for (const system of [
+			"P25_1A3",
+			"P25_CC_1A3",
+			"NXDN_RAN_1",
+			"NXDN48_RAN_1",
+			"DPMR_CC_0",
+			"EDACS_1",
+			"PROVOICE_1",
+		])
+			expect(
+				dsdFmeCallRecordable(`${at}_${system}_GROUP_TGT_9_SRC_2.wav`),
+				system,
+			).toBe(false)
 		expect(dsdFmeCallRecordable(`${at}_DSTAR_GROUP_TGT_A_SRC_B.wav`)).toBe(true)
-		expect(dsdFmeCallRecordable(`${at}_DPMR_CC_0_GROUP_TGT_9_SRC_2.wav`)).toBe(
-			true,
-		)
+		expect(dsdFmeCallRecordable(`${at}_YSF_GROUP_TGT_A_SRC_B.wav`)).toBe(true)
+		expect(dsdFmeCallRecordable(`${at}_M17_GROUP_TGT_A_SRC_B.wav`)).toBe(true)
 	})
 })

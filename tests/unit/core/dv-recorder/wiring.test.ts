@@ -171,6 +171,8 @@ function callOutput(
 			source: 2001,
 			slot: 1,
 			encrypted: false,
+			// Known clear by its own clear print: a P25 link is presented only then.
+			encryptionKnown: true,
 			...(type === "call_end"
 				? { duration: 1500 + DV_TAP_SETTLE_MS, flags: { encrypted: false } }
 				: {}),

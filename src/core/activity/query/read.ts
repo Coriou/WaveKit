@@ -18,14 +18,16 @@ import {
 } from "./errors.js"
 import { recordWithoutRecordingPath } from "../recording-path.js"
 import {
+	callTrustAdmits,
 	dsdFmeCallRecordable,
 	protocolRecordable,
+	type CallTrustFields,
 } from "../../../decoders/builtin/dmr-recording-gate.js"
 import { dvCallDecoderField, dvCallNameField } from "../../recordings/names.js"
 import { channelHzOfRef, channelRefValue } from "../storage/row.js"
 import { ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ } from "@wavekit/api-types"
 import { bindSeq, formatSeq, MAX_SEQ, parseSeq, seqFromSqlite } from "./seq.js"
-import type { SqlDatabase, SqlValue } from "./sqlite.js"
+import type { SqlDatabase, SqlStatement, SqlValue } from "./sqlite.js"
 import { readTrails, type TrailsReadInput } from "./trails.js"
 import type { FacetDimension, NormalisedQuery } from "./validate.js"
 
@@ -767,10 +769,18 @@ function bounds(window: SeqWindow): { where: string[]; params: SqlValue[] } {
 	return { where: ["seq > ?", "seq <= ?"], params: [...windowParams(window)] }
 }
 
+/**
+ * A row's call trust, from its stored call_end data (decodedData's protocol, else the row's,
+ * and its encrypted, encryptionKnown and flags.encrypted), read only for a row whose summary
+ * links a `dsd~` recording.
+ */
+type RowTrust = (seq: bigint) => { protocol: unknown; data: CallTrustFields }
+
 function readSummary(
 	seq: bigint,
 	eventId: unknown,
 	json: unknown,
+	trust: RowTrust | null = null,
 ): ActivitySummary {
 	if (typeof eventId !== "string" || typeof json !== "string") {
 		throw activityRecordCorrupt("Activity summary is missing")
@@ -784,7 +794,11 @@ function readSummary(
 	if (!isRecord(parsed))
 		throw activityRecordCorrupt("Activity summary is not an object")
 	return {
-		...(withoutUnservableRecording(parsed) as unknown as ActivitySummary),
+		...(withoutUnservableRecording(
+			parsed,
+			seq,
+			trust,
+		) as unknown as ActivitySummary),
 		eventId,
 		commitSeq: formatSeq(seq),
 	}
@@ -818,25 +832,79 @@ function dsdLinkPresentable(name: string, decoderId: unknown): boolean {
 }
 
 /**
- * The summary without a stored dsd-fme `recording` the catalogue no longer serves (a DMR call
- * link stored before the DMR recording gate closed), so no row shows a play control the
- * recordings route refuses.
+ * The summary without a stored `dsd~` `recording` that may not be presented: one the catalogue
+ * no longer serves (a DMR call link stored before the DMR recording gate closed), or one whose
+ * row's own call trust does not admit a recording (callTrustAdmits: a P25, NXDN, dPMR or
+ * ProVoice call only with encryptionKnown true, any call never when it says encrypted; a link
+ * stored before that rule, fail open, loses its play control). No row shows a play control the
+ * rule refuses; the row itself, the call, is always kept.
  */
 function withoutUnservableRecording(
 	summary: Record<string, unknown>,
+	seq: bigint,
+	trust: RowTrust | null,
 ): Record<string, unknown> {
 	const recording = summary["recording"]
 	if (!isRecord(recording)) return summary
 	const id = recording["id"]
 	if (typeof id !== "string" || !id.startsWith(DSD_KEEP_PREFIX)) return summary
 	if (
-		dsdLinkPresentable(id.slice(DSD_KEEP_PREFIX.length), summary["decoderId"])
+		dsdLinkPresentable(
+			id.slice(DSD_KEEP_PREFIX.length),
+			summary["decoderId"],
+		) &&
+		trust !== null &&
+		rowTrustAdmits(trust(seq), summary["protocol"])
 	)
 		return summary
 	const rest: Record<string, unknown> = {}
 	for (const [key, value] of Object.entries(summary))
 		if (key !== "recording") rest[key] = value
 	return rest
+}
+
+/** The row's trust admits its recording; the summary's protocol when the data names none. */
+function rowTrustAdmits(
+	row: { protocol: unknown; data: CallTrustFields },
+	summaryProtocol: unknown,
+): boolean {
+	const protocol =
+		typeof row.protocol === "string" && row.protocol.length > 0
+			? row.protocol
+			: summaryProtocol
+	return callTrustAdmits(protocol, row.data)
+}
+
+/** JSON booleans read back from json_extract as 1 / 0. */
+const sqlBool = (v: unknown): unknown =>
+	v === 1 || v === 1n ? true : v === 0 || v === 0n ? false : v
+
+/** Reads a row's call trust by seq (RowTrust), one prepared statement per page. */
+function rowTrustReader(db: SqlDatabase): RowTrust {
+	let statement: SqlStatement | null = null
+	return seq => {
+		statement ??= db.prepare(
+			`SELECT json_extract(record_json, '$.payload.decodedData.protocol') AS protocol,
+				json_extract(record_json, '$.payload.decodedData.encrypted') AS encrypted,
+				json_extract(record_json, '$.payload.decodedData.encryptionKnown') AS known,
+				json_extract(record_json, '$.payload.decodedData.flags.encrypted') AS flagged
+			 FROM activity WHERE seq = ?`,
+		)
+		const row = statement.get(bindSeq(seq))
+		// No row (pruned between the page and this read): nothing admits.
+		if (!row) return { protocol: null, data: { encryptionKnown: false } }
+		const flagged = sqlBool(row["flagged"])
+		return {
+			protocol: row["protocol"],
+			data: {
+				encrypted: sqlBool(row["encrypted"]),
+				encryptionKnown: sqlBool(row["known"]),
+				...(flagged !== null && flagged !== undefined
+					? { flags: { encrypted: flagged } }
+					: {}),
+			},
+		}
+	}
 }
 
 function readRecord(seq: bigint, json: unknown): ActivityRecord {
@@ -882,11 +950,12 @@ function summaryRows(
 	statement: { sql: string; params: SqlValue[] },
 ): SummaryRow[] {
 	const rows: SummaryRow[] = []
+	const trust = rowTrustReader(db)
 	for (const row of db.prepare(statement.sql).all(...statement.params)) {
 		const seq = seqFromSqlite(row["seq"])
 		rows.push({
 			seq: formatSeq(seq),
-			summary: readSummary(seq, row["event_id"], row["summary_json"]),
+			summary: readSummary(seq, row["event_id"], row["summary_json"], trust),
 		})
 	}
 	return rows
