@@ -11,7 +11,16 @@
 // name (this session's answer, else what any browser identified there: WG12 nearHz); a transmission on a frequency nothing decodes is identified on its own (auto-identify.ts).
 import { WaveKitIcon } from "@wavekit/brand/react"
 import type { ScannerProtocol } from "@wavekit/api-types"
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react"
+import {
+	lazy,
+	Suspense,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+	type ReactNode,
+	type Ref,
+} from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import {
@@ -73,6 +82,7 @@ import { AUTO_IDENTIFY_DELAY_MS, shouldAutoIdentify } from "./auto-identify.ts"
 import { nowView, type NowView } from "./now.ts"
 import { playRows, TunedDisc, TunedQueue } from "./playback.tsx"
 import { tunedCardStore } from "./place.ts"
+import { cardLineForced, cardMinimised } from "../../shell/layout/stores.ts"
 import { signalBars, signalPresent } from "./signal.ts"
 import { DecoderVerdictsFeed, itemsFor, pendingFor } from "./verdicts.ts"
 
@@ -304,6 +314,66 @@ function fleetHere(types: readonly string[]): "aircraft" | "vessels" | null {
 	return null
 }
 
+/** Why the card's line cannot expand while the layout forces it (its expanded form has no room on its anchor). */
+export const LINE_FORCED_REASON =
+	"No room to expand the card here: it expands when there is room"
+
+/** The minimised line's expand control: disabled, with its reason, while the layout forces the line form. */
+export function lineExpandProps(
+	forced: boolean,
+	title: string,
+): { "aria-disabled"?: true; title: string } {
+	return forced
+		? { "aria-disabled": true, title: `${title} · ${LINE_FORCED_REASON}` }
+		: { title: `${title} · click to expand` }
+}
+
+/** The minimised line: one button that expands the card, or (forced by the layout) says why it cannot. */
+export function CardLineButton({
+	forced,
+	title,
+	onExpand,
+	lineRef,
+	children,
+}: {
+	forced: boolean
+	title: string
+	onExpand: () => void
+	lineRef?: Ref<HTMLButtonElement>
+	/** The line's text (the frequency, the short name, the state). */
+	children: ReactNode
+}) {
+	return (
+		<button
+			ref={lineRef}
+			type="button"
+			className="wkf-card-line"
+			aria-expanded="false"
+			aria-label="Expand card"
+			aria-describedby={
+				forced
+					? "wkf-card-line-text wkf-card-line-forced"
+					: "wkf-card-line-text"
+			}
+			{...lineExpandProps(forced, title)}
+			onClick={() => {
+				if (!forced) onExpand()
+			}}
+		>
+			<span id="wkf-card-line-text" className="wkf-card-line-text">
+				{children}
+			</span>
+			{forced ? (
+				<span id="wkf-card-line-forced" className="wk-sr">
+					{LINE_FORCED_REASON}
+				</span>
+			) : (
+				<Icon name="chevron-up" size={16} className="wkf-quiet" />
+			)}
+		</button>
+	)
+}
+
 export function TunedCard() {
 	useDisplay() // times and units follow Settings › Display
 	const services = useServices()
@@ -320,6 +390,10 @@ export function TunedCard() {
 			? (heldHz ?? held?.frequencyHz ?? settledHz)
 			: settledHz
 	const card = useStore(tunedCardStore)
+	// the shell layout has no room for the expanded card on its anchor: it shows its line meanwhile
+	const lineForced = useStore(cardLineForced)
+	// the shell lays the card out for the form the reader chose
+	useEffect(() => cardMinimised.set(card.minimised), [card.minimised])
 	const pinned = card.pinnedHz
 	// a pinned card keeps its frequency when you tune away
 	const hz = pinned ?? tunedNow
@@ -776,8 +850,11 @@ export function TunedCard() {
 		})
 	menuItems.push({ label: "Copy frequency", icon: "copy", pick: copyFreq })
 
-	const minimised = card.minimised
+	const minimised = card.minimised || lineForced
+	// the line the layout forces (not the reader's choice) has nothing to expand into
+	const forcedLine = lineForced && !card.minimised
 	const toggleMin = () => {
+		if (forcedLine) return
 		focusAfterMin.current = !minimised
 		setMenu(false)
 		tunedCardStore.setMinimised(!minimised)
@@ -803,29 +880,22 @@ export function TunedCard() {
 			<div className="wkf-card-head">
 				<CardHandle>{tile}</CardHandle>
 				{minimised ? (
-					<button
-						ref={lineRef}
-						type="button"
-						className="wkf-card-line"
-						aria-expanded="false"
-						aria-label="Expand card"
-						aria-describedby="wkf-card-line-text"
-						title={`${formatMHz(hz)} MHz · ${shortId} · ${stateText} · click to expand`}
-						onClick={toggleMin}
+					<CardLineButton
+						lineRef={lineRef}
+						forced={forcedLine}
+						title={`${formatMHz(hz)} MHz · ${shortId} · ${stateText}`}
+						onExpand={toggleMin}
 					>
-						<span id="wkf-card-line-text" className="wkf-card-line-text">
-							<span className="wkf-num wkf-strong">{formatMHz(hz)}</span>
-							<span className="wkf-card-line-id">{shortId}</span>
-							{lineState && (
-								<span className="wkf-state" data-tone="accent">
-									<span className="wkf-dot" aria-hidden="true" />
-									<span aria-hidden="true">{lineState}</span>
-									<span className="wk-sr">{stateText}</span>
-								</span>
-							)}
-						</span>
-						<Icon name="chevron-up" size={16} className="wkf-quiet" />
-					</button>
+						<span className="wkf-num wkf-strong">{formatMHz(hz)}</span>
+						<span className="wkf-card-line-id">{shortId}</span>
+						{lineState && (
+							<span className="wkf-state" data-tone="accent">
+								<span className="wkf-dot" aria-hidden="true" />
+								<span aria-hidden="true">{lineState}</span>
+								<span className="wk-sr">{stateText}</span>
+							</span>
+						)}
+					</CardLineButton>
 				) : (
 					<>
 						<div className="wkf-card-title">

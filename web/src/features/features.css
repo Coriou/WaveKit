@@ -810,182 +810,23 @@
 	.wkf-meter {
 		overflow: visible;
 	}
-	.wkf-meter .wk-meter-fill,
-	.wkf-sq-bar .wk-meter-fill {
+	.wkf-meter .wk-meter-fill {
 		background: var(--wk-text-4);
 	}
-	.wkf-meter .wk-meter-fill[data-open],
-	.wkf-sq-bar .wk-meter-fill[data-open] {
+	.wkf-meter .wk-meter-fill[data-open] {
 		background: var(--wk-accent);
 	}
+	/* the squelch tick overhangs the head's meter by 2 px, so it reads at a glance */
 	.wkf-sq-line {
 		position: absolute;
-		top: 0;
-		bottom: 0;
+		top: -2px;
+		bottom: -2px;
 		width: 2px;
+		border-radius: 1px;
 		background: var(--wk-amber);
-	}
-	.wkf-sq-head {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-	}
-	.wkf-sq-bar {
-		position: relative;
-		height: 44px;
-		border-radius: 8px;
-		background: var(--wk-well);
-		overflow: hidden;
-	}
-	.wkf-sq-hatch {
-		position: absolute;
-		left: 0;
-		top: 0;
-		bottom: 0;
-		background: repeating-linear-gradient(
-			135deg,
-			var(--wk-well-glass) 0 6px,
-			transparent 6px 12px
-		);
-	}
-	.wkf-sq-mark {
-		position: absolute;
-		top: 0;
-		bottom: 0;
-		width: 2px;
-		margin-left: -1px;
-		background: var(--wk-amber);
-	}
-	.wkf-sq-knob {
-		position: absolute;
-		top: 50%;
-		width: 14px;
-		height: 24px;
-		margin: -12px 0 0 -7px;
-		border-radius: 5px;
-		background: var(--wk-amber);
-	}
-	.wkf-sq-bar > input[type="range"] {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		margin: 0;
-		opacity: 0;
-		cursor: ew-resize;
-	}
-	.wkf-sq-bar:has(> input:focus-visible) .wkf-sq-knob {
-		box-shadow:
-			0 0 0 2px var(--wk-surface),
-			0 0 0 3.5px var(--wk-focus);
-	}
-	.wkf-sq-foot {
-		display: flex;
-		justify-content: space-between;
-		font-size: var(--wk-fs-xs);
-		color: var(--wk-text-3);
-		font-variant-numeric: tabular-nums;
 	}
 	.wk-shell-listen-btn:disabled {
 		opacity: 0.5;
-	}
-	/* tone squelch row, Sound switches (Listen board: fill row with a switch) */
-	.wkf-tone-row {
-		display: flex;
-		align-items: center;
-		gap: 14px;
-		min-height: 52px;
-		padding: 8px 12px;
-		border-radius: var(--wk-r-4);
-		background: var(--wk-fill);
-		text-align: left;
-	}
-	.wkf-tone-row:disabled {
-		opacity: 0.5;
-	}
-	.wkf-tone-row > .wk-switch {
-		margin: 0 -6px;
-	}
-	.wkf-tone-text {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-	}
-	.wkf-tone-tone {
-		font-weight: 400;
-		color: var(--wk-accent);
-	}
-	.wkf-hear-hint {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 10px 12px;
-		border-radius: 8px;
-		background: var(--wk-fill);
-		font-size: var(--wk-fs-md);
-		color: var(--wk-text-2);
-	}
-	@media (max-width: 480px) {
-		.wkf-hear-long {
-			display: none;
-		}
-	}
-	.wkf-hear-dot {
-		width: 7px;
-		height: 7px;
-		border-radius: 50%;
-		flex: none;
-		background: var(--wk-accent);
-	}
-	.wkf-sound-row {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-	}
-	.wkf-sound-row > b {
-		flex: 1;
-	}
-	.wkf-sound-switch {
-		display: flex;
-		align-items: center;
-		gap: 14px;
-		min-height: 44px;
-	}
-	.wkf-sound-switch[data-disabled] {
-		opacity: 0.5;
-	}
-	.wkf-sound-switch > .wk-switch {
-		margin: 0 -6px;
-	}
-	.wkf-rec-row {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding-top: 12px;
-		border-top: 1px solid var(--wk-line-08);
-	}
-	.wkf-rec-btn {
-		gap: 8px;
-		padding: 0 14px 0 12px;
-	}
-	.wkf-rec-btn[aria-pressed="true"] {
-		border-color: rgba(var(--wk-danger-rgb), 0.55);
-		background: rgba(var(--wk-danger-rgb), 0.12);
-	}
-	.wkf-rec-dot {
-		width: 10px;
-		height: 10px;
-		border-radius: 50%;
-		background: var(--wk-danger);
-	}
-	.wkf-listen-more {
-		align-self: flex-start;
-		gap: 4px;
-		padding: 0 6px 0 8px;
-		margin: -6px 0 -6px -8px;
-		color: var(--wk-accent);
 	}
 
 	/* ---- Receiver */

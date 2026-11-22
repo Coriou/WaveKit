@@ -8,6 +8,7 @@
 import "./plot.css"
 
 import {
+	useContext,
 	memo,
 	useEffect,
 	useMemo,
@@ -72,10 +73,13 @@ import {
 	plotLayout,
 } from "./layout.ts"
 import { BandRuler } from "./BandRuler.tsx"
+import { PlotNote } from "./PlotNote.tsx"
 import { isReadOnly } from "../app/context.ts"
 import { confidenceText } from "../data/scanner-format.ts"
 import { modeSpec } from "../features/tuner/modes.ts"
 import { ReceiverPausedBadge } from "../features/receiver/ReceiverIsland.tsx"
+import { StatusGuest } from "../shell/layout/StatusGuest.tsx"
+import { PlotLayoutContext } from "../shell/layout/stores.ts"
 import { feedControllerFor, shownSourceFor } from "../features/receiver/feed.ts"
 import { scanHasReceiver as scanHasReceiverOf } from "../features/tuning.ts"
 import { HandleController, squelchLineDbfs } from "./handle-controller.ts"
@@ -357,10 +361,25 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 		[controller, capStart, capEnd, tunerCentre],
 	)
 
-	const layout = plotLayout(
-		size.h,
-		(discRow ? DISCOVERY_ROW_CSS : 0) + RULER_CSS,
-	)
+	// the shell layout's plot contract: where the scale rows must end, and the chrome the chips keep off
+	const shellPlot = useContext(PlotLayoutContext)
+	// a short window collapses the rows in the layout's stated order: lean drops the discovery row and the ruler,
+	// none leaves the waterfall alone (DESIGN.md, "Insufficient height")
+	const rowsMode = shellPlot?.rows ?? "full"
+	const showDisc = discRow && rowsMode === "full"
+	const showRuler = rowsMode === "full"
+	const layout =
+		rowsMode === "none"
+			? { traceCss: 0, gapCss: 0, splitRatio: 0 }
+			: plotLayout(
+					size.h,
+					(showDisc ? DISCOVERY_ROW_CSS : 0) + (showRuler ? RULER_CSS : 0),
+					shellPlot?.rowsMaxCss,
+				)
+	const exclusions = shellPlot?.exclusions
+	const takenKey = exclusions
+		? exclusions.map(r => `${r.x},${r.y},${r.w},${r.h}`).join(";")
+		: ""
 	const unverified = shownMeta?.tuningTrust === "unverified"
 
 	const gateCtx = useRef({
@@ -536,8 +555,11 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					resync={stream.resync}
 					probeRef={probeRef}
 				/>
-				<ReceiverPausedBadge data={data} sourceId={sourceId} />
-				{size.w > 0 && view && (
+				{/* a guest in the shell's status slot, off the plot's labels */}
+				<StatusGuest id="paused" kind="paused">
+					<ReceiverPausedBadge data={data} sourceId={sourceId} />
+				</StatusGuest>
+				{size.w > 0 && view && rowsMode !== "none" && (
 					<>
 						<div
 							className="wk-plot-band"
@@ -561,6 +583,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 								traceCss={layout.traceCss}
 								levels={levels}
 								tunedHz={vfoHz}
+								takenKey={takenKey}
 								onPick={hz => void controller.tuneTo(hz)}
 							/>
 						</div>
@@ -620,7 +643,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 								tunedHz={vfoHz}
 							/>
 						</div>
-						{discRow && (
+						{showDisc && (
 							<div
 								className="wk-plot-band wk-plot-discs"
 								data-unverified={unverified ? "" : undefined}
@@ -683,42 +706,34 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 					</>
 				)}
 				{sourceId === null && (
-					<div className="wk-plot-note">No source connected</div>
+					<PlotNote id="no-source" status={false}>
+						No source connected
+					</PlotNote>
 				)}
 				{linkNote !== null &&
 					engineError === null &&
 					sourceId !== null &&
-					!stream.paused && (
-						<div className="wk-plot-note" role="status">
-							{linkNote}
-						</div>
-					)}
+					!stream.paused && <PlotNote id="link">{linkNote}</PlotNote>}
 				{engineError !== null && sourceId !== null && !stream.paused && (
-					<div className="wk-plot-note" role="status">
-						{engineError}
-					</div>
+					<PlotNote id="engine">{engineError}</PlotNote>
 				)}
 				{graphics?.kind === "none" &&
 					graphics.reason !== null &&
 					engineError === null &&
 					sourceId !== null && (
-						<div className="wk-plot-note" role="status">
-							{graphics.reason}
-						</div>
+						<PlotNote id="graphics">{graphics.reason}</PlotNote>
 					)}
 				{starting &&
 					linkNote === null &&
 					engineError === null &&
 					!stream.paused && (
-						<div className="wk-plot-note" role="status">
-							Starting the spectrum…
-						</div>
+						<PlotNote id="starting">Starting the spectrum…</PlotNote>
 					)}
 				{offScale !== null &&
 					linkNote === null &&
 					engineError === null &&
 					!stream.paused && (
-						<div className="wk-plot-note wk-plot-note-action" role="status">
+						<PlotNote id="off-scale" action>
 							{offScale === "below"
 								? "The noise floor is below the fixed scale"
 								: "The noise floor is above the fixed scale"}
@@ -729,10 +744,10 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 							>
 								Use Auto range
 							</Button>
-						</div>
+						</PlotNote>
 					)}
 			</div>
-			{size.w > 0 && view && capture && (
+			{size.w > 0 && view && capture && showRuler && (
 				<BandRuler
 					data={data}
 					controller={controller}
@@ -744,7 +759,7 @@ export function Plot({ data, className, stepHz, paused }: PlotProps) {
 						layout.traceCss +
 						AXIS_CSS +
 						LANES_CSS +
-						(discRow ? DISCOVERY_ROW_CSS : 0)
+						(showDisc ? DISCOVERY_ROW_CSS : 0)
 					}
 					discoveries={discOnly}
 					tunedHz={vfoHz}
@@ -960,6 +975,7 @@ function SignalLabels({
 	traceCss,
 	levels,
 	tunedHz: tuned,
+	takenKey,
 	onPick,
 }: {
 	signals: readonly GatedSignal[]
@@ -972,6 +988,8 @@ function SignalLabels({
 	traceCss: number
 	levels: SpectrumLevels
 	tunedHz: number | null
+	/** The shell's chrome over the plot body ("x,y,w,h;…", body px): chips keep off it. */
+	takenKey: string
 	onPick: (hz: number) => void
 }) {
 	const shown = useMemo(() => gated.filter(g => !g.leaving), [gated])
@@ -1027,6 +1045,7 @@ function SignalLabels({
 		})
 		return { signals: list, evidence: how }
 	}, [shown, plan, saved, discoveries, discIndex])
+	const taken = useMemo(() => takenRects(takenKey), [takenKey])
 	const placed: PlacedLabel[] = useMemo(
 		() =>
 			placeLabels(clusterSignals(signals, view, widthPx), view, {
@@ -1034,8 +1053,18 @@ function SignalLabels({
 				traceCss,
 				levels,
 				tunedHz: tuned,
+				taken,
 			}),
-		[signals, view.startHz, view.endHz, widthPx, traceCss, levels, tuned],
+		[
+			signals,
+			view.startHz,
+			view.endHz,
+			widthPx,
+			traceCss,
+			levels,
+			tuned,
+			taken,
+		],
 	)
 	// Each chip keyed by its followed signal; a leaving one fades where it last stood.
 	const lastAt = useRef(
@@ -1073,8 +1102,8 @@ function SignalLabels({
 		view,
 		widthPx,
 	).map(l => ({ ...l, leaving: true }))
-	// one layout across live and leaving chips: capped, and a fading chip never lands on another
-	const laid = layoutChips(current, fading)
+	// one layout across live and leaving chips: capped, and a fading chip never lands on another or on the chrome
+	const laid = layoutChips(current, fading, undefined, taken)
 	chips.push(...laid.placed, ...laid.leaving)
 	for (const id of lastAt.current.keys())
 		if (!live.has(id)) lastAt.current.delete(id)
@@ -1382,4 +1411,13 @@ function useInteraction(
 			el.removeEventListener("keydown", onKey)
 		}
 	}, [ref, controller, hover, range, viewRef, sig.menu, sig.traceCss])
+}
+
+/** "x,y,w,h;…" (body px) as placeLabels' taken rectangles. */
+function takenRects(key: string): [number, number, number, number][] {
+	if (key === "") return []
+	return key.split(";").map(part => {
+		const [x = 0, y = 0, w = 0, h = 0] = part.split(",").map(Number)
+		return [x, y, x + w, y + h]
+	})
 }

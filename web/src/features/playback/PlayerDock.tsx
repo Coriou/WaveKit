@@ -3,9 +3,11 @@ import "./playback.css"
 // The one transport for recordings (`data-wk-transport`): Prev, Play/Pause, Next, the title and "n of m",
 // the position, speed, Auto-next (per browser), Keep and close. Shown while a recording is in the player,
 // wherever it was started from; a thin progress line with play/pause while its row is open in the visible
-// panel (that row's waveform is the seek view then).
+// panel (that row's waveform is the seek view then), or while the shell layout has no height for the full
+// transport (`data-forced`: the first step of DESIGN.md's "Insufficient height").
 import { useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
+import { playerCompactForced } from "../../shell/layout/stores.ts"
 import { Switch } from "../../ui/Switch.tsx"
 import { useDisplay } from "../display.ts"
 import { PlayGlyph, RecIcon } from "../recordings/icons.tsx"
@@ -49,7 +51,9 @@ export function PlayerDock() {
 	const duration = useStore(playback, s => s.duration)
 	const speed = useStore(playback, s => s.speed)
 	const autoNext = useStore(playback, s => s.autoNext)
-	const compact = useStore(playback, compactOf)
+	const ownCompact = useStore(playback, compactOf)
+	const forced = useStore(playerCompactForced)
+	const compact = ownCompact || forced
 	const title = useStore(playback, dockTitle)
 	const liveWanted = useStore(listen, s => s.wanted)
 	// what live audio does while this plays (read by ui-check): muted, or on
@@ -84,6 +88,7 @@ export function PlayerDock() {
 			<div
 				className="wk-island wkp-dock"
 				data-compact=""
+				data-forced={!ownCompact || undefined}
 				data-wk-transport=""
 				data-phase={phase}
 				data-live={live}

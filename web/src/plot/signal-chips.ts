@@ -88,8 +88,9 @@ function overlaps(
 }
 
 /**
- * The chips drawn: the placed ones (already free of overlap, in priority order) up to the cap, then each
- * leaving chip (fading where it last stood) only where it overlaps none of them.
+ * The chips drawn: the placed ones (already free of overlap and of `taken`, in priority order) up to the cap, then
+ * each leaving chip (fading where it last stood) only where it overlaps none of them and none of `taken` (the
+ * shell's chrome over the plot): it stands where an older layout put it, maybe under chrome that came since.
  */
 export function layoutChips<
 	T extends Pick<PlacedLabel, "x" | "top" | "label" | "sub">,
@@ -97,9 +98,10 @@ export function layoutChips<
 	placed: readonly T[],
 	leaving: readonly T[],
 	max = SIGNAL_CHIPS_MAX,
+	taken: readonly [number, number, number, number][] = [],
 ): { placed: T[]; leaving: T[] } {
 	const kept = placed.slice(0, max)
-	const rects = kept.map(l => chipRect(l))
+	const rects = [...taken, ...kept.map(l => chipRect(l))]
 	const fading: T[] = []
 	for (const l of leaving) {
 		if (kept.length + fading.length >= max) break

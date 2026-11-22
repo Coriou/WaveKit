@@ -914,7 +914,8 @@ Condensed + Noto Sans, Tabler-based icons).
 - **Immersive is the interface the web app implements (owner, 2026-10-16).** Sub-project C builds
   C · Immersive, the chosen shell, with the boards it embeds; their states and interactions are
   the acceptance criteria (see "Handoff to the dev team").
-- **Notices: receipts and conditions in one top-centre region (2026-11-16).** The app toast moved
+- **Notices: receipts and conditions in one top-centre region (2026-11-16; the placement is
+  superseded by "Layout: rails and stage", 2026-11-17).** The app toast moved
   from bottom centre to a notice region at the top centre of the free plot area
   (`--wk-free-cx`), 8 px under the top island row and under anything already at the top centre
   (the connection chip when it drops under the top row, and any overlay marked
@@ -935,7 +936,8 @@ Condensed + Noto Sans, Tabler-based icons).
   cause flip and buried the Undo of the last action at the bottom, next to Listen and the dock;
   a condition is state, so it belongs in a status place, with one announcement per episode
   (rules in [WEB-APP.md](../WEB-APP.md#notices)).
-- **Notices beside expanded Activity: the widest empty room (2026-11-17).** Expanded Activity
+- **Notices beside expanded Activity: the widest empty room (2026-11-17; superseded by "Layout:
+  rails and stage").** Expanded Activity
   (Cards, Expand) spans the window between the island rows, so there is no free plot for the
   notice region; centred on the normal drawer's free area it landed on the cards. Measured at
   1440×900 the drawer starts at y 88 with its header controls at the ends (title and Live at the
@@ -949,7 +951,10 @@ Condensed + Noto Sans, Tabler-based icons).
   the drawer, the header middle is the fallback for windows below 1188 px where the drawer is not
   full height. Below 1100 px Expand changes nothing and no room exists (open gap, closed by the
   next entry: on a phone with any drawer open the region still overlaps the drawer header).
-- **Notices in a covering drawer: a slot under its header (2026-11-17).** At 390×844 every drawer
+- **Notices in a covering drawer: a slot under its header (2026-11-17; the rule is superseded by
+  "Layout: rails and stage": `regionPlacement` is gone, and `computeLayout` docks the status items
+  in the drawer's notice slot when the strip would land on a covering drawer; the slot mechanism
+  below is unchanged).** At 390×844 every drawer
   spans the window between the island rows (header at y 152..211), so the region at 16,144 sat
   on the title, Live and ✕. Two places were weighed: (a) a banner docked inside the drawer under
   its header, in the drawer's flow, pushing the body down; (b) a slot above the bottom row. (b)
@@ -970,7 +975,8 @@ Condensed + Noto Sans, Tabler-based icons).
   full-height drawer the region already keeps to the free plot. *Why:* a notice must never cover
   a control, at any width; a reserved place in the drawer's own column makes that true by layout,
   not by measuring. Gated by `ui-check --flow=notices` at 390×844 for each drawer.
-- **Notices beside expanded Activity: room as tall as the stack (2026-11-17).** The top-row and
+- **Notices beside expanded Activity: room as tall as the stack (2026-11-17; superseded by
+  "Layout: rails and stage").** The top-row and
   header placements above checked width only, so a condition with a receipt under it (44 + 8 +
   44 = 96 px) ran from the top row (y 16) onto the drawer's header (y 88) and, in the header, onto
   the cards. Rule (`regionPlacement`): the top-row gap is taken only when the whole measured
@@ -990,6 +996,238 @@ Condensed + Noto Sans, Tabler-based icons).
   links and the palette alias open Activity › Cards. The canvas still draws Messages in the dock
   until it is next redrawn. *Why:* one place for linked activity data, not a second board that
   shows the same decodes.
+- **Hints: a quiet mark, one sentence, a learn card (2026-11-17).** Permanent help text under
+  every control made panels dense and made nothing primary. A labelled control that needs
+  explaining now carries a small info mark (Tabler `info-circle`, 14 px in a 20 px round button,
+  `--wk-text-4`, 4 px after the label, never at the row's far end); everything else about the
+  control lives behind it. Two depths, one element: the **hint** (one sentence, up to 280 px) and,
+  for the few deep concepts whose options each need a line, the **learn card** (the same bubble
+  pinned: the sentence as lead, up to four term rows, one foot line, up to 340 px). Icon-only
+  buttons keep their name tips (`.wk-tip`); hints never replace them.
+  - *What earns a hint:* a term of art (Squelch, De-emphasis), a cost the listener would blame on
+    a fault (a delay, a restart, a change every device hears), options that cannot be told apart
+    by name (Off / Slow / Fast), or a figure whose meaning depends on how it is counted. Not a
+    control whose label and visible state already say what it does, and not a hint that restates
+    the label (the removal test: delete it; if nothing is lost, delete the mark). Order of fixes:
+    a better label, grouping, visible state, then a hint, then a learn card, then the docs.
+  - *Never in a hint:* live state or values (the label line says what is true now), warnings and
+    errors (notes and notices), anything needed to finish a task, a safety consequence at the
+    moment of acting. Budget: one mark per row; none in island heads, the dock, toasts, status
+    items or on the plot; at most one learn card per section.
+  - *Behaviour:* the pointer opens it after 400 ms and it closes 120 ms after the pointer leaves
+    both the anchor and the bubble (the bubble can be hovered and its text selected); keyboard
+    focus opens it at once, and it then stays while the mark has focus, whatever the mouse does,
+    until blur or Escape; a click, Enter, Space or a tap pins it (the learn card when there is
+    one), and the same again, Escape or a click elsewhere closes it. Escape closes the hint only:
+    the panel under it stays open and focus stays on the mark. One hint is open at a time; for
+    500 ms after one closes the next opens without the delay. It closes when its host scrolls,
+    closes or the window resizes, and it never opens by itself.
+  - *Accessibility:* the mark is a real button (`About <label>`, `aria-expanded` and
+    `aria-controls` while its bubble is drawn: a hint with no room anywhere is not expanded and
+    controls nothing); the explained control and the mark point `aria-describedby` at
+    an always-mounted `hidden` copy of the sentence (out of the reading flow), so a screen reader
+    hears it on the control without finding the mark; a pinned learn card adds its rows and foot
+    to the mark's description. No `title` attributes for explanations. The open hint is
+    `role="tooltip"`, the learn card a named `role="group"` that takes no focus, except a bubble
+    cut to its room (below), which scrolls: Tab from the mark goes into it, the arrows scroll it,
+    Shift+Tab goes back to the mark, and Escape there closes it with focus on the mark. Focus in a
+    cut bubble never drops to the page: when it becomes whole (the hint stays open), is not shown,
+    or a scroll, resize or click on nothing focusable closes it, focus goes back to the mark first
+    and stays there through the whole click (the mousedown that follows, on touch after the finger
+    lifts, would drop it to the page); a click on something focusable keeps the focus it gives. On a coarse pointer the mark has a
+    44 px hit area.
+  - *Placement:* inside the surface that holds the mark (island panel, drawer, sheet), 12 px in
+    from its edges and clipped to the window; above the row it explains, else below; when neither
+    side has room for all of it, the roomier side with the bubble cut to that room and its body
+    scrolling. Never over its own row (the label line and its control). A cut is never shorter
+    than the bubble's own padding and border plus two lines of text (read from its computed style;
+    a shorter box would still draw its padding and border over the row or out of the host). With
+    less room than that on both sides, as when the row fills its host, the bubble goes out of the
+    host into the window (12 px in from its edges): above the host, else below, right, left, clear
+    by the gap of the host, its row and every other island, whole on the first side it fits, else
+    cut to the tallest free room around the host if that holds the same two-line minimum. Only
+    when nothing does is no bubble drawn; the mark is then not expanded, and the sentence still
+    reaches a screen reader through the control's `aria-describedby`. An island a
+    layout lays over the host's edge is cut out of that room. So a hint cannot touch another
+    island or plot data and needs no slot in the layout. Solid, unblurred, `--wk-e2`; opens with
+    a 120 ms fade and 4 px slide, and simply appears under reduced motion.
+  - *Writing rules:* the voice of someone who knows radio sitting next to you: plain, calm,
+    present tense, active verbs; no "please", "simply", "just", "allows you to", exclamation marks
+    or marketing. One sentence of at most 15 words saying what the control does for the listener,
+    starting with the verb; a second of at most 8 words only for a cost or a choice; sentence
+    case, ending with a full stop. Never restate the label; a term of art only as the label being
+    explained or with its plain meaning beside it; units only when they help choose, rounded
+    ("about 1 s"); never dBFS, samples, sample rates, route names, buffers or filter types; no
+    gestures the control already affords ("drag", "click"); no state ("currently") and no
+    cross-references. Use the app's own names. Learn rows: the term, then at most 14 words; a
+    shortcut is a key cap, last. Before a hint ships, the flip test (someone who never used a
+    radio can say what changes when the control is flipped) and the removal test.
+  - *Code:* `web/src/ui/Hint.tsx` (`useHint`, `HintMark`, `hintRow`), the placement in
+    `hint-place.ts` and the one-at-a-time controller in `hint-controller.ts`. The recipe is
+    web-local (`web/src/ui/hint.css`, marked `wk-explore: hint`) until it is approved into
+    `ui.css`. Listen's strings live in `web/src/features/listen/hints.ts`, with the rules as a test.
+    Gated by `ui-check --flow=hints`: at 1440×900 and 390×844 every mark is reached by Tab, its hint
+    lies inside its host and the window and meets no other island and never its own row, a cut
+    card (the flow makes a learn card longer than the window, so one is met at both sizes)
+    scrolls by keyboard (End to its end) and gives focus back to the mark when it closes or
+    becomes whole, including after a real click on plain text, a real click on another mark keeps
+    focus there, a hint with no room anywhere is not drawn and not expanded, Enter pins, Escape
+    closes the hint only, a tap pins.
+- **Listen panel: essentials first (2026-11-17).** The Audio options panel stacked five sections,
+  each with permanent prose, a 44 px hatched level block and two sets of figures. Now: Volume as
+  one row; Squelch (mode, a slim 8 px level bar with the squelch as an amber handle, hollow in
+  Auto and solid in Manual, absent in Open, one caption "Opens above −46 dB · Signal −40 dB",
+  Voice only, Tone squelch when a tone is heard or set); Source; Sound folded into one row that
+  says what is behind it ("Level, de-emphasis, filters") or, when something there is not at its
+  default, what is set; then a footer with **Record**, the delay ("180 ms delay") and All audio
+  settings. Each field reads name and mark on the left, what is true now on the right (the squelch
+  state **Voice heard**, **Tone heard**, **Playing**, **Waiting for voice**, **Quiet**, **Open**;
+  Source **Playing NFM**). Notes exist only while their problem holds (no decoder, an encrypted
+  call, audio breaking up, several devices listening). Figures read dB, not dBFS. The stream line
+  (rate, client count, health) and the core-filled and rebase sentences of the audio-health detail
+  left the panel; they stay in the API. Three marks at rest (Squelch and Source with learn cards,
+  Voice only), two more in Sound. The fold is remembered per browser and never opens by itself.
+  *Why:* most sessions touch volume and squelch and nothing else; this puts them first and keeps
+  the answer to "why is it quiet?" in one block, and the fold absorbs later sound controls.
+- **Layout: rails and stage (owner, 2026-11-17).** Every floating element used to place itself
+  (CSS centred on `--wk-free-cx`, the notice region measuring the DOM every 500 ms, the connection
+  chip reading a store the shell wrote, the plot inset in a CSS `:has()`), so a right drawer moved
+  the Receiver, the dock, the player and the notices, and nothing checked the result: the player
+  landed on the card line and notices sat on the first row of signal chips. Now one pure function,
+  `computeLayout` (`web/src/shell/layout/compute.ts`), takes the window, the drawer state and each
+  element's intrinsic size and returns every rectangle; components only report sizes, and each
+  slot carries `data-wk-slot` and `data-wk-rect`. The model:
+  - Two *rails* hold the chrome and never read the drawer. Top rail: the Tuner at 16,16, the
+    Receiver at the right corner (under the Tuner, 8 px down, when the row cannot hold both), and
+    the *status slot* between them (y 16..72). Bottom rail: Listen at the left corner, the dock
+    centred on the window and never within a gutter of Listen's *open* width (compact below
+    1180 px; hidden below 761 px or when Listen's closed head and the compact dock cannot share the
+    row, where the search button takes over). Listen widens to 420 px while Audio options are open
+    and the dock reserves that width (less on a narrow window: `W − 48 − dock width`, so 340 at
+    836 px and 420 from 916 px), so nothing moves when Listen opens and the open head never
+    covers the dock: the dock stands at 452 from 916 px up to 1395 px (off centre by 58 px at
+    1280 px, 126 at 1100), centred from there. On a phone the open head keeps 8 px from the
+    search button (302 px at 390).
+  - A *stack* above Listen: the player storey (x 16, up to 560 wide, 16 px above the bottom rail's
+    top, the taller of Listen and the dock, so it clears both), then the
+    tuned card's home ("above Listen", 16 px over the stack). The card home moves by the player's
+    height and a gutter when a recording starts or stops; that is the one stated move. With no
+    room for the expanded card on its anchor it shows its minimised line there, instead of
+    jumping to another anchor; it still hides at 1100 px and below and under covering surfaces.
+  - The *stage* between the rails takes the drawers. From 1100 px a drawer is a column under the
+    Receiver (top 88 on the default rail), as wide as wanted up to 640 px and never into the player
+    storey; its foot reaches the window edge when it clears the dock by a gutter, else it stands on
+    the bottom rail. Expanded Activity, an attached pane, any drawer below 1100 px and the phone
+    sheet are covering surfaces: from 16 px under the top rail to 16 px above the stack (182 px
+    off the bottom with the player, 96 without). The pane attaches left of the column when it has
+    the player storey's width (560 px), else a push-in pane becomes a screen in the drawer.
+  - The *status slot* holds the notices, the connection chip and the "Receiver paused" label, in
+    two groups that never push each other: the state group packed against the Receiver
+    (condition, connection, then paused), the receipt against the Tuner. When the row is too
+    narrow: the condition goes compact (168 px, one line), the connection chip title only, the
+    condition an icon, the receipt wraps to two lines; then every item moves to the strip under the
+    top rail (below) when the strip shows more of them than the slot can, and only then does the
+    lowest-ranked item wait. A lone item wraps to two lines before it changes form. A waiting item's
+    timer waits with it (a toast's 6 s or 8 s run only while it is on screen, so a receipt with Undo
+    is never lost unseen); it shows, with its whole time, when there is room. Below a 200 px slot or with the Receiver
+    stacked (phones) the items stack in a strip 8 px under the top rail, at the strip's width;
+    with a covering drawer open they dock in its notice slot (the 2026-11-17 slot entry stands).
+    Beside a drawer column (a narrow slot on a wide window) the strip stops 16 px left of the
+    column, and with the column's pane attached the items dock in the column's notice slot.
+    An item taller than the 56 px row is clamped to it. Every status item renders inside the shell
+    (the connection chip and the paused label in the shell's guest layer, beside the notices),
+    under the open island panel and the ⌘K palette, and hides while the palette is open.
+  - The *plot* gets its inset (top rail + 12: 84, 132 with the scan hold row, 148 on a phone), a
+    cap so the scale rows end 16 px above the stack, and every chrome rectangle over its body as
+    *exclusions*: `placeLabels` treats them as taken, so signal chips flow around the card, the
+    strip and the drawer. Its status notes ("No source connected", "Use Auto range") stand on the
+    note row (40 % down, centred on the plot left of a drawer column), else at the nearest free
+    spot along that row and the rows around it, 8 px clear of every exclusion; with no free spot
+    (a sheet over the plot) a note is a status item in the status slot, never under chrome.
+  - *Open island panels* are part of the layout. A panel going down starts 8 px under the whole
+    top rail (under the Tuner's hold row too, when that is the taller island) and keeps 8 px above
+    the bottom rail; Listen's going up starts 8 px under the top rail (on a
+    phone: under the stacked Receiver, 390×844 caps it at 612 px), and it scrolls past that. On a
+    stacked top rail the Receiver yields (out of sight) while the Tuner's panel is open over it.
+    No frame island ever covers an open panel. The tuned card and the player yield the same way:
+    while an open panel stands over them or within 8 px of them (Listen's over the card's home
+    above Listen and over the player storey, a tall Tuner panel over a card on the left), they are
+    out of sight in place, still mounted, measured and playing, and the shell lists them as
+    waiting; they are back on the same rectangles when the panel closes. A status item within
+    8 px of the open panel's room yields too (on a phone the Tuner or Receiver panel over the
+    strip): out of sight in place and inert, its timer paused; it comes back with the time it had
+    left when the panel closes, so a receipt's Undo is never lost under a panel. Known limit: a toast
+    that comes back under a pointer that does not move runs its clock until the pointer moves. A docked item
+    yields with its drawer when the panel covers that. The notice region and every status guest
+    (the connection chip, back to live, the paused label, plot notes) decide their render, inert
+    state, focus and timer from one layout predicate (`statusState`), carried on the element as
+    `data-wk-state`. Focus inside an item the reader cannot see moves to the open panel's
+    trigger, so it never falls to the page. A panel opened this
+    frame and not measured yet counts as all the room it may take (its island's column, as tall
+    as its cap), so the card is never drawn over it, not even for the first frames. Nothing moves
+    for a popover, and no island lies over an open panel, so a hint inside it never meets one. A
+    hint's room ignores an island out of sight.
+  - *Motion.* Frame elements never ease. When a layout change moves the tuned card (the player
+    starting, a drawer opening over a right anchor), the card glides (260 ms) to its new home and
+    sweeps the box of its two homes: a slot entering that box (the player, a drawer, a pane, a
+    status item, the map's side panel) is held out of sight until the card lands, and the plot's
+    exclusions cover the whole box meanwhile. "Lands" is measured, not timed: the hold lasts at
+    least the glide and its 60 ms margin, then until the card's painted box stands at its new
+    home (a slow page starts the glide late, on its first frame), 4 s at most. A move the layout forces eases out with no
+    overshoot, so the card never leaves that box; a move the reader asks for keeps the spring.
+    With reduced motion there is no glide and nothing is held.
+  - *Dragging the card.* The dragged card's live rectangle is the card's rectangle for the plot's
+    exclusions and `data-wk-rect`. It stays 16 px inside the window and left of a drawer column,
+    and a gutter clear of every island (the rails, the status slot or strip, the player, the dock
+    or search button, the drawer, the map's chrome, the open Listen head at its open width and an
+    open panel's room): a pointer over an island holds the card at the
+    nearest legal spot one or two push-outs away (out of one island along one axis, then out of the
+    next), else where it last was. The layout clamps it, so when something opens under a still
+    pointer (Listen, a panel) the held card jumps clear. The drop snaps to the nearest free anchor as before.
+  - *Insufficient height* (a short or zoomed window) collapses in this order, each step only when
+    the one before leaves too little; nothing overlaps at any step:
+
+    | Step | When the scale rows' room above the stack is | What gives |
+    | --- | --- | --- |
+    | 1 | under 148 px (100 px of rows + the 48 px trace floor) with the full player | the player shows its compact line (play/pause, progress, time) |
+    | 2 | under 148 px with the compact line | the trace floor yields: the trace shrinks toward 0 |
+    | 3 | under 100 px | the discovery row and the band ruler hide (54 px of rows left: axis and lanes) |
+    | 4 | under 54 px with the player | the player waits out of sight, still playing |
+    | 5 | under 54 px over Listen | every scale row hides; the waterfall alone |
+
+  - *The map's chrome* is laid out with the rest, by the same rails and stage. The corner (the
+    Live chip at the window's right gutter, the scale left of it, the attribution line above them)
+    stands on the bottom rail right of the dock when the rail has room for the chip and the scale,
+    else above the stack; a drawer column over it stands a gutter above the attribution line. The
+    layer rail stands under the Receiver (under the strip when one shows), its side panel (the
+    selection, the overlays menu) 10 px left of it and the station chip centred left of both, all
+    clamped above the corner and the stack. A drawer opening never moves any of it: the stage
+    chrome within a gutter of a drawer, pane or sheet waits out of sight, and the corner keeps its
+    rectangle (1280×800 with Activity open: the Live chip at 1200,740, clear of the dock). The
+    tuned card's anchors and the map's own label placement keep off all of it. The pointer's
+    hover tip and the cluster chooser are popovers at the pointer, like island panels.
+
+  Expected numbers: 1440×900 Receiver 1124,16; dock 474,820 492×64 (1280×800 452,720; 1100×800
+  452,720 448×64); player 16,734 560×70; card
+  16,278 (expanded 440) or 16,666 (line); Activity column 1004,88 420×796; expanded Cards 16,88
+  1408×630. 390×844: Receiver 16,80; player 16,678 358×70; sheet 16,152 358×510. Deviations from
+  the design sketch: a two-line status item is 52 px tall in the strip too (the sketch said 54);
+  the drawer column caps its width by the player storey whether or not a recording plays, so
+  playback never resizes a drawer; the pane starts under the top rail like the other covering
+  surfaces (under the Tuner's hold row too). Frame elements carry no position transition. What
+  does move, exactly: the card's home by the player's height and a gutter (stated above), a card on
+  a centre or right anchor stepping left of a drawer column, the map's stage chrome under the strip
+  when status items stack there, and the collapse steps of a short window. *Why:*
+  "what moves when I open a drawer?" is now "nothing": the dock that opened it stays under the
+  pointer, and a notice never covers data on a wide window. Cost accepted: drawers are 72 px
+  shorter at the top, and 80 px more where they stand on the rail. Gated by unit tests of the
+  expected rectangles, fast-check properties down to 320×400 (no two islands intersect, all inside
+  the window, frame and map chrome identical with and without a drawer, no chip under chrome, no
+  shown slot inside a glide's box, a dragged card a gutter clear of every island, no frame island
+  over an open panel, no card or player shown over one) and `ui-check --flow=layout` (settled
+  cells that require every expected island on screen or listed as waiting, motion samples with
+  the transitions on, the Map view at every viewport, and Listen's panel open on the phone and at
+  1440×900).
 
 ## Open questions and next topics
 

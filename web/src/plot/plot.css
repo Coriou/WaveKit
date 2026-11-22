@@ -13,7 +13,7 @@
 	}
 	.wk-plot-body {
 		position: absolute;
-		/* Room for the shell's island heads above the trace (Immersive board: 84 px). */
+		/* Room for the shell's top rail above the trace (the shell layout's inset: 84 px on the default rail). */
 		top: var(--wk-plot-inset-top, 84px);
 		left: 0;
 		right: 0;
@@ -393,16 +393,39 @@
 		background: rgba(var(--wk-ink-rgb), 0.28);
 		pointer-events: none;
 	}
-	/* status notes centre on the free area beside a full-height drawer (--wk-free-cx, set by the shell) */
+	/* status notes centre on the plot left of a drawer column (--wk-plot-note-cx, from the shell layout) */
 	.wk-plot-note {
 		position: absolute;
-		left: var(--wk-free-cx, 50%);
-		max-width: calc(2 * var(--wk-free-cx, 50%) - 32px);
+		left: var(--wk-plot-note-cx, 50%);
+		max-width: calc(2 * var(--wk-plot-note-cx, 50%) - 32px);
 		top: 40%;
 		transform: translate(-50%, -50%);
 		font-size: 13px;
 		color: var(--wk-text-3);
 		pointer-events: none;
+	}
+	/* in a shell, a note is placed by the exclusion-aware placer (PlotNote.tsx): measured out of sight, then at its
+	   spot (top-left, no centring transform); both forms share one width rule so the measure holds */
+	.wk-plot-note[data-pending],
+	.wk-plot-note[data-placed] {
+		transform: none;
+		width: max-content;
+		max-width: min(560px, calc(100% - 32px));
+	}
+	.wk-plot-note[data-pending] {
+		left: 0;
+		top: 0;
+		visibility: hidden;
+	}
+	/* no free spot on the plot: the note is a guest in the status slot, a toast's row */
+	.wk-plot-note-guest {
+		gap: 12px;
+		padding: 0 12px;
+		color: var(--wk-text-2);
+		white-space: nowrap;
+		overflow: hidden;
+		max-width: 100%;
+		box-sizing: border-box;
 	}
 	/* a note with a way out (the fixed scale misses the signal: Use Auto range) */
 	.wk-plot-note-action {

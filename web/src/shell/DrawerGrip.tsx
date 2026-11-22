@@ -6,6 +6,8 @@ import { useRef, useState } from "react"
 import type { KeyboardEvent, PointerEvent } from "react"
 
 import { DR_MIN } from "./layout.ts"
+import type { Rect } from "./layout/geometry.ts"
+import { slotAttrs, topLeft } from "./layout/slot.ts"
 import type { DrawerWidthStore } from "./drawer-width.ts"
 import type { DrawerId } from "./store.ts"
 
@@ -17,11 +19,11 @@ export interface DrawerGripProps {
 	/** The width the drawer got this render, and the most the grip may give it. */
 	width: number
 	maxW: number
-	/** The drawer's left edge from the shell's left, and its top and bottom insets. */
-	x: number
-	top: number
-	bottom: number
+	/** Its rectangle from the shell layout (on the drawer's left edge). */
+	rect: Rect
 	onResizing: (on: boolean) => void
+	/** Held out of sight while the tuned card glides through its rectangle (layout motion rule). */
+	held?: boolean
 }
 
 const KEY_STEP: Readonly<Record<string, (w: number, step: number) => number>> =
@@ -38,10 +40,9 @@ export function DrawerGrip({
 	store,
 	width,
 	maxW,
-	x,
-	top,
-	bottom,
+	rect,
 	onResizing,
+	held = false,
 }: DrawerGripProps) {
 	const from = useRef<{ px: number; w: number; pointer: number } | null>(null)
 	const [on, setOn] = useState(false)
@@ -91,7 +92,9 @@ export function DrawerGrip({
 				title="Drag to resize · double-click resets"
 				className="wk-shell-grip"
 				data-on={on || undefined}
-				style={{ left: x - 10, top: top + 16, bottom: bottom + 16 }}
+				data-held={held || undefined}
+				{...slotAttrs("grip", rect)}
+				style={topLeft(rect, true)}
 				onPointerDown={onPointerDown}
 				onPointerMove={onPointerMove}
 				onPointerUp={e => stop(e.currentTarget)}

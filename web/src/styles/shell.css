@@ -47,9 +47,10 @@
 	.wk-shell-island[data-island="listen"] {
 		width: 340px;
 	}
-	/* the Listen board widens to 420 while Audio options are open */
+	/* the Listen board widens while Audio options are open: to the width the layout reserves for it (LISTEN_OPEN_W,
+	   420, in src/shell/layout/compute.ts; less on a narrow window), which the dock keeps clear of */
 	.wk-shell-island[data-island="listen"][data-open] {
-		width: 420px;
+		width: var(--wk-listen-open-w);
 	}
 	.wk-shell-panel {
 		box-sizing: border-box;
@@ -58,10 +59,19 @@
 		flex-direction: column;
 		gap: 14px;
 		overscroll-behavior: contain;
-		max-height: calc(100dvh - 110px);
+		/* the shell layout's cap (--wk-panel-max: below the top rail, above the bottom rail) */
+		max-height: min(calc(100dvh - 110px), var(--wk-panel-max, 100dvh));
 	}
 	.wk-shell-island[data-island="listen"] .wk-shell-panel {
-		max-height: calc(100dvh - 176px);
+		max-height: min(calc(100dvh - 176px), var(--wk-panel-max, 100dvh));
+	}
+	/* a panel going down starts under the whole top rail (under a taller neighbour: the layout's panelDrop) */
+	.wk-shell-island[data-direction="down"] > .wk-shell-panel {
+		margin-top: var(--wk-panel-drop, 0px);
+	}
+	/* a frame island an open panel takes the place of (the stacked Receiver under the Tuner's panel) */
+	.wk-shell-island[data-yielded] {
+		visibility: hidden;
 	}
 
 	/* Tuner head (Tuner board) */
@@ -516,21 +526,13 @@
 		}
 	}
 
-	/* the notice region (src/shell/notices): top centre of the free area, 8 px under the top island row and
-	   under anything already there (top set by NoticeRegion). One condition toast, then one receipt. Centred
-	   on the free area: beside a full-height drawer it is [0, 2 × --wk-free-cx] (Shell.tsx), 16 px from both
-	   its edges. Each toast takes its own text width (max-content) up to 560 px, about 70 characters. */
+	/* the notice region (src/shell/notices): one condition toast, then one receipt. On the rail and in the strip
+	   each toast sits at its layout rectangle in the status layer (src/shell/layout/slots.css); this column is the
+	   region docked in a drawer's notice slot (below) */
 	.wk-notices {
-		position: absolute;
-		left: var(--wk-free-cx, 50%);
-		translate: -50% 0;
-		z-index: 12;
 		display: flex;
 		flex-direction: column;
-		align-items: center;
 		gap: 8px;
-		width: max-content;
-		max-width: min(560px, calc(2 * var(--wk-free-cx, 50%) - 32px));
 		pointer-events: none;
 	}
 	.wk-notice {
@@ -555,10 +557,6 @@
 	   in the drawer's flow, so it pushes the body down instead of covering its controls; flat, as it sits on the
 	   drawer's surface. The push is not animated: only the toast's own 150 ms rise */
 	.wk-drawer-notices > .wk-notices {
-		position: static;
-		translate: none;
-		width: auto;
-		max-width: none;
 		align-items: stretch;
 	}
 	.wk-drawer-notices .wk-notice {

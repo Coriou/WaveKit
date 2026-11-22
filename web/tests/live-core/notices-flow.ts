@@ -6,16 +6,17 @@
  * again within the episode → still one; ✕, then it keeps dropping → no new notice (the Receiver chip still says
  * Samples lost); the episode ends and the link drops again → one new notice; a busy core → a notice that never
  * says "lower the sample rate"; the page reloads while it persists → the chip shows it, no notice. While a notice
- * shows, its box is measured against the Listen island, the dock, the tuned card, the other islands and the
- * frequency readout at 1440×900 and 390×844: none may intersect it, and each element that must exist at that
+ * shows, each toast's box (the condition and the receipt have their own slots in the status slot) is measured against
+ * the Listen island, the dock, the tuned card, the other islands and the frequency readout at 1440×900 and 390×844:
+ * none may intersect one, and each element that must exist at that
  * viewport (the Listen island and the frequency readout always; the dock and the tuned card at desktop width)
  * must be laid out. The report lists every element's rect (null when it is not laid out).
  *
  * Expanded Activity (Cards, full width): with the drawer covering the plot between the island rows, a new notice
  * is measured at 1440×900 against the same elements plus the drawer's card list, its first card, its header
  * controls (title, Live, ✕) and its Expand button; all must exist and none may intersect it. Then a receipt with
- * Undo stacks under it (⌘K `vol <n>`, a real action) and the whole stacked region (44 + 8 + 44 px, too tall for the
- * top row's gap) is measured the same way.
+ * Undo joins it (⌘K `vol <n>`, a real action; on the top row the receipt sits by the Tuner, the condition by the
+ * Receiver) and both toasts are measured the same way.
  *
  * Phone (390×844), each drawer open in turn (Activity expanded, Activity, Scanner, Recordings, Settings): every
  * drawer spans the window there, so the region docks in the drawer's notice slot under its header (`data-where`
@@ -45,7 +46,7 @@ export interface Rect {
 
 export interface NoticeLayout {
 	viewport: string
-	/** Where the region placed itself (`data-where`: free-plot, top-row, drawer-head, drawer-slot). */
+	/** Where the shell layout put the toasts (`data-where`: rail, strip, drawer-slot). */
 	where?: string
 	/** A condition and a receipt were both expected (stacked); its ✕ and Undo, and whether the focus stayed. */
 	stacked?: {
@@ -210,7 +211,10 @@ async function measure(
 			focusInRegion: region !== null && region.contains(document.activeElement),
 			vw: window.innerWidth,
 			vh: window.innerHeight,
-			notice: rect(region),
+			// each toast has its own slot (the region is a layer, or the drawer slot's column)
+			toasts: [...(region?.querySelectorAll(".wk-notice") ?? [])]
+				.map(rect)
+				.filter(r => r !== null),
 			where: region?.getAttribute("data-where") ?? "",
 			others: [
 				...named.map(([name, sel]) => ({
@@ -229,6 +233,17 @@ async function measure(
 			],
 		}
 	}, extra)
+	const toasts = boxes.toasts
+	const notice: Rect | null =
+		toasts.length === 0
+			? null
+			: (() => {
+					const x = Math.min(...toasts.map(t => t.x))
+					const y = Math.min(...toasts.map(t => t.y))
+					const r = Math.max(...toasts.map(t => t.x + t.w))
+					const b = Math.max(...toasts.map(t => t.y + t.h))
+					return { x, y, w: r - x, h: b - y }
+				})()
 	const desktop = width >= DESKTOP_MIN_WIDTH
 	// the expanded drawer may cover the tuned card: it need not be laid out then
 	const requiredHere = (name: string, isExtra: boolean) =>
@@ -238,18 +253,17 @@ async function measure(
 		(desktop &&
 			(name === "dock" || (name === "tuned card" && extra.length === 0)))
 	const inWindow =
-		boxes.notice !== null &&
-		boxes.notice.x >= 0 &&
-		boxes.notice.y >= 0 &&
-		boxes.notice.x + boxes.notice.w <= boxes.vw &&
-		boxes.notice.y + boxes.notice.h <= boxes.vh
+		notice !== null &&
+		notice.x >= 0 &&
+		notice.y >= 0 &&
+		notice.x + notice.w <= boxes.vw &&
+		notice.y + notice.h <= boxes.vh
 	const others = boxes.others.map(({ extra: isExtra, ...o }) => ({
 		...o,
 		required: requiredHere(o.name, isExtra),
 		intersects:
-			boxes.notice !== null &&
 			o.rect !== null &&
-			intersects(boxes.notice, o.rect),
+			toasts.some(t => o.rect !== null && intersects(t, o.rect)),
 	}))
 	const missing = others.filter(o => o.required && !o.rect).map(o => o.name)
 	const inside = (r: Rect | null) =>
@@ -269,12 +283,12 @@ async function measure(
 	return {
 		viewport,
 		where: boxes.where,
-		notice: boxes.notice,
+		notice,
 		...(stacked ? { stacked } : {}),
 		others,
 		missing,
 		ok:
-			boxes.notice !== null &&
+			notice !== null &&
 			inWindow &&
 			missing.length === 0 &&
 			others.every(o => !o.intersects) &&
@@ -313,7 +327,10 @@ async function settled(
  * volume), then the condition's ✕ focused, which pauses both timers while the stack is measured. True once both
  * toasts show and the focus is in the region.
  */
-async function stackReceipt(page: Page, percent: number): Promise<string> {
+export async function stackReceipt(
+	page: Page,
+	percent: number,
+): Promise<string> {
 	let phase = "open the palette"
 	try {
 		await page.keyboard.press("Control+k")

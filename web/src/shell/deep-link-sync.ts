@@ -1,6 +1,8 @@
-// Keeps the address bar's hash and the app in step (deep-link.ts says what the hash holds). On load and on
-// hashchange the hash opens its view, drawer, Activity search or discovery; afterwards every change rewrites it with
-// replaceState, coalesced to one write per task.
+// Keeps the address bar's hash and the app in step (deep-link.ts says what the hash holds). On load, on hashchange
+// and on popstate the hash opens its view, drawer, Activity search or discovery; afterwards every change rewrites it
+// with replaceState, coalesced to one write per task. A hash set from outside is never overwritten: the write waits
+// for its hashchange, and adopts the hash itself when none has come by the next task (a history change that fires
+// no hashchange).
 import type { AppServices } from "../app/services.ts"
 import {
 	activityLayout,
@@ -69,11 +71,28 @@ export function applyLink(services: AppServices, link: LinkState): void {
 export function followDeepLinks(services: AppServices): () => void {
 	if (typeof window === "undefined") return () => undefined
 	let queued = false
+	// The hash as this module last read or wrote it. A different one in the address bar was set from outside (a
+	// link, the address bar, a script) and its hashchange is still on its way (a task later): the app's state does
+	// not overwrite it meanwhile, or the change would be lost (open() would then read the old hash back).
+	let known = window.location.hash
+	let adoptTimer: ReturnType<typeof setTimeout> | undefined
+	let stopped = false
 
 	const write = () => {
 		queued = false
-		const hash = formatLink(currentLink(services))
+		if (stopped) return
 		const loc = window.location
+		if (loc.hash !== known) {
+			// its hashchange is a task away; if none comes by the next task, open the hash anyway
+			if (adoptTimer === undefined) {
+				adoptTimer = setTimeout(() => {
+					adoptTimer = undefined
+					if (window.location.hash !== known) open()
+				}, 0)
+			}
+			return
+		}
+		const hash = formatLink(currentLink(services))
 		if (hash === loc.hash || (hash === "" && loc.hash === "")) return
 		const url = hash === "" ? `${loc.pathname}${loc.search}` : hash
 		try {
@@ -81,6 +100,7 @@ export function followDeepLinks(services: AppServices): () => void {
 		} catch {
 			// Sandboxed frames refuse it: the app works the same without the link.
 		}
+		known = loc.hash
 	}
 	const schedule = () => {
 		if (queued) return
@@ -89,17 +109,19 @@ export function followDeepLinks(services: AppServices): () => void {
 	}
 
 	const open = () => {
-		const link = parseLink(window.location.hash)
+		known = window.location.hash
+		const link = parseLink(known)
 		if (link) applyLink(services, link)
 		schedule()
 	}
 
 	open()
 	window.addEventListener("hashchange", open)
+	window.addEventListener("popstate", open)
 	// installed app: a manifest shortcut or a link launched into the open window (launch_handler focus-existing)
 	const queue = (window as { launchQueue?: LaunchQueue }).launchQueue
 	queue?.setConsumer(params => {
-		if (!params.targetURL) return
+		if (stopped || !params.targetURL) return
 		const hash = new URL(params.targetURL).hash
 		if (hash !== window.location.hash) window.location.hash = hash
 	})
@@ -110,7 +132,10 @@ export function followDeepLinks(services: AppServices): () => void {
 		activityLayout.subscribe(schedule),
 	]
 	return () => {
+		stopped = true
+		clearTimeout(adoptTimer)
 		window.removeEventListener("hashchange", open)
+		window.removeEventListener("popstate", open)
 		for (const off of offs) off()
 	}
 }

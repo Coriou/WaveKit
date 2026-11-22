@@ -33,7 +33,9 @@ import {
 	LEGACY_HEAR_KEY,
 	listenHeadline,
 	listenModeOf,
-	sourceHint,
+	soundSummary,
+	sourceNote,
+	sourceNow,
 	heldCall,
 	heldCallLine,
 	voiceCallLine,
@@ -106,6 +108,28 @@ describe("Listen › Sound", () => {
 			expect(deemphOf(config(deemphPatch(v) as Partial<LiveAudioConfig>))).toBe(
 				v,
 			)
+	})
+
+	it("folds Sound into one row that names what is set, or what is behind it", () => {
+		const st = (
+			c: Partial<LiveAudioConfig>,
+			over: Partial<LiveAudioStatus> = {},
+		) => ({ ...over, config: config(c) }) as LiveAudioStatus
+		expect(soundSummary(st({}))).toEqual({
+			text: "Level, de-emphasis, filters",
+			changed: false,
+		})
+		// the modulation's own level control is the default: AM on Fast says nothing
+		expect(soundSummary(st({ modulation: "am" })).changed).toBe(false)
+		expect(soundSummary(st({ agc: "fast", highPass: 300 }))).toEqual({
+			text: "Level control Fast · Rumble cut",
+			changed: true,
+		})
+		expect(
+			soundSummary(
+				st({ deEmphasis: true, deEmphasisTau: 75, noiseReduction: "voice" }),
+			).text,
+		).toBe("De-emphasis 75 µs · Noise reduction")
 	})
 })
 
@@ -407,31 +431,41 @@ describe("Listen › Source (the core's listenMode)", () => {
 		expect(listenModeOf(null)).toBe("auto")
 	})
 
-	it("words the hint from what the core plays and why", () => {
+	it("says what Source plays now, and a note only while there is a problem", () => {
 		const r = voiceRoute([dsd()], voice(), 161_150_000, 6250)
-		const hint = (
+		const input = (
 			mode: "auto" | "analog" | "digital",
-			now: Parameters<typeof sourceHint>[0]["now"],
+			now: Parameters<typeof sourceNow>[0]["now"],
 			route = r,
-		) => sourceHint({ mode, now, route, modeLabel: "NFM" })
-		expect(hint("auto", { active: "digital", protocol: "dmr" })).toBe(
-			"DMR call. Playing decoded voice.",
-		)
+		) => ({ mode, now, route, modeLabel: "NFM" })
+		const both = (...a: Parameters<typeof input>) => [
+			sourceNow(input(...a)),
+			sourceNote(input(...a))?.text ?? null,
+		]
+		expect(both("auto", { active: "digital", protocol: "dmr" })).toEqual([
+			"Playing DMR voice",
+			null,
+		])
 		expect(
-			hint("digital", { active: "none", reason: "no-decoder" }, null),
-		).toBe("No digital voice decoder on this channel: nothing plays.")
-		expect(hint("auto", { active: "analog", reason: "squelch-open" })).toBe(
-			"Open plays the NFM audio as it is.",
-		)
-		expect(hint("analog", { active: "analog" })).toBe(
-			"Playing demodulated NFM audio only.",
-		)
-		expect(hint("digital", { active: "none" })).toBe(
-			"Decoded digital voice only, silence between calls.",
-		)
-		expect(hint("auto", { active: "none" }, null)).toBe(
-			"Playing NFM audio. Decoded voice when a decoder covers the channel.",
-		)
+			both("digital", { active: "none", reason: "no-decoder" }, null),
+		).toEqual([null, "No digital voice decoder here, so nothing plays."])
+		expect(
+			sourceNote(input("digital", { active: "none", reason: "no-decoder" }))
+				?.tone,
+		).toBe("warn")
+		expect(both("auto", { active: "analog", reason: "squelch-open" })).toEqual([
+			"Playing NFM",
+			"An open squelch plays analog only.",
+		])
+		expect(both("analog", { active: "analog" })).toEqual(["Playing NFM", null])
+		expect(both("digital", { active: "none" })).toEqual([
+			"Waiting for a call",
+			null,
+		])
+		expect(both("auto", { active: "none" }, null)).toEqual([
+			"Playing NFM",
+			null,
+		])
 	})
 
 	describe("a call the core holds (never routed: encrypted, or encryption not known)", () => {
@@ -450,41 +484,47 @@ describe("Listen › Source (the core's listenMode)", () => {
 			}) as unknown as DigitalVoiceStatus["call"]
 		const routeOf = (over: Record<string, unknown>) =>
 			voiceRoute([dsd()], voice(call(over)), 161_150_000, 6250)
+		const input = (
+			mode: "auto" | "analog" | "digital",
+			over: Record<string, unknown>,
+		) => ({
+			mode,
+			now: { active: "none" } as const,
+			route: routeOf(over),
+			modeLabel: "NFM",
+		})
 		const hint = (
 			mode: "auto" | "analog" | "digital",
 			over: Record<string, unknown>,
-		) =>
-			sourceHint({
-				mode,
-				now: { active: "none" },
-				route: routeOf(over),
-				modeLabel: "NFM",
-			})
+		) => sourceNote(input(mode, over))?.text ?? sourceNow(input(mode, over))
 
 		it("says an encrypted call has nothing to play", () => {
 			expect(hint("auto", { encrypted: true })).toBe(
-				"DMR call is encrypted: nothing to play.",
+				"Encrypted DMR call: nothing to play.",
 			)
 			expect(hint("digital", { encrypted: true })).toBe(
-				"DMR call is encrypted: nothing to play.",
+				"Encrypted DMR call: nothing to play.",
 			)
+			expect(sourceNow(input("auto", { encrypted: true }))).toBeNull()
 			expect(
 				heldCallLine("encrypted", "DMR", routeOf({ encrypted: true })),
-			).toBe("DMR call is encrypted: nothing to play.")
+			).toBe("Encrypted DMR call")
 		})
 
 		it("says decoded voice is not played while the analog channel plays an encrypted call", () => {
 			expect(
 				heldCallLine("encrypted", "DMR", routeOf({ encrypted: true }), true),
-			).toBe("DMR call is encrypted: decoded voice is not played.")
-			expect(
-				sourceHint({
-					mode: "auto",
-					now: { active: "analog" },
-					route: routeOf({ encrypted: true }),
-					modeLabel: "NFM",
-				}),
-			).toBe("DMR call is encrypted: decoded voice is not played.")
+			).toBe("Encrypted DMR call · analog only")
+			const analog = {
+				mode: "auto" as const,
+				now: { active: "analog" as const },
+				route: routeOf({ encrypted: true }),
+				modeLabel: "NFM",
+			}
+			expect(sourceNote(analog)?.text).toBe(
+				"Encrypted DMR call: decoded voice is not played.",
+			)
+			expect(sourceNow(analog)).toBe("Playing NFM")
 			// a checking call reads the same whatever plays
 			expect(
 				heldCallLine(
@@ -498,7 +538,7 @@ describe("Listen › Source (the core's listenMode)", () => {
 
 		it("says a call whose encryption is not known is being checked", () => {
 			expect(hint("auto", { encryptionKnown: false })).toBe(
-				"DMR call: checking it is not encrypted before it plays.",
+				"Checking DMR call…",
 			)
 			expect(
 				heldCallLine("checking", "DMR", routeOf({ encryptionKnown: false })),
@@ -520,9 +560,7 @@ describe("Listen › Source (the core's listenMode)", () => {
 			expect(held({ encrypted: true }, "analog")).toBeNull()
 			expect(held({ encryptionKnown: false }, "digital", "open")).toBeNull()
 			expect(heldCall({ route: null, source: "auto" })).toBeNull()
-			expect(hint("analog", { encrypted: true })).toBe(
-				"Playing demodulated NFM audio only.",
-			)
+			expect(hint("analog", { encrypted: true })).toBe("Playing NFM")
 		})
 	})
 })
@@ -684,10 +722,10 @@ describe("Listen › Evidence squelch", () => {
 			"Voice heard",
 		)
 		expect(evidenceText({ state: "open", evidence: "ctcss" })).toBe(
-			"CTCSS heard",
+			"Tone heard",
 		)
-		expect(evidenceText({ state: "open", evidence: "dcs" })).toBe("DCS heard")
-		expect(evidenceText({ state: "open" })).toBe("Passing")
+		expect(evidenceText({ state: "open", evidence: "dcs" })).toBe("Tone heard")
+		expect(evidenceText({ state: "open" })).toBe("Playing")
 		expect(evidenceText({ state: "waiting" })).toBeNull()
 		expect(evidenceText(null)).toBeNull()
 	})

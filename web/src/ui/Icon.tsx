@@ -71,6 +71,7 @@ const PATHS = {
 	],
 	"chevron-left": ["M15 6l-6 6l6 6"],
 	"chevron-right": ["M9 6l6 6l-6 6"],
+	info: ["M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0", "M12 9h.01", "M11 12h1v4h1"],
 } as const satisfies Record<string, readonly string[]>
 
 export type IconName = keyof typeof PATHS

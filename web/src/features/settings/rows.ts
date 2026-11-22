@@ -58,6 +58,7 @@ import {
 	voiceOnlyFits,
 } from "../listen/audio.ts"
 import { rememberBeforeOpen } from "../listen/squelch-actions.ts"
+import { VOICE_ONLY_HINT } from "../listen/hints.ts"
 import { listenModeOf } from "../listen/sound.ts"
 import {
 	controlAvailability,
@@ -832,7 +833,7 @@ function audioRows(s: SettingsSnapshot, a: SettingsActions): SettingRow[] {
 				id: "au.voiceOnly",
 				group: "audio",
 				label: "Voice only",
-				help: "Skips carriers, data and pagers. Voice starts about 1 s late, nothing is cut.",
+				help: VOICE_ONLY_HINT.text,
 				keys: words("voice check evidence squelch carrier data pager"),
 				widget: { kind: "switch" },
 				value: voiceOnly,

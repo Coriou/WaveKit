@@ -39,23 +39,49 @@ The app has two views, picked from the dock at the bottom: **Spectrum** and **Ma
 on the right on top of the view: **Activity**, **Scanner**, **Recordings** and **Settings**.
 Decoded messages as cards live in Activity's **Cards** layout (the Messages view is gone; see
 [Drawers](#drawers)). On a phone, the ⌘K palette (the search button) is the way around.
-Beside a full-height drawer, notices and the spectrum's status notes (`No source connected` and
-the like) centre on the free area left of it, never under the drawer.
+
+Nothing moves when a drawer opens. The Tuner (top left), the Receiver (top right), Listen (bottom
+left) and the dock (bottom centre) keep their places at every width; the drawer opens on the right
+under the Receiver, down to the bottom of the window when it clears the dock and above the dock
+row otherwise. Below 1100 px wide, and on a phone, a drawer spans the window between the top
+islands and Listen. While a recording is loaded, the player sits just above Listen at full width
+and the tuned card above it; the drawer never reaches that column. The dock hides on windows too
+narrow to hold it beside Listen; the search button takes its place. The spectrum keeps its signal
+labels clear of the card, the drawer and any notice, and its status notes (`No source connected`,
+`Use Auto range` and the like) stand clear of them too, on the spectrum left of the drawer; with
+no room anywhere a note shows on the top row with the notices.
+
+The few things that do move are deliberate. The tuned card moves up by the player's height when a
+recording starts (and back when it stops), and a card parked on the right steps left of an open
+drawer; while it glides there, anything appearing in its way (the player, the drawer) waits until
+it lands, so nothing is ever drawn over it. A card you drag stops at the edges of the islands
+instead of sliding over them. An open panel (Audio options, the Receiver's, the Tuner's) is never
+covered by another island: on a phone, Audio options starts under the Receiver and scrolls, and the
+Receiver steps out of sight while the Tuner's panel is open over it. The tuned card and the player
+do the same where an open panel reaches them (Audio options over the card above Listen): they step
+out of sight in place, the player still playing, and are back where they were when it closes.
+A notice an open panel covers (on a phone, the Tuner's panel over a receipt with Undo) waits out of
+sight with its clock stopped and comes back with the time it had left. The dock stands clear of
+Listen at its open width, so opening Audio options moves nothing. On
+a short or zoomed window the bottom of the screen gives way in order: the player shrinks to a
+progress line, the spectrum's trace gets shorter, the discovery row and the band ruler hide, then
+the player hides (it keeps playing), and last the spectrum's scale rows hide, leaving the waterfall.
 
 ### Notices
 
-Notices appear at the top centre of the spectrum, just under the Tuner and Receiver (and under the
-connection chip when it sits there). While Activity is expanded (**Cards**, then
-**Expand**), the drawer covers the spectrum, so notices move to the widest empty gap of the top row
-(beside the Receiver, or between the Tuner and the Receiver), or, when that gap is too narrow, to
-the empty middle of the Activity header; when neither has room for every notice showing (a
-warning with an Undo under it, say), they sit in the drawer under its header as below. They never
-cover a card or a drawer control. On a phone,
-and in any window narrower than 1100 px, an open drawer (Activity, Scanner, Recordings or
-Settings) spans the window, so notices sit inside it as a banner directly under its header: the
-drawer's list moves down to make room and comes back when the notice goes, and the title, Live,
-✕ and every other header control stay clear and usable. There are two kinds, and at most one of
-each shows at once:
+Notices appear on the top row, between the Tuner and the Receiver, never over the spectrum's
+labels: a warning sits next to the Receiver (beside the connection chip and **Receiver paused**,
+when they show), what you just did sits next to the Tuner, and neither pushes the other. When the
+row is tight a warning shortens to one line (the full text in its tooltip), then to its triangle
+alone (the Receiver island says the same); a lone warning may take two lines first. When the top
+row still cannot hold them all, the notices stack just under the top row instead. On a phone and
+other narrow windows, where the top row has no room, notices stack just under the Receiver; with a
+drawer open there (Activity, Scanner, Recordings or Settings span the window), they sit inside it as
+a banner directly under its header: the drawer's list moves down to make room and comes back when
+the notice goes, and the title, Live, ✕ and every other header control stay clear and usable.
+An open island panel and the ⌘K palette sit above the notices, the connection chip and
+**Receiver paused**, and these hide while the palette is open.
+There are two kinds, and at most one of each shows at once:
 
 - **What you just did**, such as `Saved`, `Copied` or `Removed`, often with **Undo**. It stays
   6 seconds; the next one replaces it.
@@ -66,7 +92,9 @@ each shows at once:
   kind removes the other, so an Undo is never pushed away by a warning.
 
 **WaveKit was updated · Reload** stays until you reload or close it. Notices wait while the ⌘K
-palette is open and while the pointer or keyboard focus is on them. ✕ closes one.
+palette is open and while the pointer or keyboard focus is on them, and a notice with no room on
+screen yet waits too: its time only runs once you can see it, so an **Undo** is never lost unseen.
+✕ closes one.
 
 When WaveKit loses receiver samples, the notice says why:
 
@@ -228,7 +256,9 @@ the width, for example `Club net · 145.6125 ±6.25 kHz`.
 
 The card on the left follows the frequency you are tuned to. From the top it says what the signal
 is, then the frequency once, the mode and channel width, the decoders on its band, and the actions
-(Activity, save, Identify, Open message).
+(Activity, save, Identify, Open message). Where the window has no room for the whole card on its
+place it shows as one line there; its expand control is then disabled and says why, and the card
+expands by itself when there is room.
 
 The header names the signal from the most specific thing known: the protocol last heard, what
 Identify or a proven discovery named, the decoder whose band holds the frequency, then the band
@@ -322,18 +352,30 @@ The bar's title says what you hear, in one line:
 A decoded call the core does not play is named under the title whatever it says (unless Source is
 Analog or the squelch is Open): `DMR voice · checking…` while the core does not know yet whether the
 call is encrypted (it is never played or shown as clear until that is known), and
-`DMR call is encrypted: nothing to play.` for an encrypted one (`DMR call is encrypted: decoded voice
-is not played.` while the squelch passes the analog channel and the title says **Listening**). **Play anyway** is not offered then:
-it would only play the call's digital noise. The line under **Source** says the same.
+`Encrypted DMR call` for an encrypted one (`Encrypted DMR call · analog only` while the squelch passes
+the analog channel and the title says **Listening**). **Play anyway** is not offered then: it would only
+play the call's digital noise. **Source** says the same: `Checking DMR call…` on its label line, or a
+note under it for an encrypted call.
 
-**Audio options** sets the squelch in one row, **Auto | Manual | Open**:
+**Audio options** puts the everyday controls first: **Volume**, **Squelch**, **Source**, then **Sound**
+folded into one row, and a footer with **Record**, the delay (for example `180 ms delay`) and **All
+audio settings**. Each control reads its name on the left and what is true now on the right. A small
+info mark after a name explains it: hover or focus it for one sentence, click or tap it to pin it
+(Squelch and Source then show what each option does); Escape closes it and leaves the panel open. A
+screen reader hears the same sentence on the control itself.
 
-- **Auto** opens on a carrier above the noise floor and follows conditions. On NFM, the **Voice only**
-  switch under it (on by default) waits for evidence that someone is talking, voice or a CTCSS or DCS
-  tone: "Skips carriers, data and pagers. Voice starts about 1 s late, nothing is cut." The squelch tag
-  says what let the audio through, for example **CTCSS heard**, and reads **Quiet** whenever the title
-  does (Source Digital between calls, for example).
-- **Manual** is the line on the level bar: everything above it plays. Dragging the line selects Manual
+The squelch is one row, **Auto | Manual | Open**, over a level bar: the signal fills the bar (grey
+while the squelch holds it, coloured while it plays) and the squelch is the amber handle, hollow in
+Auto, solid in Manual, absent in Open. The caption under it reads, for example, `Opens above −46 dB`
+and `Signal −40 dB`.
+
+- **Auto** opens when a signal rises above the noise and adapts as the noise changes. On NFM, the
+  **Voice only** switch under it (on by default) waits for evidence that someone is talking, voice or a
+  CTCSS or DCS tone: "Plays only when someone talks; carriers, data and pagers stay silent. Voice
+  arrives about 1 s late, uncut." The squelch state says what let the audio through (**Voice heard**,
+  **Tone heard**, or **Playing**), and reads **Quiet** whenever the title does (Source Digital between
+  calls, for example).
+- **Manual** is the handle on the level bar: everything above it plays. Dragging the handle selects Manual
   at once; the spectrum shows the same dashed line, in Manual only. Choosing Manual from Auto starts the
   line where Auto had it.
 - **Open** plays everything, noise, pagers and data included. Transmissions are still detected and
@@ -344,10 +386,23 @@ it would only play the call's digital noise. The line under **Source** says the 
   change. **Settings › Audio › Squelch › Open** only changes the setting, without starting Listen; `Q`
   still goes back from it to the squelch before.
 
-**Source**, **Auto | Analog | Digital**, says what Listen plays. **Auto** plays the analog audio or a
-clear decoded call, decided per transmission; **Analog** only the demodulated audio; **Digital** only
-decoded voice, silence otherwise. With no digital voice decoder on the channel, Digital plays nothing
-and the panel says so, with **Use Auto**. Open always plays the analog audio.
+**Source**, **Auto | Analog | Digital**, says what Listen plays, and its label line what plays now
+(`Playing NFM`, `Playing DMR voice`, `Waiting for a call`). **Auto** plays the analog audio or a
+clear decoded call, decided per transmission; **Analog** only the demodulated audio (a digital call
+sounds like a buzz); **Digital** only decoded voice, silence otherwise. With no digital voice decoder
+on the channel, Digital plays nothing and a note says so, with **Use Auto**. Open always plays the
+analog audio.
+
+**Sound** holds the level control, de-emphasis, **Cut low rumble** and **Noise reduction**. Folded, its
+row says what is behind it, or what is set there when something is not at its default (for example
+`Level control Fast · Rumble cut`); it stays open or closed in this browser. A cut-off or a noise
+reduction mode chosen in **Settings › Audio** shows as the row's value. **Record** keeps what plays in
+this browser and saves it as a WAV file; it needs Listen on ("Listen first").
+
+Notes appear in the panel only while there is something to say: live audio off on the core ("Live
+audio is off. Listen starts it."), more than one device listening, an error, or audio breaking up.
+The stream's format and health are in
+[`GET /api/live-audio/status`](API.md#get-apilive-audiostatus).
 
 The squelch, Voice only and Source are settings of the core: every browser and client listening sees
 the same ones, and a change applies at once without restarting the audio stream. Volume stays in this
@@ -366,14 +421,14 @@ A short gap on an open stream keeps **Listening**. When over 10% of the audio yo
 did not play in the last 10 s, the card says so next to it, for example
 **Listening** `Breaking up · 71% heard`, until the figure is back within 5%. It needs at least 5 s of open
 signal to judge, and silence from a closed squelch never counts. **Audio options** gives the figure and
-the total missing since Listen started, next to the latency, for example `71% heard · 17.4 s missing`;
-hover it for what the core reported. The web app reads the core's figure every 2 s, so it can lag a little;
+the total missing since Listen started as a note, for example `71% heard · 17.4 s missing`; its info
+mark explains the figure. The web app reads the core's figure every 2 s, so it can lag a little;
 a reading that fails is made up by the next one. After 10 s of playback with no reading it only knows what
 this browser played: it gives a percentage only if that alone is breaking up, and a card already breaking up
 stays that way, without a percentage if it has none, until a reading arrives.
 Time this browser was not playing the stream (a suspended tab's audio, a reattach, another stream) never
 counts as missing.
-The latency includes audio waiting in the core.
+The delay includes audio waiting in the core.
 
 Breaking up usually means the core is too busy. It catches up a late stream by up to 500 ms at once, which
 hides short stalls, but it cannot recover audio it never received: when the receiver's data backs up inside
@@ -485,7 +540,8 @@ on disk.`
   (off by default) saves at once: on, your own retunes also set the band's gain and give yours
   back outside the bands. See [Per-band gain](API.md#per-band-gain-get-and-put-apituner-band-gain).
 - **Receiver › Pause** stops pulling IQ from the receiver without removing it: the core closes the
-  receiver connection, the waterfall stops on its last rows under a `Receiver paused` label,
+  receiver connection, the waterfall stops on its last rows with a `Receiver paused` label on the
+  top row (beside the Receiver),
   decoders wait (their status reads paused because the receiver is paused) and the tuner
   controls are locked until you resume. The island shows `Receiver paused · since 14:02 ·
 waterfall frozen · 3 decoders waiting` with **Resume**; the island's head reads `Paused`. The
@@ -566,8 +622,8 @@ transmission and plays its first file (Recordings lists every file). A recording
 when its transmission is not in the list, or when WaveKit cannot tell which of two transmissions on
 the channel it recorded.
 
-While something is loaded, the player sits at the bottom of the screen, above the dock, whatever
-panel is open: **Previous**, **Play/Pause**, **Next**, the title and its place in the list
+While something is loaded, the player sits just above Listen, at the left, whatever panel is
+open (an open drawer never covers it): **Previous**, **Play/Pause**, **Next**, the title and its place in the list
 (`3 of 12`), the time, a position slider, the speed (1×, 1.5×, 2×), **Auto-next**, **Keep** and
 **Close**. Closing a drawer does not stop it. **Next**, **Previous** and **Auto-next** follow the
 list it was started from, in the order shown, and only the rows with a recording: the Activity
@@ -715,6 +771,11 @@ discovery sits within 12.5 kHz, and up to 50 folded rows.
 
 The **Map** shows aircraft, vessels, APRS stations and mesh nodes around your station, with their
 trails and the station's coverage.
+
+The map's controls follow the same layout as the rest of the app and never move when a drawer
+opens. **Live**, the scale and the map's credits sit at the bottom right, beside the dock (above
+Listen on a phone); the layers rail, its zoom buttons and the selected item's card sit under the
+Receiver. An open drawer covers the rail and the card, which come back when it closes.
 
 Between reports, an aircraft keeps moving along its track at its speed. When a new position
 arrives, the plane glides onto it over about two seconds instead of jumping, and its glyph turns

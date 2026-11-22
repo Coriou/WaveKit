@@ -1,6 +1,8 @@
 import type { Ref } from "react"
 
 import { Icon, type IconName } from "../ui/Icon.tsx"
+import type { Rect } from "./layout/geometry.ts"
+import { slotAttrs, topLeft } from "./layout/slot.ts"
 import type { DrawerId, ShellState, ViewId } from "./store.ts"
 
 const VIEW_NAV: ReadonlyArray<{ id: ViewId; label: string; icon: IconName }> = [
@@ -19,9 +21,10 @@ const DRAWER_NAV: ReadonlyArray<{
 
 export interface DockProps {
 	state: ShellState
-	/** Hide the active view's label (narrow windows, or a full-height drawer close by). */
+	/** Hide the active view's label (narrow windows). */
 	compact: boolean
-	x: number
+	/** Its rectangle from the shell layout. */
+	rect: Rect
 	onView: (id: ViewId) => void
 	onDrawer: (id: DrawerId) => void
 	onPalette: () => void
@@ -37,7 +40,7 @@ const MOD = isMac ? "⌘" : "Ctrl+"
 export function Dock({
 	state,
 	compact,
-	x,
+	rect,
 	onView,
 	onDrawer,
 	onPalette,
@@ -49,7 +52,9 @@ export function Dock({
 			ref={ref}
 			className="wk-dock wk-island"
 			aria-label="Primary"
-			style={{ left: x }}
+			data-compact={compact || undefined}
+			{...slotAttrs("dock", rect)}
+			style={{ ...topLeft(rect), transition: "none" }}
 		>
 			{VIEW_NAV.map(n => {
 				const on = state.view === n.id
