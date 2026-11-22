@@ -672,9 +672,12 @@ See [DOCKER-SETUP.md](DOCKER-SETUP.md) for the compose profiles (`app`, `protect
 `decoderPolicy.efficiency.cpuBudgetCores` defaults to `"auto"`. An omitted value
 reports budget source `"default"`; an explicit `"auto"` or number reports `"config"`
 unless a saved override applies. Automatic sizing takes
-50% of CPUs available to the process (`os.availableParallelism()`), limited further by
-the smallest cgroup quota divided by its period across the process's cgroup and
-its ancestors. Both v2 `cpu.max` and v1 CPU controller quotas are supported, including
+50% of CPUs available to the process, limited further by the smallest cgroup quota
+divided by its period across the process's cgroup and its ancestors. The CPUs
+available are the smallest of the process's affinity mask (`Cpus_allowed_list` in
+`/proc/self/status`), the v2 `cpuset.cpus.effective` of its own cgroup and the online
+CPUs. `os.availableParallelism()` is used only when none of these can be read, because
+it already folds a quota in rounded down (a 1.5-CPU quota would read as 1). Both v2 `cpu.max` and v1 CPU controller quotas are supported, including
 hybrid hierarchies. V1 reads `cpu.cfs_quota_us` and `cpu.cfs_period_us` beneath
 `/sys/fs/cgroup/cpu,cpuacct` and `/sys/fs/cgroup/cpu`; quota `-1` is unlimited.
 With `capacity = min(available CPUs, effective quota / period)`, the budget is
@@ -683,7 +686,7 @@ the automatic floor is `min(0.75, quota)`, so the budget never exceeds quota.
 Missing, unreadable, unlimited or malformed quotas are skipped at each level.
 The path from `/proc/self/cgroup` supports at most 31 components plus the mount root
 (32 levels); an unreadable, malformed, traversal-containing or deeper path falls back
-to the mount root quota alone. Without a valid quota, the process CPU count applies.
+to the mount root quota alone. Without a valid quota, the CPUs available apply.
 Fractional quotas are preserved. Explicit finite numbers in `(0, 64]` retain their exact
 value, including values below the automatic floor.
 

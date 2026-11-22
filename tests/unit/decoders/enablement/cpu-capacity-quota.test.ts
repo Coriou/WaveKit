@@ -24,43 +24,78 @@ describe("CPU capacity under a fractional quota", () => {
 		expect(quota(8, "max 100000")).toBe(8)
 	})
 
-	it("counts the CPUs before the quota from the cpuset, not a quota-rounded count", () => {
+	it("counts the CPUs before the quota from affinity and cpuset, not a quota-rounded count", () => {
+		const none = () => {
+			throw new TypeError("unreadable")
+		}
+		const status = (list: string) => () =>
+			`Name:\tnode\nCpus_allowed:\tff\nCpus_allowed_list:\t${list}\n`
+		// Affinity alone (e.g. taskset or a v1 cpuset), quota-rounded fallback ignored.
 		expect(
-			hostCpuCount(
-				() => "0-7\n",
-				() => 1,
-			),
-		).toBe(8)
+			hostCpuCount({
+				readStatus: status("0-1"),
+				online: () => 8,
+				fallback: () => 1,
+			}),
+		).toBe(2)
+		// The own cgroup's v2 cpuset, read at the process's cgroup path.
+		const reads: string[] = []
 		expect(
-			hostCpuCount(
-				() => "0-1,4,6-7",
-				() => 1,
-			),
-		).toBe(5)
-		expect(
-			hostCpuCount(
-				() => {
-					throw new TypeError("no cpuset")
+			hostCpuCount({
+				readStatus: none,
+				readProcCgroup: () => "0::/app/core\n",
+				readCgroupFile: path => {
+					reads.push(path)
+					return "0-1,4,6-7\n"
 				},
-				() => 8,
-			),
+				online: () => 8,
+				fallback: () => 1,
+			}),
+		).toBe(5)
+		expect(reads).toEqual(["app/core/cpuset.cpus.effective"])
+		// A private namespace reads the root file.
+		const rootReads: string[] = []
+		hostCpuCount({
+			readProcCgroup: () => "0::/\n",
+			readCgroupFile: path => {
+				rootReads.push(path)
+				return "0-7"
+			},
+		})
+		expect(rootReads).toEqual(["cpuset.cpus.effective"])
+		// The smallest readable count wins.
+		expect(
+			hostCpuCount({
+				readStatus: status("0-3"),
+				readProcCgroup: () => "0::/\n",
+				readCgroupFile: () => "0-1",
+				online: () => 8,
+			}),
+		).toBe(2)
+		// Nothing readable but the online count.
+		expect(
+			hostCpuCount({ readStatus: none, online: () => 8, fallback: () => 1 }),
 		).toBe(8)
+		// Unparseable lists are skipped.
 		expect(
-			hostCpuCount(
-				() => "",
-				() => 4,
-			),
+			hostCpuCount({
+				readStatus: status("bogus"),
+				online: () => 4,
+				fallback: () => 1,
+			}),
 		).toBe(4)
-		expect(
-			hostCpuCount(
-				() => "bogus",
-				() => 4,
-			),
-		).toBe(4)
+		// Online 0 or NaN and nothing else: the fallback, never below 1.
+		expect(hostCpuCount({ online: () => 0, fallback: () => 3 })).toBe(3)
+		expect(hostCpuCount({ online: () => Number.NaN, fallback: () => 3 })).toBe(
+			3,
+		)
+		expect(hostCpuCount({ online: () => 0, fallback: () => 0 })).toBe(1)
 	})
 
 	it("parses cpuset lists at and past their bounds", () => {
 		expect(cpusetCount("0")).toBe(1)
+		expect(cpusetCount("0-0")).toBe(1)
+		expect(cpusetCount("0-3,")).toBeNull()
 		expect(cpusetCount("0-4095")).toBe(4096)
 		expect(cpusetCount("0-4095,4096")).toBeNull()
 		expect(cpusetCount("3-1")).toBeNull()
