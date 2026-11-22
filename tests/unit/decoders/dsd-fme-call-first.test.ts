@@ -446,16 +446,20 @@ describe("dsd-fme call-first lifecycle", () => {
 		})
 	})
 
-	it("P25: starts on HDU and LDU1, back-dated, the LCW attaches the IDs and says clear", () => {
+	it("P25: starts on HDU and LDU1, back-dated, the LCW attaches the IDs, its LDU2 ALG 0x80 KEY 0 says clear", () => {
 		const sync = (duid: string) => `03:04:05 Sync: +P25p1 NAC/CC: 2A5;  ${duid}`
+		const over: Line[] = [
+			[0, sync("HDU")],
+			[180, sync("LDU1")],
+			[185, " Group Voice Channel User - Group 4321 Source 1234567"],
+			[360, sync("LDU2")],
+			[540, sync("LDU1")],
+			[900, sync("TDU")],
+		]
 		const { starts, ends } = replay(
 			[
-				[0, sync("HDU")],
-				[180, sync("LDU1")],
-				[185, " Group Voice Channel User - Group 4321 Source 1234567"],
-				[360, sync("LDU2")],
-				[540, sync("LDU1")],
-				[900, sync("TDU")],
+				...over,
+				[365, " LDU2 ALG ID: 0x80 KEY ID: 0x0000 MI: 0x0000000000000000"],
 			],
 			6000,
 		)
@@ -464,6 +468,8 @@ describe("dsd-fme call-first lifecycle", () => {
 		expect(ends[0]).toMatchObject({ talkgroup: 4321, source: 1234567 })
 		expect(at(ends[0]!.startedAt)).toBe(0)
 		expect(ends[0]!.encryptionKnown).toBe(true)
+		// The LCW's service options alone prove nothing.
+		expect(replay(over, 6000).ends[0]!.encryptionKnown).toBe(false)
 	})
 
 	it("D-STAR: two voice syncs start a call before any callsign", () => {

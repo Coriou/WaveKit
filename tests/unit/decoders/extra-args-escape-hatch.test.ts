@@ -333,6 +333,9 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 				lastUpdate: start,
 				quality: { crcErrs: 0, fecErrs: 0 },
 				flags: {},
+				// Proven clear by its own VCALL (an NXDN recording needs it).
+				encryptionKnown: true,
+				clearEvidence: true,
 			}
 			const ended = d.endCall(new Date(start.getTime() + 5000), false)
 			expect(ended?.data.wavFile).toContain(dir)

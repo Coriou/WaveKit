@@ -563,9 +563,24 @@ describe("dsd-fme call-first: evidence rules", () => {
 			[1720, P25("LDU2")],
 		]
 
-		it("a clear ALG on an error-free src/tg line makes the call known clear", () => {
+		it("a clear ALG on a src/tg line proves nothing; the call's own LDU2 ALG 0x80 KEY 0 makes it known clear", () => {
+			const named: Line = [
+				1550,
+				" nac: [ 2A5] src: [ 1234] tg: [ 56] ALG ID: 0x80",
+			]
+			const unproven = replay([...frames, named], 10_000).ends
+			expect(unproven).toHaveLength(1)
+			expect(unproven[0]).toMatchObject({
+				talkgroup: 56,
+				source: 1234,
+				encryptionKnown: false,
+			})
 			const { ends } = replay(
-				[...frames, [1550, " nac: [ 2A5] src: [ 1234] tg: [ 56] ALG ID: 0x80"]],
+				[
+					...frames,
+					named,
+					[1560, " LDU2 ALG ID: 0x80 KEY ID: 0x0000 MI: 0x0000000000000000"],
+				],
 				10_000,
 			)
 			expect(ends).toHaveLength(1)

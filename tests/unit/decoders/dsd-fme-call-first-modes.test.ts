@@ -95,7 +95,7 @@ describe("dsd-fme call-first: YSF, NXDN, dPMR", () => {
 	})
 
 	describe("NXDN", () => {
-		it("two clean voice frames start the call, back-dated; the VCALL IDs attach later; no encryption field", () => {
+		it("two clean voice frames start the call, back-dated, not known clear; the VCALL IDs attach later and, with no cipher print after them, prove it clear", () => {
 			const decoder = createDecoder({ mode: "nxdn48" })
 			const lines: Line[] = [
 				[0, NXDN("1/4")],
@@ -109,9 +109,13 @@ describe("dsd-fme call-first: YSF, NXDN, dPMR", () => {
 			expect(starts).toHaveLength(1)
 			expect(at(starts[0]!.startedAt)).toBe(0)
 			expect(ends).toHaveLength(1)
-			expect(ends[0]).toMatchObject({ talkgroup: 5678, source: 1234 })
-			expect(starts[0]).not.toHaveProperty("encryptionKnown")
-			expect(voice.every(v => !("encryptionKnown" in v))).toBe(true)
+			expect(ends[0]).toMatchObject({
+				talkgroup: 5678,
+				source: 1234,
+				encryptionKnown: true,
+			})
+			expect(starts[0]).toMatchObject({ encryptionKnown: false })
+			expect(voice.at(-1)).toMatchObject({ encryptionKnown: true })
 		})
 
 		it("one clean voice frame starts nothing", () => {
@@ -121,7 +125,7 @@ describe("dsd-fme call-first: YSF, NXDN, dPMR", () => {
 	})
 
 	describe("dPMR", () => {
-		it("two clean frames (agreeing ID prints) start the call, back-dated, IDs kept out, no encryption field", () => {
+		it("two clean frames (agreeing ID prints) start the call, back-dated, IDs kept out, never known clear", () => {
 			const decoder = createDecoder({ mode: "dpmr" })
 			const lines: Line[] = []
 			for (let t = 0; t <= 400; t += 80)
@@ -130,9 +134,13 @@ describe("dsd-fme call-first: YSF, NXDN, dPMR", () => {
 			expect(starts).toHaveLength(1)
 			expect(at(starts[0]!.startedAt)).toBe(0)
 			expect(ends).toHaveLength(1)
-			expect(ends[0]).toMatchObject({ talkgroup: 0, source: 0 })
-			expect(starts[0]).not.toHaveProperty("encryptionKnown")
-			expect(voice.every(v => !("encryptionKnown" in v))).toBe(true)
+			expect(ends[0]).toMatchObject({
+				talkgroup: 0,
+				source: 0,
+				encryptionKnown: false,
+			})
+			expect(starts[0]).toMatchObject({ encryptionKnown: false })
+			expect(voice.every(v => v.encryptionKnown === false)).toBe(true)
 		})
 
 		it("one clean frame starts nothing", () => {

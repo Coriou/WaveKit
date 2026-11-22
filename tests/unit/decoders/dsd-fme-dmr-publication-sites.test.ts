@@ -74,7 +74,7 @@ const OUTPUT_SITES = [
 ]
 const UPDATE_SITES = [
 	"markEncrypted",
-	"markKnown",
+	"markClear",
 	"applyDmrTrust",
 	"applyDmrTrust",
 ]
@@ -84,7 +84,7 @@ const UPDATE_SITES = [
  */
 const NON_DMR_SITES = [
 	"handleP25P1Line",
-	"markKnown",
+	"markClear",
 	...(DMR_RECORDING_LINK_ENABLED ? [] : ["findWavFileAsync"]),
 ]
 
@@ -146,10 +146,16 @@ describe("dsd-fme DMR publication sites (structural)", () => {
 		expect(sites(/\bthis\.publishCallSnapshot\(/g).map(s => s.method)).toEqual([
 			"emitOutput",
 		])
-		// The non-DMR sites: P25's split, and markKnown returning for DMR.
+		// The non-DMR sites: P25's split, and markClear returning for DMR
+		// (positiveClearProtocol never names DMR).
 		expect(SOURCE).toMatch(
-			/private markKnown\([^)]*\): void \{\n\t\tif \(call\?\.encryptionKnown !== false \|\| call\.protocol === "dmr"\) return/,
+			/private markClear\([^)]*\): void \{\n\t\tif \(!positiveClearProtocol\(call\.protocol\) \|\| call\.flags\.encrypted\) return/,
 		)
+		const strict = SOURCE.match(
+			/\nexport function positiveClearProtocol\([\s\S]+?\n\}/,
+		)?.[0]
+		expect(strict).toBeDefined()
+		expect(strict).not.toMatch(/"dmr"/)
 	})
 
 	it("the gate writes both trust fields of every DMR publication from the clearance", () => {

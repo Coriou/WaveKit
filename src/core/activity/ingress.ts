@@ -19,7 +19,10 @@ import type {
 } from "./storage/contract.js"
 import { activityChannelOf, recordingLinkOf } from "./storage/row.js"
 import { dsdFmeKeepKey } from "../recordings/contract.js"
-import { dsdFmeCallRecordable } from "../../decoders/builtin/dmr-recording-gate.js"
+import {
+	callTrustAdmits,
+	dsdFmeCallRecordable,
+} from "../../decoders/builtin/dmr-recording-gate.js"
 import { DV_TAP_END_MAX_MS } from "../dv-tap/types.js"
 import type {
 	ActivityChannel,
@@ -363,6 +366,8 @@ interface CallEndFile {
 	/** The `dsd~<name>` key of a call file name, or null. */
 	key: string | null
 	durationMs: unknown
+	/** The call_end's own trust fields admit a recording (callTrustAdmits). */
+	clear: boolean
 }
 
 function callEndFile(output: DecoderOutput): CallEndFile | null {
@@ -394,6 +399,7 @@ function callEndFile(output: DecoderOutput): CallEndFile | null {
 		data: clean,
 		key,
 		durationMs: body["duration"],
+		clear: callTrustAdmits(body["protocol"], body),
 	}
 }
 
@@ -586,6 +592,9 @@ export function createActivityIngress(
 		// without a known protocol, is never linked while DMR recordings are off), whatever the
 		// decoder reported.
 		if (!dsdFmeCallRecordable(file.key.slice("dsd~".length))) return null
+		// And the call_end must say its call is clear: a P25, NXDN, dPMR or DMR call only with
+		// encryptionKnown true (its own positive clear evidence), any call never when encrypted.
+		if (!file.clear) return null
 		try {
 			if (!callRecordings(decoderId)) return null
 		} catch {
