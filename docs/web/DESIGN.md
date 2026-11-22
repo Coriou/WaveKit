@@ -1170,7 +1170,9 @@ Condensed + Noto Sans, Tabler-based icons).
     starting, a drawer opening over a right anchor), the card glides (260 ms) to its new home and
     sweeps the box of its two homes: a slot entering that box (the player, a drawer, a pane, a
     status item, the map's side panel) is held out of sight until the card lands, and the plot's
-    exclusions cover the whole box meanwhile. A move the layout forces eases out with no
+    exclusions cover the whole box meanwhile. "Lands" is measured, not timed: the hold lasts at
+    least the glide and its 60 ms margin, then until the card's painted box stands at its new
+    home (a slow page starts the glide late, on its first frame), 4 s at most. A move the layout forces eases out with no
     overshoot, so the card never leaves that box; a move the reader asks for keeps the spring.
     With reduced motion there is no glide and nothing is held.
   - *Dragging the card.* The dragged card's live rectangle is the card's rectangle for the plot's

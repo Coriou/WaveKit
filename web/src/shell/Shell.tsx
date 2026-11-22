@@ -63,6 +63,13 @@ import {
 	type Rect,
 	type Size,
 } from "./layout/compute.ts"
+import {
+	browserClock,
+	CARD_GLIDE_MARGIN_MS,
+	CARD_GLIDE_MS,
+	cardLanded,
+	holdUntilLanded,
+} from "./glide-hold.ts"
 import { union } from "./layout/geometry.ts"
 import { bottomLeft, focusInUnseen, slotAttrs, topLeft } from "./layout/slot.ts"
 import {
@@ -126,10 +133,7 @@ export interface ShellProps {
 	drawerWidthStore?: DrawerWidthStore
 }
 
-/** How long the tuned card glides to a new home (shell.css `.wk-shell-cardslot`: --wk-dur-4, 260 ms), and the margin
- * after it before a slot held for the glide shows (a frame or two of the transition's end). */
-export const CARD_GLIDE_MS = 260
-export const CARD_GLIDE_MARGIN_MS = 60
+export { CARD_GLIDE_MARGIN_MS, CARD_GLIDE_MS } from "./glide-hold.ts"
 
 const reducedMotion = () =>
 	typeof window !== "undefined" &&
@@ -480,20 +484,34 @@ export function Shell({
 			refocus(`panel:${state.panel}`)
 	}, [cardYielded, playerYielded, unseenKey, state.panel, refocus])
 
-	const glideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+	// the glide's hold ends once the card has landed, not on a timer from this commit alone: the transition starts on
+	// the first frame that resolves the card's new style, which a starved page draws late (glide-hold.ts)
+	const glideHold = useRef<(() => void) | null>(null)
+	const cardTarget = useRef<Rect | null>(null)
 	useLayoutEffect(() => {
 		lastCard.current = { r: L.cardNow, at: cardAt, dragging }
+		cardTarget.current = L.cardNow
 		if (!startsGlide || !glideNow) return
 		setGlide(glideNow)
-		if (glideTimer.current !== null) clearTimeout(glideTimer.current)
-		glideTimer.current = setTimeout(() => {
-			glideTimer.current = null
-			setGlide(null)
-		}, CARD_GLIDE_MS + CARD_GLIDE_MARGIN_MS)
+		glideHold.current?.()
+		glideHold.current = holdUntilLanded({
+			clock: browserClock,
+			minMs: CARD_GLIDE_MS + CARD_GLIDE_MARGIN_MS,
+			landed: () =>
+				cardLanded(
+					els.current["card"]?.getBoundingClientRect() ?? null,
+					cardTarget.current,
+				),
+			release: () => {
+				glideHold.current = null
+				setGlide(null)
+			},
+		})
 	})
 	useEffect(
 		() => () => {
-			if (glideTimer.current !== null) clearTimeout(glideTimer.current)
+			glideHold.current?.()
+			glideHold.current = null
 		},
 		[],
 	)

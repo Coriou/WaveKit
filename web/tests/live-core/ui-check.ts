@@ -46,7 +46,9 @@
  *   at a saved frequency its saved name, and no visible "Show in" (naming-flow.ts). The report gains `naming`.
  *
  * Every pairing it makes is named "ui-check" and is signed out when the run ends.
- * Exit: 0 healthy, 1 unhealthy, 2 could not run.
+ * Exit: 0 healthy, 1 unhealthy, 2 could not run, 3 not observed (`--flow=layout` only: no violation, but the host
+ * painted too few frames for a sampled cell even after its retry; the report's `layout.status` is
+ * "infra-unobserved" and `layout.infra` names the cells; never a pass).
  */
 import type { ClientRequest, IncomingMessage } from "node:http"
 import {
@@ -695,6 +697,8 @@ export async function run(
 ): Promise<{
 	report: Record<string, unknown>
 	healthy: boolean
+	/** Unhealthy only because a layout cell was not observed (exit 3). */
+	unobserved: boolean
 }> {
 	const exe = chromiumPath()
 	if (exe === null)
@@ -1075,7 +1079,7 @@ export async function run(
 								: notices !== null
 									? `notices: ${notices.ok ? "ok" : "FAILED"}, ${notices.steps.filter(s => s.ok).length}/${notices.steps.length} steps, layouts ${notices.layouts.map(l => `${l.viewport} ${l.ok ? "clear" : "OVERLAP"}`).join(", ")}`
 									: layout !== null
-										? `layout: ${layout.ok ? "ok" : "FAILED"}, ${layout.cells.filter(c => c.violations.length === 0).length}/${layout.cells.length} cells clear, ${layout.moved.length} moved, ${layout.frames.length} frame overlaps`
+										? `layout: ${layout.status === "infra-unobserved" ? `INFRA-UNOBSERVED (${layout.infra.length} cell(s) the host painted too few frames for)` : layout.ok ? "ok" : "FAILED"}, ${layout.cells.filter(c => c.violations.length === 0).length}/${layout.cells.length} cells clear, ${layout.moved.length} moved, ${layout.frames.length} frame overlaps`
 										: summaryLine(final),
 			target: {
 				kind: options.target,
@@ -1104,7 +1108,13 @@ export async function run(
 			...(layout !== null ? { layout } : {}),
 			screenshots: shots,
 		}
-		return { report, healthy }
+		// unobserved, not unhealthy: every other check passed and the layout saw no violation, but too few frames
+		const unobserved =
+			!healthy &&
+			layout?.status === "infra-unobserved" &&
+			!errors.some(text => text.startsWith("uncaught:")) &&
+			revoked !== false
+		return { report, healthy, unobserved }
 	} finally {
 		// first of all, while the core (and maybe the browser) is still there
 		await pairing.revoke().catch(() => null)
@@ -1159,13 +1169,13 @@ async function main(): Promise<void> {
 		limit,
 	)
 	try {
-		const { report, healthy } = await run(
+		const { report, healthy, unobserved } = await run(
 			parseOptions(process.argv.slice(2)),
 			pairing,
 		)
 		process.stdout.write(formatReport(report) + "\n")
 		process.stderr.write(String(report["summary"]) + "\n")
-		process.exitCode = healthy ? 0 : 1
+		process.exitCode = healthy ? 0 : unobserved ? 3 : 1
 	} catch (error) {
 		const message =
 			error instanceof CannotRun

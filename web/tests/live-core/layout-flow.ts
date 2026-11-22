@@ -36,7 +36,13 @@
  * - the map (1280×800, the Map view, Activity open, then each other viewport): the map's chrome is laid out with
  *   the rest (I1, I2, I7 and V), the Live chip stays off the dock and keeps its rectangle when the drawer opens.
  * The settled cells run with CSS transitions and animations switched off, so every box is a settled one.
- * `ticks` says how many animation frames each motion sample saw (from its action on).
+ * Every sampled cell declares its observation mode (LY rules §7.2; `sample`, `prove`): the playback start is
+ * `animate` (the card's glide: frames strictly between its two places), the drawer opening and the panels are `jump`
+ * (the first changed painted frame is already the destination). A jump needs two painted frames (one before the
+ * action, one after); a cell the host paints too few frames for, after one retry from a reset start, is listed in
+ * `infra` and the report's status is "infra-unobserved" (ui-check exit 3), never a pass.
+ * `ticks` says how many painted frames each sample saw inside its action's window; `observed` lists each sampled
+ * cell with its mode and mover.
  * The report gains `layout`; exit 1 on any violation.
  */
 import type { Page } from "playwright-core"
@@ -103,7 +109,24 @@ export interface LayoutReport {
 	frames: string[]
 	/** Animation frames each of those samples saw. */
 	ticks: number[]
+	/** Each sampled cell: its declared mode (LY rules §7.2), its mover, and whether the host painted enough frames. */
+	observed: ObservedCell[]
+	/** Sampled cells the host painted too few frames for, after one retry (infra-unobserved, never a pass). */
+	infra: string[]
+	/** "ok"; "failed" (a layout violation); or "infra-unobserved" (no violation, but some cell was not observed). */
+	status: "ok" | "failed" | "infra-unobserved"
 	setup: string[]
+}
+
+export interface ObservedCell {
+	cell: string
+	mode: "animate" | "jump"
+	mover: string
+	/** Painted frames sampled (the one before the action included). */
+	frames: number
+	/** Painted frames inside the action's window. */
+	inWindow: number
+	status: "observed" | "infra-unobserved"
 }
 
 const VIEWPORTS: [number, number][] = [
@@ -338,154 +361,96 @@ const describeViolation = (v: Violation) =>
 		? `I2 ${v.a} outside the window's margin`
 		: `I1 ${v.a} and ${v.b ?? ""}: ${v.kind === "intersect" ? "intersect" : `${Math.round(v.gap ?? 0)} px apart, need ${v.need ?? 0}`}`
 
-/** Samples every slot box on each animation frame (distinct rAF timestamps only) for `ms` from the action (a
- * capturing pointerdown, keydown or `wk:act` marks t0; Node waits on the page's done flag); the intersections seen. */
-async function framesDuring(
-	page: Page,
-	act: () => Promise<void>,
-	ms = 400,
-): Promise<string[]> {
-	await page.evaluate(ms => {
-		const w = window as unknown as {
-			__wkFrames?: string[]
-			__wkTicks?: number
-			__wkFramesDone?: boolean
-		}
-		w.__wkFrames = []
-		w.__wkTicks = 0
-		w.__wkFramesDone = false
-		delete (window as unknown as { __wkActDone?: number }).__wkActDone
-		const tick = () => {
-			w.__wkTicks = (w.__wkTicks ?? 0) + 1
-			const boxes = [
-				...document.querySelectorAll("[data-wk-slot][data-wk-rect]"),
-			]
-				.filter(el => {
-					if (el.closest("[data-pending], [data-held]")) return false
-					const cs = getComputedStyle(el)
-					return cs.visibility !== "hidden" && Number(cs.opacity) > 0.05
-				})
-				.map(el => {
-					const r = el.getBoundingClientRect()
-					return { name: el.getAttribute("data-wk-slot") ?? "", r }
-				})
-				.filter(b => b.r.width > 0 && b.r.height > 0)
-			const parts = new Set(["drawer", "pane", "grip"])
-			for (let i = 0; i < boxes.length; i++)
-				for (let j = i + 1; j < boxes.length; j++) {
-					const a = boxes[i]
-					const b = boxes[j]
-					if (!a || !b || (parts.has(a.name) && parts.has(b.name))) continue
-					if (
-						a.r.left < b.r.right - 0.5 &&
-						b.r.left < a.r.right - 0.5 &&
-						a.r.top < b.r.bottom - 0.5 &&
-						b.r.top < a.r.bottom - 0.5
-					)
-						w.__wkFrames?.push(`${a.name} × ${b.name}`)
-				}
-		}
-		let t0: number | null = null
-		const mark = () => {
-			if (t0 === null) t0 = performance.now()
-		}
-		const types = ["pointerdown", "keydown", "hashchange", "wk:act"]
-		for (const t of types) window.addEventListener(t, mark, true)
-		const armed = performance.now()
-		let last = -1
-		const frame = (ts: number) => {
-			const now = performance.now()
-			// an action that sent no event is marked when it resolves
-			const done = (window as unknown as { __wkActDone?: number }).__wkActDone
-			if (t0 === null && done !== undefined) t0 = done
-			if (ts !== last && t0 !== null && now >= t0) tick()
-			last = ts
-			// a multi-step action (navigate, click, navigate back) is sampled until it has resolved, then `ms` more
-			const end =
-				t0 === null
-					? armed + 30_000
-					: done === undefined
-						? Infinity
-						: Math.max(t0 + ms + 160, done + ms)
-			if (now < end) requestAnimationFrame(frame)
-			else {
-				for (const t of types) window.removeEventListener(t, mark, true)
-				w.__wkFramesDone = true
-			}
-		}
-		requestAnimationFrame(frame)
-	}, ms)
-	await act()
-	await page.evaluate(() => {
-		;(window as unknown as { __wkActDone?: number }).__wkActDone =
-			performance.now()
-	})
-	await page.waitForFunction(
-		() =>
-			(window as unknown as { __wkFramesDone?: boolean }).__wkFramesDone ===
-			true,
-		undefined,
-		{ timeout: 40_000 },
-	)
-	const got = await page.evaluate(() => {
-		const w = window as unknown as { __wkFrames?: string[]; __wkTicks?: number }
-		return { seen: [...new Set(w.__wkFrames ?? [])], ticks: w.__wkTicks ?? 0 }
-	})
-	ticks.push(got.ticks)
-	// a sample that saw no frame proves nothing: it fails
-	return got.ticks === 0 ? ["no animation frame sampled"] : got.seen
+/** How a sampled cell proves what it saw (LY rules §7.2), declared with the cell:
+ * - `jump`: the change has no positional animation (a panel opening, a drawer's box appearing, a slot yielding).
+ *   Proof: the last painted frame before the action shows the old state; the first changed painted frame already
+ *   shows the mover at its destination, and so does every later one (no intermediate frame); nothing animates on the
+ *   mover then, and with the transitions off its transition time is 0. Two painted frames prove it (one before the
+ *   action, one after): every painted frame of the sampled span is read, so a single late one still proves it.
+ * - `animate`: a named mover with a transition (the card's glide). Proof: at least MIN_FRAMES painted frames in the
+ *   glide's window (from the last frame at its old place), one of them strictly between its two places (more than
+ *   1 px from both), and the last at its new place.
+ * A cell still unobserved after one retry from a reset start is reported as infra-unobserved (the host painted too
+ * few frames): its own status, never a pass and never a layout failure. */
+type Mode = "animate" | "jump"
+
+/** One sampled element on one frame. */
+interface Seen {
+	x: number
+	y: number
+	w: number
+	h: number
+	vis: string
+	state: string
+	/** Animations and transitions running on the element itself. */
+	anim: number
+	/** Its longest computed transition-duration (s). */
+	td: number
 }
 
-/** One sampled frame of named elements: each one's box, visibility and layout state, or null while it is absent. */
-type Frame = Record<
-	string,
-	{
-		x: number
-		y: number
-		w: number
-		h: number
-		vis: string
-		state: string
-	} | null
->
+/** One sampled frame of named elements, each null while it is absent. */
+type Frame = Record<string, Seen | null>
 
-/** A sampled action: the frames (the first one read before the action was sent, then one per animation frame from
- * the action on), and how many animation frames fell inside the action's window. */
+/** A sampled action. */
 interface Sampled {
+	/** frames[0] is the last painted frame before the action; then one per painted frame from the action on. */
 	frames: Frame[]
+	/** performance.now() of each frame. */
+	times: number[]
+	/** Intersections of the painted slot boxes on the frames from the action on (with `overlaps`). */
+	overlaps: string[]
+	/** Painted frames from the action to the end of its window. */
 	inWindow: number
 	/** The action's wall-clock time (Date.now() at t0), or null when no action was seen. */
 	at: number | null
 }
 
-/** Fewer animation frames than this inside the window prove nothing: the cell is unobserved. */
+/** An `animate` cell needs this many painted frames in its mover's window; fewer prove nothing (unobserved). */
 const MIN_FRAMES = 3
 /** The sampled window after the action; every frame in it is checked. */
 const SAMPLE_MS = 600
+/** The card's glide and its margin (src/shell/glide-hold.ts; not imported: the flow runs under type stripping and
+ * must not pull the shell's module graph in). */
+const GLIDE_WINDOW_MS = 260 + 60
 
-/** Samples the named elements on every animation frame (distinct rAF timestamps only, no timer ticks) for `ms` from
- * the action (LY rules §7.2): armed in the page before it, a capturing listener (pointerdown, keydown, or a `wk:act`
- * event a programmatic step dispatches) records t0, frames before t0 are dropped, sampling runs to t0 + ms + 160,
- * and Node waits on the page's done flag. The first frame is read synchronously before `act` is sent. */
-async function sampleDuring(
+/** Samples the named elements on every painted frame (distinct rAF timestamps only, no timer ticks) from the action
+ * (LY rules §7.2). Armed in the page before it: the latest painted frame before the action is frame 0 (Node waits
+ * for one before it acts), a capturing listener (pointerdown, keydown, hashchange or a `wk:act` event a programmatic
+ * step dispatches) records t0, and sampling runs to t0 + ms + 160, or with `untilDone` (a multi-step action) until
+ * `ms` after the action resolved. With `overlaps`, every painted slot box is checked pairwise on each frame. */
+async function sample(
 	page: Page,
 	named: Record<string, string>,
 	act: () => Promise<void>,
-	ms = SAMPLE_MS,
+	o: { ms?: number; overlaps?: boolean; untilDone?: boolean } = {},
 ): Promise<Sampled> {
+	const ms = o.ms ?? SAMPLE_MS
 	await page.evaluate(
-		({ named, ms }) => {
-			const w = window as unknown as {
-				__wkSamples?: unknown[]
-				__wkSampleDone?: boolean
-				__wkInWindow?: number
-				__wkSampleAt?: number | null
-			}
+		({ named, ms, overlaps, untilDone }) => {
+			const w = window as unknown as Record<string, unknown>
 			const out: unknown[] = []
-			w.__wkSamples = out
-			w.__wkSampleDone = false
-			w.__wkInWindow = 0
-			w.__wkSampleAt = null
+			const times: number[] = []
+			const seen: string[] = []
+			w["__wkSamples"] = out
+			w["__wkTimes"] = times
+			w["__wkOverlaps"] = seen
+			w["__wkSampleDone"] = false
+			w["__wkArmed"] = false
+			w["__wkInWindow"] = 0
+			w["__wkSampleAt"] = null
+			delete w["__wkActDone"]
+			const seconds = (v: string) =>
+				Math.max(
+					0,
+					...v.split(",").map(p => {
+						const n = Number.parseFloat(p)
+						return Number.isFinite(n)
+							? p.trim().endsWith("ms")
+								? n / 1000
+								: n
+							: 0
+					}),
+				)
 			const read = () => {
 				const f: Record<string, unknown> = {}
 				for (const [name, sel] of Object.entries(named)) {
@@ -495,54 +460,115 @@ async function sampleDuring(
 						continue
 					}
 					const r = el.getBoundingClientRect()
+					const cs = getComputedStyle(el)
 					const holder = el.closest("[data-wk-state]")
 					f[name] = {
 						x: r.x,
 						y: r.y,
 						w: r.width,
 						h: r.height,
-						vis: getComputedStyle(el).visibility,
+						vis: cs.visibility,
 						state: holder?.getAttribute("data-wk-state") ?? "",
+						anim: el.getAnimations().length,
+						td: seconds(cs.transitionDuration),
 					}
 				}
 				return f
+			}
+			const pairs = () => {
+				const boxes = [
+					...document.querySelectorAll("[data-wk-slot][data-wk-rect]"),
+				]
+					.filter(el => {
+						if (el.closest("[data-pending], [data-held]")) return false
+						const cs = getComputedStyle(el)
+						return cs.visibility !== "hidden" && Number(cs.opacity) > 0.05
+					})
+					.map(el => ({
+						name: el.getAttribute("data-wk-slot") ?? "",
+						r: el.getBoundingClientRect(),
+					}))
+					.filter(b => b.r.width > 0 && b.r.height > 0)
+				const parts = new Set(["drawer", "pane", "grip"])
+				for (let i = 0; i < boxes.length; i++)
+					for (let j = i + 1; j < boxes.length; j++) {
+						const a = boxes[i]
+						const b = boxes[j]
+						if (!a || !b || (parts.has(a.name) && parts.has(b.name))) continue
+						if (
+							a.r.left < b.r.right - 0.5 &&
+							b.r.left < a.r.right - 0.5 &&
+							a.r.top < b.r.bottom - 0.5 &&
+							b.r.top < a.r.bottom - 0.5
+						)
+							seen.push(`${a.name} × ${b.name}`)
+					}
 			}
 			let t0: number | null = null
 			const mark = () => {
 				if (t0 !== null) return
 				t0 = performance.now()
-				w.__wkSampleAt = Date.now()
+				w["__wkSampleAt"] = Date.now()
 			}
 			const types = ["pointerdown", "keydown", "hashchange", "wk:act"]
 			for (const t of types) window.addEventListener(t, mark, true)
 			const armed = performance.now()
 			let last = -1
 			let inWindow = 0
-			// the state before the action, read now
-			out.push(read())
 			const frame = (ts: number) => {
 				const now = performance.now()
+				// an action that sent no event is marked when it resolves
+				const done = w["__wkActDone"] as number | undefined
+				if (t0 === null && done !== undefined) t0 = done
 				if (ts !== last) {
 					last = ts
-					if (t0 !== null && now >= t0) {
+					if (t0 === null) {
+						// the latest painted frame before the action
+						out[0] = read()
+						times[0] = now
+						w["__wkArmed"] = true
+					} else if (now >= t0) {
 						out.push(read())
+						times.push(now)
+						if (overlaps) pairs()
 						if (now <= t0 + ms) inWindow++
 					}
 				}
-				// no action within 30 s: done, unobserved
-				const end = t0 === null ? armed + 30_000 : t0 + ms + 160
+				const end =
+					t0 === null
+						? armed + 30_000
+						: untilDone
+							? done === undefined
+								? Infinity
+								: Math.max(t0 + ms + 160, done + ms)
+							: t0 + ms + 160
 				if (now < end) requestAnimationFrame(frame)
 				else {
 					for (const t of types) window.removeEventListener(t, mark, true)
-					w.__wkInWindow = inWindow
-					w.__wkSampleDone = true
+					w["__wkInWindow"] = inWindow
+					w["__wkSampleDone"] = true
 				}
 			}
 			requestAnimationFrame(frame)
 		},
-		{ named, ms },
+		{
+			named,
+			ms,
+			overlaps: o.overlaps ?? false,
+			untilDone: o.untilDone ?? false,
+		},
+	)
+	// the frame before the action is a painted one, not a read between frames
+	await page.waitForFunction(
+		() => (window as unknown as { __wkArmed?: boolean }).__wkArmed === true,
+		undefined,
+		{ timeout: 40_000 },
 	)
 	await act()
+	await page.evaluate(() => {
+		;(window as unknown as { __wkActDone?: number }).__wkActDone =
+			performance.now()
+	})
 	await page.waitForFunction(
 		() =>
 			(window as unknown as { __wkSampleDone?: boolean }).__wkSampleDone ===
@@ -553,11 +579,15 @@ async function sampleDuring(
 	const got = await page.evaluate(() => {
 		const w = window as unknown as {
 			__wkSamples?: Frame[]
+			__wkTimes?: number[]
+			__wkOverlaps?: string[]
 			__wkInWindow?: number
 			__wkSampleAt?: number | null
 		}
 		return {
 			frames: w.__wkSamples ?? [],
+			times: w.__wkTimes ?? [],
+			overlaps: [...new Set(w.__wkOverlaps ?? [])],
 			inWindow: w.__wkInWindow ?? 0,
 			at: w.__wkSampleAt ?? null,
 		}
@@ -566,26 +596,152 @@ async function sampleDuring(
 	return got
 }
 
-/** Samples `act`; an unobserved sample (fewer than MIN_FRAMES in the window) is retried once, the same window,
- * after `reset` puts the cell's starting state back. Still unobserved, it says so (it never passes unobserved). */
-async function sampleObserved(
+const differs = (a: Seen | null | undefined, b: Seen | null | undefined) =>
+	(a ?? null) === null || (b ?? null) === null
+		? (a ?? null) !== (b ?? null)
+		: Math.abs((a as Seen).x - (b as Seen).x) > 1 ||
+			Math.abs((a as Seen).y - (b as Seen).y) > 1 ||
+			Math.abs((a as Seen).w - (b as Seen).w) > 1 ||
+			Math.abs((a as Seen).h - (b as Seen).h) > 1
+
+const fmtSeen = (s: Seen | null | undefined) => (s ? fmt(s) : "absent")
+
+/** What a sample proves in its declared mode: the violations it saw, or why it saw too little (unobserved). */
+interface Proof {
+	violations: string[]
+	unobserved: string | null
+}
+
+function prove(
+	mode: Mode,
+	s: Sampled,
+	mover: string,
+	o: { label: string; still: boolean; windowMs?: number },
+): Proof {
+	const { frames, times } = s
+	const out: string[] = []
+	const from = frames[0]?.[mover] ?? null
+	const k = frames.findIndex((f, i) => i > 0 && differs(f[mover], from))
+	if (mode === "jump") {
+		// two painted frames: the one before the action and one after it (every painted frame from the action to the
+		// end of the sampled span is read, so a late one still shows whatever was painted between)
+		if (frames.length < 2)
+			return {
+				violations: [],
+				unobserved: `no painted frame after the action in the sampled span (a jump needs the frame before it and one after; ${s.inWindow} in the window)`,
+			}
+		if (k < 0) {
+			out.push(
+				`${o.label}: no changed frame of the ${mover} (${fmtSeen(from)} on all ${frames.length} frames)`,
+			)
+			return { violations: out, unobserved: null }
+		}
+		const to = frames[k]?.[mover] ?? null
+		for (let i = k + 1; i < frames.length; i++)
+			if (differs(frames[i]?.[mover], to)) {
+				out.push(
+					`${o.label}: the ${mover} jumped to ${fmtSeen(to)} on frame ${k}, then stood at ${fmtSeen(frames[i]?.[mover])} on frame ${i} (an intermediate frame)`,
+				)
+				break
+			}
+		if (to && to.anim > 0)
+			out.push(
+				`${o.label}: ${to.anim} animation(s) running on the ${mover} on its first changed frame (a jump has none)`,
+			)
+		if (to && o.still && to.td > 0)
+			out.push(
+				`${o.label}: the ${mover}'s transition-duration is ${to.td} s on its first changed frame (a jump has 0)`,
+			)
+		return { violations: out, unobserved: null }
+	}
+	// animate: the frames in the mover's window, from the last frame at its old place
+	const windowMs = o.windowMs ?? GLIDE_WINDOW_MS
+	const start = k > 0 ? (times[k - 1] ?? 0) : (times[0] ?? 0)
+	const inGlide = times.filter(t => t >= start && t <= start + windowMs).length
+	if (inGlide < MIN_FRAMES)
+		return {
+			violations: [],
+			unobserved: `${inGlide} painted frames in the ${mover}'s ${windowMs} ms window (need ${MIN_FRAMES})`,
+		}
+	if (k < 0) {
+		out.push(
+			`${o.label}: the ${mover} never moved from ${fmtSeen(from)} (${frames.length} frames)`,
+		)
+		return { violations: out, unobserved: null }
+	}
+	const to = frames[frames.length - 1]?.[mover] ?? null
+	if (!from || !to) {
+		out.push(
+			`${o.label}: the ${mover} is absent at an end (${fmtSeen(from)} → ${fmtSeen(to)}), not a glide`,
+		)
+		return { violations: out, unobserved: null }
+	}
+	const between = (f: Seen | null | undefined) =>
+		f !== null &&
+		f !== undefined &&
+		(["x", "y", "w", "h"] as const).some(
+			e =>
+				Math.abs(from[e] - to[e]) > 2 &&
+				Math.min(Math.abs(f[e] - from[e]), Math.abs(f[e] - to[e])) > 1 &&
+				(f[e] - from[e]) * (f[e] - to[e]) < 0,
+		)
+	if (!frames.some(f => between(f[mover])))
+		out.push(
+			`${o.label}: the ${mover} snapped ${fmt(from)} → ${fmt(to)} with no frame between them (${inGlide} frames in its window)`,
+		)
+	return { violations: out, unobserved: null }
+}
+
+/** Samples `act` and proves it in its mode; an unobserved sample is retried once, the same window, after `reset`
+ * puts the cell's starting state back. Still unobserved, it is infra-unobserved (listed in the report's `infra`,
+ * never a pass). */
+async function observe(
 	page: Page,
+	cell: string,
+	mode: Mode,
+	mover: string,
 	named: Record<string, string>,
 	act: () => Promise<void>,
 	reset: () => Promise<void>,
-	ms = SAMPLE_MS,
-): Promise<Sampled & { unobserved: string | null }> {
-	let got = await sampleDuring(page, named, act, ms)
-	if (got.inWindow >= MIN_FRAMES) return { ...got, unobserved: null }
-	await reset()
-	got = await sampleDuring(page, named, act, ms)
-	return {
-		...got,
-		unobserved:
-			got.inWindow >= MIN_FRAMES
-				? null
-				: `unobserved: ${got.inWindow} animation frames in the ${ms} ms window (need ${MIN_FRAMES}), after one retry`,
+	o: {
+		ms?: number
+		overlaps?: boolean
+		untilDone?: boolean
+		still: boolean
+		windowMs?: number
+	},
+): Promise<Sampled & Proof> {
+	const label = `${cell} (${mode})`
+	const proof = (s: Sampled) =>
+		prove(mode, s, mover, {
+			label,
+			still: o.still,
+			...(o.windowMs !== undefined ? { windowMs: o.windowMs } : {}),
+		})
+	let got = await sample(page, named, act, o)
+	let p = proof(got)
+	if (p.unobserved) {
+		// an overlap painted on the first attempt is real, observed or not
+		const first = got.overlaps
+		await reset()
+		got = await sample(page, named, act, o)
+		got = { ...got, overlaps: [...new Set([...first, ...got.overlaps])] }
+		p = proof(got)
 	}
+	observed.push({
+		cell,
+		mode,
+		mover,
+		frames: got.frames.length,
+		inWindow: got.inWindow,
+		status: p.unobserved ? "infra-unobserved" : "observed",
+	})
+	if (p.unobserved) {
+		const why = `${label}: ${p.unobserved}, after one retry`
+		p = { ...p, unobserved: why }
+		infra.push(why)
+	}
+	return { ...got, ...p }
 }
 
 /** The element at the centre of the first match is that element or inside it, and not inert (a click reaches it). */
@@ -652,6 +808,8 @@ function listenOpening(frames: readonly Frame[]): string[] {
 
 /** Animation frames each motion sample saw from its action on. */
 let ticks: number[] = []
+let observed: ObservedCell[] = []
+let infra: string[] = []
 
 export async function layoutFlow(
 	page: Page,
@@ -659,6 +817,8 @@ export async function layoutFlow(
 ): Promise<LayoutReport> {
 	const setup: string[] = []
 	ticks = []
+	observed = []
+	infra = []
 	let phase = "start"
 	// kept on a failure: the cells checked so far say where it got to
 	const cells: LayoutCell[] = []
@@ -669,7 +829,17 @@ export async function layoutFlow(
 	} catch (error) {
 		const message = error instanceof Error ? error.message.split("\n")[0] : ""
 		setup.push(`MISSING: stopped at ${phase}: ${message ?? ""}`)
-		return { ok: false, cells, moved, frames, ticks, setup }
+		return {
+			ok: false,
+			cells,
+			moved,
+			frames,
+			ticks,
+			observed,
+			infra,
+			status: "failed",
+			setup,
+		}
 	}
 
 	async function run(): Promise<LayoutReport> {
@@ -766,8 +936,44 @@ export async function layoutFlow(
 					?.getAttribute("data-wk-rect") ?? null,
 		)
 		setup.push(`card before playback: ${card ?? "MISSING"}`)
-		const startFrames = await framesDuring(page, play, 1200)
-		frames.push(...startFrames.map(f => `1440x900 playback start: ${f}`))
+		// a retry's starting state: no recording in the player, the card back at its home
+		const stopPlayback = async () => {
+			phase = "stop playback for a retry"
+			await go("")
+			// programmatic: the player may be held or in its compact line (no close button there); the result says
+			// what was there
+			const why = await page.evaluate(() => {
+				const close = document.querySelector<HTMLButtonElement>(
+					'[data-wk-transport] [aria-label="Close player and unmute live audio"]',
+				)
+				close?.click()
+				const t = document.querySelector("[data-wk-transport]")
+				return `close button ${close ? "clicked" : "absent"}, transport ${t ? `phase ${t.getAttribute("data-phase") ?? ""}${t.hasAttribute("data-compact") ? " compact" : ""}` : "gone"}`
+			})
+			try {
+				await player.first().waitFor({ state: "detached", timeout: STEP_MS })
+			} catch (error) {
+				const first =
+					error instanceof Error ? (error.message.split("\n")[0] ?? "") : ""
+				throw new Error(`${first} (${why})`)
+			}
+			await settled(page)
+		}
+		// animate: the card glides up from its home while the player enters under its old place (held until it lands)
+		const start = await observe(
+			page,
+			"1440x900 playback start",
+			"animate",
+			"card",
+			{ card: '[data-wk-slot="card"]' },
+			play,
+			stopPlayback,
+			{ ms: 1200, overlaps: true, untilDone: true, still: false },
+		)
+		frames.push(
+			...start.overlaps.map(f => `1440x900 playback start: ${f}`),
+			...start.violations,
+		)
 		setup.push(`player: ${(await player.count()) > 0 ? "shown" : "MISSING"}`)
 		await motionOff()
 
@@ -861,9 +1067,13 @@ export async function layoutFlow(
 						await control.focus()
 						if (!(await control.evaluate(el => el === document.activeElement)))
 							focusViolations.push(`could not focus ${slot} before yield`)
-						const opening = await sampleObserved(
+						// jump: the panel stands at its place on the first changed frame; the slot under it yields at once
+						const opening = await observe(
 							page,
-							LISTEN_NAMED,
+							`${vp} Listen opening over the ${slot}`,
+							"jump",
+							"panel",
+							{ ...LISTEN_NAMED, yielder: `[data-wk-slot="${slot}"]` },
 							() =>
 								toggle.evaluate(el => {
 									// a programmatic step marks its action for the sampler
@@ -874,12 +1084,19 @@ export async function layoutFlow(
 								await closeListen()
 								await control.focus()
 							},
+							{ still: true },
 						)
-						if (opening.unobserved)
-							focusViolations.push(
-								`P Listen opening over the ${slot}: ${opening.unobserved}`,
+						focusViolations.push(...opening.violations)
+						if (!opening.unobserved) {
+							focusViolations.push(...listenOpening(opening.frames))
+							const shownUnder = opening.frames.findIndex(
+								f => f["panel"] !== null && f["yielder"]?.vis !== "hidden",
 							)
-						focusViolations.push(...listenOpening(opening.frames))
+							if (shownUnder >= 0)
+								focusViolations.push(
+									`P frame ${shownUnder}: the ${slot} is visible while the Listen panel stands`,
+								)
+						}
 						await page
 							.locator(`[data-wk-slot="${slot}"][data-yielded]`)
 							.waitFor({ state: "attached", timeout: STEP_MS })
@@ -890,15 +1107,20 @@ export async function layoutFlow(
 						if (slot === "player") await toggle.click()
 					}
 				} else {
-					const opening = await sampleObserved(
+					// jump: the panel stands at its place on the first changed frame
+					const opening = await observe(
 						page,
+						`${vp} Listen opening`,
+						"jump",
+						"panel",
 						LISTEN_NAMED,
 						() => toggle.click(),
 						closeListen,
+						{ still: true },
 					)
-					if (opening.unobserved)
-						focusViolations.push(`P Listen opening: ${opening.unobserved}`)
-					focusViolations.push(...listenOpening(opening.frames))
+					focusViolations.push(...opening.violations)
+					if (!opening.unobserved)
+						focusViolations.push(...listenOpening(opening.frames))
 				}
 				const panel = page.locator(
 					'.wk-shell-island[data-island="listen"] .wk-shell-panel',
@@ -1005,9 +1227,28 @@ export async function layoutFlow(
 				if (!sampled) {
 					// with the transitions on (the drawer's rise, a card yielding to it)
 					await motionOn()
-					const seen = await framesDuring(page, open)
+					// jump: the drawer's box stands at its place on its first frame (its content's 6 px rise is inside it)
+					const seen = await observe(
+						page,
+						`${vp} ${d.name} opening`,
+						"jump",
+						"drawer",
+						{ drawer: '[data-wk-slot="drawer"]' },
+						open,
+						async () => {
+							await go("")
+							await page
+								.locator('[data-wk-slot="drawer"]')
+								.waitFor({ state: "detached", timeout: STEP_MS })
+							await settled(page)
+						},
+						{ ms: 400, overlaps: true, untilDone: true, still: false },
+					)
 					await motionOff()
-					frames.push(...seen.map(f => `${vp} ${d.name} opening: ${f}`))
+					frames.push(
+						...seen.overlaps.map(f => `${vp} ${d.name} opening: ${f}`),
+						...seen.violations,
+					)
 					sampled = true
 				} else await open()
 				await record(W < 1100 ? `${d.name} (sheet)` : d.name)
@@ -1075,23 +1316,45 @@ export async function layoutFlow(
 			percent: number,
 		): Promise<LayoutCell> {
 			const first = await tunerOverReceiptOnce(vp, percent)
-			if (!first.unobserved) return first.cell
+			if (!first.unobserved) {
+				observed.push({
+					cell: `${vp} Tuner panel over the receipt`,
+					mode: "jump",
+					mover: "panel",
+					frames: first.frames,
+					inWindow: first.inWindow,
+					status: "observed",
+				})
+				return first.cell
+			}
 			const tunerPanel = page.locator(
 				'.wk-shell-island[data-island="tuner"] .wk-shell-panel',
 			)
 			if ((await tunerPanel.count()) > 0) await page.keyboard.press("Escape")
 			await tunerPanel.waitFor({ state: "detached", timeout: STEP_MS })
 			const again = await tunerOverReceiptOnce(vp, percent + 1)
+			const cell = `${vp} Tuner panel over the receipt`
+			observed.push({
+				cell,
+				mode: "jump",
+				mover: "panel",
+				frames: again.frames,
+				inWindow: again.inWindow,
+				status: again.unobserved ? "infra-unobserved" : "observed",
+			})
 			if (again.unobserved)
-				again.cell.violations.push(
-					`unobserved: fewer than ${MIN_FRAMES} animation frames in a sampled window, after one retry`,
-				)
+				infra.push(`${cell} (jump): ${again.unobserved}, after one retry`)
 			return again.cell
 		}
 		async function tunerOverReceiptOnce(
 			vp: string,
 			percent: number,
-		): Promise<{ cell: LayoutCell; unobserved: boolean }> {
+		): Promise<{
+			cell: LayoutCell
+			unobserved: string | null
+			frames: number
+			inWindow: number
+		}> {
 			phase = `${vp}: the Tuner panel over the receipt`
 			const violations: string[] = []
 			const rects: Record<string, string> = {}
@@ -1140,14 +1403,18 @@ export async function layoutFlow(
 				}
 				window.addEventListener("keydown", open)
 			})
-			const sampled = await sampleDuring(page, named, () =>
-				page.keyboard.press("F8"),
-			)
+			// jump: the panel stands at its place on the first changed frame, the receipt yields on that frame
+			const sampled = await sample(page, named, () => page.keyboard.press("F8"))
+			const openProof = prove("jump", sampled, "panel", {
+				label: `${vp} Tuner panel opening over the receipt (jump)`,
+				still: true,
+			})
+			violations.push(...openProof.violations)
 			if (!(await page.locator(named.panel).count()))
 				violations.push(
 					"the Tuner panel did not open from the key pressed on Undo",
 				)
-			let unobserved = sampled.inWindow < MIN_FRAMES
+			let unobserved = openProof.unobserved
 			const opening = sampled.frames
 			// on every frame the panel stands, the receipt is out of sight in place (mounted, hidden: never drawn under
 			// or over it, never unmounted)
@@ -1168,7 +1435,7 @@ export async function layoutFlow(
 					f["receipt"]?.state === "yielded" &&
 					f["panel"] !== null,
 			)
-			if (shownAt < 0 || yieldedAt < 0)
+			if (!openProof.unobserved && (shownAt < 0 || yieldedAt < 0))
 				violations.push(
 					`no observed change of the receipt from shown to yielded as the Tuner panel opened (${opening.length} frames)`,
 				)
@@ -1209,10 +1476,16 @@ export async function layoutFlow(
 				violations.push(
 					"the receipt's Undo expired under the open Tuner panel (its clock ran while covered)",
 				)
-			const closed = await sampleDuring(page, named, () =>
+			// jump: the panel is gone on the first changed frame, the receipt shown again on that frame
+			const closed = await sample(page, named, () =>
 				page.keyboard.press("Escape"),
 			)
-			if (closed.inWindow < MIN_FRAMES) unobserved = true
+			const closeProof = prove("jump", closed, "panel", {
+				label: `${vp} Tuner panel closing over the receipt (jump)`,
+				still: true,
+			})
+			violations.push(...closeProof.violations)
+			unobserved ??= closeProof.unobserved
 			const closing = closed.frames
 			// no frame with the panel gone and the receipt still yielded (it is back in the same commit)
 			const stuck = closing.findIndex(
@@ -1254,7 +1527,7 @@ export async function layoutFlow(
 					f["receipt"]?.vis === "visible" &&
 					f["receipt"]?.state === "shown",
 			)
-			if (hiddenFirst < 0 || backAt < 0)
+			if (!closeProof.unobserved && (hiddenFirst < 0 || backAt < 0))
 				violations.push(
 					`no observed change of the receipt from yielded back to shown as the panel closed (${closing.length} frames)`,
 				)
@@ -1301,6 +1574,8 @@ export async function layoutFlow(
 					violations,
 				},
 				unobserved,
+				frames: sampled.frames.length + closed.frames.length,
+				inWindow: Math.min(sampled.inWindow, closed.inWindow),
 			}
 		}
 
@@ -1358,16 +1633,20 @@ export async function layoutFlow(
 			if (a instanceof HTMLElement) a.blur()
 		})
 		const missing = setup.filter(s => s.includes("MISSING"))
+		const clean =
+			missing.length === 0 &&
+			cells.every(c => c.violations.length === 0) &&
+			moved.length === 0 &&
+			frames.length === 0
 		return {
-			ok:
-				missing.length === 0 &&
-				cells.every(c => c.violations.length === 0) &&
-				moved.length === 0 &&
-				frames.length === 0,
+			ok: clean && infra.length === 0,
 			cells,
 			moved,
 			frames,
 			ticks,
+			observed,
+			infra,
+			status: !clean ? "failed" : infra.length > 0 ? "infra-unobserved" : "ok",
 			setup,
 		}
 	}
