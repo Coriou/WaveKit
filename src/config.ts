@@ -865,6 +865,15 @@ export const ScannerConfigSchema = z
 				preRollMs: z.number().int().min(0).max(10_000).default(300),
 			})
 			.default({}),
+		/**
+		 * Recording admission: discard a finished analog file whose audio measures as open-squelch
+		 * noise or data buzz (`discarded:noise`, speech-content.ts admissionNoise).
+		 */
+		admission: z
+			.object({
+				enabled: z.boolean().default(true),
+			})
+			.default({}),
 		storage: z
 			.object({
 				/** null: `<stateDir>/scanner` (resolved by the scanner service). */

@@ -1037,7 +1037,10 @@ export interface ScannerIqCaptureStatus {
  * audio never classed it (no speech over a CTCSS tone); `discarded:late-non-voice`, a finished or
  * held file whose own signal a decode proved not voice after its transmission ended;
  * `discarded:not-speech`, a finished file on a channel with a strong or decode-backed digital prior whose audio
- * clearly measures as no speech (a steady buzz, no syllables, no pitch). Every
+ * clearly measures as no speech (a steady buzz, no syllables, no pitch); `discarded:noise`, a
+ * finished file whose audio the recording admission rule (scanner.admission) measures as
+ * open-squelch noise or data buzz in every window (no carrier quieting, a narrow level spread, no
+ * word burst, little pitch). Every
  * recording that started ends with exactly one terminal decision per file: `finalized`,
  * `evicted`, `refused:*` or `discarded:*`.
  */
@@ -1077,6 +1080,7 @@ export const SCANNER_RECORDER_DECISIONS = [
 	"discarded:park-expired",
 	"discarded:aborted",
 	"discarded:error",
+	"discarded:noise",
 ] as const
 export type ScannerRecorderDecision =
 	(typeof SCANNER_RECORDER_DECISIONS)[number]
@@ -1392,6 +1396,8 @@ export interface ScannerSettingsValues {
 		revisitShare: number
 	}
 	hold: { maxHoldMs: number; hangMs: number; preRollMs: number }
+	/** Recording admission (config scanner.admission). Absent: enabled. */
+	admission?: { enabled: boolean } | undefined
 	storage: {
 		dir: string | null
 		maxRecordingsMb: number

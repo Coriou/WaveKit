@@ -802,6 +802,11 @@ export interface ScannerSettings {
 		revisitShare: number
 	}
 	hold: { maxHoldMs: number; hangMs: number; preRollMs: number }
+	/**
+	 * Recording admission (config scanner.admission): discard a finished analog file whose audio
+	 * measures as noise (`discarded:noise`). Absent: enabled.
+	 */
+	admission?: { enabled: boolean } | undefined
 	storage: {
 		dir: string | null
 		maxRecordingsMb: number
