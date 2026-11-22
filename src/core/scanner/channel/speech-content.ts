@@ -559,7 +559,10 @@ export function speechReadings(c: SpeechContent | null): {
  * a channel with no digital evidence is discarded as noise (recording-verdict.ts finishPath,
  * `discarded:noise`) only when EVERY level window looks like open-squelch noise or data buzz: real
  * FM voice shows carrier quieting between words (frame levels down to −30 to −50 dBFS), noise and
- * data never fall under about −15 dBFS and keep a narrow level spread.
+ * data never fall under about −15 dBFS and keep a narrow level spread. The rule applies under any
+ * prior strength, a roll-over file (past the file length limit) included, except to a tone-classed
+ * file (its own CTCSS tone or classed by it), a file shared with a joined voice of another discovery
+ * and any file of a channel where analog voice is proven (recording-verdict.ts analogVoiceHeard).
  */
 export interface AdmissionThresholds {
 	/** Level frames needed to judge at all; fewer: not measured (null, kept). */

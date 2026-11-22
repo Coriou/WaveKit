@@ -4,7 +4,9 @@
  * its finish: counted in the decision counts and `recent`, its operation cancelled (the .wav.part
  * never linked, so no final WAV) and one `Analog file discarded as noise` line logged with ids and
  * numbers only. Admission off keeps it as before; a syllabic voice with carrier quieting, a
- * buzz over its own CTCSS tone, or a buzz file sharing another discovery's joined voice, is kept. All signals are modelled (synthetic).
+ * buzz over its own CTCSS tone, or a buzz file sharing another discovery's joined voice, is kept.
+ * Hard speech at 5 dB CNR (the measure's known limit: it reads as noise) is discarded on a channel
+ * without proven analog voice and kept on one with it. All signals are modelled (synthetic).
  */
 import { Writable } from "node:stream"
 import pino from "pino"
@@ -18,6 +20,7 @@ import {
 	snapshot,
 } from "./wideband-recorder-harness.js"
 import { FskSource } from "./wideband-nfm-fixtures.js"
+import { contentIq, HARD_SPEECH_CASES } from "./speech-content-fixtures.js"
 
 type Harness = ReturnType<typeof harness>
 
@@ -166,6 +169,62 @@ describe("W1 recording admission: noise on a channel with no digital evidence", 
 		expect(lines.some(l => l["msg"] === "Analog file discarded as noise")).toBe(
 			false,
 		)
+	}, 120_000)
+})
+
+const HARD = HARD_SPEECH_CASES.find(
+	c => c.name === "lowdev-1000-shallow-30-continuous-cnr-5",
+)
+
+/**
+ * `over` with modelled hard speech (HARD, no CTCSS) as the IQ, in 0.1 s slices. The same signal
+ * runs on before the onset and after the close, so the pre-roll and the hang hold that speech too
+ * (a carrier still keyed), not a quieter or louder stretch that would change the file's levels.
+ */
+async function hardOver(h: Harness, seconds: number): Promise<void> {
+	if (HARD === undefined) throw new Error("no hard speech case")
+	const slices = contentIq(HARD.signal, seconds + 5.1)
+	let next = 0
+	const play = async (s: number, each?: () => void): Promise<void> => {
+		for (const stop = next + Math.round(s * 10); next < stop; next++) {
+			const slice = slices[next]
+			if (slice === undefined) return
+			h.engine.write(slice)
+			each?.()
+			await h.pump()
+		}
+	}
+	await play(1)
+	const onset = h.engine.liveEdge()
+	const end = onset + seconds * h.fs
+	await play(seconds, () => {
+		const edge = h.engine.liveEdge()
+		if (edge - onset >= 0.1 * h.fs)
+			h.rec.track(input("o", snapshot("o", onset, Math.min(edge, end), LOW)))
+	})
+	await play(0.6)
+	h.rec.closed("o", snapshot("o", onset, end, LOW), null, {
+		analogFm: true,
+		discoveryId: "d_1",
+	})
+	await play(3.5)
+	await h.rec.idle()
+}
+
+describe("W1 recording admission: a channel with proven analog voice", () => {
+	// Feature: recording-admission, candidate rule RA-2 (proven-analog exemption).
+	it("KNOWN LIMIT: hard speech at 5 dB CNR, no CTCSS, 5 s, no analog proof: discarded:noise", async () => {
+		const h = low()
+		await hardOver(h, 5)
+		expect(codes(h)).toContain("discarded:noise")
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+	}, 120_000)
+
+	it("the same hard speech on a channel with proven analog voice: kept", async () => {
+		const h = low({ prior: { ...analogFm, analogVoice: () => true } })
+		await hardOver(h, 5)
+		expect(codes(h)).not.toContain("discarded:noise")
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 	}, 120_000)
 })
 

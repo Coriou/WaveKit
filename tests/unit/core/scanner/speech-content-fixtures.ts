@@ -144,6 +144,28 @@ export function contentAudio(
 	signal: ContentSignal,
 	seconds: number,
 ): Int16Array {
+	const chain = new WidebandNfmChain({
+		inputRateHz: CONTENT_FS,
+		offsetHz: CONTENT_OFFSET_HZ,
+	})
+	const parts = contentIq(signal, seconds).map(cu8 => chain.process(cu8))
+	const out = new Int16Array(parts.reduce((s, p) => s + p.length, 0))
+	let o = 0
+	for (const p of parts) {
+		out.set(p, o)
+		o += p.length
+	}
+	return out
+}
+
+/**
+ * `seconds` of `signal` as CU8 IQ at CONTENT_FS, the carrier at CONTENT_OFFSET_HZ, in slices of
+ * 9 600 samples (0.1 s): what contentAudio demodulates, for a test that feeds a recorder.
+ */
+export function contentIq(
+	signal: ContentSignal,
+	seconds: number,
+): Uint8Array[] {
 	const fs = CONTENT_FS
 	const rng = mulberry32(signal.seed ?? 5)
 	const noise = mulberry32((signal.seed ?? 5) + 1)
@@ -155,16 +177,12 @@ export function contentAudio(
 		ctcssHz === undefined
 			? wave
 			: (): number => wave() + 350 * Math.sin((TWO_PI * ctcssHz * tone++) / fs)
-	const chain = new WidebandNfmChain({
-		inputRateHz: fs,
-		offsetHz: CONTENT_OFFSET_HZ,
-	})
 	const gauss = (): number => {
 		// Box–Muller.
 		const u = Math.max(1e-12, noise())
 		return Math.sqrt(-2 * Math.log(u)) * Math.cos(TWO_PI * noise())
 	}
-	const parts: Int16Array[] = []
+	const parts: Uint8Array[] = []
 	let phase = 0
 	const total = Math.round(seconds * fs)
 	const slice = 9_600
@@ -185,15 +203,9 @@ export function contentAudio(
 				Math.min(255, Math.round(127.5 + 127.5 * im)),
 			)
 		}
-		parts.push(chain.process(cu8))
+		parts.push(cu8)
 	}
-	const out = new Int16Array(parts.reduce((s, p) => s + p.length, 0))
-	let o = 0
-	for (const p of parts) {
-		out.set(p, o)
-		o += p.length
-	}
-	return out
+	return parts
 }
 
 /** The named synthetic cases the tests and the bench share (cnrDb 30 unless named). */

@@ -4,7 +4,8 @@
  * noise and FM-demodulated 4FSK and GMSK-like data at 4, 8 and 120 s read as noise; speech-like
  * syllables on a quieted carrier are kept with a floor well under the bound, with or without a
  * CTCSS tone; a 2 s word inside or at the tail of 118 s of noise keeps the file. The spliced
- * files join separate chain runs (noise, word, noise) at frame-aligned cuts. Nothing here is a
+ * files join separate chain runs (noise, word, noise) at frame-aligned cuts. A known limit is
+ * frozen too: hard speech under the FM threshold (5 dB CNR) reads as noise. Nothing here is a
  * recording of a real signal.
  *
  * The real chain is slow (seconds per signal), so each signal is run once and shared, and each
@@ -19,7 +20,11 @@ import {
 	SpeechContentMeter,
 	type SpeechContent,
 } from "../../../../src/core/scanner/channel/speech-content.js"
-import { contentAudio, type ContentSignal } from "./speech-content-fixtures.js"
+import {
+	contentAudio,
+	HARD_SPEECH_CASES,
+	type ContentSignal,
+} from "./speech-content-fixtures.js"
 
 const yieldToLoop = (): Promise<void> =>
 	new Promise(resolve => {
@@ -96,6 +101,18 @@ describe("admission through the NFM chain (modelled signals)", () => {
 		const c = measure(await chainAudio({ ...SPEECH, ctcssHz: 250 }, 8))
 		expect(c.minWindowP10Dbfs).toBeLessThan(ADMISSION_MIN_FLOOR_DBFS - 8)
 		expect(admissionNoise(c)).toBe(false)
+	}, 120_000)
+
+	it("KNOWN LIMIT: hard speech at 5 dB CNR (1 000 Hz peak, 30 % depth, no pauses) reads as noise", async () => {
+		// Frozen so a threshold change that moves it shows here; such a file is discarded only on a
+		// channel without proven analog voice (recording-verdict.ts finishPath).
+		const hard = HARD_SPEECH_CASES.find(
+			c => c.name === "lowdev-1000-shallow-30-continuous-cnr-5",
+		)
+		expect(hard).toBeDefined()
+		const c = measure(await chainAudio(hard!.signal, 4))
+		expect(c.levelFrames).toBeGreaterThanOrEqual(94)
+		expect(admissionNoise(c)).toBe(true)
 	}, 120_000)
 
 	it("118 s of noise with a 2 s word in the middle: kept", async () => {

@@ -1228,7 +1228,9 @@ export function finishPath(input: FinishInput): FinishPath {
 	if (
 		input.admission?.enabled === true &&
 		input.admission.noise === true &&
-		!joinedOther
+		!joinedOther &&
+		// A channel with proven analog voice keeps weak speech the noise measure cannot tell apart.
+		(input.prior === null || !analogVoiceHeard(input.prior))
 	)
 		return path("discarded:noise", "noise")
 	if (strength === "none") return path("finish", "prior-none")

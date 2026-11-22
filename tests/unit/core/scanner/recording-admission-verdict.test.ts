@@ -122,6 +122,45 @@ describe("finishPath: the recording admission row", () => {
 		expect(p.verdict).toBe("finish")
 	})
 
+	it("a channel with proven analog voice keeps a noise reading (prior-none); unproven: discarded", () => {
+		const proven: VoicePrior = {
+			labels: [],
+			class: "analog-fm",
+			analogVoice: () => true,
+		}
+		const label: VoicePrior = {
+			labels: [
+				{
+					protocol: "analog-fm",
+					confidence: "classified",
+					owner: true,
+					at: NOW,
+				},
+			],
+			class: "analog-fm",
+			analogVoice: () => false,
+		}
+		const unproven: VoicePrior = {
+			labels: [],
+			class: "analog-fm",
+			analogVoice: () => false,
+		}
+		for (const prior of [proven, label]) {
+			expect(priorReading(prior, false, NOW).strength).toBe("none")
+			expect(finishPath({ ...base, prior, admission: NOISE })).toMatchObject({
+				verdict: "finish",
+				reason: "prior-none",
+			})
+			expect(
+				finishPath({ ...base, prior, rollOver: true, admission: NOISE })
+					.verdict,
+			).toBe("finish")
+		}
+		expect(
+			finishPath({ ...base, prior: unproven, admission: NOISE }),
+		).toMatchObject({ verdict: "discarded:noise", reason: "noise" })
+	})
+
 	it("a classed session's roll-over file is gated too (its own field, not a speech reading)", () => {
 		expect(
 			finishPath({ ...base, rollOver: true, admission: NOISE }).verdict,
