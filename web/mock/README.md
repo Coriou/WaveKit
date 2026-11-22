@@ -127,7 +127,8 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   route plays a `dsd~<name>` key. Scanner DV files have no row, as on the core. The seeded
   dsd-fme call files are YSF (a core lists and plays no dsd-fme P25, NXDN, dPMR, ProVoice or M17
   call file; `tests/mock/recordings.test.ts` checks every seed against the core's gate), and the
-  call recorder's are P25 and D-STAR: a core lists and links no DMR call recording while DMR
+  call recorder's are P25 and D-STAR (the mock keeps them for the UI path; a core serves no call
+  recorder file while `DV_CALL_RECORDINGS_SERVED` is off): a core lists and links no DMR call recording while DMR
   recordings are off, so the mock seeds none.
 - Channels (`activity-channel.ts`), as the core: each scanner analog recording row carries
   `channel: { discoveryId, frequencyHz }` and is titled `FM voice`; `GET /api/activity` and

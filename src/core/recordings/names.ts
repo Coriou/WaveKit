@@ -57,7 +57,8 @@ const hashedFields = new Map<string, string>()
  * `dv-call`). Off: no decoder yet feeds the recorder a call tap (addCallTap), so no per-call
  * trust check stands behind such a file, and a file in that directory is refused by name (fail
  * closed; it stays on disk under the usual retention). Re-enable in this one line once a tap
- * writes only calls whose Activity row passes callTrustAdmits.
+ * writes only calls whose Activity row passes callTrustAdmits. Links the sweep removed while
+ * this was off do not come back.
  */
 export const DV_CALL_RECORDINGS_SERVED: boolean = false
 
