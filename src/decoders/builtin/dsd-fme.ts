@@ -1164,6 +1164,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private nxdnVcallClear:
 		| { callId: string; talkgroup: number; source: number }
 		| undefined
+	/**
+	 * P25 phase 1 clear credit, per superframe: an LDU1 sync whose NID
+	 * decoded waits for its LCW (p25LcwDue); a clean LCW naming a call makes
+	 * it the superframe's named call (p25Ldu1Named); the next LDU2 sync hands
+	 * that name to its ALG print (p25Ldu2Credit), the only call an LDU2 "ALG
+	 * ID: 0x80 KEY ID: 0x0000" may prove clear. Any other P25 phase 1 sync (an
+	 * HDU opens the next over, a failed LDU1, a terminator), another
+	 * protocol's sync and a restart drop all three, so an over's clear print
+	 * never credits a call its own LDU1 did not name.
+	 */
+	private p25LcwDue = false
+	private p25Ldu1Named: string | undefined = undefined
+	private p25Ldu2Credit: string | undefined = undefined
 	/** NAC of the last P25 phase 1 sync line whose NID decoded. */
 	private lastP25Nac: string | undefined = undefined
 	/**
@@ -1524,6 +1537,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		})
 		this.privacyTaint = undefined
 		this.nxdnVcallClear = undefined
+		this.dropP25Credit()
 		this.dmrRoute = newDmrRoute()
 		this.flushPendingDmrLink(false)
 		// The old child's DMR mode and slot state, as stop() clears it.
@@ -1760,9 +1774,20 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			P25P1_LDU2_CLEAR.test(line) &&
 			!burstError(line)
 		) {
+			// Only the call this superframe's own LDU1 named (p25Ldu2Credit).
+			const credit = this.p25Ldu2Credit
+			this.p25Ldu2Credit = undefined
 			const call = this.ongoingCall("p25p1")
-			if (call !== null) this.markClear(call)
+			if (call !== null && credit !== undefined && call.callId === credit)
+				this.markClear(call)
 		}
+	}
+
+	/** Drops the P25 phase 1 superframe naming (see p25Ldu1Named). */
+	private dropP25Credit(): void {
+		this.p25LcwDue = false
+		this.p25Ldu1Named = undefined
+		this.p25Ldu2Credit = undefined
 	}
 
 	/**
@@ -2956,7 +2981,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				this.lastP25Nac = /\bduid:EE\b/.test(line)
 					? undefined
 					: printed.toUpperCase()
-		} else this.lastP25Nac = undefined
+			const duid = /\bduid:EE\b/.test(line)
+				? undefined
+				: P25_VOICE_FRAME.exec(line)?.groups?.["duid"]
+			const named = this.p25Ldu1Named
+			this.dropP25Credit()
+			if (duid === "LDU2") this.p25Ldu2Credit = named
+			else if (duid === "LDU1" && !burstError(line)) this.p25LcwDue = true
+		} else {
+			this.lastP25Nac = undefined
+			this.dropP25Credit()
+		}
 		if (protocol !== "nxdn48" && protocol !== "nxdn96") {
 			this.nxdnCleanAt = undefined
 			this.nxdnRan = undefined
@@ -3929,6 +3964,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// absence proves nothing: only an LDU2 ALG 0x80 does (markClear).
 				const call = this.ongoingCall("p25p1")
 				if (DMR_ENCRYPTED.test(line) && call !== null) this.markEncrypted(call)
+				// A clean LCW of an LDU1 names the superframe's call: its LDU2's
+				// clear print may credit that call, and no other (p25Ldu1Named).
+				if (this.p25LcwDue) {
+					this.p25LcwDue = false
+					if (call !== null && !burstError(line))
+						this.p25Ldu1Named = call.callId
+				}
 				if (split && event) this.emitOutput(split)
 				return event ?? split
 			}

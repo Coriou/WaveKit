@@ -4,7 +4,8 @@
  * recording directory holding a file for every call, so a call_end links a
  * recording exactly when the adapter admits it. Every non-DMR publication
  * that says clear or links a recording is judged at its emission by an
- * independent oracle (./dsd-fme-nondmr-call-oracle.ts, no adapter code).
+ * independent oracle (./dsd-fme-nondmr-call-oracle.ts, no adapter code) that
+ * derives the overs from the lines itself, never from the adapter's calls.
  * P25, NXDN, dPMR: a recording only on positive clear evidence of the call
  * itself; D-STAR and YSF carry no privacy field. Ids are synthetic.
  */
@@ -184,34 +185,15 @@ function replay(
 		handleOutputLine(line: string): void
 		checkCallTimeoutAsync(): void
 		endOpenCallsForRestart?: (now: Date) => void
-		callState: { callId: string } | null
-		startPendingCall(...args: unknown[]): {
-			callId: string
-			protocol: string | null
-		}
-		endCall(...args: unknown[]): DecoderOutput | null
 	}
 	const oracle = new NonDmrOracle()
 	let nowMs = 0
-	const start = internals.startPendingCall.bind(internals)
-	vi.spyOn(internals, "startPendingCall").mockImplementation((...args) => {
-		const call = start(...args)
-		oracle.born(call.callId, call.protocol, nowMs)
-		return call
-	})
-	const end = internals.endCall.bind(internals)
-	vi.spyOn(internals, "endCall").mockImplementation((...args) => {
-		const call = internals.callState
-		const out = end(...args)
-		if (call) oracle.ended(call.callId)
-		return out
-	})
 	const pubs: Pub[] = []
 	const violations: string[] = []
 	const linked: string[] = []
 	let ends = 0
 	const judge = (pub: Omit<Pub, "verdict">) => {
-		const verdict = oracle.judge(pub)
+		const verdict = oracle.judge({ ...pub, atMs: nowMs })
 		pubs.push({ ...pub, verdict })
 		if (verdict !== null)
 			violations.push(`${pub.kind} ${pub.protocol} at ${nowMs}: ${verdict}`)
@@ -393,6 +375,27 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 			expectLinked(replay("p25", items, [P1_FILE(), P1_FILE(58, 99)]), [
 				"56/1234",
 			])
+		})
+
+		it("(d) a clear LDU2 of the next over, after a failed LDU1, is not credited to the open call", () => {
+			// Call A: two superframes, no ALG print, no terminator. Then over B:
+			// its HDU inside the re-key gap, an LDU1 whose LCW failed (no IDs),
+			// a clear LDU2, then an LDU1 naming 58/99, a clear LDU2, a TDU.
+			const items: Item[] = [
+				...p25Over(0, { superframes: 2, end: false }),
+				[900, P1("HDU")],
+				[1080, P1("LDU1")],
+				[1080, " LCW FEC ERR"],
+				[1260, P1("LDU2")],
+				[1260, " LDU2 ALG ID: 0x80 KEY ID: 0x0000"],
+				[1440, P1("LDU1")],
+				[1440, LCW(58, 99)],
+				[1620, P1("LDU2")],
+				[1620, LDU2_CLEAR],
+				[1640, P1("TDU")],
+			]
+			const trace = replay("p25", items, [P1_FILE(), P1_FILE(58, 99)])
+			expectLinked(trace, ["58/99"])
 		})
 	})
 

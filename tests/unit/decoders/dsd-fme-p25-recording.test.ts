@@ -54,9 +54,14 @@ describe("dsd-fme P25 recording link", () => {
 				})
 				const adapter = d as unknown as Internals
 				vi.setSystemTime(start)
-				adapter.handleOutputLine("Sync: +P25p1")
+				adapter.handleOutputLine("Sync: +P25p1 LDU1")
 				adapter.handleOutputLine("nac: [ 1b] src: [ 1234] tg: [ 56]")
+				// The LDU1's link control names the call its LDU2 may prove clear.
+				adapter.handleOutputLine(
+					" Group Voice Channel User - Group 56 Source 1234",
+				)
 				vi.setSystemTime(start.getTime() + 50)
+				adapter.handleOutputLine("Sync: +P25p1 LDU2")
 				adapter.handleOutputLine(algLine)
 				vi.setSystemTime(start.getTime() + 5000)
 				adapter.checkCallTimeoutAsync()
