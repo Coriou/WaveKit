@@ -36,7 +36,7 @@
  * - the map (1280×800, the Map view, Activity open, then each other viewport): the map's chrome is laid out with
  *   the rest (I1, I2, I7 and V), the Live chip stays off the dock and keeps its rectangle when the drawer opens.
  * The settled cells run with CSS transitions and animations switched off, so every box is a settled one.
- * `ticks` says how many samples (animation frames and 8 ms timer ticks) each motion sample took.
+ * `ticks` says how many animation frames each motion sample saw (from its action on).
  * The report gains `layout`; exit 1 on any violation.
  */
 import type { Page } from "playwright-core"
@@ -338,17 +338,23 @@ const describeViolation = (v: Violation) =>
 		? `I2 ${v.a} outside the window's margin`
 		: `I1 ${v.a} and ${v.b ?? ""}: ${v.kind === "intersect" ? "intersect" : `${Math.round(v.gap ?? 0)} px apart, need ${v.need ?? 0}`}`
 
-/** Samples every slot box on each animation frame for `ms` while `act` runs; the intersections seen. */
+/** Samples every slot box on each animation frame (distinct rAF timestamps only) for `ms` from the action (a
+ * capturing pointerdown, keydown or `wk:act` marks t0; Node waits on the page's done flag); the intersections seen. */
 async function framesDuring(
 	page: Page,
 	act: () => Promise<void>,
 	ms = 400,
 ): Promise<string[]> {
 	await page.evaluate(ms => {
-		const w = window as unknown as { __wkFrames?: string[]; __wkTicks?: number }
+		const w = window as unknown as {
+			__wkFrames?: string[]
+			__wkTicks?: number
+			__wkFramesDone?: boolean
+		}
 		w.__wkFrames = []
 		w.__wkTicks = 0
-		const end = performance.now() + ms
+		w.__wkFramesDone = false
+		delete (window as unknown as { __wkActDone?: number }).__wkActDone
 		const tick = () => {
 			w.__wkTicks = (w.__wkTicks ?? 0) + 1
 			const boxes = [
@@ -379,21 +385,48 @@ async function framesDuring(
 						w.__wkFrames?.push(`${a.name} × ${b.name}`)
 				}
 		}
-		// every animation frame, and an 8 ms timer beside it (a headless page on a loaded host gives few frames; a box
-		// read mid-transition is the transition's current value either way)
-		const frame = () => {
-			tick()
-			if (performance.now() < end) requestAnimationFrame(frame)
+		let t0: number | null = null
+		const mark = () => {
+			if (t0 === null) t0 = performance.now()
 		}
-		const timer = () => {
-			tick()
-			if (performance.now() < end) setTimeout(timer, 8)
+		const types = ["pointerdown", "keydown", "hashchange", "wk:act"]
+		for (const t of types) window.addEventListener(t, mark, true)
+		const armed = performance.now()
+		let last = -1
+		const frame = (ts: number) => {
+			const now = performance.now()
+			// an action that sent no event is marked when it resolves
+			const done = (window as unknown as { __wkActDone?: number }).__wkActDone
+			if (t0 === null && done !== undefined) t0 = done
+			if (ts !== last && t0 !== null && now >= t0) tick()
+			last = ts
+			// a multi-step action (navigate, click, navigate back) is sampled until it has resolved, then `ms` more
+			const end =
+				t0 === null
+					? armed + 30_000
+					: done === undefined
+						? Infinity
+						: Math.max(t0 + ms + 160, done + ms)
+			if (now < end) requestAnimationFrame(frame)
+			else {
+				for (const t of types) window.removeEventListener(t, mark, true)
+				w.__wkFramesDone = true
+			}
 		}
 		requestAnimationFrame(frame)
-		setTimeout(timer, 0)
 	}, ms)
 	await act()
-	await new Promise(resolve => setTimeout(resolve, ms + 100))
+	await page.evaluate(() => {
+		;(window as unknown as { __wkActDone?: number }).__wkActDone =
+			performance.now()
+	})
+	await page.waitForFunction(
+		() =>
+			(window as unknown as { __wkFramesDone?: boolean }).__wkFramesDone ===
+			true,
+		undefined,
+		{ timeout: 40_000 },
+	)
 	const got = await page.evaluate(() => {
 		const w = window as unknown as { __wkFrames?: string[]; __wkTicks?: number }
 		return { seen: [...new Set(w.__wkFrames ?? [])], ticks: w.__wkTicks ?? 0 }
@@ -416,71 +449,143 @@ type Frame = Record<
 	} | null
 >
 
-/** Samples the named elements on every animation frame (and an 8 ms timer beside it) for `ms`, armed at the action:
- * its first sample is read synchronously before `act` is sent, so the state before the change is in the list. */
+/** A sampled action: the frames (the first one read before the action was sent, then one per animation frame from
+ * the action on), and how many animation frames fell inside the action's window. */
+interface Sampled {
+	frames: Frame[]
+	inWindow: number
+	/** The action's wall-clock time (Date.now() at t0), or null when no action was seen. */
+	at: number | null
+}
+
+/** Fewer animation frames than this inside the window prove nothing: the cell is unobserved. */
+const MIN_FRAMES = 3
+/** The sampled window after the action; every frame in it is checked. */
+const SAMPLE_MS = 600
+
+/** Samples the named elements on every animation frame (distinct rAF timestamps only, no timer ticks) for `ms` from
+ * the action (LY rules §7.2): armed in the page before it, a capturing listener (pointerdown, keydown, or a `wk:act`
+ * event a programmatic step dispatches) records t0, frames before t0 are dropped, sampling runs to t0 + ms + 160,
+ * and Node waits on the page's done flag. The first frame is read synchronously before `act` is sent. */
 async function sampleDuring(
 	page: Page,
 	named: Record<string, string>,
 	act: () => Promise<void>,
-	ms = 600,
-): Promise<Frame[]> {
-	await page.evaluate(named => {
-		const w = window as unknown as {
-			__wkSamples?: unknown[]
-			__wkSampleUntil?: number
-		}
-		const out: unknown[] = []
-		w.__wkSamples = out
-		// runs until the action has landed and `ms` more have passed (set below); 30 s at most
-		w.__wkSampleUntil = performance.now() + 30_000
-		const live = () => performance.now() < (w.__wkSampleUntil ?? 0)
-		const tick = () => {
-			const f: Record<string, unknown> = {}
-			for (const [name, sel] of Object.entries(named)) {
-				const el = document.querySelector(sel)
-				if (!el) {
-					f[name] = null
-					continue
+	ms = SAMPLE_MS,
+): Promise<Sampled> {
+	await page.evaluate(
+		({ named, ms }) => {
+			const w = window as unknown as {
+				__wkSamples?: unknown[]
+				__wkSampleDone?: boolean
+				__wkInWindow?: number
+				__wkSampleAt?: number | null
+			}
+			const out: unknown[] = []
+			w.__wkSamples = out
+			w.__wkSampleDone = false
+			w.__wkInWindow = 0
+			w.__wkSampleAt = null
+			const read = () => {
+				const f: Record<string, unknown> = {}
+				for (const [name, sel] of Object.entries(named)) {
+					const el = document.querySelector(sel)
+					if (!el) {
+						f[name] = null
+						continue
+					}
+					const r = el.getBoundingClientRect()
+					const holder = el.closest("[data-wk-state]")
+					f[name] = {
+						x: r.x,
+						y: r.y,
+						w: r.width,
+						h: r.height,
+						vis: getComputedStyle(el).visibility,
+						state: holder?.getAttribute("data-wk-state") ?? "",
+					}
 				}
-				const r = el.getBoundingClientRect()
-				const holder = el.closest("[data-wk-state]")
-				f[name] = {
-					x: r.x,
-					y: r.y,
-					w: r.width,
-					h: r.height,
-					vis: getComputedStyle(el).visibility,
-					state: holder?.getAttribute("data-wk-state") ?? "",
+				return f
+			}
+			let t0: number | null = null
+			const mark = () => {
+				if (t0 !== null) return
+				t0 = performance.now()
+				w.__wkSampleAt = Date.now()
+			}
+			const types = ["pointerdown", "keydown", "hashchange", "wk:act"]
+			for (const t of types) window.addEventListener(t, mark, true)
+			const armed = performance.now()
+			let last = -1
+			let inWindow = 0
+			// the state before the action, read now
+			out.push(read())
+			const frame = (ts: number) => {
+				const now = performance.now()
+				if (ts !== last) {
+					last = ts
+					if (t0 !== null && now >= t0) {
+						out.push(read())
+						if (now <= t0 + ms) inWindow++
+					}
+				}
+				// no action within 30 s: done, unobserved
+				const end = t0 === null ? armed + 30_000 : t0 + ms + 160
+				if (now < end) requestAnimationFrame(frame)
+				else {
+					for (const t of types) window.removeEventListener(t, mark, true)
+					w.__wkInWindow = inWindow
+					w.__wkSampleDone = true
 				}
 			}
-			out.push(f)
-		}
-		const frame = () => {
-			tick()
-			if (live()) requestAnimationFrame(frame)
-		}
-		const timer = () => {
-			tick()
-			if (live()) setTimeout(timer, 8)
-		}
-		// the state before the action, read now: an input task may run before the first timer or frame
-		tick()
-		requestAnimationFrame(frame)
-		setTimeout(timer, 0)
-	}, named)
-	// a loaded host may take a while to deliver the action (Playwright's checks before a click): the sampler runs on
-	// until it has landed, then `ms` more
-	await act()
-	await page.evaluate(ms => {
-		const w = window as unknown as { __wkSampleUntil?: number }
-		w.__wkSampleUntil = performance.now() + ms
-	}, ms)
-	await new Promise(resolve => setTimeout(resolve, ms + 100))
-	const got = await page.evaluate(
-		() => (window as unknown as { __wkSamples?: Frame[] }).__wkSamples ?? [],
+			requestAnimationFrame(frame)
+		},
+		{ named, ms },
 	)
-	ticks.push(got.length)
+	await act()
+	await page.waitForFunction(
+		() =>
+			(window as unknown as { __wkSampleDone?: boolean }).__wkSampleDone ===
+			true,
+		undefined,
+		{ timeout: 40_000 },
+	)
+	const got = await page.evaluate(() => {
+		const w = window as unknown as {
+			__wkSamples?: Frame[]
+			__wkInWindow?: number
+			__wkSampleAt?: number | null
+		}
+		return {
+			frames: w.__wkSamples ?? [],
+			inWindow: w.__wkInWindow ?? 0,
+			at: w.__wkSampleAt ?? null,
+		}
+	})
+	ticks.push(got.inWindow)
 	return got
+}
+
+/** Samples `act`; an unobserved sample (fewer than MIN_FRAMES in the window) is retried once, the same window,
+ * after `reset` puts the cell's starting state back. Still unobserved, it says so (it never passes unobserved). */
+async function sampleObserved(
+	page: Page,
+	named: Record<string, string>,
+	act: () => Promise<void>,
+	reset: () => Promise<void>,
+	ms = SAMPLE_MS,
+): Promise<Sampled & { unobserved: string | null }> {
+	let got = await sampleDuring(page, named, act, ms)
+	if (got.inWindow >= MIN_FRAMES) return { ...got, unobserved: null }
+	await reset()
+	got = await sampleDuring(page, named, act, ms)
+	return {
+		...got,
+		unobserved:
+			got.inWindow >= MIN_FRAMES
+				? null
+				: `unobserved: ${got.inWindow} animation frames in the ${ms} ms window (need ${MIN_FRAMES}), after one retry`,
+	}
 }
 
 /** The element at the centre of the first match is that element or inside it, and not inert (a click reaches it). */
@@ -502,6 +607,13 @@ async function hitsItself(page: Page, sel: string): Promise<boolean> {
 function listenOpening(frames: readonly Frame[]): string[] {
 	if (frames.length === 0) return ["P Listen opening: no frame sampled"]
 	const out: string[] = []
+	// the bottom rail's neighbour is there before the action (the dock, or the search button on a phone): a check of
+	// "never moved" against nothing proves nothing
+	const f0 = frames[0]
+	if (!f0?.["dock"] && !f0?.["find"])
+		out.push(
+			"P Listen opening: neither the dock nor the search button on frame 0",
+		)
 	const before = frames.findIndex(f => f["panel"] === null)
 	const after = frames.findIndex((f, i) => i > before && f["panel"] !== null)
 	if (before < 0 || after < 0)
@@ -538,7 +650,7 @@ function listenOpening(frames: readonly Frame[]): string[] {
 	return out
 }
 
-/** Samples (animation frames and timer ticks) each motion sample took. */
+/** Animation frames each motion sample saw from its action on. */
 let ticks: number[] = []
 
 export async function layoutFlow(
@@ -717,6 +829,14 @@ export async function layoutFlow(
 					dock: '[data-wk-slot="dock"]',
 					find: '[data-wk-slot="find"]',
 				}
+				const listenPanel = page.locator(LISTEN_NAMED.panel)
+				// a retry's starting state: the Listen panel closed and the layout settled
+				const closeListen = async () => {
+					if ((await listenPanel.count()) > 0)
+						await page.keyboard.press("Escape")
+					await listenPanel.waitFor({ state: "detached", timeout: STEP_MS })
+					await settled(page)
+				}
 				if (wide) {
 					// Programmatic opening preserves focus inside the yielding slot until the shell transfers it.
 					for (const slot of ["player", "card"]) {
@@ -741,10 +861,25 @@ export async function layoutFlow(
 						await control.focus()
 						if (!(await control.evaluate(el => el === document.activeElement)))
 							focusViolations.push(`could not focus ${slot} before yield`)
-						const opening = await sampleDuring(page, LISTEN_NAMED, () =>
-							toggle.evaluate(el => (el as HTMLButtonElement).click()),
+						const opening = await sampleObserved(
+							page,
+							LISTEN_NAMED,
+							() =>
+								toggle.evaluate(el => {
+									// a programmatic step marks its action for the sampler
+									window.dispatchEvent(new Event("wk:act"))
+									;(el as HTMLButtonElement).click()
+								}),
+							async () => {
+								await closeListen()
+								await control.focus()
+							},
 						)
-						focusViolations.push(...listenOpening(opening))
+						if (opening.unobserved)
+							focusViolations.push(
+								`P Listen opening over the ${slot}: ${opening.unobserved}`,
+							)
+						focusViolations.push(...listenOpening(opening.frames))
 						await page
 							.locator(`[data-wk-slot="${slot}"][data-yielded]`)
 							.waitFor({ state: "attached", timeout: STEP_MS })
@@ -754,12 +889,17 @@ export async function layoutFlow(
 							)
 						if (slot === "player") await toggle.click()
 					}
-				} else
-					focusViolations.push(
-						...listenOpening(
-							await sampleDuring(page, LISTEN_NAMED, () => toggle.click()),
-						),
+				} else {
+					const opening = await sampleObserved(
+						page,
+						LISTEN_NAMED,
+						() => toggle.click(),
+						closeListen,
 					)
+					if (opening.unobserved)
+						focusViolations.push(`P Listen opening: ${opening.unobserved}`)
+					focusViolations.push(...listenOpening(opening.frames))
+				}
 				const panel = page.locator(
 					'.wk-shell-island[data-island="listen"] .wk-shell-panel',
 				)
@@ -928,10 +1068,30 @@ export async function layoutFlow(
 				cells.push(await tunerOverReceipt(vp, volume))
 			}
 		}
+		// a sampled cell seen in too few frames is retried once from a reset start (panel closed, a fresh receipt with
+		// its own id); it never passes unobserved
 		async function tunerOverReceipt(
 			vp: string,
 			percent: number,
 		): Promise<LayoutCell> {
+			const first = await tunerOverReceiptOnce(vp, percent)
+			if (!first.unobserved) return first.cell
+			const tunerPanel = page.locator(
+				'.wk-shell-island[data-island="tuner"] .wk-shell-panel',
+			)
+			if ((await tunerPanel.count()) > 0) await page.keyboard.press("Escape")
+			await tunerPanel.waitFor({ state: "detached", timeout: STEP_MS })
+			const again = await tunerOverReceiptOnce(vp, percent + 1)
+			if (again.unobserved)
+				again.cell.violations.push(
+					`unobserved: fewer than ${MIN_FRAMES} animation frames in a sampled window, after one retry`,
+				)
+			return again.cell
+		}
+		async function tunerOverReceiptOnce(
+			vp: string,
+			percent: number,
+		): Promise<{ cell: LayoutCell; unobserved: boolean }> {
 			phase = `${vp}: the Tuner panel over the receipt`
 			const violations: string[] = []
 			const rects: Record<string, string> = {}
@@ -963,8 +1123,41 @@ export async function layoutFlow(
 					'.wk-shell-island[data-island="tuner"] [aria-controls][aria-expanded]',
 				)
 				.first()
-			// (a) the change, observed from the click: the receipt seen shown, then yielded under the panel
-			const opening = await sampleDuring(page, named, () => toggle.click())
+			// the focus on Undo when the panel opens by keyboard (a key pressed on Undo opens it, so the focus stays
+			// there until the shell hands it off): it must reach the Tuner's trigger, never fall to the body (LY rules
+			// §1.2). The flow binds the key for this one press; the keydown itself is the sampler's t0
+			const undo = page.locator(UNDO)
+			await undo.focus()
+			if (!(await undo.evaluate(el => el === document.activeElement)))
+				violations.push("setup: could not focus Undo before the panel opened")
+			// (a) the change, observed from the action: the receipt seen shown, then yielded under the panel
+			await toggle.evaluate(el => {
+				const open = (e: KeyboardEvent) => {
+					if (e.key !== "F8") return
+					window.removeEventListener("keydown", open)
+					e.preventDefault()
+					;(el as HTMLButtonElement).click()
+				}
+				window.addEventListener("keydown", open)
+			})
+			const sampled = await sampleDuring(page, named, () =>
+				page.keyboard.press("F8"),
+			)
+			if (!(await page.locator(named.panel).count()))
+				violations.push(
+					"the Tuner panel did not open from the key pressed on Undo",
+				)
+			let unobserved = sampled.inWindow < MIN_FRAMES
+			const opening = sampled.frames
+			// on every frame the panel stands, the receipt is out of sight in place (mounted, hidden: never drawn under
+			// or over it, never unmounted)
+			const under = opening.findIndex(
+				f => f["panel"] !== null && f["receipt"]?.vis !== "hidden",
+			)
+			if (under >= 0)
+				violations.push(
+					`frame ${under}: the receipt is visible (${opening[under]?.["receipt"]?.state ?? ""}) while the Tuner panel stands`,
+				)
 			const shownAt = opening.findIndex(
 				f => f["receipt"]?.vis === "visible" && f["receipt"]?.state === "shown",
 			)
@@ -1006,15 +1199,51 @@ export async function layoutFlow(
 			)
 			if (focusIn)
 				violations.push("the focus stayed in the notice region under the panel")
+			if (!(await toggle.evaluate(el => el === document.activeElement)))
+				violations.push(
+					"the focus did not move from Undo to the Tuner's trigger as the panel opened",
+				)
 			// (c) its clock does not run while covered: it outlives its whole time with the panel open
 			await new Promise(resolve => setTimeout(resolve, RECEIPT_MS + 1500))
 			if ((await page.locator(UNDO).count()) === 0)
 				violations.push(
 					"the receipt's Undo expired under the open Tuner panel (its clock ran while covered)",
 				)
-			const closing = await sampleDuring(page, named, () =>
+			const closed = await sampleDuring(page, named, () =>
 				page.keyboard.press("Escape"),
 			)
+			if (closed.inWindow < MIN_FRAMES) unobserved = true
+			const closing = closed.frames
+			// no frame with the panel gone and the receipt still yielded (it is back in the same commit)
+			const stuck = closing.findIndex(
+				(f, i) =>
+					i > 0 && f["panel"] === null && f["receipt"]?.state === "yielded",
+			)
+			if (stuck >= 0)
+				violations.push(
+					`frame ${stuck}: the Tuner panel is gone but the receipt is still yielded`,
+				)
+			// and once the frames have stopped: the panel gone, the receipt (if it has not expired yet) not yielded
+			const afterClose = await page.evaluate(
+				sel => ({
+					panel:
+						document.querySelector(
+							'.wk-shell-island[data-island="tuner"] .wk-shell-panel',
+						) !== null,
+					state:
+						document
+							.querySelector(sel)
+							?.closest("[data-wk-state]")
+							?.getAttribute("data-wk-state") ?? null,
+				}),
+				RECEIPT_SEL,
+			)
+			if (afterClose.panel)
+				violations.push("the Tuner panel is still open after Escape")
+			else if (afterClose.state === "yielded")
+				violations.push(
+					"the receipt stays yielded after the Tuner panel closed and the frames settled",
+				)
 			const hiddenFirst = closing.findIndex(
 				f => f["receipt"]?.state === "yielded",
 			)
@@ -1029,14 +1258,20 @@ export async function layoutFlow(
 				violations.push(
 					`no observed change of the receipt from yielded back to shown as the panel closed (${closing.length} frames)`,
 				)
-			const closedAt = Date.now()
-			const after = await settled(page)
-			const r1 = after.slots.find(sl => sl.name === "status:receipt")
+			// from the Escape itself (the sampler's t0): the receipt is shown again in that commit
+			const closedAt = closed.at ?? Date.now()
+			// where it is back: the first sampled frame it shows again (a later read may come after its remaining time
+			// on a starved page)
+			const r1 = backAt >= 0 ? (closing[backAt]?.["receipt"] ?? null) : null
 			if (!r1)
 				violations.push("the receipt is not shown after the panel closed")
 			else if (r0 && fmt(r0) !== fmt(r1))
 				violations.push(`the receipt moved: ${fmt(r0)} → ${fmt(r1)}`)
-			if (!(await hitsItself(page, UNDO)))
+			// still there: Undo is reachable (gone already: its expiry time below says whether that was early)
+			if (
+				!(await hitsItself(page, UNDO)) &&
+				(await page.locator(UNDO).count()) > 0
+			)
 				violations.push(
 					"Undo is not the element at its own centre after the panel closed",
 				)
@@ -1059,10 +1294,13 @@ export async function layoutFlow(
 					)
 			}
 			return {
-				viewport: vp,
-				drawer: "none, Tuner panel over the receipt",
-				rects,
-				violations,
+				cell: {
+					viewport: vp,
+					drawer: "none, Tuner panel over the receipt",
+					rects,
+					violations,
+				},
+				unobserved,
 			}
 		}
 

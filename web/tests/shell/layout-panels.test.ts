@@ -322,6 +322,11 @@ const statusArb: fc.Arbitrary<StatusItem[]> = fc
 	.record({
 		receipt: fc.option(size([100, 400], [36, 72]), { nil: null }),
 		condition: fc.option(size([120, 560], [36, 72]), { nil: null }),
+		// the guests outside the notice region: the connection chip, back to live, the paused label, plot notes
+		connection: fc.option(size([120, 420], [32, 48]), { nil: null }),
+		backToLive: fc.option(size([100, 240], [32, 48]), { nil: null }),
+		paused: fc.option(size([100, 240], [24, 40]), { nil: null }),
+		notes: fc.array(size([80, 320], [24, 48]), { maxLength: 2 }),
 	})
 	.map(o => [
 		...(o.condition
@@ -346,6 +351,35 @@ const statusArb: fc.Arbitrary<StatusItem[]> = fc
 					},
 				]
 			: []),
+		...(o.connection
+			? [
+					{
+						id: "connection",
+						kind: "connection" as const,
+						forms: {
+							full: o.connection,
+							compact: { w: 120, h: o.connection.h },
+						},
+					},
+				]
+			: []),
+		...(o.backToLive
+			? [
+					{
+						id: "back-to-live",
+						kind: "back-to-live" as const,
+						forms: { full: o.backToLive },
+					},
+				]
+			: []),
+		...(o.paused
+			? [{ id: "paused", kind: "paused" as const, forms: { full: o.paused } }]
+			: []),
+		...o.notes.map((full, n) => ({
+			id: `note:${n}`,
+			kind: "note" as const,
+			forms: { full },
+		})),
 	])
 
 const drawerArb: fc.Arbitrary<DrawerInput | null> = fc.option(
@@ -452,10 +486,61 @@ function build(
 	}
 }
 
+/**
+ * The open panel's room from LY rules §2.2, computed from the frame (its islands, the dock, the search button) and
+ * the scenario: panelTop.tuner = stacked ? bottom(tuner) + PG : topRail + PG, panelTop.receiver = topRail + PG, the
+ * cap = railTop − PG − panelTop (Listen: railTop − PG − (topRail + PG)), h = min(measured, cap) or the cap while
+ * pending; Listen's width is the reserve (clamp(420, listen.w, W − 3G − dock.w) with the dock, else clamp(420,
+ * listen.w, W − 2G − find.w − NG)); a pending room is at least the card's width (340) wide.
+ */
+function expectedRoom(
+	L: ReturnType<typeof computeLayout>,
+	open: IslandId | null,
+	measured: number | null,
+): Rect | null {
+	if (!open) return null
+	const G = 16
+	const PG = 8
+	const W = L.viewport.w
+	const bottom = (b: Rect) => b.y + b.h
+	const topRail = Math.max(bottom(L.tuner), bottom(L.receiver))
+	const railTop = Math.min(
+		L.listen.y,
+		L.dock?.y ?? Infinity,
+		L.find?.y ?? Infinity,
+	)
+	const fit = (v: number, lo: number, hi: number) =>
+		Math.max(lo, Math.min(hi, v))
+	const reserveW = L.dock
+		? fit(LISTEN_OPEN_W, L.listen.w, W - 3 * G - L.dock.w)
+		: fit(
+				LISTEN_OPEN_W,
+				L.listen.w,
+				Math.max(L.listen.w, W - 2 * G - (L.find ? L.find.w + 8 : 0)),
+			)
+	expect(L.listenOpen.w).toBe(reserveW)
+	const top =
+		open === "tuner"
+			? L.stacked
+				? bottom(L.tuner) + PG
+				: topRail + PG
+			: open === "receiver"
+				? topRail + PG
+				: topRail + PG
+	const cap = Math.max(0, railTop - PG - top)
+	const h = measured === null ? cap : Math.min(measured, cap)
+	const islandW =
+		open === "tuner" ? L.tuner.w : open === "receiver" ? L.receiver.w : reserveW
+	const w = measured === null ? Math.max(islandW, 340) : islandW
+	if (open === "tuner") return r(L.tuner.x, top, w, h)
+	if (open === "receiver") return r(L.receiver.x + L.receiver.w - w, top, w, h)
+	return r(G, railTop - PG - h, w, h)
+}
+
 describe("Rule P properties", () => {
 	it("no shown slot overlaps the open Listen head or the dock, in transitions and during a stationary drag", () => {
 		// Feature: layout, Property 1: the open Listen head and the dock are never covered
-		// Validates: LY rules §2
+		// Validates: Requirements LY.2
 		fc.assert(
 			fc.property(scenario, s => {
 				const L = computeLayout(build(s))
@@ -489,17 +574,28 @@ describe("Rule P properties", () => {
 
 	it("a status item within PANEL_GAP of an open panel's room yields, and is never seen while it does", () => {
 		// Feature: layout, Property 2: occluded status items yield (unseen, timer paused)
-		// Validates: LY rules §2
+		// Validates: Requirements LY.2
 		fc.assert(
 			fc.property(scenario, s => {
 				const inp = build(s)
 				const L = computeLayout(inp)
-				const rooms = L.panelRooms
-				if (!s.open) expect(rooms).toEqual([])
-				else expect(rooms.length).toBe(1)
+				// the room from the rule's formulas (LY rules §2.2) and the frame alone, never from L.panelRooms
+				const room = expectedRoom(L, s.open, s.measured ? s.panelH : null)
+				if (!s.open) expect(L.panelRooms).toEqual([])
+				else expect(L.panelRooms).toEqual([room])
 				for (const i of L.status.items) {
-					const near = rooms.some(p => separation(p, i) < PANEL_GAP)
+					const near =
+						room !== null &&
+						room.w > 0 &&
+						room.h > 0 &&
+						i.w > 0 &&
+						i.h > 0 &&
+						separation(room, i) < PANEL_GAP
 					expect(L.yielded.includes(`status:${i.id}`), i.id).toBe(near)
+					// every guest reads this one state (the chip, back to live, the paused label, the notes, the toasts)
+					const state = statusState(L, i.id, true)
+					if (near) expect(state, i.id).toBe("yielded")
+					else expect(["shown", "held"], i.id).toContain(state)
 					if (near) {
 						expect(statusSeen(statusState(L, i.id, true))).toBe(false)
 						expect(namedRects(L).some(n => n.name === `status:${i.id}`)).toBe(

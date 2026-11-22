@@ -97,7 +97,6 @@ describe("notice region markup", () => {
 			html.indexOf('data-class="receipt"'),
 		)
 		expect(receipt).toMatch(/^[^>]*data-wk-state="yielded"/)
-		expect(receipt).toMatch(/^[^>]*data-yielded=""/)
 		expect(receipt).toMatch(/^[^>]*inert=""/)
 		// in place: it keeps its rectangle
 		expect(receipt).toMatch(/^[^>]*data-wk-rect="472,22,220,44"/)

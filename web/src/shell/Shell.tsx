@@ -57,13 +57,14 @@ import {
 	DEFAULT_SIZES,
 	PLAYER_STOREY_W,
 	stablePlot,
+	unseenStatusSlots,
 	type Layout,
 	type LayoutInput,
 	type Rect,
 	type Size,
 } from "./layout/compute.ts"
 import { union } from "./layout/geometry.ts"
-import { bottomLeft, slotAttrs, topLeft } from "./layout/slot.ts"
+import { bottomLeft, focusInUnseen, slotAttrs, topLeft } from "./layout/slot.ts"
 import {
 	cardLineForced,
 	cardMinimised,
@@ -463,22 +464,21 @@ export function Shell({
 	const heldSet = new Set(L.held)
 	const cardYielded = L.yielded.includes("card")
 	const playerYielded = L.yielded.includes("player")
-	const statusYielded = L.yielded.some(y => y.startsWith("status:"))
+	// the status slots the reader cannot see now (yielded under the panel, docked in a yielded host, held, waiting)
+	const unseenKey = unseenStatusSlots(L).join(" ")
 	useLayoutEffect(() => {
 		if (!state.panel) return
 		const active = document.activeElement
-		// a yielded slot holding the focus hands it to the open panel's trigger (it is inert now)
-		const inYieldedToast =
-			statusYielded &&
-			active instanceof Element &&
-			active.closest(".wk-notice[data-yielded]") !== null
+		// a slot holding the focus that the reader cannot see hands it to the open panel's trigger (it is inert now,
+		// and the browser would drop the focus to the body): the card, the player, or any unseen status item
 		if (
 			(cardYielded && els.current["card"]?.contains(active)) ||
 			(playerYielded && els.current["player"]?.contains(active)) ||
-			inYieldedToast
+			(active instanceof Element &&
+				focusInUnseen(active, unseenKey === "" ? [] : unseenKey.split(" ")))
 		)
 			refocus(`panel:${state.panel}`)
-	}, [cardYielded, playerYielded, statusYielded, state.panel, refocus])
+	}, [cardYielded, playerYielded, unseenKey, state.panel, refocus])
 
 	const glideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 	useLayoutEffect(() => {

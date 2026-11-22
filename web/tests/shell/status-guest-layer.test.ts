@@ -26,26 +26,60 @@ describe("status guests render inside the shell, under its panels and the palett
 
 	it("a guest is pending (out of sight) unless it is placed or in the drawer's slot", () => {
 		const at = { x: 600, y: 22, w: 200, h: 44 }
-		// docked before the slot mounts: pending, no rectangle
-		const early = guestPlacement("connection", true, null, null, false)
+		// docked before the slot mounts: pending, no rectangle, waiting and inert
+		const early = guestPlacement("connection", true, null, null, "waiting")
 		expect(early["data-pending"]).toBe("")
 		expect(early["data-wk-rect"]).toBeUndefined()
-		// docked in the slot: laid out by the slot, shown
-		const inSlot = guestPlacement("connection", true, slot, null, false)
+		expect(early["data-wk-state"]).toBe("waiting")
+		expect(early.inert).toBe(true)
+		// docked in the slot: laid out by the slot, seen
+		const inSlot = guestPlacement("connection", true, slot, null, "docked")
 		expect(inSlot["data-pending"]).toBeUndefined()
 		expect(inSlot.style).toBeUndefined()
+		expect(inSlot["data-wk-state"]).toBe("docked")
+		expect(inSlot.inert).toBe(false)
 		// placed: at its rectangle; held while the card glides through it
-		const placed = guestPlacement("connection", false, null, at, false)
+		const placed = guestPlacement("connection", false, null, at, "shown")
 		expect(placed["data-wk-rect"]).toBe("600,22,200,44")
 		expect(placed["data-pending"]).toBeUndefined()
 		expect(placed.style).toMatchObject({ left: 600, top: 22 })
-		expect(
-			guestPlacement("connection", false, null, at, true)["data-held"],
-		).toBe("")
+		expect(placed.inert).toBe(false)
+		const held = guestPlacement("connection", false, null, at, "held")
+		expect(held["data-held"]).toBe("")
+		expect(held.inert).toBe(true)
 		// waiting (not placed, not docked): pending
 		expect(
-			guestPlacement("connection", false, slot, null, false)["data-pending"],
+			guestPlacement("connection", false, slot, null, "waiting")[
+				"data-pending"
+			],
 		).toBe("")
+	})
+
+	it("a guest under an open panel's room yields in place: its state on the element, inert, hidden by slots.css", () => {
+		const at = { x: 16, y: 144, w: 200, h: 36 }
+		for (const id of ["connection", "back-to-live", "paused", "note:0"]) {
+			const g = guestPlacement(id, false, null, at, "yielded")
+			expect(g["data-wk-slot"]).toBe(`status:${id}`)
+			expect(g["data-wk-rect"]).toBe("16,144,200,36")
+			expect(g["data-wk-state"]).toBe("yielded")
+			expect(g.inert).toBe(true)
+		}
+		// docked in a yielded host: in the slot, yielded with it
+		const docked = guestPlacement("connection", true, slot, null, "yielded")
+		expect(docked["data-wk-state"]).toBe("yielded")
+		expect(docked.inert).toBe(true)
+		expect(src("shell/layout/slots.css")).toContain(
+			'.wk-shell .wk-status-guest[data-wk-state="yielded"]',
+		)
+	})
+
+	it("every guest reads its state through statusState (the chip and StatusGuest alike)", () => {
+		for (const file of [
+			"shell/layout/StatusGuest.tsx",
+			"features/connection/ConnectionChip.tsx",
+		])
+			expect(src(file)).toContain("useGuestPlace(")
+		expect(src("shell/layout/StatusGuest.tsx")).toContain("statusState(l, id")
 	})
 
 	it("stacks the guest layer under an open island panel and the palette's scrim", () => {

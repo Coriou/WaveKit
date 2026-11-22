@@ -82,6 +82,30 @@ export function toastItem(
 		: { id, kind: "receipt", forms: { full } }
 }
 
+/** Each toast's state and whether the reader sees it (its timer runs only then): the region's one reading of the
+ * layout (`statusState`), absent while the region is not visible (no toast, or the palette open). */
+export function toastStates(
+	layout: Pick<Layout, "status" | "held" | "yielded">,
+	visible: boolean,
+	dockTarget: boolean,
+): {
+	readonly receiptState: StatusState
+	readonly conditionState: StatusState
+	readonly receiptSeen: boolean
+	readonly conditionSeen: boolean
+} {
+	const stateOf = (id: "condition" | "receipt"): StatusState =>
+		visible ? statusState(layout, id, dockTarget) : "absent"
+	const receiptState = stateOf("receipt")
+	const conditionState = stateOf("condition")
+	return {
+		receiptState,
+		conditionState,
+		receiptSeen: statusSeen(receiptState),
+		conditionSeen: statusSeen(conditionState),
+	}
+}
+
 export function NoticeRegion({
 	status,
 	held = [],
@@ -162,17 +186,22 @@ export function NoticeRegion({
 	const docked = status.where === "drawer-slot" && slot !== null
 	// a toast's timer runs only while the reader can see it and reach its controls (LY rules §1.2): placed and not
 	// held or yielded, or docked in a shown host whose notice slot exists
-	const stateOf = (id: "condition" | "receipt"): StatusState =>
-		visible
-			? statusState({ status, held, yielded }, id, slot !== null)
-			: "absent"
-	const receiptState = stateOf("receipt")
-	const conditionState = stateOf("condition")
-	const receiptSeen = statusSeen(receiptState)
-	const conditionSeen = statusSeen(conditionState)
+	const { receiptState, conditionState, receiptSeen, conditionSeen } =
+		toastStates({ status, held, yielded }, visible, slot !== null)
+	// the toast under the pointer, if any: its hover pause ends when it leaves `shown` (yielded, held, waiting or
+	// gone: no pointerleave comes then), so a hidden toast never keeps the other's clock stopped
+	const hovered = useRef<"condition" | "receipt" | null>(null)
 	useLayoutEffect(() => {
 		service.setUnseen("receipt", !receiptSeen)
 		service.setUnseen("condition", !conditionSeen)
+		const h = hovered.current
+		if (
+			(h === "receipt" && !receiptSeen) ||
+			(h === "condition" && !conditionSeen)
+		) {
+			hovered.current = null
+			service.setPaused("hover", false)
+		}
 	}, [service, receiptSeen, conditionSeen])
 	useEffect(
 		() => () => {
@@ -185,6 +214,7 @@ export function NoticeRegion({
 	// hover pause never stays behind; a toast button that had the focus gets it back on its new element (same
 	// toast, same control), so the focus pause stays only then
 	useLayoutEffect(() => {
+		hovered.current = null
 		service.setPaused("hover", false)
 		const f = lastFocus.current
 		const active = document.activeElement
@@ -233,6 +263,7 @@ export function NoticeRegion({
 					place={at("condition")}
 					docked={docked}
 					state={conditionState}
+					hovered={hovered}
 				/>
 			)}
 			{receipt && (
@@ -243,12 +274,16 @@ export function NoticeRegion({
 					place={at("receipt")}
 					docked={docked}
 					state={receiptState}
+					hovered={hovered}
 				/>
 			)}
 		</div>
 	)
 	return docked ? createPortal(region, slot) : region
 }
+
+/** The toast the pointer is over (its hover pause), shared by the region and its toasts. */
+type HoveredRef = { current: "condition" | "receipt" | null }
 
 /** A toast's slot: its rectangle and form from the layout, or measured out of sight until it has one. Its state
  * (`statusState`) is on the element; a toast the reader cannot see is `inert` (out of the focus order). */
@@ -258,23 +293,24 @@ function placement(
 	docked: boolean,
 	service: NoticeService,
 	state: StatusState,
+	hovered: HoveredRef,
 ): HTMLAttributes<HTMLDivElement> & {
 	readonly [data: `data-${string}`]: string | number | undefined
 } {
 	const hover = {
-		onPointerEnter: () => service.setPaused("hover", true),
-		onPointerLeave: () => service.setPaused("hover", false),
+		onPointerEnter: () => {
+			hovered.current = id
+			service.setPaused("hover", true)
+		},
+		onPointerLeave: () => {
+			if (hovered.current === id) hovered.current = null
+			service.setPaused("hover", false)
+		},
 	}
-	const vis = {
-		"data-wk-state": state,
-		"data-yielded": state === "yielded" ? "" : undefined,
-		inert: !statusSeen(state),
-	}
-	if (docked) return { ...slotAttrs(`status:${id}`, null), ...vis, ...hover }
+	if (docked) return { ...slotAttrs(`status:${id}`, null, state), ...hover }
 	const form: StatusForm = place?.form ?? "full"
 	return {
-		...slotAttrs(`status:${id}`, place),
-		...vis,
+		...slotAttrs(`status:${id}`, place, state),
 		"data-form": form,
 		"data-lines": place?.lines ?? 1,
 		"data-pending": place ? undefined : "",
@@ -294,12 +330,14 @@ function ConditionToast({
 	place,
 	docked,
 	state,
+	hovered,
 }: {
 	shown: ShownCondition
 	service: NoticeService
 	place: StatusPlaced | null
 	docked: boolean
 	state: StatusState
+	hovered: HoveredRef
 }) {
 	return (
 		<div
@@ -310,7 +348,7 @@ function ConditionToast({
 			data-key={shown.key}
 			data-tone={shown.tone}
 			title={place && place.form !== "full" ? shown.text : undefined}
-			{...placement("condition", place, docked, service, state)}
+			{...placement("condition", place, docked, service, state, hovered)}
 			onFocus={() => service.setFocusedToast(shown.id)}
 		>
 			{shown.tone === "warn" && <WarnGlyph />}
@@ -349,12 +387,14 @@ function ReceiptToast({
 	place,
 	docked,
 	state,
+	hovered,
 }: {
 	receipt: Receipt
 	service: NoticeService
 	place: StatusPlaced | null
 	docked: boolean
 	state: StatusState
+	hovered: HoveredRef
 }) {
 	const button = receipt.action !== undefined || receipt.undo !== undefined
 	return (
@@ -365,7 +405,7 @@ function ReceiptToast({
 			data-toast-id={receipt.id}
 			data-tone={receipt.tone}
 			title={place && place.lines === 2 ? receipt.text : undefined}
-			{...placement("receipt", place, docked, service, state)}
+			{...placement("receipt", place, docked, service, state, hovered)}
 			onFocus={() => service.setFocusedToast(receipt.id)}
 		>
 			{receipt.tone === "warn" && <WarnGlyph />}

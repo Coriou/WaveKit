@@ -11,9 +11,11 @@ import { createPortal } from "react-dom"
 
 import { isReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
-import { guestPlacement } from "../../shell/layout/StatusGuest.tsx"
 import {
-	dockedSlot,
+	guestPlacement,
+	useGuestPlace,
+} from "../../shell/layout/StatusGuest.tsx"
+import {
 	guestLayer,
 	guestTarget,
 	publishedLayout,
@@ -28,20 +30,8 @@ export function ConnectionChip() {
 	const { data } = useServices()
 	const connection = useStore(data.connection)
 	const access = useStore(data.access)
-	const placed = useStore(
-		publishedLayout,
-		l => l?.status.items.find(i => i.id === ID) ?? null,
-	)
-	const docked = useStore(
-		publishedLayout,
-		l => l?.status.docked.includes(ID) ?? false,
-	)
-	const held = useStore(
-		publishedLayout,
-		l => l?.held.includes(`status:${ID}`) ?? false,
-	)
+	const { placed, docked, state, slot } = useGuestPlace(ID)
 	const shell = useStore(publishedLayout, l => l !== null)
-	const slot = useStore(dockedSlot)
 	const layer = useStore(guestLayer)
 	const [pairing, setPairing] = useState(false)
 	const chip = useRef<HTMLElement | null>(null)
@@ -144,7 +134,7 @@ export function ConnectionChip() {
 	const guest = (
 		<div
 			className="wk-status-guest"
-			{...guestPlacement(ID, docked, slot, placed, held)}
+			{...guestPlacement(ID, docked, slot, placed, state)}
 		>
 			{content}
 		</div>

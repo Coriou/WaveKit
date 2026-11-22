@@ -1157,8 +1157,11 @@ Condensed + Noto Sans, Tabler-based icons).
     8 px of the open panel's room yields too (on a phone the Tuner or Receiver panel over the
     strip): out of sight in place and inert, its timer paused; it comes back with the time it had
     left when the panel closes, so a receipt's Undo is never lost under a panel. A docked item
-    yields with its drawer when the panel covers that. The notice region decides a toast's
-    render, inert state, focus and timer from one layout predicate (`statusState`). A panel opened this
+    yields with its drawer when the panel covers that. The notice region and every status guest
+    (the connection chip, back to live, the paused label, plot notes) decide their render, inert
+    state, focus and timer from one layout predicate (`statusState`), carried on the element as
+    `data-wk-state`. Focus inside an item the reader cannot see moves to the open panel's
+    trigger, so it never falls to the page. A panel opened this
     frame and not measured yet counts as all the room it may take (its island's column, as tall
     as its cap), so the card is never drawn over it, not even for the first frames. Nothing moves
     for a popover, and no island lies over an open panel, so a hint inside it never meets one. A

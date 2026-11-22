@@ -488,8 +488,9 @@ async function noRoomNotExpanded(page: Page, id: string): Promise<string[]> {
 				described: (document.getElementById(d)?.textContent ?? "").length > 0,
 			}
 		}, id)
-	// the lines grow before the hint opens: a cut bubble's box would not change, so nothing would re-place it
-	await page.keyboard.press("Escape")
+	// the lines grow before the hint opens: a cut bubble's box would not change, so nothing would re-place it.
+	// Close an open hint only: an Escape with none open would close the panel
+	if ((await measure(page, id)).open) await page.keyboard.press("Escape")
 	await page.evaluate(markId => {
 		const style = document.createElement("style")
 		style.id = "wk-flow-no-room"
@@ -725,7 +726,8 @@ async function mouseAndFocus(
 	if ((await measure(page, id)).open) await page.keyboard.press("Escape")
 	const mark = panel.locator(`[data-wk-hint-mark="${id}"]`)
 	const away = { x: 4, y: Math.round(height / 2) }
-	await intoView(page, mark)
+	if (!(await intoView(page, mark)))
+		step(`${vp}: ${id} mouse and focus`, false, "not brought into view")
 	// a real mouse move onto the mark (no actionability wait: a loaded page draws too few frames for it)
 	const overMark = async () => {
 		const at = await mark.boundingBox({ timeout: 5_000 })
@@ -1262,27 +1264,59 @@ export async function hintsFlow(
 				if (!(await intoView(page, mark)))
 					step(`${vp.name}: ${id} tap`, false, "not brought into view")
 				await page.waitForTimeout(150)
-				// a tap: a touch pointer, then the click it makes
-				await mark.evaluate(el => {
+				// a tap: a touch pointer, then the click it makes, sent only where a finger would land on the mark (the
+				// element at its box's centre is the mark or inside it)
+				const reached = await mark.evaluate(el => {
+					const r = el.getBoundingClientRect()
+					const at = document.elementFromPoint(
+						r.x + r.width / 2,
+						r.y + r.height / 2,
+					)
+					if (r.width <= 0 || !at || !(at === el || el.contains(at)))
+						return false
 					const opts = { bubbles: true, pointerType: "touch", isPrimary: true }
 					el.dispatchEvent(new PointerEvent("pointerdown", opts))
 					el.dispatchEvent(new PointerEvent("pointerup", opts))
 					;(el as HTMLElement).click()
+					return true
 				})
 				const tapped = await settled(page, id)
 				const problems = [...tapped.problems]
+				if (!reached)
+					problems.push(
+						"the mark is not the element at its own centre (a tap would miss it)",
+					)
 				if (!tapped.open) problems.push("a tap did not pin it")
 				if (tapped.expanded !== "true") problems.push("mark not expanded")
-				// a tap elsewhere in the panel closes it
-				await page.evaluate(() => {
-					const where = document.querySelector(".wkf-ls-cap")
-					where?.dispatchEvent(
-						new PointerEvent("pointerdown", {
-							bubbles: true,
-							pointerType: "touch",
-						}),
-					)
+				// a tap elsewhere in the panel closes it: at a point of the panel where a finger lands on the panel itself
+				// (the element there is inside it, not the bubble, a mark or a control), found on a grid over its box
+				const elsewhere = await mark.evaluate(el => {
+					const panel = el.closest(".wk-shell-panel")
+					if (!panel) return false
+					const r = panel.getBoundingClientRect()
+					const busy =
+						"[data-wk-hint-bubble], [data-wk-hint-mark], button, input, select, textarea, a, label, [role=slider], [tabindex]"
+					for (let fy = 0.1; fy < 1; fy += 0.1)
+						for (let fx = 0.1; fx < 1; fx += 0.1) {
+							const at = document.elementFromPoint(
+								r.x + r.width * fx,
+								r.y + r.height * fy,
+							)
+							if (!at || !panel.contains(at) || at.closest(busy)) continue
+							at.dispatchEvent(
+								new PointerEvent("pointerdown", {
+									bubbles: true,
+									pointerType: "touch",
+								}),
+							)
+							return true
+						}
+					return false
 				})
+				if (!elsewhere)
+					problems.push(
+						"no point of the panel a tap elsewhere could land on (all covered or controls)",
+					)
 				await within(2_000, async () => !(await measure(page, id)).open)
 				if ((await measure(page, id)).open)
 					problems.push("a tap elsewhere left it open")

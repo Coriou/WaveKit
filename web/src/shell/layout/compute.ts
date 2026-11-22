@@ -313,7 +313,7 @@ const STATE_ORDER: readonly StatusKind[] = [
 	"note",
 ]
 
-interface Pick {
+interface StatusPick {
 	item: StatusItem
 	form: StatusForm
 	lines: 1 | 2
@@ -339,13 +339,13 @@ function fitRail(
 	const receipt = items.find(i => i.kind === "receipt") ?? null
 	let state = STATE_ORDER.flatMap(k => items.filter(i => i.kind === k))
 	const waiting: string[] = []
-	const one = (item: StatusItem): Pick => ({
+	const one = (item: StatusItem): StatusPick => ({
 		item,
 		form: "full",
 		lines: 1,
 		size: item.forms.full,
 	})
-	const width = (ps: readonly Pick[]) =>
+	const width = (ps: readonly StatusPick[]) =>
 		ps.reduce((s, p) => s + p.size.w, 0) +
 		Math.max(0, ps.length - 1) * STATUS_GAP
 	for (;;) {
@@ -362,7 +362,7 @@ function fitRail(
 		// a lone item wraps to two lines at the slot's width before it changes form
 		const lone = (r ? 1 : 0) + s.length === 1
 		if (lone) {
-			const p = (r ?? s[0]) as Pick
+			const p = (r ?? s[0]) as StatusPick
 			const w = wrapAt(p.item.forms.full, slot.w)
 			if (w) {
 				const placed = { ...p, lines: w.lines, size: w.size }
@@ -398,9 +398,13 @@ function fitRail(
 	}
 }
 
-function place(r: Pick | null, s: readonly Pick[], slot: Rect): StatusPlaced[] {
+function place(
+	r: StatusPick | null,
+	s: readonly StatusPick[],
+	slot: Rect,
+): StatusPlaced[] {
 	// an item taller than the row is clamped to it (centred, never above the window's margin)
-	const at = (p: Pick, x: number): StatusPlaced => {
+	const at = (p: StatusPick, x: number): StatusPlaced => {
 		const h = Math.min(p.size.h, STATUS_ROW_H)
 		return {
 			id: p.item.id,
@@ -1099,7 +1103,7 @@ export type StatusState =
 	| "absent"
 
 export function statusState(
-	layout: globalThis.Pick<Layout, "status" | "yielded" | "held">,
+	layout: Pick<Layout, "status" | "yielded" | "held">,
 	id: string,
 	dockTarget: boolean,
 ): StatusState {
@@ -1118,6 +1122,18 @@ export function statusState(
 /** The reader can see the item (and reach its controls): its timer runs only then. */
 export const statusSeen = (s: StatusState): boolean =>
 	s === "shown" || s === "docked"
+
+/** The status slots ("status:<id>") the reader cannot see now: every placed, docked or waiting item whose state is
+ * not seen (yielded in place, docked in a yielded host, held, waiting). The shell hands the focus out of them. */
+export function unseenStatusSlots(
+	layout: Pick<Layout, "status" | "yielded" | "held">,
+): string[] {
+	const st = layout.status
+	const ids = new Set([...st.items.map(i => i.id), ...st.docked, ...st.waiting])
+	return [...ids]
+		.filter(id => !statusSeen(statusState(layout, id, true)))
+		.map(id => `status:${id}`)
+}
 
 /** The islands the dragged card keeps clear of (every placed rectangle but the card's own). */
 export function cardObstacles(layout: Layout): Rect[] {

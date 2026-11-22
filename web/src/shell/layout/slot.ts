@@ -3,15 +3,56 @@
 // its own.
 import type { CSSProperties } from "react"
 
+import { statusSeen, type StatusState } from "./compute.ts"
 import { rectAttr, type Rect } from "./geometry.ts"
 
+/** A slot's attributes: its id and rectangle and, given its state, `data-wk-state` and `inert` while the reader
+ * cannot see it (LY rules §1.2: one predicate, `statusSeen`, for the render, the focus order and the timers). */
 export function slotAttrs(
 	id: string,
 	r: Rect | null,
-): { "data-wk-slot": string; "data-wk-rect"?: string } {
-	return r
+	state?: StatusState,
+): {
+	"data-wk-slot": string
+	"data-wk-rect"?: string
+	"data-wk-state"?: StatusState
+	inert?: boolean
+} {
+	const at = r
 		? { "data-wk-slot": id, "data-wk-rect": rectAttr(r) }
 		: { "data-wk-slot": id }
+	return state === undefined
+		? at
+		: { ...at, "data-wk-state": state, inert: !statusSeen(state) }
+}
+
+/** The structural part of an element the focus hand-off reads (a DOM Element is one). */
+export interface SlotNode {
+	closest(selector: string): SlotNode | null
+	getAttribute(name: string): string | null
+	readonly parentElement: SlotNode | null
+}
+
+/**
+ * The focus is inside a slot the reader cannot see (LY rules §1.2, focus hand-off): an enclosing slot listed in
+ * `unseen` ("status:<id>", from the layout: the DOM may not carry the new state yet), or an enclosing element whose
+ * `data-wk-state` is not seen (shown or docked).
+ */
+export function focusInUnseen(
+	active: SlotNode | null,
+	unseen: readonly string[],
+): boolean {
+	for (
+		let el = active?.closest("[data-wk-slot], [data-wk-state]") ?? null;
+		el !== null;
+		el = el.parentElement?.closest("[data-wk-slot], [data-wk-state]") ?? null
+	) {
+		const id = el.getAttribute("data-wk-slot")
+		if (id !== null && unseen.includes(id)) return true
+		const state = el.getAttribute("data-wk-state")
+		if (state !== null && state !== "shown" && state !== "docked") return true
+	}
+	return false
 }
 
 /** Position at the rectangle's top-left (its size is the element's own unless `sized`). */

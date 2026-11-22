@@ -12,7 +12,12 @@ import {
 import { createPortal } from "react-dom"
 
 import { useStore } from "../../data/store.ts"
-import type { StatusKind } from "./compute.ts"
+import {
+	statusState,
+	type StatusKind,
+	type StatusPlaced,
+	type StatusState,
+} from "./compute.ts"
 import type { Rect } from "./geometry.ts"
 import { slotAttrs, topLeft } from "./slot.ts"
 import {
@@ -24,35 +29,61 @@ import {
 } from "./stores.ts"
 
 /**
- * A guest's slot attributes: in the drawer's notice slot while docked and the slot is there (laid out by the slot);
- * at its rectangle while placed (held out of sight while the tuned card glides through it); else pending, out of
- * sight at the layer's origin, where it is measured (docked before the slot mounts, waiting, or not placed yet).
+ * A guest's slot attributes, its state (`statusState`) on the element, `inert` while the reader cannot see it: in
+ * the drawer's notice slot while docked and the slot is there (laid out by the slot, yielded with its host under an
+ * open panel); at its rectangle while placed (held out of sight while the tuned card glides through it, yielded under
+ * an open panel's room); else pending, out of sight at the layer's origin, where it is measured (docked before the
+ * slot mounts, waiting, or not placed yet).
  */
 export function guestPlacement(
 	id: string,
 	docked: boolean,
 	slot: HTMLElement | null,
 	placed: Rect | null,
-	held: boolean,
+	state: StatusState,
 ): {
 	readonly "data-wk-slot": string
 	readonly "data-wk-rect"?: string
+	readonly "data-wk-state"?: StatusState
+	readonly inert?: boolean
 	readonly "data-pending"?: ""
 	readonly "data-held"?: ""
 	readonly style?: CSSProperties
 } {
-	if (docked && slot) return slotAttrs(`status:${id}`, null)
+	if (docked && slot) return slotAttrs(`status:${id}`, null, state)
 	if (!docked && placed)
 		return {
-			...slotAttrs(`status:${id}`, placed),
-			...(held ? { "data-held": "" as const } : {}),
+			...slotAttrs(`status:${id}`, placed, state),
+			...(state === "held" ? { "data-held": "" as const } : {}),
 			style: topLeft(placed, true),
 		}
 	return {
-		...slotAttrs(`status:${id}`, null),
+		...slotAttrs(`status:${id}`, null, state),
 		"data-pending": "",
 		style: { left: 0, top: 0, width: "max-content" },
 	}
+}
+
+/** A guest's place in the published layout: its rectangle, docked or not, and its one state (LY rules §1.2). */
+export function useGuestPlace(id: string): {
+	readonly placed: StatusPlaced | null
+	readonly docked: boolean
+	readonly state: StatusState
+	readonly slot: HTMLElement | null
+} {
+	const slot = useStore(dockedSlot)
+	const placed = useStore(
+		publishedLayout,
+		l => l?.status.items.find(i => i.id === id) ?? null,
+	)
+	const docked = useStore(
+		publishedLayout,
+		l => l?.status.docked.includes(id) ?? false,
+	)
+	const state = useStore(publishedLayout, l =>
+		l ? statusState(l, id, slot !== null) : "absent",
+	)
+	return { placed, docked, state, slot }
 }
 
 export function StatusGuest({
@@ -65,19 +96,7 @@ export function StatusGuest({
 	children: ReactNode
 }) {
 	const box = useRef<HTMLDivElement>(null)
-	const placed = useStore(
-		publishedLayout,
-		l => l?.status.items.find(i => i.id === id) ?? null,
-	)
-	const docked = useStore(
-		publishedLayout,
-		l => l?.status.docked.includes(id) ?? false,
-	)
-	const held = useStore(
-		publishedLayout,
-		l => l?.held.includes(`status:${id}`) ?? false,
-	)
-	const slot = useStore(dockedSlot)
+	const { placed, docked, state, slot } = useGuestPlace(id)
 	const layer = useStore(guestLayer)
 	useLayoutEffect(() => {
 		const el = box.current?.firstElementChild
@@ -98,7 +117,7 @@ export function StatusGuest({
 		<div
 			ref={box}
 			className="wk-status-guest"
-			{...guestPlacement(id, docked, slot, placed, held)}
+			{...guestPlacement(id, docked, slot, placed, state)}
 		>
 			{children}
 		</div>
