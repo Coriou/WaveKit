@@ -134,7 +134,7 @@ class Transport implements ActivityClientTransport {
 }
 
 /**
- * The seeded shape of the WG25 acceptance (modelled: shape from a private state, ids
+ * The seeded shape of an image acceptance (modelled: shape from a private state, ids
  * synthetic): six dsd-fme DMR call_end rows linked by the baseline image, five to dsd-fme DMR
  * names (a two-digit colour code included) and one to a name whose system field dsd-fme left
  * empty, one of them through its late file update (wavFileUpdate). A P25 row stays presented.

@@ -4,7 +4,7 @@
  * encrypted / encryptionKnown fields and recording admission.
  *
  * - Shapes modelled (shape from a private capture; ids, times and colour
- *   codes synthetic) on the WG25 image acceptance replay: a repeater over
+ *   codes synthetic) on an image acceptance replay: a repeater over
  *   dsd-fme decoded only as its terminator train (TLC + LC pairs) with one
  *   `PI (CRC ERR)` burst of the other slot; a direct capture opening on the
  *   end of a transmission (two errored voice bursts, TLC + LC); a direct
