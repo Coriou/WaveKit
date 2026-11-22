@@ -1,0 +1,372 @@
+/**
+ * Noise quarantine: a reversible discard for analog files the recording admission measured as
+ * noise (`discarded:noise`, recording-verdict.ts). Instead of deleting the file's audio, the
+ * analog operation (analog-operations.ts, AnalogHandle.cancel with `noise`) moves it here:
+ * `<scanner storage>/quarantine/noise/<YYYY-MM-DD>/<operationId>.wav` plus a small JSON sidecar
+ * `<operationId>.json` (core-made ids, measured numbers and closed codes only). The admission
+ * thresholds are provisional; this keeps the evidence to calibrate them for a while.
+ *
+ * Outside `recordings/`, so no recordings list, serve, link, keep, retention or delete-sweep
+ * walker sees it (they all walk `recordings/` or `.analog-operations/` only). Not counted in the
+ * recordings cap: bounded here instead, by age AND total size AND file count.
+ *
+ * Bounds (arithmetic): 8 kHz 16-bit mono is 16 000 B/s, so NOISE_QUARANTINE_MAX_BYTES (500 MiB =
+ * 524 288 000 B) holds 524 288 000 / 16 000 ≈ 32 768 s ≈ 9.1 h of audio, about 6 500 five-second
+ * files (80 044 B each). Over 6 days a corpus had about 2 200 noise files ≈ 3 h ≈ 165 MiB, so the
+ * size bound holds more than 2 weeks at that rate and NOISE_QUARANTINE_MAX_AGE_MS (7 days) bites
+ * first. NOISE_QUARANTINE_MAX_FILES (20 000) bounds one prune's listing: 3× the 6 500 five-second
+ * files the size bound holds, and above 500 MiB / 80 044 B; shorter files hit it first.
+ *
+ * Pruning runs after every quarantine write (in the background, never awaited by the move) and
+ * at startup: files older than the age bound go first, then the oldest until the total and count
+ * are within their bounds. One prune runs at a time; a request meanwhile reruns once after it.
+ * Every error is logged (safeErrorFields, fixed text) and never fatal. A failed move leaves the
+ * caller to delete the file (today's behaviour).
+ */
+import { constants as fsConstants } from "node:fs"
+import {
+	copyFile,
+	lstat,
+	mkdir,
+	open,
+	readdir,
+	rename,
+	rmdir,
+	unlink,
+	writeFile,
+} from "node:fs/promises"
+import { join } from "node:path"
+import { z } from "zod"
+import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
+import { WaveKitError } from "../../../utils/errors.js"
+import { createComponentLogger, type Logger } from "../../../utils/logger.js"
+import { WAV_HEADER_BYTES, wavHeader } from "../channel/wav-writer.js"
+
+/** Feature flag (Main seam, no config): false deletes noise files as before. */
+export const NOISE_QUARANTINE = true
+/** Under the scanner storage root. */
+export const NOISE_QUARANTINE_DIR = join("quarantine", "noise")
+/** A file older than this (now − mtime > 7 d) is pruned; exactly 7 d is kept. */
+export const NOISE_QUARANTINE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+/** Total bytes (WAV + sidecar) kept: exactly this is kept, one byte over prunes the oldest. */
+export const NOISE_QUARANTINE_MAX_BYTES = 500 * 1024 * 1024
+/** Files kept (and listed per prune); see the module comment. */
+export const NOISE_QUARANTINE_MAX_FILES = 20_000
+/** Day folders listed per prune: the age bound keeps 8 at most, 64 tolerates clock steps. */
+const MAX_DAY_DIRS = 64
+const SAMPLE_RATE_HZ = 8000
+const DAY = /^\d{4}-\d{2}-\d{2}$/
+const OPERATION_ID =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const WAV_NAME =
+	/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.wav$/
+const CODE = z
+	.string()
+	.regex(/^[a-z0-9:-]{1,64}$/)
+	.nullable()
+const finite = z.number().finite()
+
+/** The measured admission features and closed codes of one noise file (no untrusted strings). */
+export const NoiseQuarantineFactsSchema = z
+	.object({
+		frequencyHz: finite.nullable(),
+		reason: CODE,
+		strength: CODE,
+		levelFrames: finite,
+		spreadDb: finite,
+		p10Dbfs: finite,
+		periodicShare: finite,
+		burstFrames: finite,
+	})
+	.strict()
+export type NoiseQuarantineFacts = z.infer<typeof NoiseQuarantineFactsSchema>
+
+export const NoiseQuarantineSidecarSchema = z
+	.object({
+		version: z.literal(1),
+		verdict: z.literal("discarded:noise"),
+		operationId: z.string().regex(OPERATION_ID),
+		discoveryId: z.string().regex(/^d_[0-9A-Za-z]{1,64}$/),
+		observationId: z
+			.string()
+			.regex(/^[0-9A-Za-z_-]{1,128}$/)
+			.nullable(),
+		quarantinedAt: z.string().datetime(),
+		sampleRateHz: z.literal(SAMPLE_RATE_HZ),
+		fileBytes: z.number().int().nonnegative(),
+		facts: NoiseQuarantineFactsSchema,
+	})
+	.strict()
+export type NoiseQuarantineSidecar = z.infer<
+	typeof NoiseQuarantineSidecarSchema
+>
+
+export interface NoiseQuarantineIds {
+	readonly operationId: string
+	readonly discoveryId: string
+	readonly observationId: string | null
+}
+
+/** The file system calls quarantine uses (a test seam). */
+export interface NoiseQuarantineFs {
+	rename(from: string, to: string): Promise<void>
+	copyFile(from: string, to: string): Promise<void>
+	unlink(path: string): Promise<void>
+	mkdir(path: string): Promise<void>
+	rmdir(path: string): Promise<void>
+	readdir(path: string): Promise<string[]>
+	lstat(path: string): Promise<{
+		isFile(): boolean
+		isDirectory(): boolean
+		size: number
+		mtimeMs: number
+	}>
+	/** Rewrites the 44-byte WAV header at offset 0 and syncs the file. */
+	writeHeader(path: string, header: Buffer): Promise<void>
+	writeFile(path: string, data: Buffer): Promise<void>
+}
+
+export const nodeNoiseQuarantineFs: NoiseQuarantineFs = {
+	rename,
+	copyFile: (from, to) => copyFile(from, to, fsConstants.COPYFILE_EXCL),
+	unlink,
+	mkdir: async path => {
+		await mkdir(path, { recursive: true })
+	},
+	rmdir,
+	readdir: path => readdir(path),
+	lstat,
+	writeHeader: async (path, header) => {
+		const handle = await open(
+			path,
+			fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+		)
+		try {
+			await handle.write(header, 0, header.length, 0)
+			await handle.sync()
+		} finally {
+			await handle.close()
+		}
+	},
+	writeFile: (path, data) => writeFile(path, data, { flag: "wx" }),
+}
+
+export interface NoiseQuarantineOptions {
+	/** The scanner storage root (the quarantine lives in NOISE_QUARANTINE_DIR under it). */
+	readonly root: string
+	readonly logger: Logger
+	readonly now: () => number
+	readonly fs?: NoiseQuarantineFs
+	readonly maxAgeMs?: number
+	readonly maxBytes?: number
+	readonly maxFiles?: number
+}
+
+interface Entry {
+	readonly day: string
+	readonly id: string
+	readonly mtimeMs: number
+	readonly bytes: number
+}
+
+function codeOf(err: unknown): unknown {
+	return err instanceof Error && "code" in err ? err.code : null
+}
+
+export class NoiseQuarantine {
+	readonly dir: string
+	private readonly fs: NoiseQuarantineFs
+	private readonly log: Logger
+	private readonly maxAgeMs: number
+	private readonly maxBytes: number
+	private readonly maxFiles: number
+	private pruning: Promise<void> | null = null
+	private rerun = false
+
+	constructor(private readonly opts: NoiseQuarantineOptions) {
+		this.dir = join(opts.root, NOISE_QUARANTINE_DIR)
+		this.fs = opts.fs ?? nodeNoiseQuarantineFs
+		this.log = createComponentLogger(opts.logger, "NoiseQuarantine")
+		this.maxAgeMs = opts.maxAgeMs ?? NOISE_QUARANTINE_MAX_AGE_MS
+		this.maxBytes = opts.maxBytes ?? NOISE_QUARANTINE_MAX_BYTES
+		this.maxFiles = opts.maxFiles ?? NOISE_QUARANTINE_MAX_FILES
+	}
+
+	/**
+	 * Moves the WAV at `source` (written PCM, header not finalized) into today's folder, writes
+	 * its final header and its sidecar, and schedules a prune. True when the WAV is in the
+	 * quarantine (`source` is gone); false when it is not (`source` may remain: the caller deletes
+	 * it). Never throws.
+	 */
+	async admit(
+		source: string,
+		ids: NoiseQuarantineIds,
+		facts: NoiseQuarantineFacts,
+	): Promise<boolean> {
+		let moved: string | null = null
+		try {
+			const now = this.opts.now()
+			const day = new Date(now).toISOString().slice(0, 10)
+			const sidecar = NoiseQuarantineSidecarSchema.parse({
+				version: 1,
+				verdict: "discarded:noise",
+				operationId: ids.operationId,
+				discoveryId: ids.discoveryId,
+				observationId: ids.observationId,
+				quarantinedAt: new Date(now).toISOString(),
+				sampleRateHz: SAMPLE_RATE_HZ,
+				fileBytes: 0,
+				facts,
+			})
+			const info = await this.fs.lstat(source)
+			const dataBytes = info.size - WAV_HEADER_BYTES
+			if (!info.isFile() || dataBytes < 0 || dataBytes % 2 !== 0)
+				throw new WaveKitError("Not a PCM WAV part", "SCANNER_NOISE_QUARANTINE")
+			const folder = join(this.dir, day)
+			await this.fs.mkdir(folder)
+			const target = join(folder, `${ids.operationId}.wav`)
+			try {
+				await this.fs.lstat(target)
+				throw new WaveKitError(
+					"Quarantine target exists",
+					"SCANNER_NOISE_QUARANTINE",
+				)
+			} catch (cause) {
+				if (codeOf(cause) !== "ENOENT") throw cause
+			}
+			try {
+				await this.fs.rename(source, target)
+				moved = target
+			} catch (cause) {
+				if (codeOf(cause) !== "EXDEV") throw cause
+				// Another device: copy (exclusive create), then remove the source.
+				await this.fs.copyFile(source, target)
+				moved = target
+				await this.fs.unlink(source)
+			}
+			await this.fs.writeHeader(target, wavHeader(SAMPLE_RATE_HZ, dataBytes))
+			const body = Buffer.from(
+				JSON.stringify({ ...sidecar, fileBytes: info.size }),
+			)
+			await this.fs.writeFile(join(folder, `${ids.operationId}.json`), body)
+			this.schedulePrune()
+			return true
+		} catch (err) {
+			this.log.warn(
+				safeErrorFields(err),
+				"Noise quarantine failed; the file is deleted instead",
+			)
+			// A partly moved file is removed, so nothing half made stays (the source goes too).
+			if (moved !== null)
+				await this.fs.unlink(moved).catch((cause: unknown) => {
+					this.log.warn(
+						safeErrorFields(cause),
+						"Removing a partly quarantined file failed",
+					)
+				})
+			return false
+		}
+	}
+
+	/** Starts a prune in the background (never awaited by a writer); errors are logged. */
+	schedulePrune(): void {
+		void this.prune()
+	}
+
+	/** Prunes to the bounds; resolves when the prune (and one rerun asked meanwhile) is done. */
+	prune(): Promise<void> {
+		if (this.pruning) {
+			this.rerun = true
+			return this.pruning
+		}
+		const run = async (): Promise<void> => {
+			do {
+				this.rerun = false
+				try {
+					await this.pruneOnce()
+				} catch (err) {
+					this.log.warn(safeErrorFields(err), "Noise quarantine prune failed")
+				}
+			} while (this.rerun)
+		}
+		this.pruning = run().finally(() => {
+			this.pruning = null
+		})
+		return this.pruning
+	}
+
+	private async list(path: string): Promise<string[]> {
+		try {
+			return await this.fs.readdir(path)
+		} catch (cause) {
+			if (codeOf(cause) === "ENOENT") return []
+			throw cause
+		}
+	}
+
+	private async pruneOnce(): Promise<void> {
+		const days = (await this.list(this.dir))
+			.filter(name => DAY.test(name))
+			.sort()
+			.slice(-MAX_DAY_DIRS)
+		const entries: Entry[] = []
+		for (const day of days) {
+			const folder = join(this.dir, day)
+			const names = await this.list(folder)
+			for (const name of names) {
+				if (entries.length >= this.maxFiles * 2) break
+				const match = WAV_NAME.exec(name)
+				if (!match) continue
+				try {
+					const info = await this.fs.lstat(join(folder, name))
+					if (!info.isFile()) continue
+					let bytes = info.size
+					try {
+						const side = await this.fs.lstat(join(folder, `${match[1]!}.json`))
+						if (side.isFile()) bytes += side.size
+					} catch {
+						/* no sidecar: the WAV alone counts */
+					}
+					entries.push({ day, id: match[1]!, mtimeMs: info.mtimeMs, bytes })
+				} catch (err) {
+					this.log.debug(safeErrorFields(err), "Quarantined file unreadable")
+				}
+			}
+		}
+		const now = this.opts.now()
+		entries.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.id < b.id ? -1 : 1))
+		let total = entries.reduce((sum, e) => sum + e.bytes, 0)
+		let count = entries.length
+		let pruned = 0
+		for (const e of entries) {
+			const expired = now - e.mtimeMs > this.maxAgeMs
+			if (!expired && total <= this.maxBytes && count <= this.maxFiles) break
+			if (await this.remove(e)) pruned++
+			total -= e.bytes
+			count--
+		}
+		// Empty past day folders go; today's stays (an admit may be between its mkdir and move).
+		const today = new Date(now).toISOString().slice(0, 10)
+		for (const day of days.filter(d => d !== today))
+			await this.fs.rmdir(join(this.dir, day)).catch(() => undefined)
+		if (pruned > 0)
+			this.log.info({ pruned, files: count }, "Noise quarantine pruned")
+	}
+
+	private async remove(e: Entry): Promise<boolean> {
+		const folder = join(this.dir, e.day)
+		try {
+			await this.fs.unlink(join(folder, `${e.id}.wav`))
+		} catch (err) {
+			if (codeOf(err) !== "ENOENT") {
+				this.log.warn(
+					safeErrorFields(err),
+					"Removing a quarantined file failed",
+				)
+				return false
+			}
+		}
+		await this.fs.unlink(join(folder, `${e.id}.json`)).catch(() => undefined)
+		return true
+	}
+}

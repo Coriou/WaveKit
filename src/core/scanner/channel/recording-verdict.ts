@@ -31,6 +31,7 @@ import {
 	type DecodedLabel,
 } from "./voice-veto.js"
 import type { SpeechContent } from "./speech-content.js"
+import type { NoiseQuarantineFacts } from "../store/noise-quarantine.js"
 
 /** Why a snapshot bars a recording (encrypted, opted out, unclean track), or null when it does not. */
 export function barredSnapshot(
@@ -1294,6 +1295,29 @@ export function noiseLog(
 		operationId: file.handle?.operationId ?? null,
 		discoveryId: session.discoveryId,
 		frequencyHz: Math.round(session.targetHz),
+		reason: path.reason,
+		strength: path.strength,
+		levelFrames: c.levelFrames,
+		spreadDb: Math.round(c.maxWindowSpreadDb * 100) / 100,
+		p10Dbfs: Math.round(c.minWindowP10Dbfs * 100) / 100,
+		periodicShare: Math.round(c.periodicShare * 1000) / 1000,
+		burstFrames: c.maxBurstFrames,
+	}
+}
+
+/**
+ * The noise quarantine sidecar's facts of a file discarded as noise (noise-quarantine.ts): the
+ * same measured numbers and closed codes as noiseLog, without the ids (the operation adds them).
+ */
+export function noiseFacts(
+	path: FinishPath,
+	c: SpeechContent,
+	session: { readonly targetHz: number },
+): NoiseQuarantineFacts {
+	return {
+		frequencyHz: Number.isFinite(session.targetHz)
+			? Math.round(session.targetHz)
+			: null,
 		reason: path.reason,
 		strength: path.strength,
 		levelFrames: c.levelFrames,

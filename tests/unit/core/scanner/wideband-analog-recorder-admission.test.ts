@@ -115,6 +115,13 @@ describe("W1 recording admission: noise on a channel with no digital evidence", 
 		expect(h.rec.diagnostics().counts["discarded:noise"]).toBe(1)
 		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
 		expect(h.ops.map(o => o.cancelled)).toEqual(["cancelled"])
+		// Reversible discard: the cancel carries the measured facts for the noise quarantine.
+		expect(h.ops[0]!.noise).toMatchObject({
+			reason: "noise",
+			strength: "none",
+			frequencyHz: expect.any(Number) as number,
+		})
+		expect(h.ops[0]!.noise!.p10Dbfs).toBeGreaterThan(-25)
 		const noise = lines.filter(
 			l => l["msg"] === "Analog file discarded as noise",
 		)

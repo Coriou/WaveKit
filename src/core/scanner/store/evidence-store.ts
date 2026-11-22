@@ -63,6 +63,17 @@ import {
 	type AnalogReconciliation,
 	type AnalogSetAsideStatus,
 } from "./analog-operations.js"
+import {
+	NOISE_QUARANTINE,
+	NoiseQuarantine,
+	type NoiseQuarantineOptions,
+} from "./noise-quarantine.js"
+
+/** Test seam of the noise quarantine: its fs and bounds (root, logger and clock are the store's). */
+type NoiseQuarantineSeam = Pick<
+	NoiseQuarantineOptions,
+	"fs" | "maxAgeMs" | "maxBytes" | "maxFiles"
+>
 
 export interface StorageCaps {
 	maxRecordingsMb: number
@@ -453,6 +464,8 @@ export class EvidenceStore {
 	private readonly rootPin: { dev: number; ino: number } | null
 	/** WG10 req 1.1: test seam of the scanner delete's verified unlink. */
 	private readonly recordingDeleteFs: RecordingDeleteFs | undefined
+	/** Reversible noise discard (noise-quarantine.ts); null when NOISE_QUARANTINE is off. */
+	readonly noiseQuarantine: NoiseQuarantine | null
 	/** WG10 req 1.5: merge aliases (none without the lookup). */
 	private readonly aliases: DiscoveryAliasLookup | undefined
 	/** The ids owning a folder on disk; merge aliases never release one (recording-aliases.ts). */
@@ -496,6 +509,8 @@ export class EvidenceStore {
 		protection?: RecordingProtection
 		/** WG10 req 1.1: test seam of the scanner delete's verified unlink. */
 		recordingDeleteFs?: RecordingDeleteFs
+		/** Test seam of the noise quarantine (fs, bounds); false: none (noise files deleted). */
+		noiseQuarantine?: NoiseQuarantineSeam | false
 		/** WG10 req 1.5: the discovery store's merge aliases. */
 		aliases?: DiscoveryAliasLookup
 	}) {
@@ -514,6 +529,15 @@ export class EvidenceStore {
 		this.analogIo = opts.analogIo
 		this.protection = opts.protection
 		this.recordingDeleteFs = opts.recordingDeleteFs
+		this.noiseQuarantine =
+			!NOISE_QUARANTINE || opts.noiseQuarantine === false
+				? null
+				: new NoiseQuarantine({
+						...opts.noiseQuarantine,
+						root: this.root,
+						logger: opts.logger,
+						now: opts.now,
+					})
 		this.aliases = opts.aliases
 	}
 
@@ -767,6 +791,13 @@ export class EvidenceStore {
 					"Set aside incomplete analog operation folders (crash residue)",
 				),
 			...(this.analogIo ? { io: this.analogIo } : {}),
+			...(this.noiseQuarantine
+				? {
+						noiseQuarantine: this.noiseQuarantine.admit.bind(
+							this.noiseQuarantine,
+						),
+					}
+				: {}),
 			...(this.protection
 				? {
 						protection: this.protection,
@@ -801,6 +832,8 @@ export class EvidenceStore {
 		return handle
 	}
 	recoverAnalog(): Promise<AnalogReconciliation[]> {
+		// Startup prune of the noise quarantine: in the background, never fatal (errors logged).
+		this.noiseQuarantine?.schedulePrune()
 		const recovery = this.analog?.recover() ?? Promise.resolve([])
 		// The first admission's count of the other recordings: walked now, in the background.
 		if (this.analog && !this.legacy)

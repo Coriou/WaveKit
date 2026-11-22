@@ -26,6 +26,10 @@ import {
 } from "../channel/wav-writer.js"
 import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
 import type { RecordingProtection } from "../../recordings/contract.js"
+import type {
+	NoiseQuarantineFacts,
+	NoiseQuarantineIds,
+} from "./noise-quarantine.js"
 import { ScannerApiError } from "../errors.js"
 import type {
 	RecordingAssociation,
@@ -345,7 +349,13 @@ export interface AnalogHandle {
 	push(pcm: Int16Array): Promise<void>
 	addGap(gap: AnalogGap): void
 	finish(cut?: AnalogCut, facts?: AnalogFinishFacts): Promise<AnalogReceipt>
-	cancel(cut?: AnalogCut): void
+	/**
+	 * Ends the operation unfinalized (receipt `aborted`, like every cancel). `noise`: the file was
+	 * measured as noise (`discarded:noise`): its written audio is moved to the noise quarantine
+	 * (noise-quarantine.ts, Context.noiseQuarantine) instead of deleted; a failed move, or no
+	 * quarantine configured, deletes it as any other cancel does.
+	 */
+	cancel(cut?: AnalogCut, noise?: NoiseQuarantineFacts): void
 }
 export interface AnalogReconciliation {
 	operationId: string
@@ -431,6 +441,15 @@ interface Context {
 		evicted: number
 		held: number
 	}) => void
+	/**
+	 * The noise quarantine (noise-quarantine.ts NoiseQuarantine.admit): moves a cancelled noise
+	 * file's `payload.wav.part` out; true when moved, false (never throws) when the caller deletes it.
+	 */
+	noiseQuarantine?: (
+		source: string,
+		ids: NoiseQuarantineIds,
+		facts: NoiseQuarantineFacts,
+	) => Promise<boolean>
 }
 interface Inventory {
 	bytes: number
@@ -544,6 +563,8 @@ interface Operation {
 	descriptors: Set<WavHandle>
 	writer: WavFileWriter | null
 	cancelled: AnalogCut | null
+	/** A noise cancel's measured facts: the writer's part unlink quarantines instead (once). */
+	noise: NoiseQuarantineFacts | null
 	/** The first finish's AnalogFinishFacts.cutActive; null: none given. */
 	cutActive: boolean | null
 	/** The first finish's verdict facts (keptBy, speechHeard, startedAt) as given and valid. */
@@ -755,6 +776,7 @@ export class AnalogOperations {
 			intent,
 			writer: null,
 			cancelled: null,
+			noise: null,
 			cutActive: null,
 			verdict: {},
 			failure: null,
@@ -820,8 +842,9 @@ export class AnalogOperations {
 				if (!op.finish && facts !== undefined) op.verdict = verdictOf(facts)
 				return this.finishOperation(op, AnalogCutSchema.parse(cut))
 			},
-			cancel: (cut = "cancelled") => {
+			cancel: (cut = "cancelled", noise) => {
 				if (op.decision) return
+				if (noise !== undefined && !op.cancelled) op.noise = noise
 				op.cancelled ??= AnalogCutSchema.parse(cut)
 				op.accepting = false
 				op.writer?.cancel()
@@ -1030,6 +1053,22 @@ export class AnalogOperations {
 			unlink: async path => {
 				if (op.descriptors.size)
 					throw coded("cleanup-failed", "Descriptor closure unconfirmed")
+				const noise = op.noise
+				const quarantine = this.context.noiseQuarantine
+				if (
+					noise !== null &&
+					quarantine &&
+					path === this.stagePath(op.intent)
+				) {
+					op.noise = null
+					const ids = {
+						operationId: op.intent.operationId,
+						discoveryId: op.intent.discoveryId,
+						observationId: op.intent.observationId,
+					}
+					// Moved: the part is gone, as an unlink leaves it. Not moved: deleted below.
+					if (await quarantine(path, ids, noise).catch(() => false)) return
+				}
 				await (injected?.unlink(path) ?? this.io.unlink(path))
 			},
 			inspect: injected

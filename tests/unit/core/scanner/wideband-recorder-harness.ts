@@ -28,6 +28,7 @@ import {
 	type AnalogReceipt,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import type { RecordingBinding } from "../../../../src/core/scanner/store/recording-operation.js"
+import type { NoiseQuarantineFacts } from "../../../../src/core/scanner/store/noise-quarantine.js"
 import type { DecodedLabel } from "../../../../src/core/scanner/channel/voice-veto.js"
 import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import type { ScannerProtocol } from "../../../../src/core/scanner/types.js"
@@ -102,6 +103,8 @@ export interface FakeOp {
 	/** The finish's verdict facts (keptBy, speechHeard, startedAt) as given. */
 	verdict?: Pick<AnalogFinishFacts, "keptBy" | "speechHeard" | "startedAt">
 	cancelled: AnalogCut | null
+	/** A noise cancel's quarantine facts (AnalogHandle.cancel `noise`); absent: none given. */
+	noise?: NoiseQuarantineFacts
 	/** Settled outcome; "failed" when the binding was no longer live at the finish. */
 	outcome: "finalized" | "aborted" | "failed" | null
 	denied: boolean
@@ -203,9 +206,10 @@ export function fakeOps(
 				settle(live(input.binding) ? "finalized" : "failed")
 				return { outcome: op.outcome } as unknown as AnalogReceipt
 			},
-			cancel: (cut = "cancelled") => {
+			cancel: (cut = "cancelled", noise) => {
 				if (op.outcome !== null) return
 				op.cancelled = cut
+				if (noise !== undefined) op.noise = noise
 				settle("aborted")
 			},
 		}

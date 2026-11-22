@@ -123,6 +123,7 @@ import {
 	joinedVoiceOf,
 	keptLog,
 	LATE_VERDICT_GRACE_MS,
+	noiseFacts,
 	noiseLog,
 	notVoiceDecode,
 	noteJoinedVoice,
@@ -4374,7 +4375,11 @@ export class WidebandAnalogRecorder {
 			: null
 		const verdict = path?.verdict ?? "finish"
 		if (verdict !== "finish" && verdict !== "hold") {
-			if (verdict === "discarded:noise" && path !== null && speech !== null)
+			const noise =
+				verdict === "discarded:noise" && path !== null && speech !== null
+					? noiseFacts(path, speech, s)
+					: undefined
+			if (noise !== undefined && path !== null && speech !== null)
 				this.log.info(
 					noiseLog(path, speech, file, s),
 					"Analog file discarded as noise",
@@ -4382,7 +4387,9 @@ export class WidebandAnalogRecorder {
 			this.endFile(s, file, verdict)
 			file.failed = true
 			this.fileLost(s)
-			file.handle.cancel("cancelled")
+			// A noise file's audio goes to the noise quarantine (reversible), any other is deleted.
+			if (noise !== undefined) file.handle.cancel("cancelled", noise)
+			else file.handle.cancel("cancelled")
 		} else if (verdict === "hold") {
 			const run = this.deps.timer ?? graceTimer
 			const cancel = run(LATE_VERDICT_GRACE_MS, () => this.release(file))
