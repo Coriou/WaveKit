@@ -489,7 +489,7 @@ the row (`activityEventId`, from the store's in-memory link index). Producers:
   Only a recordable call file links (`dsdFmeCallRecordable`, `src/decoders/builtin/dmr-recording-gate.ts`):
   the ingress and the backfill refuse a DMR name, or one without a known protocol, while DMR
   recordings are off, whatever the decoder reported; the backfill also needs the row's protocol
-  to be recordable.
+  to be recordable. Reads re-check each `dsd~` link against its row's stored call trust, and call recorder (`dv-call`) files are neither listed, served nor presented while `DV_CALL_RECORDINGS_SERVED` (`src/core/recordings/names.ts`) is off.
 - scanner analog recordings: the scanner emits `recording-kept` at the irrevocable commit of a file
   (after any provisional hold), and `src/core/activity/recording-links.ts` admits one
   `recording-change` row. A discarded file never commits, so it never gets a row.
