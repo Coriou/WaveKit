@@ -16,6 +16,7 @@ import {
 } from "../../../src/decoders/direct-channel-input.js"
 import {
 	channelInputModeFrom,
+	DEFAULT_CHANNEL_INPUT_MODE,
 	processChannelInputMode,
 	resetProcessChannelInputModeForTests,
 } from "../../../src/decoders/channel-input-mode.js"
@@ -429,12 +430,13 @@ describe("direct input port and mode selection", () => {
 		expect(directInputOf(port)).toBe(port)
 	})
 
-	it("reads relay unless the value is exactly direct", () => {
+	it("reads direct unless the value is exactly relay: unset, empty and unknown values are the default", () => {
+		expect(DEFAULT_CHANNEL_INPUT_MODE).toBe("direct")
 		expect(channelInputModeFrom(undefined)).toEqual({
-			mode: "relay",
+			mode: "direct",
 			known: true,
 		})
-		expect(channelInputModeFrom("")).toEqual({ mode: "relay", known: true })
+		expect(channelInputModeFrom("")).toEqual({ mode: "direct", known: true })
 		expect(channelInputModeFrom("relay")).toEqual({
 			mode: "relay",
 			known: true,
@@ -443,11 +445,25 @@ describe("direct input port and mode selection", () => {
 			mode: "direct",
 			known: true,
 		})
-		for (const other of ["DIRECT", "direct ", "yes", "1"])
+		for (const other of ["DIRECT", "RELAY", "relay ", "yes", "1"])
 			expect(channelInputModeFrom(other)).toEqual({
-				mode: "relay",
+				mode: "direct",
 				known: false,
 			})
+	})
+
+	it("an unset environment selects direct for the process; relay stays selectable", () => {
+		const log = { info: vi.fn(), warn: vi.fn() } as unknown as Logger
+		resetProcessChannelInputModeForTests()
+		try {
+			expect(processChannelInputMode(log, {})).toBe("direct")
+			resetProcessChannelInputModeForTests()
+			expect(
+				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "relay" }),
+			).toBe("relay")
+		} finally {
+			resetProcessChannelInputModeForTests()
+		}
 	})
 
 	it("reads the environment once per process, logs the mode once and never echoes an unknown value", () => {
@@ -457,21 +473,22 @@ describe("direct input port and mode selection", () => {
 		resetProcessChannelInputModeForTests()
 		try {
 			const env = { WAVEKIT_CHANNEL_INPUT: "sideways-value" }
-			expect(processChannelInputMode(log, env)).toBe("relay")
+			expect(processChannelInputMode(log, env)).toBe("direct")
 			expect(
-				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "direct" }),
-			).toBe("relay")
+				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "relay" }),
+			).toBe("direct")
 			expect(info).toHaveBeenCalledTimes(1)
-			expect(info.mock.calls[0]?.[0]).toEqual({ channelInput: "relay" })
+			expect(info.mock.calls[0]?.[0]).toEqual({ channelInput: "direct" })
 			expect(warn).toHaveBeenCalledTimes(1)
 			expect(JSON.stringify(warn.mock.calls)).not.toContain("sideways-value")
 			expect(warn.mock.calls[0]?.[0]).toMatchObject({
 				accepted: ["relay", "direct"],
+				default: "direct",
 			})
 			resetProcessChannelInputModeForTests()
 			expect(
-				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "direct" }),
-			).toBe("direct")
+				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "relay" }),
+			).toBe("relay")
 			expect(warn).toHaveBeenCalledTimes(1)
 		} finally {
 			resetProcessChannelInputModeForTests()

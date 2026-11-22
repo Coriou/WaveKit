@@ -1259,9 +1259,13 @@ soon as it connects), the decoder is spawned with that socket as fd 0, and Node 
 copy as soon as the spawn has returned. Node never reads a byte of it; a hand-over of a socket that
 has read anything is refused.
 
-The mode is selected once per process by `WAVEKIT_CHANNEL_INPUT=relay|direct`. Unset, empty or
-any other value means `relay`, today's path; there is no config key, and one info line names the
-mode. Scanner channel taps and scanner probe decoders stay on the relay in both modes: the
+The mode is selected once per process by `WAVEKIT_CHANNEL_INPUT=relay|direct`. Since 2026-11-22
+unset, empty or any other value means `direct` (an unknown value also logs a warning that names
+only the accepted values); `relay` stays selectable. There is no config key, and one info line
+names the mode. Direct is the default because a relayed channel waits for the core's main thread:
+in the tier A hog runs of `scripts/bench/main-thread-budget.ts` a main-thread stall longer than the
+channel's queue dropped 3-4.7 % of the dsd-fme channel's samples as `queue-overflow`, while a direct
+decoder reads its socket itself. Scanner channel taps and scanner probe decoders stay on the relay in both modes: the
 scanner reads a tap's samples in Node, and its probe pool fences a probe's channel input in Node.
 `NetworkProducerDecoder`, `ExternalSdrDecoder` and raw fanout branches read no channel on stdin
 and are not affected.
@@ -1285,7 +1289,28 @@ records them at the exit) but restarts nothing, and a placement move in that wai
 crash's own restart. A requested stop releases the channel before the child is signalled, so a
 stop never looks like a vanished reader.
 
+After such an expected exit the core runs the adapter's own stop() once, after the child's last
+output lines, within 5 s; an adapter whose cleanup outlives that is replaced by a new instance at
+its next start. Stops and starts wait for that cleanup. A stop that waited and was superseded
+meanwhile by a start (the operator stops, then starts again within the 5 s) requests nothing once
+the wait ends, so the decoder runs again instead of the older stop undoing the newer start.
+
 Two races keep today's handling. A channel socket found closed when the decoder is about to start
 holds the decoder as a channelizer race (it is retried) instead of spawning it without input. A
 channel that reports its client gone while the decoder still runs is handled as today's channel
 claim; when the decoder then exits, the exit takes the crash path.
+
+### Queue and branch depth from the stall budget (2026-11-22)
+
+The buffers ahead of a channelised decoder are sized from the scheduling gap they must cover: the
+worst lateness measured for an idle worker at load 135-209 on the dev host is 1.1 s. Both buffers
+fill only while their reader is behind, so neither adds latency in steady state.
+
+- The channelizer's input branch (main thread → `wavekit-chan` stdin) holds 1 000 ms of CU8 per
+  side (`CHANNELIZER_INPUT_BUFFER_MS`): 4 800 000 bytes at 2.4 Msps, 2 048 000 at 1.024 Msps,
+  9.6 MB per source at 2.4 Msps and 12.8 MB at the tuner's 3.2 Msps maximum (the fanout caps a
+  side at 16 MiB). At 250 ms it congested in the hog runs and dropped 8.6 % of its input.
+- Each channel's output queue (`channelizer.channelQueueMs`, bound 50-2 000 ms) is meant to hold
+  1 000 ms: 384 KB for a 48 kHz cf32 channel (384 KB/s), 96 KB for s16 audio, 3.8 MB for ten cf32
+  channels. Its default in `src/config.ts` is still 250 ms until that change lands; the budget
+  harness sets it with `--channel-queue-ms`.

@@ -7,6 +7,7 @@
  *     [--passive on|off] [--profile] [--counts] [--out DIR] [--keep] [--core PATH]
  *     [--hog N|auto] [--hog-settle S] [--hog-log FILE] [--core-nice K] [--auto 0|1]
  *     [--core-qos default|utility|background | --core-qos-late utility|background]
+ *     [--channel-input relay|direct] [--channel-queue-ms 50..2000]
  *   node output/bench/main-thread-budget.mjs --finish-image DIR [--label NAME]
  *   node output/bench/main-thread-budget.mjs --reassemble DIR
  *
@@ -47,6 +48,9 @@
  * into api-start.json and api-end.json; the manifest's `starvation` section turns them into
  * per-stage sample accounting with the first stage that lost samples, the loop figures (ELU,
  * loop delay p50/p99/p99.9/max, the longest stalls) and the load averages.
+ * --channel-input sets the core's WAVEKIT_CHANNEL_INPUT (absent: the core's default, direct) and
+ * --channel-queue-ms the channelizer's channelQueueMs (absent: the config default); both are A/B
+ * switches for channel-output loss and are recorded in config.json and the core log.
  *
  * The work dir (config, state, scene IQ, stand-ins) is removed at the end unless --keep; the
  * out dir (default a new tmp dir, printed) holds the results and is always kept.
@@ -1550,6 +1554,28 @@ async function tierA(): Promise<void> {
 	if (autoOpt !== "0" && autoOpt !== "1")
 		throw new WaveKitError(`bad --auto ${autoOpt}`, "BUDGET_ARGS")
 	const autoClient = autoOpt === "1"
+	const channelInput = opt("channel-input")
+	if (
+		channelInput !== undefined &&
+		channelInput !== "relay" &&
+		channelInput !== "direct"
+	)
+		throw new WaveKitError(
+			`bad --channel-input ${channelInput} (relay|direct)`,
+			"BUDGET_ARGS",
+		)
+	const queueRaw = opt("channel-queue-ms")
+	const channelQueueMs = queueRaw === undefined ? undefined : Number(queueRaw)
+	if (
+		channelQueueMs !== undefined &&
+		(!Number.isInteger(channelQueueMs) ||
+			channelQueueMs < 50 ||
+			channelQueueMs > 2000)
+	)
+		throw new WaveKitError(
+			`bad --channel-queue-ms ${queueRaw} (50..2000)`,
+			"BUDGET_ARGS",
+		)
 	hogs.label = label
 	hogs.logPath = opt("hog-log") ?? null
 	const harnessNice = os.getPriority()
@@ -1713,6 +1739,7 @@ async function tierA(): Promise<void> {
 						enabled: true,
 						binaryPath: chanBin,
 						socketDir: channelSocketDir(work),
+						...(channelQueueMs !== undefined ? { channelQueueMs } : {}),
 					}
 				: { enabled: false, auto: false },
 			scanner: {
@@ -1768,6 +1795,7 @@ async function tierA(): Promise<void> {
 		const auth = { Authorization: `Bearer ${token}` }
 		env["WAVEKIT_CONFIG"] = configPath
 		env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] = privateDir
+		if (channelInput !== undefined) env["WAVEKIT_CHANNEL_INPUT"] = channelInput
 		env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`
 		env["BUDGET_OUT"] = join(outDir, "preload")
 		env["BUDGET_SOURCE_PORT"] = String(fakePort)

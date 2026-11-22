@@ -48,6 +48,16 @@ describe("channelizer config (addendum §6, §7)", () => {
 		).toBe(false)
 	})
 
+	it("accepts a channel queue up to 2 000 ms and refuses 2 001", () => {
+		for (const channelQueueMs of [1000, 2000])
+			expect(
+				ChannelizerConfigSchema.parse({ channelQueueMs }).channelQueueMs,
+			).toBe(channelQueueMs)
+		expect(
+			ChannelizerConfigSchema.safeParse({ channelQueueMs: 2001 }).success,
+		).toBe(false)
+	})
+
 	it("bounds every budget", () => {
 		for (const bad of [
 			{ usableFraction: 0.49 },

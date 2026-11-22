@@ -717,14 +717,14 @@ describe("ChannelizerManager", () => {
 				groupDelaySamples: 5,
 			})
 	})
-	// The input branch holds 250 ms of CU8 at the input rate, with
+	// The input branch holds 1 000 ms of CU8 at the input rate, with
 	// the configured inputHighWaterMark as a floor.
 	it("sizes the input branch in ms of signal above the configured floor", async () => {
 		const m = manager()
 		expect((await m.requestChannel("rtl", "ais", req(), caps())).ok).toBe(true)
-		// 2 048 000 × 2 B × 250 ms = 1 024 000 B > the 262 144 B default.
+		// 2 048 000 × 2 B × 1 000 ms = 4 096 000 B > the 262 144 B default.
 		expect(fanout.getBranchTelemetry("channelizer-rtl")?.highWaterMark).toBe(
-			1_024_000,
+			4_096_000,
 		)
 	})
 
@@ -740,6 +740,25 @@ describe("ChannelizerManager", () => {
 			queueBytes: 96_000,
 		}) // addendum §6 table
 	})
+	it.each([
+		[1000, 384_000],
+		[2000, 768_000],
+	] as const)(
+		"channelQueueMs %i: queueBytes of a 48 kHz cf32 channel is %i",
+		async (channelQueueMs, queueBytes) => {
+			const sent: ChannelizerRequest[] = []
+			const m = manager(
+				{ channelQueueMs },
+				{ createProcess: recordingProcess(sent) },
+			)
+			const voice = { ...req(), outputRateHz: 48_000, format: "cf32" as const }
+			expect((await m.requestChannel("rtl", "dsd", voice, caps())).ok).toBe(
+				true,
+			)
+			// 48 000 samples/s × 8 B × channelQueueMs.
+			expect(sent.find(r => r.type === "open")).toMatchObject({ queueBytes })
+		},
+	)
 	it("sends afcMaxHz only to a binary whose ready offered afc, and warns once for one that did not", async () => {
 		const warn = vi.fn()
 		const logger = Object.assign(pino({ level: "silent" }), {
@@ -962,10 +981,10 @@ describe("ChannelizerManager", () => {
 			const gaps: unknown[][] = []
 			m.on("channel-discontinuity", (...args: unknown[]) => gaps.push(args))
 			fanout.attachSource(src)
-			// The fake reads nothing for 1 s after `opened`. The OS pipe, the child stdin and the 64 KiB branch fill up
-			// after a few hundred KiB, then FanoutManager drops. 4 MiB is far past that.
+			// The fake reads nothing for 1 s after `opened`. The OS pipe, the child stdin and the branch (1 s of
+			// 2.048 Msps CU8 per side: 2 × 4 096 000 B) fill up, then FanoutManager drops. 12 MiB is past that.
 			const chunk = 65_536
-			const chunks = 64
+			const chunks = 192
 			for (let k = 0; k < chunks; k++) {
 				src.write(Buffer.alloc(chunk, k))
 				await new Promise(resolve => setImmediate(resolve))

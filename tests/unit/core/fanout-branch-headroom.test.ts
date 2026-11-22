@@ -6,7 +6,10 @@
 import { Writable } from "node:stream"
 import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { channelizerInputMark } from "../../../src/core/channelizer/channelizer-manager.js"
+import {
+	CHANNELIZER_INPUT_BUFFER_MS,
+	channelizerInputMark,
+} from "../../../src/core/channelizer/channelizer-manager.js"
 import {
 	DEFAULT_BRANCH_BUFFER_MS,
 	DROP_MODE_LOW_WATER,
@@ -145,11 +148,17 @@ describe("branch marks in ms of signal", () => {
 		fanout.destroy()
 	})
 
-	it("keeps a configured channelizer input mark as a floor", () => {
-		expect(channelizerInputMark(262_144, RATE)).toBe(1_200_000)
-		expect(channelizerInputMark(262_144, 1_024_000)).toBe(512_000)
-		expect(channelizerInputMark(4_000_000, RATE)).toBe(4_000_000)
-		expect(channelizerInputMark(65_536, 250_000)).toBe(DEFAULT_HIGH_WATER_MARK)
+	it("holds 1 000 ms of input in the channelizer branch, with a configured mark as a floor", () => {
+		expect(CHANNELIZER_INPUT_BUFFER_MS).toBe(1000)
+		expect(channelizerInputMark(262_144, RATE)).toBe(4_800_000)
+		expect(channelizerInputMark(262_144, 1_024_000)).toBe(2_048_000)
+		expect(channelizerInputMark(8_000_000, RATE)).toBe(8_000_000)
+		// 125 000 Hz × 2 B × 1 s = 250 000 B, under the 256 KiB floor.
+		expect(channelizerInputMark(65_536, 125_000)).toBe(DEFAULT_HIGH_WATER_MARK)
+		// The fanout's derived ceiling holds: 10 Msps × 2 B × 1 s = 20 MB → 16 MiB.
+		expect(channelizerInputMark(262_144, 10_000_000)).toBe(
+			MAX_DERIVED_HIGH_WATER_MARK,
+		)
 	})
 })
 

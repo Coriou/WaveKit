@@ -7,6 +7,10 @@ import pino from "pino"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
 import type { SourceManager } from "../../../src/core/source-manager.js"
+import {
+	CHANNEL_INPUT_ENV,
+	resetProcessChannelInputModeForTests,
+} from "../../../src/decoders/channel-input-mode.js"
 import { CHANNEL_FATE_MS } from "../../../src/decoders/direct-channel-input.js"
 import {
 	DecoderManager,
@@ -36,7 +40,11 @@ let order: string[]
 let restarting: string[]
 let logLines: Array<Record<string, unknown>>
 
-function setup(config: Partial<DecoderManagerConfig> = {}) {
+/** `fromEnvironment`: no channelInput option, so the process mode (WAVEKIT_CHANNEL_INPUT) decides. */
+function setup(
+	config: Partial<DecoderManagerConfig> = {},
+	fromEnvironment = false,
+) {
 	vi.useFakeTimers()
 	logLines = []
 	order = []
@@ -61,7 +69,7 @@ function setup(config: Partial<DecoderManagerConfig> = {}) {
 		restartDelay: 10,
 		maxRestartDelay: 40,
 		validateVersions: false,
-		channelInput: "direct",
+		...(fromEnvironment ? {} : { channelInput: "direct" as const }),
 		...config,
 	})
 	manager.setSourceManager(sources as unknown as SourceManager)
@@ -147,6 +155,49 @@ describe("direct wiring", () => {
 		expect(socket.listenerCount("data")).toBe(0)
 		expect(status()).toMatchObject({ running: true, suspended: false })
 	})
+
+	it.each([
+		["unset", undefined, "direct"],
+		["empty", "", "direct"],
+		["relay", "relay", "relay"],
+		["direct", "direct", "direct"],
+	] as const)(
+		"with no option, WAVEKIT_CHANNEL_INPUT %s selects %s; a scanner probe keeps the relay either way",
+		async (_label, value, expected) => {
+			await manager.destroy()
+			if (value === undefined) vi.stubEnv(CHANNEL_INPUT_ENV, undefined)
+			else vi.stubEnv(CHANNEL_INPUT_ENV, value)
+			resetProcessChannelInputModeForTests()
+			try {
+				setup({}, true)
+				const decoder = create()
+				await manager.startDecoder("dec")
+				await manager.createEphemeralDecoder(
+					{
+						id: "probe",
+						type: "direct-test",
+						enabled: true,
+						options: {},
+						useChannelizer: true,
+					},
+					{ owner: "scanner", jobId: "job" },
+				)
+				expect(provider.calls[0]).toEqual(
+					expected === "direct"
+						? { decoderId: "dec", args: 6, options: { input: "direct" } }
+						: { decoderId: "dec", args: 4 },
+				)
+				expect(provider.calls[1]).toEqual({ decoderId: "probe", args: 4 })
+				expect(decoder.spawnedWith).toHaveLength(expected === "direct" ? 1 : 0)
+				expect(
+					logLines.filter(line => line["msg"] === "Channel input mode"),
+				).toEqual([expect.objectContaining({ channelInput: expected })])
+			} finally {
+				vi.unstubAllEnvs()
+				resetProcessChannelInputModeForTests()
+			}
+		},
+	)
 
 	it("relay mode keeps today's request and stream", async () => {
 		await manager.destroy()

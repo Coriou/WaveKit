@@ -430,8 +430,9 @@ describe("the position of a centre move", () => {
 		const grant = await request()
 		if (!grant.ok) throw new Error(grant.detail)
 		const proc = processes[0]!
-		// A chunk larger than the 1 024 000-byte mark: the branch congests, and the later chunks are lost.
-		const chunk = 1_100_000
+		// A chunk larger than the 4 096 000-byte mark (1 s of 2.048 Msps CU8): the branch congests, and the later chunks
+		// are lost.
+		const chunk = 4_200_000
 		const chunks = 3
 		for (let k = 0; k < chunks; k++) fanout.distribute(Buffer.alloc(chunk, OLD))
 		const { droppedBytesTotal } = fanout.getBranchTelemetry("channelizer-s")!
@@ -795,8 +796,8 @@ describe("the position of a centre move", () => {
 			const proc = setup.processes[0]!
 			const branchState = () =>
 				setup.fanout.getBranchTelemetry("channelizer-s")!
-			// A chunk past the 1 024 000-byte mark goes on to the unread stdin; the next one stays in the branch, full.
-			const chunk = 1_100_000
+			// A chunk past the 4 096 000-byte mark goes on to the unread stdin; the next one stays in the branch, full.
+			const chunk = 4_200_000
 			setup.fanout.distribute(Buffer.alloc(chunk, OLD))
 			await vi.waitFor(() =>
 				expect(branchState().backpressureActive).toBe(false),

@@ -312,18 +312,30 @@ const isCu8Iq = (caps: SourceCaps): boolean =>
 	(caps.kind === "iq" || caps.kind === "recording") && caps.format === "U8_IQ"
 
 /**
- * Input branch mark: the configured `inputHighWaterMark` is a floor; the mark
- * also holds DEFAULT_BRANCH_BUFFER_MS of CU8 (2 bytes per sample) at the
- * input rate. The 262 144-byte default alone held 54.6 ms at 2.4 Msps
- * (4.8 MB/s), shorter than the scheduler stalls of a loaded host; 250 ms is
- * 1 200 000 bytes there and 512 000 at 1.024 Msps. A rate change restarts
- * the process and its branch, so the mark follows the rate.
+ * Signal time the channelizer's input branch holds per side: 1 000 ms. The branch is fed on the core's main thread
+ * and drained by wavekit-chan reading its stdin, so it must cover both sides' scheduling gaps: after a main-thread
+ * stall the fanout pushes the backlog through at once (libuv reads up to about 2 MB per wake), and under a CPU hog
+ * wavekit-chan itself is late to read. The measured worst lateness of an idle worker at load 135-209 on the dev host
+ * is 1.1 s; 250 ms (DEFAULT_BRANCH_BUFFER_MS) congested under a hog and dropped 8.6 % of the branch. The mark only
+ * fills while wavekit-chan is behind, so it adds no latency in steady state. Memory per source at most two marks:
+ * 4.8 MB per side at 2.4 Msps (9.6 MB), 2.048 MB at 1.024 Msps (4.1 MB).
+ */
+export const CHANNELIZER_INPUT_BUFFER_MS = 1000
+
+/**
+ * Input branch mark: the configured `inputHighWaterMark` is a floor; the mark also holds CHANNELIZER_INPUT_BUFFER_MS
+ * of CU8 (2 bytes per sample) at the input rate (4 800 000 bytes at 2.4 Msps, 2 048 000 at 1.024 Msps), within the
+ * fanout's derived-mark ceiling (MAX_DERIVED_HIGH_WATER_MARK, 16 MiB). The 262 144-byte default alone held 54.6 ms at
+ * 2.4 Msps. A rate change restarts the process and its branch, so the mark follows the rate.
  */
 export function channelizerInputMark(
 	configured: number,
 	sampleRateHz: number,
 ): number {
-	return Math.max(configured, branchHighWaterMark(sampleRateHz * 2))
+	return Math.max(
+		configured,
+		branchHighWaterMark(sampleRateHz * 2, CHANNELIZER_INPUT_BUFFER_MS),
+	)
 }
 
 function defaultConnect(

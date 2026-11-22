@@ -763,14 +763,42 @@ describe.each([
 		expect(starting.done).toBe(true)
 		expect(cleanupTimeouts()).toHaveLength(1)
 		expect(hung.calls).toBe(1)
-		if (!placements) {
-			// The start then runs on a new instance.
-			expect(children).toHaveLength(2)
-			expect(manager.getDecoder("voice")).toBe(voice[1])
-			expect(manager.getStatus("voice")).toMatchObject({ running: true })
-		}
+		// The start then runs on a new instance, with placements too: the superseded stop requests nothing.
+		await vi.advanceTimersByTimeAsync(0)
+		expect(children).toHaveLength(2)
+		expect(manager.getDecoder("voice")).toBe(voice[1])
+		expect(manager.getStatus("voice")).toMatchObject({ running: true })
 		await manager.destroy()
 		expect(cleanupTimeouts()).toHaveLength(1)
+	})
+
+	it("a stop and then a start that both join a cleanup that never settles: after its deadline the decoder runs on a new instance", async () => {
+		setup("direct", placements)
+		await start(placements)
+		const hung = hangCleanup(voice[0]!)
+		loseSource()
+		const stopping = track(manager.stopDecoder("voice"))
+		await vi.advanceTimersByTimeAsync(LATE_JOIN_MS)
+		restoreSource()
+		const starting = track(manager.startDecoder("voice"))
+		await vi.advanceTimersByTimeAsync(PLACEMENT_STOP_TIMEOUT_MS - LATE_JOIN_MS)
+		expect(stopping.done).toBe(true)
+		expect(starting.done).toBe(true)
+		// Desired running, so it runs: on a new instance, the fenced one never again.
+		await vi.advanceTimersByTimeAsync(DEBOUNCE)
+		expect(children).toHaveLength(2)
+		expect(manager.getDecoder("voice")).toBe(voice[1])
+		expect(manager.getStatus("voice")).toMatchObject({ running: true })
+		expect(hung.calls).toBe(1)
+		expect(cleanupTimeouts()).toHaveLength(1)
+		// Nothing later stops it: the old stop() settling reaches nothing.
+		hung.release()
+		await vi.advanceTimersByTimeAsync(PLACEMENT_STOP_TIMEOUT_MS * 2)
+		expect(children).toHaveLength(2)
+		expect(children[1]).toMatchObject({ exitCode: null, signalCode: null })
+		expect(manager.getStatus("voice")).toMatchObject({ running: true })
+		await manager.destroy()
+		expect(live.size).toBe(0)
 	})
 
 	it.each([

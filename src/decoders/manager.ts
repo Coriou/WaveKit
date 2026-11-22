@@ -4294,7 +4294,9 @@ export class DecoderManager extends EventEmitter {
 					candidate => candidate === state || candidate.parentId === id,
 				)
 				const results = await Promise.allSettled(
-					placements.map(candidate => this.stopPlacement(candidate)),
+					placements.map(candidate =>
+						this.stopPlacement(candidate, false, current),
+					),
 				)
 				if (!current()) return
 				for (const worker of placements) {
@@ -8130,9 +8132,15 @@ export class DecoderManager extends EventEmitter {
 		return actor
 	}
 
+	/**
+	 * `current`: the public request this stop serves (stopDecoder) is still the latest. A stop that waited on a direct
+	 * cleanup and was superseded meanwhile (a start that came during the wait) requests nothing: the newer request
+	 * already owns the placement, and a late "stopped" would leave it desired-running but stopped.
+	 */
 	private async stopPlacement(
 		state: DecoderState,
 		restart = false,
+		current: () => boolean = () => true,
 	): Promise<void> {
 		// Every requested stop, suspend, restart and removal passes here before any signal.
 		this.releaseDirectBeforeSignal(state)
@@ -8140,6 +8148,7 @@ export class DecoderManager extends EventEmitter {
 		if (cleanup !== undefined) {
 			// An exited run's own stop() is in flight: this stop joins it (bounded) and never calls it again.
 			await this.joinDirectCleanup(cleanup)
+			if (!current()) return
 			// Without the actor, that stop() is this whole stop: nothing is left to signal. The actor signals nothing
 			// either while the decoder is not running.
 			if (
