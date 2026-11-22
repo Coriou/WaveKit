@@ -10,9 +10,14 @@ import { NoticeRegion } from "../../src/shell/notices/NoticeRegion.tsx"
 import { NoticeService } from "../../src/shell/notices/service.ts"
 import { Drawer } from "../../src/ui/Drawer.tsx"
 
-const region = (svc: NoticeService, palette = false) =>
+const region = (
+	svc: NoticeService,
+	palette = false,
+	yielded: readonly `status:${string}`[] = [],
+) =>
 	renderToStaticMarkup(
 		createElement(NoticeRegion, {
+			yielded,
 			status: {
 				where: "rail",
 				slot: { x: 472, y: 16, w: 636, h: 56 },
@@ -41,6 +46,7 @@ const region = (svc: NoticeService, palette = false) =>
 				],
 				docked: [],
 				waiting: [],
+				dockHost: "shown",
 			},
 			palette,
 			receiverOpen: false,
@@ -78,6 +84,30 @@ describe("notice region markup", () => {
 		)
 		expect(html).toContain("left:677px;top:22px")
 		expect(html).not.toMatch(/autofocus/i)
+	})
+
+	it("a receipt under an open panel's room yields: out of sight in place and inert; the condition stays shown", () => {
+		const svc = new NoticeService()
+		svc.raise("link:rx", { text: "Receiver samples lost", tone: "warn" }, true)
+		svc.showReceipt("Removed band", { undo: () => undefined })
+		const html = region(svc, false, ["status:receipt"])
+		const receipt = html.slice(html.indexOf('data-class="receipt"'))
+		const condition = html.slice(
+			html.indexOf('data-class="condition"'),
+			html.indexOf('data-class="receipt"'),
+		)
+		expect(receipt).toMatch(/^[^>]*data-wk-state="yielded"/)
+		expect(receipt).toMatch(/^[^>]*data-yielded=""/)
+		expect(receipt).toMatch(/^[^>]*inert=""/)
+		// in place: it keeps its rectangle
+		expect(receipt).toMatch(/^[^>]*data-wk-rect="472,22,220,44"/)
+		expect(condition).toMatch(/^[^>]*data-wk-state="shown"/)
+		expect(condition).not.toMatch(/^[^>]*inert/)
+		// closed again: shown and live
+		const after = region(svc)
+		const back = after.slice(after.indexOf('data-class="receipt"'))
+		expect(back).toMatch(/^[^>]*data-wk-state="shown"/)
+		expect(back).not.toMatch(/^[^>]*inert/)
 	})
 
 	it("names each toast and its controls, so a moved toast's button gets its focus back", () => {

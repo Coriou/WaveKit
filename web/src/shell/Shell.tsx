@@ -309,7 +309,8 @@ export function Shell({
 		setGeo(prev => {
 			const open = panelRef.current
 			const head = (k: string, d: Size) => sizeOf(e[k]) ?? d
-			// Listen widens while its options are open (a popover): the frame keeps its closed size
+			// Listen widens while its options are open: it is measured only while closed (the frame keeps its closed head)
+			// and the layout reserves its open width (`listenOpen`, LY rules §2.2)
 			const listenHead =
 				open === "listen" ? prev.listen : head("listenHead", prev.listen)
 			const dockEl = e["dock"]
@@ -462,15 +463,22 @@ export function Shell({
 	const heldSet = new Set(L.held)
 	const cardYielded = L.yielded.includes("card")
 	const playerYielded = L.yielded.includes("player")
+	const statusYielded = L.yielded.some(y => y.startsWith("status:"))
 	useLayoutEffect(() => {
 		if (!state.panel) return
 		const active = document.activeElement
+		// a yielded slot holding the focus hands it to the open panel's trigger (it is inert now)
+		const inYieldedToast =
+			statusYielded &&
+			active instanceof Element &&
+			active.closest(".wk-notice[data-yielded]") !== null
 		if (
 			(cardYielded && els.current["card"]?.contains(active)) ||
-			(playerYielded && els.current["player"]?.contains(active))
+			(playerYielded && els.current["player"]?.contains(active)) ||
+			inYieldedToast
 		)
 			refocus(`panel:${state.panel}`)
-	}, [cardYielded, playerYielded, state.panel, refocus])
+	}, [cardYielded, playerYielded, statusYielded, state.panel, refocus])
 
 	const glideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 	useLayoutEffect(() => {
@@ -760,10 +768,14 @@ export function Shell({
 			{island(
 				"listen",
 				listen,
-				L.listen,
+				// the head stands at its open width while its panel is open (the dock reserves it)
+				state.panel === "listen" ? L.listenOpen : L.listen,
 				refs.listenHead,
 				refs.listenBox,
-				bottomLeft(L.listen, geo.H),
+				{
+					...bottomLeft(L.listen, geo.H),
+					"--wk-listen-open-w": `${L.listenOpen.w}px`,
+				} as CSSProperties,
 				"up",
 			)}
 
@@ -904,6 +916,7 @@ export function Shell({
 			<NoticeRegion
 				status={L.status}
 				held={L.held}
+				yielded={L.yielded}
 				palette={state.palette}
 				receiverOpen={state.panel === "receiver"}
 			/>

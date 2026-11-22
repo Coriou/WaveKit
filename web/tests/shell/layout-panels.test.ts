@@ -1,0 +1,522 @@
+// Rule P (LY rules §2): Listen's open width and an open panel's room are layout inputs. The dock reserves the width
+// Listen takes while its panel is open, so nothing moves when it opens and the open head never covers the dock; a
+// status item within PANEL_GAP of an open panel's room yields (out of sight in place, inert, its timer paused), and
+// the notice region reads one predicate of the layout for render, inert, focus and the timer.
+import fc from "fast-check"
+import { describe, expect, it } from "vitest"
+
+import { clampDrag } from "../../src/shell/card-place.ts"
+import { CARD_ANCHOR_IDS } from "../../src/shell/layout.ts"
+import {
+	cardObstacles,
+	computeLayout,
+	DEFAULT_SIZES,
+	LISTEN_OPEN_W,
+	layoutViolations,
+	namedRects,
+	PANEL_GAP,
+	statusSeen,
+	statusState,
+	type DrawerInput,
+	type LayoutInput,
+	type StatusItem,
+} from "../../src/shell/layout/compute.ts"
+import {
+	intersects,
+	right,
+	separation,
+	type Rect,
+} from "../../src/shell/layout/geometry.ts"
+import type { IslandId } from "../../src/shell/store.ts"
+
+const r = (x: number, y: number, w: number, h: number): Rect => ({ x, y, w, h })
+const box = (l: Rect | null): Rect | null =>
+	l === null ? null : r(l.x, l.y, l.w, l.h)
+
+const RECEIPT: StatusItem = {
+	id: "receipt",
+	kind: "receipt",
+	forms: { full: { w: 220, h: 44 } },
+}
+
+function input(
+	W: number,
+	H: number,
+	o: {
+		open?: IslandId | null
+		panel?: { w: number; h: number } | null
+		status?: StatusItem[]
+		drawer?: DrawerInput | null
+		card?: boolean
+	} = {},
+): LayoutInput {
+	const open = o.open ?? null
+	return {
+		viewport: { w: W, h: H },
+		tuner: { w: 440, h: 56 },
+		receiver: { w: 300, h: 56 },
+		listen: { w: 340, h: 64 },
+		dock: DEFAULT_SIZES.dock,
+		player: { w: 560, h: 70 },
+		card:
+			o.card === false
+				? null
+				: {
+						expanded: { w: 340, h: 300 },
+						line: { w: 340, h: 52 },
+						minimised: false,
+						anchor: "al",
+					},
+		status: o.status ?? [],
+		drawer: o.drawer ?? null,
+		panels: open && o.panel ? [{ island: open, size: o.panel }] : [],
+		openPanel: open,
+	}
+}
+
+/** Listen's panel open at its real width (the board's 420, or what the layout reserves for it). */
+const listenOpen = (
+	W: number,
+	H: number,
+	extra: Parameters<typeof input>[2] = {},
+) => {
+	const closed = computeLayout(input(W, H, extra))
+	return computeLayout(
+		input(W, H, {
+			...extra,
+			open: "listen",
+			panel: { w: closed.listenOpen.w, h: 320 },
+		}),
+	)
+}
+
+describe("Rule P: the dock reserves Listen's open width (LY rules §2.2)", () => {
+	it("Listen opens to the board's 420 px", () => {
+		expect(LISTEN_OPEN_W).toBe(420)
+	})
+
+	// W, H, dock x, dock w, reserved (open) Listen width, gap open Listen → dock
+	const table: [number, number, number, number, number, number][] = [
+		// round((1440 − 492) / 2) = 474 ≥ 16 + 420 + 16 = 452: centred; gap 474 − 436 = 38
+		[1440, 900, 474, 492, 420, 38],
+		// round((1280 − 492) / 2) = 394 < 452: at the bound; gap 452 − 436 = 16
+		[1280, 800, 452, 492, 420, 16],
+		// compact: round((1100 − 448) / 2) = 326 < 452: at the bound
+		[1100, 800, 452, 448, 420, 16],
+		// reserve squeezed: min(420, 900 − 48 − 448 = 404); dock 16 + 404 + 16 = 436 = 900 − 16 − 448
+		[900, 800, 436, 448, 404, 16],
+	]
+	for (const [W, H, x, w, reserve, gap] of table)
+		it(`${W}x${H}: dock ${x} (${w} wide), Listen open ${reserve}, ${gap} px apart, closed or open`, () => {
+			const closed = computeLayout(input(W, H))
+			const open = listenOpen(W, H)
+			for (const L of [closed, open]) {
+				expect(L.dock).toMatchObject({ x, y: H - 16 - 64, w, h: 64 })
+				expect(L.listenOpen).toEqual(r(16, H - 16 - 64, reserve, 64))
+				// the closed head is the frame's: opening Listen never moves the stack
+				expect(L.listen).toEqual(r(16, H - 16 - 64, 340, 64))
+			}
+			expect(L0dockGap(open)).toBe(gap)
+			expect(box(open.dock)).toEqual(box(closed.dock))
+			expect(open.player).toEqual(closed.player)
+			expect(open.tuner).toEqual(closed.tuner)
+			expect(open.receiver).toEqual(closed.receiver)
+			expect(layoutViolations(namedRects(open), open.viewport)).toEqual([])
+		})
+
+	it("390x844 (phone): the open head keeps to the search button, min(420, 390 − 32 − 48 − 8) = 302", () => {
+		const L = listenOpen(390, 844)
+		expect(L.dock).toBeNull()
+		expect(L.find).toEqual(r(326, 780, 48, 48))
+		expect(L.listenOpen).toEqual(r(16, 764, 302, 64))
+		// find − right(open Listen) = 326 − 318 = 8 (the rail neighbours' gap)
+		expect((L.find?.x ?? 0) - right(L.listenOpen)).toBe(8)
+		expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+	})
+
+	const dockX = (W: number) => computeLayout(input(W, 800)).dock?.x ?? null
+	const reserveW = (W: number) => computeLayout(input(W, 800)).listenOpen.w
+
+	it("the dock hides at 835 (closed width: 16 + 340 + 16 + 448 + 16 = 836), the reserve squeezes from 836", () => {
+		expect(dockX(835)).toBeNull()
+		// 836: reserve = 836 − 48 − 448 = 340 (the closed width); the dock ends at the margin, 372 + 448 = 820
+		expect(dockX(836)).toBe(372)
+		expect(reserveW(836)).toBe(340)
+		expect(right(computeLayout(input(836, 800)).dock as Rect)).toBe(836 - 16)
+	})
+
+	it("the reserve is W − 496 up to 915 and the board's 420 from 916", () => {
+		expect(reserveW(915)).toBe(419)
+		expect(dockX(915)).toBe(451)
+		expect(reserveW(916)).toBe(420)
+		expect(dockX(916)).toBe(452)
+		expect(reserveW(917)).toBe(420)
+		expect(dockX(917)).toBe(452)
+	})
+
+	it("the compact dock (below 1180) is never centred; the wide one centres from 1395 (round(903/2) = 452)", () => {
+		expect(dockX(1100)).toBe(452)
+		expect(dockX(1101)).toBe(452)
+		expect(dockX(1179)).toBe(452)
+		expect(computeLayout(input(1179, 800)).dock?.compact).toBe(true)
+		expect(dockX(1180)).toBe(452)
+		// round((1394 − 492) / 2) = 451 < 452: clamped
+		expect(dockX(1394)).toBe(452)
+		expect(dockX(1395)).toBe(452)
+		expect(dockX(1396)).toBe(452)
+		// round(905 / 2) = 453: centred, past the bound
+		expect(dockX(1397)).toBe(453)
+	})
+
+	it("the card shows from 1101 and keeps its home when Listen opens (it yields, never moves)", () => {
+		expect(computeLayout(input(1100, 800)).card).toBeNull()
+		const closed = computeLayout(input(1101, 800))
+		const open = listenOpen(1101, 800)
+		expect(closed.card).not.toBeNull()
+		expect(open.card).toEqual(closed.card)
+		expect(open.yielded).toContain("card")
+	})
+
+	it("a measured open head wider than the board (421) still keeps a gutter from the dock", () => {
+		const L = computeLayout({
+			...input(1280, 800, { open: "listen", panel: { w: 421, h: 300 } }),
+			listenOpenW: 421,
+		})
+		expect(L.listenOpen.w).toBe(421)
+		expect(L.dock?.x).toBe(453)
+		expect(L0dockGap(L)).toBe(16)
+	})
+})
+
+/** The clear distance between the open Listen head and the dock (or the search button). */
+function L0dockGap(L: ReturnType<typeof computeLayout>): number {
+	const other = L.dock ?? L.find
+	return other ? other.x - right(L.listenOpen) : Infinity
+}
+
+describe("Rule P: a status item under an open panel's room yields (LY rules §2.3)", () => {
+	it("390x844: the Tuner panel (16,80 358×340) yields the receipt in the strip at 16,144; its timer is unseen", () => {
+		const closed = computeLayout(input(390, 844, { status: [RECEIPT] }))
+		expect(closed.stacked).toBe(true)
+		const item = closed.status.items.find(i => i.id === "receipt")
+		expect(item).toMatchObject({ x: 16, y: 144 })
+		expect(statusState(closed, "receipt", false)).toBe("shown")
+		expect(statusSeen(statusState(closed, "receipt", false))).toBe(true)
+		// pending (opened this frame, not measured): the room at its cap height already yields it
+		const pending = computeLayout(
+			input(390, 844, { status: [RECEIPT], open: "tuner" }),
+		)
+		// measured
+		const open = computeLayout(
+			input(390, 844, {
+				status: [RECEIPT],
+				open: "tuner",
+				panel: { w: 358, h: 340 },
+			}),
+		)
+		expect(open.panels[0]?.rect).toEqual(r(16, 80, 358, 340))
+		for (const L of [pending, open]) {
+			expect(L.yielded).toContain("status:receipt")
+			expect(statusState(L, "receipt", false)).toBe("yielded")
+			expect(statusSeen(statusState(L, "receipt", false))).toBe(false)
+			// in place: it keeps its rectangle (it is back there, with Undo, when the panel closes)
+			expect(L.status.items).toEqual(closed.status.items)
+			expect(namedRects(L).some(n => n.name === "status:receipt")).toBe(false)
+		}
+		// closed again: shown
+		expect(statusState(closed, "receipt", false)).toBe("shown")
+	})
+
+	it("390x844: the Receiver panel (top 144 = the strip's top) yields the strip's receipt", () => {
+		const L = computeLayout(
+			input(390, 844, {
+				status: [RECEIPT],
+				open: "receiver",
+				panel: { w: 300, h: 200 },
+			}),
+		)
+		expect(statusState(L, "receipt", false)).toBe("yielded")
+	})
+
+	it("a short Tuner panel that ends PANEL_GAP above the strip item leaves it shown (at and past the bound)", () => {
+		// item top 144; the panel's foot at 80 + h; it yields iff 144 − (80 + h) < 8 ⇔ h > 56
+		const at = (h: number) =>
+			statusState(
+				computeLayout(
+					input(390, 844, {
+						status: [RECEIPT],
+						open: "tuner",
+						panel: { w: 358, h },
+					}),
+				),
+				"receipt",
+				false,
+			)
+		expect(at(56)).toBe("shown")
+		expect(at(57)).toBe("yielded")
+	})
+
+	it("1440x900: the rail's items never yield to a panel (its top is 8 under the top rail)", () => {
+		for (const open of ["tuner", "receiver", "listen"] as const) {
+			const L = computeLayout(
+				input(1440, 900, {
+					status: [RECEIPT],
+					open,
+					panel: { w: open === "listen" ? 420 : 300, h: 600 },
+				}),
+			)
+			expect(L.status.where).toBe("rail")
+			expect(statusState(L, "receipt", false), open).toBe("shown")
+		}
+	})
+
+	it("a docked item is seen only while its host is shown and its target exists", () => {
+		const sheet: DrawerInput = {
+			id: "activity",
+			wantedW: 420,
+			expanded: false,
+			pane: null,
+			hasNoticeSlot: true,
+		}
+		const L = computeLayout(
+			input(390, 844, { status: [RECEIPT], drawer: sheet }),
+		)
+		expect(L.status.docked).toEqual(["receipt"])
+		expect(statusState(L, "receipt", true)).toBe("docked")
+		expect(statusSeen(statusState(L, "receipt", true))).toBe(true)
+		// no portal target yet: it waits
+		expect(statusState(L, "receipt", false)).toBe("waiting")
+		// the Tuner panel over the sheet's top (its notice slot): the host yields, so the docked item does
+		const covered = computeLayout(
+			input(390, 844, {
+				status: [RECEIPT],
+				drawer: sheet,
+				open: "tuner",
+				panel: { w: 358, h: 340 },
+			}),
+		)
+		expect(covered.status.dockHost).toBe("yielded")
+		expect(statusState(covered, "receipt", true)).toBe("yielded")
+		expect(statusSeen(statusState(covered, "receipt", true))).toBe(false)
+	})
+
+	it("an item held for the card's glide is held (unseen); a missing item is absent", () => {
+		const L = computeLayout(input(1440, 900, { status: [RECEIPT] }))
+		expect(statusState(L, "condition", false)).toBe("absent")
+		const held = { ...L, held: ["status:receipt"] }
+		expect(statusState(held, "receipt", false)).toBe("held")
+		expect(statusSeen("held")).toBe(false)
+		expect(statusSeen("waiting")).toBe(false)
+	})
+})
+
+// ---- properties
+
+const size = (w: [number, number], h: [number, number]) =>
+	fc.record({
+		w: fc.integer({ min: w[0], max: w[1] }),
+		h: fc.integer({ min: h[0], max: h[1] }),
+	})
+
+const statusArb: fc.Arbitrary<StatusItem[]> = fc
+	.record({
+		receipt: fc.option(size([100, 400], [36, 72]), { nil: null }),
+		condition: fc.option(size([120, 560], [36, 72]), { nil: null }),
+	})
+	.map(o => [
+		...(o.condition
+			? [
+					{
+						id: "condition",
+						kind: "condition" as const,
+						forms: {
+							full: o.condition,
+							compact: { w: 168, h: o.condition.h },
+							icon: { w: 44, h: o.condition.h },
+						},
+					},
+				]
+			: []),
+		...(o.receipt
+			? [
+					{
+						id: "receipt",
+						kind: "receipt" as const,
+						forms: { full: o.receipt },
+					},
+				]
+			: []),
+	])
+
+const drawerArb: fc.Arbitrary<DrawerInput | null> = fc.option(
+	fc.record({
+		id: fc.constantFrom(
+			"activity" as const,
+			"recordings" as const,
+			"settings" as const,
+		),
+		wantedW: fc.integer({ min: 360, max: 640 }),
+		expanded: fc.boolean(),
+		pane: fc.constant(null),
+		hasNoticeSlot: fc.boolean(),
+	}),
+	{ nil: null },
+)
+
+// the real open widths: the viewports the rule table names, and any window from a phone to a wide desktop
+const viewport = fc.oneof(
+	fc.constantFrom(
+		{ w: 1440, h: 900 },
+		{ w: 1280, h: 800 },
+		{ w: 1100, h: 800 },
+		{ w: 900, h: 800 },
+		{ w: 390, h: 844 },
+	),
+	size([320, 2560], [560, 1600]),
+)
+
+const motionArb = fc.record({
+	cardFrom: fc.option(
+		fc.record({
+			x: fc.integer({ min: 16, max: 1200 }),
+			y: fc.integer({ min: 88, max: 700 }),
+			w: fc.constant(340),
+			h: fc.integer({ min: 52, max: 300 }),
+		}),
+		{ nil: null },
+	),
+	cardDrag: fc.option(
+		fc.record({
+			x: fc.integer({ min: 16, max: 1200 }),
+			y: fc.integer({ min: 88, max: 700 }),
+		}),
+		{ nil: null },
+	),
+})
+
+const scenario = fc.record({
+	viewport,
+	open: fc.constantFrom<IslandId | null>("listen", "tuner", "receiver", null),
+	measured: fc.boolean(),
+	panelH: fc.integer({ min: 40, max: 800 }),
+	status: statusArb,
+	drawer: drawerArb,
+	card: fc.boolean(),
+	anchor: fc.constantFrom(...CARD_ANCHOR_IDS),
+	motion: motionArb,
+})
+
+function build(
+	s: typeof scenario extends fc.Arbitrary<infer T> ? T : never,
+): LayoutInput {
+	const W = s.viewport.w
+	const H = s.viewport.h
+	const base = input(W, H, { status: s.status, drawer: s.drawer, card: s.card })
+	const closed = computeLayout(base)
+	const w =
+		s.open === "listen"
+			? closed.listenOpen.w
+			: s.open === "tuner"
+				? closed.tuner.w
+				: closed.receiver.w
+	const withCard: LayoutInput = {
+		...base,
+		card: base.card ? { ...base.card, anchor: s.anchor } : null,
+	}
+	// a stationary drag: the pointer holds the card where the settled (panel-closed) layout let it stand
+	const settled = computeLayout(withCard)
+	const want = s.motion.cardDrag
+	const cardDrag =
+		want && settled.card
+			? clampDrag(
+					want,
+					{
+						anchors: settled.cardAnchors,
+						card: settled.card,
+						freeW: settled.cardFreeW,
+						H: settled.viewport.h,
+						cardH: settled.card.h,
+						obstacles: cardObstacles(settled),
+					},
+					settled.card,
+				)
+			: null
+	return {
+		...withCard,
+		openPanel: s.open,
+		panels:
+			s.open && s.measured
+				? [{ island: s.open, size: { w, h: s.panelH } }]
+				: [],
+		motion: { cardFrom: s.motion.cardFrom, cardDrag },
+	}
+}
+
+describe("Rule P properties", () => {
+	it("no shown slot overlaps the open Listen head or the dock, in transitions and during a stationary drag", () => {
+		// Feature: layout, Property 1: the open Listen head and the dock are never covered
+		// Validates: LY rules §2
+		fc.assert(
+			fc.property(scenario, s => {
+				const L = computeLayout(build(s))
+				const shown = namedRects(L)
+				const listen = shown.find(n => n.name === "listen")
+				// the head's rectangle in the checks is its open one while its panel is open
+				if (s.open === "listen")
+					expect(box(listen ?? null)).toEqual(L.listenOpen)
+				// the frame and the dock are the same whatever opens (nothing moves when Listen opens)
+				const bare = computeLayout({ ...build(s), openPanel: null, panels: [] })
+				expect(box(L.dock)).toEqual(box(bare.dock))
+				expect(L.listen).toEqual(bare.listen)
+				if (L.dock) {
+					// the open head keeps a gutter from the dock by construction: dock.x ≥ G + reserveW + G
+					expect(L.dock.x - right(L.listenOpen)).toBeGreaterThanOrEqual(16)
+					for (const n of shown)
+						if (n.name !== "dock" && !n.name.startsWith("map:"))
+							expect(intersects(n, L.dock), `${n.name} × dock`).toBe(false)
+				}
+				if (s.open === "listen")
+					for (const n of shown)
+						if (n.name !== "listen")
+							expect(
+								intersects(n, L.listenOpen),
+								`${n.name} × open Listen`,
+							).toBe(false)
+			}),
+			{ numRuns: 300 },
+		)
+	})
+
+	it("a status item within PANEL_GAP of an open panel's room yields, and is never seen while it does", () => {
+		// Feature: layout, Property 2: occluded status items yield (unseen, timer paused)
+		// Validates: LY rules §2
+		fc.assert(
+			fc.property(scenario, s => {
+				const inp = build(s)
+				const L = computeLayout(inp)
+				const rooms = L.panelRooms
+				if (!s.open) expect(rooms).toEqual([])
+				else expect(rooms.length).toBe(1)
+				for (const i of L.status.items) {
+					const near = rooms.some(p => separation(p, i) < PANEL_GAP)
+					expect(L.yielded.includes(`status:${i.id}`), i.id).toBe(near)
+					if (near) {
+						expect(statusSeen(statusState(L, i.id, true))).toBe(false)
+						expect(namedRects(L).some(n => n.name === `status:${i.id}`)).toBe(
+							false,
+						)
+					}
+				}
+				// every shown status item keeps PANEL_GAP from the painted panel
+				for (const n of namedRects(L))
+					if (n.name.startsWith("status:"))
+						for (const p of L.panels)
+							expect(separation(n, p.rect)).toBeGreaterThanOrEqual(PANEL_GAP)
+				// yielding never moves an item
+				const bare = computeLayout({ ...inp, openPanel: null, panels: [] })
+				expect(L.status.items).toEqual(bare.status.items)
+			}),
+			{ numRuns: 300 },
+		)
+	})
+})

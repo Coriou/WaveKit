@@ -23,8 +23,16 @@
  * - motion (M): when playback starts with the expanded card above Listen (the card glides up), and during one drawer
  *   opening per viewport, every animation frame for 400 ms (1200 ms for playback) WITH the CSS transitions on: no
  *   two shown slots intersect (a slot held for the card's glide is out of sight); a sample that sees no frame fails;
- * - open panels (P, 390×844 and 1440×900): with Listen's panel open no island (the stacked Receiver, the tuned card,
- *   the player) covers it: the card is in the tree and either shown clear of the panel or listed as yielded;
+ * - open panels (P, every viewport): with Listen's panel open no island (the stacked Receiver, the tuned card,
+ *   the player) covers it: the card is in the tree and either shown clear of the panel or listed as yielded; the
+ *   opening is sampled from the click (an observed frame with the panel absent, then one with it present), and on
+ *   every sampled frame the dock (or the search button) keeps its rectangle and its gap from the open Listen head
+ *   (the dock reserves Listen's open width, LY rules §2.2); the dock's first button (the search button on a phone)
+ *   is the element at its own centre, so it can be clicked;
+ * - a panel over a receipt (P, 390×844): the Tuner panel opens over the strip's receipt with Undo; sampled from the
+ *   click, the receipt is seen shown, then yielded (out of sight, inert, the element at Undo's centre is not Undo);
+ *   it outlives its 6 s with the panel open (its clock does not run while covered), comes back shown on close with
+ *   Undo at its own centre, and then expires after about the time it had left (it is live again);
  * - the map (1280×800, the Map view, Activity open, then each other viewport): the map's chrome is laid out with
  *   the rest (I1, I2, I7 and V), the Live chip stays off the dock and keeps its rectangle when the drawer opens.
  * The settled cells run with CSS transitions and animations switched off, so every box is a settled one.
@@ -114,6 +122,9 @@ const DRAWERS: { name: string; hash: string; ready: string }[] = [
 /** Onset (6 s of core time) plus the snapshot cadence and a margin (ms). */
 const NOTICE_MS = 15_000
 const STEP_MS = 10_000
+/** A receipt's time on screen (src/shell/notices/service.ts `RECEIPT_MS`; not imported: its class syntax is not
+ * type-strippable, and this flow runs under Node's type stripping). */
+const RECEIPT_MS = 6000
 const STEADY = ["tuner", "receiver", "listen", "dock", "find", "player"]
 
 const fmt = (b: Box) =>
@@ -287,8 +298,7 @@ function check(
 			w &&
 			(Math.abs(w.x - sl.x) > 1 ||
 				Math.abs(w.y - sl.y) > 1 ||
-				(Math.abs(w.w - sl.w) > 1 &&
-					!(s.listenOpen && sl.name === "listen" && sl.w > w.w)) ||
+				Math.abs(w.w - sl.w) > 1 ||
 				Math.abs(w.h - sl.h) > 1)
 		)
 			out.push(`I7 ${sl.name}: DOM ${fmt(sl)}, layout ${fmt(w)}`)
@@ -391,6 +401,141 @@ async function framesDuring(
 	ticks.push(got.ticks)
 	// a sample that saw no frame proves nothing: it fails
 	return got.ticks === 0 ? ["no animation frame sampled"] : got.seen
+}
+
+/** One sampled frame of named elements: each one's box, visibility and layout state, or null while it is absent. */
+type Frame = Record<
+	string,
+	{
+		x: number
+		y: number
+		w: number
+		h: number
+		vis: string
+		state: string
+	} | null
+>
+
+/** Samples the named elements on every animation frame (and an 8 ms timer beside it) for `ms`, armed at the action:
+ * its first sample is read synchronously before `act` is sent, so the state before the change is in the list. */
+async function sampleDuring(
+	page: Page,
+	named: Record<string, string>,
+	act: () => Promise<void>,
+	ms = 600,
+): Promise<Frame[]> {
+	await page.evaluate(named => {
+		const w = window as unknown as {
+			__wkSamples?: unknown[]
+			__wkSampleUntil?: number
+		}
+		const out: unknown[] = []
+		w.__wkSamples = out
+		// runs until the action has landed and `ms` more have passed (set below); 30 s at most
+		w.__wkSampleUntil = performance.now() + 30_000
+		const live = () => performance.now() < (w.__wkSampleUntil ?? 0)
+		const tick = () => {
+			const f: Record<string, unknown> = {}
+			for (const [name, sel] of Object.entries(named)) {
+				const el = document.querySelector(sel)
+				if (!el) {
+					f[name] = null
+					continue
+				}
+				const r = el.getBoundingClientRect()
+				const holder = el.closest("[data-wk-state]")
+				f[name] = {
+					x: r.x,
+					y: r.y,
+					w: r.width,
+					h: r.height,
+					vis: getComputedStyle(el).visibility,
+					state: holder?.getAttribute("data-wk-state") ?? "",
+				}
+			}
+			out.push(f)
+		}
+		const frame = () => {
+			tick()
+			if (live()) requestAnimationFrame(frame)
+		}
+		const timer = () => {
+			tick()
+			if (live()) setTimeout(timer, 8)
+		}
+		// the state before the action, read now: an input task may run before the first timer or frame
+		tick()
+		requestAnimationFrame(frame)
+		setTimeout(timer, 0)
+	}, named)
+	// a loaded host may take a while to deliver the action (Playwright's checks before a click): the sampler runs on
+	// until it has landed, then `ms` more
+	await act()
+	await page.evaluate(ms => {
+		const w = window as unknown as { __wkSampleUntil?: number }
+		w.__wkSampleUntil = performance.now() + ms
+	}, ms)
+	await new Promise(resolve => setTimeout(resolve, ms + 100))
+	const got = await page.evaluate(
+		() => (window as unknown as { __wkSamples?: Frame[] }).__wkSamples ?? [],
+	)
+	ticks.push(got.length)
+	return got
+}
+
+/** The element at the centre of the first match is that element or inside it, and not inert (a click reaches it). */
+async function hitsItself(page: Page, sel: string): Promise<boolean> {
+	return page.evaluate(sel => {
+		const el = document.querySelector(sel)
+		if (!el) return false
+		const r = el.getBoundingClientRect()
+		if (r.width <= 0 || r.height <= 0) return false
+		const at = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
+		return (
+			at !== null && (at === el || el.contains(at)) && !el.closest("[inert]")
+		)
+	}, sel)
+}
+
+/** Listen's opening, sampled from the click: the panel seen absent then present (a changed frame), the dock or the
+ * search button never moving and never within its gap of the open Listen head on any frame. */
+function listenOpening(frames: readonly Frame[]): string[] {
+	if (frames.length === 0) return ["P Listen opening: no frame sampled"]
+	const out: string[] = []
+	const before = frames.findIndex(f => f["panel"] === null)
+	const after = frames.findIndex((f, i) => i > before && f["panel"] !== null)
+	if (before < 0 || after < 0)
+		out.push(
+			`P Listen opening: no changed frame of the panel observed (${frames.length} frames)`,
+		)
+	const first = frames[0]
+	for (const [name, need] of [
+		["dock", 16],
+		["find", 8],
+	] as const) {
+		const at0 = first?.[name] ?? null
+		for (const f of frames) {
+			const b = f[name] ?? null
+			const l = f["listen"] ?? null
+			if (!b || !l) continue
+			if (
+				at0 &&
+				(Math.abs(b.x - at0.x) > 0.5 ||
+					Math.abs(b.y - at0.y) > 0.5 ||
+					Math.abs(b.w - at0.w) > 0.5)
+			) {
+				out.push(`P ${name} moved while Listen opened: ${fmt(at0)} → ${fmt(b)}`)
+				break
+			}
+			if (b.x - (l.x + l.w) < need - 0.5) {
+				out.push(
+					`P open Listen ${fmt(l)} within ${need} px of the ${name} ${fmt(b)}`,
+				)
+				break
+			}
+		}
+	}
+	return out
 }
 
 /** Samples (animation frames and timer ticks) each motion sample took. */
@@ -554,10 +699,11 @@ export async function layoutFlow(
 				})
 			}
 			await record("none")
-			// Listen's panel open is part of the layout: no island over it (on the phone the stacked Receiver; at
-			// 1440x900 the tuned card at its home above Listen and the player, which yield in place, out of sight)
+			// Listen's panel open is part of the layout, in every viewport: no island over it (on the phone the stacked
+			// Receiver; from 1101 px the tuned card at its home above Listen and the player, which yield in place, out of
+			// sight), and the open head (420 px from 916 px) never reaches the dock, which reserves that width
 			const wide = W === 1440 && H === 900
-			if (W < 761 || wide) {
+			{
 				phase = `${vp}: open the Listen panel`
 				const toggle = page
 					.locator(
@@ -565,6 +711,12 @@ export async function layoutFlow(
 					)
 					.first()
 				const focusViolations: string[] = []
+				const LISTEN_NAMED = {
+					listen: '[data-wk-slot="listen"]',
+					panel: '.wk-shell-island[data-island="listen"] .wk-shell-panel',
+					dock: '[data-wk-slot="dock"]',
+					find: '[data-wk-slot="find"]',
+				}
 				if (wide) {
 					// Programmatic opening preserves focus inside the yielding slot until the shell transfers it.
 					for (const slot of ["player", "card"]) {
@@ -589,7 +741,10 @@ export async function layoutFlow(
 						await control.focus()
 						if (!(await control.evaluate(el => el === document.activeElement)))
 							focusViolations.push(`could not focus ${slot} before yield`)
-						await toggle.evaluate(el => (el as HTMLButtonElement).click())
+						const opening = await sampleDuring(page, LISTEN_NAMED, () =>
+							toggle.evaluate(el => (el as HTMLButtonElement).click()),
+						)
+						focusViolations.push(...listenOpening(opening))
 						await page
 							.locator(`[data-wk-slot="${slot}"][data-yielded]`)
 							.waitFor({ state: "attached", timeout: STEP_MS })
@@ -599,7 +754,12 @@ export async function layoutFlow(
 							)
 						if (slot === "player") await toggle.click()
 					}
-				} else await toggle.click()
+				} else
+					focusViolations.push(
+						...listenOpening(
+							await sampleDuring(page, LISTEN_NAMED, () => toggle.click()),
+						),
+					)
 				const panel = page.locator(
 					'.wk-shell-island[data-island="listen"] .wk-shell-panel',
 				)
@@ -607,6 +767,13 @@ export async function layoutFlow(
 				const s = await settled(page)
 				const p = await panel.boundingBox()
 				const violations = [...check(s), ...focusViolations]
+				// the control beside the open Listen head is clickable: nothing stands over it
+				const neighbour =
+					W >= 761 ? '[data-wk-slot="dock"] button' : '[data-wk-slot="find"]'
+				if (!(await hitsItself(page, neighbour)))
+					violations.push(
+						`P ${W >= 761 ? "the dock's first button" : "the search button"} is not the element at its own centre with Listen open`,
+					)
 				const frameNames = [
 					"tuner",
 					"receiver",
@@ -754,7 +921,151 @@ export async function layoutFlow(
 							)
 					}
 				}
+			// a phone: the Tuner panel over the strip's receipt (LY rules §2.3, decision 3: it waits, unseen, its clock
+			// paused, and shows with Undo when the panel closes)
+			if (W < 761) {
+				volume += 5
+				cells.push(await tunerOverReceipt(vp, volume))
+			}
 		}
+		async function tunerOverReceipt(
+			vp: string,
+			percent: number,
+		): Promise<LayoutCell> {
+			phase = `${vp}: the Tuner panel over the receipt`
+			const violations: string[] = []
+			const rects: Record<string, string> = {}
+			const RECEIPT_SEL =
+				'[data-wk-notice-region] .wk-notice[data-class="receipt"]'
+			const UNDO = `${RECEIPT_SEL} [data-control="undo"]`
+			const named = {
+				receipt: RECEIPT_SEL,
+				panel: '.wk-shell-island[data-island="tuner"] .wk-shell-panel',
+			}
+			await go("")
+			// a fresh receipt with Undo (the focus held in the region pauses its clock until the Tuner's click)
+			const why = await stackReceipt(page, percent)
+			if (why && why !== "no condition under the receipt")
+				violations.push(`setup: ${why}`)
+			const before = await settled(page)
+			const r0 = before.slots.find(sl => sl.name === "status:receipt")
+			if (!r0)
+				violations.push(
+					"setup: the receipt is not shown before the panel opens",
+				)
+			else rects["receipt"] = fmt(r0)
+			if (!(await hitsItself(page, UNDO)))
+				violations.push(
+					"Undo is not the element at its own centre before the panel opens",
+				)
+			const toggle = page
+				.locator(
+					'.wk-shell-island[data-island="tuner"] [aria-controls][aria-expanded]',
+				)
+				.first()
+			// (a) the change, observed from the click: the receipt seen shown, then yielded under the panel
+			const opening = await sampleDuring(page, named, () => toggle.click())
+			const shownAt = opening.findIndex(
+				f => f["receipt"]?.vis === "visible" && f["receipt"]?.state === "shown",
+			)
+			const yieldedAt = opening.findIndex(
+				(f, i) =>
+					i > shownAt &&
+					f["receipt"]?.vis === "hidden" &&
+					f["receipt"]?.state === "yielded" &&
+					f["panel"] !== null,
+			)
+			if (shownAt < 0 || yieldedAt < 0)
+				violations.push(
+					`no observed change of the receipt from shown to yielded as the Tuner panel opened (${opening.length} frames)`,
+				)
+			const panelBox = await page.locator(named.panel).boundingBox()
+			if (panelBox)
+				rects["tuner panel"] = fmt({
+					x: panelBox.x,
+					y: panelBox.y,
+					w: panelBox.width,
+					h: panelBox.height,
+				})
+			// (b) covered: out of sight, inert, the element at Undo's centre is not Undo; listed as waiting
+			const open = await snapshot(page)
+			if (!open.waiting.includes("status:receipt"))
+				violations.push("the yielded receipt is not listed in data-wk-waiting")
+			if (await hitsItself(page, UNDO))
+				violations.push("Undo is reachable under the open Tuner panel")
+			const inert = await page.evaluate(
+				sel => document.querySelector(sel)?.closest("[inert]") != null,
+				RECEIPT_SEL,
+			)
+			if (!inert) violations.push("the yielded receipt is not inert")
+			const focusIn = await page.evaluate(
+				() =>
+					document
+						.querySelector("[data-wk-notice-region]")
+						?.contains(document.activeElement) ?? false,
+			)
+			if (focusIn)
+				violations.push("the focus stayed in the notice region under the panel")
+			// (c) its clock does not run while covered: it outlives its whole time with the panel open
+			await new Promise(resolve => setTimeout(resolve, RECEIPT_MS + 1500))
+			if ((await page.locator(UNDO).count()) === 0)
+				violations.push(
+					"the receipt's Undo expired under the open Tuner panel (its clock ran while covered)",
+				)
+			const closing = await sampleDuring(page, named, () =>
+				page.keyboard.press("Escape"),
+			)
+			const hiddenFirst = closing.findIndex(
+				f => f["receipt"]?.state === "yielded",
+			)
+			const backAt = closing.findIndex(
+				(f, i) =>
+					i > hiddenFirst &&
+					f["panel"] === null &&
+					f["receipt"]?.vis === "visible" &&
+					f["receipt"]?.state === "shown",
+			)
+			if (hiddenFirst < 0 || backAt < 0)
+				violations.push(
+					`no observed change of the receipt from yielded back to shown as the panel closed (${closing.length} frames)`,
+				)
+			const closedAt = Date.now()
+			const after = await settled(page)
+			const r1 = after.slots.find(sl => sl.name === "status:receipt")
+			if (!r1)
+				violations.push("the receipt is not shown after the panel closed")
+			else if (r0 && fmt(r0) !== fmt(r1))
+				violations.push(`the receipt moved: ${fmt(r0)} → ${fmt(r1)}`)
+			if (!(await hitsItself(page, UNDO)))
+				violations.push(
+					"Undo is not the element at its own centre after the panel closed",
+				)
+			// live again: it expires after about the time it had left (nearly all of it: its clock ran only between the
+			// click's press and the panel's first frame), not at once and not never
+			const expired = await within(
+				RECEIPT_MS + 4000,
+				async () => (await page.locator(UNDO).count()) === 0,
+			)
+			const gone = Date.now() - closedAt
+			if (!expired)
+				violations.push(
+					`the receipt did not expire within ${RECEIPT_MS + 4000} ms of the panel closing (its clock did not resume)`,
+				)
+			else {
+				rects["receipt left after close (ms)"] = String(gone)
+				if (gone < RECEIPT_MS - 2000)
+					violations.push(
+						`the receipt expired ${gone} ms after the panel closed: its clock ran while it was covered`,
+					)
+			}
+			return {
+				viewport: vp,
+				drawer: "none, Tuner panel over the receipt",
+				rects,
+				violations,
+			}
+		}
+
 		// the Map view: its chrome is laid out with the rest; the Live chip keeps its rectangle when a drawer opens
 		for (const [W, H] of [
 			[1280, 800],

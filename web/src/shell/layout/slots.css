@@ -127,6 +127,12 @@
 	.wk-shell .wk-shell-cardslot[data-glide="yield"] {
 		transition-timing-function: var(--wk-ease-out);
 	}
+	/* a status item under an open panel's room (the layout's `yielded`): out of sight in place, inert, its timer
+	   paused (in the top rail's slot, the strip or a drawer's notice slot alike) */
+	.wk-shell .wk-notice[data-yielded] {
+		visibility: hidden;
+		pointer-events: none;
+	}
 	.wk-shell [data-held] {
 		visibility: hidden;
 		opacity: 0;

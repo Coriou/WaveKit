@@ -65,6 +65,9 @@ export const PANEL_GAP = 8
 /** Neighbours in one rail row that the boards draw 8 px apart: the stacked Receiver under the Tuner, the phone's
  * search button beside Listen, and the status strip under the top rail. */
 export const RAIL_NEIGHBOUR_GAP = 8
+/** Listen's width while its panel (Audio options) is open: the board's 420. The one source for it: the shell sets
+ * the Listen island's `--wk-listen-open-w` from the layout's `listenOpen`, and the dock reserves it (LY rules §2.2). */
+export const LISTEN_OPEN_W = 420
 /** Fallback sizes before anything is measured (the boards' figures). */
 export const DEFAULT_SIZES = {
 	tuner: { w: 440, h: 56 },
@@ -127,7 +130,10 @@ export interface LayoutInput {
 	/** The Tuner's head, the scan hold row included. */
 	readonly tuner: Size
 	readonly receiver: Size
+	/** Listen's closed head (measured only while its panel is closed: opening it never moves the stack). */
 	readonly listen: Size
+	/** Listen's width while its panel is open (default LISTEN_OPEN_W): the dock reserves it. */
+	readonly listenOpenW?: number
 	readonly dock: { readonly wide: Size; readonly compact: Size }
 	readonly find?: Size
 	/** The player's measured size in the form it chose itself, or null while nothing is in it. */
@@ -192,8 +198,8 @@ export interface MapPlaced {
 	readonly covered: readonly ("rail" | "side" | "station" | "corner")[]
 }
 
-/** What may yield to an open panel: a frame island, the tuned card, the player. */
-export type YieldedId = IslandId | "card" | "player"
+/** What may yield to an open panel: a frame island, the tuned card, the player, a status item ("status:<id>"). */
+export type YieldedId = IslandId | "card" | "player" | `status:${string}`
 
 export type DrawerShape = "column" | "between-rails" | "sheet" | "expanded"
 
@@ -228,7 +234,12 @@ export interface Layout {
 	readonly receiver: Rect
 	/** The Receiver sits under the Tuner (the top row cannot hold both). */
 	readonly stacked: boolean
+	/** Listen's closed head: the frame's rectangle. */
 	readonly listen: Rect
+	/** The head's rectangle while its panel is open (as wide as the layout reserves for it, the dock clear of it). */
+	readonly listenOpen: Rect
+	/** The island whose panel is open now (measured or not). */
+	readonly openPanel: IslandId | null
 	readonly dock: (Rect & { readonly compact: boolean }) | null
 	readonly find: Rect | null
 	readonly player: PlayerPlaced | null
@@ -245,6 +256,9 @@ export interface Layout {
 	readonly panelDrop: Readonly<Record<IslandId, number>>
 	/** Open panels where they stand (their height capped to panelMaxH): frame islands never cover them. */
 	readonly panels: readonly { readonly island: IslandId; readonly rect: Rect }[]
+	/** The room the open panel takes: its measured rectangle, or before it is measured all it may grow to (its
+	 * island's column at panelMaxH). Slots within PANEL_GAP of it yield. Empty while no panel is open. */
+	readonly panelRooms: readonly Rect[]
 	/** Islands out of sight while an open panel takes their place: the stacked Receiver under the Tuner's, and the
 	 * card or the player under Listen's (or any panel within 8 px of them). */
 	readonly yielded: readonly YieldedId[]
@@ -263,6 +277,8 @@ export interface Layout {
 		readonly docked: readonly string[]
 		/** Items with no room now (shown again when there is). */
 		readonly waiting: readonly string[]
+		/** The docked items' host (the drawer and its notice slot): yielded while an open panel's room covers it. */
+		readonly dockHost: "shown" | "yielded"
 	}
 	readonly drawer: DrawerPlaced | null
 	readonly pane: Rect | null
@@ -526,10 +542,27 @@ export function computeLayout(input: LayoutInput): Layout {
 		W - 2 * G - (find ? find.w + RAIL_NEIGHBOUR_GAP : 0),
 	)
 	const listen = rect(G, H - G - input.listen.h, listenW, input.listen.h)
+	// Listen widens while its panel is open: the dock reserves that width, so nothing moves when it opens and the open
+	// head never covers the dock (LY rules §2.2). With the dock shown, reserveW = clamp(listenOpenW, listen.w,
+	// W − 3G − dockW): the dock's hide bound above uses the closed width, so G + listen.w + G + dockW + G ≤ W and the
+	// range is never empty (at 836 px: 836 − 48 − 448 = 340, the closed width; from 916 px the board's 420). On a
+	// phone, reserveW = clamp(listenOpenW, listen.w, W − 2G − find.w − NG): the search button stays 8 px away.
+	const listenOpenW = input.listenOpenW ?? LISTEN_OPEN_W
+	const reserveW = dockHidden
+		? clamp(
+				listenOpenW,
+				listenW,
+				Math.max(listenW, W - 2 * G - (find ? find.w + RAIL_NEIGHBOUR_GAP : 0)),
+			)
+		: clamp(listenOpenW, listenW, W - 3 * G - dockSize.w)
+	const listenOpen = rect(G, listen.y, reserveW, listen.h)
 	let dock: (Rect & { compact: boolean }) | null = null
 	if (!dockHidden) {
 		const d = dockSize
-		const lo = right(listen) + G
+		// dock.x = clamp(round((W − dockW) / 2), G + reserveW + G, W − G − dockW): centred when that clears the open
+		// head by a gutter (the wide dock from 1395 px, round(903 / 2) = 452), else at the bound (452 from 916 px);
+		// the compact dock (below 1180 px) would need 1352 px to centre, so it never does
+		const lo = right(listenOpen) + G
 		const x = Math.max(lo, Math.min(Math.round((W - d.w) / 2), W - G - d.w))
 		dock = { ...rect(x, H - G - d.h, d.w, d.h), compact }
 	}
@@ -589,8 +622,11 @@ export function computeLayout(input: LayoutInput): Layout {
 	} | null = null
 	if (mi) {
 		const roomX0 =
-			Math.max(right(listen), dock ? right(dock) : 0, find ? right(find) : 0) +
-			G
+			Math.max(
+				right(listenOpen),
+				dock ? right(dock) : 0,
+				find ? right(find) : 0,
+			) + G
 		const rowW = mi.scale.w + MAP_CORNER_GAP + mi.live.w
 		const onRail = W - G - roomX0 >= rowW
 		const base = onRail ? H - G : stackTop - G
@@ -946,7 +982,10 @@ export function computeLayout(input: LayoutInput): Layout {
 	// a panel opened this frame and not measured yet takes, for this, all the room it may grow to (its island's
 	// column, as tall as panelMaxH): the card is out of sight from the panel's first frame, never drawn over it
 	const pending = input.openPanel ?? null
-	const panelRoom: Rect[] = panels.map(p => p.rect)
+	// the open panel's room (one panel at a time; a measured panel no longer open is stale and takes no room)
+	const panelRoom: Rect[] = panels
+		.filter(p => pending === null || p.island === pending)
+		.map(p => p.rect)
 	if (pending && !panels.some(p => p.island === pending)) {
 		const h = panelMaxH[pending]
 		panelRoom.push(
@@ -962,7 +1001,7 @@ export function computeLayout(input: LayoutInput): Layout {
 					: rect(
 							listen.x,
 							railTop - PANEL_GAP - h,
-							Math.max(listen.w, CARD_W),
+							Math.max(listenOpen.w, CARD_W),
 							h,
 						),
 		)
@@ -971,6 +1010,16 @@ export function computeLayout(input: LayoutInput): Layout {
 		r !== null && panelRoom.some(p => separation(p, r) < PANEL_GAP)
 	if (underPanel(cardNow)) yielded.push("card")
 	if (underPanel(player)) yielded.push("player")
+	// a status item within PANEL_GAP of the open panel's room yields in place (LY rules §2.3): out of sight, inert, its
+	// timer paused; it is back where it was, with its remaining time, when the panel closes. A positive-area item only:
+	// the rail's items never yield (their foot is at most 72, the panel's top at least topRail + 8 = 80)
+	for (const i of items)
+		if (i.w > 0 && i.h > 0 && underPanel(i)) yielded.push(`status:${i.id}`)
+	// the docked items' host (the drawer holding the notice slot) under the open panel's room: they yield with it
+	const dockHost: Layout["status"]["dockHost"] =
+		docked.length > 0 && drawer !== null && underPanel(drawer)
+			? "yielded"
+			: "shown"
 
 	// ---- plot contract (R6)
 	const body = rect(0, insetTop, W, H - insetTop)
@@ -1004,6 +1053,8 @@ export function computeLayout(input: LayoutInput): Layout {
 		receiver,
 		stacked,
 		listen,
+		listenOpen,
+		openPanel: pending,
 		dock,
 		find,
 		player,
@@ -1014,10 +1065,11 @@ export function computeLayout(input: LayoutInput): Layout {
 		panelMaxH,
 		panelDrop,
 		panels,
+		panelRooms: panelRoom,
 		yielded,
 		cardAnchors: anchors,
 		cardFreeW: freeW,
-		status: { where, slot, strip, items, docked, waiting },
+		status: { where, slot, strip, items, docked, waiting, dockHost },
 		drawer,
 		pane,
 		grip,
@@ -1033,6 +1085,39 @@ export function computeLayout(input: LayoutInput): Layout {
 		map,
 	}
 }
+
+/** One status item's visibility (LY rules §1.2): the single predicate the notice region reads for its render, its
+ * `inert`, the focus hand-off and the item's timer. Precedence: absent > waiting > yielded > held > docked > shown.
+ * A docked item is `docked` (seen) only while its portal target exists (`dockTarget`) and its host is shown: with no
+ * target it waits, under an open panel it yields with its host. */
+export type StatusState =
+	| "shown"
+	| "docked"
+	| "held"
+	| "yielded"
+	| "waiting"
+	| "absent"
+
+export function statusState(
+	layout: globalThis.Pick<Layout, "status" | "yielded" | "held">,
+	id: string,
+	dockTarget: boolean,
+): StatusState {
+	const st = layout.status
+	if (st.docked.includes(id)) {
+		if (!dockTarget) return "waiting"
+		return st.dockHost === "yielded" ? "yielded" : "docked"
+	}
+	if (st.waiting.includes(id)) return "waiting"
+	if (!st.items.some(i => i.id === id)) return "absent"
+	if (layout.yielded.includes(`status:${id}`)) return "yielded"
+	if (layout.held.includes(`status:${id}`)) return "held"
+	return "shown"
+}
+
+/** The reader can see the item (and reach its controls): its timer runs only then. */
+export const statusSeen = (s: StatusState): boolean =>
+	s === "shown" || s === "docked"
 
 /** The islands the dragged card keeps clear of (every placed rectangle but the card's own). */
 export function cardObstacles(layout: Layout): Rect[] {
@@ -1098,14 +1183,19 @@ export function namedRects(layout: Layout): Named[] {
 	}
 	add("tuner", layout.tuner)
 	add("receiver", layout.receiver)
-	add("listen", layout.listen)
+	// the head as wide as it stands: its open width while its panel is open
+	add(
+		"listen",
+		layout.openPanel === "listen" ? layout.listenOpen : layout.listen,
+	)
 	add("dock", layout.dock)
 	add("find", layout.find)
-	// a yielded card or player is out of sight (under an open panel): not on screen, so not in the checks
+	// a yielded card, player or status item is out of sight (under an open panel): not on screen, so not in the checks
 	const shown = (id: YieldedId) => !layout.yielded.includes(id)
 	if (shown("player")) add("player", layout.player)
 	if (shown("card")) add("card", layout.cardNow ?? layout.card)
-	for (const i of layout.status.items) add(`status:${i.id}`, i)
+	for (const i of layout.status.items)
+		if (shown(`status:${i.id}`)) add(`status:${i.id}`, i)
 	add("drawer", layout.drawer)
 	add("pane", layout.pane)
 	add("grip", layout.grip)

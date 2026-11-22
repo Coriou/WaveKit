@@ -37,6 +37,23 @@ describe("notice timers wait while the toast is unseen", () => {
 		expect(svc.receipt.get()).toBeNull()
 	})
 
+	it("an Undo receipt yielded under an open panel keeps the time it had left and goes on with it after", () => {
+		const svc = new NoticeService()
+		const undo = vi.fn()
+		svc.showReceipt("Volume 35", { undo })
+		vi.advanceTimersByTime(2000)
+		// the Tuner panel opens over it (the layout yields it): the clock stops
+		svc.setUnseen("receipt", true)
+		vi.advanceTimersByTime(RECEIPT_MS * 5)
+		expect(svc.receipt.get()?.undo).toBe(undo)
+		// the panel closes: the remaining RECEIPT_MS − 2000 run, no more
+		svc.setUnseen("receipt", false)
+		vi.advanceTimersByTime(RECEIPT_MS - 2000 - 1)
+		expect(svc.receipt.get()?.undo).toBe(undo)
+		vi.advanceTimersByTime(1)
+		expect(svc.receipt.get()).toBeNull()
+	})
+
 	it("a condition toast's time also waits, and a pause ending does not start an unseen toast's timer", () => {
 		const svc = new NoticeService()
 		svc.raise("pwa-update", { text: "Update ready" }, true)

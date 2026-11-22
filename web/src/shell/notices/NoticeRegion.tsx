@@ -5,8 +5,9 @@
 // top rail on a phone, or docked in a covering drawer's notice slot under its header (ui/notice-slot.ts), which
 // pushes the drawer body down. It never takes focus, except to give a moved toast's button back the focus it had;
 // hovering a toast or focusing inside one pauses both timers (until that toast goes). A toast the layout places
-// nowhere (waiting for room, not placed yet, or held while the tuned card glides past) is unseen: its own timer
-// waits until it shows (service `setUnseen`).
+// nowhere (waiting for room, not placed yet, held while the tuned card glides past, or yielded under an open panel)
+// is unseen: its own timer waits until it shows (service `setUnseen`) and goes on with the time it had left. One
+// predicate of the layout (`statusState`) decides the toast's render, its `inert`, its focus and its timer.
 import {
 	useEffect,
 	useLayoutEffect,
@@ -18,11 +19,14 @@ import { createPortal } from "react-dom"
 
 import { useStore, type Store } from "../../data/store.ts"
 import { Icon } from "../../ui/Icon.tsx"
-import type {
-	Layout,
-	StatusForm,
-	StatusItem,
-	StatusPlaced,
+import {
+	statusSeen,
+	statusState,
+	type Layout,
+	type StatusForm,
+	type StatusItem,
+	type StatusPlaced,
+	type StatusState,
 } from "../layout/compute.ts"
 import { naturalRowWidth, slotAttrs, topLeft } from "../layout/slot.ts"
 import {
@@ -48,6 +52,8 @@ export interface NoticeRegionProps {
 	readonly status: Layout["status"]
 	/** Slots the layout holds out of sight while the tuned card glides through them ("status:<id>"). */
 	readonly held?: readonly string[]
+	/** Slots out of sight under an open panel's room (the layout's `yielded`, "status:<id>" among them). */
+	readonly yielded?: Layout["yielded"]
 	/** The ⌘K palette is open: the region hides and its timers wait. */
 	readonly palette: boolean
 	/** The Receiver panel is open: it lists the link conditions, so no floating link toast. */
@@ -79,6 +85,7 @@ export function toastItem(
 export function NoticeRegion({
 	status,
 	held = [],
+	yielded = [],
 	palette,
 	receiverOpen,
 	service = notices,
@@ -153,13 +160,16 @@ export function NoticeRegion({
 	)
 
 	const docked = status.where === "drawer-slot" && slot !== null
-	// a toast's timer runs only while the reader can see it: placed (or docked), and not held
-	const seen = (id: "condition" | "receipt") =>
-		visible &&
-		!held.includes(`status:${id}`) &&
-		(docked || status.items.some(i => i.id === id))
-	const receiptSeen = seen("receipt")
-	const conditionSeen = seen("condition")
+	// a toast's timer runs only while the reader can see it and reach its controls (LY rules §1.2): placed and not
+	// held or yielded, or docked in a shown host whose notice slot exists
+	const stateOf = (id: "condition" | "receipt"): StatusState =>
+		visible
+			? statusState({ status, held, yielded }, id, slot !== null)
+			: "absent"
+	const receiptState = stateOf("receipt")
+	const conditionState = stateOf("condition")
+	const receiptSeen = statusSeen(receiptState)
+	const conditionSeen = statusSeen(conditionState)
 	useLayoutEffect(() => {
 		service.setUnseen("receipt", !receiptSeen)
 		service.setUnseen("condition", !conditionSeen)
@@ -222,7 +232,7 @@ export function NoticeRegion({
 					service={service}
 					place={at("condition")}
 					docked={docked}
-					held={held.includes("status:condition")}
+					state={conditionState}
 				/>
 			)}
 			{receipt && (
@@ -232,7 +242,7 @@ export function NoticeRegion({
 					service={service}
 					place={at("receipt")}
 					docked={docked}
-					held={held.includes("status:receipt")}
+					state={receiptState}
 				/>
 			)}
 		</div>
@@ -240,13 +250,14 @@ export function NoticeRegion({
 	return docked ? createPortal(region, slot) : region
 }
 
-/** A toast's slot: its rectangle and form from the layout, or measured out of sight until it has one. */
+/** A toast's slot: its rectangle and form from the layout, or measured out of sight until it has one. Its state
+ * (`statusState`) is on the element; a toast the reader cannot see is `inert` (out of the focus order). */
 function placement(
 	id: "condition" | "receipt",
 	place: StatusPlaced | null,
 	docked: boolean,
 	service: NoticeService,
-	held = false,
+	state: StatusState,
 ): HTMLAttributes<HTMLDivElement> & {
 	readonly [data: `data-${string}`]: string | number | undefined
 } {
@@ -254,14 +265,20 @@ function placement(
 		onPointerEnter: () => service.setPaused("hover", true),
 		onPointerLeave: () => service.setPaused("hover", false),
 	}
-	if (docked) return { ...slotAttrs(`status:${id}`, null), ...hover }
+	const vis = {
+		"data-wk-state": state,
+		"data-yielded": state === "yielded" ? "" : undefined,
+		inert: !statusSeen(state),
+	}
+	if (docked) return { ...slotAttrs(`status:${id}`, null), ...vis, ...hover }
 	const form: StatusForm = place?.form ?? "full"
 	return {
 		...slotAttrs(`status:${id}`, place),
+		...vis,
 		"data-form": form,
 		"data-lines": place?.lines ?? 1,
 		"data-pending": place ? undefined : "",
-		"data-held": held ? "" : undefined,
+		"data-held": state === "held" ? "" : undefined,
 		style: place
 			? topLeft(place, true)
 			: { left: 0, top: 0, width: "max-content", height: TOAST_H },
@@ -276,13 +293,13 @@ function ConditionToast({
 	service,
 	place,
 	docked,
-	held,
+	state,
 }: {
 	shown: ShownCondition
 	service: NoticeService
 	place: StatusPlaced | null
 	docked: boolean
-	held: boolean
+	state: StatusState
 }) {
 	return (
 		<div
@@ -293,7 +310,7 @@ function ConditionToast({
 			data-key={shown.key}
 			data-tone={shown.tone}
 			title={place && place.form !== "full" ? shown.text : undefined}
-			{...placement("condition", place, docked, service, held)}
+			{...placement("condition", place, docked, service, state)}
 			onFocus={() => service.setFocusedToast(shown.id)}
 		>
 			{shown.tone === "warn" && <WarnGlyph />}
@@ -331,13 +348,13 @@ function ReceiptToast({
 	service,
 	place,
 	docked,
-	held,
+	state,
 }: {
 	receipt: Receipt
 	service: NoticeService
 	place: StatusPlaced | null
 	docked: boolean
-	held: boolean
+	state: StatusState
 }) {
 	const button = receipt.action !== undefined || receipt.undo !== undefined
 	return (
@@ -348,7 +365,7 @@ function ReceiptToast({
 			data-toast-id={receipt.id}
 			data-tone={receipt.tone}
 			title={place && place.lines === 2 ? receipt.text : undefined}
-			{...placement("receipt", place, docked, service, held)}
+			{...placement("receipt", place, docked, service, state)}
 			onFocus={() => service.setFocusedToast(receipt.id)}
 		>
 			{receipt.tone === "warn" && <WarnGlyph />}

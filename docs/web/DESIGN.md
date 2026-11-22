@@ -1100,8 +1100,14 @@ Condensed + Noto Sans, Tabler-based icons).
   - Two *rails* hold the chrome and never read the drawer. Top rail: the Tuner at 16,16, the
     Receiver at the right corner (under the Tuner, 8 px down, when the row cannot hold both), and
     the *status slot* between them (y 16..72). Bottom rail: Listen at the left corner, the dock
-    centred on the window and never left of Listen (compact below 1180 px; hidden below 761 px or
-    when Listen and the compact dock cannot share the row, where the search button takes over).
+    centred on the window and never within a gutter of Listen's *open* width (compact below
+    1180 px; hidden below 761 px or when Listen's closed head and the compact dock cannot share the
+    row, where the search button takes over). Listen widens to 420 px while Audio options are open
+    and the dock reserves that width (less on a narrow window: `W − 48 − dock width`, so 340 at
+    836 px and 420 from 916 px), so nothing moves when Listen opens and the open head never
+    covers the dock: the dock stands at 452 from 916 px up to 1395 px (off centre by 58 px at
+    1280 px, 126 at 1100), centred from there. On a phone the open head keeps 8 px from the
+    search button (302 px at 390).
   - A *stack* above Listen: the player storey (x 16, up to 560 wide, 16 px above the bottom rail's
     top, the taller of Listen and the dock, so it clears both), then the
     tuned card's home ("above Listen", 16 px over the stack). The card home moves by the player's
@@ -1147,7 +1153,12 @@ Condensed + Noto Sans, Tabler-based icons).
     while an open panel stands over them or within 8 px of them (Listen's over the card's home
     above Listen and over the player storey, a tall Tuner panel over a card on the left), they are
     out of sight in place, still mounted, measured and playing, and the shell lists them as
-    waiting; they are back on the same rectangles when the panel closes. A panel opened this
+    waiting; they are back on the same rectangles when the panel closes. A status item within
+    8 px of the open panel's room yields too (on a phone the Tuner or Receiver panel over the
+    strip): out of sight in place and inert, its timer paused; it comes back with the time it had
+    left when the panel closes, so a receipt's Undo is never lost under a panel. A docked item
+    yields with its drawer when the panel covers that. The notice region decides a toast's
+    render, inert state, focus and timer from one layout predicate (`statusState`). A panel opened this
     frame and not measured yet counts as all the room it may take (its island's column, as tall
     as its cap), so the card is never drawn over it, not even for the first frames. Nothing moves
     for a popover, and no island lies over an open panel, so a hint inside it never meets one. A
@@ -1188,7 +1199,8 @@ Condensed + Noto Sans, Tabler-based icons).
     tuned card's anchors and the map's own label placement keep off all of it. The pointer's
     hover tip and the cluster chooser are popovers at the pointer, like island panels.
 
-  Expected numbers: 1440×900 Receiver 1124,16; dock 474,820 492×64; player 16,734 560×70; card
+  Expected numbers: 1440×900 Receiver 1124,16; dock 474,820 492×64 (1280×800 452,720; 1100×800
+  452,720 448×64); player 16,734 560×70; card
   16,278 (expanded 440) or 16,666 (line); Activity column 1004,88 420×796; expanded Cards 16,88
   1408×630. 390×844: Receiver 16,80; player 16,678 358×70; sheet 16,152 358×510. Deviations from
   the design sketch: a two-line status item is 52 px tall in the strip too (the sketch said 54);

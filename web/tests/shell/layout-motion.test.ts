@@ -249,8 +249,9 @@ describe("the map's chrome", () => {
 		expect(a.map?.cornerOnRail).toBe(true)
 		expect(a.map?.live).toEqual(r(1200, 740, 64, 44))
 		expect(a.map?.scale).toEqual(r(1102, 764, 90, 20))
-		// the attribution line above, from a gutter right of the dock (886 + 16) to the window's gutter
-		expect(a.map?.footer).toEqual(r(902, 717, 362, 15))
+		// the attribution line above, from a gutter right of the dock (452 + 492 + 16 = 960: the dock reserves Listen's
+		// open 420, LY rules §2.2) to the window's gutter (1280 − 16 − 960 = 304)
+		expect(a.map?.footer).toEqual(r(960, 717, 304, 15))
 		expect(b.map?.live).toEqual(a.map?.live)
 		expect(b.map?.scale).toEqual(a.map?.scale)
 		expect(b.map?.footer).toEqual(a.map?.footer)
@@ -263,6 +264,27 @@ describe("the map's chrome", () => {
 		expect(b.map?.covered).toContain("rail")
 		for (const L of [a, b])
 			expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+	})
+
+	it("the corner stays on the rail while scale + 8 + Live fits right of the dock (room 304 @1280, 168 @1100)", () => {
+		// room = W − G − (right(dock) + G): 1280 − 16 − 960 = 304; 1100 − 16 − (452 + 448 + 16) = 168
+		const on = (W: number, rowW: number) =>
+			computeLayout(
+				input(W, 800, { map: { ...MAP, scale: { w: rowW - 8 - 64, h: 20 } } }),
+			).map?.cornerOnRail
+		expect(on(1280, 304)).toBe(true)
+		expect(on(1280, 305)).toBe(false)
+		expect(on(1100, 168)).toBe(true)
+		expect(on(1100, 169)).toBe(false)
+		for (const [W, rowW] of [
+			[1280, 305],
+			[1100, 169],
+		] as const) {
+			const L = computeLayout(
+				input(W, 800, { map: { ...MAP, scale: { w: rowW - 8 - 64, h: 20 } } }),
+			)
+			expect(layoutViolations(namedRects(L), L.viewport)).toEqual([])
+		}
 	})
 
 	it("the side panel and the station chip stand left of the rail", () => {
