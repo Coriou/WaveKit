@@ -18,6 +18,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import fc from "fast-check"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { DMR_RECORDING_LINK_ENABLED } from "../../../src/decoders/builtin/call-recordings.js"
 import type { DsdFmeVoiceCallState } from "../../../src/decoders/builtin/dsd-fme.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
 import {
@@ -1560,7 +1561,7 @@ describe("dsd-fme DMR clearance oracle", () => {
 	})
 
 	describe("late recording update", () => {
-		it("the call_end that links a recording found late carries encryptionKnown", async () => {
+		it("the call_end that links a recording found late carries encryptionKnown (none while DMR recordings are off)", async () => {
 			const dir = mkdtempSync(join(tmpdir(), "wk-dmr-clearance-"))
 			try {
 				const decoder = createDecoder({
@@ -1601,8 +1602,10 @@ describe("dsd-fme DMR clearance oracle", () => {
 				)
 				await new Promise(resolve => setTimeout(resolve, 700))
 				const update = ends.find(e => e.flags?.wavFileUpdate === true)
-				expect(update).toBeDefined()
-				expect(update).toMatchObject({ encryptionKnown: true })
+				if (DMR_RECORDING_LINK_ENABLED) {
+					expect(update).toBeDefined()
+					expect(update).toMatchObject({ encryptionKnown: true })
+				} else expect(update).toBeUndefined()
 				expect(failures).toEqual([])
 			} finally {
 				rmSync(dir, { recursive: true, force: true })

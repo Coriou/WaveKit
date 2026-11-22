@@ -18,6 +18,7 @@ import {
 	SYNC_CHAIN_MS,
 	type DsdFmeVoiceCallState,
 } from "../../../src/decoders/builtin/dsd-fme.js"
+import { DMR_RECORDING_LINK_ENABLED } from "../../../src/decoders/builtin/call-recordings.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
 import { DATE_CLOCK } from "./dsd-fme-call-first-helpers.js"
 
@@ -505,7 +506,7 @@ describe("dsd-fme call-first lifecycle", () => {
 })
 
 describe("dsd-fme: a call whose encryption was never known", () => {
-	it("is never linked to a recording; a known one is", () => {
+	it("is never linked to a recording; a known one is only while DMR recordings are on", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "wk-call-first-"))
 		try {
 			const start = new Date(2026, 0, 9, 10, 53, 27)
@@ -540,10 +541,12 @@ describe("dsd-fme: a call whose encryption was never known", () => {
 				encryptionKnown: false,
 				wavFile: undefined,
 			})
-			expect(end(true)).toMatchObject({
-				encryptionKnown: true,
-				wavFile: expect.stringContaining(root),
-			})
+			// A known clear DMR call is linked only while DMR recordings are on.
+			const known = end(true)
+			expect(known).toMatchObject({ encryptionKnown: true })
+			if (DMR_RECORDING_LINK_ENABLED)
+				expect(known?.wavFile).toEqual(expect.stringContaining(root))
+			else expect(known?.wavFile).toBeUndefined()
 		} finally {
 			vi.useRealTimers()
 			fs.rmSync(root, { recursive: true })

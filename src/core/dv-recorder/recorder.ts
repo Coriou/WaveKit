@@ -8,6 +8,8 @@
  * - CLOSED: finalized (renamed, or dropped as too short) and waiting for the tap's `end`, after
  *   the max-call cap cut it;
  * - ABANDONED: encrypted, ended while not clear, or a write failed: the TEMP is unlinked.
+ * A DMR call (or one of unknown protocol) is never admitted while DMR_RECORDING_LINK_ENABLED
+ * is off: no record, so no DMR audio is written, kept or linked.
  * IDLE is the absence of a record. The tap sends exactly one `end` per call, so the recorder adds
  * no timer. Nothing on a tap event is awaited or sync: file work runs on each writer's chain.
  *
@@ -34,6 +36,7 @@ import * as path from "node:path"
 import {
 	DSD_FME_CALL_WAV,
 	DSD_FME_TEMP_WAV,
+	protocolRecordable,
 	pruneCallRecordings,
 } from "../../decoders/builtin/call-recordings.js"
 import type {
@@ -167,6 +170,8 @@ export interface DvRecorderCounters {
 	refusedDir: number
 	/** Calls dropped because every final-name attempt was taken. */
 	nameExhausted: number
+	/** Calls refused at start for their protocol (DMR or unknown, while DMR recording is off). */
+	refusedProtocol: number
 	active: number
 }
 
@@ -291,6 +296,7 @@ export function createDvCallRecorder(
 		pruneUnprotected: 0,
 		refusedDir: 0,
 		nameExhausted: 0,
+		refusedProtocol: 0,
 		active: 0,
 	}
 
@@ -372,6 +378,10 @@ export function createDvCallRecorder(
 
 	function accept(e: DvTapCallStart): boolean {
 		if (e.state === "encrypted") return false
+		if (!protocolRecordable(e.protocol)) {
+			counts.refusedProtocol++
+			return false
+		}
 		if (free < DV_RECORDER_FREE_FLOOR_BYTES) {
 			counts.refusedFloor++
 			if (now() - lastPruneAt >= DV_RECORDER_PRUNE_RETRY_MS) requestPrune()

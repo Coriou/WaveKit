@@ -46,7 +46,10 @@ import {
 	DSD_FME_SAMPLE_RATE_MAX_HZ,
 	DSD_FME_SAMPLE_RATE_MIN_HZ,
 } from "../options/dsd-fme.js"
-import { pruneCallRecordings } from "./call-recordings.js"
+import {
+	DMR_RECORDING_LINK_ENABLED,
+	pruneCallRecordings,
+} from "./call-recordings.js"
 import { receiveFilterEffect } from "./dsd-fme-filter.js"
 import {
 	classifyDmrLine,
@@ -4833,10 +4836,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * clearance is clear, any other protocol's call that is not encrypted
 	 * and whose encryption is not unknown. A future admission check (squelch,
 	 * SNR, voice activity) belongs here too, after this privacy rule.
+	 * DMR recordings stay unlinked while DMR_RECORDING_LINK_ENABLED is off
+	 * (until the DMR clearance gate passes its final review).
 	 */
 	private recordingLinkable(call: DsdFmeCallState): boolean {
 		if (call.protocol === "dmr")
-			return this.dmrClearance.trust(call.callId) === "clear"
+			return (
+				DMR_RECORDING_LINK_ENABLED &&
+				this.dmrClearance.trust(call.callId) === "clear"
+			)
 		return !call.flags.encrypted && call.encryptionKnown !== false
 	}
 

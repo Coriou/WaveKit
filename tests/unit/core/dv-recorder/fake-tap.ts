@@ -49,6 +49,8 @@ export interface CallOpts {
 	slot?: 1 | 2 | null
 	state?: DvTapCallState
 	startedAtMs?: number
+	/** The tap's protocol label; P25 unless set (DMR calls are not recorded yet). */
+	protocol?: string | null
 }
 
 /** Drives one call through the fake tap, counting delivered samples as the service does. */
@@ -72,7 +74,7 @@ export class FakeCall {
 			channelKind: "main",
 			probeId: null,
 			channelHz: null,
-			protocol: "DMR",
+			protocol: opts.protocol === undefined ? "P25" : opts.protocol,
 			state: opts.state ?? "clear",
 			startedAtMs: opts.startedAtMs ?? T0,
 		})

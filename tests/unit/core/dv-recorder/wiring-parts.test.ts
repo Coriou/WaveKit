@@ -340,6 +340,24 @@ describe("the recorder wiring", () => {
 		expect(w.unknownDecoder()).toBe(1)
 	})
 
+	it("a clear DMR call gives no file and no link; a clear NXDN call still records and links", async () => {
+		const { w, src, linked, dir } = await wired()
+		const dmr = new FakeCall(src, { callId: "D", slot: 1, protocol: "DMR" })
+		dmr.voice(1500)
+		dmr.end()
+		const nxdn = new FakeCall(src, { callId: "N", protocol: "NXDN" })
+		nxdn.voice(1500)
+		nxdn.end()
+		await w.stop()
+		const files = await readdir(dir)
+		expect(files).toHaveLength(1)
+		expect(linked.map(l => l.callId)).toEqual(["N"])
+		expect(w.recorder?.counters()).toMatchObject({
+			recorded: 1,
+			refusedProtocol: 1,
+		})
+	})
+
 	it("stays off without a tap or when disabled", async () => {
 		const root = await tmpRoot()
 		const base = {

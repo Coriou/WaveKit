@@ -15,6 +15,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { DMR_RECORDING_LINK_ENABLED } from "../../../src/decoders/builtin/call-recordings.js"
 import type { DsdFmeVoiceCallState } from "../../../src/decoders/builtin/dsd-fme.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
 import {
@@ -77,8 +78,15 @@ const UPDATE_SITES = [
 	"applyDmrTrust",
 	"applyDmrTrust",
 ]
-/** Sites that never carry a DMR call (each returns before for DMR or parses another protocol). */
-const NON_DMR_SITES = ["handleP25P1Line", "markKnown"]
+/**
+ * Sites that never carry a DMR call (each returns before for DMR or parses another protocol).
+ * While DMR recordings are off, the late recording update never runs for a DMR call either.
+ */
+const NON_DMR_SITES = [
+	"handleP25P1Line",
+	"markKnown",
+	...(DMR_RECORDING_LINK_ENABLED ? [] : ["findWavFileAsync"]),
+]
 
 describe("dsd-fme DMR publication sites (structural)", () => {
 	it("emits events only from the gate, plus the named link-layer sink", () => {
@@ -412,18 +420,35 @@ describe("dsd-fme recording admission", () => {
 	const linked = (seen: Seen[]) =>
 		seen.filter(s => s.kind === "call_end" && s.data.wavFile !== undefined)
 
-	it("links a clear call's file at its end (endCall)", () => {
+	it("links a clear call's file at its end (endCall) only while DMR recordings are on", () => {
 		const seen = call(false, true)
-		expect(linked(seen).map(s => s.data.flags?.wavFileUpdate)).toEqual([
-			undefined,
-		])
+		expect(linked(seen).map(s => s.data.flags?.wavFileUpdate)).toEqual(
+			DMR_RECORDING_LINK_ENABLED ? [undefined] : [],
+		)
 		expectGated(seen, "checkCallTimeoutAsync", "call_end")
 	})
 
-	it("links a clear call's file found later, through the gate (findWavFileAsync)", () => {
+	it("links a clear call's file found later (findWavFileAsync) only while DMR recordings are on", () => {
 		const seen = call(false, false)
-		expect(linked(seen).map(s => s.data.flags?.wavFileUpdate)).toEqual([true])
-		expectGated(seen, "findWavFileAsync", "call_end")
+		expect(linked(seen).map(s => s.data.flags?.wavFileUpdate)).toEqual(
+			DMR_RECORDING_LINK_ENABLED ? [true] : [],
+		)
+		if (DMR_RECORDING_LINK_ENABLED)
+			expectGated(seen, "findWavFileAsync", "call_end")
+	})
+
+	it("never links a clear DMR call's file while DMR recordings are off, at its end or later", () => {
+		if (DMR_RECORDING_LINK_ENABLED) return
+		const now = call(false, true)
+		expect(
+			now.some(s => s.kind === "call_end" && s.data.encryptionKnown === true),
+		).toBe(true)
+		expect(linked(now)).toEqual([])
+		expect(now.some(s => s.data.flags?.wavFileUpdate === true)).toBe(false)
+		fs.rmSync(path.join(root, FILE))
+		const later = call(false, false)
+		expect(linked(later)).toEqual([])
+		expect(later.some(s => s.data.flags?.wavFileUpdate === true)).toBe(false)
 	})
 
 	it("never links a known encrypted call's file, at its end or later", () => {

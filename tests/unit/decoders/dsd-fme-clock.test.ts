@@ -7,7 +7,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
 	DsdFmeDecoder,
 	type DsdFmeClock,
@@ -155,6 +155,14 @@ describe("dsd-fme monotonic clock", () => {
 			const pad = (n: number) => String(n).padStart(2, "0")
 			const name = `${t.getFullYear()}${pad(t.getMonth() + 1)}${pad(t.getDate())}_${pad(t.getHours())}${pad(t.getMinutes())}${pad(t.getSeconds())}_123_DMR_CC_1_GROUP_TGT_9001_SRC_91.wav`
 			fs.writeFileSync(path.join(root, name), "")
+			// This pins the file-name match only: admission (DMR recordings are off for now) is
+			// pinned in dsd-fme-dmr-publication-sites.test.ts.
+			vi.spyOn(
+				DsdFmeDecoder.prototype as unknown as {
+					recordingLinkable(): boolean
+				},
+				"recordingLinkable",
+			).mockReturnValue(true)
 			const options = {
 				enablePerCallRecording: true,
 				perCallRecordingDir: root,
@@ -170,6 +178,7 @@ describe("dsd-fme monotonic clock", () => {
 			)
 			expect(steppedEnd?.wavFile).toContain(name)
 		} finally {
+			vi.restoreAllMocks()
 			fs.rmSync(root, { recursive: true })
 		}
 	})

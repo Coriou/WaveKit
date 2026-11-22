@@ -7747,7 +7747,7 @@ Which rows link:
 
 A dsd-fme per-call file is linked only to a call known clear: an encrypted
 call, or one whose encryption was never known, is never linked, so its audio
-never becomes playable.
+never becomes playable. DMR per-call recordings are not linked or kept yet.
 
 A link goes when its file goes (pruned, deleted, retention, a removed
 discovery, removed by hand): once a complete catalogue has lacked the key on

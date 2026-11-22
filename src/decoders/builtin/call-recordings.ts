@@ -166,6 +166,24 @@ export function rebaseOnRecordingRoot(
 	return p
 }
 
+/**
+ * Whether a DMR call's recording may be written, kept or linked to its Activity row. Off until
+ * the DMR clearance gate passes its final review: no DMR recording is linked or playable, and
+ * the digital-voice call recorder writes no DMR audio. Re-enabling is this one line.
+ */
+export const DMR_RECORDING_LINK_ENABLED = false
+
+/**
+ * True when a call of this protocol may have a recording. A DMR call (any case, any
+ * "dmr..." variant) only while DMR_RECORDING_LINK_ENABLED; a call of unknown protocol (null)
+ * may be DMR, so it is refused too while that flag is off. Every other protocol: true.
+ */
+export function protocolRecordable(protocol: string | null): boolean {
+	if (DMR_RECORDING_LINK_ENABLED) return true
+	if (protocol === null) return false
+	return !protocol.trim().toLowerCase().startsWith("dmr")
+}
+
 /** dsd-fme's final per-call recording name. */
 export const DSD_FME_CALL_WAV = /^\d{8}_\d{6}_\d{5}_.*_TGT_.*_SRC_.*\.wav$/
 /** dsd-fme's in-progress recording name. */

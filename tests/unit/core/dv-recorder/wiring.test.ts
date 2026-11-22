@@ -166,7 +166,7 @@ function callOutput(
 		type,
 		data: {
 			callId,
-			protocol: "DMR",
+			protocol: "P25",
 			talkgroup: 9,
 			source: 2001,
 			slot: 1,

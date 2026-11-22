@@ -59,6 +59,44 @@ function enospc(): NodeJS.ErrnoException {
 	return err
 }
 
+describe("DV call recorder: DMR calls are not recorded yet", () => {
+	it.each(["DMR", "dmr", "DMR BS", null])(
+		"a clear call of protocol %s writes, keeps and reports nothing",
+		async protocol => {
+			const h = await harness()
+			const call = new FakeCall(h.src, { protocol })
+			call.voice(2000)
+			call.end()
+			await h.rec.stop()
+			expect(await wavs(h.dir)).toEqual([])
+			expect(h.finalized).toEqual([])
+			expect(h.rec.bytesTotal()).toBe(0)
+			expect(h.rec.counters()).toMatchObject({
+				recorded: 0,
+				refusedProtocol: 1,
+				active: 0,
+			})
+		},
+	)
+
+	it.each(["P25", "NXDN", "D-STAR", "YSF", "dPMR"])(
+		"a clear %s call still records one WAV",
+		async protocol => {
+			const h = await harness()
+			const call = new FakeCall(h.src, { protocol })
+			call.voice(2000)
+			call.end()
+			await h.rec.stop()
+			expect(await wavs(h.dir)).toHaveLength(1)
+			expect(h.finalized).toHaveLength(1)
+			expect(h.rec.counters()).toMatchObject({
+				recorded: 1,
+				refusedProtocol: 0,
+			})
+		},
+	)
+})
+
 describe("DV call recorder: A1-A4, A9 start, audio, end", () => {
 	it("start -> PCM -> end writes one WAV with the right RIFF sizes", async () => {
 		const h = await harness()
