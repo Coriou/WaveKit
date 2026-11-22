@@ -64,6 +64,21 @@ const near = (a: Obstacle, b: Obstacle): boolean =>
  * becomes the nearest legal spot one or two push-outs away (out of an island along one axis, then out of a second
  * one it lands near); with none, the card stays at `last` (its previous legal spot), or at the nearest window spot.
  */
+/** The card's top-left `p` is a legal drag spot in `frame`: one gutter in from the window (and left of a drawer
+ * column) and a gutter clear of every obstacle. */
+export function dragLegal(p: Point, frame: CardFrame): boolean {
+	const xHi = Math.max(G, frame.freeW - G - CARD_W)
+	const yHi = Math.max(G, frame.H - G - frame.cardH)
+	const box: Obstacle = { x: p.x, y: p.y, w: CARD_W, h: frame.cardH }
+	return (
+		p.x >= G &&
+		p.x <= xHi &&
+		p.y >= G &&
+		p.y <= yHi &&
+		!frame.obstacles.some(o => near(box, o))
+	)
+}
+
 export function clampDrag(
 	want: Point,
 	frame: CardFrame,
@@ -78,12 +93,7 @@ export function clampDrag(
 		y: Math.max(G, Math.min(yHi, p.y)),
 	})
 	const box = (p: Point): Obstacle => ({ x: p.x, y: p.y, w: cw, h: ch })
-	const legal = (p: Point) =>
-		p.x >= G &&
-		p.x <= xHi &&
-		p.y >= G &&
-		p.y <= yHi &&
-		!frame.obstacles.some(o => near(box(p), o))
+	const legal = (p: Point) => dragLegal(p, frame)
 	const start = inWin(want)
 	if (legal(start)) return start
 	const pushes = (p: Point): Point[] =>

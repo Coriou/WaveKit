@@ -656,3 +656,63 @@ describe("Rule D: a held card under the open Listen head (LY rules §4.2)", () =
 			).toEqual([])
 		})
 })
+
+describe("Rule D: a held card with no legal spot left (LY rules §4.1)", () => {
+	// a crowded frame: 1280x420 (the card in its line form), Activity open, a receipt and a condition up and Listen's
+	// panel open; held low over the open Listen head, no spot is a gutter clear of every island and open room, and
+	// the clamp's window-clamped fallback (16,352) stands under the open head and the player. The card yields there
+	// (out of sight in place) rather than overlap an island; wherever a legal spot exists it stands clear
+	const crowded = (
+		x: number,
+		y: number,
+		panel: { w: number; h: number } | null,
+	): LayoutInput => ({
+		...input(1280, 420, {
+			open: "listen",
+			panel,
+			status: [
+				RECEIPT,
+				{ id: "cond", kind: "condition", forms: { full: { w: 320, h: 60 } } },
+			],
+			drawer: {
+				id: "activity",
+				wantedW: 420,
+				expanded: false,
+				pane: null,
+				hasNoticeSlot: true,
+			},
+		}),
+		motion: { cardFrom: null, cardDrag: { x, y } },
+	})
+	const frameOf = (L: ReturnType<typeof computeLayout>): Rect[] => [
+		...cardObstacles(L),
+		...L.panelRooms,
+		...(L.listenOpen ? [L.listenOpen] : []),
+	]
+
+	it("1280x420, the card held at 0,360 over the open Listen head: no legal spot, so it yields", () => {
+		const L = computeLayout(crowded(0, 360, { w: 420, h: 300 }))
+		const card = L.cardNow
+		expect(card).not.toBeNull()
+		if (!card) return
+		// the fallback spot overlaps an island (the frame really has no legal spot)
+		expect(frameOf(L).some(o => separation(card, o) < 0)).toBe(true)
+		expect(L.yielded).toContain("card")
+		expect(namedRects(L).some(n => n.name === "card")).toBe(false)
+	})
+
+	it("1280x420 crowded, any held spot: the card yields or stands a gutter clear of every island and room", () => {
+		for (const panel of [{ w: 420, h: 300 }, null])
+			for (let x = 0; x <= 1280; x += 80)
+				for (let y = 0; y <= 420; y += 60) {
+					const L = computeLayout(crowded(x, y, panel))
+					const card = L.cardNow
+					if (!card || L.yielded.includes("card")) continue
+					for (const o of frameOf(L))
+						expect(
+							separation(card, o),
+							`${x},${y} ${panel ? "measured" : "pending"}: card at ${card.x},${card.y}`,
+						).toBeGreaterThanOrEqual(15.5)
+				}
+	})
+})

@@ -25,7 +25,7 @@ import {
 	type CardAnchor,
 	type CardAnchorId,
 } from "../layout.ts"
-import { clampDrag } from "../card-place.ts"
+import { clampDrag, dragLegal, type CardFrame } from "../card-place.ts"
 import type { DrawerId, IslandId } from "../store.ts"
 import {
 	bottom,
@@ -994,21 +994,23 @@ export function computeLayout(input: LayoutInput): Layout {
 		...panelRoom,
 	]
 	const want = mo?.cardDrag ?? null
-	const dragAt =
+	const heldFrame: CardFrame | null =
 		card && want
-			? clampDrag(
-					want,
-					{
-						anchors,
-						card: { x: card.x, y: card.y },
-						freeW,
-						H,
-						cardH: card.h,
-						obstacles: dragFrame,
-					},
-					null,
-				)
+			? {
+					anchors,
+					card: { x: card.x, y: card.y },
+					freeW,
+					H,
+					cardH: card.h,
+					obstacles: dragFrame,
+				}
 			: null
+	const dragAt = heldFrame && want ? clampDrag(want, heldFrame, null) : null
+	// no legal spot left in this frame: the clamp's fallback (the window-clamped wanted spot) would stand the held card
+	// over an island or an open room, so it yields there instead (out of sight in place, back under the pointer as
+	// soon as a spot frees)
+	const dragStuck =
+		heldFrame !== null && dragAt !== null && !dragLegal(dragAt, heldFrame)
 	const cardNow: Rect | null =
 		card && dragAt ? rect(dragAt.x, dragAt.y, CARD_W, card.h) : card
 	const path =
@@ -1033,10 +1035,11 @@ export function computeLayout(input: LayoutInput): Layout {
 	}
 	const cardSwept = path ?? cardNow
 
-	// the card (only with no legal spot left for a held one), the player and the status items under the open room yield
+	// the card (held or not) whose spot is within PANEL_GAP of the open room yields, and so does a held card with no
+	// legal spot left in its frame (dragStuck); the player and the status items under the open room yield too
 	const underPanel = (r: Rect | null) =>
 		r !== null && panelRoom.some(p => separation(p, r) < PANEL_GAP)
-	if (underPanel(cardNow)) yielded.push("card")
+	if (dragStuck || underPanel(cardNow)) yielded.push("card")
 	if (underPanel(player)) yielded.push("player")
 	// a status item within PANEL_GAP of the open panel's room yields in place (LY rules §2.3): out of sight, inert, its
 	// timer paused; it is back where it was, with its remaining time, when the panel closes. A positive-area item only:

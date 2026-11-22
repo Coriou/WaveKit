@@ -366,17 +366,18 @@ const describeViolation = (v: Violation) =>
  *   Proof: the last painted frame before the action shows the old state; the first changed painted frame already
  *   shows the mover at its destination, and so does every later one (no intermediate frame); nothing animates on the
  *   mover on any of those frames (`getAnimations()` is empty), and with `still` its transition time is 0. It needs
- *   the frame before the action and at least one painted frame after it inside the declared window (`inWindow`); the
- *   160 ms tail after the window is read for the checks, never counted as that frame.
+ *   the frame before the action and at least one painted frame after it: inside the declared window (`inWindow`)
+ *   unless `still`; a still jump's proof does not depend on when its frames land, so a frame in the 160 ms read tail
+ *   observes it too (`observedGate`).
  * - `animate`: a named mover with a transition (the card's glide). Proof: at least MIN_FRAMES painted frames in the
  *   glide's window (from the last frame at its old place), one of them strictly between its two places (more than
  *   1 px from both), and the last at its new place.
  * A cell still unobserved after one retry from a reset start is reported as infra-unobserved (the host painted too
  * few frames): its own status, never a pass and never a layout failure. */
-type Mode = "animate" | "jump"
+export type Mode = "animate" | "jump"
 
 /** One sampled element on one frame. */
-interface Seen {
+export interface Seen {
 	x: number
 	y: number
 	w: number
@@ -390,10 +391,10 @@ interface Seen {
 }
 
 /** One sampled frame of named elements, each null while it is absent. */
-type Frame = Record<string, Seen | null>
+export type Frame = Record<string, Seen | null>
 
 /** A sampled action. */
-interface Sampled {
+export interface Sampled {
 	/** frames[0] is the last painted frame before the action; then one per painted frame from the action on. */
 	frames: Frame[]
 	/** performance.now() of each frame. */
@@ -416,7 +417,7 @@ const GLIDE_WINDOW_MS = 260 + 60
 
 /** Samples the named elements on every painted frame (distinct rAF timestamps only, no timer ticks) from the action
  * (LY rules §7.2). Armed in the page before it: the latest painted frame before the action is frame 0 (Node waits
- * for one before it acts), a capturing listener (pointerdown, keydown, hashchange or a `wk:act` event a programmatic
+ * for one before it acts), a capturing listener (pointerdown, keydown, click, hashchange or a `wk:act` event a programmatic
  * step dispatches) records t0, and sampling runs to t0 + ms + 160, or with `untilDone` (a multi-step action) until
  * `ms` after the action resolved. With `overlaps`, every painted slot box is checked pairwise on each frame. */
 async function sample(
@@ -511,7 +512,7 @@ async function sample(
 				t0 = performance.now()
 				w["__wkSampleAt"] = Date.now()
 			}
-			const types = ["pointerdown", "keydown", "hashchange", "wk:act"]
+			const types = ["pointerdown", "keydown", "click", "hashchange", "wk:act"]
 			for (const t of types) window.addEventListener(t, mark, true)
 			const armed = performance.now()
 			let last = -1
@@ -613,7 +614,25 @@ interface Proof {
 	unobserved: string | null
 }
 
-function prove(
+/** Whether a sample saw enough to prove its mode, or why not. An animate cell and a non-still jump need at least one
+ * painted frame after the action inside the declared window (the tail after it is read, never counted: a frame
+ * painted only in the tail proves nothing about the window). A still jump's proof (its first changed frame already at
+ * the destination, no later frame differs, no animation, transition-duration 0) does not depend on when its frames
+ * land, so any painted frame after the action in the read range observes it (`inWindow` stays a reported count). */
+export function observedGate(
+	mode: Mode,
+	still: boolean,
+	s: Pick<Sampled, "frames" | "inWindow">,
+): string | null {
+	const after = s.frames.length - 1
+	if (mode === "jump" && still)
+		return after >= 1 ? null : "no painted frame after the action"
+	return s.inWindow >= 1
+		? null
+		: `no painted frame after the action inside the declared window (${after} in the read tail only)`
+}
+
+export function prove(
 	mode: Mode,
 	s: Sampled,
 	mover: string,
@@ -623,13 +642,8 @@ function prove(
 	const out: string[] = []
 	const from = frames[0]?.[mover] ?? null
 	const k = frames.findIndex((f, i) => i > 0 && differs(f[mover], from))
-	// every mode: at least one painted frame after the action inside the declared window (the tail after it is read,
-	// never counted: a frame painted only in the tail proves nothing about the window)
-	if (s.inWindow < 1)
-		return {
-			violations: [],
-			unobserved: `no painted frame after the action inside the declared window (${frames.length - 1} in the read tail only)`,
-		}
+	const gate = observedGate(mode, o.still, s)
+	if (gate) return { violations: [], unobserved: gate }
 	if (mode === "jump") {
 		if (k < 0) {
 			out.push(
