@@ -844,6 +844,8 @@ export interface FakeMark {
 	behindMs?: number | null | undefined
 	/** Its socket was waiting for a drain at the mark (the core was not reading). */
 	blocked?: boolean | null | undefined
+	/** Clients the fake has accepted so far (a connect count; a change means a reconnect). */
+	clients?: number | undefined
 }
 
 /** The fake rtl_tcp skips its whole backlog once it is more than this far behind (budget-fake-rtltcp.mjs). */
@@ -946,7 +948,17 @@ export function buildStages(i: StageInputs): StageCount[] {
 			: owed - fakeSent - skipped
 	const growthLost =
 		!behindKnown && lagGrowth > FAKE_MAX_BEHIND_S * rate ? lagGrowth : 0
-	const fakeDropped = skipped === null ? null : skipped + pending + growthLost
+	// A reconnect in the window breaks the lag bookkeeping: a backlog pending at A dies with its
+	// socket without being counted as skipped. The stage is then unknown, and so is any negative
+	// result, never a known zero loss. Marks without a client count (older logs) rely on the
+	// negative guard alone.
+	const ca = i.fakeA?.clients
+	const cb = i.fakeB?.clients
+	const sameClient =
+		typeof ca !== "number" || typeof cb !== "number" || ca === cb
+	const fakeRaw = skipped === null ? null : skipped + pending + growthLost
+	const fakeDropped =
+		!sameClient || fakeRaw === null || fakeRaw < 0 ? null : fakeRaw
 	const lag = (v: number | null, blocked: boolean | null): string =>
 		v === null
 			? "n/a"

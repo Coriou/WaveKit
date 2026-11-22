@@ -768,6 +768,70 @@ describe("buildStages", () => {
 		})
 	})
 
+	it("a reconnect in the window makes the fake stage unknown, not a negative loss", () => {
+		const stages = buildStages({
+			...inputs(edge({}), later(10)),
+			fakeA: {
+				bytes: 0,
+				skippedSeconds: 0,
+				monoMs: 0,
+				behindMs: 3000,
+				blocked: true,
+				clients: 1,
+			},
+			fakeB: {
+				bytes: 2 * RATE * 10,
+				skippedSeconds: 2.5,
+				monoMs: 10_000,
+				behindMs: 0,
+				clients: 2,
+			},
+		})
+		const fake = byId(stages, "fake-schedule")
+		expect(fake.droppedSamples).toBeNull()
+		expect(fake.losing).toBeNull()
+	})
+
+	it("a pending backlog that never became a skip is unknown, never a negative loss", () => {
+		const stages = buildStages({
+			...inputs(edge({}), later(10)),
+			fakeA: { bytes: 0, skippedSeconds: 0, monoMs: 0, behindMs: 3000 },
+			fakeB: {
+				bytes: 2 * RATE * 10,
+				skippedSeconds: 0,
+				monoMs: 13_000,
+				behindMs: 0,
+			},
+		})
+		const fake = byId(stages, "fake-schedule")
+		expect(fake.droppedSamples).toBeNull()
+		expect(fake.losing).toBeNull()
+	})
+
+	it("the same client at both edges keeps the fake stage known", () => {
+		const stages = buildStages({
+			...inputs(edge({}), later(10)),
+			fakeA: {
+				bytes: 0,
+				skippedSeconds: 0,
+				monoMs: 0,
+				behindMs: 0,
+				clients: 1,
+			},
+			fakeB: {
+				bytes: 2 * RATE * 9,
+				skippedSeconds: 1,
+				monoMs: 10_000,
+				behindMs: 0,
+				clients: 1,
+			},
+		})
+		expect(byId(stages, "fake-schedule")).toMatchObject({
+			droppedSamples: RATE,
+			losing: true,
+		})
+	})
+
 	it("a branch and a decoder closed in the window are unknown, not no loss (MA2)", () => {
 		const b = later(10)
 		const stages = buildStages(

@@ -373,6 +373,7 @@ const FakeLineSchema = z.object({
 	monoMs: z.number().optional(),
 	behindMs: z.number().nullable().optional(),
 	blocked: z.boolean().nullable().optional(),
+	clients: z.number().int().min(0).optional(),
 	rateHz: z.number().optional(),
 	port: z.number().optional(),
 })
