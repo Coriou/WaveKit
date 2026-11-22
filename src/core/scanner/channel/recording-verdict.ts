@@ -169,7 +169,8 @@ export function fileDecodedOwn(
  * source and frequency key, newest seen first, 64 discoveries in all), still keep: each keeps its
  * last OBSERVATIONS_PER_DISCOVERY = 256, so a proof older than that many transmissions no longer
  * counts; or an analog label at `classified` or more); it walks up to 64 × 256 cached proofs, so
- * it is asked only when a digital prior would otherwise apply.
+ * it is asked only when a digital prior would otherwise apply, or once at a file's finish when the
+ * noise admission measures the file as noise.
  * `classVotes` (absent: none) counts the owner's observations that voted a class (`total`) and
  * how many voted each class (`votes`; a class absent: none); asked only for an owner's digital
  * label. A label's `checkedHint` (absent: false) is true for a dsd-fme sync hint that carries
