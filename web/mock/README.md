@@ -124,7 +124,9 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   each new call as it lands), linked by the summary's `recording: { id, durationMs }` (the item's
   `key`) and the item's `activityEventId`. `GET /api/activity` takes `hasRecording` and
   `refs=recordingId:<key>` (other ref types match nothing: mock rows carry no refs), and the file
-  route plays a `dsd~<name>` key. Scanner DV files have no row, as on the core.
+  route plays a `dsd~<name>` key. Scanner DV files have no row, as on the core. The seeded calls
+  are P25 and D-STAR: a core lists and links no DMR call recording while DMR recordings are off,
+  so the mock seeds none.
 - Channels (`activity-channel.ts`), as the core: each scanner analog recording row carries
   `channel: { discoveryId, frequencyHz }` and is titled `FM voice`; `GET /api/activity` and
   `POST /api/activity/facets` take `channelHz` or `nearHz` with `toleranceHz` (a row without
