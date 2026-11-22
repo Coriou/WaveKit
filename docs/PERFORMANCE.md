@@ -1312,5 +1312,4 @@ fill only while their reader is behind, so neither adds latency in steady state.
   side at 16 MiB). At 250 ms it congested in the hog runs and dropped 8.6 % of its input.
 - Each channel's output queue (`channelizer.channelQueueMs`, bound 50-2 000 ms) is meant to hold
   1 000 ms: 384 KB for a 48 kHz cf32 channel (384 KB/s), 96 KB for s16 audio, 3.8 MB for ten cf32
-  channels. Its default in `src/config.ts` is still 250 ms until that change lands; the budget
-  harness sets it with `--channel-queue-ms`.
+  channels. That is its default; the budget harness can override it with `--channel-queue-ms`.

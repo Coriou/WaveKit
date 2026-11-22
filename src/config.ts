@@ -766,7 +766,11 @@ export const ChannelizerConfigSchema = z.object({
 	binaryPath: z.string().min(1).default("wavekit-chan"),
 	socketDir: z.string().min(1).default("/var/run/wavekit/chan"),
 	usableFraction: z.number().min(0.5).max(0.95).default(0.8),
-	channelQueueMs: z.number().int().min(50).max(2000).default(250),
+	// A channel's output queue fills only while its decoder is not reading, so it adds no latency in steady state; it
+	// must cover the decoder process's own scheduling gap. Measured worst idle-worker lateness at load 135-209 on the
+	// dev host: 1.1 s, so 1 000 ms. 48 kHz cf32 is 384 KB/s, 384 KB per channel; s16 audio 96 KB; ten cf32 channels
+	// 3.8 MB. The bound stays 2 000 ms.
+	channelQueueMs: z.number().int().min(50).max(2000).default(1000),
 	inputHighWaterMark: z
 		.number()
 		.int()
