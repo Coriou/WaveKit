@@ -114,7 +114,7 @@ probes). It records whether or not anyone is listening.
   `DMR_`), or no known protocol, is not listed in Recordings, cannot be
   downloaded and is never linked to its Activity row; a dsd-fme decoder in
   `mode: dmr` is not asked for per-call files at all. An Activity row linked to
-  one earlier loses that link within a few minutes. Files dsd-fme already
+  one earlier shows no play control. Files dsd-fme already
   wrote stay on disk under the usual retention.
 - **About 2 s behind the air.** Each sample is held for 2 s before it is
   written, so a late encryption notice can still withhold it. The call's end

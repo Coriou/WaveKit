@@ -16,7 +16,8 @@ import {
 	stores,
 } from "../core/activity/storage/helpers.js"
 
-const KEY = "dsd~20261012_100000_12345_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
+// A P25 call: a DMR link is not presented while DMR recordings are off.
+const KEY = "dsd~20261012_100000_12345_P25_1A3_GROUP_TGT_9_SRC_2001.wav"
 
 afterEach(async () => {
 	await Promise.all(stores.splice(0).map(s => s.close().catch(() => undefined)))

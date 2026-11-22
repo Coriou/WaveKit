@@ -7752,7 +7752,8 @@ linked or recorded yet: `GET /api/recordings` lists no dsd-fme call file whose
 name says DMR (nor one whose name says no known protocol), its `file` route
 answers 404 for one, no Activity row links one (backfill included), and a
 dsd-fme decoder in `mode: dmr` is not asked for per-call files. A row linked
-to one before is unlinked by the link sweep below, as for a deleted file.
+to one before is read without its `recording` (REST and WebSocket alike), and
+the link sweep below unlinks it as for a deleted file.
 Files dsd-fme already wrote stay on disk under the usual retention.
 Scanner DMR call files are not listed or served yet either: a probe's dsd-fme
 call file in a discovery's `dv` folder whose name says DMR (or no known

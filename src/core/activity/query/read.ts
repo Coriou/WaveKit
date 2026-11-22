@@ -17,12 +17,19 @@ import {
 	ActivityReaderFailedError,
 } from "./errors.js"
 import { recordWithoutRecordingPath } from "../recording-path.js"
+import {
+	dsdFmeCallProtocol,
+	protocolRecordable,
+} from "../../../decoders/builtin/dmr-recording-gate.js"
 import { channelHzOfRef, channelRefValue } from "../storage/row.js"
 import { ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ } from "@wavekit/api-types"
 import { bindSeq, formatSeq, MAX_SEQ, parseSeq, seqFromSqlite } from "./seq.js"
 import type { SqlDatabase, SqlValue } from "./sqlite.js"
 import { readTrails, type TrailsReadInput } from "./trails.js"
 import type { FacetDimension, NormalisedQuery } from "./validate.js"
+
+/** The keep-key prefix of a dsd-fme call recording (RECORDING_KEEP_KEY). */
+const DSD_KEEP_PREFIX = "dsd~"
 
 export interface SummaryRow {
 	seq: string
@@ -776,10 +783,49 @@ function readSummary(
 	if (!isRecord(parsed))
 		throw activityRecordCorrupt("Activity summary is not an object")
 	return {
-		...(parsed as unknown as ActivitySummary),
+		...(withoutUnservableRecording(parsed) as unknown as ActivitySummary),
 		eventId,
 		commitSeq: formatSeq(seq),
 	}
+}
+
+/** A per-call recording name, dsd-fme's or the dv call recorder's (the same shape). */
+const CALL_WAV_NAME = /^\d{8}_\d{6}_\d{5}_.*_TGT_.*_SRC_.*\.wav$/
+/** dsd-fme's name before it knows the system: no first field. */
+const EMPTY_FIRST_FIELD = /^\d{8}_\d{6}_\d{5}__/
+
+/**
+ * Whether a stored `dsd~` link may be presented: not a per-call name, or one whose first field
+ * is not empty and is not DMR (DMR only while the DMR gate is on, protocolRecordable).
+ * Narrower than dsdFmeNameServable on purpose: the dv call recorder's names share the `dsd~`
+ * keys with a decoder id in that field (`..._dsd-fme_GROUP_...`), and the catalogue serves them
+ * whatever it says (it writes no DMR audio). A name with no first field is refused.
+ */
+function dsdLinkPresentable(name: string): boolean {
+	if (!CALL_WAV_NAME.test(name)) return true
+	if (EMPTY_FIRST_FIELD.test(name)) return false
+	const protocol = dsdFmeCallProtocol(name)
+	if (protocol === null || protocol.toLowerCase() !== "dmr") return true
+	return protocolRecordable(protocol)
+}
+
+/**
+ * The summary without a stored dsd-fme `recording` the catalogue no longer serves (a DMR call
+ * link stored before the DMR recording gate closed), so no row shows a play control the
+ * recordings route refuses.
+ */
+function withoutUnservableRecording(
+	summary: Record<string, unknown>,
+): Record<string, unknown> {
+	const recording = summary["recording"]
+	if (!isRecord(recording)) return summary
+	const id = recording["id"]
+	if (typeof id !== "string" || !id.startsWith(DSD_KEEP_PREFIX)) return summary
+	if (dsdLinkPresentable(id.slice(DSD_KEEP_PREFIX.length))) return summary
+	const rest: Record<string, unknown> = {}
+	for (const [key, value] of Object.entries(summary))
+		if (key !== "recording") rest[key] = value
+	return rest
 }
 
 function readRecord(seq: bigint, json: unknown): ActivityRecord {

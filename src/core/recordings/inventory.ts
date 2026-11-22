@@ -2076,12 +2076,10 @@ export function createRecordingInventory(
 				.filter(st => st.spec.kind === "dsd-fme-call")
 				.map(st => st.spec.decoderId),
 		)
-		// A decoder with no dsd-fme directory of its own is covered by an indexed dv-call one.
-		const dvIndexed = states.some(st => st.spec.kind === "dv-call")
+		// A decoder with no indexed dsd-fme directory re-derives them, even with the dv call
+		// recorder's directory indexed: that one never stands for a decoder's own directory.
 		const missing =
-			decoderIds === null || dvIndexed
-				? []
-				: [...decoderIds].filter(d => !known.has(d))
+			decoderIds === null ? [] : [...decoderIds].filter(d => !known.has(d))
 		if (missing.length > 0 || states.length === 0) {
 			const specs = (await deriveFolders(counts)).filter(wanted)
 			await Promise.all(
