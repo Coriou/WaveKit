@@ -28,6 +28,7 @@ import type {
 	EfficiencyGate,
 	ProbationVerdict,
 	EfficiencyInputs,
+	EfficiencyCpuState,
 	RunningPlacement,
 	ShedAttribution,
 	WantedPlacement,
@@ -42,6 +43,8 @@ import {
 	probationLoss,
 } from "./host-starvation.js"
 import type { LossAttribution } from "./host-starvation.js"
+import { classifyCpuSample, OWN_CPU_MAX_GAP_MS } from "./own-cpu.js"
+import type { CpuClassification } from "./own-cpu.js"
 
 const DropStateSchema = z.object({
 	state: z.enum(["ok", "dropping", "clearing", "unknown"]),
@@ -213,9 +216,34 @@ export function createEfficiencyGate(
 	/** The latest probation pass's verdict attributions, by placement key. */
 	const shed = new Map<string, ShedAttribution>()
 	let cpu: number | null = null
-	/** Monotonic times of samples with CPU over the limit, oldest first. */
-	const highCpu: number[] = []
+	/**
+	 * Monotonic times of samples with the core's own CPU over the guard share
+	 * of its capacity (own-cpu.ts), oldest first: the only CPU evidence against
+	 * a decoder. A time is pushed only for the second of two consecutive
+	 * own-over samples, so one spawn burst is no evidence.
+	 */
+	const ownOver: number[] = []
+	/**
+	 * Monotonic times of samples with host CPU over the guard, oldest first:
+	 * excuses drops only (host-starvation.ts), never sheds or refuses.
+	 */
+	const hostCpu: number[] = []
 	let cpuAt: number | null = null
+	/** The latest sample's CPU classification, its own and host readings. */
+	let cpuClass: CpuClassification | null = null
+	let ownCores: number | null = null
+	let capacityCores: number | null = null
+	/** Monotonic time of the latest sample (classification freshness for probation). */
+	let classMono: number | null = null
+	/** Monotonic time of the previous own-over sample, for the two-sample rule. */
+	let lastOwnOverMono: number | null = null
+	/**
+	 * Whether the latest sample completed two consecutive own-over samples
+	 * (the two-sample rule above): only then does admission refuse for `cpu`,
+	 * so one spawn burst refuses nothing.
+	 */
+	let latestOwnOverPair = false
+	let ownUnavailableLogged = false
 
 	const currentCpu = (now: number) =>
 		valid(now) &&
@@ -255,11 +283,49 @@ export function createEfficiencyGate(
 	// CPU evidence evicted from bounded history must not erase a failed probation.
 	// One flag per admitted placement, reset with its admission mark or removal.
 	const originalFailed = new Set<string>()
-	const evictHighCpu = () => {
-		const t = highCpu.shift()
+	// Only own CPU is evidence: evicting host CPU (an excuse) fails nothing.
+	const evictOwnOver = () => {
+		const t = ownOver.shift()
 		if (t === undefined) return
 		for (const [key, admitted] of admittedMono)
 			if (!graduated.has(key) && admitted <= t) originalFailed.add(key)
+	}
+	/** The latest sample's classification while fresh at `now` (wall ms), else null. */
+	const currentClass = (now: number) =>
+		valid(now) &&
+		cpuAt !== null &&
+		now >= cpuAt &&
+		now - cpuAt <= EFFICIENCY_STALE_MS
+			? cpuClass
+			: null
+	/** The latest sample's classification while fresh at `mono`, else null. */
+	const classAtMono = (mono: number) =>
+		valid(mono) &&
+		classMono !== null &&
+		mono >= classMono &&
+		mono - classMono <= EFFICIENCY_STALE_MS
+			? cpuClass
+			: null
+	const hostBusyLabel = (c: CpuClassification | null) =>
+		c !== null &&
+		(c.label === "host-busy" || c.label === "host-busy-unattributed")
+	/** The CPU readings a verdict log carries (no untrusted values). */
+	const cpuLogFields = () => ({
+		ownCores: ownCores === null ? null : Math.round(ownCores * 1000) / 1000,
+		capacityCores,
+		hostCpuPercent: cpu === null ? null : Math.round(cpu * 10) / 10,
+		cpuLabel: cpuClass?.label ?? null,
+		budgetCores: valid(budgetCores()) ? budgetCores() : null,
+	})
+	const logVerdict = (fields: Record<string, unknown>) => {
+		try {
+			deps.log?.warn(
+				{ ...fields, ...cpuLogFields() },
+				"Efficiency probation verdict",
+			)
+		} catch {
+			/* Logging cannot change a verdict. */
+		}
 	}
 	/** Placements this gate admitted (YAML and pre-gate runs never are). */
 	const gated = new Set<string>()
@@ -487,7 +553,7 @@ export function createEfficiencyGate(
 			until + HOST_STARVATION_WINDOW_MS,
 		)
 		if (drops === null) return null
-		const cpuHost: ChargedDrop[] = highCpu
+		const cpuHost: ChargedDrop[] = hostCpu
 			.filter(
 				t =>
 					t >= from - HOST_STARVATION_WINDOW_MS &&
@@ -593,7 +659,7 @@ export function createEfficiencyGate(
 			/* Unreadable evidence is unknown, not a drop. */
 		}
 		if (dropped) return "drops"
-		return highCpu.some(t => t >= admitted && t <= until) ? "cpu" : null
+		return ownOver.some(t => t >= admitted && t <= until) ? "cpu" : null
 	}
 	// Normal probation is earned: with a coverage reader a placement needs
 	// EFFICIENCY_PROBATION_MS of complete evidence since admission (unknown
@@ -645,7 +711,7 @@ export function createEfficiencyGate(
 		try {
 			const cleanAt = deps.drops?.cleanAtMono?.(p.sourceId)
 			if (!valid(cleanAt) || cleanAt > mono) return false
-			const lastHighCpu = highCpu.findLast(t => t >= admitted && t <= mono)
+			const lastHighCpu = ownOver.findLast(t => t >= admitted && t <= mono)
 			// Recovery needs only the last 60 s plus one sample: at 2 s per
 			// sample that is at most 32 timestamps, well below the 1024 cap.
 			// Older original evidence is retained separately in originalFailed.
@@ -884,6 +950,37 @@ export function createEfficiencyGate(
 				}
 			})
 		}
+		// L1: while the latest fresh sample is host-busy and not own-over, host
+		// loss is the host's (a hog elsewhere): an untuned placement is condemned
+		// only by consumer loss charged to its branch in the window. Without
+		// per-sample charges no loss is known to be consumer loss, so none
+		// condemns an untuned placement until the host calms.
+		const hostBusyConsumer: Map<LateDropWindow, Set<string>> | null =
+			hostBusyLabel(classAtMono(mono)) && windows.length > 0 ? new Map() : null
+		if (hostBusyConsumer !== null) {
+			const charged = chargedDrops(sourceId, windows[0]!.startMono, mono)
+			windows.forEach((w, i) => {
+				const until = windows[i + 1]?.startMono ?? mono
+				const consumer = new Set<string>()
+				for (const d of charged ?? [])
+					if (
+						d.code === "consumer" &&
+						d.branches !== "source" &&
+						d.atMono > w.startMono &&
+						d.atMono <= until
+					)
+						for (const b of d.branches) consumer.add(b)
+				hostBusyConsumer.set(w, consumer)
+			})
+		}
+		const hostExcused = (w: LateDropWindow, p: RunningPlacement) => {
+			if (hostBusyConsumer === null || p.tunedBand === true) return false
+			const consumer = hostBusyConsumer.get(w)
+			if (consumer === undefined) return false
+			return p.inputBranch === undefined
+				? consumer.size === 0
+				: !consumer.has(p.inputBranch)
+		}
 		// A window condemns the placements reading a branch that dropped in it;
 		// an unscoped window (no branch list) or upstream loss no branch can be
 		// charged with (absorber overflow, "source") condemns the whole source.
@@ -893,42 +990,79 @@ export function createEfficiencyGate(
 		// evidence the window is judged as before.
 		// Host CPU alone excuses its own loss for at most CPU_ONLY_EXCUSE_MS
 		// (30 000 ms), as on probation: a window with a drop on its branch
-		// condemns it once the CPU-only run open at the window's end
-		// (cpuOnlyLoss) has outlived that bound. The drops read reach back far
-		// enough to see a run that began the bound before the oldest window.
-		const around =
+		// condemns it once the CPU-only run still open at the latest sample
+		// (cpuOnlyLoss) has outlived that bound and the drop belongs to that
+		// run. The drops read reach back far enough to see a run that began
+		// the bound before the oldest window.
+		// Host CPU samples over the guard join the drops as CPU-only `host`
+		// evidence, as on probation (tunedLoss), so ownLoss excuses with them
+		// and cpuOnlyOwn bounds that excuse.
+		const aroundFrom =
+			windows.length > 0
+				? windows[0]!.startMono - CPU_ONLY_EXCUSE_MS - HOST_STARVATION_WINDOW_MS
+				: mono
+		const aroundDrops =
 			windows.length > 0 && placements.some(p => p.tunedBand === true)
-				? chargedDrops(
-						sourceId,
-						windows[0]!.startMono -
-							CPU_ONLY_EXCUSE_MS -
-							HOST_STARVATION_WINDOW_MS,
-						mono,
-					)
+				? chargedDrops(sourceId, aroundFrom, mono)
 				: null
+		const aroundCpu: ChargedDrop[] =
+			aroundDrops === null
+				? []
+				: hostCpu
+						.filter(t => t >= aroundFrom && t <= mono)
+						.map(t => ({
+							atMono: t,
+							code: "host",
+							branches: [],
+							hostCpuOnly: true,
+						}))
+		const around =
+			aroundDrops !== null && aroundCpu.length > 0
+				? [...aroundDrops, ...aroundCpu]
+				: aroundDrops
+		// Only the run still open at the latest sample is judged, and a window
+		// counts only for a drop inside that run: a window before a gap
+		// belongs to a run that stopped within its excuse and never counts.
+		const openCpuRun = new Map<string, number | null>()
+		const spentRunStart = (drops: readonly ChargedDrop[], branch: string) => {
+			let start = openCpuRun.get(branch)
+			if (start === undefined) {
+				const sampled = sampledMono()
+				const run = cpuOnlyLoss(
+					drops,
+					branch,
+					windows[0]!.startMono - CPU_ONLY_EXCUSE_MS,
+					sampled,
+					sampled,
+				)
+				start = run.own ? run.start : null
+				openCpuRun.set(branch, start)
+			}
+			return start
+		}
 		const cpuOnlyOwn = (
 			drops: readonly ChargedDrop[],
 			branch: string | undefined,
 			w: LateDropWindow,
-		) =>
-			branch !== undefined &&
-			drops.some(
-				d =>
-					d.atMono > w.startMono &&
-					d.atMono <= w.endMono &&
-					d.branches !== "source" &&
-					d.branches.includes(branch),
-			) &&
-			cpuOnlyLoss(
-				drops,
-				branch,
-				windows[0]!.startMono - CPU_ONLY_EXCUSE_MS,
-				w.endMono,
-				sampledMono(),
-			).own
+		) => {
+			if (branch === undefined) return false
+			const start = spentRunStart(drops, branch)
+			return (
+				start !== null &&
+				drops.some(
+					d =>
+						d.atMono > w.startMono &&
+						d.atMono <= w.endMono &&
+						d.atMono >= start &&
+						d.branches !== "source" &&
+						d.branches.includes(branch),
+				)
+			)
+		}
 		const condemns = (w: LateDropWindow, p: RunningPlacement) =>
 			w.condemning &&
 			chargesBranch(w.condemnedBranches, p.inputBranch) &&
+			!hostExcused(w, p) &&
 			(p.tunedBand !== true ||
 				around === null ||
 				ownLoss(
@@ -976,6 +1110,11 @@ export function createEfficiencyGate(
 		record(sample) {
 			if (!sample || !valid(sample.atMs)) {
 				cpu = null
+				cpuClass = null
+				ownCores = null
+				lastOwnOverMono = null
+				latestOwnOverPair = false
+				classMono = null
 				return
 			}
 			const at = sample.atMs
@@ -998,21 +1137,65 @@ export function createEfficiencyGate(
 				// A carried drop is judged with the CPU around it.
 				for (const at of carried.values())
 					since = Math.min(since, at - HOST_STARVATION_WINDOW_MS)
-				while (highCpu.length && highCpu[0]! < since) evictHighCpu()
+				while (ownOver.length && ownOver[0]! < since) evictOwnOver()
+				while (hostCpu.length && hostCpu[0]! < since) hostCpu.shift()
 			}
-			if (
-				valid(sample.cpuPercent) &&
-				sample.cpuPercent > inputs.cpuGuardPercent
-			) {
-				// CPU evidence carries the evidence time of the sample it came with,
-				// so the sample that completes coverage includes its CPU reading.
-				if (Number.isFinite(mono)) {
-					highCpu.push(mono)
-					if (highCpu.length > 1024) evictHighCpu()
+			const own = valid(sample.ownCores) ? sample.ownCores : null
+			const capacity =
+				valid(sample.capacityCores) && sample.capacityCores > 0
+					? sample.capacityCores
+					: null
+			const classified = classifyCpuSample(
+				sample.cpuPercent,
+				own,
+				capacity,
+				inputs.cpuGuardPercent,
+			)
+			// CPU evidence carries the evidence time of the sample it came with,
+			// so the sample that completes coverage includes its CPU reading.
+			if (Number.isFinite(mono)) {
+				if (classified.hostCpu) {
+					hostCpu.push(mono)
+					if (hostCpu.length > 1024) hostCpu.shift()
+				}
+				if (classified.ownOver) {
+					// Two consecutive own-over samples (no gap past
+					// OWN_CPU_MAX_GAP_MS) make evidence; a lone one does not.
+					if (
+						lastOwnOverMono !== null &&
+						mono > lastOwnOverMono &&
+						mono - lastOwnOverMono <= OWN_CPU_MAX_GAP_MS
+					) {
+						ownOver.push(mono)
+						if (ownOver.length > 1024) evictOwnOver()
+						latestOwnOverPair = true
+					} else latestOwnOverPair = false
+					lastOwnOverMono = mono
+				} else {
+					lastOwnOverMono = null
+					latestOwnOverPair = false
+				}
+			} else {
+				lastOwnOverMono = null
+				latestOwnOverPair = false
+			}
+			if (sample.ownCpuAvailable === false && !ownUnavailableLogged) {
+				ownUnavailableLogged = true
+				try {
+					deps.log?.info(
+						{ capacityCores: capacity },
+						"own CPU unavailable: CPU shedding off",
+					)
+				} catch {
+					/* Logging cannot change a verdict. */
 				}
 			}
 			cpuAt = at
 			cpu = valid(sample.cpuPercent) ? sample.cpuPercent : null
+			cpuClass = classified
+			ownCores = own
+			capacityCores = capacity
+			classMono = Number.isFinite(mono) ? mono : null
 		},
 		admit(newcomer, running, now): AdmissionDecision {
 			const mono = monoNow()
@@ -1094,8 +1277,9 @@ export function createEfficiencyGate(
 			const unsettled =
 				state === "unknown" || state === "clearing" || attribution === "unknown"
 			let detail: DecoderEfficiencyDetail | null = null
-			// Over the CPU limit a tuned-band newcomer swaps in for untuned
-			// placements (newest first) whose cost together covers its own.
+			// Own CPU over the guard share (A1t): a tuned-band newcomer swaps in
+			// for untuned placements (newest first) whose cost together covers its
+			// own. Host CPU alone (A2t) swaps nothing: the budget decides.
 			const swapped = new Set<string>()
 			if (
 				!valid(now) ||
@@ -1105,7 +1289,11 @@ export function createEfficiencyGate(
 				detail = "unknown"
 			else if (state === "dropping" && !hostBusyNow) detail = "drops"
 			else if (!valid(inputs.cpuGuardPercent)) detail = "unknown"
-			else if ((currentCpu(now) ?? 0) > inputs.cpuGuardPercent) {
+			// Only the core's own CPU over its guard share refuses (A1), on the
+			// latest two fresh consecutive own-over samples (the probation
+			// evidence rule: one spawn burst refuses nothing); host CPU alone
+			// never does (A2): the cost model below still applies.
+			else if (currentClass(now)?.ownOver === true && latestOwnOverPair) {
 				detail = "cpu"
 				if (tuned && valid(newcomer.costCores)) {
 					let freed = 0
@@ -1124,7 +1312,7 @@ export function createEfficiencyGate(
 					if (freed >= newcomer.costCores) detail = null
 					else swapped.clear()
 				}
-				// Host CPU at the guard while the host is busy, or on the retry
+				// Own CPU over the guard while the host is busy, or on the retry
 				// of a tuned decoder shed for its own loss: withholding it cures
 				// no host load, so it is admitted on probation (budget applies).
 				if (
@@ -1164,7 +1352,24 @@ export function createEfficiencyGate(
 			if (detail === null) {
 				// A key already running keeps its mark; any other admission starts a
 				// fresh probation window.
-				if (!running.some(p => p.key === newcomer.key)) mark(newcomer.key, mono)
+				if (!running.some(p => p.key === newcomer.key)) {
+					mark(newcomer.key, mono)
+					// The admission time opens the probation evidence window.
+					try {
+						deps.log?.info(
+							{
+								key: newcomer.key,
+								sourceId: newcomer.sourceId,
+								tunedBand: tuned,
+								admittedMono: Math.round(mono),
+								...cpuLogFields(),
+							},
+							"Efficiency admission",
+						)
+					} catch {
+						/* Logging cannot change a decision. */
+					}
+				}
 				// An activity move keeps the probation its predecessor earned (on
 				// the preflight and the final admission alike).
 				if (earned.has(newcomer.key)) graduated.add(newcomer.key)
@@ -1443,12 +1648,24 @@ export function createEfficiencyGate(
 						verdicts.push({ key: scapegoat.key, detail: detail ?? "drops" })
 						shed.set(scapegoat.key, {
 							tuned: false,
+							// CPU evidence is the core's own CPU: decoder load, not host.
 							attribution: attributionAt(
 								scapegoat.sourceId,
 								mono,
 								EFFICIENCY_PROBATION_MS,
-								"host",
+								detail === "cpu" ? "decoder" : "host",
 							),
+						})
+						// The evidence was the tuned probationer's: name it and its
+						// admission so the window can be checked independently.
+						logVerdict({
+							key: scapegoat.key,
+							sourceId: scapegoat.sourceId,
+							detail: detail ?? "drops",
+							scapegoat: true,
+							probationerKey: placement.key,
+							probationerAdmittedMono: Math.round(admitted),
+							verdictMono: Math.round(mono),
 						})
 						scapegoatAt.set(scapegoat.sourceId, mono)
 						// Only a CPU scapegoat opens the window, and only once the
@@ -1481,9 +1698,10 @@ export function createEfficiencyGate(
 				// Host loss on a sibling's branch with nothing untuned left to shed:
 				// the tuned one is judged by its own branch only.
 				if (detail === null) continue
-				// Tuned band: CPU over the guard is the host's CPU, so shedding the
-				// tuned decoder cannot cure it: it restarts its probation instead
-				// (graduating once 30 000 ms pass under the guard).
+				// Tuned band (T1c): own CPU over the guard with nothing untuned left
+				// to shed: the tuned decoder is the one the user listens to, so it
+				// restarts its probation instead (graduating once its window passes
+				// with no own-over evidence).
 				if (tuned && detail === "cpu") {
 					if (valid(mono)) cpuReset(placement, admitted, mono)
 					continue
@@ -1492,12 +1710,22 @@ export function createEfficiencyGate(
 				verdicts.push({ key: placement.key, detail })
 				shed.set(placement.key, {
 					tuned,
+					// CPU evidence is the core's own CPU (own-cpu.ts): decoder load.
 					attribution: attributionAt(
 						placement.sourceId,
 						mono,
 						EFFICIENCY_PROBATION_MS,
-						tuned ? "decoder" : detail === "cpu" ? "host" : undefined,
+						tuned || detail === "cpu" ? "decoder" : undefined,
 					),
+				})
+				logVerdict({
+					key: placement.key,
+					sourceId: placement.sourceId,
+					detail,
+					scapegoat: false,
+					probationerKey: placement.key,
+					probationerAdmittedMono: Math.round(admitted),
+					verdictMono: Math.round(mono),
 				})
 			}
 			if (valid(mono))
@@ -1608,6 +1836,17 @@ export function createEfficiencyGate(
 			tunedRetries.delete(key)
 		},
 		shedAttribution: key => shed.get(key),
+		cpuState(now): EfficiencyCpuState | null {
+			const c = currentClass(now)
+			if (c === null) return null
+			return {
+				label: c.label,
+				hostPercent: cpu,
+				ownCores,
+				capacityCores,
+				guardPercent: inputs.cpuGuardPercent,
+			}
+		},
 		hostBusy: (sourceId, branches) =>
 			hostBusyAt(sourceId, sampledMono(), branches),
 		view(running, blocked, now) {

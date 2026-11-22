@@ -13,7 +13,10 @@
 // structuredClone calls, IQ source chunks (`data` events on the TCP socket whose remote port is
 // BUDGET_SOURCE_PORT), and on Linux the main thread's run-queue wait (/proc/thread-self/schedstat)
 // and every thread's utime + stime and wait (/proc/self/task/*). Every 10 s inside a window it
-// appends the same figures for those 10 s, plus os.loadavg(), to ticks-<n>.jsonl.
+// appends the same figures for those 10 s, plus os.loadavg(), to ticks-<n>.jsonl. The window
+// file also holds os.loadavg() at both edges, the loop delay p99.9, and the stalls: a 50 ms
+// interval timer that fired more than 50 ms late is one stall (its end time and lateness), with
+// counts over 100 ms, 500 ms and 1 s and the 10 longest.
 //
 // Workers: on Node 24 an --import preload also runs in every worker_threads Worker started from
 // a file (not in `eval: true` workers). A worker records its own process.threadCpuUsage between
@@ -95,6 +98,9 @@ export function parseProcStat(text) {
 const out = process.env.BUDGET_OUT
 const CHANNEL = "wavekit-budget-window"
 const TICK_MS = 10_000
+const STALL_RES_MS = 50
+const STALL_MIN_MS = 50
+const STALL_TOP = 10
 /** USER_HZ: 100 on every Linux ABI Node supports. */
 const CLK_TCK = 100
 
@@ -392,6 +398,7 @@ function startMain() {
 				? {
 						p50: h.percentile(50) / 1e6,
 						p99: h.percentile(99) / 1e6,
+						p999: h.percentile(99.9) / 1e6,
 						max: h.max / 1e6,
 						mean: h.mean / 1e6,
 					}
@@ -424,6 +431,37 @@ function startMain() {
 	let n = -1
 	let open = null
 	let ticker = null
+	// Stalls: a STALL_RES_MS interval timer; a gap of more than STALL_MIN_MS past its due time is
+	// one stall (wall clock of its end, and its length). 20 wake-ups a second while a window is open.
+	const stalls = { list: [], count: 0, totalMs: 0, over: [0, 0, 0] }
+	let stallTimer = null
+	let stallLast = 0
+	const stallCheck = () => {
+		const now = performance.now()
+		const late = now - stallLast - STALL_RES_MS
+		stallLast = now
+		if (late < STALL_MIN_MS) return
+		stalls.count++
+		stalls.totalMs += late
+		if (late > 100) stalls.over[0]++
+		if (late > 500) stalls.over[1]++
+		if (late > 1000) stalls.over[2]++
+		stalls.list.push({ atUtc: new Date().toISOString(), ms: late })
+		if (stalls.list.length > 4 * STALL_TOP) {
+			stalls.list.sort((a, b) => b.ms - a.ms)
+			stalls.list.length = STALL_TOP
+		}
+	}
+	const stallSummary = () => ({
+		resolutionMs: STALL_RES_MS,
+		thresholdMs: STALL_MIN_MS,
+		count: stalls.count,
+		totalMs: stalls.totalMs,
+		over100: stalls.over[0],
+		over500: stalls.over[1],
+		over1000: stalls.over[2],
+		top: [...stalls.list].sort((a, b) => b.ms - a.ms).slice(0, STALL_TOP),
+	})
 
 	writeJson("preload.json", {
 		pid: process.pid,
@@ -452,6 +490,8 @@ function startMain() {
 	const close = () => {
 		if (open === null) return
 		clearInterval(ticker)
+		clearInterval(stallTimer)
+		stallCheck()
 		const end = snapshot()
 		// The last partial tick, when it holds at least 2 s.
 		if (end.t - open.last.t >= 2000) {
@@ -489,6 +529,9 @@ function startMain() {
 			startUtc: new Date(open.start.wall).toISOString(),
 			endUtc: new Date(end.wall).toISOString(),
 			...delta(open.start, end, windowH),
+			loadavgStart: open.loadavg,
+			loadavgEnd: os.loadavg(),
+			stalls: stallSummary(),
 			tasks,
 		})
 		bc?.postMessage({ cmd: "close", n: open.n })
@@ -507,7 +550,14 @@ function startMain() {
 		windowH.enable()
 		tickH.enable()
 		const start = snapshot()
-		open = { n, start, last: start, tasks: readTasks() }
+		open = { n, start, last: start, tasks: readTasks(), loadavg: os.loadavg() }
+		stalls.list = []
+		stalls.count = 0
+		stalls.totalMs = 0
+		stalls.over = [0, 0, 0]
+		stallLast = performance.now()
+		stallTimer = setInterval(stallCheck, STALL_RES_MS)
+		stallTimer.unref()
 		writeJson("window-open.json", { n, open: true })
 		bc?.postMessage({ cmd: "open", n })
 		ticker = setInterval(tick, TICK_MS)

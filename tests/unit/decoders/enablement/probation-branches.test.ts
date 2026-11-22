@@ -52,6 +52,7 @@ function harness(gateGuardPercent = 90) {
 			),
 		topology: () => "fixed",
 		cpu,
+		ownCpu: null,
 		now: () => mono,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),

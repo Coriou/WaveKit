@@ -6,8 +6,11 @@ import { MAX_SETTLEMENT_TOKEN, isSettlementToken } from "./protocol.js"
 import type { SettlementTransport } from "./settlement-transport.js"
 import type {
 	ChannelProvider,
+	ChannelRequestOptions,
 	ChannelRequestResult,
+	ChannelStats,
 	DecoderChannelRequest,
+	DirectChannelRequestResult,
 } from "./types.js"
 
 export type ProofState = "pending" | "settled" | "unknown" | "failed"
@@ -1243,9 +1246,21 @@ interface DecoderListenerRecord {
 	registered: boolean
 	removed: boolean
 }
+/** The underlying provider's `channel-stats` forwarder, attached only while the adapter has a listener for it. */
+interface StatsForwarder {
+	attach(): void
+	detach(): void
+}
 class ForwardingProvider extends EventEmitter implements ChannelProvider {
 	private decoderListener: DecoderListenerRecord | undefined
 	override on(event: string | symbol, listener: AdapterListener): this {
+		// Counters only (direct channel input's byte counts); no settlement state rides on them. With no listener
+		// here nothing listens below either, so the channelizer builds no per-channel counters (relay mode).
+		if (event === "channel-stats") {
+			super.on(event, listener)
+			if (this.listenerCount(event) === 1) this.stats.attach()
+			return this
+		}
 		if (event !== "channel-invalidated")
 			throw new WaveKitError(
 				"unsupported settlement adapter listener",
@@ -1306,6 +1321,11 @@ class ForwardingProvider extends EventEmitter implements ChannelProvider {
 		event: string | symbol,
 		listener: (...args: never[]) => void,
 	): this {
+		if (event === "channel-stats") {
+			super.off(event, listener as (...args: unknown[]) => void)
+			if (this.listenerCount(event) === 0) this.stats.detach()
+			return this
+		}
 		const record = this.decoderListener
 		if (
 			event !== "channel-invalidated" ||
@@ -1324,6 +1344,7 @@ class ForwardingProvider extends EventEmitter implements ChannelProvider {
 	constructor(
 		private readonly observer: ChannelSettlementObserver,
 		private readonly underlying: ChannelProvider,
+		private readonly stats: StatsForwarder,
 	) {
 		super()
 	}
@@ -1333,7 +1354,24 @@ class ForwardingProvider extends EventEmitter implements ChannelProvider {
 		request: DecoderChannelRequest,
 		caps: SourceCaps | undefined,
 		signal?: AbortSignal,
-	): Promise<ChannelRequestResult> {
+	): Promise<ChannelRequestResult>
+	/** Passed through to a provider with a direct mode; an observed acquisition is always relayed. */
+	requestChannel(
+		sourceId: string,
+		decoderId: string,
+		request: DecoderChannelRequest,
+		caps: SourceCaps | undefined,
+		signal: AbortSignal | undefined,
+		options: ChannelRequestOptions,
+	): Promise<DirectChannelRequestResult>
+	requestChannel(
+		sourceId: string,
+		decoderId: string,
+		request: DecoderChannelRequest,
+		caps: SourceCaps | undefined,
+		signal?: AbortSignal,
+		options?: ChannelRequestOptions,
+	): Promise<DirectChannelRequestResult> {
 		const v = providerData(this.observer.provider)
 		const matching = [...v.handles].filter(handle => {
 			const h = handles.get(handle)!
@@ -1344,6 +1382,15 @@ class ForwardingProvider extends EventEmitter implements ChannelProvider {
 			)
 		})
 		if (!matching.length) {
+			if (options !== undefined)
+				return this.underlying.requestChannel(
+					sourceId,
+					decoderId,
+					request,
+					caps,
+					signal,
+					options,
+				)
 			return signal === undefined
 				? this.underlying.requestChannel(sourceId, decoderId, request, caps)
 				: this.underlying.requestChannel(
@@ -1595,13 +1642,30 @@ export class ChannelSettlementObserver {
 				"settlement lifetime sealed",
 				"CHANNELIZER_UNAVAILABLE",
 			)
-		const adapter = new ForwardingProvider(this, provider)
+		// Set once the invalidation claim's remover ran: a later adapter listener attaches nothing below.
+		let statsRemoved = false
+		const adapter = new ForwardingProvider(this, provider, {
+			attach: () => {
+				if (
+					statsRemoved ||
+					!(provider instanceof EventEmitter) ||
+					provider.listeners("channel-stats").includes(stats)
+				)
+					return
+				provider.on("channel-stats", stats)
+			},
+			detach: () => {
+				if (provider instanceof EventEmitter)
+					provider.off("channel-stats", stats)
+			},
+		})
 		const invalidated = (
 			sourceId: string,
 			generation: number,
 			ids: string[],
 			cause?: string,
 		) => adapter.emit("channel-invalidated", sourceId, generation, ids, cause)
+		const stats = (entry: ChannelStats) => adapter.emit("channel-stats", entry)
 		const discontinuity = (
 			id: string,
 			generation: number,
@@ -1619,11 +1683,15 @@ export class ChannelSettlementObserver {
 				cause,
 			)
 		}
+		// One claim for both: the invalidation and the counters of the same grants (the listener capacity is shared).
 		const a = this.provider.ownListener(() => {
 			provider.off("channel-invalidated", invalidated)
+			statsRemoved = true
+			if (provider instanceof EventEmitter) provider.off("channel-stats", stats)
 			if (
 				!(provider instanceof EventEmitter) ||
-				provider.listeners("channel-invalidated").includes(invalidated)
+				provider.listeners("channel-invalidated").includes(invalidated) ||
+				provider.listeners("channel-stats").includes(stats)
 			)
 				throw new WaveKitError(
 					"settlement listener removal incomplete",

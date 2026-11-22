@@ -721,6 +721,7 @@ it.each([false, true])(
 			branchCounters: id => f.routing!.branchDropCounters(id),
 			topology: id => f.routing!.branchTopology(id),
 			cpu: { normalisedPercent: 0 },
+			ownCpu: null,
 			now: Date.now,
 			monoNow: () => performance.now(),
 			setInterval: () => ({ cancel() {} }),

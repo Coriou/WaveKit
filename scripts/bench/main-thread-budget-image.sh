@@ -29,6 +29,10 @@
 #                     ^[A-Za-z0-9._-]+$) is bind-mounted read-only over /app/dist/<name>, so a
 #                     JS-only change runs in the base image. Listed with sha256 in overlay.json;
 #                     an index.js in it is the bundle the manifest describes.
+#   BUDGET_CORE_ENV   space-separated NAME=value settings for the core, each matching
+#                     ^WAVEKIT_[A-Z0-9_]+=[A-Za-z0-9_.-]*$ (a switch such as
+#                     WAVEKIT_CHANNEL_INPUT=direct; no host, port or path fits the value, and
+#                     the config, access and source settings are refused). Kept in core-env.txt.
 #
 # Afterwards (also run at the end when the bundle exists):
 #   node output/bench/main-thread-budget.mjs --finish-image "$BUDGET_OUT"
@@ -69,6 +73,18 @@ done
 [ -f "$BUDGET_PLAYLIST" ] || die "no playlist at $BUDGET_PLAYLIST"
 [ -d "$BUDGET_IQ_DIR" ] || die "no IQ dir at $BUDGET_IQ_DIR"
 [ -z "$OVERLAY" ] || [ -d "$OVERLAY" ] || die "BUDGET_DIST_OVERLAY is not a directory: $OVERLAY"
+CORE_ENV_ARGS=()
+CORE_ENV_LINES=""
+for kv in ${BUDGET_CORE_ENV:-}; do
+	[[ "$kv" =~ ^WAVEKIT_[A-Z0-9_]+=[A-Za-z0-9_.-]*$ ]] || die "BUDGET_CORE_ENV entry not allowed: $kv"
+	case "$kv" in
+	WAVEKIT_CONFIG=* | WAVEKIT_ACCESS_* | WAVEKIT_SOURCES_* | WAVEKIT_API_* | WAVEKIT_TUNER_RELAY_*)
+		die "BUDGET_CORE_ENV may not set ${kv%%=*}"
+		;;
+	esac
+	CORE_ENV_ARGS+=(-e "$kv")
+	CORE_ENV_LINES="$CORE_ENV_LINES$kv"$'\n'
+done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -80,6 +96,7 @@ OUT="$(cd "$BUDGET_OUT" && pwd)"
 CONFIG="$(cd "$(dirname "$BUDGET_CONFIG")" && pwd)/$(basename "$BUDGET_CONFIG")"
 IQ_DIR="$(cd "$BUDGET_IQ_DIR" && pwd)"
 cp "$BUDGET_PLAYLIST" "$OUT/playlist.txt" || die "cannot copy the playlist"
+printf '%s' "$CORE_ENV_LINES" >"$OUT/core-env.txt" || die "cannot write core-env.txt"
 
 sha256_of() {
 	local h
@@ -168,6 +185,7 @@ docker create --name "$NAME" --network none --cpus=1.5 \
 	-e BUDGET_OUT=/out/preload \
 	-e BUDGET_SOURCE_PORT="$FAKE_PORT" \
 	-e NODE_OPTIONS="--import /bench/budget-preload.mjs" \
+	${CORE_ENV_ARGS[@]+"${CORE_ENV_ARGS[@]}"} \
 	"$BUDGET_IMAGE" >"$OUT/container.id" || die "docker create failed"
 CID="$(cat "$OUT/container.id")"
 [[ "$CID" =~ ^[0-9a-f]{12,64}$ ]] || die "docker create gave no container ID"

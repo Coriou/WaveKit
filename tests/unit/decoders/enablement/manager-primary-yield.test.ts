@@ -342,7 +342,9 @@ it("exactly at the survivor bound the oldest secondary stays beside AIS; just pa
 	expect(past.running().filter(p => p.gated)).toHaveLength(0)
 })
 
-it("CPU over the limit while the AIS channel is pending refuses it and displaces nothing", async () => {
+// Intended change (rx-starvation S1): own CPU over 90 % of capacity refuses;
+// host CPU alone would not.
+it("own CPU over the limit while the AIS channel is pending refuses it and displaces nothing", async () => {
 	const f = setup(EFFICIENCY_BUDGET_X64)
 	f.plan(yamlPlan(32))
 	await f.m.startAll()
@@ -364,13 +366,20 @@ it("CPU over the limit while the AIS channel is pending refuses it and displaces
 	f.m.notifyBandplansChanged()
 	await vi.advanceTimersByTimeAsync(400)
 	expect(release).toBeTypeOf("function")
-	f.gate.record({
-		atMs: performance.now(),
-		cpuPercent: 99,
-		sources: new Map([
-			["rtl", { droppedBytesDelta: 0, droppedChunksDelta: 0 }],
-		]),
-	})
+	// Two consecutive own-over samples refuse (one spawn burst does not).
+	const ownOver = () =>
+		f.gate.record({
+			atMs: performance.now(),
+			cpuPercent: 99,
+			ownCores: 3.8,
+			capacityCores: 4,
+			sources: new Map([
+				["rtl", { droppedBytesDelta: 0, droppedChunksDelta: 0 }],
+			]),
+		})
+	ownOver()
+	await vi.advanceTimersByTimeAsync(2_000)
+	ownOver()
 	release()
 	await vi.advanceTimersByTimeAsync(50)
 	expect(f.instances.get("ais")?.running).toBe(false)

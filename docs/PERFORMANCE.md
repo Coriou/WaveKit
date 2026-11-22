@@ -1115,6 +1115,37 @@ connect only to 127.0.0.1, `[::1]` or localhost and refuse ports 1234, 4713, 555
 its API there inside the isolated tier B container. Tier A, on the host, never binds or connects
 to 5173.
 
+**Starvation runs.** These measure the core while other work takes the host's CPU:
+
+```bash
+node output/bench/main-thread-budget.mjs --label hog --rate 2400000 --hog auto --core-nice 0
+node output/bench/main-thread-budget.mjs --label late-bg --rate 2400000 --core-qos-late background
+```
+
+`--hog N|auto` starts N busy-loop children (`auto` is the number of host CPUs) after the warm-up
+and `--hog-settle` seconds (default 10) before the window, and stops them by their recorded PIDs
+at the window's end and on every exit path. Each hog also ends itself when its parent changes or
+its lifetime cap (settle + window + 30 s) runs out, so a harness killed by SIGKILL leaves none
+behind. With `--hog` the window must be at most 120 s. `--hog-log FILE` appends one line per hog
+window with its UTC start and stop. `--core-nice K` sets the core's nice relative to the harness
+(default 10). `--core-qos utility|background` starts the core under macOS `taskpolicy`;
+`--core-qos-late background|utility` starts it at the default QoS and lowers it only for the
+window (`utility` sets throughput and latency tiers only, which `ps` cannot confirm), which is closer to a core that starts normally and later loses the CPU (for instance a
+VM whose vCPUs lose to host load). `--auto 0|1` adds a `/auto` listener client (default 1).
+
+The manifest's `starvation` section holds the hog PIDs (started, stopped, exited early), the
+effective nice and QoS with their `ps` priority readback, load averages at both window edges,
+ELU, event-loop delay p50/p99/p99.9/max, the 10 longest stalls with UTC times, and per-stage
+sample accounting in pipeline order: fake schedule (signal the fake had to skip because the
+core stopped reading, with its backlog at each edge reported apart; it can include up to 2 s of lag built before the window, and a source reconnect in the window makes it unknown), source socket, source
+manager, fanout branches, channel outputs, decoder stdin (the stand-ins count it), the `/auto`
+route and its client. A stage whose counter is missing at either edge, reset (it went down) or
+closed in the window reads as unknown, never as no loss, and the summary names the first stage
+that lost samples and the unknown stages before it. `STAGE_GAPS` in `budget-manifest.ts` lists
+the stages the core has no counter for. `budget-compare.mjs` prints the starvation table even
+when a run is not timing-valid. A run on a loaded host is never timing-valid, so read its loss
+and stall figures together with its load averages.
+
 Tier B, `scripts/bench/main-thread-budget-image.sh`, measures an image with recorded IQ. It runs
 in a scratch container (`--network none`, `--cpus=1.5`, a name matching
 `^wk-scratch-[A-Za-z0-9_.-]+$`), and the fake source and clients run inside the container. The
@@ -1133,6 +1164,11 @@ JavaScript-only change runs in the base image without an image build. `overlay.j
 file with its sha256, and the manifest keeps the list as `core.overlay`. When the overlay holds
 `index.js`, that file, copied from the overlay directory on the host, is the bundle the manifest
 hashes (`core.sha256`) and maps profile frames against.
+
+**Core switches.** `BUDGET_CORE_ENV` passes space-separated `NAME=value` settings to the core,
+so two runs of one bundle can differ by a single switch (`WAVEKIT_CHANNEL_INPUT=direct`). Each
+entry must match `^WAVEKIT_[A-Z0-9_]+=[A-Za-z0-9_.-]*$`; the config, access, source, API and
+relay settings are refused. The run keeps the list in `core-env.txt`.
 
 **What is measured.** `scripts/bench/budget-preload.mjs` is loaded into the core with
 `--import`. It stays inert in any other node process. A SIGUSR2 opens a window and a second
@@ -1211,3 +1247,70 @@ and no channelizer, two short smoke runs read 242 and 269 ms of main-thread CPU 
 The spectrum worker read 165 to 168 ms. The wasm NFM chain of the recorder (A1) was 42 % of the
 main thread's profiled busy time. Those two runs only show that the harness works. They are not
 a baseline.
+
+## Direct channel input (2026-11-17)
+
+A channelised decoder used to get its channel through the main thread: the `wavekit-chan` channel
+socket was piped into a Node stream, and that stream into the decoder's stdin, so every channel
+byte was read and written again by Node in small pipe writes. In `direct` mode the connected
+channel socket itself becomes the decoder's stdin: the connector pauses the socket right after it
+is created, before its `connect` event is emitted (a socket not paused by then starts reading as
+soon as it connects), the decoder is spawned with that socket as fd 0, and Node destroys its own
+copy as soon as the spawn has returned. Node never reads a byte of it; a hand-over of a socket that
+has read anything is refused.
+
+The mode is selected once per process by `WAVEKIT_CHANNEL_INPUT=relay|direct`. Since 2026-11-22
+unset, empty or any other value means `direct` (an unknown value also logs a warning that names
+only the accepted values); `relay` stays selectable. There is no config key, and one info line
+names the mode. Direct is the default because a relayed channel waits for the core's main thread:
+in the tier A hog runs of `scripts/bench/main-thread-budget.ts` a main-thread stall longer than the
+channel's queue dropped 3-4.7 % of the dsd-fme channel's samples as `queue-overflow`, while a direct
+decoder reads its socket itself. Scanner channel taps and scanner probe decoders stay on the relay in both modes: the
+scanner reads a tap's samples in Node, and its probe pool fences a probe's channel input in Node.
+`NetworkProducerDecoder`, `ExternalSdrDecoder` and raw fanout branches read no channel on stdin
+and are not affected.
+
+`bytesIn` of a direct decoder comes from `wavekit-chan`'s `stats` line, one every 5 s, which lists
+open channels only: it counts the samples queued for the decoder (produced, less those a full queue
+dropped), including samples still in the queue at the line; a run shorter than one period reports 0
+and the last 0 to 5 s of a run are not counted. Nothing decides on this field; the status API only shows it. In `relay` mode nothing
+listens for these counters, so the channelizer builds none.
+
+Since Node holds no copy, a decoder exit no longer says why its input ended, and the channel's
+terminal event decides: `closed {client-gone}` means the decoder went away on its own (today's
+crash path), any other end of the channel (a centre move, the end of its generation, a release)
+means the decoder only saw EOF, and it is restarted once with no crash accounting, whichever of
+its exit and the caps worker comes first. That restart comes from the source-evaluation (caps)
+worker in both orders, so it follows the worker's 300 ms debounce; with no caps for the source
+(the source is gone) the decoder is held until they return. An exit with no terminal event waits
+for one at most 2 000 ms, then takes the crash path; a stop, suspension or removal in that wait
+records the exit as the crash it most likely was (its error and failure count, as the relay path
+records them at the exit) but restarts nothing, and a placement move in that wait waits for the
+crash's own restart. A requested stop releases the channel before the child is signalled, so a
+stop never looks like a vanished reader.
+
+After such an expected exit the core runs the adapter's own stop() once, after the child's last
+output lines, within 5 s; an adapter whose cleanup outlives that is replaced by a new instance at
+its next start. Stops and starts wait for that cleanup. A stop that waited and was superseded
+meanwhile by a start (the operator stops, then starts again within the 5 s) requests nothing once
+the wait ends, so the decoder runs again instead of the older stop undoing the newer start.
+
+Two races keep today's handling. A channel socket found closed when the decoder is about to start
+holds the decoder as a channelizer race (it is retried) instead of spawning it without input. A
+channel that reports its client gone while the decoder still runs is handled as today's channel
+claim; when the decoder then exits, the exit takes the crash path.
+
+### Queue and branch depth from the stall budget (2026-11-22)
+
+The buffers ahead of a channelised decoder are sized from the scheduling gap they must cover: the
+worst lateness measured for an idle worker at load 135-209 on the dev host is 1.1 s. Both buffers
+fill only while their reader is behind, so neither adds latency in steady state.
+
+- The channelizer's input branch (main thread → `wavekit-chan` stdin) holds 1 000 ms of CU8 per
+  side (`CHANNELIZER_INPUT_BUFFER_MS`): 4 800 000 bytes at 2.4 Msps, 2 048 000 at 1.024 Msps,
+  9.6 MB per source at 2.4 Msps and 12.8 MB at the tuner's 3.2 Msps maximum (the fanout caps a
+  side at 16 MiB). At 250 ms it congested in the hog runs and dropped 8.6 % of its input.
+- Each channel's output queue (`channelizer.channelQueueMs`, bound 50-2 000 ms) is meant to hold
+  1 000 ms: 384 KB for a 48 kHz cf32 channel (384 KB/s), 96 KB for s16 audio, 3.8 MB for ten cf32
+  channels. Its default in `src/config.ts` is still 250 ms until that change lands; the budget
+  harness sets it with `--channel-queue-ms`.

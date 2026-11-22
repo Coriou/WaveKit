@@ -208,6 +208,7 @@ const harness = (
 		branchCounters: () => branches,
 		topology: () => "fixed",
 		cpu: cpuReader,
+		ownCpu: null,
 		cpuGuardPercent: GUARD,
 		now: () => 0,
 		monoNow: () => mono,

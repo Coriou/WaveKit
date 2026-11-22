@@ -13,6 +13,9 @@ import { createComponentLogger } from "../../utils/logger.js"
 import type { Logger } from "../../utils/logger.js"
 import { CpuBudgetSchema, hostCpuBudget } from "./cpu-budget.js"
 
+/** The capacity the automatic budget is sized from; own CPU is judged against it. */
+export { hostCpuCapacity, resolveCpuCapacity } from "./cpu-budget.js"
+
 // 2^8 bytes accommodates the version and single budget field plus whitespace.
 // Read one byte past this limit to distinguish an exact-sized file from overflow.
 export const BUDGET_SETTINGS_MAX_BYTES = 256

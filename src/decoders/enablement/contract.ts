@@ -410,8 +410,31 @@ export interface SourceDropSample {
 } // null: unreadable
 export interface EfficiencySample {
 	atMs: number
+	/** Host CPU (CpuMeter): explains drops only, never sheds a decoder. */
 	cpuPercent: number | null
+	/**
+	 * The core's own CPU in cores (its container's cgroup, own-cpu.ts), the only
+	 * CPU evidence against a decoder; null or absent when unknown.
+	 */
+	ownCores?: number | null
+	/** The capacity own CPU is judged against (cores); null or absent when unknown. */
+	capacityCores?: number | null
+	/** False when the process has no own CPU reading at all: CPU shedding is off. */
+	ownCpuAvailable?: boolean
 	sources: ReadonlyMap<string, SourceDropSample>
+}
+/** The latest fresh CPU sample as the gate classified it (own-cpu.ts). */
+export interface EfficiencyCpuState {
+	label:
+		| "own-over"
+		| "host-busy"
+		| "calm"
+		| "host-busy-unattributed"
+		| "unknown"
+	hostPercent: number | null
+	ownCores: number | null
+	capacityCores: number | null
+	guardPercent: number
 }
 export interface EfficiencyInputs {
 	budget?: EfficiencyBudgetService
@@ -500,6 +523,8 @@ export interface EfficiencyGate {
 		sourceId: string,
 		branches?: readonly string[],
 	): LossAttribution | null
+	/** The latest fresh CPU sample's label; null when none is fresh at `now`. */
+	cpuState?(now: number): EfficiencyCpuState | null
 	/** The attribution of a verdict the latest probation() pass returned for `key`. */
 	shedAttribution?(key: string): ShedAttribution | undefined
 	/**

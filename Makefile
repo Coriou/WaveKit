@@ -16,7 +16,7 @@
 	sdr-host-clean \
 	fixtures-download fixtures-download-all fixtures-convert \
 	fixtures-test fixtures-test-local \
-	chan-build chan-test \
+	chan-build chan-test hub-build hub-test \
 	truth
 
 # SDR-host variables (preserved from prior Makefile)
@@ -212,6 +212,14 @@ chan-build: ## Build wavekit-chan and wavekit-iqcap on the host (needs a Rust to
 
 chan-test: ## Run wavekit-chan unit/property tests (crate only; no benches)
 	@cargo test --release --locked --manifest-path native/wavekit-chan/Cargo.toml
+
+# === IQ hub ===
+
+hub-build: ## Build wavekit-iqhub, the per-source IQ hub, on the host (needs a Rust toolchain)
+	@cargo build --release --locked --manifest-path native/wavekit-iqhub/Cargo.toml
+
+hub-test: ## Run wavekit-iqhub unit/property/process tests (crate only; no benches)
+	@cargo test --release --locked --manifest-path native/wavekit-iqhub/Cargo.toml
 
 # === Truth scorecard ===
 

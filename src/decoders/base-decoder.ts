@@ -36,6 +36,8 @@ import type { Logger } from "../utils/logger.js"
 import { DecoderSpawnError } from "../utils/errors.js"
 import { createComponentLogger, LogRateLimiter } from "../utils/logger.js"
 import { safeErrorFields } from "./safe-error-fields.js"
+import type { DirectChannelSocket } from "../core/channelizer/types.js"
+import { directInputLost, directStep } from "./direct-channel-input.js"
 
 /** Timeout in ms to wait for graceful shutdown before SIGKILL */
 const GRACEFUL_STOP_TIMEOUT = 5000
@@ -89,6 +91,21 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 	protected process: ChildProcess | null = null
 	protected inputStream: Readable | null = null
+	/**
+	 * A channel socket the next spawn takes as stdin (direct channel input). Node never reads it: no `data`
+	 * listener, pipe, read() or resume(); it destroys its own copy as soon as `spawn` has returned. It is also the
+	 * grant's identity: a detach destroys the socket but keeps it here, so the start it was granted for refuses to
+	 * spawn without it (lost-before-start) instead of spawning with an unfed pipe. Only a new input or a start clears it.
+	 */
+	private directInput: DirectChannelSocket | null = null
+	/**
+	 * Settles when the last spawned child's stdout and stderr have both ended or closed: every line they carried has
+	 * been parsed by then. Recorded for every run and awaited only by a caller that must act after a run's last line
+	 * (outputDrained); it never rejects.
+	 */
+	private outputDrain: Promise<void> = Promise.resolve()
+	/** The last spawned child's stdout and stderr, kept so a caller that gives up on their drain can close them. */
+	private outputStreams: Readable[] = []
 	private readonly trackInputBytes = (chunk: Buffer): void => {
 		this.stats.bytesIn += chunk.length
 	}
@@ -186,18 +203,24 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			"Starting decoder process",
 		)
 
+		const direct = this.takeDirectInput(command)
+
 		// The new child's counters start at 0; lines of the old one count nothing.
 		const counterGeneration = this.counters.restart()
 		try {
 			this.process = spawn(command, args, {
 				env: csdrChildEnv(),
-				stdio: ["pipe", "pipe", "pipe"],
+				stdio: [direct ?? "pipe", "pipe", "pipe"],
 				detached: process.platform !== "win32",
 			})
 		} catch (err) {
+			direct?.destroy()
 			const error = err instanceof Error ? err : new Error(String(err))
 			throw new DecoderSpawnError(this.id, command, error)
 		}
+		// The child has its own descriptor now (or none: a failed spawn reports `error` next). Node's copy closes
+		// here, so the child is the socket's only reader and its exit gives the channelizer a failed write.
+		direct?.destroy()
 
 		// Keep the spawned process reference stable across exit/error callbacks.
 		const proc = this.process
@@ -293,6 +316,12 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			}
 		}
 
+		// Registered after the readers: on `end`, a reader parses its last line before these listeners run.
+		this.outputDrain = streamsEnded(this.process.stdout, this.process.stderr)
+		this.outputStreams = [this.process.stdout, this.process.stderr].filter(
+			(stream): stream is Readable => stream !== null,
+		)
+
 		// Pipe input stream to process stdin if attached
 		if (this.inputStream && this.process.stdin) {
 			this.inputStream.pipe(this.process.stdin)
@@ -358,6 +387,25 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	}
 
 	/**
+	 * Settles when the output of the last spawned child has been read to its end (stdout and stderr ended or closed),
+	 * at once if none was spawned. The process `exit` can come before that, while lines are still being parsed; a
+	 * caller that must act after the run's last line waits for this. Never rejects.
+	 */
+	outputDrained(): Promise<void> {
+		return this.outputDrain
+	}
+
+	/**
+	 * Gives up on the last spawned child's output: its stdout and stderr are destroyed, so no further line of that run
+	 * is parsed and its drain (outputDrained) settles. Only for a run whose process has already exited; idempotent.
+	 */
+	abandonOutput(): void {
+		for (const stream of this.outputStreams)
+			if (!stream.destroyed) stream.destroy()
+		this.outputStreams = []
+	}
+
+	/**
 	 * Restarts the decoder process.
 	 * Equivalent to stop() followed by start().
 	 */
@@ -368,6 +416,54 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	}
 
 	/**
+	 * Holds a paused channel socket for the next start, which spawns the child with it as stdin. Replaces any
+	 * attached input. Bytes are counted from the channelizer's reports instead (addInputBytes).
+	 */
+	attachDirectInput(socket: DirectChannelSocket): void {
+		this.detachInput()
+		this.directInput = socket
+		this.logger.debug("Direct channel input attached")
+	}
+
+	/** Bytes the channelizer reports it wrote to this decoder's channel socket. */
+	addInputBytes(bytes: number): void {
+		if (Number.isSafeInteger(bytes) && bytes > 0) this.stats.bytesIn += bytes
+	}
+
+	/**
+	 * Takes the held socket for this spawn. A socket that closed since the grant (the channel ended or was released
+	 * while startup awaited) is the table's lost-before-start: no spawn, and a WaveKitError with DIRECT_INPUT_LOST
+	 * that the manager turns into the channel-loss hold. One that has read a byte, or is not paused, is refused: those
+	 * bytes would never reach the child, and only a programming error gets there.
+	 */
+	private takeDirectInput(command: string): DirectChannelSocket | null {
+		const direct = this.directInput
+		this.directInput = null
+		if (!direct) return null
+		const verdict = directStep(
+			{ phase: "wired" },
+			{ type: "start", acquired: true, socketDestroyed: direct.destroyed },
+		)
+		if (verdict.action === "lost-before-start") {
+			this.logger.debug("Direct channel input closed before the spawn")
+			throw directInputLost(this.id)
+		}
+		if (
+			direct.bytesRead !== 0 ||
+			!direct.isPaused() ||
+			direct.listenerCount("data") > 0
+		) {
+			direct.destroy()
+			throw new DecoderSpawnError(
+				this.id,
+				command,
+				new Error("direct channel input was read before the hand-over"),
+			)
+		}
+		return direct
+	}
+
+	/**
 	 * Attaches an input stream to feed audio data to the decoder.
 	 * If the decoder is already running, pipes the stream to stdin.
 	 *
@@ -375,6 +471,8 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 */
 	attachInput(stream: Readable): void {
 		this.detachInput()
+		// Another input replaces a direct grant this decoder no longer starts with.
+		this.directInput = null
 		this.inputStream = stream
 
 		// Track bytes received
@@ -393,6 +491,9 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 * Detaches the current input stream.
 	 */
 	detachInput(): void {
+		// A held socket no spawn took is abandoned: Node's copy is the only one, so it closes here. The closed socket
+		// stays held as the grant's identity (takeDirectInput).
+		this.directInput?.destroy()
 		if (this.inputStream) {
 			// Unpipe from process stdin if connected
 			if (this.process?.stdin) {
@@ -564,4 +665,33 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			this.stats.errors++
 		}
 	}
+}
+
+/** Settles when every given stream has ended or closed (a destroyed stream closes without ending). */
+function streamsEnded(...streams: Array<Readable | null>): Promise<void> {
+	return Promise.all(
+		streams.map(stream =>
+			stream === null
+				? Promise.resolve()
+				: new Promise<void>(resolve => {
+						stream.once("end", resolve)
+						stream.once("close", resolve)
+					}),
+		),
+	).then(() => undefined)
+}
+
+/**
+ * The drain of a decoder's last run (BaseDecoder.outputDrained); settled at once for a decoder that is not a
+ * BaseDecoder, whose output the manager cannot see the end of.
+ */
+export function decoderOutputDrained(decoder: object): Promise<void> {
+	return decoder instanceof BaseDecoder
+		? decoder.outputDrained()
+		: Promise.resolve()
+}
+
+/** BaseDecoder.abandonOutput on a BaseDecoder; nothing for another decoder, whose output the manager cannot see. */
+export function abandonDecoderOutput(decoder: object): void {
+	if (decoder instanceof BaseDecoder) decoder.abandonOutput()
 }

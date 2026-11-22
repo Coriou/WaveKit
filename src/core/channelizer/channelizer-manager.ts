@@ -29,9 +29,14 @@ import {
 } from "./protocol.js"
 import type {
 	ChannelFormat,
+	ChannelInputMode,
 	ChannelProvider,
+	ChannelRequestOptions,
 	ChannelRequestResult,
+	ChannelStats,
 	DecoderChannelRequest,
+	DirectChannelRequestResult,
+	DirectChannelSocket,
 } from "./types.js"
 import type {
 	ChannelSettlementObserver,
@@ -156,7 +161,15 @@ export interface ChannelizerManagerDeps {
 		o: ChannelizerProcessOptions,
 		logger: Logger,
 	) => ChannelizerProcessLike
-	connect?: (socketPath: string, signal?: AbortSignal) => Promise<Readable>
+	/**
+	 * `input` is the request's mode. For `direct` the connector must pause the socket before `connect` is emitted
+	 * (never after an await: a connected socket reads up to 64 KiB on its own) and attach no `data` listener.
+	 */
+	connect?: (
+		socketPath: string,
+		signal?: AbortSignal,
+		input?: ChannelInputMode,
+	) => Promise<Readable>
 	/** Injectable clock for the crash-loop window (tests). */
 	now?: () => number
 	/** How long a request waits for `opened`/`rejected` (default 5 s; tests). */
@@ -169,11 +182,15 @@ export interface ChannelizerManagerDeps {
 	settlementObserver?: ChannelSettlementObserver
 }
 
-/** `socket` is the process's Unix socket; `stream` is what the decoder gets (fed with end: false). */
+/**
+ * `socket` is the process's Unix socket; `stream` is what the decoder gets (fed with end: false). A `direct` channel
+ * has no stream: its socket goes to a decoder child as stdin and Node destroys its own copy right after the spawn.
+ * Its liveness is its place in `channels` of a generation that is not invalidated.
+ */
 interface OpenChannel {
 	id: string
 	socket: Readable
-	stream: PassThrough
+	stream: PassThrough | null
 	settlement?: SendClaim
 	/** What `openChannelRows` reports; nothing on the data path reads these. */
 	decoderId: string
@@ -194,6 +211,7 @@ interface RequestContext {
 	transaction?: ObservedTransaction
 	/** The source's centre moves when this request began; a later count means its request may be stale. */
 	centreMoves?: number
+	input: ChannelInputMode
 }
 interface OpenAttempt {
 	/** Updated synchronously on wire events, before any promise continuation. */
@@ -294,23 +312,42 @@ const isCu8Iq = (caps: SourceCaps): boolean =>
 	(caps.kind === "iq" || caps.kind === "recording") && caps.format === "U8_IQ"
 
 /**
- * Input branch mark: the configured `inputHighWaterMark` is a floor; the mark
- * also holds DEFAULT_BRANCH_BUFFER_MS of CU8 (2 bytes per sample) at the
- * input rate. The 262 144-byte default alone held 54.6 ms at 2.4 Msps
- * (4.8 MB/s), shorter than the scheduler stalls of a loaded host; 250 ms is
- * 1 200 000 bytes there and 512 000 at 1.024 Msps. A rate change restarts
- * the process and its branch, so the mark follows the rate.
+ * Signal time the channelizer's input branch holds per side: 1 000 ms. The branch is fed on the core's main thread
+ * and drained by wavekit-chan reading its stdin, so it must cover both sides' scheduling gaps: after a main-thread
+ * stall the fanout pushes the backlog through at once (libuv reads up to about 2 MB per wake), and under a CPU hog
+ * wavekit-chan itself is late to read. The measured worst lateness of an idle worker at load 135-209 on the dev host
+ * is 1.1 s; 250 ms (DEFAULT_BRANCH_BUFFER_MS) congested under a hog and dropped 8.6 % of the branch. The mark only
+ * fills while wavekit-chan is behind, so it adds no latency in steady state. Memory per source at most two marks:
+ * 4.8 MB per side at 2.4 Msps (9.6 MB), 2.048 MB at 1.024 Msps (4.1 MB).
+ */
+export const CHANNELIZER_INPUT_BUFFER_MS = 1000
+
+/**
+ * Input branch mark: the configured `inputHighWaterMark` is a floor; the mark also holds CHANNELIZER_INPUT_BUFFER_MS
+ * of CU8 (2 bytes per sample) at the input rate (4 800 000 bytes at 2.4 Msps, 2 048 000 at 1.024 Msps), within the
+ * fanout's derived-mark ceiling (MAX_DERIVED_HIGH_WATER_MARK, 16 MiB). The 262 144-byte default alone held 54.6 ms at
+ * 2.4 Msps. A rate change restarts the process and its branch, so the mark follows the rate.
  */
 export function channelizerInputMark(
 	configured: number,
 	sampleRateHz: number,
 ): number {
-	return Math.max(configured, branchHighWaterMark(sampleRateHz * 2))
+	return Math.max(
+		configured,
+		branchHighWaterMark(sampleRateHz * 2, CHANNELIZER_INPUT_BUFFER_MS),
+	)
 }
 
-function defaultConnect(path: string, signal?: AbortSignal): Promise<Readable> {
+function defaultConnect(
+	path: string,
+	signal?: AbortSignal,
+	input: ChannelInputMode = "relay",
+): Promise<Readable> {
 	return new Promise((resolve, reject) => {
 		const socket = createConnection(path)
+		// Before `connect` is emitted: a socket not paused by then starts reading on connect, and the bytes it buffers
+		// would never reach the child that takes it as stdin.
+		if (input === "direct") socket.pause()
 		// A late transport error can arrive between acquisition settlement and the manager attaching its handler.
 		socket.on("error", () => {})
 		const cancelled = () => {
@@ -342,6 +379,22 @@ function defaultConnect(path: string, signal?: AbortSignal): Promise<Readable> {
 		signal?.addEventListener("abort", cancelled, { once: true })
 		if (signal?.aborted) cancelled()
 	})
+}
+
+/**
+ * The socket a direct grant hands over: a socket (it counts `bytesRead`) that is paused, has read nothing and has no
+ * `data` listener. Anything else would lose the stream's head to Node, so it is refused rather than handed over.
+ */
+function directSocket(socket: Readable): DirectChannelSocket | null {
+	const bytesRead = (socket as Readable & { bytesRead?: unknown }).bytesRead
+	if (
+		typeof bytesRead !== "number" ||
+		bytesRead !== 0 ||
+		!socket.isPaused() ||
+		socket.listenerCount("data") > 0
+	)
+		return null
+	return socket as DirectChannelSocket
 }
 
 /**
@@ -499,7 +552,26 @@ export class ChannelizerManager
 		req: DecoderChannelRequest,
 		inputCaps: SourceCaps | undefined,
 		signal?: AbortSignal,
-	): Promise<ChannelRequestResult> {
+	): Promise<ChannelRequestResult>
+	/** `input: "direct"` answers a grant with the paused socket and no stream (DirectChannelGranted). */
+	requestChannel(
+		sourceId: string,
+		decoderId: string,
+		req: DecoderChannelRequest,
+		inputCaps: SourceCaps | undefined,
+		signal: AbortSignal | undefined,
+		options: ChannelRequestOptions,
+	): Promise<DirectChannelRequestResult>
+	requestChannel(
+		sourceId: string,
+		decoderId: string,
+		req: DecoderChannelRequest,
+		inputCaps: SourceCaps | undefined,
+		signal?: AbortSignal,
+		options?: ChannelRequestOptions,
+	): Promise<DirectChannelRequestResult> {
+		const input: ChannelInputMode =
+			options?.input === "direct" ? "direct" : "relay"
 		const observed = this.deps.settlementObserver?.takeAcquisition(
 			sourceId,
 			decoderId,
@@ -535,6 +607,7 @@ export class ChannelizerManager
 					sends: 0,
 					...(observed ? { observed } : {}),
 					...(transaction ? { transaction } : {}),
+					input,
 				}
 				return this.request(sourceId, decoderId, req, inputCaps, ctx)
 			}
@@ -606,7 +679,7 @@ export class ChannelizerManager
 						!s.invalidated &&
 						s.channels.get(channelId) === ch &&
 						this.channelOwner.get(channelId) === sourceId &&
-						!ch.stream.destroyed
+						(ch.stream === null || !ch.stream.destroyed)
 					if (!live || (e.type === "retuned" && e.centerHz !== centerHz)) {
 						fail()
 						return
@@ -621,7 +694,7 @@ export class ChannelizerManager
 				clearTimeout(timer)
 				s.process.off("event", onEvent)
 				s.process.off("protocol-error", fail)
-				ch.stream.off("close", fail)
+				ch.stream?.off("close", fail)
 				s.interruptions.delete(fail)
 				s.retuning.delete(channelId)
 				if (result instanceof WaveKitError) reject(result)
@@ -633,7 +706,8 @@ export class ChannelizerManager
 			s.interruptions.add(fail)
 			s.process.on("event", onEvent)
 			s.process.on("protocol-error", fail)
-			ch.stream.once("close", fail)
+			// A direct channel has no stream: its terminal event (`closed`, invalidation) fails the retune instead.
+			ch.stream?.once("close", fail)
 			try {
 				s.process.send({ v: 1, type: "retune", channelId, centerHz })
 			} catch {
@@ -656,7 +730,7 @@ export class ChannelizerManager
 		s.channels.delete(channelId)
 		const settlement = this.closeOwned(s, channelId, false)
 		ch.socket.destroy()
-		ch.stream.destroy()
+		ch.stream?.destroy()
 		this.releases.set(channelId, settlement)
 		void settlement.then(() => {
 			if (this.releases.get(channelId) === settlement)
@@ -709,7 +783,7 @@ export class ChannelizerManager
 		inputCaps: SourceCaps | undefined,
 		ctx: RequestContext,
 		retried = false,
-	): Promise<ChannelRequestResult> {
+	): Promise<DirectChannelRequestResult> {
 		if (this.destroyed) return unavailable("channelizer manager destroyed")
 		if (ctx.signal?.aborted) return unavailable(this.cancellationDetail())
 		if (this.movedSince(sourceId, ctx)) return centreMoved()
@@ -836,7 +910,7 @@ export class ChannelizerManager
 				`socket path too long (${length} > ${MAX_SOCKET_PATH}): ${socketPath}`,
 			)
 		}
-		const superseded = (): Promise<ChannelRequestResult> => {
+		const superseded = (): Promise<DirectChannelRequestResult> => {
 			if (ctx.signal?.aborted)
 				return Promise.resolve(unavailable(this.cancellationDetail()))
 			if (this.destroyed)
@@ -925,8 +999,8 @@ export class ChannelizerManager
 		s: SourceChannelizer,
 		open: OpenRequest,
 		ctx: RequestContext,
-		superseded: () => Promise<ChannelRequestResult>,
-	): Promise<ChannelRequestResult> {
+		superseded: () => Promise<DirectChannelRequestResult>,
+	): Promise<DirectChannelRequestResult> {
 		const channelId = open.id
 		this.clearIdleTimer(s)
 		s.pending++
@@ -1066,7 +1140,9 @@ export class ChannelizerManager
 							connectorOwner?.settle({ ok: true })
 							return undefined
 						}
-						return this.connect(event.socket, connectCancel.signal)
+						return ctx.input === "direct"
+							? this.connect(event.socket, connectCancel.signal, "direct")
+							: this.connect(event.socket, connectCancel.signal)
 					})
 					.then(
 						socket => {
@@ -1130,14 +1206,24 @@ export class ChannelizerManager
 					? unavailable(this.cancellationDetail())
 					: this.timeout()
 			}
-			const stream = new PassThrough()
-			stream.on("error", (err: Error) =>
-				this.log.debug({ err, channelId }, "Channel stream error"),
-			)
-			socket.pipe(stream, { end: false })
+			const direct = ctx.input === "direct" ? directSocket(socket) : null
+			if (ctx.input === "direct" && !direct) {
+				// A connector that did not pause the socket (or gave no socket) cannot hand it over whole.
+				socket.destroy()
+				await this.closeOwned(s, channelId, false, this.remaining(ctx))
+				return unavailable("channel socket not paused for direct input")
+			}
+			let stream: PassThrough | null = null
+			if (!direct) {
+				stream = new PassThrough()
+				stream.on("error", (err: Error) =>
+					this.log.debug({ err, channelId }, "Channel stream error"),
+				)
+				socket.pipe(stream, { end: false })
+			}
 			delete s.recenterLingerUntil
 			delete s.recenterLingerSince
-			s.channels.set(channelId, {
+			const record: OpenChannel = {
 				id: channelId,
 				socket,
 				stream,
@@ -1150,7 +1236,8 @@ export class ChannelizerManager
 				outputRateHz: event.outputRateHz,
 				format: event.format,
 				filterTaps: event.filterTaps,
-			})
+			}
+			s.channels.set(channelId, record)
 			this.channelOwner.set(channelId, s.sourceId)
 			if (ownedAttempt?.settlement && s.settlement)
 				this.deps.settlementObserver?.recordGrant(ownedAttempt.settlement, {
@@ -1167,16 +1254,26 @@ export class ChannelizerManager
 					process: s.settlement,
 					send: ownedAttempt.settlement,
 				})
+			const realised = {
+				outputRateHz: event.outputRateHz,
+				format: event.format,
+				groupDelaySamples: event.groupDelaySamples,
+			}
+			if (direct)
+				return {
+					ok: true,
+					input: "direct",
+					socket: direct,
+					channelId,
+					generation: event.generation,
+					realised,
+				}
 			return {
 				ok: true,
-				stream,
+				stream: stream ?? socket,
 				channelId,
 				generation: event.generation,
-				realised: {
-					outputRateHz: event.outputRateHz,
-					format: event.format,
-					groupDelaySamples: event.groupDelaySamples,
-				},
+				realised,
 			}
 		} finally {
 			if (s.waiters.get(channelId) === ownedAttempt) s.waiters.delete(channelId)
@@ -1738,6 +1835,7 @@ export class ChannelizerManager
 					},
 					"channelizer stats",
 				)
+				this.emitChannelStats(s, e.channels)
 				break
 			case "closed": {
 				s.closing.get(e.id)?.finish()
@@ -1804,6 +1902,47 @@ export class ChannelizerManager
 		}
 	}
 
+	/**
+	 * `channel-stats` per open channel of a `stats` line. The line was validated with the event schema; this only
+	 * checks the counters and that the id is one of this generation's open channels, whose format sets the units. An
+	 * entry for an id no longer open (a centre move closed it, the same id may be granted again) is never forwarded.
+	 */
+	private emitChannelStats(
+		s: SourceChannelizer,
+		channels: Extract<ChannelizerEvent, { type: "stats" }>["channels"],
+	): void {
+		if (this.listenerCount("channel-stats") === 0) return
+		for (const entry of channels) {
+			const ch = s.channels.get(entry.id)
+			if (
+				!ch ||
+				!Number.isSafeInteger(entry.outputSamples) ||
+				entry.outputSamples < 0 ||
+				!Number.isSafeInteger(entry.droppedSamples) ||
+				entry.droppedSamples < 0 ||
+				entry.droppedSamples > entry.outputSamples
+			)
+				continue
+			const stats: ChannelStats = {
+				sourceId: s.sourceId,
+				generation: s.generation,
+				channelId: entry.id,
+				outputSamples: entry.outputSamples,
+				droppedSamples: entry.droppedSamples,
+				bytesPerSample: SAMPLE_BYTES[ch.format],
+			}
+			try {
+				this.emit("channel-stats", stats)
+			} catch (err: unknown) {
+				this.log.error(
+					{ err, sourceId: s.sourceId, generation: s.generation },
+					"channel-stats listener threw",
+				)
+				return
+			}
+		}
+	}
+
 	private onExit(
 		s: SourceChannelizer,
 		code: number | null,
@@ -1855,7 +1994,7 @@ export class ChannelizerManager
 		}
 		for (const ch of s.channels.values()) {
 			ch.socket.destroy()
-			ch.stream.destroy()
+			ch.stream?.destroy()
 			this.channelOwner.delete(ch.id)
 		}
 		s.channels.clear()
@@ -1901,7 +2040,7 @@ export class ChannelizerManager
 		// The process already closed a client-gone channel; a socket error may have left it open there.
 		if (cause === "socket-error") void this.closeOwned(s, channelId, false)
 		ch.socket.destroy()
-		ch.stream.destroy()
+		ch.stream?.destroy()
 		this.stopIfIdle(s, "last-channel-died")
 	}
 
@@ -2157,7 +2296,7 @@ export class ChannelizerManager
 		}
 		for (const ch of channels) {
 			ch.socket.destroy()
-			ch.stream.destroy()
+			ch.stream?.destroy()
 		}
 		if (ids.length > 0) this.stopIfIdle(s, "recentered")
 	}

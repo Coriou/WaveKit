@@ -1744,6 +1744,7 @@ function monitoredGate() {
 				branchCounters: () => new Map(branches),
 				topology: () => "fanout",
 				cpu: { normalisedPercent: 10 },
+				ownCpu: null,
 				now: () => Date.now(),
 				monoNow: () => performance.now(),
 				onSample: sample => real?.record(sample),

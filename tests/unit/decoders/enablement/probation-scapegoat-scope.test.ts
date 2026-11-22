@@ -8,6 +8,7 @@ import {
 	type RunningPlacement,
 	type WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
+import { ownFollows } from "./rx-starvation-harness.js"
 
 /**
  * How far a tuned-band probationer's scapegoat window reaches. Each source
@@ -47,7 +48,25 @@ function harness(
 		)
 	}
 	for (const s of specs) totals.get(s.source)!.set(`decoder-${s.key}#0`, 0)
-	const cpu = { normalisedPercent: 10 as number | null }
+	// rx-starvation S1: the CPU load these tests model is the core's own
+	// (ownFollows). A rise over the guard is primed as own-over on the latest
+	// sample too, so the first sample after it is evidence as before the
+	// two-consecutive-sample rule (m2, tested in rx-starvation-s1.test.ts).
+	let primeOwn: (percent: number) => void = () => {}
+	let cpuValue: number | null = 10
+	const cpu = {
+		get normalisedPercent(): number | null {
+			return cpuValue
+		},
+		set normalisedPercent(v: number | null) {
+			const rising =
+				v !== null &&
+				v > gateGuardPercent &&
+				(cpuValue === null || cpuValue <= gateGuardPercent)
+			cpuValue = v
+			if (rising) primeOwn(v)
+		},
+	}
 	const monitor = createEfficiencyMonitor({
 		sources: () => sources,
 		branchCounters: (id: string) =>
@@ -72,6 +91,7 @@ function harness(
 				}
 			: {}),
 		cpu,
+		ownCpu: ownFollows(cpu),
 		now: () => mono,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),
@@ -80,6 +100,15 @@ function harness(
 		{ budgetCores: 10, cpuGuardPercent: gateGuardPercent },
 		{ drops: monitor },
 	)
+	primeOwn = percent =>
+		gate.record({
+			atMs: mono,
+			cpuPercent: percent,
+			ownCores: (percent / 100) * 4,
+			capacityCores: 4,
+			ownCpuAvailable: true,
+			sources: new Map(),
+		})
 	const running: RunningPlacement[] = []
 	const tick = () => {
 		mono += 2_000

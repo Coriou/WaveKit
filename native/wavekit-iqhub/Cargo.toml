@@ -1,0 +1,25 @@
+[package]
+name = "wavekit-iqhub"
+version = "0.1.0"
+edition = "2021"
+# The same floor as wavekit-chan (unsigned is_multiple_of is 1.87).
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+# The Deserialize impls are hand-written (protocol.rs): no derive, so no proc-macro crates.
+serde = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+# poll, sendmsg, setsockopt, shutdown, ioctl(FIONREAD), getrusage (MIT OR Apache-2.0)
+libc = "0.2"
+
+[dev-dependencies]
+proptest = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.test]
+opt-level = 3

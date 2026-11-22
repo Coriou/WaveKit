@@ -472,3 +472,117 @@ describe("compareManifests window and coverage", () => {
 		).toBe(10)
 	})
 })
+
+describe("compareManifests starvation rows", () => {
+	const starvation = (
+		hog: number,
+		elu: number,
+		lost: number,
+	): NonNullable<Manifest["starvation"]> => ({
+		hog: {
+			requested: String(hog),
+			count: hog,
+			startedPids: [],
+			stoppedPids: [],
+			killedPids: [],
+			survivorPids: [],
+			startUtc: null,
+			stopUtc: null,
+			settleSeconds: 10,
+			nice: 0,
+		},
+		coreNice: { requested: 10, effective: 10, harness: 0 },
+		coreQos: {
+			requested: hog > 0 ? "background" : "default",
+			command: hog > 0 ? ["/usr/sbin/taskpolicy", "-b"] : [],
+			psPri: hog > 0 ? 4 : 31,
+			effective: hog > 0 ? "background" : "default",
+		},
+		edgeReads: { startMs: 12, endMs: hog > 0 ? 900 : 15 },
+		loadavg: { windowStart: [4, 3, 2], windowEnd: [9, 5, 3] },
+		loop: {
+			elu,
+			p50Ms: 1,
+			p99Ms: 10,
+			p999Ms: 50,
+			maxMs: 90,
+			stalls: {
+				resolutionMs: 50,
+				thresholdMs: 50,
+				count: 2,
+				totalMs: 300,
+				over100: 1,
+				over500: 0,
+				over1000: 0,
+				top: [{ atUtc: "2026-11-22T00:00:00.000Z", ms: 200 }],
+			},
+		},
+		stages: [
+			{
+				id: "fanout:x",
+				label: "x",
+				order: 3,
+				inSamples: 1000,
+				outSamples: 1000 - lost,
+				droppedSamples: lost,
+				toleranceSamples: 0,
+				source: "t",
+				reset: hog > 0,
+				lostSamples: lost,
+				lossShare: lost / 1000,
+				losing: lost > 0,
+			},
+		],
+		firstLosingStage:
+			lost > 0
+				? {
+						id: "fanout:x",
+						label: "x",
+						lostSamples: lost,
+						lossShare: lost / 1000,
+					}
+				: null,
+		unknownBeforeFirstLoss: [],
+		gaps: [],
+	})
+
+	it("prints ELU, delays, load and per-stage loss even when timing is not valid", () => {
+		const a = manifest({ starvation: starvation(0, 0.5, 0) })
+		const b = manifest({
+			label: "b",
+			timingValid: false,
+			timingInvalidReasons: ["load"],
+			starvation: starvation(8, 1, 20),
+		})
+		expect(ManifestSchema.safeParse(b).success).toBe(true)
+		const r = compareManifests(a, b)
+		if (!r.ok) throw new Error(r.refusal)
+		expect(r.timingRows).toBeNull()
+		const rows = r.starvationRows ?? []
+		const get = (f: string) => rows.find(x => x.figure === f)
+		expect(get("ELU")).toMatchObject({ a: 0.5, b: 1 })
+		expect(get("hog children")).toMatchObject({ a: 0, b: 8 })
+		expect(get("load1 at window end")).toMatchObject({ a: 9, b: 9 })
+		expect(get("loop delay p99.9 ms")).toMatchObject({ a: 50, b: 50 })
+		expect(get("core ps pri (QoS)")).toMatchObject({ a: 31, b: 4 })
+		expect(get("edge B read ms")).toMatchObject({ a: 15, b: 900 })
+		expect(r.notes.join("\n")).toContain(
+			"Core QoS: A default (effective default) | B background (effective background)",
+		)
+		expect(r.notes.join("\n")).toContain(
+			"Counter resets (delta unknown): A none | B fanout:x",
+		)
+		expect(get("stage fanout:x lost samples")).toMatchObject({ a: 0, b: 20 })
+		expect(get("stage fanout:x loss (%)")?.b).toBeCloseTo(2)
+		expect(r.notes.join("\n")).toContain(
+			"B (b): first losing stage fanout:x (x), 20 samples",
+		)
+		expect(formatComparison(a, b, r)).toContain("| ELU | 0.500 | 1.00 |")
+	})
+
+	it("has no starvation rows for manifests from before the starvation harness", () => {
+		const r = compareManifests(manifest(), manifest({ label: "b" }))
+		if (!r.ok) throw new Error(r.refusal)
+		expect(r.starvationRows).toBeNull()
+	})
+})

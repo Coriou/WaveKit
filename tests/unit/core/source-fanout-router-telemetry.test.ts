@@ -179,6 +179,7 @@ describe("branch topology evidence", () => {
 				let tick = () => {}
 				let last: EfficiencySample | undefined
 				const monitor = createEfficiencyMonitor({
+					ownCpu: null,
 					sources: () => [sourceId],
 					branchCounters: id => router.branchDropCounters(id),
 					topology: id => router.branchTopology(id),

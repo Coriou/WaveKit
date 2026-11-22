@@ -10,11 +10,13 @@ import {
 	SUSTAINED_DROP_GAP_MS,
 } from "../../../../src/decoders/enablement/host-starvation.js"
 import {
+	EFFICIENCY_DROP_WINDOW_MS,
 	EFFICIENCY_PROBATION_MS,
 	EFFICIENCY_RETRY_MAX_MS,
 	EFFICIENCY_RETRY_MS,
 	TUNED_RETRY_MAX_MS,
 	TUNED_RETRY_MS,
+	LATE_SHED_WINDOWS,
 	lossRetryMs,
 } from "../../../../src/decoders/enablement/contract.js"
 import type { ChargedDrop } from "../../../../src/decoders/enablement/contract.js"
@@ -478,19 +480,29 @@ describe("gate: host CPU alone excuses a tuned probationer's own loss for at mos
 		expect(CPU_ONLY_EXCUSE_MS).toBe(30_000)
 	})
 
-	it("sheds it 30 000 ms after its first drop, then retries it 30 s later", () => {
+	// Intended change (rx-starvation S1, row T3): host CPU no longer restarts
+	// the probation, so the tuned probationer graduates and its own loss past
+	// the 30 000 ms excuse is shed by late drops, within the late windows
+	// (LATE_SHED_WINDOWS × EFFICIENCY_DROP_WINDOW_MS) after the bound.
+	it("sheds it by late drops once 30 000 ms pass after its first drop, then retries it 30 s later", () => {
 		const h = starvationHarness()
 		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
 		h.tick()
 		const first = spikes(h, Infinity)
-		expect(h.shed).toEqual([
-			{ key: "readsb", detail: "drops", at: first + CPU_ONLY_EXCUSE_MS },
+		expect(h.shed.map(s => [s.key, s.detail])).toEqual([
+			["readsb", "late-drops"],
 		])
+		const at = h.shed[0]!.at
+		expect(at).toBeGreaterThanOrEqual(first + CPU_ONLY_EXCUSE_MS)
+		expect(at).toBeLessThanOrEqual(
+			first +
+				CPU_ONLY_EXCUSE_MS +
+				LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
+		)
 		expect(h.gate.shedAttribution?.(h.keyOf("readsb"))).toMatchObject({
 			tuned: true,
 			attribution: { cause: "decoder" },
 		})
-		const at = first + CPU_ONLY_EXCUSE_MS
 		h.clean(30_000 - SAMPLE_MS)
 		expect(h.admit("readsb", true)).toMatchObject({
 			admit: false,
@@ -509,7 +521,9 @@ describe("gate: host CPU alone excuses a tuned probationer's own loss for at mos
 		spikes(h, first + CPU_ONLY_EXCUSE_MS - SAMPLE_MS)
 		expect(h.mono()).toBe(first + CPU_ONLY_EXCUSE_MS - SAMPLE_MS)
 		expect(h.shed).toEqual([])
-		expect(h.probation("readsb")).toBe(true)
+		// Intended change (rx-starvation S1, T3): host CPU no longer restarts
+		// its probation, so it has graduated by now.
+		expect(h.probation("readsb")).toBe(false)
 	})
 
 	it("a run that stops before the bound is never shed and graduates", () => {
@@ -524,28 +538,64 @@ describe("gate: host CPU alone excuses a tuned probationer's own loss for at mos
 		expect(h.probation("readsb")).toBe(false)
 	})
 
-	it("a gap longer than one window restarts the run, past the bound", () => {
-		const h = starvationHarness()
-		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
-		h.tick()
-		const first = h.mono() + 2 * SAMPLE_MS
-		spikes(h, first + 16_000)
-		// 12 000 ms without an own drop (CPU still spiking): the run ends.
-		for (let i = 0; i < 6; i++) {
-			h.cpu.normalisedPercent = i % 5 === 2 ? 100 : 10
+	// A graduated decoder's run that stops (no own drop for one window,
+	// 10 000 ms) before its first drop is 30 000 ms old spans late windows
+	// still read after that: a stopped run is never judged by the bound, so
+	// they never count.
+	it.each([12_000, 14_000, 16_000])(
+		"a graduated decoder's %i ms run that stops inside the bound is never shed",
+		runMs => {
+			const h = starvationHarness()
+			expect(h.admit("readsb", true)).toMatchObject({ admit: true })
+			h.clean(EFFICIENCY_PROBATION_MS + 4 * SAMPLE_MS)
+			expect(h.probation("readsb")).toBe(false)
+			const first = h.mono() + 2 * SAMPLE_MS
+			spikes(h, first + runMs)
+			// The host still spikes every fifth sample; the branch flows.
+			for (let i = 0; i < 30; i++) {
+				h.cpu.normalisedPercent = i % 5 === 2 ? 100 : 10
+				h.tick()
+			}
+			h.cpu.normalisedPercent = 10
+			expect(h.shed).toEqual([])
+		},
+	)
+
+	// A window before the gap belongs to the stopped run, which ended within
+	// its excuse: it never counts toward the late windows, so the shed waits
+	// for the restarted run's own 30 000 ms bound whatever the first run's
+	// length.
+	it.each([16_000, 8000, 4000])(
+		"a gap longer than one window restarts the run, past the bound (%i ms run before it)",
+		runMs => {
+			const h = starvationHarness()
+			expect(h.admit("readsb", true)).toMatchObject({ admit: true })
 			h.tick()
-		}
-		h.cpu.normalisedPercent = 10
-		const restart = h.mono() + SAMPLE_MS
-		spikes(h, first + CPU_ONLY_EXCUSE_MS + SAMPLE_MS)
-		expect(h.shed).toEqual([])
-		spikes(h, Infinity)
-		expect(h.shed.map(s => [s.key, s.detail])).toEqual([["readsb", "drops"]])
-		expect(h.shed[0]!.at).toBeGreaterThanOrEqual(restart + CPU_ONLY_EXCUSE_MS)
-		expect(h.shed[0]!.at).toBeLessThanOrEqual(
-			restart + CPU_ONLY_EXCUSE_MS + 2 * SAMPLE_MS,
-		)
-	})
+			const first = h.mono() + 2 * SAMPLE_MS
+			spikes(h, first + runMs)
+			// 12 000 ms without an own drop (CPU still spiking): the run ends.
+			for (let i = 0; i < 6; i++) {
+				h.cpu.normalisedPercent = i % 5 === 2 ? 100 : 10
+				h.tick()
+			}
+			h.cpu.normalisedPercent = 10
+			const restart = h.mono() + SAMPLE_MS
+			spikes(h, first + CPU_ONLY_EXCUSE_MS + SAMPLE_MS)
+			expect(h.shed).toEqual([])
+			spikes(h, Infinity)
+			// Intended change (rx-starvation S1, T3): graduated, it is shed by
+			// late drops, within the late windows after the bound.
+			expect(h.shed.map(s => [s.key, s.detail])).toEqual([
+				["readsb", "late-drops"],
+			])
+			expect(h.shed[0]!.at).toBeGreaterThanOrEqual(restart + CPU_ONLY_EXCUSE_MS)
+			expect(h.shed[0]!.at).toBeLessThanOrEqual(
+				restart +
+					CPU_ONLY_EXCUSE_MS +
+					LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
+			)
+		},
+	)
 
 	it("sibling loss in the run is a real host episode: never bounded", () => {
 		const h = starvationHarness()
@@ -585,7 +635,7 @@ describe("gate: graduation clears a tuned probationer's carried loss", () => {
 	})
 
 	it("no gate map holds its carried drop once it graduates", () => {
-		const h = starvationHarness()
+		const h = starvationHarness({ ownFollowsCpu: true })
 		const key = h.keyOf("readsb")
 		// Every map that ever holds a number for readsb's key.
 		const maps = new Set<Map<unknown, unknown>>()
@@ -599,12 +649,14 @@ describe("gate: graduation clears a tuned probationer's carried loss", () => {
 			return set.call(this, k, value)
 		})
 		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
-		// CPU over the guard, probation passes lagging; then an own-branch
-		// drop 14 s later on a judged pass: the CPU reset carries it.
+		// The core's own CPU over the guard on two samples (rx-starvation S1:
+		// host CPU alone resets nothing), probation passes lagging; then an
+		// own-branch drop 14 s later on a judged pass: the CPU reset carries it.
 		h.cpu.normalisedPercent = 100
 		h.tick([], 4, false)
+		h.tick([], 4, false)
 		h.cpu.normalisedPercent = 10
-		for (let i = 0; i < 6; i++) h.tick([], 4, false)
+		for (let i = 0; i < 5; i++) h.tick([], 4, false)
 		h.tick([h.branch("readsb")])
 		const at = h.mono()
 		const holding = () => [...maps].filter(m => m.get(key) === at)
@@ -687,9 +739,17 @@ describe("gate: CPU pinned at the guard bounds the excuse on both paths", () => 
 			first ??= h.mono()
 		}
 		h.cpu.normalisedPercent = 10
-		expect(h.shed).toEqual([
-			{ key: "readsb", detail: "drops", at: first! + CPU_ONLY_EXCUSE_MS },
+		// Intended change (rx-starvation S1, T3): host CPU never restarts its
+		// probation, so it graduates and the late path sheds it past the bound.
+		expect(h.shed.map(s => [s.key, s.detail])).toEqual([
+			["readsb", "late-drops"],
 		])
+		expect(h.shed[0]!.at).toBeGreaterThanOrEqual(first! + CPU_ONLY_EXCUSE_MS)
+		expect(h.shed[0]!.at).toBeLessThanOrEqual(
+			first! +
+				CPU_ONLY_EXCUSE_MS +
+				LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
+		)
 		expect(h.gate.shedAttribution?.(h.keyOf("readsb"))).toMatchObject({
 			tuned: true,
 			attribution: { cause: "decoder" },

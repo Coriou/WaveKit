@@ -140,14 +140,40 @@ describe("efficiency gate", () => {
 		expect(setup(0.36).admit(placement(), [], 0).admit).toBe(true)
 		expectDetail(setup(0.359).admit(placement(), [], 0), "budget")
 	})
-	it("cpu 90 admits and 90.1 blocks with cpu", () => {
-		for (const cpu of [90, 90.1]) {
+	// Intended change (rx-starvation S1): host CPU over the guard alone no longer
+	// refuses (row A2); only the core's own CPU over 90 % of capacity does (A1).
+	it("host cpu 90.1 and 100 admit: host CPU alone never refuses", () => {
+		for (const cpu of [90, 90.1, 100]) {
 			const gate = setup()
 			gate.record(sample(1, cpu))
-			expect(gate.admit(placement(), [], 1)).toMatchObject(
-				cpu === 90 ? { admit: true } : { admit: false, detail: "cpu" },
+			expect(gate.admit(placement(), [], 1)).toMatchObject({ admit: true })
+		}
+	})
+	it("own cpu at 90 % of capacity admits and past it on two samples blocks with cpu", () => {
+		for (const own of [3.6, 3.6 + 1e-9]) {
+			const gate = setup()
+			gate.record({ ...sample(1, 100), ownCores: own, capacityCores: 4 })
+			gate.record({ ...sample(2001, 100), ownCores: own, capacityCores: 4 })
+			expect(gate.admit(placement(), [], 2001)).toMatchObject(
+				own === 3.6 ? { admit: true } : { admit: false, detail: "cpu" },
 			)
 		}
+	})
+	it("one own-over sample admits; two consecutive refuse with cpu", () => {
+		const gate = setup()
+		gate.record({ ...sample(1, 10), ownCores: 3.8, capacityCores: 4 })
+		expect(gate.admit(placement(), [], 1)).toEqual({ admit: true })
+		gate.record({ ...sample(2001, 10), ownCores: 3.8, capacityCores: 4 })
+		expect(gate.admit(placement(), [], 2001)).toMatchObject({
+			admit: false,
+			detail: "cpu",
+		})
+	})
+	it("two own-over samples further apart than the gap limit admit", () => {
+		const gate = setup()
+		gate.record({ ...sample(1, 10), ownCores: 3.8, capacityCores: 4 })
+		gate.record({ ...sample(6001, 10), ownCores: 3.8, capacityCores: 4 })
+		expect(gate.admit(placement(), [], 6001)).toEqual({ admit: true })
 	})
 	it("null cpu leaves the decision to budget and drops", () => {
 		expect(setup().admit(placement(), [], 0).admit).toBe(true)

@@ -6,6 +6,7 @@ import type {
 	RunningPlacement,
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
+import { ownFollows } from "./rx-starvation-harness.js"
 
 const placement = (key: string, sampleRateHz: number): WantedPlacement => ({
 	key,
@@ -43,6 +44,7 @@ it.each(
 			branchCounters: () => new Map([["raw", counters]]),
 			topology: () => "raw",
 			cpu: { normalisedPercent: 10 },
+			ownCpu: null,
 			now: () => mono,
 			monoNow: () => mono,
 			setInterval: () => ({ cancel() {} }),
@@ -124,6 +126,7 @@ it.each(
 			branchCounters: () => new Map([["raw", counters]]),
 			topology: () => "raw",
 			cpu: { normalisedPercent: 10 },
+			ownCpu: null,
 			now: () => mono,
 			monoNow: () => mono,
 			setInterval: () => ({ cancel() {} }),
@@ -253,6 +256,7 @@ it.each(
 			branchCounters: () => new Map([["raw", counters]]),
 			topology: () => "raw",
 			cpu,
+			ownCpu: ownFollows(cpu),
 			now: () => mono,
 			monoNow: () => mono,
 			setInterval: () => ({ cancel() {} }),
@@ -284,9 +288,15 @@ it.each(
 			const recoveredAt = lastSpike + 2000 + 60000
 			for (let at = 70000; at <= 3600000; at += 2000) {
 				if (at === 76000) counters.droppedBytesTotal++
+				// rx-starvation S1 (m2): a spike is the core's own CPU over the
+				// guard on two consecutive samples; the second is the evidence.
 				cpu.normalisedPercent =
+					at === 78000 ||
 					at === 80000 ||
-					(repeated && at > 80000 && at <= lastSpike && at % 20000 === 0) ||
+					(repeated &&
+						at > 80000 &&
+						at <= lastSpike &&
+						(at % 20000 === 0 || (at + 2000) % 20000 === 0)) ||
 					at === recoveredAt + 2000
 						? 95
 						: 10
@@ -331,6 +341,7 @@ it.each(["forget", "prune", "readmit"] as const)(
 				mono === 108000 ? null : new Map([["raw", counters]]),
 			topology: () => "raw",
 			cpu,
+			ownCpu: ownFollows(cpu),
 			now: () => mono,
 			monoNow: () => mono,
 			setInterval: () => ({ cancel() {} }),
@@ -408,6 +419,7 @@ it("graduates at completed coverage after pending link recovery despite a later 
 		branchCounters: () => new Map([["raw", counters]]),
 		topology: () => "raw",
 		cpu,
+		ownCpu: ownFollows(cpu),
 		now: () => mono,
 		monoNow: () => mono,
 		ingest: () => ({
@@ -481,6 +493,7 @@ it("graduates resumed coverage without retaining a previous epoch's drop failure
 		branchCounters: () => new Map([["raw", counters]]),
 		topology: () => "raw",
 		cpu: { normalisedPercent: 10 },
+		ownCpu: null,
 		now: () => mono,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),

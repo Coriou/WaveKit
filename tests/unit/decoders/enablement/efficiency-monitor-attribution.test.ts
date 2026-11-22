@@ -28,6 +28,7 @@ const setupAttribution = (
 		branchCounters: () => branches,
 		topology: () => "fixed",
 		cpu: { normalisedPercent: 10 },
+		ownCpu: null,
 		now: () => 0,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),

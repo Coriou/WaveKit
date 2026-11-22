@@ -15,6 +15,18 @@ required hooks before you start.
 | `ExternalSdrDecoder` (`external-sdr-decoder.ts`)         | Opens its own SDR hardware                               | none built in                                   |
 | `BaseDecoder` (`base-decoder.ts`)                        | Raw stdin; the common lifecycle the others build on      | (base of all of the above)                      |
 
+A decoder with `useChannelizer` and a channel request (`getChannelRequest`, which
+`AudioDemodDecoder` and `IqDecimateDecoder` provide) reads a `wavekit-chan` channel on stdin
+instead of the raw source stream. By default the channel socket itself is the decoder's stdin,
+handed over at the spawn, so the channel's bytes never pass through Node and `bytesIn` is updated
+from the channelizer's 5-second `stats` lines. With `WAVEKIT_CHANNEL_INPUT=relay` Node relays it
+instead: the channel socket is piped into the decoder's stdin. Either way the decoder sees the same
+byte stream, so an adapter needs no change. When the channel closes (a capture-centre move, for
+example) a direct decoder sees EOF; whether it exits then or keeps running, the core restarts it
+once, with no crash counted, or holds it until its source returns when the source has gone.
+[PERFORMANCE.md, "Direct channel input"](PERFORMANCE.md#direct-channel-input-2026-11-17) has the
+details.
+
 The three walkthroughs below show the older, simpler patterns (pure consumer, network producer,
 external SDR). New decoders that share the receiver should normally use `AudioDemodDecoder` or
 `IqDecimateDecoder`; model them on the built-ins in `src/decoders/builtin/`.
@@ -948,6 +960,41 @@ suggested action, for example "ADS-B paused: CPU budget full" with `raise-budget
 verdict appears only when the budget is what holds the decoder back; one waiting to be
 checked again reads "waiting for the source to settle", with no action.
 
+### Which CPU counts against a decoder
+
+The CPU budget's guard (90 %) is judged on the core's **own** CPU: the CPU time of its
+container (core, workers, channelizer and every decoder process), read every 2 seconds from
+the container's cgroup and compared with the CPU capacity the automatic budget is sized from
+(`min(available CPUs, quota / period)`). Own CPU over 90 % of that capacity on two
+consecutive samples is evidence against the newest automatic decoder on probation; a single
+sample (a decoder's start-up burst) is not. The same rule holds back new automatic decoders:
+own CPU over the guard on the latest two consecutive samples refuses a newcomer, one sample
+does not.
+
+Host CPU (every process on the machine, another project's build included) never stops,
+refuses or late-stops a decoder for host CPU alone. It only explains drops: while the host is
+over the guard and the core's own CPU is not, drops on a graduated decoder's input are the
+host's, and they stop no automatic decoder outside the tuned band until the host calms
+(consumer loss charged to that decoder's own input still does). The log line "Decoder
+efficiency drops or CPU limit exceeded" reads `efficiencyDetail: "host-cpu"` in that case and
+`"cpu"` only for the core's own CPU.
+
+For a decoder of the tuned band, host CPU excuses a run of drops on its own input for at most
+30 seconds from the run's first drop; past that, the loss is its own and the decoder can
+still be late-stopped. A run ends after 10 seconds without such a drop, and a new run starts
+its own 30 seconds. A tuned decoder on probation whose excused run is still open can
+graduate meanwhile; if the run outlasts the 30 seconds, it is then stopped as `late-drops`,
+not `drops`.
+
+The own reading needs the core in a container with a private cgroup namespace
+(`/proc/self/cgroup` is `0::/`, the Docker default with cgroup v2). Elsewhere (`pnpm run dev`
+on macOS, a bare Linux shell, cgroup v1) the core logs `own CPU unavailable: CPU shedding off`
+once and stops nothing for CPU; drops and the budget's cost estimate still govern. Every
+probation verdict is logged as "Efficiency probation verdict" with `ownCores` and
+`capacityCores` (null when unknown) and, for a decoder stopped to make room for a tuned one,
+the probationer whose evidence it was; every admission logs "Efficiency admission" with its
+time.
+
 ### Efficiency recovery
 
 Automatic decoder admission uses a recent 10-second positive-drop window and a separate
@@ -981,11 +1028,11 @@ closes before the next sample (its share is kept for two samples). Overflow with
 holding branch known is charged to the source as a whole, even when live audio dropped too. Among the decoders charged, the newest automatic one is stopped,
 decoders of the tuned band last; `always` and operator-started decoders are never stopped.
 A decoder of the tuned band (such as ADS-B) on probation is judged only by drops on its own
-branch: overflow charged to the source as a whole, CPU over the guard, or host loss on
-another decoder's branch stops the newest other automatic decoder instead, at most one per
+branch: overflow charged to the source as a whole, the core's own CPU over the guard (its
+share of the container's CPU capacity), or host loss on another decoder's branch stops the
+newest other automatic decoder instead, at most one per
 60-second clear window on each source (one host-wide for CPU). Under sustained CPU load the
-tuned decoder is never stopped: CPU over the guard is the host's, so it restarts its
-probation instead, and loss already spent on such a stop does not stop a second decoder through late drops
+tuned decoder is never stopped: it restarts its probation instead, and loss already spent on such a stop does not stop a second decoder through late drops
 on that source until the window has closed. After a stop for CPU, host-attributed drops on
 any source are that same load and stop nobody else until that stop's own 60-second window
 has closed; stops for other loss inside it do not extend it. Other

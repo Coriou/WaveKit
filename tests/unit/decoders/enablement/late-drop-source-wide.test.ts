@@ -5,6 +5,7 @@ import type {
 	RunningPlacement,
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
+import { ownFollows } from "./rx-starvation-harness.js"
 
 /**
  * Loss upstream of the branch split (burst absorber overflow) names no
@@ -43,6 +44,7 @@ function harness(specs: readonly Spec[]) {
 			),
 		topology: () => "fixed",
 		cpu,
+		ownCpu: ownFollows(cpu),
 		now: () => mono,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),

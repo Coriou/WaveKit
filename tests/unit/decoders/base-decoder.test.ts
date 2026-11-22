@@ -5,10 +5,12 @@
  * Requirements: 4.5
  */
 
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 import * as fc from "fast-check"
 import { EventEmitter } from "node:events"
 import { PassThrough, type Readable } from "node:stream"
+import { spawn } from "node:child_process"
+import type { ChildProcess } from "node:child_process"
 import type {
 	Decoder,
 	DecoderCaps,
@@ -17,7 +19,18 @@ import type {
 	DecoderOutput,
 	DecoderStatus,
 } from "../../../src/decoders/types.js"
+import {
+	abandonDecoderOutput,
+	BaseDecoder,
+	decoderOutputDrained,
+} from "../../../src/decoders/base-decoder.js"
 import pino from "pino"
+
+// Only the drain test spawns; its child is a fake and nothing is executed.
+vi.mock("node:child_process", () => ({ spawn: vi.fn() }))
+vi.mock("../../../src/decoders/process-tools.js", () => ({
+	signalDecoder: vi.fn(),
+}))
 
 // Create a silent logger for tests
 const testLogger = pino({ level: "silent" })
@@ -301,5 +314,140 @@ describe("Property-Based Tests", () => {
 				{ numRuns: 100 },
 			)
 		})
+	})
+})
+
+/** A BaseDecoder that records every line it parses. */
+class LineDecoder extends BaseDecoder {
+	readonly lines: string[] = []
+	protected getCommand(): string {
+		return "unused"
+	}
+	protected getArgs(): string[] {
+		return []
+	}
+	protected getCaps(): DecoderCaps {
+		return {
+			input: "audio_pcm",
+			wantsExclusiveSource: false,
+			preferredSampleRates: [48000],
+			output: "text",
+			integrationPattern: "pure_consumer",
+		}
+	}
+	protected parseOutput(line: string): DecoderOutput | null {
+		this.lines.push(line)
+		return null
+	}
+}
+
+/** A child that reports `spawn` at once and exits only when the test says; its streams end separately. */
+function fakeChild() {
+	return Object.assign(new EventEmitter(), {
+		pid: 7,
+		stdin: null,
+		stdout: new PassThrough(),
+		stderr: new PassThrough(),
+		exitCode: null,
+		signalCode: null,
+		killed: false,
+	})
+}
+
+describe("output drain", () => {
+	it("settles after the exited child's last lines are parsed, not at its exit; each run has its own", async () => {
+		const decoder = new LineDecoder(
+			{ id: "drain", type: "test", enabled: true, options: {} },
+			testLogger,
+		)
+		// Nothing was spawned: settled at once, as for a decoder that is not a BaseDecoder.
+		await decoder.outputDrained()
+		await decoderOutputDrained(
+			new TestDecoder({ id: "x", type: "x", enabled: true, options: {} }),
+		)
+
+		const child = fakeChild()
+		vi.mocked(spawn).mockImplementationOnce(() => {
+			queueMicrotask(() => child.emit("spawn"))
+			return child as unknown as ChildProcess
+		})
+		await decoder.start()
+		const drained = decoderOutputDrained(decoder)
+		let settled = false
+		void drained.then(() => {
+			settled = true
+		})
+		const order: string[] = []
+		decoder.on("exit", () => order.push("exit"))
+		child.emit("exit", 0, null)
+		child.stdout.write("first\n")
+		child.stderr.write("second\nlast without newline")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(order).toEqual(["exit"])
+		expect(decoder.lines).toEqual(["first", "second"])
+		expect(settled).toBe(false)
+		child.stderr.end()
+		await new Promise(resolve => setImmediate(resolve))
+		// One stream is still open.
+		expect(settled).toBe(false)
+		child.stdout.end()
+		await drained
+		expect(decoder.lines).toEqual(["first", "second", "last without newline"])
+
+		// A new run gets a new drain; a stream destroyed without ending settles it too.
+		const next = fakeChild()
+		vi.mocked(spawn).mockImplementationOnce(() => {
+			queueMicrotask(() => next.emit("spawn"))
+			return next as unknown as ChildProcess
+		})
+		await decoder.start()
+		const nextDrained = decoder.outputDrained()
+		expect(nextDrained).not.toBe(drained)
+		let nextSettled = false
+		void nextDrained.then(() => {
+			nextSettled = true
+		})
+		next.emit("exit", 0, null)
+		next.stdout.end()
+		await new Promise(resolve => setImmediate(resolve))
+		expect(nextSettled).toBe(false)
+		next.stderr.destroy()
+		await nextDrained
+	})
+
+	it("abandoned: an output that never ends is closed, its drain settles and no later line is parsed", async () => {
+		const decoder = new LineDecoder(
+			{ id: "abandon", type: "test", enabled: true, options: {} },
+			testLogger,
+		)
+		// Nothing spawned, or not a BaseDecoder: nothing to do.
+		decoder.abandonOutput()
+		abandonDecoderOutput(
+			new TestDecoder({ id: "x", type: "x", enabled: true, options: {} }),
+		)
+		const child = fakeChild()
+		vi.mocked(spawn).mockImplementationOnce(() => {
+			queueMicrotask(() => child.emit("spawn"))
+			return child as unknown as ChildProcess
+		})
+		await decoder.start()
+		const drained = decoder.outputDrained()
+		let settled = false
+		void drained.then(() => {
+			settled = true
+		})
+		child.emit("exit", 0, null)
+		child.stdout.write("before\n")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(settled).toBe(false)
+		abandonDecoderOutput(decoder)
+		await drained
+		expect(child.stdout.destroyed).toBe(true)
+		expect(child.stderr.destroyed).toBe(true)
+		child.stderr.write("after\n")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(decoder.lines).toEqual(["before"])
+		// Idempotent.
+		decoder.abandonOutput()
 	})
 })

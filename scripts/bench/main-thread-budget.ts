@@ -5,6 +5,9 @@
  *   nice -n 10 node output/bench/main-thread-budget.mjs --label base
  *     [--rate 1024000|2400000] [--seconds 60] [--warmup 20] [--clients 0|1|2]
  *     [--passive on|off] [--profile] [--counts] [--out DIR] [--keep] [--core PATH]
+ *     [--hog N|auto] [--hog-settle S] [--hog-log FILE] [--core-nice K] [--auto 0|1]
+ *     [--core-qos default|utility|background | --core-qos-late utility|background]
+ *     [--channel-input relay|direct] [--channel-queue-ms 50..2000]
  *   node output/bench/main-thread-budget.mjs --finish-image DIR [--label NAME]
  *   node output/bench/main-thread-budget.mjs --reassemble DIR
  *
@@ -28,6 +31,26 @@
  * --finish-image DIR builds the same manifest (tier B) from what main-thread-budget-image.sh
  * collected in DIR. --reassemble DIR rebuilds DIR/manifest.json from the files of an earlier run
  * (its run.json), for instance after a change to the post-processing.
+ *
+ * Starvation runs: --hog N (auto = os.availableParallelism()) starts N busy-loop children
+ * (cpu-hog.mjs, not niced: run the harness itself un-niced) after the warm-up, lets them settle
+ * --hog-settle seconds (default 10), and stops them by their recorded PIDs (SIGTERM, SIGKILL
+ * after 2 s) at the window's end and on every exit path; with --hog the window is at most 120 s.
+ * --hog-log FILE appends one `<start> .. <stop> hog window N=<n> label=<label> load1=<a>/<b>`
+ * line per hog window. --core-nice K (default 10) is the core's `nice -n`; the effective nice is
+ * read back with ps (a negative one needs root and is reported when refused). --auto 1 (default)
+ * adds one listener of the live-demod server's /auto stream. --core-qos starts the core under
+ * taskpolicy(8); --core-qos-late (not with --core-qos) starts it at the default QoS and applies
+ * `taskpolicy ... -p <core PID>` right at the window open, removing it at the close, with the
+ * `ps -o pri=` readback before, during and after (the core's process only, not its children). Stand-in decoders count their stdin
+ * bytes into count files. At both window edges the harness reads the core's own counters
+ * (/api/sources, /api/telemetry/fanout, /api/diagnostics, /api/decoders, /api/live-audio/status)
+ * into api-start.json and api-end.json; the manifest's `starvation` section turns them into
+ * per-stage sample accounting with the first stage that lost samples, the loop figures (ELU,
+ * loop delay p50/p99/p99.9/max, the longest stalls) and the load averages.
+ * --channel-input sets the core's WAVEKIT_CHANNEL_INPUT (absent: the core's default, direct) and
+ * --channel-queue-ms the channelizer's channelQueueMs (absent: the config default); both are A/B
+ * switches for channel-output loss and are recorded in config.json and the core log.
  *
  * The work dir (config, state, scene IQ, stand-ins) is removed at the end unless --keep; the
  * out dir (default a new tmp dir, printed) holds the results and is always kept.
@@ -60,19 +83,47 @@ import {
 	SceneGenerator,
 } from "./scanner-quality/scene.js"
 import {
+	abortableSleep,
+	accountStages,
+	type ApiEdge,
+	ApiEdgeSchema,
+	buildStages,
+	CORE_QOS,
+	CORE_QOS_LATE,
+	checkQosOptions,
+	type CoreQos,
+	coreQosLateArgs,
+	coreQosPrefix,
 	descendantsOf,
+	expectedNice,
+	type FakeBehind,
+	fakeBehindOf,
+	type HogHandle,
+	HogPool,
+	type HogRecord,
+	hogWindowLine,
 	iqSecondsOf,
 	type Manifest,
 	ManifestSchema,
+	noKnownLoss,
+	suspensionGroups,
+	suspensionsOf,
 	nonLoopbackListeners,
 	parseLsofListeners,
 	parseProcLines,
+	parseHogCount,
 	parsePs,
 	perIqSecond,
 	type PsRow,
 	roundWindowUp,
+	qosOfPri,
 	spread,
+	STAGE_GAPS,
+	type StageCount,
+	type Starvation,
+	StarvationSchema,
 	timingValidity,
+	utcStamp,
 } from "./budget-manifest.js"
 import {
 	callCounts,
@@ -81,6 +132,41 @@ import {
 	PreciseCoverageSchema,
 	summariseProfile,
 } from "./budget-profile.js"
+
+/**
+ * Stand-in decoder: reads stdin in 64 KiB blocks, counts the bytes and rewrites
+ * <DIR>/<name>-<pid>.json at most every 250 ms, at EOF and on SIGTERM.
+ */
+const STANDIN_COUNTER = `import json, os, signal, sys, time
+name, d = sys.argv[1], sys.argv[2]
+path = os.path.join(d, "%s-%d.json" % (name, os.getpid()))
+n = 0
+def flush():
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(json.dumps({"name": name, "pid": os.getpid(), "bytes": n, "t": time.time()}))
+    os.replace(tmp, path)
+def term(*_):
+    flush()
+    os._exit(0)
+signal.signal(signal.SIGTERM, term)
+flush()
+last = time.monotonic()
+fd = sys.stdin.fileno()
+while True:
+    try:
+        b = os.read(fd, 65536)
+    except OSError:
+        break
+    if not b:
+        break
+    n += len(b)
+    now = time.monotonic()
+    if now - last >= 0.25:
+        flush()
+        last = now
+flush()
+`
 
 const BANNED_PORTS = new Set([
 	1234, 4713, 5555, 5556, 5173, 8080, 8081, 8082, 9000, 9229, 15555, 15556,
@@ -234,7 +320,12 @@ const DeltaSchema = z.object({
 	processCpuUs: z.number(),
 	elu: z.object({ utilization: z.number() }),
 	loopDelayMs: z
-		.object({ p50: z.number(), p99: z.number(), max: z.number() })
+		.object({
+			p50: z.number(),
+			p99: z.number(),
+			p999: z.number().optional(),
+			max: z.number(),
+		})
 		.nullable(),
 	gc: KindCounts,
 	contextSwitches: z.object({ voluntary: z.number(), involuntary: z.number() }),
@@ -244,8 +335,21 @@ const DeltaSchema = z.object({
 	sourceBytes: z.number().nullable(),
 	schedstat: z.object({ waitShare: z.number().nullable() }).nullable(),
 })
+const StallsSchema = z.object({
+	resolutionMs: z.number(),
+	thresholdMs: z.number(),
+	count: z.number(),
+	totalMs: z.number(),
+	over100: z.number(),
+	over500: z.number(),
+	over1000: z.number(),
+	top: z.array(z.object({ atUtc: z.string(), ms: z.number() })),
+})
 const WindowSchema = DeltaSchema.extend({
 	n: z.number(),
+	loadavgStart: z.array(z.number()).length(3).optional(),
+	loadavgEnd: z.array(z.number()).length(3).optional(),
+	stalls: StallsSchema.optional(),
 	pid: z.number(),
 	platform: z.string(),
 	startUtc: z.string(),
@@ -272,6 +376,10 @@ const FakeLineSchema = z.object({
 	bytes: z.number().optional(),
 	iqSeconds: z.number().optional(),
 	skippedSeconds: z.number().optional(),
+	monoMs: z.number().optional(),
+	behindMs: z.number().nullable().optional(),
+	blocked: z.boolean().nullable().optional(),
+	clients: z.number().int().min(0).optional(),
 	rateHz: z.number().optional(),
 	port: z.number().optional(),
 })
@@ -319,8 +427,159 @@ const RunMetaSchema = z.object({
 		.array(z.object({ file: z.string(), sha256: z.string() }))
 		.nullable(),
 	warnings: z.array(z.string()),
+	/** Tier A from the starvation harness on: hog, nice and the API edges of the window. */
+	starvationRun: z
+		.object({
+			hogRequested: z.string(),
+			hog: z.object({
+				count: z.number(),
+				startedPids: z.array(z.number()),
+				stoppedPids: z.array(z.number()),
+				killedPids: z.array(z.number()),
+				survivorPids: z.array(z.number()),
+				exitedEarlyPids: z.array(z.number()).optional(),
+				effectiveCount: z.number().nullable().optional(),
+			}),
+			hogStartUtc: z.string().nullable(),
+			hogStopUtc: z.string().nullable(),
+			hogNice: z.number().nullable(),
+			settleSeconds: z.number(),
+			coreNiceRequested: z.number(),
+			coreNiceEffective: z.number().nullable(),
+			harnessNice: z.number(),
+			loadStart: z.array(z.number()).length(3),
+			loadEnd: z.array(z.number()).length(3),
+			autoClient: z.boolean(),
+			coreQos: z
+				.object({
+					requested: z.enum(CORE_QOS),
+					command: z.array(z.string()),
+					psPri: z.number().nullable(),
+				})
+				.optional(),
+			edgeReadMs: z
+				.object({ start: z.number().nullable(), end: z.number().nullable() })
+				.optional(),
+			coreQosLate: StarvationSchema.shape.coreQosLate,
+		})
+		.optional(),
 })
 type RunMeta = z.infer<typeof RunMetaSchema>
+
+// === API edges of the window (per-stage sample accounting: see budget-manifest.ts) ===
+
+/** One edge: the core's counters (in parallel) and the stand-ins' count files. */
+async function apiEdge(
+	api: string,
+	auth: Record<string, string>,
+	standinDir: string,
+	signalMs: number,
+): Promise<ApiEdge> {
+	let standins: Record<string, unknown> | null = {}
+	try {
+		for (const f of readdirSync(standinDir))
+			if (f.endsWith(".json")) standins[f] = readJson(join(standinDir, f))
+	} catch {
+		// The count dir could not be listed: the stand-in stage is unknown at this edge.
+		standins = null
+	}
+	const [sources, fanout, diagnostics, decoders, liveAudio] = await Promise.all(
+		[
+			"/api/sources",
+			"/api/telemetry/fanout",
+			"/api/diagnostics",
+			"/api/decoders",
+			"/api/live-audio/status",
+		].map(path => getJson(`${api}${path}`, auth)),
+	)
+	return {
+		signalMs,
+		doneMs: Date.now(),
+		sources,
+		fanout,
+		diagnostics,
+		decoders,
+		liveAudio,
+		standins,
+	}
+}
+
+function parsedOr<T>(schema: z.ZodType<T>, v: unknown): T | null {
+	const r = schema.safeParse(v)
+	return r.success ? r.data : null
+}
+
+function starvationOf(
+	meta: RunMeta,
+	win: z.infer<typeof WindowSchema>,
+	stages: StageCount[],
+	/** The core's own window was far shorter than asked (it did not run): loop figures unknown. */
+	windowShort: boolean,
+	fakeBehind: FakeBehind,
+): Starvation | undefined {
+	const run = meta.starvationRun
+	if (run === undefined) return undefined
+	const acc = accountStages(stages)
+	const known = <T>(v: T): T | null => (windowShort ? null : v)
+	return {
+		hog: {
+			requested: run.hogRequested,
+			count: run.hog.count,
+			startedPids: run.hog.startedPids,
+			stoppedPids: run.hog.stoppedPids,
+			killedPids: run.hog.killedPids,
+			survivorPids: run.hog.survivorPids,
+			...(run.hog.exitedEarlyPids === undefined
+				? {}
+				: { exitedEarlyPids: run.hog.exitedEarlyPids }),
+			...(run.hog.effectiveCount === undefined
+				? {}
+				: { effectiveCount: run.hog.effectiveCount }),
+			startUtc: run.hogStartUtc,
+			stopUtc: run.hogStopUtc,
+			settleSeconds: run.settleSeconds,
+			nice: run.hogNice,
+		},
+		coreNice: {
+			requested: run.coreNiceRequested,
+			effective: run.coreNiceEffective,
+			harness: run.harnessNice,
+		},
+		...(run.coreQos === undefined
+			? {}
+			: {
+					coreQos: {
+						requested: run.coreQos.requested,
+						command: run.coreQos.command,
+						psPri: run.coreQos.psPri,
+						effective: qosOfPri(run.coreQos.psPri),
+					},
+				}),
+		...(run.coreQosLate === undefined ? {} : { coreQosLate: run.coreQosLate }),
+		fakeBehind,
+		...(run.edgeReadMs === undefined
+			? {}
+			: {
+					edgeReads: {
+						startMs: run.edgeReadMs.start,
+						endMs: run.edgeReadMs.end,
+					},
+				}),
+		loadavg: { windowStart: run.loadStart, windowEnd: run.loadEnd },
+		loop: {
+			elu: known(win.elu.utilization),
+			p50Ms: known(win.loopDelayMs?.p50 ?? null),
+			p99Ms: known(win.loopDelayMs?.p99 ?? null),
+			p999Ms: known(win.loopDelayMs?.p999 ?? null),
+			maxMs: known(win.loopDelayMs?.max ?? null),
+			stalls: known(win.stalls ?? null),
+		},
+		stages: acc.stages,
+		firstLosingStage: acc.firstLosing,
+		unknownBeforeFirstLoss: acc.unknownBefore,
+		gaps: STAGE_GAPS,
+	}
+}
 
 // === ps (children CPU, by PID) ===
 
@@ -404,6 +663,26 @@ function assemble(outDir: string, meta: RunMeta): Manifest {
 	if (sourceSkippedSeconds !== null && sourceSkippedSeconds > 0)
 		warnings.push(
 			`the fake skipped ${sourceSkippedSeconds.toFixed(2)} s of signal in the window: the core fell more than 2 s behind its source`,
+		)
+	// Edge reads are not atomic: what the core dropped between the signal and a slow read's
+	// answer is outside the window's counts.
+	const edgeMs = meta.starvationRun?.edgeReadMs
+	for (const [name, ms] of [
+		["A", edgeMs?.start ?? null],
+		["B", edgeMs?.end ?? null],
+	] as const)
+		if (ms !== null && ms > 1000)
+			warnings.push(
+				`edge ${name} API read took ${(ms / 1000).toFixed(2)} s (over 1 s): drops between the window signal and the read are not counted`,
+			)
+	// A starved core opens its window only when it next runs: a window far shorter than asked
+	// means the core did not run for most of it, and its loop figures cover only that sliver.
+	const windowShort =
+		meta.windowSecondsRequested !== null &&
+		windowSeconds < 0.9 * meta.windowSecondsRequested
+	if (windowShort)
+		warnings.push(
+			`the core's own window lasted ${windowSeconds.toFixed(2)} s of the ${meta.windowSecondsRequested ?? 0} s asked: it did not run for most of the window (starved), so its loop figures are unknown`,
 		)
 	const perIq = (ms: number | null): number | null => perIqSecond(ms, iqSeconds)
 	const perS = (v: number): number =>
@@ -658,6 +937,39 @@ function assemble(outDir: string, meta: RunMeta): Manifest {
 	for (const [k, v] of Object.entries(win.writes))
 		writesPerSecond[k] = { count: perS(v.count), bytes: perS(v.bytes ?? 0) }
 
+	const autoMarks = marks(
+		readJsonl(join(outDir, "auto", "auto.jsonl"))
+			.map(l => WsLineSchema.safeParse(l))
+			.flatMap(r => (r.success ? [r.data] : [])),
+	)
+	const starvation = starvationOf(
+		meta,
+		win,
+		buildStages({
+			rateHz: meta.rateHz,
+			windowSeconds,
+			sourceId: SOURCE_ID,
+			socketBytes: win.sourceBytes,
+			fakeA,
+			fakeB,
+			edgeA: parsedOr(ApiEdgeSchema, readJson(join(outDir, "api-start.json"))),
+			edgeB: parsedOr(ApiEdgeSchema, readJson(join(outDir, "api-end.json"))),
+			autoA: autoMarks[0],
+			autoB: autoMarks[1],
+		}),
+		windowShort,
+		fakeBehindOf(fakeA, fakeB),
+	)
+	// Decoder suspensions in the window, by reason, from the core log.
+	const coreLogPath = join(outDir, "core.log")
+	const startMs = Date.parse(win.startUtc)
+	const endMs = Date.parse(win.endUtc)
+	const suspensions =
+		existsSync(coreLogPath) &&
+		Number.isFinite(startMs) &&
+		Number.isFinite(endMs)
+			? suspensionsOf(readFileSync(coreLogPath, "utf8"), startMs, endMs)
+			: undefined
 	const manifest: Manifest = {
 		schema: 2,
 		label: meta.label,
@@ -733,6 +1045,8 @@ function assemble(outDir: string, meta: RunMeta): Manifest {
 			longTasks: longTaskReport,
 			callsPerSecond,
 		},
+		...(starvation === undefined ? {} : { starvation }),
+		...(suspensions === undefined ? {} : { suspensions }),
 	}
 	return ManifestSchema.parse(manifest)
 }
@@ -752,9 +1066,56 @@ function writeManifest(outDir: string, manifest: Manifest): void {
 			`  timing ${manifest.timingValid ? "valid" : `not valid: ${manifest.timingInvalidReasons.join("; ")}`}`,
 			`  warnings: ${manifest.warnings.join("; ") || "none"}`,
 			`  coverage missing: ${manifest.coverage.missing.join(", ") || "none"}; unknown: ${manifest.coverage.unknown.join(", ") || "none"}`,
+			...starvationLines(manifest),
+			...suspensionLines(manifest),
 			"",
 		].join("\n"),
 	)
+}
+
+function suspensionLines(manifest: Manifest): string[] {
+	const s = manifest.suspensions
+	if (s === undefined) return []
+	const g = suspensionGroups(s)
+	const list = (r: Record<string, number>): string =>
+		Object.entries(r)
+			.map(([k, v]) => `${k} ${v}`)
+			.join(", ") || "none"
+	return [
+		`  suspensions: efficiency cpu ${g.cpu}, late drops ${g.lateDrops}, other detail ${g.other}; all entered: ${list(s.entered)}`,
+		`  gate verdicts: ${list(s.verdicts)}; late sheds ${s.lateSheds}; own CPU ${s.ownCpuUnavailable ? "unavailable (CPU shedding off)" : "available or not logged"}`,
+		`  efficiency-suspended seconds: ${list(s.efficiencySeconds)}`,
+	]
+}
+
+function starvationLines(manifest: Manifest): string[] {
+	const st = manifest.starvation
+	if (st === undefined) return []
+	const f = (v: number | null, d = 1): string =>
+		v === null ? "n/a" : v.toFixed(d)
+	const load = (l: readonly number[]): string =>
+		l.map(v => v.toFixed(2)).join("/")
+	const first = st.firstLosingStage
+	return [
+		`  hog ${st.hog.count} (${st.hog.requested}${st.hog.effectiveCount === undefined || st.hog.effectiveCount === null ? "" : `, ${st.hog.effectiveCount} alive at close${(st.hog.exitedEarlyPids ?? []).length > 0 ? `, exited early ${(st.hog.exitedEarlyPids ?? []).join(",")}` : ""}`}), PIDs ${st.hog.startedPids.join(",") || "none"}, stopped ${st.hog.stoppedPids.length}, SIGKILL ${st.hog.killedPids.length}, survivors ${st.hog.survivorPids.length}; core nice ${f(st.coreNice.effective, 0)} (asked ${st.coreNice.requested})`,
+		`  loadavg window start ${load(st.loadavg.windowStart)}, end ${load(st.loadavg.windowEnd)}`,
+		`  ELU ${f(st.loop.elu, 3)}, loop delay p50 ${f(st.loop.p50Ms)} p99 ${f(st.loop.p99Ms)} p99.9 ${f(st.loop.p999Ms)} max ${f(st.loop.maxMs)} ms; stalls ${st.loop.stalls?.count ?? "n/a"} (over 1 s ${st.loop.stalls?.over1000 ?? "n/a"}), longest ${f(st.loop.stalls?.top[0]?.ms ?? null)} ms`,
+		...st.stages.map(
+			s =>
+				`  stage ${s.id}: in ${f(s.inSamples, 0)} out ${f(s.outSamples, 0)} lost ${f(s.lostSamples, 0)}${s.lossShare === null ? "" : ` (${(s.lossShare * 100).toFixed(3)} %)`} ${s.losing === null ? "unknown" : s.losing ? "LOSING" : "ok"}`,
+		),
+		`  first losing stage: ${first === null ? noKnownLoss(st.unknownBeforeFirstLoss) : `${first.id} (${first.lostSamples} samples)${st.unknownBeforeFirstLoss.length > 0 ? `; unknown before it: ${st.unknownBeforeFirstLoss.join(", ")}` : ""}`}`,
+		...(st.fakeBehind === undefined
+			? []
+			: [
+					`  fake behind (late, not lost): A ${f(st.fakeBehind.aS, 2)} s${st.fakeBehind.blockedA === true ? " blocked" : ""}, B ${f(st.fakeBehind.bS, 2)} s${st.fakeBehind.blockedB === true ? " blocked" : ""}`,
+				]),
+		...(st.coreQosLate === undefined
+			? []
+			: [
+					`  core QoS late ${st.coreQosLate.requested}: applied ${st.coreQosLate.appliedUtc ?? "never"}, removed ${st.coreQosLate.removedUtc ?? "never (stays until exit)"}; ps pri ${f(st.coreQosLate.psPriBefore, 0)} -> ${f(st.coreQosLate.psPriApplied, 0)} -> ${f(st.coreQosLate.psPriRemoved, 0)}`,
+				]),
+	]
 }
 
 // === tier A ===
@@ -825,7 +1186,141 @@ interface Proc {
 
 const procs: Proc[] = []
 /** The work dir to remove if a signal ends the run early. */
-const held: { work: string | null } = { work: null }
+const held: { work: string | null; chan: string | null } = {
+	work: null,
+	chan: null,
+}
+
+/**
+ * A Unix socket path is at most 104 bytes on macOS (108 on Linux). The channelizer names a channel
+ * socket `<dir>/<source>-g<n>/<decoder id>-<hash>-g<n>.sock` (about 60 bytes past the dir for a
+ * scanner channel), so under macOS's long $TMPDIR a run lost its channels to "Channel socket path
+ * too long". The socket dir goes under /tmp when the work dir is too deep for that.
+ */
+const CHANNEL_SOCKET_DIR_MAX = 40
+
+function channelSocketDir(work: string): string {
+	const inWork = join(work, "chan")
+	if (inWork.length <= CHANNEL_SOCKET_DIR_MAX) return inWork
+	const dir = mkdtempSync("/tmp/wkc-")
+	chmodSync(dir, 0o700)
+	held.chan = dir
+	return dir
+}
+/** The CPU hogs of this run, stopped on every exit path (by PID, never by pattern). */
+const hogs: {
+	pool: HogPool | null
+	startMs: number | null
+	stopMs: number | null
+	label: string
+	loadStart: number | null
+	loadEnd: number | null
+	logPath: string | null
+	logged: boolean
+} = {
+	pool: null,
+	startMs: null,
+	stopMs: null,
+	label: "run",
+	loadStart: null,
+	loadEnd: null,
+	logPath: null,
+	logged: false,
+}
+
+/** One hog, ending itself when this harness dies (reparented) or after `maxSeconds`. */
+function spawnHog(maxSeconds: number): HogHandle {
+	const child = spawn(
+		process.execPath,
+		[
+			join(benchDir, "cpu-hog.mjs"),
+			"--parent",
+			String(process.pid),
+			"--max-seconds",
+			String(maxSeconds),
+		],
+		{ stdio: "ignore" },
+	)
+	const exited = new Promise<void>(r => {
+		child.once("exit", () => r())
+		child.once("error", () => r())
+	})
+	return {
+		pid: child.pid,
+		kill: signal => {
+			child.kill(signal)
+		},
+		isAlive: () => child.exitCode === null && child.signalCode === null,
+		exited,
+	}
+}
+
+/** Stops the hogs (idempotent) and writes the hog-window line once. */
+async function finishHogs(): Promise<HogRecord | null> {
+	const pool = hogs.pool
+	if (pool === null) return null
+	const rec = await pool.stop()
+	hogs.stopMs ??= Date.now()
+	if (!hogs.logged && hogs.startMs !== null && rec.count > 0) {
+		hogs.logged = true
+		const line = hogWindowLine({
+			startUtc: utcStamp(hogs.startMs),
+			stopUtc: utcStamp(hogs.stopMs),
+			count: rec.count,
+			label: hogs.label,
+			load1Start: hogs.loadStart,
+			load1End: hogs.loadEnd ?? os.loadavg()[0] ?? null,
+		})
+		log(line)
+		if (hogs.logPath !== null)
+			try {
+				writeFileSync(hogs.logPath, `${line}\n`, { flag: "a" })
+			} catch (err) {
+				log(
+					`could not append to ${hogs.logPath}: ${err instanceof Error ? err.message : String(err)}`,
+				)
+			}
+	}
+	if (rec.survivorPids.length > 0)
+		log(`hog PIDs still alive after SIGKILL: ${rec.survivorPids.join(", ")}`)
+	return rec
+}
+
+/** `ps -o nice=` of one PID, or null. */
+function niceOf(pid: number | undefined): number | null {
+	if (pid === undefined) return null
+	const r = spawnSync("ps", ["-o", "nice=", "-p", String(pid)], {
+		encoding: "utf8",
+	})
+	const v = Number(r.stdout.trim())
+	return r.status === 0 && r.stdout.trim() !== "" && Number.isFinite(v)
+		? v
+		: null
+}
+
+/** `ps -o pri=` of one PID (its scheduling priority), or null. */
+function priOf(pid: number | undefined): number | null {
+	if (pid === undefined) return null
+	const r = spawnSync("ps", ["-o", "pri=", "-p", String(pid)], {
+		encoding: "utf8",
+	})
+	const v = Number(r.stdout.trim())
+	return r.status === 0 && r.stdout.trim() !== "" && Number.isFinite(v)
+		? v
+		: null
+}
+
+/** The macOS taskpolicy(8) binary for a non-default --core-qos; throws when there is none. */
+function taskpolicyPath(qos: CoreQos): string {
+	const path = "/usr/sbin/taskpolicy"
+	if (qos === "default") return path
+	if (process.platform !== "darwin" || !existsSync(path))
+		throw new WaveKitError(
+			`--core-qos ${qos} needs macOS taskpolicy (${path}), which is not available here`,
+			"BUDGET_ARGS",
+		)
+	return path
+}
 
 function start(
 	name: string,
@@ -1026,6 +1521,64 @@ async function tierA(): Promise<void> {
 	const counts = flag("counts")
 	const keep = flag("keep")
 	const label = opt("label") ?? "run"
+	const hogRequested = opt("hog") ?? "0"
+	const hogCount = parseHogCount(hogRequested, os.availableParallelism())
+	if (hogCount === null)
+		throw new WaveKitError(`bad --hog ${hogRequested}`, "BUDGET_ARGS")
+	const settleSeconds = numOpt("hog-settle", 10)
+	const niceRaw = opt("core-nice") ?? "10"
+	const coreNice = Number(niceRaw)
+	if (!/^-?\d+$/.test(niceRaw) || coreNice < -20 || coreNice > 19)
+		throw new WaveKitError(`bad --core-nice ${niceRaw}`, "BUDGET_ARGS")
+	checkQosOptions(opt("core-qos"), opt("core-qos-late"))
+	const lateRaw = opt("core-qos-late")
+	const coreQosLate =
+		lateRaw === undefined ? null : CORE_QOS_LATE.find(q => q === lateRaw)
+	if (coreQosLate === undefined)
+		throw new WaveKitError(
+			`bad --core-qos-late ${lateRaw} (utility|background)`,
+			"BUDGET_ARGS",
+		)
+	const lateArgs = coreQosLate === null ? null : coreQosLateArgs(coreQosLate)
+	const lateTaskpolicy =
+		coreQosLate === null ? null : taskpolicyPath(coreQosLate)
+	const qosRaw = opt("core-qos") ?? "default"
+	const coreQos = CORE_QOS.find(q => q === qosRaw)
+	if (coreQos === undefined)
+		throw new WaveKitError(
+			`bad --core-qos ${qosRaw} (default|utility|background)`,
+			"BUDGET_ARGS",
+		)
+	const qosPrefix = coreQosPrefix(coreQos, taskpolicyPath(coreQos))
+	const autoOpt = opt("auto") ?? "1"
+	if (autoOpt !== "0" && autoOpt !== "1")
+		throw new WaveKitError(`bad --auto ${autoOpt}`, "BUDGET_ARGS")
+	const autoClient = autoOpt === "1"
+	const channelInput = opt("channel-input")
+	if (
+		channelInput !== undefined &&
+		channelInput !== "relay" &&
+		channelInput !== "direct"
+	)
+		throw new WaveKitError(
+			`bad --channel-input ${channelInput} (relay|direct)`,
+			"BUDGET_ARGS",
+		)
+	const queueRaw = opt("channel-queue-ms")
+	const channelQueueMs = queueRaw === undefined ? undefined : Number(queueRaw)
+	if (
+		channelQueueMs !== undefined &&
+		(!Number.isInteger(channelQueueMs) ||
+			channelQueueMs < 50 ||
+			channelQueueMs > 2000)
+	)
+		throw new WaveKitError(
+			`bad --channel-queue-ms ${queueRaw} (50..2000)`,
+			"BUDGET_ARGS",
+		)
+	hogs.label = label
+	hogs.logPath = opt("hog-log") ?? null
+	const harnessNice = os.getPriority()
 	const coreArg = resolve(opt("core") ?? join(root, "dist/index.js"))
 	if (!existsSync(coreArg))
 		throw new WaveKitError(`no core bundle at ${coreArg}`, "BUDGET_ARGS")
@@ -1039,6 +1592,11 @@ async function tierA(): Promise<void> {
 		)
 	if (requestedSeconds < 10)
 		throw new WaveKitError("--seconds must be at least 10", "BUDGET_ARGS")
+	if (hogCount > 0 && requestedSeconds > 120)
+		throw new WaveKitError(
+			"--seconds must be at most 120 with --hog",
+			"BUDGET_ARGS",
+		)
 	const { seconds, rounded } = roundWindowUp(requestedSeconds, SCENE_MS / 1000)
 	if (rounded)
 		log(
@@ -1050,6 +1608,7 @@ async function tierA(): Promise<void> {
 		: mkdtempSync(join(os.tmpdir(), "wk-budget-out-"))
 	mkdirSync(join(outDir, "preload"), { recursive: true })
 	mkdirSync(join(outDir, "ws"), { recursive: true })
+	mkdirSync(join(outDir, "auto"), { recursive: true })
 	log(`out ${outDir}`)
 	const work = mkdtempSync(join(os.tmpdir(), "wk-budget-"))
 	chmodSync(work, 0o700)
@@ -1087,7 +1646,14 @@ async function tierA(): Promise<void> {
 			"csdr",
 			`exec python3 ${shellQuote(join(root, "scripts/profile-stub-csdr.py"))} "$@"`,
 		)
-		for (const tool of DECODER_STANDINS) script(tool, "exec cat > /dev/null")
+		const standinDir = join(work, "standin-counts")
+		mkdirSync(standinDir)
+		writeFileSync(join(binDir, "standin-count.py"), STANDIN_COUNTER)
+		for (const tool of DECODER_STANDINS)
+			script(
+				tool,
+				`exec python3 ${shellQuote(join(binDir, "standin-count.py"))} ${shellQuote(tool)} ${shellQuote(standinDir)}`,
+			)
 		for (const tool of RECEIVER_TOOLS) script(tool, "exit 127")
 		const chanBin = process.env["WAVEKIT_CHAN_BIN"]
 		const realChan =
@@ -1169,7 +1735,12 @@ async function tierA(): Promise<void> {
 			},
 			digitalVoice: { enabled: true, httpPort: ports.voice },
 			channelizer: realChan
-				? { enabled: true, binaryPath: chanBin, socketDir: join(work, "chan") }
+				? {
+						enabled: true,
+						binaryPath: chanBin,
+						socketDir: channelSocketDir(work),
+						...(channelQueueMs !== undefined ? { channelQueueMs } : {}),
+					}
 				: { enabled: false, auto: false },
 			scanner: {
 				passive: { enabled: passive, maxEngineUtilization: 1 },
@@ -1224,6 +1795,7 @@ async function tierA(): Promise<void> {
 		const auth = { Authorization: `Bearer ${token}` }
 		env["WAVEKIT_CONFIG"] = configPath
 		env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] = privateDir
+		if (channelInput !== undefined) env["WAVEKIT_CHANNEL_INPUT"] = channelInput
 		env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`
 		env["BUDGET_OUT"] = join(outDir, "preload")
 		env["BUDGET_SOURCE_PORT"] = String(fakePort)
@@ -1238,7 +1810,18 @@ async function tierA(): Promise<void> {
 		log(
 			`starting scratch core (api 127.0.0.1:${ports.api}, fake 127.0.0.1:${fakePort})`,
 		)
-		core = start("core", "nice", ["-n", "10", process.execPath, ...nodeArgs], {
+		const coreCmd = [
+			...qosPrefix,
+			"nice",
+			"-n",
+			String(coreNice),
+			process.execPath,
+			...nodeArgs,
+		]
+		log(
+			`core under ${coreQos === "default" ? "the default QoS" : qosPrefix.join(" ")}, nice ${coreNice}`,
+		)
+		core = start("core", coreCmd[0] ?? "nice", coreCmd.slice(1), {
 			cwd: work,
 			env,
 			logTo: coreLog,
@@ -1261,6 +1844,36 @@ async function tierA(): Promise<void> {
 		if (startedPid === undefined)
 			throw new WaveKitError("scratch core has no PID", "BUDGET_UP")
 		const listenersChecked = checkLoopbackListeners(startedPid)
+		const coreNiceEffective = niceOf(startedPid)
+		const corePri = priOf(startedPid)
+		const runWarnings: string[] = []
+		const niceExpected = expectedNice(harnessNice, coreNice)
+		if (coreNiceEffective !== niceExpected)
+			runWarnings.push(
+				`core nice is ${coreNiceEffective ?? "unreadable"}, not the ${niceExpected} asked for (harness nice ${harnessNice} + --core-nice ${coreNice}, clamped to [-20, 19]; a nice below the harness's needs root)`,
+			)
+		const qosEffective = qosOfPri(corePri)
+		if (coreQos !== "default" && qosEffective !== coreQos)
+			runWarnings.push(
+				`core priority ${corePri ?? "unreadable"} does not show the ${coreQos} QoS asked for (read ${qosEffective ?? "nothing"})`,
+			)
+		log(
+			`core PID ${startedPid}: nice ${coreNiceEffective ?? "?"}, ps pri ${corePri ?? "?"} (${qosEffective ?? "?"})`,
+		)
+		if (hogCount > 0 && harnessNice !== 0)
+			runWarnings.push(
+				`the harness runs at nice ${harnessNice}, so its hogs do too: run the harness itself un-niced`,
+			)
+		if (autoClient)
+			start("auto", process.execPath, [
+				join(benchDir, "budget-ws-client.mjs"),
+				"audio",
+				`http://127.0.0.1:${ports.live}/auto`,
+				token,
+				join(outDir, "auto"),
+				"--name",
+				"auto",
+			])
 		if (!listenersChecked)
 			log("lsof is not available here: the core's listeners were not checked")
 		for (let i = 1; i <= clients; i++)
@@ -1288,7 +1901,12 @@ async function tierA(): Promise<void> {
 			)
 		const markAll = (): void => {
 			for (const p of procs)
-				if ((p.name === "fake" || p.name.startsWith("ws-")) && alive(p))
+				if (
+					(p.name === "fake" ||
+						p.name === "auto" ||
+						p.name.startsWith("ws-")) &&
+					alive(p)
+				)
 					p.child.kill("SIGUSR2")
 		}
 
@@ -1307,15 +1925,125 @@ async function tierA(): Promise<void> {
 					join(outDir, "main.cpuprofile"),
 				)
 			: null
+		// CPU hogs: started before the window, settled, stopped at its end (by PID).
+		let hogNice: number | null = null
+		if (hogCount > 0) {
+			// Hard lifetime: settle + window + 30 s, so no hog outlives a run however it ends.
+			const lifetime = settleSeconds + seconds + 30
+			hogs.pool = new HogPool(() => spawnHog(lifetime), {
+				graceMs: 2000,
+				sleep: abortableSleep,
+			})
+			const rec = await hogs.pool.start(hogCount)
+			hogs.startMs = Date.now()
+			hogNice = niceOf(rec.startedPids[0])
+			log(
+				`${rec.count} CPU hogs started (PIDs ${rec.startedPids.join(", ")}), settling ${settleSeconds} s`,
+			)
+			await sleep(settleSeconds * 1000)
+		}
+		// --core-qos-late: the core loses its QoS right at the window open, as on a host that
+		// starts loading after the core is up.
+		const late: Starvation["coreQosLate"] =
+			coreQosLate === null || lateArgs === null || lateTaskpolicy === null
+				? undefined
+				: {
+						requested: coreQosLate,
+						applyCommand: [
+							lateTaskpolicy,
+							...lateArgs.apply,
+							"-p",
+							String(corePid),
+						],
+						removeCommand: [
+							lateTaskpolicy,
+							...lateArgs.remove,
+							"-p",
+							String(corePid),
+						],
+						appliedUtc: null,
+						removedUtc: null,
+						applyStatus: null,
+						removeStatus: null,
+						psPriBefore: priOf(corePid),
+						psPriApplied: null,
+						psPriRemoved: null,
+						scope:
+							"the core's process only (taskpolicy -p): decoder and channelizer children it already spawned keep the default QoS",
+					}
+		if (late !== undefined) {
+			const r = spawnSync(
+				late.applyCommand[0] ?? "",
+				late.applyCommand.slice(1),
+				{
+					encoding: "utf8",
+				},
+			)
+			late.appliedUtc = utcStamp(Date.now())
+			late.applyStatus = r.status
+			late.psPriApplied = priOf(corePid)
+			log(
+				`core QoS late ${coreQosLate}: ${late.applyCommand.join(" ")} exit ${r.status ?? "?"}, ps pri ${late.psPriBefore ?? "?"} -> ${late.psPriApplied ?? "?"}`,
+			)
+			if (r.status !== 0)
+				runWarnings.push(
+					`taskpolicy ${late.applyCommand.join(" ")} failed (exit ${r.status ?? "?"}): ${r.stderr.trim()}`,
+				)
+			else if (
+				coreQosLate === "background" &&
+				qosOfPri(late.psPriApplied) !== "background"
+			)
+				runWarnings.push(
+					`core ps pri ${late.psPriApplied ?? "unreadable"} after taskpolicy -b does not show the background QoS`,
+				)
+		}
 		// Children's CPU from just before the window opens (after the collector start).
 		writeFileSync(join(outDir, "ps-start.txt"), psUnder(corePid))
+		const loadStart = os.loadavg()
+		hogs.loadStart = loadStart[0] ?? null
 		markAll()
 		core.child.kill("SIGUSR2")
-		const startUtc = new Date().toISOString()
-		log(`window open ${startUtc}, ${seconds} s`)
-		await sleep(seconds * 1000)
+		const openMs = Date.now()
+		const startUtc = new Date(openMs).toISOString()
+		log(
+			`window open ${startUtc}, ${seconds} s, load ${loadStart.map(v => v.toFixed(2)).join("/")}`,
+		)
+		const edgeA = await apiEdge(api, auth, standinDir, openMs)
+		writeFileSync(join(outDir, "api-start.json"), JSON.stringify(edgeA))
+		log(`edge A read in ${edgeA.doneMs - edgeA.signalMs} ms`)
+		await sleep(Math.max(0, seconds * 1000 - (Date.now() - openMs)))
+		const hogsAlive = hogs.pool?.checkAlive() ?? null
+		if (hogsAlive !== null && hogsAlive.exitedEarlyPids.length > 0)
+			runWarnings.push(
+				`hog PIDs ${hogsAlive.exitedEarlyPids.join(", ")} had exited before the window closed: ${hogsAlive.effectiveCount ?? "?"} of ${hogsAlive.count} loaded it at the end`,
+			)
 		core.child.kill("SIGUSR2")
+		const closeMs = Date.now()
 		markAll()
+		if (late !== undefined) {
+			const r = spawnSync(
+				late.removeCommand[0] ?? "",
+				late.removeCommand.slice(1),
+				{ encoding: "utf8" },
+			)
+			late.removeStatus = r.status
+			if (r.status === 0) late.removedUtc = utcStamp(Date.now())
+			else
+				runWarnings.push(
+					`taskpolicy ${late.removeCommand.join(" ")} failed (exit ${r.status ?? "?"}): the QoS stays until the core exits`,
+				)
+			late.psPriRemoved = priOf(corePid)
+			log(
+				`core QoS late removed: exit ${r.status ?? "?"}, ps pri ${late.psPriRemoved ?? "?"}`,
+			)
+		}
+		const loadEnd = os.loadavg()
+		hogs.loadEnd = loadEnd[0] ?? null
+		const hogRecord = await finishHogs()
+		const edgeB = await apiEdge(api, auth, standinDir, closeMs)
+		writeFileSync(join(outDir, "api-end.json"), JSON.stringify(edgeB))
+		log(`edge B read in ${edgeB.doneMs - edgeB.signalMs} ms`)
+		log(`window closed, load ${loadEnd.map(v => v.toFixed(2)).join("/")}`)
 		writeFileSync(join(outDir, "ps-end.txt"), psUnder(corePid))
 		writeFileSync(
 			join(outDir, "decisions-end.json"),
@@ -1366,6 +2094,7 @@ async function tierA(): Promise<void> {
 			decoderBinaries: realChan ? "stand-in" : "absent",
 			activityStore: "real",
 			wsClients: clients > 0 ? "real" : "absent",
+			autoClient: autoClient ? "real" : "absent",
 			iqCapture: "absent",
 		}
 		const meta: RunMeta = {
@@ -1385,7 +2114,7 @@ async function tierA(): Promise<void> {
 			notes: [
 				"access protected (local-http, every listener bound to 127.0.0.1; the raw audio TCP port and the tuner relay do not run in protected mode), region EU, logging at the default level",
 				"passive guard limit maxEngineUtilization 1, so a loaded host does not turn passive off mid-run",
-				`stand-in decoder executables: ${DECODER_STANDINS.join(", ")} (read and discard stdin)`,
+				`stand-in decoder executables: ${DECODER_STANDINS.join(", ")} (count their stdin bytes into count files)`,
 				...(realChan
 					? []
 					: [
@@ -1400,7 +2129,35 @@ async function tierA(): Promise<void> {
 			warmupSeconds: warmup,
 			listenersChecked,
 			overlay: null,
-			warnings: [],
+			warnings: runWarnings,
+			starvationRun: {
+				hogRequested,
+				hog: hogRecord ?? {
+					count: 0,
+					startedPids: [],
+					stoppedPids: [],
+					killedPids: [],
+					survivorPids: [],
+					exitedEarlyPids: [],
+					effectiveCount: null,
+				},
+				hogStartUtc: hogs.startMs === null ? null : utcStamp(hogs.startMs),
+				hogStopUtc: hogs.stopMs === null ? null : utcStamp(hogs.stopMs),
+				hogNice,
+				settleSeconds: hogCount > 0 ? settleSeconds : 0,
+				coreNiceRequested: coreNice,
+				coreNiceEffective,
+				harnessNice,
+				loadStart: [loadStart[0] ?? 0, loadStart[1] ?? 0, loadStart[2] ?? 0],
+				loadEnd: [loadEnd[0] ?? 0, loadEnd[1] ?? 0, loadEnd[2] ?? 0],
+				autoClient,
+				coreQos: { requested: coreQos, command: qosPrefix, psPri: corePri },
+				...(late === undefined ? {} : { coreQosLate: late }),
+				edgeReadMs: {
+					start: edgeA.doneMs - edgeA.signalMs,
+					end: edgeB.doneMs - edgeB.signalMs,
+				},
+			},
 		}
 		writeFileSync(
 			join(outDir, "run.json"),
@@ -1412,11 +2169,13 @@ async function tierA(): Promise<void> {
 		log(Buffer.concat(coreLog).toString("utf8").slice(-3000))
 		process.exitCode = 1
 	} finally {
+		await finishHogs()
 		for (const p of [...procs].reverse()) await stop(p, "SIGTERM", 5000)
 		if (coreLog.length > 0 && !existsSync(join(outDir, "core.log")))
 			writeFileSync(join(outDir, "core.log"), Buffer.concat(coreLog))
 		if (keep) log(`kept work dir ${work}`)
 		else rmSync(work, { recursive: true, force: true })
+		if (held.chan !== null) rmSync(held.chan, { recursive: true, force: true })
 		log(`results in ${outDir}`)
 	}
 }
@@ -1573,17 +2332,28 @@ if (reassemble !== undefined) {
 		process.exitCode = 1
 	}
 } else {
-	for (const signal of ["SIGINT", "SIGTERM"] as const)
+	// SIGHUP too (a closed terminal): the hogs, the children and the socket dir all go.
+	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const)
 		process.once(signal, () => {
 			log(`${signal}: stopping`)
-			void Promise.all([...procs].reverse().map(p => stop(p, "SIGTERM", 3000)))
+			void finishHogs()
+				.catch(() => null)
+				.then(() =>
+					Promise.all([...procs].reverse().map(p => stop(p, "SIGTERM", 3000))),
+				)
 				.catch(() => undefined)
 				.finally(() => {
 					if (held.work !== null)
 						rmSync(held.work, { recursive: true, force: true })
-					process.exit(signal === "SIGINT" ? 130 : 143)
+					if (held.chan !== null)
+						rmSync(held.chan, { recursive: true, force: true })
+					process.exit(
+						signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143,
+					)
 				})
 		})
+	// Last resort: SIGKILL every hog still alive, by its handle.
+	process.on("exit", () => hogs.pool?.stopNow())
 	void tierA().catch((err: unknown) => {
 		log(err instanceof Error ? (err.stack ?? err.message) : String(err))
 		process.exitCode = 1

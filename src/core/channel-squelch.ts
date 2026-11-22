@@ -150,6 +150,8 @@ const BYTES_PER_COMPLEX_SAMPLE = 8
 const MUTED_MAGNITUDE = 1e-4
 /** Time constant of the reported (smoothed) channel power. */
 const REPORT_SMOOTHING_MS = 100
+/** Host byte order: float32 views read the wire format (little-endian) directly. */
+const LITTLE_ENDIAN = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1
 
 export class ChannelSquelch {
 	private readonly blockBytes: number
@@ -157,7 +159,25 @@ export class ChannelSquelch {
 	private readonly hysteresisDb: number
 	private readonly hangMs: number
 	private thresholdDbfs: number | null
-	private remainder: Buffer = Buffer.alloc(0)
+	/**
+	 * The partial block carried between `process` calls (`pendingBytes` valid bytes). Never
+	 * emitted itself: a pass-through block assembled here leaves as a copy.
+	 */
+	private readonly pending: Buffer
+	private pendingBytes = 0
+	/** Aligned float32 copy of one block (`blockPower`, the rotation), viewed by `scratchBytes`. */
+	private readonly scratch: Float32Array
+	private readonly scratchBytes: Buffer
+	/**
+	 * Muted output shared by the blocks of a mute (no allocation per closed block). Ownership:
+	 * once pushed, a chunk stays referenced by the stream until written, so these buffers are
+	 * immutable: filled once when created, never written again. `zeroBlock` (A19 zeros) is
+	 * replaced only when the length changes; `heldBlock` (the -80 dBFS hold vector) when the
+	 * length changes or a new mute episode starts (new fill vector). A replaced buffer stays
+	 * valid for whoever still holds it.
+	 */
+	private zeroBlock: Buffer | null = null
+	private heldBlock: Buffer | null = null
 	private streamMs = 0
 	private lastAboveMs = Number.NEGATIVE_INFINITY
 	/**
@@ -215,6 +235,9 @@ export class ChannelSquelch {
 			Math.round((options.sampleRate * (options.blockMs ?? 10)) / 1000),
 		)
 		this.blockBytes = blockSamples * BYTES_PER_COMPLEX_SAMPLE
+		this.pending = Buffer.alloc(this.blockBytes)
+		this.scratch = new Float32Array(blockSamples * 2)
+		this.scratchBytes = Buffer.from(this.scratch.buffer)
 		this.blockMs = (blockSamples / options.sampleRate) * 1000
 		this.hysteresisDb = options.hysteresisDb ?? 2
 		this.hangMs = options.hangMs ?? 250
@@ -428,31 +451,53 @@ export class ChannelSquelch {
 		this.lastBlockCarrier = false
 	}
 
-	/** Gates complete blocks; a partial block waits for the next chunk. */
+	/**
+	 * Gates complete blocks; a partial block waits for the next chunk. Exactly one whole block
+	 * with nothing pending (the live demodulator's case) is gated in place, without a copy. Copies:
+	 * a partial tail is copied into `pending`; a block completed there is gated in place and copied
+	 * out only when it leaves as pass-through data (the emitted block may be referenced downstream
+	 * while `pending` is reused). Blocks wholly inside the chunk pass as views of it, as before.
+	 */
 	process(chunk: Buffer): Buffer[] {
-		const data =
-			this.remainder.length > 0 ? Buffer.concat([this.remainder, chunk]) : chunk
+		const blockBytes = this.blockBytes
+		if (this.pendingBytes === 0 && chunk.length === blockBytes)
+			return [this.gateBlock(chunk)]
 		const out: Buffer[] = []
 		let offset = 0
-		while (data.length - offset >= this.blockBytes) {
-			const block = data.subarray(offset, offset + this.blockBytes)
-			offset += this.blockBytes
-			out.push(this.gateBlock(block))
+		if (this.pendingBytes > 0) {
+			const need = blockBytes - this.pendingBytes
+			if (chunk.length < need) {
+				chunk.copy(this.pending, this.pendingBytes)
+				this.pendingBytes += chunk.length
+				return out
+			}
+			chunk.copy(this.pending, this.pendingBytes, 0, need)
+			offset = need
+			this.pendingBytes = 0
+			const emitted = this.gateBlock(this.pending)
+			out.push(emitted === this.pending ? Buffer.from(emitted) : emitted)
 		}
-		this.remainder = Buffer.from(data.subarray(offset))
+		while (chunk.length - offset >= blockBytes) {
+			out.push(this.gateBlock(chunk.subarray(offset, offset + blockBytes)))
+			offset += blockBytes
+		}
+		if (offset < chunk.length) {
+			chunk.copy(this.pending, 0, offset)
+			this.pendingBytes = chunk.length - offset
+		}
 		return out
 	}
 
 	/** Releases the buffered partial block using the current gate state. */
 	flush(): Buffer[] {
-		if (this.remainder.length === 0) return []
-		const tail = this.remainder
-		this.remainder = Buffer.alloc(0)
+		if (this.pendingBytes === 0) return []
+		const tail = Buffer.from(this.pending.subarray(0, this.pendingBytes))
+		this.pendingBytes = 0
 		return [this.emitBlock(tail)]
 	}
 
 	private gateBlock(block: Buffer): Buffer {
-		const power = blockPower(block)
+		const power = this.blockPower(block)
 		this.streamMs += this.blockMs
 		this.smoothedPower =
 			this.smoothedPower === null
@@ -595,7 +640,12 @@ export class ChannelSquelch {
 			// A19: exact zeros freeze the envelope chain's AGC; no phase to continue.
 			if (!passing) {
 				this.outputOpen = false
-				return Buffer.alloc(block.length)
+				let zeros = this.zeroBlock
+				if (zeros === null || zeros.length !== block.length) {
+					zeros = Buffer.alloc(block.length)
+					this.zeroBlock = zeros
+				}
+				return zeros
 			}
 			this.outputOpen = true
 			return block
@@ -608,11 +658,13 @@ export class ChannelSquelch {
 					this.fillQ = (this.lastQ / magnitude) * MUTED_MAGNITUDE
 				}
 				this.outputOpen = false
+				// A new mute episode: a new hold buffer (the old one stays as emitted).
+				this.heldBlock = null
 			}
-			const muted = Buffer.alloc(block.length)
-			for (let n = 0; n < samples; n++) {
-				muted.writeFloatLE(this.fillI, n * 8)
-				muted.writeFloatLE(this.fillQ, n * 8 + 4)
+			let muted = this.heldBlock
+			if (muted === null || muted.length !== block.length) {
+				muted = this.heldVector(block.length, samples)
+				this.heldBlock = muted
 			}
 			return muted
 		}
@@ -627,19 +679,156 @@ export class ChannelSquelch {
 			this.outputOpen = true
 		}
 		let out = block
-		if (this.rotCos !== 1 || this.rotSin !== 0) {
-			out = Buffer.from(block)
-			for (let n = 0; n < samples; n++) {
-				const i = block.readFloatLE(n * 8)
-				const q = block.readFloatLE(n * 8 + 4)
-				out.writeFloatLE(i * this.rotCos - q * this.rotSin, n * 8)
-				out.writeFloatLE(i * this.rotSin + q * this.rotCos, n * 8 + 4)
-			}
-		}
+		if (this.rotCos !== 1 || this.rotSin !== 0)
+			out = this.rotated(block, samples)
 		const last = (samples - 1) * 8
 		this.lastI = out.readFloatLE(last)
 		this.lastQ = out.readFloatLE(last + 4)
 		return out
+	}
+
+	/**
+	 * A fresh, never rewritten buffer of `length` bytes holding the hold vector in each of its
+	 * `samples` complex samples (a trailing partial sample stays zero, as before).
+	 */
+	private heldVector(length: number, samples: number): Buffer {
+		const muted = Buffer.alloc(length)
+		if (LITTLE_ENDIAN) {
+			// Buffer.alloc owns its ArrayBuffer (offset 0): the view is aligned.
+			const view = new Float32Array(muted.buffer, muted.byteOffset, samples * 2)
+			const fillI = this.fillI
+			const fillQ = this.fillQ
+			for (let k = 0; k < samples * 2; k += 2) {
+				view[k] = fillI
+				view[k + 1] = fillQ
+			}
+		} else {
+			for (let n = 0; n < samples; n++) {
+				muted.writeFloatLE(this.fillI, n * 8)
+				muted.writeFloatLE(this.fillQ, n * 8 + 4)
+			}
+		}
+		return muted
+	}
+
+	/**
+	 * The block rotated by (`rotCos`, `rotSin`) in a fresh buffer (only after an unmute, not the
+	 * steady state); a trailing partial sample is copied unrotated, as before.
+	 */
+	private rotated(block: Buffer, samples: number): Buffer {
+		const cos = this.rotCos
+		const sin = this.rotSin
+		if (!LITTLE_ENDIAN) {
+			const out = Buffer.from(block)
+			for (let n = 0; n < samples; n++) {
+				const i = block.readFloatLE(n * 8)
+				const q = block.readFloatLE(n * 8 + 4)
+				out.writeFloatLE(i * cos - q * sin, n * 8)
+				out.writeFloatLE(i * sin + q * cos, n * 8 + 4)
+			}
+			return out
+		}
+		const bytes = samples * BYTES_PER_COMPLEX_SAMPLE
+		// allocUnsafeSlow owns its ArrayBuffer (offset 0); every byte is written below.
+		const out = Buffer.allocUnsafeSlow(block.length)
+		block.copy(out, bytes, bytes)
+		block.copy(this.scratchBytes, 0, 0, bytes)
+		const src = this.scratch
+		const dst = new Float32Array(out.buffer, out.byteOffset, samples * 2)
+		for (let k = 0; k < samples * 2; k += 2) {
+			const i = src[k]!
+			const q = src[k + 1]!
+			dst[k] = i * cos - q * sin
+			dst[k + 1] = i * sin + q * cos
+		}
+		return out
+	}
+
+	/** Mean |z|² of a whole block; non-finite values are skipped (same order as before). */
+	private blockPower(block: Buffer): number {
+		const samples = block.length / BYTES_PER_COMPLEX_SAMPLE
+		let sum = 0
+		if (LITTLE_ENDIAN) {
+			const floats = block.length >> 2
+			block.copy(this.scratchBytes, 0, 0, floats * 4)
+			const view = this.scratch
+			for (let k = 0; k < floats; k++) {
+				const value = view[k]!
+				if (Number.isFinite(value)) sum += value * value
+			}
+		} else {
+			for (let i = 0; i < block.length; i += 4) {
+				const value = block.readFloatLE(i)
+				if (Number.isFinite(value)) sum += value * value
+			}
+		}
+		return sum / samples
+	}
+}
+
+/**
+ * Cuts a byte stream into whole blocks of `blockBytes` without copying the stream: a block wholly
+ * inside a chunk is passed as a view of it; at most one partial block is carried, in a buffer
+ * allocated once. A block that straddles two chunks is assembled in that carry buffer and passed
+ * as it (`ownsMemoryOf` true): the callee must copy whatever it keeps or emits from it, because
+ * the carry buffer is reused by the next chunk.
+ */
+export class SquelchBlockChunker {
+	readonly blockBytes: number
+	private readonly carry: Buffer
+	private carried = 0
+
+	constructor(blockBytes: number) {
+		this.blockBytes = blockBytes
+		this.carry = Buffer.alloc(blockBytes)
+	}
+
+	/** Bytes of the partial block carried for the next chunk. */
+	get pendingBytes(): number {
+		return this.carried
+	}
+
+	/** True when `buffer` lies in the reused carry buffer (copy it before keeping it). */
+	ownsMemoryOf(buffer: Buffer): boolean {
+		return buffer.buffer === this.carry.buffer
+	}
+
+	/** Calls `onBlock` for every whole block completed by `chunk`, in stream order. */
+	push(chunk: Buffer, onBlock: (block: Buffer) => void): void {
+		const blockBytes = this.blockBytes
+		let offset = 0
+		if (this.carried > 0) {
+			const need = blockBytes - this.carried
+			if (chunk.length < need) {
+				chunk.copy(this.carry, this.carried)
+				this.carried += chunk.length
+				return
+			}
+			chunk.copy(this.carry, this.carried, 0, need)
+			offset = need
+			this.carried = 0
+			onBlock(this.carry)
+		}
+		while (chunk.length - offset >= blockBytes) {
+			onBlock(chunk.subarray(offset, offset + blockBytes))
+			offset += blockBytes
+		}
+		if (offset < chunk.length) {
+			chunk.copy(this.carry, 0, offset)
+			this.carried = chunk.length - offset
+		}
+	}
+
+	/** Drops the bytes of a partial `unit` at the end of the carried block (alignment reset). */
+	dropPartial(unit: number): void {
+		this.carried -= this.carried % unit
+	}
+
+	/** Takes the carried partial block as a fresh buffer and empties the carry. */
+	take(): Buffer {
+		const tail = Buffer.from(this.carry.subarray(0, this.carried))
+		this.carried = 0
+		return tail
 	}
 }
 
@@ -661,16 +850,6 @@ export function createChannelSquelchTransform(
 
 function normalizeThreshold(value: number | null): number | null {
 	return value === null || value >= 0 || !Number.isFinite(value) ? null : value
-}
-
-function blockPower(block: Buffer): number {
-	const samples = block.length / BYTES_PER_COMPLEX_SAMPLE
-	let sum = 0
-	for (let i = 0; i < block.length; i += 4) {
-		const value = block.readFloatLE(i)
-		if (Number.isFinite(value)) sum += value * value
-	}
-	return sum / samples
 }
 
 function toDbfs(power: number): number {
