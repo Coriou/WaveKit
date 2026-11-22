@@ -133,6 +133,139 @@ class Transport implements ActivityClientTransport {
 	close(): void {}
 }
 
+/**
+ * The seeded shape of the WG25 acceptance (modelled: shape from a private state, ids
+ * synthetic): six dsd-fme DMR call_end rows linked by the baseline image, five to dsd-fme DMR
+ * names (a two-digit colour code included) and one to a name whose system field dsd-fme left
+ * empty, one of them through its late file update (wavFileUpdate). A P25 row stays presented.
+ */
+const SEEDED_DMR_KEYS = [
+	"dsd~20261012_110000_10001_DMR_CC_11_GROUP_TGT_90001_SRC_901.wav",
+	"dsd~20261012_110010_10002_DMR_CC_11_GROUP_TGT_90001_SRC_902.wav",
+	"dsd~20261012_110020_10003_DMR_CC_11_GROUP_TGT_90001_SRC_903.wav",
+	"dsd~20261012_110030_10004_DMR_CC_1_GROUP_TGT_90002_SRC_904.wav",
+	"dsd~20261012_110040_10005_DMR_CC_11_GROUP_TGT_90001_SRC_9.wav",
+	"dsd~20261012_110050_10006__GROUP_TGT_9_SRC_9.wav",
+]
+
+function admitSeeded(store: Store): void {
+	SEEDED_DMR_KEYS.forEach((id, i) =>
+		store.admit(
+			envelope({
+				eventId: `seeded-dmr-${i}`,
+				decoderId: "dsd-fme",
+				category: "voice",
+				outputType: "call_end",
+				protocol: "dmr",
+				entityKey: null,
+				decodedData:
+					i === 2
+						? { callId: `c${i}`, flags: { wavFileUpdate: true } }
+						: { callId: `c${i}` },
+			}),
+			undefined,
+			{ id, durationMs: 1000 + i },
+		),
+	)
+	store.admit(
+		envelope({
+			eventId: "seeded-p25",
+			decoderId: "dsd-fme",
+			category: "voice",
+			outputType: "call_end",
+			protocol: "p25",
+			entityKey: null,
+		}),
+		undefined,
+		{ id: P25_KEY, durationMs: 3100 },
+	)
+}
+
+function expectSeededHidden(items: readonly ActivitySummary[], body: string) {
+	for (let i = 0; i < SEEDED_DMR_KEYS.length; i++)
+		expect(recordingOf(items, `seeded-dmr-${i}`)).toBeUndefined()
+	for (const key of SEEDED_DMR_KEYS)
+		expect(body).not.toContain(key.slice("dsd~".length))
+	expect(recordingOf(items, "seeded-p25")).toEqual({
+		id: P25_KEY,
+		durationMs: 3100,
+	})
+}
+
+describe("activity: rows a baseline image linked to DMR call files (seeded store)", () => {
+	it("the REST list and a hasRecording query never present their recording", async () => {
+		const store = await openStore()
+		admitSeeded(store)
+		const service = createActivityQueryService({
+			store,
+			logger,
+			execution: "inline",
+		})
+		const app = Fastify({ logger: false })
+		await app.register(activityRoutes, { service, enabled: true })
+		try {
+			const all = await app.inject({ method: "GET", url: "/api/activity" })
+			expect(all.statusCode).toBe(200)
+			const items = (all.json() as { items: ActivitySummary[] }).items
+			expect(items).toHaveLength(SEEDED_DMR_KEYS.length + 1)
+			expectSeededHidden(items, all.body)
+			// The stored link still matches hasRecording until the link sweep removes it
+			// (recording-links.ts; the catalogue answers false for these keys at once), but no
+			// row of that page presents a DMR recording either.
+			const linked = await app.inject({
+				method: "GET",
+				url: "/api/activity?hasRecording=true",
+			})
+			expect(linked.statusCode).toBe(200)
+			expectSeededHidden(
+				(linked.json() as { items: ActivitySummary[] }).items,
+				linked.body,
+			)
+		} finally {
+			await app.close()
+			await service.close()
+		}
+	})
+
+	it("the WebSocket records never present their recording", async () => {
+		const store = await openStore()
+		const service = createActivityQueryService({
+			store,
+			logger,
+			execution: "inline",
+		})
+		const start = await service.search({ query: {} })
+		admitSeeded(store)
+		const hub = createActivitySubscriptions({ service, enabled: true })
+		const transport = new Transport("client-seeded")
+		try {
+			hub.handleMessage(transport, {
+				type: "activity:subscribe",
+				id: "seeded",
+				query: {},
+				cursor: start.replayCursor,
+			})
+			const items = (): ActivitySummary[] =>
+				transport.delivered.flatMap(m => {
+					const message = m as {
+						type?: string
+						data?: { items?: ActivitySummary[] }
+					}
+					return message.type === "activity:records"
+						? [...(message.data?.items ?? [])]
+						: []
+				})
+			await expect
+				.poll(() => items().length, { timeout: 5_000 })
+				.toBe(SEEDED_DMR_KEYS.length + 1)
+			expectSeededHidden(items(), JSON.stringify(transport.delivered))
+		} finally {
+			hub.close()
+			await service.close()
+		}
+	})
+})
+
 describe("activity: dsd-fme recording links at read time", () => {
 	it("the REST list presents P25 and dv recorder links, never a stored DMR or unlisted-label link", async () => {
 		const store = await openStore()

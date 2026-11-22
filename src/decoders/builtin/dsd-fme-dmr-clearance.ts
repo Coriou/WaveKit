@@ -181,6 +181,11 @@ interface LcSeen {
 interface CallRecord {
 	/** An unattributed burst bars proof for the rest of this lifetime. */
 	unplaced: boolean
+	/**
+	 * The adapter opened the call from a terminator train alone (no voice
+	 * decoded, voiceless): never cleared.
+	 */
+	voiceless: boolean
 	callId: string
 	key: string | null
 	firstVoiceSeq: number | undefined
@@ -526,6 +531,21 @@ export class DmrClearance {
 		}
 	}
 
+	/**
+	 * The adapter opened `callId` from a terminator train alone: no voice
+	 * of it was decoded, so nothing proves it clear (it stays unknown, or
+	 * encrypted). Sticky for the call's lifetime.
+	 */
+	voiceless(callId: string): void {
+		for (const lane of this.lanes.values()) {
+			const call = lane.call
+			if (call?.callId !== callId) continue
+			call.voiceless = true
+			call.evidence = undefined
+			if (call.trust === "pending") call.trust = "unknown"
+		}
+	}
+
 	/** Invalidate the generation before any closing snapshots are published. */
 	private resetMode(): DmrDecision[] {
 		const out: DmrDecision[] = []
@@ -699,6 +719,7 @@ export class DmrClearance {
 			const encrypted = lane.privacySeq === seq || this.tainted(lane, view.key)
 			record = {
 				unplaced: key === "x",
+				voiceless: false,
 				callId: view.callId,
 				key: view.key,
 				firstVoiceSeq:
@@ -765,6 +786,7 @@ export class DmrClearance {
 			lc.burstSeq !== burst.seq ||
 			!burst.syncClean ||
 			burst.errored ||
+			record.voiceless ||
 			record.trust === "encrypted" ||
 			record.trust === "clear"
 		)
@@ -961,6 +983,7 @@ export class DmrClearance {
 		if (
 			call.trust !== "pending" ||
 			call.unplaced ||
+			call.voiceless ||
 			// Keyless evidence never settles clear.
 			call.key === null ||
 			evidence.lcKey === "" ||

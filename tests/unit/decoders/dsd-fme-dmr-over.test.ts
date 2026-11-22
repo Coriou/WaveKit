@@ -634,14 +634,26 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			}
 		})
 
-		it("a key-up whose first header printed a garbled colour code is one call", () => {
+		it("a key-up whose first header printed a garbled colour code is one call, after the cut transmission's own call", () => {
 			const lines = fixture("direct-e4")
 			const { starts, ends } = replay(lines, lines.at(-1)![0] + 6000)
-			expect(starts).toHaveLength(1)
-			expect(ends).toHaveLength(1)
+			// The capture opens on the end of an earlier transmission (its
+			// terminator and link control only): that is a call of its own, with
+			// its IDs, never known clear; the next over's voice ends it.
+			expect(starts).toHaveLength(2)
+			expect(ends).toHaveLength(2)
+			const [cut, keyUp] = ends
+			expect(cut).toMatchObject({
+				talkgroup: 90001,
+				source: 901,
+				encryptionKnown: false,
+			})
 			const vlc = timesOf(lines, /\| VLC/)[0]!
-			expect(at(ends[0]!.startedAt)).toBe(vlc)
-			expect(at(ends[0]!.endedAt!)).toBe(timesOf(lines, /\| TLC/).at(-1))
+			expect(at(cut!.startedAt)).toBeLessThan(vlc)
+			expect(at(cut!.endedAt!)).toBeLessThan(vlc)
+			// The key-up itself is one call, from its first header to its terminator.
+			expect(at(keyUp!.startedAt)).toBe(vlc)
+			expect(at(keyUp!.endedAt!)).toBe(timesOf(lines, /\| TLC/).at(-1))
 		})
 
 		it("three voice LC headers of one key-up, the last 260 ms after the second, stay one call under -Z", () => {

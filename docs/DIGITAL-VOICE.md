@@ -114,8 +114,9 @@ probes). It records whether or not anyone is listening.
   `DMR_`), or no known protocol, is not listed in Recordings, cannot be
   downloaded and is never linked to its Activity row; a dsd-fme decoder in
   `mode: dmr` is not asked for per-call files at all. An Activity row linked to
-  one earlier shows no play control. Files dsd-fme already
-  wrote stay on disk under the usual retention.
+  one earlier shows no play control, and its link is removed by the next
+  link sweeps (about 2 min), even while another recordings folder is missing.
+  Files dsd-fme already wrote stay on disk under the usual retention.
 - **About 2 s behind the air.** Each sample is held for 2 s before it is
   written, so a late encryption notice can still withhold it. The call's end
   also reaches the recorder up to 10 s after the decoder reported it.
@@ -194,6 +195,13 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   present and not `true`, and admits it once the call is known clear. A scanner
   probe records such a call as encrypted, never as a clear recording. Noise
   syncs that start a DMR call leave it unknown, so it stays muted.
+- **Every DMR call is published**: whether a call is clear or encrypted sets
+  only `encrypted`, `encryptionKnown` and its recording, never whether its
+  `call_start` / `call_end` (with talkgroup, source, slot and times) exist. An
+  over whose voice dsd-fme did not decode but whose terminator link control it
+  did (a weak repeater, or a capture that opens on a transmission's end) is
+  still a call, with `encryptionKnown: false`; a repeater's hang train after a
+  call is that call, not new ones.
 - **Hold on the stream**: the digital voice stream (`/stream`,
   `/decoders/<id>/stream`) does not mute the head of such a call; it holds it.
   Its voice waits in a per-slot ring (slot 1, slot 2, and a whole-datagram

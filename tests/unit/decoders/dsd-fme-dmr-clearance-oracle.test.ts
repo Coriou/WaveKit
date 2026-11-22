@@ -129,6 +129,72 @@ function auditPublications(decoder: ReturnType<typeof createDecoder>) {
 }
 
 /** Replays items (10 ms steps, the 500 ms timer), recording each publication's line seq. */
+/**
+ * The script with every privacy print removed (PI bursts, ALG / KEY ID
+ * prints; a link control keeps its IDs but loses the Encrypted word and the
+ * SVC privacy bit 0x40).
+ */
+function withoutPrivacy(items: readonly Item[]): Item[] {
+	const out: Item[] = []
+	for (const [t, raw] of items) {
+		const text = raw.replace(/\x1b\[[0-9;]*m/g, "")
+		if (/\|\s*PI\b/.test(text) || /\b(?:ALG ID|KEY ID)\b|\bDMR PI\b/.test(text))
+			continue
+		out.push([
+			t,
+			text
+				.replace(/\bEncrypted\s+/g, "")
+				.replace(/\bSVC=0x([0-9A-Fa-f]{2})\b/g, (_, hex: string) => {
+					const svc = parseInt(hex, 16) & ~0x40
+					return `SVC=0x${svc.toString(16).padStart(2, "0").toUpperCase()}`
+				}),
+		])
+	}
+	return out
+}
+
+/**
+ * The named calls a replay publishes (each call_end with TGT/SRC: its IDs
+ * and slot). An unnamed call-first call whose only evidence is a privacy
+ * print (hasEvidence: an encrypted print shows its frames are an over) is
+ * left out, as in the baseline lifecycle; every named call is compared.
+ */
+function publishedCalls(items: readonly Item[]) {
+	vi.setSystemTime(T0)
+	const decoder = createDecoder({ mode: "dmr" })
+	const internals = decoder as unknown as {
+		handleOutputLine(line: string): void
+		checkCallTimeoutAsync(): void
+		endOpenCallsForRestart(now: Date): void
+	}
+	const ends: string[] = []
+	decoder.on("output", (o: DecoderOutput) => {
+		const d = o.data as CallData
+		if (d.flags?.wavFileUpdate || o.type !== "call_end") return
+		if (d.talkgroup !== null || d.source !== null)
+			ends.push(`${d.talkgroup}/${d.source}/${d.slot ?? "-"}`)
+	})
+	const sorted = items
+		.map((item, index) => ({ item, index }))
+		.sort((a, b) => a.item[0] - b.item[0] || a.index - b.index)
+		.map(x => x.item)
+	const last = sorted.at(-1)?.[0] ?? 0
+	let index = 0
+	for (let now = 0; now <= last + 6000; now += 10) {
+		while (index < sorted.length && sorted[index]![0] <= now) {
+			const [atMs, text] = sorted[index]!
+			vi.setSystemTime(T0 + atMs)
+			if (text === RESTART)
+				internals.endOpenCallsForRestart(new Date(T0 + atMs))
+			else internals.handleOutputLine(text)
+			index++
+		}
+		vi.setSystemTime(T0 + now)
+		if (now % 500 === 0) internals.checkCallTimeoutAsync()
+	}
+	return ends
+}
+
 function replayTrace(items: Item[]) {
 	const decoder = createDecoder({ mode: "dmr" })
 	const internals = decoder as unknown as {
@@ -1800,6 +1866,11 @@ describe("dsd-fme DMR clearance oracle", () => {
 						}
 					}
 					replayTrace(items)
+					// Privacy decides trust, never whether a call publishes: the
+					// same named calls with every privacy print removed.
+					expect(publishedCalls(withoutPrivacy(items))).toEqual(
+						publishedCalls(items),
+					)
 				},
 			),
 			{ numRuns: 200, seed: 20261117 },

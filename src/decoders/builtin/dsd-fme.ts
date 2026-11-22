@@ -542,6 +542,16 @@ interface DsdFmeCallState {
 	 * agreeing copy is the next talker (handleDmrIds).
 	 */
 	rival?: { talkgroup: number; source: number; voiceSeq: number } | undefined
+	/**
+	 * DMR: the call started on a terminator's link control (TLC + LC) with
+	 * no call of those IDs just ended on the lane: an over whose voice
+	 * dsd-fme did not decode, known only from its terminator train
+	 * (handleDmrTrainIds). The train's own terminators do not end it; it
+	 * ends CALL_TIMEOUT_MS after its last burst, on the next talker, or at
+	 * its last line when a voice or header burst of the lane follows (the
+	 * next over, handleDmrSync).
+	 */
+	train?: boolean | undefined
 }
 
 /**
@@ -1124,6 +1134,23 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * copy); a debug count, never an identity.
 	 */
 	private dmrIdRejected = 0
+	/**
+	 * Per lane, the IDs of its last named DMR call that ended and when the
+	 * lane last printed them: a terminator train naming them within
+	 * CALL_TIMEOUT_MS is that call's hang train, not a new call; other IDs
+	 * inside it are the next talker only on a second agreeing copy (`rival`,
+	 * which a rival copy on the call's own voice starts)
+	 * (handleDmrTrainIds).
+	 */
+	private dmrTrainOf = new Map<
+		number,
+		{
+			talkgroup: number
+			source: number
+			atMs: number
+			rival: { talkgroup: number; source: number } | undefined
+		}
+	>()
 
 	// Active call state (null = no call in progress)
 	private callState: DsdFmeCallState | null = null
@@ -1440,6 +1467,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.laneSync = undefined
 			this.candidate = undefined
 		})
+		this.dmrTrainOf.clear()
 		this.dmrRoute = newDmrRoute()
 		this.flushPendingDmrLink(false)
 		// The old child's DMR mode and slot state, as stop() clears it.
@@ -3151,12 +3179,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			if (voice || header) {
 				// A voice or header burst after a terminator is the next over: the trailer is over.
 				this.recentlyTerminated = null
+				this.dmrTrainOf.delete(this.laneKey)
 				if (voice) this.lastVoiceSyncMs = nowMs
 			}
 			if (burst !== undefined) this.startOnFrames("dmr", now, clean)
 			return null
 		}
-		if (header && this.dmrRekey(ongoing, nowMs, burst)) {
+		if (
+			(header && this.dmrRekey(ongoing, nowMs, burst)) ||
+			// Voice after a train call's terminators is the next over.
+			(ongoing.train === true && (voice || header))
+		) {
 			// The call ends at its last line before the next over's header.
 			const ended = this.endOngoingCall(now, true)
 			this.chain = this.dmrChainAt(line, nowMs)
@@ -3601,10 +3634,20 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	): DecoderOutput | null {
 		const sync = this.laneSync
 		const matchSlot = this.linkDmrMs ? undefined : slot
-		if (sync?.kind === "tlc" || sync?.kind === "other") {
+		if (sync?.kind === "other") {
 			this.rejectDmrIds("not after voice")
 			return null
 		}
+		if (sync?.kind === "tlc")
+			return this.handleDmrTrainIds(
+				line,
+				now,
+				tgt,
+				src,
+				slot,
+				dmrMeta,
+				encrypted,
+			)
 		// dsd-fme prints a repeater burst's link control right after its sync
 		// line, with that sync's slot (every recorded LC does): one printing
 		// the other slot is not this burst's.
@@ -3690,6 +3733,131 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			call.voiceAtMs = sync?.kind === "voice" ? sync.atMs : undefined
 		// Whether the call is known clear is the clearance machine's alone
 		// (dsd-fme-dmr-clearance.ts): every DMR call starts not known clear.
+		if (encrypted) this.markDmrEncrypted(matchSlot)
+		return event
+	}
+
+	/**
+	 * A DMR link control after a terminator (TLC + LC, a repeater's hang
+	 * train or a direct radio's end of transmission). Its IDs never name or
+	 * clear a running call. A checked, plausible one of this burst's slot:
+	 *
+	 * - names the call that just ended on the lane (same IDs within
+	 *   CALL_TIMEOUT_MS, dmrTrainOf): its hang train, no new call; other IDs
+	 *   inside that train start the next talker's call only on a second
+	 *   agreeing copy (a false link control of a train is one copy);
+	 * - refreshes a running train call of the same IDs;
+	 * - against a running train call of other IDs, is the next talker on a
+	 *   second agreeing copy (the first is a rival only);
+	 * - with no call on the lane, starts one (a train call): an over whose
+	 *   voice was not decoded is still a call (its metadata always
+	 *   publishes; the clearance machine never clears it, voiceless).
+	 */
+	private handleDmrTrainIds(
+		line: string,
+		now: Date,
+		tgt: number,
+		src: number,
+		slot: number | undefined,
+		dmrMeta: DmrMetadata | undefined,
+		encrypted: boolean,
+	): DecoderOutput | null {
+		const nowMs = now.getTime()
+		if (
+			(!this.linkDmrMs &&
+				this.dmrBs &&
+				slot !== undefined &&
+				slot !== this.dmrBsSlot) ||
+			burstError(line) ||
+			!dmrIdsPlausible(line, tgt, src) ||
+			// A repeater terminator that bracketed no slot: its slot is unknown.
+			(!this.linkDmrMs && !this.dmrBs)
+		) {
+			this.rejectDmrIds("not after voice")
+			return null
+		}
+		const matchSlot = this.linkDmrMs ? undefined : slot
+		let ongoing = this.ongoingCall("dmr")
+		// A named call whose end waits for its terminator's trailer, and this
+		// trailer names another talker (resolveHeldEnd marked the burst not
+		// clean): the call ends at its terminator, and this is the next over.
+		if (
+			ongoing?.heldEnd !== undefined &&
+			ongoing.talkgroup !== null &&
+			(ongoing.talkgroup !== tgt || ongoing.source !== src)
+		) {
+			const ended = this.closeHeldEnd(now)
+			if (ended) this.emitOutput(ended)
+			ongoing = this.ongoingCall("dmr")
+		}
+		if (ongoing !== null) {
+			if (ongoing.train !== true || ongoing.talkgroup === null) {
+				this.rejectDmrIds("not after voice")
+				return null
+			}
+			if (ongoing.talkgroup === tgt && ongoing.source === src) {
+				ongoing.rival = undefined
+				ongoing.lastUpdate = now
+				if (encrypted) this.markDmrEncrypted(matchSlot)
+				return null
+			}
+			// Another talker splits a train call on a second agreeing copy,
+			// announced or not (its announcement time depends on its trust).
+			const rival = ongoing.rival
+			if (rival?.talkgroup !== tgt || rival.source !== src) {
+				ongoing.rival = { talkgroup: tgt, source: src, voiceSeq: this.voiceSeq }
+				this.rejectDmrIds("single copy")
+				return null
+			}
+			ongoing.rival = undefined
+		} else {
+			// The terminator's own link control right after it (the trailer
+			// window, processCallMetadata's rule): its call's train, no new call.
+			const trailer = this.recentlyTerminated
+			if (
+				trailer?.protocol === "dmr" &&
+				nowMs <= trailer.untilMs &&
+				((trailer.talkgroup === null && trailer.source === null) ||
+					(trailer.talkgroup === tgt && trailer.source === src))
+			) {
+				this.recentlyTerminated = null
+				this.dmrTrainOf.set(this.laneKey, {
+					talkgroup: tgt,
+					source: src,
+					atMs: nowMs,
+					rival: undefined,
+				})
+				this.rejectDmrIds("trailer")
+				return null
+			}
+			const last = this.dmrTrainOf.get(this.laneKey)
+			if (
+				last !== undefined &&
+				nowMs >= last.atMs &&
+				nowMs - last.atMs <= CALL_TIMEOUT_MS
+			) {
+				if (last.talkgroup === tgt && last.source === src) {
+					last.atMs = nowMs
+					last.rival = undefined
+					this.rejectDmrIds("train")
+					return null
+				}
+				if (last.rival?.talkgroup !== tgt || last.rival.source !== src) {
+					last.rival = { talkgroup: tgt, source: src }
+					this.rejectDmrIds("single copy")
+					return null
+				}
+			}
+			this.dmrTrainOf.delete(this.laneKey)
+		}
+		this.recentlyTerminated = null
+		const event = this.processCallMetadata(now, "dmr", tgt, src, slot, dmrMeta)
+		const call = this.ongoingCall("dmr")
+		if (call !== null && call !== ongoing) {
+			call.train = true
+			call.voiceAtMs = undefined
+			this.dmrClearance.voiceless(call.callId)
+		}
 		if (encrypted) this.markDmrEncrypted(matchSlot)
 		return event
 	}
@@ -4235,6 +4403,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				const burstSlot = DMR_CURRENT_SLOT.exec(line)?.groups?.["slot"]
 				isTerminator =
 					DMR_END_HINT.test(line) &&
+					// A train call's own terminators are its train (handleDmrTrainIds).
+					!(
+						targetCall.train === true &&
+						DMR_BURST.exec(line)?.groups?.["burst"] === "TLC"
+					) &&
 					!(
 						line.includes("|") &&
 						SYNC_PATTERN.exec(line)?.groups?.["proto"]?.toUpperCase() ===
@@ -4934,6 +5107,24 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.callState = null
 		this.frameCount = 0
 		callInfo.flags.timeout = timeout
+		if (
+			callInfo.protocol === "dmr" &&
+			callInfo.talkgroup !== null &&
+			callInfo.source !== null
+		)
+			this.dmrTrainOf.set(this.laneKey, {
+				talkgroup: callInfo.talkgroup,
+				source: callInfo.source,
+				// Its last line (a timeout is detected late).
+				atMs: endTime.getTime(),
+				rival:
+					callInfo.rival === undefined
+						? undefined
+						: {
+								talkgroup: callInfo.rival.talkgroup,
+								source: callInfo.rival.source,
+							},
+			})
 
 		this.logger.info(
 			{

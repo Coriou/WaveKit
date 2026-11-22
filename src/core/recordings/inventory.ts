@@ -286,6 +286,8 @@ export interface RecordingInventory {
 	 * (folders are dropped and re-indexed), after a pass that met a source or directory error,
 	 * while files are left out (a bound reached, or lifted until the next pass re-adds them), and,
 	 * for a `dsd~` key, while a configured dsd-fme directory is missing (not created, unmounted).
+	 * False at once for a `dsd~` dsd-fme call name the recording gate refuses (a DMR call while
+	 * DMR recordings are off): no source serves it, so no folder state can make it present.
 	 */
 	hasKey?(key: string): boolean | null
 	/** Writers: these discoveries' folders changed (finalize, delete, retention). */
@@ -505,6 +507,19 @@ function isCallKind(kind: RecordingInventoryKind): boolean {
  */
 function callFileServable(kind: RecordingInventoryKind, name: string): boolean {
 	return kind !== "dsd-fme-call" || dsdFmeCallRecordable(name)
+}
+
+/**
+ * A `dsd~` key's name that no source may serve: a dsd-fme call name (never TEMP) the gate
+ * refuses in a dsd-fme directory (callFileServable), and not in the dv call recorder's name
+ * shape (dvCallDecoderField: that directory serves its own names, whichever decoder they name).
+ */
+function dsdNameRefused(name: string): boolean {
+	return (
+		dsdId(0, name) !== null &&
+		!callFileServable("dsd-fme-call", name) &&
+		dvCallDecoderField(name) === null
+	)
 }
 
 /** A dsd-fme call name the inventory lists (never TEMP), as `dsd:<n>~<name>`. */
@@ -2442,6 +2457,10 @@ export function createRecordingInventory(
 		},
 
 		hasKey(key) {
+			// A dsd-fme call name the gate refuses (DMR while DMR recordings are off) is served by
+			// no source, whatever a missing directory or a running pass holds: its link may go.
+			if (key.startsWith("dsd~") && dsdNameRefused(key.slice("dsd~".length)))
+				return false
 			if (
 				!built ||
 				!lastPassClean ||
