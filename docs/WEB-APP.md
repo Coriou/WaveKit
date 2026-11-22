@@ -59,7 +59,10 @@ instead of sliding over them. An open panel (Audio options, the Receiver's, the 
 covered by another island: on a phone, Audio options starts under the Receiver and scrolls, and the
 Receiver steps out of sight while the Tuner's panel is open over it. The tuned card and the player
 do the same where an open panel reaches them (Audio options over the card above Listen): they step
-out of sight in place, the player still playing, and are back where they were when it closes. On
+out of sight in place, the player still playing, and are back where they were when it closes.
+A notice an open panel covers (on a phone, the Tuner's panel over a receipt with Undo) waits out of
+sight with its clock stopped and comes back with the time it had left. The dock stands clear of
+Listen at its open width, so opening Audio options moves nothing. On
 a short or zoomed window the bottom of the screen gives way in order: the player shrinks to a
 progress line, the spectrum's trace gets shorter, the discovery row and the band ruler hide, then
 the player hides (it keeps playing), and last the spectrum's scale rows hide, leaving the waterfall.
