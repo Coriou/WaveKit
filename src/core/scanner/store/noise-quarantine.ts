@@ -14,12 +14,19 @@
  * 524 288 000 B) holds 524 288 000 / 16 000 ≈ 32 768 s ≈ 9.1 h of audio, about 6 500 five-second
  * files (80 044 B each). Over 6 days a corpus had about 2 200 noise files ≈ 3 h ≈ 165 MiB, so the
  * size bound holds more than 2 weeks at that rate and NOISE_QUARANTINE_MAX_AGE_MS (7 days) bites
- * first. NOISE_QUARANTINE_MAX_FILES (20 000) bounds one prune's listing: 3× the 6 500 five-second
- * files the size bound holds, and above 500 MiB / 80 044 B; shorter files hit it first.
+ * first. A measured file is at least 94 frames (about 3 s: 44 + 48 000 = 48 044 B), so 500 MiB holds
+ * at most 524 288 000 / 48 044 ≈ 10 912 files: the NOISE_QUARANTINE_MAX_FILES (20 000) count bound
+ * never applies before the size bound on such files; it caps one prune's listing (at most twice it
+ * entries are read) and guards against a flood of small foreign files.
  *
  * Pruning runs after every quarantine write (in the background, never awaited by the move) and
  * at startup: files older than the age bound go first, then the oldest until the total and count
- * are within their bounds. One prune runs at a time; a request meanwhile reruns once after it.
+ * are within their bounds. Every day folder is visited, oldest first (so expiry reaches folders a
+ * stepped clock left far behind), until the listing cap. Orphans in a day folder (a sidecar with
+ * no WAV, or any entry that is neither a quarantined WAV nor its sidecar) are removed once older
+ * than ORPHAN_GRACE_MS, so an admit between its move and its sidecar is never raced. One prune
+ * runs at a time; a request meanwhile reruns once after it. A discovery's removal purges its
+ * quarantined files (purgeDiscovery, read from the sidecars) in the background.
  * Every error is logged (safeErrorFields, fixed text) and never fatal. A failed move leaves the
  * caller to delete the file (today's behaviour).
  */
@@ -30,6 +37,7 @@ import {
 	mkdir,
 	open,
 	readdir,
+	readFile,
 	rename,
 	rmdir,
 	unlink,
@@ -44,22 +52,29 @@ import { WAV_HEADER_BYTES, wavHeader } from "../channel/wav-writer.js"
 
 /** Feature flag (Main seam, no config): false deletes noise files as before. */
 export const NOISE_QUARANTINE = true
+/** The top-level quarantine folder under the scanner storage root (never in state backups). */
+export const QUARANTINE_ROOT_DIR = "quarantine"
 /** Under the scanner storage root. */
-export const NOISE_QUARANTINE_DIR = join("quarantine", "noise")
+export const NOISE_QUARANTINE_DIR = join(QUARANTINE_ROOT_DIR, "noise")
 /** A file older than this (now − mtime > 7 d) is pruned; exactly 7 d is kept. */
 export const NOISE_QUARANTINE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 /** Total bytes (WAV + sidecar) kept: exactly this is kept, one byte over prunes the oldest. */
 export const NOISE_QUARANTINE_MAX_BYTES = 500 * 1024 * 1024
 /** Files kept (and listed per prune); see the module comment. */
 export const NOISE_QUARANTINE_MAX_FILES = 20_000
-/** Day folders listed per prune: the age bound keeps 8 at most, 64 tolerates clock steps. */
-const MAX_DAY_DIRS = 64
+/** An orphan (a sidecar without its WAV, a foreign entry) younger than this is left alone. */
+export const ORPHAN_GRACE_MS = 60 * 60 * 1000
+/** A sidecar larger than this is not read (ours are a few hundred bytes). */
+const MAX_SIDECAR_BYTES = 4096
 const SAMPLE_RATE_HZ = 8000
 const DAY = /^\d{4}-\d{2}-\d{2}$/
 const OPERATION_ID =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const WAV_NAME =
 	/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.wav$/
+const JSON_NAME =
+	/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json$/
+const DISCOVERY_ID = /^d_[0-9A-Za-z]{1,64}$/
 const CODE = z
 	.string()
 	.regex(/^[a-z0-9:-]{1,64}$/)
@@ -86,7 +101,7 @@ export const NoiseQuarantineSidecarSchema = z
 		version: z.literal(1),
 		verdict: z.literal("discarded:noise"),
 		operationId: z.string().regex(OPERATION_ID),
-		discoveryId: z.string().regex(/^d_[0-9A-Za-z]{1,64}$/),
+		discoveryId: z.string().regex(DISCOVERY_ID),
 		observationId: z
 			.string()
 			.regex(/^[0-9A-Za-z_-]{1,128}$/)
@@ -124,6 +139,7 @@ export interface NoiseQuarantineFs {
 	/** Rewrites the 44-byte WAV header at offset 0 and syncs the file. */
 	writeHeader(path: string, header: Buffer): Promise<void>
 	writeFile(path: string, data: Buffer): Promise<void>
+	readFile(path: string): Promise<Buffer>
 }
 
 export const nodeNoiseQuarantineFs: NoiseQuarantineFs = {
@@ -149,6 +165,7 @@ export const nodeNoiseQuarantineFs: NoiseQuarantineFs = {
 		}
 	},
 	writeFile: (path, data) => writeFile(path, data, { flag: "wx" }),
+	readFile: path => readFile(path),
 }
 
 export interface NoiseQuarantineOptions {
@@ -182,6 +199,7 @@ export class NoiseQuarantine {
 	private readonly maxFiles: number
 	private pruning: Promise<void> | null = null
 	private rerun = false
+	private readonly purges = new Set<Promise<void>>()
 
 	constructor(private readonly opts: NoiseQuarantineOptions) {
 		this.dir = join(opts.root, NOISE_QUARANTINE_DIR)
@@ -304,36 +322,65 @@ export class NoiseQuarantine {
 		}
 	}
 
+	/** The valid day folder names, oldest first. */
+	private async days(): Promise<string[]> {
+		return (await this.list(this.dir)).filter(name => DAY.test(name)).sort()
+	}
+
 	private async pruneOnce(): Promise<void> {
-		const days = (await this.list(this.dir))
-			.filter(name => DAY.test(name))
-			.sort()
-			.slice(-MAX_DAY_DIRS)
+		const now = this.opts.now()
+		const days = await this.days()
+		const visited: string[] = []
 		const entries: Entry[] = []
+		// lstat calls per prune (entries and orphan checks), so a flooded folder stays bounded.
+		const budget = this.maxFiles * 2
+		let scanned = 0
+		let orphans = 0
 		for (const day of days) {
+			if (scanned >= budget) break
+			visited.push(day)
 			const folder = join(this.dir, day)
 			const names = await this.list(folder)
+			const wavs = new Set<string>()
 			for (const name of names) {
-				if (entries.length >= this.maxFiles * 2) break
 				const match = WAV_NAME.exec(name)
-				if (!match) continue
+				if (match) wavs.add(match[1]!)
+			}
+			for (const name of names) {
+				if (scanned >= budget) break
+				scanned++
+				const path = join(folder, name)
+				const wav = WAV_NAME.exec(name)
+				const side = JSON_NAME.exec(name)
+				// A sidecar beside its WAV is counted with the WAV below.
+				if (side && wavs.has(side[1]!)) continue
 				try {
-					const info = await this.fs.lstat(join(folder, name))
-					if (!info.isFile()) continue
-					let bytes = info.size
-					try {
-						const side = await this.fs.lstat(join(folder, `${match[1]!}.json`))
-						if (side.isFile()) bytes += side.size
-					} catch {
-						/* no sidecar: the WAV alone counts */
+					const info = await this.fs.lstat(path)
+					if (wav && info.isFile()) {
+						let bytes = info.size
+						try {
+							const sidecar = await this.fs.lstat(
+								join(folder, `${wav[1]!}.json`),
+							)
+							if (sidecar.isFile()) bytes += sidecar.size
+						} catch {
+							/* no sidecar: the WAV alone counts */
+						}
+						entries.push({ day, id: wav[1]!, mtimeMs: info.mtimeMs, bytes })
+						continue
 					}
-					entries.push({ day, id: match[1]!, mtimeMs: info.mtimeMs, bytes })
+					// An orphan: a sidecar without its WAV, a foreign file or symlink. A folder is
+					// left alone (nothing here makes one; never removed recursively).
+					if (info.isDirectory()) continue
+					if (now - info.mtimeMs <= ORPHAN_GRACE_MS) continue
+					await this.fs.unlink(path)
+					orphans++
 				} catch (err) {
-					this.log.debug(safeErrorFields(err), "Quarantined file unreadable")
+					if (codeOf(err) !== "ENOENT")
+						this.log.debug(safeErrorFields(err), "Quarantined entry unreadable")
 				}
 			}
 		}
-		const now = this.opts.now()
 		entries.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.id < b.id ? -1 : 1))
 		let total = entries.reduce((sum, e) => sum + e.bytes, 0)
 		let count = entries.length
@@ -341,16 +388,21 @@ export class NoiseQuarantine {
 		for (const e of entries) {
 			const expired = now - e.mtimeMs > this.maxAgeMs
 			if (!expired && total <= this.maxBytes && count <= this.maxFiles) break
-			if (await this.remove(e)) pruned++
+			// A file that could not be removed still occupies its space: the bounds keep it.
+			if (!(await this.remove(e))) continue
+			pruned++
 			total -= e.bytes
 			count--
 		}
 		// Empty past day folders go; today's stays (an admit may be between its mkdir and move).
 		const today = new Date(now).toISOString().slice(0, 10)
-		for (const day of days.filter(d => d !== today))
+		for (const day of visited.filter(d => d !== today))
 			await this.fs.rmdir(join(this.dir, day)).catch(() => undefined)
-		if (pruned > 0)
-			this.log.info({ pruned, files: count }, "Noise quarantine pruned")
+		if (pruned > 0 || orphans > 0)
+			this.log.info(
+				{ pruned, orphans, files: count },
+				"Noise quarantine pruned",
+			)
 	}
 
 	private async remove(e: Entry): Promise<boolean> {
@@ -368,5 +420,68 @@ export class NoiseQuarantine {
 		}
 		await this.fs.unlink(join(folder, `${e.id}.json`)).catch(() => undefined)
 		return true
+	}
+
+	/**
+	 * Removes every quarantined file of a removed discovery: reads each sidecar (at most twice
+	 * the file bound) and deletes the matching WAV, then its sidecar (a crash in between leaves an
+	 * orphan sidecar, which the prune removes). Never throws; errors are logged. Runs in the
+	 * background of the removal (track it with `settled`).
+	 */
+	purgeDiscovery(discoveryId: string): Promise<void> {
+		const run = this.purgeOnce(discoveryId).catch((err: unknown) => {
+			this.log.warn(safeErrorFields(err), "Noise quarantine purge failed")
+		})
+		this.purges.add(run)
+		void run.finally(() => this.purges.delete(run))
+		return run
+	}
+
+	/** Resolves when every purge started so far is done (tests, shutdown). */
+	async settled(): Promise<void> {
+		await Promise.all([...this.purges])
+	}
+
+	private async purgeOnce(discoveryId: string): Promise<void> {
+		if (!DISCOVERY_ID.test(discoveryId)) return
+		const budget = this.maxFiles * 2
+		let read = 0
+		let purged = 0
+		for (const day of await this.days()) {
+			const folder = join(this.dir, day)
+			for (const name of await this.list(folder)) {
+				const side = JSON_NAME.exec(name)
+				if (!side) continue
+				if (read >= budget) break
+				read++
+				const path = join(folder, name)
+				try {
+					const info = await this.fs.lstat(path)
+					if (!info.isFile() || info.size > MAX_SIDECAR_BYTES) continue
+					const parsed = NoiseQuarantineSidecarSchema.safeParse(
+						JSON.parse((await this.fs.readFile(path)).toString("utf8")),
+					)
+					if (!parsed.success || parsed.data.discoveryId !== discoveryId)
+						continue
+					await this.fs
+						.unlink(join(folder, `${side[1]!}.wav`))
+						.catch((err: unknown) => {
+							if (codeOf(err) !== "ENOENT") throw err
+						})
+					await this.fs.unlink(path).catch((err: unknown) => {
+						if (codeOf(err) !== "ENOENT") throw err
+					})
+					purged++
+				} catch (err) {
+					if (codeOf(err) !== "ENOENT")
+						this.log.warn(
+							safeErrorFields(err),
+							"Purging a quarantined file failed",
+						)
+				}
+			}
+		}
+		if (purged > 0)
+			this.log.info({ purged }, "Noise quarantine purged a removed discovery")
 	}
 }

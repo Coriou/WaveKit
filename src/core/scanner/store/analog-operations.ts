@@ -2579,6 +2579,8 @@ export class AnalogOperations {
 			op => op.intent.discoveryId === id,
 		)
 		for (const op of operations) {
+			// A deleted discovery's audio is deleted, never quarantined (even a noise cancel's).
+			op.noise = null
 			if (op.decision) continue
 			op.cancelled ??= "discovery-deleted"
 			op.accepting = false
@@ -2591,6 +2593,7 @@ export class AnalogOperations {
 		this.stopped = true
 		const operations = [...this.active.values()]
 		for (const op of operations) {
+			op.noise = null
 			if (op.decision) continue
 			op.cancelled ??= "shutdown"
 			op.accepting = false

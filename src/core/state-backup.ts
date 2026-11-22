@@ -70,6 +70,7 @@ import { createComponentLogger } from "../utils/logger.js"
 import type { Logger } from "../utils/logger.js"
 import { atomicWrite } from "./scanner/store/atomic-write.js"
 import { HELD_JOURNAL_FORMAT } from "./scanner/store/held-recordings.js"
+import { QUARANTINE_ROOT_DIR } from "./scanner/store/noise-quarantine.js"
 
 /** The marker file, at the top of the scanner state directory. */
 export const STATE_FORMAT_FILE = "state-format.json"
@@ -427,7 +428,14 @@ function writtenOnce(rel: string): boolean {
 }
 
 /**
- * Recursive walk (symlinks and `.backups` skipped), stopping past `maxFiles`; then the sizes of
+ * Top-level entries a backup never holds: the backups themselves, and the bounded noise
+ * quarantine (noise-quarantine.ts: up to 500 MiB of discarded audio pruned after 7 days, so a
+ * copy in a backup would cost that space again and outlive its age bound; not scanner state).
+ */
+const NOT_BACKED_UP = new Set([BACKUPS_DIR, QUARANTINE_ROOT_DIR])
+
+/**
+ * Recursive walk (symlinks, `.backups` and `quarantine` skipped), stopping past `maxFiles`; then the sizes of
  * the copied files (hard-linked ones cost no space and need no lstat), BACKUP_IO_CONCURRENCY at once.
  */
 async function planTree(root: string, maxFiles: number): Promise<Plan> {
@@ -437,7 +445,7 @@ async function planTree(root: string, maxFiles: number): Promise<Plan> {
 		const rel = stack.pop() ?? ""
 		const entries = await readdir(join(root, rel), { withFileTypes: true })
 		for (const e of entries) {
-			if (rel === "" && e.name === BACKUPS_DIR) continue
+			if (rel === "" && NOT_BACKED_UP.has(e.name)) continue
 			const childRel = rel === "" ? e.name : join(rel, e.name)
 			if (e.isDirectory()) {
 				plan.dirs.push(childRel)

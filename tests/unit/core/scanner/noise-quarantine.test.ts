@@ -11,6 +11,7 @@ import { existsSync } from "node:fs"
 import {
 	lstat,
 	mkdir,
+	symlink,
 	mkdtemp,
 	readFile,
 	readdir,
@@ -32,6 +33,7 @@ import {
 	NOISE_QUARANTINE_MAX_BYTES,
 	NoiseQuarantine,
 	NoiseQuarantineSidecarSchema,
+	ORPHAN_GRACE_MS,
 	nodeNoiseQuarantineFs,
 	type NoiseQuarantineFacts,
 	type NoiseQuarantineFs,
@@ -139,6 +141,9 @@ describe("noise quarantine bounds", () => {
 		expect(NOISE_QUARANTINE_MAX_BYTES / 16_000 / 3600).toBeCloseTo(9.1, 1)
 		expect(Math.floor(NOISE_QUARANTINE_MAX_BYTES / 80_044)).toBe(6_549)
 		expect(NOISE_QUARANTINE_DIR).toBe(join("quarantine", "noise"))
+		// A measured file is at least 94 frames (48 044 B): 500 MiB holds at most ~10 900 of
+		// them, so the 20 000 count bound never applies before the size bound.
+		expect(Math.floor(NOISE_QUARANTINE_MAX_BYTES / 48_044)).toBe(10_912)
 	})
 
 	it("age: 7 d − 1 ms kept, 7 d + 1 ms pruned, exactly 7 d kept", async () => {
@@ -246,15 +251,153 @@ describe("noise quarantine bounds", () => {
 		expect([a, b, c].map(p => existsSync(p))).toEqual([false, true, true])
 	})
 
-	it("prune ignores foreign names and symlinks, and a missing folder is not an error", async () => {
+	it("a missing folder is not an error; a folder inside a day folder is left alone", async () => {
 		const root = await tempRoot()
 		const q = new NoiseQuarantine({ root, logger, now: () => NOW, maxBytes: 0 })
 		await q.prune()
-		await mkdir(join(q.dir, DAY), { recursive: true })
-		const foreign = join(q.dir, DAY, "notes.txt")
-		await writeFile(foreign, "x")
+		const sub = join(q.dir, DAY, "sub")
+		await mkdir(sub, { recursive: true })
 		await q.prune()
-		expect(existsSync(foreign)).toBe(true)
+		expect(existsSync(sub)).toBe(true)
+	})
+
+	it("orphans: a sidecar without its WAV and foreign entries go once older than 1 h", async () => {
+		const root = await tempRoot()
+		const mtimes = new Map<string, number>()
+		const q = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			fs: timedFs(mtimes),
+		})
+		const folder = join(q.dir, DAY)
+		await mkdir(folder, { recursive: true })
+		const at = async (name: string, age: number): Promise<string> => {
+			const path = join(folder, name)
+			await writeFile(path, "{}")
+			mtimes.set(path, NOW - age)
+			return path
+		}
+		const oldSide = await at(`${randomUUID()}.json`, ORPHAN_GRACE_MS + 1)
+		const graceSide = await at(`${randomUUID()}.json`, ORPHAN_GRACE_MS)
+		const oldForeign = await at("notes.txt", ORPHAN_GRACE_MS + 1)
+		const freshForeign = await at("fresh.txt", 1000)
+		const link = join(folder, "link.wav")
+		await symlink(join(root, "elsewhere"), link)
+		mtimes.set(link, NOW - ORPHAN_GRACE_MS - 1)
+		// A WAV with its sidecar is no orphan, however old the sidecar.
+		const wav = await plant(q, mtimes, 10, NOW - 1000)
+		const side = await at(
+			wav
+				.split("/")
+				.at(-1)!
+				.replace(/\.wav$/, ".json"),
+			ORPHAN_GRACE_MS * 10,
+		)
+		await q.prune()
+		expect(existsSync(oldSide)).toBe(false)
+		expect(existsSync(graceSide)).toBe(true)
+		expect(existsSync(oldForeign)).toBe(false)
+		expect(existsSync(freshForeign)).toBe(true)
+		expect((await lstat(folder)).isDirectory()).toBe(true)
+		expect(await readdir(folder)).not.toContain("link.wav")
+		expect(existsSync(wav)).toBe(true)
+		expect(existsSync(side)).toBe(true)
+	})
+
+	it("every day folder is visited for expiry, past 64 of them (oldest first)", async () => {
+		const root = await tempRoot()
+		const mtimes = new Map<string, number>()
+		const q = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			fs: timedFs(mtimes),
+		})
+		const old: string[] = []
+		for (let i = 0; i < 70; i++) {
+			const day = new Date(Date.UTC(2025, 0, 1 + i)).toISOString().slice(0, 10)
+			old.push(
+				await plant(q, mtimes, 10, NOW - NOISE_QUARANTINE_MAX_AGE_MS - 1, day),
+			)
+		}
+		const fresh = await plant(q, mtimes, 10, NOW - 1000)
+		await q.prune()
+		expect(old.filter(p => existsSync(p))).toEqual([])
+		expect(existsSync(fresh)).toBe(true)
+		expect(await readdir(q.dir)).toEqual([DAY])
+	})
+
+	it("a file that cannot be removed still counts: the next oldest is pruned instead", async () => {
+		const root = await tempRoot()
+		const mtimes = new Map<string, number>()
+		let stuck = ""
+		const q = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			fs: timedFs(mtimes, {
+				unlink: async path => {
+					if (path === stuck)
+						throw Object.assign(new Error("denied"), { code: "EACCES" })
+					await nodeNoiseQuarantineFs.unlink(path)
+				},
+			}),
+			maxFiles: 2,
+		})
+		const a = await plant(q, mtimes, 10, NOW - 3000)
+		const b = await plant(q, mtimes, 10, NOW - 2000)
+		const c = await plant(q, mtimes, 10, NOW - 1000)
+		stuck = a
+		await q.prune()
+		expect([a, b, c].map(p => existsSync(p))).toEqual([true, false, true])
+	})
+})
+
+describe("noise quarantine purge of a removed discovery", () => {
+	it("removes the discovery's WAV and sidecar; others, corrupt and foreign sidecars stay", async () => {
+		const root = await tempRoot()
+		const q = new NoiseQuarantine({ root, logger, now: () => NOW })
+		const mine = ids()
+		const other = { ...ids(), discoveryId: "d_02XYZ" }
+		for (const id of [mine, other]) {
+			const source = join(root, `${id.operationId}.part`)
+			await part(source, 100)
+			expect(await q.admit(source, id, facts)).toBe(true)
+		}
+		const folder = join(q.dir, DAY)
+		const corrupt = join(folder, `${randomUUID()}.json`)
+		await writeFile(corrupt, "{not json")
+		await q.purgeDiscovery("../escape")
+		await q.purgeDiscovery(mine.discoveryId)
+		await q.settled()
+		expect(existsSync(join(folder, `${mine.operationId}.wav`))).toBe(false)
+		expect(existsSync(join(folder, `${mine.operationId}.json`))).toBe(false)
+		expect(existsSync(join(folder, `${other.operationId}.wav`))).toBe(true)
+		expect(existsSync(join(folder, `${other.operationId}.json`))).toBe(true)
+		expect(existsSync(corrupt)).toBe(true)
+	})
+
+	it("a failing unlink is logged, never thrown", async () => {
+		const root = await tempRoot()
+		const id = ids()
+		const q = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			fs: {
+				...nodeNoiseQuarantineFs,
+				unlink: async () => {
+					throw Object.assign(new Error("denied"), { code: "EACCES" })
+				},
+			},
+		})
+		const source = join(root, "payload.wav.part")
+		await part(source, 100)
+		// The admit's own source unlink is not used (rename succeeds).
+		expect(await q.admit(source, id, facts)).toBe(true)
+		await expect(q.purgeDiscovery(id.discoveryId)).resolves.toBeUndefined()
+		expect(existsSync(join(q.dir, DAY, `${id.operationId}.wav`))).toBe(true)
 	})
 })
 
@@ -551,6 +694,56 @@ describe("noise quarantine through the analog operation's cancel", () => {
 		await evidence.noiseQuarantine!.prune()
 		expect(existsSync(stale)).toBe(false)
 		expect(existsSync(fresh)).toBe(true)
+	})
+
+	it("race: a noise cancel then a discovery delete before the writer's remove deletes, never quarantines", async () => {
+		// Every move into the quarantine is recorded (the purge would hide a moved file).
+		const moves: string[] = []
+		const h = await harness({
+			noiseQuarantine: {
+				fs: {
+					...nodeNoiseQuarantineFs,
+					rename: async (from, to) => {
+						moves.push(to)
+						await nodeNoiseQuarantineFs.rename(from, to)
+					},
+				},
+			},
+		})
+		const op = await writtenOp(h)
+		op.cancel("cancelled", facts)
+		const removal = h.evidence.removeDiscovery(h.discoveryId)
+		expect((await op.settled).outcome).toBe("aborted")
+		await removal
+		await h.evidence.noiseQuarantine!.settled()
+		expect(moves).toEqual([])
+		expect(await filesUnder(join(h.root, "quarantine"))).toEqual([])
+		expect(
+			existsSync(
+				join(h.root, ".analog-operations", op.operationId, "payload.wav.part"),
+			),
+		).toBe(false)
+	})
+
+	it("a discovery removal purges its already quarantined files", async () => {
+		const h = await harness()
+		const op = await writtenOp(h)
+		op.cancel("cancelled", facts)
+		await op.settled
+		const day = join(h.root, NOISE_QUARANTINE_DIR, DAY)
+		expect(existsSync(join(day, `${op.operationId}.wav`))).toBe(true)
+		// Another discovery's quarantined file stays.
+		const other = { ...ids(), discoveryId: "d_02XYZ" }
+		const source = join(h.root, "other.part")
+		await part(source, 100)
+		expect(await h.evidence.noiseQuarantine!.admit(source, other, facts)).toBe(
+			true,
+		)
+		await h.evidence.removeDiscovery(h.discoveryId)
+		await h.evidence.noiseQuarantine!.settled()
+		expect(existsSync(join(day, `${op.operationId}.wav`))).toBe(false)
+		expect(existsSync(join(day, `${op.operationId}.json`))).toBe(false)
+		expect(existsSync(join(day, `${other.operationId}.wav`))).toBe(true)
 	})
 
 	it("the 500 MiB default holds a 6 day corpus of 2 200 five-second files", () => {

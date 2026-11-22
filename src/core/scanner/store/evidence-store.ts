@@ -1334,6 +1334,8 @@ export class EvidenceStore {
 						await this.serialise(alias, () => removeFolders(alias))
 					}
 				})
+				// Its quarantined noise files go too, in the background (never fails the removal).
+				for (const id of removing) void this.noiseQuarantine?.purgeDiscovery(id)
 			})
 			.catch((cause: unknown) => {
 				if (cause instanceof ScannerApiError) throw cause
