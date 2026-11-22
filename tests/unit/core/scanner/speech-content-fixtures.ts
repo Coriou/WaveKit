@@ -14,7 +14,7 @@
  *   mobile's slot), the carrier staying on.
  * - tone: a sine at `hz`, 2 400 Hz peak.
  * - silent: no modulation (an unmodulated carrier).
- * A source with `carrier: false` sends noise only (an open squelch).
+ * A source with `carrier: false` sends noise only (an open squelch); `ctcssHz` adds a sub-tone.
  */
 import { mulberry32 } from "../../../mocks/scanner/signals.js"
 import { WidebandNfmChain } from "../../../../src/core/scanner/channel/wideband-nfm.js"
@@ -64,6 +64,8 @@ export interface ContentSignal {
 	/** Default true; false: noise only. */
 	readonly carrier?: boolean
 	readonly seed?: number
+	/** A sub-tone added to the deviation (Hz; 350 Hz deviation), as a CTCSS tone; default none. */
+	readonly ctcssHz?: number
 }
 
 const AMP = 0.4
@@ -146,7 +148,13 @@ export function contentAudio(
 	const rng = mulberry32(signal.seed ?? 5)
 	const noise = mulberry32((signal.seed ?? 5) + 1)
 	const sigma = AMP / Math.sqrt(2 * (12_500 / fs) * 10 ** (signal.cnrDb / 10))
-	const dev = deviation(signal.waveform, fs, rng)
+	const wave = deviation(signal.waveform, fs, rng)
+	const ctcssHz = signal.ctcssHz
+	let tone = 0
+	const dev =
+		ctcssHz === undefined
+			? wave
+			: (): number => wave() + 350 * Math.sin((TWO_PI * ctcssHz * tone++) / fs)
 	const chain = new WidebandNfmChain({
 		inputRateHz: fs,
 		offsetHz: CONTENT_OFFSET_HZ,

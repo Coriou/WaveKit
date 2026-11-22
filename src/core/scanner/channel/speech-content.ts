@@ -184,9 +184,46 @@ export interface SpeechContent {
 	 * as maxRangeDb): a word.
 	 */
 	readonly maxBurstFrames: number
+	/**
+	 * Frames that fed the admission level ring: whole frames with at most half their samples exact
+	 * zeros (a gap the recorder filled with silence is not audio heard).
+	 */
+	readonly levelFrames: number
+	/**
+	 * The largest level spread (90th minus 10th percentile of the frames' SPEECH_HIGH_PASS_BIN to
+	 * 127 level, dBFS, see `frameLevelDbfs`) of a level window (SPEECH_WINDOW_FRAMES level frames,
+	 * hop SPEECH_WINDOW_HOP, plus one ending at the last level frame); under one window: that of
+	 * its one partial window from SPEECH_SHORT_MIN_FRAMES level frames on, 0 under it.
+	 */
+	readonly maxWindowSpreadDb: number
+	/**
+	 * The lowest 10th percentile level (dBFS) of a level window, windows as maxWindowSpreadDb (a
+	 * partial window under one window, 0 under SPEECH_SHORT_MIN_FRAMES level frames). Carrier
+	 * quieting between words drives it down; open-squelch noise and data never quiet.
+	 */
+	readonly minWindowP10Dbfs: number
 }
 
-/** Streaming measure of one file's audio (SpeechContent); `push` allocates nothing. */
+/**
+ * A frame's admission level (dBFS): 10·log10 of the frame's estimated mean square in FFT bins
+ * SPEECH_HIGH_PASS_BIN (312.5 Hz) to 127 (3 968.75 Hz, the last bin under Nyquist) over
+ * 32 768², plus 1e-10 (a floor of −100 dBFS). Bins under 312.5 Hz (CTCSS, hum) are left out. The
+ * Hann-windowed band power Σ|X_k|² over the positive bins, doubled for the mirrored half, over n²
+ * (Parseval) and over the Hann window's mean square 3/8: a full-scale square wave would read
+ * about 0 dBFS, a full-scale sine inside the band −3 dBFS.
+ */
+const LEVEL_TOP_BIN = SPEECH_FRAME_SAMPLES / 2 - 1
+const LEVEL_SCALE =
+	2 / (SPEECH_FRAME_SAMPLES * SPEECH_FRAME_SAMPLES * 0.375 * 32_768 * 32_768)
+const LEVEL_FLOOR = 1e-10
+/** A frame with more exact-zero samples than this (half the frame) is skipped by the level ring. */
+const LEVEL_MAX_ZEROS = SPEECH_FRAME_SAMPLES / 2
+
+/**
+ * Streaming measure of one file's audio (SpeechContent); `push` allocates nothing and costs O(1)
+ * amortised per frame (one sort of SPEECH_WINDOW_FRAMES numbers per SPEECH_WINDOW_HOP frames for
+ * each of the envelope and the admission level rings).
+ */
 export class SpeechContentMeter {
 	private readonly frame = new Float32Array(SPEECH_FRAME_SAMPLES)
 	private fill = 0
@@ -210,6 +247,21 @@ export class SpeechContentMeter {
 	private partialBurst = 0
 	/** Frame count at the last window measured (−1: none). */
 	private measuredAt = -1
+	/** The admission level ring: one level per frame that is not mostly exact zeros. */
+	private readonly levelRing = new Float64Array(SPEECH_WINDOW_FRAMES)
+	private readonly levelSorted = new Float64Array(SPEECH_WINDOW_FRAMES)
+	private levelHeard = 0
+	/** The last analysed frame's level (dBFS) and whether it was mostly exact zeros. */
+	private frameLevel = 0
+	private frameZeroHeavy = false
+	/** Whole level windows' largest spread and lowest p10 (never a partial one). */
+	private maxSpread = 0
+	private minP10 = Infinity
+	/** A short file's one partial level window (as partialRange). */
+	private partialSpread = 0
+	private partialP10 = 0
+	/** Level frame count at the last level window measured (−1: none). */
+	private levelMeasuredAt = -1
 
 	/** Whole frames heard so far (result().frames, without measuring a window). */
 	get frames(): number {
@@ -233,11 +285,21 @@ export class SpeechContentMeter {
 			if (whole) this.measureWindow()
 			else if (frames >= SPEECH_SHORT_MIN_FRAMES) this.measureWindow(frames)
 		}
+		const levelFrames = this.levelHeard
+		const levelWhole = levelFrames >= SPEECH_WINDOW_FRAMES
+		if (this.levelMeasuredAt !== levelFrames) {
+			if (levelWhole) this.measureLevelWindow()
+			else if (levelFrames >= SPEECH_SHORT_MIN_FRAMES)
+				this.measureLevelWindow(levelFrames)
+		}
 		return {
 			frames,
 			maxRangeDb: whole ? this.maxRange : this.partialRange,
 			periodicShare: frames === 0 ? 0 : this.periodic / frames,
 			maxBurstFrames: whole ? this.maxBurst : this.partialBurst,
+			levelFrames,
+			maxWindowSpreadDb: levelWhole ? this.maxSpread : this.partialSpread,
+			minWindowP10Dbfs: levelWhole ? this.minP10 : this.partialP10,
 		}
 	}
 
@@ -249,6 +311,36 @@ export class SpeechContentMeter {
 			(this.heard - SPEECH_WINDOW_FRAMES) % SPEECH_WINDOW_HOP === 0
 		)
 			this.measureWindow()
+		if (this.frameZeroHeavy) return
+		this.levelRing[this.levelHeard % SPEECH_WINDOW_FRAMES] = this.frameLevel
+		this.levelHeard++
+		if (
+			this.levelHeard >= SPEECH_WINDOW_FRAMES &&
+			(this.levelHeard - SPEECH_WINDOW_FRAMES) % SPEECH_WINDOW_HOP === 0
+		)
+			this.measureLevelWindow()
+	}
+
+	/**
+	 * The level spread (p90 − p10) and p10 of the last SPEECH_WINDOW_FRAMES level frames (one sort
+	 * per hop); `n` under it: a short file's one partial window, its level frames 0 to n − 1, kept
+	 * apart as measureWindow's partial figures.
+	 */
+	private measureLevelWindow(n: number = SPEECH_WINDOW_FRAMES): void {
+		const sorted = this.levelSorted.subarray(0, n)
+		sorted.set(this.levelRing.subarray(0, n))
+		sorted.sort()
+		const full = n === SPEECH_WINDOW_FRAMES
+		const p10 = sorted[full ? P10 : Math.floor(0.1 * (n - 1))]!
+		const spread = sorted[full ? P90 : Math.ceil(0.9 * (n - 1))]! - p10
+		if (full) {
+			if (spread > this.maxSpread) this.maxSpread = spread
+			if (p10 < this.minP10) this.minP10 = p10
+		} else {
+			this.partialSpread = spread
+			this.partialP10 = p10
+		}
+		this.levelMeasuredAt = this.levelHeard
 	}
 
 	/**
@@ -258,17 +350,26 @@ export class SpeechContentMeter {
 	private analyse(): number {
 		const n = SPEECH_FRAME_SAMPLES
 		const { re, im } = this
+		let zeros = 0
 		for (let i = 0; i < n; i++) {
-			re[i] = this.frame[i]! * HANN[i]!
+			const x = this.frame[i]!
+			if (x === 0) zeros++
+			re[i] = x * HANN[i]!
 			im[i] = 0
 		}
+		this.frameZeroHeavy = zeros > LEVEL_MAX_ZEROS
 		sharedFft ??= new Fft(n)
 		sharedFft.transform(re, im)
 		let band = 0
-		for (let k = SPEECH_HIGH_PASS_BIN; k <= SPEECH_BAND_TOP_BIN; k++)
-			band += re[k]! * re[k]! + im[k]! * im[k]!
+		let level = 0
+		for (let k = SPEECH_HIGH_PASS_BIN; k <= LEVEL_TOP_BIN; k++) {
+			const p = re[k]! * re[k]! + im[k]! * im[k]!
+			level += p
+			if (k <= SPEECH_BAND_TOP_BIN) band += p
+		}
 		this.ring[this.heard % SPEECH_WINDOW_FRAMES] =
 			10 * Math.log10((4 * band) / (n * n) + 1)
+		this.frameLevel = 10 * Math.log10(level * LEVEL_SCALE + LEVEL_FLOOR)
 		for (let k = 0; k < n; k++) {
 			const low = k < SPEECH_HIGH_PASS_BIN || n - k < SPEECH_HIGH_PASS_BIN
 			re[k] = low ? 0 : re[k]! * re[k]! + im[k]! * im[k]!
@@ -443,4 +544,66 @@ export function speechReadings(c: SpeechContent | null): {
 				clearNoise: clearlyNoise(c),
 				speechHeard: speechHeard(c),
 			}
+}
+
+/**
+ * Recording admission (candidate rule RA-2, PROVISIONAL: the bounds below are set from synthetic
+ * signals and a few listened files and await calibration on a labelled corpus). A finished file of
+ * a channel with no digital evidence is discarded as noise (recording-verdict.ts finishPath,
+ * `discarded:noise`) only when EVERY level window looks like open-squelch noise or data buzz: real
+ * FM voice shows carrier quieting between words (frame levels down to −30 to −50 dBFS), noise and
+ * data never fall under about −15 dBFS and keep a narrow level spread.
+ */
+export interface AdmissionThresholds {
+	/** Level frames needed to judge at all; fewer: not measured (null, kept). */
+	readonly minFrames: number
+	/** Every window's level spread (p90 − p10, dB) must be under this. */
+	readonly maxSpreadDb: number
+	/** Every window's p10 level (dBFS) must be over this (no quieting anywhere). */
+	readonly minFloorDbfs: number
+	/** The longest burst (SpeechContent.maxBurstFrames) must be under this. */
+	readonly maxBurstFrames: number
+	/** The periodic share must be under this. */
+	readonly maxPeriodicShare: number
+}
+/** 94 level frames × 32 ms = 3.008 s: one whole level window. */
+export const ADMISSION_MIN_FRAMES = SPEECH_WINDOW_FRAMES
+/**
+ * 10 dB: synthetic open-squelch noise and 4FSK/GMSK-like buzz spread a few dB per window (a frame's
+ * 118 bins hold about 236 degrees of freedom, 4.34·√(2/236) ≈ 0.4 dB rms); speech with quieting
+ * spreads tens of dB.
+ */
+export const ADMISSION_MAX_SPREAD_DB = 10
+/**
+ * −25 dBFS: noise and data hold at or over about −15 dBFS (a 10 dB margin); a quieted carrier
+ * between words falls to −30 to −50 dBFS.
+ */
+export const ADMISSION_MIN_FLOOR_DBFS = -25
+/** 4 frames (128 ms): a word on a quiet carrier stays 6 dB over its window's median 4 to 7 frames. */
+export const ADMISSION_MAX_BURST_FRAMES = 4
+/** 0.25: voiced speech (pitched frames) at a CNR of 9 dB or more measures 0.24 to 0.61. */
+export const ADMISSION_MAX_PERIODIC = 0.25
+export const ADMISSION_DEFAULTS: AdmissionThresholds = Object.freeze({
+	minFrames: ADMISSION_MIN_FRAMES,
+	maxSpreadDb: ADMISSION_MAX_SPREAD_DB,
+	minFloorDbfs: ADMISSION_MIN_FLOOR_DBFS,
+	maxBurstFrames: ADMISSION_MAX_BURST_FRAMES,
+	maxPeriodicShare: ADMISSION_MAX_PERIODIC,
+})
+
+/**
+ * The file measures as noise by the admission rule (AdmissionThresholds): true noise, false not
+ * noise (kept), null not measured (fewer than `minFrames` level frames: kept).
+ */
+export function admissionNoise(
+	c: SpeechContent,
+	thresholds: AdmissionThresholds = ADMISSION_DEFAULTS,
+): boolean | null {
+	if (c.levelFrames < thresholds.minFrames) return null
+	return (
+		c.maxWindowSpreadDb < thresholds.maxSpreadDb &&
+		c.minWindowP10Dbfs > thresholds.minFloorDbfs &&
+		c.maxBurstFrames < thresholds.maxBurstFrames &&
+		c.periodicShare < thresholds.maxPeriodicShare
+	)
 }

@@ -37,13 +37,18 @@ const noVoice: VoicePrior = {
 	analogTrials: () => ({ attempts: 600, decoded: 0 }),
 }
 
-const low = (prior: VoicePrior, ctcssHz: number | null = null): Harness =>
+const low = (
+	prior: VoicePrior,
+	ctcssHz: number | null = null,
+	admission?: boolean,
+): Harness =>
 	harness({
 		fs: LOW_FS,
 		offset: LOW_OFFSET,
 		source: { ctcssHz, syllables: true },
 		decodedLabel: () => null,
 		voicePrior: () => prior,
+		...(admission !== undefined ? { admission } : {}),
 	})
 
 /** `seconds` of one continuous over by `id` (classed analog-fm by its snapshots), then quiet. */
@@ -148,13 +153,22 @@ describe("a no-voice channel's continuous signal past the file length limit", ()
 		])
 	}, 300_000)
 
-	it("off a no-voice channel the noise carrier's roll-over is not content-checked: kept as its classed session", async () => {
-		const h = low(analogFm)
+	it("off a no-voice channel, admission off: the noise carrier's roll-over is not content-checked, kept as its classed session", async () => {
+		const h = low(analogFm, null, false)
 		await noiseScene(h, SCENE_S)
 		await h.rec.idle()
 		expect(h.ops.map(o => [o.cut, o.outcome])).toEqual([
 			["duration-limit", "finalized"],
 			["completed", "finalized"],
 		])
+	}, 300_000)
+
+	it("off a no-voice channel, admission on (the default): the noise carrier's first file and its roll-over are both discarded:noise", async () => {
+		// Feature: recording-admission, candidate rule RA-2 (roll-over files gated).
+		const h = low(analogFm)
+		await noiseScene(h, SCENE_S)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
+		expect(codes(h).filter(c => c === "discarded:noise")).toHaveLength(2)
 	}, 300_000)
 })

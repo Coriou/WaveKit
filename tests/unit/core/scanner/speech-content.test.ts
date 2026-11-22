@@ -42,6 +42,9 @@ describe("speech-content: bounds", () => {
 			maxRangeDb: 0,
 			periodicShare: 0,
 			maxBurstFrames: 0,
+			levelFrames: 0,
+			maxWindowSpreadDb: 0,
+			minWindowP10Dbfs: 0,
 		})
 	})
 

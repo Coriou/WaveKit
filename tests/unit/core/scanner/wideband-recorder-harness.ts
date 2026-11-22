@@ -246,6 +246,8 @@ export function harness(
 		 * recorder assumes 3 s, the FakeEngine's default ring).
 		 */
 		ringSeconds?: number
+		/** settings().admission.enabled (scanner.admission); default absent (enabled). */
+		admission?: boolean
 		/** The recorder's logger; default silent. */
 		logger?: Logger
 		/** Wraps the fake store's beginAnalog (failure injection: a throw, a rejected push). */
@@ -290,6 +292,9 @@ export function harness(
 			cpuBudgetCores: opts.budget ?? 1,
 			...(opts.ringSeconds !== undefined
 				? { ringSeconds: opts.ringSeconds }
+				: {}),
+			...(opts.admission !== undefined
+				? { admission: { enabled: opts.admission } }
 				: {}),
 		}),
 		beginAnalog: opts.beginWrap ? opts.beginWrap(begin) : begin,

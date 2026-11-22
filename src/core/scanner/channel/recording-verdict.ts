@@ -1066,7 +1066,9 @@ export function noteJoinedVoice(
  * `discarded:known-non-voice`, a shadow of a channel with a strong prior its own audio never
  * classed; `discarded:late-non-voice`, a decode of its own signal found at its finish or when
  * its hold ends; `discarded:not-speech`, audio that clearly measures as no speech
- * (speech-content.ts) on a channel whose digital prior is backed (contentChecked).
+ * (speech-content.ts) on a channel whose digital prior is backed (contentChecked);
+ * `discarded:noise`, audio the recording admission rule measures as open-squelch noise or data
+ * buzz (speech-content.ts admissionNoise, `FinishInput.admission`).
  */
 export type FinishVerdict =
 	| "finish"
@@ -1074,13 +1076,15 @@ export type FinishVerdict =
 	| "discarded:known-non-voice"
 	| "discarded:late-non-voice"
 	| "discarded:not-speech"
+	| "discarded:noise"
 
 /**
  * Why finishVerdict decided what it did (finishPath; the recorder logs it for every file it
  * keeps, so an audit can tell each file's path): `no-voice` (discarded by noVoiceChannel),
  * `own-tone`, `late-non-voice`, `joined-decode` (a decode of its own signal, another
  * transmission's joined voice on the air), `known-non-voice`, `prior-none` (kept at once), `content` (discarded by the content
- * check), `held`, `final` (kept at the end of its grace or with no room to hold).
+ * check), `noise` (discarded by the recording admission rule), `held`, `final` (kept at the end of
+ * its grace or with no room to hold).
  */
 export type FinishReason =
 	| "no-voice"
@@ -1090,6 +1094,7 @@ export type FinishReason =
 	| "known-non-voice"
 	| "prior-none"
 	| "content"
+	| "noise"
 	| "held"
 	| "final"
 
@@ -1124,6 +1129,16 @@ export interface FinishInput {
 	readonly speechHeard?: boolean | null
 	readonly rollOver?: boolean
 	readonly ownObservationId?: string | null
+	/**
+	 * The recording admission rule (scanner.admission): `enabled` its setting, `noise` the file's
+	 * speech-content.ts admissionNoise (null: not measured, or a file classed by its own tone: kept).
+	 * Its own field, not a speech reading: it applies to a classed session's roll-over file too.
+	 * Absent: not applied.
+	 */
+	readonly admission?: {
+		readonly enabled: boolean
+		readonly noise: boolean | null
+	}
 	readonly final: boolean
 	readonly now: number
 }
@@ -1146,6 +1161,10 @@ export interface FinishInput {
  * carries only its own spectral analog-fm class) is discarded (`discarded:not-speech`;
  * `speechHeard` absent or null: not measured, a file classed by its own tone, kept; a joined
  * observation the store does not index, joinedOtherKnownVoice, does not exempt it either);
+ * then, whatever the prior's strength (so a weak prior never holds noise), a file the recording
+ * admission rule measures as noise (`admission`: enabled, `noise` true; roll-over files included)
+ * that no joined voice of another transmission shares (joinedOtherVoice) is discarded
+ * (`discarded:noise`);
  * a classed session's roll-over file (`rollOver`: it continues a voiced over) gets that speech
  * check only, and only on a no-voice channel (elsewhere its readings are ignored: kept as its
  * session); where the content check applies (contentChecked: a
@@ -1206,6 +1225,12 @@ export function finishPath(input: FinishInput): FinishPath {
 		!joinedOtherKnownVoice(input.prior, input.joinedVoice, input.joinedVoiceIds)
 	)
 		return path("discarded:not-speech", "no-voice")
+	if (
+		input.admission?.enabled === true &&
+		input.admission.noise === true &&
+		!joinedOther
+	)
+		return path("discarded:noise", "noise")
 	if (strength === "none") return path("finish", "prior-none")
 	if (
 		notSpeech &&
@@ -1245,6 +1270,32 @@ export function keptLog(
 		speechHeard: path.speechHeard,
 		frames: c.frames,
 		rangeDb: Math.round(c.maxRangeDb * 100) / 100,
+		periodicShare: Math.round(c.periodicShare * 1000) / 1000,
+		burstFrames: c.maxBurstFrames,
+	}
+}
+
+/**
+ * The log fields of a file discarded as noise (`discarded:noise`; the recorder logs one line per
+ * such file): its operation id, its session's discovery and centre (whole Hz), finishPath's prior
+ * reading and the admission rule's measured numbers (speech-content.ts SpeechContent, rounded).
+ * Ids the core made and numbers it measured only.
+ */
+export function noiseLog(
+	path: FinishPath,
+	c: SpeechContent,
+	file: { readonly handle: { readonly operationId: string } | null },
+	session: { readonly discoveryId: string | null; readonly targetHz: number },
+): Record<string, string | number | boolean | null> {
+	return {
+		operationId: file.handle?.operationId ?? null,
+		discoveryId: session.discoveryId,
+		frequencyHz: Math.round(session.targetHz),
+		reason: path.reason,
+		strength: path.strength,
+		levelFrames: c.levelFrames,
+		spreadDb: Math.round(c.maxWindowSpreadDb * 100) / 100,
+		p10Dbfs: Math.round(c.minWindowP10Dbfs * 100) / 100,
 		periodicShare: Math.round(c.periodicShare * 1000) / 1000,
 		burstFrames: c.maxBurstFrames,
 	}

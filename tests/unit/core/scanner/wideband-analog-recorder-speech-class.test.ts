@@ -110,6 +110,9 @@ const content = (c: Partial<SpeechContent>): SpeechContent => ({
 	maxRangeDb: SPEECH_STRONG_MIN_RANGE_DB,
 	periodicShare: SPEECH_STRONG_MIN_PERIODIC_SHARE,
 	maxBurstFrames: 0,
+	levelFrames: 0,
+	maxWindowSpreadDb: 0,
+	minWindowP10Dbfs: 0,
 	...c,
 })
 

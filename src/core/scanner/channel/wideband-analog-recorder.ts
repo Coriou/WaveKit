@@ -123,6 +123,7 @@ import {
 	joinedVoiceOf,
 	keptLog,
 	LATE_VERDICT_GRACE_MS,
+	noiseLog,
 	notVoiceDecode,
 	noteJoinedVoice,
 	provisionalRoom,
@@ -137,6 +138,7 @@ import {
 	SPEECH_WINDOW_FRAMES,
 	SpeechContentMeter,
 	speechReadings,
+	admissionNoise,
 	strongSpeech,
 } from "./speech-content.js"
 import type { RecordingActivity, VoiceOnAir } from "../scheduler.js"
@@ -744,6 +746,11 @@ export interface WidebandAnalogDeps {
 		cpuBudgetCores: number
 		/** The engine's IQ ring (scanner ringSeconds); default WIDEBAND_DEFAULT_RING_SECONDS. */
 		ringSeconds?: number
+		/**
+		 * Recording admission (scanner.admission): `enabled` discards a finished file whose audio
+		 * measures as noise (speech-content.ts admissionNoise, `discarded:noise`). Default enabled.
+		 */
+		admission?: { readonly enabled: boolean } | undefined
 	}
 	beginAnalog(input: AnalogInput): AnalogHandle
 	/** A standard CTCSS tone heard over a finalized file of this observation. */
@@ -4341,6 +4348,11 @@ export class WidebandAnalogRecorder {
 		)
 		// A classed session's roll-over: only a no-voice channel's speech check (finishPath).
 		const speech = file.classTone === null ? file.speech.result() : null
+		// Recording admission: a file classed by its own tone is never measured as noise (kept).
+		const admission = {
+			enabled: this.deps.settings().admission?.enabled ?? true,
+			noise: speech === null ? null : admissionNoise(speech),
+		}
 		const path = this.deps.voicePrior
 			? finishPath({
 					prior,
@@ -4355,12 +4367,18 @@ export class WidebandAnalogRecorder {
 					...speechReadings(speech),
 					rollOver: file.rollOver && s.classed,
 					ownObservationId: s.owner,
+					admission,
 					final: final || room === 0,
 					now,
 				})
 			: null
 		const verdict = path?.verdict ?? "finish"
 		if (verdict !== "finish" && verdict !== "hold") {
+			if (verdict === "discarded:noise" && path !== null && speech !== null)
+				this.log.info(
+					noiseLog(path, speech, file, s),
+					"Analog file discarded as noise",
+				)
 			this.endFile(s, file, verdict)
 			file.failed = true
 			this.fileLost(s)
