@@ -73,6 +73,20 @@ Manages TCP connections to SDR sources with automatic reconnection.
   delivering one after `SOURCE_CANDIDATE_RETRIES` losses) and report the endpoint in use
   (`candidate`)
 
+**Source intake** (`src/core/iq-hub/`): every network source gets and dials its socket through a
+`SourceIntake`. The default is Node's own TCP socket (`new net.Socket()`, `connect(port, host)`).
+Hub intake is **not yet available**: there a `wavekit-iqhub` process
+([`native/wavekit-iqhub/README.md`](../native/wavekit-iqhub/README.md)) owns the `rtl_tcp`
+connection on its own thread, and SourceManager reads a front sink over a Unix socket that replays
+the header, delivers the stream with counted whole-frame gaps and forwards tuner commands
+upstream in order. It is built and tested (a supervisor per source in `supervisor.ts`, the
+protocol in `protocol.ts`, a 5 s hung-hub watchdog), but tuner-command receipts do not yet use the
+hub's exact command positions, so `WAVEKIT_SOURCE_INTAKE=hub` stops startup with a configuration
+error. Unset or `socket` keeps today's path; any other value also stops startup, naming the
+accepted values. Hub intake applies only to `rtl_tcp` `U8_IQ` sources whose host is an IP address;
+failures the hub causes carry `IQHUB_*` codes and never count as receiver connect failures or
+toward the endpoint fallback.
+
 **Key interfaces**:
 
 ```typescript

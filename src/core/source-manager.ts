@@ -42,9 +42,15 @@ import type {
 import {
 	connectFailureStatus,
 	connectTarget,
+	isIntakeFault,
 	noteConnectFailure,
 	PEER_CLOSED,
 } from "./source-manager-connect-failure.js"
+import type { SourceIntake } from "./iq-hub/intake.js"
+import {
+	hubIntakeUnavailableError,
+	processSourceIntakeMode,
+} from "./iq-hub/intake-mode.js"
 import type { ConnectFailureRecord } from "./source-manager-connect-failure.js"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError, WaveKitError } from "../utils/errors.js"
@@ -254,6 +260,22 @@ export interface SourceManagerOptions {
 	tuningSettleMs?: ((sourceId: string) => number) | undefined
 	/** Overrides the ledger's in-flight estimate (IN_FLIGHT_BOUND_BYTES, 512 KiB): tests, measured links. */
 	tuningInFlightBytes?: number | undefined
+	/**
+	 * How network sources get and dial their socket (tests inject the hub intake). Without it the
+	 * process's WAVEKIT_SOURCE_INTAKE is read (iq-hub/intake-mode.ts) and today's socket path is used.
+	 */
+	intake?: SourceIntake | undefined
+}
+
+/** Today's intake: Node's own TCP socket, `new net.Socket()` and `connect(port, host)`. */
+const SOCKET_INTAKE: SourceIntake = {
+	create: () => new net.Socket(),
+	connect: (socket, _id, _config, host, port) => {
+		socket.connect(port, host)
+	},
+	localPortOf: () => null,
+	dispose: () => {},
+	disposeAll: () => Promise.resolve(),
 }
 
 /**
@@ -383,6 +405,8 @@ interface SourceAttempt {
 	silentTimer: ReturnType<typeof setTimeout> | null
 	/** This connection in the tuning ledger (frames written, its session once payload flows). */
 	ledger: LedgerConnection
+	/** The intake (the IQ hub), not the receiver, failed this attempt (an IQHUB_* error). */
+	intakeFault: boolean
 }
 
 interface SourceState {
@@ -596,12 +620,17 @@ export class SourceManager extends EventEmitter {
 		| null = null
 	private readonly ledger: TuningLedger
 	private readonly unproven: TuningUnprovenTracker
+	private readonly intake: SourceIntake
 
 	constructor(logger: Logger, options: SourceManagerOptions = {}) {
 		super()
 		this.setMaxListeners(SOURCE_MANAGER_MAX_LISTENERS)
 		this.logger = logger.child({ component: "SourceManager" })
 		this.options = options
+		if (options.intake !== undefined) this.intake = options.intake
+		else if (processSourceIntakeMode(this.logger) === "socket")
+			this.intake = SOCKET_INTAKE
+		else throw hubIntakeUnavailableError()
 		this.feedPersistence =
 			options.feedPersistence ??
 			(options.stateDir !== undefined
@@ -642,7 +671,8 @@ export class SourceManager extends EventEmitter {
 	connectionLocalPort(id: string): number | null {
 		const state = this.sources.get(id)
 		const socket = state?.connected === true ? state.socket : null
-		const port = socket?.localPort
+		const port =
+			(socket ? this.intake.localPortOf(socket) : null) ?? socket?.localPort
 		return typeof port === "number" && Number.isInteger(port) && port > 0
 			? port
 			: null
@@ -1655,7 +1685,7 @@ export class SourceManager extends EventEmitter {
 		const host = endpoint.host
 		const port = endpoint.port
 		return new Promise<void>((resolve, reject) => {
-			const socket = new net.Socket()
+			const socket = this.intake.create(id, config, host, port)
 			if (!this.isCurrent(state)) {
 				socket.destroy()
 				resolve()
@@ -1677,6 +1707,7 @@ export class SourceManager extends EventEmitter {
 				watchdog: null,
 				silentTimer: null,
 				ledger: this.ledger.connection(id),
+				intakeFault: false,
 			}
 			const previous = state.attempt
 			state.attempt = attempt
@@ -1929,6 +1960,8 @@ export class SourceManager extends EventEmitter {
 			const onError = (err: Error) => {
 				const current = this.isActiveAttempt(state, attempt)
 				const hadConnected = attempt.phase === "connected"
+				// A hub failure is no receiver failure: no connect-failure record, no endpoint fallback.
+				if (isIntakeFault(err)) attempt.intakeFault = true
 				if (current) {
 					attempt.ledger.close()
 					attempt.phase = "failed"
@@ -1943,7 +1976,7 @@ export class SourceManager extends EventEmitter {
 					stopOwnWatchdog()
 				}
 				try {
-					if (current) {
+					if (current && !attempt.intakeFault) {
 						state.connectFailure = noteConnectFailure(
 							state.connectFailure,
 							err,
@@ -1951,8 +1984,8 @@ export class SourceManager extends EventEmitter {
 							port,
 							Date.now(),
 						)
-						this.handleConnectionError(id, err, state, attempt)
 					}
+					if (current) this.handleConnectionError(id, err, state, attempt)
 				} finally {
 					if (isInitialAttempt && !hadConnected)
 						safeReject(new SourceConnectionError(host, port, err))
@@ -1976,6 +2009,7 @@ export class SourceManager extends EventEmitter {
 				// failed connect, so it starts no connect-failure record.
 				const peerClosed =
 					owns &&
+					!attempt.intakeFault &&
 					!state.retargetPending &&
 					attempt.lastSampleAt === null &&
 					(attempt.phase === "connecting" || attempt.phase === "connected")
@@ -1987,7 +2021,7 @@ export class SourceManager extends EventEmitter {
 						port,
 						Date.now(),
 					)
-				if (owns) this.noteEndpointClose(id, state)
+				if (owns && !attempt.intakeFault) this.noteEndpointClose(id, state)
 				if (owns) {
 					attempt.ledger.close()
 					attempt.phase = "closed"
@@ -2063,7 +2097,8 @@ export class SourceManager extends EventEmitter {
 				)
 			})
 			socket.setTimeout(SOURCE_CONNECT_TIMEOUT_MS)
-			if (this.isActiveAttempt(state, attempt)) socket.connect(port, host)
+			if (this.isActiveAttempt(state, attempt))
+				this.intake.connect(socket, id, config, host, port)
 			else safeResolve()
 		})
 	}
@@ -2524,6 +2559,7 @@ export class SourceManager extends EventEmitter {
 			state.socket.destroy()
 			state.socket = null
 		}
+		this.intake.dispose(id)
 
 		// End the stream
 		if (!state.stream.destroyed) {
@@ -3942,5 +3978,6 @@ export class SourceManager extends EventEmitter {
 	async disconnectAll(): Promise<void> {
 		const ids = Array.from(this.sources.keys())
 		for (const id of ids) this.teardown(id)
+		await this.intake.disposeAll()
 	}
 }
