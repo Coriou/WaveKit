@@ -32,8 +32,9 @@
  * meanwhile rerun it once), so a bulk removal costs one or two scans, not one per discovery. The
  * store's analog stop waits for a running purge at most PURGE_STOP_WAIT_MS; files a stopped purge
  * leaves are removed by the age bound.
- * Every error is logged (safeErrorFields, fixed text) and never fatal. A failed move leaves the
- * caller to delete the file (today's behaviour).
+ * Every error is logged (safeErrorFields, fixed text) and never fatal. A move that finds its day
+ * folder gone (ENOENT: a prune removed it around midnight) recreates it and retries once; a
+ * failed move leaves the caller to delete the file (today's behaviour).
  */
 import { constants as fsConstants } from "node:fs"
 import {
@@ -260,15 +261,26 @@ export class NoiseQuarantine {
 			} catch (cause) {
 				if (codeOf(cause) !== "ENOENT") throw cause
 			}
+			const move = async (): Promise<void> => {
+				try {
+					await this.fs.rename(source, target)
+					moved = target
+				} catch (cause) {
+					if (codeOf(cause) !== "EXDEV") throw cause
+					// Another device: copy (exclusive create), then remove the source.
+					await this.fs.copyFile(source, target)
+					moved = target
+					await this.fs.unlink(source)
+				}
+			}
 			try {
-				await this.fs.rename(source, target)
-				moved = target
+				await move()
 			} catch (cause) {
-				if (codeOf(cause) !== "EXDEV") throw cause
-				// Another device: copy (exclusive create), then remove the source.
-				await this.fs.copyFile(source, target)
-				moved = target
-				await this.fs.unlink(source)
+				if (codeOf(cause) !== "ENOENT" || moved !== null) throw cause
+				// Around midnight a prune may remove this (then empty, already past) day folder
+				// between the mkdir and the move: recreate it and retry the move once.
+				await this.fs.mkdir(folder)
+				await move()
 			}
 			await this.fs.writeHeader(target, wavHeader(SAMPLE_RATE_HZ, dataBytes))
 			const body = Buffer.from(
@@ -306,18 +318,22 @@ export class NoiseQuarantine {
 			return this.pruning
 		}
 		const run = async (): Promise<void> => {
-			do {
+			for (;;) {
 				this.rerun = false
 				try {
 					await this.pruneOnce()
 				} catch (err) {
 					this.log.warn(safeErrorFields(err), "Noise quarantine prune failed")
 				}
-			} while (this.rerun)
+				// Checked and cleared in one synchronous step: a request after this starts a new
+				// prune instead of joining one that is already settling.
+				if (!this.rerun) {
+					this.pruning = null
+					return
+				}
+			}
 		}
-		this.pruning = run().finally(() => {
-			this.pruning = null
-		})
+		this.pruning = run()
 		return this.pruning
 	}
 
@@ -458,7 +474,13 @@ export class NoiseQuarantine {
 		this.pendingPurge.add(discoveryId)
 		if (this.purging) return this.purging
 		const run = async (): Promise<void> => {
-			while (this.pendingPurge.size > 0) {
+			for (;;) {
+				// Checked and cleared in one synchronous step: an id queued after this starts a new
+				// scan (and gets its promise) instead of joining one that is already settling.
+				if (this.pendingPurge.size === 0) {
+					this.purging = null
+					return
+				}
 				const ids = new Set(this.pendingPurge)
 				this.pendingPurge.clear()
 				try {
@@ -468,9 +490,7 @@ export class NoiseQuarantine {
 				}
 			}
 		}
-		this.purging = run().finally(() => {
-			this.purging = null
-		})
+		this.purging = run()
 		return this.purging
 	}
 

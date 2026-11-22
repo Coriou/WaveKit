@@ -132,6 +132,12 @@ function ids(): {
 	}
 }
 
+/** Runs `fn` after `n` microtask hops (probes a window between two awaits). */
+function afterTicks(n: number, fn: () => void): void {
+	if (n === 0) fn()
+	else queueMicrotask(() => afterTicks(n - 1, fn))
+}
+
 describe("noise quarantine bounds", () => {
 	it("the flag is on by default and the bounds state their arithmetic", () => {
 		expect(NOISE_QUARANTINE).toBe(true)
@@ -352,6 +358,41 @@ describe("noise quarantine bounds", () => {
 		await q.prune()
 		expect([a, b, c].map(p => existsSync(p))).toEqual([true, false, true])
 	})
+
+	it("a prune asked as the last one settles reruns: the window before it clears is covered", async () => {
+		// Probe every microtask depth after the prune's last fs call (the past-day rmdir): a
+		// prune asked there must be covered by a run that its returned promise waits for.
+		for (let depth = 0; depth <= 12; depth++) {
+			const root = await tempRoot()
+			let rootReads = 0
+			const late: { run: Promise<void> | null } = { run: null }
+			const q: NoiseQuarantine = new NoiseQuarantine({
+				root,
+				logger,
+				now: () => NOW,
+				fs: {
+					...nodeNoiseQuarantineFs,
+					readdir: async path => {
+						if (path === q.dir) rootReads++
+						return nodeNoiseQuarantineFs.readdir(path)
+					},
+					rmdir: async path => {
+						await nodeNoiseQuarantineFs.rmdir(path).catch(() => undefined)
+						if (late.run === null)
+							afterTicks(depth, () => {
+								late.run = q.prune()
+							})
+					},
+				},
+			})
+			await mkdir(join(q.dir, "2026-11-21"), { recursive: true })
+			await q.prune()
+			await new Promise(resolve => setImmediate(resolve))
+			expect(late.run).not.toBeNull()
+			await late.run
+			expect({ depth, rootReads }).toEqual({ depth, rootReads: 2 })
+		}
+	})
 })
 
 describe("noise quarantine purge of a removed discovery", () => {
@@ -488,6 +529,54 @@ describe("noise quarantine purge of a removed discovery", () => {
 		expect(existsSync(join(q.dir, DAY, `${late.operationId}.wav`))).toBe(false)
 	})
 
+	it("an id asked as the last scan settles is still purged by the promise it gets", async () => {
+		// Probe every microtask depth after the scan's last fs call (A's sidecar unlink): B asked
+		// there must be covered by a scan that its returned promise waits for.
+		for (let depth = 0; depth <= 12; depth++) {
+			const root = await tempRoot()
+			const a = { ...ids(), discoveryId: "d_A" }
+			const b = { ...ids(), discoveryId: "d_B" }
+			const late: { run: Promise<void> | null } = { run: null }
+			const q: NoiseQuarantine = new NoiseQuarantine({
+				root,
+				logger,
+				now: () => NOW,
+				fs: {
+					...nodeNoiseQuarantineFs,
+					// A's entries are listed last, so its sidecar unlink is the scan's last fs call.
+					readdir: async path =>
+						(await nodeNoiseQuarantineFs.readdir(path)).sort(
+							(x, y) =>
+								Number(x.startsWith(a.operationId)) -
+									Number(y.startsWith(a.operationId)) || (x < y ? -1 : 1),
+						),
+					unlink: async path => {
+						await nodeNoiseQuarantineFs.unlink(path)
+						if (path.endsWith(`${a.operationId}.json`) && late.run === null)
+							afterTicks(depth, () => {
+								late.run = q.purgeDiscovery("d_B")
+							})
+					},
+				},
+			})
+			for (const id of [a, b]) {
+				const source = join(root, `${id.operationId}.part`)
+				await part(source, 100)
+				expect(await q.admit(source, id, facts)).toBe(true)
+			}
+			await q.prune()
+			await q.purgeDiscovery("d_A")
+			await new Promise(resolve => setImmediate(resolve))
+			expect(late.run).not.toBeNull()
+			await late.run
+			const left = [a, b].map(id =>
+				existsSync(join(q.dir, DAY, `${id.operationId}.wav`)),
+			)
+			expect({ depth, left }).toEqual({ depth, left: [false, false] })
+			await q.settled()
+		}
+	})
+
 	it("settledWithin gives up after its bound while a purge hangs", async () => {
 		const root = await tempRoot()
 		let release: () => void = () => undefined
@@ -607,6 +696,59 @@ describe("noise quarantine admit", () => {
 		const source = join(root, "payload.wav.part")
 		await part(source, 100)
 		expect(await q.admit(source, ids(), facts)).toBe(false)
+		expect(existsSync(source)).toBe(true)
+	})
+
+	it("midnight: a prune removing the day folder before the move recreates it and retries once", async () => {
+		const root = await tempRoot()
+		let enoents = 0
+		const q: NoiseQuarantine = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			fs: {
+				...nodeNoiseQuarantineFs,
+				rename: async (from, to) => {
+					if (enoents < 1) {
+						enoents++
+						// As a prune's rmdir of the (still empty) folder would leave it.
+						await nodeNoiseQuarantineFs.rmdir(join(q.dir, DAY))
+						throw Object.assign(new Error("gone"), { code: "ENOENT" })
+					}
+					await nodeNoiseQuarantineFs.rename(from, to)
+				},
+			},
+		})
+		const source = join(root, "payload.wav.part")
+		await part(source, 100)
+		const id = ids()
+		expect(await q.admit(source, id, facts)).toBe(true)
+		expect(enoents).toBe(1)
+		expect(existsSync(source)).toBe(false)
+		expect(existsSync(join(q.dir, DAY, `${id.operationId}.wav`))).toBe(true)
+		expect(existsSync(join(q.dir, DAY, `${id.operationId}.json`))).toBe(true)
+	})
+
+	it("midnight: a second ENOENT on the retried move falls back to delete (false)", async () => {
+		const root = await tempRoot()
+		let renames = 0
+		const q: NoiseQuarantine = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			fs: {
+				...nodeNoiseQuarantineFs,
+				rename: async () => {
+					renames++
+					await nodeNoiseQuarantineFs.rmdir(join(q.dir, DAY))
+					throw Object.assign(new Error("gone"), { code: "ENOENT" })
+				},
+			},
+		})
+		const source = join(root, "payload.wav.part")
+		await part(source, 100)
+		expect(await q.admit(source, ids(), facts)).toBe(false)
+		expect(renames).toBe(2)
 		expect(existsSync(source)).toBe(true)
 	})
 
