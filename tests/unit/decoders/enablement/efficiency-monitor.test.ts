@@ -31,6 +31,7 @@ const setup = () => {
 		},
 		topology: () => topology,
 		cpu: { normalisedPercent: NaN },
+		ownCpu: null,
 		now: () => wall,
 		monoNow: () => mono,
 		setInterval(fn) {
@@ -304,6 +305,7 @@ it("throwing read yields unknown for that source only", () => {
 		monoNow: () => mono,
 		now: () => 0,
 		cpu: { normalisedPercent: null },
+		ownCpu: null,
 		setInterval: () => ({ cancel() {} }),
 	})
 	for (mono = 0; mono <= 62000; mono += 2000) monitor.sampleNow()
@@ -404,6 +406,7 @@ const branchSetup = () => {
 		},
 		topology: () => String(removals),
 		cpu: { normalisedPercent: 10 },
+		ownCpu: null,
 		now: () => mono,
 		monoNow: () => mono,
 		setInterval(fn) {
@@ -571,15 +574,21 @@ it("a clock rollback restarts probation coverage instead of counting it twice", 
 	])
 })
 
-it("CPU over the limit on the sample that completes coverage condemns", () => {
+// Intended change (rx-starvation S1): the evidence is own CPU over 90 % of
+// capacity on two consecutive samples; host CPU alone (99 %) is no evidence.
+it("own CPU over the limit on the sample that completes coverage condemns", () => {
 	const f = branchSetup()
 	f.earn(62_000)
 	expect(f.admit()).toEqual({ admit: true })
-	for (let at = 64_000; at <= 92_000; at += 2000) f.tickAt(at)
+	for (let at = 64_000; at <= 90_000; at += 2000) f.tickAt(at)
+	const over = { ownCores: 3.8, capacityCores: 4 }
+	f.clockAt(90_000.1)
+	f.gate.record({ atMs: 90_000, cpuPercent: 99, ...over, sources: new Map() })
+	f.tickAt(92_000)
 	expect(f.monitor.coverageCompleteAtMono("s", 62_000, 30_000)).toBe(92_000)
 	// The sample's CPU reading is delivered just after the clock moved on.
 	f.clockAt(92_000.1)
-	f.gate.record({ atMs: 92_000, cpuPercent: 99, sources: new Map() })
+	f.gate.record({ atMs: 92_000, cpuPercent: 99, ...over, sources: new Map() })
 	expect(f.gate.probation(f.running, 92_000)).toEqual([
 		{ key: "q", detail: "cpu" },
 	])

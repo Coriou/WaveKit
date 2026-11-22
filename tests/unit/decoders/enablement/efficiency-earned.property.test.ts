@@ -123,6 +123,7 @@ const harness = () => {
 		monoNow: () => time,
 		now: () => Number.MAX_SAFE_INTEGER,
 		cpu: { normalisedPercent: null },
+		ownCpu: null,
 		setInterval(fn) {
 			tick = fn
 			return { cancel() {} }

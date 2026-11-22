@@ -91,6 +91,7 @@ async function setup() {
 		branchCounters: () => new Map(),
 		topology: () => "branches",
 		cpu: { normalisedPercent: 20 },
+		ownCpu: null,
 		now: Date.now,
 		monoNow,
 		// Called only once started, after the gate below exists.

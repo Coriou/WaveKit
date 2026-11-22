@@ -69,6 +69,7 @@ async function scenario(graduated: boolean, outage: number, phase: number) {
 	let branch = "original"
 	// Counter injection models a slow consumer independently of the transport fake.
 	const monitor = createEfficiencyMonitor({
+		ownCpu: null,
 		sourceEvents: sources,
 		sources: () => sources.getAllStatus().map(s => s.id),
 		branchCounters: () =>
@@ -332,6 +333,7 @@ it("releases permanent source recovery records without losing transient epochs",
 		fc.property(fc.integer({ min: 1, max: 100 }), churn => {
 			const events = new EventEmitter()
 			const monitor = createEfficiencyMonitor({
+				ownCpu: null,
 				sourceEvents: events,
 				sources: () => ["transient"],
 				branchCounters: () => null,

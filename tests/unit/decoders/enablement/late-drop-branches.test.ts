@@ -42,6 +42,7 @@ function harness(specs: readonly Spec[]) {
 			),
 		topology: () => "fixed",
 		cpu: { normalisedPercent: 10 },
+		ownCpu: null,
 		now: () => mono,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),

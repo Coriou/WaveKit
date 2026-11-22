@@ -6,6 +6,7 @@ import type {
 	RunningPlacement,
 	WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
+import { ownFollows } from "./rx-starvation-harness.js"
 
 /** One sample period of the efficiency monitor, 2000 ms. */
 export const SAMPLE_MS = 2_000
@@ -19,7 +20,15 @@ export const LIVE = "live-demod-a"
  * clock shared with the real gate; ingest is gapless and the event-loop
  * delay is the test's (healthy unless raised). No sockets or processes.
  */
-export function starvationHarness() {
+export function starvationHarness(
+	opts: {
+		/**
+		 * rx-starvation S1: CPU load is the core's own (own cores follow `cpu`);
+		 * by default the core has no own reading, so `cpu` is host CPU only.
+		 */
+		ownFollowsCpu?: boolean
+	} = {},
+) {
 	let mono = 0
 	const totals = new Map<string, number>([[`${LIVE}#1`, 0]])
 	const loop = { maxMs: 4, p99Ms: 2 }
@@ -39,6 +48,7 @@ export function starvationHarness() {
 		loopDelay: () => ({ ...loop }),
 		shortfall: () => false,
 		cpu,
+		ownCpu: opts.ownFollowsCpu === true ? ownFollows(cpu) : null,
 		now: () => mono,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),

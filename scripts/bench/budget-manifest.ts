@@ -1309,6 +1309,104 @@ const CoverageClass = z.object({
 	source: z.string(),
 })
 
+// === decoder suspensions in the window (from the core log) ===
+
+/**
+ * Decoder suspensions in the measured window, read from the core's JSON log: transitions into a
+ * suspension by reason (an efficiency-budget suspension by its efficiency detail, as
+ * `efficiency-budget:cpu`), the seconds each decoder spent suspended for the efficiency budget,
+ * and the gate's verdict lines by detail (a stop made for a tuned probationer counts as
+ * `<detail>:scapegoat`).
+ */
+export const SuspensionsSchema = z.object({
+	entered: z.record(Num),
+	efficiencySeconds: z.record(Num),
+	verdicts: z.record(Num),
+	lateSheds: Num,
+	ownCpuUnavailable: z.boolean(),
+})
+export type Suspensions = z.infer<typeof SuspensionsSchema>
+
+const LogLineSchema = z.object({
+	time: z.string(),
+	msg: z.string(),
+	decoderId: z.string().optional(),
+	reasonCode: z.string().nullable().optional(),
+	efficiencyDetail: z.string().optional(),
+	detail: z.string().optional(),
+	scapegoat: z.boolean().optional(),
+})
+
+/** Pure: the core log's text and the window's bounds (epoch ms). Unparsable lines are skipped. */
+export function suspensionsOf(
+	logText: string,
+	startMs: number,
+	endMs: number,
+): Suspensions {
+	const entered: Record<string, number> = {}
+	const verdicts: Record<string, number> = {}
+	const seconds: Record<string, number> = {}
+	/** Per decoder: since when it is suspended for the efficiency budget. */
+	const since = new Map<string, number>()
+	let lateSheds = 0
+	let ownCpuUnavailable = false
+	const bump = (r: Record<string, number>, k: string) => {
+		r[k] = (r[k] ?? 0) + 1
+	}
+	const close = (id: string, at: number) => {
+		const from = since.get(id)
+		if (from === undefined) return
+		since.delete(id)
+		const overlap = Math.min(at, endMs) - Math.max(from, startMs)
+		if (overlap > 0) seconds[id] = (seconds[id] ?? 0) + overlap / 1000
+	}
+	for (const line of logText.split("\n")) {
+		if (line.trim() === "") continue
+		let raw: unknown
+		try {
+			raw = JSON.parse(line)
+		} catch {
+			continue
+		}
+		const parsed = LogLineSchema.safeParse(raw)
+		if (!parsed.success) continue
+		const l = parsed.data
+		const at = Date.parse(l.time)
+		if (!Number.isFinite(at)) continue
+		const inWindow = at >= startMs && at <= endMs
+		if (l.msg === "own CPU unavailable: CPU shedding off")
+			ownCpuUnavailable = true
+		if (l.msg === "Decoder suspension changed" && l.decoderId !== undefined) {
+			const id = l.decoderId
+			const reason = l.reasonCode ?? null
+			if (reason === "efficiency-budget") {
+				if (!since.has(id)) since.set(id, at)
+			} else close(id, at)
+			if (inWindow && reason !== null)
+				bump(
+					entered,
+					reason === "efficiency-budget"
+						? `efficiency-budget:${l.efficiencyDetail ?? "unknown"}`
+						: reason,
+				)
+		}
+		if (!inWindow) continue
+		if (l.msg === "Efficiency probation verdict" && l.detail !== undefined)
+			bump(verdicts, l.scapegoat === true ? `${l.detail}:scapegoat` : l.detail)
+		if (l.msg === "Late drops shed a decoder") lateSheds++
+	}
+	for (const id of [...since.keys()]) close(id, endMs)
+	for (const k of Object.keys(seconds))
+		seconds[k] = Math.round(seconds[k]! * 1000) / 1000
+	return {
+		entered,
+		efficiencySeconds: seconds,
+		verdicts,
+		lateSheds,
+		ownCpuUnavailable,
+	}
+}
+
 export const ManifestSchema = z.object({
 	schema: z.literal(2),
 	label: z.string(),
@@ -1462,6 +1560,8 @@ export const ManifestSchema = z.object({
 	}),
 	/** Tier A runs from the starvation harness onwards; absent in older manifests. */
 	starvation: StarvationSchema.optional(),
+	/** Decoder suspensions in the window (core log); absent in older manifests. */
+	suspensions: SuspensionsSchema.optional(),
 })
 export type Manifest = z.infer<typeof ManifestSchema>
 
@@ -1956,6 +2056,50 @@ function table(rows: readonly CompareRow[], a: string, b: string): string {
 	return lines.join("\n")
 }
 
+/** Efficiency-budget entries by detail grouped as cpu, late drop and other. */
+export function suspensionGroups(s: Suspensions): {
+	cpu: number
+	lateDrops: number
+	other: number
+} {
+	let cpu = 0
+	let lateDrops = 0
+	let other = 0
+	for (const [k, n] of Object.entries(s.entered)) {
+		if (k === "efficiency-budget:cpu") cpu += n
+		else if (k === "efficiency-budget:late-drops") lateDrops += n
+		else if (k.startsWith("efficiency-budget:")) other += n
+	}
+	return { cpu, lateDrops, other }
+}
+
+function suspensionTable(a: Manifest, b: Manifest): string {
+	const rows: [string, (s: Suspensions) => number][] = [
+		["efficiency suspensions: cpu", s => suspensionGroups(s).cpu],
+		["efficiency suspensions: late drops", s => suspensionGroups(s).lateDrops],
+		["efficiency suspensions: other detail", s => suspensionGroups(s).other],
+		[
+			"gate cpu verdicts",
+			s => (s.verdicts["cpu"] ?? 0) + (s.verdicts["cpu:scapegoat"] ?? 0),
+		],
+		[
+			"dsd-fme efficiency-suspended s",
+			s => s.efficiencySeconds["dsd-fme"] ?? 0,
+		],
+	]
+	return table(
+		rows.map(([figure, f]) =>
+			row(
+				figure,
+				a.suspensions === undefined ? null : f(a.suspensions),
+				b.suspensions === undefined ? null : f(b.suspensions),
+			),
+		),
+		`A (${a.label})`,
+		`B (${b.label})`,
+	)
+}
+
 /** The comparison as Markdown (tables, then notes). */
 export function formatComparison(
 	a: Manifest,
@@ -1967,6 +2111,8 @@ export function formatComparison(
 		parts.push(table(result.timingRows, `A (${a.label})`, `B (${b.label})`))
 	if (result.starvationRows)
 		parts.push(table(result.starvationRows, `A (${a.label})`, `B (${b.label})`))
+	if (a.suspensions !== undefined || b.suspensions !== undefined)
+		parts.push(suspensionTable(a, b))
 	parts.push(...result.notes)
 	return `${parts.join("\n\n")}\n`
 }

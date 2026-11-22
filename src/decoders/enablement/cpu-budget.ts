@@ -51,19 +51,19 @@ function cgroupPaths(read?: () => string): {
 	return result
 }
 
-/** Pure given its CPU count and readers; malformed quotas mean no quota. */
-export function resolveCpuBudget(
-	value: EfficiencyBudgetValue,
-	deps: {
-		cpuCount: number
-		readProcCgroup?: () => string
-		readCpuMax: (relativePath: string) => string
-	},
-): EfficiencyBudgetResolution {
-	const parsed = CpuBudgetSchema.safeParse(value)
-	if (parsed.success && typeof parsed.data === "number")
-		return { mode: "configured", cores: parsed.data, label: "configured" }
-	// An invalid CPU count fails to the minimum auto budget (one available CPU).
+export interface CpuCapacityReaders {
+	cpuCount: number
+	readProcCgroup?: () => string
+	readCpuMax: (relativePath: string) => string
+}
+
+/**
+ * The CPU capacity of this process: `min(available CPUs, effective quota / period)`
+ * over its cgroup and every ancestor. Pure given its readers; malformed quotas mean
+ * no quota.
+ */
+export function resolveCpuCapacity(deps: CpuCapacityReaders): number {
+	// An invalid CPU count fails to the minimum (one available CPU).
 	let cpus =
 		Number.isSafeInteger(deps.cpuCount) && deps.cpuCount > 0 ? deps.cpuCount : 1
 	const paths = cgroupPaths(deps.readProcCgroup)
@@ -115,6 +115,18 @@ export function resolveCpuBudget(
 			}
 		}
 	}
+	return cpus
+}
+
+/** Pure given its CPU count and readers; malformed quotas mean no quota. */
+export function resolveCpuBudget(
+	value: EfficiencyBudgetValue,
+	deps: CpuCapacityReaders,
+): EfficiencyBudgetResolution {
+	const parsed = CpuBudgetSchema.safeParse(value)
+	if (parsed.success && typeof parsed.data === "number")
+		return { mode: "configured", cores: parsed.data, label: "configured" }
+	const cpus = resolveCpuCapacity(deps)
 	const cores = Math.min(64, cpus, Math.max(0.75, cpus / 2))
 	return {
 		mode: "auto",
@@ -124,13 +136,20 @@ export function resolveCpuBudget(
 	}
 }
 
+const hostReaders = (): CpuCapacityReaders => ({
+	cpuCount: availableParallelism(),
+	readProcCgroup: () => readFileSync("/proc/self/cgroup", "utf8"),
+	readCpuMax: relativePath =>
+		readFileSync(`/sys/fs/cgroup/${relativePath}`, "utf8"),
+})
+
 export function hostCpuBudget(
 	value: EfficiencyBudgetValue,
 ): EfficiencyBudgetResolution {
-	return resolveCpuBudget(value, {
-		cpuCount: availableParallelism(),
-		readProcCgroup: () => readFileSync("/proc/self/cgroup", "utf8"),
-		readCpuMax: relativePath =>
-			readFileSync(`/sys/fs/cgroup/${relativePath}`, "utf8"),
-	})
+	return resolveCpuBudget(value, hostReaders())
+}
+
+/** This host's CPU capacity in cores (resolveCpuCapacity on the real readers). */
+export function hostCpuCapacity(): number {
+	return resolveCpuCapacity(hostReaders())
 }

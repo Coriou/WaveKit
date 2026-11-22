@@ -2088,6 +2088,31 @@ export class DecoderManager extends EventEmitter {
 		}
 		if (verdicts.length === 0 && now - this.lastEfficiencyWarningMs >= 60_000) {
 			const view = this.efficiencyView()
+			// The core's own CPU (the gate's classification) is decoder load;
+			// host CPU alone is reported as "host-cpu". A gate without cpuState
+			// falls back to the view's host CPU.
+			let cpuState: ReturnType<NonNullable<typeof gate.cpuState>> = null
+			try {
+				cpuState = gate.cpuState?.(now) ?? null
+			} catch {
+				/* Warning only. */
+			}
+			const cpuDetail = (source: {
+				cpu: { percent: number | null; limit: number }
+			}): "cpu" | "host-cpu" | null => {
+				if (gate.cpuState === undefined)
+					return source.cpu.percent !== null &&
+						source.cpu.percent > source.cpu.limit
+						? "cpu"
+						: null
+				if (cpuState?.label === "own-over") return "cpu"
+				if (
+					cpuState?.label === "host-busy" ||
+					cpuState?.label === "host-busy-unattributed"
+				)
+					return "host-cpu"
+				return null
+			}
 			const over = view.sources.filter(
 				source =>
 					!running.some(
@@ -2095,9 +2120,7 @@ export class DecoderManager extends EventEmitter {
 							placement.sourceId === source.sourceId &&
 							now - placement.admittedAtMs < EFFICIENCY_PROBATION_MS,
 					) &&
-					(source.drops === "dropping" ||
-						(source.cpu.percent !== null &&
-							source.cpu.percent > source.cpu.limit)),
+					(source.drops === "dropping" || cpuDetail(source) !== null),
 			)
 			if (over.length > 0) {
 				this.lastEfficiencyWarningMs = now
@@ -2107,7 +2130,18 @@ export class DecoderManager extends EventEmitter {
 						// Drops outrank CPU, as in the gate's own verdicts.
 						efficiencyDetail: over.some(source => source.drops === "dropping")
 							? "drops"
-							: "cpu",
+							: over.some(source => cpuDetail(source) === "cpu")
+								? "cpu"
+								: "host-cpu",
+						...(cpuState === null
+							? {}
+							: {
+									ownCores:
+										cpuState.ownCores === null
+											? null
+											: Math.round(cpuState.ownCores * 1000) / 1000,
+									capacityCores: cpuState.capacityCores,
+								}),
 					},
 					"Decoder efficiency drops or CPU limit exceeded",
 				)

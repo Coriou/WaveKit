@@ -37,6 +37,7 @@ const fixture = (overflow = false, sibling = false) => {
 			),
 		topology: () => "fixed",
 		cpu: { normalisedPercent: 10 },
+		ownCpu: null,
 		now: () => 0,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),

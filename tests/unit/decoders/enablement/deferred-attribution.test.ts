@@ -49,6 +49,7 @@ function scenario(
 			]),
 		topology: () => "fixed",
 		cpu: { normalisedPercent: 10 },
+		ownCpu: null,
 		now: () => now,
 		monoNow: () => now,
 		ingest: (_id, from, to) => recorder.interval(from, to),
@@ -234,6 +235,7 @@ function intervalScenario(initialCpu = 10, initialLoop = 15) {
 				return cpu
 			},
 		},
+		ownCpu: null,
 		now: () => now,
 		monoNow: () => now,
 		ingest: () => ({ maxGapMs: gap, catchupBytes: 0, chunks: 100 }),

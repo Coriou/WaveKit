@@ -102,6 +102,8 @@ import {
 	type Manifest,
 	ManifestSchema,
 	noKnownLoss,
+	suspensionGroups,
+	suspensionsOf,
 	nonLoopbackListeners,
 	parseLsofListeners,
 	parseProcLines,
@@ -954,6 +956,16 @@ function assemble(outDir: string, meta: RunMeta): Manifest {
 		windowShort,
 		fakeBehindOf(fakeA, fakeB),
 	)
+	// Decoder suspensions in the window, by reason, from the core log.
+	const coreLogPath = join(outDir, "core.log")
+	const startMs = Date.parse(win.startUtc)
+	const endMs = Date.parse(win.endUtc)
+	const suspensions =
+		existsSync(coreLogPath) &&
+		Number.isFinite(startMs) &&
+		Number.isFinite(endMs)
+			? suspensionsOf(readFileSync(coreLogPath, "utf8"), startMs, endMs)
+			: undefined
 	const manifest: Manifest = {
 		schema: 2,
 		label: meta.label,
@@ -1030,6 +1042,7 @@ function assemble(outDir: string, meta: RunMeta): Manifest {
 			callsPerSecond,
 		},
 		...(starvation === undefined ? {} : { starvation }),
+		...(suspensions === undefined ? {} : { suspensions }),
 	}
 	return ManifestSchema.parse(manifest)
 }
@@ -1050,9 +1063,25 @@ function writeManifest(outDir: string, manifest: Manifest): void {
 			`  warnings: ${manifest.warnings.join("; ") || "none"}`,
 			`  coverage missing: ${manifest.coverage.missing.join(", ") || "none"}; unknown: ${manifest.coverage.unknown.join(", ") || "none"}`,
 			...starvationLines(manifest),
+			...suspensionLines(manifest),
 			"",
 		].join("\n"),
 	)
+}
+
+function suspensionLines(manifest: Manifest): string[] {
+	const s = manifest.suspensions
+	if (s === undefined) return []
+	const g = suspensionGroups(s)
+	const list = (r: Record<string, number>): string =>
+		Object.entries(r)
+			.map(([k, v]) => `${k} ${v}`)
+			.join(", ") || "none"
+	return [
+		`  suspensions: efficiency cpu ${g.cpu}, late drops ${g.lateDrops}, other detail ${g.other}; all entered: ${list(s.entered)}`,
+		`  gate verdicts: ${list(s.verdicts)}; late sheds ${s.lateSheds}; own CPU ${s.ownCpuUnavailable ? "unavailable (CPU shedding off)" : "available or not logged"}`,
+		`  efficiency-suspended seconds: ${list(s.efficiencySeconds)}`,
+	]
 }
 
 function starvationLines(manifest: Manifest): string[] {

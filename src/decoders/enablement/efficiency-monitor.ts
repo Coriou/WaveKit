@@ -27,6 +27,8 @@ import type {
 	LateDropWindow,
 } from "./contract.js"
 import type { DropReader } from "./efficiency-gate.js"
+import { OwnCpuMeter } from "./own-cpu.js"
+import type { OwnCpuSource } from "./own-cpu.js"
 
 type Counters = {
 	droppedBytesTotal: number
@@ -165,6 +167,12 @@ export function createEfficiencyMonitor(deps: {
 	log?: Logger
 	topology?: (id: string) => string | null
 	cpu: { readonly normalisedPercent: number | null }
+	/**
+	 * The core's own CPU (own-cpu.ts), read once per sample: an OwnCpuMeter when
+	 * omitted, none with null. Host CPU (`cpu`) only labels drops; own CPU is the
+	 * gate's only CPU evidence against a decoder.
+	 */
+	ownCpu?: OwnCpuSource | null
 	now: () => number
 	monoNow?: () => number
 	setInterval: (fn: () => void, ms: number) => { cancel(): void }
@@ -195,6 +203,8 @@ export function createEfficiencyMonitor(deps: {
 	} {
 	const states = new Map<string, SourceState>()
 	const monoNow = deps.monoNow ?? (() => performance.now())
+	const ownCpu: OwnCpuSource | null =
+		deps.ownCpu === undefined ? new OwnCpuMeter() : deps.ownCpu
 	// Default only an omitted guard: a supplied malformed value (null included)
 	// must fail validation rather than become the default.
 	const cpuGuardPercent: unknown =
@@ -983,7 +993,33 @@ export function createEfficiencyMonitor(deps: {
 		} catch {
 			/* Display only. */
 		}
-		return { atMs, cpuPercent: sampledCpuPercent, sources }
+		let own: {
+			ownCores: number | null
+			capacityCores: number | null
+			ownCpuAvailable: boolean
+		} = { ownCores: null, capacityCores: null, ownCpuAvailable: false }
+		if (ownCpu !== null)
+			try {
+				const reading = ownCpu.sample(at)
+				own = {
+					ownCores:
+						typeof reading.ownCores === "number" &&
+						Number.isFinite(reading.ownCores) &&
+						reading.ownCores >= 0
+							? reading.ownCores
+							: null,
+					capacityCores:
+						typeof reading.capacityCores === "number" &&
+						Number.isFinite(reading.capacityCores) &&
+						reading.capacityCores > 0
+							? reading.capacityCores
+							: null,
+					ownCpuAvailable: reading.available === true,
+				}
+			} catch {
+				own = { ownCores: null, capacityCores: null, ownCpuAvailable: true }
+			}
+		return { atMs, cpuPercent: sampledCpuPercent, ...own, sources }
 	}
 	const dropState: DropReader["dropState"] = id => {
 		const at = clock()

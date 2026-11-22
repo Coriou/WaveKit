@@ -451,7 +451,13 @@ describe("decoder enablement composition", () => {
 			primary: true,
 			origin: "configured" as const,
 		}
-		gate.record({ atMs: Date.now(), cpuPercent: 95, sources: new Map() })
+		gate.record({
+			atMs: Date.now(),
+			cpuPercent: 95,
+			ownCores: 3.8,
+			capacityCores: 4,
+			sources: new Map(),
+		})
 		const decision = gate.admit(placement, [], mono)
 		expect(decision.admit).toBe(false)
 		if (!decision.admit) {

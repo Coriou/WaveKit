@@ -207,7 +207,7 @@ it("no newcomer displaces an always or operator-started placement, primary or se
 
 // Feature: decoder-autostart, Property 2: a tuned-band probationer's CPU loss sheds untuned first, one placement per clear window
 // Validates: Requirements R2
-it("CPU loss during a tuned-band probation sheds the newest untuned placement, one per clear window, never the tuned one", () => {
+it("own CPU loss during a tuned-band probation sheds the newest untuned placement, one per clear window, never the tuned one", () => {
 	fc.assert(
 		fc.property(
 			fc.array(fc.boolean(), { minLength: 0, maxLength: 5 }),
@@ -261,8 +261,13 @@ it("CPU loss during a tuned-band probation sheds the newest untuned placement, o
 				let lastShed = -Infinity
 				let after = 0
 				while (after < 9) {
-					mono += 20_000
-					gate.record({ atMs: mono, cpuPercent: 99, sources: new Map() })
+					// Intended change (rx-starvation S1): the evidence is own CPU over
+					// 90 % of capacity on two consecutive samples, not host CPU.
+					mono += 18_000
+					const over = { cpuPercent: 99, ownCores: 3.8, capacityCores: 4 }
+					gate.record({ atMs: mono, ...over, sources: new Map() })
+					mono += 2_000
+					gate.record({ atMs: mono, ...over, sources: new Map() })
 					const due = mono - lastShed >= 60_000
 					const expected = due ? (untuned.pop() ?? null) : null
 					if (expected === null && untuned.length === 0 && due) after++

@@ -79,6 +79,7 @@ it("charges no drops, late drops or reconnect backoff across a pause and resume"
 	let dropped = 0
 	let branch = "original"
 	const monitor = createEfficiencyMonitor({
+		ownCpu: null,
 		sourceEvents: sources,
 		sources: () => sources.getAllStatus().map(s => s.id),
 		branchCounters: () =>

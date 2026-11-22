@@ -98,6 +98,7 @@ function harness() {
 		branchCounters: id => router.branchDropCounters(id),
 		topology: id => router.branchTopology(id),
 		cpu,
+		ownCpu: null,
 		now: () => mono,
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),
