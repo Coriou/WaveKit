@@ -667,6 +667,13 @@ WaveKit can also take audio from an SDR++ network sink (`type: "sdrpp-network"`)
 See [DOCKER-SETUP.md](DOCKER-SETUP.md) for the compose profiles (`app`, `protected`, `dev`,
 `prod-single-host`, `prod-distributed`, `demod-test`) and the GHCR-backed registry cache.
 
+### Channelizer output queue
+
+`channelizer.channelQueueMs` (50-2 000 ms, default 1 000 ms) is how much signal each channel
+holds while its decoder is not reading. It fills only during a decoder's own scheduling gap, so
+it adds no delay in steady state; one second covers the gaps measured under heavy host load
+(see [PERFORMANCE.md](PERFORMANCE.md)).
+
 ### Decoder efficiency CPU budget
 
 `decoderPolicy.efficiency.cpuBudgetCores` defaults to `"auto"`. An omitted value
