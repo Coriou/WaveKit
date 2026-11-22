@@ -907,4 +907,67 @@ describe("dsd-fme DMR clearance repro corpus", () => {
 			expect(verdict(tainted)).toBe("privacy print in the lane's context")
 		})
 	})
+
+	describe("proof kinds", () => {
+		const ALG00 = " SLOT 1 ALG ID: 00; KEY ID: 00; "
+		/** An encrypted call, then an unnamed one proven only by a clear ALG and named by its trailer. */
+		const keyedAfterEncrypted = (trailer: string, sync = B1): Item[] => [
+			[0, sync("VLC")],
+			[1, LC("Encrypted")],
+			[60, sync("VC1")],
+			[120, sync("TLC")],
+			[121, LC("Encrypted")],
+			[180, sync("IDLE")],
+			[300, sync("VC1")],
+			[360, sync("VC2")],
+			[361, ALG00],
+			[420, sync("VC3")],
+			[480, sync("VC4")],
+			[540, sync("TLC")],
+			[541, trailer],
+			[600, sync("IDLE")],
+		]
+
+		it("A1: a trailer naming an encrypted key never makes an ALG-proven call clear", () => {
+			expectNeverClear(keyedAfterEncrypted(LC()))
+		})
+
+		it("A2: nor does a DMR Voice trailer", () => {
+			expectNeverClear(keyedAfterEncrypted(DMR_VOICE))
+		})
+
+		it("A5: the same on the direct channel", () => {
+			expectNeverClear(keyedAfterEncrypted(LC(), M))
+		})
+
+		it("A0: a clear ALG is not keyed to the call: its trailer name alone never settles clear", () => {
+			expectNeverClear([
+				[0, B1("VC1")],
+				[60, B1("VC2")],
+				[61, ALG00],
+				[120, B1("VC3")],
+				[180, B1("VC4")],
+				[240, B1("TLC")],
+				[241, LC()],
+				[300, B1("IDLE")],
+			])
+		})
+
+		it("C1: bracketless syncs keep every lane's privacy context alive", () => {
+			const items: Item[] = [
+				[0, B1("PI")],
+				[1, " SLOT 1 ALG ID: 21; KEY ID: 05; "],
+			]
+			for (let i = 0; i < 70; i++)
+				items.push([60 + i * 60, X(`VC${(i % 6) + 1}`)])
+			items.push(
+				[4300, B1("VC1")],
+				[4360, B1("VC2")],
+				[4361, LC()],
+				[4420, B1("VC3")],
+				[4480, B1("VC4")],
+			)
+			expectNeverClear(items)
+		})
+	})
 })

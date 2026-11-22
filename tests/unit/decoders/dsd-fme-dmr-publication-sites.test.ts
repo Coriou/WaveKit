@@ -100,6 +100,21 @@ describe("dsd-fme DMR publication sites (structural)", () => {
 		expect(link).not.toMatch(/encryptionKnown|callId/)
 	})
 
+	it("sets a call's IDs only in the binding, so its taint check always runs", () => {
+		// Plain, compound or logical assignment of any `.talkgroup` / `.source`
+		// member, and a bulk assignment that could carry them.
+		const pattern =
+			/\.\s*(?:talkgroup|source)\s*(?:\?\?|\|\||&&|[-+*/%|&^])?=(?!=)|\bObject\.assign\(|\bReflect\.set\(/g
+		const assigned = sites(pattern)
+		// The binding's own two assignments, and nothing else (no allowlist).
+		expect(assigned.filter(s => s.method !== "bindDmrCall")).toEqual([])
+		expect(assigned.map(s => s.method)).toEqual(["bindDmrCall", "bindDmrCall"])
+		// The scan sees every assignment form, and no comparison.
+		const probe =
+			"a.talkgroup = 1; b.source ??= 2; c.talkgroup === 3; d.source !== 4; Object.assign(e, f)"
+		expect([...probe.matchAll(pattern)].length).toBe(3)
+	})
+
 	it("reaches the output stream only through the gate", () => {
 		expect(sites(/\bsuper\.emitOutput\(/g)).toEqual([
 			{ method: "publish", text: "super.emitOutput(" },

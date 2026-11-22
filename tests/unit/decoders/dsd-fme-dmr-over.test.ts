@@ -871,7 +871,7 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 			})
 		})
 
-		it("a clean clear algorithm print in a clean burst proves a frames call clear (naming-link); a non-clear one drops a held clear trailer", () => {
+		it("a clean clear algorithm print never proves a frames call clear; a non-clear one drops a held clear trailer", () => {
 			const head: Line[] = [
 				...over(1, 1000, 2, null),
 				[1662, LC(1)],
@@ -885,7 +885,8 @@ describe("dsd-fme DMR overs and their terminator trains", () => {
 				],
 				9000,
 			)
-			expect(everClear(clearAlg.voice)).toBe(true)
+			// It names no key, so it cannot be bound to the call.
+			expect(everClear(clearAlg.voice)).toBe(false)
 			const held = replay(
 				[...head, [1800, TLC(1)], [1800, LC(1)], [1801, "ALG ID: 21"]],
 				8000,

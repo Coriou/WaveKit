@@ -24,9 +24,12 @@
  * - voice-header: a checked link control in a clean voice LC header burst,
  *   naming the call it opens (or its own key); settled by the next voice
  *   burst or header;
- * - terminator: a named call's own key in its clean terminator's trailer;
- * - clear-algorithm: a clean clear ALG print in a clean voice, header or PI
- *   burst of the lane's call.
+ * - terminator: a named call's own key in its clean terminator's trailer.
+ *
+ * Every proof is a keyed link control: a clear ALG / KEY ID print names no
+ * key, so it cannot be bound to the call and is never proof of clear (it is
+ * a non-neutral line: it drops a pending proof). Keyless evidence never
+ * settles clear.
  *
  * Any privacy field (Encrypted, an SVC privacy bit, a non-clear ALG, a
  * non-zero KEY ID) on any line of the lane makes the lane's call encrypted,
@@ -40,7 +43,8 @@
  * call's end or timeout, a clean idle burst, another protocol or a header
  * naming another key never end it, and a BS/MS change carries the old
  * mode's live contexts into the new mode's lanes. An unattributable print
- * taints every lane.
+ * taints every lane, and a bracketless DMR sync counts as a line of every
+ * lane (it may be any lane's burst: it keeps every context alive).
  *
  * Over-muting, accepted: a privacy print after a repeater sync with no slot
  * bracket mutes both slots' calls (fail closed), because the SLOT it prints
@@ -70,7 +74,6 @@ export type DmrProofKind =
 	| "naming-link"
 	| "voice-header"
 	| "terminator"
-	| "clear-algorithm"
 export type DmrLaneTrust = "unknown" | "pending" | "clear" | "encrypted"
 
 /** A DMR sync line of a lane. */
@@ -111,7 +114,7 @@ export interface DmrOtherEvent {
 	lane: DmrLane
 	errored: boolean
 	privacy: boolean
-	/** The line, read for the neutral and clear-algorithm tests only when needed. */
+	/** The line, read for the neutral test only when needed. */
 	text: string
 	slot: "1" | "2" | undefined
 	/** A repeater line printing another slot than its burst's: no proof anywhere. */
@@ -279,11 +282,6 @@ const NEUTRAL: readonly RegExp[] = [
 /** A line that neither settles nor drops a pending proof (ask only of a clean line without privacy). */
 export function dmrLineNeutral(line: string): boolean {
 	return NEUTRAL.some(pattern => pattern.test(line))
-}
-
-/** A clear-algorithm print, ALG 00 or 80 (ask only of a clean line without privacy). */
-export function dmrLineClearAlg(line: string): boolean {
-	return ALG.test(line)
 }
 
 /** A line printed an error of its burst (the CACH short LC's own failure excepted). */
@@ -581,7 +579,11 @@ export class DmrClearance {
 			}
 		}
 		if (event.lane === "x") {
-			this.touch(this.lane("x"), atMs)
+			// A bracketless sync's burst may be any lane's: every lane's context
+			// stays alive (fail closed).
+			if (event.type === "sync")
+				for (const key of LANES) this.touch(this.lane(key), atMs)
+			else this.touch(this.lane("x"), atMs)
 			this.onUnplaced(event, seq, atMs, out)
 			if (event.type === "sync") {
 				const lane = this.lane("x")
@@ -635,25 +637,13 @@ export class DmrClearance {
 		}
 		if (event.type === "line") {
 			// An errored line drops nothing more than dirty() did; the
-			// neutral and clear-algorithm tests run only for a call that may
-			// still gain or lose a proof, on a clean line without privacy.
-			if (
-				call === undefined ||
-				event.errored ||
-				event.privacy ||
-				(call.trust !== "pending" && call.trust !== "unknown")
-			)
+			// neutral test runs only for a pending proof, on a clean line
+			// without privacy.
+			if (call?.trust !== "pending" || event.errored || event.privacy)
 				return out
-			// A clean clear-algorithm print of a clean burst is the call's
-			// proof, settled like a link control.
-			if (dmrLineClearAlg(event.text)) {
-				this.drop(call)
-				this.armAlg(lane, call, seq, atMs)
-				return out
-			}
-			// Any other line but a neutral one drops a pending proof.
-			if (call.trust === "pending" && !dmrLineNeutral(event.text))
-				this.drop(call)
+			// Any line but a neutral one (a clear ALG print included: it names
+			// no key, so it is never proof) drops a pending proof.
+			if (!dmrLineNeutral(event.text)) this.drop(call)
 			return out
 		}
 		// A link control. A second one in the burst drops a pending proof.
@@ -818,50 +808,17 @@ export class DmrClearance {
 		}
 	}
 
-	/**
-	 * A clean clear ALG print (PI header, late entry) in a clean voice,
-	 * header or PI burst of the lane's call, settled on the lane's next
-	 * clean sync.
-	 */
-	private armAlg(
-		lane: LaneState,
-		record: CallRecord,
-		seq: number,
-		atMs: number,
-	): void {
-		const burst = lane.burst
-		if (
-			burst === undefined ||
-			!burst.syncClean ||
-			burst.errored ||
-			(burst.kind !== "vlc" && burst.kind !== "voice" && burst.kind !== "pi") ||
-			record.trust === "encrypted" ||
-			record.trust === "clear"
-		)
-			return
-		record.trust = "pending"
-		record.evidence = {
-			kind: "clear-algorithm",
-			decoderGeneration: this.decoderGeneration,
-			modeGeneration: lane.modeGeneration,
-			lane: this.keyOf(lane),
-			format: burst.format,
-			callId: record.callId,
-			callKey: record.key ?? "",
-			firstVoiceSeq: record.firstVoiceSeq,
-			openingBurstSeq: burst.seq,
-			openingBurstKind: burst.kind,
-			lcLineSeq: seq,
-			lcKey: record.key ?? "",
-			expiresAt: atMs + this.callTimeoutMs,
-			burstClean: true,
-		}
-	}
-
 	/** Line `seq` printed a checked link control of `key` on the lane. */
 	private namesHere(lane: LaneState, seq: number, key: string | null): boolean {
 		const lc = lane.lc
 		return key !== null && lc?.seq === seq && lc.ok && lc.key === key
+	}
+
+	/** The lane whose record holds `callId`, if any. */
+	laneOf(callId: string): DmrLane | undefined {
+		for (const [key, lane] of this.lanes)
+			if (lane.call?.callId === callId) return key
+		return undefined
 	}
 
 	/** A line (or taint) of the lane: a silence over the call timeout first ends its context. */
@@ -1004,6 +961,9 @@ export class DmrClearance {
 		if (
 			call.trust !== "pending" ||
 			call.unplaced ||
+			// Keyless evidence never settles clear.
+			call.key === null ||
+			evidence.lcKey === "" ||
 			evidence.callId !== call.callId ||
 			evidence.callKey !== (call.key ?? "") ||
 			evidence.lcKey !== (call.key ?? "") ||

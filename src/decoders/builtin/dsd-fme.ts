@@ -558,11 +558,11 @@ interface HeldEnd {
 	/** An error line printed in the terminator's burst: its link control is not checked. */
 	errored: boolean
 	/**
-	 * The trailer's IDs: they attach at closeHeldEnd only if the burst closed
-	 * clean (an error line after the IDs line leaves the call unnamed).
+	 * The trailer's IDs: they attach at closeHeldEnd (through bindDmrCall)
+	 * only if the burst closed clean (an error line after the IDs line leaves
+	 * the call unnamed).
 	 */
-	talkgroup?: number | undefined
-	source?: number | undefined
+	ids?: { talkgroup: number; source: number } | undefined
 }
 
 /** The terminator's own link control, expected right after it (TERMINATOR_TRAILER_MS). */
@@ -1657,8 +1657,23 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return null
 	}
 
-	/** Bind a call at the point where the lifecycle opens it or supplies its first IDs. */
-	private bindDmrCall(call: DsdFmeCallState, nowMs: number): void {
+	/**
+	 * Bind a call at the point where the lifecycle opens it or supplies its
+	 * first IDs. The one place a call's IDs are set after it opens (`ids`), so
+	 * a DMR call named into a tainted key of its lane's context is encrypted
+	 * before anything publishes it; a naming alone never makes a call clear.
+	 * `lane`: the clearance lane holding the call (default: this line's).
+	 */
+	private bindDmrCall(
+		call: DsdFmeCallState,
+		nowMs: number,
+		ids?: { talkgroup: number | null; source: number | null },
+		lane: DmrLane = this.dmrLineLane,
+	): void {
+		if (ids !== undefined) {
+			call.talkgroup = ids.talkgroup
+			call.source = ids.source
+		}
 		if (call.protocol !== "dmr") return
 		const key =
 			call.talkgroup !== null && call.source !== null
@@ -1666,7 +1681,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				: null
 		this.applyDmrTrust(
 			this.dmrClearance.call(
-				this.dmrLineLane,
+				lane,
 				{ callId: call.callId, key },
 				this.lineSeq,
 				nowMs,
@@ -1777,10 +1792,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			return false
 		}
 		held.lc = true
-		if (!named) {
-			held.talkgroup = tg
-			held.source = src
-		}
+		if (!named) held.ids = { talkgroup: tg, source: src }
 		const svc = DMR_TLC_FIELDS.exec(line)?.groups?.["svc"]
 		const alg = ALG_ID.exec(line)?.groups?.["alg"]
 		if (
@@ -1803,16 +1815,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const held = call?.heldEnd
 		if (call === null || held === undefined) return null
 		call.heldEnd = undefined
-		// Only a burst that closed clean names the call.
-		if (
-			held.lc &&
-			!held.errored &&
-			held.talkgroup !== undefined &&
-			held.source !== undefined
-		) {
-			call.talkgroup = held.talkgroup
-			call.source = held.source
-		}
+		// Only a burst that closed clean names the call, through the binding
+		// (its lane's taint check runs before the call_end publishes).
+		if (held.lc && !held.errored && held.ids !== undefined)
+			this.bindDmrCall(
+				call,
+				now.getTime(),
+				held.ids,
+				this.dmrClearance.laneOf(call.callId) ?? this.dmrLineLane,
+			)
 		const endAt = new Date(held.atMs)
 		call.lastUpdate = endAt
 		if (!this.callState && this.pendingCall) {
@@ -3859,10 +3870,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				ongoing.talkgroup === 0 &&
 				ongoing.source === 0 &&
 				now.getTime() - ongoing.startTime.getTime() <= NXDN_ADOPT_IDS_MS
-			) {
-				ongoing.talkgroup = tgt
-				ongoing.source = src
-			}
+			)
+				this.bindDmrCall(ongoing, now.getTime(), {
+					talkgroup: tgt,
+					source: src,
+				})
 			return this.processCallMetadata(
 				now,
 				protocol,
@@ -4348,11 +4360,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			unnamed.talkgroup === null &&
 			unnamed.source === null &&
 			(tgt !== 0 || src !== 0)
-		) {
-			unnamed.talkgroup = tgt
-			unnamed.source = src
-			this.bindDmrCall(unnamed, nowMs)
-		}
+		)
+			this.bindDmrCall(unnamed, nowMs, { talkgroup: tgt, source: src })
 
 		// Check if we have an active call that matches
 		const activeKeyMatches =

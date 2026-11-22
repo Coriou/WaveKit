@@ -19,7 +19,8 @@
  *   cannot be attributed to a lane (a bare or bracketless DMR sync's burst),
  *   or on another slot's line printing this call's slot, forbids clear.
  * - Privacy only widens within a lane context: a lane's context ends only
- *   on more than the call timeout without a line of that lane, or on a
+ *   on more than the call timeout without a line of that lane (a bracketless
+ *   DMR sync counts as a line of every lane), or on a
  *   restart (a protocol switch, a BS/MS change, a clean idle burst or a
  *   call's end does not end it; a BS/MS change carries the old mode's live
  *   lane contexts into the new mode's lanes, another protocol between the
@@ -34,6 +35,10 @@
  *   BS/MS change or a gap over the call timeout ends the window: only a
  *   publication on that very line (the call's end) may still carry a clear
  *   proven before it.
+ * - Proof kinds: only a keyed link control settles clear (a clean,
+ *   plausible TGT/SRC print, settled by the call's voice). A clear ALG / KEY
+ *   ID print, a "DMR Voice" print or any other keyless line is never proof:
+ *   it names no key, so it cannot be bound to the call.
  * - A chain is: a clean opening sync of the lane (VLC, voice, or a TLC of a
  *   call already named in its window), the burst's first link control with
  *   the publication's key (clean, plausible, no privacy field, not a
@@ -50,6 +55,8 @@ export const RESTART_LINE = "<restart>"
 type Lane = "1" | "2" | "ms" | "x" | "foreign" | "none"
 type Format = "bs" | "ms" | "x"
 type BurstKind = "vlc" | "voice" | "tlc" | "pi" | "idle" | "bare" | "other"
+/** What a line could prove: only a keyed link control is ever proof of clear. */
+type ProofKind = "keyed-lc" | "alg" | "keyless" | "none"
 
 interface OracleLine {
 	seq: number
@@ -69,6 +76,7 @@ interface OracleLine {
 	plausible: boolean
 	neutral: boolean
 	printedSlot: string | undefined
+	proof: ProofKind
 	/** A BS/MS change happened on this sync. */
 	modeChange: boolean
 	/**
@@ -152,6 +160,7 @@ export class CallOracle {
 			plausible: false,
 			neutral: false,
 			printedSlot: undefined,
+			proof: "none",
 			modeChange: false,
 			taintModeChange: false,
 		}
@@ -251,6 +260,15 @@ export class CallOracle {
 		)
 		const ntg = Number(named?.[1] ?? 0)
 		const nsrc = Number(named?.[2] ?? 0)
+		const plausible = tg >= 1 && tg <= 0xffffff && src >= 1 && src <= 0xffffff
+		const proof: ProofKind =
+			ids && plausible && !errored && !privacy
+				? "keyed-lc"
+				: PRIVACY_FIELDS.alg.test(text) || PRIVACY_FIELDS.keyId.test(text)
+					? "alg"
+					: /\bDMR\s+Voice\b/i.test(text)
+						? "keyless"
+						: "none"
 		this.lines.push({
 			...base,
 			lane,
@@ -261,7 +279,8 @@ export class CallOracle {
 					? `${ntg}/${nsrc}`
 					: undefined,
 			key: ids ? `${tg}/${src}` : undefined,
-			plausible: tg >= 1 && tg <= 0xffffff && src >= 1 && src <= 0xffffff,
+			plausible,
+			proof,
 			neutral: !errored && !privacy && NEUTRAL.test(text),
 			printedSlot: otherSlot ? printed : undefined,
 		})
@@ -367,6 +386,7 @@ export class CallOracle {
 			const lc = laneLines[i]!
 			if (
 				lc.sync ||
+				lc.proof !== "keyed-lc" ||
 				lc.key !== key ||
 				!lc.plausible ||
 				lc.errored ||
@@ -490,6 +510,9 @@ function laneTaint(lines: readonly OracleLine[], lane: Lane): Taint {
 			}
 		}
 		if (l.lane === "x") {
+			// A bracketless sync's burst may belong to any lane: it keeps every
+			// lane's context alive (fail closed), and its privacy taints them all.
+			if (l.sync) for (const k of ["1", "2", "ms"] as const) touch(k, l.atMs)
 			if (l.privacy)
 				for (const k of ["1", "2", "ms"] as const)
 					taint(k, l.atMs, l.privacyKey)

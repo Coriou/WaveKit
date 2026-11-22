@@ -8,7 +8,6 @@ import {
 	classifyDmrLine,
 	DMR_TAINT_KEYS_MAX,
 	DmrClearance,
-	dmrLineClearAlg,
 	dmrLineErrored,
 	dmrLineNeutral,
 	dmrLinePrivacy,
@@ -117,10 +116,7 @@ describe("DMR clearance: classification", () => {
 		// An allowlisted prefix carrying an error is an error first.
 		expect(neutral).toMatchObject({ type: "line", errored: true })
 		expect(dmrLineNeutral(" AMBE 01 err = [0] [0] ")).toBe(true)
-		expect(dmrLineClearAlg(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")).toBe(
-			true,
-		)
-		// A PI header is its own burst kind (a clear-algorithm proof may open there).
+		// A PI header is its own burst kind.
 		expect(
 			classifyDmrLine(
 				"00:00:01 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | PI ",
@@ -244,8 +240,8 @@ describe("DMR clearance: state x event rows", () => {
 		expect(late.cleared()).toBe(false)
 	})
 
-	it("a clear algorithm print opens no proof in an idle, CSBK or terminator burst", () => {
-		for (const burst of ["IDLE", "CSBK", "TLC"]) {
+	it("a clear algorithm print opens no proof in any burst (it names no key)", () => {
+		for (const burst of ["IDLE", "CSBK", "TLC", "PI ", "VC*"]) {
 			const h = new Harness()
 			h.line(MS("VC*"))
 			h.open("ms", "c1", null)
@@ -256,15 +252,6 @@ describe("DMR clearance: state x event rows", () => {
 			h.line(MS("VC*"))
 			expect(h.cleared()).toBe(false)
 		}
-		// A PI header burst is one.
-		const pi = new Harness()
-		pi.line(MS("VC*"))
-		pi.open("ms", "c1", null)
-		pi.line(MS("VC*"))
-		pi.line(MS("PI "))
-		pi.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
-		pi.line(MS("VC*"))
-		expect(pi.trust()).toBe("clear")
 	})
 
 	it("a privacy line mutes the live call and a replacement opened on the same line", () => {
@@ -314,20 +301,24 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.trust()).toBe("unknown")
 	})
 
-	it("clear algorithm: a clean clear ALG print in a clean burst is settled like an LC; a late error kills it", () => {
-		const run = (tail: string[]) => {
-			const h = new Harness()
-			h.line(MS("VC*"))
-			h.open("ms", "c1", null)
-			h.line(MS("VC*"))
-			h.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
-			for (const line of tail) h.line(line)
-			return h
-		}
-		const settled = run([MS("VC*")])
-		expect(settled.trust()).toBe("clear")
-		expect(run([" (FEC ERR) ", MS("VC*")]).cleared()).toBe(false)
-		expect(run([MS("VC*  (FEC ERR)")]).cleared()).toBe(false)
+	it("clear algorithm: a clean clear ALG print is never proof, and it drops a pending link-control proof", () => {
+		const alone = new Harness()
+		alone.line(MS("VC*"))
+		alone.open("ms", "c1", null)
+		alone.line(MS("VC*"))
+		alone.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
+		alone.line(MS("VC*"))
+		expect(alone.cleared()).toBe(false)
+		// A named call's pending link control, then the keyless ALG print.
+		const dropped = new Harness()
+		namedCall(dropped)
+		dropped.line(MS("VC*"))
+		dropped.line(LC())
+		expect(dropped.m.evidence("c1")).toMatchObject({ kind: "link-after-voice" })
+		dropped.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
+		expect(dropped.m.evidence("c1")).toBeUndefined()
+		dropped.line(MS("VC*"))
+		expect(dropped.cleared()).toBe(false)
 	})
 
 	it("a named call's own LC after its voice is link-after-voice, settled by the next clean sync", () => {
