@@ -1156,7 +1156,8 @@ Condensed + Noto Sans, Tabler-based icons).
     waiting; they are back on the same rectangles when the panel closes. A status item within
     8 px of the open panel's room yields too (on a phone the Tuner or Receiver panel over the
     strip): out of sight in place and inert, its timer paused; it comes back with the time it had
-    left when the panel closes, so a receipt's Undo is never lost under a panel. A docked item
+    left when the panel closes, so a receipt's Undo is never lost under a panel. Known limit: a toast
+    that comes back under a pointer that does not move runs its clock until the pointer moves. A docked item
     yields with its drawer when the panel covers that. The notice region and every status guest
     (the connection chip, back to live, the paused label, plot notes) decide their render, inert
     state, focus and timer from one layout predicate (`statusState`), carried on the element as
@@ -1178,9 +1179,11 @@ Condensed + Noto Sans, Tabler-based icons).
   - *Dragging the card.* The dragged card's live rectangle is the card's rectangle for the plot's
     exclusions and `data-wk-rect`. It stays 16 px inside the window and left of a drawer column,
     and a gutter clear of every island (the rails, the status slot or strip, the player, the dock
-    or search button, the drawer, the map's chrome): a pointer over an island holds the card at the
+    or search button, the drawer, the map's chrome, the open Listen head at its open width and an
+    open panel's room): a pointer over an island holds the card at the
     nearest legal spot one or two push-outs away (out of one island along one axis, then out of the
-    next), else where it last was. The drop snaps to the nearest free anchor as before.
+    next), else where it last was. The layout clamps it, so when something opens under a still
+    pointer (Listen, a panel) the held card jumps clear. The drop snaps to the nearest free anchor as before.
   - *Insufficient height* (a short or zoomed window) collapses in this order, each step only when
     the one before leaves too little; nothing overlaps at any step:
 

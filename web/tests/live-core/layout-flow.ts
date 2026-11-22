@@ -365,8 +365,9 @@ const describeViolation = (v: Violation) =>
  * - `jump`: the change has no positional animation (a panel opening, a drawer's box appearing, a slot yielding).
  *   Proof: the last painted frame before the action shows the old state; the first changed painted frame already
  *   shows the mover at its destination, and so does every later one (no intermediate frame); nothing animates on the
- *   mover then, and with the transitions off its transition time is 0. Two painted frames prove it (one before the
- *   action, one after): every painted frame of the sampled span is read, so a single late one still proves it.
+ *   mover on any of those frames (`getAnimations()` is empty), and with `still` its transition time is 0. It needs
+ *   the frame before the action and at least one painted frame after it inside the declared window (`inWindow`); the
+ *   160 ms tail after the window is read for the checks, never counted as that frame.
  * - `animate`: a named mover with a transition (the card's glide). Proof: at least MIN_FRAMES painted frames in the
  *   glide's window (from the last frame at its old place), one of them strictly between its two places (more than
  *   1 px from both), and the last at its new place.
@@ -622,14 +623,14 @@ function prove(
 	const out: string[] = []
 	const from = frames[0]?.[mover] ?? null
 	const k = frames.findIndex((f, i) => i > 0 && differs(f[mover], from))
+	// every mode: at least one painted frame after the action inside the declared window (the tail after it is read,
+	// never counted: a frame painted only in the tail proves nothing about the window)
+	if (s.inWindow < 1)
+		return {
+			violations: [],
+			unobserved: `no painted frame after the action inside the declared window (${frames.length - 1} in the read tail only)`,
+		}
 	if (mode === "jump") {
-		// two painted frames: the one before the action and one after it (every painted frame from the action to the
-		// end of the sampled span is read, so a late one still shows whatever was painted between)
-		if (frames.length < 2)
-			return {
-				violations: [],
-				unobserved: `no painted frame after the action in the sampled span (a jump needs the frame before it and one after; ${s.inWindow} in the window)`,
-			}
 		if (k < 0) {
 			out.push(
 				`${o.label}: no changed frame of the ${mover} (${fmtSeen(from)} on all ${frames.length} frames)`,
@@ -644,10 +645,17 @@ function prove(
 				)
 				break
 			}
-		if (to && to.anim > 0)
-			out.push(
-				`${o.label}: ${to.anim} animation(s) running on the ${mover} on its first changed frame (a jump has none)`,
-			)
+		// nothing animates on the mover from its first changed frame on (getAnimations: its CSS animations and running
+		// transitions, any property)
+		for (let i = k; i < frames.length; i++) {
+			const f = frames[i]?.[mover]
+			if (f && f.anim > 0) {
+				out.push(
+					`${o.label}: ${f.anim} animation(s) running on the ${mover} on frame ${i} (a jump has none)`,
+				)
+				break
+			}
+		}
 		if (to && o.still && to.td > 0)
 			out.push(
 				`${o.label}: the ${mover}'s transition-duration is ${to.td} s on its first changed frame (a jump has 0)`,
@@ -770,6 +778,15 @@ function listenOpening(frames: readonly Frame[]): string[] {
 		out.push(
 			"P Listen opening: neither the dock nor the search button on frame 0",
 		)
+	else {
+		// and on every later frame: a neighbour gone on any frame (unmounted, hidden away) is checked against nothing
+		const neighbour = f0["dock"] ? "dock" : "find"
+		const gone = frames.findIndex(f => !f[neighbour])
+		if (gone >= 0)
+			out.push(
+				`P Listen opening: the ${neighbour === "dock" ? "dock" : "search button"} is missing on frame ${gone}`,
+			)
+	}
 	const before = frames.findIndex(f => f["panel"] === null)
 	const after = frames.findIndex((f, i) => i > before && f["panel"] !== null)
 	if (before < 0 || after < 0)
@@ -1227,7 +1244,10 @@ export async function layoutFlow(
 				if (!sampled) {
 					// with the transitions on (the drawer's rise, a card yielding to it)
 					await motionOn()
-					// jump: the drawer's box stands at its place on its first frame (its content's 6 px rise is inside it)
+					// jump: the drawer's box stands at its place on its first frame (its content's 6 px rise is inside it), and
+					// nothing animates on the box itself on any frame from then on (getAnimations() empty: no running
+					// transition or animation of any property). `still` stays off: the box declares its foot's height
+					// transition (the sheet's foot ease, an animate case), so a nonzero declared duration is no motion
 					const seen = await observe(
 						page,
 						`${vp} ${d.name} opening`,
@@ -1318,7 +1338,7 @@ export async function layoutFlow(
 			const first = await tunerOverReceiptOnce(vp, percent)
 			if (!first.unobserved) {
 				observed.push({
-					cell: `${vp} Tuner panel over the receipt`,
+					cell: `${vp} Tuner panel opened without moving focus, over the receipt`,
 					mode: "jump",
 					mover: "panel",
 					frames: first.frames,
@@ -1332,8 +1352,21 @@ export async function layoutFlow(
 			)
 			if ((await tunerPanel.count()) > 0) await page.keyboard.press("Escape")
 			await tunerPanel.waitFor({ state: "detached", timeout: STEP_MS })
-			const again = await tunerOverReceiptOnce(vp, percent + 1)
-			const cell = `${vp} Tuner panel over the receipt`
+			const retry = await tunerOverReceiptOnce(vp, percent + 1)
+			// what the first attempt found without frames is real, observed or not
+			const again = {
+				...retry,
+				cell: {
+					...retry.cell,
+					violations: [
+						...new Set([
+							...first.settledViolations.map(v => `first attempt: ${v}`),
+							...retry.cell.violations,
+						]),
+					],
+				},
+			}
+			const cell = `${vp} Tuner panel opened without moving focus, over the receipt`
 			observed.push({
 				cell,
 				mode: "jump",
@@ -1352,11 +1385,19 @@ export async function layoutFlow(
 		): Promise<{
 			cell: LayoutCell
 			unobserved: string | null
+			settledViolations: string[]
 			frames: number
 			inWindow: number
 		}> {
 			phase = `${vp}: the Tuner panel over the receipt`
 			const violations: string[] = []
+			// the frame-independent ones (focus, inert, Undo's expiry, a receipt stuck yielded): a retry for too few frames
+			// keeps them, as observe() keeps an overlap the first attempt painted
+			const settledViolations: string[] = []
+			const kept = (v: string) => {
+				violations.push(v)
+				settledViolations.push(v)
+			}
 			const rects: Record<string, string> = {}
 			const RECEIPT_SEL =
 				'[data-wk-notice-region] .wk-notice[data-class="receipt"]'
@@ -1386,33 +1427,32 @@ export async function layoutFlow(
 					'.wk-shell-island[data-island="tuner"] [aria-controls][aria-expanded]',
 				)
 				.first()
-			// the focus on Undo when the panel opens by keyboard (a key pressed on Undo opens it, so the focus stays
-			// there until the shell hands it off): it must reach the Tuner's trigger, never fall to the body (LY rules
-			// §1.2). The flow binds the key for this one press; the keydown itself is the sampler's t0
+			// the panel opened without moving focus: a click dispatched on the Tuner's toggle (no pointer, no focus
+			// change), so the focus is still on Undo when the panel opens and the receipt yields. The shell must hand it
+			// to the Tuner's trigger, never let it fall to the body (LY rules §1.2)
 			const undo = page.locator(UNDO)
 			await undo.focus()
 			if (!(await undo.evaluate(el => el === document.activeElement)))
 				violations.push("setup: could not focus Undo before the panel opened")
 			// (a) the change, observed from the action: the receipt seen shown, then yielded under the panel
-			await toggle.evaluate(el => {
-				const open = (e: KeyboardEvent) => {
-					if (e.key !== "F8") return
-					window.removeEventListener("keydown", open)
-					e.preventDefault()
-					;(el as HTMLButtonElement).click()
-				}
-				window.addEventListener("keydown", open)
-			})
 			// jump: the panel stands at its place on the first changed frame, the receipt yields on that frame
-			const sampled = await sample(page, named, () => page.keyboard.press("F8"))
+			const sampled = await sample(page, named, () =>
+				toggle.evaluate(el => {
+					// a programmatic step marks its action for the sampler
+					window.dispatchEvent(new Event("wk:act"))
+					el.dispatchEvent(
+						new MouseEvent("click", { bubbles: true, cancelable: true }),
+					)
+				}),
+			)
 			const openProof = prove("jump", sampled, "panel", {
-				label: `${vp} Tuner panel opening over the receipt (jump)`,
+				label: `${vp} Tuner panel opened without moving focus, over the receipt (jump)`,
 				still: true,
 			})
 			violations.push(...openProof.violations)
 			if (!(await page.locator(named.panel).count()))
-				violations.push(
-					"the Tuner panel did not open from the key pressed on Undo",
+				kept(
+					"the Tuner panel did not open from the click dispatched on its toggle",
 				)
 			let unobserved = openProof.unobserved
 			const opening = sampled.frames
@@ -1450,30 +1490,29 @@ export async function layoutFlow(
 			// (b) covered: out of sight, inert, the element at Undo's centre is not Undo; listed as waiting
 			const open = await snapshot(page)
 			if (!open.waiting.includes("status:receipt"))
-				violations.push("the yielded receipt is not listed in data-wk-waiting")
+				kept("the yielded receipt is not listed in data-wk-waiting")
 			if (await hitsItself(page, UNDO))
-				violations.push("Undo is reachable under the open Tuner panel")
+				kept("Undo is reachable under the open Tuner panel")
 			const inert = await page.evaluate(
 				sel => document.querySelector(sel)?.closest("[inert]") != null,
 				RECEIPT_SEL,
 			)
-			if (!inert) violations.push("the yielded receipt is not inert")
+			if (!inert) kept("the yielded receipt is not inert")
 			const focusIn = await page.evaluate(
 				() =>
 					document
 						.querySelector("[data-wk-notice-region]")
 						?.contains(document.activeElement) ?? false,
 			)
-			if (focusIn)
-				violations.push("the focus stayed in the notice region under the panel")
+			if (focusIn) kept("the focus stayed in the notice region under the panel")
 			if (!(await toggle.evaluate(el => el === document.activeElement)))
-				violations.push(
+				kept(
 					"the focus did not move from Undo to the Tuner's trigger as the panel opened",
 				)
 			// (c) its clock does not run while covered: it outlives its whole time with the panel open
 			await new Promise(resolve => setTimeout(resolve, RECEIPT_MS + 1500))
 			if ((await page.locator(UNDO).count()) === 0)
-				violations.push(
+				kept(
 					"the receipt's Undo expired under the open Tuner panel (its clock ran while covered)",
 				)
 			// jump: the panel is gone on the first changed frame, the receipt shown again on that frame
@@ -1511,10 +1550,9 @@ export async function layoutFlow(
 				}),
 				RECEIPT_SEL,
 			)
-			if (afterClose.panel)
-				violations.push("the Tuner panel is still open after Escape")
+			if (afterClose.panel) kept("the Tuner panel is still open after Escape")
 			else if (afterClose.state === "yielded")
-				violations.push(
+				kept(
 					"the receipt stays yielded after the Tuner panel closed and the frames settled",
 				)
 			const hiddenFirst = closing.findIndex(
@@ -1545,9 +1583,7 @@ export async function layoutFlow(
 				!(await hitsItself(page, UNDO)) &&
 				(await page.locator(UNDO).count()) > 0
 			)
-				violations.push(
-					"Undo is not the element at its own centre after the panel closed",
-				)
+				kept("Undo is not the element at its own centre after the panel closed")
 			// live again: it expires after about the time it had left (nearly all of it: its clock ran only between the
 			// click's press and the panel's first frame), not at once and not never
 			const expired = await within(
@@ -1556,24 +1592,26 @@ export async function layoutFlow(
 			)
 			const gone = Date.now() - closedAt
 			if (!expired)
-				violations.push(
+				kept(
 					`the receipt did not expire within ${RECEIPT_MS + 4000} ms of the panel closing (its clock did not resume)`,
 				)
 			else {
 				rects["receipt left after close (ms)"] = String(gone)
 				if (gone < RECEIPT_MS - 2000)
-					violations.push(
+					kept(
 						`the receipt expired ${gone} ms after the panel closed: its clock ran while it was covered`,
 					)
 			}
 			return {
 				cell: {
 					viewport: vp,
-					drawer: "none, Tuner panel over the receipt",
+					drawer:
+						"none, Tuner panel opened without moving focus, over the receipt",
 					rects,
 					violations,
 				},
 				unobserved,
+				settledViolations,
 				frames: sampled.frames.length + closed.frames.length,
 				inWindow: Math.min(sampled.inWindow, closed.inWindow),
 			}

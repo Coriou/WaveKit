@@ -537,39 +537,43 @@ function expectedRoom(
 	return r(G, railTop - PG - h, w, h)
 }
 
+// the open Listen head and the dock are never covered by a shown slot (Property 1 below; pinned by a recorded seed)
+const openListenClear = fc.property(scenario, s => {
+	const L = computeLayout(build(s))
+	const shown = namedRects(L)
+	const listen = shown.find(n => n.name === "listen")
+	// the head's rectangle in the checks is its open one while its panel is open
+	if (s.open === "listen") expect(box(listen ?? null)).toEqual(L.listenOpen)
+	// the frame and the dock are the same whatever opens (nothing moves when Listen opens)
+	const bare = computeLayout({ ...build(s), openPanel: null, panels: [] })
+	expect(box(L.dock)).toEqual(box(bare.dock))
+	expect(L.listen).toEqual(bare.listen)
+	if (L.dock) {
+		// the open head keeps a gutter from the dock by construction: dock.x ≥ G + reserveW + G
+		expect(L.dock.x - right(L.listenOpen)).toBeGreaterThanOrEqual(16)
+		for (const n of shown)
+			if (n.name !== "dock" && !n.name.startsWith("map:"))
+				expect(intersects(n, L.dock), `${n.name} × dock`).toBe(false)
+	}
+	if (s.open === "listen")
+		for (const n of shown)
+			if (n.name !== "listen")
+				expect(intersects(n, L.listenOpen), `${n.name} × open Listen`).toBe(
+					false,
+				)
+})
+
 describe("Rule P properties", () => {
 	it("no shown slot overlaps the open Listen head or the dock, in transitions and during a stationary drag", () => {
 		// Feature: layout, Property 1: the open Listen head and the dock are never covered
 		// Validates: Requirements LY.2
-		fc.assert(
-			fc.property(scenario, s => {
-				const L = computeLayout(build(s))
-				const shown = namedRects(L)
-				const listen = shown.find(n => n.name === "listen")
-				// the head's rectangle in the checks is its open one while its panel is open
-				if (s.open === "listen")
-					expect(box(listen ?? null)).toEqual(L.listenOpen)
-				// the frame and the dock are the same whatever opens (nothing moves when Listen opens)
-				const bare = computeLayout({ ...build(s), openPanel: null, panels: [] })
-				expect(box(L.dock)).toEqual(box(bare.dock))
-				expect(L.listen).toEqual(bare.listen)
-				if (L.dock) {
-					// the open head keeps a gutter from the dock by construction: dock.x ≥ G + reserveW + G
-					expect(L.dock.x - right(L.listenOpen)).toBeGreaterThanOrEqual(16)
-					for (const n of shown)
-						if (n.name !== "dock" && !n.name.startsWith("map:"))
-							expect(intersects(n, L.dock), `${n.name} × dock`).toBe(false)
-				}
-				if (s.open === "listen")
-					for (const n of shown)
-						if (n.name !== "listen")
-							expect(
-								intersects(n, L.listenOpen),
-								`${n.name} × open Listen`,
-							).toBe(false)
-			}),
-			{ numRuns: 300 },
-		)
+		fc.assert(openListenClear, { numRuns: 300 })
+	})
+
+	it("the recorded seed that held a card under the open Listen head (review MJ1) stays clear", () => {
+		// Feature: layout, Property 1: the open Listen head and the dock are never covered
+		// Validates: Requirements LY.2
+		fc.assert(openListenClear, { numRuns: 300, seed: 60 })
 	})
 
 	it("a status item within PANEL_GAP of an open panel's room yields, and is never seen while it does", () => {
@@ -615,4 +619,40 @@ describe("Rule P properties", () => {
 			{ numRuns: 300 },
 		)
 	})
+})
+
+describe("Rule D: a held card under the open Listen head (LY rules §4.2)", () => {
+	// review MJ1: 2000x560, the line-form card (52 tall) held at 372,480 (clamped against the closed 340 px head),
+	// then Listen opens: its head widens to 16,480 420×64 and the held card must jump clear under the still pointer
+	// (taste call 6), never stand under the open head, whether the panel is measured or still pending
+	const held = (panel: { w: number; h: number } | null): LayoutInput => {
+		const base = input(2000, 560, { open: "listen", panel })
+		return {
+			...base,
+			card: base.card ? { ...base.card, minimised: true } : null,
+			motion: { cardFrom: null, cardDrag: { x: 372, y: 480 } },
+		}
+	}
+	for (const [name, panel] of [
+		["measured", { w: 420, h: 300 }],
+		["pending", null],
+	] as const)
+		it(`2000x560, card held at 372,480, Listen opens (${name}): the card stands a gutter clear of the open head`, () => {
+			const L = computeLayout(held(panel))
+			expect(L.listenOpen).toEqual(r(16, 480, 420, 64))
+			const card = L.cardNow
+			expect(card).not.toBeNull()
+			if (!card) return
+			expect(card.h).toBe(52)
+			// held, it is pushed clear like any island and never yields (LY rules §4.2: "it never yields while held")
+			expect(L.yielded).not.toContain("card")
+			expect(separation(card, L.listenOpen)).toBeGreaterThanOrEqual(15.5)
+			for (const room of L.panelRooms)
+				expect(separation(card, room)).toBeGreaterThanOrEqual(15.5)
+			expect(
+				layoutViolations(namedRects(L), L.viewport).filter(
+					v => v.a === "card" || v.b === "card",
+				),
+			).toEqual([])
+		})
 })

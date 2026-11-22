@@ -25,6 +25,7 @@ import {
 	type CardAnchor,
 	type CardAnchorId,
 } from "../layout.ts"
+import { clampDrag } from "../card-place.ts"
 import type { DrawerId, IslandId } from "../store.ts"
 import {
 	bottom,
@@ -950,36 +951,6 @@ export function computeLayout(input: LayoutInput): Layout {
 			card = { ...rect(home.x, home.y, CARD_W, size.h), anchor: home.id, form }
 	}
 
-	// ---- motion (DESIGN.md, "Motion"): a dragged card stands where the pointer holds it (clamped clear of the
-	// islands by the card's handle); a card gliding to a new home sweeps the box of its two homes, and a slot entering
-	// that box is held out of sight until the card lands
-	const mo = input.motion
-	const cardNow: Rect | null =
-		card && mo?.cardDrag
-			? rect(mo.cardDrag.x, mo.cardDrag.y, CARD_W, card.h)
-			: card
-	const path =
-		card && !mo?.cardDrag && mo?.cardFrom ? union(mo.cardFrom, card) : null
-	const held: string[] = []
-	if (path) {
-		const entering: [string, Rect | null][] = [
-			["player", player],
-			["drawer", drawer],
-			["pane", pane],
-			["grip", grip],
-			...items.map((i): [string, Rect] => [`status:${i.id}`, i]),
-			...(map
-				? ([
-						["map:side", map.side],
-						["map:station", map.station],
-					] as [string, Rect | null][])
-				: []),
-		]
-		for (const [name, r] of entering)
-			if (r && intersects(r, path)) held.push(name)
-	}
-	const cardSwept = path ?? cardNow
-
 	// ---- an open panel over the card or the player (Listen's going up over the card's home and the player storey):
 	// they yield, out of sight in place (still mounted and measured), and are back where they were when it closes;
 	// so no island stands over an open panel and nothing moves for a popover
@@ -1010,6 +981,59 @@ export function computeLayout(input: LayoutInput): Layout {
 						),
 		)
 	}
+	// ---- motion (DESIGN.md, "Motion"): a dragged card stands where the pointer holds it, clamped here against this
+	// very layout's frame (LY rules §4.1): every island, the open Listen head at its open width and every open or
+	// pending panel room. So a layout change under a still pointer (Listen opening, a drawer, the player) revalidates
+	// the drag, and the held card jumps clear under the pointer (taste call 6) rather than standing under the change.
+	// A card gliding to a new home sweeps the box of its two homes, and a slot entering that box is held out of sight
+	// until the card lands
+	const mo = input.motion
+	const dragFrame: Rect[] = [
+		...islands,
+		...(input.openPanel === "listen" ? [listenOpen] : []),
+		...panelRoom,
+	]
+	const want = mo?.cardDrag ?? null
+	const dragAt =
+		card && want
+			? clampDrag(
+					want,
+					{
+						anchors,
+						card: { x: card.x, y: card.y },
+						freeW,
+						H,
+						cardH: card.h,
+						obstacles: dragFrame,
+					},
+					null,
+				)
+			: null
+	const cardNow: Rect | null =
+		card && dragAt ? rect(dragAt.x, dragAt.y, CARD_W, card.h) : card
+	const path =
+		card && !mo?.cardDrag && mo?.cardFrom ? union(mo.cardFrom, card) : null
+	const held: string[] = []
+	if (path) {
+		const entering: [string, Rect | null][] = [
+			["player", player],
+			["drawer", drawer],
+			["pane", pane],
+			["grip", grip],
+			...items.map((i): [string, Rect] => [`status:${i.id}`, i]),
+			...(map
+				? ([
+						["map:side", map.side],
+						["map:station", map.station],
+					] as [string, Rect | null][])
+				: []),
+		]
+		for (const [name, r] of entering)
+			if (r && intersects(r, path)) held.push(name)
+	}
+	const cardSwept = path ?? cardNow
+
+	// the card (only with no legal spot left for a held one), the player and the status items under the open room yield
 	const underPanel = (r: Rect | null) =>
 		r !== null && panelRoom.some(p => separation(p, r) < PANEL_GAP)
 	if (underPanel(cardNow)) yielded.push("card")
