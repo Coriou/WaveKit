@@ -23,7 +23,11 @@ import {
 	protocolRecordable,
 	type CallTrustFields,
 } from "../../../decoders/builtin/dmr-recording-gate.js"
-import { dvCallDecoderField, dvCallNameField } from "../../recordings/names.js"
+import {
+	DV_CALL_RECORDINGS_SERVED,
+	dvCallDecoderField,
+	dvCallNameField,
+} from "../../recordings/names.js"
 import { channelHzOfRef, channelRefValue } from "../storage/row.js"
 import { ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ } from "@wavekit/api-types"
 import { bindSeq, formatSeq, MAX_SEQ, parseSeq, seqFromSqlite } from "./seq.js"
@@ -812,7 +816,8 @@ const CALL_WAV_NAME = /^\d{8}_\d{6}_\d{5}_.*_TGT_.*_SRC_.*\.wav$/
  * source. A per-call name is the dv call recorder's only when its decoder field is exactly
  * dvCallNameField(decoderId) of the row's own decoder (the recorder names each call after the
  * decoder whose call it is; the catalogue serves those whatever the field says, the recorder
- * writes no DMR audio). A field that reads `dmr` itself stays refused while DMR is not
+ * writes no DMR audio), and only while DV_CALL_RECORDINGS_SERVED is on (off: never presented,
+ * as the catalogue serves none). A field that reads `dmr` itself stays refused while DMR is not
  * recordable, so a dsd-fme DMR name never passes for a dv one. Every other per-call name is
  * dsd-fme's and is presented only when the catalogue serves it (dsdFmeNameServable: a
  * recordable protocol label; DMR, an unknown label or no label is refused). Not a per-call
@@ -827,7 +832,10 @@ function dsdLinkPresentable(name: string, decoderId: unknown): boolean {
 		decoderId.length > 0 &&
 		dvCallNameField(decoderId) === field
 	)
-		return field.toLowerCase() !== "dmr" || protocolRecordable("dmr")
+		return (
+			DV_CALL_RECORDINGS_SERVED &&
+			(field.toLowerCase() !== "dmr" || protocolRecordable("dmr"))
+		)
 	return dsdFmeCallRecordable(name)
 }
 

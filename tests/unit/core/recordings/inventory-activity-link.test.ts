@@ -150,7 +150,8 @@ describe("catalogue links to Activity", () => {
 		await inv.start?.()
 		// A missing directory may hold any servable dsd~ name: those stay unknown.
 		expect(inv.hasKey?.(`dsd~${NAME}`)).toBeNull()
-		expect(inv.hasKey?.(`dsd~${DV}`)).toBeNull()
+		// A dv call recorder name is served by no source while DV_CALL_RECORDINGS_SERVED is off.
+		expect(inv.hasKey?.(`dsd~${DV}`)).toBe(false)
 		// No source serves a dsd-fme DMR name while DMR recordings are off.
 		expect(inv.hasKey?.(`dsd~${DMR}`)).toBe(false)
 		// Neither a TEMP name nor a name that is no call name is claimed gone.
@@ -172,7 +173,10 @@ describe("catalogue links to Activity", () => {
 		closers.push(() => links.close())
 		links.sweep()
 		links.sweep()
-		expect(ops).toEqual([{ type: "unlink", recordingIds: [`dsd~${DMR}`] }])
+		// The dv call recorder's link goes too: no source serves its name while it is off.
+		expect(ops).toEqual([
+			{ type: "unlink", recordingIds: [`dsd~${DMR}`, `dsd~${DV}`] },
+		])
 	})
 
 	it("hasKey cannot tell while a refresh runs, nor after a pass that met a directory error", async () => {

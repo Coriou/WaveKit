@@ -126,8 +126,8 @@ probes). It records whether or not anyone is listening.
   file (`enablePerCallRecording`, or a scanner probe's `dv` folder) of P25,
   NXDN, dPMR, ProVoice (`EDACS_`) or M17 is never listed in Recordings, served or
   linked, whatever the call was: its name does not carry the call's clear
-  print. Those calls' recordings come from this recorder, which keeps only known
-  clear audio. D-STAR and YSF dsd-fme files are unchanged.
+  print. Those calls' recordings are to come from this recorder, which keeps
+  only known clear audio (not served yet: see "In Recordings and Activity"). D-STAR and YSF dsd-fme files are unchanged.
 - **Old links re-checked.** An Activity row shows a recording only while its
   own `call_end` admits it (known clear, not encrypted), checked again on every
   read: a link stored earlier for a call that was not known clear has no play
@@ -167,8 +167,13 @@ probes). It records whether or not anyone is listening.
   oldest until the folder fits `retentionBytes` (2 GiB, about 37 hours of
   voice). Kept recordings are never deleted. No call starts while the disk has
   less than 512 MiB free.
-- **In Recordings and Activity.** The Recordings list shows the files with
-  kind `dv-call` (search "calls" or "recorder"), under the call's decoder.
+- **In Recordings and Activity.** Not yet: no decoder feeds the recorder its
+  calls in this build, so the Recordings list shows no `dv-call` file, none can
+  be downloaded, no Activity row links to one, and a link stored earlier loses
+  its play control and is removed by the next link sweeps. Files in the folder
+  stay on disk under the retention above. Once a decoder feeds it, the list
+  shows the files with kind `dv-call` (search "calls" or "recorder"), under
+  the call's decoder.
   Once a file is in place, the call's Activity row (its `call_end`) links to
   it, so its play button appears. That happens after the row was first shown:
   a page that is already open shows the button on its next refresh. Deleting

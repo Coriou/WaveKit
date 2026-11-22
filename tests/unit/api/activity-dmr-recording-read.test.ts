@@ -14,7 +14,7 @@
  */
 import { rm } from "node:fs/promises"
 import Fastify from "fastify"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	createActivitySubscriptions,
 	type ActivityClientTransport,
@@ -31,6 +31,13 @@ import {
 	roots,
 	stores,
 } from "../core/activity/storage/helpers.js"
+
+// These cases exercise the dv call recorder's catalogue path, which is off in production
+// (DV_CALL_RECORDINGS_SERVED: no call tap feeds the recorder yet); they pin it for its re-enable.
+vi.mock("../../../src/core/recordings/names.js", async importOriginal => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	DV_CALL_RECORDINGS_SERVED: true,
+}))
 
 const DMR_KEY = "dsd~20261012_100000_12345_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
 const P25_KEY = "dsd~20261012_100100_12346_P25_1A3_GROUP_TGT_9_SRC_2002.wav"

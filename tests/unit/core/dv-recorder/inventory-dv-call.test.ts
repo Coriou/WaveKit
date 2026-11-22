@@ -6,10 +6,17 @@ import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import pino from "pino"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
 import { wavHeader } from "../../../../src/core/dv-recorder/wav-writer.js"
 import { dvCallFileName } from "../../../../src/core/dv-recorder/names.js"
+
+// These cases exercise the dv call recorder's catalogue path, which is off in production
+// (DV_CALL_RECORDINGS_SERVED: no call tap feeds the recorder yet); they pin it for its re-enable.
+vi.mock("../../../../src/core/recordings/names.js", async importOriginal => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	DV_CALL_RECORDINGS_SERVED: true,
+}))
 
 const logger = pino({ level: "silent" })
 const DSD = "20261012_100000_12345_YSF_1A3_GROUP_TGT_9_SRC_1.wav"
