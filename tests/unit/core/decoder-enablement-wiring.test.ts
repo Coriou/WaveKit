@@ -451,13 +451,19 @@ describe("decoder enablement composition", () => {
 			primary: true,
 			origin: "configured" as const,
 		}
-		gate.record({
-			atMs: Date.now(),
-			cpuPercent: 95,
-			ownCores: 3.8,
-			capacityCores: 4,
-			sources: new Map(),
-		})
+		// Admission refuses for CPU on two consecutive own-over samples.
+		const ownOver = () =>
+			gate.record({
+				atMs: Date.now(),
+				cpuPercent: 95,
+				ownCores: 3.8,
+				capacityCores: 4,
+				sources: new Map(),
+			})
+		mono -= 2000
+		ownOver()
+		mono += 2000
+		ownOver()
 		const decision = gate.admit(placement, [], mono)
 		expect(decision.admit).toBe(false)
 		if (!decision.admit) {
