@@ -6,12 +6,14 @@
  * src/index.ts composes them. The first call's file is on disk at its end; the second's appears
  * after its row is stored (dsd-fme's late search), so its row is updated, never doubled. Real
  * clock, timers, fs and SQLite (an envelope takes only real Dates). Synthetic files only.
+ * DMR recordings are off in the shipped build (dmr-recording-gate.ts), so the gate is mocked on
+ * here: this is the path as it runs once they are re-enabled.
  */
 import { mkdtemp, rm, unlink, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import pino from "pino"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { wireRecordingLinks } from "../../../../src/core/activity/recording-links.js"
 import { startActivityRuntime } from "../../../../src/core/activity/runtime.js"
 import type { ActivityRuntime } from "../../../../src/core/activity/runtime.js"
@@ -24,6 +26,24 @@ import type {
 	DecoderOutput,
 } from "../../../../src/decoders/types.js"
 import { recordingDsdFmeDirs } from "../../../../src/index.js"
+import type * as DmrGate from "../../../../src/decoders/builtin/dmr-recording-gate.js"
+
+vi.mock(
+	"../../../../src/decoders/builtin/dmr-recording-gate.js",
+	async importOriginal => {
+		const real = await importOriginal<typeof DmrGate>()
+		const dmr = (p: string | null) => p !== null && /^dmr$/i.test(p.trim())
+		const protocolRecordable = (p: string | null) =>
+			dmr(p) || real.protocolRecordable(p)
+		return {
+			...real,
+			DMR_RECORDING_LINK_ENABLED: true,
+			protocolRecordable,
+			dsdFmeCallRecordable: (name: string) =>
+				protocolRecordable(real.dsdFmeCallProtocol(name)),
+		}
+	},
+)
 
 const logger = pino({ level: "silent" })
 const realNow = (): number => performance.timeOrigin + performance.now()

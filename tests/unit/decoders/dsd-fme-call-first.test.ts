@@ -18,7 +18,9 @@ import {
 	SYNC_CHAIN_MS,
 	type DsdFmeVoiceCallState,
 } from "../../../src/decoders/builtin/dsd-fme.js"
+import { DMR_RECORDING_LINK_ENABLED } from "../../../src/decoders/builtin/call-recordings.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
+import { DATE_CLOCK } from "./dsd-fme-call-first-helpers.js"
 
 const logger = pino({ level: "silent" })
 const T0 = Date.parse("2026-01-02T03:04:05.000Z")
@@ -52,6 +54,7 @@ function createDecoder(options: Record<string, unknown> = {}): DsdFmeDecoder {
 			options: { mode: "auto", ...options },
 		},
 		logger,
+		DATE_CLOCK,
 	)
 }
 
@@ -210,8 +213,9 @@ describe("dsd-fme call-first lifecycle", () => {
 	})
 
 	it("attaches the IDs of the first link control and learns the call is clear", () => {
-		// Three syncs announce the unnamed call (timer at 1000); the LC at 1100
-		// counts once the sync at 1440 closes its burst clean.
+		// Three syncs announce the unnamed call (timer at 1000); the LC at 1100,
+		// its first after its voice, names it and is its proof once the sync at
+		// 1440 closes its burst clean.
 		const { starts, ends, voice } = replay(
 			[
 				[0, MS("VC*")],
@@ -260,7 +264,7 @@ describe("dsd-fme call-first lifecycle", () => {
 		expect(ends[0]!.flags?.encrypted).toBe(true)
 	})
 
-	it("a call started on its IDs is back-dated to its first sync and known from the start", () => {
+	it("a call joined late on its IDs is back-dated to its first sync and is not known clear from its opening LC", () => {
 		const { starts, voice } = replay(
 			[
 				[0, MS("VC*")],
@@ -270,8 +274,12 @@ describe("dsd-fme call-first lifecycle", () => {
 			6000,
 		)
 		expect(at(starts[0]!.startedAt)).toBe(0)
-		expect(starts[0]!.encryptionKnown).toBeUndefined()
-		expect(voice.every(v => v.encryptionKnown === undefined)).toBe(true)
+		// An LC after a voice burst with no call running is a late join: it
+		// opens and names the call, which proves nothing: the call did not
+		// start on its frames, so only a later link control of the same IDs
+		// after its voice does.
+		expect(starts[0]!.encryptionKnown).toBe(false)
+		expect(voice.every(v => v.encryptionKnown === false)).toBe(true)
 	})
 
 	it("does not start a phantom call from the terminator LC of a call ended before its IDs", () => {
@@ -498,7 +506,7 @@ describe("dsd-fme call-first lifecycle", () => {
 })
 
 describe("dsd-fme: a call whose encryption was never known", () => {
-	it("is never linked to a recording; a known one is", () => {
+	it("is never linked to a recording; a known one is only while DMR recordings are on", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "wk-call-first-"))
 		try {
 			const start = new Date(2026, 0, 9, 10, 53, 27)
@@ -509,36 +517,38 @@ describe("dsd-fme: a call whose encryption was never known", () => {
 				),
 				"",
 			)
-			const end = (known: boolean | undefined) => {
+			vi.useFakeTimers({ toFake: ["Date"] })
+			const end = (settle: boolean) => {
 				const d = createDecoder({
 					enablePerCallRecording: true,
 					perCallRecordingDir: root,
-				}) as unknown as {
-					callState: unknown
-					endCall(
-						now: Date,
-						timeout: boolean,
-					): { data: { wavFile?: string; encryptionKnown?: boolean } } | null
-				}
-				d.callState = {
-					callId: "c",
-					protocol: "dmr",
-					talkgroup: 100,
-					source: 200,
-					startTime: start,
-					lastUpdate: start,
-					dmr: { cc: 1 },
-					quality: { crcErrs: 0, fecErrs: 0 },
-					flags: {},
-					...(known === undefined ? {} : { encryptionKnown: known }),
-				}
-				return d.endCall(new Date(start.getTime() + 5000), false)?.data
+					perCallRecordingPrune: false,
+				})
+				const ends: CallData[] = []
+				d.on("output", (o: DecoderOutput) => {
+					if (o.type === "call_end") ends.push(o.data as CallData)
+				})
+				const adapter = d as unknown as Internals
+				vi.setSystemTime(start)
+				adapter.handleOutputLine(MS("VLC"))
+				adapter.handleOutputLine(LC(1, 100, 200))
+				if (settle) adapter.handleOutputLine(MS("VC*"))
+				vi.setSystemTime(start.getTime() + 5000)
+				adapter.checkCallTimeoutAsync()
+				return ends[0]
 			}
-			expect(end(false)?.wavFile).toBeUndefined()
-			expect(end(false)?.encryptionKnown).toBe(false)
-			expect(end(true)?.wavFile).toContain(root)
-			expect(end(undefined)?.wavFile).toContain(root)
+			expect(end(false)).toMatchObject({
+				encryptionKnown: false,
+				wavFile: undefined,
+			})
+			// A known clear DMR call is linked only while DMR recordings are on.
+			const known = end(true)
+			expect(known).toMatchObject({ encryptionKnown: true })
+			if (DMR_RECORDING_LINK_ENABLED)
+				expect(known?.wavFile).toEqual(expect.stringContaining(root))
+			else expect(known?.wavFile).toBeUndefined()
 		} finally {
+			vi.useRealTimers()
 			fs.rmSync(root, { recursive: true })
 		}
 	})

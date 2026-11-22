@@ -30,8 +30,8 @@ import {
 	tempDir,
 } from "./helpers.js"
 
-const NAME_A = "20261012_100000_12345_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
-const NAME_B = "20261012_100100_54321_DMR_CC_1_GROUP_TGT_9_SRC_2002.wav"
+const NAME_A = "20261012_100000_12345_P25_1A3_GROUP_TGT_9_SRC_2001.wav"
+const NAME_B = "20261012_100100_54321_P25_1A3_GROUP_TGT_9_SRC_2002.wav"
 const KEY_A = `dsd~${NAME_A}`
 const KEY_B = `dsd~${NAME_B}`
 const SCAN_KEY =
@@ -49,18 +49,26 @@ afterEach(async () => {
 /** A dsd-fme `call_end` reception of `callId` (its `callId` ref, as the ingress sets it). */
 function callEnd(
 	callId: string,
-	patch: { decoderId?: string; wavFile?: string; late?: boolean } = {},
+	patch: {
+		decoderId?: string
+		wavFile?: string
+		late?: boolean
+		/** The decoder's protocol label (dsd-fme's call data); null leaves it out. */
+		protocol?: string | null
+	} = {},
 ): DecodeEnvelope {
+	const protocol = patch.protocol === undefined ? "p25p1" : patch.protocol
 	const base = envelope({
 		decoderId: patch.decoderId ?? "dsd-a",
 		outputType: "call_end",
-		protocol: "dmr",
+		protocol: "p25",
 		category: "voice",
 		entityKey: "talkgroup:9",
-		title: "DMR TG 9 from 2001",
+		title: "P25 TG 9 from 2001",
 		fields: [{ key: "talkgroup", label: "Talkgroup", value: 9 }],
 		decodedData: {
 			callId,
+			...(protocol !== null ? { protocol } : {}),
 			talkgroup: 9,
 			duration: 4200,
 			...(patch.wavFile !== undefined ? { wavFile: patch.wavFile } : {}),
@@ -400,6 +408,65 @@ describe("recording links in the store", () => {
 		expect(Number(refs)).toBe(1)
 		expect(backfillRecordingLinks(db, carry, 1).done).toBe(true)
 		db.close()
+	})
+
+	it("the backfill links no DMR call (by its row or its file name) nor one of unknown protocol while DMR recordings are off", async () => {
+		const stateDir = await tempDir()
+		const first = await openStore({ stateDir })
+		const DMR_NAME = "20261012_100200_11111_DMR_CC_1_GROUP_TGT_9_SRC_2003.wav"
+		const UNNAMED = "20261012_100300_22222__GROUP_TGT_9_SRC_2004.wav"
+		const dmrRow = callEnd("call-20", {
+			wavFile: `/c/${DMR_NAME}`,
+			protocol: "dmr",
+		})
+		const dmrName = callEnd("call-21", { wavFile: `/c/${DMR_NAME}` })
+		const dmrRowP25Name = callEnd("call-22", {
+			wavFile: `/c/${NAME_A}`,
+			protocol: "dmr",
+		})
+		const noProtocol = callEnd("call-23", {
+			wavFile: `/c/${NAME_A}`,
+			protocol: null,
+		})
+		const unnamed = callEnd("call-24", { wavFile: `/c/${UNNAMED}` })
+		// A late file of a DMR call, and a DMR call's late P25-named file.
+		const dmrPending = callEnd("call-25", { protocol: "dmr" })
+		const dmrLate = callEnd("call-25", {
+			wavFile: `/c/${NAME_B}`,
+			late: true,
+		})
+		const clear = callEnd("call-26", { wavFile: `/c/${NAME_B}` })
+		const all = [
+			dmrRow,
+			dmrName,
+			dmrRowP25Name,
+			noProtocol,
+			unnamed,
+			dmrPending,
+			dmrLate,
+			clear,
+		]
+		for (const e of all) {
+			const { refs: _refs, ...legacy } = e
+			first.admit(legacy)
+		}
+		await first.close()
+		const db = await openSqliteFile(first.dbPath)
+		db.prepare("UPDATE store_meta SET value = '0' WHERE key = ?").run(
+			"recordingLinkBackfill",
+		)
+		const step = backfillRecordingLinks(db, new Map(), 500)
+		const refs = db
+			.prepare(
+				"SELECT COUNT(*) AS n FROM activity_refs WHERE ref_type = 'recordingId'",
+			)
+			.get()?.["n"]
+		db.close()
+		expect(step.done).toBe(true)
+		expect(step.events.map(e => [e.recordingId, e.eventId])).toEqual([
+			[KEY_B, clear.eventId],
+		])
+		expect(Number(refs)).toBe(1)
 	})
 
 	it("the backfill stops at the newest row stored before the open", async () => {

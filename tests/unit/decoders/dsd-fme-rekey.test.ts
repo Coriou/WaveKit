@@ -113,12 +113,14 @@ describe("dsd-fme DMR re-key", () => {
 		).toHaveLength(0)
 	})
 
-	it("another radio's IDs still split on a continuous run of syncs", () => {
+	it("another radio's IDs still split on a continuous run of syncs (on their second copy)", () => {
+		// Adapted: one copy of other IDs only revokes known clear; two agreeing copies split.
 		const lines: Line[] = [
 			...over(8),
 			[1000 + DMR_SUPERFRAME_MS + 40, LC(1, 9, 100)],
 			[1000 + 3 * DMR_SUPERFRAME_MS + 40, LC(1, 9, 100)],
 			[1000 + 6 * DMR_SUPERFRAME_MS + 40, LC(1, 7, 200)],
+			[1000 + 7 * DMR_SUPERFRAME_MS + 40, LC(1, 7, 200)],
 		]
 		const { ends } = replay(lines, 12_000)
 		expect(ends).toHaveLength(2)

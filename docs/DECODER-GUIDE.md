@@ -1154,7 +1154,13 @@ either slot) with no error line before it; a line with an error, a sync loss or
 4 s without a sync leave the call unknown (an `Encrypted` one mutes it at once).
 A P25 `src: … tg: …` print says it only through a clear ALG ID on an error-free
 line. A call that
-ends still unknown is never linked to a per-call recording. Noise that prints
+ends still unknown is never linked to a per-call recording. DMR per-call
+recordings are off for now (`DMR_RECORDING_LINK_ENABLED` in
+`src/decoders/builtin/dmr-recording-gate.ts`): until DMR clearance is trusted, no
+DMR call file is written by the call recorder, listed, served or linked, clear or
+not. The recordable protocols are an allow-list (P25, NXDN, YSF, D-STAR, dPMR,
+ProVoice, EDACS, M17); a dsd-fme file name without a known protocol is refused
+too and stays on disk. Noise that prints
 three clean DMR syncs of one colour code over two superframes starts such a call;
 it never learns its encryption, so it stays muted and unrecorded. YSF, NXDN and dPMR
 calls carry no `encryptionKnown` field: the adapter does not read their

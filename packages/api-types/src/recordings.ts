@@ -64,12 +64,14 @@ export const RECORDING_INVENTORY_ID =
 export const RECORDING_DSD_KEY =
 	/^dsd~(\d{8}_\d{6}_\d{5}_[A-Za-z0-9_.-]{1,200}\.wav)$/
 
+/** `dv-call`: a call kept by WaveKit's own digital-voice call recorder (same `dsd~` keys). */
 export type RecordingInventoryKind =
 	| "dsd-fme-call"
 	| "scanner-dv"
 	| "scanner-analog"
+	| "dv-call"
 export const RECORDING_INVENTORY_KINDS: readonly RecordingInventoryKind[] =
-	Object.freeze(["dsd-fme-call", "scanner-dv", "scanner-analog"])
+	Object.freeze(["dsd-fme-call", "scanner-dv", "scanner-analog", "dv-call"])
 
 export type RecordingCallType = "group" | "private" | "unit"
 
@@ -107,7 +109,10 @@ export const RECORDING_SPEECH: readonly RecordingSpeech[] = Object.freeze([
 export interface RecordingInventoryItem {
 	id: string
 	kind: RecordingInventoryKind
-	/** The dsd-fme decoder that owns the directory; null for scanner recordings. */
+	/**
+	 * The dsd-fme decoder that owns the directory (`dv-call`: the known decoder the file name
+	 * stands for, or null when it matches none or several); null for scanner recordings.
+	 */
 	decoderId: string | null
 	/** The scanner discovery; null for dsd-fme recordings. */
 	discoveryId: string | null

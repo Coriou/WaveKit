@@ -58,6 +58,13 @@ digitalVoice:
   voiceSlot: "both" # 1 | 2 | "both" -> dsd-fme -V 1|2|3
   jitterBufferMs: 400 # voice buffered (or waited for) before a burst plays
   maxBufferMs: 1000 # bound per stream; the oldest voice is dropped beyond it
+  recordCalls: # call recordings, see "Call recordings" below
+    enabled: true
+    # dir: /data/dv-calls # default <stateDir>/recordings/dv-calls
+    minVoiceMs: 1000
+    maxCallMs: 300000
+    retentionBytes: 2147483648 # 2 GiB
+    retentionDays: 7
 ```
 
 Environment overrides follow the usual convention:
@@ -88,6 +95,62 @@ behind. Other WAV files in the directory are never touched.
 Only decoders configured at startup are routed (the API cannot create decoders).
 `digitalVoice.enabled: false` keeps dsd-fme on `-o null`, and `POST
 /api/digital-voice/start` then answers 409.
+
+## Call recordings
+
+WaveKit keeps one WAV file per clear digital voice call, from every dsd-fme
+decoder the digital voice stream follows (configured decoders and scanner
+probes). It records whether or not anyone is listening.
+
+- **Only clear audio.** A call is recorded only while the voice service knows
+  it is clear. Audio of an encrypted call, or of a call whose encryption is not
+  known yet, is never written. A call that turns encrypted partway through
+  loses its whole file, and so does a call that ends before it is known to be
+  clear. Audio that arrives too late to be checked against the call's events
+  may still slip through (a known limit).
+- **No DMR yet.** DMR per-call recordings are not listed, served, linked or
+  recorded yet. The recorder writes no DMR call (nor one whose protocol is not
+  known). A dsd-fme per-call file whose name says DMR (its system field starts
+  `DMR_`), or no known protocol, is not listed in Recordings, cannot be
+  downloaded and is never linked to its Activity row; a dsd-fme decoder in
+  `mode: dmr` is not asked for per-call files at all. An Activity row linked to
+  one earlier loses that link within a few minutes. Files dsd-fme already
+  wrote stay on disk under the usual retention.
+- **About 2 s behind the air.** Each sample is held for 2 s before it is
+  written, so a late encryption notice can still withhold it. The call's end
+  also reaches the recorder up to 10 s after the decoder reported it.
+- **At least 1 s of voice.** A call with less than `minVoiceMs` (1 000 ms) of
+  voice, silence excluded, leaves no file. A call that runs past `maxCallMs`
+  (300 000 ms, 4.8 MB) is cut there.
+- **Where the files live.** One flat folder, `digitalVoice.recordCalls.dir`,
+  by default `<stateDir>/recordings/dv-calls`. A file is named like a dsd-fme
+  call file, with the decoder id in place of the system id:
+  `<YYYYMMDD>_<HHMMSS>_<5 digits>_<decoder>_GROUP_TGT_<talkgroup>_SRC_<radio>.wav`
+  (8 kHz, 16-bit mono). A D-STAR call puts UR in `TGT` and MY in `SRC` when its
+  header was checked, else `TGT_0_SRC_0`. Unfinished
+  `TEMP_dv_<YYYYMMDD>_<HHMMSS>_<4 hex>.wav` files left by a crash are removed
+  at start. The folder must be a real directory, not a symlink, or recording
+  stays off.
+- **Retention.** Files older than `retentionDays` (7) are deleted, then the
+  oldest until the folder fits `retentionBytes` (2 GiB, about 37 hours of
+  voice). Kept recordings are never deleted. No call starts while the disk has
+  less than 512 MiB free.
+- **In Recordings and Activity.** The Recordings list shows the files with
+  kind `dv-call` (search "calls" or "recorder"), under the call's decoder.
+  Once a file is in place, the call's Activity row (its `call_end`) links to
+  it, so its play button appears. That happens after the row was first shown:
+  a page that is already open shows the button on its next refresh. Deleting
+  the recording removes the link within about three minutes (the link sweep
+  waits until the catalogue has missed the file twice, 90 s apart).
+
+| Key (`digitalVoice.recordCalls.*`) | Default                          | Effect                                  |
+| ---------------------------------- | -------------------------------- | --------------------------------------- |
+| `enabled`                          | `true`                           | Record clear calls                      |
+| `dir`                              | `<stateDir>/recordings/dv-calls` | The recordings folder                   |
+| `minVoiceMs`                       | `1000`                           | Shortest call kept (voice, not silence) |
+| `maxCallMs`                        | `300000`                         | A longer call's file is cut there       |
+| `retentionBytes`                   | `2147483648` (2 GiB)             | Folder size kept                        |
+| `retentionDays`                    | `7`                              | Age kept                                |
 
 ## How it works
 

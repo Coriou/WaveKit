@@ -19,6 +19,7 @@ import type {
 	DecoderOutput,
 } from "../../../src/decoders/types.js"
 import { receiveFilterEffect } from "../../../src/decoders/builtin/dsd-fme-filter.js"
+import { DATE_CLOCK } from "./dsd-fme-call-first-helpers.js"
 
 /** The sox receive-filter effect of the 4800 symbols/s modes (auto, dmr, p25, ysf, dstar). */
 const rx = (rateHz: number) => receiveFilterEffect("auto", rateHz)!
@@ -52,7 +53,7 @@ function createDecoder(options: Record<string, unknown> = {}): DsdFmeDecoder {
 		enabled: true,
 		options: { mode: "auto", ...options },
 	}
-	return new DsdFmeDecoder(config, logger)
+	return new DsdFmeDecoder(config, logger, DATE_CLOCK)
 }
 
 /** Replays timed lines, running the 500 ms timeout checker as time passes. */
@@ -543,9 +544,12 @@ describe("dsd-fme voice-call metadata", () => {
 					text: "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC",
 				},
 			],
-			1000,
+			// A bare sync says nothing of encryption: the call is unknown, so its
+			// call_end waits for the terminator's trailer window.
+			2000,
 		)
 		expect(ended.voice.map(state => state.active)).toEqual([true, false])
+		expect(ended.voice[1]).toMatchObject({ encryptionKnown: false })
 		expect(ended.voice[0]?.errors).toEqual({ crc: 0, fec: 0 })
 		expect(ended.voice[1]).toMatchObject({
 			active: false,

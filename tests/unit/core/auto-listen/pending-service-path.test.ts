@@ -133,7 +133,11 @@ async function replayThroughService(
 		options: { mode: "auto" },
 	}
 	await service.prepareDecoderConfigs([decoderConfig])
-	const decoder = new DsdFmeDecoder(decoderConfig, logger)
+	// Elapsed time follows the fake Date (vi.setSystemTime).
+	const decoder = new DsdFmeDecoder(decoderConfig, logger, {
+		mono: () => Date.now(),
+		wall: () => Date.now(),
+	})
 	service.attachDecoder("dsd-fme", decoder)
 	await service.start()
 	const socket = FakeSocket.created[first]

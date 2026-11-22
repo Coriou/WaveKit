@@ -6,6 +6,7 @@ import pino from "pino"
 import { vi } from "vitest"
 import {
 	DsdFmeDecoder,
+	type DsdFmeClock,
 	type DsdFmeVoiceCallState,
 } from "../../../src/decoders/builtin/dsd-fme.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
@@ -35,6 +36,15 @@ export interface CallData {
 
 export type Line = [atMs: number, text: string]
 
+/**
+ * A clock whose monotonic and wall readings are both Date.now(), so a fake
+ * Date (vi.setSystemTime) drives the adapter's elapsed time as before.
+ */
+export const DATE_CLOCK: DsdFmeClock = {
+	mono: () => Date.now(),
+	wall: () => Date.now(),
+}
+
 export function createDecoder(
 	options: Record<string, unknown> = {},
 ): DsdFmeDecoder {
@@ -46,6 +56,7 @@ export function createDecoder(
 			options: { mode: "auto", ...options },
 		},
 		logger,
+		DATE_CLOCK,
 	)
 }
 

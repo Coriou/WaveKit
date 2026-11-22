@@ -45,6 +45,13 @@ const status: DigitalVoiceStatus = {
 		voiceSlot: "both",
 		jitterBufferMs: 250,
 		maxBufferMs: 1000,
+		recordCalls: {
+			enabled: true,
+			minVoiceMs: 1000,
+			maxCallMs: 300_000,
+			retentionBytes: 2 * 1024 * 1024 * 1024,
+			retentionDays: 7,
+		},
 	},
 	sampleRate: 8000,
 	audioFormat: "s16le",
@@ -110,7 +117,9 @@ describe("Digital voice routes", () => {
 			url: "/api/digital-voice/status",
 		})
 		expect(response.statusCode).toBe(200)
-		expect(JSON.parse(response.body)).toEqual(status)
+		// The response schema does not publish the call recorder settings (its dir is a filesystem path).
+		const { recordCalls: _recordCalls, ...wireConfig } = status.config
+		expect(JSON.parse(response.body)).toEqual({ ...status, config: wireConfig })
 	})
 
 	it("keeps each decoder's voiceHold counters through the response schema", async () => {
@@ -149,7 +158,8 @@ describe("Digital voice routes", () => {
 			method: "GET",
 			url: "/api/digital-voice/status",
 		})
-		expect(JSON.parse(response.body)).toEqual(idle)
+		const { recordCalls: _idleRecordCalls, ...idleWireConfig } = idle.config
+		expect(JSON.parse(response.body)).toEqual({ ...idle, config: idleWireConfig })
 	})
 
 	it("POST start and stop control the stream", async () => {

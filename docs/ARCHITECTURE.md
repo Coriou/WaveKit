@@ -486,6 +486,10 @@ the row (`activityEventId`, from the store's in-memory link index). Producers:
   gets `dsd~<name>` and a `callId` ref; `wavFile` is reduced to the file name. A file found late
   (`wavFileUpdate`) is a link change of that call's row: the store patches the row in its queue,
   or the writer updates the stored row by its `callId` ref (`storage/links.ts`). It is never a row.
+  Only a recordable call file links (`dsdFmeCallRecordable`, `src/decoders/builtin/dmr-recording-gate.ts`):
+  the ingress and the backfill refuse a DMR name, or one without a known protocol, while DMR
+  recordings are off, whatever the decoder reported; the backfill also needs the row's protocol
+  to be recordable.
 - scanner analog recordings: the scanner emits `recording-kept` at the irrevocable commit of a file
   (after any provisional hold), and `src/core/activity/recording-links.ts` admits one
   `recording-change` row. A discarded file never commits, so it never gets a row.

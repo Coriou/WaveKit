@@ -14,9 +14,11 @@ import {
 	type RecordingRoutesOptions,
 } from "../../../../src/api/routes/recordings.js"
 import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
+import { wireRecordingLinks } from "../../../../src/core/activity/recording-links.js"
+import type { ActivityLinkOp } from "../../../../src/core/activity/storage/contract.js"
 
 const logger = pino({ level: "silent" })
-const NAME = "20261012_100000_12345_DMR_CC_1_GROUP_TGT_9_SRC_1.wav"
+const NAME = "20261012_100000_12345_P25_1A3_GROUP_TGT_9_SRC_1.wav"
 const roots: string[] = []
 const closers: (() => void)[] = []
 afterEach(async () => {
@@ -82,6 +84,46 @@ describe("catalogue links to Activity", () => {
 		await inv.start?.()
 		expect(inv.hasKey?.(`dsd~${NAME}`)).toBe(true)
 		expect(inv.hasKey?.(`dsd~${NAME.replace("12345", "54321")}`)).toBe(false)
+	})
+
+	it("a DMR call file on disk is not a key (DMR recordings off), so the link sweep removes an old DMR link", async () => {
+		const { a, b } = await callDirs()
+		const DMR = "20261012_100001_12345_DMR_CC_1_GROUP_TGT_9_SRC_1.wav"
+		const file = join(a, DMR)
+		await writeFile(file, Buffer.alloc(64))
+		const old = (Date.now() - 60_000) / 1000
+		await utimes(file, old, old)
+		const inv = createRecordingInventory({
+			dsdFmeDirs: () => [
+				{ decoderId: "dsd-a", dir: a },
+				{ decoderId: "dsd-b", dir: b },
+			],
+			scannerRecordingsDir: () => null,
+			logger,
+		})
+		closers.push(() => inv.close?.())
+		await inv.start?.()
+		expect(inv.hasKey?.(`dsd~${DMR}`)).toBe(false)
+		expect(inv.hasKey?.(`dsd~${NAME}`)).toBe(true)
+		// A store written before DMR recordings were switched off holds both links.
+		const ops: ActivityLinkOp[] = []
+		const links = wireRecordingLinks({
+			links: {
+				admitRecording: () => undefined,
+				link: op => ops.push(op),
+				recordingEventId: () => null,
+				linkedRecordings: () => [`dsd~${DMR}`, `dsd~${NAME}`],
+				onLinks: () => () => undefined,
+			},
+			catalogue: inv,
+			logger,
+			sweepMs: 3_600_000,
+			missingMs: 0,
+		})
+		closers.push(() => links.close())
+		links.sweep()
+		links.sweep()
+		expect(ops).toEqual([{ type: "unlink", recordingIds: [`dsd~${DMR}`] }])
 	})
 
 	it("hasKey cannot tell while a refresh runs, nor after a pass that met a directory error", async () => {

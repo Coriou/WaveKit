@@ -1,0 +1,273 @@
+# recorded wavekit core image dsd-fme -fs -V 3 (ids replaced)
+# a repeater over whose VC6 link control is followed by a same-slot sync loss, a slot 2 burst run, then the terminator train
+# arrival ms<TAB>line, relative; TGT/SRC replaced by synthetic values of the same digit count
+1000	00:00:01 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+1004	00:00:01 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+1384	Sync: no sync
+1805	00:00:01 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+2001	00:00:02 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1*
+2004	00:00:02 Sync:  DMR   slot1  [SLOT2] [36m| Frame Sync Err: 7[0m
+2011	00:00:02 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 
+2012	[31m SLCO CRC ERR[0m
+2287	00:00:02 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+2299	00:00:02 Sync:  DMR                  [31m| VOICE CACH/EMB ERR[0m
+2299	00:00:02 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+2373	00:00:02 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+2477	Sync: no sync
+2822	00:00:02 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+2836	00:00:02 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+2845	00:00:02 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+3083	00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+3182	00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+3190	00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+3264	00:00:03 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+3270	00:00:03 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+4071	00:00:04 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+4396	00:00:04 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+4577	00:00:04 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+4870	00:00:04 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC1*
+5012	00:00:05 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+5012	00:00:05 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC2 
+5012	[31m SLCO CRC ERR[0m
+5013	00:00:05 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+5013	00:00:05 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC3 
+5070	00:00:05 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+5081	00:00:05 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC4 
+5082	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+5099	00:00:05 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+5172	00:00:05 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC5 
+5181	00:00:05 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+5196	00:00:05 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | VC6 
+5200	[32m SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+5200	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+5362	00:00:05 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+5364	00:00:05 Sync:  DMR  [SLOT1]  slot2  [36m| Frame Sync Err: 7[0m
+5365	00:00:05 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+5365	[31m SLCO CRC ERR[0m
+5464	00:00:05 Sync:  DMR   slot1  [SLOT2] [36m| Frame Sync Err: 7[0m
+5464	00:00:05 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+5464	[31m SLCO CRC ERR[0m
+5466	00:00:05 Sync:  DMR  [SLOT1]  slot2  [36m| Frame Sync Err: 7[0m
+5474	00:00:05 Sync:  DMR   slot1  [SLOT2] [36m| Frame Sync Err: 8[0m
+5480	00:00:05 Sync:  DMR  [SLOT1]  slot2  [36m| Frame Sync Err: 8[0m
+5480	00:00:05 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+5481	[31m SLCO CRC ERR[0m
+5485	00:00:05 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+5486	[31m SLCO CRC ERR[0m
+5487	00:00:05 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+5590	[31m SLCO CRC ERR[0m
+5591	00:00:05 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+5591	[31m SLCO CRC ERR[0m
+5664	00:00:05 Sync: +DMR   slot1  [SLOT2] | Color Code=01 | VC1*
+5679	[31m SLCO CRC ERR[0m
+5683	00:00:05 Sync:  DMR                  [31m| VOICE CACH/EMB ERR[0m
+5703	00:00:05 Sync: +DMR   slot1  [SLOT2] | Color Code=01 | VC1*
+5773	[31m SLCO CRC ERR[0m
+5775	00:00:05 Sync:  DMR                  [31m| VOICE CACH/EMB ERR[0m
+5780	00:00:05 Sync: +DMR   slot1  [SLOT2] | Color Code=01 | VC1*
+5780	[31m SLCO CRC ERR[0m
+5783	00:00:05 Sync:  DMR                  [31m| VOICE CACH/EMB ERR[0m
+5818	00:00:05 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+5878	00:00:05 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+5878	00:00:05 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+5881	00:00:05 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+5967	00:00:05 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+6065	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6065	[31m SLCO CRC ERR[0m
+6066	00:00:06 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+6072	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6169	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6169	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6170	[31m SLCO CRC ERR[0m
+6172	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6172	[31m SLCO CRC ERR[0m
+6172	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6173	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6173	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6173	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6173	 SLOT 1 TGT=901 SRC=9002 Group Call [0m [31m (CRC ERR) [0m
+6173	[31m SLCO CRC ERR[0m
+6173	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6173	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6173	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6173	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6173	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6173	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6175	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+6176	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6199	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6199	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6200	[31m SLCO CRC ERR[0m
+6200	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6201	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6201	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6201	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6201	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6268	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6268	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+6291	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6293	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6295	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6448	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6483	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6483	 SLOT 1 TGT=9000001 SRC=91 Group Call [0m [31m (CRC ERR) [0m
+6483	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+6500	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6502	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6503	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6505	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6566	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [33m 
+6566	 SLOT 1 Unknown LC  FLCO=0x00 FID=0x40 [0m
+6566	[31m SLCO CRC ERR[0m
+6567	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6578	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6578	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6579	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6669	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6671	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6672	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+6672	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6680	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6786	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6884	00:00:06 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+6897	00:00:06 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+6897	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+6898	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+7002	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7035	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | TLC [31m 
+7035	 SLOT 2 TGT=9001 SRC=91 Group Call [0m 
+7067	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7070	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7071	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7074	[31m SLCO CRC ERR[0m
+7077	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7078	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7078	 SLOT 1 TGT=9001 SRC=9002 Group Call [0m [31m (CRC ERR) [0m
+7085	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7168	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7186	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7325	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+7362	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7362	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7362	 SLOT 1 TGT=9003 SRC=90001 Group Call [0m 
+7362	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7362	00:00:07 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+7363	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7363	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7363	 SLOT 1 TGT=9004 SRC=91 Group Call [0m [31m (CRC ERR) [0m
+7363	[31m SLCO CRC ERR[0m
+7363	00:00:07 Sync: +DMR   slot1   slot2  [31m| CACH/Burst FEC ERR[0m
+7363	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7363	00:00:07 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+7363	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7363	 SLOT 1 TGT=9000002 SRC=91 Group Broadcast Call [0m [31m (CRC ERR) [0m
+7363	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7363	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7363	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7363	[31m SLCO CRC ERR[0m
+7363	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7363	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7363	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7363	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7364	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7364	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7365	[31m SLCO CRC ERR[0m
+7367	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7372	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7398	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7398	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7554	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7554	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7554	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+7554	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7556	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7556	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7559	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7560	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7560	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7560	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+7575	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7578	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7578	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7582	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7596	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7618	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7628	[31m SLCO CRC ERR[0m
+7629	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7632	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7633	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7638	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7797	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7831	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7832	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+7832	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7832	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7832	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7832	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7832	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7832	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7832	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+7832	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7964	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7966	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7966	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7966	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7966	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+7966	[33m Activity Update TS1: Group Voice; Hash: 255; TS2: Idle; Hash: 0;[0m
+7974	00:00:07 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+7975	00:00:07 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+7976	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+8163	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8164	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC [31m 
+8164	 SLOT 1 TGT=9001 SRC=91 Group Call [0m 
+8164	[31m SLCO CRC ERR[0m
+8167	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8172	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+8176	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8180	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+8184	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+8196	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8197	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+8197	[31m SLCO CRC ERR[0m
+8202	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8210	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+8494	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8498	00:00:08 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+8500	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8503	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+8506	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8507	00:00:08 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+8511	00:00:08 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+8513	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8516	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+8516	[31m SLCO CRC ERR[0m
+8527	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8877	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+8879	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8890	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+8893	00:00:08 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+8894	00:00:08 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+9224	00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+9264	00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+9265	00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+9265	[31m SLCO CRC ERR[0m
+9272	00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+9275	00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+9288	00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+9298	00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+9299	[33m SLCO NULL [0m
+9311	00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+9317	00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+9322	00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+9326	00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+9327	[33m SLCO NULL [0m
+9565	00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+9568	00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+9574	00:00:09 Sync: +DMR   slot1  [slot2] | Color Code=01 | IDLE 
+9602	00:00:09 Sync: +DMR  [slot1]  slot2  | Color Code=01 | IDLE 
+9602	[33m SLCO NULL [0m
+9672	00:00:09 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+9876	00:00:09 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+10283	Sync: no sync
+11323	00:00:11 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+11586	00:00:11 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m

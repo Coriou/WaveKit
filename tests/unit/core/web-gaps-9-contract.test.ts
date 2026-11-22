@@ -55,7 +55,7 @@ const same = <A, B>(value: Same<A, B>): Same<A, B> => value
 type Extends<A, B> = [A] extends [B] ? true : false
 const extendsType = <A, B>(value: Extends<A, B>): Extends<A, B> => value
 
-const DSD_NAME = "20261017_081500_12345_DMR_GROUP_TGT_9_SRC_1234.wav"
+const DSD_NAME = "20261017_081500_12345_P25_1A3_GROUP_TGT_9_SRC_1234.wav"
 const DEVICE_ID = `device_${"A".repeat(43)}`
 const CSRF = "B".repeat(43)
 

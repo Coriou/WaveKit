@@ -109,9 +109,10 @@ const slotArb = fc.integer({ min: 1, max: 2 })
 const talkgroupArb = fc.integer({ min: 1, max: 16777215 })
 
 /**
- * Arbitrary for generating valid source IDs.
+ * Arbitrary for generating valid source IDs: 1 to 16 777 215 - 800 (the
+ * top 800 addresses are reserved, DMR_SOURCE_MAX).
  */
-const sourceIdArb = fc.integer({ min: 1, max: 16777215 })
+const sourceIdArb = fc.integer({ min: 1, max: 16776415 })
 
 /**
  * Arbitrary for generating error patterns.

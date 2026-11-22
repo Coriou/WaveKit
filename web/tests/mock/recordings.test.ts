@@ -82,7 +82,7 @@ describe("mock recordings routes", () => {
 	it("keeps, refuses to delete kept or scanner recordings, and deletes calls", async () => {
 		const items = await all()
 		const callItem = items.find(i => i.kind === "dsd-fme-call" && !i.kept)
-		const scanItem = items.find(i => i.kind !== "dsd-fme-call" && !i.kept)
+		const scanItem = items.find(i => i.kind.startsWith("scanner-") && !i.kept)
 		if (!callItem || !scanItem) throw new Error("seeds")
 		const keep = await server.app.inject({
 			method: "PUT",

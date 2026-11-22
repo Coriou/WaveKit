@@ -6900,7 +6900,7 @@ Re-authorized like the other protected operator routes; `Cache-Control:
 no-store`; `Server-Timing: catalogue;dur=<ms>` gives the core time of the
 listing. Query: `limit` (1–200, default 50), `cursor` (opaque, at most 512
 characters), and these filters, all combined: `kind` (`dsd-fme-call`,
-`scanner-dv`, `scanner-analog`), `decoderId` (exact match), `kept` (`true` or
+`dv-call`, `scanner-dv`, `scanner-analog`), `decoderId` (exact match), `kept` (`true` or
 `false`), `discoveryId` (its own folder and every folder it owns through
 merges), `talkgroup` and `source` (radio id; decimal digits), `minHz` and
 `maxHz` (integer Hz, inclusive; only recordings with a known frequency match),
@@ -6918,7 +6918,7 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
 {
 	"items": [
 		{
-			"id": "dsd:0~20261016_141503_12345_DMR_GROUP_TGT_9_SRC_2301234.wav",
+			"id": "dsd:0~20261016_141503_12345_P25_1A3_GROUP_TGT_9_SRC_2301234.wav",
 			"kind": "dsd-fme-call",
 			"decoderId": "dsd-main",
 			"discoveryId": null,
@@ -6930,7 +6930,7 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
 			"talkgroup": "9",
 			"source": "2301234",
 			"frequencyHz": null,
-			"key": "dsd~20261016_141503_12345_DMR_GROUP_TGT_9_SRC_2301234.wav",
+			"key": "dsd~20261016_141503_12345_P25_1A3_GROUP_TGT_9_SRC_2301234.wav",
 			"ownerDiscoveryId": null
 		}
 	],
@@ -6945,7 +6945,12 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
 		"total": 1,
 		"kept": 0,
 		"bytes": 288044,
-		"byKind": { "dsd-fme-call": 1, "scanner-dv": 0, "scanner-analog": 0 }
+		"byKind": {
+			"dsd-fme-call": 1,
+			"dv-call": 0,
+			"scanner-dv": 0,
+			"scanner-analog": 0
+		}
 	},
 	"truncatedBefore": null
 }
@@ -6959,8 +6964,13 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   unlike `id` it survives a renumbering of the dsd-fme directories.
   `ownerDiscoveryId` is the live discovery owning the folder (through merges),
   null when none does and for dsd-fme calls.
-- `activityEventId` is the Activity row linked to the recording (a dsd-fme
-  call's `call_end` row, a scanner analog recording's `recording-change` row;
+- `kind` `dv-call`: a digital voice call recording
+  ([DIGITAL-VOICE](DIGITAL-VOICE.md#call-recordings)). Its `id` is
+  `dsd:<n>~<name>` and its `key` `dsd~<name>`, as a dsd-fme call's;
+  `decoderId` is the decoder named in the file name, null when it is not a
+  current decoder. It is deleted like a dsd-fme call.
+- `activityEventId` is the Activity row linked to the recording (a dsd-fme or
+  `dv-call` call's `call_end` row, a scanner analog recording's `recording-change` row;
   `GET /api/activity/:eventId`), read at list time from memory; null when no
   row is known (no such row, the row was pruned, or Activity is off). Older
   cores omit it. See "Recording links" under Activity.
@@ -7734,6 +7744,22 @@ Which rows link:
 | dsd-fme call (a configured decoder's per-call file) | its `call_end` row (`decoder-reception`, `outputType: "call_end"`, a `callId` ref). A file dsd-fme finds after the call ended (`wavFileUpdate`) updates that row: never a row of its own |
 | scanner analog recording                            | one `recording-change` row, written when the scanner keeps the file for good (after any provisional hold). A file discarded at its finish or when its hold ends never gets a row         |
 | scanner digital voice (a probe's call file)         | not linked yet: the probe's call rows name no file of the catalogue                                                                                                                      |
+
+A dsd-fme per-call file is linked only to a call known clear: an encrypted
+call, or one whose encryption was never known, is never linked, so its audio
+never becomes playable. DMR per-call recordings are not listed, served,
+linked or recorded yet: `GET /api/recordings` lists no dsd-fme call file whose
+name says DMR (nor one whose name says no known protocol), its `file` route
+answers 404 for one, no Activity row links one (backfill included), and a
+dsd-fme decoder in `mode: dmr` is not asked for per-call files. A row linked
+to one before is unlinked by the link sweep below, as for a deleted file.
+Files dsd-fme already wrote stay on disk under the usual retention.
+Scanner DMR call files are not listed or served yet either: a probe's dsd-fme
+call file in a discovery's `dv` folder whose name says DMR (or no known
+protocol) is not in `GET /api/recordings`, answers 404 from
+`GET /api/scanner/recordings/:recordingId` and is not among an observation's
+`recordingIds`. `dv-call` files a core wrote before this change are not
+filtered by protocol: their names carry no protocol.
 
 A link goes when its file goes (pruned, deleted, retention, a removed
 discovery, removed by hand): once a complete catalogue has lacked the key on
