@@ -67,6 +67,7 @@ import {
 	NOISE_QUARANTINE,
 	NoiseQuarantine,
 	type NoiseQuarantineOptions,
+	PURGE_STOP_WAIT_MS,
 } from "./noise-quarantine.js"
 
 /** Test seam of the noise quarantine: its fs and bounds (root, logger and clock are the store's). */
@@ -848,8 +849,14 @@ export class EvidenceStore {
 	auditAnalog(): Promise<void> {
 		return this.analog?.audit() ?? Promise.resolve()
 	}
-	stopAnalog(): Promise<void> {
-		return this.analog?.stop() ?? Promise.resolve()
+	/**
+	 * Stops the analog operations, then waits for a running noise quarantine purge at most
+	 * PURGE_STOP_WAIT_MS (2 s): shutdown is never held longer; files a stopped purge leaves go
+	 * by the quarantine's age bound.
+	 */
+	async stopAnalog(): Promise<void> {
+		await (this.analog?.stop() ?? Promise.resolve())
+		await this.noiseQuarantine?.settledWithin(PURGE_STOP_WAIT_MS)
 	}
 
 	/**

@@ -16,8 +16,9 @@
  * size bound holds more than 2 weeks at that rate and NOISE_QUARANTINE_MAX_AGE_MS (7 days) bites
  * first. A measured file is at least 94 frames (about 3 s: 44 + 48 000 = 48 044 B), so 500 MiB holds
  * at most 524 288 000 / 48 044 ≈ 10 912 files: the NOISE_QUARANTINE_MAX_FILES (20 000) count bound
- * never applies before the size bound on such files; it caps one prune's listing (at most twice it
- * entries are read) and guards against a flood of small foreign files.
+ * never applies before the size bound on such files; it caps one prune's work (at most twice that
+ * many folder entries are examined, and one purge reads at most twice that many sidecars) and
+ * guards against a flood of small foreign files.
  *
  * Pruning runs after every quarantine write (in the background, never awaited by the move) and
  * at startup: files older than the age bound go first, then the oldest until the total and count
@@ -26,7 +27,11 @@
  * no WAV, or any entry that is neither a quarantined WAV nor its sidecar) are removed once older
  * than ORPHAN_GRACE_MS, so an admit between its move and its sidecar is never raced. One prune
  * runs at a time; a request meanwhile reruns once after it. A discovery's removal purges its
- * quarantined files (purgeDiscovery, read from the sidecars) in the background.
+ * quarantined files (purgeDiscovery, read from the sidecars) in the background: purges are
+ * batched like prunes (one sidecar scan at a time matches every discovery asked so far; ids asked
+ * meanwhile rerun it once), so a bulk removal costs one or two scans, not one per discovery. The
+ * store's analog stop waits for a running purge at most PURGE_STOP_WAIT_MS; files a stopped purge
+ * leaves are removed by the age bound.
  * Every error is logged (safeErrorFields, fixed text) and never fatal. A failed move leaves the
  * caller to delete the file (today's behaviour).
  */
@@ -66,6 +71,8 @@ export const NOISE_QUARANTINE_MAX_FILES = 20_000
 export const ORPHAN_GRACE_MS = 60 * 60 * 1000
 /** A sidecar larger than this is not read (ours are a few hundred bytes). */
 const MAX_SIDECAR_BYTES = 4096
+/** The longest the store's analog stop waits for a running purge (shutdown is never held longer). */
+export const PURGE_STOP_WAIT_MS = 2000
 const SAMPLE_RATE_HZ = 8000
 const DAY = /^\d{4}-\d{2}-\d{2}$/
 const OPERATION_ID =
@@ -199,7 +206,8 @@ export class NoiseQuarantine {
 	private readonly maxFiles: number
 	private pruning: Promise<void> | null = null
 	private rerun = false
-	private readonly purges = new Set<Promise<void>>()
+	private purging: Promise<void> | null = null
+	private readonly pendingPurge = new Set<string>()
 
 	constructor(private readonly opts: NoiseQuarantineOptions) {
 		this.dir = join(opts.root, NOISE_QUARANTINE_DIR)
@@ -332,12 +340,18 @@ export class NoiseQuarantine {
 		const days = await this.days()
 		const visited: string[] = []
 		const entries: Entry[] = []
-		// lstat calls per prune (entries and orphan checks), so a flooded folder stays bounded.
+		// Folder entries examined per prune (each costs at most two lstat calls: a WAV and its
+		// sidecar), so a flooded folder stays bounded.
 		const budget = this.maxFiles * 2
 		let scanned = 0
 		let orphans = 0
+		let exhausted = false
 		for (const day of days) {
-			if (scanned >= budget) break
+			// The budget spent: no further day folder is listed.
+			if (scanned >= budget) {
+				exhausted = true
+				break
+			}
 			visited.push(day)
 			const folder = join(this.dir, day)
 			const names = await this.list(folder)
@@ -347,7 +361,10 @@ export class NoiseQuarantine {
 				if (match) wavs.add(match[1]!)
 			}
 			for (const name of names) {
-				if (scanned >= budget) break
+				if (scanned >= budget) {
+					exhausted = true
+					break
+				}
 				scanned++
 				const path = join(folder, name)
 				const wav = WAV_NAME.exec(name)
@@ -381,6 +398,11 @@ export class NoiseQuarantine {
 				}
 			}
 		}
+		if (exhausted)
+			this.log.warn(
+				{ scanned, budget, days: days.length, visited: visited.length },
+				"Noise quarantine prune stopped at its entry budget",
+			)
 		entries.sort((a, b) => a.mtimeMs - b.mtimeMs || (a.id < b.id ? -1 : 1))
 		let total = entries.reduce((sum, e) => sum + e.bytes, 0)
 		let count = entries.length
@@ -425,34 +447,74 @@ export class NoiseQuarantine {
 	/**
 	 * Removes every quarantined file of a removed discovery: reads each sidecar (at most twice
 	 * the file bound) and deletes the matching WAV, then its sidecar (a crash in between leaves an
-	 * orphan sidecar, which the prune removes). Never throws; errors are logged. Runs in the
-	 * background of the removal (track it with `settled`).
+	 * orphan sidecar, which the prune removes). One scan runs at a time and matches every id
+	 * queued when it starts; ids queued meanwhile rerun it once. Never throws; errors are logged.
+	 * Runs in the background of the removal; resolves when a scan covering this id is done
+	 * (track every purge with `settled`).
 	 */
 	purgeDiscovery(discoveryId: string): Promise<void> {
-		const run = this.purgeOnce(discoveryId).catch((err: unknown) => {
-			this.log.warn(safeErrorFields(err), "Noise quarantine purge failed")
+		if (!DISCOVERY_ID.test(discoveryId))
+			return this.purging ?? Promise.resolve()
+		this.pendingPurge.add(discoveryId)
+		if (this.purging) return this.purging
+		const run = async (): Promise<void> => {
+			while (this.pendingPurge.size > 0) {
+				const ids = new Set(this.pendingPurge)
+				this.pendingPurge.clear()
+				try {
+					await this.purgeOnce(ids)
+				} catch (err) {
+					this.log.warn(safeErrorFields(err), "Noise quarantine purge failed")
+				}
+			}
+		}
+		this.purging = run().finally(() => {
+			this.purging = null
 		})
-		this.purges.add(run)
-		void run.finally(() => this.purges.delete(run))
-		return run
+		return this.purging
 	}
 
-	/** Resolves when every purge started so far is done (tests, shutdown). */
+	/** Resolves when every purge asked so far is done (tests, shutdown). */
 	async settled(): Promise<void> {
-		await Promise.all([...this.purges])
+		while (this.purging) await this.purging
 	}
 
-	private async purgeOnce(discoveryId: string): Promise<void> {
-		if (!DISCOVERY_ID.test(discoveryId)) return
+	/**
+	 * Waits for `settled` at most `ms` (the store's analog stop); true when every purge is done.
+	 * A purge still running carries on in the background.
+	 */
+	async settledWithin(ms: number = PURGE_STOP_WAIT_MS): Promise<boolean> {
+		let timer: NodeJS.Timeout | undefined
+		const timeout = new Promise<false>(resolve => {
+			timer = setTimeout(() => resolve(false), ms)
+			timer.unref()
+		})
+		try {
+			return await Promise.race([this.settled().then(() => true), timeout])
+		} finally {
+			clearTimeout(timer)
+		}
+	}
+
+	private async purgeOnce(discoveryIds: ReadonlySet<string>): Promise<void> {
 		const budget = this.maxFiles * 2
 		let read = 0
 		let purged = 0
+		let exhausted = false
 		for (const day of await this.days()) {
+			// The budget spent: no further day folder is listed.
+			if (read >= budget) {
+				exhausted = true
+				break
+			}
 			const folder = join(this.dir, day)
 			for (const name of await this.list(folder)) {
 				const side = JSON_NAME.exec(name)
 				if (!side) continue
-				if (read >= budget) break
+				if (read >= budget) {
+					exhausted = true
+					break
+				}
 				read++
 				const path = join(folder, name)
 				try {
@@ -461,7 +523,7 @@ export class NoiseQuarantine {
 					const parsed = NoiseQuarantineSidecarSchema.safeParse(
 						JSON.parse((await this.fs.readFile(path)).toString("utf8")),
 					)
-					if (!parsed.success || parsed.data.discoveryId !== discoveryId)
+					if (!parsed.success || !discoveryIds.has(parsed.data.discoveryId))
 						continue
 					await this.fs
 						.unlink(join(folder, `${side[1]!}.wav`))
@@ -481,7 +543,15 @@ export class NoiseQuarantine {
 				}
 			}
 		}
+		if (exhausted)
+			this.log.warn(
+				{ read, budget, discoveries: discoveryIds.size },
+				"Noise quarantine purge stopped at its sidecar budget",
+			)
 		if (purged > 0)
-			this.log.info({ purged }, "Noise quarantine purged a removed discovery")
+			this.log.info(
+				{ purged, discoveries: discoveryIds.size },
+				"Noise quarantine purged removed discoveries",
+			)
 	}
 }

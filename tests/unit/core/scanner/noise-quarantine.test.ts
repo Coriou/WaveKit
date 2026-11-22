@@ -399,6 +399,148 @@ describe("noise quarantine purge of a removed discovery", () => {
 		await expect(q.purgeDiscovery(id.discoveryId)).resolves.toBeUndefined()
 		expect(existsSync(join(q.dir, DAY, `${id.operationId}.wav`))).toBe(true)
 	})
+
+	it("200 removals in a row cost at most 2 sidecar scans; theirs go, others stay", async () => {
+		const root = await tempRoot()
+		let rootReads = 0
+		let sidecarReads = 0
+		const q: NoiseQuarantine = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			fs: {
+				...nodeNoiseQuarantineFs,
+				readdir: async path => {
+					if (path === q.dir) rootReads++
+					return nodeNoiseQuarantineFs.readdir(path)
+				},
+				readFile: async path => {
+					sidecarReads++
+					return nodeNoiseQuarantineFs.readFile(path)
+				},
+			},
+		})
+		const removed = Array.from({ length: 200 }, (_, i) => `d_RM${i}`)
+		const purgedIds = [removed[0]!, removed[57]!, removed[199]!]
+		const mine = purgedIds.map(discoveryId => ({ ...ids(), discoveryId }))
+		const others = [
+			{ ...ids(), discoveryId: "d_KEEP1" },
+			{ ...ids(), discoveryId: "d_KEEP2" },
+		]
+		for (const id of [...mine, ...others]) {
+			const source = join(root, `${id.operationId}.part`)
+			await part(source, 100)
+			expect(await q.admit(source, id, facts)).toBe(true)
+		}
+		await q.prune()
+		rootReads = 0
+		sidecarReads = 0
+		const runs = removed.map(id => q.purgeDiscovery(id))
+		await q.settled()
+		await Promise.all(runs)
+		expect(rootReads).toBeLessThanOrEqual(2)
+		expect(sidecarReads).toBeLessThanOrEqual(2 * (mine.length + others.length))
+		const folder = join(q.dir, DAY)
+		for (const id of mine) {
+			expect(existsSync(join(folder, `${id.operationId}.wav`))).toBe(false)
+			expect(existsSync(join(folder, `${id.operationId}.json`))).toBe(false)
+		}
+		for (const id of others) {
+			expect(existsSync(join(folder, `${id.operationId}.wav`))).toBe(true)
+			expect(existsSync(join(folder, `${id.operationId}.json`))).toBe(true)
+		}
+	})
+
+	it("an id asked during a scan reruns it once and settled waits for the rerun", async () => {
+		const root = await tempRoot()
+		let rootReads = 0
+		let armed = false
+		let release: () => void = () => undefined
+		const gate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		const q: NoiseQuarantine = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			fs: {
+				...nodeNoiseQuarantineFs,
+				readdir: async path => {
+					if (path === q.dir && armed && ++rootReads === 1) await gate
+					return nodeNoiseQuarantineFs.readdir(path)
+				},
+			},
+		})
+		const late = { ...ids(), discoveryId: "d_LATE" }
+		const source = join(root, `${late.operationId}.part`)
+		await part(source, 100)
+		expect(await q.admit(source, late, facts)).toBe(true)
+		await q.prune()
+		armed = true
+		void q.purgeDiscovery("d_FIRST")
+		await new Promise(resolve => setImmediate(resolve))
+		void q.purgeDiscovery("d_LATE")
+		void q.purgeDiscovery("d_LATE2")
+		const done = q.settled()
+		release()
+		await done
+		expect(rootReads).toBe(2)
+		expect(existsSync(join(q.dir, DAY, `${late.operationId}.wav`))).toBe(false)
+	})
+
+	it("settledWithin gives up after its bound while a purge hangs", async () => {
+		const root = await tempRoot()
+		let release: () => void = () => undefined
+		const gate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		const q = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			fs: {
+				...nodeNoiseQuarantineFs,
+				readdir: async path => {
+					await gate
+					return nodeNoiseQuarantineFs.readdir(path)
+				},
+			},
+		})
+		const run = q.purgeDiscovery("d_HANG")
+		const started = Date.now()
+		expect(await q.settledWithin(50)).toBe(false)
+		expect(Date.now() - started).toBeLessThan(2000)
+		release()
+		await run
+		expect(await q.settledWithin(50)).toBe(true)
+	})
+
+	it("a purge whose sidecar budget runs out lists no further day folder", async () => {
+		const root = await tempRoot()
+		const listed: string[] = []
+		const q: NoiseQuarantine = new NoiseQuarantine({
+			root,
+			logger,
+			now: () => NOW,
+			maxFiles: 1,
+			fs: {
+				...nodeNoiseQuarantineFs,
+				readdir: async path => {
+					listed.push(path)
+					return nodeNoiseQuarantineFs.readdir(path)
+				},
+			},
+		})
+		for (const day of ["2026-11-20", "2026-11-21", "2026-11-22"]) {
+			const folder = join(q.dir, day)
+			await mkdir(folder, { recursive: true })
+			for (let i = 0; i < 2; i++)
+				await writeFile(join(folder, `${randomUUID()}.json`), "{}")
+		}
+		await q.purgeDiscovery("d_NONE")
+		// Budget 2 sidecars: the first folder spends it, the others are never listed.
+		expect(listed).toEqual([q.dir, join(q.dir, "2026-11-20")])
+	})
 })
 
 describe("noise quarantine admit", () => {
