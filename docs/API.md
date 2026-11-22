@@ -7745,6 +7745,10 @@ Which rows link:
 | scanner analog recording                            | one `recording-change` row, written when the scanner keeps the file for good (after any provisional hold). A file discarded at its finish or when its hold ends never gets a row         |
 | scanner digital voice (a probe's call file)         | not linked yet: the probe's call rows name no file of the catalogue                                                                                                                      |
 
+A dsd-fme per-call file is linked only to a call known clear: an encrypted
+call, or one whose encryption was never known, is never linked, so its audio
+never becomes playable.
+
 A link goes when its file goes (pruned, deleted, retention, a removed
 discovery, removed by hand): once a complete catalogue has lacked the key on
 two sweeps at least 90 s apart (sweeps every 60 s), the row loses `recording`

@@ -4651,6 +4651,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			attempt++
 
 			// Search all directories
+			// The late link is admitted on the same rule as the end's own.
+			if (!this.recordingLinkable(call)) {
+				if (call.protocol === "dmr") this.dmrClearance.ended(call.callId)
+				return
+			}
 			for (const dir of dirsToSearch) {
 				const wavFile = this.searchForWavFile(call, callEndTime, dir)
 				if (wavFile) {
@@ -4823,6 +4828,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}
 
 	/**
+	 * Recording admission: whether a call's recording may be linked to it
+	 * (and so become playable). Only a call known clear: a DMR call whose
+	 * clearance is clear, any other protocol's call that is not encrypted
+	 * and whose encryption is not unknown. A future admission check (squelch,
+	 * SNR, voice activity) belongs here too, after this privacy rule.
+	 */
+	private recordingLinkable(call: DsdFmeCallState): boolean {
+		if (call.protocol === "dmr")
+			return this.dmrClearance.trust(call.callId) === "clear"
+		return !call.flags.encrypted && call.encryptionKnown !== false
+	}
+
+	/**
 	 * Ends the current call and returns a call_end event.
 	 * Generates expected WAV filename if per-call recording is enabled.
 	 */
@@ -4874,13 +4892,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (!announced)
 			this.emitOutput(this.callStartEvent(callInfo, callInfo.startTime))
 
-		// A call that ended before its encryption was known is never linked to
-		// a recording: its audio may be encrypted voice.
-		const trust = this.dmrClearance.trust(callInfo.callId)
-		const linkable =
-			callInfo.protocol === "dmr"
-				? trust === "clear" || trust === "encrypted"
-				: callInfo.encryptionKnown !== false
+		// Only a call known clear is linked to a recording: one that ended
+		// before its encryption was known, or known encrypted, never is (its
+		// audio is restricted and must never become playable).
+		const linkable = this.recordingLinkable(callInfo)
 		// Try to find the WAV file immediately
 		const wavFile = linkable ? this.findWavFile(callInfo, endTime) : undefined
 
