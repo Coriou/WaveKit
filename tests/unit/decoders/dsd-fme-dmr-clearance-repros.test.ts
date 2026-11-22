@@ -749,7 +749,7 @@ describe("dsd-fme DMR clearance repro corpus", () => {
 			expect(trace.pubs.some(clear)).toBe(true)
 		})
 
-		it("the muted call's end closes the context: the lane's next call still goes clear", () => {
+		it("the muted call's end does not close the context: the lane's next call stays muted", () => {
 			const trace = expectAuthorized([
 				...proof([
 					[0, B1("PI")],
@@ -766,10 +766,208 @@ describe("dsd-fme DMR clearance repro corpus", () => {
 			])
 			const ids = [...new Set(trace.pubs.map(p => p.callId))]
 			expect(ids.length).toBeGreaterThanOrEqual(2)
-			expect(trace.pubs.filter(p => p.callId === ids[0] && clear(p))).toEqual(
-				[],
+			// The PI burst's ALG names no key: it taints every call of the
+			// lane's context, which only silence or a restart ends.
+			expect(trace.pubs.filter(clear)).toEqual([])
+		})
+	})
+
+	describe("privacy across a lane context", () => {
+		const alg = " SLOT 1 ALG ID: 21; KEY ID: 05; "
+		const encryptedHeader =
+			" SLOT 1 TGT=9001 SRC=91 Group Call Encrypted (CRC ERR) "
+		/** The idle closer: privacy, the lane's clean idle burst, then a clean call. */
+		const idleCloser = (
+			lead: "pi" | "header",
+			sync: (k: string) => string,
+			slco: boolean,
+		): Item[] => {
+			const bs = sync === B1
+			const items: Item[] = [
+				[0, sync(lead === "pi" ? "PI" : "VLC")],
+				[1, lead === "pi" ? alg : encryptedHeader],
+				[30, sync("IDLE")],
+				[60, sync("VC1")],
+				[120, sync("VC2")],
+				[121, LC()],
+				[180, sync("VC3")],
+				[240, sync("VC4")],
+			]
+			if (slco) items.push([31, SLCO_NULL])
+			if (bs) items.push([45, B2("IDLE")], [90, B2("IDLE")], [150, B2("IDLE")])
+			return items
+		}
+		for (const lead of ["pi", "header"] as const)
+			for (const [mode, sync] of [
+				["repeater", B1],
+				["direct", M],
+			] as const)
+				for (const slco of [false, true])
+					it(`1: a clean idle burst does not end ${lead === "pi" ? "a PI burst's ALG" : "an encrypted header"} (${mode}${slco ? ", then SLCO NULL" : ""})`, () => {
+						expectNeverClear(idleCloser(lead, sync, slco))
+					})
+
+		/** A rival talker's name, then a privacy print for the original key while it is live. */
+		const rivalKeyed = (privacy: string): Item[] => [
+			[0, B1("VC1")],
+			[60, B1("VC2")],
+			[61, LC("", 9002, 92)],
+			[120, B1("VC3")],
+			[121, privacy],
+			[180, B1("VC4")],
+			[181, LC()],
+			[240, B1("VC5")],
+			[241, LC()],
+			[300, B1("VC6")],
+			[301, LC()],
+			[360, B1("VC1")],
+		]
+		for (const [name, privacy] of [
+			["Encrypted", " SLOT 1 TGT=9001 SRC=91 Group Call Encrypted "],
+			["CRC", " SLOT 1 TGT=9001 SRC=91 Group Call Encrypted (CRC ERR) "],
+			["SVC", " SLOT 1 TGT=9001 SRC=91 SVC=0x40 Group Call (CRC ERR) "],
+		] as const)
+			it(`2: a keyed privacy print taints its key even while another call is live (${name})`, () => {
+				expectNotClearFrom(rivalKeyed(privacy), 5)
+			})
+
+		/** Privacy, a protocol or BS/MS bump, then a clean call. */
+		const modeBump = (bump: Item, after = B1): Item[] => [
+			[0, B1("PI")],
+			[1, alg],
+			bump,
+			[60, after("VC1")],
+			[120, after("VC2")],
+			[121, LC()],
+			[180, after("VC3")],
+			[240, after("VC4")],
+		]
+		const bumps: [string, Item[]][] = [
+			["another protocol", modeBump([30, DSTAR])],
+			["a direct-mode burst between", modeBump([30, M("VC*")])],
+			["a direct-mode call after it", modeBump([30, M("VC*")], M)],
+			["another protocol, then a direct-mode call", modeBump([30, DSTAR], M)],
+		]
+		for (const [name, items] of bumps)
+			it(`3: a mode bump does not end privacy (${name})`, () => {
+				expectNeverClear(items)
+			})
+
+		it("the oracle rejects a forged clear in each family", () => {
+			const forgedFor = (items: Item[], line: number) => {
+				const trace = replay(items)
+				const id = trace.pubs.find(
+					p => p.talkgroup === 9001 && p.seq >= line,
+				)?.callId
+				expect(id).toBeDefined()
+				return trace.oracle.judge({
+					...forged(trace, trace.lines + 0.3, id),
+					talkgroup: 9001,
+					source: 91,
+				})
+			}
+			expect(forgedFor(idleCloser("pi", B1, false), 1)).not.toBeNull()
+			expect(
+				forgedFor(
+					rivalKeyed(" SLOT 1 TGT=9001 SRC=91 Group Call Encrypted "),
+					6,
+				),
+			).not.toBeNull()
+			for (const [, items] of bumps) expect(forgedFor(items, 1)).not.toBeNull()
+		})
+
+		it("the oracle carries a slot's privacy across another protocol into direct mode", () => {
+			/**
+			 * The oracle alone, on the script's lines: one direct-mode call born on
+			 * its first voice sync (line 4, adapter lane 0), a clear claimed on the
+			 * last line.
+			 */
+			const verdict = (items: Item[]) => {
+				const oracle = new CallOracle()
+				items.forEach(([at, text], i) => {
+					oracle.line(i + 1, at, text)
+					if (i + 1 === 4) oracle.born("c1", 4.25, 0)
+				})
+				return oracle.judge({
+					callId: "c1",
+					seq: items.length + 0.25,
+					talkgroup: 9001,
+					source: 91,
+					encrypted: false,
+					encryptionKnown: true,
+					hasField: true,
+				})
+			}
+			const tainted = modeBump([30, DSTAR], M)
+			// Control: the same script with a neutral line for the ALG print is clear.
+			const control = tainted.map(
+				([at, text]): Item => [at, text === alg ? SLCO_NULL : text],
 			)
-			expect(trace.pubs.some(p => p.callId !== ids[0] && clear(p))).toBe(true)
+			expect(verdict(control)).toBeNull()
+			expect(verdict(tainted)).toBe("privacy print in the lane's context")
+		})
+	})
+
+	describe("proof kinds", () => {
+		const ALG00 = " SLOT 1 ALG ID: 00; KEY ID: 00; "
+		/** An encrypted call, then an unnamed one proven only by a clear ALG and named by its trailer. */
+		const keyedAfterEncrypted = (trailer: string, sync = B1): Item[] => [
+			[0, sync("VLC")],
+			[1, LC("Encrypted")],
+			[60, sync("VC1")],
+			[120, sync("TLC")],
+			[121, LC("Encrypted")],
+			[180, sync("IDLE")],
+			[300, sync("VC1")],
+			[360, sync("VC2")],
+			[361, ALG00],
+			[420, sync("VC3")],
+			[480, sync("VC4")],
+			[540, sync("TLC")],
+			[541, trailer],
+			[600, sync("IDLE")],
+		]
+
+		it("A1: a trailer naming an encrypted key never makes an ALG-proven call clear", () => {
+			expectNeverClear(keyedAfterEncrypted(LC()))
+		})
+
+		it("A2: nor does a DMR Voice trailer", () => {
+			expectNeverClear(keyedAfterEncrypted(DMR_VOICE))
+		})
+
+		it("A5: the same on the direct channel", () => {
+			expectNeverClear(keyedAfterEncrypted(LC(), M))
+		})
+
+		it("A0: a clear ALG is not keyed to the call: its trailer name alone never settles clear", () => {
+			expectNeverClear([
+				[0, B1("VC1")],
+				[60, B1("VC2")],
+				[61, ALG00],
+				[120, B1("VC3")],
+				[180, B1("VC4")],
+				[240, B1("TLC")],
+				[241, LC()],
+				[300, B1("IDLE")],
+			])
+		})
+
+		it("C1: bracketless syncs keep every lane's privacy context alive", () => {
+			const items: Item[] = [
+				[0, B1("PI")],
+				[1, " SLOT 1 ALG ID: 21; KEY ID: 05; "],
+			]
+			for (let i = 0; i < 70; i++)
+				items.push([60 + i * 60, X(`VC${(i % 6) + 1}`)])
+			items.push(
+				[4300, B1("VC1")],
+				[4360, B1("VC2")],
+				[4361, LC()],
+				[4420, B1("VC3")],
+				[4480, B1("VC4")],
+			)
+			expectNeverClear(items)
 		})
 	})
 })

@@ -126,6 +126,55 @@ describe("catalogue links to Activity", () => {
 		expect(ops).toEqual([{ type: "unlink", recordingIds: [`dsd~${DMR}`] }])
 	})
 
+	it("an old DMR link goes even while a configured directory is missing (the dv call recorder's, never created)", async () => {
+		const { a, b } = await callDirs()
+		const DMR = "20261012_100001_12345_DMR_CC_1_GROUP_TGT_9_SRC_1.wav"
+		const file = join(a, DMR)
+		await writeFile(file, Buffer.alloc(64))
+		const old = (Date.now() - 60_000) / 1000
+		await utimes(file, old, old)
+		// The recorder's directory is created only when it starts (it had no call tap here).
+		const dvCalls = join(b, "dv-calls")
+		const DV = "20261012_100002_12346_dsd-a_GROUP_TGT_9_SRC_3.wav"
+		const inv = createRecordingInventory({
+			dsdFmeDirs: () => [
+				{ decoderId: "dsd-a", dir: a },
+				{ decoderId: "dsd-b", dir: b },
+				{ decoderId: "dv-calls", dir: dvCalls, kind: "dv-call" },
+			],
+			dvCallDecoderIds: () => ["dsd-a"],
+			scannerRecordingsDir: () => null,
+			logger,
+		})
+		closers.push(() => inv.close?.())
+		await inv.start?.()
+		// A missing directory may hold any servable dsd~ name: those stay unknown.
+		expect(inv.hasKey?.(`dsd~${NAME}`)).toBeNull()
+		expect(inv.hasKey?.(`dsd~${DV}`)).toBeNull()
+		// No source serves a dsd-fme DMR name while DMR recordings are off.
+		expect(inv.hasKey?.(`dsd~${DMR}`)).toBe(false)
+		// Neither a TEMP name nor a name that is no call name is claimed gone.
+		expect(inv.hasKey?.(`dsd~TEMP_${DMR}`)).toBeNull()
+		const ops: ActivityLinkOp[] = []
+		const links = wireRecordingLinks({
+			links: {
+				admitRecording: () => undefined,
+				link: op => ops.push(op),
+				recordingEventId: () => null,
+				linkedRecordings: () => [`dsd~${DMR}`, `dsd~${NAME}`, `dsd~${DV}`],
+				onLinks: () => () => undefined,
+			},
+			catalogue: inv,
+			logger,
+			sweepMs: 3_600_000,
+			missingMs: 0,
+		})
+		closers.push(() => links.close())
+		links.sweep()
+		links.sweep()
+		expect(ops).toEqual([{ type: "unlink", recordingIds: [`dsd~${DMR}`] }])
+	})
+
 	it("hasKey cannot tell while a refresh runs, nor after a pass that met a directory error", async () => {
 		const { a, b } = await callDirs()
 		let dirs = [

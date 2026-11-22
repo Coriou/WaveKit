@@ -286,6 +286,8 @@ export interface RecordingInventory {
 	 * (folders are dropped and re-indexed), after a pass that met a source or directory error,
 	 * while files are left out (a bound reached, or lifted until the next pass re-adds them), and,
 	 * for a `dsd~` key, while a configured dsd-fme directory is missing (not created, unmounted).
+	 * False at once for a `dsd~` dsd-fme call name the recording gate refuses (a DMR call while
+	 * DMR recordings are off): no source serves it, so no folder state can make it present.
 	 */
 	hasKey?(key: string): boolean | null
 	/** Writers: these discoveries' folders changed (finalize, delete, retention). */
@@ -505,6 +507,19 @@ function isCallKind(kind: RecordingInventoryKind): boolean {
  */
 function callFileServable(kind: RecordingInventoryKind, name: string): boolean {
 	return kind !== "dsd-fme-call" || dsdFmeCallRecordable(name)
+}
+
+/**
+ * A `dsd~` key's name that no source may serve: a dsd-fme call name (never TEMP) the gate
+ * refuses in a dsd-fme directory (callFileServable), and not in the dv call recorder's name
+ * shape (dvCallDecoderField: that directory serves its own names, whichever decoder they name).
+ */
+function dsdNameRefused(name: string): boolean {
+	return (
+		dsdId(0, name) !== null &&
+		!callFileServable("dsd-fme-call", name) &&
+		dvCallDecoderField(name) === null
+	)
 }
 
 /** A dsd-fme call name the inventory lists (never TEMP), as `dsd:<n>~<name>`. */
@@ -1224,11 +1239,8 @@ export function createRecordingInventory(
 		}
 	}
 
-	/** Every folder to index: dsd-fme directories, then scanner folders newest change first. */
-	async function deriveFolders(
-		counts: Counts,
-		report?: { foldersTruncated: boolean },
-	): Promise<FolderSpec[]> {
+	/** The dsd sources' folders only (dsd-fme and dv call directories): no scanner walk. */
+	async function dsdFolders(counts: Counts): Promise<FolderSpec[]> {
 		const out: FolderSpec[] = []
 		for (const [n, source] of (await dsdSources(counts)).entries()) {
 			out.push({
@@ -1244,6 +1256,15 @@ export function createRecordingInventory(
 				mtimeMs: Number.POSITIVE_INFINITY,
 			})
 		}
+		return out
+	}
+
+	/** Every folder to index: dsd-fme directories, then scanner folders newest change first. */
+	async function deriveFolders(
+		counts: Counts,
+		report?: { foldersTruncated: boolean },
+	): Promise<FolderSpec[]> {
+		const out = await dsdFolders(counts)
 		const base = await scannerBase(counts)
 		const scanner: FolderSpec[] = []
 		let truncatedHere = false
@@ -2057,8 +2078,10 @@ export function createRecordingInventory(
 	/**
 	 * A call ended: re-read only that decoder's dsd-fme directory and check only names not
 	 * indexed yet that are at least as new as the newest one indexed (names start with the date
-	 * and time), plus none other: one directory read and one lstat per new call. An unknown
-	 * decoder (no indexed directory yet) re-derives the dsd-fme directories once.
+	 * and time), plus none other: one directory read and one lstat per new call. A decoder with
+	 * no indexed dsd-fme directory (not created yet, DMR-mode dsd-fme, dv-recorder-only decoders)
+	 * re-derives the dsd sources only (one realpath check per configured source, never the
+	 * scanner walk) on each of its call ends, so a directory created since is indexed.
 	 */
 	async function refreshCalls(
 		decoderIds: ReadonlySet<string> | null,
@@ -2076,14 +2099,12 @@ export function createRecordingInventory(
 				.filter(st => st.spec.kind === "dsd-fme-call")
 				.map(st => st.spec.decoderId),
 		)
-		// A decoder with no dsd-fme directory of its own is covered by an indexed dv-call one.
-		const dvIndexed = states.some(st => st.spec.kind === "dv-call")
+		// A decoder with no indexed dsd-fme directory re-derives them, even with the dv call
+		// recorder's directory indexed: that one never stands for a decoder's own directory.
 		const missing =
-			decoderIds === null || dvIndexed
-				? []
-				: [...decoderIds].filter(d => !known.has(d))
+			decoderIds === null ? [] : [...decoderIds].filter(d => !known.has(d))
 		if (missing.length > 0 || states.length === 0) {
-			const specs = (await deriveFolders(counts)).filter(wanted)
+			const specs = (await dsdFolders(counts)).filter(wanted)
 			await Promise.all(
 				specs
 					.filter(sp => !folders.has(sp.key))
@@ -2436,6 +2457,10 @@ export function createRecordingInventory(
 		},
 
 		hasKey(key) {
+			// A dsd-fme call name the gate refuses (DMR while DMR recordings are off) is served by
+			// no source, whatever a missing directory or a running pass holds: its link may go.
+			if (key.startsWith("dsd~") && dsdNameRefused(key.slice("dsd~".length)))
+				return false
 			if (
 				!built ||
 				!lastPassClean ||

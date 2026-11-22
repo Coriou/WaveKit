@@ -114,8 +114,12 @@ probes). It records whether or not anyone is listening.
   `DMR_`), or no known protocol, is not listed in Recordings, cannot be
   downloaded and is never linked to its Activity row; a dsd-fme decoder in
   `mode: dmr` is not asked for per-call files at all. An Activity row linked to
-  one earlier loses that link within a few minutes. Files dsd-fme already
-  wrote stay on disk under the usual retention.
+  one earlier shows no play control, and its link is removed by the next
+  link sweeps (about 2 min), even while another recordings folder is missing.
+  That removal is permanent: once DMR recordings are listed again, rows
+  unlinked this way (DMR files, and files whose name says no known protocol)
+  do not get their link back. Files dsd-fme already wrote stay on disk under
+  the usual retention.
 - **About 2 s behind the air.** Each sample is held for 2 s before it is
   written, so a late encryption notice can still withhold it. The call's end
   also reaches the recorder up to 10 s after the decoder reported it.
@@ -194,6 +198,36 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   present and not `true`, and admits it once the call is known clear. A scanner
   probe records such a call as encrypted, never as a clear recording. Noise
   syncs that start a DMR call leave it unknown, so it stays muted.
+- **Every DMR call is published**: whether a call is clear or encrypted sets
+  only `encrypted`, `encryptionKnown` and its recording, never whether its
+  `call_start` / `call_end` (with talkgroup, source, slot and times) exist. An
+  over whose voice dsd-fme did not decode but whose terminator link control it
+  did (a weak repeater, or a capture that opens on a transmission's end) is
+  still a call, with `encryptionKnown: false`; a repeater's hang train after a
+  call is that call, not new ones. One over is one call, and each separate
+  over is its own:
+  - A call known only from its terminator train runs from the train's first
+    checked link control to its last one of the same talkgroup and source;
+    another talker's link controls never extend it.
+  - A direct (MS/DM) radio has no hang: its train lasts while copies follow
+    each other within 700 ms (one 360 ms superframe plus one 340 ms line
+    clump). The same talker's terminators after a longer pause are its next
+    over, and another talker's single checked copy on a clean sync is that
+    talker's call.
+  - On a repeater, another talker inside a train needs two agreeing copies
+    within 700 ms; the call starts at the first one. A slot that prints two
+    checked idle bursts in a row has ended its train: the same talker's
+    terminators after that are a new over.
+  - A train link control after a terminator sync that printed an error starts
+    nothing on its own; a second agreeing copy within 700 ms starts the call
+    from the first.
+  - A call that started on its voice frames alone and whose terminator's own
+    link control failed its check still takes its talkgroup and source from the
+    terminator's next checked copy.
+  - A privacy print (an encrypted link control, a PI burst, an ALG or KEY ID
+    print) is never the evidence that announces an unnamed call: such a call
+    is announced on its frames' own evidence (a run of syncs) or a link
+    control naming it, so removing every privacy print changes no call.
 - **Hold on the stream**: the digital voice stream (`/stream`,
   `/decoders/<id>/stream`) does not mute the head of such a call; it holds it.
   Its voice waits in a per-slot ring (slot 1, slot 2, and a whole-datagram
@@ -257,6 +291,21 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   channels are identical is silenced whole), and in mono or with the slot
   unknown whole datagrams are discarded. dsd-fme also mutes encrypted voice by
   default (it zero-fills the encrypted slot).
+- **DMR privacy over-mutes, on purpose**: a DMR privacy print (an
+  `Encrypted` link control, a non-zero `ALG ID`) mutes more than its own call,
+  failing closed. It taints its slot until the slot falls silent for longer
+  than the call timeout (or the decoder restarts), and the taint only widens:
+  - a privacy print that names no talkgroup and source (a PI burst's `ALG ID`)
+    mutes every later call on that slot, clear ones included, for as long as
+    the slot keeps carrier (idle bursts count);
+  - a privacy print that names a talkgroup and source also mutes a later clear
+    call of the same talkgroup and source within that hang time;
+  - a privacy link control whose ids are not plausible DMR ids names nothing,
+    so it mutes every later call on the slot, as a keyless print does;
+  - a slot whose taint names more than 256 talkgroup/source pairs mutes every
+    later call on it;
+  - a privacy print after a repeater sync with no slot bracket mutes both
+    slots, since the slot it prints may be stale.
 
 ## Spike: dsd-fme UDP format (2026-10-09)
 

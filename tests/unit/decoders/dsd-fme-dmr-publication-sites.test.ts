@@ -68,6 +68,8 @@ const OUTPUT_SITES = [
 	"parseOutput",
 	"parseOutput",
 	"handleSync",
+	"handleDmrTrainIds",
+	"handleDmrTrainIds",
 	"handleP25P1Line",
 	"findWavFileAsync",
 	"endCall",
@@ -98,6 +100,21 @@ describe("dsd-fme DMR publication sites (structural)", () => {
 		])
 		const link = fs.readFileSync("src/decoders/builtin/dsd-fme-link.ts", "utf8")
 		expect(link).not.toMatch(/encryptionKnown|callId/)
+	})
+
+	it("sets a call's IDs only in the binding, so its taint check always runs", () => {
+		// Plain, compound or logical assignment of any `.talkgroup` / `.source`
+		// member, and a bulk assignment that could carry them.
+		const pattern =
+			/\.\s*(?:talkgroup|source)\s*(?:\?\?|\|\||&&|[-+*/%|&^])?=(?!=)|\bObject\.assign\(|\bReflect\.set\(/g
+		const assigned = sites(pattern)
+		// The binding's own two assignments, and nothing else (no allowlist).
+		expect(assigned.filter(s => s.method !== "bindDmrCall")).toEqual([])
+		expect(assigned.map(s => s.method)).toEqual(["bindDmrCall", "bindDmrCall"])
+		// The scan sees every assignment form, and no comparison.
+		const probe =
+			"a.talkgroup = 1; b.source ??= 2; c.talkgroup === 3; d.source !== 4; Object.assign(e, f)"
+		expect([...probe.matchAll(pattern)].length).toBe(3)
 	})
 
 	it("reaches the output stream only through the gate", () => {
@@ -291,6 +308,33 @@ describe("dsd-fme DMR publication sites (behavioural)", () => {
 		h.at(420, M("VC*"))
 		expectGated(h.seen, "base:handleOutputLine", "call_start")
 		expectGated(h.seen, "applyDmrTrust", "voice-call")
+	})
+
+	it("another talker's trailer ends a held call at its terminator (handleDmrTrainIds)", () => {
+		const h = harness({ callStartDelayMs: 0 })
+		h.at(0, M("VC*"))
+		h.at(60, M("VC*"))
+		h.at(61, LC())
+		// An error line drops the naming proof: the call does not know it is clear.
+		h.at(62, " SLOT 1 FLCO FEC ERR  (FEC ERR)")
+		h.at(120, M("VC*"))
+		h.at(180, M("TLC"))
+		h.at(181, LC("", 9002, 92))
+		expectGated(h.seen, "handleDmrTrainIds", "call_end")
+		const ends = h.seen.filter(s => s.kind === "call_end")
+		expect(ends.map(e => e.data.talkgroup)).toEqual([9001])
+		// One copy inside the ended call's train is a rival only; a second
+		// agreeing copy is the next talker's call.
+		h.at(240, M("TLC"))
+		h.at(241, LC("", 9002, 92))
+		h.tick(5000)
+		// The next talker's train call publishes its IDs too, never known clear.
+		const last = h.seen.filter(s => s.kind === "call_end").at(-1)
+		expect(last?.data).toMatchObject({
+			talkgroup: 9002,
+			source: 92,
+			encryptionKnown: false,
+		})
 	})
 
 	it("the timer promotes a pending call and times it out (checkCallTimeoutAsync)", () => {

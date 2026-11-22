@@ -8,7 +8,8 @@
  * followed. The lifecycle supplies each call id, opening line and ending line.
  * An independent shadow ledger derives evidence from the raw lines
  * (it never calls the clearance module), checks each DMR publication:
- * (a) encryptionKnown is present; (b) when it says clear, a proof chain (link control after voice, naming link, voice header, terminator or clear algorithm)
+ * (a) encryptionKnown is present; (b) when it says clear, a proof chain (link control after voice, naming link, voice header or terminator;
+ * a clear ALG print names no key and is never proof)
  * of the current generation backs it, settled before the publication; (c)
  * no privacy print of the lane came before it in that chain's window; (d)
  * the settling line is a sync of the chain's own lane.
@@ -128,6 +129,72 @@ function auditPublications(decoder: ReturnType<typeof createDecoder>) {
 }
 
 /** Replays items (10 ms steps, the 500 ms timer), recording each publication's line seq. */
+/**
+ * The script with every privacy print removed (PI bursts, ALG / KEY ID
+ * prints; a link control keeps its IDs but loses the Encrypted word and the
+ * SVC privacy bit 0x40).
+ */
+function withoutPrivacy(items: readonly Item[]): Item[] {
+	const out: Item[] = []
+	for (const [t, raw] of items) {
+		const text = raw.replace(/\x1b\[[0-9;]*m/g, "")
+		if (/\|\s*PI\b/.test(text) || /\b(?:ALG ID|KEY ID)\b|\bDMR PI\b/.test(text))
+			continue
+		out.push([
+			t,
+			text
+				.replace(/\bEncrypted\s+/g, "")
+				.replace(/\bSVC=0x([0-9A-Fa-f]{2})\b/g, (_, hex: string) => {
+					const svc = parseInt(hex, 16) & ~0x40
+					return `SVC=0x${svc.toString(16).padStart(2, "0").toUpperCase()}`
+				}),
+		])
+	}
+	return out
+}
+
+/**
+ * The named calls a replay publishes (each call_end with TGT/SRC: its IDs
+ * and slot). An unnamed call-first call whose only evidence is a privacy
+ * print (hasEvidence: an encrypted print shows its frames are an over) is
+ * left out, as in the baseline lifecycle; every named call is compared.
+ */
+function publishedCalls(items: readonly Item[]) {
+	vi.setSystemTime(T0)
+	const decoder = createDecoder({ mode: "dmr" })
+	const internals = decoder as unknown as {
+		handleOutputLine(line: string): void
+		checkCallTimeoutAsync(): void
+		endOpenCallsForRestart(now: Date): void
+	}
+	const ends: string[] = []
+	decoder.on("output", (o: DecoderOutput) => {
+		const d = o.data as CallData
+		if (d.flags?.wavFileUpdate || o.type !== "call_end") return
+		if (d.talkgroup !== null || d.source !== null)
+			ends.push(`${d.talkgroup}/${d.source}/${d.slot ?? "-"}`)
+	})
+	const sorted = items
+		.map((item, index) => ({ item, index }))
+		.sort((a, b) => a.item[0] - b.item[0] || a.index - b.index)
+		.map(x => x.item)
+	const last = sorted.at(-1)?.[0] ?? 0
+	let index = 0
+	for (let now = 0; now <= last + 6000; now += 10) {
+		while (index < sorted.length && sorted[index]![0] <= now) {
+			const [atMs, text] = sorted[index]!
+			vi.setSystemTime(T0 + atMs)
+			if (text === RESTART)
+				internals.endOpenCallsForRestart(new Date(T0 + atMs))
+			else internals.handleOutputLine(text)
+			index++
+		}
+		vi.setSystemTime(T0 + now)
+		if (now % 500 === 0) internals.checkCallTimeoutAsync()
+	}
+	return ends
+}
+
 function replayTrace(items: Item[]) {
 	const decoder = createDecoder({ mode: "dmr" })
 	const internals = decoder as unknown as {
@@ -256,7 +323,7 @@ interface Shadow {
 	key: string | undefined
 	plausible: boolean
 	neutral: boolean
-	/** A clean clear-algorithm print (a proof of the lane's call). */
+	/** A clean clear-algorithm print: keyless, so never a proof of the lane's call. */
 	alg: boolean
 	/** The slot a repeater line printed, when it is not its burst's. */
 	printed: string | undefined
@@ -485,7 +552,7 @@ function ledger(items: Item[]): Omit<Shadow, "epochs">[] {
 interface Binding {
 	lane: string
 	epoch: number
-	/** The chain's link control (or clear algorithm) line: owned by one callId. */
+	/** The chain's link control line: owned by one callId. */
 	lcSeq: number
 }
 
@@ -532,7 +599,10 @@ function backed(
 			l.sync ||
 			l.errored ||
 			l.privacy ||
-			(!l.alg && (key === undefined || l.key !== key || !l.plausible)) ||
+			l.alg ||
+			key === undefined ||
+			l.key !== key ||
+			!l.plausible ||
 			l.generation !== genAt ||
 			!lanes.includes(l.lane)
 		)
@@ -579,13 +649,7 @@ function backed(
 				? undefined
 				: lines.find(x => x.atMs >= startedAtMs)?.seq
 		const callStart = life?.born ?? Math.min(laneStart, openedAt ?? laneStart)
-		if (
-			s.errored ||
-			!(l.alg ? ["vlc", "voice", "pi"] : ["vlc", "voice", "tlc"]).includes(
-				s.kind,
-			)
-		)
-			continue
+		if (s.errored || !["vlc", "voice", "tlc"].includes(s.kind)) continue
 		// The burst's first link control.
 		if (lane.some(x => x.key !== undefined && x.seq > s.seq && x.seq < l.seq))
 			continue
@@ -1165,7 +1229,7 @@ describe("dsd-fme DMR clearance oracle", () => {
 				])
 		})
 
-		it("a frames call is clear from its first clean voice LC (naming-link) or a clear ALG print", () => {
+		it("a frames call is clear from its first clean voice LC (naming-link), never from a clear ALG print", () => {
 			for (const proof of [LC(), " Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;"]) {
 				const items: Item[] = [
 					[0, BS(1, "VC1")],
@@ -1177,7 +1241,8 @@ describe("dsd-fme DMR clearance oracle", () => {
 					),
 				]
 				const pubs = run(items)
-				expect(everClear(pubs)).toBe(true)
+				// A clear ALG print names no key: it cannot be bound to the call.
+				expect(everClear(pubs)).toBe(proof.includes("TGT"))
 			}
 		})
 
@@ -1801,6 +1866,11 @@ describe("dsd-fme DMR clearance oracle", () => {
 						}
 					}
 					replayTrace(items)
+					// Privacy decides trust, never whether a call publishes: the
+					// same named calls with every privacy print removed.
+					expect(publishedCalls(withoutPrivacy(items))).toEqual(
+						publishedCalls(items),
+					)
 				},
 			),
 			{ numRuns: 200, seed: 20261117 },

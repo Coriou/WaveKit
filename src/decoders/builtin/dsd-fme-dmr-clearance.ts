@@ -24,21 +24,27 @@
  * - voice-header: a checked link control in a clean voice LC header burst,
  *   naming the call it opens (or its own key); settled by the next voice
  *   burst or header;
- * - terminator: a named call's own key in its clean terminator's trailer;
- * - clear-algorithm: a clean clear ALG print in a clean voice, header or PI
- *   burst of the lane's call.
+ * - terminator: a named call's own key in its clean terminator's trailer.
+ *
+ * Every proof is a keyed link control: a clear ALG / KEY ID print names no
+ * key, so it cannot be bound to the call and is never proof of clear (it is
+ * a non-neutral line: it drops a pending proof). Keyless evidence never
+ * settles clear.
  *
  * Any privacy field (Encrypted, an SVC privacy bit, a non-clear ALG, a
  * non-zero KEY ID) on any line of the lane makes the lane's call encrypted,
- * for good. Printed while the lane has no call (a privacy header or PI
- * burst before a call started on its voice frames), it stays pending on the
- * lane and the lane's next call opens encrypted, until the lane's context
- * closes: a mode generation bump (call timeout, BS/MS or protocol change,
- * restart), more than callTimeoutMs without a line of the lane, a clean
- * idle burst of the lane, or the checked first link control of a clean
- * voice header naming another key than every pending privacy print (only
- * when each print named a key: a keyless one, such as a PI burst's ALG,
- * waits for the other closes).
+ * for good, and taints the lane's context: a print naming a key (TGT/SRC,
+ * even with a CRC error) taints that key, one naming none (a PI burst's
+ * ALG) taints every key. The taint only widens; any call opened in, or
+ * named into, a tainted key of the lane's context (any call at all while
+ * it is tainted keyless) is encrypted from its start, whichever call was
+ * live when the print came. The context ends only after more than
+ * callTimeoutMs without a line of the lane, or on a decoder restart: a
+ * call's end or timeout, a clean idle burst, another protocol or a header
+ * naming another key never end it, and a BS/MS change carries the old
+ * mode's live contexts into the new mode's lanes. An unattributable print
+ * taints every lane, and a bracketless DMR sync counts as a line of every
+ * lane (it may be any lane's burst: it keeps every context alive).
  *
  * Over-muting, accepted: a privacy print after a repeater sync with no slot
  * bracket mutes both slots' calls (fail closed), because the SLOT it prints
@@ -50,6 +56,16 @@
 export const DMR_TALKGROUP_MAX = 0xffffff
 export const DMR_SOURCE_MAX = DMR_TALKGROUP_MAX - 800
 
+/**
+ * The most distinct `tg/src` keys one lane's taint holds. A key is at most 8 + 1 + 8 = 17
+ * characters (two 24-bit decimal ids), so a full set is about 256 × 17 ≈ 4.4 KB of key text per
+ * lane, four lanes at most. One context (calls of a slot without a silence over the call
+ * timeout) names a handful of talkgroups in practice; 256 distinct encrypted keys in one context
+ * is a flood, and past it the taint turns keyless (every call of the context muted, the set
+ * cleared): constant size, failing closed.
+ */
+export const DMR_TAINT_KEYS_MAX = 256
+
 export type DmrLane = "1" | "2" | "ms" | "x"
 export type DmrFormat = "bs" | "ms" | "x"
 export type DmrBurstKind = "vlc" | "voice" | "tlc" | "pi" | "other" | "bare"
@@ -58,7 +74,6 @@ export type DmrProofKind =
 	| "naming-link"
 	| "voice-header"
 	| "terminator"
-	| "clear-algorithm"
 export type DmrLaneTrust = "unknown" | "pending" | "clear" | "encrypted"
 
 /** A DMR sync line of a lane. */
@@ -99,7 +114,7 @@ export interface DmrOtherEvent {
 	lane: DmrLane
 	errored: boolean
 	privacy: boolean
-	/** The line, read for the neutral and clear-algorithm tests only when needed. */
+	/** The line, read for the neutral test only when needed. */
 	text: string
 	slot: "1" | "2" | undefined
 	/** A repeater line printing another slot than its burst's: no proof anywhere. */
@@ -166,6 +181,11 @@ interface LcSeen {
 interface CallRecord {
 	/** An unattributed burst bars proof for the rest of this lifetime. */
 	unplaced: boolean
+	/**
+	 * The adapter opened the call from a terminator train alone (no voice
+	 * decoded, voiceless): never cleared.
+	 */
+	voiceless: boolean
 	callId: string
 	key: string | null
 	firstVoiceSeq: number | undefined
@@ -187,20 +207,41 @@ interface CallRecord {
 	modeGeneration: number
 }
 
+interface Taint {
+	/** The keys privacy prints named in the lane's context. */
+	keys: Set<string>
+	/** A privacy print named no key: every call of the context is encrypted. */
+	keyless: boolean
+	/** The lane's latest line (or taint) time: the context ends after callTimeoutMs without one. */
+	lastAtMs: number | undefined
+}
+
+const emptyTaint = (): Taint => ({
+	keys: new Set(),
+	keyless: false,
+	lastAtMs: undefined,
+})
+
+/** Every key of the context is tainted: the key set is no longer needed. */
+function markKeyless(taint: Taint): void {
+	taint.keyless = true
+	taint.keys.clear()
+}
+
+/** Taints `key`; a set already at DMR_TAINT_KEYS_MAX turns the taint keyless instead. */
+function addTaintKey(taint: Taint, key: string): void {
+	if (taint.keyless || taint.keys.has(key)) return
+	if (taint.keys.size >= DMR_TAINT_KEYS_MAX) markKeyless(taint)
+	else taint.keys.add(key)
+}
+
 interface LaneState {
 	burst: Burst | undefined
 	lc: LcSeen | undefined
 	/** The line seq of the lane's latest privacy field (it mutes a call that line opens). */
 	privacySeq: number | undefined
-	/**
-	 * A privacy field printed while the lane had no call: the lane's next
-	 * call opens encrypted, until the lane's context closes.
-	 */
-	privacyPending: boolean
-	/** When the pending privacy was printed, or the lane's latest line since. */
-	privacyAtMs: number
-	/** The keys the pending privacy prints named; null once one named none. */
-	privacyKeys: string[] | null
+	/** The lane context's privacy: it only widens until the context ends. */
+	taint: Taint
 	call: CallRecord | undefined
 	modeGeneration: number
 }
@@ -246,11 +287,6 @@ const NEUTRAL: readonly RegExp[] = [
 /** A line that neither settles nor drops a pending proof (ask only of a clean line without privacy). */
 export function dmrLineNeutral(line: string): boolean {
 	return NEUTRAL.some(pattern => pattern.test(line))
-}
-
-/** A clear-algorithm print, ALG 00 or 80 (ask only of a clean line without privacy). */
-export function dmrLineClearAlg(line: string): boolean {
-	return ALG.test(line)
 }
 
 /** A line printed an error of its burst (the CACH short LC's own failure excepted). */
@@ -396,9 +432,7 @@ const emptyLane = (modeGeneration: number): LaneState => ({
 	burst: undefined,
 	lc: undefined,
 	privacySeq: undefined,
-	privacyPending: false,
-	privacyAtMs: 0,
-	privacyKeys: [],
+	taint: emptyTaint(),
 	call: undefined,
 	modeGeneration,
 })
@@ -412,6 +446,8 @@ export class DmrClearance {
 	private decoderGeneration = 0
 	private burstSeq = 0
 	private mode: "bs" | "ms" | undefined
+	/** The latest DMR mode, kept across other protocols: BS/MS changes carry privacy. */
+	private taintMode: "bs" | "ms" | undefined
 	private readonly lanes = new Map<DmrLane, LaneState>()
 
 	constructor(private readonly callTimeoutMs: number) {
@@ -455,7 +491,10 @@ export class DmrClearance {
 	restart(): void {
 		this.decoderGeneration++
 		this.mode = undefined
+		this.taintMode = undefined
 		this.resetMode()
+		// Only a restart ends every lane's privacy context.
+		for (const lane of this.lanes.values()) lane.taint = emptyTaint()
 	}
 
 	/** The adapter ended a lane's call on its call timeout. */
@@ -492,6 +531,21 @@ export class DmrClearance {
 		}
 	}
 
+	/**
+	 * The adapter opened `callId` from a terminator train alone: no voice
+	 * of it was decoded, so nothing proves it clear (it stays unknown, or
+	 * encrypted). Sticky for the call's lifetime.
+	 */
+	voiceless(callId: string): void {
+		for (const lane of this.lanes.values()) {
+			const call = lane.call
+			if (call?.callId !== callId) continue
+			call.voiceless = true
+			call.evidence = undefined
+			if (call.trust === "pending") call.trust = "unknown"
+		}
+	}
+
 	/** Invalidate the generation before any closing snapshots are published. */
 	private resetMode(): DmrDecision[] {
 		const out: DmrDecision[] = []
@@ -514,7 +568,6 @@ export class DmrClearance {
 		lane.burst = undefined
 		lane.lc = undefined
 		lane.privacySeq = undefined
-		this.closePrivacy(lane)
 		const call = lane.call
 		if (call?.trust === "pending") {
 			call.trust = "unknown"
@@ -546,6 +599,11 @@ export class DmrClearance {
 			}
 		}
 		if (event.lane === "x") {
+			// A bracketless sync's burst may be any lane's: every lane's context
+			// stays alive (fail closed).
+			if (event.type === "sync")
+				for (const key of LANES) this.touch(this.lane(key), atMs)
+			else this.touch(this.lane("x"), atMs)
 			this.onUnplaced(event, seq, atMs, out)
 			if (event.type === "sync") {
 				const lane = this.lane("x")
@@ -556,29 +614,38 @@ export class DmrClearance {
 		}
 		const lane = this.lane(event.lane)
 		// A lane silent for longer than the call timeout has closed its context.
-		if (lane.privacyPending) {
-			if (atMs - lane.privacyAtMs > this.callTimeoutMs) this.closePrivacy(lane)
-			else lane.privacyAtMs = atMs
-		}
+		this.touch(lane, atMs)
 		if (event.type === "sync") {
 			const mode = event.format === "bs" ? "bs" : "ms"
 			if (this.mode !== undefined && this.mode !== mode)
 				out.push(...this.resetMode())
 			this.mode = mode
+			// A BS/MS change keeps privacy: the old mode's live contexts carry over.
+			if (this.taintMode !== undefined && this.taintMode !== mode)
+				for (const [from, to] of mode === "ms"
+					? ([
+							["1", "ms"],
+							["2", "ms"],
+						] as const)
+					: ([
+							["ms", "1"],
+							["ms", "2"],
+						] as const))
+					this.carry(this.lane(from), this.lane(to), atMs)
+			this.taintMode = mode
 			this.settle(event, lane, seq, atMs, out)
 			lane.burst = this.newBurst(event)
 			lane.lc = undefined
 			const call = lane.call
 			if (event.burst === "voice" && call !== undefined)
 				call.firstVoiceSeq ??= lane.burst.seq
-			// A clean idle burst: the lane carries no call.
-			if (event.idle && event.clean && !event.privacy) this.closePrivacy(lane)
 			if (event.privacy) this.privacy(lane, seq, atMs, out)
 			return out
 		}
 		if (event.errored) this.dirty(lane)
 		const call = lane.call
-		const key = event.type === "lc" ? event.key : undefined
+		// An implausible key names no call: its privacy taints every key.
+		const key = event.type === "lc" && event.plausible ? event.key : undefined
 		if (event.privacy) this.privacy(lane, seq, atMs, out, key)
 		// Another slot's print: its privacy also mutes the slot it names (fail
 		// closed), and it proves nothing on either.
@@ -590,25 +657,13 @@ export class DmrClearance {
 		}
 		if (event.type === "line") {
 			// An errored line drops nothing more than dirty() did; the
-			// neutral and clear-algorithm tests run only for a call that may
-			// still gain or lose a proof, on a clean line without privacy.
-			if (
-				call === undefined ||
-				event.errored ||
-				event.privacy ||
-				(call.trust !== "pending" && call.trust !== "unknown")
-			)
+			// neutral test runs only for a pending proof, on a clean line
+			// without privacy.
+			if (call?.trust !== "pending" || event.errored || event.privacy)
 				return out
-			// A clean clear-algorithm print of a clean burst is the call's
-			// proof, settled like a link control.
-			if (dmrLineClearAlg(event.text)) {
-				this.drop(call)
-				this.armAlg(lane, call, seq, atMs)
-				return out
-			}
-			// Any other line but a neutral one drops a pending proof.
-			if (call.trust === "pending" && !dmrLineNeutral(event.text))
-				this.drop(call)
+			// Any line but a neutral one (a clear ALG print included: it names
+			// no key, so it is never proof) drops a pending proof.
+			if (!dmrLineNeutral(event.text)) this.drop(call)
 			return out
 		}
 		// A link control. A second one in the burst drops a pending proof.
@@ -627,18 +682,6 @@ export class DmrClearance {
 				!call.lcAfterVoice,
 		}
 		if (call?.firstVoiceSeq !== undefined) call.lcAfterVoice = true
-		// A clean voice header of another call than the pending privacy named.
-		if (
-			lane.privacyPending &&
-			ok &&
-			lane.lc.first &&
-			lane.privacyKeys !== null &&
-			!lane.privacyKeys.includes(event.key) &&
-			burst?.kind === "vlc" &&
-			burst.syncClean &&
-			!burst.errored
-		)
-			this.closePrivacy(lane)
 		// The first checked copy of another talker's IDs after voice revokes at once.
 		if (
 			ok &&
@@ -672,12 +715,11 @@ export class DmrClearance {
 		const lane = this.lane(key)
 		let record = lane.call
 		if (record?.callId !== view.callId) {
-			// Privacy of this line, or pending since the lane had no call.
-			const encrypted = lane.privacySeq === seq || lane.privacyPending
-			lane.privacySeq = undefined
-			this.closePrivacy(lane)
+			// Privacy of this line, or a taint of the lane's context.
+			const encrypted = lane.privacySeq === seq || this.tainted(lane, view.key)
 			record = {
 				unplaced: key === "x",
+				voiceless: false,
 				callId: view.callId,
 				key: view.key,
 				firstVoiceSeq:
@@ -707,6 +749,13 @@ export class DmrClearance {
 			record.evidence = undefined
 		}
 		record.key = view.key
+		// Named into a tainted key of the lane's context: encrypted for good.
+		if (record.trust !== "encrypted" && this.tainted(lane, record.key)) {
+			record.trust = "encrypted"
+			record.evidence = undefined
+			out.push({ callId: record.callId, trust: "encrypted" })
+			return out
+		}
 		// This line's own link control names the call for later proofs only.
 		const names = this.namesHere(lane, seq, record.key)
 		if (key === "x" || record.key === null) return out
@@ -737,6 +786,7 @@ export class DmrClearance {
 			lc.burstSeq !== burst.seq ||
 			!burst.syncClean ||
 			burst.errored ||
+			record.voiceless ||
 			record.trust === "encrypted" ||
 			record.trust === "clear"
 		)
@@ -780,56 +830,47 @@ export class DmrClearance {
 		}
 	}
 
-	/**
-	 * A clean clear ALG print (PI header, late entry) in a clean voice,
-	 * header or PI burst of the lane's call, settled on the lane's next
-	 * clean sync.
-	 */
-	private armAlg(
-		lane: LaneState,
-		record: CallRecord,
-		seq: number,
-		atMs: number,
-	): void {
-		const burst = lane.burst
-		if (
-			burst === undefined ||
-			!burst.syncClean ||
-			burst.errored ||
-			(burst.kind !== "vlc" && burst.kind !== "voice" && burst.kind !== "pi") ||
-			record.trust === "encrypted" ||
-			record.trust === "clear"
-		)
-			return
-		record.trust = "pending"
-		record.evidence = {
-			kind: "clear-algorithm",
-			decoderGeneration: this.decoderGeneration,
-			modeGeneration: lane.modeGeneration,
-			lane: this.keyOf(lane),
-			format: burst.format,
-			callId: record.callId,
-			callKey: record.key ?? "",
-			firstVoiceSeq: record.firstVoiceSeq,
-			openingBurstSeq: burst.seq,
-			openingBurstKind: burst.kind,
-			lcLineSeq: seq,
-			lcKey: record.key ?? "",
-			expiresAt: atMs + this.callTimeoutMs,
-			burstClean: true,
-		}
-	}
-
 	/** Line `seq` printed a checked link control of `key` on the lane. */
 	private namesHere(lane: LaneState, seq: number, key: string | null): boolean {
 		const lc = lane.lc
 		return key !== null && lc?.seq === seq && lc.ok && lc.key === key
 	}
 
-	/** The lane's context closed: pending privacy no longer reaches its next call. */
-	private closePrivacy(lane: LaneState): void {
-		lane.privacyPending = false
-		lane.privacyKeys = []
+	/** The lane whose record holds `callId`, if any. */
+	laneOf(callId: string): DmrLane | undefined {
+		for (const [key, lane] of this.lanes)
+			if (lane.call?.callId === callId) return key
+		return undefined
+	}
+
+	/** A line (or taint) of the lane: a silence over the call timeout first ends its context. */
+	private touch(lane: LaneState, atMs: number): void {
+		const taint = lane.taint
+		if (
+			taint.lastAtMs !== undefined &&
+			atMs - taint.lastAtMs > this.callTimeoutMs
+		)
+			lane.taint = emptyTaint()
+		lane.taint.lastAtMs = atMs
+	}
+
+	/** Whether a call of `key` (null: unnamed) is encrypted by the lane's context. */
+	private tainted(lane: LaneState, key: string | null): boolean {
+		return lane.taint.keyless || (key !== null && lane.taint.keys.has(key))
+	}
+
+	/** A BS/MS change: a live context's privacy carries into the new mode's lane. */
+	private carry(from: LaneState, to: LaneState, atMs: number): void {
+		const source = from.taint
+		if (
+			source.lastAtMs === undefined ||
+			atMs - source.lastAtMs > this.callTimeoutMs ||
+			(!source.keyless && source.keys.size === 0)
+		)
+			return
+		this.touch(to, atMs)
+		if (source.keyless) markKeyless(to.taint)
+		for (const key of source.keys) addTaintKey(to.taint, key)
 	}
 
 	private keyOf(lane: LaneState): DmrLane {
@@ -861,8 +902,8 @@ export class DmrClearance {
 	}
 
 	/**
-	 * A privacy field makes the lane's call encrypted, for good; with no call
-	 * on the lane, it waits for the lane's next call.
+	 * A privacy field makes the lane's call encrypted, for good, and taints
+	 * the lane's context with its key (every key when it names none).
 	 */
 	private privacy(
 		lane: LaneState,
@@ -872,15 +913,11 @@ export class DmrClearance {
 		key?: string,
 	): void {
 		lane.privacySeq = seq // Applies also to a call opened on this line.
+		this.touch(lane, atMs)
+		if (key === undefined) markKeyless(lane.taint)
+		else addTaintKey(lane.taint, key)
 		const call = lane.call
-		if (call === undefined) {
-			lane.privacyPending = true
-			lane.privacyAtMs = atMs
-			if (key === undefined) lane.privacyKeys = null
-			else lane.privacyKeys?.push(key)
-			return
-		}
-		if (call.trust === "encrypted") return
+		if (call === undefined || call.trust === "encrypted") return
 		call.trust = "encrypted"
 		call.evidence = undefined
 		out.push({ callId: call.callId, trust: "encrypted" })
@@ -901,7 +938,8 @@ export class DmrClearance {
 		const errored = event.type === "sync" ? !event.clean : event.errored
 		if (errored) for (const key of PROOF_LANES) this.dirty(this.lane(key))
 		if (!event.privacy) return
-		const printed = event.type === "lc" ? event.key : undefined
+		const printed =
+			event.type === "lc" && event.plausible ? event.key : undefined
 		// It cannot be attributed to one lane: every live call it could belong
 		// to (any lane's record, unplaced ones included) is encrypted (fail
 		// closed).
@@ -945,6 +983,10 @@ export class DmrClearance {
 		if (
 			call.trust !== "pending" ||
 			call.unplaced ||
+			call.voiceless ||
+			// Keyless evidence never settles clear.
+			call.key === null ||
+			evidence.lcKey === "" ||
 			evidence.callId !== call.callId ||
 			evidence.callKey !== (call.key ?? "") ||
 			evidence.lcKey !== (call.key ?? "") ||

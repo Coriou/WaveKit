@@ -6,8 +6,8 @@
 import { describe, expect, it } from "vitest"
 import {
 	classifyDmrLine,
+	DMR_TAINT_KEYS_MAX,
 	DmrClearance,
-	dmrLineClearAlg,
 	dmrLineErrored,
 	dmrLineNeutral,
 	dmrLinePrivacy,
@@ -116,10 +116,7 @@ describe("DMR clearance: classification", () => {
 		// An allowlisted prefix carrying an error is an error first.
 		expect(neutral).toMatchObject({ type: "line", errored: true })
 		expect(dmrLineNeutral(" AMBE 01 err = [0] [0] ")).toBe(true)
-		expect(dmrLineClearAlg(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")).toBe(
-			true,
-		)
-		// A PI header is its own burst kind (a clear-algorithm proof may open there).
+		// A PI header is its own burst kind.
 		expect(
 			classifyDmrLine(
 				"00:00:01 Sync: +DMR  [SLOT1]  slot2  | Color Code=01 | PI ",
@@ -243,8 +240,8 @@ describe("DMR clearance: state x event rows", () => {
 		expect(late.cleared()).toBe(false)
 	})
 
-	it("a clear algorithm print opens no proof in an idle, CSBK or terminator burst", () => {
-		for (const burst of ["IDLE", "CSBK", "TLC"]) {
+	it("a clear algorithm print opens no proof in any burst (it names no key)", () => {
+		for (const burst of ["IDLE", "CSBK", "TLC", "PI ", "VC*"]) {
 			const h = new Harness()
 			h.line(MS("VC*"))
 			h.open("ms", "c1", null)
@@ -255,15 +252,6 @@ describe("DMR clearance: state x event rows", () => {
 			h.line(MS("VC*"))
 			expect(h.cleared()).toBe(false)
 		}
-		// A PI header burst is one.
-		const pi = new Harness()
-		pi.line(MS("VC*"))
-		pi.open("ms", "c1", null)
-		pi.line(MS("VC*"))
-		pi.line(MS("PI "))
-		pi.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
-		pi.line(MS("VC*"))
-		expect(pi.trust()).toBe("clear")
 	})
 
 	it("a privacy line mutes the live call and a replacement opened on the same line", () => {
@@ -313,20 +301,24 @@ describe("DMR clearance: state x event rows", () => {
 		expect(h.trust()).toBe("unknown")
 	})
 
-	it("clear algorithm: a clean clear ALG print in a clean burst is settled like an LC; a late error kills it", () => {
-		const run = (tail: string[]) => {
-			const h = new Harness()
-			h.line(MS("VC*"))
-			h.open("ms", "c1", null)
-			h.line(MS("VC*"))
-			h.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
-			for (const line of tail) h.line(line)
-			return h
-		}
-		const settled = run([MS("VC*")])
-		expect(settled.trust()).toBe("clear")
-		expect(run([" (FEC ERR) ", MS("VC*")]).cleared()).toBe(false)
-		expect(run([MS("VC*  (FEC ERR)")]).cleared()).toBe(false)
+	it("clear algorithm: a clean clear ALG print is never proof, and it drops a pending link-control proof", () => {
+		const alone = new Harness()
+		alone.line(MS("VC*"))
+		alone.open("ms", "c1", null)
+		alone.line(MS("VC*"))
+		alone.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
+		alone.line(MS("VC*"))
+		expect(alone.cleared()).toBe(false)
+		// A named call's pending link control, then the keyless ALG print.
+		const dropped = new Harness()
+		namedCall(dropped)
+		dropped.line(MS("VC*"))
+		dropped.line(LC())
+		expect(dropped.m.evidence("c1")).toMatchObject({ kind: "link-after-voice" })
+		dropped.line(" Slot 1 DMR PI H- ALG ID: 00; KEY ID: 00;")
+		expect(dropped.m.evidence("c1")).toBeUndefined()
+		dropped.line(MS("VC*"))
+		expect(dropped.cleared()).toBe(false)
 	})
 
 	it("a named call's own LC after its voice is link-after-voice, settled by the next clean sync", () => {
@@ -605,13 +597,13 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		expect(frames(h, "c2", undefined, 2)).toBe("unknown")
 	})
 
-	it("is consumed by the call it mutes", () => {
+	it("outlives the call it mutes: the lane's next call opens encrypted too", () => {
 		const h = new Harness()
 		h.line(BS(1, "PI"))
 		h.line(ALG)
 		expect(frames(h, "c1")).toBe("encrypted")
 		h.end("1")
-		expect(frames(h, "c2")).toBe("unknown")
+		expect(frames(h, "c2")).toBe("encrypted")
 	})
 
 	it("bracketless or another slot's privacy is pending on every lane it may belong to", () => {
@@ -626,12 +618,12 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		expect(frames(other, "c1")).toBe("encrypted")
 	})
 
-	it("a clean idle burst, a call timeout or a silent lane closes the context", () => {
+	it("only a silent lane closes the context: a clean idle burst or a call timeout does not", () => {
 		const idle = new Harness()
 		idle.line(BS(1, "PI"))
 		idle.line(ALG)
 		idle.line(BS(1, "IDLE"))
-		expect(frames(idle, "c1")).toBe("unknown")
+		expect(frames(idle, "c1")).toBe("encrypted")
 		const dirtyIdle = new Harness()
 		dirtyIdle.line(BS(1, "PI"))
 		dirtyIdle.line(ALG)
@@ -641,7 +633,7 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		timeout.line(BS(1, "PI"))
 		timeout.line(ALG)
 		timeout.m.timeout(["1"])
-		expect(frames(timeout, "c1")).toBe("unknown")
+		expect(frames(timeout, "c1")).toBe("encrypted")
 		const silent = (gapMs: number) => {
 			const h = new Harness()
 			h.line(BS(1, "PI"), 0)
@@ -652,7 +644,28 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		expect(silent(TIMEOUT_MS + 1)).toBe("unknown")
 	})
 
-	it("a clean header of another key closes a keyed privacy print, never a keyless one or its own key", () => {
+	it("a lane's context ends on its own silence: another slot's lines do not keep it", () => {
+		const h = new Harness()
+		h.line(BS(1, "PI"), 0)
+		h.line(ALG, 0)
+		// Slot 2 stays busy past the call timeout; slot 1 prints nothing.
+		for (let at = 500; at <= TIMEOUT_MS + 500; at += 500)
+			h.line(BS(2, "IDLE"), at)
+		expect(frames(h, "c1", TIMEOUT_MS + 600)).toBe("unknown")
+	})
+
+	it("a lane's own idle bursts keep its context while another slot is silent", () => {
+		const h = new Harness()
+		h.line(BS(1, "PI"), 0)
+		h.line(ALG, 0)
+		// Slot 1 keeps carrier past the call timeout; slot 2 prints nothing.
+		for (let at = 500; at <= TIMEOUT_MS + 500; at += 500)
+			h.line(BS(1, "IDLE"), at)
+		expect(frames(h, "c1", TIMEOUT_MS + 600)).toBe("encrypted")
+		expect(frames(h, "c2", TIMEOUT_MS + 700, 2)).toBe("unknown")
+	})
+
+	it("a keyed privacy print taints only its key; a keyless one taints every key", () => {
 		const run = (privacy: string, key: string) => {
 			const h = new Harness()
 			h.line(BS(1, "VLC"))
@@ -666,5 +679,28 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		expect(run(keyed, K)).toBe("pending")
 		expect(run(keyed, "9002/92")).toBe("encrypted")
 		expect(run(" SLOT 1 SVC=0x40 (CRC ERR) ", K)).toBe("encrypted")
+	})
+
+	it("a lane's taint holds at most DMR_TAINT_KEYS_MAX keys; one more turns it keyless", () => {
+		expect(DMR_TAINT_KEYS_MAX).toBe(256)
+		/** Taints `count` distinct keys, then opens a call of K (never one of them). */
+		const run = (count: number, key: string = K) => {
+			const h = new Harness()
+			h.line(BS(1, "VLC"))
+			for (let i = 0; i < count; i++)
+				h.line(LC(1, 20_000 + i, 92, "Encrypted (CRC ERR)"))
+			h.line(BS(1, "VLC"))
+			h.open("1", "c1", key)
+			const [tg, src] = key.split("/").map(Number)
+			h.line(LC(1, tg, src))
+			return h.trust("c1")
+		}
+		// At the bound every key is still held, and only those: K stays untainted.
+		expect(run(DMR_TAINT_KEYS_MAX)).toBe("pending")
+		expect(
+			run(DMR_TAINT_KEYS_MAX, `${20_000 + DMR_TAINT_KEYS_MAX - 1}/92`),
+		).toBe("encrypted")
+		// Past it the taint is keyless: every call of the context, K included, is muted.
+		expect(run(DMR_TAINT_KEYS_MAX + 1)).toBe("encrypted")
 	})
 })
