@@ -200,7 +200,8 @@ export class NonDmrOracle {
 	/** A link control names `id`: another identity is another over. */
 	private name(family: Family, atMs: number, id: Id): Over {
 		let over = this.current(family, atMs)
-		if (over.id !== null && !sameId(over.id, id)) over = this.begin(family, atMs)
+		if (over.id !== null && !sameId(over.id, id))
+			over = this.begin(family, atMs)
 		over.id = id
 		return over
 	}
@@ -268,6 +269,12 @@ export class NonDmrOracle {
 			if (duid === "LDU1" || duid === "LDU2") this.current("p25p1", atMs)
 			if (duid === "LDU1" && !ERRORED.test(text)) this.lcwDue = true
 			if (duid === "LDU2") this.ldu2Credit = named
+			// The LDU2's ALG print on its own sync line (no newline between them).
+			if (
+				duid === "LDU2" &&
+				/\bLDU2\s+ALG ID: 0x80 KEY ID: 0x0000\b/.test(text)
+			)
+				this.ldu2Clear(text)
 			return
 		}
 		const lcw = p25Lcw(text)
@@ -279,22 +286,24 @@ export class NonDmrOracle {
 			if (due && !ERRORED.test(text)) this.ldu1Named = lcw
 			return
 		}
-		if (
-			/^\s*LDU2 ALG ID: 0x80 KEY ID: 0x0000\b/.test(text) &&
-			!ERRORED.test(text)
-		) {
-			const credit = this.ldu2Credit
-			this.ldu2Credit = null
-			const over = this.open
-			if (
-				credit !== null &&
-				over !== null &&
-				over.family === "p25p1" &&
-				sameId(over.id, credit)
-			)
-				over.clear = true
-		}
+		if (/^\s*LDU2 ALG ID: 0x80 KEY ID: 0x0000\b/.test(text))
+			this.ldu2Clear(text)
 		if (this.open !== null) this.open.lastMs = atMs
+	}
+
+	/** An LDU2 clear print: proves clear only the identity this superframe's LDU1 named. */
+	private ldu2Clear(text: string): void {
+		if (ERRORED.test(text) || privacyPrint("p25p1", text)) return
+		const credit = this.ldu2Credit
+		this.ldu2Credit = null
+		const over = this.open
+		if (
+			credit !== null &&
+			over !== null &&
+			over.family === "p25p1" &&
+			sameId(over.id, credit)
+		)
+			over.clear = true
 	}
 
 	private nxdnLine(atMs: number, text: string, privacy: boolean): void {

@@ -42,6 +42,8 @@ function p25Over(
 		superframes?: number
 		end?: boolean
 		hdu?: string | null
+		/** The ALG print on the LDU2 sync line itself (no newline between them). */
+		algOnSync?: boolean
 	} = {},
 ): Item[] {
 	const items: Item[] = [[t0, P1("HDU")]]
@@ -50,9 +52,13 @@ function p25Over(
 	for (let i = 0; i < n; i++) {
 		const t = t0 + 180 + i * 360
 		items.push([t, P1("LDU1")], [t, LCW(opts.tg, opts.src)])
-		items.push([t + 180, P1("LDU2")])
 		const alg = opts.alg?.(i) ?? null
-		if (alg !== null) items.push([t + 180, alg])
+		if (opts.algOnSync === true && alg !== null)
+			items.push([t + 180, P1("LDU2") + alg])
+		else {
+			items.push([t + 180, P1("LDU2")])
+			if (alg !== null) items.push([t + 180, alg])
+		}
 	}
 	if (opts.end !== false) items.push([t0 + 180 + n * 360 + 20, P1("TDU")])
 	return items
@@ -359,6 +365,91 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 				replay("p25", p25Over(0, { alg: () => LDU2_CLEAR }), [P1_FILE()]),
 				["56/1234"],
 			)
+		})
+
+		describe("the LDU2 ALG print on the LDU2 sync line itself", () => {
+			const onSync = (alg: (n: number) => string | null, extra = {}) =>
+				p25Over(0, { alg, algOnSync: true, ...extra })
+
+			it("(c) a clear ALG on the call's own LDU2 sync line is linked", () => {
+				expectLinked(
+					replay(
+						"p25",
+						onSync(() => LDU2_CLEAR),
+						[P1_FILE()],
+					),
+					["56/1234"],
+				)
+			})
+
+			it("(b) an encrypted ALG on the LDU2 sync line is never linked", () => {
+				expectNeverLinked(
+					replay(
+						"p25",
+						onSync(() => LDU2_ENC),
+						[P1_FILE()],
+					),
+				)
+			})
+
+			it("(b) encryption on a later LDU2 sync line after a clear one is never linked", () => {
+				expectNeverLinked(
+					replay(
+						"p25",
+						onSync(n => (n === 0 ? LDU2_CLEAR : LDU2_ENC)),
+						[P1_FILE()],
+					),
+				)
+			})
+
+			it("(c) an errored LDU2 sync line's clear ALG is not evidence", () => {
+				expectNeverLinked(
+					replay(
+						"p25",
+						onSync(() => `${LDU2_CLEAR} FEC ERR`),
+						[P1_FILE()],
+					),
+				)
+			})
+
+			it("(c) a clear ALG on an LDU2 sync line with a non-zero key is not evidence", () => {
+				expectNeverLinked(
+					replay(
+						"p25",
+						onSync(
+							() => " LDU2 ALG ID: 0x80 KEY ID: 0x0007 MI: 0x0000000000000000",
+						),
+						[P1_FILE()],
+					),
+				)
+			})
+
+			it("(d) a clear LDU2 sync line after a failed LDU1 credits no call", () => {
+				const items: Item[] = [
+					...p25Over(0, { superframes: 2, end: false }),
+					[900, P1("HDU")],
+					[1080, P1("LDU1")],
+					[1080, " LCW FEC ERR"],
+					[1260, P1("LDU2") + LDU2_CLEAR],
+					[1440, P1("LDU1")],
+					[1440, LCW(58, 99)],
+					[1620, P1("LDU2") + LDU2_CLEAR],
+					[1640, P1("TDU")],
+				]
+				expectLinked(replay("p25", items, [P1_FILE(), P1_FILE(58, 99)]), [
+					"58/99",
+				])
+			})
+
+			it("(d) another call's clear LDU2 sync line is not borrowed by the next call", () => {
+				const items = [
+					...onSync(() => LDU2_CLEAR),
+					...p25Over(2000, { tg: 57 }),
+				]
+				expectLinked(replay("p25", items, [P1_FILE(), P1_FILE(57)]), [
+					"56/1234",
+				])
+			})
 		})
 
 		it("(c) an LDU2 clear with a non-zero key is not evidence", () => {

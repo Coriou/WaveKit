@@ -206,6 +206,12 @@ const P25_PRIVACY = /\bEncrypted\b|\bENC\b|\bLCW Protected\b/
  */
 const P25P1_LDU2_CLEAR = /^\s*LDU2 ALG ID: 0x80 KEY ID: 0x0000\b/
 /**
+ * The same clear print on the LDU2 sync line itself (no newline between the
+ * sync and the LDU2's ALG print): checked once the sync handler has handed
+ * the superframe's named call to that LDU2 (handleSync, p25Ldu2Credit).
+ */
+const P25P1_LDU2_SYNC_CLEAR = /\bLDU2\s+ALG ID: 0x80 KEY ID: 0x0000\b/
+/**
  * NXDN privacy prints: the cipher type and key printed on the line after a
  * VCALL's IDs whenever the 2-bit cipher type is not 0 (nxdn_element.c
  * NXDN_decode_VCALL / _ARIB: "  Scrambler - Key ID 3 - "), the SCCH form
@@ -1848,18 +1854,23 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.privacyTaint = { protocol, atMs: nowMs }
 			return
 		}
-		if (
-			protocol === "p25p1" &&
-			P25P1_LDU2_CLEAR.test(line) &&
-			!burstError(line)
-		) {
-			// Only the call this superframe's own LDU1 named (p25Ldu2Credit).
-			const credit = this.p25Ldu2Credit
-			this.p25Ldu2Credit = undefined
-			const call = this.ongoingCall("p25p1")
-			if (call !== null && credit !== undefined && call.callId === credit)
-				this.markClear(call)
-		}
+		if (protocol === "p25p1" && P25P1_LDU2_CLEAR.test(line))
+			this.creditP25Ldu2Clear(line)
+	}
+
+	/**
+	 * An LDU2 "ALG ID: 0x80 KEY ID: 0x0000" print, on its own line or on the
+	 * LDU2 sync line: proves the ongoing P25 phase 1 call clear only when the
+	 * line printed no error and no privacy, and only for the call this
+	 * superframe's own LDU1 named (p25Ldu2Credit, used up either way).
+	 */
+	private creditP25Ldu2Clear(line: string): void {
+		if (burstError(line) || nonDmrPrivacyPrint("p25p1", line)) return
+		const credit = this.p25Ldu2Credit
+		this.p25Ldu2Credit = undefined
+		const call = this.ongoingCall("p25p1")
+		if (call !== null && credit !== undefined && call.callId === credit)
+			this.markClear(call)
 	}
 
 	/** Drops the P25 phase 1 superframe naming (see p25Ldu1Named). */
@@ -3064,6 +3075,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Update protocol tracking
 		this.currentProtocol = newProtocol
+
+		// An LDU2 whose ALG print shares its sync line: nonDmrPrivacy ran
+		// before trackSyncState handed this LDU2 its superframe's named call.
+		if (
+			newProtocol === "p25p1" &&
+			this.p25Ldu2Credit !== undefined &&
+			P25P1_LDU2_SYNC_CLEAR.test(line)
+		)
+			this.creditP25Ldu2Clear(line)
 
 		// Deduplicate sync events for debug output
 		if (proto === this.lastSyncMode) {
