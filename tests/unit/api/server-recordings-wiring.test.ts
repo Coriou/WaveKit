@@ -263,6 +263,65 @@ describe("recordings inventory through the API server", () => {
 		)
 	})
 
+	it("protected: a scanner probe's DMR call file (or one of no known protocol) is neither listed nor served; P25 and analog are", async () => {
+		const { root, bytes } = await setup()
+		const scan = join(root, "scan")
+		const dv = join(scan, "dv", "d_1")
+		const analog = join(scan, "analog", "d_2")
+		await fs.mkdir(dv, { recursive: true })
+		await fs.mkdir(analog, { recursive: true })
+		const DMR = "20261017_081500_12345_DMR_CC_1_GROUP_TGT_9_SRC_1234.wav"
+		const UNNAMED = "20261017_081501_12345__GROUP_TGT_9_SRC_1234.wav"
+		const P25 = "20261017_081502_12345_P25_1A3_GROUP_TGT_9_SRC_1234.wav"
+		const ANALOG = "analog-00000000-0000-4000-8000-000000000001.wav"
+		const old = (Date.now() - 60_000) / 1000
+		for (const file of [
+			join(dv, DMR),
+			join(dv, UNNAMED),
+			join(dv, P25),
+			join(analog, ANALOG),
+		]) {
+			await fs.writeFile(file, bytes)
+			await fs.utimes(file, old, old)
+		}
+		const inventory = createRecordingInventory({
+			dsdFmeDirs: () => [],
+			scannerRecordingsDir: () => scan,
+			logger,
+		})
+		const { app, authorized } = await protectedApp(root, inventory)
+		const list = await app.inject({
+			method: "GET",
+			url: "/api/recordings",
+			headers: authorized,
+		})
+		expect(list.statusCode).toBe(200)
+		expect(
+			list
+				.json<RecordingInventoryPage>()
+				.items.map(i => i.id)
+				.sort(),
+		).toEqual([`scan:d_1~${P25}`, `scan:d_2~${ANALOG}`].sort())
+		const get = (id: string) =>
+			app.inject({
+				method: "GET",
+				url: `/api/recordings/${encodeURIComponent(id)}/file`,
+				headers: authorized,
+			})
+		for (const name of [DMR, UNNAMED]) {
+			expect((await get(`scan:d_1~${name}`)).statusCode).toBe(404)
+			expect(await inventory.open(`scan:d_1~${name}`)).toBeNull()
+			expect(await inventory.resolve(`scan:d_1~${name}`)).toBeNull()
+		}
+		for (const id of [`scan:d_1~${P25}`, `scan:d_2~${ANALOG}`]) {
+			const file = await get(id)
+			expect(file.statusCode).toBe(200)
+			expect(file.rawPayload.equals(bytes)).toBe(true)
+		}
+		// The refused files stay on disk.
+		expect((await fs.readdir(dv)).sort()).toEqual([DMR, P25, UNNAMED].sort())
+	})
+
 	it("protected: denied without a credential, then lists and downloads", async () => {
 		const { root, inventory, bytes } = await setup()
 		const directory = join(root, "private")

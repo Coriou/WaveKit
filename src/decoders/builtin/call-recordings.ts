@@ -20,6 +20,7 @@ import * as path from "node:path"
 import type { RecordingProtection } from "../../core/recordings/contract.js"
 import type { Logger } from "../../utils/logger.js"
 import { createComponentLogger, createLogger } from "../../utils/logger.js"
+import { dsdFmeCallRecordable } from "./dmr-recording-gate.js"
 
 export interface CallRecordingRetention {
 	/** Keep at most this many megabytes (MiB) of recordings. */
@@ -177,6 +178,15 @@ export {
 export const DSD_FME_CALL_WAV = /^\d{8}_\d{6}_\d{5}_.*_TGT_.*_SRC_.*\.wav$/
 /** dsd-fme's in-progress recording name. */
 export const DSD_FME_TEMP_WAV = /^TEMP_\d{8}_\d{6}_[0-9A-F]{4}\.wav$/
+
+/**
+ * True when a file of this name may be listed, served or linked from any recordings folder
+ * (scanner folders included): it is not a dsd-fme per-call name, or its protocol is recordable
+ * (dsdFmeCallRecordable). A DMR or protocol-less dsd-fme call name is refused and stays on disk.
+ */
+export function dsdFmeNameServable(name: string): boolean {
+	return !DSD_FME_CALL_WAV.test(name) || dsdFmeCallRecordable(name)
+}
 
 /** True for a WAV file named by dsd-fme's per-call recorder. */
 export function isDsdFmeRecording(name: string): boolean {

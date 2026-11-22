@@ -41,7 +41,10 @@ import {
 	verifiedUnlink,
 } from "../../recordings/verified-unlink.js"
 import type { RecordingDeleteFs } from "../../recordings/verified-unlink.js"
-import { RECORDING_IN_PROGRESS_MS } from "../../../decoders/builtin/call-recordings.js"
+import {
+	RECORDING_IN_PROGRESS_MS,
+	dsdFmeNameServable,
+} from "../../../decoders/builtin/call-recordings.js"
 import { ScannerApiError } from "../errors.js"
 import { WaveKitError } from "../../../utils/errors.js"
 import { createComponentLogger } from "../../../utils/logger.js"
@@ -1125,6 +1128,9 @@ export class EvidenceStore {
 		const file = m?.[2]
 		if (discoveryId === undefined || file === undefined || file.includes(".."))
 			return null
+		// A probe's dsd-fme call file of a protocol that is not recordable (DMR) is never served
+		// or linked; it stays on disk under the usual retention.
+		if (!dsdFmeNameServable(file)) return null
 		// An analog file is admitted per file: through its folder, or through the live discovery
 		// owning it after a split (AnalogOperations.path).
 		if (/^analog-[0-9a-f-]{36}\.wav$/i.test(file))

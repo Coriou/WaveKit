@@ -7754,6 +7754,12 @@ answers 404 for one, no Activity row links one (backfill included), and a
 dsd-fme decoder in `mode: dmr` is not asked for per-call files. A row linked
 to one before is unlinked by the link sweep below, as for a deleted file.
 Files dsd-fme already wrote stay on disk under the usual retention.
+Scanner DMR call files are not listed or served yet either: a probe's dsd-fme
+call file in a discovery's `dv` folder whose name says DMR (or no known
+protocol) is not in `GET /api/recordings`, answers 404 from
+`GET /api/scanner/recordings/:recordingId` and is not among an observation's
+`recordingIds`. `dv-call` files a core wrote before this change are not
+filtered by protocol: their names carry no protocol.
 
 A link goes when its file goes (pruned, deleted, retention, a removed
 discovery, removed by hand): once a complete catalogue has lacked the key on
