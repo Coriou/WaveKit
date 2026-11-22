@@ -22,7 +22,8 @@
  *   on more than the call timeout without a line of that lane, or on a
  *   restart (a protocol switch, a BS/MS change, a clean idle burst or a
  *   call's end does not end it; a BS/MS change carries the old mode's live
- *   lane contexts into the new mode's lanes). A privacy print naming a key
+ *   lane contexts into the new mode's lanes, another protocol between the
+ *   two modes or not). A privacy print naming a key
  *   (TGT/SRC, even with a CRC error) taints that key in the context; one
  *   naming none taints every key; an unattributable one taints every lane.
  *   A clear for a tainted key, or in a lane tainted keyless, is forbidden,
@@ -70,6 +71,11 @@ interface OracleLine {
 	printedSlot: string | undefined
 	/** A BS/MS change happened on this sync. */
 	modeChange: boolean
+	/**
+	 * A BS/MS change against the latest DMR mode before it, another protocol
+	 * between them or not (only a restart forgets that mode): privacy carries.
+	 */
+	taintModeChange: boolean
 }
 
 export interface CallLife {
@@ -122,6 +128,8 @@ export class CallOracle {
 	private format: Format | undefined
 	private slot: "1" | "2" = "1"
 	private mode: "bs" | "ms" | undefined
+	/** The latest DMR mode, kept across other protocols (a restart forgets it). */
+	private taintMode: "bs" | "ms" | undefined
 	private dmr = false
 	private foreignActive = false
 
@@ -145,10 +153,12 @@ export class CallOracle {
 			neutral: false,
 			printedSlot: undefined,
 			modeChange: false,
+			taintModeChange: false,
 		}
 		if (text === RESTART_LINE) {
 			this.format = undefined
 			this.mode = undefined
+			this.taintMode = undefined
 			this.dmr = false
 			this.foreignActive = false
 			this.lines.push({ ...base, restart: true })
@@ -181,9 +191,13 @@ export class CallOracle {
 			this.format = format
 			if (bracket !== undefined) this.slot = bracket
 			let modeChange = false
+			let taintModeChange = false
 			if (format !== "x") {
 				modeChange = this.mode !== undefined && this.mode !== format
+				taintModeChange =
+					this.taintMode !== undefined && this.taintMode !== format
 				this.mode = format
+				this.taintMode = format
 			}
 			const tail = text.includes("|")
 				? text.slice(text.lastIndexOf("|") + 1)
@@ -210,6 +224,7 @@ export class CallOracle {
 				errored,
 				privacy,
 				modeChange,
+				taintModeChange,
 			})
 			return
 		}
@@ -464,7 +479,8 @@ function laneTaint(lines: readonly OracleLine[], lane: Lane): Taint {
 			continue
 		}
 		if (l.foreign) continue
-		if (l.modeChange) {
+		// Another protocol between the two modes still carries the old mode's privacy.
+		if (l.taintModeChange) {
 			if (l.format === "ms") {
 				merge("1", "ms", l.atMs)
 				merge("2", "ms", l.atMs)

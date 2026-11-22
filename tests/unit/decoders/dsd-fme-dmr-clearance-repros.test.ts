@@ -846,6 +846,7 @@ describe("dsd-fme DMR clearance repro corpus", () => {
 			["another protocol", modeBump([30, DSTAR])],
 			["a direct-mode burst between", modeBump([30, M("VC*")])],
 			["a direct-mode call after it", modeBump([30, M("VC*")], M)],
+			["another protocol, then a direct-mode call", modeBump([30, DSTAR], M)],
 		]
 		for (const [name, items] of bumps)
 			it(`3: a mode bump does not end privacy (${name})`, () => {
@@ -873,6 +874,37 @@ describe("dsd-fme DMR clearance repro corpus", () => {
 				),
 			).not.toBeNull()
 			for (const [, items] of bumps) expect(forgedFor(items, 1)).not.toBeNull()
+		})
+
+		it("the oracle carries a slot's privacy across another protocol into direct mode", () => {
+			/**
+			 * The oracle alone, on the script's lines: one direct-mode call born on
+			 * its first voice sync (line 4, adapter lane 0), a clear claimed on the
+			 * last line.
+			 */
+			const verdict = (items: Item[]) => {
+				const oracle = new CallOracle()
+				items.forEach(([at, text], i) => {
+					oracle.line(i + 1, at, text)
+					if (i + 1 === 4) oracle.born("c1", 4.25, 0)
+				})
+				return oracle.judge({
+					callId: "c1",
+					seq: items.length + 0.25,
+					talkgroup: 9001,
+					source: 91,
+					encrypted: false,
+					encryptionKnown: true,
+					hasField: true,
+				})
+			}
+			const tainted = modeBump([30, DSTAR], M)
+			// Control: the same script with a neutral line for the ALG print is clear.
+			const control = tainted.map(
+				([at, text]): Item => [at, text === alg ? SLCO_NULL : text],
+			)
+			expect(verdict(control)).toBeNull()
+			expect(verdict(tainted)).toBe("privacy print in the lane's context")
 		})
 	})
 })

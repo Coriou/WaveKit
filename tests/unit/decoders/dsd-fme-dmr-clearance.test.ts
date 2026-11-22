@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest"
 import {
 	classifyDmrLine,
+	DMR_TAINT_KEYS_MAX,
 	DmrClearance,
 	dmrLineClearAlg,
 	dmrLineErrored,
@@ -652,6 +653,27 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		expect(silent(TIMEOUT_MS + 1)).toBe("unknown")
 	})
 
+	it("a lane's context ends on its own silence: another slot's lines do not keep it", () => {
+		const h = new Harness()
+		h.line(BS(1, "PI"), 0)
+		h.line(ALG, 0)
+		// Slot 2 stays busy past the call timeout; slot 1 prints nothing.
+		for (let at = 500; at <= TIMEOUT_MS + 500; at += 500)
+			h.line(BS(2, "IDLE"), at)
+		expect(frames(h, "c1", TIMEOUT_MS + 600)).toBe("unknown")
+	})
+
+	it("a lane's own idle bursts keep its context while another slot is silent", () => {
+		const h = new Harness()
+		h.line(BS(1, "PI"), 0)
+		h.line(ALG, 0)
+		// Slot 1 keeps carrier past the call timeout; slot 2 prints nothing.
+		for (let at = 500; at <= TIMEOUT_MS + 500; at += 500)
+			h.line(BS(1, "IDLE"), at)
+		expect(frames(h, "c1", TIMEOUT_MS + 600)).toBe("encrypted")
+		expect(frames(h, "c2", TIMEOUT_MS + 700, 2)).toBe("unknown")
+	})
+
 	it("a keyed privacy print taints only its key; a keyless one taints every key", () => {
 		const run = (privacy: string, key: string) => {
 			const h = new Harness()
@@ -666,5 +688,28 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		expect(run(keyed, K)).toBe("pending")
 		expect(run(keyed, "9002/92")).toBe("encrypted")
 		expect(run(" SLOT 1 SVC=0x40 (CRC ERR) ", K)).toBe("encrypted")
+	})
+
+	it("a lane's taint holds at most DMR_TAINT_KEYS_MAX keys; one more turns it keyless", () => {
+		expect(DMR_TAINT_KEYS_MAX).toBe(256)
+		/** Taints `count` distinct keys, then opens a call of K (never one of them). */
+		const run = (count: number, key: string = K) => {
+			const h = new Harness()
+			h.line(BS(1, "VLC"))
+			for (let i = 0; i < count; i++)
+				h.line(LC(1, 20_000 + i, 92, "Encrypted (CRC ERR)"))
+			h.line(BS(1, "VLC"))
+			h.open("1", "c1", key)
+			const [tg, src] = key.split("/").map(Number)
+			h.line(LC(1, tg, src))
+			return h.trust("c1")
+		}
+		// At the bound every key is still held, and only those: K stays untainted.
+		expect(run(DMR_TAINT_KEYS_MAX)).toBe("pending")
+		expect(
+			run(DMR_TAINT_KEYS_MAX, `${20_000 + DMR_TAINT_KEYS_MAX - 1}/92`),
+		).toBe("encrypted")
+		// Past it the taint is keyless: every call of the context, K included, is muted.
+		expect(run(DMR_TAINT_KEYS_MAX + 1)).toBe("encrypted")
 	})
 })

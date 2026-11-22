@@ -257,6 +257,21 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   channels are identical is silenced whole), and in mono or with the slot
   unknown whole datagrams are discarded. dsd-fme also mutes encrypted voice by
   default (it zero-fills the encrypted slot).
+- **DMR privacy over-mutes, on purpose**: a DMR privacy print (an
+  `Encrypted` link control, a non-zero `ALG ID`) mutes more than its own call,
+  failing closed. It taints its slot until the slot falls silent for longer
+  than the call timeout (or the decoder restarts), and the taint only widens:
+  - a privacy print that names no talkgroup and source (a PI burst's `ALG ID`)
+    mutes every later call on that slot, clear ones included, for as long as
+    the slot keeps carrier (idle bursts count);
+  - a privacy print that names a talkgroup and source also mutes a later clear
+    call of the same talkgroup and source within that hang time;
+  - a privacy link control whose ids are not plausible DMR ids names nothing,
+    so it mutes every later call on the slot, as a keyless print does;
+  - a slot whose taint names more than 256 talkgroup/source pairs mutes every
+    later call on it;
+  - a privacy print after a repeater sync with no slot bracket mutes both
+    slots, since the slot it prints may be stale.
 
 ## Spike: dsd-fme UDP format (2026-10-09)
 

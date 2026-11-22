@@ -1224,11 +1224,8 @@ export function createRecordingInventory(
 		}
 	}
 
-	/** Every folder to index: dsd-fme directories, then scanner folders newest change first. */
-	async function deriveFolders(
-		counts: Counts,
-		report?: { foldersTruncated: boolean },
-	): Promise<FolderSpec[]> {
+	/** The dsd sources' folders only (dsd-fme and dv call directories): no scanner walk. */
+	async function dsdFolders(counts: Counts): Promise<FolderSpec[]> {
 		const out: FolderSpec[] = []
 		for (const [n, source] of (await dsdSources(counts)).entries()) {
 			out.push({
@@ -1244,6 +1241,15 @@ export function createRecordingInventory(
 				mtimeMs: Number.POSITIVE_INFINITY,
 			})
 		}
+		return out
+	}
+
+	/** Every folder to index: dsd-fme directories, then scanner folders newest change first. */
+	async function deriveFolders(
+		counts: Counts,
+		report?: { foldersTruncated: boolean },
+	): Promise<FolderSpec[]> {
+		const out = await dsdFolders(counts)
 		const base = await scannerBase(counts)
 		const scanner: FolderSpec[] = []
 		let truncatedHere = false
@@ -2057,8 +2063,10 @@ export function createRecordingInventory(
 	/**
 	 * A call ended: re-read only that decoder's dsd-fme directory and check only names not
 	 * indexed yet that are at least as new as the newest one indexed (names start with the date
-	 * and time), plus none other: one directory read and one lstat per new call. An unknown
-	 * decoder (no indexed directory yet) re-derives the dsd-fme directories once.
+	 * and time), plus none other: one directory read and one lstat per new call. A decoder with
+	 * no indexed dsd-fme directory (not created yet, DMR-mode dsd-fme, dv-recorder-only decoders)
+	 * re-derives the dsd sources only (one realpath check per configured source, never the
+	 * scanner walk) on each of its call ends, so a directory created since is indexed.
 	 */
 	async function refreshCalls(
 		decoderIds: ReadonlySet<string> | null,
@@ -2081,7 +2089,7 @@ export function createRecordingInventory(
 		const missing =
 			decoderIds === null ? [] : [...decoderIds].filter(d => !known.has(d))
 		if (missing.length > 0 || states.length === 0) {
-			const specs = (await deriveFolders(counts)).filter(wanted)
+			const specs = (await dsdFolders(counts)).filter(wanted)
 			await Promise.all(
 				specs
 					.filter(sp => !folders.has(sp.key))

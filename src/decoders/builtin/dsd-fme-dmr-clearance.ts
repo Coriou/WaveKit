@@ -52,6 +52,16 @@
 export const DMR_TALKGROUP_MAX = 0xffffff
 export const DMR_SOURCE_MAX = DMR_TALKGROUP_MAX - 800
 
+/**
+ * The most distinct `tg/src` keys one lane's taint holds. A key is at most 8 + 1 + 8 = 17
+ * characters (two 24-bit decimal ids), so a full set is about 256 × 17 ≈ 4.4 KB of key text per
+ * lane, four lanes at most. One context (calls of a slot without a silence over the call
+ * timeout) names a handful of talkgroups in practice; 256 distinct encrypted keys in one context
+ * is a flood, and past it the taint turns keyless (every call of the context muted, the set
+ * cleared): constant size, failing closed.
+ */
+export const DMR_TAINT_KEYS_MAX = 256
+
 export type DmrLane = "1" | "2" | "ms" | "x"
 export type DmrFormat = "bs" | "ms" | "x"
 export type DmrBurstKind = "vlc" | "voice" | "tlc" | "pi" | "other" | "bare"
@@ -203,6 +213,19 @@ const emptyTaint = (): Taint => ({
 	keyless: false,
 	lastAtMs: undefined,
 })
+
+/** Every key of the context is tainted: the key set is no longer needed. */
+function markKeyless(taint: Taint): void {
+	taint.keyless = true
+	taint.keys.clear()
+}
+
+/** Taints `key`; a set already at DMR_TAINT_KEYS_MAX turns the taint keyless instead. */
+function addTaintKey(taint: Taint, key: string): void {
+	if (taint.keyless || taint.keys.has(key)) return
+	if (taint.keys.size >= DMR_TAINT_KEYS_MAX) markKeyless(taint)
+	else taint.keys.add(key)
+}
 
 interface LaneState {
 	burst: Burst | undefined
@@ -867,8 +890,8 @@ export class DmrClearance {
 		)
 			return
 		this.touch(to, atMs)
-		to.taint.keyless ||= source.keyless
-		for (const key of source.keys) to.taint.keys.add(key)
+		if (source.keyless) markKeyless(to.taint)
+		for (const key of source.keys) addTaintKey(to.taint, key)
 	}
 
 	private keyOf(lane: LaneState): DmrLane {
@@ -912,8 +935,8 @@ export class DmrClearance {
 	): void {
 		lane.privacySeq = seq // Applies also to a call opened on this line.
 		this.touch(lane, atMs)
-		if (key === undefined) lane.taint.keyless = true
-		else lane.taint.keys.add(key)
+		if (key === undefined) markKeyless(lane.taint)
+		else addTaintKey(lane.taint, key)
 		const call = lane.call
 		if (call === undefined || call.trust === "encrypted") return
 		call.trust = "encrypted"

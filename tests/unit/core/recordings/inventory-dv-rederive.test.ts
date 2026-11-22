@@ -3,14 +3,16 @@
  * the dsd-fme directories even when the dv call recorder's directory is already indexed, so the
  * decoder's new call file becomes a key. Synthetic names only.
  */
-import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import pino from "pino"
 import { afterEach, describe, expect, it } from "vitest"
 import {
 	createRecordingInventory,
+	nodeRecordingFs,
 	type RecordingDsdSourceConfig,
+	type RecordingFsPort,
 } from "../../../../src/core/recordings/inventory.js"
 
 const logger = pino({ level: "silent" })
@@ -53,5 +55,47 @@ describe("recordings inventory: call refresh with a dv-call directory indexed", 
 		sources.push({ decoderId: "dsd-b", dir: calls })
 		await inv.touchCallRecordings?.("dsd-b")
 		expect(inv.hasKey?.(`dsd~${NAME}`)).toBe(true)
+	})
+
+	it("repeated call ends of a decoder without a dsd-fme directory never re-walk scanner folders", async () => {
+		const dv = await dir("wk-inv-dv-")
+		const scanner = await dir("wk-inv-scan-")
+		const folder = join(scanner, "dv", "d_abc1")
+		await mkdir(folder, { recursive: true })
+		await writeFile(join(folder, "20261012_100000_rec.wav"), Buffer.alloc(64))
+		let scannerTouches = 0
+		const touched = (p: string): void => {
+			if (p.startsWith(scanner)) scannerTouches++
+		}
+		const fs: RecordingFsPort = {
+			...nodeRecordingFs,
+			opendir: d => {
+				touched(d)
+				return nodeRecordingFs.opendir(d)
+			},
+			lstat: p => {
+				touched(p)
+				return nodeRecordingFs.lstat(p)
+			},
+			stat: p => {
+				touched(p)
+				return nodeRecordingFs.stat(p)
+			},
+		}
+		const inv = createRecordingInventory({
+			dsdFmeDirs: () => [{ decoderId: "dv", dir: dv, kind: "dv-call" }],
+			scannerRecordingsDir: () => scanner,
+			reconcileIntervalMs: 3_600_000,
+			logger,
+			fs,
+		})
+		closers.push(() => inv.close?.())
+		await inv.start?.()
+		expect(scannerTouches).toBeGreaterThan(0)
+		scannerTouches = 0
+		// A DMR-mode dsd-fme decoder has no dsd-fme directory: each call end re-derives only
+		// the dsd sources.
+		for (let i = 0; i < 5; i++) await inv.touchCallRecordings?.("dmr-a")
+		expect(scannerTouches).toBe(0)
 	})
 })

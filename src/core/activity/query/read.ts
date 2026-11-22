@@ -18,9 +18,10 @@ import {
 } from "./errors.js"
 import { recordWithoutRecordingPath } from "../recording-path.js"
 import {
-	dsdFmeCallProtocol,
+	dsdFmeCallRecordable,
 	protocolRecordable,
 } from "../../../decoders/builtin/dmr-recording-gate.js"
+import { dvCallDecoderField, dvCallNameField } from "../../recordings/names.js"
 import { channelHzOfRef, channelRefValue } from "../storage/row.js"
 import { ACTIVITY_CHANNEL_FALLBACK_HALF_STEP_HZ } from "@wavekit/api-types"
 import { bindSeq, formatSeq, MAX_SEQ, parseSeq, seqFromSqlite } from "./seq.js"
@@ -791,22 +792,29 @@ function readSummary(
 
 /** A per-call recording name, dsd-fme's or the dv call recorder's (the same shape). */
 const CALL_WAV_NAME = /^\d{8}_\d{6}_\d{5}_.*_TGT_.*_SRC_.*\.wav$/
-/** dsd-fme's name before it knows the system: no first field. */
-const EMPTY_FIRST_FIELD = /^\d{8}_\d{6}_\d{5}__/
 
 /**
- * Whether a stored `dsd~` link may be presented: not a per-call name, or one whose first field
- * is not empty and is not DMR (DMR only while the DMR gate is on, protocolRecordable).
- * Narrower than dsdFmeNameServable on purpose: the dv call recorder's names share the `dsd~`
- * keys with a decoder id in that field (`..._dsd-fme_GROUP_...`), and the catalogue serves them
- * whatever it says (it writes no DMR audio). A name with no first field is refused.
+ * Whether a stored `dsd~` link of a row of `decoderId` may be presented, decided by the file's
+ * source. A per-call name is the dv call recorder's only when its decoder field is exactly
+ * dvCallNameField(decoderId) of the row's own decoder (the recorder names each call after the
+ * decoder whose call it is; the catalogue serves those whatever the field says, the recorder
+ * writes no DMR audio). A field that reads `dmr` itself stays refused while DMR is not
+ * recordable, so a dsd-fme DMR name never passes for a dv one. Every other per-call name is
+ * dsd-fme's and is presented only when the catalogue serves it (dsdFmeNameServable: a
+ * recordable protocol label; DMR, an unknown label or no label is refused). Not a per-call
+ * name: presented.
  */
-function dsdLinkPresentable(name: string): boolean {
+function dsdLinkPresentable(name: string, decoderId: unknown): boolean {
 	if (!CALL_WAV_NAME.test(name)) return true
-	if (EMPTY_FIRST_FIELD.test(name)) return false
-	const protocol = dsdFmeCallProtocol(name)
-	if (protocol === null || protocol.toLowerCase() !== "dmr") return true
-	return protocolRecordable(protocol)
+	const field = dvCallDecoderField(name)
+	if (
+		field !== null &&
+		typeof decoderId === "string" &&
+		decoderId.length > 0 &&
+		dvCallNameField(decoderId) === field
+	)
+		return field.toLowerCase() !== "dmr" || protocolRecordable("dmr")
+	return dsdFmeCallRecordable(name)
 }
 
 /**
@@ -821,7 +829,10 @@ function withoutUnservableRecording(
 	if (!isRecord(recording)) return summary
 	const id = recording["id"]
 	if (typeof id !== "string" || !id.startsWith(DSD_KEEP_PREFIX)) return summary
-	if (dsdLinkPresentable(id.slice(DSD_KEEP_PREFIX.length))) return summary
+	if (
+		dsdLinkPresentable(id.slice(DSD_KEEP_PREFIX.length), summary["decoderId"])
+	)
+		return summary
 	const rest: Record<string, unknown> = {}
 	for (const [key, value] of Object.entries(summary))
 		if (key !== "recording") rest[key] = value
