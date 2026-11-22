@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs"
-import { availableParallelism } from "node:os"
+import { availableParallelism, cpus as osCpus } from "node:os"
 import { z } from "zod"
 import type {
 	EfficiencyBudgetResolution,
@@ -136,8 +136,90 @@ export function resolveCpuBudget(
 	}
 }
 
+/**
+ * CPUs in a cpuset list such as `0-3,6`; null when the text does not parse.
+ * At most 4 096 CPUs (the kernel's NR_CPUS ceiling on common builds).
+ */
+export function cpusetCount(text: string): number | null {
+	const list = text.trim()
+	if (list === "") return null
+	let count = 0
+	for (const part of list.split(",")) {
+		const match = /^([0-9]{1,4})(?:-([0-9]{1,4}))?$/.exec(part)
+		if (!match) return null
+		const first = Number(match[1])
+		const last = match[2] === undefined ? first : Number(match[2])
+		if (last < first) return null
+		count += last - first + 1
+		if (count > 4096) return null
+	}
+	return count
+}
+
+export interface CpuCountReaders {
+	/** /proc/self/status (its Cpus_allowed_list line is the affinity mask). */
+	readStatus?: () => string
+	/** /proc/self/cgroup, for the process's own v2 cgroup path. */
+	readProcCgroup?: () => string
+	/** A file under /sys/fs/cgroup by relative path. */
+	readCgroupFile?: (relativePath: string) => string
+	online?: () => number
+	fallback?: () => number
+}
+
+/**
+ * The CPUs this process may run on, before any quota. Not availableParallelism():
+ * libuv folds a cgroup quota into it rounded down (1.5 CPUs reads as 1), and the
+ * quota is applied exactly by resolveCpuCapacity. The smallest of the affinity mask
+ * (Cpus_allowed_list: taskset, systemd, v1 and v2 cpusets), the v2 effective cpuset
+ * of the process's own cgroup, and the online CPUs; availableParallelism() only when
+ * none of them can be read.
+ */
+export function hostCpuCount(readers: CpuCountReaders = {}): number {
+	const counts: number[] = []
+	const add = (value: number | null) => {
+		if (value !== null && Number.isSafeInteger(value) && value > 0)
+			counts.push(value)
+	}
+	try {
+		const status = readers.readStatus?.() ?? ""
+		const line = /^Cpus_allowed_list:\s*(.*)$/m.exec(status)
+		add(line?.[1] === undefined ? null : cpusetCount(line[1]))
+	} catch {
+		/* No affinity mask readable here. */
+	}
+	if (readers.readCgroupFile !== undefined) {
+		const own = cgroupPaths(readers.readProcCgroup).v2
+		try {
+			add(
+				cpusetCount(
+					readers.readCgroupFile([...own, "cpuset.cpus.effective"].join("/")),
+				),
+			)
+		} catch {
+			/* No v2 cpuset for this cgroup. */
+		}
+	}
+	try {
+		add(readers.online?.() ?? null)
+	} catch {
+		/* No online count. */
+	}
+	if (counts.length > 0) return Math.min(...counts)
+	const last = readers.fallback?.() ?? availableParallelism()
+	return Number.isSafeInteger(last) && last > 0 ? last : 1
+}
+
+const hostCountReaders = (): CpuCountReaders => ({
+	readStatus: () => readFileSync("/proc/self/status", "utf8"),
+	readProcCgroup: () => readFileSync("/proc/self/cgroup", "utf8"),
+	readCgroupFile: relativePath =>
+		readFileSync(`/sys/fs/cgroup/${relativePath}`, "utf8"),
+	online: () => osCpus().length,
+})
+
 const hostReaders = (): CpuCapacityReaders => ({
-	cpuCount: availableParallelism(),
+	cpuCount: hostCpuCount(hostCountReaders()),
 	readProcCgroup: () => readFileSync("/proc/self/cgroup", "utf8"),
 	readCpuMax: relativePath =>
 		readFileSync(`/sys/fs/cgroup/${relativePath}`, "utf8"),

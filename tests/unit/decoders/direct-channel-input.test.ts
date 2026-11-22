@@ -3,7 +3,9 @@
  * byte count taken from the channelizer's `stats` lines. Pure: the clock is a number passed in.
  */
 import fc from "fast-check"
+import pino from "pino"
 import { describe, expect, it, vi } from "vitest"
+import { FanoutManager } from "../../../src/core/fanout-manager.js"
 import {
 	CHANNEL_FATE_MS,
 	channelStatsDelta,
@@ -15,11 +17,15 @@ import {
 	type DirectTerminalEvent,
 } from "../../../src/decoders/direct-channel-input.js"
 import {
+	CHANNEL_INPUT_ENV,
 	channelInputModeFrom,
 	DEFAULT_CHANNEL_INPUT_MODE,
 	processChannelInputMode,
 	resetProcessChannelInputModeForTests,
 } from "../../../src/decoders/channel-input-mode.js"
+import { DecoderManager } from "../../../src/decoders/manager.js"
+import { DecoderRegistry } from "../../../src/decoders/registry.js"
+import { ConfigValidationError } from "../../../src/utils/errors.js"
 import type { Logger } from "../../../src/utils/logger.js"
 
 const terminal = (
@@ -430,34 +436,98 @@ describe("direct input port and mode selection", () => {
 		expect(directInputOf(port)).toBe(port)
 	})
 
-	it("reads direct unless the value is exactly relay: unset, empty and unknown values are the default", () => {
+	it("reads relay and direct as given and unset or empty as the default (direct)", () => {
 		expect(DEFAULT_CHANNEL_INPUT_MODE).toBe("direct")
-		expect(channelInputModeFrom(undefined)).toEqual({
-			mode: "direct",
-			known: true,
-		})
-		expect(channelInputModeFrom("")).toEqual({ mode: "direct", known: true })
-		expect(channelInputModeFrom("relay")).toEqual({
-			mode: "relay",
-			known: true,
-		})
-		expect(channelInputModeFrom("direct")).toEqual({
-			mode: "direct",
-			known: true,
-		})
-		for (const other of ["DIRECT", "RELAY", "relay ", "yes", "1"])
-			expect(channelInputModeFrom(other)).toEqual({
-				mode: "direct",
-				known: false,
-			})
+		expect(channelInputModeFrom(undefined)).toBe("direct")
+		expect(channelInputModeFrom("")).toBe("direct")
+		expect(channelInputModeFrom("relay")).toBe("relay")
+		expect(channelInputModeFrom("direct")).toBe("direct")
 	})
 
+	it.each(["RELAY", "DIRECT", "relay ", " direct", "bogus", "yes"])(
+		"%j is a ConfigValidationError naming the variable and the accepted values, never the value",
+		value => {
+			let thrown: unknown
+			try {
+				channelInputModeFrom(value)
+			} catch (error: unknown) {
+				thrown = error
+			}
+			expect(thrown).toBeInstanceOf(ConfigValidationError)
+			const error = thrown as ConfigValidationError
+			expect(error.code).toBe("CONFIG_VALIDATION_ERROR")
+			expect(error.message).toContain(CHANNEL_INPUT_ENV)
+			expect(error.message).toContain("Expected one of: direct, relay")
+			const serialised = JSON.stringify({
+				message: error.message,
+				issues: error.zodError.issues,
+			})
+			if (value.trim() !== "relay" && value.trim() !== "direct")
+				expect(serialised).not.toContain(value)
+			expect(serialised).not.toContain(JSON.stringify(value))
+		},
+	)
+
 	it("an unset environment selects direct for the process; relay stays selectable", () => {
-		const log = { info: vi.fn(), warn: vi.fn() } as unknown as Logger
+		const log = {
+			info: vi.fn(),
+			warn: vi.fn(),
+			error: vi.fn(),
+		} as unknown as Logger
 		resetProcessChannelInputModeForTests()
 		try {
 			expect(processChannelInputMode(log, {})).toBe("direct")
 			resetProcessChannelInputModeForTests()
+			expect(processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "" })).toBe(
+				"direct",
+			)
+			resetProcessChannelInputModeForTests()
+			expect(
+				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "relay" }),
+			).toBe("relay")
+			resetProcessChannelInputModeForTests()
+			expect(
+				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "direct" }),
+			).toBe("direct")
+		} finally {
+			resetProcessChannelInputModeForTests()
+		}
+	})
+
+	it("reads the environment once per process and logs the mode once", () => {
+		const info = vi.fn()
+		const log = { info, warn: vi.fn(), error: vi.fn() } as unknown as Logger
+		resetProcessChannelInputModeForTests()
+		try {
+			expect(
+				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "relay" }),
+			).toBe("relay")
+			expect(processChannelInputMode(log, {})).toBe("relay")
+			expect(info).toHaveBeenCalledTimes(1)
+			expect(info.mock.calls[0]?.[0]).toEqual({ channelInput: "relay" })
+		} finally {
+			resetProcessChannelInputModeForTests()
+		}
+	})
+
+	it("an unknown value throws with one error line naming only the accepted values, and caches nothing", () => {
+		const info = vi.fn()
+		const error = vi.fn()
+		const log = { info, warn: vi.fn(), error } as unknown as Logger
+		resetProcessChannelInputModeForTests()
+		try {
+			const env = { WAVEKIT_CHANNEL_INPUT: "sideways-value" }
+			expect(() => processChannelInputMode(log, env)).toThrow(
+				ConfigValidationError,
+			)
+			expect(error).toHaveBeenCalledTimes(1)
+			expect(error.mock.calls[0]?.[0]).toEqual({
+				variable: CHANNEL_INPUT_ENV,
+				accepted: ["direct", "relay"],
+			})
+			expect(JSON.stringify(error.mock.calls)).not.toContain("sideways-value")
+			expect(info).not.toHaveBeenCalled()
+			// Nothing was cached: a later valid read still selects.
 			expect(
 				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "relay" }),
 			).toBe("relay")
@@ -466,32 +536,52 @@ describe("direct input port and mode selection", () => {
 		}
 	})
 
-	it("reads the environment once per process, logs the mode once and never echoes an unknown value", () => {
-		const info = vi.fn()
-		const warn = vi.fn()
-		const log = { info, warn } as unknown as Logger
-		resetProcessChannelInputModeForTests()
-		try {
-			const env = { WAVEKIT_CHANNEL_INPUT: "sideways-value" }
-			expect(processChannelInputMode(log, env)).toBe("direct")
-			expect(
-				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "relay" }),
-			).toBe("direct")
-			expect(info).toHaveBeenCalledTimes(1)
-			expect(info.mock.calls[0]?.[0]).toEqual({ channelInput: "direct" })
-			expect(warn).toHaveBeenCalledTimes(1)
-			expect(JSON.stringify(warn.mock.calls)).not.toContain("sideways-value")
-			expect(warn.mock.calls[0]?.[0]).toMatchObject({
-				accepted: ["relay", "direct"],
-				default: "direct",
-			})
+	it.each(["RELAY", "relay ", "bogus"])(
+		"WAVEKIT_CHANNEL_INPUT=%j: constructing the DecoderManager (startup) throws a ConfigValidationError",
+		value => {
+			vi.stubEnv(CHANNEL_INPUT_ENV, value)
 			resetProcessChannelInputModeForTests()
-			expect(
-				processChannelInputMode(log, { WAVEKIT_CHANNEL_INPUT: "relay" }),
-			).toBe("relay")
-			expect(warn).toHaveBeenCalledTimes(1)
-		} finally {
+			try {
+				expect(
+					() =>
+						new DecoderManager(
+							new DecoderRegistry(),
+							new FanoutManager(pino({ level: "silent" })),
+							pino({ level: "silent" }),
+						),
+				).toThrow(ConfigValidationError)
+			} finally {
+				vi.unstubAllEnvs()
+				resetProcessChannelInputModeForTests()
+			}
+		},
+	)
+
+	it.each([
+		["unset", undefined, "direct"],
+		["relay", "relay", "relay"],
+		["direct", "direct", "direct"],
+	] as const)(
+		"WAVEKIT_CHANNEL_INPUT %s: the DecoderManager reads %s at construction",
+		async (_label, value, expected) => {
+			vi.stubEnv(CHANNEL_INPUT_ENV, value)
 			resetProcessChannelInputModeForTests()
-		}
-	})
+			try {
+				const manager = new DecoderManager(
+					new DecoderRegistry(),
+					new FanoutManager(pino({ level: "silent" })),
+					pino({ level: "silent" }),
+				)
+				// Read once at construction: a later environment change does not reach this process.
+				vi.stubEnv(CHANNEL_INPUT_ENV, "bogus")
+				expect(processChannelInputMode(pino({ level: "silent" }))).toBe(
+					expected,
+				)
+				await manager.destroy()
+			} finally {
+				vi.unstubAllEnvs()
+				resetProcessChannelInputModeForTests()
+			}
+		},
+	)
 })

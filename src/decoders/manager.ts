@@ -51,7 +51,10 @@ import {
 	placementOptionsKey,
 	channelizerBranchId,
 } from "./enablement/contract.js"
-import type { PlannerCentreSlot } from "./enablement/contract.js"
+import type {
+	CoreEfficiencyView,
+	PlannerCentreSlot,
+} from "./enablement/contract.js"
 import type { LossAttribution } from "./enablement/host-starvation.js"
 import {
 	TUNED_SETTLE_MS,
@@ -70,7 +73,6 @@ import type {
 	DecoderMode,
 	DecoderPlacementView,
 	DecoderEfficiencyDetail,
-	DecoderEfficiencyView,
 	DecoderHostBusy,
 	DecoderOptionIssue,
 	DecoderSettingValue,
@@ -1831,7 +1833,7 @@ export class DecoderManager extends EventEmitter {
 		return this.budgetSettings
 	}
 
-	efficiencyView(): DecoderEfficiencyView {
+	efficiencyView(): CoreEfficiencyView {
 		const gate = this.config.enablement?.gate
 		if (!gate) return { budgetCores: 0, cpuGuardPercent: 90, sources: [] }
 		const mono = performance.now()
@@ -1873,11 +1875,21 @@ export class DecoderManager extends EventEmitter {
 							},
 						}
 					: {}),
-				admitted: source.admitted.map(placement =>
-					configured(placement.decoderId)
-						? { ...placement, probation: false, detail: "configured" as const }
-						: placement,
-				),
+				admitted: source.admitted.map(placement => {
+					if (configured(placement.decoderId)) {
+						// A YAML decoder is never gated, so never late-stopped: no L1 excuse applies to it.
+						const { hostExcusedLoss: _excuse, ...rest } = placement
+						return { ...rest, probation: false, detail: "configured" as const }
+					}
+					const excuse = placement.hostExcusedLoss
+					if (!excuse) return placement
+					const since = rebaseCooldown(excuse.since)
+					if (since === null) {
+						const { hostExcusedLoss: _excuse, ...rest } = placement
+						return rest
+					}
+					return { ...placement, hostExcusedLoss: { ...excuse, since } }
+				}),
 				blocked: source.blocked.map(placement => ({
 					...placement,
 					...(placement.retryAt !== undefined
@@ -3158,6 +3170,10 @@ export class DecoderManager extends EventEmitter {
 		this.fanout = fanout
 		this.log = createComponentLogger(logger, "DecoderManager")
 		this.config = { ...DEFAULT_CONFIG, ...config }
+		// Read (and validate) WAVEKIT_CHANNEL_INPUT now: an unknown value is a ConfigValidationError at startup, never
+		// a silent fallback at the first channel decoder's start.
+		if (this.config.channelInput === undefined)
+			processChannelInputMode(this.log)
 		this.bandOverrides = bandOverrides ?? BandOverrideStore.inMemory(logger)
 		const activity = this.config.enablement?.activity
 		if (activity) {
@@ -4413,7 +4429,9 @@ export class DecoderManager extends EventEmitter {
 							candidate => candidate === state || candidate.parentId === id,
 						)
 						await Promise.all(
-							placements.map(candidate => this.stopPlacement(candidate, true)),
+							placements.map(candidate =>
+								this.stopPlacement(candidate, true, current),
+							),
 						)
 						if (!current()) return
 						for (const worker of placements) {
@@ -8133,9 +8151,10 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	/**
-	 * `current`: the public request this stop serves (stopDecoder) is still the latest. A stop that waited on a direct
-	 * cleanup and was superseded meanwhile (a start that came during the wait) requests nothing: the newer request
-	 * already owns the placement, and a late "stopped" would leave it desired-running but stopped.
+	 * `current`: the public request this stop serves (stopDecoder, restartDecoder) is still the latest. A stop that
+	 * waited on a direct cleanup and was superseded meanwhile (a start, or a stop after a restart, that came during
+	 * the wait) requests nothing: the newer request already owns the placement, and a late "stopped" would leave it
+	 * desired-running but stopped, a late restart "running" desired-stopped but running.
 	 */
 	private async stopPlacement(
 		state: DecoderState,

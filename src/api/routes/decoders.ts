@@ -723,6 +723,17 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				enum: ["budget", "cpu", "drops", "unknown", "late-drops", "configured"],
 			},
 			retryAt: { type: ["string", "null"] },
+			// L1 is excusing this untuned placement's own loss while the host is busy (no late stop).
+			hostExcusedLoss: {
+				type: "object",
+				required: ["cause", "since", "windows"],
+				additionalProperties: false,
+				properties: {
+					cause: { type: "string", enum: ["host-busy"] },
+					since: { type: "string" },
+					windows: { type: "integer", minimum: 1 },
+				},
+			},
 		},
 	} as const
 	fastify.get<{ Reply: DecoderEfficiencyView }>(

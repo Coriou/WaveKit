@@ -24,6 +24,7 @@ import {
 import type {
 	AdmissionDecision,
 	ChargedDrop,
+	CoreEfficiencyView,
 	LateDropWindow,
 	EfficiencyGate,
 	ProbationVerdict,
@@ -197,6 +198,67 @@ export function createEfficiencyGate(
 	const cpuRun = new Map<string, number>()
 	const cooldownUntil = new Map<string, number>()
 	const warned = new Map<string, Map<string, number>>()
+	/**
+	 * L1 excuses (lateState `excused`), by running placement key: when the excuse began and how many windows it
+	 * covers at the latest late pass. One entry per running placement at most; an entry goes when its excuse ends,
+	 * its placement stops running or is forgotten.
+	 */
+	const hostExcusedLoss = new Map<
+		string,
+		{ sourceId: string; sinceMono: number; windows: number }
+	>()
+	const logExcuse = (
+		key: string,
+		entry: { sourceId: string; sinceMono: number; windows: number },
+		ended: number | null,
+	) => {
+		try {
+			if (ended === null)
+				deps.log?.warn(
+					{
+						placement: key,
+						sourceId: entry.sourceId,
+						cause: "host-busy",
+						windows: entry.windows,
+					},
+					"Late loss excused: host busy",
+				)
+			else
+				deps.log?.info(
+					{
+						placement: key,
+						sourceId: entry.sourceId,
+						cause: "host-busy",
+						durationMs: Math.max(0, Math.round(ended - entry.sinceMono)),
+					},
+					"Late loss no longer excused",
+				)
+		} catch {
+			/* Logging cannot change a verdict. */
+		}
+	}
+	/** One late pass on a source: enter, refresh and clear its placements' excuses (one log line each way). */
+	const noteExcused = (
+		sourceId: string,
+		excused: ReadonlyMap<string, number>,
+		mono: number,
+	) => {
+		for (const [key, entry] of hostExcusedLoss)
+			if (entry.sourceId === sourceId && !excused.has(key)) {
+				hostExcusedLoss.delete(key)
+				logExcuse(key, entry, mono)
+			}
+		for (const [key, windows] of excused) {
+			const entry = hostExcusedLoss.get(key)
+			if (entry && entry.sourceId === sourceId) entry.windows = windows
+			else {
+				if (entry) logExcuse(key, entry, mono)
+				const next = { sourceId, sinceMono: mono, windows }
+				hostExcusedLoss.set(key, next)
+				logExcuse(key, next, null)
+			}
+		}
+	}
 	let lastLateMono: number | null = null
 
 	const retries = new Map<
@@ -1082,6 +1144,19 @@ export function createEfficiencyGate(
 		const condemned = eligible.filter(
 			p => windows.filter(w => condemns(w, p)).length >= LATE_SHED_HITS,
 		)
+		// L1's visible side: the untuned placements, not condemned, with own loss (a window that charges their branch
+		// or their whole source) that only L1 excuses, by key with the number of such windows.
+		const excused = new Map<string, number>()
+		for (const p of eligible) {
+			if (p.tunedBand === true || condemned.includes(p)) continue
+			const n = windows.filter(
+				w =>
+					w.condemning &&
+					chargesBranch(w.condemnedBranches, p.inputBranch) &&
+					hostExcused(w, p),
+			).length
+			if (n > 0) excused.set(p.key, n)
+		}
 		let held: "nothing-sheddable" | "link-or-unknown" | null = null
 		if (!probation) {
 			if (condemningWindows >= LATE_SHED_HITS && condemned.length === 0)
@@ -1097,12 +1172,28 @@ export function createEfficiencyGate(
 		return {
 			eligible,
 			condemned,
+			excused,
 			condemningWindows,
 			windows: windows.length,
 			held,
 			cooldownUntil: cooldownUntil.has(sourceId)
 				? new Date(cooldownUntil.get(sourceId)!).toISOString()
 				: null,
+		}
+	}
+
+	/** A placement's excuse as the view shows it (`since` on the monotonic clock, rebased by the manager). */
+	const hostExcusedView = (key: string, sourceId: string) => {
+		const entry = hostExcusedLoss.get(key)
+		if (!entry || entry.sourceId !== sourceId) return {}
+		const since = new Date(entry.sinceMono)
+		if (Number.isNaN(since.getTime())) return {}
+		return {
+			hostExcusedLoss: {
+				cause: "host-busy" as const,
+				since: since.toISOString(),
+				windows: entry.windows,
+			},
 		}
 	}
 
@@ -1733,6 +1824,7 @@ export function createEfficiencyGate(
 					if (newest.has(sourceId)) continue
 					if (!valid(lateSince.get(sourceId))) lateSince.set(sourceId, mono)
 					const state = lateState(sourceId, running, mono)
+					noteExcused(sourceId, state.excused, mono)
 					if (state.held !== null) {
 						const times = warned.get(sourceId) ?? new Map<string, number>()
 						const previous = times.get(state.held)
@@ -1788,6 +1880,14 @@ export function createEfficiencyGate(
 						lateSince.set(sourceId, mono)
 					}
 				}
+			// An excuse ends with its placement's run (a shed, a stop, another source).
+			for (const [key, entry] of hostExcusedLoss)
+				if (
+					!running.some(p => p.key === key && p.sourceId === entry.sourceId)
+				) {
+					hostExcusedLoss.delete(key)
+					logExcuse(key, entry, valid(mono) ? mono : entry.sinceMono)
+				}
 			return verdicts
 		},
 		noteSuspended(key, detail, now, tuned = false) {
@@ -1820,6 +1920,12 @@ export function createEfficiencyGate(
 				retries.delete(toKey)
 		},
 		forget(key) {
+			const excuse = hostExcusedLoss.get(key)
+			if (excuse) {
+				hostExcusedLoss.delete(key)
+				const mono = monoNow()
+				logExcuse(key, excuse, valid(mono) ? mono : excuse.sinceMono)
+			}
 			earned.delete(key)
 			hostJudged.delete(key)
 			carried.delete(key)
@@ -1849,7 +1955,7 @@ export function createEfficiencyGate(
 		},
 		hostBusy: (sourceId, branches) =>
 			hostBusyAt(sourceId, sampledMono(), branches),
-		view(running, blocked, now) {
+		view(running, blocked, now): CoreEfficiencyView {
 			const mono = monoNow()
 			observeRunning(running, mono)
 			let membership: readonly string[] = []
@@ -1908,6 +2014,7 @@ export function createEfficiencyGate(
 									reach: p.reach,
 									costCores: p.costCores,
 									probation: onProbation(p, mono),
+									...hostExcusedView(p.key, sourceId),
 								}
 							}),
 						blocked: blocked
