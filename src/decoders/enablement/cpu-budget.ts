@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs"
-import { availableParallelism } from "node:os"
+import { availableParallelism, cpus as osCpus } from "node:os"
 import { z } from "zod"
 import type {
 	EfficiencyBudgetResolution,
@@ -136,8 +136,51 @@ export function resolveCpuBudget(
 	}
 }
 
+/**
+ * CPUs in a cpuset list such as `0-3,6`; null when the text does not parse.
+ * At most 4 096 CPUs (the kernel's NR_CPUS ceiling on common builds).
+ */
+export function cpusetCount(text: string): number | null {
+	const list = text.trim()
+	if (list === "") return null
+	let count = 0
+	for (const part of list.split(",")) {
+		const match = /^([0-9]{1,4})(?:-([0-9]{1,4}))?$/.exec(part)
+		if (!match) return null
+		const first = Number(match[1])
+		const last = match[2] === undefined ? first : Number(match[2])
+		if (last < first) return null
+		count += last - first + 1
+		if (count > 4096) return null
+	}
+	return count
+}
+
+/**
+ * The CPUs this process may run on, before any quota. Not availableParallelism():
+ * libuv folds a cgroup quota into it rounded down (1.5 CPUs reads as 1), and the
+ * quota is applied exactly by resolveCpuCapacity. The cgroup's effective cpuset
+ * when readable, else every online CPU.
+ */
+export function hostCpuCount(
+	readCpuset: () => string = () =>
+		readFileSync("/sys/fs/cgroup/cpuset.cpus.effective", "utf8"),
+	online: () => number = () => osCpus().length,
+): number {
+	try {
+		const fromCpuset = cpusetCount(readCpuset())
+		if (fromCpuset !== null && fromCpuset > 0) return fromCpuset
+	} catch {
+		/* No cgroup v2 cpuset here: fall back to the online CPUs. */
+	}
+	const count = online()
+	return Number.isSafeInteger(count) && count > 0
+		? count
+		: availableParallelism()
+}
+
 const hostReaders = (): CpuCapacityReaders => ({
-	cpuCount: availableParallelism(),
+	cpuCount: hostCpuCount(),
 	readProcCgroup: () => readFileSync("/proc/self/cgroup", "utf8"),
 	readCpuMax: relativePath =>
 		readFileSync(`/sys/fs/cgroup/${relativePath}`, "utf8"),
