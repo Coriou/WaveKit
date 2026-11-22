@@ -3,8 +3,8 @@
  * channel with no digital evidence (prior `none`, kept at once before) ends `discarded:noise` at
  * its finish: counted in the decision counts and `recent`, its operation cancelled (the .wav.part
  * never linked, so no final WAV) and one `Analog file discarded as noise` line logged with ids and
- * numbers only. Admission off keeps it as before; a syllabic voice with carrier quieting, or a
- * buzz over its own CTCSS tone, is kept. All signals are modelled (synthetic).
+ * numbers only. Admission off keeps it as before; a syllabic voice with carrier quieting, a
+ * buzz over its own CTCSS tone, or a buzz file sharing another discovery's joined voice, is kept. All signals are modelled (synthetic).
  */
 import { Writable } from "node:stream"
 import pino from "pino"
@@ -51,6 +51,7 @@ const low = (
 		ctcssHz?: number | null
 		syllables?: boolean
 		logger?: pino.Logger
+		prior?: VoicePrior
 	} = {},
 ): Harness =>
 	harness({
@@ -61,7 +62,7 @@ const low = (
 			syllables: more.syllables ?? false,
 		},
 		decodedLabel: () => null,
-		voicePrior: () => analogFm,
+		voicePrior: () => more.prior ?? analogFm,
 		...(more.admission !== undefined ? { admission: more.admission } : {}),
 		...(more.logger ? { logger: more.logger } : {}),
 	})
@@ -145,4 +146,65 @@ describe("W1 recording admission: noise on a channel with no digital evidence", 
 		expect(codes(h)).not.toContain("discarded:noise")
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 	}, 120_000)
+
+	it("FROZEN: joined voice of another discovery over this file's buzz (admission on): kept, joined", async () => {
+		const { logger, lines } = capture()
+		const h = low({
+			logger,
+			prior: {
+				...analogFm,
+				channelObservation: () => false,
+				knownObservation: () => true,
+			},
+		})
+		await joinedOver(h, 6)
+		expect(codes(h)).not.toContain("discarded:noise")
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		const kept = lines.filter(l => l["msg"] === "Analog file kept")
+		expect(kept).toHaveLength(1)
+		expect(kept[0]).toMatchObject({ joinedOther: true })
+		expect(lines.some(l => l["msg"] === "Analog file discarded as noise")).toBe(
+			false,
+		)
+	}, 120_000)
 })
+
+/**
+ * `over` with a modelled 4FSK buzz whose middle is also tracked as observation "j" (classed
+ * analog-fm by its snapshots, joined to the session): another discovery's transmission on the
+ * channel, its voice on the air in this file.
+ */
+async function joinedOver(h: Harness, seconds: number): Promise<void> {
+	const fsk = new FskSource({
+		fs: h.fs,
+		offsetHz: LOW_OFFSET,
+		levelsHz: [-1_944, -648, 648, 1_944],
+	})
+	const chunk = h.fs / 40
+	await h.feed(1, false)
+	const onset = h.engine.liveEdge()
+	const end = onset + seconds * h.fs
+	let jOnset = 0
+	for (let i = 0; i < seconds * 40; i++) {
+		h.engine.write(fsk.next(chunk, true))
+		const edge = h.engine.liveEdge()
+		if (edge - onset >= 0.1 * h.fs)
+			h.rec.track(input("o", snapshot("o", onset, Math.min(edge, end), LOW)))
+		if (edge - onset >= h.fs) {
+			if (jOnset === 0) jOnset = edge
+			h.rec.track(input("j", snapshot("j", jOnset, edge, LOW)))
+		}
+		await h.pump()
+	}
+	await h.feed(0.6, false)
+	h.rec.closed("j", snapshot("j", jOnset, end, LOW), null, {
+		analogFm: true,
+		discoveryId: "d_2",
+	})
+	h.rec.closed("o", snapshot("o", onset, end, LOW), null, {
+		analogFm: true,
+		discoveryId: "d_1",
+	})
+	await h.feed(3.5, false)
+	await h.rec.idle()
+}

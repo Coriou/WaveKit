@@ -196,6 +196,21 @@ describe("admission: the meter's level ring (modelled PCM)", () => {
 		expect(admissionNoise(c)).toBe(true)
 	})
 
+	it("zero-filled gaps neither count nor dilute the periodic share: pitched voice with 1 s gaps reads the share of its voiced frames", () => {
+		const frames = 375 // 12 s
+		const gapped = speech(frames)
+		let voiced = 0
+		const kept = new Int16Array(gapped.length)
+		for (let f = 0; f < frames; f++)
+			if (f % 125 >= 94) gapped.fill(0, f * N, (f + 1) * N)
+			else kept.set(gapped.subarray(f * N, (f + 1) * N), voiced++ * N)
+		const g = measure(gapped)
+		const v = measure(kept.subarray(0, voiced * N))
+		expect(g.levelFrames).toBe(voiced)
+		expect(g.periodicShare).toBeGreaterThan(0)
+		expect(g.periodicShare).toBe(v.periodicShare)
+	})
+
 	it("a frame of exactly half zeros counts; one more zero skips it", () => {
 		const half = noise(100, -10)
 		const more = noise(100, -10)

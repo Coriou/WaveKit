@@ -1087,7 +1087,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 	}, 120_000)
 
 	it("FROZEN: an untoned syllabic NFM voice on the same suspect channel is held, then kept", async () => {
-		const h = lowPrior(() => spectral("fsk4-12k5"), null, { syllables: true })
+		const h = low(() => spectral("fsk4-12k5"), null, { syllables: true })
 		await h.feed(1, false)
 		await over(h, "o", 6)
 		expect(h.timers.map(t => t.ms)).toEqual([LATE_VERDICT_GRACE_MS])
@@ -1185,7 +1185,7 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 		}, 120_000)
 
 	it("FROZEN: a speech-like over (syllables) on that channel: kept", async () => {
-		const h = lowPrior(() => noVoice(), null, { syllables: true })
+		const h = low(() => noVoice(), null, { syllables: true })
 		await h.feed(1, false)
 		await over(h, "o", 3)
 		await h.rec.idle()
@@ -1193,7 +1193,7 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 	}, 120_000)
 
 	it("FROZEN: speech over a CTCSS tone on that channel: kept", async () => {
-		const h = lowPrior(() => noVoice(), 88.5, { syllables: true })
+		const h = low(() => noVoice(), 88.5, { syllables: true })
 		await h.feed(1, false)
 		await over(h, "o", 3)
 		await h.rec.idle()
@@ -1255,7 +1255,7 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 	}, 120_000)
 
 	it("FROZEN: a joined observation of another discovery (another transmission's voice) keeps the file", async () => {
-		const h = lowPrior(() => ({
+		const h = low(() => ({
 			...noVoice(),
 			channelObservation: () => false,
 		}))
@@ -1277,7 +1277,7 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 	}, 120_000)
 
 	it("FROZEN: a joined observation the store indexes under another discovery still keeps the file", async () => {
-		const h = lowPrior(() => ({
+		const h = low(() => ({
 			...noVoice(),
 			channelObservation: () => false,
 			knownObservation: () => true,

@@ -176,12 +176,17 @@ export interface SpeechContent {
 	 * partial window from SPEECH_SHORT_MIN_FRAMES on (speechHeard only), 0 under it.
 	 */
 	readonly maxRangeDb: number
-	/** Periodic frames over all frames (0 with none). */
+	/**
+	 * Periodic frames over the whole frames that are not mostly exact zeros (as levelFrames; 0
+	 * with none): a gap the recorder filled with silence neither counts nor dilutes the share.
+	 */
 	readonly periodicShare: number
 	/**
 	 * The longest run of consecutive frames at least SPEECH_NOISE_BURST_DB over its window's
 	 * median band level, the largest over the file's windows (a shorter file: its partial window,
-	 * as maxRangeDb): a word.
+	 * as maxRangeDb): a word. Unlike levelFrames and periodicShare it walks every whole frame, a
+	 * zero-filled gap's included: a gap's frames read a 0 dB band level, so they lower the window's
+	 * median (a burst beside a gap reads longer) and break a run (one across a gap reads shorter).
 	 */
 	readonly maxBurstFrames: number
 	/**
@@ -220,7 +225,8 @@ const LEVEL_FLOOR = 1e-10
 const LEVEL_MAX_ZEROS = SPEECH_FRAME_SAMPLES / 2
 
 /**
- * Streaming measure of one file's audio (SpeechContent); `push` allocates nothing and costs O(1)
+ * Streaming measure of one file's audio (SpeechContent); `push` allocates no buffers (its only
+ * allocations are two small typed-array views, `subarray`, per window measured) and costs O(1)
  * amortised per frame (one sort of SPEECH_WINDOW_FRAMES numbers per SPEECH_WINDOW_HOP frames for
  * each of the envelope and the admission level rings).
  */
@@ -295,7 +301,7 @@ export class SpeechContentMeter {
 		return {
 			frames,
 			maxRangeDb: whole ? this.maxRange : this.partialRange,
-			periodicShare: frames === 0 ? 0 : this.periodic / frames,
+			periodicShare: levelFrames === 0 ? 0 : this.periodic / levelFrames,
 			maxBurstFrames: whole ? this.maxBurst : this.partialBurst,
 			levelFrames,
 			maxWindowSpreadDb: levelWhole ? this.maxSpread : this.partialSpread,
@@ -304,7 +310,7 @@ export class SpeechContentMeter {
 	}
 
 	private measureFrame(): void {
-		if (this.analyse() >= SPEECH_PERIODIC_MIN_CORRELATION) this.periodic++
+		const peak = this.analyse()
 		this.heard++
 		if (
 			this.heard >= SPEECH_WINDOW_FRAMES &&
@@ -312,6 +318,7 @@ export class SpeechContentMeter {
 		)
 			this.measureWindow()
 		if (this.frameZeroHeavy) return
+		if (peak >= SPEECH_PERIODIC_MIN_CORRELATION) this.periodic++
 		this.levelRing[this.levelHeard % SPEECH_WINDOW_FRAMES] = this.frameLevel
 		this.levelHeard++
 		if (
