@@ -592,8 +592,10 @@ export function createActivityIngress(
 		// without a known protocol, is never linked while DMR recordings are off), whatever the
 		// decoder reported.
 		if (!dsdFmeCallRecordable(file.key.slice("dsd~".length))) return null
-		// And the call_end must say its call is clear: a P25, NXDN, dPMR or DMR call only with
-		// encryptionKnown true (its own positive clear evidence), any call never when encrypted.
+		// And the call_end must prove its call clear (callTrustAdmits): a P25 phase 1 or NXDN call
+		// only with encryptionKnown true and clearEvidence true (its own clear print), a DMR call
+		// only with encryptionKnown true, a P25 phase 2, dPMR, ProVoice, EDACS or M17 call never,
+		// any call never when encrypted.
 		if (!file.clear) return null
 		try {
 			if (!callRecordings(decoderId)) return null

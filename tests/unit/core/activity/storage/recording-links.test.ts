@@ -57,6 +57,8 @@ function callEnd(
 		protocol?: string | null
 		/** The call_end's encryptionKnown (default true); null leaves it out. */
 		known?: boolean | null
+		/** The call_end's clearEvidence marker (default true); null leaves it out. */
+		evidence?: boolean | null
 	} = {},
 ): DecodeEnvelope {
 	const protocol = patch.protocol === undefined ? "p25p1" : patch.protocol
@@ -72,6 +74,9 @@ function callEnd(
 			callId,
 			...(protocol !== null ? { protocol } : {}),
 			...(patch.known !== null ? { encryptionKnown: patch.known ?? true } : {}),
+			...(patch.evidence !== null
+				? { clearEvidence: patch.evidence ?? true }
+				: {}),
 			talkgroup: 9,
 			duration: 4200,
 			...(patch.wavFile !== undefined ? { wavFile: patch.wavFile } : {}),
@@ -486,8 +491,27 @@ describe("recording links in the store", () => {
 			wavFile: `/c/${NAME_A}`,
 			late: true,
 		})
+		// encryptionKnown true from an older rule, without the call's own clear print.
+		const unproven = callEnd("call-34", {
+			wavFile: `/c/${NAME_A}`,
+			evidence: null,
+		})
+		const pendingUnproven = callEnd("call-35", { evidence: null })
+		const lateOfUnproven = callEnd("call-35", {
+			wavFile: `/c/${NAME_A}`,
+			late: true,
+		})
 		const clear = callEnd("call-33", { wavFile: `/c/${NAME_B}` })
-		for (const e of [unknown, notKnown, pendingUnknown, lateOfUnknown, clear]) {
+		for (const e of [
+			unknown,
+			notKnown,
+			pendingUnknown,
+			lateOfUnknown,
+			unproven,
+			pendingUnproven,
+			lateOfUnproven,
+			clear,
+		]) {
 			const { refs: _refs, ...legacy } = e
 			first.admit(legacy)
 		}

@@ -31,6 +31,7 @@ function callEnd(
 			source: 2001,
 			duration: 4200,
 			encryptionKnown: true,
+			clearEvidence: true,
 			flags: { encrypted: false },
 			...data,
 		},
@@ -101,10 +102,15 @@ describe("dsd-fme call recordings in the Activity ingress", () => {
 		expect(ops).toEqual([])
 	})
 
-	it("never links a call whose call_end does not say it clear: P25 without encryptionKnown true, or encrypted; D-STAR without the field is linked", () => {
+	it("never links a call whose call_end does not say it clear: P25 without encryptionKnown true and its clearEvidence marker, or encrypted; D-STAR without the field is linked", () => {
 		const { ingress, rows, ops } = setup()
 		const shapes: Record<string, unknown>[] = [
 			{ encryptionKnown: undefined },
+			{ clearEvidence: undefined },
+			{ protocol: "nxdn48", clearEvidence: undefined },
+			{ protocol: "p25p2" },
+			{ protocol: "edacs" },
+			{ protocol: "m17" },
 			{ encryptionKnown: false },
 			{ encryptionKnown: true, flags: { encrypted: true } },
 			{ encryptionKnown: true, encrypted: true },

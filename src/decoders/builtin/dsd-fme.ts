@@ -1156,6 +1156,8 @@ interface CallEventData {
 	endedAt?: string
 	encrypted?: boolean
 	encryptionKnown?: boolean
+	/** The call printed its own positive clear (clearEvidenceField). */
+	clearEvidence?: true
 	protocol?: DsdFmeProtocol
 	talkgroup?: number | null
 	source?: number | null
@@ -2976,6 +2978,21 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (call.protocol === "dmr") return {}
 		return call.encryptionKnown !== undefined
 			? { encryptionKnown: call.encryptionKnown }
+			: {}
+	}
+
+	/**
+	 * The stored proof of a P25, NXDN, dPMR or ProVoice call's own positive
+	 * clear print, for its call_end and late file update: `clearEvidence:
+	 * true` only while that print held (markClear) and no privacy print
+	 * followed. Its Activity row is admitted on it (callTrustAdmits), so a
+	 * row an older rule wrote with `encryptionKnown: true` alone is not.
+	 */
+	private clearEvidenceField(call: DsdFmeCallState): { clearEvidence?: true } {
+		return positiveClearProtocol(call.protocol) &&
+			call.clearEvidence === true &&
+			!call.flags.encrypted
+			? { clearEvidence: true }
 			: {}
 	}
 
@@ -5261,6 +5278,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 							endedAt: this.wallIso(call, callEndTime),
 							// The update carries the call's trust like its first end.
 							...this.encryptionKnownField(call),
+							...this.clearEvidenceField(call),
 							protocol: call.protocol,
 							talkgroup: call.talkgroup,
 							source: call.source,
@@ -5556,6 +5574,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				startedAt: this.startedAtIso(callInfo),
 				endedAt: this.wallIso(callInfo, endTime),
 				...this.encryptionKnownField(callInfo),
+				...this.clearEvidenceField(callInfo),
 				protocol: callInfo.protocol,
 				talkgroup: callInfo.talkgroup,
 				source: callInfo.source,

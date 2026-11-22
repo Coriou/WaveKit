@@ -5,9 +5,12 @@
  * presented on the REST list or the WebSocket records; a YSF link and dv call recorder links are
  * (decided by the row's decoder, so a recorder name of a decoder whose id starts with `dmr` is
  * presented). A link is presented only
- * while its row's own call trust admits it (callTrustAdmits): a P25, NXDN, dPMR or ProVoice
- * link stored before that rule (no encryptionKnown) loses its play control, the row stays; a
- * D-STAR or YSF link is unchanged. Synthetic rows only.
+ * while its row's own call trust admits it (callTrustAdmits): a P25 phase 1 or NXDN link only
+ * when its call_end carries the call's own clear print (`clearEvidence: true` with
+ * `encryptionKnown: true`), so a link stored before that rule (no encryptionKnown, or
+ * `encryptionKnown: true` without the marker) loses its play control, the row stays; a P25
+ * phase 2, dPMR, ProVoice, EDACS or M17 link never plays; a D-STAR or YSF link is unchanged.
+ * Synthetic rows only.
  */
 import { rm } from "node:fs/promises"
 import Fastify from "fastify"
@@ -38,7 +41,11 @@ const DV_KEY = "dsd~20261012_100200_12347_dsd-fme_GROUP_TGT_9_SRC_2003.wav"
 const DV_DMR_ID_KEY =
 	"dsd~20261012_100300_12348_dmr-main_GROUP_TGT_9_SRC_2004.wav"
 /** A P25 call_end's data with its own clear print (callTrustAdmits admits it). */
-const CLEAR_P25 = { protocol: "p25p1", encryptionKnown: true }
+const CLEAR_P25 = {
+	protocol: "p25p1",
+	encryptionKnown: true,
+	clearEvidence: true,
+}
 /** A dsd-fme call name whose label is not on the recordable allow-list. */
 const FOO_KEY = "dsd~20261012_100400_12349_FOO_1_GROUP_TGT_9_SRC_2005.wav"
 
@@ -367,9 +374,10 @@ describe("activity: dsd-fme recording links at read time", () => {
 
 /**
  * dv call recorder links (served whatever their protocol) stored before the per-call trust rule
- * (fail open: a call_end without encryptionKnown), next to rows whose own data admits them, and
- * one dsd-fme P25 call file of a known clear row (never served: not presented either). Modelled
- * shapes, synthetic ids.
+ * (fail open: a call_end without encryptionKnown, or with `encryptionKnown: true` from an older
+ * rule but no `clearEvidence` marker), next to rows whose own data admits them, and one dsd-fme
+ * P25 call file of a known clear row (never served: not presented either). Modelled shapes,
+ * synthetic ids.
  */
 const TRUST_ROWS: Array<{
 	eventId: string
@@ -436,21 +444,83 @@ const TRUST_ROWS: Array<{
 		eventId: "p25-clear",
 		protocol: "p25",
 		key: "dsd~20261012_120110_20008_dsd-fme_GROUP_TGT_56_SRC_1237.wav",
-		data: { callId: "t8", protocol: "p25p1", encryptionKnown: true },
+		data: {
+			callId: "t8",
+			protocol: "p25p1",
+			encryptionKnown: true,
+			clearEvidence: true,
+		},
 		presented: true,
 	},
 	{
 		eventId: "nxdn-clear",
 		protocol: "nxdn",
 		key: "dsd~20261012_120120_20009_dsd-fme_GROUP_TGT_5678_SRC_1238.wav",
-		data: { callId: "t9", protocol: "nxdn48", encryptionKnown: true },
+		data: {
+			callId: "t9",
+			protocol: "nxdn48",
+			encryptionKnown: true,
+			clearEvidence: true,
+		},
 		presented: true,
+	},
+	{
+		eventId: "p25-known-unproven",
+		protocol: "p25",
+		key: "dsd~20261012_120300_20013_dsd-fme_GROUP_TGT_56_SRC_1240.wav",
+		data: { callId: "t13", protocol: "p25p1", encryptionKnown: true },
+		presented: false,
+	},
+	{
+		eventId: "nxdn-known-unproven",
+		protocol: "nxdn",
+		key: "dsd~20261012_120310_20014_dsd-fme_GROUP_TGT_5678_SRC_1241.wav",
+		data: { callId: "t14", protocol: "nxdn96", encryptionKnown: true },
+		presented: false,
+	},
+	{
+		eventId: "p25-marker-not-known",
+		protocol: "p25",
+		key: "dsd~20261012_120320_20015_dsd-fme_GROUP_TGT_56_SRC_1242.wav",
+		data: { callId: "t15", protocol: "p25p1", clearEvidence: true },
+		presented: false,
+	},
+	{
+		eventId: "p25p2-marked",
+		protocol: "p25",
+		key: "dsd~20261012_120330_20016_dsd-fme_GROUP_TGT_7070_SRC_40821.wav",
+		data: {
+			callId: "t16",
+			protocol: "p25p2",
+			encryptionKnown: true,
+			clearEvidence: true,
+		},
+		presented: false,
+	},
+	{
+		eventId: "edacs-open",
+		protocol: "edacs",
+		key: "dsd~20261012_120340_20017_dsd-fme_GROUP_TGT_0_SRC_0.wav",
+		data: { callId: "t17", protocol: "edacs" },
+		presented: false,
+	},
+	{
+		eventId: "m17-open",
+		protocol: "m17",
+		key: "dsd~20261012_120350_20018_dsd-fme_GROUP_TGT_0_SRC_0.wav",
+		data: { callId: "t18", protocol: "m17" },
+		presented: false,
 	},
 	{
 		eventId: "p25-clear-dsd-file",
 		protocol: "p25",
 		key: "dsd~20261012_120150_20012_P25_1A3_GROUP_TGT_56_SRC_1239.wav",
-		data: { callId: "t12", protocol: "p25p1", encryptionKnown: true },
+		data: {
+			callId: "t12",
+			protocol: "p25p1",
+			encryptionKnown: true,
+			clearEvidence: true,
+		},
 		presented: false,
 	},
 	{
@@ -505,7 +575,7 @@ function expectTrusted(items: readonly ActivitySummary[], body: string): void {
 }
 
 describe("activity: a stored dsd-fme link is presented only while its row's call trust admits it", () => {
-	it("the REST list keeps every call row and drops the play control of fail-open P25, P25 phase 2, NXDN, dPMR and ProVoice links", async () => {
+	it("the REST list keeps every call row and drops the play control of fail-open or unproven P25 and NXDN links and of P25 phase 2, dPMR, ProVoice, EDACS and M17 links", async () => {
 		const store = await openStore()
 		admitTrustRows(store)
 		const service = createActivityQueryService({

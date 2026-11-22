@@ -1191,17 +1191,20 @@ What this means in use:
 - **Scanner.** A scanner probe records such a call as encrypted in its evidence
   (no clear recording), so these calls read as encrypted in scanner evidence.
 - **Recordings.** dsd-fme's own per-call files (`-7 <dir> -P`) of P25, NXDN,
-  dPMR and ProVoice (named `EDACS_`) are never listed in Recordings, served,
+  dPMR, ProVoice (named `EDACS_`) and M17 are never listed in Recordings, served,
   downloaded or linked to their Activity row, in a dsd-fme directory or a scanner
   `dv` folder: the file name does not carry the call's clear print. The files stay
   on disk under the usual retention. Their known clear calls are kept by the
   digital-voice call recorder instead ([DIGITAL-VOICE.md](DIGITAL-VOICE.md)).
-  D-STAR, YSF and M17 dsd-fme files are listed and served as before.
-- **Activity.** A call file is linked only when the row's own `call_end` says
-  `encryptionKnown: true` (for P25, NXDN, dPMR, ProVoice and DMR) and not
-  encrypted, and the same check runs again when a row is read (REST and
+  D-STAR and YSF dsd-fme files are listed and served as before; M17 files are
+  not (its LSF carries an encryption type, and dsd-fme prints no clear proof).
+- **Activity.** A call file is linked only when the row's own `call_end` proves
+  it clear and not encrypted: `encryptionKnown: true` with `clearEvidence: true`
+  (the call's own clear print) for P25 phase 1 and NXDN, `encryptionKnown: true`
+  for DMR, never for P25 phase 2, dPMR, ProVoice, EDACS or M17, and the same check runs again when a row is read (REST and
   WebSocket): a link stored before this rule, for a call that was not known
-  clear, loses its play control; the row stays. DMR per-call
+  clear (or `encryptionKnown: true` without `clearEvidence`), loses its play
+  control; the row stays. DMR per-call
   recordings are off for now (`DMR_RECORDING_LINK_ENABLED` in
   `src/decoders/builtin/dmr-recording-gate.ts`): until DMR clearance is trusted, no
   DMR call file is written by the call recorder, listed, served or linked, clear or

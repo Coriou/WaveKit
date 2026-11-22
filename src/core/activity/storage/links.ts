@@ -286,6 +286,7 @@ export function backfillRecordingLinks(
 				json_extract(record_json, '$.payload.decodedData.protocol') AS protocol,
 				json_extract(record_json, '$.payload.decodedData.encrypted') AS encrypted,
 				json_extract(record_json, '$.payload.decodedData.encryptionKnown') AS known,
+				json_extract(record_json, '$.payload.decodedData.clearEvidence') AS evidence,
 				json_extract(record_json, '$.payload.decodedData.flags.encrypted') AS flagged
 			 FROM activity
 			 WHERE category = 'voice' AND kind = 'decoder-reception' AND seq > ? AND seq <= ?
@@ -330,6 +331,7 @@ export function backfillRecordingLinks(
 			const clear = callTrustAdmits(protocol, {
 				encrypted: bool(cell(row, "encrypted")),
 				encryptionKnown: bool(cell(row, "known")),
+				clearEvidence: bool(cell(row, "evidence")),
 				...(flagged !== null ? { flags: { encrypted: flagged } } : {}),
 			})
 			let target: PendingCall | undefined

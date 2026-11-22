@@ -124,14 +124,18 @@ probes). It records whether or not anyone is listening.
   evidence. In scanner evidence such a call reads as encrypted.
 - **dsd-fme's own files of these protocols are not served.** A dsd-fme per-call
   file (`enablePerCallRecording`, or a scanner probe's `dv` folder) of P25,
-  NXDN, dPMR or ProVoice (`EDACS_`) is never listed in Recordings, served or
+  NXDN, dPMR, ProVoice (`EDACS_`) or M17 is never listed in Recordings, served or
   linked, whatever the call was: its name does not carry the call's clear
   print. Those calls' recordings come from this recorder, which keeps only known
   clear audio. D-STAR and YSF dsd-fme files are unchanged.
 - **Old links re-checked.** An Activity row shows a recording only while its
   own `call_end` admits it (known clear, not encrypted), checked again on every
   read: a link stored earlier for a call that was not known clear has no play
-  control.
+  control. A P25 phase 1 or NXDN `call_end` proves its clear print with
+  `clearEvidence: true` next to `encryptionKnown: true`; a row with
+  `encryptionKnown: true` alone (written by an older build) is not proof and
+  shows no play control. P25 phase 2, dPMR, ProVoice, EDACS and M17 rows never
+  do.
 - **No DMR yet.** DMR per-call recordings are not listed, served, linked or
   recorded yet. The recorder writes no DMR call (nor one whose protocol is not
   known). A dsd-fme per-call file whose name says DMR (its system field starts

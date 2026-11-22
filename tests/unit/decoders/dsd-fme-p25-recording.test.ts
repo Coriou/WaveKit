@@ -20,6 +20,7 @@ interface EndData {
 	protocol?: string
 	encrypted?: boolean
 	encryptionKnown?: boolean
+	clearEvidence?: boolean
 	wavFile?: string
 	flags?: { encrypted?: boolean; wavFileUpdate?: boolean }
 }
@@ -74,14 +75,21 @@ describe("dsd-fme P25 recording link", () => {
 			for (const e of encrypted) {
 				expect(e.flags?.encrypted).toBe(true)
 				expect(e.wavFile).toBeUndefined()
+				expect(e.clearEvidence).toBeUndefined()
 			}
 			// A clear ALG that is not the call's LDU2 0x80 KEY 0 proves nothing.
-			for (const e of end("ALG ID: 0x80")) expect(e.wavFile).toBeUndefined()
+			for (const e of end("ALG ID: 0x80")) {
+				expect(e.wavFile).toBeUndefined()
+				expect(e.clearEvidence).toBeUndefined()
+			}
 			const clear = end(
 				" LDU2 ALG ID: 0x80 KEY ID: 0x0000 MI: 0x0000000000000000",
 			)
 			expect(clear[0]).toMatchObject({
 				protocol: "p25p1",
+				encryptionKnown: true,
+				// The stored row's own proof of the clear print (callTrustAdmits needs it).
+				clearEvidence: true,
 				wavFile: expect.stringContaining(root),
 			})
 		} finally {

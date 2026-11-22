@@ -771,8 +771,8 @@ function bounds(window: SeqWindow): { where: string[]; params: SqlValue[] } {
 
 /**
  * A row's call trust, from its stored call_end data (decodedData's protocol, else the row's,
- * and its encrypted, encryptionKnown and flags.encrypted), read only for a row whose summary
- * links a `dsd~` recording.
+ * and its encrypted, encryptionKnown, clearEvidence and flags.encrypted), read only for a row
+ * whose summary links a `dsd~` recording.
  */
 type RowTrust = (seq: bigint) => { protocol: unknown; data: CallTrustFields }
 
@@ -834,10 +834,12 @@ function dsdLinkPresentable(name: string, decoderId: unknown): boolean {
 /**
  * The summary without a stored `dsd~` `recording` that may not be presented: one the catalogue
  * no longer serves (a DMR call link stored before the DMR recording gate closed), or one whose
- * row's own call trust does not admit a recording (callTrustAdmits: a P25, NXDN, dPMR or
- * ProVoice call only with encryptionKnown true, any call never when it says encrypted; a link
- * stored before that rule, fail open, loses its play control). No row shows a play control the
- * rule refuses; the row itself, the call, is always kept.
+ * row's own call trust does not admit a recording (callTrustAdmits: a P25 phase 1 or NXDN call
+ * only with encryptionKnown true and the adapter's clearEvidence marker of its own clear print, a
+ * P25 phase 2, dPMR, ProVoice, EDACS or M17 call never, any call never when it says encrypted; a
+ * link stored before that rule, without encryptionKnown or with encryptionKnown true but no
+ * marker, loses its play control). No row shows a play control the rule refuses; the row
+ * itself, the call, is always kept.
  */
 function withoutUnservableRecording(
 	summary: Record<string, unknown>,
@@ -887,6 +889,7 @@ function rowTrustReader(db: SqlDatabase): RowTrust {
 			`SELECT json_extract(record_json, '$.payload.decodedData.protocol') AS protocol,
 				json_extract(record_json, '$.payload.decodedData.encrypted') AS encrypted,
 				json_extract(record_json, '$.payload.decodedData.encryptionKnown') AS known,
+				json_extract(record_json, '$.payload.decodedData.clearEvidence') AS evidence,
 				json_extract(record_json, '$.payload.decodedData.flags.encrypted') AS flagged
 			 FROM activity WHERE seq = ?`,
 		)
@@ -899,6 +902,7 @@ function rowTrustReader(db: SqlDatabase): RowTrust {
 			data: {
 				encrypted: sqlBool(row["encrypted"]),
 				encryptionKnown: sqlBool(row["known"]),
+				clearEvidence: sqlBool(row["evidence"]),
 				...(flagged !== null && flagged !== undefined
 					? { flags: { encrypted: flagged } }
 					: {}),
