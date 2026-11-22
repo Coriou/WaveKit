@@ -22,7 +22,7 @@ import { recordingDsdFmeDirs } from "../../../src/index.js"
 const origin = "http://receiver.lan:9000"
 const host = "receiver.lan:9000"
 const logger = pino({ level: "silent" })
-const CALL = "20261016_120000_01234_1_GROUP_TGT_100_SRC_2001.wav"
+const CALL = "20261016_120000_01234_P25_1_GROUP_TGT_100_SRC_2001.wav"
 
 function wav(dataBytes: number, rate = 8000): Buffer {
 	const b = Buffer.alloc(44 + dataBytes)
@@ -179,6 +179,88 @@ describe("recordings inventory through the API server", () => {
 			url: `/api/recordings/${encodeURIComponent(`dsd:0~${CALL}`)}/file`,
 		})
 		expect(file.statusCode).toBe(404)
+	})
+
+	async function protectedApp(
+		root: string,
+		inventory: ReturnType<typeof createRecordingInventory>,
+	) {
+		const directory = join(root, "private")
+		const storage = await PrivateAccessStorage.open({
+			directory,
+			ownership: "single-host-pid-namespace",
+			mode: "provision",
+		})
+		const token = storage.useMachineCredential(value => value)
+		await storage.close()
+		const access = await openAccessRuntime(runtimeOptions(directory))
+		cleanup.push(() => access.close())
+		const server = new ApiServer(
+			dependencies({ recordingInventory: inventory, access }),
+			{
+				host: "127.0.0.1",
+				port: 0,
+				accessBootstrap: runtimeOptions(directory).bootstrap,
+				publicOrigins: {
+					api: origin,
+					analogAudio: "http://receiver.lan:9001",
+					digitalAudio: "http://receiver.lan:9002",
+				},
+			},
+		)
+		cleanup.push(() => server.stop())
+		await server.start()
+		return {
+			app: server.getApp(),
+			authorized: { host, authorization: `Bearer ${token}` },
+		}
+	}
+
+	it("protected: a dsd-fme DMR call file (or one of no known protocol) is neither listed nor served; P25 and NXDN are", async () => {
+		const { root, inventory, bytes, calls } = await setup()
+		const DMR = "20261016_120001_01234_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
+		const UNNAMED = "20261016_120002_01234__GROUP_TGT_9_SRC_2001.wav"
+		const NXDN = "20261016_120003_01234_NXDN_RAN_1_GROUP_TGT_9_SRC_2001.wav"
+		const old = (Date.now() - 60_000) / 1000
+		for (const name of [DMR, UNNAMED, NXDN]) {
+			await fs.writeFile(join(calls, name), bytes)
+			await fs.utimes(join(calls, name), old, old)
+		}
+		const { app, authorized } = await protectedApp(root, inventory)
+		const list = await app.inject({
+			method: "GET",
+			url: "/api/recordings",
+			headers: authorized,
+		})
+		expect(list.statusCode).toBe(200)
+		expect(
+			list
+				.json<RecordingInventoryPage>()
+				.items.map(i => i.id)
+				.sort(),
+		).toEqual([`dsd:0~${CALL}`, `dsd:0~${NXDN}`].sort())
+		const get = (id: string) =>
+			app.inject({
+				method: "GET",
+				url: `/api/recordings/${encodeURIComponent(id)}/file`,
+				headers: authorized,
+			})
+		for (const name of [DMR, UNNAMED]) {
+			expect((await get(`dsd:0~${name}`)).statusCode).toBe(404)
+			expect((await get(`dsd~${name}`)).statusCode).toBe(404)
+			expect(await inventory.open(`dsd:0~${name}`)).toBeNull()
+			expect(await inventory.resolve(`dsd~${name}`)).toBeNull()
+		}
+		for (const name of [CALL, NXDN]) {
+			const file = await get(`dsd:0~${name}`)
+			expect(file.statusCode).toBe(200)
+			expect(file.rawPayload.equals(bytes)).toBe(true)
+			expect((await get(`dsd~${name}`)).statusCode).toBe(200)
+		}
+		// The refused files stay on disk.
+		expect((await fs.readdir(calls)).sort()).toEqual(
+			[CALL, DMR, NXDN, UNNAMED].sort(),
+		)
 	})
 
 	it("protected: denied without a credential, then lists and downloads", async () => {

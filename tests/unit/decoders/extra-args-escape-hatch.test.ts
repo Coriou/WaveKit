@@ -303,7 +303,7 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 			fs.writeFileSync(
 				path.join(
 					dir,
-					"20260109_105327_123_DMR_CC_1_GROUP_TGT_100_SRC_200.wav",
+					"20260109_105327_123_NXDN_CC_1_GROUP_TGT_100_SRC_200.wav",
 				),
 				"",
 			)
@@ -321,16 +321,16 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 					timeout: boolean,
 				): { data: { wavFile?: string } } | null
 			}
+			// An NXDN call: DMR recordings are off (dmr-recording-gate.ts), so a DMR call has no file.
 			d.callState = {
 				callId: "c",
-				protocol: "dmr",
+				protocol: "nxdn48",
 				talkgroup: 100,
 				source: 200,
 				startTime: start,
 				// The call's wall start (set by startPendingCall in production).
 				startWallMs: start.getTime(),
 				lastUpdate: start,
-				dmr: { cc: 1 },
 				quality: { crcErrs: 0, fecErrs: 0 },
 				flags: {},
 			}

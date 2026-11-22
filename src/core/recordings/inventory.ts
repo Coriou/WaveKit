@@ -35,6 +35,7 @@ import type {
 import {
 	DSD_FME_CALL_WAV,
 	DSD_FME_TEMP_WAV,
+	dsdFmeCallRecordable,
 } from "../../decoders/builtin/call-recordings.js"
 import { safeErrorFields } from "../../decoders/safe-error-fields.js"
 import { WaveKitError } from "../../utils/errors.js"
@@ -493,6 +494,16 @@ function note(
 /** A dsd source's kinds: dsd-fme's own directories and the dv call recorder's. */
 function isCallKind(kind: RecordingInventoryKind): boolean {
 	return kind === "dsd-fme-call" || kind === "dv-call"
+}
+
+/**
+ * Whether a file of this name in a folder of this kind may be listed or opened. dsd-fme's own
+ * per-call files carry their protocol in the name: one that is not recordable (DMR while DMR
+ * recordings are off, or no or an unknown protocol) is neither listed nor opened, and stays on
+ * disk under the usual retention. The dv call recorder writes only recordable calls.
+ */
+function callFileServable(kind: RecordingInventoryKind, name: string): boolean {
+	return kind !== "dsd-fme-call" || dsdFmeCallRecordable(name)
 }
 
 /** A dsd-fme call name the inventory lists (never TEMP), as `dsd:<n>~<name>`. */
@@ -1343,7 +1354,9 @@ export function createRecordingInventory(
 	): string | null {
 		const id =
 			spec.dsdIndex !== null
-				? dsdId(spec.dsdIndex, name)
+				? callFileServable(spec.kind, name)
+					? dsdId(spec.dsdIndex, name)
+					: null
 				: spec.discoveryId !== null
 					? scanId(spec.discoveryId, name)
 					: null
@@ -2188,6 +2201,7 @@ export function createRecordingInventory(
 			if (dsdId(0, name) === null) return []
 			const out: Location[] = []
 			for (const source of await dsdSources(newCounts())) {
+				if (!callFileServable(source.kind, name)) continue
 				const file = childPath(source.dir, name)
 				const real = childPath(source.real, name)
 				if (file !== null && real !== null)
@@ -2202,7 +2216,7 @@ export function createRecordingInventory(
 			if (dsdId(Number(n), dsdName) !== id) return []
 			const sources = await dsdSources(newCounts())
 			const source = sources[Number(n)]
-			if (!source) return []
+			if (!source || !callFileServable(source.kind, dsdName)) return []
 			const file = childPath(source.dir, dsdName)
 			const real = childPath(source.real, dsdName)
 			if (file === null || real === null) return []

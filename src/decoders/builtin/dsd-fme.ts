@@ -2294,9 +2294,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Input from stdin (receives WAV stream from sox)
 		args.push("-i", "/dev/stdin")
 
-		// Per-call WAV files: -7 <dir> must precede -P (-w is one static file).
+		// Per-call WAV files: -7 <dir> must precede -P (-w is one static file). A mode that can
+		// only decode DMR asks for none while DMR recordings are off (they would never be listed,
+		// served or linked). Retention still runs on the directory (files written before).
 		const recordingDir = this.recordingDir()
-		if (recordingDir !== null) {
+		if (
+			recordingDir !== null &&
+			(this.options.mode !== "dmr" || DMR_RECORDING_LINK_ENABLED)
+		) {
 			args.push("-7", recordingDir, "-P")
 		}
 

@@ -165,10 +165,13 @@ describe("web-gaps-8 contract", () => {
 		expect(RECORDINGS_HEADER_READ_BYTES).toBe(4096)
 		expect(RECORDINGS_SCAN_CONCURRENCY).toBe(8)
 		expect(RECORDINGS_IN_PROGRESS_MS).toBe(RECORDING_IN_PROGRESS_MS)
+		// `dv-call` (the digital-voice call recorder's files) was added after this freeze, as an
+		// additive kind; the original three are unchanged.
 		expect(RECORDING_INVENTORY_KINDS).toEqual([
 			"dsd-fme-call",
 			"scanner-dv",
 			"scanner-analog",
+			"dv-call",
 		])
 		for (const ok of [
 			"dsd:0~20261016_120000_01234_1_GROUP_TGT_100_SRC_2001.wav",

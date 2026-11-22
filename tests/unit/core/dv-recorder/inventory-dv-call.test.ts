@@ -12,7 +12,7 @@ import { wavHeader } from "../../../../src/core/dv-recorder/wav-writer.js"
 import { dvCallFileName } from "../../../../src/core/dv-recorder/names.js"
 
 const logger = pino({ level: "silent" })
-const DSD = "20261012_100000_12345_DMR_CC_1_GROUP_TGT_9_SRC_1.wav"
+const DSD = "20261012_100000_12345_P25_1A3_GROUP_TGT_9_SRC_1.wav"
 const DV_A = "20261012_100500_00042_dsd-fme_GROUP_TGT_9_SRC_1.wav"
 const DV_B = "20261012_100600_00043_dsd-fme-2_PRIVATE_TGT_7_SRC_3.wav"
 const TEMP = "TEMP_dv_20261012_100700_0001.wav"

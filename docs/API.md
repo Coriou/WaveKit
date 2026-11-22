@@ -6918,7 +6918,7 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
 {
 	"items": [
 		{
-			"id": "dsd:0~20261016_141503_12345_DMR_GROUP_TGT_9_SRC_2301234.wav",
+			"id": "dsd:0~20261016_141503_12345_P25_1A3_GROUP_TGT_9_SRC_2301234.wav",
 			"kind": "dsd-fme-call",
 			"decoderId": "dsd-main",
 			"discoveryId": null,
@@ -6930,7 +6930,7 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
 			"talkgroup": "9",
 			"source": "2301234",
 			"frequencyHz": null,
-			"key": "dsd~20261016_141503_12345_DMR_GROUP_TGT_9_SRC_2301234.wav",
+			"key": "dsd~20261016_141503_12345_P25_1A3_GROUP_TGT_9_SRC_2301234.wav",
 			"ownerDiscoveryId": null
 		}
 	],
@@ -7747,7 +7747,13 @@ Which rows link:
 
 A dsd-fme per-call file is linked only to a call known clear: an encrypted
 call, or one whose encryption was never known, is never linked, so its audio
-never becomes playable. DMR per-call recordings are not linked or kept yet.
+never becomes playable. DMR per-call recordings are not listed, served,
+linked or recorded yet: `GET /api/recordings` lists no dsd-fme call file whose
+name says DMR (nor one whose name says no known protocol), its `file` route
+answers 404 for one, no Activity row links one (backfill included), and a
+dsd-fme decoder in `mode: dmr` is not asked for per-call files. A row linked
+to one before is unlinked by the link sweep below, as for a deleted file.
+Files dsd-fme already wrote stay on disk under the usual retention.
 
 A link goes when its file goes (pruned, deleted, retention, a removed
 discovery, removed by hand): once a complete catalogue has lacked the key on

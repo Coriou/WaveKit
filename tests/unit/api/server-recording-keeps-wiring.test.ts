@@ -34,7 +34,7 @@ import {
 const origin = "http://receiver.lan:9000"
 const host = "receiver.lan:9000"
 const logger = pino({ level: "silent" })
-const CALL = "20261016_120000_01234_1_GROUP_TGT_100_SRC_2001.wav"
+const CALL = "20261016_120000_01234_P25_1_GROUP_TGT_100_SRC_2001.wav"
 const ID = `dsd:0~${CALL}`
 const KEEP = `/api/recordings/${encodeURIComponent(ID)}/keep`
 const DEL = `/api/recordings/${encodeURIComponent(ID)}`

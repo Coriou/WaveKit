@@ -301,7 +301,7 @@ describe("recordingRoutes over a real inventory", () => {
 		root = await mkdtemp(join(tmpdir(), "rec-routes-real-"))
 		const dsd = join(root, "dsd")
 		await mkdir(dsd)
-		const name = "20261016_120000_01234_1_GROUP_TGT_1_SRC_2.wav"
+		const name = "20261016_120000_01234_P25_1_GROUP_TGT_1_SRC_2.wav"
 		const file = join(dsd, name)
 		const now = Date.now() + 60_000
 		await writeFile(file, BYTES)

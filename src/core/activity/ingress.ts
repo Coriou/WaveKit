@@ -19,6 +19,7 @@ import type {
 } from "./storage/contract.js"
 import { activityChannelOf, recordingLinkOf } from "./storage/row.js"
 import { dsdFmeKeepKey } from "../recordings/contract.js"
+import { dsdFmeCallRecordable } from "../../decoders/builtin/dmr-recording-gate.js"
 import { DV_TAP_END_MAX_MS } from "../dv-tap/types.js"
 import type {
 	ActivityChannel,
@@ -581,6 +582,10 @@ export function createActivityIngress(
 		file: CallEndFile,
 	): ActivityRecordingLink | null => {
 		if (file.key === null || callRecordings === null) return null
+		// dsd-fme's own call file: its name must say a recordable protocol (a DMR name, or one
+		// without a known protocol, is never linked while DMR recordings are off), whatever the
+		// decoder reported.
+		if (!dsdFmeCallRecordable(file.key.slice("dsd~".length))) return null
 		try {
 			if (!callRecordings(decoderId)) return null
 		} catch {

@@ -26,7 +26,7 @@ import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
 import { serviceHarness } from "../../../mocks/scanner/service-fakes.js"
 
 const quiet = createLogger({ level: "fatal" })
-const CALL = "20261016_120000_01234_1_GROUP_TGT_100_SRC_2001.wav"
+const CALL = "20261016_120000_01234_P25_1_GROUP_TGT_100_SRC_2001.wav"
 
 function wav(dataBytes: number): Buffer {
 	const b = Buffer.alloc(44 + dataBytes)

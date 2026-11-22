@@ -24,7 +24,10 @@ import {
 	dsdFmeVoiceSlotArg,
 	type DsdFmeVoiceCallState,
 } from "../../../src/decoders/builtin/dsd-fme.js"
-import { pruneCallRecordings } from "../../../src/decoders/builtin/call-recordings.js"
+import {
+	DMR_RECORDING_LINK_ENABLED,
+	pruneCallRecordings,
+} from "../../../src/decoders/builtin/call-recordings.js"
 import type {
 	DecoderConfig,
 	DecoderOutput,
@@ -173,6 +176,24 @@ describe("dsd-fme voice output arguments", () => {
 		expect(out.slice(at, at + 3)).toEqual(["-7", "/data/calls", "-P"])
 		expect(out).not.toContain("-w")
 		expect(out).toContain("udp:127.0.0.1:40000")
+	})
+
+	it("asks a DMR-only decoder for no per-call files while DMR recordings are off", () => {
+		for (const opts of [
+			{ enablePerCallRecording: true, perCallRecordingDir: "/data/calls" },
+			{ output: "wav", wavDir: "/data/wav" },
+		]) {
+			const dmr = args({ mode: "dmr", ...opts })
+			expect(dmr).toContain("-fs")
+			if (DMR_RECORDING_LINK_ENABLED) expect(dmr).toContain("-P")
+			else {
+				expect(dmr).not.toContain("-P")
+				expect(dmr).not.toContain("-7")
+			}
+			// Auto and every non-DMR mode still record per call.
+			for (const mode of ["auto", "p25", "nxdn", "ysf", "dstar", "dpmr"])
+				expect(args({ mode, ...opts })).toContain("-P")
+		}
 	})
 
 	it('maps the legacy output "wav" to per-call files in wavDir with no live audio', () => {

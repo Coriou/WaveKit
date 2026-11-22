@@ -108,9 +108,14 @@ probes). It records whether or not anyone is listening.
   loses its whole file, and so does a call that ends before it is known to be
   clear. Audio that arrives too late to be checked against the call's events
   may still slip through (a known limit).
-- **No DMR yet.** DMR per-call recordings are not linked or kept yet: the
-  recorder writes no DMR call (nor one whose protocol is not known), and a
-  dsd-fme DMR call file is never linked to its Activity row.
+- **No DMR yet.** DMR per-call recordings are not listed, served, linked or
+  recorded yet. The recorder writes no DMR call (nor one whose protocol is not
+  known). A dsd-fme per-call file whose name says DMR (its system field starts
+  `DMR_`), or no known protocol, is not listed in Recordings, cannot be
+  downloaded and is never linked to its Activity row; a dsd-fme decoder in
+  `mode: dmr` is not asked for per-call files at all. An Activity row linked to
+  one earlier loses that link within a few minutes. Files dsd-fme already
+  wrote stay on disk under the usual retention.
 - **About 2 s behind the air.** Each sample is held for 2 s before it is
   written, so a late encryption notice can still withhold it. The call's end
   also reaches the recorder up to 10 s after the decoder reported it.
