@@ -1,0 +1,151 @@
+/* wk-explore: hint. The hint recipe (docs/web/DESIGN.md, Hints), web-local until it is approved into the kit's
+   ui.css. Existing tokens only: no new colour, no new token. */
+@layer wk-app {
+	/* label and mark: one hover anchor */
+	.wk-hint-anchor {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		min-width: 0;
+	}
+	/* the mark: a quiet info glyph after a label, the only resting trace of a hint. text-4 keeps 3:1 (a control) */
+	.wk-hint-mark {
+		position: relative;
+		display: inline-grid;
+		place-items: center;
+		width: 20px;
+		height: 20px;
+		flex: none;
+		padding: 0;
+		border: 0;
+		border-radius: 50%;
+		background: transparent;
+		color: var(--wk-text-4);
+		cursor: help;
+		transition:
+			color var(--wk-dur-2),
+			background-color var(--wk-dur-2);
+	}
+	.wk-hint-mark:hover,
+	.wk-hint-anchor:hover > .wk-hint-mark {
+		color: var(--wk-text-2);
+	}
+	.wk-hint-mark[aria-expanded="true"] {
+		color: var(--wk-accent);
+		background: var(--wk-sel);
+	}
+	/* touch: a 44 px target around the 20 px glyph */
+	@media (pointer: coarse) {
+		.wk-hint-mark::after {
+			content: "";
+			position: absolute;
+			inset: -12px;
+		}
+	}
+
+	/* the bubble: solid (never blurred, it lies over text and controls), e2, inside its host surface. The menus'
+	   colour on an opaque base: their .92 glass would let the controls underneath show through */
+	.wk-hint {
+		position: fixed;
+		left: 0;
+		top: 0;
+		z-index: 9;
+		box-sizing: border-box;
+		max-width: 280px;
+		padding: 8px 12px;
+		border-radius: var(--wk-r-4);
+		background:
+			linear-gradient(var(--wk-fill-glass), var(--wk-fill-glass)),
+			var(--wk-surface);
+		border: 1px solid var(--wk-line-14);
+		box-shadow: var(--wk-e2);
+		font-family: var(--wk-font-ui);
+		font-size: var(--wk-fs-sm);
+		font-weight: 400;
+		line-height: 1.5;
+		text-transform: none;
+		letter-spacing: normal;
+		white-space: normal;
+		color: var(--wk-text-soft);
+		opacity: 0;
+		transform: translateY(4px);
+		transition:
+			opacity var(--wk-dur-1) var(--wk-ease-out),
+			transform var(--wk-dur-1) var(--wk-ease-out);
+	}
+	.wk-hint[data-side="below"] {
+		transform: translateY(-4px);
+	}
+	/* no room for all of it beside its row: cut to the room (placed inline), the body scrolls, the page does not */
+	.wk-hint[data-scroll] {
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
+	.wk-hint[data-open] {
+		opacity: 1;
+		transform: none;
+	}
+	.wk-hint p {
+		margin: 0;
+	}
+	.wk-hint-more {
+		margin-left: 6px;
+		padding: 0;
+		border: 0;
+		background: none;
+		font: inherit;
+		font-weight: 700;
+		color: var(--wk-accent);
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	/* the learn card: the same bubble, pinned, for the few deep concepts */
+	.wk-hint[data-learn] {
+		max-width: 340px;
+		padding: 14px 16px;
+		border-radius: var(--wk-r-5);
+	}
+	.wk-hint-lead {
+		color: var(--wk-text);
+	}
+	.wk-hint-terms {
+		display: grid;
+		grid-template-columns: max-content 1fr;
+		gap: 6px 12px;
+		margin: 10px 0 0;
+	}
+	.wk-hint-terms > div {
+		display: contents;
+	}
+	.wk-hint-terms dt {
+		font-weight: 700;
+		color: var(--wk-text);
+	}
+	.wk-hint-terms dd {
+		margin: 0;
+		color: var(--wk-text-2);
+	}
+	.wk-hint p.wk-hint-foot {
+		margin-top: 12px;
+		padding-top: 10px;
+		border-top: 1px solid var(--wk-line-08);
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+	}
+	/* reduced motion: no slide, no fade; the hint simply appears */
+	@media (prefers-reduced-motion: reduce) {
+		.wk-hint,
+		.wk-hint-mark {
+			transition: none;
+			transform: none;
+		}
+		.wk-hint {
+			opacity: 1;
+		}
+	}
+	[data-wk-motion="reduce"] .wk-hint {
+		transition: none;
+		transform: none;
+		opacity: 1;
+	}
+}

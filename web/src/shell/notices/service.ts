@@ -11,7 +11,9 @@
 // toast is never displaced by another condition's: the other waits, and shows when the one on screen goes if
 // its condition is still active (a toast of the same key takes the new text and time). Both
 // timers pause while the ⌘K palette is open, while a toast is hovered and while focus is inside one; a
-// condition toast resuming from a pause is dropped if its condition cleared meanwhile.
+// condition toast resuming from a pause is dropped if its condition cleared meanwhile. Each toast's own timer also
+// waits while the shell layout has no place for it (`setUnseen`: waiting, or not placed yet), so its time runs only
+// while it can be read: a receipt with Undo is never lost unseen.
 import { Store } from "../../data/store.ts"
 
 /** How long a receipt shows (ms). */
@@ -129,8 +131,6 @@ export class NoticeService {
 	)
 	/** The condition toast on screen. */
 	readonly shown = new Store<ShownCondition | null>(null)
-	/** The region holds a toast (the tuned card then keeps off the top-centre anchor). */
-	readonly occupied = new Store<boolean>(false)
 
 	private seq = 0
 	private receiptTimer: PausableTimer | null = null
@@ -141,6 +141,8 @@ export class NoticeService {
 	private linkHidden = false
 	/** The toast (receipt or condition id) focus is inside, or null. */
 	private focusedId: number | null = null
+	/** Toasts the layout shows nowhere now (waiting for room, or not placed yet): their timers wait. */
+	private readonly unseen = { receipt: false, condition: false }
 
 	constructor() {
 		this.receipt.subscribe(() => this.syncToasts())
@@ -165,8 +167,20 @@ export class NoticeService {
 				this.receiptTimer = null
 				if (this.receipt.get()?.id === r.id) this.receipt.set(null)
 			},
-			this.paused(),
+			this.paused() || this.unseen.receipt,
 		)
+	}
+
+	/**
+	 * The notice region says whether the receipt or the condition toast is on screen now (false while the shell
+	 * layout lets it wait, or has not placed it yet): its timer runs only while it is.
+	 */
+	setUnseen(which: "receipt" | "condition", on: boolean): void {
+		if (this.unseen[which] === on) return
+		this.unseen[which] = on
+		const timer = which === "receipt" ? this.receiptTimer : this.shownTimer
+		if (on || this.paused()) timer?.pause()
+		else timer?.resume()
 	}
 
 	dismissReceipt(): void {
@@ -254,11 +268,11 @@ export class NoticeService {
 			this.shownTimer?.pause()
 			return
 		}
-		this.receiptTimer?.resume()
+		if (!this.unseen.receipt) this.receiptTimer?.resume()
 		const shown = this.shown.get()
 		if (shown && !shown.persist && !this.conditions.get().has(shown.key))
 			this.endShown()
-		else this.shownTimer?.resume()
+		else if (!this.unseen.condition) this.shownTimer?.resume()
 	}
 
 	/**
@@ -288,6 +302,8 @@ export class NoticeService {
 		this.pauses.clear()
 		this.focusedId = null
 		this.linkHidden = false
+		this.unseen.receipt = false
+		this.unseen.condition = false
 		this.receipt.set(null)
 		this.shown.set(null)
 		this.conditions.set(new Map())
@@ -327,7 +343,7 @@ export class NoticeService {
 				this.shownTimer = null
 				if (this.shown.get()?.id === s.id) this.endShown()
 			},
-			this.paused(),
+			this.paused() || this.unseen.condition,
 		)
 	}
 
@@ -353,7 +369,6 @@ export class NoticeService {
 	private syncToasts(): void {
 		const receipt = this.receipt.get()
 		const shown = this.shown.get()
-		this.occupied.set(receipt !== null || shown !== null)
 		if (
 			this.focusedId !== null &&
 			receipt?.id !== this.focusedId &&

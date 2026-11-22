@@ -27,12 +27,28 @@
  * - `--flow=play` (fake target only): play anywhere on the same mock core: a row's disc plays its recording in
  *   the one dock, which outlives the drawer, Recordings marks it, Listen holds and gets live audio back, and
  *   "With audio" asks for `hasRecording=true`. The report gains `play`.
+ * - `--flow=hints` (fake target only): every hint in Listen's Audio options on the same mock core, at 1440×900
+ *   and 390×844: each mark reached by Tab, its hint shown on focus inside its host and the window, clear of
+ *   other islands and its own row; Enter pins, Escape closes the hint only, a tap pins (hints-flow.ts). The
+ *   report gains `hints`.
+ * - `--flow=layout` (fake target only): the shell layout on the same mock core (layout-flow.ts): with Listen on, a
+ *   recording playing, a link condition and a receipt held on screen, at 1440×900, 1280×800, 1100×800 and 390×844
+ *   and in each drawer state (none, Activity, Recordings, Scanner, expanded Cards; sheets on a phone; the card
+ *   minimised to its line where it shows), every `[data-wk-slot]` box: none may intersect or crowd another or
+ *   leave the window's margin, each must equal its `data-wk-rect`, no chip may lie under one, no status item or the
+ *   player on the plot's chips or rows, and the frame, the player and the card's home may not move between a
+ *   viewport's cells; every expected island must be on screen or listed as waiting; playback starting and one
+ *   drawer opening per viewport are sampled frame by frame with the transitions on; the Map view's chrome is
+ *   checked at every viewport with and without Activity open, and the phone's Listen panel against the Receiver.
+ *   The report gains `layout`.
  * - `--flow=naming` (fake target only): names and the removed Messages view on the same mock core: `#/messages`
  *   lands on Activity in Cards, a scanner row reads "FM voice", a roll-over part "Part 1 of 3 · continues", a tag
  *   at a saved frequency its saved name, and no visible "Show in" (naming-flow.ts). The report gains `naming`.
  *
  * Every pairing it makes is named "ui-check" and is signed out when the run ends.
- * Exit: 0 healthy, 1 unhealthy, 2 could not run.
+ * Exit: 0 healthy, 1 unhealthy, 2 could not run, 3 not observed (`--flow=layout` only: no violation, but the host
+ * painted too few frames for a sampled cell even after its retry; the report's `layout.status` is
+ * "infra-unobserved" and `layout.infra` names the cells; never a pass).
  */
 import type { ClientRequest, IncomingMessage } from "node:http"
 import {
@@ -65,9 +81,11 @@ import {
 	type PanelBench,
 	type PanelLook,
 } from "./panel-check.ts"
+import { hintsFlow, type HintsReport } from "./hints-flow.ts"
 import { listenFlow, type ListenReport } from "./listen-flow.ts"
 import { noticesFlow, type NoticesReport } from "./notices-flow.ts"
 import { playFlow, type PlayReport } from "./play-flow.ts"
+import { layoutFlow, type LayoutReport } from "./layout-flow.ts"
 import { NAMING_ROUTE, namingFlow, type NamingReport } from "./naming-flow.ts"
 import {
 	FORBIDDEN_PORTS,
@@ -130,8 +148,8 @@ export interface Options {
 	allowMeasure: boolean
 	/** Fake target: the production build (vite build, then vite preview) instead of the dev server. */
 	built: boolean
-	/** `--flow=listen`, `--flow=play`, `--flow=naming` or `--flow=notices`: drive that flow on the mock core (fake target only). */
-	flow: "listen" | "play" | "naming" | "notices" | null
+	/** `--flow=listen`, `--flow=play`, `--flow=naming`, `--flow=notices`, `--flow=hints` or `--flow=layout`: drive that flow on the mock core (fake target only). */
+	flow: "listen" | "play" | "naming" | "notices" | "hints" | "layout" | null
 }
 
 /** The run cannot start or finish (exit 2); the message never holds a credential. */
@@ -189,7 +207,9 @@ export function parseOptions(argv: readonly string[]): Options {
 			(value === "listen" ||
 				value === "play" ||
 				value === "naming" ||
-				value === "notices")
+				value === "notices" ||
+				value === "hints" ||
+				value === "layout")
 		)
 			options.flow = value
 		else if (flag === "--seed-recordings" && /^\d{1,6}$/.test(value)) {
@@ -677,6 +697,8 @@ export async function run(
 ): Promise<{
 	report: Record<string, unknown>
 	healthy: boolean
+	/** Unhealthy only because a layout cell was not observed (exit 3). */
+	unobserved: boolean
 }> {
 	const exe = chromiumPath()
 	if (exe === null)
@@ -714,8 +736,10 @@ export async function run(
 				port: apiPort,
 				audioPort: mockAudioPort,
 				audioOrigin: `http://${LOOPBACK}:${mockAudioPort}`,
-				// the notices flow counts the core's onset in snapshot ticks: a quicker tick, same rule
-				...(options.flow === "notices" ? { resourcesIntervalMs: 1000 } : {}),
+				// the notices and layout flows count the core's onset in snapshot ticks: a quicker tick, same rule
+				...(options.flow === "notices" || options.flow === "layout"
+					? { resourcesIntervalMs: 1000 }
+					: {}),
 			})
 			mockApi = `http://${LOOPBACK}:${apiPort}`
 			await server.listen()
@@ -971,6 +995,11 @@ export async function run(
 			play = await playFlow(page)
 			await shoot("2-play")
 		}
+		let hints: HintsReport | null = null
+		if (options.flow === "hints") {
+			hints = await hintsFlow(page, shoot, mockApi)
+			await shoot("2-hints")
+		}
 		let naming: NamingReport | null = null
 		if (options.flow === "naming") {
 			naming = await namingFlow(page)
@@ -986,6 +1015,11 @@ export async function run(
 					.waitFor({ timeout: DRAW_WAIT_MS })
 			})
 			await shoot("2-notices")
+		}
+		let layout: LayoutReport | null = null
+		if (options.flow === "layout") {
+			layout = await layoutFlow(page, mockApi)
+			await shoot("2-layout")
 		}
 		const last = options.actions.length > 0 ? await look(page, core) : null
 		if (last !== null) await shoot("2-after-actions")
@@ -1016,11 +1050,15 @@ export async function run(
 				? listen.ok
 				: play !== null
 					? play.ok
-					: naming !== null
-						? naming.ok
-						: notices !== null
-							? notices.ok
-							: lookHealthy(final)) &&
+					: hints !== null
+						? hints.ok
+						: naming !== null
+							? naming.ok
+							: notices !== null
+								? notices.ok
+								: layout !== null
+									? layout.ok
+									: lookHealthy(final)) &&
 			!errors.some(text => text.startsWith("uncaught:")) &&
 			revoked !== false
 		const report: Record<string, unknown> = {
@@ -1030,11 +1068,19 @@ export async function run(
 					? `listen: ${listen.ok ? "ok" : "FAILED"}, ${listen.title}, ${listen.attaches} attach(es); ${summaryLine(final)}`
 					: play !== null
 						? `play: ${play.ok ? "ok" : "FAILED"}, ${play.steps.filter(s => s.ok).length} of ${play.steps.length} steps; ${summaryLine(final)}`
-						: naming !== null
-							? `naming: ${naming.ok ? "ok" : "FAILED"}, ${naming.steps.filter(s => s.ok).length}/${naming.steps.length} steps; ${summaryLine(final)}`
-							: notices !== null
-								? `notices: ${notices.ok ? "ok" : "FAILED"}, ${notices.steps.filter(s => s.ok).length}/${notices.steps.length} steps, layouts ${notices.layouts.map(l => `${l.viewport} ${l.ok ? "clear" : "OVERLAP"}`).join(", ")}`
-								: summaryLine(final),
+						: hints !== null
+							? `hints: ${hints.ok ? "ok" : "FAILED"}, ${hints.cases.filter(c => c.ok).length}/${hints.cases.length} cases, marks ${Object.entries(
+									hints.reached,
+								)
+									.map(([v, n]) => `${v} ${n}/${hints?.marks[v] ?? 0}`)
+									.join(", ")}; ${summaryLine(final)}`
+							: naming !== null
+								? `naming: ${naming.ok ? "ok" : "FAILED"}, ${naming.steps.filter(s => s.ok).length}/${naming.steps.length} steps; ${summaryLine(final)}`
+								: notices !== null
+									? `notices: ${notices.ok ? "ok" : "FAILED"}, ${notices.steps.filter(s => s.ok).length}/${notices.steps.length} steps, layouts ${notices.layouts.map(l => `${l.viewport} ${l.ok ? "clear" : "OVERLAP"}`).join(", ")}`
+									: layout !== null
+										? `layout: ${layout.status === "infra-unobserved" ? `INFRA-UNOBSERVED (${layout.infra.length} cell(s) the host painted too few frames for)` : layout.ok ? "ok" : "FAILED"}, ${layout.cells.filter(c => c.violations.length === 0).length}/${layout.cells.length} cells clear, ${layout.moved.length} moved, ${layout.frames.length} frame overlaps`
+										: summaryLine(final),
 			target: {
 				kind: options.target,
 				url: base + options.route,
@@ -1056,11 +1102,19 @@ export async function run(
 			...(bench !== null ? { panelBench: bench } : {}),
 			...(listen !== null ? { listen } : {}),
 			...(play !== null ? { play } : {}),
+			...(hints !== null ? { hints } : {}),
 			...(naming !== null ? { naming } : {}),
 			...(notices !== null ? { notices } : {}),
+			...(layout !== null ? { layout } : {}),
 			screenshots: shots,
 		}
-		return { report, healthy }
+		// unobserved, not unhealthy: every other check passed and the layout saw no violation, but too few frames
+		const unobserved =
+			!healthy &&
+			layout?.status === "infra-unobserved" &&
+			!errors.some(text => text.startsWith("uncaught:")) &&
+			revoked !== false
+		return { report, healthy, unobserved }
 	} finally {
 		// first of all, while the core (and maybe the browser) is still there
 		await pairing.revoke().catch(() => null)
@@ -1081,6 +1135,9 @@ export async function run(
 const DEADLINE_MS = 6 * 60_000
 /** With --measure: the opens, reloads and a scroll through up to 50 000 rows take longer. */
 const MEASURE_DEADLINE_MS = 15 * 60_000
+/** With --flow=layout: 4 viewports, each waiting up to 15 s for a link notice's onset and opening 5 drawer states
+ * (about 5 minutes on a loaded host, the dev server's start included). */
+const LAYOUT_DEADLINE_MS = 12 * 60_000
 
 async function main(): Promise<void> {
 	const pairing = new Pairing()
@@ -1104,19 +1161,21 @@ async function main(): Promise<void> {
 	process.once("SIGTERM", () => giveUp("Terminated"))
 	const limit = process.argv.includes("--measure")
 		? MEASURE_DEADLINE_MS
-		: DEADLINE_MS
+		: process.argv.includes("--flow=layout")
+			? LAYOUT_DEADLINE_MS
+			: DEADLINE_MS
 	const deadline = setTimeout(
 		() => giveUp(`Not finished after ${limit / 1000} s`),
 		limit,
 	)
 	try {
-		const { report, healthy } = await run(
+		const { report, healthy, unobserved } = await run(
 			parseOptions(process.argv.slice(2)),
 			pairing,
 		)
 		process.stdout.write(formatReport(report) + "\n")
 		process.stderr.write(String(report["summary"]) + "\n")
-		process.exitCode = healthy ? 0 : 1
+		process.exitCode = healthy ? 0 : unobserved ? 3 : 1
 	} catch (error) {
 		const message =
 			error instanceof CannotRun

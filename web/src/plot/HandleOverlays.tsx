@@ -124,7 +124,7 @@ export function SquelchLine({
 			aria-valuemin={SQUELCH_MIN_DBFS}
 			aria-valuemax={SQUELCH_MAX_DBFS}
 			aria-valuenow={Math.round(db)}
-			aria-valuetext={`${isAuto ? "Auto · " : ""}${formatDb(db)} dBFS`}
+			aria-valuetext={`${isAuto ? "Auto · " : ""}${formatDb(db)} dB`}
 			aria-readonly={readOnly || undefined}
 			title={
 				readOnly

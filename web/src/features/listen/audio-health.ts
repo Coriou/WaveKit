@@ -237,20 +237,3 @@ export function audioHealthText(health: AudioHealth): string | null {
 		? missing
 		: `${health.heardPct}% heard · ${missing}`
 }
-
-/** The readout's detail. */
-export function audioHealthTitle(health: AudioHealth): string {
-	const parts = [
-		"Heard: the share of the last 10 s of expected audio that played. Missing: all the time this Listen had no audio to play while a signal was open.",
-	]
-	if (health.coreFilledMs > 0)
-		parts.push(
-			`The core had no audio for ${seconds(health.coreFilledMs)} of it and sent silence in its place.`,
-		)
-	if (health.rebases > 0)
-		parts.push(
-			`It fell too far behind to catch up ${health.rebases} ${health.rebases === 1 ? "time" : "times"}.`,
-		)
-	parts.push("Both usually mean the core is too busy.")
-	return parts.join(" ")
-}

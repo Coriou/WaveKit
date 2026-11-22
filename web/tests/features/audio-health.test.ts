@@ -3,7 +3,6 @@ import type { LiveAudioLevel, LiveAudioStatus } from "@wavekit/api-types"
 import {
 	audioExpected,
 	audioHealthText,
-	audioHealthTitle,
 	AudioHealthTracker,
 	breakingUpText,
 	BREAKING_CLEARS_AT,
@@ -478,14 +477,5 @@ describe("what the card and Audio options say", () => {
 			"71% heard · 17.4 s missing",
 		)
 		expect(audioHealthText(health({ missingMs: 800 }))).toBe("0.8 s missing")
-	})
-
-	it("the detail names what the core reported", () => {
-		const text = audioHealthTitle(
-			health({ coreFilledMs: 12_300, rebases: 2, missingMs: 13_000 }),
-		)
-		expect(text).toContain("12.3 s")
-		expect(text).toContain("2 times")
-		expect(audioHealthTitle(health({ rebases: 1 }))).toContain("1 time.")
 	})
 })
