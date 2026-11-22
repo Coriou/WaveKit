@@ -20,6 +20,7 @@ import {
 import { activityRoutes } from "../../../src/api/routes/activity.js"
 import { createActivityQueryService } from "../../../src/core/activity/query/service.js"
 import type { ActivitySummary } from "../../../src/core/activity/storage/contract.js"
+import type { JsonValue } from "../../../src/core/activity/types.js"
 import {
 	envelope,
 	logger,
@@ -374,7 +375,7 @@ const TRUST_ROWS: Array<{
 	eventId: string
 	protocol: string
 	key: string
-	data: Record<string, unknown>
+	data: { [key: string]: JsonValue }
 	presented: boolean
 }> = [
 	{
