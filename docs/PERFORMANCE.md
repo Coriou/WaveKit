@@ -1259,10 +1259,12 @@ soon as it connects), the decoder is spawned with that socket as fd 0, and Node 
 copy as soon as the spawn has returned. Node never reads a byte of it; a hand-over of a socket that
 has read anything is refused.
 
-The mode is selected once per process by `WAVEKIT_CHANNEL_INPUT=relay|direct`. Since 2026-11-22
-unset, empty or any other value means `direct` (an unknown value also logs a warning that names
-only the accepted values); `relay` stays selectable. There is no config key, and one info line
-names the mode. Direct is the default because a relayed channel waits for the core's main thread:
+The mode is selected once per process, at startup, by `WAVEKIT_CHANNEL_INPUT=relay|direct`, both
+written exactly so. Since 2026-11-22 unset or empty means `direct`; `relay` stays selectable. Any
+other value (another case, surrounding spaces, a typo) stops startup with a
+`ConfigValidationError` that names the variable and the accepted values, plus one error line naming
+the same (the value itself is never logged); there is no silent fallback. There is no config key
+or API route, and one info line names the mode. Direct is the default because a relayed channel waits for the core's main thread:
 in the tier A hog runs of `scripts/bench/main-thread-budget.ts` a main-thread stall longer than the
 channel's queue dropped 3-4.7 % of the dsd-fme channel's samples as `queue-overflow`, while a direct
 decoder reads its socket itself. Scanner channel taps and scanner probe decoders stay on the relay in both modes: the

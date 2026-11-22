@@ -3562,6 +3562,14 @@ fresh clean evidence is accumulating toward the separate 60-second admission hys
 missing or stale evidence is `unknown`. Waiting admissions recheck when that clean window
 completes, without an additional drop rejection backoff.
 
+An admitted automatic decoder outside the tuned band that is losing its own input while the
+host is busy carries `hostExcusedLoss: { cause: "host-busy", since, windows }`: the host's CPU
+(not the core's own) explains the loss, so the decoder is not late-stopped for it, and the loss
+is shown here instead of being silent. `since` is when the excuse began (ISO time) and
+`windows` how many of the latest three 10-second late-drop windows it covers. The field goes
+away when the host calms or the loss stops; the core logs one warning when it appears and one
+info line when it goes.
+
 #### GET /api/decoders/efficiency/budget
 
 Returns `{ cpuBudgetCores, resolved, source }`. `source` is `"saved"` for a persisted

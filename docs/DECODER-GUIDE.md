@@ -975,7 +975,11 @@ Host CPU (every process on the machine, another project's build included) never 
 refuses or late-stops a decoder for host CPU alone. It only explains drops: while the host is
 over the guard and the core's own CPU is not, drops on a graduated decoder's input are the
 host's, and they stop no automatic decoder outside the tuned band until the host calms
-(consumer loss charged to that decoder's own input still does). The log line "Decoder
+(consumer loss charged to that decoder's own input still does). That loss is not silent:
+while it lasts, the decoder's entry in `GET /api/decoders/efficiency` carries
+`hostExcusedLoss` (cause `host-busy`, [API.md](API.md#get-apidecodersefficiency)), and the core
+logs "Late loss excused: host busy" once when it begins and "Late loss no longer excused" once
+when the host calms or the loss stops. The log line "Decoder
 efficiency drops or CPU limit exceeded" reads `efficiencyDetail: "host-cpu"` in that case and
 `"cpu"` only for the core's own CPU.
 

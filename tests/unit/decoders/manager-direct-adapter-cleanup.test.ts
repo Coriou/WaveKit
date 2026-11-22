@@ -31,7 +31,10 @@ import {
 	CAPS_CHANGE_DEBOUNCE_MS,
 	DecoderManager,
 } from "../../../src/decoders/manager.js"
-import { PLACEMENT_STOP_TIMEOUT_MS } from "../../../src/decoders/placement-lifecycle.js"
+import {
+	PLACEMENT_STOP_TIMEOUT_MS,
+	PlacementLifecycle,
+} from "../../../src/decoders/placement-lifecycle.js"
 import { signalDecoder } from "../../../src/decoders/process-tools.js"
 import type * as ProcessToolsModule from "../../../src/decoders/process-tools.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
@@ -799,6 +802,36 @@ describe.each([
 		expect(manager.getStatus("voice")).toMatchObject({ running: true })
 		await manager.destroy()
 		expect(live.size).toBe(0)
+	})
+
+	it("a restart and then a stop that both join a cleanup that never settles: after its deadline the decoder stays stopped", async () => {
+		setup("direct", placements)
+		await start(placements)
+		const hung = hangCleanup(voice[0]!)
+		loseSource()
+		const restarting = track(manager.restartDecoder("voice").catch(() => {}))
+		await vi.advanceTimersByTimeAsync(LATE_JOIN_MS)
+		expect(restarting.done).toBe(false)
+		restoreSource()
+		const requests = vi.spyOn(PlacementLifecycle.prototype, "request")
+		const stopping = track(manager.stopDecoder("voice"))
+		await vi.advanceTimersByTimeAsync(PLACEMENT_STOP_TIMEOUT_MS - LATE_JOIN_MS)
+		expect(stopping.done).toBe(true)
+		expect(restarting.done).toBe(true)
+		expect(cleanupTimeouts()).toHaveLength(1)
+		// The superseded restart requests nothing after the wait: no "running", no new instance.
+		await vi.advanceTimersByTimeAsync(DEBOUNCE)
+		expect(
+			requests.mock.calls.filter(([desired]) => desired === "running"),
+		).toEqual([])
+		expect(children).toHaveLength(1)
+		expect(manager.getStatus("voice")).toMatchObject({ running: false })
+		hung.release()
+		await vi.advanceTimersByTimeAsync(PLACEMENT_STOP_TIMEOUT_MS * 2)
+		expect(children).toHaveLength(1)
+		expect(manager.getStatus("voice")).toMatchObject({ running: false })
+		expect(hung.calls).toBe(1)
+		await manager.destroy()
 	})
 
 	it.each([

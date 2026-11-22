@@ -11,7 +11,10 @@ import { installAccessHooks } from "../../../src/access/fastify-adapter.js"
 import { AccessPolicy } from "../../../src/access/policy.js"
 import { SessionStore } from "../../../src/access/sessions.js"
 import { createEfficiencyGate } from "../../../src/decoders/enablement/efficiency-gate.js"
-import { placementKey } from "../../../src/decoders/enablement/contract.js"
+import {
+	placementKey,
+	type CoreEfficiencyView,
+} from "../../../src/decoders/enablement/contract.js"
 import {
 	digestMachineToken,
 	generateMachineToken,
@@ -65,6 +68,43 @@ it.each([
 		const response = await app.inject("/api/decoders/efficiency")
 		expect(response.statusCode).toBe(200)
 		expect(response.json()).toEqual(view)
+	} finally {
+		await app.close()
+	}
+})
+
+it("the route keeps an admitted placement's host-busy excused loss (L1), cause, since and windows", async () => {
+	const excused: CoreEfficiencyView = {
+		...view,
+		sources: [
+			{
+				...view.sources[0]!,
+				admitted: [
+					{
+						...placement,
+						hostExcusedLoss: {
+							cause: "host-busy",
+							since: "2026-11-22T10:00:00.000Z",
+							windows: 2,
+						},
+					},
+				],
+			},
+		],
+	}
+	const app = Fastify()
+	await app.register(decoderRoutes, {
+		decoderManager: {
+			efficiencyView: () => excused,
+		} as unknown as DecoderRoutesOptions["decoderManager"],
+		authorizeSettings: () => {
+			throw new Error("write authorization must not run")
+		},
+	})
+	try {
+		const response = await app.inject("/api/decoders/efficiency")
+		expect(response.statusCode).toBe(200)
+		expect(response.json()).toEqual(excused)
 	} finally {
 		await app.close()
 	}

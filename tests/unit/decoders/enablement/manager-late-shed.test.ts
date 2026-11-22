@@ -671,6 +671,51 @@ it.each([
 	},
 )
 
+it.each(["1970-01-01T00:01:00.000Z", "invalid"])(
+	"efficiency view rebases a host-busy excuse's since %s with the retry clock (malformed: no excuse shown)",
+	async since => {
+		const gate = fakeGate()
+		const admitted = {
+			decoderId: "ghost",
+			sourceId: "rtl",
+			channelHz: null,
+			reach: "raw" as const,
+			costCores: 0.1,
+			probation: false,
+		}
+		gate.view = () => ({
+			budgetCores: 1,
+			cpuGuardPercent: 90,
+			sources: [
+				{
+					sourceId: "rtl",
+					coresInUse: 0.1,
+					cpu: { percent: 99, limit: 90 },
+					drops: "dropping",
+					dropBytesPerSecond: 10,
+					admitted: [
+						{
+							...admitted,
+							hostExcusedLoss: { cause: "host-busy", since, windows: 2 },
+						},
+					],
+					blocked: [],
+				},
+			],
+		})
+		const f = setup("rate-test", gate)
+		await vi.advanceTimersByTimeAsync(12_345)
+		const placement = f.manager.efficiencyView().sources[0]!.admitted[0]!
+		if (since === "invalid") expect(placement).toEqual(admitted)
+		else
+			expect(placement.hostExcusedLoss).toEqual({
+				cause: "host-busy",
+				since: new Date(Date.now() + 60_000 - performance.now()).toISOString(),
+				windows: 2,
+			})
+	},
+)
+
 it.each([
 	"",
 	"invalid",
