@@ -18,6 +18,15 @@
  *   a non-clear ALG or a non-zero KEY ID on the call's lane, on any line that
  *   cannot be attributed to a lane (a bare or bracketless DMR sync's burst),
  *   or on another slot's line printing this call's slot, forbids clear.
+ * - Privacy only widens within a lane context: a lane's context ends only
+ *   on more than the call timeout without a line of that lane, or on a
+ *   restart (a protocol switch, a BS/MS change, a clean idle burst or a
+ *   call's end does not end it; a BS/MS change carries the old mode's live
+ *   lane contexts into the new mode's lanes). A privacy print naming a key
+ *   (TGT/SRC, even with a CRC error) taints that key in the context; one
+ *   naming none taints every key; an unattributable one taints every lane.
+ *   A clear for a tainted key, or in a lane tainted keyless, is forbidden,
+ *   whichever call was live when the print came.
  * - A call that was ever unplaced (born on an unattributable line, or a
  *   lane-0 call that saw a bare or bracketless DMR sync) is never clear.
  * - A restart forbids clear for every call alive at it. Another protocol, a
@@ -53,6 +62,8 @@ interface OracleLine {
 	lane: Lane
 	errored: boolean
 	privacy: boolean
+	/** The plausible key a privacy print names, if any. */
+	privacyKey: string | undefined
 	key: string | undefined
 	plausible: boolean
 	neutral: boolean
@@ -128,6 +139,7 @@ export class CallOracle {
 			lane: "none",
 			errored: false,
 			privacy: false,
+			privacyKey: undefined,
 			key: undefined,
 			plausible: false,
 			neutral: false,
@@ -219,11 +231,20 @@ export class CallOracle {
 				: /\bTGT\s*[=:]\s*(\d+)\b[^\n]*?\bSRC\s*[=:]\s*(\d+)\b/i.exec(text)
 		const tg = Number(ids?.[1] ?? 0)
 		const src = Number(ids?.[2] ?? 0)
+		const named = /\bTGT\s*[=:]\s*(\d+)\b[^\n]*?\bSRC\s*[=:]\s*(\d+)\b/i.exec(
+			text,
+		)
+		const ntg = Number(named?.[1] ?? 0)
+		const nsrc = Number(named?.[2] ?? 0)
 		this.lines.push({
 			...base,
 			lane,
 			errored,
 			privacy,
+			privacyKey:
+				privacy && ntg >= 1 && ntg <= 0xffffff && nsrc >= 1 && nsrc <= 0xffffff
+					? `${ntg}/${nsrc}`
+					: undefined,
 			key: ids ? `${tg}/${src}` : undefined,
 			plausible: tg >= 1 && tg <= 0xffffff && src >= 1 && src <= 0xffffff,
 			neutral: !errored && !privacy && NEUTRAL.test(text),
@@ -313,6 +334,10 @@ export class CallOracle {
 		if (boundary !== undefined && boundary.seq < Math.floor(claim.seq))
 			return "clear after a protocol, mode or timeout boundary"
 		const proofEnd = boundary?.seq ?? Infinity
+		// Privacy over the lane's context, whatever call was live.
+		const taint = laneTaint(seen, lane)
+		if (taint.keyless || taint.keys.has(key))
+			return "privacy print in the lane's context"
 		// Sticky privacy over the whole window.
 		if (
 			life_.some(
@@ -384,4 +409,81 @@ export class CallOracle {
 		}
 		return "no settled proof chain owned by the call"
 	}
+}
+
+interface Taint {
+	last: number | undefined
+	keys: Set<string>
+	keyless: boolean
+}
+
+/**
+ * The privacy taint of `lane`'s context after `lines`: keys only widen, and
+ * the context ends only on more than the call timeout without a line of the
+ * lane (taint arriving counts as one) or on a restart.
+ */
+function laneTaint(lines: readonly OracleLine[], lane: Lane): Taint {
+	const fresh = (): Taint => ({
+		last: undefined,
+		keys: new Set(),
+		keyless: false,
+	})
+	const lanes = new Map<Lane, Taint>([
+		["1", fresh()],
+		["2", fresh()],
+		["ms", fresh()],
+	])
+	const touch = (l: Lane, at: number): Taint | undefined => {
+		const t = lanes.get(l)
+		if (t === undefined) return undefined
+		if (t.last !== undefined && at - t.last > ORACLE_TIMEOUT_MS) {
+			t.keys.clear()
+			t.keyless = false
+		}
+		t.last = at
+		return t
+	}
+	const taint = (l: Lane, at: number, key: string | undefined) => {
+		const t = touch(l, at)
+		if (t === undefined) return
+		if (key === undefined) t.keyless = true
+		else t.keys.add(key)
+	}
+	const merge = (from: Lane, to: Lane, at: number) => {
+		const f = lanes.get(from)
+		if (f?.last === undefined || at - f.last > ORACLE_TIMEOUT_MS) return
+		if (!f.keyless && f.keys.size === 0) return
+		const t = touch(to, at)
+		if (t === undefined) return
+		t.keyless ||= f.keyless
+		for (const k of f.keys) t.keys.add(k)
+	}
+	for (const l of lines) {
+		if (l.restart) {
+			for (const k of lanes.keys()) lanes.set(k, fresh())
+			continue
+		}
+		if (l.foreign) continue
+		if (l.modeChange) {
+			if (l.format === "ms") {
+				merge("1", "ms", l.atMs)
+				merge("2", "ms", l.atMs)
+			} else {
+				merge("ms", "1", l.atMs)
+				merge("ms", "2", l.atMs)
+			}
+		}
+		if (l.lane === "x") {
+			if (l.privacy)
+				for (const k of ["1", "2", "ms"] as const)
+					taint(k, l.atMs, l.privacyKey)
+			continue
+		}
+		touch(l.lane, l.atMs)
+		if (!l.privacy) continue
+		taint(l.lane, l.atMs, l.privacyKey)
+		if (l.printedSlot === "1" || l.printedSlot === "2")
+			taint(l.printedSlot, l.atMs, l.privacyKey)
+	}
+	return lanes.get(lane) ?? fresh()
 }

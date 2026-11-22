@@ -749,7 +749,7 @@ describe("dsd-fme DMR clearance repro corpus", () => {
 			expect(trace.pubs.some(clear)).toBe(true)
 		})
 
-		it("the muted call's end closes the context: the lane's next call still goes clear", () => {
+		it("the muted call's end does not close the context: the lane's next call stays muted", () => {
 			const trace = expectAuthorized([
 				...proof([
 					[0, B1("PI")],
@@ -766,10 +766,113 @@ describe("dsd-fme DMR clearance repro corpus", () => {
 			])
 			const ids = [...new Set(trace.pubs.map(p => p.callId))]
 			expect(ids.length).toBeGreaterThanOrEqual(2)
-			expect(trace.pubs.filter(p => p.callId === ids[0] && clear(p))).toEqual(
-				[],
-			)
-			expect(trace.pubs.some(p => p.callId !== ids[0] && clear(p))).toBe(true)
+			// The PI burst's ALG names no key: it taints every call of the
+			// lane's context, which only silence or a restart ends.
+			expect(trace.pubs.filter(clear)).toEqual([])
+		})
+	})
+
+	describe("privacy across a lane context", () => {
+		const alg = " SLOT 1 ALG ID: 21; KEY ID: 05; "
+		const encryptedHeader =
+			" SLOT 1 TGT=9001 SRC=91 Group Call Encrypted (CRC ERR) "
+		/** The idle closer: privacy, the lane's clean idle burst, then a clean call. */
+		const idleCloser = (
+			lead: "pi" | "header",
+			sync: (k: string) => string,
+			slco: boolean,
+		): Item[] => {
+			const bs = sync === B1
+			const items: Item[] = [
+				[0, sync(lead === "pi" ? "PI" : "VLC")],
+				[1, lead === "pi" ? alg : encryptedHeader],
+				[30, sync("IDLE")],
+				[60, sync("VC1")],
+				[120, sync("VC2")],
+				[121, LC()],
+				[180, sync("VC3")],
+				[240, sync("VC4")],
+			]
+			if (slco) items.push([31, SLCO_NULL])
+			if (bs) items.push([45, B2("IDLE")], [90, B2("IDLE")], [150, B2("IDLE")])
+			return items
+		}
+		for (const lead of ["pi", "header"] as const)
+			for (const [mode, sync] of [
+				["repeater", B1],
+				["direct", M],
+			] as const)
+				for (const slco of [false, true])
+					it(`1: a clean idle burst does not end ${lead === "pi" ? "a PI burst's ALG" : "an encrypted header"} (${mode}${slco ? ", then SLCO NULL" : ""})`, () => {
+						expectNeverClear(idleCloser(lead, sync, slco))
+					})
+
+		/** A rival talker's name, then a privacy print for the original key while it is live. */
+		const rivalKeyed = (privacy: string): Item[] => [
+			[0, B1("VC1")],
+			[60, B1("VC2")],
+			[61, LC("", 9002, 92)],
+			[120, B1("VC3")],
+			[121, privacy],
+			[180, B1("VC4")],
+			[181, LC()],
+			[240, B1("VC5")],
+			[241, LC()],
+			[300, B1("VC6")],
+			[301, LC()],
+			[360, B1("VC1")],
+		]
+		for (const [name, privacy] of [
+			["Encrypted", " SLOT 1 TGT=9001 SRC=91 Group Call Encrypted "],
+			["CRC", " SLOT 1 TGT=9001 SRC=91 Group Call Encrypted (CRC ERR) "],
+			["SVC", " SLOT 1 TGT=9001 SRC=91 SVC=0x40 Group Call (CRC ERR) "],
+		] as const)
+			it(`2: a keyed privacy print taints its key even while another call is live (${name})`, () => {
+				expectNotClearFrom(rivalKeyed(privacy), 5)
+			})
+
+		/** Privacy, a protocol or BS/MS bump, then a clean call. */
+		const modeBump = (bump: Item, after = B1): Item[] => [
+			[0, B1("PI")],
+			[1, alg],
+			bump,
+			[60, after("VC1")],
+			[120, after("VC2")],
+			[121, LC()],
+			[180, after("VC3")],
+			[240, after("VC4")],
+		]
+		const bumps: [string, Item[]][] = [
+			["another protocol", modeBump([30, DSTAR])],
+			["a direct-mode burst between", modeBump([30, M("VC*")])],
+			["a direct-mode call after it", modeBump([30, M("VC*")], M)],
+		]
+		for (const [name, items] of bumps)
+			it(`3: a mode bump does not end privacy (${name})`, () => {
+				expectNeverClear(items)
+			})
+
+		it("the oracle rejects a forged clear in each family", () => {
+			const forgedFor = (items: Item[], line: number) => {
+				const trace = replay(items)
+				const id = trace.pubs.find(
+					p => p.talkgroup === 9001 && p.seq >= line,
+				)?.callId
+				expect(id).toBeDefined()
+				return trace.oracle.judge({
+					...forged(trace, trace.lines + 0.3, id),
+					talkgroup: 9001,
+					source: 91,
+				})
+			}
+			expect(forgedFor(idleCloser("pi", B1, false), 1)).not.toBeNull()
+			expect(
+				forgedFor(
+					rivalKeyed(" SLOT 1 TGT=9001 SRC=91 Group Call Encrypted "),
+					6,
+				),
+			).not.toBeNull()
+			for (const [, items] of bumps) expect(forgedFor(items, 1)).not.toBeNull()
 		})
 	})
 })

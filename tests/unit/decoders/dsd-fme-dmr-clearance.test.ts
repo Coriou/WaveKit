@@ -605,13 +605,13 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		expect(frames(h, "c2", undefined, 2)).toBe("unknown")
 	})
 
-	it("is consumed by the call it mutes", () => {
+	it("outlives the call it mutes: the lane's next call opens encrypted too", () => {
 		const h = new Harness()
 		h.line(BS(1, "PI"))
 		h.line(ALG)
 		expect(frames(h, "c1")).toBe("encrypted")
 		h.end("1")
-		expect(frames(h, "c2")).toBe("unknown")
+		expect(frames(h, "c2")).toBe("encrypted")
 	})
 
 	it("bracketless or another slot's privacy is pending on every lane it may belong to", () => {
@@ -626,12 +626,12 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		expect(frames(other, "c1")).toBe("encrypted")
 	})
 
-	it("a clean idle burst, a call timeout or a silent lane closes the context", () => {
+	it("only a silent lane closes the context: a clean idle burst or a call timeout does not", () => {
 		const idle = new Harness()
 		idle.line(BS(1, "PI"))
 		idle.line(ALG)
 		idle.line(BS(1, "IDLE"))
-		expect(frames(idle, "c1")).toBe("unknown")
+		expect(frames(idle, "c1")).toBe("encrypted")
 		const dirtyIdle = new Harness()
 		dirtyIdle.line(BS(1, "PI"))
 		dirtyIdle.line(ALG)
@@ -641,7 +641,7 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		timeout.line(BS(1, "PI"))
 		timeout.line(ALG)
 		timeout.m.timeout(["1"])
-		expect(frames(timeout, "c1")).toBe("unknown")
+		expect(frames(timeout, "c1")).toBe("encrypted")
 		const silent = (gapMs: number) => {
 			const h = new Harness()
 			h.line(BS(1, "PI"), 0)
@@ -652,7 +652,7 @@ describe("DMR clearance: privacy printed before the call opens", () => {
 		expect(silent(TIMEOUT_MS + 1)).toBe("unknown")
 	})
 
-	it("a clean header of another key closes a keyed privacy print, never a keyless one or its own key", () => {
+	it("a keyed privacy print taints only its key; a keyless one taints every key", () => {
 		const run = (privacy: string, key: string) => {
 			const h = new Harness()
 			h.line(BS(1, "VLC"))
