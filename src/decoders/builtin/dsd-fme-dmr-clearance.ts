@@ -30,7 +30,15 @@
  *
  * Any privacy field (Encrypted, an SVC privacy bit, a non-clear ALG, a
  * non-zero KEY ID) on any line of the lane makes the lane's call encrypted,
- * for good.
+ * for good. Printed while the lane has no call (a privacy header or PI
+ * burst before a call started on its voice frames), it stays pending on the
+ * lane and the lane's next call opens encrypted, until the lane's context
+ * closes: a mode generation bump (call timeout, BS/MS or protocol change,
+ * restart), more than callTimeoutMs without a line of the lane, a clean
+ * idle burst of the lane, or the checked first link control of a clean
+ * voice header naming another key than every pending privacy print (only
+ * when each print named a key: a keyless one, such as a PI burst's ALG,
+ * waits for the other closes).
  *
  * Over-muting, accepted: a privacy print after a repeater sync with no slot
  * bracket mutes both slots' calls (fail closed), because the SLOT it prints
@@ -62,6 +70,8 @@ export interface DmrSyncEvent {
 	/** The sync printed no error (no FEC/CRC/RAS error, no Frame Sync Err). */
 	clean: boolean
 	privacy: boolean
+	/** An IDLE burst. */
+	idle: boolean
 }
 
 /** Another protocol's sync. */
@@ -180,8 +190,17 @@ interface CallRecord {
 interface LaneState {
 	burst: Burst | undefined
 	lc: LcSeen | undefined
-	/** The line seq of a privacy field printed while the lane had no call (it mutes a call that line opens). */
+	/** The line seq of the lane's latest privacy field (it mutes a call that line opens). */
 	privacySeq: number | undefined
+	/**
+	 * A privacy field printed while the lane had no call: the lane's next
+	 * call opens encrypted, until the lane's context closes.
+	 */
+	privacyPending: boolean
+	/** When the pending privacy was printed, or the lane's latest line since. */
+	privacyAtMs: number
+	/** The keys the pending privacy prints named; null once one named none. */
+	privacyKeys: string[] | null
 	call: CallRecord | undefined
 	modeGeneration: number
 }
@@ -210,6 +229,7 @@ const FLCO = /\bFLCO=0x(?<flco>[0-9A-F]+)\b/i
 const FID = /\bFID=0x(?<fid>[0-9A-F]+)\b/i
 const SVC_PRIVACY = 0x40
 const PI_BURST = /\|\s*PI\b/
+const IDLE_BURST = /\|\s*IDLE\b/
 
 /** Lines that neither settle nor drop a pending proof (each anchored). */
 const NEUTRAL: readonly RegExp[] = [
@@ -331,7 +351,15 @@ export function classifyDmrLine(
 						: "voice"
 		const lane: DmrLane =
 			format === "bs" ? (bracket ?? "1") : format === "ms" ? "ms" : "x"
-		return { type: "sync", lane, format, burst, clean: !errored, privacy }
+		return {
+			type: "sync",
+			lane,
+			format,
+			burst,
+			clean: !errored,
+			privacy,
+			idle: IDLE_BURST.test(line),
+		}
 	}
 	const slot = slotOf(
 		SLOT_WORD.exec(line)?.groups?.["slot"] ??
@@ -368,6 +396,9 @@ const emptyLane = (modeGeneration: number): LaneState => ({
 	burst: undefined,
 	lc: undefined,
 	privacySeq: undefined,
+	privacyPending: false,
+	privacyAtMs: 0,
+	privacyKeys: [],
 	call: undefined,
 	modeGeneration,
 })
@@ -483,6 +514,7 @@ export class DmrClearance {
 		lane.burst = undefined
 		lane.lc = undefined
 		lane.privacySeq = undefined
+		this.closePrivacy(lane)
 		const call = lane.call
 		if (call?.trust === "pending") {
 			call.trust = "unknown"
@@ -514,7 +546,7 @@ export class DmrClearance {
 			}
 		}
 		if (event.lane === "x") {
-			this.onUnplaced(event, seq, out)
+			this.onUnplaced(event, seq, atMs, out)
 			if (event.type === "sync") {
 				const lane = this.lane("x")
 				lane.burst = this.newBurst(event)
@@ -523,6 +555,11 @@ export class DmrClearance {
 			return out
 		}
 		const lane = this.lane(event.lane)
+		// A lane silent for longer than the call timeout has closed its context.
+		if (lane.privacyPending) {
+			if (atMs - lane.privacyAtMs > this.callTimeoutMs) this.closePrivacy(lane)
+			else lane.privacyAtMs = atMs
+		}
 		if (event.type === "sync") {
 			const mode = event.format === "bs" ? "bs" : "ms"
 			if (this.mode !== undefined && this.mode !== mode)
@@ -534,17 +571,20 @@ export class DmrClearance {
 			const call = lane.call
 			if (event.burst === "voice" && call !== undefined)
 				call.firstVoiceSeq ??= lane.burst.seq
-			if (event.privacy) this.privacy(lane, seq, out)
+			// A clean idle burst: the lane carries no call.
+			if (event.idle && event.clean && !event.privacy) this.closePrivacy(lane)
+			if (event.privacy) this.privacy(lane, seq, atMs, out)
 			return out
 		}
 		if (event.errored) this.dirty(lane)
 		const call = lane.call
-		if (event.privacy) this.privacy(lane, seq, out)
+		const key = event.type === "lc" ? event.key : undefined
+		if (event.privacy) this.privacy(lane, seq, atMs, out, key)
 		// Another slot's print: its privacy also mutes the slot it names (fail
 		// closed), and it proves nothing on either.
 		if (event.otherSlot) {
 			if (event.privacy && event.slot !== undefined)
-				this.privacy(this.lane(event.slot), seq, out)
+				this.privacy(this.lane(event.slot), seq, atMs, out, key)
 			this.drop(call)
 			return out
 		}
@@ -587,6 +627,18 @@ export class DmrClearance {
 				!call.lcAfterVoice,
 		}
 		if (call?.firstVoiceSeq !== undefined) call.lcAfterVoice = true
+		// A clean voice header of another call than the pending privacy named.
+		if (
+			lane.privacyPending &&
+			ok &&
+			lane.lc.first &&
+			lane.privacyKeys !== null &&
+			!lane.privacyKeys.includes(event.key) &&
+			burst?.kind === "vlc" &&
+			burst.syncClean &&
+			!burst.errored
+		)
+			this.closePrivacy(lane)
 		// The first checked copy of another talker's IDs after voice revokes at once.
 		if (
 			ok &&
@@ -620,8 +672,10 @@ export class DmrClearance {
 		const lane = this.lane(key)
 		let record = lane.call
 		if (record?.callId !== view.callId) {
-			const encrypted = lane.privacySeq === seq
+			// Privacy of this line, or pending since the lane had no call.
+			const encrypted = lane.privacySeq === seq || lane.privacyPending
 			lane.privacySeq = undefined
+			this.closePrivacy(lane)
 			record = {
 				unplaced: key === "x",
 				callId: view.callId,
@@ -772,6 +826,12 @@ export class DmrClearance {
 		return key !== null && lc?.seq === seq && lc.ok && lc.key === key
 	}
 
+	/** The lane's context closed: pending privacy no longer reaches its next call. */
+	private closePrivacy(lane: LaneState): void {
+		lane.privacyPending = false
+		lane.privacyKeys = []
+	}
+
 	private keyOf(lane: LaneState): DmrLane {
 		for (const [key, value] of this.lanes) if (value === lane) return key
 		return "x"
@@ -800,11 +860,26 @@ export class DmrClearance {
 		call.evidence = undefined
 	}
 
-	/** A privacy field makes the lane's call encrypted, for good. */
-	private privacy(lane: LaneState, seq: number, out: DmrDecision[]): void {
+	/**
+	 * A privacy field makes the lane's call encrypted, for good; with no call
+	 * on the lane, it waits for the lane's next call.
+	 */
+	private privacy(
+		lane: LaneState,
+		seq: number,
+		atMs: number,
+		out: DmrDecision[],
+		key?: string,
+	): void {
 		lane.privacySeq = seq // Applies also to a call opened on this line.
 		const call = lane.call
-		if (call === undefined) return
+		if (call === undefined) {
+			lane.privacyPending = true
+			lane.privacyAtMs = atMs
+			if (key === undefined) lane.privacyKeys = null
+			else lane.privacyKeys?.push(key)
+			return
+		}
 		if (call.trust === "encrypted") return
 		call.trust = "encrypted"
 		call.evidence = undefined
@@ -820,17 +895,19 @@ export class DmrClearance {
 	private onUnplaced(
 		event: DmrSyncEvent | DmrLcEvent | DmrOtherEvent,
 		seq: number,
+		atMs: number,
 		out: DmrDecision[],
 	): void {
 		const errored = event.type === "sync" ? !event.clean : event.errored
 		if (errored) for (const key of PROOF_LANES) this.dirty(this.lane(key))
 		if (!event.privacy) return
+		const printed = event.type === "lc" ? event.key : undefined
 		// It cannot be attributed to one lane: every live call it could belong
 		// to (any lane's record, unplaced ones included) is encrypted (fail
 		// closed).
 		for (const key of LANES) {
 			const lane = this.lane(key)
-			this.privacy(lane, seq, out)
+			this.privacy(lane, seq, atMs, out, printed)
 		}
 	}
 

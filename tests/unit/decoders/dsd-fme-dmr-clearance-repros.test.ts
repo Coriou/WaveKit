@@ -644,4 +644,132 @@ describe("dsd-fme DMR clearance repro corpus", () => {
 			).not.toBeNull()
 		})
 	})
+	describe("privacy before the call opens", () => {
+		const proof = (lead: Item[], sync = B1): Item[] => [
+			...lead,
+			[60, sync("VC1")],
+			[120, sync("VC2")],
+			[121, LC()],
+			[180, sync("VC3")],
+			[240, sync("VC4")],
+		]
+		const encryptedHeader =
+			" SLOT 1 TGT=9001 SRC=91 Group Call Encrypted (CRC ERR) "
+		const alg = " SLOT 1 ALG ID: 21; KEY ID: 05; "
+		const shapes: [string, Item[]][] = [
+			[
+				"1: an encrypted header LC with a CRC error mutes the call opened on its voice",
+				proof([
+					[0, B1("VLC")],
+					[1, encryptedHeader],
+				]),
+			],
+			[
+				"2: the same on the direct channel",
+				proof(
+					[
+						[0, M("VLC")],
+						[1, encryptedHeader],
+					],
+					M,
+				),
+			],
+			[
+				"3: a header LC with the SVC privacy bit and a CRC error",
+				proof([
+					[0, B1("VLC")],
+					[1, " SLOT 1 SVC=0x40 (CRC ERR) "],
+				]),
+			],
+			[
+				"4: a PI burst's non-clear ALG",
+				proof([
+					[0, B1("PI")],
+					[1, alg],
+				]),
+			],
+			[
+				"5: a PI burst's non-clear ALG on the direct channel",
+				proof(
+					[
+						[0, M("PI")],
+						[1, alg],
+					],
+					M,
+				),
+			],
+			[
+				"6: a PI burst's SVC privacy bit",
+				proof([
+					[0, B1("PI")],
+					[1, " SLOT 1 SVC=0x40 "],
+				]),
+			],
+			[
+				"7: a bracketless PI burst's ALG taints the slot",
+				proof([
+					[0, X("PI")],
+					[1, alg],
+				]),
+			],
+			[
+				"8: another slot's PI burst naming this slot",
+				proof([
+					[0, B2("PI")],
+					[1, alg],
+				]),
+			],
+			[
+				"9: a later clear ALG print does not undo the PI burst's ALG",
+				[
+					...proof([
+						[0, B1("PI")],
+						[1, alg],
+					]),
+					[121, " SLOT 1 ALG ID: 00; KEY ID: 00; "],
+					[181, LC()],
+				],
+			],
+		]
+		for (const [name, items] of shapes)
+			it(name, () => {
+				expectNeverClear(items)
+			})
+
+		it("a lane silent past the call timeout closes the context: a later clean call still goes clear", () => {
+			const trace = expectAuthorized([
+				[0, B1("PI")],
+				[1, alg],
+				[5000, B1("VC1")],
+				[5060, B1("VC2")],
+				[5061, LC()],
+				[5120, B1("VC3")],
+				[5180, B1("VC4")],
+			])
+			expect(trace.pubs.some(clear)).toBe(true)
+		})
+
+		it("the muted call's end closes the context: the lane's next call still goes clear", () => {
+			const trace = expectAuthorized([
+				...proof([
+					[0, B1("PI")],
+					[1, alg],
+				]),
+				[300, B1("TLC")],
+				[301, LC()],
+				[360, B1("IDLE")],
+				[420, B1("VC1")],
+				[480, B1("VC2")],
+				[481, LC(undefined, 9002, 92)],
+				[540, B1("VC3")],
+				[600, B1("VC4")],
+			])
+			const ids = [...new Set(trace.pubs.map(p => p.callId))]
+			expect(ids.length).toBeGreaterThanOrEqual(2)
+			expect(trace.pubs.filter(p => p.callId === ids[0] && clear(p))).toEqual(
+				[],
+			)
+			expect(trace.pubs.some(p => p.callId !== ids[0] && clear(p))).toBe(true)
+		})
+	})
 })

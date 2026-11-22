@@ -580,3 +580,91 @@ describe("DMR clearance: state x event rows", () => {
 		expect(run(2 + TIMEOUT_MS)).toBe("unknown")
 	})
 })
+
+describe("DMR clearance: privacy printed before the call opens", () => {
+	const ALG = " SLOT 1 ALG ID: 21; KEY ID: 05; "
+	/** The lane's next call, opened on its voice frames at `atMs`. */
+	const frames = (
+		h: Harness,
+		callId: string,
+		atMs?: number,
+		lane: 1 | 2 = 1,
+	) => {
+		h.open(lane === 1 ? "1" : "2", callId, null)
+		h.line(BS(lane, "VC1"), atMs)
+		return h.trust(callId)
+	}
+
+	it("stays pending on the lane: its next call opens encrypted, another lane's does not", () => {
+		const h = new Harness()
+		h.line(BS(1, "PI"))
+		h.line(ALG)
+		expect(h.decisions).toEqual([])
+		expect(frames(h, "c1")).toBe("encrypted")
+		expect(h.decisions).toEqual([{ callId: "c1", trust: "encrypted" }])
+		expect(frames(h, "c2", undefined, 2)).toBe("unknown")
+	})
+
+	it("is consumed by the call it mutes", () => {
+		const h = new Harness()
+		h.line(BS(1, "PI"))
+		h.line(ALG)
+		expect(frames(h, "c1")).toBe("encrypted")
+		h.end("1")
+		expect(frames(h, "c2")).toBe("unknown")
+	})
+
+	it("bracketless or another slot's privacy is pending on every lane it may belong to", () => {
+		const unplaced = new Harness()
+		unplaced.line(BRACKETLESS("PI"))
+		unplaced.line(ALG)
+		expect(frames(unplaced, "c1")).toBe("encrypted")
+		expect(frames(unplaced, "c2", undefined, 2)).toBe("encrypted")
+		const other = new Harness()
+		other.line(BS(2, "PI"))
+		other.line(ALG)
+		expect(frames(other, "c1")).toBe("encrypted")
+	})
+
+	it("a clean idle burst, a call timeout or a silent lane closes the context", () => {
+		const idle = new Harness()
+		idle.line(BS(1, "PI"))
+		idle.line(ALG)
+		idle.line(BS(1, "IDLE"))
+		expect(frames(idle, "c1")).toBe("unknown")
+		const dirtyIdle = new Harness()
+		dirtyIdle.line(BS(1, "PI"))
+		dirtyIdle.line(ALG)
+		dirtyIdle.line(BS(1, "IDLE (FEC ERR)"))
+		expect(frames(dirtyIdle, "c1")).toBe("encrypted")
+		const timeout = new Harness()
+		timeout.line(BS(1, "PI"))
+		timeout.line(ALG)
+		timeout.m.timeout(["1"])
+		expect(frames(timeout, "c1")).toBe("unknown")
+		const silent = (gapMs: number) => {
+			const h = new Harness()
+			h.line(BS(1, "PI"), 0)
+			h.line(ALG, 0)
+			return frames(h, "c1", gapMs)
+		}
+		expect(silent(TIMEOUT_MS)).toBe("encrypted")
+		expect(silent(TIMEOUT_MS + 1)).toBe("unknown")
+	})
+
+	it("a clean header of another key closes a keyed privacy print, never a keyless one or its own key", () => {
+		const run = (privacy: string, key: string) => {
+			const h = new Harness()
+			h.line(BS(1, "VLC"))
+			h.line(privacy)
+			h.line(BS(1, "VLC"))
+			h.open("1", "c1", key)
+			h.line(LC(1, Number(key.split("/")[0]), Number(key.split("/")[1])))
+			return h.trust("c1")
+		}
+		const keyed = LC(1, 9002, 92, "Encrypted (CRC ERR)")
+		expect(run(keyed, K)).toBe("pending")
+		expect(run(keyed, "9002/92")).toBe("encrypted")
+		expect(run(" SLOT 1 SVC=0x40 (CRC ERR) ", K)).toBe("encrypted")
+	})
+})
