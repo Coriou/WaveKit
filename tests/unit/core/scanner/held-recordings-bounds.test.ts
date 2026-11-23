@@ -34,7 +34,10 @@ import { afterEach, describe, expect, it } from "vitest"
 import { DISCOVERY_RECORDING_ALIASES_MAX } from "../../../../src/core/recordings/contract.js"
 import { RecordingAliasTable } from "../../../../src/core/scanner/recording-aliases.js"
 import { readAliasHistory } from "../../../../src/core/scanner/store/alias-history.js"
-import type { AnalogMetadataAdapter } from "../../../../src/core/scanner/store/analog-operations.js"
+import {
+	ADMISSION_HEADROOM,
+	type AnalogMetadataAdapter,
+} from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type {
 	JournalEntry,
@@ -827,7 +830,7 @@ describe("a recordings quota exceeded with nothing removable is visible", () => 
 		expect(ev.recordingsQuotaExceeded).toEqual({
 			capBytes: 4096,
 			usedBytes: used,
-			overBytes: used - 4096,
+			overBytes: used + ADMISSION_HEADROOM - 4096,
 		})
 		await ev.retention(new Set([b]))
 		await new Promise(resolve => setImmediate(resolve))
@@ -839,7 +842,7 @@ describe("a recordings quota exceeded with nothing removable is visible", () => 
 		expect(entered[0]).toMatchObject({
 			capBytes: 4096,
 			usedBytes: used,
-			overBytes: used - 4096,
+			overBytes: used + ADMISSION_HEADROOM - 4096,
 		})
 		// The refusal the recorder sees.
 		const op = ev.beginAnalog({
@@ -850,8 +853,8 @@ describe("a recordings quota exceeded with nothing removable is visible", () => 
 		await expect(op.ready).rejects.toThrow()
 		const receipt = await op.settled
 		expect(receipt.errorCode).toBe("storage-cap")
-		// Clears once the quota fits: one line.
-		ev.setCaps({ ...CAPS, maxRecordingsMb: 1 })
+		// Clears once the quota fits with room for the next recording (ADMISSION_HEADROOM): one line.
+		ev.setCaps({ ...CAPS, maxRecordingsMb: 8 })
 		await ev.retention(new Set([b]))
 		await new Promise(resolve => setImmediate(resolve))
 		expect(ev.recordingsQuotaExceeded).toBeNull()
@@ -888,7 +891,10 @@ describe("a recordings quota exceeded with nothing removable is visible", () => 
 				capBytes: 4096,
 			})
 			expect(quota?.usedBytes).toBeGreaterThanOrEqual(8192)
-			expect(quota?.overBytes).toBe((quota?.usedBytes ?? 0) - 4096)
+			// What retention must free for the next recording plus one in flight (ADMISSION_HEADROOM).
+			expect(quota?.overBytes).toBe(
+				(quota?.usedBytes ?? 0) + ADMISSION_HEADROOM - 4096,
+			)
 		} finally {
 			await h.service.stop()
 		}

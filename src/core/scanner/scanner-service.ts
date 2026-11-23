@@ -377,7 +377,14 @@ import { extractChannelFeatures } from "./classify/channel-features.js"
 import { refineChannelClassification } from "./classify/channel-tier.js"
 import { updateChannelAdmission } from "./plan/resource-admission.js"
 import { channelGateMinDurationMs } from "../spectrum/channel-gate.js"
-import type { AnalogCut } from "./store/analog-operations.js"
+import {
+	isStorageBytesRefusal,
+	isStorageCountRefusal,
+	type AnalogCut,
+	type AnalogHandle,
+	type AnalogInput,
+	type AnalogRoomShort,
+} from "./store/analog-operations.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
 import {
 	CHANNEL_GATE_DEFAULT_WIDTH_HZ,
@@ -622,6 +629,14 @@ const COVERAGE_EVENTS = [
 ] as const
 
 const MAINTENANCE_EVERY_MS = 5 * 60_000
+/**
+ * A storage-cap admission refusal (of the bytes or of the operation inventory), or an admission
+ * that left the store short of room for the next one (AnalogHandle.roomShort), asks for the next
+ * maintenance pass (retention) at the next tick instead of up to MAINTENANCE_EVERY_MS later: at
+ * most once per this window, and only while the last pass did not already find nothing
+ * removable for that shortage (`recordingsQuota` for bytes, `operationsHeldFull` for count).
+ */
+export const EARLY_RETENTION_EVERY_MS = 30_000
 const STATUS_EVERY_MS = 1_000
 /** Per-item quarantine lines one analog recovery logs; the rest are one suppressed count. */
 export const QUARANTINE_LOG_LINES = 32
@@ -1372,6 +1387,8 @@ export class ScannerService extends EventEmitter {
 	/** Maintenance still running behind a slow disk: the next one waits for it. */
 	private maintenanceInFlight = false
 	private lastMaintenanceAt = 0
+	/** requestRetentionSoon: when it last brought maintenance forward (-∞: never). */
+	private earlyRetentionAt = Number.NEGATIVE_INFINITY
 	private lastStatusAt = 0
 	private lastStatusJson = ""
 	private startupAttempted = false
@@ -1642,7 +1659,7 @@ export class ScannerService extends EventEmitter {
 					ringSeconds: this.settings().ringSeconds,
 					admission: this.settings().admission,
 				}),
-				beginAnalog: input => this.evidence.beginAnalog(input),
+				beginAnalog: input => this.beginAnalogRecording(input),
 				recordTone: (observationId, ctcssHz, at) =>
 					void this.store.recordAnalog(
 						observationId,
@@ -1809,7 +1826,7 @@ export class ScannerService extends EventEmitter {
 				beginAnalogComponent: identity =>
 					this.channelRecordingOwners.get(identity.token)?.tap.beginAnalog() ===
 					true,
-				beginAnalog: input => this.evidence.beginAnalog(input),
+				beginAnalog: input => this.beginAnalogRecording(input),
 				releaseLogical: identity =>
 					this.channelRecordingOwners
 						.get(identity.token)
@@ -9408,6 +9425,66 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	/**
+	 * The recorders' store admission: a storage-cap refusal of the bytes or of the operation
+	 * inventory, or an admission that left less than one more recording's room (roomShort), asks
+	 * for retention soon, so a full store frees room before the next transmission is refused.
+	 */
+	private beginAnalogRecording(input: AnalogInput): AnalogHandle {
+		const handle = this.evidence.beginAnalog(input)
+		// Not the metadata bounds: they share the code, and retention cannot clear them.
+		void handle.ready.then(
+			() => {
+				const short = handle.roomShort
+				if (short) this.requestRetentionSoon(short)
+			},
+			(err: unknown) => {
+				if (isStorageBytesRefusal(err))
+					this.requestRetentionSoon({ bytes: true, count: false })
+				else if (isStorageCountRefusal(err))
+					this.requestRetentionSoon({ bytes: false, count: true })
+			},
+		)
+		return handle
+	}
+
+	/**
+	 * Brings the next maintenance pass (whose retention frees room oldest first) forward to the
+	 * next tick: at most once per EARLY_RETENTION_EVERY_MS (30 s), and not for a shortage the
+	 * last pass already left with nothing removable (bytes: the quota stayed exceeded; count: the
+	 * held operations alone fill the inventory); the regular 5 min cadence retries those.
+	 */
+	private requestRetentionSoon(short: AnalogRoomShort): void {
+		const bytes = short.bytes && this.evidence.recordingsQuotaExceeded === null
+		const count = short.count && !this.evidence.operationsHeldFull
+		if (!bytes && !count) return
+		const now = this.now()
+		if (now - this.earlyRetentionAt < EARLY_RETENTION_EVERY_MS) return
+		this.earlyRetentionAt = now
+		this.lastMaintenanceAt = Math.min(
+			this.lastMaintenanceAt,
+			now - MAINTENANCE_EVERY_MS,
+		)
+	}
+
+	/**
+	 * A pass ended short of room with removable files left (EvidenceStore.retention `again`):
+	 * the next pass is due as soon as the early-retention debounce allows (at most once per
+	 * EARLY_RETENTION_EVERY_MS, counted from the last early request), never later than the
+	 * regular cadence.
+	 */
+	private retentionAgain(): void {
+		const due = Math.max(
+			this.now(),
+			this.earlyRetentionAt + EARLY_RETENTION_EVERY_MS,
+		)
+		this.earlyRetentionAt = due
+		this.lastMaintenanceAt = Math.min(
+			this.lastMaintenanceAt,
+			due - MAINTENANCE_EVERY_MS,
+		)
+	}
+
 	private async maintenance(): Promise<void> {
 		if (this.ownershipLost()) return
 		const s = this.settings()
@@ -9454,6 +9531,8 @@ export class ScannerService extends EventEmitter {
 			})
 		// Retention removes files without changing a discovery's recording count: the recordings
 		// catalogue hears it here (folder ids only).
+		// Short of room with files the pass did not try still removable: another pass, soon.
+		if (retained?.again === true) this.retentionAgain()
 		if (retained !== null && retained.deleted.length > 0) {
 			const folderIds = recordingFolderIdsOf(retained.deleted)
 			if (folderIds.length > 0) this.emit("recordings-removed", folderIds)

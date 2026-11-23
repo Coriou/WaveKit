@@ -62,6 +62,7 @@ import {
 	type AnalogQuarantine,
 	type AnalogReconciliation,
 	type AnalogSetAsideStatus,
+	type LegacyRetention,
 } from "./analog-operations.js"
 import {
 	NOISE_QUARANTINE,
@@ -477,6 +478,8 @@ export class EvidenceStore {
 	private unknownHeldFiles = 0
 	/** The recordings quota the last retention pass left exceeded; null within it. */
 	private quotaExceeded: RecordingsQuotaExceeded | null = null
+	/** noteOperationsHeld: the full-of-held state was last logged as entered. */
+	private operationsHeldLogged = false
 	/**
 	 * Bytes of the recordings outside analog operations (`legacyRecordingBytes`), from the last
 	 * walk or retention pass, with the monotonic time that walk began; null: none trusted yet.
@@ -684,6 +687,15 @@ export class EvidenceStore {
 	 */
 	get recordingsQuotaExceeded(): RecordingsQuotaExceeded | null {
 		return this.quotaExceeded === null ? null : { ...this.quotaExceeded }
+	}
+
+	/**
+	 * The last retention pass found the analog operation inventory full with the operations it
+	 * may not remove alone filling it (AnalogOperations.operationsHeldFull): admission refuses
+	 * with `storage-cap` (the inventory limit) until some of them are released or deleted.
+	 */
+	get operationsHeldFull(): boolean {
+		return this.analog?.operationsHeldFull ?? false
 	}
 
 	/**
@@ -1594,9 +1606,15 @@ export class EvidenceStore {
 		await rmdirIfEmpty(evidenceDir)
 	}
 
+	/**
+	 * One retention pass. `again`: the store is short of room for the next recording with files
+	 * this pass did not try still removable (an admission or a finalization after its last
+	 * removal decision used the room it freed); the caller runs another pass soon. The quota is
+	 * then not reported exceeded: that state means nothing removable is left.
+	 */
 	async retention(
 		keepDiscoveryIds: ReadonlySet<string>,
-	): Promise<{ deleted: string[] }> {
+	): Promise<{ deleted: string[]; again?: true }> {
 		const gate = this.deletionGate()
 		if (gate) await gate
 		// WG9 R2: a pinned root whose identity changed deletes nothing (fail closed).
@@ -1678,10 +1696,17 @@ export class EvidenceStore {
 			["evidence", this.caps.maxEvidenceMb * MIB],
 		]
 		let recordingsLeft = 0
+		// With analog operations, the recordings quota is one oldest-first pass over the legacy
+		// files and the analog ones together, on admission's own full test (analog.retained).
+		const combined = this.analog !== null
 		for (const [category, capBytes] of caps) {
 			let total = 0
 			for (const f of files)
 				if (f.category === category && !gone.has(f.path)) total += f.bytes
+			if (combined && category === "recordings") {
+				recordingsLeft = total
+				continue
+			}
 			for (const f of byAge) {
 				if (total <= capBytes) break
 				if (f.category !== category || gone.has(f.path) || isProtected(f))
@@ -1692,14 +1717,34 @@ export class EvidenceStore {
 		}
 		// This pass's walk, less what it removed: as fresh as a walk of legacyRecordingBytes.
 		this.legacy = { bytes: recordingsLeft, atMs: walkedAtMs }
-		if (this.analog)
+		if (this.analog) {
+			const pool: LegacyRetention = {
+				bytes: recordingsLeft,
+				files: byAge
+					.filter(
+						f =>
+							f.category === "recordings" &&
+							!gone.has(f.path) &&
+							!isProtected(f),
+					)
+					.map(f => ({
+						mtimeMs: f.mtimeMs,
+						key: f.rel,
+						bytes: f.bytes,
+						remove: () => remove(f),
+					})),
+			}
 			deleted.push(
 				...(await this.analog.retained(
 					keepDiscoveryIds,
 					this.caps.maxAgeDays * DAY_MS,
 					now,
+					pool,
 				)),
 			)
+			recordingsLeft = pool.bytes
+			this.legacy = { bytes: recordingsLeft, atMs: walkedAtMs }
+		}
 		await this.removeEmptyDirs()
 		// The folders left on disk: an alias whose folder retention emptied may be released again.
 		await this.loadFolderIndex().catch((err: unknown) =>
@@ -1707,7 +1752,14 @@ export class EvidenceStore {
 		)
 		this.unresolvedFolders = unresolved.size
 		this.unknownHeldFiles = unknownHeld.size
-		this.noteQuota(recordingsLeft + (this.analog?.managedBytes ?? 0))
+		// Measured now, after the pass's last await: admissions and finalizations since its last
+		// removal decision count, and so do the removable files they left (removableNow).
+		const again = this.noteQuota(
+			recordingsLeft + (this.analog?.managedBytes ?? 0),
+			this.analog?.quotaShortfall(recordingsLeft),
+			this.analog?.removableNow() ?? 0,
+		)
+		this.noteOperationsHeld(this.operationsHeldFull)
 		if (unknownHeld.size > 0)
 			this.log.debug(
 				{ kept: unknownHeld.size },
@@ -1728,23 +1780,34 @@ export class EvidenceStore {
 				{ deleted: deleted.length },
 				"Scanner retention removed files",
 			)
-		return { deleted }
+		return again ? { deleted, again } : { deleted }
 	}
 
 	/**
 	 * The recordings left after a retention pass against the quota: entering or leaving the
-	 * exceeded state logs once (numbers only).
+	 * exceeded state logs once (numbers only). With analog operations the test is admission's
+	 * own (`shortfall`, AnalogOperations.quotaShortfall: no room left for the next recording
+	 * plus one in flight, ADMISSION_HEADROOM), so a store within one recording of its cap shows;
+	 * without them, or while the analog inventory is unknown (null), it is the cap itself.
+	 * Exceeded only with nothing removable left (`removable`, AnalogOperations.removableNow, 0):
+	 * a shortfall with removable files left is not entered (returns true: run another pass).
 	 */
-	private noteQuota(usedBytes: number): void {
+	private noteQuota(
+		usedBytes: number,
+		shortfall: number | null | undefined,
+		removable: number,
+	): boolean {
 		const capBytes = this.caps.maxRecordingsMb * MIB
-		const next =
-			Number.isFinite(usedBytes) && usedBytes > capBytes
-				? {
-						capBytes,
-						usedBytes,
-						overBytes: usedBytes - capBytes,
-					}
-				: null
+		const overBytes = shortfall ?? usedBytes - capBytes
+		const short =
+			Number.isFinite(usedBytes) && Number.isFinite(overBytes) && overBytes > 0
+		const again = short && removable > 0
+		const next = short && !again ? { capBytes, usedBytes, overBytes } : null
+		if (again)
+			this.log.debug(
+				{ reason: "storage-cap", overBytes, removable },
+				"Scanner recordings are short of room with removable files left; retention runs again",
+			)
 		if (next !== null && this.quotaExceeded === null)
 			this.log.warn(
 				{
@@ -1753,7 +1816,7 @@ export class EvidenceStore {
 					usedBytes: next.usedBytes,
 					overBytes: next.overBytes,
 				},
-				"Scanner recordings quota exceeded and retention may remove nothing more; analog recordings are refused (storage-cap)",
+				"Scanner recordings quota exceeded (no room for the next recording) and retention may remove nothing more; analog recordings are refused (storage-cap)",
 			)
 		else if (next === null && this.quotaExceeded !== null)
 			this.log.info(
@@ -1761,6 +1824,22 @@ export class EvidenceStore {
 				"Scanner recordings quota no longer exceeded; analog recordings are admitted again",
 			)
 		this.quotaExceeded = next
+		return again
+	}
+
+	/** Entering or leaving operationsHeldFull logs once (fixed text). */
+	private noteOperationsHeld(full: boolean): void {
+		if (full && !this.operationsHeldLogged)
+			this.log.warn(
+				{ reason: "storage-cap" },
+				"Scanner analog operation inventory is full of recordings retention may not remove; analog recordings are refused (storage-cap)",
+			)
+		else if (!full && this.operationsHeldLogged)
+			this.log.info(
+				{ reason: "storage-cap" },
+				"Scanner analog operation inventory has room again",
+			)
+		this.operationsHeldLogged = full
 	}
 
 	async diskState(): Promise<"ok" | "disk-low"> {
