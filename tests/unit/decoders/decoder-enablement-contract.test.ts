@@ -189,6 +189,7 @@ const baseConfig = {
 			hangMs: 2000,
 			preRollMs: 300,
 		},
+		admission: { enabled: true },
 		storage: {
 			dir: null,
 			maxRecordingsMb: 512,

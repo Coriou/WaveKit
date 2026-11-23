@@ -14,7 +14,7 @@
  *   mobile's slot), the carrier staying on.
  * - tone: a sine at `hz`, 2 400 Hz peak.
  * - silent: no modulation (an unmodulated carrier).
- * A source with `carrier: false` sends noise only (an open squelch).
+ * A source with `carrier: false` sends noise only (an open squelch); `ctcssHz` adds a sub-tone.
  */
 import { mulberry32 } from "../../../mocks/scanner/signals.js"
 import { WidebandNfmChain } from "../../../../src/core/scanner/channel/wideband-nfm.js"
@@ -64,6 +64,8 @@ export interface ContentSignal {
 	/** Default true; false: noise only. */
 	readonly carrier?: boolean
 	readonly seed?: number
+	/** A sub-tone added to the deviation (Hz; 350 Hz deviation), as a CTCSS tone; default none. */
+	readonly ctcssHz?: number
 }
 
 const AMP = 0.4
@@ -142,21 +144,45 @@ export function contentAudio(
 	signal: ContentSignal,
 	seconds: number,
 ): Int16Array {
+	const chain = new WidebandNfmChain({
+		inputRateHz: CONTENT_FS,
+		offsetHz: CONTENT_OFFSET_HZ,
+	})
+	const parts = contentIq(signal, seconds).map(cu8 => chain.process(cu8))
+	const out = new Int16Array(parts.reduce((s, p) => s + p.length, 0))
+	let o = 0
+	for (const p of parts) {
+		out.set(p, o)
+		o += p.length
+	}
+	return out
+}
+
+/**
+ * `seconds` of `signal` as CU8 IQ at CONTENT_FS, the carrier at CONTENT_OFFSET_HZ, in slices of
+ * 9 600 samples (0.1 s): what contentAudio demodulates, for a test that feeds a recorder.
+ */
+export function contentIq(
+	signal: ContentSignal,
+	seconds: number,
+): Uint8Array[] {
 	const fs = CONTENT_FS
 	const rng = mulberry32(signal.seed ?? 5)
 	const noise = mulberry32((signal.seed ?? 5) + 1)
 	const sigma = AMP / Math.sqrt(2 * (12_500 / fs) * 10 ** (signal.cnrDb / 10))
-	const dev = deviation(signal.waveform, fs, rng)
-	const chain = new WidebandNfmChain({
-		inputRateHz: fs,
-		offsetHz: CONTENT_OFFSET_HZ,
-	})
+	const wave = deviation(signal.waveform, fs, rng)
+	const ctcssHz = signal.ctcssHz
+	let tone = 0
+	const dev =
+		ctcssHz === undefined
+			? wave
+			: (): number => wave() + 350 * Math.sin((TWO_PI * ctcssHz * tone++) / fs)
 	const gauss = (): number => {
 		// Box–Muller.
 		const u = Math.max(1e-12, noise())
 		return Math.sqrt(-2 * Math.log(u)) * Math.cos(TWO_PI * noise())
 	}
-	const parts: Int16Array[] = []
+	const parts: Uint8Array[] = []
 	let phase = 0
 	const total = Math.round(seconds * fs)
 	const slice = 9_600
@@ -177,15 +203,9 @@ export function contentAudio(
 				Math.min(255, Math.round(127.5 + 127.5 * im)),
 			)
 		}
-		parts.push(chain.process(cu8))
+		parts.push(cu8)
 	}
-	const out = new Int16Array(parts.reduce((s, p) => s + p.length, 0))
-	let o = 0
-	for (const p of parts) {
-		out.set(p, o)
-		o += p.length
-	}
-	return out
+	return parts
 }
 
 /** The named synthetic cases the tests and the bench share (cnrDb 30 unless named). */

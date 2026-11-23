@@ -50,6 +50,7 @@ const SPEC_DEFAULTS: ScannerSettings = {
 		revisitShare: 0.3,
 	},
 	hold: { maxHoldMs: 60000, hangMs: 2000, preRollMs: 300 },
+	admission: { enabled: true },
 	storage: {
 		dir: null,
 		maxRecordingsMb: 512,

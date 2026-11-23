@@ -4389,7 +4389,9 @@ that closed its track, while no recording ran for it) and the discards `discarde
 `discarded:late-non-voice` (a finished or held file whose own signal a decode proved not voice
 after it ended) and `discarded:not-speech` (a finished file on a channel with a strong or decode-backed digital
 prior whose audio clearly measures as no speech, or a file of a channel whose analog trials ran 10
-times and never heard voice whose audio shows no speech at all), so a client should show an unknown code as it is rather than reject it. `discarded:unclassed` also ends a file of a recording classed
+times and never heard voice whose audio shows no speech at all) and `discarded:noise` (a finished
+file whose audio measures as open-squelch noise or data buzz in every window, with no carrier
+quieting between words; `scanner.admission.enabled`, on by default), so a client should show an unknown code as it is rather than reject it. `discarded:unclassed` also ends a file of a recording classed
 only by its own audio when the whole file no longer holds that class at its end. `evicted`
 means the recording's slot went to another track: to a track classed `analog-fm`, or, for a
 recording classed only by its own audio past its hold, to any waiting track; such a recording

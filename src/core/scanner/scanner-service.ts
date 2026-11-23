@@ -1640,6 +1640,7 @@ export class ScannerService extends EventEmitter {
 					...this.settings().hold,
 					cpuBudgetCores: this.settings().cpuBudgetCores,
 					ringSeconds: this.settings().ringSeconds,
+					admission: this.settings().admission,
 				}),
 				beginAnalog: input => this.evidence.beginAnalog(input),
 				recordTone: (observationId, ctcssHz, at) =>

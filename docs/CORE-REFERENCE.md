@@ -574,6 +574,19 @@ The log shows one line per change, for example
 `Receiver changed: source:rtl|model:5:29 -> unit:<id>; learned state adopted`, and the same receiver
 coming back after a reconnect logs `Receiver reconnected: <key>; learned state resumed`.
 
+### Scanner recording admission
+
+`scanner.admission.enabled` (default `true`) discards a finished analog voice recording whose
+audio measures as open-squelch noise or data buzz, with decision `discarded:noise`. Set it to
+`false` to keep such files. The rule and its provisional bounds are in
+[SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings).
+
+```yaml
+scanner:
+  admission:
+    enabled: true
+```
+
 ## RTL-SDR Setup
 
 WaveKit reads IQ from `rtl_tcp` (or rtlmux in front of it). On a Raspberry Pi, the
