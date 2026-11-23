@@ -34,7 +34,11 @@ import {
 	planPlacements,
 } from "../../../../src/decoders/enablement/placement.js"
 import { pagingRasterRanges } from "../../../../src/decoders/enablement/paging-plan.js"
-import { dsdChallengeKey } from "../../../../src/decoders/enablement/dsd-activity.js"
+import {
+	dsdChallengeKey,
+	dsdGroupKey,
+	dsdTierKey,
+} from "../../../../src/decoders/enablement/dsd-activity.js"
 
 const RATE = 1_024_000
 // Off-raster, inside the EU UHF paging band (6.25 kHz raster).
@@ -1063,4 +1067,146 @@ it("keeps planner candidates stable across repeated midpoint crossings", () => {
 		candidates = next
 	}
 	ranker.dispose()
+})
+
+// Scanner-only digital evidence with a manager no-sync in cooldown
+// (docs/DECODER-GUIDE.md, dsd-fme evidence ranking): the no-sync demotes the
+// channel whatever its scanner evidence, so it neither challenges nor refills.
+describe("dsd-fme tiers: a manager no-sync in cooldown demotes scanner-only digital", () => {
+	const A = 466_037_500
+	const B = 466_075_000
+	const input = base([dsd()], [source()], {
+		vfo: { sourceId: "s", frequencyHz: CENTRE },
+	})
+	const policy = {
+		...activity().policy,
+		slots: { "multimon-ng": 0, "dsd-fme": 1 },
+	}
+	const observed = [{ epoch: EPOCH, channelsHz: [A, B] }]
+	const nosync = (hz: number, now: number) => ({
+		key: dsdTierKey("dsd", "s", hz)!,
+		tier: "nosync" as const,
+		untilMonoMs: now + 120_000,
+		failures: 1,
+	})
+	/** One pass; `digital` channels carry scanner evidence "digital". */
+	const pass = (
+		now: number,
+		heat: ReadonlyMap<number, Heat>,
+		incumbents: ActivityIncumbent[],
+		tiers: PlannerActivity["tiers"],
+		digital: readonly number[],
+		extra: {
+			analog?: readonly number[]
+			analogRetries?: PlannerActivity["analogRetries"]
+		} = {},
+	) => {
+		const act = activity({
+			policy,
+			nowMonoMs: now,
+			observed,
+			incumbents,
+			...(tiers ? { tiers } : {}),
+			...(extra.analogRetries ? { analogRetries: extra.analogRetries } : {}),
+			confirmedChallengers: [A, B].map(hz => dsdChallengeKey("dsd", "s", hz)),
+		})
+		const withAct = { ...input, activity: act }
+		const snapshots = answer(activityQueries(withAct), heat).map(snap => ({
+			...snap,
+			channels: snap.channels.map(c =>
+				digital.includes(c.hz)
+					? { ...c, evidence: "digital" as const }
+					: extra.analog?.includes(c.hz)
+						? { ...c, evidence: "analog" as const }
+						: c,
+			),
+		}))
+		return planPlacements({ ...withAct, activity: { ...act, snapshots } })
+	}
+	const asIncumbents = (plan: PlacementPlan, since: number) =>
+		plan.wanted.map(p => ({
+			key: p.key,
+			decoderId: p.decoderId,
+			sourceId: p.sourceId,
+			hz: p.channelHz!,
+			primary: p.primary,
+			dwellSinceMonoMs: since,
+		}))
+	const hotLive = { state: "hot" as const, score: 102, live: true }
+	const seedB = () =>
+		asIncumbents(pass(0, new Map([[B, hotLive]]), [], [], []), 0)
+
+	it("count 1: nosync A (until now + 120 s, 1 failure), hot live digital evidence, does not displace an unknown B past its dwell", () => {
+		const now = 1_000_000
+		const incumbents = seedB()
+		expect(incumbents.map(i => i.hz)).toEqual([CENTRE, B])
+		const heat = new Map([[A, hotLive]])
+		const held = pass(now, heat, incumbents, [nosync(A, now)], [A])
+		expect(held.activity!.moves).toEqual([])
+		expect(channels(held, "dsd")).toEqual([CENTRE, B])
+		// Non-vacuous: without the no-sync entry A (digital > unknown) moves in.
+		const moved = pass(now, heat, incumbents, [], [A])
+		expect(moved.activity!.moves).toHaveLength(1)
+		expect(channels(moved, "dsd")).toEqual([CENTRE, A])
+		// A at/past its cooldown (now >= until) challenges again.
+		const expired = pass(now, heat, incumbents, [nosync(A, now - 120_000)], [A])
+		expect(expired.activity!.moves).toHaveLength(1)
+	})
+
+	it("two nosync scanner-digital channels never swap the slot (no A/B churn)", () => {
+		let incumbents = seedB()
+		const since = new Map(incumbents.map(i => [i.key, 0]))
+		let moves = 0
+		// 10 min of passes every 5 s, A and B alternately hot and live, both
+		// failed (nosync renewed each pass, as a running failed run renews).
+		for (let now = 30_000; now <= 630_000; now += 5_000) {
+			const hotHz = Math.floor(now / 20_000) % 2 === 0 ? A : B
+			const plan = pass(
+				now,
+				new Map([[hotHz, hotLive]]),
+				incumbents,
+				[nosync(A, now), nosync(B, now)],
+				[A, B],
+			)
+			moves += plan.activity!.moves.length
+			for (const p of plan.wanted) if (!since.has(p.key)) since.set(p.key, now)
+			incumbents = asIncumbents(plan, 0).map(i => ({
+				...i,
+				dwellSinceMonoMs: since.get(i.key)!,
+			}))
+		}
+		expect(moves).toBe(0)
+		expect(incumbents.map(i => i.hz)).toEqual([CENTRE, B])
+	})
+
+	it("a non-finite group analog try time keeps the analog try gate closed", () => {
+		// B (scanner analog, no sync) holds the only slot past its dwell; A is
+		// scanner analog and hot live. The gate is one try per group per
+		// cooldown(5) = 120 s x 2^4 = 1,920 s from the recorded try.
+		const now = 10_000_000
+		const incumbents = seedB()
+		const heat = new Map([[A, hotLive]])
+		const groupKey = dsdGroupKey("dsd", "s")
+		const at = (atMonoMs: number) => ({
+			analog: [A, B],
+			analogRetries: [{ groupKey, atMonoMs }],
+		})
+		// Non-vacuous: no try recorded opens the gate, and A is tried.
+		const open = pass(now, heat, incumbents, [], [], { analog: [A, B] })
+		expect(open.activity!.moves).toHaveLength(1)
+		expect(channels(open, "dsd")).toEqual([CENTRE, A])
+		// A finite try 1,920 s ago opens it; one 1,919 s ago keeps it closed.
+		expect(
+			pass(now, heat, incumbents, [], [], at(now - 1_920_000)).activity!.moves,
+		).toHaveLength(1)
+		expect(
+			pass(now, heat, incumbents, [], [], at(now - 1_919_000)).activity!.moves,
+		).toEqual([])
+		// A malformed (non-finite) try time keeps it closed.
+		for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -Infinity]) {
+			const closed = pass(now, heat, incumbents, [], [], at(bad))
+			expect(closed.activity!.moves).toEqual([])
+			expect(channels(closed, "dsd")).toEqual([CENTRE, B])
+		}
+	})
 })

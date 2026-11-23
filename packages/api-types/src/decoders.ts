@@ -452,6 +452,9 @@ export interface DecoderPlacementActivity {
 		| "decoded"
 		| "trial-success"
 		| "trial-backoff"
+		| "digital-memory"
+		| "analog-voice"
+		| "no-sync"
 	)[]
 }
 export interface DecoderPlacementView {

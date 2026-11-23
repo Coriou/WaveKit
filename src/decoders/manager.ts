@@ -134,10 +134,12 @@ import type {
 	PlannerActivity,
 } from "./enablement/activity-plan.js"
 import {
-	DsdActivityDemotions,
+	DSD_DIGITAL_HOLD_MS,
 	DsdChallengeEvidence,
+	DsdChannelTiers,
 	dsdChallengeKey,
-	dsdSyncProtectionUntil,
+	dsdGroupKey,
+	dsdTierKey,
 	isDsdActivitySync,
 } from "./enablement/dsd-activity.js"
 import { ACTIVITY_MAX_OBSERVED } from "./enablement/activity-contract.js"
@@ -1167,7 +1169,14 @@ export class DecoderManager extends EventEmitter {
 	private activityPassDirty = false
 	/** At most this long from an activity notice or deadline to its pass (contract: 250 ms). */
 	private static readonly ACTIVITY_PASS_COALESCE_MS = 100
-	private readonly dsdActivityDemotions = new DsdActivityDemotions()
+	/** dsd-fme evidence tiers per RF channel (digital memory, escalating no-sync). */
+	private readonly dsdChannelTiers = new DsdChannelTiers()
+	/**
+	 * The last "connected" event per source (activity clock), one per
+	 * configured source; deleted on "source-removed". A no-sync failure needs
+	 * a full dwell since max(run start, this reconnect).
+	 */
+	private readonly sourceConnectedMono = new Map<string, number>()
 	/** R2: repeat-and-span evidence of dsd-fme challengers (bounded, same clock). */
 	private readonly dsdChallengeEvidence = new DsdChallengeEvidence()
 	private activityMoves: { sourceId: string; atMonoMs: number }[] = []
@@ -2740,11 +2749,17 @@ export class DecoderManager extends EventEmitter {
 				else vfoSecondaries.set(placement.decoderId, [placement])
 			}
 			if (plan.activity) {
-				for (const move of plan.activity.moves)
+				for (const move of plan.activity.moves) {
 					this.activityMoves.push({
 						sourceId: move.sourceId,
 						atMonoMs: move.atMonoMs,
 					})
+					if (move.analogRetry)
+						this.dsdChannelTiers.noteAnalogRetry(
+							dsdGroupKey(move.decoderId, move.sourceId),
+							move.atMonoMs,
+						)
+				}
 				// An activity move hands the victim's earned probation to its
 				// replacement before the victim is removed below.
 				for (const placement of wanted)
@@ -3272,28 +3287,51 @@ export class DecoderManager extends EventEmitter {
 			)
 				continue
 			const since = this.activitySince.get(placement.key)
-			const syncUntilMonoMs =
+			// dsd-fme tiers are kept per RF channel, only for a finite frequency.
+			const tierKey =
 				state.config.type === "dsd-fme"
-					? dsdSyncProtectionUntil(
-							since?.cleanSyncMonoMs ?? null,
-							now,
-							activity.policy,
+					? dsdTierKey(
+							placement.decoderId,
+							placement.sourceId,
+							placement.channelHz,
 						)
 					: null
-			const syncSeen = syncUntilMonoMs !== null
+			const syncSeen =
+				tierKey !== null && this.dsdChannelTiers.held(tierKey, now)
+			const syncUntilMonoMs = syncSeen
+				? (this.dsdChannelTiers.lastSync(tierKey) ?? now) + DSD_DIGITAL_HOLD_MS
+				: null
 			if (
-				state.config.type === "dsd-fme" &&
+				tierKey !== null &&
 				placement.origin === "activity" &&
 				running &&
 				since !== undefined &&
 				since.startedMonoMs !== null &&
-				!syncSeen &&
+				since.cleanSyncMonoMs === null &&
 				!since.demoted &&
-				now - since.startedMonoMs >= activity.policy.dwellMs
+				// A full dwell of delivered samples: since the run started and since
+				// the source's last reconnect, whichever is later.
+				now -
+					Math.max(
+						since.startedMonoMs,
+						this.sourceConnectedMono.get(placement.sourceId) ??
+							Number.NEGATIVE_INFINITY,
+					) >=
+					activity.policy.dwellMs &&
+				// A source that is not connected delivers nothing: no failure. Without
+				// a source manager (sourceManager null) no failure is ever noted.
+				this.sourceManager?.getStatus(placement.sourceId)?.connected === true
 			) {
-				this.dsdActivityDemotions.note(placement.key, now, activity.policy)
+				this.dsdChannelTiers.noteFailure(tierKey, now, activity.policy)
 				since.demoted = true
-			}
+			} else if (
+				tierKey !== null &&
+				running &&
+				since?.demoted === true &&
+				since.cleanSyncMonoMs === null
+			)
+				// The failed run goes on: its cooldown counts from its end.
+				this.dsdChannelTiers.renewFailure(tierKey, now, activity.policy)
 			incumbents.push({
 				...(syncSeen
 					? { syncSeen: true, syncUntilMonoMs: syncUntilMonoMs! }
@@ -3319,7 +3357,7 @@ export class DecoderManager extends EventEmitter {
 		const plannerActivity: PlannerActivity = {
 			nowMonoMs: now,
 			policy: activity.policy,
-			demotions: this.dsdActivityDemotions.snapshot(now),
+			...this.dsdChannelTiers.snapshot(now, activity.policy),
 			epochs,
 			observed: epochs.flatMap(epoch => {
 				try {
@@ -5238,21 +5276,20 @@ export class DecoderManager extends EventEmitter {
 					this.refreshActivitySince(this.activityMonoNow())
 					since = this.activitySince.get(placement.key)
 				}
-				if (since) {
+				const tierKey = dsdTierKey(
+					placement.decoderId,
+					placement.sourceId,
+					placement.channelHz ?? Number.NaN,
+				)
+				if (since && tierKey !== null) {
 					// Renew on the manager's monotonic clock, never the event's wall time.
 					const now = this.activityMonoNow()
-					const wasProtected =
-						dsdSyncProtectionUntil(
-							since.cleanSyncMonoMs,
-							now,
-							this.config.enablement.activity.policy,
-						) !== null
 					since.cleanSyncMonoMs = now
 					since.demoted = false
-					this.dsdActivityDemotions.clear(placement.key)
 					// The existing expiry timer re-reads the renewed deadline; steady
-					// checked output does not need a planner pass for every parser line.
-					if (!wasProtected) this.requestActivityPass()
+					// checked output asks for a pass only when the channel becomes held.
+					if (this.dsdChannelTiers.noteSync(tierKey, now))
+						this.requestActivityPass()
 				}
 			}
 			const binding = {
@@ -7048,6 +7085,7 @@ export class DecoderManager extends EventEmitter {
 			)
 		this.ownsSourceRouting = !routing
 		this.sourceConnectedHandler = sourceId => {
+			this.sourceConnectedMono.set(sourceId, this.activityMonoNow())
 			for (const state of this.decoders.values()) {
 				const selected =
 					state.config.sourceId ?? this.sourceRouting?.getDefaultSourceId()
@@ -7093,6 +7131,8 @@ export class DecoderManager extends EventEmitter {
 		// "source-removed" means the source is gone for good.
 		this.sourceGoneHandler = sourceId => {
 			this.scanTainted.delete(sourceId)
+			this.dsdChannelTiers.dropSource(sourceId)
+			this.sourceConnectedMono.delete(sourceId)
 			this.efficiencyEvaluations.delete(sourceId)
 		}
 		sourceManager.on("source-removed", this.sourceGoneHandler)

@@ -17,6 +17,25 @@ export type ActivityReason =
 	| "decoded"
 	| "trial-success"
 	| "trial-backoff"
+	/** dsd-fme: the channel's tier is digital (a checked sync within 6 h, or scanner identity). */
+	| "digital-memory"
+	/** dsd-fme: the scanner classed the channel analog FM (voice or tone) within 15 min. */
+	| "analog-voice"
+	/** dsd-fme: a recent failed sync, inside its escalating cooldown, or a run without sync. */
+	| "no-sync"
+
+/** Every reason in its status order; the status schema's enum and maxItems mirror it. */
+export const REASONS: readonly ActivityReason[] = [
+	"live-energy",
+	"track",
+	"occupancy",
+	"decoded",
+	"trial-success",
+	"trial-backoff",
+	"digital-memory",
+	"analog-voice",
+	"no-sync",
+]
 
 /** One spectrum engine generation of a source; numeric epochs may restart with a new engine. */
 export interface ActivityEpoch {
@@ -40,6 +59,11 @@ export interface ChannelActivity {
 	readonly hz: number
 	/** Recent decode of a non-voice protocol excludes this candidate from dsd-fme. */
 	readonly excluded?: boolean
+	/**
+	 * dsd-fme only, scanner-side evidence tier: "digital" for a digital-voice decode or replay
+	 * success within 6 h, else "analog" for analog FM proof within 15 min; absent otherwise.
+	 */
+	readonly evidence?: "digital" | "analog"
 	/** Finite and at least 0. */
 	readonly score: number
 	readonly state: ActivityState

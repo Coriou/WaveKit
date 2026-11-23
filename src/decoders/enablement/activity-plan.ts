@@ -15,7 +15,9 @@ import type {
 	ChannelActivity,
 	ObservedActivityCentre,
 } from "./activity-contract.js"
+import { REASONS } from "./activity-contract.js"
 import type { DecoderReach } from "./contract.js"
+import type { DsdTierView } from "./dsd-activity.js"
 import { channelizerBaseCores } from "./contract.js"
 
 export const ACTIVITY_DECODERS: readonly ActivityDecoder[] = [
@@ -77,7 +79,10 @@ export interface ActivityIncumbent {
 	primary: boolean
 	/** Its successful start, or when it was first planned while never started. */
 	dwellSinceMonoMs: number
-	/** Recent checked, CRC/FEC-clean sync from this exact running placement. */
+	/**
+	 * dsd-fme: the channel is digital-held, a checked CRC/FEC-clean sync on it
+	 * within DSD_DIGITAL_HOLD_MS (30 min, dsd-activity.ts), kept per RF channel.
+	 */
 	syncSeen?: boolean
 	/** Monotonic expiry supplied by the manager; re-evaluate even in quiet spectrum. */
 	syncUntilMonoMs?: number
@@ -94,8 +99,15 @@ export interface ActivityPendingStart {
 
 export interface PlannerActivity {
 	nowMonoMs: number
-	/** Bounded no-sync cooldowns, carried by the manager on the same clock. */
-	demotions?: readonly { key: string; untilMonoMs: number }[]
+	/**
+	 * dsd-fme channel tiers (dsdTierKey keys, bounded to DSD_MAX_TIERS = 256),
+	 * carried by the manager on the same clock.
+	 */
+	tiers?: readonly DsdTierView[]
+	/** Per dsd-fme slot group (dsdGroupKey), its last analog-to-analog try move. */
+	analogRetries?: readonly { groupKey: string; atMonoMs: number }[]
+	/** dsd-fme: the last failed try per channel (dsdTierKey), kept 6 h, at most 256. */
+	tries?: readonly { key: string; atMonoMs: number }[]
 	/**
 	 * dsd-fme challengers whose energy passed the challenge hysteresis
 	 * (dsdChallengeKey keys, dsd-activity.ts). Absent: none did, so no dsd-fme
@@ -127,6 +139,8 @@ export interface ActivityMove {
 	toKey: string
 	toHz: number
 	atMonoMs: number
+	/** dsd-fme: an analog-to-analog try (one per group per cooldown(5)). */
+	analogRetry?: true
 }
 
 export interface ActivityGroupView {
@@ -157,15 +171,6 @@ export interface PlacementActivity {
 }
 
 const STATES: readonly ActivityState[] = ["hot", "warm", "cold"]
-const REASONS: readonly ActivityReason[] = [
-	"live-energy",
-	"track",
-	"occupancy",
-	"decoded",
-	"trial-success",
-	"trial-backoff",
-]
-
 const sameEpoch = (a: ActivityEpoch, b: ActivityEpoch | undefined) =>
 	b !== undefined &&
 	a.sourceId === b.sourceId &&
@@ -182,7 +187,10 @@ function validChannel(c: ChannelActivity | null | undefined, hz: number) {
 		STATES.includes(c.state) &&
 		typeof c.live === "boolean" &&
 		Array.isArray(c.reasons) &&
-		(c.excluded === undefined || typeof c.excluded === "boolean")
+		(c.excluded === undefined || typeof c.excluded === "boolean") &&
+		(c.evidence === undefined ||
+			c.evidence === "digital" ||
+			c.evidence === "analog")
 	)
 }
 
@@ -236,17 +244,36 @@ const stateRank = { hot: 0, warm: 1, cold: 2 } as const
 export function activityOrder(
 	candidatesHz: readonly number[],
 	snapshot: ActivitySnapshot | null,
+	tierOf?: (hz: number) => SlotTier | undefined,
 ): number[] {
 	if (!snapshot) return [...candidatesHz]
 	const by = new Map(snapshot.channels.map(c => [c.hz, c]))
 	const index = new Map(candidatesHz.map((hz, i) => [hz, i]))
+	// dsd-fme tier classes: 0 digital-held; 1 digital (not held) or unknown,
+	// hot or warm; 2 analog, hot or warm; 3 cold, any tier. Inside a class:
+	// state, live first, digital before unknown, score, today's order.
+	const cls = (hz: number, c: ChannelActivity) => {
+		// No tiers (multimon-ng): one class. A channel the planner has no tier
+		// for is unknown, never tried (class 1, or 3 when cold).
+		if (!tierOf) return 0
+		const t = tierOf(hz) ?? UNKNOWN_TIER
+		if (t.held) return 0
+		if (c.state === "cold") return 3
+		return t.tier === "analog" ? 2 : 1
+	}
 	return candidatesHz
 		.filter(hz => by.get(hz)?.excluded !== true)
 		.sort((a, b) => {
 			const ca = by.get(a)!
 			const cb = by.get(b)!
 			return (
+				cls(a, ca) - cls(b, cb) ||
 				stateRank[ca.state] - stateRank[cb.state] ||
+				(tierOf ? Number(cb.live) - Number(ca.live) : 0) ||
+				(tierOf
+					? Number(tierOf(a)?.tier !== "digital") -
+						Number(tierOf(b)?.tier !== "digital")
+					: 0) ||
 				(ca.state === "cold" ? 0 : cb.score - ca.score) ||
 				index.get(a)! - index.get(b)!
 			)
@@ -256,6 +283,7 @@ export function activityOrder(
 /** The bounded status entry for one channel. */
 export function placementActivity(
 	channel: ChannelActivity | undefined,
+	tierReasons: readonly ActivityReason[] = [],
 ): PlacementActivity {
 	if (!channel) return { ranking: "nearest" }
 	return {
@@ -263,7 +291,9 @@ export function placementActivity(
 		state: channel.state,
 		score: roundScore(channel.score),
 		live: channel.live,
-		reasons: REASONS.filter(r => channel.reasons.includes(r)),
+		reasons: REASONS.filter(
+			r => channel.reasons.includes(r) || tierReasons.includes(r),
+		),
 	}
 }
 
@@ -419,10 +449,53 @@ export interface SelectionIncumbent {
 	syncSeen?: boolean
 }
 export interface SelectionResult {
-	chosen: { hz: number; movedFrom?: { key: string; hz: number } }[]
+	chosen: {
+		hz: number
+		movedFrom?: { key: string; hz: number }
+		analogRetry?: true
+	}[]
 	moves: number
 	/** When a blocked move may become possible (dwell end or move window). */
 	blockedUntilMonoMs: number | null
+}
+
+/**
+ * The evidence tier of one dsd-fme channel for one pass (the evidence
+ * ranking of docs/DECODER-GUIDE.md, Troubleshooting, Decoder not starting,
+ * item 8; built by the planner from the manager's tiers and the snapshot's
+ * `evidence`):
+ * - `tier`: how it challenges and ranks (digital > unknown > analog);
+ * - `victim`: how it is judged as an incumbent (a manager no-sync failure
+ *   turns scanner-only digital into analog here);
+ * - `held`: digital-held (sync within 30 min), never a victim but for the
+ *   discovery yield;
+ * - `demoted`: analog in its cooldown, never fills a free slot or challenges;
+ * - `retry`: scanner analog past its try gap: may take an analog slot once
+ *   per group per cooldown(5), and fills a free slot only after digital and
+ *   unknown candidates.
+ */
+export interface SlotTier {
+	tier: "digital" | "unknown" | "analog"
+	victim: "digital" | "unknown" | "analog"
+	held: boolean
+	demoted: boolean
+	retry: boolean
+	/** Last checked sync on the channel (manager clock), null for none. */
+	lastSyncMonoMs: number | null
+	/** Its last noted failed try, null for none (analog tries go least recent first). */
+	triedMonoMs: number | null
+}
+
+const TIER_RANK = { analog: 0, unknown: 1, digital: 2 } as const
+/** A channel the planner has no tier for: unknown, never tried. */
+const UNKNOWN_TIER: SlotTier = {
+	tier: "unknown",
+	victim: "unknown",
+	held: false,
+	demoted: false,
+	retry: false,
+	lastSyncMonoMs: null,
+	triedMonoMs: null,
 }
 
 /**
@@ -434,12 +507,32 @@ export interface SelectionResult {
  *    rank; the lowest-ranked unpinned are dropped only when the slot count
  *    shrank (budget or eligibility, not a move).
  * 2. Free slots take the best-ranked channels not chosen (a new slot, not a
- *    move).
+ *    move). With tiers, analog channels fill only after every digital and
+ *    unknown candidate, and demoted channels never.
  * 3. Ranked only: a hot or warm channel outranking an incumbent (and passing
  *    `canChallenge`, when given) replaces the lowest-ranked incumbent that is
  *    not live and whose dwell has passed, while the source has moves left. Each replacement is one move and
  *    carries the victim it replaces. The nearest-order fallback never
  *    displaces an incumbent, so a ranking outage reshuffles nothing.
+ *
+ * With `tierOf` (dsd-fme), step 3 follows the tiers instead:
+ * - a higher tier replaces a lower one whatever the victim's live flag; the
+ *   same tier (digital or unknown) needs today's rank rule and a victim that
+ *   is not live; analog never replaces analog but for one `retry` per pass
+ *   while `analogRetryOpen` (one per group per cooldown(5) = 1,920 s): the
+ *   least recently tried channel, into the oldest analog run, without the
+ *   hysteresis (the rate gate bounds it, and a channel heard only in short
+ *   bursts is still tried);
+ * - victims go lowest tier first; among analog runs the oldest first;
+ * - a digital-held incumbent is never a victim; a digital incumbent that is
+ *   not held is a victim of an unknown only when not live and its last sync
+ *   (or none) is at least `syncCooldownMs` old;
+ * - a digital challenger that is live passes the hysteresis at once (a short
+ *   burst on a known channel reclaims a slot);
+ * - discovery yield: when every slot is digital-held, count >= 2 and a
+ *   confirmed hot unknown waits, the lowest-ranked held incumbent whose last
+ *   sync is at least `syncCooldownMs` old yields, at most once per pass;
+ * - analog challengers never schedule a blocked deadline.
  */
 export function selectChannels(args: {
 	order: readonly number[]
@@ -456,6 +549,12 @@ export function selectChannels(args: {
 	movesLeft: number
 	/** When the oldest counted move leaves the window (for blocked moves). */
 	moveWindowFreesMonoMs: number | null
+	/** dsd-fme evidence tiers; absent: today's rules (multimon-ng). */
+	tierOf?: (hz: number) => SlotTier | undefined
+	/** Whether this group may make an analog-to-analog try move now. */
+	analogRetryOpen?: boolean
+	/** A not-held digital victim's last sync must be at least this old (no-sync cooldown). */
+	syncCooldownMs?: number
 }): SelectionResult {
 	const rank = new Map(args.order.map((hz, i) => [hz, i]))
 	const count = Math.max(0, Math.min(args.count, args.order.length))
@@ -472,37 +571,105 @@ export function selectChannels(args: {
 		hz: number
 		incumbent?: SelectionIncumbent
 		movedFrom?: { key: string; hz: number }
+		analogRetry?: true
 	}
 	const chosen: Entry[] = incumbents.map(i => ({ hz: i.hz, incumbent: i }))
 	const has = (hz: number) => chosen.some(e => e.hz === hz)
-	for (const hz of args.order) {
-		if (chosen.length >= count) break
-		if (!has(hz) && !args.demotedHz?.has(hz)) chosen.push({ hz })
+	const tierOf = args.tierOf
+	const fill = (accept: (hz: number) => boolean) => {
+		for (const hz of args.order) {
+			if (chosen.length >= count) break
+			if (!has(hz) && !args.demotedHz?.has(hz) && accept(hz))
+				chosen.push({ hz })
+		}
 	}
+	if (tierOf) {
+		fill(hz => tierOf(hz)?.tier !== "analog")
+		fill(hz => tierOf(hz)?.demoted !== true)
+	} else fill(() => true)
 	let moves = 0
 	let blocked: number | null = null
 	const block = (at: number) => {
 		blocked = blocked === null ? at : Math.min(blocked, at)
+	}
+	const now = args.nowMonoMs
+	const cooldown = args.syncCooldownMs ?? 0
+	const oldSync = (t: SlotTier | undefined) =>
+		t === undefined ||
+		t.lastSyncMonoMs === null ||
+		now - t.lastSyncMonoMs >= cooldown
+	let yielded = false
+	// Victims: lowest tier first; among analog runs the oldest run first (a
+	// fresh try keeps its slot longest), otherwise the lowest-ranked first.
+	const victimOrder = (x: Entry, y: Entry): number => {
+		if (!tierOf) return rank.get(y.hz)! - rank.get(x.hz)!
+		const vx = tierOf(x.hz)?.victim ?? "unknown"
+		const vy = tierOf(y.hz)?.victim ?? "unknown"
+		return (
+			TIER_RANK[vx] - TIER_RANK[vy] ||
+			(vx === "analog" && vy === "analog"
+				? (x.incumbent?.dwellSinceMonoMs ?? 0) -
+					(y.incumbent?.dwellSinceMonoMs ?? 0)
+				: 0) ||
+			rank.get(y.hz)! - rank.get(x.hz)!
+		)
 	}
 	if (args.ranked && args.activity) {
 		for (const hz of args.order) {
 			if (has(hz) || args.demotedHz?.has(hz)) continue
 			const a = args.activity.get(hz)
 			if (!a || a.state === "cold") continue
-			if (args.canChallenge && args.canChallenge(hz) !== true) continue
-			const victims = chosen
-				.filter(
-					e =>
-						e.incumbent !== undefined &&
-						e.incumbent.pinned !== true &&
-						e.incumbent.syncSeen !== true &&
-						rank.get(e.hz)! > rank.get(hz)! &&
-						args.activity!.get(e.hz)?.live !== true,
+			const ct = tierOf ? (tierOf(hz) ?? UNKNOWN_TIER) : undefined
+			if (ct?.demoted) continue
+			const liveDigital = ct?.tier === "digital" && a.live
+			if (args.canChallenge && args.canChallenge(hz) !== true && !liveDigital)
+				continue
+			// Analog challengers move only through the rate-gated try below.
+			if (ct?.tier === "analog") continue
+			const eligible = (e: Entry): boolean => {
+				if (e.incumbent === undefined || e.incumbent.pinned === true)
+					return false
+				const live = args.activity!.get(e.hz)?.live === true
+				const below = rank.get(e.hz)! > rank.get(hz)!
+				if (!ct || !tierOf)
+					return e.incumbent.syncSeen !== true && below && !live
+				const vt = tierOf(e.hz) ?? UNKNOWN_TIER
+				if (vt.held || e.incumbent.syncSeen === true) return false
+				const victim = vt.victim
+				// Silent digital channel yields: a not-held digital incumbent
+				// yields to an unknown only when quiet: not live and no sync within
+				// the no-sync cooldown.
+				if (victim === "digital")
+					return ct.tier === "digital" ? below && !live : !live && oldSync(vt)
+				if (TIER_RANK[ct.tier] > TIER_RANK[victim]) return true
+				return ct.tier === victim && below && !live
+			}
+			const victims = chosen.filter(eligible).sort(victimOrder)
+			let yieldVictim = false
+			if (
+				!victims.length &&
+				tierOf &&
+				ct?.tier === "unknown" &&
+				a.state === "hot" &&
+				!yielded &&
+				count >= 2 &&
+				chosen.length === count &&
+				chosen.every(
+					e => e.incumbent !== undefined && tierOf(e.hz)?.held === true,
 				)
-				.sort((x, y) => rank.get(y.hz)! - rank.get(x.hz)!)
+			) {
+				// Discovery yield: the lowest-ranked held incumbent with an old sync.
+				const quiet = chosen
+					.filter(e => e.incumbent!.pinned !== true && oldSync(tierOf(e.hz)))
+					.sort((x, y) => rank.get(y.hz)! - rank.get(x.hz)!)
+				if (quiet.length) {
+					victims.push(...quiet)
+					yieldVictim = true
+				}
+			}
 			if (!victims.length) continue
 			const victim = victims.find(
-				e => args.nowMonoMs - e.incumbent!.dwellSinceMonoMs >= args.dwellMs,
+				e => now - e.incumbent!.dwellSinceMonoMs >= args.dwellMs,
 			)
 			if (!victim) {
 				for (const e of victims)
@@ -519,13 +686,65 @@ export function selectChannels(args: {
 				hz,
 				movedFrom: { key: victim.incumbent!.key, hz: victim.hz },
 			}
+			if (yieldVictim) yielded = true
 			moves++
+		}
+		// The analog try: one per pass while the group's gate is open (one per
+		// cooldown(5) = 1,920 s, dsd-activity.ts), the least recently tried
+		// scanner-analog channel (never tried first, then rank) into the
+		// oldest analog run past its dwell. The rate gate replaces the
+		// hysteresis, so a channel with only short bursts is still tried.
+		if (tierOf && args.analogRetryOpen === true && moves < args.movesLeft) {
+			const tried = (hz: number) =>
+				tierOf(hz)?.triedMonoMs ?? Number.NEGATIVE_INFINITY
+			const candidate = args.order
+				.filter(hz => {
+					const t = tierOf(hz)
+					const a = args.activity!.get(hz)
+					return (
+						!has(hz) &&
+						!args.demotedHz?.has(hz) &&
+						t?.tier === "analog" &&
+						t.retry &&
+						a !== undefined &&
+						a.state !== "cold"
+					)
+				})
+				.sort((x, y) => tried(x) - tried(y) || rank.get(x)! - rank.get(y)!)[0]
+			const victim =
+				candidate === undefined
+					? undefined
+					: chosen
+							.filter(
+								e =>
+									e.incumbent !== undefined &&
+									e.incumbent.pinned !== true &&
+									e.incumbent.syncSeen !== true &&
+									tierOf(e.hz)?.held !== true &&
+									tierOf(e.hz)?.victim === "analog" &&
+									now - e.incumbent.dwellSinceMonoMs >= args.dwellMs,
+							)
+							.sort(victimOrder)[0]
+			if (candidate !== undefined && victim) {
+				chosen[chosen.indexOf(victim)] = {
+					hz: candidate,
+					movedFrom: { key: victim.incumbent!.key, hz: victim.hz },
+					analogRetry: true,
+				}
+				moves++
+			}
 		}
 	}
 	chosen.sort((a, b) => rank.get(a.hz)! - rank.get(b.hz)!)
 	return {
 		chosen: chosen.map(e =>
-			e.movedFrom ? { hz: e.hz, movedFrom: e.movedFrom } : { hz: e.hz },
+			e.movedFrom
+				? {
+						hz: e.hz,
+						movedFrom: e.movedFrom,
+						...(e.analogRetry ? { analogRetry: true as const } : {}),
+					}
+				: { hz: e.hz },
 		),
 		moves,
 		blockedUntilMonoMs: blocked,

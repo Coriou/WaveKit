@@ -29,7 +29,11 @@ import {
 	ACTIVITY_MAX_CANDIDATES,
 	quantiseObservedCentre,
 } from "./activity-contract.js"
-import type { ActivityQuery, ActivitySnapshot } from "./activity-contract.js"
+import type {
+	ActivityQuery,
+	ActivityReason,
+	ActivitySnapshot,
+} from "./activity-contract.js"
 import {
 	BUDGET_EPSILON,
 	ACTIVITY_MAX_SLOTS,
@@ -45,8 +49,18 @@ import type {
 	ActivityGroupView,
 	ActivityMove,
 	PlacementActivity,
+	SlotTier,
 } from "./activity-plan.js"
-import { dsdActivitySlotAllowed, dsdChallengeKey } from "./dsd-activity.js"
+import {
+	DSD_ANALOG_TRY_FAILURES,
+	DSD_DIGITAL_HOLD_MS,
+	dsdActivitySlotAllowed,
+	dsdChallengeKey,
+	dsdGroupKey,
+	dsdNoSyncCooldownAfter,
+	dsdNoSyncCooldownMs,
+	dsdTierKey,
+} from "./dsd-activity.js"
 
 /** Single-channel audio adapters; AIS/VDL2 and rtl433 retain their protocol windows. */
 export const VFO_CHANNEL_TYPES: readonly string[] = [
@@ -1388,43 +1402,136 @@ export const planPlacements: PlacementPlanner = input => {
 		if (typeof at === "number" && Number.isFinite(at) && at > now)
 			next = next === null ? at : Math.min(next, at)
 	}
-	const demotions = new Map(act.demotions?.map(d => [d.key, d.untilMonoMs]))
+	const tierViews = new Map(
+		(Array.isArray(act.tiers) ? act.tiers : []).map(t => [t?.key, t]),
+	)
+	const retryAt = new Map(
+		(Array.isArray(act.analogRetries) ? act.analogRetries : []).map(r => [
+			r?.groupKey,
+			r?.atMonoMs,
+		]),
+	)
+	const triedAt = new Map(
+		(Array.isArray(act.tries) ? act.tries : []).map(t => [t?.key, t?.atMonoMs]),
+	)
+	const syncCooldownMs = dsdNoSyncCooldownMs(act.policy)
+	// One analog try per channel and per group per cooldown(5) = 1,920 s.
+	const analogGapMs = dsdNoSyncCooldownAfter(
+		DSD_ANALOG_TRY_FAILURES,
+		act.policy,
+	)
 	const confirmed = new Set(
 		Array.isArray(act.confirmedChallengers) ? act.confirmedChallengers : [],
 	)
 	groups.forEach((g, i) => {
 		const times = (windowMoves.get(g.source.id) ?? []).sort((a, b) => a - b)
-		if (g.d.type === "dsd-fme")
+		const dsd = g.d.type === "dsd-fme"
+		const own = act.incumbents.filter(
+			inc =>
+				inc.decoderId === g.d.id &&
+				inc.sourceId === g.source.id &&
+				!inc.primary,
+		)
+		// A held channel's expiry re-plans, the primary's included.
+		if (dsd)
 			for (const inc of act.incumbents)
 				if (
 					inc.decoderId === g.d.id &&
 					inc.sourceId === g.source.id &&
 					inc.syncSeen
-				) {
+				)
 					later(inc.syncUntilMonoMs)
-				}
+		// dsd-fme tiers per channel (evidence ranking: docs/DECODER-GUIDE.md).
+		const tiers = new Map<number, SlotTier & { reasons: ActivityReason[] }>()
 		const demotedHz = new Set<number>()
-		if (g.d.type === "dsd-fme") {
+		let analogRetryOpen = false
+		if (dsd) {
+			const groupKey = dsdGroupKey(g.d.id, g.source.id)
+			const at = retryAt.get(groupKey)
+			// No try recorded opens the gate; a recorded try time that is not a
+			// finite number (a malformed view) keeps it closed: fail safe, no
+			// analog churn, and no re-plan time can be derived from it.
+			analogRetryOpen = !retryAt.has(groupKey)
+				? true
+				: typeof at === "number" &&
+					Number.isFinite(at) &&
+					now - at >= analogGapMs
+			if (!analogRetryOpen && typeof at === "number") later(at + analogGapMs)
+			// Each unsynced run's dwell end re-plans (it then turns replaceable).
+			for (const inc of own)
+				if (!inc.syncSeen && now - inc.dwellSinceMonoMs < dwellMs)
+					later(inc.dwellSinceMonoMs + dwellMs)
+			const channels = new Map(g.snapshot?.channels.map(c => [c.hz, c]))
+			// Incumbents outside the order are dropped by the selection anyway.
 			for (const hz of g.order) {
-				const until = demotions.get(keyOf(g, hz))
-				if (until !== undefined && Number.isFinite(until) && now < until) {
-					demotedHz.add(hz)
-					later(until)
-				}
+				const key = dsdTierKey(g.d.id, g.source.id, hz)
+				const e = key === null ? undefined : tierViews.get(key)
+				const ch = channels.get(hz)
+				const inc = own.find(x => x.hz === hz)
+				const lastSync =
+					e?.tier === "digital" &&
+					typeof e.lastSyncMonoMs === "number" &&
+					Number.isFinite(e.lastSyncMonoMs) &&
+					e.lastSyncMonoMs <= now
+						? e.lastSyncMonoMs
+						: null
+				const held =
+					(inc?.syncSeen === true &&
+						inc.syncUntilMonoMs !== undefined &&
+						now < inc.syncUntilMonoMs) ||
+					(lastSync !== null && now - lastSync < DSD_DIGITAL_HOLD_MS)
+				const nosync =
+					e?.tier === "nosync" &&
+					Number.isFinite(e.untilMonoMs) &&
+					now < e.untilMonoMs
+				if (nosync) later(e.untilMonoMs)
+				// A run past its dwell without a sync stays replaceable until a sync
+				// or a move: cooldown expiry permits a fresh try, not a revival.
+				let runNoSync = false
+				if (inc && e?.tier !== "digital" && !held && inc.syncSeen !== true)
+					runNoSync = now - inc.dwellSinceMonoMs >= dwellMs
+				const scannerAnalog = ch?.evidence === "analog"
+				const digital = e?.tier === "digital" || ch?.evidence === "digital"
+				const backoff = ch?.reasons.includes("trial-backoff") === true
+				const t = key === null ? undefined : triedAt.get(key)
+				const noted =
+					typeof t === "number" && Number.isFinite(t) && t <= now ? t : null
+				const tryGap =
+					scannerAnalog && noted !== null && now - noted < analogGapMs
+				if (tryGap) later(noted! + analogGapMs)
+				const analog = nosync || runNoSync || backoff || scannerAnalog
+				const tier = digital ? "digital" : analog ? "analog" : "unknown"
+				// A manager no-sync in cooldown demotes whatever the tier: scanner-only
+				// digital evidence on a channel that just failed must not refill or
+				// challenge, or two such channels swap slots every dwell.
+				const demoted = nosync || (tier === "analog" && (backoff || tryGap))
+				const reasons: ActivityReason[] = []
+				if (digital) reasons.push("digital-memory")
+				if (scannerAnalog) reasons.push("analog-voice")
+				if (nosync || runNoSync) reasons.push("no-sync")
+				tiers.set(hz, {
+					tier,
+					victim:
+						e?.tier === "digital"
+							? "digital"
+							: nosync || runNoSync
+								? "analog"
+								: digital
+									? "digital"
+									: analog
+										? "analog"
+										: "unknown",
+					held,
+					demoted,
+					retry: tier === "analog" && scannerAnalog && !demoted,
+					lastSyncMonoMs: lastSync,
+					triedMonoMs: noted,
+					reasons,
+				})
+				if (demoted || runNoSync) demotedHz.add(hz)
 			}
-			for (const inc of act.incumbents)
-				if (
-					inc.decoderId === g.d.id &&
-					inc.sourceId === g.source.id &&
-					!inc.primary &&
-					!inc.syncSeen
-				) {
-					// Cooldown expiry permits a fresh trial, not revival of an existing
-					// run that still has no sync. Keep it replaceable until sync or a move.
-					if (now - inc.dwellSinceMonoMs >= dwellMs) demotedHz.add(inc.hz)
-					else later(inc.dwellSinceMonoMs + dwellMs)
-				}
 		}
+		const tierOf = (hz: number) => tiers.get(hz)
 		const effectiveSnapshot =
 			g.snapshot && demotedHz.size > 0
 				? {
@@ -1437,14 +1544,22 @@ export const planPlacements: PlacementPlanner = input => {
 					}
 				: g.snapshot
 		const selection = selectChannels({
-			order: activityOrder(g.order, effectiveSnapshot),
+			order: activityOrder(
+				g.order,
+				effectiveSnapshot,
+				dsd ? tierOf : undefined,
+			),
 			demotedHz,
 			// R2 hysteresis (dsd-activity.ts): a dsd-fme challenger moves a slot
-			// only once its energy passed the repeat and span bounds.
-			...(g.d.type === "dsd-fme"
+			// only once its energy passed the repeat and span bounds, or, on a
+			// digital channel, while it is live (a short burst reclaims its slot).
+			...(dsd
 				? {
 						canChallenge: (hz: number) =>
 							confirmed.has(dsdChallengeKey(g.d.id, g.source.id, hz)),
+						tierOf,
+						analogRetryOpen,
+						syncCooldownMs,
 					}
 				: {}),
 			ranked: g.snapshot !== null,
@@ -1452,20 +1567,13 @@ export const planPlacements: PlacementPlanner = input => {
 				? new Map(effectiveSnapshot.channels.map(c => [c.hz, c]))
 				: null,
 			count: allocation.given[i]!,
-			incumbents: act.incumbents
-				.filter(
-					inc =>
-						inc.decoderId === g.d.id &&
-						inc.sourceId === g.source.id &&
-						!inc.primary,
-				)
-				.map(inc => ({
-					key: inc.key,
-					hz: inc.hz,
-					dwellSinceMonoMs: inc.dwellSinceMonoMs,
-					syncSeen: g.d.type === "dsd-fme" && inc.syncSeen === true,
-					...(pendingKeys.has(inc.key) ? { pinned: true } : {}),
-				})),
+			incumbents: own.map(inc => ({
+				key: inc.key,
+				hz: inc.hz,
+				dwellSinceMonoMs: inc.dwellSinceMonoMs,
+				syncSeen: dsd && inc.syncSeen === true,
+				...(pendingKeys.has(inc.key) ? { pinned: true } : {}),
+			})),
 			nowMonoMs: now,
 			dwellMs,
 			movesLeft: Math.max(0, maxMoves - times.length),
@@ -1492,6 +1600,7 @@ export const planPlacements: PlacementPlanner = input => {
 				...(c.movedFrom ? { movedFrom: c.movedFrom.key } : {}),
 				activity: placementActivity(
 					effectiveSnapshot?.channels.find(ch => ch.hz === c.hz),
+					tiers.get(c.hz)?.reasons,
 				),
 			})
 			if (c.movedFrom) {
@@ -1503,6 +1612,7 @@ export const planPlacements: PlacementPlanner = input => {
 					toKey: key,
 					toHz: c.hz,
 					atMonoMs: now,
+					...(c.analogRetry ? { analogRetry: true as const } : {}),
 				})
 				times.push(now)
 			}

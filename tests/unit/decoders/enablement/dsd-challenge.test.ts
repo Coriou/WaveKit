@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
-import type { ChannelActivity } from "../../../../src/decoders/enablement/activity-contract.js"
+import type {
+	ActivitySnapshot,
+	ChannelActivity,
+} from "../../../../src/decoders/enablement/activity-contract.js"
 import {
 	ACTIVITY_DWELL_MS,
+	activityOrder,
 	selectChannels,
 } from "../../../../src/decoders/enablement/activity-plan.js"
 import {
@@ -294,4 +298,281 @@ it("non-vacuous: a transmission reaching the span, or a repeat, does move the sl
 			now => now >= 1_000 && now <= 10_999,
 		),
 	).toBeNull()
+})
+
+describe("dsd-fme evidence tiers: the slot victim matrix", () => {
+	type T = Parameters<typeof selectChannels>[0]["tierOf"]
+	const tier = (
+		t: "digital" | "unknown" | "analog",
+		extra: Partial<NonNullable<ReturnType<NonNullable<T>>>> = {},
+	) => ({
+		tier: t,
+		victim: t,
+		held: false,
+		demoted: false,
+		retry: false,
+		lastSyncMonoMs: null,
+		triedMonoMs: null,
+		...extra,
+	})
+	const ch = (hz: number, live: boolean, state: "hot" | "cold" = "hot") => ({
+		hz,
+		score: live ? 101 : 1,
+		state,
+		live,
+		reasons: [],
+		lastEnergyMonoMs: null,
+		stateSinceMonoMs: 0,
+	})
+	const NOW = 1_000_000
+	const run = (
+		tiers: Record<number, ReturnType<typeof tier>>,
+		live: Record<number, boolean>,
+		opts: Partial<Parameters<typeof selectChannels>[0]> = {},
+	) =>
+		selectChannels({
+			order: [1, 2, 3],
+			ranked: true,
+			activity: new Map([1, 2, 3].map(hz => [hz, ch(hz, live[hz] ?? false)])),
+			count: 1,
+			incumbents: [{ key: "inc", hz: 3, dwellSinceMonoMs: 0 }],
+			nowMonoMs: NOW,
+			dwellMs: ACTIVITY_DWELL_MS,
+			movesLeft: 6,
+			moveWindowFreesMonoMs: null,
+			canChallenge: () => true,
+			tierOf: hz => tiers[hz],
+			syncCooldownMs: 120_000,
+			...opts,
+		})
+
+	it("analog never replaces analog, even a quiet one", () => {
+		const r = run(
+			{ 1: tier("analog"), 2: tier("analog"), 3: tier("analog") },
+			{},
+		)
+		expect(r.moves).toBe(0)
+		expect(r.blockedUntilMonoMs).toBeNull()
+	})
+
+	it("an unknown replaces a live analog incumbent (live ignored across tiers)", () => {
+		const r = run(
+			{ 1: tier("unknown"), 3: tier("analog") },
+			{ 1: true, 3: true },
+		)
+		expect(r.chosen).toEqual([{ hz: 1, movedFrom: { key: "inc", hz: 3 } }])
+	})
+
+	it("a digital-held incumbent is never a victim, whoever challenges", () => {
+		for (const c of ["digital", "unknown"] as const)
+			expect(
+				run(
+					{ 1: tier(c), 3: tier("digital", { held: true, lastSyncMonoMs: 0 }) },
+					{ 1: true },
+				).moves,
+			).toBe(0)
+	})
+
+	it.each([
+		// Silent digital channel yields: a not-held digital incumbent yields to
+		// a confirmed unknown only when it is not live and its last sync is at
+		// least the 120 s cooldown old.
+		[false, NOW - 120_000, 1],
+		[false, NOW - 119_999, 0],
+		[false, null, 1],
+		[true, NOW - 600_000, 0],
+	])(
+		"not-held digital victim of an unknown: live=%s lastSync=%s -> %i moves",
+		(live, last, n) => {
+			expect(
+				run(
+					{ 1: tier("unknown"), 3: tier("digital", { lastSyncMonoMs: last }) },
+					{ 3: live },
+				).moves,
+			).toBe(n)
+		},
+	)
+
+	it("a scanner-only digital incumbent with a no-sync failure is an analog victim", () => {
+		expect(
+			run(
+				{ 1: tier("unknown"), 3: tier("digital", { victim: "analog" }) },
+				{ 3: true },
+			).moves,
+		).toBe(1)
+	})
+
+	it("a live digital channel passes the hysteresis at once (a burst shorter than 10 s)", () => {
+		const opts = { canChallenge: () => false }
+		expect(
+			run({ 1: tier("digital"), 3: tier("analog") }, { 1: true }, opts).moves,
+		).toBe(1)
+		expect(run({ 1: tier("digital"), 3: tier("analog") }, {}, opts).moves).toBe(
+			0,
+		)
+		expect(
+			run({ 1: tier("unknown"), 3: tier("analog") }, { 1: true }, opts).moves,
+		).toBe(0)
+	})
+
+	it("one analog try per pass while the group's gate is open, least recently tried first", () => {
+		const tiers = {
+			1: tier("analog", { retry: true, triedMonoMs: 5 }),
+			2: tier("analog", { retry: true }),
+			3: tier("analog"),
+		}
+		const closed = run(
+			tiers,
+			{},
+			{ analogRetryOpen: false, canChallenge: () => false },
+		)
+		expect(closed.moves).toBe(0)
+		const open = run(
+			tiers,
+			{},
+			{ analogRetryOpen: true, canChallenge: () => false },
+		)
+		expect(open.chosen).toEqual([
+			{ hz: 2, movedFrom: { key: "inc", hz: 3 }, analogRetry: true },
+		])
+		// Never into a slot that is not analog, and never twice in one pass.
+		expect(
+			run({ ...tiers, 3: tier("unknown") }, {}, { analogRetryOpen: true })
+				.moves,
+		).toBe(0)
+		const two = run(
+			tiers,
+			{},
+			{
+				analogRetryOpen: true,
+				count: 2,
+				order: [1, 2, 3, 4],
+				activity: new Map([1, 2, 3, 4].map(hz => [hz, ch(hz, false)])),
+				incumbents: [
+					{ key: "a", hz: 3, dwellSinceMonoMs: 0 },
+					{ key: "b", hz: 4, dwellSinceMonoMs: 1 },
+				],
+				tierOf: hz => (hz === 4 ? tier("analog") : tiers[hz as 1 | 2 | 3]),
+			},
+		)
+		expect(two.moves).toBe(1)
+		// The oldest analog run is the victim.
+		expect(two.chosen.find(c => c.movedFrom)?.movedFrom?.key).toBe("a")
+	})
+
+	it("fills free slots with digital and unknown before analog, never with demoted", () => {
+		const r = run(
+			{
+				1: tier("analog"),
+				2: tier("unknown"),
+				3: tier("analog", { demoted: true }),
+			},
+			{},
+			{ incumbents: [], count: 3, demotedHz: new Set([3]) },
+		)
+		expect(r.chosen.map(c => c.hz)).toEqual([1, 2])
+		const order = run(
+			{ 1: tier("analog"), 2: tier("unknown") },
+			{},
+			{ incumbents: [] },
+		)
+		expect(order.chosen).toEqual([{ hz: 2 }])
+	})
+
+	it("activityOrder: a channel without a tier ranks as unknown, never as held digital", () => {
+		const snap = (
+			chs: { hz: number; state: "hot" | "cold"; score: number }[],
+		): ActivitySnapshot => ({
+			query: {
+				epoch: { sourceId: "s", engineId: "e", epoch: 1 },
+				decoderId: "dsd",
+				decoderType: "dsd-fme",
+				protocols: ["dmr"],
+				centreHz: 0,
+				candidatesHz: chs.map(c => c.hz),
+				channelWidthHz: 12_500,
+			},
+			revision: 1,
+			evaluatedMonoMs: 0,
+			lastFrameMonoMs: 0,
+			status: "ready",
+			nextEvaluationMonoMs: null,
+			channels: chs.map(c => ({ ...ch(c.hz, false, c.state), score: c.score })),
+		})
+		const tiers: Record<number, ReturnType<typeof tier> | undefined> = {
+			1: undefined,
+			2: tier("unknown"),
+			3: tier("digital", { held: true, lastSyncMonoMs: 0 }),
+			4: tier("analog"),
+		}
+		const of = (hz: number) => tiers[hz]
+		// Cold: no tier is class 3 like an explicit unknown, so today's order holds.
+		expect(
+			activityOrder(
+				[2, 1],
+				snap([
+					{ hz: 2, state: "cold", score: 0 },
+					{ hz: 1, state: "cold", score: 0 },
+				]),
+				of,
+			),
+		).toEqual([2, 1])
+		// Hot: held digital (class 0) first, then no tier with unknown (class 1)
+		// by score, then analog (class 2).
+		expect(
+			activityOrder(
+				[4, 1, 2, 3],
+				snap([
+					{ hz: 4, state: "hot", score: 9 },
+					{ hz: 1, state: "hot", score: 5 },
+					{ hz: 2, state: "hot", score: 6 },
+					{ hz: 3, state: "hot", score: 1 },
+				]),
+				of,
+			),
+		).toEqual([3, 2, 1, 4])
+		// Without tierOf (multimon-ng) every channel is one class: by score.
+		expect(
+			activityOrder(
+				[4, 1, 2, 3],
+				snap([
+					{ hz: 4, state: "hot", score: 9 },
+					{ hz: 1, state: "hot", score: 5 },
+					{ hz: 2, state: "hot", score: 6 },
+					{ hz: 3, state: "hot", score: 1 },
+				]),
+			),
+		).toEqual([4, 2, 1, 3])
+	})
+
+	it("discovery yield: all slots held, count >= 2, one quiet held incumbent per pass", () => {
+		const held = (last: number) =>
+			tier("digital", { held: true, lastSyncMonoMs: last })
+		const base = {
+			count: 2,
+			order: [1, 2, 3],
+			incumbents: [
+				{ key: "a", hz: 2, dwellSinceMonoMs: 0 },
+				{ key: "b", hz: 3, dwellSinceMonoMs: 0 },
+			],
+		}
+		const r = run(
+			{ 1: tier("unknown"), 2: held(NOW - 500_000), 3: held(NOW - 500_000) },
+			{ 1: true },
+			base,
+		)
+		expect(r.moves).toBe(1)
+		expect(r.chosen.find(c => c.movedFrom)?.movedFrom?.key).toBe("b")
+		// A sync newer than the cooldown keeps the slot; one slot never yields.
+		expect(
+			run(
+				{ 1: tier("unknown"), 2: held(NOW - 1_000), 3: held(NOW - 1_000) },
+				{ 1: true },
+				base,
+			).moves,
+		).toBe(0)
+		expect(
+			run({ 1: tier("unknown"), 3: held(NOW - 500_000) }, { 1: true }).moves,
+		).toBe(0)
+	})
 })

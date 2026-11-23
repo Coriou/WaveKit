@@ -133,6 +133,8 @@ export interface ActivityHistory {
 	successes: readonly { hz: number; protocol: string; ageMs: number }[]
 	/** Coarse rolling-hour duty per occupancy bucket centre, 0..1. */
 	occupancy: readonly { hz: number; duty: number }[]
+	/** Analog FM proof (voice or tone) per channel; kept within ACTIVITY_WARM_HOLD_MS (15 min). */
+	analog?: readonly { hz: number; ageMs: number }[]
 }
 
 export type ActivityHistoryProvider = (
@@ -257,6 +259,8 @@ interface SourceState {
 		decodes: TimedPoint[]
 		successes: TimedPoint[]
 		occupancy: { hz: number; duty: number }[]
+		/** At most ACTIVITY_MAX_HISTORY = 512 analog proof times. */
+		analog: { hz: number; at: number }[]
 	}
 	lastRefreshMono: number | null
 	dirty: boolean
@@ -434,7 +438,7 @@ export function createChannelActivityRanker(
 			decodes: new Map(),
 			successes: new Map(),
 			failures: new Map(),
-			history: { decodes: [], successes: [], occupancy: [] },
+			history: { decodes: [], successes: [], occupancy: [], analog: [] },
 			lastRefreshMono: null,
 			dirty: false,
 			healthChanged: false,
@@ -527,6 +531,8 @@ export function createChannelActivityRanker(
 		const lastDecode = new Array<number | null>(n).fill(null)
 		const nonVoiceDecode = new Array<number | null>(n).fill(null)
 		const voiceDecode = new Array<number | null>(n).fill(null)
+		const voiceSuccess = new Array<number | null>(n).fill(null)
+		const lastAnalog = new Array<number | null>(n).fill(null)
 		const lastSuccess = new Array<number | null>(n).fill(null)
 		const lastFailure = new Array<number | null>(n).fill(null)
 		const duty = new Array<number>(n).fill(0)
@@ -574,6 +580,20 @@ export function createChannelActivityRanker(
 						: nonVoiceDecode
 					into[i] = later(into[i]!, p.at)
 				}
+			// Evidence tiers: digital-voice replay successes and analog FM proof,
+			// on the same narrow association as decodes.
+			for (const list of [s.successes.values(), s.history.successes])
+				for (const p of list) {
+					if (!DIGITAL_VOICE_PROTOCOLS.has(p.protocol.toLowerCase())) continue
+					const k = associateCandidate(sorted, p.hz, raster / 2)
+					if (k !== -1)
+						voiceSuccess[order[k]!.i] = later(voiceSuccess[order[k]!.i]!, p.at)
+				}
+			for (const p of s.history.analog) {
+				const k = associateCandidate(sorted, p.hz, raster / 2)
+				if (k !== -1)
+					lastAnalog[order[k]!.i] = later(lastAnalog[order[k]!.i]!, p.at)
+			}
 		}
 
 		points(s.decodes.values(), lastDecode)
@@ -672,9 +692,23 @@ export function createChannelActivityRanker(
 					positiveDecode !== null &&
 					now - positiveDecode < ACTIVITY_DECODE_HOT_MS
 				)
+			// Tier evidence (dsd-fme): digital within 6 h beats analog within 15 min.
+			const success = voiceSuccess[i]!
+			const digitalAt =
+				success === null ? positiveDecode : later(positiveDecode, success)
+			const analogAt = lastAnalog[i]!
+			deadline(digitalAt, ACTIVITY_DECODE_WARM_MS)
+			deadline(analogAt, ACTIVITY_WARM_HOLD_MS)
+			const evidence =
+				digitalAt !== null && now - digitalAt < ACTIVITY_DECODE_WARM_MS
+					? ("digital" as const)
+					: analogAt !== null && now - analogAt < ACTIVITY_WARM_HOLD_MS
+						? ("analog" as const)
+						: undefined
 			const memo = memos?.get(hz)
 			channels.push({
 				...(q.decoderType === "dsd-fme" ? { excluded } : {}),
+				...(q.decoderType === "dsd-fme" && evidence ? { evidence } : {}),
 				hz,
 				score,
 				state,
@@ -880,10 +914,29 @@ export function createChannelActivityRanker(
 			if (Number.isFinite(o.hz) && Number.isFinite(o.duty) && o.duty > 0)
 				occupancy.push({ hz: o.hz, duty: Math.min(1, o.duty) })
 		}
+		// Analog proof: the newest ACTIVITY_MAX_HISTORY = 512 valid proofs are
+		// kept (smallest age; equal ages keep the provider's order, which for
+		// the scanner is nearest the capture centre first). Keeping the first
+		// 512 would let 512 old proofs hide a fresh one.
+		const fresh: { hz: number; ageMs: number }[] = []
+		for (const a of Array.isArray(h.analog) ? h.analog : [])
+			if (
+				Number.isFinite(a?.hz) &&
+				Number.isFinite(a?.ageMs) &&
+				a.ageMs >= 0 &&
+				a.ageMs < ACTIVITY_WARM_HOLD_MS
+			)
+				fresh.push({ hz: a.hz, ageMs: a.ageMs })
+		if (fresh.length > ACTIVITY_MAX_HISTORY)
+			fresh.sort((x, y) => x.ageMs - y.ageMs)
+		const analog = fresh
+			.slice(0, ACTIVITY_MAX_HISTORY)
+			.map(a => ({ hz: a.hz, at: now - a.ageMs }))
 		s.history = {
 			decodes: timed(h.decodes),
 			successes: timed(h.successes),
 			occupancy,
+			analog,
 		}
 		markDirty(sourceId)
 	}

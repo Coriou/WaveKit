@@ -169,6 +169,8 @@ import { syllabicHeard } from "./analog-trial.js"
 import { analogTrialsHeard } from "./channel/recording-verdict.js"
 import { PendingCaptureLimiter, admittedAtClose } from "./pending-capture.js"
 import {
+	ACTIVITY_MAX_HISTORY,
+	ACTIVITY_WARM_HOLD_MS,
 	replayTrialWeight,
 	type ChannelActivityRanker,
 } from "./channel-activity.js"
@@ -1261,20 +1263,48 @@ export class ScannerService extends EventEmitter {
 		decodes: { hz: number; protocol: string; ageMs: number }[]
 		successes: { hz: number; protocol: string; ageMs: number }[]
 		occupancy: { hz: number; duty: number }[]
+		analog: { hz: number; ageMs: number }[]
 	} {
 		const now = this.now()
 		const decodes: { hz: number; protocol: string; ageMs: number }[] = []
 		const successes: { hz: number; protocol: string; ageMs: number }[] = []
+		// Analog FM proof the scanner already holds, within the ranker's 15 min
+		// analog window: the nearest ACTIVITY_MAX_HISTORY = 512 to the window
+		// centre (the store's order, |Δf| first), its own count.
+		const analog: { hz: number; ageMs: number }[] = []
+		// Decodes and analog proof both full: stop (successes stop with the
+		// decodes, as before the analog list existed).
+		const full = () =>
+			decodes.length >= 512 && analog.length >= ACTIVITY_MAX_HISTORY
 		const mid = (window.lowHz + window.highHz) / 2
 		for (const d of this.store.near(
 			mid,
 			(window.highHz - window.lowHz) / 2,
 			sourceId,
 		)) {
-			if (decodes.length >= 512) break
+			if (full()) break
 			// The time of the last applied decode, never the discovery's activity time.
 			const decodedAt = this.decodeTimes.get(d.id)
-			if (d.confidence === "decoded" && decodedAt !== undefined)
+			if (
+				d.confidence !== "decoded" &&
+				d.protocol === "analog-fm" &&
+				(d.proof?.kind === "analog-voice" || d.proof?.kind === "analog-tone") &&
+				analog.length < ACTIVITY_MAX_HISTORY
+			) {
+				// A malformed or future proof time is no evidence.
+				const ageMs = now - Date.parse(d.proof.at)
+				if (
+					Number.isFinite(ageMs) &&
+					ageMs >= 0 &&
+					ageMs < ACTIVITY_WARM_HOLD_MS
+				)
+					analog.push({ hz: d.frequencyHz, ageMs })
+			}
+			if (
+				d.confidence === "decoded" &&
+				decodedAt !== undefined &&
+				decodes.length < 512
+			)
 				decodes.push({
 					hz: d.frequencyHz,
 					protocol: d.protocol,
@@ -1302,7 +1332,7 @@ export class ScannerService extends EventEmitter {
 					duty: b.activeMs / b.observedMs,
 				})
 		}
-		return { decodes, successes, occupancy }
+		return { decodes, successes, occupancy, analog }
 	}
 	private readonly frequencyErrors = new Map<
 		string,

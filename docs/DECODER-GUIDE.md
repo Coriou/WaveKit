@@ -667,7 +667,31 @@ describe("HfdlDecoder", () => {
    receiving. A dsd-fme channel must also have been heard for at least 10 s before it may
    replace a running one: two energy observations at least 10 s apart (one transmission of
    10 s or more, or two transmissions 10 s apart) within the last 120 s, so a single short
-   burst never moves a slot; free slots still fill at once. dsd-fme also considers
+   burst never moves a slot; free slots still fill at once.
+   dsd-fme ranks its extra channels by evidence: digital first, then channels it knows
+   nothing about, then analog. A channel is digital after a checked (CRC/FEC-clean)
+   dsd-fme sync on it, remembered per channel for 6 hours whatever runs or retunes in
+   between, or while the scanner holds a digital-voice decode or replay success there
+   (also 6 hours). For 30 minutes after its last sync a digital channel keeps its slot
+   between bursts and nothing replaces it, with one exception: when every extra channel of
+   a source holds such a digital channel, there are at least two of them, and an unknown
+   channel waits that is busy and passed the 10 s rule, the lowest-ranked one without a
+   sync for 2 minutes gives up its slot to it (one per planning pass; with one extra
+   channel digital always keeps it). After the 30 minutes it still ranks with the unknown
+   channels and yields to an unknown one only while it is quiet (not live, no sync for
+   2 minutes). A digital channel that comes back live takes a slot at once, without the
+   10 s rule, so a 2 to 5 s DMR burst is caught. A channel is analog while the scanner
+   classed it analog FM (voice or tone, within 15 minutes) or after a failed sync: a
+   run of 20 s without a checked sync (20 s of a connected source: a disconnect or a
+   reconnect less than 20 s ago never counts) puts it in a cooldown of 2, 4, 8, 16, then at most
+   32 minutes, counted from the end of that run and reset 15 minutes after the cooldown
+   ends. Analog channels fill a free slot only when no digital or unknown channel waits,
+   and an analog channel never replaces another analog one, except one try per source
+   and decoder every 32 minutes (at most 1.875 an hour): the scanner-analog channel
+   tried least recently, so a DMR channel that also carries analog FM is still found.
+   An unknown channel replaces an analog one, receiving or not, once it passed the 10 s
+   rule. Each placement's `activity.reasons` then also says `digital-memory`,
+   `analog-voice` or `no-sync`. dsd-fme also considers
    scanner-observed energy centres when no explicit decoder channels are configured,
    including channels absent from the protocol band plan, but its extra channels sit only
    inside a digital-voice range of your region's built-in band plan (VHF and UHF land mobile,

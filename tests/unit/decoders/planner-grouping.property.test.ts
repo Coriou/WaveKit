@@ -6,6 +6,7 @@ import type {
 } from "../../../src/decoders/enablement/activity-contract.js"
 import type {
 	ActivityIncumbent,
+	ActivityMove,
 	PlannerActivity,
 } from "../../../src/decoders/enablement/activity-plan.js"
 import { resolveActivityPolicy } from "../../../src/decoders/enablement/activity-plan.js"
@@ -20,7 +21,10 @@ import {
 	EFFICIENCY_BUDGET_X64,
 	placementKey,
 } from "../../../src/decoders/enablement/contract.js"
-import { dsdChallengeKey } from "../../../src/decoders/enablement/dsd-activity.js"
+import {
+	dsdChallengeKey,
+	dsdTierKey,
+} from "../../../src/decoders/enablement/dsd-activity.js"
 import { pagingRasterRanges } from "../../../src/decoders/enablement/paging-plan.js"
 import {
 	activityPlanQueries,
@@ -266,10 +270,20 @@ const raw = fc
 			activity: {
 				nowMonoMs: g.nowMonoMs,
 				policy: POLICY,
-				demotions: g.demoted.map(hz => ({
-					key: placementKey("dsd", "s0", "channel", hz),
+				// The same no-sync cooldowns as manager tiers (dsdTierKey) and, for
+				// the frozen reference, as its former placement-keyed demotions.
+				tiers: g.demoted.map(hz => ({
+					key: dsdTierKey("dsd", "s0", hz)!,
+					tier: "nosync" as const,
 					untilMonoMs: g.nowMonoMs + 10_000,
+					failures: 1,
 				})),
+				...({
+					demotions: g.demoted.map(hz => ({
+						key: placementKey("dsd", "s0", "channel", hz),
+						untilMonoMs: g.nowMonoMs + 10_000,
+					})),
+				} as object),
 				epochs,
 				observed: epochs.flatMap((epoch, i) => {
 					const hz = g.observed[i]
@@ -338,11 +352,213 @@ function challengers(
 }
 
 /** A plan with its map as ordered entries, so order is compared too. */
+/** dsd-fme tier reasons, added after the frozen planner: not compared. */
+const TIER_REASONS: readonly string[] = [
+	"digital-memory",
+	"analog-voice",
+	"no-sync",
+]
+// A digital-held dsd-fme channel now ranks first (tier class 0), so activity
+// slots may be emitted in another order: they are compared as a set.
+const byKey = (a: { key: string }, b: { key: string }) =>
+	a.key < b.key ? -1 : a.key > b.key ? 1 : 0
 const comparable = (plan: PlacementPlan) => ({
-	wanted: plan.wanted,
+	wanted: [
+		...plan.wanted.filter(w => w.origin !== "activity"),
+		...plan.wanted.filter(w => w.origin === "activity").sort(byKey),
+	].map(w =>
+		w.activity?.reasons
+			? {
+					...w,
+					activity: {
+						...w.activity,
+						reasons: w.activity.reasons.filter(r => !TIER_REASONS.includes(r)),
+					},
+				}
+			: w,
+	),
 	unplaced: [...plan.unplaced],
 	activity: plan.activity,
 })
+
+/**
+ * Compares a pass with the frozen reference. The dsd-fme tier rules change
+ * what the generator reaches (no scanner evidence, no tries, no-sync tiers
+ * only from `demoted`, which both planners demote) in these ways only:
+ * - an incumbent with an unexpired sync ("held") ranks first in its group
+ *   (tier class 0): its group's activity placements come in another order,
+ *   and when the group has more incumbents than slots it is kept where the
+ *   reference dropped it, leaving fewer victims ("kept");
+ * - with two or more replaceable no-sync runs in a group (past their dwell,
+ *   no sync, not pinned) the oldest run is the victim, where the reference
+ *   took the lowest-ranked ("victim");
+ * - the discovery yield (every slot held, count >= 2, a hot unknown; "yield").
+ * A pass with no held incumbent and fewer than two runs in every group must
+ * equal the reference exactly ("reference"). Otherwise ("projection" when no
+ * victim was chosen) the non-activity placements (in order), the unplaced
+ * list, the queries, every other group's activity placements and moves are
+ * equal; in a diverging group the slot count, the held placements, the
+ * moved-to channels and the move count are equal, kept placements plus
+ * victims equal the reference's (the same incumbents), the victims are the
+ * oldest runs, and a held incumbent comes first in a ranked group.
+ * nextEvaluationMonoMs and the group views are not compared there.
+ */
+function againstReference(
+	input: PlannerInput,
+	plan: PlacementPlan,
+	reference: PlacementPlan,
+): "reference" | "projection" | "victim" | "yield" | "kept" {
+	const act = input.activity!
+	const now = act.nowMonoMs
+	const pinned = new Set(act.pendingStarts.map(p => p.key))
+	const got = comparable(plan)
+	const ref = comparable(reference)
+	const groupKeys = [
+		...new Set(
+			act.incumbents
+				.filter(i => i.decoderId !== "pager" && !i.primary)
+				.map(i => JSON.stringify([i.decoderId, i.sourceId])),
+		),
+	]
+	const isHeld = (i: ActivityIncumbent) =>
+		i.syncSeen === true &&
+		i.syncUntilMonoMs !== undefined &&
+		now < i.syncUntilMonoMs
+	const groups = groupKeys.map(k => {
+		const [decoderId, sourceId] = JSON.parse(k) as [string, string]
+		// The planner reads the first incumbent of a key (selectChannels and
+		// the tier lookup both keep the first), so duplicates are dropped here.
+		const seenKeys = new Set<string>()
+		const incs = act.incumbents.filter(
+			i =>
+				i.decoderId === decoderId &&
+				i.sourceId === sourceId &&
+				!i.primary &&
+				!seenKeys.has(i.key) &&
+				seenKeys.add(i.key),
+		)
+		return {
+			decoderId,
+			sourceId,
+			all: incs,
+			held: incs.filter(isHeld),
+			runs: incs.filter(
+				i =>
+					i.syncSeen !== true &&
+					now - i.dwellSinceMonoMs >= POLICY.dwellMs &&
+					!pinned.has(i.key),
+			),
+		}
+	})
+	const diverging = groups.filter(g => g.held.length > 0 || g.runs.length >= 2)
+	if (!diverging.length) {
+		expect(got).toStrictEqual(ref)
+		return "reference"
+	}
+	const inGroup =
+		(g: { decoderId: string; sourceId: string }) =>
+		(x: { decoderId: string; sourceId: string }) =>
+			x.decoderId === g.decoderId && x.sourceId === g.sourceId
+	const isDiverging = (x: { decoderId: string; sourceId: string }) =>
+		diverging.some(g => inGroup(g)(x))
+	const activityOf = (c: ReturnType<typeof comparable>) =>
+		c.wanted.filter(w => w.origin === "activity")
+	expect(got.wanted.filter(w => w.origin !== "activity")).toStrictEqual(
+		ref.wanted.filter(w => w.origin !== "activity"),
+	)
+	expect(got.unplaced).toStrictEqual(ref.unplaced)
+	expect(got.activity?.queries).toStrictEqual(ref.activity?.queries)
+	// Groups no tier change reaches: exactly the reference.
+	expect(activityOf(got).filter(w => !isDiverging(w))).toStrictEqual(
+		activityOf(ref).filter(w => !isDiverging(w)),
+	)
+	expect(got.activity?.moves.filter(m => !isDiverging(m))).toStrictEqual(
+		ref.activity?.moves.filter(m => !isDiverging(m)),
+	)
+	let kind: "projection" | "victim" | "yield" | "kept" = "projection"
+	for (const g of diverging) {
+		const gotMoves = (got.activity?.moves ?? []).filter(inGroup(g))
+		const refMoves = (ref.activity?.moves ?? []).filter(inGroup(g))
+		const heldKeys = new Set(g.held.map(i => i.key))
+		const yields = gotMoves.filter(m => heldKeys.has(m.fromKey))
+		if (yields.length) {
+			// Discovery yield: at most one per pass, only when every slot was
+			// held and count >= 2; the reference never moves a synced slot.
+			expect(yields).toHaveLength(1)
+			expect(refMoves.some(m => heldKeys.has(m.fromKey))).toBe(false)
+			const slots = activityOf(got).filter(inGroup(g)).length
+			expect(slots).toBeGreaterThanOrEqual(2)
+			kind = "yield"
+			continue
+		}
+		const keys = (list: readonly { key: string }[]) =>
+			new Set(list.map(w => w.key))
+		const gotTo = new Set(gotMoves.map(m => m.toKey))
+		const refTo = new Set(refMoves.map(m => m.toKey))
+		// Kept placements plus victims: the incumbents each plan worked from.
+		const keptAndVictims = (
+			wanted: readonly { key: string; decoderId: string; sourceId: string }[],
+			moves: readonly ActivityMove[],
+			to: ReadonlySet<string>,
+		) =>
+			new Set([
+				...[...keys(wanted.filter(inGroup(g)))].filter(k => !to.has(k)),
+				...moves.map(m => m.fromKey),
+			])
+		const given = plan.activity?.groups.find(inGroup(g))?.given ?? 0
+		const distinct = new Set(g.all.map(i => i.hz)).size
+		const heldIn = (c: ReturnType<typeof comparable>) =>
+			activityOf(c).filter(w => inGroup(g)(w) && heldKeys.has(w.key)).length
+		expect(activityOf(got).filter(inGroup(g))).toHaveLength(
+			activityOf(ref).filter(inGroup(g)).length,
+		)
+		if (g.held.length > 0 && distinct > given && heldIn(got) > heldIn(ref)) {
+			// More incumbents than slots: the lowest-ranked are dropped, and a
+			// held incumbent now ranks first, so it is kept where the reference
+			// dropped it. That leaves fewer victims: the moves are a subset.
+			const gotKeys = keys(activityOf(got))
+			for (const w of activityOf(ref))
+				if (heldKeys.has(w.key)) expect(gotKeys.has(w.key)).toBe(true)
+			expect(gotMoves.length).toBeLessThanOrEqual(refMoves.length)
+			for (const k of gotTo) expect(refTo.has(k)).toBe(true)
+			kind = "kept"
+			continue
+		}
+		expect(heldIn(got)).toBe(heldIn(ref))
+		expect(gotTo).toEqual(refTo)
+		expect(gotMoves).toHaveLength(refMoves.length)
+		expect(keptAndVictims(activityOf(got), gotMoves, gotTo)).toEqual(
+			keptAndVictims(activityOf(ref), refMoves, refTo),
+		)
+		if (g.runs.length >= 2 && gotMoves.length > 0) {
+			// The victims are the oldest replaceable runs among those planned.
+			const planned = keptAndVictims(activityOf(got), gotMoves, gotTo)
+			const ages = g.runs
+				.filter(i => planned.has(i.key))
+				.map(i => i.dwellSinceMonoMs)
+				.sort((a, b) => a - b)
+			const since = new Map(g.runs.map(i => [i.key, i.dwellSinceMonoMs]))
+			const victims = gotMoves
+				.map(m => since.get(m.fromKey))
+				.sort((a, b) => a! - b!)
+			expect(victims).toEqual(ages.slice(0, victims.length))
+			if (kind === "projection") kind = "victim"
+		}
+		const ranked =
+			plan.activity?.groups.find(inGroup(g))?.ranking === "activity"
+		if (g.held.length > 0 && ranked) {
+			// The first activity placement of the group (raw plan order, the
+			// group's rank) is a held incumbent, when one is planned. Unranked
+			// (nearest order) groups keep today's order.
+			const ordered = plan.wanted.filter(
+				w => w.origin === "activity" && inGroup(g)(w),
+			)
+			if (ordered.some(w => heldKeys.has(w.key)))
+				expect(heldKeys.has(ordered[0]!.key)).toBe(true)
+		}
+	}
+	return kind
+}
 
 /** Counts band-plan lookups (one per activity decoder and source per grouping). */
 function counted(input: PlannerInput & { activity: PlannerActivity }) {
@@ -359,6 +575,17 @@ function counted(input: PlannerInput & { activity: PlannerActivity }) {
 		},
 	}
 }
+
+const SEED = Number.parseInt(process.env["PLANNER_PROPERTY_SEED"] ?? "", 10)
+/** Runs of the grouping property (AGENTS.md floor: 100). */
+const GROUPING_RUNS = 200
+/**
+ * Explicit timeout for the grouping property: 200 runs x 8 ms (worst whole-run
+ * cost measured, generation included, at load ~26 on 8 cores: 6.1 ms per run
+ * with two reference plans, one is now gone) x 8 (load margin, the host has
+ * reached ~175) = 12 800 ms. Measured: 0.44-0.48 s per run of 200 at load ~12.
+ */
+const GROUPING_TIMEOUT_MS = GROUPING_RUNS * 8 * 8
 
 describe("the split planner against the frozen pre-change planner", () => {
 	it("activityQueries returns exactly the reference planner's queries without snapshots", () => {
@@ -378,64 +605,99 @@ describe("the split planner against the frozen pre-change planner", () => {
 	// Generator reach, measured over four runs of 400 inputs (random seeds):
 	// non-empty wanted 100 % (400/400 each time), non-empty queries 94-96 %
 	// (375-384), non-empty moves 32-38 % (127-152). Each is asserted >= 20 %.
-	it("plans what the reference plans, without and with the grouping of the same pass", () => {
-		const reach = {
-			runs: 0,
-			wanted: 0,
-			queries: 0,
-			moves: 0,
-			gated: 0,
-			lookups: 0,
-			unranked: 0,
-		}
-		fc.assert(
-			fc.property(raw, fc.nat(1_000), fc.nat(255), (pre, seed, pick) => {
-				const queries = referencePlan(pre).activity?.queries ?? []
-				const cold = new Set(
-					seed % 8 === 0
-						? []
-						: pre.activity.incumbents.filter(i => !i.primary).map(i => i.hz),
-				)
-				const snapshots = answer(queries, seed, cold)
-				const confirmedChallengers = challengers(queries, pick)
-				const answered: PlannerInput = {
-					...pre,
-					activity: { ...pre.activity, snapshots, confirmedChallengers },
-				}
-				const expected = comparable(referencePlan(answered))
-				// Planned afresh.
-				expect(comparable(planPlacements(answered))).toStrictEqual(expected)
-				// Planned from the grouping of the same pass, which is reused: no
-				// band-plan lookup is made again.
-				const c = counted(pre)
-				const grouped = activityPlanQueries(c.input)
-				expect(grouped.queries).toStrictEqual(queries)
-				const lookups = c.calls.n
-				const supplied: PlannerInput = {
-					...c.input,
-					activity: { ...c.input.activity, snapshots, confirmedChallengers },
-					...(grouped.grouping ? { grouping: grouped.grouping } : {}),
-				}
-				expect(comparable(planPlacements(supplied))).toStrictEqual(expected)
-				expect(c.calls.n).toBe(lookups)
-				reach.runs++
-				if (expected.wanted.length) reach.wanted++
-				if (expected.activity?.queries.length) reach.queries++
-				if (expected.activity?.moves.length) reach.moves++
-				if (expected.wanted.some(p => p.gated === true)) reach.gated++
-				// Reuse is only shown where the grouping looked a band plan up.
-				if (lookups > 0) reach.lookups++
-				if (pre.activity.epochs.length < pre.sources.length) reach.unranked++
-			}),
-			{ numRuns: 400 },
-		)
-		expect(reach.wanted / reach.runs).toBeGreaterThanOrEqual(0.2)
-		expect(reach.queries / reach.runs).toBeGreaterThanOrEqual(0.2)
-		expect(reach.moves / reach.runs).toBeGreaterThanOrEqual(0.2)
-		expect(reach.gated / reach.runs).toBeGreaterThanOrEqual(0.2)
-		expect(reach.lookups / reach.runs).toBeGreaterThanOrEqual(0.2)
-		expect(reach.unranked / reach.runs).toBeGreaterThanOrEqual(0.2)
-	})
+	// A failure prints fast-check's seed and path (fc.assert's message, with
+	// the counterexample); PLANNER_PROPERTY_SEED replays a seed.
+	it(
+		"plans what the reference plans, without and with the grouping of the same pass",
+		{ timeout: GROUPING_TIMEOUT_MS },
+		() => {
+			const reach = {
+				runs: 0,
+				reference: 0,
+				projection: 0,
+				victim: 0,
+				yield: 0,
+				kept: 0,
+				wanted: 0,
+				queries: 0,
+				moves: 0,
+				gated: 0,
+				lookups: 0,
+				unranked: 0,
+			}
+			fc.assert(
+				fc.property(raw, fc.nat(1_000), fc.nat(255), (pre, seed, pick) => {
+					// The reference's queries without snapshots (the property above
+					// holds activityQueries to them), so only one reference plan runs.
+					const queries = activityQueries(pre)
+					const cold = new Set(
+						seed % 8 === 0
+							? []
+							: pre.activity.incumbents.filter(i => !i.primary).map(i => i.hz),
+					)
+					const snapshots = answer(queries, seed, cold)
+					const confirmedChallengers = challengers(queries, pick)
+					const answered: PlannerInput = {
+						...pre,
+						activity: { ...pre.activity, snapshots, confirmedChallengers },
+					}
+					// Always held to the frozen reference: exactly where no intended
+					// dsd-fme tier change applies, on the invariant projection with the
+					// intended differences asserted explicitly where one does.
+					const plan = planPlacements(answered)
+					const expected = comparable(plan)
+					const kind = againstReference(answered, plan, referencePlan(answered))
+					reach[kind]++
+					// Planned from the grouping of the same pass, which is reused: no
+					// band-plan lookup is made again.
+					const c = counted(pre)
+					const grouped = activityPlanQueries(c.input)
+					expect(grouped.queries).toStrictEqual(queries)
+					const lookups = c.calls.n
+					const supplied: PlannerInput = {
+						...c.input,
+						activity: { ...c.input.activity, snapshots, confirmedChallengers },
+						...(grouped.grouping ? { grouping: grouped.grouping } : {}),
+					}
+					expect(comparable(planPlacements(supplied))).toStrictEqual(expected)
+					expect(c.calls.n).toBe(lookups)
+					reach.runs++
+					if (expected.wanted.length) reach.wanted++
+					if (expected.activity?.queries.length) reach.queries++
+					if (expected.activity?.moves.length) reach.moves++
+					if (expected.wanted.some(p => p.gated === true)) reach.gated++
+					// Reuse is only shown where the grouping looked a band plan up.
+					if (lookups > 0) reach.lookups++
+					if (pre.activity.epochs.length < pre.sources.length) reach.unranked++
+				}),
+				{
+					numRuns: GROUPING_RUNS,
+					verbose: 1,
+					...(Number.isNaN(SEED) ? {} : { seed: SEED }),
+				},
+			)
+			expect(reach.wanted / reach.runs).toBeGreaterThanOrEqual(0.2)
+			expect(reach.queries / reach.runs).toBeGreaterThanOrEqual(0.2)
+			expect(reach.moves / reach.runs).toBeGreaterThanOrEqual(0.2)
+			expect(reach.gated / reach.runs).toBeGreaterThanOrEqual(0.2)
+			expect(reach.lookups / reach.runs).toBeGreaterThanOrEqual(0.2)
+			expect(reach.unranked / reach.runs).toBeGreaterThanOrEqual(0.2)
+			// Path reach, measured over five runs of 400: reference 122-131 (30-33 %),
+			// projection 150-186, victim choice 88-110 (22-28 %), kept 1-9, yield 0
+			// (the generator never holds every slot). Every run takes one path.
+			expect(reach.reference / reach.runs).toBeGreaterThanOrEqual(0.2)
+			expect(reach.victim / reach.runs).toBeGreaterThanOrEqual(0.1)
+			expect(reach.projection).toBeGreaterThan(0)
+			expect(reach.victim).toBeGreaterThan(0)
+			expect(
+				reach.reference +
+					reach.projection +
+					reach.victim +
+					reach.yield +
+					reach.kept,
+			).toBe(reach.runs)
+		},
+	)
 })
 
 /** One dsd-fme decoder ranked on one source, its band-plan lookups counted. */
