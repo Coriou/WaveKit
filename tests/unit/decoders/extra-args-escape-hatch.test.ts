@@ -321,6 +321,7 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 					now: Date,
 					timeout: boolean,
 				): { data: { wavFile?: string } } | null
+				emitOutput(output: unknown): void
 			}
 			// An NXDN call: DMR recordings are off (dmr-recording-gate.ts), so a DMR call has no file.
 			d.callState = {
@@ -339,6 +340,8 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 				clearEvidence: true,
 			}
 			const ended = d.endCall(new Date(start.getTime() + 5000), false)
+			// The end is published (held for its lookup); "Call ended" is logged at release.
+			d.emitOutput(ended)
 			// The lookup's first attempt runs off the event loop and fills the end.
 			await settleWavLookups(d)
 			expect(ended?.data.wavFile).toContain(dir)

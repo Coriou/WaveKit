@@ -1780,10 +1780,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * "voice-call" state in the same tick (the digital voice stream's call
 	 * metadata is derived from exactly these events).
 	 */
-	protected override emitOutput(raw: DecoderOutput): void {
+	protected override emitOutput(produced: DecoderOutput): void {
 		// Stamped at production: a held output keeps the wall time it was produced at.
-		const output = this.outputAtWall(raw)
-		const payload = typeof raw.data === "object" ? raw.data : null
+		const output = this.outputAtWall(produced)
+		const payload = typeof produced.data === "object" ? produced.data : null
 		const end = payload === null ? undefined : this.pendingEnds.get(payload)
 		if (end !== undefined && payload !== null) this.pendingEnds.delete(payload)
 		if (end === undefined && this.outbox.length === 0) this.deliver(output)
