@@ -928,7 +928,10 @@ export const LATE_VERDICT_GRACE_MS = 3_000 + 8_000 + 15_000
  * Provisional files held at once on a source recording at most `cap` at once
  * (widebandRecordingLimit, 2 to 6: the store's MAX_ACTIVE_ANALOG_PER_SOURCE = 6): a held file keeps
  * its slot, so cap − 1 are held (1 at the floor of 2, 5 at the ceiling) and one slot stays free
- * for a new recording. The limit is never under 2, so a cap of 1 or less (0 held: every file is
+ * for a new recording. A limit that shrinks under the running sessions (calm 6, then CPU pressure:
+ * 2) can leave more held than cap − 1 for a while: they keep their grace (a candidate over the
+ * limit releases none, as releasing them all would still start nothing) and end as usual. The
+ * limit is never under 2, so a cap of 1 or less (0 held: every file is
  * finished at once) only guards a malformed input. A file to hold past it finishes the oldest
  * held one now (kept), and so does any candidate that finds every slot taken and is not known non-voice.
  */

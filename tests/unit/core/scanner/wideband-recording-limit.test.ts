@@ -10,8 +10,10 @@ import {
 	WIDEBAND_CPU_SHARE,
 	widebandRecordingCap,
 	widebandRecordingLimit,
+	widebandRecordingRoomCores,
 	widebandSessionCores,
 	type RecordingCpuReading,
+	type WidebandTrackInput,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import {
 	ANALOG_RESERVATION_BYTES,
@@ -23,6 +25,7 @@ import {
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import {
 	CENTRE,
+	FS,
 	harness,
 	input,
 	snapshot,
@@ -122,7 +125,30 @@ describe("widebandRecordingCap (the configured budget's slots)", () => {
 })
 
 describe("widebandRecordingLimit (the measured CPU's limit)", () => {
-	const per24 = widebandSessionCores(2_400_000)
+	const per24 = widebandRecordingRoomCores(2_400_000)
+
+	it("a recording's room cost is its measured whole cost: 0.10 cores at 1.024 Msps, more than the chain", () => {
+		expect(widebandRecordingRoomCores(1_024_000)).toBeCloseTo(0.1, 12)
+		expect(widebandRecordingRoomCores(2_400_000)).toBeCloseTo(0.112384, 12)
+		expect(widebandRecordingRoomCores(2_400_000)).toBeGreaterThan(
+			widebandSessionCores(2_400_000),
+		)
+	})
+
+	it("spent room under the same reading lowers the limit; negative or malformed spent counts as none", () => {
+		// 1 core at 100 %, 2.5 recordings' room: 2 more than running, 1 once one was spent.
+		const cpu = calm(1 - 2.5 * per24, 1, 100)
+		expect(widebandRecordingLimit(2_400_000, 1, cpu, 2).limit).toBe(4)
+		expect(widebandRecordingLimit(2_400_000, 1, cpu, 3, per24).limit).toBe(4)
+		expect(widebandRecordingLimit(2_400_000, 1, cpu, 4, 2 * per24).limit).toBe(
+			4,
+		)
+		expect(widebandRecordingLimit(2_400_000, 1, cpu, 2, 2 * per24).limit).toBe(
+			2,
+		)
+		for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY])
+			expect(widebandRecordingLimit(2_400_000, 1, cpu, 2, bad).limit).toBe(4)
+	})
 
 	it("calm: active + floor(spare under the guard / cores per recording), up to the cap", () => {
 		// 8 cores at 90 %: 7.2 under the guard, 1.2 own, spare 6 → the cap (6).
@@ -131,7 +157,7 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 			cap: 6,
 			shrunk: null,
 		})
-		// 2 cores at 90 %: 1.8 under the guard; own 1.75 → spare 0.05 < 0.0716: no more than active.
+		// 2 cores at 90 %: 1.8 under the guard; own 1.75 → spare 0.05 < 0.1124: no more than active.
 		expect(widebandRecordingLimit(2_400_000, 1, calm(1.75, 2), 3)).toEqual({
 			limit: 3,
 			cap: 6,
@@ -140,11 +166,11 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 	})
 
 	it("at and past the spare bound: exactly k recordings' cores of spare allow k more", () => {
-		// Guard 100 % of 1 core: spare = 1 − own. Two more need 2 · per24 = 0.1432 cores of spare
+		// Guard 100 % of 1 core: spare = 1 − own. Two more need 2 · per24 = 0.2248 cores of spare
 		// (the 1e-12 relative margin only absorbs the float rounding of 1 − own).
 		const at = (spare: number) =>
 			widebandRecordingLimit(2_400_000, 1, calm(1 - spare, 1, 100), 2).limit
-		expect(per24).toBeCloseTo(0.0716, 12)
+		expect(per24).toBeCloseTo(0.112384, 12)
 		expect(at(2 * per24 * (1 + 1e-12))).toBe(4)
 		// A hair less spare: one more only.
 		expect(at(2 * per24 * (1 - 1e-9))).toBe(3)
@@ -340,5 +366,191 @@ describe("the recorder's admission at the limit", () => {
 		tracks(h, 3)
 		expect(h.rec.activeOn("rtl")).toBe(2)
 		expect(h.rec.limitOn("rtl", 1_024_000).shrunk).toBe("unknown")
+	})
+})
+
+describe("the recorder's limit under a shrink, a shared reading and the store's overall limit", () => {
+	const SHADOW: Partial<WidebandTrackInput> = {
+		analogFm: false,
+		shadowAllowed: true,
+		discoveryId: null,
+	}
+	const at = (
+		h: ReturnType<typeof harness>,
+		id: string,
+		i: number,
+		sourceId = "rtl",
+		extra: Partial<WidebandTrackInput> = {},
+	) =>
+		h.rec.track(
+			input(
+				id,
+				snapshot(id, 0, 10, { centreHz: CENTRE + 20_000 * i, sourceId }),
+				{ sourceId, ...extra },
+			),
+		)
+	const counts = (h: ReturnType<typeof harness>) => h.rec.diagnostics().counts
+	// One recording's room at the harness rate (1.024 Msps): 0.10 cores.
+	const per = widebandRecordingRoomCores(FS)
+	/** 1 core at a 100 % guard with `room` + 0.5 recordings' cores spare. */
+	const roomOf = (room: number, sampledAt = 1): RecordingCpuReading => ({
+		...calm(1 - (room + 0.5) * per, 1, 100),
+		sampledAt,
+	})
+
+	it("over the limit after a shrink: nothing evicted, no held file released, the candidate waits refused:cpu", () => {
+		let cpu: RecordingCpuReading = calm(0.5)
+		const h = harness({ recordingCpu: () => cpu })
+		for (let i = 0; i < 5; i++) at(h, `c${i}`, i)
+		at(h, "s5", 5, "rtl", SHADOW)
+		expect(h.rec.activeOn("rtl")).toBe(6)
+		// A held file of c0 (its grace timer pending): releasing it would be seen by its cancel.
+		const internals = h.rec as unknown as {
+			sessions: Map<string, { owner: string }>
+			held: Map<object, { s: unknown; cancel: () => void }>
+		}
+		const c0 = [...internals.sessions.values()].find(s => s.owner === "c0")
+		expect(c0).toBeDefined()
+		let cancelled = 0
+		internals.held.set(
+			{},
+			{
+				s: c0,
+				cancel: () => {
+					cancelled++
+				},
+			},
+		)
+		cpu = { ...calm(0.5), label: "host-busy" }
+		for (let k = 0; k < 3; k++) at(h, "v", 6)
+		expect(cancelled).toBe(0)
+		expect(internals.held.size).toBe(1)
+		for (const id of ["c0", "c1", "c2", "c3", "c4", "s5"])
+			expect(h.rec.owns(id)).toBe(true)
+		expect(h.rec.owns("v")).toBe(false)
+		expect(h.rec.activeOn("rtl")).toBe(6)
+		// The same refusal of one observation counts once (RecorderDecisions), retried each time.
+		expect(counts(h)["refused:cpu"]).toBe(1)
+		expect(counts(h)["refused:slots"]).toBeUndefined()
+		internals.held.clear()
+	})
+
+	it("over the limit without a reading: the candidate waits refused:slots, nothing evicted", () => {
+		let cpu: RecordingCpuReading | null = calm(0.5)
+		const h = harness({ recordingCpu: () => cpu })
+		for (let i = 0; i < 3; i++) at(h, `c${i}`, i)
+		at(h, "s3", 3, "rtl", SHADOW)
+		cpu = null
+		at(h, "v", 6)
+		at(h, "v", 6)
+		expect(h.rec.owns("s3")).toBe(true)
+		expect(h.rec.owns("v")).toBe(false)
+		expect(counts(h)["refused:slots"]).toBe(1)
+		expect(counts(h)["refused:cpu"]).toBeUndefined()
+	})
+
+	it("exactly at the limit an analog candidate still evicts the shadow (one eviction makes room)", () => {
+		const h = harness()
+		at(h, "c0", 0)
+		at(h, "s1", 1, "rtl", SHADOW)
+		at(h, "v", 2)
+		expect(h.rec.owns("s1")).toBe(false)
+		expect(h.rec.owns("v")).toBe(true)
+	})
+
+	it("one reading's room is spent once on one source: at most room starts above the floor", () => {
+		// Feature: simultaneous traffic, Property 2: a calm reading's room is spent once
+		// Validates: Requirements 19.b
+		const h = harness({ recordingCpu: () => roomOf(2) })
+		for (let i = 0; i < 7; i++) at(h, `c${i}`, i)
+		// 2 at the floor (free) + the room of 2: at room, then past it refused:cpu.
+		expect(h.rec.activeOn("rtl")).toBe(4)
+		expect(counts(h)["refused:cpu"]).toBe(3)
+		expect(h.rec.limitOn("rtl", FS)).toEqual({
+			limit: 4,
+			cap: 6,
+			shrunk: "pressure",
+		})
+	})
+
+	it("two sources share one reading's room: split, not doubled", () => {
+		const h = harness({ recordingCpu: () => roomOf(2) })
+		// Interleaved: each source's third start spends one of the room's two, the fourths wait.
+		for (let i = 0; i < 4; i++) {
+			at(h, `a${i}`, i, "rtl")
+			at(h, `b${i}`, i + 4, "b")
+		}
+		// Each keeps its floor of 2; the room of 2 went once: one to each source.
+		expect(h.rec.activeOn("rtl")).toBe(3)
+		expect(h.rec.activeOn("b")).toBe(3)
+		expect(h.rec.activeOn("rtl") + h.rec.activeOn("b")).toBe(2 + 2 + 2)
+		expect(counts(h)["refused:cpu"]).toBe(2)
+	})
+
+	it("a new reading resets the spent room; the same values without a sample time are the same reading", () => {
+		let cpu: RecordingCpuReading = roomOf(1, 1)
+		const h = harness({ recordingCpu: () => cpu })
+		for (let i = 0; i < 4; i++) at(h, `c${i}`, i)
+		expect(h.rec.activeOn("rtl")).toBe(3)
+		// The same sample read again: nothing more.
+		cpu = { ...roomOf(1, 1) }
+		at(h, "c4", 4)
+		expect(h.rec.activeOn("rtl")).toBe(3)
+		// A new sample (the earlier starts now in its ownCores) leaves room for one more.
+		cpu = roomOf(1, 2)
+		at(h, "c4", 4)
+		at(h, "c5", 5)
+		expect(h.rec.activeOn("rtl")).toBe(4)
+		// Without a sample time the values name the reading: equal values are the same one,
+		// changed ones a new one.
+		const values: RecordingCpuReading = calm(1 - 1.5 * per, 1, 100)
+		cpu = values
+		at(h, "c5", 5)
+		expect(h.rec.activeOn("rtl")).toBe(5)
+		cpu = { ...values }
+		at(h, "c6", 6)
+		expect(h.rec.activeOn("rtl")).toBe(5)
+		cpu = { ...values, ownCores: values.ownCores! - 0.001 }
+		at(h, "c6", 6)
+		expect(h.rec.activeOn("rtl")).toBe(6)
+	})
+
+	it("the store's overall limit reached: refused:slots (retried), never a store refusal", () => {
+		let held = 8
+		const h = harness({
+			recordingCpu: () => calm(0.5),
+			analogActive: () => held,
+		})
+		at(h, "c0", 0)
+		expect(h.rec.owns("c0")).toBe(false)
+		expect(counts(h)["refused:slots"]).toBe(1)
+		expect(counts(h)["refused:store"]).toBeUndefined()
+		// At and past the limit: 9 is refused too; one under it starts.
+		held = 9
+		at(h, "c0", 0)
+		expect(h.rec.owns("c0")).toBe(false)
+		held = 7
+		at(h, "c0", 0)
+		expect(h.rec.owns("c0")).toBe(true)
+		expect(counts(h)["refused:slots"]).toBe(1)
+	})
+
+	it("one source at its ceiling of 6 and another at 2: a third voice on the second waits refused:slots", () => {
+		const h = harness({ recordingCpu: () => calm(0.5) })
+		for (let i = 0; i < 6; i++) at(h, `a${i}`, i, "rtl")
+		at(h, "b0", 6, "b")
+		at(h, "b1", 7, "b")
+		expect(h.rec.activeOn("rtl")).toBe(6)
+		expect(h.rec.activeOn("b")).toBe(2)
+		// The second source's limit allows more, but all 8 operations would be taken.
+		expect(h.rec.limitOn("b", FS).limit).toBe(6)
+		at(h, "b2", 8, "b")
+		at(h, "b2", 8, "b")
+		expect(h.rec.owns("b2")).toBe(false)
+		expect(counts(h)["refused:slots"]).toBe(1)
+		expect(counts(h)["refused:store"]).toBeUndefined()
+		// A shadow is not counted: it holds no operation and may never need one.
+		at(h, "s3", 9, "b", SHADOW)
+		expect(h.rec.owns("s3")).toBe(true)
 	})
 })

@@ -53,7 +53,8 @@ export const MAX_ACTIVE_ANALOG_OPERATIONS = 8
  * The recorder's floor per source (widebandRecordingLimit): it never limits a source to fewer
  * than 2, whatever its CPU reads. The store guarantees the floor to a second source only: with
  * one source at its ceiling of 6 and a second at 2, all 8 operations are held and a third source
- * gets none until one ends (its admission is denied by the operations' overall limit).
+ * gets none until one ends (the recorder waits, refused:slots, before the operations' overall
+ * limit would deny its admission).
  */
 export const MIN_ACTIVE_ANALOG_PER_SOURCE = 2
 /**
@@ -883,6 +884,11 @@ export class AnalogOperations {
 		this.io = context.io ?? defaultIo
 		this.root = resolve(context.root)
 	}
+	/** Operations active now over all sources (the MAX_ACTIVE_ANALOG_OPERATIONS limit counts these). */
+	get activeCount(): number {
+		return this.active.size
+	}
+
 	get ready(): boolean {
 		return (
 			!this.stopped &&
