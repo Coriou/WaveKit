@@ -29,7 +29,7 @@ import {
 	statfs,
 	unlink,
 } from "node:fs/promises"
-import { join, relative, resolve } from "node:path"
+import { join, relative, resolve, sep } from "node:path"
 import { performance } from "node:perf_hooks"
 import { z } from "zod"
 import { SCANNER_DISCOVERY_HOLDS_KEPT_CODE } from "@wavekit/api-types"
@@ -1623,7 +1623,10 @@ export class EvidenceStore {
 		await this.analog?.audit()
 		const now = this.now()
 		const walkedAtMs = performance.now()
-		const files = await this.collect().catch((err: unknown) => {
+		// The discovery folders this walk listed empty: the only folders, with those this pass
+		// empties, that the closing sweep may remove (no second walk of the trees).
+		const emptyDirs = new Set<string>()
+		const files = await this.collect(emptyDirs).catch((err: unknown) => {
 			// A failed walk is not trusted: the next admission waits for one of its own.
 			this.legacy = null
 			throw err
@@ -1745,7 +1748,7 @@ export class EvidenceStore {
 			recordingsLeft = pool.bytes
 			this.legacy = { bytes: recordingsLeft, atMs: walkedAtMs }
 		}
-		await this.removeEmptyDirs()
+		await this.removeEmptyDirs(emptyDirs, deleted)
 		// The folders left on disk: an alias whose folder retention emptied may be released again.
 		await this.loadFolderIndex().catch((err: unknown) =>
 			this.log.debug({ err }, "Scanner folder listing failed"),
@@ -1858,7 +1861,8 @@ export class EvidenceStore {
 		}
 	}
 
-	private async collect(): Promise<StoredFile[]> {
+	/** `emptyDirs`, when given, receives every discovery folder (not a probe's) listed empty. */
+	private async collect(emptyDirs?: Set<string>): Promise<StoredFile[]> {
 		const out: StoredFile[] = []
 		// WG9 req 2.5: with a protection port, never descend an aliased directory or count a symlink.
 		const guarded = this.protection !== undefined
@@ -1888,7 +1892,9 @@ export class EvidenceStore {
 				for (const dir of probe ? await wavDirs(top) : [top]) {
 					const chain = dir === top ? topChain : await descend(dir, topChain)
 					if (chain === null) continue
-					for (const name of await listDir(dir)) {
+					const names = await listDir(dir)
+					if (!probe && names.length === 0) emptyDirs?.add(dir)
+					for (const name of names) {
 						const path = join(dir, name)
 						try {
 							const s = guarded ? await lstat(path) : await stat(path)
@@ -1925,25 +1931,56 @@ export class EvidenceStore {
 		return out
 	}
 
-	private async removeEmptyDirs(): Promise<void> {
+	/**
+	 * Removes the empty discovery folders a retention pass knows of, without walking the trees
+	 * again: those its walk listed empty (`emptyDirs`) and those holding a file it deleted
+	 * (`deleted`, root-relative). Only a discovery folder directly under a category base
+	 * (recordings/<kind>/d_… or evidence/d_…) is ever removed, never a base, a probe folder or
+	 * anything deeper; rmdir removes only an empty directory and never follows a symlink, so a
+	 * folder written since stays (ENOTEMPTY, ignored). With a protection port, a base that is not
+	 * a real directory (or under a recordings root that is not) removes nothing. A folder emptied
+	 * by someone else after the walk is removed at the next pass, whose walk lists it empty.
+	 */
+	private async removeEmptyDirs(
+		emptyDirs: ReadonlySet<string>,
+		deleted: readonly string[],
+	): Promise<void> {
 		const bases = [
 			...RECORDING_KINDS.map(k => join(this.root, "recordings", k)),
 			join(this.root, "evidence"),
 		]
+		const candidates = new Map<string, Set<string>>()
+		const add = (base: string, discoveryId: string): void => {
+			if (!DISCOVERY_ID.test(discoveryId)) return
+			const set = candidates.get(base) ?? new Set<string>()
+			set.add(discoveryId)
+			candidates.set(base, set)
+		}
+		for (const dir of emptyDirs) {
+			const rel = relative(this.root, dir).split(sep)
+			const discoveryId = rel.at(-1) ?? ""
+			const base = join(this.root, ...rel.slice(0, -1))
+			if (bases.includes(base)) add(base, discoveryId)
+		}
+		for (const file of deleted) {
+			const parts = file.split(sep)
+			const depth =
+				parts[0] === "recordings" ? 2 : parts[0] === "evidence" ? 1 : 0
+			if (depth === 0 || parts.length <= depth + 1) continue
+			const base = join(this.root, ...parts.slice(0, depth))
+			if (bases.includes(base)) add(base, parts[depth] ?? "")
+		}
+		if (candidates.size === 0) return
 		const guarded = this.protection !== undefined
-		if (
-			guarded &&
-			(await realDirectory(join(this.root, "recordings"))) === null
-		)
-			bases.splice(0, RECORDING_KINDS.length)
+		const recordingsReal =
+			!guarded || (await realDirectory(join(this.root, "recordings"))) !== null
 		for (const base of bases) {
+			const ids = candidates.get(base)
+			if (ids === undefined) continue
+			if (!recordingsReal && base !== join(this.root, "evidence")) continue
 			if (guarded && (await realDirectory(base)) === null) continue
-			for (const discoveryId of await listDir(base)) {
-				if (!DISCOVERY_ID.test(discoveryId)) continue
-				const dir = join(base, discoveryId)
-				if ((await listDir(dir)).length === 0)
-					await rmdir(dir).catch(() => undefined)
-			}
+			for (const discoveryId of ids)
+				await rmdir(join(base, discoveryId)).catch(() => undefined)
 		}
 	}
 }
