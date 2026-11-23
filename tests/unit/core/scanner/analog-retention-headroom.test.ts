@@ -8,7 +8,14 @@
  */
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
-import { mkdtemp, realpath, rm, utimes } from "node:fs/promises"
+import {
+	mkdir,
+	mkdtemp,
+	realpath,
+	rm,
+	utimes,
+	writeFile,
+} from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Writable } from "node:stream"
@@ -18,12 +25,18 @@ import type { RecordingProtection } from "../../../../src/core/recordings/contra
 import {
 	ADMISSION_HEADROOM,
 	AnalogOperations,
+	AnalogStorageBytesError,
 	MAX_ANALOG_FILE_BYTES,
+	OPERATION_HEADROOM,
+	isStorageBytesRefusal,
 	type AnalogMetadataAdapter,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
-import { MAX_OPERATION_METADATA_BYTES } from "../../../../src/core/scanner/store/recording-operation.js"
+import {
+	MAX_OPERATION_METADATA_BYTES,
+	MAX_RECOVERY_OPERATIONS,
+} from "../../../../src/core/scanner/store/recording-operation.js"
 import type { RecordingBinding } from "../../../../src/core/scanner/store/recording-operation.js"
 import type { Logger } from "../../../../src/utils/logger.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
@@ -374,5 +387,244 @@ describe("the recordings quota status uses admission's full test", () => {
 			lines.filter(l => String(l["msg"]).includes("no longer exceeded")),
 		).toHaveLength(1)
 		await ev.stopAnalog()
+	}, 60_000)
+})
+
+/**
+ * The recordings quota is one oldest-first pass over both pools: the recordings outside analog
+ * operations (legacy: digital voice, probes) and the analog files, on admission's own full test.
+ * Before, legacy files were removed only past the cap itself, so a store whose removable files
+ * were legacy refused every analog admission and reported nothing removable.
+ */
+describe("retention removes legacy and analog files oldest first on one full test", () => {
+	/** A 1 600 000 B legacy recording file: under one RESERVATION, so a shortfall of R needs two. */
+	const LEGACY_BYTES = 1_600_000
+
+	async function evidenceHarness() {
+		const root = await tempRoot()
+		const { store, discoveryId } = storeWithDiscovery()
+		const caps = {
+			maxRecordingsMb: 1024,
+			maxEvidenceMb: 20,
+			maxAgeDays: 30,
+			minFreeDiskMb: 0,
+		}
+		const ev = new EvidenceStore({
+			dir: root,
+			caps,
+			logger: pino({ level: "silent" }) as unknown as Logger,
+			now: () => Date.now(),
+			statfs: async () => ({ freeBytes: 1e12 }),
+			isDiscoveryLive: id => store.get(id) !== undefined,
+		})
+		ev.configureAnalog(adapterOf(store))
+		await ev.recoverAnalog()
+		const analog = (ev as unknown as { analog: AnalogOperations }).analog
+		const begin = () =>
+			ev.beginAnalog({ discoveryId, observationId: "o1", binding: binding() })
+		/** A legacy (digital voice) file `rel` under recordings/dv/<discovery>/, its mtime set. */
+		const legacy = async (name: string, mtimeMs: number): Promise<string> => {
+			const dir = join(root, "recordings", "dv", discoveryId)
+			await mkdir(dir, { recursive: true })
+			const path = join(dir, name)
+			await writeFile(path, Buffer.alloc(LEGACY_BYTES))
+			await utimes(path, mtimeMs / 1000, mtimeMs / 1000)
+			return join("recordings", "dv", discoveryId, name)
+		}
+		/** One finalized analog file, its media mtime set; its bytes as the inventory counts them. */
+		const record = async (mtimeMs: number): Promise<Stored> => {
+			const before = analog.managedBytes ?? 0
+			const op = begin()
+			await op.ready
+			for (let i = 0; i < SAMPLES; i += 16_000)
+				await op.push(new Int16Array(16_000))
+			const receipt = await op.finish()
+			expect(receipt.outcome).toBe("finalized")
+			const artifact = receipt.artifact!
+			await utimes(join(root, artifact), mtimeMs / 1000, mtimeMs / 1000)
+			return { artifact, bytes: (analog.managedBytes ?? 0) - before, mtimeMs }
+		}
+		const setCap = (capBytes: number) =>
+			ev.setCaps({ ...caps, maxRecordingsMb: capBytes / MIB })
+		const admits = async (): Promise<true | string> => {
+			const op = begin()
+			try {
+				await op.ready
+				op.cancel()
+				await op.settled
+				return true
+			} catch (err: unknown) {
+				await op.settled
+				return (err as { code?: string }).code ?? "unknown"
+			}
+		}
+		const exists = (rel: string) => existsSync(join(root, rel))
+		return { ev, analog, discoveryId, legacy, record, setCap, admits, exists }
+	}
+
+	it("a legacy-only store at cap − RESERVATION + 1 (stuck before): the oldest legacy files go and the next analog admission succeeds", async () => {
+		const h = await evidenceHarness()
+		const now = Date.now()
+		const files: string[] = []
+		for (const [i, daysAgo] of [2, 4, 1, 3].entries())
+			files.push(
+				await h.legacy(`2026110${i}_120000_${i}.wav`, now - daysAgo * DAY),
+			)
+		const used = 4 * LEGACY_BYTES
+		h.setCap(used + RESERVATION - 1)
+		// A pass first so admission counts the legacy bytes from a walk.
+		await h.ev.retention(new Set([h.discoveryId]))
+		expect(await h.admits()).toBe("SCANNER_ANALOG_STORAGE_CAP")
+		// The discovery kept: nothing removable, reported so.
+		expect(h.ev.recordingsQuotaExceeded).not.toBeNull()
+		const { deleted } = await h.ev.retention(new Set())
+		// 1.6 MB < the shortfall (used + 2R − cap = R + 1 B): the two oldest (4 and 3 days).
+		expect(deleted).toEqual([files[1], files[3]])
+		expect(h.exists(files[0]!)).toBe(true)
+		expect(h.exists(files[2]!)).toBe(true)
+		expect(h.analog.quotaShortfall(2 * LEGACY_BYTES)).toBeLessThanOrEqual(0)
+		expect(h.ev.recordingsQuotaExceeded).toBeNull()
+		expect(await h.admits()).toBe(true)
+		await h.ev.stopAnalog()
+	}, 60_000)
+
+	it("a mixed store with legacy L > cap − 2R: legacy files go too, oldest first across both pools", async () => {
+		const h = await evidenceHarness()
+		const now = Date.now()
+		const legacy5 = await h.legacy("20261101_120000_5.wav", now - 5 * DAY)
+		const analog4 = await h.record(now - 4 * DAY)
+		const legacy3 = await h.legacy("20261103_120000_3.wav", now - 3 * DAY)
+		const legacy2 = await h.legacy("20261104_120000_2.wav", now - 2 * DAY)
+		const legacyBytes = 3 * LEGACY_BYTES
+		// L > cap − 2R: no analog eviction alone can make room.
+		const cap = legacyBytes + RESERVATION
+		expect(legacyBytes).toBeGreaterThan(cap - ADMISSION_HEADROOM)
+		h.setCap(cap)
+		const { deleted } = await h.ev.retention(new Set())
+		// Shortfall A + R ≈ 3.5 MB: the 5-day legacy, the 4-day analog, then the 3-day legacy.
+		expect(deleted).toEqual(
+			expect.arrayContaining([legacy5, analog4.artifact, legacy3]),
+		)
+		expect(deleted).toHaveLength(3)
+		expect(h.exists(legacy5)).toBe(false)
+		expect(h.exists(analog4.artifact)).toBe(false)
+		expect(h.exists(legacy3)).toBe(false)
+		expect(h.exists(legacy2)).toBe(true)
+		expect(h.ev.recordingsQuotaExceeded).toBeNull()
+		expect(await h.admits()).toBe(true)
+		await h.ev.stopAnalog()
+	}, 60_000)
+
+	it("ordering across pools is by file time: a younger legacy file outlives an older analog file", async () => {
+		const h = await evidenceHarness()
+		const now = Date.now()
+		const analogOld = await h.record(now - 6 * DAY)
+		const legacyMid = await h.legacy("20261102_120000_m.wav", now - 5 * DAY)
+		const analogMid = await h.record(now - 4 * DAY)
+		const legacyNew = await h.legacy("20261104_120000_n.wav", now - 1 * DAY)
+		const used = 2 * LEGACY_BYTES + analogOld.bytes + analogMid.bytes
+		// Shortfall of one byte: only the oldest file of either pool goes.
+		h.setCap(used + ADMISSION_HEADROOM - 1)
+		const first = await h.ev.retention(new Set())
+		expect(first.deleted).toEqual([analogOld.artifact])
+		// Shortfall of one byte again: now the 5-day legacy file is the oldest.
+		h.setCap(used - analogOld.bytes + ADMISSION_HEADROOM - 1)
+		const second = await h.ev.retention(new Set())
+		expect(second.deleted).toEqual([legacyMid])
+		expect(h.exists(analogMid.artifact)).toBe(true)
+		expect(h.exists(legacyNew)).toBe(true)
+		await h.ev.stopAnalog()
+	}, 60_000)
+})
+
+/**
+ * The operation inventory bound (MAX_RECOVERY_OPERATIONS) refuses admission with the same public
+ * code as the byte cap. Retention keeps OPERATION_HEADROOM (8) operations free under it, oldest
+ * first, so that refusal cannot stick; and only the byte refusal is an AnalogStorageBytesError.
+ * The inventory is padded with held synthetic intents (a kept discovery) rather than 4 000 files.
+ */
+describe("retention keeps the operation inventory under its bound", () => {
+	type Intents = Map<string, { operationId: string; discoveryId: string }>
+	const PAD_DISCOVERY = "d-pad"
+	const keep = new Set([PAD_DISCOVERY])
+
+	function padder(ops: AnalogOperations) {
+		const intents = (ops as unknown as { inventory: { intents: Intents } })
+			.inventory.intents
+		const template = [...intents.values()][0]!
+		const pads: string[] = []
+		/** Pads the inventory to `total` intents with held clones (none of them on disk). */
+		const padTo = (total: number) => {
+			while (intents.size < total) {
+				const operationId = randomUUID()
+				intents.set(operationId, {
+					...template,
+					operationId,
+					discoveryId: PAD_DISCOVERY,
+				})
+				pads.push(operationId)
+			}
+		}
+		const clear = () => {
+			for (const id of pads.splice(0)) intents.delete(id)
+		}
+		return { intents, padTo, clear }
+	}
+
+	it("OPERATION_HEADROOM is the in-flight limit, 8: retention evicts from 4096 − 8 = 4088 intents", () => {
+		expect(OPERATION_HEADROOM).toBe(8)
+		expect(MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM).toBe(4088)
+	})
+
+	it("at 4087 intents nothing is evicted; at 4088 the oldest goes; at 4089 the two oldest", async () => {
+		const h = await harness()
+		const files = await shuffledFour(h)
+		const pad = padder(h.ops)
+		const bound = MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM
+		pad.padTo(bound - 1)
+		expect(await h.retain(keep)).toEqual([])
+		pad.padTo(bound)
+		expect(await h.retain(keep)).toEqual([files[1]!.artifact])
+		expect(pad.intents.size).toBe(bound - 1)
+		pad.padTo(bound + 1)
+		expect(await h.retain(keep)).toEqual([
+			files[3]!.artifact,
+			files[0]!.artifact,
+		])
+		expect(pad.intents.size).toBe(bound - 1)
+		expect(existsSync(join(h.root, files[2]!.artifact))).toBe(true)
+		pad.clear()
+		await h.ops.stop()
+	}, 60_000)
+
+	it("the inventory-limit refusal shares the storage-cap code but is not a byte refusal; the byte refusal is", async () => {
+		const h = await harness()
+		await h.record(Date.now() - DAY)
+		const pad = padder(h.ops)
+		const refusal = async (): Promise<unknown> => {
+			const op = h.ops.begin({
+				discoveryId: h.discoveryId,
+				observationId: "o1",
+				binding: binding(),
+			})
+			const err = await op.ready.then(
+				() => null,
+				(e: unknown) => e,
+			)
+			if (err === null) op.cancel()
+			await op.settled
+			return err
+		}
+		pad.padTo(MAX_RECOVERY_OPERATIONS)
+		const count = await refusal()
+		expect((count as { code?: string }).code).toBe("SCANNER_ANALOG_STORAGE_CAP")
+		expect(isStorageBytesRefusal(count)).toBe(false)
+		expect(count).not.toBeInstanceOf(AnalogStorageBytesError)
+		pad.clear()
+		h.limit.maxBytes = h.used() + RESERVATION - 1
+		const bytes = await refusal()
+		expect((bytes as { code?: string }).code).toBe("SCANNER_ANALOG_STORAGE_CAP")
+		expect(isStorageBytesRefusal(bytes)).toBe(true)
+		await h.ops.stop()
 	}, 60_000)
 })

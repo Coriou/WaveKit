@@ -377,10 +377,11 @@ import { extractChannelFeatures } from "./classify/channel-features.js"
 import { refineChannelClassification } from "./classify/channel-tier.js"
 import { updateChannelAdmission } from "./plan/resource-admission.js"
 import { channelGateMinDurationMs } from "../spectrum/channel-gate.js"
-import type {
-	AnalogCut,
-	AnalogHandle,
-	AnalogInput,
+import {
+	isStorageBytesRefusal,
+	type AnalogCut,
+	type AnalogHandle,
+	type AnalogInput,
 } from "./store/analog-operations.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
 import {
@@ -627,7 +628,7 @@ const COVERAGE_EVENTS = [
 
 const MAINTENANCE_EVERY_MS = 5 * 60_000
 /**
- * A storage-cap admission refusal asks for the next maintenance pass (retention) at the next
+ * A storage-cap admission refusal of the bytes asks for the next maintenance pass (retention) at the next
  * tick instead of up to MAINTENANCE_EVERY_MS later, at most once per this window, and only
  * while the last pass did not already find nothing removable (`recordingsQuota`).
  */
@@ -9420,15 +9421,13 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
-	/** The recorders' store admission: a storage-cap refusal asks for retention soon. */
+	/** The recorders' store admission: a storage-cap refusal of the bytes asks for retention soon. */
 	private beginAnalogRecording(input: AnalogInput): AnalogHandle {
 		const handle = this.evidence.beginAnalog(input)
+		// Only the byte refusal: the operation inventory limit and the metadata bounds share its
+		// code, and retention cannot clear the metadata ones (the inventory limit it keeps clear).
 		void handle.ready.catch((err: unknown) => {
-			if (
-				err instanceof WaveKitError &&
-				err.code === "SCANNER_ANALOG_STORAGE_CAP"
-			)
-				this.requestRetentionSoon()
+			if (isStorageBytesRefusal(err)) this.requestRetentionSoon()
 		})
 		return handle
 	}

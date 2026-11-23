@@ -62,6 +62,7 @@ import {
 	type AnalogQuarantine,
 	type AnalogReconciliation,
 	type AnalogSetAsideStatus,
+	type LegacyRetention,
 } from "./analog-operations.js"
 import {
 	NOISE_QUARANTINE,
@@ -1678,10 +1679,17 @@ export class EvidenceStore {
 			["evidence", this.caps.maxEvidenceMb * MIB],
 		]
 		let recordingsLeft = 0
+		// With analog operations, the recordings quota is one oldest-first pass over the legacy
+		// files and the analog ones together, on admission's own full test (analog.retained).
+		const combined = this.analog !== null
 		for (const [category, capBytes] of caps) {
 			let total = 0
 			for (const f of files)
 				if (f.category === category && !gone.has(f.path)) total += f.bytes
+			if (combined && category === "recordings") {
+				recordingsLeft = total
+				continue
+			}
 			for (const f of byAge) {
 				if (total <= capBytes) break
 				if (f.category !== category || gone.has(f.path) || isProtected(f))
@@ -1692,14 +1700,34 @@ export class EvidenceStore {
 		}
 		// This pass's walk, less what it removed: as fresh as a walk of legacyRecordingBytes.
 		this.legacy = { bytes: recordingsLeft, atMs: walkedAtMs }
-		if (this.analog)
+		if (this.analog) {
+			const pool: LegacyRetention = {
+				bytes: recordingsLeft,
+				files: byAge
+					.filter(
+						f =>
+							f.category === "recordings" &&
+							!gone.has(f.path) &&
+							!isProtected(f),
+					)
+					.map(f => ({
+						mtimeMs: f.mtimeMs,
+						key: f.rel,
+						bytes: f.bytes,
+						remove: () => remove(f),
+					})),
+			}
 			deleted.push(
 				...(await this.analog.retained(
 					keepDiscoveryIds,
 					this.caps.maxAgeDays * DAY_MS,
 					now,
+					pool,
 				)),
 			)
+			recordingsLeft = pool.bytes
+			this.legacy = { bytes: recordingsLeft, atMs: walkedAtMs }
+		}
 		await this.removeEmptyDirs()
 		// The folders left on disk: an alias whose folder retention emptied may be released again.
 		await this.loadFolderIndex().catch((err: unknown) =>

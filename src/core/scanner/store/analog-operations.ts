@@ -61,6 +61,51 @@ const RESERVATION = MAX_ANALOG_FILE_BYTES + MAX_OPERATION_METADATA_BYTES
  */
 export const ADMISSION_HEADROOM = 2 * RESERVATION
 /**
+ * Operations retention keeps free under the inventory bound (MAX_RECOVERY_OPERATIONS, 4096):
+ * admission refuses once intents + unpublished reach the bound, so retention evicts oldest
+ * first while they are at or past 4096 − 8 = 4088, which leaves room for every recording that
+ * can be in flight at once (MAX_ACTIVE_ANALOG_OPERATIONS, 8).
+ */
+export const OPERATION_HEADROOM = MAX_ACTIVE_ANALOG_OPERATIONS
+/**
+ * A recording outside analog operations (digital voice, probes) that retention may remove for
+ * the quota, offered to AnalogOperations.retained so one oldest-first pass covers both pools.
+ */
+export interface LegacyRetentionFile {
+	mtimeMs: number
+	/** Tie-break among equal mtimes (the file's relative path). */
+	key: string
+	bytes: number
+	/** Removes it after the caller's whole policy again; false when it was kept. */
+	remove: () => Promise<boolean>
+}
+/** One file of AnalogOperations.retained's oldest-first pass, from either pool. */
+type RetentionEntry =
+	| { kind: "analog"; intent: Intent; mtimeMs: number; key: string }
+	| { kind: "legacy"; file: LegacyRetentionFile; mtimeMs: number; key: string }
+/** The legacy pool of one retention pass; `bytes` drops by each file `retained` removes. */
+export interface LegacyRetention {
+	/** Legacy recording bytes left (the pass's walk, less what it removed). */
+	bytes: number
+	/** Removable legacy recordings (not protected when listed). */
+	files: readonly LegacyRetentionFile[]
+}
+/**
+ * The refusal for the recording bytes themselves (used + outstanding + one reservation over the
+ * cap), the only storage-cap refusal retention can clear. Its public code is the same
+ * SCANNER_ANALOG_STORAGE_CAP the operation inventory limit and the metadata bounds throw; only
+ * this class tells it apart (isStorageBytesRefusal).
+ */
+export class AnalogStorageBytesError extends WaveKitError {
+	constructor(message: string) {
+		super(message, "SCANNER_ANALOG_STORAGE_CAP")
+	}
+}
+/** True for a storage-cap refusal of the recording bytes (AnalogStorageBytesError). */
+export function isStorageBytesRefusal(err: unknown): boolean {
+	return err instanceof AnalogStorageBytesError
+}
+/**
  * Incomplete operation folders (crash residue holding no media) a scan moved aside into
  * `.analog-operations/.set-aside/`, kept for diagnosis. Each holds only the intent files
  * (intent.json, intent.tmp), together at most MAX_OPERATION_METADATA_BYTES (16 KiB). Past the
@@ -739,6 +784,16 @@ export class AnalogOperations {
 			this.context.limits().maxBytes
 		)
 	}
+	/**
+	 * The operation inventory is within OPERATION_HEADROOM of its bound (intents + unpublished
+	 * ≥ MAX_RECOVERY_OPERATIONS − OPERATION_HEADROOM): retention evicts until it is not.
+	 */
+	private operationsFull(): boolean {
+		return (
+			this.inventory.intents.size + this.unpublished() >=
+			MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM
+		)
+	}
 	get managedBytes(): number | null {
 		return this.inventory.unknown
 			? null
@@ -964,8 +1019,9 @@ export class AnalogOperations {
 			if (
 				this.inventory.bytes + legacy + outstanding + RESERVATION >
 				this.context.limits().maxBytes
-			)
-				throw coded("storage-cap", "Recording storage cap")
+			) {
+				throw new AnalogStorageBytesError("Recording storage cap")
+			}
 			op.reservation = true
 		})
 		this.valid(op)
@@ -3008,12 +3064,30 @@ export class AnalogOperations {
 			return true
 		}
 	}
+	/**
+	 * Age expiry and the quota for the analog files, and, with `legacy`, the quota for the other
+	 * recordings in the same pass: every removable file of both pools, oldest first, goes while
+	 * the store is full (quotaShortfall over the pool's live `legacy.bytes` > 0); an analog file
+	 * also goes while the operation inventory is full (operationsFull) or once it is past
+	 * `maxAgeMs`. The pass stops removing as soon as neither holds, so a shortfall left after it
+	 * means no candidate in either pool was left. Not ready: the legacy pool alone, to the cap.
+	 */
 	async retained(
 		keep: ReadonlySet<string>,
 		maxAgeMs: number,
 		now: number,
+		legacy?: LegacyRetention,
 	): Promise<string[]> {
-		if (!this.ready) return []
+		if (!this.ready) {
+			if (legacy) {
+				const capBytes = this.context.limits().maxBytes
+				for (const file of legacy.files) {
+					if (legacy.bytes <= capBytes) break
+					if (await file.remove()) legacy.bytes -= file.bytes
+				}
+			}
+			return []
+		}
 		const deleted: string[] = []
 		let skipped = 0
 		let unresolved = 0
@@ -3049,20 +3123,41 @@ export class AnalogOperations {
 			}
 			candidates.push({ intent, mtimeMs })
 		}
-		candidates.sort(
+		// Both pools in one order: oldest first by file time, then by operation id or path.
+		const entries: RetentionEntry[] = candidates.map(c => ({
+			kind: "analog",
+			intent: c.intent,
+			mtimeMs: c.mtimeMs,
+			key: c.intent.operationId,
+		}))
+		for (const file of legacy?.files ?? [])
+			entries.push({
+				kind: "legacy",
+				file,
+				mtimeMs: file.mtimeMs,
+				key: file.key,
+			})
+		entries.sort(
 			(a, b) =>
-				a.mtimeMs - b.mtimeMs ||
-				(a.intent.operationId < b.intent.operationId ? -1 : 1),
+				a.mtimeMs - b.mtimeMs || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
 		)
-		for (const { intent, mtimeMs } of candidates) {
-			const old = now - mtimeMs > maxAgeMs
-			// Full: no room for one admission plus one in flight (ADMISSION_HEADROOM), re-checked
-			// after every retire so the pass stops as soon as the next recording fits.
-			if (
-				!old &&
-				(this.quotaShortfall(await this.context.legacyBytes()) ?? 0) <= 0
-			)
+		// Full: no room for one admission plus one in flight (ADMISSION_HEADROOM), re-checked
+		// after every removal so the pass stops as soon as the next recording fits.
+		const bytesFull = async (): Promise<boolean> =>
+			(this.quotaShortfall(
+				legacy ? legacy.bytes : await this.context.legacyBytes(),
+			) ?? 0) > 0
+		for (const entry of entries) {
+			if (entry.kind === "legacy") {
+				// Legacy age expiry ran in the caller's own pass; here only the quota removes.
+				if (!(await bytesFull())) continue
+				if ((await entry.file.remove()) && legacy)
+					legacy.bytes -= entry.file.bytes
 				continue
+			}
+			const { intent, mtimeMs } = entry
+			const old = now - mtimeMs > maxAgeMs
+			if (!old && !this.operationsFull() && !(await bytesFull())) continue
 			// The whole policy again before the retire and in the media unlink's own turn: a
 			// listing, a mark, a keep or an unresolved folder since keeps the file.
 			const stillRetirable = (): boolean =>

@@ -4327,9 +4327,13 @@ be read or copied, and no backup was kept); or `none` with `reason` `same-format
 
 `recordingsQuota` is present only while the last retention pass left the recordings quota
 (`storage.maxRecordingsMb`) without room for the next analog recording after removing every file
-its rules allow, so everything left is protected (kept, recent, held by a kept discovery, or
-with an owner the scanner cannot resolve) and quota retention frees nothing. That room is two
-full recordings (3,872,856 B), so it can show while `usedBytes` is still just under `capBytes`.
+its rules allow, so everything left is protected (kept, held by a kept discovery, with an owner
+the scanner cannot resolve, or, for a recording outside analog operations, written in the last
+10 s; analog recordings have no such recent hold, so the newest analog file goes when nothing
+else is removable) and quota retention frees nothing. That room is two full recordings
+(3,872,856 B), so it can show while `usedBytes` is still just under `capBytes`. While
+recordings are in flight their reserved space counts too, so retention may clear up to about
+(2 + n) reservations below `capBytes` with n recordings in flight (n ≤ 8: about 19 MB).
 `overBytes` is what retention would have to free for the next recording: `usedBytes` plus the
 space reserved by recordings in flight plus that room, less `capBytes` (cores before 2026-11-23:
 `usedBytes - capBytes`):

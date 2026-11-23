@@ -4572,7 +4572,6 @@ export class WidebandAnalogRecorder {
 		if (!keepMappings) this.publishTones(s)
 	}
 
-	/** At most one warning a minute; never the error's untrusted text beyond safe fields. */
 	/**
 	 * Why the store refused a file (`handle.ready` rejected), logged at info with the error's
 	 * allowlisted fields (its code: storage-cap, disk-low, ...): at most once per code per
@@ -4598,6 +4597,7 @@ export class WidebandAnalogRecorder {
 		)
 	}
 
+	/** At most one warning a minute; never the error's untrusted text beyond safe fields. */
 	private warn(err: unknown): void {
 		const now = this.deps.now()
 		if (now - this.warnedAt < 60_000) return
