@@ -68,7 +68,7 @@ export const ADMISSION_HEADROOM = 2 * RESERVATION
  */
 export const OPERATION_HEADROOM = MAX_ACTIVE_ANALOG_OPERATIONS
 /**
- * A recording outside analog operations (digital voice, probes) that retention may remove for
+ * A recording outside analog operations (digital voice; probe recordings are protected and never offered) that retention may remove for
  * the quota, offered to AnalogOperations.retained so one oldest-first pass covers both pools.
  */
 export interface LegacyRetentionFile {
