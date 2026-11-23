@@ -835,6 +835,53 @@ export const DSD_FME_WAV_RETRY_MS = 200
  * order is the file system's) and logged, never listed whole.
  */
 export const DSD_FME_WAV_LIST_MAX_ENTRIES = 20_000
+/**
+ * How long a call_end waits for its WAV lookup's first attempt (so it carries `wavFile` itself,
+ * as when the lookup was synchronous). It is a deadline from the end's production, not a wait per
+ * attempt: every output the adapter produces after a held end waits behind it in order (the
+ * `outbox`), and an end produced later has a later deadline, so no output is published more than
+ * 500 ms after it was produced. A first attempt that misses the deadline still reports a file it
+ * finds, in a `wavFileUpdate`.
+ */
+export const DSD_FME_WAV_END_WAIT_MS = 500
+/**
+ * A lookup attempt (one listing of each of the three directories) is abandoned after this long,
+ * so a stuck directory read cannot stall the one-at-a-time chain of every later call: a chain of
+ * 1 + DSD_FME_WAV_RETRIES attempts then lasts at most 6 × (2 000 + 200) ms = 13.2 s. Node cannot
+ * cancel the read itself; its late result is discarded.
+ */
+export const DSD_FME_WAV_ATTEMPT_TIMEOUT_MS = 2_000
+/**
+ * Outputs held behind waiting call_ends at most. They are what the adapter produces within
+ * DSD_FME_WAV_END_WAIT_MS: dsd-fme prints a few tens of lines a second per lane and most produce
+ * no output, so 500 ms holds well under 100; at 1 024 the oldest waiting end is released early
+ * (without its file, which its lookup then reports in an update) rather than grow the queue.
+ */
+export const DSD_FME_HELD_OUTPUTS_MAX = 1_024
+/**
+ * Directories whose truncated listing was logged, per adapter (once each). An adapter searches
+ * three per recording directory, so 16 names covers five configured directories; past that the
+ * set restarts (each directory then logs once more).
+ */
+const WAV_TRUNCATION_WARNED_MAX = 16
+
+/** A call_end held for its WAV lookup's first attempt (endCall, findWavFileAsync). */
+type WavHeldEnd = {
+	/** The end's payload, shared by the event endCall returned and its published copy. */
+	data: { wavFile?: string | undefined }
+	/** Its first attempt finished, its deadline passed, or the queue overflowed. */
+	settled: boolean
+	/** The end has been published: a file found now goes out in an update. */
+	released: boolean
+	deadline: ReturnType<typeof setTimeout> | undefined
+	/** The end's "Call ended" log, written once it is known whether it carries a file. */
+	log: (hasWavFile: boolean) => void
+}
+
+/** One publication held in order behind a waiting call_end. */
+type HeldOutput =
+	| { kind: "output"; output: DecoderOutput; end?: WavHeldEnd }
+	| { kind: "voice"; state: DsdFmeVoiceCallState }
 
 /**
  * Fallback call end (ms) when no line from the call arrives for this long. Calls
@@ -1272,6 +1319,22 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private readonly dmrClearance = new DmrClearance(CALL_TIMEOUT_MS)
 	/** The tail of the WAV lookups: one attempt in flight at a time (findWavFileAsync). */
 	private wavSearch: Promise<void> = Promise.resolve()
+	/**
+	 * The call_ends endCall returned that wait for their lookup's first attempt (emitOutput), by
+	 * payload: a caller's copy of the event shares it.
+	 */
+	private readonly pendingEnds = new WeakMap<object, WavHeldEnd>()
+	/**
+	 * Publications in production order behind a waiting call_end (DSD_FME_WAV_END_WAIT_MS): a later
+	 * call's events never overtake an earlier call's end. At most DSD_FME_HELD_OUTPUTS_MAX.
+	 */
+	private readonly outbox: HeldOutput[] = []
+	/** stop() waiting for the outbox to empty. */
+	private outboxIdle: Array<() => void> = []
+	/** Directories whose truncated listing was logged (WAV_TRUNCATION_WARNED_MAX). */
+	private readonly wavTruncationWarned = new Set<string>()
+	/** Whether a timed-out lookup attempt was logged (once per adapter). */
+	private wavTimeoutWarned = false
 	private dmrRoute = newDmrRoute()
 	private lineSeq = 0
 	/** The clearance lane of the line being parsed. */
@@ -1683,6 +1746,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		this.flushPendingDmrLink(false)
 		this.dmrRoute = newDmrRoute()
+		// The ends just produced go out first, each with its file when its lookup found it
+		// (at most DSD_FME_WAV_END_WAIT_MS).
+		await this.outboxDrained()
 		await super.stop()
 		this.linkDmrCc.clear()
 		this.linkDmrMs = false
@@ -1694,7 +1760,77 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * metadata is derived from exactly these events).
 	 */
 	protected override emitOutput(raw: DecoderOutput): void {
+		// Stamped at production: a held output keeps the wall time it was produced at.
 		const output = this.outputAtWall(raw)
+		const payload = typeof raw.data === "object" ? raw.data : null
+		const end = payload === null ? undefined : this.pendingEnds.get(payload)
+		if (end !== undefined && payload !== null) this.pendingEnds.delete(payload)
+		if (end === undefined && this.outbox.length === 0) this.deliver(output)
+		else this.hold({ kind: "output", output, ...(end ? { end } : {}) })
+	}
+
+	/** Queues a publication behind a waiting call_end, then releases what may go. */
+	private hold(item: HeldOutput): void {
+		this.outbox.push(item)
+		// Over the bound the oldest waiting end goes now, without a file (DSD_FME_HELD_OUTPUTS_MAX).
+		while (this.outbox.length > DSD_FME_HELD_OUTPUTS_MAX) {
+			const waiting = this.outbox.find(
+				h => h.kind === "output" && h.end !== undefined && !h.end.settled,
+			)
+			if (waiting?.kind !== "output" || waiting.end === undefined) break
+			this.markSettled(waiting.end, false)
+			this.drainOutbox()
+		}
+		this.drainOutbox()
+	}
+
+	/** Publishes the outbox's head while it is not an end still waiting for its lookup. */
+	private drainOutbox(): void {
+		for (;;) {
+			const head = this.outbox[0]
+			if (head === undefined) break
+			if (head.kind === "output" && head.end !== undefined && !head.end.settled)
+				return
+			this.outbox.shift()
+			if (head.kind === "output") {
+				if (head.end !== undefined) head.end.released = true
+				this.deliver(head.output)
+			} else this.publish(head.state)
+		}
+		const idle = this.outboxIdle
+		this.outboxIdle = []
+		for (const resolve of idle) resolve()
+	}
+
+	/** Settles when no publication is held (at most DSD_FME_WAV_END_WAIT_MS after the last end). */
+	private outboxDrained(): Promise<void> {
+		if (this.outbox.length === 0) return Promise.resolve()
+		return new Promise(resolve => this.outboxIdle.push(resolve))
+	}
+
+	/** Marks a held end settled (its file known or given up) and writes its log line once. */
+	private markSettled(end: WavHeldEnd, hasWavFile: boolean): void {
+		if (end.settled) return
+		end.settled = true
+		if (end.deadline !== undefined) clearTimeout(end.deadline)
+		end.deadline = undefined
+		end.log(hasWavFile)
+	}
+
+	/**
+	 * The lookup's answer for a held end: a file found before the end went out rides on the end
+	 * itself (true); after it, the caller reports it in an update (false).
+	 */
+	private settleEnd(end: WavHeldEnd, wavFile: string | undefined): boolean {
+		if (end.released) return false
+		if (wavFile !== undefined) end.data.wavFile = wavFile
+		this.markSettled(end, wavFile !== undefined)
+		this.drainOutbox()
+		return wavFile !== undefined
+	}
+
+	/** Publishes one output now (emitOutput, drainOutbox). */
+	private deliver(output: DecoderOutput): void {
 		if (output.type !== "call_start" && output.type !== "call_end") {
 			this.publish(output)
 			return
@@ -2164,7 +2300,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			quality: call.quality,
 			encrypted,
 		})
-		this.publish(state)
+		// In order behind a held call_end (outbox).
+		if (this.outbox.length === 0) this.publish(state)
+		else this.hold({ kind: "voice", state })
 	}
 
 	/** The announced call `callId` of any lane. */
@@ -5236,8 +5374,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}
 
 	/**
-	 * Finds the WAV file dsd-fme created for a completed call, off the event loop, and emits a
-	 * `call_end` update (`flags.wavFileUpdate`) carrying it.
+	 * Finds the WAV file dsd-fme created for a completed call, off the event loop. A file found
+	 * while the call's end is still held (`end`, DSD_FME_WAV_END_WAIT_MS) rides on that
+	 * `call_end` itself, as when the lookup was synchronous; one found after it went out is
+	 * emitted in a `call_end` update (`flags.wavFileUpdate`).
 	 *
 	 * dsd-fme filename format: YYYYMMDD_HHMMSS_XXXXX_PROTO_CC_N_CALLTYPE_TGT_N_SRC_N.wav
 	 * Where XXXXX is an internal frame ID we cannot predict.
@@ -5251,14 +5391,19 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * The first attempt runs at once, then up to DSD_FME_WAV_RETRIES more every
 	 * DSD_FME_WAV_RETRY_MS (dsd-fme renames the file at the call's close, so it may still be
 	 * writing). Every attempt is one async, bounded listing per directory
-	 * (searchForWavFile), and attempts of every call run one at a time (`wavSearch`): a
-	 * burst of call ends never stacks directory reads. The call's own `call_end` goes out
-	 * without the file; the update links it (Activity, the recordings inventory and the
-	 * clearance count already take the late update).
+	 * (searchForWavFile), abandoned after DSD_FME_WAV_ATTEMPT_TIMEOUT_MS, and attempts of every
+	 * call run one at a time (`wavSearch`): a burst of call ends never stacks directory reads.
 	 */
-	private findWavFileAsync(call: DsdFmeCallState, callEndTime: Date): void {
+	private findWavFileAsync(
+		call: DsdFmeCallState,
+		callEndTime: Date,
+		end?: WavHeldEnd,
+	): void {
 		const baseDir = this.recordingDir()
-		if (baseDir === null) return
+		if (baseDir === null) {
+			if (end !== undefined) this.settleEnd(end, undefined)
+			return
+		}
 
 		// dsd-fme creates a WAV subdirectory inside the output directory
 		const dirsToSearch = [
@@ -5266,25 +5411,53 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			path.join(baseDir, "WAV"),
 			path.join(baseDir, "wav"),
 		]
+		const searchAll = async (): Promise<string | undefined> => {
+			for (const dir of dirsToSearch) {
+				const found = await this.searchForWavFile(call, callEndTime, dir)
+				if (found) return found
+			}
+			return undefined
+		}
 
 		let attempt = 0
 		const tryFind = async (): Promise<void> => {
 			attempt++
 
-			// Search all directories
-			let wavFile: string | undefined
-			for (const dir of dirsToSearch) {
-				wavFile = await this.searchForWavFile(call, callEndTime, dir)
-				if (wavFile) break
+			// Search all directories, giving up on a stuck read (DSD_FME_WAV_ATTEMPT_TIMEOUT_MS).
+			let timer: ReturnType<typeof setTimeout> | undefined
+			const timedOut = new Promise<"timeout">(resolve => {
+				timer = setTimeout(
+					() => resolve("timeout"),
+					DSD_FME_WAV_ATTEMPT_TIMEOUT_MS,
+				)
+			})
+			// An abandoned search never rejects unhandled (searchForWavFile catches its own reads).
+			const searched = searchAll().catch(() => undefined)
+			const result = await Promise.race([searched, timedOut])
+			clearTimeout(timer)
+			if (result === "timeout" && !this.wavTimeoutWarned) {
+				this.wavTimeoutWarned = true
+				this.logger.warn(
+					{ timeoutMs: DSD_FME_WAV_ATTEMPT_TIMEOUT_MS },
+					"WAV file search attempt timed out",
+				)
 			}
+			const wavFile = result === "timeout" ? undefined : result
 			// The late link is admitted on the same rule as the end's own, decided after the
 			// reads (the call's trust may have changed while they ran).
 			if (!this.recordingLinkable(call)) {
+				if (end !== undefined) this.settleEnd(end, undefined)
 				if (call.protocol === "dmr") this.dmrClearance.ended(call.callId)
 				return
 			}
 			if (wavFile) {
-				// Found it! Emit an event so the UI can update
+				if (end !== undefined && this.settleEnd(end, wavFile)) {
+					// The held end carries it: the lookup is done.
+					if (call.protocol === "dmr") this.dmrClearance.ended(call.callId)
+					this.logger.debug({ attempt }, "Found WAV file for the call's end")
+					return
+				}
+				// Its end has gone out: an update links it.
 				this.emitOutput({
 					timestamp: this.monoDate(),
 					decoder: this.id,
@@ -5314,6 +5487,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				this.logger.debug({ attempt }, "Found WAV file after async search")
 				return
 			}
+			// Not found by the first attempt: the end goes out without it.
+			if (end !== undefined) this.settleEnd(end, undefined)
 
 			// Not found in any directory, retry if attempts remain
 			if (attempt <= DSD_FME_WAV_RETRIES) {
@@ -5336,6 +5511,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const queue = (): void => {
 			const run = this.wavSearch.then(tryFind)
 			this.wavSearch = run.catch((err: unknown) => {
+				if (end !== undefined) this.settleEnd(end, undefined)
 				if (call.protocol === "dmr") this.dmrClearance.ended(call.callId)
 				this.logger.warn(
 					{ code: (err as NodeJS.ErrnoException | null)?.code },
@@ -5394,10 +5570,16 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			// Breaking out of the loop closes the directory.
 			for await (const entry of directory) {
 				if (++examined > DSD_FME_WAV_LIST_MAX_ENTRIES) {
-					this.logger.warn(
-						{ limit: DSD_FME_WAV_LIST_MAX_ENTRIES },
-						"Recording directory listing truncated",
-					)
+					// Once per directory per adapter (WAV_TRUNCATION_WARNED_MAX); never the path.
+					if (!this.wavTruncationWarned.has(dir)) {
+						if (this.wavTruncationWarned.size >= WAV_TRUNCATION_WARNED_MAX)
+							this.wavTruncationWarned.clear()
+						this.wavTruncationWarned.add(dir)
+						this.logger.warn(
+							{ limit: DSD_FME_WAV_LIST_MAX_ENTRIES },
+							"Recording directory listing truncated",
+						)
+					}
 					break
 				}
 				const file = entry.name
@@ -5543,15 +5725,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// before its encryption was known, or known encrypted, never is (its
 		// audio is restricted and must never become playable).
 		const linkable = this.recordingLinkable(callInfo)
-		// The file is looked up off the event loop (findWavFileAsync): its first attempt runs at
-		// once, then retries while dsd-fme may still be writing; a found file goes out in a
-		// `wavFileUpdate` call_end. This end never carries it.
-		const wavFile: string | undefined = undefined
+		// The file is looked up off the event loop (findWavFileAsync). This end is held (emitOutput,
+		// at most DSD_FME_WAV_END_WAIT_MS) for the lookup's first attempt and carries the file it
+		// finds; retries while dsd-fme may still be writing report it in a `wavFileUpdate`.
 		const awaitingWav = linkable && this.recordingDir() !== null
 		if (callInfo.protocol === "dmr")
 			this.dmrClearance.ending(callInfo.callId, awaitingWav)
-		if (awaitingWav) {
-			this.findWavFileAsync(callInfo, endTime)
+		const logEnd = (hasWavFile: boolean): void => {
+			this.logger.info(
+				{
+					protocol: callInfo.protocol,
+					talkgroup: callInfo.talkgroup,
+					source: callInfo.source,
+					duration,
+					timeout,
+					quality: callInfo.quality,
+					badSignal: callInfo.flags.badSignal,
+					// Presence only: the path is the configured recording dir.
+					hasWavFile,
+				},
+				"Call ended",
+			)
 		}
 
 		// Clear state
@@ -5578,46 +5772,43 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 							},
 			})
 
-		this.logger.info(
-			{
-				protocol: callInfo.protocol,
-				talkgroup: callInfo.talkgroup,
-				source: callInfo.source,
-				duration,
-				timeout,
-				quality: callInfo.quality,
-				badSignal: callInfo.flags.badSignal,
-				// Presence only: the path is the configured recording dir.
-				awaitingWav,
-			},
-			"Call ended",
-		)
-
-		return {
-			timestamp: now,
-			decoder: this.id,
-			type: "call_end",
-			data: {
-				callId: callInfo.callId,
-				startedAt: this.startedAtIso(callInfo),
-				endedAt: this.wallIso(callInfo, endTime),
-				...this.encryptionKnownField(callInfo),
-				...this.clearEvidenceField(callInfo),
-				protocol: callInfo.protocol,
-				talkgroup: callInfo.talkgroup,
-				source: callInfo.source,
-				slot: callInfo.slot,
-				duration,
-				dmr: callInfo.dmr,
-				p25: callInfo.p25,
-				nxdn: callInfo.nxdn,
-				dstar: callInfo.dstar,
-				ysf: callInfo.ysf,
-				quality: callInfo.quality,
-				flags: callInfo.flags,
-				wavFile,
-			},
+		const data = {
+			callId: callInfo.callId,
+			startedAt: this.startedAtIso(callInfo),
+			endedAt: this.wallIso(callInfo, endTime),
+			...this.encryptionKnownField(callInfo),
+			...this.clearEvidenceField(callInfo),
+			protocol: callInfo.protocol,
+			talkgroup: callInfo.talkgroup,
+			source: callInfo.source,
+			slot: callInfo.slot,
+			duration,
+			dmr: callInfo.dmr,
+			p25: callInfo.p25,
+			nxdn: callInfo.nxdn,
+			dstar: callInfo.dstar,
+			ysf: callInfo.ysf,
+			quality: callInfo.quality,
+			flags: callInfo.flags,
+			// Filled by the lookup's first attempt while the end is held (findWavFileAsync).
+			wavFile: undefined as string | undefined,
 		}
+		if (awaitingWav) {
+			const end: WavHeldEnd = {
+				data,
+				settled: false,
+				released: false,
+				deadline: undefined,
+				log: logEnd,
+			}
+			end.deadline = setTimeout(() => {
+				end.deadline = undefined
+				this.settleEnd(end, undefined)
+			}, DSD_FME_WAV_END_WAIT_MS)
+			this.pendingEnds.set(data, end)
+			this.findWavFileAsync(callInfo, endTime, end)
+		} else logEnd(false)
+		return { timestamp: now, decoder: this.id, type: "call_end", data }
 	}
 }
 

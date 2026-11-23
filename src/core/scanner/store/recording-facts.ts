@@ -30,6 +30,7 @@
 import { z } from "zod"
 import type { RecordingFacts } from "@wavekit/api-types"
 import { NoiseQuarantineFactsSchema } from "./noise-quarantine.js"
+import { MAX_OPERATION_METADATA_BYTES } from "./recording-operation.js"
 
 export const RECORDING_FACTS_FILE = "facts.json"
 export const RECORDING_FACTS_TEMP = "facts.tmp"
@@ -129,8 +130,27 @@ export function recordingFactsBytes(input: RecordingFactsInput): Buffer | null {
 		admission: admission.success ? admission.data : null,
 	})
 	if (!parsed.success) return null
-	const bytes = Buffer.from(JSON.stringify(parsed.data))
+	return withinFactsBound(Buffer.from(JSON.stringify(parsed.data)))
+}
+
+/** `bytes` when at most RECORDING_FACTS_MAX_BYTES (exactly at it is within), else null. */
+export function withinFactsBound(bytes: Buffer): Buffer | null {
 	return bytes.length > RECORDING_FACTS_MAX_BYTES ? null : bytes
+}
+
+/**
+ * Whether a sidecar of `factsBytes` may join an operation folder whose intent and receipt take
+ * `metadataBytes`: the sidecar within its own bound and the three within
+ * MAX_OPERATION_METADATA_BYTES (exactly at either bound is within it).
+ */
+export function factsFitFolder(
+	metadataBytes: number,
+	factsBytes: number,
+): boolean {
+	return (
+		factsBytes <= RECORDING_FACTS_MAX_BYTES &&
+		metadataBytes + factsBytes <= MAX_OPERATION_METADATA_BYTES
+	)
 }
 
 /** Parsed sidecar JSON of `operationId`, or null when it is not one (fail closed). */

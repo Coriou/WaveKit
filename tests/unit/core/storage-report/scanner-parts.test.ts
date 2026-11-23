@@ -219,6 +219,7 @@ describe("overBound at and past each bound", () => {
 		bytes: number,
 		files: number,
 		partialReason: "entry-limit" | null = null,
+		boundedFiles: number = files,
 	) {
 		const reporter = createStorageReporter(
 			{ stateDir: "/fake", areas: [source], minFreeBytes: null },
@@ -235,6 +236,7 @@ describe("overBound at and past each bound", () => {
 							id: p,
 							bytes: p === id ? bytes : 0,
 							files: p === id ? files : 0,
+							boundedFiles: p === id ? boundedFiles : 0,
 							exists: p === id,
 						})),
 					},
@@ -259,18 +261,60 @@ describe("overBound at and past each bound", () => {
 		},
 	)
 
-	it("quarantine: exactly maxFiles is within, one file more is over", async () => {
-		expect(await overOf("quarantine", 1, NOISE_QUARANTINE_MAX_FILES)).toBe(
-			false,
-		)
-		expect(await overOf("quarantine", 1, NOISE_QUARANTINE_MAX_FILES + 1)).toBe(
-			true,
-		)
+	it("quarantine: exactly maxFiles entries is within, one entry more is over (the prune's unit)", async () => {
+		// Each entry is a WAV and its JSON sidecar: 2 × maxFiles files at the bound.
+		const max = NOISE_QUARANTINE_MAX_FILES
+		expect(await overOf("quarantine", 1, 2 * max, null, max)).toBe(false)
+		expect(await overOf("quarantine", 1, 2 * max + 2, null, max + 1)).toBe(true)
+		// Raw files past the bound alone are not over: the prune would remove nothing.
+		expect(await overOf("quarantine", 1, max + 1, null, max / 2)).toBe(false)
 	})
 
 	it("unbounded parts and a partial area read null", async () => {
 		expect(await overOf("engine", 10 * MiB, 1)).toBeNull()
 		expect(await overOf("other", 10 * MiB, 1)).toBeNull()
 		expect(await overOf("recordings", 2 * MiB, 1, "entry-limit")).toBeNull()
+	})
+})
+
+describe("the quarantine counts its prune's entries", () => {
+	it("a real walk counts quarantined WAVs, not their sidecars or foreign files", async () => {
+		const root = await mkdtemp(join(tmpdir(), "wk-parts-q-"))
+		dirs.push(root)
+		const day = join(root, "quarantine", "noise", "2026-11-20")
+		await mkdir(day, { recursive: true })
+		const ids = [
+			"0b8c2c7e-1f3a-4b5c-8d9e-0a1b2c3d4e5f",
+			"1c9d3d8f-2a4b-4c6d-9e0f-1b2c3d4e5f60",
+		]
+		for (const id of ids) {
+			await writeFile(join(day, `${id}.wav`), Buffer.alloc(10))
+			await writeFile(join(day, `${id}.json`), "{}")
+		}
+		// A sidecar without its WAV and a foreign file: files, not entries.
+		await writeFile(
+			join(day, "2d0e4e9a-3b5c-4d7e-8f10-2c3d4e5f6071.json"),
+			"{}",
+		)
+		await writeFile(join(day, "notes.wav"), "x")
+		const reporter = createStorageReporter({
+			stateDir: root,
+			areas: [
+				{
+					id: "scanner-evidence",
+					paths: [root],
+					capBytes: null,
+					parts: scannerStorageParts(storage, true),
+				},
+			],
+			minFreeBytes: null,
+		})
+		const area = (await reporter.report()).areas[0]
+		const quarantine = area?.parts?.find(p => p.id === "quarantine")
+		expect(quarantine?.files).toBe(6)
+		expect(quarantine?.boundedFiles).toBe(2)
+		// Every other part counts every file.
+		for (const p of area?.parts ?? [])
+			if (p.id !== "quarantine") expect(p.boundedFiles).toBe(p.files)
 	})
 })

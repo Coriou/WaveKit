@@ -56,7 +56,7 @@ function run(
 	return replayLines(stepAt, options).seen
 }
 
-/** run, with the adapter (to wait for its WAV lookups, whose updates fill `wavFile`). */
+/** run, with the adapter (to wait for its WAV lookups: an end with a file is held for its first one). */
 function replayLines(
 	stepAt: (monoMs: number) => number,
 	options: Record<string, unknown> = {},
@@ -86,14 +86,7 @@ function replayLines(
 			flags?: { wavFileUpdate?: boolean }
 			wavFile?: string
 		}
-		// A late file notice fills its call's end (the end itself never carries it).
-		if (data.flags?.wavFileUpdate) {
-			const end = seen.findLast(
-				e => e.type === "call_end" && e.talkgroup === data.talkgroup,
-			)
-			if (end) end.wavFile = data.wavFile
-			return
-		}
+		if (data.flags?.wavFileUpdate) return
 		seen.push({
 			monoMs: mono,
 			type: o.type,

@@ -1,14 +1,20 @@
 /**
  * dsd-fme per-call WAV lookup off the event loop (findWavFileAsync): async listings only (no
  * sync directory read), one attempt in flight per adapter however many calls end at once, and
- * at most DSD_FME_WAV_LIST_MAX_ENTRIES names examined per listing. Synthetic names only.
+ * at most DSD_FME_WAV_LIST_MAX_ENTRIES names examined per listing, each attempt abandoned after
+ * DSD_FME_WAV_ATTEMPT_TIMEOUT_MS. A call's end waits (in order, at most DSD_FME_WAV_END_WAIT_MS)
+ * for the first attempt and carries the file it finds. Synthetic names only.
  */
 import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import {
+	DSD_FME_HELD_OUTPUTS_MAX,
+	DSD_FME_WAV_ATTEMPT_TIMEOUT_MS,
+	DSD_FME_WAV_END_WAIT_MS,
 	DSD_FME_WAV_LIST_MAX_ENTRIES,
+	DSD_FME_WAV_RETRY_MS,
 	DsdFmeDecoder,
 } from "../../../src/decoders/builtin/dsd-fme.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
@@ -160,5 +166,179 @@ describe("dsd-fme WAV lookup", () => {
 		;(d as unknown as Lookup).findWavFileAsync(callOf(32), START)
 		await settleWavLookups(d)
 		expect(found).toEqual([])
+	})
+
+	it("logs a truncated listing once per directory per adapter", async () => {
+		const names = Array.from(
+			{ length: DSD_FME_WAV_LIST_MAX_ENTRIES + 1 },
+			(_, i) => `other-${i}.wav`,
+		)
+		listing(names)
+		const { d } = decoderWithUpdates()
+		const warn = vi.spyOn(
+			(d as unknown as { logger: { warn(...a: unknown[]): void } }).logger,
+			"warn",
+		)
+		const lookup = d as unknown as Lookup
+		lookup.findWavFileAsync(callOf(33), START)
+		lookup.findWavFileAsync(callOf(34), START)
+		await settleWavLookups(d)
+		const truncated = warn.mock.calls.filter(
+			c => c[1] === "Recording directory listing truncated",
+		)
+		// Three directories searched per attempt, two calls: one line per directory.
+		expect(truncated).toHaveLength(3)
+	})
+})
+
+type EndInternals = {
+	callState: unknown
+	endCall(now: Date, timeout: boolean): DecoderOutput | null
+	emitOutput(o: DecoderOutput): void
+	outbox: unknown[]
+}
+
+/** Ends a D-STAR call through endCall and publishes it as the adapter does. */
+function endThrough(d: DsdFmeDecoder, tg: number): DecoderOutput | null {
+	const internals = d as unknown as EndInternals
+	internals.callState = { ...callOf(tg), announced: true }
+	const ended = internals.endCall(new Date(START.getTime() + 2000), false)
+	if (ended) internals.emitOutput(ended)
+	return ended
+}
+
+/** Every output in publication order, as type:talkgroup[:wav][:update]. */
+function recorder(d: DsdFmeDecoder) {
+	const seen: string[] = []
+	d.on("output", (o: DecoderOutput) => {
+		const data = o.data as {
+			talkgroup?: number
+			wavFile?: string
+			flags?: { wavFileUpdate?: boolean }
+		}
+		seen.push(
+			[
+				o.type,
+				String(data.talkgroup),
+				...(data.wavFile ? [path.basename(data.wavFile)] : []),
+				...(data.flags?.wavFileUpdate ? ["update"] : []),
+			].join(":"),
+		)
+	})
+	return seen
+}
+
+/** opendir that never settles (a stuck directory read). */
+function stuckOpendir() {
+	return vi
+		.spyOn(fs.promises, "opendir")
+		.mockImplementation(() => new Promise<fs.Dir>(() => undefined))
+}
+
+describe("dsd-fme call_end held for its first lookup", () => {
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it("the call_end itself carries a file that exists at its end, with no update", async () => {
+		fs.writeFileSync(path.join(root, fileOf(41)), "")
+		const { d } = decoderWithUpdates()
+		const seen = recorder(d)
+		endThrough(d, 41)
+		// Held: nothing is published before the first attempt.
+		expect(seen).toEqual([])
+		await settleWavLookups(d)
+		expect(seen).toEqual([`call_end:41:${fileOf(41)}`])
+	})
+
+	it("a later call's events never overtake an earlier held end", async () => {
+		fs.writeFileSync(path.join(root, fileOf(42)), "")
+		const { d } = decoderWithUpdates()
+		const seen = recorder(d)
+		const internals = d as unknown as EndInternals
+		endThrough(d, 42)
+		internals.emitOutput({
+			timestamp: START,
+			decoder: "dsd-fme",
+			type: "call_start",
+			data: { callId: "next", talkgroup: 43, flags: {} },
+		})
+		const voice: string[] = []
+		d.on("voice-call", (v: { callId: string; active: boolean }) =>
+			voice.push(`${v.callId}:${v.active}`),
+		)
+		expect(seen).toEqual([])
+		await settleWavLookups(d)
+		expect(seen).toEqual([`call_end:42:${fileOf(42)}`, "call_start:43"])
+		// The voice-call halves follow the same order.
+		expect(voice).toEqual(["c42:false", "next:true"])
+	})
+
+	it("a stuck read releases the end without its file at DSD_FME_WAV_END_WAIT_MS, not before", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		stuckOpendir()
+		const { d } = decoderWithUpdates()
+		const seen = recorder(d)
+		endThrough(d, 44)
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_END_WAIT_MS - 1)
+		expect(seen).toEqual([])
+		await vi.advanceTimersByTimeAsync(1)
+		expect(seen).toEqual(["call_end:44"])
+	})
+
+	it("a stuck read is abandoned at DSD_FME_WAV_ATTEMPT_TIMEOUT_MS so the chain moves on, not before", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const opendir = stuckOpendir()
+		const { d, found } = decoderWithUpdates()
+		endThrough(d, 45)
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS - 1)
+		// Only the first directory's read started, and it never settles.
+		expect(opendir).toHaveBeenCalledTimes(1)
+		await vi.advanceTimersByTimeAsync(1)
+		// Abandoned: the retry is scheduled and reads again.
+		opendir.mockRestore()
+		fs.writeFileSync(path.join(root, fileOf(45)), "")
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS)
+		await settleWavLookups(d)
+		// The end went out at its deadline; the retry's find is an update.
+		expect(found).toEqual([fileOf(45)])
+	})
+
+	it("holds DSD_FME_HELD_OUTPUTS_MAX outputs behind a waiting end, and releases it one past", () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		stuckOpendir()
+		const { d } = decoderWithUpdates()
+		const seen = recorder(d)
+		const internals = d as unknown as EndInternals
+		endThrough(d, 46)
+		const other = (i: number): DecoderOutput => ({
+			timestamp: START,
+			decoder: "dsd-fme",
+			type: "message",
+			data: { i },
+		})
+		// The end plus MAX - 1 others: exactly the bound.
+		for (let i = 0; i < DSD_FME_HELD_OUTPUTS_MAX - 1; i++)
+			internals.emitOutput(other(i))
+		expect(internals.outbox).toHaveLength(DSD_FME_HELD_OUTPUTS_MAX)
+		expect(seen).toEqual([])
+		internals.emitOutput(other(DSD_FME_HELD_OUTPUTS_MAX))
+		expect(internals.outbox).toHaveLength(0)
+		expect(seen[0]).toBe("call_end:46")
+		expect(seen).toHaveLength(DSD_FME_HELD_OUTPUTS_MAX + 1)
+	})
+
+	it("stop publishes the ends it produces, with their files, before it returns", async () => {
+		fs.writeFileSync(path.join(root, fileOf(47)), "")
+		const { d } = decoderWithUpdates()
+		const seen = recorder(d)
+		;(d as unknown as EndInternals).callState = {
+			...callOf(47),
+			announced: true,
+		}
+		await d.stop()
+		expect(seen).toEqual([
+			expect.stringMatching(new RegExp(`^call_end:47:${fileOf(47)}`)),
+		])
 	})
 })

@@ -213,18 +213,21 @@ export function createStorageReporter(
 			const found = scan?.parts?.[i]
 			const bytes = found?.bytes ?? 0
 			const files = found?.files ?? 0
+			// maxFiles counts in its prune's unit (StorageAreaPartSource.boundedFile).
+			const boundedFiles = found?.boundedFiles ?? files
 			const { maxBytes, maxFiles } = p.bounds
 			return {
 				id: p.id,
 				bytes,
 				files,
 				exists: found?.exists ?? false,
+				boundedFiles,
 				bounds: { ...p.bounds },
 				overBound:
 					partial || (maxBytes === null && maxFiles === null)
 						? null
 						: (maxBytes !== null && bytes > maxBytes) ||
-							(maxFiles !== null && files > maxFiles),
+							(maxFiles !== null && boundedFiles > maxFiles),
 			}
 		})
 	}

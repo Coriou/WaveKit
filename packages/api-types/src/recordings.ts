@@ -30,7 +30,10 @@ export const RECORDINGS_SCAN_MAX_FILES = 2000
 /**
  * Recordings catalogue bound: at most this many files are indexed and listed, newest
  * modification time first. Past it the oldest are left out (`truncated`, `truncatedBefore`).
- * About 600 bytes of memory per entry: 50 000 entries ≈ 30 MB.
+ * About 600 bytes of memory per entry: 50 000 entries ≈ 30 MB. A scanner analog entry with a
+ * facts sidecar (`facts`) also holds its parsed facts: about 710 bytes more (measured: 20 000
+ * distinct parsed sidecars of 646 JSON bytes took 712 B of heap each), so 1 310 B per entry and
+ * at most 50 000 × 1 310 B ≈ 66 MB when every entry is a kept analog file with facts.
  */
 export const RECORDINGS_CATALOGUE_MAX = 50_000
 /** Recording folders the catalogue enters (newest directory change first); past it, `truncated`. */

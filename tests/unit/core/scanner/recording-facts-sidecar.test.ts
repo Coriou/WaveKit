@@ -31,13 +31,28 @@ import {
 	RECORDING_FACTS_FILE,
 	RECORDING_FACTS_MAX_BYTES,
 	RecordingFactsSchema,
+	factsFitFolder,
 	recordingFactsBytes,
 	recordingFactsOf,
+	withinFactsBound,
 	type RecordingFactsInput,
 } from "../../../../src/core/scanner/store/recording-facts.js"
-import type { RecordingBinding } from "../../../../src/core/scanner/store/recording-operation.js"
+import {
+	MAX_OPERATION_METADATA_BYTES,
+	type RecordingBinding,
+} from "../../../../src/core/scanner/store/recording-operation.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
+import type { AnalogHandle } from "../../../../src/core/scanner/store/analog-operations.js"
+import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
+import {
+	LOW,
+	LOW_FS,
+	LOW_OFFSET,
+	harness as recorderHarness,
+	input as trackInput,
+	snapshot,
+} from "./wideband-recorder-harness.js"
 
 const logger = createLogger({ level: "fatal" })
 const NOW = Date.UTC(2026, 10, 22, 12, 0, 0)
@@ -380,5 +395,118 @@ describe("recordingFactsBytes bounds", () => {
 		) as { startedAt: unknown; endedAt: unknown }
 		expect(parsed.startedAt).toBeNull()
 		expect(parsed.endedAt).toBeNull()
+	})
+})
+
+describe("kept analog file: the recorder's own finish writes its admission numbers", () => {
+	// The real WidebandAnalogRecorder over a modelled syllabic voice (no digital evidence: kept by
+	// its finish path, as wideband-analog-recorder-admission.test.ts): its finish facts go to a real
+	// EvidenceStore operation, whose sidecar must carry the admission numbers it measured.
+	it("a kept voice's sidecar carries the finish path's admission numbers", async () => {
+		const h = await harness()
+		const given: unknown[] = []
+		let real: ReturnType<EvidenceStore["beginAnalog"]> | null = null
+		const analogFm: VoicePrior = {
+			labels: [],
+			class: "analog-fm",
+			analogVoice: () => false,
+		}
+		const r = recorderHarness({
+			fs: LOW_FS,
+			offset: LOW_OFFSET,
+			source: { ctcssHz: null, syllables: true },
+			decodedLabel: () => null,
+			voicePrior: () => analogFm,
+			beginWrap: begin => recorderInput => {
+				const fake = begin(recorderInput)
+				const op = h.evidence.beginAnalog({
+					discoveryId: h.discoveryId,
+					observationId: "o1",
+					binding: h.binding,
+				})
+				real = op
+				const fakeFinish = fake.finish.bind(fake)
+				const finish: AnalogHandle["finish"] = async (cut, facts) => {
+					given.push(facts)
+					await op.ready
+					await op.push(new Int16Array(8000).fill(900))
+					await op.finish(cut, facts)
+					return fakeFinish(cut, facts)
+				}
+				return Object.assign(fake, { finish })
+			},
+		})
+		await r.feed(1, false)
+		const onset = r.engine.liveEdge()
+		const end = onset + 6 * r.fs
+		const chunk = r.fs / 40
+		for (let i = 0; i < 6 * 40; i++) {
+			r.engine.write(r.src.next(chunk, true))
+			const edge = r.engine.liveEdge()
+			if (edge - onset >= 0.1 * r.fs)
+				r.rec.track(
+					trackInput("o", snapshot("o", onset, Math.min(edge, end), LOW)),
+				)
+			await r.pump()
+		}
+		await r.feed(0.6, false)
+		r.rec.closed("o", snapshot("o", onset, end, LOW), null, {
+			analogFm: true,
+			discoveryId: "d_1",
+		})
+		await r.feed(3.5, false)
+		await r.rec.idle()
+		expect(r.ops.map(o => o.outcome)).toEqual(["finalized"])
+		// The recorder gave measured numbers, and the real store wrote them beside the receipt.
+		expect(given).toHaveLength(1)
+		const facts = given[0] as { admission?: NoiseQuarantineFacts }
+		expect(facts.admission).toMatchObject({
+			strength: "none",
+			frequencyHz: expect.any(Number) as number,
+			p10Dbfs: expect.any(Number) as number,
+			spreadDb: expect.any(Number) as number,
+		})
+		const op = real as ReturnType<EvidenceStore["beginAnalog"]> | null
+		expect(op).not.toBeNull()
+		const stored = RecordingFactsSchema.parse(
+			JSON.parse(await readFile(factsPath(h, op!.operationId), "utf8")),
+		)
+		expect(stored.admission).toEqual(facts.admission)
+	}, 120_000)
+})
+
+describe("facts sidecar bounds, at and one past", () => {
+	it("the writer keeps exactly RECORDING_FACTS_MAX_BYTES and refuses one byte more", () => {
+		const at = Buffer.alloc(RECORDING_FACTS_MAX_BYTES)
+		expect(withinFactsBound(at)).toBe(at)
+		expect(
+			withinFactsBound(Buffer.alloc(RECORDING_FACTS_MAX_BYTES + 1)),
+		).toBeNull()
+	})
+
+	it("a sidecar joins its folder exactly at MAX_OPERATION_METADATA_BYTES, not one byte past", () => {
+		const metadata = MAX_OPERATION_METADATA_BYTES - 1_000
+		expect(factsFitFolder(metadata, 1_000)).toBe(true)
+		expect(factsFitFolder(metadata, 1_001)).toBe(false)
+		// The sidecar's own bound holds even in an empty folder.
+		expect(factsFitFolder(0, RECORDING_FACTS_MAX_BYTES)).toBe(true)
+		expect(factsFitFolder(0, RECORDING_FACTS_MAX_BYTES + 1)).toBe(false)
+	})
+
+	it.each([
+		[RECORDING_FACTS_MAX_BYTES, true],
+		[RECORDING_FACTS_MAX_BYTES + 1, false],
+	])("the reader takes a valid sidecar of %i bytes: %s", async (size, read) => {
+		const h = await harness()
+		const { op } = await keptOp(h)
+		const file = factsPath(h, op.operationId)
+		const json = (await readFile(file, "utf8")).trimEnd()
+		// Valid JSON padded with trailing spaces to exactly `size` bytes.
+		await writeFile(file, json + " ".repeat(size - Buffer.byteLength(json)))
+		expect((await lstat(file)).size).toBe(size)
+		const page = await h.inventory.list({ limit: "200" })
+		expect(page.items).toHaveLength(1)
+		if (read) expect(page.items[0]?.facts).toMatchObject({ version: 1 })
+		else expect(page.items[0]?.facts).toBeNull()
 	})
 })

@@ -296,7 +296,7 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 		expect(JSON.stringify(logs)).not.toContain("SECRET-")
 	})
 
-	it("a completed recorded call logs awaitingWav, not the recording path", async () => {
+	it("a completed recorded call logs hasWavFile, not the recording path", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "wg7-hwfix-"))
 		const dir = fs.mkdtempSync(path.join(root, "SECRET-recordings-"))
 		try {
@@ -317,10 +317,6 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 				logger,
 			) as unknown as {
 				callState: unknown
-				on(
-					event: "output",
-					fn: (o: { data: { wavFile?: string } }) => void,
-				): void
 				endCall(
 					now: Date,
 					timeout: boolean,
@@ -342,18 +338,13 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 				encryptionKnown: true,
 				clearEvidence: true,
 			}
-			const found: string[] = []
-			d.on("output", o => {
-				if (o.data.wavFile !== undefined) found.push(o.data.wavFile)
-			})
 			const ended = d.endCall(new Date(start.getTime() + 5000), false)
-			// The file is looked up off the event loop; its update carries it.
-			expect(ended?.data.wavFile).toBeUndefined()
+			// The lookup's first attempt runs off the event loop and fills the end.
 			await settleWavLookups(d)
-			expect(found).toEqual([expect.stringContaining(dir)])
+			expect(ended?.data.wavFile).toContain(dir)
 			expect(JSON.stringify(logs)).not.toContain("SECRET-recordings")
 			expect(logs).toContainEqual(
-				expect.objectContaining({ msg: "Call ended", awaitingWav: true }),
+				expect.objectContaining({ msg: "Call ended", hasWavFile: true }),
 			)
 		} finally {
 			fs.rmSync(root, { recursive: true })

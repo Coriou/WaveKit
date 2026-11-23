@@ -4420,6 +4420,9 @@ export class WidebandAnalogRecorder {
 						? path.speechHeard
 						: speechReadings(speech).speechHeard,
 					...(startedAt === null ? {} : { startedAt }),
+					...(path !== null && speech !== null
+						? { admission: noiseFacts(path, speech, s) }
+						: {}),
 				})
 				.catch(() => undefined)
 		}

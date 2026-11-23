@@ -58,6 +58,8 @@ export interface StoragePartScan {
 	id: StorageScannerPartId
 	bytes: number
 	files: number
+	/** Files its source's `boundedFile` matches (all of `files` without one). */
+	boundedFiles?: number
 	exists: boolean
 }
 
@@ -226,6 +228,7 @@ export async function scanStorageAreas(
 				id: p.id,
 				bytes: 0,
 				files: 0,
+				boundedFiles: 0,
 				exists: false,
 			}))
 			split.parts.forEach((p, i) => {
@@ -234,6 +237,10 @@ export async function scanStorageAreas(
 			})
 		}
 		const fallback = split?.parts.length ?? 0
+		const boundedFile =
+			split === undefined
+				? []
+				: [...split.parts, split.fallback].map(p => p.boundedFile)
 		results.push(scan)
 		const mark = (reason: StoragePartialReason): void => {
 			if (frozen !== null) return
@@ -271,8 +278,8 @@ export async function scanStorageAreas(
 			if (lateCheck() || frozen !== null) return
 			if (item.root) scan.exists = true
 			// A root's own files count in the fallback part.
-			const part =
-				scan.parts?.[item.part ?? (item.root ? fallback : -1)] ?? undefined
+			const index = item.part ?? (item.root ? fallback : -1)
+			const part = scan.parts?.[index] ?? undefined
 			if (part !== undefined && item.depth === 1) part.exists = true
 			if (stat.isFile() || stat.isSymbolicLink()) {
 				scan.bytes += stat.size
@@ -280,6 +287,12 @@ export async function scanStorageAreas(
 				if (part !== undefined) {
 					part.bytes += stat.size
 					part.files++
+					const unit = boundedFile[index]
+					if (
+						unit === undefined ||
+						(stat.isFile() && unit.test(path.basename(item.path)))
+					)
+						part.boundedFiles = (part.boundedFiles ?? 0) + 1
 				}
 				return
 			}

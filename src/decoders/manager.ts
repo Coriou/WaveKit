@@ -4933,7 +4933,8 @@ export class DecoderManager extends EventEmitter {
 			const history = status.rateHistory
 			// Rate buckets are wall minutes on every adapter: equal lengths align.
 			if (history !== undefined) {
-				if (rateHistory === undefined) rateHistory = [...history]
+				// The first worker's buckets are sanitised like every sum's (finiteCount).
+				if (rateHistory === undefined) rateHistory = history.map(finiteCount)
 				else if (rateHistory.length === history.length)
 					rateHistory = rateHistory.map((n, i) => n + finiteCount(history[i]))
 			}

@@ -92,16 +92,8 @@ describe("dsd-fme P25 recording link", () => {
 				encryptionKnown: true,
 				// The stored row's own proof of the clear print (callTrustAdmits needs it).
 				clearEvidence: true,
+				wavFile: expect.stringContaining(root),
 			})
-			// The file goes out in the lookup's update, with the same trust.
-			expect(clear.filter(e => e.wavFile !== undefined)).toEqual([
-				expect.objectContaining({
-					encryptionKnown: true,
-					clearEvidence: true,
-					flags: expect.objectContaining({ wavFileUpdate: true }),
-					wavFile: expect.stringContaining(root),
-				}),
-			])
 		} finally {
 			fs.rmSync(root, { recursive: true })
 		}

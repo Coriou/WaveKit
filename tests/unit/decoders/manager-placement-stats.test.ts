@@ -91,6 +91,30 @@ describe("placement-visible decoder stats", () => {
 		)
 	})
 
+	it("a parent without its own rate history takes the first worker's buckets sanitised", async () => {
+		const { manager } = await placed()
+		const parent = f!.decoders.get(VOICE)!
+		const parentBase = parent.getStatus.bind(parent)
+		parent.getStatus = (): DecoderStatus => {
+			const { rateHistory: _none, ...rest } = parentBase()
+			return rest
+		}
+		const workers = [...f!.decoders.entries()].filter(([id]) =>
+			id.startsWith(`${VOICE}#`),
+		)
+		// The first worker reports malformed buckets; the others none.
+		workers.forEach(([, decoder], i) => {
+			const base = decoder.getStatus.bind(decoder)
+			decoder.getStatus = (): DecoderStatus => {
+				const { rateHistory: _drop, ...rest } = base()
+				return i === 0
+					? { ...rest, rateHistory: [Number.NaN, -1, Infinity, 3] }
+					: rest
+			}
+		})
+		expect(manager.getStatus(VOICE)?.rateHistory).toEqual([0, 0, 0, 3])
+	})
+
 	it("an idle parent reads running while a running worker is producing; idle once none is", async () => {
 		const { manager } = await placed()
 		const states = (

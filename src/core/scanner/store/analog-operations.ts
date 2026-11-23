@@ -49,8 +49,8 @@ import {
 } from "./recording-operation.js"
 import {
 	RECORDING_FACTS_FILE,
-	RECORDING_FACTS_MAX_BYTES,
 	RECORDING_FACTS_TEMP,
+	factsFitFolder,
 	recordingFactsBytes,
 } from "./recording-facts.js"
 
@@ -1705,11 +1705,7 @@ export class AnalogOperations {
 			if (bytes === null) return
 			const metadata =
 				boundedJson(op.intent).length + boundedJson(receipt).length
-			if (
-				bytes.length > RECORDING_FACTS_MAX_BYTES ||
-				metadata + bytes.length > MAX_OPERATION_METADATA_BYTES
-			)
-				return
+			if (!factsFitFolder(metadata, bytes.length)) return
 			await this.writeSynced(temp, bytes)
 			const target = join(dir, RECORDING_FACTS_FILE)
 			await this.safeTarget(target)

@@ -33,6 +33,12 @@ import type { StorageAreaSource } from "./contract.js"
 
 const MiB = 1024 * 1024
 const DAY_MS = 86_400_000
+/**
+ * A quarantined WAV (noise-quarantine.ts WAV_NAME: `<operation id>.wav`), the unit its prune
+ * counts against NOISE_QUARANTINE_MAX_FILES; its `.json` sidecar rides with it, uncounted.
+ */
+const QUARANTINE_ENTRY_FILE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.wav$/
 
 /**
  * Scanner storage folders the store writes with literal names: `recordings/` and `evidence/`
@@ -103,6 +109,8 @@ export function scannerStorageParts(
 			{
 				id: "quarantine",
 				names: [QUARANTINE_ROOT_DIR],
+				// noise-quarantine.ts prune counts entries: a WAV (its WAV_NAME) with its JSON sidecar.
+				boundedFile: QUARANTINE_ENTRY_FILE,
 				bounds: on({
 					maxBytes: NOISE_QUARANTINE_MAX_BYTES,
 					maxAgeMs: NOISE_QUARANTINE_MAX_AGE_MS,

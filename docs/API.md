@@ -6808,22 +6808,24 @@ files; symlinks are counted, not followed), `files`, `exists`, `partial`,
 `partialReason`, `cap` (`{ bytes }` or null when WaveKit does not cap it) and
 `retention`. `scanner-evidence` also has `parts` (since 2026-11-23): the same bytes
 and files split by the scanner storage folder that holds them, in this order, each
-`{ id, bytes, files, exists, bounds: { maxBytes, maxAgeMs, maxFiles }, overBound }`:
+`{ id, bytes, files, exists, boundedFiles, bounds: { maxBytes, maxAgeMs, maxFiles }, overBound }`
+(`boundedFiles` is what `maxFiles` counts, in its prune's unit: the quarantine's WAVs,
+each of which has a JSON sidecar beside it; every other part's `files`):
 
-| `id`         | Folders                                                        | `bounds`                                                          |
-| ------------ | -------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `recordings` | `recordings/` and `.analog-operations/` (analog file metadata) | `maxRecordingsMb` MiB, `maxAgeDays` days                          |
-| `quarantine` | `quarantine/` (reversible noise discards)                      | 500 MiB, 7 days, 20,000 files (the noise quarantine's own bounds) |
-| `journal`    | `journal/` (observation journal)                               | `maxJournalMb` MiB, `maxAgeDays` days                             |
-| `captures`   | `captures/` (burst IQ captures)                                | `maxCapturesMb` MiB                                               |
-| `evidence`   | `evidence/` (per-discovery spectra and IQ snippets)            | `maxEvidenceMb` MiB, `maxAgeDays` days                            |
-| `engine`     | `engine/` (learned receiver state)                             | none                                                              |
-| `other`      | Everything else: state files at the root and any other folder  | none                                                              |
+| `id`         | Folders                                                        | `bounds`                                                         |
+| ------------ | -------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `recordings` | `recordings/` and `.analog-operations/` (analog file metadata) | `maxRecordingsMb` MiB, `maxAgeDays` days                         |
+| `quarantine` | `quarantine/` (reversible noise discards)                      | 500 MiB, 7 days, 20,000 WAVs (the noise quarantine's own bounds) |
+| `journal`    | `journal/` (observation journal)                               | `maxJournalMb` MiB, `maxAgeDays` days                            |
+| `captures`   | `captures/` (burst IQ captures)                                | `maxCapturesMb` MiB                                              |
+| `evidence`   | `evidence/` (per-discovery spectra and IQ snippets)            | `maxEvidenceMb` MiB, `maxAgeDays` days                           |
+| `engine`     | `engine/` (learned receiver state)                             | none                                                             |
+| `other`      | Everything else: state files at the root and any other folder  | none                                                             |
 
 The settings are `scanner.storage.*`; a bound is null when nothing applies it, and
 every bound is null while the scanner is not running. The parts' sums equal the
 area's (pre-migration backups stay excluded from both). `overBound` is true when
-`bytes` > `maxBytes` or `files` > `maxFiles` (exactly at a bound is within it),
+`bytes` > `maxBytes` or `boundedFiles` > `maxFiles` (exactly at a bound is within it),
 null when neither is set or the area is `partial` (its totals are then lower
 bounds). The area `cap` stays `maxRecordingsMb`: the recordings part's bound, not
 a bound of the whole folder. `retention` is set on `activity` only (null elsewhere, and null when

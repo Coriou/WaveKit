@@ -413,18 +413,23 @@ function scannerParts(): StorageAreaPart[] {
 		bytes: number,
 		files: number,
 		bounds: StorageAreaPart["bounds"],
-	): StorageAreaPart => ({
-		id,
-		bytes,
-		files,
-		exists: true,
-		bounds,
-		overBound:
-			bounds.maxBytes === null && bounds.maxFiles === null
-				? null
-				: (bounds.maxBytes !== null && bytes > bounds.maxBytes) ||
-					(bounds.maxFiles !== null && files > bounds.maxFiles),
-	})
+	): StorageAreaPart => {
+		// The quarantine counts its entries (a WAV and its JSON sidecar), the others every file.
+		const boundedFiles = id === "quarantine" ? Math.ceil(files / 2) : files
+		return {
+			id,
+			bytes,
+			files,
+			exists: true,
+			boundedFiles,
+			bounds,
+			overBound:
+				bounds.maxBytes === null && bounds.maxFiles === null
+					? null
+					: (bounds.maxBytes !== null && bytes > bounds.maxBytes) ||
+						(bounds.maxFiles !== null && boundedFiles > bounds.maxFiles),
+		}
+	}
 	return [
 		part("recordings", 300 * MIB, 980, {
 			maxBytes: 512 * MIB,

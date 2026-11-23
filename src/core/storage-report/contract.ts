@@ -39,6 +39,11 @@ export interface StorageAreaPartSource {
 	/** Direct children of the area's root counted in this part (unused for the fallback). */
 	names: readonly string[]
 	bounds: StoragePartBounds
+	/**
+	 * The files `bounds.maxFiles` counts (by base name, regular files only): the prune's own unit.
+	 * Absent: every file of the part.
+	 */
+	boundedFile?: RegExp
 }
 
 export interface StorageReportOptions {

@@ -141,6 +141,7 @@ export interface StoragePartBounds {
 	maxBytes: number | null
 	/** Files older than this are removed. */
 	maxAgeMs: number | null
+	/** Counted in the prune's own unit (StorageAreaPart.boundedFiles), not in raw files. */
 	maxFiles: number | null
 }
 
@@ -150,10 +151,16 @@ export interface StorageAreaPart {
 	files: number
 	/** The part's folder exists (`other`: anything outside the named folders was found). */
 	exists: boolean
+	/**
+	 * The files counted against `bounds.maxFiles`, in the unit its prune counts: for `quarantine`
+	 * its quarantined WAVs (each entry is a WAV and its JSON sidecar, so about half of `files`);
+	 * equal to `files` for every other part. Absent from older cores.
+	 */
+	boundedFiles?: number
 	bounds: StoragePartBounds
 	/**
-	 * bytes > maxBytes or files > maxFiles (exactly at a bound is within it). Null when neither
-	 * bound is set or the area is partial (its totals are lower bounds).
+	 * bytes > maxBytes or boundedFiles > maxFiles (exactly at a bound is within it). Null when
+	 * neither bound is set or the area is partial (its totals are lower bounds).
 	 */
 	overBound: boolean | null
 }

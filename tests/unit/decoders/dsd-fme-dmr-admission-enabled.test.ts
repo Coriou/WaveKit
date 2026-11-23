@@ -89,10 +89,11 @@ describe("dsd-fme recording admission (DMR recordings on)", () => {
 		at(base + 420, M("VC*"))
 		vi.setSystemTime(T0 + base + 5000)
 		adapter.checkCallTimeoutAsync()
-		if (!fileFirst) fs.writeFileSync(path.join(root, FILE), "")
-		// The lookup runs off the event loop: each attempt's read, then the next retry's timer.
+		// The lookup runs off the event loop: each attempt's read, then the next retry's timer. A
+		// file written only after the first attempt (the end's own) is found by a retry.
 		for (let i = 0; i <= DSD_FME_WAV_RETRIES; i++) {
 			await settleWavLookups(d)
+			if (!fileFirst && i === 0) fs.writeFileSync(path.join(root, FILE), "")
 			await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS)
 		}
 		await settleWavLookups(d)
@@ -101,11 +102,10 @@ describe("dsd-fme recording admission (DMR recordings on)", () => {
 
 	const linked = (ends: Ended[]) => ends.filter(e => e.wavFile !== undefined)
 
-	it("a clear DMR call is linked, when its file exists at its end and when it is found later", async () => {
+	it("a clear DMR call is linked, at its end and when its file is found later", async () => {
 		const now = await call(false, true)
 		expect(now.some(e => e.encryptionKnown === true)).toBe(true)
-		// The end never carries the file: the lookup's update (its first attempt) links it.
-		expect(linked(now).map(e => e.flags?.wavFileUpdate)).toEqual([true])
+		expect(linked(now).map(e => e.flags?.wavFileUpdate)).toEqual([undefined])
 		expect(linked(now)[0]?.wavFile).toEqual(expect.stringContaining(FILE))
 		fs.rmSync(path.join(root, FILE))
 		const later = await call(false, false)
