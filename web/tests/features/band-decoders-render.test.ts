@@ -6,7 +6,10 @@ import type { DecoderInfo } from "@wavekit/api-types"
 import { ServicesContext } from "../../src/app/context.ts"
 import { createServices, type AppServices } from "../../src/app/services.ts"
 import { BandDecoders } from "../../src/features/tuned/BandDecoders.tsx"
-import type { SummaryItem } from "../../src/features/tuned/band-table.ts"
+import {
+	parseSummary,
+	type SummaryItem,
+} from "../../src/features/tuned/band-table.ts"
 import { DecoderVerdictsFeed } from "../../src/features/tuned/verdicts.ts"
 
 const HZ = 1_090_000_000
@@ -189,5 +192,42 @@ describe("On this band table semantics", () => {
 				[decoder({ id: "readsb" })],
 			),
 		).toBe("")
+	})
+
+	it("a decoder decoding only through its placements shows their last decode, not Never", () => {
+		// GET /api/decoders/summary for a parent with no output of its own: the core's top-level
+		// lastOutputAt is its newest placement worker's (DecoderManager placementLastOutput).
+		const at = "2026-10-17T11:59:22.000Z"
+		const items = parseSummary([
+			{
+				id: "dsd-fme",
+				name: "Digital voice",
+				protocol: "dsd-fme",
+				state: "running",
+				placements: [{ sourceId: "rtl-0", frequencyHz: HZ }],
+				eventsOut: 4,
+				lastOutputAt: at,
+				health: "idle",
+				verdict: {
+					code: "listening",
+					text: "Digital voice listening",
+					actions: [],
+				},
+				coversHz: true,
+			},
+		])
+		expect(items).not.toBeNull()
+		const html = render(items!, [
+			decoder({
+				id: "dsd-fme",
+				type: "dsd-fme",
+				health: "idle",
+				lastOutputAt: at,
+				stats: { bytesIn: 0, eventsOut: 4, errors: 0 },
+			}),
+		])
+		expect(html).toContain(`dateTime="${at}"`)
+		expect(html).toContain("38 s ago")
+		expect(html).not.toContain("Never")
 	})
 })

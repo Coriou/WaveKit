@@ -9,6 +9,7 @@
 import Fastify from "fastify"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { WebSocket } from "ws"
+import { decoderSummaryRoutes } from "../../../src/api/routes/decoder-summary.js"
 import { decoderRoutes } from "../../../src/api/routes/decoders.js"
 import {
 	healthRoutes,
@@ -134,13 +135,18 @@ describe("placement-visible decoder stats", () => {
 		expect(manager.getStatus(VOICE)?.rateHistory).toEqual([0, 0, 0, 3])
 	})
 
-	it("an idle parent reads running while a running worker is producing; idle once none is", async () => {
+	it("an idle parent reads running while a running worker produced within the idle timeout; idle once none did", async () => {
 		const { manager } = await placed()
 		const states = (
 			manager as unknown as {
 				decoders: Map<
 					string,
-					{ lastHealth: string; parentId?: string; config: { id: string } }
+					{
+						lastHealth: string
+						lastOutputAt: Date | null
+						parentId?: string
+						config: { id: string }
+					}
 				>
 			}
 		).decoders
@@ -148,9 +154,14 @@ describe("placement-visible decoder stats", () => {
 		const workers = [...states.values()].filter(s => s.parentId === VOICE)
 		parent.lastHealth = "idle"
 		for (const w of workers) w.lastHealth = "idle"
+		// The scripted adapter stamps (AT) are days old: none produced lately.
 		expect(manager.getStatus(VOICE)?.health).toBe("idle")
-		workers[0]!.lastHealth = "running"
+		workers[0]!.lastOutputAt = new Date()
 		expect(manager.getStatus(VOICE)?.health).toBe("running")
+		// Older than the idle timeout (30 s by default): idle again.
+		workers[0]!.lastOutputAt = new Date(Date.now() - 30_001)
+		expect(manager.getStatus(VOICE)?.health).toBe("idle")
+		workers[0]!.lastOutputAt = new Date()
 		// A faulted parent keeps its own health whatever its workers do.
 		parent.lastHealth = "faulted"
 		expect(manager.getStatus(VOICE)?.health).toBe("faulted")
@@ -264,5 +275,112 @@ describe("placement-visible decoder stats", () => {
 		expect(
 			(message.data.placements ?? []).filter(p => (p.eventsOut ?? 0) > 0),
 		).toHaveLength(count)
+	})
+
+	describe("a parent without output of its own, a placement worker decoding", () => {
+		/** The parent idle, its workers' real outputs forwarded by the manager (fake adapters never stamp). */
+		async function decoding() {
+			f = passCostManager()
+			await f.manager.startAll()
+			await f.advance(5_000)
+			const states = (
+				f.manager as unknown as {
+					decoders: Map<string, { lastHealth: string; parentId?: string }>
+				}
+			).decoders
+			states.get(VOICE)!.lastHealth = "idle"
+			const [workerId, worker] = [...f.decoders.entries()].find(([id]) =>
+				id.startsWith(`${VOICE}#`),
+			)!
+			const changed: string[] = []
+			f.manager.on("decoder:status-changed", (id: string) => changed.push(id))
+			return { manager: f.manager, workerId, worker, changed }
+		}
+
+		/** The parent's top-level lastOutputAt and health through every serializer. */
+		async function serialized(
+			manager: ReturnType<typeof passCostManager>["manager"],
+		) {
+			const app = Fastify({ logger: false })
+			await app.register(decoderRoutes, { decoderManager: manager })
+			await app.register(decoderSummaryRoutes, { decoderManager: manager })
+			await app.register(healthRoutes, {
+				sourceManager: { getAllStatus: () => [] },
+				decoderManager: manager,
+				audioOutput: { getPort: () => 0, getConnectedClients: () => 0 },
+			} as unknown as HealthRoutesOptions)
+			type Item = { id: string; lastOutputAt?: string | null; health: string }
+			try {
+				const decoders = (
+					await app.inject({ method: "GET", url: "/api/decoders" })
+				).json<Item[]>()
+				const status = (
+					await app.inject({ method: "GET", url: "/api/status" })
+				).json<{ decoders: Item[] }>()
+				const summary = (
+					await app.inject({ method: "GET", url: "/api/decoders/summary" })
+				).json<Item[]>()
+				const ws = toApiDecoderInfo(manager.getStatus(VOICE)!)
+				const pick = (items: Item[]) => {
+					const item = items.find(d => d.id === VOICE)
+					return {
+						lastOutputAt: item?.lastOutputAt ?? null,
+						health: item?.health,
+					}
+				}
+				return {
+					decoders: pick(decoders),
+					status: pick(status.decoders),
+					summary: pick(summary),
+					ws: { lastOutputAt: ws.lastOutputAt ?? null, health: ws.health },
+				}
+			} finally {
+				await app.close()
+			}
+		}
+
+		it("reads the placement's latest output and running, then idle after the idle timeout", async () => {
+			const { manager, workerId, worker, changed } = await decoding()
+			expect(manager.getStatus(VOICE)?.lastOutputAt).toBeUndefined()
+			expect(manager.getStatus(VOICE)?.health).toBe("idle")
+
+			worker.emit("output", {
+				timestamp: new Date(),
+				decoder: workerId,
+				type: "call",
+				data: {},
+			})
+			const at = new Date().toISOString()
+			expect(manager.getStatus(VOICE)?.lastOutputAt?.toISOString()).toBe(at)
+			expect(manager.getStatus(VOICE)?.health).toBe("running")
+			const live = await serialized(manager)
+			expect(live.decoders).toEqual({ lastOutputAt: at, health: "running" })
+			expect(live.status).toEqual({ lastOutputAt: at, health: "running" })
+			expect(live.ws).toEqual({ lastOutputAt: at, health: "running" })
+			// The summary the web's tuned card reads ("Last decode"); its own words for health.
+			expect(live.summary).toEqual({ lastOutputAt: at, health: "decoding" })
+
+			// Still within the idle timeout (30 s).
+			await f!.advance(25_000)
+			expect(manager.getStatus(VOICE)?.health).toBe("running")
+
+			// The health check idles the worker past the timeout; the parent's status is published again.
+			changed.length = 0
+			await f!.advance(10_000)
+			expect(manager.getStatus(VOICE)?.health).toBe("idle")
+			expect(changed).toContain(VOICE)
+			const quiet = await serialized(manager)
+			// The last decode stays the placement's.
+			expect(quiet.decoders).toEqual({ lastOutputAt: at, health: "idle" })
+			expect(quiet.status).toEqual({ lastOutputAt: at, health: "idle" })
+			expect(quiet.ws).toEqual({ lastOutputAt: at, health: "idle" })
+			// The summary reads decoding for its own window (DECODING_WINDOW_MS, 60 s), then idle.
+			expect(quiet.summary).toEqual({ lastOutputAt: at, health: "decoding" })
+			await f!.advance(30_000)
+			expect((await serialized(manager)).summary).toEqual({
+				lastOutputAt: at,
+				health: "idle",
+			})
+		})
 	})
 })

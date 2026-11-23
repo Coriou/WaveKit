@@ -456,6 +456,18 @@ function validDate(at: Date | undefined): Date | undefined {
 	return at instanceof Date && Number.isFinite(at.getTime()) ? at : undefined
 }
 
+/** The newer of two output times; an unreadable one counts as none. */
+function newestOutput(
+	a: Date | null | undefined,
+	b: Date | null | undefined,
+): Date | undefined {
+	const x = validDate(a ?? undefined)
+	const y = validDate(b ?? undefined)
+	if (x === undefined) return y
+	if (y === undefined) return x
+	return y.getTime() > x.getTime() ? y : x
+}
+
 /** A non-negative finite count, else 0 (a malformed adapter counter adds nothing). */
 function finiteCount(n: number | undefined): number {
 	return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0
@@ -2214,7 +2226,7 @@ export class DecoderManager extends EventEmitter {
 						: this.plannedChannelWidthHz(parent, caps))
 			}
 			const own = state.decoder.getStatus()
-			const lastEventAt = validDate(own.lastOutputAt)
+			const lastEventAt = newestOutput(own.lastOutputAt, state.lastOutputAt)
 			return [
 				{
 					sourceId: placement.sourceId,
@@ -4936,9 +4948,10 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * A parent's totals over its placement workers (the states placed for it, `parentId`):
 	 * `stats` and `rateHistory` summed with its own, and `health` lifted from idle to running
-	 * while a running worker is producing (its own health running). Nothing for a decoder
-	 * without workers: its own counters are its totals. A faulted or restarting parent keeps
-	 * its own health (its own process failed, whatever its workers do).
+	 * while a running worker produced output within `idleTimeout` (the window the health check
+	 * idles a decoder after, performHealthChecks). Nothing for a decoder without workers: its
+	 * own counters are its totals. A faulted or restarting parent keeps its own health (its own
+	 * process failed, whatever its workers do).
 	 */
 	private placementTotals(
 		parent: DecoderState,
@@ -4949,6 +4962,7 @@ export class DecoderManager extends EventEmitter {
 		const stats = { ...own.stats }
 		let rateHistory = own.rateHistory ? [...own.rateHistory] : undefined
 		let producing = false
+		const now = Date.now()
 		for (const worker of workers) {
 			const status = worker.decoder.getStatus()
 			stats.bytesIn += finiteCount(status.stats.bytesIn)
@@ -4962,7 +4976,15 @@ export class DecoderManager extends EventEmitter {
 				else if (rateHistory.length === history.length)
 					rateHistory = rateHistory.map((n, i) => n + finiteCount(history[i]))
 			}
-			if (status.running && worker.lastHealth === "running") producing = true
+			const at = newestOutput(worker.lastOutputAt, status.lastOutputAt)
+			if (
+				status.running &&
+				worker.lastHealth !== "faulted" &&
+				worker.lastHealth !== "restarting" &&
+				at !== undefined &&
+				now - at.getTime() <= this.config.idleTimeout
+			)
+				producing = true
 		}
 		return {
 			stats,
@@ -4996,22 +5018,26 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * A decoder's placement workers (ids `<decoder>#<channel>@<source>`) decode
 	 * for it, so its last output is the newest of its own and theirs; without
-	 * this an instance decoder showed its parent's old output time.
+	 * this an instance decoder showed its parent's old output time. Each state's
+	 * time is the newer of its adapter's stamp and the manager's own (set on
+	 * every output it forwards), so an adapter that does not stamp still counts.
 	 */
 	private placementLastOutput(
 		parent: DecoderState,
 		workers: readonly DecoderState[],
 	): Pick<DecoderStatus, "lastOutputAt"> {
-		let latest = parent.decoder.getStatus().lastOutputAt
-		for (const state of workers) {
-			const at = state.decoder.getStatus().lastOutputAt
-			if (
-				at instanceof Date &&
-				Number.isFinite(at.getTime()) &&
-				(latest === undefined || at.getTime() > latest.getTime())
+		let latest = newestOutput(
+			parent.decoder.getStatus().lastOutputAt,
+			workers.length > 0 ? parent.lastOutputAt : null,
+		)
+		for (const state of workers)
+			latest = newestOutput(
+				latest,
+				newestOutput(
+					state.lastOutputAt,
+					state.decoder.getStatus().lastOutputAt,
+				),
 			)
-				latest = at
-		}
 		return latest !== undefined ? { lastOutputAt: latest } : {}
 	}
 
@@ -9210,6 +9236,18 @@ export class DecoderManager extends EventEmitter {
 
 			// Emit health event (Requirement 20.4)
 			this.emit("decoder:health", state.decoder.id, health)
+			// A placement worker's health is part of its parent's (placementTotals):
+			// the parent's status is published again (decoder:status on WS).
+			if (state.parentId !== undefined) {
+				try {
+					this.emit("decoder:status-changed", state.parentId)
+				} catch (err) {
+					this.log.error(
+						{ err: safeErrorFields(err), decoderId: state.parentId },
+						"Error handling decoder status-changed event, continuing operation",
+					)
+				}
+			}
 		}
 	}
 }
