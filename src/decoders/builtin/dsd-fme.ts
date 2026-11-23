@@ -856,6 +856,38 @@ export const DSD_FME_WAV_END_WAIT_MS = 500
  * per adapter occupies the libuv pool however long the file system hangs.
  */
 export const DSD_FME_WAV_ATTEMPT_TIMEOUT_MS = 2_000
+
+/** A WAV listing an attempt abandoned, still pending: the attempts waiting for it to settle. */
+interface StuckWavListing {
+	/** Each resolves its attempt's wait: true when the listing settled, false when dropped. */
+	readonly waiters: Set<(free: boolean) => void>
+}
+
+/**
+ * Waits at most `ms` for `stuck` to settle: true when it did, false at the timeout or when it was
+ * dropped. The waiter leaves the set either way, so a listing that never settles holds none of
+ * the attempts that gave up on it.
+ */
+function waitStuckListing(
+	stuck: StuckWavListing,
+	ms: number,
+): Promise<boolean> {
+	return new Promise<boolean>(resolve => {
+		const done = (free: boolean): void => {
+			clearTimeout(timer)
+			stuck.waiters.delete(done)
+			resolve(free)
+		}
+		stuck.waiters.add(done)
+		const timer = setTimeout(() => done(false), ms)
+	})
+}
+
+/** Resolves and removes every waiter of `stuck`. */
+function wakeStuckWaiters(stuck: StuckWavListing, free: boolean): void {
+	for (const waiter of [...stuck.waiters]) waiter(free)
+	stuck.waiters.clear()
+}
 /**
  * Outputs held behind waiting call_ends at most. They are what the adapter produces within
  * DSD_FME_WAV_END_WAIT_MS: dsd-fme prints a few tens of lines a second per lane and most produce
@@ -1327,9 +1359,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private wavSearch: Promise<void> = Promise.resolve()
 	/**
 	 * The listing an attempt abandoned at DSD_FME_WAV_ATTEMPT_TIMEOUT_MS while it is still
-	 * pending: no attempt starts another until it settles (single flight).
+	 * pending: no attempt starts another until it settles (single flight). One reaction is
+	 * attached to it (stuckListing); attempts wait through its waiter set, so a read that never
+	 * settles holds at most the one waiting attempt, however many time out behind it. A new run
+	 * (start) drops it.
 	 */
-	private stuckWavListing: Promise<unknown> | null = null
+	private stuckWavListing: StuckWavListing | null = null
 	/**
 	 * The call_ends endCall returned that wait for their lookup's first attempt (emitOutput), by
 	 * payload: a caller's copy of the event shares it.
@@ -1681,6 +1716,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.callTimeoutTimer = null
 		}
 		this.endOpenCallsForRestart(this.monoDate())
+		// An old run's stuck listing never delays this run: its waiting attempt reads nothing.
+		this.dropStuckWavListing()
 		this.stopping = false
 		this.stopEnded = []
 
@@ -5496,6 +5533,26 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}
 
 	/**
+	 * The single-flight record of an abandoned search: its one reaction wakes the waiting
+	 * attempts (free) and clears the record once the search settles.
+	 */
+	private stuckListing(searched: Promise<unknown>): StuckWavListing {
+		const stuck: StuckWavListing = { waiters: new Set() }
+		void searched.finally(() => {
+			if (this.stuckWavListing === stuck) this.stuckWavListing = null
+			wakeStuckWaiters(stuck, true)
+		})
+		return stuck
+	}
+
+	/** Drops the stuck listing; its waiting attempts read nothing (a new run's start). */
+	private dropStuckWavListing(): void {
+		const stuck = this.stuckWavListing
+		this.stuckWavListing = null
+		if (stuck !== null) wakeStuckWaiters(stuck, false)
+	}
+
+	/**
 	 * Finds the WAV file dsd-fme created for a completed call, off the event loop. A file found
 	 * while the call's end is still held (`end`, DSD_FME_WAV_END_WAIT_MS) rides on that
 	 * `call_end` itself, as when the lookup was synchronous; one found after it went out is
@@ -5545,34 +5602,29 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const tryFind = async (): Promise<void> => {
 			attempt++
 
-			// Search all directories, giving up on a stuck read (DSD_FME_WAV_ATTEMPT_TIMEOUT_MS).
-			let timer: ReturnType<typeof setTimeout> | undefined
-			const timedOut = new Promise<"timeout">(resolve => {
-				timer = setTimeout(
-					() => resolve("timeout"),
-					DSD_FME_WAV_ATTEMPT_TIMEOUT_MS,
-				)
-			})
-			// Single flight: a listing an earlier attempt abandoned is waited for (within this
-			// attempt's timeout) before this one reads; still stuck, this attempt reads nothing.
+			// Single flight: a listing an earlier attempt abandoned is waited for (at most
+			// DSD_FME_WAV_ATTEMPT_TIMEOUT_MS) before this one reads; still stuck, this attempt reads
+			// nothing. Freed, the search gets its own full DSD_FME_WAV_ATTEMPT_TIMEOUT_MS.
 			const stuck = this.stuckWavListing
 			const freed =
-				stuck === null
-					? "free"
-					: await Promise.race([stuck.then(() => "free" as const), timedOut])
+				stuck === null ||
+				(await waitStuckListing(stuck, DSD_FME_WAV_ATTEMPT_TIMEOUT_MS))
 			let result: string | undefined | "timeout" = "timeout"
-			if (freed === "free") {
+			if (freed) {
 				// An abandoned search never rejects unhandled (searchForWavFile catches its own reads).
 				const searched = searchAll().catch(() => undefined)
+				let timer: ReturnType<typeof setTimeout> | undefined
+				const timedOut = new Promise<"timeout">(resolve => {
+					timer = setTimeout(
+						() => resolve("timeout"),
+						DSD_FME_WAV_ATTEMPT_TIMEOUT_MS,
+					)
+				})
 				result = await Promise.race([searched, timedOut])
-				if (result === "timeout") {
-					const pending: Promise<unknown> = searched.finally(() => {
-						if (this.stuckWavListing === pending) this.stuckWavListing = null
-					})
-					this.stuckWavListing = pending
-				}
+				clearTimeout(timer)
+				if (result === "timeout")
+					this.stuckWavListing = this.stuckListing(searched)
 			}
-			clearTimeout(timer)
 			if (result === "timeout" && !this.wavTimeoutWarned) {
 				this.wavTimeoutWarned = true
 				this.logger.warn(

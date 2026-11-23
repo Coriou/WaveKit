@@ -31,11 +31,14 @@
  * larger.
  *
  * Tone: what the recorder's own CTCSS bank measured over the file's activity (no new
- * detection). `{kind:"ctcss",hz}` when it heard a tone; null when it measured at least
- * TONE_MEASURED_MIN_MS of the file's activity and heard none; the member is absent when it
- * measured less (the bank needs 750 ms before it answers at all, so a null there would not be a
- * confirmed "no tone"). The recorder measures no DCS: the `dcs` form is in the shape but never
- * produced now. A tone that does not validate is dropped (the member absent), never the whole
+ * detection), frozen when the file finished (the bank's own sample and block counts, never a
+ * span estimate: the session runs on after the file and its later activity was never fed to
+ * this bank). `{kind:"ctcss",hz}` when the bank settled on a tone; null only when it was fed at
+ * least TONE_MEASURED_MIN_SAMPLES and not one of its blocks voted for any tone; the member is
+ * absent otherwise: fed less (the bank needs 750 ms before it answers at all), or some block
+ * held a tone the bank did not settle on (fewer than 60% of the blocks: hang noise, gaps and
+ * untoned turnarounds dilute a toned voice), so a null there would be a half truth. The recorder
+ * measures no DCS: the `dcs` form is in the shape but never produced now. A tone that does not validate is dropped (the member absent), never the whole
  * sidecar, like the admission block. The store's operation folder budget (MAX_OPERATION_METADATA_BYTES, 16 KiB)
  * covers intent + receipt + sidecar: the sidecar is skipped when the three would exceed it.
  */
@@ -57,11 +60,19 @@ const iso = z.string().datetime()
 const finite = z.number().finite()
 
 /**
- * Activity the recorder's CTCSS bank must have measured before its "no tone" counts: the bank's
- * own minimum (two 500 ms blocks hopped by 250 ms: 750 ms, ctcss.ts MIN_SAMPLES) plus 250 ms for
- * the frames the recorder does not feed it (a roll-over file's carried head) — 1 000 ms.
+ * Samples (8 kHz, the bank's rate) the recorder's CTCSS bank must have been fed before its "no
+ * tone" counts: 1 s, three of its 500 ms blocks hopped by 250 ms, one hop past the 750 ms the
+ * bank needs to answer at all (ctcss.ts MIN_SAMPLES).
  */
-export const TONE_MEASURED_MIN_MS = 1000
+export const TONE_MEASURED_MIN_SAMPLES = 8000
+
+/** What a file's CTCSS bank was fed when the file finished (CtcssBank counters). */
+export interface ToneCoverage {
+	/** Samples pushed (CtcssBank.sampleCount). */
+	readonly samples: number
+	/** Blocks some tone won (CtcssBank.votedBlockCount). */
+	readonly votedBlocks: number
+}
 
 /** Lowest and highest standard CTCSS tones (67.0 and 254.1 Hz): the bounds of `hz`. */
 const CTCSS_MIN_HZ = CTCSS_HZ[0]
@@ -81,17 +92,22 @@ export const RecordingToneSchema = z.discriminatedUnion("kind", [
 ])
 
 /**
- * The tone fact of a file whose CTCSS bank answered `toneHz` over `measuredMs` of its activity,
- * as AnalogFinishFacts members: the CTCSS tone when it heard one, null when it measured at least
- * TONE_MEASURED_MIN_MS (exactly at it counts) and heard none, no member below that or on a
- * non-finite span.
+ * The tone fact of a file whose CTCSS bank answered `toneHz` with `coverage` at the file's
+ * finish, as AnalogFinishFacts members: the CTCSS tone when it settled on one; null only when it
+ * was fed at least TONE_MEASURED_MIN_SAMPLES (exactly at it counts) and no block voted for any
+ * tone; no member otherwise (fed less, a block held a tone it did not settle on, no bank, or a
+ * count that is not a finite number).
  */
 export function toneFactOf(
 	toneHz: number | null,
-	measuredMs: number,
+	coverage: ToneCoverage | null,
 ): { readonly tone?: RecordingTone | null } {
 	if (toneHz !== null) return { tone: { kind: "ctcss", hz: toneHz } }
-	return Number.isFinite(measuredMs) && measuredMs >= TONE_MEASURED_MIN_MS
+	if (coverage === null) return {}
+	const { samples, votedBlocks } = coverage
+	return Number.isFinite(samples) &&
+		samples >= TONE_MEASURED_MIN_SAMPLES &&
+		votedBlocks === 0
 		? { tone: null }
 		: {}
 }
@@ -119,7 +135,7 @@ export const RecordingFactsSchema = z
 			.strict(),
 		/** The recording admission's measured numbers; null when the recorder gave none. */
 		admission: NoiseQuarantineFactsSchema.nullable(),
-		/** The tone heard over the file; null: measured, none heard; absent: not measured. */
+		/** The tone heard over the file; null: measured, no block held a tone; absent: not determined. */
 		tone: RecordingToneSchema.nullable().optional(),
 	})
 	.strict()

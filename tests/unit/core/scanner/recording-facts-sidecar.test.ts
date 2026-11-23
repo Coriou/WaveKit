@@ -19,6 +19,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { CtcssBank } from "../../../../src/core/audio-tones/ctcss.js"
 import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
 import type { AnalogMetadataAdapter } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
@@ -31,7 +32,7 @@ import {
 	RECORDING_FACTS_FILE,
 	RECORDING_FACTS_MAX_BYTES,
 	RecordingFactsSchema,
-	TONE_MEASURED_MIN_MS,
+	TONE_MEASURED_MIN_SAMPLES,
 	factsFitFolder,
 	recordingFactsBytes,
 	recordingFactsOf,
@@ -44,6 +45,7 @@ import {
 	type RecordingBinding,
 } from "../../../../src/core/scanner/store/recording-operation.js"
 import { createLogger } from "../../../../src/utils/logger.js"
+import { gaussian, mulberry32 } from "../audio-tones/synth.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
 import type { AnalogHandle } from "../../../../src/core/scanner/store/analog-operations.js"
 import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
@@ -451,12 +453,65 @@ describe("recordingFactsBytes bounds", () => {
 		).toBeNull()
 	})
 
-	it("toneFactOf: a heard tone always; null from TONE_MEASURED_MIN_MS of activity, nothing one below", () => {
-		expect(toneFactOf(88.5, 0)).toEqual({ tone: { kind: "ctcss", hz: 88.5 } })
-		expect(toneFactOf(null, TONE_MEASURED_MIN_MS)).toEqual({ tone: null })
-		expect(toneFactOf(null, TONE_MEASURED_MIN_MS - 1)).toEqual({})
-		expect(toneFactOf(null, Number.NaN)).toEqual({})
-		expect(toneFactOf(null, Number.POSITIVE_INFINITY)).toEqual({})
+	it("toneFactOf: a settled tone always; null only from TONE_MEASURED_MIN_SAMPLES with no voted block", () => {
+		const fed = (samples: number, votedBlocks = 0) => ({
+			samples,
+			votedBlocks,
+		})
+		expect(toneFactOf(88.5, fed(0))).toEqual({
+			tone: { kind: "ctcss", hz: 88.5 },
+		})
+		expect(toneFactOf(88.5, null)).toEqual({
+			tone: { kind: "ctcss", hz: 88.5 },
+		})
+		// At the sample bound counts, one sample below does not.
+		expect(toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES))).toEqual({
+			tone: null,
+		})
+		expect(toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES - 1))).toEqual({})
+		// A block held a tone the bank did not settle on: not determined, never a "no tone".
+		expect(toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES, 1))).toEqual({})
+		expect(toneFactOf(null, fed(10 * TONE_MEASURED_MIN_SAMPLES, 3))).toEqual({})
+		// No bank, or counts that are not finite numbers.
+		expect(toneFactOf(null, null)).toEqual({})
+		expect(toneFactOf(null, fed(Number.NaN))).toEqual({})
+		expect(toneFactOf(null, fed(Number.POSITIVE_INFINITY))).toEqual({})
+		expect(
+			toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES, Number.NaN)),
+		).toEqual({})
+	})
+
+	// Two 1.5 s toned overs with 1.9 s of hang noise between them, straight into a real bank: the
+	// tone wins its blocks but under 60% of all of them, so the bank settles on none. Blocks
+	// voted, so the fact is not determined (no member), never a "no tone".
+	it("a bank whose tone was diluted under its 60% share gives no member, never null", () => {
+		const bank = new CtcssBank()
+		const rand = mulberry32(7)
+		const tone = (n: number) => {
+			for (let i = 0; i < n; i++)
+				bank.pushSample(0.2 * Math.sin((2 * Math.PI * 88.5 * i) / 8000))
+		}
+		tone(12_000)
+		for (let i = 0; i < 15_200; i++) bank.pushSample(0.3 * gaussian(rand))
+		tone(12_000)
+		expect(bank.result()).toBeNull()
+		const coverage = {
+			samples: bank.sampleCount(),
+			votedBlocks: bank.votedBlockCount(),
+		}
+		expect(coverage.samples).toBe(39_200)
+		expect(coverage.votedBlocks).toBeGreaterThan(0)
+		expect(toneFactOf(bank.result(), coverage)).toEqual({})
+		// The same bank's noise alone, as long: no block voted, a measured "no tone".
+		const quiet = new CtcssBank()
+		for (let i = 0; i < 39_200; i++) quiet.pushSample(0.3 * gaussian(rand))
+		expect(quiet.votedBlockCount()).toBe(0)
+		expect(
+			toneFactOf(quiet.result(), {
+				samples: quiet.sampleCount(),
+				votedBlocks: quiet.votedBlockCount(),
+			}),
+		).toEqual({ tone: null })
 	})
 
 	it("ids or codes past their bounds refuse the sidecar", () => {
@@ -480,11 +535,20 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 	// The real WidebandAnalogRecorder over a modelled syllabic voice (no digital evidence: kept by
 	// its finish path, as wideband-analog-recorder-admission.test.ts): its finish facts go to a real
 	// EvidenceStore operation, whose sidecar must carry the admission numbers it measured.
-	// One kept file through the real recorder and store; `ctcssHz` is the modelled source's tone.
-	async function recorderKeep(ctcssHz: number | null) {
+	/** One keyed over of a scene: its seconds on the air, its tone, the carrier-off gap after it. */
+	interface Over {
+		seconds: number
+		ctcssHz: number | null
+		gapAfter: number
+	}
+
+	// Kept files of a scene through the real recorder and store. Each over is its own observation
+	// (closed 600 ms into the gap after it, so a gap under the 2 s hang joins the next over into
+	// the same file); the source's tone follows each over.
+	async function recorderScene(overs: readonly Over[]) {
 		const h = await harness()
 		const given: unknown[] = []
-		let real: ReturnType<EvidenceStore["beginAnalog"]> | null = null
+		const real: ReturnType<EvidenceStore["beginAnalog"]>[] = []
 		const analogFm: VoicePrior = {
 			labels: [],
 			class: "analog-fm",
@@ -493,7 +557,7 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		const r = recorderHarness({
 			fs: LOW_FS,
 			offset: LOW_OFFSET,
-			source: { ctcssHz, syllables: true },
+			source: { ctcssHz: overs[0]?.ctcssHz ?? null, syllables: true },
 			decodedLabel: () => null,
 			voicePrior: () => analogFm,
 			beginWrap: begin => recorderInput => {
@@ -503,7 +567,7 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 					observationId: "o1",
 					binding: h.binding,
 				})
-				real = op
+				real.push(op)
 				const fakeFinish = fake.finish.bind(fake)
 				const finish: AnalogHandle["finish"] = async (cut, facts) => {
 					given.push(facts)
@@ -516,39 +580,54 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 			},
 		})
 		await r.feed(1, false)
-		const onset = r.engine.liveEdge()
-		const end = onset + 6 * r.fs
 		const chunk = r.fs / 40
-		for (let i = 0; i < 6 * 40; i++) {
-			r.engine.write(r.src.next(chunk, true))
-			const edge = r.engine.liveEdge()
-			if (edge - onset >= 0.1 * r.fs)
-				r.rec.track(
-					trackInput("o", snapshot("o", onset, Math.min(edge, end), LOW)),
-				)
-			await r.pump()
+		for (const [n, over] of overs.entries()) {
+			const id = `o${n}`
+			r.src.setCtcss(over.ctcssHz)
+			const onset = r.engine.liveEdge()
+			const end = onset + over.seconds * r.fs
+			for (let i = 0; i < Math.round(over.seconds * 40); i++) {
+				r.engine.write(r.src.next(chunk, true))
+				const edge = r.engine.liveEdge()
+				if (edge - onset >= 0.1 * r.fs)
+					r.rec.track(
+						trackInput(id, snapshot(id, onset, Math.min(edge, end), LOW)),
+					)
+				await r.pump()
+			}
+			const closeAfter = Math.min(0.6, over.gapAfter)
+			await r.feed(closeAfter, false)
+			r.rec.closed(id, snapshot(id, onset, end, LOW), null, {
+				analogFm: true,
+				discoveryId: "d_1",
+			})
+			await r.feed(over.gapAfter - closeAfter, false)
 		}
-		await r.feed(0.6, false)
-		r.rec.closed("o", snapshot("o", onset, end, LOW), null, {
-			analogFm: true,
-			discoveryId: "d_1",
-		})
-		await r.feed(3.5, false)
 		await r.rec.idle()
-		expect(r.ops.map(o => o.outcome)).toEqual(["finalized"])
-		expect(given).toHaveLength(1)
-		const op = real as ReturnType<EvidenceStore["beginAnalog"]> | null
-		expect(op).not.toBeNull()
-		const stored = RecordingFactsSchema.parse(
-			JSON.parse(await readFile(factsPath(h, op!.operationId), "utf8")),
-		)
+		await r.fire()
+		await r.rec.idle()
+		const stored = []
+		for (const op of real) {
+			const path = factsPath(h, op.operationId)
+			if (!existsSync(path)) continue
+			stored.push(
+				RecordingFactsSchema.parse(JSON.parse(await readFile(path, "utf8"))),
+			)
+		}
 		return {
-			facts: given[0] as {
-				admission?: NoiseQuarantineFacts
-				tone?: unknown
-			},
+			outcomes: r.ops.map(o => o.outcome),
+			facts: given as { admission?: NoiseQuarantineFacts; tone?: unknown }[],
 			stored,
 		}
+	}
+
+	// One kept file through the real recorder and store; `ctcssHz` is the modelled source's tone.
+	async function recorderKeep(ctcssHz: number | null) {
+		const scene = await recorderScene([{ seconds: 6, ctcssHz, gapAfter: 4.1 }])
+		expect(scene.outcomes).toEqual(["finalized"])
+		expect(scene.facts).toHaveLength(1)
+		expect(scene.stored).toHaveLength(1)
+		return { facts: scene.facts[0]!, stored: scene.stored[0]! }
 	}
 
 	it("a kept voice's sidecar carries the finish path's admission numbers", async () => {
@@ -574,6 +653,45 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		expect(facts.tone).toBeNull()
 		expect("tone" in stored).toBe(true)
 		expect(stored.tone).toBeNull()
+	}, 120_000)
+
+	// The file's tone fact is the bank's own coverage frozen at its finish, never the session's
+	// span: here the next over raises the session's activity 2.7 s after the first started, while
+	// the first file's bank heard only its 600 ms (under the bank's minimum): no member, not null.
+	it("a 600 ms toned over followed by the next over at 2.7 s: the first file's tone is absent, never null", async () => {
+		const scene = await recorderScene([
+			{ seconds: 0.6, ctcssHz: 88.5, gapAfter: 2.1 },
+			{ seconds: 3, ctcssHz: 88.5, gapAfter: 4.1 },
+		])
+		expect(scene.outcomes).toEqual(["finalized", "finalized"])
+		expect(scene.facts).toHaveLength(2)
+		expect("tone" in scene.facts[0]!).toBe(false)
+		expect("tone" in scene.stored[0]!).toBe(false)
+		expect(scene.facts[1]!.tone).toEqual({ kind: "ctcss", hz: 88.5 })
+		expect(scene.stored[1]!.tone).toEqual({ kind: "ctcss", hz: 88.5 })
+	}, 120_000)
+
+	it("two toned overs joined into one file across the hang: the tone, never null", async () => {
+		const scene = await recorderScene([
+			{ seconds: 1.5, ctcssHz: 88.5, gapAfter: 1.9 },
+			{ seconds: 1.5, ctcssHz: 88.5, gapAfter: 4.1 },
+		])
+		expect(scene.outcomes).toEqual(["finalized"])
+		expect(scene.facts[0]!.tone).toEqual({ kind: "ctcss", hz: 88.5 })
+		expect(scene.stored[0]!.tone).toEqual({ kind: "ctcss", hz: 88.5 })
+	}, 120_000)
+
+	// A toned over joined to a longer untoned turnaround: the tone's blocks fall under the bank's
+	// 60% share, so it settles on none, but blocks did vote for it: not determined, no member.
+	it("a toned over joined to a longer untoned one: the tone is absent, never null", async () => {
+		const scene = await recorderScene([
+			{ seconds: 1.5, ctcssHz: 88.5, gapAfter: 1 },
+			{ seconds: 4, ctcssHz: null, gapAfter: 4.1 },
+		])
+		expect(scene.outcomes).toEqual(["finalized"])
+		expect(scene.facts).toHaveLength(1)
+		expect("tone" in scene.facts[0]!).toBe(false)
+		expect("tone" in scene.stored[0]!).toBe(false)
 	}, 120_000)
 })
 

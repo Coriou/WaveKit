@@ -254,8 +254,8 @@ export interface RecordingFacts {
 	/** Null when the recorder passed no admission numbers. */
 	admission: RecordingAdmissionFacts | null
 	/**
-	 * The tone the file was sent with; null: the recorder measured the file and heard none.
-	 * Absent when it did not measure one (too little audio, older files and cores).
+	 * The tone the file was sent with; null: at least 1 s was measured and no part held any tone.
+	 * Absent when the recorder cannot tell (too little audio, an unsettled tone, older files).
 	 */
 	tone?: RecordingTone | null | undefined
 }

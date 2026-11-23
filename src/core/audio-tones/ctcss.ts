@@ -139,6 +139,8 @@ export class CtcssBank {
 	private streak = 0
 	/** Table index that won the most recent analysis block, or -1 (WG7 streaming view). */
 	private lastBlockWinner = -1
+	/** Analysis blocks some tone won (each block votes for at most one tone). */
+	private votedBlocks = 0
 
 	constructor() {
 		for (let i = 0; i < CTCSS_HZ.length; i++) {
@@ -189,6 +191,20 @@ export class CtcssBank {
 		return this.lastBlockWinner
 	}
 
+	/** Samples pushed since construction or the last reset. Does not affect `result()`. */
+	sampleCount(): number {
+		return this.seen
+	}
+
+	/**
+	 * Analysis blocks some tone won (≥ 0.65 of the band, ≥ 3× the next tone, 1% of whole-audio
+	 * power), whether or not that tone later qualified or reached 60% of the blocks. 0 with at
+	 * least MIN_SAMPLES pushed: no block of the audio held any tone. Does not affect `result()`.
+	 */
+	votedBlockCount(): number {
+		return this.votedBlocks
+	}
+
 	result(): number | null {
 		if (this.seen < MIN_SAMPLES) return null
 		const tone = selectCtcssTone(this.votes, this.qualified, this.firstBlock)
@@ -218,6 +234,7 @@ export class CtcssBank {
 		this.lastWinner = -1
 		this.streak = 0
 		this.lastBlockWinner = -1
+		this.votedBlocks = 0
 	}
 
 	private analyse(): void {
@@ -277,6 +294,7 @@ export class CtcssBank {
 			this.lastWinner = -1
 		}
 		if (winner >= 0) {
+			this.votedBlocks += 1
 			this.votes[winner] = (this.votes[winner] ?? 0) + 1
 			if (this.firstBlock[winner] === -1)
 				this.firstBlock[winner] = this.blockIndex

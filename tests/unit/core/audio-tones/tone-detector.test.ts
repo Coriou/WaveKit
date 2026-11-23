@@ -403,6 +403,29 @@ describe("CTCSS transmission continuity", () => {
 		expect(bank.result()).toBeNull()
 	})
 
+	it("counts the samples it was fed and the blocks a tone won, without changing the result", () => {
+		const bank = new CtcssBank()
+		expect(bank.sampleCount()).toBe(0)
+		expect(bank.votedBlockCount()).toBe(0)
+		// 0.8 s of 67 Hz then 3.2 s of a voice-band sine: blocks voted, the result is none.
+		for (let i = 0; i < 32000; i++) {
+			const hz = i < 6400 ? 67 : 1000
+			bank.pushSample(0.3 * Math.sin((2 * Math.PI * hz * i) / 8000))
+		}
+		expect(bank.sampleCount()).toBe(32000)
+		expect(bank.votedBlockCount()).toBeGreaterThan(0)
+		expect(bank.votedBlockCount()).toBeLessThanOrEqual(bank.blockCount())
+		expect(bank.result()).toBeNull()
+		bank.reset()
+		expect(bank.sampleCount()).toBe(0)
+		expect(bank.votedBlockCount()).toBe(0)
+		// A voice-band sine alone: every block runs, none votes.
+		for (let i = 0; i < 16000; i++)
+			bank.pushSample(0.3 * Math.sin((2 * Math.PI * 1000 * i) / 8000))
+		expect(bank.blockCount()).toBe(7)
+		expect(bank.votedBlockCount()).toBe(0)
+	})
+
 	it("rejects a weak sub-audible line beneath dominant voice energy", () => {
 		const bank = new CtcssBank()
 		for (let i = 0; i < 8000; i++) {

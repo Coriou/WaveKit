@@ -53,7 +53,7 @@ import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import { CtcssBank } from "../../audio-tones/ctcss.js"
-import { toneFactOf } from "../store/recording-facts.js"
+import { toneFactOf, type ToneCoverage } from "../store/recording-facts.js"
 import { ulid } from "../ids.js"
 import type {
 	AnalogCut,
@@ -870,6 +870,8 @@ interface FileState {
 	ctcss: CtcssBank | null
 	/** The tone heard over this file (taken when it finished), reported once it is finalized. */
 	toneHz: number | null
+	/** What its CTCSS bank was fed when the file finished (taken with `toneHz`); null before. */
+	toneCoverage: ToneCoverage | null
 	/** The stricter evidence classByTone needs (tone-class.ts); null once the file finished. */
 	toneClass: ToneClassEvidence | null
 	/**
@@ -2880,6 +2882,7 @@ export class WidebandAnalogRecorder {
 			gate: new VoiceActivityGate(),
 			ctcss: new CtcssBank(),
 			toneHz: null,
+			toneCoverage: null,
 			toneClass: new ToneClassEvidence(),
 			speech: new SpeechContentMeter(),
 			judgedSpeech:
@@ -4033,6 +4036,13 @@ export class WidebandAnalogRecorder {
 		)
 			file.cut = "source-lost"
 		file.toneHz = file.ctcss?.result() ?? null
+		file.toneCoverage =
+			file.ctcss === null
+				? null
+				: {
+						samples: file.ctcss.sampleCount(),
+						votedBlocks: file.ctcss.votedBlockCount(),
+					}
 		file.classTone = file.toneClass?.result(true) ?? null
 		file.toneClass = null
 		if (
@@ -4424,14 +4434,9 @@ export class WidebandAnalogRecorder {
 					...(path !== null && speech !== null
 						? { admission: noiseFacts(path, speech, s) }
 						: {}),
-					// The file's CTCSS answer (finishFile) over the activity its bank was fed (toneFrames).
-					...toneFactOf(
-						file.toneHz,
-						((Math.min(file.endSample ?? s.next, s.lastActive) -
-							Math.max(file.startSample, s.onset)) *
-							1000) /
-							s.fs,
-					),
+					// The file's CTCSS answer and what its bank was fed (toneFrames), both frozen in
+					// finishFile: the session's later activity never reached this file's bank.
+					...toneFactOf(file.toneHz, file.toneCoverage),
 				})
 				.catch(() => undefined)
 		}
