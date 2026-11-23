@@ -988,6 +988,13 @@ ends the hold of any decoder, tuned or not; for the tuned decoder it also clears
 delay. A channel worker removed by a replan is not logged as a resume ("Decoder suspension
 changed" with no reason code): the decoder stays held.
 
+A hold that lasts 10 minutes (10 release windows of 60 seconds, counted from the stop) logs one
+warning, "Decoder still held for cpu", naming the decoder and the reason it cannot end on its
+own: `own-cpu-unavailable` (the core's own CPU cannot be read, so no release run can start)
+or `above-release-level` (own CPU, given rounded as `ownPercent`, is at or above the 80 %
+release level). The warning is logged once per hold; a later stop for `cpu` may warn again.
+Start the decoder yourself to end the hold.
+
 Host CPU (every process on the machine, another project's build included) never stops,
 refuses or late-stops a decoder for host CPU alone. It only explains drops: while the host is
 over the guard and the core's own CPU is not, drops on a graduated decoder's input are the

@@ -117,6 +117,13 @@ export interface DropReader {
 /** How long the host-busy status holds after its latest host loss: one clear window, 60 000 ms. */
 export const HOST_BUSY_HOLD_MS = EFFICIENCY_CLEAR_MS
 
+/**
+ * How long a cpu hold may last before its one warning: 10 clear windows,
+ * 10 × EFFICIENCY_CLEAR_MS (60 000 ms) = 600 000 ms = 10 min from the hold.
+ */
+export const CPU_HOLD_WARN_WINDOWS = 10
+export const CPU_HOLD_WARN_MS = CPU_HOLD_WARN_WINDOWS * EFFICIENCY_CLEAR_MS
+
 export function createEfficiencyGate(
 	inputs: EfficiencyInputs,
 	deps: { drops?: DropReader; log?: Logger } = {},
@@ -372,7 +379,10 @@ export function createEfficiencyGate(
 	 * forget() keeps it; only that release or an operator start
 	 * (releaseCpuHold) ends it.
 	 */
-	const cpuHeld = new Map<string, { decoderId: string; mono: number }>()
+	const cpuHeld = new Map<
+		string,
+		{ decoderId: string; mono: number; warned?: true }
+	>()
 	/** Whether the release run (30 samples) began after a hold taken at `held`. */
 	const releasedSince = (held: number): boolean => {
 		const first = releaseRun[releaseRun.length - CPU_RELEASE_SAMPLES]
@@ -393,6 +403,51 @@ export function createEfficiencyGate(
 		return true
 	}
 	let ownUnavailableLogged = false
+	/**
+	 * A cpu hold ends only on a release run or an operator start, so one whose
+	 * own CPU is unreadable, or sits between the release level and the guard,
+	 * keeps its decoder stopped indefinitely. Once a hold outlives
+	 * CPU_HOLD_WARN_MS (10 clear windows: 10 × 60 000 ms = 10 min from the hold
+	 * start) while the latest sample cannot release it, one warning names the
+	 * reason. Once per hold (the `warned` mark lives on the bounded cpuHeld
+	 * entry; a new suspension replaces the entry and may warn again). A sample
+	 * under the release level logs nothing: the release run is under way.
+	 */
+	const warnLongCpuHolds = (
+		mono: number,
+		ownPercent: number | null,
+		guard: number,
+	) => {
+		for (const held of cpuHeld.values()) {
+			if (held.warned || !Number.isFinite(held.mono)) continue
+			if (!(mono - held.mono >= CPU_HOLD_WARN_MS)) continue
+			if (releasedSince(held.mono)) continue
+			let reason: "own-cpu-unavailable" | "above-release-level"
+			if (ownPercent === null || !valid(guard)) reason = "own-cpu-unavailable"
+			else if (ownPercent >= cpuReleasePercent(guard))
+				reason = "above-release-level"
+			else continue
+			held.warned = true
+			try {
+				deps.log?.warn(
+					{
+						decoderId: held.decoderId,
+						reason,
+						heldMinutes: Math.floor((mono - held.mono) / 60_000),
+						...(reason === "above-release-level" && ownPercent !== null
+							? {
+									ownPercent: Math.round(ownPercent),
+									releasePercent: cpuReleasePercent(guard),
+								}
+							: {}),
+					},
+					"Decoder still held for cpu: an operator start releases it",
+				)
+			} catch {
+				/* Logging cannot change a verdict. */
+			}
+		}
+	}
 
 	const currentCpu = (now: number) =>
 		valid(now) &&
@@ -1396,6 +1451,8 @@ export function createEfficiencyGate(
 				latestOwnOverSustained = false
 				releaseRun.length = 0
 			}
+			if (Number.isFinite(mono))
+				warnLongCpuHolds(mono, classified.ownPercent, inputs.cpuGuardPercent)
 			if (sample.ownCpuAvailable === false && !ownUnavailableLogged) {
 				ownUnavailableLogged = true
 				try {
