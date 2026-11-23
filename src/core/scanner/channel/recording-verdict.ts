@@ -30,7 +30,7 @@ import {
 	notAnalogVoiceProtocol,
 	type DecodedLabel,
 } from "./voice-veto.js"
-import type { SpeechContent } from "./speech-content.js"
+import { admissionBranch, type SpeechContent } from "./speech-content.js"
 import type { NoiseQuarantineFacts } from "../store/noise-quarantine.js"
 
 /** Why a snapshot bars a recording (encrypted, opted out, unclean track), or null when it does not. */
@@ -1282,8 +1282,9 @@ export function keptLog(
 /**
  * The log fields of a file discarded as noise (`discarded:noise`; the recorder logs one line per
  * such file): its operation id, its session's discovery and centre (whole Hz), finishPath's prior
- * reading and the admission rule's measured numbers (speech-content.ts SpeechContent, rounded).
- * Ids the core made and numbers it measured only.
+ * reading, the admission branch that fired (speech-content.ts admissionBranch: `noise` or
+ * `data-buzz`) and the admission rule's measured numbers (SpeechContent, rounded). Ids the core
+ * made and numbers it measured only.
  */
 export function noiseLog(
 	path: FinishPath,
@@ -1297,34 +1298,56 @@ export function noiseLog(
 		frequencyHz: Math.round(session.targetHz),
 		reason: path.reason,
 		strength: path.strength,
+		branch: admissionBranch(c),
+		...admissionNumbers(c),
+	}
+}
+
+/** The admission rule's measured numbers of a noise file, rounded (noiseLog, noiseFacts). */
+function admissionNumbers(c: SpeechContent): {
+	levelFrames: number
+	spreadDb: number
+	p10Dbfs: number
+	periodicShare: number
+	burstFrames: number
+	loudPitchShare: number
+	topSpreadDb: number
+	loudLevelDbfs: number | null
+} {
+	return {
 		levelFrames: c.levelFrames,
 		spreadDb: Math.round(c.maxWindowSpreadDb * 100) / 100,
 		p10Dbfs: Math.round(c.minWindowP10Dbfs * 100) / 100,
 		periodicShare: Math.round(c.periodicShare * 1000) / 1000,
 		burstFrames: c.maxBurstFrames,
+		loudPitchShare: Math.round(c.maxLoudPitchShare * 1000) / 1000,
+		topSpreadDb: Math.round(c.maxTopSpreadDb * 100) / 100,
+		// −Infinity (no whole level window) is not JSON: null.
+		loudLevelDbfs: Number.isFinite(c.maxLoudLevelDbfs)
+			? Math.round(c.maxLoudLevelDbfs * 100) / 100
+			: null,
 	}
 }
 
 /**
  * The noise quarantine sidecar's facts of a file discarded as noise (noise-quarantine.ts): the
- * same measured numbers and closed codes as noiseLog, without the ids (the operation adds them).
+ * same measured numbers, closed codes and admission branch as noiseLog, without the ids (the
+ * operation adds them).
  */
 export function noiseFacts(
 	path: FinishPath,
 	c: SpeechContent,
 	session: { readonly targetHz: number },
 ): NoiseQuarantineFacts {
+	const branch = admissionBranch(c)
 	return {
 		frequencyHz: Number.isFinite(session.targetHz)
 			? Math.round(session.targetHz)
 			: null,
 		reason: path.reason,
 		strength: path.strength,
-		levelFrames: c.levelFrames,
-		spreadDb: Math.round(c.maxWindowSpreadDb * 100) / 100,
-		p10Dbfs: Math.round(c.minWindowP10Dbfs * 100) / 100,
-		periodicShare: Math.round(c.periodicShare * 1000) / 1000,
-		burstFrames: c.maxBurstFrames,
+		...(branch === null ? {} : { branch }),
+		...admissionNumbers(c),
 	}
 }
 

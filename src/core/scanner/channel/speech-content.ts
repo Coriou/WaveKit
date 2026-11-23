@@ -161,6 +161,8 @@ const P10 = Math.floor(0.1 * (SPEECH_WINDOW_FRAMES - 1))
 const P90 = Math.ceil(0.9 * (SPEECH_WINDOW_FRAMES - 1))
 const MEDIAN_LO = Math.floor((SPEECH_WINDOW_FRAMES - 1) / 2)
 const MEDIAN_HI = Math.ceil((SPEECH_WINDOW_FRAMES - 1) / 2)
+/** The admission level window's lower median index (46): its top spread is p90 − this. */
+const P50 = MEDIAN_LO
 
 let sharedFft: Fft | null = null
 const HANN = new Float32Array(SPEECH_FRAME_SAMPLES)
@@ -207,6 +209,23 @@ export interface SpeechContent {
 	 * quieting between words drives it down; open-squelch noise and data never quiet.
 	 */
 	readonly minWindowP10Dbfs: number
+	/**
+	 * The largest pitched share of a whole level window's loud frames: level frames at or over the
+	 * window's p90 level minus ADMISSION_LOUD_MARGIN_DB whose autocorrelation peak reaches
+	 * SPEECH_PERIODIC_MIN_CORRELATION (as periodicShare), windows as maxWindowSpreadDb; 0 under one
+	 * whole level window. Voice is pitched where it is loud; data and noise are not.
+	 */
+	readonly maxLoudPitchShare: number
+	/**
+	 * The largest top spread (p90 − p50 level, dB) of a whole level window; 0 under one whole level
+	 * window. A syllable's top stands over the window's median; buzz holds a flat top.
+	 */
+	readonly maxTopSpreadDb: number
+	/**
+	 * The loudest whole level window's p90 level (dBFS); −Infinity under one whole level window.
+	 * FM-demodulated data at full deviation is loud.
+	 */
+	readonly maxLoudLevelDbfs: number
 }
 
 /**
@@ -228,7 +247,8 @@ const LEVEL_MAX_ZEROS = SPEECH_FRAME_SAMPLES / 2
  * Streaming measure of one file's audio (SpeechContent); `push` allocates no buffers (its only
  * allocations are two small typed-array views, `subarray`, per window measured) and costs O(1)
  * amortised per frame (one sort of SPEECH_WINDOW_FRAMES numbers per SPEECH_WINDOW_HOP frames for
- * each of the envelope and the admission level rings).
+ * each of the envelope and the admission level rings, and one walk of the level and pitch rings
+ * per whole level window).
  */
 export class SpeechContentMeter {
 	private readonly frame = new Float32Array(SPEECH_FRAME_SAMPLES)
@@ -268,6 +288,12 @@ export class SpeechContentMeter {
 	private partialP10 = 0
 	/** Level frame count at the last level window measured (−1: none). */
 	private levelMeasuredAt = -1
+	/** Per level frame (beside levelRing): 1 when its autocorrelation peak made it periodic. */
+	private readonly pitchRing = new Uint8Array(SPEECH_WINDOW_FRAMES)
+	/** Whole level windows' largest loud-frame pitched share, top spread and p90 level. */
+	private maxLoudPitch = 0
+	private maxTopSpread = 0
+	private maxLoudLevel = -Infinity
 
 	/** Whole frames heard so far (result().frames, without measuring a window). */
 	get frames(): number {
@@ -306,6 +332,9 @@ export class SpeechContentMeter {
 			levelFrames,
 			maxWindowSpreadDb: levelWhole ? this.maxSpread : this.partialSpread,
 			minWindowP10Dbfs: levelWhole ? this.minP10 : this.partialP10,
+			maxLoudPitchShare: this.maxLoudPitch,
+			maxTopSpreadDb: this.maxTopSpread,
+			maxLoudLevelDbfs: this.maxLoudLevel,
 		}
 	}
 
@@ -318,8 +347,11 @@ export class SpeechContentMeter {
 		)
 			this.measureWindow()
 		if (this.frameZeroHeavy) return
-		if (peak >= SPEECH_PERIODIC_MIN_CORRELATION) this.periodic++
-		this.levelRing[this.levelHeard % SPEECH_WINDOW_FRAMES] = this.frameLevel
+		const pitched = peak >= SPEECH_PERIODIC_MIN_CORRELATION
+		if (pitched) this.periodic++
+		const slot = this.levelHeard % SPEECH_WINDOW_FRAMES
+		this.levelRing[slot] = this.frameLevel
+		this.pitchRing[slot] = pitched ? 1 : 0
 		this.levelHeard++
 		if (
 			this.levelHeard >= SPEECH_WINDOW_FRAMES &&
@@ -331,7 +363,11 @@ export class SpeechContentMeter {
 	/**
 	 * The level spread (p90 − p10) and p10 of the last SPEECH_WINDOW_FRAMES level frames (one sort
 	 * per hop); `n` under it: a short file's one partial window, its level frames 0 to n − 1, kept
-	 * apart as measureWindow's partial figures.
+	 * apart as measureWindow's partial figures. A whole window also folds its data-buzz features
+	 * (admissionBranch) into the file maxima: its top spread (p90 − p50), its p90 level, and the
+	 * pitched share of its loud frames (level at or over p90 − ADMISSION_LOUD_MARGIN_DB, one walk of
+	 * the unsorted rings: order does not matter; at least the top tenth of the window by
+	 * construction, so never empty).
 	 */
 	private measureLevelWindow(n: number = SPEECH_WINDOW_FRAMES): void {
 		const sorted = this.levelSorted.subarray(0, n)
@@ -343,6 +379,21 @@ export class SpeechContentMeter {
 		if (full) {
 			if (spread > this.maxSpread) this.maxSpread = spread
 			if (p10 < this.minP10) this.minP10 = p10
+			const p90 = sorted[P90]!
+			const top = p90 - sorted[P50]!
+			if (top > this.maxTopSpread) this.maxTopSpread = top
+			if (p90 > this.maxLoudLevel) this.maxLoudLevel = p90
+			const loud = p90 - ADMISSION_LOUD_MARGIN_DB
+			const { levelRing, pitchRing } = this
+			let active = 0
+			let pitched = 0
+			for (let i = 0; i < SPEECH_WINDOW_FRAMES; i++)
+				if (levelRing[i]! >= loud) {
+					active++
+					pitched += pitchRing[i]!
+				}
+			const share = pitched / active
+			if (share > this.maxLoudPitch) this.maxLoudPitch = share
 		} else {
 			this.partialSpread = spread
 			this.partialP10 = p10
@@ -559,7 +610,10 @@ export function speechReadings(c: SpeechContent | null): {
  * a channel with no digital evidence is discarded as noise (recording-verdict.ts finishPath,
  * `discarded:noise`) only when EVERY level window looks like open-squelch noise or data buzz: real
  * FM voice shows carrier quieting between words (frame levels down to −30 to −50 dBFS), noise and
- * data never fall under about −15 dBFS and keep a narrow level spread. The rule applies under any
+ * data never fall under about −15 dBFS and keep a narrow level spread (the `noise` branch); or
+ * (candidate rule RA-3, the `data-buzz` branch, admissionBranch) no window's loud frames are
+ * pitched or peaked like syllables and the loudest window is at full-deviation level, data bursts
+ * on a quiet carrier whose quieting the first branch reads as voice. The rule applies under any
  * prior strength, a roll-over file (past the file length limit) included, except to a tone-classed
  * file (its own CTCSS tone or classed by it), a file shared with a joined voice of another discovery
  * and any file of a channel where analog voice is proven (recording-verdict.ts analogVoiceHeard).
@@ -573,8 +627,14 @@ export interface AdmissionThresholds {
 	readonly minFloorDbfs: number
 	/** The longest burst (SpeechContent.maxBurstFrames) must be under this. */
 	readonly maxBurstFrames: number
-	/** The periodic share must be under this. */
+	/** The periodic share must be under this (both branches). */
 	readonly maxPeriodicShare: number
+	/** Data buzz: every window's loud-frame pitched share (maxLoudPitchShare) must be under this. */
+	readonly maxLoudPitchShare: number
+	/** Data buzz: every window's top spread (maxTopSpreadDb, p90 − p50, dB) must be under this. */
+	readonly maxTopSpreadDb: number
+	/** Data buzz: the loudest window's p90 level (maxLoudLevelDbfs) must be over this. */
+	readonly minLoudLevelDbfs: number
 }
 /** 94 level frames × 32 ms = 3.008 s: one whole level window. */
 export const ADMISSION_MIN_FRAMES = SPEECH_WINDOW_FRAMES
@@ -591,29 +651,90 @@ export const ADMISSION_MAX_SPREAD_DB = 10
 export const ADMISSION_MIN_FLOOR_DBFS = -25
 /** 4 frames (128 ms): a word on a quiet carrier stays 6 dB over its window's median 4 to 7 frames. */
 export const ADMISSION_MAX_BURST_FRAMES = 4
-/** 0.25: voiced speech (pitched frames) at a CNR of 9 dB or more measures 0.24 to 0.61. */
+/**
+ * 0.25: voiced speech (pitched frames) at a CNR of 9 dB or more measures 0.24 to 0.61. Both
+ * branches need it, so a tone, a selcall, slow (512 Bd) 2FSK or a pitched buzz is kept.
+ */
 export const ADMISSION_MAX_PERIODIC = 0.25
+/**
+ * The data-buzz branch's loud frames: level frames within 10 dB of their window's p90 level.
+ */
+export const ADMISSION_LOUD_MARGIN_DB = 10
+/**
+ * 0.40 (data buzz): voice is pitched where it is loud. Measured on labelled analog files of the
+ * user's receiver (aggregates only): every voice file's largest window reads 0.738 or more (a
+ * margin of 0.338), every listened data or noise file 0.291 or less (a margin of 0.109).
+ */
+export const ADMISSION_MAX_LOUD_PITCH_SHARE = 0.4
+/**
+ * 10 dB (data buzz): a syllable's top stands over its window's median; data and noise hold a flat
+ * top. Measured as ADMISSION_MAX_LOUD_PITCH_SHARE: voice 13.33 dB or more (a margin of 3.33 dB),
+ * listened data and noise 7.43 dB or less (2.57 dB). A voice file is lost only when this bound
+ * and the pitch bound both fail.
+ */
+export const ADMISSION_MAX_TOP_SPREAD_DB = 10
+/**
+ * −11 dBFS (data buzz, a weak-voice guard): FM-demodulated data at full deviation is loud. Near
+ * the FM threshold voice is neither pitched nor peaked, so without this guard the two bounds
+ * above would discard weak voice. Measured: listened data −8.66 dBFS or louder (a margin of
+ * 2.34 dB), SYNTHETIC GMSK, 4FSK and TDMA −13.2 or louder; SYNTHETIC weak voice through
+ * WidebandNfmChain at a CNR of 5 dB or more −14.19 or quieter (3.19 dB, synthetic only: real voice
+ * reads louder than synthetic, and a loud open-squelch tail after weak voice can defeat the guard,
+ * which is why the noise quarantine keeps such files reversible).
+ */
+export const ADMISSION_MIN_LOUD_LEVEL_DBFS = -11
 export const ADMISSION_DEFAULTS: AdmissionThresholds = Object.freeze({
 	minFrames: ADMISSION_MIN_FRAMES,
 	maxSpreadDb: ADMISSION_MAX_SPREAD_DB,
 	minFloorDbfs: ADMISSION_MIN_FLOOR_DBFS,
 	maxBurstFrames: ADMISSION_MAX_BURST_FRAMES,
 	maxPeriodicShare: ADMISSION_MAX_PERIODIC,
+	maxLoudPitchShare: ADMISSION_MAX_LOUD_PITCH_SHARE,
+	maxTopSpreadDb: ADMISSION_MAX_TOP_SPREAD_DB,
+	minLoudLevelDbfs: ADMISSION_MIN_LOUD_LEVEL_DBFS,
 })
 
+/** Which admission branch measured a file as noise (admissionBranch). */
+export type AdmissionBranch = "noise" | "data-buzz"
+
 /**
- * The file measures as noise by the admission rule (AdmissionThresholds): true noise, false not
- * noise (kept), null not measured (fewer than `minFrames` level frames: kept).
+ * The admission branch that measures the file as noise, null when none does or it is not measured
+ * (fewer than `minFrames` level frames: kept). `noise` (RA-2): every level window looks like
+ * open-squelch noise (narrow spread, no quieting, no burst). `data-buzz` (RA-3): no window shows
+ * voice evidence (its loud frames pitched, maxLoudPitchShare, or a syllable-like top,
+ * maxTopSpreadDb) and the loudest window is at full-deviation level (maxLoudLevelDbfs): bursts of
+ * FM-demodulated data on a quiet carrier (paging, DMR) that RA-2 keeps by their quieting. `noise`
+ * wins when both match. Both need a periodic share under maxPeriodicShare.
+ */
+export function admissionBranch(
+	c: SpeechContent,
+	thresholds: AdmissionThresholds = ADMISSION_DEFAULTS,
+): AdmissionBranch | null {
+	if (c.levelFrames < thresholds.minFrames) return null
+	if (!(c.periodicShare < thresholds.maxPeriodicShare)) return null
+	if (
+		c.maxWindowSpreadDb < thresholds.maxSpreadDb &&
+		c.minWindowP10Dbfs > thresholds.minFloorDbfs &&
+		c.maxBurstFrames < thresholds.maxBurstFrames
+	)
+		return "noise"
+	if (
+		c.maxLoudPitchShare < thresholds.maxLoudPitchShare &&
+		c.maxTopSpreadDb < thresholds.maxTopSpreadDb &&
+		c.maxLoudLevelDbfs > thresholds.minLoudLevelDbfs
+	)
+		return "data-buzz"
+	return null
+}
+
+/**
+ * The file measures as noise by the admission rule (AdmissionThresholds, either admissionBranch):
+ * true noise, false not noise (kept), null not measured (fewer than `minFrames` level frames: kept).
  */
 export function admissionNoise(
 	c: SpeechContent,
 	thresholds: AdmissionThresholds = ADMISSION_DEFAULTS,
 ): boolean | null {
 	if (c.levelFrames < thresholds.minFrames) return null
-	return (
-		c.maxWindowSpreadDb < thresholds.maxSpreadDb &&
-		c.minWindowP10Dbfs > thresholds.minFloorDbfs &&
-		c.maxBurstFrames < thresholds.maxBurstFrames &&
-		c.periodicShare < thresholds.maxPeriodicShare
-	)
+	return admissionBranch(c, thresholds) !== null
 }

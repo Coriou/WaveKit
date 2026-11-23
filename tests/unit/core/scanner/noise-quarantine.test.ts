@@ -395,6 +395,49 @@ describe("noise quarantine bounds", () => {
 	})
 })
 
+/** A logger whose component loggers' `warn` throws (a failing log transport). */
+function throwingWarnLogger(): typeof logger {
+	const base = createLogger({ level: "fatal" })
+	const child = base.child.bind(base)
+	base.child = ((bindings, options) => {
+		const c = child(bindings, options)
+		c.warn = (() => {
+			throw new Error("log transport down")
+		}) as typeof c.warn
+		return c
+	}) as typeof base.child
+	return base
+}
+
+describe("noise quarantine: a throwing logger never wedges a prune or a purge", () => {
+	it("a prune and a purge whose failure warn throws still clear; later ones run and settled resolves", async () => {
+		const root = await tempRoot()
+		let readdirs = 0
+		const q = new NoiseQuarantine({
+			root,
+			logger: throwingWarnLogger(),
+			now: () => NOW,
+			fs: {
+				...nodeNoiseQuarantineFs,
+				readdir: async () => {
+					readdirs++
+					throw Object.assign(new Error("denied"), { code: "EACCES" })
+				},
+			},
+		})
+		await expect(q.prune()).resolves.toBeUndefined()
+		expect(readdirs).toBe(1)
+		await expect(q.prune()).resolves.toBeUndefined()
+		expect(readdirs).toBe(2)
+		await expect(q.purgeDiscovery("d_01ABC")).resolves.toBeUndefined()
+		await expect(q.settled()).resolves.toBeUndefined()
+		expect(readdirs).toBe(3)
+		await expect(q.purgeDiscovery("d_02XYZ")).resolves.toBeUndefined()
+		expect(readdirs).toBe(4)
+		await expect(q.settledWithin(1_000)).resolves.toBe(true)
+	})
+})
+
 describe("noise quarantine purge of a removed discovery", () => {
 	it("removes the discovery's WAV and sidecar; others, corrupt and foreign sidecars stay", async () => {
 		const root = await tempRoot()
@@ -657,6 +700,40 @@ describe("noise quarantine admit", () => {
 			quarantinedAt: new Date(NOW).toISOString(),
 			facts,
 		})
+	})
+
+	it("the sidecar carries the admission branch and data-buzz features; a sidecar without them still parses", async () => {
+		const root = await tempRoot()
+		const q = new NoiseQuarantine({ root, logger, now: () => NOW })
+		const tagged: NoiseQuarantineFacts = {
+			...facts,
+			branch: "data-buzz",
+			loudPitchShare: 0.231,
+			topSpreadDb: 3.3,
+			loudLevelDbfs: -4.7,
+		}
+		for (const f of [tagged, facts]) {
+			const source = join(root, `${randomUUID()}.part`)
+			await part(source, 100)
+			const id = ids()
+			expect(await q.admit(source, id, f)).toBe(true)
+			const sidecar = NoiseQuarantineSidecarSchema.parse(
+				JSON.parse(
+					await readFile(join(q.dir, DAY, `${id.operationId}.json`), "utf8"),
+				),
+			)
+			expect(sidecar.facts).toEqual(f)
+		}
+		await q.prune()
+		// Only the two closed branch codes are accepted.
+		const bad = join(root, "bad.part")
+		await part(bad, 100)
+		expect(
+			await q.admit(bad, ids(), {
+				...facts,
+				branch: "voice" as unknown as "noise",
+			}),
+		).toBe(false)
 	})
 
 	it("across devices (EXDEV): copies then removes the source", async () => {

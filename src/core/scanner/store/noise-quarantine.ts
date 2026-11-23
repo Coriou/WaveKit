@@ -89,17 +89,25 @@ const CODE = z
 	.nullable()
 const finite = z.number().finite()
 
-/** The measured admission features and closed codes of one noise file (no untrusted strings). */
+/**
+ * The measured admission features and closed codes of one noise file (no untrusted strings).
+ * `branch` (speech-content.ts admissionBranch: `noise` or `data-buzz`) and the data-buzz features
+ * are optional: sidecars written before them carry none.
+ */
 export const NoiseQuarantineFactsSchema = z
 	.object({
 		frequencyHz: finite.nullable(),
 		reason: CODE,
 		strength: CODE,
+		branch: z.enum(["noise", "data-buzz"]).optional(),
 		levelFrames: finite,
 		spreadDb: finite,
 		p10Dbfs: finite,
 		periodicShare: finite,
 		burstFrames: finite,
+		loudPitchShare: finite.optional(),
+		topSpreadDb: finite.optional(),
+		loudLevelDbfs: finite.nullable().optional(),
 	})
 	.strict()
 export type NoiseQuarantineFacts = z.infer<typeof NoiseQuarantineFactsSchema>
@@ -318,19 +326,24 @@ export class NoiseQuarantine {
 			return this.pruning
 		}
 		const run = async (): Promise<void> => {
-			for (;;) {
-				this.rerun = false
-				try {
-					await this.pruneOnce()
-				} catch (err) {
-					this.log.warn(safeErrorFields(err), "Noise quarantine prune failed")
+			try {
+				for (;;) {
+					this.rerun = false
+					try {
+						await this.pruneOnce()
+					} catch (err) {
+						this.log.warn(safeErrorFields(err), "Noise quarantine prune failed")
+					}
+					// Checked and cleared in one synchronous step: a request after this starts a new
+					// prune instead of joining one that is already settling.
+					if (!this.rerun) {
+						this.pruning = null
+						return
+					}
 				}
-				// Checked and cleared in one synchronous step: a request after this starts a new
-				// prune instead of joining one that is already settling.
-				if (!this.rerun) {
-					this.pruning = null
-					return
-				}
+			} catch {
+				// Anything else that throws (a failing logger): the prune ends and the next one runs.
+				this.pruning = null
 			}
 		}
 		this.pruning = run()
@@ -474,20 +487,26 @@ export class NoiseQuarantine {
 		this.pendingPurge.add(discoveryId)
 		if (this.purging) return this.purging
 		const run = async (): Promise<void> => {
-			for (;;) {
-				// Checked and cleared in one synchronous step: an id queued after this starts a new
-				// scan (and gets its promise) instead of joining one that is already settling.
-				if (this.pendingPurge.size === 0) {
-					this.purging = null
-					return
+			try {
+				for (;;) {
+					// Checked and cleared in one synchronous step: an id queued after this starts a new
+					// scan (and gets its promise) instead of joining one that is already settling.
+					if (this.pendingPurge.size === 0) {
+						this.purging = null
+						return
+					}
+					const ids = new Set(this.pendingPurge)
+					this.pendingPurge.clear()
+					try {
+						await this.purgeOnce(ids)
+					} catch (err) {
+						this.log.warn(safeErrorFields(err), "Noise quarantine purge failed")
+					}
 				}
-				const ids = new Set(this.pendingPurge)
-				this.pendingPurge.clear()
-				try {
-					await this.purgeOnce(ids)
-				} catch (err) {
-					this.log.warn(safeErrorFields(err), "Noise quarantine purge failed")
-				}
+			} catch {
+				// Anything else that throws (a failing logger): the scan ends, so `settled` resolves and
+				// the next purge runs (ids still queued go with it).
+				this.purging = null
 			}
 		}
 		this.purging = run()

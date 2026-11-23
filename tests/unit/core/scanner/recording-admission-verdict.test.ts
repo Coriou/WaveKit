@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest"
 import {
 	finishPath,
+	noiseFacts,
 	noiseLog,
 	priorReading,
 	type FinishInput,
@@ -185,7 +186,7 @@ describe("finishPath: the recording admission row", () => {
 		}
 	})
 
-	it("noiseLog carries ids and measured numbers only", () => {
+	it("noiseLog carries ids, the branch and measured numbers only", () => {
 		const c: SpeechContent = {
 			frames: 300,
 			maxRangeDb: 3.456,
@@ -194,6 +195,9 @@ describe("finishPath: the recording admission row", () => {
 			levelFrames: 290,
 			maxWindowSpreadDb: 2.3456,
 			minWindowP10Dbfs: -12.3456,
+			maxLoudPitchShare: 0.01234,
+			maxTopSpreadDb: 1.2345,
+			maxLoudLevelDbfs: -10.4567,
 		}
 		const path = finishPath({ ...base, admission: NOISE })
 		expect(
@@ -209,11 +213,82 @@ describe("finishPath: the recording admission row", () => {
 			frequencyHz: 100_000_000,
 			reason: "noise",
 			strength: "none",
+			branch: "noise",
 			levelFrames: 290,
 			spreadDb: 2.35,
 			p10Dbfs: -12.35,
 			periodicShare: 0.012,
 			burstFrames: 1,
+			loudPitchShare: 0.012,
+			topSpreadDb: 1.23,
+			loudLevelDbfs: -10.46,
 		})
+	})
+
+	it("a data-buzz discard is tagged data-buzz in its log and its sidecar facts", () => {
+		// Data bursts on a quiet carrier: the quieting fails RA-2, the data-buzz branch fires.
+		const c: SpeechContent = {
+			frames: 140,
+			maxRangeDb: 30,
+			periodicShare: 0.08,
+			maxBurstFrames: 40,
+			levelFrames: 140,
+			maxWindowSpreadDb: 42,
+			minWindowP10Dbfs: -60,
+			maxLoudPitchShare: 0.2304,
+			maxTopSpreadDb: 3.3049,
+			maxLoudLevelDbfs: -4.7012,
+		}
+		const path = finishPath({ ...base, admission: NOISE })
+		const log = noiseLog(
+			path,
+			c,
+			{ handle: { operationId: "op_2" } },
+			{ discoveryId: "d_2", targetHz: 100_000_000 },
+		)
+		expect(log).toMatchObject({
+			branch: "data-buzz",
+			loudPitchShare: 0.23,
+			topSpreadDb: 3.3,
+			loudLevelDbfs: -4.7,
+		})
+		expect(noiseFacts(path, c, { targetHz: 100_000_000 })).toEqual({
+			frequencyHz: 100_000_000,
+			reason: "noise",
+			strength: "none",
+			branch: "data-buzz",
+			levelFrames: 140,
+			spreadDb: 42,
+			p10Dbfs: -60,
+			periodicShare: 0.08,
+			burstFrames: 40,
+			loudPitchShare: 0.23,
+			topSpreadDb: 3.3,
+			loudLevelDbfs: -4.7,
+		})
+	})
+
+	it("a reading neither branch matches carries no branch in its facts (null in the log)", () => {
+		const c: SpeechContent = {
+			frames: 50,
+			maxRangeDb: 3,
+			periodicShare: 0.01,
+			maxBurstFrames: 0,
+			levelFrames: 50,
+			maxWindowSpreadDb: 3,
+			minWindowP10Dbfs: -10,
+			maxLoudPitchShare: 0,
+			maxTopSpreadDb: 0,
+			maxLoudLevelDbfs: -Infinity,
+		}
+		const path = finishPath({ ...base, admission: NOISE })
+		const facts = noiseFacts(path, c, { targetHz: 1 })
+		expect("branch" in facts).toBe(false)
+		expect(facts.loudLevelDbfs).toBeNull()
+		expect(
+			noiseLog(path, c, { handle: null }, { discoveryId: null, targetHz: 1 })[
+				"branch"
+			],
+		).toBeNull()
 	})
 })

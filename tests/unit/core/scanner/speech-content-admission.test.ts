@@ -3,18 +3,24 @@
  * fed directly to SpeechContentMeter (fast; the slow cases through WidebandNfmChain live in
  * speech-content-admission-chain.test.ts): every bound at and past its value, the not-measured
  * floor, frames of exact zeros skipped, a CTCSS-band tone ignored, and the reading invariant to
- * how the audio is chunked. All audio here is modelled (synthetic), never a recording.
+ * how the audio is chunked; the data-buzz branch (candidate rule RA-3) likewise, and its features
+ * on modelled PCM. All audio here is modelled (synthetic), never a recording.
  */
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { mulberry32 } from "../../../mocks/scanner/signals.js"
 import {
 	ADMISSION_DEFAULTS,
+	ADMISSION_LOUD_MARGIN_DB,
 	ADMISSION_MAX_BURST_FRAMES,
+	ADMISSION_MAX_LOUD_PITCH_SHARE,
 	ADMISSION_MAX_PERIODIC,
 	ADMISSION_MAX_SPREAD_DB,
+	ADMISSION_MAX_TOP_SPREAD_DB,
 	ADMISSION_MIN_FLOOR_DBFS,
 	ADMISSION_MIN_FRAMES,
+	ADMISSION_MIN_LOUD_LEVEL_DBFS,
+	admissionBranch,
 	admissionNoise,
 	SPEECH_FRAME_SAMPLES,
 	SPEECH_WINDOW_FRAMES,
@@ -70,6 +76,10 @@ function speech(
 	return out
 }
 
+/**
+ * A noise-like reading for the RA-2 branch: its loudest window is quiet (−20 dBFS), so the
+ * data-buzz guard never fires and each RA-2 bound decides alone.
+ */
 const content = (over: Partial<SpeechContent> = {}): SpeechContent => ({
 	frames: 400,
 	maxRangeDb: 3,
@@ -78,6 +88,27 @@ const content = (over: Partial<SpeechContent> = {}): SpeechContent => ({
 	levelFrames: 400,
 	maxWindowSpreadDb: 3,
 	minWindowP10Dbfs: -10,
+	maxLoudPitchShare: 0.02,
+	maxTopSpreadDb: 2,
+	maxLoudLevelDbfs: -20,
+	...over,
+})
+
+/**
+ * A data-buzz reading: loud data bursts on a quiet carrier. The quieting (p10 −60 dBFS, a 40 dB
+ * spread, long bursts) fails RA-2, so each data-buzz bound decides alone.
+ */
+const buzz = (over: Partial<SpeechContent> = {}): SpeechContent => ({
+	frames: 140,
+	maxRangeDb: 30,
+	periodicShare: 0.08,
+	maxBurstFrames: 40,
+	levelFrames: 140,
+	maxWindowSpreadDb: 40,
+	minWindowP10Dbfs: -60,
+	maxLoudPitchShare: 0.23,
+	maxTopSpreadDb: 3.3,
+	maxLoudLevelDbfs: -4.7,
 	...over,
 })
 
@@ -92,7 +123,14 @@ describe("admission: the rule's bounds (each at and past its value)", () => {
 			minFloorDbfs: -25,
 			maxBurstFrames: 4,
 			maxPeriodicShare: 0.25,
+			maxLoudPitchShare: 0.4,
+			maxTopSpreadDb: 10,
+			minLoudLevelDbfs: -11,
 		})
+		expect(ADMISSION_MAX_LOUD_PITCH_SHARE).toBe(0.4)
+		expect(ADMISSION_MAX_TOP_SPREAD_DB).toBe(10)
+		expect(ADMISSION_MIN_LOUD_LEVEL_DBFS).toBe(-11)
+		expect(ADMISSION_LOUD_MARGIN_DB).toBe(10)
 		expect(Object.isFrozen(ADMISSION_DEFAULTS)).toBe(true)
 		expect(ADMISSION_MAX_SPREAD_DB).toBe(10)
 		expect(ADMISSION_MIN_FLOOR_DBFS).toBe(-25)
@@ -100,8 +138,9 @@ describe("admission: the rule's bounds (each at and past its value)", () => {
 		expect(ADMISSION_MAX_PERIODIC).toBe(0.25)
 	})
 
-	it("a noise-like reading is noise", () => {
+	it("a noise-like reading is noise (branch noise)", () => {
 		expect(admissionNoise(content())).toBe(true)
+		expect(admissionBranch(content())).toBe("noise")
 	})
 
 	it("level frames: 93 not measured (null), 94 measured", () => {
@@ -142,6 +181,165 @@ describe("admission: the rule's bounds (each at and past its value)", () => {
 		)
 		expect(admissionNoise(c, { ...ADMISSION_DEFAULTS, minFrames: 500 })).toBe(
 			null,
+		)
+	})
+})
+
+describe("admission: the data-buzz branch's bounds (RA-3, each at and past its value)", () => {
+	// Feature: recording-admission, candidate rule RA-3 (provisional bounds).
+	it("data bursts on a quiet carrier: RA-2 keeps them, data-buzz discards them", () => {
+		const c = buzz()
+		expect(
+			admissionNoise(c, { ...ADMISSION_DEFAULTS, minLoudLevelDbfs: Infinity }),
+		).toBe(false)
+		expect(admissionNoise(c)).toBe(true)
+		expect(admissionBranch(c)).toBe("data-buzz")
+	})
+
+	it("level frames: 93 not measured (null) on either branch, 94 measured", () => {
+		expect(admissionBranch(buzz({ levelFrames: 93 }))).toBeNull()
+		expect(admissionNoise(buzz({ levelFrames: 93 }))).toBeNull()
+		expect(admissionBranch(buzz({ levelFrames: 94 }))).toBe("data-buzz")
+	})
+
+	it("loud-frame pitched share: under 0.40 data buzz, at 0.40 and past it kept", () => {
+		expect(admissionBranch(buzz({ maxLoudPitchShare: 0.399 }))).toBe(
+			"data-buzz",
+		)
+		expect(admissionNoise(buzz({ maxLoudPitchShare: 0.4 }))).toBe(false)
+		expect(admissionNoise(buzz({ maxLoudPitchShare: 0.41 }))).toBe(false)
+	})
+
+	it("top spread: under 10 dB data buzz, at 10 dB and past it kept", () => {
+		expect(admissionBranch(buzz({ maxTopSpreadDb: 9.99 }))).toBe("data-buzz")
+		expect(admissionNoise(buzz({ maxTopSpreadDb: 10 }))).toBe(false)
+		expect(admissionNoise(buzz({ maxTopSpreadDb: 10.01 }))).toBe(false)
+	})
+
+	it("loudest window: over -11 dBFS data buzz, at -11 and under it kept (the weak-voice guard)", () => {
+		expect(admissionBranch(buzz({ maxLoudLevelDbfs: -10.99 }))).toBe(
+			"data-buzz",
+		)
+		expect(admissionNoise(buzz({ maxLoudLevelDbfs: -11 }))).toBe(false)
+		expect(admissionNoise(buzz({ maxLoudLevelDbfs: -11.01 }))).toBe(false)
+		// No whole level window measured (−Infinity): never data buzz.
+		expect(admissionNoise(buzz({ maxLoudLevelDbfs: -Infinity }))).toBe(false)
+	})
+
+	it("periodic share: both branches need it under 0.25 (a tone or slow 2FSK is kept)", () => {
+		expect(admissionBranch(buzz({ periodicShare: 0.249 }))).toBe("data-buzz")
+		expect(admissionNoise(buzz({ periodicShare: 0.25 }))).toBe(false)
+		expect(admissionNoise(buzz({ periodicShare: 0.26 }))).toBe(false)
+	})
+
+	it("one voice feature is enough to keep: pitched loud frames OR a syllable-like top", () => {
+		expect(
+			admissionNoise(buzz({ maxLoudPitchShare: 0.74, maxTopSpreadDb: 3 })),
+		).toBe(false)
+		expect(
+			admissionNoise(buzz({ maxLoudPitchShare: 0.1, maxTopSpreadDb: 13.3 })),
+		).toBe(false)
+	})
+
+	it("both branches match: noise wins the tag", () => {
+		expect(admissionBranch(content({ maxLoudLevelDbfs: -5 }))).toBe("noise")
+	})
+
+	it("takes overrides: a stricter pitch bound keeps the buzz", () => {
+		expect(
+			admissionNoise(buzz(), { ...ADMISSION_DEFAULTS, maxLoudPitchShare: 0.2 }),
+		).toBe(false)
+	})
+})
+
+describe("admission: the meter's data-buzz features (modelled PCM)", () => {
+	/** Modelled FM-demodulated 2FSK at `baud`: a full-scale-ish square of random signs. */
+	function fsk(
+		frames: number,
+		baud: number,
+		amp = 20_000,
+		seed = 4,
+	): Int16Array {
+		const rng = mulberry32(seed)
+		const out = new Int16Array(frames * N)
+		const per = FS / baud
+		let sign = 1
+		for (let i = 0; i < out.length; i++) {
+			if (i % per < 1) sign = rng() < 0.5 ? -1 : 1
+			out[i] = sign * amp
+		}
+		return out
+	}
+
+	it("under one whole level window: 0, 0 and -Infinity (not measured)", () => {
+		for (const frames of [0, 15, 40, 93])
+			expect(measure(noise(frames, -10))).toMatchObject({
+				maxLoudPitchShare: 0,
+				maxTopSpreadDb: 0,
+				maxLoudLevelDbfs: -Infinity,
+			})
+		const c = measure(noise(94, -10))
+		expect(c.maxLoudLevelDbfs).toBeGreaterThan(-12)
+	})
+
+	it("steady white noise at -10 dBFS: no pitched loud frame, a flat top, loud", () => {
+		const c = measure(noise(250, -10))
+		expect(c.maxLoudPitchShare).toBeLessThan(0.05)
+		expect(c.maxTopSpreadDb).toBeLessThan(2)
+		expect(c.maxLoudLevelDbfs).toBeGreaterThan(-12)
+		expect(c.maxLoudLevelDbfs).toBeLessThan(-9)
+		expect(admissionBranch(c)).toBe("noise")
+	})
+
+	it("speech-like syllables: their loud frames are pitched and their top is peaked, kept", () => {
+		const c = measure(speech(250))
+		expect(c.maxLoudPitchShare).toBeGreaterThan(
+			ADMISSION_MAX_LOUD_PITCH_SHARE + 0.3,
+		)
+		// Peaked too (about 10 dB here), though the pitch alone keeps it.
+		expect(c.maxTopSpreadDb).toBeGreaterThan(6)
+		expect(admissionBranch(c)).toBeNull()
+	})
+
+	it("3 s of 2FSK bursts, then 1.5 s of a quieted carrier: RA-2 keeps it, data-buzz discards it", () => {
+		const frames = 140 // 4.48 s
+		const pcm = noise(frames, -55, 7)
+		pcm.set(fsk(94, 1_200))
+		const c = measure(pcm)
+		expect(c.minWindowP10Dbfs).toBeLessThan(ADMISSION_MIN_FLOOR_DBFS)
+		expect(c.maxLoudPitchShare).toBeLessThan(ADMISSION_MAX_LOUD_PITCH_SHARE)
+		expect(c.maxTopSpreadDb).toBeLessThan(ADMISSION_MAX_TOP_SPREAD_DB)
+		expect(c.maxLoudLevelDbfs).toBeGreaterThan(ADMISSION_MIN_LOUD_LEVEL_DBFS)
+		expect(admissionBranch(c)).toBe("data-buzz")
+	})
+
+	it("the same bursts 20 dB down (a weak-voice level): the guard keeps it", () => {
+		const pcm = noise(140, -55, 7)
+		pcm.set(fsk(94, 1_200, 2_000))
+		const c = measure(pcm)
+		expect(c.maxLoudLevelDbfs).toBeLessThan(ADMISSION_MIN_LOUD_LEVEL_DBFS)
+		expect(admissionNoise(c)).toBe(false)
+	})
+
+	it("a window's loud frames are those within 10 dB of its p90: quieter pitched frames do not count", () => {
+		// 2FSK data at the top and the pitched voice of `speech` 20 dB down in the same windows:
+		// the loud frames are the data, unpitched.
+		const frames = 188
+		const data = fsk(frames, 1_200)
+		const mixed = (quiet: Int16Array): Int16Array => {
+			const pcm = new Int16Array(data)
+			for (let f = 0; f < frames; f += 4)
+				for (let i = f * N; i < (f + 1) * N; i++)
+					pcm[i] = Math.round(quiet[i]! / 10)
+			return pcm
+		}
+		const voiced = measure(mixed(speech(frames)))
+		// The same data with unpitched noise in those frames instead.
+		const unvoiced = measure(mixed(noise(frames, -15, 5)))
+		expect(voiced.periodicShare).toBeGreaterThan(unvoiced.periodicShare + 0.1)
+		expect(voiced.maxLoudPitchShare).toBe(unvoiced.maxLoudPitchShare)
+		expect(voiced.maxLoudPitchShare).toBeLessThan(
+			ADMISSION_MAX_LOUD_PITCH_SHARE,
 		)
 	})
 })

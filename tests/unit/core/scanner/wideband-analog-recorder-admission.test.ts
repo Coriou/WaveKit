@@ -119,6 +119,8 @@ describe("W1 recording admission: noise on a channel with no digital evidence", 
 		expect(h.ops[0]!.noise).toMatchObject({
 			reason: "noise",
 			strength: "none",
+			// The branch that fired (RA-2's steady-noise reading).
+			branch: "noise",
 			frequencyHz: expect.any(Number) as number,
 		})
 		expect(h.ops[0]!.noise!.p10Dbfs).toBeGreaterThan(-25)
@@ -130,6 +132,7 @@ describe("W1 recording admission: noise on a channel with no digital evidence", 
 			discoveryId: "d_1",
 			reason: "noise",
 			strength: "none",
+			branch: "noise",
 		})
 		expect(noise[0]!["p10Dbfs"] as number).toBeGreaterThan(-25)
 		expect(noise[0]!["spreadDb"] as number).toBeLessThan(10)
