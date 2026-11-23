@@ -22,7 +22,7 @@ import {
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import {
 	MAX_ACTIVE_ANALOG_OPERATIONS,
-	MAX_ACTIVE_ANALOG_PER_SOURCE,
+	analogPerSourceLimit,
 	type AnalogCut,
 	type AnalogFinishFacts,
 	type AnalogHandle,
@@ -119,8 +119,8 @@ export const microtasks = async (n: number): Promise<void> => {
 }
 
 /**
- * Fake analog operations with the store's rules: at most MAX_ACTIVE_ANALOG_PER_SOURCE (6) active
- * per source and MAX_ACTIVE_ANALOG_OPERATIONS (8) over all sources (a slot is held until the operation settles), the binding must be live at
+ * Fake analog operations with the store's rules: at most the admission's per-source limit
+ * (analogPerSourceLimit: the wideband recorder asks for the ceiling, 6; absent, 2) active per source and MAX_ACTIVE_ANALOG_OPERATIONS (8) over all sources (a slot is held until the operation settles), the binding must be live at
  * admission and again at the finish, and the finish takes a few turns (I/O) to settle.
  */
 export function fakeOps(
@@ -160,7 +160,7 @@ export function fakeOps(
 		).length
 		const capacity =
 			active.size < MAX_ACTIVE_ANALOG_OPERATIONS &&
-			sameSource < MAX_ACTIVE_ANALOG_PER_SOURCE
+			sameSource < analogPerSourceLimit(input.perSourceLimit)
 		if (capacity) active.add(op)
 		else op.denied = true
 		const ready =

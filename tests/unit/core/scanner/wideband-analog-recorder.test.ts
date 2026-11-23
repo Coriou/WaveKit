@@ -234,7 +234,7 @@ describe("WidebandAnalogRecorder", () => {
 	}, 60_000)
 
 	it("without a CPU reading a source records at most the floor of 2 at once, whatever the budget's cap", () => {
-		expect(widebandRecordingCap(1_024_000, 1)).toBe(6)
+		expect(widebandRecordingCap(1_024_000, 1)).toBe(4)
 		const h = harness()
 		for (let i = 0; i < 3; i++)
 			h.rec.track(

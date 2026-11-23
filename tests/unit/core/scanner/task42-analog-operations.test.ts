@@ -24,6 +24,8 @@ import {
 	AnalogOperations,
 	MAX_ACTIVE_ANALOG_OPERATIONS,
 	MAX_ACTIVE_ANALOG_PER_SOURCE,
+	MIN_ACTIVE_ANALOG_PER_SOURCE,
+	analogPerSourceLimit,
 	type AnalogMetadataAdapter,
 	type AnalogOperationIo,
 	type AnalogReceipt,
@@ -136,8 +138,14 @@ async function harness(
 		state,
 		adapter,
 		evidence,
-		begin: () =>
-			evidence.beginAnalog({ discoveryId, observationId: "o1", binding }),
+		/** `perSourceLimit`: the admission's per-source limit (absent: the floor, as the channel tier's producer). */
+		begin: (perSourceLimit?: number) =>
+			evidence.beginAnalog({
+				discoveryId,
+				observationId: "o1",
+				binding,
+				...(perSourceLimit === undefined ? {} : { perSourceLimit }),
+			}),
 	}
 }
 async function record(
@@ -1341,11 +1349,11 @@ describe("Task42 owned prepared-link operations", () => {
 		const h = await harness()
 		// At the bound: six on one source are all admitted.
 		const accepted = Array.from({ length: MAX_ACTIVE_ANALOG_PER_SOURCE }, () =>
-			h.begin(),
+			h.begin(MAX_ACTIVE_ANALOG_PER_SOURCE),
 		)
 		await Promise.all(accepted.map(op => op.ready))
 		// Past it: the seventh is denied before any payload.
-		const seventh = h.begin()
+		const seventh = h.begin(MAX_ACTIVE_ANALOG_PER_SOURCE)
 		await expect(seventh.ready).rejects.toThrow("Active analog operation limit")
 		expect((await seventh.settled).outcome).toBe("failed")
 		expect(existsSync(privateDir(h.root, seventh.operationId))).toBe(false)
@@ -1372,7 +1380,7 @@ describe("Task42 owned prepared-link operations", () => {
 				binding: other,
 			})
 		const first = Array.from({ length: MAX_ACTIVE_ANALOG_PER_SOURCE }, () =>
-			h.begin(),
+			h.begin(MAX_ACTIVE_ANALOG_PER_SOURCE),
 		)
 		const second = [beginOther(), beginOther()]
 		// At the global bound: 6 + 2 = 8 admitted.
@@ -1383,6 +1391,40 @@ describe("Task42 owned prepared-link operations", () => {
 		expect((await ninth.settled).outcome).toBe("failed")
 		for (const op of [...first, ...second]) op.cancel()
 		await Promise.all([...first, ...second].map(op => op.settled))
+	})
+	it("a producer without a CPU gate (no perSourceLimit, as the channel tier's) gets at most 2 per source; the wideband recorder's ceiling admits 6", async () => {
+		expect(MIN_ACTIVE_ANALOG_PER_SOURCE).toBe(2)
+		expect(analogPerSourceLimit(undefined)).toBe(2)
+		// Clamped to [2, 6]: past either bound gives the bound; not finite gives the floor.
+		expect(analogPerSourceLimit(1)).toBe(2)
+		expect(analogPerSourceLimit(7)).toBe(6)
+		expect(analogPerSourceLimit(4.9)).toBe(4)
+		expect(analogPerSourceLimit(Number.NaN)).toBe(2)
+		expect(analogPerSourceLimit(Number.POSITIVE_INFINITY)).toBe(2)
+		const h = await harness()
+		// At the floor: two channel-tap-like admissions on the source.
+		const tap = [h.begin(), h.begin()]
+		await Promise.all(tap.map(op => op.ready))
+		// Past it: a third without a CPU gate is denied before any payload.
+		const third = h.begin()
+		await expect(third.ready).rejects.toThrow("Active analog operation limit")
+		expect((await third.settled).outcome).toBe("failed")
+		expect(existsSync(privateDir(h.root, third.operationId))).toBe(false)
+		// The wideband recorder's admissions (perSourceLimit 6) fill the source up to 6, counting
+		// the two already there (any producer's operation counts on the source).
+		const wide = Array.from({ length: 4 }, () =>
+			h.begin(MAX_ACTIVE_ANALOG_PER_SOURCE),
+		)
+		await Promise.all(wide.map(op => op.ready))
+		const seventh = h.begin(MAX_ACTIVE_ANALOG_PER_SOURCE)
+		await expect(seventh.ready).rejects.toThrow("Active analog operation limit")
+		// And the source holding more than 2 still denies a producer without a CPU gate.
+		const tapAgain = h.begin()
+		await expect(tapAgain.ready).rejects.toThrow(
+			"Active analog operation limit",
+		)
+		for (const op of [...tap, ...wide]) op.cancel()
+		await Promise.all([...tap, ...wide].map(op => op.settled))
 	})
 	it("metadata aggregate overflow and bounded directory enumeration fail closed without cleanup", async () => {
 		const h = await harness()

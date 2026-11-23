@@ -81,6 +81,7 @@ const calm: RecordingCpuReading = {
 	ownCores: 0.5,
 	capacityCores: 8,
 	guardPercent: 90,
+	hostPercent: 10,
 }
 
 describe("simultaneous FM voices in one span (modelled)", () => {
@@ -95,7 +96,7 @@ describe("simultaneous FM voices in one span (modelled)", () => {
 		expect(r.stray).toEqual([])
 	}, 300_000)
 
-	it("a calm reading: all four voices recorded whole at once, nothing refused for slots, no stray file", async () => {
+	it("a calm reading: all four voices recorded whole at once (the default budget's 4 slots at 1.024 Msps), nothing refused for slots, no stray file", async () => {
 		const r = await run(() => calm)
 		expect(r.outcomes).toEqual(["whole", "whole", "whole", "whole"])
 		expect(r.maxActive).toBeGreaterThanOrEqual(4)

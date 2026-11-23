@@ -170,9 +170,9 @@ export const RECORDER_STREAK_FIXES = Object.freeze({
 	"refused:tuning":
 		"GET /api/sources (sources[].tuningUnproven), then POST /api/tuner/:sourceId/take-back",
 	"refused:cpu":
-		"GET /api/diagnostics, then raise cpuBudgetCores with PATCH /api/scanner/settings",
+		"GET /api/diagnostics: the shared CPU budget is full or the measured core or host CPU is busy; wait, or free CPU or raise cpuBudgetCores with PATCH /api/scanner/settings",
 	"refused:slots":
-		"GET /api/scanner (recorder.sessions), then raise cpuBudgetCores with PATCH /api/scanner/settings",
+		"GET /api/scanner (recorder.sessions): the source is at its recording limit, or at the floor of 2 without a CPU reading; wait for a recording to end",
 	"refused:no-iq":
 		"GET /api/sources: the source must deliver U8_IQ for the analog recorder",
 	"refused:store":

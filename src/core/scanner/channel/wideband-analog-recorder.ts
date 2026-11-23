@@ -54,6 +54,7 @@ import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import { CtcssBank } from "../../audio-tones/ctcss.js"
 import { ulid } from "../ids.js"
+import { CPU_COST } from "../plan/cost.js"
 import type {
 	AnalogCut,
 	AnalogFinishFacts,
@@ -498,13 +499,27 @@ export const WIDEBAND_DEFAULT_RING_SECONDS = 3
 export const WIDEBAND_CPU_FIXED_MS = 50
 export const WIDEBAND_CPU_MS_PER_MSPS = 9
 /**
- * Share of `cpuBudgetCores` the concurrent recordings on one source may use (per source: each
- * source's cap is computed from it alone): 0.5, so at the default 1-core budget a source
- * records up to 6 voices at once (6 × 0.0716 = 0.43 cores at 2.4 Msps). Each recording also
- * reserves its cores in that budget (reserveCores), so recordings and probes never exceed it
- * together.
+ * Share of `cpuBudgetCores` the concurrent recordings on one source may use without regard to
+ * probes (per source: each source's slot cap is computed from it alone): 0.25, so at the
+ * default 1-core budget 3 at 2.4 Msps (0.215 cores) and 4 at 1.024 Msps (0.237 cores). A calm
+ * CPU reading may raise the limit above these slots, up to MAX_ACTIVE_ANALOG_PER_SOURCE (6),
+ * but each recording above them starts only while the shared budget keeps one probe's room
+ * (WIDEBAND_PROBE_ROOM_CORES) free beside it. Every recording reserves its cores in that budget
+ * (reserveCores), so recordings and probes never exceed it together.
  */
-export const WIDEBAND_CPU_SHARE = 0.5
+export const WIDEBAND_CPU_SHARE = 0.25
+/**
+ * Room one probe needs in the shared CPU budget (cpuBudgetCores): its offset probe
+ * (CPU_COST.offsetProbe, 0.5) plus the dearest probe decoder (0.1: rtl433, and the cost of an
+ * unknown decoder), 0.6 cores. A recording above the budget's slots (widebandRecordingCap)
+ * starts only while this much stays free after it, so recordings the CPU reading allows beyond
+ * the slots never keep a probe or live audio out. Default 1-core budget, the engine's 0.08
+ * counted: at 2.4 Msps 3 slots (0.215) + 1 above (0.0716) = 0.367 used, 0.633 free; a fifth
+ * would leave 0.561 < 0.6, so 4 at once while nothing else holds cores; at 1.024 Msps 4 slots
+ * (0.237) + 1 above = 0.376 used, 0.624 free, so 5. Six need a budget of 1.11 cores at
+ * 2.4 Msps (0.08 + 6 · 0.0716 + 0.6) or 1.04 at 1.024 Msps.
+ */
+export const WIDEBAND_PROBE_ROOM_CORES = CPU_COST.offsetProbe + 0.1
 /**
  * Missing input longer than this, summed over consecutive unreadable slices (a ring overrun
  * reads as many 25 ms gaps), ends the file instead of inserting silence.
@@ -632,10 +647,13 @@ const RECENT_ENDS = 32
  * Concurrent recordings per source the configured budget allows at `inputRateHz` (the slot
  * cap): floor(share · cpuBudgetCores · 1000 ms / (fixed + slope · rate in Msps)), at least
  * MIN_ACTIVE_ANALOG_PER_SOURCE (2) and at most MAX_ACTIVE_ANALOG_PER_SOURCE (6, the analog
- * operations' own ceiling). Default budget 1 core: floor(500 / 71.6) = 6 at 2.4 Msps,
- * floor(500 / 59.2) = 8 → 6 at 1.024 Msps; a 0.5-core budget: floor(250 / 71.6) = 3 at
- * 2.4 Msps; a 0.1-core budget: floor(50 / 59.2) = 0 → 2. A non-positive or non-finite rate or
- * budget, or one so large an intermediate overflows to a non-finite value, gives the floor.
+ * operations' own ceiling). Default budget 1 core: floor(250 / 71.6) = 3 at 2.4 Msps,
+ * floor(250 / 59.2) = 4 at 1.024 Msps; a 2-core budget: floor(500 / 71.6) = 6 at 2.4 Msps; a
+ * 0.5-core budget: floor(125 / 71.6) = 1 → 2; a 0.1-core budget: floor(25 / 59.2) = 0 → 2. A
+ * calm CPU reading may raise the limit above these slots (widebandRecordingLimit), each
+ * recording above them keeping a probe's room free (WIDEBAND_PROBE_ROOM_CORES). A
+ * non-positive or non-finite rate or budget, or one so large an intermediate overflows to a
+ * non-finite value, gives the floor.
  */
 export function widebandRecordingCap(
 	inputRateHz: number,
@@ -675,9 +693,17 @@ export interface RecordingCpuReading {
 	readonly capacityCores: number | null
 	readonly guardPercent: number
 	/**
-	 * The gate sample's time (its cpuAt, ms), which names the reading: the room a calm reading
-	 * leaves is shared by every source and spent once (recordingCpuKey). Absent or not finite:
-	 * the reading is named by its values instead.
+	 * Host CPU at the sample (percent of the host's capacity, own CPU included). A calm reading
+	 * gives room above the floor only while the host leaves room under the guard too
+	 * (widebandRecordingLimit); absent, null or malformed: no room above the floor.
+	 */
+	readonly hostPercent?: number | null
+	/**
+	 * The gate sample's time (its cpuAt, on the gate's monotonic clock, ms), which names the
+	 * reading: the room a calm reading leaves is shared by every source and spent once
+	 * (recordingCpuKey). The core's gate gives it (EfficiencyCpuState.sampledAt); absent or not
+	 * finite, the reading is named by its values instead, so two samples with equal values count
+	 * as one reading (their room is spent once over both: the safe side).
 	 */
 	readonly sampledAt?: number | null
 }
@@ -706,20 +732,25 @@ export const WIDEBAND_RECORDING_OVERHEAD_CORES =
 export function recordingCpuKey(cpu: RecordingCpuReading): string {
 	const at = cpu.sampledAt
 	if (typeof at === "number" && Number.isFinite(at)) return `t:${at}`
-	return `v:${cpu.label}|${String(cpu.ownCores)}|${String(cpu.capacityCores)}|${String(cpu.guardPercent)}`
+	return `v:${cpu.label}|${String(cpu.ownCores)}|${String(cpu.capacityCores)}|${String(cpu.guardPercent)}|${String(cpu.hostPercent)}`
 }
 
 /** The per-source recording limit and what set it (widebandRecordingLimit). */
 export interface WidebandRecordingLimit {
 	/** Recordings the source may hold at once now. */
 	readonly limit: number
-	/** The configured budget's cap (widebandRecordingCap). */
+	/**
+	 * The configured budget's slots (widebandRecordingCap): a calm reading may raise the limit
+	 * above them (up to MAX_ACTIVE_ANALOG_PER_SOURCE), each recording above them keeping a
+	 * probe's room free in the shared budget (WIDEBAND_PROBE_ROOM_CORES).
+	 */
 	readonly cap: number
 	/**
-	 * Why the limit is under the cap: `pressure` (the gate reads own CPU over the guard or the
-	 * host busy, or calm with too little spare under the guard for more; a refusal at the limit
-	 * is `refused:cpu`), `unknown` (no fresh, well-formed reading: the safe answer, the floor;
-	 * a refusal is `refused:slots`, as at the cap), null when the limit is the cap.
+	 * Why the limit is under its ceiling: `pressure` (the gate reads own CPU over the guard or
+	 * the host busy, or calm with too little room under the guard for more; a refusal at the
+	 * limit is `refused:cpu`), `unknown` (no fresh, well-formed reading: the safe answer, the
+	 * floor; a refusal is `refused:slots`), null when the limit is its ceiling (6, or the
+	 * floor when the budget's slots are the floor; a refusal is `refused:slots`).
 	 */
 	readonly shrunk: "pressure" | "unknown" | null
 }
@@ -728,21 +759,35 @@ const finiteAtLeast = (v: unknown, min: number): v is number =>
 	typeof v === "number" && Number.isFinite(v) && v >= min
 
 /**
- * Recordings one source may hold at once: the configured cap (widebandRecordingCap) unless the
- * measured CPU says less. Only a fresh `calm` reading with a finite ownCores ≥ 0, a finite
- * capacityCores > 0 and a guard in (0, 100] allows more than MIN_ACTIVE_ANALOG_PER_SOURCE (2):
+ * Recordings one source may hold at once. A budget whose slots (widebandRecordingCap) are the
+ * floor stays at the floor, whatever the reading. Otherwise the measured CPU sets it: the
+ * floor of 2 unless a calm reading leaves room, then up to MAX_ACTIVE_ANALOG_PER_SOURCE (6),
+ * above the budget's slots too (each recording above them must also keep a probe's room free
+ * in the shared budget when it starts: WIDEBAND_PROBE_ROOM_CORES). A pressure label
+ * (`own-over`, `host-busy`, `host-busy-unattributed`) is the floor at once, whatever its other
+ * fields (a refusal there is `refused:cpu`). Only a
+ * fresh `calm` reading with a finite ownCores ≥ 0, a finite capacityCores > 0, a guard in
+ * (0, 100] and a finite hostPercent ≥ 0 allows more than MIN_ACTIVE_ANALOG_PER_SOURCE (2). The
+ * room is the smaller of the core's own spare and the host's, in cores:
  *
- *   spare = capacityCores · guardPercent / 100 − ownCores − spentCores
- *   limit = clamp(active + floor(spare / perRecordingCores), 2, cap)
+ *   ownSpare  = capacityCores · guardPercent / 100 − ownCores
+ *   hostSpare = capacityCores · (guardPercent − hostPercent) / 100
+ *   spare = min(ownSpare, hostSpare) − spentCores
+ *   limit = clamp(active + floor(spare / perRecordingCores), 2, 6)
  *
- * with perRecordingCores = widebandRecordingRoomCores(rate) (0.10 at 1.024 Msps, 0.1124 at
+ * so a host busy with other work (host 84 % of an 85 % guard: hostSpare = 1 % of capacity,
+ * 0.08 of 8 cores, under one recording) gives no room above the floor even while the core's own
+ * CPU is low. An absent, null or malformed hostPercent gives no room above the floor (`unknown`).
+ *
+ * Here perRecordingCores = widebandRecordingRoomCores(rate) (0.10 at 1.024 Msps, 0.1124 at
  * 2.4 Msps), `active` the source's sessions now and `spentCores` the room cores already given,
  * under this same reading, to recordings started above the floor on any source (the recorder's
  * ledger: a reading's room is shared by every source and spent once, so the starts above the
  * floor under one reading are at most floor(spare / per) overall, never that per source or per
- * start). For example 8 cores at an 85 % guard with 1.2 cores own and 3 active at 2.4 Msps:
- * spare = 6.8 − 1.2 = 5.6, 3 + floor(5.6 / 0.1124) = 52 → the cap (6 at a 1-core budget). Calm
- * at 1.75 own of 2 cores (guard 90: spare 0.05) with 2 active: 2 + 0 = 2. Any other label
+ * start). For example 8 cores at an 85 % guard with 1.2 cores own, host 20 % and 3 active at
+ * 2.4 Msps: ownSpare = 6.8 − 1.2 = 5.6, hostSpare = 8 · 0.65 = 5.2, 3 + floor(5.2 / 0.1124) = 49
+ * → the ceiling, 6. Calm at 1.75 own of 2 cores (guard 90: ownSpare 0.05) with
+ * 2 active: 2 + 0 = 2. Any other label
  * (`own-over`, `host-busy`, `host-busy-unattributed`: pressure; `unknown`), no reading, a stale
  * or malformed one, or one whose arithmetic overflows: the floor, 2. Sessions already running
  * are never stopped by a lower limit; new ones wait until the source is under it. A reading
@@ -761,21 +806,26 @@ export function widebandRecordingLimit(
 	if (cap <= floor) return { limit: cap, cap, shrunk: null }
 	const unknown = { limit: floor, cap, shrunk: "unknown" } as const
 	if (cpu === null || cpu === undefined) return unknown
-	const { label, ownCores, capacityCores, guardPercent } = cpu
+	const { label, ownCores, capacityCores, guardPercent, hostPercent } = cpu
+	// Pressure first: host-busy-unattributed carries no own reading (ownCores null), and it is
+	// still pressure (refused:cpu), not an absent reading.
+	if (typeof label === "string" && PRESSURE_LABELS.has(label))
+		return { limit: floor, cap, shrunk: "pressure" }
 	if (
-		typeof label !== "string" ||
+		label !== "calm" ||
 		!finiteAtLeast(ownCores, 0) ||
 		!finiteAtLeast(capacityCores, 0) ||
 		capacityCores === 0 ||
 		!finiteAtLeast(guardPercent, 0) ||
 		guardPercent === 0 ||
 		guardPercent > 100 ||
-		(label !== "calm" && !PRESSURE_LABELS.has(label))
+		!finiteAtLeast(hostPercent, 0)
 	)
 		return unknown
-	if (label !== "calm") return { limit: floor, cap, shrunk: "pressure" }
 	const spent = finiteAtLeast(spentCores, 0) ? spentCores : 0
-	const spare = (capacityCores * guardPercent) / 100 - ownCores - spent
+	const ownSpare = (capacityCores * guardPercent) / 100 - ownCores
+	const hostSpare = (capacityCores * (guardPercent - hostPercent)) / 100
+	const spare = Math.min(ownSpare, hostSpare) - spent
 	const per = widebandRecordingRoomCores(inputRateHz)
 	const room = spare > 0 && per > 0 ? Math.floor(spare / per) : 0
 	const running = finiteAtLeast(active, 0) ? Math.floor(active) : 0
@@ -788,8 +838,9 @@ export function widebandRecordingLimit(
 		!Number.isFinite(sum)
 	)
 		return unknown
-	const limit = Math.max(floor, Math.min(cap, sum))
-	return { limit, cap, shrunk: limit < cap ? "pressure" : null }
+	const ceiling = MAX_ACTIVE_ANALOG_PER_SOURCE
+	const limit = Math.max(floor, Math.min(ceiling, sum))
+	return { limit, cap, shrunk: limit < ceiling ? "pressure" : null }
 }
 
 /** The gate's labels that mean CPU pressure (own-cpu.ts CpuSampleLabel, other than calm/unknown). */
@@ -929,8 +980,8 @@ export interface WidebandAnalogDeps {
 	reserveCores?(cores: number): (() => void) | null
 	/**
 	 * The decoder efficiency gate's latest CPU classification (fresh, else null): a calm reading
-	 * with spare cores under the guard lets a source record more than 2 voices at once, up to
-	 * the budget's cap (widebandRecordingLimit). Absent, null, stale or malformed: 2.
+	 * with spare cores under the guard, for the core and the host, lets a source record more
+	 * than 2 voices at once, up to 6 (widebandRecordingLimit). Absent, null, stale or malformed: 2.
 	 */
 	recordingCpu?(): RecordingCpuReading | null
 	/**
@@ -1497,6 +1548,14 @@ export class WidebandAnalogRecorder {
 	 * it was first read. A new reading starts it again.
 	 */
 	private roomLedger: { key: string; spentCores: number } | null = null
+	/**
+	 * Sessions holding no operation whose voiced file waits (in its `waiting`) because every
+	 * operation the store allows over all sources is held (storeFull): a shadow classed after it
+	 * was admitted beside a full store. Its audio stays buffered (WIDEBAND_MAX_BUFFERED_FRAMES)
+	 * and its operation begins once one ends (drainStoreWaiters), oldest first, instead of the
+	 * store refusing it (refused:store) and its opening audio being lost.
+	 */
+	private readonly storeWaiters = new Set<Session>()
 	private readonly refused = new Set<string>()
 	/** Decode- or channel-tier-backed digital classes seen per live discovery (bounded). */
 	private readonly digitalSeen = new DigitalClassLedger()
@@ -1609,9 +1668,9 @@ export class WidebandAnalogRecorder {
 	}
 
 	/**
-	 * The recording limit on `sourceId` at `rateHz` now (widebandRecordingLimit): the configured
-	 * budget's cap, shrunk to the floor of 2 under CPU pressure or without a usable reading. A
-	 * throwing reader counts as none.
+	 * The recording limit on `sourceId` at `rateHz` now (widebandRecordingLimit): 2 to 6, above
+	 * 2 only under a calm reading with room for more, the floor of 2 under CPU pressure or
+	 * without a usable reading. A throwing reader counts as none.
 	 */
 	limitOn(sourceId: string, rateHz: number): WidebandRecordingLimit {
 		return this.limitWith(sourceId, rateHz).bound
@@ -1656,7 +1715,8 @@ export class WidebandAnalogRecorder {
 	 * the store's count (analogActive) or this recorder's unsettled ones, whichever is larger,
 	 * plus this recorder's classed sessions holding none yet (each takes one once its audio
 	 * sounds like voice). Shadows are not counted: an unclassed signal on one source never keeps
-	 * a voice out on another.
+	 * a voice out on another. A shadow classed while the store is full does not take an
+	 * operation the store would refuse: its file waits for one to end (storeWaiters).
 	 */
 	private analogHeld(): number {
 		let own = 0
@@ -1672,6 +1732,36 @@ export class WidebandAnalogRecorder {
 		for (const s of this.sessions.values())
 			if (!s.done && s.ops === 0 && s.classed) pending++
 		return Math.max(own, store) + pending
+	}
+
+	/**
+	 * The store holds every operation it allows over all sources (MAX_ACTIVE_ANALOG_OPERATIONS):
+	 * its count (analogActive) or this recorder's unsettled ones, whichever is larger. Never
+	 * during stop(): a waiting file then begins as before (the store judges it).
+	 */
+	private storeFull(): boolean {
+		if (this.stopped) return false
+		let own = 0
+		for (const n of this.unsettled.values()) own += n
+		let store = 0
+		try {
+			const n = this.deps.analogActive?.()
+			if (typeof n === "number" && Number.isFinite(n)) store = n
+		} catch {
+			store = 0
+		}
+		return Math.max(own, store) >= MAX_ACTIVE_ANALOG_OPERATIONS
+	}
+
+	/** Begins the store waiters' operations, oldest first, while the store has room (storeWaiters). */
+	private drainStoreWaiters(): void {
+		for (const s of [...this.storeWaiters]) {
+			while (s.ops === 0 && s.waiting.length > 0 && !this.storeFull())
+				this.beginOp(s, s.waiting.shift()!)
+			// Holding an operation now, its own settle begins the rest (one at a time).
+			if (s.ops > 0 || s.waiting.length === 0) this.storeWaiters.delete(s)
+			else return
+		}
 	}
 
 	owns(observationId: string): boolean {
@@ -1963,6 +2053,8 @@ export class WidebandAnalogRecorder {
 	track(input: WidebandTrackInput): void {
 		if (this.stopped) return
 		try {
+			// Another producer's operation may have ended since: a file waiting for the store begins.
+			this.drainStoreWaiters()
 			this.onTrack(input)
 		} catch (err: unknown) {
 			this.warn(err)
@@ -2097,6 +2189,7 @@ export class WidebandAnalogRecorder {
 			this.dropParked(s, false, "discarded:park-expired")
 		for (const s of [...this.sessions.values()]) this.endSession(s, "shutdown")
 		for (const file of [...this.held.keys()]) this.release(file)
+		this.drainStoreWaiters()
 		await this.idle()
 	}
 
@@ -2715,8 +2808,9 @@ export class WidebandAnalogRecorder {
 			this.decisions.note("refused:unsupported", ref)
 			return
 		}
-		// The source's limit now: the budget's cap, fewer under measured CPU pressure (a refusal
-		// there is refused:cpu), the floor without a usable reading (refused:slots).
+		// The source's limit now: up to 6 under a calm reading with room, fewer under measured
+		// CPU pressure (a refusal there is refused:cpu), the floor without a usable reading
+		// (refused:slots).
 		const { bound, calmKey } = this.limitWith(
 			input.sourceId,
 			epoch.sampleRateHz,
@@ -2782,16 +2876,28 @@ export class WidebandAnalogRecorder {
 		// Every analog operation the store allows over all sources is held (one source at its
 		// ceiling, another at its floor): the store would refuse a classed candidate's admission,
 		// so it waits for one to end like a full source (not refused, retried next snapshot). A
-		// shadow takes no operation until it is classed, so it is not held back here.
+		// shadow takes no operation until it is classed, so it is not held back here: classed
+		// beside a full store, its voiced file waits for an operation (storeWaiters).
 		if (input.analogFm && this.analogHeld() >= MAX_ACTIVE_ANALOG_OPERATIONS) {
 			this.decisions.note("refused:slots", ref)
 			return
 		}
 		const reserve = this.deps.reserveCores
-		const release = reserve
-			? reserve(widebandSessionCores(epoch.sampleRateHz))
-			: () => undefined
-		// The shared CPU budget is full (probes, live audio): not refused, retried next snapshot.
+		const cores = widebandSessionCores(epoch.sampleRateHz)
+		let release: (() => void) | null = () => undefined
+		if (reserve && before >= bound.cap) {
+			// Above the budget's slots (a calm reading's room): only while the shared budget keeps
+			// a probe's room free beside it (WIDEBAND_PROBE_ROOM_CORES), asked as one reservation
+			// given back at once, then its own cores.
+			const probeRoom = reserve(cores + WIDEBAND_PROBE_ROOM_CORES)
+			if (probeRoom === null) release = null
+			else {
+				probeRoom()
+				release = reserve(cores)
+			}
+		} else if (reserve) release = reserve(cores)
+		// The shared CPU budget is full (probes, live audio), or a recording above the budget's
+		// slots would leave no probe's room: not refused, retried next snapshot.
 		if (release === null) {
 			this.decisions.note("refused:cpu", ref)
 			return
@@ -3202,6 +3308,12 @@ export class WidebandAnalogRecorder {
 		)
 			return
 		if (s.ops === 0) {
+			// Every operation the store allows is held: wait for one to end rather than be refused.
+			if (this.storeFull()) {
+				s.waiting.push(file)
+				this.storeWaiters.add(s)
+				return
+			}
 			this.beginOp(s, file)
 			return
 		}
@@ -3243,6 +3355,10 @@ export class WidebandAnalogRecorder {
 				discoveryId: s.discoveryId,
 				observationId: s.owner,
 				binding,
+				// The store's ceiling: this recorder's own limit (limitWith, 2 to 6) bounds its
+				// sessions per source at their start, and a session started under it is never
+				// refused its operation later because the limit shrank since.
+				perSourceLimit: MAX_ACTIVE_ANALOG_PER_SOURCE,
 			})
 		} catch (err: unknown) {
 			this.bindings.delete(key)
@@ -3269,6 +3385,8 @@ export class WidebandAnalogRecorder {
 				// One at a time: the next waiting file begins when this session holds no slot.
 				while (s.ops === 0 && s.waiting.length > 0)
 					this.beginOp(s, s.waiting.shift()!)
+				// An operation ended: a file waiting for the store's overall limit may begin.
+				this.drainStoreWaiters()
 				if (s.ops === 0 || !s.done) this.yielding.delete(s)
 				this.publishTones(s)
 			})

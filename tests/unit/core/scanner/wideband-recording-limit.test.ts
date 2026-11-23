@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import {
 	WIDEBAND_CPU_SHARE,
+	WIDEBAND_PROBE_ROOM_CORES,
 	widebandRecordingCap,
 	widebandRecordingLimit,
 	widebandRecordingRoomCores,
@@ -35,11 +36,13 @@ const calm = (
 	ownCores: number,
 	capacityCores = 8,
 	guardPercent = 90,
+	hostPercent = 0,
 ): RecordingCpuReading => ({
 	label: "calm",
 	ownCores,
 	capacityCores,
 	guardPercent,
+	hostPercent,
 })
 
 describe("the store's ceiling and its reservation arithmetic", () => {
@@ -68,28 +71,29 @@ describe("the store's ceiling and its reservation arithmetic", () => {
 })
 
 describe("widebandRecordingCap (the configured budget's slots)", () => {
-	it("floor(0.5 · budget · 1000 / (50 + 9 · Msps)), at least 2, at most 6", () => {
-		expect(WIDEBAND_CPU_SHARE).toBe(0.5)
-		// Default 1-core budget: floor(500 / 71.6) = 6 at 2.4 Msps; floor(500 / 59.216) = 8 → 6.
-		expect(widebandRecordingCap(2_400_000, 1)).toBe(6)
-		expect(widebandRecordingCap(1_024_000, 1)).toBe(6)
-		// 0.5 core at 2.4 Msps: floor(250 / 71.6) = 3.
-		expect(widebandRecordingCap(2_400_000, 0.5)).toBe(3)
-		// The floor: floor(50 / 59.216) = 0 → 2.
+	it("floor(0.25 · budget · 1000 / (50 + 9 · Msps)), at least 2, at most 6", () => {
+		expect(WIDEBAND_CPU_SHARE).toBe(0.25)
+		// Default 1-core budget: floor(250 / 71.6) = 3 at 2.4 Msps; floor(250 / 59.216) = 4.
+		expect(widebandRecordingCap(2_400_000, 1)).toBe(3)
+		expect(widebandRecordingCap(1_024_000, 1)).toBe(4)
+		// 2 cores at 2.4 Msps: floor(500 / 71.6) = 6; 0.5 core: floor(125 / 71.6) = 1 → 2.
+		expect(widebandRecordingCap(2_400_000, 2)).toBe(6)
+		expect(widebandRecordingCap(2_400_000, 0.5)).toBe(2)
+		// The floor: floor(25 / 59.216) = 0 → 2.
 		expect(widebandRecordingCap(1_024_000, 0.1)).toBe(2)
 	})
 
 	it("at and past each bound", () => {
-		// Ceiling at 2.4 Msps: 6 slots need 6 · 71.6 / 500 = 0.8592 cores.
-		expect(widebandRecordingCap(2_400_000, 0.8592)).toBe(6)
-		expect(widebandRecordingCap(2_400_000, 0.8591)).toBe(5)
-		// Past the ceiling: 7 · 59.216 / 500 = 0.829 cores would give 7 at 1.024 Msps → 6.
-		expect(widebandRecordingCap(1_024_000, 0.83)).toBe(6)
+		// Ceiling at 2.4 Msps: 6 slots need 6 · 71.6 / 250 = 1.7184 cores.
+		expect(widebandRecordingCap(2_400_000, 1.7184)).toBe(6)
+		expect(widebandRecordingCap(2_400_000, 1.7183)).toBe(5)
+		// Past the ceiling: 7 · 59.216 / 250 = 1.658 cores would give 7 at 1.024 Msps → 6.
+		expect(widebandRecordingCap(1_024_000, 1.66)).toBe(6)
 		expect(widebandRecordingCap(1_024_000, 64)).toBe(6)
-		// Floor: 3 slots need 3 · 59.216 / 500 = 0.3553 cores (1.024 Msps: 50 + 9.216 ms); under
+		// Floor: 3 slots need 3 · 59.216 / 250 = 0.7106 cores (1.024 Msps: 50 + 9.216 ms); under
 		// it 2, and never under 2.
-		expect(widebandRecordingCap(1_024_000, 0.3553)).toBe(3)
-		expect(widebandRecordingCap(1_024_000, 0.3552)).toBe(2)
+		expect(widebandRecordingCap(1_024_000, 0.7106)).toBe(3)
+		expect(widebandRecordingCap(1_024_000, 0.7105)).toBe(2)
 		expect(widebandRecordingCap(1_024_000, 0)).toBe(2)
 	})
 
@@ -150,17 +154,18 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 			expect(widebandRecordingLimit(2_400_000, 1, cpu, 2, bad).limit).toBe(4)
 	})
 
-	it("calm: active + floor(spare under the guard / cores per recording), up to the cap", () => {
-		// 8 cores at 90 %: 7.2 under the guard, 1.2 own, spare 6 → the cap (6).
+	it("calm: active + floor(spare under the guard / cores per recording), up to 6, above the budget's slots", () => {
+		// 8 cores at 90 %: 7.2 under the guard, 1.2 own, spare 6 → the ceiling (6), above the
+		// budget's 3 slots at 2.4 Msps.
 		expect(widebandRecordingLimit(2_400_000, 1, calm(1.2), 3)).toEqual({
 			limit: 6,
-			cap: 6,
+			cap: 3,
 			shrunk: null,
 		})
 		// 2 cores at 90 %: 1.8 under the guard; own 1.75 → spare 0.05 < 0.1124: no more than active.
 		expect(widebandRecordingLimit(2_400_000, 1, calm(1.75, 2), 3)).toEqual({
 			limit: 3,
-			cap: 6,
+			cap: 3,
 			shrunk: "pressure",
 		})
 	})
@@ -182,7 +187,7 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 		for (const label of ["own-over", "host-busy", "host-busy-unattributed"])
 			expect(
 				widebandRecordingLimit(2_400_000, 1, { ...calm(0.1), label }, 5),
-			).toEqual({ limit: 2, cap: 6, shrunk: "pressure" })
+			).toEqual({ limit: 2, cap: 3, shrunk: "pressure" })
 		// Calm with no spare at all and nothing running: still 2.
 		expect(widebandRecordingLimit(2_400_000, 1, calm(8, 8, 50), 0).limit).toBe(
 			2,
@@ -208,7 +213,7 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 		for (const cpu of bad)
 			expect(widebandRecordingLimit(2_400_000, 1, cpu, 4)).toEqual({
 				limit: 2,
-				cap: 6,
+				cap: 3,
 				shrunk: "unknown",
 			})
 	})
@@ -222,11 +227,84 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 		// A finite capacity whose product with the guard overflows: no evidence, the floor.
 		expect(
 			widebandRecordingLimit(2_400_000, 1, calm(0.1, Number.MAX_VALUE, 90), 2),
-		).toEqual({ limit: 2, cap: 6, shrunk: "unknown" })
+		).toEqual({ limit: 2, cap: 3, shrunk: "unknown" })
 		// A huge finite active count with spare: running + room stays finite, the cap.
 		expect(
 			widebandRecordingLimit(2_400_000, 1, calm(0.1), Number.MAX_VALUE).limit,
 		).toBe(6)
+	})
+
+	it("the host's room: min(own spare, (guard − host) / 100 · capacity), at and past the host bound", () => {
+		// 8 cores at an 85 % guard, own 0.5: own spare 6.3 cores; the host's spare binds.
+		const at = (hostPercent: number) =>
+			widebandRecordingLimit(2_400_000, 1, calm(0.5, 8, 85, hostPercent), 2)
+		// Host 84 % of an 85 % guard: 8 · 1 / 100 = 0.08 cores, under one recording (0.1124).
+		expect(at(84)).toEqual({ limit: 2, cap: 3, shrunk: "pressure" })
+		// Exactly two recordings' room left by the host (the 1e-10 relative margin only absorbs
+		// the float rounding of 85 − host): two more; a hair less, one more.
+		const hostFor = (k: number, margin: number) =>
+			85 - (100 * k * per24 * (1 + margin)) / 8
+		expect(at(hostFor(2, 1e-10)).limit).toBe(4)
+		expect(at(hostFor(2, -1e-8)).limit).toBe(3)
+		// At the guard: no room; past it (a calm label the gate would not give): none, the floor.
+		expect(at(85).limit).toBe(2)
+		expect(at(86).limit).toBe(2)
+		// A quiet host: the own spare and the cap bound it.
+		expect(at(0)).toEqual({ limit: 6, cap: 3, shrunk: null })
+		// The own spare still binds when it is the smaller: 1 core at 100 %, host 0.
+		expect(
+			widebandRecordingLimit(2_400_000, 1, calm(1 - 1.5 * per24, 1, 100, 0), 2)
+				.limit,
+		).toBe(3)
+	})
+
+	it("calm without a usable host reading gives no room above the floor (unknown)", () => {
+		const bad: (number | null | undefined)[] = [
+			undefined,
+			null,
+			-1,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+		]
+		for (const hostPercent of bad) {
+			const reading: RecordingCpuReading = {
+				label: "calm",
+				ownCores: 0.5,
+				capacityCores: 8,
+				guardPercent: 85,
+				...(hostPercent === undefined ? {} : { hostPercent }),
+			}
+			expect(widebandRecordingLimit(2_400_000, 1, reading, 4)).toEqual({
+				limit: 2,
+				cap: 3,
+				shrunk: "unknown",
+			})
+		}
+	})
+
+	it("host-busy-unattributed (no own reading) is pressure, not an absent reading", () => {
+		const reading: RecordingCpuReading = {
+			label: "host-busy-unattributed",
+			ownCores: null,
+			capacityCores: null,
+			guardPercent: 85,
+			hostPercent: 99,
+		}
+		expect(widebandRecordingLimit(2_400_000, 1, reading, 2)).toEqual({
+			limit: 2,
+			cap: 3,
+			shrunk: "pressure",
+		})
+		// Any pressure label with malformed fields is still pressure.
+		for (const label of ["own-over", "host-busy"])
+			expect(
+				widebandRecordingLimit(
+					2_400_000,
+					1,
+					{ ...reading, label, guardPercent: Number.NaN },
+					2,
+				).shrunk,
+			).toBe("pressure")
 	})
 
 	it("a budget whose cap is the floor stays at it, whatever the reading", () => {
@@ -237,7 +315,7 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 		})
 	})
 
-	it("property: the limit is always within [2, cap] and never above 6", () => {
+	it("property: the limit is always within [2, 6], 2 when the budget's slots are, 2 without a calm reading", () => {
 		// Feature: simultaneous traffic, Property 1: the recording limit stays in its bounds
 		// Validates: Requirements 19.b
 		const num = fc.oneof(
@@ -267,6 +345,7 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 							fc.double(),
 							fc.integer({ min: -5, max: 120 }),
 						),
+						hostPercent: num,
 					}),
 				),
 				fc.oneof(fc.integer({ min: -3, max: 12 }), fc.double()),
@@ -282,7 +361,8 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 					expect(r.cap).toBeGreaterThanOrEqual(2)
 					expect(r.cap).toBeLessThanOrEqual(6)
 					expect(r.limit).toBeGreaterThanOrEqual(2)
-					expect(r.limit).toBeLessThanOrEqual(r.cap)
+					expect(r.limit).toBeLessThanOrEqual(6)
+					if (r.cap === 2) expect(r.limit).toBe(2)
 					expect(Number.isInteger(r.limit)).toBe(true)
 					if (cpu === null || cpu.label !== "calm") expect(r.limit).toBe(2)
 				},
@@ -300,6 +380,7 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 							ownCores: 0,
 							capacityCores: 8,
 							guardPercent: 90,
+							hostPercent: 0,
 						},
 						0,
 					],
@@ -328,7 +409,7 @@ describe("the recorder's admission at the limit", () => {
 		expect(h.rec.diagnostics().counts["refused:cpu"]).toBeUndefined()
 	})
 
-	it("calm: the cap of 6 at the default budget; a seventh is refused:slots", () => {
+	it("calm: 6 at the default budget (above its 4 slots, no shared budget held); a seventh is refused:slots", () => {
 		const h = harness({ recordingCpu: () => calm(0.5) })
 		tracks(h, 6)
 		expect(h.rec.activeOn("rtl")).toBe(6)
@@ -355,6 +436,79 @@ describe("the recorder's admission at the limit", () => {
 		tracks(h, 1, 4)
 		expect(h.rec.owns("c4")).toBe(true)
 		expect(h.rec.activeOn("rtl")).toBe(5)
+	})
+
+	it("host-busy-unattributed: a third is refused:cpu, not refused:slots", () => {
+		const h = harness({
+			recordingCpu: () => ({
+				label: "host-busy-unattributed",
+				ownCores: null,
+				capacityCores: null,
+				guardPercent: 85,
+				hostPercent: 99,
+			}),
+		})
+		tracks(h, 3)
+		expect(h.rec.activeOn("rtl")).toBe(2)
+		expect(h.rec.diagnostics().counts["refused:cpu"]).toBe(1)
+		expect(h.rec.diagnostics().counts["refused:slots"]).toBeUndefined()
+	})
+
+	it("a host busy with other work keeps a calm core at the floor (refused:cpu)", () => {
+		// Own 0.5 of 8 cores, host 84 % of an 85 % guard: 0.08 cores of host room.
+		const h = harness({ recordingCpu: () => calm(0.5, 8, 85, 84) })
+		tracks(h, 3)
+		expect(h.rec.activeOn("rtl")).toBe(2)
+		expect(h.rec.diagnostics().counts["refused:cpu"]).toBe(1)
+	})
+
+	it("above the budget's slots a start keeps a probe's room free in the shared budget, at and past the bound", () => {
+		expect(WIDEBAND_PROBE_ROOM_CORES).toBeCloseTo(0.6, 12)
+		const cores = widebandSessionCores(FS)
+		// A shared budget holding the engine's 0.08 cores; reservations sum against `budget`.
+		const shared = (budget: number) => {
+			let used = 0.08
+			const asked: number[] = []
+			return {
+				asked,
+				reserveCores: (c: number) => {
+					asked.push(c)
+					if (used + c > budget + 1e-9) return null
+					used += c
+					return () => {
+						used -= c
+					}
+				},
+			}
+		}
+		// Default 1-core budget at 1.024 Msps: 4 slots (0.237), then a fifth (0.317 + 0.0592 +
+		// 0.6 = 0.976 ≤ 1), a sixth would leave less than a probe's room: refused:cpu.
+		const one = shared(1)
+		const h = harness({
+			recordingCpu: () => calm(0.5),
+			reserveCores: one.reserveCores,
+		})
+		tracks(h, 6)
+		expect(h.rec.activeOn("rtl")).toBe(5)
+		expect(h.rec.diagnostics().counts["refused:cpu"]).toBe(1)
+		// Within the slots only its own cores are asked; above them, its cores and a probe's room.
+		expect(one.asked.slice(0, 4).every(c => c === cores)).toBe(true)
+		expect(one.asked[4]).toBeCloseTo(cores + WIDEBAND_PROBE_ROOM_CORES, 12)
+		// At the bound: exactly a sixth plus a probe's room fits; a hair under it does not.
+		const exact = 0.08 + 6 * cores + WIDEBAND_PROBE_ROOM_CORES
+		const at = harness({
+			recordingCpu: () => calm(0.5),
+			reserveCores: shared(exact).reserveCores,
+		})
+		tracks(at, 6)
+		expect(at.rec.activeOn("rtl")).toBe(6)
+		const past = harness({
+			recordingCpu: () => calm(0.5),
+			reserveCores: shared(exact - 1e-6).reserveCores,
+		})
+		tracks(past, 6)
+		expect(past.rec.activeOn("rtl")).toBe(5)
+		expect(past.rec.diagnostics().counts["refused:cpu"]).toBe(1)
 	})
 
 	it("a throwing reader counts as none (the floor)", () => {
@@ -468,7 +622,7 @@ describe("the recorder's limit under a shrink, a shared reading and the store's 
 		expect(counts(h)["refused:cpu"]).toBe(3)
 		expect(h.rec.limitOn("rtl", FS)).toEqual({
 			limit: 4,
-			cap: 6,
+			cap: 4,
 			shrunk: "pressure",
 		})
 	})
@@ -552,5 +706,80 @@ describe("the recorder's limit under a shrink, a shared reading and the store's 
 		// A shadow is not counted: it holds no operation and may never need one.
 		at(h, "s3", 9, "b", SHADOW)
 		expect(h.rec.owns("s3")).toBe(true)
+		// Classed while every operation is held: it keeps its session and is never refused by
+		// the store (its operation waits for one to end: the voiced case below).
+		at(h, "s3", 9, "b", { discoveryId: "d_1" })
+		expect(h.rec.owns("s3")).toBe(true)
+		expect(counts(h)["refused:store"]).toBeUndefined()
+		expect(h.ops.some(op => op.denied)).toBe(false)
 	})
+
+	it("a shadow classed and voiced while the store is full waits for an operation, then is kept whole (no refused:store)", async () => {
+		// Other sources hold every operation the store allows (one at its ceiling of 6, another
+		// at its floor of 2): `others`. The fake store denies past the overall limit.
+		let others = MAX_ACTIVE_ANALOG_OPERATIONS
+		let ref: ReturnType<typeof harness> | null = null
+		const mine = () =>
+			ref === null
+				? 0
+				: ref.ops.filter(op => op.outcome === null && !op.denied).length
+		let denied = 0
+		const h = harness({
+			recordingCpu: () => calm(0.5),
+			analogActive: () => others + mine(),
+			beginWrap: begin => inp => {
+				if (others + mine() >= MAX_ACTIVE_ANALOG_OPERATIONS) denied++
+				const handle = begin(inp)
+				if (others + mine() > MAX_ACTIVE_ANALOG_OPERATIONS) {
+					handle.cancel()
+					return {
+						...handle,
+						ready: Promise.reject(new Error("admission-denied")),
+					}
+				}
+				return handle
+			},
+		})
+		ref = h
+		const id = "s"
+		const onset = h.engine.liveEdge()
+		const seconds = 3
+		const end = onset + seconds * h.fs
+		let fed = 0
+		await h.feed(seconds, true, () => {
+			fed++
+			const edge = h.engine.liveEdge()
+			if (edge - onset < 0.1 * h.fs) return
+			// A shadow for its first second, then classed analog-fm with its discovery.
+			const classed = edge - onset >= 1 * h.fs
+			// The store frees one operation 2 s in (another source's file ended).
+			if (edge - onset >= 2 * h.fs) others = MAX_ACTIVE_ANALOG_OPERATIONS - 1
+			h.rec.track(
+				input(
+					id,
+					snapshot(id, onset, Math.min(edge, end)),
+					classed ? {} : SHADOW,
+				),
+			)
+			// Classed and voiced, but the store is full: no operation begun yet.
+			if (classed && others === MAX_ACTIVE_ANALOG_OPERATIONS)
+				expect(h.ops).toHaveLength(0)
+		})
+		expect(fed).toBeGreaterThan(0)
+		await h.feed(0.6, false)
+		h.rec.closed(id, snapshot(id, onset, end), null)
+		// Past the hang (2 s), then any grace timer: the file finishes and settles.
+		await h.feed(3, false)
+		await h.fire()
+		await h.rec.idle()
+		expect(denied).toBe(0)
+		expect(counts(h)["refused:store"]).toBeUndefined()
+		expect(h.ops).toHaveLength(1)
+		const op = h.ops[0]!
+		expect(op.denied).toBe(false)
+		expect(op.outcome).toBe("finalized")
+		// Whole: the file holds the transmission's audio from its pre-roll, nothing lost while
+		// it waited (8000 frames/s over the 3 s air time at least).
+		expect(op.frames).toBeGreaterThanOrEqual(seconds * 8000)
+	}, 60_000)
 })

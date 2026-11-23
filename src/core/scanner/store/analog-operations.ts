@@ -66,7 +66,8 @@ export const MIN_ACTIVE_ANALOG_PER_SOURCE = 2
  * RESERVATION free under the cap. Admission itself counts each one in flight as outstanding
  * (used + outstanding + RESERVATION <= cap), so six admitted at once never exceed the quota.
  * The recorder admits fewer when its CPU budget or the measured CPU says so (it never asks for
- * more than this).
+ * more than this). Only an admission that asks for it gets the ceiling (AnalogInput
+ * perSourceLimit): a producer without a CPU gate keeps the floor of 2 per source.
  */
 export const MAX_ACTIVE_ANALOG_PER_SOURCE =
 	MAX_ACTIVE_ANALOG_OPERATIONS - MIN_ACTIVE_ANALOG_PER_SOURCE
@@ -397,6 +398,27 @@ export interface AnalogInput {
 	discoveryId: string
 	observationId: string
 	binding: RecordingBinding
+	/**
+	 * Operations this source may hold at once for this admission (analogPerSourceLimit): the
+	 * wideband recorder, whose own CPU-gated limit (2 to 6) bounds its sessions, passes the
+	 * ceiling MAX_ACTIVE_ANALOG_PER_SOURCE; a producer without a CPU gate (the channel tier's
+	 * recording producer) passes nothing and gets the floor, 2.
+	 */
+	perSourceLimit?: number
+}
+
+/**
+ * The per-source limit one admission is judged against: `perSourceLimit` clamped to
+ * [MIN_ACTIVE_ANALOG_PER_SOURCE, MAX_ACTIVE_ANALOG_PER_SOURCE] (floored); absent or not finite,
+ * the floor (2). It counts every operation active on the source, any producer's.
+ */
+export function analogPerSourceLimit(perSourceLimit: unknown): number {
+	if (typeof perSourceLimit !== "number" || !Number.isFinite(perSourceLimit))
+		return MIN_ACTIVE_ANALOG_PER_SOURCE
+	return Math.max(
+		MIN_ACTIVE_ANALOG_PER_SOURCE,
+		Math.min(MAX_ACTIVE_ANALOG_PER_SOURCE, Math.floor(perSourceLimit)),
+	)
 }
 export interface AnalogMetadataAdapter {
 	authorityHealthy(): boolean
@@ -1024,7 +1046,7 @@ export class AnalogOperations {
 		// Registration precedes the first await, including an admission that will fail.
 		const capacity =
 			this.active.size < MAX_ACTIVE_ANALOG_OPERATIONS &&
-			sameSource < MAX_ACTIVE_ANALOG_PER_SOURCE
+			sameSource < analogPerSourceLimit(input.perSourceLimit)
 		if (capacity) this.active.set(id, op)
 		op.ready = capacity
 			? this.admit(op)
