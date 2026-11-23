@@ -731,7 +731,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				properties: {
 					cause: { type: "string", enum: ["host-busy"] },
 					since: { type: "string" },
-					windows: { type: "integer", minimum: 1 },
+					windows: { type: "integer", minimum: 1, maximum: 3 },
 				},
 			},
 		},

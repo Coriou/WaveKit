@@ -288,15 +288,15 @@ it.each(
 			const recoveredAt = lastSpike + 2000 + 60000
 			for (let at = 70000; at <= 3600000; at += 2000) {
 				if (at === 76000) counters.droppedBytesTotal++
-				// rx-starvation S1 (m2): a spike is the core's own CPU over the
-				// guard on two consecutive samples; the second is the evidence.
+				// rx-starvation S1 (m2) and hysteresis: a spike is the core's own
+				// CPU over the guard on five consecutive samples
+				// (OWN_OVER_SUSTAIN_SAMPLES); the fifth is the evidence.
 				cpu.normalisedPercent =
-					at === 78000 ||
-					at === 80000 ||
+					(at >= 72000 && at <= 80000) ||
 					(repeated &&
 						at > 80000 &&
 						at <= lastSpike &&
-						(at % 20000 === 0 || (at + 2000) % 20000 === 0)) ||
+						(at % 20000 === 0 || at % 20000 >= 12000)) ||
 					at === recoveredAt + 2000
 						? 95
 						: 10

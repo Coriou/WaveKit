@@ -878,12 +878,325 @@ function pendingSkipS(behindS: number): number {
 	return behindS > FAKE_MAX_BEHIND_S ? behindS : 0
 }
 
+// === hub intake (WAVEKIT_SOURCE_INTAKE=hub): the hub's stats file and the exact byte check ===
+
+/** One sink (or closed front) entry of a `wavekit-iqhub --stats-file` line (README "Stats file"). */
+export const HubStatsSinkSchema = z
+	.object({
+		sink: z.string(),
+		kind: z.string(),
+		state: z.string().optional(),
+		startSourcePos: z.number().nullable().optional(),
+		sinkBytes: z.number(),
+		droppedBytes: z.number(),
+		discardedBytes: z.number(),
+		gaps: z.number(),
+		lagBytes: z.number().optional(),
+		closeReason: z.string().optional(),
+	})
+	.passthrough()
+export type HubStatsSink = z.infer<typeof HubStatsSinkSchema>
+
+export const HubStatsLineSchema = z
+	.object({
+		type: z.literal("stats"),
+		utcMs: z.number(),
+		pid: z.number().int(),
+		sourcePos: z.number(),
+		arrivals: z.object({ bytes: z.number() }).passthrough(),
+		sinks: z.array(HubStatsSinkSchema),
+		closedFronts: z.array(HubStatsSinkSchema).optional(),
+		rusage: z
+			.object({
+				userUs: z.number(),
+				sysUs: z.number(),
+				maxRssBytes: z.number().optional(),
+			})
+			.passthrough(),
+	})
+	.passthrough()
+export type HubStatsLine = z.infer<typeof HubStatsLineSchema>
+
+/** The parsed stats lines of a file's text (invalid lines skipped), in file order. */
+export function parseHubStats(text: string): HubStatsLine[] {
+	const out: HubStatsLine[] = []
+	for (const raw of text.split("\n")) {
+		if (raw.trim() === "") continue
+		try {
+			const r = HubStatsLineSchema.safeParse(JSON.parse(raw))
+			if (r.success) out.push(r.data)
+		} catch {
+			// a torn last line
+		}
+	}
+	return out
+}
+
+/** The stats line nearest `utcMs` (1 Hz lines: within about 0.5 s of an edge); undefined without any. */
+export function nearestStats(
+	lines: readonly HubStatsLine[],
+	utcMs: number,
+): HubStatsLine | undefined {
+	let best: HubStatsLine | undefined
+	for (const l of lines)
+		if (
+			best === undefined ||
+			Math.abs(l.utcMs - utcMs) < Math.abs(best.utcMs - utcMs)
+		)
+			best = l
+	return best
+}
+
+/** Every front of a stats line by sink id (live ones over closed ones of the same id). */
+export function frontsOf(line: HubStatsLine): Map<string, HubStatsSink> {
+	const m = new Map<string, HubStatsSink>()
+	for (const f of line.closedFronts ?? [])
+		if (f.kind === "front") m.set(f.sink, f)
+	for (const f of line.sinks) if (f.kind === "front") m.set(f.sink, f)
+	return m
+}
+
+export interface FrontSums {
+	sinkBytes: number
+	droppedBytes: number
+	discardedBytes: number
+	gaps: number
+}
+
+/**
+ * The fronts' counts between two stats lines, summed over every front either line names (a
+ * front missing at A started after it: its whole count is the window's). Null when a front
+ * missing at B was alive at A (it closed and left the 4 closed fronts kept: unknown).
+ */
+export function frontDelta(a: HubStatsLine, b: HubStatsLine): FrontSums | null {
+	const fa = frontsOf(a)
+	const fb = frontsOf(b)
+	for (const id of fa.keys()) if (!fb.has(id)) return null
+	const sum: FrontSums = {
+		sinkBytes: 0,
+		droppedBytes: 0,
+		discardedBytes: 0,
+		gaps: 0,
+	}
+	for (const [id, f] of fb) {
+		const before = fa.get(id)
+		sum.sinkBytes += f.sinkBytes - (before?.sinkBytes ?? 0)
+		sum.droppedBytes += f.droppedBytes - (before?.droppedBytes ?? 0)
+		sum.discardedBytes += f.discardedBytes - (before?.discardedBytes ?? 0)
+		sum.gaps += f.gaps - (before?.gaps ?? 0)
+	}
+	return sum
+}
+
+/**
+ * The hub's two stages (hub intake only), after `fake-schedule`:
+ * - `hub-upstream`: the fake's bytes sent vs the hub's `arrivals.bytes` (TCP does not drop: a
+ *   gap is data in flight; tolerance 1 s, the stats lines are 1 Hz).
+ * - `hub-node`: the hub's `sourcePos` advance vs what its fronts delivered to Node plus their
+ *   counted skips and discarded tails; lost = the skips (`droppedBytes`): counted loss, never
+ *   silent. Tolerance 0: any skip shows the stage losing.
+ */
+export function hubStages(i: {
+	rateHz: number
+	fakeSentBytes: number | null
+	a: HubStatsLine | undefined
+	b: HubStatsLine | undefined
+}): StageCount[] {
+	const rate = i.rateHz
+	const known = i.a !== undefined && i.b !== undefined
+	const arrivals = known ? i.b!.arrivals.bytes - i.a!.arrivals.bytes : null
+	const advance = known ? i.b!.sourcePos - i.a!.sourcePos : null
+	const fronts = known ? frontDelta(i.a!, i.b!) : null
+	const pidChanged = known && i.a!.pid !== i.b!.pid
+	const edges = known
+		? `stats lines at ${new Date(i.a!.utcMs).toISOString()} and ${new Date(i.b!.utcMs).toISOString()}`
+		: "no stats line at an edge"
+	return [
+		{
+			id: "hub-upstream",
+			label: "IQ hub upstream read (TCP from the fake into the hub)",
+			order: 0.25,
+			inSamples: half(i.fakeSentBytes),
+			outSamples: pidChanged ? null : half(arrivals),
+			droppedSamples: null,
+			toleranceSamples: rate,
+			source: `fake marks vs the hub's arrivals.bytes; ${edges}${pidChanged ? "; the hub's pid changed (respawned): unknown" : ""}; TCP does not drop, so a gap is data in flight (tolerance 1 s)`,
+			reset: false,
+		},
+		{
+			id: "hub-node",
+			label:
+				"IQ hub front to Node (delivered + counted skips + discarded tails; lost = the skips)",
+			order: 0.5,
+			inSamples: pidChanged ? null : half(advance),
+			outSamples: pidChanged || fronts === null ? null : half(fronts.sinkBytes),
+			droppedSamples:
+				pidChanged || fronts === null ? null : half(fronts.droppedBytes),
+			toleranceSamples: 0,
+			source: `hub stats: sourcePos advance, fronts' sinkBytes, droppedBytes (${fronts?.gaps ?? "n/a"} gaps) and discardedBytes (${fronts === null ? "n/a" : fronts.discardedBytes}); ${edges}${pidChanged ? "; the hub's pid changed: unknown" : ""}`,
+			reset: false,
+		},
+	]
+}
+
+/** A front skip the supervisor logged (core log, "IQ hub front skipped samples"). */
+export interface HubGapLine {
+	atUtc: string
+	cause: string
+	atSinkByte: number
+	atSourcePos: number
+	droppedBytes: number
+}
+
+const HubGapLogSchema = z.object({
+	/** pino's epoch ms, or an ISO time (the core's timestamp option). */
+	time: z.union([z.number(), z.string()]),
+	msg: z.literal("IQ hub front skipped samples (counted loss)"),
+	cause: z.string(),
+	atSinkByte: z.number(),
+	atSourcePos: z.number(),
+	droppedBytes: z.number(),
+})
+
+/** The supervisor's gap lines in [startMs, endMs] of a pino core log; the first `limit`. */
+export function hubGapsOf(
+	log: string,
+	startMs: number,
+	endMs: number,
+	limit = 256,
+): { gaps: HubGapLine[]; total: number } {
+	const gaps: HubGapLine[] = []
+	let total = 0
+	for (const raw of log.split("\n")) {
+		if (!raw.includes("IQ hub front skipped samples")) continue
+		let parsed: unknown
+		try {
+			parsed = JSON.parse(raw)
+		} catch {
+			continue
+		}
+		const r = HubGapLogSchema.safeParse(parsed)
+		if (!r.success) continue
+		const time =
+			typeof r.data.time === "number" ? r.data.time : Date.parse(r.data.time)
+		if (!Number.isFinite(time) || time < startMs || time > endMs) continue
+		total++
+		if (gaps.length < limit)
+			gaps.push({
+				atUtc: new Date(time).toISOString(),
+				cause: r.data.cause,
+				atSinkByte: r.data.atSinkByte,
+				atSourcePos: r.data.atSourcePos,
+				droppedBytes: r.data.droppedBytes,
+			})
+	}
+	return { gaps, total }
+}
+
+/**
+ * The exact end-of-run byte check (I-S3, the session ended by the fake's stop-and-end after the
+ * window), from three independent sources: U from the fake's own `bytesWritten` of the client
+ * (what its kernel accepted, equal to what the core read only after a graceful close, so a
+ * client that did not close gracefully is never exact; − the 12-byte header, rounded down to
+ * whole frames), N from the core's
+ * `bytesReceived` (− the header), and G, D and the front's `sinkBytes` from the hub's final
+ * stats. Exact means `U = N + G + D + K` with `D = 0` and `K = sinkBytes − N = 0`. Socket mode:
+ * `U = N`. `reason` says why it could not be checked.
+ */
+export interface ByteCheck {
+	mode: "socket" | "hub"
+	upstream: number | null
+	node: number | null
+	gaps: number | null
+	discarded: number | null
+	abandoned: number | null
+	exact: boolean
+	reason: string | null
+}
+
+export function byteCheckOf(i: {
+	mode: "socket" | "hub"
+	/**
+	 * The fake's per-client bytesWritten from its `stopped` line, and whether each closed
+	 * gracefully (absent: unknown, an older fake). bytesWritten is what the fake's kernel accepted;
+	 * only a graceful close makes it the bytes the core read, so anything else is never `exact`.
+	 */
+	clients:
+		| readonly { bytesWritten: number; graceful?: boolean | undefined }[]
+		| null
+	/** The core's cumulative bytesReceived for the source after the end. */
+	coreBytesReceived: number | null
+	/** Hub mode: the front's final entry (closed fronts of the last stats line). */
+	front: HubStatsSink | null
+	headerBytes?: number
+}): ByteCheck {
+	const header = i.headerBytes ?? 12
+	const none = (reason: string): ByteCheck => ({
+		mode: i.mode,
+		upstream: null,
+		node: null,
+		gaps: null,
+		discarded: null,
+		abandoned: null,
+		exact: false,
+		reason,
+	})
+	if (i.clients === null) return none("no stopped line from the fake")
+	if (i.clients.length !== 1)
+		return none(
+			`${i.clients.length} fake clients (a reconnect): the core's cumulative count spans sessions`,
+		)
+	if (i.coreBytesReceived === null)
+		return none("no bytesReceived from the core")
+	if (i.clients.some(c => c.graceful !== true))
+		return none(
+			"a fake client did not close gracefully: its bytesWritten is not the bytes the core read",
+		)
+	const written = i.clients[0]!.bytesWritten
+	const upstream = Math.max(0, written - header)
+	const wholeUpstream = upstream - (upstream % 2)
+	const node = Math.max(0, i.coreBytesReceived - header)
+	if (i.mode === "socket")
+		return {
+			mode: "socket",
+			upstream: wholeUpstream,
+			node,
+			gaps: 0,
+			discarded: 0,
+			abandoned: 0,
+			exact: wholeUpstream === node - (node % 2),
+			reason: null,
+		}
+	if (i.front === null) return none("no closed front in the hub's final stats")
+	const abandoned = i.front.sinkBytes - node
+	return {
+		mode: "hub",
+		upstream: wholeUpstream,
+		node,
+		gaps: i.front.droppedBytes,
+		discarded: i.front.discardedBytes,
+		abandoned,
+		exact:
+			i.front.discardedBytes === 0 &&
+			abandoned === 0 &&
+			wholeUpstream ===
+				node + i.front.droppedBytes + i.front.discardedBytes + abandoned,
+		reason: null,
+	}
+}
+
 export interface StageInputs {
 	rateHz: number
 	windowSeconds: number
 	sourceId: string
 	/** The preload's IQ bytes on the source socket in the window. */
 	socketBytes: number | null
+	/**
+	 * Hub intake: the hub's stats lines nearest the window edges (the `hub-upstream` and
+	 * `hub-node` stages); `socketBytes` is then the preload's count of the front socket, or null
+	 * (an older preload counts the TCP socket only).
+	 */
+	hub?: { a: HubStatsLine | undefined; b: HubStatsLine | undefined } | undefined
 	/** The fake rtl_tcp's marks at the window edges. */
 	fakeA: FakeMark | undefined
 	fakeB: FakeMark | undefined
@@ -978,16 +1291,33 @@ export function buildStages(i: StageInputs): StageCount[] {
 		reset: fakeBytes.reset || skippedD.reset || mono.reset,
 	})
 	const socket = i.socketBytes === null ? null : i.socketBytes / 2
+	const hub = i.hub
+	let socketIn = fakeSent
+	if (hub !== undefined) {
+		const [up, node] = hubStages({
+			rateHz: rate,
+			fakeSentBytes: fakeBytes.delta,
+			a: hub.a,
+			b: hub.b,
+		})
+		stages.push(up!, node!)
+		socketIn = node!.outSamples
+	}
 	stages.push({
 		id: "source-socket",
-		label: "IQ source socket (TCP into the core)",
+		label:
+			hub === undefined
+				? "IQ source socket (TCP into the core)"
+				: "IQ source socket (the hub front's Unix socket into the core)",
 		order: 1,
-		inSamples: fakeSent,
+		inSamples: socketIn,
 		outSamples: socket,
 		droppedSamples: null,
 		toleranceSamples: rate,
 		source:
-			"fake marks vs the preload's data events on the source socket; TCP does not drop, so a gap is data in flight (tolerance 1 s)",
+			hub === undefined
+				? "fake marks vs the preload's data events on the source socket; TCP does not drop, so a gap is data in flight (tolerance 1 s)"
+				: `hub fronts' sinkBytes vs the preload's data events on the tagged front socket${i.socketBytes === null ? " (this preload counts the TCP socket only: unknown)" : ""}; a stream socket does not drop (tolerance 1 s)`,
 		reset: fakeBytes.reset,
 	})
 	const srcA = parsedOr(ApiSourcesSchema, i.edgeA?.sources)
@@ -999,7 +1329,7 @@ export function buildStages(i: StageInputs): StageCount[] {
 		id: "source-manager",
 		label: "SourceManager bytesReceived",
 		order: 2,
-		inSamples: socket,
+		inSamples: socket ?? (hub === undefined ? null : socketIn),
 		outSamples: half(sm?.delta ?? null),
 		droppedSamples: null,
 		toleranceSamples: Number.isFinite(skewS) ? rate * (skewS + 0.5) : rate,
@@ -1200,6 +1530,57 @@ const StageSchema = z.object({
 
 const LoadTriple = z.array(Num).length(3)
 
+export const ByteCheckSchema = z.object({
+	mode: z.enum(["socket", "hub"]),
+	upstream: NullableNum,
+	node: NullableNum,
+	gaps: NullableNum,
+	discarded: NullableNum,
+	abandoned: NullableNum,
+	exact: z.boolean(),
+	reason: z.string().nullable(),
+})
+
+export const IntakeSchema = z.object({
+	mode: z.enum(["socket", "hub"]),
+	/** WAVEKIT_IQHUB_BIN and the hub's stats file (hub mode). */
+	bin: z.string().nullable(),
+	statsFile: z.string().nullable(),
+	hub: z
+		.object({
+			/** The hub's pid from the stats lines at the window edges (a change: it respawned). */
+			pidAtOpen: NullableNum,
+			pidAtClose: NullableNum,
+			pidChanged: z.boolean(),
+			/** `ps -o ppid=` of the hub is the core's pid. */
+			ppidIsCore: z.boolean().nullable(),
+			/** `ps -o pri=` of the hub before the late QoS apply, after it, and after the removal. */
+			psPriBefore: NullableNum,
+			psPriApplied: NullableNum,
+			psPriRemoved: NullableNum,
+			/** The class the in-window priority implies (default unless the tree was demoted). */
+			effective: z.enum(CORE_QOS).nullable(),
+			/** The hub's user + system CPU over the window (stats rusage), and per IQ second it read. */
+			cpuMs: NullableNum,
+			cpuMsPerIqSecond: NullableNum,
+			maxRssBytes: NullableNum,
+			/** Front skips the supervisor logged in the window (the first 256), and their count. */
+			gaps: z.array(
+				z.object({
+					atUtc: z.string(),
+					cause: z.string(),
+					atSinkByte: Num,
+					atSourcePos: Num,
+					droppedBytes: Num,
+				}),
+			),
+			gapCount: Num,
+		})
+		.optional(),
+	byteCheck: ByteCheckSchema.optional(),
+})
+export type Intake = z.infer<typeof IntakeSchema>
+
 /** Starvation runs (`--hog`, `--core-nice`): what loaded the host and what each stage lost. */
 export const StarvationSchema = z.object({
 	hog: z.object({
@@ -1254,6 +1635,19 @@ export const StarvationSchema = z.object({
 			scope: z.string(),
 		})
 		.optional(),
+	/**
+	 * `--core-qos-late-tree`: the same taskpolicy also applied to every descendant of the core
+	 * (the hub, the channelizer, the stand-ins) at the window open and removed at the close.
+	 */
+	coreQosLateTree: z
+		.object({
+			pids: z.array(z.number().int()),
+			applyStatus: z.array(NullableNum),
+			removeStatus: z.array(NullableNum),
+		})
+		.optional(),
+	/** `--source-intake`: how the core read the fake, and the hub's own record; absent in older manifests. */
+	intake: IntakeSchema.optional(),
 	/** The fake's lag at the edges (late signal under backpressure, not loss); absent in older manifests. */
 	fakeBehind: z
 		.object({

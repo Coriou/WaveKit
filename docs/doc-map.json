@@ -83,6 +83,10 @@
 			"docs": ["docs/AIRCRAFT-DATALINK.md"]
 		},
 		{
+			"code": ["src/core/iq-hub/"],
+			"docs": ["docs/ARCHITECTURE.md", "docs/PERFORMANCE.md"]
+		},
+		{
 			"code": [
 				"src/core/",
 				"src/utils/",

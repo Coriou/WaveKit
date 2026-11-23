@@ -36,6 +36,17 @@ export function connectErrorClass(err: unknown): SourceConnectErrorClass {
 }
 
 /**
+ * True for a failure the IQ hub intake caused itself (codes IQHUB_*: the hub could not start, refused
+ * a request, exited or hung). It is no receiver failure: SourceManager keeps it out of this record
+ * and out of the endpoint fallback (its class would be `other`; `lastError` names the hub).
+ */
+export function isIntakeFault(err: unknown): boolean {
+	if (err === null || typeof err !== "object") return false
+	const code: unknown = Reflect.get(err, "code")
+	return typeof code === "string" && code.startsWith("IQHUB_")
+}
+
+/**
  * Host names (RFC 1123 labels), IPv4 and bracket-free IPv6 literals only, 253 characters at most
  * (the DNS name limit): anything else is never shown.
  */

@@ -1212,3 +1212,640 @@ fn the_generated_scenarios_reach_every_behaviour_the_properties_cover() {
     }
     eprintln!("{seen:?}");
 }
+
+// ---- Front sinks --------------------------------------------------------------------------------
+//
+// A front on its own attempt beside a raw sink, with random source chunking (splits inside a
+// frame), random front write room and partial writes, random chunking of the front's command
+// writes and of the upstream's command room, the front's EOF and the stream's end at random
+// times, and the clock running into the grace:
+//
+// (fa) the front receives the header, then payload that, with its gaps re-inserted at
+//      `atSinkByte`, is the stream's whole-frame payload from `startSourcePos`; once
+//      `front-ended`, `startSourcePos + sinkBytes + droppedBytes + discardedBytes` is the
+//      stream's end (I-S3 at crate level);
+// (fb) the upstream's command bytes are a prefix of the front's command bytes, all of them when
+//      nothing closed the attempt with commands unsent (I-C);
+// (fc) every `front-placed` names the head at the instant the upstream accepted its last
+//      command byte, and its `sinkByte` is the front byte carrying that position (or the
+//      `atSinkByte` of the gap covering it): the front's bytes before it were all appended
+//      before the command reached the upstream, and none after (I-P);
+// (fd) a front that never reads costs the raw sink beside it zero bytes;
+// (fe) events stay in action order, `sourcePos` never decreases and `frontBytes` strictly
+//      increases.
+
+const FRONT_HDR: &[u8; 12] = b"RTL0\x00\x00\x00\x05\x00\x00\x00\x1d";
+
+#[derive(Debug, Clone)]
+enum FrontOp {
+    /// Source bytes, read in pieces of at most `per_read`.
+    Feed {
+        n: usize,
+        per_read: usize,
+    },
+    /// Room for the front's kernel (and a per-call cap).
+    Room {
+        n: usize,
+        per_call: usize,
+    },
+    /// The front's peer writes command bytes, read in pieces of at most `per_read`.
+    Cmd {
+        n: usize,
+        per_read: usize,
+    },
+    /// Room for the upstream's commands.
+    Upstream {
+        n: usize,
+    },
+    /// The front's peer ends its write side.
+    FrontEof,
+    /// The front's next write fails (its peer reset): it closes before its end.
+    WriteFail,
+    /// The endpoint closes the stream (inside a frame when `odd`).
+    StreamEnd,
+    Tick {
+        ms: u64,
+    },
+}
+
+fn front_op() -> impl Strategy<Value = FrontOp> {
+    prop_oneof![
+        4 => (1usize..700, 1usize..900).prop_map(|(n, per_read)| FrontOp::Feed { n, per_read }),
+        3 => (0usize..1_200, 1usize..1_500).prop_map(|(n, per_call)| FrontOp::Room { n, per_call }),
+        3 => (1usize..300, 1usize..200).prop_map(|(n, per_read)| FrontOp::Cmd { n, per_read }),
+        1 => (1_000usize..3_000, 1usize..5_000)
+            .prop_map(|(n, per_read)| FrontOp::Cmd { n, per_read }),
+        2 => (0usize..400).prop_map(|n| FrontOp::Upstream { n }),
+        1 => Just(FrontOp::FrontEof),
+        1 => Just(FrontOp::WriteFail),
+        1 => Just(FrontOp::StreamEnd),
+        1 => (0u64..1_500).prop_map(|ms| FrontOp::Tick { ms }),
+    ]
+}
+
+#[derive(Debug, Clone)]
+struct FrontScenario {
+    /// Source bytes fed before the front's hello (a late bind: F3 or F3g).
+    before_bind: usize,
+    trailing: usize,
+    ops: Vec<FrontOp>,
+}
+
+fn front_scenario() -> impl Strategy<Value = FrontScenario> {
+    (
+        prop_oneof![2 => Just(0usize), 1 => 0usize..1_200],
+        0usize..40,
+        proptest::collection::vec(front_op(), 1..60),
+    )
+        .prop_map(|(before_bind, trailing, ops)| FrontScenario {
+            before_bind,
+            trailing,
+            ops,
+        })
+}
+
+struct FrontRun {
+    rig: Rig,
+    slot: usize,
+    fs: usize,
+    raw: usize,
+    /// The source bytes offered, in order (the stream's truth).
+    truth: Vec<u8>,
+    /// Command bytes the front's peer wrote, in order.
+    written: Vec<u8>,
+    /// Whether something closed the attempt while it could still hold unsent commands.
+    lossy: bool,
+    reached: HashMap<&'static str, u64>,
+}
+
+fn front_cmd_byte(i: usize) -> u8 {
+    (i * 7 + 3) as u8
+}
+
+fn run_front(sc: &FrontScenario, hog: bool) -> FrontRun {
+    let mut r = Rig::new(12_000);
+    r.configure(8_000, 2);
+    // The raw sink, active before the stream.
+    let raw = r.active("r", RAW, r#","maxLagMs":100,"resumeMs":20"#);
+    r.send(r#"{"v":1,"type":"connect","attempt":1,"host":"127.0.0.1","port":1,"timeoutMs":1000,"headerBytes":12}"#);
+    let slot = match r.actions.last() {
+        Some(wavekit_iqhub::hub::Action::Connect { attempt, .. }) => *attempt,
+        a => panic!("{a:?}"),
+    };
+    r.hub.connect_done(slot, Ok(LOCAL_PORT), r.now);
+    r.actions();
+    r.send(r#"{"v":1,"type":"sink-open","sink":"f","kind":"front","attempt":1,"maxLagMs":100,"resumeMs":20}"#);
+    r.k.sources[slot].queue.extend(FRONT_HDR.iter());
+    r.hub.service_attempt(slot, true, false, &mut r.k, r.now);
+    r.actions();
+    r.k.sources[slot].consumed = 0;
+    // The upstream takes commands only in `Upstream` steps (and at the end).
+    r.k.sources[slot].command_space = 0;
+    r.k.current = Some(slot);
+    let mut truth = Vec::new();
+    let offer = |r: &mut Rig, truth: &mut Vec<u8>, n: usize, per_read: usize| {
+        let from = truth.len() as u64;
+        let b = stream_bytes(1, from, n);
+        truth.extend_from_slice(&b);
+        r.k.sources[slot].per_read = per_read;
+        // A closing attempt is not read: the bytes wait in its socket (the rig's pump would
+        // otherwise run the clock to the grace's end).
+        if r.hub.attempt_closing(slot).is_some_and(|c| !c.draining) {
+            r.k.sources[slot].queue.extend(b.iter());
+        } else {
+            r.feed(slot, &b);
+        }
+    };
+    if sc.before_bind > 0 {
+        offer(&mut r, &mut truth, sc.before_bind, 4_096);
+    }
+    let written_hello: Vec<u8> = (0..sc.trailing).map(front_cmd_byte).collect();
+    let fs = r.hello_front("f", &written_hello);
+    let mut written = written_hello;
+    let mut reached: HashMap<&'static str, u64> = HashMap::new();
+    let mut hit = |k: &'static str| *reached.entry(k).or_default() += 1;
+    if hog {
+        r.k.sinks[fs].space = 0;
+        r.k.sinks[fs].record = false;
+    }
+    let mut front_eof = false;
+    let mut stream_end = false;
+    let mut lossy = false;
+    let mut eof_at: Option<u64> = None;
+    let flush = |r: &mut Rig| {
+        for _ in 0..1_000 {
+            let before = r.k.sources[slot].commands.len();
+            match r.hub.attempt_interest(slot) {
+                Some((_, true)) => {
+                    r.hub.service_attempt(slot, false, true, &mut r.k, r.now);
+                    r.actions();
+                }
+                _ => return,
+            }
+            if r.k.sources[slot].commands.len() == before {
+                return;
+            }
+        }
+    };
+    for op in &sc.ops {
+        match *op {
+            FrontOp::Feed { n, per_read } => {
+                if r.k.sources[slot].open && !stream_end {
+                    offer(&mut r, &mut truth, n, per_read);
+                }
+            }
+            FrontOp::Room { n, per_call } => {
+                if !hog && r.k.sinks[fs].open {
+                    r.k.sinks[fs].per_call = per_call;
+                    r.drain(fs, n);
+                    r.k.sinks[fs].space = 0;
+                }
+            }
+            FrontOp::Cmd { n, per_read } => {
+                if r.k.sinks[fs].open && !front_eof {
+                    // After the stream's end no command reaches the upstream.
+                    lossy |= stream_end;
+                    let from = written.len();
+                    let b: Vec<u8> = (from..from + n).map(front_cmd_byte).collect();
+                    written.extend_from_slice(&b);
+                    r.k.sinks[fs].cmd_per_read = per_read;
+                    r.front_write(fs, &b);
+                    if !r.hub.front_gate(fs) && !r.k.sinks[fs].cmd.is_empty() {
+                        hit("front gate closed with bytes waiting");
+                    }
+                }
+            }
+            FrontOp::Upstream { n } => {
+                r.k.sources[slot].command_space = n;
+                flush(&mut r);
+                r.k.sources[slot].command_space = 0;
+                r.front_poll(fs);
+            }
+            FrontOp::FrontEof => {
+                if r.k.sinks[fs].open && !front_eof {
+                    front_eof = true;
+                    eof_at = Some(r.now);
+                    r.front_end(fs);
+                    hit("front eof");
+                }
+            }
+            FrontOp::WriteFail => {
+                if !hog && r.k.sinks[fs].open && r.hub.sink_wants_write(fs) == Some(true) {
+                    // Unread command bytes in its socket may be lost with it.
+                    lossy = true;
+                    r.k.sinks[fs].fail = true;
+                    r.k.sinks[fs].space = usize::MAX;
+                    r.hub.sink_writable(fs, &mut r.k, r.now);
+                    r.actions();
+                    if !r.k.sinks[fs].open {
+                        hit("front write failed");
+                    }
+                }
+            }
+            FrontOp::StreamEnd => {
+                if r.k.sources[slot].open && !stream_end {
+                    stream_end = true;
+                    if r.hub.attempt_commands(slot).is_some_and(|(_, p)| p > 0)
+                        || !r.k.sinks[fs].cmd.is_empty()
+                    {
+                        lossy = true;
+                    }
+                    r.k.sources[slot].eof = true;
+                    if r.hub.attempt_closing(slot).is_none_or(|c| c.draining) {
+                        r.pump(slot);
+                    }
+                    // The EOF is seen by the next read: let it come due.
+                    for _ in 0..4 {
+                        if let Some(t) = r.hub.next_deadline() {
+                            if t <= r.now + 30_000 {
+                                r.tick_to(t.max(r.now));
+                            }
+                        }
+                        if r.hub.attempt_interest(slot).is_some_and(|(rd, _)| rd) {
+                            r.hub.service_attempt(slot, true, false, &mut r.k, r.now);
+                            r.actions();
+                        }
+                    }
+                    hit("stream end");
+                }
+            }
+            FrontOp::Tick { ms } => {
+                let t = r.now + ms * 1000;
+                if let Some(e) = eof_at {
+                    if t >= e + 2_000_000 && r.hub.attempt_phase(slot).is_some() {
+                        lossy = true;
+                        hit("grace deadline");
+                    }
+                }
+                r.tick_to(t);
+            }
+        }
+    }
+    // The end: every command the attempt still holds goes upstream, the front reads its rest,
+    // the source ends, the front drains and its peer closes.
+    r.k.sources[slot].command_space = usize::MAX;
+    for _ in 0..8 {
+        flush(&mut r);
+        r.front_poll(fs);
+    }
+    if r.k.sources[slot].open && !stream_end {
+        r.k.sources[slot].eof = true;
+        if r.hub.attempt_closing(slot).is_none_or(|c| c.draining) {
+            r.pump(slot);
+        }
+        for _ in 0..4 {
+            if let Some(t) = r.hub.next_deadline() {
+                if t <= r.now + 30_000 {
+                    r.tick_to(t.max(r.now));
+                }
+            }
+            if r.hub.attempt_interest(slot).is_some_and(|(rd, _)| rd) {
+                r.hub.service_attempt(slot, true, false, &mut r.k, r.now);
+                r.actions();
+            }
+        }
+    }
+    if !hog {
+        r.drain_all();
+    }
+    if r.k.sinks[fs].open {
+        r.k.sinks[fs].cmd_eof = true;
+        r.front_poll(fs);
+    }
+    r.drain_all();
+    r.events();
+    FrontRun {
+        rig: r,
+        slot,
+        fs,
+        raw,
+        truth,
+        written,
+        lossy,
+        reached,
+    }
+}
+
+/// Maps a source position to the front byte that carries it, through the front's gaps (a
+/// position inside a gap maps to that gap's `atSinkByte`).
+fn sink_byte_of(start: u64, gaps: &[(u64, u64, u64)], pos: u64) -> u64 {
+    let mut sink = 0u64;
+    let mut at = start;
+    for &(gs, src, dropped) in gaps {
+        if pos <= src {
+            return sink + (pos - at);
+        }
+        sink = gs;
+        at = src + dropped;
+        if pos <= at {
+            return gs;
+        }
+    }
+    sink + (pos - at)
+}
+
+fn check_front(o: &FrontRun) -> Result<(), TestCaseError> {
+    let log = &o.rig.log;
+    let mine = |e: &&Value| e["sink"] == "f";
+    let started: Vec<&Value> = log
+        .iter()
+        .filter(|e| e["type"] == "sink-started")
+        .filter(mine)
+        .collect();
+    prop_assert_eq!(started.len(), 1);
+    let start = started[0]["startSourcePos"].as_u64().unwrap();
+    let gaps: Vec<(u64, u64, u64)> = log
+        .iter()
+        .filter(|e| e["type"] == "sink-gap")
+        .filter(mine)
+        .map(|e| {
+            (
+                e["atSinkByte"].as_u64().unwrap(),
+                e["atSourcePos"].as_u64().unwrap(),
+                e["droppedBytes"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    // (fa) the header, then the stream with its gaps re-inserted.
+    let got = &o.rig.k.sinks[o.fs].received;
+    let hdr = got.len().min(12);
+    prop_assert_eq!(&got[..hdr], &FRONT_HDR[..hdr]);
+    let pay = &got[hdr..];
+    // A front closed before its end (a failed write) may lose the rest of a frame it had
+    // spilled: a gap reported after those bytes then lies at most a frame's remainder past
+    // what it received, and the bytes up to it were discarded.
+    let closed_early = !log.iter().filter(mine).any(|e| e["type"] == "front-ended")
+        && log.iter().filter(mine).any(|e| e["type"] == "sink-closed");
+    let closed_discarded = log
+        .iter()
+        .filter(mine)
+        .find(|e| e["type"] == "sink-closed")
+        .and_then(|e| e["discardedBytes"].as_u64())
+        .unwrap_or(0);
+    let mut at = start;
+    let mut r = 0usize;
+    for &(gs, src, dropped) in &gaps {
+        let gs = gs as usize;
+        if closed_early && gs > pay.len() {
+            prop_assert!(gs - pay.len() < 2, "gap at {} of {}", gs, pay.len());
+            prop_assert!(
+                closed_discarded >= (gs - pay.len()) as u64,
+                "the {} spilled bytes past {} are discarded ({})",
+                gs - pay.len(),
+                pay.len(),
+                closed_discarded
+            );
+            prop_assert!(r <= pay.len());
+            break;
+        }
+        prop_assert!(gs >= r && gs <= pay.len(), "gap at {} of {}", gs, pay.len());
+        prop_assert_eq!(&pay[r..gs], &o.truth[at as usize..at as usize + gs - r]);
+        at += (gs - r) as u64;
+        prop_assert_eq!(src, at, "a gap starts where the bytes before it end");
+        prop_assert!(dropped.is_multiple_of(2) && gs.is_multiple_of(2));
+        at += dropped;
+        r = gs;
+    }
+    let tail = pay.len().saturating_sub(r);
+    prop_assert!(at as usize + tail <= o.truth.len());
+    prop_assert_eq!(&pay[r..], &o.truth[at as usize..at as usize + tail]);
+    let stream_whole = {
+        let s = &o.rig.k.sources[o.slot];
+        let c = s.consumed - s.drained;
+        c - c % 2
+    };
+    let ended: Vec<&Value> = log
+        .iter()
+        .filter(|e| e["type"] == "front-ended")
+        .filter(mine)
+        .collect();
+    prop_assert!(ended.len() <= 1);
+    if let Some(fe) = ended.first() {
+        let sent = fe["sinkBytes"].as_u64().unwrap();
+        let dropped = fe["droppedBytes"].as_u64().unwrap();
+        let discarded = fe["discardedBytes"].as_u64().unwrap();
+        prop_assert_eq!(
+            start + sent + dropped + discarded,
+            stream_whole,
+            "I-S3: U = N + G + D"
+        );
+        prop_assert_eq!(dropped, gaps.iter().map(|g| g.2).sum::<u64>());
+        if o.rig.k.sinks[o.fs].record {
+            prop_assert_eq!(sent as usize, pay.len());
+        }
+        // Nothing for the front after its front-ended but its sink-closed.
+        let i = log.iter().position(|e| std::ptr::eq(e, *fe)).unwrap();
+        prop_assert!(log[i + 1..]
+            .iter()
+            .filter(mine)
+            .all(|e| e["type"] == "sink-closed"));
+    }
+    // (fa) a front closed before its end (a failed write): its stream stops at the close, and
+    // `startSourcePos + sinkBytes + droppedBytes + discardedBytes` is the head then.
+    if ended.is_empty() {
+        let closed: Vec<&Value> = log
+            .iter()
+            .filter(|e| e["type"] == "sink-closed")
+            .filter(mine)
+            .collect();
+        prop_assert!(closed.len() <= 1);
+        if let Some(sc) = closed.first() {
+            let sent = sc["sinkBytes"].as_u64().unwrap();
+            let dropped = sc["droppedBytes"].as_u64().unwrap();
+            let discarded = sc["discardedBytes"].as_u64().unwrap();
+            prop_assert_eq!(
+                start + sent + dropped + discarded,
+                sc["sourcePos"].as_u64().unwrap(),
+                "I-S3 at a close: U = N + G + D"
+            );
+            prop_assert_eq!(dropped, gaps.iter().map(|g| g.2).sum::<u64>());
+            if o.rig.k.sinks[o.fs].record {
+                prop_assert_eq!(sent as usize, pay.len());
+            }
+        }
+    }
+    // (fb) the upstream's commands are a prefix of the front's.
+    let up = &o.rig.k.sources[o.slot].commands;
+    prop_assert!(up.len() <= o.written.len());
+    prop_assert_eq!(
+        &o.written[..up.len()],
+        &up[..],
+        "I-C: in order, nothing invented"
+    );
+    if !o.lossy {
+        prop_assert_eq!(up.len(), o.written.len(), "I-C: all of them");
+    }
+    // (fc) placements.
+    let acc = &o.rig.k.sources[o.slot].accepted_at;
+    let mut last_front_bytes = 0u64;
+    for p in log
+        .iter()
+        .filter(|e| e["type"] == "front-placed")
+        .filter(mine)
+    {
+        let fb = p["frontBytes"].as_u64().unwrap();
+        let pos = p["atSourcePos"].as_u64().unwrap();
+        let sb = p["sinkByte"].as_u64().unwrap();
+        prop_assert!(fb > last_front_bytes, "(fe) frontBytes strictly increases");
+        last_front_bytes = fb;
+        let (_, head) = acc
+            .iter()
+            .find(|(cum, _)| *cum >= fb)
+            .copied()
+            .expect("the placed bytes were accepted");
+        prop_assert_eq!(pos, head, "the head when the last placed byte was accepted");
+        prop_assert!(pos >= start);
+        prop_assert_eq!(
+            sb,
+            sink_byte_of(start, &gaps, pos),
+            "sinkByte carries atSourcePos"
+        );
+    }
+    // (fe) sourcePos never decreases.
+    let mut last = 0u64;
+    for e in log {
+        if let Some(p) = e["sourcePos"].as_u64() {
+            prop_assert!(p >= last, "{}", e);
+            last = p;
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    // Properties (fa), (fb), (fc), (fe).
+    #[test]
+    fn a_front_carries_its_stream_its_commands_and_exact_placements(sc in front_scenario()) {
+        let o = run_front(&sc, false);
+        check_front(&o)?;
+    }
+
+    // Property (fd): a front that never reads costs the raw sink beside it nothing.
+    #[test]
+    fn a_front_that_never_reads_costs_the_other_sinks_nothing(sc in front_scenario()) {
+        // A failed write closes the front and its attempt: the stream itself changes.
+        let mut sc = sc;
+        sc.ops.retain(|op| !matches!(op, FrontOp::WriteFail));
+        let without = run_front(&sc, false);
+        let with = run_front(&sc, true);
+        check_front(&with)?;
+        prop_assert!(
+            without.rig.k.sinks[without.raw].received == with.rig.k.sinks[with.raw].received,
+            "the raw sink received other bytes beside a front that never reads"
+        );
+        prop_assert_eq!(without.rig.hub.head(), with.rig.hub.head());
+    }
+}
+
+/// The front scenarios are not vacuous: over a fixed sample of 256, each behaviour occurs.
+#[test]
+fn the_front_scenarios_reach_every_behaviour_the_properties_cover() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+    let mut runner = TestRunner::deterministic();
+    let mut seen: HashMap<&str, u64> = HashMap::new();
+    for _ in 0..256 {
+        let sc = front_scenario().new_tree(&mut runner).unwrap().current();
+        let o = run_front(&sc, false);
+        for (k, n) in &o.reached {
+            *seen.entry(k).or_default() += n;
+        }
+        let log = &o.rig.log;
+        let mut count = |k: &'static str, n: usize| *seen.entry(k).or_default() += n as u64;
+        let f = |e: &&Value| e["sink"] == "f";
+        count(
+            "lag gap",
+            log.iter().filter(f).filter(|e| e["cause"] == "lag").count(),
+        );
+        count(
+            "start gap",
+            log.iter()
+                .filter(f)
+                .filter(|e| e["cause"] == "start")
+                .count(),
+        );
+        count(
+            "front-placed",
+            log.iter()
+                .filter(f)
+                .filter(|e| e["type"] == "front-placed")
+                .count(),
+        );
+        count(
+            "placement inside a gap",
+            log.iter()
+                .filter(f)
+                .filter(|e| e["type"] == "front-placed")
+                .filter(|p| {
+                    let pos = p["atSourcePos"].as_u64().unwrap();
+                    log.iter()
+                        .filter(f)
+                        .filter(|e| e["type"] == "sink-gap")
+                        .any(|g| {
+                            let s = g["atSourcePos"].as_u64().unwrap();
+                            s < pos && pos <= s + g["droppedBytes"].as_u64().unwrap()
+                        })
+                })
+                .count(),
+        );
+        count(
+            "front-ended",
+            log.iter()
+                .filter(f)
+                .filter(|e| e["type"] == "front-ended")
+                .count(),
+        );
+        count(
+            "discarded tail",
+            log.iter()
+                .filter(f)
+                .filter(|e| e["type"] == "front-ended" && e["discardedBytes"].as_u64() > Some(0))
+                .count(),
+        );
+        count(
+            "closed by the front",
+            log.iter()
+                .filter(|e| e["type"] == "closed" && e["by"] == "front")
+                .count(),
+        );
+        count(
+            "front-closed reason",
+            log.iter().filter(|e| e["reason"] == "front-closed").count(),
+        );
+        count(
+            "eof reason",
+            log.iter()
+                .filter(f)
+                .filter(|e| e["type"] == "front-ended" && e["reason"] == "eof")
+                .count(),
+        );
+        count(
+            "lossless commands",
+            usize::from(!o.lossy && !o.written.is_empty()),
+        );
+    }
+    for k in [
+        "lag gap",
+        "start gap",
+        "front-placed",
+        "placement inside a gap",
+        "front-ended",
+        "discarded tail",
+        "closed by the front",
+        "front-closed reason",
+        "eof reason",
+        "front eof",
+        "front write failed",
+        "stream end",
+        "front gate closed with bytes waiting",
+        "lossless commands",
+    ] {
+        assert!(
+            seen.get(k).copied().unwrap_or(0) > 0,
+            "no case reached: {k} ({seen:?})"
+        );
+    }
+    eprintln!("{seen:?}");
+}

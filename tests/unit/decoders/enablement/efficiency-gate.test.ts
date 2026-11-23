@@ -149,22 +149,33 @@ describe("efficiency gate", () => {
 			expect(gate.admit(placement(), [], 1)).toMatchObject({ admit: true })
 		}
 	})
-	it("own cpu at 90 % of capacity admits and past it on two samples blocks with cpu", () => {
+	// rx-starvation hysteresis: own-over is evidence after OWN_OVER_SUSTAIN_SAMPLES (5) samples.
+	it("own cpu at 90 % of capacity admits and past it on five samples blocks with cpu", () => {
 		for (const own of [3.6, 3.6 + 1e-9]) {
 			const gate = setup()
-			gate.record({ ...sample(1, 100), ownCores: own, capacityCores: 4 })
-			gate.record({ ...sample(2001, 100), ownCores: own, capacityCores: 4 })
-			expect(gate.admit(placement(), [], 2001)).toMatchObject(
+			for (let i = 0; i < 5; i++)
+				gate.record({
+					...sample(1 + i * 2000, 100),
+					ownCores: own,
+					capacityCores: 4,
+				})
+			expect(gate.admit(placement(), [], 8001)).toMatchObject(
 				own === 3.6 ? { admit: true } : { admit: false, detail: "cpu" },
 			)
 		}
 	})
-	it("one own-over sample admits; two consecutive refuse with cpu", () => {
+	it("four consecutive own-over samples admit; the fifth refuses with cpu", () => {
 		const gate = setup()
-		gate.record({ ...sample(1, 10), ownCores: 3.8, capacityCores: 4 })
-		expect(gate.admit(placement(), [], 1)).toEqual({ admit: true })
-		gate.record({ ...sample(2001, 10), ownCores: 3.8, capacityCores: 4 })
-		expect(gate.admit(placement(), [], 2001)).toMatchObject({
+		for (let i = 0; i < 4; i++) {
+			gate.record({
+				...sample(1 + i * 2000, 10),
+				ownCores: 3.8,
+				capacityCores: 4,
+			})
+			expect(gate.admit(placement(), [], 1 + i * 2000)).toEqual({ admit: true })
+		}
+		gate.record({ ...sample(8001, 10), ownCores: 3.8, capacityCores: 4 })
+		expect(gate.admit(placement(), [], 8001)).toMatchObject({
 			admit: false,
 			detail: "cpu",
 		})

@@ -2,7 +2,7 @@
 //!
 //! Run (the bench starts the release binary next to its own directory):
 //!   cargo build --release --locked --manifest-path native/wavekit-iqhub/Cargo.toml
-//!   cargo run --release --locked --example hub_bench --manifest-path native/wavekit-iqhub/Cargo.toml -- [--rate SPS] [--seconds S] [--chunk BYTES] [--header]
+//!   cargo run --release --locked --example hub_bench --manifest-path native/wavekit-iqhub/Cargo.toml -- [--rate SPS] [--seconds S] [--chunk BYTES] [--header] [--one raw|front]
 //!
 //! An in-process TCP source on an ephemeral loopback port sends a 12-byte header, then CU8 at
 //! `--rate` samples per second (2 bytes each) in `--chunk`-byte writes, each due at
@@ -15,6 +15,12 @@
 //! granted send buffer, each sink's bytes, gaps and dropped bytes, and the one-minute load
 //! average at the end. By hand, for scale: reading 4.8 MB/s and writing it to 5 sinks is about
 //! 29 MB/s of kernel copies.
+//!
+//! `--one raw` or `--one front` runs one sink of that kind instead, so the two rows compare a
+//! front's CPU per second of IQ with a raw sink's: the front (bound to the attempt, which adopts
+//! itself at its header) also carries a 5-byte command every 50 ms upstream, with its
+//! placements. Its row: the kind, Msps, IQ seconds, the hub's CPU per second of IQ, switches,
+//! wake-ups per block, the sink's MB, gaps, command bytes sent and placements.
 
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -86,7 +92,17 @@ fn main() {
     let rate: u64 = arg(&args, "--rate", 2_400_000);
     let seconds: f64 = arg(&args, "--seconds", 15.0);
     let chunk: usize = arg(&args, "--chunk", 16_384);
-    if args.iter().any(|a| a == "--header") {
+    let one: Option<String> = args
+        .iter()
+        .position(|a| a == "--one")
+        .map(|i| args.get(i + 1).cloned().expect("--one raw|front"));
+    if let Some(k) = &one {
+        assert!(k == "raw" || k == "front", "--one raw|front");
+    }
+    if one.is_some() && args.iter().any(|a| a == "--header") {
+        println!("| sink | Msps | IQ s | hub CPU ms per s of IQ (user + sys) | vol. / invol. switches per s | wake-ups per block | sink MB | gaps | command bytes sent | placements | load avg |");
+        println!("| ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |");
+    } else if args.iter().any(|a| a == "--header") {
         println!("| Msps | IQ s | hub CPU ms per s of IQ (user + sys) | vol. / invol. switches per s | wake-ups per block | wake-ups per read | reads per s | send buffer granted | raw1-3 MB | stall MB, gaps, dropped MB | never MB, gaps, dropped MB | framed MB | load avg |");
         println!("| ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- | ---- |");
     }
@@ -189,7 +205,38 @@ fn main() {
     let stop = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::new();
     let mut never = None;
-    for (id, kind) in SINKS {
+    let mut commander = None;
+    let sinks: Vec<(&str, &str)> = match one.as_deref() {
+        Some(k) => vec![("one", if k == "front" { "front" } else { "raw" })],
+        None => SINKS.to_vec(),
+    };
+    for (id, kind) in sinks.iter().copied().filter(|(_, k)| *k == "front") {
+        // The front's attempt is held: it adopts itself at once.
+        send(format!(
+            r#"{{"v":1,"type":"sink-open","sink":"{id}","kind":"front","attempt":1}}"#
+        ));
+        wait_for("adopted", &mut log);
+        let mut s = UnixStream::connect(&socket).expect("front connect");
+        s.write_all(format!("{{\"v\":1,\"sink\":\"{id}\"}}\n").as_bytes())
+            .expect("hello");
+        wait_for("sink-started", &mut log);
+        let mut w = s.try_clone().expect("front clone");
+        let stop2 = stop.clone();
+        commander = Some(thread::spawn(move || {
+            let mut n = 0u64;
+            while !stop2.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(50));
+                if w.write_all(&[1, 2, 3, 4, 5]).is_err() {
+                    break;
+                }
+                n += 5;
+            }
+            n
+        }));
+        readers.push((id, reader(s, false, stop.clone())));
+        let _ = kind;
+    }
+    for (id, kind) in sinks.iter().copied().filter(|(_, k)| *k != "front") {
         send(format!(
             r#"{{"v":1,"type":"sink-open","sink":"{id}","kind":"{kind}"}}"#
         ));
@@ -206,8 +253,10 @@ fn main() {
             readers.push((id, reader(s, id == "stall", stop.clone())));
         }
     }
-    send(r#"{"v":1,"type":"adopt","attempt":1}"#.to_string());
-    wait_for("adopted", &mut log);
+    if one.as_deref() != Some("front") {
+        send(r#"{"v":1,"type":"adopt","attempt":1}"#.to_string());
+        wait_for("adopted", &mut log);
+    }
 
     // The paced source: chunk k is due at start + k x chunk / byte rate.
     let total = (seconds * byte_rate as f64) as u64;
@@ -254,10 +303,20 @@ fn main() {
             log.push(e);
         }
     }
+    let placements = log.iter().filter(|e| e["type"] == "front-placed").count();
+    let cmd_sent = log
+        .iter()
+        .rev()
+        .find(|e| e["type"] == "front-placed")
+        .and_then(|e| e["frontBytes"].as_u64())
+        .unwrap_or(0);
+    stop.store(true, Ordering::Relaxed);
+    if let Some(c) = commander {
+        let _ = c.join();
+    }
     drop(src);
     drop(control);
     let status = child.wait().expect("hub exit");
-    stop.store(true, Ordering::Relaxed);
     drop(never);
     let mut received = Vec::new();
     for (id, h) in readers {
@@ -307,6 +366,28 @@ fn main() {
     // A block is the reader's target: min(32 768 bytes, 20 ms of signal).
     let target = 32_768u64.min(byte_rate * 20 / 1000);
     let blocks = (last["sourcePos"].as_u64().unwrap_or(0) as f64 / target as f64).max(1.0);
+    if let Some(k) = &one {
+        let o = sink("one");
+        println!(
+            "| {k} | {:.3} | {:.1} | {:.1} ({:.1} + {:.1}) | {:.1} / {:.1} | {:.2} | {:.1} | {} | {cmd_sent} | {placements} | {load:.2} |",
+            rate as f64 / 1e6,
+            iq_s,
+            cpu_ms / iq_s.max(1e-9),
+            user / iq_s.max(1e-9),
+            sys / iq_s.max(1e-9),
+            field("voluntary") as f64 / iq_s.max(1e-9),
+            field("involuntary") as f64 / iq_s.max(1e-9),
+            field("wakeups") as f64 / blocks,
+            o.0,
+            o.1,
+        );
+        if status.code() != Some(0) {
+            eprintln!("hub exit {status:?}: {err}");
+        }
+        let _ = received;
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
     println!(
         "| {:.3} | {:.1} | {:.1} ({:.1} + {:.1}) | {:.1} / {:.1} | {:.2} | {:.2} | {:.0} | {} | {} | {:.1}, {}, {:.1} | {:.2}, {}, {:.1} | {:.1} | {:.2} |",
         rate as f64 / 1e6,

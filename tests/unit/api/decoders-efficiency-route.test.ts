@@ -1,7 +1,11 @@
 import Fastify from "fastify"
 import { decoderStatusExtensionProperties } from "../../../src/api/routes/decoder-status-schemas.js"
-import { expect, it } from "vitest"
-import type { DecoderEfficiencyView } from "@wavekit/api-types"
+import { expect, expectTypeOf, it } from "vitest"
+import type {
+	DecoderEfficiencyPlacement,
+	DecoderEfficiencyView,
+	DecoderHostExcusedLoss,
+} from "@wavekit/api-types"
 import {
 	decoderRoutes,
 	type DecoderRoutesOptions,
@@ -11,10 +15,7 @@ import { installAccessHooks } from "../../../src/access/fastify-adapter.js"
 import { AccessPolicy } from "../../../src/access/policy.js"
 import { SessionStore } from "../../../src/access/sessions.js"
 import { createEfficiencyGate } from "../../../src/decoders/enablement/efficiency-gate.js"
-import {
-	placementKey,
-	type CoreEfficiencyView,
-} from "../../../src/decoders/enablement/contract.js"
+import { placementKey } from "../../../src/decoders/enablement/contract.js"
 import {
 	digestMachineToken,
 	generateMachineToken,
@@ -73,8 +74,18 @@ it.each([
 	}
 })
 
+it("api-types carries hostExcusedLoss as an optional DecoderHostExcusedLoss on a placement", () => {
+	expectTypeOf<DecoderEfficiencyPlacement["hostExcusedLoss"]>().toEqualTypeOf<
+		DecoderHostExcusedLoss | undefined
+	>()
+	expectTypeOf<DecoderHostExcusedLoss["cause"]>().toEqualTypeOf<"host-busy">()
+	expectTypeOf<
+		ReturnType<typeof createEfficiencyGate>["view"]
+	>().returns.toEqualTypeOf<DecoderEfficiencyView>()
+})
+
 it("the route keeps an admitted placement's host-busy excused loss (L1), cause, since and windows", async () => {
-	const excused: CoreEfficiencyView = {
+	const excused: DecoderEfficiencyView = {
 		...view,
 		sources: [
 			{
@@ -360,6 +371,43 @@ it.each([
 		await app.close()
 	}
 })
+
+it.each([
+	[1, 200],
+	[3, 200],
+	[0, 400],
+	[4, 400],
+] as const)(
+	"efficiency response schema holds host-excused windows to 1..3 (%i → %i)",
+	async (windows, expected) => {
+		const app = await responseValidator()
+		try {
+			const response = await app.inject({
+				method: "POST",
+				url: "/validate",
+				payload: {
+					...view,
+					sources: view.sources.map(source => ({
+						...source,
+						admitted: [
+							{
+								...placement,
+								hostExcusedLoss: {
+									cause: "host-busy",
+									since: "2026-11-22T10:00:00.000Z",
+									windows,
+								},
+							},
+						],
+					})),
+				},
+			})
+			expect(response.statusCode).toBe(expected)
+		} finally {
+			await app.close()
+		}
+	},
+)
 
 it.each(["none", "link", "host", "consumer", "unknown"] as const)(
 	"efficiency response schema accepts attribution %s and all held states",

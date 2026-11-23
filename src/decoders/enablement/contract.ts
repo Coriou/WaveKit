@@ -9,8 +9,6 @@ import type {
 	DecoderStartMode,
 	DecoderSuspensionReasonCode,
 	DecoderPlacementView,
-	DecoderEfficiencyPlacement,
-	DecoderEfficiencySourceView,
 	DecoderEfficiencyView,
 	DecoderEfficiencyDetail,
 	DecoderLossCause,
@@ -80,6 +78,28 @@ export const EFFICIENCY_DROP_WINDOW_MS = 10_000
 export const EFFICIENCY_CLEAR_MS = 60_000
 export const EFFICIENCY_PROBATION_MS = 30_000
 export const EFFICIENCY_RETRY_MS = 300_000
+/**
+ * Own CPU over the guard share counts as `cpu` evidence (probation, scapegoat,
+ * admission) only once it has held this long: 10 000 ms / 2000 ms per sample =
+ * 5 consecutive own-over samples, each no more than OWN_CPU_MAX_GAP_MS (4000 ms)
+ * after the previous one. Sitting at a quota for 4 samples (8 s) is no evidence;
+ * the 5th is.
+ */
+export const OWN_OVER_SUSTAIN_MS = 10_000
+export const OWN_OVER_SUSTAIN_SAMPLES =
+	OWN_OVER_SUSTAIN_MS / EFFICIENCY_SAMPLE_MS
+/**
+ * A placement suspended for `cpu` is readmitted only after own CPU has been
+ * strictly below the guard minus this many points (90 % guard: below 80 %) for
+ * one clear window: EFFICIENCY_CLEAR_MS / EFFICIENCY_SAMPLE_MS = 60 000 / 2000 =
+ * 30 consecutive samples, all taken after the suspension.
+ */
+export const CPU_RELEASE_MARGIN_PERCENT = 10
+export const CPU_RELEASE_SAMPLES = EFFICIENCY_CLEAR_MS / EFFICIENCY_SAMPLE_MS
+/** The release threshold for a guard: guard − 10 points, never below half the guard. */
+export function cpuReleasePercent(guardPercent: number): number {
+	return Math.max(guardPercent - CPU_RELEASE_MARGIN_PERCENT, guardPercent / 2)
+}
 export const EFFICIENCY_RETRY_MAX_MS = 1_800_000
 /**
  * The tuned decoder shed for its own loss is probed again sooner than an
@@ -405,6 +425,19 @@ export function placementKey(
 ): string {
 	return `${decoderId}#${reach === "channel" ? channelHz : reach}@${sourceId}`
 }
+const PLACEMENT_KEY = /^(.*)#[^#@]*@(.*)$/
+/** The decoder id of a placementKey(); the key itself when it is not one. */
+export function cpuHoldDecoderId(key: string): string {
+	return PLACEMENT_KEY.exec(key)?.[1] ?? key
+}
+/**
+ * The key a `cpu` hold is kept under: `decoderId@sourceId`, the reach and
+ * channel left out, so every placement of a decoder on a source shares it.
+ */
+export function cpuHoldKey(key: string): string {
+	const match = PLACEMENT_KEY.exec(key)
+	return match ? `${match[1]}@${match[2]}` : key
+}
 export interface SourceDropSample {
 	attribution?: DropAttribution
 	droppedBytesDelta: number | null
@@ -488,37 +521,6 @@ export interface ShedAttribution {
 	/** Whose loss condemned it, with the safe evidence the logs carry. */
 	attribution: LossAttribution
 }
-/**
- * L1 is excusing a running untuned placement's own loss: late-drop windows that would condemn it (loss charged to
- * the branch it reads, or to its whole source) are its host's, while the host is busy and the core's own CPU is not
- * over, so it is not late-stopped. Visible here so the loss is never silent; gone once the host calms or the loss
- * stops.
- */
-export interface HostExcusedLossView {
-	cause: "host-busy"
-	/** When the excuse began (ISO). */
-	since: string
-	/** Late-drop windows (of the latest LATE_SHED_WINDOWS) whose loss it excuses now: 1 to LATE_SHED_WINDOWS. */
-	windows: number
-}
-/** The core's efficiency placement: the API placement plus `hostExcusedLoss` (until api-types carries it). */
-export interface CoreEfficiencyPlacement extends DecoderEfficiencyPlacement {
-	hostExcusedLoss?: HostExcusedLossView
-}
-export interface CoreEfficiencySourceView extends Omit<
-	DecoderEfficiencySourceView,
-	"admitted"
-> {
-	admitted: CoreEfficiencyPlacement[]
-}
-/** DecoderEfficiencyView with `hostExcusedLoss` on admitted placements; assignable to it. */
-export interface CoreEfficiencyView extends Omit<
-	DecoderEfficiencyView,
-	"sources"
-> {
-	sources: CoreEfficiencySourceView[]
-}
-
 export interface EfficiencyGate {
 	record(sample: EfficiencySample): void
 	admit(
@@ -566,7 +568,14 @@ export interface EfficiencyGate {
 	 * any budget backoff. Call before `fromKey` is forgotten.
 	 */
 	inherit?(fromKey: string, toKey: string): void
+	/**
+	 * Forgets a placement's history. A `cpu` hold (kept per decoder and
+	 * source, see cpuHoldKey) survives it: only own CPU's release or
+	 * releaseCpuHold ends it.
+	 */
 	forget(key: string): void
+	/** An operator start of `decoderId`: its `cpu` holds on every source end now. */
+	releaseCpuHold?(decoderId: string): void
 	view(
 		running: readonly RunningPlacement[],
 		blocked: readonly {
@@ -574,7 +583,7 @@ export interface EfficiencyGate {
 			decision: AdmissionDecision
 		}[],
 		now: number,
-	): CoreEfficiencyView
+	): DecoderEfficiencyView
 }
 
 export const LATE_SHED_WINDOWS = 3

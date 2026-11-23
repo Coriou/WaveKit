@@ -480,6 +480,19 @@ export interface DecoderEfficiencyPlacement {
 	/** "configured": a YAML decoder, admitted without the gate; its cost still counts. */
 	detail?: DecoderEfficiencyDetail | "configured"
 	retryAt?: string | null
+	/** Admitted only: L1 excuses this untuned decoder's own loss while the host is busy (no late stop). */
+	hostExcusedLoss?: DecoderHostExcusedLoss
+}
+/**
+ * The host's CPU (not the core's own) explains an admitted untuned placement's own late-drop loss, so it is not
+ * late-stopped for it; present while that lasts, gone once the host calms or the loss stops.
+ */
+export interface DecoderHostExcusedLoss {
+	cause: "host-busy"
+	/** When the excuse began (ISO). */
+	since: string
+	/** Late-drop windows (of the latest three) whose loss it excuses now: 1 to 3. */
+	windows: number
 }
 export interface DecoderEfficiencySourceView {
 	attribution?: DropAttribution

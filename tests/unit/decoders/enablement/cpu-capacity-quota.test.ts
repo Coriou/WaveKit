@@ -84,6 +84,49 @@ describe("CPU capacity under a fractional quota", () => {
 				fallback: () => 1,
 			}),
 		).toBe(4)
+		// An empty affinity line never reads the next line as its list.
+		expect(
+			hostCpuCount({
+				readStatus: () => "Cpus_allowed_list:\n0-1\nMems_allowed_list:\t0\n",
+				online: () => 8,
+				fallback: () => 1,
+			}),
+		).toBe(8)
+		// An unreadable cgroup file skips the cpuset, the other counts still apply.
+		expect(
+			hostCpuCount({
+				readStatus: status("0-3"),
+				readProcCgroup: () => "0::/app\n",
+				readCgroupFile: none,
+				online: () => 8,
+				fallback: () => 1,
+			}),
+		).toBe(4)
+		// An unreadable /proc/self/cgroup reads the cpuset at the mount root.
+		const fallbackReads: string[] = []
+		expect(
+			hostCpuCount({
+				readStatus: none,
+				readProcCgroup: none,
+				readCgroupFile: path => {
+					fallbackReads.push(path)
+					return "0-2"
+				},
+				online: () => 8,
+				fallback: () => 1,
+			}),
+		).toBe(3)
+		expect(fallbackReads).toEqual(["cpuset.cpus.effective"])
+		// Both unreadable: the online count.
+		expect(
+			hostCpuCount({
+				readStatus: none,
+				readProcCgroup: none,
+				readCgroupFile: none,
+				online: () => 6,
+				fallback: () => 1,
+			}),
+		).toBe(6)
 		// Online 0 or NaN and nothing else: the fallback, never below 1.
 		expect(hostCpuCount({ online: () => 0, fallback: () => 3 })).toBe(3)
 		expect(hostCpuCount({ online: () => Number.NaN, fallback: () => 3 })).toBe(

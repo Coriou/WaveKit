@@ -10,14 +10,14 @@
 use crate::events::{EventQueue, Pos};
 use crate::protocol::{
     parse_hello, parse_request, truncate_utf8, CloseMode, Configure, Connect, Parsed, Refusal,
-    Request, SinkKind, MAX_DETAIL_BYTES, MAX_HEADER_BYTES,
+    Request, SinkKind, MAX_COMMAND_BYTES, MAX_DETAIL_BYTES, MAX_HEADER_BYTES,
 };
 use crate::ring::{align_down, align_up, Coalesce, Level, NoMemory, Ring};
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 
 pub const PROTOCOL: u64 = 1;
-pub const FEATURES: [&str; 7] = [
+pub const FEATURES: [&str; 10] = [
     "mark",
     "sink-update",
     "link-gap",
@@ -25,6 +25,9 @@ pub const FEATURES: [&str; 7] = [
     "header-timeout",
     "errno",
     "close-modes",
+    "front",
+    "rcvbuf",
+    "stats-file",
 ];
 pub const MAX_SINKS: usize = 32;
 pub const MAX_ATTEMPTS: usize = 4;
@@ -65,6 +68,14 @@ pub const DISCARD_READ_BYTES: usize = 16 * 1024;
 /// peer that keeps sending during a graceful close cannot hold the loop; `poll` is level
 /// triggered, so the rest is read at the next wake-up (and the grace bounds it all).
 pub const DISCARD_READS_PER_WAKE: usize = 16;
+/// Placements a front may have pending (commands sent upstream whose position the front has
+/// not reached). At this bound the front's read gate closes and the attempt sends no more of
+/// the front's commands until one resolves, so a placement is never coalesced across positions.
+pub const MAX_FRONT_PLACEMENTS: usize = 256;
+/// The grace of the internal graceful abort a front's close starts (README, "Front sinks").
+pub const FRONT_GRACE_MS: u64 = 2_000;
+/// Closed fronts whose final counts the stats file keeps (the most recent).
+pub const CLOSED_FRONTS_KEPT: usize = 4;
 
 /// Why an attempt closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +139,19 @@ pub enum Received {
     Failed(Failure),
 }
 
+/// What became of a `connect`'s `rcvBufBytes` (`tcp-connected.rcvBuf`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RcvBuf {
+    pub requested: u64,
+    /// `getsockopt(SO_RCVBUF)` once the socket is set up (Linux reports twice the request).
+    pub granted: Option<u64>,
+    /// Whether the option was set. When the platform's limit does not allow the whole request
+    /// the hub leaves it unset, so the kernel's autotuning stays on.
+    pub applied: bool,
+    /// The platform's limit (Linux `net.core.rmem_max`, macOS `kern.ipc.maxsockbuf`).
+    pub limit: Option<u64>,
+}
+
 /// One system call per method, on the socket the slot names. Never blocks.
 pub trait Kernel {
     /// Sends the concatenation of `bufs` (at most three slices) to a sink.
@@ -140,6 +164,8 @@ pub trait Kernel {
     fn source_queued(&mut self, attempt: usize) -> u64;
     fn command_send(&mut self, attempt: usize, bytes: &[u8]) -> Sent;
     fn unbound_recv(&mut self, conn: usize, buf: &mut [u8]) -> Received;
+    /// Receives command bytes from a front sink's connection.
+    fn front_recv(&mut self, sink: usize, buf: &mut [u8]) -> Received;
 }
 
 /// Work the I/O loop performs for the state machine, in order.
@@ -150,6 +176,9 @@ pub enum Action {
         attempt: usize,
         addr: SocketAddr,
         keep_alive_ms: Option<u64>,
+        /// `SO_RCVBUF` to request between `socket()` and `connect()`; report with
+        /// [`Hub::set_rcv_buf`] before [`Hub::connect_done`].
+        rcv_buf_bytes: Option<u64>,
     },
     CloseAttempt {
         attempt: usize,
@@ -161,6 +190,15 @@ pub enum Action {
     /// The connection becomes the sink's: shut its read side and poll it for writes only.
     BindSink {
         conn: usize,
+        sink: usize,
+    },
+    /// The connection becomes a front's: its read side stays open (the commands come in there).
+    BindFront {
+        conn: usize,
+        sink: usize,
+    },
+    /// A front's stream is complete: shut its write side (`shutdown(SHUT_WR)`).
+    ShutdownSinkWrite {
         sink: usize,
     },
     SetSendBuffer {
@@ -197,9 +235,13 @@ impl Phase {
 #[derive(Debug, Clone, Copy)]
 struct Command {
     id: u64,
+    /// The attempt's queued byte count before this command's first byte.
+    start: u64,
     /// The attempt's queued byte count once this command is queued.
     end: u64,
     seq: Option<u64>,
+    /// A command made of a front's bytes: no `written` or `write-failed` answers it.
+    internal: bool,
 }
 
 /// An attempt an `abort` in `after-writes` or `graceful` mode is closing.
@@ -213,6 +255,9 @@ pub struct Closing {
     /// Graceful only: the pending writes are done and the write side is shut; input is read and
     /// discarded until the peer closes.
     pub draining: bool,
+    /// Started by the attempt's front (its close, hang-up or reconfiguration), not by a request:
+    /// the `closed` carries `by: "front"`.
+    pub by_front: bool,
 }
 
 /// How an attempt's `closed` reads.
@@ -224,6 +269,7 @@ struct Close {
     seq: Option<u64>,
     /// An `abort`'s mode.
     mode: Option<CloseMode>,
+    by_front: bool,
 }
 
 impl Close {
@@ -233,6 +279,7 @@ impl Close {
             errno: None,
             seq: None,
             mode: None,
+            by_front: false,
         }
     }
 
@@ -249,6 +296,15 @@ impl Close {
             errno,
             seq,
             mode: Some(mode),
+            by_front: false,
+        }
+    }
+
+    /// The `closed` that ends a closing attempt's grace.
+    fn closing(c: Closing, errno: Option<i32>) -> Close {
+        Close {
+            by_front: c.by_front,
+            ..Close::aborted(c.mode, c.seq, errno)
         }
     }
 }
@@ -269,12 +325,184 @@ struct Attempt {
     queued: u64,
     sent: u64,
     connect_seq: Option<u64>,
+    /// The attempt's front sink (its slot) while it is declared, bound, active or ending.
+    front: Option<usize>,
+    /// The front's id from `sink-open` on, for `closed.front` (kept after the front closed).
+    front_id: Option<String>,
+    /// `queued` when the front was declared: later bytes are the front's.
+    front_from: u64,
+    /// The head at this attempt's adoption (its stream's first byte).
+    stream_start: u64,
+    rcv_requested: Option<u64>,
+    rcv_buf: Option<RcvBuf>,
 }
 
 impl Attempt {
     fn pending(&self) -> usize {
         (self.queued - self.sent) as usize
     }
+
+    /// The command bytes the read gate still admits: the byte bound, and the room the command
+    /// bound leaves (the unsent tail command is filled up to 64 bytes before a new one starts).
+    fn command_room(&self) -> usize {
+        let bytes = MAX_PENDING_COMMAND_BYTES - self.pending();
+        let tail = match self.commands.back() {
+            Some(c) if c.internal => MAX_COMMAND_BYTES - (c.end - c.start) as usize,
+            _ => 0,
+        };
+        let new = (MAX_PENDING_COMMANDS - self.commands.len().min(MAX_PENDING_COMMANDS))
+            * MAX_COMMAND_BYTES;
+        bytes.min(tail + new)
+    }
+
+    /// Appends a front's command bytes (at most [`Attempt::command_room`]): the unsent tail
+    /// command is filled up to 64 bytes first, then new commands of at most 64 bytes follow.
+    fn append_front(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let take = match self.commands.back_mut() {
+                Some(c) if c.internal && ((c.end - c.start) as usize) < MAX_COMMAND_BYTES => {
+                    let n = (MAX_COMMAND_BYTES - (c.end - c.start) as usize).min(bytes.len());
+                    c.end += n as u64;
+                    n
+                }
+                _ => {
+                    let n = MAX_COMMAND_BYTES.min(bytes.len());
+                    self.commands.push_back(Command {
+                        id: 0,
+                        start: self.queued,
+                        end: self.queued + n as u64,
+                        seq: None,
+                        internal: true,
+                    });
+                    n
+                }
+            };
+            self.bytes.extend(bytes[..take].iter());
+            self.queued += take as u64;
+            bytes = &bytes[take..];
+        }
+    }
+}
+
+/// A command the attempt sent upstream for its front: the front's command bytes sent so far,
+/// the head when they went out and the bytes then waiting in the upstream socket.
+#[derive(Debug, Clone, Copy)]
+struct Placement {
+    front_bytes: u64,
+    pos: u64,
+    queued: u64,
+}
+
+/// A front sink's own state (README, "Front sinks"). Allocated once, at `sink-open`.
+struct Front {
+    /// The attempt's slot, while the attempt lives.
+    attempt: Option<usize>,
+    attempt_id: u64,
+    hdr: [u8; MAX_HEADER_BYTES],
+    hdr_len: usize,
+    hdr_sent: usize,
+    /// The last position this front is sent (its stream's end, or the cursor at its EOF).
+    end: Option<u64>,
+    /// Where its stream ended, once it has.
+    stream_end: Option<u64>,
+    /// The front's EOF (or a read error) was seen.
+    read_eof: bool,
+    /// Its EOF cut the delivery short (`end` = the cursor then).
+    eof_cut: bool,
+    /// `front-ended` was emitted and the write side shut.
+    ending: bool,
+    /// Why its stream ended: `front-ended.reason` and `errno`.
+    reason: Option<(&'static str, Option<i32>)>,
+    /// Command bytes received after the hello's newline, and those sent upstream.
+    cmd_in: u64,
+    cmd_sent: u64,
+    /// Bytes that came after the hello's newline, waiting for the gate.
+    inbox: [u8; crate::protocol::MAX_HELLO_BYTES],
+    inbox_len: usize,
+    placements: VecDeque<Placement>,
+    gate_full: bool,
+    gate_stalls: u64,
+    /// `sinkBytes` when the front's EOF was seen.
+    sent_at_eof: Option<u64>,
+    /// Stream bytes a close before its end left unsent (between the cursor and `end`, and
+    /// payload still in the spill): part of `discardedBytes`.
+    cut_unsent: u64,
+}
+
+impl Front {
+    fn new(attempt: usize, attempt_id: u64) -> Front {
+        Front {
+            attempt: Some(attempt),
+            attempt_id,
+            hdr: [0; MAX_HEADER_BYTES],
+            hdr_len: 0,
+            hdr_sent: 0,
+            end: None,
+            stream_end: None,
+            read_eof: false,
+            eof_cut: false,
+            ending: false,
+            reason: None,
+            cmd_in: 0,
+            cmd_sent: 0,
+            inbox: [0; crate::protocol::MAX_HELLO_BYTES],
+            inbox_len: 0,
+            placements: VecDeque::with_capacity(MAX_FRONT_PLACEMENTS),
+            gate_full: false,
+            gate_stalls: 0,
+            sent_at_eof: None,
+            cut_unsent: 0,
+        }
+    }
+
+    /// `discardedBytes`: what the ring held of the stream past `end` when the front's EOF (or
+    /// its close) cut it, plus what a close before its end left unsent.
+    fn discarded(&self) -> u64 {
+        let tail = match (self.eof_cut, self.end, self.stream_end) {
+            (true, Some(e), Some(s)) => s.saturating_sub(e),
+            _ => 0,
+        };
+        tail + self.cut_unsent
+    }
+
+    /// The sink closes before `front-ended` (a failed write, a hang-up, `configure`,
+    /// `sink-close`): its stream stops here. With no end yet it is cut at the cursor and the
+    /// rest the ring holds (`head`) is discarded; with an end, the bytes between the cursor
+    /// and it are; `spilled` payload bytes the kernel never took are discarded too. Then
+    /// `startSourcePos + sinkBytes + droppedBytes + discardedBytes` is the stream's end, or
+    /// the head at the close.
+    fn close_cut(&mut self, cursor: u64, spilled: u64, head: u64) {
+        match self.end {
+            None => {
+                self.end = Some(cursor);
+                self.stream_end = Some(head);
+                self.eof_cut = true;
+            }
+            Some(e) => {
+                if self.eof_cut && self.stream_end.is_none() {
+                    self.stream_end = Some(head.max(e));
+                }
+                self.cut_unsent += e.saturating_sub(cursor);
+            }
+        }
+        self.cut_unsent += spilled;
+    }
+}
+
+/// A closed front's final counts, kept for the stats file.
+struct ClosedFront {
+    id: String,
+    attempt_id: u64,
+    start: Option<u64>,
+    sent: u64,
+    hdr_sent: usize,
+    gaps: u64,
+    dropped: u64,
+    discarded: u64,
+    cmd_in: u64,
+    cmd_sent: u64,
+    sent_at_eof: Option<u64>,
+    reason: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -332,6 +560,9 @@ pub struct Sink {
     ctl_len: usize,
     /// The sequence number of the next mark this (framed) sink has not been sent.
     next_mark: u64,
+    /// The first position it was sent (`sink-started.startSourcePos`).
+    start: Option<u64>,
+    front: Option<Box<Front>>,
 }
 
 impl Sink {
@@ -358,7 +589,23 @@ impl Sink {
             ctl: [Ctl::default(); CTL_CAPACITY],
             ctl_len: 0,
             next_mark: 0,
+            start: None,
+            front: None,
         }
+    }
+
+    /// A front sink that is draining to its end or ended: no lag skip goes past `end`.
+    fn front_end(&self) -> Option<u64> {
+        self.front.as_ref().and_then(|f| f.end)
+    }
+
+    /// The position this sink is sent up to: the head, or a front's end.
+    fn limit(&self, head: u64) -> u64 {
+        self.front_end().map_or(head, |e| e.min(head))
+    }
+
+    fn header_pending(&self) -> bool {
+        self.front.as_ref().is_some_and(|f| f.hdr_sent < f.hdr_len)
     }
 
     /// The sink byte count at the cursor: payload taken by the kernel plus payload in the spill.
@@ -519,9 +766,41 @@ pub struct Hub {
     next_progress_us: Option<u64>,
     progress_emitted: u64,
     total_reads: u64,
-    /// Where a graceful close's input goes (never the ring).
+    /// Where a graceful close's input goes (never the ring), and a front's command bytes
+    /// before they join the attempt's queue.
     discard: Box<[u8]>,
     exit: Option<i32>,
+    link_gaps: LinkGaps,
+    /// The most recent closed fronts' final counts (a ring of [`CLOSED_FRONTS_KEPT`]).
+    closed_fronts: [Option<ClosedFront>; CLOSED_FRONTS_KEPT],
+    closed_fronts_next: usize,
+    /// Fronts with queued bytes and a writable socket that nothing else would wake: one bit per
+    /// sink slot, sent by [`Hub::service_kicked`] once the I/O loop has run the actions.
+    kicked: u32,
+}
+
+const _: () = assert!(MAX_SINKS <= u32::BITS as usize);
+
+/// `link-gap` totals since the hub started (the stats file's `linkGaps`).
+#[derive(Debug, Clone, Copy, Default)]
+struct LinkGaps {
+    count: u64,
+    max_us: u64,
+    max_queued: u64,
+}
+
+/// What the stats line takes from outside the state machine.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatsInput {
+    pub utc_ms: u64,
+    pub pid: u32,
+    pub user_us: u64,
+    pub sys_us: u64,
+    pub nvcsw: u64,
+    pub nivcsw: u64,
+    pub max_rss_bytes: u64,
+    /// Lines the writer thread was still busy for (skipped, never waited for).
+    pub skipped: u64,
 }
 
 /// The bytes of `ms` at the configured rate, rounded down to the frame grid. `ms` is at most
@@ -582,6 +861,10 @@ impl Hub {
             total_reads: 0,
             discard: vec![0u8; DISCARD_READ_BYTES].into_boxed_slice(),
             exit: None,
+            link_gaps: LinkGaps::default(),
+            closed_fronts: Default::default(),
+            closed_fronts_next: 0,
+            kicked: 0,
         }
     }
 
@@ -593,6 +876,28 @@ impl Hub {
 
     pub fn take_action(&mut self) -> Option<Action> {
         self.actions.pop_front()
+    }
+
+    /// Whether [`Hub::service_kicked`] has work.
+    pub fn has_kicks(&self) -> bool {
+        self.kicked != 0
+    }
+
+    /// Sends what a kicked front has queued: run after the actions (a front bound by `hello`
+    /// has its connection only then). A front that started after its stream's last read, or
+    /// whose stream ended, has no head advance and no POLLOUT to wake it.
+    pub fn service_kicked(&mut self, k: &mut impl Kernel, now: u64) {
+        let mut m = std::mem::take(&mut self.kicked);
+        while m != 0 {
+            let slot = m.trailing_zeros() as usize;
+            m &= m - 1;
+            let go = self.sinks[slot]
+                .as_ref()
+                .is_some_and(|s| s.state == SinkState::Active && !s.blocked);
+            if go {
+                self.service_sink(slot, k, now);
+            }
+        }
     }
 
     /// The exit code once the hub must stop: 0 on shutdown, 1 once an event could not be queued.
@@ -634,8 +939,108 @@ impl Hub {
         match s.state {
             SinkState::Declared => None,
             SinkState::Bound => Some(false),
-            SinkState::Active => Some(s.blocked),
+            SinkState::Active => Some(s.blocked && !s.front.as_ref().is_some_and(|f| f.ending)),
         }
+    }
+
+    /// For a sink with a connection: (poll for readable, poll for writable). Only a front is
+    /// ever read: while its read gate is open, or (ending) until its EOF.
+    pub fn sink_interest(&self, sink: usize) -> Option<(bool, bool)> {
+        let w = self.sink_wants_write(sink)?;
+        Some((self.front_wants_read(sink), w))
+    }
+
+    pub fn is_front(&self, sink: usize) -> bool {
+        matches!(self.sinks.get(sink), Some(Some(s)) if s.kind == SinkKind::Front)
+    }
+
+    /// Whether to read the front's connection: the read gate G, or (ending) to see its EOF.
+    pub fn front_wants_read(&self, sink: usize) -> bool {
+        let Some(Some(s)) = self.sinks.get(sink) else {
+            return false;
+        };
+        let Some(f) = s.front.as_ref() else {
+            return false;
+        };
+        if f.read_eof || s.state == SinkState::Declared {
+            return false;
+        }
+        // Bound (its stream not started): read into the hello's 256-byte inbox, so an EOF in
+        // the attempt's header phase is seen; a full inbox stops the reading.
+        if s.state == SinkState::Bound {
+            return f.inbox_len < f.inbox.len();
+        }
+        // Draining to its stream's end, or ended: read (and discard) to see the EOF.
+        f.ending || (s.state == SinkState::Active && f.end.is_some()) || self.front_gate(sink)
+    }
+
+    /// The read gate G (README, "Front sinks"): the front is active and not ended, its
+    /// attempt is the adopted stream and not closing, its EOF is not seen, no hello bytes wait,
+    /// fewer than 64 commands and 4 096 bytes are pending on the attempt and fewer than 256
+    /// placements on the front.
+    pub fn front_gate(&self, sink: usize) -> bool {
+        let Some(Some(s)) = self.sinks.get(sink) else {
+            return false;
+        };
+        let Some(f) = s.front.as_ref() else {
+            return false;
+        };
+        if s.state != SinkState::Active
+            || f.ending
+            || f.end.is_some()
+            || f.read_eof
+            || f.inbox_len > 0
+            || f.placements.len() >= MAX_FRONT_PLACEMENTS
+        {
+            return false;
+        }
+        let Some(slot) = f.attempt else {
+            return false;
+        };
+        let Some(a) = self.attempts[slot].as_ref() else {
+            return false;
+        };
+        a.closing.is_none()
+            && a.phase == Phase::Adopted
+            && self.adopted == Some(slot)
+            && a.commands.len() < MAX_PENDING_COMMANDS
+            && a.pending() < MAX_PENDING_COMMAND_BYTES
+    }
+
+    /// A front's counters (tests): (commandBytesIn, commandBytesSent, placements pending,
+    /// commandGateStalls, headerSent).
+    pub fn front_counts(&self, sink: usize) -> Option<(u64, u64, usize, u64, usize)> {
+        let s = self.sinks.get(sink)?.as_ref()?;
+        let f = s.front.as_ref()?;
+        Some((
+            f.cmd_in,
+            f.cmd_sent,
+            f.placements.len(),
+            f.gate_stalls,
+            f.hdr_sent,
+        ))
+    }
+
+    /// Commands pending on the attempt (tests).
+    pub fn attempt_commands(&self, attempt: usize) -> Option<(usize, usize)> {
+        let a = self.attempts.get(attempt)?.as_ref()?;
+        Some((a.commands.len(), a.pending()))
+    }
+
+    /// Whether the attempt holds back its front's commands: its front has 256 placements
+    /// pending (a 257th position could not be reported exactly).
+    fn front_send_paused(&self, attempt: usize) -> bool {
+        let Some(a) = self.attempts[attempt].as_ref() else {
+            return false;
+        };
+        let Some(fs) = a.front else {
+            return false;
+        };
+        self.sinks[fs].as_ref().is_some_and(|s| {
+            s.front.as_ref().is_some_and(|f| {
+                !f.ending && f.end.is_none() && f.placements.len() >= MAX_FRONT_PLACEMENTS
+            }) && a.sent >= a.front_from
+        })
     }
 
     /// The marks an active framed sink still owes (`None` for any other slot).
@@ -681,14 +1086,15 @@ impl Hub {
             return Some(if c.draining {
                 (true, false)
             } else {
-                (false, a.pending() > 0)
+                (false, a.pending() > 0 && !self.front_send_paused(attempt))
             });
         }
+        let w = a.pending() > 0 && !self.front_send_paused(attempt);
         Some(match a.phase {
             Phase::Connecting => (false, true),
             Phase::Header => (true, false),
-            Phase::Held => (!a.payload_reported, a.pending() > 0),
-            Phase::Adopted => (self.hold_until.is_none(), a.pending() > 0),
+            Phase::Held => (!a.payload_reported, w),
+            Phase::Adopted => (self.hold_until.is_none(), w),
         })
     }
 
@@ -815,7 +1221,7 @@ impl Hub {
                 mode,
                 grace_ms,
             } => match self.attempt_slot(attempt) {
-                Some(slot) => self.abort(slot, mode, grace_ms, seq, now),
+                Some(slot) => self.abort(slot, mode, grace_ms, seq, false, now),
                 None => self.reject(now, seq, Some("abort"), "unknown-attempt", ""),
             },
             Request::Write { id, attempt, bytes } => self.write(id, attempt, &bytes, seq, now, k),
@@ -825,7 +1231,8 @@ impl Hub {
                 kind,
                 max_lag_ms,
                 resume_ms,
-            } => self.sink_open(sink, kind, max_lag_ms, resume_ms, seq, now),
+                attempt,
+            } => self.sink_open(sink, kind, max_lag_ms, resume_ms, attempt, seq, now),
             Request::SinkActivate {
                 sink,
                 at_source_pos,
@@ -959,12 +1366,26 @@ impl Hub {
             queued: 0,
             sent: 0,
             connect_seq: seq,
+            front: None,
+            front_id: None,
+            front_from: 0,
+            stream_start: 0,
+            rcv_requested: c.rcv_buf_bytes,
+            rcv_buf: None,
         });
         self.actions.push_back(Action::Connect {
             attempt: slot,
             addr: c.addr,
             keep_alive_ms: c.keep_alive_ms,
+            rcv_buf_bytes: c.rcv_buf_bytes,
         });
+    }
+
+    /// What the connect of [`Action::Connect`] did with its `rcvBufBytes`.
+    pub fn set_rcv_buf(&mut self, slot: usize, rcv: RcvBuf) {
+        if let Some(a) = self.attempts.get_mut(slot).and_then(Option::as_mut) {
+            a.rcv_buf = Some(rcv);
+        }
     }
 
     /// The outcome of the non-blocking connect started by [`Action::Connect`]: the local port
@@ -988,6 +1409,32 @@ impl Hub {
         o.seq(seq);
         o.u64("attempt", a.id);
         o.u64("localPort", u64::from(port));
+        if let Some(requested) = a.rcv_requested {
+            let r = a.rcv_buf.unwrap_or(RcvBuf {
+                requested,
+                granted: None,
+                applied: false,
+                limit: None,
+            });
+            o.raw_key("rcvBuf");
+            o.raw(b"{\"requested\":");
+            o.raw_u64(r.requested);
+            o.raw(b",\"granted\":");
+            match r.granted {
+                Some(g) => o.raw_u64(g),
+                None => o.raw(b"null"),
+            }
+            o.raw(if r.applied {
+                b",\"applied\":true,\"limit\":"
+            } else {
+                b",\"applied\":false,\"limit\":"
+            });
+            match r.limit {
+                Some(l) => o.raw_u64(l),
+                None => o.raw(b"null"),
+            }
+            o.raw(b"}");
+        }
         o.end(pos);
         if a.header_bytes == 0 {
             self.header_complete(slot, now);
@@ -1009,15 +1456,45 @@ impl Hub {
         o.u64("attempt", a.id);
         o.hex("headerHex", &a.header[..a.header_got]);
         o.end(pos);
+        // A fronted attempt adopts itself when its header completes: the payload never waits
+        // in the kernel for the parent's `adopt` (README, "Front sinks").
+        if a.front.is_some() && a.closing.is_none() && self.cfg.is_some() {
+            self.adopt_slot(slot, None, now);
+        }
     }
 
     /// The adopted stream ends: its trailing partial frame is discarded, the sinks keep what the
-    /// ring holds, and there is no stream until the next `adopt`.
-    fn end_stream(&mut self) {
+    /// ring holds, and there is no stream until the next `adopt`. `front` is the ending
+    /// attempt's front: it is sent up to here, then ends (`reason` for its `front-ended`).
+    fn end_stream(&mut self, front: Option<usize>, reason: (&'static str, Option<i32>), now: u64) {
         self.adopted = None;
         self.ring.discard_carry();
         self.hold_until = None;
         self.last_read_us = None;
+        let head = self.ring.head();
+        if let Some(fs) = front {
+            if let Some(f) = self.sinks[fs].as_mut().and_then(|s| {
+                (s.state == SinkState::Active)
+                    .then_some(s.front.as_mut())
+                    .flatten()
+            }) {
+                f.stream_end = Some(head);
+                if f.end.is_none() {
+                    f.end = Some(head);
+                    f.reason = Some(reason);
+                }
+            }
+            self.front_check_end(fs, now);
+            // Not ended and not blocked: nothing more is read and no POLLOUT is polled, so only
+            // a kick can send what it still holds. (The start's kick and every head advance
+            // already send a writable front all it has; this keeps it from waiting forever.)
+            if self.sinks[fs]
+                .as_ref()
+                .is_some_and(|s| s.state == SinkState::Active && !s.blocked)
+            {
+                self.kicked |= 1 << fs;
+            }
+        }
     }
 
     fn close_attempt(&mut self, slot: usize, close: Close, now: u64) {
@@ -1025,7 +1502,7 @@ impl Hub {
             return;
         };
         let pos = self.pos();
-        for c in a.commands.iter() {
+        for c in a.commands.iter().filter(|c| !c.internal) {
             let o = &mut self.out;
             o.begin("write-failed", now);
             o.seq(c.seq);
@@ -1054,19 +1531,36 @@ impl Hub {
         if let Some(e) = close.errno {
             o.i64("errno", i64::from(e));
         }
+        if let Some(id) = &a.front_id {
+            o.str("front", id);
+        }
+        if close.by_front {
+            o.str("by", "front");
+        }
         o.end(pos);
         if self.adopted == Some(slot) {
-            self.end_stream();
+            self.end_stream(a.front, (close.reason.as_str(), close.errno), now);
         }
         self.actions
             .push_back(Action::CloseAttempt { attempt: slot });
+        if let Some(fs) = a.front {
+            // The attempt is gone: its front no longer names the slot (a later attempt may
+            // take it). A front its attempt never fed closes (F13).
+            let state = self.sinks[fs].as_ref().map(|s| s.state);
+            if let Some(f) = self.sinks[fs].as_mut().and_then(|s| s.front.as_mut()) {
+                f.attempt = None;
+            }
+            if matches!(state, Some(SinkState::Declared | SinkState::Bound)) {
+                self.close_sink(fs, "attempt-closed", None, now);
+            }
+        }
     }
 
     /// A failure of the attempt's socket: a closing attempt's `closed` still answers its
     /// `abort` (with the error number); any other closes with the failure's reason.
     fn attempt_failed(&mut self, slot: usize, f: Failure, now: u64) {
         match self.attempts[slot].as_ref().and_then(|a| a.closing) {
-            Some(c) => self.close_attempt(slot, Close::aborted(c.mode, c.seq, f.errno), now),
+            Some(c) => self.close_attempt(slot, Close::closing(c, f.errno), now),
             None => self.close_attempt(slot, Close::failed(f), now),
         }
     }
@@ -1074,19 +1568,31 @@ impl Hub {
     /// The peer closed (EOF) on a read.
     fn attempt_eof(&mut self, slot: usize, now: u64) {
         match self.attempts[slot].as_ref().and_then(|a| a.closing) {
-            Some(c) => self.close_attempt(slot, Close::aborted(c.mode, c.seq, None), now),
+            Some(c) => self.close_attempt(slot, Close::closing(c, None), now),
             None => self.close_attempt(slot, Close::by(CloseReason::Eof), now),
         }
     }
 
-    fn abort(&mut self, slot: usize, mode: CloseMode, grace_ms: u64, seq: Option<u64>, now: u64) {
+    fn abort(
+        &mut self,
+        slot: usize,
+        mode: CloseMode,
+        grace_ms: u64,
+        seq: Option<u64>,
+        by_front: bool,
+        now: u64,
+    ) {
         let Some(a) = self.attempts[slot].as_ref() else {
             return;
+        };
+        let aborted = Close {
+            by_front,
+            ..Close::aborted(mode, seq, None)
         };
         if a.closing.is_some() {
             // During the grace only `now` is accepted: it closes at once.
             if mode == CloseMode::Now {
-                self.close_attempt(slot, Close::aborted(mode, seq, None), now);
+                self.close_attempt(slot, aborted, now);
             } else {
                 self.reject(
                     now,
@@ -1100,20 +1606,22 @@ impl Hub {
         }
         // A connecting attempt has written nothing and has no peer to half-close.
         if mode == CloseMode::Now || a.phase == Phase::Connecting {
-            self.close_attempt(slot, Close::aborted(mode, seq, None), now);
+            self.close_attempt(slot, aborted, now);
             return;
         }
-        // Stop reading at once: an adopted stream ends for the sinks as on a peer close.
-        if self.adopted == Some(slot) {
-            self.end_stream();
-        }
+        let front = a.front;
         if let Some(a) = self.attempts[slot].as_mut() {
             a.closing = Some(Closing {
                 mode,
                 deadline_us: now + grace_ms * 1000,
                 seq,
                 draining: false,
+                by_front,
             });
+        }
+        // Stop reading at once: an adopted stream ends for the sinks as on a peer close.
+        if self.adopted == Some(slot) {
+            self.end_stream(front, ("aborted", None), now);
         }
         self.closing_progress(slot, now);
     }
@@ -1138,7 +1646,7 @@ impl Hub {
                     .push_back(Action::ShutdownWrite { attempt: slot });
             }
             CloseMode::AfterWrites | CloseMode::Now => {
-                let close = Close::aborted(c.mode, c.seq, None);
+                let close = Close::closing(*c, None);
                 self.close_attempt(slot, close, now);
             }
         }
@@ -1183,6 +1691,11 @@ impl Hub {
             self.reject(now, seq, Some("adopt"), "not-configured", "");
             return;
         }
+        self.adopt_slot(slot, seq, now);
+    }
+
+    /// Adopts a held attempt (an `adopt`, or a fronted attempt's own header completing).
+    fn adopt_slot(&mut self, slot: usize, seq: Option<u64>, now: u64) {
         if let Some(old) = self.adopted {
             self.close_attempt(old, Close::by(CloseReason::Replaced), now);
         }
@@ -1194,8 +1707,11 @@ impl Hub {
         self.last_read_us = None;
         self.level.restart_phase();
         let pos = self.pos();
+        let mut front = None;
         if let Some(a) = self.attempts[slot].as_mut() {
             a.phase = Phase::Adopted;
+            a.stream_start = self.stream_start;
+            front = a.front;
             let o = &mut self.out;
             o.begin("adopted", now);
             o.seq(seq);
@@ -1210,9 +1726,15 @@ impl Hub {
             order: &mut self.order,
             now,
         };
+        // A front follows its own attempt's stream only: it never takes a new stream's row.
         for s in self.sinks.iter_mut().flatten() {
-            if s.state == SinkState::Active {
+            if s.state == SinkState::Active && s.kind != SinkKind::Front {
                 s.adopt_row(&mut ctx, self.stream);
+            }
+        }
+        if let Some(fs) = front {
+            if self.sink_state(fs) == Some(SinkState::Bound) {
+                self.activate_front(fs, now);
             }
         }
     }
@@ -1227,6 +1749,14 @@ impl Hub {
         k: &mut impl Kernel,
     ) {
         let slot = self.attempt_slot(attempt);
+        if slot
+            .and_then(|s| self.attempts[s].as_ref())
+            .is_some_and(|a| a.front_id.is_some())
+        {
+            // One writer orders the stream: a fronted attempt takes commands from its front.
+            self.write_failed(id, attempt, "fronted", seq, now);
+            return;
+        }
         if slot
             .and_then(|s| self.attempts[s].as_ref())
             .is_some_and(|a| a.closing.is_some())
@@ -1252,11 +1782,14 @@ impl Hub {
             return;
         }
         a.bytes.extend(bytes.iter());
+        let start = a.queued;
         a.queued += bytes.len() as u64;
         a.commands.push_back(Command {
             id,
+            start,
             end: a.queued,
             seq,
+            internal: false,
         });
         self.flush_commands(slot, k, now);
     }
@@ -1273,16 +1806,20 @@ impl Hub {
     }
 
     fn flush_commands(&mut self, slot: usize, k: &mut impl Kernel, now: u64) {
+        let sent_before = self.attempts[slot].as_ref().map_or(0, |a| a.sent);
         loop {
+            if self.front_send_paused(slot) {
+                break;
+            }
             let Some(a) = self.attempts[slot].as_mut() else {
                 return;
             };
             if a.pending() == 0 {
-                return;
+                break;
             }
             let (front, _) = a.bytes.as_slices();
             match k.command_send(slot, front) {
-                Sent::Took(0) | Sent::WouldBlock => return,
+                Sent::Took(0) | Sent::WouldBlock => break,
                 Sent::Failed(f) => {
                     self.attempt_failed(slot, f, now);
                     return;
@@ -1297,6 +1834,9 @@ impl Hub {
                         let Some(c) = a.commands.pop_front() else {
                             break;
                         };
+                        if c.internal {
+                            continue;
+                        }
                         let o = &mut self.out;
                         o.begin("written", now);
                         o.seq(c.seq);
@@ -1307,6 +1847,51 @@ impl Hub {
                 }
             }
         }
+        self.front_commands_sent(slot, sent_before, k, now);
+    }
+
+    /// F8s: the attempt sent some of its front's command bytes; one placement for all of them
+    /// (the head now, and `FIONREAD` of the upstream socket), then F8p at once if the front is
+    /// at the head. A command sent after the front's stream ended is never placed: the front
+    /// never carries a byte after it (the parent resolves it null).
+    fn front_commands_sent(&mut self, slot: usize, before: u64, k: &mut impl Kernel, now: u64) {
+        let Some(a) = self.attempts[slot].as_ref() else {
+            return;
+        };
+        let (Some(fs), sent, from) = (a.front, a.sent, a.front_from) else {
+            return;
+        };
+        if sent <= before || sent <= from {
+            return;
+        }
+        let head = self.ring.head();
+        let queued = k.source_queued(slot);
+        if let Some(f) = self.sinks[fs].as_mut().and_then(|s| s.front.as_mut()) {
+            f.cmd_sent = sent - from;
+            if f.ending || f.end.is_some_and(|e| head > e) {
+                return;
+            }
+            match f.placements.back_mut() {
+                // The same position: one placement (each byte of both is carried after it).
+                Some(p) if p.pos == head => {
+                    p.front_bytes = f.cmd_sent;
+                    p.queued = p.queued.max(queued);
+                }
+                _ => {
+                    f.placements.push_back(Placement {
+                        front_bytes: f.cmd_sent,
+                        pos: head,
+                        queued,
+                    });
+                    if f.placements.len() >= MAX_FRONT_PLACEMENTS && !f.gate_full {
+                        f.gate_full = true;
+                        f.gate_stalls += 1;
+                    }
+                }
+            }
+        }
+        self.front_resolve(fs, now);
+        self.front_take_inbox(fs);
     }
 
     /// Readiness on an attempt's socket (a hang-up or error counts as both).
@@ -1436,6 +2021,10 @@ impl Hub {
                     let gap = now.saturating_sub(last);
                     self.arrivals.max_gap_us = self.arrivals.max_gap_us.max(gap);
                     if gap >= link_gap_us {
+                        let q = queued.unwrap_or(0);
+                        self.link_gaps.count += 1;
+                        self.link_gaps.max_us = self.link_gaps.max_us.max(gap);
+                        self.link_gaps.max_queued = self.link_gaps.max_queued.max(q);
                         let o = &mut self.out;
                         o.begin("link-gap", now);
                         o.ms("startMono", last);
@@ -1485,7 +2074,7 @@ impl Hub {
             match a.closing {
                 // The grace is over: what is still pending fails, the socket closes.
                 Some(c) if now >= c.deadline_us => {
-                    self.close_attempt(slot, Close::aborted(c.mode, c.seq, None), now)
+                    self.close_attempt(slot, Close::closing(c, None), now)
                 }
                 Some(_) => {}
                 None => {
@@ -1569,7 +2158,7 @@ impl Hub {
             o.raw(b",\"sinkBytes\":");
             o.raw_u64(s.sent);
             o.raw(b",\"lagBytes\":");
-            o.raw_u64(head - s.cursor);
+            o.raw_u64(s.limit(head).saturating_sub(s.cursor));
             o.raw(b",\"gaps\":");
             o.raw_u64(s.gaps);
             o.raw(b",\"droppedBytes\":");
@@ -1578,6 +2167,145 @@ impl Hub {
         }
         o.raw(b"]");
         o.end(Pos::Head(head));
+    }
+
+    /// One `--stats-file` line (README, "Stats file"), with its newline, into `out` (cleared
+    /// first; no allocation once `out` has its capacity). Ids match `[A-Za-z0-9._-]`, so they
+    /// need no escaping.
+    pub fn stats_line(&self, out: &mut Vec<u8>, now: u64, inp: &StatsInput) {
+        use std::io::Write as _;
+        out.clear();
+        let head = self.ring.head();
+        let configured = self.cfg.is_some();
+        let _ = write!(
+            out,
+            "{{\"v\":1,\"type\":\"stats\",\"utcMs\":{},\"mono\":{},\"pid\":{}",
+            inp.utc_ms,
+            now / 1000,
+            inp.pid
+        );
+        if configured {
+            let _ = write!(out, ",\"sourcePos\":{head}");
+        } else {
+            out.extend_from_slice(b",\"sourcePos\":null");
+        }
+        match self.adopted {
+            Some(_) => {
+                let _ = write!(out, ",\"stream\":{}", self.stream);
+            }
+            None => out.extend_from_slice(b",\"stream\":null"),
+        }
+        let ring = self.cfg.map_or(0, |c| c.ring_bytes as u64);
+        let sinks = self.sinks.iter().flatten().count() as u64;
+        let _ = write!(
+            out,
+            ",\"memory\":{{\"ringBytes\":{ring},\"spillBytes\":{}}}",
+            sinks * SPILL_BYTES as u64
+        );
+        let a = self.arrivals;
+        let _ = write!(
+            out,
+            ",\"arrivals\":{{\"reads\":{},\"bytes\":{},\"maxGapMs\":{}}}",
+            a.reads,
+            a.bytes,
+            a.max_gap_us / 1000
+        );
+        out.extend_from_slice(b",\"sinks\":[");
+        let mut first = true;
+        for s in self.sinks.iter().flatten() {
+            if !first {
+                out.push(b',');
+            }
+            first = false;
+            let f = s.front.as_deref();
+            let state = match (s.state, f.is_some_and(|f| f.ending)) {
+                (_, true) => "ending",
+                (SinkState::Declared, _) => "declared",
+                (SinkState::Bound, _) => "bound",
+                (SinkState::Active, _) => "active",
+            };
+            let lag = if s.state == SinkState::Active {
+                s.limit(head).saturating_sub(s.cursor)
+            } else {
+                0
+            };
+            let _ = write!(
+                out,
+                "{{\"sink\":\"{}\",\"kind\":\"{}\",\"state\":\"{state}\"",
+                s.id,
+                s.kind.as_str()
+            );
+            stats_counts(
+                out,
+                &Counts {
+                    start: s.start,
+                    sent: s.sent,
+                    hdr_sent: f.map_or(0, |f| f.hdr_sent),
+                    lag,
+                    gaps: s.gaps,
+                    dropped: s.dropped,
+                    discarded: f.map_or(0, Front::discarded),
+                    cmd_in: f.map_or(0, |f| f.cmd_in),
+                    cmd_sent: f.map_or(0, |f| f.cmd_sent),
+                    placements: f.map_or(0, |f| f.placements.len()),
+                    stalls: f.map_or(0, |f| f.gate_stalls),
+                    sent_at_eof: f.and_then(|f| f.sent_at_eof),
+                },
+            );
+            if let Some(f) = f {
+                let _ = write!(out, ",\"attempt\":{}", f.attempt_id);
+            }
+            out.push(b'}');
+        }
+        out.extend_from_slice(b"],\"closedFronts\":[");
+        let mut first = true;
+        // Oldest first.
+        for i in 0..CLOSED_FRONTS_KEPT {
+            let Some(c) = &self.closed_fronts[(self.closed_fronts_next + i) % CLOSED_FRONTS_KEPT]
+            else {
+                continue;
+            };
+            if !first {
+                out.push(b',');
+            }
+            first = false;
+            let _ = write!(
+                out,
+                "{{\"sink\":\"{}\",\"kind\":\"front\",\"state\":\"closed\",\"closeReason\":\"{}\",\"attempt\":{}",
+                c.id, c.reason, c.attempt_id
+            );
+            stats_counts(
+                out,
+                &Counts {
+                    start: c.start,
+                    sent: c.sent,
+                    hdr_sent: c.hdr_sent,
+                    lag: 0,
+                    gaps: c.gaps,
+                    dropped: c.dropped,
+                    discarded: c.discarded,
+                    cmd_in: c.cmd_in,
+                    cmd_sent: c.cmd_sent,
+                    placements: 0,
+                    stalls: 0,
+                    sent_at_eof: c.sent_at_eof,
+                },
+            );
+            out.push(b'}');
+        }
+        let g = self.link_gaps;
+        let _ = write!(
+            out,
+            "],\"linkGaps\":{{\"count\":{},\"maxMs\":{},\"maxQueuedBytes\":{}}}",
+            g.count,
+            g.max_us / 1000,
+            g.max_queued
+        );
+        let _ = writeln!(
+            out,
+            ",\"rusage\":{{\"userUs\":{},\"sysUs\":{},\"nvcsw\":{},\"nivcsw\":{},\"maxRssBytes\":{}}},\"statsSkipped\":{}}}",
+            inp.user_us, inp.sys_us, inp.nvcsw, inp.nivcsw, inp.max_rss_bytes, inp.skipped
+        );
     }
 
     // ---- marks ------------------------------------------------------------------------------
@@ -1695,12 +2423,14 @@ impl Hub {
         max_lag_ms.checked_mul(2).is_some_and(|x| x <= self.ring_ms)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sink_open(
         &mut self,
         id: String,
         kind: SinkKind,
         max_lag_ms: u64,
         resume_ms: u64,
+        attempt: Option<u64>,
         seq: Option<u64>,
         now: u64,
     ) {
@@ -1722,13 +2452,51 @@ impl Hub {
             self.reject(now, seq, Some("sink-open"), "too-many-sinks", "");
             return;
         };
+        // A front is bound to one live attempt that is not closing and has no front yet.
+        let fronted = match attempt {
+            None => None,
+            Some(aid) => {
+                let Some(att) = self.attempt_slot(aid) else {
+                    self.reject(now, seq, Some("sink-open"), "unknown-attempt", "");
+                    return;
+                };
+                let a = self.attempts[att].as_ref();
+                if a.is_some_and(|a| a.closing.is_some()) {
+                    self.reject(now, seq, Some("sink-open"), "closing", "");
+                    return;
+                }
+                if a.is_some_and(|a| a.front_id.is_some()) {
+                    self.reject(now, seq, Some("sink-open"), "front-exists", "");
+                    return;
+                }
+                Some((att, aid))
+            }
+        };
         let pos = self.pos();
         let o = &mut self.out;
         o.begin("sink-ready", now);
         o.seq(seq);
         o.str("sink", &id);
         o.end(pos);
-        self.sinks[slot] = Some(Sink::new(id, kind, max_lag_ms, resume_ms));
+        let mut sink = Sink::new(id, kind, max_lag_ms, resume_ms);
+        if let Some((att, aid)) = fronted {
+            sink.front = Some(Box::new(Front::new(att, aid)));
+            if let Some(a) = self.attempts[att].as_mut() {
+                a.front = Some(slot);
+                a.front_id = Some(sink.id.clone());
+                a.front_from = a.queued;
+            }
+        }
+        self.sinks[slot] = Some(sink);
+        // A held attempt adopts itself as soon as it has a front (as at its header's end).
+        if let Some((att, _)) = fronted {
+            let held = self.attempts[att]
+                .as_ref()
+                .is_some_and(|a| a.phase == Phase::Held && a.closing.is_none());
+            if held && self.cfg.is_some() {
+                self.adopt_slot(att, None, now);
+            }
+        }
     }
 
     fn sink_activate(&mut self, id: &str, at: Option<u64>, seq: Option<u64>, now: u64) {
@@ -1736,6 +2504,11 @@ impl Hub {
             self.reject(now, seq, Some("sink-activate"), "unknown-sink", "");
             return;
         };
+        if self.is_front(slot) {
+            // A front starts when its attempt's stream does.
+            self.reject(now, seq, Some("sink-activate"), "front", "");
+            return;
+        }
         let state = self.sinks[slot].as_ref().map(|s| s.state);
         match (state, self.cfg) {
             (Some(SinkState::Declared), _) => {
@@ -1768,6 +2541,7 @@ impl Hub {
             _ => head,
         };
         s.state = SinkState::Active;
+        s.start = Some(s.cursor);
         s.blocked = false;
         s.next_mark = self.marks.next_seq();
         if !s.send_buffer_set {
@@ -1826,10 +2600,16 @@ impl Hub {
         o.end(pos);
     }
 
-    fn close_sink(&mut self, slot: usize, reason: &str, seq: Option<u64>, now: u64) {
-        let Some(s) = self.sinks[slot].take() else {
+    fn close_sink(&mut self, slot: usize, reason: &'static str, seq: Option<u64>, now: u64) {
+        let Some(mut s) = self.sinks[slot].take() else {
             return;
         };
+        if s.state == SinkState::Active {
+            let (cursor, spilled, head) = (s.cursor, s.committed() - s.sent, self.ring.head());
+            if let Some(f) = s.front.as_mut().filter(|f| !f.ending) {
+                f.close_cut(cursor, spilled, head);
+            }
+        }
         let pos = self.pos();
         let o = &mut self.out;
         o.begin("sink-closed", now);
@@ -1837,19 +2617,366 @@ impl Hub {
         o.str("sink", &s.id);
         o.str("reason", reason);
         o.u64("sinkBytes", s.sent);
+        if let Some(f) = s.front.as_ref() {
+            o.u64("headerSent", f.hdr_sent as u64);
+            o.u64("droppedBytes", s.dropped);
+            o.u64("discardedBytes", f.discarded());
+        }
         o.end(pos);
         if s.state != SinkState::Declared {
             self.actions.push_back(Action::CloseSink { sink: slot });
         }
+        let Some(f) = s.front else {
+            return;
+        };
+        // A fronted attempt without its front has no reader and no writer: it closes
+        // gracefully (its pending commands still go upstream, F10, F15, F16). One already
+        // closing keeps its own grace.
+        if let Some(att) = f.attempt {
+            let live = self.attempts[att].as_mut().map(|a| {
+                a.front = None;
+                a.closing.is_none()
+            });
+            if live == Some(true) {
+                self.abort(att, CloseMode::Graceful, FRONT_GRACE_MS, None, true, now);
+            }
+        }
+        let i = self.closed_fronts_next;
+        self.closed_fronts_next = (i + 1) % CLOSED_FRONTS_KEPT;
+        self.closed_fronts[i] = Some(ClosedFront {
+            id: s.id,
+            attempt_id: f.attempt_id,
+            start: s.start,
+            sent: s.sent,
+            hdr_sent: f.hdr_sent,
+            gaps: s.gaps,
+            dropped: s.dropped,
+            discarded: f.discarded(),
+            cmd_in: f.cmd_in,
+            cmd_sent: f.cmd_sent,
+            sent_at_eof: f.sent_at_eof,
+            reason,
+        });
     }
 
-    /// The peer of a bound or active sink hung up (or the socket reported an error).
-    pub fn sink_hangup(&mut self, slot: usize, now: u64) {
+    /// The peer of a bound or active sink hung up (or the socket reported an error). A front
+    /// first reads the command bytes still in its socket (`front_last_read`).
+    pub fn sink_hangup(&mut self, slot: usize, k: &mut impl Kernel, now: u64) {
         if matches!(
             self.sink_state(slot),
             Some(SinkState::Bound | SinkState::Active)
         ) {
-            self.close_sink(slot, "peer", None, now);
+            self.front_last_read(slot, k, now);
+            if matches!(
+                self.sink_state(slot),
+                Some(SinkState::Bound | SinkState::Active)
+            ) {
+                self.close_sink(slot, "peer", None, now);
+            }
+        }
+    }
+
+    /// A front whose peer is gone (a failed write or a hang-up) is read once more, as its gate
+    /// admits, before it closes: command bytes its peer wrote before going still go upstream,
+    /// and an EOF there ends it as F9. A sink that is not a front is not read.
+    fn front_last_read(&mut self, slot: usize, k: &mut impl Kernel, now: u64) {
+        if self
+            .sinks
+            .get(slot)
+            .and_then(Option::as_ref)
+            .is_some_and(|s| s.front.is_some())
+        {
+            self.front_readable(slot, k, now);
+        }
+    }
+
+    /// A front's connection is readable (or reported a hang-up while it is polled for reading,
+    /// which macOS does for a half-close: the bytes before the EOF are read first).
+    pub fn front_readable(&mut self, fs: usize, k: &mut impl Kernel, now: u64) {
+        let Some(s) = self.sinks.get(fs).and_then(Option::as_ref) else {
+            return;
+        };
+        let Some(f) = s.front.as_ref() else {
+            return;
+        };
+        if f.read_eof || s.state == SinkState::Declared {
+            return;
+        }
+        if s.state == SinkState::Bound {
+            let Some(f) = self.sinks[fs].as_mut().and_then(|s| s.front.as_mut()) else {
+                return;
+            };
+            let len = f.inbox_len;
+            match k.front_recv(fs, &mut f.inbox[len..]) {
+                Received::Data(n) => {
+                    let n = n.min(f.inbox.len() - len);
+                    f.inbox_len += n;
+                    f.cmd_in += n as u64;
+                }
+                Received::WouldBlock => {}
+                Received::Eof | Received::Failed(_) => self.front_eof(fs, now),
+            }
+            return;
+        }
+        if f.ending || f.end.is_some() {
+            // Its stream is over: input goes nowhere. The EOF is F9 while it still drains
+            // (the parent's end before `front-ended`), F14 once it ended.
+            let ending = f.ending;
+            for _ in 0..DISCARD_READS_PER_WAKE {
+                match k.front_recv(fs, &mut self.discard) {
+                    Received::Data(n) => {
+                        if let Some(f) = self.sinks[fs].as_mut().and_then(|s| s.front.as_mut()) {
+                            f.cmd_in += n as u64;
+                        }
+                    }
+                    Received::WouldBlock => return,
+                    Received::Eof | Received::Failed(_) if ending => {
+                        self.close_sink(fs, "peer", None, now);
+                        return;
+                    }
+                    Received::Eof | Received::Failed(_) => {
+                        self.front_eof(fs, now);
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+        // F8: read while the gate is open, at most what the attempt's command bounds admit, and
+        // at most 16 reads per readiness (poll is level-triggered: the rest waits).
+        for _ in 0..DISCARD_READS_PER_WAKE {
+            if !self.front_gate(fs) {
+                return;
+            }
+            let Some(att) = self.sinks[fs]
+                .as_ref()
+                .and_then(|s| s.front.as_ref())
+                .and_then(|f| f.attempt)
+            else {
+                return;
+            };
+            let room = self.attempts[att]
+                .as_ref()
+                .map_or(0, Attempt::command_room)
+                .min(MAX_PENDING_COMMAND_BYTES);
+            if room == 0 {
+                return;
+            }
+            match k.front_recv(fs, &mut self.discard[..room]) {
+                Received::Data(n) => {
+                    let n = n.min(room);
+                    if let Some(a) = self.attempts[att].as_mut() {
+                        a.append_front(&self.discard[..n]);
+                    }
+                    if let Some(f) = self.sinks[fs].as_mut().and_then(|s| s.front.as_mut()) {
+                        f.cmd_in += n as u64;
+                    }
+                    self.flush_commands(att, k, now);
+                }
+                Received::WouldBlock => return,
+                Received::Eof | Received::Failed(_) => {
+                    self.front_eof(fs, now);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// F9: the front's EOF (or a read error): its delivery stops at the cursor (the rest of its
+    /// stream is discarded, never counted as loss), and its attempt closes gracefully.
+    fn front_eof(&mut self, fs: usize, now: u64) {
+        let Some(s) = self.sinks[fs].as_mut() else {
+            return;
+        };
+        let (cursor, sent, state) = (s.cursor, s.sent, s.state);
+        let Some(f) = s.front.as_mut() else {
+            return;
+        };
+        f.read_eof = true;
+        f.sent_at_eof = Some(sent);
+        if state == SinkState::Active && !f.ending {
+            match f.end {
+                // Its stream had ended already: the reason stays the stream's.
+                Some(e) if e <= cursor => {}
+                Some(_) => {
+                    f.end = Some(cursor);
+                    f.eof_cut = true;
+                }
+                None => {
+                    f.end = Some(cursor);
+                    f.eof_cut = true;
+                    f.reason = Some(("front-closed", None));
+                }
+            }
+        }
+        let att = f.attempt;
+        if let Some(att) = att {
+            if self.attempts[att]
+                .as_ref()
+                .is_some_and(|a| a.closing.is_none())
+            {
+                self.abort(att, CloseMode::Graceful, FRONT_GRACE_MS, None, true, now);
+            }
+        }
+        self.front_check_end(fs, now);
+    }
+
+    /// F3/F3g: a bound front whose attempt is the adopted stream starts at the stream's first
+    /// byte, or (older than its window) at `head - resumeBytes` after a `sink-gap {cause:
+    /// "start"}` from the stream's first byte.
+    fn activate_front(&mut self, fs: usize, now: u64) {
+        let Some(cfg) = self.cfg else {
+            return;
+        };
+        let head = self.ring.head();
+        let Some(att) = self.sinks[fs]
+            .as_ref()
+            .and_then(|s| s.front.as_ref())
+            .and_then(|f| f.attempt)
+        else {
+            return;
+        };
+        let Some(a) = self.attempts[att].as_ref() else {
+            return;
+        };
+        let (stream_start, hdr, hdr_len) = (a.stream_start, a.header, a.header_got);
+        let mut ctx = Ctx {
+            ring: &self.ring,
+            out: &mut self.out,
+            marks: &self.marks,
+            order: &mut self.order,
+            now,
+        };
+        let Some(s) = self.sinks[fs].as_mut() else {
+            return;
+        };
+        s.max_lag_bytes = ms_bytes(s.max_lag_ms, &cfg.req);
+        s.resume_bytes = ms_bytes(s.resume_ms, &cfg.req);
+        s.cursor = stream_start;
+        s.start = Some(stream_start);
+        s.state = SinkState::Active;
+        s.blocked = false;
+        s.next_mark = self.marks.next_seq();
+        if let Some(f) = s.front.as_mut() {
+            f.hdr = hdr;
+            f.hdr_len = hdr_len;
+            f.hdr_sent = 0;
+        }
+        if !s.send_buffer_set {
+            s.send_buffer_set = true;
+            self.actions.push_back(Action::SetSendBuffer {
+                sink: fs,
+                bytes: (cfg.req.byte_rate * SEND_BUFFER_MS / 1000) as usize,
+            });
+        }
+        let o = &mut *ctx.out;
+        o.begin("sink-started", now);
+        o.str("sink", &s.id);
+        o.u64("startSourcePos", stream_start);
+        o.u64("sinkByte", 0);
+        o.end(Pos::Head(head));
+        // The window: [head - maxLagBytes + resumeBytes, head].
+        let lo = head.saturating_sub(s.max_lag_bytes.saturating_sub(s.resume_bytes));
+        if stream_start < lo {
+            let target = align_down(head - s.resume_bytes, cfg.req.frame_bytes);
+            s.emit_gap(&mut ctx, "start", target - stream_start);
+        }
+        self.front_take_inbox(fs);
+        // The header unit (and any payload the ring holds) is queued: send it without waiting
+        // for the next read.
+        self.kicked |= 1 << fs;
+    }
+
+    /// The hello's trailing command bytes join the attempt's queue once the gate admits them.
+    fn front_take_inbox(&mut self, fs: usize) {
+        let Some(f) = self.sinks[fs].as_ref().and_then(|s| s.front.as_ref()) else {
+            return;
+        };
+        if f.inbox_len == 0 {
+            return;
+        }
+        let Some(att) = f.attempt else {
+            return;
+        };
+        // The gate without its own inbox condition.
+        let Some(f) = self.sinks[fs].as_mut().and_then(|s| s.front.as_mut()) else {
+            return;
+        };
+        let len = f.inbox_len;
+        f.inbox_len = 0;
+        let open = self.front_gate(fs);
+        let Some(f) = self.sinks[fs].as_mut().and_then(|s| s.front.as_mut()) else {
+            return;
+        };
+        f.inbox_len = len;
+        if !open {
+            return;
+        }
+        let Some(a) = self.attempts[att].as_mut() else {
+            return;
+        };
+        let n = a.command_room().min(len);
+        a.append_front(&f.inbox[..n]);
+        f.inbox.copy_within(n..len, 0);
+        f.inbox_len = len - n;
+    }
+
+    /// F8p: every placement the front's cursor has reached is reported, in order.
+    fn front_resolve(&mut self, fs: usize, now: u64) {
+        let mut ctx = Ctx {
+            ring: &self.ring,
+            out: &mut self.out,
+            marks: &self.marks,
+            order: &mut self.order,
+            now,
+        };
+        if let Some(s) = self.sinks[fs].as_mut() {
+            s.resolve_placements(&mut ctx, None);
+        }
+    }
+
+    /// F12: an active front with an end, its cursor there and nothing in flight, ends: its write
+    /// side is shut and `front-ended` says why. A front whose EOF was already seen has nothing
+    /// more to wait for and closes at once.
+    fn front_check_end(&mut self, fs: usize, now: u64) {
+        let Some(s) = self.sinks[fs].as_mut() else {
+            return;
+        };
+        let done = s.state == SinkState::Active
+            && !s.spill_pending()
+            && !s.header_pending()
+            && s.front
+                .as_ref()
+                .is_some_and(|f| !f.ending && f.end == Some(s.cursor));
+        if !done {
+            return;
+        }
+        let Some(f) = s.front.as_mut() else {
+            return;
+        };
+        f.ending = true;
+        // A placement past the end is never carried by this front.
+        f.placements.clear();
+        f.gate_full = false;
+        let (reason, errno) = f.reason.unwrap_or(("front-closed", None));
+        let pos = Pos::Head(self.ring.head());
+        let o = &mut self.out;
+        o.begin("front-ended", now);
+        o.str("sink", &s.id);
+        o.u64("sinkBytes", s.sent);
+        o.u64("headerSent", f.hdr_sent as u64);
+        o.u64("droppedBytes", s.dropped);
+        o.u64("discardedBytes", f.discarded());
+        o.str("reason", reason);
+        if let Some(e) = errno {
+            o.i64("errno", i64::from(e));
+        }
+        o.end(pos);
+        let eof = f.read_eof;
+        self.actions
+            .push_back(Action::ShutdownSinkWrite { sink: fs });
+        if eof {
+            self.close_sink(fs, "peer", None, now);
         }
     }
 
@@ -1875,7 +3002,16 @@ impl Hub {
             return;
         };
         if let SinkOutcome::PeerGone = s.service(slot, &mut ctx, k) {
-            self.close_sink(slot, "peer", None, now);
+            self.front_last_read(slot, k, now);
+            if self.sinks[slot].is_some() {
+                self.close_sink(slot, "peer", None, now);
+            }
+            return;
+        }
+        if s.front.is_some() {
+            self.front_check_end(slot, now);
+            // A resolved placement may reopen the gate for the hello's bytes.
+            self.front_take_inbox(slot);
         }
     }
 
@@ -1908,7 +3044,13 @@ impl Hub {
                     order: &mut self.order,
                     now,
                 };
+                if s.front.as_ref().is_some_and(|f| f.ending) {
+                    continue;
+                }
                 s.guard(&mut ctx);
+                if s.front.is_some() {
+                    self.front_check_end(slot, now);
+                }
             } else {
                 self.service_sink(slot, k, now);
             }
@@ -1968,8 +3110,8 @@ impl Hub {
                 u.len = (len + n).min(u.buf.len());
                 match u.buf[..u.len].iter().position(|&b| b == b'\n') {
                     Some(i) => {
-                        let line = u.buf;
-                        self.hello(conn, &line[..i], now);
+                        let (line, len) = (u.buf, u.len);
+                        self.hello(conn, &line[..i], &line[i + 1..len], now);
                     }
                     None if u.len == u.buf.len() => {
                         self.reject_unbound(conn, "malformed", None, now)
@@ -1984,7 +3126,9 @@ impl Hub {
         }
     }
 
-    fn hello(&mut self, conn: usize, line: &[u8], now: u64) {
+    /// A complete hello. `rest` is what the connection sent after its newline: a front's first
+    /// command bytes (any other sink's are never read).
+    fn hello(&mut self, conn: usize, line: &[u8], rest: &[u8], now: u64) {
         let id = match parse_hello(line) {
             Ok(id) => id,
             Err(_) => return self.reject_unbound(conn, "malformed", None, now),
@@ -1997,14 +3141,23 @@ impl Hub {
             return self.reject_unbound(conn, "bound", Some(&id), now);
         }
         self.unbound[conn] = None;
-        self.actions
-            .push_back(Action::BindSink { conn, sink: slot });
+        let front = self.is_front(slot);
+        self.actions.push_back(if front {
+            Action::BindFront { conn, sink: slot }
+        } else {
+            Action::BindSink { conn, sink: slot }
+        });
         let pos = self.pos();
         let cfg = self.cfg;
         let Some(s) = self.sinks[slot].as_mut() else {
             return;
         };
         s.state = SinkState::Bound;
+        if let Some(f) = s.front.as_mut() {
+            f.inbox[..rest.len()].copy_from_slice(rest);
+            f.inbox_len = rest.len();
+            f.cmd_in += rest.len() as u64;
+        }
         if let Some(cfg) = cfg {
             s.send_buffer_set = true;
             self.actions.push_back(Action::SetSendBuffer {
@@ -2016,6 +3169,63 @@ impl Hub {
         o.begin("sink-bound", now);
         o.str("sink", &s.id);
         o.end(pos);
+        // F3: bound while its attempt is already the stream.
+        let att = s.front.as_ref().and_then(|f| f.attempt);
+        if let Some(att) = att {
+            let adopted = self.adopted == Some(att)
+                && self.attempts[att]
+                    .as_ref()
+                    .is_some_and(|a| a.phase == Phase::Adopted && a.closing.is_none());
+            if adopted {
+                self.activate_front(slot, now);
+            }
+        }
+    }
+}
+
+/// One sink's counters in a stats line.
+struct Counts {
+    start: Option<u64>,
+    sent: u64,
+    hdr_sent: usize,
+    lag: u64,
+    gaps: u64,
+    dropped: u64,
+    discarded: u64,
+    cmd_in: u64,
+    cmd_sent: u64,
+    placements: usize,
+    stalls: u64,
+    sent_at_eof: Option<u64>,
+}
+
+fn stats_counts(out: &mut Vec<u8>, c: &Counts) {
+    use std::io::Write as _;
+    match c.start {
+        Some(p) => {
+            let _ = write!(out, ",\"startSourcePos\":{p}");
+        }
+        None => out.extend_from_slice(b",\"startSourcePos\":null"),
+    }
+    let _ = write!(
+        out,
+        ",\"sinkBytes\":{},\"headerSent\":{},\"lagBytes\":{},\"gaps\":{},\"droppedBytes\":{},\"discardedBytes\":{},\"commandBytesIn\":{},\"commandBytesSent\":{},\"placementsPending\":{},\"commandGateStalls\":{}",
+        c.sent,
+        c.hdr_sent,
+        c.lag,
+        c.gaps,
+        c.dropped,
+        c.discarded,
+        c.cmd_in,
+        c.cmd_sent,
+        c.placements,
+        c.stalls
+    );
+    match c.sent_at_eof {
+        Some(p) => {
+            let _ = write!(out, ",\"sinkBytesAtEof\":{p}");
+        }
+        None => out.extend_from_slice(b",\"sinkBytesAtEof\":null"),
     }
 }
 
@@ -2038,6 +3248,14 @@ impl Sink {
         o.u64("droppedBytes", dropped);
         o.str("cause", cause);
         o.end(Pos::Head(ctx.ring.head()));
+        if dropped > 0 && self.kind == SinkKind::Front {
+            self.gaps += 1;
+            self.dropped += dropped;
+            self.cursor += dropped;
+            // A placement inside the skipped range is carried at the gap's sink byte.
+            self.resolve_placements(ctx, Some((at_src, at_sink)));
+            return;
+        }
         if dropped > 0 {
             self.gaps += 1;
             self.dropped += dropped;
@@ -2083,7 +3301,7 @@ impl Sink {
     fn spill_unit(&mut self, ring: &Ring, target: u64) {
         debug_assert!(!self.spill_pending());
         match self.kind {
-            SinkKind::Raw => {
+            SinkKind::Raw | SinkKind::Front => {
                 let end = align_up(self.cursor, ring.frame());
                 let rest = (end - self.cursor) as usize;
                 if rest > 0 {
@@ -2118,15 +3336,54 @@ impl Sink {
         }
     }
 
-    /// The lag guard, against the current head.
+    /// The lag guard, against the current head. A front never skips past its end.
     fn guard(&mut self, ctx: &mut Ctx) {
         let head = ctx.ring.head();
         if head - self.cursor <= self.max_lag_bytes {
             return;
         }
         // head - cursor > maxLagBytes >= 2 x resumeBytes, so head > resumeBytes.
-        let target = align_down(head - self.resume_bytes, ctx.ring.frame());
+        let target = align_down(head - self.resume_bytes, ctx.ring.frame()).min(self.limit(head));
+        if target <= self.cursor {
+            return;
+        }
         self.skip_to(ctx, target);
+    }
+
+    /// F8p for a front: reports every placement at or before the cursor, in order. `skip` is a
+    /// skip just made (its first missing position and `atSinkByte`): a placement inside it is
+    /// carried at that sink byte. A placement at or before the cursor otherwise maps through
+    /// the bytes since it (no gap lies between: placements resolve after every write and skip).
+    fn resolve_placements(&mut self, ctx: &mut Ctx, skip: Option<(u64, u64)>) {
+        let committed = self.committed();
+        let cursor = self.cursor;
+        let Some(f) = self.front.as_mut() else {
+            return;
+        };
+        while let Some(p) = f.placements.front().copied() {
+            if p.pos > cursor {
+                break;
+            }
+            f.placements.pop_front();
+            let sink_byte = match skip {
+                Some((from, at)) if p.pos > from => at,
+                Some((from, at)) => at - (from - p.pos),
+                None => committed - (cursor - p.pos),
+            };
+            let o = &mut *ctx.out;
+            o.begin("front-placed", ctx.now);
+            o.str("sink", &self.id);
+            o.u64("frontBytes", p.front_bytes);
+            // The head when the command went out (`sourcePos` is the head now, as on every
+            // event); `sinkByte` is the front's byte that carries it.
+            o.u64("atSourcePos", p.pos);
+            o.u64("sinkByte", sink_byte);
+            o.u64("queuedBytes", p.queued);
+            o.end(Pos::Head(ctx.ring.head()));
+        }
+        if f.placements.len() < MAX_FRONT_PLACEMENTS {
+            f.gate_full = false;
+        }
     }
 
     /// An `adopt` of a new stream: drop the old stream's unsent bytes, mark the stream.
@@ -2151,8 +3408,30 @@ impl Sink {
 
     /// Sends as much as the kernel takes: the spill first, then records or ring bytes.
     fn service(&mut self, slot: usize, ctx: &mut Ctx, k: &mut impl Kernel) -> SinkOutcome {
+        if self.front.as_ref().is_some_and(|f| f.ending) {
+            return SinkOutcome::Ok;
+        }
         loop {
             self.guard(ctx);
+            // A front's header unit goes before any payload byte (F5); it is never cut.
+            if let Some(f) = self.front.as_mut().filter(|f| f.hdr_sent < f.hdr_len) {
+                let want = f.hdr_len - f.hdr_sent;
+                let r = k.sink_send(slot, &[&f.hdr[f.hdr_sent..f.hdr_len]]);
+                let n = match r {
+                    Sent::Took(0) | Sent::WouldBlock => {
+                        self.blocked = true;
+                        return SinkOutcome::Ok;
+                    }
+                    Sent::Took(n) => n.min(want),
+                    Sent::Failed(_) => return SinkOutcome::PeerGone,
+                };
+                f.hdr_sent += n;
+                if n < want {
+                    self.blocked = true;
+                    return SinkOutcome::Ok;
+                }
+                continue;
+            }
             if self.spill_pending() {
                 let want = self.spill_len - self.spill_off;
                 let r = k.sink_send(slot, &[&self.spill[self.spill_off..self.spill_len]]);
@@ -2178,11 +3457,12 @@ impl Sink {
             }
             let head = ctx.ring.head();
             match self.kind {
-                SinkKind::Raw => {
-                    if self.cursor == head {
+                SinkKind::Raw | SinkKind::Front => {
+                    let limit = self.limit(head);
+                    if self.cursor >= limit {
                         return SinkOutcome::Ok;
                     }
-                    let (a, b) = ctx.ring.slices(self.cursor, head);
+                    let (a, b) = ctx.ring.slices(self.cursor, limit);
                     let want = a.len() + b.len();
                     let r = k.sink_send(slot, &[a, b]);
                     match self.took(r, want) {
@@ -2190,6 +3470,9 @@ impl Sink {
                         Ok(n) => {
                             self.cursor += n as u64;
                             self.sent += n as u64;
+                            if self.front.is_some() {
+                                self.resolve_placements(ctx, None);
+                            }
                             if n < want {
                                 self.blocked = true;
                                 return SinkOutcome::Ok;

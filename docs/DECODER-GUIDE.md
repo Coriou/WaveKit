@@ -965,11 +965,35 @@ checked again reads "waiting for the source to settle", with no action.
 The CPU budget's guard (90 %) is judged on the core's **own** CPU: the CPU time of its
 container (core, workers, channelizer and every decoder process), read every 2 seconds from
 the container's cgroup and compared with the CPU capacity the automatic budget is sized from
-(`min(available CPUs, quota / period)`). Own CPU over 90 % of that capacity on two
-consecutive samples is evidence against the newest automatic decoder on probation; a single
-sample (a decoder's start-up burst) is not. The same rule holds back new automatic decoders:
-own CPU over the guard on the latest two consecutive samples refuses a newcomer, one sample
-does not.
+(`min(available CPUs, quota / period)`). Own CPU over 90 % of that capacity counts only once
+it has held for 10 seconds: five consecutive samples, each no more than 4 seconds after the
+previous one. Only then is it evidence against the newest automatic decoder on probation (or
+against the untuned decoder stopped to make room for a tuned one), and only then does it hold
+back new automatic decoders. Four samples (a decoder's start-up burst, or the core sitting at
+its CPU quota for 8 seconds) are not, and a sample under the guard, an unknown reading or a
+longer gap starts the count again.
+
+A decoder stopped for `cpu` is held: none of its placements on that source (any channel) is
+started again until the core's own CPU has stayed below 80 % of its capacity (the guard
+minus 10 points) for a full 60 seconds after the stop (30 consecutive samples, restarted by
+any sample at or above 80 %, an unknown reading or a gap), or until you start the decoder
+yourself (an operator start). The hold belongs to the decoder on its source, not to one
+channel: a channel worker the activity plan moves to another channel, a replan that removes
+and re-adds it, or a tuned decoder's settle after a retune keeps it held. Its usual retry
+delay applies as well, and host CPU does not shorten either wait. So a core running between
+80 % and 90 % of its capacity neither stops more decoders for CPU nor brings back the ones it
+stopped, and a stop is never undone within one sample. A tuned-band decoder that is waiting
+this way can still take the place of untuned decoders that cover its cost. An operator start
+ends the hold of any decoder, tuned or not; for the tuned decoder it also clears its retry
+delay. A channel worker removed by a replan is not logged as a resume ("Decoder suspension
+changed" with no reason code): the decoder stays held.
+
+A hold that lasts 10 minutes (10 release windows of 60 seconds, counted from the stop) logs one
+warning, "Decoder still held for cpu", naming the decoder and the reason it cannot end on its
+own: `own-cpu-unavailable` (the core's own CPU cannot be read, so no release run can start)
+or `above-release-level` (own CPU, given rounded as `ownPercent`, is at or above the 80 %
+release level). The warning is logged once per hold; a later stop for `cpu` may warn again.
+Start the decoder yourself to end the hold.
 
 Host CPU (every process on the machine, another project's build included) never stops,
 refuses or late-stops a decoder for host CPU alone. It only explains drops: while the host is
@@ -979,7 +1003,11 @@ host's, and they stop no automatic decoder outside the tuned band until the host
 while it lasts, the decoder's entry in `GET /api/decoders/efficiency` carries
 `hostExcusedLoss` (cause `host-busy`, [API.md](API.md#get-apidecodersefficiency)), and the core
 logs "Late loss excused: host busy" once when it begins and "Late loss no longer excused" once
-when the host calms or the loss stops. The log line "Decoder
+when it ends. It begins only when the excused loss would have stopped the decoder without the
+excuse (two of the latest three 10-second windows), so a stray drop now and then shows nothing.
+It ends when the host calms, when the decoder stops or is late-judged again, or 30 seconds (a
+full set of three windows) after its newest excused window; while a new decoder on the same
+input is still on probation, no excuse is shown. The log line "Decoder
 efficiency drops or CPU limit exceeded" reads `efficiencyDetail: "host-cpu"` in that case and
 `"cpu"` only for the core's own CPU.
 
@@ -988,7 +1016,10 @@ For a decoder of the tuned band, host CPU excuses a run of drops on its own inpu
 still be late-stopped. A run ends after 10 seconds without such a drop, and a new run starts
 its own 30 seconds. A tuned decoder on probation whose excused run is still open can
 graduate meanwhile; if the run outlasts the 30 seconds, it is then stopped as `late-drops`,
-not `drops`.
+not `drops`. After the 30-second excuse, the stop can take up to two more 10-second late windows
+(the loss must fill two of the latest three), so it comes about 30 to 35 seconds after the run's
+first drop for a decoder that had already graduated, and about 50 to 55 seconds when the run
+began while it was still on probation.
 
 The own reading needs the core in a container with a private cgroup namespace
 (`/proc/self/cgroup` is `0::/`, the Docker default with cgroup v2). Elsewhere (`pnpm run dev`
@@ -1011,8 +1042,8 @@ After a source reconnect, probation requires fresh coverage; drops recorded in t
 source epoch do not condemn a resumed decoder. New drops still trigger probation backoff
 for suspendable decoders. Decoders protected by `always` mode or an operator start stay
 running; after loss, a fresh 60-second clean run with complete evidence lets them graduate
-and frees the source's probation slot. CPU over the guard restarts this recovery interval
-at the following sample; a full 60 seconds of complete evidence must follow the latest
+and frees the source's probation slot. Own CPU over the guard (held 10 seconds, as above)
+restarts this recovery interval at the following sample; a full 60 seconds of complete evidence must follow the latest
 spike. CPU evidence against an original probation stays failed even after it is evicted
 from bounded history; only a fresh clean run can release that protected probation slot.
 Drop evidence resets on reconnect, so previous-epoch loss does not condemn a resumed

@@ -682,7 +682,7 @@ fn bound_and_active_peer_closed_closes_peer_and_touches_no_other_sink() {
     );
     assert_eq!(r.k.sinks[c].received, stream_bytes(1, 0, 300));
     // A hang-up reported by poll on a bound sink.
-    r.hub.sink_hangup(bound, r.now);
+    r.hub.sink_hangup(bound, &mut r.k, r.now);
     r.actions();
     let e = r.one("sink-closed");
     assert_eq!(

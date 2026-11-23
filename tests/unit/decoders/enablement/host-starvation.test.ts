@@ -10,13 +10,11 @@ import {
 	SUSTAINED_DROP_GAP_MS,
 } from "../../../../src/decoders/enablement/host-starvation.js"
 import {
-	EFFICIENCY_DROP_WINDOW_MS,
 	EFFICIENCY_PROBATION_MS,
 	EFFICIENCY_RETRY_MAX_MS,
 	EFFICIENCY_RETRY_MS,
 	TUNED_RETRY_MAX_MS,
 	TUNED_RETRY_MS,
-	LATE_SHED_WINDOWS,
 	lossRetryMs,
 } from "../../../../src/decoders/enablement/contract.js"
 import type { ChargedDrop } from "../../../../src/decoders/enablement/contract.js"
@@ -482,8 +480,8 @@ describe("gate: host CPU alone excuses a tuned probationer's own loss for at mos
 
 	// Intended change (rx-starvation S1, row T3): host CPU no longer restarts
 	// the probation, so the tuned probationer graduates and its own loss past
-	// the 30 000 ms excuse is shed by late drops, within the late windows
-	// (LATE_SHED_WINDOWS × EFFICIENCY_DROP_WINDOW_MS) after the bound.
+	// the 30 000 ms excuse is shed by late drops once it has graduated and two
+	// of the latest three late windows hold that loss.
 	it("sheds it by late drops once 30 000 ms pass after its first drop, then retries it 30 s later", () => {
 		const h = starvationHarness()
 		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
@@ -494,11 +492,8 @@ describe("gate: host CPU alone excuses a tuned probationer's own loss for at mos
 		])
 		const at = h.shed[0]!.at
 		expect(at).toBeGreaterThanOrEqual(first + CPU_ONLY_EXCUSE_MS)
-		expect(at).toBeLessThanOrEqual(
-			first +
-				CPU_ONLY_EXCUSE_MS +
-				LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
-		)
+		// Measured 52 000 ms (the run began on probation), plus one sample.
+		expect(at).toBeLessThanOrEqual(first + 52_000 + SAMPLE_MS)
 		expect(h.gate.shedAttribution?.(h.keyOf("readsb"))).toMatchObject({
 			tuned: true,
 			attribution: { cause: "decoder" },
@@ -589,11 +584,8 @@ describe("gate: host CPU alone excuses a tuned probationer's own loss for at mos
 				["readsb", "late-drops"],
 			])
 			expect(h.shed[0]!.at).toBeGreaterThanOrEqual(restart + CPU_ONLY_EXCUSE_MS)
-			expect(h.shed[0]!.at).toBeLessThanOrEqual(
-				restart +
-					CPU_ONLY_EXCUSE_MS +
-					LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
-			)
+			// Measured 32 000-34 000 ms (already graduated), plus one sample.
+			expect(h.shed[0]!.at).toBeLessThanOrEqual(restart + 34_000 + SAMPLE_MS)
 		},
 	)
 
@@ -649,12 +641,12 @@ describe("gate: graduation clears a tuned probationer's carried loss", () => {
 			return set.call(this, k, value)
 		})
 		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
-		// The core's own CPU over the guard on two samples (rx-starvation S1:
-		// host CPU alone resets nothing), probation passes lagging; then an
-		// own-branch drop 14 s later on a judged pass: the CPU reset carries it.
+		// The core's own CPU over the guard on five samples (rx-starvation S1
+		// and the sustain rule, OWN_OVER_SUSTAIN_SAMPLES: host CPU alone
+		// resets nothing), probation passes lagging; then an own-branch drop
+		// 12 s later on a judged pass: the CPU reset carries it.
 		h.cpu.normalisedPercent = 100
-		h.tick([], 4, false)
-		h.tick([], 4, false)
+		for (let i = 0; i < 5; i++) h.tick([], 4, false)
 		h.cpu.normalisedPercent = 10
 		for (let i = 0; i < 5; i++) h.tick([], 4, false)
 		h.tick([h.branch("readsb")])
@@ -745,11 +737,8 @@ describe("gate: CPU pinned at the guard bounds the excuse on both paths", () => 
 			["readsb", "late-drops"],
 		])
 		expect(h.shed[0]!.at).toBeGreaterThanOrEqual(first! + CPU_ONLY_EXCUSE_MS)
-		expect(h.shed[0]!.at).toBeLessThanOrEqual(
-			first! +
-				CPU_ONLY_EXCUSE_MS +
-				LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS,
-		)
+		// Measured 54 000 ms (the run began on probation), plus one sample.
+		expect(h.shed[0]!.at).toBeLessThanOrEqual(first! + 54_000 + SAMPLE_MS)
 		expect(h.gate.shedAttribution?.(h.keyOf("readsb"))).toMatchObject({
 			tuned: true,
 			attribution: { cause: "decoder" },

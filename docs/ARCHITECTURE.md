@@ -73,6 +73,33 @@ Manages TCP connections to SDR sources with automatic reconnection.
   delivering one after `SOURCE_CANDIDATE_RETRIES` losses) and report the endpoint in use
   (`candidate`)
 
+**Source intake** (`src/core/iq-hub/`): every network source gets and dials its socket through a
+`SourceIntake`. The default is Node's own TCP socket (`new net.Socket()`, `connect(port, host)`).
+Hub intake is **opt-in** (`WAVEKIT_SOURCE_INTAKE=hub`): a `wavekit-iqhub` process per source
+([`native/wavekit-iqhub/README.md`](../native/wavekit-iqhub/README.md)) owns the `rtl_tcp`
+connection on its own thread, and SourceManager reads a front sink over a Unix socket that replays
+the header, delivers the stream with counted whole-frame gaps and forwards tuner commands
+upstream in order. A front more than 6 s behind skips whole frames and reports each skip (counted
+loss; SourceManager emits `intake-gap`), so the receiver's sender never falls behind. Tuner-command
+receipts follow the hub's exact placements: the tuning ledger records each one at the Node payload
+position the hub placed it at (parked until the stream reaches it), a read past a frame written
+and not yet placed reads `settling`, and the settle adds the hub's measured upstream backlog to
+the in-flight bound. A command the hub never placed (its front ended or closed first) gets no
+receipt and raises no doubt: it touched no delivered byte. A placement that disagrees with Node's
+own accounting (the hub read command bytes before Node registered them, a placed position its gap
+history maps elsewhere, or a placement below an earlier one) fails the connection with
+`IQHUB_PLACEMENT_MISMATCH`: the ledger doubts the session from the write position, the session
+ends, and the next one starts unverified, so the tuner re-sends. `WAVEKIT_IQHUB_BIN` names the binary
+(default `/usr/local/bin/wavekit-iqhub`) and `WAVEKIT_IQHUB_STATS_DIR` (a bench diagnostic) gives
+each hub a stats file; startup stops with a configuration error naming the variable whose value
+is unusable. Unset or `socket`
+keeps today's path; any other value stops startup, naming the accepted values. Hub intake applies
+only to `rtl_tcp` `U8_IQ` sources whose host is an IP address (a host name keeps the socket path).
+The hub bounds its own connect phase (start, configure, the 5 s upstream connect), so a hub fault
+is never counted as a receiver timeout: failures the hub causes carry `IQHUB_*` codes and never
+count as receiver connect failures or toward the endpoint fallback. The image ships the binary
+at `/usr/local/bin/wavekit-iqhub` (the `WAVEKIT_IQHUB_BIN` default).
+
 **Key interfaces**:
 
 ```typescript

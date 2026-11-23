@@ -261,13 +261,16 @@ it("own CPU loss during a tuned-band probation sheds the newest untuned placemen
 				let lastShed = -Infinity
 				let after = 0
 				while (after < 9) {
-					// Intended change (rx-starvation S1): the evidence is own CPU over
-					// 90 % of capacity on two consecutive samples, not host CPU.
-					mono += 18_000
+					// Intended change (rx-starvation S1 and the sustain rule): the
+					// evidence is own CPU over 90 % of capacity on five consecutive
+					// samples (OWN_OVER_SUSTAIN_SAMPLES), not host CPU.
+					mono += 12_000
 					const over = { cpuPercent: 99, ownCores: 3.8, capacityCores: 4 }
 					gate.record({ atMs: mono, ...over, sources: new Map() })
-					mono += 2_000
-					gate.record({ atMs: mono, ...over, sources: new Map() })
+					for (let i = 0; i < 4; i++) {
+						mono += 2_000
+						gate.record({ atMs: mono, ...over, sources: new Map() })
+					}
 					const due = mono - lastShed >= 60_000
 					const expected = due ? (untuned.pop() ?? null) : null
 					if (expected === null && untuned.length === 0 && due) after++

@@ -3566,9 +3566,12 @@ An admitted automatic decoder outside the tuned band that is losing its own inpu
 host is busy carries `hostExcusedLoss: { cause: "host-busy", since, windows }`: the host's CPU
 (not the core's own) explains the loss, so the decoder is not late-stopped for it, and the loss
 is shown here instead of being silent. `since` is when the excuse began (ISO time) and
-`windows` how many of the latest three 10-second late-drop windows it covers. The field goes
-away when the host calms or the loss stops; the core logs one warning when it appears and one
-info line when it goes.
+`windows` how many of the latest three 10-second late-drop windows it covers. It appears only
+once the excused loss would have late-stopped the decoder without the excuse (two of the three
+windows). The field goes away when the host calms, when the decoder is stopped or condemned, while
+a newer decoder on the same source is on probation, or 30 seconds (a full set of three windows)
+after its newest excused window; until then `windows` keeps its latest count. The core logs one
+warning when it appears and one info line when it goes.
 
 #### GET /api/decoders/efficiency/budget
 

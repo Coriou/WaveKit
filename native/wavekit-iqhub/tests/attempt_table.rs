@@ -60,7 +60,10 @@ fn ready_names_the_protocol_features_socket_and_limits() {
             "tcp-connected",
             "header-timeout",
             "errno",
-            "close-modes"
+            "close-modes",
+            "front",
+            "rcvbuf",
+            "stats-file"
         ])
     );
     assert_eq!(e["sinkSocket"], "/run/hub.sock");
@@ -1022,6 +1025,7 @@ fn held_abort_after_writes_stops_reading_lets_pending_writes_complete_then_close
             deadline_us: r.now + 1_000_000,
             seq: Some(7),
             draining: false,
+            by_front: false,
         })
     );
     assert_eq!(r.hub.attempt_phase(slot), Some(Phase::Held));

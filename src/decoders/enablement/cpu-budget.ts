@@ -172,8 +172,8 @@ export interface CpuCountReaders {
  * libuv folds a cgroup quota into it rounded down (1.5 CPUs reads as 1), and the
  * quota is applied exactly by resolveCpuCapacity. The smallest of the affinity mask
  * (Cpus_allowed_list: taskset, systemd, v1 and v2 cpusets), the v2 effective cpuset
- * of the process's own cgroup, and the online CPUs; availableParallelism() only when
- * none of them can be read.
+ * of the process's own cgroup (the mount root's when /proc/self/cgroup is unreadable),
+ * and the online CPUs; availableParallelism() only when none of them can be read.
  */
 export function hostCpuCount(readers: CpuCountReaders = {}): number {
 	const counts: number[] = []
@@ -183,7 +183,7 @@ export function hostCpuCount(readers: CpuCountReaders = {}): number {
 	}
 	try {
 		const status = readers.readStatus?.() ?? ""
-		const line = /^Cpus_allowed_list:\s*(.*)$/m.exec(status)
+		const line = /^Cpus_allowed_list:[ \t]*(.*)$/m.exec(status)
 		add(line?.[1] === undefined ? null : cpusetCount(line[1]))
 	} catch {
 		/* No affinity mask readable here. */
