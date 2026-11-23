@@ -876,3 +876,183 @@ describe("retention before the analog inventory is ready", () => {
 		expect(removed).toEqual([])
 	})
 })
+
+/**
+ * Live-clone finding: a pass whose last removal left the store fitting, then an admission or a
+ * finalization before the quota was measured (the pass's folder listing awaits after its last
+ * removal decision), reported "nothing removable" with removable files left; that state
+ * suppressed the early pass and refused admissions until the next regular pass removed more.
+ * The quota state is now measured against what is removable NOW: such a shortfall asks for
+ * another pass (`again`) instead, and only a genuinely held store warns.
+ */
+describe("a shortfall a pass's own tail created is not 'nothing removable'", () => {
+	async function tailHarness() {
+		const root = await tempRoot()
+		const now = Date.now()
+		const store = new DiscoveryStore({
+			maxDiscoveries: 100,
+			now: () => now,
+			newId: counterIds(),
+		})
+		const first = store.ingest(
+			makeObs({ id: "o1", centreHz: 446_000_000, startedAt: now }),
+		).discoveryId
+		const second = store.ingest(
+			makeObs({ id: "o2", centreHz: 162_025_000, startedAt: now }),
+		).discoveryId
+		if (!first || !second || first === second)
+			throw new Error("Missing test discoveries")
+		const lines: Record<string, unknown>[] = []
+		const sink = new Writable({
+			write(chunk: Buffer, _enc, done) {
+				for (const text of chunk.toString("utf8").split("\n"))
+					if (text.trim() !== "")
+						lines.push(JSON.parse(text) as Record<string, unknown>)
+				done()
+			},
+		})
+		const caps = {
+			maxRecordingsMb: 1024,
+			maxEvidenceMb: 20,
+			maxAgeDays: 30,
+			minFreeDiskMb: 0,
+		}
+		const ev = new EvidenceStore({
+			dir: root,
+			caps,
+			logger: pino({ level: "info" }, sink) as unknown as Logger,
+			now: () => Date.now(),
+			statfs: async () => ({ freeBytes: 1e12 }),
+			isDiscoveryLive: id => store.get(id) !== undefined,
+		})
+		ev.configureAnalog(adapterOf(store))
+		await ev.recoverAnalog()
+		const analog = (ev as unknown as { analog: AnalogOperations }).analog
+		const begin = (discoveryId = first, observationId = "o1") =>
+			ev.beginAnalog({ discoveryId, observationId, binding: binding() })
+		const record = async (
+			mtimeMs: number,
+			discoveryId = first,
+		): Promise<Stored> => {
+			const before = analog.managedBytes ?? 0
+			const op = begin(discoveryId, discoveryId === first ? "o1" : "o2")
+			await op.ready
+			for (let i = 0; i < SAMPLES; i += 16_000)
+				await op.push(new Int16Array(16_000))
+			const receipt = await op.finish()
+			expect(receipt.outcome).toBe("finalized")
+			const artifact = receipt.artifact!
+			await utimes(join(root, artifact), mtimeMs / 1000, mtimeMs / 1000)
+			return { artifact, bytes: (analog.managedBytes ?? 0) - before, mtimeMs }
+		}
+		/** Runs `job` once, after the next pass's last removal decision, before it measures. */
+		const atPassTail = (job: () => Promise<void>) => {
+			const internals = ev as unknown as {
+				loadFolderIndex(): Promise<string[]>
+			}
+			const original = internals.loadFolderIndex.bind(ev)
+			let pending: (() => Promise<void>) | null = job
+			internals.loadFolderIndex = async () => {
+				const run = pending
+				pending = null
+				if (run) await run()
+				return original()
+			}
+		}
+		const warned = () =>
+			lines.filter(
+				l =>
+					l["reason"] === "storage-cap" &&
+					l["level"] === 40 &&
+					String(l["msg"]).includes("exceeded"),
+			)
+		/** Three files, oldest first; the cap leaves room after removing the oldest, 1 000 B spare. */
+		const fill = async (): Promise<Stored[]> => {
+			const files: Stored[] = []
+			for (const daysAgo of [4, 3, 2])
+				files.push(await record(now - daysAgo * DAY))
+			const used = analog.managedBytes!
+			const capBytes = used - files[0]!.bytes + ADMISSION_HEADROOM + 1_000
+			ev.setCaps({ ...caps, maxRecordingsMb: capBytes / MIB })
+			return files
+		}
+		return {
+			ev,
+			analog,
+			first,
+			second,
+			begin,
+			record,
+			atPassTail,
+			warned,
+			fill,
+		}
+	}
+
+	it("a finalization after the last removal: no false warning, `again`, and the next pass removes the oldest", async () => {
+		const t = await tailHarness()
+		const files = await t.fill()
+		t.atPassTail(async () => {
+			await t.record(Date.now() - 60_000)
+		})
+		const pass = await t.ev.retention(new Set())
+		expect(pass.deleted).toEqual([files[0]!.artifact])
+		// Short again (the new file used the room), with removable files left.
+		expect(t.analog.quotaShortfall(0)).toBeGreaterThan(0)
+		expect(t.warned()).toHaveLength(0)
+		expect(t.ev.recordingsQuotaExceeded).toBeNull()
+		expect(pass.again).toBe(true)
+		const next = await t.ev.retention(new Set())
+		expect(next.deleted).toEqual([files[1]!.artifact])
+		expect(next.again).toBeUndefined()
+		expect(t.analog.quotaShortfall(0)).toBeLessThanOrEqual(0)
+		expect(t.ev.recordingsQuotaExceeded).toBeNull()
+		expect(t.warned()).toHaveLength(0)
+		await t.ev.stopAnalog()
+	}, 120_000)
+
+	it("an admission (a new reservation) after the last removal: no false warning, the next pass removes the oldest", async () => {
+		const t = await tailHarness()
+		const files = await t.fill()
+		// Another discovery's recording, admitted at the pass's tail and still in flight.
+		let op: ReturnType<typeof t.begin> | null = null
+		t.atPassTail(async () => {
+			op = t.begin(t.second, "o2")
+			await op.ready
+		})
+		const pass = await t.ev.retention(new Set())
+		expect(pass.deleted).toEqual([files[0]!.artifact])
+		expect(t.analog.quotaShortfall(0)).toBeGreaterThan(0)
+		expect(t.warned()).toHaveLength(0)
+		expect(t.ev.recordingsQuotaExceeded).toBeNull()
+		expect(pass.again).toBe(true)
+		const next = await t.ev.retention(new Set())
+		expect(next.deleted[0]).toBe(files[1]!.artifact)
+		expect(t.analog.quotaShortfall(0)).toBeLessThanOrEqual(0)
+		const admitted = op as ReturnType<typeof t.begin> | null
+		expect(admitted).not.toBeNull()
+		admitted!.cancel()
+		await admitted!.settled
+		await t.ev.stopAnalog()
+	}, 120_000)
+
+	it("a held-only store short of room still warns once and reports the quota; no `again`", async () => {
+		const t = await tailHarness()
+		await t.fill()
+		const keep = new Set([t.first])
+		// A file finalized at the tail into the kept discovery is held too.
+		t.atPassTail(async () => {
+			await t.record(Date.now() - 60_000)
+		})
+		const pass = await t.ev.retention(keep)
+		expect(pass.deleted).toEqual([])
+		expect(pass.again).toBeUndefined()
+		expect(t.ev.recordingsQuotaExceeded).not.toBeNull()
+		expect(t.warned()).toHaveLength(1)
+		const next = await t.ev.retention(keep)
+		expect(next.again).toBeUndefined()
+		expect(t.ev.recordingsQuotaExceeded).not.toBeNull()
+		expect(t.warned()).toHaveLength(1)
+		await t.ev.stopAnalog()
+	}, 120_000)
+})

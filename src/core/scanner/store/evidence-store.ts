@@ -1606,9 +1606,15 @@ export class EvidenceStore {
 		await rmdirIfEmpty(evidenceDir)
 	}
 
+	/**
+	 * One retention pass. `again`: the store is short of room for the next recording with files
+	 * this pass did not try still removable (an admission or a finalization after its last
+	 * removal decision used the room it freed); the caller runs another pass soon. The quota is
+	 * then not reported exceeded: that state means nothing removable is left.
+	 */
 	async retention(
 		keepDiscoveryIds: ReadonlySet<string>,
-	): Promise<{ deleted: string[] }> {
+	): Promise<{ deleted: string[]; again?: true }> {
 		const gate = this.deletionGate()
 		if (gate) await gate
 		// WG9 R2: a pinned root whose identity changed deletes nothing (fail closed).
@@ -1746,9 +1752,12 @@ export class EvidenceStore {
 		)
 		this.unresolvedFolders = unresolved.size
 		this.unknownHeldFiles = unknownHeld.size
-		this.noteQuota(
+		// Measured now, after the pass's last await: admissions and finalizations since its last
+		// removal decision count, and so do the removable files they left (removableNow).
+		const again = this.noteQuota(
 			recordingsLeft + (this.analog?.managedBytes ?? 0),
 			this.analog?.quotaShortfall(recordingsLeft),
+			this.analog?.removableNow() ?? 0,
 		)
 		this.noteOperationsHeld(this.operationsHeldFull)
 		if (unknownHeld.size > 0)
@@ -1771,7 +1780,7 @@ export class EvidenceStore {
 				{ deleted: deleted.length },
 				"Scanner retention removed files",
 			)
-		return { deleted }
+		return again ? { deleted, again } : { deleted }
 	}
 
 	/**
@@ -1780,14 +1789,25 @@ export class EvidenceStore {
 	 * own (`shortfall`, AnalogOperations.quotaShortfall: no room left for the next recording
 	 * plus one in flight, ADMISSION_HEADROOM), so a store within one recording of its cap shows;
 	 * without them, or while the analog inventory is unknown (null), it is the cap itself.
+	 * Exceeded only with nothing removable left (`removable`, AnalogOperations.removableNow, 0):
+	 * a shortfall with removable files left is not entered (returns true: run another pass).
 	 */
-	private noteQuota(usedBytes: number, shortfall?: number | null): void {
+	private noteQuota(
+		usedBytes: number,
+		shortfall: number | null | undefined,
+		removable: number,
+	): boolean {
 		const capBytes = this.caps.maxRecordingsMb * MIB
 		const overBytes = shortfall ?? usedBytes - capBytes
-		const next =
+		const short =
 			Number.isFinite(usedBytes) && Number.isFinite(overBytes) && overBytes > 0
-				? { capBytes, usedBytes, overBytes }
-				: null
+		const again = short && removable > 0
+		const next = short && !again ? { capBytes, usedBytes, overBytes } : null
+		if (again)
+			this.log.debug(
+				{ reason: "storage-cap", overBytes, removable },
+				"Scanner recordings are short of room with removable files left; retention runs again",
+			)
 		if (next !== null && this.quotaExceeded === null)
 			this.log.warn(
 				{
@@ -1804,6 +1824,7 @@ export class EvidenceStore {
 				"Scanner recordings quota no longer exceeded; analog recordings are admitted again",
 			)
 		this.quotaExceeded = next
+		return again
 	}
 
 	/** Entering or leaving operationsHeldFull logs once (fixed text). */

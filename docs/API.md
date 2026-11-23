@@ -4334,6 +4334,8 @@ else is removable) and quota retention frees nothing. That room is two full reco
 (3,872,856 B), so it can show while `usedBytes` is still just under `capBytes`. While
 recordings are in flight their reserved space counts too, so retention may clear up to about
 (2 + n) reservations below `capBytes` with n recordings in flight (n ≤ 8: about 19 MB).
+A shortfall that recordings admitted or finished during the pass created while removable files
+are left does not show it; another pass runs within 30 s instead.
 `overBytes` is what retention would have to free for the next recording: `usedBytes` plus the
 space reserved by recordings in flight plus that room, less `capBytes` (cores before 2026-11-23:
 `usedBytes - capBytes`):

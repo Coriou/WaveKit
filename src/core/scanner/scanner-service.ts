@@ -9467,6 +9467,24 @@ export class ScannerService extends EventEmitter {
 		)
 	}
 
+	/**
+	 * A pass ended short of room with removable files left (EvidenceStore.retention `again`):
+	 * the next pass is due as soon as the early-retention debounce allows (at most once per
+	 * EARLY_RETENTION_EVERY_MS, counted from the last early request), never later than the
+	 * regular cadence.
+	 */
+	private retentionAgain(): void {
+		const due = Math.max(
+			this.now(),
+			this.earlyRetentionAt + EARLY_RETENTION_EVERY_MS,
+		)
+		this.earlyRetentionAt = due
+		this.lastMaintenanceAt = Math.min(
+			this.lastMaintenanceAt,
+			due - MAINTENANCE_EVERY_MS,
+		)
+	}
+
 	private async maintenance(): Promise<void> {
 		if (this.ownershipLost()) return
 		const s = this.settings()
@@ -9513,6 +9531,8 @@ export class ScannerService extends EventEmitter {
 			})
 		// Retention removes files without changing a discovery's recording count: the recordings
 		// catalogue hears it here (folder ids only).
+		// Short of room with files the pass did not try still removable: another pass, soon.
+		if (retained?.again === true) this.retentionAgain()
 		if (retained !== null && retained.deleted.length > 0) {
 			const folderIds = recordingFolderIdsOf(retained.deleted)
 			if (folderIds.length > 0) this.emit("recordings-removed", folderIds)

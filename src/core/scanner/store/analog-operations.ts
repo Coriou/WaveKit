@@ -776,6 +776,15 @@ export class AnalogOperations {
 	operationsHeldFull = false
 	/** Artifacts the last retention pass kept because recovery quarantined them. */
 	quarantinedRetained = 0
+	/**
+	 * The last retention pass, for removableNow: its keep set, the analog operations it tried to
+	 * retire and the legacy files it did not try (the store fit at their turn). Null: none ran.
+	 */
+	private lastPass: {
+		keep: ReadonlySet<string>
+		tried: ReadonlySet<string>
+		legacyUntried: number
+	} | null = null
 	/** Why the last recovery quarantined each operation it did not admit (closed reasons). */
 	private readonly quarantine = new Map<string, AnalogQuarantine>()
 	/** Artifacts the last retention pass kept because their owner is unknown (table full). */
@@ -3134,6 +3143,7 @@ export class AnalogOperations {
 		now: number,
 		legacy?: LegacyRetention,
 	): Promise<string[]> {
+		this.lastPass = null
 		if (!this.ready) {
 			if (legacy) {
 				const capBytes = this.context.limits().maxBytes
@@ -3216,10 +3226,15 @@ export class AnalogOperations {
 		const countEvicts = (): boolean =>
 			this.operationsFull() &&
 			this.inventory.intents.size + this.unpublished() - analogLeft < countLimit
+		const tried = new Set<string>()
+		let legacyUntried = 0
 		for (const entry of entries) {
 			if (entry.kind === "legacy") {
 				// Legacy age expiry ran in the caller's own pass; here only the quota removes.
-				if (!(await bytesFull())) continue
+				if (!(await bytesFull())) {
+					legacyUntried++
+					continue
+				}
 				if ((await entry.file.remove()) && legacy)
 					legacy.bytes -= entry.file.bytes
 				continue
@@ -3233,6 +3248,7 @@ export class AnalogOperations {
 			// listing, a mark, a keep or an unresolved folder since keeps the file.
 			const stillRetirable = (): boolean =>
 				this.retentionHold(intent, keep) === false
+			tried.add(intent.operationId)
 			if (!stillRetirable()) continue
 			try {
 				await this.retire(intent, deleted, stillRetirable)
@@ -3245,7 +3261,27 @@ export class AnalogOperations {
 		this.unresolvedRetained = unresolved
 		this.unknownHeldRetained = unknownHeld
 		this.quarantinedRetained = quarantined
+		this.lastPass = { keep, tried, legacyUntried }
 		return deleted
+	}
+	/**
+	 * Files the last retention pass left that it could still remove, counted NOW: the analog
+	 * operations in the inventory it did not try to retire whose policy lets them go (one
+	 * finalized during the pass included), plus the legacy files it did not try. An admission or
+	 * a finalization after the pass's last removal decision can leave the store short again with
+	 * these left, so a shortfall then is not "nothing removable" (0: genuinely held, or no pass).
+	 */
+	removableNow(): number {
+		const pass = this.lastPass
+		if (pass === null || !this.ready) return 0
+		let n = pass.legacyUntried
+		for (const intent of this.inventory.intents.values())
+			if (
+				!pass.tried.has(intent.operationId) &&
+				this.retentionHold(intent, pass.keep) === false
+			)
+				n++
+		return n
 	}
 	/**
 	 * Retention's policy for one artifact, synchronous so it can run in the media unlink's turn:

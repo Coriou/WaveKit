@@ -265,6 +265,41 @@ describe("early retention after an admission that left the store short, or a cou
 	})
 })
 
+describe("a pass that ends short with removable files left (`again`)", () => {
+	it("brings the next pass forward, debounced like an early request; a pass without it does not", async () => {
+		let now = 50_000_000
+		const h = serviceHarness({ now: () => now })
+		const svc = h.service as unknown as Internals & {
+			earlyRetentionAt: number
+			evidence: {
+				retention(
+					keep: ReadonlySet<string>,
+				): Promise<{ deleted: string[]; again?: true }>
+			}
+		}
+		let again = true
+		svc.evidence.retention = async () =>
+			again ? { deleted: [], again } : { deleted: [] }
+		const due = () => now - svc.lastMaintenanceAt >= MAINTENANCE_EVERY_MS
+		svc.lastMaintenanceAt = now
+		await svc.maintenance()
+		// No early request before: due at the next tick.
+		expect(due()).toBe(true)
+		// Again right away: due once the debounce from that request elapsed, not before.
+		svc.lastMaintenanceAt = now
+		await svc.maintenance()
+		expect(due()).toBe(false)
+		now += EARLY_RETENTION_EVERY_MS
+		expect(due()).toBe(true)
+		// A pass that ends without `again` leaves the regular cadence alone.
+		now += EARLY_RETENTION_EVERY_MS
+		again = false
+		svc.lastMaintenanceAt = now
+		await svc.maintenance()
+		expect(due()).toBe(false)
+	})
+})
+
 /**
  * Not mocked: a real EvidenceStore with real analog operations on a temporary directory. The
  * store is filled to within one reservation of its cap, a real admission refuses with the byte
