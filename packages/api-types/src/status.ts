@@ -172,7 +172,7 @@ export const RECORDER_STREAK_FIXES = Object.freeze({
 	"refused:cpu":
 		"GET /api/diagnostics: the shared CPU budget is full or the measured core or host CPU is busy; wait, or free CPU or raise cpuBudgetCores with PATCH /api/scanner/settings",
 	"refused:slots":
-		"GET /api/scanner (recorder.sessions): the source is at its recording limit, or at the floor of 2 without a CPU reading; wait for a recording to end",
+		"GET /api/scanner (recorder.sessions): the source is at its recording limit; wait for a recording to end. When the CPU budget gives only the floor of slots (cpuBudgetCores 0.5, say), raising cpuBudgetCores with PATCH /api/scanner/settings raises it; without a CPU reading the limit is the floor of 2 whatever the budget",
 	"refused:no-iq":
 		"GET /api/sources: the source must deliver U8_IQ for the analog recorder",
 	"refused:store":

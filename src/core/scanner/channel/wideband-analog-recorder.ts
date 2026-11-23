@@ -554,13 +554,20 @@ export const WIDEBAND_MAX_PENDING_GAPS = 64
  */
 export const MAX_WAITING_FILES = 2
 /**
- * Sessions whose voiced file may wait at once for a free store operation (storeWaiters): the
- * store's overall limit, MAX_ACTIVE_ANALOG_OPERATIONS (8). Every waiter begins its operation as
- * one ends, oldest first, so 8 waiters are all served once the store's 8 operations have each
- * ended once; a ninth could only wait past that turnover, and is dropped instead
- * (`discarded:store-backlog`). Each waiting session holds at most MAX_WAITING_FILES files within
- * WIDEBAND_MAX_BUFFERED_FRAMES (960 KB): 8 · 960 KB = 7.68 MB at most, and each waiting file is
- * dropped once it waited longer than WIDEBAND_MAX_BUFFERED_MS (60 s).
+ * New store waiters (storeWaiters: sessions holding no operation whose first voiced file waits
+ * for a free store operation) at once: the store's overall limit, MAX_ACTIVE_ANALOG_OPERATIONS
+ * (8). A ninth is dropped (`discarded:store-backlog`) rather than wait behind them. Continuations
+ * (a recording's own next file waiting behind its settled operation: a roll-over, a new
+ * transmission while the previous file still settled) are not counted here and never dropped for
+ * it: each comes from a session that held an operation, and a new waiter begins only while this
+ * recorder's operations plus its waiting continuations are under MAX_ACTIVE_ANALOG_OPERATIONS,
+ * so at most 8 continuations wait. At most 8 + 8 = 16 sessions wait in all, each holding at most
+ * MAX_WAITING_FILES files within WIDEBAND_MAX_BUFFERED_FRAMES (480 000 frames · 2 B = 960 KB):
+ * 16 · 960 KB = 15.36 MB at most. Each waiting file is dropped once it waited longer than
+ * WIDEBAND_MAX_BUFFERED_MS (60 s) on the recorder's monotonic clock. The store's freed
+ * operations go to continuations first, then to the new waiter that waited longest; how fast
+ * they free is the store's (other producers hold operations too), so no turnover bound is
+ * claimed beyond that deadline.
  */
 export const MAX_STORE_WAITERS = MAX_ACTIVE_ANALOG_OPERATIONS
 /**
@@ -1163,8 +1170,14 @@ interface FileState {
 	/** Order it began waiting in (Session.waiting): the store's freed operations go oldest first. */
 	waitSeq: number
 	/**
-	 * When (deps.now(), ms) it first waited for a free store operation (storeWaiters); null
-	 * before. Waiting longer than WIDEBAND_MAX_BUFFERED_MS, it is dropped (expireStoreWaiters).
+	 * It waits behind its own session's file (an operation or a file already waiting): a
+	 * continuation of the recording, served before new store waiters (drainStoreWaiters).
+	 */
+	continuation: boolean
+	/**
+	 * When (the recorder's monotonic clock, ms) it first waited for a free store operation
+	 * (storeWaiters); null before. Waiting longer than WIDEBAND_MAX_BUFFERED_MS, it is dropped
+	 * (expireStoreWaiters). A wall-clock step never moves it.
 	 */
 	storeSince: number | null
 }
@@ -1533,6 +1546,14 @@ function voicedSpan(s: Session): { open: boolean; voiced: string | null } {
  * classByTone cannot class it in this file (a snapshot still could; the shadow yields only to a
  * waiting candidate). Reads only.
  */
+/**
+ * A store waiter whose waiting file is a continuation (its session's operation settled with it
+ * waiting): served before new waiters (drainStoreWaiters).
+ */
+function isContinuation(s: Session): boolean {
+	return s.waiting[0]?.continuation === true
+}
+
 function hopeless(s: Session): boolean {
 	if (s.classed) return false
 	if (s.stale) return true
@@ -1575,12 +1596,14 @@ export class WidebandAnalogRecorder {
 	 * Sessions holding no operation whose voiced file waits (in its `waiting`) because every
 	 * operation the store allows over all sources is held (storeFull): a shadow classed after it
 	 * was admitted beside a full store. Its audio stays buffered (WIDEBAND_MAX_BUFFERED_FRAMES)
-	 * and its operation begins once one ends (drainStoreWaiters), oldest first, instead of the
-	 * store refusing it (refused:store) and its opening audio being lost. A session whose own
-	 * operation settled with a next file waiting (a roll-over, a new transmission) joins them, so
-	 * a freed operation goes to the file that has waited longest, whoever's it is. The session
-	 * may have ended (its file finished while waiting): it is kept here only, at most
-	 * MAX_STORE_WAITERS, each waiting file at most WIDEBAND_MAX_BUFFERED_MS.
+	 * and its operation begins once one ends (drainStoreWaiters) instead of the store refusing it
+	 * (refused:store) and its opening audio being lost. A session whose own operation settled with
+	 * a next file waiting (a roll-over, a new transmission) joins them as a continuation: freed
+	 * operations go to continuations first (a recording is kept whole), then to the new waiter
+	 * that waited longest. The session may have ended (its file finished while waiting): it is
+	 * kept here only. At most MAX_STORE_WAITERS new waiters plus at most
+	 * MAX_ACTIVE_ANALOG_OPERATIONS continuations (see MAX_STORE_WAITERS for the bound), each
+	 * waiting file at most WIDEBAND_MAX_BUFFERED_MS.
 	 */
 	private readonly storeWaiters = new Set<Session>()
 	/** Orders the files that wait (FileState.waitSeq). */
@@ -1802,36 +1825,61 @@ export class WidebandAnalogRecorder {
 		}
 	}
 
-	/** Store waiters with a file still waiting and no operation (stale entries leave). */
+	/**
+	 * New store waiters (not continuations) with a file still waiting and no operation, for
+	 * MAX_STORE_WAITERS (stale entries leave).
+	 */
 	private storeWaiting(): number {
+		let n = 0
 		for (const s of [...this.storeWaiters])
 			if (s.ops > 0 || s.waiting.length === 0) this.storeWaiters.delete(s)
-		return this.storeWaiters.size
+			else if (!isContinuation(s)) n++
+		return n
+	}
+
+	/**
+	 * A new file of a session holding no operation must wait (not begin): the store is full on
+	 * its source, or this recorder's operations plus its waiting continuations already take every
+	 * operation the store allows (each continuation keeps the operation its session gave up).
+	 */
+	private newMustWait(sourceId: string): boolean {
+		if (this.storeFull(sourceId)) return true
+		if (this.stopped) return false
+		let n = 0
+		for (const k of this.unsettled.values()) n += k
+		for (const s of this.storeWaiters) if (s.ops === 0 && isContinuation(s)) n++
+		return n >= MAX_ACTIVE_ANALOG_OPERATIONS
 	}
 
 	/** `s` waits for a free store operation from now (its files' storeSince, once). */
 	private addStoreWaiter(s: Session): void {
-		const now = this.deps.now()
+		const now = this.clock()
 		for (const f of s.waiting) f.storeSince ??= now
 		this.storeWaiters.add(s)
 	}
 
 	/**
-	 * Begins the store waiters' operations while the store has room, the oldest waiting file
-	 * first (FileState.waitSeq, over every session: a store waiter and a session's own next file
-	 * behind its settled operation alike), each on its source only while that source has room
-	 * too; one at a time per session (its own settle begins its next file). Then every file still
-	 * waiting longer than WIDEBAND_MAX_BUFFERED_MS is dropped (expireStoreWaiters). Run on every
-	 * snapshot (track, closed) and every operation's end.
+	 * Begins the store waiters' operations while the store has room: continuations first (a
+	 * session's own next file behind its settled operation, so a kept recording goes on whole),
+	 * then the new waiters, oldest waiting file first (FileState.waitSeq), each on its source only
+	 * while that source has room too; one at a time per session (its own settle begins its next
+	 * file). Then every file still waiting longer than WIDEBAND_MAX_BUFFERED_MS is dropped
+	 * (expireStoreWaiters). Run on every snapshot (track, closed) and every operation's end.
 	 */
 	private drainStoreWaiters(): void {
+		if (this.storeWaiters.size === 0) return
 		this.storeWaiting()
 		const order = [...this.storeWaiters].sort(
-			(a, b) => (a.waiting[0]?.waitSeq ?? 0) - (b.waiting[0]?.waitSeq ?? 0),
+			(a, b) =>
+				Number(isContinuation(b)) - Number(isContinuation(a)) ||
+				(a.waiting[0]?.waitSeq ?? 0) - (b.waiting[0]?.waitSeq ?? 0),
 		)
 		for (const s of order) {
 			if (this.storeFull()) break
-			while (s.ops === 0 && s.waiting.length > 0 && !this.storeFull(s.sourceId))
+			const room = isContinuation(s)
+				? () => !this.storeFull(s.sourceId)
+				: () => !this.newMustWait(s.sourceId)
+			while (s.ops === 0 && s.waiting.length > 0 && room())
 				this.beginOp(s, s.waiting.shift()!)
 			if (s.ops > 0 || s.waiting.length === 0) this.storeWaiters.delete(s)
 		}
@@ -1845,7 +1893,7 @@ export class WidebandAnalogRecorder {
 	 */
 	private expireStoreWaiters(): void {
 		if (this.stopped || this.storeWaiters.size === 0) return
-		const now = this.deps.now()
+		const now = this.clock()
 		for (const s of [...this.storeWaiters]) {
 			for (const f of [...s.waiting])
 				if (
@@ -3403,6 +3451,7 @@ export class WidebandAnalogRecorder {
 			pushFailed: false,
 			decided: false,
 			waitSeq: 0,
+			continuation: false,
 			storeSince: null,
 		}
 		s.file = file
@@ -3412,8 +3461,10 @@ export class WidebandAnalogRecorder {
 	/**
 	 * Begins the file's analog operation once the session is classed analog-fm, its discovery is
 	 * known and the file sounded like voice: at once, or, while this session's previous operation
-	 * has not settled (it still holds an analog slot), once that one settles. A continuation
-	 * never needs a third slot.
+	 * has not settled (it still holds an analog slot), once that one settles. A continuation (a
+	 * file behind its own session's file) waits for that session's operation: it takes no second
+	 * slot beside it, and once the operation settles it waits for the store's next free one
+	 * ahead of new waiters (drainStoreWaiters), which the store may still have given away.
 	 */
 	private admit(s: Session, file: FileState): void {
 		if (
@@ -3427,12 +3478,13 @@ export class WidebandAnalogRecorder {
 		)
 			return
 		if (s.ops === 0 && s.waiting.length === 0) {
-			if (!this.storeFull(s.sourceId)) {
+			if (!this.newMustWait(s.sourceId)) {
 				this.beginOp(s, file)
 				return
 			}
-			// Every operation the store allows is held: wait for one to end rather than be
-			// refused, unless MAX_STORE_WAITERS files already wait (it could only wait past them).
+			// Every operation the store allows is held (or kept by a waiting continuation): wait
+			// for one to end rather than be refused, unless MAX_STORE_WAITERS new waiters already
+			// wait (it could only wait past them).
 			if (this.storeWaiting() >= MAX_STORE_WAITERS) {
 				this.backlogged(s, file)
 				return
@@ -3450,6 +3502,9 @@ export class WidebandAnalogRecorder {
 			return
 		}
 		file.waitSeq = ++this.waitSeq
+		// Behind a continuation already waiting it is one too; behind its own operation it becomes
+		// one when that settles.
+		file.continuation = s.waiting[0]?.continuation === true
 		s.waiting.push(file)
 		if (s.ops === 0) this.addStoreWaiter(s)
 	}
@@ -3515,10 +3570,14 @@ export class WidebandAnalogRecorder {
 				this.settling.delete(settled)
 				s.files.delete(file)
 				s.ops--
-				// One at a time: this session's next waiting file may begin now it holds no slot,
-				// but the freed operation goes to the file that has waited longest over every
-				// session (drainStoreWaiters, FileState.waitSeq): it joins the store waiters.
-				if (s.ops === 0 && s.waiting.length > 0) this.addStoreWaiter(s)
+				// One at a time: this session's next waiting file may begin now it holds no slot. It
+				// joins the store waiters as a continuation, served before new waiters
+				// (drainStoreWaiters); it keeps the operation it gave up (newMustWait), so
+				// continuations never outnumber MAX_ACTIVE_ANALOG_OPERATIONS.
+				if (s.ops === 0 && s.waiting.length > 0) {
+					for (const f of s.waiting) f.continuation = true
+					this.addStoreWaiter(s)
+				}
 				this.drainStoreWaiters()
 				if (s.ops === 0 || !s.done) this.yielding.delete(s)
 				this.publishTones(s)
