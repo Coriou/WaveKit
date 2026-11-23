@@ -201,7 +201,8 @@ export class CtcssBank {
 	/**
 	 * Analysis blocks some tone won (≥ 0.65 of the band, ≥ 3× the next tone, 1% of whole-audio
 	 * power), whether or not that tone later qualified or reached 60% of the blocks. 0 with at
-	 * least MIN_SAMPLES pushed: no block of the audio held any tone. Does not affect `result()`.
+	 * least MIN_SAMPLES pushed: no block voted. That alone does not prove absence (a DCS code or a
+	 * broken-up tone never votes): see `subAudibleBlockCount()`. Does not affect `result()`.
 	 */
 	votedBlockCount(): number {
 		return this.votedBlocks
@@ -299,6 +300,9 @@ export class CtcssBank {
 			bestPower >= BAND_FRACTION * bandMean &&
 			bestPower >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
 		const winner = inBand && dominates ? best : -1
+		// Sub-audible energy with no winner. A large DC offset can drown a vote; it still counts here
+		// because each file gets a fresh bank whose filters start from zero, so the DC step puts
+		// in-band energy in the first block. A bank started on audio with DC already settled would not.
 		if (
 			winner < 0 &&
 			bandMean > MIN_POWER &&
