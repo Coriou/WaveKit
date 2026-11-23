@@ -1,7 +1,7 @@
 // loadTransmission(ref): one transmission as the Transmission DTO, composed in the web from the calls that exist
 // today (the recording, its Activity record, its discovery, its observation and its neighbours) until the core
-// serves GET /api/transmissions/:ref. Only the first read is required, under its own deadline (it fails, and the
-// view offers Retry); each optional one has its own short deadline and fails to "absent", so the view never waits
+// serves GET /api/transmissions/:ref. Only the first reads are required, under one overall deadline (they fail, the
+// read still running is aborted, and the view offers Retry); each optional one has its own short deadline and fails to "absent", so the view never waits
 // on it. One open reads a channel's recordings once (the file's folder is also its neighbours). This composition is
 // the only place that knows the four calls, and it goes when the route arrives.
 import type {
@@ -23,11 +23,14 @@ import type {
 	TransmissionTone,
 } from "./contract.ts"
 import { factsOf, freezeDto, readLiveTone, refText } from "./contract.ts"
-import { keptFileStartOf, noteRecordStart } from "../activity/row-time.ts"
+import { noteRecordStart } from "../activity/row-time.ts"
 
 /** Each optional read gives up after this long (the view renders without it). */
 export const OPTIONAL_READ_MS = 4_000
-/** The required read gives up after this long: the view then says so and offers Retry, never an endless load. */
+/**
+ * The required reads (one, or an Activity record then its recording) give up after this long in all: the view
+ * then says so and offers Retry, never an endless load. The read still running is aborted.
+ */
 export const REQUIRED_READ_MS = 15_000
 /** Recordings of the same channel this close to the transmission count as "around this time". */
 export const AROUND_MS = 120_000
@@ -163,6 +166,18 @@ async function compose(
 	deps: LoadTransmissionDeps,
 ): Promise<TransmissionDto> {
 	const ctx = new Reads(deps)
+	try {
+		return await composeWith(ref, deps, ctx)
+	} finally {
+		ctx.done()
+	}
+}
+
+async function composeWith(
+	ref: TransmissionRef,
+	deps: LoadTransmissionDeps,
+	ctx: Reads,
+): Promise<TransmissionDto> {
 	const gone = new Set<TransmissionDto["gone"][number]>()
 	let record: ActivityRecord | null = null
 	let item: RecordingInventoryItem | null = null
@@ -217,6 +232,9 @@ async function compose(
 			throw new TransmissionNotFoundError(ref, NOT_FOUND_WORDS.observation)
 	}
 
+	// the required reads are over: their deadline never cuts the optional ones that follow
+	ctx.done()
+
 	if ("recording" in ref && item !== null && item.activityEventId) {
 		const eventId = item.activityEventId
 		record = await ctx.optional(() => ctx.activity(eventId))
@@ -252,12 +270,53 @@ export function recordingQueryOf(
 		: { limit: NEWEST }
 }
 
-/** The reads, each with the caller's abort and its deadline; one recordings page per query per open. */
+/**
+ * The reads, each with the caller's abort and its deadline; one recordings page per query per open. The required
+ * reads share one overall deadline from the first of them (a chain of two slow reads still gives up within
+ * REQUIRED_READ_MS), and the deadline aborts the reads still running, so none lingers after the view gave up.
+ */
 class Reads {
 	readonly #deps: LoadTransmissionDeps
 	readonly #pages = new Map<string, Promise<RecordingInventoryPage>>()
+	/** Aborts every read of this open: the caller's abort, or the required deadline. */
+	readonly #abort = new AbortController()
+	/** The required deadline, armed by the first required read; it rejects once and stays rejected. */
+	#deadline: Promise<never> | undefined
+	#timer: ReturnType<typeof setTimeout> | undefined
 	constructor(deps: LoadTransmissionDeps) {
 		this.#deps = deps
+		const outer = deps.signal
+		if (outer?.aborted) this.#abort.abort(outer.reason)
+		else
+			outer?.addEventListener("abort", () => this.#abort.abort(outer.reason), {
+				once: true,
+			})
+	}
+
+	/** The signal every read is given. */
+	get signal(): AbortSignal {
+		return this.#abort.signal
+	}
+
+	/** Ends the required reads (and the open): clears their deadline, so it never fires on later reads. */
+	done(): void {
+		clearTimeout(this.#timer)
+	}
+
+	#requiredDeadline(): Promise<never> {
+		if (this.#deadline === undefined) {
+			this.#deadline = new Promise<never>((_, reject) => {
+				this.#timer = setTimeout(() => {
+					const e = new TransmissionTimeoutError()
+					reject(e)
+					// the read that hit the deadline is aborted, not left running
+					this.#abort.abort(e)
+				}, this.#deps.requiredMs ?? REQUIRED_READ_MS)
+			})
+			// handled by each race; a deadline that fires after the last required read is not unhandled
+			this.#deadline.catch(() => undefined)
+		}
+		return this.#deadline
 	}
 
 	/** A recordings page, read once per query in this open (the file's lookup and its neighbours share it). */
@@ -277,20 +336,13 @@ class Reads {
 		return p
 	}
 
-	/** Runs the required read under its deadline: no answer in time rejects (the view offers Retry). */
+	/**
+	 * Runs a required read under the open's one required deadline: no answer in time rejects (the view offers
+	 * Retry), and the read is aborted.
+	 */
 	async required<T>(read: () => Promise<T>): Promise<T> {
-		let timer: ReturnType<typeof setTimeout> | undefined
-		const late = new Promise<never>((_, reject) => {
-			timer = setTimeout(
-				() => reject(new TransmissionTimeoutError()),
-				this.#deps.requiredMs ?? REQUIRED_READ_MS,
-			)
-		})
-		try {
-			return await Promise.race([read(), late])
-		} finally {
-			clearTimeout(timer)
-		}
+		const late = this.#requiredDeadline()
+		return Promise.race([read(), late])
 	}
 
 	loaded(): readonly RecordingInventoryItem[] {
@@ -298,9 +350,8 @@ class Reads {
 	}
 
 	#options(optional: boolean) {
-		const signal = this.#deps.signal
 		return {
-			...(signal ? { signal } : {}),
+			signal: this.#abort.signal,
 			timeoutMs: optional
 				? (this.#deps.optionalMs ?? OPTIONAL_READ_MS)
 				: (this.#deps.requiredMs ?? REQUIRED_READ_MS),
@@ -322,7 +373,7 @@ class Reads {
 		try {
 			return await Promise.race([read(), late])
 		} catch (e) {
-			if (this.#deps.signal?.aborted) throw e
+			if (this.#abort.signal.aborted) throw e
 			return null
 		} finally {
 			clearTimeout(timer)
@@ -425,7 +476,9 @@ export function recorderTone(
 	if (facts?.toneMalformed === true)
 		return { ...base, state: "not-measured", why: "malformed" }
 	const tone = facts?.tone
-	if (tone === undefined && ownTone)
+	// kept for its own tone: a tone was heard, whatever the facts store (a stored null never says "No tone heard"
+	// next to "Speech heard over a tone")
+	if ((tone === undefined || tone === null) && ownTone)
 		return { ...base, state: "heard", why: "not-stored" }
 	if (facts === null) return { ...base, state: "not-measured", why: "no-facts" }
 	if (tone === undefined)
@@ -701,12 +754,11 @@ function fromActivity(
 			: typeof field("duration") === "number"
 				? (field("duration") as number)
 				: (summary?.recording?.durationMs ?? null))
-	const startedAt = firstTime(
-		live?.startedAt,
-		kept !== null ? keptFileStartOf(kept) : null,
-		record?.producedAt,
-		summary?.producedAt,
-	)
+	// a kept file known only here has no start of its own: its record's observationStartedAt is the transmission's
+	// (the view shows it as "Transmission started", knownRows), and its producedAt is when it was kept
+	const startedAt = keptRow
+		? null
+		: firstTime(live?.startedAt, record?.producedAt, summary?.producedAt)
 	const fm =
 		live !== null && (live.modulation === "nfm" || live.modulation === "wfm")
 	const hz =

@@ -448,8 +448,10 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   it reads `FM voice` (or the channel's saved name, with `FM voice` under it), never
   `Recording 145.5625 MHz`. A row for a kept recording (a scanner recording, a call with audio)
   shows when its audio starts, the same time as its Recordings row: the Recordings list's time when
-  that list has it loaded, else the start its stored event carries once you have opened it, else
-  the time it was stored. The list stays in the order the events were stored, so a long recording
+  that list has it loaded, else the start a live transmission's stored event carries once you have
+  opened it, else the time it was stored (a scanner recording's stored event holds only when its
+  transmission started, which a later part or a second over shares, so it never stands in for the
+  file's own start). The list stays in the order the events were stored, so a long recording
   can show an earlier time than the row below it.
   **Last decode** on the tuned card opens it on one decoder: a **Decoder ADS-B** chip in the
   search lists only that decoder's events; remove the chip with its `×` like any other filter.
@@ -631,18 +633,20 @@ before (when there was one) and puts focus back on what you clicked; closing the
 (`Esc` from outside it, such as from the player, or its close button) also reopens that drawer. Opening it never changes another panel's search,
 and opening another transmission while it is open (the player's title, a tuned card row) keeps that
 same Back. When nothing can be found the view says `Not found` and why; when the receiver does not
-answer in time it says so with **Retry**, so it never stays on `Loading` for good. Opened from
+answer within 15 s in all it says so with **Retry**, so it never stays on `Loading` for good. Opened from
 Recordings, the list's count and its **All / Kept** switch are hidden until you go Back, so Back
 returns to the list exactly as you left it.
 
 From the top: the recording's icon (as on its Recordings row; a live transmission has none), the
-time the audio starts (with the date when it is not today; a later part of a long transmission shows
-its own start, not the transmission's), the channel in MHz
+time the audio starts (with the date when it is not today; the recording's own start, from its
+Recordings entry; a scanner recording whose file is not listed shows no time here, and **What we
+know** says when its **Transmission started** and when it was **Kept at** instead), the channel in MHz
 on its raster and the length in seconds; the waveform and play disc (or one sentence when there is
 no audio, such as `The recording was deleted`); **What we know**, a few short rows in words:
 
 - **Tone**, always for analog FM and never for AM: `CTCSS 88.5 Hz`, `DCS 023`,
-  `A tone was heard (not stored)` (the scanner kept the file for its tone without storing which),
+  `A tone was heard (not stored)` (the scanner kept the file for its tone without storing which;
+  such a file never reads `No tone heard`),
   `No tone heard` (only when the scanner recorder stored that it listened and heard none; it does
   not check DCS codes), or `Not measured` with why (recordings made before WaveKit stored the tone,
   `Not determined for this recording` when the stored facts hold no tone, a scanner recording whose
@@ -667,8 +671,10 @@ with a copy button, the measured frequency in Hz with its offset, the UTC times,
 recording admission's numbers, the file size, **Download WAV** and the stored JSON. **Copy** says
 `Copied`, or that the browser blocked it.
 
-A scanner recording's event detail in Activity speaks the same way: **Channel** in MHz, **Started**,
-**Duration** in seconds and **Kept at**, never its ids or ISO times; those, the measured frequency in
+A scanner recording's event detail in Activity speaks the same way: **Channel** in MHz,
+**Transmission started** (when the transmission it belongs to began: a later part or a second over
+of the same session shares it, so it is not the file's own start), **Duration** in seconds and
+**Kept at**, never its ids or ISO times; those, the measured frequency in
 whole Hz and the stored JSON are under **Ids and raw values**, collapsed. A live analog
 transmission's detail says its length in seconds and how it ended in words.
 

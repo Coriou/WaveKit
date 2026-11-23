@@ -1,8 +1,10 @@
 // The time an Activity row shows. A row for a kept recording (a scanner file, a call with audio) shows when its
-// audio starts, as the Recordings list does: the loaded recording's start first (so the two lists agree), else
-// the start its stored record carries (a kept file's own start, keptFileStartOf; a live transmission's startedAt) once
-// that record was read here, else the row's producedAt. Only the shown time changes: the list stays ordered by
-// producedAt, so a row's start can be earlier than the row below it.
+// audio starts, as the Recordings list does: the loaded recording's real start first (its receipt's first sample or
+// its facts' start, so the two lists agree), else the start its stored record carries (a live transmission's
+// startedAt) once that record was read here, else the row's producedAt. A kept scanner file's record carries no
+// start of its own (its observationStartedAt is the transmission's, which a second over or a later part of the
+// same session shares), so without its recording such a row shows producedAt. Only the shown time changes: the
+// list stays ordered by producedAt, so a row's start can be earlier than the row below it.
 import type {
 	ActivityRecord,
 	ActivitySummary,
@@ -11,6 +13,7 @@ import type {
 
 import { Store } from "../../data/store.ts"
 import { recordedAt } from "../recordings/model.ts"
+import { factsOf } from "../transmission/contract.ts"
 
 /** Records whose start is remembered (the newest win). */
 const MAX_STARTS = 1000
@@ -18,52 +21,11 @@ const MAX_STARTS = 1000
 /** Event id → when its audio starts, from the Activity records read in this browser. */
 export const recordStarts = new Store<ReadonlyMap<string, string>>(new Map())
 
-/**
- * A gap between the observation's start and this file's start (its keep less its length) above this means the
- * file is a later part. A first file's gap is its audio's offset in the observation plus the keep's latency, and
- * a provisional hold delays the keep by up to 26 s (the recorder's late-verdict grace), so a held first file can
- * show a gap near 30 s. A later part of a rolled-over transmission starts at least one file limit (120 s) after
- * its observation. 60 s sits between the two: twice the worst held first file, half the earliest later part.
- */
-export const LATER_PART_GAP_MS = 60_000
-
-/**
- * When a kept scanner file's own audio starts, from its stored record: the observation's start for its first (or
- * only) file; for a later part of a rolled-over transmission, whose observation started long before it, its keep
- * time less its length (the file was whole when it was kept, so that is when its audio started, give or take the
- * keep's latency). The record names no part, so a later part is told by the gap (LATER_PART_GAP_MS). Null when
- * neither time is valid.
- */
-export function keptFileStartOf(p: {
-	observationStartedAt: string | null
-	finalizedAt: string
-	durationMs: number
-}): string | null {
-	const obs =
-		typeof p.observationStartedAt === "string"
-			? Date.parse(p.observationStartedAt)
-			: Number.NaN
-	const kept = Date.parse(p.finalizedAt)
-	const own =
-		Number.isFinite(kept) && Number.isFinite(p.durationMs)
-			? kept - Math.max(0, p.durationMs)
-			: Number.NaN
-	if (
-		Number.isFinite(own) &&
-		(!Number.isFinite(obs) || own - obs > LATER_PART_GAP_MS)
-	)
-		return new Date(own).toISOString()
-	return Number.isFinite(obs) ? new Date(obs).toISOString() : null
-}
-
 /** The audio start a stored record carries; null when it carries none. */
 export function recordStartOf(record: ActivityRecord): string | null {
+	// a kept file's record names only its transmission's start, never its own: no start here
 	const iso =
-		record.kind === "recording-change"
-			? keptFileStartOf(record.payload)
-			: record.kind === "analog-transmission"
-				? record.payload.startedAt
-				: null
+		record.kind === "analog-transmission" ? record.payload.startedAt : null
 	return typeof iso === "string" && Number.isFinite(Date.parse(iso))
 		? iso
 		: null
@@ -117,7 +79,12 @@ export function recordingStarts(
 	if (m === undefined) {
 		m = new Map()
 		for (const r of items) {
-			const d = recordedAt(r)
+			// the receipt's first sample, else the facts' start, else the list's own time (the file name's, its write)
+			const real = r.startedAt ?? factsOf(r)?.startedAt ?? null
+			const d =
+				real !== null && Number.isFinite(Date.parse(real))
+					? new Date(real)
+					: recordedAt(r)
 			if (Number.isNaN(d.getTime())) continue
 			const iso = d.toISOString()
 			m.set(r.id, iso)

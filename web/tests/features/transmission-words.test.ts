@@ -138,7 +138,14 @@ describe("tone words", () => {
 			state: "not-measured",
 			why: "undetermined",
 		})
-		expect(recorderTone(facts(null))).toMatchObject({ state: "none" })
+		// a stored null: none, unless the file was kept for its own tone (then heard, never "No tone heard")
+		expect(recorderTone(facts(null), "content")).toMatchObject({
+			state: "none",
+		})
+		expect(recorderTone(facts(null))).toMatchObject({
+			state: "heard",
+			why: "not-stored",
+		})
 		expect(recorderTone(facts({ kind: "ctcss", hz: 88.5 }))).toMatchObject({
 			state: "heard",
 			ctcssHz: 88.5,
@@ -267,7 +274,13 @@ describe("What we know", () => {
 			),
 		).toBe(false)
 		const none = dto({
-			tone: recorderTone(parseFacts({ ...FACTS, tone: null })),
+			tone: recorderTone(
+				parseFacts({
+					...FACTS,
+					tone: null,
+					finish: { ...FACTS.finish, keptBy: "content" },
+				}),
+			),
 		})
 		expect(knownRows(none).find(r => r.term === "Tone")?.value).toBe(
 			"No tone heard",

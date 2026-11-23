@@ -6,6 +6,7 @@ import "./transmission.css"
 // number. It renders only the Transmission DTO (loadTransmission); Back and Esc return to the origin in one step.
 import type { JsonValue } from "@wavekit/api-types"
 import { useEffect, useMemo, useRef, useState } from "react"
+import { z } from "zod"
 
 import { useServices } from "../../app/context.ts"
 import { errorMessage } from "../../data/index.ts"
@@ -53,6 +54,7 @@ import {
 	SPEECH_WORDS,
 	startText,
 	toneRow,
+	TRANSMISSION_STARTED,
 	wordsFor,
 } from "./words.ts"
 
@@ -127,11 +129,47 @@ export function transmissionIcon(t: TransmissionDto): RecordingIcon | null {
 	return null
 }
 
-/** "What we know": at most six short rows in a fixed order; Tone always for analog FM. */
+const KeptRecordTimes = z.object({
+	kind: z.literal("recording-change"),
+	payload: z.object({
+		observationStartedAt: z.string().nullable(),
+		finalizedAt: z.string(),
+	}),
+})
+
+/**
+ * The times a kept file known only from its Activity record carries (no recording read, so no start of its own):
+ * its transmission's start and its keep. Null for any other transmission.
+ */
+export function keptRecordTimes(
+	t: TransmissionDto,
+): { transmissionStartedAt: string | null; keptAt: string } | null {
+	if (t.startedAt !== null || t.raw.recording !== null) return null
+	const r = KeptRecordTimes.safeParse(t.raw.activity)
+	if (!r.success) return null
+	return {
+		transmissionStartedAt: r.data.payload.observationStartedAt,
+		keptAt: r.data.payload.finalizedAt,
+	}
+}
+
+/**
+ * "What we know": at most six short rows in a fixed order; Tone always for analog FM. A kept file known only from
+ * its record leads with "Transmission started" (its transmission's start, never passed off as the file's) and
+ * "Kept at".
+ */
 export function knownRows(
 	t: TransmissionDto,
 ): { term: string; value: string; hint: string | null }[] {
 	const rows: { term: string; value: string; hint: string | null }[] = []
+	const times = keptRecordTimes(t)
+	if (times !== null) {
+		const began = startText(times.transmissionStartedAt)
+		if (began !== "")
+			rows.push({ term: TRANSMISSION_STARTED, value: began, hint: null })
+		const kept = startText(times.keptAt)
+		if (kept !== "") rows.push({ term: "Kept at", value: kept, hint: null })
+	}
 	const who = [
 		t.identity?.talkgroup ? `TG ${t.identity.talkgroup}` : null,
 		t.identity?.radio ? `radio ${t.identity.radio}` : null,
@@ -176,6 +214,27 @@ export function playAllQueue(queue: QueueRef): QueueRef {
 	return { ...queue, playAll: true }
 }
 
+/**
+ * Whether a load may answer from the cache: only when the view follows the player, and not after a Retry until a
+ * load succeeds (then the player's later steps use the cache again).
+ */
+export function retryGate(): {
+	cached: (follow: boolean | undefined) => boolean
+	retry: () => void
+	loaded: () => void
+} {
+	let fresh = false
+	return {
+		cached: follow => follow === true && !fresh,
+		retry: () => {
+			fresh = true
+		},
+		loaded: () => {
+			fresh = false
+		},
+	}
+}
+
 type LoadState =
 	| { status: "loading" }
 	| { status: "ready"; t: TransmissionDto }
@@ -195,6 +254,7 @@ export function TransmissionView({
 	useSavedNames() // a saved name renames the title
 	const [state, setState] = useState<LoadState>({ status: "loading" })
 	const [attempt, setAttempt] = useState(0)
+	const gate = useRef(retryGate()).current
 	const back = useRef<HTMLButtonElement>(null)
 	const view = useRef<HTMLElement>(null)
 	const key = refText(open.ref)
@@ -240,10 +300,12 @@ export function TransmissionView({
 			recordings: () => data.recordings.get().items,
 			summary: opened.current.summary,
 			signal: abort.signal,
-			cached: opened.current.follow === true && attempt === 0,
+			cached: gate.cached(opened.current.follow),
 		}).then(
 			t => {
-				if (!abort.signal.aborted) setState({ status: "ready", t })
+				if (abort.signal.aborted) return
+				gate.loaded()
+				setState({ status: "ready", t })
 			},
 			(e: unknown) => {
 				if (abort.signal.aborted) return
@@ -314,7 +376,10 @@ export function TransmissionView({
 						<button
 							type="button"
 							className="wkt-link"
-							onClick={() => setAttempt(n => n + 1)}
+							onClick={() => {
+								gate.retry()
+								setAttempt(n => n + 1)
+							}}
 						>
 							Retry
 						</button>

@@ -394,7 +394,8 @@ describe("5. a kept recording known only through Activity", () => {
 		)
 		expect(t.kind).toBe("voice-analog")
 		expect(t.tone).toMatchObject({ state: "not-measured", why: "no-recording" })
-		expect(t.startedAt).toBe("2026-11-23T17:30:21.000Z")
+		// no file start is known: the observation's start is the transmission's, shown as such (knownRows)
+		expect(t.startedAt).toBeNull()
 		expect(t.channel).toMatchObject({
 			hz: 145_562_500,
 			measuredHz: 145_562_753,

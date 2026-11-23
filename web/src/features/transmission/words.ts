@@ -10,7 +10,6 @@ import type {
 	RecordingSpeech,
 } from "@wavekit/api-types"
 
-import { keptFileStartOf } from "../activity/row-time.ts"
 import { clockText, dateText, sameDay } from "../display.ts"
 import { channelMHz } from "../naming.ts"
 import type { TransmissionTone } from "./contract.ts"
@@ -230,6 +229,9 @@ export const NO_AUDIO_WORDS: Readonly<Record<string, string>> = {
 
 // ---- Activity rows that are transmissions (the event detail's fields)
 
+/** The label of a kept file's observation start: its transmission's, never the file's own. */
+export const TRANSMISSION_STARTED = "Transmission started"
+
 /** A field of a row's detail, in words (no unit: the value says it). */
 function wordField(
 	key: string,
@@ -240,8 +242,11 @@ function wordField(
 }
 
 /**
- * A kept recording's Activity record as the detail shows it: the channel on its raster, when its audio started
- * and how long it is. Ids, the measured Hz and the ISO times are expert data (recordingChangeDetails).
+ * A kept recording's Activity record as the detail shows it: the channel on its raster, when its transmission
+ * started, how long the file is and when it was kept. The record holds no start of the file itself: its
+ * observationStartedAt is the transmission's (a second over or a later part of the same session shares it), so it
+ * is labelled as such and never passed off as the file's. Ids, the measured Hz and the ISO times are expert data
+ * (recordingChangeDetails).
  */
 export function recordingChangeFields(
 	p: RecordingChangePayload,
@@ -252,7 +257,11 @@ export function recordingChangeFields(
 			"Channel",
 			channelText(p.channel?.frequencyHz ?? p.frequencyHz),
 		),
-		...wordField("started", "Started", startText(keptFileStartOf(p))),
+		...wordField(
+			"transmissionStarted",
+			TRANSMISSION_STARTED,
+			startText(p.observationStartedAt),
+		),
 		...wordField("duration", "Duration", durationWords(p.durationMs)),
 		...wordField("kept", "Kept at", startText(p.finalizedAt)),
 	]

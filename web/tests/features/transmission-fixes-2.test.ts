@@ -404,7 +404,7 @@ describe("4. a kept recording's Activity row shows its audio start", () => {
 		expect(m.get("dsd~c")).toBe(new Date("2026-11-23T18:00:00").toISOString())
 	})
 
-	it("a record read here carries its start to the row", async () => {
+	it("a kept file's record carries no start of its own to the row (its observation's start is the transmission's)", async () => {
 		const summary = row()
 		const record: ActivityRecord = {
 			version: 1,
@@ -432,11 +432,9 @@ describe("4. a kept recording's Activity row shows its audio start", () => {
 				: json(200, { items: [], nextCursor: null }),
 		)
 		await loadTransmission({ event: summary.eventId }, { api, summary })
-		expect(recordStarts.get().get(summary.eventId)).toBe(
-			"2026-11-23T17:30:21.000Z",
-		)
+		expect(recordStarts.get().get(summary.eventId)).toBeUndefined()
 		noteRecordStart(null)
-		expect(recordStarts.get().size).toBe(1)
+		expect(recordStarts.get().size).toBe(0)
 	})
 
 	it("both row kinds show it; the list's order is untouched", () => {

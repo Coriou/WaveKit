@@ -66,11 +66,11 @@ describe("a kept recording's event in words", () => {
 		})
 	})
 
-	it("shows Channel, Started, Duration and Kept at, and no raw id, Hz or ISO time", () => {
+	it("shows Channel, Transmission started, Duration and Kept at, and no raw id, Hz or ISO time", () => {
 		const v = messageView(summaryOfRecord(KEPT), KEPT)
 		expect(v.fields.map(f => f.label)).toEqual([
 			"Channel",
-			"Started",
+			"Transmission started",
 			"Duration",
 			"Kept at",
 		])

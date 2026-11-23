@@ -1,7 +1,7 @@
 // The Transmission view's merge-gate round: an empty live tone reading is "Not measured" (only the recorder's
 // stored null says "No tone heard"), a file kept for its own tone reads "A tone was heard (not stored)", the
 // header tile carries the kind's icon, the required read gives up with Retry, one recordings read per open and a
-// bounded cache for the player's steps, a later part's own start, no Tone row for AM, the Recordings switch hidden
+// bounded cache for the player's steps, no Tone row for AM, the Recordings switch hidden
 // under the view, and the known kept value handed to Keep.
 import { readFileSync } from "node:fs"
 import { createElement } from "react"
@@ -9,18 +9,13 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type {
 	ActivitySummary,
-	RecordingChangePayload,
 	RecordingInventoryItem,
 } from "@wavekit/api-types"
 
 import { ServicesContext } from "../../src/app/context.ts"
 import { createServices, type AppServices } from "../../src/app/services.ts"
 import type { ApiClient } from "../../src/data/api-client.ts"
-import {
-	keptFileStartOf,
-	LATER_PART_GAP_MS,
-	recordStarts,
-} from "../../src/features/activity/row-time.ts"
+import { recordStarts } from "../../src/features/activity/row-time.ts"
 import { RecordingsDrawer } from "../../src/features/recordings/RecordingsDrawer.tsx"
 import type {
 	TransmissionDto,
@@ -50,7 +45,6 @@ import {
 } from "../../src/features/transmission/TransmissionView.tsx"
 import {
 	NOT_MEASURED_WORDS,
-	recordingChangeFields,
 	TONE_NOT_STORED,
 	toneRow,
 } from "../../src/features/transmission/words.ts"
@@ -423,7 +417,7 @@ describe("m6. the required read gives up, and the view offers Retry", () => {
 
 	it("the error state has a Retry button", () => {
 		expect(src("features/transmission/TransmissionView.tsx")).toMatch(
-			/setAttempt\(n => n \+ 1\)\}\s*>\s*Retry/,
+			/setAttempt\(n => n \+ 1\)\s*\}\}\s*>\s*Retry/,
 		)
 	})
 })
@@ -516,87 +510,8 @@ describe("m7. one recordings read per open, and a bounded cache for the player's
 		replaceTransmission({ recording: "c" })
 		expect(transmissionNav.get()?.follow).toBeUndefined()
 		expect(src("features/transmission/TransmissionView.tsx")).toContain(
-			"cached: opened.current.follow === true && attempt === 0",
+			"cached: gate.cached(opened.current.follow),",
 		)
-	})
-})
-
-describe("m8. a later part's start is its own", () => {
-	const payload = (
-		over: Partial<RecordingChangePayload> = {},
-	): RecordingChangePayload => ({
-		change: "finalized",
-		recordingId: KEY,
-		recordingKind: "scanner-analog",
-		discoveryId: "d_A",
-		observationId: "o_A",
-		sourceId: "rx",
-		frequencyHz: 145_562_753,
-		observationStartedAt: "2026-11-23T17:30:00.000Z",
-		durationMs: 120_000,
-		finalizedAt: "2026-11-23T17:32:02.000Z",
-		...over,
-	})
-
-	it("the first part starts with its observation", () => {
-		expect(keptFileStartOf(payload())).toBe("2026-11-23T17:30:00.000Z")
-	})
-
-	it("a later part starts at its keep less its length", () => {
-		// part 3 of a long transmission: kept at 17:36:02, 120 s long
-		const p = payload({
-			finalizedAt: "2026-11-23T17:36:02.000Z",
-			durationMs: 120_000,
-		})
-		expect(keptFileStartOf(p)).toBe("2026-11-23T17:34:02.000Z")
-		expect(recordingChangeFields(p).find(f => f.key === "started")).toBeTruthy()
-	})
-
-	it("a first file held for the full grace still starts with its observation", () => {
-		// audio 17:30:05-17:30:15, held 26 s, kept at 17:30:41: gap 31 s
-		const p = payload({
-			finalizedAt: "2026-11-23T17:30:41.000Z",
-			durationMs: 10_000,
-		})
-		expect(keptFileStartOf(p)).toBe("2026-11-23T17:30:00.000Z")
-	})
-
-	it("the gap rule's edge", () => {
-		const obs = Date.parse("2026-11-23T17:30:00.000Z")
-		const at = (gap: number) =>
-			keptFileStartOf(
-				payload({
-					finalizedAt: new Date(obs + gap + 8000).toISOString(),
-					durationMs: 8000,
-				}),
-			)
-		expect(at(LATER_PART_GAP_MS)).toBe("2026-11-23T17:30:00.000Z")
-		expect(at(LATER_PART_GAP_MS + 1000)).toBe(
-			new Date(obs + LATER_PART_GAP_MS + 1000).toISOString(),
-		)
-	})
-
-	it("a kept file known only through Activity takes its own start", async () => {
-		const summary = row({ kind: "recording-change", title: "FM voice" })
-		const p = payload({ finalizedAt: "2026-11-23T17:36:02.000Z" })
-		const { api } = scripted(call =>
-			new URL(call.url, "http://core").pathname.startsWith("/api/activity/")
-				? json(200, {
-						version: 1,
-						eventId: summary.eventId,
-						commitSeq: "1",
-						producedAt: p.finalizedAt,
-						receivedAt: p.finalizedAt,
-						kind: "recording-change",
-						payload: p,
-					})
-				: json(200, { items: [], nextCursor: null }),
-		)
-		const t = await loadTransmission(
-			{ event: summary.eventId },
-			{ api, summary, optionalMs: 50 },
-		)
-		expect(t.startedAt).toBe("2026-11-23T17:34:02.000Z")
 	})
 })
 

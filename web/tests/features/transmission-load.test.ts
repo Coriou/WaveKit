@@ -245,7 +245,14 @@ describe("loadTransmission", () => {
 
 	it("opens an Activity event through its recording", async () => {
 		const { api } = core([
-			{ ...item(), facts: { ...FACTS, tone: null } } as RecordingInventoryItem,
+			{
+				...item({ keptBy: "content" }),
+				facts: {
+					...FACTS,
+					tone: null,
+					finish: { ...FACTS.finish, keptBy: "content" },
+				},
+			} as RecordingInventoryItem,
 		])
 		const t = await loadTransmission({ event: "evt_1" }, { api })
 		expect(t.refs.recordingKeys).toEqual([KEY])
