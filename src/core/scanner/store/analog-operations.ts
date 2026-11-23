@@ -64,19 +64,28 @@ export const ADMISSION_HEADROOM = 2 * RESERVATION
 /** The floor of the eviction target: 8 × RESERVATION = 8 × 1,936,428 = 15,491,424 B. */
 export const EVICTION_TARGET_MIN_HEADROOM = 8 * RESERVATION
 /**
- * Room a retention pass that evicts for bytes leaves under the recordings cap: max(8 ×
- * RESERVATION, 2 % of the cap) = max(15,491,424 B, ⌊cap / 50⌋). The default 512 MiB cap
- * (536,870,912 B): 2 % = 10,737,418 B < 15,491,424 B, so the target is cap − 15,491,424 B
- * (≈ 15.5 MB, eight recordings); from a cap of 774,571,200 B (≈ 739 MiB) up, 2 % wins (1 GiB:
- * 21,474,836 B). Hysteresis: the pass starts only on the trigger (ADMISSION_HEADROOM, two
- * reservations), then evicts oldest first until used + outstanding + uncertain + this <= cap
- * or no candidate is left, so a store that keeps filling is not trimmed one file per
- * recording. A non-finite or non-positive cap gets the floor.
+ * Room a retention pass that evicts for bytes leaves under the recordings cap: min(max(8 ×
+ * RESERVATION, 2 % of the cap), a quarter of the cap) = min(max(15,491,424 B, ⌊cap / 50⌋),
+ * ⌊cap / 4⌋). The default 512 MiB cap (536,870,912 B): 2 % = 10,737,418 B < 15,491,424 B and
+ * ⌊cap / 4⌋ = 134,217,728 B, so the target is cap − 15,491,424 B (≈ 15.5 MB, eight
+ * recordings); from a cap of 774,571,200 B (≈ 739 MiB) up, 2 % wins (1 GiB: 21,474,836 B). The
+ * quarter clamp bites below 4 × 15,491,424 = 61,965,696 B (≈ 59.1 MiB): an 18 MiB cap
+ * (18,874,368 B) gets 4,718,592 B, so a small store is not emptied to three quarters. Below
+ * 8 × RESERVATION = 15,491,424 B (≈ 14.8 MiB) the clamped target is under the trigger's own
+ * room (ADMISSION_HEADROOM, 3,872,856 B); a pass evicts while the trigger holds OR the store
+ * is above the target, so there the trigger wins and the pass ends at cap − 3,872,856 B.
+ * Hysteresis: the pass starts only on the trigger, then evicts oldest first until used +
+ * outstanding + uncertain + max(this, ADMISSION_HEADROOM) <= cap or no candidate is left, so a
+ * store that keeps filling is not trimmed one file per recording. A non-finite or
+ * non-positive cap gets the floor, unclamped.
  */
 export function EVICTION_TARGET_HEADROOM(capBytes: number): number {
-	const share =
-		Number.isFinite(capBytes) && capBytes > 0 ? Math.floor(capBytes / 50) : 0
-	return Math.max(EVICTION_TARGET_MIN_HEADROOM, share)
+	if (!Number.isFinite(capBytes) || capBytes <= 0)
+		return EVICTION_TARGET_MIN_HEADROOM
+	return Math.min(
+		Math.max(EVICTION_TARGET_MIN_HEADROOM, Math.floor(capBytes / 50)),
+		Math.floor(capBytes / 4),
+	)
 }
 /**
  * Operations retention keeps free under the inventory bound (MAX_RECOVERY_OPERATIONS, 4096):
@@ -3270,10 +3279,14 @@ export class AnalogOperations {
 				a.mtimeMs - b.mtimeMs || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
 		)
 		// Evict for bytes, with hysteresis. Trigger: no room for one admission plus one in flight
-		// (quotaShortfall > 0, ADMISSION_HEADROOM). Once it has held in this pass, files go
-		// until the target room is left (used + outstanding + uncertain +
-		// EVICTION_TARGET_HEADROOM(cap) <= cap), re-checked after every removal; a store between
-		// the trigger and the target that never triggered in this pass evicts nothing.
+		// (quotaShortfall > 0, ADMISSION_HEADROOM). Latched once at the pass's start (before any
+		// removal, so an age-expired first removal cannot drop the store under the trigger first
+		// and end the pass there) and on every later check (an admission mid-pass can cross it).
+		// Once latched, files go while the trigger still holds or the target room is not left
+		// (used + outstanding + uncertain + EVICTION_TARGET_HEADROOM(cap) > cap), re-checked
+		// after every removal; for a cap under 8 × RESERVATION the clamped target is under the
+		// trigger's room and the trigger decides. A store between the trigger and the target that
+		// never triggered in this pass evicts nothing for bytes.
 		let bytesTriggered = false
 		const bytesFull = async (): Promise<boolean> => {
 			const legacyNow = legacy ? legacy.bytes : await this.context.legacyBytes()
@@ -3281,12 +3294,14 @@ export class AnalogOperations {
 			if (trigger === null) return false
 			if (trigger > 0) bytesTriggered = true
 			if (!bytesTriggered) return false
+			if (trigger > 0) return true
 			const target = this.shortfallWith(
 				legacyNow,
 				EVICTION_TARGET_HEADROOM(this.context.limits().maxBytes),
 			)
 			return (target ?? 0) > 0
 		}
+		await bytesFull()
 		// Count eviction: while the inventory is full (intents + unpublished ≥ 4096 − 8 = 4088),
 		// only when the analog candidates not yet tried can bring it under that limit, i.e.
 		// intents + unpublished − analogLeft < 4088. Each retire drops one intent, so the pass

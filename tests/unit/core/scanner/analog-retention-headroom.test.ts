@@ -55,6 +55,12 @@ const MAX_AGE_MS = 30 * DAY
 const MIB = 1024 * 1024
 /** 800 000 samples: a 1 600 044 B WAV, under one RESERVATION, so a shortfall of R needs two. */
 const SAMPLES = 800_000
+/**
+ * Held bytes outside analog operations under every default harness store: 64 MiB keeps a cap of
+ * used + a few reservations at or above 4 × 8R = 61 965 696 B, so the target is 8R (or 2 %), not
+ * the ⌊cap / 4⌋ clamp. Tests of the clamp itself pass `pad: 0`.
+ */
+const PAD = 64 * MIB
 const dirs: string[] = []
 
 afterEach(async () => {
@@ -124,12 +130,15 @@ interface Stored {
 	mtimeMs: number
 }
 
-async function harness(opts: { protectedName?: () => string | null } = {}) {
+async function harness(
+	opts: { protectedName?: () => string | null; pad?: number } = {},
+) {
+	const pad = opts.pad ?? PAD
 	const root = await tempRoot()
 	const { store, discoveryId } = storeWithDiscovery()
 	const limit = { maxBytes: 1024 * MIB }
 	/** Recordings outside analog operations, counted but never offered for removal. */
-	const legacy = { bytes: 0 }
+	const legacy = { bytes: pad }
 	const protection: RecordingProtection = {
 		isProtected: () => false,
 		isDsdFmeFileProtected: () => false,
@@ -165,7 +174,10 @@ async function harness(opts: { protectedName?: () => string | null } = {}) {
 		await utimes(join(root, artifact), mtimeMs / 1000, mtimeMs / 1000)
 		return { artifact, bytes: (ops.managedBytes ?? 0) - before, mtimeMs }
 	}
-	const used = (): number => ops.managedBytes ?? Number.NaN
+	/** Analog bytes plus the held pad: what the quota counts while `legacy.bytes` is the pad. */
+	const used = (): number => (ops.managedBytes ?? Number.NaN) + pad
+	/** The trigger's shortfall over the live legacy bytes (the pad unless a test sets them). */
+	const shortfall = () => ops.quotaShortfall(legacy.bytes)
 	const retain = (keep: ReadonlySet<string> = new Set()) =>
 		ops.retained(keep, MAX_AGE_MS, Date.now())
 	/** The next admission's outcome: admitted (then cancelled) or its error code. */
@@ -190,6 +202,7 @@ async function harness(opts: { protectedName?: () => string | null } = {}) {
 		begin,
 		record,
 		used,
+		shortfall,
 		retain,
 		admits,
 	}
@@ -259,14 +272,141 @@ describe("analog retention keeps room for the next recording", () => {
 		expect(EVICTION_TARGET_HEADROOM(774_571_200)).toBe(15_491_424)
 		expect(EVICTION_TARGET_HEADROOM(774_571_249)).toBe(15_491_424)
 		expect(EVICTION_TARGET_HEADROOM(774_571_250)).toBe(15_491_425)
-		// Small, zero, non-finite caps: the floor.
-		expect(EVICTION_TARGET_HEADROOM(4096)).toBe(15_491_424)
+		// Zero, negative, non-finite caps: the floor, unclamped.
 		expect(EVICTION_TARGET_HEADROOM(0)).toBe(15_491_424)
+		expect(EVICTION_TARGET_HEADROOM(-1)).toBe(15_491_424)
 		expect(EVICTION_TARGET_HEADROOM(Number.NaN)).toBe(15_491_424)
 		expect(EVICTION_TARGET_HEADROOM(Number.POSITIVE_INFINITY)).toBe(15_491_424)
-		// Always at least the trigger's room, so a pass that reaches it ends the full state.
+		// The floor beats the trigger's room, so an unclamped target ends the full state.
 		expect(EVICTION_TARGET_MIN_HEADROOM).toBeGreaterThan(ADMISSION_HEADROOM)
 	})
+
+	it("the target is clamped to ⌊cap / 4⌋: unclamped from 4 × 8R = 61 965 696 B up, clamped one byte under", () => {
+		expect(4 * EVICTION_TARGET_MIN_HEADROOM).toBe(61_965_696)
+		// At the bound: ⌊cap / 4⌋ = 8R exactly, both agree.
+		expect(EVICTION_TARGET_HEADROOM(61_965_696)).toBe(15_491_424)
+		// One byte under: ⌊61 965 695 / 4⌋ = 15 491 423.
+		expect(EVICTION_TARGET_HEADROOM(61_965_695)).toBe(15_491_423)
+		// Past it: the floor again (⌊cap / 4⌋ above 8R).
+		expect(EVICTION_TARGET_HEADROOM(61_965_700)).toBe(15_491_424)
+		// The default 512 MiB and 1 GiB caps are unchanged (cap / 4 is far above).
+		expect(Math.floor((512 * MIB) / 4)).toBe(134_217_728)
+		expect(EVICTION_TARGET_HEADROOM(512 * MIB)).toBe(15_491_424)
+		expect(EVICTION_TARGET_HEADROOM(1024 * MIB)).toBe(21_474_836)
+		// 18 MiB = 18 874 368 B: ⌊cap / 4⌋ = 4 718 592 B < 8R, clamped.
+		expect(EVICTION_TARGET_HEADROOM(18 * MIB)).toBe(4_718_592)
+		// 1 MiB: 262 144 B, under the trigger's room (2R); 4096 B: 1024 B.
+		expect(EVICTION_TARGET_HEADROOM(MIB)).toBe(262_144)
+		expect(EVICTION_TARGET_HEADROOM(4096)).toBe(1024)
+		// The clamped target falls under the trigger's room below 8R = 15 491 424 B (≈ 14.8 MiB).
+		expect(EVICTION_TARGET_HEADROOM(15_491_424)).toBe(3_872_856)
+		expect(EVICTION_TARGET_HEADROOM(15_491_424)).toBe(ADMISSION_HEADROOM)
+		expect(EVICTION_TARGET_HEADROOM(15_491_423)).toBeLessThan(
+			ADMISSION_HEADROOM,
+		)
+	})
+
+	// Regression: the trigger latched only on a quota check, which an age-expired candidate
+	// skips (`old || …` short-circuits). Two aged files at the front removed the shortfall
+	// before any check, so the pass never latched and stopped just under the trigger.
+	it("a store past the trigger whose oldest candidates are age-expired: the pass still ends at cap − target", async () => {
+		const h = await harness()
+		const now = Date.now()
+		const files: Stored[] = []
+		for (const daysAgo of [5, 40, 3, 9, 35, 1, 7, 2, 10, 4, 8, 6])
+			files.push(await h.record(now - daysAgo * DAY))
+		// One byte past the trigger: the aged pair alone (≈ 3.2 MB) clears the shortfall.
+		h.limit.maxBytes = h.used() + ADMISSION_HEADROOM - 1
+		expect(h.shortfall()).toBe(1)
+		const aged = files.filter(f => now - f.mtimeMs > MAX_AGE_MS)
+		expect(aged).toHaveLength(2)
+		expect(aged.reduce((n, f) => n + f.bytes, 0)).toBeGreaterThan(1)
+		const expected = expectedEvictions(files, h.used(), h.limit.maxBytes)
+		expect(expected.length).toBeGreaterThan(aged.length)
+		expect(expected.slice(0, 2)).toEqual(oldestFirst(aged))
+		const deleted = await h.retain()
+		expect(deleted).toEqual(expected)
+		expect(
+			h.used() + EVICTION_TARGET_HEADROOM(h.limit.maxBytes),
+		).toBeLessThanOrEqual(h.limit.maxBytes)
+		await h.ops.stop()
+	}, 60_000)
+
+	it("an 18 MiB cap (target clamped to 4 718 592 B): the pass ends at cap − ⌊cap / 4⌋, not cap − 8R", async () => {
+		const h = await harness({ pad: 0 })
+		const files = await shuffled(h, 13)
+		const cap = 18 * MIB
+		expect(cap).toBe(18_874_368)
+		h.limit.maxBytes = cap
+		expect(h.used()).toBeGreaterThan(cap)
+		const target = EVICTION_TARGET_HEADROOM(cap)
+		expect(target).toBe(4_718_592)
+		expect(target).toBeGreaterThan(ADMISSION_HEADROOM)
+		const expected = expectedEvictions(files, h.used(), cap)
+		// Fewer than the unclamped 8R target would remove, short of everything.
+		expect(expected.length).toBeLessThan(
+			expectedEvictions(files, h.used(), cap, EVICTION_TARGET_MIN_HEADROOM)
+				.length,
+		)
+		expect(expected.length).toBeLessThan(files.length)
+		const deleted = await h.retain()
+		expect(deleted).toEqual(expected)
+		expect(h.used() + target).toBeLessThanOrEqual(cap)
+		const last = files.find(f => f.artifact === deleted.at(-1))!
+		expect(h.used() + last.bytes + target).toBeGreaterThan(cap)
+		expect(h.shortfall()).toBeLessThanOrEqual(0)
+		expect(await h.admits()).toBe(true)
+		await h.ops.stop()
+	}, 60_000)
+
+	it("a cap under 8R (clamped target < the trigger's 2R): the trigger wins, the pass ends at cap − 2R, not at the target", async () => {
+		const h = await harness({ pad: 0 })
+		const files = await shuffled(h, 11)
+		const sorted = [...files].sort((a, b) => a.mtimeMs - b.mtimeMs)
+		// After the four oldest go, the store sits between the target and the trigger: within
+		// ⌊cap / 4⌋ of room (the target met) but one byte short of 2R (the trigger still holds).
+		const k = 4
+		const left = sorted.slice(k).reduce((n, f) => n + f.bytes, 0)
+		const cap = left + ADMISSION_HEADROOM - 1
+		h.limit.maxBytes = cap
+		expect(cap).toBeLessThan(EVICTION_TARGET_MIN_HEADROOM)
+		expect(EVICTION_TARGET_HEADROOM(cap)).toBe(Math.floor(cap / 4))
+		expect(EVICTION_TARGET_HEADROOM(cap)).toBeLessThan(ADMISSION_HEADROOM)
+		expect(left + EVICTION_TARGET_HEADROOM(cap)).toBeLessThanOrEqual(cap)
+		// Stopping at the target would remove k; the trigger needs k + 1.
+		expect(expectedEvictions(files, h.used(), cap)).toHaveLength(k)
+		const expected = expectedEvictions(files, h.used(), cap, ADMISSION_HEADROOM)
+		expect(expected).toEqual(sorted.slice(0, k + 1).map(f => f.artifact))
+		const deleted = await h.retain()
+		expect(deleted).toEqual(expected)
+		// The full state is over: the trigger no longer holds, the next admission fits.
+		expect(h.shortfall()).toBeLessThanOrEqual(0)
+		const last = files.find(f => f.artifact === deleted.at(-1))!
+		expect(h.used() + last.bytes + ADMISSION_HEADROOM).toBeGreaterThan(cap)
+		expect(await h.admits()).toBe(true)
+		// A second pass evicts nothing.
+		expect(await h.retain()).toEqual([])
+		await h.ops.stop()
+	}, 60_000)
+
+	it("a 1 MiB cap (one reservation alone is over it): every file goes, every admission is refused, a pass ends", async () => {
+		const h = await harness({ pad: 0 })
+		const files = await shuffled(h, 3)
+		h.limit.maxBytes = MIB
+		expect(RESERVATION).toBeGreaterThan(MIB)
+		expect(EVICTION_TARGET_HEADROOM(MIB)).toBe(262_144)
+		const deleted = await h.retain()
+		expect(deleted).toEqual(oldestFirst(files))
+		expect(h.used()).toBe(0)
+		// The trigger still holds over an empty store (2R > cap): full, nothing removable.
+		expect(h.shortfall()).toBe(ADMISSION_HEADROOM - MIB)
+		expect(h.ops.removableNow()).toBe(0)
+		expect(await h.admits()).toBe("SCANNER_ANALOG_STORAGE_CAP")
+		// A later pass has nothing to try and returns at once.
+		expect(await h.retain()).toEqual([])
+		expect(await h.admits()).toBe("SCANNER_ANALOG_STORAGE_CAP")
+		await h.ops.stop()
+	}, 60_000)
 
 	// Regression: before the fix this store refused every admission and retention evicted nothing.
 	it("a store at cap − RESERVATION + 1 (stuck before): retention evicts the oldest down to the target, the next admission succeeds", async () => {
@@ -291,7 +431,7 @@ describe("analog retention keeps room for the next recording", () => {
 		expect(h.used() + EVICTION_TARGET_MIN_HEADROOM).toBeLessThanOrEqual(
 			h.limit.maxBytes,
 		)
-		expect(h.ops.quotaShortfall(0)).toBeLessThanOrEqual(0)
+		expect(h.shortfall()).toBeLessThanOrEqual(0)
 		expect(await h.admits()).toBe(true)
 		await h.ops.stop()
 	}, 60_000)
@@ -335,17 +475,17 @@ describe("analog retention keeps room for the next recording", () => {
 		const files = await shuffled(h, 12)
 		// Exactly the trigger's edge: not full.
 		h.limit.maxBytes = h.used() + ADMISSION_HEADROOM
-		expect(h.ops.quotaShortfall(0)).toBe(0)
+		expect(h.shortfall()).toBe(0)
 		expect(await h.retain()).toEqual([])
 		expect(await h.admits()).toBe(true)
 		// Between: less than the target's room left, the trigger not met: no eviction.
 		h.limit.maxBytes = h.used() + EVICTION_TARGET_MIN_HEADROOM - 1
-		expect(h.ops.quotaShortfall(0)).toBeLessThan(0)
+		expect(h.shortfall()).toBeLessThan(0)
 		expect(await h.retain()).toEqual([])
 		expect(await h.admits()).toBe(true)
 		// One byte past the trigger: the pass runs on to the target, not one file.
 		h.limit.maxBytes = h.used() + ADMISSION_HEADROOM - 1
-		expect(h.ops.quotaShortfall(0)).toBe(1)
+		expect(h.shortfall()).toBe(1)
 		const expected = expectedEvictions(files, h.used(), h.limit.maxBytes)
 		expect(expected.length).toBeGreaterThan(1)
 		expect(await h.retain()).toEqual(expected)
@@ -369,7 +509,7 @@ describe("analog retention keeps room for the next recording", () => {
 			const cap = used - freed + EVICTION_TARGET_MIN_HEADROOM + delta
 			h.limit.maxBytes = cap
 			expect(EVICTION_TARGET_HEADROOM(cap)).toBe(EVICTION_TARGET_MIN_HEADROOM)
-			expect(h.ops.quotaShortfall(0)).toBeGreaterThan(0)
+			expect(h.shortfall()).toBeGreaterThan(0)
 			const deleted = await h.retain()
 			const n = delta < 0 ? k + 1 : k
 			expect(deleted).toEqual(sorted.slice(0, n).map(f => f.artifact))
@@ -383,7 +523,7 @@ describe("analog retention keeps room for the next recording", () => {
 	}, 180_000)
 
 	it("a cap where 2 % > 8R (1 GiB): the pass evicts to cap − 2 % of the cap", async () => {
-		const h = await harness()
+		const h = await harness({ pad: 0 })
 		const files = await shuffled(h, 16)
 		const cap = 1024 * MIB
 		h.limit.maxBytes = cap
@@ -406,7 +546,7 @@ describe("analog retention keeps room for the next recording", () => {
 	}, 120_000)
 
 	it("the default 512 MiB cap (8R > 2 %): the pass evicts to cap − 15 491 424 B", async () => {
-		const h = await harness()
+		const h = await harness({ pad: 0 })
 		const files = await shuffled(h, 12)
 		const cap = 512 * MIB
 		h.limit.maxBytes = cap
@@ -478,7 +618,7 @@ describe("analog retention keeps room for the next recording", () => {
 		const target = EVICTION_TARGET_HEADROOM(cap)
 		let landed = 0
 		for (let cycle = 0; cycle < 3; cycle++) {
-			expect(h.ops.quotaShortfall(0)).toBeGreaterThan(0)
+			expect(h.shortfall()).toBeGreaterThan(0)
 			const expected = expectedEvictions(alive, h.used(), cap)
 			const deleted = await h.retain()
 			expect(deleted.length).toBeGreaterThan(0)
@@ -492,7 +632,7 @@ describe("analog retention keeps room for the next recording", () => {
 			// New recordings land (each younger than all before) until the trigger holds again:
 			// every one is admitted, and a pass in between evicts nothing.
 			let added = 0
-			while ((h.ops.quotaShortfall(0) ?? 0) <= 0) {
+			while ((h.shortfall() ?? 0) <= 0) {
 				expect(await h.retain()).toEqual([])
 				expect(await h.admits()).toBe(true)
 				alive.push(await h.record(now - (1_000 - landed++) * 1_000))
@@ -679,11 +819,12 @@ describe("retention removes legacy and analog files oldest first on one full tes
 			name: string,
 			mtimeMs: number,
 			folder: string = discoveryId,
+			bytes = LEGACY_BYTES,
 		): Promise<string> => {
 			const dir = join(root, "recordings", "dv", folder)
 			await mkdir(dir, { recursive: true })
 			const path = join(dir, name)
-			await writeFile(path, Buffer.alloc(LEGACY_BYTES))
+			await writeFile(path, Buffer.alloc(bytes))
 			await utimes(path, mtimeMs / 1000, mtimeMs / 1000)
 			return join("recordings", "dv", folder, name)
 		}
@@ -715,7 +856,20 @@ describe("retention removes legacy and analog files oldest first on one full tes
 			}
 		}
 		const exists = (rel: string) => existsSync(join(root, rel))
-		return { ev, analog, discoveryId, legacy, record, setCap, admits, exists }
+		/** PAD bytes in a live probe's folder: counted against the cap, never removed. */
+		const pad = () =>
+			legacy("20261101_120000_pad.wav", Date.now() - 6 * DAY, "probe-p1", PAD)
+		return {
+			ev,
+			analog,
+			discoveryId,
+			legacy,
+			pad,
+			record,
+			setCap,
+			admits,
+			exists,
+		}
 	}
 
 	/** Legacy files as Stored (path, LEGACY_BYTES, mtime) for expectedEvictions. */
@@ -735,7 +889,8 @@ describe("retention removes legacy and analog files oldest first on one full tes
 			const name = `202611${String(i + 1).padStart(2, "0")}_120000_${i}.wav`
 			files.push(legacyStored(await h.legacy(name, mtimeMs), mtimeMs))
 		}
-		const used = 12 * LEGACY_BYTES
+		await h.pad()
+		const used = 12 * LEGACY_BYTES + PAD
 		const cap = used + RESERVATION - 1
 		h.setCap(cap)
 		// A pass first so admission counts the legacy bytes from a walk.
@@ -772,7 +927,8 @@ describe("retention removes legacy and analog files oldest first on one full tes
 		const analogOld = await h.record(now - 8.5 * DAY)
 		const analogNew = await h.record(now - 1.5 * DAY)
 		files.push(analogOld, analogNew)
-		const legacyBytes = 14 * LEGACY_BYTES
+		await h.pad()
+		const legacyBytes = 14 * LEGACY_BYTES + PAD
 		// L > cap − 2R: no analog eviction alone can make room.
 		const cap = legacyBytes + RESERVATION
 		expect(legacyBytes).toBeGreaterThan(cap - ADMISSION_HEADROOM)
@@ -804,7 +960,8 @@ describe("retention removes legacy and analog files oldest first on one full tes
 				files.push(legacyStored(await h.legacy(name, mtimeMs), mtimeMs))
 			}
 		}
-		const used = files.reduce((n, f) => n + f.bytes, 0)
+		await h.pad()
+		const used = files.reduce((n, f) => n + f.bytes, PAD)
 		// Shortfall of one byte at the trigger: the pass runs to the target, oldest first.
 		const cap = used + ADMISSION_HEADROOM - 1
 		h.setCap(cap)
