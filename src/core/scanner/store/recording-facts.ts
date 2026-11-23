@@ -23,12 +23,25 @@
  * observation at most 128 each: 292 B), three ISO times (24 B each: 72 B), at most 14 finite
  * numbers (at most 24 B each as JSON: 336 B) and the closed codes (keptBy 32, cut 32, reason and
  * strength 64 each, branch 9: 201 B), plus about 520 B of member names and punctuation: about
- * 1 421 B. RECORDING_FACTS_MAX_BYTES (2 048 B) holds that with room, and a writer refuses
- * anything larger. The store's operation folder budget (MAX_OPERATION_METADATA_BYTES, 16 KiB)
+ * 1 421 B. The tone member adds at most 48 B: `,"tone":{"kind":"ctcss","hz":` and `}` take
+ * 30 B and the bounded hz at most 18 (a double in 67..254.1 prints in at most 18 characters,
+ * e.g. 254.09999999999997); the DCS form `,"tone":{"kind":"dcs","code":"754"}` takes 35 B.
+ * About 1 469 B in all.
+ * RECORDING_FACTS_MAX_BYTES (2 048 B) holds that with room, and a writer refuses anything
+ * larger.
+ *
+ * Tone: what the recorder's own CTCSS bank measured over the file's activity (no new
+ * detection). `{kind:"ctcss",hz}` when it heard a tone; null when it measured at least
+ * TONE_MEASURED_MIN_MS of the file's activity and heard none; the member is absent when it
+ * measured less (the bank needs 750 ms before it answers at all, so a null there would not be a
+ * confirmed "no tone"). The recorder measures no DCS: the `dcs` form is in the shape but never
+ * produced now. A tone that does not validate is dropped (the member absent), never the whole
+ * sidecar, like the admission block. The store's operation folder budget (MAX_OPERATION_METADATA_BYTES, 16 KiB)
  * covers intent + receipt + sidecar: the sidecar is skipped when the three would exceed it.
  */
 import { z } from "zod"
-import type { RecordingFacts } from "@wavekit/api-types"
+import type { RecordingFacts, RecordingTone } from "@wavekit/api-types"
+import { CTCSS_HZ } from "../../audio-tones/ctcss.js"
 import { NoiseQuarantineFactsSchema } from "./noise-quarantine.js"
 import { MAX_OPERATION_METADATA_BYTES } from "./recording-operation.js"
 
@@ -42,6 +55,46 @@ const IDENTITY = /^[A-Za-z0-9_-]{1,128}$/
 const CODE = /^[a-z][a-z-]{0,31}$/
 const iso = z.string().datetime()
 const finite = z.number().finite()
+
+/**
+ * Activity the recorder's CTCSS bank must have measured before its "no tone" counts: the bank's
+ * own minimum (two 500 ms blocks hopped by 250 ms: 750 ms, ctcss.ts MIN_SAMPLES) plus 250 ms for
+ * the frames the recorder does not feed it (a roll-over file's carried head) — 1 000 ms.
+ */
+export const TONE_MEASURED_MIN_MS = 1000
+
+/** Lowest and highest standard CTCSS tones (67.0 and 254.1 Hz): the bounds of `hz`. */
+const CTCSS_MIN_HZ = CTCSS_HZ[0]
+const CTCSS_MAX_HZ = CTCSS_HZ[CTCSS_HZ.length - 1]!
+
+export const RecordingToneSchema = z.discriminatedUnion("kind", [
+	z
+		.object({
+			kind: z.literal("ctcss"),
+			hz: finite.min(CTCSS_MIN_HZ).max(CTCSS_MAX_HZ),
+		})
+		.strict(),
+	/** A DCS code as three octal digits ("023"); reserved, the recorder measures none. */
+	z
+		.object({ kind: z.literal("dcs"), code: z.string().regex(/^[0-7]{3}$/) })
+		.strict(),
+])
+
+/**
+ * The tone fact of a file whose CTCSS bank answered `toneHz` over `measuredMs` of its activity,
+ * as AnalogFinishFacts members: the CTCSS tone when it heard one, null when it measured at least
+ * TONE_MEASURED_MIN_MS (exactly at it counts) and heard none, no member below that or on a
+ * non-finite span.
+ */
+export function toneFactOf(
+	toneHz: number | null,
+	measuredMs: number,
+): { readonly tone?: RecordingTone | null } {
+	if (toneHz !== null) return { tone: { kind: "ctcss", hz: toneHz } }
+	return Number.isFinite(measuredMs) && measuredMs >= TONE_MEASURED_MIN_MS
+		? { tone: null }
+		: {}
+}
 
 export const RecordingFactsSchema = z
 	.object({
@@ -66,6 +119,8 @@ export const RecordingFactsSchema = z
 			.strict(),
 		/** The recording admission's measured numbers; null when the recorder gave none. */
 		admission: NoiseQuarantineFactsSchema.nullable(),
+		/** The tone heard over the file; null: measured, none heard; absent: not measured. */
+		tone: RecordingToneSchema.nullable().optional(),
 	})
 	.strict()
 
@@ -90,15 +145,22 @@ export interface RecordingFactsInput {
 	speechHeard: boolean | null | undefined
 	cutActive: boolean | null
 	admission: unknown
+	/** The recorder's tone fact (toneFactOf); undefined: none, the member is left out. */
+	tone?: unknown
 }
 
 /**
  * The sidecar's bytes for a kept file, or null when the facts do not validate or exceed
  * RECORDING_FACTS_MAX_BYTES. An admission block that does not validate is dropped (null), never
- * the whole sidecar: the recorder's numbers are a read-only pass-through.
+ * the whole sidecar: the recorder's numbers are a read-only pass-through. So is a tone that does
+ * not validate: the member is left out.
  */
 export function recordingFactsBytes(input: RecordingFactsInput): Buffer | null {
 	const admission = NoiseQuarantineFactsSchema.safeParse(input.admission)
+	const tone =
+		input.tone === undefined
+			? null
+			: RecordingToneSchema.nullable().safeParse(input.tone)
 	const startMs =
 		input.startedAt === undefined ? Number.NaN : Date.parse(input.startedAt)
 	const started = Number.isFinite(startMs)
@@ -128,6 +190,7 @@ export function recordingFactsBytes(input: RecordingFactsInput): Buffer | null {
 			cutActive: input.cutActive,
 		},
 		admission: admission.success ? admission.data : null,
+		...(tone?.success === true ? { tone: tone.data } : {}),
 	})
 	if (!parsed.success) return null
 	return withinFactsBound(Buffer.from(JSON.stringify(parsed.data)))

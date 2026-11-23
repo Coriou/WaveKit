@@ -31,9 +31,11 @@ import {
 	RECORDING_FACTS_FILE,
 	RECORDING_FACTS_MAX_BYTES,
 	RecordingFactsSchema,
+	TONE_MEASURED_MIN_MS,
 	factsFitFolder,
 	recordingFactsBytes,
 	recordingFactsOf,
+	toneFactOf,
 	withinFactsBound,
 	type RecordingFactsInput,
 } from "../../../../src/core/scanner/store/recording-facts.js"
@@ -365,6 +367,8 @@ describe("recordingFactsBytes bounds", () => {
 			topSpreadDb: -1.2345678901234567e-15,
 			loudLevelDbfs: -1.2345678901234567e-15,
 		},
+		// The longest bounded hz as JSON (18 characters).
+		tone: { kind: "ctcss", hz: 254.09999999999997 },
 	}
 
 	it("the largest valid sidecar fits the bound", () => {
@@ -379,6 +383,80 @@ describe("recordingFactsBytes bounds", () => {
 			admission: { ...admission, reason: "<script>" },
 		})
 		expect(JSON.parse(bytes!.toString()).admission).toBeNull()
+	})
+
+	it("a tone round-trips: CTCSS, DCS, null; no tone given leaves the member out", () => {
+		const read = (tone: unknown) => {
+			const json = JSON.parse(
+				recordingFactsBytes({ ...base, tone })!.toString(),
+			) as unknown
+			return recordingFactsOf(json, base.operationId)
+		}
+		expect(read({ kind: "ctcss", hz: 88.5 })?.tone).toEqual({
+			kind: "ctcss",
+			hz: 88.5,
+		})
+		expect(read({ kind: "dcs", code: "023" })?.tone).toEqual({
+			kind: "dcs",
+			code: "023",
+		})
+		expect(read(null)?.tone).toBeNull()
+		const { tone: _omitted, ...noTone } = base
+		void _omitted
+		const json = JSON.parse(recordingFactsBytes(noTone)!.toString()) as object
+		expect("tone" in json).toBe(false)
+		expect(recordingFactsOf(json, base.operationId)).not.toBeNull()
+	})
+
+	it.each([
+		["below the CTCSS table", { kind: "ctcss", hz: 66.99 }],
+		["above the CTCSS table", { kind: "ctcss", hz: 254.11 }],
+		["not finite", { kind: "ctcss", hz: Number.NaN }],
+		["a DCS code with an 8", { kind: "dcs", code: "028" }],
+		["a DCS code of four digits", { kind: "dcs", code: "0234" }],
+		["an unknown kind", { kind: "dtmf", code: "1" }],
+		["an extra member", { kind: "ctcss", hz: 88.5, extra: 1 }],
+		["not an object", "88.5"],
+	])("a malformed tone (%s) is dropped, not the sidecar", (_name, tone) => {
+		const json = JSON.parse(
+			recordingFactsBytes({ ...base, tone })!.toString(),
+		) as object
+		expect("tone" in json).toBe(false)
+		expect(recordingFactsOf(json, base.operationId)).not.toBeNull()
+	})
+
+	it("the table's edge tones are within the bound (67.0 and 254.1 Hz)", () => {
+		for (const hz of [67, 254.1]) {
+			const json = JSON.parse(
+				recordingFactsBytes({
+					...base,
+					tone: { kind: "ctcss", hz },
+				})!.toString(),
+			) as { tone?: unknown }
+			expect(json.tone).toEqual({ kind: "ctcss", hz })
+		}
+	})
+
+	it("a sidecar read with a malformed tone reads as no facts (fail closed)", () => {
+		const json = JSON.parse(recordingFactsBytes(base)!.toString()) as Record<
+			string,
+			unknown
+		>
+		expect(recordingFactsOf(json, base.operationId)).not.toBeNull()
+		expect(
+			recordingFactsOf(
+				{ ...json, tone: { kind: "ctcss", hz: 300 } },
+				base.operationId,
+			),
+		).toBeNull()
+	})
+
+	it("toneFactOf: a heard tone always; null from TONE_MEASURED_MIN_MS of activity, nothing one below", () => {
+		expect(toneFactOf(88.5, 0)).toEqual({ tone: { kind: "ctcss", hz: 88.5 } })
+		expect(toneFactOf(null, TONE_MEASURED_MIN_MS)).toEqual({ tone: null })
+		expect(toneFactOf(null, TONE_MEASURED_MIN_MS - 1)).toEqual({})
+		expect(toneFactOf(null, Number.NaN)).toEqual({})
+		expect(toneFactOf(null, Number.POSITIVE_INFINITY)).toEqual({})
 	})
 
 	it("ids or codes past their bounds refuse the sidecar", () => {
@@ -402,7 +480,8 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 	// The real WidebandAnalogRecorder over a modelled syllabic voice (no digital evidence: kept by
 	// its finish path, as wideband-analog-recorder-admission.test.ts): its finish facts go to a real
 	// EvidenceStore operation, whose sidecar must carry the admission numbers it measured.
-	it("a kept voice's sidecar carries the finish path's admission numbers", async () => {
+	// One kept file through the real recorder and store; `ctcssHz` is the modelled source's tone.
+	async function recorderKeep(ctcssHz: number | null) {
 		const h = await harness()
 		const given: unknown[] = []
 		let real: ReturnType<EvidenceStore["beginAnalog"]> | null = null
@@ -414,7 +493,7 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		const r = recorderHarness({
 			fs: LOW_FS,
 			offset: LOW_OFFSET,
-			source: { ctcssHz: null, syllables: true },
+			source: { ctcssHz, syllables: true },
 			decodedLabel: () => null,
 			voicePrior: () => analogFm,
 			beginWrap: begin => recorderInput => {
@@ -457,21 +536,44 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		await r.feed(3.5, false)
 		await r.rec.idle()
 		expect(r.ops.map(o => o.outcome)).toEqual(["finalized"])
-		// The recorder gave measured numbers, and the real store wrote them beside the receipt.
 		expect(given).toHaveLength(1)
-		const facts = given[0] as { admission?: NoiseQuarantineFacts }
+		const op = real as ReturnType<EvidenceStore["beginAnalog"]> | null
+		expect(op).not.toBeNull()
+		const stored = RecordingFactsSchema.parse(
+			JSON.parse(await readFile(factsPath(h, op!.operationId), "utf8")),
+		)
+		return {
+			facts: given[0] as {
+				admission?: NoiseQuarantineFacts
+				tone?: unknown
+			},
+			stored,
+		}
+	}
+
+	it("a kept voice's sidecar carries the finish path's admission numbers", async () => {
+		const { facts, stored } = await recorderKeep(null)
+		// The recorder gave measured numbers, and the real store wrote them beside the receipt.
 		expect(facts.admission).toMatchObject({
 			strength: "none",
 			frequencyHz: expect.any(Number) as number,
 			p10Dbfs: expect.any(Number) as number,
 			spreadDb: expect.any(Number) as number,
 		})
-		const op = real as ReturnType<EvidenceStore["beginAnalog"]> | null
-		expect(op).not.toBeNull()
-		const stored = RecordingFactsSchema.parse(
-			JSON.parse(await readFile(factsPath(h, op!.operationId), "utf8")),
-		)
 		expect(stored.admission).toEqual(facts.admission)
+	}, 120_000)
+
+	it("voice over a CTCSS tone: the sidecar carries the tone the recorder heard", async () => {
+		const { facts, stored } = await recorderKeep(88.5)
+		expect(facts.tone).toEqual({ kind: "ctcss", hz: 88.5 })
+		expect(stored.tone).toEqual({ kind: "ctcss", hz: 88.5 })
+	}, 120_000)
+
+	it("untoned voice: the sidecar says measured and no tone (null)", async () => {
+		const { facts, stored } = await recorderKeep(null)
+		expect(facts.tone).toBeNull()
+		expect("tone" in stored).toBe(true)
+		expect(stored.tone).toBeNull()
 	}, 120_000)
 })
 

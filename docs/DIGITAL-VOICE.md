@@ -218,9 +218,10 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   unexpected size (not a multiple of 640 bytes in stereo, 320 in mono) is
   played but logged once: it means the mode or output format was overridden.
 - **Call state**: the decoder's `call_start` / `call_end` stay authoritative.
-  dsd-fme publishes a `voice-call` event in the same tick as each of them
-  (`emitOutput`), plus one when a running call turns out encrypted or learns it
-  is clear. The stream maps these to `digital-voice:call` (`decoderId`, `callId`,
+  dsd-fme publishes a `voice-call` event when each of them is produced; a
+  `call_end` output held for its recording file can follow it by up to 500 ms
+  (`DSD_FME_WAV_END_WAIT_MS`). It also publishes one when a running call turns
+  out encrypted or learns it is clear. The stream maps these to `digital-voice:call` (`decoderId`, `callId`,
   `protocol`, `talkgroup`, `source`, `slot`, `encrypted`, `encryptionKnown`,
   `active`, `startedAt`, `endedAt`).
 - **Encryption not known yet**: a DMR call starts on its voice frames,

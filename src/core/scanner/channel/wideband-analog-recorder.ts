@@ -53,6 +53,7 @@ import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import { CtcssBank } from "../../audio-tones/ctcss.js"
+import { toneFactOf } from "../store/recording-facts.js"
 import { ulid } from "../ids.js"
 import type {
 	AnalogCut,
@@ -4423,6 +4424,14 @@ export class WidebandAnalogRecorder {
 					...(path !== null && speech !== null
 						? { admission: noiseFacts(path, speech, s) }
 						: {}),
+					// The file's CTCSS answer (finishFile) over the activity its bank was fed (toneFrames).
+					...toneFactOf(
+						file.toneHz,
+						((Math.min(file.endSample ?? s.next, s.lastActive) -
+							Math.max(file.startSample, s.onset)) *
+							1000) /
+							s.fs,
+					),
 				})
 				.catch(() => undefined)
 		}

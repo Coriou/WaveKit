@@ -7075,7 +7075,13 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   recording admission's measured numbers and codes: `frequencyHz`, `reason`,
   `strength`, `branch`, `levelFrames`, `spreadDb`, `p10Dbfs`, `periodicShare`,
   `burstFrames`, `loudPitchShare`, `topSpreadDb`, `loudLevelDbfs`; null when the
-  recorder passed none). Null for older files, any other kind, and a sidecar that
+  recorder passed none), plus `tone` (since 2026-11-23): the sub-audible tone the
+  file was sent with, as the recorder's CTCSS detector measured it over the
+  file's activity: `{ "kind": "ctcss", "hz": 88.5 }` (a standard tone,
+  67.0-254.1 Hz), or null when it measured at least 1 s of the activity and heard
+  none; absent when it measured less, and on older files. A DCS form,
+  `{ "kind": "dcs", "code": "023" }` (three octal digits), is reserved: the
+  recorder measures no DCS today. Null for older files, any other kind, and a sidecar that
   is missing, larger than 2 KiB, malformed or of another operation; the file is
   served the same either way.
 - `frequencyHz` of a scanner recording is its channel frequency: the frequency

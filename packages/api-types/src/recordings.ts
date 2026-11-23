@@ -216,6 +216,15 @@ export interface RecordingAdmissionFacts {
 }
 
 /**
+ * The sub-audible tone a kept analog recording was sent with: a CTCSS tone (one of the 50
+ * EIA/TIA-603 tones, 67.0-254.1 Hz) or a DCS code (three octal digits, e.g. "023"). The core
+ * produces only `ctcss` today (it measures no DCS); `dcs` is reserved in the shape.
+ */
+export type RecordingTone =
+	| { kind: "ctcss"; hz: number }
+	| { kind: "dcs"; code: string }
+
+/**
  * Facts of a kept scanner analog recording, written once beside its receipt at the keep
  * (schema version 1). Read-only: nothing serves, retains or deletes on them.
  */
@@ -244,6 +253,11 @@ export interface RecordingFacts {
 	}
 	/** Null when the recorder passed no admission numbers. */
 	admission: RecordingAdmissionFacts | null
+	/**
+	 * The tone the file was sent with; null: the recorder measured the file and heard none.
+	 * Absent when it did not measure one (too little audio, older files and cores).
+	 */
+	tone?: RecordingTone | null | undefined
 }
 
 /**

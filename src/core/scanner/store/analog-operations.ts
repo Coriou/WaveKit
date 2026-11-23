@@ -1,5 +1,6 @@
 /** Scanner-owned prepared-link media lifecycle. No native/channel consumer is adopted here. */
 import { SCANNER_RECORDER_ERRORS } from "@wavekit/api-types"
+import type { RecordingTone } from "@wavekit/api-types"
 import { randomUUID } from "node:crypto"
 import { constants, linkSync, lstatSync, type Stats } from "node:fs"
 import {
@@ -428,6 +429,12 @@ export interface AnalogFinishFacts {
 	 * (recording-facts.ts), never to the receipt; a read-only pass-through, dropped when malformed.
 	 */
 	readonly admission?: NoiseQuarantineFacts
+	/**
+	 * The tone the file was sent with, as the recorder measured it (recording-facts.ts
+	 * toneFactOf): null when it measured and heard none; absent when it did not measure. Written
+	 * to the kept file's facts sidecar only; a read-only pass-through, dropped when malformed.
+	 */
+	readonly tone?: RecordingTone | null
 }
 /**
  * The receipt's verdict members of finish facts: each one kept only when the receipt schema takes
@@ -720,6 +727,8 @@ interface Operation {
 	verdict: Pick<AnalogReceipt, "keptBy" | "speechHeard" | "startedAt">
 	/** The first finish's AnalogFinishFacts.admission as given (validated when the sidecar is written). */
 	admission: unknown
+	/** The first finish's AnalogFinishFacts.tone as given; undefined: none (validated on write). */
+	tone: unknown
 	/** The check that refused it first (AnalogFailure), for its receipt. */
 	failure: AnalogFailure | null
 	accepting: boolean
@@ -982,6 +991,7 @@ export class AnalogOperations {
 			cutActive: null,
 			verdict: {},
 			admission: null,
+			tone: undefined,
 			failure: null,
 			accepting: true,
 			decision: null,
@@ -1049,6 +1059,7 @@ export class AnalogOperations {
 				if (!op.finish && facts !== undefined) {
 					op.verdict = verdictOf(facts)
 					op.admission = facts.admission ?? null
+					op.tone = facts.tone
 				}
 				return this.finishOperation(op, AnalogCutSchema.parse(cut))
 			},
@@ -1701,6 +1712,7 @@ export class AnalogOperations {
 				speechHeard: receipt.speechHeard,
 				cutActive: receipt.cutActive ?? null,
 				admission: op.admission,
+				tone: op.tone,
 			})
 			if (bytes === null) return
 			const metadata =
