@@ -293,8 +293,12 @@ describe("dsd-fme call_end held for its first lookup", () => {
 		const { d, found } = decoderWithUpdates()
 		endThrough(d, 45)
 		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS - 1)
-		// Only the first directory's read started, and it never settles.
-		expect(opendir).toHaveBeenCalledTimes(1)
+		// Only the first directory's read started, and it never settles. Counted under this
+		// test's root: an earlier test's real-timer retry may still reach the spy.
+		const ours = opendir.mock.calls.filter(([dir]) =>
+			String(dir).startsWith(root),
+		)
+		expect(ours).toHaveLength(1)
 		await vi.advanceTimersByTimeAsync(1)
 		// Abandoned: the retry is scheduled and reads again.
 		opendir.mockRestore()
