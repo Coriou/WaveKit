@@ -5,6 +5,26 @@
 // path restores it). A finished recording plays the next one of the list it was started from (a snapshot the
 // surface refreshes while it is shown) when Auto-next is on (per browser). Waveform peaks come from the same
 // blob.
+//
+// One player model. Every surface (a Recordings row, an Activity row or detail, the Transmission view, the tuned
+// card) only drives this service: its disc toggles it, its waveform seeks it, nothing holds a second <audio> or
+// a second transport. The dock (PlayerDock) is the one transport and always names what plays and can close it.
+//
+// Transitions (event → next phase; "–" stays). `play row` is a row's disc or a waveform click, `play all` a list's
+// Play all (its first entry, with the list as queue), `next/prev` the transport's or Auto-next's step, `end` the
+// file playing to its end, `error` a failed fetch or a failed element. A play of another recording always goes
+// to loading; next/prev with no entry that way do nothing (prev past PREV_RESTART_S restarts the same one).
+//
+// | from \ event | play row  | play all | next/prev           | close | end                              | error |
+// | ------------ | --------- | -------- | ------------------- | ----- | -------------------------------- | ----- |
+// | idle         | loading   | loading  | –                   | –     | –                                | –     |
+// | loading      | loading   | loading  | loading (the other) | idle  | –                                | error |
+// | playing      | loading¹  | loading¹ | loading (the other) | idle  | loading (Auto-next) or ended     | error |
+// | paused       | loading¹  | loading¹ | loading (the other) | idle  | ended                            | error |
+// | ended        | loading¹  | loading¹ | loading (the other) | idle  | –                                | –     |
+// | error        | loading   | loading  | loading (the other) | idle  | –                                | –     |
+//
+// ¹ the same recording again plays on from where it is asked (playing), without a new fetch.
 import { errorMessage, isApiError, Store } from "../../data/index.ts"
 import { wavPeaks } from "./wav.ts"
 
@@ -29,12 +49,6 @@ export interface QueueRef {
 	titles?: Readonly<Record<string, string>>
 }
 
-export interface ExpandedRow {
-	id: string | null
-	/** The panel that shows it is the visible one. */
-	visible: boolean
-}
-
 export interface PlaybackState {
 	/** The recording in the player; null exactly when idle. */
 	id: string | null
@@ -50,8 +64,6 @@ export interface PlaybackState {
 	wantPlay: boolean
 	/** The title the surface gave with play(), for a queue that does not name it. */
 	title: string | null
-	/** Per surface, the row it shows expanded (the dock goes compact under it). */
-	expanded: Readonly<Partial<Record<QueueSource, ExpandedRow>>>
 }
 
 export const SPEEDS = [1, 1.5, 2] as const
@@ -128,16 +140,6 @@ export function fileErrorText(error: unknown): string {
 /** Live audio is muted while this holds (invariant I2). */
 export function heldOf(s: PlaybackState): boolean {
 	return s.phase === "playing" || (s.phase === "loading" && s.wantPlay)
-}
-
-/**
- * The dock shows only its thin line: the playing recording's row is open in the visible panel. A failed one
- * keeps the full dock, whose error line is the only place the failure shows.
- */
-export function compactOf(s: PlaybackState): boolean {
-	if (s.id === null) return false
-	if (s.error !== null || s.phase === "error") return false
-	return Object.values(s.expanded).some(e => e?.visible && e.id === s.id)
 }
 
 /** The queue entry after (by 1) or before (by -1) `id`; null when `id` is not in it or at its end. */
@@ -254,7 +256,6 @@ export class PlaybackService extends Store<PlaybackState> {
 			autoNext: readAutoNext(storage),
 			wantPlay: false,
 			title: null,
-			expanded: {},
 		})
 		this.deps = deps
 		this.storage = storage
@@ -451,21 +452,6 @@ export class PlaybackService extends Store<PlaybackState> {
 		if (titles !== undefined) queue.titles = titles
 		if (list !== undefined) queue.list = list
 		this.set({ ...s, queue })
-	}
-
-	/** The row `source` shows open (null: none) and whether its panel is the visible one (compact only then). */
-	setExpanded(source: QueueSource, id: string | null, visible = false): void {
-		const s = this.get()
-		const was = s.expanded[source]
-		if (id === null) {
-			if (!was) return
-			const expanded = { ...s.expanded }
-			delete expanded[source]
-			this.set({ ...s, expanded })
-			return
-		}
-		if (was?.id === id && was.visible === visible) return
-		this.set({ ...s, expanded: { ...s.expanded, [source]: { id, visible } } })
 	}
 
 	setAutoNext(on: boolean): void {

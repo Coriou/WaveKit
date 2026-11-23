@@ -15,6 +15,13 @@ import { formatWidth } from "../format.ts"
 import { fieldText, protocolText, rowView } from "../activity/rows.ts"
 import { sanitisePagerMessage } from "../activity/pager-detail.ts"
 import { bearing, distanceKm, relativeText } from "../map/geo.ts"
+import {
+	CLOSE_WORDS,
+	durationWords,
+	recordingChangeFields,
+	recordingRowFields,
+	wordsFor,
+} from "../transmission/words.ts"
 import { mergeFields } from "./humanize.ts"
 
 export interface MessageBadge {
@@ -111,8 +118,7 @@ export function recordFields(record: ActivityRecord): DecodeField[] {
 				{
 					key: "duration",
 					label: "Duration",
-					value: Math.round(p.durationMs / 100) / 10,
-					unit: "s",
+					value: durationWords(p.durationMs) ?? "",
 				},
 				{ key: "modulation", label: "Mode", value: p.modulation.toUpperCase() },
 				{ key: "bandwidth", label: "Width", value: formatWidth(p.bandwidthHz) },
@@ -140,9 +146,15 @@ export function recordFields(record: ActivityRecord): DecodeField[] {
 				})
 			if (p.tone?.dtmf)
 				out.push({ key: "dtmf", label: "DTMF", value: p.tone.dtmf })
-			out.push({ key: "closed", label: "Ended by", value: p.closeReason })
+			out.push({
+				key: "closed",
+				label: "Ended",
+				value: wordsFor(CLOSE_WORDS, p.closeReason) ?? p.closeReason,
+			})
 			return out
 		}
+		case "recording-change":
+			return recordingChangeFields(record.payload)
 		case "ingestion-gap": {
 			const p = record.payload
 			return [
@@ -192,6 +204,22 @@ export function summaryOfRecord(record: ActivityRecord): ActivitySummary {
 				entityKey: null,
 				title: null,
 			}
+		case "recording-change": {
+			// as the core's row summary: on the owning discovery's channel, its file linked for the player
+			const p = record.payload
+			return {
+				...base,
+				decoderId: null,
+				sourceId: p.sourceId,
+				protocol: "analog",
+				category: "voice",
+				frequencyHz: p.channel?.frequencyHz ?? p.frequencyHz,
+				entityKey: null,
+				title: "FM voice",
+				recording: { id: p.recordingId, durationMs: p.durationMs },
+				...(p.channel ? { channel: { ...p.channel } } : {}),
+			}
+		}
 		default:
 			return {
 				...base,
@@ -206,9 +234,13 @@ export function summaryOfRecord(record: ActivityRecord): ActivitySummary {
 	}
 }
 
-/** The decoded JSON behind the card: decodedData for a reception, the payload otherwise. */
+/**
+ * The decoded JSON behind the card: decodedData for a reception, the payload otherwise. None for a kept
+ * recording: its ids and raw numbers are the detail's expert Details, never the card's.
+ */
 export function rawOf(record: ActivityRecord | null): JsonValue | null {
 	if (!record) return null
+	if (record.kind === "recording-change") return null
 	if (record.kind === "decoder-reception") return record.payload.decodedData
 	return record.payload as unknown as JsonValue
 }
@@ -304,7 +336,13 @@ export function messageView(
 	const row = rowView(item)
 	const raw = rawOf(record)
 	const data = raw ?? undefined
-	const coreFields = record ? recordFields(record) : [...item.fields]
+	const kept = item.kind === "recording-change"
+	// a kept recording's fields are already words (Channel, Started, Duration): never its raw payload
+	const coreFields = record
+		? recordFields(record)
+		: kept
+			? recordingRowFields(item)
+			: [...item.fields]
 	const analog = item.kind === "analog-transmission"
 	const notice = row.notice
 
@@ -342,7 +380,8 @@ export function messageView(
 			badges.push({ label: `Type ${t}`, variant: "neutral" })
 	}
 
-	const extra = !FULLY_PRESENTED.has(item.category) || item.protocol === null
+	const extra =
+		!kept && (!FULLY_PRESENTED.has(item.category) || item.protocol === null)
 	const said_ = `${row.title} · ${sub}`
 	const merged = mergeFields(coreFields, analog ? undefined : data, extra).map(
 		f =>
@@ -360,6 +399,7 @@ export function messageView(
 				) || null
 			: row.message
 	const fields = merged.map(batteryWord).filter(f => {
+		if (kept) return true
 		if (BADGE_KEYS.has(f.key)) return false
 		// The sanitised paging body is already shown above, or is empty.
 		if (

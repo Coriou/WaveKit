@@ -31,15 +31,36 @@ export const AROUND_MS = 120_000
 const NEIGHBOURS = 50
 /** Observations of the discovery searched for this one's (the core keeps its last 256). */
 const OBSERVATIONS = 256
-/** Bounds of the DTO (the route's). */
-const MEMBERS_MAX = 64
+/** Recordings read when a key names no folder: the newest page (the route's page limit). */
+const NEWEST = 200
+/**
+ * The Conversation's bound: the route's `group.members` cap (64). Today the members are this recording and at
+ * most NEIGHBOURS (50) recordings of its channel, 1 + 50 = 51, so the cap does not bite until the route lists
+ * more; when it does, it keeps the window of MEMBERS_MAX that holds this one (groupOf).
+ */
+export const MEMBERS_MAX = 64
 
+/**
+ * Nothing the web can read names this ref. `reason` says why, in words the view shows after "Not found"; it never
+ * claims a store expired something unless that store said so.
+ */
 export class TransmissionNotFoundError extends Error {
-	constructor(ref: TransmissionRef) {
-		super(`No transmission is known as ${refText(ref)}`)
+	readonly reason: string
+	constructor(ref: TransmissionRef, reason: string) {
+		super(`No transmission is known as ${refText(ref)}: ${reason}`)
 		this.name = "TransmissionNotFoundError"
+		this.reason = reason
 	}
 }
+
+/** The reasons a ref is not found, in words. */
+export const NOT_FOUND_WORDS = {
+	recordingInFolder: "The receiver does not list this recording in its channel",
+	recordingNewest:
+		"This recording is not among the receiver's newest, and the receiver cannot look one up by name yet",
+	event: "Activity holds no event under this name",
+	observation: "Only an observation of a recording loaded here can be opened",
+} as const
 
 export interface LoadTransmissionDeps {
 	api: Pick<ApiClient, "get">
@@ -64,18 +85,35 @@ export async function loadTransmission(
 
 	if ("recording" in ref) {
 		item = await ctx.recording(ref.recording)
-		if (item === null) throw new TransmissionNotFoundError(ref)
+		if (item === null)
+			throw new TransmissionNotFoundError(
+				ref,
+				folderOf(ref.recording) !== null
+					? NOT_FOUND_WORDS.recordingInFolder
+					: NOT_FOUND_WORDS.recordingNewest,
+			)
 	} else if ("event" in ref) {
-		record = await ctx.activity(ref.event)
+		// with the row in hand both reads are optional: the view renders from the row when they fail
+		const summary = deps.summary ?? null
+		const eventId = ref.event
+		record =
+			summary !== null
+				? await ctx.optional(() => ctx.activity(eventId))
+				: await ctx.activity(eventId)
 		if (record === null) gone.add("activity")
-		const key = recordingKeyOf(record, deps.summary ?? null)
-		if (key !== null) item = await ctx.recording(key)
-		if (record === null && item === null && !deps.summary)
-			throw new TransmissionNotFoundError(ref)
+		const key = recordingKeyOf(record, summary)
+		if (key !== null)
+			item =
+				summary !== null
+					? await ctx.optional(() => ctx.recording(key))
+					: await ctx.recording(key)
+		if (record === null && item === null && summary === null)
+			throw new TransmissionNotFoundError(ref, NOT_FOUND_WORDS.event)
 		if (key !== null && item === null) gone.add("audio")
 	} else {
 		item = ctx.loaded().find(r => r.observationId === ref.observation) ?? null
-		if (item === null) throw new TransmissionNotFoundError(ref)
+		if (item === null)
+			throw new TransmissionNotFoundError(ref, NOT_FOUND_WORDS.observation)
 	}
 
 	if ("recording" in ref && item !== null && item.activityEventId) {
@@ -96,6 +134,21 @@ function recordingKeyOf(
 ): string | null {
 	if (record?.kind === "recording-change") return record.payload.recordingId
 	return summary?.recording?.id ?? null
+}
+
+/** The discovery whose folder a scanner recording key names (`scan:<discovery>~<file>`); null for other keys. */
+function folderOf(key: string): string | null {
+	return /^scan:([^~]+)~/.exec(key)?.[1] ?? null
+}
+
+/** The /api/recordings query that lists the recording `key` names, when it is still kept. */
+export function recordingQueryOf(
+	key: string,
+): { discoveryId: string; limit: number } | { limit: number } {
+	const discoveryId = folderOf(key)
+	return discoveryId !== null
+		? { discoveryId, limit: NEWEST }
+		: { limit: NEWEST }
 }
 
 /** The reads, each with the caller's abort and the optional ones' deadline. */
@@ -141,16 +194,17 @@ class Reads {
 		}
 	}
 
-	/** A recording by key or id: the loaded list first, else its discovery's recordings. */
+	/**
+	 * A recording by key or id: the loaded list first, else the /api/recordings page its key names (its
+	 * channel's folder for a scanner key, the newest page for any other: the route has no by-key read).
+	 */
 	async recording(key: string): Promise<RecordingInventoryItem | null> {
 		const match = (r: RecordingInventoryItem) => r.key === key || r.id === key
 		const known = this.loaded().find(match)
 		if (known) return known
-		const discoveryId = /^scan:([^~]+)~/.exec(key)?.[1] ?? null
-		if (discoveryId === null) return null
 		const page = await this.#deps.api.get<RecordingInventoryPage>(
 			"/api/recordings",
-			{ ...this.#options(false), query: { discoveryId, limit: 200 } },
+			{ ...this.#options(false), query: recordingQueryOf(key) },
 		)
 		return page.items.find(match) ?? null
 	}
@@ -282,15 +336,33 @@ export function groupOf(
 		members.push(r)
 	}
 	if (members.length < 2) return null
+	const self = refText({ recording: item.key ?? item.id })
 	const sorted = members
 		.map(memberOf)
 		.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))
-		.slice(0, MEMBERS_MAX)
 	return {
 		id: heuristic ? null : (item.observationId ?? null),
 		heuristic,
-		members: sorted,
+		members: windowAround(sorted, self, MEMBERS_MAX),
 	}
+}
+
+/** At most `max` members, oldest first, always holding `self`: the window centred on it, kept inside the list. */
+export function windowAround(
+	sorted: readonly TransmissionMember[],
+	self: string,
+	max: number,
+): TransmissionMember[] {
+	if (sorted.length <= max) return [...sorted]
+	const at = Math.max(
+		0,
+		sorted.findIndex(m => m.ref === self),
+	)
+	const start = Math.min(
+		Math.max(0, at - Math.floor(max / 2)),
+		sorted.length - max,
+	)
+	return sorted.slice(start, start + max)
 }
 
 const FLAG_NAMES: readonly (keyof Observation["flags"])[] = [
@@ -428,62 +500,90 @@ async function fromRecording(
 	}
 }
 
-/** A transmission known only from Activity: a live analog transmission, a call whose file is not listed. */
+/** The first of `times` that is a real date; null when none is (the view then shows no time). */
+export function firstTime(
+	...times: (string | null | undefined)[]
+): string | null {
+	for (const t of times)
+		if (typeof t === "string" && Number.isFinite(Date.parse(t))) return t
+	return null
+}
+
+/**
+ * A transmission known only from Activity: a live analog transmission, a call whose file is not listed, a kept
+ * scanner recording whose file is not listed (always scanner analog FM: its tone is not measured here).
+ */
 function fromActivity(
 	record: ActivityRecord | null,
 	summary: ActivitySummary | null,
 	gone: Set<TransmissionDto["gone"][number]>,
 ): TransmissionDto {
 	const live = record?.kind === "analog-transmission" ? record.payload : null
+	const kept = record?.kind === "recording-change" ? record.payload : null
+	const keptRow = kept !== null || summary?.kind === "recording-change"
 	const eventId = record?.eventId ?? summary?.eventId ?? ""
 	const field = (key: string) =>
 		summary?.fields.find(f => f.key === key)?.value ?? null
 	const durationMs =
 		live?.durationMs ??
+		kept?.durationMs ??
 		(typeof field("durationMs") === "number"
 			? (field("durationMs") as number)
 			: typeof field("duration") === "number"
 				? (field("duration") as number)
 				: (summary?.recording?.durationMs ?? null))
-	const startedAt =
-		live?.startedAt ??
-		record?.producedAt ??
-		summary?.producedAt ??
-		new Date(0).toISOString()
+	const startedAt = firstTime(
+		live?.startedAt,
+		kept?.observationStartedAt,
+		record?.producedAt,
+		summary?.producedAt,
+	)
 	const fm =
 		live !== null && (live.modulation === "nfm" || live.modulation === "wfm")
 	const hz =
 		live?.frequency?.hz ??
+		kept?.channel?.frequencyHz ??
 		summary?.channel?.frequencyHz ??
 		summary?.frequencyHz ??
+		kept?.frequencyHz ??
 		null
 	const talkgroup = field("talkgroup")
 	const radio = field("source")
 	const rec = summary?.recording ?? null
+	const recordingKeys = rec ? [rec.id] : kept !== null ? [kept.recordingId] : []
 	return {
 		id: null,
 		refs: {
-			recordingKeys: rec ? [rec.id] : [],
+			recordingKeys,
 			eventIds: eventId ? [eventId] : [],
-			observationId: null,
-			discoveryId: null,
-			ownerDiscoveryId: null,
+			observationId: kept?.observationId ?? null,
+			discoveryId: kept?.discoveryId ?? null,
+			ownerDiscoveryId:
+				kept?.channel?.discoveryId ?? summary?.channel?.discoveryId ?? null,
 			operationId: null,
 		},
 		kind:
-			live !== null
+			live !== null || keptRow
 				? "voice-analog"
 				: summary?.category === "voice"
 					? "voice-digital"
 					: "unknown",
 		protocol:
-			live !== null ? `analog-${live.modulation}` : (summary?.protocol ?? null),
-		sourceId: live?.sourceId ?? summary?.sourceId ?? null,
-		channel: { hz, measuredHz: live?.frequency?.hz ?? null, name: null },
+			live !== null
+				? `analog-${live.modulation}`
+				: keptRow
+					? "analog-fm"
+					: (summary?.protocol ?? null),
+		sourceId: live?.sourceId ?? kept?.sourceId ?? summary?.sourceId ?? null,
+		channel: {
+			hz,
+			measuredHz: live?.frequency?.hz ?? kept?.frequencyHz ?? null,
+			name: null,
+		},
 		startedAt,
 		endedAt:
 			live?.endedAt ??
-			(durationMs !== null
+			(durationMs !== null && startedAt !== null
 				? new Date(Date.parse(startedAt) + durationMs).toISOString()
 				: null),
 		durationMs,
@@ -491,7 +591,18 @@ function fromActivity(
 			? { reason: live.closeReason, complete: live.closeReason === "squelch" }
 			: null,
 		part: null,
-		tone: fm ? liveTone(live) : null,
+		tone: fm
+			? liveTone(live)
+			: keptRow
+				? {
+						state: "not-measured",
+						ctcssHz: null,
+						dcs: null,
+						dcsChecked: false,
+						from: "recorder",
+						why: "no-recording",
+					}
+				: null,
 		identity:
 			talkgroup !== null || radio !== null
 				? {
@@ -519,7 +630,11 @@ function fromActivity(
 					},
 				]
 			: [],
-		noAudioReason: rec ? null : gone.has("audio") ? "deleted" : "not-recorded",
+		noAudioReason: rec
+			? null
+			: gone.has("audio")
+				? "not-listed"
+				: "not-recorded",
 		group: null,
 		sameTime: null,
 		channelSummary: null,
@@ -546,7 +661,7 @@ function liveTone(
 			ctcssHz: null,
 			dcs: null,
 			dcsChecked: false,
-			why: "no-facts",
+			why: "live-none",
 		}
 	const dcs = t.dcs ?? null
 	return {

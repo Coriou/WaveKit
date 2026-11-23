@@ -1189,7 +1189,7 @@ Condensed + Noto Sans, Tabler-based icons).
 
     | Step | When the scale rows' room above the stack is | What gives |
     | --- | --- | --- |
-    | 1 | under 148 px (100 px of rows + the 48 px trace floor) with the full player | the player shows its compact line (play/pause, progress, time) |
+    | 1 | under 148 px (100 px of rows + the 48 px trace floor) with the full player | the player shows its compact line (play/pause, title over the progress, time, close) |
     | 2 | under 148 px with the compact line | the trace floor yields: the trace shrinks toward 0 |
     | 3 | under 100 px | the discovery row and the band ruler hide (54 px of rows left: axis and lanes) |
     | 4 | under 54 px with the player | the player waits out of sight, still playing |
@@ -1244,6 +1244,20 @@ Condensed + Noto Sans, Tabler-based icons).
   from `loadTransmission(ref)`, which composes today's calls behind one adapter until the core
   serves a transmission route. *Why:* the user's question about one over ("which tone was it?") had
   no place to be answered, and every door led to a place instead of the thing.
+- **One player model (2026-11-23).** The dock is the one transport and never shrinks under an open
+  row: an expanded Recordings row, an open Activity event and the Transmission view only drive it
+  (their disc toggles it, their waveform seeks it; no surface holds row state in the player any
+  more). The compact line stays, but only as step 1 of *Insufficient height*, and it keeps the
+  title (the door to the playing transmission) and **Close**: play/pause, title over the progress,
+  time, close. Of the two ways out (rows drive the app player, or the pill keeps title and close)
+  both are taken because they answer different causes: the row-driven shrink was the bare pill the
+  user met (a row's waveform and Play beside a dock that had lost its title, Next and Close, so two
+  players seemed to run), while the height step is this document's own rule for a short window,
+  where a full transport would overlap the plot. The transition table (idle, loading, playing,
+  paused, ended, error × play row, play all, next/prev, close, end, error) heads the player model
+  (`web/src/features/playback/service.ts`) and is tested cell by cell. *Why:* one thing that plays
+  should look like one thing everywhere, and a control that can play must also say what plays and
+  let you stop it.
 
 ## Open questions and next topics
 

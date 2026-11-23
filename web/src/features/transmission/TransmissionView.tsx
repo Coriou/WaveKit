@@ -6,7 +6,6 @@ import "./transmission.css"
 // number. It renders only the Transmission DTO (loadTransmission); Back and Esc return to the origin in one step.
 import type { JsonValue } from "@wavekit/api-types"
 import { useEffect, useMemo, useRef, useState } from "react"
-import type { KeyboardEvent as ReactKeyboardEvent } from "react"
 
 import { useServices } from "../../app/context.ts"
 import { errorMessage } from "../../data/index.ts"
@@ -20,19 +19,24 @@ import {
 	protocolSpelling,
 	rasterHz,
 	savedNameAt,
-	showChannel,
-	stepAt,
 	useSavedNames,
 } from "../naming.ts"
 import { KeepButton, PlayDisc, WaveView } from "../playback/PlaybackUi.tsx"
 import type { QueueRef } from "../playback/service.ts"
-import { useDrawerVisible } from "../playback/visible.ts"
 import { formatBytes } from "../recordings/model.ts"
 import type { TransmissionDto, TransmissionMember } from "./contract.ts"
 import { parseRef, refText } from "./contract.ts"
 import { loadTransmission, TransmissionNotFoundError } from "./load.ts"
 import type { OpenTransmission } from "./nav.ts"
-import { openInScanner, replaceTransmission } from "./nav.ts"
+import {
+	activityLists,
+	escapeGoesBack,
+	followsPlayer,
+	openChannelHistory,
+	openInScanner,
+	playingTransmission,
+	replaceTransmission,
+} from "./nav.ts"
 import {
 	channelText,
 	CLOSE_WORDS,
@@ -65,6 +69,33 @@ function writeDetailsOpen(open: boolean): void {
 		globalThis.localStorage?.setItem(DETAILS_KEY, open ? "1" : "0")
 	} catch {
 		// private windows and full storage: remembered for this page only
+	}
+}
+
+/** The part of the Clipboard API Copy uses (absent on plain HTTP and in some embedded browsers). */
+export interface ClipboardLike {
+	writeText(text: string): Promise<void>
+}
+
+/** Copies `value` and says so in a toast either way; resolves to whether it was copied. */
+export async function copyValue(
+	value: string,
+	clipboard: ClipboardLike | undefined = globalThis.navigator?.clipboard,
+	toast: typeof showAppToast = showAppToast,
+): Promise<boolean> {
+	if (!clipboard) {
+		toast("Could not copy: this browser blocks the clipboard here", {
+			tone: "warn",
+		})
+		return false
+	}
+	try {
+		await clipboard.writeText(value)
+		toast("Copied")
+		return true
+	} catch {
+		toast("Could not copy", { tone: "warn" })
+		return false
 	}
 }
 
@@ -130,7 +161,7 @@ export function conversationQueue(
 type LoadState =
 	| { status: "loading" }
 	| { status: "ready"; t: TransmissionDto }
-	| { status: "missing" }
+	| { status: "missing"; reason: string }
 	| { status: "error"; error: string }
 
 export function TransmissionView({
@@ -147,12 +178,40 @@ export function TransmissionView({
 	const [state, setState] = useState<LoadState>({ status: "loading" })
 	const [attempt, setAttempt] = useState(0)
 	const back = useRef<HTMLButtonElement>(null)
+	const view = useRef<HTMLElement>(null)
 	const key = refText(open.ref)
 	// the ref's text is its identity; the summary only seeds the first read
 	const opened = useRef(open)
 	opened.current = open
+	const onBackRef = useRef(onBack)
+	onBackRef.current = onBack
 
-	useEffect(() => back.current?.focus({ preventScroll: true }), [])
+	// focus on Back when it opens and whenever it shows another transmission (a clicked Conversation row is
+	// disabled as the current one, so focus would fall to the page and Esc would close the drawer)
+	useEffect(() => back.current?.focus({ preventScroll: true }), [key])
+
+	// Esc anywhere in the drawer (or on the drawer box, or the page after a lost focus) goes Back, before the
+	// shell's Esc closes the drawer: a capture-phase hook, not the section's own handler
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			const el = view.current
+			if (
+				!escapeGoesBack({
+					key: e.key,
+					defaultPrevented: e.defaultPrevented,
+					target: e.target instanceof Node ? e.target : null,
+					view: el,
+					host: el?.closest(".wk-drawer") ?? null,
+				})
+			)
+				return
+			e.preventDefault()
+			e.stopPropagation()
+			onBackRef.current()
+		}
+		window.addEventListener("keydown", onKey, true)
+		return () => window.removeEventListener("keydown", onKey, true)
+	}, [])
 
 	useEffect(() => {
 		const abort = new AbortController()
@@ -170,7 +229,7 @@ export function TransmissionView({
 				if (abort.signal.aborted) return
 				setState(
 					e instanceof TransmissionNotFoundError
-						? { status: "missing" }
+						? { status: "missing", reason: e.reason }
 						: { status: "error", error: errorMessage(e) },
 				)
 			},
@@ -178,31 +237,27 @@ export function TransmissionView({
 		return () => abort.abort()
 	}, [data, key, attempt])
 
-	// the dock goes compact while this transmission's audio is the playing one
 	const host = open.origin.host
-	const visible = useDrawerVisible(host)
 	const audioId =
 		state.status === "ready" ? (state.t.artefacts[0]?.id ?? null) : null
-	useEffect(() => {
-		playback.setExpanded(host, audioId, visible)
-	}, [playback, host, audioId, visible])
-	useEffect(() => () => playback.setExpanded(host, null), [playback, host])
 
-	const onKeyDown = (e: ReactKeyboardEvent<HTMLElement>) => {
-		if (e.key !== "Escape") return
-		const target = e.target as HTMLElement
-		if (target.tagName === "INPUT" || target.closest("[role=menu]")) return
-		e.preventDefault()
-		e.stopPropagation()
-		onBack()
-	}
+	// the player's Next, Prev, Auto-next or Play all moved on from the recording shown here: the view follows
+	// (its content replaced, its origin kept)
+	const shown = useRef(audioId)
+	shown.current = audioId
+	useEffect(() => {
+		let before = playback.get().id
+		return playback.subscribe(s => {
+			const was = before
+			before = s.id
+			if (!followsPlayer(shown.current, was, s.id)) return
+			const next = playingTransmission(s, activityLists(services.activity))
+			if (next !== null) replaceTransmission(next.ref, next.summary)
+		})
+	}, [playback, services.activity])
 
 	return (
-		<section
-			className="wkt-view"
-			aria-label="Transmission"
-			onKeyDown={onKeyDown}
-		>
+		<section ref={view} className="wkt-view" aria-label="Transmission">
 			<div className="wkt-bar">
 				<Button
 					ref={back}
@@ -226,7 +281,7 @@ export function TransmissionView({
 				)}
 				{state.status === "missing" && (
 					<p className="wkt-note" role="status">
-						This transmission is no longer kept.
+						Not found: {state.reason}.
 					</p>
 				)}
 				{state.status === "error" && (
@@ -298,9 +353,11 @@ function Ready({
 					<span className="wkt-head-line">
 						<h3 className="wkt-title">{title}</h3>
 						<span className="wkt-gap" />
-						<time className="wkt-time" dateTime={t.startedAt}>
-							{startText(t.startedAt)}
-						</time>
+						{startText(t.startedAt) !== "" && (
+							<time className="wkt-time" dateTime={t.startedAt ?? undefined}>
+								{startText(t.startedAt)}
+							</time>
+						)}
 					</span>
 					<span className="wkt-head-line wkt-sub">
 						<span>{sub}</span>
@@ -480,7 +537,7 @@ function ChannelDoors({ t }: { t: TransmissionDto }) {
 						variant="tonal"
 						size="sm"
 						title="Everything heard on this channel, in Activity"
-						onClick={() => showChannel(services.activity, hz, stepAt(hz))}
+						onClick={() => openChannelHistory(services.activity, hz)}
 					>
 						{historyLabel(hz)}
 					</Button>
@@ -580,12 +637,7 @@ function Details({
 				([, v]) => v !== undefined,
 			)
 		: []
-	const copy = (value: string) => {
-		navigator.clipboard.writeText(value).then(
-			() => showAppToast("Copied"),
-			() => showAppToast("Could not copy", { tone: "warn" }),
-		)
-	}
+	const copy = (value: string) => void copyValue(value)
 	return (
 		<details
 			className="wkt-details"

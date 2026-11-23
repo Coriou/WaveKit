@@ -275,7 +275,8 @@ describe("loadTransmission", () => {
 		const t = await loadTransmission({ event: "evt_1" }, { api, summary })
 		expect(t.artefacts).toEqual([])
 		expect(t.gone).toContain("audio")
-		expect(t.noAudioReason).toBe("deleted")
+		// not listed is all the store said: never "deleted"
+		expect(t.noAudioReason).toBe("not-listed")
 	})
 
 	it("rejects a ref nothing names", async () => {

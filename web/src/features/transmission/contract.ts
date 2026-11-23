@@ -182,8 +182,17 @@ export interface TransmissionTone {
 	/** False for the scanner recorder today: it never looks for DCS. */
 	dcsChecked: boolean
 	from: "recorder" | "live-demod" | null
-	/** Why it is not measured: no facts stored, too little audio or an unsteady tone, or an unreadable value. */
-	why: "no-facts" | "undetermined" | "malformed" | null
+	/**
+	 * Why it is not measured: no facts stored, too little audio or an unsteady tone, an unreadable value, a kept
+	 * recording known only through its Activity row (its facts not read), a live transmission with no tone reading.
+	 */
+	why:
+		| "no-facts"
+		| "undetermined"
+		| "malformed"
+		| "no-recording"
+		| "live-none"
+		| null
 }
 
 export interface TransmissionArtefact {
@@ -224,7 +233,8 @@ export interface TransmissionDto {
 	sourceId: string | null
 	/** The raster channel, the measured centre and the saved name. */
 	channel: { hz: number | null; measuredHz: number | null; name: string | null }
-	startedAt: string
+	/** When the audio started; null when nothing says (the view then shows no time, never an epoch date). */
+	startedAt: string | null
 	endedAt: string | null
 	durationMs: number | null
 	close: { reason: string; complete: boolean } | null

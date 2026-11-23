@@ -207,21 +207,33 @@
 		margin: 4px 0 0;
 		accent-color: var(--wk-accent);
 	}
-	/* compact: the playing row is open in the visible panel; only the line and play/pause stay */
+	/* compact: the layout has no height for the full transport (Insufficient height, step 1); one line that
+	   still names what plays and can close it: play/pause, title over the progress, time, close */
 	.wkp-dock[data-compact] {
 		display: flex;
 		align-items: center;
 		gap: 10px;
-		padding: 4px 12px 4px 4px;
-		width: min(320px, 100%);
+		padding: 4px 4px 4px 4px;
+		width: min(420px, 100%);
 		margin: 0 auto;
+	}
+	.wkp-dock-cline {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.wkp-dock[data-compact] .wkp-dock-name {
+		font-size: var(--wk-fs-xs);
+		line-height: 1.2;
 	}
 	.wkp-dock[data-compact] .wkp-dock-play {
 		width: 28px;
 		height: 28px;
 	}
 	.wkp-dock-line {
-		flex: 1;
+		display: block;
 		height: 3px;
 		border-radius: 2px;
 		background: var(--wk-line-solid);

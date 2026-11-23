@@ -2,11 +2,14 @@
 // position, the stored JSON), what it probably is (a hypothesis from its stack: "Likely a paging-network idle
 // beacon …"), who earlier rows of its stack said it is when this decode does not (a separate "Latest known" block,
 // identity only), where, when and how strong it was heard, links to tune it and to its Scanner discovery, and the
-// rows folded with it (or, opened by a link, earlier events from the same sender).
+// rows folded with it (or, opened by a link, earlier events from the same sender). A transmission's event (a kept
+// recording, a live analog transmission, a call with audio) also offers Details, the door to its Transmission
+// view; a kept recording's ids and raw numbers sit in a collapsed expert section, never in its card.
 import type {
 	ActivityRecord,
 	ActivitySummary,
 	Discovery,
+	JsonValue,
 } from "@wavekit/api-types"
 import { useEffect, useMemo, useRef, useState } from "react"
 
@@ -20,8 +23,11 @@ import { Label } from "../../ui/Label.tsx"
 import { clockText, dateText, useDisplay } from "../display.ts"
 import { formatMHz } from "../format.ts"
 import { summaryOfRecord } from "../messages/card.ts"
+import { JsonView } from "../messages/JsonView.tsx"
 import { MessageCard } from "../messages/MessageCard.tsx"
 import { openDiscovery } from "../scanner/ui-store.ts"
+import { isTransmissionRow, openTransmission } from "../transmission/nav.ts"
+import { recordingChangeDetails } from "../transmission/words.ts"
 import { ActivityRow, FoldedRow } from "./ActivityList.tsx"
 import { RecordingBlock } from "./ActivityPlayback.tsx"
 import type { ActivityStack, KnownIdentity } from "./fold.ts"
@@ -234,6 +240,9 @@ export function ActivityDetail({
 	const alsoHeard = stack ? otherChannels(stack.channelsHz, hz) : []
 	const provenance =
 		record?.kind === "decoder-reception" ? record.payload.provenance : null
+	const transmission = item !== null && isTransmissionRow(item)
+	// a kept recording's receiver id is expert data (its Details), not a Heard row
+	const keptFile = item?.kind === "recording-change"
 
 	const detailItem = item
 		? withoutUnknownType(pagerDetailItem(item, record))
@@ -272,8 +281,24 @@ export function ActivityDetail({
 				)}
 				{stack && <WhatItIs stack={stack} />}
 				{stack && item && <LatestKnown known={knownFor(stack, item)} />}
-				{((entityKey !== null && v) || discovery !== null) && (
+				{((entityKey !== null && v) || discovery !== null || transmission) && (
 					<div className="wka-detail-actions">
+						{transmission && item && (
+							<Button
+								variant="tonal"
+								size="sm"
+								title="Everything known about this transmission"
+								onClick={() =>
+									openTransmission(
+										{ event: item.eventId },
+										{ host: "activity", label: "Activity" },
+										item,
+									)
+								}
+							>
+								Details
+							</Button>
+						)}
 						{entityKey !== null && v && (
 							<Button
 								variant="tonal"
@@ -364,7 +389,7 @@ export function ActivityDetail({
 							<dd>{item.decoderId}</dd>
 						</div>
 					)}
-					{item?.sourceId && (
+					{item?.sourceId && !keptFile && (
 						<div className="wka-field">
 							<dt>Receiver</dt>
 							<dd>{item.sourceId}</dd>
@@ -391,6 +416,10 @@ export function ActivityDetail({
 							</div>
 						)}
 				</dl>
+
+				{record?.kind === "recording-change" && (
+					<KeptRecordingDetails record={record} />
+				)}
 
 				{stack && stack.members.length > 1 ? (
 					<>
@@ -443,6 +472,31 @@ export function ActivityDetail({
 }
 
 const noop = () => undefined
+
+/** A kept recording's ids and raw numbers, collapsed: what the card no longer prints. */
+function KeptRecordingDetails({
+	record,
+}: {
+	record: Extract<ActivityRecord, { kind: "recording-change" }>
+}) {
+	const rows = recordingChangeDetails(record.payload)
+	return (
+		<details className="wka-expert">
+			<summary>Ids and raw values</summary>
+			<dl className="wka-fields">
+				{rows.map(r => (
+					<div key={r.term} className="wka-field">
+						<dt>{r.term}</dt>
+						<dd>
+							<code>{r.value}</code>
+						</dd>
+					</div>
+				))}
+			</dl>
+			<JsonView data={record.payload as unknown as JsonValue} maxHeight={220} />
+		</details>
+	)
+}
 
 /**
  * Who earlier rows of the stack said it is, when this decode does not (an aircraft's callsign on a

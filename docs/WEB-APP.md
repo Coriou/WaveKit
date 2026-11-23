@@ -615,11 +615,15 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
 ### The Transmission view
 
 Everything known about one transmission, in the drawer you are in: **Details** on an open
-Recordings row, a transmission's row in Activity (a scanner recording, a live analog transmission,
-a call with audio; other rows keep their event detail), one of the tuned card's earlier rows, or the
-player's title (in Recordings or Activity when one of them is open, else in Activity). **‹ Back**
-(or `Esc`) names where you came from and returns there in one step: the same list, search, scroll
-and open row. Opening it never changes another panel's search.
+Recordings row, a transmission's row in Activity or in a pinned column (a scanner recording, a live
+analog transmission, a call with audio; other rows keep their event detail), **Details** on such an
+event's detail, one of the tuned card's earlier rows, or the player's title (in Recordings or
+Activity when one of them is open, else in Activity; played from an Activity list, it opens on that
+row). **‹ Back** (or `Esc` anywhere in the drawer) names where you came from and returns there in
+one step: the same list, search, scroll and open row; when the view opened the drawer, Back closes
+it again and puts focus back on what you clicked. Opening it never changes another panel's search,
+and opening another transmission while it is open (the player's title, a tuned card row) keeps that
+same Back. When nothing can be found the view says `Not found` and why.
 
 From the top: the time the audio starts (with the date when it is not today), the channel in MHz
 on its raster and the length in seconds; the waveform and play disc (or one sentence when there is
@@ -627,18 +631,27 @@ no audio, such as `The recording was deleted`); **What we know**, a few short ro
 
 - **Tone**, always for analog FM: `CTCSS 88.5 Hz`, `DCS 023`, `No tone heard` (it listened and heard
   none; the scanner recorder does not check DCS codes), or `Not measured` with why (recordings made
-  before WaveKit stored the tone, too little audio, or a tone that was not steady).
+  before WaveKit stored the tone, too little audio, a tone that was not steady, a scanner recording
+  whose file is not listed, or a live transmission that stored no tone reading).
 - **Signal** (`Strong, 24 dB over the noise`), **Ended** (`The transmission ended`,
   `Cut: the receiver was retuned`) and **Kept** (`Speech heard over a tone`), each only when known.
 
 Then the **Conversation**: the other parts of the same transmission, oldest first, this one marked,
 with **Play all** in that order; recordings of the same channel close in time are titled
 `Around this time on this channel`, since WaveKit cannot yet tell they were one exchange. Choosing
-one shows it in place; Back still returns to where you came from. **On this channel** says how
-often the channel was heard and its usual tone, with three doors that do leave: **History of …**,
-**Open in Scanner** and **Tune**. **Details**, collapsed (remembered per browser), holds every id
+one shows it in place; Back still returns to where you came from. While it shows the recording that
+plays, the player's **Next**, **Previous** and **Auto-next** move the view along with it. **On this
+channel** says how often the channel was heard and its usual tone, with three doors: **History of
+…** and **Open in Scanner** close the view and show that place (Back does not come back to it), and
+**Tune**. **Details**, collapsed (remembered per browser), holds every id
 with a copy button, the measured frequency in Hz with its offset, the UTC times, the codes, the
-recording admission's numbers, the file size, **Download WAV** and the stored JSON.
+recording admission's numbers, the file size, **Download WAV** and the stored JSON. **Copy** says
+`Copied`, or that the browser blocked it.
+
+A scanner recording's event detail in Activity speaks the same way: **Channel** in MHz, **Started**,
+**Duration** in seconds and **Kept at**, never its ids or ISO times; those, the measured frequency in
+whole Hz and the stored JSON are under **Ids and raw values**, collapsed. A live analog
+transmission's detail says its length in seconds and how it ended in words.
 
 ### Playing recordings
 
@@ -661,10 +674,11 @@ list it was started from, in the order shown, and only the rows with a recording
 drawer and each pinned column are separate lists. **Previous** after the first 2 s goes back to the
 start; before that it plays the previous recording, and it is greyed out when there is none.
 **Auto-next** plays the next recording when one ends (never after a failure); it is on by default
-and remembered per browser. While the open Activity event or Recordings row is the one playing and
-its drawer is the one on screen, the player shrinks to a thin progress line with play/pause, and
-that row's waveform is where you seek: click or drag on it (a paused one plays on from there). A
-recording that fails keeps the full player, which says why:
+and remembered per browser. An open Activity event or Recordings row only drives this player: its
+disc plays and pauses it and its waveform is where you seek (click or drag on it; a paused one plays
+on from there), while the player stays whole, with its title and **Close**. Only a window too short
+for the full player shrinks it to one line: play/pause, the title over a progress line, the time and
+**Close**. A recording that fails keeps the full player, which says why:
 `This recording is no longer on the receiver`,
 `Too many recordings are being read; try again in a moment`,
 `The receiver is busy; try again`, or `Session expired, pair again`.

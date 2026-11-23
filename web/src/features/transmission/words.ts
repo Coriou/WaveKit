@@ -2,7 +2,13 @@
 // the Transmission view uses: the channel on its raster in MHz, local times (the date only when not today),
 // durations in seconds, one rounded number per row with what it is relative to. A code the table lacks shows
 // nothing in "What we know" and its raw value in Details.
-import type { RecordingCut, RecordingSpeech } from "@wavekit/api-types"
+import type {
+	ActivitySummary,
+	DecodeField,
+	RecordingChangePayload,
+	RecordingCut,
+	RecordingSpeech,
+} from "@wavekit/api-types"
 
 import { clockText, dateText, sameDay } from "../display.ts"
 import { channelMHz } from "../naming.ts"
@@ -94,6 +100,18 @@ export function toneText(raw: unknown): string {
 	return tone.kind === "ctcss" ? ctcssText(tone.hz) : dcsText(tone.code)
 }
 
+/** Why a tone is not measured, one hint per reason (TransmissionTone["why"]). */
+export const NOT_MEASURED_WORDS: Readonly<
+	Record<NonNullable<TransmissionTone["why"]>, string>
+> = {
+	"no-facts": "This recording did not store its tone",
+	malformed: "The stored tone could not be read",
+	undetermined: "Too little audio, or the tone was not steady enough to tell",
+	"no-recording":
+		"Its recording is not listed here, so its stored tone could not be read",
+	"live-none": "Listening stored no tone reading for this live transmission",
+}
+
 /** The Tone row of a transmission: its value and, when it is not a plain value, a hint saying why. */
 export function toneRow(t: TransmissionTone): {
 	value: string
@@ -108,13 +126,10 @@ export function toneRow(t: TransmissionTone): {
 			value: "No tone heard",
 			hint: t.dcsChecked ? null : "This recorder does not check DCS codes",
 		}
-	const hint =
-		t.why === "no-facts"
-			? "This recording did not store its tone"
-			: t.why === "malformed"
-				? "The stored tone could not be read"
-				: "Too little audio, or the tone was not steady enough to tell"
-	return { value: "Not measured", hint }
+	return {
+		value: "Not measured",
+		hint: NOT_MEASURED_WORDS[t.why ?? "undetermined"],
+	}
 }
 
 // ---- numbers, times, frequencies
@@ -134,8 +149,12 @@ export function channelText(hz: number | null | undefined): string | null {
 	return `${channelMHz(hz)} MHz`
 }
 
-/** "17:30:21", or "12 Nov, 17:30:21" when it is not today, on the chosen clock. */
-export function startText(iso: string, now: Date = new Date()): string {
+/** "17:30:21", or "12 Nov, 17:30:21" when it is not today, on the chosen clock; "" with no valid time. */
+export function startText(
+	iso: string | null | undefined,
+	now: Date = new Date(),
+): string {
+	if (typeof iso !== "string" || !Number.isFinite(Date.parse(iso))) return ""
 	const time = clockText(iso, { seconds: true })
 	if (time === "") return ""
 	return sameDay(iso, now) ? time : `${dateText(iso)}, ${time}`
@@ -165,8 +184,83 @@ export function measuredText(
 /** Why there is no audio, in one plain sentence (the Listen section's place). */
 export const NO_AUDIO_WORDS: Readonly<Record<string, string>> = {
 	deleted: "The recording was deleted",
+	"not-listed": "Its recording is not listed on the receiver",
 	"not-recorded": "Not recorded",
 	encrypted: "Encrypted: not recorded",
 	"refused:slots": "Not recorded: every recording slot was busy",
 	"refused:cpu": "Not recorded: WaveKit was too busy",
+}
+
+// ---- Activity rows that are transmissions (the event detail's fields)
+
+/** A field of a row's detail, in words (no unit: the value says it). */
+function wordField(
+	key: string,
+	label: string,
+	value: string | null,
+): DecodeField[] {
+	return value === null || value === "" ? [] : [{ key, label, value }]
+}
+
+/**
+ * A kept recording's Activity record as the detail shows it: the channel on its raster, when its audio started
+ * and how long it is. Ids, the measured Hz and the ISO times are expert data (recordingChangeDetails).
+ */
+export function recordingChangeFields(
+	p: RecordingChangePayload,
+): DecodeField[] {
+	return [
+		...wordField(
+			"channel",
+			"Channel",
+			channelText(p.channel?.frequencyHz ?? p.frequencyHz),
+		),
+		...wordField("started", "Started", startText(p.observationStartedAt)),
+		...wordField("duration", "Duration", durationWords(p.durationMs)),
+		...wordField("kept", "Kept at", startText(p.finalizedAt)),
+	]
+}
+
+/** The same from the list's row alone (before or without its stored record). */
+export function recordingRowFields(s: ActivitySummary): DecodeField[] {
+	const ms =
+		s.recording?.durationMs ?? s.fields.find(f => f.key === "durationMs")?.value
+	return [
+		...wordField(
+			"channel",
+			"Channel",
+			channelText(s.channel?.frequencyHz ?? s.frequencyHz),
+		),
+		...wordField(
+			"duration",
+			"Duration",
+			durationWords(typeof ms === "number" ? ms : null),
+		),
+	]
+}
+
+/** The expert Details of a kept recording's record: every id and raw number, labelled, in a fixed order. */
+export function recordingChangeDetails(
+	p: RecordingChangePayload,
+): { term: string; value: string }[] {
+	const channelHz = p.channel?.frequencyHz ?? null
+	const rows: [string, string | null][] = [
+		["Recording", p.recordingId],
+		["Discovery", p.discoveryId],
+		["Owner discovery", p.channel?.discoveryId ?? null],
+		["Observation", p.observationId],
+		["Receiver", p.sourceId],
+		[
+			"Measured",
+			p.frequencyHz !== null ? measuredText(p.frequencyHz, channelHz) : null,
+		],
+		["Channel Hz", channelHz !== null ? String(Math.round(channelHz)) : null],
+		["Observation start (UTC)", p.observationStartedAt],
+		["Kept (UTC)", p.finalizedAt],
+		["Duration ms", String(p.durationMs)],
+		["Change", p.change],
+	]
+	return rows
+		.filter((r): r is [string, string] => r[1] !== null && r[1] !== "")
+		.map(([term, value]) => ({ term, value }))
 }

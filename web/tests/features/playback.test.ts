@@ -13,7 +13,6 @@ import {
 	PREV_RESTART_S,
 	PlaybackService,
 	canPrev,
-	compactOf,
 	discPauses,
 	fileErrorText,
 	heldOf,
@@ -783,58 +782,164 @@ describe("PlaybackService: live hold (one subscriber)", () => {
 	})
 })
 
-describe("PlaybackService: marks and the compact dock", () => {
-	it("marks one id with its phase; compact only under the visible expanded row of the playing id", async () => {
+describe("PlaybackService: marks", () => {
+	it("marks one id with its phase", async () => {
 		const s = setup()
 		await playing(s, "a")
 		expect(markOf("a")(s.p.get())).toBe("playing")
 		expect(markOf("b")(s.p.get())).toBeNull()
-		s.p.setExpanded("recordings", "b")
-		expect(compactOf(s.p.get())).toBe(false)
-		s.p.setExpanded("activity", "a", false)
-		expect(compactOf(s.p.get())).toBe(false)
-		s.p.setExpanded("activity", "a", true)
-		expect(compactOf(s.p.get())).toBe(true)
-		s.p.setExpanded("activity", null)
-		expect(compactOf(s.p.get())).toBe(false)
+	})
+
+	it("keeps no per-surface row state: no surface can shrink the dock", async () => {
+		const s = setup()
+		await playing(s, "a")
+		expect(Object.keys(s.p.get())).not.toContain("expanded")
+		expect("setExpanded" in s.p).toBe(false)
 	})
 })
 
-describe("PlaybackService: a failed play keeps the full dock", () => {
-	it("an element error under the open row is not compact, so its error line shows", async () => {
-		const s = setup()
-		await playing(s, "a")
-		s.p.setExpanded("activity", "a", true)
-		expect(compactOf(s.p.get())).toBe(true)
-		s.audio.emit("error")
-		expect(s.p.get().phase).toBe("error")
-		expect(compactOf(s.p.get())).toBe(false)
-	})
+// The player model's transition table (service.ts, top comment): one test per cell that moves.
+type Phase = "idle" | "loading" | "playing" | "paused" | "ended" | "error"
+type PlayerEvent =
+	| "play row"
+	| "play all"
+	| "next/prev"
+	| "close"
+	| "end"
+	| "error"
 
-	it("a fetch that fails while its row is open shows the full dock with the reason", async () => {
-		const s = setup({ fail: { a: "Recording not found" } })
-		s.p.setExpanded("recordings", "a", true)
+/** A service in `phase` with "a" in the player (queue a, b; Auto-next as given). */
+async function inPhase(phase: Phase, autoNext = true) {
+	const s = setup({
+		hold: phase === "loading",
+		fail: phase === "error" ? { a: "boom" } : {},
+	})
+	s.p.setAutoNext(autoNext)
+	if (phase === "idle") return s
+	s.p.play("a", Q("a", "b"))
+	await flush()
+	if (phase === "paused") s.p.pause()
+	if (phase === "ended") {
+		s.p.pause()
+		s.audio.ended = true
+		s.audio.emit("ended")
+		s.audio.ended = false
+	}
+	expect(s.p.get().phase).toBe(phase)
+	return s
+}
+
+/** Fires `event` on the service. */
+function fire(s: ReturnType<typeof setup>, event: PlayerEvent): void {
+	switch (event) {
+		case "play row":
+			s.p.play("b", Q("a", "b"), 0, "B")
+			return
+		case "play all":
+			s.p.play("b", Q("b", "a"), 0, "B")
+			return
+		case "next/prev":
+			s.p.next()
+			return
+		case "close":
+			s.p.stop()
+			return
+		case "end":
+			s.audio.ended = true
+			s.audio.emit("ended")
+			return
+		case "error":
+			s.audio.emit("error")
+			return
+	}
+}
+
+const TABLE: Record<Phase, Record<PlayerEvent, Phase>> = {
+	idle: {
+		"play row": "loading",
+		"play all": "loading",
+		"next/prev": "idle",
+		close: "idle",
+		end: "idle",
+		error: "idle",
+	},
+	loading: {
+		"play row": "loading",
+		"play all": "loading",
+		"next/prev": "loading",
+		close: "idle",
+		end: "loading",
+		// an element error is not the loading file's: its failed fetch is (the test below)
+		error: "loading",
+	},
+	playing: {
+		"play row": "loading",
+		"play all": "loading",
+		"next/prev": "loading",
+		close: "idle",
+		end: "loading",
+		error: "error",
+	},
+	paused: {
+		"play row": "loading",
+		"play all": "loading",
+		"next/prev": "loading",
+		close: "idle",
+		end: "ended",
+		error: "error",
+	},
+	ended: {
+		"play row": "loading",
+		"play all": "loading",
+		"next/prev": "loading",
+		close: "idle",
+		end: "ended",
+		error: "ended",
+	},
+	error: {
+		"play row": "loading",
+		"play all": "loading",
+		"next/prev": "loading",
+		close: "idle",
+		end: "error",
+		error: "error",
+	},
+}
+
+describe("PlaybackService: the transition table", () => {
+	for (const [from, row] of Object.entries(TABLE) as [
+		Phase,
+		Record<PlayerEvent, Phase>,
+	][])
+		for (const [event, to] of Object.entries(row) as [PlayerEvent, Phase][])
+			it(`${from} + ${event} → ${to}`, async () => {
+				const s = await inPhase(from)
+				fire(s, event)
+				expect(s.p.get().phase).toBe(to)
+			})
+
+	it("loading + error: a failed fetch is the error", async () => {
+		const s = setup({ fail: { a: "boom" } })
 		s.p.play("a")
-		expect(compactOf(s.p.get())).toBe(true)
+		expect(s.p.get().phase).toBe("loading")
 		await flush()
-		expect(s.p.get()).toMatchObject({
-			phase: "error",
-			error: "Recording not found",
-		})
-		expect(compactOf(s.p.get())).toBe(false)
+		expect(s.p.get()).toMatchObject({ phase: "error", error: "boom" })
 	})
 
-	it("an error left on a paused one (a refused start) keeps the full dock too", () => {
-		const base = setup().p.get()
-		expect(
-			compactOf({
-				...base,
-				id: "a",
-				phase: "paused",
-				error: "boom",
-				expanded: { activity: { id: "a", visible: true } },
-			}),
-		).toBe(false)
+	it("playing + end without Auto-next (or at the queue's end) → ended", async () => {
+		const s = await inPhase("playing", false)
+		fire(s, "end")
+		expect(s.p.get().phase).toBe("ended")
+	})
+
+	it("the same recording again plays on from where it is asked, no new fetch", async () => {
+		for (const from of ["playing", "paused", "ended"] as const) {
+			const s = await inPhase(from)
+			const fetches = s.fetchFile.mock.calls.length
+			s.p.play("a", Q("a", "b"), 0.5)
+			expect(s.p.get().phase).toBe("playing")
+			expect(s.fetchFile.mock.calls.length).toBe(fetches)
+		}
 	})
 })
 

@@ -55,7 +55,6 @@ import { tuningStep } from "../../plot/maths.ts"
 import { playbackIdOf } from "../playback/keep.ts"
 import { PlayDisc, usePlaybackMark, WaveView } from "../playback/PlaybackUi.tsx"
 import type { PlaybackService, QueueRef } from "../playback/service.ts"
-import { useDrawerVisible } from "../playback/visible.ts"
 import { PlayGlyph, RecIcon } from "./icons.tsx"
 import { listKeyAction } from "./keys.ts"
 import {
@@ -103,24 +102,10 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 	const unavailable = useStore(recordings, recordingsUnavailable)
 	const readOnly = useReadOnly()
 	const player = services.playback
-	// the open row: the dock goes compact while it is the playing one
-	const openId = useStore(recordingsUi, s => s.openId)
-	const openPid = useStore(recordings, s => {
-		const item =
-			openId === null ? undefined : s.items.find(r => r.id === openId)
-		return item ? playbackIdOf(item) : null
-	})
-	// the Transmission view pushed in place of the list (Details); it owns the compact dock while shown
+	// the Transmission view pushed in place of the list (Details)
 	const tx = useStore(transmissionNav, s =>
 		s?.origin.host === "recordings" ? s : null,
 	)
-	const txOpen = tx !== null
-	// compact only while this drawer is the visible panel
-	const visible = useDrawerVisible("recordings")
-	useEffect(() => {
-		if (!txOpen) player.setExpanded("recordings", openPid, visible)
-	}, [player, openPid, visible, txOpen])
-	useEffect(() => () => player.setExpanded("recordings", null), [player])
 
 	// open: the list for the current search, following the catalogue's notices (no polling)
 	useEffect(() => {

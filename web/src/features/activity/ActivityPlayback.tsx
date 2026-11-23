@@ -1,7 +1,7 @@
 // The disc on an Activity row or card with audio, and the detail's Recording block (the waveform as a seek
-// view of the one player, Keep). The dock goes compact while the open event's recording is the playing one.
+// view of the one player, Keep). Both only drive the one player; the dock stays the transport.
 import type { ActivitySummary } from "@wavekit/api-types"
-import { useEffect, useMemo, useRef } from "react"
+import { useMemo, useRef } from "react"
 
 import { useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
@@ -9,7 +9,6 @@ import { Label } from "../../ui/Label.tsx"
 import { KeepButton, PlayDisc, WaveView } from "../playback/PlaybackUi.tsx"
 import type { QueueRef } from "../playback/service.ts"
 import { foldedOf } from "./fold.ts"
-import { useDrawerVisible } from "../playback/visible.ts"
 import {
 	activityListKey,
 	activityQueue,
@@ -43,15 +42,8 @@ export function ActivityDisc({
 
 /** The open event's recording: disc, waveform (seek view) and Keep. */
 export function RecordingBlock({ item }: { item: ActivitySummary }) {
-	const { playback, activity } = useServices()
+	const { activity } = useServices()
 	const rec = recordingOf(item)
-	const id = rec?.id ?? null
-	// compact only while the Activity drawer showing it is the visible panel
-	const visible = useDrawerVisible("activity")
-	useEffect(() => {
-		playback.setExpanded("activity", id, visible)
-	}, [playback, id, visible])
-	useEffect(() => () => playback.setExpanded("activity", null), [playback])
 	// the list it was opened from, as shown (its own queue key)
 	const feed = activity.stackFeed()
 	const list = activityListKey(feed)

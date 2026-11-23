@@ -535,6 +535,20 @@
 		flex-wrap: wrap;
 		gap: 8px;
 	}
+	/* a kept recording's ids and raw numbers: expert, collapsed */
+	.wka-expert summary {
+		cursor: pointer;
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-2);
+	}
+	.wka-expert[open] {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+	.wka-expert code {
+		overflow-wrap: anywhere;
+	}
 	.wka-fields {
 		margin: 0;
 		display: grid;
