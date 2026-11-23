@@ -319,6 +319,8 @@ interface DecoderState {
 	assignedSourceId: string | null
 	/** Last known health state for change detection */
 	lastHealth: DecoderHealth
+	/** The last health sent on `decoder:health` (publishedHealth), for change detection. */
+	lastPublishedHealth?: DecoderHealth
 	/** Timestamp of last output received */
 	lastOutputAt: Date | null
 	/** Version validation result (Requirements 27.1, 27.2, 27.3) */
@@ -449,6 +451,28 @@ function sameJsonValue(a: unknown, b: unknown): boolean {
 		return true
 	}
 	return false
+}
+
+/** A finite Date, else undefined. */
+function validDate(at: Date | undefined): Date | undefined {
+	return at instanceof Date && Number.isFinite(at.getTime()) ? at : undefined
+}
+
+/** The newer of two output times; an unreadable one counts as none. */
+function newestOutput(
+	a: Date | null | undefined,
+	b: Date | null | undefined,
+): Date | undefined {
+	const x = validDate(a ?? undefined)
+	const y = validDate(b ?? undefined)
+	if (x === undefined) return y
+	if (y === undefined) return x
+	return y.getTime() > x.getTime() ? y : x
+}
+
+/** A non-negative finite count, else 0 (a malformed adapter counter adds nothing). */
+function finiteCount(n: number | undefined): number {
+	return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0
 }
 
 /** A parent placement start failed (fixed text, no cause). */
@@ -2203,6 +2227,8 @@ export class DecoderManager extends EventEmitter {
 						? undefined
 						: this.plannedChannelWidthHz(parent, caps))
 			}
+			const own = state.decoder.getStatus()
+			const lastEventAt = newestOutput(own.lastOutputAt, state.lastOutputAt)
 			return [
 				{
 					sourceId: placement.sourceId,
@@ -2213,8 +2239,11 @@ export class DecoderManager extends EventEmitter {
 					reach: placement.reach,
 					origin: placement.origin,
 					primary: placement.primary,
-					running: state.decoder.getStatus().running,
+					running: own.running,
 					costCores: placement.costCores,
+					// This placement's own worker: what it published, and when last.
+					eventsOut: own.stats.eventsOut,
+					lastEventAt: lastEventAt?.toISOString() ?? null,
 					...(state.suspension
 						? {
 								suspension: {
@@ -4807,6 +4836,32 @@ export class DecoderManager extends EventEmitter {
 	getStatus(id: string): DecoderStatus | undefined {
 		const state = this.decoders.get(id)
 		if (!state) return undefined
+		return this.statusOf(state, this.placementWorkersOf(state))
+	}
+
+	/** Every decoder's placement workers, by parent id: built once per status list (getAllStatus). */
+	private placementWorkersByParent(): Map<string, DecoderState[]> {
+		const byParent = new Map<string, DecoderState[]>()
+		for (const state of this.decoders.values()) {
+			if (state.parentId === undefined) continue
+			const workers = byParent.get(state.parentId)
+			if (workers) workers.push(state)
+			else byParent.set(state.parentId, [state])
+		}
+		return byParent
+	}
+
+	/** One decoder's placement workers (the states placed for it, `parentId`). */
+	private placementWorkersOf(parent: DecoderState): DecoderState[] {
+		return [...this.decoders.values()].filter(
+			state => state !== parent && state.parentId === parent.config.id,
+		)
+	}
+
+	private statusOf(
+		state: DecoderState,
+		workers: readonly DecoderState[],
+	): DecoderStatus {
 		const suspension =
 			this.config.enablement && !state.placement && state.suspension
 				? {
@@ -4886,8 +4941,92 @@ export class DecoderManager extends EventEmitter {
 				idleTimeoutMs: this.config.idleTimeout,
 			}),
 			...this.placementTargetFields(state),
-			...this.placementLastOutput(state),
+			...this.placementLastOutput(state, workers),
+			...this.placementTotals(state, workers),
 			...this.counterFields(state),
+		}
+	}
+
+	/**
+	 * A parent's totals over its placement workers (the states placed for it, `parentId`):
+	 * `stats` and `rateHistory` summed with its own, and `health` lifted from idle to running
+	 * while a running worker produced output within `idleTimeout` (the window the health check
+	 * idles a decoder after, performHealthChecks). Nothing for a decoder without workers: its
+	 * own counters are its totals. A faulted or restarting parent keeps its own health (its own
+	 * process failed, whatever its workers do).
+	 */
+	private placementTotals(
+		parent: DecoderState,
+		workers: readonly DecoderState[],
+	): Partial<Pick<DecoderStatus, "stats" | "rateHistory" | "health">> {
+		if (workers.length === 0) return {}
+		const own = parent.decoder.getStatus()
+		const stats = { ...own.stats }
+		let rateHistory = own.rateHistory ? [...own.rateHistory] : undefined
+		for (const worker of workers) {
+			const status = worker.decoder.getStatus()
+			stats.bytesIn += finiteCount(status.stats.bytesIn)
+			stats.eventsOut += finiteCount(status.stats.eventsOut)
+			stats.errors += finiteCount(status.stats.errors)
+			const history = status.rateHistory
+			// Rate buckets are wall minutes on every adapter: equal lengths align.
+			if (history !== undefined) {
+				// The first worker's buckets are sanitised like every sum's (finiteCount).
+				if (rateHistory === undefined) rateHistory = history.map(finiteCount)
+				else if (rateHistory.length === history.length)
+					rateHistory = rateHistory.map((n, i) => n + finiteCount(history[i]))
+			}
+		}
+		const health = this.publishedHealth(parent, workers)
+		return {
+			stats,
+			...(rateHistory !== undefined ? { rateHistory } : {}),
+			...(health !== parent.lastHealth ? { health } : {}),
+		}
+	}
+
+	/**
+	 * The health a decoder publishes, on REST (getStatus, placementTotals) and on the WS
+	 * `decoder:health` (publishHealth) alike: its own, except that an idle parent is running while
+	 * a running worker that is neither faulted nor restarting produced output within
+	 * `idleTimeout` (the window performHealthChecks idles a decoder after).
+	 */
+	private publishedHealth(
+		state: DecoderState,
+		workers?: readonly DecoderState[],
+	): DecoderHealth {
+		if (state.lastHealth !== "idle") return state.lastHealth
+		const now = Date.now()
+		for (const worker of workers ?? this.placementWorkersOf(state)) {
+			const status = worker.decoder.getStatus()
+			const at = newestOutput(worker.lastOutputAt, status.lastOutputAt)
+			if (
+				status.running &&
+				worker.lastHealth !== "faulted" &&
+				worker.lastHealth !== "restarting" &&
+				at !== undefined &&
+				now - at.getTime() <= this.config.idleTimeout
+			)
+				return "running"
+		}
+		return "idle"
+	}
+
+	/** Sends `decoder:health` when the decoder's published health (publishedHealth) changed. */
+	private publishHealth(
+		state: DecoderState,
+		workers?: readonly DecoderState[],
+	): void {
+		const health = this.publishedHealth(state, workers)
+		if (state.lastPublishedHealth === health) return
+		state.lastPublishedHealth = health
+		try {
+			this.emit("decoder:health", state.decoder.id, health)
+		} catch (err) {
+			this.log.error(
+				{ err: safeErrorFields(err), decoderId: state.decoder.id },
+				"Error handling decoder health event, continuing operation",
+			)
 		}
 	}
 
@@ -4914,22 +5053,26 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * A decoder's placement workers (ids `<decoder>#<channel>@<source>`) decode
 	 * for it, so its last output is the newest of its own and theirs; without
-	 * this an instance decoder showed its parent's old output time.
+	 * this an instance decoder showed its parent's old output time. Each state's
+	 * time is the newer of its adapter's stamp and the manager's own (set on
+	 * every output it forwards), so an adapter that does not stamp still counts.
 	 */
 	private placementLastOutput(
 		parent: DecoderState,
+		workers: readonly DecoderState[],
 	): Pick<DecoderStatus, "lastOutputAt"> {
-		let latest = parent.decoder.getStatus().lastOutputAt
-		for (const state of this.decoders.values()) {
-			if (state.parentId !== parent.config.id) continue
-			const at = state.decoder.getStatus().lastOutputAt
-			if (
-				at instanceof Date &&
-				Number.isFinite(at.getTime()) &&
-				(latest === undefined || at.getTime() > latest.getTime())
+		let latest = newestOutput(
+			parent.decoder.getStatus().lastOutputAt,
+			workers.length > 0 ? parent.lastOutputAt : null,
+		)
+		for (const state of workers)
+			latest = newestOutput(
+				latest,
+				newestOutput(
+					state.lastOutputAt,
+					state.decoder.getStatus().lastOutputAt,
+				),
 			)
-				latest = at
-		}
 		return latest !== undefined ? { lastOutputAt: latest } : {}
 	}
 
@@ -5031,7 +5174,17 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	getAllStatus(): DecoderStatus[] {
-		return this.getAllDecoders().map(decoder => this.getStatus(decoder.id)!)
+		// One pass for every parent's workers, not one per decoder (O(N), not O(N²)).
+		const byParent = this.placementWorkersByParent()
+		// The decoders getAllDecoders lists, in its order.
+		return Array.from(this.decoders.values())
+			.filter(state => state.owner !== "placement")
+			.map(state =>
+				this.statusOf(
+					state,
+					(byParent.get(state.config.id) ?? []).filter(w => w !== state),
+				),
+			)
 	}
 
 	/**
@@ -9037,6 +9190,18 @@ export class DecoderManager extends EventEmitter {
 				)
 			}
 		}
+		// A parent's published health also follows its workers' output (publishedHealth), which
+		// raises no health change of its own: re-checked here, once per parent.
+		for (const [parentId, workers] of this.placementWorkersByParent()) {
+			const parent = this.decoders.get(parentId)
+			if (parent === undefined) continue
+			// Nothing sent yet: clients hold its own health (no event lifted it).
+			parent.lastPublishedHealth ??= parent.lastHealth
+			this.publishHealth(
+				parent,
+				workers.filter(w => w !== parent),
+			)
+		}
 	}
 
 	/** Consecutive unstable runs reached the crash-loop threshold. */
@@ -9105,6 +9270,8 @@ export class DecoderManager extends EventEmitter {
 	): void {
 		if (state.lastHealth !== health) {
 			const previousHealth = state.lastHealth
+			// Nothing sent yet: what clients hold is the health published until now.
+			state.lastPublishedHealth ??= this.publishedHealth(state)
 			state.lastHealth = health
 
 			this.log.info(
@@ -9116,8 +9283,22 @@ export class DecoderManager extends EventEmitter {
 				"Decoder health changed",
 			)
 
-			// Emit health event (Requirement 20.4)
-			this.emit("decoder:health", state.decoder.id, health)
+			// Emit health event (Requirement 20.4): the published value, as REST shows it.
+			this.publishHealth(state)
+			// A placement worker's health is part of its parent's (placementTotals):
+			// the parent's health and status are published again (decoder:status on WS).
+			if (state.parentId !== undefined) {
+				const parent = this.decoders.get(state.parentId)
+				if (parent !== undefined && parent !== state) this.publishHealth(parent)
+				try {
+					this.emit("decoder:status-changed", state.parentId)
+				} catch (err) {
+					this.log.error(
+						{ err: safeErrorFields(err), decoderId: state.parentId },
+						"Error handling decoder status-changed event, continuing operation",
+					)
+				}
+			}
 		}
 	}
 }

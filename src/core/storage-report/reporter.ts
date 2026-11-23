@@ -7,6 +7,7 @@ import {
 import type {
 	StorageActivityRetention,
 	StorageArea,
+	StorageAreaPart,
 	StorageFilesystem,
 	StorageKeptSummary,
 	StorageLowSpaceState,
@@ -20,7 +21,11 @@ import type {
 } from "./contract.js"
 import { scanStorageAreas } from "./scan.js"
 import { DEFAULT_STORAGE_SCAN_LIMITS } from "./scan.js"
-import type { StorageScanFs, StorageScanLimits } from "./scan.js"
+import type {
+	StorageAreaScan,
+	StorageScanFs,
+	StorageScanLimits,
+} from "./scan.js"
 
 type Num = number | bigint
 
@@ -160,7 +165,8 @@ export function createStorageReporter(
 		const byId = new Map(scans.map(s => [s.id, s]))
 		const out: StorageArea[] = areas.map(source => {
 			const s = byId.get(source.id)
-			return {
+			const parts = partsOf(source, s)
+			const area: StorageArea = {
 				id: source.id,
 				class: STORAGE_AREA_CLASS[source.id],
 				bytes: s?.bytes ?? 0,
@@ -171,6 +177,8 @@ export function createStorageReporter(
 				cap: source.capBytes === null ? null : { bytes: source.capBytes },
 				retention: source.id === "activity" ? readRetention() : null,
 			}
+			if (parts !== null) area.parts = parts
+			return area
 		})
 		let state: StorageLowSpaceState = "unknown"
 		if (min !== null && filesystem !== null) {
@@ -188,6 +196,42 @@ export function createStorageReporter(
 				state,
 			},
 		}
+	}
+
+	/**
+	 * The split of a source with parts (STORAGE_SCANNER_PART_IDS order): each part's scanned
+	 * totals and bounds. A part the scan did not reach reads 0 (the area is partial then).
+	 */
+	function partsOf(
+		source: StorageAreaSource,
+		scan: StorageAreaScan | undefined,
+	): StorageAreaPart[] | null {
+		const split = source.parts
+		if (split === undefined || source.paths.length !== 1) return null
+		const partial = scan === undefined || scan.partialReason !== null
+		return [...split.parts, split.fallback].map((p, i) => {
+			const found = scan?.parts?.[i]
+			const bytes = found?.bytes ?? 0
+			const files = found?.files ?? 0
+			// maxFiles counts in its prune's unit (StorageAreaPartSource.boundedFile).
+			const boundedFiles = found?.boundedFiles ?? files
+			// maxBytes counts the bytes its cap counts (StorageAreaPartSource.boundedPath).
+			const boundedBytes = found?.boundedBytes ?? bytes
+			const { maxBytes, maxFiles } = p.bounds
+			return {
+				id: p.id,
+				bytes,
+				files,
+				exists: found?.exists ?? false,
+				boundedFiles,
+				bounds: { ...p.bounds },
+				overBound:
+					partial || (maxBytes === null && maxFiles === null)
+						? null
+						: (maxBytes !== null && boundedBytes > maxBytes) ||
+							(maxFiles !== null && boundedFiles > maxFiles),
+			}
+		})
 	}
 
 	return {

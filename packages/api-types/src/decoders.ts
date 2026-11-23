@@ -469,6 +469,14 @@ export interface DecoderPlacementView {
 	efficiencyDetail?: DecoderEfficiencyDetail
 	costCores: number
 	probation?: boolean
+	/**
+	 * Outputs this placement's own worker published (its adapter's stats.eventsOut, reset when
+	 * the worker is replaced). The decoder's top-level `stats` and `rateHistory` sum its
+	 * placements. Absent from older cores.
+	 */
+	eventsOut?: number
+	/** This placement's last output (ISO-8601); null before its first. Absent from older cores. */
+	lastEventAt?: string | null
 }
 export interface DecoderEfficiencyPlacement {
 	decoderId: string

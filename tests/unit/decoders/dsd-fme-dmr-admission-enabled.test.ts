@@ -15,6 +15,11 @@ import {
 	T0,
 	type CallData,
 } from "./dsd-fme-call-first-helpers.js"
+import { settleWavLookups } from "./dsd-fme-wav-settle.js"
+import {
+	DSD_FME_WAV_RETRIES,
+	DSD_FME_WAV_RETRY_MS,
+} from "../../../src/decoders/builtin/dsd-fme.js"
 
 vi.mock(
 	"../../../src/decoders/builtin/call-recordings.js",
@@ -61,7 +66,10 @@ describe("dsd-fme recording admission (DMR recordings on)", () => {
 	}
 
 	/** One header call, optionally encrypted mid-call; the file exists at its end or only later. */
-	function call(encrypted: boolean, fileFirst: boolean): Ended[] {
+	async function call(
+		encrypted: boolean,
+		fileFirst: boolean,
+	): Promise<Ended[]> {
 		if (fileFirst) fs.writeFileSync(path.join(root, FILE), "")
 		const d = decoder()
 		const adapter = d as unknown as Internals
@@ -81,29 +89,35 @@ describe("dsd-fme recording admission (DMR recordings on)", () => {
 		at(base + 420, M("VC*"))
 		vi.setSystemTime(T0 + base + 5000)
 		adapter.checkCallTimeoutAsync()
-		if (!fileFirst) fs.writeFileSync(path.join(root, FILE), "")
-		vi.advanceTimersByTime(2000)
+		// The lookup runs off the event loop: each attempt's read, then the next retry's timer. A
+		// file written only after the first attempt (the end's own) is found by a retry.
+		for (let i = 0; i <= DSD_FME_WAV_RETRIES; i++) {
+			await settleWavLookups(d)
+			if (!fileFirst && i === 0) fs.writeFileSync(path.join(root, FILE), "")
+			await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS)
+		}
+		await settleWavLookups(d)
 		return ends
 	}
 
 	const linked = (ends: Ended[]) => ends.filter(e => e.wavFile !== undefined)
 
-	it("a clear DMR call is linked, at its end and when its file is found later", () => {
-		const now = call(false, true)
+	it("a clear DMR call is linked, at its end and when its file is found later", async () => {
+		const now = await call(false, true)
 		expect(now.some(e => e.encryptionKnown === true)).toBe(true)
 		expect(linked(now).map(e => e.flags?.wavFileUpdate)).toEqual([undefined])
 		expect(linked(now)[0]?.wavFile).toEqual(expect.stringContaining(FILE))
 		fs.rmSync(path.join(root, FILE))
-		const later = call(false, false)
+		const later = await call(false, false)
 		expect(linked(later).map(e => e.flags?.wavFileUpdate)).toEqual([true])
 	})
 
-	it("a known encrypted DMR call never links, at its end or later", () => {
-		const now = call(true, true)
+	it("a known encrypted DMR call never links, at its end or later", async () => {
+		const now = await call(true, true)
 		expect(now.some(e => e.flags?.encrypted === true)).toBe(true)
 		expect(linked(now)).toEqual([])
 		fs.rmSync(path.join(root, FILE))
-		expect(linked(call(true, false))).toEqual([])
+		expect(linked(await call(true, false))).toEqual([])
 	})
 
 	it("a DMR-only decoder asks dsd-fme for per-call files", () => {

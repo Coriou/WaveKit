@@ -11,7 +11,11 @@ import {
 	STORAGE_SCAN_MAX_ENTRIES,
 	STORAGE_SCAN_MAX_WALL_MS,
 } from "@wavekit/api-types"
-import type { StorageAreaId, StoragePartialReason } from "@wavekit/api-types"
+import type {
+	StorageAreaId,
+	StoragePartialReason,
+	StorageScannerPartId,
+} from "@wavekit/api-types"
 
 import { STORAGE_SCAN_FS_CONCURRENCY } from "./contract.js"
 import { disjointStorageAreas } from "./roots.js"
@@ -50,12 +54,25 @@ export const DEFAULT_STORAGE_SCAN_LIMITS: StorageScanLimits = {
 	concurrency: STORAGE_SCAN_FS_CONCURRENCY,
 }
 
+export interface StoragePartScan {
+	id: StorageScannerPartId
+	bytes: number
+	files: number
+	/** Files its source's `boundedFile` matches (all of `files` without one). */
+	boundedFiles?: number
+	/** Bytes of the regular files its source's `boundedPath` matches (all of `bytes` without one). */
+	boundedBytes?: number
+	exists: boolean
+}
+
 export interface StorageAreaScan {
 	id: StorageAreaId
 	bytes: number
 	files: number
 	exists: boolean
 	partialReason: StoragePartialReason | null
+	/** With StorageAreaSource.parts: named parts in order, then the fallback. */
+	parts?: StoragePartScan[]
 }
 
 type BoundReason = "entry-limit" | "time-limit" | "depth-limit"
@@ -64,6 +81,17 @@ interface WalkItem {
 	path: string
 	depth: number
 	root: boolean
+	/** Index into the area scan's parts; undefined for a root or an unsplit area. */
+	part?: number
+	/** Path segments from the area's root, for a part with `boundedPath` only. */
+	rel?: string[]
+}
+
+/** A copy of a scan result (its parts too), so a frozen snapshot shares nothing. */
+function copyScan(r: StorageAreaScan): StorageAreaScan {
+	return r.parts === undefined
+		? { ...r }
+		: { ...r, parts: r.parts.map(p => ({ ...p })) }
 }
 
 function errnoCode(err: unknown): string | undefined {
@@ -146,8 +174,8 @@ export async function scanStorageAreas(
 					partialReason: reason,
 				}
 			}
-			if (i < done) return { ...r }
-			return { ...r, partialReason: r.partialReason ?? reason }
+			if (i < done) return copyScan(r)
+			return { ...copyScan(r), partialReason: r.partialReason ?? reason }
 		})
 
 	const run = async (): Promise<StorageAreaScan[]> => {
@@ -167,7 +195,7 @@ export async function scanStorageAreas(
 			await scanArea(area)
 			done++
 		}
-		return results.map(r => ({ ...r }))
+		return results.map(copyScan)
 	}
 
 	let timer: ReturnType<typeof setTimeout> | undefined
@@ -196,6 +224,32 @@ export async function scanStorageAreas(
 			exists: false,
 			partialReason: null,
 		}
+		// A split area: named parts in order, then the fallback (index `fallback`).
+		const split = area.paths.length === 1 ? area.parts : undefined
+		const partIndex = new Map<string, number>()
+		if (split !== undefined) {
+			scan.parts = [...split.parts, split.fallback].map(p => ({
+				id: p.id,
+				bytes: 0,
+				files: 0,
+				boundedFiles: 0,
+				boundedBytes: 0,
+				exists: false,
+			}))
+			split.parts.forEach((p, i) => {
+				for (const name of p.names)
+					if (!partIndex.has(name)) partIndex.set(name, i)
+			})
+		}
+		const fallback = split?.parts.length ?? 0
+		const boundedFile =
+			split === undefined
+				? []
+				: [...split.parts, split.fallback].map(p => p.boundedFile)
+		const boundedPath =
+			split === undefined
+				? []
+				: [...split.parts, split.fallback].map(p => p.boundedPath)
 		results.push(scan)
 		const mark = (reason: StoragePartialReason): void => {
 			if (frozen !== null) return
@@ -232,9 +286,29 @@ export async function scanStorageAreas(
 			}
 			if (lateCheck() || frozen !== null) return
 			if (item.root) scan.exists = true
+			// A root's own files count in the fallback part.
+			const index = item.part ?? (item.root ? fallback : -1)
+			const part = scan.parts?.[index] ?? undefined
+			if (part !== undefined && item.depth === 1) part.exists = true
 			if (stat.isFile() || stat.isSymbolicLink()) {
 				scan.bytes += stat.size
 				scan.files++
+				if (part !== undefined) {
+					part.bytes += stat.size
+					part.files++
+					const unit = boundedFile[index]
+					if (
+						unit === undefined ||
+						(stat.isFile() && unit.test(path.basename(item.path)))
+					)
+						part.boundedFiles = (part.boundedFiles ?? 0) + 1
+					const counted = boundedPath[index]
+					if (
+						counted === undefined ||
+						(stat.isFile() && !stat.isSymbolicLink() && counted(item.rel ?? []))
+					)
+						part.boundedBytes = (part.boundedBytes ?? 0) + stat.size
+				}
 				return
 			}
 			if (!stat.isDirectory()) return
@@ -253,11 +327,22 @@ export async function scanStorageAreas(
 				return
 			}
 			for (const name of names) {
-				queue.push({
+				const child: WalkItem = {
 					path: path.join(item.path, name),
 					depth: item.depth + 1,
 					root: false,
-				})
+				}
+				// The root's direct children pick the part; deeper entries inherit it.
+				if (scan.parts !== undefined) {
+					const part = item.root ? (partIndex.get(name) ?? fallback) : item.part
+					if (part !== undefined) {
+						child.part = part
+						// Segments only where a predicate reads them (no allocation otherwise).
+						if (boundedPath[part] !== undefined)
+							child.rel = [...(item.rel ?? []), name]
+					}
+				}
+				queue.push(child)
 			}
 		}
 

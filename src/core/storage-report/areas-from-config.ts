@@ -4,7 +4,10 @@
  * retention block. Paths are resolved to absolute and never leave the core.
  */
 import { join, resolve } from "node:path"
-import type { StorageActivityRetention } from "@wavekit/api-types"
+import type {
+	StorageActivityRetention,
+	StoragePartBounds,
+} from "@wavekit/api-types"
 import {
 	DECODER_SETTINGS_FILE_NAME,
 	IQ_CAPTURES_QUOTA_BYTES,
@@ -19,9 +22,80 @@ import type { ActivityRetentionOverrides } from "../activity/runtime.js"
 import { BAND_OVERRIDE_FILE_NAME } from "../../decoders/band-override-store.js"
 import { STATION_STORE_FILE } from "../station/contract.js"
 import { BACKUPS_DIR } from "../state-backup.js"
+import {
+	NOISE_QUARANTINE_MAX_AGE_MS,
+	NOISE_QUARANTINE_MAX_BYTES,
+	NOISE_QUARANTINE_MAX_FILES,
+	QUARANTINE_ROOT_DIR,
+} from "../scanner/store/noise-quarantine.js"
+import { ENGINE_DIR, JOURNAL_DIR } from "../scanner/store/persistence.js"
 import type { StorageAreaSource } from "./contract.js"
 
 const MiB = 1024 * 1024
+const DAY_MS = 86_400_000
+/**
+ * A quarantined WAV (noise-quarantine.ts WAV_NAME: `<operation id>.wav`), the unit its prune
+ * counts against NOISE_QUARANTINE_MAX_FILES; its `.json` sidecar rides with it, uncounted.
+ */
+const QUARANTINE_ENTRY_FILE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.wav$/
+
+/**
+ * Scanner storage folders the store writes with literal names: `recordings/` and `evidence/`
+ * (evidence-store.ts), `.analog-operations/` (analog-operations.ts: the analog files' intent,
+ * receipt and facts sidecar, counted with the recordings as the recordings cap counts them) and
+ * `captures/` (scanner-service.ts CaptureStore dir).
+ */
+export const SCANNER_RECORDINGS_DIRS = ["recordings", ".analog-operations"]
+
+/**
+ * evidence-store.ts RECORDING_KINDS, DISCOVERY_ID, PROBE_DIR; analog-operations.ts STAGING_PREFIX
+ * and its UUID operation ids (copied, not imported: the report never loads the store).
+ */
+const RECORDING_KIND_DIRS: readonly string[] = ["dv", "analog"]
+const DISCOVERY_ID = /^d_[0-9A-Za-z]+$/
+const PROBE_FOLDER = /^probe-[0-9A-Za-z._-]+$/
+const OPERATION_ID =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const STAGING_PREFIX = ".staging-"
+
+/**
+ * The files the scanner's recordings cap counts (maxRecordingsMb), by path segments from the
+ * scanner root, exactly as its admission and retention sum them (AnalogOperations
+ * shortfallWith: the operation inventory plus the legacy walk):
+ * - the legacy walk (evidence-store.ts collect): `recordings/<dv|analog>/<discovery id>/<file>`,
+ *   and a probe's `recordings/<kind>/probe-*\/<file>` or `.../probe-*\/<WAV|wav>/<file>`;
+ *   an analog operation's published media lies there too and is counted once (the walk skips
+ *   what the inventory owns);
+ * - the operation inventory (analog-operations.ts readOperation): every file of an operation
+ *   folder `.analog-operations/<id>/` (intent, receipt, payload part, facts sidecar), of its
+ *   staging folder `.analog-operations/.staging-<id>/`, and its `<id>.cleanup` marker.
+ * Not counted, as by the store: `.analog-operations/.set-aside/` (crash residue kept for
+ * diagnosis), and any file elsewhere (a stray file in `recordings/`, a folder of no discovery).
+ * What a disk walk cannot see: space reserved for an admission still writing (in memory), and
+ * the one hard link an operation's intent.tmp and intent.json can share after a crash (counted
+ * once by the store, twice here, at most 16 KiB).
+ */
+export function scannerRecordingsCounted(rel: readonly string[]): boolean {
+	const [top, a, b, c] = rel
+	if (top === "recordings") {
+		if (a === undefined || b === undefined || !RECORDING_KIND_DIRS.includes(a))
+			return false
+		if (DISCOVERY_ID.test(b)) return rel.length === 4
+		if (!PROBE_FOLDER.test(b)) return false
+		return (
+			rel.length === 4 || (rel.length === 5 && (c === "WAV" || c === "wav"))
+		)
+	}
+	if (top !== ".analog-operations" || a === undefined) return false
+	if (rel.length === 2)
+		return a.endsWith(".cleanup") && OPERATION_ID.test(a.slice(0, -8))
+	if (rel.length !== 3) return false
+	const id = a.startsWith(STAGING_PREFIX) ? a.slice(STAGING_PREFIX.length) : a
+	return OPERATION_ID.test(id)
+}
+export const SCANNER_EVIDENCE_DIR = "evidence"
+export const SCANNER_CAPTURES_DIR = "captures"
 
 /** Directory of the IQ capture route (`POST /api/iq-captures`) under the state dir. */
 export const IQ_CAPTURES_DIR = "iq-captures"
@@ -29,12 +103,111 @@ export const IQ_CAPTURES_DIR = "iq-captures"
 /** Default per-call WAV directory of the dsd-fme adapter. */
 export const DSD_FME_DEFAULT_RECORDING_DIR = "/app/decoded_calls"
 
+/**
+ * `scanner.storage` as the storage report reads it. The bounds other than maxRecordingsMb are
+ * optional: a missing one reports that part's bound as null (unknown, never a guess).
+ */
+export interface StorageScannerCaps {
+	dir: string | null
+	maxRecordingsMb: number
+	maxEvidenceMb?: number
+	maxJournalMb?: number
+	maxAgeDays?: number
+	maxCapturesMb?: number
+}
+
+/** A positive count of `unit`, or null (missing, malformed). */
+function scaled(value: number | undefined, unit: number): number | null {
+	return value !== undefined && Number.isFinite(value) && value > 0
+		? value * unit
+		: null
+}
+
+const NO_BOUNDS: StoragePartBounds = {
+	maxBytes: null,
+	maxAgeMs: null,
+	maxFiles: null,
+}
+
+/**
+ * The scanner storage split (StorageArea.parts) with each folder's bounds: the scanner's own
+ * caps (`scanner.storage`, MiB and days as its retention applies them) and the noise
+ * quarantine's constants. With the scanner off nothing prunes, so every bound is null.
+ */
+export function scannerStorageParts(
+	storage: StorageScannerCaps,
+	enabled: boolean,
+): NonNullable<StorageAreaSource["parts"]> {
+	const on = (bounds: StoragePartBounds): StoragePartBounds =>
+		enabled ? bounds : NO_BOUNDS
+	const maxAgeMs = scaled(storage.maxAgeDays, DAY_MS)
+	return {
+		parts: [
+			{
+				id: "recordings",
+				names: SCANNER_RECORDINGS_DIRS,
+				// maxBytes counts what the cap counts (scannerRecordingsCounted), not the whole part.
+				boundedPath: scannerRecordingsCounted,
+				// evidence-store.ts retention: maxRecordingsMb, and maxAgeDays for every file.
+				bounds: on({
+					maxBytes: scaled(storage.maxRecordingsMb, MiB),
+					maxAgeMs,
+					maxFiles: null,
+				}),
+			},
+			{
+				id: "quarantine",
+				names: [QUARANTINE_ROOT_DIR],
+				// noise-quarantine.ts prune counts entries: a WAV (its WAV_NAME) with its JSON sidecar.
+				boundedFile: QUARANTINE_ENTRY_FILE,
+				bounds: on({
+					maxBytes: NOISE_QUARANTINE_MAX_BYTES,
+					maxAgeMs: NOISE_QUARANTINE_MAX_AGE_MS,
+					maxFiles: NOISE_QUARANTINE_MAX_FILES,
+				}),
+			},
+			{
+				id: "journal",
+				names: [JOURNAL_DIR],
+				// persistence.ts pruneJournal({ maxBytes: maxJournalMb MiB, maxAgeDays }).
+				bounds: on({
+					maxBytes: scaled(storage.maxJournalMb, MiB),
+					maxAgeMs,
+					maxFiles: null,
+				}),
+			},
+			{
+				id: "captures",
+				names: [SCANNER_CAPTURES_DIR],
+				// CaptureStore.retention(maxCapturesMb MiB).
+				bounds: on({
+					maxBytes: scaled(storage.maxCapturesMb, MiB),
+					maxAgeMs: null,
+					maxFiles: null,
+				}),
+			},
+			{
+				id: "evidence",
+				names: [SCANNER_EVIDENCE_DIR],
+				bounds: on({
+					maxBytes: scaled(storage.maxEvidenceMb, MiB),
+					maxAgeMs,
+					maxFiles: null,
+				}),
+			},
+			// Learned receiver state: nothing prunes it by size or age.
+			{ id: "engine", names: [ENGINE_DIR], bounds: NO_BOUNDS },
+		],
+		fallback: { id: "other", names: [], bounds: NO_BOUNDS },
+	}
+}
+
 export interface StorageAreaInputs {
 	stateDir: string
 	/** Resolved Activity `maxDbBytes`; null when unknown. */
 	activityMaxDbBytes: number | null
 	/** `scanner.storage`: `dir` null means `<stateDir>/scanner`. */
-	scannerStorage: { dir: string | null; maxRecordingsMb: number }
+	scannerStorage: StorageScannerCaps
 	/** False when the scanner is not running: its area then reports no cap. Default true. */
 	scannerEnabled?: boolean
 	/** Configured decoders; every `dsd-fme` instance that records contributes its dir. */
@@ -103,6 +276,10 @@ export function storageAreasFromConfig(
 			// Pre-migration backups (state-backup.ts): mostly hard links of the recordings counted
 			// here already, and no scanner retention ever removes them.
 			exclude: [join(scannerDir, BACKUPS_DIR)],
+			parts: scannerStorageParts(
+				inputs.scannerStorage,
+				inputs.scannerEnabled !== false,
+			),
 			capBytes:
 				inputs.scannerEnabled === false
 					? null
@@ -154,9 +331,7 @@ export function storageAreasFromConfig(
 }
 
 /** The scanner storage settings a report reads (ScannerService.settings().storage). */
-export interface StorageScannerStorage {
-	dir: string | null
-	maxRecordingsMb: number
+export interface StorageScannerStorage extends StorageScannerCaps {
 	minFreeDiskMb: number
 }
 

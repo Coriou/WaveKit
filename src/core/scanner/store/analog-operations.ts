@@ -1,5 +1,6 @@
 /** Scanner-owned prepared-link media lifecycle. No native/channel consumer is adopted here. */
 import { SCANNER_RECORDER_ERRORS } from "@wavekit/api-types"
+import type { RecordingTone } from "@wavekit/api-types"
 import { randomUUID } from "node:crypto"
 import { constants, linkSync, lstatSync, type Stats } from "node:fs"
 import {
@@ -47,6 +48,12 @@ import {
 	type PreparedRecordingMetadata,
 	type RecordingBinding,
 } from "./recording-operation.js"
+import {
+	RECORDING_FACTS_FILE,
+	RECORDING_FACTS_TEMP,
+	factsFitFolder,
+	recordingFactsBytes,
+} from "./recording-facts.js"
 
 export const MAX_ACTIVE_ANALOG_OPERATIONS = 8
 /**
@@ -461,6 +468,21 @@ export interface AnalogFinishFacts {
 	readonly speechHeard?: boolean | null
 	/** Wall time of the file's first sample, ISO. Receipt `startedAt`. */
 	readonly startedAt?: string
+	/**
+	 * The recording admission's measured numbers (recording-verdict.ts noiseFacts, the same as a
+	 * noise file's quarantine sidecar). Written to the kept file's facts sidecar
+	 * (recording-facts.ts), never to the receipt; a read-only pass-through, dropped when malformed.
+	 */
+	readonly admission?: NoiseQuarantineFacts
+	/**
+	 * The tone the file was sent with, as the recorder measured it (recording-facts.ts
+	 * toneFactOf): null only when at least 1 s was measured, no block voted for any tone and the
+	 * sub-audible band held no energy (1% of a block's power); absent when the recorder cannot
+	 * tell (too little audio, a tone it never settled on, or sub-audible energy no tone won: a
+	 * DCS code, which it does not measure, a broken-up tone, an untoned voice). Written
+	 * to the kept file's facts sidecar only; a read-only pass-through, dropped when malformed.
+	 */
+	readonly tone?: RecordingTone | null
 }
 /**
  * The receipt's verdict members of finish facts: each one kept only when the receipt schema takes
@@ -751,6 +773,10 @@ interface Operation {
 	cutActive: boolean | null
 	/** The first finish's verdict facts (keptBy, speechHeard, startedAt) as given and valid. */
 	verdict: Pick<AnalogReceipt, "keptBy" | "speechHeard" | "startedAt">
+	/** The first finish's AnalogFinishFacts.admission as given (validated when the sidecar is written). */
+	admission: unknown
+	/** The first finish's AnalogFinishFacts.tone as given; undefined: none (validated on write). */
+	tone: unknown
 	/** The check that refused it first (AnalogFailure), for its receipt. */
 	failure: AnalogFailure | null
 	accepting: boolean
@@ -1027,6 +1053,8 @@ export class AnalogOperations {
 			noise: null,
 			cutActive: null,
 			verdict: {},
+			admission: null,
+			tone: undefined,
 			failure: null,
 			accepting: true,
 			decision: null,
@@ -1091,7 +1119,11 @@ export class AnalogOperations {
 			finish: (cut = "completed", facts) => {
 				if (!op.finish && typeof facts?.cutActive === "boolean")
 					op.cutActive = facts.cutActive
-				if (!op.finish && facts !== undefined) op.verdict = verdictOf(facts)
+				if (!op.finish && facts !== undefined) {
+					op.verdict = verdictOf(facts)
+					op.admission = facts.admission ?? null
+					op.tone = facts.tone
+				}
 				return this.finishOperation(op, AnalogCutSchema.parse(cut))
 			},
 			cancel: (cut = "cancelled", noise) => {
@@ -1707,12 +1739,59 @@ export class AnalogOperations {
 			} catch {
 				/* retained and inventoried */
 			}
+			// Still active (retention and deletion leave its discovery alone) while the sidecar is
+			// written, so the inventory settles with it.
+			await this.writeFacts(op, op.decision)
 			await this.settleInventory(op)
 		}
 		const result = op.decision!
 		this.active.delete(op.intent.operationId)
 		op.resolve(result)
 		return result
+	}
+	/**
+	 * The kept file's facts sidecar (recording-facts.ts), tmp + fsync + rename, best effort: any
+	 * failure leaves no sidecar (a temp file it could not remove is an allowed name, removed with
+	 * the operation) and never changes the finalized outcome. Skipped when intent + receipt +
+	 * sidecar would exceed the folder's metadata bound (MAX_OPERATION_METADATA_BYTES).
+	 */
+	private async writeFacts(
+		op: Operation,
+		receipt: AnalogReceipt,
+	): Promise<void> {
+		const dir = this.opDir(op.intent.operationId)
+		const temp = join(dir, RECORDING_FACTS_TEMP)
+		try {
+			const bytes = recordingFactsBytes({
+				operationId: op.intent.operationId,
+				discoveryId: op.intent.discoveryId,
+				observationId: op.intent.observationId,
+				targetHz: op.intent.binding.targetHz,
+				startedAt: receipt.startedAt,
+				durationMs: op.output?.durationMs ?? null,
+				keptAt: Date.now(),
+				cut: receipt.cutReason ?? "completed",
+				keptBy: receipt.keptBy,
+				speechHeard: receipt.speechHeard,
+				cutActive: receipt.cutActive ?? null,
+				admission: op.admission,
+				tone: op.tone,
+			})
+			if (bytes === null) return
+			const metadata =
+				boundedJson(op.intent).length + boundedJson(receipt).length
+			if (!factsFitFolder(metadata, bytes.length)) return
+			await this.writeSynced(temp, bytes)
+			const target = join(dir, RECORDING_FACTS_FILE)
+			await this.safeTarget(target)
+			await rename(temp, target)
+		} catch {
+			try {
+				await this.io.unlink(temp)
+			} catch {
+				/* an allowed name: inventoried, removed with the operation */
+			}
+		}
 	}
 	/**
 	 * A settling operation's files are final (no step of this process changes them any more):
@@ -2407,6 +2486,8 @@ export class AnalogOperations {
 					"receipt.json",
 					"receipt.tmp",
 					"payload.wav.part",
+					RECORDING_FACTS_FILE,
+					RECORDING_FACTS_TEMP,
 				].includes(name)
 			)
 				out.unknown = true
@@ -3184,6 +3265,8 @@ export class AnalogOperations {
 			"receipt.tmp",
 			"receipt.json",
 			"intent.tmp",
+			RECORDING_FACTS_TEMP,
+			RECORDING_FACTS_FILE,
 		]) {
 			try {
 				await remove(join(dir, name))

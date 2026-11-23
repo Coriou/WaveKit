@@ -8,6 +8,7 @@ import {
 	activityRetentionFromStats,
 	dsdFmeRecordingDir,
 	liveStorageReportSources,
+	scannerStorageParts,
 	storageActivityLimits,
 	type StorageScannerStorage,
 	storageAreasFromConfig,
@@ -76,6 +77,7 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 				id: "scanner-evidence",
 				paths: [join(stateDir, "scanner")],
 				exclude: [join(stateDir, "scanner", ".backups")],
+				parts: scannerStorageParts({ dir: null, maxRecordingsMb: 512 }, true),
 				capBytes: 512 * MiB,
 			},
 			{
@@ -139,6 +141,10 @@ describe("storageAreasFromConfig (WG4 req 3)", () => {
 			id: "scanner-evidence",
 			paths: ["/srv/scanner"],
 			exclude: ["/srv/scanner/.backups"],
+			parts: scannerStorageParts(
+				{ dir: "/srv/scanner", maxRecordingsMb: 3 },
+				true,
+			),
 			capBytes: 3 * MiB,
 		})
 	})

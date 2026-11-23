@@ -1280,6 +1280,13 @@ What this means in use:
   digital-voice call recorder instead ([DIGITAL-VOICE.md](DIGITAL-VOICE.md)).
   D-STAR and YSF dsd-fme files are listed and served as before; M17 files are
   not (its LSF carries an encryption type, and dsd-fme prints no clear proof).
+- **Finding the file.** dsd-fme names a call's file when it closes it, so WaveKit
+  looks the file up after the call ends, off the event loop: a first look at once,
+  then up to 5 more 200 ms apart, every look of every call one at a time, at most
+  20 000 directory entries each. The call's `call_end` never carries the file; a
+  second `call_end` with `flags.wavFileUpdate: true` and `wavFile` follows when it
+  is found (since 2026-11-23; before, a file already there rode on the first
+  `call_end`).
 - **Activity.** A call file is linked only when the row's own `call_end` proves
   it clear and not encrypted: `encryptionKnown: true` with `clearEvidence: true`
   (the call's own clear print) for P25 phase 1 and NXDN, `encryptionKnown: true`

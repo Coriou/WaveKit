@@ -139,6 +139,10 @@ export class CtcssBank {
 	private streak = 0
 	/** Table index that won the most recent analysis block, or -1 (WG7 streaming view). */
 	private lastBlockWinner = -1
+	/** Analysis blocks some tone won (each block votes for at most one tone). */
+	private votedBlocks = 0
+	/** Analysis blocks no tone won that still held sub-audible band energy (subAudibleBlockCount). */
+	private subAudibleBlocks = 0
 
 	constructor() {
 		for (let i = 0; i < CTCSS_HZ.length; i++) {
@@ -189,6 +193,33 @@ export class CtcssBank {
 		return this.lastBlockWinner
 	}
 
+	/** Samples pushed since construction or the last reset. Does not affect `result()`. */
+	sampleCount(): number {
+		return this.seen
+	}
+
+	/**
+	 * Analysis blocks some tone won (≥ 0.65 of the band, ≥ 3× the next tone, 1% of whole-audio
+	 * power), whether or not that tone later qualified or reached 60% of the blocks. 0 with at
+	 * least MIN_SAMPLES pushed: no block voted. That alone does not prove absence (a DCS code or a
+	 * broken-up tone never votes): see `subAudibleBlockCount()`. Does not affect `result()`.
+	 */
+	votedBlockCount(): number {
+		return this.votedBlocks
+	}
+
+	/**
+	 * Analysis blocks no tone won whose band power (the block's raw power minus the 40 Hz
+	 * low-pass and the 400 Hz high-pass, the same band the vote divides by) was above MIN_POWER
+	 * and at least RAW_POWER_FRACTION (1%) of the block's raw power: energy a DCS code, a
+	 * broken-up tone, voice or noise put in the sub-audible band without any one CTCSS tone
+	 * winning. 0 together with votedBlockCount() 0: every block's sub-audible band was empty.
+	 * Does not affect `result()`.
+	 */
+	subAudibleBlockCount(): number {
+		return this.subAudibleBlocks
+	}
+
 	result(): number | null {
 		if (this.seen < MIN_SAMPLES) return null
 		const tone = selectCtcssTone(this.votes, this.qualified, this.firstBlock)
@@ -218,6 +249,8 @@ export class CtcssBank {
 		this.lastWinner = -1
 		this.streak = 0
 		this.lastBlockWinner = -1
+		this.votedBlocks = 0
+		this.subAudibleBlocks = 0
 	}
 
 	private analyse(): void {
@@ -267,6 +300,15 @@ export class CtcssBank {
 			bestPower >= BAND_FRACTION * bandMean &&
 			bestPower >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
 		const winner = inBand && dominates ? best : -1
+		// Sub-audible energy with no winner. A large DC offset can drown a vote; it still counts here
+		// because each file gets a fresh bank whose filters start from zero, so the DC step puts
+		// in-band energy in the first block. A bank started on audio with DC already settled would not.
+		if (
+			winner < 0 &&
+			bandMean > MIN_POWER &&
+			bandMean >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
+		)
+			this.subAudibleBlocks += 1
 		this.lastBlockWinner = winner
 		if (winner >= 0 && winner === this.lastWinner) this.streak += 1
 		else if (winner >= 0) {
@@ -277,6 +319,7 @@ export class CtcssBank {
 			this.lastWinner = -1
 		}
 		if (winner >= 0) {
+			this.votedBlocks += 1
 			this.votes[winner] = (this.votes[winner] ?? 0) + 1
 			if (this.firstBlock[winner] === -1)
 				this.firstBlock[winner] = this.blockIndex

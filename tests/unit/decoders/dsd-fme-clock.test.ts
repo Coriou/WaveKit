@@ -14,6 +14,7 @@ import {
 } from "../../../src/decoders/builtin/dsd-fme.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
 import { LC, MS, type Line } from "./dsd-fme-call-first-helpers.js"
+import { settleWavLookups } from "./dsd-fme-wav-settle.js"
 
 type Internals = {
 	handleOutputLine(line: string): void
@@ -52,6 +53,14 @@ function run(
 	stepAt: (monoMs: number) => number,
 	options: Record<string, unknown> = {},
 ): Seen[] {
+	return replayLines(stepAt, options).seen
+}
+
+/** run, with the adapter (to wait for its WAV lookups: an end with a file is held for its first one). */
+function replayLines(
+	stepAt: (monoMs: number) => number,
+	options: Record<string, unknown> = {},
+): { seen: Seen[]; decoder: DsdFmeDecoder } {
 	let mono = 0
 	const clock: DsdFmeClock = {
 		mono: () => mono,
@@ -98,7 +107,7 @@ function run(
 		}
 		if (mono % 500 === 0) internals.checkCallTimeoutAsync()
 	}
-	return seen
+	return { seen, decoder }
 }
 
 describe("dsd-fme monotonic clock", () => {
@@ -148,7 +157,7 @@ describe("dsd-fme monotonic clock", () => {
 		}
 	})
 
-	it("a recording named by the call's start wall time still matches after a wall step of more than 5 s mid-call", () => {
+	it("a recording named by the call's start wall time still matches after a wall step of more than 5 s mid-call", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "wk-dsd-clock-"))
 		try {
 			const t = new Date(T0)
@@ -167,13 +176,17 @@ describe("dsd-fme monotonic clock", () => {
 				enablePerCallRecording: true,
 				perCallRecordingDir: root,
 			}
-			const steadyEnd = run(() => 0, options).find(
+			const steadyRun = replayLines(() => 0, options)
+			await settleWavLookups(steadyRun.decoder)
+			const steadyEnd = steadyRun.seen.find(
 				e => e.type === "call_end" && e.talkgroup === 9001,
 			)
 			expect(steadyEnd?.wavFile).toContain(name)
 			// Over A's wall steps back 6 s, then forward 6 s, before its end.
 			const step = (m: number) => (m < 300 ? 0 : m < 900 ? -6000 : 6000)
-			const steppedEnd = run(step, options).find(
+			const steppedRun = replayLines(step, options)
+			await settleWavLookups(steppedRun.decoder)
+			const steppedEnd = steppedRun.seen.find(
 				e => e.type === "call_end" && e.talkgroup === 9001,
 			)
 			expect(steppedEnd?.wavFile).toContain(name)

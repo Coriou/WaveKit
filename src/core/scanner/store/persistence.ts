@@ -111,8 +111,8 @@ const SETTINGS_FILE = "settings.json"
 /** WG15 DQ 7.6: an in-flight consolidation plan, kept until a snapshot after it is durable. */
 const CONSOLIDATION_PLAN_FILE = "consolidation-plan.json"
 const CONSOLIDATION_PLAN_MAX_GROUPS = 1_000_000
-const JOURNAL_DIR = "journal"
-const ENGINE_DIR = "engine"
+export const JOURNAL_DIR = "journal"
+export const ENGINE_DIR = "engine"
 /** A subdirectory, so readEngines (direct `engine/*.json` only) never sees these files. */
 const OCCUPANCY_DIR = join(ENGINE_DIR, "occupancy")
 /**

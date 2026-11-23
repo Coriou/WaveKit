@@ -494,6 +494,12 @@ Signal discovery: finds activity on a source, confirms it with a probe decode, a
 
 ### Recordings catalogue
 
+A kept scanner analog file has a facts sidecar (`src/core/scanner/store/recording-facts.ts`) in
+its operation folder beside the receipt; the catalogue reads it with the receipt into the item's
+`facts`, and the store's one removal path deletes it with the file. `GET /api/storage`
+(`src/core/storage-report/`) splits the scanner storage area into its folders (`parts`) in the
+same bounded, cached walk.
+
 `src/core/recordings/inventory.ts` serves `GET /api/recordings` from an in-memory catalogue of the
 dsd-fme call recordings and the scanner recording folders, so a listing makes no filesystem call
 once warm. It is built in the background at start (scanner folders newest change first; listings

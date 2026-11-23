@@ -187,7 +187,13 @@ describe("readRecordingReceipt", () => {
 		const recordings = join(root, "recordings")
 		expect(
 			await readRecordingReceipt(nodeRecordingFs, recordings, name),
-		).toEqual({ cut: "shutdown", observationId: "o_1", ...UNKNOWN })
+		).toEqual({
+			cut: "shutdown",
+			observationId: "o_1",
+			...UNKNOWN,
+			// No facts sidecar beside it.
+			facts: null,
+		})
 		await writeFile(join(dir, "receipt.json"), `${at} `)
 		expect(
 			await readRecordingReceipt(nodeRecordingFs, recordings, name),

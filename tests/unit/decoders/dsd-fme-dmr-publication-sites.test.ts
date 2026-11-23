@@ -124,10 +124,13 @@ describe("dsd-fme DMR publication sites (structural)", () => {
 		expect(SOURCE).not.toMatch(/outputStream|\.emit\(\s*["']output["']/)
 	})
 
-	it("calls the gate only from the output override, the call snapshot and the call update", () => {
+	it("calls the gate only from the output delivery, the outbox, the call snapshot and the call update", () => {
+		// deliver publishes what emitOutput let through, at once or from the ordered outbox
+		// (behind a call_end held for its recording lookup); voice-call states (the snapshot and
+		// the update) never wait in the outbox.
 		expect(sites(/\bthis\.publish\(/g).map(s => s.method)).toEqual([
-			"emitOutput",
-			"emitOutput",
+			"deliver",
+			"deliver",
 			"publishCallSnapshot",
 			"publishCallUpdate",
 		])
@@ -146,7 +149,13 @@ describe("dsd-fme DMR publication sites (structural)", () => {
 			UPDATE_SITES,
 		)
 		expect(sites(/\bthis\.publishCallSnapshot\(/g).map(s => s.method)).toEqual([
+			"publishVoiceState",
+		])
+		// The snapshot goes out from emitOutput (at production) and from deliver (an output never
+		// held), never from the outbox's release.
+		expect(sites(/\bthis\.publishVoiceState\(/g).map(s => s.method)).toEqual([
 			"emitOutput",
+			"deliver",
 		])
 		// The non-DMR sites: P25's split, and markClear returning for DMR
 		// (positiveClearProtocol never names DMR).
@@ -174,8 +183,17 @@ describe("dsd-fme DMR publication sites (structural)", () => {
 			"findWavFileAsync",
 			"endCall",
 		])
+		// settleEnd only fills a held end with a file findWavFileAsync admitted.
 		for (const s of sites(/\bwavFile\s*[:,]/g))
-			expect(["findWavFileAsync", "endCall"]).toContain(s.method)
+			expect(["findWavFileAsync", "endCall", "settleEnd"]).toContain(s.method)
+		// A file reaches a held end only from the lookup, past its recordingLinkable check; every
+		// other settle gives the end no file.
+		expect(
+			sites(/\bthis\.settleEnd\(end, wavFile\)/g).map(s => s.method),
+		).toEqual(["findWavFileAsync"])
+		expect(
+			SOURCE.match(/\bthis\.settleEnd\((?!end, (?:undefined|wavFile)\))/g),
+		).toBeNull()
 	})
 
 	it("the base class publishes parse results through the overridable emitOutput", () => {

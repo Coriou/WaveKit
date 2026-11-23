@@ -1330,6 +1330,7 @@ describe("recordings inventory WG9 kept and invalidate", () => {
 			observationId: null,
 			speech: "unchecked",
 			keptBy: null,
+			facts: null,
 		},
 		{
 			id: "scan:d_x~call.wav",
@@ -1350,6 +1351,7 @@ describe("recordings inventory WG9 kept and invalidate", () => {
 			observationId: null,
 			speech: "unchecked",
 			keptBy: null,
+			facts: null,
 		},
 	]
 

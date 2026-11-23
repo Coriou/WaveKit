@@ -6,7 +6,9 @@ import type {
 	StorageActivityRetention,
 	StorageAreaId,
 	StorageKeptSummary,
+	StoragePartBounds,
 	StorageReport,
+	StorageScannerPartId,
 } from "@wavekit/api-types"
 
 /** Concurrent lstat/readdir calls per report. */
@@ -21,6 +23,33 @@ export interface StorageAreaSource {
 	capBytes: number | null
 	/** Absolute paths inside `paths` that belong to another area and are not counted here. */
 	exclude?: readonly string[]
+	/**
+	 * Splits the area's one root by its direct children: an entry named in a part's `names`
+	 * counts in that part, every other entry (and the root's own files) in `fallback`. Only for
+	 * an area with exactly one path; ignored otherwise. Each part is reported, found or not.
+	 */
+	parts?: {
+		readonly parts: readonly StorageAreaPartSource[]
+		readonly fallback: StorageAreaPartSource
+	}
+}
+
+export interface StorageAreaPartSource {
+	id: StorageScannerPartId
+	/** Direct children of the area's root counted in this part (unused for the fallback). */
+	names: readonly string[]
+	bounds: StoragePartBounds
+	/**
+	 * The files `bounds.maxFiles` counts (by base name, regular files only): the prune's own unit.
+	 * Absent: every file of the part.
+	 */
+	boundedFile?: RegExp
+	/**
+	 * The files `bounds.maxBytes` counts, by their path segments from the area's root (the part's
+	 * own name first; regular files only): the cap's own unit, as its admission counts it. Absent:
+	 * every byte of the part.
+	 */
+	boundedPath?: (rel: readonly string[]) => boolean
 }
 
 export interface StorageReportOptions {

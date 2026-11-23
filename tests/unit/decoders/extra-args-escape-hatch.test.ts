@@ -27,6 +27,7 @@ import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import { ReadsbDecoder } from "../../../src/decoders/builtin/readsb.js"
 import { DirewolfDecoder } from "../../../src/decoders/builtin/direwolf.js"
 import { rtl433OptionsSchema } from "../../../src/decoders/options/rtl433.js"
+import { settleWavLookups } from "./dsd-fme-wav-settle.js"
 
 type Ctor = new (config: DecoderConfig, logger: pino.Logger) => unknown
 
@@ -295,7 +296,7 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 		expect(JSON.stringify(logs)).not.toContain("SECRET-")
 	})
 
-	it("a completed recorded call logs hasWavFile, not the recording path", () => {
+	it("a completed recorded call logs hasWavFile, not the recording path", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "wg7-hwfix-"))
 		const dir = fs.mkdtempSync(path.join(root, "SECRET-recordings-"))
 		try {
@@ -320,6 +321,7 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 					now: Date,
 					timeout: boolean,
 				): { data: { wavFile?: string } } | null
+				emitOutput(output: unknown): void
 			}
 			// An NXDN call: DMR recordings are off (dmr-recording-gate.ts), so a DMR call has no file.
 			d.callState = {
@@ -338,6 +340,10 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 				clearEvidence: true,
 			}
 			const ended = d.endCall(new Date(start.getTime() + 5000), false)
+			// The end is published (held for its lookup); "Call ended" is logged at release.
+			d.emitOutput(ended)
+			// The lookup's first attempt runs off the event loop and fills the end.
+			await settleWavLookups(d)
 			expect(ended?.data.wavFile).toContain(dir)
 			expect(JSON.stringify(logs)).not.toContain("SECRET-recordings")
 			expect(logs).toContainEqual(

@@ -7,7 +7,16 @@
 import { constants as fsConstants } from "node:fs"
 import * as path from "node:path"
 import { z } from "zod"
-import type { RecordingCut, RecordingSpeech } from "@wavekit/api-types"
+import type {
+	RecordingCut,
+	RecordingFacts,
+	RecordingSpeech,
+} from "@wavekit/api-types"
+import {
+	RECORDING_FACTS_FILE,
+	RECORDING_FACTS_MAX_BYTES,
+	recordingFactsOf,
+} from "../scanner/store/recording-facts.js"
 import type { RecordingFsPort } from "./inventory.js"
 import { startedAtLocalFromName } from "./names.js"
 
@@ -56,6 +65,11 @@ export interface RecordingReceiptFacts {
 	keptBy?: string | null
 	/** The receipt's `startedAt` (ISO, UTC, milliseconds); null when absent or malformed. */
 	startedAt?: string | null
+	/**
+	 * The facts sidecar beside the receipt (recording-facts.ts); null when it is missing,
+	 * oversized, malformed or of another operation. Absent: not read.
+	 */
+	facts?: RecordingFacts | null
 }
 
 /** A receipt's `speechHeard` as a RecordingSpeech: anything but a boolean is `unchecked`. */
@@ -139,20 +153,51 @@ export async function readRecordingReceipt(
 	const match = ANALOG_FILE.exec(name)
 	const operationId = match?.[1]
 	if (operationId === undefined) return null
-	const file = path.join(
+	const dir = path.join(
 		path.dirname(recordingsDir),
 		".analog-operations",
 		operationId,
-		"receipt.json",
 	)
+	const receipt = await readBoundedJson(
+		fs,
+		path.join(dir, "receipt.json"),
+		RECORDING_RECEIPT_MAX_BYTES,
+	)
+	if (receipt === undefined) return null
+	const facts = receiptFactsOf(receipt, operationId)
+	if (facts === null) return null
+	// The sidecar is written after the receipt; any failure reading it is no facts, never a
+	// failure of the receipt (the WAV is served either way).
+	const sidecar = await readBoundedJson(
+		fs,
+		path.join(dir, RECORDING_FACTS_FILE),
+		RECORDING_FACTS_MAX_BYTES,
+	)
+	return {
+		...facts,
+		facts:
+			sidecar === undefined ? null : recordingFactsOf(sidecar, operationId),
+	}
+}
+
+/**
+ * The JSON of a regular file of at most `max` bytes (no symlink followed); undefined when it is
+ * missing, unreadable, larger, not UTF-8 or not JSON.
+ */
+async function readBoundedJson(
+	fs: RecordingFsPort,
+	file: string,
+	max: number,
+): Promise<unknown> {
 	let handle: Awaited<ReturnType<RecordingFsPort["open"]>>
 	try {
 		handle = await fs.open(file, RECEIPT_FLAGS)
 	} catch {
-		return null
+		return undefined
 	}
 	try {
-		const buffer = new Uint8Array(RECORDING_RECEIPT_MAX_BYTES + 1)
+		// One byte more than the bound tells an oversized file, which reads as unknown.
+		const buffer = new Uint8Array(max + 1)
 		let length = 0
 		while (length < buffer.length) {
 			const { bytesRead } = await handle.read(
@@ -164,13 +209,13 @@ export async function readRecordingReceipt(
 			if (bytesRead <= 0) break
 			length += bytesRead
 		}
-		if (length > RECORDING_RECEIPT_MAX_BYTES) return null
+		if (length > max) return undefined
 		const text = new TextDecoder("utf-8", { fatal: true }).decode(
 			buffer.subarray(0, length),
 		)
-		return receiptFactsOf(JSON.parse(text) as unknown, operationId)
+		return JSON.parse(text) as unknown
 	} catch {
-		return null
+		return undefined
 	} finally {
 		await handle.close().catch(() => undefined)
 	}

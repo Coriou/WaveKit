@@ -187,11 +187,11 @@ function wavName(system: string, tg: number, src: number, atMs = 0): string {
 
 let root = ""
 
-function replay(
+async function replay(
 	mode: string,
 	items: Item[],
 	files: Array<[system: string, tg: number, src: number, atMs?: number]>,
-): Trace {
+): Promise<Trace> {
 	for (const [system, tg, src, atMs] of files)
 		fs.writeFileSync(path.join(root, wavName(system, tg, src, atMs)), "")
 	const decoder = createDecoder({
@@ -204,6 +204,7 @@ function replay(
 		handleOutputLine(line: string): void
 		checkCallTimeoutAsync(): void
 		endOpenCallsForRestart?: (now: Date) => void
+		wavSearch: Promise<void>
 	}
 	const oracle = new NonDmrOracle()
 	let nowMs = 0
@@ -275,6 +276,13 @@ function replay(
 		vi.setSystemTime(T0 + now)
 		if (now % 500 === 0) internals.checkCallTimeoutAsync()
 	}
+	// The WAV lookups run off the event loop: wait for every one queued (a first attempt finds
+	// a file that already exists; a later retry is beyond this trace).
+	for (;;) {
+		const tail = internals.wavSearch
+		await tail
+		if (internals.wavSearch === tail) break
+	}
 	return { pubs, violations, linked, ends, calls }
 }
 
@@ -322,19 +330,19 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 	})
 
 	describe("P25 phase 1", () => {
-		it("(a) a call with no ALG print at all is never linked", () => {
-			expectNeverLinked(replay("p25", p25Over(0), [P1_FILE()]))
+		it("(a) a call with no ALG print at all is never linked", async () => {
+			expectNeverLinked(await replay("p25", p25Over(0), [P1_FILE()]))
 		})
 
-		it("(b) an encrypted LDU2 ALG is never linked", () => {
+		it("(b) an encrypted LDU2 ALG is never linked", async () => {
 			expectNeverLinked(
-				replay("p25", p25Over(0, { alg: () => LDU2_ENC }), [P1_FILE()]),
+				await replay("p25", p25Over(0, { alg: () => LDU2_ENC }), [P1_FILE()]),
 			)
 		})
 
-		it("(b) encryption printed after a clear LDU2 is never linked", () => {
+		it("(b) encryption printed after a clear LDU2 is never linked", async () => {
 			expectNeverLinked(
-				replay(
+				await replay(
 					"p25",
 					p25Over(0, { alg: n => (n === 0 ? LDU2_CLEAR : LDU2_ENC) }),
 					[P1_FILE()],
@@ -342,27 +350,29 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 			)
 		})
 
-		it("(b) an LCW printing Encrypted is never linked, even with clear LDU2s", () => {
+		it("(b) an LCW printing Encrypted is never linked, even with clear LDU2s", async () => {
 			const items = p25Over(0, { alg: () => LDU2_CLEAR }).map(
 				([t, text]): Item => [
 					t,
 					text.startsWith(" LCW") ? LCW(56, 1234, " Encrypted") : text,
 				],
 			)
-			expectNeverLinked(replay("p25", items, [P1_FILE()]))
+			expectNeverLinked(await replay("p25", items, [P1_FILE()]))
 		})
 
-		it("(b) an encrypted HDU before the call's start in the same context is never linked", () => {
+		it("(b) an encrypted HDU before the call's start in the same context is never linked", async () => {
 			expectNeverLinked(
-				replay("p25", p25Over(0, { hdu: HDU_ENC, alg: () => LDU2_CLEAR }), [
-					P1_FILE(),
-				]),
+				await replay(
+					"p25",
+					p25Over(0, { hdu: HDU_ENC, alg: () => LDU2_CLEAR }),
+					[P1_FILE()],
+				),
 			)
 		})
 
-		it("(c) a call whose own LDU2 prints ALG 0x80 KEY 0 is linked", () => {
+		it("(c) a call whose own LDU2 prints ALG 0x80 KEY 0 is linked", async () => {
 			expectLinked(
-				replay("p25", p25Over(0, { alg: () => LDU2_CLEAR }), [P1_FILE()]),
+				await replay("p25", p25Over(0, { alg: () => LDU2_CLEAR }), [P1_FILE()]),
 				["56/1234"],
 			)
 		})
@@ -371,9 +381,9 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 			const onSync = (alg: (n: number) => string | null, extra = {}) =>
 				p25Over(0, { alg, algOnSync: true, ...extra })
 
-			it("(c) a clear ALG on the call's own LDU2 sync line is linked", () => {
+			it("(c) a clear ALG on the call's own LDU2 sync line is linked", async () => {
 				expectLinked(
-					replay(
+					await replay(
 						"p25",
 						onSync(() => LDU2_CLEAR),
 						[P1_FILE()],
@@ -382,9 +392,9 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 				)
 			})
 
-			it("(b) an encrypted ALG on the LDU2 sync line is never linked", () => {
+			it("(b) an encrypted ALG on the LDU2 sync line is never linked", async () => {
 				expectNeverLinked(
-					replay(
+					await replay(
 						"p25",
 						onSync(() => LDU2_ENC),
 						[P1_FILE()],
@@ -392,9 +402,9 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 				)
 			})
 
-			it("(b) encryption on a later LDU2 sync line after a clear one is never linked", () => {
+			it("(b) encryption on a later LDU2 sync line after a clear one is never linked", async () => {
 				expectNeverLinked(
-					replay(
+					await replay(
 						"p25",
 						onSync(n => (n === 0 ? LDU2_CLEAR : LDU2_ENC)),
 						[P1_FILE()],
@@ -402,9 +412,9 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 				)
 			})
 
-			it("(c) an errored LDU2 sync line's clear ALG is not evidence", () => {
+			it("(c) an errored LDU2 sync line's clear ALG is not evidence", async () => {
 				expectNeverLinked(
-					replay(
+					await replay(
 						"p25",
 						onSync(() => `${LDU2_CLEAR} FEC ERR`),
 						[P1_FILE()],
@@ -412,9 +422,9 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 				)
 			})
 
-			it("(c) a clear ALG on an LDU2 sync line with a non-zero key is not evidence", () => {
+			it("(c) a clear ALG on an LDU2 sync line with a non-zero key is not evidence", async () => {
 				expectNeverLinked(
-					replay(
+					await replay(
 						"p25",
 						onSync(
 							() => " LDU2 ALG ID: 0x80 KEY ID: 0x0007 MI: 0x0000000000000000",
@@ -424,7 +434,7 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 				)
 			})
 
-			it("(d) a clear LDU2 sync line after a failed LDU1 credits no call", () => {
+			it("(d) a clear LDU2 sync line after a failed LDU1 credits no call", async () => {
 				const items: Item[] = [
 					...p25Over(0, { superframes: 2, end: false }),
 					[900, P1("HDU")],
@@ -436,25 +446,25 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 					[1620, P1("LDU2") + LDU2_CLEAR],
 					[1640, P1("TDU")],
 				]
-				expectLinked(replay("p25", items, [P1_FILE(), P1_FILE(58, 99)]), [
+				expectLinked(await replay("p25", items, [P1_FILE(), P1_FILE(58, 99)]), [
 					"58/99",
 				])
 			})
 
-			it("(d) another call's clear LDU2 sync line is not borrowed by the next call", () => {
+			it("(d) another call's clear LDU2 sync line is not borrowed by the next call", async () => {
 				const items = [
 					...onSync(() => LDU2_CLEAR),
 					...p25Over(2000, { tg: 57 }),
 				]
-				expectLinked(replay("p25", items, [P1_FILE(), P1_FILE(57)]), [
+				expectLinked(await replay("p25", items, [P1_FILE(), P1_FILE(57)]), [
 					"56/1234",
 				])
 			})
 		})
 
-		it("(c) an LDU2 clear with a non-zero key is not evidence", () => {
+		it("(c) an LDU2 clear with a non-zero key is not evidence", async () => {
 			expectNeverLinked(
-				replay(
+				await replay(
 					"p25",
 					p25Over(0, {
 						alg: () =>
@@ -465,27 +475,29 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 			)
 		})
 
-		it("(d) an earlier call's clear LDU2 is not borrowed by the next call", () => {
+		it("(d) an earlier call's clear LDU2 is not borrowed by the next call", async () => {
 			const items = [
 				...p25Over(0, { alg: () => LDU2_CLEAR }),
 				...p25Over(2000, { tg: 57 }),
 			]
-			expectLinked(replay("p25", items, [P1_FILE(), P1_FILE(57)]), ["56/1234"])
+			expectLinked(await replay("p25", items, [P1_FILE(), P1_FILE(57)]), [
+				"56/1234",
+			])
 		})
 
-		it("(d) another talkgroup named without a terminator does not take the call's evidence", () => {
+		it("(d) another talkgroup named without a terminator does not take the call's evidence", async () => {
 			const items = [
 				...p25Over(0, { alg: () => LDU2_CLEAR, end: false }),
 				[1300, P1("LDU1")] as Item,
 				[1300, LCW(58, 99)] as Item,
 				[1660, P1("TDU")] as Item,
 			]
-			expectLinked(replay("p25", items, [P1_FILE(), P1_FILE(58, 99)]), [
+			expectLinked(await replay("p25", items, [P1_FILE(), P1_FILE(58, 99)]), [
 				"56/1234",
 			])
 		})
 
-		it("(d) a clear LDU2 of the next over, after a failed LDU1, is not credited to the open call", () => {
+		it("(d) a clear LDU2 of the next over, after a failed LDU1, is not credited to the open call", async () => {
 			// Call A: two superframes, no ALG print, no terminator. Then over B:
 			// its HDU inside the re-key gap, an LDU1 whose LCW failed (no IDs),
 			// a clear LDU2, then an LDU1 naming 58/99, a clear LDU2, a TDU.
@@ -502,119 +514,126 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 				[1620, LDU2_CLEAR],
 				[1640, P1("TDU")],
 			]
-			const trace = replay("p25", items, [P1_FILE(), P1_FILE(58, 99)])
+			const trace = await replay("p25", items, [P1_FILE(), P1_FILE(58, 99)])
 			expectLinked(trace, ["58/99"])
 		})
 	})
 
 	describe("P25 phase 2", () => {
-		it("(a) a MAC_PTT call without any ALG print is never linked (no clear print exists)", () => {
-			expectNeverLinked(replay("p25", p2Call(0), [P2_FILE]))
+		it("(a) a MAC_PTT call without any ALG print is never linked (no clear print exists)", async () => {
+			expectNeverLinked(await replay("p25", p2Call(0), [P2_FILE]))
 		})
 
-		it("(b) a MAC_PTT ALG print is never linked", () => {
-			expectNeverLinked(replay("p25", p2Call(0, "in"), [P2_FILE]))
+		it("(b) a MAC_PTT ALG print is never linked", async () => {
+			expectNeverLinked(await replay("p25", p2Call(0, "in"), [P2_FILE]))
 		})
 
-		it("(b) an ALG print before the call's start in the same context is never linked", () => {
-			expectNeverLinked(replay("p25", p2Call(0, "before"), [P2_FILE]))
+		it("(b) an ALG print before the call's start in the same context is never linked", async () => {
+			expectNeverLinked(await replay("p25", p2Call(0, "before"), [P2_FILE]))
 		})
 	})
 
 	describe("NXDN", () => {
-		it("(a) a call heard by its RAN only (no VCALL) is never linked", () => {
+		it("(a) a call heard by its RAN only (no VCALL) is never linked", async () => {
 			expectNeverLinked(
-				replay("nxdn48", nxdnOver(0, { vcall: null }), [NX_FILE(0, 0)]),
+				await replay("nxdn48", nxdnOver(0, { vcall: null }), [NX_FILE(0, 0)]),
 			)
 		})
 
-		it("(b) a VCALL followed by its cipher print is never linked", () => {
+		it("(b) a VCALL followed by its cipher print is never linked", async () => {
 			expectNeverLinked(
-				replay("nxdn48", nxdnOver(0, { vcall: { cipher: true } }), [NX_FILE()]),
-			)
-		})
-
-		it("(b) a cipher print after a clear VCALL is never linked", () => {
-			const items = [
-				...nxdnOver(0, { vcall: {}, frames: 12 }),
-				[800, NX_CIPHER] as Item,
-			]
-			expectNeverLinked(replay("nxdn48", items, [NX_FILE()]))
-		})
-
-		it("(b) a cipher print before the call's start in the same context is never linked", () => {
-			expectNeverLinked(
-				replay("nxdn48", nxdnOver(0, { vcall: {}, before: NX_CIPHER }), [
+				await replay("nxdn48", nxdnOver(0, { vcall: { cipher: true } }), [
 					NX_FILE(),
 				]),
 			)
 		})
 
-		it("(c) a call whose own checked VCALL has no cipher print is linked", () => {
-			expectLinked(replay("nxdn48", nxdnOver(0, { vcall: {} }), [NX_FILE()]), [
-				"5678/1234",
-			])
+		it("(b) a cipher print after a clear VCALL is never linked", async () => {
+			const items = [
+				...nxdnOver(0, { vcall: {}, frames: 12 }),
+				[800, NX_CIPHER] as Item,
+			]
+			expectNeverLinked(await replay("nxdn48", items, [NX_FILE()]))
 		})
 
-		it("(d) an earlier call's clear VCALL is not borrowed by a call heard by RAN only", () => {
+		it("(b) a cipher print before the call's start in the same context is never linked", async () => {
+			expectNeverLinked(
+				await replay("nxdn48", nxdnOver(0, { vcall: {}, before: NX_CIPHER }), [
+					NX_FILE(),
+				]),
+			)
+		})
+
+		it("(c) a call whose own checked VCALL has no cipher print is linked", async () => {
+			expectLinked(
+				await replay("nxdn48", nxdnOver(0, { vcall: {} }), [NX_FILE()]),
+				["5678/1234"],
+			)
+		})
+
+		it("(d) an earlier call's clear VCALL is not borrowed by a call heard by RAN only", async () => {
 			const items = [
 				...nxdnOver(0, { vcall: {} }),
 				...nxdnOver(6000, { vcall: null }),
 			]
-			expectLinked(replay("nxdn48", items, [NX_FILE(), NX_FILE(0, 0, 6000)]), [
-				"5678/1234",
-			])
+			expectLinked(
+				await replay("nxdn48", items, [NX_FILE(), NX_FILE(0, 0, 6000)]),
+				["5678/1234"],
+			)
 		})
 
-		it("(d) an earlier call's clear VCALL is not borrowed by a ciphered call", () => {
+		it("(d) an earlier call's clear VCALL is not borrowed by a ciphered call", async () => {
 			const items = [
 				...nxdnOver(0, { vcall: {} }),
 				...nxdnOver(6000, { vcall: { src: 77, tg: 66, cipher: true } }),
 			]
 			expectLinked(
-				replay("nxdn48", items, [NX_FILE(), NX_FILE(66, 77, 6000)]),
+				await replay("nxdn48", items, [NX_FILE(), NX_FILE(66, 77, 6000)]),
 				["5678/1234"],
 			)
 		})
 	})
 
 	describe("dPMR", () => {
-		it("(a) a call without a Scrambler print is never linked (no clear print exists)", () => {
-			expectNeverLinked(replay("dpmr", dpmrCall(0, false), [DP_FILE]))
+		it("(a) a call without a Scrambler print is never linked (no clear print exists)", async () => {
+			expectNeverLinked(await replay("dpmr", dpmrCall(0, false), [DP_FILE]))
 		})
 
-		it("(b) a Scrambler print is never linked", () => {
-			expectNeverLinked(replay("dpmr", dpmrCall(0, true), [DP_FILE]))
+		it("(b) a Scrambler print is never linked", async () => {
+			expectNeverLinked(await replay("dpmr", dpmrCall(0, true), [DP_FILE]))
 		})
 	})
 
 	describe("ProVoice", () => {
-		it("(a) a ProVoice call is never linked (no clear print exists)", () => {
-			expectNeverLinked(replay("provoice", provoiceCall(0), [PV_FILE]))
+		it("(a) a ProVoice call is never linked (no clear print exists)", async () => {
+			expectNeverLinked(await replay("provoice", provoiceCall(0), [PV_FILE]))
 		})
 	})
 
 	describe("D-STAR and YSF (no privacy field)", () => {
-		it("(e) a D-STAR call is linked", () => {
-			expectLinked(replay("dstar", dstarCall(0), [["DSTAR_CC_0", 0, 0]]), [
-				"0/0",
-			])
+		it("(e) a D-STAR call is linked", async () => {
+			expectLinked(
+				await replay("dstar", dstarCall(0), [["DSTAR_CC_0", 0, 0]]),
+				["0/0"],
+			)
 		})
 
-		it("(e) a YSF call is linked", () => {
-			expectLinked(replay("ysf", ysfCall(0), [["YSF_CC_0", 0, 0]]), ["0/0"])
+		it("(e) a YSF call is linked", async () => {
+			expectLinked(await replay("ysf", ysfCall(0), [["YSF_CC_0", 0, 0]]), [
+				"0/0",
+			])
 		})
 	})
 
 	describe("context resets", () => {
-		it("a restart drops a P25 privacy print's context; the next call proves itself", () => {
+		it("a restart drops a P25 privacy print's context; the next call proves itself", async () => {
 			const items: Item[] = [
 				[0, P1("HDU")],
 				[0, HDU_ENC],
 				[100, RESTART_LINE],
 				...p25Over(500, { alg: () => LDU2_CLEAR }),
 			]
-			expectLinked(replay("p25", items, [P1_FILE()]), ["56/1234"])
+			expectLinked(await replay("p25", items, [P1_FILE()]), ["56/1234"])
 		})
 	})
 	describe("call publication never depends on privacy", () => {
@@ -670,11 +689,11 @@ describe("dsd-fme non-DMR recording clearance repro corpus", () => {
 		]
 
 		for (const [name, mode, items] of cases)
-			it(`${name}: the same call_start and call_end events, with the same talkgroup and source, with the privacy prints stripped`, () => {
-				const full = replay(mode, items, []).calls
+			it(`${name}: the same call_start and call_end events, with the same talkgroup and source, with the privacy prints stripped`, async () => {
+				const full = (await replay(mode, items, [])).calls
 				const stripped = strip(items)
 				expect(stripped.length).toBeLessThanOrEqual(items.length)
-				const bare = replay(mode, stripped, []).calls
+				const bare = (await replay(mode, stripped, [])).calls
 				expect(full.length).toBeGreaterThan(0)
 				expect(full.filter(c => c.startsWith("call_start"))).toHaveLength(
 					full.filter(c => c.startsWith("call_end")).length,
