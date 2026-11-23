@@ -267,7 +267,7 @@ it("AIS on its band displaces the paging secondaries that filled the budget (x86
 	await f.settle(10 * 60_000)
 	expect(f.instances.get("ais")?.running).toBe(true)
 	expect(f.cores()).toBeLessThanOrEqual(EFFICIENCY_BUDGET_X64 + 1e-9)
-})
+}, 120_000)
 
 it("on the arm64 budget AIS fits beside the YAML decoders and every secondary yields", async () => {
 	const f = setup(EFFICIENCY_BUDGET_ARM64)

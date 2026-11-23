@@ -28,7 +28,13 @@ const K = (id: "chan" | "a" | "b") =>
 function harness() {
 	let mono = 0
 	let host = 10
-	const branches = ["decoder-a", "decoder-b", "channelizer-s", "live-demod-s"]
+	const branches = [
+		"decoder-a",
+		"decoder-b",
+		"decoder-c",
+		"channelizer-s",
+		"live-demod-s",
+	]
 	const totals = new Map(branches.map(b => [b, 0]))
 	const ownCpu: OwnCpuSource = {
 		sample: () => ({ ownCores: OWN_CALM, capacityCores: 4, available: true }),
@@ -76,12 +82,8 @@ function harness() {
 		mono += 2_000
 		gate.record(monitor.sampleNow())
 	}
-	for (const [id, reach] of [
-		["chan", "channel"],
-		["a", "raw"],
-		["b", "raw"],
-	] as const) {
-		const key = K(id)
+	const admit = (id: "chan" | "a" | "b" | "c", reach: "channel" | "raw") => {
+		const key = id === "c" ? placementKey(id, "s", "raw", null) : K(id)
 		const placement: WantedPlacement = {
 			key,
 			decoderId: id,
@@ -92,8 +94,9 @@ function harness() {
 			origin: "band",
 			primary: true,
 			sampleRateHz: 2_400_000,
+			...(id === "c" ? { tunedBand: true } : {}),
 		}
-		expect(gate.admit(placement, running, mono).admit).toBe(true)
+		if (!gate.admit(placement, running, mono).admit) return false
 		running.push({
 			key,
 			sourceId: "s",
@@ -105,7 +108,16 @@ function harness() {
 			startMode: "auto",
 			inputBranch:
 				reach === "channel" ? channelizerBranchId("s") : `decoder-${id}`,
+			...(id === "c" ? { tunedBand: true } : {}),
 		})
+		return true
+	}
+	for (const [id, reach] of [
+		["chan", "channel"],
+		["a", "raw"],
+		["b", "raw"],
+	] as const) {
+		expect(admit(id, reach)).toBe(true)
 		for (let i = 0; i < 17; i++) tick()
 	}
 	expect(verdicts).toEqual([])
@@ -130,6 +142,10 @@ function harness() {
 		},
 		entered: () => lines(warn, "Late loss excused: host busy"),
 		cleared: () => lines(info, "Late loss no longer excused"),
+		/** Admits a fourth raw placement `c` of the tuned band (the source's newest, on probation) if the gate admits it. */
+		admitC() {
+			return admit("c", "raw")
+		},
 		setHost(value: number) {
 			host = value
 		},
@@ -246,4 +262,63 @@ it("a placement that stops running loses its excuse with one info line; forget a
 	expect(
 		h.cleared().map(call => (call[0] as { placement: string }).placement),
 	).toEqual([K("a"), K("b")])
+})
+
+it("one excused window would not have condemned the placement: no excuse, no log line; sparse drops never log", () => {
+	const h = harness()
+	h.setHost(99)
+	h.run(["decoder-a"], 2_000)
+	h.run([], QUIET_MS)
+	expect(h.excuses()).toEqual({})
+	expect(h.entered()).toHaveLength(0)
+	// One drop every 36 s: never two excused windows in one window set.
+	for (let i = 0; i < 10; i++) {
+		h.run(["decoder-a"], 2_000)
+		h.run([], 34_000)
+	}
+	expect(h.verdicts).toEqual([])
+	expect(h.entered()).toHaveLength(0)
+	expect(h.cleared()).toHaveLength(0)
+})
+
+it("two excused windows (LATE_SHED_HITS) begin the excuse; it ends a full window set after its newest excused window", () => {
+	const h = harness()
+	h.setHost(99)
+	h.run(["decoder-a"], 2_000)
+	h.run([], 10_000)
+	expect(h.entered()).toHaveLength(0)
+	h.run(["decoder-a"], 2_000)
+	// Once the second drop's window completes.
+	h.run([], EFFICIENCY_DROP_WINDOW_MS)
+	expect(h.verdicts).toEqual([])
+	expect(Object.keys(h.excuses())).toEqual(["a"])
+	expect(h.excuses()["a"]!.windows).toBe(2)
+	expect(h.entered()).toHaveLength(1)
+	// The newest excused window ends at or after its drop: the excuse is still shown just short of a full window
+	// set after the drop, and gone once a full set has passed since that window's end.
+	h.run([], LATE_SHED_WINDOWS * EFFICIENCY_DROP_WINDOW_MS - 12_000)
+	expect(Object.keys(h.excuses())).toEqual(["a"])
+	h.run([], EFFICIENCY_DROP_WINDOW_MS + 4_000)
+	expect(h.excuses()).toEqual({})
+	expect(h.cleared()).toHaveLength(1)
+	expect(h.entered()).toHaveLength(1)
+})
+
+it("a source whose late pass is skipped (its newest placement on probation) clears its excuses and keeps none while it is skipped", () => {
+	const h = harness()
+	h.setHost(99)
+	h.run(["decoder-a"], 40_000)
+	expect(Object.keys(h.excuses())).toEqual(["a"])
+	// Host loss does not refuse a tuned-band newcomer.
+	expect(h.admitC()).toBe(true)
+	expect(h.cleared()).toHaveLength(0)
+	h.run(["decoder-a"], 2_000)
+	expect(h.excuses()).toEqual({})
+	expect(
+		h.cleared().map(call => (call[0] as { placement: string }).placement),
+	).toEqual([K("a")])
+	// No stale excuse comes back while the probationer is on probation.
+	h.run(["decoder-a"], 20_000)
+	expect(h.excuses()).toEqual({})
+	expect(h.entered()).toHaveLength(1)
 })

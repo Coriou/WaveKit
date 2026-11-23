@@ -444,6 +444,12 @@ closes the front discards them by design: not loss). Its counts then satisfy, pe
 U = sinkBytes + droppedBytes + discardedBytes        U = end of stream - startSourcePos
 ```
 
+A front closed before its `front-ended` (a failed write or a hang-up, F10; `configure` with
+other values, F15; `sink-close`, F16) carries the same identity on its `sink-closed`: its stream
+stops at the close, so U ends at the stream's end when it was already set, otherwise at the head
+at the close (the event's `sourcePos`). What the ring held past the front's cursor, and the
+spilled payload bytes the kernel never took, are in its `discardedBytes`.
+
 The parent's own count N (payload bytes it read) gives the bytes it abandoned at its close as
 `K = sinkBytes - N`; the hub cannot see them (macOS reports no unread count for a Unix-socket
 sender: `SO_NWRITE` is 0), so the stats file keeps every closed front's final `sinkBytes`
@@ -719,7 +725,8 @@ cargo run --release --locked --example hub_bench --manifest-path native/wavekit-
   upstream command room, the front's EOF and the stream's end at random times and the clock
   running into the grace: the front's bytes are the header and the stream with its gaps
   re-inserted, and `startSourcePos + sinkBytes + droppedBytes + discardedBytes` is the stream's
-  end (I-S3); the upstream's commands are a prefix of the front's, all of them unless the
+  end (I-S3), or on the `sink-closed` of a front closed before its end the head at the close,
+  with its unsent spill in `discardedBytes`; the upstream's commands are a prefix of the front's, all of them unless the
   attempt closed with commands unsent (I-C); every `front-placed` names the head when the
   upstream accepted its last byte and its `sinkByte` carries that position (I-P); a front that
   never reads costs the raw sink beside it nothing; `frontBytes` strictly increases.

@@ -1576,12 +1576,25 @@ fn check_front(o: &FrontRun) -> Result<(), TestCaseError> {
     // what it received, and the bytes up to it were discarded.
     let closed_early = !log.iter().filter(mine).any(|e| e["type"] == "front-ended")
         && log.iter().filter(mine).any(|e| e["type"] == "sink-closed");
+    let closed_discarded = log
+        .iter()
+        .filter(mine)
+        .find(|e| e["type"] == "sink-closed")
+        .and_then(|e| e["discardedBytes"].as_u64())
+        .unwrap_or(0);
     let mut at = start;
     let mut r = 0usize;
     for &(gs, src, dropped) in &gaps {
         let gs = gs as usize;
         if closed_early && gs > pay.len() {
             prop_assert!(gs - pay.len() < 2, "gap at {} of {}", gs, pay.len());
+            prop_assert!(
+                closed_discarded >= (gs - pay.len()) as u64,
+                "the {} spilled bytes past {} are discarded ({})",
+                gs - pay.len(),
+                pay.len(),
+                closed_discarded
+            );
             prop_assert!(r <= pay.len());
             break;
         }
