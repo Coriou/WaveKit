@@ -618,26 +618,53 @@ function addOperation(inventory: Inventory, scan: OperationScan): void {
  */
 const SCAN_CONCURRENCY = 8
 /**
- * Operation ids an audit reads at once: 1, so a background audit never queues more than one
- * file system call ahead of a recording's own writes on the shared thread pool.
+ * Operation ids an audit reads at once while no analog operation is active: 4, libuv's default
+ * thread pool (the image sets no UV_THREADPOOL_SIZE). Each id is a chain of dependent calls, so
+ * at most 4 audit calls are ever in flight; 2 while a recording runs (below).
  */
-const AUDIT_CONCURRENCY = 1
-/** Runs `fn` over `items` with at most `limit` in flight; results in input order. */
+export const AUDIT_CONCURRENCY_IDLE = 4
+/**
+ * Operation ids an audit reads at once while any analog operation of this process is active
+ * (checked before each id): 2, half the pool, so the audit alone never fills the shared thread
+ * pool and a recording's own writes never queue behind it. Readers above it park; a reader
+ * mid-id finishes that id's chain (one dependent call at a time) first.
+ */
+export const AUDIT_CONCURRENCY_RECORDING = 2
+/** How long a parked audit reader waits before it checks the limit again. */
+const AUDIT_PARK_MS = 50
+/**
+ * Runs `fn` over `items` with at most `limit` in flight (a number, or asked again before each
+ * item and clamped to 1..`max`: a reader at or above it parks for `parkMs`, never cancelling
+ * a read in flight); results in input order.
+ */
 async function mapLimited<T, R>(
 	items: readonly T[],
-	limit: number,
+	limit: number | (() => number),
 	fn: (item: T) => Promise<R>,
+	max = typeof limit === "number" ? limit : 1,
+	parkMs = AUDIT_PARK_MS,
 ): Promise<R[]> {
 	const results = new Array<R>(items.length)
+	const readers = Math.max(1, Math.min(Math.floor(max), items.length))
+	const allowed = (): number => {
+		const asked = typeof limit === "number" ? limit : limit()
+		return Number.isFinite(asked)
+			? Math.max(1, Math.min(readers, Math.floor(asked)))
+			: 1
+	}
 	let next = 0
-	const worker = async (): Promise<void> => {
+	const worker = async (reader: number): Promise<void> => {
 		while (next < items.length) {
+			if (reader >= allowed()) {
+				await new Promise<void>(resolve => setTimeout(resolve, parkMs))
+				continue
+			}
 			const index = next++
 			results[index] = await fn(items[index]!)
 		}
 	}
 	await Promise.all(
-		Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+		Array.from({ length: readers }, (_, reader) => worker(reader)),
 	)
 	return results
 }
@@ -2448,11 +2475,12 @@ export class AnalogOperations {
 		else this.applyScans(scans)
 	}
 	/**
-	 * Re-reads every operation without holding the lock (AUDIT_CONCURRENCY at once), so changes
-	 * made from outside this process (hand edits, tampering) reach the inventory and an
-	 * unexpected one makes it unknown, fail closed, as the full scan would. Each id's result is
-	 * applied under the lock only when nothing of this process touched that id since the audit
-	 * began (an active operation, a refresh, a full scan). Crash residue, or an unknown
+	 * Re-reads every operation without holding the lock (AUDIT_CONCURRENCY_IDLE ids at once,
+	 * AUDIT_CONCURRENCY_RECORDING while an operation is active), so changes made from outside
+	 * this process (hand edits, tampering) reach the inventory and an unexpected one makes it
+	 * unknown, fail closed, as the full scan would. Each id's result is applied under the lock
+	 * only when nothing of this process touched that id since the audit began (an active
+	 * operation, a refresh, a full scan). Crash residue, or an unknown
 	 * inventory, runs the full scan under the lock instead (it sets residue aside, and only it
 	 * may clear an unknown inventory). One audit at a time; the retention pass runs it.
 	 */
@@ -2481,8 +2509,14 @@ export class AnalogOperations {
 			])
 				if (!ids.has(id))
 					ids.set(id, { cleanup: false, staging: false, folder: false })
-			const scans = await mapLimited([...ids], AUDIT_CONCURRENCY, ([id, has]) =>
-				this.scanOperation(id, has),
+			const scans = await mapLimited(
+				[...ids],
+				() =>
+					this.active.size
+						? AUDIT_CONCURRENCY_RECORDING
+						: AUDIT_CONCURRENCY_IDLE,
+				([id, has]) => this.scanOperation(id, has),
+				AUDIT_CONCURRENCY_IDLE,
 			)
 			await this.exclusive(async () => {
 				// A full scan replaced the inventory meanwhile: it is newer than this audit.
