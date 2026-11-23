@@ -1669,6 +1669,8 @@ export class ScannerService extends EventEmitter {
 				beginAnalog: input => this.beginAnalogRecording(input),
 				// The store's analog operations over all sources (its overall limit).
 				analogActive: () => this.evidence.analogActiveCount,
+				// And per source, the channel tier's included (the store's per-source limit).
+				analogActiveOn: sourceId => this.evidence.analogActiveCountOn(sourceId),
 				recordTone: (observationId, ctcssHz, at) =>
 					void this.store.recordAnalog(
 						observationId,

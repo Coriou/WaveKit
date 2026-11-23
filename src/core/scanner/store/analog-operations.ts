@@ -910,6 +910,16 @@ export class AnalogOperations {
 	get activeCount(): number {
 		return this.active.size
 	}
+	/**
+	 * Operations active now on `sourceId`, every producer's (the per-source limit,
+	 * analogPerSourceLimit, counts these): at most MAX_ACTIVE_ANALOG_OPERATIONS to scan.
+	 */
+	activeCountOn(sourceId: string): number {
+		let n = 0
+		for (const op of this.active.values())
+			if (op.intent.binding.sourceId === sourceId) n++
+		return n
+	}
 
 	get ready(): boolean {
 		return (

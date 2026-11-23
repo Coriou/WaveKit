@@ -554,6 +554,16 @@ export const WIDEBAND_MAX_PENDING_GAPS = 64
  */
 export const MAX_WAITING_FILES = 2
 /**
+ * Sessions whose voiced file may wait at once for a free store operation (storeWaiters): the
+ * store's overall limit, MAX_ACTIVE_ANALOG_OPERATIONS (8). Every waiter begins its operation as
+ * one ends, oldest first, so 8 waiters are all served once the store's 8 operations have each
+ * ended once; a ninth could only wait past that turnover, and is dropped instead
+ * (`discarded:store-backlog`). Each waiting session holds at most MAX_WAITING_FILES files within
+ * WIDEBAND_MAX_BUFFERED_FRAMES (960 KB): 8 · 960 KB = 7.68 MB at most, and each waiting file is
+ * dropped once it waited longer than WIDEBAND_MAX_BUFFERED_MS (60 s).
+ */
+export const MAX_STORE_WAITERS = MAX_ACTIVE_ANALOG_OPERATIONS
+/**
  * A shadow file a retune ended before its class arrived waits this long for the closing
  * snapshot (which may carry the first analog-fm class): 2 s of stream samples after the new
  * epoch's start (2 048 000 samples at 1.024 Msps), checked on every engine write. Past it, or
@@ -992,6 +1002,12 @@ export interface WidebandAnalogDeps {
 	 */
 	analogActive?(): number
 	/**
+	 * Analog operations the store holds now on `sourceId`, every producer's (the channel tier's
+	 * included): the store refuses a wideband admission at MAX_ACTIVE_ANALOG_PER_SOURCE (6) of
+	 * them. Absent or not finite: this recorder's own unsettled operations on the source.
+	 */
+	analogActiveOn?(sourceId: string): number
+	/**
 	 * The decoded label of `discoveryId`, or of the live discovery it was merged into (its
 	 * folder's owner), with the decode's time and observation (voice-veto.ts ownerDecoded); null
 	 * while not decoded or unknown. A protocol that is not analog voice (notAnalogVoiceProtocol)
@@ -1144,6 +1160,13 @@ interface FileState {
 	pushFailed: boolean
 	/** This file's terminal decision was noted (each file gets exactly one; endFile). */
 	decided: boolean
+	/** Order it began waiting in (Session.waiting): the store's freed operations go oldest first. */
+	waitSeq: number
+	/**
+	 * When (deps.now(), ms) it first waited for a free store operation (storeWaiters); null
+	 * before. Waiting longer than WIDEBAND_MAX_BUFFERED_MS, it is dropped (expireStoreWaiters).
+	 */
+	storeSince: number | null
 }
 
 interface Session {
@@ -1553,9 +1576,15 @@ export class WidebandAnalogRecorder {
 	 * operation the store allows over all sources is held (storeFull): a shadow classed after it
 	 * was admitted beside a full store. Its audio stays buffered (WIDEBAND_MAX_BUFFERED_FRAMES)
 	 * and its operation begins once one ends (drainStoreWaiters), oldest first, instead of the
-	 * store refusing it (refused:store) and its opening audio being lost.
+	 * store refusing it (refused:store) and its opening audio being lost. A session whose own
+	 * operation settled with a next file waiting (a roll-over, a new transmission) joins them, so
+	 * a freed operation goes to the file that has waited longest, whoever's it is. The session
+	 * may have ended (its file finished while waiting): it is kept here only, at most
+	 * MAX_STORE_WAITERS, each waiting file at most WIDEBAND_MAX_BUFFERED_MS.
 	 */
 	private readonly storeWaiters = new Set<Session>()
+	/** Orders the files that wait (FileState.waitSeq). */
+	private waitSeq = 0
 	private readonly refused = new Set<string>()
 	/** Decode- or channel-tier-backed digital classes seen per live discovery (bounded). */
 	private readonly digitalSeen = new DigitalClassLedger()
@@ -1731,37 +1760,113 @@ export class WidebandAnalogRecorder {
 		let pending = 0
 		for (const s of this.sessions.values())
 			if (!s.done && s.ops === 0 && s.classed) pending++
+		// An ended session whose file still waits for the store takes one too (the live ones are
+		// counted above): a new voice never starts ahead of the files already waiting.
+		for (const s of this.storeWaiters)
+			if (s.done && s.ops === 0 && s.waiting.length > 0) pending++
 		return Math.max(own, store) + pending
 	}
 
 	/**
 	 * The store holds every operation it allows over all sources (MAX_ACTIVE_ANALOG_OPERATIONS):
-	 * its count (analogActive) or this recorder's unsettled ones, whichever is larger. Never
-	 * during stop(): a waiting file then begins as before (the store judges it).
+	 * its count (analogActive) or this recorder's unsettled ones, whichever is larger; with
+	 * `sourceId`, also every one it allows this recorder on that source
+	 * (MAX_ACTIVE_ANALOG_PER_SOURCE, 6): the store's count there (analogActiveOn, the channel
+	 * tier's operations included) or this recorder's own, whichever is larger. Never during
+	 * stop(): a waiting file then begins as before (the store judges it).
 	 */
-	private storeFull(): boolean {
+	private storeFull(sourceId?: string): boolean {
 		if (this.stopped) return false
 		let own = 0
 		for (const n of this.unsettled.values()) own += n
-		let store = 0
-		try {
-			const n = this.deps.analogActive?.()
-			if (typeof n === "number" && Number.isFinite(n)) store = n
-		} catch {
-			store = 0
-		}
-		return Math.max(own, store) >= MAX_ACTIVE_ANALOG_OPERATIONS
+		if (
+			Math.max(
+				own,
+				this.storeCount(() => this.deps.analogActive?.()),
+			) >= MAX_ACTIVE_ANALOG_OPERATIONS
+		)
+			return true
+		if (sourceId === undefined) return false
+		const mine = this.unsettled.get(sourceId) ?? 0
+		const there = this.storeCount(() => this.deps.analogActiveOn?.(sourceId))
+		return Math.max(mine, there) >= MAX_ACTIVE_ANALOG_PER_SOURCE
 	}
 
-	/** Begins the store waiters' operations, oldest first, while the store has room (storeWaiters). */
-	private drainStoreWaiters(): void {
-		for (const s of [...this.storeWaiters]) {
-			while (s.ops === 0 && s.waiting.length > 0 && !this.storeFull())
-				this.beginOp(s, s.waiting.shift()!)
-			// Holding an operation now, its own settle begins the rest (one at a time).
-			if (s.ops > 0 || s.waiting.length === 0) this.storeWaiters.delete(s)
-			else return
+	/** A store count from `read`: 0 when absent, not finite or throwing. */
+	private storeCount(read: () => number | undefined): number {
+		try {
+			const n = read()
+			return typeof n === "number" && Number.isFinite(n) ? n : 0
+		} catch {
+			return 0
 		}
+	}
+
+	/** Store waiters with a file still waiting and no operation (stale entries leave). */
+	private storeWaiting(): number {
+		for (const s of [...this.storeWaiters])
+			if (s.ops > 0 || s.waiting.length === 0) this.storeWaiters.delete(s)
+		return this.storeWaiters.size
+	}
+
+	/** `s` waits for a free store operation from now (its files' storeSince, once). */
+	private addStoreWaiter(s: Session): void {
+		const now = this.deps.now()
+		for (const f of s.waiting) f.storeSince ??= now
+		this.storeWaiters.add(s)
+	}
+
+	/**
+	 * Begins the store waiters' operations while the store has room, the oldest waiting file
+	 * first (FileState.waitSeq, over every session: a store waiter and a session's own next file
+	 * behind its settled operation alike), each on its source only while that source has room
+	 * too; one at a time per session (its own settle begins its next file). Then every file still
+	 * waiting longer than WIDEBAND_MAX_BUFFERED_MS is dropped (expireStoreWaiters). Run on every
+	 * snapshot (track, closed) and every operation's end.
+	 */
+	private drainStoreWaiters(): void {
+		this.storeWaiting()
+		const order = [...this.storeWaiters].sort(
+			(a, b) => (a.waiting[0]?.waitSeq ?? 0) - (b.waiting[0]?.waitSeq ?? 0),
+		)
+		for (const s of order) {
+			if (this.storeFull()) break
+			while (s.ops === 0 && s.waiting.length > 0 && !this.storeFull(s.sourceId))
+				this.beginOp(s, s.waiting.shift()!)
+			if (s.ops > 0 || s.waiting.length === 0) this.storeWaiters.delete(s)
+		}
+		this.expireStoreWaiters()
+	}
+
+	/**
+	 * Drops every file that waited for the store longer than WIDEBAND_MAX_BUFFERED_MS
+	 * (`discarded:store-backlog`, noted once; its buffered audio goes with it); a live session
+	 * whose current file it is ends too. Never during stop() (every waiter begins).
+	 */
+	private expireStoreWaiters(): void {
+		if (this.stopped || this.storeWaiters.size === 0) return
+		const now = this.deps.now()
+		for (const s of [...this.storeWaiters]) {
+			for (const f of [...s.waiting])
+				if (
+					f.storeSince !== null &&
+					now - f.storeSince > WIDEBAND_MAX_BUFFERED_MS
+				)
+					this.dropWaiting(s, f)
+			if (s.ops > 0 || s.waiting.length === 0) this.storeWaiters.delete(s)
+		}
+	}
+
+	/** A waiting file the store will not take in time: dropped, its decision noted once. */
+	private dropWaiting(s: Session, file: FileState): void {
+		const at = s.waiting.indexOf(file)
+		if (at >= 0) s.waiting.splice(at, 1)
+		file.failed = true
+		s.files.delete(file)
+		file.unjudged.length = 0
+		this.fileLost(s)
+		this.endFile(s, file, "discarded:store-backlog")
+		if (s.file === file && !s.done) this.refuse(s, "discarded:store-backlog")
 	}
 
 	owns(observationId: string): boolean {
@@ -2078,6 +2183,8 @@ export class WidebandAnalogRecorder {
 		// Its closing ingest came first: the observation asks for no waiver any more.
 		this.waived.delete(observationId)
 		this.closeUnrecorded(observationId)
+		// A file waiting for the store may begin, or has waited too long (drainStoreWaiters).
+		if (!this.stopped) this.drainStoreWaiters()
 		// An association first given at the close still names the observation's earlier decisions.
 		if (info !== undefined && info.discoveryId !== null)
 			this.decisions.bindDiscovery(observationId, info.discoveryId)
@@ -2882,6 +2989,16 @@ export class WidebandAnalogRecorder {
 			this.decisions.note("refused:slots", ref)
 			return
 		}
+		// A shadow beside a full store while MAX_STORE_WAITERS files already wait for it: once
+		// classed and voiced it could only be dropped (admit), so it waits like a full source.
+		if (
+			!input.analogFm &&
+			this.storeWaiting() >= MAX_STORE_WAITERS &&
+			this.storeFull(input.sourceId)
+		) {
+			this.decisions.note("refused:slots", ref)
+			return
+		}
 		const reserve = this.deps.reserveCores
 		const cores = widebandSessionCores(epoch.sampleRateHz)
 		let release: (() => void) | null = () => undefined
@@ -3285,6 +3402,8 @@ export class WidebandAnalogRecorder {
 			finishAsked: false,
 			pushFailed: false,
 			decided: false,
+			waitSeq: 0,
+			storeSince: null,
 		}
 		s.file = file
 		s.files.add(file)
@@ -3307,26 +3426,40 @@ export class WidebandAnalogRecorder {
 			(s.done && !file.finishing)
 		)
 			return
-		if (s.ops === 0) {
-			// Every operation the store allows is held: wait for one to end rather than be refused.
-			if (this.storeFull()) {
-				s.waiting.push(file)
-				this.storeWaiters.add(s)
+		if (s.ops === 0 && s.waiting.length === 0) {
+			if (!this.storeFull(s.sourceId)) {
+				this.beginOp(s, file)
 				return
 			}
-			this.beginOp(s, file)
+			// Every operation the store allows is held: wait for one to end rather than be
+			// refused, unless MAX_STORE_WAITERS files already wait (it could only wait past them).
+			if (this.storeWaiting() >= MAX_STORE_WAITERS) {
+				this.backlogged(s, file)
+				return
+			}
+			file.waitSeq = ++this.waitSeq
+			s.waiting.push(file)
+			this.addStoreWaiter(s)
 			return
 		}
 		for (const [f, h] of [...this.held]) if (h.s === s) this.release(f)
+		// Behind its own operation or its file already waiting for the store: at most
+		// MAX_WAITING_FILES wait, in order.
 		if (s.waiting.length >= MAX_WAITING_FILES) {
-			// The store is not settling files: give up rather than hold more audio.
-			file.failed = true
-			s.files.delete(file)
-			this.endFile(s, file, "discarded:store-backlog")
-			if (s.file === file) this.refuse(s, "discarded:store-backlog")
+			this.backlogged(s, file)
 			return
 		}
+		file.waitSeq = ++this.waitSeq
 		s.waiting.push(file)
+		if (s.ops === 0) this.addStoreWaiter(s)
+	}
+
+	/** The store is not settling files: give up on `file` rather than hold more audio. */
+	private backlogged(s: Session, file: FileState): void {
+		file.failed = true
+		s.files.delete(file)
+		this.endFile(s, file, "discarded:store-backlog")
+		if (s.file === file) this.refuse(s, "discarded:store-backlog")
 	}
 
 	private beginOp(s: Session, file: FileState): void {
@@ -3382,10 +3515,10 @@ export class WidebandAnalogRecorder {
 				this.settling.delete(settled)
 				s.files.delete(file)
 				s.ops--
-				// One at a time: the next waiting file begins when this session holds no slot.
-				while (s.ops === 0 && s.waiting.length > 0)
-					this.beginOp(s, s.waiting.shift()!)
-				// An operation ended: a file waiting for the store's overall limit may begin.
+				// One at a time: this session's next waiting file may begin now it holds no slot,
+				// but the freed operation goes to the file that has waited longest over every
+				// session (drainStoreWaiters, FileState.waitSeq): it joins the store waiters.
+				if (s.ops === 0 && s.waiting.length > 0) this.addStoreWaiter(s)
 				this.drainStoreWaiters()
 				if (s.ops === 0 || !s.done) this.yielding.delete(s)
 				this.publishTones(s)

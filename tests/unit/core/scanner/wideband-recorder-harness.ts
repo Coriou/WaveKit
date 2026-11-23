@@ -235,6 +235,10 @@ export function harness(
 		recordingCpu?: () => RecordingCpuReading | null
 		/** The store's analog operations over all sources (WidebandAnalogDeps.analogActive); default absent. */
 		analogActive?: () => number
+		/** The store's analog operations on a source (WidebandAnalogDeps.analogActiveOn); default absent. */
+		analogActiveOn?: (sourceId: string) => number
+		/** The recorder's wall clock (WidebandAnalogDeps.now), driven by the test; wins over `liveClock`. */
+		now?: () => number
 		/** The recorder's refused:tuning report (WidebandAnalogDeps.tuningRefused). */
 		tuningRefused?: (sourceId: string) => void
 		/** The recorder's per-turn budget clock (milliseconds); default performance.now. */
@@ -278,9 +282,11 @@ export function harness(
 	const timers: { ms: number; run: () => void; live: boolean }[] = []
 	const warnings: unknown[] = []
 	const logger = opts.logger ?? pino({ level: "silent" })
-	const now = opts.liveClock
-		? () => HARNESS_T0 + (engine.liveEdge() * 1000) / fs
-		: () => HARNESS_T0
+	const now = opts.now
+		? opts.now
+		: opts.liveClock
+			? () => HARNESS_T0 + (engine.liveEdge() * 1000) / fs
+			: () => HARNESS_T0
 	const legacy = opts.decodedProtocol
 	const decodedLabel =
 		opts.decodedLabel ??
@@ -314,6 +320,7 @@ export function harness(
 		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
 		...(opts.recordingCpu ? { recordingCpu: opts.recordingCpu } : {}),
 		...(opts.analogActive ? { analogActive: opts.analogActive } : {}),
+		...(opts.analogActiveOn ? { analogActiveOn: opts.analogActiveOn } : {}),
 		...(opts.tuningRefused ? { tuningRefused: opts.tuningRefused } : {}),
 		...(decodedLabel ? { decodedLabel } : {}),
 		...(opts.voicePrior ? { voicePrior: opts.voicePrior } : {}),
