@@ -601,8 +601,9 @@ and a full store drops to about 15.5 MB under the cap; from about 739 MiB up, 2 
 59.1 MiB): an 18 MiB (18,874,368 B) cap gets 4,718,592 B, so a small store is not emptied to
 three quarters. Below 15,491,424 B (about 14.8 MiB) a quarter of the cap is less than the
 two-reservation trigger; a pass removes while either the trigger holds or the target is not
-free, so there it stops at two reservations under the cap. A cap under one reservation (1 MiB,
-say) refuses every analog recording and retention removes every removable one. Between the
+free, so there it stops at two reservations under the cap. A cap under two reservations
+(3,872,856 B) keeps the trigger on even over an empty store, so every pass removes every
+removable recording; under one reservation (1 MiB, say) every analog recording is also refused. Between the
 two points nothing is removed. Kept, held and recent files are never removed for room. A store
 without analog operations, or whose analog inventory is not ready yet (before recovery
 finishes), trims its other recordings only to the cap itself. Details:
