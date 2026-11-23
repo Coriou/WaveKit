@@ -488,6 +488,12 @@ while its stream drains (the stream ended first) ends the front at once with the
 reason, its rest discarded. The macOS `poll` reports a half-close as `POLLIN | POLLHUP`: a front
 polled for reading reads to its EOF before anything else.
 
+A front is sent to at its start (F3, F3g) and when its stream ends, not only on a head advance
+or writable: a front bound after its stream's last read, or one whose stream ends with nothing
+more to read, still sends its header unit and what the ring holds, then ends (F12). This kick
+runs once the I/O loop has applied the actions (the front's connection is in place) and only for
+the fronts that started or ended; a writable front is never polled for POLLOUT.
+
 ## Stats file
 
 With `--stats-file PATH` the hub appends one line a second, and one at exit:

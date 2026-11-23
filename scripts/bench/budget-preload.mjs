@@ -270,6 +270,7 @@ function startMain() {
 		clones: 0,
 		chunks: 0,
 		chunkBytes: 0,
+		frontBytes: 0,
 		gc: {},
 	}
 	const sourcePort = Number(process.env.BUDGET_SOURCE_PORT)
@@ -292,6 +293,24 @@ function startMain() {
 		else if (chunk && typeof chunk.byteLength === "number")
 			c.bytes += chunk.byteLength
 		return originalWrite.apply(this, arguments)
+	}
+	// Hub intake (WAVEKIT_SOURCE_INTAKE=hub): the core reads the hub's front over a Unix
+	// socket the iqhub supervisor tags with this symbol (src/core/iq-hub/intake.ts HUB_FRONT_TAG).
+	const HUB_FRONT_TAG = Symbol.for("wavekit.iqhub.front")
+	const IS_FRONT = Symbol("budgetFront")
+	{
+		const frontEmit = proto.emit
+		proto.emit = function emit(event, data) {
+			if (event === "data") {
+				let is = this[IS_FRONT]
+				if (is === undefined) {
+					is = this[HUB_FRONT_TAG] !== undefined
+					this[IS_FRONT] = is
+				}
+				if (is) counters.frontBytes += data?.length ?? 0
+			}
+			return frontEmit.apply(this, arguments)
+		}
 	}
 	if (Number.isInteger(sourcePort) && sourcePort > 0) {
 		const IS_SOURCE = Symbol("budgetSource")
@@ -349,6 +368,7 @@ function startMain() {
 		clones: counters.clones,
 		chunks: counters.chunks,
 		chunkBytes: counters.chunkBytes,
+		frontBytes: counters.frontBytes,
 		sched: readSchedstat(),
 	})
 	// The counters hold only numbers: a JSON round trip copies them without calling the
@@ -420,6 +440,7 @@ function startMain() {
 				Number.isInteger(sourcePort) && sourcePort > 0
 					? b.chunkBytes - a.chunkBytes
 					: null,
+			frontBytes: b.frontBytes - a.frontBytes,
 			schedstat: sched,
 		}
 	}

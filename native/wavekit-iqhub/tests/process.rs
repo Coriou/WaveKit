@@ -1696,6 +1696,114 @@ fn a_stream_that_ends_is_delivered_whole_then_the_front_ends_with_its_reason() {
     assert_eq!(hub.wait_exit().code(), Some(0));
 }
 
+/// Reads exactly `n` bytes, or what came before the deadline.
+fn read_exact_within(s: &mut UnixStream, n: usize) -> Vec<u8> {
+    s.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    let deadline = Instant::now() + WAIT;
+    let mut v = vec![0u8; n];
+    let mut got = 0;
+    while got < n && Instant::now() < deadline {
+        match s.read(&mut v[got..]) {
+            Ok(0) => break,
+            Ok(k) => got += k,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(e) => panic!("front read: {e}"),
+        }
+    }
+    v.truncate(got);
+    v
+}
+
+/// F3 bound while its attempt is the stream, after the stream's last read: nothing more comes
+/// from the upstream (no head advance) and the socket is writable (no POLLOUT is polled), yet
+/// the header unit and the payload the ring holds are sent at once.
+#[test]
+fn a_front_bound_after_its_stream_was_read_gets_the_header_and_payload_without_more_reads() {
+    let mut hub = spawn();
+    hub.expect("ready");
+    hub.send(r#"{"v":1,"type":"configure","byteRate":2048000,"frameBytes":2,"levelFormat":null,"progressMs":50}"#);
+    hub.expect("configured");
+    let src = listener();
+    let port = src.local_addr().unwrap().port();
+    hub.send(&connect_line(1, port, 12, ""));
+    hub.send(r#"{"v":1,"type":"sink-open","sink":"f1","kind":"front","attempt":1}"#);
+    let (mut peer, _) = src.accept().unwrap();
+    hub.until("tcp-connected");
+    // A short finite payload: one read takes it all, then the upstream stays silent.
+    let truth = stream_bytes(1, 0, 1000);
+    peer.write_all(RTL_HEADER).unwrap();
+    peer.write_all(&truth).unwrap();
+    hub.until("adopted");
+    let mut read = 0;
+    while read < truth.len() as u64 {
+        let p = hub.until("progress");
+        read += p["arrivals"]["bytes"].as_u64().unwrap_or(0);
+    }
+    let mut front = hub.connect_sink("f1");
+    hub.until("sink-bound");
+    let st = hub.until("sink-started");
+    assert_eq!(st["startSourcePos"].as_u64(), Some(0), "{st}");
+    let got = read_exact_within(&mut front, 12 + truth.len());
+    assert_eq!(got.len(), 12 + truth.len(), "the header and payload arrive");
+    assert_eq!(&got[..12], RTL_HEADER);
+    assert_eq!(&got[12..], &truth[..]);
+    // The stream ends: nothing more to send, the front ends with the stream's reason.
+    drop(peer);
+    let fe = hub.until("front-ended");
+    assert_eq!(
+        (
+            fe["reason"].as_str(),
+            fe["sinkBytes"].as_u64(),
+            fe["headerSent"].as_u64()
+        ),
+        (Some("eof"), Some(1000), Some(12)),
+        "{fe}"
+    );
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
+}
+
+/// F3 then F12: a front active from its stream's start whose stream ends with nothing read
+/// after the header (the header unit is still queued, the socket writable) sends the header
+/// and ends.
+#[test]
+fn a_front_whose_stream_ends_after_only_the_header_sends_it_and_ends() {
+    let mut hub = spawn();
+    hub.expect("ready");
+    hub.send(r#"{"v":1,"type":"configure","byteRate":2048000,"frameBytes":2,"levelFormat":null}"#);
+    hub.expect("configured");
+    let src = listener();
+    let port = src.local_addr().unwrap().port();
+    hub.send(&connect_line(1, port, 12, ""));
+    hub.send(r#"{"v":1,"type":"sink-open","sink":"f1","kind":"front","attempt":1}"#);
+    let (mut peer, _) = src.accept().unwrap();
+    hub.until("tcp-connected");
+    let mut front = hub.connect_sink("f1");
+    hub.until("sink-bound");
+    peer.write_all(RTL_HEADER).unwrap();
+    drop(peer);
+    hub.until("sink-started");
+    let fe = hub.until("front-ended");
+    assert_eq!(
+        (
+            fe["reason"].as_str(),
+            fe["sinkBytes"].as_u64(),
+            fe["headerSent"].as_u64()
+        ),
+        (Some("eof"), Some(0), Some(12)),
+        "{fe}"
+    );
+    let got = read_exact_within(&mut front, 13);
+    assert_eq!(&got[..], RTL_HEADER, "the header, then the half-close");
+    hub.close_control();
+    assert_eq!(hub.wait_exit().code(), Some(0));
+}
+
 #[test]
 fn a_write_to_a_fronted_attempt_is_refused_and_a_missing_stats_dir_fails_start_up() {
     let mut hub = spawn();

@@ -812,6 +812,21 @@ impl Io {
     }
 
     fn actions(&mut self, now: u64) {
+        loop {
+            self.run_actions(now);
+            if !self.hub.has_kicks() {
+                return;
+            }
+            let mut k = Fds {
+                attempts: &self.attempts,
+                sinks: &self.sinks,
+                unbound: &self.unbound,
+            };
+            self.hub.service_kicked(&mut k, now);
+        }
+    }
+
+    fn run_actions(&mut self, now: u64) {
         while let Some(a) = self.hub.take_action() {
             match a {
                 Action::Connect {

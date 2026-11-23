@@ -774,7 +774,12 @@ pub struct Hub {
     /// The most recent closed fronts' final counts (a ring of [`CLOSED_FRONTS_KEPT`]).
     closed_fronts: [Option<ClosedFront>; CLOSED_FRONTS_KEPT],
     closed_fronts_next: usize,
+    /// Fronts with queued bytes and a writable socket that nothing else would wake: one bit per
+    /// sink slot, sent by [`Hub::service_kicked`] once the I/O loop has run the actions.
+    kicked: u32,
 }
+
+const _: () = assert!(MAX_SINKS <= u32::BITS as usize);
 
 /// `link-gap` totals since the hub started (the stats file's `linkGaps`).
 #[derive(Debug, Clone, Copy, Default)]
@@ -859,6 +864,7 @@ impl Hub {
             link_gaps: LinkGaps::default(),
             closed_fronts: Default::default(),
             closed_fronts_next: 0,
+            kicked: 0,
         }
     }
 
@@ -870,6 +876,28 @@ impl Hub {
 
     pub fn take_action(&mut self) -> Option<Action> {
         self.actions.pop_front()
+    }
+
+    /// Whether [`Hub::service_kicked`] has work.
+    pub fn has_kicks(&self) -> bool {
+        self.kicked != 0
+    }
+
+    /// Sends what a kicked front has queued: run after the actions (a front bound by `hello`
+    /// has its connection only then). A front that started after its stream's last read, or
+    /// whose stream ended, has no head advance and no POLLOUT to wake it.
+    pub fn service_kicked(&mut self, k: &mut impl Kernel, now: u64) {
+        let mut m = std::mem::take(&mut self.kicked);
+        while m != 0 {
+            let slot = m.trailing_zeros() as usize;
+            m &= m - 1;
+            let go = self.sinks[slot]
+                .as_ref()
+                .is_some_and(|s| s.state == SinkState::Active && !s.blocked);
+            if go {
+                self.service_sink(slot, k, now);
+            }
+        }
     }
 
     /// The exit code once the hub must stop: 0 on shutdown, 1 once an event could not be queued.
@@ -1457,6 +1485,15 @@ impl Hub {
                 }
             }
             self.front_check_end(fs, now);
+            // Not ended and not blocked: nothing more is read and no POLLOUT is polled, so only
+            // a kick can send what it still holds. (The start's kick and every head advance
+            // already send a writable front all it has; this keeps it from waiting forever.)
+            if self.sinks[fs]
+                .as_ref()
+                .is_some_and(|s| s.state == SinkState::Active && !s.blocked)
+            {
+                self.kicked |= 1 << fs;
+            }
         }
     }
 
@@ -2845,6 +2882,9 @@ impl Hub {
             s.emit_gap(&mut ctx, "start", target - stream_start);
         }
         self.front_take_inbox(fs);
+        // The header unit (and any payload the ring holds) is queued: send it without waiting
+        // for the next read.
+        self.kicked |= 1 << fs;
     }
 
     /// The hello's trailing command bytes join the attempt's queue once the gate admits them.

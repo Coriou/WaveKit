@@ -334,10 +334,13 @@ fn f3_bound_while_its_attempt_is_adopted_starts_at_the_stream_start_with_the_hea
         (st["startSourcePos"].as_u64(), st["sinkByte"].as_u64()),
         (Some(0), Some(0))
     );
-    // The header unit goes first once the front is serviced (the next head advance).
-    r.feed(slot, &payload(100, 20));
+    // The header unit goes first, with what the ring holds, at once: no head advance and no
+    // POLLOUT (the socket was writable) is needed to wake it.
     let mut want = HDR.to_vec();
-    want.extend(payload(0, 120));
+    want.extend(payload(0, 100));
+    assert_eq!(got(&r, fs), want);
+    r.feed(slot, &payload(100, 20));
+    want.extend(payload(100, 20));
     assert_eq!(got(&r, fs), want);
     assert_eq!(r.hub.front_counts(fs).unwrap().4, 12, "headerSent");
     // The window edge: a stream start exactly maxLagBytes - resumeBytes behind the head.
@@ -1113,11 +1116,12 @@ fn f11_a_lagging_front_never_skips_past_its_streams_end() {
     // A new stream runs the head far past the old one's end.
     let s2 = r.new_stream(2);
     r.feed(s2, &payload(500, 2_000));
-    let evs = r.events();
+    let mut evs = r.events();
     let g = gaps(&evs);
     assert!(g.iter().all(|(_, at, n, _)| at + n <= 500), "{g:?}");
+    // The header went out at the start, so a skip to the end may end the front at once.
     r.drain_all();
-    let evs = r.events();
+    evs.extend(r.events());
     let fe = find(&evs, "front-ended")[0].clone();
     let dropped = fe["droppedBytes"].as_u64().unwrap();
     assert_eq!(
@@ -1143,6 +1147,28 @@ fn f12_front_ended_carries_the_attempts_close_reason_and_errno() {
         (Some("reset"), Some(54))
     );
     let _ = fs;
+}
+
+#[test]
+fn f12_a_stream_that_ends_after_only_its_header_ends_the_front_with_the_header_sent() {
+    let mut r = rig();
+    let (slot, fs) = live(&mut r);
+    // F3 queued the header unit; the writable front sends it at once, with no read after it.
+    assert_eq!(got(&r, fs), HDR.to_vec(), "the header unit at once");
+    r.k.sources[slot].eof = true;
+    r.hub.service_attempt(slot, true, false, &mut r.k, r.now);
+    r.actions();
+    let evs = r.events();
+    let fe = find(&evs, "front-ended")[0];
+    assert_eq!(
+        (
+            fe["reason"].as_str(),
+            fe["sinkBytes"].as_u64(),
+            fe["headerSent"].as_u64()
+        ),
+        (Some("eof"), Some(0), Some(12))
+    );
+    assert!(r.k.sinks[fs].shut_write, "its write side is shut");
 }
 
 #[test]

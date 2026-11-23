@@ -326,7 +326,18 @@ impl Rig {
     }
 
     /// Performs the hub's actions the way the I/O loop does, on the simulated kernel.
+    /// As the I/O loop: the actions, then the kicked fronts, until neither has work.
     pub fn actions(&mut self) {
+        loop {
+            self.run_actions();
+            if !self.hub.has_kicks() {
+                return;
+            }
+            self.hub.service_kicked(&mut self.k, self.now);
+        }
+    }
+
+    fn run_actions(&mut self) {
         while let Some(a) = self.hub.take_action() {
             match &a {
                 Action::Connect { attempt, .. } => {
