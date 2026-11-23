@@ -4042,6 +4042,7 @@ export class WidebandAnalogRecorder {
 				: {
 						samples: file.ctcss.sampleCount(),
 						votedBlocks: file.ctcss.votedBlockCount(),
+						subAudibleBlocks: file.ctcss.subAudibleBlockCount(),
 					}
 		file.classTone = file.toneClass?.result(true) ?? null
 		file.toneClass = null

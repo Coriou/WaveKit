@@ -254,8 +254,10 @@ export interface RecordingFacts {
 	/** Null when the recorder passed no admission numbers. */
 	admission: RecordingAdmissionFacts | null
 	/**
-	 * The tone the file was sent with; null: at least 1 s was measured and no part held any tone.
-	 * Absent when the recorder cannot tell (too little audio, an unsettled tone, older files).
+	 * The tone the file was sent with; null: at least 1 s was measured, no part held a CTCSS tone
+	 * and the sub-audible band was empty (rare: voice and receiver noise fill it). Absent when the
+	 * recorder cannot tell (too little audio, an unsettled tone, sub-audible energy no CTCSS tone
+	 * won such as a DCS code, which is not measured, a broken-up tone or untoned voice; older files).
 	 */
 	tone?: RecordingTone | null | undefined
 }

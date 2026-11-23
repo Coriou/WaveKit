@@ -453,10 +453,11 @@ describe("recordingFactsBytes bounds", () => {
 		).toBeNull()
 	})
 
-	it("toneFactOf: a settled tone always; null only from TONE_MEASURED_MIN_SAMPLES with no voted block", () => {
-		const fed = (samples: number, votedBlocks = 0) => ({
+	it("toneFactOf: a settled tone always; null only from TONE_MEASURED_MIN_SAMPLES with no voted block and an empty sub-audible band", () => {
+		const fed = (samples: number, votedBlocks = 0, subAudibleBlocks = 0) => ({
 			samples,
 			votedBlocks,
+			subAudibleBlocks,
 		})
 		expect(toneFactOf(88.5, fed(0))).toEqual({
 			tone: { kind: "ctcss", hz: 88.5 },
@@ -472,6 +473,12 @@ describe("recordingFactsBytes bounds", () => {
 		// A block held a tone the bank did not settle on: not determined, never a "no tone".
 		expect(toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES, 1))).toEqual({})
 		expect(toneFactOf(null, fed(10 * TONE_MEASURED_MIN_SAMPLES, 3))).toEqual({})
+		// No block voted but one held sub-audible energy (a DCS code, a broken-up tone, voice):
+		// not determined either.
+		expect(toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES, 0, 1))).toEqual({})
+		expect(
+			toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES, 0, Number.NaN)),
+		).toEqual({})
 		// No bank, or counts that are not finite numbers.
 		expect(toneFactOf(null, null)).toEqual({})
 		expect(toneFactOf(null, fed(Number.NaN))).toEqual({})
@@ -498,18 +505,32 @@ describe("recordingFactsBytes bounds", () => {
 		const coverage = {
 			samples: bank.sampleCount(),
 			votedBlocks: bank.votedBlockCount(),
+			subAudibleBlocks: bank.subAudibleBlockCount(),
 		}
 		expect(coverage.samples).toBe(39_200)
 		expect(coverage.votedBlocks).toBeGreaterThan(0)
 		expect(toneFactOf(bank.result(), coverage)).toEqual({})
-		// The same bank's noise alone, as long: no block voted, a measured "no tone".
+		// The same bank's noise alone, as long: no block voted, but the noise fills the sub-audible
+		// band (white noise puts about 9% of its power there, over the 1% floor): not determined.
+		const noisy = new CtcssBank()
+		for (let i = 0; i < 39_200; i++) noisy.pushSample(0.3 * gaussian(rand))
+		expect(noisy.votedBlockCount()).toBe(0)
+		expect(noisy.subAudibleBlockCount()).toBeGreaterThan(0)
+		expect(
+			toneFactOf(noisy.result(), {
+				samples: noisy.sampleCount(),
+				votedBlocks: noisy.votedBlockCount(),
+				subAudibleBlocks: noisy.subAudibleBlockCount(),
+			}),
+		).toEqual({})
+		// As long and silent: an empty band, a measured "no tone".
 		const quiet = new CtcssBank()
-		for (let i = 0; i < 39_200; i++) quiet.pushSample(0.3 * gaussian(rand))
-		expect(quiet.votedBlockCount()).toBe(0)
+		for (let i = 0; i < 39_200; i++) quiet.pushSample(0)
 		expect(
 			toneFactOf(quiet.result(), {
 				samples: quiet.sampleCount(),
 				votedBlocks: quiet.votedBlockCount(),
+				subAudibleBlocks: quiet.subAudibleBlockCount(),
 			}),
 		).toEqual({ tone: null })
 	})
@@ -540,6 +561,10 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		seconds: number
 		ctcssHz: number | null
 		gapAfter: number
+		/** The over's CTCSS at t s into it (overrides ctcssHz each 25 ms chunk). */
+		ctcssAt?: (t: number) => number | null
+		/** Extra deviation in Hz at absolute source time t s (NfmSource.setSubAudible). */
+		subAudible?: (t: number) => number
 	}
 
 	// Kept files of a scene through the real recorder and store. Each over is its own observation
@@ -584,9 +609,11 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		for (const [n, over] of overs.entries()) {
 			const id = `o${n}`
 			r.src.setCtcss(over.ctcssHz)
+			r.src.setSubAudible(over.subAudible ?? null)
 			const onset = r.engine.liveEdge()
 			const end = onset + over.seconds * r.fs
 			for (let i = 0; i < Math.round(over.seconds * 40); i++) {
+				if (over.ctcssAt !== undefined) r.src.setCtcss(over.ctcssAt(i / 40))
 				r.engine.write(r.src.next(chunk, true))
 				const edge = r.engine.liveEdge()
 				if (edge - onset >= 0.1 * r.fs)
@@ -596,6 +623,7 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 				await r.pump()
 			}
 			const closeAfter = Math.min(0.6, over.gapAfter)
+			r.src.setSubAudible(null)
 			await r.feed(closeAfter, false)
 			r.rec.closed(id, snapshot(id, onset, end, LOW), null, {
 				analogFm: true,
@@ -648,11 +676,47 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		expect(stored.tone).toEqual({ kind: "ctcss", hz: 88.5 })
 	}, 120_000)
 
-	it("untoned voice: the sidecar says measured and no tone (null)", async () => {
+	// The recorder's tone audio is the demodulated audio low-passed at 300 Hz, so nearly all of
+	// its power lies in the bank's band: an untoned voice (its own pitch, and the discriminator's
+	// noise under it) fills the band in every block. Not determined, never a false "no tone".
+	it("untoned voice: the tone is absent (its audio fills the sub-audible band), never null", async () => {
 		const { facts, stored } = await recorderKeep(null)
-		expect(facts.tone).toBeNull()
-		expect("tone" in stored).toBe(true)
-		expect(stored.tone).toBeNull()
+		expect("tone" in facts).toBe(false)
+		expect("tone" in stored).toBe(false)
+	}, 120_000)
+
+	// A DCS-coded over: random NRZ at 134.4 bps, ±500 Hz deviation. No CTCSS tone wins a block,
+	// but the code fills the band: absent (the recorder measures no DCS), never null.
+	it("a DCS-like coded over: the tone is absent, never null", async () => {
+		const bits = mulberry32(19)
+		const levels: number[] = []
+		const nrz = (t: number): number => {
+			const bit = Math.floor(t * 134.4)
+			while (levels.length <= bit) levels.push(bits() < 0.5 ? -500 : 500)
+			return levels[bit]!
+		}
+		const scene = await recorderScene([
+			{ seconds: 6, ctcssHz: null, gapAfter: 4.1, subAudible: nrz },
+		])
+		expect(scene.outcomes).toEqual(["finalized"])
+		expect("tone" in scene.facts[0]!).toBe(false)
+		expect("tone" in scene.stored[0]!).toBe(false)
+	}, 120_000)
+
+	// The tone keyed 300 ms on, 300 ms off for the whole over: too broken for a block to vote,
+	// yet the band holds it: absent, never null.
+	it("a voice over an 88.5 Hz tone broken up 300 ms on / 300 ms off: the tone is absent, never null", async () => {
+		const scene = await recorderScene([
+			{
+				seconds: 6,
+				ctcssHz: 88.5,
+				gapAfter: 4.1,
+				ctcssAt: t => (Math.floor(t / 0.3) % 2 === 0 ? 88.5 : null),
+			},
+		])
+		expect(scene.outcomes).toEqual(["finalized"])
+		expect("tone" in scene.facts[0]!).toBe(false)
+		expect("tone" in scene.stored[0]!).toBe(false)
 	}, 120_000)
 
 	// The file's tone fact is the bank's own coverage frozen at its finish, never the session's

@@ -453,7 +453,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 		await settleWavLookups(d)
 	})
 
-	it("a new run drops an old run's stuck read: its waiting attempt reads nothing and the next lookup reads at once", async () => {
+	it("a new run keeps an old run's stuck read: its waiting attempt reads nothing and the next lookup starts no second listing until it settles", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
 		const reads = heldReads(1)
 		const { d } = decoderWithUpdates()
@@ -461,6 +461,8 @@ describe("dsd-fme call_end held for its first lookup", () => {
 		const internals = d as unknown as StuckInternals & {
 			callTimeoutTimer: ReturnType<typeof setInterval> | null
 		}
+		const rootReads = (): number =>
+			ours(reads.opendir).filter(([dir]) => dir === root).length
 		endThrough(d, 55)
 		await vi.advanceTimersByTimeAsync(
 			DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS,
@@ -477,17 +479,26 @@ describe("dsd-fme call_end held for its first lookup", () => {
 		await d.start()
 		if (internals.callTimeoutTimer) clearInterval(internals.callTimeoutTimer)
 		internals.callTimeoutTimer = null
+		// The old run's waiter gave up; the read still holds a libuv thread, so it stays recorded.
 		expect(old!.waiters.size).toBe(0)
-		expect(internals.stuckWavListing).toBeNull()
-		// A new call's lookup reads now, not behind the old read.
+		expect(internals.stuckWavListing).toBe(old)
+		expect(rootReads()).toBe(1)
+		// A new call's lookup waits for the one stuck read: no second listing beside it.
 		fs.writeFileSync(path.join(root, fileOf(56)), "")
 		endThrough(d, 56)
-		await vi.advanceTimersByTimeAsync(0)
-		await settleWavLookups(d)
-		expect(seen).toContain(`call_end:56:${fileOf(56)}`)
-		expect(ours(reads.opendir).length).toBeGreaterThan(1)
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS - 100)
+		expect(rootReads()).toBe(1)
+		expect(internals.stuckWavListing).toBe(old)
+		expect(old!.waiters.size).toBe(1)
+		// The stuck read settles: the waiting attempt reads now, and finds the file.
 		reads.release(0)
-		await vi.advanceTimersByTimeAsync(0)
+		await untilReal(() => rootReads() === 2)
+		await untilReal(() =>
+			seen.some(e => e.startsWith(`call_end:56:${fileOf(56)}`)),
+		)
+		expect(internals.stuckWavListing).toBeNull()
+		// Free again: later attempts (the old call's retries) read one at a time, real reads.
+		await settleWavLookups(d)
 	})
 
 	it("holds DSD_FME_HELD_OUTPUTS_MAX outputs behind a waiting end, and releases it one past", () => {

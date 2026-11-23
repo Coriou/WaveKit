@@ -1362,7 +1362,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * pending: no attempt starts another until it settles (single flight). One reaction is
 	 * attached to it (stuckListing); attempts wait through its waiter set, so a read that never
 	 * settles holds at most the one waiting attempt, however many time out behind it. A new run
-	 * (start) drops it.
+	 * (start) keeps it: the read still holds a libuv thread, so the new run's attempts wait for
+	 * it too and at most one listing per adapter is ever in flight; start only wakes the old
+	 * run's waiters, which read nothing.
 	 */
 	private stuckWavListing: StuckWavListing | null = null
 	/**
@@ -1716,8 +1718,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.callTimeoutTimer = null
 		}
 		this.endOpenCallsForRestart(this.monoDate())
-		// An old run's stuck listing never delays this run: its waiting attempt reads nothing.
-		this.dropStuckWavListing()
+		// An old run's waiting attempt reads nothing; the stuck listing itself stays recorded until
+		// it settles, so this run starts no second read beside it (single flight across runs).
+		this.wakeOldRunWavWaiters()
 		this.stopping = false
 		this.stopEnded = []
 
@@ -5545,10 +5548,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return stuck
 	}
 
-	/** Drops the stuck listing; its waiting attempts read nothing (a new run's start). */
-	private dropStuckWavListing(): void {
+	/**
+	 * A new run's start: the attempts waiting on the stuck listing give up and read nothing. The
+	 * record stays (its read still occupies a libuv thread) and clears itself when it settles.
+	 */
+	private wakeOldRunWavWaiters(): void {
 		const stuck = this.stuckWavListing
-		this.stuckWavListing = null
 		if (stuck !== null) wakeStuckWaiters(stuck, false)
 	}
 

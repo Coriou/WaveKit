@@ -431,8 +431,10 @@ export interface AnalogFinishFacts {
 	readonly admission?: NoiseQuarantineFacts
 	/**
 	 * The tone the file was sent with, as the recorder measured it (recording-facts.ts
-	 * toneFactOf): null only when at least 1 s was measured and no block held any tone; absent
-	 * when the recorder cannot tell (too little audio, or a tone it never settled on). Written
+	 * toneFactOf): null only when at least 1 s was measured, no block voted for any tone and the
+	 * sub-audible band held no energy (1% of a block's power); absent when the recorder cannot
+	 * tell (too little audio, a tone it never settled on, or sub-audible energy no tone won: a
+	 * DCS code, which it does not measure, a broken-up tone, an untoned voice). Written
 	 * to the kept file's facts sidecar only; a read-only pass-through, dropped when malformed.
 	 */
 	readonly tone?: RecordingTone | null

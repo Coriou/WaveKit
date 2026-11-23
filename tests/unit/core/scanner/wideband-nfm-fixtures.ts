@@ -34,6 +34,8 @@ export interface NfmSourceOptions {
 export class NfmSource {
 	private carrierPhase = 0
 	private sample = 0
+	/** Extra deviation in Hz at time t (s), e.g. a DCS-like NRZ code; null: none. */
+	private subAudible: ((t: number) => number) | null = null
 	private readonly rng: () => number
 	private readonly o: Required<Omit<NfmSourceOptions, "ctcssHz">> & {
 		ctcssHz: number | null
@@ -68,6 +70,11 @@ export class NfmSource {
 		this.o.ctcssHz = hz
 	}
 
+	/** Extra deviation (Hz at time t in s) from the next sample, beside the voice and CTCSS. */
+	setSubAudible(deviation: ((t: number) => number) | null): void {
+		this.subAudible = deviation
+	}
+
 	/** `n` CU8 IQ pairs; the carrier is keyed when `on`. */
 	next(n: number, on: boolean): Uint8Array {
 		const { fs, offsetHz, amp, noiseSigma, peakDeviationHz } = this.o
@@ -96,6 +103,7 @@ export class NfmSource {
 					: 0
 				if (ctcss !== null)
 					dev += this.o.ctcssDeviationHz * Math.sin(TWO_PI * ctcss * t)
+				if (this.subAudible !== null) dev += this.subAudible(t)
 				this.carrierPhase += (TWO_PI * (offsetHz + dev)) / fs
 				this.carrierPhase %= TWO_PI
 				re += amp * Math.cos(this.carrierPhase)

@@ -7078,12 +7078,17 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   recorder passed none), plus `tone` (since 2026-11-23): the sub-audible tone the
   file was sent with, as the recorder's CTCSS detector measured it over the
   file's activity: `{ "kind": "ctcss", "hz": 88.5 }` (a standard tone,
-  67.0-254.1 Hz), or null when it measured at least 1 s of the activity and no
-  part of it held any tone; absent when it could not tell: it measured less, or
-  part of the audio held a tone it could not settle on (a toned over joined to
-  an untoned one, or diluted by squelch-tail noise); and absent on older files. A DCS form,
+  67.0-254.1 Hz), or null when it measured at least 1 s of the activity, no
+  part of it held a CTCSS tone and its sub-audible band (about 40-400 Hz) held
+  no energy (under 1% of each half-second block's power): in practice only an
+  almost silent audio path, since voice and receiver noise fill that band. Absent
+  when it could not tell: it measured less, part of the audio held a tone it could
+  not settle on (a toned over joined to an untoned one, or diluted by
+  squelch-tail noise), or the band held energy no CTCSS tone won (a DCS code, a
+  broken-up tone, an untoned voice); and absent on older files. So an untoned
+  voice recording normally reads absent, not null. A DCS form,
   `{ "kind": "dcs", "code": "023" }` (three octal digits), is reserved: the
-  recorder measures no DCS today. Null for older files, any other kind, and a sidecar that
+  recorder measures no DCS today, and a DCS-coded file reads absent. Null for older files, any other kind, and a sidecar that
   is missing, larger than 2 KiB, malformed or of another operation; the file is
   served the same either way.
 - `frequencyHz` of a scanner recording is its channel frequency: the frequency

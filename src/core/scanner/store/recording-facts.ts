@@ -34,12 +34,20 @@
  * detection), frozen when the file finished (the bank's own sample and block counts, never a
  * span estimate: the session runs on after the file and its later activity was never fed to
  * this bank). `{kind:"ctcss",hz}` when the bank settled on a tone; null only when it was fed at
- * least TONE_MEASURED_MIN_SAMPLES and not one of its blocks voted for any tone; the member is
- * absent otherwise: fed less (the bank needs 750 ms before it answers at all), or some block
- * held a tone the bank did not settle on (fewer than 60% of the blocks: hang noise, gaps and
- * untoned turnarounds dilute a toned voice), so a null there would be a half truth. The recorder
- * measures no DCS: the `dcs` form is in the shape but never produced now. A tone that does not validate is dropped (the member absent), never the whole
- * sidecar, like the admission block. The store's operation folder budget (MAX_OPERATION_METADATA_BYTES, 16 KiB)
+ * least TONE_MEASURED_MIN_SAMPLES, not one of its blocks voted for any tone and not one held
+ * sub-audible energy (CtcssBank.subAudibleBlockCount: band power above the bank's numerical
+ * floor and at least 1% of the block's power): the band was empty. "No block voted" alone is no
+ * proof of absence: a DCS code (134.4 bps NRZ spreads over 50-300 Hz, no CTCSS line reaches 0.65
+ * of the band) or a broken-up tone wins no block either. The member is absent otherwise: fed
+ * less (the bank needs 750 ms before it answers at all), some block held a tone the bank did not
+ * settle on (fewer than 60% of the blocks: hang noise, gaps and untoned turnarounds dilute a
+ * toned voice), or a block held sub-audible energy no tone won. The recorder's tone audio is the
+ * demodulated audio low-passed at 300 Hz, so nearly all its power is in that band: voice (its
+ * pitch is 85-255 Hz), receiver noise and a DCS code always fill it, so an untoned voice file
+ * reads absent, and null in practice means an almost silent tone path. The recorder measures no
+ * DCS: a DCS-coded file reads absent, and the `dcs` form is in the shape but never produced now.
+ * A tone that does not validate is dropped (the member absent), never the whole sidecar, like
+ * the admission block. The store's operation folder budget (MAX_OPERATION_METADATA_BYTES, 16 KiB)
  * covers intent + receipt + sidecar: the sidecar is skipped when the three would exceed it.
  */
 import { z } from "zod"
@@ -72,6 +80,8 @@ export interface ToneCoverage {
 	readonly samples: number
 	/** Blocks some tone won (CtcssBank.votedBlockCount). */
 	readonly votedBlocks: number
+	/** Blocks no tone won that held sub-audible band energy (CtcssBank.subAudibleBlockCount). */
+	readonly subAudibleBlocks: number
 }
 
 /** Lowest and highest standard CTCSS tones (67.0 and 254.1 Hz): the bounds of `hz`. */
@@ -94,9 +104,10 @@ export const RecordingToneSchema = z.discriminatedUnion("kind", [
 /**
  * The tone fact of a file whose CTCSS bank answered `toneHz` with `coverage` at the file's
  * finish, as AnalogFinishFacts members: the CTCSS tone when it settled on one; null only when it
- * was fed at least TONE_MEASURED_MIN_SAMPLES (exactly at it counts) and no block voted for any
- * tone; no member otherwise (fed less, a block held a tone it did not settle on, no bank, or a
- * count that is not a finite number).
+ * was fed at least TONE_MEASURED_MIN_SAMPLES (exactly at it counts), no block voted for any tone
+ * and no block held sub-audible energy (the band was empty); no member otherwise (fed less, a
+ * block held a tone it did not settle on, a block held sub-audible energy no tone won, such as a
+ * DCS code, a broken-up tone or voice, no bank, or a count that is not a finite number).
  */
 export function toneFactOf(
 	toneHz: number | null,
@@ -104,10 +115,11 @@ export function toneFactOf(
 ): { readonly tone?: RecordingTone | null } {
 	if (toneHz !== null) return { tone: { kind: "ctcss", hz: toneHz } }
 	if (coverage === null) return {}
-	const { samples, votedBlocks } = coverage
+	const { samples, votedBlocks, subAudibleBlocks } = coverage
 	return Number.isFinite(samples) &&
 		samples >= TONE_MEASURED_MIN_SAMPLES &&
-		votedBlocks === 0
+		votedBlocks === 0 &&
+		subAudibleBlocks === 0
 		? { tone: null }
 		: {}
 }
@@ -135,7 +147,7 @@ export const RecordingFactsSchema = z
 			.strict(),
 		/** The recording admission's measured numbers; null when the recorder gave none. */
 		admission: NoiseQuarantineFactsSchema.nullable(),
-		/** The tone heard over the file; null: measured, no block held a tone; absent: not determined. */
+		/** The tone heard over the file; null: measured, the sub-audible band was empty; absent: not determined. */
 		tone: RecordingToneSchema.nullable().optional(),
 	})
 	.strict()
