@@ -41,13 +41,13 @@ describe("probation under host CPU (T1-T5)", () => {
 			h.logs.find(l => l.msg === "Efficiency admission")?.obj,
 		).toMatchObject({ key: "a", admittedMono: 0 })
 	})
-	it("m2: one own-over sample alone (a spawn burst) is no evidence", () => {
+	it("one own-over sample alone (a spawn burst) is no evidence", () => {
 		const h = gateHarness()
 		h.start("a")
 		for (let i = 0; i < 20; i++)
 			expect(h.step(10, i % 2 === 0 ? OWN_OVER : OWN_CALM)).toEqual([])
 	})
-	it("m2: own-over samples further apart than two samples are not consecutive", () => {
+	it("own-over samples further apart than two samples are not consecutive", () => {
 		const h = gateHarness()
 		h.start("a")
 		expect(h.step(10, OWN_OVER)).toEqual([])
@@ -77,7 +77,7 @@ describe("probation under host CPU (T1-T5)", () => {
 		for (let i = 0; i < 30; i++)
 			expect(noCapacity.step(100, OWN_OVER, null)).toEqual([])
 	})
-	it("B2: 1 100 host-busy samples with own calm evict host CPU without failing the probation", () => {
+	it("1 100 host-busy samples with own calm evict host CPU without failing the probation", () => {
 		const h = gateHarness()
 		h.start("a")
 		// No probation pass: the placement stays ungraduated, so its admission
@@ -107,7 +107,7 @@ describe("probation under host CPU (T1-T5)", () => {
 			{ key: "a", detail: "cpu" },
 		])
 	})
-	it("M5: a process without own CPU logs once that CPU shedding is off", () => {
+	it("a process without own CPU logs once that CPU shedding is off", () => {
 		const h = gateHarness()
 		h.record(10, null, CAPACITY, false)
 		h.advance(2_000)

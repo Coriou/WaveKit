@@ -84,7 +84,7 @@ async function dialActive(hooks: SupervisorHooks = {}) {
 	return { supervisor, socket, hub, front, closed }
 }
 
-describe("S12: placements of the front's command bytes", () => {
+describe("placements of the front's command bytes", () => {
 	it("resolves registered ends in write order at the placed sink byte, with the in-flight bound added", async () => {
 		const { supervisor, socket, front } = await dialActive()
 		const got: (CommandPlacement & { n: number })[] = []
@@ -122,7 +122,7 @@ describe("S12: placements of the front's command bytes", () => {
 		expect(supervisor.placementMismatches).toBe(0)
 	})
 
-	it("M-A: a registration the hub already read past fails the dial with an intake fault; pending ones resolve as mismatches", async () => {
+	it("a registration the hub already read past fails the dial with an intake fault; pending ones resolve as mismatches", async () => {
 		const { supervisor, socket, front, closed } = await dialActive()
 		const got: CommandPlacement[] = []
 		socket.write(Buffer.alloc(5, 0x04))
@@ -147,7 +147,7 @@ describe("S12: placements of the front's command bytes", () => {
 		expect(got[2]).toEqual({ pos: null })
 	})
 
-	it("m-1: a placed sink byte the front's own gap history maps elsewhere fails the dial", async () => {
+	it("a placed sink byte the front's own gap history maps elsewhere fails the dial", async () => {
 		const hooked: number[] = []
 		const { supervisor, socket, front, closed } = await dialActive({
 			onFrontPlaced: (_s, e) => hooked.push(e.sinkByte),
@@ -175,7 +175,7 @@ describe("S12: placements of the front's command bytes", () => {
 		expect(hooked).toEqual([])
 	})
 
-	it("m-1: a placement below an earlier one (sink byte or front bytes moving back) fails the dial", async () => {
+	it("a placement below an earlier one (sink byte or front bytes moving back) fails the dial", async () => {
 		for (const back of ["sinkByte", "frontBytes"] as const) {
 			const { supervisor, socket, front, closed } = await dialActive()
 			const got: CommandPlacement[] = []
@@ -310,7 +310,7 @@ describe("SourceManager receipts at the hub's placements", () => {
 		return { manager, received, hub, front }
 	}
 
-	it("M4: a placement that arrives before the write callback still waits for it, and the receipt is exact", async () => {
+	it("a placement that arrives before the write callback still waits for it, and the receipt is exact", async () => {
 		const { manager, front } = await hubManager()
 		front.produce(1000)
 		front.deliver(1000)
@@ -356,7 +356,7 @@ describe("SourceManager receipts at the hub's placements", () => {
 		expect(got[0]?.inFlightBytes).toBe(IN_FLIGHT_BOUND_BYTES)
 	})
 
-	it("M-A: a forced placement mismatch ends the session as an intake fault; no read past the command proves the old value", async () => {
+	it("a forced placement mismatch ends the session as an intake fault; no read past the command proves the old value", async () => {
 		const { manager, front } = await hubManager()
 		const ledger = manager.tuningLedger
 		const rate = Buffer.alloc(5)
@@ -438,7 +438,7 @@ describe("SourceManager receipts at the hub's placements", () => {
 		expect(status?.lastError).toContain("IQ hub")
 	})
 
-	it("M1: a write after a paused front ended gets a null receipt and no doubt, so a controller writes at most once before the socket ends", async () => {
+	it("a write after a paused front ended gets a null receipt and no doubt, so a controller writes at most once before the socket ends", async () => {
 		const { manager, front } = await hubManager({
 			endWaitMs: 20,
 			pausedEndCapMs: 400,

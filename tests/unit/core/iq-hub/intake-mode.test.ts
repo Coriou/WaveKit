@@ -85,7 +85,7 @@ describe("WAVEKIT_SOURCE_INTAKE (B1)", () => {
 		expect(lines.join("")).toContain(IQHUB_BIN_ENV)
 	})
 
-	it("m3: an unusable stats directory fails startup naming WAVEKIT_IQHUB_STATS_DIR, never the binary's variable or the value", () => {
+	it("an unusable stats directory fails startup naming WAVEKIT_IQHUB_STATS_DIR, never the binary's variable or the value", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wk-hubbin-"))
 		const bin = path.join(dir, "wavekit-iqhub")
 		fs.writeFileSync(bin, "#!/bin/sh\nexit 1\n", { mode: 0o700 })

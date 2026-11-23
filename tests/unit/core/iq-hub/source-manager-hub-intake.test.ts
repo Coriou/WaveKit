@@ -81,7 +81,7 @@ describe("SourceManager through the injected hub intake", () => {
 		)
 	})
 
-	it("M2: a hub failure is no receiver failure (no connect-failure record, no endpoint close); a refused receiver is", async () => {
+	it("a hub failure is no receiver failure (no connect-failure record, no endpoint close); a refused receiver is", async () => {
 		fake = new FakeHub()
 		fake.features = ["front"]
 		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
@@ -120,7 +120,7 @@ describe("SourceManager through the injected hub intake", () => {
 		expect(receiverClose).toHaveBeenCalled()
 	})
 
-	it("M-A: a hub that never reports ready fails IQHUB_UNAVAILABLE at default timings, no receiver ETIMEDOUT", async () => {
+	it("a hub that never reports ready fails IQHUB_UNAVAILABLE at default timings, no receiver ETIMEDOUT", async () => {
 		fake = new FakeHub()
 		fake.noReady = true
 		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
@@ -138,7 +138,7 @@ describe("SourceManager through the injected hub intake", () => {
 		expect(endpointClose).not.toHaveBeenCalled()
 	}, 15_000)
 
-	it("M-A: a hub that never answers the connect fails IQHUB_HUNG after its deadline plus grace, no receiver failure", async () => {
+	it("a hub that never answers the connect fails IQHUB_HUNG after its deadline plus grace, no receiver failure", async () => {
 		fake = new FakeHub()
 		fake.connectBehavior = () => ({ kind: "silent" })
 		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
@@ -157,7 +157,7 @@ describe("SourceManager through the injected hub intake", () => {
 		expect(fake.last.requestsOf("abort")).toHaveLength(1)
 	}, 15_000)
 
-	it("M-A: the hub's own upstream timeout is the receiver's (ETIMEDOUT, class timeout)", async () => {
+	it("the hub's own upstream timeout is the receiver's (ETIMEDOUT, class timeout)", async () => {
 		fake = new FakeHub()
 		fake.connectBehavior = () => ({ kind: "refuse", reason: "timeout" })
 		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
@@ -176,7 +176,7 @@ describe("SourceManager through the injected hub intake", () => {
 		expect(fake.last.requestsOf("connect")[0]?.["timeoutMs"]).toBe(5000)
 	})
 
-	it("M8: a host name dials Node's own socket (connect(port, host)), never the hub", async () => {
+	it("a host name dials Node's own socket (connect(port, host)), never the hub", async () => {
 		fake = new FakeHub()
 		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
 		const connect = vi

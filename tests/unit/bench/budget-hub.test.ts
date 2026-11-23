@@ -259,7 +259,7 @@ describe("the exact end-of-run byte check", () => {
 	})
 })
 
-describe("m4: the byte check needs every fake client's graceful close", () => {
+describe("the byte check needs every fake client's graceful close", () => {
 	const front = {
 		sink: "front-1",
 		kind: "front",

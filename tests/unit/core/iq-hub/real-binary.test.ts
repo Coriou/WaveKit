@@ -236,7 +236,7 @@ describe.skipIf(!available)(
 			expectCounting(two.received.bytes().subarray(12))
 		}, 20_000)
 
-		it("S16: a killed hub fails its dial IQHUB_EXITED; the next dial spawns a new hub", async () => {
+		it("a killed hub fails its dial IQHUB_EXITED; the next dial spawns a new hub", async () => {
 			upstream = new FakeRtlTcp()
 			const port = await upstream.listen()
 			const supervisor = makeSupervisor()
@@ -254,7 +254,7 @@ describe.skipIf(!available)(
 			expectCounting(two.received.bytes().subarray(12))
 		}, 20_000)
 
-		it("M1: a stopped hub is killed and its dial fails IQHUB_HUNG", async () => {
+		it("a stopped hub is killed and its dial fails IQHUB_HUNG", async () => {
 			upstream = new FakeRtlTcp()
 			const port = await upstream.listen()
 			const supervisor = makeSupervisor({
@@ -270,18 +270,20 @@ describe.skipIf(!available)(
 			await until(() => supervisor.pid === null)
 		}, 20_000)
 
-		it("M1: a stalled Node main thread does not kill a live hub", async () => {
+		it("a stalled Node main thread does not kill a live hub", async () => {
 			upstream = new FakeRtlTcp()
 			const port = await upstream.listen()
+			// 3 s threshold, 3.5 s stall: the stall still outlasts the threshold, and a loaded
+			// runner that deschedules the hub child for a second does not kill it.
 			const supervisor = makeSupervisor({
-				watchdog: { hungAfterMs: 1000, checkEveryMs: 100 },
+				watchdog: { hungAfterMs: 3000, checkEveryMs: 100 },
 			})
 			const one = await dial(supervisor, port)
 			await one.connected
 			const pid = supervisor.pid
-			const until1500 = Date.now() + 1500
-			while (Date.now() < until1500) {
-				/* a 1.5 s main-thread stall */
+			const stallEnd = Date.now() + 3500
+			while (Date.now() < stallEnd) {
+				/* a 3.5 s main-thread stall */
 			}
 			await new Promise(resolve => setTimeout(resolve, 300))
 			expect(supervisor.pid).toBe(pid)
@@ -290,7 +292,7 @@ describe.skipIf(!available)(
 			await until(() => one.received.bytes().length > before + 4096)
 		}, 20_000)
 
-		it("M1: a ready line waiting behind a 1 s main-thread stall is read before the 300 ms deadline acts", async () => {
+		it("a ready line waiting behind a 1 s main-thread stall is read before the 300 ms deadline acts", async () => {
 			upstream = new FakeRtlTcp()
 			const port = await upstream.listen()
 			const real = spawnHubProcessFactory(BIN)
@@ -313,7 +315,7 @@ describe.skipIf(!available)(
 			expectCounting(one.received.bytes().subarray(12))
 		}, 20_000)
 
-		it("M1: a configured line waiting behind a 1 s stall on a rate change is read before the deadline acts", async () => {
+		it("a configured line waiting behind a 1 s stall on a rate change is read before the deadline acts", async () => {
 			upstream = new FakeRtlTcp()
 			const port = await upstream.listen()
 			const supervisor = makeSupervisor({

@@ -149,7 +149,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(isHubHello(Buffer.from([0x01, 0x00, 0x00, 0x00, 0x2a]))).toBe(false)
 	})
 
-	it("S1: a hub without a required feature is refused IQHUB_UNAVAILABLE", async () => {
+	it("a hub without a required feature is refused IQHUB_UNAVAILABLE", async () => {
 		newFake()
 		fake.features = ["tcp-connected", "errno"]
 		const supervisor = makeSupervisor()
@@ -162,7 +162,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(fake.last.requestsOf("connect")).toHaveLength(0)
 	})
 
-	it("S1: no ready in time, and a spawn failure, are IQHUB_UNAVAILABLE", async () => {
+	it("no ready in time, and a spawn failure, are IQHUB_UNAVAILABLE", async () => {
 		newFake()
 		fake.noReady = true
 		const supervisor = makeSupervisor({ readyTimeoutMs: 100 })
@@ -180,7 +180,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect((await secondClosed).error?.code).toBe(IQHUB_UNAVAILABLE)
 	})
 
-	it("S3: a refused configure is IQHUB_REJECTED; a second dial at another rate reconfigures", async () => {
+	it("a refused configure is IQHUB_REJECTED; a second dial at another rate reconfigures", async () => {
 		newFake()
 		fake.configureAnswer = "reject"
 		const supervisor = makeSupervisor()
@@ -212,7 +212,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(configures.map(r => r["byteRate"])).toEqual([2_048_000, 4_800_000])
 	})
 
-	it("S5: a closed connect maps to the code a net connect gives, with and without errno", async () => {
+	it("a closed connect maps to the code a net connect gives, with and without errno", async () => {
 		const cases: { reason: string; errno?: number; code: string }[] = [
 			{ reason: "refused", code: "ECONNREFUSED" },
 			{ reason: "unreachable", code: "EHOSTUNREACH" },
@@ -251,7 +251,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		}
 	})
 
-	it("S8: a refused front sink is IQHUB_REJECTED and its attempt is aborted", async () => {
+	it("a refused front sink is IQHUB_REJECTED and its attempt is aborted", async () => {
 		newFake()
 		fake.sinkOpenReject = "too-many-sinks"
 		const supervisor = makeSupervisor()
@@ -360,7 +360,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(twoData.bytes().length).toBe(12 + 32)
 	})
 
-	it("S14: front-ended with no Node end falls back after the wait (via destroy)", async () => {
+	it("front-ended with no Node end falls back after the wait (via destroy)", async () => {
 		newFake()
 		const supervisor = makeSupervisor({ endWaitMs: 50 })
 		const { front, closed } = await dialActive(supervisor)
@@ -370,7 +370,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(result.events).not.toContain("end")
 	})
 
-	it("M6 (S14'): Node's end before front-ended waits for it, then follows its decision", async () => {
+	it("Node's end before front-ended waits for it, then follows its decision", async () => {
 		newFake()
 		const supervisor = makeSupervisor({ endWaitMs: 1000 })
 		const { front, closed } = await dialActive(supervisor)
@@ -388,7 +388,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(result.events).toEqual(["end", "error", "close"])
 	})
 
-	it("M6 (S14'): Node's end with no front-ended within the wait destroys with ECONNRESET", async () => {
+	it("Node's end with no front-ended within the wait destroys with ECONNRESET", async () => {
 		newFake()
 		const supervisor = makeSupervisor({ endWaitMs: 60 })
 		const { front, closed } = await dialActive(supervisor)
@@ -399,7 +399,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(result.error?.code).toBe("ECONNRESET")
 	})
 
-	it("S15: SourceManager's end reaches the hub as the front's EOF, the commands first", async () => {
+	it("SourceManager's end reaches the hub as the front's EOF, the commands first", async () => {
 		newFake()
 		const supervisor = makeSupervisor()
 		const { socket, front, closed } = await dialActive(supervisor)
@@ -411,7 +411,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(result.error).toBeNull()
 	})
 
-	it("S15: a destroyed socket whose attempt stays live is aborted after the belt-and-braces wait", async () => {
+	it("a destroyed socket whose attempt stays live is aborted after the belt-and-braces wait", async () => {
 		newFake()
 		fake.ignoreFrontEof = true
 		const supervisor = makeSupervisor({ abortAfterCloseMs: 50 })
@@ -426,7 +426,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		})
 	})
 
-	it("M9: a dial cancelled before its connect was sent sends nothing", async () => {
+	it("a dial cancelled before its connect was sent sends nothing", async () => {
 		newFake()
 		fake.readyDelayMs = 50
 		const supervisor = makeSupervisor()
@@ -440,7 +440,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(hub.requestsOf("connect")).toHaveLength(0)
 	})
 
-	it("M9: a dial cancelled after its connect, before the Unix connect, aborts now and never connects", async () => {
+	it("a dial cancelled after its connect, before the Unix connect, aborts now and never connects", async () => {
 		newFake()
 		fake.connectBehavior = () => ({ kind: "accept", delayMs: 80 })
 		const supervisor = makeSupervisor()
@@ -459,7 +459,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(hub.fronts.get("front-1")?.socket).toBeNull()
 	})
 
-	it("S16: a hub exit mid-stream destroys with IQHUB_EXITED after the data; the next dial respawns", async () => {
+	it("a hub exit mid-stream destroys with IQHUB_EXITED after the data; the next dial respawns", async () => {
 		newFake()
 		const supervisor = makeSupervisor()
 		const { hub, front, closed, received } = await dialActive(supervisor)
@@ -480,7 +480,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(second.requestsOf("connect")[0]?.["attempt"]).toBeGreaterThan(1)
 	})
 
-	it("M1 (S19): a stopped hub is killed by its handle and the dial fails IQHUB_HUNG", async () => {
+	it("a stopped hub is killed by its handle and the dial fails IQHUB_HUNG", async () => {
 		newFake()
 		const supervisor = makeSupervisor({
 			watchdog: { hungAfterMs: 200, checkEveryMs: 20 },
@@ -492,7 +492,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(hub.signals).toEqual(["SIGKILL"])
 	})
 
-	it("M1 (S19): a live hub that keeps sending progress is never killed", async () => {
+	it("a live hub that keeps sending progress is never killed", async () => {
 		newFake()
 		const supervisor = makeSupervisor({
 			watchdog: { hungAfterMs: 200, checkEveryMs: 20 },
@@ -502,7 +502,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(hub.signals).toEqual([])
 	})
 
-	it("S17: too many attempts aborts the source's older attempts and retries once; a second refusal is IQHUB_REJECTED", async () => {
+	it("too many attempts aborts the source's older attempts and retries once; a second refusal is IQHUB_REJECTED", async () => {
 		newFake()
 		let refusals = 1
 		fake.connectBehavior = attempt =>
@@ -533,7 +533,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect((await thirdClosed).error?.code).toBe(IQHUB_REJECTED)
 	})
 
-	it("S18: dispose shuts the hub down and removes its socket dir; a hub ignoring it is killed", async () => {
+	it("dispose shuts the hub down and removes its socket dir; a hub ignoring it is killed", async () => {
 		newFake()
 		const supervisor = makeSupervisor()
 		const { hub } = await dialActive(supervisor)
@@ -551,7 +551,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(fs.existsSync(other.hub.socketDir)).toBe(false)
 	})
 
-	it("M1: a ready line that waits behind a main-thread stall is read before the ready deadline acts", async () => {
+	it("a ready line that waits behind a main-thread stall is read before the ready deadline acts", async () => {
 		newFake()
 		fake.readyDelayMs = 150
 		const supervisor = makeSupervisor({ readyTimeoutMs: 150 })
@@ -574,7 +574,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		await closed
 	})
 
-	it("m1: a hub that connects upstream but never answers sink-open is failed IQHUB_HUNG by the connect backstop", async () => {
+	it("a hub that connects upstream but never answers sink-open is failed IQHUB_HUNG by the connect backstop", async () => {
 		newFake()
 		fake.sinkOpenSilent = true
 		const supervisor = makeSupervisor({ connectGraceMs: 0 })
@@ -590,7 +590,7 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(fake.last.requestsOf("abort")).toHaveLength(1)
 	}, 15_000)
 
-	it("M1: a hub that never answers configure is still failed IQHUB_HUNG after the recheck", async () => {
+	it("a hub that never answers configure is still failed IQHUB_HUNG after the recheck", async () => {
 		newFake()
 		fake.configureAnswer = "silent"
 		const supervisor = makeSupervisor({ readyTimeoutMs: 100 })
@@ -677,7 +677,7 @@ describe("hub supervisor rows (fake hub)", () => {
 })
 
 describe("HubSourceIntake", () => {
-	it("M8: a host name keeps the socket path; an IP literal gets a tagged half-open front socket", () => {
+	it("a host name keeps the socket path; an IP literal gets a tagged half-open front socket", () => {
 		newFake()
 		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
 		const named = intake.create("rx", config, "receiver.local", 5555)
@@ -704,7 +704,7 @@ describe("HubSourceIntake", () => {
 		expect(audio.allowHalfOpen).toBe(false)
 	})
 
-	it("m9: dispose drops the supervisor synchronously; a re-added id gets a new hub", async () => {
+	it("dispose drops the supervisor synchronously; a re-added id gets a new hub", async () => {
 		newFake()
 		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
 		const first = intake.create("rx", config, "127.0.0.1", 5555)

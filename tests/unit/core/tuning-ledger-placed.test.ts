@@ -126,7 +126,7 @@ describe("placed connection: receipts at the intake's placements", () => {
 		})
 	})
 
-	it("M1: a null placement unqueues with a null receipt and no doubt; a write error doubts; close hands parked receipts null", () => {
+	it("a null placement unqueues with a null receipt and no doubt; a write error doubts; close hands parked receipts null", () => {
 		const ledger = ledgerWith()
 		const { conn, session } = placedSession(ledger)
 		provenAt(ledger, conn, session, 0)
@@ -151,7 +151,7 @@ describe("placed connection: receipts at the intake's placements", () => {
 		expect(got).toEqual([null])
 	})
 
-	it("M-A: a mismatch placement doubts both fields from the write position, with a null receipt", () => {
+	it("a mismatch placement doubts both fields from the write position, with a null receipt", () => {
 		const ledger = ledgerWith()
 		const { conn, session } = placedSession(ledger)
 		provenAt(ledger, conn, session, 0)
@@ -172,7 +172,7 @@ describe("placed connection: receipts at the intake's placements", () => {
 		})
 	})
 
-	it("m-1: a placement below the newest receipt records there and doubts from its own position (never hidden)", () => {
+	it("a placement below the newest receipt records there and doubts from its own position (never hidden)", () => {
 		const ledger = ledgerWith()
 		const { conn, session } = placedSession(ledger)
 		provenAt(ledger, conn, session, 0)
@@ -224,7 +224,7 @@ describe("placed connection: receipts at the intake's placements", () => {
 	})
 })
 
-describe("B3: doubts by position as well as by seq", () => {
+describe("doubts by position as well as by seq", () => {
 	it("a placement recorded after a doubt at an earlier position does not re-prove past the doubt", () => {
 		const ledger = ledgerWith()
 		const { conn, session } = placedSession(ledger)
@@ -291,7 +291,7 @@ describe("B3: doubts by position as well as by seq", () => {
 	})
 })
 
-describe("m2: a measured in-flight figure only raises the settle", () => {
+describe("a measured in-flight figure only raises the settle", () => {
 	it("uses the receipt's in-flight bytes when larger, the link estimate when smaller", () => {
 		const ledger = new TuningLedger({
 			settleLink: () => ({ configuredSettleMs: 0 }),
