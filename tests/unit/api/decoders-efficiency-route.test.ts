@@ -372,6 +372,43 @@ it.each([
 	}
 })
 
+it.each([
+	[1, 200],
+	[3, 200],
+	[0, 400],
+	[4, 400],
+] as const)(
+	"efficiency response schema holds host-excused windows to 1..3 (%i → %i)",
+	async (windows, expected) => {
+		const app = await responseValidator()
+		try {
+			const response = await app.inject({
+				method: "POST",
+				url: "/validate",
+				payload: {
+					...view,
+					sources: view.sources.map(source => ({
+						...source,
+						admitted: [
+							{
+								...placement,
+								hostExcusedLoss: {
+									cause: "host-busy",
+									since: "2026-11-22T10:00:00.000Z",
+									windows,
+								},
+							},
+						],
+					})),
+				},
+			})
+			expect(response.statusCode).toBe(expected)
+		} finally {
+			await app.close()
+		}
+	},
+)
+
 it.each(["none", "link", "host", "consumer", "unknown"] as const)(
 	"efficiency response schema accepts attribution %s and all held states",
 	async attribution => {

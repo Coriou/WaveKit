@@ -366,7 +366,7 @@ it("own CPU over the limit while the AIS channel is pending refuses it and displ
 	f.m.notifyBandplansChanged()
 	await vi.advanceTimersByTimeAsync(400)
 	expect(release).toBeTypeOf("function")
-	// Two consecutive own-over samples refuse (one spawn burst does not).
+	// Five consecutive own-over samples refuse (OWN_OVER_SUSTAIN_SAMPLES; fewer do not).
 	const ownOver = () =>
 		f.gate.record({
 			atMs: performance.now(),
@@ -377,8 +377,10 @@ it("own CPU over the limit while the AIS channel is pending refuses it and displ
 				["rtl", { droppedBytesDelta: 0, droppedChunksDelta: 0 }],
 			]),
 		})
-	ownOver()
-	await vi.advanceTimersByTimeAsync(2_000)
+	for (let i = 0; i < 4; i++) {
+		ownOver()
+		await vi.advanceTimersByTimeAsync(2_000)
+	}
 	ownOver()
 	release()
 	await vi.advanceTimersByTimeAsync(50)

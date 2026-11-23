@@ -4,6 +4,7 @@ import { createEfficiencyMonitor } from "../../../../src/decoders/enablement/eff
 import { createEfficiencyGate } from "../../../../src/decoders/enablement/efficiency-gate.js"
 import {
 	channelizerBranchId,
+	OWN_OVER_SUSTAIN_SAMPLES,
 	type RunningPlacement,
 	type WantedPlacement,
 } from "../../../../src/decoders/enablement/contract.js"
@@ -68,7 +69,13 @@ function run(samples: readonly Sample[]) {
 
 // Feature: rx-starvation, Property 1: cpu verdicts need own CPU over budget
 // Validates: S1 C1, T1a, A1 (I-S1)
-it("every cpu verdict has two consecutive own-over samples in its evidence window; every cpu refusal follows an own-over sample", () => {
+// Hysteresis: OWN_OVER_SUSTAIN_SAMPLES (5) consecutive samples, no longer two.
+it("every cpu verdict has five consecutive own-over samples in its evidence window; every cpu refusal ends five", () => {
+	const sustainedAt = (samples: readonly Sample[], i: number) =>
+		i >= OWN_OVER_SUSTAIN_SAMPLES - 1 &&
+		samples
+			.slice(i - OWN_OVER_SUSTAIN_SAMPLES + 1, i + 1)
+			.every(s => ownOverRef(s))
 	fc.assert(
 		fc.property(
 			fc.array(sampleArb, { minLength: 1, maxLength: 600 }),
@@ -76,16 +83,14 @@ it("every cpu verdict has two consecutive own-over samples in its evidence windo
 				const { times, cpuVerdicts, cpuRefusals } = run(samples)
 				for (const v of cpuVerdicts) {
 					const ok = samples.some(
-						(s, i) =>
-							i > 0 &&
-							ownOverRef(s) &&
-							ownOverRef(samples[i - 1]!) &&
+						(_s, i) =>
+							sustainedAt(samples, i) &&
 							times[i]! >= v.admitted &&
 							times[i]! <= v.at,
 					)
 					expect(ok).toBe(true)
 				}
-				for (const i of cpuRefusals) expect(ownOverRef(samples[i]!)).toBe(true)
+				for (const i of cpuRefusals) expect(sustainedAt(samples, i)).toBe(true)
 			},
 		),
 		{ numRuns: 100 },

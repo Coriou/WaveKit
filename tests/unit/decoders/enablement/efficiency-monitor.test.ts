@@ -575,15 +575,20 @@ it("a clock rollback restarts probation coverage instead of counting it twice", 
 })
 
 // Intended change (rx-starvation S1): the evidence is own CPU over 90 % of
-// capacity on two consecutive samples; host CPU alone (99 %) is no evidence.
+// capacity on five consecutive samples (OWN_OVER_SUSTAIN_SAMPLES, 10 s); host
+// CPU alone (99 %) is no evidence.
 it("own CPU over the limit on the sample that completes coverage condemns", () => {
 	const f = branchSetup()
 	f.earn(62_000)
 	expect(f.admit()).toEqual({ admit: true })
-	for (let at = 64_000; at <= 90_000; at += 2000) f.tickAt(at)
+	for (let at = 64_000; at <= 82_000; at += 2000) f.tickAt(at)
 	const over = { ownCores: 3.8, capacityCores: 4 }
-	f.clockAt(90_000.1)
-	f.gate.record({ atMs: 90_000, cpuPercent: 99, ...over, sources: new Map() })
+	// Four own-over samples (84-90 s); the fifth, at 92 s, sustains it (OWN_OVER_SUSTAIN_SAMPLES).
+	for (let at = 84_000; at <= 90_000; at += 2000) {
+		f.tickAt(at)
+		f.clockAt(at + 0.1)
+		f.gate.record({ atMs: at, cpuPercent: 99, ...over, sources: new Map() })
+	}
 	f.tickAt(92_000)
 	expect(f.monitor.coverageCompleteAtMono("s", 62_000, 30_000)).toBe(92_000)
 	// The sample's CPU reading is delivered just after the clock moved on.

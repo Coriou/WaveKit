@@ -18,6 +18,11 @@ import {
 	EFFICIENCY_RETRY_MS,
 	EFFICIENCY_RETRY_MAX_MS,
 	EFFICIENCY_SAMPLE_MS,
+	CPU_RELEASE_SAMPLES,
+	cpuReleasePercent,
+	cpuHoldDecoderId,
+	cpuHoldKey,
+	OWN_OVER_SUSTAIN_SAMPLES,
 	EFFICIENCY_STALE_MS,
 	TUNED_RETRY_MAX_MS,
 	lossRetryMs,
@@ -323,8 +328,9 @@ export function createEfficiencyGate(
 	/**
 	 * Monotonic times of samples with the core's own CPU over the guard share
 	 * of its capacity (own-cpu.ts), oldest first: the only CPU evidence against
-	 * a decoder. A time is pushed only for the second of two consecutive
-	 * own-over samples, so one spawn burst is no evidence.
+	 * a decoder. A time is pushed only for the OWN_OVER_SUSTAIN_SAMPLES-th (5th)
+	 * and later consecutive own-over sample of a run, so a spawn burst, or own CPU
+	 * sitting at its quota for up to 4 samples (8 s), is no evidence.
 	 */
 	const ownOver: number[] = []
 	/**
@@ -339,14 +345,53 @@ export function createEfficiencyGate(
 	let capacityCores: number | null = null
 	/** Monotonic time of the latest sample (classification freshness for probation). */
 	let classMono: number | null = null
-	/** Monotonic time of the previous own-over sample, for the two-sample rule. */
+	/** Monotonic time of the previous own-over sample, for the sustain rule. */
 	let lastOwnOverMono: number | null = null
+	/** Consecutive own-over samples ending at lastOwnOverMono (gaps ≤ OWN_CPU_MAX_GAP_MS). */
+	let ownOverRun = 0
 	/**
-	 * Whether the latest sample completed two consecutive own-over samples
-	 * (the two-sample rule above): only then does admission refuse for `cpu`,
-	 * so one spawn burst refuses nothing.
+	 * Whether the latest sample ends a sustained own-over run (the sustain rule
+	 * above): only then does admission refuse a newcomer for `cpu`.
 	 */
-	let latestOwnOverPair = false
+	let latestOwnOverSustained = false
+	/**
+	 * Monotonic times of the current run of consecutive samples with own CPU
+	 * strictly below cpuReleasePercent(guard), the newest CPU_RELEASE_SAMPLES
+	 * (30) kept; any other sample (over the threshold, unknown, a gap past
+	 * OWN_CPU_MAX_GAP_MS) empties it.
+	 */
+	const releaseRun: number[] = []
+	/**
+	 * Decoders suspended for `cpu`, by `decoderId@sourceId` (cpuHoldKey: the
+	 * channel left out, so a channel worker the activity plan moves, or a
+	 * replan removes and re-adds, keeps its hold), with the monotonic time of
+	 * the latest such suspension: none of the decoder's placements on that
+	 * source is readmitted until CPU_RELEASE_SAMPLES consecutive samples after
+	 * that time were under the release threshold, so a suspension never toggles
+	 * off within one sample, nor while own CPU stays between release and guard.
+	 * forget() keeps it; only that release or an operator start
+	 * (releaseCpuHold) ends it.
+	 */
+	const cpuHeld = new Map<string, { decoderId: string; mono: number }>()
+	/** Whether the release run (30 samples) began after a hold taken at `held`. */
+	const releasedSince = (held: number): boolean => {
+		const first = releaseRun[releaseRun.length - CPU_RELEASE_SAMPLES]
+		return first !== undefined && first > held
+	}
+	/** Whether `key`'s CPU hold (if any) is released by the latest samples at `mono`. */
+	const cpuHoldReleased = (key: string, mono: number): boolean => {
+		const holdKey = cpuHoldKey(key)
+		const held = cpuHeld.get(holdKey)
+		if (held === undefined) return true
+		if (
+			!releasedSince(held.mono) ||
+			classAtMono(mono) === null ||
+			releaseRun[releaseRun.length - 1] !== classMono
+		)
+			return false
+		cpuHeld.delete(holdKey)
+		return true
+	}
 	let ownUnavailableLogged = false
 
 	const currentCpu = (now: number) =>
@@ -1260,7 +1305,9 @@ export function createEfficiencyGate(
 				cpuClass = null
 				ownCores = null
 				lastOwnOverMono = null
-				latestOwnOverPair = false
+				ownOverRun = 0
+				latestOwnOverSustained = false
+				releaseRun.length = 0
 				classMono = null
 				return
 			}
@@ -1306,25 +1353,48 @@ export function createEfficiencyGate(
 					if (hostCpu.length > 1024) hostCpu.shift()
 				}
 				if (classified.ownOver) {
-					// Two consecutive own-over samples (no gap past
-					// OWN_CPU_MAX_GAP_MS) make evidence; a lone one does not.
-					if (
+					// OWN_OVER_SUSTAIN_SAMPLES (5) consecutive own-over samples, each
+					// at most OWN_CPU_MAX_GAP_MS (4000 ms) after the previous, make
+					// evidence: 5 × 2000 ms = 10 s of own CPU over the guard. A gap or
+					// any other sample restarts the run.
+					ownOverRun =
 						lastOwnOverMono !== null &&
 						mono > lastOwnOverMono &&
 						mono - lastOwnOverMono <= OWN_CPU_MAX_GAP_MS
-					) {
+							? ownOverRun + 1
+							: 1
+					latestOwnOverSustained = ownOverRun >= OWN_OVER_SUSTAIN_SAMPLES
+					if (latestOwnOverSustained) {
 						ownOver.push(mono)
 						if (ownOver.length > 1024) evictOwnOver()
-						latestOwnOverPair = true
-					} else latestOwnOverPair = false
+					}
 					lastOwnOverMono = mono
 				} else {
 					lastOwnOverMono = null
-					latestOwnOverPair = false
+					ownOverRun = 0
+					latestOwnOverSustained = false
 				}
+				// The release run: own CPU strictly below guard − 10 points
+				// (cpuReleasePercent), consecutive within OWN_CPU_MAX_GAP_MS.
+				const previous = releaseRun[releaseRun.length - 1]
+				if (
+					classified.ownPercent !== null &&
+					valid(inputs.cpuGuardPercent) &&
+					classified.ownPercent < cpuReleasePercent(inputs.cpuGuardPercent)
+				) {
+					if (
+						previous !== undefined &&
+						!(mono > previous && mono - previous <= OWN_CPU_MAX_GAP_MS)
+					)
+						releaseRun.length = 0
+					releaseRun.push(mono)
+					if (releaseRun.length > CPU_RELEASE_SAMPLES) releaseRun.shift()
+				} else releaseRun.length = 0
 			} else {
 				lastOwnOverMono = null
-				latestOwnOverPair = false
+				ownOverRun = 0
+				latestOwnOverSustained = false
+				releaseRun.length = 0
 			}
 			if (sample.ownCpuAvailable === false && !ownUnavailableLogged) {
 				ownUnavailableLogged = true
@@ -1424,6 +1494,10 @@ export function createEfficiencyGate(
 			const unsettled =
 				state === "unknown" || state === "clearing" || attribution === "unknown"
 			let detail: DecoderEfficiencyDetail | null = null
+			// Suspended for `cpu` and not yet released (cpuHeld): refused for
+			// `cpu` whatever the latest sample says, and no excuse below
+			// readmits it; a tuned newcomer may still swap untuned ones out.
+			const held = !cpuHoldReleased(newcomer.key, mono)
 			// Own CPU over the guard share (A1t): a tuned-band newcomer swaps in
 			// for untuned placements (newest first) whose cost together covers its
 			// own. Host CPU alone (A2t) swaps nothing: the budget decides.
@@ -1436,11 +1510,15 @@ export function createEfficiencyGate(
 				detail = "unknown"
 			else if (state === "dropping" && !hostBusyNow) detail = "drops"
 			else if (!valid(inputs.cpuGuardPercent)) detail = "unknown"
-			// Only the core's own CPU over its guard share refuses (A1), on the
-			// latest two fresh consecutive own-over samples (the probation
-			// evidence rule: one spawn burst refuses nothing); host CPU alone
-			// never does (A2): the cost model below still applies.
-			else if (currentClass(now)?.ownOver === true && latestOwnOverPair) {
+			// Only the core's own CPU over its guard share refuses (A1), once the
+			// latest fresh sample ends a sustained own-over run (the probation
+			// evidence rule: 5 samples, 10 s), or while a `cpu` suspension is
+			// held; host CPU alone never does (A2): the cost model below still
+			// applies.
+			else if (
+				held ||
+				(currentClass(now)?.ownOver === true && latestOwnOverSustained)
+			) {
 				detail = "cpu"
 				if (tuned && valid(newcomer.costCores)) {
 					let freed = 0
@@ -1464,6 +1542,7 @@ export function createEfficiencyGate(
 				// no host load, so it is admitted on probation (budget applies).
 				if (
 					detail === "cpu" &&
+					!held &&
 					(hostBusyNow || (tuned && tunedRetries.has(newcomer.key)))
 				)
 					detail = null
@@ -1965,6 +2044,23 @@ export function createEfficiencyGate(
 			gated.delete(key)
 			if (detail === "late-drops") lateRetries.add(key)
 			if (tuned) tunedRetries.add(key)
+			// Held until own CPU has been under the release threshold for one
+			// clear window after this suspension (cpuHoldReleased).
+			if (detail === "cpu") {
+				const mono = monoNow()
+				// No clock reading: the latest sample's time stands in.
+				const holdKey = cpuHoldKey(key)
+				// Re-inserted last, so the oldest hold goes first past the bound.
+				cpuHeld.delete(holdKey)
+				cpuHeld.set(holdKey, {
+					decoderId: cpuHoldDecoderId(key),
+					mono: valid(mono) ? mono : (classMono ?? -Infinity),
+				})
+				if (cpuHeld.size > 1024) {
+					const oldest = cpuHeld.keys().next()
+					if (!oldest.done) cpuHeld.delete(oldest.value)
+				}
+			}
 			const previous = retries.get(key)
 			// Tuned: 30 000 ms doubling to TUNED_RETRY_MAX_MS (240 000 ms);
 			// otherwise 300 000 ms doubling to 1 800 000 ms.
@@ -1998,6 +2094,9 @@ export function createEfficiencyGate(
 			hostJudged.delete(key)
 			carried.delete(key)
 			cpuRun.delete(key)
+			// The CPU hold (cpuHeld) stays: it belongs to the decoder on its
+			// source, not to this placement (a move, replan or tuned settle
+			// forgets the placement but does not release it).
 			reconnectRetained.delete(key)
 			placementEpochs.delete(key)
 			admittedMono.delete(key)
@@ -2008,6 +2107,10 @@ export function createEfficiencyGate(
 			failures.delete(key)
 			lateRetries.delete(key)
 			tunedRetries.delete(key)
+		},
+		releaseCpuHold(decoderId) {
+			for (const [holdKey, held] of cpuHeld)
+				if (held.decoderId === decoderId) cpuHeld.delete(holdKey)
 		},
 		shedAttribution: key => shed.get(key),
 		cpuState(now): EfficiencyCpuState | null {

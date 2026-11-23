@@ -339,6 +339,33 @@ it.each(["late-drops", "drops", "cpu"] as const)(
 	},
 )
 
+it("a replan removing a cpu-refused channel worker logs no resume between two refusals", async () => {
+	const gate = fakeGate()
+	const f = setup("rate-test", gate)
+	f.create("dsd")
+	const primary = f.place("dsd", 162_000_000)
+	const x = f.place("dsd", 162_025_000, false, "activity")
+	const y = f.place("dsd", 162_050_000, false, "activity")
+	gate.admit = vi.fn<EfficiencyGate["admit"]>(placement =>
+		placement.key === primary.key
+			? { admit: true }
+			: { admit: false, detail: "cpu", retryAtMs: 1e12 },
+	)
+	// The worker on X cannot be retuned to Y: the replan removes it.
+	f.provider.retuneChannel.mockImplementation(async () => "refused")
+	f.plan([primary, x])
+	await f.manager.startAll()
+	await f.settle()
+	f.plan([primary, y])
+	await f.settle()
+	await vi.advanceTimersByTimeAsync(2500)
+	const changes = f.info.mock.calls
+		.filter(call => call[1] === "Decoder suspension changed")
+		.map(call => (call[0] as { reasonCode: string | null }).reasonCode)
+	expect(changes).toContain("efficiency-budget")
+	expect(changes).not.toContain(null)
+})
+
 it("a suspension the efficiency gate did not cause logs no efficiency detail", async () => {
 	const gate = fakeGate()
 	const f = setup("rate-test", gate)
@@ -1028,4 +1055,24 @@ it("an operator start that clears a tuned shed re-admits it on probation, and it
 			.mock.calls.at(-1)![0]
 			.find(p => p.key === placement.key),
 	).toMatchObject({ startMode: "operator" })
+})
+
+it("an operator start releases the decoder's cpu hold, tuned or not; an automatic start does not", async () => {
+	const gate = fakeGate()
+	const releaseCpuHold = vi.fn<NonNullable<EfficiencyGate["releaseCpuHold"]>>()
+	gate.releaseCpuHold = releaseCpuHold
+	const f = setup("rate-test", gate)
+	f.create("dec")
+	f.create("other")
+	f.plan([f.place("dec", 162_000_000), f.place("other", 162_025_000)])
+	await f.manager.startAll()
+	await f.settle()
+	expect(releaseCpuHold).not.toHaveBeenCalled()
+	await f.manager.stopDecoder("other")
+	await f.manager.startDecoder("other", {
+		startMode: "operator",
+		clearEfficiencyShed: true,
+	})
+	await f.settle()
+	expect(releaseCpuHold.mock.calls).toEqual([["other"]])
 })

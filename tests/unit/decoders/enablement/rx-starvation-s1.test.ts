@@ -19,11 +19,12 @@ describe("probation under host CPU (T1-T5)", () => {
 		// Graduated: the next placement on the source is not held behind it.
 		expect(h.start("b")).toEqual({ admit: true })
 	})
-	it("T1a: two consecutive own-over samples suspend the newest untuned probationer, cause decoder", () => {
+	// Hysteresis: own-over is evidence on the fifth consecutive sample (OWN_OVER_SUSTAIN_SAMPLES).
+	it("T1a: five consecutive own-over samples suspend the newest untuned probationer, cause decoder", () => {
 		const h = gateHarness()
 		h.start("a")
 		expect(h.step(10, OWN_CALM)).toEqual([])
-		expect(h.step(10, OWN_OVER)).toEqual([])
+		for (let i = 0; i < 4; i++) expect(h.step(10, OWN_OVER)).toEqual([])
 		expect(h.step(10, OWN_OVER)).toEqual([{ key: "a", detail: "cpu" }])
 		expect(h.gate.shedAttribution?.("a")?.attribution.cause).toBe("decoder")
 		const verdict = h.logs.find(l => l.msg === "Efficiency probation verdict")
@@ -59,7 +60,7 @@ describe("probation under host CPU (T1-T5)", () => {
 		for (let i = 0; i < 5; i++) expect(at.step(null, 3.6)).toEqual([])
 		const past = gateHarness()
 		past.start("a")
-		past.step(null, 3.6 + 1e-9)
+		for (let i = 0; i < 4; i++) expect(past.step(null, 3.6 + 1e-9)).toEqual([])
 		expect(past.step(null, 3.6 + 1e-9)).toEqual([{ key: "a", detail: "cpu" }])
 	})
 	it("T2: a pinned probationer is never suspended for own CPU", () => {
@@ -129,7 +130,7 @@ describe("tuned probation (T1b, T1c)", () => {
 	}
 	it("T1b: own-over sheds the newest untuned placement on any source, cause decoder, naming the probationer", () => {
 		const h = setup()
-		h.step(10, OWN_OVER)
+		for (let i = 0; i < 4; i++) expect(h.step(10, OWN_OVER)).toEqual([])
 		expect(h.step(10, OWN_OVER)).toEqual([{ key: "u2", detail: "cpu" }])
 		expect(h.gate.shedAttribution?.("u2")?.attribution.cause).toBe("decoder")
 		expect(
@@ -162,10 +163,9 @@ describe("admission (A1-A3)", () => {
 		for (let i = 0; i < 16; i++) h.step(10, OWN_CALM)
 		return h
 	}
-	it("A1: the latest two fresh own-over samples refuse an untuned newcomer with cpu", () => {
+	it("A1: the latest five fresh own-over samples refuse an untuned newcomer with cpu", () => {
 		const h = withUntuned()
-		h.step(10, OWN_OVER)
-		h.step(10, OWN_OVER)
+		for (let i = 0; i < 5; i++) h.step(10, OWN_OVER)
 		expect(h.gate.admit(h.wanted("n"), h.running, h.mono)).toMatchObject({
 			admit: false,
 			detail: "cpu",
@@ -226,8 +226,7 @@ describe("admission (A1-A3)", () => {
 	})
 	it("A1t: own-over swaps a tuned newcomer in for untuned placements", () => {
 		const h = withUntuned()
-		h.step(10, OWN_OVER)
-		h.step(10, OWN_OVER)
+		for (let i = 0; i < 5; i++) h.step(10, OWN_OVER)
 		expect(
 			h.gate.admit(
 				h.wanted("t", { tuned: true, cost: 0.25 }),

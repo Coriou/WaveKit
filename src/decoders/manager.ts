@@ -1553,6 +1553,9 @@ export class DecoderManager extends EventEmitter {
 			episode.released = true
 			// Acted on now: the source's next revive does not wait out a sample.
 			this.efficiencyEvaluations.delete(placement.sourceId)
+			// A `cpu` hold survives this forget: the settle releases the backoff,
+			// not the hold, which ends only when own CPU releases it or on an
+			// operator start (releaseCpuHold).
 			gate?.forget(placement.key)
 			delete state.efficiencyBackoffMs
 			delete state.efficiencyLateShed
@@ -4167,7 +4170,11 @@ export class DecoderManager extends EventEmitter {
 				!current()
 			)
 				return
-			if (intent?.clearEfficiencyShed === true) this.clearTunedLossShed(state)
+			if (intent?.clearEfficiencyShed === true) {
+				// An operator start ends the decoder's `cpu` holds, tuned or not.
+				this.config.enablement?.gate?.releaseCpuHold?.(state.config.id)
+				this.clearTunedLossShed(state)
+			}
 			if (!this.reconcilingPlacements) await this.reconcilePlacements()
 			if (
 				this.decoders.get(id) !== state ||
@@ -9052,7 +9059,15 @@ export class DecoderManager extends EventEmitter {
 	 * are isolated so they never interrupt stop or restart handling.
 	 */
 	private emitStatusChanged(state: DecoderState): void {
-		if (this.config.enablement) {
+		// A placement worker being removed (a replan or activity move), or
+		// already removed when its stop settles, did not resume: its suspension
+		// ending is no change of its decoder's, which a sibling or the next
+		// worker may still hold, so it is not logged.
+		const removedWorker =
+			state.parentId !== undefined &&
+			(state.removalPending === true ||
+				this.decoders.get(state.config.id) !== state)
+		if (this.config.enablement && !removedWorker) {
 			const reasonCode = state.suspension?.reasonCode ?? null
 			if (
 				state.loggedSuspension !== reasonCode &&

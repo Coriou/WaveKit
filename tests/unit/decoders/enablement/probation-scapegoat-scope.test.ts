@@ -49,9 +49,10 @@ function harness(
 	}
 	for (const s of specs) totals.get(s.source)!.set(`decoder-${s.key}#0`, 0)
 	// rx-starvation S1: the CPU load these tests model is the core's own
-	// (ownFollows). A rise over the guard is primed as own-over on the latest
-	// sample too, so the first sample after it is evidence as before the
-	// two-consecutive-sample rule (m2, tested in rx-starvation-s1.test.ts).
+	// (ownFollows). A rise over the guard is primed as own-over on the four
+	// sample times up to the latest, so the first sample after it is evidence
+	// as before the sustain rule (OWN_OVER_SUSTAIN_SAMPLES = 5, tested in
+	// cpu-gate-hysteresis.test.ts).
 	let primeOwn: (percent: number) => void = () => {}
 	let cpuValue: number | null = 10
 	const cpu = {
@@ -96,19 +97,31 @@ function harness(
 		monoNow: () => mono,
 		setInterval: () => ({ cancel() {} }),
 	})
+	/** While priming, the evidence time the gate reads for a primed sample. */
+	let primeAt: number | null = null
+	const drops: typeof monitor = {
+		...monitor,
+		lastSampleMono: () =>
+			primeAt !== null ? primeAt : (monitor.lastSampleMono?.() ?? mono),
+	}
 	const gate = createEfficiencyGate(
 		{ budgetCores: 10, cpuGuardPercent: gateGuardPercent },
-		{ drops: monitor },
+		{ drops },
 	)
-	primeOwn = percent =>
-		gate.record({
-			atMs: mono,
-			cpuPercent: percent,
-			ownCores: (percent / 100) * 4,
-			capacityCores: 4,
-			ownCpuAvailable: true,
-			sources: new Map(),
-		})
+	primeOwn = percent => {
+		for (let i = 3; i >= 0; i--) {
+			primeAt = mono - i * 2_000
+			gate.record({
+				atMs: primeAt,
+				cpuPercent: percent,
+				ownCores: (percent / 100) * 4,
+				capacityCores: 4,
+				ownCpuAvailable: true,
+				sources: new Map(),
+			})
+		}
+		primeAt = null
+	}
 	const running: RunningPlacement[] = []
 	const tick = () => {
 		mono += 2_000

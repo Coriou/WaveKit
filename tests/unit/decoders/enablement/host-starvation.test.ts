@@ -641,12 +641,12 @@ describe("gate: graduation clears a tuned probationer's carried loss", () => {
 			return set.call(this, k, value)
 		})
 		expect(h.admit("readsb", true)).toMatchObject({ admit: true })
-		// The core's own CPU over the guard on two samples (rx-starvation S1:
-		// host CPU alone resets nothing), probation passes lagging; then an
-		// own-branch drop 14 s later on a judged pass: the CPU reset carries it.
+		// The core's own CPU over the guard on five samples (rx-starvation S1
+		// and the sustain rule, OWN_OVER_SUSTAIN_SAMPLES: host CPU alone
+		// resets nothing), probation passes lagging; then an own-branch drop
+		// 12 s later on a judged pass: the CPU reset carries it.
 		h.cpu.normalisedPercent = 100
-		h.tick([], 4, false)
-		h.tick([], 4, false)
+		for (let i = 0; i < 5; i++) h.tick([], 4, false)
 		h.cpu.normalisedPercent = 10
 		for (let i = 0; i < 5; i++) h.tick([], 4, false)
 		h.tick([h.branch("readsb")])
