@@ -382,7 +382,7 @@ describe("4. a kept recording's Activity row shows its audio start", () => {
 			kept.producedAt,
 		)
 		// any other row keeps producedAt
-		const other = row({ kind: "decoder-reception", category: "data" })
+		const other = row({ kind: "decoder-reception", category: "aviation-data" })
 		expect(
 			rowTimeOf(other, { recording: null, record: "2026-11-23T17:30:20.000Z" }),
 		).toBe(other.producedAt)
