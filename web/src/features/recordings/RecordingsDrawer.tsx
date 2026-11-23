@@ -39,6 +39,7 @@ import { useVirtualRows } from "../../ui/virtual-rows.ts"
 import { token as activityToken } from "../activity/search.ts"
 import {
 	backFromTransmission,
+	focusAfterBack,
 	openInScanner,
 	openTransmission,
 	transmissionNav,
@@ -155,15 +156,42 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 	)
 }
 
-/** Back from the Transmission view: the list comes back as it was (search, scroll, open row), focus on that row. */
+/**
+ * Back from the Transmission view: the list comes back as it was (search, scroll, open row), focus on that row,
+ * or on the list itself when that row is not mounted (scrolled out of the window, or gone). A view that opened
+ * this drawer gives focus back to what opened it instead (backFromTransmission).
+ */
 function backToList(): void {
-	backFromTransmission()
-	requestAnimationFrame(() => {
-		const { openId, cursorId } = recordingsUi.get()
-		const id = openId ?? cursorId
-		if (id !== null)
-			document.getElementById(rowDomId(id))?.focus({ preventScroll: true })
-	})
+	const origin = backFromTransmission()
+	if (focusAfterBack(origin, false) !== "list") return
+	requestAnimationFrame(() => focusListAfterBack(recordingsUi.get(), document))
+}
+
+/**
+ * Focuses the open (else the cursor) row when it is mounted, else the list: its tab stop row when one is
+ * mounted, else the list element itself (made focusable by script only, so it never becomes a tab stop).
+ */
+export function focusListAfterBack(
+	ui: { openId: string | null; cursorId: string | null },
+	doc: Pick<Document, "getElementById" | "querySelector">,
+): void {
+	const id = ui.openId ?? ui.cursorId
+	const row = id !== null ? doc.getElementById(rowDomId(id)) : null
+	if (row !== null) {
+		row.focus({ preventScroll: true })
+		return
+	}
+	const stop = doc.querySelector<HTMLElement>(
+		'.wkr-drawer .wkr-list [data-row-id][tabindex="0"]',
+	)
+	if (stop !== null) {
+		stop.focus({ preventScroll: true })
+		return
+	}
+	const list = doc.querySelector<HTMLElement>(".wkr-drawer .wkr-list")
+	if (list === null) return
+	if (!list.hasAttribute("tabindex")) list.tabIndex = -1
+	list.focus({ preventScroll: true })
 }
 
 /** The search and the Kept filter as a core query: chips and Kept at once, typed text after a pause. */

@@ -53,6 +53,7 @@ import { Icon } from "../../ui/Icon.tsx"
 import type { QueueRef } from "../playback/service.ts"
 import { ActivityDisc } from "./ActivityPlayback.tsx"
 import { activityListKey, activityQueue } from "./playback.ts"
+import { recordingStarts, recordStarts, rowTimeOf } from "./row-time.ts"
 
 const HOLD_PX = 8
 const MORE_PX = NEAR_END_PX
@@ -581,6 +582,17 @@ interface RowProps {
 
 const NO_QUEUE = (): QueueRef => ({ source: "activity", ids: [] })
 
+/** The time a row shows (row-time.ts): a kept recording's audio start, as the Recordings list shows it. */
+function useRowTime(item: ActivitySummary): string {
+	const { data } = useServices()
+	const id = item.recording?.id ?? null
+	const recording = useStore(data.recordings, s =>
+		id === null ? null : (recordingStarts(s.items).get(id) ?? null),
+	)
+	const record = useStore(recordStarts, m => m.get(item.eventId) ?? null)
+	return rowTimeOf(item, { recording, record })
+}
+
 function StackToggle({
 	stack,
 	expanded,
@@ -629,6 +641,7 @@ export const ActivityRow = memo(function ActivityRow({
 	const stacked = stack !== undefined && stack.members.length > 1
 	const channels = channelsText(stack)
 	const audio = item.recording !== undefined
+	const shown = useRowTime(item)
 	return (
 		<div
 			role="listitem"
@@ -658,8 +671,8 @@ export const ActivityRow = memo(function ActivityRow({
 				<span className="wka-main">
 					<span className="wka-line1">
 						<span className="wka-title">{v.title}</span>
-						<time className="wka-time" dateTime={item.producedAt}>
-							{timeText(item.producedAt)}
+						<time className="wka-time" dateTime={shown}>
+							{timeText(shown)}
 						</time>
 					</span>
 					{v.subtitle && <span className="wka-sub">{v.subtitle}</span>}
@@ -707,6 +720,7 @@ export const FoldedRow = memo(function FoldedRow({
 	onOpen: (eventId: string) => void
 }) {
 	useDisplay()
+	const shown = useRowTime(item)
 	return (
 		<div
 			role="listitem"
@@ -722,8 +736,8 @@ export const FoldedRow = memo(function FoldedRow({
 				aria-current={current || undefined}
 				onClick={() => onOpen(item.eventId)}
 			>
-				<time className="wka-time" dateTime={item.producedAt}>
-					{clockText(item.producedAt, { seconds: true })}
+				<time className="wka-time" dateTime={shown}>
+					{clockText(shown, { seconds: true })}
 				</time>
 				<span className="wka-folded-text">{memberLine(item)}</span>
 			</button>

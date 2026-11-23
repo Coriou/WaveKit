@@ -59,11 +59,56 @@ export interface RecordingFacts {
 const finite = z.number().finite()
 const code = z.string().min(1).max(64)
 
-/** A CTCSS tone (67.0 to 254.1 Hz, a float hair either side) or a DCS code (one to three octal digits). */
+/** A CTCSS tone's frequency: 67.0 to 254.1 Hz, a float hair either side. */
+const CtcssHz = finite.min(66.95).max(254.15)
+/** A DCS code: one to three octal digits. */
+const DcsCode = z.string().regex(/^[0-7]{1,3}$/)
+
+/** A CTCSS tone or a DCS code, as the recorder's facts store it. */
 const ToneSchema = z.discriminatedUnion("kind", [
-	z.object({ kind: z.literal("ctcss"), hz: finite.min(66.95).max(254.15) }),
-	z.object({ kind: z.literal("dcs"), code: z.string().regex(/^[0-7]{1,3}$/) }),
+	z.object({ kind: z.literal("ctcss"), hz: CtcssHz }),
+	z.object({ kind: z.literal("dcs"), code: DcsCode }),
 ])
+
+/**
+ * The live demodulator's tone reading (an `analog-transmission` record's `tone`): the CTCSS tone or null, and,
+ * from cores that check DCS, the DCS code or null. Other keys (the DTMF digits) are not read here.
+ */
+const LiveToneSchema = z.object({
+	ctcssHz: CtcssHz.nullable(),
+	dcs: z
+		.object({ code: DcsCode, polarity: z.enum(["normal", "inverted"]) })
+		.nullable()
+		.optional(),
+})
+
+/** A live tone reading as read: what it heard, and whether it looked for DCS at all. */
+export interface LiveToneReading {
+	ctcssHz: number | null
+	dcs: { code: string; polarity: "normal" | "inverted" } | null
+	dcsChecked: boolean
+}
+
+/**
+ * Reads a live record's raw tone: the reading, undefined when the record stored none, or "malformed" when it
+ * stored one this web cannot read (null included: a stored reading is an object). A DCS code is zero padded.
+ */
+export function readLiveTone(
+	raw: unknown,
+): LiveToneReading | undefined | "malformed" {
+	if (raw === undefined) return undefined
+	const t = LiveToneSchema.safeParse(raw)
+	if (!t.success) return "malformed"
+	const dcs = t.data.dcs ?? null
+	return {
+		ctcssHz: t.data.ctcssHz,
+		dcs:
+			dcs === null
+				? null
+				: { code: dcs.code.padStart(3, "0"), polarity: dcs.polarity },
+		dcsChecked: t.data.dcs !== undefined,
+	}
+}
 
 const AdmissionSchema = z.object({
 	frequencyHz: finite.nullable(),
@@ -184,10 +229,12 @@ export interface TransmissionTone {
 	from: "recorder" | "live-demod" | null
 	/**
 	 * Why it is not measured: no facts stored, too little audio or an unsteady tone, an unreadable value, a kept
-	 * recording known only through its Activity row (its facts not read), a live transmission with no tone reading.
+	 * recording known only through its Activity row (its facts not read), a live transmission whose Activity record
+	 * could not be read, a live transmission with no tone reading.
 	 */
 	why:
 		| "no-facts"
+		| "no-record"
 		| "undetermined"
 		| "malformed"
 		| "no-recording"

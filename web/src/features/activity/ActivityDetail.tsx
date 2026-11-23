@@ -40,6 +40,7 @@ import {
 } from "./fold.ts"
 import { fieldText, rowView } from "./rows.ts"
 import { pagerDetailItem } from "./pager-detail.ts"
+import { noteRecordStart } from "./row-time.ts"
 import {
 	aircraftKey,
 	useAircraftFleet,
@@ -132,6 +133,7 @@ export function ActivityDetail({
 		fetchActivityRecord(data.api, eventId, abort.signal).then(
 			r => {
 				if (abort.signal.aborted) return
+				noteRecordStart(r)
 				setRecord(r)
 				setState(r === null ? "gone" : "ready")
 			},

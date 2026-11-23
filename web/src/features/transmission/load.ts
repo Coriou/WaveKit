@@ -21,7 +21,8 @@ import type {
 	TransmissionRef,
 	TransmissionTone,
 } from "./contract.ts"
-import { factsOf, freezeDto, refText } from "./contract.ts"
+import { factsOf, freezeDto, readLiveTone, refText } from "./contract.ts"
+import { noteRecordStart } from "../activity/row-time.ts"
 
 /** Each optional read gives up after this long (the view renders without it). */
 export const OPTIONAL_READ_MS = 4_000
@@ -93,20 +94,35 @@ export async function loadTransmission(
 					: NOT_FOUND_WORDS.recordingNewest,
 			)
 	} else if ("event" in ref) {
-		// with the row in hand both reads are optional: the view renders from the row when they fail
 		const summary = deps.summary ?? null
 		const eventId = ref.event
-		record =
-			summary !== null
-				? await ctx.optional(() => ctx.activity(eventId))
-				: await ctx.activity(eventId)
-		if (record === null) gone.add("activity")
-		const key = recordingKeyOf(record, summary)
-		if (key !== null)
+		let key: string | null
+		if (summary !== null) {
+			// with the row in hand both reads are optional and run at once, each under the optional deadline: the
+			// view renders from the row when they fail or are slow
+			const rowKey = summary.recording?.id ?? null
+			const [read, rowItem] = await Promise.all([
+				ctx.optional(() => ctx.activity(eventId, true)),
+				rowKey !== null
+					? ctx.optional(() => ctx.recording(rowKey, true))
+					: Promise.resolve(null),
+			])
+			record = read
+			const named = recordingKeyOf(record, summary)
+			key = named
+			// a record naming another file than the row's (or a row with no link) reads that file, still optional
 			item =
-				summary !== null
-					? await ctx.optional(() => ctx.recording(key))
-					: await ctx.recording(key)
+				named === null
+					? null
+					: named === rowKey
+						? rowItem
+						: await ctx.optional(() => ctx.recording(named, true))
+		} else {
+			record = await ctx.activity(eventId)
+			key = recordingKeyOf(record, summary)
+			if (key !== null) item = await ctx.recording(key)
+		}
+		if (record === null) gone.add("activity")
 		if (record === null && item === null && summary === null)
 			throw new TransmissionNotFoundError(ref, NOT_FOUND_WORDS.event)
 		if (key !== null && item === null) gone.add("audio")
@@ -172,22 +188,39 @@ class Reads {
 		}
 	}
 
-	/** Runs an optional read: any failure (timeout, 404, older core) is absent. */
+	/**
+	 * Runs an optional read: any failure (timeout, 404, older core) is absent, and so is no answer within the
+	 * optional deadline (the client's own timeout aside: a read that never settles never holds the view).
+	 */
 	async optional<T>(read: () => Promise<T | null>): Promise<T | null> {
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const late = new Promise<null>(resolve => {
+			timer = setTimeout(
+				() => resolve(null),
+				this.#deps.optionalMs ?? OPTIONAL_READ_MS,
+			)
+		})
 		try {
-			return await read()
+			return await Promise.race([read(), late])
 		} catch (e) {
 			if (this.#deps.signal?.aborted) throw e
 			return null
+		} finally {
+			clearTimeout(timer)
 		}
 	}
 
-	async activity(eventId: string): Promise<ActivityRecord | null> {
+	async activity(
+		eventId: string,
+		optional = false,
+	): Promise<ActivityRecord | null> {
 		try {
-			return await this.#deps.api.get<ActivityRecord>(
+			const record = await this.#deps.api.get<ActivityRecord>(
 				`/api/activity/${encodeURIComponent(eventId)}`,
-				this.#options(false),
+				this.#options(optional),
 			)
+			noteRecordStart(record)
+			return record
 		} catch (e) {
 			if ((e as { status?: number }).status === 404) return null
 			throw e
@@ -198,13 +231,16 @@ class Reads {
 	 * A recording by key or id: the loaded list first, else the /api/recordings page its key names (its
 	 * channel's folder for a scanner key, the newest page for any other: the route has no by-key read).
 	 */
-	async recording(key: string): Promise<RecordingInventoryItem | null> {
+	async recording(
+		key: string,
+		optional = false,
+	): Promise<RecordingInventoryItem | null> {
 		const match = (r: RecordingInventoryItem) => r.key === key || r.id === key
 		const known = this.loaded().find(match)
 		if (known) return known
 		const page = await this.#deps.api.get<RecordingInventoryPage>(
 			"/api/recordings",
-			{ ...this.#options(false), query: recordingQueryOf(key) },
+			{ ...this.#options(optional), query: recordingQueryOf(key) },
 		)
 		return page.items.find(match) ?? null
 	}
@@ -511,7 +547,8 @@ export function firstTime(
 
 /**
  * A transmission known only from Activity: a live analog transmission, a call whose file is not listed, a kept
- * scanner recording whose file is not listed (always scanner analog FM: its tone is not measured here).
+ * scanner recording whose file is not listed (always scanner analog FM: its tone is not measured here). A live
+ * transmission's row whose record could not be read is still analog voice, its tone not measured.
  */
 function fromActivity(
 	record: ActivityRecord | null,
@@ -521,6 +558,9 @@ function fromActivity(
 	const live = record?.kind === "analog-transmission" ? record.payload : null
 	const kept = record?.kind === "recording-change" ? record.payload : null
 	const keptRow = kept !== null || summary?.kind === "recording-change"
+	// a live transmission's row whose record was not read: analog voice, its modulation and tone unknown
+	const liveRow =
+		live === null && record === null && summary?.kind === "analog-transmission"
 	const eventId = record?.eventId ?? summary?.eventId ?? ""
 	const field = (key: string) =>
 		summary?.fields.find(f => f.key === key)?.value ?? null
@@ -563,7 +603,7 @@ function fromActivity(
 			operationId: null,
 		},
 		kind:
-			live !== null || keptRow
+			live !== null || keptRow || liveRow
 				? "voice-analog"
 				: summary?.category === "voice"
 					? "voice-digital"
@@ -592,7 +632,7 @@ function fromActivity(
 			: null,
 		part: null,
 		tone: fm
-			? liveTone(live)
+			? liveToneOf(live.tone)
 			: keptRow
 				? {
 						state: "not-measured",
@@ -602,7 +642,16 @@ function fromActivity(
 						from: "recorder",
 						why: "no-recording",
 					}
-				: null,
+				: liveRow
+					? {
+							state: "not-measured",
+							ctcssHz: null,
+							dcs: null,
+							dcsChecked: false,
+							from: "live-demod",
+							why: "no-record",
+						}
+					: null,
 		identity:
 			talkgroup !== null || radio !== null
 				? {
@@ -648,27 +697,27 @@ function fromActivity(
 	}
 }
 
-/** The live demodulator's tone: it checks CTCSS and DCS when it stored a tone at all. */
-function liveTone(
-	live: Extract<ActivityRecord, { kind: "analog-transmission" }>["payload"],
-): TransmissionTone {
-	const t = live.tone
-	const base = { from: "live-demod" as const, why: null }
-	if (t === undefined)
-		return {
-			...base,
-			state: "not-measured",
-			ctcssHz: null,
-			dcs: null,
-			dcsChecked: false,
-			why: "live-none",
-		}
-	const dcs = t.dcs ?? null
+/**
+ * The live demodulator's tone, from a record's raw `tone` read with Zod: heard or none when it stored a readable
+ * reading, not measured when it stored none (`live-none`) or one this web cannot read (`malformed`).
+ */
+export function liveToneOf(raw: unknown): TransmissionTone {
+	const t = readLiveTone(raw)
+	const unknown = {
+		state: "not-measured" as const,
+		ctcssHz: null,
+		dcs: null,
+		dcsChecked: false,
+		from: "live-demod" as const,
+	}
+	if (t === undefined) return { ...unknown, why: "live-none" }
+	if (t === "malformed") return { ...unknown, why: "malformed" }
 	return {
-		...base,
-		state: t.ctcssHz !== null || dcs !== null ? "heard" : "none",
+		state: t.ctcssHz !== null || t.dcs !== null ? "heard" : "none",
 		ctcssHz: t.ctcssHz,
-		dcs,
-		dcsChecked: t.dcs !== undefined,
+		dcs: t.dcs,
+		dcsChecked: t.dcsChecked,
+		from: "live-demod",
+		why: null,
 	}
 }

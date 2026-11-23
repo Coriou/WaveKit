@@ -440,12 +440,12 @@ describe("PlaybackService: element events", () => {
 		expect(t.p.get()).toMatchObject({ id: "a", phase: "ended" })
 	})
 
-	it("paused + ended → ended, never auto-next", async () => {
+	it("paused + ended stays paused, never auto-next", async () => {
 		const s = setup()
 		await playing(s, "a", Q("a", "b"))
 		s.p.pause()
 		s.audio.emit("ended")
-		expect(s.p.get()).toMatchObject({ id: "a", phase: "ended" })
+		expect(s.p.get()).toMatchObject({ id: "a", phase: "paused" })
 	})
 
 	it("playing/paused + error → error, and the file is fetched again by toggle", async () => {
@@ -820,10 +820,12 @@ async function inPhase(phase: Phase, autoNext = true) {
 	await flush()
 	if (phase === "paused") s.p.pause()
 	if (phase === "ended") {
-		s.p.pause()
+		// played to its end with Auto-next off (a paused file's end event leaves it paused)
+		s.p.setAutoNext(false)
 		s.audio.ended = true
 		s.audio.emit("ended")
 		s.audio.ended = false
+		s.p.setAutoNext(autoNext)
 	}
 	expect(s.p.get().phase).toBe(phase)
 	return s
@@ -885,7 +887,7 @@ const TABLE: Record<Phase, Record<PlayerEvent, Phase>> = {
 		"play all": "loading",
 		"next/prev": "loading",
 		close: "idle",
-		end: "ended",
+		end: "paused",
 		error: "error",
 	},
 	ended: {

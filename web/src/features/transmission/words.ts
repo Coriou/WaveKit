@@ -107,28 +107,55 @@ export const NOT_MEASURED_WORDS: Readonly<
 	"no-facts": "This recording did not store its tone",
 	malformed: "The stored tone could not be read",
 	undetermined: "Too little audio, or the tone was not steady enough to tell",
+	"no-record":
+		"Its Activity record could not be read, so its tone reading is not known",
 	"no-recording":
 		"Its recording is not listed here, so its stored tone could not be read",
 	"live-none": "Listening stored no tone reading for this live transmission",
 }
 
-/** The Tone row of a transmission: its value and, when it is not a plain value, a hint saying why. */
+/** A heard tone's value as one text; null when what it holds cannot be shown (not a finite Hz, not a DCS code). */
+function heardText(t: TransmissionTone): string | null {
+	const hz: unknown = t.ctcssHz
+	if (typeof hz === "number" && Number.isFinite(hz)) return ctcssText(hz)
+	const code: unknown = (t.dcs as { code?: unknown } | null)?.code
+	if (typeof code === "string" && /^[0-7]{1,3}$/.test(code))
+		return dcsText(code)
+	return null
+}
+
+/**
+ * The Tone row of a transmission: its value and, when it is not a plain value, a hint saying why. Anything it
+ * cannot read is "Not measured" (the stored tone could not be read), never "No tone heard".
+ */
 export function toneRow(t: TransmissionTone): {
 	value: string
 	hint: string | null
 } {
+	const malformed = {
+		value: "Not measured",
+		hint: NOT_MEASURED_WORDS.malformed,
+	}
+	const raw: unknown = t
+	if (raw === null || typeof raw !== "object") return malformed
 	if (t.state === "heard") {
-		if (t.ctcssHz !== null) return { value: ctcssText(t.ctcssHz), hint: null }
-		if (t.dcs !== null) return { value: dcsText(t.dcs.code), hint: null }
+		const text = heardText(t)
+		return text === null ? malformed : { value: text, hint: null }
 	}
 	if (t.state === "none")
 		return {
 			value: "No tone heard",
-			hint: t.dcsChecked ? null : "This recorder does not check DCS codes",
+			hint:
+				t.dcsChecked === true ? null : "This recorder does not check DCS codes",
 		}
+	if (t.state !== "not-measured") return malformed
+	const why: unknown = t.why
 	return {
 		value: "Not measured",
-		hint: NOT_MEASURED_WORDS[t.why ?? "undetermined"],
+		hint:
+			typeof why === "string" && Object.hasOwn(NOT_MEASURED_WORDS, why)
+				? NOT_MEASURED_WORDS[why as keyof typeof NOT_MEASURED_WORDS]
+				: NOT_MEASURED_WORDS.undetermined,
 	}
 }
 

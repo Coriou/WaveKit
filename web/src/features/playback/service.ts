@@ -20,7 +20,7 @@
 // | idle         | loading   | loading  | –                   | –     | –                                | –     |
 // | loading      | loading   | loading  | loading (the other) | idle  | –                                | error |
 // | playing      | loading¹  | loading¹ | loading (the other) | idle  | loading (Auto-next) or ended     | error |
-// | paused       | loading¹  | loading¹ | loading (the other) | idle  | ended                            | error |
+// | paused       | loading¹  | loading¹ | loading (the other) | idle  | –                                | error |
 // | ended        | loading¹  | loading¹ | loading (the other) | idle  | –                                | –     |
 // | error        | loading   | loading  | loading (the other) | idle  | –                                | –     |
 //
@@ -641,7 +641,8 @@ export class PlaybackService extends Store<PlaybackState> {
 				return
 			}
 		}
-		if (s.phase !== "playing" && s.phase !== "paused") return
+		// a paused file stays paused (an end event then is a seek to the end, not the file playing out)
+		if (s.phase !== "playing") return
 		this.set({ ...s, phase: "ended", pos: s.duration ?? s.pos })
 	}
 

@@ -16,6 +16,7 @@ import { showChannel, stepAt } from "../naming.ts"
 import type { PlaybackState } from "../playback/service.ts"
 import { openDiscovery } from "../scanner/ui-store.ts"
 import type { TransmissionRef } from "./contract.ts"
+import { sameRef } from "./contract.ts"
 
 /** What had focus when the view opened its host: Back that closes that host gives focus back to it. */
 export interface FocusTrigger {
@@ -147,12 +148,37 @@ export function hostHere(shell: Pick<ShellDoor, "getState"> = shellStore): {
 	return { host: "activity", label: "Back" }
 }
 
-// the view lives in its host: closing or switching that drawer (Esc, its close button, the dock) drops it
-shellStore.subscribe(() => {
+/**
+ * The shell's drawer changed while a view may be open. The view lives in its host: switching to another drawer
+ * (the dock, a door) drops it; closing the host (Esc from outside the drawer, its close button) drops it too and,
+ * when the view had opened that host over another drawer, reopens that drawer as Back would.
+ */
+export function hostChanged(
+	drawer: DrawerId | null,
+	shell: Pick<ShellDoor, "openDrawer"> = shellStore,
+): void {
 	const open = transmissionNav.get()
-	if (open !== null && shellStore.getState().drawer !== open.origin.host)
-		transmissionNav.set(null)
-})
+	if (open === null || drawer === open.origin.host) return
+	transmissionNav.set(null)
+	const restore = open.origin.restoreDrawer
+	if (drawer === null && restore !== undefined && restore !== null)
+		shell.openDrawer(restore)
+}
+
+shellStore.subscribe(() => hostChanged(shellStore.getState().drawer))
+
+/**
+ * Where focus goes after Back in a drawer: back to what opened the drawer when the view opened it (Back gave it
+ * already), onto the event detail the view was opened from when it is still open under it (its Back), else the
+ * list.
+ */
+export function focusAfterBack(
+	origin: TransmissionOrigin | null,
+	detailOpen: boolean,
+): "trigger" | "detail" | "list" {
+	if (origin?.restoreDrawer !== undefined) return "trigger"
+	return detailOpen ? "detail" : "list"
+}
 
 /**
  * A click on an Activity row, in the drawer's list or a pinned column: a transmission's row opens its view in
@@ -272,7 +298,8 @@ export interface ScannerDoor {
 
 /**
  * "Open in Scanner": the channel's discovery opened in the Scanner drawer. When the core cannot give it (deleted,
- * merged away, no answer), a toast says so and nothing moves. Resolves to whether it opened.
+ * merged away, no answer), a toast says so and nothing moves; when the view it was asked from was closed or shows
+ * another transmission by the time the answer comes, nothing moves either. Resolves to whether it opened.
  */
 export async function openInScanner(
 	discoveryId: string,
@@ -281,20 +308,30 @@ export async function openInScanner(
 ): Promise<boolean> {
 	let id = discoveryId
 	if (!scanner.discovery(id)) {
+		const asked = transmissionNav.get()
 		try {
 			id = (await scanner.fetchDiscovery(id)).id
 		} catch (error) {
+			if (!stillShown(asked)) return false
 			showAppToast(
 				`Could not open this channel in Scanner: ${errorMessage(error)}`,
 				{ tone: "warn" },
 			)
 			return false
 		}
+		if (!stillShown(asked)) return false
 	}
 	leaveTransmission()
 	openDiscovery(id)
 	shell.openDrawer("scanner")
 	return true
+}
+
+/** Whether the view an action was asked from still shows the same transmission (true when none was open). */
+function stillShown(asked: OpenTransmission | null): boolean {
+	if (asked === null) return true
+	const now = transmissionNav.get()
+	return now !== null && sameRef(now.ref, asked.ref)
 }
 
 /**

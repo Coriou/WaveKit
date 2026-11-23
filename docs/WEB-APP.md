@@ -446,7 +446,11 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   This replaces the old Messages view: `#/messages`, a link with `view=messages` and the ⌘K
   **Messages** row (`G` `D`) open Activity in Cards. A scanner recording's row is a transmission:
   it reads `FM voice` (or the channel's saved name, with `FM voice` under it), never
-  `Recording 145.5625 MHz`.
+  `Recording 145.5625 MHz`. A row for a kept recording (a scanner recording, a call with audio)
+  shows when its audio starts, the same time as its Recordings row: the Recordings list's time when
+  that list has it loaded, else the start its stored event carries once you have opened it, else
+  the time it was stored. The list stays in the order the events were stored, so a long recording
+  can show an earlier time than the row below it.
   **Last decode** on the tuned card opens it on one decoder: a **Decoder ADS-B** chip in the
   search lists only that decoder's events; remove the chip with its `×` like any other filter.
   If the core rate-limits a request, Activity retries by itself up to 3 times, unless the core asks
@@ -620,8 +624,11 @@ analog transmission, a call with audio; other rows keep their event detail), **D
 event's detail, one of the tuned card's earlier rows, or the player's title (in Recordings or
 Activity when one of them is open, else in Activity; played from an Activity list, it opens on that
 row). **‹ Back** (or `Esc` anywhere in the drawer) names where you came from and returns there in
-one step: the same list, search, scroll and open row; when the view opened the drawer, Back closes
-it again and puts focus back on what you clicked. Opening it never changes another panel's search,
+one step: the same list, search, scroll and open row, or the event detail it was opened from
+(focus on that detail's Back), with focus on that row or, when the row is no longer on screen, on
+the list. When the view opened the drawer, Back closes it again, reopens the drawer that was open
+before (when there was one) and puts focus back on what you clicked; closing the drawer another way
+(`Esc` from outside it, such as from the player, or its close button) also reopens that drawer. Opening it never changes another panel's search,
 and opening another transmission while it is open (the player's title, a tuned card row) keeps that
 same Back. When nothing can be found the view says `Not found` and why.
 
@@ -632,7 +639,8 @@ no audio, such as `The recording was deleted`); **What we know**, a few short ro
 - **Tone**, always for analog FM: `CTCSS 88.5 Hz`, `DCS 023`, `No tone heard` (it listened and heard
   none; the scanner recorder does not check DCS codes), or `Not measured` with why (recordings made
   before WaveKit stored the tone, too little audio, a tone that was not steady, a scanner recording
-  whose file is not listed, or a live transmission that stored no tone reading).
+  whose file is not listed, a live transmission whose stored event could not be read, a live
+  transmission that stored no tone reading, or a stored tone this web app cannot read).
 - **Signal** (`Strong, 24 dB over the noise`), **Ended** (`The transmission ended`,
   `Cut: the receiver was retuned`) and **Kept** (`Speech heard over a tone`), each only when known.
 

@@ -41,6 +41,7 @@ import { ScopeChips } from "../../features/activity/ScopeChips.tsx"
 import { rangeEnded, rangeLabel } from "../../features/activity/scope.ts"
 import {
 	backFromTransmission,
+	focusAfterBack,
 	openActivityRow,
 	transmissionNav,
 } from "../../features/transmission/nav.ts"
@@ -100,11 +101,12 @@ export default function ActivityDrawer({
 		s?.origin.host === "activity" ? s : null,
 	)
 	const txEvent = tx !== null && "event" in tx.ref ? tx.ref.event : null
-	// Back onto the list; a view that opened this drawer gives focus back to what opened it (backFromTransmission)
+	// Back onto what it was opened from: the event detail (its Back takes focus as it mounts) or the list; a view
+	// that opened this drawer gives focus back to what opened it (backFromTransmission)
 	const txBack = () => {
 		const origin = backFromTransmission()
-		if (origin?.restoreDrawer === undefined)
-			requestAnimationFrame(() => list.current?.focus())
+		const target = focusAfterBack(origin, activity.get().openId !== null)
+		if (target === "list") requestAnimationFrame(() => list.current?.focus())
 	}
 	// a transmission's row opens the Transmission view; any other row its event detail
 	const openRow = (item: ActivitySummary) => openActivityRow(item, activity)
