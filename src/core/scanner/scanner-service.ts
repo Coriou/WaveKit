@@ -377,7 +377,11 @@ import { extractChannelFeatures } from "./classify/channel-features.js"
 import { refineChannelClassification } from "./classify/channel-tier.js"
 import { updateChannelAdmission } from "./plan/resource-admission.js"
 import { channelGateMinDurationMs } from "../spectrum/channel-gate.js"
-import type { AnalogCut } from "./store/analog-operations.js"
+import type {
+	AnalogCut,
+	AnalogHandle,
+	AnalogInput,
+} from "./store/analog-operations.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
 import {
 	CHANNEL_GATE_DEFAULT_WIDTH_HZ,
@@ -622,6 +626,12 @@ const COVERAGE_EVENTS = [
 ] as const
 
 const MAINTENANCE_EVERY_MS = 5 * 60_000
+/**
+ * A storage-cap admission refusal asks for the next maintenance pass (retention) at the next
+ * tick instead of up to MAINTENANCE_EVERY_MS later, at most once per this window, and only
+ * while the last pass did not already find nothing removable (`recordingsQuota`).
+ */
+export const EARLY_RETENTION_EVERY_MS = 30_000
 const STATUS_EVERY_MS = 1_000
 /** Per-item quarantine lines one analog recovery logs; the rest are one suppressed count. */
 export const QUARANTINE_LOG_LINES = 32
@@ -1372,6 +1382,8 @@ export class ScannerService extends EventEmitter {
 	/** Maintenance still running behind a slow disk: the next one waits for it. */
 	private maintenanceInFlight = false
 	private lastMaintenanceAt = 0
+	/** requestRetentionSoon: when it last brought maintenance forward (-∞: never). */
+	private earlyRetentionAt = Number.NEGATIVE_INFINITY
 	private lastStatusAt = 0
 	private lastStatusJson = ""
 	private startupAttempted = false
@@ -1642,7 +1654,7 @@ export class ScannerService extends EventEmitter {
 					ringSeconds: this.settings().ringSeconds,
 					admission: this.settings().admission,
 				}),
-				beginAnalog: input => this.evidence.beginAnalog(input),
+				beginAnalog: input => this.beginAnalogRecording(input),
 				recordTone: (observationId, ctcssHz, at) =>
 					void this.store.recordAnalog(
 						observationId,
@@ -1809,7 +1821,7 @@ export class ScannerService extends EventEmitter {
 				beginAnalogComponent: identity =>
 					this.channelRecordingOwners.get(identity.token)?.tap.beginAnalog() ===
 					true,
-				beginAnalog: input => this.evidence.beginAnalog(input),
+				beginAnalog: input => this.beginAnalogRecording(input),
 				releaseLogical: identity =>
 					this.channelRecordingOwners
 						.get(identity.token)
@@ -9406,6 +9418,35 @@ export class ScannerService extends EventEmitter {
 		} catch (err: unknown) {
 			this.log.warn({ err }, "Re-attaching scanner folders failed")
 		}
+	}
+
+	/** The recorders' store admission: a storage-cap refusal asks for retention soon. */
+	private beginAnalogRecording(input: AnalogInput): AnalogHandle {
+		const handle = this.evidence.beginAnalog(input)
+		void handle.ready.catch((err: unknown) => {
+			if (
+				err instanceof WaveKitError &&
+				err.code === "SCANNER_ANALOG_STORAGE_CAP"
+			)
+				this.requestRetentionSoon()
+		})
+		return handle
+	}
+
+	/**
+	 * Brings the next maintenance pass (whose retention frees room oldest first) forward to the
+	 * next tick: at most once per EARLY_RETENTION_EVERY_MS (30 s), and not while the last pass
+	 * left the quota full with nothing removable (the regular 5 min cadence retries that).
+	 */
+	private requestRetentionSoon(): void {
+		if (this.evidence.recordingsQuotaExceeded !== null) return
+		const now = this.now()
+		if (now - this.earlyRetentionAt < EARLY_RETENTION_EVERY_MS) return
+		this.earlyRetentionAt = now
+		this.lastMaintenanceAt = Math.min(
+			this.lastMaintenanceAt,
+			now - MAINTENANCE_EVERY_MS,
+		)
 	}
 
 	private async maintenance(): Promise<void> {

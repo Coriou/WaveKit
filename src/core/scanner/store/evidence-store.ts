@@ -1707,7 +1707,10 @@ export class EvidenceStore {
 		)
 		this.unresolvedFolders = unresolved.size
 		this.unknownHeldFiles = unknownHeld.size
-		this.noteQuota(recordingsLeft + (this.analog?.managedBytes ?? 0))
+		this.noteQuota(
+			recordingsLeft + (this.analog?.managedBytes ?? 0),
+			this.analog?.quotaShortfall(recordingsLeft),
+		)
 		if (unknownHeld.size > 0)
 			this.log.debug(
 				{ kept: unknownHeld.size },
@@ -1733,17 +1736,17 @@ export class EvidenceStore {
 
 	/**
 	 * The recordings left after a retention pass against the quota: entering or leaving the
-	 * exceeded state logs once (numbers only).
+	 * exceeded state logs once (numbers only). With analog operations the test is admission's
+	 * own (`shortfall`, AnalogOperations.quotaShortfall: no room left for the next recording
+	 * plus one in flight, ADMISSION_HEADROOM), so a store within one recording of its cap shows;
+	 * without them, or while the analog inventory is unknown (null), it is the cap itself.
 	 */
-	private noteQuota(usedBytes: number): void {
+	private noteQuota(usedBytes: number, shortfall?: number | null): void {
 		const capBytes = this.caps.maxRecordingsMb * MIB
+		const overBytes = shortfall ?? usedBytes - capBytes
 		const next =
-			Number.isFinite(usedBytes) && usedBytes > capBytes
-				? {
-						capBytes,
-						usedBytes,
-						overBytes: usedBytes - capBytes,
-					}
+			Number.isFinite(usedBytes) && Number.isFinite(overBytes) && overBytes > 0
+				? { capBytes, usedBytes, overBytes }
 				: null
 		if (next !== null && this.quotaExceeded === null)
 			this.log.warn(
@@ -1753,7 +1756,7 @@ export class EvidenceStore {
 					usedBytes: next.usedBytes,
 					overBytes: next.overBytes,
 				},
-				"Scanner recordings quota exceeded and retention may remove nothing more; analog recordings are refused (storage-cap)",
+				"Scanner recordings quota exceeded (no room for the next recording) and retention may remove nothing more; analog recordings are refused (storage-cap)",
 			)
 		else if (next === null && this.quotaExceeded !== null)
 			this.log.info(

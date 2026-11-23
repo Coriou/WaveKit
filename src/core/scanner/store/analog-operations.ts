@@ -53,6 +53,14 @@ export const MAX_ACTIVE_ANALOG_PER_SOURCE = 2
 export const MAX_ANALOG_FILE_BYTES = 1_920_044
 const RESERVATION = MAX_ANALOG_FILE_BYTES + MAX_OPERATION_METADATA_BYTES
 /**
+ * Room retention keeps free under the recordings quota for admission: 2 × RESERVATION =
+ * 2 × (1,920,044 + 16,384) = 3,872,856 B. Admission refuses once used + outstanding +
+ * RESERVATION exceeds the cap, so a pass that leaves used + outstanding + ADMISSION_HEADROOM
+ * within the cap always fits one admission plus one more in flight. A store counts as full
+ * (retention evicts, the quota status shows) past that, never only past the cap itself.
+ */
+export const ADMISSION_HEADROOM = 2 * RESERVATION
+/**
  * Incomplete operation folders (crash residue holding no media) a scan moved aside into
  * `.analog-operations/.set-aside/`, kept for diagnosis. Each holds only the intent files
  * (intent.json, intent.tmp), together at most MAX_OPERATION_METADATA_BYTES (16 KiB). Past the
@@ -713,6 +721,22 @@ export class AnalogOperations {
 			this.initialized &&
 			!this.inventory.unknown &&
 			this.context.adapter.authorityHealthy()
+		)
+	}
+	/**
+	 * Bytes retention must still free so the next admissions fit: managed + `legacy` +
+	 * outstanding reservations + ADMISSION_HEADROOM − the cap (> 0: full). Null while the
+	 * inventory is unknown.
+	 */
+	quotaShortfall(legacy: number): number | null {
+		if (this.inventory.unknown) return null
+		return (
+			this.inventory.bytes +
+			legacy +
+			this.reservedUnused() +
+			this.uncertainUnused() +
+			ADMISSION_HEADROOM -
+			this.context.limits().maxBytes
 		)
 	}
 	get managedBytes(): number | null {
@@ -2995,6 +3019,10 @@ export class AnalogOperations {
 		let unresolved = 0
 		let unknownHeld = 0
 		let quarantined = 0
+		// Evictable files with their media mtime (one lstat each; at most the inventory,
+		// MAX_RECOVERY_OPERATIONS), oldest first: age expiry and the quota both retire the oldest.
+		// A file whose media cannot be read sorts last (its age is unknown, never aged).
+		const candidates: { intent: Intent; mtimeMs: number }[] = []
 		for (const intent of [...this.inventory.intents.values()]) {
 			const hold = this.retentionHold(intent, keep)
 			// Quarantined at recovery (whatever the reason): kept, counted, until a start admits it.
@@ -3013,16 +3041,26 @@ export class AnalogOperations {
 				continue
 			}
 			if (hold) continue
-			let old = false
+			let mtimeMs = Number.POSITIVE_INFINITY
 			try {
-				old = now - (await lstat(this.finalPath(intent))).mtimeMs > maxAgeMs
+				mtimeMs = (await lstat(this.finalPath(intent))).mtimeMs
 			} catch {
 				/* quarantine is retained until explicit deletion */
 			}
+			candidates.push({ intent, mtimeMs })
+		}
+		candidates.sort(
+			(a, b) =>
+				a.mtimeMs - b.mtimeMs ||
+				(a.intent.operationId < b.intent.operationId ? -1 : 1),
+		)
+		for (const { intent, mtimeMs } of candidates) {
+			const old = now - mtimeMs > maxAgeMs
+			// Full: no room for one admission plus one in flight (ADMISSION_HEADROOM), re-checked
+			// after every retire so the pass stops as soon as the next recording fits.
 			if (
 				!old &&
-				this.inventory.bytes + (await this.context.legacyBytes()) <=
-					this.context.limits().maxBytes
+				(this.quotaShortfall(await this.context.legacyBytes()) ?? 0) <= 0
 			)
 				continue
 			// The whole policy again before the retire and in the media unlink's own turn: a

@@ -158,6 +158,10 @@ export const WIDEBAND_JOIN_TOLERANCE_HZ = 5_000
 export const WIDEBAND_DECODE_SKEW_MS = 500
 /** Joined observations a session remembers (Session.joins), oldest dropped first. */
 const WIDEBAND_JOINS_KEPT = 64
+/** A store refusal's code is logged at most once per this window (noteStoreRefusal). */
+export const STORE_REFUSAL_LOG_MS = 60_000
+/** Distinct refusal codes noteStoreRefusal remembers (the store's codes are a closed set). */
+const STORE_REFUSAL_CODES = 16
 /**
  * How late a decision may be: the engine closes a track one 500 ms track hang after it went
  * quiet and reports opens a few 10 to 50 ms blocks late, so 1000 ms covers both with margin.
@@ -1402,6 +1406,8 @@ export class WidebandAnalogRecorder {
 	private grant: { session: Session; left: number } | null = null
 	private stopped = false
 	private warnedAt = Number.NEGATIVE_INFINITY
+	/** noteStoreRefusal: when each refusal code was last logged (at most STORE_REFUSAL_CODES). */
+	private readonly storeRefusedAt = new Map<string, number>()
 	private readonly decisions: RecorderDecisions
 
 	constructor(private readonly deps: WidebandAnalogDeps) {
@@ -2998,10 +3004,11 @@ export class WidebandAnalogRecorder {
 				if (file.finishing) this.completeFinish(s, file)
 				else this.wake(s)
 			},
-			() => {
+			(err: unknown) => {
 				// Storage cap, disk-low or a lost association: this transmission is not recorded
 				// (the observation is tried once more from its next snapshot). A finishing or waiting
 				// file gets its own refused:store; the store settles its operation.
+				this.noteStoreRefusal(err)
 				this.storeFailed(s, file)
 			},
 		)
@@ -4566,6 +4573,31 @@ export class WidebandAnalogRecorder {
 	}
 
 	/** At most one warning a minute; never the error's untrusted text beyond safe fields. */
+	/**
+	 * Why the store refused a file (`handle.ready` rejected), logged at info with the error's
+	 * allowlisted fields (its code: storage-cap, disk-low, ...): at most once per code per
+	 * STORE_REFUSAL_LOG_MS (60 s); the codes are a closed set, and past STORE_REFUSAL_CODES (16)
+	 * remembered the oldest is forgotten, so the map stays bounded.
+	 */
+	private noteStoreRefusal(err: unknown): void {
+		const fields = safeErrorFields(err)
+		const key = fields.code ?? fields.type
+		const now = this.deps.now()
+		const last = this.storeRefusedAt.get(key)
+		if (last !== undefined && now - last < STORE_REFUSAL_LOG_MS) return
+		this.storeRefusedAt.delete(key)
+		this.storeRefusedAt.set(key, now)
+		while (this.storeRefusedAt.size > STORE_REFUSAL_CODES) {
+			const oldest = this.storeRefusedAt.keys().next()
+			if (oldest.done === true) break
+			this.storeRefusedAt.delete(oldest.value)
+		}
+		this.log.info(
+			{ reason: "store-refused", err: fields },
+			"Wideband analog recording refused by the store",
+		)
+	}
+
 	private warn(err: unknown): void {
 		const now = this.deps.now()
 		if (now - this.warnedAt < 60_000) return

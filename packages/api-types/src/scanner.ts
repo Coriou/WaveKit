@@ -1351,14 +1351,21 @@ export interface ScannerStatus {
 	jobs: { active: number; total: number }
 }
 
-/** `ScannerStatus.recordingsQuota`: the recordings quota exceeded with nothing removable. */
+/**
+ * `ScannerStatus.recordingsQuota`: the recordings quota left without room for the next analog
+ * recording (two full recordings) with nothing removable; `usedBytes` may be under `capBytes`.
+ */
 export interface ScannerRecordingsQuotaStatus {
 	state: "exceeded"
 	/** The refusal analog admission gives meanwhile. */
 	reason: "storage-cap"
 	capBytes: number
 	usedBytes: number
-	/** `usedBytes - capBytes`. */
+	/**
+	 * Bytes retention would have to free for the next recording: `usedBytes` + space reserved by
+	 * recordings in flight + the room for two recordings − `capBytes` (> 0). Cores before
+	 * 2026-11-23: `usedBytes - capBytes`.
+	 */
 	overBytes: number
 }
 
