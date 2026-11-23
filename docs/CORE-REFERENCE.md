@@ -587,6 +587,28 @@ scanner:
     enabled: true
 ```
 
+### Scanner recording storage
+
+`scanner.storage.maxRecordingsMb` (default 512) caps the scanner's recordings. One analog recording
+reserves 1,936,428 B (1,920,044 B of audio plus 16 KiB of operation metadata), and one is
+admitted only while that much room is left. Retention removes recordings oldest first when the
+store counts as full: the recordings plus the space reserved by recordings in flight come within
+two reservations (3,872,856 B) of the cap. It then keeps removing until the eviction target is
+free: min(max(8 × 1,936,428 B, ⌊cap / 50⌋), ⌊cap / 4⌋). For the default 512 MiB (536,870,912 B)
+cap, 2 % is 10,737,418 B and a quarter 134,217,728 B, so eight reservations (15,491,424 B) win
+and a full store drops to about 15.5 MB under the cap; from about 739 MiB up, 2 % is larger
+(1 GiB: 21,474,836 B). The quarter clamp applies below 4 × 15,491,424 = 61,965,696 B (about
+59.1 MiB): an 18 MiB (18,874,368 B) cap gets 4,718,592 B, so a small store is not emptied to
+three quarters. Below 15,491,424 B (about 14.8 MiB) a quarter of the cap is less than the
+two-reservation trigger; a pass removes while either the trigger holds or the target is not
+free, so there it stops at two reservations under the cap. A cap under two reservations
+(3,872,856 B) keeps the trigger on even over an empty store, so every pass removes every
+removable recording; under one reservation (1 MiB, say) every analog recording is also refused. Between the
+two points nothing is removed. Kept, held and recent files are never removed for room. A store
+without analog operations, or whose analog inventory is not ready yet (before recovery
+finishes), trims its other recordings only to the cap itself. Details:
+[SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings).
+
 ## RTL-SDR Setup
 
 WaveKit reads IQ from `rtl_tcp` (or rtlmux in front of it). On a Raspberry Pi, the

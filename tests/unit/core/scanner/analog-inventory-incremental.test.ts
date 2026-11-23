@@ -23,6 +23,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+	AUDIT_CONCURRENCY_IDLE,
+	AUDIT_CONCURRENCY_RECORDING,
 	AnalogOperations,
 	type AnalogMetadataAdapter,
 	type AnalogOperationIo,
@@ -305,6 +307,172 @@ describe("analog inventory without store scans", () => {
 		expect(operations.ready).toBe(true)
 		expect(operations.managedBytes).toBeLessThan(before)
 		expect(operations.ownsArtifact(gone.artifact!)).toBe(false)
+		await operations.stop()
+	})
+})
+
+/** An operation's intent.json read the audit makes, held `delayMs` so concurrent reads overlap. */
+function auditReads(delayMs: number): {
+	io: AnalogOperationIo
+	probe: {
+		auditing: boolean
+		/** Reads of this id are not counted (an active operation's own settlement). */
+		skip: string | null
+		inflight: number
+		max: number
+		reads: string[]
+		onRead: (() => void) | null
+	}
+} {
+	const probe = {
+		auditing: false,
+		skip: null as string | null,
+		inflight: 0,
+		max: 0,
+		reads: [] as string[],
+		onRead: null as (() => void) | null,
+	}
+	return {
+		probe,
+		io: {
+			unlink: path => unlink(path),
+			checkpoint: async () => undefined,
+			readOpen: async (path: string, flags: number): Promise<FileHandle> => {
+				const counted =
+					probe.auditing &&
+					path.endsWith("intent.json") &&
+					(probe.skip === null || !path.includes(probe.skip))
+				if (!counted) return open(path, flags)
+				probe.reads.push(path)
+				probe.inflight++
+				probe.max = Math.max(probe.max, probe.inflight)
+				probe.onRead?.()
+				try {
+					await new Promise(resolve => setTimeout(resolve, delayMs))
+					return await open(path, flags)
+				} finally {
+					probe.inflight--
+				}
+			},
+		},
+	}
+}
+
+describe("the audit reads operations concurrently, bounded by recording activity", () => {
+	it(`reads ${AUDIT_CONCURRENCY_IDLE} operations at once while none is active, ${AUDIT_CONCURRENCY_RECORDING} while one records`, async () => {
+		const root = await newRoot()
+		const s = newStore()
+		const { io, probe } = auditReads(20)
+		const operations = direct(root, s.store, io)
+		await operations.recover()
+		for (let i = 0; i < 16; i++) await recordWith(operations, s.discoveryId)
+		probe.auditing = true
+		await operations.audit()
+		probe.auditing = false
+		expect(probe.reads).toHaveLength(16)
+		expect(probe.max).toBe(AUDIT_CONCURRENCY_IDLE)
+		expect(operations.ready).toBe(true)
+		// A recording is active for the whole audit: never more than the recording bound.
+		const op = operations.begin({
+			discoveryId: s.discoveryId,
+			observationId: "o1",
+			binding: binding(),
+		})
+		await op.ready
+		await op.push(new Int16Array(800))
+		probe.skip = op.operationId
+		probe.reads = []
+		probe.max = 0
+		probe.auditing = true
+		await operations.audit()
+		probe.auditing = false
+		expect(probe.reads).toHaveLength(16)
+		expect(probe.max).toBe(AUDIT_CONCURRENCY_RECORDING)
+		expect((await op.finish()).outcome).toBe("finalized")
+		expect(operations.ready).toBe(true)
+		// The inventory agrees with a fresh process's full scan.
+		const managed = operations.managedBytes
+		await operations.stop()
+		const rescanned = direct(root, s.store)
+		await rescanned.recover()
+		expect(managed).toBe(rescanned.managedBytes)
+	})
+
+	it("parked readers resume once the recording ends mid-audit", async () => {
+		const root = await newRoot()
+		const s = newStore()
+		const { io, probe } = auditReads(20)
+		const operations = direct(root, s.store, io)
+		await operations.recover()
+		for (let i = 0; i < 24; i++) await recordWith(operations, s.discoveryId)
+		const op = operations.begin({
+			discoveryId: s.discoveryId,
+			observationId: "o1",
+			binding: binding(),
+		})
+		await op.ready
+		await op.push(new Int16Array(800))
+		probe.skip = op.operationId
+		let maxWhileRecording = 0
+		let finished: Promise<AnalogReceipt> | null = null
+		probe.onRead = () => {
+			if (finished === null) {
+				maxWhileRecording = Math.max(maxWhileRecording, probe.inflight)
+				if (probe.reads.length === 4) {
+					finished = op.finish()
+					// Only what overlaps the settlement's end is counted from here on.
+					probe.max = 0
+				}
+			}
+		}
+		probe.auditing = true
+		await operations.audit()
+		probe.auditing = false
+		expect(finished).not.toBeNull()
+		expect((await finished!).outcome).toBe("finalized")
+		expect(probe.reads).toHaveLength(24)
+		expect(maxWhileRecording).toBeLessThanOrEqual(AUDIT_CONCURRENCY_RECORDING)
+		expect(probe.max).toBeGreaterThan(AUDIT_CONCURRENCY_RECORDING)
+		expect(operations.ready).toBe(true)
+		await operations.stop()
+	})
+
+	it("a concurrent audit still fails closed on one tampered operation among many", async () => {
+		const root = await newRoot()
+		const s = newStore()
+		const operations = direct(root, s.store)
+		await operations.recover()
+		const receipts: AnalogReceipt[] = []
+		for (let i = 0; i < 16; i++)
+			receipts.push(await recordWith(operations, s.discoveryId))
+		// An intent edited in place (no rename: its folder listing is unchanged).
+		await writeFile(
+			join(ops(root), receipts[7]!.operationId, "intent.json"),
+			"{}",
+		)
+		await operations.audit()
+		expect(operations.ready).toBe(false)
+		await operations.stop()
+	})
+
+	it("a concurrent audit still sets crash residue aside among many operations", async () => {
+		const root = await newRoot()
+		const s = newStore()
+		const operations = direct(root, s.store)
+		await operations.recover()
+		for (let i = 0; i < 16; i++) await recordWith(operations, s.discoveryId)
+		const before = operations.managedBytes
+		const staging = join(ops(root), `.staging-${randomUUID()}`)
+		await mkdir(staging)
+		await writeFile(join(staging, "intent.tmp"), "{}")
+		await operations.audit()
+		expect(operations.ready).toBe(true)
+		expect(operations.setAsideStatus()).toEqual({
+			setAside: 1,
+			lastReason: "staging-residue",
+		})
+		expect(await readdir(ops(root))).not.toContain(staging.split("/").at(-1))
+		expect(operations.managedBytes).toBe(before)
 		await operations.stop()
 	})
 })

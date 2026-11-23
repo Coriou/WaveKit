@@ -58,8 +58,35 @@ const RESERVATION = MAX_ANALOG_FILE_BYTES + MAX_OPERATION_METADATA_BYTES
  * RESERVATION exceeds the cap, so a pass that leaves used + outstanding + ADMISSION_HEADROOM
  * within the cap always fits one admission plus one more in flight. A store counts as full
  * (retention evicts, the quota status shows) past that, never only past the cap itself.
+ * This is the TRIGGER; once it holds, a pass evicts further, to EVICTION_TARGET_HEADROOM.
  */
 export const ADMISSION_HEADROOM = 2 * RESERVATION
+/** The floor of the eviction target: 8 × RESERVATION = 8 × 1,936,428 = 15,491,424 B. */
+export const EVICTION_TARGET_MIN_HEADROOM = 8 * RESERVATION
+/**
+ * Room a retention pass that evicts for bytes leaves under the recordings cap: min(max(8 ×
+ * RESERVATION, 2 % of the cap), a quarter of the cap) = min(max(15,491,424 B, ⌊cap / 50⌋),
+ * ⌊cap / 4⌋). The default 512 MiB cap (536,870,912 B): 2 % = 10,737,418 B < 15,491,424 B and
+ * ⌊cap / 4⌋ = 134,217,728 B, so the target is cap − 15,491,424 B (≈ 15.5 MB, eight
+ * recordings); from a cap of 774,571,200 B (≈ 739 MiB) up, 2 % wins (1 GiB: 21,474,836 B). The
+ * quarter clamp bites below 4 × 15,491,424 = 61,965,696 B (≈ 59.1 MiB): an 18 MiB cap
+ * (18,874,368 B) gets 4,718,592 B, so a small store is not emptied to three quarters. Below
+ * 8 × RESERVATION = 15,491,424 B (≈ 14.8 MiB) the clamped target is under the trigger's own
+ * room (ADMISSION_HEADROOM, 3,872,856 B); a pass evicts while the trigger holds OR the store
+ * is above the target, so there the trigger wins and the pass ends at cap − 3,872,856 B.
+ * Hysteresis: the pass starts only on the trigger, then evicts oldest first until used +
+ * outstanding + uncertain + max(this, ADMISSION_HEADROOM) <= cap or no candidate is left, so a
+ * store that keeps filling is not trimmed one file per recording. A non-finite or
+ * non-positive cap gets the floor, unclamped.
+ */
+export function EVICTION_TARGET_HEADROOM(capBytes: number): number {
+	if (!Number.isFinite(capBytes) || capBytes <= 0)
+		return EVICTION_TARGET_MIN_HEADROOM
+	return Math.min(
+		Math.max(EVICTION_TARGET_MIN_HEADROOM, Math.floor(capBytes / 50)),
+		Math.floor(capBytes / 4),
+	)
+}
 /**
  * Operations retention keeps free under the inventory bound (MAX_RECOVERY_OPERATIONS, 4096):
  * admission refuses once intents + unpublished reach the bound, so retention evicts oldest
@@ -618,26 +645,53 @@ function addOperation(inventory: Inventory, scan: OperationScan): void {
  */
 const SCAN_CONCURRENCY = 8
 /**
- * Operation ids an audit reads at once: 1, so a background audit never queues more than one
- * file system call ahead of a recording's own writes on the shared thread pool.
+ * Operation ids an audit reads at once while no analog operation is active: 4, libuv's default
+ * thread pool (the image sets no UV_THREADPOOL_SIZE). Each id is a chain of dependent calls, so
+ * at most 4 audit calls are ever in flight; 2 while a recording runs (below).
  */
-const AUDIT_CONCURRENCY = 1
-/** Runs `fn` over `items` with at most `limit` in flight; results in input order. */
+export const AUDIT_CONCURRENCY_IDLE = 4
+/**
+ * Operation ids an audit reads at once while any analog operation of this process is active
+ * (checked before each id): 2, half the pool, so the audit alone never fills the shared thread
+ * pool and a recording's own writes never queue behind it. Readers above it park; a reader
+ * mid-id finishes that id's chain (one dependent call at a time) first.
+ */
+export const AUDIT_CONCURRENCY_RECORDING = 2
+/** How long a parked audit reader waits before it checks the limit again. */
+const AUDIT_PARK_MS = 50
+/**
+ * Runs `fn` over `items` with at most `limit` in flight (a number, or asked again before each
+ * item and clamped to 1..`max`: a reader at or above it parks for `parkMs`, never cancelling
+ * a read in flight); results in input order.
+ */
 async function mapLimited<T, R>(
 	items: readonly T[],
-	limit: number,
+	limit: number | (() => number),
 	fn: (item: T) => Promise<R>,
+	max = typeof limit === "number" ? limit : 1,
+	parkMs = AUDIT_PARK_MS,
 ): Promise<R[]> {
 	const results = new Array<R>(items.length)
+	const readers = Math.max(1, Math.min(Math.floor(max), items.length))
+	const allowed = (): number => {
+		const asked = typeof limit === "number" ? limit : limit()
+		return Number.isFinite(asked)
+			? Math.max(1, Math.min(readers, Math.floor(asked)))
+			: 1
+	}
 	let next = 0
-	const worker = async (): Promise<void> => {
+	const worker = async (reader: number): Promise<void> => {
 		while (next < items.length) {
+			if (reader >= allowed()) {
+				await new Promise<void>(resolve => setTimeout(resolve, parkMs))
+				continue
+			}
 			const index = next++
 			results[index] = await fn(items[index]!)
 		}
 	}
 	await Promise.all(
-		Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+		Array.from({ length: readers }, (_, reader) => worker(reader)),
 	)
 	return results
 }
@@ -821,13 +875,21 @@ export class AnalogOperations {
 	 * inventory is unknown.
 	 */
 	quotaShortfall(legacy: number): number | null {
+		return this.shortfallWith(legacy, ADMISSION_HEADROOM)
+	}
+	/**
+	 * managed + `legacy` + outstanding reservations + `headroom` − the cap: quotaShortfall with
+	 * ADMISSION_HEADROOM (the trigger), retention's stop test with EVICTION_TARGET_HEADROOM.
+	 * Null while the inventory is unknown.
+	 */
+	private shortfallWith(legacy: number, headroom: number): number | null {
 		if (this.inventory.unknown) return null
 		return (
 			this.inventory.bytes +
 			legacy +
 			this.reservedUnused() +
 			this.uncertainUnused() +
-			ADMISSION_HEADROOM -
+			headroom -
 			this.context.limits().maxBytes
 		)
 	}
@@ -2448,11 +2510,12 @@ export class AnalogOperations {
 		else this.applyScans(scans)
 	}
 	/**
-	 * Re-reads every operation without holding the lock (AUDIT_CONCURRENCY at once), so changes
-	 * made from outside this process (hand edits, tampering) reach the inventory and an
-	 * unexpected one makes it unknown, fail closed, as the full scan would. Each id's result is
-	 * applied under the lock only when nothing of this process touched that id since the audit
-	 * began (an active operation, a refresh, a full scan). Crash residue, or an unknown
+	 * Re-reads every operation without holding the lock (AUDIT_CONCURRENCY_IDLE ids at once,
+	 * AUDIT_CONCURRENCY_RECORDING while an operation is active), so changes made from outside
+	 * this process (hand edits, tampering) reach the inventory and an unexpected one makes it
+	 * unknown, fail closed, as the full scan would. Each id's result is applied under the lock
+	 * only when nothing of this process touched that id since the audit began (an active
+	 * operation, a refresh, a full scan). Crash residue, or an unknown
 	 * inventory, runs the full scan under the lock instead (it sets residue aside, and only it
 	 * may clear an unknown inventory). One audit at a time; the retention pass runs it.
 	 */
@@ -2481,8 +2544,14 @@ export class AnalogOperations {
 			])
 				if (!ids.has(id))
 					ids.set(id, { cleanup: false, staging: false, folder: false })
-			const scans = await mapLimited([...ids], AUDIT_CONCURRENCY, ([id, has]) =>
-				this.scanOperation(id, has),
+			const scans = await mapLimited(
+				[...ids],
+				() =>
+					this.active.size
+						? AUDIT_CONCURRENCY_RECORDING
+						: AUDIT_CONCURRENCY_IDLE,
+				([id, has]) => this.scanOperation(id, has),
+				AUDIT_CONCURRENCY_IDLE,
 			)
 			await this.exclusive(async () => {
 				// A full scan replaced the inventory meanwhile: it is newer than this audit.
@@ -3131,7 +3200,8 @@ export class AnalogOperations {
 	/**
 	 * Age expiry and the quota for the analog files, and, with `legacy`, the quota for the other
 	 * recordings in the same pass: every removable file of both pools, oldest first, goes while
-	 * the store is full (quotaShortfall over the pool's live `legacy.bytes` > 0); an analog file
+	 * the store is full (quotaShortfall over the pool's live `legacy.bytes` > 0, the trigger) and
+	 * then until EVICTION_TARGET_HEADROOM is left under the cap (hysteresis); an analog file
 	 * also goes once it is past `maxAgeMs`, or while the operation inventory is full
 	 * (operationsFull) and the candidates left can clear it (at most the excess; none when the
 	 * held operations alone fill it, operationsHeldFull). The pass stops removing as soon as neither holds, so a shortfall left after it
@@ -3208,12 +3278,30 @@ export class AnalogOperations {
 			(a, b) =>
 				a.mtimeMs - b.mtimeMs || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
 		)
-		// Full: no room for one admission plus one in flight (ADMISSION_HEADROOM), re-checked
-		// after every removal so the pass stops as soon as the next recording fits.
-		const bytesFull = async (): Promise<boolean> =>
-			(this.quotaShortfall(
-				legacy ? legacy.bytes : await this.context.legacyBytes(),
-			) ?? 0) > 0
+		// Evict for bytes, with hysteresis. Trigger: no room for one admission plus one in flight
+		// (quotaShortfall > 0, ADMISSION_HEADROOM). Latched once at the pass's start (before any
+		// removal, so an age-expired first removal cannot drop the store under the trigger first
+		// and end the pass there) and on every later check (an admission mid-pass can cross it).
+		// Once latched, files go while the trigger still holds or the target room is not left
+		// (used + outstanding + uncertain + EVICTION_TARGET_HEADROOM(cap) > cap), re-checked
+		// after every removal; for a cap under 8 × RESERVATION the clamped target is under the
+		// trigger's room and the trigger decides. A store between the trigger and the target that
+		// never triggered in this pass evicts nothing for bytes.
+		let bytesTriggered = false
+		const bytesFull = async (): Promise<boolean> => {
+			const legacyNow = legacy ? legacy.bytes : await this.context.legacyBytes()
+			const trigger = this.quotaShortfall(legacyNow)
+			if (trigger === null) return false
+			if (trigger > 0) bytesTriggered = true
+			if (!bytesTriggered) return false
+			if (trigger > 0) return true
+			const target = this.shortfallWith(
+				legacyNow,
+				EVICTION_TARGET_HEADROOM(this.context.limits().maxBytes),
+			)
+			return (target ?? 0) > 0
+		}
+		await bytesFull()
 		// Count eviction: while the inventory is full (intents + unpublished ≥ 4096 − 8 = 4088),
 		// only when the analog candidates not yet tried can bring it under that limit, i.e.
 		// intents + unpublished − analogLeft < 4088. Each retire drops one intent, so the pass
