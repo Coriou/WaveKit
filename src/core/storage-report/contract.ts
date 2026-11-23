@@ -44,6 +44,12 @@ export interface StorageAreaPartSource {
 	 * Absent: every file of the part.
 	 */
 	boundedFile?: RegExp
+	/**
+	 * The files `bounds.maxBytes` counts, by their path segments from the area's root (the part's
+	 * own name first; regular files only): the cap's own unit, as its admission counts it. Absent:
+	 * every byte of the part.
+	 */
+	boundedPath?: (rel: readonly string[]) => boolean
 }
 
 export interface StorageReportOptions {

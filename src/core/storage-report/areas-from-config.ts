@@ -47,6 +47,53 @@ const QUARANTINE_ENTRY_FILE =
  * `captures/` (scanner-service.ts CaptureStore dir).
  */
 export const SCANNER_RECORDINGS_DIRS = ["recordings", ".analog-operations"]
+
+/**
+ * evidence-store.ts RECORDING_KINDS, DISCOVERY_ID, PROBE_DIR; analog-operations.ts STAGING_PREFIX
+ * and its UUID operation ids (copied, not imported: the report never loads the store).
+ */
+const RECORDING_KIND_DIRS: readonly string[] = ["dv", "analog"]
+const DISCOVERY_ID = /^d_[0-9A-Za-z]+$/
+const PROBE_FOLDER = /^probe-[0-9A-Za-z._-]+$/
+const OPERATION_ID =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const STAGING_PREFIX = ".staging-"
+
+/**
+ * The files the scanner's recordings cap counts (maxRecordingsMb), by path segments from the
+ * scanner root, exactly as its admission and retention sum them (AnalogOperations
+ * shortfallWith: the operation inventory plus the legacy walk):
+ * - the legacy walk (evidence-store.ts collect): `recordings/<dv|analog>/<discovery id>/<file>`,
+ *   and a probe's `recordings/<kind>/probe-*\/<file>` or `.../probe-*\/<WAV|wav>/<file>`;
+ *   an analog operation's published media lies there too and is counted once (the walk skips
+ *   what the inventory owns);
+ * - the operation inventory (analog-operations.ts readOperation): every file of an operation
+ *   folder `.analog-operations/<id>/` (intent, receipt, payload part, facts sidecar), of its
+ *   staging folder `.analog-operations/.staging-<id>/`, and its `<id>.cleanup` marker.
+ * Not counted, as by the store: `.analog-operations/.set-aside/` (crash residue kept for
+ * diagnosis), and any file elsewhere (a stray file in `recordings/`, a folder of no discovery).
+ * What a disk walk cannot see: space reserved for an admission still writing (in memory), and
+ * the one hard link an operation's intent.tmp and intent.json can share after a crash (counted
+ * once by the store, twice here, at most 16 KiB).
+ */
+export function scannerRecordingsCounted(rel: readonly string[]): boolean {
+	const [top, a, b, c] = rel
+	if (top === "recordings") {
+		if (a === undefined || b === undefined || !RECORDING_KIND_DIRS.includes(a))
+			return false
+		if (DISCOVERY_ID.test(b)) return rel.length === 4
+		if (!PROBE_FOLDER.test(b)) return false
+		return (
+			rel.length === 4 || (rel.length === 5 && (c === "WAV" || c === "wav"))
+		)
+	}
+	if (top !== ".analog-operations" || a === undefined) return false
+	if (rel.length === 2)
+		return a.endsWith(".cleanup") && OPERATION_ID.test(a.slice(0, -8))
+	if (rel.length !== 3) return false
+	const id = a.startsWith(STAGING_PREFIX) ? a.slice(STAGING_PREFIX.length) : a
+	return OPERATION_ID.test(id)
+}
 export const SCANNER_EVIDENCE_DIR = "evidence"
 export const SCANNER_CAPTURES_DIR = "captures"
 
@@ -99,6 +146,8 @@ export function scannerStorageParts(
 			{
 				id: "recordings",
 				names: SCANNER_RECORDINGS_DIRS,
+				// maxBytes counts what the cap counts (scannerRecordingsCounted), not the whole part.
+				boundedPath: scannerRecordingsCounted,
 				// evidence-store.ts retention: maxRecordingsMb, and maxAgeDays for every file.
 				bounds: on({
 					maxBytes: scaled(storage.maxRecordingsMb, MiB),

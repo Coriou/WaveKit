@@ -6825,9 +6825,15 @@ each of which has a JSON sidecar beside it; every other part's `files`):
 The settings are `scanner.storage.*`; a bound is null when nothing applies it, and
 every bound is null while the scanner is not running. The parts' sums equal the
 area's (pre-migration backups stay excluded from both). `overBound` is true when
-`bytes` > `maxBytes` or `boundedFiles` > `maxFiles` (exactly at a bound is within it),
+the bytes `maxBytes` counts exceed it or `boundedFiles` > `maxFiles` (exactly at a bound is within it),
 null when neither is set or the area is `partial` (its totals are then lower
-bounds). The area `cap` stays `maxRecordingsMb`: the recordings part's bound, not
+bounds). `maxBytes` counts the bytes the bound's own admission counts: for
+`recordings`, the discovery folders' files under `recordings/` and every file of the
+analog operations (intent, receipt, facts sidecar, staging folder, cleanup marker),
+not the crash residue set aside in `.analog-operations/.set-aside/` nor stray files,
+so `bytes` may exceed `maxBytes` while `overBound` is false (space reserved for a
+recording still being written is not on disk and not counted); every other part
+counts all its `bytes`. The area `cap` stays `maxRecordingsMb`: the recordings part's bound, not
 a bound of the whole folder. `retention` is set on `activity` only (null elsewhere, and null when
 Activity is disabled or its stats fail): `policy`, `effective`, `maxRows`,
 `maxDbBytes`, `maxAgeMs`, `rows`, `oldestReceivedAt`, `shares` (at most 64) and
@@ -8709,6 +8715,12 @@ any cached `decoder:status`.
 
 #### decoder:health
 
+`health` is the decoder's published health, the same value `GET /api/decoders`
+shows: a parent with placement workers reads `running` while one of them decoded
+within the idle timeout, even if its own process is idle. Sent when that value
+changes (a worker's output lifting an idle parent is sent by the next health
+check).
+
 ```json
 {
 	"type": "decoder:health",
@@ -9072,8 +9084,10 @@ shape is unchanged.
 #### digital-voice:call
 
 On the `digital-voice` channel: a dsd-fme call started, turned out encrypted, or
-ended (`DigitalVoiceCall`). Published in the same tick as the decoder's
-`call_start` / `call_end` (same `callId`).
+ended (`DigitalVoiceCall`). Published when the decoder produces its
+`call_start` / `call_end` (same `callId`); a `call_end` held for its recording
+lookup reaches Activity and `decoder:output` up to 500 ms later, its call state
+never waits.
 
 ```json
 {

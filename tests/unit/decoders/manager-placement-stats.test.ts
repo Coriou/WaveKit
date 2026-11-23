@@ -339,6 +339,56 @@ describe("placement-visible decoder stats", () => {
 			}
 		}
 
+		it("the decoder:health event sends the health REST shows (one function), as it changes", async () => {
+			const { manager, workerId, worker } = await decoding()
+			const internals = manager as unknown as {
+				decoders: Map<string, { lastPublishedHealth?: string }>
+			}
+			// What a WS client last received for the parent (server.ts forwards the value as is).
+			const lastSent = (): string | undefined =>
+				internals.decoders.get(VOICE)?.lastPublishedHealth
+			const sent: { ws: string; rest: string | undefined }[] = []
+			manager.on("decoder:health", (id: string, health: string) => {
+				if (id !== VOICE) return
+				sent.push({
+					ws: health,
+					rest: toApiDecoderInfo(manager.getStatus(VOICE)!).health,
+				})
+			})
+			const agree = (): void =>
+				expect(lastSent()).toBe(
+					toApiDecoderInfo(manager.getStatus(VOICE)!).health,
+				)
+			const decode = (): void => {
+				worker.emit("output", {
+					timestamp: new Date(),
+					decoder: workerId,
+					type: "call",
+					data: {},
+				})
+			}
+			decode()
+			// The parent's own health is idle; REST and the last WS value both read running.
+			expect(manager.getStatus(VOICE)?.health).toBe("running")
+			agree()
+			await f!.advance(10_000)
+			agree()
+			expect(sent).toEqual([])
+			// The worker idles past the timeout: the parent's published health follows at once.
+			await f!.advance(25_000)
+			expect(manager.getStatus(VOICE)?.health).toBe("idle")
+			expect(sent).toEqual([{ ws: "idle", rest: "idle" }])
+			agree()
+			// The worker decodes again: running is sent, by the next health check at the latest.
+			decode()
+			await f!.advance(5_000)
+			expect(sent).toEqual([
+				{ ws: "idle", rest: "idle" },
+				{ ws: "running", rest: "running" },
+			])
+			agree()
+		})
+
 		it("reads the placement's latest output and running, then idle after the idle timeout", async () => {
 			const { manager, workerId, worker, changed } = await decoding()
 			expect(manager.getStatus(VOICE)?.lastOutputAt).toBeUndefined()

@@ -60,6 +60,8 @@ export interface StoragePartScan {
 	files: number
 	/** Files its source's `boundedFile` matches (all of `files` without one). */
 	boundedFiles?: number
+	/** Bytes of the regular files its source's `boundedPath` matches (all of `bytes` without one). */
+	boundedBytes?: number
 	exists: boolean
 }
 
@@ -81,6 +83,8 @@ interface WalkItem {
 	root: boolean
 	/** Index into the area scan's parts; undefined for a root or an unsplit area. */
 	part?: number
+	/** Path segments from the area's root, for a part with `boundedPath` only. */
+	rel?: string[]
 }
 
 /** A copy of a scan result (its parts too), so a frozen snapshot shares nothing. */
@@ -229,6 +233,7 @@ export async function scanStorageAreas(
 				bytes: 0,
 				files: 0,
 				boundedFiles: 0,
+				boundedBytes: 0,
 				exists: false,
 			}))
 			split.parts.forEach((p, i) => {
@@ -241,6 +246,10 @@ export async function scanStorageAreas(
 			split === undefined
 				? []
 				: [...split.parts, split.fallback].map(p => p.boundedFile)
+		const boundedPath =
+			split === undefined
+				? []
+				: [...split.parts, split.fallback].map(p => p.boundedPath)
 		results.push(scan)
 		const mark = (reason: StoragePartialReason): void => {
 			if (frozen !== null) return
@@ -293,6 +302,12 @@ export async function scanStorageAreas(
 						(stat.isFile() && unit.test(path.basename(item.path)))
 					)
 						part.boundedFiles = (part.boundedFiles ?? 0) + 1
+					const counted = boundedPath[index]
+					if (
+						counted === undefined ||
+						(stat.isFile() && !stat.isSymbolicLink() && counted(item.rel ?? []))
+					)
+						part.boundedBytes = (part.boundedBytes ?? 0) + stat.size
 				}
 				return
 			}
@@ -320,7 +335,12 @@ export async function scanStorageAreas(
 				// The root's direct children pick the part; deeper entries inherit it.
 				if (scan.parts !== undefined) {
 					const part = item.root ? (partIndex.get(name) ?? fallback) : item.part
-					if (part !== undefined) child.part = part
+					if (part !== undefined) {
+						child.part = part
+						// Segments only where a predicate reads them (no allocation otherwise).
+						if (boundedPath[part] !== undefined)
+							child.rel = [...(item.rel ?? []), name]
+					}
 				}
 				queue.push(child)
 			}

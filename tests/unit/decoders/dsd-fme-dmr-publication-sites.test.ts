@@ -126,9 +126,9 @@ describe("dsd-fme DMR publication sites (structural)", () => {
 
 	it("calls the gate only from the output delivery, the outbox, the call snapshot and the call update", () => {
 		// deliver publishes what emitOutput let through, at once or from the ordered outbox
-		// (behind a call_end held for its recording lookup); the outbox also releases held updates.
+		// (behind a call_end held for its recording lookup); voice-call states (the snapshot and
+		// the update) never wait in the outbox.
 		expect(sites(/\bthis\.publish\(/g).map(s => s.method)).toEqual([
-			"drainOutbox",
 			"deliver",
 			"deliver",
 			"publishCallSnapshot",
@@ -149,6 +149,12 @@ describe("dsd-fme DMR publication sites (structural)", () => {
 			UPDATE_SITES,
 		)
 		expect(sites(/\bthis\.publishCallSnapshot\(/g).map(s => s.method)).toEqual([
+			"publishVoiceState",
+		])
+		// The snapshot goes out from emitOutput (at production) and from deliver (an output never
+		// held), never from the outbox's release.
+		expect(sites(/\bthis\.publishVoiceState\(/g).map(s => s.method)).toEqual([
+			"emitOutput",
 			"deliver",
 		])
 		// The non-DMR sites: P25's split, and markClear returning for DMR

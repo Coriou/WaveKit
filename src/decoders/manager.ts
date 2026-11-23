@@ -319,6 +319,8 @@ interface DecoderState {
 	assignedSourceId: string | null
 	/** Last known health state for change detection */
 	lastHealth: DecoderHealth
+	/** The last health sent on `decoder:health` (publishedHealth), for change detection. */
+	lastPublishedHealth?: DecoderHealth
 	/** Timestamp of last output received */
 	lastOutputAt: Date | null
 	/** Version validation result (Requirements 27.1, 27.2, 27.3) */
@@ -4961,8 +4963,6 @@ export class DecoderManager extends EventEmitter {
 		const own = parent.decoder.getStatus()
 		const stats = { ...own.stats }
 		let rateHistory = own.rateHistory ? [...own.rateHistory] : undefined
-		let producing = false
-		const now = Date.now()
 		for (const worker of workers) {
 			const status = worker.decoder.getStatus()
 			stats.bytesIn += finiteCount(status.stats.bytesIn)
@@ -4976,6 +4976,29 @@ export class DecoderManager extends EventEmitter {
 				else if (rateHistory.length === history.length)
 					rateHistory = rateHistory.map((n, i) => n + finiteCount(history[i]))
 			}
+		}
+		const health = this.publishedHealth(parent, workers)
+		return {
+			stats,
+			...(rateHistory !== undefined ? { rateHistory } : {}),
+			...(health !== parent.lastHealth ? { health } : {}),
+		}
+	}
+
+	/**
+	 * The health a decoder publishes, on REST (getStatus, placementTotals) and on the WS
+	 * `decoder:health` (publishHealth) alike: its own, except that an idle parent is running while
+	 * a running worker that is neither faulted nor restarting produced output within
+	 * `idleTimeout` (the window performHealthChecks idles a decoder after).
+	 */
+	private publishedHealth(
+		state: DecoderState,
+		workers?: readonly DecoderState[],
+	): DecoderHealth {
+		if (state.lastHealth !== "idle") return state.lastHealth
+		const now = Date.now()
+		for (const worker of workers ?? this.placementWorkersOf(state)) {
+			const status = worker.decoder.getStatus()
 			const at = newestOutput(worker.lastOutputAt, status.lastOutputAt)
 			if (
 				status.running &&
@@ -4984,14 +5007,26 @@ export class DecoderManager extends EventEmitter {
 				at !== undefined &&
 				now - at.getTime() <= this.config.idleTimeout
 			)
-				producing = true
+				return "running"
 		}
-		return {
-			stats,
-			...(rateHistory !== undefined ? { rateHistory } : {}),
-			...(parent.lastHealth === "idle" && producing
-				? { health: "running" as const }
-				: {}),
+		return "idle"
+	}
+
+	/** Sends `decoder:health` when the decoder's published health (publishedHealth) changed. */
+	private publishHealth(
+		state: DecoderState,
+		workers?: readonly DecoderState[],
+	): void {
+		const health = this.publishedHealth(state, workers)
+		if (state.lastPublishedHealth === health) return
+		state.lastPublishedHealth = health
+		try {
+			this.emit("decoder:health", state.decoder.id, health)
+		} catch (err) {
+			this.log.error(
+				{ err: safeErrorFields(err), decoderId: state.decoder.id },
+				"Error handling decoder health event, continuing operation",
+			)
 		}
 	}
 
@@ -9155,6 +9190,18 @@ export class DecoderManager extends EventEmitter {
 				)
 			}
 		}
+		// A parent's published health also follows its workers' output (publishedHealth), which
+		// raises no health change of its own: re-checked here, once per parent.
+		for (const [parentId, workers] of this.placementWorkersByParent()) {
+			const parent = this.decoders.get(parentId)
+			if (parent === undefined) continue
+			// Nothing sent yet: clients hold its own health (no event lifted it).
+			parent.lastPublishedHealth ??= parent.lastHealth
+			this.publishHealth(
+				parent,
+				workers.filter(w => w !== parent),
+			)
+		}
 	}
 
 	/** Consecutive unstable runs reached the crash-loop threshold. */
@@ -9223,6 +9270,8 @@ export class DecoderManager extends EventEmitter {
 	): void {
 		if (state.lastHealth !== health) {
 			const previousHealth = state.lastHealth
+			// Nothing sent yet: what clients hold is the health published until now.
+			state.lastPublishedHealth ??= this.publishedHealth(state)
 			state.lastHealth = health
 
 			this.log.info(
@@ -9234,11 +9283,13 @@ export class DecoderManager extends EventEmitter {
 				"Decoder health changed",
 			)
 
-			// Emit health event (Requirement 20.4)
-			this.emit("decoder:health", state.decoder.id, health)
+			// Emit health event (Requirement 20.4): the published value, as REST shows it.
+			this.publishHealth(state)
 			// A placement worker's health is part of its parent's (placementTotals):
-			// the parent's status is published again (decoder:status on WS).
+			// the parent's health and status are published again (decoder:status on WS).
 			if (state.parentId !== undefined) {
+				const parent = this.decoders.get(state.parentId)
+				if (parent !== undefined && parent !== state) this.publishHealth(parent)
 				try {
 					this.emit("decoder:status-changed", state.parentId)
 				} catch (err) {

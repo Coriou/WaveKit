@@ -10,9 +10,11 @@ import { afterEach, describe, expect, it } from "vitest"
 import { STORAGE_SCANNER_PART_IDS } from "@wavekit/api-types"
 import type { StorageAreaPart } from "@wavekit/api-types"
 import {
+	scannerRecordingsCounted,
 	scannerStorageParts,
 	storageAreasFromConfig,
 } from "../../../../src/core/storage-report/areas-from-config.js"
+import { DISCOVERY_ID } from "../../../../src/core/scanner/store/evidence-store.js"
 import { createStorageReporter } from "../../../../src/core/storage-report/reporter.js"
 import type { StorageAreaSource } from "../../../../src/core/storage-report/contract.js"
 import {
@@ -316,5 +318,100 @@ describe("the quarantine counts its prune's entries", () => {
 		// Every other part counts every file.
 		for (const p of area?.parts ?? [])
 			if (p.id !== "quarantine") expect(p.boundedFiles).toBe(p.files)
+	})
+})
+
+describe("the recordings part counts what the recordings cap counts", () => {
+	const OP = "0b8c2c7e-1f3a-4b5c-8d9e-0a1b2c3d4e5f"
+	const OP2 = "1c9d3d8f-2a4b-4c6d-9e0f-1b2c3d4e5f60"
+
+	it("counts the legacy walk's files and every operation file, nothing else", () => {
+		const counted = (rel: string) => scannerRecordingsCounted(rel.split("/"))
+		// The legacy walk (evidence-store.ts collect).
+		expect(counted("recordings/analog/d_1/analog-a.wav")).toBe(true)
+		expect(counted("recordings/dv/d_2/call.wav")).toBe(true)
+		expect(counted("recordings/dv/probe-p1/call.wav")).toBe(true)
+		expect(counted("recordings/dv/probe-p1/WAV/call.wav")).toBe(true)
+		expect(counted("recordings/dv/probe-p1/wav/call.wav")).toBe(true)
+		expect(counted("recordings/dv/probe-p1/other/call.wav")).toBe(false)
+		expect(counted("recordings/dv/d_2/sub/call.wav")).toBe(false)
+		expect(counted("recordings/dv/notes.txt")).toBe(false)
+		expect(counted("recordings/other/d_2/call.wav")).toBe(false)
+		expect(counted("recordings/notes.txt")).toBe(false)
+		expect(counted("recordings/dv/not-a-folder/call.wav")).toBe(false)
+		// The operation inventory (analog-operations.ts readOperation): metadata included.
+		expect(counted(`.analog-operations/${OP}/intent.json`)).toBe(true)
+		expect(counted(`.analog-operations/${OP}/receipt.json`)).toBe(true)
+		expect(counted(`.analog-operations/${OP}/facts.json`)).toBe(true)
+		expect(counted(`.analog-operations/${OP}/payload.wav.part`)).toBe(true)
+		expect(counted(`.analog-operations/.staging-${OP}/intent.tmp`)).toBe(true)
+		expect(counted(`.analog-operations/${OP}.cleanup`)).toBe(true)
+		// Not counted by the store.
+		expect(counted(`.analog-operations/.set-aside/${OP}/intent.json`)).toBe(
+			false,
+		)
+		expect(counted(".analog-operations/op-1/intent.json")).toBe(false)
+		expect(counted(`.analog-operations/${OP}/deeper/x`)).toBe(false)
+		expect(counted(".analog-operations/stray.txt")).toBe(false)
+	})
+
+	it("its copied folder rule matches the store's own", () => {
+		for (const id of ["d_1", "d_aZ9", "d_", "x_1", "d_1-2"])
+			expect(scannerRecordingsCounted(["recordings", "dv", id, "f.wav"])).toBe(
+				DISCOVERY_ID.test(id),
+			)
+	})
+
+	/** A scanner root whose counted files sum to `counted` bytes, plus uncounted files. */
+	async function tree(counted: number): Promise<string> {
+		const root = await mkdtemp(join(tmpdir(), "wk-parts-rec-"))
+		dirs.push(root)
+		const files: Record<string, number> = {
+			"recordings/analog/d_1/analog-a.wav": counted - 1000,
+			"recordings/dv/probe-p1/WAV/call.wav": 300,
+			[`.analog-operations/${OP}/intent.json`]: 120,
+			[`.analog-operations/${OP}/receipt.json`]: 240,
+			[`.analog-operations/${OP}/facts.json`]: 60,
+			[`.analog-operations/.staging-${OP2}/intent.tmp`]: 200,
+			[`.analog-operations/${OP2}.cleanup`]: 80,
+			// Uncounted by the cap: crash residue set aside, and stray files.
+			[`.analog-operations/.set-aside/${OP2}/intent.json`]: 5000,
+			"recordings/notes.txt": 4000,
+			"recordings/dv/not-a-folder/x.wav": 3000,
+		}
+		for (const [rel, size] of Object.entries(files)) {
+			const file = join(root, rel)
+			await mkdir(join(file, ".."), { recursive: true })
+			await writeFile(file, Buffer.alloc(size))
+		}
+		return root
+	}
+
+	async function recordingsOf(root: string): Promise<StorageAreaPart> {
+		const reporter = createStorageReporter({
+			stateDir: root,
+			areas: [
+				{
+					id: "scanner-evidence",
+					paths: [root],
+					capBytes: null,
+					parts: scannerStorageParts(storage, true),
+				},
+			],
+			minFreeBytes: null,
+		})
+		const area = (await reporter.report()).areas[0]
+		const part = area?.parts?.find(p => p.id === "recordings")
+		expect(part).toBeDefined()
+		return part!
+	}
+
+	it("exactly maxRecordingsMb of counted bytes is within, one byte more is over", async () => {
+		const at = await recordingsOf(await tree(1 * MiB))
+		// The part holds more than the cap (uncounted files), yet is within it as the store counts.
+		expect(at.bytes).toBe(1 * MiB + 12_000)
+		expect(at.overBound).toBe(false)
+		const past = await recordingsOf(await tree(1 * MiB + 1))
+		expect(past.overBound).toBe(true)
 	})
 })

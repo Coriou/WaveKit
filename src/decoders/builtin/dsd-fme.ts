@@ -407,9 +407,11 @@ export function dsdFmeUdpChannels(mode: DsdFmeMode): 1 | 2 {
 }
 
 /**
- * Voice call state published on the decoder's "voice-call" event, in the
- * same tick as the call_start / call_end outputs (and when a running call
- * turns out to be encrypted). Times are ISO 8601.
+ * Voice call state published on the decoder's "voice-call" event when its
+ * call_start / call_end is produced, in that line's tick (and when a running
+ * call's encryption or identity is learned). A call_end held for its WAV
+ * lookup (DSD_FME_WAV_END_WAIT_MS) reaches "output" up to that much later; its
+ * state never waits. Times are ISO 8601.
  */
 export interface DsdFmeVoiceCallState {
 	callId: string
@@ -848,7 +850,10 @@ export const DSD_FME_WAV_END_WAIT_MS = 500
  * A lookup attempt (one listing of each of the three directories) is abandoned after this long,
  * so a stuck directory read cannot stall the one-at-a-time chain of every later call: a chain of
  * 1 + DSD_FME_WAV_RETRIES attempts then lasts at most 6 × (2 000 + 200) ms = 13.2 s. Node cannot
- * cancel the read itself; its late result is discarded.
+ * cancel the read itself; its late result is discarded. Single flight: while an abandoned read is
+ * still pending, a later attempt starts no listing of its own (it waits for that read, again at
+ * most this long, and counts as timed out if it is still stuck), so at most one directory read
+ * per adapter occupies the libuv pool however long the file system hangs.
  */
 export const DSD_FME_WAV_ATTEMPT_TIMEOUT_MS = 2_000
 /**
@@ -878,10 +883,11 @@ type WavHeldEnd = {
 	log: (hasWavFile: boolean) => void
 }
 
-/** One publication held in order behind a waiting call_end. */
-type HeldOutput =
-	| { kind: "output"; output: DecoderOutput; end?: WavHeldEnd }
-	| { kind: "voice"; state: DsdFmeVoiceCallState }
+/**
+ * One output held in order behind a waiting call_end. Only DecoderOutputs wait: voice-call
+ * states go out at production (emitOutput).
+ */
+type HeldOutput = { output: DecoderOutput; end?: WavHeldEnd }
 
 /**
  * Fallback call end (ms) when no line from the call arrives for this long. Calls
@@ -1320,6 +1326,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/** The tail of the WAV lookups: one attempt in flight at a time (findWavFileAsync). */
 	private wavSearch: Promise<void> = Promise.resolve()
 	/**
+	 * The listing an attempt abandoned at DSD_FME_WAV_ATTEMPT_TIMEOUT_MS while it is still
+	 * pending: no attempt starts another until it settles (single flight).
+	 */
+	private stuckWavListing: Promise<unknown> | null = null
+	/**
 	 * The call_ends endCall returned that wait for their lookup's first attempt (emitOutput), by
 	 * payload: a caller's copy of the event shares it.
 	 */
@@ -1336,10 +1347,20 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private readonly outboxWaiters: Array<{ upTo: number; resolve: () => void }> =
 		[]
 	/**
-	 * stop() runs: lines the child still prints are not parsed, so no call opens after stop()
-	 * ended every open call (start() clears it).
+	 * stop() runs: no call opens after stop() ended every open call, so the child's late lines
+	 * are only scanned for a privacy print of a call stop() ended (stopEnded; start() clears it).
 	 */
 	private stopping = false
+	/**
+	 * The non-DMR calls stop() ended, with their call_end payloads, until the next start(): a
+	 * privacy print the child still prints before it exits marks them encrypted (lateStopPrivacy).
+	 * At most one per lane. A DMR call needs none: stop()'s clearance restart already left it
+	 * unknown, never clear.
+	 */
+	private stopEnded: Array<{
+		call: DsdFmeCallState
+		data: { clearEvidence?: true; wavFile?: string | undefined }
+	}> = []
 	/** Directories whose truncated listing was logged (WAV_TRUNCATION_WARNED_MAX). */
 	private readonly wavTruncationWarned = new Set<string>()
 	/** Whether a timed-out lookup attempt was logged (once per adapter). */
@@ -1661,6 +1682,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 		this.endOpenCallsForRestart(this.monoDate())
 		this.stopping = false
+		this.stopEnded = []
 
 		await super.start()
 
@@ -1742,15 +1764,22 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// End every lane's active or pending call before stopping
 		this.dmrClearance.restart()
 		const now = this.monoDate()
+		this.stopEnded = []
 		this.forEachLane(() => {
 			if (this.pendingCall) {
 				// Promote pending call to active and end it
 				this.callState = this.pendingCall.state
 				this.pendingCall = null
 			}
-			if (this.callState) {
+			const call = this.callState
+			if (call) {
 				const endEvent = this.endCall(now, true)
 				if (endEvent) {
+					if (call.protocol !== "dmr")
+						this.stopEnded.push({
+							call,
+							data: endEvent.data as { clearEvidence?: true; wavFile?: string },
+						})
 					this.emitOutput(endEvent)
 				}
 			}
@@ -1777,8 +1806,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/**
 	 * Publishes an output and, for call_start / call_end, the matching
-	 * "voice-call" state in the same tick (the digital voice stream's call
-	 * metadata is derived from exactly these events).
+	 * "voice-call" state. The voice-call state always goes out at production,
+	 * in the tick the line was parsed: the digital voice stream mutes or holds
+	 * the call's voice from it, and that voice is never delayed. Only the
+	 * DecoderOutput may wait in the outbox, in order behind a call_end held for
+	 * its WAV lookup (Activity and the probe pool see outputs in production
+	 * order); an output that is not held goes out first, then its state, as
+	 * before the outbox.
 	 */
 	protected override emitOutput(produced: DecoderOutput): void {
 		// Stamped at production: a held output keeps the wall time it was produced at.
@@ -1786,8 +1820,20 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const payload = typeof produced.data === "object" ? produced.data : null
 		const end = payload === null ? undefined : this.pendingEnds.get(payload)
 		if (end !== undefined && payload !== null) this.pendingEnds.delete(payload)
-		if (end === undefined && this.outbox.length === 0) this.deliver(output)
-		else this.hold({ kind: "output", output, ...(end ? { end } : {}) })
+		if (end === undefined && this.outbox.length === 0) {
+			this.deliver(output, true)
+			return
+		}
+		this.publishVoiceState(output)
+		this.hold({ output, ...(end ? { end } : {}) })
+	}
+
+	/** The voice-call state of a call_start / call_end (not of a file update), now. */
+	private publishVoiceState(output: DecoderOutput): void {
+		if (output.type !== "call_start" && output.type !== "call_end") return
+		const data = output.data as CallEventData
+		if (data.callId !== undefined && !data.flags?.wavFileUpdate)
+			this.publishCallSnapshot(output, data, data.callId)
 	}
 
 	/** Queues a publication behind a waiting call_end, then releases what may go. */
@@ -1797,9 +1843,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Over the bound the oldest waiting end goes now, without a file (DSD_FME_HELD_OUTPUTS_MAX).
 		while (this.outbox.length > DSD_FME_HELD_OUTPUTS_MAX) {
 			const waiting = this.outbox.find(
-				h => h.kind === "output" && h.end !== undefined && !h.end.settled,
+				h => h.end !== undefined && !h.end.settled,
 			)
-			if (waiting?.kind !== "output" || waiting.end === undefined) break
+			if (waiting?.end === undefined) break
 			this.markSettled(waiting.end)
 			this.drainOutbox()
 		}
@@ -1811,18 +1857,16 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		for (;;) {
 			const head = this.outbox[0]
 			if (head === undefined) break
-			if (head.kind === "output" && head.end !== undefined && !head.end.settled)
-				break
+			if (head.end !== undefined && !head.end.settled) break
 			this.outbox.shift()
 			this.outboxReleased++
-			if (head.kind === "output") {
-				if (head.end !== undefined) {
-					head.end.released = true
-					// Logged as published: a file set after its deadline but before release rides on it.
-					head.end.log(head.end.data.wavFile !== undefined)
-				}
-				this.deliver(head.output)
-			} else this.publish(head.state)
+			if (head.end !== undefined) {
+				head.end.released = true
+				// Logged as published: a file set after its deadline but before release rides on it.
+				head.end.log(head.end.data.wavFile !== undefined)
+			}
+			// Its voice-call state went out at production (emitOutput).
+			this.deliver(head.output, false)
 		}
 		// Waiters are in `upTo` order (outboxDrained): resolve from the front, no allocation.
 		const waiters = this.outboxWaiters
@@ -1851,8 +1895,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/** Publishes every held output now: a waiting end goes without its file (stop). */
 	private releaseHeldEnds(): void {
 		for (const held of this.outbox)
-			if (held.kind === "output" && held.end !== undefined)
-				this.markSettled(held.end)
+			if (held.end !== undefined) this.markSettled(held.end)
 		this.drainOutbox()
 	}
 
@@ -1868,8 +1911,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return wavFile !== undefined
 	}
 
-	/** Publishes one output now (emitOutput, drainOutbox). */
-	private deliver(output: DecoderOutput): void {
+	/**
+	 * Publishes one output now (emitOutput, drainOutbox), then its voice-call state when
+	 * `withVoiceState` (an output that was never held; a held one's went out at production). A
+	 * DMR call_end releases its clearance record only here, after its output: the record is the
+	 * trust both halves read.
+	 */
+	private deliver(output: DecoderOutput, withVoiceState: boolean): void {
 		if (output.type !== "call_start" && output.type !== "call_end") {
 			this.publish(output)
 			return
@@ -1881,8 +1929,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				: undefined
 		try {
 			this.publish(output)
-			if (data.callId !== undefined && !data.flags?.wavFileUpdate)
-				this.publishCallSnapshot(output, data, data.callId)
+			if (withVoiceState) this.publishVoiceState(output)
 		} finally {
 			if (endingId !== undefined) this.dmrClearance.ended(endingId)
 		}
@@ -1991,6 +2038,32 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (call.encryptionKnown !== false) return
 		call.encryptionKnown = true
 		this.publishCallUpdate(call)
+	}
+
+	/**
+	 * A line the child printed after stop() began (stopping): a privacy print (any protocol's
+	 * "Encrypted", a non-clear ALG ID, or the call's own protocol print) marks every call stop()
+	 * ended that is not encrypted yet. Wider than nonDmrPrivacy on purpose: no call is open, so
+	 * a print can only belong to one of these, and a false match only keeps a recording unlinked.
+	 * An end still held (its WAV lookup's first attempt) goes out encrypted, without its clear
+	 * proof or file; the lookup re-checks recordingLinkable before any later link, so none follows.
+	 */
+	private lateStopPrivacy(line: string): void {
+		if (this.stopEnded.length === 0) return
+		const alg = ALG_ID.exec(line)?.groups?.["alg"]
+		const any =
+			DMR_ENCRYPTED.test(line) || (alg !== undefined && !isClearAlgorithm(alg))
+		for (const { call, data } of this.stopEnded) {
+			if (call.flags.encrypted) continue
+			if (!any && !nonDmrPrivacyPrint(call.protocol, line)) continue
+			this.markEncrypted(call)
+			call.clearEvidence = false
+			const held = this.outbox.find(h => h.output.data === data)
+			if (held !== undefined) {
+				delete data.clearEvidence
+				data.wavFile = undefined
+			}
+		}
 	}
 
 	/**
@@ -2339,9 +2412,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			quality: call.quality,
 			encrypted,
 		})
-		// In order behind a held call_end (outbox).
-		if (this.outbox.length === 0) this.publish(state)
-		else this.hold({ kind: "voice", state })
+		// Now, never behind a held call_end: the voice stream mutes or plays from it (emitOutput).
+		this.publish(state)
 	}
 
 	/** The announced call `callId` of any lane. */
@@ -2899,8 +2971,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * 5. Error events (FEC/CRC) are tracked for quality but not emitted unless debug mode is on
 	 */
 	protected override parseOutput(line: string): DecoderOutput | null {
-		// stop() ended every call: a line printed while the child exits opens none (stopping).
-		if (this.stopping) return null
+		// stop() ended every call: a line printed while the child exits opens none (stopping),
+		// but its privacy print still marks the call stop() ended (fail closed).
+		if (this.stopping) {
+			this.lateStopPrivacy(line.replace(ANSI_ESCAPE, ""))
+			return null
+		}
 		const now = this.monoDate()
 		const nowMs = now.getTime()
 
@@ -5477,9 +5553,25 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					DSD_FME_WAV_ATTEMPT_TIMEOUT_MS,
 				)
 			})
-			// An abandoned search never rejects unhandled (searchForWavFile catches its own reads).
-			const searched = searchAll().catch(() => undefined)
-			const result = await Promise.race([searched, timedOut])
+			// Single flight: a listing an earlier attempt abandoned is waited for (within this
+			// attempt's timeout) before this one reads; still stuck, this attempt reads nothing.
+			const stuck = this.stuckWavListing
+			const freed =
+				stuck === null
+					? "free"
+					: await Promise.race([stuck.then(() => "free" as const), timedOut])
+			let result: string | undefined | "timeout" = "timeout"
+			if (freed === "free") {
+				// An abandoned search never rejects unhandled (searchForWavFile catches its own reads).
+				const searched = searchAll().catch(() => undefined)
+				result = await Promise.race([searched, timedOut])
+				if (result === "timeout") {
+					const pending: Promise<unknown> = searched.finally(() => {
+						if (this.stuckWavListing === pending) this.stuckWavListing = null
+					})
+					this.stuckWavListing = pending
+				}
+			}
 			clearTimeout(timer)
 			if (result === "timeout" && !this.wavTimeoutWarned) {
 				this.wavTimeoutWarned = true

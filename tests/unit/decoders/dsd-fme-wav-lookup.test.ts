@@ -230,6 +230,32 @@ function recorder(d: DsdFmeDecoder) {
 }
 
 /** opendir that never settles (a stuck directory read). */
+/**
+ * opendir whose first read under this test's root stays pending until `release()` (it then
+ * fails as a missing directory: no match); later reads are real.
+ */
+function heldOpendir() {
+	const real = fs.promises.opendir.bind(fs.promises)
+	let release = (): void => undefined
+	let held = false
+	const opendir = vi
+		.spyOn(fs.promises, "opendir")
+		.mockImplementation((dir, options) => {
+			if (held || !String(dir).startsWith(root)) return real(dir, options)
+			held = true
+			return new Promise<fs.Dir>((_resolve, reject) => {
+				release = () =>
+					reject(Object.assign(new Error("gone"), { code: "ENOENT" }))
+			})
+		})
+	return { opendir, release: () => release() }
+}
+
+/** The opendir calls under this test's root (an earlier test's real-timer retry may reach the spy). */
+function ours(opendir: { mock: { calls: unknown[][] } }): unknown[][] {
+	return opendir.mock.calls.filter(([dir]) => String(dir).startsWith(root))
+}
+
 function stuckOpendir() {
 	return vi
 		.spyOn(fs.promises, "opendir")
@@ -257,6 +283,10 @@ describe("dsd-fme call_end held for its first lookup", () => {
 		const { d } = decoderWithUpdates()
 		const seen = recorder(d)
 		const internals = d as unknown as EndInternals
+		const voice: string[] = []
+		d.on("voice-call", (v: { callId: string; active: boolean }) =>
+			voice.push(`${v.callId}:${v.active}`),
+		)
 		endThrough(d, 42)
 		internals.emitOutput({
 			timestamp: START,
@@ -264,14 +294,11 @@ describe("dsd-fme call_end held for its first lookup", () => {
 			type: "call_start",
 			data: { callId: "next", talkgroup: 43, flags: {} },
 		})
-		const voice: string[] = []
-		d.on("voice-call", (v: { callId: string; active: boolean }) =>
-			voice.push(`${v.callId}:${v.active}`),
-		)
 		expect(seen).toEqual([])
+		// The voice-call halves never wait: in production order, in the tick they were produced.
+		expect(voice).toEqual(["c42:false", "next:true"])
 		await settleWavLookups(d)
 		expect(seen).toEqual([`call_end:42:${fileOf(42)}`, "call_start:43"])
-		// The voice-call halves follow the same order.
 		expect(voice).toEqual(["c42:false", "next:true"])
 	})
 
@@ -289,24 +316,53 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("a stuck read is abandoned at DSD_FME_WAV_ATTEMPT_TIMEOUT_MS so the chain moves on, not before", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const opendir = stuckOpendir()
+		const { opendir, release } = heldOpendir()
 		const { d, found } = decoderWithUpdates()
+		let ended = false
+		d.on("output", (o: DecoderOutput) => {
+			if (o.type === "call_end") ended = true
+		})
 		endThrough(d, 45)
 		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS - 1)
-		// Only the first directory's read started, and it never settles. Counted under this
-		// test's root: an earlier test's real-timer retry may still reach the spy.
-		const ours = opendir.mock.calls.filter(([dir]) =>
-			String(dir).startsWith(root),
-		)
-		expect(ours).toHaveLength(1)
+		// Only the first directory's read started, and it has not settled.
+		expect(ours(opendir)).toHaveLength(1)
+		// The end went out at its own deadline, long before.
+		expect(ended).toBe(true)
 		await vi.advanceTimersByTimeAsync(1)
-		// Abandoned: the retry is scheduled and reads again.
-		opendir.mockRestore()
+		// Abandoned: the retry is scheduled; once the stuck read settles it reads again.
 		fs.writeFileSync(path.join(root, fileOf(45)), "")
 		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS)
+		release()
+		await vi.advanceTimersByTimeAsync(0)
 		await settleWavLookups(d)
-		// The end went out at its deadline; the retry's find is an update.
+		// The retry's find is an update.
 		expect(found).toEqual([fileOf(45)])
+	})
+
+	it("single flight: while an abandoned read is pending, no attempt starts another", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const { opendir, release } = heldOpendir()
+		const { d, found } = decoderWithUpdates()
+		endThrough(d, 48)
+		// Past the first attempt's timeout and every retry's (each waits for the stuck read).
+		const chainMs =
+			(1 + DSD_FME_WAV_RETRIES) *
+			(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS)
+		await vi.advanceTimersByTimeAsync(chainMs)
+		// One read ever started, however many attempts timed out behind it.
+		expect(ours(opendir)).toHaveLength(1)
+		expect(found).toEqual([])
+		// A later call's lookup waits for it too: still one read.
+		endThrough(d, 49)
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS - 1)
+		expect(ours(opendir)).toHaveLength(1)
+		// The stuck read settles: the waiting attempt reads (a second listing), and only then.
+		fs.writeFileSync(path.join(root, fileOf(49)), "")
+		release()
+		await vi.advanceTimersByTimeAsync(0)
+		await settleWavLookups(d)
+		expect(ours(opendir).length).toBeGreaterThan(1)
+		expect(found).toEqual([fileOf(49)])
 	})
 
 	it("holds DSD_FME_HELD_OUTPUTS_MAX outputs behind a waiting end, and releases it one past", () => {
@@ -396,6 +452,78 @@ describe("dsd-fme stop with held ends", () => {
 		expect(internals.callState).toBeNull()
 		expect(internals.pendingCall).toBeNull()
 		expect(seen).toEqual(["call_end:61"])
+	})
+
+	it("a privacy print the child prints while stop drains marks the call stop ended (fail closed)", async () => {
+		// The real admission rule: a P25 call is linkable on its own clear print only.
+		vi.restoreAllMocks()
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const { release } = heldOpendir()
+		const { d, found } = decoderWithUpdates()
+		const ends: {
+			flags?: { encrypted?: boolean }
+			clearEvidence?: boolean
+			wavFile?: string
+		}[] = []
+		d.on("output", (o: DecoderOutput) => {
+			if (o.type === "call_end") ends.push(o.data as (typeof ends)[number])
+		})
+		const internals = d as unknown as StopInternals
+		internals.callState = {
+			...callOf(64),
+			protocol: "p25p1",
+			clearEvidence: true,
+			flags: { encrypted: false },
+			announced: true,
+		}
+		const stopped = d.stop()
+		// Held for its lookup: a late line still reaches the call stop() ended.
+		expect(ends).toEqual([])
+		internals.handleOutputLine("03:04:05 Group Call Encrypted ")
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_END_WAIT_MS)
+		await stopped
+		expect(ends).toHaveLength(1)
+		expect(ends[0]?.flags?.encrypted).toBe(true)
+		expect(ends[0]?.clearEvidence).toBeUndefined()
+		expect(ends[0]?.wavFile).toBeUndefined()
+		// The file the child finalises at exit is never linked afterwards.
+		fs.writeFileSync(
+			path.join(root, `${STAMP}_12345_P25_CC_0_GROUP_TGT_64_SRC_7.wav`),
+			"",
+		)
+		release()
+		await runOutLookups(d)
+		expect(found).toEqual([])
+		// And no call opened from the late line.
+		expect(internals.callState).toBeNull()
+	})
+
+	it("a late line without a privacy print leaves the call stop ended clear", async () => {
+		vi.restoreAllMocks()
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		stuckOpendir()
+		const { d } = decoderWithUpdates()
+		const ends: { flags?: { encrypted?: boolean }; clearEvidence?: boolean }[] =
+			[]
+		d.on("output", (o: DecoderOutput) => {
+			if (o.type === "call_end") ends.push(o.data as (typeof ends)[number])
+		})
+		const internals = d as unknown as StopInternals
+		internals.callState = {
+			...callOf(65),
+			protocol: "p25p1",
+			clearEvidence: true,
+			flags: { encrypted: false },
+			announced: true,
+		}
+		const stopped = d.stop()
+		internals.handleOutputLine(
+			"03:04:05 Group Call ALG ID: 0x80 KEY ID: 0x0000 ",
+		)
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_END_WAIT_MS)
+		await stopped
+		expect(ends[0]?.flags?.encrypted).toBe(false)
+		expect(ends[0]?.clearEvidence).toBe(true)
 	})
 
 	it("waits only for the ends queued when the drain began, at most DSD_FME_WAV_END_WAIT_MS", async () => {
