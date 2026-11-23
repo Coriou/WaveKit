@@ -1,10 +1,12 @@
 /**
  * Retention keeps room for the next analog recording. Admission refuses once used + outstanding +
  * RESERVATION exceeds the recordings cap; retention counts the store full once used + outstanding
- * + ADMISSION_HEADROOM (2 × RESERVATION) exceeds it, and then retires evictable files oldest
- * first (by media mtime) until the next recording fits. Before, retention evicted only past the
- * cap itself, so a store within one reservation of the cap refused every admission for good.
- * The quota status and its warning use the same test. Synthetic files and ids only.
+ * + ADMISSION_HEADROOM (2 × RESERVATION) exceeds it (the trigger), and then retires evictable
+ * files oldest first (by media mtime) until used + outstanding + EVICTION_TARGET_HEADROOM(cap)
+ * (max(8 × RESERVATION, 2 % of the cap)) fits (the target, hysteresis). Before, retention evicted
+ * only past the cap itself, so a store within one reservation of the cap refused every admission
+ * for good; then it stopped at the trigger, one file per recording. The quota status and its
+ * warning use the trigger. Synthetic files and ids only.
  */
 import { randomUUID } from "node:crypto"
 import { existsSync } from "node:fs"
@@ -28,6 +30,8 @@ import {
 	AnalogOperations,
 	AnalogStorageBytesError,
 	AnalogStorageCountError,
+	EVICTION_TARGET_HEADROOM,
+	EVICTION_TARGET_MIN_HEADROOM,
 	MAX_ANALOG_FILE_BYTES,
 	OPERATION_HEADROOM,
 	isStorageBytesRefusal,
@@ -124,6 +128,8 @@ async function harness(opts: { protectedName?: () => string | null } = {}) {
 	const root = await tempRoot()
 	const { store, discoveryId } = storeWithDiscovery()
 	const limit = { maxBytes: 1024 * MIB }
+	/** Recordings outside analog operations, counted but never offered for removal. */
+	const legacy = { bytes: 0 }
 	const protection: RecordingProtection = {
 		isProtected: () => false,
 		isDsdFmeFileProtected: () => false,
@@ -135,7 +141,7 @@ async function harness(opts: { protectedName?: () => string | null } = {}) {
 		adapter: adapterOf(store),
 		admits: () => true,
 		serialise: async (_id, job) => job(),
-		legacyBytes: async () => 0,
+		legacyBytes: async () => legacy.bytes,
 		limits: () => ({ maxBytes: limit.maxBytes, minFreeBytes: 0 }),
 		freeBytes: async () => 1e12,
 		...(opts.protectedName ? { protection } : {}),
@@ -180,6 +186,7 @@ async function harness(opts: { protectedName?: () => string | null } = {}) {
 		ops,
 		discoveryId,
 		limit,
+		legacy,
 		begin,
 		record,
 		used,
@@ -188,16 +195,25 @@ async function harness(opts: { protectedName?: () => string | null } = {}) {
 	}
 }
 
-/** The oldest-first prefix whose removal lets used + ADMISSION_HEADROOM fit under the cap. */
+/** Artifacts oldest first (distinct mtimes in these tests). */
+function oldestFirst(files: readonly Stored[]): string[] {
+	return [...files].sort((a, b) => a.mtimeMs - b.mtimeMs).map(f => f.artifact)
+}
+
+/**
+ * A triggered pass's removals: the oldest-first prefix whose removal lets used + `headroom`
+ * (default the target, EVICTION_TARGET_HEADROOM(cap)) fit under the cap.
+ */
 function expectedEvictions(
 	files: readonly Stored[],
 	used: number,
 	cap: number,
+	headroom = EVICTION_TARGET_HEADROOM(cap),
 ): string[] {
 	const out: string[] = []
 	let left = used
 	for (const f of [...files].sort((a, b) => a.mtimeMs - b.mtimeMs)) {
-		if (left + ADMISSION_HEADROOM <= cap) break
+		if (left + headroom <= cap) break
 		out.push(f.artifact)
 		left -= f.bytes
 	}
@@ -213,59 +229,202 @@ async function shuffledFour(h: Awaited<ReturnType<typeof harness>>) {
 	return files
 }
 
+/**
+ * `n` files (n coprime with 5) aged 1 to n days, written in an order unrelated to their ages:
+ * about 1.6 MB each, so the target (8 × RESERVATION ≈ 15.5 MB) needs several of them.
+ */
+async function shuffled(h: Awaited<ReturnType<typeof harness>>, n: number) {
+	const now = Date.now()
+	const files: Stored[] = []
+	for (let i = 0; i < n; i++)
+		files.push(await h.record(now - (((i * 5) % n) + 1) * DAY))
+	return files
+}
+
 describe("analog retention keeps room for the next recording", () => {
 	it("ADMISSION_HEADROOM is two reservations: 2 × (1 920 044 + 16 384) = 3 872 856 B", () => {
 		expect(ADMISSION_HEADROOM).toBe(3_872_856)
 		expect(ADMISSION_HEADROOM).toBe(2 * RESERVATION)
 	})
 
+	it("EVICTION_TARGET_HEADROOM is max(8 × RESERVATION, 2 % of the cap): 8R wins at 512 MiB, 2 % at 1 GiB", () => {
+		expect(EVICTION_TARGET_MIN_HEADROOM).toBe(15_491_424)
+		expect(EVICTION_TARGET_MIN_HEADROOM).toBe(8 * RESERVATION)
+		// Default 512 MiB: 2 % = 10 737 418 B < 8R.
+		expect(Math.floor((512 * MIB) / 50)).toBe(10_737_418)
+		expect(EVICTION_TARGET_HEADROOM(512 * MIB)).toBe(15_491_424)
+		// 1 GiB: 2 % = 21 474 836 B > 8R.
+		expect(EVICTION_TARGET_HEADROOM(1024 * MIB)).toBe(21_474_836)
+		// The crossover, 50 × 8R = 774 571 200 B: 8R up to it, 2 % one step (50 B) past it.
+		expect(EVICTION_TARGET_HEADROOM(774_571_200)).toBe(15_491_424)
+		expect(EVICTION_TARGET_HEADROOM(774_571_249)).toBe(15_491_424)
+		expect(EVICTION_TARGET_HEADROOM(774_571_250)).toBe(15_491_425)
+		// Small, zero, non-finite caps: the floor.
+		expect(EVICTION_TARGET_HEADROOM(4096)).toBe(15_491_424)
+		expect(EVICTION_TARGET_HEADROOM(0)).toBe(15_491_424)
+		expect(EVICTION_TARGET_HEADROOM(Number.NaN)).toBe(15_491_424)
+		expect(EVICTION_TARGET_HEADROOM(Number.POSITIVE_INFINITY)).toBe(15_491_424)
+		// Always at least the trigger's room, so a pass that reaches it ends the full state.
+		expect(EVICTION_TARGET_MIN_HEADROOM).toBeGreaterThan(ADMISSION_HEADROOM)
+	})
+
 	// Regression: before the fix this store refused every admission and retention evicted nothing.
-	it("a store at cap − RESERVATION + 1 (stuck before): retention evicts the oldest, the next admission succeeds", async () => {
+	it("a store at cap − RESERVATION + 1 (stuck before): retention evicts the oldest down to the target, the next admission succeeds", async () => {
 		const h = await harness()
-		const files = await shuffledFour(h)
+		const files = await shuffled(h, 12)
 		h.limit.maxBytes = h.used() + RESERVATION - 1
 		expect(await h.admits()).toBe("SCANNER_ANALOG_STORAGE_CAP")
 		const expected = expectedEvictions(files, h.used(), h.limit.maxBytes)
-		expect(expected).toHaveLength(2)
+		// Past the trigger's own prefix (two files), short of everything.
+		expect(expected.length).toBeGreaterThan(
+			expectedEvictions(files, h.used(), h.limit.maxBytes, ADMISSION_HEADROOM)
+				.length,
+		)
+		expect(expected.length).toBeLessThan(files.length)
 		const deleted = await h.retain()
 		expect(deleted).toEqual(expected)
-		// The two oldest (4 and 3 days) went, written second and fourth.
-		expect(deleted).toEqual([files[1]!.artifact, files[3]!.artifact])
+		expect(deleted).toEqual(oldestFirst(files).slice(0, expected.length))
 		for (const f of files)
 			expect(existsSync(join(h.root, f.artifact))).toBe(
 				!deleted.includes(f.artifact),
 			)
+		expect(h.used() + EVICTION_TARGET_MIN_HEADROOM).toBeLessThanOrEqual(
+			h.limit.maxBytes,
+		)
 		expect(h.ops.quotaShortfall(0)).toBeLessThanOrEqual(0)
 		expect(await h.admits()).toBe(true)
 		await h.ops.stop()
 	}, 60_000)
 
-	it("a store at exactly cap − RESERVATION (admission's edge) is full: evicts oldest until used + headroom fits, then admits", async () => {
+	it("a store at exactly cap − RESERVATION (admission's edge) is full: evicts oldest until used + target fits, then admits", async () => {
 		const h = await harness()
-		const files = await shuffledFour(h)
+		const files = await shuffled(h, 12)
 		h.limit.maxBytes = h.used() + RESERVATION
 		const expected = expectedEvictions(files, h.used(), h.limit.maxBytes)
 		expect(expected.length).toBeGreaterThan(0)
 		const deleted = await h.retain()
 		expect(deleted).toEqual(expected)
-		expect(h.used() + ADMISSION_HEADROOM).toBeLessThanOrEqual(h.limit.maxBytes)
+		expect(
+			h.used() + EVICTION_TARGET_HEADROOM(h.limit.maxBytes),
+		).toBeLessThanOrEqual(h.limit.maxBytes)
 		expect(await h.admits()).toBe(true)
 		await h.ops.stop()
 	}, 60_000)
 
-	it("at exactly cap − ADMISSION_HEADROOM nothing is evicted; one byte more evicts only the oldest", async () => {
+	it("a store exactly at the cap: evicts oldest until cap − target, no further", async () => {
 		const h = await harness()
-		const files = await shuffledFour(h)
+		const files = await shuffled(h, 12)
+		h.limit.maxBytes = h.used()
+		expect(await h.admits()).toBe("SCANNER_ANALOG_STORAGE_CAP")
+		const expected = expectedEvictions(files, h.used(), h.limit.maxBytes)
+		const deleted = await h.retain()
+		expect(deleted).toEqual(expected)
+		expect(deleted).toEqual(oldestFirst(files).slice(0, expected.length))
+		const target = EVICTION_TARGET_HEADROOM(h.limit.maxBytes)
+		expect(target).toBe(EVICTION_TARGET_MIN_HEADROOM)
+		expect(h.used() + target).toBeLessThanOrEqual(h.limit.maxBytes)
+		// Minimal: the last file it removed would not have fit back under the target.
+		const last = files.find(f => f.artifact === deleted.at(-1))!
+		expect(h.used() + last.bytes + target).toBeGreaterThan(h.limit.maxBytes)
+		expect(await h.admits()).toBe(true)
+		await h.ops.stop()
+	}, 60_000)
+
+	it("between the trigger and the target nothing is evicted; one byte past the trigger evicts to the target", async () => {
+		const h = await harness()
+		const files = await shuffled(h, 12)
+		// Exactly the trigger's edge: not full.
 		h.limit.maxBytes = h.used() + ADMISSION_HEADROOM
 		expect(h.ops.quotaShortfall(0)).toBe(0)
 		expect(await h.retain()).toEqual([])
 		expect(await h.admits()).toBe(true)
-		h.limit.maxBytes -= 1
+		// Between: less than the target's room left, the trigger not met: no eviction.
+		h.limit.maxBytes = h.used() + EVICTION_TARGET_MIN_HEADROOM - 1
+		expect(h.ops.quotaShortfall(0)).toBeLessThan(0)
+		expect(await h.retain()).toEqual([])
+		expect(await h.admits()).toBe(true)
+		// One byte past the trigger: the pass runs on to the target, not one file.
+		h.limit.maxBytes = h.used() + ADMISSION_HEADROOM - 1
 		expect(h.ops.quotaShortfall(0)).toBe(1)
-		expect(await h.retain()).toEqual([files[1]!.artifact])
-		expect(h.ops.quotaShortfall(0)).toBeLessThanOrEqual(0)
+		const expected = expectedEvictions(files, h.used(), h.limit.maxBytes)
+		expect(expected.length).toBeGreaterThan(1)
+		expect(await h.retain()).toEqual(expected)
+		expect(h.used() + EVICTION_TARGET_MIN_HEADROOM).toBeLessThanOrEqual(
+			h.limit.maxBytes,
+		)
 		await h.ops.stop()
 	}, 60_000)
+
+	it("the target bound: a cap landing the store exactly at the target after k removals stops at k; one byte less needs k + 1, one more still k", async () => {
+		for (const delta of [-1, 0, 1]) {
+			const h = await harness()
+			const files = await shuffled(h, 12)
+			const sorted = [...files].sort((a, b) => a.mtimeMs - b.mtimeMs)
+			// k: the fewest oldest files whose bytes exceed 6R + 1, so the trigger holds at every delta.
+			let k = 0
+			let freed = 0
+			while (freed <= EVICTION_TARGET_MIN_HEADROOM - ADMISSION_HEADROOM + 1)
+				freed += sorted[k++]!.bytes
+			const used = h.used()
+			const cap = used - freed + EVICTION_TARGET_MIN_HEADROOM + delta
+			h.limit.maxBytes = cap
+			expect(EVICTION_TARGET_HEADROOM(cap)).toBe(EVICTION_TARGET_MIN_HEADROOM)
+			expect(h.ops.quotaShortfall(0)).toBeGreaterThan(0)
+			const deleted = await h.retain()
+			const n = delta < 0 ? k + 1 : k
+			expect(deleted).toEqual(sorted.slice(0, n).map(f => f.artifact))
+			const room = cap - h.used()
+			if (delta === 0) expect(room).toBe(EVICTION_TARGET_MIN_HEADROOM)
+			if (delta === 1) expect(room).toBe(EVICTION_TARGET_MIN_HEADROOM + 1)
+			if (delta === -1)
+				expect(room).toBe(EVICTION_TARGET_MIN_HEADROOM - 1 + sorted[k]!.bytes)
+			await h.ops.stop()
+		}
+	}, 180_000)
+
+	it("a cap where 2 % > 8R (1 GiB): the pass evicts to cap − 2 % of the cap", async () => {
+		const h = await harness()
+		const files = await shuffled(h, 16)
+		const cap = 1024 * MIB
+		h.limit.maxBytes = cap
+		// The other recordings fill the store to one byte past admission's edge.
+		h.legacy.bytes = cap - h.used() - RESERVATION + 1
+		expect(await h.admits()).toBe("SCANNER_ANALOG_STORAGE_CAP")
+		const target = EVICTION_TARGET_HEADROOM(cap)
+		expect(target).toBe(21_474_836)
+		const used = h.used() + h.legacy.bytes
+		const expected = expectedEvictions(files, used, cap)
+		// More than an 8R target would remove, fewer than all.
+		expect(expected.length).toBeGreaterThan(
+			expectedEvictions(files, used, cap, EVICTION_TARGET_MIN_HEADROOM).length,
+		)
+		expect(expected.length).toBeLessThan(files.length)
+		expect(await h.retain()).toEqual(expected)
+		expect(h.used() + h.legacy.bytes + target).toBeLessThanOrEqual(cap)
+		expect(await h.admits()).toBe(true)
+		await h.ops.stop()
+	}, 120_000)
+
+	it("the default 512 MiB cap (8R > 2 %): the pass evicts to cap − 15 491 424 B", async () => {
+		const h = await harness()
+		const files = await shuffled(h, 12)
+		const cap = 512 * MIB
+		h.limit.maxBytes = cap
+		h.legacy.bytes = cap - h.used() - RESERVATION + 1
+		const target = EVICTION_TARGET_HEADROOM(cap)
+		expect(target).toBe(15_491_424)
+		const used = h.used() + h.legacy.bytes
+		const expected = expectedEvictions(files, used, cap)
+		// More than a 2 % target (10 737 418 B) would remove.
+		expect(expected.length).toBeGreaterThan(
+			expectedEvictions(files, used, cap, Math.floor(cap / 50)).length,
+		)
+		expect(expected.length).toBeLessThan(files.length)
+		expect(await h.retain()).toEqual(expected)
+		expect(h.used() + h.legacy.bytes + target).toBeLessThanOrEqual(cap)
+		expect(await h.admits()).toBe(true)
+		await h.ops.stop()
+	}, 120_000)
 
 	it("age expiry is unchanged: an aged file goes even with room, oldest first", async () => {
 		const h = await harness()
@@ -281,44 +440,70 @@ describe("analog retention keeps room for the next recording", () => {
 	it("held files are never evicted: a kept artifact is skipped (the next oldest goes), a kept discovery keeps all", async () => {
 		let protectedName: string | null = null
 		const h = await harness({ protectedName: () => protectedName })
-		const files = await shuffledFour(h)
-		protectedName = files[1]!.artifact.split("/").at(-1)!
+		const files = await shuffled(h, 12)
+		const sorted = [...files].sort((a, b) => a.mtimeMs - b.mtimeMs)
+		const oldest = sorted[0]!
+		protectedName = oldest.artifact.split("/").at(-1)!
 		h.limit.maxBytes = h.used() + RESERVATION - 1
 		// The discovery kept: nothing evictable, nothing evicted, still refused.
 		expect(await h.retain(new Set([h.discoveryId]))).toEqual([])
 		expect(await h.admits()).toBe("SCANNER_ANALOG_STORAGE_CAP")
-		// The oldest kept: the next two oldest go instead.
+		// The oldest kept: the next oldest go instead, down to the target.
+		const expected = expectedEvictions(
+			sorted.slice(1),
+			h.used(),
+			h.limit.maxBytes,
+		)
 		const deleted = await h.retain()
-		expect(deleted).not.toContain(files[1]!.artifact)
-		expect(deleted).toEqual([files[3]!.artifact, files[0]!.artifact])
-		expect(existsSync(join(h.root, files[1]!.artifact))).toBe(true)
+		expect(deleted).not.toContain(oldest.artifact)
+		expect(deleted).toEqual(expected)
+		expect(deleted).toEqual(
+			sorted.slice(1, 1 + expected.length).map(f => f.artifact),
+		)
+		expect(existsSync(join(h.root, oldest.artifact))).toBe(true)
+		expect(h.used() + EVICTION_TARGET_MIN_HEADROOM).toBeLessThanOrEqual(
+			h.limit.maxBytes,
+		)
 		expect(await h.admits()).toBe(true)
 		await h.ops.stop()
 	}, 60_000)
 
-	it("a store that keeps filling to its cap keeps admitting across retention passes (repeated fill)", async () => {
+	it("a store held at its cap over repeated fills: each triggered pass brings it to the target, admissions keep succeeding", async () => {
 		const h = await harness()
 		const now = Date.now()
-		const first = await h.record(now - 5 * DAY)
-		await h.record(now - 4 * DAY)
-		await h.record(now - 3 * DAY)
-		// Three files fill the store to exactly cap − ADMISSION_HEADROOM.
-		h.limit.maxBytes = h.used() + ADMISSION_HEADROOM
-		const gone: string[] = []
-		for (let pass = 0; pass < 4; pass++) {
-			expect(await h.admits()).toBe(true)
-			// A new file lands (now-ish: the youngest), overfilling the headroom.
-			await h.record(now - (2 - pass) * 60_000)
+		const alive = await shuffled(h, 12)
+		// Full: exactly admission's edge.
+		h.limit.maxBytes = h.used() + RESERVATION
+		const cap = h.limit.maxBytes
+		const target = EVICTION_TARGET_HEADROOM(cap)
+		let landed = 0
+		for (let cycle = 0; cycle < 3; cycle++) {
 			expect(h.ops.quotaShortfall(0)).toBeGreaterThan(0)
+			const expected = expectedEvictions(alive, h.used(), cap)
 			const deleted = await h.retain()
-			expect(deleted).toHaveLength(1)
-			gone.push(...deleted)
-			expect(h.ops.quotaShortfall(0)).toBeLessThanOrEqual(0)
+			expect(deleted.length).toBeGreaterThan(0)
+			expect(deleted).toEqual(expected)
+			for (const a of deleted)
+				alive.splice(
+					alive.findIndex(f => f.artifact === a),
+					1,
+				)
+			expect(h.used() + target).toBeLessThanOrEqual(cap)
+			// New recordings land (each younger than all before) until the trigger holds again:
+			// every one is admitted, and a pass in between evicts nothing.
+			let added = 0
+			while ((h.ops.quotaShortfall(0) ?? 0) <= 0) {
+				expect(await h.retain()).toEqual([])
+				expect(await h.admits()).toBe(true)
+				alive.push(await h.record(now - (1_000 - landed++) * 1_000))
+				added++
+				expect(added).toBeLessThanOrEqual(12)
+			}
+			// The target's slack holds several recordings, not one.
+			expect(added).toBeGreaterThan(1)
 		}
-		expect(gone[0]).toBe(first.artifact)
-		expect(await h.admits()).toBe(true)
 		await h.ops.stop()
-	}, 120_000)
+	}, 180_000)
 })
 
 describe("the recordings quota status uses admission's full test", () => {
@@ -394,6 +579,55 @@ describe("the recordings quota status uses admission's full test", () => {
 		expect(
 			lines.filter(l => String(l["msg"]).includes("no longer exceeded")),
 		).toHaveLength(1)
+		await ev.stopAnalog()
+	}, 60_000)
+
+	it("a held store between the trigger and the target is not exceeded and does not ask again", async () => {
+		const root = await tempRoot()
+		const { store, discoveryId } = storeWithDiscovery()
+		const { log, lines } = capture()
+		const caps = {
+			maxRecordingsMb: 1024,
+			maxEvidenceMb: 20,
+			maxAgeDays: 30,
+			minFreeDiskMb: 0,
+		}
+		const ev = new EvidenceStore({
+			dir: root,
+			caps,
+			logger: log,
+			now: () => Date.now(),
+			statfs: async () => ({ freeBytes: 1e12 }),
+			isDiscoveryLive: id => store.get(id) !== undefined,
+		})
+		ev.configureAnalog(adapterOf(store))
+		await ev.recoverAnalog()
+		const op = ev.beginAnalog({
+			discoveryId,
+			observationId: "o1",
+			binding: binding(),
+		})
+		await op.ready
+		await op.push(new Int16Array(8_000))
+		expect((await op.finish()).outcome).toBe("finalized")
+		const analog = (ev as unknown as { analog: AnalogOperations }).analog
+		const used = analog.managedBytes!
+		// Less than the target's room left, more than the trigger's.
+		ev.setCaps({
+			...caps,
+			maxRecordingsMb: (used + EVICTION_TARGET_MIN_HEADROOM - 1) / MIB,
+		})
+		const pass = await ev.retention(new Set([discoveryId]))
+		await new Promise(resolve => setImmediate(resolve))
+		expect(pass.again).toBeUndefined()
+		expect(ev.recordingsQuotaExceeded).toBeNull()
+		expect(
+			lines.filter(
+				l =>
+					l["reason"] === "storage-cap" &&
+					String(l["msg"]).includes("exceeded"),
+			),
+		).toHaveLength(0)
 		await ev.stopAnalog()
 	}, 60_000)
 })
@@ -484,27 +718,42 @@ describe("retention removes legacy and analog files oldest first on one full tes
 		return { ev, analog, discoveryId, legacy, record, setCap, admits, exists }
 	}
 
-	it("a legacy-only store at cap − RESERVATION + 1 (stuck before): the oldest legacy files go and the next analog admission succeeds", async () => {
+	/** Legacy files as Stored (path, LEGACY_BYTES, mtime) for expectedEvictions. */
+	const legacyStored = (artifact: string, mtimeMs: number): Stored => ({
+		artifact,
+		bytes: LEGACY_BYTES,
+		mtimeMs,
+	})
+	const sortedIds = (ids: readonly string[]) => [...ids].sort()
+
+	it("a legacy-only store at cap − RESERVATION + 1 (stuck before): the oldest legacy files go down to the target and the next analog admission succeeds", async () => {
 		const h = await evidenceHarness()
 		const now = Date.now()
-		const files: string[] = []
-		for (const [i, daysAgo] of [2, 4, 1, 3].entries())
-			files.push(
-				await h.legacy(`2026110${i}_120000_${i}.wav`, now - daysAgo * DAY),
-			)
-		const used = 4 * LEGACY_BYTES
-		h.setCap(used + RESERVATION - 1)
+		const files: Stored[] = []
+		for (let i = 0; i < 12; i++) {
+			const mtimeMs = now - (((i * 5) % 12) + 1) * DAY
+			const name = `202611${String(i + 1).padStart(2, "0")}_120000_${i}.wav`
+			files.push(legacyStored(await h.legacy(name, mtimeMs), mtimeMs))
+		}
+		const used = 12 * LEGACY_BYTES
+		const cap = used + RESERVATION - 1
+		h.setCap(cap)
 		// A pass first so admission counts the legacy bytes from a walk.
 		await h.ev.retention(new Set([h.discoveryId]))
 		expect(await h.admits()).toBe("SCANNER_ANALOG_STORAGE_CAP")
 		// The discovery kept: nothing removable, reported so.
 		expect(h.ev.recordingsQuotaExceeded).not.toBeNull()
+		const expected = expectedEvictions(files, used, cap)
+		expect(expected.length).toBeGreaterThan(2)
+		expect(expected.length).toBeLessThan(files.length)
 		const { deleted } = await h.ev.retention(new Set())
-		// 1.6 MB < the shortfall (used + 2R − cap = R + 1 B): the two oldest (4 and 3 days).
-		expect(deleted).toEqual([files[1], files[3]])
-		expect(h.exists(files[0]!)).toBe(true)
-		expect(h.exists(files[2]!)).toBe(true)
-		expect(h.analog.quotaShortfall(2 * LEGACY_BYTES)).toBeLessThanOrEqual(0)
+		// The oldest legacy files, until used + 8R fits.
+		expect(sortedIds(deleted)).toEqual(sortedIds(expected))
+		for (const f of files)
+			expect(h.exists(f.artifact)).toBe(!expected.includes(f.artifact))
+		const left = used - expected.length * LEGACY_BYTES
+		expect(left + EVICTION_TARGET_MIN_HEADROOM).toBeLessThanOrEqual(cap)
+		expect(h.analog.quotaShortfall(left)).toBeLessThanOrEqual(0)
 		expect(h.ev.recordingsQuotaExceeded).toBeNull()
 		expect(await h.admits()).toBe(true)
 		await h.ev.stopAnalog()
@@ -513,25 +762,30 @@ describe("retention removes legacy and analog files oldest first on one full tes
 	it("a mixed store with legacy L > cap − 2R: legacy files go too, oldest first across both pools", async () => {
 		const h = await evidenceHarness()
 		const now = Date.now()
-		const legacy5 = await h.legacy("20261101_120000_5.wav", now - 5 * DAY)
-		const analog4 = await h.record(now - 4 * DAY)
-		const legacy3 = await h.legacy("20261103_120000_3.wav", now - 3 * DAY)
-		const legacy2 = await h.legacy("20261104_120000_2.wav", now - 2 * DAY)
-		const legacyBytes = 3 * LEGACY_BYTES
+		const files: Stored[] = []
+		// Fourteen legacy files aged 1 to 14 days, one analog file at 8.5 days, one at 1.5 days.
+		for (let d = 14; d >= 1; d--) {
+			const mtimeMs = now - d * DAY
+			const name = `202611${String(d).padStart(2, "0")}_120000_${d}.wav`
+			files.push(legacyStored(await h.legacy(name, mtimeMs), mtimeMs))
+		}
+		const analogOld = await h.record(now - 8.5 * DAY)
+		const analogNew = await h.record(now - 1.5 * DAY)
+		files.push(analogOld, analogNew)
+		const legacyBytes = 14 * LEGACY_BYTES
 		// L > cap − 2R: no analog eviction alone can make room.
 		const cap = legacyBytes + RESERVATION
 		expect(legacyBytes).toBeGreaterThan(cap - ADMISSION_HEADROOM)
 		h.setCap(cap)
+		const used = legacyBytes + analogOld.bytes + analogNew.bytes
+		const expected = expectedEvictions(files, used, cap)
 		const { deleted } = await h.ev.retention(new Set())
-		// Shortfall A + R ≈ 3.5 MB: the 5-day legacy, the 4-day analog, then the 3-day legacy.
-		expect(deleted).toEqual(
-			expect.arrayContaining([legacy5, analog4.artifact, legacy3]),
-		)
-		expect(deleted).toHaveLength(3)
-		expect(h.exists(legacy5)).toBe(false)
-		expect(h.exists(analog4.artifact)).toBe(false)
-		expect(h.exists(legacy3)).toBe(false)
-		expect(h.exists(legacy2)).toBe(true)
+		expect(sortedIds(deleted)).toEqual(sortedIds(expected))
+		// Both pools gave files; the young analog file and the youngest legacy files stay.
+		expect(deleted).toContain(analogOld.artifact)
+		expect(deleted).toContain(files[0]!.artifact)
+		expect(h.exists(analogNew.artifact)).toBe(true)
+		expect(h.exists(files[13]!.artifact)).toBe(true)
 		expect(h.ev.recordingsQuotaExceeded).toBeNull()
 		expect(await h.admits()).toBe(true)
 		await h.ev.stopAnalog()
@@ -540,21 +794,38 @@ describe("retention removes legacy and analog files oldest first on one full tes
 	it("ordering across pools is by file time: a younger legacy file outlives an older analog file", async () => {
 		const h = await evidenceHarness()
 		const now = Date.now()
-		const analogOld = await h.record(now - 6 * DAY)
-		const legacyMid = await h.legacy("20261102_120000_m.wav", now - 5 * DAY)
-		const analogMid = await h.record(now - 4 * DAY)
-		const legacyNew = await h.legacy("20261104_120000_n.wav", now - 1 * DAY)
-		const used = 2 * LEGACY_BYTES + analogOld.bytes + analogMid.bytes
-		// Shortfall of one byte: only the oldest file of either pool goes.
-		h.setCap(used + ADMISSION_HEADROOM - 1)
-		const first = await h.ev.retention(new Set())
-		expect(first.deleted).toEqual([analogOld.artifact])
-		// Shortfall of one byte again: now the 5-day legacy file is the oldest.
-		h.setCap(used - analogOld.bytes + ADMISSION_HEADROOM - 1)
-		const second = await h.ev.retention(new Set())
-		expect(second.deleted).toEqual([legacyMid])
-		expect(h.exists(analogMid.artifact)).toBe(true)
-		expect(h.exists(legacyNew)).toBe(true)
+		const files: Stored[] = []
+		// Alternating pools, oldest (12 days) to youngest (1 day): analog on even days.
+		for (let d = 12; d >= 1; d--) {
+			const mtimeMs = now - d * DAY
+			if (d % 2 === 0) files.push(await h.record(mtimeMs))
+			else {
+				const name = `202611${String(d).padStart(2, "0")}_120000_${d}.wav`
+				files.push(legacyStored(await h.legacy(name, mtimeMs), mtimeMs))
+			}
+		}
+		const used = files.reduce((n, f) => n + f.bytes, 0)
+		// Shortfall of one byte at the trigger: the pass runs to the target, oldest first.
+		const cap = used + ADMISSION_HEADROOM - 1
+		h.setCap(cap)
+		const expected = expectedEvictions(files, used, cap)
+		expect(expected.length).toBeGreaterThan(2)
+		expect(expected.length).toBeLessThan(files.length - 1)
+		const { deleted } = await h.ev.retention(new Set())
+		expect(sortedIds(deleted)).toEqual(sortedIds(expected))
+		// Removed: exactly a prefix by file time across both pools.
+		expect(sortedIds(deleted)).toEqual(
+			sortedIds(files.slice(0, expected.length).map(f => f.artifact)),
+		)
+		// The cut falls between pools: an older analog file went, a younger legacy one stays.
+		const kept = files.slice(expected.length)
+		expect(kept.some(f => f.artifact.startsWith("recordings/dv/"))).toBe(true)
+		expect(
+			files
+				.slice(0, expected.length)
+				.some(f => !f.artifact.startsWith("recordings/dv/")),
+		).toBe(true)
+		for (const f of kept) expect(h.exists(f.artifact)).toBe(true)
 		await h.ev.stopAnalog()
 	}, 60_000)
 
@@ -966,15 +1237,22 @@ describe("a shortfall a pass's own tail created is not 'nothing removable'", () 
 					l["level"] === 40 &&
 					String(l["msg"]).includes("exceeded"),
 			)
-		/** Three files, oldest first; the cap leaves room after removing the oldest, 1 000 B spare. */
+		/** Twelve files, oldest first; the cap one byte past the trigger (a pass runs to the target). */
 		const fill = async (): Promise<Stored[]> => {
 			const files: Stored[] = []
-			for (const daysAgo of [4, 3, 2])
+			for (let daysAgo = 12; daysAgo >= 1; daysAgo--)
 				files.push(await record(now - daysAgo * DAY))
 			const used = analog.managedBytes!
-			const capBytes = used - files[0]!.bytes + ADMISSION_HEADROOM + 1_000
+			const capBytes = used + ADMISSION_HEADROOM - 1
 			ev.setCaps({ ...caps, maxRecordingsMb: capBytes / MIB })
 			return files
+		}
+		/** At the pass's tail: finalizations (the youngest files) until the store is short again. */
+		const fillToTrigger = async (): Promise<void> => {
+			for (let i = 0; (analog.quotaShortfall(0) ?? 0) <= 0; i++) {
+				expect(i).toBeLessThan(12)
+				await record(Date.now() - 60_000 + i)
+			}
 		}
 		return {
 			ev,
@@ -986,24 +1264,31 @@ describe("a shortfall a pass's own tail created is not 'nothing removable'", () 
 			atPassTail,
 			warned,
 			fill,
+			fillToTrigger,
 		}
 	}
 
-	it("a finalization after the last removal: no false warning, `again`, and the next pass removes the oldest", async () => {
+	it("finalizations after the last removal: no false warning, `again`, and the next pass removes the oldest", async () => {
 		const t = await tailHarness()
 		const files = await t.fill()
-		t.atPassTail(async () => {
-			await t.record(Date.now() - 60_000)
-		})
+		// fill's cap: used + ADMISSION_HEADROOM − 1.
+		const used = t.analog.managedBytes!
+		const expected = expectedEvictions(
+			files,
+			used,
+			used + ADMISSION_HEADROOM - 1,
+		)
+		// The tail fills the target's room again (several recordings, the youngest).
+		t.atPassTail(t.fillToTrigger)
 		const pass = await t.ev.retention(new Set())
-		expect(pass.deleted).toEqual([files[0]!.artifact])
-		// Short again (the new file used the room), with removable files left.
+		expect(pass.deleted).toEqual(expected)
+		// Short again (the new files used the room), with removable files left.
 		expect(t.analog.quotaShortfall(0)).toBeGreaterThan(0)
 		expect(t.warned()).toHaveLength(0)
 		expect(t.ev.recordingsQuotaExceeded).toBeNull()
 		expect(pass.again).toBe(true)
 		const next = await t.ev.retention(new Set())
-		expect(next.deleted).toEqual([files[1]!.artifact])
+		expect(next.deleted[0]).toBe(files[expected.length]!.artifact)
 		expect(next.again).toBeUndefined()
 		expect(t.analog.quotaShortfall(0)).toBeLessThanOrEqual(0)
 		expect(t.ev.recordingsQuotaExceeded).toBeNull()
@@ -1014,20 +1299,35 @@ describe("a shortfall a pass's own tail created is not 'nothing removable'", () 
 	it("an admission (a new reservation) after the last removal: no false warning, the next pass removes the oldest", async () => {
 		const t = await tailHarness()
 		const files = await t.fill()
-		// Another discovery's recording, admitted at the pass's tail and still in flight.
+		const used = t.analog.managedBytes!
+		const expected = expectedEvictions(
+			files,
+			used,
+			used + ADMISSION_HEADROOM - 1,
+		)
+		// Finalizations until one more admission crosses the trigger, then another discovery's
+		// recording, admitted at the pass's tail and still in flight.
 		let op: ReturnType<typeof t.begin> | null = null
 		t.atPassTail(async () => {
+			for (
+				let i = 0;
+				(t.analog.quotaShortfall(0) ?? 0) + RESERVATION <= 0;
+				i++
+			) {
+				expect(i).toBeLessThan(12)
+				await t.record(Date.now() - 60_000 + i)
+			}
 			op = t.begin(t.second, "o2")
 			await op.ready
 		})
 		const pass = await t.ev.retention(new Set())
-		expect(pass.deleted).toEqual([files[0]!.artifact])
+		expect(pass.deleted).toEqual(expected)
 		expect(t.analog.quotaShortfall(0)).toBeGreaterThan(0)
 		expect(t.warned()).toHaveLength(0)
 		expect(t.ev.recordingsQuotaExceeded).toBeNull()
 		expect(pass.again).toBe(true)
 		const next = await t.ev.retention(new Set())
-		expect(next.deleted[0]).toBe(files[1]!.artifact)
+		expect(next.deleted[0]).toBe(files[expected.length]!.artifact)
 		expect(t.analog.quotaShortfall(0)).toBeLessThanOrEqual(0)
 		const admitted = op as ReturnType<typeof t.begin> | null
 		expect(admitted).not.toBeNull()

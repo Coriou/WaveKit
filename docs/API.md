@@ -4334,9 +4334,12 @@ its rules allow, so everything left is protected (kept, held by a kept discovery
 the scanner cannot resolve, or, for a recording outside analog operations, written in the last
 10 s; analog recordings have no such recent hold, so the newest analog file goes when nothing
 else is removable) and quota retention frees nothing. That room is two full recordings
-(3,872,856 B), so it can show while `usedBytes` is still just under `capBytes`. While
-recordings are in flight their reserved space counts too, so retention may clear up to about
-(2 + n) reservations below `capBytes` with n recordings in flight (n ≤ 8: about 19 MB).
+(3,872,856 B), so it can show while `usedBytes` is still just under `capBytes`. It is also the
+point where retention starts; a pass then removes oldest first until the larger of eight full
+recordings (15,491,424 B) and 2 % of `capBytes` is free, so it never shows for a store that is
+only between those two. While recordings are in flight their reserved space counts too, so
+retention may clear up to about n more reservations below that target with n recordings in
+flight (n ≤ 8: about 15.5 MB).
 A shortfall that recordings admitted or finished during the pass created while removable files
 are left does not show it; another pass runs within 30 s instead.
 `overBytes` is what retention would have to free for the next recording: `usedBytes` plus the

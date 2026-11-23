@@ -1791,6 +1791,8 @@ export class EvidenceStore {
 	 * without them, or while the analog inventory is unknown (null), it is the cap itself.
 	 * Exceeded only with nothing removable left (`removable`, AnalogOperations.removableNow, 0):
 	 * a shortfall with removable files left is not entered (returns true: run another pass).
+	 * The test is the eviction TRIGGER, not its target (EVICTION_TARGET_HEADROOM): a store
+	 * between the two with nothing removable has room for the next recording and is not exceeded.
 	 */
 	private noteQuota(
 		usedBytes: number,

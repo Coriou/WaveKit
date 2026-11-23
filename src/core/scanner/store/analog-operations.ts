@@ -58,8 +58,26 @@ const RESERVATION = MAX_ANALOG_FILE_BYTES + MAX_OPERATION_METADATA_BYTES
  * RESERVATION exceeds the cap, so a pass that leaves used + outstanding + ADMISSION_HEADROOM
  * within the cap always fits one admission plus one more in flight. A store counts as full
  * (retention evicts, the quota status shows) past that, never only past the cap itself.
+ * This is the TRIGGER; once it holds, a pass evicts further, to EVICTION_TARGET_HEADROOM.
  */
 export const ADMISSION_HEADROOM = 2 * RESERVATION
+/** The floor of the eviction target: 8 × RESERVATION = 8 × 1,936,428 = 15,491,424 B. */
+export const EVICTION_TARGET_MIN_HEADROOM = 8 * RESERVATION
+/**
+ * Room a retention pass that evicts for bytes leaves under the recordings cap: max(8 ×
+ * RESERVATION, 2 % of the cap) = max(15,491,424 B, ⌊cap / 50⌋). The default 512 MiB cap
+ * (536,870,912 B): 2 % = 10,737,418 B < 15,491,424 B, so the target is cap − 15,491,424 B
+ * (≈ 15.5 MB, eight recordings); from a cap of 774,571,200 B (≈ 739 MiB) up, 2 % wins (1 GiB:
+ * 21,474,836 B). Hysteresis: the pass starts only on the trigger (ADMISSION_HEADROOM, two
+ * reservations), then evicts oldest first until used + outstanding + uncertain + this <= cap
+ * or no candidate is left, so a store that keeps filling is not trimmed one file per
+ * recording. A non-finite or non-positive cap gets the floor.
+ */
+export function EVICTION_TARGET_HEADROOM(capBytes: number): number {
+	const share =
+		Number.isFinite(capBytes) && capBytes > 0 ? Math.floor(capBytes / 50) : 0
+	return Math.max(EVICTION_TARGET_MIN_HEADROOM, share)
+}
 /**
  * Operations retention keeps free under the inventory bound (MAX_RECOVERY_OPERATIONS, 4096):
  * admission refuses once intents + unpublished reach the bound, so retention evicts oldest
@@ -848,13 +866,21 @@ export class AnalogOperations {
 	 * inventory is unknown.
 	 */
 	quotaShortfall(legacy: number): number | null {
+		return this.shortfallWith(legacy, ADMISSION_HEADROOM)
+	}
+	/**
+	 * managed + `legacy` + outstanding reservations + `headroom` − the cap: quotaShortfall with
+	 * ADMISSION_HEADROOM (the trigger), retention's stop test with EVICTION_TARGET_HEADROOM.
+	 * Null while the inventory is unknown.
+	 */
+	private shortfallWith(legacy: number, headroom: number): number | null {
 		if (this.inventory.unknown) return null
 		return (
 			this.inventory.bytes +
 			legacy +
 			this.reservedUnused() +
 			this.uncertainUnused() +
-			ADMISSION_HEADROOM -
+			headroom -
 			this.context.limits().maxBytes
 		)
 	}
@@ -3165,7 +3191,8 @@ export class AnalogOperations {
 	/**
 	 * Age expiry and the quota for the analog files, and, with `legacy`, the quota for the other
 	 * recordings in the same pass: every removable file of both pools, oldest first, goes while
-	 * the store is full (quotaShortfall over the pool's live `legacy.bytes` > 0); an analog file
+	 * the store is full (quotaShortfall over the pool's live `legacy.bytes` > 0, the trigger) and
+	 * then until EVICTION_TARGET_HEADROOM is left under the cap (hysteresis); an analog file
 	 * also goes once it is past `maxAgeMs`, or while the operation inventory is full
 	 * (operationsFull) and the candidates left can clear it (at most the excess; none when the
 	 * held operations alone fill it, operationsHeldFull). The pass stops removing as soon as neither holds, so a shortfall left after it
@@ -3242,12 +3269,24 @@ export class AnalogOperations {
 			(a, b) =>
 				a.mtimeMs - b.mtimeMs || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
 		)
-		// Full: no room for one admission plus one in flight (ADMISSION_HEADROOM), re-checked
-		// after every removal so the pass stops as soon as the next recording fits.
-		const bytesFull = async (): Promise<boolean> =>
-			(this.quotaShortfall(
-				legacy ? legacy.bytes : await this.context.legacyBytes(),
-			) ?? 0) > 0
+		// Evict for bytes, with hysteresis. Trigger: no room for one admission plus one in flight
+		// (quotaShortfall > 0, ADMISSION_HEADROOM). Once it has held in this pass, files go
+		// until the target room is left (used + outstanding + uncertain +
+		// EVICTION_TARGET_HEADROOM(cap) <= cap), re-checked after every removal; a store between
+		// the trigger and the target that never triggered in this pass evicts nothing.
+		let bytesTriggered = false
+		const bytesFull = async (): Promise<boolean> => {
+			const legacyNow = legacy ? legacy.bytes : await this.context.legacyBytes()
+			const trigger = this.quotaShortfall(legacyNow)
+			if (trigger === null) return false
+			if (trigger > 0) bytesTriggered = true
+			if (!bytesTriggered) return false
+			const target = this.shortfallWith(
+				legacyNow,
+				EVICTION_TARGET_HEADROOM(this.context.limits().maxBytes),
+			)
+			return (target ?? 0) > 0
+		}
 		// Count eviction: while the inventory is full (intents + unpublished ≥ 4096 − 8 = 4088),
 		// only when the analog candidates not yet tried can bring it under that limit, i.e.
 		// intents + unpublished − analogLeft < 4088. Each retire drops one intent, so the pass

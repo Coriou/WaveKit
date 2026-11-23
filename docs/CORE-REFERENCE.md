@@ -587,6 +587,19 @@ scanner:
     enabled: true
 ```
 
+### Scanner recording storage
+
+`scanner.storage.maxRecordingsMb` (default 512) caps the scanner's recordings. One analog recording
+reserves 1,936,428 B (1,920,044 B of audio plus 16 KiB of operation metadata), and one is
+admitted only while that much room is left. Retention removes recordings oldest first when the
+store counts as full: the recordings plus the space reserved by recordings in flight come within
+two reservations (3,872,856 B) of the cap. It then keeps removing until the eviction target is
+free: max(8 × 1,936,428 B, 2 % of the cap). For the default 512 MiB (536,870,912 B) cap, 2 % is
+10,737,418 B, so eight reservations (15,491,424 B) win and a full store drops to about 15.5 MB
+under the cap; from about 739 MiB up, 2 % is larger (1 GiB: 21,474,836 B). Between the two
+points nothing is removed. Kept, held and recent files are never removed for room. Details:
+[SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings).
+
 ## RTL-SDR Setup
 
 WaveKit reads IQ from `rtl_tcp` (or rtlmux in front of it). On a Raspberry Pi, the
