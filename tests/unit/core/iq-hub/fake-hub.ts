@@ -2,6 +2,19 @@
  * An in-process fake `wavekit-iqhub` speaking the protocol subset the supervisor uses, with a
  * real Unix listener in a private 0700 mkdtemp directory. Injected through a HubProcessFactory.
  * No network: the "upstream" is scripted by the test (front.send, front.endStream, ...).
+ *
+ * The end of a front follows the crate (README "Front sinks", rows F9-F14):
+ * - an upstream end with the front drained (`endStream`): `front-ended` with the stream's
+ *   reason and `discardedBytes` 0, then the FIN;
+ * - an upstream end with a backlog the front has not delivered (`endStream(..., {backlogBytes})`):
+ *   the front keeps draining; only Node's EOF can cut it, and the cut backlog is `discardedBytes`
+ *   (D > 0 only then);
+ * - Node's EOF (or close) while the stream is live (F9): `front-ended {front-closed}` at once with
+ *   `discardedBytes` 0, `sink-closed {peer}`, and the attempt's graceful abort closes it after
+ *   `frontGraceMs` while the stream keeps arriving (sent bytes advance the source position but
+ *   reach no front);
+ * - F10 (`hangupWithoutRead`: the front was not polled to read when Node closed): only
+ *   `sink-closed {peer}`, no `front-ended`, then the graceful abort.
  */
 import * as fs from "node:fs"
 import * as net from "node:net"
@@ -30,6 +43,9 @@ export const ALL_FEATURES = [
 
 export type Request = Record<string, unknown> & { type: string; seq?: number }
 
+/** Stamped receiver: a frequency frame of value STAMP_BASE + s sets the stamp to s. */
+export const STAMP_BASE = 100_000_000
+
 export type ConnectBehavior =
 	| { kind: "accept"; localPort?: number; header?: Buffer; delayMs?: number }
 	| { kind: "refuse"; reason: string; errno?: number }
@@ -47,6 +63,25 @@ export class FakeFront {
 	nodeEof = false
 	/** The hub itself destroyed the front connection (its close is no Node EOF). */
 	hubClosed = false
+	/** Payload of an ended stream the front has not delivered yet (Node's EOF discards it). */
+	backlog = 0
+	/** The ended stream's reason while a backlog drains. */
+	streamEnd: { reason: string; errno?: number } | null = null
+	/**
+	 * Stamped receiver (I-P): every payload byte is the receiver's current stamp; a frequency
+	 * frame (opcode 1, value STAMP_BASE + s) sets the stamp to s for every byte produced after
+	 * the hub read it. `produce` fills the ring (the head advances), `deliver` sends from it to
+	 * Node; each command chunk gets one placement at the head, emitted (F8p) once the delivery
+	 * cursor reaches it.
+	 */
+	stamped = false
+	stamp = 0
+	private produced: { stamp: number; bytes: number }[] = []
+	producedBacklog = 0
+	private stampedCmdIn = 0
+	private stampedCmd = Buffer.alloc(0)
+	private stampedPlacements: { frontBytes: number; atSink: number }[] = []
+	private startPos = 0
 	private onStart: (() => void)[] = []
 	private onEof: (() => void)[] = []
 	private onCommand: (() => void)[] = []
@@ -79,7 +114,69 @@ export class FakeFront {
 
 	noteCommand(chunk: Buffer): void {
 		this.commands.push(Buffer.from(chunk))
+		if (this.stamped) this.stampedCommand(chunk)
 		for (const wake of this.onCommand.splice(0)) wake()
+	}
+
+	/** Stamped mode: the receiver produces `bytes` (even) at the current stamp into the ring. */
+	produce(bytes: number): void {
+		if (bytes <= 0) return
+		const last = this.produced.at(-1)
+		if (last && last.stamp === this.stamp) last.bytes += bytes
+		else this.produced.push({ stamp: this.stamp, bytes })
+		this.producedBacklog += bytes
+		this.hub.sourcePos += bytes
+	}
+
+	/** Stamped mode: sends up to `bytes` of the ring to Node (F6), then due placements (F8p). */
+	deliver(bytes: number): number {
+		const parts: Buffer[] = []
+		let left = Math.min(bytes, this.producedBacklog)
+		const sent = left
+		while (left > 0) {
+			const run = this.produced[0]!
+			const take = Math.min(run.bytes, left)
+			parts.push(Buffer.alloc(take, run.stamp))
+			run.bytes -= take
+			left -= take
+			if (run.bytes === 0) this.produced.shift()
+		}
+		this.producedBacklog -= sent
+		this.sinkBytes += sent
+		if (sent > 0) this.socket?.write(Buffer.concat(parts))
+		this.flushStampedPlacements()
+		return sent
+	}
+
+	private stampedCommand(chunk: Buffer): void {
+		this.stampedCmdIn += chunk.length
+		this.stampedCmd = Buffer.concat([this.stampedCmd, chunk])
+		while (this.stampedCmd.length >= 5) {
+			if (this.stampedCmd[0] === 0x01)
+				this.stamp = (this.stampedCmd.readUInt32BE(1) - STAMP_BASE) & 0xff
+			this.stampedCmd = this.stampedCmd.subarray(5)
+		}
+		this.stampedPlacements.push({
+			frontBytes: this.stampedCmdIn,
+			atSink: this.sinkBytes + this.producedBacklog,
+		})
+		this.flushStampedPlacements()
+	}
+
+	private flushStampedPlacements(): void {
+		while (
+			this.stampedPlacements.length > 0 &&
+			this.stampedPlacements[0]!.atSink <= this.sinkBytes
+		) {
+			const p = this.stampedPlacements.shift()!
+			this.hub.emit("front-placed", {
+				sink: this.sink,
+				frontBytes: p.frontBytes,
+				atSourcePos: this.startPos + p.atSink,
+				sinkByte: p.atSink,
+				queuedBytes: 0,
+			})
+		}
 	}
 
 	noteEof(): void {
@@ -90,6 +187,7 @@ export class FakeFront {
 	start(): void {
 		if (this.started || !this.socket || !this.attempt.adopted) return
 		this.started = true
+		this.startPos = this.hub.sourcePos
 		this.hub.emit("sink-started", {
 			sink: this.sink,
 			startSourcePos: this.hub.sourcePos,
@@ -100,9 +198,13 @@ export class FakeFront {
 		for (const wake of this.onStart.splice(0)) wake()
 	}
 
-	/** Upstream payload delivered to the front. */
+	/**
+	 * Upstream payload delivered to the front. After Node's EOF (or the hub's close) the stream
+	 * still arrives in the ring (the source position advances) but this front carries none of it.
+	 */
 	send(payload: Buffer): void {
 		this.hub.sourcePos += payload.length
+		if (this.nodeEof || this.hubClosed || this.ended) return
 		this.sinkBytes += payload.length
 		this.socket?.write(payload)
 	}
@@ -145,9 +247,11 @@ export class FakeFront {
 	}
 
 	/**
-	 * The upstream stream ends: `closed` of the adopted attempt, `front-ended`, then the front's FIN
-	 * (or the FIN first with `finFirst`, or no FIN with `noFin`). `discardedBytes` of upstream
-	 * payload the front's EOF cut off advance the source position without reaching Node.
+	 * The upstream stream ends: `closed` of the adopted attempt, `front-ended` (D = 0: the front
+	 * delivered all of it), then the front's FIN (or the FIN first with `finFirst`, or no FIN with
+	 * `noFin`). With `backlogBytes` the front is still that far behind: the stream's end is set,
+	 * nothing more is delivered here, and `front-ended` waits for `drain()` or Node's EOF (which
+	 * discards the backlog: the only D > 0 case).
 	 */
 	endStream(
 		reason: string,
@@ -155,14 +259,34 @@ export class FakeFront {
 			errno?: number
 			finFirst?: boolean
 			noFin?: boolean
-			discardedBytes?: number
+			backlogBytes?: number
 		} = {},
 	): void {
-		this.hub.sourcePos += options.discardedBytes ?? 0
+		const backlog = options.backlogBytes ?? 0
 		this.hub.closeAttempt(this.attempt, "adopted", reason, options.errno)
+		if (backlog > 0) {
+			this.hub.sourcePos += backlog
+			this.backlog = backlog
+			this.streamEnd = {
+				reason,
+				...(options.errno !== undefined ? { errno: options.errno } : {}),
+			}
+			return
+		}
 		if (options.finFirst) this.socket?.end()
-		this.frontEnded(reason, options.errno, options.discardedBytes ?? 0)
+		this.frontEnded(reason, options.errno, 0)
 		if (!options.finFirst && !options.noFin) this.socket?.end()
+	}
+
+	/** The backlog of an ended stream reaches Node, then `front-ended` and the FIN. */
+	drain(fill = 0): void {
+		if (this.backlog === 0 || this.streamEnd === null || this.ended) return
+		const bytes = this.backlog
+		this.backlog = 0
+		this.sinkBytes += bytes
+		this.socket?.write(Buffer.alloc(bytes, fill))
+		this.frontEnded(this.streamEnd.reason, this.streamEnd.errno, 0)
+		this.socket?.end()
 	}
 }
 
@@ -366,22 +490,33 @@ export class FakeHubInstance implements HubProcess {
 			front.start()
 		})
 		// F9: the front's EOF (or its close: Node destroyed it) ends its delivery and gracefully
-		// aborts its attempt.
+		// aborts its attempt; F10 (hangupWithoutRead) emits only `sink-closed {peer}`.
 		const peerGone = () => {
 			if (!front || front.nodeEof || front.hubClosed) return
-			front.noteEof()
+			const f = front
+			f.noteEof()
 			if (this.owner.ignoreFrontEof) return
-			front.frontEnded("front-closed")
-			if (!conn.destroyed) conn.end()
-			this.closeAttempt(front.attempt, "adopted", "aborted", undefined, {
-				mode: "graceful",
-				by: "front",
-			})
+			if (!this.owner.hangupWithoutRead && !f.ended) {
+				// An ended stream still draining keeps its reason; its backlog is discarded (D).
+				if (f.streamEnd !== null)
+					f.frontEnded(f.streamEnd.reason, f.streamEnd.errno, f.backlog)
+				else f.frontEnded("front-closed", undefined, 0)
+				f.backlog = 0
+				if (!conn.destroyed) conn.end()
+			}
 			this.emit("sink-closed", {
-				sink: front.sink,
+				sink: f.sink,
 				reason: "peer",
-				sinkBytes: front.sinkBytes,
+				sinkBytes: f.sinkBytes,
 			})
+			const close = () =>
+				this.closeAttempt(f.attempt, "adopted", "aborted", undefined, {
+					mode: "graceful",
+					by: "front",
+				})
+			if (this.owner.frontGraceMs > 0)
+				setTimeout(close, this.owner.frontGraceMs)
+			else close()
 		}
 		conn.on("end", peerGone)
 		conn.on("close", peerGone)
@@ -397,8 +532,16 @@ export class FakeHub {
 	spawnFails = false
 	ignoreShutdown = false
 	ignoreFrontEof = false
+	/** F10: Node's close is seen as a hang-up while the front was not polled to read. */
+	hangupWithoutRead = false
+	/** How long a front's graceful abort keeps its attempt open after Node's EOF (F9). */
+	frontGraceMs = 0
+	/** New fronts run the stamped receiver (FakeFront.stamped). */
+	stampedFronts = false
 	configureAnswer: "configured" | "reject" | "silent" = "configured"
 	sinkOpenReject: string | null = null
+	/** `sink-open` is never answered (a hung hub after `tcp-connected`). */
+	sinkOpenSilent = false
 	connectBehavior: (attempt: number) => ConnectBehavior = () => ({
 		kind: "accept",
 	})
@@ -467,6 +610,7 @@ export class FakeHub {
 				this.onConnect(hub, request)
 				return
 			case "sink-open": {
+				if (this.sinkOpenSilent) return
 				const attempt = hub.attempts.get(request["attempt"] as number)
 				if (this.sinkOpenReject !== null || !attempt || attempt.closed) {
 					hub.emit(
@@ -480,6 +624,7 @@ export class FakeHub {
 					return
 				}
 				const front = new FakeFront(hub, request["sink"] as string, attempt)
+				front.stamped = this.stampedFronts
 				attempt.front = front
 				hub.fronts.set(front.sink, front)
 				hub.emit("sink-ready", { sink: front.sink }, seq)

@@ -574,6 +574,22 @@ describe("hub supervisor rows (fake hub)", () => {
 		await closed
 	})
 
+	it("m1: a hub that connects upstream but never answers sink-open is failed IQHUB_HUNG by the connect backstop", async () => {
+		newFake()
+		fake.sinkOpenSilent = true
+		const supervisor = makeSupervisor({ connectGraceMs: 0 })
+		const socket = hubSocket()
+		const closed = closeOf(socket)
+		const started = performance.now()
+		supervisor.dial(socket, config, "127.0.0.1", 5555)
+		const result = await closed
+		expect(result.error?.code).toBe(IQHUB_HUNG)
+		expect(performance.now() - started).toBeGreaterThanOrEqual(4900)
+		// tcp-connected came (the backstop outlived it) and the attempt is aborted.
+		expect(fake.last.requestsOf("sink-open")).toHaveLength(1)
+		expect(fake.last.requestsOf("abort")).toHaveLength(1)
+	}, 15_000)
+
 	it("M1: a hub that never answers configure is still failed IQHUB_HUNG after the recheck", async () => {
 		newFake()
 		fake.configureAnswer = "silent"

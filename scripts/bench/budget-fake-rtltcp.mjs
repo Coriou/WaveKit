@@ -20,6 +20,16 @@
 // A mark also carries the newest client's lag: behindMs = now - its next due write (0 when on
 // schedule) and blocked = its socket is waiting for a drain (the core is not reading).
 // SIGTERM or SIGINT write the summary and exit. The first stdout line is {"port":N}.
+//
+// SIGUSR1 is the stop-and-end signal of the exact end-of-run byte check: the fake stops
+// pumping, stops accepting clients, ends every client socket (FIN after its queued bytes),
+// waits up to 5 s for each to close (then destroys it), and logs one `stopped` line with each
+// client's `bytesWritten` and `graceful`, and the totals. `bytesWritten` is what the kernel
+// accepted from this socket, not what the client read: it equals the bytes delivered only when
+// the client closed gracefully (`graceful`: closed without a socket error and without the 5 s
+// destroy, so the peer read up to our FIN), which is why the byte check refuses `exact`
+// otherwise. It keeps running until SIGTERM. Every `client-close` line carries that client's own
+// `remotePort`, `bytesWritten` and `graceful` too.
 import { appendFileSync, readFileSync } from "node:fs"
 import net from "node:net"
 import { dirname, isAbsolute, resolve } from "node:path"
@@ -158,14 +168,35 @@ function cursor() {
 }
 
 const sockets = new Set()
+/** Every client's own counts, in accept order (`stopped` and `client-close` lines). */
+const clientsSeen = []
 /** The newest client's pacing state, for the marks. */
 let active = null
+let stopping = false
 const server = net.createServer(socket => {
+	if (stopping) {
+		socket.destroy()
+		return
+	}
 	sockets.add(socket)
+	const client = {
+		index: clientsSeen.length,
+		remotePort: socket.remotePort ?? null,
+		bytesWritten: 0,
+		closed: false,
+		/** Closed without a socket error and without the stop's forced destroy. */
+		graceful: false,
+		errored: false,
+		forced: false,
+		socket,
+	}
+	clientsSeen.push(client)
 	totals.clients++
 	log({ ev: "client", remotePort: socket.remotePort })
 	socket.setNoDelay(true)
-	socket.on("error", () => undefined)
+	socket.on("error", () => {
+		client.errored = true
+	})
 	const header = Buffer.alloc(12)
 	header.write("RTL0", 0, "ascii")
 	header.writeUInt32BE(5, 4)
@@ -188,7 +219,7 @@ const server = net.createServer(socket => {
 	active = state
 	const pump = () => {
 		timer = null
-		if (socket.destroyed) return
+		if (socket.destroyed || stopping) return
 		if (socket.writableNeedDrain) {
 			waiting = true
 			return
@@ -220,12 +251,26 @@ const server = net.createServer(socket => {
 			pump()
 		}
 	})
-	socket.on("close", () => {
+	socket.on("close", hadError => {
 		if (timer) clearTimeout(timer)
 		sockets.delete(socket)
 		if (active === state) active = null
-		log({ ev: "client-close", ...totals })
+		client.bytesWritten = socket.bytesWritten
+		client.closed = true
+		client.graceful = !hadError && !client.errored && !client.forced
+		log({
+			ev: "client-close",
+			client: client.index,
+			remotePort: client.remotePort,
+			bytesWritten: client.bytesWritten,
+			graceful: client.graceful,
+			...totals,
+		})
 	})
+	client.stopPump = () => {
+		if (timer) clearTimeout(timer)
+		timer = null
+	}
 	pump()
 })
 
@@ -252,6 +297,44 @@ process.on("SIGUSR2", () => {
 		behindMs: active === null ? null : active.behindMs(),
 		blocked: active === null ? null : active.blocked(),
 	})
+})
+process.on("SIGUSR1", () => {
+	if (stopping) return
+	stopping = true
+	server.close()
+	const waits = []
+	for (const c of clientsSeen) {
+		c.stopPump?.()
+		if (c.closed) continue
+		waits.push(
+			new Promise(resolve => {
+				const s = c.socket
+				const t = setTimeout(() => {
+					c.forced = true
+					c.graceful = false
+					s.destroy()
+					resolve()
+				}, 5000)
+				s.once("close", () => {
+					clearTimeout(t)
+					resolve()
+				})
+				s.end()
+			}),
+		)
+	}
+	void Promise.all(waits).then(() =>
+		log({
+			...totals,
+			ev: "stopped",
+			clients: clientsSeen.map(c => ({
+				client: c.index,
+				remotePort: c.remotePort,
+				bytesWritten: c.socket.bytesWritten,
+				graceful: c.closed && c.graceful && !c.forced,
+			})),
+		}),
+	)
 })
 for (const sig of ["SIGTERM", "SIGINT"])
 	process.on(sig, () => {

@@ -7,23 +7,35 @@
  * stream only and never sends a request that depends on a state it has not seen.
  *
  * Errors the hub itself causes carry IQHUB_* codes (IQHUB_UNAVAILABLE, IQHUB_REJECTED,
- * IQHUB_EXITED, IQHUB_HUNG, IQHUB_FRONT_CLOSED): SourceManager keeps them out of the receiver's
+ * IQHUB_EXITED, IQHUB_HUNG, IQHUB_FRONT_CLOSED, IQHUB_PLACEMENT_MISMATCH): SourceManager keeps them out of the receiver's
  * connect-failure record and its endpoint fallback. A closed upstream attempt maps to the code a `net` connect would give.
  *
- * Exact command positions (`front-placed`) are surfaced to a hook only: SourceManager does not use
- * them yet, which is why hub intake is not selectable by the environment (intake-mode.ts).
+ * Exact command positions: SourceManager registers each write's command bytes synchronously
+ * (`noteCommandBytes`, M4) and `front-placed` resolves them in write order at the front's sink
+ * byte (the Node payload position), with the hub's upstream backlog plus the in-flight bound
+ * (S12). A front that ends or closes, a closed Node socket and a gone hub resolve the rest null;
+ * a placement that disagrees with Node's accounting fails the dial (IQHUB_PLACEMENT_MISMATCH).
+ * The hub bounds the connect phase itself (`ownsConnectDeadline`): its ready and configure
+ * deadlines, the upstream connect's own timeout (the receiver's ETIMEDOUT) and a backstop past it
+ * (IQHUB_HUNG), so SourceManager's 5 s connect timer never counts a hub stall as the receiver's.
  */
 import * as net from "node:net"
+import * as path from "node:path"
 import type { Socket } from "node:net"
 import type { SourceConfig } from "../../config.js"
 import { WaveKitError } from "../../utils/errors.js"
+import { IN_FLIGHT_BOUND_BYTES } from "../spectrum/network-settle.js"
 import type { Logger } from "../../utils/logger.js"
 import { FrontAccounting } from "./front-accounting.js"
 import type { HubExit, HubProcess, HubProcessFactory } from "./hub-process.js"
 import { HungWatchdog } from "./hung-watchdog.js"
 import type { HungWatchdogOptions } from "./hung-watchdog.js"
 import { HUB_FRONT_TAG, hubEligibleHost, hubEligibleSource } from "./intake.js"
-import type { SourceIntake } from "./intake.js"
+import type {
+	CommandPlacement,
+	SourceIntake,
+	SourceIntakeListener,
+} from "./intake.js"
 import {
 	HUB_REQUIRED_FEATURES,
 	encodeHubRequest,
@@ -46,8 +58,14 @@ export const HUB_RING_MS = 12_000
 export const HUB_FRONT_MAX_LAG_MS = 6000
 export const HUB_FRONT_RESUME_MS = 250
 export const HUB_READY_TIMEOUT_MS = 5000
-/** SourceManager's own connect deadline (5 s) fires first; the hub's bounds the orphan. */
-export const HUB_CONNECT_TIMEOUT_MS = 5000 + 2000
+/**
+ * The upstream connect deadline the hub applies (SOURCE_CONNECT_TIMEOUT_MS, 5 s: a hub socket arms
+ * no SourceManager connect timer, SourceIntake.ownsConnectDeadline). Its expiry is the receiver's
+ * (`closed {reason: "timeout"}` → ETIMEDOUT, as a `net` connect timeout).
+ */
+export const HUB_CONNECT_TIMEOUT_MS = 5000
+/** A hub that reports neither `tcp-connected` nor `closed` this long after its deadline is hung. */
+export const HUB_CONNECT_GRACE_MS = 2000
 export const HUB_KEEPALIVE_MS = 5000
 export const HUB_HEADER_BYTES = 12
 /** M6/S14: how long one side of a front's end waits for the other. */
@@ -55,6 +73,8 @@ export const HUB_END_WAIT_MS = 2000
 /** S15: a closed Node socket whose attempt is still live after this is aborted. */
 export const HUB_ABORT_AFTER_CLOSE_MS = 3000
 export const HUB_SHUTDOWN_WAIT_MS = 2000
+/** After SIGKILL, dispose waits this long for the exit, then logs and gives up on it. */
+export const HUB_KILL_WAIT_MS = 2000
 /** m3: a rate change waits this long for older fronted attempts to close. */
 export const HUB_CONFIGURE_WAIT_MS = 2000
 /** A paused Node socket delays its `end` at most this long in all, then it is destroyed. */
@@ -71,6 +91,13 @@ export const IQHUB_HUNG = "IQHUB_HUNG"
  * nothing wrong, so they carry an IQHUB_* code and stay out of connectFailure and endpoint fallback.
  */
 export const IQHUB_FRONT_CLOSED = "IQHUB_FRONT_CLOSED"
+/**
+ * The hub's placements disagree with Node's own accounting (a registration the hub already read
+ * past, a sink byte its gap history maps elsewhere, a placement below an earlier one). Neither
+ * figure can be trusted, so the dial fails: the session ends, the next one starts unverified and
+ * the controller re-asserts (reconnect backoff bounds the repeats).
+ */
+export const IQHUB_PLACEMENT_MISMATCH = "IQHUB_PLACEMENT_MISMATCH"
 
 const DESTROY_REASONS: ReadonlySet<string> = new Set([
 	"reset",
@@ -95,6 +122,23 @@ function safeReason(reason: string): string {
  */
 function afterPoll(fn: () => void): void {
 	setImmediate(fn)
+}
+
+/** A source id as a file name: anything outside [A-Za-z0-9._-] becomes "_" (never empty). */
+export function statsFileStem(id: string): string {
+	const stem = id.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128)
+	return stem === "" || stem === "." || stem === ".." ? "_" : stem
+}
+
+function safePlaced(
+	resolve: (placement: CommandPlacement) => void,
+	placement: CommandPlacement,
+): void {
+	try {
+		resolve(placement)
+	} catch {
+		// A caller's callback never breaks the event loop of the supervisor.
+	}
 }
 
 function hubError(message: string, code: string): WaveKitError {
@@ -131,6 +175,21 @@ interface Dial {
 	/** When the end wait first armed (the paused-socket cap counts from it). */
 	endWaitStartedAt: number | null
 	abortTimer: ReturnType<typeof setTimeout> | null
+	/** The backstop of the hub's own connect deadline (IQHUB_HUNG past it). */
+	connectTimer: ReturnType<typeof setTimeout> | null
+	/** Command bytes Node wrote after the hello (the offsets placements resolve). */
+	commandBytes: number
+	/** Registered command ends waiting for their placement, in write order. */
+	readonly placements: { end: number; resolve: (p: CommandPlacement) => void }[]
+	/**
+	 * The newest placement's `frontBytes` (the hub read that many command bytes). A registration
+	 * ending at or below it is a mismatch: the hub read bytes Node had not registered yet.
+	 */
+	placedFrontBytes: number
+	/** The newest placement's `sinkByte` (placements never move back). */
+	placedSinkByte: number
+	/** No placement can come any more (the front ended or closed, the hub is gone). */
+	placementsOver: boolean
 	readonly accounting: FrontAccounting
 }
 
@@ -173,6 +232,10 @@ export interface SupervisorOptions extends SupervisorHooks {
 	shutdownWaitMs?: number
 	configureWaitMs?: number
 	pausedEndCapMs?: number
+	/** Past the hub's connect deadline before the dial counts the hub hung (HUB_CONNECT_GRACE_MS). */
+	connectGraceMs?: number
+	/** The bound on waiting for a killed child's exit at dispose (HUB_KILL_WAIT_MS). */
+	killWaitMs?: number
 	/** Monotonic clock in ms (tests). */
 	now?: () => number
 	watchdog?: Omit<HungWatchdogOptions, "onHung">
@@ -197,6 +260,12 @@ export class Supervisor {
 	private readonly attemptClosedWaiters: (() => void)[] = []
 	/** Lines that were not a valid event (never logged themselves). */
 	invalidLines = 0
+	/**
+	 * Placement mismatches: a `front-placed` whose `sinkByte` the front's own gap history maps
+	 * elsewhere, a placement below an earlier one, or a registration the hub had already read past;
+	 * each fails its dial (IQHUB_PLACEMENT_MISMATCH).
+	 */
+	placementMismatches = 0
 
 	constructor(options: SupervisorOptions) {
 		this.options = options
@@ -249,6 +318,12 @@ export class Supervisor {
 			endTimer: null,
 			endWaitStartedAt: null,
 			abortTimer: null,
+			connectTimer: null,
+			commandBytes: 0,
+			placements: [],
+			placedFrontBytes: 0,
+			placedSinkByte: 0,
+			placementsOver: false,
 			accounting: new FrontAccounting(),
 		}
 		this.dials.add(dial)
@@ -565,6 +640,7 @@ export class Supervisor {
 			this.failGone(dial, hub)
 			return
 		}
+		this.armConnectTimer(hub, dial, attempt)
 		this.send(
 			hub,
 			{
@@ -592,6 +668,44 @@ export class Supervisor {
 				}
 			},
 		)
+	}
+
+	/**
+	 * M-A: the hub bounds the upstream connect itself (HUB_CONNECT_TIMEOUT_MS); a hub that reports
+	 * neither `tcp-connected` nor `closed` past it plus HUB_CONNECT_GRACE_MS is hung, not the
+	 * receiver. It stays armed until the Unix connect starts (both `tcp-connected` and `sink-ready`),
+	 * so a hub that never answers `sink-open` is bounded too. Acts only after the poll phase (a
+	 * starved main thread reads the waiting answer first).
+	 */
+	private armConnectTimer(hub: Hub, dial: Dial, attempt: number): void {
+		this.clearConnectTimer(dial)
+		dial.connectTimer = setTimeout(
+			() =>
+				afterPoll(() => {
+					dial.connectTimer = null
+					if (
+						dial.attempt !== attempt ||
+						dial.unixStarted ||
+						dial.attemptClosed !== null ||
+						this.cancelled(dial)
+					)
+						return
+					this.log.warn(
+						{ timeoutMs: HUB_CONNECT_TIMEOUT_MS + HUB_CONNECT_GRACE_MS },
+						"IQ hub did not answer the connect in time",
+					)
+					this.fail(dial, IQHUB_HUNG, "IQ hub did not answer the connect")
+					this.abortNow(hub, attempt)
+				}),
+			HUB_CONNECT_TIMEOUT_MS +
+				(this.options.connectGraceMs ?? HUB_CONNECT_GRACE_MS),
+		)
+		dial.connectTimer.unref()
+	}
+
+	private clearConnectTimer(dial: Dial): void {
+		if (dial.connectTimer !== null) clearTimeout(dial.connectTimer)
+		dial.connectTimer = null
 	}
 
 	// S17: a refused connect.
@@ -638,6 +752,7 @@ export class Supervisor {
 		}
 		const path = hub.sinkSocket
 		if (path === null) return
+		this.clearConnectTimer(dial)
 		dial.unixStarted = true
 		dial.socket.connect({ path })
 		dial.socket.write(hubHello(dial.sink))
@@ -691,6 +806,7 @@ export class Supervisor {
 				const dial = this.byAttempt.get(event.attempt)
 				if (event.seq !== undefined) hub.answers.delete(event.seq)
 				if (!dial) return
+				// m1: the backstop stays armed until the Unix connect starts (sink-ready may never come).
 				dial.tcpConnected = true
 				dial.localPort = event.localPort > 0 ? event.localPort : null
 				this.maybeStartUnix(hub, dial)
@@ -734,7 +850,9 @@ export class Supervisor {
 			}
 			case "front-placed": {
 				const dial = this.bySink.get(event.sink)
-				if (dial) this.options.onFrontPlaced?.(dial.socket, event)
+				if (!dial) return
+				if (this.onFrontPlaced(dial, event))
+					this.options.onFrontPlaced?.(dial.socket, event)
 				return
 			}
 			case "front-ended":
@@ -770,6 +888,7 @@ export class Supervisor {
 		for (const wake of this.attemptClosedWaiters.splice(0)) wake()
 		if (!dial) return
 		dial.attemptClosed = event
+		this.clearConnectTimer(dial)
 		if (dial.abortTimer !== null) clearTimeout(dial.abortTimer)
 		dial.abortTimer = null
 		if (!dial.unixStarted) {
@@ -779,10 +898,127 @@ export class Supervisor {
 		this.forgetIfDone(dial)
 	}
 
+	/**
+	 * Registers `bytes` command bytes Node just wrote on a dialled socket (synchronously after its
+	 * `socket.write`, so the offsets follow the write order); `onPlaced` runs once with the Node
+	 * position the hub placed them at, or `pos: null` when they never reach the receiver. False for
+	 * a socket this supervisor does not dial.
+	 */
+	noteCommandBytes(
+		socket: Socket,
+		bytes: number,
+		onPlaced: (placement: CommandPlacement) => void,
+	): boolean {
+		const dial = this.bySocket.get(socket)
+		if (!dial) return false
+		dial.commandBytes += Math.max(0, bytes)
+		const end = dial.commandBytes
+		if (dial.placementsOver) {
+			safePlaced(onPlaced, { pos: null })
+			return true
+		}
+		if (bytes <= 0) {
+			// Nothing to place: no byte of it reaches the receiver.
+			safePlaced(onPlaced, { pos: null })
+			return true
+		}
+		if (end <= dial.placedFrontBytes) {
+			// M-A: the hub already read past these bytes (they went upstream) before Node registered
+			// them, so where they took effect is unknown: fail the dial (doubt, then end the session).
+			this.failPlacement(
+				dial,
+				{ end, frontBytes: dial.placedFrontBytes },
+				onPlaced,
+			)
+			return true
+		}
+		dial.placements.push({ end, resolve: onPlaced })
+		return true
+	}
+
+	/**
+	 * S12: every registered end at or below `frontBytes` resolves, in write order, at the front's
+	 * `sinkByte` (the Node payload position: the hub counts sink bytes exactly as Node counts its
+	 * payload, gaps excluded), with `queuedBytes` (FIONREAD upstream when the command went out)
+	 * plus the unmeasured in-flight bound (m2: never below today's settle term).
+	 */
+	private onFrontPlaced(dial: Dial, event: HubFrontPlaced): boolean {
+		if (dial.placementsOver) return false
+		const mapped = dial.accounting.sinkByteOf(event.atSourcePos)
+		if (mapped !== null && mapped !== event.sinkByte) {
+			// m-1: the hub's sink byte and its own gap history disagree: trust neither figure.
+			this.failPlacement(dial, { sinkByte: event.sinkByte, mapped })
+			return false
+		}
+		if (
+			event.sinkByte < dial.placedSinkByte ||
+			event.frontBytes < dial.placedFrontBytes
+		) {
+			// m-1: placements resolve in command order, so a position never moves back.
+			this.failPlacement(dial, {
+				sinkByte: event.sinkByte,
+				previousSinkByte: dial.placedSinkByte,
+				frontBytes: event.frontBytes,
+				previousFrontBytes: dial.placedFrontBytes,
+			})
+			return false
+		}
+		dial.placedSinkByte = event.sinkByte
+		const placement: CommandPlacement = {
+			pos: event.sinkByte,
+			inFlightBytes: event.queuedBytes + IN_FLIGHT_BOUND_BYTES,
+		}
+		if (event.frontBytes > dial.placedFrontBytes)
+			dial.placedFrontBytes = event.frontBytes
+		while (
+			dial.placements.length > 0 &&
+			dial.placements[0]!.end <= event.frontBytes
+		) {
+			const entry = dial.placements.shift()!
+			safePlaced(entry.resolve, { ...placement })
+		}
+		return true
+	}
+
+	/**
+	 * A placement that disagrees with Node's accounting fails the dial (IQHUB_PLACEMENT_MISMATCH):
+	 * every pending registration (and `current`, the one being registered) resolves as a mismatch,
+	 * so the ledger doubts the session from its write position, then the socket is destroyed with an
+	 * intake fault (never the receiver's).
+	 */
+	private failPlacement(
+		dial: Dial,
+		detail: Record<string, number>,
+		current?: (placement: CommandPlacement) => void,
+	): void {
+		this.notePlacementMismatch(detail)
+		dial.placementsOver = true
+		for (const entry of dial.placements.splice(0))
+			safePlaced(entry.resolve, { pos: null, mismatch: true })
+		if (current) safePlaced(current, { pos: null, mismatch: true })
+		this.fail(dial, IQHUB_PLACEMENT_MISMATCH, "IQ hub placement mismatch")
+	}
+
+	/** Counts a placement mismatch; only the first is logged (numbers only, never hub text). */
+	private notePlacementMismatch(detail: Record<string, number>): void {
+		this.placementMismatches += 1
+		if (this.placementMismatches === 1)
+			this.log.warn(detail, "IQ hub placement disagrees with Node's accounting")
+	}
+
+	/** No placement comes any more: every pending one resolves null (in order). */
+	private endPlacements(dial: Dial): void {
+		dial.placementsOver = true
+		for (const entry of dial.placements.splice(0))
+			safePlaced(entry.resolve, { pos: null })
+	}
+
 	// S14: the front has its whole stream; its write side is shut (Node's `end` follows).
 	private onFrontEnded(event: HubEventOf<"front-ended">): void {
 		const dial = this.bySink.get(event.sink)
 		if (!dial) return
+		// A front that ended places nothing more (README "Placements").
+		this.endPlacements(dial)
 		dial.frontEnded = event
 		dial.accounting.noteEnded(event)
 		this.decide(dial, this.decisionFor(event.reason, event.errno))
@@ -803,6 +1039,7 @@ export class Supervisor {
 	private onSinkClosed(hub: Hub, event: HubEventOf<"sink-closed">): void {
 		const dial = this.bySink.get(event.sink)
 		if (!dial) return
+		this.endPlacements(dial)
 		if (event.reason === "peer") return
 		if (event.reason === "attempt-closed") {
 			const closed = dial.attemptClosed
@@ -899,8 +1136,10 @@ export class Supervisor {
 	private onNodeClose(dial: Dial): void {
 		if (dial.nodeClosed) return
 		dial.nodeClosed = true
+		this.clearConnectTimer(dial)
 		if (dial.endTimer !== null) clearTimeout(dial.endTimer)
 		dial.endTimer = null
+		this.endPlacements(dial)
 		this.options.onDialClosed?.(dial.socket)
 		const hub = this.hub
 		if (
@@ -947,6 +1186,8 @@ export class Supervisor {
 	private fail(dial: Dial, code: string, message: string): void {
 		if (dial.failed) return
 		dial.failed = true
+		this.clearConnectTimer(dial)
+		this.endPlacements(dial)
 		if (dial.endTimer !== null) clearTimeout(dial.endTimer)
 		dial.endTimer = null
 		if (!dial.socket.destroyed) dial.socket.destroy(hubError(message, code))
@@ -982,6 +1223,7 @@ export class Supervisor {
 		if (this.hub === hub) this.hub = null
 		const { code, message } = this.goneError(hub)
 		for (const dial of [...this.dials]) {
+			this.endPlacements(dial)
 			if (dial.nodeClosed) {
 				this.forgetIfDone(dial)
 				continue
@@ -1044,35 +1286,58 @@ export class Supervisor {
 			const exited = new Promise<void>(resolve => hub.exitWaiters.push(resolve))
 			if (hub.gone || hub.readyEvent === null) {
 				proc.kill("SIGKILL")
-				await exited
+				await this.killWait(hub, exited)
 			} else {
 				proc.send(encodeHubRequest({ type: "shutdown" }))
 				proc.endControl()
-				let timer: ReturnType<typeof setTimeout> | null = null
-				const timeout = new Promise<"timeout">(resolve => {
-					timer = setTimeout(
-						() => resolve("timeout"),
-						this.options.shutdownWaitMs ?? HUB_SHUTDOWN_WAIT_MS,
-					)
-				})
-				const result = await Promise.race([
-					exited.then(() => "exited" as const),
-					timeout,
-				])
-				if (timer !== null) clearTimeout(timer)
+				const result = await this.within(
+					exited,
+					this.options.shutdownWaitMs ?? HUB_SHUTDOWN_WAIT_MS,
+				)
 				if (result === "timeout") {
 					proc.kill("SIGKILL")
-					await exited
+					await this.killWait(hub, exited)
 				}
 			}
 		}
 		await proc.removeSocketDir().catch(() => {})
+	}
+
+	/** Resolves "exited" when `exited` settles first, else "timeout" after `ms`. */
+	private async within(
+		exited: Promise<void>,
+		ms: number,
+	): Promise<"exited" | "timeout"> {
+		let timer: ReturnType<typeof setTimeout> | null = null
+		const timeout = new Promise<"timeout">(resolve => {
+			timer = setTimeout(() => resolve("timeout"), ms)
+		})
+		try {
+			return await Promise.race([exited.then(() => "exited" as const), timeout])
+		} finally {
+			if (timer !== null) clearTimeout(timer)
+		}
+	}
+
+	/** After SIGKILL: wait for the exit at most HUB_KILL_WAIT_MS, then log and give up on it. */
+	private async killWait(hub: Hub, exited: Promise<void>): Promise<void> {
+		const result = await this.within(
+			exited,
+			this.options.killWaitMs ?? HUB_KILL_WAIT_MS,
+		)
+		if (result === "timeout")
+			this.log.warn(
+				{ pid: hub.proc?.pid ?? null },
+				"IQ hub did not exit after SIGKILL; giving up on its exit",
+			)
 	}
 }
 
 export interface HubSourceIntakeOptions extends SupervisorHooks {
 	logger: Logger
 	factory: HubProcessFactory
+	/** Each hub writes its stats file `<statsDir>/<sourceId>.jsonl` (bench diagnostic). */
+	statsDir?: string | null | undefined
 	/** Per-supervisor overrides (tests). */
 	supervisor?: Partial<
 		Omit<
@@ -1091,12 +1356,18 @@ export class HubSourceIntake implements SourceIntake {
 	private readonly options: HubSourceIntakeOptions
 	private readonly supervisors = new Map<string, Supervisor>()
 	private readonly plain = new WeakSet<Socket>()
+	private readonly fronts = new WeakSet<Socket>()
 	private readonly namedHostLogged = new Set<string>()
 	private readonly disposing = new Set<Promise<void>>()
+	private listener: SourceIntakeListener | null = null
 
 	constructor(options: HubSourceIntakeOptions) {
 		this.options = options
 		this.log = options.logger.child({ component: "IqHubIntake" })
+	}
+
+	attach(listener: SourceIntakeListener): void {
+		this.listener = listener
 	}
 
 	/** The supervisor of a source (tests, R3). */
@@ -1124,6 +1395,7 @@ export class HubSourceIntake implements SourceIntake {
 		}
 		const socket = new net.Socket({ allowHalfOpen: true })
 		Object.defineProperty(socket, HUB_FRONT_TAG, { value: id })
+		this.fronts.add(socket)
 		return socket
 	}
 
@@ -1140,17 +1412,30 @@ export class HubSourceIntake implements SourceIntake {
 		}
 		let supervisor = this.supervisors.get(id)
 		if (!supervisor) {
+			const statsDir = this.options.statsDir
 			supervisor = new Supervisor({
 				...this.options.supervisor,
 				sourceId: id,
 				logger: this.options.logger,
 				factory: this.options.factory,
+				...(statsDir !== undefined && statsDir !== null
+					? { statsFile: path.join(statsDir, `${statsFileStem(id)}.jsonl`) }
+					: {}),
 				...(this.options.onFrontPlaced
 					? { onFrontPlaced: this.options.onFrontPlaced }
 					: {}),
-				...(this.options.onIntakeGap
-					? { onIntakeGap: this.options.onIntakeGap }
-					: {}),
+				onIntakeGap: (gapSocket, event) => {
+					this.options.onIntakeGap?.(gapSocket, event)
+					try {
+						this.listener?.onIntakeGap(gapSocket, {
+							atSinkByte: event.atSinkByte,
+							droppedBytes: event.droppedBytes,
+							cause: event.cause,
+						})
+					} catch {
+						// A listener never breaks the supervisor.
+					}
+				},
 				...(this.options.onDialClosed
 					? { onDialClosed: this.options.onDialClosed }
 					: {}),
@@ -1158,6 +1443,23 @@ export class HubSourceIntake implements SourceIntake {
 			this.supervisors.set(id, supervisor)
 		}
 		supervisor.dial(socket, config, host, port)
+	}
+
+	ownsConnectDeadline(socket: Socket): boolean {
+		return this.fronts.has(socket)
+	}
+
+	noteCommandBytes(
+		socket: Socket,
+		bytes: number,
+		onPlaced: (placement: CommandPlacement) => void,
+	): boolean {
+		if (!this.fronts.has(socket)) return false
+		for (const supervisor of this.supervisors.values())
+			if (supervisor.noteCommandBytes(socket, bytes, onPlaced)) return true
+		// A front whose supervisor is gone (the source was removed): nothing reaches the receiver.
+		onPlaced({ pos: null })
+		return true
 	}
 
 	localPortOf(socket: Socket): number | null {

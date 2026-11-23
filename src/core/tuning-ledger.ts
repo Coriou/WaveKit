@@ -30,7 +30,11 @@
  * evidence and the analog transmission frequency (`trustNow`).
  */
 import type { TuningTrust } from "./spectrum/types.js"
-import { settleBytes, type SettleLink } from "./spectrum/network-settle.js"
+import {
+	IN_FLIGHT_BOUND_BYTES,
+	settleBytes,
+	type SettleLink,
+} from "./spectrum/network-settle.js"
 
 /** Who wrote a frame. `assert` is the controller's automatic write of an unproven field. */
 export type TuningWriter = "operator" | "scanner" | "assert" | "relay"
@@ -119,6 +123,12 @@ export interface TuningReceipt {
 	pos: number
 	/** Wall-clock time of the receipt (ms since the epoch; TuningLedgerOptions.now): status only. */
 	at: number
+	/**
+	 * Payload bytes that may still have been in flight towards the core when the receiver read the
+	 * frame, as measured by the intake (hub placements: the upstream FIONREAD plus the in-flight
+	 * bound). The settle term never drops below the link's estimate. Absent: the link estimate.
+	 */
+	inFlightBytes?: number
 }
 
 export interface TuningDoubt {
@@ -126,7 +136,11 @@ export interface TuningDoubt {
 	field: DoubtField
 	/** Lower bound of the first position the doubt applies to. */
 	pos: number
-	/** The source's last receipt seq when the doubt was raised: it unproves receipts after none. */
+	/**
+	 * The source's last receipt seq when the doubt was raised. A doubt applies to a receipt raised
+	 * at or before that seq, or to one recorded at a position before the doubt's (a hub placement
+	 * recorded after the doubt at an earlier position: the doubt's evidence lies past it).
+	 */
 	afterSeq: number
 	reason: string
 }
@@ -288,7 +302,7 @@ class SessionRecord implements LedgerSession {
 	 */
 	evictedDoubt: Record<
 		GatedField,
-		{ minPos: number; maxAfterSeq: number } | null
+		{ minPos: number; maxPos: number; maxAfterSeq: number } | null
 	> = {
 		frequency: null,
 		sampleRate: null,
@@ -310,6 +324,12 @@ class SessionRecord implements LedgerSession {
 		GatedField,
 		{ start: number; end: number; reason: string }[]
 	> = { frequency: [], sampleRate: [] }
+	/**
+	 * A placed connection (hub intake) reports here the lowest position a frame of `field` was
+	 * written at that is not receipted yet (null: none). Null for a connection whose frames are
+	 * receipted at their write callback (today's socket path).
+	 */
+	queuedFrom: ((field: TuningField) => number | null) | null = null
 	constructor(
 		readonly sourceId: string,
 		readonly session: number,
@@ -505,12 +525,42 @@ interface QueuedCount {
 	count: number
 	value: number
 	writer: TuningWriter | null
+	/**
+	 * Placed connections only: the session position each queued frame was written at, oldest
+	 * first from `writeHead` (FIFO with the flush; O(1) per frame, compacted when half is spent).
+	 */
+	writePos: number[] | null
+	writeHead: number
+}
+
+/** Where the intake placed a write's frames (SourceIntake.noteCommandBytes). */
+export interface WritePlacement {
+	/** The exact payload position; null: the frames never reached the receiver. */
+	pos: number | null
+	/** Bytes that may still have been in flight then (TuningReceipt.inFlightBytes). */
+	inFlightBytes?: number
+	/**
+	 * With `pos: null`: the frames may have reached the receiver at an unknown position (the
+	 * intake's placements disagreed with its own accounting); the session is doubted from the
+	 * write position on, and the intake ends the connection.
+	 */
+	mismatch?: true
 }
 
 interface PreSessionFrame {
 	frame: PendingFrame
 	/** Present on a write's last frame: its receipt callback. */
 	done?: ReceiptCallback
+	/** A placed write's position (absent: the session's start). */
+	atPos?: number
+	inFlightBytes?: number
+}
+
+interface ParkedFrame {
+	frame: PendingFrame
+	done?: ReceiptCallback
+	atPos: number
+	inFlightBytes?: number
 }
 
 /**
@@ -518,20 +568,32 @@ interface PreSessionFrame {
  * once its first payload is forwarded. Frames flushed before the session starts are recorded at
  * position 0 of the session when it starts (no payload byte was forwarded before them); a
  * connection closed before its first payload records nothing.
+ *
+ * A **placed** connection (hub intake) gets each write's exact position from the intake: a
+ * placement at or below the live position records there at once, one beyond it is **parked** and
+ * recorded when forwardData reaches it (`parkedUntil`, one comparison per chunk while anything is
+ * parked). Its frames stay queued until recorded, and a read ending past the position a queued
+ * frame was written at reads `settling` (TuningLedger.proveField).
  */
 export class LedgerConnection {
 	private readonly assembler = new RtlTcpFrameAssembler()
 	/** Flushed before the first payload; at most TUNING_LEDGER_RING (older ones count evicted). */
 	private pending: PreSessionFrame[] = []
 	private readonly pendingEvicted = new Map<TuningField, number>()
-	/** Written frames not receipted yet, per field (backpressure or pre-session). */
+	/** Placed beyond the live position, oldest first; at most TUNING_LEDGER_RING. */
+	private parked: ParkedFrame[] = []
+	/** Written frames not receipted yet, per field (backpressure, pre-session or parked). */
 	private readonly queued = new Map<TuningField, QueuedCount>()
 	private closed = false
 	private live: SessionRecord | null = null
+	/** The position of the oldest parked frame (+Infinity: none). Hot path: compare, then release. */
+	parkedUntil = Number.POSITIVE_INFINITY
 
 	constructor(
 		private readonly ledger: TuningLedger,
 		readonly sourceId: string,
+		/** Receipts follow the intake's placements (hub intake). */
+		readonly placed = false,
 	) {}
 
 	/** The started session, or null before the first payload (and after close). */
@@ -545,6 +607,14 @@ export class LedgerConnection {
 		return q && q.count > 0 ? { value: q.value, writer: q.writer } : null
 	}
 
+	/** The lowest position a not-yet-receipted frame of `field` was written at, or null. */
+	queuedFrom(field: TuningField): number | null {
+		const q = this.queued.get(field)
+		return q && q.count > 0 && q.writePos !== null
+			? (q.writePos[q.writeHead] ?? null)
+			: null
+	}
+
 	/**
 	 * Starts the session (first payload about to be forwarded). Idempotent while open; null once
 	 * closed.
@@ -554,6 +624,7 @@ export class LedgerConnection {
 		if (this.live) return this.live
 		const session = this.ledger.beginSession(this.sourceId)
 		this.live = session
+		if (this.placed) session.queuedFrom = field => this.queuedFrom(field)
 		for (const [field, n] of this.pendingEvicted)
 			session.evicted.set(field, (session.evicted.get(field) ?? 0) + n)
 		this.pendingEvicted.clear()
@@ -561,8 +632,26 @@ export class LedgerConnection {
 		this.pending = []
 		let last: TuningReceipt | null = null
 		for (const p of pending) {
+			// A placement past the session's start (position 0) parks; every later frame parks behind it.
+			if (this.parked.length > 0 || (p.atPos !== undefined && p.atPos > 0)) {
+				this.park({
+					frame: p.frame,
+					atPos: p.atPos ?? 0,
+					...(p.done ? { done: p.done } : {}),
+					...(p.inFlightBytes !== undefined
+						? { inFlightBytes: p.inFlightBytes }
+						: {}),
+				})
+				continue
+			}
 			this.unqueue(p.frame.field)
-			const receipt = this.ledger.record(session, p.frame)
+			const receipt = this.ledger.record(
+				session,
+				p.frame,
+				p.atPos !== undefined
+					? { pos: 0, inFlightBytes: p.inFlightBytes }
+					: undefined,
+			)
 			if (receipt) last = receipt
 			if (p.done) {
 				safeReceiptCallback(p.done, last)
@@ -578,18 +667,24 @@ export class LedgerConnection {
 
 	/**
 	 * Parses `payload` in socket order now; the returned callback, run from the socket write
-	 * callback, records the frames at the session position of that moment. A write error records
-	 * nothing and raises a doubt on both fields (the receiver may have parsed part of it).
+	 * callback, records the frames at the session position of that moment, or (with a
+	 * `placement`, hub intake) at the placement's exact position: at once when the live position
+	 * has reached it, else when forwardData does (parked). A write error records nothing and raises a
+	 * doubt on both fields (the receiver may have parsed part of it). A null placement (the bytes
+	 * never reached the receiver: the front ended or closed first) records nothing and raises no
+	 * doubt: the command touched no delivered byte, and a doubt would make the controller re-write
+	 * at once into the same ending front (a hot loop while Node is starved, M1).
 	 * `onReceipt` runs once with the receipt of the payload's last complete frame, or null.
 	 */
 	write(
 		payload: Buffer,
 		tag: TuningWriterTag | undefined,
 		onReceipt?: ReceiptCallback,
-	): (err?: Error | null) => void {
+	): (err?: Error | null, placement?: WritePlacement) => void {
 		const frames = this.closed ? [] : this.assembler.push(payload, tag)
-		for (const frame of frames) this.enqueue(frame)
-		return err => {
+		const writePos = this.live?.pos ?? 0
+		for (const frame of frames) this.enqueue(frame, writePos)
+		return (err, placement) => {
 			if (this.closed || frames.length === 0) {
 				safeReceiptCallback(onReceipt, null)
 				return
@@ -601,6 +696,27 @@ export class LedgerConnection {
 				safeReceiptCallback(onReceipt, null)
 				return
 			}
+			if (placement !== undefined && placement.pos === null) {
+				for (const frame of frames) this.unqueue(frame.field)
+				if (placement.mismatch === true && session)
+					this.ledger.doubtSession(
+						session,
+						"both",
+						"placement-mismatch",
+						writePos,
+					)
+				safeReceiptCallback(onReceipt, null)
+				return
+			}
+			const atPos =
+				placement !== undefined && validPos(placement.pos)
+					? placement.pos
+					: undefined
+			const inFlight =
+				placement?.inFlightBytes !== undefined &&
+				validPos(placement.inFlightBytes)
+					? { inFlightBytes: placement.inFlightBytes }
+					: {}
 			if (!session) {
 				// Still queued (reported so) until the session starts and receipts them.
 				frames.forEach((frame, i) => {
@@ -613,21 +729,64 @@ export class LedgerConnection {
 						)
 						if (gone.done) safeReceiptCallback(gone.done, null)
 					}
-					this.pending.push(
-						i === frames.length - 1 && onReceipt
-							? { frame, done: onReceipt }
-							: { frame },
-					)
+					this.pending.push({
+						frame,
+						...(i === frames.length - 1 && onReceipt
+							? { done: onReceipt }
+							: {}),
+						...(atPos !== undefined ? { atPos, ...inFlight } : {}),
+					})
 				})
+				return
+			}
+			if (
+				atPos !== undefined &&
+				(this.parked.length > 0 || atPos > session.pos)
+			) {
+				frames.forEach((frame, i) =>
+					this.park({
+						frame,
+						atPos,
+						...inFlight,
+						...(i === frames.length - 1 && onReceipt
+							? { done: onReceipt }
+							: {}),
+					}),
+				)
 				return
 			}
 			let last: TuningReceipt | null = null
 			for (const frame of frames) {
 				this.unqueue(frame.field)
-				last = this.ledger.record(session, frame) ?? last
+				last =
+					this.ledger.record(
+						session,
+						frame,
+						atPos !== undefined ? { pos: atPos, ...inFlight } : undefined,
+					) ?? last
 			}
 			safeReceiptCallback(onReceipt, last)
 		}
+	}
+
+	/**
+	 * Records every parked frame whose position the live session has reached, in order. Called by
+	 * forwardData once `session.pos >= parkedUntil`.
+	 */
+	releaseParked(): void {
+		const session = this.live
+		if (!session) return
+		let last: TuningReceipt | null = null
+		while (this.parked.length > 0 && this.parked[0]!.atPos <= session.pos) {
+			const p = this.parked.shift()!
+			last = this.recordParked(session, p) ?? last
+			if (p.done) {
+				safeReceiptCallback(p.done, last)
+				last = null
+			}
+			if (this.live !== session || this.closed) break
+		}
+		this.parkedUntil = this.parked[0]?.atPos ?? Number.POSITIVE_INFINITY
 	}
 
 	/** Ends the session (close, pause, removal); later flushes record nothing. */
@@ -636,30 +795,81 @@ export class LedgerConnection {
 		this.closed = true
 		const pending = this.pending
 		this.pending = []
+		const parked = this.parked
+		this.parked = []
+		this.parkedUntil = Number.POSITIVE_INFINITY
 		this.queued.clear()
 		for (const p of pending) if (p.done) safeReceiptCallback(p.done, null)
+		for (const p of parked) if (p.done) safeReceiptCallback(p.done, null)
 		const live = this.live
 		this.live = null
-		if (live) this.ledger.finishSession(live)
+		if (live) {
+			live.queuedFrom = null
+			this.ledger.finishSession(live)
+		}
 		this.ledger.connectionClosed(this)
 	}
 
-	private enqueue(frame: PendingFrame): void {
+	/**
+	 * Parks a placed frame. Past TUNING_LEDGER_RING the oldest is recorded at once at its exact
+	 * (future) position: reads end at the live position, so none sees it before it is reached, and
+	 * its position stays exact (no doubt: a doubt would make the controller re-write in a loop).
+	 */
+	private park(p: ParkedFrame): void {
+		if (this.parked.length >= TUNING_LEDGER_RING) {
+			const gone = this.parked.shift()!
+			const session = this.live
+			const receipt = session ? this.recordParked(session, gone) : null
+			if (gone.done) safeReceiptCallback(gone.done, receipt)
+		}
+		this.parked.push(p)
+		this.parkedUntil = this.parked[0]!.atPos
+	}
+
+	private recordParked(
+		session: SessionRecord,
+		p: ParkedFrame,
+	): TuningReceipt | null {
+		this.unqueue(p.frame.field)
+		return this.ledger.record(session, p.frame, {
+			pos: p.atPos,
+			inFlightBytes: p.inFlightBytes,
+		})
+	}
+
+	private enqueue(frame: PendingFrame, writePos: number): void {
 		const q = this.queued.get(frame.field)
 		const writer = frame.tag?.writer ?? null
 		if (q) {
 			q.count += 1
 			q.value = frame.value
 			q.writer = writer
+			q.writePos?.push(writePos)
 		} else
-			this.queued.set(frame.field, { count: 1, value: frame.value, writer })
+			this.queued.set(frame.field, {
+				count: 1,
+				value: frame.value,
+				writer,
+				writePos: this.placed ? [writePos] : null,
+				writeHead: 0,
+			})
 	}
 
 	private unqueue(field: TuningField): void {
 		const q = this.queued.get(field)
 		if (!q) return
 		q.count -= 1
-		if (q.count <= 0) this.queued.delete(field)
+		if (q.count <= 0) {
+			this.queued.delete(field)
+			return
+		}
+		const positions = q.writePos
+		if (positions === null) return
+		q.writeHead += 1
+		if (q.writeHead > 64 && q.writeHead * 2 > positions.length) {
+			positions.splice(0, q.writeHead)
+			q.writeHead = 0
+		}
 	}
 }
 
@@ -695,9 +905,16 @@ export class TuningLedger {
 		}
 	}
 
-	/** A new connection of `sourceId` (its session starts at its first payload). */
-	connection(sourceId: string): LedgerConnection {
-		const conn = new LedgerConnection(this, sourceId)
+	/**
+	 * A new connection of `sourceId` (its session starts at its first payload). `placed`: its
+	 * writes are receipted at the positions the intake places them at (hub intake), not at their
+	 * write callback.
+	 */
+	connection(
+		sourceId: string,
+		options: { placed?: boolean } = {},
+	): LedgerConnection {
+		const conn = new LedgerConnection(this, sourceId, options.placed === true)
 		this.sourceRecord(sourceId).current = conn
 		return conn
 	}
@@ -746,13 +963,36 @@ export class TuningLedger {
 		if (record?.current === conn) record.current = null
 	}
 
-	/** @internal A flushed frame at the session's current position; null when not recorded. */
-	record(session: LedgerSession, frame: PendingFrame): TuningReceipt | null {
+	/**
+	 * @internal A flushed frame at the session's current position, or at `placed.pos` (a hub
+	 * placement: exact, normally at or below the current position); null when not recorded.
+	 * Receipt positions stay monotone in seq order: a placement below the session's newest
+	 * receipt (never sent by the hub, whose placements resolve in command order) records there and
+	 * doubts both fields from its own position (fail closed, never hidden).
+	 */
+	record(
+		session: LedgerSession,
+		frame: PendingFrame,
+		placed?: { pos: number; inFlightBytes?: number | undefined },
+	): TuningReceipt | null {
 		const live = this.liveRecord(session)
 		if (!live) return null
 		const record = this.sources.get(live.sourceId)
 		if (!record) return null
+		let pos = live.pos
+		let outOfOrder = false
+		if (placed !== undefined) {
+			const newest = live.receipts.at(-1)?.pos ?? live.evictedMaxPos
+			if (validPos(placed.pos)) {
+				// m-1: never hide a placement below the newest receipt (the supervisor fails the dial on
+				// a non-monotone hub position): it records there and doubts the field from its own
+				// position, so no read past it is proven by this receipt alone.
+				outOfOrder = placed.pos < newest
+				pos = Math.max(placed.pos, newest, 0)
+			} else pos = live.pos
+		}
 		record.seq += 1
+		const inFlight = placed?.inFlightBytes
 		const receipt: TuningReceipt = {
 			session: live.session,
 			seq: record.seq,
@@ -760,8 +1000,11 @@ export class TuningLedger {
 			value: frame.value,
 			writer: frame.tag?.writer,
 			...(frame.tag?.jobId !== undefined ? { jobId: frame.tag.jobId } : {}),
-			pos: live.pos,
+			pos,
 			at: (this.opts.now ?? Date.now)(),
+			...(inFlight !== undefined && validPos(inFlight)
+				? { inFlightBytes: inFlight }
+				: {}),
 		}
 		if (frame.field === "sampleRate" && validValue("sampleRate", frame.value))
 			live.maxRate = Math.max(live.maxRate, frame.value)
@@ -781,6 +1024,8 @@ export class TuningLedger {
 			field: frame.field,
 			receipt: { ...receipt },
 		})
+		if (outOfOrder && placed !== undefined)
+			this.doubtSession(live, "both", "placement-out-of-order", placed.pos)
 		return receipt
 	}
 
@@ -821,9 +1066,10 @@ export class TuningLedger {
 				live.evictedDoubt[f] = range
 					? {
 							minPos: Math.min(range.minPos, gone.pos),
+							maxPos: Math.max(range.maxPos, gone.pos),
 							maxAfterSeq: Math.max(range.maxAfterSeq, gone.afterSeq),
 						}
-					: { minPos: gone.pos, maxAfterSeq: gone.afterSeq }
+					: { minPos: gone.pos, maxPos: gone.pos, maxAfterSeq: gone.afterSeq }
 			}
 		}
 		this.notify(live.sourceId, { kind: "doubt", field, reason })
@@ -1231,19 +1477,45 @@ export class TuningLedger {
 			if (posA < h.end && posB > h.start)
 				return { ok: false, reason: "doubt", doubtReason: h.reason }
 		// A doubt unproves the receipts raised before it (by seq), from its position on; equal
-		// positions do not matter: a receipt after the doubt re-proves.
+		// positions do not matter: a receipt after the doubt re-proves. B3: a receipt recorded
+		// after the doubt at an earlier position (a hub placement) does not re-prove past it.
 		const evicted = live.evictedDoubt[field]
-		if (evicted && evicted.maxAfterSeq >= receipt.seq && evicted.minPos < posB)
+		if (
+			evicted &&
+			(evicted.maxAfterSeq >= receipt.seq || evicted.maxPos > receipt.pos) &&
+			evicted.minPos < posB
+		)
 			return { ok: false, reason: "doubt", doubtReason: "older-than-ring" }
 		for (const d of live.doubts) {
 			if (d.pos >= posB) break
-			if (d.afterSeq < receipt.seq) continue
+			if (d.afterSeq < receipt.seq && !(d.pos > receipt.pos)) continue
 			if (d.field === field || d.field === "both")
 				return { ok: false, reason: "doubt", doubtReason: d.reason }
+		}
+		// B2: a frame of the field (or a centre mover) written to a placed connection and not
+		// receipted yet may already be in effect anywhere past the position it was written at.
+		if (live.queuedFrom !== null) {
+			const from = this.queuedMoverFrom(live, field)
+			if (from !== null && from < posB) return { ok: false, reason: "settling" }
 		}
 		const boundary = this.boundaryOf(live, field, receipt, posB)
 		if (!(posA >= boundary)) return { ok: false, reason: "settling" }
 		return { ok: true, receipt, boundary }
+	}
+
+	/** The lowest write position of a queued frame of `field` or of any centre mover; null: none. */
+	private queuedMoverFrom(
+		live: SessionRecord,
+		field: GatedField,
+	): number | null {
+		const probe = live.queuedFrom
+		if (probe === null) return null
+		let from = probe(field)
+		for (const mover of CENTRE_MOVERS) {
+			const p = probe(mover)
+			if (p !== null && (from === null || p < from)) from = p
+		}
+		return from
 	}
 
 	/**
@@ -1268,7 +1540,10 @@ export class TuningLedger {
 		for (const r of live.receipts) {
 			if (r.seq <= receipt.seq || r.pos >= posB || !movers.has(r.field))
 				continue
-			boundary = Math.max(boundary, r.pos + settle)
+			boundary = Math.max(
+				boundary,
+				r.pos + Math.max(settle, r.inFlightBytes ?? 0),
+			)
 		}
 		const evictedMover =
 			field === "frequency"
@@ -1279,7 +1554,10 @@ export class TuningLedger {
 			evictedMover.seq > receipt.seq &&
 			evictedMover.pos < posB
 		)
-			boundary = Math.max(boundary, evictedMover.pos + settle)
+			boundary = Math.max(
+				boundary,
+				evictedMover.pos + Math.max(settle, evictedMover.inFlightBytes ?? 0),
+			)
 		return boundary
 	}
 
@@ -1330,6 +1608,13 @@ export class TuningLedger {
 		const link = this.opts.settleLink?.(live.sourceId) ?? {
 			configuredSettleMs: DEFAULT_LEDGER_SETTLE_MS,
 		}
-		return settleBytes(rate, frameBytes, link)
+		// m2: a measured in-flight figure (hub placement) only ever raises the link's estimate.
+		if (receipt.inFlightBytes === undefined)
+			return settleBytes(rate, frameBytes, link)
+		const estimate = link.inFlightBytes ?? IN_FLIGHT_BOUND_BYTES
+		return settleBytes(rate, frameBytes, {
+			...link,
+			inFlightBytes: Math.max(receipt.inFlightBytes, estimate),
+		})
 	}
 }

@@ -120,6 +120,62 @@ describe("SourceManager through the injected hub intake", () => {
 		expect(receiverClose).toHaveBeenCalled()
 	})
 
+	it("M-A: a hub that never reports ready fails IQHUB_UNAVAILABLE at default timings, no receiver ETIMEDOUT", async () => {
+		fake = new FakeHub()
+		fake.noReady = true
+		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
+		manager = new SourceManager(log, { intake })
+		const endpointClose = vi.spyOn(
+			manager as unknown as { noteEndpointClose: () => void },
+			"noteEndpointClose",
+		)
+		const started = performance.now()
+		await expect(manager.connect(source())).rejects.toThrow()
+		expect(performance.now() - started).toBeGreaterThanOrEqual(4900)
+		const status = manager.getStatus("rx")
+		expect(status?.connectFailure).toBeUndefined()
+		expect(status?.lastError).toContain("IQ hub")
+		expect(endpointClose).not.toHaveBeenCalled()
+	}, 15_000)
+
+	it("M-A: a hub that never answers the connect fails IQHUB_HUNG after its deadline plus grace, no receiver failure", async () => {
+		fake = new FakeHub()
+		fake.connectBehavior = () => ({ kind: "silent" })
+		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
+		manager = new SourceManager(log, { intake })
+		const endpointClose = vi.spyOn(
+			manager as unknown as { noteEndpointClose: () => void },
+			"noteEndpointClose",
+		)
+		const errors: Error[] = []
+		manager.on("error", (_id: string, err: Error) => errors.push(err))
+		const started = performance.now()
+		await expect(manager.connect(source())).rejects.toThrow()
+		expect(performance.now() - started).toBeGreaterThanOrEqual(6900)
+		expect(manager.getStatus("rx")?.connectFailure).toBeUndefined()
+		expect(endpointClose).not.toHaveBeenCalled()
+		expect(fake.last.requestsOf("abort")).toHaveLength(1)
+	}, 15_000)
+
+	it("M-A: the hub's own upstream timeout is the receiver's (ETIMEDOUT, class timeout)", async () => {
+		fake = new FakeHub()
+		fake.connectBehavior = () => ({ kind: "refuse", reason: "timeout" })
+		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
+		manager = new SourceManager(log, { intake })
+		const endpointClose = vi.spyOn(
+			manager as unknown as { noteEndpointClose: (id: string) => void },
+			"noteEndpointClose",
+		)
+		await expect(manager.connect(source())).rejects.toThrow()
+		// m5: a receiver failure, so the endpoint fallback is reached (unlike a hub stall).
+		expect(endpointClose).toHaveBeenCalledWith("rx", expect.anything())
+		expect(manager.getStatus("rx")?.connectFailure).toMatchObject({
+			errorClass: "timeout",
+			attempts: 1,
+		})
+		expect(fake.last.requestsOf("connect")[0]?.["timeoutMs"]).toBe(5000)
+	})
+
 	it("M8: a host name dials Node's own socket (connect(port, host)), never the hub", async () => {
 		fake = new FakeHub()
 		const intake = new HubSourceIntake({ logger: log, factory: fake.factory })
@@ -143,6 +199,8 @@ describe("byte invariants through the injected intake", () => {
 		// Feature: rx-starvation, Property 2: hub intake conserves bytes at every event
 		// Validates: S3 I-S3, S6, S9, S10, S11, S14, M5
 		fake = new FakeHub()
+		// F9: the attempt's graceful abort keeps it open a little while the stream still arrives.
+		fake.frontGraceMs = 5
 		const supervisor = new Supervisor({
 			sourceId: "rx",
 			logger: log,
@@ -166,10 +224,17 @@ describe("byte invariants through the injected intake", () => {
 						{ maxLength: 12 },
 					),
 					fc.oneof(
+						// The upstream ends with the front drained: D = 0.
 						fc.record({
 							kind: fc.constant("eof" as const),
-							frames: fc.integer({ min: 0, max: 2048 }),
+							frames: fc.constant(0),
 						}),
+						// The upstream ends with a backlog; Node's end cuts it: D = backlog.
+						fc.record({
+							kind: fc.constant("eof-cut" as const),
+							frames: fc.integer({ min: 1, max: 2048 }),
+						}),
+						// Node closes early while the stream still arrives: K = what it abandoned.
 						fc.record({
 							kind: fc.constant("node-close" as const),
 							frames: fc.integer({ min: 1, max: 2048 }),
@@ -218,28 +283,39 @@ describe("byte invariants through the injected intake", () => {
 							await conserved()
 						}
 						const tail = ending.frames * 2
+						let upstream: number
 						if (ending.kind === "eof") {
-							front.endStream("eof", { discardedBytes: tail })
+							front.endStream("eof")
 							const result = await closed
 							expect(result.error).toBeNull()
+							upstream = hub.sourcePos - startPos
+						} else if (ending.kind === "eof-cut") {
+							front.endStream("eof", { backlogBytes: tail })
+							upstream = hub.sourcePos - startPos
+							socket.end()
+							await closed
+							await until(() => accounting.end !== null)
 						} else {
-							// M5: Node closes early; what the front sent behind its pause is abandoned.
+							// M5: Node closes early; what the front sent behind its pause is abandoned,
+							// and the stream keeps arriving through the attempt's graceful grace.
 							socket.pause()
 							front.send(Buffer.alloc(tail, 0xee))
 							await new Promise(resolve => setTimeout(resolve, 1))
+							upstream = hub.sourcePos - startPos
 							socket.destroy()
 							await closed
 							await until(() => accounting.end !== null)
+							front.send(Buffer.alloc(tail, 0xdd))
+							expect(hub.sourcePos - startPos).toBe(upstream + tail)
 						}
 						expect(received.bytes()).toEqual(
 							Buffer.concat([headerBuf, ...sent]),
 						)
-						const upstream = hub.sourcePos - startPos
 						expect(accounting.check(upstream, nodeBytes())).toMatchObject({
 							holds: true,
 							gaps: accounting.droppedBytes,
-							discarded: ending.kind === "eof" ? tail : 0,
-							abandoned: ending.kind === "eof" ? 0 : tail,
+							discarded: ending.kind === "eof-cut" ? tail : 0,
+							abandoned: ending.kind === "node-close" ? tail : 0,
 						})
 					},
 				),

@@ -1248,6 +1248,51 @@ The spectrum worker read 165 to 168 ms. The wasm NFM chain of the recorder (A1) 
 main thread's profiled busy time. Those two runs only show that the harness works. They are not
 a baseline.
 
+## IQ intake through the hub (2026-11-22)
+
+`WAVEKIT_SOURCE_INTAKE=hub` (opt-in, see `docs/ARCHITECTURE.md` "Source intake") moves the
+`rtl_tcp` socket read off the core's main thread into `wavekit-iqhub`, which reads into a 12 s
+ring on its own thread. The core reads a front sink over a Unix socket; a front more than 6 s
+behind skips whole frames (`sink-gap`, logged by the supervisor and emitted as `intake-gap`), so
+the loss moves from the sender, where it is silent, to the hub, where it is counted.
+
+The budget harness measures it with `--source-intake socket|hub` (and `--iqhub-bin PATH`): hub
+mode sets the core's `WAVEKIT_SOURCE_INTAKE`, `WAVEKIT_IQHUB_BIN` and
+`WAVEKIT_IQHUB_STATS_DIR=<out>/hub-stats`, and the manifest adds two stages after
+`fake-schedule`: `hub-upstream` (the fake's bytes against what the hub read; TCP does not drop)
+and `hub-node` (the hub's stream against what its front delivered plus its counted skips; lost is
+the skips). Its `starvation.intake` section holds the gap list from the core log, the hub's pid
+and `ps -o pri=` before, during and after a late QoS (a pid change is flagged), its CPU per IQ
+second it read and its RSS. After the window an exact end-of-run check sends the fake its
+stop-and-end signal and compares three independent counts: the fake's `bytesWritten` (U),
+the core's `bytesReceived` (N), and the hub's final front counts (gaps G, discarded tail D,
+abandoned K = sinkBytes − N): `U = N + G + D + K` with D = K = 0 (socket mode: U = N).
+`bytesWritten` is what the fake's kernel accepted, so it is the bytes delivered only when the
+client closed gracefully (no socket error, no forced destroy after 5 s); the fake logs
+`graceful` per client and the check is never exact without it.
+`--core-qos-late` demotes the core's process only, so the hub, spawned at the first connect,
+keeps the default QoS; `--core-qos-late-tree` demotes the core and every descendant, the hub too.
+
+Proof, tier A, 2.4 Msps, 60 s window, one client, `/auto`, core nice 0, channel queue 1 000 ms,
+real channelizer, `--core-qos-late background`, alternating runs on a loaded host (load 11 to
+45: no run is timing-valid; manifests are kept outside the repository):
+
+| Run | Intake | Load start/end | fake-schedule lost | hub-node lost (gaps) | Byte check  | ELU   | Delay p99 / max |
+| --- | ------ | -------------- | ------------------ | -------------------- | ----------- | ----- | --------------- |
+| 1   | socket | 10.6 / 21.1    | 40.1 %             | (none)               | U = N exact | 1.000 | 2.6 s / 9.5 s   |
+| 2   | hub    | 28.6 / 23.5    | 0                  | 38.3 % (4)           | I-S3 exact  | 0.989 | 0.55 s / 5.0 s  |
+| 3   | socket | 45.1 / 32.6    | 65.0 %             | (none)               | U = N exact | 1.000 | 12.9 s / 12.9 s |
+| 4   | hub    | 31.2 / 30.3    | 0                  | 78.0 % (8)           | I-S3 exact  | 1.000 | 2.1 s / 7.6 s   |
+
+The hub kept the default QoS (`ps -o pri=` 31 before, during and after) and used 13 to 14 ms of
+CPU per IQ second it read, with a 59 MB RSS (the 57.6 MB ring). What this shows: with only the
+core demoted, taking the TCP read off the starved main thread stops the sender-side loss, and
+every byte the core does not get is a counted, positioned skip, proven exact against the fake's
+own count. What it does not show: the core still loses the same order of signal (the hub only
+counts it), downstream stages still see the bursts after each stall, and a run with the hub
+demoted too (`--core-qos-late-tree`) or a VM-wide freeze is not covered: there only kernel
+buffers outside the frozen threads hold data.
+
 ## Direct channel input (2026-11-17)
 
 A channelised decoder used to get its channel through the main thread: the `wavekit-chan` channel

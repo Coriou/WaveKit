@@ -46,11 +46,15 @@ import {
 	noteConnectFailure,
 	PEER_CLOSED,
 } from "./source-manager-connect-failure.js"
-import type { SourceIntake } from "./iq-hub/intake.js"
+import type { IntakeGap, SourceIntake } from "./iq-hub/intake.js"
 import {
-	hubIntakeUnavailableError,
+	IQHUB_BIN_ENV,
+	hubIntakeSettingsFrom,
+	intakeErrorVariable,
 	processSourceIntakeMode,
 } from "./iq-hub/intake-mode.js"
+import { spawnHubProcessFactory } from "./iq-hub/hub-process.js"
+import { HubSourceIntake } from "./iq-hub/supervisor.js"
 import type { ConnectFailureRecord } from "./source-manager-connect-failure.js"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError, WaveKitError } from "../utils/errors.js"
@@ -62,6 +66,7 @@ import {
 	type LedgerConnection,
 	type ReceiptCallback,
 	type TuningWriterTag,
+	type WritePlacement,
 } from "./tuning-ledger.js"
 import { TuningUnprovenTracker } from "./tuning-ledger-unproven.js"
 import { SOURCE_METRICS_INTERVAL_MS } from "./link-burst/contract.js"
@@ -344,6 +349,18 @@ export interface SourceManagerEvents {
 	 * configured host (receiver-endpoints 3.4); `host` is the endpoint left.
 	 */
 	"endpoint-fallback": (sourceId: string, host: string) => void
+	/**
+	 * Hub intake: the source's front skipped `droppedBytes` of whole frames at payload position
+	 * `atPos` of ledger session `session` (null before the session started): counted loss, the
+	 * bytes never reach the stream. No consumer yet (the RX S5 governor).
+	 */
+	"intake-gap": (
+		sourceId: string,
+		session: number | null,
+		atPos: number,
+		droppedBytes: number,
+		cause: "lag" | "start" | "stream",
+	) => void
 }
 
 // Exponential backoff constants
@@ -630,7 +647,10 @@ export class SourceManager extends EventEmitter {
 		if (options.intake !== undefined) this.intake = options.intake
 		else if (processSourceIntakeMode(this.logger) === "socket")
 			this.intake = SOCKET_INTAKE
-		else throw hubIntakeUnavailableError()
+		else this.intake = this.processHubIntake(logger)
+		this.intake.attach?.({
+			onIntakeGap: (socket, gap) => this.onIntakeGap(socket, gap),
+		})
 		this.feedPersistence =
 			options.feedPersistence ??
 			(options.stateDir !== undefined
@@ -652,6 +672,51 @@ export class SourceManager extends EventEmitter {
 			capsRate: id => this.sources.get(id)?.config.caps.sampleRate ?? null,
 		})
 		this.unproven = new TuningUnprovenTracker(this.ledger)
+	}
+
+	/**
+	 * WAVEKIT_SOURCE_INTAKE=hub: the hub settings are checked once here, so a missing binary or a
+	 * bad stats directory fails startup (an error naming that variable, never its value), not the
+	 * first connect.
+	 */
+	private processHubIntake(logger: Logger): SourceIntake {
+		let settings: ReturnType<typeof hubIntakeSettingsFrom>
+		try {
+			settings = hubIntakeSettingsFrom(process.env)
+		} catch (error: unknown) {
+			// m3: the refused variable's name (WAVEKIT_IQHUB_BIN or WAVEKIT_IQHUB_STATS_DIR), never its value.
+			this.logger.error(
+				{ variable: intakeErrorVariable(error) ?? IQHUB_BIN_ENV },
+				"Hub intake refused: its settings are not usable; startup stops",
+			)
+			throw error
+		}
+		this.logger.info(
+			{ statsFile: settings.statsDir !== null },
+			"Hub intake: rtl_tcp U8 IQ sources with an IP address read through wavekit-iqhub",
+		)
+		return new HubSourceIntake({
+			logger,
+			factory: spawnHubProcessFactory(settings.bin),
+			statsDir: settings.statsDir,
+		})
+	}
+
+	/** S11/R3 item 4: a hub front skipped whole frames (counted loss) on a source's live attempt. */
+	private onIntakeGap(socket: net.Socket, gap: IntakeGap): void {
+		for (const [id, state] of this.sources) {
+			const attempt = state.attempt
+			if (!attempt || attempt.socket !== socket) continue
+			this.emit(
+				"intake-gap",
+				id,
+				attempt.ledger.session?.session ?? null,
+				gap.atSinkByte,
+				gap.droppedBytes,
+				gap.cause,
+			)
+			return
+		}
 	}
 
 	/** The tuning ledger of every network source (sessions, positions, receipts, doubts). */
@@ -1208,8 +1273,14 @@ export class SourceManager extends EventEmitter {
 				if (!current()) return false
 			}
 			const session = attempt.ledger.session
-			if (session !== null && !state.stream.destroyed)
+			if (session !== null && !state.stream.destroyed) {
 				session.pos += chunk.length
+				// Hub intake: receipts placed past the old position record once it is reached.
+				if (session.pos >= attempt.ledger.parkedUntil) {
+					attempt.ledger.releaseParked()
+					if (!current()) return false
+				}
+			}
 		}
 		let canWrite = true
 		if (!state.stream.destroyed) {
@@ -1706,7 +1777,9 @@ export class SourceManager extends EventEmitter {
 				headerAt: null,
 				watchdog: null,
 				silentTimer: null,
-				ledger: this.ledger.connection(id),
+				ledger: this.ledger.connection(id, {
+					placed: this.intake.ownsConnectDeadline?.(socket) === true,
+				}),
 				intakeFault: false,
 			}
 			const previous = state.attempt
@@ -2096,7 +2169,10 @@ export class SourceManager extends EventEmitter {
 					),
 				)
 			})
-			socket.setTimeout(SOURCE_CONNECT_TIMEOUT_MS)
+			// The hub intake bounds its own connect phase (hub start, configure, the upstream
+			// connect), each with its own code: this timer would count a hub stall as the receiver's.
+			if (this.intake.ownsConnectDeadline?.(socket) !== true)
+				socket.setTimeout(SOURCE_CONNECT_TIMEOUT_MS)
 			if (this.isActiveAttempt(state, attempt))
 				this.intake.connect(socket, id, config, host, port)
 			else safeResolve()
@@ -3765,7 +3841,13 @@ export class SourceManager extends EventEmitter {
 		const ledger =
 			state.attempt?.socket === socket ? state.attempt.ledger : null
 		const accepted = ledger
-			? socket.write(payload, ledger.write(payload, writer, onReceipt))
+			? ledger.placed
+				? this.writePlaced(
+						socket,
+						payload,
+						ledger.write(payload, writer, onReceipt),
+					)
+				: socket.write(payload, ledger.write(payload, writer, onReceipt))
 			: onReceipt
 				? socket.write(payload, () => {
 						try {
@@ -3791,6 +3873,45 @@ export class SourceManager extends EventEmitter {
 				socket,
 				owner: command.signal,
 			})
+		}
+		return accepted
+	}
+
+	/**
+	 * Hub intake (M4): the placement wait is registered synchronously right after `socket.write`, so
+	 * the command offsets follow the write order; the ledger callback runs once both the write
+	 * callback and the placement have arrived (a write error wins at once).
+	 */
+	private writePlaced(
+		socket: net.Socket,
+		payload: Buffer,
+		done: (err?: Error | null, placement?: WritePlacement) => void,
+	): boolean {
+		let wrote = false
+		let failed = false
+		let placement: WritePlacement | null = null
+		const finish = () => {
+			if (failed || !wrote || placement === null) return
+			done(null, placement)
+		}
+		const accepted = socket.write(payload, (err?: Error | null) => {
+			if (err) {
+				failed = true
+				done(err)
+				return
+			}
+			wrote = true
+			finish()
+		})
+		const registered =
+			this.intake.noteCommandBytes?.(socket, payload.length, p => {
+				placement = p
+				finish()
+			}) ?? false
+		// Not a hub front after all: nothing will place the bytes, so none reached a receiver.
+		if (!registered) {
+			placement = { pos: null }
+			finish()
 		}
 		return accepted
 	}

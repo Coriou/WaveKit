@@ -6,8 +6,10 @@
  *     [--rate 1024000|2400000] [--seconds 60] [--warmup 20] [--clients 0|1|2]
  *     [--passive on|off] [--profile] [--counts] [--out DIR] [--keep] [--core PATH]
  *     [--hog N|auto] [--hog-settle S] [--hog-log FILE] [--core-nice K] [--auto 0|1]
- *     [--core-qos default|utility|background | --core-qos-late utility|background]
+ *     [--core-qos default|utility|background | --core-qos-late utility|background
+ *      | --core-qos-late-tree utility|background]
  *     [--channel-input relay|direct] [--channel-queue-ms 50..2000]
+ *     [--source-intake socket|hub] [--iqhub-bin PATH]
  *   node output/bench/main-thread-budget.mjs --finish-image DIR [--label NAME]
  *   node output/bench/main-thread-budget.mjs --reassemble DIR
  *
@@ -52,6 +54,21 @@
  * --channel-queue-ms the channelizer's channelQueueMs (absent: the config default); both are A/B
  * switches for channel-output loss and are recorded in config.json and the core log.
  *
+ * --source-intake hub sets the core's WAVEKIT_SOURCE_INTAKE=hub, WAVEKIT_IQHUB_BIN (--iqhub-bin,
+ * else the environment's, else the crate's release build; the run refuses to start when it is not
+ * an executable file) and WAVEKIT_IQHUB_STATS_DIR=<out>/hub-stats, all three recorded in
+ * intake-env.json and the manifest. The manifest then adds the stages `hub-upstream` (the fake's
+ * bytes vs what the hub read) and `hub-node` (the hub's stream vs what its front delivered to the
+ * core plus its counted skips; lost = the skips), the gap list from the core log, the hub's
+ * pid, `ps -o pri=` before/during/after a late QoS (a pid change is flagged), its CPU per IQ
+ * second and RSS. --core-qos-late demotes the core's process only, so the hub (spawned at the
+ * first connect) keeps the default QoS, which the record shows; --core-qos-late-tree applies the
+ * same policy to the core and every descendant (the hub too): the control run. After the window
+ * (both intakes) the exact end-of-run byte check sends the fake its stop-and-end signal (SIGUSR1:
+ * it ends each client and logs its bytesWritten and whether it closed gracefully), waits for the
+ * stream's end to reach the core (hub: the front's closed entry in the stats file) and compares the fake's bytes, the
+ * core's bytesReceived and the hub's counts: `U = N + G + D + K` with D = K = 0 (socket: U = N).
+ *
  * The work dir (config, state, scene IQ, stand-ins) is removed at the end unless --keep; the
  * out dir (default a new tmp dir, printed) holds the results and is always kept.
  */
@@ -87,6 +104,17 @@ import {
 	accountStages,
 	type ApiEdge,
 	ApiEdgeSchema,
+	ApiSourcesSchema,
+	byteCheckOf,
+	frontDelta,
+	frontsOf,
+	hubGapsOf,
+	type HubStatsLine,
+	type HubStatsSink,
+	HubStatsSinkSchema,
+	type Intake,
+	nearestStats,
+	parseHubStats,
 	buildStages,
 	CORE_QOS,
 	CORE_QOS_LATE,
@@ -333,6 +361,8 @@ const DeltaSchema = z.object({
 	structuredClone: z.number(),
 	sourceChunks: z.number().nullable(),
 	sourceBytes: z.number().nullable(),
+	/** Hub intake: the preload's data bytes on the tagged front socket (a newer preload); absent otherwise. */
+	frontBytes: z.number().nullable().optional(),
 	schedstat: z.object({ waitShare: z.number().nullable() }).nullable(),
 })
 const StallsSchema = z.object({
@@ -398,6 +428,41 @@ const CoverageFileSchema = z.object({
 	seconds: z.number(),
 	result: PreciseCoverageSchema,
 })
+/** What the run recorded about its intake (hub pid and QoS, the tree demotion, the end check's inputs). */
+const IntakeRunSchema = z.object({
+	mode: z.enum(["socket", "hub"]),
+	bin: z.string().nullable(),
+	statsFile: z.string().nullable(),
+	hubPidAtOpen: z.number().int().nullable(),
+	ppidIsCore: z.boolean().nullable(),
+	psPriBefore: z.number().nullable(),
+	psPriApplied: z.number().nullable(),
+	psPriRemoved: z.number().nullable(),
+	tree: z
+		.object({
+			pids: z.array(z.number().int()),
+			applyStatus: z.array(z.number().nullable()),
+			removeStatus: z.array(z.number().nullable()),
+		})
+		.nullable(),
+	endCheck: z
+		.object({
+			clients: z
+				.array(
+					z.object({
+						bytesWritten: z.number(),
+						graceful: z.boolean().optional(),
+					}),
+				)
+				.nullable(),
+			coreBytesReceived: z.number().nullable(),
+			front: HubStatsSinkSchema.nullable(),
+			waitedMs: z.number(),
+		})
+		.nullable(),
+})
+type IntakeRun = z.infer<typeof IntakeRunSchema>
+
 const RunMetaSchema = z.object({
 	tier: z.enum(["A", "B"]),
 	label: z.string(),
@@ -461,6 +526,7 @@ const RunMetaSchema = z.object({
 				.object({ start: z.number().nullable(), end: z.number().nullable() })
 				.optional(),
 			coreQosLate: StarvationSchema.shape.coreQosLate,
+			intake: IntakeRunSchema.optional(),
 		})
 		.optional(),
 })
@@ -581,17 +647,180 @@ function starvationOf(
 	}
 }
 
+/** The manifest's intake section from the run's record, the stats lines and the core log. */
+function intakeOf(
+	run: IntakeRun,
+	/** Every fake client's bytesWritten from its `client-close` lines (when the end check has none). */
+	fakeClients:
+		| { bytesWritten: number; graceful?: boolean | undefined }[]
+		| null,
+	a: HubStatsLine | undefined,
+	b: HubStatsLine | undefined,
+	coreLog: string,
+	startMs: number,
+	endMs: number,
+	rateHz: number,
+): Intake {
+	const check = byteCheckOf({
+		mode: run.mode,
+		clients: run.endCheck?.clients ?? fakeClients,
+		coreBytesReceived: run.endCheck?.coreBytesReceived ?? null,
+		front: run.endCheck?.front ?? null,
+	})
+	if (run.mode === "socket")
+		return { mode: "socket", bin: null, statsFile: null, byteCheck: check }
+	const cpuMs =
+		a !== undefined && b !== undefined && a.pid === b.pid
+			? (b.rusage.userUs + b.rusage.sysUs - a.rusage.userUs - a.rusage.sysUs) /
+				1000
+			: null
+	const { gaps, total } =
+		Number.isFinite(startMs) && Number.isFinite(endMs)
+			? hubGapsOf(coreLog, startMs, endMs)
+			: { gaps: [], total: 0 }
+	return {
+		mode: "hub",
+		bin: run.bin,
+		statsFile: run.statsFile,
+		hub: {
+			pidAtOpen: a?.pid ?? run.hubPidAtOpen,
+			pidAtClose: b?.pid ?? null,
+			pidChanged:
+				a !== undefined &&
+				b !== undefined &&
+				(a.pid !== b.pid ||
+					(run.hubPidAtOpen !== null && run.hubPidAtOpen !== a.pid)),
+			ppidIsCore: run.ppidIsCore,
+			psPriBefore: run.psPriBefore,
+			psPriApplied: run.psPriApplied,
+			psPriRemoved: run.psPriRemoved,
+			effective: qosOfPri(run.psPriApplied ?? run.psPriBefore),
+			cpuMs,
+			// Per IQ second the hub read (its arrivals), not what Node took.
+			cpuMsPerIqSecond: (() => {
+				if (cpuMs === null || a === undefined || b === undefined) return null
+				const hubIq = (b.arrivals.bytes - a.arrivals.bytes) / (2 * rateHz)
+				return hubIq > 0 ? cpuMs / hubIq : null
+			})(),
+			maxRssBytes: b?.rusage.maxRssBytes ?? null,
+			gaps,
+			gapCount: total,
+		},
+		byteCheck: check,
+	}
+}
+
 // === ps (children CPU, by PID) ===
 
-/** Tier A: the core's descendants with their CPU, as `pid ppid time comm` lines. */
-function psUnder(corePid: number): string {
+/** Every process as `{pid, ppid}` (`ps -A`); empty when ps fails. */
+function psRows(): { pid: number; ppid: number }[] {
 	const all = spawnSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8" })
-	if (all.status !== 0) return ""
-	const rows = all.stdout
+	if (all.status !== 0) return []
+	return all.stdout
 		.split("\n")
 		.map(l => /^\s*(\d+)\s+(\d+)/.exec(l))
 		.filter((m): m is RegExpExecArray => m !== null)
 		.map(m => ({ pid: Number(m[1]), ppid: Number(m[2]) }))
+}
+
+/** `ps -o ppid=` of one pid; null when it is gone or unreadable. */
+function ppidOf(pid: number): number | null {
+	const r = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], {
+		encoding: "utf8",
+	})
+	const v = Number(r.stdout.trim())
+	return r.status === 0 && Number.isInteger(v) && v > 0 ? v : null
+}
+
+/** The hub's pid from the newest line of its stats file (waits up to 5 s for one). */
+async function hubPidOf(statsFile: string): Promise<number | null> {
+	const deadline = Date.now() + 5000
+	for (;;) {
+		const lines = existsSync(statsFile)
+			? parseHubStats(readFileSync(statsFile, "utf8"))
+			: []
+		const last = lines.at(-1)
+		if (last !== undefined) return last.pid
+		if (Date.now() > deadline) return null
+		await sleep(250)
+	}
+}
+
+/**
+ * M7: the exact end-of-run check's inputs. The fake gets its stop-and-end signal (SIGUSR1) and
+ * logs each client's bytesWritten and whether it closed gracefully (`stopped`); then the stream's
+ * end must reach the core: hub mode waits for the stats file to show the front that carried the stream closed,
+ * socket mode for the core's count to stop moving. Then the core's bytesReceived is read.
+ */
+async function endOfRunCheck(i: {
+	fake: Proc
+	fakeLog: string
+	statsFile: string | null
+	api: string
+	auth: Record<string, string>
+}): Promise<NonNullable<IntakeRun["endCheck"]>> {
+	const started = Date.now()
+	const StoppedSchema = z.object({
+		ev: z.literal("stopped"),
+		clients: z.array(
+			z.object({
+				bytesWritten: z.number(),
+				graceful: z.boolean().optional(),
+			}),
+		),
+	})
+	let clients:
+		| { bytesWritten: number; graceful?: boolean | undefined }[]
+		| null = null
+	if (alive(i.fake)) {
+		i.fake.child.kill("SIGUSR1")
+		const deadline = Date.now() + 10_000
+		while (clients === null && Date.now() < deadline) {
+			for (const l of readJsonl(i.fakeLog)) {
+				const r = StoppedSchema.safeParse(l)
+				if (r.success) clients = r.data.clients
+			}
+			if (clients === null) await sleep(200)
+		}
+	}
+	let front: HubStatsSink | null = null
+	const bytesNow = async (): Promise<number | null> => {
+		const r = ApiSourcesSchema.safeParse(
+			await getJson(`${i.api}/api/sources`, i.auth),
+		)
+		return r.success
+			? (r.data.find(x => x.id === SOURCE_ID)?.bytesReceived ?? null)
+			: null
+	}
+	if (i.statsFile !== null) {
+		// The front with the stream (the most bytes) once it is closed: its counts are final.
+		const deadline = Date.now() + 15_000
+		while (front === null && Date.now() < deadline) {
+			const last = existsSync(i.statsFile)
+				? parseHubStats(readFileSync(i.statsFile, "utf8")).at(-1)
+				: undefined
+			const fronts = last === undefined ? [] : [...frontsOf(last).values()]
+			const best = fronts.sort((a, b) => b.sinkBytes - a.sinkBytes)[0]
+			if (best !== undefined && best.state === "closed") front = best
+			else await sleep(250)
+		}
+	}
+	// The core's count settles (it read the stream's end): two equal reads 1 s apart, ≤ 10 s.
+	let coreBytesReceived = await bytesNow()
+	const settleDeadline = Date.now() + 10_000
+	while (Date.now() < settleDeadline) {
+		await sleep(1000)
+		const next = await bytesNow()
+		if (next !== null && next === coreBytesReceived) break
+		coreBytesReceived = next
+	}
+	return { clients, coreBytesReceived, front, waitedMs: Date.now() - started }
+}
+
+/** Tier A: the core's descendants with their CPU, as `pid ppid time comm` lines. */
+function psUnder(corePid: number): string {
+	const rows = psRows()
+	if (rows.length === 0) return ""
 	const pids = [...descendantsOf(rows, corePid)]
 	if (pids.length === 0) return ""
 	const r = spawnSync(
@@ -646,8 +875,35 @@ function assemble(outDir: string, meta: RunMeta): Manifest {
 	)
 	const fakeA = fake[0]
 	const fakeB = fake[1]
+	// Hub intake: the hub's stats lines nearest the window edges.
+	const intakeRun = meta.starvationRun?.intake
+	const hubLines =
+		intakeRun?.mode === "hub" &&
+		intakeRun.statsFile !== null &&
+		existsSync(join(outDir, "hub-stats", basename(intakeRun.statsFile)))
+			? parseHubStats(
+					readFileSync(
+						join(outDir, "hub-stats", basename(intakeRun.statsFile)),
+						"utf8",
+					),
+				)
+			: null
+	const hubA =
+		hubLines === null
+			? undefined
+			: nearestStats(hubLines, Date.parse(win.startUtc))
+	const hubB =
+		hubLines === null
+			? undefined
+			: nearestStats(hubLines, Date.parse(win.endUtc))
+	const hubFronts =
+		hubA !== undefined && hubB !== undefined ? frontDelta(hubA, hubB) : null
 	const iq = iqSecondsOf({
-		sourceBytes: win.sourceBytes,
+		// Hub intake: the core's IQ is what the hub's front delivered (the preload counts TCP).
+		sourceBytes:
+			intakeRun?.mode === "hub"
+				? (win.frontBytes ?? hubFronts?.sinkBytes ?? null)
+				: win.sourceBytes,
 		rateHz: meta.rateHz,
 		fakeIqSeconds:
 			fakeA?.iqSeconds !== undefined && fakeB?.iqSeconds !== undefined
@@ -949,7 +1205,9 @@ function assemble(outDir: string, meta: RunMeta): Manifest {
 			rateHz: meta.rateHz,
 			windowSeconds,
 			sourceId: SOURCE_ID,
-			socketBytes: win.sourceBytes,
+			socketBytes:
+				intakeRun?.mode === "hub" ? (win.frontBytes ?? null) : win.sourceBytes,
+			...(intakeRun?.mode === "hub" ? { hub: { a: hubA, b: hubB } } : {}),
 			fakeA,
 			fakeB,
 			edgeA: parsedOr(ApiEdgeSchema, readJson(join(outDir, "api-start.json"))),
@@ -970,6 +1228,50 @@ function assemble(outDir: string, meta: RunMeta): Manifest {
 		Number.isFinite(endMs)
 			? suspensionsOf(readFileSync(coreLogPath, "utf8"), startMs, endMs)
 			: undefined
+	if (starvation !== undefined && intakeRun !== undefined) {
+		const closes = readJsonl(join(outDir, "fake.jsonl")).flatMap(l => {
+			const r = z
+				.object({
+					ev: z.literal("client-close"),
+					bytesWritten: z.number(),
+					graceful: z.boolean().optional(),
+				})
+				.safeParse(l)
+			return r.success
+				? [
+						{
+							bytesWritten: r.data.bytesWritten,
+							...(r.data.graceful !== undefined
+								? { graceful: r.data.graceful }
+								: {}),
+						},
+					]
+				: []
+		})
+		starvation.intake = intakeOf(
+			intakeRun,
+			intakeRun.endCheck?.clients === null && closes.length > 0 ? closes : null,
+			hubA,
+			hubB,
+			existsSync(coreLogPath) ? readFileSync(coreLogPath, "utf8") : "",
+			startMs,
+			endMs,
+			meta.rateHz,
+		)
+		if (intakeRun.tree !== null) starvation.coreQosLateTree = intakeRun.tree
+		if (
+			intakeRun.mode === "hub" &&
+			starvation.intake.hub?.effective === "background" &&
+			intakeRun.tree === null
+		)
+			warnings.push(
+				"the hub ran at the background QoS in a core-only run: it was respawned under the demoted core, or its QoS was read wrong",
+			)
+		if (starvation.intake.hub?.pidChanged === true)
+			warnings.push(
+				"the hub's pid changed in the window (respawned: it inherits the core's QoS)",
+			)
+	}
 	const manifest: Manifest = {
 		schema: 2,
 		label: meta.label,
@@ -1113,7 +1415,31 @@ function starvationLines(manifest: Manifest): string[] {
 		...(st.coreQosLate === undefined
 			? []
 			: [
-					`  core QoS late ${st.coreQosLate.requested}: applied ${st.coreQosLate.appliedUtc ?? "never"}, removed ${st.coreQosLate.removedUtc ?? "never (stays until exit)"}; ps pri ${f(st.coreQosLate.psPriBefore, 0)} -> ${f(st.coreQosLate.psPriApplied, 0)} -> ${f(st.coreQosLate.psPriRemoved, 0)}`,
+					`  core QoS late ${st.coreQosLate.requested}: applied ${st.coreQosLate.appliedUtc ?? "never"}, removed ${st.coreQosLate.removedUtc ?? "never (stays until exit)"}; ps pri ${f(st.coreQosLate.psPriBefore, 0)} -> ${f(st.coreQosLate.psPriApplied, 0)} -> ${f(st.coreQosLate.psPriRemoved, 0)}${st.coreQosLateTree === undefined ? "" : `; tree ${st.coreQosLateTree.pids.length} descendants`}`,
+				]),
+		...intakeLines(st.intake, f),
+	]
+}
+
+function intakeLines(
+	intake: Intake | undefined,
+	f: (v: number | null, d?: number) => string,
+): string[] {
+	if (intake === undefined) return []
+	const c = intake.byteCheck
+	const check =
+		c === undefined
+			? "not run"
+			: c.reason !== null
+				? `not checkable: ${c.reason}`
+				: `${c.exact}: U ${c.upstream} = N ${c.node} + G ${c.gaps} + D ${c.discarded} + K ${c.abandoned}`
+	const h = intake.hub
+	return [
+		`  intake ${intake.mode}; ${intake.mode === "hub" ? "I-S3" : "U = N"} exact: ${check}`,
+		...(h === undefined
+			? []
+			: [
+					`  hub pid ${f(h.pidAtOpen, 0)}${h.pidChanged ? ` -> ${f(h.pidAtClose, 0)} (CHANGED)` : ""}, ps pri ${f(h.psPriBefore, 0)} -> ${f(h.psPriApplied, 0)} -> ${f(h.psPriRemoved, 0)} (${h.effective ?? "?"}), CPU ${f(h.cpuMs)} ms (${f(h.cpuMsPerIqSecond, 2)} ms per IQ s), max RSS ${f(h.maxRssBytes === null ? null : h.maxRssBytes / 1e6)} MB, gaps ${h.gapCount}`,
 				]),
 	]
 }
@@ -1530,8 +1856,15 @@ async function tierA(): Promise<void> {
 	const coreNice = Number(niceRaw)
 	if (!/^-?\d+$/.test(niceRaw) || coreNice < -20 || coreNice > 19)
 		throw new WaveKitError(`bad --core-nice ${niceRaw}`, "BUDGET_ARGS")
-	checkQosOptions(opt("core-qos"), opt("core-qos-late"))
-	const lateRaw = opt("core-qos-late")
+	const lateTreeRaw = opt("core-qos-late-tree")
+	if (lateTreeRaw !== undefined && opt("core-qos-late") !== undefined)
+		throw new WaveKitError(
+			"--core-qos-late and --core-qos-late-tree are mutually exclusive",
+			"BUDGET_ARGS",
+		)
+	const lateTree = lateTreeRaw !== undefined
+	checkQosOptions(opt("core-qos"), opt("core-qos-late") ?? lateTreeRaw)
+	const lateRaw = opt("core-qos-late") ?? lateTreeRaw
 	const coreQosLate =
 		lateRaw === undefined ? null : CORE_QOS_LATE.find(q => q === lateRaw)
 	if (coreQosLate === undefined)
@@ -1574,6 +1907,26 @@ async function tierA(): Promise<void> {
 	)
 		throw new WaveKitError(
 			`bad --channel-queue-ms ${queueRaw} (50..2000)`,
+			"BUDGET_ARGS",
+		)
+	const intakeRaw = opt("source-intake") ?? "socket"
+	if (intakeRaw !== "socket" && intakeRaw !== "hub")
+		throw new WaveKitError(
+			`bad --source-intake ${intakeRaw} (socket|hub)`,
+			"BUDGET_ARGS",
+		)
+	const intakeMode: "socket" | "hub" = intakeRaw
+	const hubBin =
+		intakeMode === "hub"
+			? resolve(
+					opt("iqhub-bin") ??
+						process.env["WAVEKIT_IQHUB_BIN"] ??
+						join(root, "native/wavekit-iqhub/target/release/wavekit-iqhub"),
+				)
+			: null
+	if (hubBin !== null && (!existsSync(hubBin) || !statSync(hubBin).isFile()))
+		throw new WaveKitError(
+			`no wavekit-iqhub at ${hubBin} (make hub-build, or --iqhub-bin)`,
 			"BUDGET_ARGS",
 		)
 	hogs.label = label
@@ -1796,6 +2149,26 @@ async function tierA(): Promise<void> {
 		env["WAVEKIT_CONFIG"] = configPath
 		env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] = privateDir
 		if (channelInput !== undefined) env["WAVEKIT_CHANNEL_INPUT"] = channelInput
+		const hubStatsDir = join(outDir, "hub-stats")
+		const hubStatsFile = join(hubStatsDir, `${SOURCE_ID}.jsonl`)
+		if (intakeMode === "hub" && hubBin !== null) {
+			mkdirSync(hubStatsDir, { recursive: true })
+			env["WAVEKIT_SOURCE_INTAKE"] = "hub"
+			env["WAVEKIT_IQHUB_BIN"] = hubBin
+			env["WAVEKIT_IQHUB_STATS_DIR"] = hubStatsDir
+		}
+		writeFileSync(
+			join(outDir, "intake-env.json"),
+			JSON.stringify(
+				{
+					WAVEKIT_SOURCE_INTAKE: env["WAVEKIT_SOURCE_INTAKE"] ?? null,
+					WAVEKIT_IQHUB_BIN: env["WAVEKIT_IQHUB_BIN"] ?? null,
+					WAVEKIT_IQHUB_STATS_DIR: env["WAVEKIT_IQHUB_STATS_DIR"] ?? null,
+				},
+				null,
+				2,
+			),
+		)
 		env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`
 		env["BUDGET_OUT"] = join(outDir, "preload")
 		env["BUDGET_SOURCE_PORT"] = String(fakePort)
@@ -1971,6 +2344,51 @@ async function tierA(): Promise<void> {
 						scope:
 							"the core's process only (taskpolicy -p): decoder and channelizer children it already spawned keep the default QoS",
 					}
+		// The hub's pid (its stats file) and priority before any late QoS.
+		const hubRec: IntakeRun = {
+			mode: intakeMode,
+			bin: hubBin,
+			statsFile: intakeMode === "hub" ? hubStatsFile : null,
+			hubPidAtOpen: null,
+			ppidIsCore: null,
+			psPriBefore: null,
+			psPriApplied: null,
+			psPriRemoved: null,
+			tree: null,
+			endCheck: null,
+		}
+		if (intakeMode === "hub") {
+			hubRec.hubPidAtOpen = await hubPidOf(hubStatsFile)
+			hubRec.ppidIsCore =
+				hubRec.hubPidAtOpen === null
+					? null
+					: ppidOf(hubRec.hubPidAtOpen) === corePid
+			hubRec.psPriBefore = priOf(hubRec.hubPidAtOpen ?? undefined)
+			if (hubRec.ppidIsCore === false)
+				runWarnings.push(
+					`the hub pid ${hubRec.hubPidAtOpen} from the stats file is not the core's child`,
+				)
+		}
+		const treePids =
+			late !== undefined && lateTree
+				? [...descendantsOf(psRows(), corePid)].sort((a, b) => a - b)
+				: []
+		if (late !== undefined && lateTree) {
+			late.scope =
+				"the core and every descendant (taskpolicy -p per pid: the hub, the channelizer, the stand-ins)"
+			const applyStatus = treePids.map(
+				pid =>
+					spawnSync(
+						lateTaskpolicy ?? "",
+						[...(lateArgs?.apply ?? []), "-p", String(pid)],
+						{ encoding: "utf8" },
+					).status,
+			)
+			hubRec.tree = { pids: treePids, applyStatus, removeStatus: [] }
+			log(
+				`core QoS late tree: ${treePids.length} descendants (${treePids.join(",")}), exits ${applyStatus.join(",")}`,
+			)
+		}
 		if (late !== undefined) {
 			const r = spawnSync(
 				late.applyCommand[0] ?? "",
@@ -1982,6 +2400,8 @@ async function tierA(): Promise<void> {
 			late.appliedUtc = utcStamp(Date.now())
 			late.applyStatus = r.status
 			late.psPriApplied = priOf(corePid)
+			if (hubRec.hubPidAtOpen !== null)
+				hubRec.psPriApplied = priOf(hubRec.hubPidAtOpen)
 			log(
 				`core QoS late ${coreQosLate}: ${late.applyCommand.join(" ")} exit ${r.status ?? "?"}, ps pri ${late.psPriBefore ?? "?"} -> ${late.psPriApplied ?? "?"}`,
 			)
@@ -2037,6 +2457,21 @@ async function tierA(): Promise<void> {
 				`core QoS late removed: exit ${r.status ?? "?"}, ps pri ${late.psPriRemoved ?? "?"}`,
 			)
 		}
+		if (hubRec.tree !== null)
+			hubRec.tree.removeStatus = hubRec.tree.pids.map(
+				pid =>
+					spawnSync(
+						lateTaskpolicy ?? "",
+						[...(lateArgs?.remove ?? []), "-p", String(pid)],
+						{ encoding: "utf8" },
+					).status,
+			)
+		if (hubRec.hubPidAtOpen !== null) {
+			hubRec.psPriRemoved = priOf(hubRec.hubPidAtOpen)
+			log(
+				`hub PID ${hubRec.hubPidAtOpen}: ps pri ${hubRec.psPriBefore ?? "?"} -> ${hubRec.psPriApplied ?? "?"} -> ${hubRec.psPriRemoved ?? "?"}`,
+			)
+		}
 		const loadEnd = os.loadavg()
 		hogs.loadEnd = loadEnd[0] ?? null
 		const hogRecord = await finishHogs()
@@ -2072,6 +2507,18 @@ async function tierA(): Promise<void> {
 			)
 			await Promise.race([cov.exited, sleep((seconds + 60) * 1000)])
 		}
+
+		// The exact end-of-run byte check: the fake ends its stream, the core reads it all.
+		hubRec.endCheck = await endOfRunCheck({
+			fake,
+			fakeLog: join(outDir, "fake.jsonl"),
+			statsFile: intakeMode === "hub" ? hubStatsFile : null,
+			api,
+			auth,
+		})
+		log(
+			`end-of-run check inputs: fake clients ${hubRec.endCheck.clients?.length ?? "n/a"}, core bytesReceived ${hubRec.endCheck.coreBytesReceived ?? "n/a"}${intakeMode === "hub" ? `, front ${hubRec.endCheck.front?.sink ?? "none"}` : ""}`,
+		)
 
 		// Stop clients, core, fake.
 		for (const p of procs)
@@ -2153,6 +2600,7 @@ async function tierA(): Promise<void> {
 				autoClient,
 				coreQos: { requested: coreQos, command: qosPrefix, psPri: corePri },
 				...(late === undefined ? {} : { coreQosLate: late }),
+				intake: hubRec,
 				edgeReadMs: {
 					start: edgeA.doneMs - edgeA.signalMs,
 					end: edgeB.doneMs - edgeB.signalMs,

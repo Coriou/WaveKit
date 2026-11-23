@@ -80,7 +80,7 @@
 		},
 		{
 			"code": ["src/core/iq-hub/"],
-			"docs": ["docs/ARCHITECTURE.md"]
+			"docs": ["docs/ARCHITECTURE.md", "docs/PERFORMANCE.md"]
 		},
 		{
 			"code": [

@@ -1,7 +1,14 @@
 import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import * as fs from "node:fs"
+import * as os from "node:os"
+import * as path from "node:path"
 import {
+	DEFAULT_IQHUB_BIN,
+	IQHUB_BIN_ENV,
+	IQHUB_STATS_DIR_ENV,
 	SOURCE_INTAKE_ENV,
+	hubIntakeSettingsFrom,
 	processSourceIntakeMode,
 	resetProcessSourceIntakeModeForTests,
 	sourceIntakeModeFrom,
@@ -21,16 +28,8 @@ describe("WAVEKIT_SOURCE_INTAKE (B1)", () => {
 		expect(sourceIntakeModeFrom("socket")).toBe("socket")
 	})
 
-	it("hub is refused: hub intake is not yet available", () => {
-		let error: unknown
-		try {
-			sourceIntakeModeFrom("hub")
-		} catch (err: unknown) {
-			error = err
-		}
-		expect(error).toBeInstanceOf(ConfigValidationError)
-		expect((error as Error).message).toContain(SOURCE_INTAKE_ENV)
-		expect((error as Error).message).toContain("not yet available")
+	it("hub is selectable (opt-in)", () => {
+		expect(sourceIntakeModeFrom("hub")).toBe("hub")
 	})
 
 	it("any other value names the accepted values and never echoes the value", () => {
@@ -64,11 +63,102 @@ describe("WAVEKIT_SOURCE_INTAKE (B1)", () => {
 		)
 	})
 
-	it("SourceManager fails at startup with hub or a bogus value, and keeps the socket path otherwise", () => {
-		const log = pino({ level: "silent" })
+	it("SourceManager fails at startup with hub and no usable binary, naming WAVEKIT_IQHUB_BIN only", () => {
+		const lines: string[] = []
+		const log = pino(
+			{ level: "debug" },
+			{ write: (line: string) => void lines.push(line) },
+		)
 		vi.stubEnv(SOURCE_INTAKE_ENV, "hub")
-		expect(() => new SourceManager(log)).toThrow(ConfigValidationError)
-		resetProcessSourceIntakeModeForTests()
+		vi.stubEnv(IQHUB_BIN_ENV, "/nonexistent/secret-hub-path")
+		let error: unknown
+		try {
+			new SourceManager(log)
+		} catch (err: unknown) {
+			error = err
+		}
+		expect(error).toBeInstanceOf(ConfigValidationError)
+		const text = `${(error as Error).message} ${JSON.stringify((error as ConfigValidationError).zodError.issues)}`
+		expect(text).toContain(IQHUB_BIN_ENV)
+		expect(text).not.toContain("secret-hub-path")
+		expect(lines.join("")).not.toContain("secret-hub-path")
+		expect(lines.join("")).toContain(IQHUB_BIN_ENV)
+	})
+
+	it("m3: an unusable stats directory fails startup naming WAVEKIT_IQHUB_STATS_DIR, never the binary's variable or the value", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wk-hubbin-"))
+		const bin = path.join(dir, "wavekit-iqhub")
+		fs.writeFileSync(bin, "#!/bin/sh\nexit 1\n", { mode: 0o700 })
+		const lines: string[] = []
+		const log = pino(
+			{ level: "debug" },
+			{ write: (line: string) => void lines.push(line) },
+		)
+		try {
+			vi.stubEnv(SOURCE_INTAKE_ENV, "hub")
+			vi.stubEnv(IQHUB_BIN_ENV, bin)
+			vi.stubEnv(IQHUB_STATS_DIR_ENV, "/nonexistent/secret-stats-dir")
+			expect(() => new SourceManager(log)).toThrow(ConfigValidationError)
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true })
+		}
+		const errors = lines
+			.map(line => JSON.parse(line) as { level: number; variable?: string })
+			.filter(line => line.level >= 50)
+		expect(errors).toHaveLength(1)
+		expect(errors[0]?.variable).toBe(IQHUB_STATS_DIR_ENV)
+		expect(lines.join("")).not.toContain("secret-stats-dir")
+	})
+
+	it("SourceManager starts in hub mode with an executable binary (no hub spawned before a dial)", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wk-hubbin-"))
+		const bin = path.join(dir, "wavekit-iqhub")
+		fs.writeFileSync(bin, "#!/bin/sh\nexit 1\n", { mode: 0o700 })
+		try {
+			vi.stubEnv(SOURCE_INTAKE_ENV, "hub")
+			vi.stubEnv(IQHUB_BIN_ENV, bin)
+			const manager = new SourceManager(pino({ level: "silent" }))
+			await manager.disconnectAll()
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true })
+		}
+	})
+
+	it("hub settings: the default path, a non-executable file, the stats directory", () => {
+		const seen: string[] = []
+		expect(
+			hubIntakeSettingsFrom({}, file => {
+				seen.push(file)
+				return true
+			}),
+		).toEqual({ bin: DEFAULT_IQHUB_BIN, statsDir: null })
+		expect(seen).toEqual([DEFAULT_IQHUB_BIN])
+		let error: unknown
+		try {
+			hubIntakeSettingsFrom({}, () => false)
+		} catch (err: unknown) {
+			error = err
+		}
+		expect(error).toBeInstanceOf(ConfigValidationError)
+		expect((error as Error).message).toContain(IQHUB_BIN_ENV)
+		expect(
+			hubIntakeSettingsFrom(
+				{ [IQHUB_BIN_ENV]: "/x/hub", [IQHUB_STATS_DIR_ENV]: "/stats" },
+				() => true,
+				dir => dir === "/stats",
+			),
+		).toEqual({ bin: "/x/hub", statsDir: "/stats" })
+		expect(() =>
+			hubIntakeSettingsFrom(
+				{ [IQHUB_STATS_DIR_ENV]: "/not-a-dir" },
+				() => true,
+				() => false,
+			),
+		).toThrow(ConfigValidationError)
+	})
+
+	it("SourceManager fails at startup with a bogus value, and keeps the socket path otherwise", () => {
+		const log = pino({ level: "silent" })
 		vi.stubEnv(SOURCE_INTAKE_ENV, "bogus")
 		expect(() => new SourceManager(log)).toThrow(ConfigValidationError)
 		resetProcessSourceIntakeModeForTests()

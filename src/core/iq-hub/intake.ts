@@ -22,10 +22,52 @@ export interface SourceIntake {
 	): void
 	/** The upstream TCP local port of the attempt, when the socket is not the TCP socket itself. */
 	localPortOf(socket: Socket): number | null
+	/**
+	 * True when the intake itself bounds the attempt's connect phase (the hub: its start, its
+	 * configure and the upstream connect each have their own deadline and error code), so
+	 * SourceManager arms no connect timeout of its own on the socket. Absent: false.
+	 */
+	ownsConnectDeadline?(socket: Socket): boolean
+	/**
+	 * Hub intake: registers `bytes` command bytes just written on `socket` (call it synchronously
+	 * after `socket.write`, so the offsets follow the write order) and calls `onPlaced` once with
+	 * the Node payload position the hub placed them at (`pos`, the first byte that can carry IQ
+	 * produced after the receiver read them) and the bytes that may still be in flight then, or
+	 * `pos: null` when they never reached the receiver (`mismatch: true`: they may have, at an
+	 * unknown position; the intake then fails the socket). False (and no call) for a socket that is
+	 * not a hub front: the caller keeps today's receipt at the write callback.
+	 */
+	noteCommandBytes?(
+		socket: Socket,
+		bytes: number,
+		onPlaced: (placement: CommandPlacement) => void,
+	): boolean
 	/** The source was removed: drop its per-source state synchronously (a re-add starts fresh). */
 	dispose(id: string): void
 	/** Every source is gone (shutdown): resolves once every per-source process has exited. */
 	disposeAll(): Promise<void>
+	/** SourceManager hears the intake's own events here (set once, before the first dial). */
+	attach?(listener: SourceIntakeListener): void
+}
+
+/** A whole-frame skip the hub counted on a front (lag or start): counted loss. */
+export interface IntakeGap {
+	/** The Node payload position the skip sits at (the front's sink byte). */
+	atSinkByte: number
+	droppedBytes: number
+	cause: "lag" | "start" | "stream"
+}
+
+export interface SourceIntakeListener {
+	onIntakeGap(socket: Socket, gap: IntakeGap): void
+}
+
+/** Where the hub placed command bytes in the Node payload (see SourceIntake.noteCommandBytes). */
+export interface CommandPlacement {
+	pos: number | null
+	inFlightBytes?: number
+	/** With `pos: null`: the hub's placements disagreed with Node's, so the position is unknown. */
+	mismatch?: true
 }
 
 /** Symbol a hub front socket is tagged with (its value is the source id); the bench preload counts it. */
