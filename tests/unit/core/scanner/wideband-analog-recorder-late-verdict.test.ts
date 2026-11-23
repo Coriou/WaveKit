@@ -18,6 +18,7 @@ import {
 } from "../../../../src/core/scanner/channel/recording-verdict.js"
 import {
 	WIDEBAND_MAX_FILE_MS,
+	widebandRecordingCap,
 	type WidebandTrackInput,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import type { DecodedLabel } from "../../../../src/core/scanner/channel/voice-veto.js"
@@ -660,26 +661,28 @@ describe("late verdict within the grace", () => {
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
 	}, 120_000)
 
-	it("M2: at a cap of 1 recording nothing is held (provisionalRoom(1) = 0): a file under a suspect prior is finalized at once and the next voice is recorded whole", async () => {
-		// cpuBudgetCores 0.3 at 96 kHz: floor(0.25 × 0.3 × 1000 / (50 + 9 × 0.096)) = floor(1.47) = 1.
+	it("M2: a small budget still records 2 at once (the floor): a file under a suspect prior is held (provisionalRoom(2) = 1) and the next voice is recorded whole", async () => {
+		// cpuBudgetCores 0.3 at 96 kHz: floor(0.5 × 0.3 × 1000 / (50 + 9 × 0.096)) = floor(2.95) = 2.
+		expect(widebandRecordingCap(LOW_FS, 0.3)).toBe(2)
 		const h = low(() => spectral("fsk2-wide"), null, { budget: 0.3 })
 		await h.feed(1, false)
 		await over(h, "a", 4)
-		expect(h.timers).toHaveLength(0)
+		expect(h.timers.filter(t => t.live)).toHaveLength(1)
+		await h.fire()
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 		expect(h.rec.activeOn("rtl")).toBe(0)
 		await over(h, "b", 4)
+		await h.fire()
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized", "finalized"])
-		expect(h.timers).toHaveLength(0)
 		expect(refusals(h)).not.toContain("refused:slots")
 		// Its whole over: 4 s + 0.3 s pre-roll at least.
 		expect(h.ops[1]!.frames / 8000).toBeGreaterThanOrEqual(4.25)
 	}, 120_000)
 
 	/**
-	 * At a cap of 2 (budget 1 core at 96 kHz: floor(250 / 50.9) = 4 → 2): a file held on the
+	 * At a limit of 2 (no CPU reading: the floor, whatever the budget's cap): a file held on the
 	 * channel, a live session on a second channel, then a candidate on a third channel finding
 	 * both slots taken.
 	 */

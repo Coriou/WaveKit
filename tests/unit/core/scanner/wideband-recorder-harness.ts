@@ -16,6 +16,7 @@ import pino from "pino"
 import type { Logger } from "../../../../src/utils/logger.js"
 import {
 	WidebandAnalogRecorder,
+	type RecordingCpuReading,
 	type WidebandEngineView,
 	type WidebandTrackInput,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
@@ -117,7 +118,7 @@ export const microtasks = async (n: number): Promise<void> => {
 }
 
 /**
- * Fake analog operations with the store's rules: at most MAX_ACTIVE_ANALOG_PER_SOURCE active
+ * Fake analog operations with the store's rules: at most MAX_ACTIVE_ANALOG_PER_SOURCE (6) active
  * per source (a slot is held until the operation settles), the binding must be live at
  * admission and again at the finish, and the finish takes a few turns (I/O) to settle.
  */
@@ -227,6 +228,8 @@ export function harness(
 		readyHold?: Promise<void>
 		source?: Partial<ConstructorParameters<typeof NfmSource>[0]>
 		reserveCores?: (cores: number) => (() => void) | null
+		/** The efficiency gate's CPU reading (WidebandAnalogDeps.recordingCpu); default absent (the floor, 2). */
+		recordingCpu?: () => RecordingCpuReading | null
 		/** The recorder's refused:tuning report (WidebandAnalogDeps.tuningRefused). */
 		tuningRefused?: (sourceId: string) => void
 		/** The recorder's per-turn budget clock (milliseconds); default performance.now. */
@@ -304,6 +307,7 @@ export function harness(
 		beginAnalog: opts.beginWrap ? opts.beginWrap(begin) : begin,
 		recordTone: (observationId, hz) => tones.push({ observationId, hz }),
 		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
+		...(opts.recordingCpu ? { recordingCpu: opts.recordingCpu } : {}),
 		...(opts.tuningRefused ? { tuningRefused: opts.tuningRefused } : {}),
 		...(decodedLabel ? { decodedLabel } : {}),
 		...(opts.voicePrior ? { voicePrior: opts.voicePrior } : {}),

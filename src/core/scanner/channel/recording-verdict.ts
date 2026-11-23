@@ -926,7 +926,7 @@ export function admissionVerdict(
 export const LATE_VERDICT_GRACE_MS = 3_000 + 8_000 + 15_000
 /**
  * Provisional files held at once on a source recording at most `cap` at once
- * (widebandRecordingCap, 1 or 2: the store's MAX_ACTIVE_ANALOG_PER_SOURCE = 2): a held file keeps
+ * (widebandRecordingLimit, 2 to 6: the store's MAX_ACTIVE_ANALOG_PER_SOURCE = 6): a held file keeps
  * its slot, so cap − 1 are held and one slot stays free for a new recording; at cap 1 none is
  * (0: every file is finished at once). A file to hold past it finishes the oldest held one now
  * (kept), and so does any candidate that finds every slot taken and is not known non-voice.

@@ -494,8 +494,9 @@ describe("recording-verdict table", () => {
 		expect(LATE_VERDICT_GRACE_MS).toBe(26_000)
 	})
 
-	it("provisionalRoom: cap − 1 held files (at cap 1 none is held; at the store's 2, one)", () => {
-		expect(provisionalRoom(MAX_ACTIVE_ANALOG_PER_SOURCE)).toBe(1)
+	it("provisionalRoom: cap − 1 held files (at cap 1 none is held; at the floor 2, one; at the store's 6, five)", () => {
+		expect(provisionalRoom(MAX_ACTIVE_ANALOG_PER_SOURCE)).toBe(5)
+		expect(provisionalRoom(2)).toBe(1)
 		for (const [cap, room] of [
 			[1, 0],
 			[2, 1],

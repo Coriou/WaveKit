@@ -22,6 +22,8 @@ import { WavFileWriter } from "../../../../src/core/scanner/channel/wav-writer.j
 import {
 	AnalogReceiptSchema,
 	AnalogOperations,
+	MAX_ACTIVE_ANALOG_OPERATIONS,
+	MAX_ACTIVE_ANALOG_PER_SOURCE,
 	type AnalogMetadataAdapter,
 	type AnalogOperationIo,
 	type AnalogReceipt,
@@ -1334,18 +1336,53 @@ describe("Task42 owned prepared-link operations", () => {
 			h.evidence.removeDiscovery(h.discoveryId),
 		).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
 	})
-	it("enforces two accepted operations per source without opening a denied payload", async () => {
+	it("enforces MAX_ACTIVE_ANALOG_PER_SOURCE (8 − 2 = 6) accepted operations per source without opening a denied payload", async () => {
+		expect(MAX_ACTIVE_ANALOG_PER_SOURCE).toBe(6)
 		const h = await harness()
-		const first = h.begin()
-		const second = h.begin()
-		await Promise.all([first.ready, second.ready])
-		const third = h.begin()
-		await expect(third.ready).rejects.toThrow("Active analog operation limit")
-		expect((await third.settled).outcome).toBe("failed")
-		expect(existsSync(privateDir(h.root, third.operationId))).toBe(false)
-		first.cancel()
-		second.cancel()
-		await Promise.all([first.settled, second.settled])
+		// At the bound: six on one source are all admitted.
+		const accepted = Array.from({ length: MAX_ACTIVE_ANALOG_PER_SOURCE }, () =>
+			h.begin(),
+		)
+		await Promise.all(accepted.map(op => op.ready))
+		// Past it: the seventh is denied before any payload.
+		const seventh = h.begin()
+		await expect(seventh.ready).rejects.toThrow("Active analog operation limit")
+		expect((await seventh.settled).outcome).toBe("failed")
+		expect(existsSync(privateDir(h.root, seventh.operationId))).toBe(false)
+		for (const op of accepted) op.cancel()
+		await Promise.all(accepted.map(op => op.settled))
+	})
+	it("a second source keeps its floor of 2 while the first holds 6; the ninth operation overall is denied", async () => {
+		expect(MAX_ACTIVE_ANALOG_OPERATIONS).toBe(8)
+		const h = await harness()
+		// The second source's own observation (an association needs the binding's source).
+		const o2 = h.store.ingest(
+			makeObs({
+				id: "o2",
+				sourceId: "src-2",
+				centreHz: 446_500_000,
+				startedAt: NOW,
+			}),
+		)
+		const other = { ...h.binding, sourceId: "src-2", targetHz: 446_500_000 }
+		const beginOther = () =>
+			h.evidence.beginAnalog({
+				discoveryId: o2.discoveryId!,
+				observationId: "o2",
+				binding: other,
+			})
+		const first = Array.from({ length: MAX_ACTIVE_ANALOG_PER_SOURCE }, () =>
+			h.begin(),
+		)
+		const second = [beginOther(), beginOther()]
+		// At the global bound: 6 + 2 = 8 admitted.
+		await Promise.all([...first, ...second].map(op => op.ready))
+		// Past it: a third on the second source is denied by the global limit.
+		const ninth = beginOther()
+		await expect(ninth.ready).rejects.toThrow("Active analog operation limit")
+		expect((await ninth.settled).outcome).toBe("failed")
+		for (const op of [...first, ...second]) op.cancel()
+		await Promise.all([...first, ...second].map(op => op.settled))
 	})
 	it("metadata aggregate overflow and bounded directory enumeration fail closed without cleanup", async () => {
 		const h = await harness()
