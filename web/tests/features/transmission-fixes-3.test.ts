@@ -552,6 +552,15 @@ describe("m8. a later part's start is its own", () => {
 		expect(recordingChangeFields(p).find(f => f.key === "started")).toBeTruthy()
 	})
 
+	it("a first file held for the full grace still starts with its observation", () => {
+		// audio 17:30:05-17:30:15, held 26 s, kept at 17:30:41: gap 31 s
+		const p = payload({
+			finalizedAt: "2026-11-23T17:30:41.000Z",
+			durationMs: 10_000,
+		})
+		expect(keptFileStartOf(p)).toBe("2026-11-23T17:30:00.000Z")
+	})
+
 	it("the gap rule's edge", () => {
 		const obs = Date.parse("2026-11-23T17:30:00.000Z")
 		const at = (gap: number) =>

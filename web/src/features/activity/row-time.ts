@@ -19,11 +19,13 @@ const MAX_STARTS = 1000
 export const recordStarts = new Store<ReadonlyMap<string, string>>(new Map())
 
 /**
- * A first file is kept within seconds of its audio's end; a later part of a rolled-over transmission starts at
- * least one file limit (minutes) after its observation did. A gap between the observation's start and this file's
- * start (its keep less its length) above this means the file is a later part.
+ * A gap between the observation's start and this file's start (its keep less its length) above this means the
+ * file is a later part. A first file's gap is its audio's offset in the observation plus the keep's latency, and
+ * a provisional hold delays the keep by up to 26 s (the recorder's late-verdict grace), so a held first file can
+ * show a gap near 30 s. A later part of a rolled-over transmission starts at least one file limit (120 s) after
+ * its observation. 60 s sits between the two: twice the worst held first file, half the earliest later part.
  */
-export const LATER_PART_GAP_MS = 30_000
+export const LATER_PART_GAP_MS = 60_000
 
 /**
  * When a kept scanner file's own audio starts, from its stored record: the observation's start for its first (or
