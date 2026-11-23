@@ -529,9 +529,12 @@ const UNKNOWN_TIER: SlotTier = {
  *   (or none) is at least `syncCooldownMs` old;
  * - a digital challenger that is live passes the hysteresis at once (a short
  *   burst on a known channel reclaims a slot);
- * - discovery yield: when every slot is digital-held, count >= 2 and a
- *   confirmed hot unknown waits, the lowest-ranked held incumbent whose last
- *   sync is at least `syncCooldownMs` old yields, at most once per pass;
+ * - discovery yield: when every slot is digital-held, count >= 2 and a hot
+ *   challenger that is not analog waits (an unknown past the hysteresis, or a
+ *   digital one past it or live: scanner-identified or remembered digital
+ *   must not wait behind held slots an unknown could open), the lowest-ranked
+ *   held incumbent whose last sync is at least `syncCooldownMs` old yields,
+ *   at most once per pass;
  * - analog challengers never schedule a blocked deadline.
  */
 export function selectChannels(args: {
@@ -649,7 +652,11 @@ export function selectChannels(args: {
 			if (
 				!victims.length &&
 				tierOf &&
-				ct?.tier === "unknown" &&
+				// Any non-analog challenger (analog left at the try gate above)
+				// that is not itself held: a held site that lost its slot must not
+				// yield its way back, or held sites trade slots every dwell.
+				ct !== undefined &&
+				ct.held !== true &&
 				a.state === "hot" &&
 				!yielded &&
 				count >= 2 &&
@@ -658,9 +665,15 @@ export function selectChannels(args: {
 					e => e.incumbent !== undefined && tierOf(e.hz)?.held === true,
 				)
 			) {
-				// Discovery yield: the lowest-ranked held incumbent with an old sync.
+				// Discovery yield: the lowest-ranked quiet held incumbent (not live,
+				// old sync), the same quiet rule as a not-held digital victim.
 				const quiet = chosen
-					.filter(e => e.incumbent!.pinned !== true && oldSync(tierOf(e.hz)))
+					.filter(
+						e =>
+							e.incumbent!.pinned !== true &&
+							args.activity!.get(e.hz)?.live !== true &&
+							oldSync(tierOf(e.hz)),
+					)
 					.sort((x, y) => rank.get(y.hz)! - rank.get(x.hz)!)
 				if (quiet.length) {
 					victims.push(...quiet)

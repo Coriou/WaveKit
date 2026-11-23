@@ -10,6 +10,7 @@ import {
 	selectChannels,
 } from "../../../../src/decoders/enablement/activity-plan.js"
 import {
+	DSD_CHALLENGE_BURST_MEMORY_MS,
 	DSD_CHALLENGE_MAX_OBSERVATIONS,
 	DSD_CHALLENGE_MEMORY_MS,
 	DSD_CHALLENGE_MIN_OBSERVATIONS,
@@ -163,6 +164,68 @@ describe("R2: dsd-fme challenge hysteresis bounds", () => {
 			// After 0 and 1 age out (memory 120 s), the kept 10 000 still pairs.
 			e.note(key, 120_001, 120_001)
 			expect(e.confirmed(key, 120_001)).toBe(true)
+		},
+	)
+
+	it("two separate bursts 120 s to 15 min apart confirm, for 120 s after the second", () => {
+		expect(DSD_CHALLENGE_BURST_MEMORY_MS).toBe(900_000)
+		// One observation per short burst, the second g after the first.
+		const pair = (g: number, at: number) => {
+			const e = new DsdChallengeEvidence()
+			e.note(key, 1_000, 1_000)
+			e.note(key, 1_000 + g, 1_000 + g)
+			e.snapshot(1_000 + g)
+			return e.confirmed(key, 1_000 + g + at)
+		}
+		// Under 10 s apart: one burst. 10 s to 120 s: the span rule. 120 s
+		// (inclusive) to 900 s (exclusive): the burst pair. So any two bursts
+		// under 15 min apart confirm.
+		expect(pair(9_999, 0)).toBe(false)
+		expect(pair(10_000, 0)).toBe(true)
+		expect(pair(119_999, 0)).toBe(true)
+		expect(pair(120_000, 0)).toBe(true)
+		expect(pair(240_000, 0)).toBe(true)
+		expect(pair(899_999, 0)).toBe(true)
+		expect(pair(900_000, 0)).toBe(false)
+		// Freshness: strictly within 120 s of the second burst.
+		expect(pair(240_000, 119_999)).toBe(true)
+		expect(pair(240_000, 120_000)).toBe(false)
+		// Bursts every 4 min: each new burst pairs with the one before.
+		const e = new DsdChallengeEvidence()
+		for (const t of [0, 240_000, 480_000, 720_000]) {
+			e.note(key, t, t)
+			expect(e.snapshot(t)).toEqual(t === 0 ? [] : [key])
+		}
+	})
+
+	it("a single burst never pairs with itself, nor with a burst 15 min or more later", () => {
+		const e = new DsdChallengeEvidence()
+		// A 3 s burst seen at every second: never 10 s or 120 s apart.
+		for (let t = 0; t <= 3_000; t += 1_000) e.note(key, t, t)
+		for (const now of [3_000, 100_000, 200_000, 899_999])
+			expect(e.confirmed(key, now)).toBe(false)
+		// The same energy seen by a later pass is not a second burst.
+		e.note(key, 3_000, 50_000)
+		expect(e.confirmed(key, 50_000)).toBe(false)
+		// Swept at 3 000 + 900 000; a burst 15 min or more later is a first one.
+		e.snapshot(903_000)
+		e.note(key, 1_000_000, 1_000_000)
+		expect(e.confirmed(key, 1_000_000)).toBe(false)
+	})
+
+	it.each([DSD_MAX_CHALLENGERS, DSD_MAX_CHALLENGERS + 1])(
+		"tracks %i burst records, dropping the oldest insertion past 1 024",
+		count => {
+			const e = new DsdChallengeEvidence()
+			const k = (i: number) => dsdChallengeKey("dsd", "s", 400_000_000 + i)
+			for (let i = 0; i < count; i++) e.note(k(i), 0, 0)
+			// The newest and the oldest insertion see a second burst.
+			e.note(k(count - 1), 200_000, 200_000)
+			e.note(k(0), 200_000, 200_000)
+			const confirmed = e.snapshot(200_000)
+			// Past 1 024 the oldest record was dropped: its second burst is a first.
+			expect(confirmed.includes(k(count - 1))).toBe(true)
+			expect(confirmed.includes(k(0))).toBe(count === DSD_MAX_CHALLENGERS)
 		},
 	)
 
@@ -573,6 +636,90 @@ describe("dsd-fme evidence tiers: the slot victim matrix", () => {
 		).toBe(0)
 		expect(
 			run({ 1: tier("unknown"), 3: held(NOW - 500_000) }, { 1: true }).moves,
+		).toBe(0)
+	})
+
+	it("discovery yield: a digital challenger that is not held also gets in; analog never", () => {
+		// Four slots, each a site synced 500 s ago (held: < 1,800 s, quiet:
+		// >= the 120 s cooldown); a fifth site waits.
+		const held = tier("digital", { held: true, lastSyncMonoMs: NOW - 500_000 })
+		const order = [1, 2, 3, 4, 5]
+		const base = {
+			count: 4,
+			order,
+			activity: new Map(order.map(hz => [hz, ch(hz, false)])),
+			incumbents: [2, 3, 4, 5].map(hz => ({
+				key: `s${hz}`,
+				hz,
+				dwellSinceMonoMs: 0,
+			})),
+		}
+		const all = (c: ReturnType<typeof tier>) => ({
+			1: c,
+			2: held,
+			3: held,
+			4: held,
+			5: held,
+		})
+		for (const c of [
+			// Scanner-identified: digital, never synced here.
+			tier("digital"),
+			// Manager memory: synced 1 h ago (past the 30 min hold, within 6 h).
+			tier("digital", { lastSyncMonoMs: NOW - 3_600_000 }),
+			tier("unknown"),
+		]) {
+			const r = run(all(c), {}, base)
+			expect(r.moves).toBe(1)
+			// The lowest-ranked held incumbent yields.
+			expect(r.chosen.find(x => x.movedFrom)?.movedFrom?.key).toBe("s5")
+		}
+		// Analog challengers never use the yield, past the hysteresis or not.
+		expect(run(all(tier("analog")), {}, base).moves).toBe(0)
+		expect(
+			run(
+				all(tier("analog", { retry: true })),
+				{},
+				{
+					...base,
+					analogRetryOpen: true,
+				},
+			).moves,
+		).toBe(0)
+		// The hysteresis still applies: a digital challenger neither confirmed
+		// nor live waits; live, it passes at once.
+		const gated = { ...base, canChallenge: () => false }
+		expect(run(all(tier("digital")), {}, gated).moves).toBe(0)
+		expect(
+			run(
+				all(tier("digital")),
+				{},
+				{
+					...gated,
+					activity: new Map(order.map(hz => [hz, ch(hz, hz === 1)])),
+				},
+			).moves,
+		).toBe(1)
+		// A held challenger (a site that just lost its slot) never yields its
+		// way back, so held sites cannot trade slots.
+		expect(run(all(held), {}, base).moves).toBe(0)
+		// A live held incumbent is never the yield victim: with s5 live the
+		// next quiet one (s4) yields; with all live, none does.
+		const liveOnly = (on: number[]) => ({
+			...base,
+			activity: new Map(order.map(hz => [hz, ch(hz, on.includes(hz))])),
+		})
+		const r5 = run(all(tier("digital")), {}, liveOnly([5]))
+		expect(r5.moves).toBe(1)
+		expect(r5.chosen.find(x => x.movedFrom)?.movedFrom?.key).toBe("s4")
+		expect(run(all(tier("unknown")), {}, liveOnly([2, 3, 4, 5])).moves).toBe(0)
+		// Held syncs newer than the 120 s cooldown keep every slot.
+		const fresh = tier("digital", { held: true, lastSyncMonoMs: NOW - 119_999 })
+		expect(
+			run(
+				{ 1: tier("digital"), 2: fresh, 3: fresh, 4: fresh, 5: fresh },
+				{},
+				base,
+			).moves,
 		).toBe(0)
 	})
 })

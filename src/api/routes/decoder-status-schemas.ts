@@ -66,21 +66,11 @@ export const decoderStatusExtensionProperties = {
 						live: { type: "boolean" },
 						reasons: {
 							type: "array",
-							// One of each reason at most (REASONS, activity-contract.ts).
+							// One of each reason at most; the enum is REASONS (activity-contract.ts).
 							maxItems: REASONS.length,
 							items: {
 								type: "string",
-								enum: [
-									"live-energy",
-									"track",
-									"occupancy",
-									"decoded",
-									"trial-success",
-									"trial-backoff",
-									"digital-memory",
-									"analog-voice",
-									"no-sync",
-								],
+								enum: [...REASONS],
 							},
 						},
 					},

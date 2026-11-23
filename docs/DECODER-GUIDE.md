@@ -666,21 +666,30 @@ describe("HfdlDecoder", () => {
    after that one has run 20 s, at most 6 times a minute per source, and never one that is
    receiving. A dsd-fme channel must also have been heard for at least 10 s before it may
    replace a running one: two energy observations at least 10 s apart (one transmission of
-   10 s or more, or two transmissions 10 s apart) within the last 120 s, so a single short
-   burst never moves a slot; free slots still fill at once.
+   10 s or more, or two transmissions 10 s apart) within the last 120 s, or two separate
+   bursts 2 to 15 minutes apart (the second counts for 120 s), so a single short burst never
+   moves a slot but a site heard in 3 s bursts every few minutes still gets in; free slots
+   still fill at once.
    dsd-fme ranks its extra channels by evidence: digital first, then channels it knows
    nothing about, then analog. A channel is digital after a checked (CRC/FEC-clean)
    dsd-fme sync on it, remembered per channel for 6 hours whatever runs or retunes in
    between, or while the scanner holds a digital-voice decode or replay success there
    (also 6 hours). For 30 minutes after its last sync a digital channel keeps its slot
-   between bursts and nothing replaces it, with one exception: when every extra channel of
-   a source holds such a digital channel, there are at least two of them, and an unknown
-   channel waits that is busy and passed the 10 s rule, the lowest-ranked one without a
-   sync for 2 minutes gives up its slot to it (one per planning pass; with one extra
-   channel digital always keeps it). After the 30 minutes it still ranks with the unknown
+   between bursts and nothing replaces it, even while its dsd-fme process is not running
+   (a restart, for example: the slot stays reserved for at most those 30 minutes), with
+   one exception: when every extra channel of a source holds such a digital channel, there
+   are at least two of them, and a busy channel waits that is not analog (an unknown one
+   that passed the 10 s rule, or a digital one the scanner identified or that synced more
+   than 30 minutes ago, past the 10 s rule or receiving), the lowest-ranked one without a
+   sync for 2 minutes gives up its slot to it (one per planning pass). With a single extra
+   dsd-fme channel per source there is no such exception: a held digital channel always
+   keeps it. After the 30 minutes it still ranks with the unknown
    channels and yields to an unknown one only while it is quiet (not live, no sync for
-   2 minutes). A digital channel that comes back live takes a slot at once, without the
-   10 s rule, so a 2 to 5 s DMR burst is caught. A channel is analog while the scanner
+   2 minutes). Past the 30 minutes failed runs count again: the second run of 20 s without
+   a checked sync turns it into a no-sync channel (cooldown 4 minutes, escalating as below),
+   so a single false sync can be forgotten about 30 minutes after it instead of 6 hours; any new
+   sync resets the count. A digital channel that comes back live takes a slot at once,
+   without the 10 s rule, so a 2 to 5 s DMR burst is caught. A channel is analog while the scanner
    classed it analog FM (voice or tone, within 15 minutes) or after a failed sync: a
    run of 20 s without a checked sync (20 s of a connected source: a disconnect or a
    reconnect less than 20 s ago never counts) puts it in a cooldown of 2, 4, 8, 16, then at most

@@ -2,12 +2,14 @@ import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
 	DSD_ANALOG_TRY_FAILURES,
+	DSD_DIGITAL_DECAY_FAILURES,
 	DSD_DIGITAL_HOLD_MS,
 	DSD_DIGITAL_MEMORY_MS,
 	DSD_MAX_DEMOTIONS,
 	DSD_MAX_RETRY_GROUPS,
 	DSD_MAX_TIERS,
 	DSD_NOSYNC_FORGET_MS,
+	DSD_TIER_RASTER_HZ,
 	DSD_TRY_MEMORY_MS,
 	DsdChannelTiers,
 	dsdGroupKey,
@@ -153,9 +155,22 @@ describe("dsd-fme channel tiers (transition table)", () => {
 		expect(DSD_MAX_TIERS).toBe(256)
 	})
 
-	it("keys tiers by the 6.25 kHz raster and only for a finite, positive frequency", () => {
+	it("keys tiers by the candidate's own 6.25 kHz raster and only for a finite, positive frequency", () => {
+		expect(DSD_TIER_RASTER_HZ).toBe(3_125)
 		expect(key(446_006_250)).toBe(key(446_007_000))
 		expect(key(446_006_250)).not.toBe(key(446_018_750))
+		// A raster offset by 3 125 Hz from the 12.5 kHz grid (base + n × 6 250):
+		// each channel keeps its own key, distinct from both grid neighbours.
+		const grid = 446_000_000
+		const offset = grid + 3_125
+		expect(key(offset)).not.toBe(key(grid))
+		expect(key(offset)).not.toBe(key(grid + 6_250))
+		expect(key(offset + 6_250)).not.toBe(key(grid + 12_500))
+		// At most 1 562.5 Hz off, ties upward.
+		expect(key(offset + 1_562)).toBe(key(offset))
+		expect(key(offset - 1_562)).toBe(key(offset))
+		expect(key(offset + 1_562.5)).toBe(key(offset + 3_125))
+		expect(key(offset - 1_562.5)).toBe(key(offset))
 		for (const hz of [NaN, Infinity, -1, 0])
 			expect(dsdTierKey("voice", "rtl", hz)).toBeNull()
 	})
@@ -206,14 +221,66 @@ describe("dsd-fme channel tiers (transition table)", () => {
 		])
 	})
 
-	it("a failure on a digital channel leaves it unchanged (quiet between bursts)", () => {
+	it("a failure on a held digital channel leaves it unchanged (quiet between bursts)", () => {
 		const tiers = new DsdChannelTiers()
 		const k = key(446_106_250)
 		tiers.noteSync(k, 0)
 		tiers.noteFailure(k, 60_000, policy)
-		expect(tiers.snapshot(60_000, policy).tiers[0]).toMatchObject({
+		tiers.noteFailure(k, DSD_DIGITAL_HOLD_MS - 1, policy)
+		expect(
+			tiers.snapshot(DSD_DIGITAL_HOLD_MS - 1, policy).tiers[0],
+		).toMatchObject({ tier: "digital", lastSyncMonoMs: 0, failures: 0 })
+	})
+
+	it.each([0, 1])(
+		"past the 30 min hold (+%i ms) failures count; the second turns digital into nosync",
+		d => {
+			expect(DSD_DIGITAL_DECAY_FAILURES).toBe(2)
+			const tiers = new DsdChannelTiers()
+			const k = key(446_106_250)
+			tiers.noteSync(k, 0)
+			const first = DSD_DIGITAL_HOLD_MS + d
+			tiers.noteFailure(k, first, policy)
+			expect(tiers.snapshot(first, policy).tiers[0]).toMatchObject({
+				tier: "digital",
+				failures: 1,
+				lastSyncMonoMs: 0,
+				notedMonoMs: first,
+			})
+			// The earliest second failed run: one 20 s dwell later.
+			const second = first + policy.dwellMs
+			tiers.noteFailure(k, second, policy)
+			const [e] = tiers.snapshot(second, policy).tiers
+			expect(e).toMatchObject({ tier: "nosync", failures: 2 })
+			// cooldown(2) = 240 s; at the earliest 1 800 000 + 20 000 ms after the sync.
+			expect(e!.untilMonoMs - second).toBe(240_000)
+			expect(second).toBe(1_820_000 + d)
+			expect(tiers.held(k, second)).toBe(false)
+			// It then escalates as any nosync entry.
+			tiers.noteFailure(k, e!.untilMonoMs, policy)
+			expect(tiers.snapshot(e!.untilMonoMs, policy).tiers[0]).toMatchObject({
+				failures: 3,
+			})
+		},
+	)
+
+	it("a sync past the hold resets the decay count", () => {
+		const tiers = new DsdChannelTiers()
+		const k = key(446_106_250)
+		tiers.noteSync(k, 0)
+		tiers.noteFailure(k, DSD_DIGITAL_HOLD_MS, policy)
+		tiers.noteSync(k, DSD_DIGITAL_HOLD_MS + 1)
+		// The next failure lies within the renewed hold: unchanged.
+		tiers.noteFailure(k, DSD_DIGITAL_HOLD_MS + 2, policy)
+		expect(
+			tiers.snapshot(DSD_DIGITAL_HOLD_MS + 2, policy).tiers[0],
+		).toMatchObject({ tier: "digital", failures: 0 })
+		// Past the renewed hold one failure keeps it digital (count 1, not 2).
+		const later = 2 * DSD_DIGITAL_HOLD_MS + 1
+		tiers.noteFailure(k, later, policy)
+		expect(tiers.snapshot(later, policy).tiers[0]).toMatchObject({
 			tier: "digital",
-			lastSyncMonoMs: 0,
+			failures: 1,
 		})
 	})
 

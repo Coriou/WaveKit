@@ -7,10 +7,7 @@ import {
 	ACTIVITY_DECODE_WARM_MS,
 	ACTIVITY_WARM_HOLD_MS,
 } from "../../core/scanner/channel-activity.js"
-import {
-	ACTIVITY_MAX_CANDIDATES,
-	quantiseObservedCentre,
-} from "./activity-contract.js"
+import { ACTIVITY_MAX_CANDIDATES } from "./activity-contract.js"
 import { ACTIVITY_DWELL_MS, ACTIVITY_MOVE_WINDOW_MS } from "./activity-plan.js"
 import type { ActivityPolicy } from "./activity-plan.js"
 import { DECODER_PROTOCOLS } from "./contract.js"
@@ -81,6 +78,19 @@ export const DSD_NOSYNC_MAX_DOUBLINGS = 4
  * 3,600 / 1,920 = 1.875 moves per hour per group.
  */
 export const DSD_ANALOG_TRY_FAILURES = DSD_NOSYNC_MAX_DOUBLINGS + 1
+/**
+ * Digital decay: within the 30 min hold a failed run leaves a digital entry
+ * unchanged (a quiet channel between bursts); at/past last sync +
+ * DSD_DIGITAL_HOLD_MS each failed run counts, and the
+ * DSD_DIGITAL_DECAY_FAILURES = 2nd one turns the entry nosync with failures
+ * 2 (cooldown(2) = 240 s), escalating from there as any nosync entry. A
+ * failure is noted once per run, so a channel with one false sync loses its
+ * digital tier after its hold and two failed runs: at the earliest
+ * 1,800 s (the first counted failure, at the hold's end) + one 20 s dwell (the
+ * second run's) = 1,820 s after that sync, not 6 h; a sync resets the count
+ * to 0. One quiet run alone never erases a real site's memory.
+ */
+export const DSD_DIGITAL_DECAY_FAILURES = 2
 /** A no-sync entry is forgotten (failures reset) at until + ACTIVITY_WARM_HOLD_MS (15 min). */
 export const DSD_NOSYNC_FORGET_MS = ACTIVITY_WARM_HOLD_MS
 /**
@@ -109,10 +119,22 @@ export function dsdNoSyncCooldownAfter(
 }
 
 /**
+ * Tier keys round to DSD_TIER_RASTER_HZ = 6,250 / 2 = 3,125 Hz:
+ * round(hz / 3,125) × 3,125, ties upward, at most 1,562.5 Hz off. Both
+ * 6.25 kHz rasters (n × 6,250, which holds the 12.5 kHz grid, and
+ * 3,125 + n × 6,250) are multiples of 3,125 Hz, so every channel of either
+ * raster keeps its own key: two channels 3,125 Hz apart never share a tier.
+ * (A plain 6,250 Hz rounding would put a 3,125 Hz-offset channel on its
+ * upper neighbour's key.) Scanner observed centres are already on the
+ * n × 6,250 raster (quantiseObservedCentre, activity-contract.ts) and keep their own frequency.
+ */
+export const DSD_TIER_RASTER_HZ = 3_125
+
+/**
  * The RF identity of one dsd-fme channel of one (decoder, source) group: the
- * frequency on the 6,250 Hz raster (quantiseObservedCentre), not the
- * placement key, so it survives restarts, origin changes and retunes. Null
- * for a frequency that is not finite and positive (no tier is kept).
+ * candidate's own frequency rounded to DSD_TIER_RASTER_HZ, not the placement
+ * key, so it survives restarts, origin changes and retunes. Null for a
+ * frequency that is not finite and positive (no tier is kept).
  */
 export function dsdTierKey(
 	decoderId: string,
@@ -120,7 +142,11 @@ export function dsdTierKey(
 	hz: number,
 ): string | null {
 	if (!Number.isFinite(hz) || hz <= 0) return null
-	return dsdChallengeKey(decoderId, sourceId, quantiseObservedCentre(hz))
+	return dsdChallengeKey(
+		decoderId,
+		sourceId,
+		Math.round(hz / DSD_TIER_RASTER_HZ) * DSD_TIER_RASTER_HZ,
+	)
 }
 
 /** The key of one (decoder, source) slot group for its analog try time. */
@@ -154,8 +180,9 @@ interface TierEntry {
  * Decoder not starting, item 8):
  * - a checked sync: digital, last = now, until = now + 6 h, failures 0;
  * - a failed sync of a run (dwell passed, no sync since its start): a digital
- *   entry is unchanged; otherwise nosync, failures + 1, until = now +
- *   cooldown(failures). Escalation needs a re-try: a failure is noted once
+ *   entry within its 30 min hold is unchanged; past the hold failures + 1, and
+ *   at DSD_DIGITAL_DECAY_FAILURES = 2 it turns nosync; otherwise nosync,
+ *   failures + 1, until = now + cooldown(failures). Escalation needs a re-try: a failure is noted once
  *   per run, so failures grow only when the channel runs again. While that
  *   run goes on without sync, each pass renews until = max(until, now +
  *   cooldown(failures)) (renewFailure): the cooldown counts from its end;
@@ -216,11 +243,23 @@ export class DsdChannelTiers {
 		return !wasHeld
 	}
 
-	/** Records a failed sync of one run; a digital entry is unchanged. */
+	/**
+	 * Records a failed sync of one run. A held digital entry is unchanged; past
+	 * its hold the failure counts and the DSD_DIGITAL_DECAY_FAILURES-th one
+	 * turns it nosync (DSD_DIGITAL_DECAY_FAILURES).
+	 */
 	noteFailure(key: string, now: number, policy: ActivityPolicy): void {
 		if (!Number.isFinite(now)) return
 		const old = this.live(key, now)
-		if (old?.tier === "digital") return
+		if (old?.tier === "digital") {
+			if (this.held(key, now)) return
+			const counted = old.failures + 1
+			if (counted < DSD_DIGITAL_DECAY_FAILURES) {
+				this.set(key, { ...old, failures: counted, notedMonoMs: now }, now)
+				this.noteTry(key, now)
+				return
+			}
+		}
 		const failures = (old?.failures ?? 0) + 1
 		const until = now + dsdNoSyncCooldownAfter(failures, policy)
 		this.set(
@@ -459,6 +498,22 @@ export const DSD_CHALLENGE_MAX_OBSERVATIONS =
 	DSD_CHALLENGE_MEMORY_MS / DSD_CHALLENGE_THIN_MS + 2
 /** Channels tracked: one query's 1 024 candidates; oldest insertion dropped first. */
 export const DSD_MAX_CHALLENGERS = ACTIVITY_MAX_CANDIDATES
+/**
+ * Burst pairs: a site heard only in short bursts minutes apart (3 s every
+ * 3 to 5 min) never meets the 10 s span within the 120 s memory. Two
+ * consecutive energy observations (nothing recorded in between) at least
+ * DSD_CHALLENGE_MEMORY_MS = 120 s and less than DSD_CHALLENGE_BURST_MEMORY_MS
+ * = ACTIVITY_WARM_HOLD_MS = 900 s (15 min, as long as a channel stays warm
+ * after energy) apart are two separate bursts and confirm too, for 120 s
+ * after the second (the same freshness as the span rule). Gaps of 10 s to
+ * 120 s are already the span rule, so two bursts at any spacing under
+ * 15 min confirm, and a single burst never does: every observation it leaves
+ * lies within its own duration, under 10 s apart. State: the last
+ * observation and the last pair time per channel, at most DSD_MAX_CHALLENGERS
+ * = 1 024 channels (oldest insertion dropped first), swept 15 min after the
+ * last observation.
+ */
+export const DSD_CHALLENGE_BURST_MEMORY_MS = ACTIVITY_WARM_HOLD_MS
 
 /** The identity of one challenger channel of one (decoder, source) group. */
 export function dsdChallengeKey(
@@ -471,6 +526,28 @@ export function dsdChallengeKey(
 
 export class DsdChallengeEvidence {
 	private readonly entries = new Map<string, number[]>()
+	private readonly bursts = new Map<
+		string,
+		{ lastMonoMs: number; pairedMonoMs: number | null }
+	>()
+
+	/** Updates the burst-pair record of a channel (DSD_CHALLENGE_BURST_MEMORY_MS). */
+	private noteBurst(key: string, energyMonoMs: number): void {
+		const b = this.bursts.get(key)
+		if (b && energyMonoMs <= b.lastMonoMs) return
+		const gap = b ? energyMonoMs - b.lastMonoMs : Number.NaN
+		const paired =
+			gap >= DSD_CHALLENGE_MEMORY_MS && gap < DSD_CHALLENGE_BURST_MEMORY_MS
+				? energyMonoMs
+				: (b?.pairedMonoMs ?? null)
+		this.bursts.delete(key)
+		this.bursts.set(key, { lastMonoMs: energyMonoMs, pairedMonoMs: paired })
+		while (this.bursts.size > DSD_MAX_CHALLENGERS) {
+			const oldest = this.bursts.keys().next()
+			if (oldest.done) break
+			this.bursts.delete(oldest.value)
+		}
+	}
 
 	/**
 	 * Records one energy timestamp of a channel, as a snapshot reports it
@@ -487,6 +564,7 @@ export class DsdChallengeEvidence {
 			now - energyMonoMs >= DSD_CHALLENGE_MEMORY_MS
 		)
 			return
+		this.noteBurst(key, energyMonoMs)
 		const kept = (this.entries.get(key) ?? []).filter(
 			t => now - t < DSD_CHALLENGE_MEMORY_MS,
 		)
@@ -506,8 +584,18 @@ export class DsdChallengeEvidence {
 		}
 	}
 
-	/** Whether the channel's evidence within the memory meets both bounds. */
+	/**
+	 * Whether the channel's evidence within the memory meets both bounds, or
+	 * its last burst pair is less than 120 s old (DSD_CHALLENGE_BURST_MEMORY_MS).
+	 */
 	confirmed(key: string, now: number): boolean {
+		const paired = this.bursts.get(key)?.pairedMonoMs ?? null
+		if (
+			paired !== null &&
+			paired <= now &&
+			now - paired < DSD_CHALLENGE_MEMORY_MS
+		)
+			return true
 		const kept = (this.entries.get(key) ?? []).filter(
 			t => now - t < DSD_CHALLENGE_MEMORY_MS && t <= now,
 		)
@@ -519,6 +607,9 @@ export class DsdChallengeEvidence {
 
 	/** Keys confirmed now; expired evidence is dropped. */
 	snapshot(now: number): string[] {
+		for (const [key, b] of this.bursts)
+			if (now - b.lastMonoMs >= DSD_CHALLENGE_BURST_MEMORY_MS)
+				this.bursts.delete(key)
 		const out: string[] = []
 		for (const [key, kept] of this.entries) {
 			if (!kept.some(t => now - t < DSD_CHALLENGE_MEMORY_MS))
