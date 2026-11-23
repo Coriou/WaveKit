@@ -246,9 +246,10 @@ describe("2. the live tone goes through Zod", () => {
 			dcs: { code: "023", polarity: "inverted" },
 			dcsChecked: true,
 		})
+		// an empty live reading is not a measured absence (binding: short audio, a failed detector, old records)
 		expect(
-			toneRow(liveToneOf({ ctcssHz: null, dtmf: null, dcs: null })),
-		).toEqual({ value: "No tone heard", hint: null })
+			toneRow(liveToneOf({ ctcssHz: null, dtmf: null, dcs: null })).value,
+		).toBe("Not measured")
 	})
 
 	it("a live record with tone: null reads as not measured through the loader", async () => {
@@ -309,14 +310,15 @@ describe("2. the live tone goes through Zod", () => {
 
 	// Feature: transmission-view, Property 1: an unreadable tone never reads as "No tone heard"
 	// Validates: review finding 2
-	it("property: the formatter never throws, and says No tone heard only for a stored null (or a readable live none)", () => {
+	it("property: the formatter never throws, and says No tone heard only for the recorder's stored null", () => {
 		const raw = fc.oneof(fc.anything(), nearLiveTone)
 		fc.assert(
 			fc.property(raw, x => {
 				// the live demodulator's reading
 				const live = toneRow(liveToneOf(x))
 				expect(typeof live.value).toBe("string")
-				if (live.value === "No tone heard") expect(isNoneReading(x)).toBe(true)
+				expect(live.value).not.toBe("No tone heard")
+				if (isNoneReading(x)) expect(live.value).toBe("Not measured")
 				// the recorder's facts carrying it as their tone
 				const facts = parseFacts({ ...FACTS, tone: x })
 				const kept = toneRow(recorderTone(facts))

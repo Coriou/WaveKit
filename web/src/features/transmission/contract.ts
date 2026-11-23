@@ -217,8 +217,9 @@ export type TransmissionKind =
 	| "unknown"
 
 /**
- * The sub-audible tone of one transmission, three honest states: `heard` (ctcssHz or dcs set), `none` (measured,
- * nothing heard), `not-measured` (no answer: `why` says which reason a hint can give).
+ * The sub-audible tone of one transmission, three honest states: `heard` (ctcssHz or dcs set; or neither, `why`
+ * "not-stored": the recorder kept it for its tone and did not store which), `none` (the recorder measured it and
+ * heard nothing: only ever from the recorder), `not-measured` (no answer: `why` says which reason a hint can give).
  */
 export interface TransmissionTone {
 	state: "heard" | "none" | "not-measured"
@@ -228,11 +229,14 @@ export interface TransmissionTone {
 	dcsChecked: boolean
 	from: "recorder" | "live-demod" | null
 	/**
-	 * Why it is not measured: no facts stored, too little audio or an unsteady tone, an unreadable value, a kept
-	 * recording known only through its Activity row (its facts not read), a live transmission whose Activity record
-	 * could not be read, a live transmission with no tone reading.
+	 * Why it is not measured: no facts stored, not determined (the facts hold no tone: untoned voice and too little
+	 * audio both leave it absent), an unreadable value, a kept recording known only through its Activity row (its
+	 * facts not read), a live transmission whose Activity record could not be read, a live transmission whose record
+	 * holds no tone (the live demodulator stores the same empty reading for short audio, a failed detector and old
+	 * records, so an empty reading is never "none"). For `heard`: "not-stored", a tone heard but not stored.
 	 */
 	why:
+		| "not-stored"
 		| "no-facts"
 		| "no-record"
 		| "undetermined"
@@ -251,7 +255,8 @@ export interface TransmissionArtefact {
 	bytes: number
 	durationMs: number | null
 	state: string
-	kept: boolean
+	/** Whether it is kept; null when the source does not say (never claims not kept). */
+	kept: boolean | null
 	expiresAt: string | null
 }
 
@@ -276,6 +281,8 @@ export interface TransmissionDto {
 		operationId: string | null
 	}
 	kind: TransmissionKind
+	/** The kind of its recording (the catalogue's `kind`), when one is known; the header's icon follows it. */
+	recordingKind: RecordingInventoryItem["kind"] | null
 	protocol: string | null
 	sourceId: string | null
 	/** The raster channel, the measured centre and the saved name. */

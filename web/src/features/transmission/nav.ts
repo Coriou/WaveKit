@@ -45,6 +45,8 @@ export interface OpenTransmission {
 	origin: TransmissionOrigin
 	/** The Activity row it was opened from: the loader reads it before asking the core. */
 	summary: ActivitySummary | null
+	/** It shows what the player stepped to (Next, Previous, Auto-next): the loader may answer from its cache. */
+	follow?: boolean
 }
 
 export const transmissionNav = new Store<OpenTransmission | null>(null)
@@ -95,12 +97,21 @@ export function openTransmission(
 	transmissionNav.set({ ref, origin: full, summary })
 }
 
-/** The view shows another transmission (Conversation, the player's Next); Back still goes to the origin. */
+/**
+ * The view shows another transmission (Conversation, the player's Next); Back still goes to the origin. `follow`:
+ * the player stepped to it (the loader may answer from its cache).
+ */
 export function replaceTransmission(
 	ref: TransmissionRef,
 	summary: ActivitySummary | null = null,
+	follow = false,
 ): void {
-	transmissionNav.update(s => (s === null ? s : { ...s, ref, summary }))
+	transmissionNav.update(s => {
+		if (s === null) return s
+		const next: OpenTransmission = { ref, origin: s.origin, summary }
+		if (follow) next.follow = true
+		return next
+	})
 }
 
 /** A door that leaves (History, Open in Scanner): the view closes first, its origin dropped, nothing restored. */

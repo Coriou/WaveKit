@@ -440,6 +440,29 @@ describe("PlaybackService: element events", () => {
 		expect(t.p.get()).toMatchObject({ id: "a", phase: "ended" })
 	})
 
+	it("a Play all queue plays every part to its end whatever Auto-next says", async () => {
+		const s = setup()
+		s.p.setAutoNext(false)
+		const all: QueueRef = { ...Q("a", "b", "c"), playAll: true }
+		await playing(s, "a", all)
+		s.audio.emit("ended")
+		expect(s.p.get()).toMatchObject({ id: "b", phase: "loading", queue: all })
+		await flush()
+		s.audio.emit("ended")
+		expect(s.p.get()).toMatchObject({ id: "c", phase: "loading" })
+		await flush()
+		s.audio.meta(2)
+		s.audio.emit("ended")
+		// the queue's end: it stops there
+		expect(s.p.get()).toMatchObject({ id: "c", phase: "ended" })
+		// a surface refreshing the same list keeps it a Play all
+		const t = setup()
+		t.p.setAutoNext(false)
+		await playing(t, "a", all)
+		t.p.setQueue("activity", ["a", "b", "c", "d"])
+		expect(t.p.get().queue?.playAll).toBe(true)
+	})
+
 	it("paused + ended stays paused, never auto-next", async () => {
 		const s = setup()
 		await playing(s, "a", Q("a", "b"))

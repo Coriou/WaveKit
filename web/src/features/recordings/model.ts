@@ -56,7 +56,14 @@ export function isCallKind(kind: RecordingInventoryKind): boolean {
 }
 
 export function recordingIcon(r: RecordingInventoryItem): RecordingIcon {
-	return isCallKind(r.kind) ? "voice" : "scan"
+	return recordingIconOf(r.kind)
+}
+
+/** The icon of a recording kind: a call's voice, a scanner file's scan. */
+export function recordingIconOf(
+	kind: RecordingInventoryItem["kind"],
+): RecordingIcon {
+	return isCallKind(kind) ? "voice" : "scan"
 }
 
 /**

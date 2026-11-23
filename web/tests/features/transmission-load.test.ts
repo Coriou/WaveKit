@@ -195,13 +195,12 @@ describe("loadTransmission", () => {
 			KEY,
 		])
 		expect(t.gone).toEqual([])
-		// the recording, its Activity record, the discovery, its observations, the neighbours
+		// the recording and its neighbours (one folder read), its Activity record, the discovery, its observations
 		expect(
 			calls.map(c => new URL(c.url, "http://core").pathname).sort(),
 		).toEqual(
 			[
 				"/api/activity/evt_1",
-				"/api/recordings",
 				"/api/recordings",
 				"/api/scanner/discoveries/d_A",
 				"/api/scanner/discoveries/d_A/observations",
@@ -217,7 +216,8 @@ describe("loadTransmission", () => {
 			{ recording: KEY },
 			{ api, recordings: () => [item()] },
 		)
-		expect(t.tone).toMatchObject({ state: "not-measured", why: "no-facts" })
+		// no facts, but kept for its own tone: a tone was heard, not stored
+		expect(t.tone).toMatchObject({ state: "heard", why: "not-stored" })
 		expect(t.admission).toBeNull()
 		expect(t.signal).toBeNull()
 		expect(t.channelSummary).toBeNull()
@@ -239,11 +239,8 @@ describe("loadTransmission", () => {
 				recordings: () => [item({ activityEventId: null })],
 			},
 		)
-		expect(
-			calls.filter(
-				c => c.url.includes("/api/recordings") && !c.url.includes("limit=50"),
-			),
-		).toEqual([])
+		// only the neighbours' folder read, never a lookup of the file itself
+		expect(calls.filter(c => c.url.includes("/api/recordings"))).toHaveLength(1)
 	})
 
 	it("opens an Activity event through its recording", async () => {

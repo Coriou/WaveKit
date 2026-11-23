@@ -349,12 +349,12 @@ describe("4. Esc in a drawer with an open view goes Back", () => {
 		expect(esc(row, "Escape", true)).toBe(false)
 	})
 
-	it("is a capture-phase hook, and focus returns to Back whenever the ref changes", () => {
+	it("is a capture-phase hook, and focus goes to Back when the view opens", () => {
 		const viewSrc = src("features/transmission/TransmissionView.tsx")
 		expect(viewSrc).toContain('window.addEventListener("keydown", onKey, true)')
 		expect(viewSrc).not.toContain("onKeyDown={onKeyDown}")
 		expect(viewSrc).toContain(
-			"back.current?.focus({ preventScroll: true }), [key])",
+			"back.current?.focus({ preventScroll: true }), [])",
 		)
 	})
 })
@@ -597,7 +597,7 @@ describe("11. the player, the columns and Back's focus", () => {
 		expect(followsPlayer(null, "a", "b")).toBe(false)
 		const view = src("features/transmission/TransmissionView.tsx")
 		expect(view).toContain("followsPlayer(shown.current, was, s.id)")
-		expect(view).toContain("replaceTransmission(next.ref, next.summary)")
+		expect(view).toContain("replaceTransmission(next.ref, next.summary, true)")
 	})
 
 	it("a pinned column's row opens the view like the drawer's", () => {

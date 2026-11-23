@@ -1,6 +1,6 @@
 // The time an Activity row shows. A row for a kept recording (a scanner file, a call with audio) shows when its
 // audio starts, as the Recordings list does: the loaded recording's start first (so the two lists agree), else
-// the start its stored record carries (a kept file's observationStartedAt, a live transmission's startedAt) once
+// the start its stored record carries (a kept file's own start, keptFileStartOf; a live transmission's startedAt) once
 // that record was read here, else the row's producedAt. Only the shown time changes: the list stays ordered by
 // producedAt, so a row's start can be earlier than the row below it.
 import type {
@@ -18,11 +18,47 @@ const MAX_STARTS = 1000
 /** Event id → when its audio starts, from the Activity records read in this browser. */
 export const recordStarts = new Store<ReadonlyMap<string, string>>(new Map())
 
+/**
+ * A first file is kept within seconds of its audio's end; a later part of a rolled-over transmission starts at
+ * least one file limit (minutes) after its observation did. A gap between the observation's start and this file's
+ * start (its keep less its length) above this means the file is a later part.
+ */
+export const LATER_PART_GAP_MS = 30_000
+
+/**
+ * When a kept scanner file's own audio starts, from its stored record: the observation's start for its first (or
+ * only) file; for a later part of a rolled-over transmission, whose observation started long before it, its keep
+ * time less its length (the file was whole when it was kept, so that is when its audio started, give or take the
+ * keep's latency). The record names no part, so a later part is told by the gap (LATER_PART_GAP_MS). Null when
+ * neither time is valid.
+ */
+export function keptFileStartOf(p: {
+	observationStartedAt: string | null
+	finalizedAt: string
+	durationMs: number
+}): string | null {
+	const obs =
+		typeof p.observationStartedAt === "string"
+			? Date.parse(p.observationStartedAt)
+			: Number.NaN
+	const kept = Date.parse(p.finalizedAt)
+	const own =
+		Number.isFinite(kept) && Number.isFinite(p.durationMs)
+			? kept - Math.max(0, p.durationMs)
+			: Number.NaN
+	if (
+		Number.isFinite(own) &&
+		(!Number.isFinite(obs) || own - obs > LATER_PART_GAP_MS)
+	)
+		return new Date(own).toISOString()
+	return Number.isFinite(obs) ? new Date(obs).toISOString() : null
+}
+
 /** The audio start a stored record carries; null when it carries none. */
 export function recordStartOf(record: ActivityRecord): string | null {
 	const iso =
 		record.kind === "recording-change"
-			? record.payload.observationStartedAt
+			? keptFileStartOf(record.payload)
 			: record.kind === "analog-transmission"
 				? record.payload.startedAt
 				: null

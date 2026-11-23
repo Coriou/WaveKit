@@ -630,25 +630,36 @@ the list. When the view opened the drawer, Back closes it again, reopens the dra
 before (when there was one) and puts focus back on what you clicked; closing the drawer another way
 (`Esc` from outside it, such as from the player, or its close button) also reopens that drawer. Opening it never changes another panel's search,
 and opening another transmission while it is open (the player's title, a tuned card row) keeps that
-same Back. When nothing can be found the view says `Not found` and why.
+same Back. When nothing can be found the view says `Not found` and why; when the receiver does not
+answer in time it says so with **Retry**, so it never stays on `Loading` for good. Opened from
+Recordings, the list's count and its **All / Kept** switch are hidden until you go Back, so Back
+returns to the list exactly as you left it.
 
-From the top: the time the audio starts (with the date when it is not today), the channel in MHz
+From the top: the recording's icon (as on its Recordings row; a live transmission has none), the
+time the audio starts (with the date when it is not today; a later part of a long transmission shows
+its own start, not the transmission's), the channel in MHz
 on its raster and the length in seconds; the waveform and play disc (or one sentence when there is
 no audio, such as `The recording was deleted`); **What we know**, a few short rows in words:
 
-- **Tone**, always for analog FM: `CTCSS 88.5 Hz`, `DCS 023`, `No tone heard` (it listened and heard
-  none; the scanner recorder does not check DCS codes), or `Not measured` with why (recordings made
-  before WaveKit stored the tone, too little audio, a tone that was not steady, a scanner recording
-  whose file is not listed, a live transmission whose stored event could not be read, a live
-  transmission that stored no tone reading, or a stored tone this web app cannot read).
+- **Tone**, always for analog FM and never for AM: `CTCSS 88.5 Hz`, `DCS 023`,
+  `A tone was heard (not stored)` (the scanner kept the file for its tone without storing which),
+  `No tone heard` (only when the scanner recorder stored that it listened and heard none; it does
+  not check DCS codes), or `Not measured` with why (recordings made before WaveKit stored the tone,
+  `Not determined for this recording` when the stored facts hold no tone, a scanner recording whose
+  file is not listed, a live transmission whose stored event could not be read, a live transmission
+  whose stored reading holds no tone, or a stored tone this web app cannot read). A live
+  transmission never says `No tone heard`: the live demodulator stores the same empty reading when
+  the audio was too short, its detector failed, or the core predates the check.
 - **Signal** (`Strong, 24 dB over the noise`), **Ended** (`The transmission ended`,
   `Cut: the receiver was retuned`) and **Kept** (`Speech heard over a tone`), each only when known.
 
 Then the **Conversation**: the other parts of the same transmission, oldest first, this one marked,
-with **Play all** in that order; recordings of the same channel close in time are titled
+with **Play all**, which plays every one in that order to the last, whether **Auto-next** is on
+or off; recordings of the same channel close in time are titled
 `Around this time on this channel`, since WaveKit cannot yet tell they were one exchange. Choosing
 one shows it in place; Back still returns to where you came from. While it shows the recording that
-plays, the player's **Next**, **Previous** and **Auto-next** move the view along with it. **On this
+plays, the player's **Next**, **Previous** and **Auto-next** move the view along with it, without
+moving your focus (focus goes to Back only when the view opens). **On this
 channel** says how often the channel was heard and its usual tone, with three doors: **History of
 …** and **Open in Scanner** close the view and show that place (Back does not come back to it), and
 **Tune**. **Details**, collapsed (remembered per browser), holds every id
@@ -690,6 +701,10 @@ for the full player shrinks it to one line: play/pause, the title over a progres
 `This recording is no longer on the receiver`,
 `Too many recordings are being read; try again in a moment`,
 `The receiver is busy; try again`, or `Session expired, pair again`.
+
+Known gap: an Activity row of a scanner recording whose file was deleted since still shows its play
+disc, and playing it fails with `This recording is no longer on the receiver`.
+
 **Keep** works when WaveKit can name the file, which for a digital-voice call needs it loaded in
 Recordings; otherwise it says to keep it from there. When WaveKit does not know yet whether a file
 is kept, **Keep** never shows it as not kept: pressing it keeps the file and shows the answer.

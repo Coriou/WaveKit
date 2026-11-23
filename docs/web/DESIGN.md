@@ -1235,7 +1235,8 @@ Condensed + Noto Sans, Tabler-based icons).
   words); Conversation (oldest first, **Play all**; a time heuristic is titled as one); On this
   channel (History of …, Open in Scanner, Tune: the only doors that leave); Details, collapsed and
   remembered, with every id and raw number. The Tone row always shows for analog FM, in three honest
-  states: the value, `No tone heard` only for a measured absence, else `Not measured` with why.
+  states: the value, `No tone heard` only for the recorder's stored absence (an empty live reading
+  is `Not measured`), else `Not measured` with why.
   Codes become sentences from one table (`web/src/features/transmission/words.ts`). Back and Esc
   return to the exact origin in one step (the host keeps its list state: Recordings remounts its
   list on its saved scroll, Activity keeps its list mounted under the view); opening never writes

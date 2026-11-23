@@ -23,7 +23,9 @@ import {
 } from "../naming.ts"
 import { KeepButton, PlayDisc, WaveView } from "../playback/PlaybackUi.tsx"
 import type { QueueRef } from "../playback/service.ts"
-import { formatBytes } from "../recordings/model.ts"
+import { RecIcon } from "../recordings/icons.tsx"
+import type { RecordingIcon } from "../recordings/model.ts"
+import { formatBytes, recordingIconOf } from "../recordings/model.ts"
 import type { TransmissionDto, TransmissionMember } from "./contract.ts"
 import { parseRef, refText } from "./contract.ts"
 import { loadTransmission, TransmissionNotFoundError } from "./load.ts"
@@ -114,6 +116,17 @@ export function transmissionHeading(t: TransmissionDto): string {
 	return savedNameAt(t.channel.hz) ?? t.channel.name ?? transmissionWhat(t)
 }
 
+/**
+ * The header tile's icon, the one the Recordings rows use for its recording's kind (a call's voice, a scanner file's
+ * scan); a digital call known only from Activity is voice. Null (no tile) when no recording kind fits: a live
+ * transmission, which is no recording.
+ */
+export function transmissionIcon(t: TransmissionDto): RecordingIcon | null {
+	if (t.recordingKind !== null) return recordingIconOf(t.recordingKind)
+	if (t.kind === "voice-digital" && t.artefacts.length > 0) return "voice"
+	return null
+}
+
 /** "What we know": at most six short rows in a fixed order; Tone always for analog FM. */
 export function knownRows(
 	t: TransmissionDto,
@@ -158,6 +171,11 @@ export function conversationQueue(
 	return { source, list: "transmission", ids, titles }
 }
 
+/** Play all's queue: the Conversation's, each part playing on into the next whatever Auto-next says. */
+export function playAllQueue(queue: QueueRef): QueueRef {
+	return { ...queue, playAll: true }
+}
+
 type LoadState =
 	| { status: "loading" }
 	| { status: "ready"; t: TransmissionDto }
@@ -186,9 +204,10 @@ export function TransmissionView({
 	const onBackRef = useRef(onBack)
 	onBackRef.current = onBack
 
-	// focus on Back when it opens and whenever it shows another transmission (a clicked Conversation row is
-	// disabled as the current one, so focus would fall to the page and Esc would close the drawer)
-	useEffect(() => back.current?.focus({ preventScroll: true }), [key])
+	// focus on Back when it opens, never when the player moves it on (focus stays where the user has it); a clicked
+	// Conversation row gives it to Back itself (that row turns disabled as the current one)
+	useEffect(() => back.current?.focus({ preventScroll: true }), [])
+	const focusBack = () => back.current?.focus({ preventScroll: true })
 
 	// Esc anywhere in the drawer (or on the drawer box, or the page after a lost focus) goes Back, before the
 	// shell's Esc closes the drawer: a capture-phase hook, not the section's own handler
@@ -221,6 +240,7 @@ export function TransmissionView({
 			recordings: () => data.recordings.get().items,
 			summary: opened.current.summary,
 			signal: abort.signal,
+			cached: opened.current.follow === true && attempt === 0,
 		}).then(
 			t => {
 				if (!abort.signal.aborted) setState({ status: "ready", t })
@@ -252,7 +272,7 @@ export function TransmissionView({
 			before = s.id
 			if (!followsPlayer(shown.current, was, s.id)) return
 			const next = playingTransmission(s, activityLists(services.activity))
-			if (next !== null) replaceTransmission(next.ref, next.summary)
+			if (next !== null) replaceTransmission(next.ref, next.summary, true)
 		})
 	}, [playback, services.activity])
 
@@ -270,7 +290,11 @@ export function TransmissionView({
 				</Button>
 				<span className="wkt-gap" />
 				{audioId !== null && state.status === "ready" && (
-					<KeepButton id={audioId} title={transmissionHeading(state.t)} />
+					<KeepButton
+						id={audioId}
+						title={transmissionHeading(state.t)}
+						kept={state.t.artefacts[0]?.kept ?? null}
+					/>
 				)}
 			</div>
 			<div className="wkt-body wk-scroll">
@@ -292,11 +316,13 @@ export function TransmissionView({
 							className="wkt-link"
 							onClick={() => setAttempt(n => n + 1)}
 						>
-							Try again
+							Retry
 						</button>
 					</p>
 				)}
-				{state.status === "ready" && <Ready t={state.t} host={host} />}
+				{state.status === "ready" && (
+					<Ready t={state.t} host={host} onPicked={focusBack} />
+				)}
 			</div>
 		</section>
 	)
@@ -305,9 +331,12 @@ export function TransmissionView({
 function Ready({
 	t,
 	host,
+	onPicked,
 }: {
 	t: TransmissionDto
 	host: "recordings" | "activity"
+	/** A Conversation row was picked: focus goes to Back (that row turns disabled). */
+	onPicked: () => void
 }) {
 	const services = useServices()
 	const title = transmissionHeading(t)
@@ -345,10 +374,15 @@ function Ready({
 		audio === null
 			? (wordsFor(NO_AUDIO_WORDS, t.noAudioReason) ?? "Not recorded")
 			: null
+	const icon = transmissionIcon(t)
 	return (
 		<>
 			<header className="wkt-head">
-				<span className="wk-tile" data-tone="accent" aria-hidden="true" />
+				{icon !== null && (
+					<span className="wk-tile" data-tone="accent" aria-hidden="true">
+						<RecIcon name={icon} />
+					</span>
+				)}
 				<span className="wkt-head-main">
 					<span className="wkt-head-line">
 						<h3 className="wkt-title">{title}</h3>
@@ -410,7 +444,12 @@ function Ready({
 			)}
 
 			{t.group !== null && (
-				<Conversation t={t} queue={queue} self={audio?.id ?? null} />
+				<Conversation
+					t={t}
+					queue={queue}
+					self={audio?.id ?? null}
+					onPicked={onPicked}
+				/>
 			)}
 
 			<ChannelDoors t={t} />
@@ -431,10 +470,12 @@ function Conversation({
 	t,
 	queue,
 	self,
+	onPicked,
 }: {
 	t: TransmissionDto
 	queue: QueueRef | null
 	self: string | null
+	onPicked: () => void
 }) {
 	const { playback } = useServices()
 	const members = t.group?.members ?? []
@@ -465,7 +506,7 @@ function Conversation({
 						onClick={() =>
 							playback.play(
 								queue.ids[0]!,
-								queue,
+								playAllQueue(queue),
 								0,
 								queue.titles?.[queue.ids[0]!],
 							)
@@ -494,7 +535,9 @@ function Conversation({
 								aria-current={current || undefined}
 								disabled={current || ref === null}
 								onClick={() => {
-									if (ref !== null) replaceTransmission(ref)
+									if (ref === null) return
+									replaceTransmission(ref)
+									onPicked()
 								}}
 							>
 								<time dateTime={m.startedAt}>{startText(m.startedAt)}</time>

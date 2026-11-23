@@ -127,7 +127,11 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 			className="wkr-drawer"
 			onClose={onClose}
 			closeLabel="Close recordings"
-			actions={<HeaderActions usable={unavailable === null} />}
+			actions={
+				// the count and the All / Kept switch belong to the list: hidden while the view stands in its place,
+				// so the list Back returns to is the one the user left
+				tx === null ? <HeaderActions usable={unavailable === null} /> : null
+			}
 		>
 			{unavailable === "protected-only" ? (
 				<Empty

@@ -10,6 +10,7 @@ import type {
 	RecordingSpeech,
 } from "@wavekit/api-types"
 
+import { keptFileStartOf } from "../activity/row-time.ts"
 import { clockText, dateText, sameDay } from "../display.ts"
 import { channelMHz } from "../naming.ts"
 import type { TransmissionTone } from "./contract.ts"
@@ -102,17 +103,21 @@ export function toneText(raw: unknown): string {
 
 /** Why a tone is not measured, one hint per reason (TransmissionTone["why"]). */
 export const NOT_MEASURED_WORDS: Readonly<
-	Record<NonNullable<TransmissionTone["why"]>, string>
+	Record<Exclude<NonNullable<TransmissionTone["why"]>, "not-stored">, string>
 > = {
 	"no-facts": "This recording did not store its tone",
 	malformed: "The stored tone could not be read",
-	undetermined: "Too little audio, or the tone was not steady enough to tell",
+	undetermined: "Not determined for this recording",
 	"no-record":
 		"Its Activity record could not be read, so its tone reading is not known",
 	"no-recording":
 		"Its recording is not listed here, so its stored tone could not be read",
-	"live-none": "Listening stored no tone reading for this live transmission",
+	"live-none":
+		"The live demodulator stores no tone when the audio was too short, the detector failed, or the core predates the check",
 }
+
+/** A tone the recorder kept the file for (`keptBy` "own-tone") without storing which. */
+export const TONE_NOT_STORED = "A tone was heard (not stored)"
 
 /** A heard tone's value as one text; null when what it holds cannot be shown (not a finite Hz, not a DCS code). */
 function heardText(t: TransmissionTone): string | null {
@@ -126,7 +131,8 @@ function heardText(t: TransmissionTone): string | null {
 
 /**
  * The Tone row of a transmission: its value and, when it is not a plain value, a hint saying why. Anything it
- * cannot read is "Not measured" (the stored tone could not be read), never "No tone heard".
+ * cannot read is "Not measured" (the stored tone could not be read), never "No tone heard": that comes only from
+ * the recorder's stored null (a `none` from any other source reads as not measured).
  */
 export function toneRow(t: TransmissionTone): {
 	value: string
@@ -139,9 +145,13 @@ export function toneRow(t: TransmissionTone): {
 	const raw: unknown = t
 	if (raw === null || typeof raw !== "object") return malformed
 	if (t.state === "heard") {
+		if (t.why === "not-stored" && t.ctcssHz === null && t.dcs === null)
+			return { value: TONE_NOT_STORED, hint: null }
 		const text = heardText(t)
 		return text === null ? malformed : { value: text, hint: null }
 	}
+	if (t.state === "none" && t.from !== "recorder")
+		return { value: "Not measured", hint: NOT_MEASURED_WORDS["live-none"] }
 	if (t.state === "none")
 		return {
 			value: "No tone heard",
@@ -242,7 +252,7 @@ export function recordingChangeFields(
 			"Channel",
 			channelText(p.channel?.frequencyHz ?? p.frequencyHz),
 		),
-		...wordField("started", "Started", startText(p.observationStartedAt)),
+		...wordField("started", "Started", startText(keptFileStartOf(p))),
 		...wordField("duration", "Duration", durationWords(p.durationMs)),
 		...wordField("kept", "Kept at", startText(p.finalizedAt)),
 	]

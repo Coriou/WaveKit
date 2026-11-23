@@ -3,9 +3,11 @@
  * app's mock core (web/mock: synthetic recordings, one per tone state of the facts sidecar).
  *
  * Steps: Recordings → an open row's Details shows the view; Back returns to the list with the same row open and
- * focused; Activity → a transmission row's Details → Back; the view for each tone state reads its Tone row
- * ("CTCSS 88.5 Hz", "DCS 023", "No tone heard", "Not measured" twice: tone missing, no facts); Esc in the view
- * goes Back and the drawer stays open. A PNG is saved after each step.
+ * focused; Activity → a transmission row's Details shows the view inside Activity (its own screenshot) → Back; the
+ * view for each tone state reads its Tone row ("CTCSS 88.5 Hz", "DCS 023", "No tone heard" from the recorder's
+ * stored null, "Not measured" twice with its hint: "Not determined for this recording" for a missing tone, "This
+ * recording did not store its tone" with no facts); Esc in the view goes Back and the drawer stays open. A PNG is
+ * saved after each step.
  */
 import type { Page } from "playwright-core"
 import { within } from "./harness.ts"
@@ -152,6 +154,17 @@ export async function transmissionFlow(
 				await page.locator(".wka-list").waitFor(bounded)
 			}
 			if (activityOk) {
+				await page.locator(".wkt-known, .wkt-listen").first().waitFor(bounded)
+				const inActivity = await page.evaluate(
+					() =>
+						document.querySelector(".wka-drawer .wkt-view") !== null &&
+						document.querySelector(".wkr-drawer") === null,
+				)
+				await record(
+					"activity-view",
+					inActivity,
+					inActivity ? "" : "the view is not inside the Activity drawer",
+				)
 				await goBack()
 				activityOk = await until(
 					async () =>
@@ -170,14 +183,25 @@ export async function transmissionFlow(
 			location.hash = "#/recordings"
 		})
 		await page.locator(".wkr-item").first().waitFor(bounded)
-		const expected: [string, string, string][] = [
-			["tone-ctcss", "ctcss", "CTCSS 88.5 Hz"],
-			["tone-dcs", "dcs", "DCS 023"],
-			["tone-none-heard", "none heard", "No tone heard"],
-			["tone-missing", "missing", "Not measured"],
-			["tone-no-facts", "no facts", "Not measured"],
+		// the value, then the hint when it has one (the row's text is both)
+		const expected: [string, string, string, string][] = [
+			["tone-ctcss", "ctcss", "CTCSS 88.5 Hz", ""],
+			["tone-dcs", "dcs", "DCS 023", ""],
+			["tone-none-heard", "none heard", "No tone heard", ""],
+			[
+				"tone-missing",
+				"missing",
+				"Not measured",
+				"Not determined for this recording",
+			],
+			[
+				"tone-no-facts",
+				"no facts",
+				"Not measured",
+				"This recording did not store its tone",
+			],
 		]
-		for (const [name, state, text] of expected) {
+		for (const [name, state, text, hint] of expected) {
 			const id = rows[state]
 			if (id === undefined) {
 				await record(name, false, `the mock has no ${state} recording`)
@@ -193,7 +217,10 @@ export async function transmissionFlow(
 			}
 			await record(
 				name,
-				got !== null && got.startsWith(text),
+				got !== null &&
+					got.startsWith(text) &&
+					got.includes(hint) &&
+					!got.includes("steady"),
 				`Tone: ${got ?? details[name] ?? "not shown"}`,
 			)
 			await goBack().catch(() => undefined)

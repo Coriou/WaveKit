@@ -1,8 +1,9 @@
 // loadTransmission(ref): one transmission as the Transmission DTO, composed in the web from the calls that exist
 // today (the recording, its Activity record, its discovery, its observation and its neighbours) until the core
-// serves GET /api/transmissions/:ref. Only the first read is required; each optional one has its own short
-// deadline and fails to "absent", so the view never waits on it. This composition is the only place that knows
-// the four calls, and it goes when the route arrives.
+// serves GET /api/transmissions/:ref. Only the first read is required, under its own deadline (it fails, and the
+// view offers Retry); each optional one has its own short deadline and fails to "absent", so the view never waits
+// on it. One open reads a channel's recordings once (the file's folder is also its neighbours). This composition is
+// the only place that knows the four calls, and it goes when the route arrives.
 import type {
 	ActivityRecord,
 	ActivitySummary,
@@ -22,24 +23,83 @@ import type {
 	TransmissionTone,
 } from "./contract.ts"
 import { factsOf, freezeDto, readLiveTone, refText } from "./contract.ts"
-import { noteRecordStart } from "../activity/row-time.ts"
+import { keptFileStartOf, noteRecordStart } from "../activity/row-time.ts"
 
 /** Each optional read gives up after this long (the view renders without it). */
 export const OPTIONAL_READ_MS = 4_000
+/** The required read gives up after this long: the view then says so and offers Retry, never an endless load. */
+export const REQUIRED_READ_MS = 15_000
 /** Recordings of the same channel this close to the transmission count as "around this time". */
 export const AROUND_MS = 120_000
-/** Neighbours read from the channel's recordings (newest first). */
-const NEIGHBOURS = 50
 /** Observations of the discovery searched for this one's (the core keeps its last 256). */
 const OBSERVATIONS = 256
-/** Recordings read when a key names no folder: the newest page (the route's page limit). */
+/**
+ * Recordings read from a folder (the route's page limit, newest first). The same page finds the file and lists its
+ * neighbours, so one open reads a channel's recordings once.
+ */
 const NEWEST = 200
 /**
- * The Conversation's bound: the route's `group.members` cap (64). Today the members are this recording and at
- * most NEIGHBOURS (50) recordings of its channel, 1 + 50 = 51, so the cap does not bite until the route lists
- * more; when it does, it keeps the window of MEMBERS_MAX that holds this one (groupOf).
+ * The Conversation's bound: the route's `group.members` cap (64). The members are this recording and at most
+ * NEWEST (200) recordings of its channel, 1 + 200 = 201, so the cap can bite: it keeps the window of MEMBERS_MAX
+ * that holds this one (groupOf).
  */
 export const MEMBERS_MAX = 64
+
+/**
+ * Transmissions kept for the player's Next and Previous (the view following the player reads a ref it showed a
+ * moment ago from here). Bound: at most TRANSMISSION_CACHE_MAX entries, each no older than TRANSMISSION_CACHE_MS.
+ * A DTO is its few fields, at most MEMBERS_MAX (64) members of about 200 bytes (13 KB) and the raw records it read
+ * (a recording item, an Activity record, facts and an observation: a few KB), so well under 50 KB; 16 × 50 KB =
+ * 800 KB at the very most.
+ */
+export const TRANSMISSION_CACHE_MAX = 16
+export const TRANSMISSION_CACHE_MS = 60_000
+const cache = new Map<string, { at: number; dto: TransmissionDto }>()
+
+/** The cached DTO of `ref` when it is fresh; else undefined. */
+export function cachedTransmission(
+	ref: TransmissionRef,
+	now: number = Date.now(),
+): TransmissionDto | undefined {
+	const key = refText(ref)
+	const hit = cache.get(key)
+	if (hit === undefined) return undefined
+	if (now - hit.at > TRANSMISSION_CACHE_MS) {
+		cache.delete(key)
+		return undefined
+	}
+	return hit.dto
+}
+
+/** Keeps `dto` under `ref`, the oldest dropped past TRANSMISSION_CACHE_MAX. */
+function remember(ref: TransmissionRef, dto: TransmissionDto, now: number) {
+	const key = refText(ref)
+	cache.delete(key)
+	cache.set(key, { at: now, dto })
+	while (cache.size > TRANSMISSION_CACHE_MAX) {
+		const oldest = cache.keys().next().value
+		if (oldest === undefined) break
+		cache.delete(oldest)
+	}
+}
+
+/** Forgets every cached transmission (tests). */
+export function clearTransmissionCache(): void {
+	cache.clear()
+}
+
+/** How many transmissions are cached (tests). */
+export function transmissionCacheSize(): number {
+	return cache.size
+}
+
+/** The required read did not answer in time. */
+export class TransmissionTimeoutError extends Error {
+	constructor() {
+		super("The receiver did not answer in time")
+		this.name = "TransmissionTimeoutError"
+	}
+}
 
 /**
  * Nothing the web can read names this ref. `reason` says why, in words the view shows after "Not found"; it never
@@ -72,10 +132,33 @@ export interface LoadTransmissionDeps {
 	signal?: AbortSignal
 	/** The optional reads' deadline (tests). */
 	optionalMs?: number
+	/** The required read's deadline (tests). */
+	requiredMs?: number
+	/** Answer from the cache when it holds a fresh copy (the view following the player's Next and Previous). */
+	cached?: boolean
+	/** The clock (tests). */
+	now?: () => number
 }
 
-/** The Transmission DTO of `ref`, frozen. Rejects with TransmissionNotFoundError when nothing names it. */
+/**
+ * The Transmission DTO of `ref`, frozen, and cached for the player's steps. Rejects with TransmissionNotFoundError
+ * when nothing names it, and with TransmissionTimeoutError when the required read does not answer in time.
+ */
 export async function loadTransmission(
+	ref: TransmissionRef,
+	deps: LoadTransmissionDeps,
+): Promise<TransmissionDto> {
+	const now = deps.now ?? Date.now
+	if (deps.cached === true) {
+		const hit = cachedTransmission(ref, now())
+		if (hit !== undefined) return hit
+	}
+	const dto = await compose(ref, deps)
+	remember(ref, dto, now())
+	return dto
+}
+
+async function compose(
 	ref: TransmissionRef,
 	deps: LoadTransmissionDeps,
 ): Promise<TransmissionDto> {
@@ -85,7 +168,8 @@ export async function loadTransmission(
 	let item: RecordingInventoryItem | null = null
 
 	if ("recording" in ref) {
-		item = await ctx.recording(ref.recording)
+		const key = ref.recording
+		item = await ctx.required(() => ctx.recording(key))
 		if (item === null)
 			throw new TransmissionNotFoundError(
 				ref,
@@ -118,9 +202,10 @@ export async function loadTransmission(
 						? rowItem
 						: await ctx.optional(() => ctx.recording(named, true))
 		} else {
-			record = await ctx.activity(eventId)
-			key = recordingKeyOf(record, summary)
-			if (key !== null) item = await ctx.recording(key)
+			record = await ctx.required(() => ctx.activity(eventId))
+			const found = recordingKeyOf(record, summary)
+			key = found
+			if (found !== null) item = await ctx.required(() => ctx.recording(found))
 		}
 		if (record === null) gone.add("activity")
 		if (record === null && item === null && summary === null)
@@ -167,11 +252,45 @@ export function recordingQueryOf(
 		: { limit: NEWEST }
 }
 
-/** The reads, each with the caller's abort and the optional ones' deadline. */
+/** The reads, each with the caller's abort and its deadline; one recordings page per query per open. */
 class Reads {
 	readonly #deps: LoadTransmissionDeps
+	readonly #pages = new Map<string, Promise<RecordingInventoryPage>>()
 	constructor(deps: LoadTransmissionDeps) {
 		this.#deps = deps
+	}
+
+	/** A recordings page, read once per query in this open (the file's lookup and its neighbours share it). */
+	#page(
+		query: { discoveryId: string; limit: number } | { limit: number },
+		optional: boolean,
+	): Promise<RecordingInventoryPage> {
+		const key = JSON.stringify(query)
+		let p = this.#pages.get(key)
+		if (p === undefined) {
+			p = this.#deps.api.get<RecordingInventoryPage>("/api/recordings", {
+				...this.#options(optional),
+				query,
+			})
+			this.#pages.set(key, p)
+		}
+		return p
+	}
+
+	/** Runs the required read under its deadline: no answer in time rejects (the view offers Retry). */
+	async required<T>(read: () => Promise<T>): Promise<T> {
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const late = new Promise<never>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new TransmissionTimeoutError()),
+				this.#deps.requiredMs ?? REQUIRED_READ_MS,
+			)
+		})
+		try {
+			return await Promise.race([read(), late])
+		} finally {
+			clearTimeout(timer)
+		}
 	}
 
 	loaded(): readonly RecordingInventoryItem[] {
@@ -182,9 +301,9 @@ class Reads {
 		const signal = this.#deps.signal
 		return {
 			...(signal ? { signal } : {}),
-			...(optional
-				? { timeoutMs: this.#deps.optionalMs ?? OPTIONAL_READ_MS }
-				: {}),
+			timeoutMs: optional
+				? (this.#deps.optionalMs ?? OPTIONAL_READ_MS)
+				: (this.#deps.requiredMs ?? REQUIRED_READ_MS),
 		}
 	}
 
@@ -238,10 +357,7 @@ class Reads {
 		const match = (r: RecordingInventoryItem) => r.key === key || r.id === key
 		const known = this.loaded().find(match)
 		if (known) return known
-		const page = await this.#deps.api.get<RecordingInventoryPage>(
-			"/api/recordings",
-			{ ...this.#options(optional), query: recordingQueryOf(key) },
-		)
+		const page = await this.#page(recordingQueryOf(key), optional)
 		return page.items.find(match) ?? null
 	}
 
@@ -264,12 +380,10 @@ class Reads {
 		})
 	}
 
+	/** The channel's recordings: the same page the file was found in when its folder is the channel's. */
 	neighbours(discoveryId: string): Promise<RecordingInventoryItem[] | null> {
 		return this.optional(async () => {
-			const page = await this.#deps.api.get<RecordingInventoryPage>(
-				"/api/recordings",
-				{ ...this.#options(true), query: { discoveryId, limit: NEIGHBOURS } },
-			)
+			const page = await this.#page({ discoveryId, limit: NEWEST }, true)
 			return page.items
 		})
 	}
@@ -293,18 +407,27 @@ function isCall(item: RecordingInventoryItem): boolean {
 	return item.kind === "dsd-fme-call" || item.kind === "dv-call"
 }
 
-/** The recorder's tone, three states: from the facts, else not measured (and why). */
-export function recorderTone(facts: RecordingFacts | null): TransmissionTone {
+/**
+ * The recorder's tone, three states: from the facts; else, when the file was kept for its tone (`keptBy`
+ * "own-tone"), heard but not stored; else not measured (and why).
+ */
+export function recorderTone(
+	facts: RecordingFacts | null,
+	keptBy: string | null = facts?.finish.keptBy ?? null,
+): TransmissionTone {
 	const base = {
 		ctcssHz: null,
 		dcs: null,
 		dcsChecked: false,
 		from: "recorder" as const,
 	}
-	if (facts === null) return { ...base, state: "not-measured", why: "no-facts" }
-	if (facts.toneMalformed === true)
+	const ownTone = keptBy === "own-tone"
+	if (facts?.toneMalformed === true)
 		return { ...base, state: "not-measured", why: "malformed" }
-	const tone = facts.tone
+	const tone = facts?.tone
+	if (tone === undefined && ownTone)
+		return { ...base, state: "heard", why: "not-stored" }
+	if (facts === null) return { ...base, state: "not-measured", why: "no-facts" }
 	if (tone === undefined)
 		return { ...base, state: "not-measured", why: "undetermined" }
 	if (tone === null) return { ...base, state: "none", why: null }
@@ -326,7 +449,7 @@ function audioOf(item: RecordingInventoryItem): TransmissionArtefact {
 		bytes: item.bytes,
 		durationMs: item.durationMs,
 		state: "kept",
-		kept: item.kept === true,
+		kept: typeof item.kept === "boolean" ? item.kept : null,
 		expiresAt: null,
 	}
 }
@@ -470,6 +593,7 @@ async function fromRecording(
 				: item.kind === "scanner-dv" || isCall(item)
 					? "voice-digital"
 					: "unknown",
+		recordingKind: item.kind,
 		protocol:
 			item.kind === "scanner-analog"
 				? "analog-fm"
@@ -498,7 +622,10 @@ async function fromRecording(
 			item.part != null && item.parts != null && item.parts > 1
 				? { index: item.part, of: item.parts }
 				: null,
-		tone: item.kind === "scanner-analog" ? recorderTone(facts) : null,
+		tone:
+			item.kind === "scanner-analog"
+				? recorderTone(facts, facts?.finish.keptBy ?? item.keptBy ?? null)
+				: null,
 		identity: isCall(item)
 			? { talkgroup: item.talkgroup, radio: item.source, label: null }
 			: null,
@@ -558,12 +685,14 @@ function fromActivity(
 	const live = record?.kind === "analog-transmission" ? record.payload : null
 	const kept = record?.kind === "recording-change" ? record.payload : null
 	const keptRow = kept !== null || summary?.kind === "recording-change"
-	// a live transmission's row whose record was not read: analog voice, its modulation and tone unknown
+	// a live transmission's row whose record was not read: analog voice, its modulation read from the row
 	const liveRow =
 		live === null && record === null && summary?.kind === "analog-transmission"
 	const eventId = record?.eventId ?? summary?.eventId ?? ""
 	const field = (key: string) =>
 		summary?.fields.find(f => f.key === key)?.value ?? null
+	const rowModulation = liveRow ? modulationOfRow(summary) : null
+	const rowFm = rowModulation === "nfm" || rowModulation === "wfm"
 	const durationMs =
 		live?.durationMs ??
 		kept?.durationMs ??
@@ -574,7 +703,7 @@ function fromActivity(
 				: (summary?.recording?.durationMs ?? null))
 	const startedAt = firstTime(
 		live?.startedAt,
-		kept?.observationStartedAt,
+		kept !== null ? keptFileStartOf(kept) : null,
 		record?.producedAt,
 		summary?.producedAt,
 	)
@@ -608,12 +737,15 @@ function fromActivity(
 				: summary?.category === "voice"
 					? "voice-digital"
 					: "unknown",
+		recordingKind: keptRow ? "scanner-analog" : null,
 		protocol:
 			live !== null
 				? `analog-${live.modulation}`
 				: keptRow
 					? "analog-fm"
-					: (summary?.protocol ?? null),
+					: rowModulation !== null
+						? `analog-${rowModulation}`
+						: (summary?.protocol ?? null),
 		sourceId: live?.sourceId ?? kept?.sourceId ?? summary?.sourceId ?? null,
 		channel: {
 			hz,
@@ -642,7 +774,7 @@ function fromActivity(
 						from: "recorder",
 						why: "no-recording",
 					}
-				: liveRow
+				: rowFm
 					? {
 							state: "not-measured",
 							ctcssHz: null,
@@ -674,7 +806,7 @@ function fromActivity(
 						bytes: 0,
 						durationMs: rec.durationMs,
 						state: "kept",
-						kept: false,
+						kept: null,
 						expiresAt: null,
 					},
 				]
@@ -698,8 +830,24 @@ function fromActivity(
 }
 
 /**
- * The live demodulator's tone, from a record's raw `tone` read with Zod: heard or none when it stored a readable
- * reading, not measured when it stored none (`live-none`) or one this web cannot read (`malformed`).
+ * A live transmission row's modulation ("nfm", "wfm", "am", ...), from its Modulation field, else its title's
+ * first word ("NFM 145.5625 MHz"); null when the row says neither. Only a known FM row gets a Tone row.
+ */
+export function modulationOfRow(
+	summary: ActivitySummary | null,
+): string | null {
+	const v = summary?.fields.find(f => f.key === "modulation")?.value
+	if (typeof v === "string" && /^[a-z]{2,4}$/i.test(v)) return v.toLowerCase()
+	const word = /^(NFM|WFM|AM|USB|LSB|CW|DSB|RAW)\b/.exec(summary?.title ?? "")
+	return word?.[1] ? word[1].toLowerCase() : null
+}
+
+/**
+ * The live demodulator's tone, from a record's raw `tone` read with Zod: heard when it stored a tone or code; not
+ * measured otherwise. An empty reading ({ctcssHz: null, dcs: null or absent}) is not measured, never "none": the
+ * live demodulator writes exactly that when the audio was under 0.75 s, when its detector failed or threw, and old
+ * records carry it too, so it cannot say no tone was heard (`live-none`, as for no reading at all). One it cannot
+ * read is `malformed`.
  */
 export function liveToneOf(raw: unknown): TransmissionTone {
 	const t = readLiveTone(raw)
@@ -712,8 +860,10 @@ export function liveToneOf(raw: unknown): TransmissionTone {
 	}
 	if (t === undefined) return { ...unknown, why: "live-none" }
 	if (t === "malformed") return { ...unknown, why: "malformed" }
+	if (t.ctcssHz === null && t.dcs === null)
+		return { ...unknown, dcsChecked: t.dcsChecked, why: "live-none" }
 	return {
-		state: t.ctcssHz !== null || t.dcs !== null ? "heard" : "none",
+		state: "heard",
 		ctcssHz: t.ctcssHz,
 		dcs: t.dcs,
 		dcsChecked: t.dcsChecked,

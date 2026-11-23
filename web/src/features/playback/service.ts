@@ -3,8 +3,8 @@
 // (the core's file route sends no ranges, so the whole file is fetched once and seeks are local). Live audio
 // is muted while a recording loads to play or plays (one subscriber calls holdLive on every change, so every
 // path restores it). A finished recording plays the next one of the list it was started from (a snapshot the
-// surface refreshes while it is shown) when Auto-next is on (per browser). Waveform peaks come from the same
-// blob.
+// surface refreshes while it is shown) when Auto-next is on (per browser), or always for a Play all queue. Waveform
+// peaks come from the same blob.
 //
 // One player model. Every surface (a Recordings row, an Activity row or detail, the Transmission view, the tuned
 // card) only drives this service: its disc toggles it, its waveform seeks it, nothing holds a second <audio> or
@@ -47,6 +47,8 @@ export interface QueueRef {
 	ids: readonly string[]
 	/** What the dock calls each one (the row's title). */
 	titles?: Readonly<Record<string, string>>
+	/** Started by a Play all: each one plays on into the next to the queue's end, whatever Auto-next says. */
+	playAll?: boolean
 }
 
 export interface PlaybackState {
@@ -451,6 +453,7 @@ export class PlaybackService extends Store<PlaybackState> {
 		const queue: QueueRef = { source, ids }
 		if (titles !== undefined) queue.titles = titles
 		if (list !== undefined) queue.list = list
+		if (s.queue.playAll === true) queue.playAll = true
 		this.set({ ...s, queue })
 	}
 
@@ -634,7 +637,7 @@ export class PlaybackService extends Store<PlaybackState> {
 	private onEnded(): void {
 		if (!this.live()) return
 		const s = this.get()
-		if (s.phase === "playing" && s.autoNext) {
+		if (s.phase === "playing" && (s.autoNext || s.queue?.playAll === true)) {
 			const next = queueStep(s.queue, s.id, 1)
 			if (next !== null) {
 				this.play(next, s.queue ?? undefined)

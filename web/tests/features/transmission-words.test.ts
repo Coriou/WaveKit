@@ -129,7 +129,12 @@ describe("tone words", () => {
 			state: "not-measured",
 			why: "no-facts",
 		})
+		// kept for its own tone (FACTS' keptBy) and no tone stored: heard, not stored
 		expect(recorderTone(facts("absent"))).toMatchObject({
+			state: "heard",
+			why: "not-stored",
+		})
+		expect(recorderTone(facts("absent"), "content")).toMatchObject({
 			state: "not-measured",
 			why: "undetermined",
 		})
@@ -324,6 +329,7 @@ function dto(over: Partial<TransmissionDto>): TransmissionDto {
 			operationId: null,
 		},
 		kind: "voice-analog",
+		recordingKind: "scanner-analog",
 		protocol: "analog-fm",
 		sourceId: null,
 		channel: { hz: 145_562_500, measuredHz: null, name: null },
