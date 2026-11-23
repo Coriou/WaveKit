@@ -407,8 +407,8 @@ describe("probe call recordings reach the recordings list", () => {
 			live.talkgroup = "9"
 			live.source = "2002"
 			const t0 = Math.floor(live.startedAt / 1000) * 1000
-			const first = `${stamp(t0)}_00042_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav`
-			const second = `${stamp(t0 + 1_000)}_00043_DMR_CC_1_GROUP_TGT_9_SRC_2002.wav`
+			const first = `${stamp(t0)}_00042_YSF_1A3_GROUP_TGT_9_SRC_2001.wav`
+			const second = `${stamp(t0 + 1_000)}_00043_YSF_1A3_GROUP_TGT_9_SRC_2002.wav`
 			const probeDir = join(h.dir, "recordings", "dv", "probe-scn-test-1")
 			await mkdir(join(probeDir, "WAV"), { recursive: true })
 			await writeFile(join(probeDir, "WAV", first), wav(1))

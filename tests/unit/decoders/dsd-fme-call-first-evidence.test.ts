@@ -73,7 +73,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 		expect(unnamedEvidenceSpanMs("ysf")).toBeUndefined()
 	})
 
-	describe("R1: one missed sync and a late next print keep an over whole", () => {
+	describe("one missed sync and a late next print keep an over whole", () => {
 		/** over(14) from 1000 with sync 6 dropped and sync 7 `offset` ms off its grid. */
 		const dropped = (offset: number, withLc: boolean): Line[] => {
 			const lines: Line[] = []
@@ -341,9 +341,9 @@ describe("dsd-fme call-first: evidence rules", () => {
 			[1720, MS("VC*")],
 		]
 
-		it("VC* at 1000/1360/1720 and TLC + SLOT line at 1900: one call, tg 9 src 100, known clear", () => {
+		it("VC* at 1000/1360/1720 and TLC + SLOT line at 1900, closed by a clean sync: one call, tg 9 src 100, named but not known clear", () => {
 			const { outputs, starts, ends, voice } = replay(
-				[...head, [1900, MS("TLC")], [1900, LC(1)]],
+				[...head, [1900, MS("TLC")], [1900, LC(1)], [1960, MS("CSBK")]],
 				8000,
 			)
 			expect(starts).toHaveLength(1)
@@ -357,15 +357,25 @@ describe("dsd-fme call-first: evidence rules", () => {
 				source: null,
 				encryptionKnown: false,
 			})
+			// A trailer of a call named by nothing before it is metadata only
+			// (DMR clearance terminator needs a named call): never known clear.
 			expect(ends[0]).toMatchObject({
 				talkgroup: 9,
 				source: 100,
-				encryptionKnown: true,
+				encryptionKnown: false,
 			})
 			expect(at(ends[0]!.startedAt)).toBe(1000)
 			expect(at(ends[0]!.endedAt!)).toBe(1900)
 			expect(ends[0]!.flags?.timeout).toBe(false)
 			expect(voice.at(-1)).toMatchObject({ active: false, talkgroup: 9 })
+			// With no closing sync, the trailer window runs out: it still names
+			// the call but proves nothing (fail closed).
+			const unclosed = replay([...head, [1900, MS("TLC")], [1900, LC(1)]], 8000)
+			expect(unclosed.ends[0]).toMatchObject({
+				talkgroup: 9,
+				source: 100,
+				encryptionKnown: false,
+			})
 		})
 
 		it("the trailer counts at 105 ms after the terminator, not at 106", () => {
@@ -426,15 +436,22 @@ describe("dsd-fme call-first: evidence rules", () => {
 
 		it("the terminator printed again inside the hold keeps the call_end held for its trailer", () => {
 			const { starts, ends } = replay(
-				[...head, [1900, MS("TLC")], [1930, MS("TLC")], [1950, LC(1)]],
+				[
+					...head,
+					[1900, MS("TLC")],
+					[1930, MS("TLC")],
+					[1950, LC(1)],
+					[1990, MS("CSBK")],
+				],
 				8000,
 			)
 			expect(starts).toHaveLength(1)
 			expect(ends).toHaveLength(1)
+			// Named by its trailer only: metadata, not a proof (terminator needs a named call).
 			expect(ends[0]).toMatchObject({
 				talkgroup: 9,
 				source: 100,
-				encryptionKnown: true,
+				encryptionKnown: false,
 			})
 			expect(at(ends[0]!.endedAt!)).toBe(1900)
 		})
@@ -469,7 +486,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 		})
 	})
 
-	describe("m2: known clear only once the link control's burst closes clean", () => {
+	describe("known clear only once the link control's burst closes clean", () => {
 		const head: Line[] = [
 			[1000, MS("VC*")],
 			[1360, MS("VC*")],
@@ -495,6 +512,8 @@ describe("dsd-fme call-first: evidence rules", () => {
 				replay(
 					[
 						...head,
+						// The first clean LC after voice names the call and is its
+						// naming-link proof, settled by the next clean sync.
 						[1800, LC(1)],
 						...tail,
 						[2080, MS("VC*")],
@@ -524,6 +543,8 @@ describe("dsd-fme call-first: evidence rules", () => {
 					[1720, BS("VC*")],
 					[1800, LC(1)],
 					[1830, slot2],
+					// The LC at 1800 names the call and is its proof: slot 1's next
+					// sync settles it, slot 2's sync in between does not drop it.
 					[2080, BS("VC*")],
 				],
 				10_000,
@@ -533,7 +554,7 @@ describe("dsd-fme call-first: evidence rules", () => {
 		})
 	})
 
-	describe("m4: P25 src/tg prints", () => {
+	describe("P25 src/tg prints", () => {
 		const frames: Line[] = [
 			[1000, P25("HDU")],
 			[1180, P25("LDU1")],
@@ -542,9 +563,31 @@ describe("dsd-fme call-first: evidence rules", () => {
 			[1720, P25("LDU2")],
 		]
 
-		it("a clear ALG on an error-free src/tg line makes the call known clear", () => {
+		it("a clear ALG on a src/tg line proves nothing; the call's own LDU2 ALG 0x80 KEY 0, after its LDU1 named it, makes it known clear", () => {
+			const named: Line = [
+				1550,
+				" nac: [ 2A5] src: [ 1234] tg: [ 56] ALG ID: 0x80",
+			]
+			const unproven = replay([...frames, named], 10_000).ends
+			expect(unproven).toHaveLength(1)
+			expect(unproven[0]).toMatchObject({
+				talkgroup: 56,
+				source: 1234,
+				encryptionKnown: false,
+			})
+			const clearAlg = " LDU2 ALG ID: 0x80 KEY ID: 0x0000 MI: 0x0000000000000000"
+			// No LDU1 link control named the call: the LDU2's clear print is
+			// nobody's proof.
+			const unnamed = replay([...frames, named, [1721, clearAlg]], 10_000).ends
+			expect(unnamed).toHaveLength(1)
+			expect(unnamed[0]).toMatchObject({ encryptionKnown: false })
 			const { ends } = replay(
-				[...frames, [1550, " nac: [ 2A5] src: [ 1234] tg: [ 56] ALG ID: 0x80"]],
+				[
+					...frames,
+					named,
+					[1541, " Group Voice Channel User - Group 56 Source 1234"],
+					[1721, clearAlg],
+				],
 				10_000,
 			)
 			expect(ends).toHaveLength(1)

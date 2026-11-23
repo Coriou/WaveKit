@@ -542,6 +542,7 @@ csdr:
 #     settleMs: { local: 300, network: 1000 }
 #     revisitShare: 0.3
 #   hold: { maxHoldMs: 60000, hangMs: 2000, preRollMs: 300 }
+#   admission: { enabled: true }   # discard analog files measured as noise (discarded:noise)
 #   storage:
 #     dir: null                  # null = <stateDir>/scanner
 #     maxRecordingsMb: 512
@@ -817,7 +818,7 @@ csdr:
 #   binaryPath: wavekit-chan
 #   socketDir: /var/run/wavekit/chan
 #   usableFraction: 0.8
-#   channelQueueMs: 250
+#   channelQueueMs: 1000
 #   inputHighWaterMark: 262144
 #   blockSamples: 16384
 

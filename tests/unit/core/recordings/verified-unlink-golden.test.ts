@@ -10,7 +10,7 @@ import { createRecordingInventory } from "../../../../src/core/recordings/invent
 import { openRecordingKeepService } from "../../../../src/core/recordings/keep-service.js"
 import type { Logger } from "../../../../src/utils/logger.js"
 
-const NAME = "20261016_120000_01234_1_GROUP_TGT_100_SRC_2001.wav"
+const NAME = "20261016_120000_01234_YSF_1_GROUP_TGT_100_SRC_2001.wav"
 const DSD_ID = `dsd:0~${NAME}`
 
 function wav(dataBytes: number): Buffer {

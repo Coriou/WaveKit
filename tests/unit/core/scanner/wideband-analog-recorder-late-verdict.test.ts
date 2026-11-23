@@ -87,6 +87,7 @@ const low = (
 		decodedLabel?: (id: string) => DecodedLabel | null
 		budget?: number
 		syllables?: boolean
+		admission?: boolean
 	} = {},
 ): Harness =>
 	harness({
@@ -96,7 +97,19 @@ const low = (
 		decodedLabel: more.decodedLabel ?? (() => null),
 		...(more.budget !== undefined ? { budget: more.budget } : {}),
 		...(voicePrior ? { voicePrior } : {}),
+		...(more.admission !== undefined ? { admission: more.admission } : {}),
 	})
+
+/**
+ * `low` with recording admission off (scanner.admission.enabled false): the content-check and
+ * no-voice tests below feed a data buzz or open-squelch noise to test those rows alone; with
+ * admission on such a file is `discarded:noise` first (wideband-analog-recorder-admission.test.ts).
+ */
+const lowPrior = (
+	voicePrior: ((id: string) => VoicePrior | null) | undefined,
+	ctcssHz: number | null = null,
+	more: Parameters<typeof low>[2] = {},
+): Harness => low(voicePrior, ctcssHz, { ...more, admission: false })
 
 /** One analog-fm over of `seconds` by observation `id`, closed, then 3.5 s of quiet (no idle). */
 async function over(
@@ -938,7 +951,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 	}
 
 	it("a retune that ends the over does not bypass the content check: the buzz cut epoch-changed is discarded:not-speech", async () => {
-		const h = low(ownDmr)
+		const h = lowPrior(ownDmr)
 		await retunedDataOver(h)
 		await h.fire()
 		await h.rec.idle()
@@ -948,7 +961,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 	}, 120_000)
 
 	it("FROZEN: the same retune with no prior keeps the file, marked cut epoch-changed", async () => {
-		const h = low(() => null)
+		const h = lowPrior(() => null)
 		await retunedDataOver(h)
 		await h.fire()
 		await h.rec.idle()
@@ -981,7 +994,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 			digitalSeenAt: () => Math.max(...proofs.map(p => p.at)),
 		})
 		const { box, voicePrior } = priorBox(dmrChannel(history))
-		const h = low(voicePrior)
+		const h = lowPrior(voicePrior)
 		let i = 0
 		const realTrack = h.rec.track.bind(h.rec)
 		h.rec.track = (t: WidebandTrackInput) => {
@@ -998,7 +1011,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 	}, 120_000)
 
 	it("B1: backed evidence (the owner's own DMR decode): discarded:not-speech at its finish, nothing kept, no hold", async () => {
-		const h = low(ownDmr)
+		const h = lowPrior(ownDmr)
 		await dataOver(h)
 		await h.rec.idle()
 		expect(codes(h)).toContain("discarded:not-speech")
@@ -1008,7 +1021,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 
 	it("B1: backedClass (two channel-tier digital observations of the discovery): discarded:not-speech", async () => {
 		// Two channel-tier digital observations of the discovery: backedClass (DigitalClassLedger).
-		const h = low(() => prior({}))
+		const h = lowPrior(() => prior({}))
 		await h.feed(1, false)
 		for (let k = 0; k < 2; k++)
 			h.rec.track(
@@ -1032,7 +1045,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 		["the owner's LoRa decode", prior({ labels: [label("lora")] })],
 	] as const)
 		it(`B1: ${name} only (suspect, unbacked): no content check, the buzz is held, then kept`, async () => {
-			const h = low(() => p)
+			const h = lowPrior(() => p)
 			await dataOver(h)
 			expect(h.timers.map(t => t.ms)).toEqual([LATE_VERDICT_GRACE_MS])
 			await h.fire()
@@ -1042,7 +1055,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 		}, 120_000)
 
 	it("M2: a classed session's roll-over file is never content-checked: voice, then a steady buzz past WIDEBAND_MAX_FILE_MS, both files kept", async () => {
-		const h = low(ownDmr, null, { syllables: true })
+		const h = lowPrior(ownDmr, null, { syllables: true })
 		// The voice ends 1 s before the roll-over: the next file is the buzz alone.
 		await dataOver(h, WIDEBAND_MAX_FILE_MS / 1000 - 1)
 		await h.fire()
@@ -1057,7 +1070,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 	}, 120_000)
 
 	it("the same audio with no prior is kept at once (no content check)", async () => {
-		const h = low(() => null)
+		const h = lowPrior(() => null)
 		await dataOver(h)
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
@@ -1065,7 +1078,7 @@ describe("the content check: a file on a digital-looking channel whose audio is 
 	}, 120_000)
 
 	it("FROZEN: the same audio on a channel with analog voice heard is kept at once", async () => {
-		const h = low(() =>
+		const h = lowPrior(() =>
 			prior({ labels: [label("dmr", true, "activity")], analogVoice: true }),
 		)
 		await dataOver(h)
@@ -1163,7 +1176,7 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 
 	for (const seconds of [2, 4, 9])
 		it(`a ${seconds} s file with no speech in it: discarded (not speech), at once`, async () => {
-			const h = low(() => noVoice())
+			const h = lowPrior(() => noVoice())
 			await noiseOver(h, seconds)
 			await h.rec.idle()
 			expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
@@ -1234,7 +1247,7 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 	}
 
 	it("a joined burst of the channel itself (its own spectral analog-fm class) does not exempt the file: discarded", async () => {
-		const h = low(() => ({ ...noVoice(), channelObservation: () => true }))
+		const h = lowPrior(() => ({ ...noVoice(), channelObservation: () => true }))
 		await joinedNoiseOver(h, 4)
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
@@ -1242,14 +1255,17 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 	}, 120_000)
 
 	it("FROZEN: a joined observation of another discovery (another transmission's voice) keeps the file", async () => {
-		const h = low(() => ({ ...noVoice(), channelObservation: () => false }))
+		const h = low(() => ({
+			...noVoice(),
+			channelObservation: () => false,
+		}))
 		await joinedNoiseOver(h, 4)
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
 	}, 120_000)
 
 	it("a joined observation the store does not index (never stored, retracted or trimmed) does not exempt the file: discarded", async () => {
-		const h = low(() => ({
+		const h = lowPrior(() => ({
 			...noVoice(),
 			channelObservation: () => false,
 			knownObservation: () => false,
@@ -1272,7 +1288,7 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 	}, 120_000)
 
 	it("one stray heard trial of 52 (under 2 heard): still a no-voice channel, the file is discarded", async () => {
-		const h = low(() => noVoice(1))
+		const h = lowPrior(() => noVoice(1))
 		await noiseOver(h, 4)
 		await h.rec.idle()
 		expect(h.ops.map(o => o.outcome)).not.toContain("finalized")
@@ -1285,7 +1301,7 @@ describe("a no-voice channel: 52 analog trials, none heard, no analog proof", ()
 		["no trial memory (a fresh channel)", prior({ class: "analog-fm" })],
 	] as const)
 		it(`${name}: the same file is kept`, async () => {
-			const h = low(() => p)
+			const h = lowPrior(() => p)
 			await noiseOver(h, 4)
 			await h.rec.idle()
 			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])

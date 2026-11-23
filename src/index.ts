@@ -268,6 +268,8 @@ import { RECORDING_DELETE_UNSUPPORTED_TEXT } from "./core/recordings/verified-un
 import { sweepRecordingDeleteLeftovers } from "./core/recordings/delete-sweep.js"
 import { keptSummaryOf } from "./core/recordings/kept-summary.js"
 import { setCallRecordingProtection } from "./decoders/builtin/call-recordings.js"
+import { createCallRecordingLinker } from "./core/activity/ingress.js"
+import * as dvCalls from "./core/dv-recorder/wiring.js"
 import type {
 	DecoderSettingsManagerPort,
 	DecoderSettingsService,
@@ -891,8 +893,9 @@ export async function scannerDeleteSweepDir(
  */
 export function recordingDsdFmeDirs(
 	decoderManager: Pick<DecoderManager, "getConfiguredDecoderConfigs">,
-): { decoderId: string; dir: string }[] {
-	return decoderManager
+	dvCallsDir?: string,
+): { decoderId: string; dir: string; kind?: "dv-call" }[] {
+	const dsd = decoderManager
 		.getConfiguredDecoderConfigs()
 		.filter(c => c.type === "dsd-fme")
 		.flatMap(c => {
@@ -902,6 +905,10 @@ export function recordingDsdFmeDirs(
 		.sort((a, b) =>
 			a.decoderId < b.decoderId ? -1 : a.decoderId > b.decoderId ? 1 : 0,
 		)
+	// The digital-voice call recorder's directory, last: dsd-fme's sources keep their indexes.
+	return dvCallsDir === undefined
+		? dsd
+		: [...dsd, dvCalls.dvCallRecordingSource(dvCallsDir)]
 }
 
 /** A scanner probe's decoder id, as src/core/scanner/ids.ts probeId builds it. */
@@ -1939,8 +1946,13 @@ async function main(): Promise<void> {
 		let recordingKeeps: RecordingKeepService | undefined
 		// Activity ↔ recording links (wired below, once Activity and the scanner exist).
 		let recordingLinks: RecordingLinkWiring | null = null
+		const dvCallsDir = dvCalls.dvCallRecordingDir(
+			digitalVoiceConfig.recordCalls,
+			config.stateDir,
+		)
 		const recordingInventory = createRecordingInventory({
-			dsdFmeDirs: () => recordingDsdFmeDirs(decoderManager),
+			dsdFmeDirs: () => recordingDsdFmeDirs(decoderManager, dvCallsDir),
+			dvCallDecoderIds: () => dvCalls.dvCallDecoderIds(decoderManager),
 			scannerRecordingsDir: () => {
 				if (scanner === null) return null
 				const storage = scanner.settings().storage
@@ -1976,6 +1988,7 @@ async function main(): Promise<void> {
 		own(67, () => recordingInventory.close?.())
 		checkpoint()
 		setCallRecordingProtection(keeps, logger)
+		const callRecordingProtectionInstalled = true
 
 		// Step 7: Create decoders from configuration. dsd-fme decoders are first
 		// pointed at the digital voice stream (-o udp to a local socket).
@@ -2032,7 +2045,9 @@ async function main(): Promise<void> {
 		// delete routes exist only there); the keep service's state() is the readiness proof.
 		if (protectedMode) {
 			await sweepRecordingDeleteLeftovers({
-				dsdFmeDirs: recordingDsdFmeDirs(decoderManager).map(d => d.dir),
+				dsdFmeDirs: recordingDsdFmeDirs(decoderManager, dvCallsDir).map(
+					d => d.dir,
+				),
 				scannerRecordingsDir: await scannerDeleteSweepDir(
 					config.stateDir,
 					config.scanner.storage.dir,
@@ -2108,6 +2123,23 @@ async function main(): Promise<void> {
 		})
 		// Own at once: a stop during the open must still close the workers.
 		own(8, () => activity.close())
+		// Digital-voice call recordings: one WAV per clear call, linked to its call_end row.
+		const dvCallRecorder = dvCalls.createDvCallRecorderWiring({
+			config: digitalVoiceConfig.recordCalls,
+			stateDir: config.stateDir,
+			tapSource: dvCalls.dvCallTapSourceOf(digitalVoice),
+			inventory: recordingInventory,
+			ingress: createCallRecordingLinker({
+				callRecordings: id =>
+					dvCalls.dvCallDecoderIds(decoderManager).includes(id),
+				link: op => activity.recordingLinks?.()?.link(op),
+			}),
+			decoderIds: () => dvCalls.dvCallDecoderIds(decoderManager),
+			outputs: decoderManager,
+			protectionInstalled: () => callRecordingProtectionInstalled,
+			logger,
+		})
+		own(55, () => dvCallRecorder.stop())
 		const { channelTier, ...scannerSettings } = config.scanner
 		// WG8 req 5.2: the host bins cap, resolved once (bounded bench, or the configured value)
 		const spectrumBinsCap = resolveSpectrumBinsCap(
@@ -2939,6 +2971,13 @@ async function main(): Promise<void> {
 			timeout: 2000,
 		})
 
+		// After the voice stream (LIFO): its call ends finalize the files first.
+		shutdown.register({
+			name: "dv-call-recorder",
+			handler: () => dvCallRecorder.stop(),
+			timeout: 2000,
+		})
+
 		// Shutdown digital voice stream (releases its UDP sockets)
 		shutdown.register({
 			name: "digital-voice",
@@ -3360,6 +3399,12 @@ async function main(): Promise<void> {
 		} else if (digitalVoiceConfig.enabled) {
 			log.info("Digital voice enabled but no dsd-fme decoder streams voice")
 		}
+		await dvCallRecorder.start().catch((err: unknown) => {
+			log.error(
+				protectedMode ? { code: "RUNTIME_ERROR" } : { err },
+				"Call recorder failed to start",
+			)
+		})
 
 		// Step 15: Start enabled decoders
 		// Decoded messages: the payload at debug only (a line per output is a synchronous stdout

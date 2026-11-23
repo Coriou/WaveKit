@@ -3,7 +3,9 @@
  * (speech-content-fixtures.ts): speech-like audio, with and without pauses and down to a CNR of
  * 5 dB, is never clearly not speech; FM-demodulated 4FSK, 2FSK, GMSK-like data, an unmodulated
  * carrier and open-squelch noise are; tones are kept by design; a single word or sparse speech on
- * a quiet carrier is never clear noise (its burst), while data and noise stay clear noise.
+ * a quiet carrier is never clear noise (its burst), while data and noise stay clear noise. The
+ * recording admission's data-buzz branch (candidate rule RA-3) never fires on that speech, nor
+ * on the tones, slow 2FSK and TDMA kept by design.
  *
  * The real chain is slow (seconds per signal), so each signal is run once and its measurement
  * shared by every assertion on it, and each run first yields to the event loop so the worker's
@@ -11,6 +13,10 @@
  */
 import { describe, expect, it } from "vitest"
 import {
+	ADMISSION_DEFAULTS,
+	ADMISSION_MIN_LOUD_LEVEL_DBFS,
+	admissionBranch,
+	admissionNoise,
 	clearlyNoise,
 	clearlyNotSpeech,
 	SPEECH_FRAME_SAMPLES,
@@ -320,4 +326,47 @@ describe("speechHeard: a short file of a no-voice channel must show speech (any 
 		m.push(new Int16Array(15 * SPEECH_FRAME_SAMPLES))
 		expect(speechHeard(m.result())).toBe(false)
 	})
+})
+
+describe("admission's data-buzz branch on the NFM chain (RA-3, modelled signals)", () => {
+	// Feature: recording-admission, candidate rule RA-3 (provisional bounds).
+	/** The admission rule without its data-buzz branch (RA-2 alone): what the rule read before. */
+	const ra2 = { ...ADMISSION_DEFAULTS, minLoudLevelDbfs: Infinity }
+	const voice = [
+		...CONTENT_CASES.filter(c => c.speech),
+		...(["short", "none"] as const).map(pauses => ({
+			name: `speech-${pauses}-cnr-5`,
+			signal: { waveform: { kind: "speech" as const, pauses }, cnrDb: 5 },
+		})),
+		...HARD_SPEECH_CASES,
+	]
+	for (const c of voice)
+		it(`voice ${c.name}: never data buzz, the admission reading unchanged`, async () => {
+			const r = await measureSignal(c.signal, SECONDS)
+			expect(admissionBranch(r)).not.toBe("data-buzz")
+			expect(admissionNoise(r)).toBe(admissionNoise(r, ra2))
+		}, 60_000)
+
+	it("weak voice (CNR 5 to 8 dB) reads quieter than the loud-level guard", async () => {
+		for (const c of voice.filter(v => v.signal.cnrDb <= 8)) {
+			const r = await measureSignal(c.signal, SECONDS)
+			expect(r.maxLoudLevelDbfs).toBeLessThan(ADMISSION_MIN_LOUD_LEVEL_DBFS)
+		}
+	}, 300_000)
+
+	for (const name of ["dmr-tdma", "pager-2fsk-512"])
+		it(`${name}: kept (a disclosed limit, unchanged)`, async () => {
+			const c = CONTENT_CASES.find(k => k.name === name)
+			expect(c).toBeDefined()
+			const r = await measureSignal(c!.signal, SECONDS)
+			expect(admissionNoise(r)).toBe(false)
+		}, 60_000)
+
+	it("a steady 1 kHz tone: kept (periodic)", async () => {
+		const r = await measureSignal(
+			{ waveform: { kind: "tone", hz: 1_000 }, cnrDb: 30 },
+			SECONDS,
+		)
+		expect(admissionNoise(r)).toBe(false)
+	}, 60_000)
 })

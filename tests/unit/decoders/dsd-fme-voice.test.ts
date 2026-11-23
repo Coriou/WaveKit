@@ -24,11 +24,15 @@ import {
 	dsdFmeVoiceSlotArg,
 	type DsdFmeVoiceCallState,
 } from "../../../src/decoders/builtin/dsd-fme.js"
-import { pruneCallRecordings } from "../../../src/decoders/builtin/call-recordings.js"
+import {
+	DMR_RECORDING_LINK_ENABLED,
+	pruneCallRecordings,
+} from "../../../src/decoders/builtin/call-recordings.js"
 import type {
 	DecoderConfig,
 	DecoderOutput,
 } from "../../../src/decoders/types.js"
+import { DATE_CLOCK } from "./dsd-fme-call-first-helpers.js"
 
 const logger = pino({ level: "silent" })
 const T0 = Date.parse("2026-10-09T12:13:33.000Z")
@@ -47,7 +51,7 @@ function createDecoder(options: Record<string, unknown> = {}): DsdFmeDecoder {
 		enabled: true,
 		options: { mode: "auto", ...options },
 	}
-	return new DsdFmeDecoder(config, logger)
+	return new DsdFmeDecoder(config, logger, DATE_CLOCK)
 }
 
 function args(options: Record<string, unknown>): string[] {
@@ -172,6 +176,24 @@ describe("dsd-fme voice output arguments", () => {
 		expect(out.slice(at, at + 3)).toEqual(["-7", "/data/calls", "-P"])
 		expect(out).not.toContain("-w")
 		expect(out).toContain("udp:127.0.0.1:40000")
+	})
+
+	it("asks a DMR-only decoder for no per-call files while DMR recordings are off", () => {
+		for (const opts of [
+			{ enablePerCallRecording: true, perCallRecordingDir: "/data/calls" },
+			{ output: "wav", wavDir: "/data/wav" },
+		]) {
+			const dmr = args({ mode: "dmr", ...opts })
+			expect(dmr).toContain("-fs")
+			if (DMR_RECORDING_LINK_ENABLED) expect(dmr).toContain("-P")
+			else {
+				expect(dmr).not.toContain("-P")
+				expect(dmr).not.toContain("-7")
+			}
+			// Auto and every non-DMR mode still record per call.
+			for (const mode of ["auto", "p25", "nxdn", "ysf", "dstar", "dpmr"])
+				expect(args({ mode, ...opts })).toContain("-P")
+		}
 	})
 
 	it('maps the legacy output "wav" to per-call files in wavDir with no live audio', () => {
@@ -313,7 +335,7 @@ describe("dsd-fme call ids and voice-call events", () => {
 		expect(voice.map(v => v.encrypted)).toEqual([false, true])
 	})
 
-	it("does not take an encrypted data PDU for an encrypted voice call", () => {
+	it("takes an encrypted data PDU on the call's lane as encrypted (fail closed)", () => {
 		const lines = [
 			{
 				atMs: 0,
@@ -323,7 +345,8 @@ describe("dsd-fme call ids and voice-call events", () => {
 			{ atMs: 500, text: " Slot 1 - Encrypted PDU;" },
 		]
 		const { voice } = replay(createDecoder(), lines, 1500)
-		expect(voice.map(v => v.encrypted)).toEqual([false])
+		// Every privacy field of the lane mutes its call.
+		expect(voice.at(-1)?.encrypted).toBe(true)
 	})
 
 	it("treats P25 ALG ID 0x80 as clear and other algorithms as encrypted", () => {

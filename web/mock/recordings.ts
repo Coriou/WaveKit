@@ -8,8 +8,11 @@
  *   `Content-Disposition: attachment`, no ranges.
  * - PUT / DELETE /api/recordings/:id/keep, DELETE /api/recordings/:id with the core's codes:
  *   RECORDING_NOT_FOUND 404, RECORDING_KEPT and RECORDING_DELETE_UNSUPPORTED 409.
- * Seeds: dsd-fme calls on the mock's talkgroups and scanner recordings of seeded discoveries, over
- * three days; a new call lands every NEW_CALL_MS so the drawer's refresh shows something.
+ * Seeds: dsd-fme YSF calls on the mock's talkgroups (a core serves no dsd-fme P25, NXDN, dPMR,
+ * ProVoice or M17 call file), digital-voice recorder calls (kind `dv-call`:
+ * a P25 call and a D-STAR call, each linked to its Activity row; a core lists no DMR call recording
+ * yet) and scanner recordings of seeded
+ * discoveries, over three days; a new call lands every NEW_CALL_MS so the drawer's refresh shows something.
  */
 import type { FastifyInstance, FastifyReply } from "fastify"
 import {
@@ -54,6 +57,24 @@ interface Seed {
 }
 
 const SEEDS: readonly Seed[] = [
+	// The digital-voice call recorder's files (synthetic ids and callsigns): a P25 call, and a
+	// D-STAR call, whose file names UR as TGT and MY as SRC.
+	{
+		kind: "dv-call",
+		agoMin: 6,
+		durationS: 14,
+		callType: "group",
+		talkgroup: "2081",
+		source: "2081045",
+	},
+	{
+		kind: "dv-call",
+		agoMin: 17,
+		durationS: 9,
+		callType: "group",
+		talkgroup: "CQCQCQ",
+		source: "N0CALL",
+	},
 	{
 		kind: "dsd-fme-call",
 		agoMin: 3,
@@ -219,13 +240,20 @@ function makeRec(s: Seed, at: Date): Rec {
 	const n = ++serial
 	const bytes = 44 + s.durationS * RATE * 2
 	const modifiedAt = new Date(at.getTime() + s.durationS * 1000).toISOString()
-	if (s.kind === "dsd-fme-call") {
+	if (s.kind === "dsd-fme-call" || s.kind === "dv-call") {
 		const type = (s.callType ?? "group").toUpperCase()
-		const name = `${localStamp(at)}_${pad(n, 5)}_DMR_SLOT1_${type}_TGT_${s.talkgroup ?? "0"}_SRC_${s.source ?? "0"}.wav`
+		// dsd-fme names its own files; the recorder writes the decoder id in their place. The
+		// dsd-fme seeds are YSF: a core lists and plays no dsd-fme P25, NXDN, dPMR, ProVoice or M17
+		// call file (dsdFmeCallRecordable), whose name does not carry the call's clear print.
+		const name =
+			s.kind === "dv-call"
+				? `${localStamp(at)}_${pad(n, 5)}_dsd-fme_${type}_TGT_${s.talkgroup ?? "0"}_SRC_${s.source ?? "0"}.wav`
+				: `${localStamp(at)}_${pad(n, 5)}_YSF_${type}_TGT_${s.talkgroup ?? "0"}_SRC_${s.source ?? "0"}.wav`
 		return {
 			seed: n,
 			item: {
-				id: `dsd:0~${name}`,
+				// The recorder's directory is the core's last dsd source.
+				id: `dsd:${s.kind === "dv-call" ? 1 : 0}~${name}`,
 				key: `dsd~${name}`,
 				activityEventId: null,
 				kind: s.kind,
@@ -339,6 +367,7 @@ export function synthWav(durationS: number, seed: number): Buffer {
 
 const KINDS: readonly string[] = [
 	"dsd-fme-call",
+	"dv-call",
 	"scanner-dv",
 	"scanner-analog",
 ]
@@ -646,6 +675,7 @@ export function registerRecordingsMock(
 					"dsd-fme-call": all.filter(r => r.kind === "dsd-fme-call").length,
 					"scanner-dv": all.filter(r => r.kind === "scanner-dv").length,
 					"scanner-analog": all.filter(r => r.kind === "scanner-analog").length,
+					"dv-call": all.filter(r => r.kind === "dv-call").length,
 				},
 			},
 			truncatedBefore: null,
@@ -703,7 +733,7 @@ export function registerRecordingsMock(
 					"Recording is kept; unkeep it first",
 					"Conflict",
 				)
-			if (r.item.kind !== "dsd-fme-call")
+			if (r.item.kind !== "dsd-fme-call" && r.item.kind !== "dv-call")
 				return error(
 					reply,
 					409,

@@ -225,6 +225,19 @@ describe("recording search", () => {
 			"156.800 MHz",
 		)
 		expect(suggest("call", []).map(x => x.token.label)).toContain("Calls")
+		// The call recorder's files (kind dv-call) are offered beside dsd-fme's own.
+		const calls = suggest("calls", []).filter(x => x.token.kind === "kind")
+		expect(calls.map(x => [x.token.value, x.token.label])).toEqual([
+			["dsd-fme-call", "Calls"],
+			["dv-call", "Calls · call recorder"],
+		])
+		expect(
+			recordingsQuery({
+				tokens: [calls[1]!.token],
+				text: "",
+				filter: "all",
+			}),
+		).toEqual({ kind: "dv-call" })
 		expect(suggest("  ", [])).toEqual([])
 		// a chip already there is not offered again
 		const tg = suggest("9", [])[0]?.token

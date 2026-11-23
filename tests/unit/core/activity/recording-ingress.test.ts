@@ -13,7 +13,8 @@ import type {
 import type { DecodeEnvelope } from "../../../../src/core/activity/types.js"
 import type { DecoderOutput } from "../../../../src/decoders/types.js"
 
-const NAME = "20261012_100000_12345_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
+const NAME = "20261012_100000_12345_YSF_1A3_GROUP_TGT_9_SRC_2001.wav"
+const DMR_NAME = "20261012_100000_12346_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
 
 function callEnd(
 	data: Record<string, unknown>,
@@ -25,10 +26,12 @@ function callEnd(
 		type: "call_end",
 		data: {
 			callId: "call-1",
-			protocol: "dmr",
+			protocol: "p25p1",
 			talkgroup: 9,
 			source: 2001,
 			duration: 4200,
+			encryptionKnown: true,
+			clearEvidence: true,
 			flags: { encrypted: false },
 			...data,
 		},
@@ -74,6 +77,85 @@ describe("dsd-fme call recordings in the Activity ingress", () => {
 		expect((output.data as Record<string, unknown>)["wavFile"]).toBe(
 			`/var/lib/wavekit/calls/${NAME}`,
 		)
+	})
+
+	it("never links a dsd-fme call file whose name says DMR or no known protocol, on time or late", () => {
+		const { ingress, rows, ops } = setup()
+		const unnamed = "20261012_100000_12347__GROUP_TGT_9_SRC_2001.wav"
+		for (const name of [DMR_NAME, unnamed]) {
+			ingress.publish(
+				"dsd-a",
+				"dsd-fme",
+				callEnd({ wavFile: `/calls/${name}` }),
+			)
+			ingress.publish(
+				"dsd-a",
+				"dsd-fme",
+				callEnd({
+					wavFile: `/calls/${name}`,
+					flags: { encrypted: false, wavFileUpdate: true },
+				}),
+			)
+		}
+		expect(rows).toHaveLength(2)
+		for (const row of rows) expect(row.recording).toBeUndefined()
+		expect(ops).toEqual([])
+	})
+
+	it("never links a call whose call_end does not say it clear: P25 without encryptionKnown true and its clearEvidence marker, or encrypted; D-STAR without the field is linked", () => {
+		const { ingress, rows, ops } = setup()
+		const shapes: Record<string, unknown>[] = [
+			{ encryptionKnown: undefined },
+			{ clearEvidence: undefined },
+			{ protocol: "nxdn48", clearEvidence: undefined },
+			{ protocol: "p25p2" },
+			{ protocol: "edacs" },
+			{ protocol: "m17" },
+			{ encryptionKnown: false },
+			{ encryptionKnown: true, flags: { encrypted: true } },
+			{ encryptionKnown: true, encrypted: true },
+			{ protocol: "nxdn48", encryptionKnown: undefined },
+			{ protocol: "dpmr", encryptionKnown: false },
+		]
+		for (const shape of shapes) {
+			ingress.publish(
+				"dsd-a",
+				"dsd-fme",
+				callEnd({ wavFile: `/calls/${NAME}`, ...shape }),
+			)
+			ingress.publish(
+				"dsd-a",
+				"dsd-fme",
+				callEnd({
+					wavFile: `/calls/${NAME}`,
+					...shape,
+					flags: {
+						encrypted:
+							shape["encrypted"] === true ||
+							(shape["flags"] as { encrypted?: boolean } | undefined)
+								?.encrypted === true,
+						wavFileUpdate: true,
+					},
+				}),
+			)
+		}
+		expect(rows).toHaveLength(shapes.length)
+		for (const row of rows) expect(row.recording).toBeUndefined()
+		expect(ops).toEqual([])
+		const dstar = "20261012_100000_12348_DSTAR_GROUP_TGT_0_SRC_0.wav"
+		ingress.publish(
+			"dsd-a",
+			"dsd-fme",
+			callEnd({
+				wavFile: `/calls/${dstar}`,
+				protocol: "dstar",
+				encryptionKnown: undefined,
+			}),
+		)
+		expect(rows.at(-1)?.recording).toEqual({
+			id: `dsd~${dstar}`,
+			durationMs: 4200,
+		})
 	})
 
 	it("a decoder the catalogue does not list (a scanner probe) keeps the name and gets no link", () => {

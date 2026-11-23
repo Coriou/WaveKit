@@ -417,7 +417,8 @@ build that writes another format reads it (`ScannerPersistence.load`): see the r
 [SCANNER.md](SCANNER.md). It has two halves so the start never waits on one link per recording:
 `ensurePreMigrationBackup` copies every other file under a pending partial name before the load,
 and `completeDeferredLinks`, started by the load and not awaited, links the recordings in and
-renames the backup into place (a stop in between is completed by the next start).
+renames the backup into place (a stop in between is completed by the next start). The top-level
+`quarantine/` folder (noise-discarded audio with its own age and size bounds) is never copied.
 
 ### TunerRelay
 
@@ -514,6 +515,10 @@ the row (`activityEventId`, from the store's in-memory link index). Producers:
   gets `dsd~<name>` and a `callId` ref; `wavFile` is reduced to the file name. A file found late
   (`wavFileUpdate`) is a link change of that call's row: the store patches the row in its queue,
   or the writer updates the stored row by its `callId` ref (`storage/links.ts`). It is never a row.
+  Only a recordable call file links (`dsdFmeCallRecordable`, `src/decoders/builtin/dmr-recording-gate.ts`):
+  the ingress and the backfill refuse a DMR name, or one without a known protocol, while DMR
+  recordings are off, whatever the decoder reported; the backfill also needs the row's protocol
+  to be recordable. Reads re-check each `dsd~` link against its row's stored call trust, and call recorder (`dv-call`) files are neither listed, served nor presented while `DV_CALL_RECORDINGS_SERVED` (`src/core/recordings/names.ts`) is off.
 - scanner analog recordings: the scanner emits `recording-kept` at the irrevocable commit of a file
   (after any provisional hold), and `src/core/activity/recording-links.ts` admits one
   `recording-change` row. A discarded file never commits, so it never gets a row.

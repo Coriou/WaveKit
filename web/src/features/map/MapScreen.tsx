@@ -2,6 +2,9 @@
 // the layers rail under Receiver, the overlays menu with the legend, zoom and recentre, the hover tooltip, the
 // cluster chooser, the selection panel, the station chip, the Live chip, the scale bar and the footer naming the
 // basemap in use. Loaded only when the Map view opens (the Shell lazy-loads it), so MapLibre stays off the main chunk.
+// Every piece of the map's chrome reports its size (mapReports) and stands at the rectangle the shell layout gives it
+// (src/shell/layout/compute.ts, "map"): nothing here places itself, and nothing moves when a drawer opens (a drawer
+// covers the rail and the side panel; they hide meanwhile). Out of sight until placed.
 import "./map.css"
 
 import type { ActivitySummary } from "@wavekit/api-types"
@@ -14,12 +17,23 @@ import {
 	useRef,
 	useState,
 	useSyncExternalStore,
+	type CSSProperties,
 	type PointerEvent as ReactPointerEvent,
+	type RefObject,
 } from "react"
 
 import { useReadOnly, useServices } from "../../app/context.ts"
 import { useStore } from "../../data/store.ts"
 import { useDevicePrefs } from "../../shell/hooks.ts"
+import {
+	MAP_SIDE_MAX_W,
+	type MapInput,
+	type MapPlaced,
+} from "../../shell/layout/compute.ts"
+import type { Rect as ShellRect } from "../../shell/layout/geometry.ts"
+import { rectAttr } from "../../shell/layout/geometry.ts"
+import { naturalRowWidth } from "../../shell/layout/slot.ts"
+import { mapReports } from "../../shell/layout/stores.ts"
 import { shellStore } from "../../shell/store.ts"
 import { themeStore } from "../../shell/theme.ts"
 import { buildQuery } from "../activity/search.ts"
@@ -60,18 +74,109 @@ import {
 	type OverlayId,
 } from "./ui-store.ts"
 
-export interface MapInsets {
-	/** Bottom of the shell's top island row: the rail and panels start there. */
-	readonly top: number
-	/** Receiver's distance from the right edge (a full-height drawer pushes it in). */
-	readonly right: number
+/** Where the shell layout puts the map's chrome (null before the first layout: everything waits out of sight). */
+export interface MapPlacementProps {
+	readonly placement: MapPlaced | null
 	/** Phone layout: no dock, the find button sits bottom-right. */
 	readonly phone: boolean
 }
 
-/** The rail collapses to icons under this width (DESIGN.md: the map's rail at 1100 px). */
-const RAIL_WIDE_MIN = 1100
-const RAIL_W = { wide: 156, narrow: 48 } as const
+/** A chrome element at its layout rectangle (top-left), or out of sight while it has none (not placed, covered). */
+function at(
+	name: string,
+	r: ShellRect | null,
+	sized: "w" | "wh" | null = null,
+): {
+	"data-wkm-slot": string
+	"data-wk-slot": string
+	"data-wk-rect"?: string
+	style: CSSProperties
+} {
+	if (!r)
+		return {
+			"data-wkm-slot": name,
+			"data-wk-slot": `map:${name}`,
+			style: {
+				left: 0,
+				top: 0,
+				right: "auto",
+				bottom: "auto",
+				visibility: "hidden",
+			},
+		}
+	return {
+		"data-wkm-slot": name,
+		"data-wk-slot": `map:${name}`,
+		"data-wk-rect": rectAttr(r),
+		style: {
+			left: r.x,
+			top: r.y,
+			right: "auto",
+			bottom: "auto",
+			...(sized ? { width: r.w } : {}),
+			...(sized === "wh" ? { height: r.h } : {}),
+		},
+	}
+}
+
+const sameMapInput = (a: MapInput | null, b: MapInput) => {
+	if (!a) return false
+	const s = (
+		x: { w: number; h: number } | null,
+		y: { w: number; h: number } | null,
+	) => x === y || (x !== null && y !== null && x.w === y.w && x.h === y.h)
+	return (
+		a.railH === b.railH &&
+		s(a.side, b.side) &&
+		s(a.station, b.station) &&
+		s(a.live, b.live) &&
+		s(a.scale, b.scale) &&
+		s(a.footer, b.footer)
+	)
+}
+
+/** The chrome's natural sizes, read from its elements (a clamped rail or panel reports its whole content). */
+function measureChrome(root: HTMLElement): MapInput | null {
+	const el = (n: string) =>
+		root.querySelector<HTMLElement>(`[data-wkm-slot="${n}"]`)
+	// whole px rounded up (offsetWidth rounds a 71.4 px chip down, and its rectangle would end past the gutter)
+	const size = (e: HTMLElement | null, scrollW = false, scrollH = false) => {
+		if (!e || !e.offsetWidth) return null
+		const r = e.getBoundingClientRect()
+		const w = Math.ceil(r.width - 0.01)
+		const h = Math.ceil(r.height - 0.01)
+		return {
+			w: scrollW ? Math.max(w, e.scrollWidth) : w,
+			h: scrollH ? Math.max(h, e.scrollHeight) : h,
+		}
+	}
+	const live = size(el("live"))
+	const scale = size(el("scale"))
+	const footer = size(el("footer"), true)
+	const rail = el("rail")
+	if (!live || !scale || !footer || !rail) return null
+	// the side panel asks for its design width (it is laid out at the width it gets); the station chip for its
+	// one-line width (it wraps when it gets less)
+	const sideEl = el("side")
+	const side = size(sideEl, false, true)
+	const stationEl = el("station")
+	const stationBtn = stationEl?.querySelector<HTMLElement>(".wkm-approx")
+	const station = size(stationEl)
+	return {
+		railH: Math.max(rail.offsetHeight, rail.scrollHeight),
+		side:
+			side && sideEl
+				? { w: Number(sideEl.dataset["naturalW"]) || side.w, h: side.h }
+				: null,
+		station:
+			station && stationBtn
+				? { w: naturalRowWidth(stationBtn), h: station.h }
+				: null,
+		live,
+		scale,
+		footer,
+	}
+}
 const PAN_PX = 80
 const PAN_BIG_PX = 320
 
@@ -204,9 +309,12 @@ function uiRectsOf(box: HTMLElement): Rect[] {
 	const b = box.getBoundingClientRect()
 	const scope = box.closest(".wk-shell") ?? document.body
 	const out: Rect[] = []
-	const sel =
-		".wk-shell-island, .wk-dock, .wk-shell-cardslot, .wk-shell-drawer, .wk-shell-find, .wk-shell-paneslot, [data-wkm-ui]"
+	// every slot the shell layout places (the islands, the dock, the player, the card, the status items and guests,
+	// the drawer, the pane) and the map's own chrome; a slot out of sight (waiting, held, covered) holds no room
+	const sel = ".wk-shell-island, [data-wk-slot], [data-wkm-ui]"
 	for (const el of scope.querySelectorAll<HTMLElement>(sel)) {
+		if (el.closest("[data-pending], [data-held]")) continue
+		if (getComputedStyle(el).visibility === "hidden") continue
 		const r = el.getBoundingClientRect()
 		if (r.width === 0 || r.height === 0) continue
 		out.push([
@@ -219,7 +327,7 @@ function uiRectsOf(box: HTMLElement): Rect[] {
 	return out
 }
 
-export default function MapScreen({ insets }: { insets: MapInsets }) {
+export default function MapScreen({ placement, phone }: MapPlacementProps) {
 	const { data, activity } = useServices()
 	const root = useRef<HTMLDivElement>(null)
 	const box = useRef<HTMLDivElement>(null)
@@ -232,9 +340,6 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 		[data],
 	)
 	const [engine, setEngine] = useState<MapEngine | null>(null)
-	const [width, setWidth] = useState(() =>
-		typeof window === "undefined" ? 1440 : window.innerWidth,
-	)
 	const theme = useSyncExternalStore(
 		themeStore.subscribe,
 		themeStore.getState,
@@ -313,10 +418,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 	useEffect(() => {
 		const el = root.current
 		if (!el || !engine) return
-		const measure = () => {
-			setWidth(el.clientWidth)
-			engine.resize()
-		}
+		const measure = () => engine.resize()
 		measure()
 		if (typeof ResizeObserver === "undefined") {
 			window.addEventListener("resize", measure)
@@ -427,10 +529,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 		() => latestReports(reportedTrails, reportedNow).length,
 		[reportedTrails, reportedNow],
 	)
-	const wide = width >= RAIL_WIDE_MIN
-	const railW = wide ? RAIL_W.wide : RAIL_W.narrow
-	const sideRight = insets.right + railW + 10
-	const chipBottom = insets.phone ? 16 + 48 + 12 : 30
+	const wide = placement?.wide ?? false
 
 	return (
 		<div
@@ -439,7 +538,7 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 			role="region"
 			aria-label="Map"
 			data-wide={wide || undefined}
-			data-phone={insets.phone || undefined}
+			data-phone={phone || undefined}
 		>
 			<div
 				ref={box}
@@ -466,11 +565,9 @@ export default function MapScreen({ insets }: { insets: MapInsets }) {
 					engine={engine}
 					ui={ui}
 					s={s}
-					insets={insets}
+					placement={placement}
+					root={root}
 					wide={wide}
-					railW={railW}
-					sideRight={sideRight}
-					chipBottom={chipBottom}
 					reportedCount={reportedCount}
 					onActivity={it => {
 						activity.setSearch([activityTokenOf(it)], null)
@@ -486,36 +583,66 @@ interface ChromeProps {
 	readonly engine: MapEngine
 	readonly ui: MapUi
 	readonly s: MapUiState
-	readonly insets: MapInsets
+	readonly placement: MapPlaced | null
+	readonly root: RefObject<HTMLDivElement | null>
 	readonly wide: boolean
-	readonly railW: number
-	readonly sideRight: number
-	readonly chipBottom: number
 	readonly reportedCount: number
 	readonly onActivity: (it: MapItem) => void
 }
 
 function MapChrome(props: ChromeProps) {
-	const { engine, ui, s, insets, wide, railW, sideRight, chipBottom } = props
+	const { engine, ui, s, placement: P, root, wide } = props
 	const v = useStore(engine.view)
 	const pal = engine.palette
+	// report the chrome's sizes after every render and on every resize (the scale follows the zoom); the shell
+	// lays them out and hands the rectangles back
+	const report = useCallback(() => {
+		const el = root.current
+		if (!el) return
+		const m = measureChrome(el)
+		if (m && !sameMapInput(mapReports.get(), m)) mapReports.set(m)
+	}, [root])
+	useLayoutEffect(report)
+	useLayoutEffect(() => {
+		const el = root.current
+		if (!el || typeof ResizeObserver === "undefined") return
+		const ro = new ResizeObserver(report)
+		const selector = "[data-wkm-slot]"
+		for (const slot of el.querySelectorAll(selector)) ro.observe(slot)
+		// Chrome slots are direct children. Follow the optional station and side panels as they mount or leave.
+		const mounts = new MutationObserver(records => {
+			for (const record of records) {
+				for (const slot of record.removedNodes)
+					if (slot instanceof Element && slot.matches(selector))
+						ro.unobserve(slot)
+				for (const slot of record.addedNodes)
+					if (slot instanceof Element && slot.matches(selector))
+						ro.observe(slot)
+			}
+		})
+		mounts.observe(el, { childList: true })
+		return () => {
+			mounts.disconnect()
+			ro.disconnect()
+		}
+	}, [root, report])
+	useEffect(() => () => mapReports.set(null), [])
+	const sideMaxH = P?.sideMaxH ?? 0
 	return (
 		<>
 			{s.hover && !s.chooser && <HoverTip engine={engine} hover={s.hover} />}
 			{s.chooser && (
 				<Chooser engine={engine} ui={ui} chooser={s.chooser} pal={pal} />
 			)}
-			<StationChip v={v} top={insets.top} right={sideRight} />
+			<StationChip v={v} place={P?.station ?? null} />
 			<Rail
 				engine={engine}
 				ui={ui}
 				s={s}
 				v={v}
 				pal={pal}
-				top={insets.top}
-				right={insets.right}
+				place={P?.rail ?? null}
 				wide={wide}
-				width={railW}
 				reportedCount={props.reportedCount}
 			/>
 			{s.overlaysOpen && (
@@ -524,8 +651,8 @@ function MapChrome(props: ChromeProps) {
 					s={s}
 					v={v}
 					pal={pal}
-					top={insets.top}
-					right={sideRight}
+					place={P?.side ?? null}
+					maxH={sideMaxH}
 				/>
 			)}
 			{s.selected && !s.overlaysOpen && (
@@ -535,23 +662,22 @@ function MapChrome(props: ChromeProps) {
 					id={s.selected}
 					follow={s.follow}
 					pal={pal}
-					top={insets.top}
-					right={sideRight}
-					bottomGap={chipBottom + 54}
+					place={P?.side ?? null}
+					maxH={sideMaxH}
 					onActivity={props.onActivity}
 				/>
 			)}
 			<div
 				data-wkm-ui=""
 				className="wk-island wkm-live"
-				style={{ right: insets.right, bottom: chipBottom }}
+				{...at("live", P?.live ?? null)}
 				title="Live positions. Replay needs history the core does not keep yet."
 			>
 				<span className="wkm-live-dot" aria-hidden="true" />
 				Live
 			</div>
-			<ScaleBar v={v} right={insets.right + 2} bottom={chipBottom + 52} />
-			<Footer v={v} right={insets.right} phone={insets.phone} />
+			<ScaleBar v={v} place={P?.scale ?? null} />
+			<Footer v={v} place={P?.footer ?? null} />
 		</>
 	)
 }
@@ -660,15 +786,7 @@ function Chooser({
 	)
 }
 
-function StationChip({
-	v,
-	top,
-	right,
-}: {
-	v: EngineView
-	top: number
-	right: number
-}) {
+function StationChip({ v, place }: { v: EngineView; place: ShellRect | null }) {
 	if (v.station.kind === "set") return null
 	// nothing heard yet and no location: the chip asks for one
 	const text =
@@ -676,8 +794,8 @@ function StationChip({
 			? "Station location is approximate · Set it"
 			: "Station location not set · Set it"
 	return (
-		// centred in the room left of the rail (a full-height drawer pushes the rail in)
-		<div className="wkm-top" style={{ top, right }}>
+		// centred in the room left of the rail and its side panel (the shell layout's rectangle)
+		<div className="wkm-top" {...at("station", place, "w")}>
 			<button
 				data-wkm-ui=""
 				type="button"
@@ -685,7 +803,7 @@ function StationChip({
 				onClick={openStationSettings}
 			>
 				<Svg paths={TARGET} />
-				{text}
+				<span data-measure-text="">{text}</span>
 			</button>
 		</div>
 	)
@@ -697,10 +815,9 @@ function Rail(props: {
 	s: MapUiState
 	v: EngineView
 	pal: MapPalette
-	top: number
-	right: number
+	/** Its rectangle from the shell layout (its height clamped above the corner: it scrolls then). */
+	place: ShellRect | null
 	wide: boolean
-	width: number
 	/** Aircraft with a position reported over ACARS or VDL2 in the last hour. */
 	reportedCount: number
 }) {
@@ -708,11 +825,7 @@ function Rail(props: {
 	const ovCount = OVERLAY_IDS.filter(o => s.overlays[o]).length
 	const just = wide ? "flex-start" : "center"
 	return (
-		<div
-			data-wkm-ui=""
-			className="wkm-rail"
-			style={{ top: props.top, right: props.right, width: props.width }}
-		>
+		<div data-wkm-ui="" className="wkm-rail" {...railAt(props.place)}>
 			<div
 				className="wk-island wkm-rail-box"
 				role="group"
@@ -857,8 +970,8 @@ function OverlaysMenu(props: {
 	s: MapUiState
 	v: EngineView
 	pal: MapPalette
-	top: number
-	right: number
+	place: ShellRect | null
+	maxH: number
 }) {
 	const { ui, s, v, pal } = props
 	const coverageNote =
@@ -867,7 +980,8 @@ function OverlaysMenu(props: {
 		<div
 			data-wkm-ui=""
 			className="wkm-overlays"
-			style={{ top: props.top, right: props.right }}
+			data-natural-w="280"
+			{...sideAt(props.place, props.maxH)}
 			role="group"
 			aria-label="Overlays and legend"
 		>
@@ -947,9 +1061,8 @@ function Selection(props: {
 	id: string
 	follow: boolean
 	pal: MapPalette
-	top: number
-	right: number
-	bottomGap: number
+	place: ShellRect | null
+	maxH: number
 	onActivity: (it: MapItem) => void
 }) {
 	useDisplay() // units follow Settings › Display
@@ -981,11 +1094,8 @@ function Selection(props: {
 			className="wk-island wkm-sel"
 			data-expanded=""
 			aria-label={`Selected: ${info.title}`}
-			style={{
-				top: props.top,
-				right: props.right,
-				maxHeight: `calc(100% - ${props.top + props.bottomGap}px)`,
-			}}
+			data-natural-w={MAP_SIDE_MAX_W}
+			{...sideAt(props.place, props.maxH)}
 		>
 			{info.aircraft?.photo && (
 				<AircraftPhoto key={info.aircraft.photo.src} {...info.aircraft.photo} />
@@ -1104,34 +1214,18 @@ function Datalink({
 	)
 }
 
-function ScaleBar({
-	v,
-	right,
-	bottom,
-}: {
-	v: EngineView
-	right: number
-	bottom: number
-}) {
+function ScaleBar({ v, place }: { v: EngineView; place: ShellRect | null }) {
 	useDisplay() // units follow Settings › Display
 	const sb = scaleBar(kmPerPx(v.lat, v.zoom))
 	return (
-		<div className="wkm-scale" aria-hidden="true" style={{ right, bottom }}>
+		<div className="wkm-scale" aria-hidden="true" {...at("scale", place)}>
 			<span>{sb.text}</span>
 			<span className="wkm-scale-bar" style={{ width: sb.px }} />
 		</div>
 	)
 }
 
-function Footer({
-	v,
-	right,
-	phone,
-}: {
-	v: EngineView
-	right: number
-	phone: boolean
-}) {
+function Footer({ v, place }: { v: EngineView; place: ShellRect | null }) {
 	const st = v.station
 	const stationText =
 		st.kind === "set"
@@ -1144,7 +1238,7 @@ function Footer({
 			? "Set the station location"
 			: `${fmtLat(st.lat)} · ${fmtLon(st.lon)}`
 	return (
-		<div className="wkm-footer" style={{ right, bottom: phone ? 2 : 6 }}>
+		<div className="wkm-footer" {...at("footer", place, "w")}>
 			<button
 				type="button"
 				className="wkm-link"
@@ -1181,4 +1275,21 @@ function Footer({
 			)}
 		</div>
 	)
+}
+
+/** The rail at its rectangle: its height clamped (it scrolls) when the corner leaves it less than its content. */
+function railAt(r: ShellRect | null) {
+	const a = at("rail", r, "w")
+	return r
+		? {
+				...a,
+				style: { ...a.style, maxHeight: r.h, overflowY: "auto" as const },
+			}
+		: a
+}
+
+/** The side panel (the selection, the overlays menu) at its rectangle, as tall as its content up to `maxH`. */
+function sideAt(r: ShellRect | null, maxH: number) {
+	const a = at("side", r, "w")
+	return r ? { ...a, style: { ...a.style, maxHeight: maxH } } : a
 }

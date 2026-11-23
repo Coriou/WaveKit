@@ -100,6 +100,13 @@ const baseConfig = {
 		voiceSlot: "both",
 		jitterBufferMs: 400,
 		maxBufferMs: 1000,
+		recordCalls: {
+			enabled: true,
+			minVoiceMs: 1000,
+			maxCallMs: 300_000,
+			retentionBytes: 2 * 1024 * 1024 * 1024,
+			retentionDays: 7,
+		},
 	},
 	api: {
 		host: "0.0.0.0",
@@ -133,7 +140,7 @@ const baseConfig = {
 		binaryPath: "wavekit-chan",
 		socketDir: "/var/run/wavekit/chan",
 		usableFraction: 0.8,
-		channelQueueMs: 250,
+		channelQueueMs: 1000,
 		inputHighWaterMark: 262144,
 		blockSamples: 16384,
 	},
@@ -182,6 +189,7 @@ const baseConfig = {
 			hangMs: 2000,
 			preRollMs: 300,
 		},
+		admission: { enabled: true },
 		storage: {
 			dir: null,
 			maxRecordingsMb: 512,

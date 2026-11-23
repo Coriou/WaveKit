@@ -33,7 +33,7 @@ describe("channelizer config (addendum §6, §7)", () => {
 			binaryPath: "wavekit-chan",
 			socketDir: "/var/run/wavekit/chan",
 			usableFraction: 0.8,
-			channelQueueMs: 250,
+			channelQueueMs: 1000,
 			inputHighWaterMark: 262144,
 			blockSamples: 16384,
 		})

@@ -182,6 +182,33 @@ describe("pre-migration backup of scanner state", () => {
 		expect(await backups()).toEqual([`pre-unmarked.${NOW}`])
 	})
 
+	it("the noise quarantine is never backed up (bounded discarded audio, not state)", async () => {
+		const copied = await seedState()
+		const day = join(dir, "quarantine", "noise", "2026-01-01")
+		await mkdir(day, { recursive: true })
+		await writeFile(join(day, "op.wav"), "RIFF-noise-audio")
+		await writeFile(join(day, "op.json"), "{}")
+		const out = await backUp({ dir, logger, now: () => NOW, statfs: roomy })
+		expect(out).toMatchObject({
+			kind: "taken",
+			files: 3,
+			copiedBytes: copied,
+			linkedFiles: 1,
+		})
+		const root = join(dir, BACKUPS_DIR, `pre-unmarked.${NOW}`)
+		expect(await readdir(root)).not.toContain("quarantine")
+		// The live quarantine is left alone.
+		expect((await readdir(day)).sort()).toEqual(["op.json", "op.wav"])
+	})
+
+	it("a nested folder named quarantine is still backed up (only the top level is skipped)", async () => {
+		await seedState()
+		await mkdir(join(dir, "recordings", "quarantine"), { recursive: true })
+		await writeFile(join(dir, "recordings", "quarantine", "b.wav"), AUDIO)
+		const out = await backUp({ dir, logger, now: () => NOW, statfs: roomy })
+		expect(out).toMatchObject({ kind: "taken", files: 4, linkedFiles: 2 })
+	})
+
 	it("a version change backs up under the old format with its marker; the next change keeps both (the cap)", async () => {
 		await seedState()
 		await writeMarker({ fileVersion: 1, heldJournalFormat: 2, revision: 1 })

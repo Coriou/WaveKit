@@ -1,6 +1,7 @@
 /**
  * The dsd-fme adapter on timed decoder lines: feeds each line at its time on
- * a fake clock (Date and `new Date()` only; the adapter's call timer runs
+ * a fake clock (Date, `new Date()` and the adapter's injected wall and
+ * monotonic clocks, DsdFmeClock; the adapter's call timer runs
  * every 500 ms as its own setInterval would) and returns the calls it
  * reported. The capture harness replays the lines live dsd-fme printed (their
  * arrival times); the truth scorecard replays recorded line timings
@@ -8,7 +9,10 @@
  * call lifecycle is the production code's.
  */
 import pino from "pino"
-import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
+import {
+	DsdFmeDecoder,
+	type DsdFmeClock,
+} from "../../../src/decoders/builtin/dsd-fme.js"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
 import type { DvCall, DvLine, DvOver } from "./dv-metrics.js"
 
@@ -74,6 +78,10 @@ export function replayDvLines(
 	mode: string,
 	options: Record<string, unknown> = {},
 ): DvCall[] {
+	const clock = { now: DV_T0 }
+	// Elapsed time (call timeout, settle windows) runs on the adapter's
+	// monotonic clock: both of its clocks read the fake one.
+	const dsdClock: DsdFmeClock = { wall: () => clock.now, mono: () => clock.now }
 	const decoder = new DsdFmeDecoder(
 		{
 			id: "dsd-fme",
@@ -82,11 +90,11 @@ export function replayDvLines(
 			options: { mode, ...options },
 		},
 		pino({ level: "silent" }),
+		dsdClock,
 	)
 	const outputs: DecoderOutput[] = []
 	decoder.on("output", (out: DecoderOutput) => outputs.push(out))
 	const internals = decoder as unknown as Internals
-	const clock = { now: DV_T0 }
 	withFakeDate(clock, () => {
 		let tick = DV_T0 + DV_TIMER_MS
 		const advance = (to: number) => {

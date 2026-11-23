@@ -58,6 +58,13 @@ digitalVoice:
   voiceSlot: "both" # 1 | 2 | "both" -> dsd-fme -V 1|2|3
   jitterBufferMs: 400 # voice buffered (or waited for) before a burst plays
   maxBufferMs: 1000 # bound per stream; the oldest voice is dropped beyond it
+  recordCalls: # call recordings, see "Call recordings" below
+    enabled: true
+    # dir: /data/dv-calls # default <stateDir>/recordings/dv-calls
+    minVoiceMs: 1000
+    maxCallMs: 300000
+    retentionBytes: 2147483648 # 2 GiB
+    retentionDays: 7
 ```
 
 Environment overrides follow the usual convention:
@@ -88,6 +95,99 @@ behind. Other WAV files in the directory are never touched.
 Only decoders configured at startup are routed (the API cannot create decoders).
 `digitalVoice.enabled: false` keeps dsd-fme on `-o null`, and `POST
 /api/digital-voice/start` then answers 409.
+
+## Call recordings
+
+WaveKit keeps one WAV file per clear digital voice call, from every dsd-fme
+decoder the digital voice stream follows (configured decoders and scanner
+probes). It records whether or not anyone is listening.
+
+- **Only clear audio.** A call is recorded only while the voice service knows
+  it is clear. Audio of an encrypted call, or of a call whose encryption is not
+  known yet, is never written. A call that turns encrypted partway through
+  loses its whole file, and so does a call that ends before it is known to be
+  clear. Audio that arrives too late to be checked against the call's events
+  may still slip through (a known limit).
+- **Clear means proven clear, per call.** A P25 phase 1 call is clear only
+  once its own LDU2 printed `ALG ID: 0x80 KEY ID: 0x0000`, an NXDN call once
+  its own checked VCALL came with no cipher print. P25 phase 2, dPMR and
+  ProVoice print nothing that proves a call clear, so their calls are never
+  recorded, linked or played live: they stay silent. A P25 phase 1 or NXDN call
+  plays and records only from its own clear print, about 0.3 to 0.5 s into the
+  call, and stays silent and unrecorded if that print never decodes. D-STAR and
+  YSF have no privacy field and are recorded as clear. The per-protocol table is
+  in [DECODER-GUIDE.md](DECODER-GUIDE.md) (call lifecycle).
+- **Calls always publish.** Encryption or missing evidence never hides a call:
+  every P25, NXDN, dPMR and ProVoice call still publishes its `call_start` and
+  `call_end` (talkgroup, source, times) and its Activity row. Only its audio,
+  its recording and its `encrypted` / `encryptionKnown` fields follow the
+  evidence. In scanner evidence such a call reads as encrypted.
+- **dsd-fme's own files of these protocols are not served.** A dsd-fme per-call
+  file (`enablePerCallRecording`, or a scanner probe's `dv` folder) of P25,
+  NXDN, dPMR, ProVoice (`EDACS_`) or M17 is never listed in Recordings, served or
+  linked, whatever the call was: its name does not carry the call's clear
+  print. Those calls' recordings are to come from this recorder, which keeps
+  only known clear audio (not served yet: see "In Recordings and Activity"). D-STAR and YSF dsd-fme files are unchanged.
+- **Old links re-checked.** An Activity row shows a recording only while its
+  own `call_end` admits it (known clear, not encrypted), checked again on every
+  read: a link stored earlier for a call that was not known clear has no play
+  control. A P25 phase 1 or NXDN `call_end` proves its clear print with
+  `clearEvidence: true` next to `encryptionKnown: true`; a row with
+  `encryptionKnown: true` alone (written by an older build) is not proof and
+  shows no play control. P25 phase 2, dPMR, ProVoice, EDACS and M17 rows never
+  do.
+- **No DMR yet.** DMR per-call recordings are not listed, served, linked or
+  recorded yet. The recorder writes no DMR call (nor one whose protocol is not
+  known). A dsd-fme per-call file whose name says DMR (its system field starts
+  `DMR_`), or no known protocol, is not listed in Recordings, cannot be
+  downloaded and is never linked to its Activity row; a dsd-fme decoder in
+  `mode: dmr` is not asked for per-call files at all. An Activity row linked to
+  one earlier shows no play control, and its link is removed by the next
+  link sweeps (about 2 min), even while another recordings folder is missing.
+  That removal is permanent: once DMR recordings are listed again, rows
+  unlinked this way (DMR files, and files whose name says no known protocol)
+  do not get their link back. Files dsd-fme already wrote stay on disk under
+  the usual retention.
+- **About 2 s behind the air.** Each sample is held for 2 s before it is
+  written, so a late encryption notice can still withhold it. The call's end
+  also reaches the recorder up to 10 s after the decoder reported it.
+- **At least 1 s of voice.** A call with less than `minVoiceMs` (1 000 ms) of
+  voice, silence excluded, leaves no file. A call that runs past `maxCallMs`
+  (300 000 ms, 4.8 MB) is cut there.
+- **Where the files live.** One flat folder, `digitalVoice.recordCalls.dir`,
+  by default `<stateDir>/recordings/dv-calls`. A file is named like a dsd-fme
+  call file, with the decoder id in place of the system id:
+  `<YYYYMMDD>_<HHMMSS>_<5 digits>_<decoder>_GROUP_TGT_<talkgroup>_SRC_<radio>.wav`
+  (8 kHz, 16-bit mono). A D-STAR call puts UR in `TGT` and MY in `SRC` when its
+  header was checked, else `TGT_0_SRC_0`. Unfinished
+  `TEMP_dv_<YYYYMMDD>_<HHMMSS>_<4 hex>.wav` files left by a crash are removed
+  at start. The folder must be a real directory, not a symlink, or recording
+  stays off.
+- **Retention.** Files older than `retentionDays` (7) are deleted, then the
+  oldest until the folder fits `retentionBytes` (2 GiB, about 37 hours of
+  voice). Kept recordings are never deleted. No call starts while the disk has
+  less than 512 MiB free.
+- **In Recordings and Activity.** Not yet: no decoder feeds the recorder its
+  calls in this build, so the Recordings list shows no `dv-call` file, none can
+  be downloaded, no Activity row links to one, and a link stored earlier loses
+  its play control and is removed by the next link sweeps. Files in the folder
+  stay on disk under the retention above. Once a decoder feeds it, the list
+  shows the files with kind `dv-call` (search "calls" or "recorder"), under
+  the call's decoder.
+  Once a file is in place, the call's Activity row (its `call_end`) links to
+  it, so its play button appears. That happens after the row was first shown:
+  a page that is already open shows the button on its next refresh. Deleting
+  the recording removes the link within about three minutes (the link sweep
+  waits until the catalogue has missed the file twice, 90 s apart).
+
+| Key (`digitalVoice.recordCalls.*`) | Default                          | Effect                                  |
+| ---------------------------------- | -------------------------------- | --------------------------------------- |
+| `enabled`                          | `true`                           | Record clear calls                      |
+| `dir`                              | `<stateDir>/recordings/dv-calls` | The recordings folder                   |
+| `minVoiceMs`                       | `1000`                           | Shortest call kept (voice, not silence) |
+| `maxCallMs`                        | `300000`                         | A longer call's file is cut there       |
+| `retentionBytes`                   | `2147483648` (2 GiB)             | Folder size kept                        |
+| `retentionDays`                    | `7`                              | Age kept                                |
 
 ## How it works
 
@@ -123,14 +223,46 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   is clear. The stream maps these to `digital-voice:call` (`decoderId`, `callId`,
   `protocol`, `talkgroup`, `source`, `slot`, `encrypted`, `encryptionKnown`,
   `active`, `startedAt`, `endedAt`).
-- **Encryption not known yet**: a DMR or P25 call starts on its voice frames,
-  before its link control says whether it is encrypted
-  ([DECODER-GUIDE.md](DECODER-GUIDE.md), call lifecycle), and carries
-  `encryptionKnown: false` until it does (absent means known). Such a call is not
+- **Encryption not known yet**: a DMR call starts on its voice frames,
+  before its link control says whether it is encrypted, and a P25, NXDN, dPMR
+  or ProVoice call starts before its own positive clear print
+  ([DECODER-GUIDE.md](DECODER-GUIDE.md), call lifecycle); either carries
+  `encryptionKnown: false` until it is known (absent means known: D-STAR and
+  YSF). Such a call is not
   clear: the auto route (`/auto`) admits none of its voice while the field is
   present and not `true`, and admits it once the call is known clear. A scanner
   probe records such a call as encrypted, never as a clear recording. Noise
   syncs that start a DMR call leave it unknown, so it stays muted.
+- **Every DMR call is published**: whether a call is clear or encrypted sets
+  only `encrypted`, `encryptionKnown` and its recording, never whether its
+  `call_start` / `call_end` (with talkgroup, source, slot and times) exist. An
+  over whose voice dsd-fme did not decode but whose terminator link control it
+  did (a weak repeater, or a capture that opens on a transmission's end) is
+  still a call, with `encryptionKnown: false`; a repeater's hang train after a
+  call is that call, not new ones. One over is one call, and each separate
+  over is its own:
+  - A call known only from its terminator train runs from the train's first
+    checked link control to its last one of the same talkgroup and source;
+    another talker's link controls never extend it.
+  - A direct (MS/DM) radio has no hang: its train lasts while copies follow
+    each other within 700 ms (one 360 ms superframe plus one 340 ms line
+    clump). The same talker's terminators after a longer pause are its next
+    over, and another talker's single checked copy on a clean sync is that
+    talker's call.
+  - On a repeater, another talker inside a train needs two agreeing copies
+    within 700 ms; the call starts at the first one. A slot that prints two
+    checked idle bursts in a row has ended its train: the same talker's
+    terminators after that are a new over.
+  - A train link control after a terminator sync that printed an error starts
+    nothing on its own; a second agreeing copy within 700 ms starts the call
+    from the first.
+  - A call that started on its voice frames alone and whose terminator's own
+    link control failed its check still takes its talkgroup and source from the
+    terminator's next checked copy.
+  - A privacy print (an encrypted link control, a PI burst, an ALG or KEY ID
+    print) is never the evidence that announces an unnamed call: such a call
+    is announced on its frames' own evidence (a run of syncs) or a link
+    control naming it, so removing every privacy print changes no call.
 - **Hold on the stream**: the digital voice stream (`/stream`,
   `/decoders/<id>/stream`) does not mute the head of such a call; it holds it.
   Its voice waits in a per-slot ring (slot 1, slot 2, and a whole-datagram
@@ -194,6 +326,21 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   channels are identical is silenced whole), and in mono or with the slot
   unknown whole datagrams are discarded. dsd-fme also mutes encrypted voice by
   default (it zero-fills the encrypted slot).
+- **DMR privacy over-mutes, on purpose**: a DMR privacy print (an
+  `Encrypted` link control, a non-zero `ALG ID`) mutes more than its own call,
+  failing closed. It taints its slot until the slot falls silent for longer
+  than the call timeout (or the decoder restarts), and the taint only widens:
+  - a privacy print that names no talkgroup and source (a PI burst's `ALG ID`)
+    mutes every later call on that slot, clear ones included, for as long as
+    the slot keeps carrier (idle bursts count);
+  - a privacy print that names a talkgroup and source also mutes a later clear
+    call of the same talkgroup and source within that hang time;
+  - a privacy link control whose ids are not plausible DMR ids names nothing,
+    so it mutes every later call on the slot, as a keyless print does;
+  - a slot whose taint names more than 256 talkgroup/source pairs mutes every
+    later call on it;
+  - a privacy print after a repeater sync with no slot bracket mutes both
+    slots, since the slot it prints may be stale.
 
 ## Spike: dsd-fme UDP format (2026-10-09)
 

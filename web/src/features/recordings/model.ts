@@ -27,7 +27,7 @@ export type RecordingIcon = "voice" | "scan"
  * name, else what it was ("FM voice", "Digital voice"), never "Recording <Hz>". The frequency is in the meta line.
  */
 export function recordingTitle(r: RecordingInventoryItem): string {
-	if (r.kind === "dsd-fme-call") {
+	if (isCallKind(r.kind)) {
 		if (r.callType === "private")
 			return r.talkgroup ? `Private call to ${r.talkgroup}` : "Private call"
 		if (r.callType === "unit")
@@ -47,10 +47,16 @@ export const KIND_LABEL: Record<RecordingInventoryKind, string> = {
 	"dsd-fme-call": "Call",
 	"scanner-dv": "Scanner · digital voice",
 	"scanner-analog": "Scanner · analog",
+	"dv-call": "Call",
+}
+
+/** A call recording: dsd-fme's own per-call file or the core's digital voice recorder. */
+export function isCallKind(kind: RecordingInventoryKind): boolean {
+	return kind === "dsd-fme-call" || kind === "dv-call"
 }
 
 export function recordingIcon(r: RecordingInventoryItem): RecordingIcon {
-	return r.kind === "dsd-fme-call" ? "voice" : "scan"
+	return isCallKind(r.kind) ? "voice" : "scan"
 }
 
 /**
@@ -59,7 +65,7 @@ export function recordingIcon(r: RecordingInventoryItem): RecordingIcon {
  */
 export function recordingMeta(r: RecordingInventoryItem): string {
 	const parts: string[] = []
-	if (r.kind === "dsd-fme-call") parts.push(KIND_LABEL[r.kind])
+	if (isCallKind(r.kind)) parts.push(KIND_LABEL[r.kind])
 	else if (savedNameAt(r.frequencyHz) !== null) parts.push(whatOf(r))
 	if (r.frequencyHz !== null) parts.push(channelMHz(r.frequencyHz))
 	if (r.source && r.callType !== "unit") parts.push(`radio ${r.source}`)
@@ -298,6 +304,12 @@ export interface RecToken {
 
 const KIND_WORDS: readonly [RegExp, RecordingInventoryKind, string][] = [
 	[/^(c|ca|cal|call|calls)$/i, "dsd-fme-call", "Calls"],
+	// The core filters one kind at a time: the call recorder's files are their own chip.
+	[
+		/^(c|ca|cal|call|calls|rec|reco|recor|record|recorde|recorder)$/i,
+		"dv-call",
+		"Calls · call recorder",
+	],
 	[
 		/^(s|sc|sca|scan|scann|scanne|scanner)$/i,
 		"scanner-dv",
@@ -430,7 +442,7 @@ export function suggest(
 /** Why the recording cannot be deleted from here, or null when it can. */
 export function deleteBlocker(r: RecordingInventoryItem): string | null {
 	if (r.kept === true) return "Kept recordings are protected. Unkeep it first."
-	if (r.kind !== "dsd-fme-call")
+	if (!isCallKind(r.kind))
 		return "Scanner recordings go with their discovery. Delete the discovery in Scanner."
 	return null
 }

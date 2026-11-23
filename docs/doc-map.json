@@ -68,6 +68,10 @@
 			"docs": ["docs/DIGITAL-VOICE.md"]
 		},
 		{
+			"code": ["src/core/dv-recorder/"],
+			"docs": ["docs/DIGITAL-VOICE.md"]
+		},
+		{
 			"code": ["src/core/aircraft-", "src/services/", "src/data/"],
 			"docs": ["docs/ADSB.md"]
 		},

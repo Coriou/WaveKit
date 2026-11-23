@@ -85,7 +85,7 @@ function errno(code: string): Error {
 	return Object.assign(new Error(code), { code })
 }
 
-const DSD = (hhmmss: string, rest = "1_GROUP_TGT_100_SRC_2001"): string =>
+const DSD = (hhmmss: string, rest = "YSF_1_GROUP_TGT_100_SRC_2001"): string =>
 	`20261016_${hhmmss}_01234_${rest}.wav`
 
 type FNode =
@@ -300,10 +300,10 @@ async function treeHash(root: string): Promise<string> {
 }
 
 const REFUSED = [
-	"dsd:01~20261016_120000_01234_1_GROUP_TGT_1_SRC_2.wav",
-	"dsd:10000~20261016_120000_01234_1_GROUP_TGT_1_SRC_2.wav",
+	"dsd:01~20261016_120000_01234_YSF_1_GROUP_TGT_1_SRC_2.wav",
+	"dsd:10000~20261016_120000_01234_YSF_1_GROUP_TGT_1_SRC_2.wav",
 	"dsd:0~TEMP_20261016_120000_ABCD.wav",
-	"dsd:0~../20261016_120000_01234_1_GROUP_TGT_1_SRC_2.wav",
+	"dsd:0~../20261016_120000_01234_YSF_1_GROUP_TGT_1_SRC_2.wav",
 	"dsd:0~20261016_120000_01234_a/b.wav",
 	"dsd:0~20261016_120000_01234_a b.wav",
 	"scan:d_abc~../../etc/passwd.wav",
@@ -311,7 +311,7 @@ const REFUSED = [
 	"scan:d_abc~x.WAV",
 	"/app/decoded_calls/x.wav",
 	"",
-	"dsd:0~..%2F20261016_120000_01234_1_GROUP_TGT_1_SRC_2.wav",
+	"dsd:0~..%2F20261016_120000_01234_YSF_1_GROUP_TGT_1_SRC_2.wav",
 	"dsd:0~20261016_120000_01234_1\\..\\x.wav",
 	"scan:d_abc~..\\..\\x.wav",
 	"scan:d_abc/../d_x~y.wav",
@@ -352,10 +352,10 @@ describe("recordings inventory on a hostile tree", () => {
 		const c = path.join(root, "dsdC")
 		await put(path.join(a, DSD("120000")))
 		await put(path.join(a, "TEMP_20261016_120000_ABCD.wav"))
-		await put(path.join(a, DSD("120001", "1_GROUP_TGT_1_SRC_2")))
+		await put(path.join(a, DSD("120001", "YSF_1_GROUP_TGT_1_SRC_2")))
 		const fresh = (now - RECORDINGS_IN_PROGRESS_MS + 1000) / 1000
 		await utimes(
-			path.join(a, DSD("120001", "1_GROUP_TGT_1_SRC_2")),
+			path.join(a, DSD("120001", "YSF_1_GROUP_TGT_1_SRC_2")),
 			fresh,
 			fresh,
 		)
@@ -367,10 +367,12 @@ describe("recordings inventory on a hostile tree", () => {
 		await put(path.join(a, "..wav"))
 		await symlink(DSD("120008"), path.join(a, DSD("120008")))
 		await put(
-			path.join(a, "20261316_120009_01234_1_UNIT_TGT_5_SRC_x.wav"),
+			path.join(a, "20261316_120009_01234_YSF_1_UNIT_TGT_5_SRC_x.wav"),
 			Buffer.from("not a wav"),
 		)
-		await put(path.join(c, "20261016_130000_00001_X_PRIVATE_TGT_7_SRC_8.wav"))
+		await put(
+			path.join(c, "20261016_130000_00001_YSF_X_PRIVATE_TGT_7_SRC_8.wav"),
+		)
 		await symlink(root, path.join(root, "alias"))
 		await symlink(c, path.join(root, "dsdLink"))
 
@@ -420,8 +422,8 @@ describe("recordings inventory on a hostile tree", () => {
 		expect(ids).toEqual(
 			[
 				`dsd:0~${DSD("120000")}`,
-				"dsd:0~20261316_120009_01234_1_UNIT_TGT_5_SRC_x.wav",
-				"dsd:1~20261016_130000_00001_X_PRIVATE_TGT_7_SRC_8.wav",
+				"dsd:0~20261316_120009_01234_YSF_1_UNIT_TGT_5_SRC_x.wav",
+				"dsd:1~20261016_130000_00001_YSF_X_PRIVATE_TGT_7_SRC_8.wav",
 				"scan:d_abc~call-1.wav",
 				"scan:d_def~a-1.wav",
 			].sort(),
@@ -472,13 +474,13 @@ describe("recordings inventory on a hostile tree", () => {
 			expect(path.isAbsolute(p ?? "")).toBe(true)
 		}
 		for (const id of [
-			`dsd:0~${DSD("120001", "1_GROUP_TGT_1_SRC_2")}`, // fresh
+			`dsd:0~${DSD("120001", "YSF_1_GROUP_TGT_1_SRC_2")}`, // fresh
 			`dsd:0~${DSD("120002")}`, // symlinked file
 			`dsd:0~${DSD("120003")}`, // directory
 			`dsd:0~${DSD("120008")}`, // loop
 			`dsd:0~${DSD("125959")}`, // absent
 			`dsd:2~${DSD("120000")}`, // index past the source list
-			"dsd:3~20261016_130000_00001_X_PRIVATE_TGT_7_SRC_8.wav",
+			"dsd:3~20261016_130000_00001_YSF_X_PRIVATE_TGT_7_SRC_8.wav",
 			"scan:d_link~call-1.wav", // symlinked discovery folder
 			"scan:d_def~link.wav",
 			"scan:d_loop~x.wav",
@@ -504,7 +506,7 @@ describe("recordings inventory on a hostile tree", () => {
 		const { options } = await build()
 		const inv = createRecordingInventory(options)
 		const page = await inv.list({})
-		const id = "dsd:1~20261016_130000_00001_X_PRIVATE_TGT_7_SRC_8.wav"
+		const id = "dsd:1~20261016_130000_00001_YSF_X_PRIVATE_TGT_7_SRC_8.wav"
 		expect(page.items.some(i => i.id === id)).toBe(true)
 		const file = path.join(root, "dsdC", id.slice("dsd:1~".length))
 		await unlink(file)
@@ -740,7 +742,7 @@ function manyFiles(n: number, mtimeMs = OLD): FakeFs {
 	const fs = new FakeFs().dir("/r/dsd")
 	for (let i = 0; i < n; i++) {
 		const t = String(100000 + i).padStart(6, "0")
-		fs.file(`/r/dsd/20261016_${t}_01234_1_GROUP_TGT_1_SRC_2.wav`, mtimeMs)
+		fs.file(`/r/dsd/20261016_${t}_01234_YSF_1_GROUP_TGT_1_SRC_2.wav`, mtimeMs)
 	}
 	return fs
 }
@@ -753,7 +755,10 @@ describe("recordings inventory bounds", () => {
 			const fs = new FakeFs().dir("/r/dsd")
 			for (let i = 0; i < n; i++) {
 				const t = String(100000 + i).padStart(6, "0")
-				fs.file(`/r/dsd/20261016_${t}_01234_1_GROUP_TGT_1_SRC_2.wav`, OLD + i)
+				fs.file(
+					`/r/dsd/20261016_${t}_01234_YSF_1_GROUP_TGT_1_SRC_2.wav`,
+					OLD + i,
+				)
 			}
 			return fs
 		}
@@ -876,11 +881,11 @@ function nameFor(s: Spec, i: number): string {
 	const t = String(100000 + i)
 	switch (s.name) {
 		case "call":
-			return `20261016_${t}_01234_1_GROUP_TGT_${i}_SRC_2.wav`
+			return `20261016_${t}_01234_YSF_1_GROUP_TGT_${i}_SRC_2.wav`
 		case "temp":
 			return `TEMP_20261016_${t}_ABCD.wav`
 		case "upper":
-			return `20261016_${t}_01234_1_GROUP_TGT_1_SRC_2.WAV`
+			return `20261016_${t}_01234_YSF_1_GROUP_TGT_1_SRC_2.WAV`
 		case "space":
 			return `20261016_${t}_01234_a b_TGT_1_SRC_2.wav`
 		case "scan":
@@ -954,7 +959,7 @@ describe("recordings inventory property", () => {
 
 /** A dsd-fme call name giving an id of exactly `idLength` characters at index 0. */
 function dsdNameForIdLength(idLength: number): string {
-	const head = "20261016_120000_01234_"
+	const head = "20261016_120000_01234_YSF_"
 	const tail = "_GROUP_TGT_1_SRC_2.wav"
 	return (
 		head +
@@ -1501,15 +1506,17 @@ describe("recordings catalogue", () => {
 
 	it("filters server side and counts the whole catalogue", async () => {
 		const fs = new FakeFs()
-			.file(`/r/dsd/${DSD("120000", "1_GROUP_TGT_446_SRC_2001")}`, OLD + 3)
-			.file(`/r/dsd/${DSD("120001", "1_GROUP_TGT_9_SRC_446")}`, OLD + 2)
+			.file(`/r/dsd/${DSD("120000", "YSF_1_GROUP_TGT_446_SRC_2001")}`, OLD + 3)
+			.file(`/r/dsd/${DSD("120001", "YSF_1_GROUP_TGT_9_SRC_446")}`, OLD + 2)
 			.file("/r/scan/analog/d_01K446ZZ/analog-4466.wav", OLD + 1)
 			.file("/r/scan/dv/d_B/call.wav", OLD)
 		const owner: Record<string, { id: string; frequencyHz: number }> = {
 			d_01K446ZZ: { id: "d_B", frequencyHz: 466_012_500 },
 			d_B: { id: "d_B", frequencyHz: 466_012_500 },
 		}
-		const kept = new Set([`dsd~${DSD("120000", "1_GROUP_TGT_446_SRC_2001")}`])
+		const kept = new Set([
+			`dsd~${DSD("120000", "YSF_1_GROUP_TGT_446_SRC_2001")}`,
+		])
 		const inv = fakeInventory(fs, {
 			discoveryOwner: id => owner[id] ?? null,
 			protection: {
@@ -1526,7 +1533,12 @@ describe("recordings catalogue", () => {
 			total: 4,
 			kept: 1,
 			bytes: 4 * WAV_1S.length,
-			byKind: { "dsd-fme-call": 2, "scanner-dv": 1, "scanner-analog": 1 },
+			byKind: {
+				"dsd-fme-call": 2,
+				"scanner-dv": 1,
+				"scanner-analog": 1,
+				"dv-call": 0,
+			},
 		})
 		expect(all.items.find(i => i.kind === "scanner-analog")).toMatchObject({
 			discoveryId: "d_01K446ZZ",
@@ -1536,8 +1548,8 @@ describe("recordings catalogue", () => {
 		// "446" is in a talkgroup and a radio id, in the analog folder id and file name (never
 		// searched) and in no frequency: only the two calls match.
 		expect(await ids({ q: "446" })).toEqual([
-			`dsd:0~${DSD("120000", "1_GROUP_TGT_446_SRC_2001")}`,
-			`dsd:0~${DSD("120001", "1_GROUP_TGT_9_SRC_446")}`,
+			`dsd:0~${DSD("120000", "YSF_1_GROUP_TGT_446_SRC_2001")}`,
+			`dsd:0~${DSD("120001", "YSF_1_GROUP_TGT_9_SRC_446")}`,
 		])
 		expect(await ids({ q: "466.0125" })).toHaveLength(2)
 		expect(await ids({ talkgroup: "446" })).toHaveLength(1)

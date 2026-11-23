@@ -16,7 +16,8 @@ import {
 	stores,
 } from "../core/activity/storage/helpers.js"
 
-const KEY = "dsd~20261012_100000_12345_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
+// A YSF call: dsd-fme call files of DMR, P25, NXDN, dPMR and ProVoice are never presented.
+const KEY = "dsd~20261012_100000_12345_YSF_1A3_GROUP_TGT_9_SRC_2001.wav"
 
 afterEach(async () => {
 	await Promise.all(stores.splice(0).map(s => s.close().catch(() => undefined)))
@@ -33,6 +34,8 @@ describe("activity routes: recording links", () => {
 				eventId: "with-audio",
 				category: "voice",
 				outputType: "call_end",
+				protocol: "ysf",
+				decodedData: { protocol: "ysf" },
 			}),
 			undefined,
 			{ id: KEY, durationMs: 4200 },

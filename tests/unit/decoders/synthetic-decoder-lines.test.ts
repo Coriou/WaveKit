@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs"
 import pino from "pino"
 import { afterAll, describe, expect, it, vi } from "vitest"
 import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
+import { DATE_CLOCK } from "./dsd-fme-call-first-helpers.js"
 import { MultimonDecoder } from "../../../src/decoders/builtin/multimon-ng.js"
 import { presentDecoderOutput } from "../../../src/core/activity/presentation/registry.js"
 import {
@@ -47,6 +48,8 @@ const dsd = (mode: string) =>
 	new DsdFmeDecoder(
 		{ id: "dsd-fme", type: "dsd-fme", enabled: true, options: { mode } },
 		silent,
+		// Elapsed time follows the fake Date (vi.setSystemTime).
+		DATE_CLOCK,
 	)
 
 const CASES: {

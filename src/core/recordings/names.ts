@@ -5,6 +5,7 @@
  * persistence into the startup bundle, so it is not imported here); a unit test pins them equal.
  */
 
+import { createHash } from "node:crypto"
 import type { RecordingCallType } from "@wavekit/api-types"
 
 /** Scanner recording id `${discoveryId}~${fileName}` (evidence-store RECORDING_ID). */
@@ -43,6 +44,75 @@ export function recordingFolderIdsOf(
 /** dsd-fme close_and_rename_wav_file name (evidence-store CALL_WAV). */
 export const CALL_WAV =
 	/^(\d{8})_(\d{6})_\d{5}_.+_(?:GROUP|PRIVATE|UNIT)_TGT_([^_]+)_SRC_([^_.]+)\.wav$/
+
+/** A decoder id the dv-call name field carries verbatim: `[A-Za-z0-9-]{1,18}`. */
+export const DV_CALL_DECODER_LITERAL = /^[A-Za-z0-9-]{1,18}$/
+/** 36^8 = 2 821 109 907 456 (about 2^41.4) hash values. */
+const DV_CALL_HASH_SPACE = 36n ** 8n
+const DV_CALL_HASH_MEMO_MAX = 256
+const hashedFields = new Map<string, string>()
+
+/**
+ * Whether the catalogue lists, serves or presents a link to the dv call recorder's files (kind
+ * `dv-call`). Off: no decoder yet feeds the recorder a call tap (addCallTap), so no per-call
+ * trust check stands behind such a file, and a file in that directory is refused by name (fail
+ * closed; it stays on disk under the usual retention). Re-enable in this one line once a tap
+ * writes only calls whose Activity row passes callTrustAdmits. Links the sweep removed while
+ * this was off do not come back.
+ */
+export const DV_CALL_RECORDINGS_SERVED: boolean = false
+
+/**
+ * The decoder field of a dv-call recorder name for `decoderId`: the id itself when it already
+ * matches DV_CALL_DECODER_LITERAL, else `h` plus 8 base36 digits of the SHA-256 of the exact id
+ * (its first 64 bits mod 36^8; 9 characters). The field never loses an id silently: a reader maps
+ * it back only by an exact match against known ids (dvCallDecoderOf).
+ *
+ * Collisions: k distinct hashed ids collide with probability at most k(k-1)/2 / 36^8; for
+ * k = 1 000 that is 499 500 / 2 821 109 907 456 ≈ 1.8e-7. A hashed field may also equal a literal
+ * 9-character id `h…`. Either case is ambiguous and reads as no decoder (null), never a guess.
+ */
+export function dvCallNameField(decoderId: string): string {
+	if (DV_CALL_DECODER_LITERAL.test(decoderId)) return decoderId
+	const memo = hashedFields.get(decoderId)
+	if (memo !== undefined) return memo
+	const digest = createHash("sha256").update(decoderId, "utf8").digest()
+	const n = digest.readBigUInt64BE(0) % DV_CALL_HASH_SPACE
+	const field = "h" + n.toString(36).padStart(8, "0")
+	// The inventory maps every listed file against the known ids: a bounded memo (256 ids,
+	// cleared when full) keeps that to one hash per id.
+	if (hashedFields.size >= DV_CALL_HASH_MEMO_MAX) hashedFields.clear()
+	hashedFields.set(decoderId, field)
+	return field
+}
+
+/**
+ * The decoder field of a dv-call recorder name (`<stamp>_<rand5>_<field>_<TYPE>_TGT_…`), or null
+ * when the name is not in that shape. The field is not a decoder id: see dvCallDecoderOf.
+ */
+const DV_CALL_DECODER =
+	/^\d{8}_\d{6}_\d{5}_([A-Za-z0-9-]{1,18})_(?:GROUP|PRIVATE|UNIT)_TGT_/
+export function dvCallDecoderField(name: string): string | null {
+	return DV_CALL_DECODER.exec(name)?.[1] ?? null
+}
+
+/**
+ * The known decoder id whose name field is `field`: exactly one of `knownIds` must map to it
+ * (dvCallNameField). Unknown, ambiguous (two ids, one field) or a null field gives null.
+ */
+export function dvCallDecoderOf(
+	field: string | null,
+	knownIds: Iterable<string>,
+): string | null {
+	if (field === null) return null
+	let found: string | null = null
+	for (const id of new Set(knownIds)) {
+		if (dvCallNameField(id) !== field) continue
+		if (found !== null) return null
+		found = id
+	}
+	return found
+}
 
 const CALL_TYPE = /_(GROUP|PRIVATE|UNIT)_TGT_[^_]+_SRC_[^_.]+\.wav$/
 const LEADING_STAMP = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})_/

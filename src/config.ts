@@ -602,6 +602,37 @@ export const LiveDemodRuntimeBaseSchema =
 export const DIGITAL_VOICE_ENABLED_DEFAULT = true
 
 /**
+ * The digital-voice call recorder: one WAV per clear call, from the service's call tap. Audio is
+ * 8 000 samples/s × 2 B = 16 000 B/s.
+ * - minVoiceMs: non-zero audio a call needs to be kept; 1 000 ms = 8 000 samples = 16 000 B.
+ * - maxCallMs: a file is cut here; 300 000 ms = 4 800 000 B (+ 44 B header). At most
+ *   3 600 000 ms = 57 600 000 B, and never below minVoiceMs.
+ * - retentionBytes: directory total; 2 GiB = 2 147 483 648 B ≈ 37.3 h of voice. At least
+ *   16 MiB (16 777 216 B ≈ 17 min), at most 1 TiB.
+ * - retentionDays: files older than this are deleted; 7 days = 168 h. 1 to 365.
+ * Kept recordings are never pruned and still count toward the total.
+ */
+export const DvRecordCallsConfigSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		/** Flat directory; default `<stateDir>/recordings/dv-calls`. */
+		dir: z.string().min(1).optional(),
+		minVoiceMs: z.number().int().min(0).max(60_000).default(1000),
+		maxCallMs: z.number().int().min(1000).max(3_600_000).default(300_000),
+		retentionBytes: z
+			.number()
+			.int()
+			.min(16 * 1024 * 1024)
+			.max(1024 * 1024 * 1024 * 1024)
+			.default(2 * 1024 * 1024 * 1024),
+		retentionDays: z.number().int().min(1).max(365).default(7),
+	})
+	.refine(value => value.maxCallMs >= value.minVoiceMs, {
+		message: "maxCallMs must be at least minVoiceMs",
+		path: ["maxCallMs"],
+	})
+
+/**
  * Schema for the digital voice stream (decoded dsd-fme voice as PCM).
  * Applies to every configured dsd-fme decoder whose options leave `output`
  * unset (or "udp" without a port).
@@ -621,6 +652,7 @@ export const DigitalVoiceConfigSchema = z
 		jitterBufferMs: z.number().int().min(0).max(2000).default(400),
 		/** Bound on queued voice per stream; the oldest is dropped beyond it. */
 		maxBufferMs: z.number().int().min(100).max(10_000).default(1000),
+		recordCalls: DvRecordCallsConfigSchema.default({}),
 	})
 	.refine(value => value.maxBufferMs >= value.jitterBufferMs, {
 		message: "maxBufferMs must be at least jitterBufferMs",
@@ -734,7 +766,11 @@ export const ChannelizerConfigSchema = z.object({
 	binaryPath: z.string().min(1).default("wavekit-chan"),
 	socketDir: z.string().min(1).default("/var/run/wavekit/chan"),
 	usableFraction: z.number().min(0.5).max(0.95).default(0.8),
-	channelQueueMs: z.number().int().min(50).max(2000).default(250),
+	// A channel's output queue fills only while its decoder is not reading, so it adds no latency in steady state; it
+	// must cover the decoder process's own scheduling gap. Measured worst idle-worker lateness at load 135-209 on the
+	// dev host: 1.1 s, so 1 000 ms. 48 kHz cf32 is 384 KB/s, 384 KB per channel; s16 audio 96 KB; ten cf32 channels
+	// 3.8 MB. The bound stays 2 000 ms.
+	channelQueueMs: z.number().int().min(50).max(2000).default(1000),
 	inputHighWaterMark: z
 		.number()
 		.int()
@@ -827,6 +863,15 @@ export const ScannerConfigSchema = z
 				maxHoldMs: z.number().int().min(1000).max(600_000).default(60_000),
 				hangMs: z.number().int().min(0).max(60_000).default(2000),
 				preRollMs: z.number().int().min(0).max(10_000).default(300),
+			})
+			.default({}),
+		/**
+		 * Recording admission: discard a finished analog file whose audio measures as open-squelch
+		 * noise or data buzz (`discarded:noise`, speech-content.ts admissionNoise).
+		 */
+		admission: z
+			.object({
+				enabled: z.boolean().default(true),
 			})
 			.default({}),
 		storage: z

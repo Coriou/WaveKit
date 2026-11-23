@@ -34,6 +34,7 @@ const frame = {
 	freeW: 1440,
 	H: 900,
 	cardH: 300,
+	obstacles: [],
 }
 
 describe("CardPlaceStore", () => {
@@ -53,7 +54,8 @@ describe("CardPlaceStore", () => {
 		expect(p.startDrag(100, 600)).toBe(true)
 		expect(p.get().drag).toEqual({ x: 16, y: 504 })
 		p.moveDrag(5000, -5000)
-		expect(p.get().drag).toEqual({ x: 1440 - CARD_W, y: 0 })
+		// one gutter in from the window's edges
+		expect(p.get().drag).toEqual({ x: 1440 - 16 - CARD_W, y: 16 })
 		const a = p.endDrag()
 		expect(a?.id).toBe("tr")
 		expect(p.get()).toMatchObject({
