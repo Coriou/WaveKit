@@ -3,8 +3,9 @@ import "./recordings.css"
 // The Recordings drawer (Recordings board), on the core's recordings catalogue (WG8 inventory, WG9 Keep and
 // delete): header "Recordings · count · All / Kept" with the core's counts, typed-chip search run by the core,
 // one notice slot, the virtual list of rows grouped by day (only what is on screen is mounted; older pages
-// load at the end; open in place: waveform, then Play, Keep, ⋯ (Download, Tune, Evidence, Delete with Undo)
-// and one channel link) and the storage footer. Playback is the app's one player (services.playback, its dock
+// load at the end; open in place: waveform, then Play, Keep, Details, ⋯ (Download, Tune, Open in Scanner, Delete
+// with Undo) and one channel link) and the storage footer. Details pushes the Transmission view in place of the
+// list; Back returns to the same search, scroll and open row. Playback is the app's one player (services.playback, its dock
 // the only transport): the row disc toggles it, the open row's waveform seeks it, the playing row is marked.
 // The list follows the catalogue's `recordings` socket notices; arrivals hold while it is scrolled or playing
 // from it ("N new"). Names, notes, trim, transcripts, IQ captures and Opus downloads wait for the core
@@ -36,7 +37,13 @@ import type { PanelNoticeKind } from "../../ui/panel-state.ts"
 import { Seg } from "../../ui/Seg.tsx"
 import { useVirtualRows } from "../../ui/virtual-rows.ts"
 import { token as activityToken } from "../activity/search.ts"
-import { openDiscovery } from "../scanner/ui-store.ts"
+import {
+	backFromTransmission,
+	openInScanner,
+	openTransmission,
+	transmissionNav,
+} from "../transmission/nav.ts"
+import { TransmissionView } from "../transmission/TransmissionView.tsx"
 import {
 	channelMHz,
 	historyLabel,
@@ -103,11 +110,16 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 			openId === null ? undefined : s.items.find(r => r.id === openId)
 		return item ? playbackIdOf(item) : null
 	})
+	// the Transmission view pushed in place of the list (Details); it owns the compact dock while shown
+	const tx = useStore(transmissionNav, s =>
+		s?.origin.host === "recordings" ? s : null,
+	)
+	const txOpen = tx !== null
 	// compact only while this drawer is the visible panel
 	const visible = useDrawerVisible("recordings")
 	useEffect(() => {
-		player.setExpanded("recordings", openPid, visible)
-	}, [player, openPid, visible])
+		if (!txOpen) player.setExpanded("recordings", openPid, visible)
+	}, [player, openPid, visible, txOpen])
 	useEffect(() => () => player.setExpanded("recordings", null), [player])
 
 	// open: the list for the current search, following the catalogue's notices (no polling)
@@ -137,6 +149,8 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 					title="Recordings need access protection"
 					text="This WaveKit runs without access protection, and the core lists recordings only when it is on. Turn on access in the WaveKit config to list, play and keep them here."
 				/>
+			) : tx !== null ? (
+				<TransmissionView open={tx} onBack={backToList} />
 			) : (
 				<>
 					<Progress />
@@ -151,9 +165,20 @@ export function RecordingsDrawer({ onClose }: { onClose: () => void }) {
 					<List player={player} readOnly={readOnly} />
 				</>
 			)}
-			<Footer />
+			{tx === null && <Footer />}
 		</Drawer>
 	)
+}
+
+/** Back from the Transmission view: the list comes back as it was (search, scroll, open row), focus on that row. */
+function backToList(): void {
+	backFromTransmission()
+	requestAnimationFrame(() => {
+		const { openId, cursorId } = recordingsUi.get()
+		const id = openId ?? cursorId
+		if (id !== null)
+			document.getElementById(rowDomId(id))?.focus({ preventScroll: true })
+	})
 }
 
 /** The search and the Kept filter as a core query: chips and Kept at once, typed text after a pause. */
@@ -858,10 +883,12 @@ interface Actions {
 		list: readonly RecordingInventoryItem[],
 	): void
 	tune(hz: number): void
-	/** The row's one channel link: Activity on its channel (or talkgroup), its own transmission open when known. */
+	/** The row's one channel link: Activity on its channel (or talkgroup), nothing opened over it. */
 	channel(r: RecordingInventoryItem): void
-	/** Scanner on the discovery that owns it. */
-	evidence(discoveryId: string): void
+	/** Scanner on the discovery that owns it; a toast when the core cannot give it. */
+	scanner(discoveryId: string): void
+	/** The Transmission view of this recording, in this drawer. */
+	details(r: RecordingInventoryItem): void
 }
 
 function useActions(
@@ -913,7 +940,7 @@ function useActions(
 				void services.tuning.tune(hz)
 			},
 			channel(r) {
-				const eventId = r.activityEventId ?? null
+				// the channel's list only: this transmission is Details, never opened over the list
 				if (r.frequencyHz !== null)
 					showChannel(
 						services.activity,
@@ -926,13 +953,16 @@ function useActions(
 						null,
 					)
 					shellStore.openDrawer("activity")
-				} else if (eventId === null) return
-				// its own transmission opens over the channel's list
-				if (eventId !== null) services.activity.showEvent(eventId)
+				}
 			},
-			evidence(discoveryId) {
-				openDiscovery(discoveryId)
-				shellStore.openDrawer("scanner")
+			scanner(discoveryId) {
+				void openInScanner(discoveryId, services.data.scanner)
+			},
+			details(r) {
+				openTransmission(
+					{ recording: r.key ?? r.id },
+					{ host: "recordings", label: "Recordings" },
+				)
 			},
 		}),
 		[player, queue, recordings, services],
@@ -1063,12 +1093,12 @@ const Row = memo(function Row({
 export function channelLinkLabel(r: RecordingInventoryItem): string | null {
 	if (r.frequencyHz !== null) return historyLabel(r.frequencyHz)
 	if (r.talkgroup) return `History of TG ${r.talkgroup}`
-	return r.activityEventId ? "Open transmission" : null
+	return null
 }
 
 /**
- * An open row's actions (Recordings board, design "same order everywhere"): Play, Keep, ⋯ (Download, Tune,
- * Evidence, Delete) and one channel link.
+ * An open row's actions (Recordings board, design "same order everywhere"): Play, Keep, Details, ⋯ (Download,
+ * Tune, Open in Scanner, Delete) and one channel link.
  */
 function RowActions({
 	item: r,
@@ -1124,6 +1154,15 @@ function RowActions({
 				<RecIcon name="star" size={15} filled={kept} />
 				{kept ? "Kept" : "Keep"}
 			</button>
+			<button
+				type="button"
+				className="wk-btn"
+				data-variant="outline"
+				title="Everything known about this transmission"
+				onClick={() => actions.details(r)}
+			>
+				Details
+			</button>
 			<span className="wkr-more">
 				<button
 					ref={moreRef}
@@ -1133,7 +1172,7 @@ function RowActions({
 					aria-label="More actions"
 					aria-haspopup="menu"
 					aria-expanded={menu}
-					title="Download, tune, evidence, delete"
+					title="Download, tune, open in Scanner, delete"
 					onClick={() => setMenu(m => !m)}
 				>
 					<Icon name="dots" size={15} />
@@ -1174,11 +1213,11 @@ function RowActions({
 								type="button"
 								role="menuitem"
 								className="wk-option"
-								title="The scanner's discovery for this channel"
-								onClick={() => actions.evidence(owner)}
+								title="This channel's discovery in the Scanner"
+								onClick={() => actions.scanner(owner)}
 							>
 								<RecIcon name="scan" size={16} />
-								<span className="wkf-grow">Evidence</span>
+								<span className="wkf-grow">Open in Scanner</span>
 							</button>
 						)}
 						{!readOnly && (
@@ -1205,11 +1244,7 @@ function RowActions({
 					type="button"
 					className="wk-btn wkr-channel"
 					data-variant="ghost"
-					title={
-						r.activityEventId
-							? "This channel in Activity, with this transmission open"
-							: "What was heard on this channel, in Activity"
-					}
+					title="What was heard on this channel, in Activity"
 					onClick={() => actions.channel(r)}
 				>
 					<RecIcon name="activity" size={15} />

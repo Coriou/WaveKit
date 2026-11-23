@@ -1,7 +1,7 @@
 import "./playback.css"
 
 // The one transport for recordings (`data-wk-transport`): Prev, Play/Pause, Next, the title and "n of m",
-// the position, speed, Auto-next (per browser), Keep and close. Shown while a recording is in the player,
+// the position, speed, Auto-next (per browser), Keep and close. The title opens the playing transmission's view. Shown while a recording is in the player,
 // wherever it was started from; a thin progress line with play/pause while its row is open in the visible
 // panel (that row's waveform is the seek view then), or while the shell layout has no height for the full
 // transport (`data-forced`: the first step of DESIGN.md's "Insufficient height").
@@ -12,6 +12,7 @@ import { Switch } from "../../ui/Switch.tsx"
 import { useDisplay } from "../display.ts"
 import { PlayGlyph, RecIcon } from "../recordings/icons.tsx"
 import { formatDuration } from "../recordings/model.ts"
+import { hostHere, openTransmission } from "../transmission/nav.ts"
 import { KeepButton } from "./PlaybackUi.tsx"
 import type { PlaybackState } from "./service.ts"
 import {
@@ -136,7 +137,14 @@ export function PlayerDock() {
 					<RecIcon name="next" size={14} />
 				</button>
 				<span className="wkp-dock-title">
-					<span className="wkp-dock-name">{title}</span>
+					<button
+						type="button"
+						className="wkp-dock-name wkp-dock-open"
+						title="This transmission's details"
+						onClick={() => openTransmission({ recording: id }, hostHere())}
+					>
+						{title}
+					</button>
 					<span
 						className="wkp-dock-sub"
 						data-tone={hasError ? "warn" : undefined}

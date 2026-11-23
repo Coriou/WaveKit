@@ -1228,6 +1228,22 @@ Condensed + Noto Sans, Tabler-based icons).
   cells that require every expected island on screen or listed as waiting, motion samples with
   the transitions on, the Map view at every viewport, and Listen's panel open on the phone and at
   1440×900).
+- **The Transmission view (2026-11-23).** One view per transmission, pushed into the drawer the
+  user is in (Recordings' **Details**, a transmission's Activity row); from a place with no drawer
+  (the tuned card's earlier rows, the player's title) it opens in Activity. Sections, in the order a
+  listener asks: Listen; What we know (Who, Tone, Signal, Ended, Kept, one short value each in
+  words); Conversation (oldest first, **Play all**; a time heuristic is titled as one); On this
+  channel (History of …, Open in Scanner, Tune: the only doors that leave); Details, collapsed and
+  remembered, with every id and raw number. The Tone row always shows for analog FM, in three honest
+  states: the value, `No tone heard` only for a measured absence, else `Not measured` with why.
+  Codes become sentences from one table (`web/src/features/transmission/words.ts`). Back and Esc
+  return to the exact origin in one step (the host keeps its list state: Recordings remounts its
+  list on its saved scroll, Activity keeps its list mounted under the view); opening never writes
+  another panel's search, so **History of …** is the channel's list only and ⋯ **Evidence** became
+  **Open in Scanner**, with a notice when the discovery cannot be fetched. The view renders one DTO
+  from `loadTransmission(ref)`, which composes today's calls behind one adapter until the core
+  serves a transmission route. *Why:* the user's question about one over ("which tone was it?") had
+  no place to be answered, and every door led to a place instead of the thing.
 
 ## Open questions and next topics
 

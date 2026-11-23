@@ -136,7 +136,10 @@ Start it with `pnpm --filter @wavekit/web mock`, then `pnpm --filter @wavekit/we
   `channel` matches by its own frequency within ±6,250 Hz, and the answer says `channelMatch`),
   and facets count the `channel` dimension. Scanner analog catalogue items carry `speech` and
   `keptBy` (`unchecked` and null on other kinds), and `GET /api/recordings` takes the same channel
-  parameters.
+  parameters. They also carry the kept file's `facts` sidecar (finish codes, admission numbers, the
+  tone), seeded to cover every tone state the Transmission view words: a CTCSS tone, a DCS code,
+  `tone: null` (measured, none heard), no `tone` member (not measured), and `facts: null` (an older
+  file).
 - Scanner (`scanner.ts`, registered from `server.ts`): the core's `/api/scanner` routes with their
   schemas and error codes: status, settings (GET / PATCH with provenance and bounds), the EU
   bandplans (plus a `pager-431` plan), plan previews from a port of the core's planner (hops,

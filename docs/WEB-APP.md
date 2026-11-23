@@ -496,9 +496,12 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   being trusted; a move that cut off only the silence after it says nothing), `Continues…` while the
   core has not yet linked a rolled-over file to its next part, `Receiver lost` or `WaveKit stopped`
   (separate overs of one held carrier get no part number). An open row has the same actions in the
-  same order everywhere: **Play**, **Keep** (**Kept**, click again to unkeep; `S`), **⋯** (Download,
-  Tune, Evidence, Delete with Undo) and one channel link, **History of …**, which opens the channel
-  in Activity with this transmission open when the core linked it. New recordings
+  same order everywhere: **Play**, **Keep** (**Kept**, click again to unkeep; `S`), **Details**
+  (the [Transmission view](#the-transmission-view) in this drawer), **⋯** (Download, Tune, **Open in
+  Scanner**, Delete with Undo) and one channel link, **History of …**, which opens the channel's list
+  in Activity and nothing over it. **Open in Scanner** says so in a notice when the core can no
+  longer give the channel's discovery. A row's time is when its audio starts, not when it was kept,
+  so Recordings and the Transmission view agree. New recordings
   appear on their own (the core announces each change on the socket; nothing polls); while you
   scroll down or play one from this list, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,
   then the placeholder, `Still loading. WaveKit is busy.` after 3 s, and after 10 s (or an error)
@@ -608,6 +611,34 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
 7.5 % of frames blanked)` suggests a lower gain; it is a hint, not a measurement.
 - When samples are lost on the way from the receiver to WaveKit, the Receiver island says
   `Samples lost` and a notice says why (see [Notices](#notices)).
+
+### The Transmission view
+
+Everything known about one transmission, in the drawer you are in: **Details** on an open
+Recordings row, a transmission's row in Activity (a scanner recording, a live analog transmission,
+a call with audio; other rows keep their event detail), one of the tuned card's earlier rows, or the
+player's title (in Recordings or Activity when one of them is open, else in Activity). **‹ Back**
+(or `Esc`) names where you came from and returns there in one step: the same list, search, scroll
+and open row. Opening it never changes another panel's search.
+
+From the top: the time the audio starts (with the date when it is not today), the channel in MHz
+on its raster and the length in seconds; the waveform and play disc (or one sentence when there is
+no audio, such as `The recording was deleted`); **What we know**, a few short rows in words:
+
+- **Tone**, always for analog FM: `CTCSS 88.5 Hz`, `DCS 023`, `No tone heard` (it listened and heard
+  none; the scanner recorder does not check DCS codes), or `Not measured` with why (recordings made
+  before WaveKit stored the tone, too little audio, or a tone that was not steady).
+- **Signal** (`Strong, 24 dB over the noise`), **Ended** (`The transmission ended`,
+  `Cut: the receiver was retuned`) and **Kept** (`Speech heard over a tone`), each only when known.
+
+Then the **Conversation**: the other parts of the same transmission, oldest first, this one marked,
+with **Play all** in that order; recordings of the same channel close in time are titled
+`Around this time on this channel`, since WaveKit cannot yet tell they were one exchange. Choosing
+one shows it in place; Back still returns to where you came from. **On this channel** says how
+often the channel was heard and its usual tone, with three doors that do leave: **History of …**,
+**Open in Scanner** and **Tune**. **Details**, collapsed (remembered per browser), holds every id
+with a copy button, the measured frequency in Hz with its offset, the UTC times, the codes, the
+recording admission's numbers, the file size, **Download WAV** and the stored JSON.
 
 ### Playing recordings
 

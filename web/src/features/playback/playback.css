@@ -164,6 +164,19 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	/* the title is the door to the playing transmission's view */
+	.wkp-dock-open {
+		border: 0;
+		padding: 0;
+		background: none;
+		color: inherit;
+		font-family: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+	.wkp-dock-open:hover {
+		text-decoration: underline;
+	}
 	.wkp-dock-sub {
 		font-size: var(--wk-fs-2xs);
 		color: var(--wk-text-3);

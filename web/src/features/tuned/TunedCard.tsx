@@ -33,6 +33,11 @@ import {
 } from "../../data/index.ts"
 import { CardHandle } from "../../shell/CardHandle.tsx"
 import { useDevicePrefs } from "../../shell/hooks.ts"
+import {
+	hostHere,
+	isTransmissionRow,
+	openTransmission,
+} from "../transmission/nav.ts"
 import { shellStore } from "../../shell/store.ts"
 import { showAppToast } from "../../shell/toast.ts"
 import { Button } from "../../ui/Button.tsx"
@@ -1053,10 +1058,22 @@ export function TunedCard() {
 										type="button"
 										className="wk-row wkf-earlier-row"
 										data-size="dense"
-										title="Open in Activity"
+										title={
+											isTransmissionRow(r.item)
+												? "This transmission's details"
+												: "Open in Activity"
+										}
 										onClick={() => {
-											activity.open(r.item)
-											shellStore.openDrawer("activity")
+											if (isTransmissionRow(r.item))
+												openTransmission(
+													{ event: r.item.eventId },
+													hostHere(),
+													r.item,
+												)
+											else {
+												activity.open(r.item)
+												shellStore.openDrawer("activity")
+											}
 										}}
 									>
 										<span className="wkf-earlier-t">{r.time}</span>

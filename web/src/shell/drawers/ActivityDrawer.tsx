@@ -5,6 +5,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react"
 
 import { useServices } from "../../app/context.ts"
 import { useStore } from "../../data/index.ts"
+import type { ActivitySummary } from "@wavekit/api-types"
 import type {
 	ActivityFeed,
 	ActivityFeedState,
@@ -38,6 +39,13 @@ import type { CategoryChipId } from "../../features/activity/search.ts"
 import { CATEGORY_CHIPS, suggest } from "../../features/activity/search.ts"
 import { ScopeChips } from "../../features/activity/ScopeChips.tsx"
 import { rangeEnded, rangeLabel } from "../../features/activity/scope.ts"
+import {
+	backFromTransmission,
+	isTransmissionRow,
+	openTransmission,
+	transmissionNav,
+} from "../../features/transmission/nav.ts"
+import { TransmissionView } from "../../features/transmission/TransmissionView.tsx"
 import { Button } from "../../ui/Button.tsx"
 import { Chip } from "../../ui/Chip.tsx"
 import { Drawer } from "../../ui/Drawer.tsx"
@@ -59,7 +67,8 @@ const RESET_TEXT: Record<NonNullable<ActivityFeedState["reset"]>, string> = {
 }
 
 // The Activity drawer (Activity board): search with typed chips and Pin as column, category chips with counts,
-// the live list, and an event's detail pushed in with Back. With room, the header's Columns opens the pinned
+// the live list, and an event's detail pushed in with Back (a transmission's row opens the Transmission view there,
+// as does a transmission opened from a place with no drawer; Activity's search is never touched by it). With room, the header's Columns opens the pinned
 // searches side by side in the attached pane (ActivityColumnsPane); without, they are a switcher row here.
 export default function ActivityDrawer({
 	onClose,
@@ -87,6 +96,25 @@ export default function ActivityDrawer({
 	const back = () => {
 		activity.open(null)
 		requestAnimationFrame(() => list.current?.focus())
+	}
+	const tx = useStore(transmissionNav, s =>
+		s?.origin.host === "activity" ? s : null,
+	)
+	const txEvent = tx !== null && "event" in tx.ref ? tx.ref.event : null
+	const txBack = () => {
+		const origin = backFromTransmission()
+		if (origin?.restoreDrawer === undefined)
+			requestAnimationFrame(() => list.current?.focus())
+	}
+	// a transmission's row opens the Transmission view; any other row its event detail
+	const openRow = (item: ActivitySummary) => {
+		if (isTransmissionRow(item))
+			openTransmission(
+				{ event: item.eventId },
+				{ host: "activity", label: "Activity" },
+				item,
+			)
+		else activity.open(item)
 	}
 
 	const listLabel =
@@ -136,34 +164,34 @@ export default function ActivityDrawer({
 				)
 			}
 		>
-			<div className="wka-browse" hidden={openId !== null}>
+			<div className="wka-browse" hidden={openId !== null || tx !== null}>
 				<SearchBox room={paneRoom} />
 				<Categories />
 				{!paneRoom && hasColumns && <Switcher />}
 				<ListHeader feed={feed} room={paneRoom} />
 				<Notices feed={feed} />
 				{expanded ? (
-					<CardsBoard
-						feed={feed}
-						label={listLabel}
-						onOpen={item => activity.open(item)}
-					/>
+					<CardsBoard feed={feed} label={listLabel} onOpen={openRow} />
 				) : (
 					<ActivityList
 						ref={list}
 						feed={feed}
-						openId={openId}
+						openId={openId ?? txEvent}
 						column="drawer"
 						label={listLabel}
 						onOpen={id => {
 							const item = feed.get().items.find(i => i.eventId === id) ?? null
-							if (item) activity.open(item)
+							if (item) openRow(item)
 						}}
 					/>
 				)}
 			</div>
-			{openId !== null && (
-				<ActivityDetail eventId={openId} item={openItem} onBack={back} />
+			{tx !== null ? (
+				<TransmissionView open={tx} onBack={txBack} />
+			) : (
+				openId !== null && (
+					<ActivityDetail eventId={openId} item={openItem} onBack={back} />
+				)
 			)}
 		</Drawer>
 	)

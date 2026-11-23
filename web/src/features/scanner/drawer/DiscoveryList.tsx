@@ -8,7 +8,8 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react"
 
 import { useDisplay } from "../../display.ts"
 import { useReadOnly, useServices } from "../../../app/context.ts"
-import { isIdentifyFinal, useStore } from "../../../data/index.ts"
+import { errorMessage, isIdentifyFinal, useStore } from "../../../data/index.ts"
+import { showAppToast } from "../../../shell/toast.ts"
 import { useNow, useTunerState } from "../../hooks.ts"
 import { openDiscovery, scannerUi } from "../ui-store.ts"
 import {
@@ -55,8 +56,14 @@ export function DiscoveryList() {
 	const [cursor, setCursor] = useState<string | null>(null)
 
 	useEffect(() => {
+		// an id the core cannot give (deleted, merged away, no answer) says so instead of closing silently
 		if (openId !== null && !scanner.discovery(openId))
-			scanner.fetchDiscovery(openId).catch(() => openDiscovery(null))
+			scanner.fetchDiscovery(openId).catch((error: unknown) => {
+				openDiscovery(null)
+				showAppToast(`Could not open this discovery: ${errorMessage(error)}`, {
+					tone: "warn",
+				})
+			})
 	}, [openId, scanner])
 
 	const entries = useMemo(() => {
