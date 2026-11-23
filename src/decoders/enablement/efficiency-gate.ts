@@ -2,6 +2,7 @@ import { z } from "zod"
 import type { Logger } from "../../utils/logger.js"
 import type {
 	DecoderEfficiencyDetail,
+	DecoderEfficiencyView,
 	DecoderLossCause,
 	DropAttribution,
 } from "@wavekit/api-types"
@@ -24,7 +25,6 @@ import {
 import type {
 	AdmissionDecision,
 	ChargedDrop,
-	CoreEfficiencyView,
 	LateDropWindow,
 	EfficiencyGate,
 	ProbationVerdict,
@@ -2023,7 +2023,7 @@ export function createEfficiencyGate(
 		},
 		hostBusy: (sourceId, branches) =>
 			hostBusyAt(sourceId, sampledMono(), branches),
-		view(running, blocked, now): CoreEfficiencyView {
+		view(running, blocked, now): DecoderEfficiencyView {
 			const mono = monoNow()
 			observeRunning(running, mono)
 			let membership: readonly string[] = []

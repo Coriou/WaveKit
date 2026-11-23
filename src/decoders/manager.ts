@@ -51,10 +51,7 @@ import {
 	placementOptionsKey,
 	channelizerBranchId,
 } from "./enablement/contract.js"
-import type {
-	CoreEfficiencyView,
-	PlannerCentreSlot,
-} from "./enablement/contract.js"
+import type { PlannerCentreSlot } from "./enablement/contract.js"
 import type { LossAttribution } from "./enablement/host-starvation.js"
 import {
 	TUNED_SETTLE_MS,
@@ -73,6 +70,7 @@ import type {
 	DecoderMode,
 	DecoderPlacementView,
 	DecoderEfficiencyDetail,
+	DecoderEfficiencyView,
 	DecoderHostBusy,
 	DecoderOptionIssue,
 	DecoderSettingValue,
@@ -1833,7 +1831,7 @@ export class DecoderManager extends EventEmitter {
 		return this.budgetSettings
 	}
 
-	efficiencyView(): CoreEfficiencyView {
+	efficiencyView(): DecoderEfficiencyView {
 		const gate = this.config.enablement?.gate
 		if (!gate) return { budgetCores: 0, cpuGuardPercent: 90, sources: [] }
 		const mono = performance.now()

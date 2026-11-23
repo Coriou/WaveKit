@@ -9,8 +9,6 @@ import type {
 	DecoderStartMode,
 	DecoderSuspensionReasonCode,
 	DecoderPlacementView,
-	DecoderEfficiencyPlacement,
-	DecoderEfficiencySourceView,
 	DecoderEfficiencyView,
 	DecoderEfficiencyDetail,
 	DecoderLossCause,
@@ -488,37 +486,6 @@ export interface ShedAttribution {
 	/** Whose loss condemned it, with the safe evidence the logs carry. */
 	attribution: LossAttribution
 }
-/**
- * L1 is excusing a running untuned placement's own loss: late-drop windows that would condemn it (loss charged to
- * the branch it reads, or to its whole source) are its host's, while the host is busy and the core's own CPU is not
- * over, so it is not late-stopped. Visible here so the loss is never silent; gone once the host calms or the loss
- * stops.
- */
-export interface HostExcusedLossView {
-	cause: "host-busy"
-	/** When the excuse began (ISO). */
-	since: string
-	/** Late-drop windows (of the latest LATE_SHED_WINDOWS) whose loss it excuses now: 1 to LATE_SHED_WINDOWS. */
-	windows: number
-}
-/** The core's efficiency placement: the API placement plus `hostExcusedLoss` (until api-types carries it). */
-export interface CoreEfficiencyPlacement extends DecoderEfficiencyPlacement {
-	hostExcusedLoss?: HostExcusedLossView
-}
-export interface CoreEfficiencySourceView extends Omit<
-	DecoderEfficiencySourceView,
-	"admitted"
-> {
-	admitted: CoreEfficiencyPlacement[]
-}
-/** DecoderEfficiencyView with `hostExcusedLoss` on admitted placements; assignable to it. */
-export interface CoreEfficiencyView extends Omit<
-	DecoderEfficiencyView,
-	"sources"
-> {
-	sources: CoreEfficiencySourceView[]
-}
-
 export interface EfficiencyGate {
 	record(sample: EfficiencySample): void
 	admit(
@@ -574,7 +541,7 @@ export interface EfficiencyGate {
 			decision: AdmissionDecision
 		}[],
 		now: number,
-	): CoreEfficiencyView
+	): DecoderEfficiencyView
 }
 
 export const LATE_SHED_WINDOWS = 3
