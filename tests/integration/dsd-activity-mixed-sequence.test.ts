@@ -453,8 +453,9 @@ describe("mixed-channel activity sequence", () => {
 		expect(
 			moves.filter(m => m.decoderId === "voice").every(m => m.toHz !== PAGER),
 		).toBe(true)
-		// A new run of the same placement must earn sync again; a quick restart
-		// can occur entirely between planner passes. Its fresh dwell still holds.
+		// Sync memory belongs to the RF channel, not the run: a restart of the
+		// same placement keeps its digital slot through the hold window, even
+		// with no carrier, rather than earning sync again.
 		const placement = f.plans
 			.at(-1)
 			?.wanted.find(p => p.decoderId === "voice" && p.channelHz === decodedHz)
@@ -465,9 +466,8 @@ describe("mixed-channel activity sequence", () => {
 		for (let step = 0; step < 202; step++) {
 			block([PAGER, ...ANALOG])
 			await vi.advanceTimersByTimeAsync(100)
-			if (step < 199) expect(f.runningHz()).toContain(decodedHz)
+			expect(f.runningHz()).toContain(decodedHz)
 		}
-		expect(f.runningHz()).not.toContain(decodedHz)
 	}, 60_000)
 
 	it("keeps a no-sync incumbent replaceable when DMR arrives after its cooldown", async () => {
