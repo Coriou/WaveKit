@@ -1,0 +1,200 @@
+/* The Transmission view, pushed into its host drawer: layout glue over the ui.css recipes (wk-row, wk-tile,
+   wk-label, wk-btn). No colours of its own: text tiers and the well come from the tokens. */
+@layer wk-app {
+	.wkt-view {
+		flex: 1;
+		min-height: 0;
+		display: flex;
+		flex-direction: column;
+	}
+	.wkt-bar {
+		flex: none;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 0 10px 4px;
+	}
+	.wkt-gap {
+		flex: 1;
+	}
+	.wkt-body {
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+		padding: 4px 18px 18px;
+	}
+	.wkt-head {
+		display: flex;
+		gap: 12px;
+		align-items: flex-start;
+	}
+	.wkt-head-main {
+		flex: 1;
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.wkt-head-line {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+		min-width: 0;
+	}
+	.wkt-title {
+		margin: 0;
+		font-size: var(--wk-fs-xl);
+		font-weight: 700;
+		overflow-wrap: anywhere;
+	}
+	.wkt-time,
+	.wkt-sub {
+		font-variant-numeric: tabular-nums;
+		color: var(--wk-text-2);
+		font-size: var(--wk-fs-md);
+	}
+	.wkt-listen-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+	}
+	.wkt-wave {
+		flex: 1;
+		min-width: 0;
+	}
+	.wkt-known {
+		margin: 4px 0 0;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.wkt-known-row {
+		display: grid;
+		grid-template-columns: 72px minmax(0, 1fr);
+		gap: 10px;
+	}
+	.wkt-known-row dt {
+		font-size: var(--wk-fs-sm);
+		color: var(--wk-text-3);
+	}
+	.wkt-known-row dd {
+		margin: 0;
+		font-size: var(--wk-fs-md);
+		display: flex;
+		flex-direction: column;
+		gap: 1px;
+	}
+	.wkt-hint {
+		margin: 0;
+		font-size: var(--wk-fs-xs);
+		color: var(--wk-text-3);
+	}
+	.wkt-note,
+	.wkt-line {
+		margin: 0;
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-soft);
+	}
+	.wkt-note[data-tone="warn"] {
+		color: var(--wk-amber);
+	}
+	.wkt-conv-head,
+	.wkt-door-row {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px;
+	}
+	.wkt-conv-list {
+		margin: 4px 0 0;
+		padding: 4px;
+		list-style: none;
+		border-radius: var(--wk-r-4);
+		background: var(--wk-well-glass);
+	}
+	.wkt-conv-row {
+		width: 100%;
+		display: flex;
+		gap: 12px;
+		font-variant-numeric: tabular-nums;
+	}
+	.wkt-conv-row[aria-current] {
+		font-weight: 600;
+	}
+	.wkt-this {
+		margin-left: auto;
+		color: var(--wk-text-3);
+		font-size: var(--wk-fs-xs);
+	}
+	.wkt-doors {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+	.wkt-link {
+		border: 0;
+		padding: 0;
+		background: none;
+		color: var(--wk-accent);
+		font: inherit;
+		font-size: var(--wk-fs-sm);
+		cursor: pointer;
+	}
+	.wkt-details summary {
+		cursor: pointer;
+		font-size: var(--wk-fs-md);
+		color: var(--wk-text-2);
+	}
+	.wkt-details[open] {
+		display: flex;
+		flex-direction: column;
+		gap: 10px;
+	}
+	.wkt-ids {
+		margin: 8px 0 0;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+	}
+	.wkt-id-row {
+		display: grid;
+		grid-template-columns: 112px minmax(0, 1fr);
+		gap: 10px;
+		font-size: var(--wk-fs-sm);
+	}
+	.wkt-id-row dt {
+		color: var(--wk-text-3);
+	}
+	.wkt-id-row dd {
+		margin: 0;
+		display: flex;
+		gap: 8px;
+		align-items: baseline;
+		overflow-wrap: anywhere;
+		font-variant-numeric: tabular-nums;
+	}
+	.wkt-id-row code {
+		overflow-wrap: anywhere;
+	}
+	.wkt-admission {
+		font-size: var(--wk-fs-sm);
+		border-collapse: collapse;
+	}
+	.wkt-admission caption {
+		text-align: left;
+		color: var(--wk-text-3);
+		padding-bottom: 4px;
+	}
+	.wkt-admission th {
+		text-align: left;
+		font-weight: 400;
+		color: var(--wk-text-3);
+		padding: 1px 12px 1px 0;
+	}
+	.wkt-admission td {
+		font-variant-numeric: tabular-nums;
+	}
+}

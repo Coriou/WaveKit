@@ -1189,7 +1189,7 @@ Condensed + Noto Sans, Tabler-based icons).
 
     | Step | When the scale rows' room above the stack is | What gives |
     | --- | --- | --- |
-    | 1 | under 148 px (100 px of rows + the 48 px trace floor) with the full player | the player shows its compact line (play/pause, progress, time) |
+    | 1 | under 148 px (100 px of rows + the 48 px trace floor) with the full player | the player shows its compact line (play/pause, title over the progress, time, close) |
     | 2 | under 148 px with the compact line | the trace floor yields: the trace shrinks toward 0 |
     | 3 | under 100 px | the discovery row and the band ruler hide (54 px of rows left: axis and lanes) |
     | 4 | under 54 px with the player | the player waits out of sight, still playing |
@@ -1228,6 +1228,37 @@ Condensed + Noto Sans, Tabler-based icons).
   cells that require every expected island on screen or listed as waiting, motion samples with
   the transitions on, the Map view at every viewport, and Listen's panel open on the phone and at
   1440×900).
+- **The Transmission view (2026-11-23).** One view per transmission, pushed into the drawer the
+  user is in (Recordings' **Details**, a transmission's Activity row); from a place with no drawer
+  (the tuned card's earlier rows, the player's title) it opens in Activity. Sections, in the order a
+  listener asks: Listen; What we know (Who, Tone, Signal, Ended, Kept, one short value each in
+  words); Conversation (oldest first, **Play all**; a time heuristic is titled as one); On this
+  channel (History of …, Open in Scanner, Tune: the only doors that leave); Details, collapsed and
+  remembered, with every id and raw number. The Tone row always shows for analog FM, in three honest
+  states: the value, `No tone heard` only for the recorder's stored absence (an empty live reading
+  is `Not measured`), else `Not measured` with why.
+  Codes become sentences from one table (`web/src/features/transmission/words.ts`). Back and Esc
+  return to the exact origin in one step (the host keeps its list state: Recordings remounts its
+  list on its saved scroll, Activity keeps its list mounted under the view); opening never writes
+  another panel's search, so **History of …** is the channel's list only and ⋯ **Evidence** became
+  **Open in Scanner**, with a notice when the discovery cannot be fetched. The view renders one DTO
+  from `loadTransmission(ref)`, which composes today's calls behind one adapter until the core
+  serves a transmission route. *Why:* the user's question about one over ("which tone was it?") had
+  no place to be answered, and every door led to a place instead of the thing.
+- **One player model (2026-11-23).** The dock is the one transport and never shrinks under an open
+  row: an expanded Recordings row, an open Activity event and the Transmission view only drive it
+  (their disc toggles it, their waveform seeks it; no surface holds row state in the player any
+  more). The compact line stays, but only as step 1 of *Insufficient height*, and it keeps the
+  title (the door to the playing transmission) and **Close**: play/pause, title over the progress,
+  time, close. Of the two ways out (rows drive the app player, or the pill keeps title and close)
+  both are taken because they answer different causes: the row-driven shrink was the bare pill the
+  user met (a row's waveform and Play beside a dock that had lost its title, Next and Close, so two
+  players seemed to run), while the height step is this document's own rule for a short window,
+  where a full transport would overlap the plot. The transition table (idle, loading, playing,
+  paused, ended, error × play row, play all, next/prev, close, end, error) heads the player model
+  (`web/src/features/playback/service.ts`) and is tested cell by cell. *Why:* one thing that plays
+  should look like one thing everywhere, and a control that can play must also say what plays and
+  let you stop it.
 
 ## Open questions and next topics
 

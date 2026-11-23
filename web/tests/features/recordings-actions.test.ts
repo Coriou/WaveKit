@@ -38,10 +38,11 @@ describe("Recordings row actions", () => {
 			{ kind: "dsd-fme-call", frequencyHz: null, talkgroup: "2081" },
 			"History of TG 2081",
 		],
+		// the transmission itself is the Details door, never a channel link
 		[
 			"only its transmission known",
 			{ frequencyHz: null, activityEventId: "evt_1" },
-			"Open transmission",
+			null,
 		],
 		["nothing to link", { frequencyHz: null }, null],
 	])("one channel link: %s", (_case, patch, label) => {
@@ -53,7 +54,7 @@ describe("Recordings row actions", () => {
 		expect(channelLinkLabel(item({}))).toBe("History of Club net")
 	})
 
-	it("is Play, Keep, ⋯ and one channel link, through the one channel seam", () => {
+	it("is Play, Keep, Details, ⋯ and one channel link, through the one channel seam", () => {
 		const src = readFileSync(
 			new URL(
 				"../../src/features/recordings/RecordingsDrawer.tsx",
@@ -65,16 +66,22 @@ describe("Recordings row actions", () => {
 			src.indexOf("function RowActions("),
 			src.indexOf("function RowMenu("),
 		)
-		const order = ["Play", "Keep", 'aria-label="More actions"', "{link}"].map(
-			s => block.indexOf(s),
-		)
+		const order = [
+			"Play",
+			"Keep",
+			"Details",
+			'aria-label="More actions"',
+			"{link}",
+		].map(s => block.indexOf(s))
 		expect(order.every(i => i > 0)).toBe(true)
 		expect([...order].sort((a, b) => a - b)).toEqual(order)
-		// Download, Tune, Evidence and Delete live in the ⋯ menu; Evidence only with a discovery id
+		// Download, Tune, Open in Scanner and Delete live in the ⋯ menu; Open in Scanner only with a discovery id
 		expect(block).toMatch(/owner !== null && \(/)
-		expect(block).toContain("Evidence")
+		expect(block).toContain("Open in Scanner")
+		expect(block).not.toContain("Evidence")
+		// History is the channel's list only: nothing is opened over it
 		expect(src).toMatch(/showChannel\(\s*services\.activity,\s*r\.frequencyHz,/)
-		expect(src).toContain("services.activity.showEvent(eventId)")
+		expect(src).not.toContain("showEvent(")
 		expect(src).not.toContain("showFrequency(")
 		expect(src).not.toContain("Show in")
 	})

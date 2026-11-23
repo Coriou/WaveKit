@@ -31,6 +31,7 @@ import {
 import { Button } from "../../ui/Button.tsx"
 import { Icon } from "../../ui/Icon.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
+import { openActivityRow } from "../../features/transmission/nav.ts"
 import { showAppToast } from "../toast.ts"
 import type { PaneContentProps } from "./types.ts"
 
@@ -333,9 +334,10 @@ function Column({
 	const menuBtn = useRef<HTMLButtonElement>(null)
 	if (!feed) return null
 
+	// as in the drawer's list: a transmission's row opens its view, any other row its event detail
 	const open = (id: string) => {
 		const item = feed.get().items.find(i => i.eventId === id) ?? null
-		if (item) activity.open(item)
+		if (item) openActivityRow(item, activity)
 	}
 
 	return (

@@ -446,7 +446,13 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   This replaces the old Messages view: `#/messages`, a link with `view=messages` and the ⌘K
   **Messages** row (`G` `D`) open Activity in Cards. A scanner recording's row is a transmission:
   it reads `FM voice` (or the channel's saved name, with `FM voice` under it), never
-  `Recording 145.5625 MHz`.
+  `Recording 145.5625 MHz`. A row for a kept recording (a scanner recording, a call with audio)
+  shows when its audio starts, the same time as its Recordings row: the Recordings list's time when
+  that list has it loaded, else the start a live transmission's stored event carries once you have
+  opened it, else the time it was stored (a scanner recording's stored event holds only when its
+  transmission started, which a later part or a second over shares, so it never stands in for the
+  file's own start). The list stays in the order the events were stored, so a long recording
+  can show an earlier time than the row below it.
   **Last decode** on the tuned card opens it on one decoder: a **Decoder ADS-B** chip in the
   search lists only that decoder's events; remove the chip with its `×` like any other filter.
   If the core rate-limits a request, Activity retries by itself up to 3 times, unless the core asks
@@ -496,9 +502,12 @@ the core (`Branch congested` in its log), the holes stay until the load comes do
   being trusted; a move that cut off only the silence after it says nothing), `Continues…` while the
   core has not yet linked a rolled-over file to its next part, `Receiver lost` or `WaveKit stopped`
   (separate overs of one held carrier get no part number). An open row has the same actions in the
-  same order everywhere: **Play**, **Keep** (**Kept**, click again to unkeep; `S`), **⋯** (Download,
-  Tune, Evidence, Delete with Undo) and one channel link, **History of …**, which opens the channel
-  in Activity with this transmission open when the core linked it. New recordings
+  same order everywhere: **Play**, **Keep** (**Kept**, click again to unkeep; `S`), **Details**
+  (the [Transmission view](#the-transmission-view) in this drawer), **⋯** (Download, Tune, **Open in
+  Scanner**, Delete with Undo) and one channel link, **History of …**, which opens the channel's list
+  in Activity and nothing over it. **Open in Scanner** says so in a notice when the core can no
+  longer give the channel's discovery. A row's time is when its audio starts, not when it was kept,
+  so Recordings and the Transmission view agree. New recordings
   appear on their own (the core announces each change on the socket; nothing polls); while you
   scroll down or play one from this list, they wait under an `↑ N new` pill. A slow core shows the same states as Activity: nothing for the first second,
   then the placeholder, `Still loading. WaveKit is busy.` after 3 s, and after 10 s (or an error)
@@ -609,6 +618,66 @@ scanner tunes` (or `· for your tuning` with the switch on). It shows the gain t
 - When samples are lost on the way from the receiver to WaveKit, the Receiver island says
   `Samples lost` and a notice says why (see [Notices](#notices)).
 
+### The Transmission view
+
+Everything known about one transmission, in the drawer you are in: **Details** on an open
+Recordings row, a transmission's row in Activity or in a pinned column (a scanner recording, a live
+analog transmission, a call with audio; other rows keep their event detail), **Details** on such an
+event's detail, one of the tuned card's earlier rows, or the player's title (in Recordings or
+Activity when one of them is open, else in Activity; played from an Activity list, it opens on that
+row). **‹ Back** (or `Esc` anywhere in the drawer) names where you came from and returns there in
+one step: the same list, search, scroll and open row, or the event detail it was opened from
+(focus on that detail's Back), with focus on that row or, when the row is no longer on screen, on
+the list. When the view opened the drawer, Back closes it again, reopens the drawer that was open
+before (when there was one) and puts focus back on what you clicked; closing the drawer another way
+(`Esc` from outside it, such as from the player, or its close button) also reopens that drawer. Opening it never changes another panel's search,
+and opening another transmission while it is open (the player's title, a tuned card row) keeps that
+same Back. When nothing can be found the view says `Not found` and why; when the receiver does not
+answer within 15 s in all it says so with **Retry**, so it never stays on `Loading` for good. Opened from
+Recordings, the list's count and its **All / Kept** switch are hidden until you go Back, so Back
+returns to the list exactly as you left it.
+
+From the top: the recording's icon (as on its Recordings row; a live transmission has none), the
+time the audio starts (with the date when it is not today; the recording's own start, from its
+Recordings entry; a scanner recording whose file is not listed shows no time here, and **What we
+know** says when its **Transmission started** and when it was **Kept at** instead), the channel in MHz
+on its raster and the length in seconds; the waveform and play disc (or one sentence when there is
+no audio, such as `The recording was deleted`); **What we know**, a few short rows in words:
+
+- **Tone**, always for analog FM and never for AM: `CTCSS 88.5 Hz`, `DCS 023`,
+  `A tone was heard (not stored)` (the scanner kept the file for its tone without storing which;
+  such a file never reads `No tone heard`),
+  `No tone heard` (only when the scanner recorder stored that it listened and heard none; it does
+  not check DCS codes), or `Not measured` with why (recordings made before WaveKit stored the tone,
+  `Not determined for this recording` when the stored facts hold no tone, a scanner recording whose
+  file is not listed, a live transmission whose stored event could not be read, a live transmission
+  whose stored reading holds no tone, or a stored tone this web app cannot read). A live
+  transmission never says `No tone heard`: the live demodulator stores the same empty reading when
+  the audio was too short, its detector failed, or the core predates the check.
+- **Signal** (`Strong, 24 dB over the noise`), **Ended** (`The transmission ended`,
+  `Cut: the receiver was retuned`) and **Kept** (`Speech heard over a tone`), each only when known.
+
+Then the **Conversation**: the other parts of the same transmission, oldest first, this one marked,
+with **Play all**, which plays every one in that order to the last, whether **Auto-next** is on
+or off; recordings of the same channel close in time are titled
+`Around this time on this channel`, since WaveKit cannot yet tell they were one exchange. Choosing
+one shows it in place; Back still returns to where you came from. While it shows the recording that
+plays, the player's **Next**, **Previous** and **Auto-next** move the view along with it, without
+moving your focus (focus goes to Back only when the view opens). **On this
+channel** says how often the channel was heard and its usual tone, with three doors: **History of
+…** and **Open in Scanner** close the view and show that place (Back does not come back to it), and
+**Tune**. **Details**, collapsed (remembered per browser), holds every id
+with a copy button, the measured frequency in Hz with its offset, the UTC times, the codes, the
+recording admission's numbers, the file size, **Download WAV** and the stored JSON. **Copy** says
+`Copied`, or that the browser blocked it.
+
+A scanner recording's event detail in Activity speaks the same way: **Channel** in MHz,
+**Transmission started** (when the transmission it belongs to began: a later part or a second over
+of the same session shares it, so it is not the file's own start), **Duration** in seconds and
+**Kept at**, never its ids or ISO times; those, the measured frequency in
+whole Hz and the stored JSON are under **Ids and raw values**, collapsed. A live analog
+transmission's detail says its length in seconds and how it ended in words.
+
 ### Playing recordings
 
 There is one player for the whole app. A play disc on an Activity row or card (expanded Cards too),
@@ -630,13 +699,18 @@ list it was started from, in the order shown, and only the rows with a recording
 drawer and each pinned column are separate lists. **Previous** after the first 2 s goes back to the
 start; before that it plays the previous recording, and it is greyed out when there is none.
 **Auto-next** plays the next recording when one ends (never after a failure); it is on by default
-and remembered per browser. While the open Activity event or Recordings row is the one playing and
-its drawer is the one on screen, the player shrinks to a thin progress line with play/pause, and
-that row's waveform is where you seek: click or drag on it (a paused one plays on from there). A
-recording that fails keeps the full player, which says why:
+and remembered per browser. An open Activity event or Recordings row only drives this player: its
+disc plays and pauses it and its waveform is where you seek (click or drag on it; a paused one plays
+on from there), while the player stays whole, with its title and **Close**. Only a window too short
+for the full player shrinks it to one line: play/pause, the title over a progress line, the time and
+**Close**. A recording that fails keeps the full player, which says why:
 `This recording is no longer on the receiver`,
 `Too many recordings are being read; try again in a moment`,
 `The receiver is busy; try again`, or `Session expired, pair again`.
+
+Known gap: an Activity row of a scanner recording whose file was deleted since still shows its play
+disc, and playing it fails with `This recording is no longer on the receiver`.
+
 **Keep** works when WaveKit can name the file, which for a digital-voice call needs it loaded in
 Recordings; otherwise it says to keep it from there. When WaveKit does not know yet whether a file
 is kept, **Keep** never shows it as not kept: pressing it keeps the file and shows the answer.

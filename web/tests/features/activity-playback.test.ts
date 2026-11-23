@@ -13,7 +13,6 @@ import {
 	activityQueue,
 	recordingOf,
 } from "../../src/features/activity/playback.ts"
-import { drawerVisible } from "../../src/features/playback/visible.ts"
 import {
 	keepLabel,
 	keepTarget,
@@ -203,27 +202,12 @@ describe("one queue per Activity list, compact only in a visible panel", () => {
 		expect(block).toContain("activityQueue(foldedOf(items, feed), list)")
 	})
 
-	it("a drawer is visible only while it is the open one and the Receiver panel leaves it room", () => {
-		expect(drawerVisible({ drawer: "activity", panel: null }, "activity")).toBe(
-			true,
-		)
-		expect(
-			drawerVisible({ drawer: "recordings", panel: null }, "activity"),
-		).toBe(false)
-		expect(drawerVisible({ drawer: null, panel: null }, "recordings")).toBe(
-			false,
-		)
-		expect(
-			drawerVisible({ drawer: "recordings", panel: "receiver" }, "recordings"),
-		).toBe(false)
-	})
-
-	it("both surfaces pass their real visibility to setExpanded", () => {
-		expect(src("features/activity/ActivityPlayback.tsx")).toContain(
-			'playback.setExpanded("activity", id, visible)',
-		)
-		expect(src("features/recordings/RecordingsDrawer.tsx")).toContain(
-			'player.setExpanded("recordings", openPid, visible)',
-		)
+	it("no surface shrinks the dock under its open row: the one player stays the transport", () => {
+		for (const file of [
+			"features/activity/ActivityPlayback.tsx",
+			"features/recordings/RecordingsDrawer.tsx",
+			"features/transmission/TransmissionView.tsx",
+		])
+			expect(src(file)).not.toContain("setExpanded")
 	})
 })

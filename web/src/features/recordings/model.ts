@@ -56,7 +56,14 @@ export function isCallKind(kind: RecordingInventoryKind): boolean {
 }
 
 export function recordingIcon(r: RecordingInventoryItem): RecordingIcon {
-	return isCallKind(r.kind) ? "voice" : "scan"
+	return recordingIconOf(r.kind)
+}
+
+/** The icon of a recording kind: a call's voice, a scanner file's scan. */
+export function recordingIconOf(
+	kind: RecordingInventoryItem["kind"],
+): RecordingIcon {
+	return isCallKind(kind) ? "voice" : "scan"
 }
 
 /**
@@ -181,10 +188,15 @@ export function storageLine(
 }
 
 /**
- * When it was recorded: the start time in the file name (the core's local time, read as this
- * browser's local time) or else the file's last write.
+ * When it was recorded: the start of its audio (a scanner file's first sample, never the time it was kept),
+ * else the start time in the file name (the core's local time, read as this browser's local time), else the
+ * file's last write.
  */
 export function recordedAt(r: RecordingInventoryItem): Date {
+	if (r.startedAt) {
+		const d = new Date(r.startedAt)
+		if (!Number.isNaN(d.getTime())) return d
+	}
 	if (r.startedAtLocal) {
 		const d = new Date(r.startedAtLocal)
 		if (!Number.isNaN(d.getTime())) return d

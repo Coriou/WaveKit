@@ -31,6 +31,10 @@ import type {
 	RecordingInventoryKind,
 	RecordingInventoryPage,
 } from "@wavekit/api-types"
+import type {
+	RecordingFacts,
+	RecordingTone,
+} from "../src/features/transmission/contract.ts"
 import { DISCOVERY_SEEDS, seedDiscoveryId } from "./data.ts"
 
 const RATE = 8000
@@ -54,6 +58,11 @@ interface Seed {
 	/** Scanner analog recordings: the recorder's verdict at the finish (default heard, final). */
 	speech?: RecordingSpeech
 	keptBy?: string
+	/**
+	 * Scanner analog recordings: the facts sidecar's tone (the value, null: measured and none heard, "absent": the
+	 * member left out), or `false` for a file with no facts at all (an older file). Default: facts without a tone.
+	 */
+	tone?: RecordingTone | null | "absent" | false
 }
 
 const SEEDS: readonly Seed[] = [
@@ -99,8 +108,19 @@ const SEEDS: readonly Seed[] = [
 		durationS: 90,
 		mhz: 145.5628,
 		cut: "duration-rollover",
+		tone: { kind: "ctcss", hz: 123 },
 	},
-	{ kind: "scanner-analog", agoMin: 26, durationS: 42, mhz: 156.8, kept: true },
+	// The tone states of the facts sidecar (Transmission view, Tone row): CTCSS, DCS, measured none, not measured,
+	// and no facts at all.
+	{
+		kind: "scanner-analog",
+		agoMin: 26,
+		durationS: 42,
+		mhz: 156.8,
+		kept: true,
+		keptBy: "own-tone",
+		tone: { kind: "ctcss", hz: 88.5 },
+	},
 	// One long transmission split by roll-overs, its last part cut when the sweep moved on.
 	{
 		kind: "scanner-analog",
@@ -110,6 +130,7 @@ const SEEDS: readonly Seed[] = [
 		cut: "duration-rollover",
 		part: 1,
 		parts: 3,
+		tone: { kind: "dcs", code: "023" },
 	},
 	{
 		kind: "scanner-analog",
@@ -119,6 +140,7 @@ const SEEDS: readonly Seed[] = [
 		cut: "duration-rollover",
 		part: 2,
 		parts: 3,
+		tone: { kind: "dcs", code: "023" },
 	},
 	{
 		kind: "scanner-analog",
@@ -128,6 +150,7 @@ const SEEDS: readonly Seed[] = [
 		cut: "scanner-moved",
 		part: 3,
 		parts: 3,
+		tone: { kind: "dcs", code: "023" },
 	},
 	{
 		kind: "scanner-analog",
@@ -135,6 +158,7 @@ const SEEDS: readonly Seed[] = [
 		durationS: 12,
 		mhz: 156.8,
 		cut: "source-lost",
+		tone: null,
 	},
 	{
 		kind: "scanner-analog",
@@ -142,6 +166,7 @@ const SEEDS: readonly Seed[] = [
 		durationS: 9,
 		mhz: 156.8,
 		cut: "shutdown",
+		tone: "absent",
 	},
 	// Kept with no voice prior and no speech heard in it (the "No speech found" case).
 	{
@@ -151,6 +176,7 @@ const SEEDS: readonly Seed[] = [
 		mhz: 156.8,
 		speech: "not-heard",
 		keptBy: "prior-none",
+		tone: false,
 	},
 	{
 		kind: "dsd-fme-call",
@@ -212,7 +238,13 @@ const SEEDS: readonly Seed[] = [
 		source: "2081012",
 		kept: true,
 	},
-	{ kind: "scanner-analog", agoMin: 53 * 60, durationS: 36, mhz: 156.8 },
+	{
+		kind: "scanner-analog",
+		agoMin: 53 * 60,
+		durationS: 36,
+		mhz: 156.8,
+		tone: false,
+	},
 	{
 		kind: "dsd-fme-call",
 		agoMin: 55 * 60,
@@ -316,10 +348,64 @@ function makeRec(s: Seed, at: Date): Rec {
 					: null,
 			speech: s.kind === "scanner-analog" ? (s.speech ?? "heard") : "unchecked",
 			keptBy: s.kind === "scanner-analog" ? (s.keptBy ?? "final") : null,
-			// The kept file's facts sidecar: the mock writes none (as an older file reads).
-			facts: null,
+			// The kept file's facts sidecar (scanner analog only; null as an older file reads).
+			facts:
+				s.kind === "scanner-analog" && s.tone !== false
+					? factsOf(s, n, discoveryId, hz, at, modifiedAt)
+					: null,
 		},
 	}
+}
+
+/** The store's cut code of a file the item says ended so (facts `finish.cut`). */
+const FINISH_CUT: Record<RecordingCut, string> = {
+	"scanner-moved": "epoch-changed",
+	"duration-rollover": "duration-limit",
+	"source-lost": "source-lost",
+	shutdown: "shutdown",
+}
+
+/** A kept analog file's facts sidecar, as the core writes it (its tone member per `s.tone`). */
+function factsOf(
+	s: Seed,
+	n: number,
+	discoveryId: string,
+	hz: number,
+	at: Date,
+	modifiedAt: string,
+): RecordingFacts {
+	const durationMs = s.durationS * 1000
+	const facts: RecordingFacts = {
+		version: 1,
+		operationId: `00000000-0000-4000-8000-${pad(n, 12)}`,
+		discoveryId,
+		observationId: s.parts === undefined ? `o_MOCK${n}` : `o_MOCKROLL${hz}`,
+		// the demodulated centre sits a little off the channel
+		frequencyHz: hz + 180,
+		startedAt: at.toISOString(),
+		endedAt: new Date(at.getTime() + durationMs).toISOString(),
+		keptAt: modifiedAt,
+		durationMs,
+		finish: {
+			cut: s.cut ? FINISH_CUT[s.cut] : "completed",
+			keptBy: s.keptBy ?? "final",
+			speechHeard: s.speech === undefined ? true : s.speech === "heard",
+			cutActive: s.cut === "scanner-moved" ? true : null,
+		},
+		admission: {
+			frequencyHz: hz + 180,
+			reason: null,
+			strength: "strong",
+			levelFrames: 42,
+			spreadDb: 18.4,
+			p10Dbfs: -61.2,
+			periodicShare: 0.12,
+			burstFrames: 7,
+		},
+	}
+	if (s.tone !== undefined && s.tone !== "absent" && s.tone !== false)
+		facts.tone = s.tone
+	return facts
 }
 
 /** Speech-like bursts: a few harmonics of a wandering pitch under a syllable envelope, plus hiss. */

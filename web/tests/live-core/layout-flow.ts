@@ -971,8 +971,8 @@ export async function layoutFlow(
 		const stopPlayback = async () => {
 			phase = "stop playback for a retry"
 			await go("")
-			// programmatic: the player may be held or in its compact line (no close button there); the result says
-			// what was there
+			// programmatic: the player may be held out of sight (its compact line has the close button too); the
+			// result says what was there
 			const why = await page.evaluate(() => {
 				const close = document.querySelector<HTMLButtonElement>(
 					'[data-wk-transport] [aria-label="Close player and unmute live audio"]',
