@@ -101,9 +101,34 @@ export class AnalogStorageBytesError extends WaveKitError {
 		super(message, "SCANNER_ANALOG_STORAGE_CAP")
 	}
 }
+/**
+ * The refusal for the operation inventory (intents + unpublished at MAX_RECOVERY_OPERATIONS),
+ * which retention can clear too (it evicts the oldest removable analog files while the
+ * inventory is within OPERATION_HEADROOM of its bound). Same public code as the byte refusal
+ * (SCANNER_ANALOG_STORAGE_CAP); only this class tells it apart (isStorageCountRefusal).
+ */
+export class AnalogStorageCountError extends WaveKitError {
+	constructor(message: string) {
+		super(message, "SCANNER_ANALOG_STORAGE_CAP")
+	}
+}
 /** True for a storage-cap refusal of the recording bytes (AnalogStorageBytesError). */
 export function isStorageBytesRefusal(err: unknown): boolean {
 	return err instanceof AnalogStorageBytesError
+}
+/** True for a storage-cap refusal of the operation inventory (AnalogStorageCountError). */
+export function isStorageCountRefusal(err: unknown): boolean {
+	return err instanceof AnalogStorageCountError
+}
+/**
+ * What an admission that succeeded left short (AnalogHandle.roomShort): `bytes` when less than
+ * one more RESERVATION (1,936,428 B) is left under the cap, `count` when fewer than
+ * OPERATION_HEADROOM (8) operations are left under MAX_RECOVERY_OPERATIONS (4096), this one
+ * counted. Retention evicts in both states, so an early pass asked on either can act.
+ */
+export interface AnalogRoomShort {
+	bytes: boolean
+	count: boolean
 }
 /**
  * Incomplete operation folders (crash residue holding no media) a scan moved aside into
@@ -409,6 +434,11 @@ export interface AnalogHandle {
 	 * quarantine configured, deletes it as any other cancel does.
 	 */
 	cancel(cut?: AnalogCut, noise?: NoiseQuarantineFacts): void
+	/**
+	 * Set once `ready` resolved: what the admission left short (AnalogRoomShort), null when it
+	 * left room for the next recording (or was refused). Absent on handles that never admit.
+	 */
+	readonly roomShort?: AnalogRoomShort | null
 }
 export interface AnalogReconciliation {
 	operationId: string
@@ -644,6 +674,8 @@ interface Operation {
 	ownedMedia: boolean
 	foreignMarker: boolean
 	reservation: boolean
+	/** What the admission left short (AnalogHandle.roomShort), set under its lock. */
+	roomShort: AnalogRoomShort | null
 }
 /**
  * A directory fsync is durability only (the entries are already written): a file system or
@@ -736,6 +768,12 @@ export class AnalogOperations {
 	private initialized = false
 	/** Artifacts the last retention pass kept because no live discovery owns them. */
 	unresolvedRetained = 0
+	/**
+	 * The last retention pass found the operation inventory full (operationsFull) with the
+	 * operations it may not remove alone at or past the limit (MAX_RECOVERY_OPERATIONS −
+	 * OPERATION_HEADROOM): no count eviction can clear it, so none ran.
+	 */
+	operationsHeldFull = false
 	/** Artifacts the last retention pass kept because recovery quarantined them. */
 	quarantinedRetained = 0
 	/** Why the last recovery quarantined each operation it did not admit (closed reasons). */
@@ -879,6 +917,7 @@ export class AnalogOperations {
 			ownedMedia: false,
 			foreignMarker: false,
 			reservation: false,
+			roomShort: null,
 		}
 		const sameSource = [...this.active.values()].filter(
 			other => other.intent.binding.sourceId === intent.binding.sourceId,
@@ -900,6 +939,9 @@ export class AnalogOperations {
 			operationId: id,
 			ready: op.ready,
 			settled,
+			get roomShort() {
+				return op.roomShort
+			},
 			push: pcm => {
 				if (!op.accepting || op.cancelled)
 					return Promise.reject(coded("write-failed", "Analog intake fenced"))
@@ -1009,7 +1051,7 @@ export class AnalogOperations {
 				this.inventory.intents.size + this.unpublished() >=
 				MAX_RECOVERY_OPERATIONS
 			)
-				throw coded("storage-cap", "Operation inventory limit")
+				throw new AnalogStorageCountError("Operation inventory limit")
 			this.valid(op)
 			// Space reserved and not yet written: free disk measured before the lock has not seen
 			// it, so it is subtracted here (writes since only make the check stricter).
@@ -1023,6 +1065,19 @@ export class AnalogOperations {
 				throw new AnalogStorageBytesError("Recording storage cap")
 			}
 			op.reservation = true
+			// What this admission left: less than one more RESERVATION of bytes under the cap, or
+			// fewer than OPERATION_HEADROOM operations under the bound (this one counted, it is
+			// reserved and unpublished). Both are states retention evicts for (quotaShortfall > 0,
+			// operationsFull), so an early pass asked on them can act.
+			const roomBytes =
+				this.context.limits().maxBytes -
+				(this.inventory.bytes + legacy + outstanding + RESERVATION)
+			const roomCount =
+				MAX_RECOVERY_OPERATIONS -
+				(this.inventory.intents.size + this.unpublished())
+			const bytes = roomBytes < RESERVATION
+			const count = roomCount < OPERATION_HEADROOM
+			op.roomShort = bytes || count ? { bytes, count } : null
 		})
 		this.valid(op)
 		await this.safeDirectory(
@@ -3068,8 +3123,9 @@ export class AnalogOperations {
 	 * Age expiry and the quota for the analog files, and, with `legacy`, the quota for the other
 	 * recordings in the same pass: every removable file of both pools, oldest first, goes while
 	 * the store is full (quotaShortfall over the pool's live `legacy.bytes` > 0); an analog file
-	 * also goes while the operation inventory is full (operationsFull) or once it is past
-	 * `maxAgeMs`. The pass stops removing as soon as neither holds, so a shortfall left after it
+	 * also goes once it is past `maxAgeMs`, or while the operation inventory is full
+	 * (operationsFull) and the candidates left can clear it (at most the excess; none when the
+	 * held operations alone fill it, operationsHeldFull). The pass stops removing as soon as neither holds, so a shortfall left after it
 	 * means no candidate in either pool was left. Not ready: the legacy pool alone, to the cap.
 	 */
 	async retained(
@@ -3147,6 +3203,19 @@ export class AnalogOperations {
 			(this.quotaShortfall(
 				legacy ? legacy.bytes : await this.context.legacyBytes(),
 			) ?? 0) > 0
+		// Count eviction: while the inventory is full (intents + unpublished ≥ 4096 − 8 = 4088),
+		// only when the analog candidates not yet tried can bring it under that limit, i.e.
+		// intents + unpublished − analogLeft < 4088. Each retire drops one intent, so the pass
+		// evicts for count exactly the excess intents + unpublished − 4087 (oldest first) and
+		// stops; with the held operations alone at or past 4088 it evicts nothing for count.
+		let analogLeft = candidates.length
+		const countLimit = MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM
+		const heldAtStart =
+			this.inventory.intents.size + this.unpublished() - analogLeft
+		this.operationsHeldFull = this.operationsFull() && heldAtStart >= countLimit
+		const countEvicts = (): boolean =>
+			this.operationsFull() &&
+			this.inventory.intents.size + this.unpublished() - analogLeft < countLimit
 		for (const entry of entries) {
 			if (entry.kind === "legacy") {
 				// Legacy age expiry ran in the caller's own pass; here only the quota removes.
@@ -3157,7 +3226,9 @@ export class AnalogOperations {
 			}
 			const { intent, mtimeMs } = entry
 			const old = now - mtimeMs > maxAgeMs
-			if (!old && !this.operationsFull() && !(await bytesFull())) continue
+			const evict = old || countEvicts() || (await bytesFull())
+			analogLeft--
+			if (!evict) continue
 			// The whole policy again before the retire and in the media unlink's own turn: a
 			// listing, a mark, a keep or an unresolved folder since keeps the file.
 			const stillRetirable = (): boolean =>

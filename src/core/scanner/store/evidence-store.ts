@@ -478,6 +478,8 @@ export class EvidenceStore {
 	private unknownHeldFiles = 0
 	/** The recordings quota the last retention pass left exceeded; null within it. */
 	private quotaExceeded: RecordingsQuotaExceeded | null = null
+	/** noteOperationsHeld: the full-of-held state was last logged as entered. */
+	private operationsHeldLogged = false
 	/**
 	 * Bytes of the recordings outside analog operations (`legacyRecordingBytes`), from the last
 	 * walk or retention pass, with the monotonic time that walk began; null: none trusted yet.
@@ -685,6 +687,15 @@ export class EvidenceStore {
 	 */
 	get recordingsQuotaExceeded(): RecordingsQuotaExceeded | null {
 		return this.quotaExceeded === null ? null : { ...this.quotaExceeded }
+	}
+
+	/**
+	 * The last retention pass found the analog operation inventory full with the operations it
+	 * may not remove alone filling it (AnalogOperations.operationsHeldFull): admission refuses
+	 * with `storage-cap` (the inventory limit) until some of them are released or deleted.
+	 */
+	get operationsHeldFull(): boolean {
+		return this.analog?.operationsHeldFull ?? false
 	}
 
 	/**
@@ -1739,6 +1750,7 @@ export class EvidenceStore {
 			recordingsLeft + (this.analog?.managedBytes ?? 0),
 			this.analog?.quotaShortfall(recordingsLeft),
 		)
+		this.noteOperationsHeld(this.operationsHeldFull)
 		if (unknownHeld.size > 0)
 			this.log.debug(
 				{ kept: unknownHeld.size },
@@ -1792,6 +1804,21 @@ export class EvidenceStore {
 				"Scanner recordings quota no longer exceeded; analog recordings are admitted again",
 			)
 		this.quotaExceeded = next
+	}
+
+	/** Entering or leaving operationsHeldFull logs once (fixed text). */
+	private noteOperationsHeld(full: boolean): void {
+		if (full && !this.operationsHeldLogged)
+			this.log.warn(
+				{ reason: "storage-cap" },
+				"Scanner analog operation inventory is full of recordings retention may not remove; analog recordings are refused (storage-cap)",
+			)
+		else if (!full && this.operationsHeldLogged)
+			this.log.info(
+				{ reason: "storage-cap" },
+				"Scanner analog operation inventory has room again",
+			)
+		this.operationsHeldLogged = full
 	}
 
 	async diskState(): Promise<"ok" | "disk-low"> {

@@ -379,9 +379,11 @@ import { updateChannelAdmission } from "./plan/resource-admission.js"
 import { channelGateMinDurationMs } from "../spectrum/channel-gate.js"
 import {
 	isStorageBytesRefusal,
+	isStorageCountRefusal,
 	type AnalogCut,
 	type AnalogHandle,
 	type AnalogInput,
+	type AnalogRoomShort,
 } from "./store/analog-operations.js"
 import type { IdentifyAnalogEvidence } from "./identify-analog-contract.js"
 import {
@@ -628,9 +630,11 @@ const COVERAGE_EVENTS = [
 
 const MAINTENANCE_EVERY_MS = 5 * 60_000
 /**
- * A storage-cap admission refusal of the bytes asks for the next maintenance pass (retention) at the next
- * tick instead of up to MAINTENANCE_EVERY_MS later, at most once per this window, and only
- * while the last pass did not already find nothing removable (`recordingsQuota`).
+ * A storage-cap admission refusal (of the bytes or of the operation inventory), or an admission
+ * that left the store short of room for the next one (AnalogHandle.roomShort), asks for the next
+ * maintenance pass (retention) at the next tick instead of up to MAINTENANCE_EVERY_MS later: at
+ * most once per this window, and only while the last pass did not already find nothing
+ * removable for that shortage (`recordingsQuota` for bytes, `operationsHeldFull` for count).
  */
 export const EARLY_RETENTION_EVERY_MS = 30_000
 const STATUS_EVERY_MS = 1_000
@@ -9421,24 +9425,39 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
-	/** The recorders' store admission: a storage-cap refusal of the bytes asks for retention soon. */
+	/**
+	 * The recorders' store admission: a storage-cap refusal of the bytes or of the operation
+	 * inventory, or an admission that left less than one more recording's room (roomShort), asks
+	 * for retention soon, so a full store frees room before the next transmission is refused.
+	 */
 	private beginAnalogRecording(input: AnalogInput): AnalogHandle {
 		const handle = this.evidence.beginAnalog(input)
-		// Only the byte refusal: the operation inventory limit and the metadata bounds share its
-		// code, and retention cannot clear the metadata ones (the inventory limit it keeps clear).
-		void handle.ready.catch((err: unknown) => {
-			if (isStorageBytesRefusal(err)) this.requestRetentionSoon()
-		})
+		// Not the metadata bounds: they share the code, and retention cannot clear them.
+		void handle.ready.then(
+			() => {
+				const short = handle.roomShort
+				if (short) this.requestRetentionSoon(short)
+			},
+			(err: unknown) => {
+				if (isStorageBytesRefusal(err))
+					this.requestRetentionSoon({ bytes: true, count: false })
+				else if (isStorageCountRefusal(err))
+					this.requestRetentionSoon({ bytes: false, count: true })
+			},
+		)
 		return handle
 	}
 
 	/**
 	 * Brings the next maintenance pass (whose retention frees room oldest first) forward to the
-	 * next tick: at most once per EARLY_RETENTION_EVERY_MS (30 s), and not while the last pass
-	 * left the quota full with nothing removable (the regular 5 min cadence retries that).
+	 * next tick: at most once per EARLY_RETENTION_EVERY_MS (30 s), and not for a shortage the
+	 * last pass already left with nothing removable (bytes: the quota stayed exceeded; count: the
+	 * held operations alone fill the inventory); the regular 5 min cadence retries those.
 	 */
-	private requestRetentionSoon(): void {
-		if (this.evidence.recordingsQuotaExceeded !== null) return
+	private requestRetentionSoon(short: AnalogRoomShort): void {
+		const bytes = short.bytes && this.evidence.recordingsQuotaExceeded === null
+		const count = short.count && !this.evidence.operationsHeldFull
+		if (!bytes && !count) return
 		const now = this.now()
 		if (now - this.earlyRetentionAt < EARLY_RETENTION_EVERY_MS) return
 		this.earlyRetentionAt = now

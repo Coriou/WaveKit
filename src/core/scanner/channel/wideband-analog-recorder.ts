@@ -67,6 +67,8 @@ import {
 	AnalogFailureSchema,
 	ErrorSchema,
 	MAX_ACTIVE_ANALOG_PER_SOURCE,
+	isStorageBytesRefusal,
+	isStorageCountRefusal,
 } from "../store/analog-operations.js"
 import {
 	RecordingBindingSchema,
@@ -1406,7 +1408,7 @@ export class WidebandAnalogRecorder {
 	private grant: { session: Session; left: number } | null = null
 	private stopped = false
 	private warnedAt = Number.NEGATIVE_INFINITY
-	/** noteStoreRefusal: when each refusal code was last logged (at most STORE_REFUSAL_CODES). */
+	/** noteStoreRefusal: when each refusal code and class was last logged (at most STORE_REFUSAL_CODES). */
 	private readonly storeRefusedAt = new Map<string, number>()
 	private readonly decisions: RecorderDecisions
 
@@ -4574,13 +4576,21 @@ export class WidebandAnalogRecorder {
 
 	/**
 	 * Why the store refused a file (`handle.ready` rejected), logged at info with the error's
-	 * allowlisted fields (its code: storage-cap, disk-low, ...): at most once per code per
-	 * STORE_REFUSAL_LOG_MS (60 s); the codes are a closed set, and past STORE_REFUSAL_CODES (16)
+	 * allowlisted fields (its code: storage-cap, disk-low, ...) and, for a storage cap, which one
+	 * (`cap`: bytes or count): at most once per code, error class and cap per
+	 * STORE_REFUSAL_LOG_MS (60 s); all are closed sets, and past STORE_REFUSAL_CODES (16)
 	 * remembered the oldest is forgotten, so the map stays bounded.
 	 */
 	private noteStoreRefusal(err: unknown): void {
 		const fields = safeErrorFields(err)
-		const key = fields.code ?? fields.type
+		// Code, class and which storage cap: the byte and the count refusals share
+		// SCANNER_ANALOG_STORAGE_CAP and the WaveKitError class name.
+		const cap = isStorageBytesRefusal(err)
+			? "bytes"
+			: isStorageCountRefusal(err)
+				? "count"
+				: null
+		const key = `${fields.code ?? ""}|${fields.type}|${cap ?? ""}`
 		const now = this.deps.now()
 		const last = this.storeRefusedAt.get(key)
 		if (last !== undefined && now - last < STORE_REFUSAL_LOG_MS) return
@@ -4592,7 +4602,7 @@ export class WidebandAnalogRecorder {
 			this.storeRefusedAt.delete(oldest.value)
 		}
 		this.log.info(
-			{ reason: "store-refused", err: fields },
+			{ reason: "store-refused", err: fields, ...(cap ? { cap } : {}) },
 			"Wideband analog recording refused by the store",
 		)
 	}

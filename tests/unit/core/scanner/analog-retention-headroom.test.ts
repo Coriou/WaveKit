@@ -22,14 +22,18 @@ import { Writable } from "node:stream"
 import pino from "pino"
 import { afterEach, describe, expect, it } from "vitest"
 import type { RecordingProtection } from "../../../../src/core/recordings/contract.js"
+import type { DiscoveryAliasLookup } from "../../../../src/core/scanner/recording-aliases.js"
 import {
 	ADMISSION_HEADROOM,
 	AnalogOperations,
 	AnalogStorageBytesError,
+	AnalogStorageCountError,
 	MAX_ANALOG_FILE_BYTES,
 	OPERATION_HEADROOM,
 	isStorageBytesRefusal,
+	isStorageCountRefusal,
 	type AnalogMetadataAdapter,
+	type LegacyRetentionFile,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
@@ -140,12 +144,15 @@ async function harness(opts: { protectedName?: () => string | null } = {}) {
 	const begin = () =>
 		ops.begin({ discoveryId, observationId: "o1", binding: binding() })
 	/** One finalized file, its media mtime set to `mtimeMs`; its bytes as the inventory counts them. */
-	const record = async (mtimeMs: number): Promise<Stored> => {
+	const record = async (
+		mtimeMs: number,
+		samples = SAMPLES,
+	): Promise<Stored> => {
 		const before = ops.managedBytes ?? 0
 		const op = begin()
 		await op.ready
-		for (let i = 0; i < SAMPLES; i += 16_000)
-			await op.push(new Int16Array(16_000))
+		for (let i = 0; i < samples; i += 16_000)
+			await op.push(new Int16Array(Math.min(16_000, samples - i)))
 		const receipt = await op.finish()
 		expect(receipt.outcome).toBe("finalized")
 		const artifact = receipt.artifact!
@@ -173,6 +180,7 @@ async function harness(opts: { protectedName?: () => string | null } = {}) {
 		ops,
 		discoveryId,
 		limit,
+		begin,
 		record,
 		used,
 		retain,
@@ -400,7 +408,12 @@ describe("retention removes legacy and analog files oldest first on one full tes
 	/** A 1 600 000 B legacy recording file: under one RESERVATION, so a shortfall of R needs two. */
 	const LEGACY_BYTES = 1_600_000
 
-	async function evidenceHarness() {
+	async function evidenceHarness(
+		opts: {
+			protection?: RecordingProtection
+			aliases?: DiscoveryAliasLookup
+		} = {},
+	) {
 		const root = await tempRoot()
 		const { store, discoveryId } = storeWithDiscovery()
 		const caps = {
@@ -416,20 +429,29 @@ describe("retention removes legacy and analog files oldest first on one full tes
 			now: () => Date.now(),
 			statfs: async () => ({ freeBytes: 1e12 }),
 			isDiscoveryLive: id => store.get(id) !== undefined,
+			...(opts.protection ? { protection: opts.protection } : {}),
+			...(opts.aliases ? { aliases: opts.aliases } : {}),
 		})
 		ev.configureAnalog(adapterOf(store))
 		await ev.recoverAnalog()
 		const analog = (ev as unknown as { analog: AnalogOperations }).analog
 		const begin = () =>
 			ev.beginAnalog({ discoveryId, observationId: "o1", binding: binding() })
-		/** A legacy (digital voice) file `rel` under recordings/dv/<discovery>/, its mtime set. */
-		const legacy = async (name: string, mtimeMs: number): Promise<string> => {
-			const dir = join(root, "recordings", "dv", discoveryId)
+		/**
+		 * A legacy (digital voice) file `rel` under recordings/dv/<folder>/ (default the
+		 * discovery's own folder), its mtime set.
+		 */
+		const legacy = async (
+			name: string,
+			mtimeMs: number,
+			folder: string = discoveryId,
+		): Promise<string> => {
+			const dir = join(root, "recordings", "dv", folder)
 			await mkdir(dir, { recursive: true })
 			const path = join(dir, name)
 			await writeFile(path, Buffer.alloc(LEGACY_BYTES))
 			await utimes(path, mtimeMs / 1000, mtimeMs / 1000)
-			return join("recordings", "dv", discoveryId, name)
+			return join("recordings", "dv", folder, name)
 		}
 		/** One finalized analog file, its media mtime set; its bytes as the inventory counts them. */
 		const record = async (mtimeMs: number): Promise<Stored> => {
@@ -535,6 +557,44 @@ describe("retention removes legacy and analog files oldest first on one full tes
 		expect(h.exists(legacyNew)).toBe(true)
 		await h.ev.stopAnalog()
 	}, 60_000)
+
+	it("protected legacy files survive the combined pass: kept, probe, in progress, and a DV file a kept discovery lists", async () => {
+		const KEPT_LISTER = "d-kept-lister"
+		const protection: RecordingProtection = {
+			isProtected: () => false,
+			isDsdFmeFileProtected: () => false,
+			isScannerFileProtected: (_d, name) => name === "20261101_120000_kept.wav",
+			discoveryHoldsKept: () => false,
+		}
+		const aliases: DiscoveryAliasLookup = {
+			aliasOwner: () => undefined,
+			aliasesOf: () => [],
+			heldRecordingListers: id =>
+				id.endsWith("~20261101_120000_linked.wav") ? [KEPT_LISTER] : [],
+		}
+		const h = await evidenceHarness({ protection, aliases })
+		const now = Date.now()
+		const kept = await h.legacy("20261101_120000_kept.wav", now - 6 * DAY)
+		const probe = await h.legacy(
+			"20261101_120000_probe.wav",
+			now - 6 * DAY,
+			"probe-p1",
+		)
+		const linked = await h.legacy("20261101_120000_linked.wav", now - 6 * DAY)
+		// Written just now: in progress (RECORDING_IN_PROGRESS_MS).
+		const recent = await h.legacy("20261101_120000_recent.wav", now)
+		const plain = await h.legacy("20261101_120000_plain.wav", now - 5 * DAY)
+		const analogOld = await h.record(now - 4 * DAY)
+		// A cap far below the store: everything removable goes.
+		h.setCap(MIB)
+		const { deleted } = await h.ev.retention(new Set([KEPT_LISTER]))
+		expect(deleted).toEqual([plain, analogOld.artifact])
+		for (const rel of [kept, probe, linked, recent])
+			expect(h.exists(rel)).toBe(true)
+		// Nothing removable is left: reported so.
+		expect(h.ev.recordingsQuotaExceeded).not.toBeNull()
+		await h.ev.stopAnalog()
+	}, 60_000)
 })
 
 /**
@@ -549,26 +609,41 @@ describe("retention keeps the operation inventory under its bound", () => {
 	const keep = new Set([PAD_DISCOVERY])
 
 	function padder(ops: AnalogOperations) {
-		const intents = (ops as unknown as { inventory: { intents: Intents } })
-			.inventory.intents
-		const template = [...intents.values()][0]!
-		const pads: string[] = []
+		const box = ops as unknown as { inventory: { intents: Intents } }
+		let inventory = box.inventory
+		const template = [...inventory.intents.values()][0]!
+		const pads = new Map<string, { operationId: string; discoveryId: string }>()
+		// A full scan (a retire's refresh may run one) rebuilds the inventory from disk, where the
+		// pads are not: they are put back into every inventory that replaces this one.
+		Object.defineProperty(box, "inventory", {
+			configurable: true,
+			get: () => inventory,
+			set: (next: { intents: Intents }) => {
+				inventory = next
+				for (const [id, pad] of pads)
+					if (!next.intents.has(id)) next.intents.set(id, pad)
+			},
+		})
 		/** Pads the inventory to `total` intents with held clones (none of them on disk). */
 		const padTo = (total: number) => {
-			while (intents.size < total) {
+			while (inventory.intents.size < total) {
 				const operationId = randomUUID()
-				intents.set(operationId, {
-					...template,
-					operationId,
-					discoveryId: PAD_DISCOVERY,
-				})
-				pads.push(operationId)
+				const pad = { ...template, operationId, discoveryId: PAD_DISCOVERY }
+				inventory.intents.set(operationId, pad)
+				pads.set(operationId, pad)
 			}
 		}
 		const clear = () => {
-			for (const id of pads.splice(0)) intents.delete(id)
+			for (const id of pads.keys()) inventory.intents.delete(id)
+			pads.clear()
 		}
-		return { intents, padTo, clear }
+		return {
+			get intents() {
+				return inventory.intents
+			},
+			padTo,
+			clear,
+		}
 	}
 
 	it("OPERATION_HEADROOM is the in-flight limit, 8: retention evicts from 4096 − 8 = 4088 intents", () => {
@@ -620,11 +695,184 @@ describe("retention keeps the operation inventory under its bound", () => {
 		expect((count as { code?: string }).code).toBe("SCANNER_ANALOG_STORAGE_CAP")
 		expect(isStorageBytesRefusal(count)).toBe(false)
 		expect(count).not.toBeInstanceOf(AnalogStorageBytesError)
+		// Its own class: retention can clear it, so it asks for an early pass too.
+		expect(count).toBeInstanceOf(AnalogStorageCountError)
+		expect(isStorageCountRefusal(count)).toBe(true)
 		pad.clear()
 		h.limit.maxBytes = h.used() + RESERVATION - 1
 		const bytes = await refusal()
 		expect((bytes as { code?: string }).code).toBe("SCANNER_ANALOG_STORAGE_CAP")
 		expect(isStorageBytesRefusal(bytes)).toBe(true)
+		expect(isStorageCountRefusal(bytes)).toBe(false)
 		await h.ops.stop()
 	}, 60_000)
+
+	// Regression: before, a full inventory whose held operations alone reached 4088 never left
+	// the full state, so one pass retired every removable analog file.
+	it("held operations alone at 4088: no count eviction (reported); at 4087 the removable ones clear it", async () => {
+		const h = await harness()
+		const files = await shuffledFour(h)
+		const pad = padder(h.ops)
+		const bound = MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM
+		// 4 removable + 4088 held.
+		pad.padTo(bound + files.length)
+		expect(await h.retain(keep)).toEqual([])
+		expect(h.ops.operationsHeldFull).toBe(true)
+		for (const f of files)
+			expect(existsSync(join(h.root, f.artifact))).toBe(true)
+		// One held fewer (4087): every removable goes, oldest first, and the state clears.
+		pad.clear()
+		pad.padTo(bound - 1 + files.length)
+		expect(await h.retain(keep)).toEqual([
+			files[1]!.artifact,
+			files[3]!.artifact,
+			files[0]!.artifact,
+			files[2]!.artifact,
+		])
+		expect(h.ops.operationsHeldFull).toBe(false)
+		expect(pad.intents.size).toBe(bound - 1)
+		pad.clear()
+		await h.ops.stop()
+	}, 60_000)
+
+	it("held 4080 + 20 removable (4100): exactly the excess 4100 − 4087 = 13 oldest go", async () => {
+		const h = await harness()
+		const now = Date.now()
+		const files: Stored[] = []
+		// Ages 1 to 20 min, in an order unrelated to the write order (7 is coprime to 20).
+		for (let i = 0; i < 20; i++)
+			files.push(await h.record(now - (20 - ((i * 7) % 20)) * 60_000, 8_000))
+		const pad = padder(h.ops)
+		const bound = MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM
+		pad.padTo(4080 + 20)
+		const oldest = [...files]
+			.sort((a, b) => a.mtimeMs - b.mtimeMs)
+			.map(f => f.artifact)
+		const deleted = await h.retain(keep)
+		expect(deleted).toEqual(oldest.slice(0, 13))
+		expect(pad.intents.size).toBe(bound - 1)
+		for (const a of oldest.slice(13))
+			expect(existsSync(join(h.root, a))).toBe(true)
+		pad.clear()
+		await h.ops.stop()
+	}, 120_000)
+
+	it("count eviction skips held files: a kept artifact among the oldest stays, the next oldest goes", async () => {
+		let protectedName: string | null = null
+		const h = await harness({ protectedName: () => protectedName })
+		const files = await shuffledFour(h)
+		// The oldest (4 days) is kept.
+		protectedName = files[1]!.artifact.split("/").at(-1)!
+		const pad = padder(h.ops)
+		const bound = MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM
+		pad.padTo(bound)
+		expect(await h.retain(keep)).toEqual([files[3]!.artifact])
+		expect(existsSync(join(h.root, files[1]!.artifact))).toBe(true)
+		expect(pad.intents.size).toBe(bound - 1)
+		pad.clear()
+		await h.ops.stop()
+	}, 60_000)
+
+	it("an admission that leaves fewer than 8 operations under the bound reports roomShort.count; 8 left reports nothing", async () => {
+		const h = await harness()
+		await h.record(Date.now() - DAY)
+		const pad = padder(h.ops)
+		const roomShort = async () => {
+			const op = h.begin()
+			await op.ready
+			const short = op.roomShort
+			op.cancel()
+			await op.settled
+			return short
+		}
+		// 4087 + this one = 4088: 8 left, enough.
+		pad.padTo(MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM - 1)
+		expect(await roomShort()).toBeNull()
+		// 4088 + this one = 4089: 7 left.
+		pad.padTo(MAX_RECOVERY_OPERATIONS - OPERATION_HEADROOM)
+		expect(await roomShort()).toEqual({ bytes: false, count: true })
+		pad.clear()
+		await h.ops.stop()
+	}, 60_000)
+})
+
+describe("an admission that leaves less than one more recording's room says so (roomShort)", () => {
+	it("room after it < RESERVATION: bytes; exactly RESERVATION left: null", async () => {
+		const h = await harness()
+		await h.record(Date.now() - DAY)
+		const roomShort = async () => {
+			const op = h.begin()
+			await op.ready
+			const short = op.roomShort
+			op.cancel()
+			await op.settled
+			return short
+		}
+		// used + R (this one) + R (the next) fits exactly.
+		h.limit.maxBytes = h.used() + 2 * RESERVATION
+		expect(await roomShort()).toBeNull()
+		h.limit.maxBytes -= 1
+		expect(await roomShort()).toEqual({ bytes: true, count: false })
+		// Admission's own edge (exactly one reservation left before it) still admits.
+		h.limit.maxBytes = h.used() + RESERVATION
+		expect(await roomShort()).toEqual({ bytes: true, count: false })
+		await h.ops.stop()
+	}, 60_000)
+})
+
+describe("retention before the analog inventory is ready", () => {
+	it("trims the legacy pool to the cap, oldest first, and removes nothing analog", async () => {
+		const root = await tempRoot()
+		const { store } = storeWithDiscovery()
+		const cap = 10_000
+		// Never recovered: not ready.
+		const ops = new AnalogOperations({
+			root,
+			adapter: adapterOf(store),
+			admits: () => true,
+			serialise: async (_id, job) => job(),
+			legacyBytes: async () => 0,
+			limits: () => ({ maxBytes: cap, minFreeBytes: 0 }),
+			freeBytes: async () => 1e12,
+		})
+		expect(ops.ready).toBe(false)
+		const removed: string[] = []
+		const file = (
+			key: string,
+			bytes: number,
+			kept = false,
+		): LegacyRetentionFile => ({
+			mtimeMs: 0,
+			key,
+			bytes,
+			remove: async () => {
+				if (kept) return false
+				removed.push(key)
+				return true
+			},
+		})
+		// Already oldest first (the caller's order); 16 000 B over a 10 000 B cap.
+		const pool = {
+			bytes: 16_000,
+			files: [
+				file("a", 3_000),
+				file("b", 2_000, true),
+				file("c", 4_000),
+				file("d", 5_000),
+			],
+		}
+		expect(await ops.retained(new Set(), MAX_AGE_MS, Date.now(), pool)).toEqual(
+			[],
+		)
+		// a (13 000), b kept, c (9 000 ≤ cap): d stays.
+		expect(removed).toEqual(["a", "c"])
+		expect(pool.bytes).toBe(9_000)
+		// Exactly at the cap: nothing more.
+		removed.length = 0
+		pool.bytes = cap
+		expect(await ops.retained(new Set(), MAX_AGE_MS, Date.now(), pool)).toEqual(
+			[],
+		)
+		expect(removed).toEqual([])
+	})
 })

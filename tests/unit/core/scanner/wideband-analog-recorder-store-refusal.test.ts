@@ -7,6 +7,10 @@ import { Writable } from "node:stream"
 import pino from "pino"
 import { describe, expect, it } from "vitest"
 import { STORE_REFUSAL_LOG_MS } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
+import {
+	AnalogStorageBytesError,
+	AnalogStorageCountError,
+} from "../../../../src/core/scanner/store/analog-operations.js"
 import { WaveKitError } from "../../../../src/utils/errors.js"
 import { harness, input, snapshot } from "./wideband-recorder-harness.js"
 
@@ -81,6 +85,34 @@ describe("WidebandAnalogRecorder store refusal log", () => {
 			"SCANNER_ANALOG_STORAGE_CAP",
 			"SCANNER_ANALOG_DISK_LOW",
 			"SCANNER_ANALOG_STORAGE_CAP",
+		])
+	})
+
+	it("the byte and the count refusals share a code but are told apart (cap): both log within the window", () => {
+		const { logger, lines } = capture()
+		const h = harness({ logger })
+		const now = 2_000_000
+		const rec = h.rec as unknown as {
+			deps: { now: () => number }
+			noteStoreRefusal(err: unknown): void
+		}
+		rec.deps.now = () => now
+		rec.noteStoreRefusal(new AnalogStorageBytesError("m"))
+		rec.noteStoreRefusal(new AnalogStorageCountError("m"))
+		// Repeats of either within the window are not logged again.
+		rec.noteStoreRefusal(new AnalogStorageBytesError("m"))
+		rec.noteStoreRefusal(new AnalogStorageCountError("m"))
+		const logged = lines
+			.filter(
+				l => l["msg"] === "Wideband analog recording refused by the store",
+			)
+			.map(l => ({
+				code: (l["err"] as { code?: string }).code,
+				cap: l["cap"],
+			}))
+		expect(logged).toEqual([
+			{ code: "SCANNER_ANALOG_STORAGE_CAP", cap: "bytes" },
+			{ code: "SCANNER_ANALOG_STORAGE_CAP", cap: "count" },
 		])
 	})
 })
