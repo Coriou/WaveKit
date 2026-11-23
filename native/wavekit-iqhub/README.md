@@ -150,7 +150,9 @@ lateness measured for a thread that is not saturated), at most 32 MiB:
 | 2.4 Msps   | 4 800 000      | 11 520 000           | 11 MiB (11 534 336) | not applied (autotune)    | not applied               |
 | 3.2 Msps   | 6 400 000      | 15 360 000           | 15 MiB (15 728 640) | not applied (autotune)    | not applied               |
 
-With `rmem_max` raised to 33 554 432 (32 MiB), every row is applied on Linux.
+With `rmem_max` raised to 33 554 432 (32 MiB), every row is applied on Linux. The WaveKit core
+sizes every hub for the highest tuner rate (3.2 Msps), whatever rate it dials, so it always
+requests the 3.2 Msps row: 15 MiB, which macOS (8 MiB) never applies, at any dial rate.
 An attempt id must be greater than every id used before in this hub's life, which is stricter
 than "never reused": an id below one used earlier is refused `attempt-reused` even if it was never
 used itself. A refused `connect` does not use its id (it may be sent again once a place is free).
