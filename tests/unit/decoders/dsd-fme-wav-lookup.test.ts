@@ -14,6 +14,7 @@ import {
 	DSD_FME_WAV_ATTEMPT_TIMEOUT_MS,
 	DSD_FME_WAV_END_WAIT_MS,
 	DSD_FME_WAV_LIST_MAX_ENTRIES,
+	DSD_FME_WAV_RETRIES,
 	DSD_FME_WAV_RETRY_MS,
 	DsdFmeDecoder,
 } from "../../../src/decoders/builtin/dsd-fme.js"
@@ -339,6 +340,128 @@ describe("dsd-fme call_end held for its first lookup", () => {
 		await d.stop()
 		expect(seen).toEqual([
 			expect.stringMatching(new RegExp(`^call_end:47:${fileOf(47)}`)),
+		])
+	})
+})
+
+type StopInternals = EndInternals & {
+	pendingCall: unknown
+	handleOutputLine(line: string): void
+	markSettled(end: unknown): void
+	settleEnd(end: unknown, wavFile: string | undefined): boolean
+}
+
+/**
+ * Every timer a lookup chain could still arm (each attempt's timeout, each retry) fired, with the
+ * real directory reads between them completing (setImmediate is not faked).
+ */
+async function runOutLookups(d: DsdFmeDecoder): Promise<void> {
+	// A whole chain: 1 + DSD_FME_WAV_RETRIES attempts, each at most its timeout plus the retry gap.
+	const chainMs =
+		(1 + DSD_FME_WAV_RETRIES) *
+		(DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS)
+	const turns = async (n: number): Promise<void> => {
+		for (let i = 0; i < n; i++)
+			await new Promise(resolve => setImmediate(resolve))
+	}
+	for (let ms = 0; ms <= chainMs; ms += DSD_FME_WAV_RETRY_MS) {
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_RETRY_MS)
+		// Small steps, so a real read finishes before its attempt's timeout fires.
+		await Promise.race([settleWavLookups(d), turns(50)])
+	}
+}
+
+describe("dsd-fme stop with held ends", () => {
+	afterEach(() => {
+		vi.useRealTimers()
+	})
+
+	it("parses no line while stop drains: a call opened then would never end", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		stuckOpendir()
+		const { d } = decoderWithUpdates()
+		const seen = recorder(d)
+		const internals = d as unknown as StopInternals
+		internals.callState = { ...callOf(61), announced: true }
+		const stopped = d.stop()
+		// The child still prints while it exits: D-STAR voice syncs that would open a call.
+		for (let i = 0; i < 4; i++)
+			internals.handleOutputLine("03:04:05 Sync: +DSTAR VOICE ")
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_END_WAIT_MS)
+		await stopped
+		expect(internals.callState).toBeNull()
+		expect(internals.pendingCall).toBeNull()
+		expect(seen).toEqual(["call_end:61"])
+	})
+
+	it("waits only for the ends queued when the drain began, at most DSD_FME_WAV_END_WAIT_MS", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		stuckOpendir()
+		const { d } = decoderWithUpdates()
+		const seen = recorder(d)
+		const internals = d as unknown as StopInternals
+		internals.callState = { ...callOf(62), announced: true }
+		let done = false
+		const stopped = d.stop().then(() => {
+			done = true
+		})
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_END_WAIT_MS / 2)
+		// An end queued after the drain began (its own deadline 250 ms past the first's).
+		endThrough(d, 63)
+		await vi.advanceTimersByTimeAsync(DSD_FME_WAV_END_WAIT_MS / 2 - 1)
+		expect(done).toBe(false)
+		await vi.advanceTimersByTimeAsync(1)
+		await stopped
+		expect(done).toBe(true)
+		// The later end went out at the drain's end, not at its own deadline, and none is held.
+		expect(seen).toEqual(["call_end:62", "call_end:63"])
+		expect(internals.outbox).toHaveLength(0)
+	})
+
+	it("still reports, once, a file the child finalised at exit: the post-stop update is bounded", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		const { d, found } = decoderWithUpdates()
+		endThrough(d, 66)
+		// The first attempt finds nothing and schedules a retry.
+		await settleWavLookups(d)
+		await d.stop()
+		// dsd-fme writes the stopped call's file as its child exits (inside super.stop()).
+		fs.writeFileSync(path.join(root, fileOf(66)), "")
+		await runOutLookups(d)
+		expect(found).toEqual([fileOf(66)])
+	})
+
+	it("logs a held end as published: a file set after its deadline but before release counts", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		stuckOpendir()
+		const { d } = decoderWithUpdates()
+		const seen = recorder(d)
+		const internals = d as unknown as StopInternals
+		const info = vi.spyOn(
+			(d as unknown as { logger: { info(...a: unknown[]): void } }).logger,
+			"info",
+		)
+		endThrough(d, 67)
+		endThrough(d, 68)
+		const held = internals.outbox as { end?: unknown }[]
+		const firstEnd = held[0]?.end
+		const secondEnd = held[1]?.end
+		expect(firstEnd).toBeDefined()
+		expect(secondEnd).toBeDefined()
+		// The second's deadline settled it without a file while the first still waits.
+		internals.markSettled(secondEnd)
+		expect(internals.settleEnd(secondEnd, path.join(root, fileOf(68)))).toBe(
+			true,
+		)
+		internals.settleEnd(firstEnd, undefined)
+		expect(seen).toEqual(["call_end:67", `call_end:68:${fileOf(68)}`])
+		const ended = info.mock.calls
+			.filter(c => c[1] === "Call ended")
+			.map(c => c[0] as { talkgroup: number; hasWavFile: boolean })
+			.map(c => [c.talkgroup, c.hasWavFile])
+		expect(ended).toEqual([
+			[67, false],
+			[68, true],
 		])
 	})
 })

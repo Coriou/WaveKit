@@ -64,6 +64,7 @@ const partSchema = {
 		bytes: { type: "number" },
 		files: { type: "number" },
 		exists: { type: "boolean" },
+		boundedFiles: { type: "number" },
 		bounds: {
 			type: "object",
 			additionalProperties: false,

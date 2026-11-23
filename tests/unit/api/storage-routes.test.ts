@@ -99,7 +99,18 @@ describe("storage routes", () => {
 							bytes: 20,
 							files: 2,
 							exists: true,
+							boundedFiles: 2,
 							bounds: { maxBytes: 512, maxAgeMs: 9, maxFiles: null },
+							overBound: false,
+						},
+						{
+							// Counted in the prune's unit: a WAV and its JSON sidecar are one entry.
+							id: "quarantine",
+							bytes: 8,
+							files: 4,
+							exists: true,
+							boundedFiles: 2,
+							bounds: { maxBytes: null, maxAgeMs: null, maxFiles: 2 },
 							overBound: false,
 						},
 						{

@@ -746,6 +746,14 @@ export class ProbePool extends EventEmitter {
 
 	private readonly records = new Map<string, ProbeRecord>()
 	private readonly byDecoder = new Map<string, ProbeRecord>()
+	/**
+	 * dsd-fme records whose decoder is still stopping (fence or teardown until its removal returns):
+	 * the adapter holds a call_end up to DSD_FME_WAV_END_WAIT_MS for its WAV lookup and publishes it
+	 * during stop(), after the record stopped accepting. Only those call_ends (and their evidence) are
+	 * taken, filtered as `deliver` filters (drainOutput). No wait is added: teardown already awaits
+	 * the removal, which the adapter's own hold bounds.
+	 */
+	private readonly drainingDecoders = new Map<string, ProbeRecord>()
 	private readonly queue: ProbeRequest[] = []
 	private readonly lastServed = new Map<string, number>()
 	private readonly serviceRounds = new Map<string, number>()
@@ -1905,8 +1913,25 @@ export class ProbePool extends EventEmitter {
 		rec.stepping = false
 		if (rec.modeTimer) clearTimeout(rec.modeTimer)
 		rec.modeTimer = null
+		this.openDrain(rec)
 		if (this.byDecoder.get(rec.decoderId) === rec)
 			this.byDecoder.delete(rec.decoderId)
+	}
+
+	/** The record's decoder may still publish held call_ends until its removal returns (drainingDecoders). */
+	private openDrain(rec: ProbeRecord): void {
+		if (rec.mode.decoderType !== "dsd-fme") return
+		if (this.byDecoder.get(rec.decoderId) !== rec) return
+		this.drainingDecoders.set(rec.decoderId, rec)
+	}
+
+	private closeDrain(rec: ProbeRecord): void {
+		if (this.drainingDecoders.get(rec.decoderId) === rec)
+			this.drainingDecoders.delete(rec.decoderId)
+	}
+
+	private isDraining(rec: ProbeRecord): boolean {
+		return this.drainingDecoders.get(rec.decoderId) === rec
 	}
 
 	private async launch(
@@ -2189,7 +2214,17 @@ export class ProbePool extends EventEmitter {
 		rec.state = "stopping"
 		if (rec.modeTimer) clearTimeout(rec.modeTimer)
 		rec.modeTimer = null
+		this.openDrain(rec)
 		this.byDecoder.delete(rec.decoderId)
+		try {
+			await this.teardownComponents(rec)
+		} finally {
+			// The decoder's stop() returned (its removal settled): nothing it publishes now is this record's.
+			this.closeDrain(rec)
+		}
+	}
+
+	private async teardownComponents(rec: ProbeRecord): Promise<void> {
 		const attempt = async (
 			action: () => unknown | Promise<unknown>,
 		): Promise<boolean> => {
@@ -2399,7 +2434,11 @@ export class ProbePool extends EventEmitter {
 		out: DecoderOutputLike,
 	): void => {
 		const rec = this.byDecoder.get(decoderId)
-		if (!rec || this.isStopping(rec)) return
+		if (!rec || this.isStopping(rec)) {
+			const draining = this.drainingDecoders.get(decoderId)
+			if (draining !== undefined) this.drainOutput(draining, out)
+			return
+		}
 		this.markOutput(rec)
 		if (this.isStopping(rec)) return
 		switch (rec.mode.decoderType) {
@@ -2460,6 +2499,22 @@ export class ProbePool extends EventEmitter {
 		}
 	}
 
+	/**
+	 * A call_end a stopping dsd-fme decoder published from its held outbox (drainingDecoders): the
+	 * call joins `rec.calls` (so the recordings settlement can link its file) and its evidence is
+	 * delivered, both under deliver's epoch rule; anything else from a stopping decoder is dropped.
+	 */
+	private drainOutput(rec: ProbeRecord, out: DecoderOutputLike): void {
+		const ev = toDsdFmeScannerEvent(out)
+		if (ev?.kind !== "call_end") return
+		// P17 as in deliver: produced after the probe's epoch ended is another epoch's.
+		if (rec.epochEndedAt !== null && ev.at >= rec.epochEndedAt) return
+		this.trackCall(rec, ev, out, true)
+		// A replay's evidence is held for its clean end, which a stopping replay never reaches.
+		if (this.destroyed || rec.transport.kind === "replay") return
+		this.deliver(rec, interpretDsdFme(ev, rec.interp), true)
+	}
+
 	private markOutput(rec: ProbeRecord): void {
 		if (this.isStopping(rec)) return
 		if (rec.firstOutputAt !== null) return
@@ -2509,8 +2564,9 @@ export class ProbePool extends EventEmitter {
 		rec: ProbeRecord,
 		ev: DsdFmeScannerEvent,
 		out: DecoderOutputLike,
+		draining = false,
 	): void {
-		if (this.isStopping(rec)) return
+		if (draining ? !this.isDraining(rec) : this.isStopping(rec)) return
 		if (ev.kind !== "call_end") return
 		const parsed = CallEndSchema.safeParse(out.data)
 		if (!parsed.success || parsed.data.flags?.wavFileUpdate) return
@@ -2527,15 +2583,24 @@ export class ProbePool extends EventEmitter {
 				d.flags?.encrypted === true ||
 				(d.encryptionKnown !== undefined && d.encryptionKnown !== true),
 		}
-		if (this.isStopping(rec)) return
+		if (draining ? !this.isDraining(rec) : this.isStopping(rec)) return
 		rec.calls.push(call)
 	}
 
 	/** P17: only evidence of the probe's epoch, stamped before that epoch ended. */
-	private deliver(rec: ProbeRecord, evs: DecodeEvidence[]): void {
+	private deliver(
+		rec: ProbeRecord,
+		evs: DecodeEvidence[],
+		draining = false,
+	): void {
 		for (const raw of evs) {
 			const ev = guardDsdFmeEvidence(raw, rec.req.targetHz, rec.centreHz)
-			if (this.isStopping(rec)) return
+			if (
+				draining
+					? this.destroyed || !this.isDraining(rec)
+					: this.isStopping(rec)
+			)
+				return
 			if (ev.epoch !== rec.epoch) continue
 			if (rec.epochEndedAt !== null && ev.at >= rec.epochEndedAt) continue
 			if (ev.identity || ev.encrypted !== undefined) rec.confirmed = true

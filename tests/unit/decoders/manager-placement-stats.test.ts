@@ -91,6 +91,25 @@ describe("placement-visible decoder stats", () => {
 		)
 	})
 
+	it("the status list totals every parent as getStatus does, grouping workers in one pass", async () => {
+		const { manager } = await placed()
+		const internals = manager as unknown as {
+			placementWorkersByParent(): unknown
+			placementWorkersOf(parent: unknown): unknown
+		}
+		const byParent = vi.spyOn(internals, "placementWorkersByParent")
+		const perParent = vi.spyOn(internals, "placementWorkersOf")
+		const listed = manager.getAllStatus()
+		expect(byParent).toHaveBeenCalledTimes(1)
+		expect(perParent).not.toHaveBeenCalled()
+		const voice = listed.find(s => s.id === VOICE)
+		const single = manager.getStatus(VOICE)
+		expect(voice?.stats).toEqual(single?.stats)
+		expect(voice?.rateHistory).toEqual(single?.rateHistory)
+		expect(voice?.lastOutputAt).toEqual(single?.lastOutputAt)
+		expect(voice?.health).toEqual(single?.health)
+	})
+
 	it("a parent without its own rate history takes the first worker's buckets sanitised", async () => {
 		const { manager } = await placed()
 		const parent = f!.decoders.get(VOICE)!

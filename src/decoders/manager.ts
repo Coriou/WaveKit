@@ -4822,6 +4822,32 @@ export class DecoderManager extends EventEmitter {
 	getStatus(id: string): DecoderStatus | undefined {
 		const state = this.decoders.get(id)
 		if (!state) return undefined
+		return this.statusOf(state, this.placementWorkersOf(state))
+	}
+
+	/** Every decoder's placement workers, by parent id: built once per status list (getAllStatus). */
+	private placementWorkersByParent(): Map<string, DecoderState[]> {
+		const byParent = new Map<string, DecoderState[]>()
+		for (const state of this.decoders.values()) {
+			if (state.parentId === undefined) continue
+			const workers = byParent.get(state.parentId)
+			if (workers) workers.push(state)
+			else byParent.set(state.parentId, [state])
+		}
+		return byParent
+	}
+
+	/** One decoder's placement workers (the states placed for it, `parentId`). */
+	private placementWorkersOf(parent: DecoderState): DecoderState[] {
+		return [...this.decoders.values()].filter(
+			state => state !== parent && state.parentId === parent.config.id,
+		)
+	}
+
+	private statusOf(
+		state: DecoderState,
+		workers: readonly DecoderState[],
+	): DecoderStatus {
 		const suspension =
 			this.config.enablement && !state.placement && state.suspension
 				? {
@@ -4901,8 +4927,8 @@ export class DecoderManager extends EventEmitter {
 				idleTimeoutMs: this.config.idleTimeout,
 			}),
 			...this.placementTargetFields(state),
-			...this.placementLastOutput(state),
-			...this.placementTotals(state),
+			...this.placementLastOutput(state, workers),
+			...this.placementTotals(state, workers),
 			...this.counterFields(state),
 		}
 	}
@@ -4916,10 +4942,8 @@ export class DecoderManager extends EventEmitter {
 	 */
 	private placementTotals(
 		parent: DecoderState,
+		workers: readonly DecoderState[],
 	): Partial<Pick<DecoderStatus, "stats" | "rateHistory" | "health">> {
-		const workers = [...this.decoders.values()].filter(
-			state => state !== parent && state.parentId === parent.config.id,
-		)
 		if (workers.length === 0) return {}
 		const own = parent.decoder.getStatus()
 		const stats = { ...own.stats }
@@ -4976,10 +5000,10 @@ export class DecoderManager extends EventEmitter {
 	 */
 	private placementLastOutput(
 		parent: DecoderState,
+		workers: readonly DecoderState[],
 	): Pick<DecoderStatus, "lastOutputAt"> {
 		let latest = parent.decoder.getStatus().lastOutputAt
-		for (const state of this.decoders.values()) {
-			if (state.parentId !== parent.config.id) continue
+		for (const state of workers) {
 			const at = state.decoder.getStatus().lastOutputAt
 			if (
 				at instanceof Date &&
@@ -5089,7 +5113,17 @@ export class DecoderManager extends EventEmitter {
 	}
 
 	getAllStatus(): DecoderStatus[] {
-		return this.getAllDecoders().map(decoder => this.getStatus(decoder.id)!)
+		// One pass for every parent's workers, not one per decoder (O(N), not O(N²)).
+		const byParent = this.placementWorkersByParent()
+		// The decoders getAllDecoders lists, in its order.
+		return Array.from(this.decoders.values())
+			.filter(state => state.owner !== "placement")
+			.map(state =>
+				this.statusOf(
+					state,
+					(byParent.get(state.config.id) ?? []).filter(w => w !== state),
+				),
+			)
 	}
 
 	/**

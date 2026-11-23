@@ -1329,8 +1329,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * call's events never overtake an earlier call's end. At most DSD_FME_HELD_OUTPUTS_MAX.
 	 */
 	private readonly outbox: HeldOutput[] = []
-	/** stop() waiting for the outbox to empty. */
-	private outboxIdle: Array<() => void> = []
+	/** Outputs ever queued in, and released from, the outbox (outboxDrained). */
+	private outboxQueued = 0
+	private outboxReleased = 0
+	/** stop() waiting for the outputs queued before it (`upTo` released), oldest first. */
+	private readonly outboxWaiters: Array<{ upTo: number; resolve: () => void }> =
+		[]
+	/**
+	 * stop() runs: lines the child still prints are not parsed, so no call opens after stop()
+	 * ended every open call (start() clears it).
+	 */
+	private stopping = false
 	/** Directories whose truncated listing was logged (WAV_TRUNCATION_WARNED_MAX). */
 	private readonly wavTruncationWarned = new Set<string>()
 	/** Whether a timed-out lookup attempt was logged (once per adapter). */
@@ -1651,6 +1660,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			this.callTimeoutTimer = null
 		}
 		this.endOpenCallsForRestart(this.monoDate())
+		this.stopping = false
 
 		await super.start()
 
@@ -1715,6 +1725,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Ends any active call and clears the timeout timer.
 	 */
 	override async stop(): Promise<void> {
+		// From here no line opens a call: the ends below are the last this run produces.
+		this.stopping = true
 		// Clear the timeout timer
 		if (this.callTimeoutTimer) {
 			clearInterval(this.callTimeoutTimer)
@@ -1747,8 +1759,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.flushPendingDmrLink(false)
 		this.dmrRoute = newDmrRoute()
 		// The ends just produced go out first, each with its file when its lookup found it
-		// (at most DSD_FME_WAV_END_WAIT_MS).
+		// (at most DSD_FME_WAV_END_WAIT_MS: every queued end was produced by now, and none is
+		// produced later since no line is parsed).
 		await this.outboxDrained()
+		// No end stays held past stop(): one queued after the drain began goes now, without waiting.
+		this.releaseHeldEnds()
+		// The WAV lookups are deliberately NOT cancelled: dsd-fme finalises the file of a call
+		// this stop() ended when its child exits, inside super.stop(), so only a retry after it
+		// finds that file and links it in a `wavFileUpdate` (the recording links follow it). That
+		// post-stop update is bounded: each chain is 1 + DSD_FME_WAV_RETRIES attempts, at most
+		// 6 × (DSD_FME_WAV_ATTEMPT_TIMEOUT_MS + DSD_FME_WAV_RETRY_MS) = 13.2 s after its end, and
+		// a call_end update is all it publishes (a probe pool has stopped listening by then).
 		await super.stop()
 		this.linkDmrCc.clear()
 		this.linkDmrMs = false
@@ -1772,13 +1793,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/** Queues a publication behind a waiting call_end, then releases what may go. */
 	private hold(item: HeldOutput): void {
 		this.outbox.push(item)
+		this.outboxQueued++
 		// Over the bound the oldest waiting end goes now, without a file (DSD_FME_HELD_OUTPUTS_MAX).
 		while (this.outbox.length > DSD_FME_HELD_OUTPUTS_MAX) {
 			const waiting = this.outbox.find(
 				h => h.kind === "output" && h.end !== undefined && !h.end.settled,
 			)
 			if (waiting?.kind !== "output" || waiting.end === undefined) break
-			this.markSettled(waiting.end, false)
+			this.markSettled(waiting.end)
 			this.drainOutbox()
 		}
 		this.drainOutbox()
@@ -1790,31 +1812,48 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			const head = this.outbox[0]
 			if (head === undefined) break
 			if (head.kind === "output" && head.end !== undefined && !head.end.settled)
-				return
+				break
 			this.outbox.shift()
+			this.outboxReleased++
 			if (head.kind === "output") {
-				if (head.end !== undefined) head.end.released = true
+				if (head.end !== undefined) {
+					head.end.released = true
+					// Logged as published: a file set after its deadline but before release rides on it.
+					head.end.log(head.end.data.wavFile !== undefined)
+				}
 				this.deliver(head.output)
 			} else this.publish(head.state)
 		}
-		const idle = this.outboxIdle
-		this.outboxIdle = []
-		for (const resolve of idle) resolve()
+		// Waiters are in `upTo` order (outboxDrained): resolve from the front, no allocation.
+		const waiters = this.outboxWaiters
+		while (waiters.length > 0 && waiters[0]!.upTo <= this.outboxReleased)
+			waiters.shift()!.resolve()
 	}
 
-	/** Settles when no publication is held (at most DSD_FME_WAV_END_WAIT_MS after the last end). */
+	/**
+	 * Settles once every output queued so far was published (at most DSD_FME_WAV_END_WAIT_MS after
+	 * the last of them): an output queued later is not waited for.
+	 */
 	private outboxDrained(): Promise<void> {
 		if (this.outbox.length === 0) return Promise.resolve()
-		return new Promise(resolve => this.outboxIdle.push(resolve))
+		const upTo = this.outboxQueued
+		return new Promise(resolve => this.outboxWaiters.push({ upTo, resolve }))
 	}
 
-	/** Marks a held end settled (its file known or given up) and writes its log line once. */
-	private markSettled(end: WavHeldEnd, hasWavFile: boolean): void {
+	/** Marks a held end settled (its file known or given up); its log line is written at release. */
+	private markSettled(end: WavHeldEnd): void {
 		if (end.settled) return
 		end.settled = true
 		if (end.deadline !== undefined) clearTimeout(end.deadline)
 		end.deadline = undefined
-		end.log(hasWavFile)
+	}
+
+	/** Publishes every held output now: a waiting end goes without its file (stop). */
+	private releaseHeldEnds(): void {
+		for (const held of this.outbox)
+			if (held.kind === "output" && held.end !== undefined)
+				this.markSettled(held.end)
+		this.drainOutbox()
 	}
 
 	/**
@@ -1824,7 +1863,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private settleEnd(end: WavHeldEnd, wavFile: string | undefined): boolean {
 		if (end.released) return false
 		if (wavFile !== undefined) end.data.wavFile = wavFile
-		this.markSettled(end, wavFile !== undefined)
+		this.markSettled(end)
 		this.drainOutbox()
 		return wavFile !== undefined
 	}
@@ -2860,6 +2899,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * 5. Error events (FEC/CRC) are tracked for quality but not emitted unless debug mode is on
 	 */
 	protected override parseOutput(line: string): DecoderOutput | null {
+		// stop() ended every call: a line printed while the child exits opens none (stopping).
+		if (this.stopping) return null
 		const now = this.monoDate()
 		const nowMs = now.getTime()
 
@@ -3058,6 +3099,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * (flushPendingDmrLink), so it only counts once that check accepts it.
 	 */
 	private emitLink(link: DsdFmeLinkLine): void {
+		// Deliberately not through the outbox (emitOutput): a link line is decode evidence, not a
+		// call lifecycle publication, and carries its own `at`. Its consumers (probe confirmation,
+		// identify) pair lines live, and none orders them against call_start/call_end, so holding
+		// them behind a call_end waiting for its file (up to DSD_FME_WAV_END_WAIT_MS) would only
+		// delay identification.
 		if (link.verified) {
 			this.primeCounters()
 			this.counters.count("framesOk")
