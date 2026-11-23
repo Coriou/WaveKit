@@ -4,6 +4,7 @@ import type {
 	RecordingInventoryPage,
 } from "@wavekit/api-types"
 import { RECORDING_INVENTORY_ID } from "@wavekit/api-types"
+import { dsdFmeCallRecordable } from "../../../src/decoders/builtin/dmr-recording-gate.ts"
 import { buildMockServer } from "../../mock/server.ts"
 import type { MockServer } from "../../mock/server.ts"
 
@@ -26,6 +27,18 @@ describe("mock recordings routes", () => {
 	const all = async (): Promise<RecordingInventoryItem[]> =>
 		(await list("?limit=200")).body.items
 	const enc = encodeURIComponent
+
+	it("seeds only dsd-fme call files the core's gate lists and serves", async () => {
+		const calls = (await all()).filter(i => i.kind === "dsd-fme-call")
+		expect(calls.length).toBeGreaterThan(0)
+		for (const call of calls) {
+			const name = call.id.slice(call.id.indexOf("~") + 1)
+			expect({ name, recordable: dsdFmeCallRecordable(name) }).toEqual({
+				name,
+				recordable: true,
+			})
+		}
+	})
 
 	it("lists core-shaped items, newest first, with valid ids", async () => {
 		const items = await all()

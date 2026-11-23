@@ -22,7 +22,7 @@ import { createRecordingInventory } from "../../../../src/core/recordings/invent
 import type { Logger } from "../../../../src/utils/logger.js"
 
 const DSD = (hhmmss: string): string =>
-	`20261016_${hhmmss}_01234_P25_1_GROUP_TGT_100_SRC_2001.wav`
+	`20261016_${hhmmss}_01234_YSF_1_GROUP_TGT_100_SRC_2001.wav`
 
 function wav(dataBytes: number): Buffer {
 	const b = Buffer.alloc(44 + dataBytes)

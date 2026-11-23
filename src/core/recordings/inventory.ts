@@ -56,6 +56,7 @@ import {
 	SCANNER_RECORDING_ID,
 	SCANNER_RECORDING_KINDS,
 	callNameFields,
+	DV_CALL_RECORDINGS_SERVED,
 	dvCallDecoderField,
 	dvCallDecoderOf,
 	startedAtLocalFromName,
@@ -503,22 +504,25 @@ function isCallKind(kind: RecordingInventoryKind): boolean {
  * Whether a file of this name in a folder of this kind may be listed or opened. dsd-fme's own
  * per-call files carry their protocol in the name: one that is not recordable (DMR while DMR
  * recordings are off, or no or an unknown protocol) is neither listed nor opened, and stays on
- * disk under the usual retention. The dv call recorder writes only recordable calls.
+ * disk under the usual retention. The dv call recorder's files are served only while
+ * DV_CALL_RECORDINGS_SERVED is on (off: no call tap feeds it yet, so nothing checked its calls).
  */
 function callFileServable(kind: RecordingInventoryKind, name: string): boolean {
+	if (kind === "dv-call") return DV_CALL_RECORDINGS_SERVED
 	return kind !== "dsd-fme-call" || dsdFmeCallRecordable(name)
 }
 
 /**
  * A `dsd~` key's name that no source may serve: a dsd-fme call name (never TEMP) the gate
  * refuses in a dsd-fme directory (callFileServable), and not in the dv call recorder's name
- * shape (dvCallDecoderField: that directory serves its own names, whichever decoder they name).
+ * shape while that directory is served (dvCallDecoderField: it serves its own names, whichever
+ * decoder they name; DV_CALL_RECORDINGS_SERVED off refuses them all).
  */
 function dsdNameRefused(name: string): boolean {
 	return (
 		dsdId(0, name) !== null &&
 		!callFileServable("dsd-fme-call", name) &&
-		dvCallDecoderField(name) === null
+		(!DV_CALL_RECORDINGS_SERVED || dvCallDecoderField(name) === null)
 	)
 }
 

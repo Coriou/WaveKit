@@ -22,7 +22,7 @@ import { recordingDsdFmeDirs } from "../../../src/index.js"
 const origin = "http://receiver.lan:9000"
 const host = "receiver.lan:9000"
 const logger = pino({ level: "silent" })
-const CALL = "20261016_120000_01234_P25_1_GROUP_TGT_100_SRC_2001.wav"
+const CALL = "20261016_120000_01234_YSF_1_GROUP_TGT_100_SRC_2001.wav"
 
 function wav(dataBytes: number, rate = 8000): Buffer {
 	const b = Buffer.alloc(44 + dataBytes)
@@ -216,13 +216,19 @@ describe("recordings inventory through the API server", () => {
 		}
 	}
 
-	it("protected: a dsd-fme DMR call file (or one of no known protocol) is neither listed nor served; P25 and NXDN are", async () => {
+	it("protected: a dsd-fme DMR, P25, NXDN, dPMR or ProVoice call file (or one of no known protocol) is neither listed nor served; YSF and D-STAR are", async () => {
 		const { root, inventory, bytes, calls } = await setup()
 		const DMR = "20261016_120001_01234_DMR_CC_1_GROUP_TGT_9_SRC_2001.wav"
 		const UNNAMED = "20261016_120002_01234__GROUP_TGT_9_SRC_2001.wav"
+		// Clear only on their own clear print, which a dsd-fme call file does not carry.
 		const NXDN = "20261016_120003_01234_NXDN_RAN_1_GROUP_TGT_9_SRC_2001.wav"
+		const P25 = "20261016_120004_01234_P25_1A3_GROUP_TGT_9_SRC_2001.wav"
+		const DPMR = "20261016_120005_01234_DPMR_CC_0_GROUP_TGT_9_SRC_2001.wav"
+		const EDACS = "20261016_120006_01234_EDACS_1_GROUP_TGT_9_SRC_2001.wav"
+		const DSTAR = "20261016_120007_01234_DSTAR_GROUP_TGT_0_SRC_0.wav"
+		const refused = [DMR, UNNAMED, NXDN, P25, DPMR, EDACS]
 		const old = (Date.now() - 60_000) / 1000
-		for (const name of [DMR, UNNAMED, NXDN]) {
+		for (const name of [...refused, DSTAR]) {
 			await fs.writeFile(join(calls, name), bytes)
 			await fs.utimes(join(calls, name), old, old)
 		}
@@ -238,20 +244,20 @@ describe("recordings inventory through the API server", () => {
 				.json<RecordingInventoryPage>()
 				.items.map(i => i.id)
 				.sort(),
-		).toEqual([`dsd:0~${CALL}`, `dsd:0~${NXDN}`].sort())
+		).toEqual([`dsd:0~${CALL}`, `dsd:0~${DSTAR}`].sort())
 		const get = (id: string) =>
 			app.inject({
 				method: "GET",
 				url: `/api/recordings/${encodeURIComponent(id)}/file`,
 				headers: authorized,
 			})
-		for (const name of [DMR, UNNAMED]) {
+		for (const name of refused) {
 			expect((await get(`dsd:0~${name}`)).statusCode).toBe(404)
 			expect((await get(`dsd~${name}`)).statusCode).toBe(404)
 			expect(await inventory.open(`dsd:0~${name}`)).toBeNull()
 			expect(await inventory.resolve(`dsd~${name}`)).toBeNull()
 		}
-		for (const name of [CALL, NXDN]) {
+		for (const name of [CALL, DSTAR]) {
 			const file = await get(`dsd:0~${name}`)
 			expect(file.statusCode).toBe(200)
 			expect(file.rawPayload.equals(bytes)).toBe(true)
@@ -259,11 +265,11 @@ describe("recordings inventory through the API server", () => {
 		}
 		// The refused files stay on disk.
 		expect((await fs.readdir(calls)).sort()).toEqual(
-			[CALL, DMR, NXDN, UNNAMED].sort(),
+			[CALL, ...refused, DSTAR].sort(),
 		)
 	})
 
-	it("protected: a scanner probe's DMR call file (or one of no known protocol) is neither listed nor served; P25 and analog are", async () => {
+	it("protected: a scanner probe's DMR or P25 call file (or one of no known protocol) is neither listed nor served; YSF and analog are", async () => {
 		const { root, bytes } = await setup()
 		const scan = join(root, "scan")
 		const dv = join(scan, "dv", "d_1")
@@ -273,12 +279,14 @@ describe("recordings inventory through the API server", () => {
 		const DMR = "20261017_081500_12345_DMR_CC_1_GROUP_TGT_9_SRC_1234.wav"
 		const UNNAMED = "20261017_081501_12345__GROUP_TGT_9_SRC_1234.wav"
 		const P25 = "20261017_081502_12345_P25_1A3_GROUP_TGT_9_SRC_1234.wav"
+		const YSF = "20261017_081503_12345_YSF_GROUP_TGT_9_SRC_1234.wav"
 		const ANALOG = "analog-00000000-0000-4000-8000-000000000001.wav"
 		const old = (Date.now() - 60_000) / 1000
 		for (const file of [
 			join(dv, DMR),
 			join(dv, UNNAMED),
 			join(dv, P25),
+			join(dv, YSF),
 			join(analog, ANALOG),
 		]) {
 			await fs.writeFile(file, bytes)
@@ -301,25 +309,27 @@ describe("recordings inventory through the API server", () => {
 				.json<RecordingInventoryPage>()
 				.items.map(i => i.id)
 				.sort(),
-		).toEqual([`scan:d_1~${P25}`, `scan:d_2~${ANALOG}`].sort())
+		).toEqual([`scan:d_1~${YSF}`, `scan:d_2~${ANALOG}`].sort())
 		const get = (id: string) =>
 			app.inject({
 				method: "GET",
 				url: `/api/recordings/${encodeURIComponent(id)}/file`,
 				headers: authorized,
 			})
-		for (const name of [DMR, UNNAMED]) {
+		for (const name of [DMR, UNNAMED, P25]) {
 			expect((await get(`scan:d_1~${name}`)).statusCode).toBe(404)
 			expect(await inventory.open(`scan:d_1~${name}`)).toBeNull()
 			expect(await inventory.resolve(`scan:d_1~${name}`)).toBeNull()
 		}
-		for (const id of [`scan:d_1~${P25}`, `scan:d_2~${ANALOG}`]) {
+		for (const id of [`scan:d_1~${YSF}`, `scan:d_2~${ANALOG}`]) {
 			const file = await get(id)
 			expect(file.statusCode).toBe(200)
 			expect(file.rawPayload.equals(bytes)).toBe(true)
 		}
 		// The refused files stay on disk.
-		expect((await fs.readdir(dv)).sort()).toEqual([DMR, P25, UNNAMED].sort())
+		expect((await fs.readdir(dv)).sort()).toEqual(
+			[DMR, P25, UNNAMED, YSF].sort(),
+		)
 	})
 
 	it("protected: denied without a credential, then lists and downloads", async () => {

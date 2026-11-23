@@ -108,6 +108,34 @@ probes). It records whether or not anyone is listening.
   loses its whole file, and so does a call that ends before it is known to be
   clear. Audio that arrives too late to be checked against the call's events
   may still slip through (a known limit).
+- **Clear means proven clear, per call.** A P25 phase 1 call is clear only
+  once its own LDU2 printed `ALG ID: 0x80 KEY ID: 0x0000`, an NXDN call once
+  its own checked VCALL came with no cipher print. P25 phase 2, dPMR and
+  ProVoice print nothing that proves a call clear, so their calls are never
+  recorded, linked or played live: they stay silent. A P25 phase 1 or NXDN call
+  plays and records only from its own clear print, about 0.3 to 0.5 s into the
+  call, and stays silent and unrecorded if that print never decodes. D-STAR and
+  YSF have no privacy field and are recorded as clear. The per-protocol table is
+  in [DECODER-GUIDE.md](DECODER-GUIDE.md) (call lifecycle).
+- **Calls always publish.** Encryption or missing evidence never hides a call:
+  every P25, NXDN, dPMR and ProVoice call still publishes its `call_start` and
+  `call_end` (talkgroup, source, times) and its Activity row. Only its audio,
+  its recording and its `encrypted` / `encryptionKnown` fields follow the
+  evidence. In scanner evidence such a call reads as encrypted.
+- **dsd-fme's own files of these protocols are not served.** A dsd-fme per-call
+  file (`enablePerCallRecording`, or a scanner probe's `dv` folder) of P25,
+  NXDN, dPMR, ProVoice (`EDACS_`) or M17 is never listed in Recordings, served or
+  linked, whatever the call was: its name does not carry the call's clear
+  print. Those calls' recordings are to come from this recorder, which keeps
+  only known clear audio (not served yet: see "In Recordings and Activity"). D-STAR and YSF dsd-fme files are unchanged.
+- **Old links re-checked.** An Activity row shows a recording only while its
+  own `call_end` admits it (known clear, not encrypted), checked again on every
+  read: a link stored earlier for a call that was not known clear has no play
+  control. A P25 phase 1 or NXDN `call_end` proves its clear print with
+  `clearEvidence: true` next to `encryptionKnown: true`; a row with
+  `encryptionKnown: true` alone (written by an older build) is not proof and
+  shows no play control. P25 phase 2, dPMR, ProVoice, EDACS and M17 rows never
+  do.
 - **No DMR yet.** DMR per-call recordings are not listed, served, linked or
   recorded yet. The recorder writes no DMR call (nor one whose protocol is not
   known). A dsd-fme per-call file whose name says DMR (its system field starts
@@ -139,8 +167,13 @@ probes). It records whether or not anyone is listening.
   oldest until the folder fits `retentionBytes` (2 GiB, about 37 hours of
   voice). Kept recordings are never deleted. No call starts while the disk has
   less than 512 MiB free.
-- **In Recordings and Activity.** The Recordings list shows the files with
-  kind `dv-call` (search "calls" or "recorder"), under the call's decoder.
+- **In Recordings and Activity.** Not yet: no decoder feeds the recorder its
+  calls in this build, so the Recordings list shows no `dv-call` file, none can
+  be downloaded, no Activity row links to one, and a link stored earlier loses
+  its play control and is removed by the next link sweeps. Files in the folder
+  stay on disk under the retention above. Once a decoder feeds it, the list
+  shows the files with kind `dv-call` (search "calls" or "recorder"), under
+  the call's decoder.
   Once a file is in place, the call's Activity row (its `call_end`) links to
   it, so its play button appears. That happens after the row was first shown:
   a page that is already open shows the button on its next refresh. Deleting
@@ -190,10 +223,12 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   is clear. The stream maps these to `digital-voice:call` (`decoderId`, `callId`,
   `protocol`, `talkgroup`, `source`, `slot`, `encrypted`, `encryptionKnown`,
   `active`, `startedAt`, `endedAt`).
-- **Encryption not known yet**: a DMR or P25 call starts on its voice frames,
-  before its link control says whether it is encrypted
-  ([DECODER-GUIDE.md](DECODER-GUIDE.md), call lifecycle), and carries
-  `encryptionKnown: false` until it does (absent means known). Such a call is not
+- **Encryption not known yet**: a DMR call starts on its voice frames,
+  before its link control says whether it is encrypted, and a P25, NXDN, dPMR
+  or ProVoice call starts before its own positive clear print
+  ([DECODER-GUIDE.md](DECODER-GUIDE.md), call lifecycle); either carries
+  `encryptionKnown: false` until it is known (absent means known: D-STAR and
+  YSF). Such a call is not
   clear: the auto route (`/auto`) admits none of its voice while the field is
   present and not `true`, and admits it once the call is known clear. A scanner
   probe records such a call as encrypted, never as a clear recording. Noise

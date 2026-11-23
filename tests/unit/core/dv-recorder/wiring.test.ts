@@ -13,7 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import Fastify from "fastify"
 import pino from "pino"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { activityRoutes } from "../../../../src/api/routes/activity.js"
 import {
 	recordingRoutes,
@@ -40,6 +40,13 @@ import type { ActivityPublisher } from "../../../../src/decoders/manager.js"
 import type { DecoderOutput } from "../../../../src/decoders/types.js"
 import { recordingDsdFmeDirs } from "../../../../src/index.js"
 import { FakeCall, FakeTapSource, GIB, fsWithFree } from "./fake-tap.js"
+
+// These cases exercise the dv call recorder's catalogue path, which is off in production
+// (DV_CALL_RECORDINGS_SERVED: no call tap feeds the recorder yet); they pin it for its re-enable.
+vi.mock("../../../../src/core/recordings/names.js", async importOriginal => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	DV_CALL_RECORDINGS_SERVED: true,
+}))
 
 const logger = pino({ level: "silent" })
 const realNow = (): number => performance.timeOrigin + performance.now()
@@ -171,6 +178,9 @@ function callOutput(
 			source: 2001,
 			slot: 1,
 			encrypted: false,
+			// Known clear by its own clear print (clearEvidence): a P25 link is presented only then.
+			encryptionKnown: true,
+			clearEvidence: true,
 			...(type === "call_end"
 				? { duration: 1500 + DV_TAP_SETTLE_MS, flags: { encrypted: false } }
 				: {}),

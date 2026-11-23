@@ -8,7 +8,8 @@
  *   `Content-Disposition: attachment`, no ranges.
  * - PUT / DELETE /api/recordings/:id/keep, DELETE /api/recordings/:id with the core's codes:
  *   RECORDING_NOT_FOUND 404, RECORDING_KEPT and RECORDING_DELETE_UNSUPPORTED 409.
- * Seeds: dsd-fme P25 calls on the mock's talkgroups, digital-voice recorder calls (kind `dv-call`:
+ * Seeds: dsd-fme YSF calls on the mock's talkgroups (a core serves no dsd-fme P25, NXDN, dPMR,
+ * ProVoice or M17 call file), digital-voice recorder calls (kind `dv-call`:
  * a P25 call and a D-STAR call, each linked to its Activity row; a core lists no DMR call recording
  * yet) and scanner recordings of seeded
  * discoveries, over three days; a new call lands every NEW_CALL_MS so the drawer's refresh shows something.
@@ -241,11 +242,13 @@ function makeRec(s: Seed, at: Date): Rec {
 	const modifiedAt = new Date(at.getTime() + s.durationS * 1000).toISOString()
 	if (s.kind === "dsd-fme-call" || s.kind === "dv-call") {
 		const type = (s.callType ?? "group").toUpperCase()
-		// dsd-fme names its own files; the recorder writes the decoder id in their place.
+		// dsd-fme names its own files; the recorder writes the decoder id in their place. The
+		// dsd-fme seeds are YSF: a core lists and plays no dsd-fme P25, NXDN, dPMR, ProVoice or M17
+		// call file (dsdFmeCallRecordable), whose name does not carry the call's clear print.
 		const name =
 			s.kind === "dv-call"
 				? `${localStamp(at)}_${pad(n, 5)}_dsd-fme_${type}_TGT_${s.talkgroup ?? "0"}_SRC_${s.source ?? "0"}.wav`
-				: `${localStamp(at)}_${pad(n, 5)}_P25_1A3_${type}_TGT_${s.talkgroup ?? "0"}_SRC_${s.source ?? "0"}.wav`
+				: `${localStamp(at)}_${pad(n, 5)}_YSF_${type}_TGT_${s.talkgroup ?? "0"}_SRC_${s.source ?? "0"}.wav`
 		return {
 			seed: n,
 			item: {

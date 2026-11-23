@@ -53,6 +53,16 @@ const DV_CALL_HASH_MEMO_MAX = 256
 const hashedFields = new Map<string, string>()
 
 /**
+ * Whether the catalogue lists, serves or presents a link to the dv call recorder's files (kind
+ * `dv-call`). Off: no decoder yet feeds the recorder a call tap (addCallTap), so no per-call
+ * trust check stands behind such a file, and a file in that directory is refused by name (fail
+ * closed; it stays on disk under the usual retention). Re-enable in this one line once a tap
+ * writes only calls whose Activity row passes callTrustAdmits. Links the sweep removed while
+ * this was off do not come back.
+ */
+export const DV_CALL_RECORDINGS_SERVED: boolean = false
+
+/**
  * The decoder field of a dv-call recorder name for `decoderId`: the id itself when it already
  * matches DV_CALL_DECODER_LITERAL, else `h` plus 8 base36 digits of the SHA-256 of the exact id
  * (its first 64 bits mod 36^8; 9 characters). The field never loses an id silently: a reader maps

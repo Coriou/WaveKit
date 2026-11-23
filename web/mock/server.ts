@@ -1210,8 +1210,8 @@ export async function buildMockServer(
 	// Recordings (./recordings.ts) are seeded before the history so their Activity rows are in it.
 	const recordingsState = createRecordingsState()
 	/**
-	 * A recording's Activity row, as the core writes it: a dsd-fme or call recorder call's
-	 * `call_end` row (P25; D-STAR titled MY → UR; a core links no DMR call recording yet), or a
+	 * A recording's Activity row, as the core writes it: a dsd-fme call's `call_end` row (YSF), a
+	 * call recorder call's (P25; D-STAR titled MY → UR; a core links no DMR call recording yet), or a
 	 * scanner analog recording's `recording-change` row, linked by `recording`. Scanner DV files
 	 * (probe calls) have no row.
 	 */
@@ -1265,7 +1265,7 @@ export async function buildMockServer(
 				receivedAt: iso,
 				decoderId: item.decoderId,
 				sourceId: "rtl-sdr",
-				protocol: "p25",
+				protocol: item.kind === "dsd-fme-call" ? "ysf" : "p25",
 				category: "voice",
 				frequencyHz: null,
 				entityKey: `talkgroup:${item.talkgroup ?? "0"}`,

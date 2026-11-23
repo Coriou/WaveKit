@@ -6,6 +6,7 @@ import {
 	dsdFmeCallRecordable,
 	protocolRecordable,
 } from "../../../src/decoders/builtin/call-recordings.js"
+import { callTrustAdmits } from "../../../src/decoders/builtin/dmr-recording-gate.js"
 
 describe("DMR recording gate", () => {
 	it("is off: DMR recordings are not linked, listed or written", () => {
@@ -76,7 +77,7 @@ describe("DMR recording gate", () => {
 		expect(dsdFmeCallProtocol("TEMP_20261016_120000_0A1B.wav")).toBeNull()
 	})
 
-	it("admits a dsd-fme call file only when its name says a recordable protocol", () => {
+	it("admits a dsd-fme call file only when its name says a recordable protocol without a positive clear rule", () => {
 		const at = "20261016_120000_01234"
 		expect(dsdFmeCallRecordable(`${at}_DMR_CC_1_GROUP_TGT_9_SRC_2.wav`)).toBe(
 			false,
@@ -85,15 +86,77 @@ describe("DMR recording gate", () => {
 		expect(dsdFmeCallRecordable(`${at}__GROUP_TGT_9_SRC_2.wav`)).toBe(false)
 		expect(dsdFmeCallRecordable(`${at}_1_GROUP_TGT_9_SRC_2.wav`)).toBe(false)
 		expect(dsdFmeCallRecordable(`${at}_TRBO_GROUP_TGT_9_SRC_2.wav`)).toBe(false)
-		expect(dsdFmeCallRecordable(`${at}_P25_1A3_GROUP_TGT_9_SRC_2.wav`)).toBe(
-			true,
-		)
-		expect(dsdFmeCallRecordable(`${at}_NXDN_RAN_1_GROUP_TGT_9_SRC_2.wav`)).toBe(
-			true,
-		)
+		// A P25, NXDN, dPMR or ProVoice (EDACS) call is clear only on its own print, which its
+		// file does not carry: never listed, served or linked.
+		for (const system of [
+			"P25_1A3",
+			"P25_CC_1A3",
+			"NXDN_RAN_1",
+			"NXDN48_RAN_1",
+			"DPMR_CC_0",
+			"EDACS_1",
+			"PROVOICE_1",
+		])
+			expect(
+				dsdFmeCallRecordable(`${at}_${system}_GROUP_TGT_9_SRC_2.wav`),
+				system,
+			).toBe(false)
 		expect(dsdFmeCallRecordable(`${at}_DSTAR_GROUP_TGT_A_SRC_B.wav`)).toBe(true)
-		expect(dsdFmeCallRecordable(`${at}_DPMR_CC_0_GROUP_TGT_9_SRC_2.wav`)).toBe(
-			true,
-		)
+		expect(dsdFmeCallRecordable(`${at}_YSF_GROUP_TGT_A_SRC_B.wav`)).toBe(true)
+		// M17 carries an encryption field in its LSF and dsd-fme prints no positive clear for it.
+		expect(dsdFmeCallRecordable(`${at}_M17_GROUP_TGT_A_SRC_B.wav`)).toBe(false)
+	})
+})
+
+describe("call trust of a stored call_end", () => {
+	const proven = { encryptionKnown: true, clearEvidence: true }
+
+	it.each(["p25", "p25p1", "P25p1", "nxdn", "nxdn48", "NXDN96"])(
+		"admits %s only with encryptionKnown true and its clearEvidence marker",
+		label => {
+			expect(callTrustAdmits(label, proven)).toBe(true)
+			// encryptionKnown true without the marker (an older rule's row) is not proof.
+			expect(callTrustAdmits(label, { encryptionKnown: true })).toBe(false)
+			expect(
+				callTrustAdmits(label, { encryptionKnown: true, clearEvidence: 1 }),
+			).toBe(false)
+			expect(callTrustAdmits(label, { clearEvidence: true })).toBe(false)
+			expect(
+				callTrustAdmits(label, {
+					encryptionKnown: false,
+					clearEvidence: true,
+				}),
+			).toBe(false)
+			expect(callTrustAdmits(label, { ...proven, encrypted: true })).toBe(false)
+			expect(
+				callTrustAdmits(label, { ...proven, flags: { encrypted: true } }),
+			).toBe(false)
+		},
+	)
+
+	it.each([
+		"p25p2",
+		"dpmr",
+		"DPMR",
+		"provoice",
+		"edacs",
+		"EDACS",
+		"m17",
+		"M17",
+	])("never admits %s, whatever its fields say", label => {
+		expect(callTrustAdmits(label, proven)).toBe(false)
+		expect(callTrustAdmits(label, {})).toBe(false)
+	})
+
+	it("admits D-STAR and YSF unless encryptionKnown false; null and unknown labels fail closed", () => {
+		for (const label of ["dstar", "D-STAR", "ysf"]) {
+			expect(callTrustAdmits(label, {})).toBe(true)
+			expect(callTrustAdmits(label, { encryptionKnown: false })).toBe(false)
+			expect(callTrustAdmits(label, { encrypted: true })).toBe(false)
+		}
+		for (const label of [null, undefined, 7, "foo", ""]) {
+			expect(callTrustAdmits(label, {})).toBe(false)
+			expect(callTrustAdmits(label, proven)).toBe(false)
+		}
 	})
 })
