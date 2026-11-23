@@ -12,7 +12,6 @@
 import { readFile, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { FS, serviceHarness } from "../../../mocks/scanner/service-fakes.js"
-import type { ScannerServiceDeps } from "../../../../src/core/scanner/scanner-service.js"
 import type { WidebandAnalogRecorder } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import { FskSource, NfmSource, wavDurationMs } from "./wideband-nfm-fixtures.js"
 
@@ -137,18 +136,12 @@ export function synthesize(plan: ScenarioPlan): Uint8Array[] {
 export type ScenarioHarness = ReturnType<typeof serviceHarness>
 
 /**
- * The real service at the neutral centre. `recordingCpu` is the scanner's reading of the
- * efficiency gate's CPU state (ScannerServiceDeps.recordingCpu), as the core wires it; it is set
- * on the deps before start, the only thing the harness does not pass itself.
+ * The real service at the neutral centre. The CPU reading the recorder's limit follows reaches
+ * the service the way the core passes it: a ScannerServiceDeps.recordingCpu constructor dep
+ * (simultaneous-voices.test.ts wraps the constructor to add it; the harness has no option).
  */
-export function scenarioHarness(
-	recordingCpu?: ScannerServiceDeps["recordingCpu"],
-): ScenarioHarness {
-	const h = serviceHarness({ centreHz: SCENARIO_CENTRE_HZ })
-	if (recordingCpu)
-		(h.service as unknown as { deps: ScannerServiceDeps }).deps.recordingCpu =
-			recordingCpu
-	return h
+export function scenarioHarness(): ScenarioHarness {
+	return serviceHarness({ centreHz: SCENARIO_CENTRE_HZ })
 }
 
 const turn = (): Promise<void> => new Promise(resolve => setImmediate(resolve))

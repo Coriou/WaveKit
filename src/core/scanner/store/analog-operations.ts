@@ -50,14 +50,16 @@ import {
 
 export const MAX_ACTIVE_ANALOG_OPERATIONS = 8
 /**
- * The analog recordings one source may always hold at once, whatever its CPU reads (the
- * recorder's floor, widebandRecordingLimit): 2.
+ * The recorder's floor per source (widebandRecordingLimit): it never limits a source to fewer
+ * than 2, whatever its CPU reads. The store guarantees the floor to a second source only: with
+ * one source at its ceiling of 6 and a second at 2, all 8 operations are held and a third source
+ * gets none until one ends (its admission is denied by the operations' overall limit).
  */
 export const MIN_ACTIVE_ANALOG_PER_SOURCE = 2
 /**
  * The hard ceiling of analog operations on one source: MAX_ACTIVE_ANALOG_OPERATIONS −
  * MIN_ACTIVE_ANALOG_PER_SOURCE = 8 − 2 = 6, so a second source keeps its floor of 2 while
- * the first is at its ceiling. The reservation arithmetic holds every operation in flight at
+ * the first is at its ceiling (a second source only: 6 + 2 leaves a third none). The reservation arithmetic holds every operation in flight at
  * once (8, so 6 of one source too): the operation inventory keeps OPERATION_HEADROOM = 8 free
  * under its bound, and a byte retention pass leaves at least EVICTION_TARGET_MIN_HEADROOM = 8 ×
  * RESERVATION free under the cap. Admission itself counts each one in flight as outstanding

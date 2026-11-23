@@ -3,13 +3,15 @@
  * walkie-talkie channels with an analog carrier and a digital-voice-like 4FSK burst beside them),
  * through the production scanner composition (simultaneous-voices-scenario.ts). What is recorded
  * and what is missed per voice, at the floor of 2 (no CPU reading), with a calm reading (the
- * budget's cap) and under CPU pressure (back to 2, refused:cpu). The CPU reading is injected:
- * no wall-clock assertion.
+ * budget's cap) and under CPU pressure (back to 2, refused:cpu). The CPU reading is injected
+ * as the core composes it: a `recordingCpu` dep given to the ScannerService constructor (the
+ * module mock below adds it to the deps the harness builds). No wall-clock assertion.
  */
 // WAVEKIT_REQUIRE_NFM_WASM=1: fail rather than run the JS chain (wideband-recorder-harness.ts).
 import "./recorder-dsp-required.js"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import type { RecordingCpuReading } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
+import type * as ScannerServiceModule from "../../../../src/core/scanner/scanner-service.js"
 import {
 	defaultPlan,
 	disposeScenario,
@@ -24,8 +26,30 @@ import {
 	type ScenarioHarness,
 } from "./simultaneous-voices-scenario.js"
 
+/** The reading the next constructed service is given (undefined: no recordingCpu dep). */
+const wiring = vi.hoisted(() => ({
+	recordingCpu: undefined as (() => RecordingCpuReading | null) | undefined,
+}))
+
+// The core passes the efficiency gate's reading as a constructor dep (src/index.ts
+// `recordingCpu`); the harness builds its own deps, so the constructor is wrapped to add it.
+vi.mock(
+	"../../../../src/core/scanner/scanner-service.js",
+	async importOriginal => {
+		const actual = await importOriginal<typeof ScannerServiceModule>()
+		class ComposedScannerService extends actual.ScannerService {
+			constructor(deps: ScannerServiceModule.ScannerServiceDeps) {
+				const recordingCpu = wiring.recordingCpu
+				super(recordingCpu ? { ...deps, recordingCpu } : deps)
+			}
+		}
+		return { ...actual, ScannerService: ComposedScannerService }
+	},
+)
+
 const harnesses: ScenarioHarness[] = []
 afterEach(async () => {
+	wiring.recordingCpu = undefined
 	for (const h of harnesses.splice(0)) await disposeScenario(h)
 })
 
@@ -34,7 +58,8 @@ const plan = defaultPlan(4)
 const chunks = synthesize(plan)
 
 async function run(cpu?: () => RecordingCpuReading | null) {
-	const h = scenarioHarness(cpu)
+	wiring.recordingCpu = cpu
+	const h = scenarioHarness()
 	harnesses.push(h)
 	await h.service.start()
 	let maxActive = 0

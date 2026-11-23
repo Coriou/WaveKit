@@ -101,6 +101,24 @@ describe("widebandRecordingCap (the configured budget's slots)", () => {
 		] as const)
 			expect(widebandRecordingCap(rate, budget)).toBe(2)
 	})
+
+	it("a finite rate or budget so large the arithmetic overflows is the floor, not NaN", () => {
+		// The property's counterexample (printed rounded as rate 1.997e307, budget 3.595e305, which
+		// still compute to 6): just past it, 9 · rate and 500 · budget both overflow to Infinity,
+		// and Infinity / Infinity is NaN.
+		expect(9 * 1.998e307).toBe(Number.POSITIVE_INFINITY)
+		expect(0.5 * 3.596e305 * 1000).toBe(Number.POSITIVE_INFINITY)
+		expect(widebandRecordingCap(1.998e307, 3.596e305)).toBe(2)
+		// At the printed values nothing overflows: the formula's ceiling.
+		expect(widebandRecordingCap(1.997e307, 3.595e305)).toBe(6)
+		expect(widebandRecordingCap(Number.MAX_VALUE, Number.MAX_VALUE)).toBe(2)
+		// Only the budget overflows (Infinity / finite): the floor too.
+		expect(widebandRecordingCap(1_024_000, Number.MAX_VALUE)).toBe(2)
+		// Only the rate overflows: finite / Infinity = 0 → the floor.
+		expect(widebandRecordingCap(Number.MAX_VALUE, 1)).toBe(2)
+		// Just under the overflow the budget still gives the ceiling.
+		expect(widebandRecordingCap(1_024_000, 1e300)).toBe(6)
+	})
 })
 
 describe("widebandRecordingLimit (the measured CPU's limit)", () => {
@@ -169,6 +187,22 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 			})
 	})
 
+	it("the property's counterexample and other overflows are the floor, never NaN", () => {
+		expect(widebandRecordingLimit(1.998e307, 3.596e305, calm(0.1), 2)).toEqual({
+			limit: 2,
+			cap: 2,
+			shrunk: null,
+		})
+		// A finite capacity whose product with the guard overflows: no evidence, the floor.
+		expect(
+			widebandRecordingLimit(2_400_000, 1, calm(0.1, Number.MAX_VALUE, 90), 2),
+		).toEqual({ limit: 2, cap: 6, shrunk: "unknown" })
+		// A huge finite active count with spare: running + room stays finite, the cap.
+		expect(
+			widebandRecordingLimit(2_400_000, 1, calm(0.1), Number.MAX_VALUE).limit,
+		).toBe(6)
+	})
+
 	it("a budget whose cap is the floor stays at it, whatever the reading", () => {
 		expect(widebandRecordingLimit(1_024_000, 0.1, calm(0), 0)).toEqual({
 			limit: 2,
@@ -211,6 +245,8 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 				),
 				fc.oneof(fc.integer({ min: -3, max: 12 }), fc.double()),
 				(rate, budget, cpu, active) => {
+					const cap = widebandRecordingCap(rate, budget)
+					expect(Number.isInteger(cap)).toBe(true)
 					const r = widebandRecordingLimit(
 						rate,
 						budget,
@@ -225,7 +261,24 @@ describe("widebandRecordingLimit (the measured CPU's limit)", () => {
 					if (cpu === null || cpu.label !== "calm") expect(r.limit).toBe(2)
 				},
 			),
-			{ numRuns: 200 },
+			{
+				numRuns: 200,
+				// The counterexample that once gave NaN, run first on every seed.
+				examples: [
+					[1.998e307, 3.596e305, null, 0],
+					[
+						1.998e307,
+						3.596e305,
+						{
+							label: "calm",
+							ownCores: 0,
+							capacityCores: 8,
+							guardPercent: 90,
+						},
+						0,
+					],
+				],
+			},
 		)
 	})
 })

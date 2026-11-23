@@ -775,8 +775,12 @@ Two live sessions on the wasm path: about 1.07 MB at k · m = 1 and 0.94 MB at 1
 chain that fell back holds its JS buffers instead (1.09 MB at k · m = 1), and its dropped kernel's
 memory until a garbage collection frees it, so two fallen-back chains at k · m = 1 can briefly hold
 about 3.2 MB. This module does not bound how many chains exist: the recorder's session lifecycle
-does. Live sessions are at most `widebandRecordingCap` (at most `MAX_ACTIVE_ANALOG_PER_SOURCE`, 2) per
-source; a retune-ended session parked for its close keeps its chain (the session holds it) and at
+does. Live sessions are at most the source's recording limit per source (`widebandRecordingLimit`:
+2 to 6, the budget's `widebandRecordingCap` brought back to 2 under measured CPU pressure or
+without a CPU reading; ceiling `MAX_ACTIVE_ANALOG_PER_SOURCE`, 6), so six chains on the wasm path
+hold about 2.8 MB per source (3.2 MB at k · m = 1), and the audio sessions buffer before their
+files are written is bounded at 6 × 960 KB = 5.76 MB per source (`WIDEBAND_MAX_BUFFERED_MS`, 60 s
+of 8 kHz 16-bit audio each); a retune-ended session parked for its close keeps its chain (the session holds it) and at
 most `WIDEBAND_MAX_PARKED` (4) are parked per recorder, the oldest discarded past it; a session
 waiting in the recorder's turn queue or referenced by a pending store or writer callback keeps its
 chain until that settles, which nothing here bounds. A chain is freed with its session (garbage

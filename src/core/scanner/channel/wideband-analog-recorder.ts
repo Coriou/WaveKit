@@ -190,9 +190,10 @@ export function wallIso(ms: number): string | null {
  * Audio one session holds in memory, over all its files not written yet: a shadow waiting for
  * its class, a file waiting for its slot or for the writer. 60 s (the default hold.maxHoldMs)
  * · 8000 frames/s = 480 000 frames · 2 B = 960 KB per session; at most
- * MAX_ACTIVE_ANALOG_PER_SOURCE (6) sessions per source: 5.76 MB, and at most
- * MAX_ACTIVE_ANALOG_OPERATIONS (8) admitted over all sources (7.68 MB; shadows without an
- * operation count against the per-source limit too). Past it the session is dropped
+ * MAX_ACTIVE_ANALOG_PER_SOURCE (6) sessions per source, shadows included: 6 × 960 KB =
+ * 5.76 MB per source. The bound is per source: a shadow holds no store operation, so the
+ * operations' overall limit (MAX_ACTIVE_ANALOG_OPERATIONS) does not bound the sessions over all
+ * sources. Past it the session is dropped
  * (no file): a transmission still unclassed after a minute is not kept, and a store that does
  * not take audio for a minute loses it.
  */
@@ -632,7 +633,7 @@ const RECENT_ENDS = 32
  * operations' own ceiling). Default budget 1 core: floor(500 / 71.6) = 6 at 2.4 Msps,
  * floor(500 / 59.2) = 8 → 6 at 1.024 Msps; a 0.5-core budget: floor(250 / 71.6) = 3 at
  * 2.4 Msps; a 0.1-core budget: floor(50 / 59.2) = 0 → 2. A non-positive or non-finite rate or
- * budget gives the floor.
+ * budget, or one so large an intermediate overflows to a non-finite value, gives the floor.
  */
 export function widebandRecordingCap(
 	inputRateHz: number,
@@ -647,12 +648,17 @@ export function widebandRecordingCap(
 	const perRecordingMs =
 		WIDEBAND_CPU_FIXED_MS + (WIDEBAND_CPU_MS_PER_MSPS * inputRateHz) / 1e6
 	const budgetMs = WIDEBAND_CPU_SHARE * Math.max(0, cpuBudgetCores) * 1000
+	const slots = Math.floor(budgetMs / perRecordingMs)
+	// A huge finite rate or budget overflows (Infinity / Infinity is NaN): the floor.
+	if (
+		!Number.isFinite(perRecordingMs) ||
+		!Number.isFinite(budgetMs) ||
+		!Number.isFinite(slots)
+	)
+		return MIN_ACTIVE_ANALOG_PER_SOURCE
 	return Math.max(
 		MIN_ACTIVE_ANALOG_PER_SOURCE,
-		Math.min(
-			MAX_ACTIVE_ANALOG_PER_SOURCE,
-			Math.floor(budgetMs / perRecordingMs),
-		),
+		Math.min(MAX_ACTIVE_ANALOG_PER_SOURCE, slots),
 	)
 }
 
@@ -700,8 +706,8 @@ const finiteAtLeast = (v: unknown, min: number): v is number =>
  * 6.8 − 1.2 = 5.6, 3 + floor(5.6 / 0.0716) = 81 → the cap (6 at a 1-core budget). Calm at
  * 1.75 own of 2 cores (guard 90: spare 0.05) with 2 active: 2 + 0 = 2. Any other label
  * (`own-over`, `host-busy`, `host-busy-unattributed`: pressure; `unknown`), no reading, a stale
- * or malformed one: the floor, 2. Sessions already running are never stopped by a lower limit;
- * new ones wait until the source is under it. The gate samples every 2 s, so sessions started
+ * or malformed one, or one whose arithmetic overflows: the floor, 2. Sessions already running
+ * are never stopped by a lower limit; new ones wait until the source is under it. The gate samples every 2 s, so sessions started
  * since its last sample are not in ownCores yet: the cap bounds that overshoot.
  */
 export function widebandRecordingLimit(
@@ -732,7 +738,16 @@ export function widebandRecordingLimit(
 	const per = widebandSessionCores(inputRateHz)
 	const room = spare > 0 && per > 0 ? Math.floor(spare / per) : 0
 	const running = finiteAtLeast(active, 0) ? Math.floor(active) : 0
-	const limit = Math.max(floor, Math.min(cap, running + room))
+	const sum = running + room
+	// An overflowing reading (a huge capacity, a huge active count) is no evidence: the floor.
+	if (
+		!Number.isFinite(spare) ||
+		!Number.isFinite(per) ||
+		!Number.isFinite(room) ||
+		!Number.isFinite(sum)
+	)
+		return unknown
+	const limit = Math.max(floor, Math.min(cap, sum))
 	return { limit, cap, shrunk: limit < cap ? "pressure" : null }
 }
 
