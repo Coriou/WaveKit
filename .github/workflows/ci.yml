@@ -53,7 +53,12 @@ jobs:
       - name: Crate tests
         run: make chan-test && make hub-test
       - name: Build the binary
-        run: make chan-build
+        run: make chan-build && make hub-build
+      # Hub intake against the real wavekit-iqhub (WAVEKIT_SOURCE_INTAKE=hub opt-in path).
+      - name: Real hub binary
+        env:
+          WAVEKIT_IQHUB_BIN: ${{ github.workspace }}/native/wavekit-iqhub/target/release/wavekit-iqhub
+        run: pnpm exec vitest run tests/unit/core/iq-hub
       # The manager and the binary agree on recentring only when both are real.
       - name: Real binary under the real manager
         env:

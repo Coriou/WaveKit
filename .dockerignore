@@ -22,6 +22,7 @@ web/coverage
 .tsc-cache
 **/.tsc-cache
 native/wavekit-chan/target
+native/wavekit-iqhub/target
 native/wavekit-frame/target
 native/wavekit-nfm/target
 
@@ -41,6 +42,7 @@ README.md
 # Third-party notices shipped with wavekit-chan and the wasm kernels (Dockerfile
 # final-base); kept explicit so a widened markdown pattern cannot drop them
 !native/wavekit-chan/LICENSES.md
+!native/wavekit-iqhub/LICENSES.md
 !native/wavekit-frame/LICENSES.md
 !native/wavekit-nfm/LICENSES.md
 .github

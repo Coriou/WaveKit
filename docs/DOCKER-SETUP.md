@@ -117,6 +117,17 @@ for a single-arch local build:
 docker buildx bake --file docker/bake.hcl default --set "*.platform=linux/amd64"
 ```
 
+The core images carry three native Rust binaries in `/usr/local/bin`, each
+built in its own stage: `wavekit-chan` and `wavekit-iqcap` (`chan-build`)
+and `wavekit-iqhub` (`hub-build`), the per-source IQ intake hub used only
+when `WAVEKIT_SOURCE_INTAKE=hub` (opt-in; `WAVEKIT_IQHUB_BIN` defaults to
+`/usr/local/bin/wavekit-iqhub`, see
+[ARCHITECTURE.md](ARCHITECTURE.md)). The `hub-build` stage fails the build
+when the binary's `ready` line does not list the `front` sink feature, and
+the final image's verification step runs `wavekit-iqhub --version` and
+refuses unexpected shared libraries, as it does for the other two. To build
+the hub on the host without Docker: `make hub-build`.
+
 `make docker-push` invokes `docker/push.sh`, which calls bake with
 `--push` and `CACHE_FROM_ONLY=false` (so cache layers are written, not
 just read). GHCR is the only push target. The owner defaults to `coriou`

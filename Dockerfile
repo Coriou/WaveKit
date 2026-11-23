@@ -592,6 +592,33 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=chan-cargo-registry-$
     { : | wavekit-chan --generation 1 --input-format cu8 --input-rate 2048000 --input-center 100000000 --usable-fraction 0.8 --block-samples 16384 --socket-dir /tmp --control-fd 3 3</dev/null | head -n 1 | grep -q '"recenter":true' || { echo "wavekit-chan does not take recenter"; exit 1; }; }
 
 # ============================================================================
+# Stage: hub-build
+# Purpose: Build wavekit-iqhub, the per-source IQ intake hub (Rust,
+#          AGPL-3.0-or-later; native/wavekit-iqhub), used when
+#          WAVEKIT_SOURCE_INTAKE=hub. Same toolchain, lock and cache-mount
+#          pattern as chan-build. The last step refuses a binary without the
+#          `front` feature, read from its own `ready` line.
+# ============================================================================
+FROM ${RUST_IMAGE} AS hub-build
+
+ARG TARGETARCH
+
+WORKDIR /src/wavekit-iqhub
+
+COPY native/wavekit-iqhub/Cargo.toml native/wavekit-iqhub/Cargo.lock ./
+COPY native/wavekit-iqhub/src ./src
+
+# The touch and the locked target mount: see chan-build (cargo decides by mtime).
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=hub-cargo-registry-${TARGETARCH} \
+    --mount=type=cache,target=/src/wavekit-iqhub/target,id=hub-target-${TARGETARCH},sharing=locked \
+    find src -type f -exec touch {} + && \
+    cargo build --release --locked && \
+    install -m 0755 target/release/wavekit-iqhub /usr/local/bin/wavekit-iqhub && \
+    hubdir="$(mktemp -d)" && chmod 0700 "$hubdir" && \
+    { 3</dev/null wavekit-iqhub --control-fd 3 --socket-dir "$hubdir" | head -n 1 | grep -q '"front"' || { echo "wavekit-iqhub has no front sinks"; exit 1; }; } && \
+    rm -rf "$hubdir"
+
+# ============================================================================
 # Stage: frame-wasm
 # Purpose: Build the wasm32 SIMD kernels (AGPL-3.0-or-later, no dependencies):
 #          the spectrum worker's frame kernel (native/wavekit-frame) and the
@@ -679,6 +706,11 @@ COPY --from=chan-build /usr/local/bin/wavekit-chan /usr/local/bin/
 COPY --from=chan-build /usr/local/bin/wavekit-iqcap /usr/local/bin/
 COPY native/wavekit-chan/LICENSES.md /usr/share/doc/wavekit-chan/LICENSES.md
 
+# wavekit-iqhub: per-source IQ intake hub (opt-in: WAVEKIT_SOURCE_INTAKE=hub;
+# WAVEKIT_IQHUB_BIN defaults to this path)
+COPY --from=hub-build /usr/local/bin/wavekit-iqhub /usr/local/bin/
+COPY native/wavekit-iqhub/LICENSES.md /usr/share/doc/wavekit-iqhub/LICENSES.md
+
 # SoapyRTLTCP module so acarsdec / dumpvdl2 can stream from rtl_tcp
 COPY --from=soapy-rtltcp-build /usr/local/lib/SoapySDR/modules0.8/librtltcpSupport.so /usr/local/lib/SoapySDR/modules0.8/
 
@@ -718,8 +750,11 @@ RUN echo "Verifying decoder installations..." && \
     wavekit-iqcap --version && \
     { ldd /usr/local/bin/wavekit-iqcap | awk '{print $1}' | grep -Ev '^(linux-vdso\.so\.1|/lib.*/ld-linux.*|libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libpthread\.so\.0|libdl\.so\.2|librt\.so\.1)$' > /tmp/iqcap-libs || true; } && \
     { if [ -s /tmp/iqcap-libs ]; then echo "unexpected wavekit-iqcap libs:"; cat /tmp/iqcap-libs; exit 1; fi; } && \
-    rm -f /tmp/chan-libs /tmp/iqcap-libs && \
-    echo "All 9 decoders + csdr + wavekit-chan + wavekit-iqcap verified successfully"
+    wavekit-iqhub --version && \
+    { ldd /usr/local/bin/wavekit-iqhub | awk '{print $1}' | grep -Ev '^(linux-vdso\.so\.1|/lib.*/ld-linux.*|libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libpthread\.so\.0|libdl\.so\.2|librt\.so\.1)$' > /tmp/iqhub-libs || true; } && \
+    { if [ -s /tmp/iqhub-libs ]; then echo "unexpected wavekit-iqhub libs:"; cat /tmp/iqhub-libs; exit 1; fi; } && \
+    rm -f /tmp/chan-libs /tmp/iqcap-libs /tmp/iqhub-libs && \
+    echo "All 9 decoders + csdr + wavekit-chan + wavekit-iqcap + wavekit-iqhub verified successfully"
 
 # Node runtime + app dist + workspace packages + config
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/
