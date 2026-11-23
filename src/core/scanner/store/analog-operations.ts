@@ -3144,6 +3144,7 @@ export class AnalogOperations {
 		legacy?: LegacyRetention,
 	): Promise<string[]> {
 		this.lastPass = null
+		this.operationsHeldFull = false
 		if (!this.ready) {
 			if (legacy) {
 				const capBytes = this.context.limits().maxBytes
