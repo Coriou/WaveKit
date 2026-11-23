@@ -2273,6 +2273,7 @@ async function main(): Promise<void> {
 				operatorActivity: liveDemodOperatorActivity(liveDemod),
 				logger,
 				cpuMeter: efficiencyCpu,
+				recordingCpu: () => gate.cpuState?.(monitor.monoNow()) ?? null,
 			})
 			scannerConstructionSettled = true
 			receiverState.setSpectrum(scanner.spectrum)
