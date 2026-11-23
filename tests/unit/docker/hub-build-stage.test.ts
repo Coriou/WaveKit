@@ -17,7 +17,7 @@ const stage = (name: string) => {
 	return next === -1 ? rest : rest.slice(0, next)
 }
 
-describe("wavekit-iqhub image integration (RX-S3 MAIN-NEEDED 1)", () => {
+describe("wavekit-iqhub image integration", () => {
 	it("caches hub-build only in the final and final-core chains", () => {
 		expect(target("final")).toContain('cache("hub-build")')
 		expect(target("final-core")).toContain('cache("hub-build")')

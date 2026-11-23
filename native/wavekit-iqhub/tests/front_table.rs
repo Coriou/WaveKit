@@ -1255,7 +1255,7 @@ fn f15_a_configure_with_other_values_closes_the_front_and_its_attempt_gracefully
         ),
         (Some("reconfigured"), Some(10), Some(6))
     );
-    // m3: not `now`: the pending command still goes upstream in the grace.
+    // not `now`: the pending command still goes upstream in the grace.
     let c = r.hub.attempt_closing(slot).expect("closing gracefully");
     assert!(c.by_front);
     r.k.sources[slot].command_space = usize::MAX;

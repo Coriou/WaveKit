@@ -97,8 +97,8 @@ keeps today's path; any other value stops startup, naming the accepted values. H
 only to `rtl_tcp` `U8_IQ` sources whose host is an IP address (a host name keeps the socket path).
 The hub bounds its own connect phase (start, configure, the 5 s upstream connect), so a hub fault
 is never counted as a receiver timeout: failures the hub causes carry `IQHUB_*` codes and never
-count as receiver connect failures or toward the endpoint fallback. The image does not ship the
-binary yet, so the hub stays a bench and test path until it does.
+count as receiver connect failures or toward the endpoint fallback. The image ships the binary
+at `/usr/local/bin/wavekit-iqhub` (the `WAVEKIT_IQHUB_BIN` default).
 
 **Key interfaces**:
 

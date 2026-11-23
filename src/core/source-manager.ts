@@ -684,7 +684,7 @@ export class SourceManager extends EventEmitter {
 		try {
 			settings = hubIntakeSettingsFrom(process.env)
 		} catch (error: unknown) {
-			// m3: the refused variable's name (WAVEKIT_IQHUB_BIN or WAVEKIT_IQHUB_STATS_DIR), never its value.
+			// the refused variable's name (WAVEKIT_IQHUB_BIN or WAVEKIT_IQHUB_STATS_DIR), never its value.
 			this.logger.error(
 				{ variable: intakeErrorVariable(error) ?? IQHUB_BIN_ENV },
 				"Hub intake refused: its settings are not usable; startup stops",
@@ -702,7 +702,7 @@ export class SourceManager extends EventEmitter {
 		})
 	}
 
-	/** S11/R3 item 4: a hub front skipped whole frames (counted loss) on a source's live attempt. */
+	/** A hub front skipped whole frames (counted loss) on a source's live attempt. */
 	private onIntakeGap(socket: net.Socket, gap: IntakeGap): void {
 		for (const [id, state] of this.sources) {
 			const attempt = state.attempt
@@ -3878,7 +3878,7 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
-	 * Hub intake (M4): the placement wait is registered synchronously right after `socket.write`, so
+	 * Hub intake: the placement wait is registered synchronously right after `socket.write`, so
 	 * the command offsets follow the write order; the ledger callback runs once both the write
 	 * callback and the placement have arrived (a write error wins at once).
 	 */

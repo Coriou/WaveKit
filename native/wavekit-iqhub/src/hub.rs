@@ -2719,8 +2719,8 @@ impl Hub {
             return;
         }
         if f.ending || f.end.is_some() {
-            // Its stream is over: input goes nowhere. The EOF is F9 while it still drains (M6:
-            // the parent's end before `front-ended`), F14 once it ended.
+            // Its stream is over: input goes nowhere. The EOF is F9 while it still drains
+            // (the parent's end before `front-ended`), F14 once it ended.
             let ending = f.ending;
             for _ in 0..DISCARD_READS_PER_WAKE {
                 match k.front_recv(fs, &mut self.discard) {

@@ -1,5 +1,5 @@
 /**
- * The tuning ledger on a placed connection (hub intake, RX-S3 R3): receipts at the intake's
+ * The tuning ledger on a placed connection (hub intake): receipts at the intake's
  * exact placements, parked until forwardData reaches them (B2: queued frames settle reads past
  * their write position), doubts ordered by position as well as by seq (B3), and a measured
  * in-flight figure that only ever raises the settle (m2).
@@ -354,7 +354,7 @@ const MOVES_A_READ = new Set([1, 2, 5])
 describe("P3: receipts follow the hub's placements", () => {
 	it("records every receipt at exactly its placement, in seq order, monotone, never before it is reached, and trusts no read a brute-force model refuses", () => {
 		// Feature: rx-starvation, Property 4: receipts follow the hub's placements
-		// Validates: S3 R3 items 1-2, B2, B3, I-P (ledger)
+		// Validates: hub intake exact receipts, queued commands, doubts by position
 		let commandedReads = 0
 		fc.assert(
 			fc.property(
@@ -638,7 +638,7 @@ const b3Case: fc.Arbitrary<B3Case> = fc.record({
 describe("P3b: a doubt, then a placement around its position, then a read past it", () => {
 	it("never trusts a read past a doubt on a receipt recorded before it or placed below it (B3 family)", () => {
 		// Feature: rx-starvation, Property 7: a placement at or below a standing doubt never re-proves past it
-		// Validates: S3 R3 B3 (ledger), m2
+		// Validates: hub intake doubts by position, settle bound
 		let commandedPastDoubt = 0
 		fc.assert(
 			fc.property(b3Case, c => {

@@ -7,7 +7,7 @@ import {
 } from "./rx-starvation-harness.js"
 
 /**
- * rx-starvation S1 (RX-design-1 §3 as amended by the table read): the gate's
+ * rx-starvation S1: the gate's
  * CPU evidence is the core's own CPU over the guard share of its capacity;
  * host CPU only excuses drops.
  */

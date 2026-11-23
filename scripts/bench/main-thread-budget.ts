@@ -747,7 +747,7 @@ async function hubPidOf(statsFile: string): Promise<number | null> {
 }
 
 /**
- * M7: the exact end-of-run check's inputs. The fake gets its stop-and-end signal (SIGUSR1) and
+ * the exact end-of-run check's inputs. The fake gets its stop-and-end signal (SIGUSR1) and
  * logs each client's bytesWritten and whether it closed gracefully (`stopped`); then the stream's
  * end must reach the core: hub mode waits for the stats file to show the front that carried the stream closed,
  * socket mode for the core's count to stop moving. Then the core's bytesReceived is read.

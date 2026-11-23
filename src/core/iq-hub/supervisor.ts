@@ -1,6 +1,6 @@
 /**
  * The Node side of hub intake: one Supervisor per hub-mode source owns one `wavekit-iqhub` process
- * and dials each SourceManager attempt through it (the rows S1-S19 of the RX-S3 design). The
+ * and dials each SourceManager attempt through it. The
  * socket SourceManager holds is a real `net.Socket` connected to the attempt's front sink over a
  * Unix socket; the front replays the rtl_tcp header, delivers the stream with counted gaps and
  * forwards the bytes Node writes upstream in order. The supervisor follows the hub's ordered event
@@ -11,7 +11,7 @@
  * connect-failure record and its endpoint fallback. A closed upstream attempt maps to the code a `net` connect would give.
  *
  * Exact command positions: SourceManager registers each write's command bytes synchronously
- * (`noteCommandBytes`, M4) and `front-placed` resolves them in write order at the front's sink
+ * (`noteCommandBytes`) and `front-placed` resolves them in write order at the front's sink
  * byte (the Node payload position), with the hub's upstream backlog plus the in-flight bound
  * (S12). A front that ends or closes, a closed Node socket and a gone hub resolve the rest null;
  * a placement that disagrees with Node's accounting fails the dial (IQHUB_PLACEMENT_MISMATCH).
@@ -75,7 +75,7 @@ export const HUB_ABORT_AFTER_CLOSE_MS = 3000
 export const HUB_SHUTDOWN_WAIT_MS = 2000
 /** After SIGKILL, dispose waits this long for the exit, then logs and gives up on it. */
 export const HUB_KILL_WAIT_MS = 2000
-/** m3: a rate change waits this long for older fronted attempts to close. */
+/** a rate change waits this long for older fronted attempts to close. */
 export const HUB_CONFIGURE_WAIT_MS = 2000
 /** A paused Node socket delays its `end` at most this long in all, then it is destroyed. */
 export const HUB_PAUSED_END_CAP_MS = 15_000
@@ -116,7 +116,7 @@ function safeReason(reason: string): string {
 }
 
 /**
- * M1: after a main-thread stall the timers phase runs before the poll phase reads an event line
+ * after a main-thread stall the timers phase runs before the poll phase reads an event line
  * already waiting, so a deadline only acts once a `setImmediate` (the check phase, after poll) has
  * let that line in; the callback re-checks whether its event arrived.
  */
@@ -213,11 +213,11 @@ interface Hub {
 }
 
 export interface SupervisorHooks {
-	/** R3: a front's commands reached their exact Node position. */
+	/** A front's commands reached their exact Node position. */
 	onFrontPlaced?: (socket: Socket, event: HubFrontPlaced) => void
 	/** A front skipped whole frames (start or lag): counted loss. */
 	onIntakeGap?: (socket: Socket, event: HubSinkGap) => void
-	/** The Node socket of a dial closed (R3 resolves its pending placements null). */
+	/** The Node socket of a dial closed (its pending placements resolve null). */
 	onDialClosed?: (socket: Socket) => void
 }
 
@@ -286,7 +286,7 @@ export class Supervisor {
 		return this.bySocket.get(socket)?.localPort ?? null
 	}
 
-	/** The accounting of a dialled socket's front (tests, R3). */
+	/** The accounting of a dialled socket's front (tests, placement). */
 	accountingOf(socket: Socket): FrontAccounting | null {
 		return this.bySocket.get(socket)?.accounting ?? null
 	}
@@ -496,7 +496,7 @@ export class Supervisor {
 		return sent ? seq : -1
 	}
 
-	// m3: a rate change closes every other front (F15); give older fronted attempts their grace.
+	// a rate change closes every other front (F15); give older fronted attempts their grace.
 	private async waitOlderFrontsBeforeConfigure(
 		hub: Hub,
 		dial: Dial,
@@ -671,7 +671,7 @@ export class Supervisor {
 	}
 
 	/**
-	 * M-A: the hub bounds the upstream connect itself (HUB_CONNECT_TIMEOUT_MS); a hub that reports
+	 * the hub bounds the upstream connect itself (HUB_CONNECT_TIMEOUT_MS); a hub that reports
 	 * neither `tcp-connected` nor `closed` past it plus HUB_CONNECT_GRACE_MS is hung, not the
 	 * receiver. It stays armed until the Unix connect starts (both `tcp-connected` and `sink-ready`),
 	 * so a hub that never answers `sink-open` is bounded too. Acts only after the poll phase (a
@@ -742,7 +742,7 @@ export class Supervisor {
 		this.fail(dial, IQHUB_REJECTED, "IQ hub refused the connect")
 	}
 
-	// S6 (and M9): connect the Unix socket once the front is declared and TCP is up.
+	// S6: connect the Unix socket once the front is declared and TCP is up.
 	private maybeStartUnix(hub: Hub, dial: Dial): void {
 		if (!dial.sinkReady || !dial.tcpConnected || dial.unixStarted) return
 		if (dial.attempt === null || dial.sink === null) return
@@ -806,7 +806,7 @@ export class Supervisor {
 				const dial = this.byAttempt.get(event.attempt)
 				if (event.seq !== undefined) hub.answers.delete(event.seq)
 				if (!dial) return
-				// m1: the backstop stays armed until the Unix connect starts (sink-ready may never come).
+				// the backstop stays armed until the Unix connect starts (sink-ready may never come).
 				dial.tcpConnected = true
 				dial.localPort = event.localPort > 0 ? event.localPort : null
 				this.maybeStartUnix(hub, dial)
@@ -923,7 +923,7 @@ export class Supervisor {
 			return true
 		}
 		if (end <= dial.placedFrontBytes) {
-			// M-A: the hub already read past these bytes (they went upstream) before Node registered
+			// the hub already read past these bytes (they went upstream) before Node registered
 			// them, so where they took effect is unknown: fail the dial (doubt, then end the session).
 			this.failPlacement(
 				dial,
@@ -940,13 +940,13 @@ export class Supervisor {
 	 * S12: every registered end at or below `frontBytes` resolves, in write order, at the front's
 	 * `sinkByte` (the Node payload position: the hub counts sink bytes exactly as Node counts its
 	 * payload, gaps excluded), with `queuedBytes` (FIONREAD upstream when the command went out)
-	 * plus the unmeasured in-flight bound (m2: never below today's settle term).
+	 * plus the unmeasured in-flight bound (never below today's settle term).
 	 */
 	private onFrontPlaced(dial: Dial, event: HubFrontPlaced): boolean {
 		if (dial.placementsOver) return false
 		const mapped = dial.accounting.sinkByteOf(event.atSourcePos)
 		if (mapped !== null && mapped !== event.sinkByte) {
-			// m-1: the hub's sink byte and its own gap history disagree: trust neither figure.
+			// the hub's sink byte and its own gap history disagree: trust neither figure.
 			this.failPlacement(dial, { sinkByte: event.sinkByte, mapped })
 			return false
 		}
@@ -954,7 +954,7 @@ export class Supervisor {
 			event.sinkByte < dial.placedSinkByte ||
 			event.frontBytes < dial.placedFrontBytes
 		) {
-			// m-1: placements resolve in command order, so a position never moves back.
+			// placements resolve in command order, so a position never moves back.
 			this.failPlacement(dial, {
 				sinkByte: event.sinkByte,
 				previousSinkByte: dial.placedSinkByte,
@@ -1062,7 +1062,7 @@ export class Supervisor {
 		if (abort !== null) this.abortNow(hub, abort)
 	}
 
-	/** Records how the Node socket ends and applies it once Node has its `end` (S14, M6). */
+	/** Records how the Node socket ends and applies it once Node has its `end` (S14). */
 	private decide(dial: Dial, decision: EndDecision): void {
 		if (dial.decision === null) dial.decision = decision
 		if (this.cancelled(dial)) return
@@ -1122,7 +1122,7 @@ export class Supervisor {
 		else dial.socket.end()
 	}
 
-	// M6: Node saw the front's EOF; wait for the hub's account of it.
+	// Node saw the front's EOF; wait for the hub's account of it.
 	private onNodeEnd(dial: Dial): void {
 		dial.nodeEnded = true
 		if (dial.decision !== null) {
@@ -1132,7 +1132,7 @@ export class Supervisor {
 		this.armEndTimer(dial)
 	}
 
-	// S15 and M9: SourceManager closed the socket.
+	// S15: SourceManager closed the socket.
 	private onNodeClose(dial: Dial): void {
 		if (dial.nodeClosed) return
 		dial.nodeClosed = true
@@ -1349,7 +1349,7 @@ export interface HubSourceIntakeOptions extends SupervisorHooks {
 
 /**
  * The hub SourceIntake: rtl_tcp U8 IQ sources with an IP-literal host go through a per-source
- * Supervisor; every other source, and a host name (M8), keeps today's socket path.
+ * Supervisor; every other source, and a host name, keeps today's socket path.
  */
 export class HubSourceIntake implements SourceIntake {
 	private readonly log: Logger
@@ -1370,7 +1370,7 @@ export class HubSourceIntake implements SourceIntake {
 		this.listener = listener
 	}
 
-	/** The supervisor of a source (tests, R3). */
+	/** The supervisor of a source (tests, placement). */
 	supervisor(id: string): Supervisor | undefined {
 		return this.supervisors.get(id)
 	}
@@ -1471,7 +1471,7 @@ export class HubSourceIntake implements SourceIntake {
 		return null
 	}
 
-	// m9: the map drops the supervisor at once, so a re-added id gets a new hub.
+	// the map drops the supervisor at once, so a re-added id gets a new hub.
 	dispose(id: string): void {
 		const supervisor = this.supervisors.get(id)
 		if (!supervisor) return

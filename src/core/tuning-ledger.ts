@@ -673,7 +673,7 @@ export class LedgerConnection {
 	 * doubt on both fields (the receiver may have parsed part of it). A null placement (the bytes
 	 * never reached the receiver: the front ended or closed first) records nothing and raises no
 	 * doubt: the command touched no delivered byte, and a doubt would make the controller re-write
-	 * at once into the same ending front (a hot loop while Node is starved, M1).
+	 * at once into the same ending front (a hot loop while Node is starved).
 	 * `onReceipt` runs once with the receipt of the payload's last complete frame, or null.
 	 */
 	write(
@@ -984,7 +984,7 @@ export class TuningLedger {
 		if (placed !== undefined) {
 			const newest = live.receipts.at(-1)?.pos ?? live.evictedMaxPos
 			if (validPos(placed.pos)) {
-				// m-1: never hide a placement below the newest receipt (the supervisor fails the dial on
+				// never hide a placement below the newest receipt (the supervisor fails the dial on
 				// a non-monotone hub position): it records there and doubts the field from its own
 				// position, so no read past it is proven by this receipt alone.
 				outOfOrder = placed.pos < newest
@@ -1477,7 +1477,7 @@ export class TuningLedger {
 			if (posA < h.end && posB > h.start)
 				return { ok: false, reason: "doubt", doubtReason: h.reason }
 		// A doubt unproves the receipts raised before it (by seq), from its position on; equal
-		// positions do not matter: a receipt after the doubt re-proves. B3: a receipt recorded
+		// positions do not matter: a receipt after the doubt re-proves. A receipt recorded
 		// after the doubt at an earlier position (a hub placement) does not re-prove past it.
 		const evicted = live.evictedDoubt[field]
 		if (
@@ -1492,7 +1492,7 @@ export class TuningLedger {
 			if (d.field === field || d.field === "both")
 				return { ok: false, reason: "doubt", doubtReason: d.reason }
 		}
-		// B2: a frame of the field (or a centre mover) written to a placed connection and not
+		// a frame of the field (or a centre mover) written to a placed connection and not
 		// receipted yet may already be in effect anywhere past the position it was written at.
 		if (live.queuedFrom !== null) {
 			const from = this.queuedMoverFrom(live, field)
@@ -1608,7 +1608,7 @@ export class TuningLedger {
 		const link = this.opts.settleLink?.(live.sourceId) ?? {
 			configuredSettleMs: DEFAULT_LEDGER_SETTLE_MS,
 		}
-		// m2: a measured in-flight figure (hub placement) only ever raises the link's estimate.
+		// a measured in-flight figure (hub placement) only ever raises the link's estimate.
 		if (receipt.inFlightBytes === undefined)
 			return settleBytes(rate, frameBytes, link)
 		const estimate = link.inFlightBytes ?? IN_FLIGHT_BOUND_BYTES

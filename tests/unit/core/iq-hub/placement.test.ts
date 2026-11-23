@@ -1,5 +1,5 @@
 /**
- * R3: tuner-command receipts at the hub's exact placements. The supervisor resolves registered
+ * Tuner-command receipts at the hub's exact placements. The supervisor resolves registered
  * command ends from `front-placed` (S12), SourceManager registers them synchronously at the write
  * (M4) and the ledger records receipts at the placed position (parked until forwardData reaches
  * it). The stamped fake receiver proves I-P end to end: no new-centre byte before a receipt's
@@ -524,7 +524,7 @@ describe("SourceManager receipts at the hub's placements", () => {
 
 	it("Feature: rx-starvation, Property 6: no new-centre byte appears before a receipt's position (stamped receiver)", async () => {
 		// Feature: rx-starvation, Property 6: no new-centre sample before a receipt's position
-		// Validates: S3 I-P, R3 items 1-2, M4, B2
+		// Validates: hub intake placement, exact receipts, queued commands
 		const { manager, received, front } = await hubManager()
 		const ledger = manager.tuningLedger
 		let stampCounter = 0
