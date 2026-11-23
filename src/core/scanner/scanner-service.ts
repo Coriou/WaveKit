@@ -365,6 +365,7 @@ import {
 import {
 	WidebandAnalogRecorder,
 	widebandToneEvidence,
+	type RecordingCpuReading,
 } from "./channel/wideband-analog-recorder.js"
 import type {
 	ObservedDecoderEligibility,
@@ -578,6 +579,12 @@ export interface ScannerServiceDeps {
 	transports?: readonly TransportStrategy[]
 	/** Default liveAudioListen; Task 46 passes the monitor strategy. */
 	listen?: ListenStrategy
+	/**
+	 * The decoder efficiency gate's latest CPU classification while fresh (its `cpuState`), for
+	 * the analog recorder's per-source limit (widebandRecordingLimit): a calm reading with spare
+	 * cores lets a source record more than 2 voices at once. Absent or null: 2.
+	 */
+	recordingCpu?: () => RecordingCpuReading | null
 	cpuMeter?: {
 		start(): void
 		stop(): void
@@ -1660,6 +1667,10 @@ export class ScannerService extends EventEmitter {
 					admission: this.settings().admission,
 				}),
 				beginAnalog: input => this.beginAnalogRecording(input),
+				// The store's analog operations over all sources (its overall limit).
+				analogActive: () => this.evidence.analogActiveCount,
+				// And per source, the channel tier's included (the store's per-source limit).
+				analogActiveOn: sourceId => this.evidence.analogActiveCountOn(sourceId),
 				recordTone: (observationId, ctcssHz, at) =>
 					void this.store.recordAnalog(
 						observationId,
@@ -1667,6 +1678,8 @@ export class ScannerService extends EventEmitter {
 					),
 				// Recordings share the probes' and live audio's CPU budget (cpuBudgetCores).
 				reserveCores: cores => this.probes.reserveExternal(cores),
+				// The efficiency gate's CPU reading: more voices at once only while it reads calm.
+				recordingCpu: () => this.deps.recordingCpu?.() ?? null,
 				tuningRefused: sourceId => this.tuningRefused(sourceId, "recording"),
 				// The decoded label (and its decode's time) of a discovery, or of the live one it
 				// was merged into.

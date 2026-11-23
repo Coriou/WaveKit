@@ -49,9 +49,33 @@ import {
 } from "./recording-operation.js"
 
 export const MAX_ACTIVE_ANALOG_OPERATIONS = 8
-export const MAX_ACTIVE_ANALOG_PER_SOURCE = 2
+/**
+ * The recorder's floor per source (widebandRecordingLimit): it never limits a source to fewer
+ * than 2, whatever its CPU reads. The store guarantees the floor to a second source only: with
+ * one source at its ceiling of 6 and a second at 2, all 8 operations are held and a third source
+ * gets none until one ends (the recorder waits, refused:slots, before the operations' overall
+ * limit would deny its admission).
+ */
+export const MIN_ACTIVE_ANALOG_PER_SOURCE = 2
+/**
+ * The hard ceiling of analog operations on one source: MAX_ACTIVE_ANALOG_OPERATIONS −
+ * MIN_ACTIVE_ANALOG_PER_SOURCE = 8 − 2 = 6, so a second source keeps its floor of 2 while
+ * the first is at its ceiling (a second source only: 6 + 2 leaves a third none). The reservation arithmetic holds every operation in flight at
+ * once (8, so 6 of one source too): the operation inventory keeps OPERATION_HEADROOM = 8 free
+ * under its bound, and a byte retention pass leaves at least EVICTION_TARGET_MIN_HEADROOM = 8 ×
+ * RESERVATION free under the cap. Admission itself counts each one in flight as outstanding
+ * (used + outstanding + RESERVATION <= cap), so six admitted at once never exceed the quota.
+ * The recorder admits fewer when its CPU budget or the measured CPU says so (it never asks for
+ * more than this). Only an admission that asks for it gets the ceiling (AnalogInput
+ * perSourceLimit): a producer without a CPU gate keeps the floor of 2 per source.
+ */
+export const MAX_ACTIVE_ANALOG_PER_SOURCE =
+	MAX_ACTIVE_ANALOG_OPERATIONS - MIN_ACTIVE_ANALOG_PER_SOURCE
 export const MAX_ANALOG_FILE_BYTES = 1_920_044
-const RESERVATION = MAX_ANALOG_FILE_BYTES + MAX_OPERATION_METADATA_BYTES
+/** One admission's bytes: the largest file plus its operation metadata, 1,936,428 B. */
+export const ANALOG_RESERVATION_BYTES =
+	MAX_ANALOG_FILE_BYTES + MAX_OPERATION_METADATA_BYTES
+const RESERVATION = ANALOG_RESERVATION_BYTES
 /**
  * Room retention keeps free under the recordings quota for admission: 2 × RESERVATION =
  * 2 × (1,920,044 + 16,384) = 3,872,856 B. Admission refuses once used + outstanding +
@@ -374,6 +398,27 @@ export interface AnalogInput {
 	discoveryId: string
 	observationId: string
 	binding: RecordingBinding
+	/**
+	 * Operations this source may hold at once for this admission (analogPerSourceLimit): the
+	 * wideband recorder, whose own CPU-gated limit (2 to 6) bounds its sessions, passes the
+	 * ceiling MAX_ACTIVE_ANALOG_PER_SOURCE; a producer without a CPU gate (the channel tier's
+	 * recording producer) passes nothing and gets the floor, 2.
+	 */
+	perSourceLimit?: number
+}
+
+/**
+ * The per-source limit one admission is judged against: `perSourceLimit` clamped to
+ * [MIN_ACTIVE_ANALOG_PER_SOURCE, MAX_ACTIVE_ANALOG_PER_SOURCE] (floored); absent or not finite,
+ * the floor (2). It counts every operation active on the source, any producer's.
+ */
+export function analogPerSourceLimit(perSourceLimit: unknown): number {
+	if (typeof perSourceLimit !== "number" || !Number.isFinite(perSourceLimit))
+		return MIN_ACTIVE_ANALOG_PER_SOURCE
+	return Math.max(
+		MIN_ACTIVE_ANALOG_PER_SOURCE,
+		Math.min(MAX_ACTIVE_ANALOG_PER_SOURCE, Math.floor(perSourceLimit)),
+	)
 }
 export interface AnalogMetadataAdapter {
 	authorityHealthy(): boolean
@@ -861,6 +906,21 @@ export class AnalogOperations {
 		this.io = context.io ?? defaultIo
 		this.root = resolve(context.root)
 	}
+	/** Operations active now over all sources (the MAX_ACTIVE_ANALOG_OPERATIONS limit counts these). */
+	get activeCount(): number {
+		return this.active.size
+	}
+	/**
+	 * Operations active now on `sourceId`, every producer's (the per-source limit,
+	 * analogPerSourceLimit, counts these): at most MAX_ACTIVE_ANALOG_OPERATIONS to scan.
+	 */
+	activeCountOn(sourceId: string): number {
+		let n = 0
+		for (const op of this.active.values())
+			if (op.intent.binding.sourceId === sourceId) n++
+		return n
+	}
+
 	get ready(): boolean {
 		return (
 			!this.stopped &&
@@ -996,7 +1056,7 @@ export class AnalogOperations {
 		// Registration precedes the first await, including an admission that will fail.
 		const capacity =
 			this.active.size < MAX_ACTIVE_ANALOG_OPERATIONS &&
-			sameSource < MAX_ACTIVE_ANALOG_PER_SOURCE
+			sameSource < analogPerSourceLimit(input.perSourceLimit)
 		if (capacity) this.active.set(id, op)
 		op.ready = capacity
 			? this.admit(op)

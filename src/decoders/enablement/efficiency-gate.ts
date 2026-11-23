@@ -2179,6 +2179,7 @@ export function createEfficiencyGate(
 				ownCores,
 				capacityCores,
 				guardPercent: inputs.cpuGuardPercent,
+				sampledAt: cpuAt,
 			}
 		},
 		hostBusy: (sourceId, branches) =>

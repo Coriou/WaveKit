@@ -266,8 +266,11 @@ describe("cpuState (m4)", () => {
 			ownCores: OWN_CALM,
 			capacityCores: CAPACITY,
 			guardPercent: 90,
+			sampledAt: h.mono,
 		})
 		h.step(10, OWN_OVER)
+		// Each sample names its reading by its time.
+		expect(h.gate.cpuState?.(h.mono)?.sampledAt).toBe(h.mono)
 		expect(h.gate.cpuState?.(h.mono)?.label).toBe("own-over")
 		h.step(99, null)
 		expect(h.gate.cpuState?.(h.mono)?.label).toBe("host-busy-unattributed")

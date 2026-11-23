@@ -110,8 +110,8 @@ describe("WidebandAnalogRecorder with two voiced channels in the window", () => 
 	}, 120_000)
 
 	it("a voiced session evicted while its track stays open is listed unrecorded until that track closes", async () => {
-		// Two slots: the self-classed shadow "n" and the classed voice "x" fill them.
-		expect(widebandRecordingCap(FS, 4)).toBe(2)
+		// Two slots (no CPU reading: the floor): the self-classed shadow "n" and the classed voice "x" fill them.
+		expect(widebandRecordingCap(FS, 4)).toBe(6)
 		const h = harness({ budget: 4, source: { amp: 0 } })
 		const speech = (offsetHz: number, seed: number) =>
 			new NfmSource({ fs: FS, offsetHz, amp: 0.25, seed, syllables: true })

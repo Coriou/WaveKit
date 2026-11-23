@@ -233,13 +233,8 @@ describe("WidebandAnalogRecorder", () => {
 		expect(Math.abs(h.ops[0]!.frames - 8 * 1300)).toBeLessThanOrEqual(8 * 30)
 	}, 60_000)
 
-	it("caps concurrent recordings per source by the CPU budget, at least 1 and at most 2", () => {
-		expect(widebandRecordingCap(1_024_000, 1)).toBe(2)
-		expect(widebandRecordingCap(2_400_000, 1)).toBe(2)
-		// floor(25 / 59.2) = 0 → 1; floor(0.25 · 0.24 · 1000 / 59.2) = 1.
-		expect(widebandRecordingCap(1_024_000, 0.1)).toBe(1)
-		expect(widebandRecordingCap(1_024_000, 0.48)).toBe(2)
-		expect(widebandRecordingCap(1_024_000, 0.47)).toBe(1)
+	it("without a CPU reading a source records at most the floor of 2 at once, whatever the budget's cap", () => {
+		expect(widebandRecordingCap(1_024_000, 1)).toBe(4)
 		const h = harness()
 		for (let i = 0; i < 3; i++)
 			h.rec.track(

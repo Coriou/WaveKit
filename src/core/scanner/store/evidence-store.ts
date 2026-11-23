@@ -826,6 +826,14 @@ export class EvidenceStore {
 	get analogAuthorityReady(): boolean {
 		return this.analog?.ready ?? false
 	}
+	/** Analog operations active now over all sources (0 without an analog authority). */
+	get analogActiveCount(): number {
+		return this.analog?.activeCount ?? 0
+	}
+	/** Analog operations active now on `sourceId`, every producer's (0 without an analog authority). */
+	analogActiveCountOn(sourceId: string): number {
+		return this.analog?.activeCountOn(sourceId) ?? 0
+	}
 	beginAnalog(input: AnalogInput): AnalogHandle {
 		if (!this.analog)
 			throw new WaveKitError(

@@ -470,6 +470,11 @@ export interface EfficiencyCpuState {
 	ownCores: number | null
 	capacityCores: number | null
 	guardPercent: number
+	/**
+	 * The sample's time (the gate's cpuAt: the record's atMs, monotonic in the core's
+	 * composition). It names the reading, so readers can tell a new sample from the same one.
+	 */
+	sampledAt?: number | null
 }
 export interface EfficiencyInputs {
 	budget?: EfficiencyBudgetService

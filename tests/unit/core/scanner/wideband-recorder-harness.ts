@@ -16,11 +16,13 @@ import pino from "pino"
 import type { Logger } from "../../../../src/utils/logger.js"
 import {
 	WidebandAnalogRecorder,
+	type RecordingCpuReading,
 	type WidebandEngineView,
 	type WidebandTrackInput,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
 import {
-	MAX_ACTIVE_ANALOG_PER_SOURCE,
+	MAX_ACTIVE_ANALOG_OPERATIONS,
+	analogPerSourceLimit,
 	type AnalogCut,
 	type AnalogFinishFacts,
 	type AnalogHandle,
@@ -117,8 +119,8 @@ export const microtasks = async (n: number): Promise<void> => {
 }
 
 /**
- * Fake analog operations with the store's rules: at most MAX_ACTIVE_ANALOG_PER_SOURCE active
- * per source (a slot is held until the operation settles), the binding must be live at
+ * Fake analog operations with the store's rules: at most the admission's per-source limit
+ * (analogPerSourceLimit: the wideband recorder asks for the ceiling, 6; absent, 2) active per source and MAX_ACTIVE_ANALOG_OPERATIONS (8) over all sources (a slot is held until the operation settles), the binding must be live at
  * admission and again at the finish, and the finish takes a few turns (I/O) to settle.
  */
 export function fakeOps(
@@ -156,7 +158,9 @@ export function fakeOps(
 		const sameSource = [...active].filter(
 			o => o.input.binding.sourceId === input.binding.sourceId,
 		).length
-		const capacity = sameSource < MAX_ACTIVE_ANALOG_PER_SOURCE
+		const capacity =
+			active.size < MAX_ACTIVE_ANALOG_OPERATIONS &&
+			sameSource < analogPerSourceLimit(input.perSourceLimit)
 		if (capacity) active.add(op)
 		else op.denied = true
 		const ready =
@@ -227,6 +231,14 @@ export function harness(
 		readyHold?: Promise<void>
 		source?: Partial<ConstructorParameters<typeof NfmSource>[0]>
 		reserveCores?: (cores: number) => (() => void) | null
+		/** The efficiency gate's CPU reading (WidebandAnalogDeps.recordingCpu); default absent (the floor, 2). */
+		recordingCpu?: () => RecordingCpuReading | null
+		/** The store's analog operations over all sources (WidebandAnalogDeps.analogActive); default absent. */
+		analogActive?: () => number
+		/** The store's analog operations on a source (WidebandAnalogDeps.analogActiveOn); default absent. */
+		analogActiveOn?: (sourceId: string) => number
+		/** The recorder's wall clock (WidebandAnalogDeps.now), driven by the test; wins over `liveClock`. */
+		now?: () => number
 		/** The recorder's refused:tuning report (WidebandAnalogDeps.tuningRefused). */
 		tuningRefused?: (sourceId: string) => void
 		/** The recorder's per-turn budget clock (milliseconds); default performance.now. */
@@ -270,9 +282,11 @@ export function harness(
 	const timers: { ms: number; run: () => void; live: boolean }[] = []
 	const warnings: unknown[] = []
 	const logger = opts.logger ?? pino({ level: "silent" })
-	const now = opts.liveClock
-		? () => HARNESS_T0 + (engine.liveEdge() * 1000) / fs
-		: () => HARNESS_T0
+	const now = opts.now
+		? opts.now
+		: opts.liveClock
+			? () => HARNESS_T0 + (engine.liveEdge() * 1000) / fs
+			: () => HARNESS_T0
 	const legacy = opts.decodedProtocol
 	const decodedLabel =
 		opts.decodedLabel ??
@@ -304,6 +318,9 @@ export function harness(
 		beginAnalog: opts.beginWrap ? opts.beginWrap(begin) : begin,
 		recordTone: (observationId, hz) => tones.push({ observationId, hz }),
 		...(opts.reserveCores ? { reserveCores: opts.reserveCores } : {}),
+		...(opts.recordingCpu ? { recordingCpu: opts.recordingCpu } : {}),
+		...(opts.analogActive ? { analogActive: opts.analogActive } : {}),
+		...(opts.analogActiveOn ? { analogActiveOn: opts.analogActiveOn } : {}),
 		...(opts.tuningRefused ? { tuningRefused: opts.tuningRefused } : {}),
 		...(decodedLabel ? { decodedLabel } : {}),
 		...(opts.voicePrior ? { voicePrior: opts.voicePrior } : {}),
