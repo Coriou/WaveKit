@@ -1570,6 +1570,8 @@ describe("analog receipt verdict facts", () => {
 			speech: "not-heard",
 			keptBy: "prior-none",
 			startedAt: "2026-11-16T10:00:00.000Z",
+			// The kept file's facts sidecar (recording-facts-sidecar.test.ts covers its members).
+			facts: expect.objectContaining({ operationId: receipt.operationId }),
 		})
 		// An older core's receipt has none of the three: rewrite one so, as such a core left it.
 		const oldPath = join(
@@ -1602,6 +1604,9 @@ describe("analog receipt verdict facts", () => {
 			speech: "unchecked",
 			keptBy: null,
 			startedAt: null,
+			facts: expect.objectContaining({
+				operationId: badReceipt.operationId,
+			}),
 		})
 		await h.evidence.stopAnalog()
 		const recovered = new EvidenceStore({
@@ -1670,6 +1675,7 @@ describe("analog receipt cutActive", () => {
 				speech: "unchecked",
 				keptBy: null,
 				startedAt: null,
+				facts: expect.objectContaining({ operationId: receipt.operationId }),
 			})
 		}
 		await h.evidence.stopAnalog()

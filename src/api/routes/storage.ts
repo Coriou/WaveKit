@@ -1,4 +1,4 @@
-import { STORAGE_AREA_IDS } from "@wavekit/api-types"
+import { STORAGE_AREA_IDS, STORAGE_SCANNER_PART_IDS } from "@wavekit/api-types"
 import type { StorageReport } from "@wavekit/api-types"
 import type { FastifyPluginAsync } from "fastify"
 import type { StorageReportProvider } from "../../core/storage-report/contract.js"
@@ -56,6 +56,29 @@ const retentionSchema = {
 	],
 } as const
 
+const partSchema = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		id: { type: "string", enum: [...STORAGE_SCANNER_PART_IDS] },
+		bytes: { type: "number" },
+		files: { type: "number" },
+		exists: { type: "boolean" },
+		bounds: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				maxBytes: nullableNumber,
+				maxAgeMs: nullableNumber,
+				maxFiles: nullableNumber,
+			},
+			required: ["maxBytes", "maxAgeMs", "maxFiles"],
+		},
+		overBound: { type: ["boolean", "null"] },
+	},
+	required: ["id", "bytes", "files", "exists", "bounds", "overBound"],
+} as const
+
 const areaSchema = {
 	type: "object",
 	additionalProperties: false,
@@ -93,6 +116,7 @@ const areaSchema = {
 			],
 		},
 		retention: retentionSchema,
+		parts: { type: "array", items: partSchema },
 	},
 	required: [
 		"id",
@@ -129,7 +153,38 @@ const responseSchema = {
 			],
 		},
 		areas: { type: "array", items: areaSchema },
-		kept: { type: "null" },
+		// StorageKeptSummary | null (a bare `type: "null"` serialized every summary as null).
+		kept: {
+			anyOf: [
+				{ type: "null" },
+				{
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						state: { type: "string", const: "ready" },
+						recordings: { type: "number" },
+						bytes: { type: "number" },
+						maxRecordings: { type: "number" },
+						maxBytes: { type: "number" },
+					},
+					required: [
+						"state",
+						"recordings",
+						"bytes",
+						"maxRecordings",
+						"maxBytes",
+					],
+				},
+				{
+					type: "object",
+					additionalProperties: false,
+					properties: {
+						state: { type: "string", enum: ["loading", "failed"] },
+					},
+					required: ["state"],
+				},
+			],
+		},
 		lowSpace: {
 			type: "object",
 			additionalProperties: false,

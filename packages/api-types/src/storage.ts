@@ -103,6 +103,59 @@ export interface StorageArea {
 	cap: { bytes: number } | null
 	/** Activity only; null for every other area. */
 	retention: StorageActivityRetention | null
+	/**
+	 * `scanner-evidence` only: the same bytes and files split by the scanner storage folder that
+	 * holds them, in STORAGE_SCANNER_PART_IDS order; their sums equal the area's. Lower bounds
+	 * too when the area is partial. Absent on other areas and from older cores.
+	 */
+	parts?: readonly StorageAreaPart[]
+}
+
+/**
+ * The scanner storage folders a `scanner-evidence` area is split into: `recordings` (the
+ * recording files and the analog operations' metadata, `.analog-operations`), `quarantine`
+ * (reversible noise discards), `journal` (observation journal), `captures` (burst IQ),
+ * `evidence` (per-discovery spectra and IQ snippets), `engine` (learned receiver state) and
+ * `other` (state files at the root and anything else).
+ */
+export type StorageScannerPartId =
+	| "recordings"
+	| "quarantine"
+	| "journal"
+	| "captures"
+	| "evidence"
+	| "engine"
+	| "other"
+export const STORAGE_SCANNER_PART_IDS: readonly StorageScannerPartId[] = [
+	"recordings",
+	"quarantine",
+	"journal",
+	"captures",
+	"evidence",
+	"engine",
+	"other",
+]
+
+/** What bounds one part (each null when nothing bounds it that way, or the scanner is off). */
+export interface StoragePartBounds {
+	maxBytes: number | null
+	/** Files older than this are removed. */
+	maxAgeMs: number | null
+	maxFiles: number | null
+}
+
+export interface StorageAreaPart {
+	id: StorageScannerPartId
+	bytes: number
+	files: number
+	/** The part's folder exists (`other`: anything outside the named folders was found). */
+	exists: boolean
+	bounds: StoragePartBounds
+	/**
+	 * bytes > maxBytes or files > maxFiles (exactly at a bound is within it). Null when neither
+	 * bound is set or the area is partial (its totals are lower bounds).
+	 */
+	overBound: boolean | null
 }
 
 export type StorageLowSpaceState = "ok" | "low" | "unknown"

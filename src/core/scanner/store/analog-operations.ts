@@ -47,6 +47,12 @@ import {
 	type PreparedRecordingMetadata,
 	type RecordingBinding,
 } from "./recording-operation.js"
+import {
+	RECORDING_FACTS_FILE,
+	RECORDING_FACTS_MAX_BYTES,
+	RECORDING_FACTS_TEMP,
+	recordingFactsBytes,
+} from "./recording-facts.js"
 
 export const MAX_ACTIVE_ANALOG_OPERATIONS = 8
 export const MAX_ACTIVE_ANALOG_PER_SOURCE = 2
@@ -416,6 +422,12 @@ export interface AnalogFinishFacts {
 	readonly speechHeard?: boolean | null
 	/** Wall time of the file's first sample, ISO. Receipt `startedAt`. */
 	readonly startedAt?: string
+	/**
+	 * The recording admission's measured numbers (recording-verdict.ts noiseFacts, the same as a
+	 * noise file's quarantine sidecar). Written to the kept file's facts sidecar
+	 * (recording-facts.ts), never to the receipt; a read-only pass-through, dropped when malformed.
+	 */
+	readonly admission?: NoiseQuarantineFacts
 }
 /**
  * The receipt's verdict members of finish facts: each one kept only when the receipt schema takes
@@ -706,6 +718,8 @@ interface Operation {
 	cutActive: boolean | null
 	/** The first finish's verdict facts (keptBy, speechHeard, startedAt) as given and valid. */
 	verdict: Pick<AnalogReceipt, "keptBy" | "speechHeard" | "startedAt">
+	/** The first finish's AnalogFinishFacts.admission as given (validated when the sidecar is written). */
+	admission: unknown
 	/** The check that refused it first (AnalogFailure), for its receipt. */
 	failure: AnalogFailure | null
 	accepting: boolean
@@ -967,6 +981,7 @@ export class AnalogOperations {
 			noise: null,
 			cutActive: null,
 			verdict: {},
+			admission: null,
 			failure: null,
 			accepting: true,
 			decision: null,
@@ -1031,7 +1046,10 @@ export class AnalogOperations {
 			finish: (cut = "completed", facts) => {
 				if (!op.finish && typeof facts?.cutActive === "boolean")
 					op.cutActive = facts.cutActive
-				if (!op.finish && facts !== undefined) op.verdict = verdictOf(facts)
+				if (!op.finish && facts !== undefined) {
+					op.verdict = verdictOf(facts)
+					op.admission = facts.admission ?? null
+				}
 				return this.finishOperation(op, AnalogCutSchema.parse(cut))
 			},
 			cancel: (cut = "cancelled", noise) => {
@@ -1647,12 +1665,62 @@ export class AnalogOperations {
 			} catch {
 				/* retained and inventoried */
 			}
+			// Still active (retention and deletion leave its discovery alone) while the sidecar is
+			// written, so the inventory settles with it.
+			await this.writeFacts(op, op.decision)
 			await this.settleInventory(op)
 		}
 		const result = op.decision!
 		this.active.delete(op.intent.operationId)
 		op.resolve(result)
 		return result
+	}
+	/**
+	 * The kept file's facts sidecar (recording-facts.ts), tmp + fsync + rename, best effort: any
+	 * failure leaves no sidecar (a temp file it could not remove is an allowed name, removed with
+	 * the operation) and never changes the finalized outcome. Skipped when intent + receipt +
+	 * sidecar would exceed the folder's metadata bound (MAX_OPERATION_METADATA_BYTES).
+	 */
+	private async writeFacts(
+		op: Operation,
+		receipt: AnalogReceipt,
+	): Promise<void> {
+		const dir = this.opDir(op.intent.operationId)
+		const temp = join(dir, RECORDING_FACTS_TEMP)
+		try {
+			const bytes = recordingFactsBytes({
+				operationId: op.intent.operationId,
+				discoveryId: op.intent.discoveryId,
+				observationId: op.intent.observationId,
+				targetHz: op.intent.binding.targetHz,
+				startedAt: receipt.startedAt,
+				durationMs: op.output?.durationMs ?? null,
+				keptAt: Date.now(),
+				cut: receipt.cutReason ?? "completed",
+				keptBy: receipt.keptBy,
+				speechHeard: receipt.speechHeard,
+				cutActive: receipt.cutActive ?? null,
+				admission: op.admission,
+			})
+			if (bytes === null) return
+			const metadata =
+				boundedJson(op.intent).length + boundedJson(receipt).length
+			if (
+				bytes.length > RECORDING_FACTS_MAX_BYTES ||
+				metadata + bytes.length > MAX_OPERATION_METADATA_BYTES
+			)
+				return
+			await this.writeSynced(temp, bytes)
+			const target = join(dir, RECORDING_FACTS_FILE)
+			await this.safeTarget(target)
+			await rename(temp, target)
+		} catch {
+			try {
+				await this.io.unlink(temp)
+			} catch {
+				/* an allowed name: inventoried, removed with the operation */
+			}
+		}
 	}
 	/**
 	 * A settling operation's files are final (no step of this process changes them any more):
@@ -2347,6 +2415,8 @@ export class AnalogOperations {
 					"receipt.json",
 					"receipt.tmp",
 					"payload.wav.part",
+					RECORDING_FACTS_FILE,
+					RECORDING_FACTS_TEMP,
 				].includes(name)
 			)
 				out.unknown = true
@@ -3124,6 +3194,8 @@ export class AnalogOperations {
 			"receipt.tmp",
 			"receipt.json",
 			"intent.tmp",
+			RECORDING_FACTS_TEMP,
+			RECORDING_FACTS_FILE,
 		]) {
 			try {
 				await remove(join(dir, name))

@@ -56,6 +56,8 @@ export const decoderStatusExtensionProperties = {
 				},
 				primary: { type: "boolean" },
 				running: { type: "boolean" },
+				eventsOut: { type: "number" },
+				lastEventAt: { type: "string", format: "date-time", nullable: true },
 				activity: {
 					type: "object",
 					properties: {

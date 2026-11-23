@@ -184,6 +184,63 @@ export interface RecordingInventoryItem {
 	 * kinds. Absent from older cores.
 	 */
 	keptBy?: string | null
+	/**
+	 * Scanner analog recordings only: the facts sidecar the store wrote when it kept the file
+	 * (RecordingFacts). Null when there is none (older files, a skipped write, a missing or
+	 * malformed sidecar) and for other kinds. Absent from older cores.
+	 */
+	facts?: RecordingFacts | null
+}
+
+/**
+ * The recording admission's measured numbers of one analog file (speech-content.ts, rounded as
+ * the recorder logs them) and the codes it decided on. Measured numbers and closed codes only.
+ */
+export interface RecordingAdmissionFacts {
+	frequencyHz: number | null
+	reason: string | null
+	strength: string | null
+	/** The admission branch that fired; absent when none did. */
+	branch?: "noise" | "data-buzz" | undefined
+	levelFrames: number
+	spreadDb: number
+	p10Dbfs: number
+	periodicShare: number
+	burstFrames: number
+	loudPitchShare?: number | undefined
+	topSpreadDb?: number | undefined
+	loudLevelDbfs?: number | null | undefined
+}
+
+/**
+ * Facts of a kept scanner analog recording, written once beside its receipt at the keep
+ * (schema version 1). Read-only: nothing serves, retains or deletes on them.
+ */
+export interface RecordingFacts {
+	version: 1
+	operationId: string
+	/** The discovery the file was kept for (its folder's owner at the keep). */
+	discoveryId: string
+	observationId: string
+	/** Demodulated centre, whole Hz; null when unknown. */
+	frequencyHz: number | null
+	/** First sample (ISO-8601 UTC); null when the recorder gave none. */
+	startedAt: string | null
+	/** startedAt + durationMs; null without either. */
+	endedAt: string | null
+	/** When the store kept the file. */
+	keptAt: string
+	durationMs: number | null
+	finish: {
+		/** The store's cut reason (`completed`, `duration-limit`, `epoch-changed`, …). */
+		cut: string
+		/** The recorder's finish reason code; null when it gave none. */
+		keptBy: string | null
+		speechHeard: boolean | null
+		cutActive: boolean | null
+	}
+	/** Null when the recorder passed no admission numbers. */
+	admission: RecordingAdmissionFacts | null
 }
 
 /**

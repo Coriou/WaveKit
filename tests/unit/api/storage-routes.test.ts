@@ -79,6 +79,63 @@ describe("storage routes", () => {
 		expect(res.body).not.toContain("/secret")
 	})
 
+	it("round-trips the scanner storage split (parts) and a ready kept summary", async () => {
+		const withParts: StorageReport = {
+			...full,
+			areas: [
+				{
+					id: "scanner-evidence",
+					class: "automatic",
+					bytes: 30,
+					files: 3,
+					exists: true,
+					partial: false,
+					partialReason: null,
+					cap: { bytes: 512 },
+					retention: null,
+					parts: [
+						{
+							id: "recordings",
+							bytes: 20,
+							files: 2,
+							exists: true,
+							bounds: { maxBytes: 512, maxAgeMs: 9, maxFiles: null },
+							overBound: false,
+						},
+						{
+							id: "other",
+							bytes: 10,
+							files: 1,
+							exists: true,
+							bounds: { maxBytes: null, maxAgeMs: null, maxFiles: null },
+							overBound: null,
+						},
+					],
+				},
+			],
+			kept: {
+				state: "ready",
+				recordings: 1,
+				bytes: 2,
+				maxRecordings: 3,
+				maxBytes: 4,
+			},
+		}
+		const app = await appWith(async () => withParts)
+		const res = await app.inject({ method: "GET", url: "/api/storage" })
+		expect(res.statusCode).toBe(200)
+		expect(res.json()).toEqual(withParts)
+	})
+
+	it.each(["loading", "failed"] as const)(
+		"serializes an unavailable kept summary (%s)",
+		async state => {
+			const app = await appWith(async () => ({ ...full, kept: { state } }))
+			const res = await app.inject({ method: "GET", url: "/api/storage" })
+			expect(res.json().kept).toEqual({ state })
+		},
+	)
+
 	it("answers HEAD with 200 and no body", async () => {
 		const app = await appWith(async () => full)
 		const res = await app.inject({ method: "HEAD", url: "/api/storage" })

@@ -45,6 +45,7 @@ import type {
 	StationProvenance,
 	StationUpdateResult,
 	StorageArea,
+	StorageAreaPart,
 	StorageReport,
 } from "@wavekit/api-types"
 import { MOCK_DECODER_OPTIONS } from "./decoder-options.ts"
@@ -400,6 +401,61 @@ const sameValue = (a: unknown, b: unknown) =>
 const MIB = 1024 * 1024
 const GIB = 1024 * MIB
 
+/**
+ * The scanner storage split as the core reports it (StorageArea.parts): the same order, sums
+ * equal to the area's (412 MiB, 1 284 files), bounds of the default scanner settings.
+ */
+function scannerParts(): StorageAreaPart[] {
+	const DAY = 86_400_000
+	const none = { maxBytes: null, maxAgeMs: null, maxFiles: null }
+	const part = (
+		id: StorageAreaPart["id"],
+		bytes: number,
+		files: number,
+		bounds: StorageAreaPart["bounds"],
+	): StorageAreaPart => ({
+		id,
+		bytes,
+		files,
+		exists: true,
+		bounds,
+		overBound:
+			bounds.maxBytes === null && bounds.maxFiles === null
+				? null
+				: (bounds.maxBytes !== null && bytes > bounds.maxBytes) ||
+					(bounds.maxFiles !== null && files > bounds.maxFiles),
+	})
+	return [
+		part("recordings", 300 * MIB, 980, {
+			maxBytes: 512 * MIB,
+			maxAgeMs: 30 * DAY,
+			maxFiles: null,
+		}),
+		part("quarantine", 60 * MIB, 210, {
+			maxBytes: 500 * MIB,
+			maxAgeMs: 7 * DAY,
+			maxFiles: 20_000,
+		}),
+		part("journal", 20 * MIB, 12, {
+			maxBytes: 64 * MIB,
+			maxAgeMs: 30 * DAY,
+			maxFiles: null,
+		}),
+		part("captures", 24 * MIB, 6, {
+			maxBytes: 256 * MIB,
+			maxAgeMs: null,
+			maxFiles: null,
+		}),
+		part("evidence", 6 * MIB, 60, {
+			maxBytes: 64 * MIB,
+			maxAgeMs: 30 * DAY,
+			maxFiles: null,
+		}),
+		part("engine", 1 * MIB, 10, none),
+		part("other", 1 * MIB, 6, none),
+	]
+}
+
 function storageReport(now: number, startedAt: number): StorageReport {
 	const sizes: Record<string, [bytes: number, files: number]> = {
 		activity: [118 * MIB + 412_000, 3],
@@ -467,7 +523,10 @@ function storageReport(now: number, startedAt: number): StorageReport {
 				sharesTruncated: false,
 			}
 		}
-		if (id === "scanner-evidence") area.cap = { bytes: 2 * GIB }
+		if (id === "scanner-evidence") {
+			area.cap = { bytes: 2 * GIB }
+			area.parts = scannerParts()
+		}
 		if (id === "iq-captures") area.cap = { bytes: IQ_CAPTURES_QUOTA_BYTES }
 		return area
 	})

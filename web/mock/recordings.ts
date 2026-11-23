@@ -272,6 +272,7 @@ function makeRec(s: Seed, at: Date): Rec {
 				observationId: null,
 				speech: "unchecked",
 				keptBy: null,
+				facts: null,
 			},
 		}
 	}
@@ -315,6 +316,8 @@ function makeRec(s: Seed, at: Date): Rec {
 					: null,
 			speech: s.kind === "scanner-analog" ? (s.speech ?? "heard") : "unchecked",
 			keptBy: s.kind === "scanner-analog" ? (s.keptBy ?? "final") : null,
+			// The kept file's facts sidecar: the mock writes none (as an older file reads).
+			facts: null,
 		},
 	}
 }

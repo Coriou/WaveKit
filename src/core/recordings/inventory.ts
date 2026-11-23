@@ -1491,8 +1491,9 @@ export function createRecordingInventory(
 			// RECORDINGS_RECEIPT_WAIT_MS. While it is still missing nothing changed, so nothing is
 			// replaced and no change is announced.
 			const root = spec.dirs[0]
+			// The facts sidecar follows the receipt the same way: read again while it is missing.
 			if (
-				prev.receipt !== null ||
+				(prev.receipt !== null && (prev.receipt.facts ?? null) !== null) ||
 				spec.kind !== "scanner-analog" ||
 				root === undefined ||
 				!receiptMayFollow(st.mtimeMs, at)
@@ -1503,6 +1504,8 @@ export function createRecordingInventory(
 			)
 			if (late === null || !attached(state) || state.files.get(name) !== prev)
 				return
+			// Nothing new: a receipt read again without its sidecar changes nothing.
+			if (prev.receipt !== null && (late.facts ?? null) === null) return
 			setFile(state, name, { ...prev, listed: false, receipt: late })
 			return
 		}
@@ -1992,6 +1995,7 @@ export function createRecordingInventory(
 			item.observationId = receipt?.observationId ?? null
 			item.speech = receipt?.speech ?? "unchecked"
 			item.keptBy = receipt?.keptBy ?? null
+			item.facts = receipt?.facts ?? null
 			if (kept !== undefined) item.kept = kept
 			if (eventIdOf !== undefined) {
 				let eventId: string | null = null

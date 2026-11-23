@@ -1,0 +1,276 @@
+/**
+ * GET /api/storage scanner split: the `scanner-evidence` area reports its folders (recordings,
+ * quarantine, journal, captures, evidence, engine, other) with their real bounds, and the parts'
+ * sums match a du-style walk of a synthetic tree. Synthetic files only.
+ */
+import { lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { afterEach, describe, expect, it } from "vitest"
+import { STORAGE_SCANNER_PART_IDS } from "@wavekit/api-types"
+import type { StorageAreaPart } from "@wavekit/api-types"
+import {
+	scannerStorageParts,
+	storageAreasFromConfig,
+} from "../../../../src/core/storage-report/areas-from-config.js"
+import { createStorageReporter } from "../../../../src/core/storage-report/reporter.js"
+import type { StorageAreaSource } from "../../../../src/core/storage-report/contract.js"
+import {
+	NOISE_QUARANTINE_MAX_AGE_MS,
+	NOISE_QUARANTINE_MAX_BYTES,
+	NOISE_QUARANTINE_MAX_FILES,
+} from "../../../../src/core/scanner/store/noise-quarantine.js"
+
+const MiB = 1024 * 1024
+const DAY = 86_400_000
+const dirs: string[] = []
+
+afterEach(async () => {
+	await Promise.all(
+		dirs.splice(0).map(d => rm(d, { recursive: true, force: true })),
+	)
+})
+
+const storage = {
+	dir: null,
+	maxRecordingsMb: 1,
+	maxEvidenceMb: 2,
+	maxJournalMb: 3,
+	maxAgeDays: 4,
+	maxCapturesMb: 5,
+}
+
+/** Files under the scanner root, by path, with sizes. */
+const TREE: Record<string, number> = {
+	"recordings/analog/d_1/analog-a.wav": 1000,
+	"recordings/dv/d_2/call.wav": 300,
+	".analog-operations/op-1/intent.json": 120,
+	".analog-operations/op-1/receipt.json": 240,
+	".analog-operations/op-1/facts.json": 60,
+	"quarantine/noise/2026-11-20/q.wav": 700,
+	"quarantine/noise/2026-11-20/q.json": 50,
+	"journal/observations-20261120.jsonl": 900,
+	"captures/cap_a.cu8": 4000,
+	"captures/cap_a.json": 80,
+	"evidence/d_1/psd.json": 222,
+	"engine/occupancy/src.json": 33,
+	"engine/receivers/src/rx/engine.json": 44,
+	"discoveries.json": 555,
+	"jobs.json": 66,
+	"set-aside-unknown/x.bin": 7,
+	// Excluded from the area (state backups, hard links of counted files).
+	".backups/v1/discoveries.json": 9999,
+}
+
+async function fixture(): Promise<string> {
+	const stateDir = await mkdtemp(join(tmpdir(), "wk-storage-parts-"))
+	dirs.push(stateDir)
+	for (const [rel, size] of Object.entries(TREE)) {
+		const file = join(stateDir, "scanner", rel)
+		await mkdir(join(file, ".."), { recursive: true })
+		await writeFile(file, Buffer.alloc(size))
+	}
+	return stateDir
+}
+
+/** du-style: every regular file (and symlink) under `dir`, by lstat, never following links. */
+async function du(dir: string): Promise<{ bytes: number; files: number }> {
+	let bytes = 0
+	let files = 0
+	let info
+	try {
+		info = await lstat(dir)
+	} catch {
+		return { bytes, files }
+	}
+	if (!info.isDirectory()) return { bytes: info.size, files: 1 }
+	for (const name of await readdir(dir)) {
+		const sub = await du(join(dir, name))
+		bytes += sub.bytes
+		files += sub.files
+	}
+	return { bytes, files }
+}
+
+async function reportOf(stateDir: string, enabled = true) {
+	const reporter = createStorageReporter({
+		stateDir,
+		areas: storageAreasFromConfig({
+			stateDir,
+			activityMaxDbBytes: null,
+			scannerStorage: storage,
+			scannerEnabled: enabled,
+			decoders: [],
+			accessDirectory: null,
+		}),
+		minFreeBytes: null,
+	})
+	const report = await reporter.report()
+	const area = report.areas.find(a => a.id === "scanner-evidence")
+	expect(area).toBeDefined()
+	return area!
+}
+
+describe("scanner-evidence split", () => {
+	it("part sums match a du-style walk of each folder and add up to the area", async () => {
+		const stateDir = await fixture()
+		const area = await reportOf(stateDir)
+		const root = join(stateDir, "scanner")
+		const parts = new Map(area.parts?.map(p => [p.id, p]))
+		expect(area.parts?.map(p => p.id)).toEqual(STORAGE_SCANNER_PART_IDS)
+		const sum = async (...names: string[]) => {
+			let bytes = 0
+			let files = 0
+			for (const n of names) {
+				const d = await du(join(root, n))
+				bytes += d.bytes
+				files += d.files
+			}
+			return { bytes, files }
+		}
+		const pick = (p: StorageAreaPart | undefined) => ({
+			bytes: p?.bytes,
+			files: p?.files,
+		})
+		expect(pick(parts.get("recordings"))).toEqual(
+			await sum("recordings", ".analog-operations"),
+		)
+		expect(pick(parts.get("quarantine"))).toEqual(await sum("quarantine"))
+		expect(pick(parts.get("journal"))).toEqual(await sum("journal"))
+		expect(pick(parts.get("captures"))).toEqual(await sum("captures"))
+		expect(pick(parts.get("evidence"))).toEqual(await sum("evidence"))
+		expect(pick(parts.get("engine"))).toEqual(await sum("engine"))
+		expect(pick(parts.get("other"))).toEqual(
+			await sum("discoveries.json", "jobs.json", "set-aside-unknown"),
+		)
+		// The area is the whole root but the excluded backups.
+		const whole = await du(root)
+		const backups = await du(join(root, ".backups"))
+		expect(area.bytes).toBe(whole.bytes - backups.bytes)
+		expect(area.files).toBe(whole.files - backups.files)
+		const total = (area.parts ?? []).reduce(
+			(acc, p) => ({ bytes: acc.bytes + p.bytes, files: acc.files + p.files }),
+			{ bytes: 0, files: 0 },
+		)
+		expect(total).toEqual({ bytes: area.bytes, files: area.files })
+		expect(area.partial).toBe(false)
+		expect(area.parts?.every(p => p.exists)).toBe(true)
+	})
+
+	it("reports each folder's bounds from the scanner caps and the quarantine constants", async () => {
+		const area = await reportOf(await fixture())
+		const bounds = Object.fromEntries(
+			(area.parts ?? []).map(p => [p.id, p.bounds]),
+		)
+		expect(bounds).toEqual({
+			recordings: { maxBytes: 1 * MiB, maxAgeMs: 4 * DAY, maxFiles: null },
+			quarantine: {
+				maxBytes: NOISE_QUARANTINE_MAX_BYTES,
+				maxAgeMs: NOISE_QUARANTINE_MAX_AGE_MS,
+				maxFiles: NOISE_QUARANTINE_MAX_FILES,
+			},
+			journal: { maxBytes: 3 * MiB, maxAgeMs: 4 * DAY, maxFiles: null },
+			captures: { maxBytes: 5 * MiB, maxAgeMs: null, maxFiles: null },
+			evidence: { maxBytes: 2 * MiB, maxAgeMs: 4 * DAY, maxFiles: null },
+			engine: { maxBytes: null, maxAgeMs: null, maxFiles: null },
+			other: { maxBytes: null, maxAgeMs: null, maxFiles: null },
+		})
+		// The fixture is within every bound.
+		expect(
+			area.parts?.filter(p => p.overBound !== null).map(p => p.overBound),
+		).toEqual([false, false, false, false, false])
+	})
+
+	it("with the scanner off every bound is null (nothing prunes)", async () => {
+		const area = await reportOf(await fixture(), false)
+		expect(
+			area.parts?.every(
+				p =>
+					p.bounds.maxBytes === null &&
+					p.bounds.maxAgeMs === null &&
+					p.bounds.maxFiles === null &&
+					p.overBound === null,
+			),
+		).toBe(true)
+	})
+
+	it("a missing bound reads null, never a guess", () => {
+		const parts = scannerStorageParts({ dir: null, maxRecordingsMb: 1 }, true)
+		const journal = parts.parts.find(p => p.id === "journal")
+		expect(journal?.bounds).toEqual({
+			maxBytes: null,
+			maxAgeMs: null,
+			maxFiles: null,
+		})
+	})
+})
+
+describe("overBound at and past each bound", () => {
+	const source: StorageAreaSource = {
+		id: "scanner-evidence",
+		paths: ["/fake/scanner"],
+		capBytes: null,
+		parts: scannerStorageParts(storage, true),
+	}
+	const order = [...source.parts!.parts, source.parts!.fallback].map(p => p.id)
+
+	async function overOf(
+		id: string,
+		bytes: number,
+		files: number,
+		partialReason: "entry-limit" | null = null,
+	) {
+		const reporter = createStorageReporter(
+			{ stateDir: "/fake", areas: [source], minFreeBytes: null },
+			{
+				statfs: async () => ({ blocks: 1, bfree: 1, bavail: 1, bsize: 1 }),
+				scan: async () => [
+					{
+						id: "scanner-evidence",
+						bytes,
+						files,
+						exists: true,
+						partialReason,
+						parts: order.map(p => ({
+							id: p,
+							bytes: p === id ? bytes : 0,
+							files: p === id ? files : 0,
+							exists: p === id,
+						})),
+					},
+				],
+			},
+		)
+		const area = (await reporter.report()).areas[0]
+		return area?.parts?.find(p => p.id === id)?.overBound
+	}
+
+	it.each([
+		["recordings", 1 * MiB],
+		["journal", 3 * MiB],
+		["captures", 5 * MiB],
+		["evidence", 2 * MiB],
+		["quarantine", NOISE_QUARANTINE_MAX_BYTES],
+	])(
+		"%s: exactly maxBytes is within, one byte more is over",
+		async (id, max) => {
+			expect(await overOf(id, max, 1)).toBe(false)
+			expect(await overOf(id, max + 1, 1)).toBe(true)
+		},
+	)
+
+	it("quarantine: exactly maxFiles is within, one file more is over", async () => {
+		expect(await overOf("quarantine", 1, NOISE_QUARANTINE_MAX_FILES)).toBe(
+			false,
+		)
+		expect(await overOf("quarantine", 1, NOISE_QUARANTINE_MAX_FILES + 1)).toBe(
+			true,
+		)
+	})
+
+	it("unbounded parts and a partial area read null", async () => {
+		expect(await overOf("engine", 10 * MiB, 1)).toBeNull()
+		expect(await overOf("other", 10 * MiB, 1)).toBeNull()
+		expect(await overOf("recordings", 2 * MiB, 1, "entry-limit")).toBeNull()
+	})
+})

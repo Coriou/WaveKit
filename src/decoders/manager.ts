@@ -451,6 +451,16 @@ function sameJsonValue(a: unknown, b: unknown): boolean {
 	return false
 }
 
+/** A finite Date, else undefined. */
+function validDate(at: Date | undefined): Date | undefined {
+	return at instanceof Date && Number.isFinite(at.getTime()) ? at : undefined
+}
+
+/** A non-negative finite count, else 0 (a malformed adapter counter adds nothing). */
+function finiteCount(n: number | undefined): number {
+	return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0
+}
+
 /** A parent placement start failed (fixed text, no cause). */
 export class DecoderPlacementStartError extends WaveKitError {
 	constructor() {
@@ -2203,6 +2213,8 @@ export class DecoderManager extends EventEmitter {
 						? undefined
 						: this.plannedChannelWidthHz(parent, caps))
 			}
+			const own = state.decoder.getStatus()
+			const lastEventAt = validDate(own.lastOutputAt)
 			return [
 				{
 					sourceId: placement.sourceId,
@@ -2213,8 +2225,11 @@ export class DecoderManager extends EventEmitter {
 					reach: placement.reach,
 					origin: placement.origin,
 					primary: placement.primary,
-					running: state.decoder.getStatus().running,
+					running: own.running,
 					costCores: placement.costCores,
+					// This placement's own worker: what it published, and when last.
+					eventsOut: own.stats.eventsOut,
+					lastEventAt: lastEventAt?.toISOString() ?? null,
 					...(state.suspension
 						? {
 								suspension: {
@@ -4887,7 +4902,49 @@ export class DecoderManager extends EventEmitter {
 			}),
 			...this.placementTargetFields(state),
 			...this.placementLastOutput(state),
+			...this.placementTotals(state),
 			...this.counterFields(state),
+		}
+	}
+
+	/**
+	 * A parent's totals over its placement workers (the states placed for it, `parentId`):
+	 * `stats` and `rateHistory` summed with its own, and `health` lifted from idle to running
+	 * while a running worker is producing (its own health running). Nothing for a decoder
+	 * without workers: its own counters are its totals. A faulted or restarting parent keeps
+	 * its own health (its own process failed, whatever its workers do).
+	 */
+	private placementTotals(
+		parent: DecoderState,
+	): Partial<Pick<DecoderStatus, "stats" | "rateHistory" | "health">> {
+		const workers = [...this.decoders.values()].filter(
+			state => state !== parent && state.parentId === parent.config.id,
+		)
+		if (workers.length === 0) return {}
+		const own = parent.decoder.getStatus()
+		const stats = { ...own.stats }
+		let rateHistory = own.rateHistory ? [...own.rateHistory] : undefined
+		let producing = false
+		for (const worker of workers) {
+			const status = worker.decoder.getStatus()
+			stats.bytesIn += finiteCount(status.stats.bytesIn)
+			stats.eventsOut += finiteCount(status.stats.eventsOut)
+			stats.errors += finiteCount(status.stats.errors)
+			const history = status.rateHistory
+			// Rate buckets are wall minutes on every adapter: equal lengths align.
+			if (history !== undefined) {
+				if (rateHistory === undefined) rateHistory = [...history]
+				else if (rateHistory.length === history.length)
+					rateHistory = rateHistory.map((n, i) => n + finiteCount(history[i]))
+			}
+			if (status.running && worker.lastHealth === "running") producing = true
+		}
+		return {
+			stats,
+			...(rateHistory !== undefined ? { rateHistory } : {}),
+			...(parent.lastHealth === "idle" && producing
+				? { health: "running" as const }
+				: {}),
 		}
 	}
 

@@ -10,6 +10,7 @@ import * as path from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { DecoderOutput } from "../../../src/decoders/types.js"
 import { createDecoder } from "./dsd-fme-call-first-helpers.js"
+import { settleWavLookups } from "./dsd-fme-wav-settle.js"
 
 type Internals = {
 	handleOutputLine(line: string): void
@@ -30,7 +31,7 @@ describe("dsd-fme P25 recording link", () => {
 		vi.useRealTimers()
 	})
 
-	it("never links an encrypted call's recording; a clear call's is linked", () => {
+	it("never links an encrypted call's recording; a clear call's is linked", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "wk-p25-rec-"))
 		try {
 			const start = new Date(2026, 0, 9, 10, 53, 27)
@@ -42,7 +43,7 @@ describe("dsd-fme P25 recording link", () => {
 				"",
 			)
 			vi.useFakeTimers({ toFake: ["Date"] })
-			const end = (algLine: string) => {
+			const end = async (algLine: string) => {
 				const d = createDecoder({
 					mode: "p25",
 					enablePerCallRecording: true,
@@ -66,9 +67,10 @@ describe("dsd-fme P25 recording link", () => {
 				adapter.handleOutputLine(algLine)
 				vi.setSystemTime(start.getTime() + 5000)
 				adapter.checkCallTimeoutAsync()
+				await settleWavLookups(d)
 				return ends
 			}
-			const encrypted = end(
+			const encrypted = await end(
 				" LDU2 ALG ID: 0x84 KEY ID: 0x1234 MI: 0x1122334455667788 ENC",
 			)
 			expect(encrypted.length).toBeGreaterThan(0)
@@ -78,11 +80,11 @@ describe("dsd-fme P25 recording link", () => {
 				expect(e.clearEvidence).toBeUndefined()
 			}
 			// A clear ALG that is not the call's LDU2 0x80 KEY 0 proves nothing.
-			for (const e of end("ALG ID: 0x80")) {
+			for (const e of await end("ALG ID: 0x80")) {
 				expect(e.wavFile).toBeUndefined()
 				expect(e.clearEvidence).toBeUndefined()
 			}
-			const clear = end(
+			const clear = await end(
 				" LDU2 ALG ID: 0x80 KEY ID: 0x0000 MI: 0x0000000000000000",
 			)
 			expect(clear[0]).toMatchObject({
@@ -90,8 +92,16 @@ describe("dsd-fme P25 recording link", () => {
 				encryptionKnown: true,
 				// The stored row's own proof of the clear print (callTrustAdmits needs it).
 				clearEvidence: true,
-				wavFile: expect.stringContaining(root),
 			})
+			// The file goes out in the lookup's update, with the same trust.
+			expect(clear.filter(e => e.wavFile !== undefined)).toEqual([
+				expect.objectContaining({
+					encryptionKnown: true,
+					clearEvidence: true,
+					flags: expect.objectContaining({ wavFileUpdate: true }),
+					wavFile: expect.stringContaining(root),
+				}),
+			])
 		} finally {
 			fs.rmSync(root, { recursive: true })
 		}

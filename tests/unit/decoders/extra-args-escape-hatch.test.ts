@@ -27,6 +27,7 @@ import { AisCatcherDecoder } from "../../../src/decoders/builtin/ais-catcher.js"
 import { ReadsbDecoder } from "../../../src/decoders/builtin/readsb.js"
 import { DirewolfDecoder } from "../../../src/decoders/builtin/direwolf.js"
 import { rtl433OptionsSchema } from "../../../src/decoders/options/rtl433.js"
+import { settleWavLookups } from "./dsd-fme-wav-settle.js"
 
 type Ctor = new (config: DecoderConfig, logger: pino.Logger) => unknown
 
@@ -295,7 +296,7 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 		expect(JSON.stringify(logs)).not.toContain("SECRET-")
 	})
 
-	it("a completed recorded call logs hasWavFile, not the recording path", () => {
+	it("a completed recorded call logs awaitingWav, not the recording path", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "wg7-hwfix-"))
 		const dir = fs.mkdtempSync(path.join(root, "SECRET-recordings-"))
 		try {
@@ -316,6 +317,10 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 				logger,
 			) as unknown as {
 				callState: unknown
+				on(
+					event: "output",
+					fn: (o: { data: { wavFile?: string } }) => void,
+				): void
 				endCall(
 					now: Date,
 					timeout: boolean,
@@ -337,11 +342,18 @@ describe("decoder logs carry no option text, paths or hosts", () => {
 				encryptionKnown: true,
 				clearEvidence: true,
 			}
+			const found: string[] = []
+			d.on("output", o => {
+				if (o.data.wavFile !== undefined) found.push(o.data.wavFile)
+			})
 			const ended = d.endCall(new Date(start.getTime() + 5000), false)
-			expect(ended?.data.wavFile).toContain(dir)
+			// The file is looked up off the event loop; its update carries it.
+			expect(ended?.data.wavFile).toBeUndefined()
+			await settleWavLookups(d)
+			expect(found).toEqual([expect.stringContaining(dir)])
 			expect(JSON.stringify(logs)).not.toContain("SECRET-recordings")
 			expect(logs).toContainEqual(
-				expect.objectContaining({ msg: "Call ended", hasWavFile: true }),
+				expect.objectContaining({ msg: "Call ended", awaitingWav: true }),
 			)
 		} finally {
 			fs.rmSync(root, { recursive: true })
