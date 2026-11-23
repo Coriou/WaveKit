@@ -25,6 +25,7 @@ import type { Socket } from "node:net"
 import type { SourceConfig } from "../../config.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { IN_FLIGHT_BOUND_BYTES } from "../spectrum/network-settle.js"
+import { TUNER_VALUE_BOUNDS } from "../tuner-controller.js"
 import type { Logger } from "../../utils/logger.js"
 import { FrontAccounting } from "./front-accounting.js"
 import type { HubExit, HubProcess, HubProcessFactory } from "./hub-process.js"
@@ -53,7 +54,24 @@ import type {
 	HubSinkGap,
 } from "./protocol.js"
 
-/** Ring length in signal time: twice the front's maximum lag. */
+/**
+ * The byte rate the hub is configured and sized for: the source's highest supported rate
+ * (TUNER_VALUE_BOUNDS.sampleRate.max, the RTL2832U's 3 200 000 Hz) or the dial's own rate if
+ * higher, at 2 bytes per U8 IQ sample. The ring, the front's lag bound and the SO_RCVBUF request
+ * all follow this rate, and they are fixed for the dial: another writer (a 0x02 through the tuner
+ * relay) may raise the receiver's rate mid-session without the core redialling. Sized for the
+ * maximum, every rate the receiver can take still fits: ring 12 s x 6 400 000 B/s = 76.8 MB
+ * (57.6 MB at a 2.4 Msps dial), lag bound 6 s x 6.4 MB/s = 38.4 MB, SO_RCVBUF request
+ * hubRcvBufBytes(6 400 000) = ceil(2 x 1.2 s x 6.4 MB/s / 1 MiB) = 15 MiB (the kernel clamps it to
+ * its own limit). Chosen over a reconfigure on every rate change: that would close every front
+ * (F15) and has no signal for a change another writer made. Below the maximum, the bounds are
+ * longer in signal time (the 6 s lag is 8 s at 2.4 Msps), never shorter.
+ */
+export function hubSizedByteRate(sampleRate: number): number {
+	return Math.max(sampleRate, TUNER_VALUE_BOUNDS.sampleRate.max) * 2
+}
+
+/** Ring length in signal time at the sized rate (hubSizedByteRate): twice the front's maximum lag. */
 export const HUB_RING_MS = 12_000
 export const HUB_FRONT_MAX_LAG_MS = 6000
 export const HUB_FRONT_RESUME_MS = 250
@@ -153,6 +171,7 @@ interface Dial {
 	readonly socket: Socket
 	readonly host: string
 	readonly port: number
+	/** hubSizedByteRate of the dial's rate: what the hub is configured and sized for. */
 	readonly byteRate: number
 	attempt: number | null
 	sink: string | null
@@ -297,7 +316,7 @@ export class Supervisor {
 			socket,
 			host,
 			port,
-			byteRate: config.caps.sampleRate * 2,
+			byteRate: hubSizedByteRate(config.caps.sampleRate),
 			attempt: null,
 			sink: null,
 			connectSent: false,

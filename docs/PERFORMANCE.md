@@ -1256,6 +1256,15 @@ ring on its own thread. The core reads a front sink over a Unix socket; a front 
 behind skips whole frames (`sink-gap`, logged by the supervisor and emitted as `intake-gap`), so
 the loss moves from the sender, where it is silent, to the hub, where it is counted.
 
+The ring, the lag bound and the upstream `SO_RCVBUF` request are sized once per dial for the
+source's highest supported rate, 3.2 Msps (or the dial's own rate if higher), not the rate it
+was dialled at: another writer (a `0x02` through the tuner relay) can raise the rate without a
+redial, and every bound must still hold. At 3.2 Msps (6.4 MB/s) the ring is 12 s x 6.4 MB/s =
+76.8 MB, the lag bound 6 s x 6.4 MB/s = 38.4 MB, and the `SO_RCVBUF` request
+ceil(2 x 1.2 s x 6.4 MB/s / 1 MiB) = 15 MiB, clamped by the kernel's own limit. At a lower rate
+the same bytes last longer (the 6 s lag is 8 s at 2.4 Msps); a dial above 3.2 Msps reconfigures
+the hub for its own rate.
+
 The budget harness measures it with `--source-intake socket|hub` (and `--iqhub-bin PATH`): hub
 mode sets the core's `WAVEKIT_SOURCE_INTAKE`, `WAVEKIT_IQHUB_BIN` and
 `WAVEKIT_IQHUB_STATS_DIR=<out>/hub-stats`, and the manifest adds two stages after
@@ -1285,7 +1294,8 @@ real channelizer, `--core-qos-late background`, alternating runs on a loaded hos
 | 4   | hub    | 31.2 / 30.3    | 0                  | 78.0 % (8)           | I-S3 exact  | 1.000 | 2.1 s / 7.6 s   |
 
 The hub kept the default QoS (`ps -o pri=` 31 before, during and after) and used 13 to 14 ms of
-CPU per IQ second it read, with a 59 MB RSS (the 57.6 MB ring). What this shows: with only the
+CPU per IQ second it read, with a 59 MB RSS (the 57.6 MB ring, sized then for the 2.4 Msps dial
+rate; since sizing for 3.2 Msps it is 76.8 MB). What this shows: with only the
 core demoted, taking the TCP read off the starved main thread stops the sender-side loss, and
 every byte the core does not get is a counted, positioned skip, proven exact against the fake's
 own count. What it does not show: the core still loses the same order of signal (the hub only

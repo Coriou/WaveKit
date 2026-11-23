@@ -325,7 +325,8 @@ describe.skipIf(!available)(
 			const one = await dial(supervisor, port)
 			await one.connected
 			const pid = supervisor.pid
-			const two = await dial(supervisor, port, 2_048_000)
+			// Past the 3.2 Msps the hub is sized for: a real reconfigure.
+			const two = await dial(supervisor, port, 4_000_000)
 			// The configure is sent (and its deadline armed) in the dial's microtasks.
 			await new Promise(resolve => setImmediate(resolve))
 			stall(1000)

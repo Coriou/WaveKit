@@ -5,9 +5,14 @@ import pino from "pino"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { SourceConfig } from "../../../../src/config.js"
 import { HUB_FRONT_TAG } from "../../../../src/core/iq-hub/intake.js"
-import { isHubHello } from "../../../../src/core/iq-hub/protocol.js"
+import {
+	hubRcvBufBytes,
+	isHubHello,
+} from "../../../../src/core/iq-hub/protocol.js"
 import {
 	HUB_CONNECT_TIMEOUT_MS,
+	HUB_FRONT_MAX_LAG_MS,
+	HUB_RING_MS,
 	HubSourceIntake,
 	IQHUB_EXITED,
 	IQHUB_FRONT_CLOSED,
@@ -15,6 +20,7 @@ import {
 	IQHUB_REJECTED,
 	IQHUB_UNAVAILABLE,
 	Supervisor,
+	hubSizedByteRate,
 } from "../../../../src/core/iq-hub/supervisor.js"
 import type { SupervisorOptions } from "../../../../src/core/iq-hub/supervisor.js"
 import {
@@ -99,7 +105,8 @@ describe("hub supervisor rows (fake hub)", () => {
 		expect(configure).toHaveLength(1)
 		expect(configure[0]).toMatchObject({
 			v: 1,
-			byteRate: 2_048_000,
+			// Sized for the RTL maximum (3.2 Msps), not the 1.024 Msps dial.
+			byteRate: 6_400_000,
 			frameBytes: 2,
 			levelFormat: null,
 			progressMs: 100,
@@ -113,7 +120,7 @@ describe("hub supervisor rows (fake hub)", () => {
 			timeoutMs: HUB_CONNECT_TIMEOUT_MS,
 			headerBytes: 12,
 			keepAliveMs: 5000,
-			rcvBufBytes: 5 * 1024 * 1024,
+			rcvBufBytes: 15 * 1024 * 1024,
 		})
 		expect(hub.requestsOf("sink-open")[0]).toMatchObject({
 			sink: "front-1",
@@ -202,14 +209,58 @@ describe("hub supervisor rows (fake hub)", () => {
 			second,
 			{
 				...config,
-				caps: { ...config.caps, sampleRate: 2_400_000 },
+				caps: { ...config.caps, sampleRate: 4_000_000 },
 			} as SourceConfig,
 			"127.0.0.1",
 			5555,
 		)
 		await connected
 		const configures = first.hub.requestsOf("configure")
-		expect(configures.map(r => r["byteRate"])).toEqual([2_048_000, 4_800_000])
+		// Only a rate past the RTL maximum (3.2 Msps) reconfigures.
+		expect(configures.map(r => r["byteRate"])).toEqual([6_400_000, 8_000_000])
+	})
+
+	it("a relay-style 0x02 to 3.2 Msps mid-session finds the ring, lag bound and SO_RCVBUF sized for it", async () => {
+		newFake()
+		const supervisor = makeSupervisor()
+		const { socket, hub, front, closed } = await dialActive(supervisor)
+		// Another writer (the tuner relay) raises the receiver's rate: 0x02, 3 200 000 Hz.
+		const setRate = Buffer.from([0x02, 0x00, 0x30, 0xd4, 0x00])
+		expect(setRate.readUInt32BE(1)).toBe(3_200_000)
+		socket.write(setRate)
+		expect(await front.whenCommandBytes(5)).toEqual(setRate)
+		// No redial and no reconfigure: the one configure already covers 3.2 Msps.
+		const configures = hub.requestsOf("configure")
+		expect(configures.map(r => r["byteRate"])).toEqual([3_200_000 * 2])
+		expect(hubSizedByteRate(1_024_000)).toBe(3_200_000 * 2)
+		expect(hubSizedByteRate(3_200_000)).toBe(3_200_000 * 2)
+		// Lag bound in bytes at the sized rate is 6 s at 3.2 Msps; the 12 s ring holds twice that.
+		const lag = hub.requestsOf("sink-open")[0]
+		expect(lag).toMatchObject({ maxLagMs: HUB_FRONT_MAX_LAG_MS })
+		expect(HUB_RING_MS).toBe(2 * HUB_FRONT_MAX_LAG_MS)
+		// SO_RCVBUF: ceil(2 x 1.2 s x 6.4 MB/s / 1 MiB) = 15 MiB.
+		expect(hub.requestsOf("connect")[0]).toMatchObject({
+			rcvBufBytes: hubRcvBufBytes(3_200_000 * 2),
+		})
+		expect(hubRcvBufBytes(3_200_000 * 2)).toBe(15 * 1024 * 1024)
+		// A redial at another supported rate keeps the same configuration.
+		socket.destroy()
+		await closed
+		const second = hubSocket()
+		const connected = new Promise<void>(resolve =>
+			second.once("connect", resolve),
+		)
+		supervisor.dial(
+			second,
+			{
+				...config,
+				caps: { ...config.caps, sampleRate: 2_400_000 },
+			} as SourceConfig,
+			"127.0.0.1",
+			5555,
+		)
+		await connected
+		expect(hub.requestsOf("configure")).toHaveLength(1)
 	})
 
 	it("a closed connect maps to the code a net connect gives, with and without errno", async () => {
