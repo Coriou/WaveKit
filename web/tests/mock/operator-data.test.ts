@@ -123,11 +123,24 @@ describe("mock operator data REST", () => {
 		})
 		const missing = await send("POST", url, { frequency: harbour })
 		expect(missing.statusCode).toBe(428)
+		// As core: a 428 and a 400 name the field and what it takes.
+		expect(missing.json()).toMatchObject({
+			code: "OPERATOR_DATA_PRECONDITION_REQUIRED",
+			fields: [
+				{
+					field: "expected",
+					expected: expect.stringContaining("storeId, revision"),
+				},
+			],
+		})
 		const invalid = await send("POST", url, {
 			expected: token,
 			frequency: { ...harbour, mode: "raw" },
 		})
-		expect(invalid.json()).toMatchObject({ code: "OPERATOR_DATA_INVALID" })
+		expect(invalid.json()).toMatchObject({
+			code: "OPERATOR_DATA_INVALID",
+			fields: [{ field: "frequency.bandwidthHz" }],
+		})
 		expect(invalid.statusCode).toBe(400)
 		const extra = await send("POST", url, {
 			expected: token,
@@ -135,6 +148,11 @@ describe("mock operator data REST", () => {
 			id: "x",
 		})
 		expect(extra.statusCode).toBe(400)
+		expect(extra.json()).toMatchObject({
+			fields: [
+				{ field: "body", expected: "only the fields expected, frequency" },
+			],
+		})
 		const gone = await send(
 			"DELETE",
 			`${url}/00000000-0000-4000-8000-000000000000`,

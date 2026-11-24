@@ -25,6 +25,7 @@ import {
 	toOperatorDataWriteDto,
 } from "../../../src/operator-data/transport.js"
 import type * as transport from "../../../src/operator-data/transport.js"
+import { parseErrorBody } from "./error-body.js"
 
 const storeId = "00000000-0000-4000-8000-000000000001"
 const id = "abcdefab-1234-4000-8000-abcdefabcdef"
@@ -230,9 +231,12 @@ describe("canonical public operator-data contract", () => {
 			expect(response.statusCode).toBe(
 				publicContract.OPERATOR_DATA_ERROR_DEFINITIONS[code][0],
 			)
-			expect(
-				publicContract.operatorDataErrorDtoSchema.parse(response.body),
-			).toEqual(response.body)
+			// `fields` (400 and 428 only) is read by parseErrorBody; the rest is the strict DTO.
+			expect(parseErrorBody(response.body)).toEqual(response.body)
+			expect(Object.hasOwn(response.body, "fields")).toBe(
+				code === "OPERATOR_DATA_INVALID" ||
+					code === "OPERATOR_DATA_PRECONDITION_REQUIRED",
+			)
 			expect(JSON.stringify(response)).not.toMatch(/secret|PrivateError|stack/)
 			for (const invalid of [
 				{ ...response.body, error: "PrivateError" },

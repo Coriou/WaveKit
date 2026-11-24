@@ -1,5 +1,10 @@
 import { effectivePreferences } from "./domain.js"
 import {
+	MAX_VALIDATION_FIELDS,
+	type ValidationField,
+} from "../api/validation-errors.js"
+import {
+	EXPECTED_TOKEN_TEXT,
 	OPERATOR_DATA_LIMITS,
 	OperatorDataError,
 	expectedTokenSchema,
@@ -76,15 +81,50 @@ function knownCode(code: unknown): code is OperatorDataErrorCode {
 	}
 }
 
+/** An error body: the canonical DTO, plus `fields` on a 400 or 428 (the shape of every other route's 400). */
+export type OperatorDataErrorBody = OperatorDataErrorDto & {
+	fields?: ValidationField[]
+}
+
+/** A 400 whose cause has no field of its own (an internal check) still names what to send. */
+const INVALID_FALLBACK: ValidationField = {
+	field: "body",
+	expected:
+		"a valid operator-data request: see docs/API.md, operator data, for each route's body",
+}
+
+/** Copies only well-formed, bounded fields; anything else drops to the fallback. */
+function safeFields(fields: unknown): ValidationField[] {
+	if (!Array.isArray(fields)) return []
+	const out: ValidationField[] = []
+	const items: unknown[] = fields.slice(0, MAX_VALIDATION_FIELDS)
+	for (const item of items) {
+		if (typeof item !== "object" || item === null) return []
+		const field: unknown = Reflect.get(item, "field")
+		const expected: unknown = Reflect.get(item, "expected")
+		if (
+			typeof field !== "string" ||
+			typeof expected !== "string" ||
+			field.length > 128 ||
+			expected.length > 512
+		)
+			return []
+		out.push({ field, expected })
+	}
+	return out
+}
+
 /** Future mounts must explicitly send this status/body: the global WaveKitError
- * handler uses 400. No exception object or internal delivery outcome is serialized.
+ * handler uses 400. No exception object or internal delivery outcome is serialized;
+ * `fields` holds static schema text only.
  */
 export function toOperatorDataErrorResponse(error: unknown): {
 	statusCode: number
-	body: OperatorDataErrorDto
+	body: OperatorDataErrorBody
 } {
 	let code: OperatorDataErrorCode = "OPERATOR_DATA_UNAVAILABLE"
 	let current: ExpectedToken | undefined
+	let fields: ValidationField[] = []
 	try {
 		if (error instanceof OperatorDataError) {
 			const candidate: unknown = error.code
@@ -93,12 +133,24 @@ export function toOperatorDataErrorResponse(error: unknown): {
 				const token = expectedTokenSchema.safeParse(error.current)
 				if (token.success) current = token.data
 			}
+			if (
+				code === "OPERATOR_DATA_INVALID" ||
+				code === "OPERATOR_DATA_PRECONDITION_REQUIRED"
+			)
+				fields = safeFields(error.fields)
 		}
 	} catch {
 		// Even malformed internal errors (including throwing accessors) stay generic.
 		code = "OPERATOR_DATA_UNAVAILABLE"
 		current = undefined
+		fields = []
 	}
+	if (code === "OPERATOR_DATA_INVALID" && fields.length === 0)
+		fields = [{ ...INVALID_FALLBACK }]
+	if (code === "OPERATOR_DATA_PRECONDITION_REQUIRED" && fields.length === 0)
+		fields = [
+			{ field: "expected", expected: `required; ${EXPECTED_TOKEN_TEXT}` },
+		]
 	const canonical = new OperatorDataError(code)
 	return {
 		statusCode: canonical.statusCode,
@@ -107,6 +159,7 @@ export function toOperatorDataErrorResponse(error: unknown): {
 			code,
 			message: canonical.message,
 			...(current ? { details: { current } } : {}),
+			...(fields.length > 0 ? { fields } : {}),
 		},
 	}
 }

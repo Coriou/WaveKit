@@ -128,6 +128,10 @@ Receiver panel for 5 minutes.
   receiver.
 - The band ruler under the spectrum shows the band plan and your saved frequencies. Zoom with its
   `−` `+` buttons.
+- Recalling a saved frequency (its tag, the Tuner's Saved list or the palette) follows Settings ›
+  Display › Click to tune. With **Free** the listening channel moves to it inside the capture and the
+  receiver recentres only when it lies past the capture's usable edge; with **Centre** the receiver
+  always recentres on it, so a bookmark saved as a band's middle becomes the capture centre.
 - Labels on the peaks say what WaveKit identified there (`DMR · CC 1`, `AIS · MMSI …`). Settings ›
   Spectrum › Signal labels chooses how many you see.
 - Labels and tags always sit at their own frequency inside the visible span. After a retune or a

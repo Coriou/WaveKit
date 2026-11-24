@@ -12,6 +12,7 @@ import { Button } from "../../ui/Button.tsx"
 import { Chip } from "../../ui/Chip.tsx"
 import { IconButton } from "../../ui/IconButton.tsx"
 import { Label } from "../../ui/Label.tsx"
+import { devicePrefsStore } from "../../shell/device-prefs.ts"
 import { formatMHz } from "../format.ts"
 import { useLiveStatus, useTunedHz } from "../hooks.ts"
 import { modulationOf } from "./modes.ts"
@@ -19,6 +20,7 @@ import {
 	defaultGroup,
 	defaultSaveName,
 	recallSaved,
+	recallTuneOptions,
 	SAVE_GROUPS,
 	saveInput,
 	saveSummary,
@@ -81,7 +83,11 @@ export function useRecall(): (f: SavedFrequency) => void {
 			{
 				config: () => data.liveAudio.get().status?.config,
 				setConfig: patch => data.liveAudio.setConfig(patch),
-				tune: hz => tuning.tune(hz),
+				tune: hz =>
+					tuning.tune(
+						hz,
+						recallTuneOptions(devicePrefsStore.getState().clickTuning),
+					),
 			},
 			f,
 		)

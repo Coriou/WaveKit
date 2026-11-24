@@ -113,13 +113,35 @@ export async function applyTunePlan(
 	if (offset !== 0) await data.liveAudio.setConfig({ offsetHz: 0 })
 }
 
+export interface TuneOptions {
+	/**
+	 * Recentre the hardware on the frequency even inside the capture (Display › Click to tune
+	 * "Centre": "every tune recentres the receiver"). The plot's tuneTo reads the same setting.
+	 */
+	recentre?: boolean
+}
+
 /** Plans against the current state and applies. Rejects with the API error. */
-export async function tuneTo(data: TuningData, hz: number): Promise<TunePlan> {
+export async function tuneTo(
+	data: TuningData,
+	hz: number,
+	options: TuneOptions = {},
+): Promise<TunePlan> {
 	const tuner = data.tuner.state()
 	const ctx = tuneContext(tuner, data.liveAudio.get().status)
 	if (!tuner || !ctx) throw new Error("No tuner source")
 	const scanning = scanHasReceiver(data.scanner?.get().sweep)
-	const plan = planTune(hz, scanning ? { ...ctx, offsetAvailable: false } : ctx)
+	const target = Math.round(hz)
+	// Asked to recentre, a frequency already reached by offset still moves the centre onto it.
+	const plan: TunePlan =
+		options.recentre === true && ctx.centreHz !== target
+			? { kind: "recentre", hz: target, centreHz: target, offsetHz: 0 }
+			: planTune(
+					hz,
+					scanning || options.recentre === true
+						? { ...ctx, offsetAvailable: false }
+						: ctx,
+				)
 	await applyTunePlan(data, plan, tuner.sourceId)
 	return plan
 }
@@ -137,7 +159,7 @@ export interface TuningState {
 export class TuningController extends Store<TuningState> {
 	private readonly data: TuningData
 	private running = false
-	private next: number | null = null
+	private next: { hz: number; options: TuneOptions } | null = null
 
 	constructor(data: TuningData) {
 		super({ targetHz: null, error: null })
@@ -152,10 +174,11 @@ export class TuningController extends Store<TuningState> {
 		)
 	}
 
-	/** Never rejects: a failure lands in `error`. */
-	tune(hz: number): Promise<void> {
-		this.next = Math.round(hz)
-		this.set({ targetHz: this.next, error: null })
+	/** Never rejects: a failure lands in `error`. The latest target keeps its own options. */
+	tune(hz: number, options: TuneOptions = {}): Promise<void> {
+		const target = Math.round(hz)
+		this.next = { hz: target, options }
+		this.set({ targetHz: target, error: null })
 		return this.running ? Promise.resolve() : this.drain()
 	}
 
@@ -163,10 +186,10 @@ export class TuningController extends Store<TuningState> {
 		this.running = true
 		try {
 			while (this.next !== null) {
-				const hz = this.next
+				const { hz, options } = this.next
 				this.next = null
 				try {
-					await tuneTo(this.data, hz)
+					await tuneTo(this.data, hz, options)
 				} catch (error) {
 					this.update(s => ({ ...s, error: errorMessage(error) }))
 				}

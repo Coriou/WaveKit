@@ -3631,15 +3631,16 @@ The 2026-10-16 core adds `patchable` to a descriptor: `true` when the protected
 older core reads as not patchable. Patchable keys are receive tuning and
 decode parameters whose value is a bounded number, a boolean or a closed set:
 
-| Type              | Patchable keys                                                                                                          |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                                                          |
-| `ais-catcher`     | `gain`, `ppm`                                                                                                           |
-| `readsb`          | `ppm`                                                                                                                   |
-| `dsd-fme`         | `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc`, `receiveFilter`, `carrierCorrection` |
-| `multimon-ng`     | `fmGain`, `modes`, `verbosity`                                                                                          |
-| `rtl433`          | `analyze`, `protocols`                                                                                                  |
-| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                                                        |
+| Type              | Patchable keys                                                                                                                        |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| every type        | `frequency`, `frequencies` (lora-meshtastic: `frequency` only)                                                                        |
+| `ais-catcher`     | `gain`, `ppm`                                                                                                                         |
+| `readsb`          | `ppm`                                                                                                                                 |
+| `dsd-fme`         | `channelsHz`, `callStartDelayMs`, `callTimeoutMs`, `minCallDurationMs`, `fmGain`, `enableIqAgc`, `receiveFilter`, `carrierCorrection` |
+| `multimon-ng`     | `channelsHz`, `fmGain`, `modes`, `verbosity`                                                                                          |
+| `direwolf`        | `channelsHz`                                                                                                                          |
+| `rtl433`          | `analyze`, `protocols`                                                                                                                |
+| `lora-meshtastic` | `preset`, `region`, `bandwidth`, `spreadingFactor`, `codingRate`                                                                      |
 
 Never patchable, by meaning: `extraArgs`; secrets; free-text `string` and
 `object` options; a `string-list` without a closed set; anything naming a path,
@@ -3649,7 +3650,16 @@ file, directory, host, address, port, device, serial, URL or station identity
 rate-plan inputs (`inputSampleRate`, `targetSampleRate`, `inputCenterFreq`,
 `followCenter`, `sampleRate`, `channelHz`, `offsetHz`, lora `oversampling`);
 and any key the digital-voice preparation reads or rewrites (dsd-fme `mode`,
-`output`, `udpHost`, `udpPort`, `voiceSlot`). A string `gain` (readsb,
+`output`, `udpHost`, `udpPort`, `voiceSlot`). For the channel decoders
+(dsd-fme, multimon-ng, direwolf) `channelHz` and `offsetHz` stay config-file keys
+because they set the raw input's rate plan; to move such a decoder at runtime
+patch `channelsHz`, the absolute channel centres in Hz. Naming channels in
+`channelsHz` opts a YAML decoder into channel placements as `useChannelizer: true`
+does: after its next start it decodes one channel per entry (its
+`targetFrequenciesHz` lists them). A core without the channelizer or without
+decoder placements cannot place them, so a PATCH that sets `channelsHz` there is
+refused with `DECODER_OPTION_NOT_PATCHABLE` (`keys: ["channelsHz"]`, the reason
+in `fields`) instead of being stored and decoding the capture centre. A string `gain` (readsb,
 dumpvdl2) and options an adapter does not use (acarsdec `gain`, dumpvdl2 `ppm`)
 stay false. The core re-checks these rules at runtime, not only through the
 descriptors.
@@ -4058,15 +4068,15 @@ configured keys the patch does not touch never fails the patch. A refused
 patch changes nothing. Error bodies `{ error, code, message, issues?, keys?,
 unknownKeys? }` never carry a submitted value:
 
-| Status | Code                                 | When                                                                                                 |
-| ------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| 400    | `DECODER_OPTIONS_INVALID`            | bad body shape or value (`issues`: documented key, fixed rule text), malformed `If-Match`, empty id  |
-| 400    | `DECODER_OPTION_NOT_PATCHABLE`       | a documented non-patchable key (`keys`) or undocumented keys (counted in `unknownKeys`, never named) |
-| 404    | `DECODER_NOT_FOUND`                  | unknown decoder                                                                                      |
-| 409    | `DECODER_OWNED_BY_SCANNER`           | a scanner probe                                                                                      |
-| 412    | `DECODER_SETTINGS_REVISION_MISMATCH` | `If-Match` differs from the store revision                                                           |
-| 413    | `DECODER_SETTINGS_LIMIT`             | body over 16 KiB, or the store would pass its bounds                                                 |
-| 503    | `DECODER_SETTINGS_STORE_UNAVAILABLE` | the file cannot be written (the in-memory layer is unchanged)                                        |
+| Status | Code                                 | When                                                                                                                                                                               |
+| ------ | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | `DECODER_OPTIONS_INVALID`            | bad body shape or value (`issues`: documented key, fixed rule text), malformed `If-Match`, empty id                                                                                |
+| 400    | `DECODER_OPTION_NOT_PATCHABLE`       | a documented non-patchable key (`keys`, each in `fields` with what to set instead), undocumented keys (`unknownKeys`, never named), or `channelsHz` where no channel can be placed |
+| 404    | `DECODER_NOT_FOUND`                  | unknown decoder                                                                                                                                                                    |
+| 409    | `DECODER_OWNED_BY_SCANNER`           | a scanner probe                                                                                                                                                                    |
+| 412    | `DECODER_SETTINGS_REVISION_MISMATCH` | `If-Match` differs from the store revision                                                                                                                                         |
+| 413    | `DECODER_SETTINGS_LIMIT`             | body over 16 KiB, or the store would pass its bounds                                                                                                                               |
+| 503    | `DECODER_SETTINGS_STORE_UNAVAILABLE` | the file cannot be written (the in-memory layer is unchanged)                                                                                                                      |
 
 A denial answers before the body is parsed, with the access code-only body.
 
@@ -6887,6 +6897,16 @@ Writes take the normal protected mutation admission (session, CSRF, Origin). The
 `operator-data:updated` after each change. The DTOs are in
 `packages/api-types/src/operator-data.ts`; the design is in the
 [operator data specification](specs/operator-data/design.md).
+
+Every write sends `expected`, the token of the snapshot it is based on:
+`{ "storeId": snapshot.storeId, "revision": snapshot.revision }` from
+`GET /api/operator-data`. Error bodies are `{ error: "OperatorDataError", code,
+message, details?, fields? }`. A 400 `OPERATOR_DATA_INVALID` and a 428
+`OPERATOR_DATA_PRECONDITION_REQUIRED` (no `expected`) carry `fields: [{ field,
+expected }]`, the same shape as every other route's 400: the field that failed
+(`expected`, `frequency`, `frequency.bandwidthHz`, `set.units`, the path `id`,
+or `body` for the body as a whole) and what it accepts, never a submitted value.
+A 409 `OPERATOR_DATA_CONFLICT` carries `details.current`, the token to retry with.
 
 After an unclean stop the store's writer lock is reclaimed automatically; a lock
 held by another live core is never taken and the store answers unavailable. See

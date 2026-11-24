@@ -10,6 +10,8 @@ import type {
 import { formatMHz, formatWidth } from "../format.ts"
 import { squelchForModulation } from "../listen/audio.ts"
 import { channelSuggestions, type ChannelSuggestion } from "./band.ts"
+import type { ClickTuning } from "../../shell/device-prefs.ts"
+import type { TuneOptions } from "../tuning.ts"
 import type { ParsedFrequency } from "./frequency.ts"
 import { modeSpec, type Modulation } from "./modes.ts"
 
@@ -134,6 +136,15 @@ export interface RecallPorts {
 	config(): LiveAudioConfig | null | undefined
 	setConfig(patch: Partial<LiveAudioConfig>): Promise<unknown>
 	tune(hz: number): Promise<unknown>
+}
+
+/**
+ * How a recall tunes, from Display › Click to tune: "Centre" makes every tune recentre the receiver on
+ * the frequency (as the spectrum's own recall does); "Free" moves the listening channel inside the
+ * capture and recentres only past its usable edge (DESIGN.md "Spectrum interaction").
+ */
+export function recallTuneOptions(clickTuning: ClickTuning): TuneOptions {
+	return clickTuning === "centre" ? { recentre: true } : {}
 }
 
 /**

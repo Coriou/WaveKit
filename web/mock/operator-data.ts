@@ -37,16 +37,35 @@ export interface MockOperatorDataOptions {
 	now?: () => number
 }
 
+interface MockField {
+	field: string
+	expected: string
+}
+
+/** Core's `expected` hint (src/operator-data/schema.ts EXPECTED_TOKEN_TEXT). */
+const EXPECTED_TOKEN_TEXT =
+	"object with fields storeId, revision: the snapshot.storeId and snapshot.revision of GET /api/operator-data"
+
+/** Core's fallback when a 400 has no field of its own (src/operator-data/transport.ts). */
+const INVALID_FALLBACK: MockField = {
+	field: "body",
+	expected:
+		"a valid operator-data request: see docs/API.md, operator data, for each route's body",
+}
+
 class OperatorFailure extends Error {
 	readonly code: OperatorDataErrorCode
 	readonly current: { storeId: string; revision: number } | undefined
+	readonly fields: MockField[]
 	constructor(
 		code: OperatorDataErrorCode,
 		current?: { storeId: string; revision: number },
+		fields: MockField[] = [],
 	) {
 		super(OPERATOR_DATA_ERROR_DEFINITIONS[code][1])
 		this.code = code
 		this.current = current
+		this.fields = fields
 	}
 }
 
@@ -63,13 +82,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function sendFailure(reply: FastifyReply, failure: OperatorFailure) {
-	const body: OperatorDataErrorDto = {
+	// Core names the failing fields on a 400 and a 428 (static text, never a value).
+	const fields =
+		failure.code === "OPERATOR_DATA_INVALID"
+			? failure.fields.length > 0
+				? failure.fields
+				: [INVALID_FALLBACK]
+			: failure.code === "OPERATOR_DATA_PRECONDITION_REQUIRED"
+				? [{ field: "expected", expected: `required; ${EXPECTED_TOKEN_TEXT}` }]
+				: []
+	const body: OperatorDataErrorDto & { fields?: MockField[] } = {
 		error: "OperatorDataError",
 		code: failure.code,
 		message: OPERATOR_DATA_ERROR_DEFINITIONS[failure.code][1],
 		...(failure.code === "OPERATOR_DATA_CONFLICT" && failure.current
 			? { details: { current: failure.current } }
 			: {}),
+		...(fields.length > 0 ? { fields } : {}),
 	}
 	return reply.code(OPERATOR_DATA_ERROR_DEFINITIONS[failure.code][0]).send(body)
 }
@@ -125,15 +154,42 @@ export function registerOperatorData(
 		keys: readonly string[],
 		id?: string,
 	): OperatorDataMutation => {
-		if (!isRecord(body) || Object.keys(body).some(k => !keys.includes(k)))
-			throw new OperatorFailure("OPERATOR_DATA_INVALID")
+		const listed = keys.join(", ")
+		if (!isRecord(body))
+			throw new OperatorFailure("OPERATOR_DATA_INVALID", undefined, [
+				{ field: "body", expected: `a JSON object with the fields ${listed}` },
+			])
+		if (Object.keys(body).some(k => !keys.includes(k)))
+			throw new OperatorFailure("OPERATOR_DATA_INVALID", undefined, [
+				{ field: "body", expected: `only the fields ${listed}` },
+			])
 		if (body["expected"] === undefined)
 			throw new OperatorFailure("OPERATOR_DATA_PRECONDITION_REQUIRED")
 		const input: Record<string, unknown> = { type }
 		for (const key of keys) if (Object.hasOwn(body, key)) input[key] = body[key]
 		if (id !== undefined) input["id"] = id
 		const result = mutationSchema.safeParse(input)
-		if (!result.success) throw new OperatorFailure("OPERATOR_DATA_INVALID")
+		if (!result.success)
+			// Core describes each field from its schema; the mock names the field and points at the docs.
+			throw new OperatorFailure(
+				"OPERATOR_DATA_INVALID",
+				undefined,
+				[
+					...new Set(
+						result.error.issues.map(i =>
+							i.path.length > 0 ? i.path.join(".") : "body",
+						),
+					),
+				]
+					.slice(0, 8)
+					.map(field => ({
+						field,
+						expected:
+							field === "expected"
+								? EXPECTED_TOKEN_TEXT
+								: "a valid value: see docs/API.md, operator data",
+					})),
+			)
 		return result.data
 	}
 

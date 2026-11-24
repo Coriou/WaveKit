@@ -2302,6 +2302,36 @@ export class DecoderManager extends EventEmitter {
 		})
 	}
 
+	/**
+	 * Why an explicit `channelsHz` list could not place channels for this decoder on this core,
+	 * or null when it can (or the decoder is unknown). Channel placements need the decoder
+	 * enablement planner and the channelizer; without them the list would be stored and the
+	 * decoder would keep reading the raw capture at its centre.
+	 */
+	channelListRefusal(id: string): string | null {
+		const state = this.decoders.get(id)
+		if (!state) return null
+		if (!(VFO_CHANNEL_TYPES as readonly string[]).includes(state.config.type))
+			return `a ${state.config.type} decoder takes no channel list`
+		if (!this.config.enablement)
+			return "this core runs without decoder placements"
+		if (!this.channelizer)
+			return "the channelizer is off (channelizer.enabled: false)"
+		return null
+	}
+
+	/** An explicit, non-empty `channelsHz` list: the operator named channels to decode. */
+	private namesChannelList(config: DecoderConfig): boolean {
+		const channels = config.options["channelsHz"]
+		return (
+			(VFO_CHANNEL_TYPES as readonly string[]).includes(config.type) &&
+			Array.isArray(channels) &&
+			channels.some(
+				hz => typeof hz === "number" && Number.isFinite(hz) && hz > 0,
+			)
+		)
+	}
+
 	private configuredChannels(
 		config: DecoderConfig,
 		centreHz: number | undefined,
@@ -2481,7 +2511,12 @@ export class DecoderManager extends EventEmitter {
 									config.type as keyof typeof DECODER_PROTOCOLS
 								] ?? [])
 							: [],
-						channelPlacements: catalogue || config.useChannelizer === true,
+						// Naming channels (channelsHz) opts a YAML decoder in, as useChannelizer does:
+						// without it the list fell through to one raw placement at the capture centre.
+						channelPlacements:
+							catalogue ||
+							config.useChannelizer === true ||
+							this.namesChannelList(config),
 						unavailable: this.isUnavailable(state),
 						ownDevice:
 							state.decoder.getBandDeclaration?.().ownSource === true ||

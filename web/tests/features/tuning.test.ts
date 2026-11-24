@@ -12,6 +12,10 @@ import {
 	captureOf,
 	type TuneContext,
 } from "../../src/features/tuning.ts"
+import {
+	recallSaved,
+	recallTuneOptions,
+} from "../../src/features/tuner/saved.ts"
 import { fakeSockets } from "../data/fake-socket.ts"
 
 const ctx = (over: Partial<TuneContext> = {}): TuneContext => ({
@@ -198,6 +202,44 @@ describe("TuningController against the mock core", () => {
 		// 161.0 recentred; 161.15 is then inside the window: one offset PATCH, 161.1 skipped
 		expect(data.tuner.state()?.frequency).toBe(161_000_000)
 		expect(data.liveAudio.get().status?.config.offsetHz).toBe(150_000)
+	})
+
+	it("a saved frequency recalled in Click to tune Centre recentres the receiver, Free only moves the channel", async () => {
+		const tuning = new TuningController(data)
+		const saved = {
+			frequencyHz: 0,
+			mode: "nfm" as const,
+			bandwidthHz: 12_500,
+			tone: { kind: "none" as const },
+		}
+		const ports = (clickTuning: "free" | "centre") => ({
+			config: () => data.liveAudio.get().status?.config,
+			setConfig: (patch: Parameters<typeof data.liveAudio.setConfig>[0]) =>
+				data.liveAudio.setConfig(patch),
+			tune: (hz: number) => tuning.tune(hz, recallTuneOptions(clickTuning)),
+		})
+		await tuning.tune(161_500_000)
+		const centre = data.tuner.state()?.frequency ?? 0
+		// A band-middle bookmark well inside the capture.
+		const inside = { ...saved, frequencyHz: centre + 300_000 }
+		await recallSaved(ports("free"), inside)
+		expect(data.tuner.state()?.frequency).toBe(centre)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(300_000)
+
+		await recallSaved(ports("centre"), inside)
+		expect(data.tuner.state()?.frequency).toBe(centre + 300_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
+		expect(tuning.displayHz()).toBe(centre + 300_000)
+	})
+
+	it("the latest coalesced target keeps its own recentre option", async () => {
+		const tuning = new TuningController(data)
+		await tuning.tune(161_500_000)
+		const first = tuning.tune(161_000_000)
+		void tuning.tune(161_100_000, { recentre: true })
+		await first
+		expect(data.tuner.state()?.frequency).toBe(161_100_000)
+		expect(data.liveAudio.get().status?.config.offsetHz).toBe(0)
 	})
 
 	it("keeps the core's error and clears the target", async () => {

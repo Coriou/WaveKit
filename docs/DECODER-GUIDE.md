@@ -27,6 +27,13 @@ once, with no crash counted, or holds it until its source returns when the sourc
 [PERFORMANCE.md, "Direct channel input"](PERFORMANCE.md#direct-channel-input-2026-11-17) has the
 details.
 
+For dsd-fme, multimon-ng and direwolf a non-empty `channelsHz` list (absolute channel centres in
+Hz, at most 16, in YAML or by `PATCH /api/decoders/:id`) opts the decoder into channel placements
+the same way: with the channelizer on it decodes one channel per entry. Without the channelizer
+(or without decoder placements) the core cannot place them; the PATCH is then refused, and a YAML
+list falls back to one raw placement at the capture centre, as before. `channelHz` and `offsetHz`
+set one channel on the raw input and are config-file keys only.
+
 The three walkthroughs below show the older, simpler patterns (pure consumer, network producer,
 external SDR). New decoders that share the receiver should normally use `AudioDemodDecoder` or
 `IqDecimateDecoder`; model them on the built-ins in `src/decoders/builtin/`.

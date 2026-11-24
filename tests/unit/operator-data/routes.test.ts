@@ -6,7 +6,6 @@ import type { FastifyInstance, FastifyRequest } from "fastify"
 import {
 	operatorDataReadDtoSchema,
 	operatorDataWriteDtoSchema,
-	operatorDataErrorDtoSchema,
 } from "@wavekit/api-types"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type { DeniedAdmission } from "../../../src/access/types.js"
@@ -15,6 +14,7 @@ import { operatorDataRoutes } from "../../../src/operator-data/routes.js"
 import { OperatorDataError } from "../../../src/operator-data/schema.js"
 import { OperatorDataService } from "../../../src/operator-data/service.js"
 import type { OperatorDataServiceOptions } from "../../../src/operator-data/service.js"
+import { parseErrorBody } from "./error-body.js"
 
 const roots: string[] = []
 const services: OperatorDataService[] = []
@@ -223,7 +223,7 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 			payload: { expected: old },
 		})
 		expect(conflict.statusCode).toBe(409)
-		expect(operatorDataErrorDtoSchema.parse(conflict.json()).details).toEqual({
+		expect(parseErrorBody(conflict.json()).details).toEqual({
 			current: snapshotToken(data.snapshot()),
 		})
 		const missing = await app.inject({
@@ -232,9 +232,7 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 			payload: { expected: snapshotToken(data.snapshot()) },
 		})
 		expect(missing.statusCode).toBe(404)
-		expect(operatorDataErrorDtoSchema.parse(missing.json()).code).toBe(
-			"OPERATOR_DATA_NOT_FOUND",
-		)
+		expect(parseErrorBody(missing.json()).code).toBe("OPERATOR_DATA_NOT_FOUND")
 		const noop = await app.inject({
 			method: "PATCH",
 			url: `${base}/preferences`,
@@ -471,7 +469,7 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 					: { expected: snapshotToken(data.snapshot()), ...body }
 			const response = await app.inject({ method, url: base + path, payload })
 			expect(response.statusCode).toBe(status)
-			expect(operatorDataErrorDtoSchema.parse(response.json()).code).toBe(
+			expect(parseErrorBody(response.json()).code).toBe(
 				status === 428
 					? "OPERATOR_DATA_PRECONDITION_REQUIRED"
 					: "OPERATOR_DATA_INVALID",
@@ -497,7 +495,7 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 				payload,
 			})
 			expect(response.statusCode).toBe(status)
-			expect(operatorDataErrorDtoSchema.parse(response.json()).code).toBe(code)
+			expect(parseErrorBody(response.json()).code).toBe(code)
 			expect(authorize).not.toHaveBeenCalled()
 		},
 	)
@@ -515,12 +513,12 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 		})
 		expect(response.statusCode).toBe(503)
 		expect(authorize).toHaveBeenCalledOnce()
-		expect(operatorDataErrorDtoSchema.parse(response.json()).code).toBe(
+		expect(parseErrorBody(response.json()).code).toBe(
 			"OPERATOR_DATA_UNAVAILABLE",
 		)
 		const read = await app.inject({ method: "GET", url: base })
 		expect(read.statusCode).toBe(503)
-		operatorDataErrorDtoSchema.parse(read.json())
+		parseErrorBody(read.json())
 	})
 
 	it("reports real bounded admission overload without accepting an extra write", async () => {
@@ -558,9 +556,7 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 				payload: { expected: token, set: { units: "imperial" } },
 			})
 			expect(response.statusCode).toBe(503)
-			expect(operatorDataErrorDtoSchema.parse(response.json()).code).toBe(
-				"OPERATOR_DATA_BUSY",
-			)
+			expect(parseErrorBody(response.json()).code).toBe("OPERATOR_DATA_BUSY")
 		} finally {
 			release.release()
 			await Promise.all([first, ...waiting])
@@ -583,7 +579,7 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 			const app = await server(undefined, authorize)
 			const response = await app.inject({ method, url: base + path, payload })
 			expect(response.statusCode).toBe(428)
-			expect(operatorDataErrorDtoSchema.parse(response.json()).code).toBe(
+			expect(parseErrorBody(response.json()).code).toBe(
 				"OPERATOR_DATA_PRECONDITION_REQUIRED",
 			)
 			expect(authorize).not.toHaveBeenCalled()
@@ -605,7 +601,7 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 				},
 			})
 			expect(response.statusCode).toBe(503)
-			expect(operatorDataErrorDtoSchema.parse(response.json()).code).toBe(code)
+			expect(parseErrorBody(response.json()).code).toBe(code)
 		},
 	)
 
@@ -617,7 +613,7 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 		const app = await server(data)
 		const response = await app.inject({ method: "GET", url: base })
 		expect(response.statusCode).toBe(503)
-		expect(operatorDataErrorDtoSchema.parse(response.json()).code).toBe(
+		expect(parseErrorBody(response.json()).code).toBe(
 			"OPERATOR_DATA_UNAVAILABLE",
 		)
 		expect(response.body).not.toContain("secret")
@@ -634,5 +630,133 @@ describe("unmounted operator-data routes (Requirements 5.1, 3.1–3.5)", () => {
 			authorizeMetadataMutation: () => undefined,
 		})
 		expect((await sibling.inject("/sibling")).statusCode).toBe(418)
+	})
+})
+
+describe("operator-data 400 and 428 name the field and its shape", () => {
+	const fieldOf = (json: unknown, name: string) =>
+		parseErrorBody(json).fields?.find(f => f.field === name)
+
+	it("POST without expected: the hint names the token, the hinted fix succeeds", async () => {
+		const data = await service()
+		const app = await server(data)
+		const url = `${base}/saved-frequencies`
+		const missing = await app.inject({
+			method: "POST",
+			url,
+			payload: { frequency },
+		})
+		expect(missing.statusCode).toBe(428)
+		const hint = fieldOf(missing.json(), "expected")
+		expect(hint?.expected).toContain("storeId, revision")
+		expect(hint?.expected).toContain("GET /api/operator-data")
+
+		// The hint says where the token is: the snapshot of GET /api/operator-data.
+		const read = operatorDataReadDtoSchema.parse(
+			(await app.inject({ method: "GET", url: base })).json(),
+		)
+		const fixed = await app.inject({
+			method: "POST",
+			url,
+			payload: {
+				expected: {
+					storeId: read.snapshot.storeId,
+					revision: read.snapshot.revision,
+				},
+				frequency,
+			},
+		})
+		expect(fixed.statusCode).toBe(201)
+		expect(
+			operatorDataWriteDtoSchema.parse(fixed.json()).snapshot.savedFrequencies,
+		).toHaveLength(1)
+	})
+
+	it("a flat body is told the accepted fields; a bad frequency names its field", async () => {
+		const data = await service()
+		const app = await server(data)
+		const url = `${base}/saved-frequencies`
+		const expected = snapshotToken(data.snapshot())
+		const flat = await app.inject({
+			method: "POST",
+			url,
+			payload: { expected, ...frequency },
+		})
+		expect(flat.statusCode).toBe(400)
+		expect(fieldOf(flat.json(), "body")?.expected).toBe(
+			"only the fields expected, frequency",
+		)
+		// Never echoes the client's key or value.
+		expect(flat.body).not.toContain("Repeater")
+		expect(flat.body).not.toContain("frequencyHz")
+
+		const noFrequency = await app.inject({
+			method: "POST",
+			url,
+			payload: { expected },
+		})
+		expect(noFrequency.statusCode).toBe(400)
+		expect(fieldOf(noFrequency.json(), "frequency")?.expected).toMatch(
+			/^required; object with fields name, frequencyHz, mode, bandwidthHz, tone, group/,
+		)
+
+		const raw = await app.inject({
+			method: "POST",
+			url,
+			payload: { expected, frequency: { ...frequency, bandwidthHz: 0 } },
+		})
+		expect(raw.statusCode).toBe(400)
+		expect(fieldOf(raw.json(), "frequency.bandwidthHz")?.expected).toContain(
+			"0 for mode raw, positive for every other mode",
+		)
+
+		const fixed = await app.inject({
+			method: "POST",
+			url,
+			payload: { expected, frequency },
+		})
+		expect(fixed.statusCode).toBe(201)
+	})
+
+	it.each([
+		["PATCH", "/preferences", { set: { units: "parsecs" } }, "set.units"],
+		["PATCH", "/preferences", {}, "body"],
+		[
+			"POST",
+			"/command-usage",
+			{ command: "open-saved-frequency" },
+			"savedFrequencyId",
+		],
+		["DELETE", "/saved-frequencies/not-a-uuid", {}, "id"],
+		[
+			"POST",
+			"/command-usage",
+			{ expected: "token", command: "tune" },
+			"expected",
+		],
+	] as const)("%s %s names %s", async (method, path, body, field) => {
+		const data = await service()
+		const app = await server(data)
+		const payload = Object.hasOwn(body, "expected")
+			? body
+			: { expected: snapshotToken(data.snapshot()), ...body }
+		const response = await app.inject({ method, url: base + path, payload })
+		expect(response.statusCode).toBe(400)
+		const named = fieldOf(response.json(), field)
+		expect(named?.expected.length).toBeGreaterThan(0)
+		expect(named?.expected).not.toBe("a valid value")
+	})
+
+	it("a malformed JSON body names the body", async () => {
+		const app = await server(await service())
+		const response = await app.inject({
+			method: "PATCH",
+			url: `${base}/preferences`,
+			headers: { "content-type": "application/json" },
+			payload: "{broken",
+		})
+		expect(response.statusCode).toBe(400)
+		expect(fieldOf(response.json(), "body")?.expected).toContain("JSON")
+		expect(response.body).not.toContain("broken")
 	})
 })
