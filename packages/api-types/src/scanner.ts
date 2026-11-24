@@ -1246,8 +1246,16 @@ export interface ScannerRecorderStatus {
 	 * started for it), newest last. Absent on older cores, whose `recent` held both.
 	 */
 	recentRefusals?: ScannerRecorderDecisionEntry[] | undefined
-	/** Decisions since the core started, per code (codes never seen are absent). */
+	/**
+	 * Decisions since the core started, per code (codes never seen are absent). A snapshot refusal
+	 * counts once per observation and code, however many of its snapshots were refused.
+	 */
 	counts: Partial<Record<ScannerRecorderDecision, number>>
+	/**
+	 * Snapshot refusals since the core started, per code, each refused snapshot counted (a snapshot
+	 * retried while slots or CPU stay full counts every time). Absent on older cores.
+	 */
+	refusalAttempts?: Partial<Record<ScannerRecorderDecision, number>> | undefined
 	/**
 	 * Session decision lines left out by the info log's rate limit since the core started (snapshot
 	 * refusals are logged at debug, outside the limit).

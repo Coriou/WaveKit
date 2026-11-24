@@ -384,6 +384,7 @@ export function buildRecorderDecisions(
 		items: rows,
 		held: all.length,
 		counts: recorder?.counts ?? {},
+		refusalAttempts: recorder?.refusalAttempts ?? {},
 		streak: tracker.read(recorder, nowMs),
 	}
 }

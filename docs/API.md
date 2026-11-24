@@ -4398,7 +4398,10 @@ voice, eviction, final decision, or the refusal or discard that ended one; newes
 snapshot refusals, observations refused before any recording started for them, kept apart so
 they never push a recording's decisions out of `recent`; same fields; absent from older cores,
 whose `recent` held both), `counts` (decisions per code since the core started, refusals
-included) and `logsSuppressed` (recording decision log lines left out by the 20-a-minute info
+included: a snapshot refusal counts once per observation and code, so an observation refused for
+slots on 10 snapshots counts 1 under `refused:slots`, and 1 more under `refused:cpu` if it is
+later refused for CPU), `refusalAttempts` (every refused snapshot per code, retries included;
+absent from older cores) and `logsSuppressed` (recording decision log lines left out by the 20-a-minute info
 log limit; snapshot refusals are logged at debug, outside it). The codes are listed in
 `SCANNER_RECORDER_DECISIONS` and explained in
 [SCANNER.md, Analog voice recordings](SCANNER.md#analog-voice-recordings). Newer cores add the
@@ -4478,6 +4481,7 @@ has ended and all its files are written, and only when none of its snapshots was
 		}
 	],
 	"counts": { "refused:cpu": 1, "started": 1, "voiced": 1 },
+	"refusalAttempts": { "refused:cpu": 6 },
 	"logsSuppressed": 0
 }
 ```
@@ -5611,6 +5615,7 @@ or another parameter, answers 400 `VALIDATION_ERROR` naming the field.
 	],
 	"held": 96,
 	"counts": { "refused:tuning": 31, "finalized": 12 },
+	"refusalAttempts": { "refused:tuning": 240 },
 	"streak": {
 		"since": "2026-01-01T10:00:00.000Z",
 		"durationMs": 420000,
@@ -5631,7 +5636,8 @@ decisions), `outcome` (`kept` for `finalized`, `refused`, `discarded`, or `progr
 (`discoveryId` null for a shadow not yet placed), `frequencyHz` (the discovery's frequency now;
 null without a discovery or once it is gone) and, when the decision has them, `unclean` and
 `receipt` as on `GET /api/scanner`. `held` is how many decisions the rings hold now; `counts`
-counts every decision since the core started.
+counts every decision since the core started (a snapshot refusal once per observation and code)
+and `refusalAttempts` every refused snapshot, as on `GET /api/scanner`.
 
 `streak` is null unless refusals with a fixable code (listed under
 [`GET /api/status`](#get-apistatus) `recorder-refusal-streak`) follow the last kept file or
