@@ -20,6 +20,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { CtcssBank } from "../../../../src/core/audio-tones/ctcss.js"
+import { DcsDecoder } from "../../../../src/core/audio-tones/dcs.js"
 import { createRecordingInventory } from "../../../../src/core/recordings/inventory.js"
 import type { AnalogMetadataAdapter } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
@@ -32,7 +33,9 @@ import {
 	RECORDING_FACTS_FILE,
 	RECORDING_FACTS_MAX_BYTES,
 	RecordingFactsSchema,
-	TONE_MEASURED_MIN_SAMPLES,
+	DCS_MEASURED_MIN_SAMPLES,
+	DCS_PARTIAL_WORDS,
+	TONE_MEASURED_MIN_BLOCKS,
 	factsFitFolder,
 	recordingFactsBytes,
 	recordingFactsOf,
@@ -46,6 +49,7 @@ import {
 } from "../../../../src/core/scanner/store/recording-operation.js"
 import { createLogger } from "../../../../src/utils/logger.js"
 import { gaussian, mulberry32 } from "../audio-tones/synth.js"
+import { dcsDeviation, voicePitchDeviation } from "./wideband-nfm-fixtures.js"
 import { counterIds, makeObs } from "../../../mocks/scanner/observations.js"
 import type { AnalogHandle } from "../../../../src/core/scanner/store/analog-operations.js"
 import type { VoicePrior } from "../../../../src/core/scanner/channel/recording-verdict.js"
@@ -379,6 +383,17 @@ describe("recordingFactsBytes bounds", () => {
 		expect(bytes!.length).toBeLessThanOrEqual(RECORDING_FACTS_MAX_BYTES)
 	})
 
+	// The longest tone member: a DCS code with the longer polarity (57 B, past the CTCSS 48 B).
+	it("the largest valid sidecar with the longest DCS tone fits the bound", () => {
+		const tone = { kind: "dcs", code: "754", polarity: "inverted" }
+		const bytes = recordingFactsBytes({ ...base, tone })
+		expect(bytes).not.toBeNull()
+		expect(bytes!.length).toBeLessThanOrEqual(RECORDING_FACTS_MAX_BYTES)
+		expect(JSON.parse(bytes!.toString()).tone).toEqual(tone)
+		const ctcss = recordingFactsBytes(base)!
+		expect(bytes!.length - ctcss.length).toBe(57 - 48)
+	})
+
 	it("a malformed admission block is dropped, not the sidecar", () => {
 		const bytes = recordingFactsBytes({
 			...base,
@@ -402,6 +417,12 @@ describe("recordingFactsBytes bounds", () => {
 			kind: "dcs",
 			code: "023",
 		})
+		for (const polarity of ["normal", "inverted"])
+			expect(read({ kind: "dcs", code: "023", polarity })?.tone).toEqual({
+				kind: "dcs",
+				code: "023",
+				polarity,
+			})
 		expect(read(null)?.tone).toBeNull()
 		const { tone: _omitted, ...noTone } = base
 		void _omitted
@@ -416,6 +437,7 @@ describe("recordingFactsBytes bounds", () => {
 		["not finite", { kind: "ctcss", hz: Number.NaN }],
 		["a DCS code with an 8", { kind: "dcs", code: "028" }],
 		["a DCS code of four digits", { kind: "dcs", code: "0234" }],
+		["an unknown DCS polarity", { kind: "dcs", code: "023", polarity: "up" }],
 		["an unknown kind", { kind: "dtmf", code: "1" }],
 		["an extra member", { kind: "ctcss", hz: 88.5, extra: 1 }],
 		["not an object", "88.5"],
@@ -453,40 +475,142 @@ describe("recordingFactsBytes bounds", () => {
 		).toBeNull()
 	})
 
-	it("toneFactOf: a settled tone always; null only from TONE_MEASURED_MIN_SAMPLES with no voted block and an empty sub-audible band", () => {
-		const fed = (samples: number, votedBlocks = 0, subAudibleBlocks = 0) => ({
-			samples,
-			votedBlocks,
-			subAudibleBlocks,
+	describe("toneFactOf decision table", () => {
+		/** Coverage that reads null: both detectors analysed exactly their minimum, heard nothing. */
+		const quiet = {
+			ctcssBlocks: TONE_MEASURED_MIN_BLOCKS,
+			votedBlocks: 0,
+			partialBlocks: 0,
+			dcsSamples: DCS_MEASURED_MIN_SAMPLES,
+			dcsChain: 0,
+			dcs: null,
+			ownTone: false,
+		}
+		const code = { code: "023", polarity: "normal" }
+
+		it("the minimums' arithmetic: 3 blocks (1 s of CTCSS), 6 000 samples (0.75 s of DCS), 2 words", () => {
+			expect(TONE_MEASURED_MIN_BLOCKS).toBe(3)
+			// 4 000 + 2 × 2 000 samples at 8 kHz: the bank's third block.
+			const bank = new CtcssBank()
+			for (let i = 0; i < 7_999; i++) bank.pushSample(0)
+			expect(bank.blockCount()).toBe(2)
+			bank.pushSample(0)
+			expect(bank.blockCount()).toBe(TONE_MEASURED_MIN_BLOCKS)
+			expect(DCS_MEASURED_MIN_SAMPLES).toBe(6_000)
+			expect(DCS_PARTIAL_WORDS).toBe(2)
 		})
-		expect(toneFactOf(88.5, fed(0))).toEqual({
-			tone: { kind: "ctcss", hz: 88.5 },
+
+		it("a settled CTCSS tone always wins, a DCS code too", () => {
+			const both = { ...quiet, dcs: code }
+			expect(toneFactOf(88.5, both)).toEqual({
+				tone: { kind: "ctcss", hz: 88.5 },
+			})
+			expect(toneFactOf(88.5, null)).toEqual({
+				tone: { kind: "ctcss", hz: 88.5 },
+			})
+			expect(toneFactOf(88.5, { ...quiet, ctcssBlocks: 0 })).toEqual({
+				tone: { kind: "ctcss", hz: 88.5 },
+			})
 		})
-		expect(toneFactOf(88.5, null)).toEqual({
-			tone: { kind: "ctcss", hz: 88.5 },
+
+		it("a confirmed DCS code beats a CTCSS that did not settle, at its sample minimum and not below", () => {
+			const dcs = { tone: { kind: "dcs", code: "023", polarity: "normal" } }
+			expect(toneFactOf(null, { ...quiet, dcs: code, votedBlocks: 4 })).toEqual(
+				dcs,
+			)
+			expect(toneFactOf(null, { ...quiet, dcs: code, ownTone: true })).toEqual(
+				dcs,
+			)
+			expect(toneFactOf(null, { ...quiet, dcs: code, ctcssBlocks: 0 })).toEqual(
+				dcs,
+			)
+			expect(
+				toneFactOf(null, {
+					...quiet,
+					dcs: code,
+					dcsSamples: DCS_MEASURED_MIN_SAMPLES - 1,
+				}),
+			).toEqual({})
+			expect(
+				toneFactOf(null, {
+					...quiet,
+					dcs: { code: "047", polarity: "inverted" },
+				}),
+			).toEqual({ tone: { kind: "dcs", code: "047", polarity: "inverted" } })
 		})
-		// At the sample bound counts, one sample below does not.
-		expect(toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES))).toEqual({
-			tone: null,
+
+		it.each([
+			["a code outside the standard set", { code: "024", polarity: "normal" }],
+			["a malformed code", { code: "02x", polarity: "normal" }],
+			["a malformed polarity", { code: "023", polarity: "up" }],
+			["not an object", "023"],
+		])("a DCS reading that fails the live gate (%s) is no code", (_n, dcs) => {
+			expect(toneFactOf(null, { ...quiet, dcs })).toEqual({ tone: null })
 		})
-		expect(toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES - 1))).toEqual({})
-		// A block held a tone the bank did not settle on: not determined, never a "no tone".
-		expect(toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES, 1))).toEqual({})
-		expect(toneFactOf(null, fed(10 * TONE_MEASURED_MIN_SAMPLES, 3))).toEqual({})
-		// No block voted but one held sub-audible energy (a DCS code, a broken-up tone, voice):
-		// not determined either.
-		expect(toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES, 0, 1))).toEqual({})
-		expect(
-			toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES, 0, Number.NaN)),
-		).toEqual({})
-		// No bank, or counts that are not finite numbers.
-		expect(toneFactOf(null, null)).toEqual({})
-		expect(toneFactOf(null, fed(Number.NaN))).toEqual({})
-		expect(toneFactOf(null, fed(Number.POSITIVE_INFINITY))).toEqual({})
-		expect(
-			toneFactOf(null, fed(TONE_MEASURED_MIN_SAMPLES, Number.NaN)),
-		).toEqual({})
+
+		it("null exactly at both minimums; absent one past either", () => {
+			expect(toneFactOf(null, quiet)).toEqual({ tone: null })
+			expect(toneFactOf(null, { ...quiet, ctcssBlocks: 40 })).toEqual({
+				tone: null,
+			})
+			expect(
+				toneFactOf(null, {
+					...quiet,
+					ctcssBlocks: TONE_MEASURED_MIN_BLOCKS - 1,
+				}),
+			).toEqual({})
+			expect(
+				toneFactOf(null, {
+					...quiet,
+					dcsSamples: DCS_MEASURED_MIN_SAMPLES - 1,
+				}),
+			).toEqual({})
+		})
+
+		it("tone-like evidence that did not settle is absent, never null", () => {
+			expect(toneFactOf(null, { ...quiet, votedBlocks: 1 })).toEqual({})
+			expect(toneFactOf(null, { ...quiet, partialBlocks: 1 })).toEqual({})
+			expect(
+				toneFactOf(null, { ...quiet, dcsChain: DCS_PARTIAL_WORDS }),
+			).toEqual({})
+			// A lone DCS word is no evidence (random registers hit about once per 13 s).
+			expect(
+				toneFactOf(null, { ...quiet, dcsChain: DCS_PARTIAL_WORDS - 1 }),
+			).toEqual({ tone: null })
+		})
+
+		it("a file kept for its own tone is never null", () => {
+			expect(toneFactOf(null, { ...quiet, ownTone: true })).toEqual({})
+		})
+
+		it("no coverage, or counts that are not finite numbers, are absent", () => {
+			expect(toneFactOf(null, null)).toEqual({})
+			for (const n of [Number.NaN, Number.POSITIVE_INFINITY]) {
+				expect(toneFactOf(null, { ...quiet, ctcssBlocks: n })).toEqual({})
+				expect(toneFactOf(null, { ...quiet, dcsSamples: n })).toEqual({})
+				expect(toneFactOf(null, { ...quiet, votedBlocks: n })).toEqual({})
+				expect(toneFactOf(null, { ...quiet, partialBlocks: n })).toEqual({})
+				expect(toneFactOf(null, { ...quiet, dcsChain: n })).toEqual({})
+			}
+		})
 	})
+
+	/** A detector pair's counters as the recorder freezes them (finishFile). */
+	const coverageOf = (bank: CtcssBank, dcs: DcsDecoder, ownTone = false) => ({
+		ctcssBlocks: bank.blockCount(),
+		votedBlocks: bank.votedBlockCount(),
+		partialBlocks: bank.partialBlockCount(),
+		dcsSamples: dcs.sampleCount(),
+		dcsChain: dcs.longestChain(),
+		dcs: dcs.result(),
+		ownTone,
+	})
+	/** A DCS decoder fed `n` silent samples (analysed, no code). */
+	const dcsOf = (n: number) => {
+		const dcs = new DcsDecoder()
+		for (let i = 0; i < n; i++) dcs.pushSample(0)
+		return dcs
+	}
 
 	// Two 1.5 s toned overs with 1.9 s of hang noise between them, straight into a real bank: the
 	// tone wins its blocks but under 60% of all of them, so the bank settles on none. Blocks
@@ -502,37 +626,25 @@ describe("recordingFactsBytes bounds", () => {
 		for (let i = 0; i < 15_200; i++) bank.pushSample(0.3 * gaussian(rand))
 		tone(12_000)
 		expect(bank.result()).toBeNull()
-		const coverage = {
-			samples: bank.sampleCount(),
-			votedBlocks: bank.votedBlockCount(),
-			subAudibleBlocks: bank.subAudibleBlockCount(),
-		}
-		expect(coverage.samples).toBe(39_200)
-		expect(coverage.votedBlocks).toBeGreaterThan(0)
-		expect(toneFactOf(bank.result(), coverage)).toEqual({})
-		// The same bank's noise alone, as long: no block voted, but the noise fills the sub-audible
-		// band (white noise puts about 9% of its power there, over the 1% floor): not determined.
+		expect(bank.sampleCount()).toBe(39_200)
+		expect(bank.votedBlockCount()).toBeGreaterThan(0)
+		expect(toneFactOf(bank.result(), coverageOf(bank, dcsOf(39_200)))).toEqual(
+			{},
+		)
+		// The same bank's noise alone, as long (modelled white noise): it fills the sub-audible band
+		// but no tone wins or leans on a block and no DCS word chains: a measured "no tone".
 		const noisy = new CtcssBank()
-		for (let i = 0; i < 39_200; i++) noisy.pushSample(0.3 * gaussian(rand))
+		const noisyDcs = new DcsDecoder()
+		for (let i = 0; i < 39_200; i++) {
+			const x = 0.3 * gaussian(rand)
+			noisy.pushSample(x)
+			noisyDcs.pushSample(x)
+		}
 		expect(noisy.votedBlockCount()).toBe(0)
 		expect(noisy.subAudibleBlockCount()).toBeGreaterThan(0)
-		expect(
-			toneFactOf(noisy.result(), {
-				samples: noisy.sampleCount(),
-				votedBlocks: noisy.votedBlockCount(),
-				subAudibleBlocks: noisy.subAudibleBlockCount(),
-			}),
-		).toEqual({})
-		// As long and silent: an empty band, a measured "no tone".
-		const quiet = new CtcssBank()
-		for (let i = 0; i < 39_200; i++) quiet.pushSample(0)
-		expect(
-			toneFactOf(quiet.result(), {
-				samples: quiet.sampleCount(),
-				votedBlocks: quiet.votedBlockCount(),
-				subAudibleBlocks: quiet.subAudibleBlockCount(),
-			}),
-		).toEqual({ tone: null })
+		expect(toneFactOf(noisy.result(), coverageOf(noisy, noisyDcs))).toEqual({
+			tone: null,
+		})
 	})
 
 	it("ids or codes past their bounds refuse the sidecar", () => {
@@ -670,24 +782,69 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 		expect(stored.admission).toEqual(facts.admission)
 	}, 120_000)
 
-	it("voice over a CTCSS tone: the sidecar carries the tone the recorder heard", async () => {
-		const { facts, stored } = await recorderKeep(88.5)
-		expect(facts.tone).toEqual({ kind: "ctcss", hz: 88.5 })
-		expect(stored.tone).toEqual({ kind: "ctcss", hz: 88.5 })
-	}, 120_000)
+	// Modelled voice over each edge and a middle CTCSS tone of the table.
+	it.each([67, 88.5, 254.1])(
+		"voice over a %s Hz CTCSS tone: the sidecar carries the tone the recorder heard",
+		async hz => {
+			const { facts, stored } = await recorderKeep(hz)
+			expect(facts.tone).toEqual({ kind: "ctcss", hz })
+			expect(stored.tone).toEqual({ kind: "ctcss", hz })
+		},
+		120_000,
+	)
 
-	// The recorder's tone audio is the demodulated audio low-passed at 300 Hz, so nearly all of
-	// its power lies in the bank's band: an untoned voice (its own pitch, and the discriminator's
-	// noise under it) fills the band in every block. Not determined, never a false "no tone".
-	it("untoned voice: the tone is absent (its audio fills the sub-audible band), never null", async () => {
+	// The modelled voice's bursts (400 Hz up) leave little in the 300 Hz tone audio; with the
+	// discriminator's noise under it nothing tone-like is heard over 6 s: "No tone heard".
+	it("untoned voice: both detectors analysed it and heard no tone: null", async () => {
 		const { facts, stored } = await recorderKeep(null)
-		expect("tone" in facts).toBe(false)
-		expect("tone" in stored).toBe(false)
+		expect(facts.tone).toBeNull()
+		expect(stored.tone).toBeNull()
 	}, 120_000)
 
-	// A DCS-coded over: random NRZ at 134.4 bps, ±500 Hz deviation. No CTCSS tone wins a block,
-	// but the code fills the band: absent (the recorder measures no DCS), never null.
-	it("a DCS-like coded over: the tone is absent, never null", async () => {
+	// Modelled voice pitch in the sub-audible band (110-170 Hz glide plus its harmonic): it fills
+	// the band, but no CTCSS tone wins or leans on a block and no DCS word chains: null.
+	it("untoned voice with its pitch in the 85-300 Hz band: null", async () => {
+		const scene = await recorderScene([
+			{
+				seconds: 6,
+				ctcssHz: null,
+				gapAfter: 4.1,
+				subAudible: voicePitchDeviation(),
+			},
+		])
+		expect(scene.outcomes).toEqual(["finalized"])
+		expect(scene.facts[0]!.tone).toBeNull()
+		expect(scene.stored[0]!.tone).toBeNull()
+	}, 120_000)
+
+	// Modelled DCS codes at 600 Hz deviation under the voice. An inverted 023 is the same bit
+	// stream as 047 normal; the standard set reports it the way the live path does: 047 normal.
+	it.each([
+		["023", false, { code: "023", polarity: "normal" }],
+		["023", true, { code: "047", polarity: "normal" }],
+		["754", false, { code: "754", polarity: "normal" }],
+	])(
+		"a DCS %s (inverted %s) over: the sidecar carries the code the recorder heard",
+		async (code, inverted, heard) => {
+			const scene = await recorderScene([
+				{
+					seconds: 6,
+					ctcssHz: null,
+					gapAfter: 4.1,
+					subAudible: dcsDeviation(code, inverted),
+				},
+			])
+			expect(scene.outcomes).toEqual(["finalized"])
+			expect(scene.facts[0]!.tone).toEqual({ kind: "dcs", ...heard })
+			expect(scene.stored[0]!.tone).toEqual({ kind: "dcs", ...heard })
+		},
+		120_000,
+	)
+
+	// Random NRZ at 134.4 bps (modelled, no valid code word): no CTCSS tone wins or leans on a
+	// block and no two consecutive DCS words match, so it reads as no tone. A DCS code too broken
+	// to hold two consecutive words reads the same: the disclosed limit of "No tone heard".
+	it("a DCS-like random NRZ over: no code word chains, null", async () => {
 		const bits = mulberry32(19)
 		const levels: number[] = []
 		const nrz = (t: number): number => {
@@ -699,8 +856,88 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 			{ seconds: 6, ctcssHz: null, gapAfter: 4.1, subAudible: nrz },
 		])
 		expect(scene.outcomes).toEqual(["finalized"])
+		expect(scene.facts[0]!.tone).toBeNull()
+		expect(scene.stored[0]!.tone).toBeNull()
+	}, 120_000)
+
+	// A 600 ms over alone: its detectors analysed under 1 s (the CTCSS minimum): absent.
+	it("a short over (600 ms): the tone is absent, never null", async () => {
+		const scene = await recorderScene([
+			{ seconds: 0.6, ctcssHz: null, gapAfter: 4.1 },
+		])
+		expect(scene.outcomes).toEqual(["finalized"])
 		expect("tone" in scene.facts[0]!).toBe(false)
 		expect("tone" in scene.stored[0]!).toBe(false)
+	}, 120_000)
+
+	// Two untoned overs joined across 1.9 s of carrier-off receiver noise (inside the session's
+	// activity, so the detectors hear it): FM noise fills the band without any one tone or a
+	// chained DCS word, so the file still reads no tone.
+	it("two untoned overs joined across receiver noise: null", async () => {
+		const scene = await recorderScene([
+			{ seconds: 1.5, ctcssHz: null, gapAfter: 1.9 },
+			{ seconds: 1.5, ctcssHz: null, gapAfter: 4.1 },
+		])
+		expect(scene.outcomes).toEqual(["finalized"])
+		expect(scene.facts[0]!.tone).toBeNull()
+		expect(scene.stored[0]!.tone).toBeNull()
+	}, 120_000)
+
+	// One 124 s over rolls over at WIDEBAND_MAX_FILE_MS (120 s). Its 88.5 Hz tone stops 118 s in
+	// (with the 1 s pre-roll, about 1 s before the cut): the first part settles on it, the
+	// roll-over part (about 5 s untoned) is judged on its own analysed audio only, never on the
+	// tone its session heard before or on the tail carried into it: null.
+	it("a roll-over part is judged on its own analysed audio", async () => {
+		const scene = await recorderScene([
+			{
+				seconds: 124,
+				ctcssHz: 88.5,
+				gapAfter: 4.1,
+				ctcssAt: t => (t < 118 ? 88.5 : null),
+			},
+		])
+		expect(scene.outcomes).toEqual(["finalized", "finalized"])
+		expect(scene.facts[0]!.tone).toEqual({ kind: "ctcss", hz: 88.5 })
+		expect(scene.stored[0]!.tone).toEqual({ kind: "ctcss", hz: 88.5 })
+		expect(scene.facts[1]!.tone).toBeNull()
+		expect(scene.stored[1]!.tone).toBeNull()
+	}, 300_000)
+
+	// A 121.4 s over: the roll-over part holds about 1.7 s of activity, but about 1 s of it is the
+	// tail produced past the cut before the first part finished, carried into the new part
+	// without its tone twin: the part's detectors analysed about 0.73 s, under the 1 s CTCSS
+	// minimum. The carried tail never counts toward the minimums: absent, never null.
+	it("a short roll-over part: its carried-in tail does not count, the tone is absent", async () => {
+		const scene = await recorderScene([
+			{ seconds: 121.4, ctcssHz: null, gapAfter: 4.1 },
+		])
+		expect(scene.outcomes).toEqual(["finalized", "finalized"])
+		expect(scene.facts[0]!.tone).toBeNull()
+		expect("tone" in scene.facts[1]!).toBe(false)
+		expect("tone" in scene.stored[1]!).toBe(false)
+	}, 300_000)
+
+	// Two DCS 023 overs joined across the noise: the code confirmed in the first over stays
+	// confirmed (the noise breaks the chain but never undoes a confirmed code).
+	it("two DCS 023 overs joined across receiver noise: the code", async () => {
+		const scene = await recorderScene([
+			{
+				seconds: 1.5,
+				ctcssHz: null,
+				gapAfter: 1.9,
+				subAudible: dcsDeviation("023"),
+			},
+			{
+				seconds: 1.5,
+				ctcssHz: null,
+				gapAfter: 4.1,
+				subAudible: dcsDeviation("023"),
+			},
+		])
+		expect(scene.outcomes).toEqual(["finalized"])
+		const dcs = { kind: "dcs", code: "023", polarity: "normal" }
+		expect(scene.facts[0]!.tone).toEqual(dcs)
+		expect(scene.stored[0]!.tone).toEqual(dcs)
 	}, 120_000)
 
 	// The tone keyed 300 ms on, 300 ms off for the whole over: too broken for a block to vote,

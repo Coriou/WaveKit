@@ -188,6 +188,10 @@ export class DcsDecoder {
 	private candidateWord = 0
 	private hits = 0
 	private confirmed = NONE
+	/** Samples pushed (sampleCount). */
+	private samples = 0
+	/** Most consecutive matching words any chain reached (longestChain). */
+	private bestHits = 0
 
 	constructor(options?: { codeSet?: DcsCodeSet }) {
 		this.standard = (options?.codeSet ?? DCS_CODE_SET) === "standard"
@@ -213,6 +217,7 @@ export class DcsDecoder {
 	}
 
 	pushSample(sample: number): void {
+		this.samples += 1
 		const x = Number.isFinite(sample) ? sample : 0
 		// Section A (direct form II transposed; b2 = b0).
 		const ya = this.lb0 * x + this.s1a
@@ -279,6 +284,20 @@ export class DcsDecoder {
 		return this.candidate === NONE ? 0 : this.hits
 	}
 
+	/** Samples pushed since construction or the last reset (8 kHz). Does not affect `result()`. */
+	sampleCount(): number {
+		return this.samples
+	}
+
+	/**
+	 * The most consecutive matching words (`wordHits()`) any chain reached since construction or
+	 * the last reset, whether or not it confirmed: 1 for a lone hit, DCS_MIN_WORDS or more once a
+	 * code confirmed. Does not affect `result()`.
+	 */
+	longestChain(): number {
+		return this.bestHits
+	}
+
 	result(): AnalogTransmissionDcs | null {
 		return this.confirmed === NONE ? null : toDcs(this.confirmed)
 	}
@@ -303,6 +322,8 @@ export class DcsDecoder {
 		this.candidateWord = 0
 		this.hits = 0
 		this.confirmed = NONE
+		this.samples = 0
+		this.bestHits = 0
 	}
 
 	private pushBit(bit: number, quiet: boolean): void {
@@ -323,6 +344,7 @@ export class DcsDecoder {
 			// Check point: exactly 23 bits after the previous hit.
 			if (reading === this.candidate && this.register === this.candidateWord) {
 				this.hits += 1
+				if (this.hits > this.bestHits) this.bestHits = this.hits
 				this.candidateBit = this.bitIndex
 				if (this.hits >= DCS_MIN_WORDS) this.confirmed = reading
 				return
@@ -335,5 +357,6 @@ export class DcsDecoder {
 		this.candidateBit = this.bitIndex
 		this.candidateWord = this.register
 		this.hits = 1
+		if (this.bestHits < 1) this.bestHits = 1
 	}
 }

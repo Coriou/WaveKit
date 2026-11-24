@@ -231,3 +231,42 @@ export function wavDurationMs(file: Buffer): number {
 	const dataBytes = file.readUInt32LE(40)
 	return (dataBytes / 2 / rate) * 1000
 }
+
+/**
+ * Modelled DCS code as NfmSource.setSubAudible deviation (Hz at t s): the code's Golay word
+ * repeated at 134.4 bit/s NRZ, LSB first as on air (dcs.ts), ±`deviationHz` (a radio's DCS
+ * deviation is about 500-750 Hz); `inverted` sends the complement. Positive deviation is a 1 bit.
+ */
+export function dcsDeviation(
+	code: string,
+	inverted = false,
+	deviationHz = 600,
+): (t: number) => number {
+	const data = (Number.parseInt(code, 8) & 0x1ff) | (0b100 << 9)
+	let r = data << 11
+	for (let i = 22; i >= 11; i--) if (r & (1 << i)) r ^= 0xc75 << (i - 11)
+	const word = ((data << 11) | r) & 0x7fffff
+	const bits: number[] = []
+	for (let i = 0; i < 23; i++) bits.push((word >>> ((11 + i) % 23)) & 1)
+	return t => {
+		const bit = bits[Math.floor(t * 134.4) % 23]! ^ (inverted ? 1 : 0)
+		return bit === 1 ? deviationHz : -deviationHz
+	}
+}
+
+/**
+ * Modelled untoned voice pitch as NfmSource.setSubAudible deviation (Hz at t s): a fundamental
+ * gliding 110-170 Hz (140 Hz ± 30 Hz at 1.3 Hz, a speaker's intonation) with its second harmonic
+ * at half its level and a 4 Hz syllabic raised-cosine envelope: the energy a voice puts in the
+ * 85-300 Hz band, where no one CTCSS tone holds it for a 500 ms block.
+ */
+export function voicePitchDeviation(deviationHz = 400): (t: number) => number {
+	const glide = 30 / (TWO_PI * 1.3)
+	return t => {
+		const phase = TWO_PI * (140 * t - glide * Math.cos(TWO_PI * 1.3 * t))
+		const envelope = 0.5 - 0.5 * Math.cos(TWO_PI * 4 * t)
+		return (
+			deviationHz * envelope * (Math.sin(phase) + 0.5 * Math.sin(2 * phase))
+		)
+	}
+}

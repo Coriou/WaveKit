@@ -23,34 +23,35 @@
  * observation at most 128 each: 292 B), three ISO times (24 B each: 72 B), at most 14 finite
  * numbers (at most 24 B each as JSON: 336 B) and the closed codes (keptBy 32, cut 32, reason and
  * strength 64 each, branch 9: 201 B), plus about 520 B of member names and punctuation: about
- * 1 421 B. The tone member adds at most 48 B: `,"tone":{"kind":"ctcss","hz":` and `}` take
- * 30 B and the bounded hz at most 18 (a double in 67..254.1 prints in at most 18 characters,
- * e.g. 254.09999999999997); the DCS form `,"tone":{"kind":"dcs","code":"754"}` takes 35 B.
- * About 1 469 B in all.
+ * 1 421 B. The tone member adds at most 57 B: the CTCSS form `,"tone":{"kind":"ctcss","hz":` and
+ * `}` take 30 B and the bounded hz at most 18 (a double in 67..254.1 prints in at most 18
+ * characters, e.g. 254.09999999999997): 48 B; the DCS form
+ * `,"tone":{"kind":"dcs","code":"754","polarity":"inverted"}` takes 57 B. About 1 478 B in all.
  * RECORDING_FACTS_MAX_BYTES (2 048 B) holds that with room, and a writer refuses anything
  * larger.
  *
- * Tone: what the recorder's own CTCSS bank measured over the file's activity (no new
- * detection), frozen when the file finished (the bank's own sample and block counts, never a
- * span estimate: the session runs on after the file and its later activity was never fed to
- * this bank). `{kind:"ctcss",hz}` when the bank settled on a tone; null only when it was fed at
- * least TONE_MEASURED_MIN_SAMPLES, not one of its blocks voted for any tone and not one held
- * sub-audible energy (CtcssBank.subAudibleBlockCount: band power above the bank's numerical
- * floor and at least 1% of the block's power): the band was empty. "No block voted" alone is no
- * proof of absence: a DCS code (134.4 bps NRZ spreads over 50-300 Hz, no CTCSS line reaches 0.65
- * of the band) or a broken-up tone wins no block either. The member is absent otherwise: fed
- * less (the bank needs 750 ms before it answers at all), some block held a tone the bank did not
- * settle on (fewer than 60% of the blocks: hang noise, gaps and untoned turnarounds dilute a
- * toned voice), or a block held sub-audible energy no tone won. The recorder's tone audio is the
- * demodulated audio low-passed at 300 Hz, so nearly all its power is in that band: voice (its
- * pitch is 85-255 Hz), receiver noise and a DCS code always fill it, so an untoned voice file
- * reads absent, and null in practice means an almost silent tone path. The recorder measures no
- * DCS: a DCS-coded file reads absent, and the `dcs` form is in the shape but never produced now.
- * A tone that does not validate is dropped (the member absent), never the whole sidecar, like
- * the admission block. The store's operation folder budget (MAX_OPERATION_METADATA_BYTES, 16 KiB)
- * covers intent + receipt + sidecar: the sidecar is skipped when the three would exceed it.
+ * Tone: what the recorder's own per-file CTCSS bank and DCS decoder measured over the file's
+ * activity, frozen when the file finished (their own analysed counts, never a span estimate: the
+ * session runs on after the file and its later activity was never fed to them; a roll-over part's
+ * carried-in tail is not fed to the new part's detectors either). Both hear the same tone audio
+ * (the demodulated 8 kHz audio low-passed at 300 Hz). `{kind:"ctcss",hz}` when the bank settled on
+ * a tone; `{kind:"dcs",code,polarity}` when the DCS decoder confirmed a code (its three words) over
+ * at least DCS_MIN_AUDIO_SECONDS, of the standard set when DCS_CODE_SET is "standard" (the live
+ * transmission path's gate), the polarity as that path reports it: "normal" is the stream as
+ * demodulated, "inverted" its complement. null ("No tone heard") only when both detectors analysed
+ * enough audio and neither heard anything tone-like; absent ("not determined") otherwise. The
+ * decision table is at toneFactOf. A tone that does not validate is dropped (the member absent),
+ * never the whole sidecar, like the admission block. The store's operation folder budget
+ * (MAX_OPERATION_METADATA_BYTES, 16 KiB) covers intent + receipt + sidecar: the sidecar is
+ * skipped when the three would exceed it.
  */
 import { z } from "zod"
+import {
+	DCS_CODE_SET,
+	DCS_MIN_AUDIO_SECONDS,
+	DCS_MIN_WORDS,
+	DCS_STANDARD_CODES,
+} from "@wavekit/api-types"
 import type { RecordingFacts, RecordingTone } from "@wavekit/api-types"
 import { CTCSS_HZ } from "../../audio-tones/ctcss.js"
 import { NoiseQuarantineFactsSchema } from "./noise-quarantine.js"
@@ -67,21 +68,51 @@ const CODE = /^[a-z][a-z-]{0,31}$/
 const iso = z.string().datetime()
 const finite = z.number().finite()
 
-/**
- * Samples (8 kHz, the bank's rate) the recorder's CTCSS bank must have been fed before its "no
- * tone" counts: 1 s, three of its 500 ms blocks hopped by 250 ms, one hop past the 750 ms the
- * bank needs to answer at all (ctcss.ts MIN_SAMPLES).
- */
-export const TONE_MEASURED_MIN_SAMPLES = 8000
+/** The tone audio's rate (8 kHz), the rate both the CTCSS bank and the DCS decoder run at. */
+const TONE_RATE_HZ = 8000
 
-/** What a file's CTCSS bank was fed when the file finished (CtcssBank counters). */
+/**
+ * CTCSS analysis blocks the file's bank must have run before its "no tone" counts: 3, i.e. 1 s of
+ * analysed audio (the first 500 ms block at 4 000 samples, then one per 250 ms hop of 2 000:
+ * 4 000 + 2 × 2 000 = 8 000 samples), one block past the two the bank needs to answer at all
+ * (ctcss.ts MIN_SAMPLES, 750 ms).
+ */
+export const TONE_MEASURED_MIN_BLOCKS = 3
+
+/**
+ * Samples the file's DCS decoder must have analysed before its code, or its "no code", counts:
+ * DCS_MIN_AUDIO_SECONDS (0.75 s) at 8 kHz = 6 000, the live transmission path's DCS gate.
+ */
+export const DCS_MEASURED_MIN_SAMPLES = DCS_MIN_AUDIO_SECONDS * TONE_RATE_HZ
+
+/**
+ * A DCS word chain this long that never confirmed (DCS_MIN_WORDS, 3) is a partial code: 2 words,
+ * the same 23-bit register exactly 23 bits apart. A lone hit is no evidence: a random register is
+ * a rotation of one of the 104 standard words or their complements with p ≈ 104 × 23 × 2 / 2^23 ≈
+ * 5.7e-4 per bit, at 134.4 bit/s about one hit per 13 s of noise or voice; a second matching word
+ * at the next check point has p = 2^-23 more.
+ */
+export const DCS_PARTIAL_WORDS = DCS_MIN_WORDS - 1
+
+/** What a file's tone detectors analysed when the file finished (their counters). */
 export interface ToneCoverage {
-	/** Samples pushed (CtcssBank.sampleCount). */
-	readonly samples: number
+	/** CTCSS analysis blocks run (CtcssBank.blockCount). */
+	readonly ctcssBlocks: number
 	/** Blocks some tone won (CtcssBank.votedBlockCount). */
 	readonly votedBlocks: number
-	/** Blocks no tone won that held sub-audible band energy (CtcssBank.subAudibleBlockCount). */
-	readonly subAudibleBlocks: number
+	/** Blocks no tone won whose best tone still dominated (CtcssBank.partialBlockCount). */
+	readonly partialBlocks: number
+	/** Samples the DCS decoder analysed (DcsDecoder.sampleCount, 8 kHz). */
+	readonly dcsSamples: number
+	/** Longest DCS word chain, confirmed or not (DcsDecoder.longestChain). */
+	readonly dcsChain: number
+	/** The DCS decoder's confirmed code (DcsDecoder.result()), before the gate. */
+	readonly dcs: unknown
+	/**
+	 * The file was kept for its own tone: classed by it (ToneClassEvidence) or a roll-over part
+	 * carrying that class. Never "No tone heard".
+	 */
+	readonly ownTone: boolean
 }
 
 /** Lowest and highest standard CTCSS tones (67.0 and 254.1 Hz): the bounds of `hz`. */
@@ -95,19 +126,68 @@ export const RecordingToneSchema = z.discriminatedUnion("kind", [
 			hz: finite.min(CTCSS_MIN_HZ).max(CTCSS_MAX_HZ),
 		})
 		.strict(),
-	/** A DCS code as three octal digits ("023"); reserved, the recorder measures none. */
+	/**
+	 * A DCS code as three octal digits ("023") and its polarity as the live transmission path
+	 * reports it ("normal": the stream as demodulated). The recorder always writes the polarity;
+	 * a reader accepts a sidecar without one.
+	 */
 	z
-		.object({ kind: z.literal("dcs"), code: z.string().regex(/^[0-7]{3}$/) })
+		.object({
+			kind: z.literal("dcs"),
+			code: z.string().regex(/^[0-7]{3}$/),
+			polarity: z.enum(["normal", "inverted"]).optional(),
+		})
 		.strict(),
 ])
 
 /**
+ * The DCS decoder's code `value` as the live transmission path gates it (analog-transmission.ts
+ * gateTone and copyDcs): none before DCS_MEASURED_MIN_SAMPLES (exactly at it counts), none for a
+ * malformed code or polarity, none outside DCS_STANDARD_CODES when DCS_CODE_SET is "standard".
+ */
+function gatedDcs(
+	value: unknown,
+	samples: number,
+): { code: string; polarity: "normal" | "inverted" } | null {
+	if (!(samples >= DCS_MEASURED_MIN_SAMPLES)) return null
+	if (typeof value !== "object" || value === null) return null
+	const { code, polarity } = value as { code?: unknown; polarity?: unknown }
+	if (typeof code !== "string" || !/^[0-7]{3}$/.test(code)) return null
+	if (DCS_CODE_SET === "standard" && !DCS_STANDARD_CODES.includes(code))
+		return null
+	if (polarity !== "normal" && polarity !== "inverted") return null
+	return { code, polarity }
+}
+
+/** A finite count at or above `min`. */
+const atLeast = (n: number, min: number): boolean =>
+	Number.isFinite(n) && n >= min
+
+/**
  * The tone fact of a file whose CTCSS bank answered `toneHz` with `coverage` at the file's
- * finish, as AnalogFinishFacts members: the CTCSS tone when it settled on one; null only when it
- * was fed at least TONE_MEASURED_MIN_SAMPLES (exactly at it counts), no block voted for any tone
- * and no block held sub-audible energy (the band was empty); no member otherwise (fed less, a
- * block held a tone it did not settle on, a block held sub-audible energy no tone won, such as a
- * DCS code, a broken-up tone or voice, no bank, or a count that is not a finite number).
+ * finish, as AnalogFinishFacts members. Decision table, first matching row wins ("analysed" is
+ * what the detector processed for this file, never what the session was fed):
+ *
+ * | CTCSS          | DCS (gated)        | CTCSS blocks | DCS samples | own-tone keep | tone         |
+ * | -------------- | ------------------ | ------------ | ----------- | ------------- | ------------ |
+ * | settled (hz)   | any                | any          | any         | any           | ctcss hz     |
+ * | not settled    | confirmed code     | any          | ≥ 6 000     | any           | dcs code     |
+ * | no coverage    | -                  | -            | -           | -             | absent       |
+ * | any            | any                | any          | any         | yes           | absent       |
+ * | any            | any                | < 3          | any         | no            | absent       |
+ * | any            | any                | any          | < 6 000     | no            | absent       |
+ * | voted, unset   | any                | ≥ 3          | ≥ 6 000     | no            | absent       |
+ * | partial block  | any                | ≥ 3          | ≥ 6 000     | no            | absent       |
+ * | none           | partial (2 words)  | ≥ 3          | ≥ 6 000     | no            | absent       |
+ * | none           | none (chain < 2)   | ≥ 3          | ≥ 6 000     | no            | null         |
+ *
+ * Both settled: CTCSS wins (its answer needs 60% of all the file's blocks, a DCS code only three
+ * words, about 0.5 s). "voted, unset": some block voted for a tone the bank did not settle on
+ * (under 60% of the blocks: hang noise, gaps and untoned turnarounds dilute a toned voice).
+ * "partial block": a block no tone won still leaned on one (a tone keyed on and off, or too weak to
+ * vote). Voice, receiver noise and a broken-up DCS code put energy in the sub-audible band without
+ * either: an untoned voice reads null, a DCS code too broken to hold two consecutive words reads
+ * null too (the disclosed limit). A count that is not a finite number is not analysed.
  */
 export function toneFactOf(
 	toneHz: number | null,
@@ -115,13 +195,15 @@ export function toneFactOf(
 ): { readonly tone?: RecordingTone | null } {
 	if (toneHz !== null) return { tone: { kind: "ctcss", hz: toneHz } }
 	if (coverage === null) return {}
-	const { samples, votedBlocks, subAudibleBlocks } = coverage
-	return Number.isFinite(samples) &&
-		samples >= TONE_MEASURED_MIN_SAMPLES &&
-		votedBlocks === 0 &&
-		subAudibleBlocks === 0
-		? { tone: null }
-		: {}
+	const dcs = gatedDcs(coverage.dcs, coverage.dcsSamples)
+	if (dcs !== null) return { tone: { kind: "dcs", ...dcs } }
+	if (coverage.ownTone) return {}
+	if (!atLeast(coverage.ctcssBlocks, TONE_MEASURED_MIN_BLOCKS)) return {}
+	if (!atLeast(coverage.dcsSamples, DCS_MEASURED_MIN_SAMPLES)) return {}
+	if (coverage.votedBlocks !== 0 || coverage.partialBlocks !== 0) return {}
+	if (!Number.isFinite(coverage.dcsChain)) return {}
+	if (coverage.dcsChain >= DCS_PARTIAL_WORDS) return {}
+	return { tone: null }
 }
 
 export const RecordingFactsSchema = z
@@ -147,7 +229,7 @@ export const RecordingFactsSchema = z
 			.strict(),
 		/** The recording admission's measured numbers; null when the recorder gave none. */
 		admission: NoiseQuarantineFactsSchema.nullable(),
-		/** The tone heard over the file; null: measured, the sub-audible band was empty; absent: not determined. */
+		/** The tone heard over the file; null: both detectors analysed enough and heard none; absent: not determined. */
 		tone: RecordingToneSchema.nullable().optional(),
 	})
 	.strict()

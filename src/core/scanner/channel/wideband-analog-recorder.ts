@@ -53,6 +53,7 @@ import type { TrackSnapshot, TuningTrust } from "../../spectrum/types.js"
 import { safeErrorFields } from "../../../decoders/safe-error-fields.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import { CtcssBank } from "../../audio-tones/ctcss.js"
+import { DcsDecoder } from "../../audio-tones/dcs.js"
 import { toneFactOf, type ToneCoverage } from "../store/recording-facts.js"
 import { ulid } from "../ids.js"
 import { CPU_COST } from "../plan/cost.js"
@@ -1113,9 +1114,11 @@ interface FileState {
 	readonly gate: VoiceActivityGate
 	/** This file's CTCSS input (inside the activity only); null once its tone was taken. */
 	ctcss: CtcssBank | null
+	/** This file's DCS input, the same frames as `ctcss`; null once its tone was taken. */
+	dcs: DcsDecoder | null
 	/** The tone heard over this file (taken when it finished), reported once it is finalized. */
 	toneHz: number | null
-	/** What its CTCSS bank was fed when the file finished (taken with `toneHz`); null before. */
+	/** What its CTCSS bank and DCS decoder analysed when the file finished (with `toneHz`); null before. */
 	toneCoverage: ToneCoverage | null
 	/** The stricter evidence classByTone needs (tone-class.ts); null once the file finished. */
 	toneClass: ToneClassEvidence | null
@@ -3427,6 +3430,7 @@ export class WidebandAnalogRecorder {
 			gapFrom: 0,
 			gate: new VoiceActivityGate(),
 			ctcss: new CtcssBank(),
+			dcs: new DcsDecoder(),
 			toneHz: null,
 			toneCoverage: null,
 			toneClass: new ToneClassEvidence(),
@@ -4451,7 +4455,7 @@ export class WidebandAnalogRecorder {
 		for (const f of [...s.files]) this.admit(s, f)
 	}
 
-	/** CTCSS input: only frames inside the observed activity (no pre-roll, no hang noise). */
+	/** CTCSS and DCS input: only frames inside the observed activity (no pre-roll, no hang noise). */
 	private toneFrames(
 		s: Session,
 		file: FileState,
@@ -4461,12 +4465,14 @@ export class WidebandAnalogRecorder {
 		const bank = file.ctcss
 		if (bank === null) return
 		const evidence = file.toneClass
+		const dcs = file.dcs
 		const perFrame = s.fs / ANALOG_AUDIO_RATE_HZ
 		for (let i = 0; i < tone.length; i++) {
 			const sample = file.startSample + (first + i) * perFrame
 			if (sample >= s.onset && sample <= s.lastActive) {
 				const t = tone[i]!
 				bank.pushSample(t / 32_768)
+				dcs?.pushSample(t / 32_768)
 				evidence?.tone(bank, t)
 			}
 		}
@@ -4621,16 +4627,20 @@ export class WidebandAnalogRecorder {
 		)
 			file.cut = "source-lost"
 		file.toneHz = file.ctcss?.result() ?? null
-		file.toneCoverage =
-			file.ctcss === null
-				? null
-				: {
-						samples: file.ctcss.sampleCount(),
-						votedBlocks: file.ctcss.votedBlockCount(),
-						subAudibleBlocks: file.ctcss.subAudibleBlockCount(),
-					}
 		file.classTone = file.toneClass?.result(true) ?? null
 		file.toneClass = null
+		file.toneCoverage =
+			file.ctcss === null || file.dcs === null
+				? null
+				: {
+						ctcssBlocks: file.ctcss.blockCount(),
+						votedBlocks: file.ctcss.votedBlockCount(),
+						partialBlocks: file.ctcss.partialBlockCount(),
+						dcsSamples: file.dcs.sampleCount(),
+						dcsChain: file.dcs.longestChain(),
+						dcs: file.dcs.result(),
+						ownTone: file.classTone !== null || file.toneCarried,
+					}
 		if (
 			s.toneOnly &&
 			!s.speechOnly &&
@@ -4643,6 +4653,7 @@ export class WidebandAnalogRecorder {
 			file.failed = true
 		}
 		file.ctcss = null
+		file.dcs = null
 		const next = s.pendingStart
 		s.pendingStart = null
 		s.file = null
@@ -5018,8 +5029,8 @@ export class WidebandAnalogRecorder {
 					...(path !== null && speech !== null
 						? { admission: noiseFacts(path, speech, s) }
 						: {}),
-					// The file's CTCSS answer and what its bank was fed (toneFrames), both frozen in
-					// finishFile: the session's later activity never reached this file's bank.
+					// The file's CTCSS answer and what its bank and DCS decoder analysed (toneFrames),
+					// frozen in finishFile: the session's later activity never reached them.
 					...toneFactOf(file.toneHz, file.toneCoverage),
 				})
 				.catch(() => undefined)

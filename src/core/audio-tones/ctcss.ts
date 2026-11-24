@@ -24,6 +24,14 @@ const RAW_POWER_FRACTION = 0.01
 const MIN_VOTE_FRACTION = 0.6
 /** Ignore numerical dust so a silent band cannot win on a ratio of zeros. */
 const MIN_POWER = 1e-12
+/**
+ * A block no tone won still leans on one (partialBlockCount) when its best tone dominates (3× the
+ * next, as a vote) and holds at least this share of the band: half the 0.65 a vote needs. A tone
+ * keyed on for half of a block keeps about half its power on its own Goertzel bin, the rest
+ * spread over keying sidebands; white noise puts about 2 Hz / 250 Hz < 1% of the band on one bin,
+ * and a gliding voice pitch spreads its energy over many bins.
+ */
+const PARTIAL_BAND_FRACTION = 0.325
 /** Tones evaluated together in one Goertzel pass (see `CtcssBank.goertzel`). */
 const GOERTZEL_LANES = 10
 
@@ -143,6 +151,8 @@ export class CtcssBank {
 	private votedBlocks = 0
 	/** Analysis blocks no tone won that still held sub-audible band energy (subAudibleBlockCount). */
 	private subAudibleBlocks = 0
+	/** Analysis blocks no tone won whose best tone still dominated (partialBlockCount). */
+	private partialBlocks = 0
 
 	constructor() {
 		for (let i = 0; i < CTCSS_HZ.length; i++) {
@@ -220,6 +230,15 @@ export class CtcssBank {
 		return this.subAudibleBlocks
 	}
 
+	/**
+	 * Analysis blocks no tone won whose best tone still dominated the others (≥ 3× the next) and
+	 * held at least PARTIAL_BAND_FRACTION of the band (and 1% of whole-audio power): a tone too
+	 * broken up or too weak to vote, never one a vote counted. Does not affect `result()`.
+	 */
+	partialBlockCount(): number {
+		return this.partialBlocks
+	}
+
 	result(): number | null {
 		if (this.seen < MIN_SAMPLES) return null
 		const tone = selectCtcssTone(this.votes, this.qualified, this.firstBlock)
@@ -251,6 +270,7 @@ export class CtcssBank {
 		this.lastBlockWinner = -1
 		this.votedBlocks = 0
 		this.subAudibleBlocks = 0
+		this.partialBlocks = 0
 	}
 
 	private analyse(): void {
@@ -309,6 +329,15 @@ export class CtcssBank {
 			bandMean >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
 		)
 			this.subAudibleBlocks += 1
+		if (
+			winner < 0 &&
+			dominates &&
+			bandMean > MIN_POWER &&
+			bestPower > MIN_POWER &&
+			bestPower >= PARTIAL_BAND_FRACTION * bandMean &&
+			bestPower >= RAW_POWER_FRACTION * (rawEnergy / BLOCK_SAMPLES)
+		)
+			this.partialBlocks += 1
 		this.lastBlockWinner = winner
 		if (winner >= 0 && winner === this.lastWinner) this.streak += 1
 		else if (winner >= 0) {
