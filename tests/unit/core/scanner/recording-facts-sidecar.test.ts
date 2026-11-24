@@ -40,11 +40,9 @@ import {
 	DCS_LONE_HITS_MIN,
 	DCS_PARTIAL_WORDS,
 	TONE_MEASURED_MIN_BLOCKS,
-	TONE_LOUD_BLOCK_SHARE,
 	TONE_LOUD_EDGE_BLOCKS,
 	TONE_QUIET_MIN_BLOCKS,
 	TONE_MIN_POWER,
-	toneLoudBlocksAllowed,
 	factsFitFolder,
 	toneAudioPower,
 	recordingFactsBytes,
@@ -641,32 +639,21 @@ describe("recordingFactsBytes bounds", () => {
 			).toEqual({})
 		})
 
-		it("loud blocks: null at max(2, 10% of the blocks), absent one past", () => {
+		it("loud blocks: null at 2 whatever the length, absent at 3", () => {
 			expect(TONE_LOUD_EDGE_BLOCKS).toBe(2)
-			expect(TONE_LOUD_BLOCK_SHARE).toBe(0.1)
 			const at = (ctcssBlocks: number, loud: number) =>
 				toneFactOf(null, {
 					...quiet,
 					ctcssBlocks,
 					quietBlocks: ctcssBlocks - loud,
 				})
-			// 10-29 blocks: the 2 edge blocks bind.
-			for (const blocks of [12, 20, 29]) {
-				expect(toneLoudBlocksAllowed(blocks)).toBe(2)
+			// No share of a long file: 2 loud blocks at 12, 30, 40, 100 and 400 blocks, never 3.
+			for (const blocks of [12, 20, 29, 30, 39, 40, 100, 400]) {
 				expect(at(blocks, 2)).toEqual({ tone: null })
 				expect(at(blocks, 3)).toEqual({})
 			}
-			// From 30 blocks the 10% share binds (floored): 3 at 30-39, 4 at 40, 10 at 100.
-			expect(toneLoudBlocksAllowed(30)).toBe(3)
-			expect(toneLoudBlocksAllowed(39)).toBe(3)
-			expect(toneLoudBlocksAllowed(40)).toBe(4)
-			expect(toneLoudBlocksAllowed(100)).toBe(10)
-			expect(at(30, 3)).toEqual({ tone: null })
-			expect(at(30, 4)).toEqual({})
-			expect(at(40, 4)).toEqual({ tone: null })
-			expect(at(40, 5)).toEqual({})
-			expect(at(100, 10)).toEqual({ tone: null })
-			expect(at(100, 11)).toEqual({})
+			// A 50 s carrier (100 blocks) with a 5 s toned burst (10 loud blocks): absent.
+			expect(at(100, 10)).toEqual({})
 			// At the quiet minimum both bounds hold: 12 blocks, 10 quiet, 2 loud.
 			expect(at(TONE_QUIET_MIN_BLOCKS + 2, 2)).toEqual({ tone: null })
 			// More quiet blocks than blocks is inconsistent coverage: not analysed.
@@ -723,6 +710,27 @@ describe("recordingFactsBytes bounds", () => {
 			).toEqual({})
 			expect(loudOf(n, [[12_000, 400]]).loud).toBe(2)
 			expect(loudOf(n, [[12_500, 2000]]).loud).toBe(3)
+			// A 50 s quiet carrier with a 3 s toned voice burst mid-file (its tone hidden under the
+			// voice: loud, no vote), keying edge and squelch tail included: 199 blocks, 15 of them
+			// loud. A share of the blocks (10%: 19) would have read null; the absolute bound reads
+			// not determined.
+			const long = 400_000
+			const burst = loudOf(long, [
+				[0, 2000],
+				[200_000, 24_000],
+				[long - 2000, 2000],
+			])
+			expect(burst.blocks).toBe(199)
+			expect(burst.loud).toBeGreaterThan(TONE_LOUD_EDGE_BLOCKS)
+			expect(burst.loud).toBeLessThanOrEqual(Math.floor(0.1 * burst.blocks))
+			expect(burst.fact).toEqual({})
+			// The same carrier with only its edge and tail: null at any length.
+			expect(
+				loudOf(long, [
+					[0, 2000],
+					[long - 2000, 2000],
+				]),
+			).toEqual({ blocks: 199, loud: 2, fact: { tone: null } })
 		})
 
 		it("tone-like evidence that did not settle is absent, never null", () => {

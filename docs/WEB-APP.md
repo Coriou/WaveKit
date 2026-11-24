@@ -650,10 +650,11 @@ no audio, such as `The recording was deleted`); **What we know**, a few short ro
   `A tone was heard (not stored)` (the scanner kept the file for its tone without storing which;
   such a file never reads `No tone heard`),
   `No tone heard` (only when the scanner recorder stored that it listened and heard neither a
-  CTCSS tone nor a DCS code, and the open carrier was quiet almost throughout, so a tone sent at
-  250 Hz of deviation or more would have been heard: in practice a carrier with nothing on it; a
-  tone can hide under speech, so a voiced recording almost always reads
-  `Not determined for this recording`; it does not check tones under 67 Hz), or `Not measured`
+  CTCSS tone nor a DCS code, and the open carrier was quiet throughout but for at most 2
+  half-second blocks (its keying edge and squelch tail), so a tone sent at 250 Hz of deviation or
+  more would have been heard: in practice a carrier with nothing on it; anything more that is not
+  quiet, such as a short burst of speech, reads `Not determined for this recording`, since a tone
+  can hide under speech; it does not check tones under 67 Hz), or `Not measured`
   with why (recordings made before WaveKit stored the tone,
   `Not determined for this recording` when the stored facts hold no tone, a scanner recording whose
   file is not listed, a live transmission whose stored event could not be read, a live transmission

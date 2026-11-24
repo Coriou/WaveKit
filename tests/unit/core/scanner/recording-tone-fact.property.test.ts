@@ -2,7 +2,7 @@
  * toneFactOf (recording-facts.ts) over arbitrary detector coverage, checked by invariants rather
  * than by recomputing its rule: tone-like evidence never reads "No tone heard" (null); more
  * evidence or more loud blocks never turn "not determined" into null and more quiet blocks never
- * turn null into "not determined"; null always has few loud blocks; a gated DCS code always wins, a settled CTCSS tone otherwise; and a table of
+ * turn null into "not determined"; null always has at most 2 loud blocks; a gated DCS code always wins, a settled CTCSS tone otherwise; and a table of
  * rows written out by hand (the oracle) agrees with it. Modelled counters only.
  */
 import fc from "fast-check"
@@ -113,17 +113,15 @@ describe("toneFactOf properties", () => {
 		)
 	})
 
-	// Feature: recording facts tone, Property 5: null needs few loud blocks
+	// Feature: recording facts tone, Property 5: null needs at most 2 loud blocks
 	// Validates: Requirements R2
-	it("null only with at least 10 quiet blocks and at most max(2, 10%) loud ones", () => {
+	it("null only with at least 10 quiet blocks and at most 2 loud ones, whatever the length", () => {
 		fc.assert(
 			fc.property(fc.oneof(coverage, nearMinimums), c => {
 				if (!isNull(c)) return
 				expect(c.quietBlocks).toBeGreaterThanOrEqual(10)
 				expect(c.quietBlocks).toBeLessThanOrEqual(c.ctcssBlocks)
-				expect(c.ctcssBlocks - c.quietBlocks).toBeLessThanOrEqual(
-					Math.max(2, Math.floor(c.ctcssBlocks / 10)),
-				)
+				expect(c.ctcssBlocks - c.quietBlocks).toBeLessThanOrEqual(2)
 			}),
 			{ numRuns: 300 },
 		)
@@ -177,13 +175,28 @@ describe("toneFactOf properties", () => {
 			],
 			["20 quiet blocks of 23 (3 loud)", { quietBlocks: 20 }, "absent"],
 			[
-				"27 quiet blocks of 30 (3 loud, 10%)",
-				{ ctcssBlocks: 30, quietBlocks: 27 },
+				"28 quiet blocks of 30 (2 loud)",
+				{ ctcssBlocks: 30, quietBlocks: 28 },
 				"null",
 			],
 			[
-				"26 quiet blocks of 30 (4 loud)",
-				{ ctcssBlocks: 30, quietBlocks: 26 },
+				"27 quiet blocks of 30 (3 loud)",
+				{ ctcssBlocks: 30, quietBlocks: 27 },
+				"absent",
+			],
+			[
+				"98 quiet blocks of 100 (2 loud)",
+				{ ctcssBlocks: 100, quietBlocks: 98 },
+				"null",
+			],
+			[
+				"97 quiet blocks of 100 (3 loud)",
+				{ ctcssBlocks: 100, quietBlocks: 97 },
+				"absent",
+			],
+			[
+				"90 quiet blocks of 100 (a 2.5 s toned burst on a carrier)",
+				{ ctcssBlocks: 100, quietBlocks: 90 },
 				"absent",
 			],
 			[

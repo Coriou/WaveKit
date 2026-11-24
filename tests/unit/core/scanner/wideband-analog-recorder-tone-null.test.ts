@@ -6,13 +6,14 @@
  *   nothing) and count as analysed coverage.
  * - Loud blocks: quiet blocks prove only that the tone was off during them. A tone hidden under
  *   voice, then dropped for a carrier hang (or a toned over joined to an untoned one), leaves ten
- *   quiet blocks beside many loud ones: null also needs few loud blocks (toneLoudBlocksAllowed).
+ *   quiet blocks beside many loud ones: null also needs at most TONE_LOUD_EDGE_BLOCKS (2) loud blocks,
+ *   whatever the file's length: a short toned burst on a long carrier never reads null.
  * The coverage the finish freezes is captured from toneFactOf. Modelled audio (NfmSource) only.
  */
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	TONE_QUIET_MIN_BLOCKS,
-	toneLoudBlocksAllowed,
+	TONE_LOUD_EDGE_BLOCKS,
 	type ToneCoverage,
 } from "../../../../src/core/scanner/store/recording-facts.js"
 import type * as RecordingFacts from "../../../../src/core/scanner/store/recording-facts.js"
@@ -66,6 +67,8 @@ interface Over {
 	voiceAt?: (t: number) => boolean
 	/** A sub-audible voice pitch while speaking (NfmSource.setSubAudible); default none. */
 	subAudible?: (t: number) => number
+	/** `subAudible` is on at t s (while speaking); default always. */
+	subAudibleOn?: (t: number) => boolean
 	/** Carrier-off seconds after the over: under the 2 s hang joins the next over. */
 	gapAfter: number
 	/** Source gaps (IQ skipped: a ring gap) of `gapSeconds`, spread evenly; default none. */
@@ -103,7 +106,11 @@ async function scene(overs: readonly Over[]) {
 			const speaking = over.voiceAt?.(t) ?? true
 			r.src.setCtcss(over.ctcssAt(t))
 			r.src.setVoice(speaking)
-			r.src.setSubAudible(speaking ? (over.subAudible ?? null) : null)
+			r.src.setSubAudible(
+				speaking && (over.subAudibleOn?.(t) ?? true)
+					? (over.subAudible ?? null)
+					: null,
+			)
 			const gapHere = gaps > 0 && i > 0 && i % every === 0 && skipped < gaps
 			if (gapHere) skipped++
 			r.engine.write(r.src.next(chunk, true), gapHere ? skip : 0)
@@ -222,9 +229,7 @@ describe("recorder tone path: quiet blocks beside loud ones", () => {
 		expect(coverage.votedBlocks).toBe(0)
 		expect(coverage.partialBlocks).toBe(0)
 		expect(coverage.quietBlocks).toBeGreaterThanOrEqual(TONE_QUIET_MIN_BLOCKS)
-		expect(loud(coverage)).toBeGreaterThan(
-			toneLoudBlocksAllowed(coverage.ctcssBlocks),
-		)
+		expect(loud(coverage)).toBeGreaterThan(TONE_LOUD_EDGE_BLOCKS)
 		expect(result.tone).not.toBeNull()
 	}, 240_000)
 
@@ -242,8 +247,31 @@ describe("recorder tone path: quiet blocks beside loud ones", () => {
 			{ seconds: 4, ctcssAt: () => null, gapAfter: 4.1 },
 		])
 		expect(coverage.quietBlocks).toBeGreaterThanOrEqual(TONE_QUIET_MIN_BLOCKS)
-		expect(loud(coverage)).toBeGreaterThan(
-			toneLoudBlocksAllowed(coverage.ctcssBlocks),
+		expect(loud(coverage)).toBeGreaterThan(TONE_LOUD_EDGE_BLOCKS)
+		expect(result.tone).not.toBeNull()
+	}, 240_000)
+
+	// A 40 s over with nothing in the tone band (the modelled voice sits from 400 Hz up) but a
+	// 2 s burst mid-file of the hidden tone under a sub-audible voice pitch. The burst's loud blocks are well under a tenth of the file's (a share
+	// of the blocks would have read null): only the keying edge and the squelch tail may be
+	// loud, so the burst keeps it not determined.
+	it("a 2 s toned burst in a 40 s over quiet in the tone band: never null", async () => {
+		const burst = (t: number) => t >= 19 && t < 21
+		const { coverage, result } = await oneFile([
+			{
+				seconds: 40,
+				ctcssAt: t => (burst(t) ? HIDDEN_HZ : null),
+				subAudible: hiddenPitch,
+				subAudibleOn: burst,
+				gapAfter: 4.1,
+			},
+		])
+		expect(coverage.votedBlocks).toBe(0)
+		expect(coverage.partialBlocks).toBe(0)
+		expect(coverage.quietBlocks).toBeGreaterThanOrEqual(TONE_QUIET_MIN_BLOCKS)
+		expect(loud(coverage)).toBeGreaterThan(TONE_LOUD_EDGE_BLOCKS)
+		expect(loud(coverage)).toBeLessThanOrEqual(
+			Math.floor(0.1 * coverage.ctcssBlocks),
 		)
 		expect(result.tone).not.toBeNull()
 	}, 240_000)
@@ -271,9 +299,7 @@ describe("recorder tone path: quiet blocks beside loud ones", () => {
 			{ seconds: 4, ctcssAt: () => null, gapAfter: 4.1 },
 		])
 		expect(coverage.ctcssBlocks).toBeGreaterThanOrEqual(TONE_QUIET_MIN_BLOCKS)
-		expect(loud(coverage)).toBeLessThanOrEqual(
-			toneLoudBlocksAllowed(coverage.ctcssBlocks),
-		)
+		expect(loud(coverage)).toBeLessThanOrEqual(TONE_LOUD_EDGE_BLOCKS)
 		expect(result.tone).toBeNull()
 	}, 240_000)
 })

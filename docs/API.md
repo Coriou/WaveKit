@@ -7092,20 +7092,21 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   to hide a CTCSS tone sent at 250 Hz of deviation or more: the sub-audible band
   under a fifth of the weakest such tone's power, the 254.1 Hz one after the
   de-emphasis and the 300 Hz low-pass, so a tone would have been heard in them),
-  and at most 2 blocks, or a tenth of them in a file of 30 blocks (7.75 s) or
-  more, were not quiet (room for a keying edge and a squelch tail). A quiet
+  and at most 2 blocks were not quiet, whatever the file's length (room for a
+  keying edge and a squelch tail; a third non-quiet block reads absent). A quiet
   block only shows the tone was off during it: voice and receiver noise fill the
   band and a tone can hide under them, so a voiced recording almost always reads
   absent, and null means a carrier with (almost) nothing in the sub-audible band.
   Audio missing from the source (a gap the file fills with silence) is not
   analysed. A tone at 250 Hz of deviation or more keeps every block it fills from
-  being quiet, so a file reads null only if such a tone filled at most that many
-  blocks (in a file under 7.75 s, it was on for under 1.25 s). Absent when it
+  being quiet, so a file reads null only if such a tone filled at most 2 blocks
+  (it was on for under 1.25 s, in a file of any length). Absent when it
   measured less, when a tone or DCS word was heard but did not settle (a weak or
   broken-up tone, a standard DCS code too broken to confirm, a toned over joined
-  to an untoned one), when fewer than ten blocks were quiet or more than the
-  allowed blocks were not (speech or noise: a tone could have hidden under it),
-  or when the file was kept for its own tone; and absent on older files. Null
+  to an untoned one), when fewer than ten blocks were quiet or more than 2 were
+  not (speech or noise, even a short burst of it on a long carrier: a tone could
+  have hidden under it), or when the file was kept for its own tone; and absent
+  on older files. Null
   does not rule out a non-standard tone under 67 Hz (33-64 Hz: those tones are
   not checked), a tone set under 250 Hz of deviation, a tone on only for a
   moment, or a non-standard DCS code too broken to repeat two words. A

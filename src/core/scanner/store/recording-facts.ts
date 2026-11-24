@@ -41,7 +41,7 @@
  * demodulated, "inverted" its complement. null ("No tone heard") only when both detectors analysed
  * enough audio, neither heard anything tone-like, at least TONE_QUIET_MIN_BLOCKS of the CTCSS
  * blocks were too quiet to hide a tone at 250 Hz of deviation, and at most
- * toneLoudBlocksAllowed (max(2, 10%)) of them were not; absent ("not determined") otherwise. A
+ * TONE_LOUD_EDGE_BLOCKS (2, a keying edge and a squelch tail) of them were not; absent ("not determined") otherwise. A
  * voiced recording almost always reads absent: null is a carrier with (almost) nothing in the
  * sub-audible band. The decision table is at toneFactOf. A tone that does not validate is dropped (the member absent),
  * never the whole sidecar, like the admission block. The store's operation folder budget
@@ -167,12 +167,13 @@ export const RECORDER_TONE_QUIET: CtcssQuietCeilings = {
 export const TONE_QUIET_MIN_BLOCKS = 10
 
 /**
- * Loud (not quiet) CTCSS blocks a file may hold and still read "No tone heard": the larger of
- * TONE_LOUD_EDGE_BLOCKS and TONE_LOUD_BLOCK_SHARE of its blocks (floor), so 2 up to 29 blocks,
- * 3 at 30-39, 10 at 100. A quiet block proves only that no tone was on during it: a tone hidden
- * under voice in the loud blocks and dropped for the rest (a repeater that stops its CTCSS at the
- * end of an over and hangs its carrier, or a toned over joined to an untoned one) leaves ten quiet
- * blocks beside many loud ones, so null also needs the loud blocks to be few.
+ * Loud (not quiet) CTCSS blocks a file may hold and still read "No tone heard": 2, whatever its
+ * length. A quiet block proves only that no tone was on during it: a tone hidden under voice in
+ * the loud blocks and dropped for the rest (a repeater that stops its CTCSS at the end of an over
+ * and hangs its carrier, a toned over joined to an untoned one, or a short toned burst on a long
+ * untoned carrier) leaves ten quiet blocks beside loud ones, so null also needs the loud blocks
+ * to be no more than the keying edge and the squelch tail can explain. A share of a long file's
+ * blocks would not do: 10% of a 50 s carrier (100 blocks) admits a 5 s toned voice burst.
  *
  * Why 2: blocks are 4 000 samples (500 ms) that end every 2 000 (250 ms hop), only complete
  * blocks count, and the bank hears only the audio inside the observed activity (toneFrames). A
@@ -180,26 +181,15 @@ export const TONE_QUIET_MIN_BLOCKS = 10
  * 2 000); a squelch tail in the last L ≤ 2 000 samples (150-250 ms) lies only in the last complete
  * block (a block that overlaps it ends in (N − L, N], a span of at most one hop). One edge and
  * one tail: 2. A burst in the middle of a file touches up to 3 blocks (a block starting in the
- * open span of 4 000 + L samples before its end): a file shorter than 30 blocks with one reads
- * not determined. The 10% share admits the occasional click or fade of a long carrier.
+ * open span of 4 000 + L samples before its end): a file with one reads not determined, as does
+ * a long carrier with a click or fade mid-file (a third loud block).
  *
  * What survives: a tone of TONE_MIN_CREDIBLE_DEVIATION_HZ or more makes every block it fills loud
- * (RECORDER_TONE_QUIET), so a file reads null only when such a tone filled at most this many
- * blocks. In a 10-29 block file that is 2: three whole blocks span 8 000 samples (1 s) on the
- * hop grid, and any 10 000 samples (1.25 s) hold three whole blocks, so a tone on for 1.25 s or
- * more in such a file never reads null.
+ * (RECORDER_TONE_QUIET), so a file reads null only when such a tone filled at most 2 blocks: three
+ * whole blocks span 8 000 samples (1 s) on the hop grid, and any 10 000 samples (1.25 s) hold
+ * three whole blocks, so a tone on for 1.25 s or more never reads null, in a file of any length.
  */
 export const TONE_LOUD_EDGE_BLOCKS = 2
-/** Share of a file's CTCSS blocks that may be loud before "No tone heard" (floored): 10%. */
-export const TONE_LOUD_BLOCK_SHARE = 0.1
-
-/** Loud CTCSS blocks allowed in a "No tone heard" file of `blocks` blocks (see above). */
-export function toneLoudBlocksAllowed(blocks: number): number {
-	return Math.max(
-		TONE_LOUD_EDGE_BLOCKS,
-		Math.floor(TONE_LOUD_BLOCK_SHARE * blocks),
-	)
-}
 
 /**
  * Samples the file's DCS decoder must have analysed before its code, or its "no code", counts:
@@ -362,8 +352,8 @@ function dcsHitsAboveChance(hits: number, samples: number): boolean {
  * too quiet to hide a tone of TONE_MIN_CREDIBLE_DEVIATION_HZ (RECORDER_TONE_QUIET): no vote and no
  * lean is no proof by itself, because voice in the sub-audible band, a gliding pitch or noise can
  * keep a tone under them from voting or leaning in every block; only a quiet block shows a tone
- * would have been seen, and only for that block. "few loud": at most toneLoudBlocksAllowed
- * (max(2, 10% of the blocks)) blocks are not quiet; a quiet block says nothing about the loud
+ * would have been seen, and only for that block. "few loud": at most TONE_LOUD_EDGE_BLOCKS
+ * (2, whatever the file's length) blocks are not quiet; a quiet block says nothing about the loud
  * ones, where a tone may sit under voice. So a voiced recording almost always reads absent; null
  * is a carrier with (almost) nothing in the sub-audible band. A file whose tone of 250 Hz
  * deviation or more filled more than the allowed loud blocks never reads null (each block it
@@ -385,10 +375,7 @@ export function toneFactOf(
 	if (coverage.votedBlocks !== 0 || coverage.partialBlocks !== 0) return {}
 	if (!atLeast(coverage.quietBlocks, TONE_QUIET_MIN_BLOCKS)) return {}
 	if (coverage.quietBlocks > coverage.ctcssBlocks) return {}
-	if (
-		coverage.ctcssBlocks - coverage.quietBlocks >
-		toneLoudBlocksAllowed(coverage.ctcssBlocks)
-	)
+	if (coverage.ctcssBlocks - coverage.quietBlocks > TONE_LOUD_EDGE_BLOCKS)
 		return {}
 	if (!Number.isFinite(coverage.dcsChain)) return {}
 	if (coverage.dcsChain >= DCS_PARTIAL_WORDS) return {}
