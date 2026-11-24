@@ -179,6 +179,10 @@ export class CtcssBank {
 	private lastLean = -1
 	/** Analysis blocks under both quiet ceilings (quietBlockCount). */
 	private quietBlocks = 0
+	/** Samples pushed as gap fill (pushGapSample, gapSampleCount). */
+	private gapSamples = 0
+	/** `seen` index (1-based) of the latest gap-fill sample, or 0: none yet. */
+	private lastGapAt = 0
 	private readonly quiet: CtcssQuietCeilings | null
 
 	/** `quiet`: the quiet-block ceilings (quietBlockCount); none: no block counts as quiet. */
@@ -218,6 +222,23 @@ export class CtcssBank {
 		if (this.seen !== this.nextAt) return
 		this.analyse()
 		this.nextAt += HOP_SAMPLES
+	}
+
+	/**
+	 * `sample` stands in for audio the input never delivered (a source gap's fill): analysed
+	 * exactly as `pushSample` (votes, blocks and every other count unchanged), but any analysis
+	 * block holding at least one such sample is never quiet (quietBlockCount), and the sample is
+	 * counted (gapSampleCount). Fill proves nothing about a tone: it was not heard.
+	 */
+	pushGapSample(sample: number): void {
+		this.gapSamples += 1
+		this.lastGapAt = this.seen + 1
+		this.pushSample(sample)
+	}
+
+	/** Samples pushed with pushGapSample since construction or the last reset. */
+	gapSampleCount(): number {
+		return this.gapSamples
 	}
 
 	/**
@@ -279,8 +300,8 @@ export class CtcssBank {
 	/**
 	 * Analysis blocks whose band power was at most the quiet ceilings' `bandMax` and whose raw
 	 * power at most `rawMax` (exactly at a ceiling is quiet), voted or not: a block too quiet to
-	 * hide a tone at the level the ceilings were derived for. 0 when the bank has no ceilings.
-	 * Does not affect `result()`.
+	 * hide a tone at the level the ceilings were derived for. 0 when the bank has no ceilings. A
+	 * block holding a gap-fill sample (pushGapSample) is never quiet. Does not affect `result()`.
 	 */
 	quietBlockCount(): number {
 		return this.quietBlocks
@@ -320,6 +341,8 @@ export class CtcssBank {
 		this.partialBlocks = 0
 		this.lastLean = -1
 		this.quietBlocks = 0
+		this.gapSamples = 0
+		this.lastGapAt = 0
 	}
 
 	private analyse(): void {
@@ -340,8 +363,11 @@ export class CtcssBank {
 		}
 		const bandEnergy = Math.max(0, rawEnergy - belowEnergy - aboveEnergy)
 		const quiet = this.quiet
+		// The block holds samples seen - BLOCK_SAMPLES + 1 .. seen (1-based): one of them gap fill
+		// (lastGapAt) and it is not quiet.
 		if (
 			quiet !== null &&
+			this.lastGapAt <= this.seen - BLOCK_SAMPLES &&
 			bandEnergy / BLOCK_SAMPLES <= quiet.bandMax &&
 			rawEnergy / BLOCK_SAMPLES <= quiet.rawMax
 		)

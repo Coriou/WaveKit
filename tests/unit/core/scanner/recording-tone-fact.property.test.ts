@@ -53,7 +53,7 @@ const isNull = (c: ToneCoverage) => toneFactOf(null, c).tone === null
 describe("toneFactOf properties", () => {
 	// Feature: recording facts tone, Property 1: tone-like evidence never reads null
 	// Validates: Requirements R2
-	it("a voted or leaned block, an own-tone keep or a two-word DCS chain never reads null", () => {
+	it("a voted or leaned block, an own-tone keep, gap fill or a two-word DCS chain never reads null", () => {
 		fc.assert(
 			fc.property(
 				coverage,
@@ -63,6 +63,7 @@ describe("toneFactOf properties", () => {
 					"dcsChain",
 					"dcsAnyChain",
 					"ownTone",
+					"gapSamples",
 				),
 				fc.integer({ min: 1, max: 1000 }),
 				(c, field, n) => {
@@ -216,6 +217,10 @@ describe("toneFactOf properties", () => {
 			["a two-word non-standard chain", { dcsAnyChain: 2 }, "absent"],
 			["2 lone hits in 6 s", { dcsLoneHits: 2 }, "absent"],
 			["kept for its own tone", { ownTone: true }, "absent"],
+			["no gap fill", { gapSamples: 0 }, "null"],
+			["one gap-fill sample", { gapSamples: 1 }, "absent"],
+			["0.95 s of gap fill", { gapSamples: 7_600 }, "absent"],
+			["gap fill not a number", { gapSamples: Number.NaN }, "absent"],
 			["quiet blocks not a number", { quietBlocks: Number.NaN }, "absent"],
 		]
 		for (const [, change, want] of rows) {

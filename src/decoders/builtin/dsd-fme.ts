@@ -1386,7 +1386,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * no retry in the new run. Only a crash restart (start() without stop()) raises it: after
 	 * stop() (`stopping`), as in restart() (stop() then start()), every lookup pending at the stop,
 	 * the calls stop() itself ended among them, keeps its retries, since dsd-fme finalises those
-	 * files only when its child exits; each chain is bounded (23 s, see stop()).
+	 * files only when its child exits; each chain is bounded (35 s, see DSD_FME_WAV_ATTEMPT_TIMEOUT_MS).
 	 */
 	private wavRun = 0
 	/**
@@ -1861,9 +1861,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// The WAV lookups are deliberately NOT cancelled, here or by the start() of a restart
 		// (wavRun): dsd-fme finalises the file of a call this stop() ended when its child exits, inside super.stop(), so only a retry after it
 		// finds that file and links it in a `wavFileUpdate` (the recording links follow it). That
-		// post-stop update is bounded: each chain is 1 + DSD_FME_WAV_RETRIES attempts, each retry
-		// waiting once at most for a stuck read, at most 6 × 2 000 + 5 × (200 + 2 000) ms = 23 s
-		// after its end (DSD_FME_WAV_ATTEMPT_TIMEOUT_MS), and
+		// post-stop update is bounded: each chain is 1 + DSD_FME_WAV_RETRIES attempts, at most
+		// 6 × (2 000 + 2 000) + 5 × (200 + 2 000) ms = 24 + 11 = 35 s after its end (the worst case
+		// at DSD_FME_WAV_ATTEMPT_TIMEOUT_MS), and
 		// a call_end update is all it publishes (a probe pool has stopped listening by then).
 		await super.stop()
 		this.linkDmrCc.clear()

@@ -41,7 +41,9 @@
  * demodulated, "inverted" its complement. null ("No tone heard") only when both detectors analysed
  * enough audio, neither heard anything tone-like, at least TONE_QUIET_MIN_BLOCKS of the CTCSS
  * blocks were too quiet to hide a tone at 250 Hz of deviation, and at most
- * TONE_LOUD_EDGE_BLOCKS (2, a keying edge and a squelch tail) of them were not; absent ("not determined") otherwise. A
+ * TONE_LOUD_EDGE_BLOCKS (2, a keying edge and a squelch tail) of them were not, and no source-gap
+ * fill was analysed (the recorder feeds a gap's silence to its detectors, so every keep and class
+ * decision counts it, but marks it: never quiet evidence); absent ("not determined") otherwise. A
  * voiced recording almost always reads absent: null is a carrier with (almost) nothing in the
  * sub-audible band. The decision table is at toneFactOf. A tone that does not validate is dropped (the member absent),
  * never the whole sidecar, like the admission block. The store's operation folder budget
@@ -84,7 +86,9 @@ export const TONE_MEASURED_MIN_BLOCKS = 10
 
 /**
  * The weakest CTCSS tone "No tone heard" rules out: 250 Hz of deviation, the low end of what an
- * encoder sends (radios set 250-750 Hz, most 500-700). A tone set lower than this is not ruled out.
+ * encoder sends (radios set 250-750 Hz, most 500-700). The quiet ceilings derive from it with
+ * margin: measured through the recorder chain, a toned block stays loud (never quiet) down to
+ * about 120 Hz of deviation at 254.1 Hz and about 80 Hz at 67 Hz; a tone set lower is not ruled out.
  */
 export const TONE_MIN_CREDIBLE_DEVIATION_HZ = 250
 
@@ -187,7 +191,8 @@ export const TONE_QUIET_MIN_BLOCKS = 10
  * What survives: a tone of TONE_MIN_CREDIBLE_DEVIATION_HZ or more makes every block it fills loud
  * (RECORDER_TONE_QUIET), so a file reads null only when such a tone filled at most 2 blocks: three
  * whole blocks span 8 000 samples (1 s) on the hop grid, and any 10 000 samples (1.25 s) hold
- * three whole blocks, so a tone heard for 1.25 s or more (input gaps are not heard) never reads null, in any file.
+ * three whole blocks, so a tone heard for 1.25 s or more never reads null, in any file. A file with any source-gap fill
+ * (ToneCoverage.gapSamples) never reads null at all: its fill's blocks are never quiet either.
  */
 export const TONE_LOUD_EDGE_BLOCKS = 2
 
@@ -236,6 +241,12 @@ export interface ToneCoverage {
 	readonly partialBlocks: number
 	/** Blocks too quiet to hide a credible tone (CtcssBank.quietBlockCount, RECORDER_TONE_QUIET). */
 	readonly quietBlocks: number
+	/**
+	 * Samples of source-gap fill the bank analysed (CtcssBank.gapSampleCount): silence the input
+	 * never delivered. Its blocks are never quiet, and any at all rules "No tone heard" out. The
+	 * recorder always sets it; absent: no gap (a caller that never fills gaps).
+	 */
+	readonly gapSamples?: number
 	/** Samples the DCS decoder analysed (DcsDecoder.sampleCount, 8 kHz). */
 	readonly dcsSamples: number
 	/** Longest DCS word chain, confirmed or not (DcsDecoder.longestChain). */
@@ -328,6 +339,7 @@ function dcsHitsAboveChance(hits: number, samples: number): boolean {
  * | settled (hz)  | no code                 | any          | any         | any           | ctcss hz |
  * | no coverage   | -                       | -            | -           | -             | absent   |
  * | any           | any                     | any          | any         | yes           | absent   |
+ * | any, gap fill analysed | any            | any          | any         | no            | absent   |
  * | any           | any                     | < 10         | any         | no            | absent   |
  * | any           | any                     | any          | < 6 000     | no            | absent   |
  * | voted, unset  | any                     | ≥ 10         | ≥ 6 000     | no            | absent   |
@@ -370,6 +382,7 @@ export function toneFactOf(
 	if (toneHz !== null) return { tone: { kind: "ctcss", hz: toneHz } }
 	if (coverage === null) return {}
 	if (coverage.ownTone) return {}
+	if (coverage.gapSamples !== undefined && coverage.gapSamples !== 0) return {}
 	if (!atLeast(coverage.ctcssBlocks, TONE_MEASURED_MIN_BLOCKS)) return {}
 	if (!atLeast(coverage.dcsSamples, DCS_MEASURED_MIN_SAMPLES)) return {}
 	if (coverage.votedBlocks !== 0 || coverage.partialBlocks !== 0) return {}

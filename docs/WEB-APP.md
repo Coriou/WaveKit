@@ -651,8 +651,9 @@ no audio, such as `The recording was deleted`); **What we know**, a few short ro
   such a file never reads `No tone heard`),
   `No tone heard` (only when the scanner recorder stored that it listened and heard neither a
   CTCSS tone nor a DCS code, and the open carrier was quiet throughout but for at most 2
-  half-second blocks (its keying edge and squelch tail), so a tone sent at 250 Hz of deviation or
-  more would have been heard: in practice a carrier with nothing on it; anything more that is not
+  half-second blocks (its keying edge and squelch tail), with no audio missing from the source, so
+  a tone would have been heard down to about 120 Hz of deviation at 254.1 Hz and about 80 Hz at
+  67 Hz (measured; a tone set lower is not ruled out): in practice a carrier with nothing on it; anything more that is not
   quiet, such as a short burst of speech, reads `Not determined for this recording`, since a tone
   can hide under speech; it does not check tones under 67 Hz), or `Not measured`
   with why (recordings made before WaveKit stored the tone,

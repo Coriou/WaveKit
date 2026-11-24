@@ -1099,10 +1099,14 @@ export interface WidebandCloseInfo {
 	readonly recordAllowed?: boolean
 }
 
-/** Demodulated audio and its tone-band twin, frame for frame; `tone` null: not for CTCSS. */
+/**
+ * Demodulated audio and its tone-band twin, frame for frame; `tone` null: not for CTCSS. `gap`:
+ * a source gap's silence fill, analysed like audio but never quiet tone evidence (toneFrames).
+ */
 interface Frames {
 	readonly pcm: Int16Array
 	readonly tone: Int16Array | null
+	readonly gap?: boolean
 }
 
 interface FileState {
@@ -4296,9 +4300,10 @@ export class WidebandAnalogRecorder {
 		const silence = new Int16Array(
 			Math.round((missing * ANALOG_AUDIO_RATE_HZ) / s.fs),
 		)
-		// The fill is silence in the file only: the tone detectors never hear it (tone null), so a
-		// gap neither passes for quiet sub-audible audio nor counts as analysed coverage.
-		this.enqueue(s, file, { pcm: silence, tone: null })
+		// The tone detectors and the class evidence hear the fill as before (every keep, class and
+		// admission decision counts it), marked as gap: a block holding it is never quiet and a
+		// file with any reads no "No tone heard" (gapSamples, toneFactOf).
+		this.enqueue(s, file, { pcm: silence, tone: silence, gap: true })
 		s.next = to
 	}
 
@@ -4343,9 +4348,16 @@ export class WidebandAnalogRecorder {
 				file.unjudged[0] = {
 					pcm: head.pcm.subarray(n),
 					tone: head.tone?.subarray(n) ?? null,
+					gap: head.gap === true,
 				}
 			if (head.tone !== null)
-				this.toneFrames(s, file, file.judged, head.tone.subarray(0, n))
+				this.toneFrames(
+					s,
+					file,
+					file.judged,
+					head.tone.subarray(0, n),
+					head.gap === true,
+				)
 			if (s.classed) file.judgedSpeech = null
 			else file.judgedSpeech?.push(head.pcm.subarray(0, n))
 			this.gateFrames(s, file, file.judged, head.pcm.subarray(0, n))
@@ -4461,12 +4473,16 @@ export class WidebandAnalogRecorder {
 		for (const f of [...s.files]) this.admit(s, f)
 	}
 
-	/** CTCSS and DCS input: only frames inside the observed activity (no pre-roll, no hang noise). */
+	/**
+	 * CTCSS and DCS input: only frames inside the observed activity (no pre-roll, no hang noise).
+	 * `gap`: a source gap's fill, which the bank takes as gap samples (CtcssBank.pushGapSample).
+	 */
 	private toneFrames(
 		s: Session,
 		file: FileState,
 		first: number,
 		tone: Int16Array,
+		gap: boolean,
 	): void {
 		const bank = file.ctcss
 		if (bank === null) return
@@ -4477,7 +4493,8 @@ export class WidebandAnalogRecorder {
 			const sample = file.startSample + (first + i) * perFrame
 			if (sample >= s.onset && sample <= s.lastActive) {
 				const t = tone[i]!
-				bank.pushSample(t / 32_768)
+				if (gap) bank.pushGapSample(t / 32_768)
+				else bank.pushSample(t / 32_768)
 				dcs?.pushSample(t / 32_768)
 				evidence?.tone(bank, t)
 			}
@@ -4643,6 +4660,7 @@ export class WidebandAnalogRecorder {
 						votedBlocks: file.ctcss.votedBlockCount(),
 						partialBlocks: file.ctcss.partialBlockCount(),
 						quietBlocks: file.ctcss.quietBlockCount(),
+						gapSamples: file.ctcss.gapSampleCount(),
 						dcsSamples: file.dcs.sampleCount(),
 						dcsChain: file.dcs.longestChain(),
 						dcsLoneHits: file.dcs.loneHitCount(),

@@ -1,9 +1,10 @@
 /**
  * "No tone heard" (tone null) through the real recorder (wideband-analog-recorder.ts gapTo,
  * toneFrames, finishFile): a toned file never reads null.
- * - Source gaps: the silence a short input gap leaves in the file never reaches the CTCSS bank or
- *   the DCS decoder. Zero-filled gaps would pass the quiet ceilings (an all-zero block hides
- *   nothing) and count as analysed coverage.
+ * - Source gaps: the silence a short input gap leaves in the file reaches the CTCSS bank, the DCS
+ *   decoder and the class evidence as it always did (the tone vote, classing and admission count
+ *   it), marked as gap fill: a block holding any is never quiet (an all-zero block would pass
+ *   the quiet ceilings while hiding nothing), and a file with any never reads null.
  * - Loud blocks: quiet blocks prove only that the tone was off during them. A tone hidden under
  *   voice, then dropped for a carrier hang (or a toned over joined to an untoned one), leaves ten
  *   quiet blocks beside many loud ones: null also needs at most TONE_LOUD_EDGE_BLOCKS (2) loud blocks,
@@ -136,6 +137,7 @@ async function scene(overs: readonly Over[]) {
 	await r.rec.idle()
 	return {
 		ops: r.ops,
+		tones: r.tones,
 		files: seen.calls.map(c => ({
 			coverage: c.coverage as ToneCoverage,
 			result: c.result as { tone?: unknown },
@@ -145,12 +147,12 @@ async function scene(overs: readonly Over[]) {
 
 /** One kept file: its operation and coverage. */
 async function oneFile(overs: readonly Over[]) {
-	const { ops, files } = await scene(overs)
+	const { ops, tones, files } = await scene(overs)
 	expect(ops).toHaveLength(1)
 	expect(ops[0]!.outcome).toBe("finalized")
 	expect(ops[0]!.cut).toBe("completed")
 	expect(files).toHaveLength(1)
-	return { op: ops[0]!, ...files[0]! }
+	return { op: ops[0]!, tones, ...files[0]! }
 }
 
 /** CTCSS blocks in `seconds` of 8 kHz tone audio: 4 000 samples, then one per 2 000. */
@@ -167,9 +169,8 @@ describe("recorder tone path across source gaps", () => {
 	})
 
 	// A 10 s over whose tone hides under a continuous voice pitch (no block votes, leans or is
-	// quiet), five 0.95 s gaps. Fed to the bank, the fill's 4.75 s of zeros made 10 quiet blocks
-	// (measured before the fix): "No tone heard" for a toned file. The fill never reaches the
-	// detectors now: no quiet block, never null.
+	// quiet), five 0.95 s gaps. Fed to the bank unmarked, the fill's 4.75 s of zeros made 10 quiet
+	// blocks: "No tone heard" for a toned file. Marked, the fill's blocks are loud: never null.
 	it("five 0.95 s gaps in a hidden-tone over: no quiet block, never null", async () => {
 		const { op, coverage, result } = await oneFile([
 			{
@@ -184,15 +185,16 @@ describe("recorder tone path across source gaps", () => {
 		expect(op.gaps).toBeGreaterThan(0)
 		expect(coverage.quietBlocks).toBe(0)
 		expect(result.tone).not.toBeNull()
-		// The detectors analysed the over's own audio only (10 s, both ends inclusive), never its
-		// 4.75 s of gaps (34 blocks with them).
-		expect(coverage.ctcssBlocks).toBeLessThanOrEqual(blocksIn(10))
-		expect(coverage.dcsSamples).toBeLessThanOrEqual(10 * 8000 + 1)
+		expect("tone" in result).toBe(false)
+		// The detectors analysed the fill too (10 s of audio and 4.75 s of gaps), marked.
+		expect(coverage.ctcssBlocks).toBeGreaterThan(blocksIn(10 + 4))
+		expect(coverage.dcsSamples).toBeGreaterThan((10 + 4) * 8000)
+		expect(coverage.gapSamples).toBeGreaterThan(4 * 8000)
 	}, 240_000)
 
-	// The same gaps in an untoned over: the real audio still proves no tone, so the gaps neither
-	// add blocks nor stop its null.
-	it("gaps in an untoned over add no analysed coverage and leave its null", async () => {
+	// The same gaps in an untoned over: its audio would prove no tone, but 2.85 s of it were
+	// never heard: not determined (any gap fill rules null out).
+	it("gaps in an untoned over: analysed as fill, not determined", async () => {
 		const { op, coverage, result } = await oneFile([
 			{
 				seconds: 6,
@@ -203,9 +205,36 @@ describe("recorder tone path across source gaps", () => {
 			},
 		])
 		expect(op.gaps).toBeGreaterThan(0)
-		expect(coverage.ctcssBlocks).toBeLessThanOrEqual(blocksIn(6))
-		expect(coverage.dcsSamples).toBeLessThanOrEqual(6 * 8000 + 1)
-		expect(result.tone).toBeNull()
+		expect(coverage.ctcssBlocks).toBeGreaterThan(blocksIn(6 + 2))
+		expect(coverage.gapSamples).toBeGreaterThan(2 * 8000)
+		expect(coverage.quietBlocks).toBeLessThan(coverage.ctcssBlocks)
+		expect("tone" in result).toBe(false)
+	}, 240_000)
+
+	// The recorder's decisions count the fill as they always did: a clean 88.5 Hz tone on a 4 s
+	// over (about 15 blocks) diluted by 4.75 s of gap fill (about 34 blocks in all) falls under
+	// the bank's 60% vote, so the file's tone is not taken (no recordTone, no own-tone keep) and
+	// the fact is absent. Skipping the fill (as an earlier change did) kept 88.5 Hz here: the
+	// same scene without gaps shows it.
+	it("a toned over diluted by gaps keeps the decisions the gap fill always gave", async () => {
+		const over = { seconds: 4, ctcssAt: () => 88.5, gapAfter: 4.1 }
+		const clean = await oneFile([over])
+		expect(clean.coverage.gapSamples).toBe(0)
+		expect(clean.result.tone).toEqual({ kind: "ctcss", hz: 88.5 })
+		expect(clean.tones.map(t => t.hz)).toEqual([88.5])
+		seen.calls.length = 0
+		const gapped = await oneFile([{ ...over, gaps: 5, gapSeconds: 0.95 }])
+		expect(gapped.op.gaps).toBeGreaterThan(0)
+		expect(gapped.coverage.ctcssBlocks).toBeGreaterThan(blocksIn(4 + 4))
+		expect(gapped.coverage.votedBlocks).toBeGreaterThan(0)
+		expect(gapped.coverage.votedBlocks).toBeLessThan(
+			Math.ceil(0.6 * gapped.coverage.ctcssBlocks),
+		)
+		expect(gapped.coverage.ownTone).toBe(false)
+		expect(gapped.tones).toEqual([])
+		expect("tone" in gapped.result).toBe(false)
+		expect(gapped.op.verdict?.keptBy).toBe("prior-none")
+		expect(clean.op.verdict?.keptBy).toBe("own-tone")
 	}, 240_000)
 })
 

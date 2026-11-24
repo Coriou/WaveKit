@@ -7097,10 +7097,11 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   block only shows the tone was off during it: voice and receiver noise fill the
   band and a tone can hide under them, so a voiced recording almost always reads
   absent, and null means a carrier with (almost) nothing in the sub-audible band.
-  Audio missing from the source (a gap the file fills with silence) is not
-  analysed. A tone at 250 Hz of deviation or more keeps every block it fills from
+  Audio missing from the source (a gap the file fills with silence) is analysed
+  like audio for the file's keep and class decisions but marked: a block holding
+  any of it is never quiet, and a file with any reads absent, never null. A tone at 250 Hz of deviation or more keeps every block it fills from
   being quiet, so a file reads null only if such a tone filled at most 2 blocks
-  (it was heard for under 1.25 s, in a file of any length; an input gap inside the tone is not heard). Absent when it
+  (it was heard for under 1.25 s, in a file of any length). Absent when it
   measured less, when a tone or DCS word was heard but did not settle (a weak or
   broken-up tone, a standard DCS code too broken to confirm, a toned over joined
   to an untoned one), when fewer than ten blocks were quiet or more than 2 were
@@ -7108,7 +7109,9 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   have hidden under it), or when the file was kept for its own tone; and absent
   on older files. Null
   does not rule out a non-standard tone under 67 Hz (33-64 Hz: those tones are
-  not checked), a tone set under 250 Hz of deviation, a tone on only for a
+  not checked), a tone set under about 120 Hz of deviation at 254.1 Hz or about
+  80 Hz at 67 Hz (measured through the recorder chain, a toned block stays loud,
+  never quiet, down to those levels), a tone on only for a
   moment, or a non-standard DCS code too broken to repeat two words. A
   non-standard code whose
   word is a rotation of a standard code's word (or of its complement) reads as
