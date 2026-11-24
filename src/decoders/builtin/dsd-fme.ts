@@ -1304,6 +1304,9 @@ interface PendingCall {
 /** Voice LC lines awaiting their closing DMR sync (see the push site). */
 const MAX_PENDING_DMR_VOICE_LINKS = 8
 
+/** DsdFmeDecoder instances made in this process: each one's transmission-run namespace. */
+let dsdFmeTxInstances = 0
+
 /**
  * DSD-FME Decoder - Decodes digital voice signals.
  *
@@ -1510,6 +1513,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * and any later claim of it refused) and opens the next.
 	 */
 	private txRunSeq = 0
+	/**
+	 * This instance's run namespace, unique in the process: a DecoderManager rebuild makes a new
+	 * instance with the same id, whose runs must never collide with a run an older one retired.
+	 */
+	private readonly txInstance = ++dsdFmeTxInstances
 
 	/** The adapter's clocks (DsdFmeClock). */
 	private readonly clock: DsdFmeClock
@@ -5895,7 +5903,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/** This run's id in the transmission registry. */
 	private txRun(): string {
-		return `${this.id}#${this.txRunSeq}`
+		return `${this.id}#${this.txInstance}.${this.txRunSeq}`
 	}
 
 	/** Closes this run's transmissions (`decoder-restart`) and refuses its later claims. */

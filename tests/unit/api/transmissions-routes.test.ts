@@ -63,6 +63,23 @@ describe("GET /api/transmissions/:ref", () => {
 		}
 	})
 
+	it("answers 503, not 404, when nothing resolved because an Activity read failed", async () => {
+		h = await harness(at)
+		const busy = () => Promise.reject(new Error("busy"))
+		const app = await h.app({
+			activity: { ...h.runtime.service, search: busy, detail: busy },
+		})
+		for (const ref of [TX_A, "evt:none"]) {
+			const res = await app.inject({
+				method: "GET",
+				url: `/api/transmissions/${encodeURIComponent(ref)}`,
+			})
+			expect(res.statusCode).toBe(503)
+			expect(res.json()).toMatchObject({ code: "TRANSMISSIONS_UNAVAILABLE" })
+			expect(res.body).not.toContain(ref)
+		}
+	})
+
 	it("a registry transmission with a kept file: its audio, part, recorder tone and group", async () => {
 		h = await harness(at)
 		const key = keyOf(1)
@@ -263,6 +280,64 @@ describe("GET /api/transmissions/:ref", () => {
 				artefacts: [{ id: key }],
 				recordingKind: "dsd-fme-call",
 			})
+		})
+
+		it("a pre-id call reached by evt: or rec: uses its decoder link: clear with the linked file, else unproven", async () => {
+			h = await harness(at)
+			const { txId: _none, ...data } = callEnd(TX_A, false).data
+			h.publish("dsd-a", { ...callEnd(TX_A, false), data })
+			await h.rows(1)
+			const row = (await h.runtime.service.search({ query: {}, limit: 10 }))
+				.items[0]!
+			const key = `dsd~${DSD_NAME}`
+			h.items.set(key, {
+				...analogItem(key),
+				kind: "dsd-fme-call",
+				discoveryId: null,
+				facts: null,
+			})
+			// Not linked yet: unproven, no audio, by either alias.
+			for (const ref of [`evt:${row.eventId}`, `rec:${key}`]) {
+				const dto = (await get(ref)).json<TransmissionDto>()
+				expect(dto).toMatchObject({
+					id: null,
+					kind: "voice-digital",
+					privacy: "unproven",
+					artefacts: [],
+				})
+			}
+			h.runtime.recordingLinks?.()?.link({
+				type: "link-call",
+				decoderId: "dsd-a",
+				callId: "call-1",
+				recording: { id: key, durationMs: 4_200 },
+			})
+			await expect
+				.poll(
+					async () =>
+						(
+							await h!.runtime.service.search({
+								query: { hasRecording: true },
+							})
+						).items.length,
+				)
+				.toBe(1)
+			for (const ref of [`evt:${row.eventId}`, `rec:${key}`]) {
+				const dto = (await get(ref)).json<TransmissionDto>()
+				expect(dto).toMatchObject({
+					id: null,
+					kind: "voice-digital",
+					privacy: "clear",
+					artefacts: [{ id: key }],
+				})
+			}
+			// Without the recordings route the linked call lists no audio.
+			const bare = await h.app({ inventory: undefined as never })
+			const res = await bare.inject({
+				method: "GET",
+				url: `/api/transmissions/${encodeURIComponent(`evt:${row.eventId}`)}`,
+			})
+			expect(res.json<TransmissionDto>().artefacts).toEqual([])
 		})
 
 		it("a call never proven clear lists no audio (unproven); an encrypted one says so", async () => {

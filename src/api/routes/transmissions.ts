@@ -105,6 +105,25 @@ function recordNames(record: ActivityRecord, txId: string): boolean {
 	)
 }
 
+/**
+ * The Activity ref of a digital call an id-less alias names: a dsd-fme file's `recordingId`
+ * (`dsd~<call name>`), or the `callId` of the call row an `evt:` alias read. Null otherwise.
+ */
+function dvCallRefOf(
+	ref: string,
+	records: ReadonlyMap<string, ActivityRecord>,
+): { type: "callId" | "recordingId"; value: string } | null {
+	if (ref.startsWith("rec:dsd~"))
+		return { type: "recordingId", value: ref.slice("rec:".length) }
+	if (!ref.startsWith("evt:")) return null
+	const record = records.get(ref.slice("evt:".length))
+	if (record?.kind !== "decoder-reception") return null
+	const callId = record.payload.refs?.callId
+	return typeof callId === "string" && callId.length > 0
+		? { type: "callId", value: callId }
+		: null
+}
+
 export async function transmissionRoutes(
 	fastify: FastifyInstance,
 	options: TransmissionRoutesOptions,
@@ -199,10 +218,14 @@ export async function transmissionRoutes(
 				// 3. The stores, by the id: the Activity rows on its ref and the catalogue index.
 				const linkedRecordingKeys: string[] = []
 				let summaries: readonly ActivitySummary[] = []
-				if (txId !== null) {
+				// A call row's `recording` is the decoder's link (it links only a recordingLinkable file).
+				const readRows = async (rowRef: {
+					type: "txId" | "callId" | "recordingId"
+					value: string
+				}): Promise<void> => {
 					const page = await onActivity(() =>
 						activity!.search({
-							query: { refs: [{ type: "txId", value: txId }] },
+							query: { refs: [rowRef] },
 							limit: TRANSMISSION_ROWS_MAX,
 						}),
 					)
@@ -215,12 +238,20 @@ export async function transmissionRoutes(
 								linkedRecordingKeys.push(s.recording.id)
 						}
 					}
+				}
+				if (txId !== null) {
+					await readRows({ type: "txId", value: txId })
 					try {
 						for (const k of inventory?.keysOfTx?.(txId) ?? [])
 							recordingKeys.push(k)
 					} catch {
 						// The catalogue index never fails the read.
 					}
+				} else {
+					// A digital call reached by its alias with no id (a pre-id row): the rows on the
+					// call's own ref give its decoder link, as the txId rows do (one search).
+					const callRef = dvCallRefOf(ref, records)
+					if (callRef !== null) await readRows(callRef)
 				}
 
 				// 4. The stored records (record_json) of the rows found: linked rows first.
@@ -256,7 +287,10 @@ export async function transmissionRoutes(
 					records.size === 0 &&
 					summaries.length === 0
 				)
-					return sendError(reply, 404, "TRANSMISSION_NOT_FOUND")
+					// Nothing resolved: a failed Activity read cannot prove the ref unknown.
+					return activityFailed
+						? sendError(reply, 503, "TRANSMISSIONS_UNAVAILABLE")
+						: sendError(reply, 404, "TRANSMISSION_NOT_FOUND")
 
 				const dto = buildTransmissionDto({
 					view,

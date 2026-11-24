@@ -194,9 +194,10 @@ describe("dsd-fme DMR transmission ids over the corpus", () => {
 		const script = scripts.find(s => s.name === "rep-train.txt")!
 		const plain = replayAll(script.lines, null)
 		const registry = new TransmissionRegistry({ now: () => Date.now() })
-		// The decoder's first run (before any start()) is dsd-fme#0.
-		registry.retireRun("dsd-fme#0", T0)
-		const out = replayAll(script.lines, registry)
+		// The decoder's first run (before any start()) is retired before it claims.
+		const out = replayAll(script.lines, registry, d =>
+			registry.retireRun((d as unknown as { txRun(): string }).txRun(), T0),
+		)
 		expect(out.map(withoutTx)).toEqual(plain.map(withoutTx))
 		const starts = out.filter(
 			p => p.kind === "output" && p.output.type === "call_start",

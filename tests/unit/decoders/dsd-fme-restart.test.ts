@@ -46,6 +46,7 @@ vi.mock("node:child_process", async importOriginal => {
 
 type Internals = {
 	handleOutputLine(line: string): void
+	txRun(): string
 	process: unknown
 	callTimeoutTimer: unknown
 }
@@ -163,6 +164,68 @@ describe("dsd-fme crash restart", () => {
 		internals.process = null
 		await decoder.stop()
 	})
+	it("a rebuilt instance with the same id never reuses a run the old instance retired", async () => {
+		const registry = new TransmissionRegistry({ now: () => Date.now() })
+		const make = () =>
+			new DsdFmeDecoder(
+				{
+					id: "dsd-fme",
+					type: "dsd-fme",
+					enabled: true,
+					options: { mode: "auto" },
+				},
+				pino({ level: "silent" }),
+				DATE_CLOCK,
+				{ transmissions: registry },
+			)
+		const txOf = (o: DecoderOutput | undefined) =>
+			(o?.data as { txId?: string } | undefined)?.txId
+		const runCall = async (decoder: DsdFmeDecoder, atMs: number) => {
+			const internals = decoder as unknown as Internals
+			const outputs: DecoderOutput[] = []
+			decoder.on("output", (o: DecoderOutput) => outputs.push(o))
+			decoder.on("error", () => undefined)
+			const line = (offset: number, text: string) => {
+				vi.setSystemTime(T0 + atMs + offset)
+				internals.handleOutputLine(text)
+			}
+			await decoder.start()
+			const run = internals.txRun()
+			line(0, BS("VLC"))
+			line(0, LC(1, 9001, 91))
+			line(60, BS("VC1"))
+			vi.advanceTimersByTime(500)
+			const txId = txOf(outputs.find(o => o.type === "call_start"))
+			internals.process = null
+			await decoder.stop()
+			return { run, txId }
+		}
+
+		const first = await runCall(make(), 0)
+		expect(first.txId).toMatch(TX_ID)
+		const refusedAfterFirst = registry.stats().retiredRun
+
+		const second = await runCall(make(), 30_000)
+		expect(second.run).not.toBe(first.run)
+		expect(second.txId).toMatch(TX_ID)
+		expect(second.txId).not.toBe(first.txId)
+		expect(registry.stats().retiredRun).toBe(refusedAfterFirst)
+
+		// The old instance's late claim after its stop is still refused.
+		expect(
+			registry.claim({
+				origin: "dv-call",
+				kind: "voice-digital",
+				sourceId: null,
+				dvKey: "dv:dsd-fme",
+				lane: 1,
+				run: first.run,
+				atMs: Date.now(),
+				alias: "call:dsd-fme:late",
+			}),
+		).toBeNull()
+		expect(registry.stats().retiredRun).toBe(refusedAfterFirst + 1)
+	})
 	it("a crash restart through start() closes the old run's transmission and the next call claims a fresh id; the old run's claims are refused", async () => {
 		const registry = new TransmissionRegistry({ now: () => Date.now() })
 		const decoder = new DsdFmeDecoder(
@@ -186,8 +249,9 @@ describe("dsd-fme crash restart", () => {
 		}
 		const txOf = (o: DecoderOutput | undefined) =>
 			(o?.data as { txId?: string } | undefined)?.txId
-		// The decoder's first run before any start() is dsd-fme#0; this start() begins dsd-fme#1.
+		// The decoder's first run is the one before any start(); this start() begins the next.
 		await decoder.start()
+		const crashedRun = internals.txRun()
 		line(0, BS("VLC"))
 		line(0, LC(1, 9001, 91))
 		line(60, BS("VC1"))
@@ -196,7 +260,7 @@ describe("dsd-fme crash restart", () => {
 		expect(first).toMatch(TX_ID)
 		expect(registry.get(first!)!.state).toBe("open")
 
-		// The child crashed: start() again without stop() (dsd-fme#2).
+		// The child crashed: start() again without stop() (a third run).
 		internals.process = null
 		await decoder.start()
 		const old = registry.get(first!)!
@@ -215,7 +279,7 @@ describe("dsd-fme crash restart", () => {
 				sourceId: null,
 				dvKey: "dv:dsd-fme",
 				lane: 1,
-				run: "dsd-fme#1",
+				run: crashedRun,
 				atMs: Date.now(),
 				alias: "call:dsd-fme:late",
 			}),

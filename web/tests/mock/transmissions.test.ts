@@ -88,4 +88,39 @@ describe("mock transmissions", () => {
 			expect(dto.artefacts).toEqual([])
 		}
 	})
+
+	it("a digital call is clear only with the decoder link the core accepts: its call row's recording", async () => {
+		const recordings = (
+			await get("/api/recordings?limit=200")
+		).json<RecordingInventoryPage>()
+		const calls = recordings.items.filter(i => i.kind === "dsd-fme-call")
+		expect(calls.length).toBeGreaterThan(0)
+		let clear = 0
+		for (const call of calls) {
+			const key = call.key ?? call.id
+			const dto = (await tx(`rec:${key}`)).json<TransmissionDto>()
+			expect(dto.kind).toBe("voice-digital")
+			const row =
+				typeof call.activityEventId === "string"
+					? (
+							await get(
+								`/api/activity?refs=recordingId:${encodeURIComponent(key)}&limit=10`,
+							)
+						)
+							.json<ActivitySearchPage>()
+							.items.find(i => i.eventId === call.activityEventId)
+					: undefined
+			const decoderLinked =
+				row?.kind === "decoder-reception" && row.recording?.id === key
+			if (dto.privacy === "clear") {
+				clear++
+				expect(decoderLinked).toBe(true)
+				expect(dto.artefacts.map(a => a.id)).toEqual([key])
+			} else {
+				expect(dto.artefacts).toEqual([])
+				if (dto.privacy === "unproven") expect(decoderLinked).toBe(false)
+			}
+		}
+		expect(clear).toBeGreaterThan(0)
+	})
 })

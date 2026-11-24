@@ -1,8 +1,10 @@
 // GET /api/transmissions/:ref, as the core serves it (src/api/routes/transmissions.ts): a malformed ref
 // is 400 TRANSMISSION_REF_INVALID, an unknown one 404 TRANSMISSION_NOT_FOUND. The mock has no
 // transmission registry, so it mints no ids: `rec:` and `evt:` resolve from the mock's recordings
-// and Activity rows with `id` null, and a `tx_` or `obs:` ref is 404. A digital call lists its file
-// only when its Activity row links it (the core's serve rule), else privacy reads "unproven".
+// and Activity rows with `id` null, and a `tx_` or `obs:` ref is 404. A digital call is "clear" and
+// lists its file only when its decoder call row (decoder-reception) links that file in `recording`,
+// the decoder's link the core accepts; a row whose `encrypted` field is true reads "encrypted";
+// anything else "unproven" with no audio.
 import type { FastifyInstance } from "fastify"
 import type {
 	ActivityRecord,
@@ -61,7 +63,16 @@ function dto(
 		item !== undefined
 			? item.kind !== "scanner-analog"
 			: row?.summary.kind === "decoder-reception"
-	const linked = item !== undefined && typeof item.activityEventId === "string"
+	const encrypted =
+		row?.record.kind === "decoder-reception" &&
+		row.record.payload.fields.some(
+			f => f.key === "encrypted" && f.value === true,
+		)
+	const linked =
+		item !== undefined &&
+		!encrypted &&
+		row?.summary.kind === "decoder-reception" &&
+		row.summary.recording?.id === (item.key ?? item.id)
 	const audio = item !== undefined && (!digital || linked) ? [item] : []
 	const facts = item?.facts ?? null
 	const startedAt =
@@ -133,7 +144,13 @@ function dto(
 			facts,
 			observation: null,
 		},
-		privacy: digital ? (linked ? "clear" : "unproven") : null,
+		privacy: digital
+			? encrypted
+				? "encrypted"
+				: linked
+					? "clear"
+					: "unproven"
+			: null,
 	}
 }
 
