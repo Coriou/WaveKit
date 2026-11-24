@@ -244,8 +244,9 @@ function HeaderActions({ usable }: { usable: boolean }) {
 		recordingsUi,
 		s => s.tokens.length > 0 || s.text.trim() !== "",
 	)
+	const showCopies = useStore(recordingsUi, s => s.showCopies)
 	if (!usable) return null
-	const count = headerCount(meta, filter, searching)
+	const count = headerCount(meta, filter, searching, !showCopies)
 	const kept = meta?.counts?.kept ?? null
 	return (
 		<>

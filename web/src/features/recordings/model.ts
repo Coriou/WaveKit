@@ -280,23 +280,29 @@ export function dayEntries(
 /**
  * The header count, from the core (never the loaded rows): what the search matches, else every
  * recording (or the kept ones under Kept); "50,000+" when the catalogue left older ones out. Null
- * before the first answer, or from a core without counts.
+ * before the first answer, or from a core without counts. With copies hidden (the list asked for
+ * copies=false) and copies to hide, `matched` too: `counts` holds the copies, so the count equals
+ * the rows shown.
  */
 export function headerCount(
 	meta: {
-		counts: { total: number; kept: number } | null
+		counts: { total: number; kept: number; copiesTotal?: number } | null
 		matched: number | null
 		truncated: boolean
 	} | null,
 	filter: "all" | "kept",
 	searching: boolean,
+	copiesHidden = false,
 ): string | null {
 	if (meta === null) return null
-	const n = searching
-		? meta.matched
-		: filter === "kept"
-			? (meta.counts?.kept ?? meta.matched)
-			: (meta.counts?.total ?? meta.matched)
+	const hiding =
+		copiesHidden && (meta.counts?.copiesTotal ?? 0) > 0 && meta.matched !== null
+	const n =
+		searching || hiding
+			? meta.matched
+			: filter === "kept"
+				? (meta.counts?.kept ?? meta.matched)
+				: (meta.counts?.total ?? meta.matched)
 	if (n === null) return null
 	return `${countText(n)}${meta.truncated && filter === "all" && !searching ? "+" : ""}`
 }

@@ -60,10 +60,12 @@ export interface TransmissionDtoSources {
 	audioServed: boolean
 	/**
 	 * The copy links of the transmission's analog recording (the route's bounded lookup): the
+	 * item they are of (the roll-over part a `rec:` ref names, else the first analog item), the
 	 * listed root item its `copyOf` names (null: not a copy, or the root is not served), the
 	 * listed copies of it (at most TRANSMISSION_COPIES_MAX) and how many there are. Absent: none read.
 	 */
 	copy?: {
+		readonly item?: RecordingInventoryItem
 		readonly root: RecordingInventoryItem | null
 		readonly copies: readonly RecordingInventoryItem[]
 		readonly copiesTotal: number
@@ -527,6 +529,6 @@ export function buildTransmissionDto(
 			observation: null,
 		},
 		privacy,
-		copy: digital ? null : copyOf(item, src.copy),
+		copy: digital ? null : copyOf(src.copy?.item ?? item, src.copy),
 	}
 }

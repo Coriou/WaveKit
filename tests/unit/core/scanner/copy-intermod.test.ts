@@ -207,6 +207,49 @@ describe("intermod evidence: rule B (symmetric pair)", () => {
 	})
 })
 
+describe("intermod evidence: rule B's mirror must be a real concurrent signal", () => {
+	// A repeater-like pair: a strong output fa and the file 600 kHz away carrying related audio
+	// (the wide geometry), with an unrelated track near 2·fa − fc.
+	const fa = FC + 600_000
+	const mirror = 2 * fa - FC + 1_000
+	it("an unrelated weak carrier near 2·fa − fc gives no evidence (SNR under the parent floor)", () => {
+		expect(
+			intermodEvidenceOf(
+				file,
+				[span(fa), span(mirror, { peakDbfs: -60, snrDb: 8 })],
+				onRaster,
+			),
+		).toBeNull()
+		expect(
+			intermodEvidenceOf(
+				file,
+				[span(fa), span(mirror, { peakDbfs: -40, snrDb: 19.9 })],
+				onRaster,
+			),
+		).toBeNull()
+	})
+
+	it("a mirror that does not overlap the file like a parent gives no evidence", () => {
+		expect(
+			intermodEvidenceOf(
+				file,
+				[span(fa), span(mirror, { peakDbfs: -40, startSample: 5 * FS + 1 })],
+				onRaster,
+			),
+		).toBeNull()
+	})
+
+	it("a true mirror ghost pair (both at the SNR floor, concurrent) still marks", () => {
+		expect(
+			intermodEvidenceOf(
+				file,
+				[span(fa), span(mirror, { peakDbfs: -40, snrDb: 20 })],
+				onRaster,
+			),
+		).toEqual({ rule: "symmetric", parents: [{ hz: fa }, { hz: mirror }] })
+	})
+})
+
 describe("intermod evidence: the track-span ring", () => {
 	const t = (
 		id: string,

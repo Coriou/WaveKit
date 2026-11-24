@@ -297,7 +297,13 @@ export async function transmissionRoutes(
 
 				// 6. Copy links (bounded: the root its copyOf names, at most TRANSMISSION_COPIES_MAX
 				// of its own copies), from the catalogue's memory index only.
-				const analogItem = items.find(i => i.kind === "scanner-analog")
+				// The item the ref names (a `rec:` key: that roll-over part, not the first one), else
+				// the first analog item.
+				const refKey = ref.startsWith("rec:") ? ref.slice("rec:".length) : null
+				const analogItem =
+					items.find(
+						i => i.kind === "scanner-analog" && (i.key ?? i.id) === refKey,
+					) ?? items.find(i => i.kind === "scanner-analog")
 				let copy: TransmissionDtoSources["copy"]
 				if (analogItem !== undefined && inventory !== undefined) {
 					const rootKey = analogItem.copyOf?.key ?? null
@@ -309,6 +315,7 @@ export async function transmissionRoutes(
 						copyKeys = []
 					}
 					copy = {
+						item: analogItem,
 						root: rootKey === null ? null : (itemsOf([rootKey])[0] ?? null),
 						copies: itemsOf(copyKeys.slice(0, TRANSMISSION_COPIES_MAX)),
 						copiesTotal: copyKeys.length,

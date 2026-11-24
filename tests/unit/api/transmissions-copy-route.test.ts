@@ -89,6 +89,48 @@ describe("GET /api/transmissions/:ref: copy links", () => {
 		expect(dto.copy?.copiesTotal).toBe(TRANSMISSION_COPIES_MAX + 2)
 	})
 
+	it("two roll-over parts of one transmission, copies only of part 1: rec:<part 2> shows none", async () => {
+		h = await harness(at)
+		const part1 = keyOf(1)
+		const part2 = keyOf(2)
+		const ghost = keyOf(3)
+		const claim = h.registry.claim({
+			origin: "scanner-observation",
+			kind: "voice-analog",
+			sourceId: "source-1",
+			hz: 100_000_000,
+			halfWidthHz: 6_000,
+			epoch: 1,
+			stream: 0,
+			sample: 0,
+			atMs: at - 5_000,
+			alias: "obs:o_01JTESTOBSERVATION",
+		})!
+		h.registry.attach(claim.txId, `rec:${part1}`)
+		h.registry.attach(claim.txId, `rec:${part2}`)
+		h.items.set(
+			part1,
+			analogItem(part1, { txId: claim.txId, part: 1, parts: 2 }),
+		)
+		h.items.set(
+			part2,
+			analogItem(part2, { txId: claim.txId, part: 2, parts: 2 }),
+		)
+		h.items.set(
+			ghost,
+			analogItem(ghost, {
+				frequencyHz: 100_060_000,
+				copyOf: { key: part1, evidence: ["intermod"] },
+			}),
+		)
+		expect((await get(`rec:${part2}`)).copy).toBeNull()
+		expect((await get(`rec:${part1}`)).copy).toMatchObject({
+			of: null,
+			copiesTotal: 1,
+			copies: [{ recordingKey: ghost }],
+		})
+	})
+
 	it("a copy whose root the catalogue no longer serves still names it by its alias, frequency unknown", async () => {
 		h = await harness(at)
 		const ghost = keyOf(2)

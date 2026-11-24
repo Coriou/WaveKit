@@ -1006,9 +1006,10 @@ export class AnalogOperations {
 	private root: string
 	private rootAnchored = false
 	/**
-	 * Operations whose cleanup (cleanupOwned) began: writeCopy never writes into one. Removed when
-	 * the cleanup completes (the folder is gone); one that failed part-way stays (at most
-	 * RETIRING_MAX, oldest forgotten).
+	 * Operations whose cleanup (cleanupOwned) is under way: writeCopy never writes into one.
+	 * Removed when the cleanup completes (the folder is gone) or gives up (it throws: the
+	 * operation stays inventoried and writeCopy may write again); at most RETIRING_MAX, oldest
+	 * forgotten.
 	 */
 	private readonly retiring = new Set<string>()
 	constructor(private readonly context: Context) {
@@ -3326,6 +3327,25 @@ export class AnalogOperations {
 			const oldest = this.retiring.values().next()
 			if (oldest.done !== true) this.retiring.delete(oldest.value)
 		}
+		try {
+			await this.removeOwnedFiles(intent, ownedIntent, ownedMedia, ownedNow)
+		} catch (cause) {
+			// The cleanup gave up (a refusal, an owner that moved, an I/O failure): the operation
+			// stays inventoried, so a later writeCopy may write again (a retried cleanup removes
+			// copy.json with the rest).
+			this.retiring.delete(intent.operationId)
+			throw cause
+		}
+		this.retiring.delete(intent.operationId)
+		this.notify({ kind: "removed", operationId: intent.operationId })
+	}
+	/** cleanupOwned's removals, in order (the caller holds `retiring`). */
+	private async removeOwnedFiles(
+		intent: Intent,
+		ownedIntent: boolean,
+		ownedMedia: boolean,
+		ownedNow: () => boolean,
+	): Promise<void> {
 		if (ownedIntent) await this.validateCleanupMarker(intent)
 		const remove = async (path: string): Promise<void> => {
 			this.requireCleanupClosure(intent.operationId)
@@ -3394,8 +3414,6 @@ export class AnalogOperations {
 		}
 		await this.checkpoint("cleanup-rmdir", intent.operationId)
 		if (ownedIntent) await remove(this.cleanupPath(intent.operationId))
-		this.retiring.delete(intent.operationId)
-		this.notify({ kind: "removed", operationId: intent.operationId })
 	}
 	private notify(n: AnalogNotice): void {
 		try {

@@ -333,6 +333,42 @@ describe("copy sidecar: writeCopy under the store lock", () => {
 	})
 })
 
+describe("copy sidecar: a cleanup that gives up", () => {
+	it("a removal that fails before the folder goes leaves the operation writable again", async () => {
+		let failWav: string | null = null
+		const h = await harness({
+			unlink: async path => {
+				if (path === failWav)
+					throw Object.assign(new Error("injected"), { code: "EIO" })
+				await unlink(path)
+			},
+			checkpoint: async () => undefined,
+			rename: (from, to) => rename(from, to),
+		})
+		const root = await keptOp(h)
+		const copy = await keptOp(h, "o2")
+		const wav = join(h.root, copy.receipt.artifact ?? "")
+		failWav = wav
+		const old = new Date(NOW - 31 * 86_400_000)
+		await utimes(wav, old, old)
+		await h.evidence.retention(new Set()).catch(() => undefined)
+		expect(existsSync(wav)).toBe(true)
+		expect(h.notices).not.toContainEqual({
+			kind: "removed",
+			operationId: copy.op.operationId,
+		})
+		// The cleanup gave up: the operation is no longer retiring, so the mark is written.
+		failWav = null
+		expect(
+			await h.evidence.writeCopy(
+				copy.op.operationId,
+				record(root.key, root.op.operationId),
+			),
+		).toBe("written")
+		expect(existsSync(copyPath(h, copy.op.operationId))).toBe(true)
+	})
+})
+
 describe("copy sidecar: removed with the operation, recovered as a known name", () => {
 	it("retention removes copy.json and copy.tmp with the folder and notifies removed", async () => {
 		const h = await harness()

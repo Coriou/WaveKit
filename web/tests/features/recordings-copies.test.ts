@@ -13,6 +13,7 @@ import type { RecordingInventoryItem } from "@wavekit/api-types"
 import { CopyChip } from "../../src/features/recordings/RecordingsDrawer.tsx"
 import {
 	copiesToggleLabel,
+	headerCount,
 	isCopy,
 	recordingsQuery,
 } from "../../src/features/recordings/model.ts"
@@ -111,6 +112,32 @@ describe("Recordings: copies hidden by default, Show copies, the copy chip", () 
 		expect(src).toContain("recordingsQuery(recordingsUi.get())")
 		expect(src).toContain(
 			"recordingsQuery({ tokens, text, filter, showCopies })",
+		)
+	})
+
+	it("the header count with copies hidden is `matched` (the rows shown), with them shown `counts`", () => {
+		const meta = {
+			counts: { total: 12, kept: 4, copiesTotal: 3 },
+			matched: 9,
+			truncated: false,
+		}
+		expect(headerCount(meta, "all", false, true)).toBe("9")
+		expect(headerCount(meta, "all", false, false)).toBe("12")
+		expect(headerCount({ ...meta, matched: 3 }, "kept", false, true)).toBe("3")
+		expect(headerCount(meta, "kept", false, false)).toBe("4")
+		// No copies to hide, or an older core without copiesTotal: counts as before.
+		const none = { ...meta, counts: { total: 12, kept: 4, copiesTotal: 0 } }
+		expect(headerCount(none, "all", false, true)).toBe("12")
+		expect(
+			headerCount(
+				{ ...meta, counts: { total: 12, kept: 4 } },
+				"all",
+				false,
+				true,
+			),
+		).toBe("12")
+		expect(headerCount({ ...meta, truncated: true }, "all", false, true)).toBe(
+			"9+",
 		)
 	})
 

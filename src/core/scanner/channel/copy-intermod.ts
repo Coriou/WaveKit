@@ -8,8 +8,10 @@
  * or more and a peak at least INTERMOD_PARENT_MARGIN_DB over the file's own peak; at most the
  * INTERMOD_PARENTS_MAX strongest (by peak).
  * - Rule A (2·f1 − f2): |2·f1 − f2 − fc| ≤ tol for two distinct parents f1, f2.
- * - Rule B (symmetric pair): a parent fa and another concurrent track fc′ at least
- *   INTERMOD_PARENT_MARGIN_DB under fa with |fc + fc′ − 2·fa| ≤ tol (the two products 2·fa − fb
+ * - Rule B (symmetric pair): a parent fa and another concurrent track fc′ (overlapping the
+ *   file's span by INTERMOD_MIN_OVERLAP_SHARE, like a parent, and with a parent's SNR floor of
+ *   INTERMOD_PARENT_MIN_SNR_DB, so an unrelated weak carrier never stands in for the mirror) at
+ *   least INTERMOD_PARENT_MARGIN_DB under fa with |fc + fc′ − 2·fa| ≤ tol (the two products 2·fa − fb
  *   and 2·fb − fa of fa with an unseen fb sit symmetric around fa only when fb is fa's own
  *   mixing partner; two on-raster channels symmetric around a close strong one are ordinary
  *   traffic), AND fc or fc′ is off its raster (fc′ by its span's median centre, not its latest
@@ -31,7 +33,7 @@
 
 /** Overlap of a parent with the file's span: at least half the file. */
 export const INTERMOD_MIN_OVERLAP_SHARE = 0.5
-/** A parent's SNR (dB). */
+/** A parent's SNR (dB); Rule B's mirror fc′ needs it too. */
 export const INTERMOD_PARENT_MIN_SNR_DB = 20
 /** A parent's peak over the file's peak (dB); fc′ (Rule B) at least this under fa. */
 export const INTERMOD_PARENT_MARGIN_DB = 10
@@ -178,6 +180,8 @@ export function intermodEvidenceOf(
 	for (const fa of parents)
 		for (const other of concurrent) {
 			if (other === fa) continue
+			// The mirror must be a real signal: a parent's SNR floor (its overlap is `concurrent`'s).
+			if (other.snrDb < INTERMOD_PARENT_MIN_SNR_DB) continue
 			if (other.peakDbfs > fa.peakDbfs - INTERMOD_PARENT_MARGIN_DB) continue
 			if (Math.abs(file.hz + other.hz - 2 * fa.hz) > tol) continue
 			if (
