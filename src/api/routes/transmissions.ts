@@ -7,7 +7,8 @@
  * (TRANSMISSION_ROWS_MAX rows), at most TRANSMISSION_RECORDS_MAX record reads by event id, and the
  * catalogue's memory indexes (keysOfTx, itemsOfKeys). The id and the start time come from the
  * stored record (record_json), never from an Activity summary alone. Audio is listed only where
- * the recordings route serves it, and for a digital call only the file the decoder linked.
+ * the recordings route serves it, and for a digital call only the file the decoder linked; a
+ * `rec:dsd~` ref resolves only to a clear call whose decoder link names it (else the unknown 404).
  * Bodies and logs carry fixed text: the ref is never echoed.
  */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify"
@@ -311,6 +312,19 @@ export async function transmissionRoutes(
 								),
 					audioServed: inventory !== undefined,
 				})
+				// Rule six: a dsd-fme file is reached by its key only while a clear call's decoder link
+				// names it. An unlisted file (unproven, encrypted, never linked) answers exactly as an
+				// unknown ref, so the alias is no oracle of what the catalogue holds.
+				if (
+					ref.startsWith("rec:dsd~") &&
+					!(
+						dto.privacy === "clear" &&
+						linkedRecordingKeys.includes(ref.slice("rec:".length))
+					)
+				)
+					return activityFailed
+						? sendError(reply, 503, "TRANSMISSIONS_UNAVAILABLE")
+						: sendError(reply, 404, "TRANSMISSION_NOT_FOUND")
 				return await reply.header("Cache-Control", "no-store").send(dto)
 			} catch (err) {
 				request.log.warn(

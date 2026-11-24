@@ -283,7 +283,9 @@ describe("GET /api/transmissions/:ref", () => {
 				atMs: txAt,
 				alias: "call:dsd-a:call-1",
 			})!
-		const callEnd = (txId: string, encrypted: boolean) => ({
+		// `known` false: dsd-fme could not tell encryption, so the call is never proven clear and
+		// the ingress links none of its file (callTrustAdmits).
+		const callEnd = (txId: string, encrypted: boolean, known = true) => ({
 			timestamp: new Date(at),
 			decoder: "dsd-a",
 			type: "call_end" as const,
@@ -293,9 +295,11 @@ describe("GET /api/transmissions/:ref", () => {
 				talkgroup: 100,
 				source: 2001,
 				duration: 4_200,
-				encryptionKnown: true,
+				encryptionKnown: known,
 				encrypted,
 				flags: { encrypted },
+				// dsd-fme names the call's file whatever its clearance: the ingress keeps the name.
+				wavFile: `/rec/${DSD_NAME}`,
 				txId,
 			},
 		})
@@ -342,7 +346,8 @@ describe("GET /api/transmissions/:ref", () => {
 
 		it("a pre-id call reached by evt: or rec: uses its decoder link: clear with the linked file, else unproven", async () => {
 			h = await harness(at)
-			const { txId: _none, ...data } = callEnd(TX_A, false).data
+			// A clear call whose file dsd-fme had not named yet (the link comes later).
+			const { txId: _none, wavFile: _late, ...data } = callEnd(TX_A, false).data
 			h.publish("dsd-a", { ...callEnd(TX_A, false), data })
 			await h.rows(1)
 			const row = (await h.runtime.service.search({ query: {}, limit: 10 }))
@@ -354,18 +359,17 @@ describe("GET /api/transmissions/:ref", () => {
 				discoveryId: null,
 				facts: null,
 			})
-			// Not linked yet: unproven, no audio, by either alias.
-			for (const ref of [`evt:${row.eventId}`, `rec:${key}`]) {
-				const dto = (await get(ref)).json<TransmissionDto>()
-				expect(dto).toMatchObject({
-					id: null,
-					kind: "voice-digital",
-					privacy: "unproven",
-					artefacts: [],
-				})
-				// The raw block never shows the file an unproven call lists none of.
-				expect(dto.raw.recording).toBeNull()
-			}
+			// Not linked yet: unproven and no audio by its call row; its file's key is no ref at all.
+			const dto = (await get(`evt:${row.eventId}`)).json<TransmissionDto>()
+			expect(dto).toMatchObject({
+				id: null,
+				kind: "voice-digital",
+				privacy: "unproven",
+				artefacts: [],
+			})
+			// The raw block never shows the file an unproven call lists none of.
+			expect(dto.raw.recording).toBeNull()
+			expect((await get(`rec:${key}`)).statusCode).toBe(404)
 			h.runtime.recordingLinks?.()?.link({
 				type: "link-call",
 				decoderId: "dsd-a",
@@ -404,7 +408,7 @@ describe("GET /api/transmissions/:ref", () => {
 		it("a call never proven clear lists no audio (unproven); an encrypted one says so", async () => {
 			h = await harness(at)
 			const claim = dvClaim(h, at - 4_200)
-			h.publish("dsd-a", callEnd(claim.txId, false))
+			h.publish("dsd-a", callEnd(claim.txId, false, false))
 			await h.rows(1)
 			const unproven = (await get(claim.txId)).json<TransmissionDto>()
 			expect(unproven.privacy).toBe("unproven")
@@ -419,13 +423,9 @@ describe("GET /api/transmissions/:ref", () => {
 				discoveryId: null,
 				facts: null,
 			})
-			const encByFile = (await get(`rec:${key}`)).json<TransmissionDto>()
-			expect(encByFile).toMatchObject({
-				id: claim.txId,
-				privacy: "encrypted",
-				artefacts: [],
-			})
-			expect(encByFile.raw.recording).toBeNull()
+			const encByFile = await get(`rec:${key}`)
+			expect(encByFile.statusCode).toBe(404)
+			expect(encByFile.json()).toMatchObject({ code: "TRANSMISSION_NOT_FOUND" })
 			const enc = (await get(claim.txId)).json<TransmissionDto>()
 			expect(enc.privacy).toBe("encrypted")
 			expect(enc.artefacts).toEqual([])
@@ -476,14 +476,20 @@ describe("GET /api/transmissions/:ref", () => {
 			async encrypted => {
 				h = await harness(at)
 				const claim = dvClaim(h, at - 4_200)
-				h.publish("dsd-a", callEnd(claim.txId, encrypted))
+				h.publish("dsd-a", callEnd(claim.txId, encrypted, false))
 				await h.rows(1)
 				const row = (await h.runtime.service.search({ query: {}, limit: 10 }))
 					.items[0]!
 				const key = `dsd~${DSD_NAME}`
 				h.registry.attach(claim.txId, `rec:${key}`)
 				h.items.set(key, leakyItem(key))
-				for (const ref of [claim.txId, `evt:${row.eventId}`, `rec:${key}`]) {
+				const unknown = await get(`rec:dsd~${DSD_NAME.replace("SRC", "SRX")}`)
+				// The file's own key answers exactly as an unknown ref: no oracle, no body.
+				const byFile = await get(`rec:${key}`)
+				expect(byFile.statusCode).toBe(404)
+				expect(byFile.body).toBe(unknown.body)
+				expectNoLeak(byFile.body, key)
+				for (const ref of [claim.txId, `evt:${row.eventId}`]) {
 					const res = await get(ref)
 					expect(res.statusCode).toBe(200)
 					const dto = res.json<TransmissionDto>()
@@ -516,25 +522,44 @@ describe("GET /api/transmissions/:ref", () => {
 
 		it("a pre-id unproven call reached by evt: or rec: leaks nothing of its file", async () => {
 			h = await harness(at)
-			const { txId: _none, ...data } = callEnd(TX_A, false).data
-			h.publish("dsd-a", { ...callEnd(TX_A, false), data })
+			const { txId: _none, ...data } = callEnd(TX_A, false, false).data
+			h.publish("dsd-a", { ...callEnd(TX_A, false, false), data })
 			await h.rows(1)
 			const row = (await h.runtime.service.search({ query: {}, limit: 10 }))
 				.items[0]!
 			const key = `dsd~${DSD_NAME}`
 			h.items.set(key, leakyItem(key))
-			for (const ref of [`evt:${row.eventId}`, `rec:${key}`]) {
-				const res = await get(ref)
-				expect(res.statusCode).toBe(200)
-				expect(res.json<TransmissionDto>()).toMatchObject({
-					id: null,
-					privacy: "unproven",
-					startedAt: null,
-					raw: { recording: null, facts: null },
-					refs: { recordingKeys: [] },
-				})
-				expectNoLeak(res.body, key)
-			}
+			const res = await get(`evt:${row.eventId}`)
+			expect(res.statusCode).toBe(200)
+			expect(res.json<TransmissionDto>()).toMatchObject({
+				id: null,
+				privacy: "unproven",
+				startedAt: null,
+				raw: { recording: null, facts: null },
+				refs: { recordingKeys: [] },
+			})
+			expectNoLeak(res.body, key)
+			expect((await get(`rec:${key}`)).statusCode).toBe(404)
+		})
+
+		it("an unlisted dsd-fme key and a key nothing holds answer byte-identical 404s", async () => {
+			h = await harness(at)
+			const claim = dvClaim(h, at - 4_200)
+			h.publish("dsd-a", callEnd(claim.txId, false, false))
+			await h.rows(1)
+			const key = `dsd~${DSD_NAME}`
+			h.registry.attach(claim.txId, `rec:${key}`)
+			h.items.set(key, leakyItem(key))
+			const held = await get(`rec:${key}`)
+			const none = await get(
+				"rec:dsd~20261016_120200_05555_YSF_1_GROUP_TGT_100_SRC_2003.wav",
+			)
+			expect(held.statusCode).toBe(404)
+			expect(none.statusCode).toBe(404)
+			expect(held.body).toBe(none.body)
+			expect(held.headers["content-type"]).toBe(none.headers["content-type"])
+			expect(held.headers["cache-control"]).toBe(none.headers["cache-control"])
+			expect(held.json()).toMatchObject({ code: "TRANSMISSION_NOT_FOUND" })
 		})
 
 		it("a clear call shows only its decoder-linked file, not another file it names", async () => {
@@ -578,6 +603,18 @@ describe("GET /api/transmissions/:ref", () => {
 			})
 			expect(res.body).not.toContain(other)
 			expect(res.body).not.toContain(LEAK.operationId)
+			// The linked file's name stays in the raw call row; its key resolves, the other's does not.
+			expect(
+				(dto.raw.activity as { payload: { decodedData: { wavFile?: string } } })
+					.payload.decodedData.wavFile,
+			).toBe(DSD_NAME)
+			const byKey = await get(`rec:${key}`)
+			expect(byKey.statusCode).toBe(200)
+			expect(byKey.json<TransmissionDto>()).toMatchObject({
+				privacy: "clear",
+				artefacts: [{ id: key }],
+			})
+			expect((await get(`rec:${other}`)).statusCode).toBe(404)
 			expect(res.body).not.toContain(String(LEAK.hz))
 		})
 	})
