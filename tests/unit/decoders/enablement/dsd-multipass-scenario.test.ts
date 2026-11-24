@@ -777,6 +777,12 @@ const summary = (m: MultipassMetrics) =>
  * - M6: sites never decayed and keep their last sync after the first;
  *   carriers never remembered.
  * - M7: every carrier placed within 2 h; reasons right at every sampled minute.
+ * - M8: calling sites B and C first sync <= 3,600 s on every seed and slot
+ *   count. A discovery challenger takes the trial token only while live, so
+ *   the fresh lane goes to the 10 carriers' single fresh tries
+ *   (<= 10 × 300 s = 3,000 s) and then to the site's next call (one call
+ *   gap). The gap is U(300, 1,800) s, so the strict worst case is 4,800 s;
+ *   3,600 s allows 600 s, and the site may win the lane earlier.
  */
 function expectPass(m: MultipassMetrics, opts: { m4Reclaims?: boolean } = {}) {
 	expect(m.firstSync["A"]).not.toBeNull()
@@ -816,6 +822,10 @@ function expectPass(m: MultipassMetrics, opts: { m4Reclaims?: boolean } = {}) {
 	expect(m.siteNullSyncSamples).toEqual([])
 	expect(m.carrierRemembered).toEqual([])
 	expect(m.carriersPlacedBy2h).toBe(CARRIERS.length)
+	for (const site of ["B", "C"]) {
+		expect(m.firstSync[site], `M8 ${site}`).not.toBeNull()
+		expect(m.firstSync[site]!, `M8 ${site}`).toBeLessThanOrEqual(3_600_000)
+	}
 	expect(m.reasonViolations).toEqual([])
 	// B-1: every dsd-fme stop during the run was a short victim stop.
 	expect(m.stopKill.short).toBeGreaterThan(0)

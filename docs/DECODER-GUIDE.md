@@ -691,15 +691,18 @@ describe("HfdlDecoder", () => {
    already made in that window count, whatever their kind), so a busy minute of other
    moves never uses those 2.
    Then come channels the scanner identified as digital voice (no sync here yet), then
-   channels it knows nothing about, then analog. An unknown or decayed channel enters an
-   occupied slot through the trial token, which has two lanes per source and decoder: a
+   channels it knows nothing about, then analog. An unknown or decayed channel that is
+   receiving now enters an occupied slot through the trial token (a silent one waits for
+   its next transmission), which has two lanes per source and decoder: a
    channel never tried uses the fresh lane, at most once every 5 minutes; a channel that
    failed before uses the retry lane, at most once every 10 minutes. So channels that keep
-   failing never hold up a new site (channels never tried go first, then the fewest failures,
-   then the one tried longest ago). It replaces only an analog or no-sync channel, a quiet
+   failing never hold up a new site (among unknown and decayed channels, those never tried
+   go first, then the fewest failures, then the one tried longest ago; remembered channels
+   keep their rank). A site that failed once and later decays uses the retry lane for up to
+   6 hours (its failures are kept 6 hours after its last try). It replaces only an analog or no-sync channel, a quiet
    one that ranks below it, or a remembered channel past its hold that is quiet with no
    sync for 2 minutes. With at least two extra dsd-fme channels per source all held, a busy
-   unknown channel not tried in the last 30 minutes may take the lowest-ranked held one
+   unknown channel receiving now and not tried in the last 30 minutes may take the lowest-ranked held one
    without a sync for 2 minutes (one per planning pass; never with a single extra
    channel). A channel with a burst pair that is receiving now gets a burst trial, with the
    same two lanes on their own times (never tried: at most one per 5 minutes; failed

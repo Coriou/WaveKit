@@ -330,7 +330,11 @@ function answer(
 				score,
 				state: score > 7 ? "hot" : score > 3 ? "warm" : "cold",
 				reasons: [],
-				live: score > 9,
+				// Hot and warm channels are receiving: a discovery challenger
+				// (D, S, U) takes the trial token or the yield only while live.
+				// Live stays monotone in score (the planner ranks live first
+				// inside a class; the frozen reference ranks by score only).
+				live: score > 3,
 				lastEnergyMonoMs: null,
 				stateSinceMonoMs: 0,
 			}
@@ -477,7 +481,14 @@ function againstReference(
 			const refKeys = new Set(slotsOf(ref).map(w => w.key))
 			const movedOut = new Set(theirs.map(m => m.fromKey))
 			const held = new Set(
-				act.incumbents.filter(i => i.syncSeen === true).map(i => i.key),
+				act.incumbents
+					.filter(
+						i =>
+							i.syncSeen === true &&
+							i.syncUntilMonoMs !== undefined &&
+							now < i.syncUntilMonoMs,
+					)
+					.map(i => i.key),
 			)
 			expect(slotsOf(got)).toHaveLength(slotsOf(ref).length)
 			for (const w of slotsOf(got))
@@ -763,6 +774,9 @@ describe("the split planner against the frozen pre-change planner", () => {
 			// (the generator never holds every slot). Every run takes one path.
 			// The trial token and the T1 move reserve move some former reference
 			// runs to "limited", which must be reached.
+			// With live = score > 3 (discovery challengers need live), measured
+			// over 14 runs of 200: reference 48-73 (24-37 %), victim 22-38
+			// (11-19 %), limited 10-29, non-empty moves 54-79 (27-40 %).
 			expect(reach.reference / reach.runs).toBeGreaterThanOrEqual(0.2)
 			expect(reach.limited).toBeGreaterThan(0)
 			expect(reach.victim / reach.runs).toBeGreaterThanOrEqual(0.1)

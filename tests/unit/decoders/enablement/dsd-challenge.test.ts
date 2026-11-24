@@ -545,7 +545,9 @@ const VICTIMS: readonly {
  * per victim column. "yes" (dwell needed), "free" (no dwell), "below" (V
  * ranks below C), "s120" (V's last sync >= 120 s old), "no". DN columns
  * read as D, S as U, A and N as A/N; Hq<120 is an Hq whose sync is 60-120 s
- * old.
+ * old. The T2DU and T3 rows are "(token, live)" and "(count >= 2, all H,
+ * live)": their challengers are live; a challenger that is not live is a
+ * never-mover row.
  */
 type Cell = "yes" | "free" | "below" | "s120" | "no"
 const T: Record<string, Record<string, Cell>> = {
@@ -657,7 +659,7 @@ const ROWS: readonly {
 	...(["D", "S", "U"] as const).map(cls => ({
 		row: "T2DU" as const,
 		kind: "tier" as const,
-		c: chal(cls, { confirmed: true }),
+		c: chal(cls, { confirmed: true, live: true }),
 		ctx: { trialOpen: true },
 	})),
 	...(["D", "S", "U"] as const).map(cls => ({
@@ -685,6 +687,21 @@ const ROWS: readonly {
 			chal("D", { confirmed: true, live: true, burstPaired: true }),
 		] as const
 	).map(c => ({ row: "none" as const, kind: null, c, ctx: {} })),
+	// A discovery challenger that is not live: no token, burst or yield move
+	// even with every gate open (a silent warm site only fails into retry).
+	...(["D", "S", "U"] as const).flatMap(cls =>
+		(["hot", "warm"] as const).map(state => ({
+			row: "none" as const,
+			kind: null,
+			c: chal(cls, { confirmed: true, burstPaired: true, state }),
+			ctx: {
+				trialOpen: true,
+				burstTrialOpen: true,
+				yieldOpen: true,
+				allHeld: true,
+			},
+		})),
+	),
 ]
 
 describe("dsd-fme slot challenge/yield table (mayTake)", () => {
@@ -739,7 +756,7 @@ describe("dsd-fme slot challenge/yield table (mayTake)", () => {
 							NOW - DSD_DIGITAL_HOLD_MS,
 						]) {
 							const got = mayTake(
-								chal(cls, { confirmed: true, triedMonoMs: tried }),
+								chal(cls, { confirmed: true, live: true, triedMonoMs: tried }),
 								{
 									cls: "H",
 									live: v.live,
@@ -771,11 +788,17 @@ describe("dsd-fme slot challenge/yield table (mayTake)", () => {
 			rank: 3,
 		}
 		const open = { count: 2, allHeld: true, trialOpen: true, yieldOpen: true }
-		expect(mayTake(chal("U", { confirmed: true }), v, ctxOf(open))).toBe(
-			"yield",
-		)
 		expect(
-			mayTake(chal("U", { confirmed: true, state: "warm" }), v, ctxOf(open)),
+			mayTake(chal("U", { confirmed: true, live: true }), v, ctxOf(open)),
+		).toBe("yield")
+		// Hot but not live: no yield.
+		expect(mayTake(chal("U", { confirmed: true }), v, ctxOf(open))).toBeNull()
+		expect(
+			mayTake(
+				chal("U", { confirmed: true, live: true, state: "warm" }),
+				v,
+				ctxOf(open),
+			),
 		).toBeNull()
 		expect(
 			mayTake(
@@ -852,7 +875,11 @@ describe("dsd-fme slot challenge/yield table (mayTake)", () => {
 				rank: 0,
 			}
 			expect(
-				mayTake(chal("U", { confirmed: true }), v, ctxOf({ trialOpen: true })),
+				mayTake(
+					chal("U", { confirmed: true, live: true }),
+					v,
+					ctxOf({ trialOpen: true }),
+				),
 			).toBe("tier")
 			expect(
 				mayTake(
@@ -870,7 +897,7 @@ describe("dsd-fme slot challenge/yield table (mayTake)", () => {
 			).toBeNull()
 			expect(
 				mayTake(
-					chal("U", { confirmed: true }),
+					chal("U", { confirmed: true, live: true }),
 					{ ...v, noSyncRun: false },
 					ctxOf({ trialOpen: true }),
 				),
@@ -1068,8 +1095,8 @@ describe("dsd-fme slot selection by class (selectChannels)", () => {
 
 	it("the move reserve: other gates stop 2 moves short, T1 may use them", () => {
 		const t = { 1: { cls: "U" as const }, 3: { cls: "N" as const } }
-		expect(run(t, {}, { movesLeft: 3, trialOpen: true }).moves).toBe(1)
-		expect(run(t, {}, { movesLeft: 2, trialOpen: true }).moves).toBe(0)
+		expect(run(t, { 1: true }, { movesLeft: 3, trialOpen: true }).moves).toBe(1)
+		expect(run(t, { 1: true }, { movesLeft: 2, trialOpen: true }).moves).toBe(0)
 		const r = {
 			1: { cls: "R" as const, reclaimOk: true, lastSyncMonoMs: 0 },
 			3: { cls: "N" as const },
@@ -1080,7 +1107,7 @@ describe("dsd-fme slot selection by class (selectChannels)", () => {
 	it("the trial token allows one unknown entry per pass; without it none", () => {
 		const base = {
 			order: [1, 2, 3, 4],
-			activity: new Map([1, 2, 3, 4].map(hz => [hz, ch(hz, false)])),
+			activity: new Map([1, 2, 3, 4].map(hz => [hz, ch(hz, hz < 3)])),
 			count: 2,
 			incumbents: [
 				{ key: "a", hz: 3, dwellSinceMonoMs: 0 },
@@ -1095,6 +1122,18 @@ describe("dsd-fme slot selection by class (selectChannels)", () => {
 		}
 		expect(run(t, {}, { ...base, trialOpen: true }).moves).toBe(1)
 		expect(run(t, {}, { ...base, trialOpen: false }).moves).toBe(0)
+		// Silent (not live) unknowns never take the token.
+		expect(
+			run(
+				t,
+				{},
+				{
+					...base,
+					activity: new Map([1, 2, 3, 4].map(hz => [hz, ch(hz, false)])),
+					trialOpen: true,
+				},
+			).moves,
+		).toBe(0)
 		// Free slots fill at once, no token.
 		expect(
 			run(t, {}, { ...base, incumbents: [], trialOpen: false }).chosen,
@@ -1112,10 +1151,10 @@ describe("dsd-fme slot selection by class (selectChannels)", () => {
 		const two = { order: [1, 3] }
 		// T2: a never-tried challenger needs the fresh lane only.
 		expect(
-			run(fresh, {}, { ...two, trialOpen: lanes(false, true) }).moves,
+			run(fresh, { 1: true }, { ...two, trialOpen: lanes(false, true) }).moves,
 		).toBe(0)
 		expect(
-			run(fresh, {}, { ...two, trialOpen: lanes(true, false) }).chosen,
+			run(fresh, { 1: true }, { ...two, trialOpen: lanes(true, false) }).chosen,
 		).toEqual([
 			{
 				hz: 1,
@@ -1127,11 +1166,11 @@ describe("dsd-fme slot selection by class (selectChannels)", () => {
 		])
 		// ... a failed one the retry lane only.
 		expect(
-			run(failed, {}, { ...two, trialOpen: lanes(true, false) }).moves,
+			run(failed, { 1: true }, { ...two, trialOpen: lanes(true, false) }).moves,
 		).toBe(0)
 		expect(
-			run(failed, {}, { ...two, trialOpen: lanes(false, true) }).chosen[0]
-				?.lane,
+			run(failed, { 1: true }, { ...two, trialOpen: lanes(false, true) })
+				.chosen[0]?.lane,
 		).toBe("retry")
 		// TB the same, on its own gates.
 		const paired = (t: typeof fresh | typeof failed) => ({
@@ -1173,7 +1212,7 @@ describe("dsd-fme slot selection by class (selectChannels)", () => {
 			{},
 			{
 				order: [1, 2, 3, 4],
-				activity: new Map([1, 2, 3, 4].map(hz => [hz, ch(hz, false)])),
+				activity: new Map([1, 2, 3, 4].map(hz => [hz, ch(hz, hz < 3)])),
 				count: 2,
 				incumbents: [
 					{ key: "a", hz: 3, dwellSinceMonoMs: 0 },
@@ -1235,7 +1274,8 @@ describe("dsd-fme slot selection by class (selectChannels)", () => {
 			const r = selectChannels({
 				order: ranked.filter(hz => hz !== inc.hz).concat(inc.hz),
 				ranked: true,
-				activity: new Map(order.map(hz => [hz, ch(hz, false)])),
+				// Steady carriers and the site are receiving (discovery needs live).
+				activity: new Map(order.map(hz => [hz, ch(hz, true)])),
 				count: 1,
 				incumbents: [inc],
 				nowMonoMs: now,
@@ -1284,10 +1324,29 @@ describe("dsd-fme slot selection by class (selectChannels)", () => {
 			tiers.snapshot(NOW, policy).trials.find(t => t.gate === "trial:retry") ===
 			undefined
 		const t = { 1: { cls: "U" as const }, 3: { cls: "N" as const } }
-		expect(run(t, {}, { trialOpen: retryOpen }).moves).toBe(0)
+		expect(run(t, { 1: true }, { trialOpen: retryOpen }).moves).toBe(0)
 		expect(
-			run(t, {}, { trialOpen: { fresh: true, retry: retryOpen } }).moves,
+			run(t, { 1: true }, { trialOpen: { fresh: true, retry: retryOpen } })
+				.moves,
 		).toBe(1)
+	})
+
+	it("tier order: a held channel that failed once keeps its rank over a fresh hot unknown (fewest failures only among D, S, U)", () => {
+		// X (1): held, failed once before its first sync, not live. Y (2): a
+		// fresh hot live unknown with the token open. One analog slot past dwell.
+		const t = {
+			1: {
+				cls: "H" as const,
+				failures: 1,
+				triedMonoMs: NOW - 100_000,
+				lastSyncMonoMs: NOW - 50_000,
+			},
+			2: { cls: "U" as const },
+			3: { cls: "A" as const },
+		}
+		expect(run(t, { 2: true }, { trialOpen: true }).chosen).toEqual([
+			{ hz: 1, movedFrom: { key: "inc", hz: 3 }, kind: "tier" },
+		])
 	})
 
 	it("retry lane: 10 escalated carriers tried long ago lose the next opening to a channel with 1 failure (fewest failures, then least recently tried)", () => {

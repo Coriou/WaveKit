@@ -647,15 +647,17 @@ const oldSync = (v: TakeVictim, now: number, ms: number) =>
  * | C ↓ / V →          | Hl | Hr | Hq        | Rl | Rq        | Dl / Dq        | Ul / Uq        | A / N        |
  * | T1 H/R/D/DN live   | no | no | yes       | no | yes       | no / yes       | yes, no dwell  | yes, no dwell|
  * | T2 H, R (not live) | no | no | no        | no | if below  | yes            | yes            | yes          |
- * | T2 D, S, U (token) | no | no | no        | no | sync≥120s | no / if below  | no / if below  | yes          |
- * | T3 D, S, U (≥2, all H) | no | no | sync≥120s | n/a | n/a | n/a           | n/a            | n/a          |
+ * | T2 D, S, U (token, live) | no | no | no  | no | sync≥120s | no / if below  | no / if below  | yes          |
+ * | T3 D, S, U (≥2, all H, live) | no | no | sync≥120s | n/a | n/a | n/a     | n/a            | n/a          |
  * | TB D, S, U burst   | no | no | sync≥120s | no | yes       | no / yes       | no / yes       | yes          |
  * | T4 A (analog try)  | no | no | no        | no | no        | no             | no             | A/N, oldest  |
  *
  * Hr / Hq split at quietVictimMs (60 s). For T2, TB and T4 a D/DN victim
  * whose current run passed its dwell without a sync is an A/N victim. Every
  * victim needs its dwell except a non-remembered one (S, U, A, N) taken by
- * T1; a pinned victim (start in flight) never is one.
+ * T1; a pinned victim (start in flight) never is one. A discovery challenger
+ * (D, S, U) takes a token (T2), burst (TB) or yield (T3) move only while live:
+ * a silent warm site that took the token would only fail into the retry lane.
  */
 export function mayTake(
 	c: TakeChallenger,
@@ -696,7 +698,7 @@ export function mayTake(
 				col === "AN"
 			)
 				return "tier"
-		} else if (discovery && ctx.trialOpen) {
+		} else if (discovery && c.live && ctx.trialOpen) {
 			if (
 				(col === "Rq" && oldSync(v, now, ctx.yieldSyncMs)) ||
 				(col === "Dq" && below) ||
@@ -734,6 +736,7 @@ export function mayTake(
 		ctx.yieldOpen &&
 		c.confirmed &&
 		c.state === "hot" &&
+		c.live &&
 		!c.demoted &&
 		!recentTry &&
 		victimColumn(v, ctx) === "Hq" &&
@@ -993,20 +996,28 @@ export function selectChannels(args: {
 	const failures = (hz: number) => tier(hz).failures
 	for (const kind of phases) {
 		// Live reclaims go by rank; the analog try least recently tried first
-		// (never tried first). The trial and burst-trial gates go by fewest
-		// failures, then least recently tried, so channels that keep failing
-		// (escalated) never take a lane opening from one that failed less.
+		// (never tried first). Token classes (D, S, U) in the trial, burst-trial
+		// and yield gates go by fewest failures, then least recently tried, so
+		// channels that keep failing (escalated) never take a lane opening from
+		// one that failed less. H and R challengers of the tier gate keep rank
+		// order and go before every token class.
+		const tokenCls = (hz: number) => {
+			const cls = tier(hz).cls
+			return cls === "D" || cls === "S" || cls === "U"
+		}
 		const order =
 			kind === "reclaim"
 				? args.order
 				: kind === "analog-try"
 					? [...args.order].sort((x, y) => tried(x) - tried(y) || byRank(x, y))
-					: [...args.order].sort(
-							(x, y) =>
-								failures(x) - failures(y) ||
-								tried(x) - tried(y) ||
-								byRank(x, y),
-						)
+					: [...args.order].sort((x, y) => {
+							const tx = tokenCls(x)
+							const ty = tokenCls(y)
+							if (!tx || !ty) return Number(tx) - Number(ty) || byRank(x, y)
+							return (
+								failures(x) - failures(y) || tried(x) - tried(y) || byRank(x, y)
+							)
+						})
 		for (const hz of order) {
 			if (has(hz)) continue
 			const a = activity.get(hz)
