@@ -1,13 +1,14 @@
 /**
- * Streaming read of the scanner journal at load (`journal/observations-YYYYMMDD.jsonl`). Each day
- * file is read in 256 KiB chunks and split into lines at the byte level; a line the snapshot
- * already covers (its `{"seq":<n>,` prefix at or below `fromSeq`) is skipped without JSON.parse,
+ * Streaming read of the scanner journal at load (`journal/observations-YYYYMMDD.jsonl` and the
+ * day's later parts `observations-YYYYMMDD-NNNN.jsonl`). Each file is read in 256 KiB chunks and
+ * split into lines at the byte level; a line the snapshot already covers (its `{"seq":<n>,` prefix at or below `fromSeq`) is skipped without JSON.parse,
  * so a large day file the snapshot covers costs a byte scan instead of a 4 s parse. Uncovered
  * lines are parsed and validated, and every valid one is returned in seq order, past any missing
  * seq too (salvage: a gap left by a lost or corrupt line withholds nothing that can still be
  * applied; it only degrades recovery). Work between event-loop turns is bounded by a deadline
  * (`SliceClock`).
  */
+import type { FileHandle } from "node:fs/promises"
 import { open, truncate as truncateFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { Logger } from "../../../utils/logger.js"
@@ -59,7 +60,11 @@ export function prefixSeq(line: Buffer): number | null {
 
 export interface JournalFileInfo {
 	name: string
-	/** Highest seq in the file (covered lines by their prefix), 0 for none. */
+	/**
+	 * Highest seq in the file (covered lines by their prefix), 0 for none. An invalid line with a
+	 * readable `{"seq":<n>,` prefix counts too, so a file of only invalid uncovered lines is not
+	 * taken for covered (and pruned) by `pruneJournal`.
+	 */
 	maxSeq: number
 	/** Bytes on disk after any torn-tail truncation. */
 	bytes: number
@@ -88,7 +93,7 @@ export interface JournalRead {
 
 export interface JournalReadOptions {
 	dir: string
-	/** Journal file names in name order (`observations-YYYYMMDD.jsonl`). */
+	/** Journal file names oldest first, by day then part (`journalNamesInOrder` in persistence.ts). */
 	names: readonly string[]
 	/** lastSeq of the snapshot: lines at or below it are covered. */
 	fromSeq: number
@@ -102,7 +107,11 @@ export interface JournalReadOptions {
 	maxLineBytes?: number
 }
 
-/** Reads every journal file; see the module comment. Never throws for bad content; I/O errors propagate. */
+/**
+ * Reads every journal file; see the module comment. Never throws for bad content; I/O errors
+ * propagate, except a listed file gone before it is opened (ENOENT: a prune deleted it), which is
+ * skipped.
+ */
 export async function readJournalFiles(
 	o: JournalReadOptions,
 ): Promise<JournalRead> {
@@ -124,6 +133,8 @@ export async function readJournalFiles(
 	for (const name of o.names) {
 		const path = join(o.dir, name)
 		let fileMax = 0
+		/** fileMax plus the prefix seq of invalid lines: what the file still holds for pruning. */
+		let fileHeld = 0
 		let fileMin = Number.POSITIVE_INFINITY
 		let invalid = 0
 		const handleLine = (line: Buffer): void => {
@@ -134,6 +145,7 @@ export async function readJournalFiles(
 				return
 			}
 			const parsed = o.parseLine(line.toString("utf8"))
+			if (prefixed !== null) fileHeld = Math.max(fileHeld, prefixed)
 			if (parsed === null || (prefixed !== null && parsed.seq !== prefixed)) {
 				invalid++
 				return
@@ -151,7 +163,13 @@ export async function readJournalFiles(
 				degraded = true
 			}
 		}
-		const handle = await open(path, "r")
+		let handle: FileHandle
+		try {
+			handle = await open(path, "r")
+		} catch (err) {
+			if (errnoCode(err) === "ENOENT") continue
+			throw err
+		}
 		let size = 0
 		/** Byte offset just past the last newline: what a torn tail is cut back to. */
 		let lastNewlineEnd = 0
@@ -223,7 +241,7 @@ export async function readJournalFiles(
 		if (fileMin < previousMax) outOfOrder = true
 		previousMax = Math.max(previousMax, fileMax)
 		maxSeq = Math.max(maxSeq, fileMax)
-		files.push({ name, maxSeq: fileMax, bytes: size })
+		files.push({ name, maxSeq: Math.max(fileMax, fileHeld), bytes: size })
 	}
 
 	let seqs = [...bySeq.keys()]
@@ -275,6 +293,12 @@ export async function readJournalFiles(
 		gap,
 		outOfOrder,
 	}
+}
+
+function errnoCode(err: unknown): string | undefined {
+	return err instanceof Error && "code" in err && typeof err.code === "string"
+		? err.code
+		: undefined
 }
 
 function isAscending(seqs: readonly number[]): boolean {

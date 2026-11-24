@@ -1546,6 +1546,9 @@ export class ScannerService extends EventEmitter {
 				dir: this.storageDir,
 				logger: deps.logger,
 				now: this.now,
+				// The retention pass's guard, for the prunes a write past the journal cap queues too:
+				// after a lost lock, batches already queued must not delete a new owner's lines.
+				canPrune: () => this.stateLoaded && !this.ownershipLost(),
 				// The recording keep store (RecordingKeepStore, `<stateDir>`) goes into the backup's outside/.
 				backup: { keepsFile: join(deps.stateDir, RECORDING_KEEPS_FILE_NAME) },
 			})

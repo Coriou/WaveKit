@@ -2,7 +2,10 @@
  * Scanner persistence (spec § 8) under `scanner.storage.dir`:
  *
  * - `discoveries.json`: snapshot of discoveries + observations with `lastSeq` (atomic write);
- * - `journal/observations-YYYYMMDD.jsonl`: one line per store mutation, monotonic `seq`, UTC daily files;
+ * - `journal/observations-YYYYMMDD.jsonl`: one line per store mutation, monotonic `seq`, UTC daily
+ *   files, each day split into parts `observations-YYYYMMDD-NNNN.jsonl` once a part passes the
+ *   segment size (`journalSegmentBytes`), so `pruneJournal` can drop the oldest covered part of
+ *   the current day too;
  * - `jobs.json`: job specs, lifecycle state and the persisted lease (lifecycle changes only), plus
  *   `leases`: persisted leases whose job was deleted (their recovery still runs, H4);
  * - `settings.json`: runtime settings overrides; `engine/<sourceId>.json`: learned engine state;
@@ -124,7 +127,67 @@ const OCCUPANCY_DIR = join(ENGINE_DIR, "occupancy")
 const RECEIVERS_DIR = join(ENGINE_DIR, "receivers")
 const NS_ENGINE_FILE = "engine.json"
 const NS_OCCUPANCY_FILE = "occupancy.json"
-const JOURNAL_NAME = /^observations-(\d{8})\.jsonl$/
+/** `observations-YYYYMMDD.jsonl` (part 0) or `observations-YYYYMMDD-N.jsonl` (part N >= 1, padded to 4). */
+const JOURNAL_NAME = /^observations-(\d{8})(?:-(\d{1,9}))?\.jsonl$/
+/**
+ * Parts per journal size cap: a part rolls over once it holds cap / 8, so the oldest covered part
+ * pruning can drop is at most 1/8 of the cap and the part still being written (never deletable
+ * while it holds lines a snapshot does not cover) overshoots the cap by at most that: 8 MiB of
+ * the 64 MiB default.
+ */
+const JOURNAL_PARTS_PER_CAP = 8
+/**
+ * Smallest part: 64 KiB keeps the part count bounded at a tiny cap (the 1 MiB minimum gives
+ * 128 KiB parts; 557 MB a day is then 4,250 parts, inside the 9-digit part number: 1e9 parts of
+ * 64 KiB is 64 TB a day).
+ */
+const JOURNAL_MIN_SEGMENT_BYTES = 64 * 1024
+/** Part size before the first `pruneJournal` gives the cap: 64 MiB default cap / 8 = 8 MiB. */
+const JOURNAL_DEFAULT_SEGMENT_BYTES = 8 * 1024 * 1024
+/** Part number past which a day keeps appending to its last part (unreachable, see above). */
+const JOURNAL_MAX_PART = 999_999_999
+
+/** A journal file's UTC day (`YYYYMMDD`) and part, or null for any other name. */
+export function parseJournalName(
+	name: string,
+): { day: string; part: number } | null {
+	const m = JOURNAL_NAME.exec(name)
+	if (m === null) return null
+	return { day: m[1] ?? "", part: m[2] === undefined ? 0 : Number(m[2]) }
+}
+
+/** The file name of a day's part: part 0 keeps the name earlier versions wrote. */
+export function journalPartName(day: string, part: number): string {
+	return part === 0
+		? `observations-${day}.jsonl`
+		: `observations-${day}-${String(part).padStart(4, "0")}.jsonl`
+}
+
+/**
+ * Journal file names among `names`, oldest first: by day, then part number (a plain string sort
+ * would put `-0001` before the day's part 0 and `-10000` before `-9999`).
+ */
+export function journalNamesInOrder(names: readonly string[]): string[] {
+	const parsed: Array<{ name: string; day: string; part: number }> = []
+	for (const name of names) {
+		const p = parseJournalName(name)
+		if (p !== null) parsed.push({ name, ...p })
+	}
+	parsed.sort((a, b) =>
+		a.day !== b.day ? (a.day < b.day ? -1 : 1) : a.part - b.part,
+	)
+	return parsed.map(p => p.name)
+}
+
+/** Part size for a journal cap of `maxBytes`: cap / 8, at least 64 KiB. */
+export function journalSegmentBytes(maxBytes: number | null): number {
+	if (maxBytes === null || !Number.isFinite(maxBytes))
+		return JOURNAL_DEFAULT_SEGMENT_BYTES
+	return Math.max(
+		JOURNAL_MIN_SEGMENT_BYTES,
+		Math.floor(maxBytes / JOURNAL_PARTS_PER_CAP),
+	)
+}
 const DAY_MS = 86_400_000
 /**
  * Heap a queued journal line may hold, charged against the cap: 2 bytes per UTF-16 unit (a
@@ -515,10 +578,6 @@ function dayStamp(ms: number): string {
 	return new Date(ms).toISOString().slice(0, 10).replaceAll("-", "")
 }
 
-function journalName(ms: number): string {
-	return `observations-${dayStamp(ms)}.jsonl`
-}
-
 /** Tmp file + fsync + rename (moved to atomic-write.ts for the snapshot worker; re-exported). */
 export { atomicWrite }
 
@@ -559,7 +618,8 @@ function parseJournalLine(line: string): JournalEntry | null {
 
 /** Journal lines written together by one append (group commit). */
 interface JournalBatch {
-	name: string
+	/** UTC day (`YYYYMMDD`); the part file is chosen when the batch is written. */
+	day: string
 	lines: string[]
 	bytes: number
 	minSeq: number
@@ -629,6 +689,22 @@ export class ScannerPersistence {
 	private readonly loadSliceClock: () => SliceClock
 	private readonly fileMaxSeq = new Map<string, number>()
 	private readonly fileBytes = new Map<string, number>()
+	/** Sum of `fileBytes`: the journal's size on disk as this process knows it. */
+	private diskJournalBytes = 0
+	/** Highest part number known per day (from load, then from writes). */
+	private readonly dayPart = new Map<string, number>()
+	/** The caps of the last `pruneJournal` call: a write past `maxBytes` queues another prune. */
+	private journalCaps: { maxBytes: number; maxAgeDays: number } | null = null
+	/** A prune queued by a write past the cap and not started yet (one at a time). */
+	private capPruneQueued = false
+	/**
+	 * durableLastSeq when the last prune failed or left the journal over the cap, null otherwise:
+	 * a write past the cap then queues another prune only once a snapshot has covered more since
+	 * (no prune and no warning per write).
+	 */
+	private fruitlessPruneSeq: number | null = null
+	/** False while this process may not delete journal files (ownership lost, state not loaded). */
+	private readonly canPrune: () => boolean
 	private chain: Promise<unknown> = Promise.resolve()
 	/** The newest snapshot still waiting on the chain; a later one supersedes it (bounded backlog). */
 	private queuedSnapshot: SnapshotSlot | null = null
@@ -733,6 +809,12 @@ export class ScannerPersistence {
 		now: () => number
 		appendFile?: (path: string, data: string) => Promise<void>
 		maxJournalBacklogBytes?: number
+		/**
+		 * Checked before every journal prune, the write-queued ones included, and again when the
+		 * queued prune runs: false deletes nothing (another process may own the directory).
+		 * Always true by default.
+		 */
+		canPrune?: () => boolean
 		snapshotWorker?: SnapshotWorkerOptions
 		/** Awaited between validation slices of the snapshot; a setImmediate turn by default. */
 		yieldTurn?: YieldTurn
@@ -770,6 +852,7 @@ export class ScannerPersistence {
 		this.statsSince = opts.now()
 		this.appendFile =
 			opts.appendFile ?? ((path, data) => appendFile(path, data))
+		this.canPrune = opts.canPrune ?? (() => true)
 	}
 
 	async load(): Promise<LoadedState> {
@@ -870,6 +953,9 @@ export class ScannerPersistence {
 		this.loaded = false
 		this.fileMaxSeq.clear()
 		this.fileBytes.clear()
+		this.diskJournalBytes = 0
+		this.dayPart.clear()
+		this.fruitlessPruneSeq = null
 		this.snapshotBytes = 0
 		this.journalBytes = 0
 		this.journalBytesCovered = 0
@@ -961,11 +1047,11 @@ export class ScannerPersistence {
 			this.refusedMax !== null &&
 			(this.coverSeq === null || this.coverSeq < this.refusedMax)
 		if (overCap || uncovered) return this.refuse(seq)
-		const name = journalName(this.now())
+		const day = dayStamp(this.now())
 		let batch = this.openBatch
-		if (batch === null || batch.name !== name) {
+		if (batch === null || batch.day !== day) {
 			const fresh: JournalBatch = {
-				name,
+				day,
 				lines: [],
 				bytes: 0,
 				minSeq: seq,
@@ -1047,8 +1133,9 @@ export class ScannerPersistence {
 		const text = batch.lines.join("")
 		batch.lines = []
 		const dir = join(this.root, JOURNAL_DIR)
-		const path = join(dir, batch.name)
-		const knownBytes = this.fileBytes.get(batch.name) ?? 0 // load() sized every existing file; a new file is 0
+		const name = this.partFor(batch.day)
+		const path = join(dir, name)
+		const knownBytes = this.fileBytes.get(name) ?? 0 // load() sized every existing file; a new file is 0
 		try {
 			await mkdir(dir, { recursive: true })
 			await this.appendFile(path, text)
@@ -1073,13 +1160,65 @@ export class ScannerPersistence {
 			this.queuedBytes -= batch.bytes
 		}
 		this.fileMaxSeq.set(
-			batch.name,
-			Math.max(this.fileMaxSeq.get(batch.name) ?? 0, batch.maxSeq),
+			name,
+			Math.max(this.fileMaxSeq.get(name) ?? 0, batch.maxSeq),
 		)
 		const written = Buffer.byteLength(text)
-		this.fileBytes.set(batch.name, knownBytes + written)
+		this.setFileBytes(name, knownBytes + written)
 		this.journalBytes += written
 		this.writtenJournalBytes += written
+		this.pruneIfOverCap()
+	}
+
+	/**
+	 * The part of `day` the next batch goes to: the day's last part, or a new one once that holds
+	 * a segment (`journalSegmentBytes` of the last prune's cap). A batch is appended whole, so a
+	 * part ends at most one batch past the segment.
+	 */
+	private partFor(day: string): string {
+		const part = this.dayPart.get(day) ?? 0
+		const name = journalPartName(day, part)
+		const segment = journalSegmentBytes(this.journalCaps?.maxBytes ?? null)
+		if ((this.fileBytes.get(name) ?? 0) < segment || part >= JOURNAL_MAX_PART) {
+			this.dayPart.set(day, part)
+			return name
+		}
+		this.dayPart.set(day, part + 1)
+		return journalPartName(day, part + 1)
+	}
+
+	private setFileBytes(name: string, bytes: number): void {
+		this.diskJournalBytes += bytes - (this.fileBytes.get(name) ?? 0)
+		this.fileBytes.set(name, bytes)
+	}
+
+	private forgetFile(name: string): void {
+		this.diskJournalBytes -= this.fileBytes.get(name) ?? 0
+		this.fileBytes.delete(name)
+		this.fileMaxSeq.delete(name)
+	}
+
+	/**
+	 * Within the day, not only at the next retention pass: a write that takes the journal past the
+	 * last prune's cap queues one prune on the chain (after the writes already queued, never
+	 * inside this one), so the journal stays within the cap plus one batch, plus whatever no
+	 * durable snapshot covers yet (never deletable: replay needs it).
+	 */
+	private pruneIfOverCap(): void {
+		const caps = this.journalCaps
+		if (caps === null || this.capPruneQueued) return
+		if (this.diskJournalBytes <= caps.maxBytes) return
+		// The last prune found nothing covered (or failed): wait for a snapshot to cover more.
+		if (
+			this.fruitlessPruneSeq !== null &&
+			this.durableLastSeq <= this.fruitlessPruneSeq
+		)
+			return
+		if (!this.canPrune()) return
+		this.capPruneQueued = true
+		void this.pruneJournal(caps).catch((err: unknown) =>
+			this.log.warn({ err }, "Journal prune past the size cap failed"),
+		)
 	}
 
 	writeSnapshot(s: StoreSnapshot): Promise<void> {
@@ -1692,42 +1831,66 @@ export class ScannerPersistence {
 		)
 	}
 
+	/**
+	 * Deletes journal files a durable snapshot covers (every line at or below its lastSeq): first
+	 * those older than `maxAgeDays`, then the oldest (by day, then part) while the journal is over
+	 * `maxBytes`. A file holding any line past the snapshot is never deleted. Remembers `caps`:
+	 * the part size follows `maxBytes`, and a write past it queues another prune. Deletes nothing
+	 * while `canPrune` (constructor) is false, checked when the prune runs on the chain.
+	 */
 	pruneJournal(caps: {
 		maxBytes: number
 		maxAgeDays: number
 	}): Promise<{ deleted: string[] }> {
+		this.journalCaps = { maxBytes: caps.maxBytes, maxAgeDays: caps.maxAgeDays }
 		return this.enqueue(async () => {
-			const dir = join(this.root, JOURNAL_DIR)
-			const deleted: string[] = []
-			const deletable = (name: string): boolean =>
-				(this.fileMaxSeq.get(name) ?? 0) <= this.durableLastSeq
-			const remove = async (name: string): Promise<void> => {
-				await rm(join(dir, name), { force: true })
-				this.fileMaxSeq.delete(name)
-				this.fileBytes.delete(name)
-				deleted.push(name)
+			this.capPruneQueued = false
+			if (!this.canPrune()) return { deleted: [] }
+			const seq = this.durableLastSeq
+			try {
+				const result = await this.pruneCoveredJournal(caps)
+				// Still over the cap: every covered part is gone, and only a snapshot covering more
+				// (durableLastSeq past `seq`) can make another deletable.
+				this.fruitlessPruneSeq =
+					this.diskJournalBytes > caps.maxBytes ? seq : null
+				return result
+			} catch (err) {
+				this.fruitlessPruneSeq = seq
+				throw err
 			}
-			const cutoff = dayStamp(this.now() - caps.maxAgeDays * DAY_MS)
-			for (const name of [...this.fileMaxSeq.keys()].sort()) {
-				const day = JOURNAL_NAME.exec(name)?.[1]
-				if (day !== undefined && day < cutoff && deletable(name))
-					await remove(name)
-			}
-			let total = 0
-			for (const bytes of this.fileBytes.values()) total += bytes
-			for (const name of [...this.fileMaxSeq.keys()].sort()) {
-				if (total <= caps.maxBytes) break
-				if (!deletable(name)) continue
-				total -= this.fileBytes.get(name) ?? 0
-				await remove(name)
-			}
-			if (deleted.length > 0)
-				this.log.info(
-					{ deleted, durableLastSeq: this.durableLastSeq },
-					"Pruned scanner journal",
-				)
-			return { deleted }
 		})
+	}
+
+	private async pruneCoveredJournal(caps: {
+		maxBytes: number
+		maxAgeDays: number
+	}): Promise<{ deleted: string[] }> {
+		const dir = join(this.root, JOURNAL_DIR)
+		const deleted: string[] = []
+		const deletable = (name: string): boolean =>
+			(this.fileMaxSeq.get(name) ?? 0) <= this.durableLastSeq
+		const remove = async (name: string): Promise<void> => {
+			await rm(join(dir, name), { force: true })
+			this.forgetFile(name)
+			deleted.push(name)
+		}
+		const cutoff = dayStamp(this.now() - caps.maxAgeDays * DAY_MS)
+		for (const name of journalNamesInOrder([...this.fileMaxSeq.keys()])) {
+			const day = parseJournalName(name)?.day
+			if (day !== undefined && day < cutoff && deletable(name))
+				await remove(name)
+		}
+		for (const name of journalNamesInOrder([...this.fileMaxSeq.keys()])) {
+			if (this.diskJournalBytes <= caps.maxBytes) break
+			if (!deletable(name)) continue
+			await remove(name)
+		}
+		if (deleted.length > 0)
+			this.log.info(
+				{ deleted, durableLastSeq: this.durableLastSeq },
+				"Pruned scanner journal",
+			)
+		return { deleted }
 	}
 
 	private engineFile(sourceId: string): string {
@@ -1842,7 +2005,7 @@ export class ScannerPersistence {
 		const dir = join(this.root, JOURNAL_DIR)
 		let names: string[]
 		try {
-			names = (await readdir(dir)).filter(n => JOURNAL_NAME.test(n)).sort()
+			names = journalNamesInOrder(await readdir(dir))
 		} catch (err) {
 			if (errorCode(err) !== "ENOENT") {
 				this.authorityHealth = "degraded"
@@ -1861,7 +2024,13 @@ export class ScannerPersistence {
 		if (read.degraded) this.authorityHealth = "degraded"
 		for (const file of read.files) {
 			this.fileMaxSeq.set(file.name, file.maxSeq)
-			this.fileBytes.set(file.name, file.bytes)
+			this.setFileBytes(file.name, file.bytes)
+			const parsed = parseJournalName(file.name)
+			if (parsed !== null)
+				this.dayPart.set(
+					parsed.day,
+					Math.max(this.dayPart.get(parsed.day) ?? 0, parsed.part),
+				)
 		}
 		this.journalBytes += read.uncoveredBytes
 		return {
@@ -1886,7 +2055,7 @@ export class ScannerPersistence {
 		const dir = join(this.root, JOURNAL_DIR)
 		let names: string[]
 		try {
-			names = (await readdir(dir)).filter(n => JOURNAL_NAME.test(n)).sort()
+			names = journalNamesInOrder(await readdir(dir))
 		} catch {
 			return new Map()
 		}
