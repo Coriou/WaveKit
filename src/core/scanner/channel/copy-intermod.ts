@@ -12,7 +12,8 @@
  *   INTERMOD_PARENT_MARGIN_DB under fa with |fc + fc′ − 2·fa| ≤ tol (the two products 2·fa − fb
  *   and 2·fb − fa of fa with an unseen fb sit symmetric around fa only when fb is fa's own
  *   mixing partner; two on-raster channels symmetric around a close strong one are ordinary
- *   traffic), AND fc or fc′ is off its raster or |fc − fa| ≥ INTERMOD_WIDE_HZ (100 kHz).
+ *   traffic), AND fc or fc′ is off its raster (fc′ by its span's median centre, not its latest
+ *   snapshot) or |fc − fa| ≥ INTERMOD_WIDE_HZ (100 kHz).
  * - tol = 4·max(binHz, 1 000 Hz): four FFT bins of centroid error, at least 4 kHz.
  *
  * The parent set is captured when the file ENDS (the recorder's finishFile), from a per-source,
@@ -22,7 +23,10 @@
  * Bounds (arithmetic): Rule A checks 16 × 15 = 240 ordered pairs; Rule B 16 parents × at most
  * TRACK_SPANS_MAX others = 4 096 checks (subtractions only). TrackSpans holds at most
  * TRACK_SPANS_MAX = 256 spans per source (oldest dropped first) and forgets spans that ended more
- * than COPY_HORIZON_MS before the newest one heard on that source.
+ * than COPY_HORIZON_MS before the newest one heard on that source. Each span keeps a centre
+ * sampler of at most SPAN_HZ_SAMPLES_MAX = 16 values (a partner's raster fit reads its median,
+ * not its latest snapshot): 256 × 16 = 4 096 numbers (32 KiB) per source, and spansOf sorts at
+ * most 16 values per span (256 × 16 = 4 096 values, once per file end).
  */
 
 /** Overlap of a parent with the file's span: at least half the file. */
@@ -46,7 +50,45 @@ export const COPY_HORIZON_MS = 146_000
 /** Spans held per source (oldest dropped). */
 export const TRACK_SPANS_MAX = 256
 
+/** Centres a span's sampler keeps (its median: the partner's raster fit). */
+export const SPAN_HZ_SAMPLES_MAX = 16
+
 export type RasterFit = "on" | "off" | "unknown"
+
+/**
+ * A bounded, evenly spread sample of a series of centres: every `stride`-th value is kept; when
+ * `max` are held, every other one is dropped and the stride doubles, so the kept values stay
+ * evenly spaced over the whole series at O(max) memory.
+ */
+export interface HzSampler {
+	values: number[]
+	stride: number
+	seen: number
+}
+
+export function newHzSampler(): HzSampler {
+	return { values: [], stride: 1, seen: 0 }
+}
+
+/** Adds `hz` (non-finite ignored) to `c`, keeping at most `max` (≥ 2) values. */
+export function sampleHz(c: HzSampler, hz: number, max: number): void {
+	if (!Number.isFinite(hz)) return
+	if (c.seen++ % c.stride !== 0) return
+	c.values.push(hz)
+	if (c.values.length < max) return
+	c.values = c.values.filter((_, i) => i % 2 === 0)
+	c.stride *= 2
+}
+
+/** The sampler's median (the mean of the middle two, rounded, for an even count), or null. */
+export function medianHz(c: HzSampler): number | null {
+	if (c.values.length === 0) return null
+	const sorted = [...c.values].sort((a, b) => a - b)
+	const mid = sorted.length >> 1
+	return sorted.length % 2 === 1
+		? sorted[mid]!
+		: Math.round((sorted[mid - 1]! + sorted[mid]!) / 2)
+}
 
 export interface IntermodEvidence {
 	readonly rule: "2f1-f2" | "symmetric"
@@ -63,6 +105,12 @@ export interface TrackSpan {
 	readonly binHz: number | null
 	/** The latest OBW heard (the raster fit's grid choice); absent or null: unknown. */
 	readonly obwHz?: number | null
+	/**
+	 * The median of the centres heard over the span (TrackSpans' bounded sampler); absent: `hz`.
+	 * Rule B's partner raster fit reads it, so a partner drifting at its tail is judged where it
+	 * settled.
+	 */
+	readonly medianHz?: number
 }
 
 export interface IntermodFile {
@@ -134,7 +182,7 @@ export function intermodEvidenceOf(
 			if (Math.abs(file.hz + other.hz - 2 * fa.hz) > tol) continue
 			if (
 				fileRaster === "off" ||
-				rasterOf(other.hz, other.obwHz ?? null) === "off" ||
+				rasterOf(other.medianHz ?? other.hz, other.obwHz ?? null) === "off" ||
 				Math.abs(file.hz - fa.hz) >= INTERMOD_WIDE_HZ
 			)
 				return {
@@ -153,6 +201,7 @@ interface SpanEntry {
 	peakDbfs: number
 	binHz: number | null
 	obwHz: number | null
+	centres: HzSampler
 }
 
 /**
@@ -224,7 +273,9 @@ export class TrackSpans {
 				typeof track.obwHz === "number" && Number.isFinite(track.obwHz)
 					? track.obwHz
 					: (prev?.obwHz ?? null),
+			centres: prev?.centres ?? newHzSampler(),
 		}
+		sampleHz(entry.centres, track.centreHz, SPAN_HZ_SAMPLES_MAX)
 		src.spans.delete(track.trackId)
 		src.spans.set(track.trackId, entry)
 		const horizon = (COPY_HORIZON_MS * src.fs) / 1000
@@ -245,7 +296,19 @@ export class TrackSpans {
 	spansOf(sourceId: string, epoch: number): TrackSpan[] {
 		const src = this.sources.get(sourceId)
 		if (src === undefined || src.epoch !== epoch) return []
-		return [...src.spans.values()]
+		return [...src.spans.values()].map(e => {
+			const median = medianHz(e.centres)
+			return {
+				hz: e.hz,
+				startSample: e.startSample,
+				lastSample: e.lastSample,
+				snrDb: e.snrDb,
+				peakDbfs: e.peakDbfs,
+				binHz: e.binHz,
+				obwHz: e.obwHz,
+				...(median === null ? {} : { medianHz: median }),
+			}
+		})
 	}
 
 	forgetSource(sourceId: string): void {

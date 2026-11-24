@@ -3,7 +3,10 @@
  * fingerprint to the detector with its settlement; the intermod parents are captured when the
  * file ENDS, so strong parents whose observations closed long before a provisional keep still
  * mark it; the raster fit comes from `rasterOf`; with copy detection off nothing is captured.
- * The fake engine, synthetic NFM and made-up frequencies of wideband-recorder-harness.ts.
+ * The file's settled centre is the median of its joined snapshots (a stride-decimated sample of
+ * at most COPY_HZ_SAMPLES_MAX), and a file still holding queued or in-flight audio when it is
+ * kept gets no fingerprint. The fake engine, synthetic NFM and made-up frequencies of
+ * wideband-recorder-harness.ts.
  */
 import pino from "pino"
 import { describe, expect, it } from "vitest"
@@ -15,10 +18,15 @@ import {
 	type CopySettled,
 } from "../../../../src/core/scanner/channel/copy-detector.js"
 import { COPY_FRAME_SAMPLES } from "../../../../src/core/scanner/channel/copy-fingerprint.js"
-import type {
-	WidebandCloseInfo,
-	WidebandTrackInput,
+import {
+	COPY_HZ_SAMPLES_MAX,
+	sampleCopyHz,
+	settledCopyHz,
+	type CopyHzSampler,
+	type WidebandCloseInfo,
+	type WidebandTrackInput,
 } from "../../../../src/core/scanner/channel/wideband-analog-recorder.js"
+import type { PcmQueue } from "../../../../src/core/scanner/channel/pcm-queue.js"
 import {
 	CENTRE,
 	HARNESS_T0,
@@ -260,4 +268,139 @@ describe("WidebandAnalogRecorder: copy detection of own-audio classes", () => {
 		expect(writes.map(w => w.operationId)).toEqual([ghost.operationId])
 		expect(writes[0]!.copy?.evidence).toEqual(["off-raster"])
 	}, 120_000)
+})
+
+/** One over of `seconds` at FC whose first joined snapshot reads `firstHz`, the rest FC. */
+async function overDrifting(
+	h: Harness,
+	seconds: number,
+	firstHz: number,
+): Promise<void> {
+	const chunk = h.fs / 40
+	const onset = h.engine.liveEdge()
+	const end = onset + seconds * h.fs
+	let first = true
+	for (let i = 0; i < Math.round((seconds * h.fs) / chunk); i++) {
+		h.engine.write(h.src.next(chunk, true))
+		const edge = h.engine.liveEdge()
+		if (edge - onset >= 0.1 * h.fs) {
+			const centreHz = first ? firstHz : FC
+			first = false
+			h.rec.track(
+				input("o", snapshot("o", onset, Math.min(edge, end), { centreHz })),
+			)
+		}
+		await h.pump()
+	}
+	await h.feed(0.6, false)
+	h.rec.closed("o", snapshot("o", onset, end, { centreHz: FC }), null, {
+		analogFm: true,
+		discoveryId: "d_1",
+	})
+	await h.feed(3.5, false)
+}
+
+describe("WidebandAnalogRecorder: a file's settled centre", () => {
+	it("a file whose first snapshot is off raster but whose later joined snapshots are on it fits on raster", async () => {
+		const copies = fakeCopies()
+		const h = harness({
+			fs: LOW_FS,
+			offset: LOW_OFFSET,
+			source: { ctcssHz: null, syllables: true },
+			decodedLabel: () => null,
+			admission: false,
+			copies: copies.det,
+			rasterOf: (_sourceId, hz) => (hz === FC ? "on" : "off"),
+		})
+		await h.feed(1, false)
+		await overDrifting(h, 5, FC + 3_000)
+		await h.rec.idle()
+		expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+		expect(copies.kept).toHaveLength(1)
+		expect(copies.kept[0]!.fp.hz).toBe(FC)
+		expect(copies.kept[0]!.fp.raster).toBe("on")
+	}, 120_000)
+
+	const fresh = (): CopyHzSampler => ({
+		values: [],
+		stride: 1,
+		seen: 0,
+		obwHz: null,
+	})
+	const spacing = (c: CopyHzSampler): number[] =>
+		c.values.slice(1).map((v, i) => v - c.values[i]!)
+
+	it(`keeps every centre under COPY_HZ_SAMPLES_MAX (${COPY_HZ_SAMPLES_MAX})`, () => {
+		const c = fresh()
+		for (let i = 0; i < COPY_HZ_SAMPLES_MAX - 1; i++) sampleCopyHz(c, i, 11_000)
+		expect(c.values).toHaveLength(COPY_HZ_SAMPLES_MAX - 1)
+		expect(c.stride).toBe(1)
+		expect(c.obwHz).toBe(11_000)
+	})
+
+	it("at COPY_HZ_SAMPLES_MAX halves to evenly spaced samples, and past it keeps them evenly spaced", () => {
+		const c = fresh()
+		for (let i = 0; i < COPY_HZ_SAMPLES_MAX; i++) sampleCopyHz(c, i, 11_000)
+		expect(c.stride).toBe(2)
+		expect(c.values).toHaveLength(COPY_HZ_SAMPLES_MAX / 2)
+		expect(c.values[0]).toBe(0)
+		expect(new Set(spacing(c))).toEqual(new Set([2]))
+		// Past it: 64 more centres refill the sampler and halve it again (stride 4).
+		for (let i = COPY_HZ_SAMPLES_MAX; i < 2 * COPY_HZ_SAMPLES_MAX; i++)
+			sampleCopyHz(c, i, 11_000)
+		expect(c.stride).toBe(4)
+		expect(c.values).toHaveLength(COPY_HZ_SAMPLES_MAX / 2)
+		expect(c.values[0]).toBe(0)
+		expect(new Set(spacing(c))).toEqual(new Set([4]))
+		// Many more: never over the bound, still evenly spaced from the first centre.
+		for (let i = 2 * COPY_HZ_SAMPLES_MAX; i < 1_000; i++)
+			sampleCopyHz(c, i, 11_000)
+		expect(c.values.length).toBeLessThan(COPY_HZ_SAMPLES_MAX)
+		expect(new Set(spacing(c))).toEqual(new Set([c.stride]))
+		expect(settledCopyHz(c, -1)).toBeGreaterThan(400)
+		expect(settledCopyHz(fresh(), -1)).toBe(-1)
+	})
+})
+
+/** The recorder's private keep hook, wrapped by the tests below to inject queued or in-flight audio. */
+interface KeepHook {
+	noteKept(
+		s: unknown,
+		file: { queue: PcmQueue; writing: boolean },
+		handle: unknown,
+	): void
+}
+
+describe("WidebandAnalogRecorder: no fingerprint for a file with audio still pending", () => {
+	for (const pending of ["queued", "in-flight"] as const)
+		it(`a file with ${pending} audio when it is kept gets no fingerprint`, async () => {
+			const copies = fakeCopies()
+			const h = harness({
+				fs: LOW_FS,
+				offset: LOW_OFFSET,
+				source: { ctcssHz: null, syllables: true },
+				decodedLabel: () => null,
+				admission: false,
+				copies: copies.det,
+			})
+			const hook = h.rec as unknown as KeepHook
+			const original = hook.noteKept.bind(h.rec)
+			let calls = 0
+			hook.noteKept = (s, file, handle) => {
+				calls++
+				const writing = file.writing
+				if (pending === "queued") file.queue.push(new Int16Array(16))
+				else file.writing = true
+				original(s, file, handle)
+				// Put the file back as it was: the injection only exists at the keep.
+				if (pending === "queued") file.queue.take(16)
+				file.writing = writing
+			}
+			await h.feed(1, false)
+			await overWithParents(h, 5, false)
+			await h.rec.idle()
+			expect(calls).toBe(1)
+			expect(h.ops.map(o => o.outcome)).toEqual(["finalized"])
+			expect(copies.kept).toHaveLength(0)
+		}, 120_000)
 })

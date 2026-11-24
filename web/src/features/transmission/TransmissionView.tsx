@@ -624,7 +624,7 @@ function Conversation({
 
 /**
  * Copies (ghosts: the same audio heard again on another frequency, kept on disk): a copy links to its original
- * ("Copy of 446.00625 MHz"), an original lists its copies ("Also heard on 446.10625 MHz (copy)"). Each opens that
+ * ("Copy of 156.8 MHz"), an original lists its copies ("Also heard on 156.9137 MHz (copy)"). Each opens that
  * recording's view in place; Back still goes to the origin.
  */
 export function Copies({

@@ -316,13 +316,13 @@ export function recordingChangeDetails(
 
 // ---- copies (the same audio heard again on another frequency)
 
-/** A copy's exact frequency ("446.10625 MHz"): a ghost sits off its raster, so it is never snapped to a channel. */
+/** A copy's exact frequency ("156.9137 MHz"): a ghost sits off its raster, so it is never snapped to a channel. */
 export function copyHzText(hz: number | null | undefined): string | null {
 	if (typeof hz !== "number" || !Number.isFinite(hz)) return null
 	return `${formatMHz(hz)} MHz`
 }
 
-/** An original's row for one copy: "Also heard on 446.10625 MHz (copy)". */
+/** An original's row for one copy: "Also heard on 156.9137 MHz (copy)". */
 export function alsoHeardText(hz: number | null | undefined): string {
 	const f = copyHzText(hz)
 	return f === null
@@ -330,7 +330,7 @@ export function alsoHeardText(hz: number | null | undefined): string {
 		: `Also heard on ${f} (copy)`
 }
 
-/** A copy's link to its original: "Copy of 446.00625 MHz", "Copy of the original recording". */
+/** A copy's link to its original: "Copy of 156.8 MHz", "Copy of the original recording". */
 export function copyOfText(hz: number | null | undefined): string {
 	const f = copyHzText(hz)
 	return f === null ? "Copy of the original recording" : `Copy of ${f}`

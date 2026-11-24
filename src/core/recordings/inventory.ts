@@ -78,8 +78,10 @@ import {
 export const RECORDINGS_COPY_DIRTY_MAX = 4096
 
 /**
- * Copies of one root counted as changed when that root's own copy state changes: one detector
- * group holds at most 64 files (COPY_RING_MAX), so at most 63 copies name one root.
+ * Copies of one root counted as changed when that root's own copy state changes: capped at 64,
+ * a hint for the change count, not a structural limit (one detector group holds at most 64 files,
+ * COPY_RING_MAX, but sidecars kept across restarts and re-points may name a root more often).
+ * copiesNaming stops walking once the cap is reached.
  */
 export const RECORDINGS_COPY_DEPENDENTS_MAX = 64
 
@@ -2035,13 +2037,13 @@ export function createRecordingInventory(
 	function copiesNaming(key: string): number {
 		let n = 0
 		for (const e of byCopyRoot.get(key) ?? []) {
-			if (n >= RECORDINGS_COPY_DEPENDENTS_MAX) break
 			if (
 				e.listed &&
 				e.item.kind === "scanner-analog" &&
-				(e.key ?? e.item.id) !== key
+				(e.key ?? e.item.id) !== key &&
+				++n >= RECORDINGS_COPY_DEPENDENTS_MAX
 			)
-				n++
+				break
 		}
 		return n
 	}

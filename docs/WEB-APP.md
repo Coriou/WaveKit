@@ -678,8 +678,8 @@ no audio, such as `The recording was deleted`); **What we know**, a few short ro
 - **Signal** (`Strong, 24 dB over the noise`), **Ended** (`The transmission ended`,
   `Cut: the receiver was retuned`) and **Kept** (`Speech heard over a tone`), each only when known.
 
-For a scanner analog recording the scanner marked as a copy, a link **Copy of 151.025 MHz** opens its
-original; an original lists each copy as **Also heard on 151.1137 MHz (copy)** (at most 8, then
+For a scanner analog recording the scanner marked as a copy, a link **Copy of 156.8 MHz** opens its
+original; an original lists each copy as **Also heard on 156.9137 MHz (copy)** (at most 8, then
 `and 3 more copies`), each opening that recording in place. Back still returns to where you came from.
 
 Then the **Conversation**: the other parts of the same transmission, oldest first, this one marked,

@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest"
 import {
 	COPY_HORIZON_MS,
 	INTERMOD_PARENTS_MAX,
+	SPAN_HZ_SAMPLES_MAX,
 	TRACK_SPANS_MAX,
 	TrackSpans,
 	intermodEvidenceOf,
@@ -145,6 +146,38 @@ describe("intermod evidence: rule B (symmetric pair)", () => {
 		expect(intermodEvidenceOf(file, tracks, () => "unknown")).toBeNull()
 	})
 
+	it("the partner's raster fit reads its span's median: a tail drifting off raster gives no evidence", () => {
+		const fa = FC + 25_000
+		const twin = 2 * fa - FC
+		// The partner settled 6 kHz under the twin point (past the 4 kHz tolerance, on raster) and
+		// its last snapshot drifted onto the twin point, which is off raster.
+		const settled = twin - 6_000
+		const rasterOf = (hz: number): RasterFit => (hz === twin ? "off" : "on")
+		const r = new TrackSpans()
+		const note = (id: string, hz: number, last: number, peakDbfs: number) =>
+			r.note("s", FS, {
+				trackId: id,
+				epoch: 1,
+				startSample: 0,
+				lastSample: last,
+				centreHz: hz,
+				snrDb: 40,
+				peakDbfs,
+			})
+		note("fa", fa, 10 * FS, -10)
+		for (let i = 1; i < 30; i++) note("twin", settled, i * FS, -40)
+		note("twin", twin, 10 * FS, -40)
+		const spans = r.spansOf("s", 1)
+		const partner = spans.find(x => x.hz === twin)
+		expect(partner?.medianHz).toBe(settled)
+		expect(intermodEvidenceOf(file, spans, rasterOf)).toBeNull()
+		// Judged by its latest snapshot alone, the same partner would mark the file.
+		const latestOnly = spans.map(x => ({ ...x, medianHz: x.hz }))
+		expect(intermodEvidenceOf(file, latestOnly, rasterOf)).toMatchObject({
+			rule: "symmetric",
+		})
+	})
+
 	it("the twin must be 10 dB under the parent (a twin strong enough to be a parent is rule A's)", () => {
 		const fa = FC + 140_000
 		const twin = 2 * fa - FC
@@ -204,8 +237,19 @@ describe("intermod evidence: the track-span ring", () => {
 				peakDbfs: -10,
 				binHz: null,
 				obwHz: null,
+				medianHz: FC,
 			},
 		])
+	})
+
+	it(`keeps a bounded median of a span's centres (at most SPAN_HZ_SAMPLES_MAX = ${SPAN_HZ_SAMPLES_MAX})`, () => {
+		const r = new TrackSpans()
+		// 200 snapshots settled on FC, then 20 drifting 6 kHz up: the median stays FC.
+		for (let i = 0; i < 200; i++) r.note("s", FS, t("a", FC, 0, i + 1))
+		for (let i = 0; i < 20; i++) r.note("s", FS, t("a", FC + 6_000, 0, 201 + i))
+		const [only] = r.spansOf("s", 1)
+		expect(only?.hz).toBe(FC + 6_000)
+		expect(only?.medianHz).toBe(FC)
 	})
 
 	it(`forgets spans ending more than COPY_HORIZON_MS (${COPY_HORIZON_MS} ms) before the newest: at it kept, past it gone`, () => {

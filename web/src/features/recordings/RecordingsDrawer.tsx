@@ -1125,7 +1125,7 @@ export function CopyChip({ item: r }: { item: RecordingInventoryItem }) {
 			className="wk-chip wkr-copy"
 			data-size="sm"
 			title="Copy: the same audio heard again on another frequency. Open the original"
-			aria-label={`Copy of another recording: open the original of ${recordingTitle(r)}`}
+			aria-label="Open the original recording (this is a copy)"
 			onClick={() =>
 				openTransmission(
 					{ recording: of },

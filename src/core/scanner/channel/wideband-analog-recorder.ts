@@ -159,7 +159,10 @@ import type { CopyDetector, CopyFingerprint } from "./copy-detector.js"
 import { COPY_FRAME_SAMPLES, excludeGapFrames } from "./copy-fingerprint.js"
 import {
 	intermodEvidenceOf,
+	medianHz,
+	sampleHz,
 	TrackSpans,
+	type HzSampler,
 	type IntermodEvidence,
 	type RasterFit,
 } from "./copy-intermod.js"
@@ -1081,32 +1084,24 @@ export interface WidebandAnalogDeps {
 export const COPY_HZ_SAMPLES_MAX = 64
 
 /** A file's sampled joined-snapshot centres (copy detection's settled frequency). */
-interface CopyHzSampler {
-	values: number[]
-	stride: number
-	seen: number
+export interface CopyHzSampler extends HzSampler {
 	/** The latest joined OBW heard (the raster fit's grid choice); null: none. */
 	obwHz: number | null
 }
 
-function sampleCopyHz(c: CopyHzSampler, hz: number, obwHz: number): void {
+/** Adds one joined snapshot's centre and OBW to a file's sampler (at most COPY_HZ_SAMPLES_MAX). */
+export function sampleCopyHz(
+	c: CopyHzSampler,
+	hz: number,
+	obwHz: number,
+): void {
 	if (Number.isFinite(obwHz) && obwHz > 0) c.obwHz = obwHz
-	if (!Number.isFinite(hz)) return
-	if (c.seen++ % c.stride !== 0) return
-	c.values.push(hz)
-	if (c.values.length < COPY_HZ_SAMPLES_MAX) return
-	c.values = c.values.filter((_, i) => i % 2 === 0)
-	c.stride *= 2
+	sampleHz(c, hz, COPY_HZ_SAMPLES_MAX)
 }
 
 /** The sampler's median centre, or `fallback` (the session's first centre) when it heard none. */
-function settledCopyHz(c: CopyHzSampler, fallback: number): number {
-	if (c.values.length === 0) return fallback
-	const sorted = [...c.values].sort((a, b) => a - b)
-	const mid = sorted.length >> 1
-	return sorted.length % 2 === 1
-		? sorted[mid]!
-		: Math.round((sorted[mid - 1]! + sorted[mid]!) / 2)
+export function settledCopyHz(c: CopyHzSampler, fallback: number): number {
+	return medianHz(c) ?? fallback
 }
 
 /**
