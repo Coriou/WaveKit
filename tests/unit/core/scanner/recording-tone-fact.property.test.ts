@@ -1,8 +1,8 @@
 /**
  * toneFactOf (recording-facts.ts) over arbitrary detector coverage, checked by invariants rather
  * than by recomputing its rule: tone-like evidence never reads "No tone heard" (null); more
- * evidence never turns "not determined" into null and more quiet blocks never turn null into
- * "not determined"; a gated DCS code always wins, a settled CTCSS tone otherwise; and a table of
+ * evidence or more loud blocks never turn "not determined" into null and more quiet blocks never
+ * turn null into "not determined"; null always has few loud blocks; a gated DCS code always wins, a settled CTCSS tone otherwise; and a table of
  * rows written out by hand (the oracle) agrees with it. Modelled counters only.
  */
 import fc from "fast-check"
@@ -103,8 +103,28 @@ describe("toneFactOf properties", () => {
 						ctcssBlocks: c.ctcssBlocks + more,
 					}
 					if (isNull(c)) expect(isNull(quieter)).toBe(true)
+					// More loud blocks (blocks raised, quiet ones not) never make null.
+					const louder = { ...c, ctcssBlocks: c.ctcssBlocks + more }
+					if (c.quietBlocks <= c.ctcssBlocks && isNull(louder))
+						expect(isNull(c)).toBe(true)
 				},
 			),
+			{ numRuns: 300 },
+		)
+	})
+
+	// Feature: recording facts tone, Property 5: null needs few loud blocks
+	// Validates: Requirements R2
+	it("null only with at least 10 quiet blocks and at most max(2, 10%) loud ones", () => {
+		fc.assert(
+			fc.property(fc.oneof(coverage, nearMinimums), c => {
+				if (!isNull(c)) return
+				expect(c.quietBlocks).toBeGreaterThanOrEqual(10)
+				expect(c.quietBlocks).toBeLessThanOrEqual(c.ctcssBlocks)
+				expect(c.ctcssBlocks - c.quietBlocks).toBeLessThanOrEqual(
+					Math.max(2, Math.floor(c.ctcssBlocks / 10)),
+				)
+			}),
 			{ numRuns: 300 },
 		)
 	})
@@ -131,13 +151,13 @@ describe("toneFactOf properties", () => {
 
 	// Feature: recording facts tone, Property 4: rows written out by hand agree
 	// Validates: Requirements R2
-	it("hand-written rows: null only with 10 quiet blocks, 6 000 DCS samples and nothing tone-like", () => {
-		/** A 6 s untoned file whose pauses gave 12 quiet blocks: "No tone heard". */
+	it("hand-written rows: null only with 10 quiet blocks, few loud ones, 6 000 DCS samples and nothing tone-like", () => {
+		/** A 6 s untoned carrier: 21 quiet blocks of 23, its keying edge and tail loud: "No tone heard". */
 		const base: ToneCoverage = {
 			ctcssBlocks: 23,
 			votedBlocks: 0,
 			partialBlocks: 0,
-			quietBlocks: 12,
+			quietBlocks: 21,
 			dcsSamples: 48_000,
 			dcsChain: 1,
 			dcsLoneHits: 1,
@@ -148,7 +168,31 @@ describe("toneFactOf properties", () => {
 		const rows: [string, Partial<ToneCoverage>, "null" | "absent"][] = [
 			["the base row", {}, "null"],
 			["10 quiet blocks of 10", { ctcssBlocks: 10, quietBlocks: 10 }, "null"],
-			["9 quiet blocks", { quietBlocks: 9 }, "absent"],
+			["10 quiet blocks of 12", { ctcssBlocks: 12, quietBlocks: 10 }, "null"],
+			["10 quiet blocks of 13", { ctcssBlocks: 13, quietBlocks: 10 }, "absent"],
+			[
+				"12 quiet blocks of 23 (a talker's pauses)",
+				{ quietBlocks: 12 },
+				"absent",
+			],
+			["20 quiet blocks of 23 (3 loud)", { quietBlocks: 20 }, "absent"],
+			[
+				"27 quiet blocks of 30 (3 loud, 10%)",
+				{ ctcssBlocks: 30, quietBlocks: 27 },
+				"null",
+			],
+			[
+				"26 quiet blocks of 30 (4 loud)",
+				{ ctcssBlocks: 30, quietBlocks: 26 },
+				"absent",
+			],
+			[
+				"26 quiet blocks of 29 (3 loud)",
+				{ ctcssBlocks: 29, quietBlocks: 26 },
+				"absent",
+			],
+			["more quiet blocks than blocks", { quietBlocks: 24 }, "absent"],
+			["9 quiet blocks", { ctcssBlocks: 9, quietBlocks: 9 }, "absent"],
 			["no quiet block (speech throughout)", { quietBlocks: 0 }, "absent"],
 			["9 blocks in all", { ctcssBlocks: 9, quietBlocks: 9 }, "absent"],
 			["5 999 DCS samples", { dcsSamples: 5_999 }, "absent"],

@@ -267,16 +267,28 @@ type StuckInternals = {
 	stuckWavListing: { waiters: Set<unknown> } | null
 }
 
+/** A rejection as a missing directory reads (no match, no error). */
+const missingDir = (): Promise<fs.Dir> =>
+	Promise.reject(Object.assign(new Error("gone"), { code: "ENOENT" }))
+
 /**
  * opendir whose first `n` reads of this test's root itself stay pending until `release(i)` (each
- * then fails as a missing directory: no match); later reads, and its subdirectories', are real.
+ * then fails as a missing directory: no match); later reads of the root are real. Its
+ * subdirectories' reads are real too, or with `missingSubdirs` fail at once as missing (no real
+ * I/O: the test's turns, not the machine's load, decide when they settle).
  */
-function heldReads(n: number) {
+function heldReads(n: number, opts: { missingSubdirs?: boolean } = {}) {
 	const real = fs.promises.opendir.bind(fs.promises)
 	const releases: (() => void)[] = []
 	const opendir = vi
 		.spyOn(fs.promises, "opendir")
 		.mockImplementation((dir, options) => {
+			if (
+				opts.missingSubdirs === true &&
+				String(dir) !== root &&
+				String(dir).startsWith(root)
+			)
+				return missingDir()
 			if (releases.length >= n || String(dir) !== root)
 				return real(dir, options)
 			return new Promise<fs.Dir>((_resolve, reject) => {
@@ -428,7 +440,8 @@ describe("dsd-fme call_end held for its first lookup", () => {
 
 	it("single flight: once the stuck read settles, the fresh search gets its own full DSD_FME_WAV_ATTEMPT_TIMEOUT_MS", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
-		const reads = heldReads(2)
+		// The subdirectories fail at once as missing: no real I/O races the frozen fake clock.
+		const reads = heldReads(2, { missingSubdirs: true })
 		const { d } = decoderWithUpdates()
 		const internals = d as unknown as StuckInternals
 		endThrough(d, 54)
@@ -447,7 +460,7 @@ describe("dsd-fme call_end held for its first lookup", () => {
 			DSD_FME_WAV_ATTEMPT_TIMEOUT_MS - DSD_FME_WAV_RETRY_MS - 100,
 		)
 		reads.release(0)
-		// The old search's real reads of the subdirectories finish (fake time stands still).
+		// The old search's reads of the subdirectories settle (fake time stands still).
 		await untilReal(() => internals.stuckWavListing === null)
 		await untilReal(
 			() => ours(reads.opendir).filter(([dir]) => dir === root).length === 2,

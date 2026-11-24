@@ -39,10 +39,11 @@
  * at least DCS_MIN_AUDIO_SECONDS, of the standard set when DCS_CODE_SET is "standard" (the live
  * transmission path's gate), the polarity as that path reports it: "normal" is the stream as
  * demodulated, "inverted" its complement. null ("No tone heard") only when both detectors analysed
- * enough audio, neither heard anything tone-like, and at least TONE_QUIET_MIN_BLOCKS of the CTCSS
- * blocks were too quiet to hide a tone at 250 Hz of deviation; absent ("not determined")
- * otherwise. The
- * decision table is at toneFactOf. A tone that does not validate is dropped (the member absent),
+ * enough audio, neither heard anything tone-like, at least TONE_QUIET_MIN_BLOCKS of the CTCSS
+ * blocks were too quiet to hide a tone at 250 Hz of deviation, and at most
+ * toneLoudBlocksAllowed (max(2, 10%)) of them were not; absent ("not determined") otherwise. A
+ * voiced recording almost always reads absent: null is a carrier with (almost) nothing in the
+ * sub-audible band. The decision table is at toneFactOf. A tone that does not validate is dropped (the member absent),
  * never the whole sidecar, like the admission block. The store's operation folder budget
  * (MAX_OPERATION_METADATA_BYTES, 16 KiB) covers intent + receipt + sidecar: the sidecar is
  * skipped when the three would exceed it.
@@ -164,6 +165,41 @@ export const RECORDER_TONE_QUIET: CtcssQuietCeilings = {
  * a short fade from deciding it.
  */
 export const TONE_QUIET_MIN_BLOCKS = 10
+
+/**
+ * Loud (not quiet) CTCSS blocks a file may hold and still read "No tone heard": the larger of
+ * TONE_LOUD_EDGE_BLOCKS and TONE_LOUD_BLOCK_SHARE of its blocks (floor), so 2 up to 29 blocks,
+ * 3 at 30-39, 10 at 100. A quiet block proves only that no tone was on during it: a tone hidden
+ * under voice in the loud blocks and dropped for the rest (a repeater that stops its CTCSS at the
+ * end of an over and hangs its carrier, or a toned over joined to an untoned one) leaves ten quiet
+ * blocks beside many loud ones, so null also needs the loud blocks to be few.
+ *
+ * Why 2: blocks are 4 000 samples (500 ms) that end every 2 000 (250 ms hop), only complete
+ * blocks count, and the bank hears only the audio inside the observed activity (toneFrames). A
+ * keying edge in the first L ≤ 2 000 samples lies only in the first block (the second starts at
+ * 2 000); a squelch tail in the last L ≤ 2 000 samples (150-250 ms) lies only in the last complete
+ * block (a block that overlaps it ends in (N − L, N], a span of at most one hop). One edge and
+ * one tail: 2. A burst in the middle of a file touches up to 3 blocks (a block starting in the
+ * open span of 4 000 + L samples before its end): a file shorter than 30 blocks with one reads
+ * not determined. The 10% share admits the occasional click or fade of a long carrier.
+ *
+ * What survives: a tone of TONE_MIN_CREDIBLE_DEVIATION_HZ or more makes every block it fills loud
+ * (RECORDER_TONE_QUIET), so a file reads null only when such a tone filled at most this many
+ * blocks. In a 10-29 block file that is 2: three whole blocks span 8 000 samples (1 s) on the
+ * hop grid, and any 10 000 samples (1.25 s) hold three whole blocks, so a tone on for 1.25 s or
+ * more in such a file never reads null.
+ */
+export const TONE_LOUD_EDGE_BLOCKS = 2
+/** Share of a file's CTCSS blocks that may be loud before "No tone heard" (floored): 10%. */
+export const TONE_LOUD_BLOCK_SHARE = 0.1
+
+/** Loud CTCSS blocks allowed in a "No tone heard" file of `blocks` blocks (see above). */
+export function toneLoudBlocksAllowed(blocks: number): number {
+	return Math.max(
+		TONE_LOUD_EDGE_BLOCKS,
+		Math.floor(TONE_LOUD_BLOCK_SHARE * blocks),
+	)
+}
 
 /**
  * Samples the file's DCS decoder must have analysed before its code, or its "no code", counts:
@@ -310,7 +346,8 @@ function dcsHitsAboveChance(hits: number, samples: number): boolean {
  * | none          | any valid word, 2 words | ≥ 10         | ≥ 6 000     | no            | absent   |
  * | none          | lone hits above chance  | ≥ 10         | ≥ 6 000     | no            | absent   |
  * | none, < 10 quiet blocks | none (chance hits only) | ≥ 10 | ≥ 6 000   | no            | absent   |
- * | none, ≥ 10 quiet blocks | none (chance hits only) | ≥ 10 | ≥ 6 000   | no            | null     |
+ * | none, ≥ 10 quiet, many loud | none (chance hits only) | ≥ 10 | ≥ 6 000 | no          | absent   |
+ * | none, ≥ 10 quiet, few loud  | none (chance hits only) | ≥ 10 | ≥ 6 000 | no          | null     |
  *
  * Both settled: DCS wins. A confirmed standard code is three identical 23-bit words exactly
  * 23 bits apart, one of 4 784 registers (104 codes × 23 rotations × 2 polarities) and then twice
@@ -325,9 +362,13 @@ function dcsHitsAboveChance(hits: number, samples: number): boolean {
  * too quiet to hide a tone of TONE_MIN_CREDIBLE_DEVIATION_HZ (RECORDER_TONE_QUIET): no vote and no
  * lean is no proof by itself, because voice in the sub-audible band, a gliding pitch or noise can
  * keep a tone under them from voting or leaning in every block; only a quiet block shows a tone
- * would have been seen. A voiced file reads null only when its pauses add up to ten quiet
- * blocks; a toned file never does (its tone alone keeps every block above the band ceiling). A
- * count that is not a finite number is not analysed.
+ * would have been seen, and only for that block. "few loud": at most toneLoudBlocksAllowed
+ * (max(2, 10% of the blocks)) blocks are not quiet; a quiet block says nothing about the loud
+ * ones, where a tone may sit under voice. So a voiced recording almost always reads absent; null
+ * is a carrier with (almost) nothing in the sub-audible band. A file whose tone of 250 Hz
+ * deviation or more filled more than the allowed loud blocks never reads null (each block it
+ * fills is loud). A count that is not a finite number, or more quiet blocks than blocks, is not
+ * analysed.
  */
 export function toneFactOf(
 	toneHz: number | null,
@@ -343,6 +384,12 @@ export function toneFactOf(
 	if (!atLeast(coverage.dcsSamples, DCS_MEASURED_MIN_SAMPLES)) return {}
 	if (coverage.votedBlocks !== 0 || coverage.partialBlocks !== 0) return {}
 	if (!atLeast(coverage.quietBlocks, TONE_QUIET_MIN_BLOCKS)) return {}
+	if (coverage.quietBlocks > coverage.ctcssBlocks) return {}
+	if (
+		coverage.ctcssBlocks - coverage.quietBlocks >
+		toneLoudBlocksAllowed(coverage.ctcssBlocks)
+	)
+		return {}
 	if (!Number.isFinite(coverage.dcsChain)) return {}
 	if (coverage.dcsChain >= DCS_PARTIAL_WORDS) return {}
 	if (!Number.isFinite(coverage.dcsAnyChain)) return {}

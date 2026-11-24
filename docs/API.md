@@ -7088,21 +7088,28 @@ answer 400 `RECORDINGS_QUERY_INVALID`, with `fields` naming the parameter).
   CTCSS tone, no two consecutive DCS words matched (of any valid code, standard
   or not: a clean non-standard code reads absent, never null), and DCS word hits
   stayed at chance (fewer than 2, or fewer than one per 3 s analysed; noise hits
-  about once per 13 s), and at least ten of the CTCSS blocks were quiet: too
-  quiet to hide a CTCSS tone sent at 250 Hz of deviation or more (the sub-audible
-  band under a fifth of the weakest such tone's power, the 254.1 Hz one after the
-  de-emphasis and the 300 Hz low-pass), so a tone would have been heard in them.
-  Voice and receiver noise fill that band, so a voiced file reads null only when
-  its pauses on the open carrier add up to ten such blocks; a file with a tone at
-  250 Hz of deviation or more never reads null. Absent when it measured less,
-  when a tone or DCS word was heard but did not settle (a weak or broken-up tone,
-  a standard DCS code too broken to confirm, a toned over joined to an untoned
-  one), when no ten blocks were quiet (continuous speech or noise: a tone could
-  have hidden under it), or when the file was kept for its own tone; and absent
-  on older files. Null does not rule out a non-standard tone under 67 Hz
-  (33-64 Hz: those tones are not checked), a tone set under 250 Hz of
-  deviation, or a non-standard DCS code too broken to repeat two words, and a
-  file that joins two stations' overs is judged as one. A non-standard code whose
+  about once per 13 s), at least ten of the CTCSS blocks were quiet (too quiet
+  to hide a CTCSS tone sent at 250 Hz of deviation or more: the sub-audible band
+  under a fifth of the weakest such tone's power, the 254.1 Hz one after the
+  de-emphasis and the 300 Hz low-pass, so a tone would have been heard in them),
+  and at most 2 blocks, or a tenth of them in a file of 30 blocks (7.75 s) or
+  more, were not quiet (room for a keying edge and a squelch tail). A quiet
+  block only shows the tone was off during it: voice and receiver noise fill the
+  band and a tone can hide under them, so a voiced recording almost always reads
+  absent, and null means a carrier with (almost) nothing in the sub-audible band.
+  Audio missing from the source (a gap the file fills with silence) is not
+  analysed. A tone at 250 Hz of deviation or more keeps every block it fills from
+  being quiet, so a file reads null only if such a tone filled at most that many
+  blocks (in a file under 7.75 s, it was on for under 1.25 s). Absent when it
+  measured less, when a tone or DCS word was heard but did not settle (a weak or
+  broken-up tone, a standard DCS code too broken to confirm, a toned over joined
+  to an untoned one), when fewer than ten blocks were quiet or more than the
+  allowed blocks were not (speech or noise: a tone could have hidden under it),
+  or when the file was kept for its own tone; and absent on older files. Null
+  does not rule out a non-standard tone under 67 Hz (33-64 Hz: those tones are
+  not checked), a tone set under 250 Hz of deviation, a tone on only for a
+  moment, or a non-standard DCS code too broken to repeat two words. A
+  non-standard code whose
   word is a rotation of a standard code's word (or of its complement) reads as
   that standard code, as on the live path (645 reads 526, 736 reads 263). Under
   the standard code set `polarity` is always `"normal"` today: every inverted

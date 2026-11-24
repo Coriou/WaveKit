@@ -860,9 +860,13 @@ export const DSD_FME_WAV_END_WAIT_MS = 500
  * chain one attempt, at most 2 000 ms, and its lookup lasts at most 2 000 + 200 + 2 000 =
  * 4 200 ms after its turn came, holding only a timer meanwhile (no directory read, no chain
  * slot), never a chain of 1 + DSD_FME_WAV_RETRIES attempts (6 × (2 000 + 200) ms = 13.2 s).
- * Worst case for one lookup (every read slow, each settling just inside its retry's wait): 6
- * attempts of at most 2 000 ms on the chain (12 s, as before) and 5 waits of at most 2 000 ms off
- * it: 6 × 2 000 + 5 × (200 + 2 000) = 23 s.
+ * Worst case for one lookup (every read slow, each settling just inside the wait before it): an
+ * attempt can first wait up to 2 000 ms for another attempt's stuck listing, see it settle, then
+ * run its own listing for up to 2 000 ms, so each of the 6 attempts holds the chain up to 4 000 ms
+ * (24 s); and before each of the 5 retries come the 200 ms retry delay and the wait for the
+ * listing still pending, up to 2 000 ms, off the chain (a retry that then queues may meet a
+ * different stuck listing, which its attempt waits for again inside its 4 000 ms):
+ * 6 × (2 000 + 2 000) + 5 × (200 + 2 000) = 24 + 11 = 35 s.
  */
 export const DSD_FME_WAV_ATTEMPT_TIMEOUT_MS = 2_000
 

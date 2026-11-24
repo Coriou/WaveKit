@@ -40,8 +40,11 @@ import {
 	DCS_LONE_HITS_MIN,
 	DCS_PARTIAL_WORDS,
 	TONE_MEASURED_MIN_BLOCKS,
+	TONE_LOUD_BLOCK_SHARE,
+	TONE_LOUD_EDGE_BLOCKS,
 	TONE_QUIET_MIN_BLOCKS,
 	TONE_MIN_POWER,
+	toneLoudBlocksAllowed,
 	factsFitFolder,
 	toneAudioPower,
 	recordingFactsBytes,
@@ -622,9 +625,8 @@ describe("recordingFactsBytes bounds", () => {
 			expect(
 				toneFactOf(null, { ...quiet, ctcssBlocks: 40, quietBlocks: 0 }),
 			).toEqual({})
-			expect(toneFactOf(null, { ...quiet, ctcssBlocks: 40 })).toEqual({
-				tone: null,
-			})
+			// Ten quiet blocks of 40: 30 loud blocks, where a tone may hide under voice: absent.
+			expect(toneFactOf(null, { ...quiet, ctcssBlocks: 40 })).toEqual({})
 			expect(
 				toneFactOf(null, {
 					...quiet,
@@ -637,6 +639,90 @@ describe("recordingFactsBytes bounds", () => {
 					dcsSamples: DCS_MEASURED_MIN_SAMPLES - 1,
 				}),
 			).toEqual({})
+		})
+
+		it("loud blocks: null at max(2, 10% of the blocks), absent one past", () => {
+			expect(TONE_LOUD_EDGE_BLOCKS).toBe(2)
+			expect(TONE_LOUD_BLOCK_SHARE).toBe(0.1)
+			const at = (ctcssBlocks: number, loud: number) =>
+				toneFactOf(null, {
+					...quiet,
+					ctcssBlocks,
+					quietBlocks: ctcssBlocks - loud,
+				})
+			// 10-29 blocks: the 2 edge blocks bind.
+			for (const blocks of [12, 20, 29]) {
+				expect(toneLoudBlocksAllowed(blocks)).toBe(2)
+				expect(at(blocks, 2)).toEqual({ tone: null })
+				expect(at(blocks, 3)).toEqual({})
+			}
+			// From 30 blocks the 10% share binds (floored): 3 at 30-39, 4 at 40, 10 at 100.
+			expect(toneLoudBlocksAllowed(30)).toBe(3)
+			expect(toneLoudBlocksAllowed(39)).toBe(3)
+			expect(toneLoudBlocksAllowed(40)).toBe(4)
+			expect(toneLoudBlocksAllowed(100)).toBe(10)
+			expect(at(30, 3)).toEqual({ tone: null })
+			expect(at(30, 4)).toEqual({})
+			expect(at(40, 4)).toEqual({ tone: null })
+			expect(at(40, 5)).toEqual({})
+			expect(at(100, 10)).toEqual({ tone: null })
+			expect(at(100, 11)).toEqual({})
+			// At the quiet minimum both bounds hold: 12 blocks, 10 quiet, 2 loud.
+			expect(at(TONE_QUIET_MIN_BLOCKS + 2, 2)).toEqual({ tone: null })
+			// More quiet blocks than blocks is inconsistent coverage: not analysed.
+			expect(toneFactOf(null, { ...quiet, quietBlocks: 11 })).toEqual({})
+		})
+
+		// The edge arithmetic on a real bank: a keying edge in the first 2 000 samples (250 ms)
+		// touches only the first block, a squelch tail in the last 2 000 only the last complete
+		// block; a 300 ms one touches a second. A burst mid-file touches 2 blocks on the hop
+		// grid, 3 off it. Modelled: white noise at 1.0 RMS (about 0.09 of it in the band: loud, no tone), zeros otherwise.
+		it("a real bank: an edge of 250 ms makes one loud block, a mid-file burst two or three", () => {
+			const loudOf = (total: number, bursts: [number, number][]) => {
+				const bank = new CtcssBank(RECORDER_TONE_QUIET)
+				const rand = mulberry32(11)
+				for (let i = 0; i < total; i++) {
+					const on = bursts.some(([from, n]) => i >= from && i < from + n)
+					bank.pushSample(on ? gaussian(rand) : 0)
+				}
+				return {
+					blocks: bank.blockCount(),
+					loud: bank.blockCount() - bank.quietBlockCount(),
+					fact: toneFactOf(bank.result(), coverageOf(bank, dcsOf(total))),
+				}
+			}
+			// 12 blocks: 4 000 + 11 × 2 000 samples.
+			const n = 26_000
+			expect(
+				loudOf(n, [
+					[0, 2000],
+					[n - 2000, 2000],
+				]),
+			).toEqual({
+				blocks: 12,
+				loud: 2,
+				fact: { tone: null },
+			})
+			expect(
+				loudOf(n, [
+					[0, 2400],
+					[n - 2000, 2000],
+				]).loud,
+			).toBe(3)
+			expect(
+				loudOf(n, [
+					[0, 2000],
+					[n - 2400, 2400],
+				]).loud,
+			).toBe(3)
+			expect(
+				loudOf(n, [
+					[0, 2400],
+					[n - 2000, 2000],
+				]).fact,
+			).toEqual({})
+			expect(loudOf(n, [[12_000, 400]]).loud).toBe(2)
+			expect(loudOf(n, [[12_500, 2000]]).loud).toBe(3)
 		})
 
 		it("tone-like evidence that did not settle is absent, never null", () => {
@@ -974,12 +1060,13 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 	}, 120_000)
 
 	// The same pitch spoken in phrases with pauses (2 s, a 3 s pause, 1.5 s, a 1.5 s pause, 1 s):
-	// the carrier alone in the pauses gives the bank its quiet blocks, so an untoned talker reads
-	// "No tone heard"; the same talker over a 254.1 Hz tone at 250 Hz of deviation, the weakest
-	// tone ruled out, is heard in those pauses and never reads null.
+	// the carrier alone in the pauses gives the bank its quiet blocks, but the phrases' loud
+	// blocks (far more than max(2, 10%)) could hide a tone, so even the untoned talker is not
+	// determined; the same talker over a 254.1 Hz tone at 250 Hz of deviation, the weakest tone
+	// ruled out, never reads null either.
 	const phrases = (t: number) =>
 		t < 2 || (t >= 5 && t < 6.5) || (t >= 8 && t < 9)
-	it("a talker with pauses: untoned reads null, over the weakest credible tone never", async () => {
+	it("a talker with pauses: untoned is not determined, over the weakest credible tone never null", async () => {
 		const untoned = await recorderScene([
 			{
 				seconds: 9,
@@ -990,8 +1077,8 @@ describe("kept analog file: the recorder's own finish writes its admission numbe
 			},
 		])
 		expect(untoned.outcomes).toEqual(["finalized"])
-		expect(untoned.facts[0]!.tone).toBeNull()
-		expect(untoned.stored[0]!.tone).toBeNull()
+		expect("tone" in untoned.facts[0]!).toBe(false)
+		expect("tone" in untoned.stored[0]!).toBe(false)
 		const toned = await recorderScene([
 			{
 				seconds: 9,

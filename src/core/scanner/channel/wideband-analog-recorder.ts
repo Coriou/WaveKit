@@ -4296,7 +4296,9 @@ export class WidebandAnalogRecorder {
 		const silence = new Int16Array(
 			Math.round((missing * ANALOG_AUDIO_RATE_HZ) / s.fs),
 		)
-		this.enqueue(s, file, { pcm: silence, tone: silence })
+		// The fill is silence in the file only: the tone detectors never hear it (tone null), so a
+		// gap neither passes for quiet sub-audible audio nor counts as analysed coverage.
+		this.enqueue(s, file, { pcm: silence, tone: null })
 		s.next = to
 	}
 
